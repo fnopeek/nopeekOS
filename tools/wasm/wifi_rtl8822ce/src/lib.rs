@@ -844,20 +844,20 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print("\n");
 
     // Der Chip holt die Eintraege selbst ab: die oberen zwoelf Bit des
-    // Indexregisters sind SEIN Lesezeiger. Steht er auf unserem
-    // Schreibzeiger, hat er beide Pakete genommen.
-    let idx = host::r32(h, pci::RTK_PCI_TXBD_IDX_H2CQ);
-    let hw_idx = (idx & pci::TRX_BD_HW_IDX_MASK) >> 16;
-    let our_wp = idx & pci::TRX_BD_IDX_MASK;
-    host::print("  H2CQ_IDX = 0x");
-    host::print_hex32(idx);
-    host::print("  (unser Schreibzeiger ");
-    host::print_dec(our_wp);
+    // Indexregisters sind SEIN Lesezeiger. **Gewartet, nicht gestochert** —
+    // in 0.11.0 stand er auf 1, waehrend unserer schon auf 2 stand, und das
+    // war nur die Zeit zwischen Anstoss und Lesung.
+    let (consumed, dt_h2c, hw_idx) =
+        pci::h2c_wait_consumed(h, trx, 10_000);
+    host::print("  H2C-Queue: Schreibzeiger ");
+    host::print_dec(wp_before);
+    host::print(" -> ");
+    host::print_dec(trx.tx[pci::Q_H2C].wp);
     host::print(", HW-Lesezeiger ");
     host::print_dec(hw_idx);
-    host::print(", vorher ");
-    host::print_dec(wp_before);
-    host::print(")\n");
+    host::print(if consumed { " (aufgeholt nach " } else { " (NICHT aufgeholt, " });
+    host::print_dec(dt_h2c as u32);
+    host::print(" us)\n");
 
     // ── Die Koexistenz, und damit die ANTENNE ────────────────────
     // `wifi_only = !efuse->btcoex` (main.c:1431). Unsere efuse sagt
@@ -871,24 +871,44 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print(if wifi_only { "JA" } else { "nein" });
     host::print("\n");
 
+    let scbd_before = coex::read_scbd_raw(h);
     let t0 = host::now_us();
     coex::power_on_setting(h, &mut cx, &mut h2c, e.share_ant, e.rfe_option);
-    let scbd_poweron = coex::read_scbd(h);
+    let scbd_poweron = coex::read_scbd_raw(h);
     coex::init_hw_config(h, &mut cx, &mut h2c, e.share_ant, wifi_only,
                          e.rfe_option);
+    let scbd_after = coex::read_scbd_raw(h);
     let dt = host::now_us() - t0;
 
-    host::print("  Score-Board: nach power_on 0x");
+    // ROH, ohne die Maske von `read_scbd` — sonst laesst sich eine 0 nicht
+    // von „unser eigener Schreibzugriff kam nie an" unterscheiden.
+    host::print("  Score-Board roh: vorher 0x");
+    host::print_hex16(scbd_before);
+    host::print(", nach power_on 0x");
     host::print_hex16(scbd_poweron);
     host::print(", nach init 0x");
-    host::print_hex16(coex::read_scbd(h));
-    host::print("  (BT ");
+    host::print_hex16(scbd_after);
+    host::print("  (wir schrieben 0x");
+    host::print_hex16(cx.score_board | 0x8000);
+    host::print(")\n  BT ");
     host::print(if cx.bt_disabled { "AUS" } else { "an" });
     host::print(", kt_ver ");
     host::print_dec(cx.kt_ver as u32);
     host::print(", ");
     host::print_dec(dt as u32);
-    host::print(" us)\n");
+    host::print(" us\n");
+
+    // **Das ist die Sache, um die es geht.** Wo steht die Antenne?
+    let ant = coex::read_ant_state(h);
+    host::print("  Antenne: LTE_COEX_CTRL 0x");
+    host::print_hex32(ant.lte_coex_ctrl);
+    host::print("  GNT_WL ");
+    host::print_dec(ant.gnt_wl);
+    host::print(" GNT_BT ");
+    host::print_dec(ant.gnt_bt);
+    host::print("  Pfadbesitzer ");
+    host::print(if ant.wifi_owns_path { "WLAN" } else { "BT" });
+    host::print("\n");
 
     // ── rtw_core_start ───────────────────────────────────────────
     sec::enable_sec_engine(h);
@@ -904,13 +924,24 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     // ── Gates ────────────────────────────────────────────────────
     let mut ok = true;
     ok &= gate("beide H2C-Pakete geschrieben", gi && pi);
-    ok &= gate("der Chip hat die H2C-Pakete abgeholt (HW-Zeiger == unserer)",
-               hw_idx == our_wp && our_wp == wp_before + 2);
-    // Das Score-Board ist das Zwei-Byte-Gespraech mit dem BT-Kern. Nach
-    // `init_hw_config` muessen ACTIVE und ONOFF stehen.
-    let want = COEX_SCBD_ACTIVE | COEX_SCBD_ONOFF;
-    ok &= gate("Score-Board traegt ACTIVE|ONOFF",
-               coex::read_scbd(h) & want == want);
+    ok &= gate("die Firmware hat die H2C-Queue leergeraeumt", consumed);
+
+    // **Das Score-Board ist KEIN Gate.** Es ist ein gemeinsames Postfach:
+    // die Bits, die uns interessieren wuerden, schreibt der BT-Kern. Laeuft
+    // der nicht, steht dort 0 — und das ist dann wahr, nicht falsch. Linux
+    // prueft es nirgends. Was wir pruefen koennen, ist die Wirkung:
+    //
+    // Bei `bt_disabled` nimmt `set_ant_path(COEX_SET_ANT_INIT)` den Zweig
+    // GNT_BT = SW_LOW (1), GNT_WL = SW_HIGH (3) — die Antenne geht an
+    // WLAN. Laeuft BT, ist es umgekehrt, und dann teilt die PTA sie.
+    let (want_wl, want_bt) = if cx.bt_disabled {
+        (COEX_GNT_SET_SW_HIGH, COEX_GNT_SET_SW_LOW)
+    } else {
+        (COEX_GNT_SET_SW_LOW, COEX_GNT_SET_SW_HIGH)
+    };
+    ok &= gate("GNT_WL/GNT_BT stehen so, wie set_ant_path(INIT) sie setzt",
+               ant.gnt_wl == want_wl && ant.gnt_bt == want_bt);
+    ok &= gate("der Pfadbesitzer ist WLAN", ant.wifi_owns_path);
     ok &= gate("RCR steht auf hal->rcr", rcr == hal.rcr);
 
     // ── Und die Frage, fuer die 4a da ist ────────────────────────

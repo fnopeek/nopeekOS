@@ -675,3 +675,37 @@ pub fn init_hw_config(h: i32, c: &mut Coex, st: &mut H2cState,
     tdma(h, c, st, share_ant, true, 0);
     query_bt_info(h, c, st);
 }
+
+// ── Zurueckgelesen: wo steht die Antenne wirklich? ───────────────
+
+/// Der Zustand, den `set_ant_path` in der Hardware hinterlaesst.
+///
+/// **Das ist die Sache selbst, nicht ihr Nebeneffekt.** GNT_WL und GNT_BT
+/// stehen im indirekten LTE-Registerraum, jedes zweimal (Bits 13:12 und 9:8
+/// bzw. 15:14 und 11:10) — `set_gnt_wl`/`set_gnt_bt` schreiben beide Paare.
+/// Der Besitzer des Pfads steht in `REG_SYS_SDIO_CTRL+3`.
+pub struct AntState {
+    pub lte_coex_ctrl: u32,
+    pub gnt_wl: u32,
+    pub gnt_bt: u32,
+    pub wifi_owns_path: bool,
+}
+
+pub fn read_ant_state(h: i32) -> AntState {
+    let v = read_indirect_reg(h, LTE_COEX_CTRL);
+    AntState {
+        lte_coex_ctrl: v,
+        gnt_wl: (v & 0x3000) >> 12,
+        gnt_bt: (v & 0xc000) >> 14,
+        wifi_owns_path: host::r8(h, REG_SYS_SDIO_CTRL + 3)
+            & (BIT_LTE_MUX_CTRL_PATH >> 24) as u8 != 0,
+    }
+}
+
+/// Die ROHE Zahl im Postfach, ohne die Maske, die `read_scbd` anlegt.
+/// `read_scbd` schneidet `BIT_BT_INT_EN` weg — und wer nur das Ergebnis
+/// sieht, kann eine 0 nicht von „unser eigener Schreibzugriff kam nie an"
+/// unterscheiden.
+pub fn read_scbd_raw(h: i32) -> u16 {
+    host::r16(h, REG_WIFI_BT_INFO)
+}
