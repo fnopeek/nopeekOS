@@ -928,3 +928,8 @@ pub const RTW_NET_AP_MODE: u32 = 3;
 
 // reg.h:478-480 stehen schon oben (REG_BCN_CTRL, BIT_DIS_TSF_UDT,
 // BIT_EN_BCN_FUNCTION) — dort als u8, weil `rtw_write8_mask` sie schreibt.
+
+/// fw.h:564 `H2C_CMD_SCAN`
+pub const H2C_CMD_SCAN: u32 = 0x59;
+/// fw.h:151 `FW_FEATURE_NOTIFY_SCAN`
+pub const FW_FEATURE_NOTIFY_SCAN: u32 = 1 << 6;

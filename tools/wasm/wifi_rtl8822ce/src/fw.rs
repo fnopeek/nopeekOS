@@ -365,3 +365,11 @@ pub fn coex_tdma_type(h: i32, st: &mut H2cState,
     h2c_set(&mut pkt, 1, 0x0000_ff00, para5 as u32); // PARA5
     send_h2c_command(h, st, &pkt)
 }
+
+/// fw.c:1080-1088 `rtw_fw_scan_notify` — Kommando 0x59.
+pub fn scan_notify(h: i32, st: &mut H2cState, start: bool) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_SCAN);
+    h2c_set(&mut pkt, 0, 1 << 8, start as u32); // SET_SCAN_START
+    send_h2c_command(h, st, &pkt)
+}
