@@ -52,6 +52,39 @@ EXTERNAL = {
 }
 
 
+def implicit_enums(path, text):
+    """Aufzaehlungen OHNE geschriebene Werte.
+
+    `enum rtw_rf_band { RF_BAND_2G_CCK, RF_BAND_2G_OFDM, ... }` zaehlt von
+    null hoch, und kein Zeichen davon steht im Text. Fuer einen Pruefer,
+    der nach `NAME = wert` sucht, ist so eine Aufzaehlung UNSICHTBAR — und
+    ein vertauschter Bandindex waere ein Fehler, den niemand meldet.
+    Explizite Werte setzen den Zaehler neu, wie in C.
+    """
+    out = {}
+    for m in re.finditer(r"\benum\s+\w*\s*\{([^}]*)\}", text, re.S):
+        body = m.group(1)
+        line0 = text[:m.start()].count("\n") + 1
+        nxt = 0
+        for raw in body.split(","):
+            e = raw.split("/*")[0].split("//")[0].strip()
+            if not e:
+                continue
+            if "=" in e:
+                name, val = [x.strip() for x in e.split("=", 1)]
+                out.setdefault(name, (path, line0, val))
+                try:
+                    nxt = int(val, 0) + 1
+                except ValueError:
+                    nxt = None
+                continue
+            if not re.fullmatch(r"[A-Za-z_]\w*", e) or nxt is None:
+                continue
+            out.setdefault(e, (path, line0, str(nxt)))
+            nxt += 1
+    return out
+
+
 def linux_defs():
     """name -> (datei, zeile, ausdruck). Fortsetzungszeilen zusammengezogen."""
     out = {n: ("nl80211.h", 0, str(v)) for n, v in EXTERNAL.items()}
@@ -82,6 +115,8 @@ def linux_defs():
                              r"((?:GENMASK\([^)]*\)|BIT\([^)]*\)|[^,\n}])+)", line)
                 if m and m.group(1) not in out:
                     out[m.group(1)] = (f, n, m.group(2).strip())
+        for k, v in implicit_enums(f, raw).items():
+            out.setdefault(k, v)
     return out
 
 

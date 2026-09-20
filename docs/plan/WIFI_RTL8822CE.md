@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5c: 299 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 5d: 374 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -830,10 +830,58 @@ gesetzten Nibble je Zugriff, **16 von 16**.
 wenn stdout LEER war — also gerade dann nicht, wenn es mitten im Lauf kracht.
 Dieselbe Klasse wie die zwei Werkzeuglücken aus 5a und 5b.
 
+### Stufe 5d — die RF-Kalibrierung (0.17.0)
+
+`rtw8822c_phy_calibration` ganz: `rfk_power_save` · `rfk_handshake` ·
+**TXGAPK** (17 Funktionen, rtw8822c.c:1191-1823) · **IQK** (die rechnet die
+Firmware; der Treiber stösst sie mit H2C-Paket 0x0E an und wartet auf
+`REG_RPT_CIP == 0xaa`) · **DPK** (42 Funktionen, rtw8822c.c:3171-4186).
+Dazu `rtw_fw_inform_rfk_status` und `rtw_fw_do_iqk`.
+
+**Wann sie läuft, entscheidet Linux und nicht wir.** `rtw_set_channel` setzt
+nur `need_rfk = true`; ausgeführt wird sie in `rtw_chip_prepare_tx`, das
+mac80211 aus `mgd_prepare_tx` ruft — also nach dem Suchlauf und VOR dem
+Anmelden. Der Kommentar in `main.c` nennt den Grund: während eines Scans auf
+jedem Kanal zu kalibrieren dauert zu lange.
+
+**Zwei Ausstiege sind echte Zweige, keine Auslassung.** `do_gapk` prüft
+`dm_flags & BIT(RTW_DM_CAP_TXGAPK)` — und die Prüfung ist UMGEKEHRT: Bit
+gesetzt heisst abgeschaltet; `dm_flags` wird nur aus debugfs beschrieben und
+ist beim Start null. `txgapk` selbst kehrt bei `power_track_type` 4..7 um,
+weil der Chip dann über TSSI regelt. `do_dpk` hängt an `is_dpk_pwr_on`, und
+das setzt `rtw_load_rfk_table` — die Reihenfolge ist der Grund, nicht ein
+Sonderfall.
+
+**Das vierte Gate ist das wichtigste:** hört der Empfänger danach noch?
+Dieselbe Messung wie in 4c, damit die Zahlen vergleichbar sind. Eine
+Kalibrierung, die den Empfang kaputtmacht, ist schlimmer als keine.
+
+**Die Werkzeuge haben diesmal mehr gefunden als der Code.** Neu ist
+`gen_regs.py`: Namen hinein, fertige Rust-Konstanten mit Quellenangabe
+heraus. **131 Register für diese Stufe, kein einziger von Hand getippt.**
+Dazu vier Lücken geschlossen, alle derselben Art — der Prüfer sah etwas
+nicht und meldete deshalb Übereinstimmung:
+
+* **Aufzählungen ohne geschriebene Werte** (`enum rtw_rf_band { RF_BAND_2G_CCK,
+  … }`) waren für `check_regs.py` unsichtbar. Jetzt zählt es selbst hoch —
+  und fand sofort **`COEX_SWITCH_TO_MAX` als 7 statt 5**.
+* **`read_poll_timeout(rtw_read32_mask, …)`** versteckt einen Registerzugriff
+  als Makro-Argument; `seqdiff.py` sah ihn nicht und meldete für fünf
+  Funktionen zu wenige Zugriffe.
+* **`GENMASK(27,16)` gegen `0x0fff0000`** — dieselbe Zahl, zwei
+  Schreibweisen. Der Zahlenvergleich löst beide jetzt auf, was vier
+  DPK-Funktionen grün machte und zugleich **vier Stellen aufdeckte, die nur
+  durch beidseitige Abwesenheit grün waren**.
+* **Die DPK-Tabellen sind TRIPEL** (Adresse, Maske, Wert) und nicht Paare wie
+  alle anderen. Ein Paar-Leser hätte sie still falsch geschrieben;
+  `gen_tables.py` bricht jetzt ab, statt zu raten.
+
+**204 von 204 Funktionen Zugriff für Zugriff gleich · 845 Konstanten, 0
+Abweichungen · Abdeckung 299 → 374 von 940, `rtw8822c.c` 141/171.**
+
 ### ▶ Danach — hier weitermachen
 
-**5d — Auth und Assoc.** Jetzt erst: `rtw_chip_prepare_tx` mit
-GAPK/IQK/DPK vor dem Auth, `rtw_pci_tx_isr` für den Sendezeiger,
+**5e — Auth und Assoc.** `rtw_pci_tx_isr` für den Sendezeiger,
 `rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
 Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
 (`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht

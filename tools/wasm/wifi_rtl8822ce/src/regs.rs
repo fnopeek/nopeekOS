@@ -738,7 +738,7 @@ pub const COEX_SWITCH_CTRL_BY_BBSW: u8 = 0; // coex.h:130
 pub const COEX_SWITCH_CTRL_BY_PTA: u8 = 1; // coex.h:131
 pub const COEX_SWITCH_CTRL_BY_BT: u8 = 4; // coex.h:134
 pub const COEX_SWITCH_CTRL_MAX: u8 = 6; // coex.h:137
-pub const COEX_SWITCH_TO_MAX: u8 = 7; // coex.h:126
+pub const COEX_SWITCH_TO_MAX: u8 = 5; // coex.h:126 — fuenf Eintraege, nicht sieben
 
 pub const COEX_GNT_SET_HW_PTA: u32 = 0x0; // coex.h:114
 pub const COEX_GNT_SET_SW_LOW: u32 = 0x1; // coex.h:115
@@ -933,3 +933,180 @@ pub const RTW_NET_AP_MODE: u32 = 3;
 pub const H2C_CMD_SCAN: u32 = 0x59;
 /// fw.h:151 `FW_FEATURE_NOTIFY_SCAN`
 pub const FW_FEATURE_NOTIFY_SCAN: u32 = 1 << 6;
+
+// ── Stufe 5d: die RF-Kalibrierung ────────────────────────────────
+/// rtw8822c.h:21 `IQK_DONE_8822C`
+pub const IQK_DONE_8822C: u8 = 0xaa;
+/// rtw8822c.h:256-264
+pub const REG_NCTL0: u32 = 0x1b00;
+pub const BIT_SEL_PATH: u32 = 0x6; // GENMASK(2, 1)
+pub const BIT_SUBPAGE: u32 = 0xf; // GENMASK(3, 0)
+pub const REG_DPD_CTL0_S0: u32 = 0x1b04;
+pub const REG_DPD_CTL1_S0: u32 = 0x1b08;
+pub const BIT_DPD_EN: u32 = 1 << 31;
+pub const BIT_PS_EN: u32 = 1 << 7;
+pub const REG_IQKSTAT: u32 = 0x1b10;
+pub const REG_IQK_CTL1: u32 = 0x1b20;
+pub const BIT_TX_CFIR: u32 = 0xc000_0000; // GENMASK(31, 30)
+/// rtw8822c.h:348-349
+pub const REG_RPT_CIP: u32 = 0x2d9c;
+pub const BIT_RPT_CIP_STATUS: u32 = 0xff; // GENMASK(7, 0)
+/// reg.h:163-164
+pub const REG_PMC_DBG_CTRL1: u32 = 0xa8;
+pub const BITS_PMC_BT_IQK_STS: u32 = 0x0060_0000; // GENMASK(22, 21)
+// reg.h:425-426 REG_ARFR4/BIT_WL_RFK stehen schon oben.
+/// fw.h:574 `H2C_CMD_WIFI_CALIBRATION`
+pub const H2C_CMD_WIFI_CALIBRATION: u32 = 0x6d;
+/// fw.h:391 `H2C_PKT_IQK`
+pub const H2C_PKT_IQK: u8 = 0x0E;
+
+// ── Stufe 5d: TXGAPK (rtw8822c.c:1191-1823) ─────────────────────
+
+// NICHT GEFUNDEN — von Hand nachsehen:
+//   BITS_RFC_DIRECT (Ausdruck: (BIT(31) | BIT(30)))
+pub const REG_RFTXEN_GCK_A: u32 = 0x1864; // rtw8822c.h:201
+pub const REG_RFTXEN_GCK_B: u32 = 0x4164; // rtw8822c.h:334
+pub const BIT_RFTXEN_GCK_FORCE_ON: u32 = 1 << 31; // rtw8822c.h:202
+pub const BIT_DIS_SHARERX_TXGAT: u32 = 1 << 27; // rtw8822c.h:194
+pub const REG_DIS_SHARE_RX_A: u32 = 0x186c; // rtw8822c.h:203
+pub const REG_DIS_SHARE_RX_B: u32 = 0x416c; // rtw8822c.h:335
+pub const BIT_TX_SCALE_0DB: u32 = 1 << 7; // rtw8822c.h:204
+pub const BIT_3WIRE_EN: u32 = 0x00000003; // rtw8822c.h:197  GENMASK(1, 0)
+pub const BIT_BBMODE: u32 = 0x00000006; // rtw8822c.h:214  GENMASK(2, 1)
+pub const REG_IQK_CTRL: u32 = 0x1c38; // rtw8822c.h:290
+pub const RF_DEBUG: u32 = 0xde; // rtw8822c.h:379
+pub const BIT_DE_TX_GAIN: u32 = 1 << 16; // rtw8822c.h:381
+pub const RF_DIS_BYPASS_TXBB: u32 = 0x9e; // rtw8822c.h:376
+pub const BIT_TIA_BYPASS: u32 = 1 << 5; // rtw8822c.h:378
+pub const BIT_TXBB: u32 = 1 << 10; // rtw8822c.h:377
+pub const REG_SINGLE_TONE_SW: u32 = 0x1bb8; // rtw8822c.h:263
+pub const BIT_IRQ_TEST_MODE: u32 = 1 << 20; // rtw8822c.h:264
+pub const REG_R_CONFIG: u32 = 0x1bcc; // rtw8822c.h:265
+pub const BIT_CFIR_EN: u32 = 0x07000000; // rtw8822c.h:246  GENMASK(26, 24)
+pub const BIT_GAIN_TX_PAD_H: u32 = 0x00000f00; // rtw8822c.h:361  GENMASK(11, 8)
+pub const BIT_GAIN_TX_PAD_L: u32 = 0x000000f0; // rtw8822c.h:362  GENMASK(7, 4)
+pub const REG_TABLE_SEL: u32 = 0x1b98; // rtw8822c.h:255
+pub const BIT_Q_GAIN_SEL: u32 = 0x00007000; // rtw8822c.h:258  GENMASK(14, 12)
+pub const BIT_Q_GAIN: u32 = 0x00000fff; // rtw8822c.h:259  GENMASK(11, 0)
+pub const BIT_I_GAIN: u32 = 0x000f0000; // rtw8822c.h:256  GENMASK(19, 16)
+pub const BIT_GAIN_RST: u32 = 1 << 15; // rtw8822c.h:257
+pub const REG_TX_GAIN_SET: u32 = 0x1b9c; // rtw8822c.h:260
+pub const RF_GAIN_NUM: u32 = 11; // main.h:1648
+pub const BIT_ANT_PATH: u32 = 0x00000003; // rtw8822c.h:170  GENMASK(1, 0)
+pub const REG_TXANTSEG: u32 = 0x1e28; // rtw8822c.h:312
+pub const BIT_ANTSEG: u32 = 0x0000000f; // rtw8822c.h:313  GENMASK(3, 0)
+pub const BIT_PATH_EN: u32 = 1 << 31; // rtw8822c.h:192
+pub const RF_LUTDBG: u32 = 0xdf; // reg.h:965
+pub const BIT_TXA_TANK: u32 = 1 << 4; // reg.h:966
+pub const RF_IDAC: u32 = 0x58; // rtw8822c.h:358
+pub const BIT_TX_MODE: u32 = 0x000fff00; // rtw8822c.h:359  GENMASK(19, 8)
+pub const REG_TX_TONE_IDX: u32 = 0x1b2c; // rtw8822c.h:249
+pub const BIT_2G_SWING: u32 = 0x2d; // rtw8822c.h:268
+pub const BIT_5G_SWING: u32 = 0x36; // rtw8822c.h:269
+pub const REG_RXSRAM_CTL: u32 = 0x1bd4; // rtw8822c.h:270
+pub const BIT_RPT_EN: u32 = 1 << 21; // rtw8822c.h:271
+pub const BIT_RPT_SEL: u32 = 0x001f0000; // rtw8822c.h:272  GENMASK(20, 16)
+pub const BIT_GAPK_RPT_IDX: u32 = 0x00000f00; // rtw8822c.h:261  GENMASK(11, 8)
+pub const REG_STAT_RPT: u32 = 0x1bfc; // rtw8822c.h:278
+pub const BIT_GAPK_RPT0: u32 = 0x0000000f; // rtw8822c.h:280  GENMASK(3, 0)
+pub const BIT_GAPK_RPT1: u32 = 0x000000f0; // rtw8822c.h:281  GENMASK(7, 4)
+pub const BIT_GAPK_RPT2: u32 = 0x00000f00; // rtw8822c.h:282  GENMASK(11, 8)
+pub const BIT_GAPK_RPT3: u32 = 0x0000f000; // rtw8822c.h:283  GENMASK(15, 12)
+pub const BIT_GAPK_RPT4: u32 = 0x000f0000; // rtw8822c.h:284  GENMASK(19, 16)
+pub const BIT_GAPK_RPT5: u32 = 0x00f00000; // rtw8822c.h:285  GENMASK(23, 20)
+pub const BIT_GAPK_RPT6: u32 = 0x0f000000; // rtw8822c.h:286  GENMASK(27, 24)
+pub const BIT_GAPK_RPT7: u32 = 0xf0000000; // rtw8822c.h:287  GENMASK(31, 28)
+pub const RF_HW_OFFSET_NUM: u32 = 10; // main.h:1649
+pub const BIT_IQ_SWITCH: u32 = 0x0000003f; // rtw8822c.h:267  GENMASK(5, 0)
+pub const RF_MODE_TRXAGC: u32 = 0x00; // rtw8822c.h:343
+pub const RF_TX_GAIN_OFFSET: u32 = 0x55; // rtw8822c.h:353
+pub const BIT_RF_GAIN: u32 = 0x0000001c; // rtw8822c.h:355  GENMASK(4, 2)
+pub const RF_RXG_GAIN: u32 = 0x87; // rtw8822c.h:370
+pub const BIT_RXG_GAIN: u32 = 1 << 18; // rtw8822c.h:371
+pub const BIT_RXAGC: u32 = 0x000003e0; // rtw8822c.h:345  GENMASK(9, 5)
+pub const BIT_DE_TRXBW: u32 = 1 << 2; // rtw8822c.h:382
+pub const RF_BW_TRXBB: u32 = 0x1a; // rtw8822c.h:348
+pub const BIT_BW_TXBB: u32 = 0x00007000; // rtw8822c.h:350  GENMASK(14, 12)
+pub const BIT_BW_RXBB: u32 = 0x00000c00; // rtw8822c.h:351  GENMASK(11, 10)
+pub const RF_EXT_TIA_BW: u32 = 0x8f; // rtw8822c.h:374
+pub const BIT_PW_EXT_TIA: u32 = 1 << 1; // rtw8822c.h:375
+pub const RF_TXA_LB_SW: u32 = 0x63; // rtw8822c.h:366
+pub const BIT_TXA_LB_ATT: u32 = 0x0000c000; // rtw8822c.h:367  GENMASK(15, 14)
+pub const BIT_LB_ATT: u32 = 0x0000001c; // rtw8822c.h:369  GENMASK(4, 2)
+pub const BIT_LB_SW: u32 = 0x00003000; // rtw8822c.h:368  GENMASK(13, 12)
+pub const RF_RXA_MIX_GAIN: u32 = 0x8a; // rtw8822c.h:372
+pub const BIT_RXA_MIX_GAIN: u32 = 0x00000018; // rtw8822c.h:373  GENMASK(4, 3)
+pub const BIT_RF_MODE: u32 = 0x000f0000; // rtw8822c.h:344  GENMASK(19, 16)
+pub const BIT_GAIN_EXT: u32 = 1 << 12; // reg.h:944
+pub const BIT_DATA_L: u32 = 0x00000fff; // reg.h:945  GENMASK(11, 0)
+pub const BIT_BAND: u32 = 0x00070000; // reg.h:932  GENMASK(18, 16)
+pub const BIT_DBG_CCK_CCA: u32 = 1 << 1; // rtw8822c.h:352
+pub const BIT_TX_CCK_IND: u32 = 1 << 16; // rtw8822c.h:349
+pub const RF_TX_RESULT: u32 = 0x5f; // rtw8822c.h:360
+pub const RF_BAND_2G_CCK: u32 = 0; // main.h:1639
+pub const RF_BAND_2G_OFDM: u32 = 1; // main.h:1639
+pub const RF_BAND_5G_L: u32 = 2; // main.h:1639
+pub const RF_BAND_5G_M: u32 = 3; // main.h:1639
+pub const RF_BAND_5G_H: u32 = 4; // main.h:1639
+pub const RF_BAND_MAX: u32 = 5; // main.h:1639
+pub const RTW_DM_CAP_TXGAPK: u32 = 1; // main.h:1687
+pub const REG_TX_FIFO: u32 = 0x1e70; // rtw8822c.h:316
+pub const BIT_STOP_TX: u32 = 0x0000000f; // rtw8822c.h:317  GENMASK(3, 0)
+pub const BIT_AC_QUEUE: u32 = 0x000000ff; // reg.h:452  GENMASK(7, 0)
+pub const REG_ENFN: u32 = 0x1e24; // rtw8822c.h:310
+pub const BIT_IQK_DPK_EN: u32 = 1 << 17; // rtw8822c.h:311
+pub const REG_CH_DELAY_EXTR2: u32 = 0x1cd0; // rtw8822c.h:297
+pub const BIT_IQK_DPK_CLOCK_SRC: u32 = 1 << 28; // rtw8822c.h:301
+pub const BIT_IQK_DPK_RESET_SRC: u32 = 1 << 29; // rtw8822c.h:300
+pub const BIT_EN_IOQ_IQK_DPK: u32 = 1 << 30; // rtw8822c.h:299
+pub const BIT_TST_IQK2SET_SRC: u32 = 1 << 31; // rtw8822c.h:298
+pub const REG_CCA_OFF: u32 = 0x1d58; // rtw8822c.h:306
+pub const BIT_CCA_ON_BY_PW: u32 = 0x00000ff8; // rtw8822c.h:307  GENMASK(11, 3)
+pub const BITS_RFC_DIRECT: u32 = 0xc0000000; // reg.h:36  (BIT(31) | BIT(30))
+
+// ── Stufe 5d: DPK (rtw8822c.c:3171-4186) ────────────────────────
+pub const BIT_DPD_CLK: u32 = 0x000000f0; // rtw8822c.h:273  GENMASK(7, 4)
+pub const DPK_RF_REG_NUM: u32 = 7; // main.h:1575
+pub const DPK_BB_REG_NUM: u32 = 18; // main.h:1577
+pub const DPK_RF_PATH_NUM: u32 = 2; // main.h:1576
+pub const RF_RXAGC_OFFSET: u32 = 0x19; // rtw8822c.h:347
+pub const REG_DPD_CTL1_S1: u32 = 0x1b60; // rtw8822c.h:253
+pub const REG_DPD_LUT0: u32 = 0x1b44; // rtw8822c.h:250
+pub const BIT_GLOSS_DB: u32 = 0x00007000; // rtw8822c.h:251  GENMASK(14, 12)
+pub const REG_DPD_CTL11: u32 = 0x1be4; // rtw8822c.h:274
+pub const REG_DPD_CTL12: u32 = 0x1be8; // rtw8822c.h:275
+pub const RF_TX_GAIN: u32 = 0x56; // rtw8822c.h:356
+pub const BIT_DE_PWR_TRIM: u32 = 1 << 19; // rtw8822c.h:380
+pub const BIT_BB_GAIN: u32 = 0x0007c000; // rtw8822c.h:354  GENMASK(18, 14)
+pub const DPK_CHANNEL_WIDTH_80: u32 = 1; // main.h:1578
+pub const RTW_DPK_GAIN_LOSS: u32 = 1; // rtw8822c.h:118
+pub const RTW_DPK_DO_DPK: u32 = 2; // rtw8822c.h:118
+pub const RTW_DPK_DPK_ON: u32 = 3; // rtw8822c.h:118
+pub const RTW_DPK_DAGC: u32 = 4; // rtw8822c.h:118
+pub const RTW_DPK_CAL_PWR: u32 = 0; // rtw8822c.h:118
+pub const REG_DPD_CTL0: u32 = 0x1bb4; // rtw8822c.h:262
+pub const RF_T_METER: u32 = 0x42; // reg.h:946
+pub const RTW_DPK_GAIN_LESS: u32 = 2; // rtw8822c.h:108
+pub const RTW_DPK_GAIN_LARGE: u32 = 1; // rtw8822c.h:108
+pub const RTW_DPK_GL_LESS: u32 = 4; // rtw8822c.h:108
+pub const RTW_DPK_GL_LARGE: u32 = 3; // rtw8822c.h:108
+pub const RTW_DPK_AGC_OUT: u32 = 6; // rtw8822c.h:108
+pub const RTW_DPK_LOSS_CHECK: u32 = 5; // rtw8822c.h:108
+pub const RTW_DPK_GAIN_CHECK: u32 = 0; // rtw8822c.h:108
+pub const BIT_GAIN_TXBB: u32 = 0x0000001f; // rtw8822c.h:357  GENMASK(4, 0)
+pub const BIT_TXAGC: u32 = 0x0000001f; // rtw8822c.h:346  GENMASK(4, 0)
+pub const REG_DPD_CTL0_S1: u32 = 0x1b5c; // rtw8822c.h:252
+pub const REG_DPD_AGC: u32 = 0x1b67; // rtw8822c.h:254
+pub const BIT_BYPASS_DPD: u32 = 1 << 25; // rtw8822c.h:247
+pub const BIT_INNER_LB: u32 = 1 << 21; // rtw8822c.h:266
+pub const BIT_GS_PWSF: u32 = 0x0fffffff; // rtw8822c.h:239  GENMASK(27, 0)
+pub const REG_DPD_CTL16: u32 = 0x1bf8; // rtw8822c.h:277
+pub const REG_DPD_CTL15: u32 = 0x1bf4; // rtw8822c.h:276
+pub const MASKBYTE3: u32 = 0xff000000; // phy.h:156
+pub const BIT_RPT_DGAIN: u32 = 0x0fff0000; // rtw8822c.h:279  GENMASK(27, 16)
+pub const MASKBYTE1: u32 = 0xff00; // phy.h:154
+
+/// main.h:99 `RTW_BAND_2G = BIT(NL80211_BAND_2GHZ)` — `NL80211_BAND_2GHZ`
+/// ist 0, also BIT(0). Der Name steht in einem anderen Baum (cfg80211),
+/// deshalb hier ausgerechnet statt erzeugt.
+pub const RTW_BAND_2G_MASK: u32 = 1 << 0;
