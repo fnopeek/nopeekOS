@@ -36,8 +36,17 @@ RS_FILES = ("regs.rs", "pwrseq.rs", "pci.rs", "tx.rs", "mac.rs", "fw.rs",
             "chip.rs", "efuse.rs")
 # rtw8822c.c steht MIT in der Liste, aber hinten: gibt es einen Namen in
 # einem Header UND in der Chipdatei, gilt der Header.
+# `include/linux/ieee80211.h` liegt AUSSERHALB des Treiberbaums und
+# traegt die Bits, mit denen rtw88 die Faehigkeiten des Gegenuebers
+# liest (HT/VHT). Von Hand getippt waere jedes davon ungeprueft.
 C_FILES = ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h", "bf.h",
-           "efuse.h", "sec.h", "coex.h", "phy.h", "rtw8822c.h", "rtw8822c.c")
+           "efuse.h", "sec.h", "coex.h", "phy.h", "rtw8822c.h", "rtw8822c.c",
+           # Auch die .c-Dateien: `RA_MASK_*` stehen in main.c, nicht in
+           # einem Header. **Der Generator las sie, der Pruefer nicht** —
+           # und zwei Werkzeuge mit verschiedenen Quellen lassen genau dort
+           # eine Luecke, wo der Generator am meisten hilft.
+           "main.c", "phy.c", "fw.c", "tx.c", "pci.c", "coex.c", "mac.c",
+           "../../../../../include/linux/ieee80211.h")
 
 
 # Namen aus Headern AUSSERHALB von rtw88, die in einer Definition vorkommen.
@@ -64,6 +73,10 @@ def implicit_enums(path, text):
     out = {}
     for m in re.finditer(r"\benum\s+\w*\s*\{([^}]*)\}", text, re.S):
         body = m.group(1)
+        # Kommentare raus, bevor an den Kommas geteilt wird — sonst frisst
+        # ein `/* … */` hinter einem Eintrag den Namen des naechsten.
+        body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+        body = re.sub(r"//[^\n]*", "", body)
         line0 = text[:m.start()].count("\n") + 1
         nxt = 0
         for raw in body.split(","):
@@ -129,6 +142,9 @@ def evaluate(expr, defs, depth=0):
     # Ausdruecke stehen ueber mehrere Zeilen.
     expr = " ".join(expr.split())
     expr = re.sub(r"!(?!=)", "~", expr)
+    # C-Zahlensuffixe: `0x3ff000ULL` ist dieselbe Zahl wie `0x3ff000`.
+    expr = re.sub(r"\b(0[xX][0-9a-fA-F]+|\d+)(?:ULL|UL|LL|[uU]|[lL])\b",
+                  r"\1", expr)
     e = expr.replace("_", "") if re.fullmatch(r"0[xX][0-9a-fA-F_]+", expr.strip()) else expr
     e = re.sub(r"(0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)+)",
                lambda m: m.group(1).replace("_", ""), e)

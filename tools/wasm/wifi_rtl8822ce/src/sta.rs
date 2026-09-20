@@ -1,0 +1,326 @@
+//! `rtw_sta_info` und `rtw_update_sta_info` — die Ratenanpassung
+//! (Stufe 5f), main.c:1117-1240.
+//!
+//! Der Treiber schickt der Firmware KEINE einzelne Rate, sondern eine
+//! MASKE: welche der 64 Raten dieses Gegenueber ueberhaupt kann. Die
+//! Firmware waehlt daraus laufend und meldet ihre Wahl als C2H zurueck.
+//!
+//! **Woher die Maske kommt, ist der ganze Punkt.** In Linux steht sie in
+//! `ieee80211_sta`, das mac80211 aus der Anmeldeantwort baut. Bei uns gibt
+//! es kein mac80211, also wird die Antwort hier selbst gelesen: HT- und
+//! VHT-Element, unterstuetzte Raten. Was dabei NICHT herauskommt, ist
+//! geraten — und eine geratene Ratenmaske sendet zu schnell und faellt bei
+//! jedem Paket aus.
+#![allow(dead_code)]
+
+use crate::regs::*;
+
+/// main.h:775-799 `struct rtw_sta_info` — die Felder, die `send_ra_info`
+/// liest. Der Rest ist Linux' Buchfuehrung (Arbeitsschlangen, Mittelwerte).
+#[derive(Default, Clone, Copy)]
+pub struct StaInfo {
+    pub mac_id: u8,
+    pub rate_id: u8,
+    pub bw_mode: u8,
+    pub stbc_en: u8,
+    pub ldpc_en: u8,
+    pub sgi_enable: bool,
+    pub vht_enable: bool,
+    pub init_ra_lv: u8,
+    pub ra_mask: u64,
+    pub rssi_level: u8,
+}
+
+/// Was aus der Anmeldeantwort des AP herausfaellt — bei Linux
+/// `ieee80211_sta`, von mac80211 gefuellt.
+#[derive(Default, Clone, Copy)]
+pub struct PeerCaps {
+    pub ht_supported: bool,
+    pub ht_cap: u16,
+    /// `ht_cap.mcs.rx_mask[0..4]`
+    pub ht_mcs: [u8; 4],
+    pub vht_supported: bool,
+    pub vht_cap: u32,
+    /// `vht_cap.vht_mcs.rx_mcs_map`
+    pub vht_mcs_map: u16,
+    /// Bitmaske der Grundraten, wie `supp_rates[NL80211_BAND_2GHZ]`:
+    /// Bit 0..3 = CCK 1/2/5,5/11, Bit 4..11 = OFDM 6..54.
+    pub supp_rates: u16,
+    /// 0 = 20 MHz, 1 = 40, 2 = 80 (`ieee80211_sta.bandwidth`)
+    pub bandwidth: u8,
+}
+
+/// Die Elemente einer Anmeldeantwort lesen.
+///
+/// **Das ist die obere Haelfte** — in Linux baut mac80211 daraus
+/// `ieee80211_sta`. Es steht hier, weil `rtw_update_sta_info` ohne diese
+/// Zahlen nichts rechnen kann; `wifid` loest es spaeter ab.
+pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
+    let mut c = PeerCaps::default();
+    // 24 Kopf + Faehigkeiten(2) + Status(2) + AID(2) = 30, dann Elemente.
+    let mut i = 30usize;
+    while i + 2 <= f.len() {
+        let id = f[i] as u32;
+        let len = f[i + 1] as usize;
+        if i + 2 + len > f.len() {
+            break;
+        }
+        let b = &f[i + 2..i + 2 + len];
+        if id == WLAN_EID_SUPP_RATES || id == WLAN_EID_EXT_SUPP_RATES {
+            for &r in b {
+                // Das hohe Bit markiert eine GRUNDrate und gehoert nicht
+                // zum Wert.
+                c.supp_rates |= rate_bit(r & 0x7f);
+            }
+        } else if id == WLAN_EID_HT_CAPABILITY && len >= 26 {
+            c.ht_supported = true;
+            c.ht_cap = u16::from_le_bytes([b[0], b[1]]);
+            // `ht_cap.mcs` beginnt bei Versatz 3 (nach cap und ampdu).
+            c.ht_mcs.copy_from_slice(&b[3..7]);
+        } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
+            c.vht_supported = true;
+            c.vht_cap = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            c.vht_mcs_map = u16::from_le_bytes([b[4], b[5]]);
+        }
+        i += 2 + len;
+    }
+
+    // `ieee80211_sta.bandwidth` — mac80211 rechnet sie aus den
+    // Faehigkeiten UND der Kanalbreite der Zelle. Ohne die Zelle bleibt
+    // das, was das Gegenueber kann.
+    c.bandwidth = if c.vht_supported {
+        2
+    } else if c.ht_supported && c.ht_cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 as u16 != 0 {
+        1
+    } else {
+        0
+    };
+    c
+}
+
+/// Eine Rate in halben Mbit/s auf ihr Bit in `supp_rates` abbilden.
+/// Die Reihenfolge ist die von `ieee80211_rate` im 2,4-GHz-Band.
+fn rate_bit(half_mbps: u8) -> u16 {
+    match half_mbps {
+        2 => 1 << 0,    // 1 Mbit
+        4 => 1 << 1,    // 2
+        11 => 1 << 2,   // 5,5
+        22 => 1 << 3,   // 11
+        12 => 1 << 4,   // 6
+        18 => 1 << 5,   // 9
+        24 => 1 << 6,   // 12
+        36 => 1 << 7,   // 18
+        48 => 1 << 8,   // 24
+        72 => 1 << 9,   // 36
+        96 => 1 << 10,  // 48
+        108 => 1 << 11, // 54
+        _ => 0,
+    }
+}
+
+/// main.c:1139-1163 `get_vht_ra_mask`
+fn get_vht_ra_mask(mut mcs_map: u16) -> u64 {
+    let mut ra_mask = 0u64;
+    let mut nss = 12u32;
+    for _ in 0..4 {
+        match mcs_map & 0x3 {
+            2 => ra_mask |= 0x3ffu64 << nss, // MCS9
+            1 => ra_mask |= 0x1ffu64 << nss, // MCS8
+            0 => ra_mask |= 0x0ffu64 << nss, // MCS7
+            _ => {}
+        }
+        mcs_map >>= 2;
+        nss += 10;
+    }
+    ra_mask
+}
+
+/// main.c:1165-1183 `rtw_rate_mask_rssi`
+fn rate_mask_rssi(rssi_level: u8, wireless_set: u32) -> u64 {
+    if wireless_set == WIRELESS_CCK {
+        return 0xffff_ffff_ffff_ffff;
+    }
+    match rssi_level {
+        0 => 0xffff_ffff_ffff_ffff,
+        1 => 0xffff_ffff_ffff_fff0,
+        2 => 0xffff_ffff_ffff_efe0,
+        3 => 0xffff_ffff_ffff_cfc0,
+        4 => 0xffff_ffff_ffff_8f80,
+        _ => 0xffff_ffff_ffff_0f00,
+    }
+}
+
+/// main.c:1185-1194 `rtw_rate_mask_recover`
+fn rate_mask_recover(mut ra_mask: u64, bak: u64) -> u64 {
+    let legacy = RA_MASK_CCK_RATES as u64 | RA_MASK_OFDM_RATES as u64;
+    if ra_mask & !legacy == 0 {
+        ra_mask |= bak & !legacy;
+    }
+    if ra_mask == 0 {
+        ra_mask |= bak & legacy;
+    }
+    ra_mask
+}
+
+/// main.c:1240-1310 `get_rate_id`
+fn get_rate_id(wireless_set: u32, bw_mode: u8, tx_num: u8) -> u8 {
+    let cck = WIRELESS_CCK;
+    let ofdm = WIRELESS_OFDM;
+    let ht = WIRELESS_HT;
+    let vht = WIRELESS_VHT;
+    if wireless_set == cck {
+        crate::tx::RTW_RATEID_B_20M
+    } else if wireless_set == ofdm {
+        crate::tx::RTW_RATEID_G
+    } else if wireless_set == cck | ofdm {
+        RTW_RATEID_BG as u8
+    } else if wireless_set == ofdm | ht {
+        match tx_num {
+            1 => RTW_RATEID_GN_N1SS as u8,
+            2 => RTW_RATEID_GN_N2SS as u8,
+            _ => 0,
+        }
+    } else if wireless_set == cck | ofdm | ht {
+        if bw_mode == 1 {
+            match tx_num {
+                1 => RTW_RATEID_BGN_40M_1SS as u8,
+                2 => RTW_RATEID_BGN_40M_2SS as u8,
+                _ => 0,
+            }
+        } else {
+            match tx_num {
+                1 => RTW_RATEID_BGN_20M_1SS as u8,
+                2 => RTW_RATEID_BGN_20M_2SS as u8,
+                _ => 0,
+            }
+        }
+    } else if wireless_set == ofdm | vht {
+        match tx_num {
+            1 => RTW_RATEID_ARFR1_AC_1SS as u8,
+            2 => RTW_RATEID_ARFR0_AC_2SS as u8,
+            _ => 0,
+        }
+    } else if wireless_set == cck | ofdm | vht {
+        if bw_mode >= 2 {
+            match tx_num {
+                1 => RTW_RATEID_ARFR1_AC_1SS as u8,
+                2 => RTW_RATEID_ARFR0_AC_2SS as u8,
+                _ => 0,
+            }
+        } else {
+            match tx_num {
+                1 => RTW_RATEID_ARFR2_AC_2G_1SS as u8,
+                2 => RTW_RATEID_ARFR3_AC_2G_2SS as u8,
+                _ => 0,
+            }
+        }
+    } else {
+        0
+    }
+    // Die 3SS- und 4SS-Zweige stehen nicht da: `hw_cap.nss` ist auf
+    // diesem Chip hoechstens 2, und `tx_num` kommt allein daher.
+}
+
+/// main.c:1312-1430 `rtw_update_sta_info`, Band 2,4 GHz.
+///
+/// `rtw_rate_mask_cfg` faellt weg: es greift nur bei `use_cfg_mask`, und
+/// das setzt in Linux ein Nutzerbefehl (`cfg80211_bitrate_mask`), den es
+/// hier nicht gibt — die Funktion kehrt dann unveraendert um.
+pub fn update_sta_info(si: &mut StaInfo, c: &PeerCaps, nss: u8,
+                       band_2g: bool) -> u32 {
+    let mut ra_mask = 0u64;
+    let mut stbc_en = 0u8;
+    let mut ldpc_en = 0u8;
+    let mut tx_num = 1u8;
+    let mut is_vht_enable = false;
+
+    if c.vht_supported {
+        is_vht_enable = true;
+        ra_mask |= get_vht_ra_mask(c.vht_mcs_map);
+        if c.vht_cap & IEEE80211_VHT_CAP_RXSTBC_MASK != 0 {
+            stbc_en = VHT_STBC_EN;
+        }
+        if c.vht_cap & IEEE80211_VHT_CAP_RXLDPC != 0 {
+            ldpc_en = VHT_LDPC_EN;
+        }
+    } else if c.ht_supported {
+        ra_mask |= ((c.ht_mcs[3] as u64) << 36)
+            | ((c.ht_mcs[2] as u64) << 28)
+            | ((c.ht_mcs[1] as u64) << 20)
+            | ((c.ht_mcs[0] as u64) << 12);
+        if c.ht_cap & IEEE80211_HT_CAP_RX_STBC as u16 != 0 {
+            stbc_en = HT_STBC_EN;
+        }
+        if c.ht_cap & IEEE80211_HT_CAP_LDPC_CODING as u16 != 0 {
+            ldpc_en = HT_LDPC_EN;
+        }
+    }
+
+    if nss == 1 {
+        ra_mask &= RA_MASK_VHT_RATES_1SS as u64 | RA_MASK_HT_RATES_1SS as u64;
+    } else if nss == 2 {
+        ra_mask &= RA_MASK_VHT_RATES_2SS as u64 | RA_MASK_HT_RATES_2SS as u64
+            | RA_MASK_VHT_RATES_1SS as u64 | RA_MASK_HT_RATES_1SS as u64;
+    }
+
+    let wireless_set;
+    let ra_mask_bak;
+    if band_2g {
+        ra_mask |= c.supp_rates as u64;
+        ra_mask_bak = ra_mask;
+        if c.vht_supported {
+            ra_mask &= RA_MASK_VHT_RATES as u64 | RA_MASK_CCK_IN_VHT as u64
+                | RA_MASK_OFDM_IN_VHT as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM | WIRELESS_HT
+                | WIRELESS_VHT;
+        } else if c.ht_supported {
+            ra_mask &= RA_MASK_HT_RATES as u64 | RA_MASK_CCK_IN_HT as u64
+                | RA_MASK_OFDM_IN_HT_2G as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM | WIRELESS_HT;
+        } else if c.supp_rates <= 0xf {
+            wireless_set = WIRELESS_CCK;
+        } else {
+            ra_mask &= RA_MASK_OFDM_RATES as u64 | RA_MASK_CCK_IN_BG as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM;
+        }
+    } else {
+        ra_mask |= (c.supp_rates as u64) << 4;
+        ra_mask_bak = ra_mask;
+        if c.vht_supported {
+            ra_mask &= RA_MASK_VHT_RATES as u64 | RA_MASK_OFDM_IN_VHT as u64;
+            wireless_set = WIRELESS_OFDM | WIRELESS_VHT;
+        } else if c.ht_supported {
+            ra_mask &= RA_MASK_HT_RATES as u64 | RA_MASK_OFDM_IN_HT_5G as u64;
+            wireless_set = WIRELESS_OFDM | WIRELESS_HT;
+        } else {
+            wireless_set = WIRELESS_OFDM;
+        }
+    }
+
+    let (bw_mode, is_support_sgi) = match c.bandwidth {
+        2 => (2u8, c.vht_supported
+              && c.vht_cap & IEEE80211_VHT_CAP_SHORT_GI_80 != 0),
+        1 => (1u8, c.ht_supported
+              && c.ht_cap & IEEE80211_HT_CAP_SGI_40 as u16 != 0),
+        _ => (0u8, c.ht_supported
+              && c.ht_cap & IEEE80211_HT_CAP_SGI_20 as u16 != 0),
+    };
+
+    if c.vht_supported || c.ht_supported {
+        tx_num = nss;
+    }
+
+    let rate_id = get_rate_id(wireless_set, bw_mode, tx_num);
+
+    ra_mask &= rate_mask_rssi(si.rssi_level, wireless_set);
+    ra_mask = rate_mask_recover(ra_mask, ra_mask_bak);
+
+    si.bw_mode = bw_mode;
+    si.stbc_en = stbc_en;
+    si.ldpc_en = ldpc_en;
+    si.sgi_enable = is_support_sgi;
+    si.vht_enable = is_vht_enable;
+    si.ra_mask = ra_mask;
+    si.rate_id = rate_id;
+    wireless_set
+}

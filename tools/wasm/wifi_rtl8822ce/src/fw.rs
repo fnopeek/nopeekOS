@@ -483,3 +483,56 @@ pub fn c2h_parse(frame: &[u8]) -> Option<C2hCmd<'_>> {
     }
     Some(C2hCmd { id: frame[0], seq: frame[1], payload: &frame[2..] })
 }
+
+/// fw.c:1023-1063 `rtw_fw_send_ra_info` — Kommando 0x40, Postfach.
+///
+/// Der Treiber schickt eine MASKE, keine Rate: welche der 64 Raten dieses
+/// Gegenueber kann. Die Firmware waehlt daraus laufend und meldet ihre
+/// Wahl als `C2H_RA_RPT` zurueck.
+///
+/// Der `H2C_CMD_RA_INFO_HI`-Teil daneben gilt nur fuer den 8814A (vier
+/// Sendeketten, Maske breiter als 32 Bit); `chip->id` ist hier 8822C, und
+/// Linux kehrt an derselben Stelle um.
+pub fn send_ra_info(h: i32, st: &mut H2cState, si: &mut crate::sta::StaInfo,
+                    reset_ra_mask: bool) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_RA_INFO);
+
+    h2c_set(&mut pkt, 0, 0x0000_ff00, si.mac_id as u32); // MACID
+    h2c_set(&mut pkt, 0, 0x001f_0000, si.rate_id as u32); // RATE_ID
+    h2c_set(&mut pkt, 0, 0x0060_0000, si.init_ra_lv as u32); // INIT_RA_LVL
+    h2c_set(&mut pkt, 0, 1 << 23, si.sgi_enable as u32); // SGI_EN
+    h2c_set(&mut pkt, 0, 0x0300_0000, si.bw_mode as u32); // BW_MODE
+    h2c_set(&mut pkt, 0, 1 << 26, (si.ldpc_en != 0) as u32); // LDPC
+    h2c_set(&mut pkt, 0, 1 << 27, (!reset_ra_mask) as u32); // NO_UPDATE
+    // GENMASK(29, 28) — ZWEI Bit. Bei einem `bool` schreibt eine
+    // Einzelbitmaske denselben Wert, loescht aber Bit 29 nicht. Hier ist
+    // das folgenlos (der Puffer beginnt bei null), und trotzdem steht die
+    // Maske der Quelle da: wer spaeter einen Wert > 1 setzt, bekaeme mit
+    // der falschen Maske stillschweigend etwas anderes.
+    h2c_set(&mut pkt, 0, 0x3000_0000, si.vht_enable as u32); // VHT_EN
+    h2c_set(&mut pkt, 0, 1 << 30, 1); // DIS_PT — Linux: `disable_pt = true`
+    h2c_set(&mut pkt, 1, 0x0000_00ff, (si.ra_mask & 0xff) as u32);
+    h2c_set(&mut pkt, 1, 0x0000_ff00, ((si.ra_mask & 0xff00) >> 8) as u32);
+    h2c_set(&mut pkt, 1, 0x00ff_0000, ((si.ra_mask & 0xff_0000) >> 16) as u32);
+    h2c_set(&mut pkt, 1, 0xff00_0000, ((si.ra_mask & 0xff00_0000) >> 24) as u32);
+
+    si.init_ra_lv = 0;
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c:1065-1080 `rtw_fw_default_port`.
+///
+/// Kehrt um, solange der Port nicht verbunden ist — das ist keine
+/// Abkuerzung, es steht so in der ersten Zeile.
+pub fn default_port(h: i32, st: &mut H2cState, port: u8, mac_id: u8,
+                    net_type: u32) -> bool {
+    if net_type != RTW_NET_MGD_LINKED {
+        return false;
+    }
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_DEFAULT_PORT);
+    h2c_set(&mut pkt, 0, RTW_H2C_DEFAULT_PORT_W0_PORTID, port as u32);
+    h2c_set(&mut pkt, 0, RTW_H2C_DEFAULT_PORT_W0_MACID, mac_id as u32);
+    send_h2c_command(h, st, &pkt)
+}

@@ -505,7 +505,7 @@ zweites Mal anwirft, spart sie die ganze Messung.
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 265 / 940 (war 89)
 
-**Abdeckung nach Stufe 5e: 389 von 940 rtw88-Funktionen** (vor dieser Runde
+**Abdeckung nach Stufe 5f: 394 von 940 rtw88-Funktionen** (vor dieser Runde
 89). `rtw8822c.c` 68/171 · `phy.c` 59/97 · `mac.c` 39/49 · `pci.c` 30/81 ·
 `coex.c` 27/111 · `main.c` 18/84 · `tx.c` 15/31 · `efuse.c` 5/5 · `rx.c` 3/8.
 Auf 0 stehen nur noch `mac80211.c` (die obere Hälfte, die `wifid` ersetzt),
@@ -1005,9 +1005,53 @@ Angemeldet ist nicht verbunden — das Tor stand bewusst genau hier.
 Anmeldung an einer echten Funkzelle steht, 1:1 aus rtw88 portiert, 207 von
 207 Funktionen Zugriff für Zugriff gleich.
 
+### Stufe 5f — die Ratenanpassung (0.19.0)
+
+Der Treiber schickt der Firmware **keine Rate, sondern eine MASKE**: welche
+der 64 Raten dieses Gegenüber kann. Die Firmware wählt daraus laufend und
+meldet ihre Wahl als `C2H_RA_RPT` zurück — **und genau das ist das Tor.**
+Eine Maske, die niemand beantwortet, ist eine Behauptung.
+
+Gebaut: `rtw_update_sta_info` · `get_vht_ra_mask` · `rtw_rate_mask_rssi` ·
+`rtw_rate_mask_recover` · `get_rate_id` · `rtw_fw_send_ra_info` ·
+`rtw_fw_default_port` · und der Parser, der die Fähigkeiten des AP aus der
+Anmeldeantwort liest (HT-, VHT-Element, Raten). In Linux baut mac80211
+daraus `ieee80211_sta`; hier steht er in `sta.rs` und gehört später `wifid`.
+
+**Ein echter Fund beim Gegenlesen: `SET_RA_INFO_VHT_EN` ist
+`GENMASK(29,28)`, zwei Bit** — ich hatte ein einzelnes geschrieben. Bei
+einem `bool` schreibt das denselben Wert und löscht Bit 29 nicht; hier
+folgenlos, weil der Puffer bei null beginnt, und trotzdem falsch.
+
+**Die Werkzeuge haben wieder vier Lücken geschlossen**, alle derselben Art:
+
+* **`include/linux/ieee80211.h` liegt ausserhalb des Treiberbaums.** Die
+  Bits, mit denen rtw88 die Fähigkeiten des Gegenübers liest (HT/VHT),
+  wären sonst von Hand getippt und ungeprüft gewesen.
+* **`RA_MASK_*` steht in `main.c`, nicht in einem Header.** Der Generator
+  las es, der Prüfer nicht — **zwei Werkzeuge mit verschiedenen Quellen
+  lassen genau dort eine Lücke, wo der Generator am meisten hilft.** Jetzt
+  lesen beide dieselben Dateien.
+* **Ein `/* … */` hinter einem Aufzählungseintrag frass den Namen des
+  nächsten.** So verschwanden `WLAN_EID_RSN` und `WLAN_EID_DS_PARAMS`
+  lautlos aus beiden Werkzeugen.
+* **Masken breiter als 32 Bit** (`0x3ff000ULL << 20`) und C-Zahlensuffixe:
+  als `u32` wären sie still abgeschnitten worden.
+
+**Namentlich nicht gebaut:** `rtw_fw_download_rsvd_page` +
+`rtw_send_rsvd_page_h2c`. Die reservierten Seiten tragen PS-Poll-, Null-
+und QoS-Null-Rahmen, die die FIRMWARE im Stromsparbetrieb selbst sendet.
+Stromsparen gibt es hier nicht, also würden die Seiten geschrieben und nie
+gelesen — sie gehören zu LPS, nicht hierher.
+
+**214 von 214 Funktionen · 917 Konstanten, 0 Abweichungen · Abdeckung 389
+→ 394 von 940.**
+
 ### ▶ Danach — hier weitermachen
 
-**5f — die Verbindung halten.** `rtw_update_sta_info` + `rtw_fw_send_ra_info`,
+**5g — die Verbindung halten.** Der Vierwegehandschlag und der
+Schlüsselspeicher (`rtw_sec_write_cam`), dann LPS mit den reservierten
+Seiten,
 `rtw_get_channel_params` fürs Kanalhüpfen, die Elementeauswertung des
 Beacons, und `rtw_rx_addr_match`. Der `netdev`-Anschluss
 (`npk_netdev_register`, `npk_submit_rx`) kommt ans ENDE dieser Stufe, nicht
