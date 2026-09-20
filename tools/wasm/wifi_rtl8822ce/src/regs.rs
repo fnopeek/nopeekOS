@@ -659,3 +659,152 @@ pub const REG_RX_BREAK: u32 = 0x1D2C; // rtw8822c.h:324
 pub const BIT_COM_RX_GCK_EN: u32 = 1 << 31; // rtw8822c.h:325
 pub const REG_CNT_CTRL: u32 = 0x1EB4; // rtw8822c.h:339
 pub const BIT_ALL_CNT_RST: u32 = 1 << 25; // rtw8822c.h:340
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4a: der Rest von rtw_power_on und rtw_core_start
+// ════════════════════════════════════════════════════════════════
+
+// ── H2C-MAILBOX (reg.h:291-307) ──────────────────────────────────
+// Der eine von ZWEI H2C-Wegen: acht Byte je Kommando, vier Postfaecher
+// im Umlauf. Die Koexistenz redet hierueber mit der Firmware.
+pub const REG_HMETFR: u32 = 0x01CC; // reg.h:291
+pub const REG_HMEBOX0: u32 = 0x01D0; // reg.h:298
+pub const REG_HMEBOX1: u32 = 0x01D4; // reg.h:299
+pub const REG_HMEBOX2: u32 = 0x01D8; // reg.h:300
+pub const REG_HMEBOX3: u32 = 0x01DC; // reg.h:301
+pub const REG_HMEBOX0_EX: u32 = 0x01F0; // reg.h:304
+pub const REG_HMEBOX1_EX: u32 = 0x01F4; // reg.h:305
+pub const REG_HMEBOX2_EX: u32 = 0x01F8; // reg.h:306
+pub const REG_HMEBOX3_EX: u32 = 0x01FC; // reg.h:307
+
+// ── H2C-PAKET (fw.h) ─────────────────────────────────────────────
+// Der ANDERE Weg: 32 Byte durch die H2C-Queue, also durch den Ring,
+// dessen Adresse `init_h2c` in Stufe 3a gesetzt hat. General- und
+// PHYDM-Info gehen hier durch.
+pub const H2C_PKT_SIZE: usize = 32; // fw.h:8
+pub const H2C_PKT_HDR_SIZE: u16 = 8; // fw.h:9
+pub const H2C_PKT_CMD_ID: u32 = 0xFF; // fw.h:386
+pub const H2C_PKT_CATEGORY: u32 = 0x01; // fw.h:387
+pub const H2C_PKT_GENERAL_INFO: u32 = 0x0D; // fw.h:389
+pub const H2C_PKT_PHYDM_INFO: u32 = 0x11; // fw.h:390
+pub const FW_RF_2T2R: u8 = 0x2; // fw.h:134
+pub const FW_RF_1T1R: u8 = 0x4; // fw.h:136
+
+// ── Sicherheits-Engine (sec.h) ───────────────────────────────────
+pub const RTW_SEC_CONFIG: u32 = 0x0680; // sec.h:11
+pub const RTW_SEC_TX_UNI_USE_DK: u16 = 1 << 0; // sec.h:19
+pub const RTW_SEC_RX_UNI_USE_DK: u16 = 1 << 1; // sec.h:20
+pub const RTW_SEC_TX_DEC_EN: u16 = 1 << 2; // sec.h:21
+pub const RTW_SEC_RX_DEC_EN: u16 = 1 << 3; // sec.h:22
+pub const RTW_SEC_TX_BC_USE_DK: u16 = 1 << 6; // sec.h:23
+pub const RTW_SEC_RX_BC_USE_DK: u16 = 1 << 7; // sec.h:24
+pub const RTW_SEC_ENGINE_EN: u16 = 1 << 9; // sec.h:26
+
+// ── Empfangsfilter (reg.h:502-533) ───────────────────────────────
+// `hal->rcr` wird in main.c:2183 gesetzt und in `rtw_core_start`
+// (main.c:1526) NOCH EINMAL ins Register geschrieben — nach allem, was
+// `rtw8822c_mac_init` und `rtw_drv_info_cfg` dort hinterlassen haben.
+// Der Kommentar dort lautet „rcr reset after powered on".
+pub const BIT_APP_FCS: u32 = 1 << 31; // reg.h:503
+pub const BIT_APP_MIC: u32 = 1 << 30; // reg.h:504
+pub const BIT_APP_ICV: u32 = 1 << 29; // reg.h:505
+pub const BIT_VHT_DACK: u32 = 1 << 26; // reg.h:508
+pub const BIT_PKTCTL_DLEN: u32 = 1 << 20; // reg.h:514
+pub const BIT_HTC_LOC_CTRL: u32 = 1 << 14; // reg.h:520
+pub const BIT_AB: u32 = 1 << 3; // reg.h:531
+pub const BIT_AM: u32 = 1 << 2; // reg.h:532
+pub const BIT_APM: u32 = 1 << 1; // reg.h:533
+
+// ── Koexistenz (reg.h) ───────────────────────────────────────────
+pub const REG_WIFI_BT_INFO: u32 = 0x00AA; // reg.h:184
+pub const BIT_BT_INT_EN: u16 = 1 << 15; // reg.h:185
+pub const REG_BT_COEX_TABLE_H: u32 = 0x06CC; // reg.h:573
+pub const H2C_CMD_QUERY_BT_INFO: u32 = 0x61; // fw.h:568
+pub const H2C_CMD_BT_WIFI_CONTROL: u32 = 0x69; // fw.h:573
+
+// ── Koexistenz: Zustaende (coex.h, Aufzaehlungen ohne Zahlen) ────
+// Sie stehen in `enum` ohne Wert, also zaehlt die POSITION. Abgezaehlt
+// aus coex.h:74-85 bzw. 129-138 — und darum ist die Quellzeile hier
+// wichtiger als sonst.
+pub const COEX_SET_ANT_INIT: u8 = 0; // coex.h:75
+pub const COEX_SET_ANT_WONLY: u8 = 1; // coex.h:76
+pub const COEX_SET_ANT_WOFF: u8 = 2; // coex.h:77
+pub const COEX_SET_ANT_2G: u8 = 3; // coex.h:78
+pub const COEX_SET_ANT_5G: u8 = 4; // coex.h:79
+pub const COEX_SET_ANT_POWERON: u8 = 5; // coex.h:80
+pub const COEX_SET_ANT_2G_WLBT: u8 = 6; // coex.h:81
+pub const COEX_SET_ANT_2G_FREERUN: u8 = 7; // coex.h:82
+pub const COEX_SWITCH_CTRL_BY_BBSW: u8 = 0; // coex.h:130
+pub const COEX_SWITCH_CTRL_BY_PTA: u8 = 1; // coex.h:131
+pub const COEX_SWITCH_CTRL_BY_BT: u8 = 4; // coex.h:134
+pub const COEX_SWITCH_CTRL_MAX: u8 = 6; // coex.h:137
+pub const COEX_SWITCH_TO_MAX: u8 = 7; // coex.h:126
+
+pub const COEX_GNT_SET_HW_PTA: u32 = 0x0; // coex.h:114
+pub const COEX_GNT_SET_SW_LOW: u32 = 0x1; // coex.h:115
+pub const COEX_GNT_SET_SW_HIGH: u32 = 0x3; // coex.h:116
+
+pub const COEX_SCBD_ACTIVE: u16 = 0x0001; // coex.h:181
+pub const COEX_SCBD_ONOFF: u16 = 0x0002; // coex.h:182
+pub const COEX_SCBD_BT_RFK: u16 = 0x0020; // coex.h:186
+pub const COEX_SCBD_TDMA: u16 = 1 << 9; // coex.h:189
+pub const COEX_SCBD_FIX2M: u16 = 1 << 10; // coex.h:190
+pub const COEX_SCBD_ALL: u16 = 0xffff; // coex.h:191  GENMASK(15, 0)
+
+pub const COEX_H2C69_TDMA_SLOT: u8 = 0x0B; // coex.h:23
+pub const PARA1_H2C69_TDMA_4SLOT: u8 = 0xC1; // coex.h:24
+pub const PARA1_H2C69_TDMA_2SLOT: u8 = 0x01; // coex.h:25
+pub const COEX_H2C69_WL_LEAKAP: u8 = 0x0C; // coex.h:19
+pub const PARA1_H2C69_EN_5MS: u8 = 0x00; // coex.h:21
+pub const PARA1_H2C69_DIS_5MS: u8 = 0x01; // coex.h:20
+pub const COEX_H2C69_TOGGLE_TABLE_A: u8 = 0x0D; // coex.h:26
+
+pub const TDMA_4SLOT: u32 = 0x100; // coex.h:32
+pub const TDMA_TIMER_TYPE_2SLOT: u8 = 0; // coex.h:34
+pub const TDMA_TIMER_TYPE_4SLOT: u8 = 3; // coex.h:35
+pub const COEX_MIN_DELAY: u32 = 10; // coex.h:12
+pub const COEX_RFK_TIMEOUT: u32 = 600; // coex.h:13
+pub const COEX_WLPRI_TX_RSP: u8 = 3; // coex.h:265
+pub const COEX_WLPRI_TX_BEACON: u8 = 4; // coex.h:266
+pub const COEX_WLPRI_TX_BEACONQ: u8 = 27; // coex.h:269
+
+// ── Koexistenz: Register ─────────────────────────────────────────
+pub const REG_BT_COEX_TABLE0: u32 = 0x06C0; // reg.h:570
+pub const REG_BT_COEX_TABLE1: u32 = 0x06C4; // reg.h:571
+pub const REG_BT_COEX_BRK_TABLE: u32 = 0x06C8; // reg.h:572
+pub const REG_BT_STAT_CTRL: u32 = 0x0778; // reg.h:589
+pub const REG_BT_TDMA_TIME: u32 = 0x0790; // reg.h:590
+pub const BIT_MASK_SAMPLE_RATE: u32 = 0x3f; // reg.h:591
+pub const BIT_BT_PTA_EN: u32 = 1 << 5; // reg.h:77
+pub const BIT_PO_BT_PTA_PINS: u32 = 1 << 9; // reg.h:76
+pub const REG_QUEUE_CTRL: u32 = 0x04C6; // reg.h:432
+pub const BIT_PTA_WL_TX_EN: u8 = 1 << 4; // reg.h:433
+pub const BIT_PTA_EDCCA_EN: u8 = 1 << 5; // reg.h:434
+pub const REG_BT_COEX_V2: u32 = 0x0762; // reg.h:579
+pub const BIT_GNT_BT_POLARITY: u16 = 1 << 12; // reg.h:580
+pub const REG_DUMMY_PAGE4_V1: u32 = 0x04FC; // reg.h:445
+pub const BIT_BTCCA_CTRL: u8 = 0x3; // reg.h:441  GENMASK(1, 0)
+pub const RF_MODOPT: u32 = 0x01; // reg.h:957
+pub const REG_SYS_SDIO_CTRL: u32 = 0x0070; // reg.h:111
+pub const BIT_DBG_GNT_WL_BT: u32 = 1 << 27; // reg.h:112
+pub const BIT_LTE_MUX_CTRL_PATH: u32 = 1 << 26; // reg.h:113
+pub const BIT_BTGP_JTAG_EN: u32 = 1 << 24; // reg.h:104
+pub const BIT_BTGP_SPI_EN: u32 = 1 << 20; // reg.h:105
+pub const BIT_LED1DIS: u32 = 1 << 15; // reg.h:106
+pub const BIT_WL_RFK: u8 = 1 << 0; // reg.h:426
+pub const BIT_LTE_COEX_EN: u32 = 1 << 7; // reg.h:581
+pub const LTE_COEX_CTRL: u16 = 0x38; // reg.h:1000
+pub const LTE_WL_TRX_CTRL: u16 = 0xa0; // reg.h:1001
+pub const LTE_BT_TRX_CTRL: u16 = 0xa4; // reg.h:1002
+pub const MASKLWORD: u32 = 0x0000ffff; // phy.h:177
+pub const H2C_CMD_COEX_TDMA_TYPE: u32 = 0x60; // fw.h:567
+pub const REG_IGN_GNT_BT1: u32 = 0x1860; // reg.h:910
+pub const REG_NOMASK_TXBT: u32 = 0x1CA7; // reg.h:927
+pub const REG_ANAPAR: u32 = 0x1C30; // reg.h:928
+pub const BIT_ANAPAR_BTPS: u32 = 1 << 22; // reg.h:929
+pub const REG_RSTB_SEL: u32 = 0x1C38; // reg.h:930
+pub const BIT_DAC_OFF_ENABLE: u32 = 1 << 4; // reg.h:931
+pub const BIT_PI_IGNORE_GNT_BT: u32 = 1 << 3; // reg.h:932
+pub const BIT_NOMASK_TXBT_ENABLE: u32 = 1 << 3; // reg.h:933
+pub const REG_IGN_GNTBT4: u32 = 0x4160; // reg.h:940
+pub const COEX_WLINK_5G: u8 = 0x3; // coex.h:175

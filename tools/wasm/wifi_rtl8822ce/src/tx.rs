@@ -169,3 +169,13 @@ pub fn fill_tx_desc(info: &TxPktInfo, desc: &mut [u8; TX_PKT_DESC_SZ]) {
         desc[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
     }
 }
+
+/// tx.c:524-546 `rtw_tx_write_data_h2c_get`.
+///
+/// Linux legt dafuer ein skb an, reserviert `tx_pkt_desc_sz` Vorlauf und
+/// kopiert die 32 Bytes dahinter. Das ist bei uns der Staging-Puffer; vom
+/// `pkt_info` setzt die Funktion **genau ein Feld**, alles andere bleibt
+/// null — auch `offset` und `ls`, anders als beim Reserved-Page-Weg.
+pub fn write_data_h2c_get(size: u32) -> TxPktInfo {
+    TxPktInfo { tx_pkt_size: size, ..Default::default() }
+}

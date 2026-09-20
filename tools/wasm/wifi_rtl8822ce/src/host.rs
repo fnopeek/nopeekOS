@@ -264,3 +264,18 @@ pub fn set16(h: i32, off: u32, bits: u16) {
 pub fn clr16(h: i32, off: u32, bits: u16) {
     w16(h, off, r16(h, off) & !bits);
 }
+
+/// hci.h:255-266 `rtw_write8_mask` — Feld im BYTE setzen.
+/// `mask` wird vorher auf acht Bit beschnitten, wie in Linux.
+pub fn w8_mask(h: i32, off: u32, mask: u32, data: u8) {
+    let mask = (mask & 0xff) as u8;
+    let shift = mask.trailing_zeros();
+    let orig = r8(h, off);
+    w8(h, off, (orig & !mask) | ((data << shift) & mask));
+}
+
+/// `rtw_write16_set` fuer ein Feld — es gibt in Linux kein
+/// `rtw_write16_mask`, aber `rtw_write16_set` mit einer Maske.
+pub fn r16_mask(h: i32, off: u32, mask: u16) -> u16 {
+    (r16(h, off) & mask) >> mask.trailing_zeros()
+}

@@ -622,3 +622,122 @@ pub fn false_alarm_statistics(h: i32, dm: &mut DmInfo) {
     host::clr32(h, REG_CNT_CTRL, BIT_ALL_CNT_RST);
     host::set32(h, REG_RX_BREAK, BIT_COM_RX_GCK_EN);
 }
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4a: die Koexistenz-Ops des Chips (rtw8822c.c)
+// ════════════════════════════════════════════════════════════════
+
+use crate::coex::Coex;
+
+/// rtw8822c.c `rtw8822c_coex_cfg_init` — `chip->ops->coex_set_init`.
+pub fn coex_cfg_init(h: i32) {
+    // enable TBTT interrupt
+    host::set8(h, REG_BCN_CTRL, BIT_EN_BCN_FUNCTION);
+
+    // BT report packet sample rate: 0x790[5:0]=0x5
+    host::w8_mask(h, REG_BT_TDMA_TIME, BIT_MASK_SAMPLE_RATE, 0x5);
+
+    // enable BT counter statistics
+    host::w8(h, REG_BT_STAT_CTRL, 0x1);
+
+    // enable PTA (3-wire function form BT side)
+    host::set32(h, REG_GPIO_MUXCFG, BIT_BT_PTA_EN);
+    host::set32(h, REG_GPIO_MUXCFG, BIT_PO_BT_PTA_PINS);
+
+    // enable PTA (tx/rx signal form WiFi side)
+    host::set8(h, REG_QUEUE_CTRL, BIT_PTA_WL_TX_EN);
+    // wl tx signal to PTA not case EDCCA
+    host::clr8(h, REG_QUEUE_CTRL, BIT_PTA_EDCCA_EN);
+    // GNT_BT=1 while select both
+    host::set16(h, REG_BT_COEX_V2, BIT_GNT_BT_POLARITY);
+    // BT_CCA = ~GNT_WL_BB, not or GNT_BT_BB, LTE_Rx
+    host::clr8(h, REG_DUMMY_PAGE4_V1, BIT_BTCCA_CTRL);
+
+    // to avoid RF parameter error
+    phy::write_rf_reg_mix(h, RF_PATH_B, RF_MODOPT, 0xfffff, 0x40000);
+}
+
+/// rtw8822c.c `rtw8822c_coex_cfg_gnt_debug`
+pub fn coex_cfg_gnt_debug(h: i32) {
+    host::w8_mask(h, REG_PAD_CTRL1 + 2, BIT_BTGP_SPI_EN >> 16, 0);
+    host::w8_mask(h, REG_PAD_CTRL1 + 3, BIT_BTGP_JTAG_EN >> 24, 0);
+    host::w8_mask(h, REG_GPIO_MUXCFG + 2, BIT_FSPI_EN >> 16, 0);
+    host::w8_mask(h, REG_PAD_CTRL1 + 1, BIT_LED1DIS >> 8, 0);
+    host::w8_mask(h, REG_SYS_SDIO_CTRL + 3, BIT_DBG_GNT_WL_BT >> 24, 0);
+}
+
+/// rtw8822c.c `rtw8822c_coex_cfg_rfe_type`.
+///
+/// Setzt den Beschreibungssatz des Antennen-Frontends — und schaltet dabei
+/// die LTE-Koexistenz auf der WLAN-Seite AB. **`ant_switch_exist` bleibt
+/// `false`**, und das ist der Grund, warum `rtw_coex_set_ant_switch` auf
+/// diesem Chip nie etwas tut.
+pub fn coex_cfg_rfe_type(h: i32, c: &mut Coex, share_ant: bool, rfe_option: u8) {
+    c.rfe_module_type = rfe_option;
+    c.ant_switch_polarity = 0;
+    c.ant_switch_exist = false;
+    c.ant_switch_with_bt = false;
+    c.ant_switch_diversity = false;
+    c.wlg_at_btg = share_ant;
+
+    // disable LTE coex in wifi side
+    crate::coex::write_indirect_reg(h, LTE_COEX_CTRL, BIT_LTE_COEX_EN, 0x0);
+    crate::coex::write_indirect_reg(h, LTE_WL_TRX_CTRL, MASKLWORD, 0xffff);
+    crate::coex::write_indirect_reg(h, LTE_BT_TRX_CTRL, MASKLWORD, 0xffff);
+}
+
+/// rtw8822c.c `rtw8822c_coex_cfg_gnt_fix`.
+///
+/// Nicht im Anlaufweg — Linux ruft es aus `rtw_coex_run_coex`, also im
+/// laufenden Betrieb. Es steht hier, weil es zu den Coex-Ops des Chips
+/// gehoert und weil der naechste Posten es braucht; wer es erst dann
+/// schreibt, schreibt es unter Zeitdruck.
+#[allow(dead_code)]
+pub fn coex_cfg_gnt_fix(h: i32, c: &mut Coex, share_ant: bool) {
+    const COEX_WLINK_2GFREE: u8 = 0x7; // coex.h:176
+
+    if c.gnt_workaround_state == c.wl_coex_mode {
+        return;
+    }
+    c.gnt_workaround_state = c.wl_coex_mode;
+
+    let mut rf_0x1 = if (c.kt_ver == 0 && c.under_5g) || c.freerun {
+        0x40021u32
+    } else {
+        0x40000u32
+    };
+    // BT at S1 for Shared-Ant
+    if share_ant {
+        rf_0x1 |= 1 << 13;
+    }
+    phy::write_rf_reg_mix(h, RF_PATH_B, 0x1, 0xfffff, rf_0x1);
+
+    if c.wl_coex_mode == COEX_WLINK_2GFREE {
+        host::w8_mask(h, REG_ANAPAR + 2, BIT_ANAPAR_BTPS >> 16, 0);
+    } else {
+        host::w8_mask(h, REG_ANAPAR + 2, BIT_ANAPAR_BTPS >> 16, 1);
+        host::w8_mask(h, REG_RSTB_SEL + 1, BIT_DAC_OFF_ENABLE, 0);
+        host::w8_mask(h, REG_RSTB_SEL + 3, BIT_DAC_OFF_ENABLE, 1);
+    }
+
+    // disable WL-S1 BB chage RF mode if GNT_BT, since RF TRx mask can do it
+    host::w8_mask(h, REG_IGN_GNTBT4, BIT_PI_IGNORE_GNT_BT, 1);
+
+    if c.wl_coex_mode == COEX_WLINK_2GFREE {
+        host::w8_mask(h, REG_IGN_GNT_BT1, BIT_PI_IGNORE_GNT_BT, 1);
+        host::w8_mask(h, REG_NOMASK_TXBT, BIT_NOMASK_TXBT_ENABLE, 1);
+    } else if c.wl_coex_mode == COEX_WLINK_5G || c.under_5g || !share_ant {
+        if c.kt_ver >= 3 {
+            host::w8_mask(h, REG_IGN_GNT_BT1, BIT_PI_IGNORE_GNT_BT, 0);
+            host::w8_mask(h, REG_NOMASK_TXBT, BIT_NOMASK_TXBT_ENABLE, 1);
+        } else {
+            host::w8_mask(h, REG_IGN_GNT_BT1, BIT_PI_IGNORE_GNT_BT, 1);
+        }
+    } else {
+        // shared-antenna
+        host::w8_mask(h, REG_IGN_GNT_BT1, BIT_PI_IGNORE_GNT_BT, 0);
+        if c.kt_ver >= 3 {
+            host::w8_mask(h, REG_NOMASK_TXBT, BIT_NOMASK_TXBT_ENABLE, 0);
+        }
+    }
+}

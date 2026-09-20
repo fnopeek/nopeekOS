@@ -183,3 +183,185 @@ pub fn write_data_rsvd_page(
 
     ok
 }
+
+// ════════════════════════════════════════════════════════════════
+// Stufe 4a: die zwei H2C-Wege
+// ════════════════════════════════════════════════════════════════
+//
+// Sie sehen gleich aus und sind es nicht:
+//
+//   `rtw_fw_send_h2c_command`  schreibt ACHT Byte in eines von vier
+//                              HMEBOX-Registern. Die Koexistenz redet so.
+//   `rtw_fw_send_h2c_packet`   schiebt ZWEIUNDDREISSIG Byte durch die
+//                              H2C-QUEUE, also durch den Ring, dessen
+//                              Adresse `init_h2c` gesetzt hat. General-
+//                              und PHYDM-Info gehen so.
+//
+// Wer den einen fuer den anderen haelt, schickt alles ins Leere — und
+// merkt es nicht, weil beide Wege stumm sind.
+
+/// `struct rtw_h2c_cmd` (fw.h) — acht Byte, als zwei Woerter.
+/// Der Zustand zwischen zwei Kommandos: welches Postfach als naechstes
+/// drankommt und welche Folgenummer ein PAKET traegt.
+#[derive(Default, Clone, Copy)]
+pub struct H2cState {
+    pub last_box_num: u8,
+    pub seq: u8,
+}
+
+/// Feld an seine Schiebestelle, im Wort `word` des H2C-Puffers.
+/// Das ist `le32p_replace_bits((__le32 *)(h2c) + word, value, mask)`.
+fn h2c_set(pkt: &mut [u8; H2C_PKT_SIZE], word: usize, mask: u32, value: u32) {
+    let o = word * 4;
+    let cur = u32::from_le_bytes([pkt[o], pkt[o + 1], pkt[o + 2], pkt[o + 3]]);
+    let v = (cur & !mask) | ((value << mask.trailing_zeros()) & mask);
+    pkt[o..o + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+// ── Weg 1: die MAILBOX (fw.c:76-127) ─────────────────────────────
+
+/// fw.c `rtw_fw_send_h2c_command`.
+///
+/// Linux pollt mit `read_poll_timeout_atomic(rtw_read8, ..., 100, 3000, ...)`
+/// — alle 100 us, Frist **3 ms**. Gehalten wird hier die Frist, nicht die
+/// Rundenzahl (derselbe Fehler wie in `check_hw_ready` soll sich nicht
+/// wiederholen).
+pub fn send_h2c_command(h: i32, st: &mut H2cState, pkt: &[u8; H2C_PKT_SIZE]) -> bool {
+    let box_num = st.last_box_num;
+    let (box_reg, box_ex_reg) = match box_num {
+        0 => (REG_HMEBOX0, REG_HMEBOX0_EX),
+        1 => (REG_HMEBOX1, REG_HMEBOX1_EX),
+        2 => (REG_HMEBOX2, REG_HMEBOX2_EX),
+        3 => (REG_HMEBOX3, REG_HMEBOX3_EX),
+        _ => {
+            host::print("[rtl8822ce] invalid h2c mail box number\n");
+            return false;
+        }
+    };
+
+    let start = host::now_us();
+    loop {
+        if (host::r8(h, REG_HMETFR) >> box_num) & 0x1 == 0 {
+            break;
+        }
+        if host::now_us() - start >= 3000 {
+            host::print("[rtl8822ce] failed to send h2c command\n");
+            return false;
+        }
+    }
+
+    // `h2c_cmd->msg` sind die Bytes 0..4, `msg_ext` die Bytes 4..8 —
+    // und das EX-Register wird ZUERST geschrieben.
+    let msg = u32::from_le_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]);
+    let msg_ext = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
+    host::w32(h, box_ex_reg, msg_ext);
+    host::w32(h, box_reg, msg);
+
+    st.last_box_num += 1;
+    if st.last_box_num >= 4 {
+        st.last_box_num = 0;
+    }
+    true
+}
+
+/// fw.h:586 `SET_H2C_CMD_ID_CLASS`
+fn set_cmd_id_class(pkt: &mut [u8; H2C_PKT_SIZE], value: u32) {
+    h2c_set(pkt, 0, 0xff, value);
+}
+
+/// fw.c `rtw_fw_bt_wifi_control` — fw.h:568-574, Kommando 0x69.
+pub fn bt_wifi_control(h: i32, st: &mut H2cState, op_code: u8, data: &[u8; 5]) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_BT_WIFI_CONTROL);
+    h2c_set(&mut pkt, 0, 0x0000_ff00, op_code as u32); // OP_CODE
+    h2c_set(&mut pkt, 0, 0x00ff_0000, data[0] as u32); // DATA1
+    h2c_set(&mut pkt, 0, 0xff00_0000, data[1] as u32); // DATA2
+    h2c_set(&mut pkt, 1, 0x0000_00ff, data[2] as u32); // DATA3
+    h2c_set(&mut pkt, 1, 0x0000_ff00, data[3] as u32); // DATA4
+    h2c_set(&mut pkt, 1, 0x00ff_0000, data[4] as u32); // DATA5
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c `rtw_fw_query_bt_info` — Kommando 0x61.
+pub fn query_bt_info(h: i32, st: &mut H2cState) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_QUERY_BT_INFO);
+    h2c_set(&mut pkt, 0, 1 << 8, 1); // SET_QUERY_BT_INFO(h2c_pkt, true)
+    send_h2c_command(h, st, &pkt)
+}
+
+// ── Weg 2: das PAKET durch die H2C-Queue (fw.c:495-565) ──────────
+
+/// fw.c `rtw_h2c_pkt_set_header`
+fn h2c_pkt_set_header(pkt: &mut [u8; H2C_PKT_SIZE], sub_id: u32) {
+    h2c_set(pkt, 0, 0x0000_007f, H2C_PKT_CATEGORY); // SET_PKT_H2C_CATEGORY
+    h2c_set(pkt, 0, 0x0000_ff00, H2C_PKT_CMD_ID); // SET_PKT_H2C_CMD_ID
+    h2c_set(pkt, 0, 0xffff_0000, sub_id); // SET_PKT_H2C_SUB_CMD_ID
+}
+
+/// fw.c `rtw_fw_send_h2c_packet`
+fn send_h2c_packet(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
+                   pkt: &mut [u8; H2C_PKT_SIZE]) -> bool {
+    h2c_set(pkt, 1, 0xffff_0000, st.seq as u32); // FW_OFFLOAD_H2C_SET_SEQ_NUM
+    let ok = crate::pci::write_data_h2c(h, trx, stage, pkt);
+    if !ok {
+        host::print("[rtl8822ce] failed to send h2c packet\n");
+    }
+    // Linux erhoeht `seq` auch bei Fehlschlag.
+    st.seq = st.seq.wrapping_add(1);
+    ok
+}
+
+/// fw.c:517-535 `rtw_fw_send_general_info`.
+///
+/// Sagt der Firmware, wieviele Seiten sie hinter `rsvd_boundary` fuer ihren
+/// eigenen Sendepuffer hat. Bei uns: 1994 − 1938 = **56**.
+pub fn send_general_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
+                         fifo: &crate::mac::Fifo) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    let total_size = H2C_PKT_HDR_SIZE + 4;
+
+    h2c_pkt_set_header(&mut pkt, H2C_PKT_GENERAL_INFO);
+    h2c_set(&mut pkt, 1, 0x0000_ffff, total_size as u32); // SET_PKT_H2C_TOTAL_LEN
+    h2c_set(&mut pkt, 2, 0x00ff_0000, // GENERAL_INFO_SET_FW_TX_BOUNDARY
+            (fifo.rsvd_fw_txbuf_addr - fifo.rsvd_boundary) as u32);
+
+    send_h2c_packet(h, trx, stage, st, &mut pkt)
+}
+
+/// fw.c:538-565 `rtw_fw_send_phydm_info`.
+///
+/// `rx_ant_status`/`tx_ant_status` kommen aus `hal->antenna_rx`/`antenna_tx`
+/// — bei 2T2R beide `BB_PATH_AB`.
+#[allow(clippy::too_many_arguments)]
+pub fn send_phydm_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
+                       rfe_option: u8, rf_2t2r: bool, cut_version: u8,
+                       antenna_rx: u8, antenna_tx: u8) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    let total_size = H2C_PKT_HDR_SIZE + 8;
+    let fw_rf_type = if rf_2t2r { FW_RF_2T2R } else { FW_RF_1T1R };
+
+    h2c_pkt_set_header(&mut pkt, H2C_PKT_PHYDM_INFO);
+    h2c_set(&mut pkt, 1, 0x0000_ffff, total_size as u32);
+    h2c_set(&mut pkt, 2, 0x0000_00ff, rfe_option as u32); // REF_TYPE
+    h2c_set(&mut pkt, 2, 0x0000_ff00, fw_rf_type as u32); // RF_TYPE
+    h2c_set(&mut pkt, 2, 0x00ff_0000, cut_version as u32); // CUT_VER
+    h2c_set(&mut pkt, 2, 0x0f00_0000, antenna_rx as u32); // RX_ANT_STATUS
+    h2c_set(&mut pkt, 2, 0xf000_0000, antenna_tx as u32); // TX_ANT_STATUS
+
+    send_h2c_packet(h, trx, stage, st, &mut pkt)
+}
+
+/// fw.c `rtw_fw_coex_tdma_type` — Mailbox-Kommando 0x60, fw.h:567.
+#[allow(clippy::too_many_arguments)]
+pub fn coex_tdma_type(h: i32, st: &mut H2cState,
+                      para1: u8, para2: u8, para3: u8, para4: u8, para5: u8) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_COEX_TDMA_TYPE);
+    h2c_set(&mut pkt, 0, 0x0000_ff00, para1 as u32); // PARA1
+    h2c_set(&mut pkt, 0, 0x00ff_0000, para2 as u32); // PARA2
+    h2c_set(&mut pkt, 0, 0xff00_0000, para3 as u32); // PARA3
+    h2c_set(&mut pkt, 1, 0x0000_00ff, para4 as u32); // PARA4
+    h2c_set(&mut pkt, 1, 0x0000_ff00, para5 as u32); // PARA5
+    send_h2c_command(h, st, &pkt)
+}

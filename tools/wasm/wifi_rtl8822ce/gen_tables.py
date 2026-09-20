@@ -22,6 +22,9 @@ import os
 import re
 import sys
 
+C_SRC = os.path.expanduser(
+    "~/.cache/nopeekos/linux-src/linux-6.18.26/drivers/net/wireless/"
+    "realtek/rtw88/rtw8822c.c")
 SRC = os.path.expanduser(
     "~/.cache/nopeekos/linux-src/linux-6.18.26/drivers/net/wireless/"
     "realtek/rtw88/rtw8822c_table.c")
@@ -106,6 +109,40 @@ def count_writes(vals):
     return n
 
 
+def coex_tables():
+    """Die vier Koexistenz-Tabellen aus rtw8822c.c.
+
+    Zwei Paarlisten (`coex_table_para`: bt, wl) und zwei Fuenferlisten
+    (`coex_tdma_para`: para[0..5]). Sie stehen in der Chipdatei, nicht in
+    der Tabellendatei — abtippen waere hier genauso falsch wie dort."""
+    src = open(C_SRC, errors="ignore").read()
+    out = []
+    for cname, rname, cols in (
+            ("table_sant_8822c", "COEX_TABLE_SANT", 2),
+            ("table_nsant_8822c", "COEX_TABLE_NSANT", 2),
+            ("tdma_sant_8822c", "COEX_TDMA_SANT", 5),
+            ("tdma_nsant_8822c", "COEX_TDMA_NSANT", 5)):
+        m = re.search(r"static const struct \w+ " + cname + r"\[\] = \{(.*?)\n\};",
+                      src, re.S)
+        if not m:
+            sys.exit(f"Koexistenz-Tabelle {cname} nicht gefunden")
+        rows = []
+        for entry in re.finditer(r"\{\s*\{?([^{}]*?)\}?\s*\}", m.group(1)):
+            vals = [v.strip() for v in entry.group(1).split(",") if v.strip()]
+            if len(vals) != cols:
+                sys.exit(f"{cname}: {len(vals)} Spalten statt {cols}: {vals}")
+            rows.append([int(v, 16) for v in vals])
+        ty = "u32" if cols == 2 else "u8"
+        w = 8 if cols == 2 else 2
+        out.append(f"/// rtw8822c.c `{cname}` — {len(rows)} Faelle")
+        out.append(f"pub static {rname}: [[{ty}; {cols}]; {len(rows)}] = [")
+        for r in rows:
+            out.append("    [" + ", ".join(f"0x{v:0{w}x}" for v in r) + "],")
+        out.append("];\n")
+        print(f"  {cname:30s} {len(rows):6d} Faelle")
+    return out
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -145,6 +182,8 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     for rname, n in expected:
         out.append(f'    ("{rname.lower()}", {n}),')
     out.append("];\n")
+
+    out += coex_tables()
 
     open(OUT, "w").write("\n".join(out))
     print(f"  {'SUMME':30s} {total:6d} Woerter "
