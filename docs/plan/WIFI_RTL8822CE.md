@@ -488,7 +488,8 @@ zweites Mal anwirft, spart sie die ganze Messung.
 ### Werkzeuge (im Modulverzeichnis)
 
     python3 tools/wasm/wifi_rtl8822ce/check_regs.py   # 462 Konstanten, 0 Abweichungen
-    python3 tools/wasm/wifi_rtl8822ce/seqdiff.py      # 22 Funktionen, Zugriff fuer Zugriff
+    python3 tools/wasm/wifi_rtl8822ce/seqdiff.py      # 91 Funktionen, Zugriff fuer Zugriff
+    python3 tools/wasm/wifi_rtl8822ce/txpwrcheck.py   # Sendeleistung host-seitig
     python3 tools/wasm/wifi_rtl8822ce/gen_tables.py   # src/tables.rs aus rtw8822c_table.c
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py   # src/pwrseq.rs aus rtw8822c.c
     python3 tools/linux-coverage.py --chip rtl8822ce   # 165 / 940 (war 89)
@@ -631,12 +632,36 @@ je gesendetem Paket — `wp` läuft über die ganze Ringlänge. Die erste Fassun
 teilte sich den Puffer mit dem Firmware-Download, der genau ein Stück groß
 ist. Beim Anlauf mit zwei Paketen wäre das nie aufgefallen.
 
-**4b — die Sendeleistung.** `rtw_chip_board_info_setup` (main.c:2064):
-`rtw_phy_init_tx_power` · `bb_pg_type0` und `txpwr_lmt_type0` laden ·
-`rtw_phy_tx_power_by_rate_config` · `rtw_phy_tx_power_limit_config`. Zwei
-weitere erzeugte Tabellen (~100 KiB) und ein eigener Parser mit der
-Regulierungszonen-Ersatzlogik. In Linux läuft das zur PROBE-Zeit, nicht in
-`power_on` — es steht hier, weil 4c es braucht.
+**4b — die Sendeleistung. GEBAUT in 0.12.0.** `rtw_chip_board_info_setup`
+(main.c:2064) vollständig: `rtw_phy_init_tx_power` · `bb_pg_type0` und
+`txpwr_lmt_type0` laden · `rtw_phy_tx_power_by_rate_config` ·
+`rtw_phy_tx_power_limit_config`, samt der Regulierungszonen-Ersatzlogik und
+den vier Querabgleich-Stufen.
+
+**Sie läuft VOR Stufe 3**, weil sie in Linux vor `rtw_power_on` läuft:
+`rtw_chip_info_setup` = `parameter_setup` → `efuse_info_setup` →
+`board_info_setup`. Die Nummer 4b ist die Reihenfolge, in der gebaut wurde,
+nicht die, in der gelaufen wird.
+
+Drei Tabellen dazu erzeugt und gegen die Quelle gezählt: `bb_pg_type0` 46
+Zeilen, `txpwr_lmt_type0` 2340, `txpwr_lmt_type5` 1365. **Beide RFE-Typen**,
+nicht nur der, den dieses Board meldet — `rtw_get_rfe_def` schlägt in
+`rtw8822c_rfe_defs[]` nach, und wer nur einen Eintrag baut, hat einen Treiber
+für genau ein Board.
+
+**Gate 4b braucht kein Gerät, und das ist der Punkt.** Die Funktion fasst
+kein Register an; sie füllt 25 KiB abgeleiteten Zustand. Ein falsches Byte
+darin ist am Gerät eine schiefe Sendeleistung auf einem Kanal — und nichts,
+was ein Log zeigt. Also rechnet `gen_tables.py` dieselbe Kette ein zweites
+Mal nach, in Python, und legt sechs Prüfsummen ab; `txpwrcheck.py` baut
+`txpower.rs` host-seitig und hält die eigenen dagegen. **6 von 6 gleich.**
+Gegengeprüft mit EINEM falschen Zeichen (`size - 3` statt `size - 2` in der
+VHT-Basisrate) — das schlägt auf alle sechs Summen durch.
+
+**Eine benannte Abweichung:** `rtw_phy_setup_phy_cond` steht in Linux in
+`board_info_setup`, bei uns in `phy_set_param`. Es rechnet die Bedingung für
+die PARAMETERtabellen aus `cut_version` und `rfe_option` — beide dort schon
+bekannt, kein Registerzugriff, gleiches Ergebnis.
 
 **4c — `rtw_set_channel`.** `rtw8822c_set_channel_bb` (157 Zeilen, AGC,
 CCA-Maske, RX-Filter) · `rtw_set_channel_mac` · `rtw8822c_set_channel_rf` ·
