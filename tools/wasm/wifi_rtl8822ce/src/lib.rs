@@ -3161,6 +3161,13 @@ struct LinkStats {
     /// den Sendering passte.
     addba_resp: u32,
     addba_fail: u32,
+    /// Die Form der Empfangsschleife: Bliecke mit und ohne Beute, die
+    /// Summe der Rahmen, und wie oft ein Blick den Stapel voll
+    /// ausschoepfte.
+    rx_polls: u32,
+    rx_empty: u32,
+    rx_frames: u32,
+    rx_full: u32,
 }
 
 impl LinkStats {
@@ -3734,6 +3741,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut watch_dog_ms = host::now_ms();
     // Ein Datenrahmen je Watchdog-Takt bekommt eine Quittung.
     let mut probe_due = true;
+    let mut leer_in_folge = 0u32;
     // **Das Empfangsfenster der Aggregation, aus `sys/config/wifi`.**
     // `ampdu: off` schaltet sie ab, `ampdu: 16` gibt ein anderes
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
@@ -3887,6 +3895,21 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 host::netdev_submit_rx(&ethbuf[..n]);
             }
         });
+
+        // **Die Form der Schleife, ohne einen einzigen zusaetzlichen
+        // Wirtsaufruf gemessen.** Wieviele Rahmen ein Blick bringt sagt,
+        // auf welcher Seite der Deckel liegt: knapp ueber eins heisst,
+        // wir sehen schneller nach als etwas kommt (die Luft ist die
+        // Grenze); volle Stapel heissen, wir kommen nicht nach.
+        if got > 0 {
+            ls.rx_polls += 1;
+            ls.rx_frames += got;
+            if got >= 64 {
+                ls.rx_full += 1;
+            }
+        } else {
+            ls.rx_empty += 1;
+        }
 
         // Was der Ringdurchlauf dem Watchdog zugetragen hat, eintragen.
         acc.merge(&mut d.dm, &mut link.si);
@@ -4178,14 +4201,46 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
+        // ── Wann wir die Hand vom Ring nehmen ────────────────────
+        //
+        // **Hier stand `if got == 0 { sleep_ms(1) }`, und das war der
+        // Durchsatzdeckel.** Zwischen zwei Buendeln ist der Ring einen
+        // Moment leer — beim ersten leeren Blick eine ganze Millisekunde
+        // zu schlafen heisst, hoechstens tausend Mal je Sekunde
+        // nachzusehen. Gemessen: 1375 Rahmen/s bei 1,37 Rahmen je Blick,
+        // also genau `1000 x Buendelgroesse`. Die Aggregation aus 0.29.0
+        // machte die Buendel groesser und brachte deshalb nur +26 %
+        // statt eines Vielfachen.
+        //
+        // Jetzt die Form, die Linux NAPI nennt: **ein Budget leerer
+        // Blicke, dann erst schlafen** — und liegend bleiben, bis wieder
+        // etwas kommt. Unter Last faellt der Zaehler bei jedem Buendel
+        // auf null und wir schlafen nie; im Leerlauf ist das Budget nach
+        // einem knappen halben Millisekunde aufgebraucht und wir
+        // schlafen wie vorher.
         if got == 0 {
-            host::sleep_ms(1);
+            if leer_in_folge < RX_SPIN_BUDGET {
+                leer_in_folge += 1;
+            } else {
+                host::sleep_ms(1);
+            }
+        } else {
+            leer_in_folge = 0;
         }
     }
 
     PumpEnd::Frist
 }
 
+
+/// Wieviele leere Blicke auf den Ring, bevor wir uns schlafen legen.
+///
+/// Eine Schleifenrunde kostet ein halbes Dutzend Wirtsaufrufe, also
+/// grob fuenf bis zehn Mikrosekunden. 64 leere Runden sind damit knapp
+/// eine halbe Millisekunde Wachbleiben — unter Last kommt der naechste
+/// Rahmen lange vorher, im Leerlauf ist es ein einmaliger Preis je
+/// Beacon.
+const RX_SPIN_BUDGET: u32 = 64;
 
 /// Wie lange gewartet wird, wenn ein Anlauf scheitert. Ein AP, der
 /// gerade neu startet, braucht Sekunden; oefter zu fragen hilft nicht
@@ -4576,6 +4631,23 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.keys_set, &mut b, &mut n);
     put("  rx-wachhund ", &mut b, &mut n);
     num(ls.rx_wd, &mut b, &mut n);
+    put("\nrx-schleife ", &mut b, &mut n);
+    num(ls.rx_polls, &mut b, &mut n);
+    put(" blicke mit beute, ", &mut b, &mut n);
+    num(ls.rx_empty, &mut b, &mut n);
+    put(" leer, ", &mut b, &mut n);
+    // Rahmen je Blick mit einer Nachkommastelle, in ganzen Zahlen.
+    let zehntel = if ls.rx_polls > 0 {
+        ls.rx_frames.saturating_mul(10) / ls.rx_polls
+    } else {
+        0
+    };
+    num(zehntel / 10, &mut b, &mut n);
+    put(",", &mut b, &mut n);
+    num(zehntel % 10, &mut b, &mut n);
+    put(" rahmen/blick, ", &mut b, &mut n);
+    num(ls.rx_full, &mut b, &mut n);
+    put(" volle stapel", &mut b, &mut n);
     // **Die Zeile, die sagt, ob der AP uns HOERT.** Bis 0.26.0 stand
     // hier nichts dergleichen: „raus 360" hiess nur, dass wir 360 Rahmen
     // in einen Ring gelegt haben.
