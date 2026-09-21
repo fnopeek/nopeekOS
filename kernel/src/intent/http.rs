@@ -2485,7 +2485,15 @@ fn bench_put(host: &str, path: &str, mb: usize) {
 /// POST `total` zero-bytes to <host><path>; returns the server's response body
 /// (which is expected to report the server-measured throughput).
 fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'static str> {
-    let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host)).ok_or("DNS/IP failed")?;
+    // **Der Port stand hier hartcodiert auf 80**, und `parse_ip` bekam
+    // die ganze Zeichenkette samt `:8080` — also scheiterte schon die
+    // Aufloesung. Jeder andere HTTP-Weg dieser Datei geht seit je ueber
+    // `split_host_port`; der PUT-Weg als einziger nicht, und deshalb
+    // war `netbench put <host>:<port>` nie benutzbar. Der `Host:`-Kopf
+    // traegt weiterhin `host:port`, wie RFC 9110 es verlangt.
+    let (bare, port) = split_host_port(host);
+    let port = port.unwrap_or(80);
+    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare)).ok_or("DNS/IP failed")?;
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
     // Name the failure. ConnectionRefused means the peer answered with a RST —
@@ -2493,9 +2501,9 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     // answered at all — go look at ARP, routing, the air. Collapsing both into
     // "TCP connect failed" sent us hunting the radio while a Python process on
     // the other end had simply exited.
-    let handle = crate::net::tcp::connect(ip, 80).map_err(|e| {
-        kprintln!("[netbench] connect to {}.{}.{}.{}:80 failed: {}",
-                  ip[0], ip[1], ip[2], ip[3], e);
+    let handle = crate::net::tcp::connect(ip, port).map_err(|e| {
+        kprintln!("[netbench] connect to {}.{}.{}.{}:{} failed: {}",
+                  ip[0], ip[1], ip[2], ip[3], port, e);
         "TCP connect failed"
     })?;
     crate::interrupts::set_worker_poll_hz(10_000);
