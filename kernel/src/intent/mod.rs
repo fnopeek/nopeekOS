@@ -2013,6 +2013,36 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         // wir haben sie nicht abgeholt; steht er null und `rx_pkts` ist
         // klein, kam ueber die Leitung nichts. Das ist die Gabelung, an
         // der jede Vermutung ueber einen langsamen Dongle anfaengt.
+        // `net window <KB>` / `net window auto` — der Fenster-Sweep.
+        //
+        // Bei gesaettigter Strecke ist `RTT = Fenster / Rate`. Eine einzelne
+        // Messung kann deshalb NICHT sagen, ob die Luft oder wir der Deckel
+        // sind -- beide Zahlen bewegen sich gemeinsam. Die FORM ueber
+        // mehrere Fenster sagt es: waechst der Durchsatz mit, waren wir es;
+        // bleibt er stehen und nur die RTT steigt, ist die Luft am Ende.
+        "window" => {
+            let a = args.trim();
+            if a.is_empty() {
+                let f = crate::net::tcp::rcv_window_force();
+                let (w, srtt, cap) = crate::net::tcp::window_diag();
+                if f > 0 {
+                    kprintln!("[npk] fenster: fest {} KB", f / 1024);
+                } else {
+                    kprintln!("[npk] fenster: automatisch (Kapazitaet x RTT)");
+                }
+                kprintln!("[npk]   zuletzt angeboten {} KB, Deckel {} KB, srtt {} Takte (={} ms)",
+                          w / 1024, cap / 1024, srtt, srtt * 10);
+            } else if a == "auto" {
+                crate::net::tcp::set_rcv_window_force(0);
+                kprintln!("[npk] fenster: automatisch");
+            } else if let Ok(kb) = a.parse::<u32>() {
+                let b = kb.saturating_mul(1024);
+                crate::net::tcp::set_rcv_window_force(b);
+                kprintln!("[npk] fenster: fest {} KB — gilt ab der naechsten Quittung", kb);
+            } else {
+                kprintln!("usage: window <KB> | window auto");
+            }
+        }
         "nic" => {
             if require_cap(vault, &session, Rights::AUDIT, "nic") {
                 if crate::xhci::nic_attached() {
