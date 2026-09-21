@@ -1875,6 +1875,59 @@ wo sie richtig war: dort lief kein Verkehr, und ohne sie haette der
 Kern gebrannt. Sie ist mit der Verbindung mitgewandert und hat dort eine
 andere Bedeutung bekommen.
 
+### ❌ Der `sleep_ms(1)` war NICHT der Deckel — die Messung hat mich widerlegt
+
+Mit 0.30.0, derselbe Lauf:
+
+```
+[netbench] GET: 100 MB in 55647 ms = 15 Mbit/s      (mit 0.29.0: 52953 ms)
+rx-schleife 70867 blicke mit beute, 2936961 leer, 1,2 rahmen/blick, 0 volle stapel
+```
+
+**Wir sehen jetzt 54 000 Mal je Sekunde nach statt 1 000 Mal — und die
+Rahmenrate blieb gleich** (1312/s statt 1375/s, eher etwas langsamer).
+`0 volle stapel` bei `1,2 rahmen/blick`: der Treiber ist nicht die
+langsame Seite. Die Rahmen kommen schlicht nicht schneller.
+
+**Die Gleichung stimmte und die Ursache war trotzdem falsch.**
+1000 × 1,37 = 1370 gegen gemessene 1375 — das sah aus wie ein Beweis und
+war eine Koinzidenz zweier Groessen, die beide bei ~1300 liegen. Genau
+dafuer war das Instrument da, und es hat in einem Lauf entschieden,
+wofuer sonst eine Runde Vermutungen draufgegangen waere.
+
+**Die Aenderung bleibt trotzdem drin**, aber als das, was sie ist: die
+richtige Form (NAPI), nicht ein Fix. Im Leerlauf kostet sie nichts, und
+sie nimmt eine Latenz von bis zu einer Millisekunde aus jedem
+Empfangsweg — nur den Durchsatz hebt sie nicht.
+
+**Was damit ausgeschlossen ist:**
+
+* die Empfangsschleife (`0 volle stapel`),
+* der IP-Stapel (`rx ring dropped 0` — Kern 0 kommt nach),
+* das TCP-Empfangsfenster (Window Scaling mit 8 MiB Puffer,
+  `OUR_WSCALE = 8`, ausgelegt auf ~700 Mbit),
+* unser HT-Element (`IEEE80211_HT_MAX_AMPDU_64K`, Dichte 2 — wir sagen
+  64 KB an, der AP duerfte also).
+
+**Was bleibt, ist die Strecke selbst**, und dafuer gibt es eine Messung,
+die nichts kostet: `tools/netbench_server.py` liest bei jeder
+Uebertragung `TCP_INFO` der Verbindung und schreibt cwnd, das von UNS
+angesagte Fenster, RTT, Wiederholungen und DSACKs mit. Bis eben lief er
+mit gepufferter Ausgabe und hat nichts protokolliert — das war mein
+Fehler beim Starten, nicht am Werkzeug.
+
+    setsid python3 -u tools/netbench_server.py 8080 >/tmp/netbench.log 2>&1 &
+
+**Der naechste Lauf braucht KEINE neue Version** — dieselbe 0.30.0
+gegen den jetzt protokollierenden Server. Die eine Zeile sagt dann:
+
+* `retrans` hoch → Verluste in der Luft, und die Ratenwahl ist dran.
+* `snd_wnd` klein → wir sagen ein kleines Fenster an, obwohl der Puffer
+  gross ist (dann stimmt etwas an `recv_window`).
+* `rtt` gross bei kleinem `cwnd` → die Strecke ist langsam, nicht eng;
+  dann ist die Latenz der Posten, und `ping` sagte 10 ms, was fuer WLAN
+  im selben Raum viel ist.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
