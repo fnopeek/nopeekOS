@@ -1054,8 +1054,18 @@ pub fn dbi_read8(h: i32, addr: u16) -> Option<u8> {
 /// beidem.
 ///
 /// Ab Werk ist es aus. Wir lassen es aus und sagen es.
-pub fn link_cfg(h: i32) {
+pub fn link_cfg(h: i32, rfe_option: u8) {
     dbi_write8(h, RTK_PCIE_CLKDLY_CTRL, 0);
+
+    // pci.c:1516-1517, der Schluss von `rtw_pci_phy_cfg`. **Er ist der
+    // Grund, warum die Funktion NACH der efuse steht** — vorher gibt es
+    // `rfe_option` nicht. Bis 0.40.0 fehlte dieser Zweig bei uns ganz:
+    // eine halb portierte Funktion, und die Haelfte, die fehlte, war die
+    // mit der Bedingung.
+    if rfe_option == 5 {
+        host::w32_mask(h, crate::regs::REG_ANAPARSW_MAC_0,
+                       crate::regs::BIT_CF_L_V2, 1);
+    }
 }
 
 /// Der Zustand von Realteks eigenem Link-Schalter, zum Nachsehen.

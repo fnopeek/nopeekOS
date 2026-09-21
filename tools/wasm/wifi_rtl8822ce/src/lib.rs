@@ -340,37 +340,6 @@ pub extern "C" fn _start() {
     host::print_dec(h as u32);
     host::print(", 64 KiB)\n");
 
-    // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────────────
-    // Muss NACH der BAR-Abbildung stehen: der DBI-Weg laeuft ueber MMIO.
-    pci::link_cfg(h);
-    let aspm_vorher = match read_aspm_pref() {
-        Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
-        None => pci::link_state().map(|l| (l.aspm, None)),
-    };
-    host::print("[rtl8822ce] PCIe-Link: ASPM vorgefunden ");
-    match aspm_vorher {
-        Some((v, gesetzt)) => {
-            host::print(match v {
-                0 => "aus",
-                1 => "L0s",
-                2 => "L1",
-                _ => "L0s+L1",
-            });
-            match gesetzt {
-                Some(true) => host::print(", von uns EINgeschaltet"),
-                Some(false) => host::print(", von uns AUSgeschaltet"),
-                None => host::print(", unangetastet (aspm: wie-gefunden)"),
-            }
-        }
-        None => host::print("keine PCIe-Capability gefunden"),
-    }
-    if let Some((l1, clk)) = pci::link_cfg_state(h) {
-        host::print(" · Realtek L1_SW ");
-        host::print(if l1 { "an" } else { "aus" });
-        host::print(", CLKREQ_SW ");
-        host::print(if clk { "an" } else { "aus" });
-    }
-    host::print("\n");
 
     // ── Kennung lesen (rtw_chip_parameter_setup) ─────────────────
     let hal = chip_parameter_setup(h);
@@ -619,6 +588,49 @@ pub extern "C" fn _start() {
                 && e.addr != [0xffu8; 6]
                 && e.addr[0] & 0x01 == 0;
             stage2c = gate("MAC-Adresse aus der efuse ist gueltig", valid);
+
+            // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────
+            //
+            // **Die Stelle ist Semantik, nicht Geschmack.** Linux ruft
+            // `rtw_pci_phy_cfg` in pci.c:1810 — NACH
+            // `rtw_chip_info_setup` (1800), und das ist zwingend: die
+            // Funktion endet mit einem Schreibzugriff, der
+            // `efuse->rfe_option` braucht, und sie liest
+            // `hal.cut_version`. Beides gibt es vorher nicht.
+            //
+            // In 0.34.0 stand der Ruf direkt hinter der BAR-Abbildung —
+            // also vor der Chip-Erkennung, vor der efuse und vor dem
+            // Einschalten. Ein DBI-Schreibzugriff auf ein Funkteil, das
+            // noch nicht laeuft, und die Verbindung riss seither ab.
+        pci::link_cfg(h, e.rfe_option);
+        let aspm_vorher = match read_aspm_pref() {
+            Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
+            None => pci::link_state().map(|l| (l.aspm, None)),
+        };
+        host::print("[rtl8822ce] PCIe-Link: ASPM vorgefunden ");
+        match aspm_vorher {
+            Some((v, gesetzt)) => {
+                host::print(match v {
+                    0 => "aus",
+                    1 => "L0s",
+                    2 => "L1",
+                    _ => "L0s+L1",
+                });
+                match gesetzt {
+                    Some(true) => host::print(", von uns EINgeschaltet"),
+                    Some(false) => host::print(", von uns AUSgeschaltet"),
+                    None => host::print(", unangetastet (aspm: wie-gefunden)"),
+                }
+            }
+            None => host::print("keine PCIe-Capability gefunden"),
+        }
+        if let Some((l1, clk)) = pci::link_cfg_state(h) {
+            host::print(" · Realtek L1_SW ");
+            host::print(if l1 { "an" } else { "aus" });
+            host::print(", CLKREQ_SW ");
+            host::print(if clk { "an" } else { "aus" });
+        }
+        host::print("\n");
             efuse = Some(e);
         } else {
             let _ = gate("MAC-Adresse aus der efuse ist gueltig", false);
