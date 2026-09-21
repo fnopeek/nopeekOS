@@ -2010,6 +2010,31 @@ struct NicRings {
 // many empty polls / shallow ring) or above it (TCP/ACK/poll cadence).
 static NIC_RX_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static NIC_RX_DELIV: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // calls returning data
+// **Warum kommen nur ~23 Vollzuege je Sekunde?** Der Ring ist voll (127
+// armiert), der Chip laeuft nicht ueber (rx_missed = 0), und trotzdem
+// meldet der Controller kaum Transfers fertig. Diese vier Zaehler trennen
+// die Faelle, die bisher alle gleich aussahen:
+//
+//   CC_SUCCESS      der Puffer wurde GANZ gefuellt (16 KiB)
+//   CC_SHORT_PACKET der Normalfall — der Chip hatte weniger und schloss ab
+//   sonstige cc     ein Fehler, den wir bisher stumm neu armiert haben
+//   residual        wieviel vom Puffer LEER blieb, aufsummiert
+//
+// Ein Uebergewicht von SHORT mit riesigem Rest heisst: der Chip schickt
+// winzige Haeppchen und wir zahlen je Haeppchen einen ganzen Transfer.
+static NIC_CC_OK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_CC_SHORT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_CC_OTHER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_CC_LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static NIC_RESIDUAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// (ok, short, other, letzter_fremder_cc, residual_summe) — jeweils genullt.
+pub fn nic_take_cc() -> (u64, u64, u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (NIC_CC_OK.swap(0, Relaxed), NIC_CC_SHORT.swap(0, Relaxed),
+     NIC_CC_OTHER.swap(0, Relaxed), NIC_CC_LAST.load(Relaxed),
+     NIC_RESIDUAL.swap(0, Relaxed))
+}
 static NIC_RX_EMPTY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // calls returning 0
 static NIC_RX_ARMED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0); // sum of in-flight depth at delivery
 static NIC_TX_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -2872,6 +2897,17 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
         if on_in {
             // Die TRB-Adresse zurueck auf ihren Puffer rechnen.
             let ring_slot = ((a.wrapping_sub(ir)) / 16) as usize;
+            // Den Vollzug einsortieren, BEVOR er verarbeitet wird — auch
+            // der Fehlerfall, der sonst stumm neu armiert wird.
+            match cc {
+                CC_SUCCESS => { NIC_CC_OK.fetch_add(1, Ordering::Relaxed); }
+                CC_SHORT_PACKET => { NIC_CC_SHORT.fetch_add(1, Ordering::Relaxed); }
+                other => {
+                    NIC_CC_OTHER.fetch_add(1, Ordering::Relaxed);
+                    NIC_CC_LAST.store(other as u64, Ordering::Relaxed);
+                }
+            }
+            NIC_RESIDUAL.fetch_add(e.residual as u64, Ordering::Relaxed);
             let mut rearm: Option<usize> = None;
             if ring_slot < NIC_RX_BUFS {
                 if let Some(n) = state.nic.as_mut() {

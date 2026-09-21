@@ -130,6 +130,10 @@ pub fn poll() {
 /// Core 0's `poll()` runs the TCP timers. Calling the full `poll()` in the spin
 /// burned the RX core on ~1 M CONNECTIONS-lock acquisitions + ~128 M slot-checks
 /// per second between chunks, starving the actual packet processing.
+/// Der Takt, auf dem `poll_rx_only` zuletzt den TCP-Zeitgeber gefahren hat.
+static LAST_TCP_TICK: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
 pub fn poll_rx_only() {
     use core::sync::atomic::Ordering::Relaxed;
     let rd = crate::interrupts::rdtsc;
@@ -156,6 +160,39 @@ pub fn poll_rx_only() {
         POLLING.store(false, Ordering::Release);
     } else {
         NIC_SKIPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    // **Der TCP-Zeitgeber, gedrosselt auf den 100-Hz-Takt.**
+    //
+    // Hier stand, `tick_connections` sei ueberfluessig, weil „Core 0's
+    // poll() runs the TCP timers". Das stimmt am PROMPT und nur dort:
+    // `net::poll()` wird aus `read_line_with_tab` gerufen. Waehrend ein
+    // Befehl laeuft — also genau waehrend eines Downloads — ruft es
+    // niemand. In dieser Zeit gab es KEINEN Zeitgeber:
+    //
+    //   * keine verzoegerte Quittung. Quittiert wurde nur ueber
+    //     ACK_COALESCE (jedes achte Segment in Reihenfolge).
+    //   * KEINE WIEDERHOLUNG. Ein verlorenes Segment kam nie nach.
+    //   * keine Fensteraktualisierung ausser ueber recv().
+    //
+    // Bei hohem Durchsatz faellt das nicht auf: acht Segmente treffen in
+    // Mikrosekunden ein, der Zaehler feuert, der Zeitgeber wird nie
+    // gebraucht. Die Luecke ist latent seit Juni und schlaegt zu, sobald
+    // IRGENDETWAS Verluste einfuehrt — dann gibt es keinen Weg zurueck.
+    //
+    // Gemessen am Geraet (2026-09-21, USB-Dongle): 5264 Pakete in 63,6 s
+    // = 83/s, dazu 871 gesendete Rahmen = 13,7/s. 83/8 ist genau die
+    // Quittungsrate — der Achter-Zaehler allein, ohne jeden Zeitgeber.
+    //
+    // Der Deckel ist der Grund, warum es hier ueberhaupt stehen darf:
+    // `tick_connections` nimmt das Verbindungsschloss und geht 128
+    // Plaetze durch. Bei einer Million Runden je Sekunde waere das der
+    // Ruin — einmal je Takt ist es nichts.
+    {
+        let now = crate::interrupts::ticks();
+        let prev = LAST_TCP_TICK.swap(now, Relaxed);
+        if prev != now {
+            tcp::tick_connections();
+        }
     }
     // Same reason as in poll(): this spin owns a worker core, and a driver fiber
     // parked on it would never refill the ring this loop is draining.
