@@ -351,6 +351,28 @@ CHAN = [
 ]
 
 
+def check_ba_needs_qos(src):
+    """Der ADDBA-Antrag DARF nur laufen, wenn wir QoS-Rahmen senden.
+
+    **Eine Strukturpruefung, und sie hat einen Anlass.** wifi_rtl8822ce
+    0.36.0 handelte einen Block-Ack fuer TID 0 aus, waehrend
+    `build_data_frame` Rahmen ohne QoS-Feld baute — also ohne TID. Ein
+    Block-Ack gilt je TID (802.11 §11.5.1.1); der AP warf uns hinaus.
+
+    Kein Wertetest kann das sehen: beide Funktionen sind fuer sich
+    richtig. Falsch ist ihre KOMBINATION, und die steht als Bedingung im
+    Quelltext. Also wird der Quelltext geprueft.
+    """
+    m = re.search(r"if\s+link\.tx_qos\s*\n\s*&&\s*link\.tx_ampdu\.is_none\(\)",
+                  src)
+    if m:
+        print("  OK   der ADDBA-Antrag haengt an link.tx_qos")
+        return 0
+    print("  DIFF der ADDBA-Antrag prueft link.tx_qos NICHT — genau das "
+          "war die Regression von 0.36.0")
+    return 1
+
+
 def main():
     src = (HERE / "src" / "lib.rs").read_text()
     regs = (HERE / "src" / "regs.rs").read_text()
@@ -360,6 +382,10 @@ def main():
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
+    ccmp = grab(src, r"\n(fn ccmp_hdr.*?\n\})", "ccmp_hdr")
+    bdf = grab(src, r"\n(#\[allow\(clippy::too_many_arguments\)\]\nfn build_data_frame.*?\n\})",
+               "build_data_frame")
+    llco = grab(src, r"\n(fn llc_offset.*?\n\})", "llc_offset")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
@@ -409,7 +435,18 @@ def main():
             sys.exit("%s ist %s, main.h sagt %d" % (name, m.group(1), want))
         sc[name] = int(m.group(1))
 
-    consts = """const RTW_SC_DONT_CARE: u8 = 0;
+    # LLC/SNAP kommt aus regs.rs, nicht aus einer Abschrift hier.
+    m = re.search(r"pub const LLC_SNAP_HDR: \[u8; 6\] = \[([^\]]+)\];", regs)
+    if not m:
+        sys.exit("LLC_SNAP_HDR nicht in src/regs.rs")
+    llc_literal = m.group(1).strip()
+
+    consts = """const LLC_SNAP_HDR: [u8; 6] = [%s];
+mod host {
+    pub fn print(_: &str) {}
+    pub fn print_dec(_: u32) {}
+}
+const RTW_SC_DONT_CARE: u8 = 0;""" % llc_literal + """
 const RTW_SC_20_UPPER: u8 = 1;
 const RTW_SC_20_LOWER: u8 = 2;
 const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
@@ -430,7 +467,15 @@ const ADDBA_PARAM_TID_MASK: u16 = 0x003C;
 const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0;
 const WLAN_STATUS_SUCCESS: u16 = 0;
 """
-    for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
+    # Auch diese drei kommen aus regs.rs statt aus einer Abschrift --
+    # 802.11 §9.2.4.1: Typ 10 in Bit 3:2 (also 0x08), Subtyp QoS Bit 7
+    # des Subtypfeldes (0x80 im Byte, hier 0x08 relativ), Protected
+    # Bit 6 des zweiten Bytes.
+    for name, want in (("DOT11_FC_TYPE_DATA", 0x08),
+                       ("DOT11_FC_PROTECTED", 0x40),
+                       ("DOT11_FC0_QOS", 0x80),
+                       ("DOT11_FC0_NODATA", 0x40),
+                       ("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
         if not m:
             sys.exit("%s nicht in src/regs.rs" % name)
@@ -487,6 +532,7 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + chanp + "\n\n" + aspmp \
+        + "\n\n" + ccmp + "\n\n" + bdf + "\n\n" + llco \
         + "\n\n" + ampdu_f + "\n\n" + ampdu_d \
         + "\n\n" + addba_rs + "\n\n" + addba_rq + "\n\n" + addba_pr \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
@@ -721,9 +767,74 @@ fn main() {
     println!("  {} ein ADDBA Request ist keine Response",
              if w_ok { "OK  " } else { "DIFF" });
 
+    // ── Der Datenrahmen, Byte fuer Byte ──────────────────────────────
+    //
+    // **Der Test, der 0.36.0 gefangen haette.** Dort wurde ein Block-Ack
+    // fuer TID 0 ausgehandelt, waehrend `build_data_frame` Rahmen OHNE
+    // QoS-Feld baute — also ohne TID. Ein AP wirft eine Station dafuer
+    // hinaus. Geprueft wird deshalb nicht nur „ist das Feld da", sondern
+    // die STELLE, an der alles dahinter landet.
+    let eth: [u8; 20] = [
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // DA
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // SA
+        0x08, 0x00,                         // ethertyp IPv4
+        1, 2, 3, 4, 5, 6,                   // Nutzlast
+    ];
+    let mut df = 0;
+    for (name, qos, enc, want_fc0, want_llc, want_total) in [
+        ("klar, ohne QoS: LLC bei 24", false, false, 0x08u8, 24usize, 38usize),
+        ("klar, mit QoS: LLC bei 26", true, false, 0x88, 26, 40),
+        ("CCMP, ohne QoS: LLC bei 32", false, true, 0x08, 32, 46),
+        ("CCMP, mit QoS: LLC bei 34", true, true, 0x88, 34, 48),
+    ] {
+        let mut out = [0u8; 2048];
+        let got = build_data_frame(&mut out, &eth, &BSSID, &OUR_MAC, 0x123,
+                                   enc, 7, qos);
+        let mut ok = got == Some(want_total);
+        if out[0] != want_fc0 { ok = false; }
+        if out[1] != (0x01 | if enc { 0x40 } else { 0 }) { ok = false; }
+        // Die Folgenummer steht in Bit 15:4.
+        if u16::from_le_bytes([out[22], out[23]]) >> 4 != 0x123 { ok = false; }
+        // QoS-Control: TID 0, Normal Ack, kein A-MSDU.
+        if qos && (out[24] != 0 || out[25] != 0) { ok = false; }
+        if out[want_llc..want_llc + 6] != LLC_SNAP_HDR { ok = false; }
+        if out[want_llc + 6..want_llc + 8] != eth[12..14] { ok = false; }
+        if out[want_llc + 8..want_llc + 14] != eth[14..20] { ok = false; }
+        // Adressen: ToDS, also a1 = BSSID, a2 = wir, a3 = Ziel.
+        if out[4..10] != BSSID || out[10..16] != OUR_MAC
+            || out[16..22] != eth[0..6] { ok = false; }
+        if !ok { df += 1; }
+        println!("  {} Datenrahmen {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok {
+            println!("       fc {:#04x}/{:#04x}, laenge {:?}, LLC erwartet bei {}",
+                     out[0], out[1], got, want_llc);
+        }
+
+        // **Die Gegenprobe: findet der EMPFANGSweg, was der Sendeweg
+        // gelegt hat?** Beide rechnen die Kopflaenge selbst, aus
+        // denselben zwei Bits. Wenn sie auseinanderlaufen, verwirft der
+        // eine, was der andere baut — und genau das sieht aus wie eine
+        // tote Leitung.
+        let mut miss = 0u32;
+        let rt = llc_offset(&out[..want_total + 12], &mut miss);
+        let rt_ok = rt.map(|(o, _)| o) == Some(want_llc) && miss == 0;
+        if !rt_ok { df += 1; }
+        println!("  {} ... und llc_offset findet es auch bei {} ({:?})",
+                 if rt_ok { "OK  " } else { "DIFF" }, want_llc,
+                 rt.map(|(o, _)| o));
+    }
+    // Ein zu kurzer Ethernet-Rahmen ist kein Rahmen.
+    let mut out = [0u8; 2048];
+    let short_df = build_data_frame(&mut out, &eth[..10], &BSSID, &OUR_MAC,
+                                    0, false, 0, false).is_none();
+    if !short_df { df += 1; }
+    println!("  {} Datenrahmen aus 10 Byte Ethernet -> None",
+             if short_df { "OK  " } else { "DIFF" });
+    bad += df;
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len()
-                + ampdus.len() + 5;
+                + ampdus.len() + 5 + 9;
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
@@ -731,7 +842,8 @@ fn main() {
        ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
        ampdu_cases)
 
-    loud_bad = check_loud_balance(src) + check_rsn_agreement()
+    loud_bad = (check_loud_balance(src) + check_rsn_agreement()
+                + check_ba_needs_qos(src))
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="framecheck-"))
     try:
