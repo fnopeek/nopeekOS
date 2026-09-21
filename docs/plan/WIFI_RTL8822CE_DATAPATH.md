@@ -13,12 +13,15 @@ wichtig ist, entscheidet ein Mensch; ob es dort liegt, entscheidet die Quelle.
 
 ## Die Zahl
 
-    101 Funktionen auf dem Datenweg
-     33 portiert   (Doc-Kommentar ueber einer Rust-Funktion; `seqdiff.py`
+    101 Funktionen auf dem Datenweg   (Stand 0.34.0)
+     35 portiert   (Doc-Kommentar ueber einer Rust-Funktion; `seqdiff.py`
                     rechnet diese Zugriff fuer Zugriff nach)
-     25 benannt    (der Name steht in unserem Baum — ganz oder teilweise)
-     23 FEHLEN     (kommt in unserem ganzen Baum nicht vor)
+     28 benannt    (der Name steht in unserem Baum — ganz oder teilweise)
+     18 FEHLEN     (kommt in unserem ganzen Baum nicht vor)
      20 namentlich ausgenommen, mit Grund, in `datapath.py`
+
+Erster Zensus (0.32.0) waren es 23 Fehlende; 0.33/0.34 haben die
+PCIe-Gruppe von 8 auf 3 gebracht.
 
 Die 23 fallen in **vier Gruppen**, und nur zwei davon koennen Durchsatz
 kosten.
@@ -130,10 +133,27 @@ Das ist ein Deckel, der in BEIDE Richtungen wirkt und der nicht von der Luft
 abhaengt — er wuerde erklaeren, warum jede Aenderung an Fenster, Rate und
 Ringen die Rahmenrate bei ~1430/s stehen laesst.
 
-**Und es ist messbar, nicht zu glauben:** der Schalter ist
-`PCI_EXP_LNKCTL_ASPM_L1` im Link-Control-Register der Karte, und
-`npk_pci_read_config` gibt es seit je. Erster Schritt ist also eine ZEILE im
-Bericht, kein Umbau.
+**GEMESSEN am Geraet, 2026-09-21:**
+
+    pcie gen1 x1  aspm L1 AN (austritt 64 us)  clkreq an
+
+L1 ist an, und die Karte sagt selbst, dass sie **64 us** braucht, um wieder
+herauszukommen (LNKCAP Bit 17:15, der hoechste Wert unterhalb von „mehr
+als"). Damit ist diese Gruppe kein Verdacht mehr.
+
+**Aber nicht so, wie ich erwartet hatte.** Realtek hat ZWEI Module
+(pci.c:1298-1316): eines folgt dem Konfigurationsraum, das andere MACHT
+ASPM — und das ist ab Werk AUS. rtw88 schaltet es ein
+(`rtw_pci_clkreq_set(true)`), um es danach in jedem Abholtakt wieder
+herauszunehmen. Wir schalten es nie ein, also ist Realteks Haelfte bei uns
+bereits im schnellen Zustand. Die gemessene `L1 AN`-Zeile kommt aus dem
+STANDARD-PCIe-Register, das die Firmware des Rechners gesetzt hat.
+
+**0.34.0 schaltet deshalb das Standard-ASPM der Karte ab** (dasselbe, was
+Linux' `pci_disable_link_state` tut), mit `aspm:` in `sys/config/wifi` als
+Schalter — `an` faehrt die Gegenprobe, `wie-gefunden` laesst es in Ruhe.
+Vorgabe ist AUS, weil wir gar nicht schlafen; der Preis ist Leerlaufstrom
+und haengt mit `project_idle_power_21w` zusammen.
 
 ## Gruppe 3 — EDCA vom AP. 3 Funktionen, `mac80211.c`
 

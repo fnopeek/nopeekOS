@@ -515,6 +515,22 @@ pub fn interface_cfg(h: i32, cut_version: u8) {
 /// pci.h:62-73 — der Schreibzeiger der H2C-Queue.
 pub const RTK_PCI_TXBD_IDX_H2CQ: u32 = 0x132C; // pci.h:66
 
+// Der DBI-Weg: die PCIe-Konfigurationsregister des Chips, erreicht ueber
+// MMIO statt ueber den Konfigurationsraum des Busses. Realtek legt seine
+// eigenen Link-Schalter dorthin.
+pub const REG_DBI_WDATA_V1: u32 = 0x03E8; // pci.h:20
+pub const REG_DBI_RDATA_V1: u32 = 0x03EC; // pci.h:21
+pub const REG_DBI_FLAG_V1: u32 = 0x03F0; // pci.h:22
+pub const BIT_DBI_RFLAG: u32 = 1 << 17; // pci.h:23
+pub const BIT_DBI_WFLAG: u32 = 1 << 16; // pci.h:24
+pub const BITS_DBI_WREN: u32 = 0xF000; // pci.h:25 GENMASK(15,12)
+pub const BITS_DBI_ADDR_MASK: u32 = 0x0FFC; // pci.h:26 GENMASK(11,2)
+pub const RTW_PCI_WR_RETRY_CNT: u32 = 20; // pci.h:35
+pub const RTK_PCIE_LINK_CFG: u16 = 0x0719; // pci.h:37
+pub const BIT_CLKREQ_SW_EN: u8 = 1 << 4; // pci.h:38
+pub const BIT_L1_SW_EN: u8 = 1 << 3; // pci.h:39
+pub const RTK_PCIE_CLKDLY_CTRL: u16 = 0x0725; // pci.h:41
+
 /// Ein Platz je Ringeintrag fuer den H2C-Zwischenpuffer. Linux legt je
 /// Paket ein skb an; solange der Chip einen Deskriptor nicht abgeholt hat,
 /// darf sein Inhalt nicht ueberschrieben werden. Ein Platz je Index ist die
@@ -977,6 +993,108 @@ pub fn link_state() -> Option<LinkState> {
             });
         }
         ptr = next;
+        schritte += 1;
+    }
+    None
+}
+
+/// pci.c:1236-1258 `rtw_dbi_write8`.
+///
+/// **Die Adresse wandert in ZWEI Teile.** Die unteren zwei Bit waehlen das
+/// Byte im Datenwort (`REG_DBI_WDATA_V1 + remainder`), die Bits 11:2 die
+/// Wortadresse — und das Byte wird ein zweites Mal gebraucht, als
+/// Freigabemaske `BIT(remainder)` in den Bits 15:12. Wer nur die Wortadresse
+/// schreibt, schreibt nichts: ohne gesetztes WREN-Bit passiert nichts.
+pub fn dbi_write8(h: i32, addr: u16, data: u8) {
+    let remainder = (addr as u32) & !(BITS_DBI_WREN | BITS_DBI_ADDR_MASK);
+    let write_addr = ((addr as u32) & BITS_DBI_ADDR_MASK)
+        | ((1u32 << remainder) << 12);
+    host::w8(h, REG_DBI_WDATA_V1 + remainder, data);
+    host::w16(h, REG_DBI_FLAG_V1, write_addr as u16);
+    host::w8(h, REG_DBI_FLAG_V1 + 2, (BIT_DBI_WFLAG >> 16) as u8);
+
+    for _ in 0..RTW_PCI_WR_RETRY_CNT {
+        if host::r8(h, REG_DBI_FLAG_V1 + 2) == 0 {
+            return;
+        }
+        host::delay_us(10);
+    }
+    host::say("[rtl8822ce] DBI-Schreibzugriff kam nicht durch\n");
+}
+
+/// pci.c:1260-1282 `rtw_dbi_read8`.
+pub fn dbi_read8(h: i32, addr: u16) -> Option<u8> {
+    let read_addr = (addr as u32) & BITS_DBI_ADDR_MASK;
+    host::w16(h, REG_DBI_FLAG_V1, read_addr as u16);
+    host::w8(h, REG_DBI_FLAG_V1 + 2, (BIT_DBI_RFLAG >> 16) as u8);
+
+    for _ in 0..RTW_PCI_WR_RETRY_CNT {
+        if host::r8(h, REG_DBI_FLAG_V1 + 2) == 0 {
+            return Some(host::r8(h, REG_DBI_RDATA_V1 + ((addr as u32) & 3)));
+        }
+        host::delay_us(10);
+    }
+    None
+}
+
+/// pci.c:1298-1334 `rtw_pci_link_cfg`, der Zweig fuer 8822C — und EINE
+/// benannte Abweichung.
+///
+/// Linux tut hier zwei Dinge: `RTK_PCIE_CLKDLY_CTRL = 0` (der 8822C
+/// kalibriert seinen Referenztakt selbst und braucht keine Verzoegerung),
+/// und, wenn der Wirt CLKREQ fuehrt, `rtw_pci_clkreq_set(true)` — es
+/// SCHALTET Realteks eigenes Stromsparmodul EIN.
+///
+/// **Das tun wir nicht, und der Grund ist die Haelfte, die wir nicht
+/// haben.** rtw88 schaltet das Modul ein und nimmt es danach in JEDEM
+/// Abholtakt wieder heraus (`rtw_pci_link_ps`, pci.c:1373), weil es sonst
+/// unter Last in L1 faellt — der Kommentar dort sagt es woertlich. Wir
+/// haben keinen solchen Takt und keinen Schlaf ueberhaupt. Das Modul
+/// einzuschalten, ohne es zu verwalten, waere die schlechte Haelfte von
+/// beidem.
+///
+/// Ab Werk ist es aus. Wir lassen es aus und sagen es.
+pub fn link_cfg(h: i32) {
+    dbi_write8(h, RTK_PCIE_CLKDLY_CTRL, 0);
+}
+
+/// Der Zustand von Realteks eigenem Link-Schalter, zum Nachsehen.
+pub fn link_cfg_state(h: i32) -> Option<(bool, bool)> {
+    dbi_read8(h, RTK_PCIE_LINK_CFG)
+        .map(|v| (v & BIT_L1_SW_EN != 0, v & BIT_CLKREQ_SW_EN != 0))
+}
+
+/// Das STANDARD-ASPM der Karte im Konfigurationsraum ab- oder anschalten —
+/// dasselbe, was Linux' `pci_disable_link_state(PCIE_LINK_STATE_L1)` tut.
+///
+/// **Das ist nicht Realteks Schalter**, sondern das Bit, mit dem die Karte
+/// dem Bus gegenueber erklaert, dass sie L1 betreten darf. Es steht auf
+/// diesem Geraet AN, und die Karte sagt selbst, dass sie 64 us braucht, um
+/// wieder herauszukommen (LNKCAP Bit 17:15). Wer alle 700 us ein Paket
+/// bekommt, zahlt das womoeglich jedes Mal.
+///
+/// Gibt den vorherigen Wert der zwei Bits zurueck, damit der Bericht sagen
+/// kann, was er VORGEFUNDEN hat — nicht nur, was er eingestellt hat.
+pub fn aspm_host_set(enable: bool) -> Option<u8> {
+    let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
+    let mut schritte = 0;
+    while ptr >= 0x40 && ptr != 0xff && schritte < 48 {
+        let w = host::pci_read_config(ptr & 0xfc);
+        let shift = ((ptr & 0x3) * 8) as u32;
+        if ((w >> shift) & 0xff) as u8 == 0x10 {
+            let off = ptr + 0x10;
+            let cur = host::pci_read_config(off);
+            let vorher = (cur & 0x3) as u8;
+            // LNKCTL und LNKSTA teilen sich das Wort. LNKSTA ist rein
+            // lesend, also darf das ganze Wort zurueckgeschrieben werden —
+            // aber NUR die zwei ASPM-Bits werden veraendert.
+            let neu = if enable { cur | 0x2 } else { cur & !0x3 };
+            if neu != cur {
+                host::pci_write_config(off, neu);
+            }
+            return Some(vorher);
+        }
+        ptr = ((w >> (shift + 8)) & 0xff) as u8;
         schritte += 1;
     }
     None
