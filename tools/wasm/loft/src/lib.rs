@@ -469,6 +469,29 @@ impl Loft {
     /// Resolve the handler app for a file name via its extension:
     /// `sys/config/associations` overrides first, then built-in defaults.
     /// Returns None for unknown types (loft does nothing on open).
+    /// Wie `associated_app`, aber mit dem VERZEICHNIS daneben.
+    ///
+    /// **Die Konfigurationen des Systems haben keine Endung**, und ohne
+    /// sie gab die Zuordnung `None` zurueck — ein Doppelklick auf
+    /// `sys/config/wifi` tat schlicht nichts. Das war nicht nur
+    /// unbequem: der Weg ueber `npk_open` ist der EINZIGE, der dem
+    /// Editor ein Schreibrecht fuer genau diese Datei mitgibt (der
+    /// Kernel vergibt es, weil der Benutzer auf die Datei gezeigt hat).
+    /// Ohne ihn konnte niemand eine mehrzeilige Konfiguration schreiben:
+    /// `store` ersetzt das Objekt mit EINER Zeile, und `spell` aus der
+    /// Shell bekommt weder WRITE noch eine Erlaubnis fuer den Pfad.
+    ///
+    /// Also: was unter `sys/config/` liegt, ist Text.
+    fn associated_app_in(&self, dir: &str, name: &str) -> Option<String> {
+        if dir == "sys/config" || dir.starts_with("sys/config/") {
+            if let Some((_, app)) = self.assoc.iter().find(|(k, _)| *k == "conf") {
+                return Some(app.clone());
+            }
+            return Some("spell".to_string());
+        }
+        self.associated_app(name)
+    }
+
     fn associated_app(&self, name: &str) -> Option<String> {
         let ext = match name.rsplit_once('.') {
             Some((_, e)) if !e.is_empty() => e.to_ascii_lowercase(),
@@ -674,7 +697,7 @@ impl Loft {
                 alloc::format!("{}/{}", self.current, name)
             };
             self.navigate(next);
-        } else if let Some(app) = self.associated_app(&name) {
+        } else if let Some(app) = self.associated_app_in(&self.current, &name) {
             // Open the file with its associated app (file association).
             let full = if self.current.is_empty() {
                 name
