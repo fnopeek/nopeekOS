@@ -260,16 +260,6 @@ fn do_http_request(args: &str, use_tls: bool) {
             } else {
                 kprintln!("[npk] download failed: {}", e);
             }
-            // **Die Zaehler des Chips gehoeren auf JEDEN Ausgang.** Sie
-            // standen nur hinter dem Erfolgsfall — also genau dort nicht,
-            // wo man sie braucht: bei einem Download, der stehenbleibt,
-            // abbricht oder abgewuergt wird. `rx_missed` sagt, ob der Chip
-            // die Rahmen bekam und mangels Abholung wegwarf; ohne die Zahl
-            // raet man zwischen "kam nie an" und "wir waren zu langsam".
-            if crate::xhci::nic_attached() {
-                crate::drivers::rtl8153::dump_tally("nach Abbruch");
-                crate::drivers::rtl8153::log_link_diag();
-            }
             // `writer` drops here → StreamingWriter::drop cleans up the partial.
             return;
         }
@@ -2320,12 +2310,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout"); // 15 seconds hard timeout
                 }
-                // Dieselbe Regel wie in `tcp_recv_poll` — siehe dort.
-                if crate::xhci::nic_attached() {
-                    core::hint::spin_loop();
-                } else {
-                    crate::interrupts::worker_idle_hlt();
-                }
+                core::hint::spin_loop();
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
@@ -2358,31 +2343,16 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // **Spinnen NUR fuer die gepollte USB-NIC.** Ihr
-                // RX-Ring wird ausschliesslich von `poll_rx_only()` oben
-                // nachgelegt; parkt dieser Kern, hungert der Chip binnen
-                // Millisekunden aus. Fuer jede andere Strecke ist der Spin
-                // nicht bloss nutzlos, sondern schaedlich: er haelt einen
-                // Kern zu 100 %, und jede Runde nimmt das Schloss der
-                // Verbindung — dasselbe, das ein WLAN-Modul braucht, um
-                // einen empfangenen Rahmen ABZULIEFERN. Gemessen am Geraet
-                // (2026-09-21): 66,8 Millionen Leerrunden in einem Lauf,
-                // waehrend das Funkteil kaum noch durchkam und der AP uns
-                // schliesslich hinauswarf.
-                //
-                // Der Kommentar, der hier stand, nennt den Ausweg selbst:
-                // „virtio/QEMU is immune: it delivers RX from a fiber, not
-                // this polled loop." Das WLAN-Modul liefert genauso.
-                //
-                // `worker_idle_hlt` parkt bis zum naechsten LAPIC-Tick —
-                // und der laeuft waehrend eines Downloads auf 10 kHz
-                // (`set_worker_poll_hz`), also 100 us, nicht 10 ms. Auf
-                // Kern 0 ist es ohnehin ein Spin, dort aendert sich nichts.
-                if crate::xhci::nic_attached() {
-                    core::hint::spin_loop();
-                } else {
-                    crate::interrupts::worker_idle_hlt();
-                }
+                // BUSY-SPIN, do NOT HLT. The USB NIC has no IRQ — its RX ring is
+                // re-armed ONLY by poll_rx_only() above. worker_idle_hlt() parks
+                // this core until the next 100 Hz worker tick (up to 10 ms);
+                // nothing re-arms the ring in that gap, so the chip exhausts all
+                // buffers in a few ms and then drops every frame → the ~24 Mbit
+                // cap + massive TCP reorder on rtl8153. (virtio/QEMU is immune:
+                // it delivers RX from a fiber, not this polled loop.) tcp_recv_poll
+                // only runs during an active download, so spinning is correct —
+                // and matches tls_recv_poll, which never had the HLT.
+                core::hint::spin_loop();
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
@@ -2515,15 +2485,7 @@ fn bench_put(host: &str, path: &str, mb: usize) {
 /// POST `total` zero-bytes to <host><path>; returns the server's response body
 /// (which is expected to report the server-measured throughput).
 fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'static str> {
-    // **Der Port stand hier hartcodiert auf 80**, und `parse_ip` bekam
-    // die ganze Zeichenkette samt `:8080` — also scheiterte schon die
-    // Aufloesung. Jeder andere HTTP-Weg dieser Datei geht seit je ueber
-    // `split_host_port`; der PUT-Weg als einziger nicht, und deshalb
-    // war `netbench put <host>:<port>` nie benutzbar. Der `Host:`-Kopf
-    // traegt weiterhin `host:port`, wie RFC 9110 es verlangt.
-    let (bare, port) = split_host_port(host);
-    let port = port.unwrap_or(80);
-    let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare)).ok_or("DNS/IP failed")?;
+    let ip = parse_ip(host).or_else(|| crate::net::dns::resolve(host)).ok_or("DNS/IP failed")?;
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
     // Name the failure. ConnectionRefused means the peer answered with a RST —
@@ -2531,9 +2493,9 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     // answered at all — go look at ARP, routing, the air. Collapsing both into
     // "TCP connect failed" sent us hunting the radio while a Python process on
     // the other end had simply exited.
-    let handle = crate::net::tcp::connect(ip, port).map_err(|e| {
-        kprintln!("[netbench] connect to {}.{}.{}.{}:{} failed: {}",
-                  ip[0], ip[1], ip[2], ip[3], port, e);
+    let handle = crate::net::tcp::connect(ip, 80).map_err(|e| {
+        kprintln!("[netbench] connect to {}.{}.{}.{}:80 failed: {}",
+                  ip[0], ip[1], ip[2], ip[3], e);
         "TCP connect failed"
     })?;
     crate::interrupts::set_worker_poll_hz(10_000);
