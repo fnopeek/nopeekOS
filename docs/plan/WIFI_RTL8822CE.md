@@ -1636,6 +1636,62 @@ und hat nichts zu korrigieren gefunden; steht er darauf und `bt` sagt
 
 Dazu, und es ist ein eigener Meilenstein: **das Update kam ueber WLAN.**
 
+### ✅ 100 MB UNTER LAST — und die Sendequittung meldete sich selbst als tot
+
+Florians erster Durchsatzlauf, gegen `tools/netbench_server.py` im LAN:
+
+```
+[netbench] GET: 100 MB in 66322 ms = 12 Mbit/s (1 MB/s)
+
+tx queue   enq 9622  deq 9622  backlog 0 B
+tx drops   aqm 0   full 0
+rx ring    in 72476  dropped 0
+daten rein/raus 72478/9620   rauswurf 0   neuverbunden 0
+sendequittung 0 ok, 0 ohne ACK, 49 ohne bericht
+watchdog 295  igi 0x37  fehlalarm 106  rssi 55  quarz 69
+              thermo 32/33  txidx 5  bt aus
+```
+
+**Die Last-Frage ist beantwortet.** 72 478 Rahmen empfangen, 9 620
+gesendet — das sind **siebenunddreissig volle Umlaeufe** des 256er
+Senderinges durch genau den Bereich, der bis 0.25.1 aus fremdem Speicher
+sendete. Nichts lief ueber, nichts riss ab.
+
+**Und der neue Beobachter sagte, dass es ihn nicht gibt:** `0 ok, 0 ohne
+ACK, 49 ohne bericht`. Neunundvierzig Mal gefragt, keine einzige
+Antwort. Das ist der Fall, fuer den `tx_no_report` gebaut wurde — eine
+Null mit Begruendung statt einer Null.
+
+**Die Ursache steht in rtw88 selbst: es gibt ZWEI Quittungswege.**
+
+| Weg | Kennung | Aufteilung |
+|---|---|---|
+| eigenes C2H | `C2H_CCX_TX_RPT` = 0x03 | **V0**: Nummer `payload[6]`, Status `payload[0]` |
+| Unterkommando von `C2H_HALMAC` | `C2H_CCX_RPT` = 0x0f | **V1**: Nummer `payload[8]`, Status `payload[9]` |
+
+`rtw_fw_c2h_cmd_handle` behandelt den ersten, `rtw_fw_c2h_cmd_handle_ext`
+(fw.c:93-113) den zweiten — und `rtw_tx_report_handle` waehlt die
+Aufteilung am `src`. **Wir hoerten nur auf 0x03.** In keinem Header
+steht, welchen eine Firmware nimmt; das beantwortet nur der Geraetelauf,
+und er hat es beantwortet.
+
+**0.27.2 hoert auf beide** — und zaehlt ab jetzt die C2H-Kennungen, die
+es NICHT behandelt (`c2h 0x0fx49` im Bericht). Diese eine Zeile haette
+die Frage im ersten Lauf beantwortet, statt im zweiten; das ist die
+Lehre, nicht der Fix. `framecheck.py` 41 → 46 Faelle, beide Aufteilungen,
+gegen ein Zurueckfallen auf V0 geprueft.
+
+**Was der Lauf noch sagt:** `txidx 5` bei `thermo 32/33` — die
+Sendeleistungs-Nachfuehrung hat unter Last eine Stufe mehr korrigiert
+als im Leerlauf. `igi 0x37` bei `fehlalarm 106`: DIG regelt mit.
+
+**Und die 12 Mbit/s sind erklaert, nicht raetselhaft:** wir aggregieren
+nicht. `rtw_txq_check_agg`, `rtw_txq_push`, `rtw_txq_dequeue`,
+`rtw_tx_work` fehlen (Topf 4, Punkt 4 des Audits), also kostet jeder
+Rahmen seinen eigenen Medienzugriff. 9 620 Rahmen in 66 s sind 146 je
+Sekunde — das ist der Deckel eines Senders ohne A-MPDU, nicht der der
+Luft.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach

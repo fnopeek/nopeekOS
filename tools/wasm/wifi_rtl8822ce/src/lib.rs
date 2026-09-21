@@ -3139,6 +3139,12 @@ struct LinkStats {
     fw_crash: u32,
     /// Wie oft wir die Verbindung neu aufgebaut haben.
     reconnects: u32,
+    /// **Der Zensus der unbehandelten C2H-Kennungen.** Vier Plaetze,
+    /// jeder `(Kennung, Anzahl)` — mehr verschiedene schickt diese
+    /// Firmware nicht, und die haeufigste ist die interessante. Bis
+    /// 0.27.2 wurden sie verworfen, und die ausbleibende Sendequittung
+    /// war dadurch eine Null ohne Hinweis.
+    c2h_ids: [(u8, u32); 4],
 }
 
 impl LinkStats {
@@ -3164,6 +3170,19 @@ impl LinkStats {
             } else {
                 self.tx_lost += 1;
             }
+        }
+    }
+
+    /// Eine unbehandelte C2H-Kennung zaehlen. Vier Plaetze, danach nur
+    /// noch die, die schon dastehen — der Zensus soll die haeufigste
+    /// finden, nicht jede einzelne.
+    fn note_c2h(&mut self, id: u8) {
+        if let Some(e) = self.c2h_ids.iter_mut().find(|e| e.1 > 0 && e.0 == id) {
+            e.1 += 1;
+            return;
+        }
+        if let Some(e) = self.c2h_ids.iter_mut().find(|e| e.1 == 0) {
+            *e = (id, 1);
         }
     }
 
@@ -3718,13 +3737,28 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         acc.ra_rpt = Some((c.payload[0]
                                            & RTW_C2H_RA_RPT_RATE as u8,
                                            c.payload[1]));
-                    } else if c.id as u32 == C2H_CCX_TX_RPT {
-                        if let Some(r) = fw::tx_report_parse(c.payload) {
+                    } else if c.id as u32 == C2H_CCX_TX_RPT
+                        || (c.id as u32 == C2H_HALMAC
+                            && c.payload.first().copied()
+                               == Some(C2H_CCX_RPT as u8))
+                    {
+                        // **Beide Wege.** `C2H_CCX_TX_RPT` traegt die
+                        // Quittung selbst (V0), `C2H_HALMAC` traegt sie
+                        // als Unterkommando 0x0f (V1) — fw.c:93-113.
+                        let v1 = c.id as u32 == C2H_HALMAC;
+                        if let Some(r) = fw::tx_report_parse(c.payload, v1) {
                             if acc.n_tx_rpt < acc.tx_rpt.len() {
                                 acc.tx_rpt[acc.n_tx_rpt] = r;
                                 acc.n_tx_rpt += 1;
                             }
                         }
+                    } else if acc.n_c2h_seen < acc.c2h_seen.len() {
+                        // **Und was sonst hereinkommt, wird gezaehlt.**
+                        // Dass die Quittung ausblieb, war in 0.26.0 eine
+                        // Null ohne Hinweis; ein Zensus der Kennungen
+                        // haette die Frage in EINEM Lauf beantwortet.
+                        acc.c2h_seen[acc.n_c2h_seen] = c.id;
+                        acc.n_c2h_seen += 1;
                     }
                 }
                 return;
@@ -3811,6 +3845,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         for i in 0..acc.n_tx_rpt {
             let (sn, acked) = acc.tx_rpt[i];
             ls.settle_probe(sn, acked);
+        }
+        for i in 0..acc.n_c2h_seen {
+            ls.note_c2h(acc.c2h_seen[i]);
         }
         if let Some((rate, mac_id)) = acc.ra_rpt {
             // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
@@ -4222,6 +4259,11 @@ fn gate(name: &str, ok: bool) -> bool {
     ok
 }
 
+/// Die belegten Plaetze des C2H-Zensus.
+fn d_c2h(ls: &LinkStats) -> impl Iterator<Item = (u8, u32)> + '_ {
+    ls.c2h_ids.iter().filter(|e| e.1 > 0).map(|e| (e.0, e.1))
+}
+
 /// **Die eine Zeile, die auch ein stiller Lauf druckt.**
 ///
 /// Sie steht nicht im `driver_report` — der landet in `wlan` und ist
@@ -4420,6 +4462,16 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(" ohne ACK, ", &mut b, &mut n);
     num(ls.tx_no_report, &mut b, &mut n);
     put(" ohne bericht", &mut b, &mut n);
+    for (id, cnt) in d_c2h(ls) {
+        put("  c2h 0x", &mut b, &mut n);
+        if n + 2 <= b.len() {
+            b[n] = hex[(id >> 4) as usize];
+            b[n + 1] = hex[(id & 0xf) as usize];
+            n += 2;
+        }
+        put("x", &mut b, &mut n);
+        num(cnt, &mut b, &mut n);
+    }
     if ls.fw_crash > 0 {
         put("  FIRMWARE-ABSTURZ ", &mut b, &mut n);
         num(ls.fw_crash, &mut b, &mut n);
