@@ -81,6 +81,20 @@ pub fn set_link_rx_rate(bytes_per_sec: u32) {
 /// smoothed RTT (50 ms assumed until the first TSecr-derived RTT). Keeps the
 /// sender's in-flight near the bandwidth-delay product instead of ramping the
 /// whole buffer and overflowing a slow bottleneck — without a per-link constant.
+/// Was `recv_window` zuletzt gerechnet hat: (angebotenes Fenster in Bytes,
+/// srtt in 100-Hz-Takten, Deckel in Bytes). **Die Frage, die eine Messung auf
+/// einer langsamen Leitung stellt, ist nicht „wieviel kam an", sondern „wieviel
+/// haben WIR angeboten" — und wovon der Deckel kam.**
+static WND_LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static WND_SRTT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static WND_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// (Fenster B, srtt Takte, Deckel B) der letzten Berechnung.
+pub fn window_diag() -> (u32, u32, u32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (WND_LAST.load(Relaxed), WND_SRTT.load(Relaxed), WND_CAP.load(Relaxed))
+}
+
 fn recv_window(conn: &TcpConn) -> u16 {
     let rate = LINK_RX_RATE.load(core::sync::atomic::Ordering::Relaxed);
     let cap = if rate == u32::MAX {
@@ -91,6 +105,12 @@ fn recv_window(conn: &TcpConn) -> u16 {
         ((rate as u64 * rtt_ticks / 100) as usize).clamp(RCV_WND_MIN, RCV_WND_MAX)
     };
     let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        WND_LAST.store(free as u32, Relaxed);
+        WND_SRTT.store(conn.srtt_ticks, Relaxed);
+        WND_CAP.store(cap as u32, Relaxed);
+    }
     if conn.wscale_ok {
         (free >> OUR_WSCALE).min(65535) as u16
     } else {
