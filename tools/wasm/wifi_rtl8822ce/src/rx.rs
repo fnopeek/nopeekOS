@@ -494,6 +494,10 @@ pub struct WdAcc {
     /// Die Sendequittungen dieses Durchlaufs: `(Folgenummer, quittiert)`.
     pub tx_rpt: [(u8, bool); 8],
     pub n_tx_rpt: usize,
+    /// Die Kennungen der C2H, die wir NICHT behandeln — gezaehlt statt
+    /// verworfen.
+    pub c2h_seen: [u8; 8],
+    pub n_c2h_seen: usize,
     /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -506,6 +510,7 @@ impl WdAcc {
             num_bcn_pkt: 0, num_qry_pkt: [0; DESC_RATE_MAX],
             curr_rx_rate: 0, avg_rssi, ra_rpt: None,
             tx_rpt: [(0, false); 8], n_tx_rpt: 0,
+            c2h_seen: [0; 8], n_c2h_seen: 0,
             rx_unicast: 0, rx_cnt: 0,
         }
     }

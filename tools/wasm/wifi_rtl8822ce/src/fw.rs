@@ -614,17 +614,35 @@ pub fn ra_report_handle(payload: &[u8], dm: &mut crate::dm::DmInfo,
     }
 }
 
-/// tx.c:229-256 `rtw_tx_report_handle`, Zweig `src == C2H_CCX_TX_RPT`
-/// (also V0). Gibt `(Folgenummer, quittiert)`.
+/// tx.c:229-256 `rtw_tx_report_handle`. Gibt `(Folgenummer, quittiert)`.
+///
+/// **rtw88 hat ZWEI Wege fuer dieselbe Quittung**, und `src` entscheidet
+/// die Aufteilung:
+///
+/// * `C2H_CCX_TX_RPT` (0x03) — ein eigenes C2H, Aufteilung **V0**:
+///   Nummer in `payload[6]`, Status in `payload[0]`.
+/// * `C2H_CCX_RPT` (0x0f) — ein UNTERkommando von `C2H_HALMAC`
+///   (fw.c:93-113), Aufteilung **V1**: Nummer in `payload[8]`, Status in
+///   `payload[9]`, und `payload[0]` ist die Unterkommandokennung.
+///
+/// Welchen eine Firmware nimmt, steht in keinem Header. Der erste
+/// Geraetelauf mit 0.26.0 hat es beantwortet: `0 ok, 0 ohne ACK, 49 ohne
+/// bericht` — wir hoerten nur auf 0x03, und diese Firmware nimmt den
+/// anderen Weg.
 ///
 /// `st == 0` heisst quittiert — die zwei Statusbits sind ein Code, und
 /// jeder von null verschiedene ist ein Misserfolg.
-pub fn tx_report_parse(payload: &[u8]) -> Option<(u8, bool)> {
-    if payload.len() <= CCX_REPORT_V0_SEQNUM_OFF {
+pub fn tx_report_parse(payload: &[u8], v1: bool) -> Option<(u8, bool)> {
+    let (sn_off, st_off) = if v1 {
+        (CCX_REPORT_V1_SEQNUM_OFF, CCX_REPORT_V1_STATUS_OFF)
+    } else {
+        (CCX_REPORT_V0_SEQNUM_OFF, CCX_REPORT_V0_STATUS_OFF)
+    };
+    if payload.len() <= sn_off.max(st_off) {
         return None;
     }
-    let sn = payload[CCX_REPORT_V0_SEQNUM_OFF] & CCX_REPORT_V0_SEQNUM_MASK;
-    let st = payload[CCX_REPORT_V0_STATUS_OFF] & CCX_REPORT_V0_STATUS_MASK;
+    let sn = payload[sn_off] & CCX_REPORT_V0_SEQNUM_MASK;
+    let st = payload[st_off] & CCX_REPORT_V0_STATUS_MASK;
     Some((sn, st == 0))
 }
 

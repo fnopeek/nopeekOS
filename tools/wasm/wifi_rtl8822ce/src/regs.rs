@@ -1392,3 +1392,10 @@ pub const CCX_REPORT_V0_STATUS_OFF: usize = 0; // fw.h:371
 pub const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0; // fw.h:371
 pub const REG_MCU_TST_CFG: u32 = 0x84; // reg.h:157
 pub const VAL_FW_TRIGGER: u32 = 0x1; // reg.h:158
+
+/// fw.h:67 `C2H_CCX_RPT` — die Sendequittung als UNTERkommando von
+/// `C2H_HALMAC`, mit der V1-Aufteilung. rtw88 hat ZWEI Wege dafuer, und
+/// welchen eine Firmware nimmt, sagt nur der Geraetelauf.
+pub const C2H_CCX_RPT: u32 = 0x0f; // fw.h:67
+pub const CCX_REPORT_V1_SEQNUM_OFF: usize = 8; // fw.h:372
+pub const CCX_REPORT_V1_STATUS_OFF: usize = 9; // fw.h:373

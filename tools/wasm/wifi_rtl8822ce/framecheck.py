@@ -102,11 +102,24 @@ NAMES = [(15, "Vierwegehandschlag"), (16, "Gruppenschluessel"),
 # passt dann auf keine offene Nummer, der Zaehler `tx_no_report` laeuft
 # hoch, und es sieht aus, als antworte die Firmware nicht.
 def rpt(status, seq, n=9):
+    """V0: Status in Byte 0, Nummer in Byte 6."""
     f = [0] * n
     if n > 0:
         f[0] = status
     if n > 6:
         f[6] = seq
+    return f
+
+
+def rpt1(status, seq, n=10):
+    """V1 (Unterkommando von C2H_HALMAC): Nummer in Byte 8, Status in
+    Byte 9 — und Byte 0 ist die Unterkommandokennung 0x0f."""
+    f = [0] * n
+    f[0] = 0x0f
+    if n > 8:
+        f[8] = seq
+    if n > 9:
+        f[9] = status
     return f
 
 
@@ -122,6 +135,17 @@ TXRPT = [
      [0, 0, 0, 0, 0, 0, 0x20, 0, 0x40], (0x20, True)),
     ("zu kurz: kein Byte 6", rpt(0x00, 0x04, n=6), None),
     ("leer", [], None),
+]
+
+# Derselbe Leser, andere Aufteilung — der Weg, den DIESE Firmware nimmt.
+TXRPT_V1 = [
+    ("V1: quittiert", rpt1(0x00, 0x04), (0x04, True)),
+    ("V1: nicht quittiert", rpt1(0xc0, 0x08), (0x08, False)),
+    ("V1: Nummer in Byte 8, Status in Byte 9",
+     [0x0f, 0, 0, 0, 0, 0, 0xff, 0, 0x2c, 0x00], (0x2c, True)),
+    ("V1: die Unterkommandokennung in Byte 0 stoert nicht",
+     rpt1(0x00, 0x10), (0x10, True)),
+    ("V1: zu kurz", rpt1(0x00, 0x04, n=9), None),
 ]
 
 # `report_seqnum` — die Nummernvergabe (tx.c:175).
@@ -242,6 +266,8 @@ def main():
 const CCX_REPORT_V0_SEQNUM_MASK: u8 = 0xfc;
 const CCX_REPORT_V0_STATUS_OFF: usize = 0;
 const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0;
+const CCX_REPORT_V1_SEQNUM_OFF: usize = 8;
+const CCX_REPORT_V1_STATUS_OFF: usize = 9;
 """
     for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
@@ -267,11 +293,13 @@ const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0;
         '        (%d, %s),' % (c, rs(frag)) for c, frag in NAMES)
 
     txrpt_cases = "\n".join(
-        '        (%s, &[%s], %s),' % (
+        '        (%s, &[%s], %s, %s),' % (
             rs(name), ", ".join(str(b) for b in f),
             "None" if want is None else "Some((%d, %s))"
-            % (want[0], "true" if want[1] else "false"))
-        for name, f, want in TXRPT)
+            % (want[0], "true" if want[1] else "false"),
+            "true" if v1 else "false")
+        for v1, group in ((False, TXRPT), (True, TXRPT_V1))
+        for name, f, want in group)
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + txrpt + "\n\n" + seqnum + """
@@ -314,11 +342,11 @@ fn main() {
                  code, got);
     }
 
-    let rpts: &[(&str, &[u8], Option<(u8, bool)>)] = &[
+    let rpts: &[(&str, &[u8], Option<(u8, bool)>, bool)] = &[
 %s
     ];
-    for (name, f, want) in rpts {
-        let got = tx_report_parse(f);
+    for (name, f, want, v1) in rpts {
+        let got = tx_report_parse(f, *v1);
         let ok = got == *want;
         if !ok { bad += 1; }
         println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
