@@ -1412,3 +1412,15 @@ pub const DOT11_ACTION_CAT_BA: u8 = 3;
 pub const DOT11_ACTION_ADDBA_REQ: u8 = 0;
 pub const DOT11_ACTION_ADDBA_RESP: u8 = 1;
 pub const DOT11_ACTION_DELBA: u8 = 2;
+
+// ── ADDBA (802.11 §9.6.7.2-3, include/linux/ieee80211.h) ─────────
+/// `IEEE80211_ADDBA_PARAM_*_MASK`, ieee80211.h:2032-2035
+pub const ADDBA_PARAM_AMSDU_MASK: u16 = 0x0001; // ieee80211.h:2032
+pub const ADDBA_PARAM_POLICY_MASK: u16 = 0x0002; // ieee80211.h:2033
+pub const ADDBA_PARAM_TID_MASK: u16 = 0x003C; // ieee80211.h:2034
+pub const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0; // ieee80211.h:2035
+/// `WLAN_STATUS_SUCCESS`, ieee80211.h:3536
+pub const WLAN_STATUS_SUCCESS: u16 = 0; // ieee80211.h:3536
+/// Der Verwaltungsrahmen-Subtyp 13 (Action) im ersten Byte:
+/// Protokollfassung 0, Typ 00, Subtyp 1101.
+pub const DOT11_FC_ACTION: u8 = 0xd0;

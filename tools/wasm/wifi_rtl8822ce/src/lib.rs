@@ -3157,6 +3157,10 @@ struct LinkStats {
     /// die Zahl der **ADDBA Requests** — die Frage dieser Runde.
     addba_req: u32,
     last_action: (u8, u8),
+    /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
+    /// den Sendering passte.
+    addba_resp: u32,
+    addba_fail: u32,
 }
 
 impl LinkStats {
@@ -3730,6 +3734,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut watch_dog_ms = host::now_ms();
     // Ein Datenrahmen je Watchdog-Takt bekommt eine Quittung.
     let mut probe_due = true;
+    // **Das Empfangsfenster der Aggregation, aus `sys/config/wifi`.**
+    // `ampdu: off` schaltet sie ab, `ampdu: 16` gibt ein anderes
+    // Fenster. Die Vorgabe ist klein und der Grund steht bei
+    // `build_addba_resp`: es gibt keinen Umsortierpuffer.
+    let ampdu_buf = read_ampdu_buf();
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -3801,6 +3810,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if acc.n_mgmt < acc.mgmt.len() {
                     acc.mgmt[acc.n_mgmt] = (sub, act.unwrap_or((0xff, 0xff)));
                     acc.n_mgmt += 1;
+                }
+                // **Der ADDBA Request wird nur GESEHEN**, beantwortet
+                // wird er nach dem Ringleeren — ein Sendevorgang gehoert
+                // nicht in einen Rueckruf, der `trx` nicht halten darf.
+                if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_REQ))
+                    && acc.addba.is_none()
+                {
+                    acc.addba = sta::parse_addba_req(f);
                 }
             }
             if let Some(r) = disconnect_reason(f, &bssid) {
@@ -3885,6 +3902,38 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         for i in 0..acc.n_mgmt {
             let (sub, (cat, a)) = acc.mgmt[i];
             ls.note_mgmt(sub, cat, a);
+        }
+
+        // ── Die Aggregation zulassen ─────────────────────────────
+        // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
+        // solange keine Antwort kommt — im Geraetelauf 180 Mal, und
+        // genau so lange konnte er nicht aggregieren.
+        if let Some(req) = acc.addba.take() {
+            if ampdu_buf > 0 {
+                let mut resp = [0u8; 256];
+                let n = sta::build_addba_resp(&mut resp, &mac, &bssid, &req,
+                                              ampdu_buf);
+                let mut info = tx::pkt_info_update(&resp[..n], 0,
+                                                   tx::RTW_BAND_2G);
+                let q = tx::RTW_TX_QUEUE_MGMT;
+                if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &resp[..n]) {
+                    pci::tx_kick_off_queue(h, trx, q);
+                    ls.addba_resp += 1;
+                    if ls.addba_resp <= 3 {
+                        host::loud_begin();
+                        host::print("[rtl8822ce] ADDBA angenommen: TID ");
+                        host::print_dec(req.tid as u32);
+                        host::print(", der AP wollte ");
+                        host::print_dec(req.buf_size as u32);
+                        host::print(" offene Rahmen, wir geben ");
+                        host::print_dec(ampdu_buf as u32);
+                        host::print("\n            (kein Umsortierpuffer, deshalb klein)\n");
+                        host::loud_end();
+                    }
+                } else {
+                    ls.addba_fail += 1;
+                }
+            }
         }
         if let Some((rate, mac_id)) = acc.ra_rpt {
             // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
@@ -4377,6 +4426,44 @@ fn read_debug_flag() -> (bool, i32) {
     (on, n)
 }
 
+/// `ampdu:` aus `sys/config/wifi` — das Empfangsfenster der
+/// Aggregation.
+///
+/// **Drei Faelle, und alle drei absichtlich:** die Zeile fehlt → die
+/// Vorgabe (8, siehe `build_addba_resp`); `off`/`0` → gar keine
+/// Aggregation, der Zustand bis 0.28.0; eine ZAHL → genau dieses
+/// Fenster. So kann der naechste Lauf 8 gegen 32 messen, ohne dass
+/// jemand neu uebersetzt — und eine Messung schlaegt eine Vermutung
+/// darueber, wieviel Umsortierung TCP hier vertraegt.
+fn read_ampdu_buf() -> u16 {
+    const VORGABE: u16 = 8;
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return VORGABE;
+    }
+    let Some((a, b)) = cfg_get(&cfg[..n as usize], b"ampdu") else {
+        return VORGABE;
+    };
+    let v = &cfg[a..b];
+    if v.starts_with(b"off") || v == b"0" {
+        return 0;
+    }
+    let mut num = 0u16;
+    let mut any = false;
+    for &c in v {
+        if c.is_ascii_digit() {
+            num = num.saturating_mul(10).saturating_add((c - b'0') as u16);
+            any = true;
+        } else {
+            break;
+        }
+    }
+    // Das Feld ist zehn Bit breit (`ADDBA_PARAM_BUF_SIZE_MASK`), und
+    // mehr als 64 kann HT ohnehin nicht.
+    if any { num.clamp(1, 64) } else { VORGABE }
+}
+
 /// `on` oder `1` — dieselbe Regel, die `wifi_ax200` fuer `ampdu:` und
 /// `ps:` fuehrt. Ein unbekanntes Wort ist ein NEIN und keine Vermutung.
 fn cfg_on(v: &[u8]) -> bool {
@@ -4540,8 +4627,16 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.last_action.0 as u32, &mut b, &mut n);
     put("/akt ", &mut b, &mut n);
     num(ls.last_action.1 as u32, &mut b, &mut n);
-    put(")  ADDBA-anfragen ", &mut b, &mut n);
+    put(")  ADDBA ", &mut b, &mut n);
     num(ls.addba_req, &mut b, &mut n);
+    put(" erbeten, ", &mut b, &mut n);
+    num(ls.addba_resp, &mut b, &mut n);
+    put(" angenommen", &mut b, &mut n);
+    if ls.addba_fail > 0 {
+        put(", ", &mut b, &mut n);
+        num(ls.addba_fail, &mut b, &mut n);
+        put(" NICHT GESENDET", &mut b, &mut n);
+    }
     let sonst: u32 = ls.mgmt_sub.iter().enumerate()
         .filter(|(i, _)| *i != 8 && *i != 13)
         .map(|(_, v)| *v).sum();

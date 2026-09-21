@@ -424,3 +424,87 @@ pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
     b[10..12].copy_from_slice(&highest.to_le_bytes()); // tx_highest
     14
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Block Ack: die Antwort auf den ADDBA Request des AP
+//
+// **In rtw88 macht das mac80211, nicht der Treiber** —
+// `rtw_ops_ampdu_action` behandelt `IEEE80211_AMPDU_RX_START` mit einem
+// leeren `break`. Die Empfangs-Aggregation ist also reine
+// 802.11-Verwaltung: wer zustimmt, bekommt Aggregate; die BlockAcks
+// darauf erzeugt die HARDWARE, weil sie eine SIFS nach dem Aggregat
+// hinaus muessen (16 us) — kein Treiber der Welt schafft das.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Was in einem ADDBA Request steht (802.11 §9.6.7.2,
+/// `struct ieee80211_mgmt.u.action.u.addba_req`).
+#[derive(Clone, Copy)]
+pub struct AddbaReq {
+    pub dialog_token: u8,
+    pub amsdu: bool,
+    pub policy: u16,
+    pub tid: u8,
+    pub buf_size: u16,
+    pub timeout: u16,
+    pub ssn: u16,
+}
+
+/// Den Rahmen lesen. `f` ist der ganze 802.11-Rahmen ab `frame_control`;
+/// Kategorie und Aktionscode stehen hinter dem 24 Byte langen Kopf.
+pub fn parse_addba_req(f: &[u8]) -> Option<AddbaReq> {
+    // 24 Kopf + Kategorie + Aktion + Token + capab + timeout + ssn
+    if f.len() < 24 + 1 + 1 + 1 + 2 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_ADDBA_REQ {
+        return None;
+    }
+    let capab = u16::from_le_bytes([f[27], f[28]]);
+    Some(AddbaReq {
+        dialog_token: f[26],
+        amsdu: capab & ADDBA_PARAM_AMSDU_MASK != 0,
+        policy: (capab & ADDBA_PARAM_POLICY_MASK) >> 1,
+        tid: ((capab & ADDBA_PARAM_TID_MASK) >> 2) as u8,
+        buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
+        timeout: u16::from_le_bytes([f[29], f[30]]),
+        ssn: u16::from_le_bytes([f[31], f[32]]),
+    })
+}
+
+/// Die Antwort bauen — `ieee80211_send_addba_resp` (net/mac80211/agg-rx.c)
+/// Feld fuer Feld.
+///
+/// **`buf_size` ist unsere Entscheidung, nicht seine.** Der AP fragt, wie
+/// viele Rahmen er offen haben darf; mac80211 antwortet mit dem, was
+/// sein Umsortierpuffer fasst. **Wir haben keinen** — es gibt keinen
+/// Nachbau von `ieee80211_sta_manage_reorder_buf`, und ein Rahmen, den
+/// eine Wiederholung nach hinten schiebt, geht bei uns als solcher an
+/// TCP. Deshalb steht hier eine KLEINE Zahl: bei acht offenen Rahmen
+/// sortiert eine Wiederholung um hoechstens sieben um, und das absorbiert
+/// jede TCP-Verbindung. Die Aggregation selbst wirkt schon bei acht —
+/// sie spart sieben von acht Medienzugriffen.
+///
+/// `amsdu` melden wir als NEIN: A-MSDU im A-MPDU waere ein zweiter
+/// Entpacker, den es hier nicht gibt.
+pub fn build_addba_resp(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
+                        req: &AddbaReq, buf_size: u16) -> usize {
+    out.fill(0);
+    out[0] = DOT11_FC_ACTION;
+    out[1] = 0x00;
+    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+
+    out[24] = DOT11_ACTION_CAT_BA;
+    out[25] = DOT11_ACTION_ADDBA_RESP;
+    out[26] = req.dialog_token;
+    out[27..29].copy_from_slice(&WLAN_STATUS_SUCCESS.to_le_bytes());
+
+    // capab: A-MSDU aus, Policy und TID wie erbeten, unsere Fenstergroesse.
+    let capab = ((req.policy << 1) & ADDBA_PARAM_POLICY_MASK)
+        | (((req.tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
+        | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
+    out[29..31].copy_from_slice(&capab.to_le_bytes());
+    out[31..33].copy_from_slice(&req.timeout.to_le_bytes());
+    33
+}
