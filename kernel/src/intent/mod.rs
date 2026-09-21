@@ -2020,6 +2020,15 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                               crate::xhci::nic_link_speed_str());
                     crate::drivers::rtl8153::log_link_diag();
                     crate::drivers::rtl8153::dump_tally("jetzt");
+                    // Die Vollzuege des xHCI-Bulk-IN. Sie beantworten die
+                    // Frage, die der Chip-Tally offenlaesst: der Ring ist
+                    // voll, der Chip laeuft nicht ueber — warum meldet der
+                    // Controller trotzdem so wenig fertig?
+                    let (ok, short, other, last, resid) =
+                        crate::xhci::nic_take_cc();
+                    let n = (ok + short + other).max(1);
+                    kprintln!("[npk] xhci bulk-IN: {} ok, {} short, {} sonstige (letzter cc {}) | Rest je Vollzug {} B von {}",
+                              ok, short, other, last, resid / n, 16384);
                     if args.trim() == "reset" {
                         crate::drivers::rtl8153::tally_reset();
                         kprintln!("[npk] rtl8153: Zaehler auf null");

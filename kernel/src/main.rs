@@ -81,7 +81,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     kprintln!("/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ");
     kprintln!("           /_/");
     kprintln!();
-    kprintln!("[npk] AI-native Operating System v0.1.0");
+    // Die ECHTE Version, nicht eine hartkodierte. Hier stand seit je
+    // "v0.1.0", und eine falsche Zahl ist schlechter als keine: einen
+    // Geraetelauf, der das alte Bild gebootet hat, erkennt man sonst nur am
+    // WORTLAUT einer Logzeile — und das nur, wenn man sie gerade geaendert
+    // hat. [[feedback_log_the_version_in_the_trace]]
+    kprintln!("[npk] AI-native Operating System v{}", env!("CARGO_PKG_VERSION"));
     kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
 
@@ -192,10 +197,16 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // the whole data path — including traffic that belonged elsewhere.
     //
     // The USB dongle is NOT free to probe: nic_attach halts and RESETS an xHCI
-    // controller, which drops every device already addressed on it. In QEMU that
-    // is the one controller carrying keyboard and mouse — probing for a dongle
-    // that isn't there killed the login keyboard. So it is only worth that price
-    // when no PCI NIC came up (the HP notebook, which has no wired port).
+    // controller, which drops every device already addressed on it. So it is only
+    // worth that price when no PCI NIC came up (the HP notebook, which has no
+    // wired port).
+    //
+    // Seit Kernel 0.366.0 ist der Preis kleiner: `nic_attach` probiert den
+    // Controller, auf dem Tastatur/Maus stehen, ZULETZT — und wenn der Dongle
+    // auch dort nicht ist, zaehlt es sie wieder auf. Auf einer Maschine mit
+    // zwei Controllern (IdeaPad) ueberlebt die USB-Maus den Scan damit ganz.
+    // Haengt der Dongle am SELBEN Controller, gewinnt weiterhin er; das loest
+    // erst ein gemeinsamer Controller-Zustand (docs/plan/INPUT_I2C_HID.md).
     let net_up = virtio_net::init() | intel_nic::init();
     if !net_up {
         rtl8153::init();
