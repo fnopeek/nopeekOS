@@ -4266,6 +4266,14 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
 /// Ohne das haelt ein einziger verlorener Rahmen den Strom an, bis der
 /// Sender 64 weitere geschickt hat.
 fn ro_tick(ls: &mut LinkStats) {
+    // **Zuerst die billige Frage.** Diese Funktion steht in der
+    // Pumpschleife, und die dreht ueber eine Million Mal je Sitzung. Der
+    // Normalfall ist „es liegt nichts" — dann darf sie keinen einzigen
+    // Wirtsaufruf kosten. `now_us()` wird erst gefragt, wenn wirklich ein
+    // Loch offen ist.
+    if ls.ro_held.iter().all(|&h| h == 0) {
+        return;
+    }
     let now = host::now_us() as u32 / 1000;
     for tid in 0..RO_TIDS {
         if ls.ro_held[tid] == 0 {
