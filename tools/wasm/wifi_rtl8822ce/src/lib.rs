@@ -3378,6 +3378,21 @@ struct LinkStats {
     last_seq_ctrl: [u32; 9],
     /// Verworfene 802.11-Wiederholungen (`dot11FrameDuplicateCount`).
     dup_rx: u32,
+    /// Umsortierpuffer je TID: laeuft eine Block-Ack-Sitzung?
+    ro_on: [bool; RO_TIDS],
+    /// Naechste erwartete Sequenznummer (12 Bit).
+    ro_head: [u16; RO_TIDS],
+    /// Platz im Fenster -> Poolindex + 1, 0 = leer.
+    ro_slot: [[u8; RO_WIN]; RO_TIDS],
+    /// Wieviele Rahmen dieser TID gerade liegen.
+    ro_held: [u8; RO_TIDS],
+    /// Wann der Kopf zuletzt blockiert wurde (ms), fuer die Frist.
+    ro_since: [u32; RO_TIDS],
+    /// Zaehler fuer den Bericht.
+    ro_sorted: u32,
+    ro_old: u32,
+    ro_timeout: u32,
+    ro_full: u32,
     /// **Der Gruppen-Neuschluessel, gezaehlt statt vermutet.** Jedes
     /// EAPOL NACH dem Handschlag ist einer (msg1 der
     /// Gruppenschluessel-Sequenz, oder ein ganz neues Vierwege), und
@@ -3482,7 +3497,11 @@ impl Default for LinkStats {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
-            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 9], dup_rx: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
+            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 9], dup_rx: 0,
+            ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
+            ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
+            ro_since: [0; RO_TIDS], ro_sorted: 0, ro_old: 0,
+            ro_timeout: 0, ro_full: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
             gone: None, kicked: 0, last_reason: 0,
             probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
@@ -4035,6 +4054,298 @@ enum PumpEnd {
     LinkLost,
 }
 
+// ── Umsortierpuffer fuer empfangene A-MPDUs ───────────────────────
+//
+// `ieee80211_rx_reorder_ampdu` + `ieee80211_sta_reorder_release`
+// (net/mac80211/rx.c), 802.11 §10.24.7 „Receive reordering buffer control".
+//
+// **Warum es ihn braucht, gemessen statt behauptet.** Ein Rahmen, der im
+// A-MPDU ausfaellt, kommt im NAECHSTEN Buendel nach — wir lieferten bis
+// hierher in ANKUNFTsreihenfolge, also 6,7,8…63 und dann 5. Unser TCP sieht
+// eine Luecke, schickt Doppelquittungen, und drei davon loesen beim Sender
+// eine Schnellwiederholung aus, die ueberfluessig ist. Auf Florians
+// 5-GHz-Strecke (10 % CRC) am 2026-09-21 gemessen:
+//
+//     Fenster  256 KB  ->  81 Mbit   retr  40   dsack  40
+//     Fenster 1024 KB  ->  68 Mbit   retr 802   dsack 887
+//
+// Mehr Fenster, zwanzigfache Wiederholungsrate, WENIGER Durchsatz — bei
+// `lost=0` und `dsack ~ retr`, also war fast jede ueberfluessig. Ohne
+// Umsortierung laesst sich das Empfangsfenster gar nicht aufmachen, und
+// ohne grosses Fenster kommt man an 380 Mbit Bruttorate nie heran.
+
+/// So viele TIDs koennen gleichzeitig eine Sitzung haben. Florians AP
+/// macht zwei auf (TID 0 und 6).
+const RO_TIDS: usize = 8;
+/// Die Fensterbreite, die wir im ADDBA ZUSAGEN. Beides darf nicht
+/// auseinanderlaufen: wer 64 zusagt und 32 puffert, verwirft, was er
+/// angenommen hat.
+const RO_WIN: usize = 64;
+/// Groesster 802.3-Rahmen, den wir zurueckhalten.
+const RO_FRAME: usize = 1536;
+/// Gleichzeitig zurueckgehaltene Rahmen ueber ALLE TIDs. Im Normalfall
+/// liegt hier nichts — nur solange ein Loch offen ist. Laeuft der Pool
+/// voll, wird zugestellt statt verworfen (`ro_full` zaehlt es).
+const RO_POOL: usize = 64;
+/// Frist fuer ein Loch, danach wird darueber hinweg freigegeben.
+/// mac80211: `HT_RX_REORDER_BUF_TIMEOUT` = HZ/10.
+const RO_TIMEOUT_MS: u32 = 100;
+
+static mut RO_BUF: [[u8; RO_FRAME]; RO_POOL] = [[0; RO_FRAME]; RO_POOL];
+static mut RO_LEN: [u16; RO_POOL] = [0; RO_POOL];
+static mut RO_EAP: [bool; RO_POOL] = [false; RO_POOL];
+static mut RO_USED: [bool; RO_POOL] = [false; RO_POOL];
+
+/// Einen freien Platz im Pool nehmen und den Rahmen hineinlegen.
+fn ro_take(eth: &[u8], is_eapol: bool) -> Option<usize> {
+    if eth.len() > RO_FRAME {
+        return None;
+    }
+    // SAFETY: ein Faden, ein Rufer — derselbe Vertrag wie bei RXBUF6.
+    unsafe {
+        let used = &mut *core::ptr::addr_of_mut!(RO_USED);
+        let i = used.iter().position(|u| !*u)?;
+        used[i] = true;
+        let buf = &mut *core::ptr::addr_of_mut!(RO_BUF);
+        buf[i][..eth.len()].copy_from_slice(eth);
+        let lens = &mut *core::ptr::addr_of_mut!(RO_LEN);
+        lens[i] = eth.len() as u16;
+        let eaps = &mut *core::ptr::addr_of_mut!(RO_EAP);
+        eaps[i] = is_eapol;
+        Some(i)
+    }
+}
+
+/// Den Rahmen an Platz `i` zustellen und den Platz freigeben.
+fn ro_release_slot(ls: &mut LinkStats, i: usize) {
+    // Der Rahmen wird ZUERST kopiert, dann zugestellt: `deliver` nimmt
+    // `&mut LinkStats`, und eine Anleihe auf den Pool darueber hinaus
+    // waere ein zweiter veraenderlicher Zugriff auf denselben Speicher.
+    let mut tmp = [0u8; RO_FRAME];
+    // SAFETY: wie `ro_take` — ein Faden, ein Rufer. Die Zeiger werden
+    // ZUERST an Bezuege gebunden; ein `&(*ptr)[i]` mitten im Ausdruck
+    // waere eine stillschweigende Anleihe auf einen rohen Zeiger.
+    let (len, eap) = unsafe {
+        let lens = &*core::ptr::addr_of!(RO_LEN);
+        let eaps = &*core::ptr::addr_of!(RO_EAP);
+        let len = lens[i] as usize;
+        let buf = &*core::ptr::addr_of!(RO_BUF);
+        tmp[..len].copy_from_slice(&buf[i][..len]);
+        let used = &mut *core::ptr::addr_of_mut!(RO_USED);
+        used[i] = false;
+        (len, eaps[i])
+    };
+    ls.ro_sorted += 1;
+    deliver(ls, &tmp[..len], eap);
+}
+
+/// Alles freigeben, was ab dem Kopf LUECKENLOS daliegt.
+fn ro_release_ready(ls: &mut LinkStats, tid: usize) {
+    loop {
+        let h = (ls.ro_head[tid] as usize) % RO_WIN;
+        let slot = ls.ro_slot[tid][h];
+        if slot == 0 {
+            return;
+        }
+        ls.ro_slot[tid][h] = 0;
+        ls.ro_held[tid] = ls.ro_held[tid].saturating_sub(1);
+        ls.ro_head[tid] = (ls.ro_head[tid] + 1) & 0x0fff;
+        ro_release_slot(ls, (slot - 1) as usize);
+    }
+}
+
+/// Den Kopf bis `want` vorschieben und alles darunter herausgeben —
+/// Loecher werden dabei uebersprungen (`ieee80211_sta_reorder_release`).
+fn ro_advance_to(ls: &mut LinkStats, tid: usize, want: u16) {
+    // **Ein Sprung weiter als das Fenster laeuft nicht Platz fuer Platz.**
+    // Die Entfernung kann bis 2047 betragen (halber Sequenzraum); dann
+    // waeren das 2047 Runden fuer hoechstens 64 liegende Rahmen. Hier
+    // wird stattdessen einmal ueber das Fenster gegangen und der Kopf
+    // direkt gesetzt.
+    let dist = want.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
+    if dist as usize > RO_WIN {
+        for k in 0..RO_WIN {
+            let h = ((ls.ro_head[tid] as usize) + k) % RO_WIN;
+            let slot = ls.ro_slot[tid][h];
+            if slot != 0 {
+                ls.ro_slot[tid][h] = 0;
+                ls.ro_held[tid] = ls.ro_held[tid].saturating_sub(1);
+                ro_release_slot(ls, (slot - 1) as usize);
+            }
+        }
+        ls.ro_head[tid] = want;
+        return;
+    }
+    while ((want.wrapping_sub(ls.ro_head[tid])) & 0x0fff) != 0 {
+        let h = (ls.ro_head[tid] as usize) % RO_WIN;
+        let slot = ls.ro_slot[tid][h];
+        ls.ro_slot[tid][h] = 0;
+        ls.ro_head[tid] = (ls.ro_head[tid] + 1) & 0x0fff;
+        if slot != 0 {
+            ls.ro_held[tid] = ls.ro_held[tid].saturating_sub(1);
+            ro_release_slot(ls, (slot - 1) as usize);
+        }
+    }
+}
+
+/// Eine Sitzung beginnt: der ADDBA nennt die Startsequenz.
+fn ro_open(ls: &mut LinkStats, tid: u8, ssn: u16) {
+    let t = tid as usize;
+    if t >= RO_TIDS {
+        return;
+    }
+    ls.ro_on[t] = true;
+    // **Bits 4..15, nicht das ganze Feld.** Das Block-Ack-Startfeld ist
+    // ein Sequenz-KONTROLLfeld: die unteren vier Bits sind die
+    // Fragmentnummer. Wer es ungeschoben nimmt, setzt den Kopf um das
+    // Sechzehnfache daneben — und der erste echte Rahmen sieht dann aus
+    // wie einer aus der fernen Vergangenheit.
+    ls.ro_head[t] = (ssn >> 4) & 0x0fff;
+    ls.ro_held[t] = 0;
+    ls.ro_slot[t] = [0; RO_WIN];
+}
+
+/// **Der Eintritt.** Ohne Sitzung geht der Rahmen unveraendert durch —
+/// das ist der Zustand vor dem Handschlag und jeder Rahmen ohne QoS.
+fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
+                      eth: &[u8], is_eapol: bool) {
+    if !have_sn || tid >= RO_TIDS || !ls.ro_on[tid] {
+        deliver(ls, eth, is_eapol);
+        return;
+    }
+    let d = sn.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
+    // **Der Sequenzraum ist 12 Bit, also ist „aelter" die obere Haelfte.**
+    // Ein Rahmen unter dem Kopf ist zu spaet und war laengst durch ein
+    // Loch oder eine Frist ersetzt — ihn jetzt noch zuzustellen hiesse,
+    // die Reihenfolge, die wir gerade hergestellt haben, wieder zu
+    // brechen.
+    if d >= 0x800 {
+        ls.ro_old += 1;
+        return;
+    }
+    if d >= RO_WIN as u16 {
+        // Der Sender ist weiter, als unser Fenster reicht: den Kopf
+        // nachziehen, bis `sn` gerade noch hineinpasst.
+        let want = sn.wrapping_sub(RO_WIN as u16 - 1) & 0x0fff;
+        ro_advance_to(ls, tid, want);
+    }
+    if sn == ls.ro_head[tid] && ls.ro_slot[tid][(sn as usize) % RO_WIN] == 0 {
+        // Der Normalfall: er passt genau, nichts muss liegenbleiben.
+        ls.ro_head[tid] = (ls.ro_head[tid] + 1) & 0x0fff;
+        deliver(ls, eth, is_eapol);
+        ro_release_ready(ls, tid);
+        return;
+    }
+    let pos = (sn as usize) % RO_WIN;
+    if ls.ro_slot[tid][pos] != 0 {
+        // Schon belegt — ein Duplikat, das der Tiefe-1-Zwischenspeicher
+        // nicht gesehen hat, weil andere Rahmen dazwischen lagen.
+        ls.ro_old += 1;
+        return;
+    }
+    match ro_take(eth, is_eapol) {
+        Some(i) => {
+            ls.ro_slot[tid][pos] = (i + 1) as u8;
+            if ls.ro_held[tid] == 0 {
+                ls.ro_since[tid] = host::now_us() as u32 / 1000;
+            }
+            ls.ro_held[tid] += 1;
+        }
+        None => {
+            // **Ein voller Pool wird ZUGESTELLT, nicht verworfen.** Die
+            // Reihenfolge leidet, die Daten nicht — und der Zaehler sagt,
+            // dass es passiert ist.
+            ls.ro_full += 1;
+            deliver(ls, eth, is_eapol);
+        }
+    }
+    ro_release_ready(ls, tid);
+}
+
+/// Einmal je Runde: ein Loch, das zu lange offen ist, wird uebersprungen.
+/// Ohne das haelt ein einziger verlorener Rahmen den Strom an, bis der
+/// Sender 64 weitere geschickt hat.
+fn ro_tick(ls: &mut LinkStats) {
+    let now = host::now_us() as u32 / 1000;
+    for tid in 0..RO_TIDS {
+        if ls.ro_held[tid] == 0 {
+            continue;
+        }
+        if now.wrapping_sub(ls.ro_since[tid]) < RO_TIMEOUT_MS {
+            continue;
+        }
+        ls.ro_timeout += 1;
+        // Den Kopf um EINEN weiterschieben — das Loch ist damit
+        // uebersprungen — und dann alles herausgeben, was zusammenhaengt.
+        let want = (ls.ro_head[tid] + 1) & 0x0fff;
+        ro_advance_to(ls, tid, want);
+        ro_release_ready(ls, tid);
+        ls.ro_since[tid] = now;
+    }
+}
+
+/// **Der EINE Ausgang fuer einen empfangenen Datenrahmen.**
+///
+/// Herausgeloest, weil es ihn seit dem Umsortierpuffer ZWEIMAL gibt: der
+/// Rahmen, der in Reihenfolge ankommt, geht sofort hier hindurch; einer,
+/// der ein Loch fuellt, wird gespeichert und spaeter durch dieselbe Tuer
+/// geschickt. Zwei Ausgaenge waeren zwei Semantiken, und eine davon wuerde
+/// irgendwann abweichen.
+fn deliver(ls: &mut LinkStats, eth: &[u8], is_eapol: bool) {
+    if eth.len() < 14 {
+        return;
+    }
+    if is_eapol {
+        ls.eapol_rx += 1;
+        if ls.authorized {
+            ls.rekey_rx += 1;
+        }
+        // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
+        // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
+        //
+        // **Auf die ANGESAGTE Laenge kuerzen.** Der EAPOL-Kopf
+        // traegt sie in den Bytes 2..4 (802.1X, gross-endig), und
+        // der ganze Rahmen ist 4 + diese Zahl. Was die Hardware
+        // dahinter anhaengt, gehoert nicht dazu: `WLAN_RCR_CFG`
+        // hat APP_FCS, APP_MIC und APP_ICV gesetzt, also liefert
+        // der Deskriptor mehr Bytes, als der Rahmen lang ist.
+        //
+        // **Das ist nicht kosmetisch.** `wifid` rechnet den MIC
+        // ueber die GANZE Scheibe, die es bekommt
+        // (`compute_mic`: `frame.len()`). Vier Bytes zu viel, und
+        // msg3 schlaegt fehl — msg1 nicht, denn das traegt gar
+        // keinen MIC. Genau dieses Muster stand im Geraetelauf.
+        let raw = &eth[14..];
+        let body = if raw.len() >= 4 {
+            let declared =
+                4 + u16::from_be_bytes([raw[2], raw[3]]) as usize;
+            if ls.extra_reported < 2 && declared <= raw.len() {
+                ls.extra_reported += 1;
+                host::print("    EAPOL: ");
+                host::print_dec(raw.len() as u32);
+                host::print(" Bytes geliefert, ");
+                host::print_dec(declared as u32);
+                host::print(" angesagt (");
+                host::print_dec((raw.len() - declared) as u32);
+                host::print(" zu viel)\n");
+            }
+            &raw[..declared.min(raw.len())]
+        } else {
+            raw
+        };
+        let mut ev = [0u8; 600];
+        if body.len() + 3 <= ev.len() {
+            ev[0] = EV_EAPOL_RX;
+            ev[1] = (body.len() & 0xff) as u8;
+            ev[2] = (body.len() >> 8) as u8;
+            ev[3..3 + body.len()].copy_from_slice(body);
+            host::wifi_send_event(&ev[..3 + body.len()]);
+        }
+    } else if ls.authorized {
+        host::netdev_submit_rx(eth);
+    }
+}
+
 fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
              frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
@@ -4190,6 +4501,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // Verglichen wird das GANZE Feld, nicht nur die Sequenznummer:
             // die unteren vier Bits sind die Fragmentnummer, und zwei
             // Bruchstuecke desselben Rahmens sind keine Duplikate.
+            let mut ro_tid = RO_TIDS;
+            let mut ro_sn = 0u16;
+            let mut ro_have = false;
             if f.len() >= 24 {
                 let fc = u16::from_le_bytes([f[0], f[1]]);
                 if fc & 0x000c == 0x0008 {
@@ -4205,6 +4519,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         return;
                     }
                     ls.last_seq_ctrl[idx] = sc;
+                    // **Nur ganze Rahmen werden umsortiert.** Die unteren
+                    // vier Bits sind die Fragmentnummer; ein Bruchstueck
+                    // gehoert in die Zusammensetzung, nicht in den
+                    // Umsortierpuffer, und die faehrt mac80211 auch
+                    // getrennt (`ieee80211_rx_h_defragment` laeuft VOR
+                    // dem Puffer).
+                    if is_qos && idx < RO_TIDS && sc & 0x000f == 0 {
+                        ro_tid = idx;
+                        ro_sn = (sc >> 4) as u16;
+                        ro_have = true;
+                    }
                 }
             }
             let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut ls.llc_miss)
@@ -4218,55 +4543,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 acc.rx_unicast += f.len() as u64;
                 acc.rx_cnt += 1;
             }
-            if is_eapol {
-                ls.eapol_rx += 1;
-                if ls.authorized {
-                    ls.rekey_rx += 1;
-                }
-                // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
-                // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
-                //
-                // **Auf die ANGESAGTE Laenge kuerzen.** Der EAPOL-Kopf
-                // traegt sie in den Bytes 2..4 (802.1X, gross-endig), und
-                // der ganze Rahmen ist 4 + diese Zahl. Was die Hardware
-                // dahinter anhaengt, gehoert nicht dazu: `WLAN_RCR_CFG`
-                // hat APP_FCS, APP_MIC und APP_ICV gesetzt, also liefert
-                // der Deskriptor mehr Bytes, als der Rahmen lang ist.
-                //
-                // **Das ist nicht kosmetisch.** `wifid` rechnet den MIC
-                // ueber die GANZE Scheibe, die es bekommt
-                // (`compute_mic`: `frame.len()`). Vier Bytes zu viel, und
-                // msg3 schlaegt fehl — msg1 nicht, denn das traegt gar
-                // keinen MIC. Genau dieses Muster stand im Geraetelauf.
-                let raw = &ethbuf[14..n];
-                let body = if raw.len() >= 4 {
-                    let declared =
-                        4 + u16::from_be_bytes([raw[2], raw[3]]) as usize;
-                    if ls.extra_reported < 2 && declared <= raw.len() {
-                        ls.extra_reported += 1;
-                        host::print("    EAPOL: ");
-                        host::print_dec(raw.len() as u32);
-                        host::print(" Bytes geliefert, ");
-                        host::print_dec(declared as u32);
-                        host::print(" angesagt (");
-                        host::print_dec((raw.len() - declared) as u32);
-                        host::print(" zu viel)\n");
-                    }
-                    &raw[..declared.min(raw.len())]
-                } else {
-                    raw
-                };
-                let mut ev = [0u8; 600];
-                if body.len() + 3 <= ev.len() {
-                    ev[0] = EV_EAPOL_RX;
-                    ev[1] = (body.len() & 0xff) as u8;
-                    ev[2] = (body.len() >> 8) as u8;
-                    ev[3..3 + body.len()].copy_from_slice(body);
-                    host::wifi_send_event(&ev[..3 + body.len()]);
-                }
-            } else if ls.authorized {
-                host::netdev_submit_rx(&ethbuf[..n]);
-            }
+            deliver_or_reorder(ls, ro_tid, ro_sn, ro_have,
+                               &ethbuf[..n], is_eapol);
         });
 
         // **Die Form der Schleife, ohne einen einzigen zusaetzlichen
@@ -4274,6 +4552,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // auf welcher Seite der Deckel liegt: knapp ueber eins heisst,
         // wir sehen schneller nach als etwas kommt (die Luft ist die
         // Grenze); volle Stapel heissen, wir kommen nicht nach.
+        // Ein Loch, das zu lange offen steht, haelt sonst den ganzen
+        // Strom an. Einmal je Runde reicht — die Frist ist 100 ms.
+        ro_tick(ls);
         if got > 0 {
             ls.rx_polls += 1;
             ls.rx_frames += got;
@@ -4318,6 +4599,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ls.addba_resp += 1;
                     ls.addba_win = ampdu_buf;
                     ls.addba_win_req = req.buf_size;
+                    // **Erst jetzt**, und mit der Startsequenz aus SEINER
+                    // Bitte: ab diesem Rahmen aggregiert der AP, und ab
+                    // hier muss umsortiert werden. Frueher gaebe es einen
+                    // Kopf ohne Sitzung, spaeter ein Loch am Anfang.
+                    ro_open(ls, req.tid, req.ssn);
                     if ls.addba_resp <= 3 {
                         host::loud_begin();
                         host::print("[rtl8822ce] ADDBA angenommen: TID ");
@@ -4326,7 +4612,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         host::print_dec(req.buf_size as u32);
                         host::print(" offene Rahmen, wir geben ");
                         host::print_dec(ampdu_buf as u32);
-                        host::print("\n            (kein Umsortierpuffer, deshalb klein)\n");
+                        host::print("\n            (Umsortierpuffer ");
+                        host::print_dec(RO_WIN as u32);
+                        host::print(" Plaetze, Startsequenz ");
+                        host::print_dec((req.ssn >> 4) as u32);
+                        host::print(")\n");
                         host::loud_end();
                     }
                 } else {
@@ -5158,6 +5448,15 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.data_tx, &mut b, &mut n);
     put("  duplikate ", &mut b, &mut n);
     num(ls.dup_rx, &mut b, &mut n);
+    put("  umsortiert ", &mut b, &mut n);
+    num(ls.ro_sorted, &mut b, &mut n);
+    put(" (zu spaet ", &mut b, &mut n);
+    num(ls.ro_old, &mut b, &mut n);
+    put(", Frist ", &mut b, &mut n);
+    num(ls.ro_timeout, &mut b, &mut n);
+    put(", Pool voll ", &mut b, &mut n);
+    num(ls.ro_full, &mut b, &mut n);
+    put(")", &mut b, &mut n);
     put("  eapol ", &mut b, &mut n);
     num(ls.eapol_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
