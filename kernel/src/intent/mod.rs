@@ -2005,39 +2005,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 http::intent_netbench(args);
             }
         }
-        // `nic` — die eigenen Zaehler des USB-Netzchips, JEDERZEIT.
-        //
-        // **Sie standen nur am Ende eines gelungenen Downloads**, also
-        // genau dort nicht, wo man sie braucht. `rx_missed` ist der
-        // FIFO-Ueberlauf des Chips: steht er hoch, kamen die Rahmen an und
-        // wir haben sie nicht abgeholt; steht er null und `rx_pkts` ist
-        // klein, kam ueber die Leitung nichts. Das ist die Gabelung, an
-        // der jede Vermutung ueber einen langsamen Dongle anfaengt.
-        "nic" => {
-            if require_cap(vault, &session, Rights::AUDIT, "nic") {
-                if crate::xhci::nic_attached() {
-                    kprintln!("[npk] NIC USB link: {}",
-                              crate::xhci::nic_link_speed_str());
-                    crate::drivers::rtl8153::log_link_diag();
-                    crate::drivers::rtl8153::dump_tally("jetzt");
-                    // Die Vollzuege des xHCI-Bulk-IN. Sie beantworten die
-                    // Frage, die der Chip-Tally offenlaesst: der Ring ist
-                    // voll, der Chip laeuft nicht ueber — warum meldet der
-                    // Controller trotzdem so wenig fertig?
-                    let (ok, short, other, last, resid) =
-                        crate::xhci::nic_take_cc();
-                    let n = (ok + short + other).max(1);
-                    kprintln!("[npk] xhci bulk-IN: {} ok, {} short, {} sonstige (letzter cc {}) | Rest je Vollzug {} B von {}",
-                              ok, short, other, last, resid / n, 16384);
-                    if args.trim() == "reset" {
-                        crate::drivers::rtl8153::tally_reset();
-                        kprintln!("[npk] rtl8153: Zaehler auf null");
-                    }
-                } else {
-                    kprintln!("[npk] keine USB-NIC angesteckt");
-                }
-            }
-        }
         "ping" => {
             if require_cap(vault, &session, Rights::EXECUTE, "ping") {
                 net::intent_ping(args);

@@ -260,13 +260,6 @@ fn do_http_request(args: &str, use_tls: bool) {
             } else {
                 kprintln!("[npk] download failed: {}", e);
             }
-            // Die Zaehler des Chips gehoeren auf JEDEN Ausgang — sie
-            // standen nur hinter dem Erfolgsfall, also genau dort nicht,
-            // wo man sie braucht.
-            if crate::xhci::nic_attached() {
-                crate::drivers::rtl8153::dump_tally("nach Abbruch");
-                crate::drivers::rtl8153::log_link_diag();
-            }
             // `writer` drops here → StreamingWriter::drop cleans up the partial.
             return;
         }

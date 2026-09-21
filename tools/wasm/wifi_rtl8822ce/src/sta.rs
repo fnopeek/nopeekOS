@@ -55,11 +55,6 @@ pub struct PeerCaps {
     pub supp_rates: u16,
     /// 0 = 20 MHz, 1 = 40, 2 = 80 (`ieee80211_sta.bandwidth`)
     pub bandwidth: u8,
-    /// Das A-MPDU-Parameterbyte aus dem HT-Element des AP (Versatz 2):
-    /// Bit 1:0 der Laengenexponent, Bit 4:2 der Mindestabstand.
-    /// **Es sagt, was der AP EMPFANGEN kann** — deshalb gehoert es in
-    /// unseren SENDEdeskriptor und nicht in unsere eigenen Faehigkeiten.
-    pub ht_ampdu_param: u8,
 }
 
 /// Die Elemente einer Anmeldeantwort lesen.
@@ -87,7 +82,6 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
         } else if id == WLAN_EID_HT_CAPABILITY && len >= 26 {
             c.ht_supported = true;
             c.ht_cap = u16::from_le_bytes([b[0], b[1]]);
-            c.ht_ampdu_param = b[2];
             // `ht_cap.mcs` beginnt bei Versatz 3 (nach cap und ampdu).
             c.ht_mcs.copy_from_slice(&b[3..7]);
         } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
@@ -513,91 +507,4 @@ pub fn build_addba_resp(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
     out[29..31].copy_from_slice(&capab.to_le_bytes());
     out[31..33].copy_from_slice(&req.timeout.to_le_bytes());
     33
-}
-
-/// Die Antwort des AP auf UNSEREN Antrag (802.11 §9.6.7.3).
-#[derive(Clone, Copy)]
-pub struct AddbaResp {
-    pub dialog_token: u8,
-    pub status: u16,
-    pub tid: u8,
-    pub buf_size: u16,
-}
-
-/// Einen ADDBA **Request** bauen — die Richtung, die bis 0.35.0 fehlte.
-///
-/// **Ohne diesen Rahmen gibt es keine Sende-Aggregation, und das ist kein
-/// Detail:** rtw88 tut fuer einen Sende-Block hardwareseitig NICHTS
-/// (`rtw_ops_ampdu_action`, mac80211.c — `TX_OPERATIONAL` setzt ein
-/// Flagbit, sonst nichts). Die ganze Aushandlung ist dieser eine
-/// Verwaltungsrahmen; danach ist es EIN Bit im Sendedeskriptor. Wir haben
-/// seit 0.29.0 die Antwort auf die Bitte des AP gebaut und selbst nie
-/// gefragt — jeder Datenrahmen ging einzeln raus, mit vollem Medienzugriff
-/// und eigener Quittung.
-///
-/// `policy` ist 1 = Immediate Block Ack. Delayed gibt es praktisch
-/// nirgends mehr, und ein AP, der nur Delayed kann, lehnt mit Status 38 ab
-/// — das ist eine Antwort und kein Schweigen.
-pub fn build_addba_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
-                       tid: u8, buf_size: u16, dialog_token: u8,
-                       ssn: u16, timeout: u16) -> usize {
-    out.fill(0);
-    out[0] = DOT11_FC_ACTION;
-    out[1] = 0x00;
-    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
-    out[10..16].copy_from_slice(mac); // addr2 = wir
-    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
-
-    out[24] = DOT11_ACTION_CAT_BA;
-    out[25] = DOT11_ACTION_ADDBA_REQ;
-    out[26] = dialog_token;
-
-    // capab: A-MSDU aus (Bit 0), Immediate Block Ack (Bit 1), TID, Fenster.
-    let capab = ADDBA_PARAM_POLICY_MASK
-        | (((tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
-        | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
-    out[27..29].copy_from_slice(&capab.to_le_bytes());
-    out[29..31].copy_from_slice(&timeout.to_le_bytes());
-    // Start Sequence Control: die Folgenummer steht in Bit 15:4, die
-    // Fragmentnummer in 3:0 und ist null. **Die Maske gehoert HIER hin,
-    // nicht in die Erwartung an den Rufer** — eine Folgenummer ist zwoelf
-    // Bit breit (802.11 §9.2.4.4), und was darueber steht, schoebe sonst
-    // in ein fremdes Feld.
-    out[31..33].copy_from_slice(&(((ssn & 0x0fff) << 4)).to_le_bytes());
-    33
-}
-
-/// Die Antwort lesen. **Status 0 heisst ja — und NUR dann darf aggregiert
-/// werden.** Ein AP, der ablehnt, erwartet einzelne Rahmen; wer trotzdem
-/// aggregiert, sendet in einen Block, den niemand quittiert.
-pub fn parse_addba_resp(f: &[u8]) -> Option<AddbaResp> {
-    // 24 Kopf + Kategorie + Aktion + Token + Status + capab + timeout
-    if f.len() < 24 + 1 + 1 + 1 + 2 + 2 + 2 {
-        return None;
-    }
-    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_ADDBA_RESP {
-        return None;
-    }
-    let status = u16::from_le_bytes([f[27], f[28]]);
-    let capab = u16::from_le_bytes([f[29], f[30]]);
-    Some(AddbaResp {
-        dialog_token: f[26],
-        status,
-        tid: ((capab & ADDBA_PARAM_TID_MASK) >> 2) as u8,
-        buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
-    })
-}
-
-/// tx.c:99-108 `get_tx_ampdu_factor` — und der Kommentar dort ist der
-/// ganze Inhalt: die kleinste A-MPDU-Laenge ist 8K, im Deskriptor steht
-/// aber die maximale ANZAHL, und `val * 2` Pakete passen hinein. Deshalb
-/// ist die Basis 8/2 = 4, also `BIT(2)`.
-pub fn tx_ampdu_factor(peer_ampdu_param: u8) -> u8 {
-    let exp = peer_ampdu_param & 0x03; // IEEE80211_HT_AMPDU_PARM_FACTOR
-    ((4u32 << exp) - 1).min(255) as u8
-}
-
-/// tx.c:110-113 `get_tx_ampdu_density`.
-pub fn tx_ampdu_density(peer_ampdu_param: u8) -> u8 {
-    (peer_ampdu_param >> 2) & 0x07 // IEEE80211_HT_AMPDU_PARM_DENSITY >> 2
 }
