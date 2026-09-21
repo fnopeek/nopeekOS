@@ -352,6 +352,28 @@ pub fn build_ht_cap_ie(out: &mut [u8], hw_cap_bw: u8, nss: u8) -> usize {
         | (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
     cap |= IEEE80211_HT_CAP_LDPC_CODING; // rx_ldpc
     cap |= IEEE80211_HT_CAP_TX_STBC; // tx_stbc
+    // **SM Power Save: AUS — und das ist die Zutat, die rtw88 nicht hat.**
+    //
+    // `rtw_init_ht_cap` setzt diese zwei Bits NIE, und das ist dort richtig:
+    // in Linux baut MAC80211 das Element und traegt sie beim Anmeldeantrag
+    // nach (`mlme.c:1425-1444`, `cap &= ~IEEE80211_HT_CAP_SM_PS` gefolgt vom
+    // `switch (smps)`; eine gewoehnliche Station steht auf
+    // `IEEE80211_SMPS_OFF` und bekommt `WLAN_HT_CAP_SM_PS_DISABLED`).
+    //
+    // Wir haben kein mac80211. Ungesetzt sind die Bits **null**, und null
+    // ist nicht „egal", sondern `WLAN_HT_CAP_SM_PS_STATIC`: *ich halte nur
+    // EINE Empfangskette aktiv*. Ein AP, der sich daran haelt — und sie
+    // halten sich daran —, schickt ab da nur noch EINEN raeumlichen Strom,
+    // also hoechstens MCS7.
+    //
+    // Am Geraet gemessen (2026-09-21, IvyPie_New auf K7, -40 dBm): wir
+    // boten `nss 2` an, der AP meldete `MCS ff:ff:00:00` (kann selbst 2),
+    // unsere Sendemaske trug MCS0-15 und wir SENDETEN mit MCS15 -- und
+    // empfingen trotzdem MCS7 in 29804 von 35605 Rahmen. 49 Mbit aus
+    // 72 Mbit brutto sind 68 % Effizienz, der Empfangsweg war also nie das
+    // Problem. Es fehlte der zweite Strom, und wir hatten ihn selbst
+    // abbestellt.
+    cap |= WLAN_HT_CAP_SM_PS_DISABLED << IEEE80211_HT_CAP_SM_PS_SHIFT;
     // `hw_cap.bw & BIT(RTW_CHANNEL_WIDTH_40)`
     if hw_cap_bw & (1 << 1) != 0 {
         cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40
