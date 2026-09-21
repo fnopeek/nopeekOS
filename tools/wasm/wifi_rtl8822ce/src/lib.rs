@@ -3109,7 +3109,7 @@ fn rate_name(r: u8) -> &'static str {
 /// Die Zaehler der Verbindung. Sie gehoeren dem LINK, nicht der Stufe —
 /// 6b setzt fort, wo 6a aufgehoert hat, und ein Zaehler, der dabei auf
 /// null springt, ist eine Luege ueber die Leitung.
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct LinkStats {
     eapol_rx: u32,
     eapol_tx: u32,
@@ -3177,11 +3177,46 @@ struct LinkStats {
     rx_empty: u32,
     rx_frames: u32,
     rx_full: u32,
+    /// **Das Ratenhistogramm ueber die GANZE Verbindung.**
+    ///
+    /// Linux fuehrt `cur_pkt_count.num_qry_pkt[rate]` je Watchdog-Takt
+    /// und schiebt es nach `last_pkt_count`; debugfs liest es LAUFEND
+    /// mit. Wir haben kein debugfs — ein Bericht, den jemand NACH einer
+    /// Uebertragung liest, braucht eine Zahl, die sie ueberlebt.
+    ///
+    /// Und er braucht sie dringend: `curr_rx_rate` ist die Rate des
+    /// LETZTEN Rahmens, und eine halbe Sekunde nach einem Download ist
+    /// das ein Beacon — die gehen auf der niedrigsten Grundrate. Der
+    /// Bericht zeigte deshalb „OFDM 6M", waehrend die Daten mit etwas
+    /// ganz anderem kamen.
+    rate_hist: [u32; DESC_RATE_MAX],
     /// Wie oft die Firmware ihre Ratenwahl gemeldet hat (`C2H_RA_RPT`).
     /// **Null hiesse: `dm.tx_rate` steht auf 0 = CCK 1M**, und damit
     /// waehlt `config_swing_table` die CCK-Kurve der
     /// Sendeleistungs-Nachfuehrung.
     ra_rpt_n: u32,
+}
+
+impl Default for LinkStats {
+    /// **Von Hand, weil `[u32; 84]` kein `Default` hat** (die Ableitung
+    /// reicht nur bis 32). `zeroed` waere hier richtig und trotzdem
+    /// falsch: ein `unsafe` fuer eine Struktur aus lauter Zahlen und
+    /// `bool` spart nichts und verpflichtet den naechsten Leser.
+    fn default() -> Self {
+        LinkStats {
+            eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
+            authorized: false, link_up_sent: false, extra_reported: 0,
+            llc_miss: 0, rx_wd: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
+            gone: None, kicked: 0, last_reason: 0,
+            probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
+            probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
+            fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
+            mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
+            addba_resp: 0, addba_fail: 0,
+            rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
+            rate_hist: [0; DESC_RATE_MAX], ra_rpt_n: 0,
+        }
+    }
 }
 
 impl LinkStats {
@@ -4182,6 +4217,13 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
+            // `rtw_phy_stat_rate_cnt` hat das Fenster gerade nach
+            // `last_pkt_count` geschoben — jetzt und nur jetzt steht es
+            // vollstaendig da.
+            for i in 0..DESC_RATE_MAX {
+                ls.rate_hist[i] = ls.rate_hist[i]
+                    .saturating_add(d.dm.last_pkt_count.num_qry_pkt[i] as u32);
+            }
         }
 
         // ── Einmal je Sekunde: der Bericht fuer `wlan` ───────────
@@ -4629,10 +4671,22 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             *n += 2;
         }
     };
+    // **Die haeufigste Empfangsrate der ganzen Verbindung**, nicht die
+    // des letzten Rahmens. Bei einem Download sind 65 000 Datenrahmen
+    // gegen 900 Beacons kein Zweifelsfall.
+    let (top_rate, top_cnt) = ls.rate_hist.iter().enumerate()
+        .fold((0usize, 0u32), |acc, (i, &c)| if c > acc.1 { (i, c) } else { acc });
     put("  rx ", &mut b, &mut n);
-    put(rate_name(d.dm.curr_rx_rate), &mut b, &mut n);
+    put(rate_name(top_rate as u8), &mut b, &mut n);
     put(" (0x", &mut b, &mut n);
-    rate_hex(d.dm.curr_rx_rate, &mut b, &mut n);
+    rate_hex(top_rate as u8, &mut b, &mut n);
+    put(" in ", &mut b, &mut n);
+    num(top_cnt, &mut b, &mut n);
+    put(" von ", &mut b, &mut n);
+    let ges: u32 = ls.rate_hist.iter().sum();
+    num(ges, &mut b, &mut n);
+    put(", zuletzt ", &mut b, &mut n);
+    put(rate_name(d.dm.curr_rx_rate), &mut b, &mut n);
     put(")  tx ", &mut b, &mut n);
     put(rate_name(d.dm.tx_rate), &mut b, &mut n);
     put(" (0x", &mut b, &mut n);
