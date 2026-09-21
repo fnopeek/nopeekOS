@@ -171,6 +171,15 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
+    "rtw_get_channel_params":
+        "Linux liest eine fertige `cfg80211_chan_def` und vergleicht "
+        "FREQUENZEN (`primary_freq > center_freq`). Wir haben keine "
+        "chandef -- unsere Quelle ist das HT-Operation-Byte des AP, also "
+        "stehen bei uns die vier IEEE80211_HT_PARAM_*-Masken als Zahl "
+        "(0x03 Maske, 0x01 oben, 0x03 unten, 0x04 Breite erlaubt). "
+        "Dieselbe Entscheidung, andere Eingabe: ein Kanalschritt sind "
+        "5 MHz, der Groessenvergleich dreht sich mit. Die Zuordnung steht "
+        "im Doc-Kommentar der Funktion ausgeschrieben.",
     "rtw_tx_data_pkt_info_update":
         "Linux waehlt die Rate IN der Funktion (`supp_rates[0] <= 0xf`); "
         "bei uns entscheidet das der Rufer, weil er die Faehigkeiten des "

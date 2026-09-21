@@ -1885,25 +1885,102 @@ struct Bss {
     /// SEINE Verfahren — ein AP lehnt sonst mit Status 43 ab.
     rsn: [u8; 64],
     rsn_len: u8,
+    /// Byte 1 des HT-Operation-Elements (802.11 §9.4.2.56, id 61):
+    /// Bit 1:0 die Lage des Zweitkanals, Bit 2 ob der AP ueberhaupt
+    /// breiter als 20 MHz zulaesst. **Ohne dieses Byte gibt es kein
+    /// HT40** — welche HAELFTE die breite Zelle belegt, sagt allein der
+    /// AP, und eine geratene Haelfte ist ein anderer Kanal.
+    ht_param: u8,
 }
 
 const MAX_BSS: usize = 48;
 
+/// main.c:822-867 `rtw_get_channel_params` und main.c:759-792, der Teil von
+/// `rtw_update_channel`, der die Unterkanallage waehlt — zusammengezogen,
+/// weil beide dieselbe Fallunterscheidung fahren und wir keine `chandef`
+/// haben, sondern das HT-Operation-Byte des AP.
+///
+/// Linux rechnet in FREQUENZEN (`primary_freq > center_freq`), wir in
+/// Kanalnummern. Das ist dieselbe Aussage: ein Kanalschritt sind 5 MHz,
+/// und der Vergleich dreht sich mit. Ausgeschrieben, damit es nachpruefbar
+/// ist statt geglaubt:
+///
+/// ```text
+///   Zweitkanal OBEN  (0x1): Mitte = primaer + 2, primaer ist die UNTERE
+///   Zweitkanal UNTEN (0x3): Mitte = primaer - 2, primaer ist die OBERE
+/// ```
+///
+/// 80 MHz fehlt hier mit Absicht: dafuer braucht es das
+/// VHT-Operation-Element, und ohne 5 GHz gibt es keins.
+fn chan_params(primary: u8, ht_param: u8, allow_40: bool) -> (u8, usize, u8) {
+    const SEC_OFFSET: u8 = 0x03; // IEEE80211_HT_PARAM_CHA_SEC_OFFSET
+    const SEC_ABOVE: u8 = 0x01; // IEEE80211_HT_PARAM_CHA_SEC_ABOVE
+    const SEC_BELOW: u8 = 0x03; // IEEE80211_HT_PARAM_CHA_SEC_BELOW
+    const WIDTH_ANY: u8 = 0x04; // IEEE80211_HT_PARAM_CHAN_WIDTH_ANY
+
+    // **Beide Bedingungen, nicht eine.** Ein AP darf den Zweitkanal nennen
+    // und die Breite trotzdem verbieten (Bit 2 aus), waehrend er gerade
+    // einen 20-MHz-Nachbarn schuetzt. Wer nur den Versatz liest, sendet
+    // dann 40 MHz in eine Zelle, die 20 erwartet.
+    if !allow_40 || ht_param & WIDTH_ANY == 0 {
+        return (primary, 0, RTW_SC_DONT_CARE);
+    }
+    let center = match ht_param & SEC_OFFSET {
+        SEC_ABOVE => primary.saturating_add(2),
+        SEC_BELOW => primary.saturating_sub(2),
+        _ => return (primary, 0, RTW_SC_DONT_CARE),
+    };
+
+    // **Eine Zutat gegenueber Linux, und hier ist der Grund.** `rtw88`
+    // bekommt eine `cfg80211_chan_def`, die cfg80211 vorher geprueft hat
+    // (`cfg80211_chandef_valid`); es RECHNET nur noch. Wir haben kein
+    // cfg80211 — unsere Eingabe ist ein Byte aus einem fremden Beacon,
+    // und wenn das „Zweitkanal oben" auf Kanal 13 sagt, faehrt die
+    // Rechnung auf Kanal 15. Den gibt es nicht, seine Sendeleistung steht
+    // in keiner Tabelle, und in Europa ist er nicht zugelassen.
+    //
+    // Geprueft wird deshalb der MITTENkanal gegen das Band, aus dem der
+    // primaere kommt. Faellt er heraus, gilt 20 MHz — ein schmaler Kanal
+    // ist immer erlaubt, ein erfundener nie.
+    let plausibel = if primary <= 14 {
+        (1..=13).contains(&center)
+    } else {
+        (36..=165).contains(&center)
+    };
+    if !plausibel {
+        return (primary, 0, RTW_SC_DONT_CARE);
+    }
+
+    // main.c:766-768: liegt der primaere UEBER der Mitte, ist er die obere
+    // Haelfte. Bei „Zweitkanal oben" ist er also die untere.
+    if center > primary {
+        (center, 1, RTW_SC_20_LOWER)
+    } else {
+        (center, 1, RTW_SC_20_UPPER)
+    }
+}
+
 /// main.c:880-913 `rtw_set_channel` — der Teil, der auf JEDEN Kanal passt.
 ///
-/// Stufe 4c hatte ihn auf Kanal 1 festgenagelt; fuer einen Suchlauf muss er
-/// der Reihe nach jeden Kanal bekommen. `rtw_get_channel_params` fehlt noch
-/// (es rechnet aus einer `chandef` den Mitten- und den primaeren Kanal); bei
-/// 20 MHz sind beide derselbe, und breiter fahren wir nicht.
+/// `primary` ist der Kanal, auf dem die Zelle ihre Beacons sendet;
+/// `ht_param` das Byte aus ihrem HT-Operation-Element. Der Suchlauf ruft
+/// mit `allow_40 = false` — auf einem Kanal, den man nur abhorcht, ist
+/// jede Breite ueber 20 MHz eine Behauptung ueber den Nachbarkanal.
+///
+/// **Was an den Chip geht, ist der MITTENkanal**, nicht der primaere
+/// (main.c:817 `hal->current_channel = center_channel`) — und deshalb
+/// prueft auch die Gegenprobe an RF 0x18 gegen die Mitte.
 fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
-                  ch: u8) -> bool {
-    const BW: usize = 0; // RTW_CHANNEL_WIDTH_20
+                  primary: u8, ht_param: u8, allow_40: bool) -> bool {
+    let (ch, bw, primary_idx) = chan_params(primary, ht_param, allow_40);
 
-    // `rtw_update_channel`
+    // `rtw_update_channel`: der 20-MHz-Eintrag ist IMMER der primaere
+    // Kanal, der Eintrag der laufenden Breite die Mitte (main.c:754-757).
     let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..*t };
-    t2.cch_by_bw[0] = ch;
+    t2.cch_by_bw[0] = primary;
+    t2.cch_by_bw[bw] = ch;
 
-    chip::set_channel(h, ch, BW, RTW_SC_DONT_CARE);
+    chip::set_channel(h, ch, bw, primary_idx);
 
     // `rtw_coex_switchband_notify` steht hier in Linux, mit drei
     // verschiedenen Gruenden je nach Band und Suchlauf. Er muendet in
@@ -1916,7 +1993,7 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
         txpower::TxPwrIdx(&e.txpwr_idx[0]), txpower::TxPwrIdx(&e.txpwr_idx[1]),
         txpower::TxPwrIdx(&e.txpwr_idx[2]), txpower::TxPwrIdx(&e.txpwr_idx[3]),
     ];
-    txpower::set_tx_power_level(&t2, &idx, &mut tbl, hal.rf_path_num, ch, BW,
+    txpower::set_tx_power_level(&t2, &idx, &mut tbl, hal.rf_path_num, ch, bw,
                                 band, e.regd as usize);
     chip::set_tx_power_index(h, hal.rf_path_num, &tbl);
 
@@ -1998,7 +2075,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut found: [Bss; MAX_BSS] = [Bss {
         bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
         channel: 0, best: -128, beacons: 0, resps: 0,
-        capability: 0, rsn: [0; 64], rsn_len: 0,
+        capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -2013,7 +2090,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     for (list, active) in [(&ACTIVE_2G[..], true), (&PASSIVE_5G[..], false)] {
         for &ch in list {
             n_ch += 1;
-            if switch_channel(h, hal, e, t, ch) {
+            if switch_channel(h, hal, e, t, ch, 0, false) {
                 rf_ok += 1;
             } else if rf_bad_first == 0 {
                 rf_bad_first = ch;
@@ -2073,7 +2150,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print("\n");
     }
     // Zurueck auf den Kanal, auf dem die Stufen davor gemessen haben.
-    let _ = switch_channel(h, hal, e, t, 1);
+    let _ = switch_channel(h, hal, e, t, 1, 0, false);
 
     let dauer = (host::now_us() - t_start) / 1000;
     host::print("  ");
@@ -2278,6 +2355,13 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
             48 if len + 2 <= 64 => {
                 e.rsn[..len + 2].copy_from_slice(&f[i..i + 2 + len]);
                 e.rsn_len = (len + 2) as u8;
+            }
+            // 61 = HT Operation (802.11 §9.4.2.56). Byte 0 ist der
+            // primaere Kanal, Byte 1 traegt die Lage des Zweitkanals.
+            // Wir behalten nur Byte 1 — den Kanal wissen wir, wir
+            // standen darauf, als der Beacon hereinkam.
+            61 if len >= 2 => {
+                e.ht_param = f[i + 3];
             }
             _ => {}
         }
@@ -2562,11 +2646,22 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print_dec(bss.channel as u32);
     host::print("\n");
 
-    // `rtw_set_channel` auf den Kanal des Ziels.
-    if !switch_channel(h, hal, e, t, bss.channel) {
+    // `rtw_set_channel` auf den Kanal des Ziels — und **hier zum ersten
+    // Mal mit der Breite, die die Zelle ansagt.** Bis 0.32.x stand die
+    // Breite auf 20 MHz genagelt, waehrend der Anmeldeantrag
+    // `SUP_WIDTH_20_40` versprach und jeder Sendedeskriptor 40 MHz
+    // eintrug: drei Stellen, drei Antworten.
+    let (cch, bw, _) = chan_params(bss.channel, bss.ht_param, true);
+    if !switch_channel(h, hal, e, t, bss.channel, bss.ht_param, true) {
         host::print("  RF 0x18 traegt den Zielkanal NICHT\n");
         return false;
     }
+    host::print("  Kanal ");
+    host::print_dec(bss.channel as u32);
+    host::print(" · Breite ");
+    host::print(if bw == 1 { "40 MHz (Mitte K" } else { "20 MHz (K" });
+    host::print_dec(cch as u32);
+    host::print(")\n");
 
     // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
     // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
@@ -2939,7 +3034,22 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
         return false;
     }
 
-    let caps = sta::parse_assoc_resp(&resp[..len]);
+    let mut caps = sta::parse_assoc_resp(&resp[..len]);
+
+    // **Die Breite einer Station ist das MINIMUM aus ihrem Koennen und der
+    // Zelle** (mac80211 `ieee80211_sta_cur_vht_bw`). `parse_assoc_resp`
+    // kennt nur das Koennen — der Kommentar dort sagt es woertlich: „Ohne
+    // die Zelle bleibt das, was das Gegenueber kann." Hier haben wir die
+    // Zelle, also gehoert die Klemme hierher.
+    //
+    // Ohne sie trug jeder Sendedeskriptor 40 MHz, waehrend die PHY auf 20
+    // stand. Ein Deskriptor, der eine andere Breite behauptet als das
+    // Funkteil fuehrt, ist kein Schoenheitsfehler: die Firmware waehlt
+    // ihre Raten danach.
+    let (_, zellen_bw, _) = chan_params(bss.channel, bss.ht_param, true);
+    if caps.bandwidth > zellen_bw as u8 {
+        caps.bandwidth = zellen_bw as u8;
+    }
     host::print("  Gegenueber: HT ");
     host::print(if caps.ht_supported { "ja" } else { "nein" });
     if caps.ht_supported {
@@ -4667,14 +4777,14 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
 fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
                   e: &efuse::Efuse) {
-    let mut b = [0u8; 768];
+    let mut b = [0u8; 896];
     let mut n = 0usize;
-    let put = |s: &str, b: &mut [u8; 768], n: &mut usize| {
+    let put = |s: &str, b: &mut [u8; 896], n: &mut usize| {
         let k = s.len().min(b.len() - *n);
         b[*n..*n + k].copy_from_slice(&s.as_bytes()[..k]);
         *n += k;
     };
-    let num = |v: u32, b: &mut [u8; 768], n: &mut usize| {
+    let num = |v: u32, b: &mut [u8; 896], n: &mut usize| {
         let mut d = [0u8; 10];
         let mut i = 10;
         let mut v = v;
@@ -4706,7 +4816,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // `tx` ist, was die FIRMWARE gewaehlt hat (C2H `RA_RPT`), `rx` was
     // im Empfangsdeskriptor JEDES Rahmens steht. Das sind die Messungen.
     let hex = b"0123456789abcdef";
-    let rate_hex = |v: u8, b: &mut [u8; 768], n: &mut usize| {
+    let rate_hex = |v: u8, b: &mut [u8; 896], n: &mut usize| {
         if *n + 2 <= b.len() {
             b[*n] = hex[(v >> 4) as usize];
             b[*n + 1] = hex[(v & 0xf) as usize];
@@ -4738,7 +4848,32 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(" meldungen)  angeboten 0x", &mut b, &mut n);
     rate_hex(link.highest_rate, &mut b, &mut n);
     put("  bw ", &mut b, &mut n);
-    num(link.si.bw_mode as u32, &mut b, &mut n);
+    put(match link.si.bw_mode { 0 => "20", 1 => "40", _ => "80" },
+        &mut b, &mut n);
+    put(" MHz", &mut b, &mut n);
+    // Die PCIe-Strecke. Steht hier und nicht einmalig beim Start, weil
+    // ASPM ein Verdaechtiger fuer den Durchsatz ist und ein Verdaechtiger
+    // in DEN Bericht gehoert, den Florian einschickt.
+    if let Some(l) = pci::link_state() {
+        put("\npcie gen", &mut b, &mut n);
+        num(l.speed as u32, &mut b, &mut n);
+        put(" x", &mut b, &mut n);
+        num(l.width as u32, &mut b, &mut n);
+        put("  aspm ", &mut b, &mut n);
+        put(match l.aspm {
+            0 => "aus",
+            1 => "L0s",
+            2 => "L1 AN",
+            _ => "L0s+L1 AN",
+        }, &mut b, &mut n);
+        if l.aspm & 0x2 != 0 {
+            put(" (austritt ", &mut b, &mut n);
+            num(1u32 << l.l1_exit.min(6), &mut b, &mut n);
+            put(if l.l1_exit >= 7 { "+ us)" } else { " us)" }, &mut b, &mut n);
+        }
+        put("  clkreq ", &mut b, &mut n);
+        put(if l.clkreq { "an" } else { "aus" }, &mut b, &mut n);
+    }
     put("\nbssid ", &mut b, &mut n);
     for (i, byte) in link.bssid.iter().enumerate() {
         if i > 0 && n < b.len() {

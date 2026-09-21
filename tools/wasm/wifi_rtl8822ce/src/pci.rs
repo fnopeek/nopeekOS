@@ -916,3 +916,68 @@ pub fn tx_isr(h: i32, trx: &mut Trx, queue: usize) -> u32 {
     trx.tx[queue].rp = cur_rp;
     count
 }
+
+/// Der Zustand der PCIe-Strecke: ausgehandelte Geschwindigkeit und Breite,
+/// und vor allem **ob ASPM L1 an ist**.
+///
+/// Warum das hier steht und nicht in einem Papier: rtw88 verteidigt sich
+/// aktiv dagegen. `rtw_pci_link_ps` (pci.c:1373) wird beim Betreten und
+/// Verlassen JEDES Abholtakts gerufen, und der Kommentar darueber ist eine
+/// Warnung, keine Fussnote:
+///
+/// > we've experienced some inter-operability issues that the link tends to
+/// > enter L1 state on the fly even when driver is having high throughput
+///
+/// Wir portieren diese Verteidigung nicht. Ob uns das etwas kostet, haengt
+/// an genau einem Bit im Link-Control-Register der Karte — und das ist eine
+/// MESSUNG, keine Vermutung. Deshalb zuerst die Zeile und dann, falls sie
+/// „L1 an" sagt, der Umbau.
+///
+/// Gibt `None`, wenn das Geraet gar keine PCIe-Capability fuehrt (dann ist
+/// es kein PCIe-Geraet, und die Frage stellt sich nicht).
+pub struct LinkState {
+    /// LNKCTL Bit 1:0 — 0 aus · 1 L0s · 2 L1 · 3 beide
+    pub aspm: u8,
+    /// LNKCTL Bit 8
+    pub clkreq: bool,
+    /// LNKSTA Bit 3:0 — 1 = 2,5 GT/s · 2 = 5 GT/s · 3 = 8 GT/s
+    pub speed: u8,
+    /// LNKSTA Bit 9:4
+    pub width: u8,
+    /// LNKCAP Bit 17:15 — die L1-Austrittszeit, die der Chip ANSAGT.
+    /// 0..6 = 1/2/4/8/16/32/64 us, 7 = mehr als 64.
+    pub l1_exit: u8,
+}
+
+pub fn link_state() -> Option<LinkState> {
+    // Standard-Capability-Liste: 0x34 zeigt auf den ersten Eintrag, jeder
+    // traegt seine Art in Byte 0 und den naechsten Zeiger in Byte 1.
+    // Ein Zaehler deckelt den Gang — eine ringfoermige Liste gibt es in
+    // kaputter Firmware wirklich, und ohne Deckel steht der Treiber.
+    let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
+    let mut schritte = 0;
+    while ptr >= 0x40 && ptr != 0xff && schritte < 48 {
+        let base = ptr & 0xfc;
+        let w = host::pci_read_config(base);
+        // Der Eintrag muss nicht auf vier ausgerichtet liegen.
+        let shift = ((ptr & 0x3) * 8) as u32;
+        let id = ((w >> shift) & 0xff) as u8;
+        let next = ((w >> (shift + 8)) & 0xff) as u8;
+        if id == 0x10 {
+            // PCI_CAP_ID_EXP. LNKCAP bei +0x0C, LNKCTL bei +0x10,
+            // LNKSTA bei +0x12 — LNKCTL und LNKSTA teilen sich ein Wort.
+            let lnkcap = host::pci_read_config(ptr + 0x0c);
+            let ctlsta = host::pci_read_config(ptr + 0x10);
+            return Some(LinkState {
+                aspm: (ctlsta & 0x3) as u8,
+                clkreq: ctlsta & (1 << 8) != 0,
+                speed: ((ctlsta >> 16) & 0xf) as u8,
+                width: ((ctlsta >> 20) & 0x3f) as u8,
+                l1_exit: ((lnkcap >> 15) & 0x7) as u8,
+            });
+        }
+        ptr = next;
+        schritte += 1;
+    }
+    None
+}
