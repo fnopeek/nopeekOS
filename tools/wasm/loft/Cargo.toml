@@ -1,6 +1,6 @@
 [package]
 name = "loft"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 description = "File browser — Thunar-clone for nopeekOS."
 
@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 nopeek_widgets = { path = "../sdk/widgets" }
 
 [dependencies.postcard]
-version = "0.7.0"
+version = "1.0"
 default-features = false
 features = ["alloc"]
 
