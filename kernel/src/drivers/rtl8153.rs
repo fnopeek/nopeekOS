@@ -586,14 +586,27 @@ pub fn dump_tally(label: &str) {
         crate::kprintln!("[npk] rtl8153 tally[{}]: read failed", label);
         return;
     }
+    // `struct tally_counter` (r8152): tx_packets 0, rx_packets 8, tx_errors
+    // 16, rx_errors 24, rx_missed 28, align 30, … tx_aborted 60,
+    // tx_underrun 62.
+    //
+    // **tx_packets stand ganz vorne und wurde nie gelesen.** Damit fehlte
+    // die halbe Antwort: `rx_missed = 0` sagt zwar „der Chip laeuft nicht
+    // ueber, wir sind nicht zu langsam" — aber ob unsere eigenen Rahmen
+    // ueberhaupt HINAUSgehen, sagte keine Zahl. Bei einem `connect
+    // timeout` nach drei SYN ist genau das die Frage.
+    let tx_packets = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
     let rx_packets = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
+    let tx_errors = u64::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]);
     let rx_errors = u32::from_le_bytes([b[24], b[25], b[26], b[27]]);
     let rx_missed = u16::from_le_bytes([b[28], b[29]]);     // RX FIFO overflow drops
     let align_errors = u16::from_le_bytes([b[30], b[31]]);
+    let tx_aborted = u16::from_le_bytes([b[60], b[61]]);
     let tx_underrun = u16::from_le_bytes([b[62], b[63]]);
     crate::kprintln!(
-        "[npk] rtl8153 tally[{}]: rx_pkts={} rx_missed(FIFO-overflow)={} rx_errors={} align={} tx_underrun={}",
-        label, rx_packets, rx_missed, rx_errors, align_errors, tx_underrun);
+        "[npk] rtl8153 tally[{}]: tx_pkts={} rx_pkts={} | tx_err={} tx_aborted={} tx_underrun={} | rx_missed(FIFO)={} rx_err={} align={}",
+        label, tx_packets, rx_packets, tx_errors, tx_aborted, tx_underrun,
+        rx_missed, rx_errors, align_errors);
 }
 
 /// Dump the PHY link registers raw + derived speed. PLA_PHYSTATUS is the chip's
