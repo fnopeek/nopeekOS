@@ -310,6 +310,10 @@ struct TcpConn {
     rto_tick: u64,
 
     // Delayed ACK
+    /// Ein EINMALIGER D-SACK-Block (RFC 2883): der Bereich eines Segments,
+    /// das wir schon hatten. Wird beim naechsten Quittungsbau als ERSTER
+    /// SACK-Block ausgegeben und danach sofort geloescht.
+    dsack: Option<(u32, u32)>,
     ack_pending: bool,
     ack_tick: u64,
     // In-order segments received since our last ACK (ACK-coalescing counter).
@@ -406,6 +410,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         retries: 0,
         last_send_tick: crate::interrupts::ticks(),
         rto_tick: 0,
+        dsack: None,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -544,6 +549,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         retries: 0,
         last_send_tick: 0,
         rto_tick: 0,
+        dsack: None,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -627,6 +633,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         retries: 0,
         last_send_tick: 0,
         rto_tick: 0,
+        dsack: None,
         ack_pending: false,
         ack_tick: 0,
         acks_held: 0,
@@ -1101,12 +1108,43 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                         conn.ack_pending = false;
                     } else {
-                        // BEHIND = a pure duplicate (data we already have). Do NOT
-                        // re-ACK: that ACK is itself a duplicate ACK and 3 of them
-                        // make the sender fast-retransmit → a spurious-retransmit
-                        // feedback loop (v0.219.7/8 doubled dup this way). Count
-                        // only; the next in-order segment's ACK re-syncs the sender.
+                        // BEHIND = wir haben diese Bytes schon. **Jetzt mit
+                        // D-SACK (RFC 2883) statt mit Schweigen.**
+                        //
+                        // Hier stand, man duerfe nicht erneut quittieren, weil
+                        // drei gleiche Quittungen eine Schnellwiederholung
+                        // ausloesen (v0.219.7/8). Der Schluss war zu breit: eine
+                        // Quittung, die einen BEREITS QUITTIERTEN Bereich als
+                        // ersten SACK-Block nennt, ist genau das Gegenteil eines
+                        // Doppels — der Sender liest daran ab, dass seine
+                        // Wiederholung ueberfluessig war, und nimmt seine
+                        // Fensterkuerzung ZURUECK (Linux: `tcp_dsack_seen` ->
+                        // `tcp_undo_cwnd_reduction`).
+                        //
+                        // Ohne das blutet er bei jedem Mal. Am Geraet gemessen
+                        // (2026-09-21, WLAN): `retrans=371` bei `lost=0` — der
+                        // Server wiederholte 371-mal, ohne ein einziges Paket
+                        // als verloren zu fuehren, und wir konnten es ihm nicht
+                        // sagen. Ein `dsack=0` in seinem `tcp_info` war deshalb
+                        // nie eine Aussage ueber die Leitung, sondern ueber uns.
                         TCP_OOO_BEHIND.fetch_add(1, Relaxed);
+                        if !payload.is_empty() {
+                            let end = seq.wrapping_add(payload.len() as u32);
+                            // Nur der Teil, den wir WIRKLICH schon haben.
+                            let hi = if (end.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
+                                conn.rcv_nxt
+                            } else {
+                                end
+                            };
+                            if (hi.wrapping_sub(seq) as i32) > 0 {
+                                conn.dsack = Some((seq, hi));
+                                let w = recv_window(conn);
+                                send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                                conn.dsack = None;
+                                conn.ack_pending = false;
+                                conn.acks_held = 0;
+                            }
+                        }
                     }
                 }
             }
@@ -1437,14 +1475,26 @@ fn parse_sack_permitted(seg: &[u8], data_offset: usize) -> bool {
 /// absolute sequence numbers. Returns bytes written (0 if nothing to report).
 /// First block = the highest run (most recently relevant), per RFC 2018.
 fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
-    if !conn.sack_ok || conn.ooo_runs.is_empty() { return 0; }
+    if !conn.sack_ok || (conn.ooo_runs.is_empty() && conn.dsack.is_none()) {
+        return 0;
+    }
     // `ooo_runs` is already coalesced, so this is O(runs) — no per-ACK scan of
     // the whole segment map. Emit the highest up-to-3 runs, highest first
     // (RFC 2018 §4: the most recently received block goes first).
     out[0] = 5;                       // SACK option kind
     let mut p = 2;
     let mut take = 0usize;
-    for (&s, &e) in conn.ooo_runs.iter().rev().take(3) {
+    // **Der D-SACK-Block steht VORN, und das ist der ganze Vertrag.**
+    // RFC 2883 §4: der erste Block einer SACK-Option darf einen Bereich
+    // nennen, der bereits quittiert ist — daran und nur daran erkennt der
+    // Sender ein Duplikat. Steht er nicht an erster Stelle, ist er ein
+    // gewoehnlicher SACK-Block und sagt das Gegenteil.
+    if let Some((l, r)) = conn.dsack {
+        out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
+        out[p..p + 4].copy_from_slice(&r.to_be_bytes()); p += 4;
+        take += 1;
+    }
+    for (&s, &e) in conn.ooo_runs.iter().rev().take(3 - take) {
         let l = conn.rcv_irs.wrapping_add(s);
         let r = conn.rcv_irs.wrapping_add(e);
         out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
@@ -1568,7 +1618,8 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
     // SACK blocks ride on a PURE ACK only. On a data segment they would push
     // the frame past the MTU again — `eff_mss` budgets for the timestamp and
     // nothing else, and a variable option length cannot be budgeted for at all.
-    if conn.sack_ok && flags & SYN == 0 && !has_payload && !conn.ooo.is_empty() {
+    if conn.sack_ok && flags & SYN == 0 && !has_payload
+        && (!conn.ooo.is_empty() || conn.dsack.is_some()) {
         let mut sack = [0u8; 26]; // 2 + 8*3
         let slen = build_sack_blocks(conn, &mut sack);
         if slen > 0 && len + 2 + slen <= opts.len() {
