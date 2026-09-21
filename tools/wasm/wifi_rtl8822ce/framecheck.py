@@ -287,6 +287,41 @@ def check_loud_balance(src):
     return bad
 
 
+# `chan_params`: (Name, primaer, ht_param, allow_40) -> (Mitte, bw, idx)
+#
+# Die vier interessanten Faelle stehen VOR den langweiligen: ohne Bit 2 darf
+# es kein HT40 geben, auch wenn der Versatz dasteht; und ein Versatz, der aus
+# dem Band laeuft, muss auf 20 MHz zurueckfallen statt einen Kanal zu
+# erfinden, den es nicht gibt.
+SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
+CHAN = [
+    ("K7, Zweitkanal UNTEN -> Mitte 5, primaer ist die obere Haelfte",
+     7, 0x07, True, (5, 1, SC_20_UPPER)),
+    ("K7, Zweitkanal OBEN -> Mitte 9, primaer ist die untere Haelfte",
+     7, 0x05, True, (9, 1, SC_20_LOWER)),
+    ("K7, Versatz ohne Bit 2 (Breite verboten) -> 20 MHz",
+     7, 0x03, True, (7, 0, SC_DONT_CARE)),
+    ("K13 + Zweitkanal OBEN waere K15 -> den gibt es nicht, 20 MHz",
+     13, 0x05, True, (13, 0, SC_DONT_CARE)),
+    ("K1 + Zweitkanal UNTEN waere K-1 -> 20 MHz statt Unterlauf",
+     1, 0x07, True, (1, 0, SC_DONT_CARE)),
+    ("K7 im Suchlauf (allow_40 = false) -> immer 20 MHz",
+     7, 0x07, False, (7, 0, SC_DONT_CARE)),
+    ("K7, Bit 2 an aber Versatz NONE -> 20 MHz",
+     7, 0x04, True, (7, 0, SC_DONT_CARE)),
+    ("K36 (5 GHz), Zweitkanal OBEN -> Mitte 38",
+     36, 0x05, True, (38, 1, SC_20_LOWER)),
+    ("K48 (5 GHz), Zweitkanal UNTEN -> Mitte 46",
+     48, 0x07, True, (46, 1, SC_20_UPPER)),
+    ("K165 (5 GHz oben), Zweitkanal OBEN waere 167 -> 20 MHz",
+     165, 0x05, True, (165, 0, SC_DONT_CARE)),
+    ("K11, Zweitkanal OBEN -> Mitte 13, gerade noch drin",
+     11, 0x05, True, (13, 1, SC_20_LOWER)),
+    ("K12, Zweitkanal OBEN waere 14 -> 20 MHz (K14 nur Japan)",
+     12, 0x05, True, (12, 0, SC_DONT_CARE)),
+]
+
+
 def main():
     src = (HERE / "src" / "lib.rs").read_text()
     regs = (HERE / "src" / "regs.rs").read_text()
@@ -294,6 +329,7 @@ def main():
     fn = grab(src, r"\n(fn disconnect_reason.*?\n\})", "disconnect_reason")
     names = grab(src, r"\n(fn reason_name.*?\n\})", "reason_name")
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
+    chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
@@ -319,7 +355,23 @@ def main():
         if int(m.group(1)) != want:
             sys.exit("%s ist %s, fw.h:370-371 sagt %d"
                      % (name, m.group(1), want))
-    consts = """const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
+    # Die drei Unterkanal-Namen kommen aus regs.rs. check_regs.py haelt sie
+    # gegen main.h:106-108; hier wird nur sichergestellt, dass der Pruefer
+    # DIESELBEN Zahlen fuehrt wie der Treiber, statt sie abzuschreiben.
+    sc = {}
+    for name, want in (("RTW_SC_DONT_CARE", 0), ("RTW_SC_20_UPPER", 1),
+                       ("RTW_SC_20_LOWER", 2)):
+        m = re.search(r"pub const %s: u8 = (\d+);" % name, regs)
+        if not m:
+            sys.exit("%s nicht in src/regs.rs" % name)
+        if int(m.group(1)) != want:
+            sys.exit("%s ist %s, main.h sagt %d" % (name, m.group(1), want))
+        sc[name] = int(m.group(1))
+
+    consts = """const RTW_SC_DONT_CARE: u8 = 0;
+const RTW_SC_20_UPPER: u8 = 1;
+const RTW_SC_20_LOWER: u8 = 2;
+const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
 const CCX_REPORT_V0_SEQNUM_MASK: u8 = 0xfc;
 const CCX_REPORT_V0_STATUS_OFF: usize = 0;
 const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0;
@@ -369,6 +421,11 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
+    chan_cases = "\n".join(
+        '        (%s, %d, %d, %s, (%d, %d, %d)),' % (
+            rs(name), pri, par, "true" if a40 else "false", w[0], w[1], w[2])
+        for name, pri, par, a40, w in CHAN)
+
     mgmt_cases = "\n".join(
         '        (%s, &[%s], %s),' % (
             rs(name), ", ".join(str(b) for b in f),
@@ -380,6 +437,7 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for name, f, want in MGMT)
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
+        + "\n\n" + chanp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
@@ -502,13 +560,24 @@ fn main() {
              if short_ok { "OK  " } else { "DIFF" });
     bad += ab;
 
+    let chans: &[(&str, u8, u8, bool, (u8, usize, u8))] = &[
+%s
+    ];
+    for (name, pri, par, a40, want) in chans {
+        let got = chan_params(*pri, *par, *a40);
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3;
+                + mgmt.len() + 3 + chans.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()))
+       ", ".join(str(b) for b in addba_req()), chan_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
