@@ -3280,6 +3280,11 @@ struct LinkStats {
     extra_reported: u32,
     llc_miss: u32,
     rx_wd: u32,
+    /// **Das letzte Sequenz-Kontrollfeld je TID** (Platz 8 = ohne QoS),
+    /// `u32::MAX` = noch keins. `rx.c:1480` `last_seq_ctrl[seqno_idx]`.
+    last_seq_ctrl: [u32; 9],
+    /// Verworfene 802.11-Wiederholungen (`dot11FrameDuplicateCount`).
+    dup_rx: u32,
     /// **Der Gruppen-Neuschluessel, gezaehlt statt vermutet.** Jedes
     /// EAPOL NACH dem Handschlag ist einer (msg1 der
     /// Gruppenschluessel-Sequenz, oder ein ganz neues Vierwege), und
@@ -3384,7 +3389,7 @@ impl Default for LinkStats {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
-            llc_miss: 0, rx_wd: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
+            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 9], dup_rx: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
             gone: None, kicked: 0, last_reason: 0,
             probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
@@ -4074,6 +4079,40 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ls.gone = Some(r);
                 }
                 return;
+            }
+            // **Doppelte 802.11-Wiederholungen verwerfen** —
+            // `ieee80211_rx_h_check_dup` (rx.c:1438-1490), 802.11-2012
+            // §9.3.2.10 „Duplicate detection and recovery".
+            //
+            // Der AP wiederholt einen Rahmen auf MAC-Ebene, wenn unsere
+            // Quittung ausbleibt oder zu spaet kommt. Die Wiederholung
+            // traegt dasselbe Sequenz-Kontrollfeld und das Retry-Bit. Wer
+            // sie nicht verwirft, liefert dieselben Bytes ZWEIMAL an TCP.
+            //
+            // Am Geraet gemessen (2026-09-21, WLAN mit D-SACK): der Server
+            // meldete `dsack=481` bei `retrans=186`. Eine TCP-Wiederholung
+            // kann hoechstens EIN Duplikat erzeugen — die uebrigen ~295
+            // entstanden also UNTER TCP, und das hier ist die Stelle.
+            //
+            // Verglichen wird das GANZE Feld, nicht nur die Sequenznummer:
+            // die unteren vier Bits sind die Fragmentnummer, und zwei
+            // Bruchstuecke desselben Rahmens sind keine Duplikate.
+            if f.len() >= 24 {
+                let fc = u16::from_le_bytes([f[0], f[1]]);
+                if fc & 0x000c == 0x0008 {
+                    let is_qos = fc & 0x0080 != 0;
+                    let idx = if is_qos && f.len() >= 26 {
+                        (f[24] & 0x0f) as usize
+                    } else {
+                        8
+                    };
+                    let sc = u16::from_le_bytes([f[22], f[23]]) as u32;
+                    if fc & 0x0800 != 0 && ls.last_seq_ctrl[idx] == sc {
+                        ls.dup_rx += 1;
+                        return;
+                    }
+                    ls.last_seq_ctrl[idx] = sc;
+                }
             }
             let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut ls.llc_miss)
             else {
@@ -4978,6 +5017,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.data_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
     num(ls.data_tx, &mut b, &mut n);
+    put("  duplikate ", &mut b, &mut n);
+    num(ls.dup_rx, &mut b, &mut n);
     put("  eapol ", &mut b, &mut n);
     num(ls.eapol_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
