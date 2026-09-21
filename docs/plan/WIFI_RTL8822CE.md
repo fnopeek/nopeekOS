@@ -2015,6 +2015,66 @@ Sendeweg MCS4, obwohl wir MCS15 anbieten — und `snr 27/19` sagt, dass
 Pfad B deutlich schlechter steht als Pfad A. Das ist die naechste Spur,
 sobald die Empfangsrate bekannt ist.
 
+### 📏 Die echte Rate steht — und der Server nennt eine RTT von 1,3 SEKUNDEN
+
+```
+rx HT MCS7 (0x13 in 9566 von 12852, zuletzt CCK 1M)  tx HT MCS4 (0x10, 2 meldungen)
+daten rein/raus 72643/10538
+rx-schleife 74506 blicke mit beute, 3280375 leer, 1,2 rahmen/blick, 0 volle stapel
+```
+
+**Drei Befunde, und einer davon faellt nebenbei ab.**
+
+**(1) Die Aggregation LAEUFT, und zwar nachweisbar.** 72 643 Datenrahmen,
+aber nur **12 852** im Ratenhistogramm. Der PHY-Status haengt je **PPDU**
+an, nicht je MPDU — also **5,7 MPDU je Aggregat**. Das ist die Zahl, die
+ADDBA gebracht hat, und niemand musste sie glauben.
+
+**(2) Die Empfangsrate ist HT MCS7**, nicht MCS15. MCS7 ist
+EINstroemig; fuer MCS8-15 braucht es beide Pfade, und `snr 28/20` sagt,
+warum der AP es nicht tut: **Pfad B steht acht dB unter Pfad A.** Ob das
+die Antenne ist oder der Kalibrierungsrest, der seit 0.10.3 auf Pfad B
+nicht konvergiert, ist eine eigene Frage — aber selbst MCS7 auf 40 MHz
+sind 135 Mbit/s PHY.
+
+**(3) Und damit ist die Luft ausgeschlossen:**
+
+    ein Aggregat aus 5,7 Rahmen bei MCS7/40 MHz  ~640 us
+    -> moeglich ~8800 Rahmen/s,  gemessen 1409   = Faktor 6 darunter
+
+**Der Server sagt, wo die sechs Faktoren liegen** (`TCP_INFO`, seit dem
+ungepufferten Start):
+
+```
+rtt=1318159us  retrans=116  cwnd=3181  ssthresh=105  pacing=34Mbit
+snd_wnd=8376832   (unser Fenster, nie geschlossen)
+```
+
+**1,3 Sekunden Round-Trip.** Nicht 10 ms. Das Fenster ist es also nicht
+— wir sagen 8 MB an und halten sie offen. Es ist die LATENZ, und Linux'
+Pacing rechnet daraus brav 34 Mbit und liefert 16.
+
+**Woher 1,3 Sekunden kommen, ist die Frage dieser Runde**, und
+`rahmen/blick 1,2` beantwortet sie NICHT: die Zahl heisst „schnell
+genug" ODER „exakt so langsam wie die Ankunft". Wenn ein Rahmen 700 us
+Bearbeitung kostet, leert sich der Ring bei jedem Blick, und das sieht
+identisch aus.
+
+**0.31.2 misst deshalb die Wanduhrzeit IM Empfangspfad** — nur auf
+Bliecken, die etwas brachten (rund 1400 je Sekunde), denn bei den
+65 000 leeren waere die Messung der Zustand:
+
+    ... 0 volle stapel, 63 % der zeit im empfangspfad (450 us je rahmen)
+
+* **Anteil hoch** → wir SIND die langsame Seite, trotz `1,2
+  rahmen/blick`, und der Posten ist der Empfangspfad selbst: drei Kopien
+  (`dma_read_buf` ueber die volle Pufferlaenge, `rx_to_8023`,
+  `netdev_submit_rx`) und drei Wirtsaufrufe je Rahmen.
+* **Anteil klein** → die Zeit geht woanders hin, und dann ist der
+  naechste Messpunkt die Senderichtung: ein `ping` WAEHREND der
+  Uebertragung trennt eine stehende Warteschlange (Bufferbloat) von
+  einer langsamen Quittung.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
