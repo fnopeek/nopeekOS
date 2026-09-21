@@ -89,6 +89,15 @@ NICHT_NOETIG = {
     "rtw_iterate_stas": "genau EINE Station: der AP",
 }
 
+# Die mac80211-Sendeschlangen. EINE Begruendung, fuenf Funktionen.
+_TXQ = ("mac80211s Software-Schlange je TID. Wir haben keine — der Kernel "
+        "reicht den Rahmen direkt durch, und der Chip aggregiert nach dem "
+        "Deskriptorbit. Was diese Schicht BEWIRKT, ist der ADDBA-Antrag "
+        "(`ieee80211_start_tx_ba_session`), und den baut lib.rs seit "
+        "0.36.0 selbst. Ein struktureller Unterschied, kein fehlendes "
+        "Stueck — nachgewiesen: rtw_ops_ampdu_action (mac80211.c) fasst "
+        "fuer einen SENDE-Block kein Register an, es setzt ein Flagbit.")
+
 # Was bei uns an anderer Stelle steht — mit der Stelle, nicht mit einem Wort.
 ERSETZT = {
     "rtw_pci_interrupt_handler":
@@ -106,10 +115,18 @@ ERSETZT = {
         "alle Schlangen, wir stossen die eine an, die wir gefuellt haben",
     "rtw_ops_tx":
         "lib.rs — der Rahmen kommt vom Kernel, nicht von mac80211",
-    "rtw_ops_wake_tx_queue":
-        "Es gibt bei uns keine Software-Schlange je TID. GENAU DAS ist "
-        "Luecke 1 unten: ohne sie kein `rtw_txq_check_agg`, ohne das keine "
-        "SENDE-Aggregation.",
+    "rtw_tx_work": _TXQ,
+    "__rtw_tx_work": _TXQ,
+    "rtw_txq_push": _TXQ,
+    "rtw_txq_push_skb": _TXQ,
+    "rtw_txq_dequeue": _TXQ,
+    "rtw_ops_wake_tx_queue": _TXQ,
+    "rtw_txq_check_agg":
+        "Linux' Ausloeser fuer den Sende-Block: er setzt `si->tid_ba` und "
+        "stoesst `ba_work` an, das `ieee80211_start_tx_ba_session` ruft. "
+        "Bei uns steht der Ausloeser in `link_pump` (lib.rs) und der "
+        "Rahmen in `sta::build_addba_req` — ohne Schlange, weil es keine "
+        "gibt.",
 }
 
 

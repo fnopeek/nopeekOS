@@ -308,6 +308,20 @@ ASPM = [
     ("unverstanden -> aus, nicht None", "vielleicht", "Some(false)"),
 ]
 
+# `tx_ampdu_factor` / `tx_ampdu_density`: das A-MPDU-Byte DES AP -> was in
+# unseren Sendedeskriptor geht. tx.c:99-113. Die Basis ist 4, nicht 8:
+# im Deskriptor steht die ANZAHL, und val*2 Pakete passen hinein.
+AMPDU = [
+    ("exp 0 -> 4*1-1 = 3", 0x00, 3, 0),
+    ("exp 1 -> 4*2-1 = 7", 0x01, 7, 0),
+    ("exp 2 -> 4*4-1 = 15", 0x02, 15, 0),
+    ("exp 3 (64K) -> 4*8-1 = 31", 0x03, 31, 0),
+    ("dichte 4 (2 us), exp 3", 0x13, 31, 4),
+    ("dichte 7 (16 us), exp 3", 0x1f, 31, 7),
+    ("dichte 0, exp 0 -- das kleinste Paar", 0x00, 3, 0),
+    ("Bit 5..7 sind reserviert und duerfen nichts aendern", 0xe3, 31, 0),
+]
+
 SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
 CHAN = [
     ("K7, Zweitkanal UNTEN -> Mitte 5, primaer ist die obere Haelfte",
@@ -359,6 +373,17 @@ def main():
                    "build_addba_resp")
     rxsrc = (HERE / "src" / "rx.rs").read_text()
     census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
+    ampdu_f = grab(stasrc, r"\n(pub fn tx_ampdu_factor.*?\n\})",
+                   "tx_ampdu_factor")
+    ampdu_d = grab(stasrc, r"\n(pub fn tx_ampdu_density.*?\n\})",
+                   "tx_ampdu_density")
+    addba_rs = grab(stasrc,
+                    r"\n(#\[derive\(Clone, Copy\)\]\npub struct AddbaResp.*?\n\})",
+                    "struct AddbaResp")
+    addba_rq = grab(stasrc, r"\n(pub fn build_addba_req.*?\n\})",
+                    "build_addba_req")
+    addba_pr = grab(stasrc, r"\n(pub fn parse_addba_resp.*?\n\})",
+                    "parse_addba_resp")
 
     # Die zwei Konstanten kommen aus regs.rs — sonst prueft der Pruefer
     # seine eigene Abschrift. Sie stehen in KEINEM Linux-Header, also
@@ -437,6 +462,10 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
+    ampdu_cases = "\n".join(
+        '        (%s, %d, %d, %d),' % (rs(name), par, f, d)
+        for name, par, f, d in AMPDU)
+
     aspm_cases = "\n".join(
         '        (%s, %s, %s),' % (rs(name), rs(v), want)
         for name, v, want in ASPM)
@@ -458,6 +487,8 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + chanp + "\n\n" + aspmp \
+        + "\n\n" + ampdu_f + "\n\n" + ampdu_d \
+        + "\n\n" + addba_rs + "\n\n" + addba_rq + "\n\n" + addba_pr \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
@@ -602,13 +633,103 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    let ampdus: &[(&str, u8, u8, u8)] = &[
+%s
+    ];
+    for (name, par, wf, wd) in ampdus {
+        let gf = tx_ampdu_factor(*par);
+        let gd = tx_ampdu_density(*par);
+        let ok = gf == *wf && gd == *wd;
+        if !ok { bad += 1; }
+        println!("  {} ampdu: {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok {
+            println!("       erwartet faktor {} dichte {}, bekommen {} {}",
+                     wf, wd, gf, gd);
+        }
+    }
+
+    // ADDBA Request bauen und die Antwort darauf wieder lesen: dieselben
+    // Felder muessen heil durch beide Richtungen kommen.
+    let mut req = [0u8; 256];
+    let rn = build_addba_req(&mut req, &OUR_MAC, &BSSID, 5, 64, 0x33,
+                             0x123, 0);
+    let mut rt = 0;
+    if rn != 33 { rt += 1; println!("  DIFF ADDBA Request Laenge {}", rn); }
+    if req[24] != DOT11_ACTION_CAT_BA || req[25] != DOT11_ACTION_ADDBA_REQ {
+        rt += 1; println!("  DIFF ADDBA Request Kategorie/Aktion");
+    }
+    if req[26] != 0x33 { rt += 1; println!("  DIFF ADDBA Request Token"); }
+    let capab = u16::from_le_bytes([req[27], req[28]]);
+    let tid = (capab & ADDBA_PARAM_TID_MASK) >> 2;
+    let buf = (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
+    let pol = capab & ADDBA_PARAM_POLICY_MASK;
+    if tid != 5 { rt += 1; println!("  DIFF ADDBA Request TID {}", tid); }
+    if buf != 64 { rt += 1; println!("  DIFF ADDBA Request Fenster {}", buf); }
+    if pol == 0 {
+        rt += 1;
+        println!("  DIFF ADDBA Request: Immediate-Bit fehlt");
+    }
+    let ssn = u16::from_le_bytes([req[31], req[32]]) >> 4;
+    if ssn != 0x123 { rt += 1; println!("  DIFF ADDBA Request SSN {:#x}", ssn); }
+    // Eine Folgenummer ist zwoelf Bit. Was darueber steht, darf nicht in
+    // ein fremdes Feld schieben.
+    let mut req2 = [0u8; 256];
+    build_addba_req(&mut req2, &OUR_MAC, &BSSID, 0, 64, 1, 0xf234, 0);
+    let ssn2 = u16::from_le_bytes([req2[31], req2[32]]) >> 4;
+    let m_ok = ssn2 == 0x234;
+    if !m_ok { bad += 1; }
+    println!("  {} ADDBA Request maskiert die SSN auf 12 Bit ({:#x})",
+             if m_ok { "OK  " } else { "DIFF" }, ssn2);
+    // Der Empfaenger ist der AP, der Sender sind wir.
+    if req[4..10] != BSSID || req[10..16] != OUR_MAC {
+        rt += 1; println!("  DIFF ADDBA Request Adressen");
+    }
+    println!("  {} ADDBA Request gebaut: TID 5, Fenster 64, immediate, SSN 0x123",
+             if rt == 0 { "OK  " } else { "DIFF" });
+    bad += rt;
+
+    // Eine Antwort mit Status 0 und eine mit Absage.
+    let mut ok_resp = [0u8; 33];
+    ok_resp[24] = DOT11_ACTION_CAT_BA;
+    ok_resp[25] = DOT11_ACTION_ADDBA_RESP;
+    ok_resp[26] = 0x33;
+    ok_resp[27] = 0; ok_resp[28] = 0;
+    let rcap: u16 = (5u16 << 2) | (32u16 << 6);
+    ok_resp[29] = rcap as u8; ok_resp[30] = (rcap >> 8) as u8;
+    let got = parse_addba_resp(&ok_resp);
+    let pr_ok = match got {
+        Some(r) => r.status == 0 && r.tid == 5 && r.buf_size == 32
+                   && r.dialog_token == 0x33,
+        None => false,
+    };
+    if !pr_ok { bad += 1; }
+    println!("  {} ADDBA Response gelesen: status 0, TID 5, Fenster 32",
+             if pr_ok { "OK  " } else { "DIFF" });
+
+    let mut no_resp = ok_resp;
+    no_resp[27] = 37; // WLAN_STATUS_REQUEST_DECLINED
+    let dec_ok = parse_addba_resp(&no_resp).map(|r| r.status) == Some(37);
+    if !dec_ok { bad += 1; }
+    println!("  {} ADDBA Response mit Absage traegt ihren Status",
+             if dec_ok { "OK  " } else { "DIFF" });
+
+    // Ein ADDBA REQUEST darf nicht als Antwort durchgehen.
+    let mut wrong = ok_resp;
+    wrong[25] = DOT11_ACTION_ADDBA_REQ;
+    let w_ok = parse_addba_resp(&wrong).is_none();
+    if !w_ok { bad += 1; }
+    println!("  {} ein ADDBA Request ist keine Response",
+             if w_ok { "OK  " } else { "DIFF" });
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3 + chans.len() + aspms.len();
+                + mgmt.len() + 3 + chans.len() + aspms.len()
+                + ampdus.len() + 5;
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases)
+       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
+       ampdu_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 

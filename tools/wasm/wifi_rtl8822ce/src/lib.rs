@@ -3341,6 +3341,14 @@ struct LinkStats {
     /// den Sendering passte.
     addba_resp: u32,
     addba_fail: u32,
+    /// Und die GEGENrichtung: wie oft wir selbst gefragt haben, ob der
+    /// Block steht, und mit welchem Status der AP abgelehnt hat.
+    /// **`addba_req_sent > 0` bei `tx_ba_ok == false` heisst: wir haben
+    /// gefragt und keine Antwort bekommen** — ein anderer Zustand als
+    /// „nie gefragt", und ohne die zwei Zahlen sehen beide gleich aus.
+    addba_req_sent: u32,
+    tx_ba_ok: bool,
+    tx_ba_status: u16,
     /// Das Fenster, das wir zuletzt zugestanden haben, und das, um das
     /// gebeten wurde. **Ohne die Zahl im Bericht ist nicht zu sehen, ob
     /// eine geaenderte `ampdu:`-Zeile ueberhaupt gelesen wurde** — der
@@ -3403,6 +3411,7 @@ impl Default for LinkStats {
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
+            addba_req_sent: 0, tx_ba_ok: false, tx_ba_status: 0,
             addba_win: 0, addba_win_req: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
             rx_us: 0, pump_us0: 0,
@@ -3503,6 +3512,24 @@ struct Link {
     /// Deskriptor — Linux fuellt es aus dem Rahmenkopf.
     seq: u16,
     ptk_installed: bool,
+    /// **Der SENDE-Block, TID 0.** `None` = nicht ausgehandelt, also
+    /// einzelne Rahmen. `Some(fenster)` = der AP hat mit Status 0
+    /// geantwortet, und ab dann traegt jeder Datenrahmen `ampdu_en`.
+    ///
+    /// rtw88 fuehrt das als Flagbit `RTW_TXQ_AMPDU` je Sendeschlange
+    /// (mac80211.c `rtw_ops_ampdu_action`, Zweig `TX_OPERATIONAL`) — wir
+    /// haben keine Schlangen je TID, also steht es hier.
+    tx_ampdu: Option<u16>,
+    /// Ob der AP HT kann, und sein A-MPDU-Parameterbyte. Beides aus
+    /// seinem HT-Element; ohne HT gibt es keinen Block, und die zwei
+    /// Werte im Deskriptor sagen, wie LANG und wie DICHT er ihn vertraegt.
+    peer_ht: bool,
+    peer_ampdu_param: u8,
+    /// Wie oft wir gefragt haben, und wann zuletzt. Ein AP, der schweigt,
+    /// darf uns nicht in eine Endlosschleife schicken.
+    addba_tries: u8,
+    addba_last_ms: u64,
+    addba_token: u8,
     /// 802.11 §12.5.3.2 — die 48-Bit-Paketnummer des Paarschluessels.
     /// Sie faengt bei eins an und zaehlt je Rahmen hoch; eine wiederholte
     /// Nummer verwirft der AP als Wiedereinspielung.
@@ -3587,7 +3614,8 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
     // dann die gemeinsamen Felder.
     tx::data_pkt_info_update(&mut info, link.seq, Some(&link.si),
-                             link.highest_rate);
+                             link.highest_rate, link.tx_ampdu,
+                             link.peer_ampdu_param);
     let a1 = &frame[4..10];
     info.bmc = a1.iter().all(|&b| b == 0xff) || a1[0] & 0x01 != 0;
     info.tx_pkt_size = total as u32;
@@ -3800,6 +3828,12 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         },
         seq: 0,
         ptk_installed: false,
+        tx_ampdu: None,
+        peer_ht: caps.ht_supported,
+        peer_ampdu_param: caps.ht_ampdu_param,
+        addba_tries: 0,
+        addba_last_ms: 0,
+        addba_token: 0x10,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
     };
@@ -4080,6 +4114,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 {
                     acc.addba = sta::parse_addba_req(f);
                 }
+                if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_RESP))
+                    && acc.addba_resp.is_none()
+                {
+                    acc.addba_resp = sta::parse_addba_resp(f);
+                }
             }
             if let Some(r) = disconnect_reason(f, &bssid) {
                 if ls.gone.is_none() {
@@ -4182,6 +4221,58 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Die Aggregation zulassen ─────────────────────────────
+        // ── Der SENDE-Block: wir fragen, der AP antwortet ────────
+        //
+        // **Die Richtung, die bis 0.35.0 ganz fehlte.** In Linux stoesst
+        // `rtw_txq_check_agg` (tx.c) `ba_work` an, und das ruft
+        // `ieee80211_start_tx_ba_session` — genau diesen Rahmen. Ohne ihn
+        // bleibt `ampdu_en` fuer immer falsch, und jeder Datenrahmen geht
+        // einzeln mit eigener Quittung raus.
+        //
+        // Bedingungen: der Paarschluessel muss stehen (vorher sind wir
+        // nicht autorisiert), der AP muss HT koennen, und das Fenster aus
+        // der Konfiguration muss ueberhaupt Aggregation erlauben.
+        if let Some(r) = acc.addba_resp.take() {
+            if r.dialog_token == link.addba_token && r.tid == 0 {
+                if r.status == 0 {
+                    // **Das Fenster des AP, nicht unseres.** Er darf
+                    // kleiner antworten, als wir gefragt haben, und dann
+                    // gilt seins (802.11 §11.5.3).
+                    let f = r.buf_size.clamp(1, 64);
+                    link.tx_ampdu = Some(f);
+                    ls.tx_ba_ok = true;
+                    host::print("[rtl8822ce] Sende-Block steht: TID 0, Fenster ");
+                    host::print_dec(f as u32);
+                    host::print("\n");
+                } else {
+                    // Eine Absage ist eine ANTWORT. Nicht weiterfragen.
+                    link.addba_tries = 255;
+                    ls.tx_ba_status = r.status;
+                    host::print("[rtl8822ce] Sende-Block abgelehnt, Status ");
+                    host::print_dec(r.status as u32);
+                    host::print("\n");
+                }
+            }
+        }
+        if link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
+            && link.peer_ht && link.addba_tries < 4
+            && now.wrapping_sub(link.addba_last_ms) >= 500
+        {
+            link.addba_tries += 1;
+            link.addba_last_ms = now;
+            link.addba_token = link.addba_token.wrapping_add(1);
+            let mut req = [0u8; 256];
+            // SSN: die naechste Folgenummer, die wir senden werden.
+            let n = sta::build_addba_req(&mut req, &mac, &bssid, 0, 64,
+                                         link.addba_token, link.seq, 0);
+            let mut info = tx::pkt_info_update(&req[..n], 0, tx::RTW_BAND_2G);
+            let q = tx::RTW_TX_QUEUE_MGMT;
+            if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &req[..n]) {
+                pci::tx_kick_off_queue(h, trx, q);
+                ls.addba_req_sent += 1;
+            }
+        }
+
         // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
         // solange keine Antwort kommt — im Geraetelauf 180 Mal, und
         // genau so lange konnte er nicht aggregieren.
@@ -5097,6 +5188,28 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" erbetenen)", &mut b, &mut n);
     } else if ls.addba_req > 0 {
         put(" — AGGREGATION AUS (`ampdu: off`)", &mut b, &mut n);
+    }
+    // **Die GEGENrichtung, und sie hat drei Zustaende, nicht zwei.**
+    // „nie gefragt" · „gefragt, keine Antwort" · „abgelehnt mit Status N"
+    // sehen ohne diese Zeile alle gleich aus, naemlich nach „keine
+    // Aggregation".
+    put("  senden: ", &mut b, &mut n);
+    if ls.tx_ba_ok {
+        put("Block steht (fenster ", &mut b, &mut n);
+        num(link.tx_ampdu.unwrap_or(0) as u32, &mut b, &mut n);
+        put(", faktor ", &mut b, &mut n);
+        num(sta::tx_ampdu_factor(link.peer_ampdu_param) as u32, &mut b, &mut n);
+        put(", dichte ", &mut b, &mut n);
+        num(sta::tx_ampdu_density(link.peer_ampdu_param) as u32, &mut b, &mut n);
+        put(")", &mut b, &mut n);
+    } else if ls.tx_ba_status != 0 {
+        put("ABGELEHNT, status ", &mut b, &mut n);
+        num(ls.tx_ba_status as u32, &mut b, &mut n);
+    } else if ls.addba_req_sent > 0 {
+        num(ls.addba_req_sent, &mut b, &mut n);
+        put("x gefragt, KEINE Antwort", &mut b, &mut n);
+    } else {
+        put("nicht gefragt", &mut b, &mut n);
     }
     if ls.addba_fail > 0 {
         put(", ", &mut b, &mut n);

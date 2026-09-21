@@ -276,13 +276,22 @@ pub fn pkt_info_update(frame: &[u8], mac_id: u8, current_band_type: u8)
 /// `si = None`.
 ///
 /// `ampdu_en` haengt an `IEEE80211_TX_CTL_AMPDU` — eine Fahne, die
-/// mac80211 setzt, wenn ein Block-Ack-Block offen ist. Ohne
-/// Block-Ack-Aushandlung gibt es sie nicht, und ein erfundenes
-/// A-MPDU-Flag waere schlimmer als keins. `dm_info->fix_rate` ist eine
-/// debugfs-Einstellung und steht auf `DESC_RATE_MAX` (= aus).
+/// mac80211 setzt, wenn ein Block-Ack-Block offen ist, und die
+/// `rtw_txq_check_agg` (tx.c) aus dem Flagbit `RTW_TXQ_AMPDU` ableitet.
+/// **Hier kommt sie als `tx_ampdu`: `Some(_)` heisst, der AP hat unseren
+/// ADDBA Request mit Status 0 beantwortet.** Erfunden wird sie nicht —
+/// ohne Block quittiert niemand einen Block, und dann ist ein gesetztes
+/// Bit schlimmer als ein fehlendes.
+///
+/// `ampdu_factor` und `ampdu_density` kommen aus dem HT-Element DES AP
+/// (tx.c:99-113): sie sagen, wie lang und wie dicht ER empfangen kann.
+///
+/// `dm_info->fix_rate` ist eine debugfs-Einstellung und steht auf
+/// `DESC_RATE_MAX` (= aus).
 pub fn data_pkt_info_update(info: &mut TxPktInfo, seq: u16,
                             si: Option<&crate::sta::StaInfo>,
-                            highest_rate: u8) {
+                            highest_rate: u8,
+                            tx_ampdu: Option<u16>, peer_ampdu_param: u8) {
     let mut rate = DESC_RATE6M;
     let mut rate_id = 6u8;
     let mut bw = 0u8; // RTW_CHANNEL_WIDTH_20
@@ -298,7 +307,12 @@ pub fn data_pkt_info_update(info: &mut TxPktInfo, seq: u16,
     }
 
     info.seq = seq;
-    info.ampdu_en = false;
+    // Nur mit `sta` — ein Broadcast wird nie aggregiert.
+    info.ampdu_en = si.is_some() && tx_ampdu.is_some();
+    if info.ampdu_en {
+        info.ampdu_factor = crate::sta::tx_ampdu_factor(peer_ampdu_param);
+        info.ampdu_density = crate::sta::tx_ampdu_density(peer_ampdu_param);
+    }
     info.rate = rate;
     info.rate_id = rate_id;
     info.bw = bw;
