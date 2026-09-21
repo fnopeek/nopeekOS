@@ -42,6 +42,9 @@ unsafe extern "C" {
     // npk_log_serial is invisible on machines without a COM port (the HP).
     fn npk_print(ptr: i32, len: i32);
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
+    /// Kernel 0.329.0, `security::csprng`. Braucht KEINE Kapabilitaet —
+    /// wie `npk_unix_time`. Gibt die Zahl der geschriebenen Bytes oder -1.
+    fn npk_random_bytes(buf_ptr: i32, len: i32) -> i32;
 }
 
 const LOG_CAP: usize = 8192;
@@ -120,7 +123,13 @@ const EV_EAPOL_RX: u8 = 0x84;
 const EV_LINK_UP: u8 = 0x85;
 
 // Our RSN element (WPA2-PSK-CCMP) — MUST match the one the driver put in the
-// assoc request, since it is echoed in 4-way msg2's key_data.
+// assoc request, since it is echoed in 4-way msg2's key_data and the AP
+// compares the two.
+//
+// **This is a second definition of the same thing**: the driver carries it as
+// `RSN_IE_WPA2_CCMP_PSK` (wifi_rtl8822ce/src/lib.rs). Two places for one
+// value drift, so `framecheck.py` holds them against each other byte for
+// byte. Do not edit one without the other.
 const RSN_IE: [u8; 22] = [
     0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
     0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
@@ -202,14 +211,28 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
             let mut sa = [0u8; 6];
             aa.copy_from_slice(&ev[1..7]);
             sa.copy_from_slice(&ev[7..13]);
-            // SNonce: a fixed bring-up value (functional; real entropy is a TODO —
-            // see project_keystore / no npk_random host-fn yet).
+            // SNonce: 32 REAL random bytes (802.11i §12.7.6.2).
+            //
+            // This used to be a fixed value derived from our own MAC, with
+            // the note "no npk_random host-fn yet". That reason expired in
+            // kernel 0.329.0: `npk_random_bytes` sits on `security::csprng`
+            // and needs no capability. A constant SNonce makes the PTK
+            // depend on the ANonce alone — an AP that repeats an ANonce
+            // (some do after a reboot) hands back the SAME PTK while our
+            // packet number restarts at 1, and it then drops our frames as
+            // replays. A standing link that carries nothing.
             let mut snonce = [0u8; 32];
-            for (i, b) in snonce.iter_mut().enumerate() {
-                *b = 0x5a ^ sa[i % 6] ^ (i as u8);
+            let got = unsafe { npk_random_bytes(snonce.as_mut_ptr() as i32, 32) };
+            if got != 32 {
+                // **Kein Rueckfall auf einen erfundenen Wert.** Ein
+                // vorhersagbarer Nonce ist schlechter als kein Handschlag:
+                // er sieht aus wie einer.
+                log("[wifid] no entropy for the SNonce — refusing the handshake\n");
+                *sup = None;
+                return;
             }
             *sup = Some(Supplicant::new(*pmk, aa, sa, snonce, &RSN_IE));
-            log("[wifid] READY — supplicant armed for 4-way\n");
+            log("[wifid] READY — supplicant armed for 4-way (random SNonce)\n");
         }
         // EAPOL_RX: [op][len u16][frame] → feed the 4-way state machine.
         Some(EV_EAPOL_RX) if ev.len() >= 3 => {

@@ -115,6 +115,43 @@ def grab(src, pattern, what):
     return m.group(1)
 
 
+def check_rsn_agreement():
+    """Das RSN-Element steht an ZWEI Stellen und muss byte-gleich sein.
+
+    Der Treiber schreibt es in den Anmeldeantrag
+    (`RSN_IE_WPA2_CCMP_PSK`), `wifid` spiegelt es in msg2 des
+    Vierwegehandschlags (`RSN_IE`) — und der AP VERGLEICHT die beiden.
+    Weichen sie ab, schlaegt msg3 fehl, und im Log steht „bad MIC": eine
+    Meldung, die auf den Schluessel zeigt und nicht auf den Text.
+
+    Zwei Stellen fuer denselben Wert driften. Deshalb steht hier die
+    Zusicherung und nicht nur eine Warnung im Kommentar.
+    """
+    ours = HERE / "src" / "lib.rs"
+    theirs = HERE.parent / "wifid" / "wasm" / "src" / "lib.rs"
+    if not theirs.exists():
+        print("  DIFF wifid nicht gefunden: %s" % theirs)
+        return 1
+
+    def grab(path, name):
+        m = re.search(r"const %s: \[u8; 22\] = \[(.*?)\];" % name,
+                      path.read_text(), re.S)
+        if not m:
+            return None
+        return [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1))]
+
+    a = grab(ours, "RSN_IE_WPA2_CCMP_PSK")
+    b = grab(theirs, "RSN_IE")
+    if a is None or b is None:
+        print("  DIFF RSN-Element nicht gefunden (Treiber %s, wifid %s)"
+              % (a is not None, b is not None))
+        return 1
+    ok = a == b
+    print("  %s RSN-Element Treiber == wifid (%s)"
+          % ("OK  " if ok else "DIFF", " ".join("%02x" % v for v in a)))
+    return 0 if ok else 1
+
+
 def check_loud_balance(src):
     """Jede `loud_begin`-Klammer braucht ihr `loud_end`.
 
@@ -227,7 +264,7 @@ fn main() {
 }
 """ % (cases, cfg_cases, name_cases)
 
-    loud_bad = check_loud_balance(src)
+    loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="framecheck-"))
     try:
