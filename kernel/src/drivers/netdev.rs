@@ -154,10 +154,23 @@ static WASM_CARRIER: AtomicBool = AtomicBool::new(false);
 static WASM_DORMANT: AtomicBool = AtomicBool::new(false);
 
 /// Driver reports carrier and dormant separately (npk_netdev_set_link_state).
+///
+/// **Jeder Wechsel geht ins Log, mit seinem Takt.** Der Zustand der Karte
+/// entschied bisher still darueber, ob `netdev::send` ueberhaupt noch einen
+/// Rahmen annimmt (`active_link_up`) — und ein Traegerverlust von einer
+/// halben Sekunde sah hinterher genauso aus wie „das WLAN war die ganze
+/// Zeit da". `tick_link_and_reconfigure` protokolliert zwar Linkwechsel,
+/// laeuft aber nur am Prompt (aus `read_line_with_tab`), also waehrend
+/// eines Downloads GAR NICHT. Genau dann faellt es aus.
 pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
-    WASM_CARRIER.store(carrier, Ordering::Release);
-    WASM_DORMANT.store(dormant, Ordering::Release);
+    let was_c = WASM_CARRIER.swap(carrier, Ordering::AcqRel);
+    let was_d = WASM_DORMANT.swap(dormant, Ordering::AcqRel);
     WASM_NIC.lock().link_up = carrier && !dormant;
+    if was_c != carrier || was_d != dormant {
+        crate::kprintln!("[npk] wlan: traeger {} -> {}, dormant {} -> {} (takt {}) — sendbar: {}",
+            was_c as u8, carrier as u8, was_d as u8, dormant as u8,
+            crate::interrupts::ticks(), (carrier && !dormant) as u8);
+    }
 }
 
 /// Legacy single-flag form (npk_netdev_set_link): a driver that knows only
@@ -431,7 +444,15 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     // machine with any wired device present worked, because the traffic went
     // there instead and left the radio alone.
     if !active_link_up() {
-        TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed);
+        // **Die erste Abweisung sagt es, danach jede tausendste.** Ohne sie
+        // ist ein geschlossenes Sendetor von einem stillen Netz nicht zu
+        // unterscheiden: beide Male passiert nichts, und der Zaehler wurde
+        // nur von `net`/`wlan` gedruckt — also erst, wenn jemand FRAGT.
+        let n = TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 || n % 1000 == 0 {
+            crate::kprintln!("[npk] wlan: SENDETOR ZU — {} Rahmen abgewiesen, aktiv={} (takt {})",
+                n, active_name(), crate::interrupts::ticks());
+        }
         return Err(NetError::NotInitialized);
     }
     match active() {
