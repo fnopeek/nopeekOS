@@ -91,7 +91,11 @@ fn main() {
     // right PTK, accepts the MICs, and unwraps the exact GTK we wrapped.
     all &= four_way_roundtrip();
 
+    // ── Die Haerteregeln aus 0.12.0 ───────────────────────────────────────
+    all &= hardening();
+
     println!("\n{}", if all { "ALL VECTORS PASS" } else { "SOME VECTORS FAILED" });
+
     std::process::exit(if all { 0 } else { 1 });
 }
 
@@ -211,6 +215,114 @@ fn four_way_roundtrip() -> bool {
     println!("[{}] group_rekey (new GTK installed + acknowledged)", if gok { "PASS" } else { "FAIL" });
 
     ok && gok
+}
+
+/// Die Haerteregeln aus wifid 0.12.0, jede gegen ihren eigenen Rahmen.
+///
+/// **Der Handschlag laeuft dabei ganz durch** — eine Regel, die das
+/// Funktionierende bricht, ist keine Haertung, und genau das ist hier
+/// das Risiko: ein zu strenger Wiedereinspielzaehler wirft eine
+/// legitime Wiederholung weg und die Verbindung kommt nie zustande.
+fn hardening() -> bool {
+    use wifid_core::aes::aes_wrap;
+    use wifid_core::eapol::{Step, Supplicant};
+    use wifid_core::{hmac_sha1, wpa2_ptk};
+
+    let pmk = wifid_core::wpa2_pmk(b"password", b"IEEE");
+    let aa = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let sa = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+    let anonce = [0xa1u8; 32];
+    let snonce = [0x52u8; 32];
+    let rsn = hexn("30140100000fac040100000fac040100000fac020000");
+    let ptk = wpa2_ptk(&pmk, &aa, &sa, &anonce, &snonce);
+    let kck: [u8; 16] = ptk[0..16].try_into().unwrap();
+    let kek: [u8; 16] = ptk[16..32].try_into().unwrap();
+    let gtk = hexn("000102030405060708090a0b0c0d0e0f");
+
+    // Einen Supplicant bis nach msg3 fahren.
+    let mut sup = Supplicant::new(pmk, aa, sa, snonce, &rsn);
+    let mut out = [0u8; 512];
+    let mut msg1 = vec![0u8; 99];
+    msg1[1] = 0x03;
+    put_be16(&mut msg1, 2, 95);
+    msg1[4] = 0x02;
+    put_be16(&mut msg1, 5, 0x0002 | (1 << 3) | (1 << 7));
+    msg1[8] = 16;
+    msg1[9 + 7] = 1;
+    msg1[17..49].copy_from_slice(&anonce);
+    let _ = sup.on_eapol(&msg1, &mut out);
+
+    let mut kde = vec![0xdd, 6 + gtk.len() as u8, 0x00, 0x0f, 0xac, 0x01, 0x02, 0x00];
+    kde.extend_from_slice(&gtk);
+    while kde.len() % 8 != 0 {
+        kde.push(0);
+    }
+    let mut wrapped = vec![0u8; kde.len() + 8];
+    aes_wrap(&kek, &kde, &mut wrapped);
+
+    let build_msg3 = |replay: u8, ver: u16| -> Vec<u8> {
+        let mut m = vec![0u8; 99 + wrapped.len()];
+        let body = (m.len() - 4) as u16;
+        m[1] = 0x03;
+        put_be16(&mut m, 2, body);
+        m[4] = 0x02;
+        put_be16(&mut m, 5,
+                 ver | (1 << 3) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 12));
+        m[8] = 16;
+        m[9 + 7] = replay;
+        m[17..49].copy_from_slice(&anonce);
+        put_be16(&mut m, 97, wrapped.len() as u16);
+        m[99..].copy_from_slice(&wrapped);
+        let mic = hmac_sha1(&kck, &m)[..16].to_vec();
+        m[81..97].copy_from_slice(&mic);
+        m
+    };
+
+    let mut ok = true;
+
+    // (1) Das echte msg3 mit Zaehler 2 geht durch.
+    let m3 = build_msg3(2, 0x0002);
+    ok &= matches!(sup.on_eapol(&m3, &mut out), Step::Done(_));
+    println!("[{}] hardening: msg3 (Zaehler 2) wird angenommen",
+             if ok { "PASS" } else { "FAIL" });
+
+    // (2) DASSELBE msg3 noch einmal — eine Wiederholung, und sie MUSS
+    //     durchgehen, sonst haben wir einen Handschlag ohne Wiederholung.
+    let rep_before = sup.replays_repeated;
+    let a = matches!(sup.on_eapol(&m3, &mut out), Step::Done(_));
+    let b = sup.replays_repeated == rep_before + 1;
+    ok &= a && b;
+    println!("[{}] hardening: Wiederholung mit GLEICHEM Zaehler geht durch (und wird gezaehlt)",
+             if a && b { "PASS" } else { "FAIL" });
+
+    // (3) Ein ALTES msg3 (Zaehler 1) wird verworfen.
+    let m3_old = build_msg3(1, 0x0002);
+    let drop_before = sup.replays_dropped;
+    let a = matches!(sup.on_eapol(&m3_old, &mut out), Step::Ignore);
+    let b = sup.replays_dropped == drop_before + 1;
+    ok &= a && b;
+    println!("[{}] hardening: alter Zaehler wird als Wiedereinspielung verworfen",
+             if a && b { "PASS" } else { "FAIL" });
+
+    // (4) Key Descriptor Version 3 (AES-CMAC) koennen wir nicht rechnen.
+    let m3_v3 = build_msg3(9, 0x0003);
+    let a = matches!(sup.on_eapol(&m3_v3, &mut out), Step::Ignore);
+    let b = sup.bad_key_version == 1;
+    ok &= a && b;
+    println!("[{}] hardening: unbekannte Key-Descriptor-Version wird gemeldet, nicht als MIC-Fehler",
+             if a && b { "PASS" } else { "FAIL" });
+
+    // (5) Ein Rahmen laenger als der MIC-Puffer wird abgewiesen, nicht
+    //     abgeschnitten.
+    let mut huge = vec![0u8; 600];
+    huge[1] = 0x03;
+    let a = matches!(sup.on_eapol(&huge, &mut out), Step::Ignore);
+    let b = sup.too_long == 1;
+    ok &= a && b;
+    println!("[{}] hardening: zu langer Rahmen wird abgewiesen statt abgeschnitten",
+             if a && b { "PASS" } else { "FAIL" });
+
+    ok
 }
 
 fn put_be16(b: &mut [u8], o: usize, v: u16) {
