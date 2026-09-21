@@ -343,6 +343,10 @@ pub const REG_PRECNT_CTRL: u32 = 0x04E5; // reg.h:440
 pub const BIT_EN_PRECNT: u16 = 1 << 11; // reg.h:442
 pub const REG_PROT_MODE_CTRL: u32 = 0x04C8; // reg.h:437
 pub const REG_BAR_MODE_CTRL: u32 = 0x04CC; // reg.h:439
+/// Der Schlusszweig von `rtw_pci_phy_cfg` (pci.c:1516-1517): nur fuer
+/// 8822C und nur, wenn die efuse `rfe_option == 5` meldet.
+pub const REG_ANAPARSW_MAC_0: u32 = 0x1010; // reg.h:788
+pub const BIT_CF_L_V2: u32 = 0x3000_0000; // reg.h:789 GENMASK(29,28)
 pub const REG_FAST_EDCA_VOVI_SETTING: u32 = 0x1448; // reg.h:825
 pub const REG_FAST_EDCA_BEBK_SETTING: u32 = 0x144C; // reg.h:826
 pub const REG_LIFETIME_EN: u32 = 0x0426; // reg.h:395
