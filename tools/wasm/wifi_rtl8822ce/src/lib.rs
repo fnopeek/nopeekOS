@@ -3569,6 +3569,25 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
 /// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
 /// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
 /// die Firmware antworten wird.
+/// **Ob unsere Datenrahmen QoS-Datenrahmen sind — und sie sind es NICHT.**
+///
+/// `tx_8023` baut Subtyp 0 (einfaches Data): kein QoS-Control-Feld, also
+/// kein TID. Ein Block-Ack-Block gilt aber JE TID (802.11 §11.5.1.1) und
+/// nur fuer QoS-Datenrahmen.
+///
+/// **Das hat 0.36.0 am Geraet gekostet.** Der Antrag ging hinaus, der AP
+/// stimmte zu, und danach trugen Rahmen OHNE TID das Aggregationsbit. Der
+/// AP konnte sie keiner Vereinbarung zuordnen und warf uns hinaus —
+/// `DISASSOC Grund 8`, dann `DEAUTH Grund 6` („Klasse-2-Rahmen von nicht
+/// authentifizierter Station"), dann der Handschlag in der Schleife.
+///
+/// Die Konstante steht hier statt eines geloeschten Blocks, weil sie die
+/// BEDINGUNG benennt: wird `tx_8023` auf Subtyp 8 umgebaut (QoS Data,
+/// zwei Byte mehr Kopf, TID im unteren Nibble), faellt die Sende-
+/// Aggregation von selbst wieder an. Vorher ist sie nicht erlaubt,
+/// sondern schaedlich.
+const TX_IS_QOS: bool = false;
+
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
            eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
     if eth.len() < 14 {
@@ -4254,7 +4273,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
-        if link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
+        if TX_IS_QOS
+            && link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
             && link.peer_ht && link.addba_tries < 4
             && now.wrapping_sub(link.addba_last_ms) >= 500
         {
