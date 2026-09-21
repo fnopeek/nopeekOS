@@ -613,3 +613,29 @@ pub fn ra_report_handle(payload: &[u8], dm: &mut crate::dm::DmInfo,
         si.ra_report_desc_rate = rate;
     }
 }
+
+/// tx.c:229-256 `rtw_tx_report_handle`, Zweig `src == C2H_CCX_TX_RPT`
+/// (also V0). Gibt `(Folgenummer, quittiert)`.
+///
+/// `st == 0` heisst quittiert — die zwei Statusbits sind ein Code, und
+/// jeder von null verschiedene ist ein Misserfolg.
+pub fn tx_report_parse(payload: &[u8]) -> Option<(u8, bool)> {
+    if payload.len() <= CCX_REPORT_V0_SEQNUM_OFF {
+        return None;
+    }
+    let sn = payload[CCX_REPORT_V0_SEQNUM_OFF] & CCX_REPORT_V0_SEQNUM_MASK;
+    let st = payload[CCX_REPORT_V0_STATUS_OFF] & CCX_REPORT_V0_STATUS_MASK;
+    Some((sn, st == 0))
+}
+
+/// fw.c:383-390 `rtw_fw_c2h_cmd_isr` — die Firmware meldet ihren EIGENEN
+/// Absturz.
+///
+/// **In Linux ist das eine Unterbrechung**; wir haben keine und sehen
+/// deshalb im Watchdog nach. Derselbe Test, dieselbe Stelle, anderer
+/// Takt: steht in `REG_MCU_TST_CFG` der Ausloeserwert, hat die Firmware
+/// sich selbst fuer tot erklaert. Bis hierher wurde daraus eine stille
+/// Leitung.
+pub fn fw_crashed(h: i32) -> bool {
+    host::r8(h, REG_MCU_TST_CFG) as u32 == VAL_FW_TRIGGER
+}

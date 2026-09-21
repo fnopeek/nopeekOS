@@ -318,3 +318,14 @@ pub fn highest_ht_tx_rate(ht_mcs: &[u8; 4], rf_2t2r: bool) -> u8 {
         DESC_RATEMCS7 as u8
     }
 }
+
+/// tx.c:166-177 `rtw_tx_report_enable`.
+///
+/// **Die Firmware quittiert einen Rahmen nur, wenn man danach fragt.**
+/// Die Folgenummer liegt in den Bits 7:2 — die unteren zwei gehoeren
+/// der Firmware, die oberen vier des Feldes sind reserviert. Es gibt
+/// also 64 unterscheidbare Nummern, und der Zaehler laeuft um.
+pub fn report_seqnum(counter: &mut u8) -> u8 {
+    *counter = counter.wrapping_add(1);
+    ((*counter as u16) << 2) as u8 & 0xfc
+}

@@ -3104,7 +3104,74 @@ struct LinkStats {
     /// Wie oft wir hinausgeworfen wurden, und womit zuletzt begruendet.
     kicked: u32,
     last_reason: u16,
+    /// **Die Sendequittung der Firmware** (`rtw_tx_report_*`, tx.c).
+    /// Bis 0.26.0 wussten wir von KEINEM gesendeten Rahmen, ob er
+    /// ankam — genau der Beobachter, der bei zwei Fehlern hintereinander
+    /// gefehlt hat.
+    probes: [TxProbe; TX_PROBE_SLOTS],
+    probe_sn: u8,
+    /// quittiert · nicht quittiert · gar keine Antwort der Firmware
+    tx_acked: u32,
+    tx_lost: u32,
+    tx_no_report: u32,
+    /// Die Firmware hat sich selbst fuer tot erklaert.
+    fw_crash: u32,
 }
+
+impl LinkStats {
+    /// tx.c:166-211 `rtw_tx_report_enable` + `rtw_tx_report_enqueue` in
+    /// einem: Nummer vergeben und Platz belegen.
+    ///
+    /// Gibt `None`, wenn alle acht Plaetze belegt sind — dann antwortet
+    /// die Firmware ohnehin nicht, und eine neunte Frage macht es nicht
+    /// besser.
+    fn arm_probe(&mut self, now: u64) -> Option<u8> {
+        let slot = self.probes.iter().position(|p| !p.busy)?;
+        let sn = tx::report_seqnum(&mut self.probe_sn);
+        self.probes[slot] = TxProbe { sn, at_ms: now, busy: true };
+        Some(sn)
+    }
+
+    /// tx.c:229-256 `rtw_tx_report_handle` — die Antwort zuordnen.
+    fn settle_probe(&mut self, sn: u8, acked: bool) {
+        if let Some(p) = self.probes.iter_mut().find(|p| p.busy && p.sn == sn) {
+            p.busy = false;
+            if acked {
+                self.tx_acked += 1;
+            } else {
+                self.tx_lost += 1;
+            }
+        }
+    }
+
+    /// tx.c:179-194 `rtw_tx_report_purge_timer` — „failed to get tx
+    /// report from firmware". Eine Frist, keine Rundenzahl.
+    fn purge_probes(&mut self, now: u64) {
+        for p in self.probes.iter_mut() {
+            if p.busy && now.wrapping_sub(p.at_ms) > RTW_TX_PROBE_TIMEOUT_MS {
+                p.busy = false;
+                self.tx_no_report += 1;
+            }
+        }
+    }
+}
+
+/// tx.c `struct rtw_tx_report` — die Rahmen, deren Quittung aussteht.
+///
+/// **Linux haengt dafuer die `sk_buff`s in eine Warteschlange**, weil es
+/// sie danach an mac80211 zurueckgibt. Wir brauchen den Rahmen nicht
+/// mehr, nur die Frage „ist er angekommen?" — also eine Folgenummer und
+/// wann gefragt wurde. Acht Plaetze: mehr als acht offene Quittungen
+/// hiesse, dass die Firmware gar nicht antwortet, und dann sagt das der
+/// Zaehler `tx_no_report`.
+#[derive(Clone, Copy, Default)]
+struct TxProbe {
+    sn: u8,
+    at_ms: u64,
+    busy: bool,
+}
+
+const TX_PROBE_SLOTS: usize = 8;
 
 /// Der Zustand einer stehenden Verbindung — Stufe 6a.
 struct Link {
@@ -3153,8 +3220,12 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
 /// WMM-Element, also hat der AP uns als Nicht-QoS-Station angenommen —
 /// ein QoS-Rahmen waere jetzt falsch. Das haengt zusammen: wer WMM
 /// anbietet, muss QoS senden, und wer es nicht anbietet, darf nicht.
+/// `probe` ist `IEEE80211_TX_CTL_REQ_TX_STATUS` — Linux setzt es aus
+/// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
+/// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
+/// die Firmware antworten wird.
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
-           eth: &[u8], encrypt: bool) -> bool {
+           eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
     if eth.len() < 14 {
         return false;
     }
@@ -3212,6 +3283,14 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     }
 
     link.seq = link.seq.wrapping_add(1) & 0x0fff;
+
+    // tx.c:432-433 `if (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)`.
+    // Die Nummer vergibt der Rufer (`rtw_tx_report_enable`), weil er sie
+    // gleich darauf in seine offene Liste eintraegt.
+    if let Some(sn) = probe {
+        info.sn = sn as u16;
+        info.report = true;
+    }
 
     let queue = pci::Q_BE;
     if !pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total]) {
@@ -3572,11 +3651,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut report_ms = host::now_ms();
     let mut rx_silent_ms = host::now_ms();
     let mut watch_dog_ms = host::now_ms();
+    // Ein Datenrahmen je Watchdog-Takt bekommt eine Quittung.
+    let mut probe_due = true;
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
     let beacon_int: u16 = 100;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
+        let now = host::now_ms();
+
         // ── Empfangen ────────────────────────────────────────────
         let mut acc = rx::WdAcc::new(link.si.avg_rssi);
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut d.dm, &mut d.path_div,
@@ -3602,6 +3685,13 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         acc.ra_rpt = Some((c.payload[0]
                                            & RTW_C2H_RA_RPT_RATE as u8,
                                            c.payload[1]));
+                    } else if c.id as u32 == C2H_CCX_TX_RPT {
+                        if let Some(r) = fw::tx_report_parse(c.payload) {
+                            if acc.n_tx_rpt < acc.tx_rpt.len() {
+                                acc.tx_rpt[acc.n_tx_rpt] = r;
+                                acc.n_tx_rpt += 1;
+                            }
+                        }
                     }
                 }
                 return;
@@ -3685,6 +3775,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         acc.merge(&mut d.dm, &mut link.si);
         d.stats.rx_unicast += acc.rx_unicast;
         d.stats.rx_cnt += acc.rx_cnt;
+        for i in 0..acc.n_tx_rpt {
+            let (sn, acked) = acc.tx_rpt[i];
+            ls.settle_probe(sn, acked);
+        }
         if let Some((rate, mac_id)) = acc.ra_rpt {
             // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
             // `si->ra_report.desc_rate` nur bei passender mac_id.
@@ -3769,8 +3863,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         // mit der PTK laengst im Speicher, und der AP
                         // erwartet ihn geschuetzt.
                         let enc = link.ptk_installed;
+                        // **EAPOL bekommt IMMER eine Quittung.** In Linux
+                        // kommt das aus mac80211: Rahmen des Steuerports
+                        // tragen `IEEE80211_TX_CTL_REQ_TX_STATUS`. Es
+                        // sind die Rahmen, deren Verlust die Verbindung
+                        // kostet — und beim letzten Fehler genau die, von
+                        // denen der AP keinen einzigen hoerte.
+                        let sn = ls.arm_probe(now);
                         if tx_8023(h, trx, mgmt_buf, link,
-                                   &eth[..14 + len], enc) {
+                                   &eth[..14 + len], enc, sn) {
                             ls.eapol_tx += 1;
                             if ls.authorized {
                                 ls.rekey_tx += 1;
@@ -3835,8 +3936,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     break;
                 }
                 let enc = link.ptk_installed;
+                // **Ein Datenrahmen je Watchdog-Takt wird quittiert.**
+                // Das ist eine benannte Abweichung: Linux erfaehrt den
+                // Sendeerfolg ueber mac80211 und fragt deshalb nur fuer
+                // Steuerrahmen nach. Uns fehlt dieser Weg ganz, und eine
+                // Leitung, auf der NICHTS quittiert wird, war zweimal der
+                // Fehler. Einer je zwei Sekunden kostet nichts und
+                // beantwortet „hoert der AP mich ueberhaupt".
+                let sn = if probe_due { probe_due = false; ls.arm_probe(now) }
+                         else { None };
                 if tx_8023(h, trx, mgmt_buf, link,
-                           &ethbuf[..n as usize], enc) {
+                           &ethbuf[..n as usize], enc, sn) {
                     ls.data_tx += 1;
                     // tx.c `rtw_tx` — dieselbe Buchfuehrung wie beim
                     // Empfang, damit `tx_throughput` eine Zahl hat.
@@ -3856,9 +3966,21 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // **Der Takt ist Linux'**: `RTW_WATCH_DOG_DELAY_TIME` = HZ * 2.
         // Die Nachfuehrungen darin rechnen auf dem, was seit dem letzten
         // Takt hereinkam — ein anderer Takt waere ein anderer Regler.
-        let now = host::now_ms();
+        ls.purge_probes(now);
         if now.wrapping_sub(watch_dog_ms) >= RTW_WATCH_DOG_DELAY_MS {
             watch_dog_ms = now;
+            probe_due = true;
+            if fw::fw_crashed(h) {
+                ls.fw_crash += 1;
+                if ls.fw_crash <= 3 {
+                    host::loud_begin();
+                    host::print("[rtl8822ce] DIE FIRMWARE HAT SICH SELBST FUER\n\
+                     \x20         TOT ERKLAERT (REG_MCU_TST_CFG = FW_TRIGGER).\n\
+                     \x20         Linux zieht das Geraet hier neu hoch; das\n\
+                     \x20         ist gebaut, sobald das Wiederverbinden steht.\n");
+                    host::loud_end();
+                }
+            }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
         }
@@ -4145,6 +4267,20 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev) {
     num(ls.keys_set, &mut b, &mut n);
     put("  rx-wachhund ", &mut b, &mut n);
     num(ls.rx_wd, &mut b, &mut n);
+    // **Die Zeile, die sagt, ob der AP uns HOERT.** Bis 0.26.0 stand
+    // hier nichts dergleichen: „raus 360" hiess nur, dass wir 360 Rahmen
+    // in einen Ring gelegt haben.
+    put("\nsendequittung ", &mut b, &mut n);
+    num(ls.tx_acked, &mut b, &mut n);
+    put(" ok, ", &mut b, &mut n);
+    num(ls.tx_lost, &mut b, &mut n);
+    put(" ohne ACK, ", &mut b, &mut n);
+    num(ls.tx_no_report, &mut b, &mut n);
+    put(" ohne bericht", &mut b, &mut n);
+    if ls.fw_crash > 0 {
+        put("  FIRMWARE-ABSTURZ ", &mut b, &mut n);
+        num(ls.fw_crash, &mut b, &mut n);
+    }
     // **Die Zeile, die diese Runde beantwortet.** Ein Neuschluessel
     // laeuft Minuten nach dem Handschlag und hinterlaesst sonst keine
     // Spur; ein Rauswurf war bis hierher gar nicht sichtbar.

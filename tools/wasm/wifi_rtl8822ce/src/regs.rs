@@ -1377,3 +1377,18 @@ pub const FW_FEATURE_ADAPTIVITY: u32 = 1 << 7; // fw.h:144
 // ── rtw_fw_ra_report_handle (fw.c:265-323) ───────────────────────
 /// rtw8822c.c:5359 `.c2h_ra_report_size = 7`
 pub const C2H_RA_REPORT_SIZE: usize = 7; // rtw8822c.c:5359
+
+// ── TX-Report (tx.c:166-260) und Firmware-Absturz (fw.c:383-390) ──
+/// tx.h:10 `RTW_TX_PROBE_TIMEOUT msecs_to_jiffies(500)`
+pub const RTW_TX_PROBE_TIMEOUT_MS: u64 = 500; // tx.h:10
+/// tx.h:37 `RTW_TX_DESC_W2_SPE_RPT BIT(19)`
+pub const RTW_TX_DESC_W2_SPE_RPT: u32 = 1 << 19; // tx.h:37
+/// tx.h:54 `RTW_TX_DESC_W6_SW_DEFINE GENMASK(11, 0)`
+pub const RTW_TX_DESC_W6_SW_DEFINE: u32 = 0x0000_0fff; // tx.h:54
+/// fw.h:370-371 `GET_CCX_REPORT_SEQNUM_V0` / `_STATUS_V0`
+pub const CCX_REPORT_V0_SEQNUM_OFF: usize = 6; // fw.h:370
+pub const CCX_REPORT_V0_SEQNUM_MASK: u8 = 0xfc; // fw.h:370
+pub const CCX_REPORT_V0_STATUS_OFF: usize = 0; // fw.h:371
+pub const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0; // fw.h:371
+pub const REG_MCU_TST_CFG: u32 = 0x84; // reg.h:157
+pub const VAL_FW_TRIGGER: u32 = 0x1; // reg.h:158

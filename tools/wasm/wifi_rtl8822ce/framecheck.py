@@ -95,6 +95,38 @@ CFG_ON = [
 NAMES = [(15, "Vierwegehandschlag"), (16, "Gruppenschluessel"),
          (7, "Klasse-3-Rahmen"), (999, "unbekannt")]
 
+# `tx_report_parse` — die Sendequittung der Firmware (fw.h:370-371, V0:
+# Folgenummer in payload[6] & 0xfc, Status in payload[0] & 0xc0).
+#
+# **Ein Offset daneben heisst hier wieder Schweigen**: die Quittung
+# passt dann auf keine offene Nummer, der Zaehler `tx_no_report` laeuft
+# hoch, und es sieht aus, als antworte die Firmware nicht.
+def rpt(status, seq, n=9):
+    f = [0] * n
+    if n > 0:
+        f[0] = status
+    if n > 6:
+        f[6] = seq
+    return f
+
+
+TXRPT = [
+    ("quittiert (Status 0)", rpt(0x00, 0x04), (0x04, True)),
+    ("nicht quittiert (0x40)", rpt(0x40, 0x08), (0x08, False)),
+    ("nicht quittiert (0x80)", rpt(0x80, 0x0c), (0x0c, False)),
+    ("nicht quittiert (0xc0)", rpt(0xc0, 0x10), (0x10, False)),
+    ("Statusbits ausserhalb 0xc0 zaehlen nicht", rpt(0x3f, 0x14), (0x14, True)),
+    ("die zwei unteren Bits der Nummer gehoeren der Firmware",
+     rpt(0x00, 0xff), (0xfc, True)),
+    ("Nummer steht in Byte 6, nicht in Byte 8",
+     [0, 0, 0, 0, 0, 0, 0x20, 0, 0x40], (0x20, True)),
+    ("zu kurz: kein Byte 6", rpt(0x00, 0x04, n=6), None),
+    ("leer", [], None),
+]
+
+# `report_seqnum` — die Nummernvergabe (tx.c:175).
+SEQNUM_STEPS = 6
+
 
 def rs(text):
     """Ein Rust-Zeichenkettenliteral. `json.dumps` flieht Nicht-ASCII als
@@ -190,11 +222,27 @@ def main():
     fn = grab(src, r"\n(fn disconnect_reason.*?\n\})", "disconnect_reason")
     names = grab(src, r"\n(fn reason_name.*?\n\})", "reason_name")
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
+    txrpt = grab((HERE / "src" / "fw.rs").read_text(),
+                 r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
+    seqnum = grab((HERE / "src" / "tx.rs").read_text(),
+                  r"\n(pub fn report_seqnum.*?\n\})", "report_seqnum")
 
     # Die zwei Konstanten kommen aus regs.rs — sonst prueft der Pruefer
     # seine eigene Abschrift. Sie stehen in KEINEM Linux-Header, also
     # sieht check_regs.py sie nicht; hier ist ihre einzige Kontrolle.
-    consts = ""
+    for name, want in (("CCX_REPORT_V0_SEQNUM_OFF", 6),
+                       ("CCX_REPORT_V0_STATUS_OFF", 0)):
+        m = re.search(r"pub const %s: usize = (\d+);" % name, regs)
+        if not m:
+            sys.exit("%s nicht in src/regs.rs" % name)
+        if int(m.group(1)) != want:
+            sys.exit("%s ist %s, fw.h:370-371 sagt %d"
+                     % (name, m.group(1), want))
+    consts = """const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
+const CCX_REPORT_V0_SEQNUM_MASK: u8 = 0xfc;
+const CCX_REPORT_V0_STATUS_OFF: usize = 0;
+const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0;
+"""
     for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
         if not m:
@@ -218,7 +266,15 @@ def main():
     name_cases = "\n".join(
         '        (%d, %s),' % (c, rs(frag)) for c, frag in NAMES)
 
-    main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon + """
+    txrpt_cases = "\n".join(
+        '        (%s, &[%s], %s),' % (
+            rs(name), ", ".join(str(b) for b in f),
+            "None" if want is None else "Some((%d, %s))"
+            % (want[0], "true" if want[1] else "false"))
+        for name, f, want in TXRPT)
+
+    main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
+        + "\n\n" + txrpt + "\n\n" + seqnum + """
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
@@ -258,11 +314,39 @@ fn main() {
                  code, got);
     }
 
-    let total = cases.len() + cfg.len() + names.len();
+    let rpts: &[(&str, &[u8], Option<(u8, bool)>)] = &[
+%s
+    ];
+    for (name, f, want) in rpts {
+        let got = tx_report_parse(f);
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+
+    // Die Nummernvergabe: immer ein Vielfaches von vier, nie zweimal
+    // dieselbe in einer Runde, und sie laeuft sauber um.
+    let mut counter = 0u8;
+    let mut seen = [false; 256];
+    let mut seq_ok = true;
+    for i in 0..256 {
+        let sn = report_seqnum(&mut counter);
+        if sn & 0x03 != 0 { seq_ok = false; }
+        if i < 64 && seen[sn as usize] { seq_ok = false; }
+        seen[sn as usize] = true;
+    }
+    let n_distinct = seen.iter().filter(|&&x| x).count();
+    if !seq_ok || n_distinct != 64 { bad += 1; }
+    println!("  {} report_seqnum: {} verschiedene Nummern, alle durch 4 teilbar",
+             if seq_ok && n_distinct == 64 { "OK  " } else { "DIFF" },
+             n_distinct);
+
+    let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1;
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
-""" % (cases, cfg_cases, name_cases)
+""" % (cases, cfg_cases, name_cases, txrpt_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
