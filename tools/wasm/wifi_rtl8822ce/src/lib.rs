@@ -780,9 +780,11 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5f: die Ratenanpassung ─────────────────────────────
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
-        (true, Some(v), Some(b)) =>
-            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates, rtwdev),
+    let stage5f = match (stage5e, linked.as_ref(), target.as_ref(),
+                         efuse.as_ref()) {
+        (true, Some(v), Some(b), Some(ef)) =>
+            stage5f_rates(h, &mut trx, &mut h2c, &hal, ef, v, b, &mut rates,
+                          rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
             false
@@ -3069,8 +3071,9 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
 /// und QoS-Null-Rahmen, die die FIRMWARE im Stromsparbetrieb selbst
 /// sendet. Stromsparen gibt es hier nicht, also wuerden die Seiten
 /// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
+#[allow(clippy::too_many_arguments)]
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
-                 hal: &Hal, vifc: &vif::Vif, bss: &Bss,
+                 hal: &Hal, e: &efuse::Efuse, vifc: &vif::Vif, bss: &Bss,
                  out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
@@ -3134,7 +3137,16 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
 
     let mut si = sta::StaInfo { mac_id: vifc.mac_id, init_ra_lv: 1,
                                 ..Default::default() };
-    let nss = if hal.rf_2t2r { 2 } else { 1 };
+    // **Die Stroemezahl hat EINE Quelle, und das ist die efuse.** Linux
+    // fragt an beiden Stellen `efuse->hw_cap.nss` (main.c:1248 fuer die
+    // Ratenmaske, main.c:1313 fuer `tx_num`); hier stand
+    // `if hal.rf_2t2r { 2 }`. Auf diesem Chip ist das meist dasselbe --
+    // aber es ist dieselbe Bauart wie die Bandbreite, die an drei Stellen
+    // stand und dreimal etwas anderes sagte, und das hat uns einen Faktor
+    // drei gekostet. `rf_2t2r` sagt, was der Funkteil HAT; `hw_cap.nss`
+    // sagt, was diese KARTE fuehren darf, und nur das zweite steht auch im
+    // Anmeldeantrag (`build_ht_cap_ie` nimmt es seit je).
+    let nss = e.hw_cap_nss;
     let wireless_set = sta::update_sta_info(&mut si, &caps, nss,
                                             bss.channel <= 14);
 
@@ -4575,7 +4587,7 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     // Stufe 5f: die Firmware waehlt wieder die Rate.
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
+    if !stage5f_rates(h, trx, h2c, hal, e, v, bss, &mut rates, d) {
         return false;
     }
     if let Some((caps, si)) = rates {
@@ -4962,6 +4974,17 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put("  clkreq ", &mut b, &mut n);
         put(if l.clkreq { "an" } else { "aus" }, &mut b, &mut n);
     }
+    // **Die Stroemezahl, und zwar BEIDE.** `rx HT MCS7` ist die Spitze des
+    // Ein-Strom-Bereichs — dort festzusitzen heisst entweder, dass der AP
+    // so waehlt, oder dass wir nur einen Strom ANGEBOTEN haben. Der
+    // Unterschied steht in der efuse, und ohne ihn im Bericht raet man.
+    put("  nss ", &mut b, &mut n);
+    num(e.hw_cap_nss as u32, &mut b, &mut n);
+    put(" angeboten (antennen ", &mut b, &mut n);
+    num(e.hw_cap_ant_num as u32, &mut b, &mut n);
+    put(", efuse-bw 0x", &mut b, &mut n);
+    rate_hex(e.hw_cap_bw, &mut b, &mut n);
+    put(")", &mut b, &mut n);
     put("\nbssid ", &mut b, &mut n);
     for (i, byte) in link.bssid.iter().enumerate() {
         if i > 0 && n < b.len() {
