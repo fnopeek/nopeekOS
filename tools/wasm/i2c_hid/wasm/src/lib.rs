@@ -370,6 +370,17 @@ pub extern "C" fn _start() {
         // und dann von selbst aufhoeren. Sonst bleibt ein Treiber, der
         // einen Kern frisst, eine Ratesache.
         let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
+
+        // Das Antippen drueckt sofort und laesst SPAETER los — sonst
+        // koennte daraus nie ein Ziehen werden. Der Tritt dafuer steht
+        // HIER und nicht im Berichtspfad: ein Touchpad, das niemand mehr
+        // beruehrt, schickt keinen Bericht, und die Taste bliebe unten.
+        // Genau dieser Fehler ist 0.13.0 ausgeliefert worden.
+        for l in live.iter_mut() {
+            l.track.tick(now / 1000);
+            push_buttons(l);
+        }
+
         if stat_lines_left > 0 && now >= next_stat_us {
             next_stat_us = now + 10_000_000;
             stat_lines_left -= 1;
@@ -544,6 +555,14 @@ struct Live {
     /// `buttons != 0` einspeist, meldet den Druck und nie das Ende — und
     /// der Compositor haelt die Taste fuer immer fuer gedrueckt.
     last_buttons: i32,
+    /// Die PHYSISCHEN Tasten aus dem letzten Bericht, ohne das, was ein
+    /// Antippen gerade haelt.
+    ///
+    /// Beides getrennt zu fuehren ist noetig, weil sie zu verschiedenen
+    /// Zeiten kommen: die physische Lage steht im Bericht, die gehaltene
+    /// laeuft an einem Zeitgeber ab — und der tickt auch dann, wenn das
+    /// Geraet schweigt.
+    hw_buttons: i32,
 
     /// Fragen wir den Pin, bevor wir den Bus anfassen?
     gate: Gate,
@@ -727,6 +746,7 @@ fn talk_to_device(
     let mut scroll_step = 1i32;
     let mut hscroll_step = 1i32;
     let mut tap_move = 1i32;
+    let mut pin_move = 1i32;
 
     if let Some(id) = map.touchpad_report() {
         let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
@@ -753,13 +773,21 @@ fn talk_to_device(
             // derselbe Wert, den libinput nimmt. Aus dem Geraet
             // hergeleitet, nicht in Pixeln geraten.
             tap_move = ((xs[0].logical_max - xs[0].logical_min).max(1) / 80).max(1);
+            // Und soweit darf er unter einer GEDRUECKTEN Taste wandern,
+            // bevor der Zeiger ihm wieder folgt: doppelt so weit, also
+            // rund 2,6 mm. Wer durchdrueckt, verformt die Fingerkuppe,
+            // und ihr wandernder Schwerpunkt ist keine Zeigerbewegung.
+            // Aus unserem eigenen Tippmass hergeleitet und nicht aus
+            // einer Millimeterzahl geraten.
+            pin_move = (tap_move * 2).max(1);
             // Die quere Raste kommt aus der BREITE, nicht aus der Hoehe:
             // das Pad ist breiter als hoch, und ein Schritt aus der Hoehe
             // liefe quer zu fein.
             hscroll_step = (((xs[0].logical_max - xs[0].logical_min).max(1)) / 40).max(1);
             logln(&alloc::format!(
                 "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), \
-                 scroll step {step}/{hscroll_step}, tap move {tap_move}, ids {}",
+                 scroll step {step}/{hscroll_step}, tap move {tap_move}, \
+                 pin move {pin_move}, ids {}",
                 if ids.is_empty() { "no" } else { "yes" }));
             scroll_step = step;
             decoders.push(Decoder {
@@ -815,9 +843,9 @@ fn talk_to_device(
         other_seen: 0,
         touch_logged: 0,
         raw_logged: 0, scroll_logged: 0, tap_logged: 0,
-        track: i2c_hid_core::gesture::Tracker::new(scroll_step, hscroll_step, tap_move),
+        track: i2c_hid_core::gesture::Tracker::new(scroll_step, hscroll_step, tap_move, pin_move),
         have_ref: false, rx: 0, ry: 0,
-        last_buttons: 0,
+        last_buttons: 0, hw_buttons: 0,
         gate: Gate::Blind,
         dead: false,
         polls: 0, datas: 0, empties: 0, junk: 0, errs: 0, skips: 0, capped: 0,
@@ -1074,24 +1102,33 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         dbgln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
     }
 
-    let mut buttons = 0i32;
-    for (i, f) in btn.iter().enumerate() {
-        if report::extract(data, f) != 0 { buttons |= 1 << i; }
+    // Die physische Tastenlage merken — aber nur aus einem Bericht, der
+    // ueberhaupt Tasten FUEHRT. Ein Geraet, das seine Taste in einem
+    // eigenen Bericht meldet, setzte sie sonst mit dem naechsten
+    // Kontaktbericht still wieder zurueck, und das Festhalten unter dem
+    // Druck waere wirkungslos, ohne dass es irgendwo auffiele.
+    if !btn.is_empty() {
+        let mut buttons = 0i32;
+        for (i, f) in btn.iter().enumerate() {
+            if report::extract(data, f) != 0 { buttons |= 1 << i; }
+        }
+        l.hw_buttons = buttons;
     }
+    let buttons = l.hw_buttons;
 
-    let (dx, dy, scroll, hscroll) = match mode {
+    let (dx, dy, scroll, hscroll, tap) = match mode {
         Mode::Mouse { fx, fy, wheel } => {
             let x = report::extract(data, fx);
             let y = report::extract(data, fy);
             // Das Rad meldet immer RELATIV — Rasten, keine Position.
             let s = wheel.as_ref().map(|w| report::extract(data, w)).unwrap_or(0);
             if fx.relative {
-                (x, y, s, 0)
+                (x, y, s, 0, 0)
             } else {
                 let d = if l.have_ref { (x - l.rx, y - l.ry) } else { (0, 0) };
                 l.have_ref = true;
                 l.rx = x; l.ry = y;
-                (d.0, d.1, s, 0)
+                (d.0, d.1, s, 0, 0)
             }
         }
         Mode::Touchpad { contacts, count } => {
@@ -1111,8 +1148,12 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                 }
             }
             let now_ms = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 / 1000 } };
-            match l.track.feed(cc, &present[..np], contacts.len(), now_ms) {
-                gesture::Out::Pending => (0, 0, 0, 0),
+            // Die Taste faehrt MIT: ein durchgedruecktes Pad haelt die
+            // Finger fest, und eine Beruehrung unter der Taste ist kein
+            // Antippen. Beides gehoert in den Tracker, weil es dort
+            // Tests hat.
+            match l.track.feed(cc, &present[..np], contacts.len(), now_ms, buttons != 0) {
+                gesture::Out::Pending => (0, 0, 0, 0, 0),
                 gesture::Out::Frame { n, gesture, dx, dy, scroll, hscroll, tap } => {
                     if n > 0 && l.touch_logged < 3 {
                         l.touch_logged += 1;
@@ -1126,28 +1167,44 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                         dbgln(&alloc::format!(
                             "[i2c-hid]   scroll: {scroll} up, {hscroll} right"));
                     }
-                    if tap > 0 {
-                        // Druck UND Loslassen. Der Compositor liest die
-                        // Tastenlage aus dem Ring; ein Druck ohne Ende
-                        // haelt sie fuer immer gedrueckt.
-                        let b = 1i32 << (tap - 1);
-                        unsafe { npk_pointer_inject(0, 0, b, 0, 0) };
-                        unsafe { npk_pointer_inject(0, 0, 0, 0, 0) };
-                        if l.tap_logged < 2 {
-                            l.tap_logged += 1;
-                            dbgln(&alloc::format!(
-                                "[i2c-hid]   tap: {tap} finger(s) -> button {b}"));
-                        }
+                    if tap > 0 && l.tap_logged < 2 {
+                        l.tap_logged += 1;
+                        dbgln(&alloc::format!("[i2c-hid]   tap: {tap} finger(s)"));
                     }
-                    (dx, dy, scroll, hscroll)
+                    (dx, dy, scroll, hscroll, tap)
                 }
             }
         }
     };
 
-    if dx != 0 || dy != 0 || scroll != 0 || hscroll != 0 || buttons != l.last_buttons {
-        unsafe { npk_pointer_inject(dx, dy, buttons, scroll, hscroll) };
+    // Erst die LAGE, dann der Impuls, dann der Weg.
+    //
+    // Die Reihenfolge ist nicht beliebig: beim zweiten Antippen einer
+    // Reihe gibt der Tracker im selben Bild „Haltetaste auf" UND „ein
+    // ganzer Klick". Kaeme der Klick zuerst, stuende er IN der noch
+    // gedrueckten Taste und der Compositor saehe nur einen.
+    push_buttons(l);
+    if tap > 0 {
+        let b = 1i32 << (tap - 1);
+        unsafe { npk_pointer_inject(0, 0, l.last_buttons | b, 0, 0) };
+        unsafe { npk_pointer_inject(0, 0, l.last_buttons, 0, 0) };
     }
-    l.last_buttons = buttons;
+    if dx != 0 || dy != 0 || scroll != 0 || hscroll != 0 {
+        unsafe { npk_pointer_inject(dx, dy, l.last_buttons, scroll, hscroll) };
+    }
     Step::Data
+}
+
+/// Die Tastenlage melden, wenn sie sich geaendert hat.
+///
+/// **Die einzige Stelle, die sie bildet.** Sie kommt aus zwei Quellen —
+/// den physischen Tasten des letzten Berichts und der Taste, die ein
+/// Antippen gerade haelt —, und zwei Stellen, die das je fuer sich
+/// zusammenrechnen, waeren zwei Semantiken.
+fn push_buttons(l: &mut Live) {
+    let want = l.hw_buttons | l.track.hold() as i32;
+    if want != l.last_buttons {
+        unsafe { npk_pointer_inject(0, 0, want, 0, 0) };
+        l.last_buttons = want;
+    }
 }
