@@ -1923,6 +1923,15 @@ struct Bss {
     /// HT40** — welche HAELFTE die breite Zelle belegt, sagt allein der
     /// AP, und eine geratene Haelfte ist ein anderer Kanal.
     ht_param: u8,
+    /// **War das HT-Operation-Element ueberhaupt da?** `ht_param == 0`
+    /// heisst sonst zweierlei: „der AP faehrt 20 MHz" ODER „wir haben das
+    /// Element nie gesehen". Das sind zwei verschiedene Baustellen.
+    ht_op_seen: bool,
+    /// Byte 0:1 des HT-CAPABILITIES-Elements (id 45). Bit 1 ist
+    /// `SUP_WIDTH_20_40`: was der AP KANN. Das HT-Operation-Element sagt,
+    /// was er gerade TUT. Nur beide nebeneinander beantworten die Frage,
+    /// ob 20 MHz seine Entscheidung oder unsere Luecke ist.
+    ht_cap: u16,
 }
 
 const MAX_BSS: usize = 48;
@@ -2108,6 +2117,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
         channel: 0, best: -128, beacons: 0, resps: 0,
         capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
+        ht_op_seen: false, ht_cap: 0,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -2347,24 +2357,37 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
     let mut bssid = [0u8; 6];
     bssid.copy_from_slice(&f[16..22]); // addr3
 
-    for b in found[..*n].iter_mut() {
-        if b.bssid == bssid {
-            if signal > b.best {
-                b.best = signal;
+    // **Die Elemente werden bei JEDEM Rahmen neu gelesen.**
+    //
+    // Hier stand vorher ein `return` fuer eine schon bekannte Zelle: sie
+    // bekam nur ihren Zaehler hochgesetzt, und die Elemente blieben die
+    // des ERSTEN Rahmens, den wir je von ihr gesehen haben. Damit
+    // entschied der Zufall — Beacon oder Probe Response, frueh oder spaet
+    // —, welche Kanalbreite wir ihr fuer immer zuschreiben. Linux
+    // aktualisiert den BSS-Eintrag mit jedem Beacon.
+    let idx = match found[..*n].iter().position(|b| b.bssid == bssid) {
+        Some(i) => {
+            if signal > found[i].best {
+                found[i].best = signal;
             }
-            if is_beacon { b.beacons += 1 } else { b.resps += 1 }
-            return true;
+            if is_beacon { found[i].beacons += 1 } else { found[i].resps += 1 }
+            i
         }
-    }
-    if *n >= MAX_BSS {
-        return false;
-    }
-    let e = &mut found[*n];
-    e.bssid = bssid;
-    e.channel = ch;
-    e.best = signal;
-    e.beacons = is_beacon as u16;
-    e.resps = !is_beacon as u16;
+        None => {
+            if *n >= MAX_BSS {
+                return false;
+            }
+            let i = *n;
+            *n += 1;
+            found[i].bssid = bssid;
+            found[i].channel = ch;
+            found[i].best = signal;
+            found[i].beacons = is_beacon as u16;
+            found[i].resps = !is_beacon as u16;
+            i
+        }
+    };
+    let e = &mut found[idx];
     // 24 Kopf + 8 Zeitstempel + 2 Beacon-Intervall, dann das
     // Faehigkeitsfeld, dann die Elemente.
     if f.len() >= 36 {
@@ -2392,14 +2415,19 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
             // primaere Kanal, Byte 1 traegt die Lage des Zweitkanals.
             // Wir behalten nur Byte 1 — den Kanal wissen wir, wir
             // standen darauf, als der Beacon hereinkam.
+            // 45 = HT Capabilities (802.11 §9.4.2.55). Byte 0:1 ist das
+            // Faehigkeitsfeld; Bit 1 sagt, ob der AP 40 MHz KANN.
+            45 if len >= 2 => {
+                e.ht_cap = u16::from_le_bytes([f[i + 2], f[i + 3]]);
+            }
             61 if len >= 2 => {
                 e.ht_param = f[i + 3];
+                e.ht_op_seen = true;
             }
             _ => {}
         }
         i += 2 + len;
     }
-    *n += 1;
     true
 }
 
@@ -2707,10 +2735,21 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         _ => "kein Zweitkanal",
     });
     host::print(if bss.ht_param & 0x04 != 0 {
-        ", Breite erlaubt)\n"
+        ", Breite erlaubt)"
     } else {
-        ", AP erlaubt nur 20 MHz)\n"
+        ", nur 20 MHz)"
     });
+    // **Kann er 40, oder tut er nur 20?** Das HT-Operation-Element sagt,
+    // was der AP GERADE faehrt; Bit 1 seiner HT-FAEHIGKEITEN sagt, was er
+    // KANN. Nur beide nebeneinander trennen „seine Entscheidung" von
+    // „unsere Luecke" — und ein Element, das gar nicht da war, ist ein
+    // dritter Fall, der bisher wie „nur 20 MHz" aussah.
+    host::print(" · AP kann 40: ");
+    host::print(if bss.ht_cap & 0x0002 != 0 { "JA" } else { "nein" });
+    if !bss.ht_op_seen {
+        host::print(" · ACHTUNG: HT-Operation-Element war in KEINEM Rahmen dieser Zelle");
+    }
+    host::print("\n");
 
     // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
     // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
