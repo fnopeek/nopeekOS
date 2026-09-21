@@ -540,19 +540,26 @@ pub fn init() -> bool {
         log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
-    // Declare this link's clean RX capacity so the host TCP stack sizes the
-    // receive window to capacity × measured RTT (BDP). A gigabit wire behind
-    // High-Speed USB sustains ~160 Mbit cleanly (above that the chip RX FIFO
-    // overflows); the value is a link-CLASS property, RTT-scaled in tcp.rs, and
-    // only set for sub-SuperSpeed USB — native gigabit / SuperSpeed stay uncapped
-    // (no clashing per-link window). SuperSpeed has the USB headroom → no cap.
-    if crate::xhci::nic_speed_class() < 2 {
-        crate::net::tcp::set_link_rx_rate(20_000_000); // ~160 Mbit/s clean
-    } else {
-        crate::net::tcp::set_link_rx_rate(u32::MAX);    // uncapped
-    }
+    // Die saubere Empfangskapazitaet DIESER Strecke merken. Sie geht nicht
+    // mehr in eine Globale des TCP-Stapels — dort galt sie fuer JEDE
+    // Schnittstelle, auch fuer die WLAN-Karte (siehe
+    // `netdev::active_rx_rate`). Hier steht sie, weil hier die USB-Klasse
+    // bekannt ist, und `netdev` holt sie sich fuer die aktive Schnittstelle.
+    // SuperSpeed hat die USB-Luft und bleibt ungedeckelt.
+    RX_RATE.store(
+        if crate::xhci::nic_speed_class() < 2 { 20_000_000 } else { u32::MAX },
+        Ordering::Release);
     true
 }
+
+/// Saubere Empfangskapazitaet dieser Strecke in Bytes/s, `u32::MAX` = kein
+/// Deckel. Gesetzt von `init`, gelesen von `netdev::active_rx_rate` — eine
+/// Zahl ohne Schloss, damit sie im Segmentpfad nichts kostet.
+static RX_RATE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Fuer `netdev::active_rx_rate`.
+pub fn rx_rate() -> u32 { RX_RATE.load(Ordering::Acquire) }
 
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Acquire) }
 

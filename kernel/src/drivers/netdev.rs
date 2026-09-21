@@ -250,6 +250,44 @@ pub fn active() -> Active {
     Active::None
 }
 
+/// Saubere Empfangskapazitaet der AKTIVEN Schnittstelle in Bytes/s.
+/// `u32::MAX` = kein Deckel.
+///
+/// **Das hier war eine GLOBALE, und gesetzt hat sie genau ein Treiber.**
+/// `rtl8153::init` rief `tcp::set_link_rx_rate(20_000_000)`, und damit galt
+/// der Wert des USB-Dongles fuer JEDE Schnittstelle — auch fuer die
+/// WLAN-Karte, die ihre Kapazitaet nie gemeldet hat. Steckte der Dongle,
+/// bekam das WLAN versehentlich ein vernuenftiges Fenster; steckte er
+/// nicht, blieb der Wert auf `u32::MAX` und das WLAN bot den GANZEN Puffer
+/// an: 8 MiB auf einer 50-Mbit-Strecke, also das Dreissigfache ihres BDP.
+///
+/// Gemessen am Geraet (2026-09-21): `snd_wnd=8387072` und `rtt=47203` us
+/// auf einer Strecke, die unbelastet 3-5 ms hat. Die uebrigen ~42 ms waren
+/// unsere eigenen Pakete in der Warteschlange des AP — der lief ueber,
+/// `lost=106` bei `retr=175` (8,6 %), und der Durchsatz fiel auf 1,4 Mbit.
+/// Bufferbloat, von uns verursacht.
+///
+/// Die Kapazitaet ist eine Eigenschaft der LINK-KLASSE, und sie gehoert
+/// deshalb hierher, wo die Klasse bekannt ist — nicht in eine Globale, die
+/// der zuletzt gestartete Treiber gewinnt.
+pub fn active_rx_rate() -> u32 {
+    match active() {
+        // Gigabit-Draht hinter High-Speed-USB. **Offen und benannt:** ueber
+        // Kupfer wurden 342 Mbit sauber gemessen (retrans 0), also traegt
+        // diese Strecke mehr als die 160 Mbit, die hier stehen. Die Zahl
+        // stammt vom HP-Notebook und ist nicht nachgemessen; sie bleibt,
+        // bis sie EINZELN gemessen wird.
+        Active::Rtl => rtl8153::rx_rate(),
+        // 2x2 HT20 auf 2,4 GHz: brutto 144 Mbit, sauber etwa 64. Mit dem
+        // BDP aus `rate x RTT` und der Untergrenze RCV_WND_MIN landet eine
+        // gesunde Strecke damit bei 256 KB — genug fuer 512 Mbit bei 4 ms,
+        // also kein Deckel, aber das Dreissigfache weniger Ueberschuss.
+        Active::Wasm => 8_000_000,
+        // Echtes Gigabit / virtio: der Puffer IST das Fenster.
+        Active::Intel | Active::Virtio | Active::None => u32::MAX,
+    }
+}
+
 /// Does the ACTIVE interface have a usable link right now? Distinct from
 /// `active_id`, which only says which interface would be used: a WiFi NIC is
 /// registered (and therefore "active" by fallback) from the moment the driver

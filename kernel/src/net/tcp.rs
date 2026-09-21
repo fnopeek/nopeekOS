@@ -61,21 +61,12 @@ const OUR_WSCALE: u8 = 8;
 const RCV_WND_MIN: usize = 256 * 1024;
 const RCV_WND_MAX: usize = RECV_BUF_SIZE;
 
-// Link receive-capacity hint (bytes/sec) declared by the active NIC driver.
-// Default u32::MAX = uncapped (full buffer window) — native gigabit, SuperSpeed,
-// virtio. A link whose clean sustainable TCP rate is far below the buffer's
-// implied window — a gigabit-wire dongle behind 480-Mbit USB — sets this to that
-// rate, and the receive window is then `rate × measured RTT` (= BDP). Scaling by
-// RTT keeps the offered RATE constant near and far, so it's not URL/RTT-tuned;
-// the constant is the link CLASS's capacity (a hardware property), and it only
-// applies to the NIC that sets it — so it can't clash with faster links.
-static LINK_RX_RATE: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(u32::MAX);
-
-/// Declare the active link's clean RX capacity in bytes/sec (u32::MAX = uncapped).
-pub fn set_link_rx_rate(bytes_per_sec: u32) {
-    LINK_RX_RATE.store(bytes_per_sec, core::sync::atomic::Ordering::Relaxed);
-}
+// Die Empfangskapazitaet der Strecke steht in `netdev::active_rx_rate()` —
+// JE SCHNITTSTELLE, nicht als Globale. Hier stand bis 0.395.0 ein
+// `static LINK_RX_RATE`, den genau ein Treiber setzte (rtl8153), und damit
+// galt der Wert des USB-Dongles auch fuer die WLAN-Karte. Ohne Dongle blieb
+// er auf `u32::MAX`, und das WLAN bot 8 MiB an. Der Grund und die Messung
+// stehen an `active_rx_rate`.
 
 /// Advertised receive window = min(free buffer, BDP) where BDP = link capacity ×
 /// smoothed RTT (50 ms assumed until the first TSecr-derived RTT). Keeps the
@@ -96,7 +87,7 @@ pub fn window_diag() -> (u32, u32, u32) {
 }
 
 fn recv_window(conn: &TcpConn) -> u16 {
-    let rate = LINK_RX_RATE.load(core::sync::atomic::Ordering::Relaxed);
+    let rate = crate::netdev::active_rx_rate();
     let cap = if rate == u32::MAX {
         RCV_WND_MAX
     } else {
