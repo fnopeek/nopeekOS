@@ -588,8 +588,42 @@ pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
     // engeres Raster — dort sind die Nutzdaten immer 32 Bytes.
     let stride = if queue == Q_H2C { H2C_SLOT_BYTES } else { TX_SLOT_BYTES };
     let slot = wp * stride;
-    host::dma_write_buf(stage, slot, &desc);
-    host::dma_write_buf(stage, slot + desc_sz as u32, payload);
+    // **Beide Schreibzugriffe werden GEPRUEFT.** `npk_dma_write` lehnt
+    // einen Versatz hinter dem Puffer ab und gibt -1; wer das wegwirft,
+    // traegt gleich darauf eine Adresse in den Buffer-Deskriptor ein, die
+    // dem Chip nicht gehoert — und der sendet dann, was dort liegt. Ein
+    // abgelehnter DMA-Schreibzugriff ist keine Nebensache, er ist die
+    // Meldung, dass der Zwischenpuffer nicht zum Ring passt.
+    // Und der Platz muss den Rahmen ueberhaupt fassen. Heute reicht er
+    // (48 + 1540 bei MTU 1500), aber ein Ueberlauf HIER liefe in den
+    // NACHBARplatz und nicht aus dem Puffer heraus — der Kernel saehe
+    // nichts davon.
+    if desc_sz + payload.len() > stride as usize {
+        host::loud_begin();
+        host::print("[rtl8822ce] Rahmen passt nicht in einen Platz: ");
+        host::print_dec((desc_sz + payload.len()) as u32);
+        host::print(" > ");
+        host::print_dec(stride);
+        host::print("\n");
+        host::loud_end();
+        return false;
+    }
+    let a = host::dma_write_buf(stage, slot, &desc);
+    let b = host::dma_write_buf(stage, slot + desc_sz as u32, payload);
+    if a < 0 || b < 0 {
+        host::loud_begin();
+        host::print("[rtl8822ce] Zwischenpuffer passt nicht zum Ring: Queue ");
+        host::print_dec(queue as u32);
+        host::print(", Platz ");
+        host::print_dec(wp);
+        host::print(" von ");
+        host::print_dec(ring_len);
+        host::print(", Versatz ");
+        host::print_dec(slot);
+        host::print(" — NICHTS gesendet\n");
+        host::loud_end();
+        return false;
+    }
     let dma = host::dma_phys(stage) as u32 + slot;
 
     let total = desc_sz + payload.len();
@@ -781,9 +815,32 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
 /// also gibt es einen festen Platz je Ringindex, genau wie beim H2C-Weg.
 pub const TX_SLOT_BYTES: u32 = 2048;
 
-/// So gross muss der Zwischenpuffer der MGMT-Queue sein: ein Platz je
-/// Ringindex, und `wp` laeuft ueber die ganze Ringlaenge.
-pub const MGMT_STAGE_BYTES: u32 = RTK_DEFAULT_TX_DESC_NUM * TX_SLOT_BYTES;
+/// So gross muss der Zwischenpuffer sein: ein Platz je Ringindex — und
+/// zwar des GROESSTEN Rings, der ihn benutzt.
+///
+/// **Hier stand bis 0.25.1 `RTK_DEFAULT_TX_DESC_NUM` (128), waehrend der
+/// Datenring `Q_BE` 256 Eintraege hat.** Ab dem 128. gesendeten Rahmen
+/// lag `wp * TX_SLOT_BYTES` hinter dem Puffer. Der Kernel lehnte den
+/// Schreibzugriff ab (`npk_dma_write` prueft `off + len > pages * 4096`
+/// und gibt -1), der Rueckgabewert wurde weggeworfen — und in den
+/// Buffer-Deskriptor ging trotzdem `dma_phys(stage) + slot`, also eine
+/// Adresse AUSSERHALB unserer Belegung. Der Chip holte sich von dort
+/// fremden Speicher und sendete ihn.
+///
+/// Das ergibt genau die beobachtete Form: **im Leerlauf haelt die
+/// Verbindung lange, unter Verkehr stirbt sie** — die Schwelle ist keine
+/// Zeit, sondern eine ANZAHL gesendeter Rahmen. Und danach ist jeder
+/// zweite Ringumlauf kaputt (Plaetze 128-255), was von aussen aussieht
+/// wie eine Leitung, auf der manchmal etwas durchkommt.
+pub const MGMT_STAGE_SLOTS: u32 = RTK_BEQ_TX_DESC_NUM;
+pub const MGMT_STAGE_BYTES: u32 = MGMT_STAGE_SLOTS * TX_SLOT_BYTES;
+
+// **Ein Deckel, der nicht wegdriften kann.** Waechst ein Ring, faellt
+// der Bau um — statt dass ab einem bestimmten Rahmen still daneben
+// geschrieben wird. Genau diese Zusicherung hat bis 0.25.1 gefehlt.
+const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_BEQ_TX_DESC_NUM);
+const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_DEFAULT_TX_DESC_NUM);
+const _: () = assert!(H2C_STAGE_BYTES / H2C_SLOT_BYTES >= RTK_DEFAULT_TX_DESC_NUM);
 
 /// pci.c:897-913 `rtw_pci_tx_write`.
 ///
