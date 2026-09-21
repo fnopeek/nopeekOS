@@ -1309,12 +1309,101 @@ ohne eine Abweichung.**
 Stabilität über Stunden · Wiederverbinden nach einem Deauth · Verhalten bei
 einem Gruppen-Neuschlüssel. Das sind Messungen, keine Gates.
 
+### 0.24.0 — der Schalter und die zwei Augen (Posten 1-3 gebaut)
+
+**Was es aendert, in einem Satz je Posten.**
+
+**(1) `debug: 1` in `sys/config/wifi`.** Gebaut nicht als `if verbose` um
+Bloecke herum, sondern IN `host::print` — wer die Bloecke wegschaltet,
+schaltet auch die Registerzugriffe weg, die als Argumente drinstehen, und
+aendert damit, was der Treiber TUT. So bleibt jeder Zugriff, nur die Bytes
+gehen nicht auf die Leitung. Daneben `host::say` und die Klammer
+`loud_begin`/`loud_end` — **die Klammer ist der Grund, warum es keine
+zweite Garnitur Zahlenformatierer braucht**: `print_dec` ruft `print`, und
+`print` sieht die Klammer.
+
+Immer laut, auch ohne den Schalter: jedes **gefallene** Tor, jede
+Abbruch- und Ueberspringzeile, die Panik, der RX-Wachhund, ein nicht
+gesendetes EAPOL, der Rauswurf — und **die eine Zeile, wenn es steht**:
+
+    [rtl8822ce] verbunden: "IvyPie_New" K7 -49 dBm · HT MCS8-15 (0x1b) · 40 MHz · AID 3
+
+Sie steht hinter den Toren von 6a, nicht bei `AUTHORIZED`: erst dort ist
+sie eine Aussage ueber eine VERBINDUNG und nicht ueber einen
+Zwischenstand.
+
+**Was das nebenbei aendert und hier benannt gehoert:** der Bringup wird
+schneller, weil zehntausende Serienbytes wegfallen. Nachgesehen: **alle
+Wartezeiten im Treiber haengen an `now_us()`**, keine an einer
+Rundenzahl — die Stufen messen also dasselbe wie vorher.
+
+**(2) Der Rauswurf ist sichtbar.** `disconnect_reason` steht direkt neben
+`rx_to_8023` — dort, wo das Filter sitzt, das ihn verschluckte —, und die
+Empfangsschleife fragt ihn VOR dem Datenfilter. Deauth `0xc0`, Disassoc
+`0xa0`, beide nur von `addr2 == BSSID`; der Grundcode little-endian aus
+24..26. **Gesehen im Rueckruf, gehandelt danach**: `netdev_set_link(false)`
+und `EV_LINK_DOWN` gehoeren nicht in einen Rueckruf, der mitten im
+Ringleeren laeuft und `link` nicht halten darf.
+
+    [rtl8822ce] DEAUTH vom AP — Grund 16 (Gruppenschluessel-Handschlag: Zeitueberschreitung)
+                Laufzeit 412 s · daten rein/raus 1834/902 · neuschluessel 3/3 · gtk 4
+
+Gezaehlt wird jeder, **gedruckt die ersten drei** — ein AP schickt seinen
+Rauswurf als Salve.
+
+**(3) Der Neuschluessel wird gezaehlt.** Jedes EAPOL NACH `AUTHORIZED` ist
+einer, jede Antwort darauf daneben, und die GTK-Einschreibungen ins CAM
+als dritte Zahl. Der Bericht fuer `wlan` hat eine Zeile dazubekommen:
+
+    neuschluessel 3 empfangen, 3 beantwortet  gtk 4  rauswurf 1 (zuletzt Grund 16: …)
+
+**`publish_report` nimmt jetzt `&LinkStats`** statt acht Argumenten; das
+`#[allow(clippy::too_many_arguments)]` faellt weg.
+
+**Ein fuenfter Pruefer: `framecheck.py`.** `disconnect_reason` ist der
+einzige Weg, auf dem der Treiber einen Rauswurf ueberhaupt SIEHT — greift
+er daneben, gibt er `None`, und `None` ist genau der Zustand, aus dem wir
+kommen. Ein Offset daneben ist hier keine falsche Zahl, sondern Schweigen,
+und ein Geraetelauf waere verschenkt. 31 Faelle gegen von Hand gebaute
+802.11-Rahmen, dazu `cfg_on` und `reason_name`. **Die Vorlage setzt addr3
+absichtlich ANDERS als addr2 und SeqCtl absichtlich nicht null** — sonst
+kann kein Test merken, ob die Funktion das richtige Feld liest.
+
+Gegen fuenf absichtlich eingebaute Fehler geprueft, alle fuenf gefangen:
+addr3 statt addr2 · Grundcode zwei Byte zu frueh · big-endian statt little
+· Laengenpruefung zu kurz · die Konstante `DOT11_FC_DEAUTH` falsch (die
+steht in KEINEM Linux-Header, `check_regs.py` sieht sie also nicht — hier
+ist ihre einzige Kontrolle). Dazu prueft er die **Balance der
+`loud_*`-Klammern**: eine offene macht den ganzen Posten 1 wirkungslos und
+sieht aus wie ein Schalter, der nicht greift. Ausnahme ist `fn panic`,
+danach kommt nichts mehr.
+
+**Posten 4 (Wiederverbinden) ist bewusst NICHT gebaut.** Er steht unten
+unveraendert. Ein Reconnect auf eine unbekannte Ursache ist geraten; die
+zwei Zaehler und der Grundcode sagen im naechsten Lauf, worauf er zu
+antworten hat.
+
+**Was der naechste Geraetelauf beantwortet:**
+
+* **Grund 15 oder 16** → es haengt am Handschlag bzw. am Neuschluessel,
+  und Posten 4 muss ihn heilen, nicht nur neu verbinden.
+* **`neuschluessel 3 empfangen, 0 beantwortet`** → es liegt an uns, und
+  zwar im Weg `wifid` → `Step::Rekey` → `CMD_TX_EAPOL`.
+* **`3/3` und trotzdem Rauswurf** → es liegt woanders, und der Grundcode
+  sagt wo.
+* **gar kein DEAUTH, und die Leitung wird trotzdem still** → dann ist es
+  kein Rauswurf, sondern der Empfangsring, und der RX-Wachhund meldet
+  sich als naechster.
+
+Am Geraet: `store /sys/config/wifi debug: 1` (Zeile zu den bestehenden
+dazu), dann `install wifi_rtl8822ce && driver wifi_rtl8822ce`.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
 einer weile random raus"*. Vier Posten, in dieser Reihenfolge.
 
-#### 1. Die Stufenausgabe hinter `debug: 1` (klein, entsperrt die Konsole)
+#### 1. ✅ Die Stufenausgabe hinter `debug: 1` — gebaut in 0.24.0
 
 Im Autostart druckt der Treiber bei jedem Boot sechs Stufen mit Gates und
 macht die Konsole für alles andere unbrauchbar. Schalter: ein Schlüssel in
@@ -1329,7 +1418,7 @@ etwas nicht steht.
 Die Tore bleiben — sie sind der Grund, warum sechs Stufen entstanden sind,
 ohne im Dunkeln zu suchen. Hinter den Schalter, nicht in den Müll.
 
-#### 2. Den Rauswurf SEHEN (die Diagnose)
+#### 2. ✅ Den Rauswurf SEHEN — gebaut in 0.24.0
 
 **Wir sind blind dafür.** `rx_to_8023` filtert in der ersten Zeile auf
 Datenrahmen:
@@ -1355,7 +1444,7 @@ Zu bauen, in `link_pump`s Empfangsschleife:
 * Dann `netdev_set_link(false)`, `EV_LINK_DOWN` mit `reason 1` an `wifid`
   (Spec §4b), und `ls.authorized = false`.
 
-#### 3. Den Gruppen-Neuschlüssel ZÄHLEN (dieselbe Diagnose)
+#### 3. ✅ Den Gruppen-Neuschlüssel ZÄHLEN — gebaut in 0.24.0
 
 Der Weg ist gebaut — `wifid` hat `Step::Rekey`, und wir verschlüsseln
 EAPOL, sobald die PTK steht (genau der Fehler, den der AX200-Kommentar
@@ -1368,7 +1457,7 @@ Kommt „3 empfangen, 0 beantwortet", liegt es an uns. Kommt „3/3" und der
 AP wirft uns trotzdem raus, liegt es woanders — und der Grundcode aus
 Posten 2 sagt wo.
 
-#### 4. Wiederverbinden (die Heilung)
+#### 4. ▶ Wiederverbinden (die Heilung) — OFFEN, wartet auf den Lauf
 
 Erst wenn 2 und 3 messen, lohnt sich das: nach `EV_LINK_DOWN` zurück zu
 5e (Auth + Assoc auf demselben Kanal), Schlüssel im CAM löschen
@@ -1434,6 +1523,7 @@ am 2026-09-19 einmal passiert.
       src/dm.rs        struct rtw_dm_info, der PHY-Zustand
       firmware/rtw8822c_fw.bin
       gen_pwrseq.py · gen_tables.py · check_regs.py · seqdiff.py
+      txpwrcheck.py · cfgcheck.py · framecheck.py
 
 Ein reiner Modulwechsel geht über `tools/stage-module.sh wifi_rtl8822ce` +
 `./build.sh sign-modules` — **kein Kernel-Versionssprung**. Die zwei neuen

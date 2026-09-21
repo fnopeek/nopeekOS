@@ -1237,6 +1237,18 @@ pub const DOT11_FC_PROTECTED: u8 = 0x40;
 pub const DOT11_STYPE_QOS: u8 = 0x08;
 /// Subtyp-Bit: Null und QoS-Null tragen KEINEN Rumpf.
 pub const DOT11_STYPE_NODATA: u8 = 0x04;
+/// 802.11 §9.2.4.1 — das ganze erste Byte: Protokollfassung 0, Typ
+/// VERWALTUNG (00), Subtyp 12 bzw. 10. Ein Deauth ist deshalb GENAU
+/// `0xc0` und nicht eine Maske: `rx_to_8023` filtert in seiner ersten
+/// Zeile auf Daten, und ohne diese zwei Werte faellt ein Rauswurf
+/// lautlos durch.
+pub const DOT11_FC_DEAUTH: u8 = 0xc0;
+pub const DOT11_FC_DISASSOC: u8 = 0xa0;
+/// docs/spec/WIFI_CLASS_ABI.md §4b — `EV_LINK_DOWN` traegt einen Grund:
+/// 0 = angefordert, 1 = Deauth, 2 = verloren.
+pub const LINK_DOWN_REQUESTED: u8 = 0;
+pub const LINK_DOWN_DEAUTH: u8 = 1;
+pub const LINK_DOWN_LOST: u8 = 2;
 pub const RTW_SEC_CMD_REG: u32 = 0x670; // sec.h:8
 pub const RTW_SEC_WRITE_REG: u32 = 0x674; // sec.h:9
 pub const RTW_SEC_CAM_ENTRY_SHIFT: u32 = 3; // sec.h:13

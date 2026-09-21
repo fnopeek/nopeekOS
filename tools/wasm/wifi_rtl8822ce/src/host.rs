@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_print(ptr: i32, len: i32);
@@ -90,10 +92,56 @@ pub fn netdev_set_link(up: bool) {
     unsafe { npk_netdev_set_link(up as i32) };
 }
 
-// ── Ausgabe ──────────────────────────────────────────────────────
+// ── Ausgabe: laut oder leise ─────────────────────────────────────
+//
+// **Im Autostart ist Stille die Vorgabe.** Der Treiber druckt sechs
+// Stufen mit ihren Toren — das ist der Grund, warum sie entstanden sind,
+// ohne im Dunkeln zu suchen, und es macht die Konsole fuer alles andere
+// unbrauchbar. `debug: 1` in `sys/config/wifi` schaltet sie wieder an.
+//
+// **Still heisst nicht stumm.** Was nicht stimmt, geht immer hinaus:
+// `say` fuer eine Zeichenkette, `loud_begin`/`loud_end` als Klammer um
+// eine zusammengesetzte Zeile. Die Klammer ist der Grund, warum es keine
+// zweite Garnitur Zahlenformatierer braucht — `print_dec` und die
+// anderen rufen `print`, und das sieht die Klammer.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+static LOUD: AtomicU32 = AtomicU32::new(0);
 
-pub fn print(s: &str) {
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Alles bis `loud_end` geht auch ohne `debug: 1` hinaus. Gezaehlt und
+/// nicht geschaltet, damit ein Rufer den anderen nicht abstellt.
+pub fn loud_begin() {
+    LOUD.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn loud_end() {
+    // Saettigend: eine Klammer, die ohne Anfang schliesst, darf nicht
+    // unter null laufen und damit jede Ausgabe anschalten.
+    let v = LOUD.load(Ordering::Relaxed);
+    LOUD.store(v.saturating_sub(1), Ordering::Relaxed);
+}
+
+fn emit(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
+}
+
+/// Die Stufenausgabe — nur mit `debug: 1` oder innerhalb von `loud_*`.
+pub fn print(s: &str) {
+    if verbose() || LOUD.load(Ordering::Relaxed) > 0 {
+        emit(s);
+    }
+}
+
+/// Was immer hinausgeht: Fehler, gefallene Tore, der Zustand der Leitung.
+pub fn say(s: &str) {
+    emit(s);
 }
 
 pub fn log(s: &str) {

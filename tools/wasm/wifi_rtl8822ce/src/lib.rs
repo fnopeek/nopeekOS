@@ -86,6 +86,9 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 /// `Location` ueberlebt `strip = true`, weil es statische Daten sind.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Eine Panik ist nie Stufenausgabe: laut, auch ohne `debug: 1`, und
+    // die Klammer wird nicht mehr geschlossen — danach kommt nichts.
+    host::loud_begin();
     host::print("\n[rtl8822ce] PANIC — Treiber gestoppt");
     if let Some(l) = info.location() {
         host::print(" at ");
@@ -183,9 +186,25 @@ fn check_access_widths(h: i32, word: u32) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    // ── Wie laut? ────────────────────────────────────────────────
+    // **Zuerst, vor der ersten Zeile.** Im Autostart druckt der Treiber
+    // sechs Stufen mit ihren Toren und macht die Konsole unbrauchbar;
+    // `debug: 1` in `sys/config/wifi` holt sie zurueck. Die Datei ist
+    // dieselbe, aus der Stufe 5c ihr `ssid:` liest — eine zweite Stelle
+    // fuer dieselbe Sache driftet.
+    let verbose = read_debug_flag();
+    host::set_verbose(verbose);
+
     host::print("[rtl8822ce] Realtek RTL8822CE (rtw88) v");
     host::print(DRIVER_VERSION);
     host::print(" — Stufe 0: binden, BAR2, Chipkennung\n");
+    if !verbose {
+        // Die eine Zeile, die auch ein stiller Lauf schuldet: dass es
+        // den Treiber gibt und wo der Schalter steht.
+        host::say("[rtl8822ce] v");
+        host::say(DRIVER_VERSION);
+        host::say(" — still (`debug: 1` in sys/config/wifi zeigt die Stufen)\n");
+    }
 
     // ── PCI binden ───────────────────────────────────────────────
     // rtw8822ce.c fuehrt zwei Geraete-IDs fuer denselben Chip.
@@ -196,6 +215,7 @@ pub extern "C" fn _start() {
         rc = host::pci_bind(RTL_VENDOR, dev);
     }
     if rc != 0 {
+        host::loud_begin();
         host::print("[rtl8822ce] PCI-Bind fehlgeschlagen (");
         match rc {
             -1 => host::print("nicht gefunden"),
@@ -203,6 +223,7 @@ pub extern "C" fn _start() {
             _ => host::print("unbekannter Fehler"),
         }
         host::print(") — erwartet 10ec:c822 oder 10ec:c82f\n");
+        host::loud_end();
         return;
     }
     host::print("[rtl8822ce] gebunden: 10ec:");
@@ -214,14 +235,14 @@ pub extern "C" fn _start() {
     // wie ein Fehler im Treiber statt wie eine fehlende Erlaubnis.
     let bm = host::pci_enable_bus_master();
     if bm != 0 {
-        host::print("[rtl8822ce] Bus-Master konnte nicht eingeschaltet werden\n");
+        host::say("[rtl8822ce] Bus-Master konnte nicht eingeschaltet werden\n");
     }
     fw::dump_pci_cmd("nach bind");
 
     // ── BAR2 abbilden ────────────────────────────────────────────
     let h = host::mmio_map_bar(BAR_REG, BAR_PAGES);
     if h < 0 {
-        host::print("[rtl8822ce] BAR2 nicht abbildbar — Stufe 0 endet hier\n");
+        host::say("[rtl8822ce] BAR2 nicht abbildbar — Stufe 0 endet hier\n");
         return;
     }
     host::print("[rtl8822ce] BAR2 abgebildet (handle ");
@@ -281,7 +302,7 @@ pub extern "C" fn _start() {
     all &= gate("8/16/32-Bit-Zugriff stimmen ueberein", widths_ok && !dead);
 
     if !all {
-        host::print("[rtl8822ce] Stufe 0: NEIN — Stufe 1 und 2a werden nicht gefahren\n");
+        host::say("[rtl8822ce] Stufe 0: NEIN — Stufe 1 und 2a werden nicht gefahren\n");
         return;
     }
     host::print("[rtl8822ce] Stufe 0: GRUEN\n");
@@ -293,7 +314,7 @@ pub extern "C" fn _start() {
     let mut trx = match pci::init_trx_ring() {
         Some(t) => t,
         None => {
-            host::print("[rtl8822ce] DMA reicht nicht fuer die Ringe — Stufe 2a aus\n");
+            host::say("[rtl8822ce] DMA reicht nicht fuer die Ringe — Stufe 2a aus\n");
             return;
         }
     };
@@ -322,7 +343,7 @@ pub extern "C" fn _start() {
 
     let on_ok = on.is_ok();
     if let Err(e) = on {
-        host::print(match e {
+        host::say(match e {
             mac::PwrErr::Busy => "[rtl8822ce] Power-Sequenz abgebrochen (Polling)\n",
             mac::PwrErr::Already => "[rtl8822ce] Power-Sequenz: unerwartetes EALREADY\n",
         });
@@ -498,26 +519,18 @@ pub extern "C" fn _start() {
 
     let stage1 = pwr_on_ok && pwr_off_ok;
     let stage2a = rings_ok;
-    host::print(if stage1 {
-        "[rtl8822ce] Stufe 1: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 1: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage2a {
-        "[rtl8822ce] Stufe 2a: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage2b {
-        "[rtl8822ce] Stufe 2b: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 2b: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage2c {
-        "[rtl8822ce] Stufe 2c: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
+    stage_line(stage1,
+        "[rtl8822ce] Stufe 1: GRUEN\n",
+        "[rtl8822ce] Stufe 1: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage2a,
+        "[rtl8822ce] Stufe 2a: GRUEN\n",
+        "[rtl8822ce] Stufe 2a: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage2b,
+        "[rtl8822ce] Stufe 2b: GRUEN\n",
+        "[rtl8822ce] Stufe 2b: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage2c,
+        "[rtl8822ce] Stufe 2c: GRUEN\n",
+        "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n");
 
     // ── Stufe 4b: rtw_chip_board_info_setup ──────────────────────
     // Sie steht VOR Stufe 3, weil sie in Linux vor `rtw_power_on` steht:
@@ -527,7 +540,7 @@ pub extern "C" fn _start() {
     let (stage4b, _txpwr) = match efuse.as_ref() {
         Some(e) if stage2c => stage4b_board_info_setup(e.rfe_option),
         _ => {
-            host::print("[rtl8822ce] Stufe 4b: uebersprungen, 2c steht nicht\n");
+            host::say("[rtl8822ce] Stufe 4b: uebersprungen, 2c steht nicht\n");
             (false, None)
         }
     };
@@ -557,12 +570,12 @@ pub extern "C" fn _start() {
                 stage3b = b;
                 stage3c = c;
             } else {
-                host::print("[rtl8822ce] Stufe 3b/3c: uebersprungen, 3a steht nicht\n");
+                host::say("[rtl8822ce] Stufe 3b/3c: uebersprungen, 3a steht nicht\n");
             }
             ok
         }
         _ => {
-            host::print("[rtl8822ce] Stufe 3a: uebersprungen, 2c steht nicht\n");
+            host::say("[rtl8822ce] Stufe 3a: uebersprungen, 2c steht nicht\n");
             false
         }
     };
@@ -572,7 +585,7 @@ pub extern "C" fn _start() {
         (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf, &mut h2c,
                                                  &mut fifo, e),
         _ => {
-            host::print("[rtl8822ce] Stufe 4a: uebersprungen, 3c steht nicht\n");
+            host::say("[rtl8822ce] Stufe 4a: uebersprungen, 3c steht nicht\n");
             false
         }
     };
@@ -581,7 +594,7 @@ pub extern "C" fn _start() {
     let stage4c = match (stage4a && stage4b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage4c_set_channel(h, &hal, e, t),
         _ => {
-            host::print("[rtl8822ce] Stufe 4c: uebersprungen, 4a/4b stehen nicht\n");
+            host::say("[rtl8822ce] Stufe 4c: uebersprungen, 4a/4b stehen nicht\n");
             false
         }
     };
@@ -590,7 +603,7 @@ pub extern "C" fn _start() {
     let stage5a = if stage4c {
         stage5a_rx(h, &hal, &mut trx)
     } else {
-        host::print("[rtl8822ce] Stufe 5a: uebersprungen, 4c steht nicht\n");
+        host::say("[rtl8822ce] Stufe 5a: uebersprungen, 4c steht nicht\n");
         false
     };
 
@@ -598,7 +611,7 @@ pub extern "C" fn _start() {
     let stage5b = match (stage5a, efuse.as_ref()) {
         (true, Some(e)) => stage5b_tx(h, &hal, &mut trx, mgmt_buf, e.addr),
         _ => {
-            host::print("[rtl8822ce] Stufe 5b: uebersprungen, 5a steht nicht\n");
+            host::say("[rtl8822ce] Stufe 5b: uebersprungen, 5a steht nicht\n");
             false
         }
     };
@@ -610,7 +623,7 @@ pub extern "C" fn _start() {
                                                  &mut h2c, e, t, e.addr,
                                                  fw_feature, &mut target),
         _ => {
-            host::print("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
+            host::say("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
             false
         }
     };
@@ -619,7 +632,7 @@ pub extern "C" fn _start() {
     let stage5d = match (stage5c, efuse.as_ref()) {
         (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e),
         _ => {
-            host::print("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
+            host::say("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
             false
         }
     };
@@ -632,11 +645,11 @@ pub extern "C" fn _start() {
             stage5e_connect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t,
                             e.addr, b, &mut linked),
         (true, _, _, None) => {
-            host::print("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
+            host::say("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
             false
         }
         _ => {
-            host::print("[rtl8822ce] Stufe 5e: uebersprungen, 5d steht nicht\n");
+            host::say("[rtl8822ce] Stufe 5e: uebersprungen, 5d steht nicht\n");
             false
         }
     };
@@ -647,7 +660,7 @@ pub extern "C" fn _start() {
         (true, Some(v), Some(b)) =>
             stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates),
         _ => {
-            host::print("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
+            host::say("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
             false
         }
     };
@@ -661,77 +674,51 @@ pub extern "C" fn _start() {
             stage6a_link(h, &hal, &mut trx, mgmt_buf, b, caps, *si,
                          e.addr, &mut link, &mut lstats),
         _ => {
-            host::print("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
+            host::say("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
         }
     };
 
 
-    host::print(if stage3a {
-        "[rtl8822ce] Stufe 3a: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 3a: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage3b {
-        "[rtl8822ce] Stufe 3b: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 3b: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage3c {
-        "[rtl8822ce] Stufe 3c: GRUEN — BB und RF stehen\n"
-    } else {
-        "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage4a {
-        "[rtl8822ce] Stufe 4a: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 4a: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage4b {
-        "[rtl8822ce] Stufe 4b: GRUEN\n"
-    } else {
-        "[rtl8822ce] Stufe 4b: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage4c {
-        "[rtl8822ce] Stufe 4c: GRUEN — DER EMPFAENGER HOERT\n"
-    } else {
-        "[rtl8822ce] Stufe 4c: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5a {
-        "[rtl8822ce] Stufe 5a: GRUEN — DIE PAKETE KOMMEN AN\n"
-    } else {
-        "[rtl8822ce] Stufe 5a: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5b {
-        "[rtl8822ce] Stufe 5b: GRUEN — WIR SENDEN, UND ES WIRD GEANTWORTET\n"
-    } else {
-        "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5c {
-        "[rtl8822ce] Stufe 5c: GRUEN — WIR SEHEN DIE UMGEBUNG\n"
-    } else {
-        "[rtl8822ce] Stufe 5c: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5d {
-        "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n"
-    } else {
-        "[rtl8822ce] Stufe 5d: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5e {
-        "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n"
-    } else {
-        "[rtl8822ce] Stufe 5e: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage5f {
-        "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n"
-    } else {
-        "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
-    host::print(if stage6a {
-        "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n"
-    } else {
-        "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n"
-    });
+    stage_line(stage3a,
+        "[rtl8822ce] Stufe 3a: GRUEN\n",
+        "[rtl8822ce] Stufe 3a: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage3b,
+        "[rtl8822ce] Stufe 3b: GRUEN\n",
+        "[rtl8822ce] Stufe 3b: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage3c,
+        "[rtl8822ce] Stufe 3c: GRUEN — BB und RF stehen\n",
+        "[rtl8822ce] Stufe 3c: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage4a,
+        "[rtl8822ce] Stufe 4a: GRUEN\n",
+        "[rtl8822ce] Stufe 4a: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage4b,
+        "[rtl8822ce] Stufe 4b: GRUEN\n",
+        "[rtl8822ce] Stufe 4b: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage4c,
+        "[rtl8822ce] Stufe 4c: GRUEN — DER EMPFAENGER HOERT\n",
+        "[rtl8822ce] Stufe 4c: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5a,
+        "[rtl8822ce] Stufe 5a: GRUEN — DIE PAKETE KOMMEN AN\n",
+        "[rtl8822ce] Stufe 5a: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5b,
+        "[rtl8822ce] Stufe 5b: GRUEN — WIR SENDEN, UND ES WIRD GEANTWORTET\n",
+        "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5c,
+        "[rtl8822ce] Stufe 5c: GRUEN — WIR SEHEN DIE UMGEBUNG\n",
+        "[rtl8822ce] Stufe 5c: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5d,
+        "[rtl8822ce] Stufe 5d: GRUEN — DER SENDER IST KALIBRIERT\n",
+        "[rtl8822ce] Stufe 5d: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5e,
+        "[rtl8822ce] Stufe 5e: GRUEN — DER AP HAT UNS ANGENOMMEN\n",
+        "[rtl8822ce] Stufe 5e: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage5f,
+        "[rtl8822ce] Stufe 5f: GRUEN — DIE FIRMWARE WAEHLT DIE RATE\n",
+        "[rtl8822ce] Stufe 5f: NEIN — nicht weiterbauen, bevor das steht\n");
+    stage_line(stage6a,
+        "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n",
+        "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n");
 
     // ── Stufe 6b: stehenbleiben ──────────────────────────────────
     //
@@ -745,6 +732,11 @@ pub extern "C" fn _start() {
     if stage6a {
         if let (Some(e), Some(l)) = (efuse.as_ref(), link.as_mut()) {
             host::print("[rtl8822ce] Stufe 6b: der Treiber bleibt stehen —\n             \x20         Bericht je Sekunde, RX-Wachhund, kein\n             \x20         Abschalten mehr\n");
+            // **Die eine Zeile eines stillen Laufs.** Sie steht hier und
+            // nicht bei AUTHORIZED: erst hinter den Toren von 6a ist sie
+            // eine Aussage ueber eine VERBINDUNG und nicht ueber einen
+            // Zwischenstand. Wer sie liest, muss nichts weiter fragen.
+            report_connected(l, target.as_ref(), linked.as_ref());
             // **Dieselbe Schleife, derselbe Link, dieselben Zaehler.**
             // 6b setzt fort, statt neu anzufangen — ein zweites
             // `EV_READY` liesse `wifid` einen frischen Supplicant bauen,
@@ -767,7 +759,9 @@ pub extern "C" fn _start() {
     // HIER im Terminal und nicht in `wlan`.
     // Der Chip ist hier bereits aus (Stufe 1 schaltet ihn zuletzt ab), also
     // kann niemand mehr in die gleich freigegebenen Puffer schreiben.
-    host::print("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
+    // **Hierher kommt nur ein Lauf, der NICHT steht** — mit Verbindung
+    // kehrt 6b nie zurueck. Also laut, auch ohne `debug: 1`.
+    host::say("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
 }
 
 /// main.c:2064-2081 `rtw_chip_board_info_setup` — Stufe 4b.
@@ -865,7 +859,7 @@ fn power_on_and_mac_init(
     // rtw_mac_power_on
     let t0 = host::now_us();
     if mac::mac_power_on(h, hal.cut_version).is_err() {
-        host::print("  rtw_mac_power_on fehlgeschlagen\n");
+        host::say("  rtw_mac_power_on fehlgeschlagen\n");
         return false;
     }
     host::print("  MAC an nach ");
@@ -885,7 +879,7 @@ fn power_on_and_mac_init(
     let t0 = host::now_us();
     if !mac::download_firmware(h, trx, stage_buf, FW, BAND_AT_FWDL,
                                fifo.rsvd_boundary) {
-        host::print("  zweiter Firmware-Download fehlgeschlagen\n");
+        host::say("  zweiter Firmware-Download fehlgeschlagen\n");
         return false;
     }
     host::print("  Firmware zum zweiten Mal geladen (");
@@ -3002,6 +2996,24 @@ struct LinkStats {
     extra_reported: u32,
     llc_miss: u32,
     rx_wd: u32,
+    /// **Der Gruppen-Neuschluessel, gezaehlt statt vermutet.** Jedes
+    /// EAPOL NACH dem Handschlag ist einer (msg1 der
+    /// Gruppenschluessel-Sequenz, oder ein ganz neues Vierwege), und
+    /// jede Antwort darauf zaehlt daneben. „3 empfangen, 0 beantwortet"
+    /// heisst an uns; „3/3" und trotzdem Rauswurf heisst woanders — und
+    /// der Grundcode sagt dann wo.
+    rekey_rx: u32,
+    rekey_tx: u32,
+    /// Jede GTK, die `wifid` uns ins CAM schreiben laesst.
+    gtk_set: u32,
+    /// Was die Empfangsschleife gesehen hat und die Schleife DANACH
+    /// behandelt: `(war es ein Deauth, Grundcode)`. Im Rueckruf steht
+    /// nur das Sehen — `netdev_set_link` und `EV_LINK_DOWN` gehoeren
+    /// nicht in einen Rueckruf, der mitten im Ringleeren laeuft.
+    gone: Option<(bool, u16)>,
+    /// Wie oft wir hinausgeworfen wurden, und womit zuletzt begruendet.
+    kicked: u32,
+    last_reason: u16,
 }
 
 /// Der Zustand einer stehenden Verbindung — Stufe 6a.
@@ -3172,6 +3184,68 @@ fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
     Some((found, trailing))
 }
 
+/// **Der Rauswurf, und warum er bisher unsichtbar war.**
+///
+/// `rx_to_8023` filtert in seiner ERSTEN Zeile auf Datenrahmen. Ein
+/// Deauth ist ein VERWALTUNGSrahmen und faellt dort lautlos durch: aus
+/// Treibersicht stirbt die Verbindung nicht, sie wird nur still — und
+/// genau deshalb wirkt ein Rauswurf zufaellig. Der Kernel glaubt
+/// derweil weiter an `carrier UP` und schiebt Pakete in eine tote
+/// Leitung.
+///
+/// 802.11 §9.4.1.7: Deauthentication (Subtyp 12) und Disassociation
+/// (Subtyp 10) tragen einen Grundcode, little-endian, direkt hinter dem
+/// 24 Byte langen Kopf. Gibt `(war es ein Deauth, Grundcode)` zurueck.
+///
+/// **Nur von `addr2 == BSSID`.** Die Luft ist voll; der Deauth einer
+/// fremden Zelle geht uns nichts an, und ein Treiber, der auf ihn
+/// hoert, legt seine eigene Verbindung wegen des Nachbarn nieder.
+fn disconnect_reason(f: &[u8], bssid: &[u8; 6]) -> Option<(bool, u16)> {
+    // 24 Byte Kopf + 2 Byte Grund. Kuerzer ist kein gueltiger Rahmen,
+    // und raten waere hier schlimmer als schweigen.
+    if f.len() < 26 {
+        return None;
+    }
+    let deauth = match f[0] {
+        DOT11_FC_DEAUTH => true,
+        DOT11_FC_DISASSOC => false,
+        _ => return None,
+    };
+    if f[10..16] != bssid[..] {
+        return None;
+    }
+    Some((deauth, u16::from_le_bytes([f[24], f[25]])))
+}
+
+/// 802.11 §9.4.1.7 Tabelle 9-49. **Die 15 und die 16 sind die Frage
+/// dieser Runde**: sie waeren die Bestaetigung, dass es am Handschlag
+/// bzw. am Gruppen-Neuschluessel haengt und nicht an der Luft.
+fn reason_name(code: u16) -> &'static str {
+    match code {
+        1 => "unspezifiziert",
+        2 => "vorige Authentifizierung ungueltig",
+        3 => "die Station verlaesst die Zelle",
+        4 => "Inaktivitaet",
+        5 => "dem AP gehen die Plaetze aus",
+        6 => "Klasse-2-Rahmen von nicht authentifizierter Station",
+        7 => "Klasse-3-Rahmen von nicht assoziierter Station",
+        8 => "die Station verlaesst die Zelle (Disassoc)",
+        9 => "Assoziation ohne vorherige Authentifizierung",
+        13 => "ungueltiges Informationselement",
+        14 => "MIC-Fehler",
+        15 => "Vierwegehandschlag: Zeitueberschreitung",
+        16 => "Gruppenschluessel-Handschlag: Zeitueberschreitung",
+        17 => "IE weicht vom Anmeldeantrag ab",
+        18 => "ungueltige Gruppen-Chiffre",
+        19 => "ungueltige Paar-Chiffre",
+        20 => "ungueltige AKM",
+        23 => "802.1X-Authentifizierung fehlgeschlagen",
+        24 => "Chiffre durch Sicherheitsregel abgelehnt",
+        34 => "zu schlechte Verbindung (BSS Transition)",
+        _ => "unbekannt",
+    }
+}
+
 /// docs/spec/WIFI_CLASS_ABI.md §2b, Demux-Regel: ein empfangener
 /// 802.11-Datenrahmen wird zu 802.3 und geht dann entweder als `EAPOL_RX`
 /// an `wifid` oder in den IP-Stapel.
@@ -3291,6 +3365,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Sekunden vor — der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch, wer laenger wartet, wartet auf einen Fehler.
     // Stufe 6b ruft dieselbe Schleife ohne Frist.
+
+    // Der Rueckruf braucht die BSSID, um einen Deauth der EIGENEN Zelle
+    // von dem des Nachbarn zu unterscheiden. Als Kopie, damit er `link`
+    // nicht festhalten muss, waehrend die Schleife darauf schreibt.
+    let bssid = link.bssid;
+
     let t0 = host::now_us();
     let mut report_ms = host::now_ms();
     let mut rx_silent_ms = host::now_ms();
@@ -3308,6 +3388,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
+            // **Zuerst der Rauswurf.** Er ist ein Verwaltungsrahmen und
+            // kaeme durch `rx_to_8023` nicht hindurch. Nur SEHEN hier —
+            // gehandelt wird nach dem Ringleeren.
+            if let Some(r) = disconnect_reason(f, &bssid) {
+                if ls.gone.is_none() {
+                    ls.gone = Some(r);
+                }
+                return;
+            }
             let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut ls.llc_miss)
             else {
                 return;
@@ -3315,6 +3404,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             ls.data_rx += 1;
             if is_eapol {
                 ls.eapol_rx += 1;
+                if ls.authorized {
+                    ls.rekey_rx += 1;
+                }
                 // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
                 // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
                 //
@@ -3361,6 +3453,57 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         });
 
+        // ── Der Rauswurf, gehandelt ──────────────────────────────
+        // Gesehen hat ihn der Rueckruf oben; hier ist der Ring leer und
+        // `link` wieder frei. **Der Kernel erfaehrt es als erster** —
+        // bis hierher glaubte er an `carrier UP` und schob Pakete in
+        // eine tote Leitung.
+        if let Some((deauth, reason)) = ls.gone.take() {
+            ls.kicked += 1;
+            ls.last_reason = reason;
+
+            // **Gezaehlt wird jeder, gedruckt die ersten drei.** Ein AP
+            // schickt seinen Rauswurf gern als Salve; die vierte Zeile
+            // sagt nichts, was die erste nicht sagte, und der Zaehler im
+            // Bericht bleibt vollstaendig.
+            if ls.kicked <= 3 {
+                host::loud_begin();
+                host::print("[rtl8822ce] ");
+                host::print(if deauth { "DEAUTH" } else { "DISASSOC" });
+                host::print(" vom AP — Grund ");
+                host::print_dec(reason as u32);
+                host::print(" (");
+                host::print(reason_name(reason));
+                host::print(")\n            Laufzeit ");
+                host::print_dec(((host::now_us() - t0) / 1_000_000) as u32);
+                host::print(" s · daten rein/raus ");
+                host::print_dec(ls.data_rx);
+                host::print("/");
+                host::print_dec(ls.data_tx);
+                host::print(" · neuschluessel ");
+                host::print_dec(ls.rekey_rx);
+                host::print("/");
+                host::print_dec(ls.rekey_tx);
+                host::print(" · gtk ");
+                host::print_dec(ls.gtk_set);
+                host::print("\n");
+                host::loud_end();
+            }
+
+            if ls.authorized || ls.link_up_sent {
+                host::netdev_set_link(false);
+                let down = [EV_LINK_DOWN, LINK_DOWN_DEAUTH];
+                host::wifi_send_event(&down);
+            }
+            ls.authorized = false;
+            ls.link_up_sent = false;
+            // **Wiederverbunden wird noch nicht.** Der Posten steht im
+            // Plan und braucht die Messung, die diese Zeilen liefern —
+            // ein Reconnect auf eine unbekannte Ursache ist geraten.
+            // Bis dahin laeuft die Schleife weiter, und der Bericht sagt
+            // `NICHT verbunden` statt zu schweigen.
+        }
+
         // ── Kommandos von wifid ──────────────────────────────────
         loop {
             let clen = host::wifi_poll_cmd(cmdbuf);
@@ -3388,8 +3531,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         if tx_8023(h, trx, mgmt_buf, link,
                                    &eth[..14 + len], enc) {
                             ls.eapol_tx += 1;
+                            if ls.authorized {
+                                ls.rekey_tx += 1;
+                            }
                         } else {
-                            host::print("  EAPOL NICHT GESENDET — der AP\n\
+                            host::say("  EAPOL NICHT GESENDET — der AP\n\
                              \x20         wird es wiederholen und dann\n\
                              \x20         aufgeben\n");
                         }
@@ -3411,7 +3557,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                        RTW_CAM_AES as u8, key_idx, group,
                                        &addr, key);
                         ls.keys_set += 1;
-                        if !group {
+                        if group {
+                            ls.gtk_set += 1;
+                        } else {
                             link.ptk_installed = true;
                         }
                         host::print("  Schluessel gesetzt: ");
@@ -3465,8 +3613,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         let now = host::now_ms();
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
-            publish_report(link, ls.data_rx, ls.data_tx, ls.eapol_rx, ls.eapol_tx,
-                           ls.keys_set, ls.authorized, ls.rx_wd);
+            publish_report(link, ls);
         }
 
         // ── RX-Stille als Wachhund ───────────────────────────────
@@ -3479,11 +3626,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             rx_silent_ms = now;
             ls.rx_wd += 1;
             if ls.rx_wd <= 4 {
+                // Ein stehender Ring ist kein Stufenbefund, sondern ein
+                // Fehler: laut, auch ohne `debug: 1`.
+                host::loud_begin();
                 host::print("[rtl8822ce] RX still seit 5 s — Ringzeiger rp=");
                 host::print_dec(trx.rx.rp);
                 host::print(", rx_tag ");
                 host::print_dec(trx.rx_tag as u32);
                 host::print("\n");
+                host::loud_end();
             }
         }
 
@@ -3532,11 +3683,95 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
+/// Ein Tor. **Ein gefallenes geht immer hinaus** — sonst sagt ein
+/// stiller Lauf nicht, wo er stehengeblieben ist, und das waere genau
+/// der Zustand, aus dem die sechs Stufen herausfuehren sollten.
 fn gate(name: &str, ok: bool) -> bool {
+    if !ok {
+        host::loud_begin();
+    }
     host::print(if ok { "  [ JA  ] " } else { "  [NEIN ] " });
     host::print(name);
     host::print("\n");
+    if !ok {
+        host::loud_end();
+    }
     ok
+}
+
+/// **Die eine Zeile, die auch ein stiller Lauf druckt.**
+///
+/// Sie steht nicht im `driver_report` — der landet in `wlan` und ist
+/// Zustand, der sich je Sekunde erneuert. Hier steht das EREIGNIS: die
+/// Verbindung ist zustande gekommen, mit wem, wie schnell und wie breit.
+///
+///     [rtl8822ce] verbunden: "IvyPie_New" K7 -49 dBm · HT MCS8-15
+///                 (0x1b) · 40 MHz · AID 3
+fn report_connected(link: &Link, bss: Option<&Bss>, vif: Option<&vif::Vif>) {
+    host::loud_begin();
+    host::print("[rtl8822ce] verbunden: ");
+    match bss {
+        Some(b) => {
+            host::print("\"");
+            print_ssid(&b.ssid[..b.ssid_len as usize]);
+            host::print("\"");
+        }
+        None => host::print("(ohne Namen)"),
+    }
+    host::print(" K");
+    host::print_dec(link.channel as u32);
+    if let Some(b) = bss {
+        host::print(" ");
+        print_dbm(b.best);
+    }
+    host::print(" · ");
+    host::print(rate_name(link.highest_rate));
+    host::print(" (0x");
+    host::print_hex8(link.highest_rate);
+    host::print(") · ");
+    host::print(match link.si.bw_mode {
+        0 => "20 MHz",
+        1 => "40 MHz",
+        2 => "80 MHz",
+        _ => "? MHz",
+    });
+    if let Some(v) = vif {
+        host::print(" · AID ");
+        host::print_dec(v.aid);
+    }
+    host::print("\n");
+    host::loud_end();
+}
+
+/// Eine Zeile der Schlusszusammenfassung. Gruen ist Stufenausgabe, rot
+/// geht immer hinaus.
+fn stage_line(ok: bool, green: &str, red: &str) {
+    if ok {
+        host::print(green);
+    } else {
+        host::say(red);
+    }
+}
+
+/// `debug:` aus `sys/config/wifi`. Fehlt die Datei oder die Zeile, ist
+/// die Antwort NEIN: ein Treiber im Autostart schweigt, bis jemand
+/// danach fragt.
+fn read_debug_flag() -> bool {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return false;
+    }
+    match cfg_get(&cfg[..n as usize], b"debug") {
+        Some((a, b)) => cfg_on(&cfg[a..b]),
+        None => false,
+    }
+}
+
+/// `on` oder `1` — dieselbe Regel, die `wifi_ax200` fuer `ampdu:` und
+/// `ps:` fuehrt. Ein unbekanntes Wort ist ein NEIN und keine Vermutung.
+fn cfg_on(v: &[u8]) -> bool {
+    v.starts_with(b"on") || v.starts_with(b"1")
 }
 
 /// `cfg_get` aus `wifid`/`wifi_ax200` — eine Zeile `key: value`, `#` ist
@@ -3580,9 +3815,7 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
 ///
 /// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
-#[allow(clippy::too_many_arguments)]
-fn publish_report(link: &Link, rx: u32, tx: u32, eapol_rx: u32,
-                  eapol_tx: u32, keys: u32, authorized: bool, rx_wd: u32) {
+fn publish_report(link: &Link, ls: &LinkStats) {
     let mut b = [0u8; 512];
     let mut n = 0usize;
     let put = |s: &str, b: &mut [u8; 512], n: &mut usize| {
@@ -3609,7 +3842,7 @@ fn publish_report(link: &Link, rx: u32, tx: u32, eapol_rx: u32,
     };
 
     put("rtl8822ce  ", &mut b, &mut n);
-    put(if authorized { "verbunden" } else { "NICHT verbunden" },
+    put(if ls.authorized { "verbunden" } else { "NICHT verbunden" },
         &mut b, &mut n);
     put("  kanal ", &mut b, &mut n);
     num(link.channel as u32, &mut b, &mut n);
@@ -3635,17 +3868,35 @@ fn publish_report(link: &Link, rx: u32, tx: u32, eapol_rx: u32,
         }
     }
     put("\ndaten rein/raus ", &mut b, &mut n);
-    num(rx, &mut b, &mut n);
+    num(ls.data_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
-    num(tx, &mut b, &mut n);
+    num(ls.data_tx, &mut b, &mut n);
     put("  eapol ", &mut b, &mut n);
-    num(eapol_rx, &mut b, &mut n);
+    num(ls.eapol_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
-    num(eapol_tx, &mut b, &mut n);
+    num(ls.eapol_tx, &mut b, &mut n);
     put("  schluessel ", &mut b, &mut n);
-    num(keys, &mut b, &mut n);
+    num(ls.keys_set, &mut b, &mut n);
     put("  rx-wachhund ", &mut b, &mut n);
-    num(rx_wd, &mut b, &mut n);
+    num(ls.rx_wd, &mut b, &mut n);
+    // **Die Zeile, die diese Runde beantwortet.** Ein Neuschluessel
+    // laeuft Minuten nach dem Handschlag und hinterlaesst sonst keine
+    // Spur; ein Rauswurf war bis hierher gar nicht sichtbar.
+    put("\nneuschluessel ", &mut b, &mut n);
+    num(ls.rekey_rx, &mut b, &mut n);
+    put(" empfangen, ", &mut b, &mut n);
+    num(ls.rekey_tx, &mut b, &mut n);
+    put(" beantwortet  gtk ", &mut b, &mut n);
+    num(ls.gtk_set, &mut b, &mut n);
+    put("  rauswurf ", &mut b, &mut n);
+    num(ls.kicked, &mut b, &mut n);
+    if ls.kicked > 0 {
+        put(" (zuletzt Grund ", &mut b, &mut n);
+        num(ls.last_reason as u32, &mut b, &mut n);
+        put(": ", &mut b, &mut n);
+        put(reason_name(ls.last_reason), &mut b, &mut n);
+        put(")", &mut b, &mut n);
+    }
     put("\n", &mut b, &mut n);
     host::driver_report(&b[..n]);
 }
