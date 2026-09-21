@@ -303,9 +303,10 @@ ASPM = [
     ("0 -> ausschalten", "0", "Some(false)"),
     ("wie-gefunden -> nicht anfassen", "wie-gefunden", "None"),
     ("keep -> nicht anfassen", "keep", "None"),
-    ("leer -> Vorgabe aus", "", "Some(false)"),
-    ("Tippfehler bleibt die Vorgabe, nicht das Gegenteil", "anx-aus", "Some(true)"),
-    ("unverstanden -> aus, nicht None", "vielleicht", "Some(false)"),
+    ("leer -> Vorgabe: nicht anfassen", "", "None"),
+    ("Tippfehler faellt auf die sichere Seite", "anx-aus", "Some(true)"),
+    ("unverstanden -> nicht anfassen, kein Eingriff auf Verdacht",
+     "vielleicht", "None"),
 ]
 
 # `tx_ampdu_factor` / `tx_ampdu_density`: das A-MPDU-Byte DES AP -> was in
