@@ -1398,6 +1398,26 @@ antworten hat.
 Am Geraet: `store /sys/config/wifi debug: 1` (Zeile zu den bestehenden
 dazu), dann `install wifi_rtl8822ce && driver wifi_rtl8822ce`.
 
+### 0.24.1 — ein NEIN aus einem gescheiterten Lesezugriff ist keine Antwort
+
+Aufgefallen beim Nachsehen vor der Freigabe: `read_debug_flag` gab `false`
+zurueck, wenn `sys/config/wifi` **gar nicht lesbar** war — dasselbe Ergebnis
+wie „die Zeile steht nicht drin". Und `wifid` dokumentiert fuer genau
+dieses Objekt ein Rennen mit dem Rest des Bootvorgangs („On autostart this
+races the rest of boot"). Ein `debug: 1`, das in dieses Rennen faellt,
+haette ausgesehen wie ein Schalter, der nicht greift — und das kostet einen
+ganzen Geraetelauf, statt den Fehler zu finden, fuer den der Schalter da
+ist.
+
+Der Rueckgabewert faehrt jetzt mit, und die eine stille Zeile sagt es:
+
+    [rtl8822ce] v0.24.1 — still, und sys/config/wifi war beim Start nicht
+                lesbar: ein `debug: 1` darin greift dann NICHT
+
+Nicht gebaut: eine Warteschleife wie in `wifid`. Ein Treiber, der auf
+seine Konfiguration wartet, verzoegert den Bringup fuer eine Ausgabefrage
+— die Meldung reicht, denn sie nennt die Heilung.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
