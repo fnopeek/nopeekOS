@@ -250,12 +250,49 @@ fn spawn_inner(priority: Priority, func: fn(u64), arg: u64, is_fiber: bool) {
     let pushed = unsafe { DEQUES[0].push(task) };
     if pushed {
         TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
-        // Idle workers pick this up at their next 100 Hz worker-timer
-        // tick (≤10 ms) — see per_core::smp_ap_entry. No wake flag needed.
+        wake_idlest_worker();
     } else {
         func(arg);
     }
 }
+
+/// Einen LEEREN Kern wecken, damit er das gerade Abgelegte holen kann.
+///
+/// **Ohne das gewinnt immer der beschaeftigte Kern.** Hier stand
+/// „Idle workers pick this up at their next 100 Hz worker-timer tick
+/// (≤10 ms) — no wake flag needed", und das war die ganze Politik: wer
+/// gerade laeuft, fragt `take_task` sofort wieder; wer schlaeft, wartet bis
+/// zu zehn Millisekunden auf seinen Tick. Der Beschaeftigte ist also
+/// IMMER schneller, bekommt die naechste Aufgabe, bleibt wach — und
+/// bekommt die uebernaechste auch.
+///
+/// Gemessen am Geraet (Florian, 2026-09-21): **sechzehn Kerne, und alle
+/// Module sassen auf Kern 12**, `wifid` auf 3. Vierzehn Kerne leer,
+/// waehrend sich ein WLAN-Treiber und ein Browser einen teilten — der
+/// Treiber brauchte 8 us je Rahmen statt 2.
+///
+/// Der Eingriff ist absichtlich klein: die Verteilung bleibt
+/// Arbeitsdiebstahl, es bekommt nur der Leerste einen VORSPRUNG. Findet
+/// sich keiner, aendert sich nichts, und der 100-Hz-Tick traegt wie
+/// bisher. Der Startpunkt der Suche rotiert, sonst faende sie immer
+/// denselben.
+fn wake_idlest_worker() {
+    let n = crate::smp::per_core::core_count();
+    if n < 2 {
+        return;
+    }
+    // Rundlauf, damit nicht jedes Mal derselbe leere Kern gewaehlt wird.
+    let start = WAKE_ROTOR.fetch_add(1, Ordering::Relaxed) % (n - 1) + 1;
+    for i in 0..(n - 1) {
+        let c = (start - 1 + i) % (n - 1) + 1;
+        if !crate::smp::per_core::is_active(c) {
+            crate::smp::kick_host_core(c);
+            return;
+        }
+    }
+}
+
+static WAKE_ROTOR: AtomicUsize = AtomicUsize::new(0);
 
 /// Spawn a sub-task from a worker AP. Pushes to the calling core's OWN deque.
 #[allow(dead_code)]
