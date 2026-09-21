@@ -3525,6 +3525,12 @@ struct Link {
     /// Werte im Deskriptor sagen, wie LANG und wie DICHT er ihn vertraegt.
     peer_ht: bool,
     peer_ampdu_param: u8,
+    /// **Ob wir QoS-Datenrahmen senden — die Voraussetzung fuer jede
+    /// Sende-Aggregation.** Ein HT-AP ist per Definition ein QoS-AP
+    /// (802.11 §10.1: eine HT-STA ist eine QoS-STA), also entscheidet
+    /// dasselbe Element ueber beides. Gegen einen AP ohne HT bleibt es
+    /// beim einfachen Datenrahmen, und dann gibt es auch keinen Block.
+    tx_qos: bool,
     /// Wie oft wir gefragt haben, und wann zuletzt. Ein AP, der schweigt,
     /// darf uns nicht in eine Endlosschleife schicken.
     addba_tries: u8,
@@ -3554,6 +3560,75 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
     out[7] = ((pn >> 40) & 0xff) as u8; // PN5
 }
 
+/// Den 802.11-Datenrahmen BAUEN — rein, ohne Chip, ohne `Link`.
+///
+/// **Herausgeloest, weil 0.36.0 genau hier scheiterte und kein Test es
+/// sehen konnte.** Der Fehler war ein fehlendes FELD in einem Rahmen, den
+/// wir selbst bauen, und `datapath.py` zaehlt fehlende FUNKTIONEN. Was
+/// eine Funktion zusammensetzt, muss sich Byte fuer Byte nachrechnen
+/// lassen; deshalb steht das Bauen hier und das Senden daneben.
+///
+/// **QoS oder nicht, und warum das mehr ist als zwei Byte:** ein
+/// Block-Ack gilt je TID (802.11 §11.5.1.1), und einen TID traegt nur ein
+/// QoS-Datenrahmen. Ohne `qos` darf es keine Sende-Aggregation geben.
+/// Mit `qos` waechst der Kopf auf 26 Byte, und alles dahinter — CCMP-Kopf,
+/// LLC/SNAP, Nutzlast — rueckt mit.
+///
+///     ohne QoS, klar:          [fc 2][dur 2][a1 6][a2 6][a3 6][seq 2]
+///     mit QoS:                 ... [seq 2][qos 2]
+///     verschluesselt:          ... + [ccmp 8]
+///     dann immer:              [LLC/SNAP 6][ethertyp 2][nutzlast]
+///
+/// Die Ack-Politik im QoS-Feld ist 0 (Normal Ack) und der A-MSDU-Bit ist
+/// null — wir fassen keine MSDUs zusammen, nur MPDUs.
+#[allow(clippy::too_many_arguments)]
+fn build_data_frame(out: &mut [u8; 2048], eth: &[u8], bssid: &[u8; 6],
+                    mac: &[u8; 6], seq: u16, encrypt: bool, pn: u64,
+                    qos: bool) -> Option<usize> {
+    if eth.len() < 14 {
+        return None;
+    }
+    let payload = &eth[14..];
+    let hdr = 24 + if qos { 2 } else { 0 };
+    let total = hdr + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
+    if total > out.len() {
+        return None;
+    }
+
+    out[0] = DOT11_FC_TYPE_DATA | if qos { DOT11_FC0_QOS } else { 0 };
+    out[1] = 0x01; // ToDS
+    if encrypt {
+        out[1] |= DOT11_FC_PROTECTED;
+    }
+    out[2..4].copy_from_slice(&0u16.to_le_bytes());
+    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = Quelle
+    out[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
+    out[22..24].copy_from_slice(&((seq & 0x0fff) << 4).to_le_bytes());
+    if qos {
+        // TID 0 (Best Effort), Normal Ack, kein EOSP, kein A-MSDU.
+        out[24..26].copy_from_slice(&0u16.to_le_bytes());
+    }
+
+    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
+    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
+    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
+    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
+    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
+    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
+    // auf der nichts zurueckkommt.
+    let ofs = if encrypt {
+        ccmp_hdr(&mut out[hdr..hdr + 8], pn, 0);
+        hdr + 8
+    } else {
+        hdr
+    };
+    out[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
+    out[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
+    out[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
+    Some(total)
+}
+
 /// docs/spec/WIFI_CLASS_ABI.md §2b — ein Ethernet-Rahmen als
 /// 802.11-Datenrahmen an den AP.
 ///
@@ -3569,65 +3644,21 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
 /// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
 /// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
 /// die Firmware antworten wird.
-/// **Ob unsere Datenrahmen QoS-Datenrahmen sind — und sie sind es NICHT.**
-///
-/// `tx_8023` baut Subtyp 0 (einfaches Data): kein QoS-Control-Feld, also
-/// kein TID. Ein Block-Ack-Block gilt aber JE TID (802.11 §11.5.1.1) und
-/// nur fuer QoS-Datenrahmen.
-///
-/// **Das hat 0.36.0 am Geraet gekostet.** Der Antrag ging hinaus, der AP
-/// stimmte zu, und danach trugen Rahmen OHNE TID das Aggregationsbit. Der
-/// AP konnte sie keiner Vereinbarung zuordnen und warf uns hinaus —
-/// `DISASSOC Grund 8`, dann `DEAUTH Grund 6` („Klasse-2-Rahmen von nicht
-/// authentifizierter Station"), dann der Handschlag in der Schleife.
-///
-/// Die Konstante steht hier statt eines geloeschten Blocks, weil sie die
-/// BEDINGUNG benennt: wird `tx_8023` auf Subtyp 8 umgebaut (QoS Data,
-/// zwei Byte mehr Kopf, TID im unteren Nibble), faellt die Sende-
-/// Aggregation von selbst wieder an. Vorher ist sie nicht erlaubt,
-/// sondern schaedlich.
-const TX_IS_QOS: bool = false;
-
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
            eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
     if eth.len() < 14 {
         return false;
     }
     let mut frame = [0u8; 2048];
-    let payload = &eth[14..];
-    let total = 24 + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
-    if total > frame.len() {
+    let Some(total) = build_data_frame(&mut frame, eth, &link.bssid,
+                                       &link.mac, link.seq, encrypt,
+                                       link.tx_pn, link.tx_qos)
+    else {
         return false;
-    }
-
-    frame[0] = DOT11_FC_TYPE_DATA;
-    frame[1] = 0x01; // ToDS
-    if encrypt {
-        frame[1] |= DOT11_FC_PROTECTED;
-    }
-    frame[2..4].copy_from_slice(&0u16.to_le_bytes());
-    frame[4..10].copy_from_slice(&link.bssid); // addr1 = Empfaenger
-    frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
-    frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
-    frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
-
-    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
-    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
-    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
-    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
-    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
-    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
-    // auf der nichts zurueckkommt.
-    let ofs = if encrypt {
-        ccmp_hdr(&mut frame[24..32], link.tx_pn, 0);
-        link.tx_pn = link.tx_pn.wrapping_add(1);
-        32
-    } else {
-        24
     };
-    frame[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
-    frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
-    frame[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
+    if encrypt {
+        link.tx_pn = link.tx_pn.wrapping_add(1);
+    }
 
     let mut info = tx::TxPktInfo::default();
     // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
@@ -3679,7 +3710,7 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
 /// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
 /// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
 fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
-    let qos = f[0] & DOT11_STYPE_QOS != 0;
+    let qos = f[0] & DOT11_FC0_QOS != 0;
     let hdrlen = 24 + if qos { 2 } else { 0 };
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let crypt = if prot { 8usize } else { 0 };
@@ -3792,7 +3823,7 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
         return None;
     }
     // Null und QoS-Null tragen keinen Rumpf.
-    if f[0] & DOT11_STYPE_NODATA != 0 {
+    if f[0] & DOT11_FC0_NODATA != 0 {
         return None;
     }
     let (llc, trailing) = llc_offset(f, miss)?;
@@ -3850,6 +3881,7 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         tx_ampdu: None,
         peer_ht: caps.ht_supported,
         peer_ampdu_param: caps.ht_ampdu_param,
+        tx_qos: caps.ht_supported,
         addba_tries: 0,
         addba_last_ms: 0,
         addba_token: 0x10,
@@ -4045,6 +4077,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
     // `build_addba_resp`: es gibt keinen Umsortierpuffer.
     let ampdu_buf = read_ampdu_buf();
+    // **`ampdu: off` ist der Notausgang und schaltet BEIDES ab** — die
+    // Aggregation und den QoS-Rahmen darunter. Ein QoS-Datenrahmen ist
+    // fuer sich richtig und braucht keinen Block; nach der Regression von
+    // 0.36.0 ist mir aber ein Schalter lieber, der auf EINEN bekannten
+    // Zustand zurueckfaellt, als drei halbe.
+    if ampdu_buf == 0 {
+        link.tx_qos = false;
+    }
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -4273,7 +4313,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
-        if TX_IS_QOS
+        if link.tx_qos
             && link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
             && link.peer_ht && link.addba_tries < 4
             && now.wrapping_sub(link.addba_last_ms) >= 500

@@ -1233,10 +1233,32 @@ pub const ETHERTYPE_EAPOL: u16 = 0x888e;
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08;
 /// `fc[1]` — die Nutzlast ist verschluesselt.
 pub const DOT11_FC_PROTECTED: u8 = 0x40;
-/// Subtyp-Bit: QoS-Daten, zwei Byte QoS-Control hinter dem Kopf.
-pub const DOT11_STYPE_QOS: u8 = 0x08;
-/// Subtyp-Bit: Null und QoS-Null tragen KEINEN Rumpf.
-pub const DOT11_STYPE_NODATA: u8 = 0x04;
+/// Maske auf das ERSTE BYTE des Frame Control: QoS-Daten, zwei Byte
+/// QoS-Control hinter dem Kopf.
+///
+/// **Der Name sagt `FC0`, und das ist der Punkt.** `wifi_ax200` fuehrt
+/// unter `DOT11_STYPE_QOS` denselben Begriff mit dem Wert 0x08 — und das
+/// ist dort RICHTIG, weil es gegen den herausgeloesten Subtyp-Nibble
+/// (`(fc >> 4) & 0xf`) prueft. Wir pruefen gegen das rohe Byte. Ein Name,
+/// zwei Konventionen, und `check_regs.py` paarte sie stillschweigend;
+/// deshalb heissen unsere jetzt anders. `IEEE80211_STYPE_QOS_DATA` = 0x0080 (ieee80211.h:99), und
+/// davon ist das untere Byte 0x80.
+///
+/// **Hier stand 0x08, der Nibble-Wert, und das war ein echter Fehler:**
+/// `fc[0] & 0x08` ist bei JEDEM Datenrahmen wahr, denn Typ Data IST 0x08
+/// (`DOT11_FC_TYPE_DATA` daneben). `llc_offset` hielt damit jeden Rahmen
+/// fuer QoS und rechnete immer mit 26 Byte Kopf. Folgenlos war das nur,
+/// weil ein HT-AP tatsaechlich immer QoS sendet — gegen einen
+/// Nicht-QoS-Sender haette es jeden Rahmen um zwei Byte verschoben.
+pub const DOT11_FC0_QOS: u8 = 0x80;
+/// Subtyp-Bit im ersten Byte: Null und QoS-Null tragen KEINEN Rumpf.
+/// `IEEE80211_STYPE_NULLFUNC` = 0x0040 (ieee80211.h:95).
+///
+/// **Auch hier stand der Nibble (0x04), und der ist in einem Datenrahmen
+/// nie gesetzt** — Typ Data ist 0b10 in Bit 3:2, also Bit 2 null. Die
+/// Pruefung auf rumpflose Rahmen hat nie gegriffen; sie fielen
+/// stattdessen durch `llc_offset`, das keinen LLC-Kopf fand.
+pub const DOT11_FC0_NODATA: u8 = 0x40;
 /// 802.11 §9.2.4.1 — das ganze erste Byte: Protokollfassung 0, Typ
 /// VERWALTUNG (00), Subtyp 12 bzw. 10. Ein Deauth ist deshalb GENAU
 /// `0xc0` und nicht eine Maske: `rx_to_8023` filtert in seiner ersten
