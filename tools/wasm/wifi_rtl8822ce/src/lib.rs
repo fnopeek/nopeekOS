@@ -4030,7 +4030,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // einer zu unterscheiden, die wegen voller Schlangen langsam ist.
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
-            publish_report(link, ls, d);
+            publish_report(link, ls, d, e);
         }
 
         // ── RX-Stille als Wachhund ───────────────────────────────
@@ -4345,7 +4345,8 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
 ///
 /// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
-fn publish_report(link: &Link, ls: &LinkStats, d: &Dev) {
+fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
+                  e: &efuse::Efuse) {
     let mut b = [0u8; 768];
     let mut n = 0usize;
     let put = |s: &str, b: &mut [u8; 768], n: &mut usize| {
@@ -4461,8 +4462,16 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev) {
     num(d.dm.total_fa_cnt, &mut b, &mut n);
     put("  rssi ", &mut b, &mut n);
     num(d.dm.min_rssi as u32, &mut b, &mut n);
+    // **Zwei Zahlen, die sich gegenseitig aufloesen.** Allein sagt der
+    // Quarzwert nichts: erst der Abstand zur efuse sagt, ob die
+    // Nachfuehrung ueberhaupt etwas tut. Steht er auf dem efuse-Wert und
+    // `bt` auf „aus", dann hat sie gelaufen und nichts zu korrigieren
+    // gefunden — steht er darauf und `bt` auf „AN", ist sie abgestellt.
     put("  quarz ", &mut b, &mut n);
     num(d.dm.cfo_track.crystal_cap as u32, &mut b, &mut n);
+    put(" (efuse ", &mut b, &mut n);
+    num(e.crystal_cap as u32, &mut b, &mut n);
+    put(")", &mut b, &mut n);
     put("  thermo ", &mut b, &mut n);
     num(d.dm.thermal_avg[0] as u32, &mut b, &mut n);
     put("/", &mut b, &mut n);

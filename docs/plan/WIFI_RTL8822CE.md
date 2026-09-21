@@ -1595,6 +1595,47 @@ war es der Puffer; bleibt ein langsames Einseitigwerden im Leerlauf
 uebrig, ist es die Drift — und `quarz` im Bericht sagt, ob die
 Nachfuehrung dagegen arbeitet.
 
+### ✅ 0.25.1 AM GERAET BESTAETIGT — 30 Minuten, und die Zahlen sagen warum
+
+Florians Lauf mit 0.25.1 + wifid 0.10.0:
+
+```
+tx queue   enq 224  deq 224  backlog 0 B
+daten rein/raus 692/224  eapol 5/5  schluessel 5  rx-wachhund 0
+neuschluessel 3 empfangen, 3 beantwortet  gtk 4  rauswurf 0
+watchdog 903  igi 0x31  fehlalarm 71  rssi 49  quarz 70
+           thermo 31/32  txidx 4  bt aus  tp 0/3 Mbit
+```
+
+**`watchdog 903` sind 1806 Sekunden** — dreissig Minuten, und vorher war
+nach zwoelf Schluss. Der Beweis steht aber nicht in der Dauer, sondern
+in drei Zahlen:
+
+* **`daten raus 224`** liegt GENAU im Bereich, der kaputt war. Mit dem
+  alten Zwischenpuffer waeren die Rahmen 128 bis 223 aus fremdem
+  Speicher gesendet worden. Sie gingen durch.
+* **`neuschluessel 3/3` bei `rauswurf 0`.** Vorher war die Salve aus vier
+  Rekeys der Moment, in dem der AP aufgab — weil er keine Antwort
+  hoerte. Jetzt hoert er sie.
+* **`enq 224 deq 224` gegen `daten raus 224`**: Kernel- und Treibersicht
+  stimmen Zahl fuer Zahl.
+
+**Und der Watchdog aus 0.25.0 arbeitet sichtbar.** `thermo 31/32` bei
+`txidx 4` heisst: der Chip ist warm geworden, und die
+Sendeleistungs-Nachfuehrung hat um vier Stufen korrigiert — genau das,
+was vorher niemand tat. `igi 0x31` bei `fehlalarm 71`: die
+Verstaerkungsregelung laeuft. `bt aus`: der Koexistenz-Riegel ist offen,
+die Quarznachfuehrung darf.
+
+**Eine Zahl blieb stumm, und das war ein Berichtsfehler, kein
+Codefehler:** `quarz 70` allein sagt nicht, ob die Nachfuehrung etwas
+getan hat. **0.27.1 stellt den efuse-Wert daneben** — `quarz 70
+(efuse 70)`. Steht er darauf und `bt` sagt „aus", dann ist sie gelaufen
+und hat nichts zu korrigieren gefunden; steht er darauf und `bt` sagt
+„AN", ist sie abgestellt. Zwei Zahlen, die sich gegenseitig aufloesen.
+
+Dazu, und es ist ein eigener Meilenstein: **das Update kam ueber WLAN.**
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
