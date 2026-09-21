@@ -149,7 +149,12 @@ herauszunehmen. Wir schalten es nie ein, also ist Realteks Haelfte bei uns
 bereits im schnellen Zustand. Die gemessene `L1 AN`-Zeile kommt aus dem
 STANDARD-PCIe-Register, das die Firmware des Rechners gesetzt hat.
 
-**0.34.0 schaltet deshalb das Standard-ASPM der Karte ab** (dasselbe, was
+**ERLEDIGT, und die Antwort ist NEIN.** 0.34.0 schaltet das Standard-ASPM
+ab (`aspm aus` steht im Bericht), und der Durchsatz ging von 46 auf
+48 Mbit — das ist Rauschen. **ASPM war nicht der Deckel. Diese Gruppe ist
+zu.**
+
+0.34.0 schaltet das Standard-ASPM der Karte ab (dasselbe, was
 Linux' `pci_disable_link_state` tut), mit `aspm:` in `sys/config/wifi` als
 Schalter — `an` faehrt die Gegenprobe, `wie-gefunden` laesst es in Ruhe.
 Vorgabe ist AUS, weil wir gar nicht schlafen; der Preis ist Leerlaufstrom
@@ -173,6 +178,22 @@ Kein Durchsatz. `rtw_desc_to_mcsrate` ist eine Umrechnung fuer die Meldung
 nach oben, die bei uns der Bericht selbst macht.
 
 ---
+
+## Wo der Durchsatz 2026-09-21 steht
+
+    16 Mbit  0.32.x   Deskriptor sagte 40 MHz, PHY fuhr 20 -> Firmware auf MCS4
+    46 Mbit  0.33.0   Klemme: Deskriptor = PHY -> Firmware klettert auf MCS15
+    48 Mbit  0.34.0   ASPM aus -> Rauschen, kein Effekt
+
+48 Mbit bei HT20 mit EINEM Empfangsstrom (`rx HT MCS7`, brutto 72 Mbit) sind
+etwa zwei Drittel von brutto — fuer TCP ueber 802.11n normal. **Wir sitzen
+nicht mehr an einem Fehler, wir sitzen in einer schmalen Zelle.** Schneller
+geht nur ueber mehr Breite oder mehr Stroeme.
+
+Offen und in 0.35.0 MESSBAR gemacht: warum der AP nur einen Strom sendet.
+`rx MCS7` ist die Spitze des Ein-Strom-Bereichs, und dort festzusitzen ist
+die Signatur einer Decke. Die Decke steht in der efuse (`hw_cap.nss`), und
+die Zahl steht jetzt im Bericht (`nss N angeboten`).
 
 ## Reihenfolge
 
