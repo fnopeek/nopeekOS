@@ -121,6 +121,7 @@ const CMD_AUTHORIZED: u8 = 0x08;
 const EV_READY: u8 = 0x83;
 const EV_EAPOL_RX: u8 = 0x84;
 const EV_LINK_UP: u8 = 0x85;
+const EV_LINK_DOWN: u8 = 0x86;
 
 // Our RSN element (WPA2-PSK-CCMP) — MUST match the one the driver put in the
 // assoc request, since it is echoed in 4-way msg2's key_data and the AP
@@ -279,6 +280,24 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
             }
         }
         Some(EV_LINK_UP) => log("[wifid] link up — connected\n"),
+        // LINK_DOWN: [op][reason] — the cell dropped us.
+        //
+        // **Throw the supplicant away.** It holds a PTK for a session
+        // that no longer exists, and its SNonce has been used. The
+        // driver reconnects and sends a fresh READY, which builds a new
+        // one with new entropy — keeping the old one around would mean
+        // answering the next msg1 with a stale nonce.
+        Some(EV_LINK_DOWN) => {
+            *sup = None;
+            log("[wifid] link down (reason ");
+            log(match ev.get(1) {
+                Some(0) => "requested",
+                Some(1) => "deauth",
+                Some(2) => "lost",
+                _ => "?",
+            });
+            log(") — supplicant dropped, waiting for a fresh READY\n");
+        }
         _ => {}
     }
 }
