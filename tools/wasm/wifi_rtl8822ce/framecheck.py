@@ -293,6 +293,24 @@ def check_loud_balance(src):
 # es kein HT40 geben, auch wenn der Versatz dasteht; und ein Versatz, der aus
 # dem Band laeuft, muss auf 20 MHz zurueckfallen statt einen Kanal zu
 # erfinden, den es nicht gibt.
+# `band_pref_from`: der Wert hinter `band:` -> auto / nur 2,4 / nur 5.
+# **Ein unverstandener Wert ist Auto, nicht ein Band.** Anders als bei
+# `aspm` gibt es hier keine sichere Seite: wer sich vertippt, soll die
+# Vorgabe bekommen statt in einem Band festzusitzen, in dem sein Netz
+# vielleicht gar nicht funkt.
+BAND = [
+    ("5 -> nur 5 GHz", "5", "BandPref::Only5"),
+    ("5ghz -> nur 5 GHz", "5ghz", "BandPref::Only5"),
+    ("5 GHz -> nur 5 GHz", "5 GHz", "BandPref::Only5"),
+    ("2 -> nur 2,4 GHz", "2", "BandPref::Only24"),
+    ("2.4 -> nur 2,4 GHz", "2.4", "BandPref::Only24"),
+    ("2,4 GHz -> nur 2,4 GHz", "2,4 GHz", "BandPref::Only24"),
+    ("auto -> auto", "auto", "BandPref::Auto"),
+    ("leer -> auto", "", "BandPref::Auto"),
+    ("Tippfehler bleibt auto, nicht ein Band", "fuenf", "BandPref::Auto"),
+    ("6 (gibt es fuer uns nicht) -> auto", "6", "BandPref::Auto"),
+]
+
 # `aspm_pref_from`: der Wert hinter `aspm:` -> an / aus / nicht anfassen.
 ASPM = [
     ("an -> einschalten", "an", "Some(true)"),
@@ -346,6 +364,10 @@ def main():
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
+    bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
+    # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
+    bande = grab(src, r"\n(#\[derive[^\n]*\]\npub enum BandPref \{.*?\n\})",
+                 "enum BandPref")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
@@ -437,6 +459,10 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
+    band_cases = "\n".join(
+        '        (%s, %s, %s),' % (rs(name), rs(v), want)
+        for name, v, want in BAND)
+
     aspm_cases = "\n".join(
         '        (%s, %s, %s),' % (rs(name), rs(v), want)
         for name, v, want in ASPM)
@@ -458,6 +484,7 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + chanp + "\n\n" + aspmp \
+        + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
@@ -602,13 +629,24 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    let bands: &[(&str, &str, BandPref)] = &[
+%s
+    ];
+    for (name, v, want) in bands {
+        let got = band_pref_from(v.as_bytes());
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} band: {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3 + chans.len() + aspms.len();
+                + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases)
+       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
+       band_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 

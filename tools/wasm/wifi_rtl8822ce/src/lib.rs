@@ -2299,15 +2299,69 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    *target = found[..n_found].iter()
-        .filter(|b| b.channel <= 14 && b.ssid_len > 0)
-        .filter(|bss| match want {
-            Some((a, b)) => bss.ssid_len as usize == b - a
-                && bss.ssid[..b - a] == cfg[a..b],
+    // **5 GHz ist jetzt waehlbar.** Hier stand `b.channel <= 14`, also
+    // wurde jede 5-GHz-Zelle gesucht, gemessen, gedruckt — und dann
+    // weggeworfen. Der Suchlauf faehrt die 25 Kanaele PASSIV (siehe
+    // `PASSIVE_5G`), es geht dort also kein Probe Request raus, und das
+    // ist genau die Sorgfalt, die ein DFS-Kanal verlangt: erst hoeren,
+    // dann senden.
+    //
+    // `Auto` nimmt 5 GHz, sobald es brauchbar steht, sonst das staerkste
+    // ueberhaupt. Eine reine "staerkstes Signal"-Wahl waere falsch: ein
+    // 2,4-GHz-AP im selben Raum ist fast immer lauter als sein
+    // 5-GHz-Zwilling und wuerde ihn dauerhaft verdecken.
+    let pref = read_band_pref();
+    let mut best_all: Option<Bss> = None;
+    let mut best_5g: Option<Bss> = None;
+    for b in found[..n_found].iter() {
+        if b.ssid_len == 0 {
+            continue;
+        }
+        let band_ok = match pref {
+            BandPref::Only24 => b.channel <= 14,
+            BandPref::Only5 => b.channel > 14,
+            BandPref::Auto => true,
+        };
+        if !band_ok {
+            continue;
+        }
+        let ssid_ok = match want {
+            Some((a, c)) => b.ssid_len as usize == c - a
+                && b.ssid[..c - a] == cfg[a..c],
             None => true,
-        })
-        .max_by_key(|b| b.best)
-        .copied();
+        };
+        if !ssid_ok {
+            continue;
+        }
+        if best_all.map_or(true, |x| b.best > x.best) {
+            best_all = Some(*b);
+        }
+        if b.channel > 14 && best_5g.map_or(true, |x| b.best > x.best) {
+            best_5g = Some(*b);
+        }
+    }
+    host::print("  band: ");
+    host::print(match pref {
+        BandPref::Auto => "auto (5 GHz ab -70 dBm)",
+        BandPref::Only24 => "nur 2,4 GHz",
+        BandPref::Only5 => "nur 5 GHz",
+    });
+    *target = match (pref, best_5g) {
+        (BandPref::Auto, Some(f)) if f.best >= PREFER_5G_DBM => {
+            host::print(" -> 5 GHz genommen\n");
+            Some(f)
+        }
+        (BandPref::Auto, Some(f)) => {
+            host::print(" -> 5 GHz zu schwach (");
+            print_dbm(f.best);
+            host::print("), 2,4 GHz\n");
+            best_all
+        }
+        _ => {
+            host::print("\n");
+            best_all
+        }
+    };
     if let Some(b) = target {
         host::print("  Ziel fuer Stufe 5e: \"");
         print_ssid(&b.ssid[..b.ssid_len as usize]);
@@ -4835,6 +4889,52 @@ fn read_debug_flag() -> (bool, i32) {
 /// Dafuer kostet es Leerlaufstrom, und genau daran haengt ein anderer
 /// offener Posten (`project_idle_power_21w`). Deshalb ein Schalter und
 /// kein stilles Verhalten: `aspm: an` faehrt die Gegenprobe.
+/// Welches Band die Konfiguration will.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BandPref {
+    /// Vorgabe: 5 GHz, sobald es brauchbar steht, sonst 2,4.
+    Auto,
+    /// Nur 2,4 GHz — der Rueckfall, wenn 5 GHz Aerger macht.
+    Only24,
+    /// Nur 5 GHz — fuer die Messung, damit kein starker
+    /// 2,4-GHz-Nachbar die Entscheidung uebernimmt.
+    Only5,
+}
+
+/// `band:` aus `sys/config/wifi`. Der reine Teil, damit `framecheck.py`
+/// ihn ohne Geraet fahren kann.
+///
+/// **Ein unverstandener Wert ist `Auto`, nicht ein Band.** Anders als bei
+/// `aspm` gibt es hier keine "sichere" Seite: wer sich vertippt, soll die
+/// Vorgabe bekommen und nicht in einem Band festsitzen, in dem sein Netz
+/// vielleicht gar nicht funkt.
+pub fn band_pref_from(v: &[u8]) -> BandPref {
+    if v.starts_with(b"5") {
+        BandPref::Only5
+    } else if v.starts_with(b"2") {
+        BandPref::Only24
+    } else {
+        BandPref::Auto
+    }
+}
+
+fn read_band_pref() -> BandPref {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return BandPref::Auto;
+    }
+    match cfg_get(&cfg[..n as usize], b"band") {
+        Some((a, b)) => band_pref_from(&cfg[a..b]),
+        None => BandPref::Auto,
+    }
+}
+
+/// Ab dieser Feldstaerke ist 5 GHz die bessere Wahl (Klassen-ABI
+/// `WIFI_CLASS_ABI.md`: „5 GHz ab -70 dBm bevorzugt"). Darunter traegt
+/// 2,4 GHz weiter, und ein schwaches 5-GHz-Signal waere ein Rueckschritt.
+const PREFER_5G_DBM: i8 = -70;
+
 fn read_aspm_pref() -> Option<bool> {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
