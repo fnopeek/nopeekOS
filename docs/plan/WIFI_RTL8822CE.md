@@ -2126,6 +2126,55 @@ dann ist der naechste Messpunkt die Luft selbst (Wiederholungen,
 Fremdverkehr auf Kanal 7) — dafuer gibt es `fehlalarm` und die
 Sendequittung.
 
+### 🔒 Fenster 64 bestaetigt, Luft sauber — und die Rahmenrate ruehrt sich nicht
+
+```
+ADDBA 2 erbeten, 2 angenommen (fenster 64 von 64 erbetenen)
+crc ht 471/73041 (0 %)   ofdm 357/13152
+daten rein/raus 72708/10371      16 Mbit/s
+```
+
+|                     | MPDU/Agg | Agg/s | Rahmen/s | Mbit/s |
+|---------------------|---------:|------:|---------:|-------:|
+| Fenster 8 (0.29.0)  |      5,7 |   243 |     1375 |   15,9 |
+| Fenster 8 (0.31.2)  |      6,1 |   237 |     1435 |   16,6 |
+| **Fenster 64**      |  **7,4** |   196 |     1441 |   16,7 |
+
+**Die Aggregate wurden 30 % groesser, es gibt entsprechend weniger, und
+die Rahmenrate steht wie festgenagelt bei ~1430/s.** Damit ist die
+Aggregation als Deckel erledigt — meine letzte Hypothese, und sie ist
+tot.
+
+**Die Luft auch:** 471 von 73 041 HT-Rahmen scheitern an der Pruefsumme,
+also **0 %**. Kein Wiederholungssturm. Und die Luftzeit:
+
+    ein Aggregat aus 7,4 Rahmen bei MCS7/40 MHz = 819 us
+    x 196 je Sekunde = 16 % der Luft belegt
+    -> 84 % der Zeit passiert NICHTS
+
+**Ein Deckel, der eine RAHMENRATE ist und keine Luftzeit**, ueberlebt
+jede Aenderung an der Aggregation. Und daneben steht die Zahl, die dazu
+passt:
+
+    10 371 ACKs / 50,44 s = 206/s  -> alle 4,9 ms
+     9 891 Aggregate      = 196/s  -> alle 5,1 ms
+    7,0 Segmente je ACK, und ACK_COALESCE = 8
+
+**EIN Aggregat je ACK.** Das ist eine Stopp-und-warte-Schleife und kein
+Fenster von 3181 Segmenten, das der Server meldet.
+
+**Zwei Messungen, die das entscheiden und KEINEN neuen Bau brauchen:**
+
+1. **`netbench put 192.168.178.97:8080 /upload 50`** — die
+   Senderichtung, vom SERVER gestoppt. Sie nimmt den ganzen
+   Empfangs-/Quittungsweg aus der Rechnung. Aehnlich langsam → die
+   Strecke; deutlich schneller → der Deckel sitzt in der
+   Empfangsrichtung, und das ist TCP und nicht die Luft.
+2. **`ping 192.168.178.1` WAEHREND des Downloads** — bleibt er bei
+   ~10 ms, ist die 1,3-s-RTT des Servers eine stehende Warteschlange
+   (Bufferbloat aus unserem 8-MB-Fenster) ueber einer gesaettigten
+   Strecke; steigt er mit, steckt die Verzoegerung im Weg selbst.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
