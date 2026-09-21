@@ -5113,6 +5113,8 @@ fn cfg_on(v: &[u8]) -> bool {
 /// ein Kommentar. Gibt die GRENZEN des Wertes zurueck, nicht eine
 /// Scheibe: der Puffer wird daneben weiterbenutzt.
 fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
+    let mut treffer: Option<(usize, usize)> = None;
+    let mut zahl = 0u32;
     let mut start = 0usize;
     while start <= text.len() {
         let end = text[start..].iter().position(|&b| b == b'\n')
@@ -5122,8 +5124,13 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
             if let Some(c) = text[a..b].iter().position(|&x| x == b':') {
                 let (ka, kb) = trim(text, a, a + c);
                 if &text[ka..kb] == key {
-                    let (va, vb) = trim(text, a + c + 1, b);
-                    return Some((va, vb));
+                    zahl += 1;
+                    // **Die ERSTE gilt, und das bleibt so** — eine
+                    // Aenderung der Regel waere schlimmer als die Regel.
+                    if treffer.is_none() {
+                        let (va, vb) = trim(text, a + c + 1, b);
+                        treffer = Some((va, vb));
+                    }
                 }
             }
         }
@@ -5132,7 +5139,17 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
         }
         start = end + 1;
     }
-    None
+    // **Aber eine zweite Zeile darf nicht SCHWEIGEND verlieren.** Wer
+    // `ampdu: 64` unter ein `ampdu: off` schreibt, hat etwas geaendert und
+    // sieht keine Wirkung — und sucht den Fehler dann im Treiber. Genau
+    // das ist hier passiert.
+    if zahl > 1 {
+        host::say("[rtl8822ce] WARNUNG: sys/config/wifi hat '");
+        host::say(unsafe { core::str::from_utf8_unchecked(key) });
+        host::say("' MEHRFACH — es gilt die ERSTE Zeile, die weiteren\n\
+                   \x20         werden ignoriert.\n");
+    }
+    treffer
 }
 
 /// Leerzeichen und Wagenruecklauf an beiden Enden weg.
