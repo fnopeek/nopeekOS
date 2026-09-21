@@ -340,6 +340,37 @@ pub extern "C" fn _start() {
     host::print_dec(h as u32);
     host::print(", 64 KiB)\n");
 
+    // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────────────
+    // Muss NACH der BAR-Abbildung stehen: der DBI-Weg laeuft ueber MMIO.
+    pci::link_cfg(h);
+    let aspm_vorher = match read_aspm_pref() {
+        Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
+        None => pci::link_state().map(|l| (l.aspm, None)),
+    };
+    host::print("[rtl8822ce] PCIe-Link: ASPM vorgefunden ");
+    match aspm_vorher {
+        Some((v, gesetzt)) => {
+            host::print(match v {
+                0 => "aus",
+                1 => "L0s",
+                2 => "L1",
+                _ => "L0s+L1",
+            });
+            match gesetzt {
+                Some(true) => host::print(", von uns EINgeschaltet"),
+                Some(false) => host::print(", von uns AUSgeschaltet"),
+                None => host::print(", unangetastet (aspm: wie-gefunden)"),
+            }
+        }
+        None => host::print("keine PCIe-Capability gefunden"),
+    }
+    if let Some((l1, clk)) = pci::link_cfg_state(h) {
+        host::print(" · Realtek L1_SW ");
+        host::print(if l1 { "an" } else { "aus" });
+        host::print(", CLKREQ_SW ");
+        host::print(if clk { "an" } else { "aus" });
+    }
+    host::print("\n");
 
     // ── Kennung lesen (rtw_chip_parameter_setup) ─────────────────
     let hal = chip_parameter_setup(h);
@@ -588,49 +619,6 @@ pub extern "C" fn _start() {
                 && e.addr != [0xffu8; 6]
                 && e.addr[0] & 0x01 == 0;
             stage2c = gate("MAC-Adresse aus der efuse ist gueltig", valid);
-
-            // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────
-            //
-            // **Die Stelle ist Semantik, nicht Geschmack.** Linux ruft
-            // `rtw_pci_phy_cfg` in pci.c:1810 — NACH
-            // `rtw_chip_info_setup` (1800), und das ist zwingend: die
-            // Funktion endet mit einem Schreibzugriff, der
-            // `efuse->rfe_option` braucht, und sie liest
-            // `hal.cut_version`. Beides gibt es vorher nicht.
-            //
-            // In 0.34.0 stand der Ruf direkt hinter der BAR-Abbildung —
-            // also vor der Chip-Erkennung, vor der efuse und vor dem
-            // Einschalten. Ein DBI-Schreibzugriff auf ein Funkteil, das
-            // noch nicht laeuft, und die Verbindung riss seither ab.
-        pci::link_cfg(h, e.rfe_option);
-        let aspm_vorher = match read_aspm_pref() {
-            Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
-            None => pci::link_state().map(|l| (l.aspm, None)),
-        };
-        host::print("[rtl8822ce] PCIe-Link: ASPM vorgefunden ");
-        match aspm_vorher {
-            Some((v, gesetzt)) => {
-                host::print(match v {
-                    0 => "aus",
-                    1 => "L0s",
-                    2 => "L1",
-                    _ => "L0s+L1",
-                });
-                match gesetzt {
-                    Some(true) => host::print(", von uns EINgeschaltet"),
-                    Some(false) => host::print(", von uns AUSgeschaltet"),
-                    None => host::print(", unangetastet (aspm: wie-gefunden)"),
-                }
-            }
-            None => host::print("keine PCIe-Capability gefunden"),
-        }
-        if let Some((l1, clk)) = pci::link_cfg_state(h) {
-            host::print(" · Realtek L1_SW ");
-            host::print(if l1 { "an" } else { "aus" });
-            host::print(", CLKREQ_SW ");
-            host::print(if clk { "an" } else { "aus" });
-        }
-        host::print("\n");
             efuse = Some(e);
         } else {
             let _ = gate("MAC-Adresse aus der efuse ist gueltig", false);
@@ -792,11 +780,9 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5f: die Ratenanpassung ─────────────────────────────
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    let stage5f = match (stage5e, linked.as_ref(), target.as_ref(),
-                         efuse.as_ref()) {
-        (true, Some(v), Some(b), Some(ef)) =>
-            stage5f_rates(h, &mut trx, &mut h2c, &hal, ef, v, b, &mut rates,
-                          rtwdev),
+    let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
+        (true, Some(v), Some(b)) =>
+            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
             false
@@ -1914,12 +1900,6 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
     host::print("\"\n");
 }
 
-/// Mitten- und Kanalbreite, wie sie Stufe 5e wirklich an den Chip gegeben
-/// hat: `(cch << 8) | bw`. Eine Globale, weil `Link` erst danach entsteht
-/// und der Bericht die Zahl trotzdem braucht.
-static PHY_CHAN: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
 /// Eine gefundene Funkzelle. Nur das, was aus Beacon oder Probe Response
 /// sicher herausfaellt — nichts Abgeleitetes.
 #[derive(Clone, Copy)]
@@ -2704,7 +2684,6 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // `SUP_WIDTH_20_40` versprach und jeder Sendedeskriptor 40 MHz
     // eintrug: drei Stellen, drei Antworten.
     let (cch, bw, _) = chan_params(bss.channel, bss.ht_param, true);
-    PHY_CHAN.store(((cch as u32) << 8) | bw as u32, core::sync::atomic::Ordering::Relaxed);
     if !switch_channel(h, hal, e, t, bss.channel, bss.ht_param, true) {
         host::print("  RF 0x18 traegt den Zielkanal NICHT\n");
         return false;
@@ -3090,9 +3069,8 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
 /// und QoS-Null-Rahmen, die die FIRMWARE im Stromsparbetrieb selbst
 /// sendet. Stromsparen gibt es hier nicht, also wuerden die Seiten
 /// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
-#[allow(clippy::too_many_arguments)]
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
-                 hal: &Hal, e: &efuse::Efuse, vifc: &vif::Vif, bss: &Bss,
+                 hal: &Hal, vifc: &vif::Vif, bss: &Bss,
                  out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
@@ -3156,16 +3134,7 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
 
     let mut si = sta::StaInfo { mac_id: vifc.mac_id, init_ra_lv: 1,
                                 ..Default::default() };
-    // **Die Stroemezahl hat EINE Quelle, und das ist die efuse.** Linux
-    // fragt an beiden Stellen `efuse->hw_cap.nss` (main.c:1248 fuer die
-    // Ratenmaske, main.c:1313 fuer `tx_num`); hier stand
-    // `if hal.rf_2t2r { 2 }`. Auf diesem Chip ist das meist dasselbe --
-    // aber es ist dieselbe Bauart wie die Bandbreite, die an drei Stellen
-    // stand und dreimal etwas anderes sagte, und das hat uns einen Faktor
-    // drei gekostet. `rf_2t2r` sagt, was der Funkteil HAT; `hw_cap.nss`
-    // sagt, was diese KARTE fuehren darf, und nur das zweite steht auch im
-    // Anmeldeantrag (`build_ht_cap_ie` nimmt es seit je).
-    let nss = e.hw_cap_nss;
+    let nss = if hal.rf_2t2r { 2 } else { 1 };
     let wireless_set = sta::update_sta_info(&mut si, &caps, nss,
                                             bss.channel <= 14);
 
@@ -3360,14 +3329,6 @@ struct LinkStats {
     /// den Sendering passte.
     addba_resp: u32,
     addba_fail: u32,
-    /// Und die GEGENrichtung: wie oft wir selbst gefragt haben, ob der
-    /// Block steht, und mit welchem Status der AP abgelehnt hat.
-    /// **`addba_req_sent > 0` bei `tx_ba_ok == false` heisst: wir haben
-    /// gefragt und keine Antwort bekommen** — ein anderer Zustand als
-    /// „nie gefragt", und ohne die zwei Zahlen sehen beide gleich aus.
-    addba_req_sent: u32,
-    tx_ba_ok: bool,
-    tx_ba_status: u16,
     /// Das Fenster, das wir zuletzt zugestanden haben, und das, um das
     /// gebeten wurde. **Ohne die Zahl im Bericht ist nicht zu sehen, ob
     /// eine geaenderte `ampdu:`-Zeile ueberhaupt gelesen wurde** — der
@@ -3430,7 +3391,6 @@ impl Default for LinkStats {
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
-            addba_req_sent: 0, tx_ba_ok: false, tx_ba_status: 0,
             addba_win: 0, addba_win_req: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
             rx_us: 0, pump_us0: 0,
@@ -3531,49 +3491,6 @@ struct Link {
     /// Deskriptor — Linux fuellt es aus dem Rahmenkopf.
     seq: u16,
     ptk_installed: bool,
-    /// **Der SENDE-Block, TID 0.** `None` = nicht ausgehandelt, also
-    /// einzelne Rahmen. `Some(fenster)` = der AP hat mit Status 0
-    /// geantwortet, und ab dann traegt jeder Datenrahmen `ampdu_en`.
-    ///
-    /// rtw88 fuehrt das als Flagbit `RTW_TXQ_AMPDU` je Sendeschlange
-    /// (mac80211.c `rtw_ops_ampdu_action`, Zweig `TX_OPERATIONAL`) — wir
-    /// haben keine Schlangen je TID, also steht es hier.
-    tx_ampdu: Option<u16>,
-    /// **Zwischen Antrag und Antwort wird NICHT gesendet.** Der Antrag
-    /// nennt dem AP die Folgenummer, ab der sein Umsortierfenster steht
-    /// (SSN). Senden wir weiter, ist die Nummer bei Ankunft der Antwort
-    /// veraltet — und die ersten aggregierten Rahmen fallen in ein
-    /// Fenster, dessen Anfang der AP nie bekommt. Er haelt sie fest, bis
-    /// seine Frist ablaeuft.
-    ///
-    /// mac80211 loest das mit `tid_tx->pending`: waehrend `WANT_START`
-    /// puffert es die Rahmen der TID. Wir haben keine solche Schlange —
-    /// wir rufen einfach `netdev_poll_tx` nicht, und der Kernel behaelt
-    /// sie in seiner eigenen (Rueckstau, kein Verlust).
-    addba_pending: bool,
-    /// Ob der AP HT kann, und sein A-MPDU-Parameterbyte. Beides aus
-    /// seinem HT-Element; ohne HT gibt es keinen Block, und die zwei
-    /// Werte im Deskriptor sagen, wie LANG und wie DICHT er ihn vertraegt.
-    peer_ht: bool,
-    peer_ampdu_param: u8,
-    /// **Ob wir QoS-Datenrahmen senden — die Voraussetzung fuer jede
-    /// Sende-Aggregation.** Ein HT-AP ist per Definition ein QoS-AP
-    /// (802.11 §10.1: eine HT-STA ist eine QoS-STA), also entscheidet
-    /// dasselbe Element ueber beides. Gegen einen AP ohne HT bleibt es
-    /// beim einfachen Datenrahmen, und dann gibt es auch keinen Block.
-    tx_qos: bool,
-    /// **Was die PHY WIRKLICH bekommen hat**, nicht was die Station
-    /// aushandelt. Der Bericht zeigte bisher `si.bw_mode` — und das ist
-    /// die Faehigkeit des Gegenuebers, geklemmt auf die Zelle. Laufen die
-    /// beiden auseinander, ist genau das unsichtbar, und ein Funkteil auf
-    /// der falschen Breite ist taub statt kaputt.
-    phy_bw: usize,
-    phy_cch: u8,
-    /// Wie oft wir gefragt haben, und wann zuletzt. Ein AP, der schweigt,
-    /// darf uns nicht in eine Endlosschleife schicken.
-    addba_tries: u8,
-    addba_last_ms: u64,
-    addba_token: u8,
     /// 802.11 §12.5.3.2 — die 48-Bit-Paketnummer des Paarschluessels.
     /// Sie faengt bei eins an und zaehlt je Rahmen hoch; eine wiederholte
     /// Nummer verwirft der AP als Wiedereinspielung.
@@ -3598,75 +3515,6 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
     out[7] = ((pn >> 40) & 0xff) as u8; // PN5
 }
 
-/// Den 802.11-Datenrahmen BAUEN — rein, ohne Chip, ohne `Link`.
-///
-/// **Herausgeloest, weil 0.36.0 genau hier scheiterte und kein Test es
-/// sehen konnte.** Der Fehler war ein fehlendes FELD in einem Rahmen, den
-/// wir selbst bauen, und `datapath.py` zaehlt fehlende FUNKTIONEN. Was
-/// eine Funktion zusammensetzt, muss sich Byte fuer Byte nachrechnen
-/// lassen; deshalb steht das Bauen hier und das Senden daneben.
-///
-/// **QoS oder nicht, und warum das mehr ist als zwei Byte:** ein
-/// Block-Ack gilt je TID (802.11 §11.5.1.1), und einen TID traegt nur ein
-/// QoS-Datenrahmen. Ohne `qos` darf es keine Sende-Aggregation geben.
-/// Mit `qos` waechst der Kopf auf 26 Byte, und alles dahinter — CCMP-Kopf,
-/// LLC/SNAP, Nutzlast — rueckt mit.
-///
-///     ohne QoS, klar:          [fc 2][dur 2][a1 6][a2 6][a3 6][seq 2]
-///     mit QoS:                 ... [seq 2][qos 2]
-///     verschluesselt:          ... + [ccmp 8]
-///     dann immer:              [LLC/SNAP 6][ethertyp 2][nutzlast]
-///
-/// Die Ack-Politik im QoS-Feld ist 0 (Normal Ack) und der A-MSDU-Bit ist
-/// null — wir fassen keine MSDUs zusammen, nur MPDUs.
-#[allow(clippy::too_many_arguments)]
-fn build_data_frame(out: &mut [u8; 2048], eth: &[u8], bssid: &[u8; 6],
-                    mac: &[u8; 6], seq: u16, encrypt: bool, pn: u64,
-                    qos: bool) -> Option<usize> {
-    if eth.len() < 14 {
-        return None;
-    }
-    let payload = &eth[14..];
-    let hdr = 24 + if qos { 2 } else { 0 };
-    let total = hdr + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
-    if total > out.len() {
-        return None;
-    }
-
-    out[0] = DOT11_FC_TYPE_DATA | if qos { DOT11_FC0_QOS } else { 0 };
-    out[1] = 0x01; // ToDS
-    if encrypt {
-        out[1] |= DOT11_FC_PROTECTED;
-    }
-    out[2..4].copy_from_slice(&0u16.to_le_bytes());
-    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
-    out[10..16].copy_from_slice(mac); // addr2 = Quelle
-    out[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
-    out[22..24].copy_from_slice(&((seq & 0x0fff) << 4).to_le_bytes());
-    if qos {
-        // TID 0 (Best Effort), Normal Ack, kein EOSP, kein A-MSDU.
-        out[24..26].copy_from_slice(&0u16.to_le_bytes());
-    }
-
-    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
-    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
-    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
-    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
-    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
-    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
-    // auf der nichts zurueckkommt.
-    let ofs = if encrypt {
-        ccmp_hdr(&mut out[hdr..hdr + 8], pn, 0);
-        hdr + 8
-    } else {
-        hdr
-    };
-    out[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
-    out[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
-    out[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
-    Some(total)
-}
-
 /// docs/spec/WIFI_CLASS_ABI.md §2b — ein Ethernet-Rahmen als
 /// 802.11-Datenrahmen an den AP.
 ///
@@ -3682,55 +3530,52 @@ fn build_data_frame(out: &mut [u8; 2048], eth: &[u8], bssid: &[u8; 6],
 /// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
 /// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
 /// die Firmware antworten wird.
-/// tx.c:585-592 `rtw_txq_check_agg`, die drei Ausschluesse — als reine
-/// Frage an den Ethernet-Rahmen.
-///
-/// **EAPOL darf NIE in einem A-MPDU stehen.** Linux sagt es mit
-/// `if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE))) return;`, und
-/// der Grund ist nicht Vorsicht: ein Rahmen des Steuerports, der in einem
-/// Block verlorengeht, kostet den Gruppenschluessel und damit die
-/// Verbindung. Er ist der einzige, dessen Verlust nicht nachgeliefert
-/// werden kann.
-///
-/// Die beiden anderen Ausschluesse von Linux gelten bei uns nicht und
-/// stehen hier, damit das nachpruefbar ist statt vergessen: VO-Verkehr
-/// gibt es nicht (wir fahren genau TID 0), und `RTW_TXQ_BLOCK_BA` ist
-/// Linux' „nie wieder fragen" — bei uns tut das `addba_tries = 255`.
-fn may_aggregate(eth: &[u8]) -> bool {
-    if eth.len() < 14 {
-        return false;
-    }
-    u16::from_be_bytes([eth[12], eth[13]]) != ETHERTYPE_EAPOL
-}
-
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
            eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
     if eth.len() < 14 {
         return false;
     }
     let mut frame = [0u8; 2048];
-    let Some(total) = build_data_frame(&mut frame, eth, &link.bssid,
-                                       &link.mac, link.seq, encrypt,
-                                       link.tx_pn, link.tx_qos)
-    else {
+    let payload = &eth[14..];
+    let total = 24 + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
+    if total > frame.len() {
         return false;
-    };
-    if encrypt {
-        link.tx_pn = link.tx_pn.wrapping_add(1);
     }
+
+    frame[0] = DOT11_FC_TYPE_DATA;
+    frame[1] = 0x01; // ToDS
+    if encrypt {
+        frame[1] |= DOT11_FC_PROTECTED;
+    }
+    frame[2..4].copy_from_slice(&0u16.to_le_bytes());
+    frame[4..10].copy_from_slice(&link.bssid); // addr1 = Empfaenger
+    frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
+    frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
+    frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
+
+    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
+    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
+    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
+    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
+    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
+    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
+    // auf der nichts zurueckkommt.
+    let ofs = if encrypt {
+        ccmp_hdr(&mut frame[24..32], link.tx_pn, 0);
+        link.tx_pn = link.tx_pn.wrapping_add(1);
+        32
+    } else {
+        24
+    };
+    frame[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
+    frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
+    frame[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
 
     let mut info = tx::TxPktInfo::default();
     // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
     // dann die gemeinsamen Felder.
-    //
-    // **Die Entscheidung ueber die Aggregation faellt HIER und nicht beim
-    // Rufer** — `tx_8023` sieht den Ethertyp ohnehin, und ein Rufer, der
-    // sie vergessen kann, vergisst sie irgendwann.
     tx::data_pkt_info_update(&mut info, link.seq, Some(&link.si),
-                             link.highest_rate,
-                             if may_aggregate(eth) { link.tx_ampdu }
-                             else { None },
-                             link.peer_ampdu_param);
+                             link.highest_rate);
     let a1 = &frame[4..10];
     info.bmc = a1.iter().all(|&b| b == 0xff) || a1[0] & 0x01 != 0;
     info.tx_pkt_size = total as u32;
@@ -3775,7 +3620,7 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
 /// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
 /// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
 fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
-    let qos = f[0] & DOT11_FC0_QOS != 0;
+    let qos = f[0] & DOT11_STYPE_QOS != 0;
     let hdrlen = 24 + if qos { 2 } else { 0 };
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let crypt = if prot { 8usize } else { 0 };
@@ -3888,7 +3733,7 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
         return None;
     }
     // Null und QoS-Null tragen keinen Rumpf.
-    if f[0] & DOT11_FC0_NODATA != 0 {
+    if f[0] & DOT11_STYPE_NODATA != 0 {
         return None;
     }
     let (llc, trailing) = llc_offset(f, miss)?;
@@ -3943,16 +3788,6 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         },
         seq: 0,
         ptk_installed: false,
-        tx_ampdu: None,
-        addba_pending: false,
-        peer_ht: caps.ht_supported,
-        peer_ampdu_param: caps.ht_ampdu_param,
-        tx_qos: caps.ht_supported,
-        phy_bw: 0,
-        phy_cch: bss.channel,
-        addba_tries: 0,
-        addba_last_ms: 0,
-        addba_token: 0x10,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
     };
@@ -4145,24 +3980,6 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
     // `build_addba_resp`: es gibt keinen Umsortierpuffer.
     let ampdu_buf = read_ampdu_buf();
-    // **Zwei Fragen, zwei Schalter.** `ampdu:` ist der EMPFANG (die
-    // Antwort auf die Bitte des AP), `txagg:` das SENDEN (unser eigener
-    // Antrag samt QoS-Rahmen). Bis 0.39.0 hing beides an `ampdu:`, und
-    // `ampdu: off` liess den AP deshalb 47 Mal vergeblich fragen — ein
-    // Zustand, der schlechter ist als beide Enden an.
-    let txagg = read_txagg_pref();
-    if !txagg {
-        link.tx_qos = false;
-    }
-    host::print("[rtl8822ce] Aggregation: Empfang ");
-    if ampdu_buf > 0 {
-        host::print_dec(ampdu_buf as u32);
-    } else {
-        host::print("aus");
-    }
-    host::print(", Senden ");
-    host::print(if txagg { "an (txagg: on)" } else { "aus (Vorgabe)" });
-    host::print("\n");
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -4250,11 +4067,6 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     && acc.addba.is_none()
                 {
                     acc.addba = sta::parse_addba_req(f);
-                }
-                if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_RESP))
-                    && acc.addba_resp.is_none()
-                {
-                    acc.addba_resp = sta::parse_addba_resp(f);
                 }
             }
             if let Some(r) = disconnect_reason(f, &bssid) {
@@ -4358,74 +4170,6 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Die Aggregation zulassen ─────────────────────────────
-        // ── Der SENDE-Block: wir fragen, der AP antwortet ────────
-        //
-        // **Die Richtung, die bis 0.35.0 ganz fehlte.** In Linux stoesst
-        // `rtw_txq_check_agg` (tx.c) `ba_work` an, und das ruft
-        // `ieee80211_start_tx_ba_session` — genau diesen Rahmen. Ohne ihn
-        // bleibt `ampdu_en` fuer immer falsch, und jeder Datenrahmen geht
-        // einzeln mit eigener Quittung raus.
-        //
-        // Bedingungen: der Paarschluessel muss stehen (vorher sind wir
-        // nicht autorisiert), der AP muss HT koennen, und das Fenster aus
-        // der Konfiguration muss ueberhaupt Aggregation erlauben.
-        if let Some(r) = acc.addba_resp.take() {
-            if r.dialog_token == link.addba_token && r.tid == 0 {
-                link.addba_pending = false;
-                if r.status == 0 {
-                    // **Das Fenster des AP, nicht unseres.** Er darf
-                    // kleiner antworten, als wir gefragt haben, und dann
-                    // gilt seins (802.11 §11.5.3).
-                    let f = r.buf_size.clamp(1, 64);
-                    link.tx_ampdu = Some(f);
-                    ls.tx_ba_ok = true;
-                    host::print("[rtl8822ce] Sende-Block steht: TID 0, Fenster ");
-                    host::print_dec(f as u32);
-                    host::print("\n");
-                } else {
-                    // Eine Absage ist eine ANTWORT. Nicht weiterfragen.
-                    link.addba_tries = 255;
-                    ls.tx_ba_status = r.status;
-                    host::print("[rtl8822ce] Sende-Block abgelehnt, Status ");
-                    host::print_dec(r.status as u32);
-                    host::print("\n");
-                }
-            }
-        }
-        // **Eine Antwort, die nicht kommt, darf den Strom nicht
-        // festhalten.** 60 ms sind reichlich fuer einen Rahmen, der einmal
-        // ueber die Luft und zurueck muss; danach laeuft der Verkehr
-        // weiter, und der naechste Versuch kommt nach der Frist unten.
-        if link.addba_pending
-            && now.wrapping_sub(link.addba_last_ms) >= 60
-        {
-            link.addba_pending = false;
-        }
-        if link.tx_qos
-            && link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
-            && link.peer_ht && link.addba_tries < 4
-            && !link.addba_pending
-            && now.wrapping_sub(link.addba_last_ms) >= 500
-        {
-            link.addba_tries += 1;
-            link.addba_last_ms = now;
-            link.addba_token = link.addba_token.wrapping_add(1);
-            let mut req = [0u8; 256];
-            // SSN: die naechste Folgenummer, die wir senden werden.
-            let n = sta::build_addba_req(&mut req, &mac, &bssid, 0, 64,
-                                         link.addba_token, link.seq, 0);
-            let mut info = tx::pkt_info_update(&req[..n], 0, tx::RTW_BAND_2G);
-            let q = tx::RTW_TX_QUEUE_MGMT;
-            if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &req[..n]) {
-                pci::tx_kick_off_queue(h, trx, q);
-                ls.addba_req_sent += 1;
-                // Erst JETZT anhalten — ein Antrag, der nicht in den Ring
-                // passte, ist keiner, und dafuer den Strom zu stoppen
-                // waere ein Stillstand ohne Gegenleistung.
-                link.addba_pending = true;
-            }
-        }
-
         // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
         // solange keine Antwort kommt — im Geraetelauf 180 Mal, und
         // genau so lange konnte er nicht aggregieren.
@@ -4611,10 +4355,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Senden, was der IP-Stapel loswerden will ─────────────
-        //
-        // `addba_pending` haelt den Datenstrom an, solange der Antrag
-        // unterwegs ist — siehe das Feld. Der Kernel puffert derweil.
-        if ls.authorized && !link.addba_pending {
+        if ls.authorized {
             loop {
                 let n = host::netdev_poll_tx(ethbuf);
                 if n <= 0 {
@@ -4834,7 +4575,7 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     // Stufe 5f: die Firmware waehlt wieder die Rate.
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
-    if !stage5f_rates(h, trx, h2c, hal, e, v, bss, &mut rates, d) {
+    if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
         return false;
     }
     if let Some((caps, si)) = rates {
@@ -5009,25 +4750,22 @@ fn read_debug_flag() -> (bool, i32) {
 /// darueber, wieviel Umsortierung TCP hier vertraegt.
 /// `aspm:` aus `sys/config/wifi` — `an` · `aus` · `wie-gefunden`.
 ///
-/// **Vorgabe ist seit 0.40.0 NICHT ANFASSEN, und das ist eine Umkehr.**
-/// 0.34.0 schaltete ASPM ab, weil die Karte 64 us Austrittszeit ansagt und
-/// wir ohnehin nie schlafen. Gemessen brachte das **nichts** (46 -> 48
-/// Mbit, Rauschen) — und seither riss die Verbindung ab. Ein Schreibzugriff
-/// in den Konfigurationsraum einer Karte, deren ASPM die Firmware des
-/// Rechners gesetzt hat, ist kein folgenloser Eingriff; auf dem ersten
-/// Blech einer neuen Plattformklasse erst recht nicht.
-///
-/// **Ein Eingriff ohne gemessenen Nutzen gehoert nicht in die Vorgabe.**
-/// `aspm: aus` faehrt ihn weiterhin, `aspm: an` die Gegenprobe.
+/// **Vorgabe ist AUS, und das ist eine Entscheidung mit zwei Seiten.** Der
+/// Treiber schlaeft nie (kein LPS, §6 des Plans), also hat das Stromsparen
+/// des Links bei uns keinen Gegenpart, der es wieder aufweckt — und die
+/// Karte sagt selbst, dass sie 64 us braucht, um aus L1 herauszukommen.
+/// Dafuer kostet es Leerlaufstrom, und genau daran haengt ein anderer
+/// offener Posten (`project_idle_power_21w`). Deshalb ein Schalter und
+/// kein stilles Verhalten: `aspm: an` faehrt die Gegenprobe.
 fn read_aspm_pref() -> Option<bool> {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
     if n <= 0 {
-        return None;
+        return Some(false);
     }
     match cfg_get(&cfg[..n as usize], b"aspm") {
         Some((a, b)) => aspm_pref_from(&cfg[a..b]),
-        None => None,
+        None => Some(false),
     }
 }
 
@@ -5042,35 +4780,10 @@ fn read_aspm_pref() -> Option<bool> {
 fn aspm_pref_from(v: &[u8]) -> Option<bool> {
     if v.starts_with(b"an") || v.starts_with(b"on") || v == b"1" {
         Some(true)
-    } else if v.starts_with(b"aus") || v.starts_with(b"off") || v == b"0" {
-        Some(false)
-    } else {
+    } else if v.starts_with(b"wie") || v.starts_with(b"keep") {
         None
-    }
-}
-
-/// `txagg:` aus `sys/config/wifi` — die SENDESEITE der Aggregation.
-///
-/// **Vorgabe AUS, und der Grund ist ein Geraetelauf.** 0.36.0 handelte
-/// einen Block aus, den unsere Rahmen nicht halten konnten (kein TID),
-/// 0.38.0 baute die QoS-Rahmen nach — und danach lief es immer noch nicht.
-/// Was davor BEWIESEN lief, ist 0.35.0: Empfangs-Aggregation an
-/// (`ampdu: 64`), Senden einzeln, 48 Mbit gemessen.
-///
-/// Also steht die Sendeseite ab 0.40.0 hinter einem eigenen Schalter, und
-/// die Vorgabe ist der bewiesene Zustand. `ampdu:` regelt weiter nur den
-/// EMPFANG. **Zwei Fragen, zwei Schalter** — sie in einem zu fuehren hat
-/// mich einen Lauf gekostet, weil `ampdu: off` den AP 47 Mal vergeblich
-/// nach einem Block fragen liess.
-fn read_txagg_pref() -> bool {
-    let mut cfg = [0u8; 512];
-    let n = host::fetch("sys/config/wifi", &mut cfg);
-    if n <= 0 {
-        return false;
-    }
-    match cfg_get(&cfg[..n as usize], b"txagg") {
-        Some((a, b)) => cfg_on(&cfg[a..b]),
-        None => false,
+    } else {
+        Some(false)
     }
 }
 
@@ -5113,8 +4826,6 @@ fn cfg_on(v: &[u8]) -> bool {
 /// ein Kommentar. Gibt die GRENZEN des Wertes zurueck, nicht eine
 /// Scheibe: der Puffer wird daneben weiterbenutzt.
 fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
-    let mut treffer: Option<(usize, usize)> = None;
-    let mut zahl = 0u32;
     let mut start = 0usize;
     while start <= text.len() {
         let end = text[start..].iter().position(|&b| b == b'\n')
@@ -5124,13 +4835,8 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
             if let Some(c) = text[a..b].iter().position(|&x| x == b':') {
                 let (ka, kb) = trim(text, a, a + c);
                 if &text[ka..kb] == key {
-                    zahl += 1;
-                    // **Die ERSTE gilt, und das bleibt so** — eine
-                    // Aenderung der Regel waere schlimmer als die Regel.
-                    if treffer.is_none() {
-                        let (va, vb) = trim(text, a + c + 1, b);
-                        treffer = Some((va, vb));
-                    }
+                    let (va, vb) = trim(text, a + c + 1, b);
+                    return Some((va, vb));
                 }
             }
         }
@@ -5139,17 +4845,7 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
         }
         start = end + 1;
     }
-    // **Aber eine zweite Zeile darf nicht SCHWEIGEND verlieren.** Wer
-    // `ampdu: 64` unter ein `ampdu: off` schreibt, hat etwas geaendert und
-    // sieht keine Wirkung — und sucht den Fehler dann im Treiber. Genau
-    // das ist hier passiert.
-    if zahl > 1 {
-        host::say("[rtl8822ce] WARNUNG: sys/config/wifi hat '");
-        host::say(unsafe { core::str::from_utf8_unchecked(key) });
-        host::say("' MEHRFACH — es gilt die ERSTE Zeile, die weiteren\n\
-                   \x20         werden ignoriert.\n");
-    }
-    treffer
+    None
 }
 
 /// Leerzeichen und Wagenruecklauf an beiden Enden weg.
@@ -5243,23 +4939,6 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(match link.si.bw_mode { 0 => "20", 1 => "40", _ => "80" },
         &mut b, &mut n);
     put(" MHz", &mut b, &mut n);
-    // **Und daneben, was die PHY wirklich bekommen hat.** Die zwei
-    // koennen auseinanderlaufen: `si.bw_mode` ist die Faehigkeit des AP
-    // auf die Zelle geklemmt, `phy` das, was `chan_params` an den Chip
-    // gegeben hat. Ein Funkteil auf der falschen Breite ist TAUB, nicht
-    // kaputt — es hoert die Beacons weiter und verliert die Daten.
-    {
-        let v = PHY_CHAN.load(core::sync::atomic::Ordering::Relaxed);
-        let (cch, pbw) = ((v >> 8) as u8, (v & 0xff) as usize);
-        put(" (phy ", &mut b, &mut n);
-        put(match pbw { 0 => "20", 1 => "40", _ => "80" }, &mut b, &mut n);
-        put(" MHz, mitte K", &mut b, &mut n);
-        num(cch as u32, &mut b, &mut n);
-        put(")", &mut b, &mut n);
-        if pbw as u8 != link.si.bw_mode {
-            put(" ← UNEINIG", &mut b, &mut n);
-        }
-    }
     // Die PCIe-Strecke. Steht hier und nicht einmalig beim Start, weil
     // ASPM ein Verdaechtiger fuer den Durchsatz ist und ein Verdaechtiger
     // in DEN Bericht gehoert, den Florian einschickt.
@@ -5283,17 +4962,6 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put("  clkreq ", &mut b, &mut n);
         put(if l.clkreq { "an" } else { "aus" }, &mut b, &mut n);
     }
-    // **Die Stroemezahl, und zwar BEIDE.** `rx HT MCS7` ist die Spitze des
-    // Ein-Strom-Bereichs — dort festzusitzen heisst entweder, dass der AP
-    // so waehlt, oder dass wir nur einen Strom ANGEBOTEN haben. Der
-    // Unterschied steht in der efuse, und ohne ihn im Bericht raet man.
-    put("  nss ", &mut b, &mut n);
-    num(e.hw_cap_nss as u32, &mut b, &mut n);
-    put(" angeboten (antennen ", &mut b, &mut n);
-    num(e.hw_cap_ant_num as u32, &mut b, &mut n);
-    put(", efuse-bw 0x", &mut b, &mut n);
-    rate_hex(e.hw_cap_bw, &mut b, &mut n);
-    put(")", &mut b, &mut n);
     put("\nbssid ", &mut b, &mut n);
     for (i, byte) in link.bssid.iter().enumerate() {
         if i > 0 && n < b.len() {
@@ -5406,28 +5074,6 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" erbetenen)", &mut b, &mut n);
     } else if ls.addba_req > 0 {
         put(" — AGGREGATION AUS (`ampdu: off`)", &mut b, &mut n);
-    }
-    // **Die GEGENrichtung, und sie hat drei Zustaende, nicht zwei.**
-    // „nie gefragt" · „gefragt, keine Antwort" · „abgelehnt mit Status N"
-    // sehen ohne diese Zeile alle gleich aus, naemlich nach „keine
-    // Aggregation".
-    put("  senden: ", &mut b, &mut n);
-    if ls.tx_ba_ok {
-        put("Block steht (fenster ", &mut b, &mut n);
-        num(link.tx_ampdu.unwrap_or(0) as u32, &mut b, &mut n);
-        put(", faktor ", &mut b, &mut n);
-        num(sta::tx_ampdu_factor(link.peer_ampdu_param) as u32, &mut b, &mut n);
-        put(", dichte ", &mut b, &mut n);
-        num(sta::tx_ampdu_density(link.peer_ampdu_param) as u32, &mut b, &mut n);
-        put(")", &mut b, &mut n);
-    } else if ls.tx_ba_status != 0 {
-        put("ABGELEHNT, status ", &mut b, &mut n);
-        num(ls.tx_ba_status as u32, &mut b, &mut n);
-    } else if ls.addba_req_sent > 0 {
-        num(ls.addba_req_sent, &mut b, &mut n);
-        put("x gefragt, KEINE Antwort", &mut b, &mut n);
-    } else {
-        put("nicht gefragt", &mut b, &mut n);
     }
     if ls.addba_fail > 0 {
         put(", ", &mut b, &mut n);

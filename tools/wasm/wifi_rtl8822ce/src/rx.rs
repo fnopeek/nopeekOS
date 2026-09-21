@@ -505,10 +505,6 @@ pub struct WdAcc {
     /// Der erste ADDBA Request dieses Durchlaufs — beantwortet wird er
     /// draussen, mit freiem `trx`.
     pub addba: Option<crate::sta::AddbaReq>,
-    /// Die Antwort des AP auf UNSEREN Antrag. Eigenes Feld, weil Frage
-    /// und Antwort verschiedene Richtungen sind und sich sonst im selben
-    /// Durchlauf ueberschreiben.
-    pub addba_resp: Option<crate::sta::AddbaResp>,
     /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -523,7 +519,6 @@ impl WdAcc {
             tx_rpt: [(0, false); 8], n_tx_rpt: 0,
             c2h_seen: [0; 8], n_c2h_seen: 0,
             mgmt: [(0, (0, 0)); 8], n_mgmt: 0, addba: None,
-            addba_resp: None,
             rx_unicast: 0, rx_cnt: 0,
         }
     }

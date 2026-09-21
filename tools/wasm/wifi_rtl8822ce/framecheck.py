@@ -303,24 +303,9 @@ ASPM = [
     ("0 -> ausschalten", "0", "Some(false)"),
     ("wie-gefunden -> nicht anfassen", "wie-gefunden", "None"),
     ("keep -> nicht anfassen", "keep", "None"),
-    ("leer -> Vorgabe: nicht anfassen", "", "None"),
-    ("Tippfehler faellt auf die sichere Seite", "anx-aus", "Some(true)"),
-    ("unverstanden -> nicht anfassen, kein Eingriff auf Verdacht",
-     "vielleicht", "None"),
-]
-
-# `tx_ampdu_factor` / `tx_ampdu_density`: das A-MPDU-Byte DES AP -> was in
-# unseren Sendedeskriptor geht. tx.c:99-113. Die Basis ist 4, nicht 8:
-# im Deskriptor steht die ANZAHL, und val*2 Pakete passen hinein.
-AMPDU = [
-    ("exp 0 -> 4*1-1 = 3", 0x00, 3, 0),
-    ("exp 1 -> 4*2-1 = 7", 0x01, 7, 0),
-    ("exp 2 -> 4*4-1 = 15", 0x02, 15, 0),
-    ("exp 3 (64K) -> 4*8-1 = 31", 0x03, 31, 0),
-    ("dichte 4 (2 us), exp 3", 0x13, 31, 4),
-    ("dichte 7 (16 us), exp 3", 0x1f, 31, 7),
-    ("dichte 0, exp 0 -- das kleinste Paar", 0x00, 3, 0),
-    ("Bit 5..7 sind reserviert und duerfen nichts aendern", 0xe3, 31, 0),
+    ("leer -> Vorgabe aus", "", "Some(false)"),
+    ("Tippfehler bleibt die Vorgabe, nicht das Gegenteil", "anx-aus", "Some(true)"),
+    ("unverstanden -> aus, nicht None", "vielleicht", "Some(false)"),
 ]
 
 SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
@@ -352,42 +337,6 @@ CHAN = [
 ]
 
 
-def check_ba_needs_qos(src):
-    """Der ADDBA-Antrag DARF nur laufen, wenn wir QoS-Rahmen senden.
-
-    **Eine Strukturpruefung, und sie hat einen Anlass.** wifi_rtl8822ce
-    0.36.0 handelte einen Block-Ack fuer TID 0 aus, waehrend
-    `build_data_frame` Rahmen ohne QoS-Feld baute — also ohne TID. Ein
-    Block-Ack gilt je TID (802.11 §11.5.1.1); der AP warf uns hinaus.
-
-    Kein Wertetest kann das sehen: beide Funktionen sind fuer sich
-    richtig. Falsch ist ihre KOMBINATION, und die steht als Bedingung im
-    Quelltext. Also wird der Quelltext geprueft.
-    """
-    bad = 0
-    if re.search(r"if\s+link\.tx_qos\s*\n\s*&&\s*link\.tx_ampdu\.is_none\(\)",
-                 src):
-        print("  OK   der ADDBA-Antrag haengt an link.tx_qos")
-    else:
-        print("  DIFF der ADDBA-Antrag prueft link.tx_qos NICHT — genau das "
-              "war die Regression von 0.36.0")
-        bad += 1
-
-    # **Waehrend der Aushandlung darf kein Datenrahmen hinaus.** Der Antrag
-    # nennt die SSN; senden wir weiter, ist sie bei Ankunft der Antwort
-    # veraltet, und die ersten aggregierten Rahmen fallen in ein Fenster,
-    # dessen Anfang der AP nie bekommt. mac80211 puffert dafuer in
-    # `tid_tx->pending`; wir rufen `netdev_poll_tx` nicht.
-    if re.search(r"if\s+ls\.authorized\s*&&\s*!link\.addba_pending\s*\{",
-                 src):
-        print("  OK   waehrend der ADDBA-Aushandlung ruht der Datenstrom")
-    else:
-        print("  DIFF der Datenstrom laeuft waehrend der ADDBA-Aushandlung "
-              "weiter — die SSN im Antrag ist dann veraltet")
-        bad += 1
-    return bad
-
-
 def main():
     src = (HERE / "src" / "lib.rs").read_text()
     regs = (HERE / "src" / "regs.rs").read_text()
@@ -397,11 +346,6 @@ def main():
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
-    ccmp = grab(src, r"\n(fn ccmp_hdr.*?\n\})", "ccmp_hdr")
-    mayagg = grab(src, r"\n(fn may_aggregate.*?\n\})", "may_aggregate")
-    bdf = grab(src, r"\n(#\[allow\(clippy::too_many_arguments\)\]\nfn build_data_frame.*?\n\})",
-               "build_data_frame")
-    llco = grab(src, r"\n(fn llc_offset.*?\n\})", "llc_offset")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
@@ -415,17 +359,6 @@ def main():
                    "build_addba_resp")
     rxsrc = (HERE / "src" / "rx.rs").read_text()
     census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
-    ampdu_f = grab(stasrc, r"\n(pub fn tx_ampdu_factor.*?\n\})",
-                   "tx_ampdu_factor")
-    ampdu_d = grab(stasrc, r"\n(pub fn tx_ampdu_density.*?\n\})",
-                   "tx_ampdu_density")
-    addba_rs = grab(stasrc,
-                    r"\n(#\[derive\(Clone, Copy\)\]\npub struct AddbaResp.*?\n\})",
-                    "struct AddbaResp")
-    addba_rq = grab(stasrc, r"\n(pub fn build_addba_req.*?\n\})",
-                    "build_addba_req")
-    addba_pr = grab(stasrc, r"\n(pub fn parse_addba_resp.*?\n\})",
-                    "parse_addba_resp")
 
     # Die zwei Konstanten kommen aus regs.rs — sonst prueft der Pruefer
     # seine eigene Abschrift. Sie stehen in KEINEM Linux-Header, also
@@ -451,23 +384,7 @@ def main():
             sys.exit("%s ist %s, main.h sagt %d" % (name, m.group(1), want))
         sc[name] = int(m.group(1))
 
-    # LLC/SNAP kommt aus regs.rs, nicht aus einer Abschrift hier.
-    m = re.search(r"pub const LLC_SNAP_HDR: \[u8; 6\] = \[([^\]]+)\];", regs)
-    if not m:
-        sys.exit("LLC_SNAP_HDR nicht in src/regs.rs")
-    llc_literal = m.group(1).strip()
-
-    m = re.search(r"pub const ETHERTYPE_EAPOL: u16 = (0x[0-9a-fA-F]+);", regs)
-    if not m or int(m.group(1), 16) != 0x888e:
-        sys.exit("ETHERTYPE_EAPOL fehlt oder ist nicht 0x888e")
-
-    consts = """const ETHERTYPE_EAPOL: u16 = 0x888e;
-const LLC_SNAP_HDR: [u8; 6] = [%s];
-mod host {
-    pub fn print(_: &str) {}
-    pub fn print_dec(_: u32) {}
-}
-const RTW_SC_DONT_CARE: u8 = 0;""" % llc_literal + """
+    consts = """const RTW_SC_DONT_CARE: u8 = 0;
 const RTW_SC_20_UPPER: u8 = 1;
 const RTW_SC_20_LOWER: u8 = 2;
 const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
@@ -488,15 +405,7 @@ const ADDBA_PARAM_TID_MASK: u16 = 0x003C;
 const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0;
 const WLAN_STATUS_SUCCESS: u16 = 0;
 """
-    # Auch diese drei kommen aus regs.rs statt aus einer Abschrift --
-    # 802.11 §9.2.4.1: Typ 10 in Bit 3:2 (also 0x08), Subtyp QoS Bit 7
-    # des Subtypfeldes (0x80 im Byte, hier 0x08 relativ), Protected
-    # Bit 6 des zweiten Bytes.
-    for name, want in (("DOT11_FC_TYPE_DATA", 0x08),
-                       ("DOT11_FC_PROTECTED", 0x40),
-                       ("DOT11_FC0_QOS", 0x80),
-                       ("DOT11_FC0_NODATA", 0x40),
-                       ("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
+    for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
         if not m:
             sys.exit("%s nicht in src/regs.rs" % name)
@@ -528,10 +437,6 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
-    ampdu_cases = "\n".join(
-        '        (%s, %d, %d, %d),' % (rs(name), par, f, d)
-        for name, par, f, d in AMPDU)
-
     aspm_cases = "\n".join(
         '        (%s, %s, %s),' % (rs(name), rs(v), want)
         for name, v, want in ASPM)
@@ -553,10 +458,6 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + chanp + "\n\n" + aspmp \
-        + "\n\n" + ccmp + "\n\n" + mayagg + "\n\n" + bdf \
-        + "\n\n" + llco \
-        + "\n\n" + ampdu_f + "\n\n" + ampdu_d \
-        + "\n\n" + addba_rs + "\n\n" + addba_rq + "\n\n" + addba_pr \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
@@ -701,190 +602,15 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
-    let ampdus: &[(&str, u8, u8, u8)] = &[
-%s
-    ];
-    for (name, par, wf, wd) in ampdus {
-        let gf = tx_ampdu_factor(*par);
-        let gd = tx_ampdu_density(*par);
-        let ok = gf == *wf && gd == *wd;
-        if !ok { bad += 1; }
-        println!("  {} ampdu: {}", if ok { "OK  " } else { "DIFF" }, name);
-        if !ok {
-            println!("       erwartet faktor {} dichte {}, bekommen {} {}",
-                     wf, wd, gf, gd);
-        }
-    }
-
-    // ADDBA Request bauen und die Antwort darauf wieder lesen: dieselben
-    // Felder muessen heil durch beide Richtungen kommen.
-    let mut req = [0u8; 256];
-    let rn = build_addba_req(&mut req, &OUR_MAC, &BSSID, 5, 64, 0x33,
-                             0x123, 0);
-    let mut rt = 0;
-    if rn != 33 { rt += 1; println!("  DIFF ADDBA Request Laenge {}", rn); }
-    if req[24] != DOT11_ACTION_CAT_BA || req[25] != DOT11_ACTION_ADDBA_REQ {
-        rt += 1; println!("  DIFF ADDBA Request Kategorie/Aktion");
-    }
-    if req[26] != 0x33 { rt += 1; println!("  DIFF ADDBA Request Token"); }
-    let capab = u16::from_le_bytes([req[27], req[28]]);
-    let tid = (capab & ADDBA_PARAM_TID_MASK) >> 2;
-    let buf = (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
-    let pol = capab & ADDBA_PARAM_POLICY_MASK;
-    if tid != 5 { rt += 1; println!("  DIFF ADDBA Request TID {}", tid); }
-    if buf != 64 { rt += 1; println!("  DIFF ADDBA Request Fenster {}", buf); }
-    if pol == 0 {
-        rt += 1;
-        println!("  DIFF ADDBA Request: Immediate-Bit fehlt");
-    }
-    let ssn = u16::from_le_bytes([req[31], req[32]]) >> 4;
-    if ssn != 0x123 { rt += 1; println!("  DIFF ADDBA Request SSN {:#x}", ssn); }
-    // Eine Folgenummer ist zwoelf Bit. Was darueber steht, darf nicht in
-    // ein fremdes Feld schieben.
-    let mut req2 = [0u8; 256];
-    build_addba_req(&mut req2, &OUR_MAC, &BSSID, 0, 64, 1, 0xf234, 0);
-    let ssn2 = u16::from_le_bytes([req2[31], req2[32]]) >> 4;
-    let m_ok = ssn2 == 0x234;
-    if !m_ok { bad += 1; }
-    println!("  {} ADDBA Request maskiert die SSN auf 12 Bit ({:#x})",
-             if m_ok { "OK  " } else { "DIFF" }, ssn2);
-    // Der Empfaenger ist der AP, der Sender sind wir.
-    if req[4..10] != BSSID || req[10..16] != OUR_MAC {
-        rt += 1; println!("  DIFF ADDBA Request Adressen");
-    }
-    println!("  {} ADDBA Request gebaut: TID 5, Fenster 64, immediate, SSN 0x123",
-             if rt == 0 { "OK  " } else { "DIFF" });
-    bad += rt;
-
-    // Eine Antwort mit Status 0 und eine mit Absage.
-    let mut ok_resp = [0u8; 33];
-    ok_resp[24] = DOT11_ACTION_CAT_BA;
-    ok_resp[25] = DOT11_ACTION_ADDBA_RESP;
-    ok_resp[26] = 0x33;
-    ok_resp[27] = 0; ok_resp[28] = 0;
-    let rcap: u16 = (5u16 << 2) | (32u16 << 6);
-    ok_resp[29] = rcap as u8; ok_resp[30] = (rcap >> 8) as u8;
-    let got = parse_addba_resp(&ok_resp);
-    let pr_ok = match got {
-        Some(r) => r.status == 0 && r.tid == 5 && r.buf_size == 32
-                   && r.dialog_token == 0x33,
-        None => false,
-    };
-    if !pr_ok { bad += 1; }
-    println!("  {} ADDBA Response gelesen: status 0, TID 5, Fenster 32",
-             if pr_ok { "OK  " } else { "DIFF" });
-
-    let mut no_resp = ok_resp;
-    no_resp[27] = 37; // WLAN_STATUS_REQUEST_DECLINED
-    let dec_ok = parse_addba_resp(&no_resp).map(|r| r.status) == Some(37);
-    if !dec_ok { bad += 1; }
-    println!("  {} ADDBA Response mit Absage traegt ihren Status",
-             if dec_ok { "OK  " } else { "DIFF" });
-
-    // Ein ADDBA REQUEST darf nicht als Antwort durchgehen.
-    let mut wrong = ok_resp;
-    wrong[25] = DOT11_ACTION_ADDBA_REQ;
-    let w_ok = parse_addba_resp(&wrong).is_none();
-    if !w_ok { bad += 1; }
-    println!("  {} ein ADDBA Request ist keine Response",
-             if w_ok { "OK  " } else { "DIFF" });
-
-    // ── Der Datenrahmen, Byte fuer Byte ──────────────────────────────
-    //
-    // **Der Test, der 0.36.0 gefangen haette.** Dort wurde ein Block-Ack
-    // fuer TID 0 ausgehandelt, waehrend `build_data_frame` Rahmen OHNE
-    // QoS-Feld baute — also ohne TID. Ein AP wirft eine Station dafuer
-    // hinaus. Geprueft wird deshalb nicht nur „ist das Feld da", sondern
-    // die STELLE, an der alles dahinter landet.
-    let eth: [u8; 20] = [
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // DA
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // SA
-        0x08, 0x00,                         // ethertyp IPv4
-        1, 2, 3, 4, 5, 6,                   // Nutzlast
-    ];
-    let mut df = 0;
-    for (name, qos, enc, want_fc0, want_llc, want_total) in [
-        ("klar, ohne QoS: LLC bei 24", false, false, 0x08u8, 24usize, 38usize),
-        ("klar, mit QoS: LLC bei 26", true, false, 0x88, 26, 40),
-        ("CCMP, ohne QoS: LLC bei 32", false, true, 0x08, 32, 46),
-        ("CCMP, mit QoS: LLC bei 34", true, true, 0x88, 34, 48),
-    ] {
-        let mut out = [0u8; 2048];
-        let got = build_data_frame(&mut out, &eth, &BSSID, &OUR_MAC, 0x123,
-                                   enc, 7, qos);
-        let mut ok = got == Some(want_total);
-        if out[0] != want_fc0 { ok = false; }
-        if out[1] != (0x01 | if enc { 0x40 } else { 0 }) { ok = false; }
-        // Die Folgenummer steht in Bit 15:4.
-        if u16::from_le_bytes([out[22], out[23]]) >> 4 != 0x123 { ok = false; }
-        // QoS-Control: TID 0, Normal Ack, kein A-MSDU.
-        if qos && (out[24] != 0 || out[25] != 0) { ok = false; }
-        if out[want_llc..want_llc + 6] != LLC_SNAP_HDR { ok = false; }
-        if out[want_llc + 6..want_llc + 8] != eth[12..14] { ok = false; }
-        if out[want_llc + 8..want_llc + 14] != eth[14..20] { ok = false; }
-        // Adressen: ToDS, also a1 = BSSID, a2 = wir, a3 = Ziel.
-        if out[4..10] != BSSID || out[10..16] != OUR_MAC
-            || out[16..22] != eth[0..6] { ok = false; }
-        if !ok { df += 1; }
-        println!("  {} Datenrahmen {}", if ok { "OK  " } else { "DIFF" }, name);
-        if !ok {
-            println!("       fc {:#04x}/{:#04x}, laenge {:?}, LLC erwartet bei {}",
-                     out[0], out[1], got, want_llc);
-        }
-
-        // **Die Gegenprobe: findet der EMPFANGSweg, was der Sendeweg
-        // gelegt hat?** Beide rechnen die Kopflaenge selbst, aus
-        // denselben zwei Bits. Wenn sie auseinanderlaufen, verwirft der
-        // eine, was der andere baut — und genau das sieht aus wie eine
-        // tote Leitung.
-        let mut miss = 0u32;
-        let rt = llc_offset(&out[..want_total + 12], &mut miss);
-        let rt_ok = rt.map(|(o, _)| o) == Some(want_llc) && miss == 0;
-        if !rt_ok { df += 1; }
-        println!("  {} ... und llc_offset findet es auch bei {} ({:?})",
-                 if rt_ok { "OK  " } else { "DIFF" }, want_llc,
-                 rt.map(|(o, _)| o));
-    }
-    // **EAPOL darf NIE aggregiert werden** (tx.c:591). Ein Rahmen des
-    // Steuerports, der in einem A-MPDU verlorengeht, kostet den
-    // Gruppenschluessel und damit die Verbindung.
-    let mut eapol = eth;
-    eapol[12] = 0x88;
-    eapol[13] = 0x8e;
-    let e_ok = !may_aggregate(&eapol);
-    if !e_ok { df += 1; }
-    println!("  {} EAPOL wird NICHT aggregiert",
-             if e_ok { "OK  " } else { "DIFF" });
-    let i_ok = may_aggregate(&eth);
-    if !i_ok { df += 1; }
-    println!("  {} gewoehnlicher IPv4-Verkehr schon",
-             if i_ok { "OK  " } else { "DIFF" });
-    let s_ok = !may_aggregate(&eth[..10]);
-    if !s_ok { df += 1; }
-    println!("  {} ein Rahmen ohne Ethertyp wird nicht aggregiert",
-             if s_ok { "OK  " } else { "DIFF" });
-
-    // Ein zu kurzer Ethernet-Rahmen ist kein Rahmen.
-    let mut out = [0u8; 2048];
-    let short_df = build_data_frame(&mut out, &eth[..10], &BSSID, &OUR_MAC,
-                                    0, false, 0, false).is_none();
-    if !short_df { df += 1; }
-    println!("  {} Datenrahmen aus 10 Byte Ethernet -> None",
-             if short_df { "OK  " } else { "DIFF" });
-    bad += df;
-
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3 + chans.len() + aspms.len()
-                + ampdus.len() + 5 + 12;
+                + mgmt.len() + 3 + chans.len() + aspms.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
-       ampdu_cases)
+       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases)
 
-    loud_bad = (check_loud_balance(src) + check_rsn_agreement()
-                + check_ba_needs_qos(src))
+    loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="framecheck-"))
     try:

@@ -185,17 +185,6 @@ DEVIATION = {
 # Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
 # Die Zugriffsfolge wird trotzdem geprueft.
 HEX_SKIP = {
-    "get_tx_ampdu_factor":
-        "Linux liest `sta->deflink.ht_cap.ampdu_factor` -- ein Feld, das "
-        "MAC80211 vorher aus dem HT-Element extrahiert hat. Wir haben kein "
-        "mac80211, also steht die Maske bei uns "
-        "(IEEE80211_HT_AMPDU_PARM_FACTOR = 0x03, ieee80211.h:1940). "
-        "Dieselbe Rechnung, eine Schicht tiefer.",
-    "get_tx_ampdu_density":
-        "wie get_tx_ampdu_factor: IEEE80211_HT_AMPDU_PARM_DENSITY = 0x1C "
-        "mit Schieben um 2 (ieee80211.h:1941-1942), bei uns als "
-        "`(v >> 2) & 0x07` geschrieben. Linux' Fassung hat GAR keine Zahl, "
-        "weil mac80211 das Feld schon getrennt hat.",
     "rtw_get_channel_params":
         "Linux liest eine fertige `cfg80211_chan_def` und vergleicht "
         "FREQUENZEN (`primary_freq > center_freq`). Wir haben keine "
