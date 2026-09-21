@@ -340,6 +340,38 @@ pub extern "C" fn _start() {
     host::print_dec(h as u32);
     host::print(", 64 KiB)\n");
 
+    // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────────────
+    // Muss NACH der BAR-Abbildung stehen: der DBI-Weg laeuft ueber MMIO.
+    pci::link_cfg(h);
+    let aspm_vorher = match read_aspm_pref() {
+        Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
+        None => pci::link_state().map(|l| (l.aspm, None)),
+    };
+    host::print("[rtl8822ce] PCIe-Link: ASPM vorgefunden ");
+    match aspm_vorher {
+        Some((v, gesetzt)) => {
+            host::print(match v {
+                0 => "aus",
+                1 => "L0s",
+                2 => "L1",
+                _ => "L0s+L1",
+            });
+            match gesetzt {
+                Some(true) => host::print(", von uns EINgeschaltet"),
+                Some(false) => host::print(", von uns AUSgeschaltet"),
+                None => host::print(", unangetastet (aspm: wie-gefunden)"),
+            }
+        }
+        None => host::print("keine PCIe-Capability gefunden"),
+    }
+    if let Some((l1, clk)) = pci::link_cfg_state(h) {
+        host::print(" · Realtek L1_SW ");
+        host::print(if l1 { "an" } else { "aus" });
+        host::print(", CLKREQ_SW ");
+        host::print(if clk { "an" } else { "aus" });
+    }
+    host::print("\n");
+
     // ── Kennung lesen (rtw_chip_parameter_setup) ─────────────────
     let hal = chip_parameter_setup(h);
 
@@ -2661,7 +2693,24 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print(" · Breite ");
     host::print(if bw == 1 { "40 MHz (Mitte K" } else { "20 MHz (K" });
     host::print_dec(cch as u32);
-    host::print(")\n");
+    host::print(")");
+    // **Das rohe Byte dazu.** Ohne es sieht „der AP erlaubt kein HT40"
+    // genauso aus wie „wir lesen das Element falsch" — und beides endet
+    // in derselben Zeile `20 MHz`. Der Zweitkanal steht in Bit 1:0, die
+    // Erlaubnis fuer mehr als 20 MHz in Bit 2.
+    host::print(" · HT-Operation 0x");
+    host::print_hex8(bss.ht_param);
+    host::print(" (");
+    host::print(match bss.ht_param & 0x03 {
+        1 => "Zweitkanal oben",
+        3 => "Zweitkanal unten",
+        _ => "kein Zweitkanal",
+    });
+    host::print(if bss.ht_param & 0x04 != 0 {
+        ", Breite erlaubt)\n"
+    } else {
+        ", AP erlaubt nur 20 MHz)\n"
+    });
 
     // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
     // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
@@ -4699,6 +4748,45 @@ fn read_debug_flag() -> (bool, i32) {
 /// Fenster. So kann der naechste Lauf 8 gegen 32 messen, ohne dass
 /// jemand neu uebersetzt — und eine Messung schlaegt eine Vermutung
 /// darueber, wieviel Umsortierung TCP hier vertraegt.
+/// `aspm:` aus `sys/config/wifi` — `an` · `aus` · `wie-gefunden`.
+///
+/// **Vorgabe ist AUS, und das ist eine Entscheidung mit zwei Seiten.** Der
+/// Treiber schlaeft nie (kein LPS, §6 des Plans), also hat das Stromsparen
+/// des Links bei uns keinen Gegenpart, der es wieder aufweckt — und die
+/// Karte sagt selbst, dass sie 64 us braucht, um aus L1 herauszukommen.
+/// Dafuer kostet es Leerlaufstrom, und genau daran haengt ein anderer
+/// offener Posten (`project_idle_power_21w`). Deshalb ein Schalter und
+/// kein stilles Verhalten: `aspm: an` faehrt die Gegenprobe.
+fn read_aspm_pref() -> Option<bool> {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return Some(false);
+    }
+    match cfg_get(&cfg[..n as usize], b"aspm") {
+        Some((a, b)) => aspm_pref_from(&cfg[a..b]),
+        None => Some(false),
+    }
+}
+
+/// Der reine Teil von `read_aspm_pref` — getrennt, damit `framecheck.py`
+/// ihn ohne Geraet und ohne Dateisystem fahren kann.
+///
+/// `Some(true)` anschalten · `Some(false)` ausschalten · `None` nicht
+/// anfassen. **Ein unverstandener Wert heisst AUS, nicht „nicht
+/// anfassen"** — wer etwas hinschreibt, will etwas aendern, und die
+/// sichere Auslegung eines Tippfehlers ist die Vorgabe, nicht das
+/// Gegenteil davon.
+fn aspm_pref_from(v: &[u8]) -> Option<bool> {
+    if v.starts_with(b"an") || v.starts_with(b"on") || v == b"1" {
+        Some(true)
+    } else if v.starts_with(b"wie") || v.starts_with(b"keep") {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 fn read_ampdu_buf() -> u16 {
     const VORGABE: u16 = 8;
     let mut cfg = [0u8; 512];

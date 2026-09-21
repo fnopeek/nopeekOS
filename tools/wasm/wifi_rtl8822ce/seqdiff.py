@@ -114,6 +114,20 @@ HEX_OTHER_BUS = {
 # Funktionen, deren ZUGRIFFSFOLGE bewusst von Linux abweicht, mit Grund.
 # Die Abweichung steht hier namentlich, nicht als stiller Filter im Code.
 DEVIATION = {
+    "rtw_dbi_read8":
+        "Linux benutzt die Variable `read_addr` fuer den letzten Lesezugriff "
+        "WIEDER -- sie traegt erst die Flag-Adresse und wird in der Schleife "
+        "auf REG_DBI_RDATA_V1 + (addr & 3) umgesetzt. Wir schreiben den "
+        "Ausdruck aus. Dasselbe Register, dieselbe Folge, anderer Name im "
+        "Text; der Zaehler sieht nur den Namen.",
+    "rtw_pci_link_cfg":
+        "Linux schaltet hier Realteks eigenes Stromsparmodul EIN "
+        "(rtw_pci_clkreq_set(true)), weil es danach in JEDEM Abholtakt "
+        "rtw_pci_link_ps ruft und es wieder herausnimmt. Wir haben keinen "
+        "solchen Takt und keinen Schlaf; einschalten ohne verwalten waere "
+        "die schlechte Haelfte von beidem. Ab Werk ist es aus, wir lassen "
+        "es aus. Register-seitig sehen beide Fassungen gleich aus (der "
+        "Zugriff laeuft ueber DBI), deshalb steht es hier.",
     "rtw8822c_dpk_restore_registers":
         "util.c rtw_restore_reg ist eingesetzt statt aufgerufen -- wie bei "
         "rtw8822c_dac_restore_reg. Hier sind alle Eintraege 4 Byte breit, "

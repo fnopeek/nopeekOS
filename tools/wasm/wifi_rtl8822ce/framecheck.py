@@ -293,6 +293,21 @@ def check_loud_balance(src):
 # es kein HT40 geben, auch wenn der Versatz dasteht; und ein Versatz, der aus
 # dem Band laeuft, muss auf 20 MHz zurueckfallen statt einen Kanal zu
 # erfinden, den es nicht gibt.
+# `aspm_pref_from`: der Wert hinter `aspm:` -> an / aus / nicht anfassen.
+ASPM = [
+    ("an -> einschalten", "an", "Some(true)"),
+    ("on -> einschalten", "on", "Some(true)"),
+    ("1 -> einschalten", "1", "Some(true)"),
+    ("aus -> ausschalten", "aus", "Some(false)"),
+    ("off -> ausschalten", "off", "Some(false)"),
+    ("0 -> ausschalten", "0", "Some(false)"),
+    ("wie-gefunden -> nicht anfassen", "wie-gefunden", "None"),
+    ("keep -> nicht anfassen", "keep", "None"),
+    ("leer -> Vorgabe aus", "", "Some(false)"),
+    ("Tippfehler bleibt die Vorgabe, nicht das Gegenteil", "anx-aus", "Some(true)"),
+    ("unverstanden -> aus, nicht None", "vielleicht", "Some(false)"),
+]
+
 SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
 CHAN = [
     ("K7, Zweitkanal UNTEN -> Mitte 5, primaer ist die obere Haelfte",
@@ -330,6 +345,7 @@ def main():
     names = grab(src, r"\n(fn reason_name.*?\n\})", "reason_name")
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
+    aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
@@ -421,6 +437,10 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
+    aspm_cases = "\n".join(
+        '        (%s, %s, %s),' % (rs(name), rs(v), want)
+        for name, v, want in ASPM)
+
     chan_cases = "\n".join(
         '        (%s, %d, %d, %s, (%d, %d, %d)),' % (
             rs(name), pri, par, "true" if a40 else "false", w[0], w[1], w[2])
@@ -437,7 +457,7 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for name, f, want in MGMT)
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
-        + "\n\n" + chanp \
+        + "\n\n" + chanp + "\n\n" + aspmp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
@@ -571,13 +591,24 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    let aspms: &[(&str, &str, Option<bool>)] = &[
+%s
+    ];
+    for (name, v, want) in aspms {
+        let got = aspm_pref_from(v.as_bytes());
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} aspm: {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3 + chans.len();
+                + mgmt.len() + 3 + chans.len() + aspms.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()), chan_cases)
+       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
