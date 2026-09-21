@@ -1427,6 +1427,118 @@ Nicht gebaut: eine Warteschleife wie in `wifid`. Ein Treiber, der auf
 seine Konfiguration wartet, verzoegert den Bringup fuer eine Ausgabefrage
 — die Meldung reicht, denn sie nennt die Heilung.
 
+### 0.25.0 — `rtw_watch_dog_work`: die laufende Haelfte des Treibers
+
+**Der Befund, der diese Runde ausgeloest hat.** Florians Lauf: kein
+Deauth, kein Wachhund, `tx queue enq 308 deq 308 backlog 0`, `tx drops
+full 0` — **nichts lief ueber**. Dann, nach 708 s, vier Rekeys in Salve
+und `DEAUTH Grund 16`. Die Zahlen sagen die Richtung eindeutig:
+
+    Momentaufnahme:  daten rein/raus 136/308   neuschluessel 1/1
+    beim Deauth:     daten rein/raus 140/360   neuschluessel 5/5   gtk 6
+
+`rein` +4, `neuschluessel` +4: **jeder einzelne empfangene Datenrahmen im
+Endfenster war ein Rekey-msg1.** Der AP hielt uns fuer da und sprach mit
+uns, verschluesselter Unicast kam an und entschluesselte — der EMPFANG
+lebte. Wir antworteten fuenfmal, der AP hoerte keine davon und sagte
+`Grund 16` („ich habe gefragt und nie eine Antwort bekommen"). **Der
+Deauth ist die Folge, nicht die Ursache.**
+
+**Und die Ursache war kein Fehler, sondern eine Auslassung.** Gezaehlt
+statt vermutet: `rtw_watch_dog_work` laeuft in Linux **alle zwei
+Sekunden, das ganze Leben einer Verbindung lang** — und gab es hier
+nicht. Wir hatten den Aufbau gebaut und danach den Chip sich selbst
+ueberlassen. Drei der fehlenden Posten sind SENDEseite und haengen an
+der Temperatur:
+
+| alle 2 s in rtw88 | vorher | jetzt |
+|---|---|---|
+| `rtw_phy_cfo_track` → `rtw8822c_cfo_track` | Zustand da, **nie gefahren** | ✅ |
+| `rtw_phy_pwr_track` → `rtw8822c_pwr_track` | **fehlte ganz** | ✅ |
+| `rtw_phy_dpk_track` | **fehlte** | ✅ |
+| `rtw_phy_ra_track` (`update_wl_phy_info`, `ra_info_update`, `rrsr_update`) | **fehlte** | ✅ |
+| `rtw_phy_statistics` (`stat_rssi`, `false_alarm`, `rate_cnt`) | nur `false_alarm` | ✅ |
+| `rtw_phy_dig` + fuenf Helfer | **fehlte** | ✅ |
+| `rtw_phy_cck_pd` (Linkzweig) | halb | ✅ |
+| `rtw_phy_tx_path_diversity` | **fehlte** | ✅ |
+| `rtw8822c_adaptivity` / `rtw_fw_adaptivity` | nur Init | ✅ |
+| `rtw_coex_wl_status_check`, `monitor_bt_ctr`, `monitor_bt_enable` | nur Init | ✅ |
+| `rtw_fw_c2h_cmd_handle` → `RA_RPT` | Rahmen **verworfen** | ✅ |
+| `rtw_sw_beacon_loss_check` | **fehlte** | ✅ |
+
+**Warum gerade die Quarznachfuehrung so gut passt.**
+`rtw8822c_cfo_track` misst den Frequenzversatz zum AP aus empfangenen
+Paketen und dreht den Quarz nach (`set_crystal_cap`). Unser EMPFAENGER
+rastet sich an jeder Praeambel neu ein und merkt von Drift nichts; unser
+SENDER laeuft auf dem eigenen Quarz. Der Chip waermt ueber Minuten auf —
+und das ergibt genau die beobachtete Form: **Empfang einwandfrei, Senden
+unhoerbar, nirgends ein Fehler, und es erholt sich nie von allein.**
+
+**Ein struktureller Fund, den erst der Port sichtbar gemacht hat.** Bis
+hierher legte JEDE Stufe ihr eigenes `DmInfo`, `DpkInfo` und `Coex` an.
+Solange nur Stufen liefen, war das folgenlos; mit dem Watchdog waere es
+ein stiller Fehler gewesen:
+
+* `cfo_track.crystal_cap` kommt aus `rtw_phy_init` (Wert der efuse) — ein
+  frisches `DmInfo` traegt dort NULL, die Nachfuehrung waere von null
+  hochgelaufen statt von der Werkseinstellung.
+* `dpk_info.thermal_dpk` kommt aus Stufe 5d — ohne sie kehrt
+  `dpk_track` in der ersten Zeile um.
+* `coex.bt_disabled` entscheidet, ob die Quarznachfuehrung ueberhaupt
+  darf.
+
+Es gibt jetzt **`struct Dev`** in `_start` — das ist `rtwdev` — und die
+zehn Stufenfunktionen nehmen es als Parameter. In Linux lebt all das vom
+Laden bis zum Entladen. Hier jetzt auch.
+
+**Vier Posten aus Linux stehen bewusst NICHT im Watchdog**, jeder mit
+Grund im Code: `rtw_leave_lps`/`rtw_enter_lps` (wir fahren kein
+Power-Save) · `rtw_hci_dynamic_rx_agg` (`.dynamic_rx_agg = NULL` fuer
+PCI, pci.c:1605) · `rtw_dynamic_csi_rate` (kehrt ohne
+Beamforming-Rolle um; `bf.c` bauen wir nicht) · **`rtw_coex_run_coex`**
+— der Entscheidungsbaum der Koexistenz ist **L6 dieses Papiers**, 111
+Funktionen, eigene Stufe.
+
+**Eine Abweichung, die hier stehen MUSS:** `rtw_coex_monitor_bt_enable`
+wird in Linux nur aus `rtw_coex_run_coex` gerufen. Sie erzeugt
+`bt_disabled`, und daran haengt `rtw8822c_cfo_need_adjust` — steht BT
+nicht als abgeschaltet fest, stellt Linux die Quarznachfuehrung AB und
+pinnt den Quarz auf die efuse. Ohne den Aufruf bliebe die Zahl auf ihrem
+Anfangswert und das Tor fuer immer zu. Also wird sie aus dem Watchdog
+gerufen, bis L6 steht.
+
+**Tabellen erzeugt, nicht abgetippt:** `gen_tables.py` zieht jetzt auch
+die zwoelf Kurven der Sendeleistungs-Nachfuehrung
+(`rtw8822c_pwr_track_type0_tbl`, je 30 Stuetzstellen) aus `rtw8822c.c`.
+Fuer den 8822C gibt es genau EINE — alle sieben RFE-Varianten zeigen auf
+`type0`, eine Auswahl nach RFE waere eine erfundene Verzweigung.
+
+**Die Tore:** 1032 Konstanten gegen Linux ohne Abweichung ·
+**`seqdiff.py` 263 von 263 Funktionen Zugriff fuer Zugriff** (vorher
+220) · txpwrcheck 6 Pruefsummen + 1512 Kanalkombinationen · cfgcheck
+13/13 · framecheck 31/31. Abdeckung **398 → 456 von 940**, `phy.c`
+59 → 89, `rtw8822c.c` 141 → 156.
+
+`seqdiff.py` hat dabei zwei echte Nachlaessigkeiten von mir gefunden
+(`rtw_phy_dig_write` und `rtw8822c_phy_cck_pd_set_reg`) und vier
+Zahlenfolgen der Klasse „Makro gegen Maske"; alle sechs stehen jetzt
+NAMENTLICH in seiner Liste statt als stiller Filter im Code.
+
+**Was der Geraetelauf sagen wird**, in einer Zeile des Berichts:
+
+    watchdog 214  igi 0x2a  fehlalarm 37  rssi 41  quarz 52  thermo 28/29
+                  txidx 3  bt aus  tp 12/48 Mbit
+
+* **`watchdog` waechst** → der Takt laeuft (alle 2 s eins).
+* **`quarz` bewegt sich weg vom efuse-Wert** → die Nachfuehrung greift.
+  Steht er fest und `bt` sagt `AN (Quarz fest)`, ist sie durch Linux'
+  eigenen Koexistenz-Riegel abgestellt — dann ist BT der naechste Posten
+  und nicht die Drift.
+* **`thermo` steigt ueber die Minuten** → der Chip waermt auf, und
+  `txidx` ist die Antwort darauf.
+* **Und die Frage dieser Runde:** haelt die Verbindung ueber die
+  zwoelf Minuten hinweg, nach denen sie bisher einseitig wurde.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach

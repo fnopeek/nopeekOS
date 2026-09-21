@@ -116,6 +116,64 @@ static FW: &[u8] = include_bytes!("../firmware/rtw8822c_fw.bin");
 /// denselben wie Linux.
 const BAND_AT_FWDL: u8 = 0;
 
+/// **`struct rtw_dev` — der Zustand, der so lange lebt wie der Treiber.**
+///
+/// Bis 0.26.0 legte JEDE Stufe ihr eigenes `DmInfo`, `DpkInfo` und
+/// `Coex` an. Solange nur Stufen liefen, war das folgenlos; mit dem
+/// Watchdog ist es ein Fehler, und zwar ein stiller:
+///
+/// * `cfo_track.crystal_cap` kommt aus `rtw_phy_init` (dem Wert der
+///   efuse). Ein frisches `DmInfo` traegt dort NULL — die
+///   Quarznachfuehrung wuerde von null hochlaufen statt von der
+///   Werkseinstellung.
+/// * `dpk_info.thermal_dpk` kommt aus der Kalibrierung von Stufe 5d.
+///   Ohne sie kehrt `dpk_track` in der ersten Zeile um.
+/// * `coex.bt_disabled` entscheidet, ob die Quarznachfuehrung ueberhaupt
+///   laufen darf.
+///
+/// In Linux liegt all das in `rtwdev` und lebt vom Laden bis zum
+/// Entladen. Hier jetzt auch.
+struct Dev {
+    dm: dm::DmInfo,
+    path_div: dm::PathDiv,
+    dpk: dpk::DpkInfo,
+    cx: coex::Coex,
+    /// main.h:660-672 `struct rtw_traffic_stats`
+    stats: TrafficStats,
+    /// `rtwdev->watch_dog_cnt` — `rtw_phy_ra_info_update` laeuft nur auf
+    /// jedem vierten.
+    watch_dog_cnt: u32,
+    /// `RTW_FLAG_BUSY_TRAFFIC`
+    busy_traffic: bool,
+    /// `rtwdev->beacon_loss`
+    beacon_loss: bool,
+}
+
+/// main.h:660-672 `struct rtw_traffic_stats`. Die Einheiten stehen dort
+/// als Kommentar und sind hier Teil des Namens: Bytes je zwei Sekunden,
+/// umgerechnet mit `RTW_TP_SHIFT`.
+#[derive(Default, Clone, Copy)]
+struct TrafficStats {
+    tx_unicast: u64,
+    rx_unicast: u64,
+    tx_cnt: u64,
+    rx_cnt: u64,
+    tx_throughput: u32,
+    rx_throughput: u32,
+    tx_ewma_tp: dm::Ewma,
+    rx_ewma_tp: dm::Ewma,
+}
+
+impl TrafficStats {
+    const fn new() -> Self {
+        TrafficStats {
+            tx_unicast: 0, rx_unicast: 0, tx_cnt: 0, rx_cnt: 0,
+            tx_throughput: 0, rx_throughput: 0,
+            tx_ewma_tp: dm::Ewma::new(), rx_ewma_tp: dm::Ewma::new(),
+        }
+    }
+}
+
 /// Ergebnis von `rtw_chip_parameter_setup` (main.c:1876-1900).
 struct Hal {
     chip_version: u32,
@@ -216,6 +274,23 @@ pub extern "C" fn _start() {
              \x20         lesbar: ein `debug: 1` darin greift dann NICHT\n");
         }
     }
+
+    // ── `rtwdev`: der Zustand ueber den ganzen Treiberlauf ───────
+    // Gross genug, um nicht auf den Stapel zu gehoeren (die
+    // DACK-Sicherungen und die Ratenzaehler machen den Loewenanteil).
+    static mut DEV: Dev = Dev {
+        dm: dm::DmInfo::new(),
+        path_div: dm::PathDiv::new(),
+        dpk: dpk::DpkInfo::new(),
+        cx: coex::Coex::new(),
+        stats: TrafficStats::new(),
+        watch_dog_cnt: 0,
+        busy_traffic: false,
+        beacon_loss: false,
+    };
+    // SAFETY: einfaedig, genau ein Rufer, und `_start` kehrt erst
+    // zurueck, wenn der Treiber endet.
+    let rtwdev = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
 
     // ── PCI binden ───────────────────────────────────────────────
     // rtw8822ce.c fuehrt zwei Geraete-IDs fuer denselben Chip.
@@ -577,7 +652,7 @@ pub extern "C" fn _start() {
             host::print("[rtl8822ce] Stufe 3a: rtw_power_on (zweiter Zyklus) + rtw_mac_init\n");
             let ok = power_on_and_mac_init(h, &hal, &mut trx, stage_buf, &mut fifo);
             if ok {
-                let (b, c) = phy_set_param_and_check(h, &hal, e);
+                let (b, c) = phy_set_param_and_check(h, &hal, e, rtwdev);
                 stage3b = b;
                 stage3c = c;
             } else {
@@ -594,7 +669,7 @@ pub extern "C" fn _start() {
     // ── Stufe 4a: der Rest von rtw_power_on und rtw_core_start ───
     let stage4a = match (stage3c, efuse.as_ref()) {
         (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf, &mut h2c,
-                                                 &mut fifo, e),
+                                                 &mut fifo, e, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 4a: uebersprungen, 3c steht nicht\n");
             false
@@ -603,7 +678,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 4c: rtw_set_channel ────────────────────────────────
     let stage4c = match (stage4a && stage4b, efuse.as_ref(), _txpwr.as_ref()) {
-        (true, Some(e), Some(t)) => stage4c_set_channel(h, &hal, e, t),
+        (true, Some(e), Some(t)) => stage4c_set_channel(h, &hal, e, t, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 4c: uebersprungen, 4a/4b stehen nicht\n");
             false
@@ -612,7 +687,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5a: der Empfangsweg ────────────────────────────────
     let stage5a = if stage4c {
-        stage5a_rx(h, &hal, &mut trx)
+        stage5a_rx(h, &hal, &mut trx, rtwdev)
     } else {
         host::say("[rtl8822ce] Stufe 5a: uebersprungen, 4c steht nicht\n");
         false
@@ -620,7 +695,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5b: der Sendeweg ───────────────────────────────────
     let stage5b = match (stage5a, efuse.as_ref()) {
-        (true, Some(e)) => stage5b_tx(h, &hal, &mut trx, mgmt_buf, e.addr),
+        (true, Some(e)) => stage5b_tx(h, &hal, &mut trx, mgmt_buf, e.addr, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5b: uebersprungen, 5a steht nicht\n");
             false
@@ -632,7 +707,8 @@ pub extern "C" fn _start() {
     let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
                                                  &mut h2c, e, t, e.addr,
-                                                 fw_feature, &mut target),
+                                                 fw_feature, &mut target,
+                                                 rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5c: uebersprungen, 5b steht nicht\n");
             false
@@ -641,7 +717,7 @@ pub extern "C" fn _start() {
 
     // ── Stufe 5d: die RF-Kalibrierung ────────────────────────────
     let stage5d = match (stage5c, efuse.as_ref()) {
-        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e),
+        (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5d: uebersprungen, 5c steht nicht\n");
             false
@@ -654,7 +730,7 @@ pub extern "C" fn _start() {
                          target.as_ref()) {
         (true, Some(e), Some(t), Some(b)) =>
             stage5e_connect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t,
-                            e.addr, b, &mut linked),
+                            e.addr, b, &mut linked, rtwdev),
         (true, _, _, None) => {
             host::say("[rtl8822ce] Stufe 5e: uebersprungen, der Suchlauf\n             \x20         hat kein Ziel auf 2,4 GHz gefunden\n");
             false
@@ -669,7 +745,7 @@ pub extern "C" fn _start() {
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
     let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
         (true, Some(v), Some(b)) =>
-            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates),
+            stage5f_rates(h, &mut trx, &mut h2c, &hal, v, b, &mut rates, rtwdev),
         _ => {
             host::say("[rtl8822ce] Stufe 5f: uebersprungen, 5e steht nicht\n");
             false
@@ -683,7 +759,8 @@ pub extern "C" fn _start() {
                          rates.as_ref(), efuse.as_ref()) {
         (true, Some(_v), Some(b), Some((caps, si)), Some(e)) =>
             stage6a_link(h, &hal, &mut trx, mgmt_buf, b, caps, *si,
-                         e.addr, &mut link, &mut lstats),
+                         e.addr, &mut link, &mut lstats, rtwdev, &mut h2c, e,
+                         fw_feature),
         _ => {
             host::say("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
@@ -752,8 +829,9 @@ pub extern "C" fn _start() {
             // 6b setzt fort, statt neu anzufangen — ein zweites
             // `EV_READY` liesse `wifid` einen frischen Supplicant bauen,
             // der auf ein msg1 wartet, das der AP nie wieder schickt.
+            let caps = rates.as_ref().map(|(c, _)| *c).unwrap_or_default();
             link_pump(h, &hal, &mut trx, mgmt_buf, l, &mut lstats,
-                      e.addr, 0);
+                      e.addr, 0, rtwdev, &mut h2c, e, &caps, fw_feature);
         }
     }
 
@@ -969,14 +1047,15 @@ fn power_on_and_mac_init(
 /// die Tabelle hineingeschrieben hat, und ist weder 0 noch 0xfffff.
 /// **3c** — hoert der Empfaenger? Gemessen an `false_alarm_statistics`:
 /// die CCA-Zaehler des Chips laufen nur, wenn die BB arbeitet.
-fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) {
+fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
+    -> (bool, bool) {
     host::print("[rtl8822ce] Stufe 3b/3c: rtw8822c_phy_set_param\n");
 
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
 
     let t0 = host::now_us();
-    let (tables_ok, dack_ok) = chip::phy_set_param(h, &mut dm, &mut path_div, e,
+    let (tables_ok, dack_ok) = chip::phy_set_param(h, dm, path_div, e,
                                                    hal.cut_version, hal.rf_path_num,
                                                    hal.antenna_tx, hal.antenna_rx);
     host::print("  phy_set_param fertig in ");
@@ -1037,9 +1116,9 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
     // Gemessen, aber NICHT gewertet: die Zaehler stehen hier
     // erwartungsgemaess auf 0. Sie stehen trotzdem im Log, weil sie ab
     // Stufe 4 das Gate sind und man dann die Ausgangslage kennen will.
-    chip::false_alarm_statistics(h, &mut dm);
+    chip::false_alarm_statistics(h, dm);
     host::sleep_ms(50);
-    chip::false_alarm_statistics(h, &mut dm);
+    chip::false_alarm_statistics(h, dm);
 
     host::print("  [Vorgriff Stufe 4, hier erwartungsgemaess 0]\n    Falschalarme: cck ");
     host::print_dec(dm.cck_fa_cnt);
@@ -1085,7 +1164,7 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse) -> (bool, bool) 
 ///     rtw_write32(REG_RCR, hal->rcr)
 fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
                          h2c: &mut fw::H2cState,
-                         fifo: &mut mac::Fifo, e: &efuse::Efuse) -> bool {
+                         fifo: &mut mac::Fifo, e: &efuse::Efuse, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 4a: rtw_power_on (Rest) + rtw_core_start\n");
 
     if h2c_buf < 0 {
@@ -1093,7 +1172,7 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
         return false;
     }
 
-    let mut cx = coex::Coex::new();
+    let cx = &mut d.cx;
 
     // `rtw_mac_postinit`: `chip->ops->mac_postinit` ist beim 8822C NULL,
     // die Funktion kehrt ohne einen Registerzugriff zurueck.
@@ -1150,9 +1229,9 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     let scbd_before = coex::read_scbd_raw(h);
     let t0 = host::now_us();
-    coex::power_on_setting(h, &mut cx, h2c, e.share_ant, e.rfe_option);
+    coex::power_on_setting(h, cx, h2c, e.share_ant, e.rfe_option);
     let scbd_poweron = coex::read_scbd_raw(h);
-    coex::init_hw_config(h, &mut cx, h2c, e.share_ant, wifi_only,
+    coex::init_hw_config(h, cx, h2c, e.share_ant, wifi_only,
                          e.rfe_option);
     let scbd_after = coex::read_scbd_raw(h);
     let dt = host::now_us() - t0;
@@ -1222,10 +1301,10 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     ok &= gate("RCR steht auf hal->rcr", rcr == hal.rcr);
 
     // ── Und die Frage, fuer die 4a da ist ────────────────────────
-    let mut dm = dm::DmInfo::new();
-    chip::false_alarm_statistics(h, &mut dm);
+    let dm = &mut d.dm;
+    chip::false_alarm_statistics(h, dm);
     host::sleep_ms(50);
-    chip::false_alarm_statistics(h, &mut dm);
+    chip::false_alarm_statistics(h, dm);
     host::print("  [nach der Coex-Antenne] CCA: cck ");
     host::print_dec(dm.cck_cca_cnt);
     host::print(" · ofdm ");
@@ -1262,7 +1341,7 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 /// eingesetzt wird — die Rechnung fuer 40 und 80 MHz kommt mit der Stufe,
 /// die eine Bandbreite auswaehlt.
 fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
-                       t: &txpower::TxPower) -> bool {
+                       t: &txpower::TxPower, d: &mut Dev) -> bool {
     // Kanal 1, 20 MHz. Der niedrigste 2,4-GHz-Kanal ist der, auf dem am
     // ehesten jemand funkt — und genau darum geht es beim Messen.
     const CH: u8 = 1;
@@ -1341,10 +1420,10 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
                (rf18_a >> 12) & 0x3 == 0x3);
 
     // ── Das Gate, das seit 0.10.0 auf seine Stufe gewartet hat ───
-    let mut dm = dm::DmInfo::new();
-    chip::false_alarm_statistics(h, &mut dm);
+    let dm = &mut d.dm;
+    chip::false_alarm_statistics(h, dm);
     host::sleep_ms(200);
-    chip::false_alarm_statistics(h, &mut dm);
+    chip::false_alarm_statistics(h, dm);
 
     host::print("  Falschalarme: cck ");
     host::print_dec(dm.cck_fa_cnt);
@@ -1405,7 +1484,7 @@ fn pwr_cmds_for_us(cut: u8) -> usize {
 /// lange gefragt wird und was gemeldet wird. Linux laeuft dort aus dem
 /// Interrupt in NAPI; wir haben keine Geraete-Interrupts (benannte
 /// Abweichung seit Stufe 2), also wird der Schreibzeiger gelesen.
-fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx) -> bool {
+fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
     /// Derselbe Kanal wie in Stufe 4c — `hal.current_channel`.
     const CH_5A: u8 = 1;
 
@@ -1414,9 +1493,9 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx) -> bool {
     // `dm_info` traegt die CCK-Verstaerkungsgrenzen, an denen ein
     // CCK-Paket seine Signalstaerke bekommt. Sie stehen in der Hardware,
     // seit `phy_set_param` sie dort gelesen hat.
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
+    chip::read_cck_gi_bnd(h, dm);
     host::print("  cck_gi Grenzen u/l ");
     host::print_dec(dm.cck_gi_u_bnd as u32);
     host::print("/");
@@ -1445,7 +1524,7 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx) -> bool {
     let t0 = host::now_us();
     while host::now_us() - t0 < 2_000_000 {
         rounds += 1;
-        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+        let n = pci::rx_poll(h, trx, 64, buf, dm, path_div,
                              hal.rf_path_num, 0, CH_5A, |st, pkt| {
             total += 1;
             if st.is_c2h {
@@ -1554,7 +1633,7 @@ fn print_dbm(v: i8) {
 /// Scans auf jedem Kanal zu kalibrieren dauert zu lange. Ein Probe Request
 /// geht in Linux genauso unkalibriert hinaus wie hier.
 fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
-              mac: [u8; 6]) -> bool {
+              mac: [u8; 6], d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5b: der Sendeweg\n");
     if mgmt_buf < 0 {
         host::print("  kein DMA-Puffer fuer die MGMT-Queue\n");
@@ -1644,9 +1723,9 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                && sent > 0);
 
     // Und jetzt zuhoeren. Eine Probe Response ist Subtyp 5.
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
+    chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF2: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     // SAFETY: wie in Stufe 5a — ein Faden, ein Rufer, der Puffer verlaesst
@@ -1657,7 +1736,7 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut shown = 0u32;
     let t0 = host::now_us();
     while host::now_us() - t0 < 1_000_000 {
-        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+        let n = pci::rx_poll(h, trx, 64, buf, dm, path_div,
                              hal.rf_path_num, 0, 1, |st, pkt| {
             if st.crc_err || st.is_c2h {
                 return;
@@ -1840,7 +1919,7 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
 fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
-                fw_feature: u32, target: &mut Option<Bss>) -> bool {
+                fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev) -> bool {
     // 2,4 GHz: die dreizehn Kanaele, die es in Europa gibt. Kanal 14 ist
     // nur in Japan und nur mit DSSS zugelassen — er steht bewusst nicht da.
     const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
@@ -1882,9 +1961,9 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print("\n");
     }
 
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
+    chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF3: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
@@ -1928,7 +2007,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
             let t0 = host::now_us();
             while host::now_us() - t0 < DWELL_MS as u64 * 1000 {
-                let got = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+                let got = pci::rx_poll(h, trx, 64, buf, dm, path_div,
                                        hal.rf_path_num, 0, ch, |st, pkt| {
                     if st.crc_err || st.is_c2h {
                         return;
@@ -2204,7 +2283,7 @@ fn print_ssid(s: &[u8]) {
 #[allow(clippy::too_many_arguments)]
 fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
                        h2c: &mut fw::H2cState,
-                       e: &efuse::Efuse) -> bool {
+                       e: &efuse::Efuse, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5d: die RF-Kalibrierung\n");
     if h2c_buf < 0 {
         host::print("  kein DMA-Puffer fuer H2C\n");
@@ -2274,7 +2353,7 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     }
 
     let mut gapk = txgapk::GapkInfo::new();
-    let mut dpkinfo = dpk::DpkInfo::new();
+    let dpkinfo = &mut d.dpk;
     // `rtw_load_rfk_table` hat die RFK-Tabelle in Stufe 3c geschrieben und
     // setzt dabei dieses Flag (phy.c:1847). Ohne geladene Tabelle gaebe es
     // keine DPK — die Reihenfolge ist der Grund, nicht ein Sonderfall.
@@ -2347,7 +2426,7 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     // ── do_dpk ───────────────────────────────────────────────────
     let t0 = host::now_us();
-    let dpk_rpt = dpk::do_dpk(h, &mut dpkinfo, hal.rf_path_num);
+    let dpk_rpt = dpk::do_dpk(h, dpkinfo, hal.rf_path_num);
     let dt_dpk = host::now_us() - t0;
     host::print("  DPK: ");
     let mut dpk_paths = 0u8;
@@ -2389,10 +2468,10 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     // Eine Kalibrierung, die den Empfang kaputtmacht, ist schlimmer als
     // keine. Dieselbe Messung wie in Stufe 4c, damit die Zahlen
     // vergleichbar sind.
-    let mut dm = dm::DmInfo::new();
-    chip::false_alarm_statistics(h, &mut dm);
+    let dm = &mut d.dm;
+    chip::false_alarm_statistics(h, dm);
     host::sleep_ms(200);
-    chip::false_alarm_statistics(h, &mut dm);
+    chip::false_alarm_statistics(h, dm);
     host::print("  danach: CCA ");
     host::print_dec(dm.total_cca_cnt);
     host::print(" · CRC ok/err cck ");
@@ -2450,7 +2529,7 @@ fn print_signed(v: i32) {
 fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                    h2c: &mut fw::H2cState, e: &efuse::Efuse,
                    t: &txpower::TxPower, mac: [u8; 6], bss: &Bss,
-                   out_vif: &mut Option<vif::Vif>) -> bool {
+                   out_vif: &mut Option<vif::Vif>, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5e: Auth und Assoc mit \"");
     print_ssid(&bss.ssid[..bss.ssid_len as usize]);
     host::print("\" auf K");
@@ -2466,7 +2545,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
     // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
     let mut gapk = txgapk::GapkInfo::new();
-    let mut dpkinfo = dpk::DpkInfo::new();
+    let dpkinfo = &mut d.dpk;
     dpkinfo.is_dpk_pwr_on = true;
     let mut bt_iqk_timeout = false;
     let t0 = host::now_us();
@@ -2474,7 +2553,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     rfkcal::do_gapk(h, &mut gapk, hal.rf_path_num, 0, e.power_track_type,
                     &mut bt_iqk_timeout, h2c);
     rfkcal::do_iqk(h, trx, mgmt_buf, h2c);
-    let dpk_rpt = dpk::do_dpk(h, &mut dpkinfo, hal.rf_path_num);
+    let dpk_rpt = dpk::do_dpk(h, dpkinfo, hal.rf_path_num);
     rfkcal::power_save(h, hal.rf_path_num, true);
     host::print("  auf K");
     host::print_dec(bss.channel as u32);
@@ -2494,9 +2573,9 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     vifc.bssid = bss.bssid;
     vif::port_config(h, &vifc, PORT_SET_BSSID);
 
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
+    chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF5: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
@@ -2510,7 +2589,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // der Anmeldung, im Vierwegehandschlag.
     let n = build_auth_req(&mut frame, &mac, &bss.bssid);
     let (auth_ok, auth_status, auth_tries) =
-        exchange(h, hal, trx, mgmt_buf, rxbuf, &mut dm, &mut path_div,
+        exchange(h, hal, trx, mgmt_buf, rxbuf, dm, path_div,
                  &frame[..n], &mac, bss.channel, 0xb0, |f| {
             // Auth-Antwort: Algorithmus, Folge 2, Status.
             if f.len() < 30 {
@@ -2545,7 +2624,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("\n");
     let mut aid = 0u16;
     let (assoc_ok, assoc_status, assoc_tries) =
-        exchange(h, hal, trx, mgmt_buf, rxbuf, &mut dm, &mut path_div,
+        exchange(h, hal, trx, mgmt_buf, rxbuf, dm, path_div,
                  &frame[..n], &mac, bss.channel, 0x10, |f| {
             // Anmeldeantwort: Faehigkeiten, Status, AID.
             if f.len() < 30 {
@@ -2822,7 +2901,7 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
 /// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
                  hal: &Hal, vifc: &vif::Vif, bss: &Bss,
-                 out: &mut Option<(sta::PeerCaps, sta::StaInfo)>) -> bool {
+                 out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
     // SAFETY: einfaedig, und 5e hat vorher geschrieben.
@@ -2904,9 +2983,9 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     ok &= gate("die Firmware nimmt die Ratenmaske an", ra);
 
     // ── Und jetzt zuhoeren, was die Firmware daraus macht ────────
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+    let dm = &mut d.dm;
+    let path_div = &mut d.path_div;
+    chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF6: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
@@ -2919,7 +2998,7 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     let mut c2h_total = 0u32;
     let t0 = host::now_us();
     while host::now_us() - t0 < 2_000_000 {
-        let n = pci::rx_poll(h, trx, 64, buf, &mut dm, &mut path_div,
+        let n = pci::rx_poll(h, trx, 64, buf, dm, path_div,
                              hal.rf_path_num, 0, bss.channel, |st, pkt| {
             if !st.is_c2h {
                 return;
@@ -3349,6 +3428,114 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
     link
 }
 
+/// main.c:224-310 `rtw_watch_dog_work` — **alle zwei Sekunden, das
+/// ganze Leben einer Verbindung lang.**
+///
+/// Bis 0.26.0 gab es sie nicht. Gebaut war der Aufbau, und danach blieb
+/// der Chip sich selbst ueberlassen: kein Quarz-Nachziehen, keine
+/// Sendeleistung ueber die Temperatur, keine Vorverzerrungs-Nachfuehrung,
+/// keine RSSI an die Ratenwahl der Firmware. Drei davon sind SENDEseite,
+/// und ein Empfaenger rastet sich an jeder Praeambel neu ein — ein
+/// Sender nicht. Das ist die Form, in der eine Leitung einseitig wird,
+/// ohne dass irgendwo ein Fehler steht.
+///
+/// **Vier Posten aus Linux stehen hier NICHT, und jeder hat seinen
+/// Grund:**
+///
+/// * `rtw_leave_lps` / `rtw_enter_lps` / `rtw_recalc_lps` — wir fahren
+///   kein Power-Save (offener Posten im Plan).
+/// * `rtw_hci_dynamic_rx_agg` — `.dynamic_rx_agg = NULL` fuer PCI
+///   (pci.c:1605), also auf unserem Bus ein Nichts.
+/// * `rtw_dynamic_csi_rate` — kehrt um, solange die Gegenstelle keine
+///   Beamforming-Rolle hat; wir bauen `bf.c` nicht.
+/// * `rtw_coex_run_coex` (ueber `wl_status_change_notify`) — der
+///   Entscheidungsbaum der Koexistenz ist L6 des Plans, 111 Funktionen,
+///   eigene Stufe.
+///
+/// **Eine Abweichung, die hier stehen MUSS:** `rtw_coex_monitor_bt_enable`
+/// wird in Linux nur aus `rtw_coex_run_coex` gerufen. Sie erzeugt
+/// `bt_disabled`, und daran haengt `rtw8822c_cfo_need_adjust`. Ohne sie
+/// bliebe die Zahl auf ihrem Anfangswert stehen, der Riegel zu und die
+/// Quarznachfuehrung fuer immer aus — ein Tor, das nie aufgeht. Also
+/// wird sie hier gerufen, bis L6 steht.
+#[allow(clippy::too_many_arguments)]
+fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
+             e: &efuse::Efuse, link: &mut Link, caps: &sta::PeerCaps,
+             fw_feature: u32, linked: bool, beacon_int: u16) {
+    let received_beacons = d.dm.cur_pkt_count.num_bcn_pkt;
+
+    // main.c:241-248 — die Schwelle ist 100 Rahmen je Takt.
+    let busy_pre = d.busy_traffic;
+    d.busy_traffic = d.stats.tx_cnt > RTW_BUSY_TRAFFIC_THRESHOLD
+        || d.stats.rx_cnt > RTW_BUSY_TRAFFIC_THRESHOLD;
+    if busy_pre != d.busy_traffic {
+        // `rtw_coex_wl_status_change_notify(rtwdev, 0)` -> run_coex (L6)
+    }
+
+    // main.c:255-268 — Bytes je zwei Sekunden in Mbit/s, geglaettet.
+    let tx_mbps = (d.stats.tx_unicast >> RTW_TP_SHIFT) as u32;
+    let rx_mbps = (d.stats.rx_unicast >> RTW_TP_SHIFT) as u32;
+    d.stats.tx_ewma_tp.add(tx_mbps, dm::EWMA_TP_PRECISION,
+                           dm::EWMA_TP_WEIGHT_RCP);
+    d.stats.rx_ewma_tp.add(rx_mbps, dm::EWMA_TP_PRECISION,
+                           dm::EWMA_TP_WEIGHT_RCP);
+    d.stats.tx_throughput = d.stats.tx_ewma_tp.read(dm::EWMA_TP_PRECISION);
+    d.stats.rx_throughput = d.stats.rx_ewma_tp.read(dm::EWMA_TP_PRECISION);
+    d.stats.tx_unicast = 0;
+    d.stats.rx_unicast = 0;
+    d.stats.tx_cnt = 0;
+    d.stats.rx_cnt = 0;
+
+    // main.c:275-279
+    coex::wl_status_check(h, &mut d.cx);
+    coex::monitor_bt_enable(h, &mut d.cx);
+    coex::active_query_bt_info(h, &mut d.cx);
+
+    let band_2g = link.channel <= 14;
+    // `si->ra_report.desc_rate` — was die FIRMWARE zuletzt gewaehlt hat,
+    // nicht was wir angeboten haben. Sie meldet es als C2H `RA_RPT`;
+    // solange keiner kam, steht dort die Anfangsrate.
+    let sta_rate = if linked { Some(link.si.ra_report_desc_rate) } else { None };
+    let nss = if hal.rf_2t2r { 2 } else { 1 };
+    let fw_adapt = fw_feature & FW_FEATURE_ADAPTIVITY != 0;
+
+    // **Eine Ausleihe, zwei Rufe.** `si` und `rssi_si` sind in Linux
+    // derselbe Iterator ueber dieselbe Station; hier muessen sie
+    // nacheinander gehen, weil der Ausleiher nur eine mutable Referenz
+    // zulaesst. Die Reihenfolge ist Linux': erst `statistics` (und darin
+    // der RSSI), dann der Rest.
+    phy::statistics(h, &mut d.dm, h2c, if linked { Some(&mut link.si) } else { None });
+    phy::dig(h, &mut d.dm, hal.rf_path_num, linked);
+    phy::cck_pd(h, &mut d.dm, band_2g, linked);
+    phy::ra_track(h, &mut d.dm, h2c, d.stats.tx_throughput,
+                  d.stats.rx_throughput, d.watch_dog_cnt,
+                  if linked { Some((&mut link.si, caps, nss, band_2g)) } else { None },
+                  sta_rate);
+    phy::tx_path_diversity(h, &mut d.path_div, hal.antenna_tx, hal.antenna_rx,
+                           linked);
+    chip::cfo_track(h, &mut d.dm, hal.rf_path_num, e.crystal_cap, linked,
+                    d.cx.bt_disabled);
+    dpk::track(h, &mut d.dpk);
+    chip::pwr_track(h, &mut d.dm, e.power_track_type, &e.thermal_meter,
+                    hal.rf_path_num, link.channel);
+    if fw_adapt {
+        fw::adaptivity(h, h2c, &d.dm);
+    } else {
+        phy::adaptivity(h, &d.dm);
+    }
+
+    // main.c:196-207 `rtw_sw_beacon_loss_check`. Die Firmware mit
+    // `FW_FEATURE_BCN_FILTER` macht es selbst.
+    if fw_feature & FW_FEATURE_BCN_FILTER == 0 && beacon_int > 0 {
+        // watchdog_delay = 2000000 / 1024 TU
+        let watchdog_delay = 2_000_000u32 / 1024;
+        let expected = watchdog_delay.div_ceil(beacon_int as u32);
+        d.beacon_loss = (received_beacons as u32) < expected / 2;
+    }
+
+    d.watch_dog_cnt = d.watch_dog_cnt.wrapping_add(1);
+}
+
 /// Die Schleife des Treibers. `frist_us == 0` heisst: nicht mehr aufhoeren.
 ///
 /// Sie bekommt Link UND Zaehler von aussen, damit Stufe 6b dort fortsetzt,
@@ -3356,10 +3543,9 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
 #[allow(clippy::too_many_arguments)]
 fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
-             frist_us: u64) {
-    let mut dm = dm::DmInfo::new();
-    let mut path_div = dm::PathDiv::default();
-    chip::read_cck_gi_bnd(h, &mut dm);
+             frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
+             e: &efuse::Efuse, caps: &sta::PeerCaps, fw_feature: u32) {
+    chip::read_cck_gi_bnd(h, &mut d.dm);
     static mut RXBUF7: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     static mut ETHBUF: [u8; 2048] = [0; 2048];
@@ -3385,12 +3571,18 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let t0 = host::now_us();
     let mut report_ms = host::now_ms();
     let mut rx_silent_ms = host::now_ms();
+    let mut watch_dog_ms = host::now_ms();
+    // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
+    // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
+    // waere hier schlimmer als der Normalfall (sie teilt).
+    let beacon_int: u16 = 100;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
         // ── Empfangen ────────────────────────────────────────────
-        let got = pci::rx_poll(h, trx, 64, rxbuf, &mut dm, &mut path_div,
+        let mut acc = rx::WdAcc::new(link.si.avg_rssi);
+        let got = pci::rx_poll(h, trx, 64, rxbuf, &mut d.dm, &mut d.path_div,
                                hal.rf_path_num, 0, link.channel,
                                |st, pkt| {
-            if st.crc_err || st.is_c2h {
+            if st.crc_err {
                 return;
             }
             let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
@@ -3398,7 +3590,26 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             if off >= pkt.len() {
                 return;
             }
+            // **C2H wurde bis 0.26.0 verworfen.** Der Ratenbericht der
+            // Firmware ist die Eingabe von `config_swing_table` und
+            // `rrsr_update`; ohne ihn rechnet der Watchdog auf der
+            // Anfangsrate.
+            if st.is_c2h {
+                if let Some(c) = fw::c2h_parse(&pkt[off..]) {
+                    if c.id as u32 == C2H_RA_RPT
+                        && c.payload.len() >= C2H_RA_REPORT_SIZE
+                    {
+                        acc.ra_rpt = Some((c.payload[0]
+                                           & RTW_C2H_RA_RPT_RATE as u8,
+                                           c.payload[1]));
+                    }
+                }
+                return;
+            }
             let f = &pkt[off..];
+            // rx.c:100-133 + phy.c:678-704 — was der Watchdog braucht.
+            rx::watchdog_feed(&mut acc, st, f, &mac, &bssid,
+                              hal.rf_path_num);
             // **Zuerst der Rauswurf.** Er ist ein Verwaltungsrahmen und
             // kaeme durch `rx_to_8023` nicht hindurch. Nur SEHEN hier —
             // gehandelt wird nach dem Ringleeren.
@@ -3413,6 +3624,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             };
             ls.data_rx += 1;
+            // rx.c:14-32 `rtw_rx_stats` — nur UNICAST zaehlt, und
+            // gezaehlt wird die Laenge des 802.11-Rahmens.
+            if f[4] & 0x01 == 0 {
+                acc.rx_unicast += f.len() as u64;
+                acc.rx_cnt += 1;
+            }
             if is_eapol {
                 ls.eapol_rx += 1;
                 if ls.authorized {
@@ -3463,6 +3680,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 host::netdev_submit_rx(&ethbuf[..n]);
             }
         });
+
+        // Was der Ringdurchlauf dem Watchdog zugetragen hat, eintragen.
+        acc.merge(&mut d.dm, &mut link.si);
+        d.stats.rx_unicast += acc.rx_unicast;
+        d.stats.rx_cnt += acc.rx_cnt;
+        if let Some((rate, mac_id)) = acc.ra_rpt {
+            // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
+            // `si->ra_report.desc_rate` nur bei passender mac_id.
+            d.dm.tx_rate = rate;
+            if link.si.mac_id == mac_id {
+                link.si.ra_report_desc_rate = rate;
+            }
+        }
 
         // ── Der Rauswurf, gehandelt ──────────────────────────────
         // Gesehen hat ihn der Rueckruf oben; hier ist der Ring leer und
@@ -3608,6 +3838,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if tx_8023(h, trx, mgmt_buf, link,
                            &ethbuf[..n as usize], enc) {
                     ls.data_tx += 1;
+                    // tx.c `rtw_tx` — dieselbe Buchfuehrung wie beim
+                    // Empfang, damit `tx_throughput` eine Zahl hat.
+                    if ethbuf[0] & 0x01 == 0 {
+                        d.stats.tx_unicast += n as u64;
+                        d.stats.tx_cnt += 1;
+                    }
                 }
             }
         }
@@ -3616,15 +3852,25 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         pci::tx_isr(h, trx, pci::Q_BE);
         pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
 
+        // ── Alle zwei Sekunden: `rtw_watch_dog_work` ─────────────
+        // **Der Takt ist Linux'**: `RTW_WATCH_DOG_DELAY_TIME` = HZ * 2.
+        // Die Nachfuehrungen darin rechnen auf dem, was seit dem letzten
+        // Takt hereinkam — ein anderer Takt waere ein anderer Regler.
+        let now = host::now_ms();
+        if now.wrapping_sub(watch_dog_ms) >= RTW_WATCH_DOG_DELAY_MS {
+            watch_dog_ms = now;
+            watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
+                      ls.authorized || ls.link_up_sent, beacon_int);
+        }
+
         // ── Einmal je Sekunde: der Bericht fuer `wlan` ───────────
         // Die Luft ist fuer den Kernel unsichtbar. Rate, Zaehler und
         // Schluesselzustand stehen nirgends sonst — ohne sie ist eine
         // Leitung, die wegen einer Legacy-Rate langsam ist, nicht von
         // einer zu unterscheiden, die wegen voller Schlangen langsam ist.
-        let now = host::now_ms();
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
-            publish_report(link, ls);
+            publish_report(link, ls, d);
         }
 
         // ── RX-Stille als Wachhund ───────────────────────────────
@@ -3662,13 +3908,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
                 mac: [u8; 6], link: &mut Option<Link>,
-                ls: &mut LinkStats) -> bool {
+                ls: &mut LinkStats, d: &mut Dev, h2c: &mut fw::H2cState,
+                e: &efuse::Efuse, fw_feature: u32) -> bool {
     host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
 
     let mut l = link_setup(hal, bss, caps, si, mac);
     // Acht Sekunden: der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
-    link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000);
+    link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000, d, h2c, e,
+              caps, fw_feature);
 
     host::print("  EAPOL rein/raus ");
     host::print_dec(ls.eapol_rx);
@@ -3833,15 +4081,15 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
 ///
 /// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
-fn publish_report(link: &Link, ls: &LinkStats) {
-    let mut b = [0u8; 512];
+fn publish_report(link: &Link, ls: &LinkStats, d: &Dev) {
+    let mut b = [0u8; 768];
     let mut n = 0usize;
-    let put = |s: &str, b: &mut [u8; 512], n: &mut usize| {
+    let put = |s: &str, b: &mut [u8; 768], n: &mut usize| {
         let k = s.len().min(b.len() - *n);
         b[*n..*n + k].copy_from_slice(&s.as_bytes()[..k]);
         *n += k;
     };
-    let num = |v: u32, b: &mut [u8; 512], n: &mut usize| {
+    let num = |v: u32, b: &mut [u8; 768], n: &mut usize| {
         let mut d = [0u8; 10];
         let mut i = 10;
         let mut v = v;
@@ -3915,6 +4163,39 @@ fn publish_report(link: &Link, ls: &LinkStats) {
         put(reason_name(ls.last_reason), &mut b, &mut n);
         put(")", &mut b, &mut n);
     }
-    put("\n", &mut b, &mut n);
+    // **Die Zeile, die beweist, dass der Watchdog laeuft.** Vier Zahlen,
+    // die sich bewegen muessen: der Takt, die Verstaerkungsregelung, der
+    // Quarz (gegen den Wert der efuse) und die Temperatur. Steht der
+    // Quarz auf dem efuse-Wert und `bt` auf „an", ist die Nachfuehrung
+    // durch den Koexistenz-Riegel abgestellt — das ist kein Fehler,
+    // sondern Linux' eigene Regel, und man sieht es hier.
+    put("\nwatchdog ", &mut b, &mut n);
+    num(d.watch_dog_cnt, &mut b, &mut n);
+    put("  igi 0x", &mut b, &mut n);
+    if n + 2 <= b.len() {
+        b[n] = hex[(d.dm.igi_history[0] >> 4) as usize];
+        b[n + 1] = hex[(d.dm.igi_history[0] & 0xf) as usize];
+        n += 2;
+    }
+    put("  fehlalarm ", &mut b, &mut n);
+    num(d.dm.total_fa_cnt, &mut b, &mut n);
+    put("  rssi ", &mut b, &mut n);
+    num(d.dm.min_rssi as u32, &mut b, &mut n);
+    put("  quarz ", &mut b, &mut n);
+    num(d.dm.cfo_track.crystal_cap as u32, &mut b, &mut n);
+    put("  thermo ", &mut b, &mut n);
+    num(d.dm.thermal_avg[0] as u32, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(d.dm.thermal_avg[1] as u32, &mut b, &mut n);
+    put("  txidx ", &mut b, &mut n);
+    num(d.dm.delta_power_index[0] as i32 as u32, &mut b, &mut n);
+    put("  bt ", &mut b, &mut n);
+    put(if d.cx.bt_disabled { "aus" } else { "AN (Quarz fest)" },
+        &mut b, &mut n);
+    put("  tp ", &mut b, &mut n);
+    num(d.stats.tx_throughput, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(d.stats.rx_throughput, &mut b, &mut n);
+    put(" Mbit\n", &mut b, &mut n);
     host::driver_report(&b[..n]);
 }
