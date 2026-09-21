@@ -86,9 +86,32 @@ pub fn window_diag() -> (u32, u32, u32) {
     (WND_LAST.load(Relaxed), WND_SRTT.load(Relaxed), WND_CAP.load(Relaxed))
 }
 
+/// Handfester Deckel fuer das angebotene Fenster in BYTES, 0 = aus.
+///
+/// **Ein Werkzeug, kein Schalter.** Bei gesaettigter Strecke gilt
+/// `RTT = Fenster / Rate`, also stehen Fenster und RTT im Gleichschritt und
+/// EINE Messung sagt nicht, ob die Luft oder wir der Deckel sind. Das sagt
+/// nur die FORM der Kurve ueber mehrere Fenster: steigt der Durchsatz mit,
+/// waren wir es; bleibt er stehen und nur die RTT waechst, ist es die Luft.
+static RCV_WND_FORCE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// `net window <KB>` setzt den Deckel, `net window auto` nimmt ihn weg.
+pub fn set_rcv_window_force(bytes: u32) {
+    RCV_WND_FORCE.store(bytes, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Aktueller handfester Deckel in Bytes (0 = aus).
+pub fn rcv_window_force() -> u32 {
+    RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 fn recv_window(conn: &TcpConn) -> u16 {
+    let forced = RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed);
     let rate = crate::netdev::active_rx_rate();
-    let cap = if rate == u32::MAX {
+    let cap = if forced > 0 {
+        (forced as usize).min(RCV_WND_MAX)
+    } else if rate == u32::MAX {
         RCV_WND_MAX
     } else {
         let rtt_ticks = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };

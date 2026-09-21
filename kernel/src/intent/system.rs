@@ -1286,6 +1286,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("wlan", "WiFi link diagnostics (rate, retries, drops)");
             help_row("wlan reset", "Zero the counters before a measurement");
             help_row("netbench", "Throughput measurement");
+            help_row("window <KB>", "Empfangsfenster festnageln (auto = zurueck)");
             kprintln!("[npk]");
             help_note("save a download:  https example.com /page.html > page");
             help_row("wlan set <key> <val>", "Change one wifi setting (wlan set band 2.4)");
