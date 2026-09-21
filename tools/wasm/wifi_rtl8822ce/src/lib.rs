@@ -3189,6 +3189,11 @@ struct LinkStats {
     /// das ein Beacon — die gehen auf der niedrigsten Grundrate. Der
     /// Bericht zeigte deshalb „OFDM 6M", waehrend die Daten mit etwas
     /// ganz anderem kamen.
+    /// Wanduhrzeit in `rx_poll`, wenn es etwas brachte, und wie lange
+    /// die Schleife insgesamt laeuft. Ihr Verhaeltnis ist die
+    /// Auslastung des Empfangspfades.
+    rx_us: u64,
+    pump_us0: u64,
     rate_hist: [u32; DESC_RATE_MAX],
     /// Wie oft die Firmware ihre Ratenwahl gemeldet hat (`C2H_RA_RPT`).
     /// **Null hiesse: `dm.tx_rate` steht auf 0 = CCK 1M**, und damit
@@ -3214,6 +3219,7 @@ impl Default for LinkStats {
             mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
+            rx_us: 0, pump_us0: 0,
             rate_hist: [0; DESC_RATE_MAX], ra_rpt_n: 0,
         }
     }
@@ -3791,6 +3797,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Ein Datenrahmen je Watchdog-Takt bekommt eine Quittung.
     let mut probe_due = true;
     let mut leer_in_folge = 0u32;
+    if ls.pump_us0 == 0 {
+        ls.pump_us0 = host::now_us();
+    }
     // **Das Empfangsfenster der Aggregation, aus `sys/config/wifi`.**
     // `ampdu: off` schaltet sie ab, `ampdu: 16` gibt ein anderes
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
@@ -3805,6 +3814,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
         // ── Empfangen ────────────────────────────────────────────
         let mut acc = rx::WdAcc::new(link.si.avg_rssi);
+        // **Die Zeit IM Ring, und warum sie hier gemessen wird.**
+        // `rahmen/blick 1,2` kann zweierlei heissen: schnell genug, oder
+        // exakt so langsam wie die Ankunft. Zwischen beidem entscheidet
+        // nur, wieviel Wanduhrzeit im Empfangspfad steckt. Gemessen
+        // wird NUR, wenn etwas kam (rund 1400 Mal je Sekunde, also
+        // 2800 Wirtsaufrufe) — bei den 65 000 leeren Bliecken waere es
+        // die Messung, die den Zustand erzeugt.
+        let t_rx0 = host::now_us();
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut d.dm, &mut d.path_div,
                                hal.rf_path_num, 0, link.channel,
                                |st, pkt| {
@@ -3953,6 +3970,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         if got > 0 {
             ls.rx_polls += 1;
             ls.rx_frames += got;
+            ls.rx_us = ls.rx_us.wrapping_add(host::now_us() - t_rx0);
             if got >= 64 {
                 ls.rx_full += 1;
             }
@@ -4737,7 +4755,14 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(zehntel % 10, &mut b, &mut n);
     put(" rahmen/blick, ", &mut b, &mut n);
     num(ls.rx_full, &mut b, &mut n);
-    put(" volle stapel", &mut b, &mut n);
+    put(" volle stapel, ", &mut b, &mut n);
+    // Auslastung in Prozent: Zeit im Ring gegen Zeit der Schleife.
+    let lauf = host::now_us().wrapping_sub(ls.pump_us0).max(1);
+    num(((ls.rx_us.saturating_mul(100)) / lauf) as u32, &mut b, &mut n);
+    put(" % der zeit im empfangspfad (", &mut b, &mut n);
+    let je = if ls.rx_frames > 0 { ls.rx_us / ls.rx_frames as u64 } else { 0 };
+    num(je as u32, &mut b, &mut n);
+    put(" us je rahmen)", &mut b, &mut n);
     // **Die Zeile, die sagt, ob der AP uns HOERT.** Bis 0.26.0 stand
     // hier nichts dergleichen: „raus 360" hiess nur, dass wir 360 Rahmen
     // in einen Ring gelegt haben.
