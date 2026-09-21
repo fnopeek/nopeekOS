@@ -363,14 +363,28 @@ def check_ba_needs_qos(src):
     richtig. Falsch ist ihre KOMBINATION, und die steht als Bedingung im
     Quelltext. Also wird der Quelltext geprueft.
     """
-    m = re.search(r"if\s+link\.tx_qos\s*\n\s*&&\s*link\.tx_ampdu\.is_none\(\)",
-                  src)
-    if m:
+    bad = 0
+    if re.search(r"if\s+link\.tx_qos\s*\n\s*&&\s*link\.tx_ampdu\.is_none\(\)",
+                 src):
         print("  OK   der ADDBA-Antrag haengt an link.tx_qos")
-        return 0
-    print("  DIFF der ADDBA-Antrag prueft link.tx_qos NICHT — genau das "
-          "war die Regression von 0.36.0")
-    return 1
+    else:
+        print("  DIFF der ADDBA-Antrag prueft link.tx_qos NICHT — genau das "
+              "war die Regression von 0.36.0")
+        bad += 1
+
+    # **Waehrend der Aushandlung darf kein Datenrahmen hinaus.** Der Antrag
+    # nennt die SSN; senden wir weiter, ist sie bei Ankunft der Antwort
+    # veraltet, und die ersten aggregierten Rahmen fallen in ein Fenster,
+    # dessen Anfang der AP nie bekommt. mac80211 puffert dafuer in
+    # `tid_tx->pending`; wir rufen `netdev_poll_tx` nicht.
+    if re.search(r"if\s+ls\.authorized\s*&&\s*!link\.addba_pending\s*\{",
+                 src):
+        print("  OK   waehrend der ADDBA-Aushandlung ruht der Datenstrom")
+    else:
+        print("  DIFF der Datenstrom laeuft waehrend der ADDBA-Aushandlung "
+              "weiter — die SSN im Antrag ist dann veraltet")
+        bad += 1
+    return bad
 
 
 def main():
@@ -383,6 +397,7 @@ def main():
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     ccmp = grab(src, r"\n(fn ccmp_hdr.*?\n\})", "ccmp_hdr")
+    mayagg = grab(src, r"\n(fn may_aggregate.*?\n\})", "may_aggregate")
     bdf = grab(src, r"\n(#\[allow\(clippy::too_many_arguments\)\]\nfn build_data_frame.*?\n\})",
                "build_data_frame")
     llco = grab(src, r"\n(fn llc_offset.*?\n\})", "llc_offset")
@@ -441,7 +456,12 @@ def main():
         sys.exit("LLC_SNAP_HDR nicht in src/regs.rs")
     llc_literal = m.group(1).strip()
 
-    consts = """const LLC_SNAP_HDR: [u8; 6] = [%s];
+    m = re.search(r"pub const ETHERTYPE_EAPOL: u16 = (0x[0-9a-fA-F]+);", regs)
+    if not m or int(m.group(1), 16) != 0x888e:
+        sys.exit("ETHERTYPE_EAPOL fehlt oder ist nicht 0x888e")
+
+    consts = """const ETHERTYPE_EAPOL: u16 = 0x888e;
+const LLC_SNAP_HDR: [u8; 6] = [%s];
 mod host {
     pub fn print(_: &str) {}
     pub fn print_dec(_: u32) {}
@@ -532,7 +552,8 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + chanp + "\n\n" + aspmp \
-        + "\n\n" + ccmp + "\n\n" + bdf + "\n\n" + llco \
+        + "\n\n" + ccmp + "\n\n" + mayagg + "\n\n" + bdf \
+        + "\n\n" + llco \
         + "\n\n" + ampdu_f + "\n\n" + ampdu_d \
         + "\n\n" + addba_rs + "\n\n" + addba_rq + "\n\n" + addba_pr \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
@@ -823,6 +844,25 @@ fn main() {
                  if rt_ok { "OK  " } else { "DIFF" }, want_llc,
                  rt.map(|(o, _)| o));
     }
+    // **EAPOL darf NIE aggregiert werden** (tx.c:591). Ein Rahmen des
+    // Steuerports, der in einem A-MPDU verlorengeht, kostet den
+    // Gruppenschluessel und damit die Verbindung.
+    let mut eapol = eth;
+    eapol[12] = 0x88;
+    eapol[13] = 0x8e;
+    let e_ok = !may_aggregate(&eapol);
+    if !e_ok { df += 1; }
+    println!("  {} EAPOL wird NICHT aggregiert",
+             if e_ok { "OK  " } else { "DIFF" });
+    let i_ok = may_aggregate(&eth);
+    if !i_ok { df += 1; }
+    println!("  {} gewoehnlicher IPv4-Verkehr schon",
+             if i_ok { "OK  " } else { "DIFF" });
+    let s_ok = !may_aggregate(&eth[..10]);
+    if !s_ok { df += 1; }
+    println!("  {} ein Rahmen ohne Ethertyp wird nicht aggregiert",
+             if s_ok { "OK  " } else { "DIFF" });
+
     // Ein zu kurzer Ethernet-Rahmen ist kein Rahmen.
     let mut out = [0u8; 2048];
     let short_df = build_data_frame(&mut out, &eth[..10], &BSSID, &OUR_MAC,
@@ -834,7 +874,7 @@ fn main() {
 
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len()
-                + ampdus.len() + 5 + 9;
+                + ampdus.len() + 5 + 12;
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }

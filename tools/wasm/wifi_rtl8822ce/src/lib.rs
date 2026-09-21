@@ -3520,6 +3520,18 @@ struct Link {
     /// (mac80211.c `rtw_ops_ampdu_action`, Zweig `TX_OPERATIONAL`) — wir
     /// haben keine Schlangen je TID, also steht es hier.
     tx_ampdu: Option<u16>,
+    /// **Zwischen Antrag und Antwort wird NICHT gesendet.** Der Antrag
+    /// nennt dem AP die Folgenummer, ab der sein Umsortierfenster steht
+    /// (SSN). Senden wir weiter, ist die Nummer bei Ankunft der Antwort
+    /// veraltet — und die ersten aggregierten Rahmen fallen in ein
+    /// Fenster, dessen Anfang der AP nie bekommt. Er haelt sie fest, bis
+    /// seine Frist ablaeuft.
+    ///
+    /// mac80211 loest das mit `tid_tx->pending`: waehrend `WANT_START`
+    /// puffert es die Rahmen der TID. Wir haben keine solche Schlange —
+    /// wir rufen einfach `netdev_poll_tx` nicht, und der Kernel behaelt
+    /// sie in seiner eigenen (Rueckstau, kein Verlust).
+    addba_pending: bool,
     /// Ob der AP HT kann, und sein A-MPDU-Parameterbyte. Beides aus
     /// seinem HT-Element; ohne HT gibt es keinen Block, und die zwei
     /// Werte im Deskriptor sagen, wie LANG und wie DICHT er ihn vertraegt.
@@ -3644,6 +3656,27 @@ fn build_data_frame(out: &mut [u8; 2048], eth: &[u8], bssid: &[u8; 6],
 /// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
 /// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
 /// die Firmware antworten wird.
+/// tx.c:585-592 `rtw_txq_check_agg`, die drei Ausschluesse — als reine
+/// Frage an den Ethernet-Rahmen.
+///
+/// **EAPOL darf NIE in einem A-MPDU stehen.** Linux sagt es mit
+/// `if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE))) return;`, und
+/// der Grund ist nicht Vorsicht: ein Rahmen des Steuerports, der in einem
+/// Block verlorengeht, kostet den Gruppenschluessel und damit die
+/// Verbindung. Er ist der einzige, dessen Verlust nicht nachgeliefert
+/// werden kann.
+///
+/// Die beiden anderen Ausschluesse von Linux gelten bei uns nicht und
+/// stehen hier, damit das nachpruefbar ist statt vergessen: VO-Verkehr
+/// gibt es nicht (wir fahren genau TID 0), und `RTW_TXQ_BLOCK_BA` ist
+/// Linux' „nie wieder fragen" — bei uns tut das `addba_tries = 255`.
+fn may_aggregate(eth: &[u8]) -> bool {
+    if eth.len() < 14 {
+        return false;
+    }
+    u16::from_be_bytes([eth[12], eth[13]]) != ETHERTYPE_EAPOL
+}
+
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
            eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
     if eth.len() < 14 {
@@ -3663,8 +3696,14 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     let mut info = tx::TxPktInfo::default();
     // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
     // dann die gemeinsamen Felder.
+    //
+    // **Die Entscheidung ueber die Aggregation faellt HIER und nicht beim
+    // Rufer** — `tx_8023` sieht den Ethertyp ohnehin, und ein Rufer, der
+    // sie vergessen kann, vergisst sie irgendwann.
     tx::data_pkt_info_update(&mut info, link.seq, Some(&link.si),
-                             link.highest_rate, link.tx_ampdu,
+                             link.highest_rate,
+                             if may_aggregate(eth) { link.tx_ampdu }
+                             else { None },
                              link.peer_ampdu_param);
     let a1 = &frame[4..10];
     info.bmc = a1.iter().all(|&b| b == 0xff) || a1[0] & 0x01 != 0;
@@ -3879,6 +3918,7 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         seq: 0,
         ptk_installed: false,
         tx_ampdu: None,
+        addba_pending: false,
         peer_ht: caps.ht_supported,
         peer_ampdu_param: caps.ht_ampdu_param,
         tx_qos: caps.ht_supported,
@@ -4293,6 +4333,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // der Konfiguration muss ueberhaupt Aggregation erlauben.
         if let Some(r) = acc.addba_resp.take() {
             if r.dialog_token == link.addba_token && r.tid == 0 {
+                link.addba_pending = false;
                 if r.status == 0 {
                     // **Das Fenster des AP, nicht unseres.** Er darf
                     // kleiner antworten, als wir gefragt haben, und dann
@@ -4313,9 +4354,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
+        // **Eine Antwort, die nicht kommt, darf den Strom nicht
+        // festhalten.** 60 ms sind reichlich fuer einen Rahmen, der einmal
+        // ueber die Luft und zurueck muss; danach laeuft der Verkehr
+        // weiter, und der naechste Versuch kommt nach der Frist unten.
+        if link.addba_pending
+            && now.wrapping_sub(link.addba_last_ms) >= 60
+        {
+            link.addba_pending = false;
+        }
         if link.tx_qos
             && link.tx_ampdu.is_none() && link.ptk_installed && ampdu_buf > 0
             && link.peer_ht && link.addba_tries < 4
+            && !link.addba_pending
             && now.wrapping_sub(link.addba_last_ms) >= 500
         {
             link.addba_tries += 1;
@@ -4330,6 +4381,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &req[..n]) {
                 pci::tx_kick_off_queue(h, trx, q);
                 ls.addba_req_sent += 1;
+                // Erst JETZT anhalten — ein Antrag, der nicht in den Ring
+                // passte, ist keiner, und dafuer den Strom zu stoppen
+                // waere ein Stillstand ohne Gegenleistung.
+                link.addba_pending = true;
             }
         }
 
@@ -4518,7 +4573,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Senden, was der IP-Stapel loswerden will ─────────────
-        if ls.authorized {
+        //
+        // `addba_pending` haelt den Datenstrom an, solange der Antrag
+        // unterwegs ist — siehe das Feld. Der Kernel puffert derweil.
+        if ls.authorized && !link.addba_pending {
             loop {
                 let n = host::netdev_poll_tx(ethbuf);
                 if n <= 0 {
