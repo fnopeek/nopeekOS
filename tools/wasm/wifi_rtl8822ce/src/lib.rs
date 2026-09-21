@@ -4117,14 +4117,24 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
     // `build_addba_resp`: es gibt keinen Umsortierpuffer.
     let ampdu_buf = read_ampdu_buf();
-    // **`ampdu: off` ist der Notausgang und schaltet BEIDES ab** — die
-    // Aggregation und den QoS-Rahmen darunter. Ein QoS-Datenrahmen ist
-    // fuer sich richtig und braucht keinen Block; nach der Regression von
-    // 0.36.0 ist mir aber ein Schalter lieber, der auf EINEN bekannten
-    // Zustand zurueckfaellt, als drei halbe.
-    if ampdu_buf == 0 {
+    // **Zwei Fragen, zwei Schalter.** `ampdu:` ist der EMPFANG (die
+    // Antwort auf die Bitte des AP), `txagg:` das SENDEN (unser eigener
+    // Antrag samt QoS-Rahmen). Bis 0.39.0 hing beides an `ampdu:`, und
+    // `ampdu: off` liess den AP deshalb 47 Mal vergeblich fragen — ein
+    // Zustand, der schlechter ist als beide Enden an.
+    let txagg = read_txagg_pref();
+    if !txagg {
         link.tx_qos = false;
     }
+    host::print("[rtl8822ce] Aggregation: Empfang ");
+    if ampdu_buf > 0 {
+        host::print_dec(ampdu_buf as u32);
+    } else {
+        host::print("aus");
+    }
+    host::print(", Senden ");
+    host::print(if txagg { "an (txagg: on)" } else { "aus (Vorgabe)" });
+    host::print("\n");
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -4971,22 +4981,25 @@ fn read_debug_flag() -> (bool, i32) {
 /// darueber, wieviel Umsortierung TCP hier vertraegt.
 /// `aspm:` aus `sys/config/wifi` — `an` · `aus` · `wie-gefunden`.
 ///
-/// **Vorgabe ist AUS, und das ist eine Entscheidung mit zwei Seiten.** Der
-/// Treiber schlaeft nie (kein LPS, §6 des Plans), also hat das Stromsparen
-/// des Links bei uns keinen Gegenpart, der es wieder aufweckt — und die
-/// Karte sagt selbst, dass sie 64 us braucht, um aus L1 herauszukommen.
-/// Dafuer kostet es Leerlaufstrom, und genau daran haengt ein anderer
-/// offener Posten (`project_idle_power_21w`). Deshalb ein Schalter und
-/// kein stilles Verhalten: `aspm: an` faehrt die Gegenprobe.
+/// **Vorgabe ist seit 0.40.0 NICHT ANFASSEN, und das ist eine Umkehr.**
+/// 0.34.0 schaltete ASPM ab, weil die Karte 64 us Austrittszeit ansagt und
+/// wir ohnehin nie schlafen. Gemessen brachte das **nichts** (46 -> 48
+/// Mbit, Rauschen) — und seither riss die Verbindung ab. Ein Schreibzugriff
+/// in den Konfigurationsraum einer Karte, deren ASPM die Firmware des
+/// Rechners gesetzt hat, ist kein folgenloser Eingriff; auf dem ersten
+/// Blech einer neuen Plattformklasse erst recht nicht.
+///
+/// **Ein Eingriff ohne gemessenen Nutzen gehoert nicht in die Vorgabe.**
+/// `aspm: aus` faehrt ihn weiterhin, `aspm: an` die Gegenprobe.
 fn read_aspm_pref() -> Option<bool> {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
     if n <= 0 {
-        return Some(false);
+        return None;
     }
     match cfg_get(&cfg[..n as usize], b"aspm") {
         Some((a, b)) => aspm_pref_from(&cfg[a..b]),
-        None => Some(false),
+        None => None,
     }
 }
 
@@ -5001,10 +5014,35 @@ fn read_aspm_pref() -> Option<bool> {
 fn aspm_pref_from(v: &[u8]) -> Option<bool> {
     if v.starts_with(b"an") || v.starts_with(b"on") || v == b"1" {
         Some(true)
-    } else if v.starts_with(b"wie") || v.starts_with(b"keep") {
-        None
-    } else {
+    } else if v.starts_with(b"aus") || v.starts_with(b"off") || v == b"0" {
         Some(false)
+    } else {
+        None
+    }
+}
+
+/// `txagg:` aus `sys/config/wifi` — die SENDESEITE der Aggregation.
+///
+/// **Vorgabe AUS, und der Grund ist ein Geraetelauf.** 0.36.0 handelte
+/// einen Block aus, den unsere Rahmen nicht halten konnten (kein TID),
+/// 0.38.0 baute die QoS-Rahmen nach — und danach lief es immer noch nicht.
+/// Was davor BEWIESEN lief, ist 0.35.0: Empfangs-Aggregation an
+/// (`ampdu: 64`), Senden einzeln, 48 Mbit gemessen.
+///
+/// Also steht die Sendeseite ab 0.40.0 hinter einem eigenen Schalter, und
+/// die Vorgabe ist der bewiesene Zustand. `ampdu:` regelt weiter nur den
+/// EMPFANG. **Zwei Fragen, zwei Schalter** — sie in einem zu fuehren hat
+/// mich einen Lauf gekostet, weil `ampdu: off` den AP 47 Mal vergeblich
+/// nach einem Block fragen liess.
+fn read_txagg_pref() -> bool {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return false;
+    }
+    match cfg_get(&cfg[..n as usize], b"txagg") {
+        Some((a, b)) => cfg_on(&cfg[a..b]),
+        None => false,
     }
 }
 
