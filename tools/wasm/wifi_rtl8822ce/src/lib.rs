@@ -1914,6 +1914,12 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
     host::print("\"\n");
 }
 
+/// Mitten- und Kanalbreite, wie sie Stufe 5e wirklich an den Chip gegeben
+/// hat: `(cch << 8) | bw`. Eine Globale, weil `Link` erst danach entsteht
+/// und der Bericht die Zahl trotzdem braucht.
+static PHY_CHAN: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
 /// Eine gefundene Funkzelle. Nur das, was aus Beacon oder Probe Response
 /// sicher herausfaellt — nichts Abgeleitetes.
 #[derive(Clone, Copy)]
@@ -2698,6 +2704,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // `SUP_WIDTH_20_40` versprach und jeder Sendedeskriptor 40 MHz
     // eintrug: drei Stellen, drei Antworten.
     let (cch, bw, _) = chan_params(bss.channel, bss.ht_param, true);
+    PHY_CHAN.store(((cch as u32) << 8) | bw as u32, core::sync::atomic::Ordering::Relaxed);
     if !switch_channel(h, hal, e, t, bss.channel, bss.ht_param, true) {
         host::print("  RF 0x18 traegt den Zielkanal NICHT\n");
         return false;
@@ -3555,6 +3562,13 @@ struct Link {
     /// dasselbe Element ueber beides. Gegen einen AP ohne HT bleibt es
     /// beim einfachen Datenrahmen, und dann gibt es auch keinen Block.
     tx_qos: bool,
+    /// **Was die PHY WIRKLICH bekommen hat**, nicht was die Station
+    /// aushandelt. Der Bericht zeigte bisher `si.bw_mode` — und das ist
+    /// die Faehigkeit des Gegenuebers, geklemmt auf die Zelle. Laufen die
+    /// beiden auseinander, ist genau das unsichtbar, und ein Funkteil auf
+    /// der falschen Breite ist taub statt kaputt.
+    phy_bw: usize,
+    phy_cch: u8,
     /// Wie oft wir gefragt haben, und wann zuletzt. Ein AP, der schweigt,
     /// darf uns nicht in eine Endlosschleife schicken.
     addba_tries: u8,
@@ -3934,6 +3948,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         peer_ht: caps.ht_supported,
         peer_ampdu_param: caps.ht_ampdu_param,
         tx_qos: caps.ht_supported,
+        phy_bw: 0,
+        phy_cch: bss.channel,
         addba_tries: 0,
         addba_last_ms: 0,
         addba_token: 0x10,
@@ -5210,6 +5226,23 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(match link.si.bw_mode { 0 => "20", 1 => "40", _ => "80" },
         &mut b, &mut n);
     put(" MHz", &mut b, &mut n);
+    // **Und daneben, was die PHY wirklich bekommen hat.** Die zwei
+    // koennen auseinanderlaufen: `si.bw_mode` ist die Faehigkeit des AP
+    // auf die Zelle geklemmt, `phy` das, was `chan_params` an den Chip
+    // gegeben hat. Ein Funkteil auf der falschen Breite ist TAUB, nicht
+    // kaputt — es hoert die Beacons weiter und verliert die Daten.
+    {
+        let v = PHY_CHAN.load(core::sync::atomic::Ordering::Relaxed);
+        let (cch, pbw) = ((v >> 8) as u8, (v & 0xff) as usize);
+        put(" (phy ", &mut b, &mut n);
+        put(match pbw { 0 => "20", 1 => "40", _ => "80" }, &mut b, &mut n);
+        put(" MHz, mitte K", &mut b, &mut n);
+        num(cch as u32, &mut b, &mut n);
+        put(")", &mut b, &mut n);
+        if pbw as u8 != link.si.bw_mode {
+            put(" ← UNEINIG", &mut b, &mut n);
+        }
+    }
     // Die PCIe-Strecke. Steht hier und nicht einmalig beim Start, weil
     // ASPM ein Verdaechtiger fuer den Durchsatz ist und ein Verdaechtiger
     // in DEN Bericht gehoert, den Florian einschickt.
