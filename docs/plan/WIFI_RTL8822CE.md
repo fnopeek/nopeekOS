@@ -1395,8 +1395,17 @@ antworten hat.
   kein Rauswurf, sondern der Empfangsring, und der RX-Wachhund meldet
   sich als naechster.
 
-Am Geraet: `store /sys/config/wifi debug: 1` (Zeile zu den bestehenden
-dazu), dann `install wifi_rtl8822ce && driver wifi_rtl8822ce`.
+**Am Geraet — und NICHT mit `store`.** `intent_store` ruft
+`npkfs::upsert`, das das GANZE Objekt ersetzt, und der Text hinter dem
+Namen ist eine Zeile ohne Zeilenumbrueche. `store /sys/config/wifi
+debug: 1` wuerde also die `ssid:`-Zeile loeschen und die Verbindung
+kappen. Die Datei wird mit dem Editor geaendert:
+
+    spell /sys/config/wifi      → Zeile `debug: 1` dazu, speichern
+    install wifi_rtl8822ce && driver wifi_rtl8822ce
+
+(So sind auch die mehrzeiligen AX200-Konfigurationen mit `ampdu:`/`ps:`
+entstanden — `store` kann nur den Einzeiler.)
 
 ### 0.24.1 — ein NEIN aus einem gescheiterten Lesezugriff ist keine Antwort
 

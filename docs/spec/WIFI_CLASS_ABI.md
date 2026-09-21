@@ -127,12 +127,19 @@ auseinanderdriften, und dann assoziiert der Treiber zu einem Netz, für das
 |--------|---------|
 | `ssid:` | nur APs dieses Netzes kommen als Ziel in Frage |
 | `band:` | `auto` (Standard, 5 GHz ab −70 dBm bevorzugt) · `5` · `2.4` |
+| `debug:` | `1`/`on` — der Treiber druckt seine Stufen und Tore (RTL8822CE ab 0.24.0). Ohne den Schlüssel ist er still; **gefallene** Tore, Abbrüche und der Zustand der Leitung gehen trotzdem hinaus |
 
 Das Passwort steht getrennt in `sys/config/wifi_psk` (nur `wifid` liest es;
 der Treiber sieht es nie).
 
     store /sys/config/wifi      ssid: MeinNetz
     store /sys/config/wifi_psk  meinpasswort
+
+**`store` schreibt EINE Zeile und ERSETZT das Objekt** (`intent_store` →
+`npkfs::upsert`, der Text hinter dem Namen kennt keinen Zeilenumbruch).
+Für eine Datei mit mehreren Schlüsseln also den Editor nehmen —
+`spell /sys/config/wifi` —, sonst löscht der zweite `store` den ersten
+Schlüssel, und der Treiber assoziiert plötzlich zum lautesten Nachbarn.
 
 Ohne SSID-Filter nimmt der Treiber den lautesten AP **irgendeines** Netzes —
 inklusive dem des Nachbarn, für den `wifid` keinen PSK hat (stiller
