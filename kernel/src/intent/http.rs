@@ -2310,7 +2310,12 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout"); // 15 seconds hard timeout
                 }
-                core::hint::spin_loop();
+                // Dieselbe Regel wie in `tcp_recv_poll` — siehe dort.
+                if crate::xhci::nic_attached() {
+                    core::hint::spin_loop();
+                } else {
+                    crate::interrupts::worker_idle_hlt();
+                }
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
@@ -2343,16 +2348,31 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // BUSY-SPIN, do NOT HLT. The USB NIC has no IRQ — its RX ring is
-                // re-armed ONLY by poll_rx_only() above. worker_idle_hlt() parks
-                // this core until the next 100 Hz worker tick (up to 10 ms);
-                // nothing re-arms the ring in that gap, so the chip exhausts all
-                // buffers in a few ms and then drops every frame → the ~24 Mbit
-                // cap + massive TCP reorder on rtl8153. (virtio/QEMU is immune:
-                // it delivers RX from a fiber, not this polled loop.) tcp_recv_poll
-                // only runs during an active download, so spinning is correct —
-                // and matches tls_recv_poll, which never had the HLT.
-                core::hint::spin_loop();
+                // **Spinnen NUR fuer die gepollte USB-NIC.** Ihr
+                // RX-Ring wird ausschliesslich von `poll_rx_only()` oben
+                // nachgelegt; parkt dieser Kern, hungert der Chip binnen
+                // Millisekunden aus. Fuer jede andere Strecke ist der Spin
+                // nicht bloss nutzlos, sondern schaedlich: er haelt einen
+                // Kern zu 100 %, und jede Runde nimmt das Schloss der
+                // Verbindung — dasselbe, das ein WLAN-Modul braucht, um
+                // einen empfangenen Rahmen ABZULIEFERN. Gemessen am Geraet
+                // (2026-09-21): 66,8 Millionen Leerrunden in einem Lauf,
+                // waehrend das Funkteil kaum noch durchkam und der AP uns
+                // schliesslich hinauswarf.
+                //
+                // Der Kommentar, der hier stand, nennt den Ausweg selbst:
+                // „virtio/QEMU is immune: it delivers RX from a fiber, not
+                // this polled loop." Das WLAN-Modul liefert genauso.
+                //
+                // `worker_idle_hlt` parkt bis zum naechsten LAPIC-Tick —
+                // und der laeuft waehrend eines Downloads auf 10 kHz
+                // (`set_worker_poll_hz`), also 100 us, nicht 10 ms. Auf
+                // Kern 0 ist es ohnehin ein Spin, dort aendert sich nichts.
+                if crate::xhci::nic_attached() {
+                    core::hint::spin_loop();
+                } else {
+                    crate::interrupts::worker_idle_hlt();
+                }
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
