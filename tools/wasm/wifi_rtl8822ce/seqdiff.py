@@ -144,6 +144,18 @@ DEVIATION = {
     "rtw8822c_dac_restore_reg":
         "util.c rtw_restore_reg ist eingesetzt statt aufgerufen; hier sind "
         "alle Eintraege 4 Byte breit, der len-Zweig faellt weg.",
+    "rtw_phy_dig_write":
+        "Linux fuehrt VOR der Pfadschleife den CCK-Zweig "
+        "(`if (chip->dig_cck)`); der 8822C setzt `.dig_cck = NULL` "
+        "(rtw8822c.c:5374), der Zweig ist auf diesem Chip tot. Er steht "
+        "bei uns als Kommentar, damit er nicht wie eine Auslassung "
+        "aussieht -- und nicht als Code, weil ein Zweig, den niemand "
+        "erreicht, beim naechsten Leser Fragen aufwirft.",
+    "rtw8822c_phy_cck_pd_set_reg":
+        "dieselben vier Zugriffe in derselben Folge auf dieselben "
+        "Register; Linux indiziert bei JEDEM `rtw8822c_cck_pd_reg[bw]"
+        "[nrx].reg_pd`, wir ziehen das Tupel einmal heraus. Der Zaehler "
+        "sieht deshalb `reg_pd` statt des Feldausdrucks.",
     "rtw8822c_rf_dac_cal":
         "die zwei ausgeschriebenen Zehnerschleifen sind zu dac_cal_loop "
         "zusammengefasst, und davor steht die RF-0x3e-Diagnose.",
@@ -165,6 +177,19 @@ HEX_SKIP = {
         "Felder mit SET_RA_INFO_*(…GENMASK(..)); bei uns stehen dieselben "
         "Masken als Zahl.",
     "rtw_fw_media_status_report": "wie rtw_fw_send_general_info.",
+    "rtw_fw_send_rssi_info": "wie rtw_fw_send_general_info.",
+    "rtw_fw_update_wl_phy_info": "wie rtw_fw_send_general_info.",
+    "rtw_fw_adaptivity": "wie rtw_fw_send_general_info.",
+    "rtw_coex_monitor_bt_ctr":
+        "Linux zieht die zwei Haelften mit FIELD_GET(MASKLWORD/MASKHWORD, "
+        "tmp) heraus -- Makros ohne eine Hexzahl. Bei uns stehen dieselben "
+        "zwei Haelften als Maske und Schiebung.",
+    "rtw8822c_do_lck":
+        "dieselben elf Zahlen, andere REIHENFOLGE: Linux pollt mit "
+        "read_poll_timeout(rtw_read_rf, val, val != 0x1, …, 0x1000) und "
+        "nennt die Bedingung VOR den Argumenten; unsere Schleife liest "
+        "erst (0x1000) und vergleicht dann (0x1). Dieselbe Klasse wie "
+        "rtw_read8_physical_efuse.",
     "rtw_fw_scan_notify": "wie rtw_fw_send_general_info.",
     "rtw_fw_inform_rfk_status": "wie rtw_fw_send_general_info.",
     "rtw_fw_do_iqk": "wie rtw_fw_send_general_info.",

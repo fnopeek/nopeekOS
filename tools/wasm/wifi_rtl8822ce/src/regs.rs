@@ -1263,3 +1263,117 @@ pub const DESC_RATE11M: u32 = 0x03; // main.h:246
 pub const DESC_RATE54M: u32 = 0x0b; // main.h:246
 pub const DESC_RATEMCS7: u32 = 0x13; // main.h:246
 pub const DESC_RATEMCS15: u32 = 0x1b; // main.h:246
+
+// ── rtw_watch_dog_work: die laufende Haelfte (main.c:224-310) ────
+// Linux fuehrt sie ALLE 2 SEKUNDEN, das ganze Leben einer Verbindung
+// lang. Bis 0.26.0 gab es sie bei uns nicht — und drei ihrer Posten
+// sind Sendeseite und haengen an der Temperatur.
+pub const RTW_WATCH_DOG_DELAY_MS: u64 = 2000; // main.h:30  HZ * 2
+pub const RTW_TP_SHIFT: u32 = 18; // main.h:41  bytes/2s --> Mbps
+pub const RTW_LPS_THRESHOLD: u32 = 50; // ps.h:8
+pub const RTW_BUSY_TRAFFIC_THRESHOLD: u64 = 100; // main.c:241-244
+
+// ── rtw_phy_dig (phy.c:373-437) ──────────────────────────────────
+pub const DIG_PERF_FA_TH_LOW: u32 = 250; // phy.c:360
+pub const DIG_PERF_FA_TH_HIGH: u32 = 500; // phy.c:361
+pub const DIG_PERF_FA_TH_EXTRA_HIGH: u32 = 750; // phy.c:362
+pub const DIG_PERF_MAX: u32 = 0x5a; // phy.c:363
+pub const DIG_PERF_MID: u32 = 0x40; // phy.c:364
+pub const DIG_CVRG_FA_TH_LOW: u32 = 2000; // phy.c:365
+pub const DIG_CVRG_FA_TH_HIGH: u32 = 4000; // phy.c:366
+pub const DIG_CVRG_FA_TH_EXTRA_HIGH: u32 = 5000; // phy.c:367
+pub const DIG_CVRG_MAX: u32 = 0x2a; // phy.c:368
+pub const DIG_CVRG_MID: u32 = 0x26; // phy.c:369
+pub const DIG_CVRG_MIN: u32 = 0x1c; // phy.c:370
+pub const DIG_RSSI_GAIN_OFFSET: u32 = 15; // phy.c:371
+/// rtw8822c.c:5355 `.dig_min` — die Untergrenze DIESES Chips.
+pub const RTW8822C_DIG_MIN: u8 = 0x20; // rtw8822c.c:5355
+
+// ── rtw_phy_get_rssi_level (phy.c:292-309) ───────────────────────
+pub const RA_FLOOR_TABLE_SIZE: usize = 7; // phy.c:289
+pub const RA_FLOOR_UP_GAP: u8 = 3; // phy.c:290
+
+// ── rtw_phy_cck_pd (phy.c:736-766) ───────────────────────────────
+pub const CCK_PD_FA_LV1_MIN: u32 = 1000; // phy.c:711
+pub const CCK_PD_FA_LV0_MAX: u32 = 500; // phy.c:712
+pub const CCK_PD_IGI_LV4_VAL: u8 = 0x38; // phy.c:728
+pub const CCK_PD_IGI_LV3_VAL: u8 = 0x2a; // phy.c:729
+pub const CCK_PD_IGI_LV2_VAL: u8 = 0x24; // phy.c:730
+pub const CCK_PD_RSSI_LV4_VAL: u8 = 32; // phy.c:731
+pub const CCK_PD_RSSI_LV3_VAL: u8 = 32; // phy.c:732
+pub const CCK_PD_RSSI_LV2_VAL: u8 = 24; // phy.c:733
+pub const CCK_FA_AVG_RESET: u32 = 0xffffffff; // phy.h:174
+pub const CCK_PD_LV0: u8 = 0; // phy.h:164
+pub const CCK_PD_LV1: u8 = 1; // phy.h:165
+pub const CCK_PD_LV2: u8 = 2; // phy.h:166
+pub const CCK_PD_LV3: u8 = 3; // phy.h:167
+pub const CCK_PD_LV4: u8 = 4; // phy.h:168
+pub const CCK_PD_LV_MAX: u8 = 5; // phy.h:169
+pub const RTW_CCK_PD_MAX: u32 = 255; // rtw8822c.c:4342
+pub const RTW_CCK_CS_MAX: u32 = 31; // rtw8822c.c:4343
+pub const RTW_CCK_CS_ERR1: u32 = 27; // rtw8822c.c:4344
+pub const RTW_CCK_CS_ERR2: u32 = 29; // rtw8822c.c:4345
+
+// ── rtw_phy_rrsr_update (phy.c:1062-1069) ────────────────────────
+pub const RRSR_RATE_ORDER_MAX: u32 = 0xfffff; // phy.h:180
+pub const RRSR_RATE_ORDER_CCK_LEN: u32 = 4; // phy.h:181
+
+// ── rtw8822c_cfo_track (rtw8822c.c:4265-4330) ────────────────────
+pub const CFO_TRK_ENABLE_TH: i32 = 20; // rtw8822c.h:163
+pub const CFO_TRK_STOP_TH: i32 = 10; // rtw8822c.h:164
+pub const CFO_TRK_ADJ_TH: i32 = 10; // rtw8822c.h:165
+
+// ── rtw_phy_pwr_track (phy.c) / rtw8822c_pwr_track ───────────────
+pub const RTW_PWR_TRK_TBL_SZ: usize = 30; // main.h:1127
+pub const RTW_PWR_TRK_5G_NUM: usize = 3; // main.h:1125
+pub const PWR_TRACK_MASK: u32 = 0x7f; // rtw8822c.c:4413
+/// rtw8822c.c:5387-5388 — beide 8.
+pub const RTW8822C_IQK_THRESHOLD: u8 = 8; // rtw8822c.c:5387
+pub const RTW8822C_LCK_THRESHOLD: u8 = 8; // rtw8822c.c:5388
+/// rtw8822c.c:5362 `.path_div_supported = true`
+pub const RTW8822C_PATH_DIV_SUPPORTED: bool = true; // rtw8822c.c:5362
+pub const DESC_RATE_MAX: usize = 84; // main.h:246
+
+// ── rtw_phy_get_rrsr_mask (phy.c:1021-1049) ──────────────────────
+pub const DESC_RATE1M: u32 = 0x00; // main.h:246
+pub const DESC_RATEMCS0: u32 = 0x0c; // main.h:246
+pub const DESC_RATEMCS8: u32 = 0x14; // main.h:246
+pub const DESC_RATEMCS16: u32 = 0x1c; // main.h:246
+pub const DESC_RATEMCS24: u32 = 0x24; // main.h:246
+pub const DESC_RATEVHT1SS_MCS0: u32 = 0x2c; // main.h:246
+pub const DESC_RATEVHT2SS_MCS0: u32 = 0x36; // main.h:246
+pub const DESC_RATEVHT3SS_MCS0: u32 = 0x40; // main.h:246
+pub const DESC_RATEVHT4SS_MCS0: u32 = 0x4a; // main.h:246
+
+// ── rtw8822c_cfo_track / rtw8822c_do_lck (rtw8822c.c) ────────────
+pub const BIT_XCAP_0: u32 = 0x00fffc00; // reg.h:776  GENMASK(23, 10)
+pub const RF_SYN_CTRL: u32 = 0xbb; // reg.h:958
+pub const RF_SYN_PFD: u32 = 0xb0; // reg.h:955
+pub const RF_SYN_AAC: u32 = 0xc9; // reg.h:960
+pub const RF_AAC_CTRL: u32 = 0xca; // reg.h:961
+pub const RF_FAST_LCK: u32 = 0xcc; // reg.h:962
+
+// ── rtw_coex_monitor_bt_ctr (coex.c:454-475) ─────────────────────
+pub const REG_BT_ACT_STATISTICS: u32 = 0x0770; // reg.h:571
+pub const REG_BT_ACT_STATISTICS_1: u32 = 0x0774; // reg.h:572
+pub const REG_BT_COEX_ENH_INTR_CTRL: u32 = 0x76E; // reg.h:568
+pub const BIT_R_GRANTALL_WLMASK: u32 = 1 << 3; // reg.h:569
+pub const BIT_STATIS_BT_EN: u32 = 1 << 2; // reg.h:570
+
+// ── rtw_phy_ra_track / rtw_fw_adaptivity (fw.c) ──────────────────
+pub const H2C_CMD_RSSI_MONITOR: u32 = 0x42; // fw.h:559
+pub const H2C_CMD_WL_PHY_INFO: u32 = 0x58; // fw.h:563
+pub const H2C_CMD_ADAPTIVITY: u32 = 0x5A; // fw.h:565
+
+// ── rtw8822c_adaptivity (rtw8822c.c:2178-2196) ───────────────────
+pub const EDCCA_TH_L2H_LB: i8 = 48; // main.h:1663
+pub const EDCCA_ADC_BACKOFF: i8 = 12; // main.h:1664
+pub const EDCCA_L2H_H2L_DIFF: i8 = 7; // main.h:1667
+pub const EDCCA_L2H_H2L_DIFF_NORMAL: i8 = 8; // main.h:1668
+pub const EDCCA_IGI_L2H_DIFF: i8 = 8; // main.h:1666
+pub const FW_FEATURE_BCN_FILTER: u32 = 1 << 5; // fw.h:144
+pub const FW_FEATURE_ADAPTIVITY: u32 = 1 << 7; // fw.h:144
+
+// ── rtw_fw_ra_report_handle (fw.c:265-323) ───────────────────────
+/// rtw8822c.c:5359 `.c2h_ra_report_size = 7`
+pub const C2H_RA_REPORT_SIZE: usize = 7; // rtw8822c.c:5359

@@ -29,6 +29,13 @@ pub struct StaInfo {
     pub init_ra_lv: u8,
     pub ra_mask: u64,
     pub rssi_level: u8,
+    /// main.h:760 `DECLARE_EWMA(rssi, 10, 16)` — von `rtw_rx_addr_match`
+    /// je Rahmen gefuettert, vom Watchdog alle zwei Sekunden gelesen.
+    pub avg_rssi: crate::dm::Ewma,
+    /// main.h `si->ra_report.desc_rate` — die Rate, die die FIRMWARE
+    /// zuletzt gewaehlt hat. Sie kommt als C2H `RA_RPT` herein und ist
+    /// die Eingabe von `rtw_phy_rrsr_update`.
+    pub ra_report_desc_rate: u8,
 }
 
 /// Was aus der Anmeldeantwort des AP herausfaellt — bei Linux

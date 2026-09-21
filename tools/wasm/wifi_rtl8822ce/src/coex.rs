@@ -41,6 +41,18 @@ pub struct Coex {
     pub freerun: bool,
     // rtw_coex_stat
     pub bt_disabled: bool,
+    /// coex.c:454-475 `rtw_coex_monitor_bt_ctr` — die vier Zaehler, die
+    /// der Watchdog alle zwei Sekunden abholt. Sie sind der einzige
+    /// Hinweis auf BT-Verkehr, wenn das Scoreboard nichts sagt.
+    pub hi_pri_tx: u16,
+    pub hi_pri_rx: u16,
+    pub lo_pri_tx: u16,
+    pub lo_pri_rx: u16,
+    pub bt_disable_cnt: u32,
+    /// `wl_under_ips` / `wl_under_lps` — bei uns immer falsch: wir fahren
+    /// weder IPS noch LPS (der Plan fuehrt beides als offenen Posten).
+    pub wl_under_ips: bool,
+    pub wl_under_lps: bool,
     pub bt_ble_scan_type: u8,
     pub bt_mailbox_reply: bool,
     pub bt_reenable: bool,
@@ -85,7 +97,10 @@ impl Coex {
         Coex {
             stop_dm: false, wl_rf_off: false, freeze: false,
             manual_control: false, under_5g: false, freerun: false,
-            bt_disabled: false, bt_ble_scan_type: 0, bt_mailbox_reply: false,
+            bt_disabled: false, hi_pri_tx: 0, hi_pri_rx: 0,
+            lo_pri_tx: 0, lo_pri_rx: 0, bt_disable_cnt: 0,
+            wl_under_ips: false, wl_under_lps: false,
+            bt_ble_scan_type: 0, bt_mailbox_reply: false,
             bt_reenable: false, bt_iqk_state: 0, score_board: 0, kt_ver: 0,
             wl_slot_extend: false, wl_slot_toggle: false,
             wl_slot_toggle_change: false, wl_force_lps_ctrl: false,
@@ -155,7 +170,12 @@ pub fn write_scbd(h: i32, c: &mut Coex, bitpos: u16, set: bool) {
 ///
 /// Der `bt_reenable_work`-Zeitgeber (15 s) haengt an mac80211's Arbeitswarte-
 /// schlange; wir merken nur die Fahne, die er dort setzt.
-fn monitor_bt_enable(h: i32, c: &mut Coex) {
+/// **Das ist die Zahl, an der die Quarznachfuehrung haengt.**
+/// `rtw8822c_cfo_need_adjust` stellt sie ab, solange Bluetooth NICHT
+/// abgeschaltet ist — wer den Riegel portiert und diese Funktion nicht
+/// laufen laesst, bekommt einen Riegel, der nie aufgeht. Bis 0.26.0 rief
+/// sie nur die Initialisierung.
+pub fn monitor_bt_enable(h: i32, c: &mut Coex) {
     let score_board = read_scbd(h);
     let bt_disabled = score_board & COEX_SCBD_ONOFF == 0;
 
@@ -709,3 +729,44 @@ pub fn read_ant_state(h: i32) -> AntState {
 pub fn read_scbd_raw(h: i32) -> u16 {
     host::r16(h, REG_WIFI_BT_INFO)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Was `rtw_watch_dog_work` alle zwei Sekunden an der Koexistenz tut.
+//
+// **Der Entscheidungsbaum von `rtw_coex_run_coex` gehoert NICHT hierher**
+// — er ist L6 des Plans (111 Funktionen, eigene Stufe) und entscheidet
+// Antenne und TDMA, WENN Bluetooth aktiv ist. Hier steht die
+// Beobachtung: die vier Verkehrszaehler und der eine Zustand, den die
+// Quarznachfuehrung braucht.
+// ═══════════════════════════════════════════════════════════════════
+
+/// coex.c:454-475 `rtw_coex_monitor_bt_ctr`
+pub fn monitor_bt_ctr(h: i32, c: &mut Coex) {
+    let tmp = host::r32(h, REG_BT_ACT_STATISTICS);
+    c.hi_pri_tx = (tmp & 0xffff) as u16;
+    c.hi_pri_rx = (tmp >> 16) as u16;
+
+    let tmp = host::r32(h, REG_BT_ACT_STATISTICS_1);
+    c.lo_pri_tx = (tmp & 0xffff) as u16;
+    c.lo_pri_rx = (tmp >> 16) as u16;
+
+    host::w8(h, REG_BT_COEX_ENH_INTR_CTRL,
+             (BIT_R_GRANTALL_WLMASK | BIT_STATIS_BT_EN) as u8);
+}
+
+/// coex.c:3941-3950 `rtw_coex_wl_status_check`
+pub fn wl_status_check(h: i32, c: &mut Coex) {
+    if (c.wl_under_lps && !c.wl_force_lps_ctrl) || c.wl_under_ips {
+        return;
+    }
+    monitor_bt_ctr(h, c);
+}
+
+/// coex.h:423-432 `rtw_coex_active_query_bt_info`.
+///
+/// **Fuer DIESEN Chip ein Nichts, und das ist kein Weglassen:** die
+/// Funktion fragt nur beim RTL8821AU nach, dessen Firmware bei
+/// getrennten BT-Kopfhoerern kein `C2H_BT_INFO` von sich aus schickt.
+/// Der Zweig steht hier als Kommentar, damit niemand ihn fuer vergessen
+/// haelt.
+pub fn active_query_bt_info(_h: i32, _c: &mut Coex) {}

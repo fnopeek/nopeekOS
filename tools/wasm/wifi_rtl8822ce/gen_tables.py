@@ -695,6 +695,74 @@ def db_invert_table():
     return out
 
 
+def pwr_track_table():
+    """rtw8822c.c:5100-5277 — die zwanzig Kurven der Sendeleistungs-
+    Nachfuehrung, `struct rtw_pwr_track_tbl rtw8822c_pwr_track_type0_tbl`.
+
+    **Sie sind die Antwort des Chips auf seine eigene Temperatur.** Je
+    Pfad und Band eine Kurve mit 30 Stuetzstellen: wieviel Sendeindex
+    dazu oder weg muss, wenn der Thermometerwert um N von dem der efuse
+    abweicht. Ohne sie driftet die Sendeleistung, waehrend der Empfang
+    unveraendert gut bleibt — und das sieht aus wie eine Leitung, auf der
+    nichts mehr zurueckkommt.
+
+    Fuer den 8822C gibt es genau EINE Tabelle: alle sieben RFE-Varianten
+    zeigen auf `type0` (rtw8822c.c:5277-5285). Deshalb waehlt hier nichts
+    nach RFE aus — das waere eine erfundene Verzweigung.
+    """
+    src = open(C_SRC, errors="ignore").read()
+
+    # (C-Name, Rust-Name, 5G?), in der Reihenfolge von struct rtw_swing_table
+    ONE = [("rtw8822c_pwrtrk_2ga_n", "PWRTRK_2GA_N"),
+           ("rtw8822c_pwrtrk_2ga_p", "PWRTRK_2GA_P"),
+           ("rtw8822c_pwrtrk_2gb_n", "PWRTRK_2GB_N"),
+           ("rtw8822c_pwrtrk_2gb_p", "PWRTRK_2GB_P"),
+           ("rtw8822c_pwrtrk_2g_cck_a_n", "PWRTRK_2G_CCKA_N"),
+           ("rtw8822c_pwrtrk_2g_cck_a_p", "PWRTRK_2G_CCKA_P"),
+           ("rtw8822c_pwrtrk_2g_cck_b_n", "PWRTRK_2G_CCKB_N"),
+           ("rtw8822c_pwrtrk_2g_cck_b_p", "PWRTRK_2G_CCKB_P")]
+    FIVE = [("rtw8822c_pwrtrk_5ga_n", "PWRTRK_5GA_N"),
+            ("rtw8822c_pwrtrk_5ga_p", "PWRTRK_5GA_P"),
+            ("rtw8822c_pwrtrk_5gb_n", "PWRTRK_5GB_N"),
+            ("rtw8822c_pwrtrk_5gb_p", "PWRTRK_5GB_P")]
+
+    out = ["/// rtw8822c.c `rtw8822c_pwr_track_type0_tbl` — die Kurven der",
+           "/// Sendeleistungs-Nachfuehrung, 30 Stuetzstellen je Kurve",
+           "/// (`RTW_PWR_TRK_TBL_SZ`). Index = |Thermometer - efuse|."]
+    n_tbl = 0
+    for cname, rname in ONE:
+        m = re.search(r"static const u8 %s\[RTW_PWR_TRK_TBL_SZ\] = \{(.*?)\};"
+                      % cname, src, re.S)
+        if not m:
+            sys.exit(f"{cname} nicht in rtw8822c.c")
+        vals = [int(v) for v in re.findall(r"\b(\d+)\b", m.group(1))]
+        if len(vals) != 30:
+            sys.exit(f"{cname}: {len(vals)} Werte statt 30")
+        out.append(f"pub static {rname}: [u8; 30] = [")
+        out.append("    " + ", ".join(str(v) for v in vals) + "];\n")
+        n_tbl += 1
+
+    for cname, rname in FIVE:
+        m = re.search(r"static const u8\s*\n?%s\[RTW_PWR_TRK_5G_NUM\]"
+                      r"\[RTW_PWR_TRK_TBL_SZ\] = \{(.*?)\n\};" % cname,
+                      src, re.S)
+        if not m:
+            sys.exit(f"{cname} nicht in rtw8822c.c")
+        vals = [int(v) for v in re.findall(r"\b(\d+)\b", m.group(1))]
+        if len(vals) != 90:
+            sys.exit(f"{cname}: {len(vals)} Werte statt 90")
+        out.append(f"pub static {rname}: [[u8; 30]; 3] = [")
+        for i in range(3):
+            out.append("    [" + ", ".join(str(v) for v in vals[i*30:(i+1)*30])
+                       + "],")
+        out.append("];\n")
+        n_tbl += 1
+
+    print(f"  {'pwr_track_type0 (rtw8822c.c)':30s} {n_tbl:6d} Kurven "
+          f"a 30 Stuetzstellen")
+    return out
+
+
 def main():
     src = open(SRC, errors="ignore").read()
     out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
@@ -752,6 +820,7 @@ pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     out += channel_groups()
     out += db_invert_table()
     out += txpower_reference()
+    out += pwr_track_table()
 
     out.extend(dpk_out)
     open(OUT, "w").write("\n".join(out))

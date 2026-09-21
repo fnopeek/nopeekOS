@@ -24,14 +24,15 @@ const PATHS: usize = 4; // RTW_RF_PATH_MAX
 
 /// main.h:1591-1614 `struct rtw_dpk_info`.
 ///
-/// `avg_thermal` fehlt: das ist ein gleitender Mittelwert fuer
-/// `rtw8822c_dpk_track`, die laufende Nachfuehrung ueber die Temperatur.
-/// Die gibt es noch nicht, und ein Feld ohne Leser waere eine Behauptung.
+/// `avg_thermal` ist der gleitende Mittelwert fuer `rtw8822c_dpk_track`
+/// — seit 0.26.0 hat er einen Leser (der Watchdog alle zwei Sekunden).
 pub struct DpkInfo {
     pub is_dpk_pwr_on: bool,
     pub is_reload: bool,
     pub dpk_path_ok: u8, // DECLARE_BITMAP(…, DPK_RF_PATH_NUM)
     pub thermal_dpk: [u8; DPK_RF_PATH_NUM_U],
+    /// main.h:1598 `struct ewma_thermal avg_thermal[DPK_RF_PATH_NUM]`
+    pub avg_thermal: [crate::dm::Ewma; DPK_RF_PATH_NUM_U],
     pub gnt_control: u32,
     pub gnt_value: u32,
     pub result: [u8; PATHS],
@@ -52,6 +53,7 @@ impl DpkInfo {
             is_reload: false,
             dpk_path_ok: 0,
             thermal_dpk: [0; DPK_RF_PATH_NUM_U],
+            avg_thermal: [crate::dm::Ewma::new(); DPK_RF_PATH_NUM_U],
             gnt_control: 0,
             gnt_value: 0,
             result: [0; PATHS],
@@ -978,5 +980,37 @@ pub fn do_dpk(h: i32, d: &mut DpkInfo, rf_path_num: u8) -> DpkRpt {
         gs: [d.dpk_gs[0], d.dpk_gs[1]],
         txagc: [d.dpk_txagc[0], d.dpk_txagc[1]],
         coef1_ready,
+    }
+}
+
+/// rtw8822c.c:3629-3660 `rtw8822c_dpk_track`.
+///
+/// **Die Nachfuehrung der Vorverzerrung ueber die Temperatur.** Sie
+/// laeuft nur, wenn eine DPK-Kalibrierung ueberhaupt stattgefunden hat
+/// (`thermal_dpk` beider Pfade null heisst: es gibt nichts
+/// nachzufuehren).
+pub fn track(h: i32, d: &mut DpkInfo) {
+    if d.thermal_dpk[0] == 0 && d.thermal_dpk[1] == 0 {
+        return;
+    }
+
+    for path in 0..DPK_RF_PATH_NUM_U {
+        let raw = thermal_read(h, path);
+        d.avg_thermal[path].add(raw as u32, crate::dm::EWMA_THERMAL_PRECISION,
+                                crate::dm::EWMA_THERMAL_WEIGHT_RCP);
+        let thermal_value =
+            d.avg_thermal[path].read(crate::dm::EWMA_THERMAL_PRECISION) as u8;
+        // Linux rechnet beides in `s8`, und der Umlauf ist gewollt: die
+        // Maske 0x7f darunter schneidet ohnehin auf sieben Bit.
+        let delta_dpk = (d.thermal_dpk[path] as i8)
+            .wrapping_sub(thermal_value as i8);
+        let offset = delta_dpk
+            .wrapping_sub(d.thermal_dpk_delta[path] as i8) & 0x7f;
+
+        if offset as u8 != d.pre_pwsf[path] {
+            host::w32_mask(h, REG_NCTL0, BIT_SUBPAGE, 0x8 | ((path as u32) << 1));
+            host::w32_mask(h, 0x1b58, 0x7f, offset as u32);
+            d.pre_pwsf[path] = offset as u8;
+        }
     }
 }

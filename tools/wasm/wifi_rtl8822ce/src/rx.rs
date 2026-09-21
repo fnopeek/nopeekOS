@@ -464,3 +464,137 @@ pub fn update_rx_freq_for_invalid(s: &mut RxPktStat, current_channel: u8,
     }
     set_rx_freq_band(s, current_channel);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Was der Empfangsweg dem Watchdog zutraegt (rx.c:42-133, phy.c:678-704)
+//
+// Ohne diese vier Zeilen rechnet `rtw_watch_dog_work` auf Nullen: der
+// Frequenzversatz wird NICHT aufsummiert, die Ratenzaehler bleiben leer,
+// und `min_rssi` ist 255. Die Nachfuehrung tut dann nichts und meldet
+// auch nichts — der schlimmste Zustand von allen.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Was EIN Ringdurchlauf dem Watchdog zutraegt.
+///
+/// **Im Rueckruf gesammelt, danach eingetragen.** Waehrend `rx_poll`
+/// laeuft, haelt es `DmInfo` selbst (es schreibt den PHY-Status hinein);
+/// zwei Schreiber auf denselben Zustand gibt es nicht, und ein roher
+/// Zeiger waere hier eine Umgehung des Ausleihers statt einer Loesung.
+#[derive(Clone, Copy)]
+pub struct WdAcc {
+    pub cfo_tail: [i32; 4],
+    pub cfo_cnt: [i32; 4],
+    pub packet_count: u32,
+    pub num_bcn_pkt: u16,
+    pub num_qry_pkt: [u16; DESC_RATE_MAX],
+    pub curr_rx_rate: u8,
+    pub avg_rssi: crate::dm::Ewma,
+    /// Der Ratenbericht der Firmware: `(rate, mac_id)`.
+    pub ra_rpt: Option<(u8, u8)>,
+    /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
+    pub rx_unicast: u64,
+    pub rx_cnt: u64,
+}
+
+impl WdAcc {
+    pub fn new(avg_rssi: crate::dm::Ewma) -> Self {
+        WdAcc {
+            cfo_tail: [0; 4], cfo_cnt: [0; 4], packet_count: 0,
+            num_bcn_pkt: 0, num_qry_pkt: [0; DESC_RATE_MAX],
+            curr_rx_rate: 0, avg_rssi, ra_rpt: None,
+            rx_unicast: 0, rx_cnt: 0,
+        }
+    }
+
+    /// Nach dem Ringdurchlauf in den langlebigen Zustand eintragen.
+    pub fn merge(&self, dm: &mut crate::dm::DmInfo,
+                 si: &mut crate::sta::StaInfo) {
+        for i in 0..4 {
+            dm.cfo_track.cfo_tail[i] += self.cfo_tail[i];
+            dm.cfo_track.cfo_cnt[i] += self.cfo_cnt[i];
+        }
+        dm.cfo_track.packet_count =
+            dm.cfo_track.packet_count.wrapping_add(self.packet_count);
+        dm.cur_pkt_count.num_bcn_pkt =
+            dm.cur_pkt_count.num_bcn_pkt.saturating_add(self.num_bcn_pkt);
+        for i in 0..DESC_RATE_MAX {
+            dm.cur_pkt_count.num_qry_pkt[i] =
+                dm.cur_pkt_count.num_qry_pkt[i]
+                    .saturating_add(self.num_qry_pkt[i]);
+        }
+        if self.packet_count > 0 {
+            dm.curr_rx_rate = self.curr_rx_rate;
+        }
+        si.avg_rssi = self.avg_rssi;
+    }
+}
+
+/// util.h:28-41 `get_hdr_bssid` — welche der drei Adressen die BSSID ist,
+/// haengt an den zwei DS-Bits.
+pub fn hdr_bssid(f: &[u8]) -> Option<[u8; 6]> {
+    if f.len() < 22 {
+        return None;
+    }
+    let tods = f[1] & 0x01 != 0;
+    let fromds = f[1] & 0x02 != 0;
+    let at = if tods { 4 } else if fromds { 10 } else { 16 };
+    let mut b = [0u8; 6];
+    b.copy_from_slice(&f[at..at + 6]);
+    Some(b)
+}
+
+/// `ieee80211_is_ctl` — Typ 01 im ersten Byte.
+fn is_ctl(f: &[u8]) -> bool {
+    f[0] & 0x0c == 0x04
+}
+
+/// `ieee80211_is_beacon` — Verwaltung, Subtyp 8.
+fn is_beacon(f: &[u8]) -> bool {
+    f[0] == 0x80
+}
+
+/// rx.c:100-133 `rtw_rx_addr_match` + `_iter`, und phy.c:690-704 in
+/// EINEM Gang: beide laufen in Linux ueber dieselbe Adressprobe, nur aus
+/// zwei Rufstellen.
+///
+/// `our_mac`/`bssid` ersetzen den vif-Iterator — wir fahren genau eine
+/// Schnittstelle, und mehr als eine waere hier eine Erfindung.
+pub fn watchdog_feed(a: &mut WdAcc, st: &RxPktStat, f: &[u8],
+                     our_mac: &[u8; 6], bssid: &[u8; 6], path_num: u8) {
+    if f.len() < 24 || st.crc_err || st.icv_err || !st.phy_status || is_ctl(f) {
+        return;
+    }
+    let Some(from) = hdr_bssid(f) else { return };
+    if &from != bssid {
+        return;
+    }
+
+    // phy.c: der CFO-Zweig prueft NUR die BSSID.
+    for i in 0..path_num as usize {
+        a.cfo_tail[i] += st.cfo_tail[i] as i32;
+        a.cfo_cnt[i] += 1;
+    }
+    a.packet_count = a.packet_count.wrapping_add(1);
+
+    // rx.c: der Statistikzweig verlangt zusaetzlich, dass der Rahmen an
+    // UNS gerichtet ist — oder ein Beacon.
+    if &f[4..10] != our_mac && !is_beacon(f) {
+        return;
+    }
+    // rx.c:42-99 `rtw_rx_phy_stat`
+    a.curr_rx_rate = st.rate;
+    if is_beacon(f) {
+        a.num_bcn_pkt = a.num_bcn_pkt.saturating_add(1);
+    }
+    if (st.rate as usize) < DESC_RATE_MAX {
+        let c = &mut a.num_qry_pkt[st.rate as usize];
+        *c = c.saturating_add(1);
+    }
+
+    // `ewma_rssi_add(&si->avg_rssi, pkt_stat->rssi)` — nur, wenn der
+    // Sender die bekannte Station ist.
+    if f[10..16] == bssid[..] {
+        a.avg_rssi.add(st.rssi as u32, crate::dm::EWMA_RSSI_PRECISION,
+                       crate::dm::EWMA_RSSI_WEIGHT_RCP);
+    }
+}

@@ -536,3 +536,80 @@ pub fn default_port(h: i32, st: &mut H2cState, port: u8, mac_id: u8,
     h2c_set(&mut pkt, 0, RTW_H2C_DEFAULT_PORT_W0_MACID, mac_id as u32);
     send_h2c_command(h, st, &pkt)
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Was `rtw_watch_dog_work` alle zwei Sekunden an die Firmware schickt.
+// ═══════════════════════════════════════════════════════════════════
+
+/// fw.c:713-727 `rtw_fw_send_rssi_info`.
+///
+/// **Die Firmware waehlt die Rate, und das hier ist ihre Eingabe.** Ohne
+/// sie rechnet die Ratenwahl auf dem Wert, den sie beim Anmelden bekommen
+/// hat — auch noch, wenn die Leitung laengst schlechter ist.
+pub fn send_rssi_info(h: i32, st: &mut H2cState,
+                      si: &crate::sta::StaInfo) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_RSSI_MONITOR);
+
+    let rssi = si.avg_rssi.read(crate::dm::EWMA_RSSI_PRECISION);
+    h2c_set(&mut pkt, 0, 0x0000_ff00, si.mac_id as u32); // MACID
+    h2c_set(&mut pkt, 0, 0xff00_0000, rssi); // RSSI
+    h2c_set(&mut pkt, 1, 1 << 1, (si.stbc_en != 0) as u32); // STBC
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c:1000-1013 `rtw_fw_update_wl_phy_info`
+pub fn update_wl_phy_info(h: i32, st: &mut H2cState, dm: &crate::dm::DmInfo,
+                          tx_throughput: u32, rx_throughput: u32) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_WL_PHY_INFO);
+    h2c_set(&mut pkt, 0, 0x0003_ff00, tx_throughput); // TX_TP  GENMASK(17, 8)
+    h2c_set(&mut pkt, 0, 0x0ffc_0000, rx_throughput); // RX_TP  GENMASK(27, 18)
+    h2c_set(&mut pkt, 1, 0x0000_00ff, dm.tx_rate as u32); // TX_RATE_DESC
+    h2c_set(&mut pkt, 1, 0x0000_ff00, dm.curr_rx_rate as u32); // RX_RATE_DESC
+    h2c_set(&mut pkt, 1, 0x00ff_0000, dm.rx_evm_dbm[0] as u32); // RX_EVM
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c:2465-2483 `rtw_fw_adaptivity`.
+///
+/// Der `rtw_edcca_enabled`-Zweig ist ein debugfs-Schalter (Vorgabe an);
+/// debugfs bauen wir nicht, also gilt hier immer der eingeschaltete Fall.
+pub fn adaptivity(h: i32, st: &mut H2cState, dm: &crate::dm::DmInfo) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_ADAPTIVITY);
+    h2c_set(&mut pkt, 0, 0x0000_0f00, dm.edcca_mode as u32); // MODE
+    h2c_set(&mut pkt, 0, 0x0000_f000, 1); // OPTION — Linux: fest 1
+    h2c_set(&mut pkt, 0, 0x00ff_0000, dm.igi_history[0] as u32); // IGI
+    h2c_set(&mut pkt, 0, 0xff00_0000, dm.l2h_th_ini as u32); // L2H
+    h2c_set(&mut pkt, 1, 0x0000_00ff, dm.scan_density as u32); // DENSITY
+    send_h2c_command(h, st, &pkt)
+}
+
+/// fw.c:265-323 `rtw_fw_ra_report_handle` + `_iter`.
+///
+/// **Die Rueckmeldung, welche Rate die FIRMWARE gerade fliegt.** Zwei
+/// Posten des Watchdogs haengen daran: `rtw_phy_config_swing_table`
+/// waehlt ueber `dm_info->tx_rate` zwischen CCK- und OFDM-Kurve, und
+/// `rtw_phy_rrsr_update` rechnet aus `si->ra_report.desc_rate` die
+/// Antwortraten. Ohne diesen Weg steht beides auf dem Anfangswert.
+///
+/// Der Rest von `_iter` (Flags, `bit_rate`, `max_rc_amsdu_len`) fuellt
+/// `struct rate_info` fuer `cfg80211` und hat bei uns keinen Leser.
+pub fn ra_report_handle(payload: &[u8], dm: &mut crate::dm::DmInfo,
+                        si: Option<&mut crate::sta::StaInfo>) {
+    if payload.len() < C2H_RA_REPORT_SIZE {
+        return;
+    }
+    let rate = payload[0] & RTW_C2H_RA_RPT_RATE as u8;
+    let mac_id = payload[1];
+
+    dm.tx_rate = rate;
+
+    if let Some(si) = si {
+        if si.mac_id != mac_id {
+            return;
+        }
+        si.ra_report_desc_rate = rate;
+    }
+}

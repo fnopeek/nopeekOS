@@ -1055,3 +1055,305 @@ pub fn set_tx_power_index(h: i32, rf_path_num: u8,
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Was `rtw_watch_dog_work` alle zwei Sekunden an DIESEM Chip tut.
+// rtw8822c.c — Quarz, Sendeleistung, CCK-Schwelle, Sendepfad.
+// ═══════════════════════════════════════════════════════════════════
+
+/// rtw8822c.c:2523-2527 `rtw8822c_config_tx_path`
+pub fn config_tx_path(h: i32, tx_path: u8, tx_path_sel_1ss: u8,
+                      tx_path_cck: u8, is_tx2_path: bool) {
+    config_cck_tx_path(h, tx_path_cck, is_tx2_path);
+    config_ofdm_tx_path(h, tx_path, tx_path_sel_1ss);
+    bb_reset(h);
+}
+
+/// rtw8822c.c:4343-4352 `rtw8822c_cck_pd_reg[bw][nrx]` —
+/// `(reg_pd, mask_pd, reg_cs, mask_cs)`.
+const CCK_PD_REG: [[(u32, u32, u32, u32); 2]; 2] = [
+    [(0x1ac8, 0x00ff, 0x1ad0, 0x0000_001f),
+     (0x1ac8, 0xff00, 0x1ad0, 0x0000_03e0)],
+    [(0x1acc, 0x00ff, 0x1ad0, 0x01f0_0000),
+     (0x1acc, 0xff00, 0x1ad0, 0x3e00_0000)],
+];
+
+/// rtw8822c.c:4359-4390 `rtw8822c_phy_cck_pd_set_reg`
+fn phy_cck_pd_set_reg(h: i32, pd_diff: i8, cs_diff: i8, bw: usize, nrx: usize) {
+    if bw > 1 || nrx >= 2 {
+        return; // Linux: WARN_ON und zurueck
+    }
+    let (reg_pd, mask_pd, reg_cs, mask_cs) = CCK_PD_REG[bw][nrx];
+
+    let mut pd = host::r32_mask(h, reg_pd, mask_pd) as i32;
+    let mut cs = host::r32_mask(h, reg_cs, mask_cs) as i32;
+    pd += pd_diff as i32;
+    cs += cs_diff as i32;
+    if pd > RTW_CCK_PD_MAX as i32 {
+        pd = RTW_CCK_PD_MAX as i32;
+    }
+    if cs == RTW_CCK_CS_ERR1 as i32 || cs == RTW_CCK_CS_ERR2 as i32 {
+        cs += 1;
+    } else if cs > RTW_CCK_CS_MAX as i32 {
+        cs = RTW_CCK_CS_MAX as i32;
+    }
+    host::w32_mask(h, reg_pd, mask_pd, pd as u32);
+    host::w32_mask(h, reg_cs, mask_cs, cs as u32);
+}
+
+/// rtw8822c.c:4392-4413 `rtw8822c_phy_cck_pd_set`
+pub fn phy_cck_pd_set(h: i32, dm: &mut DmInfo, new_lvl: u8) {
+    let pd_lvl: [i8; 5] = [0, 2, 4, 6, 8];
+    let cs_lvl: [i8; 5] = [0, 2, 2, 2, 4];
+
+    let nrx = host::r32_mask(h, 0x1a2c, 0x60000) as usize;
+    let bw = host::r32_mask(h, 0x9b0, 0xc) as usize;
+    if bw > 1 || nrx >= 4 {
+        return;
+    }
+
+    if dm.cck_pd_lv[bw][nrx] == new_lvl {
+        return;
+    }
+    let cur_lvl = dm.cck_pd_lv[bw][nrx];
+
+    // „update cck pd info"
+    dm.cck_fa_avg = CCK_FA_AVG_RESET;
+
+    phy_cck_pd_set_reg(h,
+                       pd_lvl[new_lvl as usize] - pd_lvl[cur_lvl as usize],
+                       cs_lvl[new_lvl as usize] - cs_lvl[cur_lvl as usize],
+                       bw, nrx.min(1));
+    dm.cck_pd_lv[bw][nrx] = new_lvl;
+}
+
+// ── Der Quarz: rtw8822c_cfo_track und seine vier Helfer ──────────
+//
+// **Das ist die Sendeseite der Temperatur.** Ein Empfaenger rastet sich
+// an jeder Praeambel neu auf die Frequenz des Gegenuebers ein; ein
+// Sender laeuft auf dem eigenen Quarz. Waermt der Chip ueber Minuten
+// auf, wandert der — und die Leitung wird einseitig, ohne dass
+// irgendwo ein Fehler steht.
+
+/// rtw8822c.c:4220 `#define XCAP_EXTEND(val) (val | val << 7)`
+fn xcap_extend(v: u8) -> u32 {
+    let v = v as u32;
+    v | (v << 7)
+}
+
+/// rtw8822c.c:4222-4231 `rtw8822c_set_crystal_cap_reg`
+fn set_crystal_cap_reg(h: i32, dm: &mut DmInfo, crystal_cap: u8) {
+    let val = xcap_extend(crystal_cap);
+    dm.cfo_track.crystal_cap = crystal_cap;
+    host::w32_mask(h, REG_ANAPAR_XTAL_0, BIT_XCAP_0, val);
+}
+
+/// rtw8822c.c:4233-4241 `rtw8822c_set_crystal_cap`
+fn set_crystal_cap(h: i32, dm: &mut DmInfo, crystal_cap: u8) {
+    if dm.cfo_track.crystal_cap == crystal_cap {
+        return;
+    }
+    set_crystal_cap_reg(h, dm, crystal_cap);
+}
+
+/// rtw8822c.c:4243-4255 `rtw8822c_cfo_tracking_reset`
+fn cfo_tracking_reset(h: i32, dm: &mut DmInfo, efuse_crystal_cap: u8) {
+    dm.cfo_track.is_adjust = true;
+
+    if dm.cfo_track.crystal_cap > efuse_crystal_cap {
+        let v = dm.cfo_track.crystal_cap - 1;
+        set_crystal_cap(h, dm, v);
+    } else if dm.cfo_track.crystal_cap < efuse_crystal_cap {
+        let v = dm.cfo_track.crystal_cap + 1;
+        set_crystal_cap(h, dm, v);
+    }
+}
+
+/// rtw8822c.c:4265 `#define REPORT_TO_KHZ(val) ((val << 1) + (val >> 1))`
+fn report_to_khz(v: i32) -> i32 {
+    (v << 1) + (v >> 1)
+}
+
+/// rtw8822c.c:4267-4289 `rtw8822c_cfo_calc_avg` — und sie LEERT die
+/// Summen, ist also nicht wiederholbar.
+fn cfo_calc_avg(dm: &mut DmInfo, path_num: u8) -> i32 {
+    let mut cfo_path_sum = 0i32;
+
+    for i in 0..path_num as usize {
+        let cfo_rpt_sum = report_to_khz(dm.cfo_track.cfo_tail[i]);
+        let cfo_avg = if dm.cfo_track.cfo_cnt[i] != 0 {
+            cfo_rpt_sum / dm.cfo_track.cfo_cnt[i]
+        } else {
+            0
+        };
+        cfo_path_sum += cfo_avg;
+    }
+
+    for i in 0..path_num as usize {
+        dm.cfo_track.cfo_tail[i] = 0;
+        dm.cfo_track.cfo_cnt[i] = 0;
+    }
+
+    if path_num == 0 { 0 } else { cfo_path_sum / path_num as i32 }
+}
+
+/// rtw8822c.c:4291-4308 `rtw8822c_cfo_need_adjust`.
+///
+/// **Der Riegel am Ende ist kein Detail:** laeuft Bluetooth im selben
+/// Chip (`!rtw_coex_disabled`), stellt Linux die Nachfuehrung AB und
+/// setzt den Quarz auf den Wert der efuse zurueck. Wer nur diese
+/// Funktion portiert und die Koexistenz nicht, baut den Riegel mit —
+/// und `bt_disabled` kommt aus dem Zustand, den der Watchdog pflegt.
+fn cfo_need_adjust(h: i32, dm: &mut DmInfo, cfo_avg: i32,
+                   efuse_crystal_cap: u8, bt_disabled: bool) {
+    if !dm.cfo_track.is_adjust {
+        if cfo_avg.abs() > CFO_TRK_ENABLE_TH {
+            dm.cfo_track.is_adjust = true;
+        }
+    } else if cfo_avg.abs() <= CFO_TRK_STOP_TH {
+        dm.cfo_track.is_adjust = false;
+    }
+
+    if !bt_disabled {
+        dm.cfo_track.is_adjust = false;
+        set_crystal_cap(h, dm, efuse_crystal_cap);
+    }
+}
+
+/// rtw8822c.c:4310-4336 `rtw8822c_cfo_track`.
+///
+/// `sta_cnt != 1` heisst bei uns: keine Verbindung. Ohne genau EINE
+/// Gegenstelle ist ein gemittelter Frequenzversatz sinnlos, und Linux
+/// faehrt dann die Nachfuehrung schrittweise auf die efuse zurueck.
+pub fn cfo_track(h: i32, dm: &mut DmInfo, path_num: u8,
+                 efuse_crystal_cap: u8, linked: bool, bt_disabled: bool) {
+    if !linked {
+        cfo_tracking_reset(h, dm, efuse_crystal_cap);
+        return;
+    }
+
+    if dm.cfo_track.packet_count == dm.cfo_track.packet_count_pre {
+        return;
+    }
+
+    dm.cfo_track.packet_count_pre = dm.cfo_track.packet_count;
+    let cfo_avg = cfo_calc_avg(dm, path_num);
+    cfo_need_adjust(h, dm, cfo_avg, efuse_crystal_cap, bt_disabled);
+
+    if dm.cfo_track.is_adjust {
+        let mut crystal_cap = dm.cfo_track.crystal_cap as i8;
+        if cfo_avg > CFO_TRK_ADJ_TH {
+            crystal_cap += 1;
+        } else if cfo_avg < -CFO_TRK_ADJ_TH {
+            crystal_cap -= 1;
+        }
+        let crystal_cap = crystal_cap.clamp(0, XCAP_MASK as i8) as u8;
+        set_crystal_cap(h, dm, crystal_cap);
+    }
+}
+
+// ── Die Sendeleistung ueber die Temperatur ───────────────────────
+
+/// rtw8822c.c:4405-4420 `rtw8822c_pwrtrack_set`
+fn pwrtrack_set(h: i32, dm: &DmInfo, rf_path: usize) {
+    match rf_path {
+        RF_PATH_A => host::w32_mask(h, 0x18a0, PWR_TRACK_MASK,
+                                    dm.delta_power_index[rf_path] as u32),
+        RF_PATH_B => host::w32_mask(h, 0x41a0, PWR_TRACK_MASK,
+                                    dm.delta_power_index[rf_path] as u32),
+        _ => {}
+    }
+}
+
+/// rtw8822c.c:4422-4431 `rtw8822c_pwr_track_stats`.
+///
+/// `0xff` in der efuse heisst „kein Thermometer fuer diesen Pfad" — dann
+/// gibt es nichts zu mitteln, und ein Mittelwert aus 0xff waere eine
+/// erfundene Temperatur.
+fn pwr_track_stats(h: i32, dm: &mut DmInfo, thermal_meter: &[u8],
+                   path: usize) {
+    if thermal_meter[path] == 0xff {
+        return;
+    }
+    let thermal_value = phy::read_rf(h, path, RF_T_METER, 0x7e) as u8;
+    phy::pwrtrack_avg(dm, thermal_value, path);
+}
+
+/// rtw8822c.c:4433-4444 `rtw8822c_pwr_track_path`
+fn pwr_track_path(h: i32, dm: &mut DmInfo, swing: &phy::SwingTable,
+                  thermal_meter: &[u8], path: usize) {
+    let delta = phy::pwrtrack_get_delta(dm, thermal_meter, path);
+    dm.delta_power_index[path] =
+        phy::pwrtrack_get_pwridx(dm, swing, thermal_meter, path, path, delta);
+    pwrtrack_set(h, dm, path);
+}
+
+/// rtw8822c.c:4446-4459 `__rtw8822c_pwr_track`
+fn pwr_track_inner(h: i32, dm: &mut DmInfo, thermal_meter: &[u8],
+                   rf_path_num: u8, channel: u8) {
+    let swing = phy::config_swing_table(channel, dm.tx_rate);
+
+    for i in 0..rf_path_num as usize {
+        pwr_track_stats(h, dm, thermal_meter, i);
+    }
+    if phy::pwrtrack_need_lck(dm) {
+        do_lck(h);
+    }
+    for i in 0..rf_path_num as usize {
+        pwr_track_path(h, dm, &swing, thermal_meter, i);
+    }
+}
+
+/// rtw8822c.c:4461-4481 `rtw8822c_pwr_track`.
+///
+/// **Zwei Takte, nicht einer.** Im ersten wird das Thermometer nur
+/// ANGESTOSSEN, im zweiten gelesen — die Wandlung braucht Zeit, und ein
+/// Wert, der im selben Takt gelesen wird, ist der alte.
+pub fn pwr_track(h: i32, dm: &mut DmInfo, power_track_type: u8,
+                 thermal_meter: &[u8], rf_path_num: u8, channel: u8) {
+    if power_track_type != 0 {
+        return;
+    }
+
+    if !dm.pwr_trk_triggered {
+        phy::write_rf_reg_mix(h, RF_PATH_A, RF_T_METER, 1 << 19, 0x01);
+        phy::write_rf_reg_mix(h, RF_PATH_A, RF_T_METER, 1 << 19, 0x00);
+        phy::write_rf_reg_mix(h, RF_PATH_A, RF_T_METER, 1 << 19, 0x01);
+
+        phy::write_rf_reg_mix(h, RF_PATH_B, RF_T_METER, 1 << 19, 0x01);
+        phy::write_rf_reg_mix(h, RF_PATH_B, RF_T_METER, 1 << 19, 0x00);
+        phy::write_rf_reg_mix(h, RF_PATH_B, RF_T_METER, 1 << 19, 0x01);
+
+        dm.pwr_trk_triggered = true;
+        return;
+    }
+
+    pwr_track_inner(h, dm, thermal_meter, rf_path_num, channel);
+    dm.pwr_trk_triggered = false;
+}
+
+/// rtw8822c.c:2136-2153 `rtw8822c_do_lck` — den Synthesizer neu
+/// einrasten lassen, wenn die Temperatur weit genug gewandert ist.
+fn do_lck(h: i32) {
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_CTRL, RFREG_MASK, 0x80010);
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_PFD, RFREG_MASK, 0x1F0FA);
+    host::delay_us(1);
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_AAC_CTRL, RFREG_MASK, 0x80000);
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_AAC, RFREG_MASK, 0x80001);
+    // read_poll_timeout(…, val != 0x1, 1000, 100000, …): 100 ms Frist,
+    // alle 1000 us nachsehen.
+    let t0 = host::now_us();
+    while host::now_us() - t0 < 100_000 {
+        if phy::read_rf(h, RF_PATH_A, RF_AAC_CTRL, 0x1000) != 0x1 {
+            break;
+        }
+        host::delay_us(1000);
+    }
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_PFD, RFREG_MASK, 0x1F0F8);
+    phy::write_rf_reg_mix(h, RF_PATH_B, RF_SYN_CTRL, RFREG_MASK, 0x80010);
+
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x0f000);
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x4f000);
+    host::delay_us(1);
+    phy::write_rf_reg_mix(h, RF_PATH_A, RF_FAST_LCK, RFREG_MASK, 0x0f000);
+}
