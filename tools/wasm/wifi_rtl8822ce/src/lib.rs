@@ -3075,7 +3075,18 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
 }
 
 /// main.h:250-262 `DESC_RATE*` als Namen — fuer den Bericht.
+/// **Der genaue Name, nicht die Klasse.** Bis 0.31.0 stand hier
+/// „HT MCS8-15" fuer acht verschiedene Raten — fuer die Frage „mit
+/// welcher Rate laeuft die Leitung wirklich" ist das keine Antwort.
 fn rate_name(r: u8) -> &'static str {
+    const HT: [&str; 16] = [
+        "HT MCS0", "HT MCS1", "HT MCS2", "HT MCS3", "HT MCS4", "HT MCS5",
+        "HT MCS6", "HT MCS7", "HT MCS8", "HT MCS9", "HT MCS10", "HT MCS11",
+        "HT MCS12", "HT MCS13", "HT MCS14", "HT MCS15",
+    ];
+    if (DESC_RATEMCS0 as u8..=DESC_RATEMCS0 as u8 + 15).contains(&r) {
+        return HT[(r - DESC_RATEMCS0 as u8) as usize];
+    }
     match r {
         0x00 => "CCK 1M",
         0x01 => "CCK 2M",
@@ -3089,8 +3100,6 @@ fn rate_name(r: u8) -> &'static str {
         0x09 => "OFDM 36M",
         0x0a => "OFDM 48M",
         0x0b => "OFDM 54M",
-        0x0c..=0x13 => "HT MCS0-7",
-        0x14..=0x1b => "HT MCS8-15",
         0x2c..=0x35 => "VHT 1SS",
         0x36..=0x3f => "VHT 2SS",
         _ => "?",
@@ -3168,6 +3177,11 @@ struct LinkStats {
     rx_empty: u32,
     rx_frames: u32,
     rx_full: u32,
+    /// Wie oft die Firmware ihre Ratenwahl gemeldet hat (`C2H_RA_RPT`).
+    /// **Null hiesse: `dm.tx_rate` steht auf 0 = CCK 1M**, und damit
+    /// waehlt `config_swing_table` die CCK-Kurve der
+    /// Sendeleistungs-Nachfuehrung.
+    ra_rpt_n: u32,
 }
 
 impl LinkStats {
@@ -3959,6 +3973,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
         if let Some((rate, mac_id)) = acc.ra_rpt {
+            ls.ra_rpt_n += 1;
             // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
             // `si->ra_report.desc_rate` nur bei passender mac_id.
             d.dm.tx_rate = rate;
@@ -4598,13 +4613,34 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         &mut b, &mut n);
     put("  kanal ", &mut b, &mut n);
     num(link.channel as u32, &mut b, &mut n);
-    put("  rate 0x", &mut b, &mut n);
+    // **Drei Raten, und nur eine davon war bisher zu sehen.**
+    //
+    // `angeboten` ist `link.highest_rate` — einmal bei der Anmeldung aus
+    // den Faehigkeiten des AP gerechnet. Das ist eine BEHAUPTUNG ueber
+    // das Moegliche, und sie stand hier bis 0.31.0 allein als „rate".
+    //
+    // `tx` ist, was die FIRMWARE gewaehlt hat (C2H `RA_RPT`), `rx` was
+    // im Empfangsdeskriptor JEDES Rahmens steht. Das sind die Messungen.
     let hex = b"0123456789abcdef";
-    if n + 2 <= b.len() {
-        b[n] = hex[(link.highest_rate >> 4) as usize];
-        b[n + 1] = hex[(link.highest_rate & 0xf) as usize];
-        n += 2;
-    }
+    let rate_hex = |v: u8, b: &mut [u8; 768], n: &mut usize| {
+        if *n + 2 <= b.len() {
+            b[*n] = hex[(v >> 4) as usize];
+            b[*n + 1] = hex[(v & 0xf) as usize];
+            *n += 2;
+        }
+    };
+    put("  rx ", &mut b, &mut n);
+    put(rate_name(d.dm.curr_rx_rate), &mut b, &mut n);
+    put(" (0x", &mut b, &mut n);
+    rate_hex(d.dm.curr_rx_rate, &mut b, &mut n);
+    put(")  tx ", &mut b, &mut n);
+    put(rate_name(d.dm.tx_rate), &mut b, &mut n);
+    put(" (0x", &mut b, &mut n);
+    rate_hex(d.dm.tx_rate, &mut b, &mut n);
+    put(", ", &mut b, &mut n);
+    num(ls.ra_rpt_n, &mut b, &mut n);
+    put(" meldungen)  angeboten 0x", &mut b, &mut n);
+    rate_hex(link.highest_rate, &mut b, &mut n);
     put("  bw ", &mut b, &mut n);
     num(link.si.bw_mode as u32, &mut b, &mut n);
     put("\nbssid ", &mut b, &mut n);
@@ -4739,6 +4775,14 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(d.dm.total_fa_cnt, &mut b, &mut n);
     put("  rssi ", &mut b, &mut n);
     num(d.dm.min_rssi as u32, &mut b, &mut n);
+    // **Warum die Gegenseite waehlt, was sie waehlt.** Der
+    // Stoerabstand je Pfad steht in jedem Empfangsdeskriptor
+    // (`query_phy_status_page1`) und sagt, ob eine niedrige Rate
+    // berechtigt ist oder ob jemand unter Wert faehrt.
+    put("  snr ", &mut b, &mut n);
+    num(d.dm.rx_snr[0].max(0) as u32, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(d.dm.rx_snr[1].max(0) as u32, &mut b, &mut n);
     // **Zwei Zahlen, die sich gegenseitig aufloesen.** Allein sagt der
     // Quarzwert nichts: erst der Abstand zur efuse sagt, ob die
     // Nachfuehrung ueberhaupt etwas tut. Steht er auf dem efuse-Wert und
