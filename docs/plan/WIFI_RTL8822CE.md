@@ -1811,6 +1811,70 @@ geschoben) — alle drei gefangen.
 (`ieee80211_sta_manage_reorder_buf`). Er ist der Grund fuer das kleine
 Fenster, und mit ihm waeren 64 gefahrlos.
 
+### ✅ ADDBA traegt — und deckt den WAHREN Deckel auf: ein `sleep_ms(1)`
+
+Der Lauf mit 0.29.0:
+
+```
+[netbench] GET: 100 MB in 52953 ms = 15 Mbit/s      (vorher 66977 ms, 12)
+mgmt beacon 822  action 2  ADDBA 2 erbeten, 2 angenommen  sonst 0
+```
+
+**Die Antwort geht hinaus, und der AP hoert auf zu fragen** — zwei
+Anfragen statt hundertachtzig. Die Sitzung steht.
+
+**Aber +26 % ist kein Vielfaches, und die Zahl daneben sagt warum:**
+
+    vorher     72 549 Rahmen in 67,0 s = 1083 Rahmen/s
+    mit ADDBA  72 800 Rahmen in 53,0 s = 1375 Rahmen/s
+
+Der Durchsatz stieg um 26 %, die RAHMENRATE um 26 %, die Groesse je
+Rahmen blieb gleich. **Der Deckel ist eine Rahmenrate, nicht die Luft** —
+728 us je Rahmen, waehrend die Uebertragung bei MCS15/40 MHz etwa 60 us
+dauert.
+
+**Und er stand in unserer eigenen Schleife:**
+
+```rust
+if got == 0 {
+    host::sleep_ms(1);
+}
+```
+
+Zwischen zwei Buendeln ist der Ring einen Moment leer. Beim ERSTEN
+leeren Blick eine ganze Millisekunde zu schlafen heisst: hoechstens
+tausend Mal je Sekunde nachsehen. Rechne es nach:
+
+    1000 Schlafzyklen/s x 1,37 Rahmen je Blick = 1370 Rahmen/s
+    gemessen:                                    1375 Rahmen/s
+
+**Das ist keine Naeherung, das ist die Gleichung.** Und es erklaert
+auch, warum die Aggregation nur +26 % brachte: sie machte die BUENDEL
+groesser, nicht die Blicke haeufiger.
+
+0.30.0 gibt der Schleife die Form, die Linux NAPI nennt: **ein Budget
+leerer Blicke, dann erst schlafen** — und liegen bleiben, bis wieder
+etwas kommt. Unter Last faellt der Zaehler bei jedem Buendel auf null
+und wir schlafen nie; im Leerlauf ist das Budget nach einer knappen
+halben Millisekunde aufgebraucht und der Ruhestrom bleibt, wie er war.
+
+Dazu die Messung, die es belegt — **ohne einen einzigen zusaetzlichen
+Wirtsaufruf**, weil sie nur zaehlt, was die Schleife ohnehin weiss:
+
+    rx-schleife 53000 blicke mit beute, 812345 leer, 1,4 rahmen/blick, 0 volle stapel
+
+* **`rahmen/blick` knapp ueber eins und `volle stapel 0`** → wir sehen
+  schneller nach, als etwas kommt: die Grenze liegt in der Luft oder
+  beim AP.
+* **`volle stapel` gross** → wir kommen nicht nach, und der naechste
+  Posten ist die Zeit IM Empfangspfad (drei Kopien und drei
+  Wirtsaufrufe je Rahmen).
+
+**Der Fehler ist aelter als jede Stufe** — die Zeile stammt aus Stufe 5a,
+wo sie richtig war: dort lief kein Verkehr, und ohne sie haette der
+Kern gebrannt. Sie ist mit der Verbindung mitgewandert und hat dort eine
+andere Bedeutung bekommen.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
