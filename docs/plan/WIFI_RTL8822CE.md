@@ -1759,6 +1759,58 @@ Dazu bleibt der Spitzenwert des Durchsatzes jetzt stehen
 einer Uebertragung binnen Sekunden auf null, und wer danach `wlan`
 tippt, konnte ihn mit nichts vergleichen.
 
+### ✅ Der Deckel hat einen Namen: 180 ADDBA-Anfragen, keine Antwort
+
+Der Zensus aus 0.28.0 hat die Frage in EINEM Lauf beantwortet:
+
+```
+mgmt beacon 2634  action 180 (zuletzt kat 3/akt 0)  ADDBA-anfragen 180  sonst 0
+```
+
+**Jeder einzelne Action-Rahmen der Zelle war ein ADDBA Request.** Der AP
+bittet um die Aggregation, wiederholt es 180 Mal ueber viereinhalb
+Minuten — und wir haben ihn nie auch nur gelesen. Solange er keine
+Zustimmung hat, darf er nicht aggregieren, und jeder der 72 550 Rahmen
+braucht seinen eigenen Medienzugriff. **Das sind die 12 Mbit/s**, drei
+Laeufe lang auf ein Prozent dieselben.
+
+**Und der Weg dahin ist kurz, weil rtw88 ihn gar nicht geht:**
+`rtw_ops_ampdu_action` behandelt `IEEE80211_AMPDU_RX_START` mit einem
+leeren `break`. Die Empfangs-Aggregation ist reine 802.11-Verwaltung —
+mac80211 beantwortet den Request, die Hardware braucht nichts. **Die
+BlockAcks darauf erzeugt die HARDWARE**, und das ist kein Zufall der
+Bauweise: sie muessen eine SIFS nach dem Aggregat hinaus, sechzehn
+Mikrosekunden, und das schafft kein Treiber.
+
+0.29.0 liest den Request (`parse_addba_req`) und antwortet
+(`build_addba_resp`, Feld fuer Feld nach `ieee80211_send_addba_resp` aus
+`net/mac80211/agg-rx.c`).
+
+**Die eine Zahl, die UNSERE Entscheidung ist, und warum sie klein ist:**
+der AP fragt, wieviele Rahmen er offen haben darf; mac80211 antwortet
+mit dem, was sein Umsortierpuffer fasst. **Wir haben keinen** — es gibt
+keinen Nachbau von `ieee80211_sta_manage_reorder_buf`, und ein Rahmen,
+den eine Wiederholung nach hinten schiebt, geht bei uns als solcher an
+TCP. Also **acht**: eine Wiederholung sortiert dann um hoechstens sieben
+um, und das absorbiert jede TCP-Verbindung. Die Aggregation wirkt schon
+bei acht — sie spart sieben von acht Medienzugriffen.
+
+**Und weil das eine Abwaegung und keine Messung ist, steht sie in der
+Konfiguration:** `ampdu:` in `sys/config/wifi` — fehlt die Zeile, gilt
+8; `off` schaltet ab (der Zustand bis 0.28.0); eine ZAHL gibt genau
+dieses Fenster, bis 64. Damit misst der naechste Lauf 8 gegen 32, ohne
+dass jemand neu uebersetzt.
+
+    ADDBA 180 erbeten, 180 angenommen
+
+`framecheck.py` 55 → 58 Faelle, gegen drei absichtliche Feldfehler
+geprueft (TID-Schiebung, Antwort mit Request-Aktionscode, Fenster falsch
+geschoben) — alle drei gefangen.
+
+**Benannt und nicht gebaut:** der Umsortierpuffer
+(`ieee80211_sta_manage_reorder_buf`). Er ist der Grund fuer das kleine
+Fenster, und mit ihm waeren 64 gefahrlos.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach

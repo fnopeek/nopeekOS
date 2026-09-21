@@ -166,6 +166,23 @@ def mgmt(fc0, addr2, cat=None, act=None, n=26):
     return f[:n]
 
 
+# `parse_addba_req` / `build_addba_resp` — 802.11 §9.6.7.2-3.
+#
+# **Ein Feld daneben heisst hier: der AP lehnt ab und wiederholt**, also
+# genau der Zustand von vorher, nur mit mehr Verkehr. Die Vorlage baut
+# den Rahmen Byte fuer Byte nach ieee80211.h.
+def addba_req(token=0x42, amsdu=0, policy=1, tid=5, buf=64, timeout=0,
+              ssn=0x1230, n=33):
+    capab = (amsdu & 1) | ((policy & 1) << 1) | ((tid & 0xf) << 2) \
+            | ((buf & 0x3ff) << 6)
+    f = [0xd0, 0x00, 0x00, 0x00]
+    f += mac(OURS) + mac(THEIRS) + mac(THEIRS)
+    f += [0x30, 0x12]
+    f += [3, 0, token, capab & 0xff, capab >> 8,
+          timeout & 0xff, timeout >> 8, ssn & 0xff, ssn >> 8]
+    return f[:n]
+
+
 MGMT = [
     ("Beacon (Subtyp 8)", mgmt(0x80, THEIRS), (8, None)),
     ("Deauth (Subtyp 12)", mgmt(0xc0, THEIRS), (12, None)),
@@ -281,6 +298,13 @@ def main():
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
                   r"\n(pub fn report_seqnum.*?\n\})", "report_seqnum")
+    stasrc = (HERE / "src" / "sta.rs").read_text()
+    addba_s = grab(stasrc, r"\n(#\[derive\(Clone, Copy\)\]\npub struct AddbaReq.*?\n\})",
+                   "struct AddbaReq")
+    addba_p = grab(stasrc, r"\n(pub fn parse_addba_req.*?\n\})",
+                   "parse_addba_req")
+    addba_b = grab(stasrc, r"\n(pub fn build_addba_resp.*?\n\})",
+                   "build_addba_resp")
     rxsrc = (HERE / "src" / "rx.rs").read_text()
     census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
 
@@ -303,6 +327,15 @@ const CCX_REPORT_V1_SEQNUM_OFF: usize = 8;
 const CCX_REPORT_V1_STATUS_OFF: usize = 9;
 const DOT11_FC_TYPE_MGMT: u8 = 0x00;
 const DOT11_FC_TYPE_MASK: u8 = 0x0c;
+const DOT11_FC_ACTION: u8 = 0xd0;
+const DOT11_ACTION_CAT_BA: u8 = 3;
+const DOT11_ACTION_ADDBA_REQ: u8 = 0;
+const DOT11_ACTION_ADDBA_RESP: u8 = 1;
+const ADDBA_PARAM_AMSDU_MASK: u16 = 0x0001;
+const ADDBA_PARAM_POLICY_MASK: u16 = 0x0002;
+const ADDBA_PARAM_TID_MASK: u16 = 0x003C;
+const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0;
+const WLAN_STATUS_SUCCESS: u16 = 0;
 """
     for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
@@ -347,9 +380,11 @@ const DOT11_FC_TYPE_MASK: u8 = 0x0c;
         for name, f, want in MGMT)
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
-        + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census + """
+        + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
+        + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+const OUR_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
 fn main() {
     let mut bad = 0;
@@ -426,12 +461,54 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    // ── ADDBA: lesen und antworten ────────────────────────────────
+    let req_frame: &[u8] = &[%s];
+    let mut ab = 0;
+    match parse_addba_req(req_frame) {
+        Some(r) => {
+            let f = r.dialog_token == 0x42 && r.tid == 5 && r.buf_size == 64
+                && r.policy == 1 && !r.amsdu && r.ssn == 0x1230;
+            if !f { ab += 1; }
+            println!("  {} ADDBA Request gelesen: token {:#x} tid {} buf {} policy {} ssn {:#x}",
+                     if f { "OK  " } else { "DIFF" }, r.dialog_token, r.tid,
+                     r.buf_size, r.policy, r.ssn);
+
+            let mut out = [0u8; 256];
+            let n = build_addba_resp(&mut out, &OUR_MAC, &BSSID, &r, 8);
+            let capab = u16::from_le_bytes([out[29], out[30]]);
+            let ok = n == 33
+                && out[0] == DOT11_FC_ACTION
+                && out[4..10] == BSSID
+                && out[10..16] == OUR_MAC
+                && out[24] == DOT11_ACTION_CAT_BA
+                && out[25] == DOT11_ACTION_ADDBA_RESP
+                && out[26] == 0x42
+                && u16::from_le_bytes([out[27], out[28]]) == WLAN_STATUS_SUCCESS
+                && (capab & ADDBA_PARAM_AMSDU_MASK) == 0
+                && (capab & ADDBA_PARAM_POLICY_MASK) >> 1 == 1
+                && (capab & ADDBA_PARAM_TID_MASK) >> 2 == 5
+                && (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6 == 8;
+            if !ok { ab += 1; }
+            println!("  {} ADDBA Response gebaut: status 0, tid gespiegelt, unser Fenster 8",
+                     if ok { "OK  " } else { "DIFF" });
+            if !ok { println!("       capab {:#06x} len {}", capab, n); }
+        }
+        None => { ab += 2; println!("  DIFF ADDBA Request wurde NICHT gelesen"); }
+    }
+    // Ein zu kurzer Rahmen darf nichts liefern.
+    let short_ok = parse_addba_req(&req_frame[..30]).is_none();
+    if !short_ok { ab += 1; }
+    println!("  {} ADDBA Request zu kurz -> None",
+             if short_ok { "OK  " } else { "DIFF" });
+    bad += ab;
+
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len();
+                + mgmt.len() + 3;
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
-""" % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases)
+""" % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
+       ", ".join(str(b) for b in addba_req()))
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 

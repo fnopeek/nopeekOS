@@ -110,10 +110,16 @@ Quarznachfuehrung daran** (`rtw8822c_cfo_need_adjust` stellt sie ab,
 solange `bt_disabled` nicht steht): seit 0.25.0 rufen wir dafuer
 `monitor_bt_enable` aus dem Watchdog, was eine benannte Abweichung ist.
 
-### 🟠 4. Keine Aggregation, und wir sagen an, was wir nicht koennen
+### 🟠 4. ~~Keine Aggregation~~ — EMPFANG gebaut in 0.29.0, Senden offen
 
 `rtw_txq_check_agg` · `rtw_txq_push` · `rtw_txq_dequeue` · `rtw_tx_work`
 · `get_tx_ampdu_density` · `get_tx_ampdu_factor` (tx.c).
+
+**Gemessen und bestaetigt:** drei Laeufe zu je 100 MB, jedes Mal
+12 Mbit/s auf ein Prozent genau, und der Mgmt-Zensus aus 0.28.0 nannte
+den Grund — **180 ADDBA Requests des AP, keine Antwort**. 0.29.0
+antwortet, und damit darf der AP auf dem DOWNLINK aggregieren. Der
+Sendeweg (`rtw_txq_*`, ADDBA von UNS aus) bleibt offen.
 
 Kein A-MPDU heisst: der Durchsatz ist gedeckelt, und zwar hart. Der
 schaerfere Teil ist `density`/`factor` — **das sind die Werte, die wir im
