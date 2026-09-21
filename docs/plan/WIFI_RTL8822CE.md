@@ -2075,6 +2075,57 @@ Bliecken, die etwas brachten (rund 1400 je Sekunde), denn bei den
   Uebertragung trennt eine stehende Warteschlange (Bufferbloat) von
   einer langsamen Quittung.
 
+### 📐 Der Treiber ist ES NICHT: 2 us je Rahmen, 0 % der Zeit
+
+```
+rx-schleife 74190 blicke, 1,1 rahmen/blick, 0 volle stapel,
+            0 % der zeit im empfangspfad (2 us je rahmen)
+```
+
+**Zwei Mikrosekunden je Rahmen bei 65 000 Bliecken je Sekunde.** Der
+Empfangspfad ist zu 99,99 % untaetig. Damit ist die letzte Vermutung
+ueber unsere Seite erledigt — und drei Runden Instrumente haben sich
+gelohnt, weil sie jede einzeln ausgeschlossen haben statt einer nach der
+anderen geraten zu werden.
+
+**Die Kette schliesst sich so:**
+
+    1435 Segmente/s rein, 206 ACKs/s raus = 7,0 Segmente je ACK
+
+Das ist `ACK_COALESCE = 8` aus `kernel/src/net/tcp.rs` und damit FOLGE,
+nicht Ursache — bei 1435 Segmenten/s sind 179 ACKs/s genau richtig. Den
+Takt setzt die Luft, und dort steht das Missverhaeltnis:
+
+    ein Aggregat aus 5,7 Rahmen bei MCS7/40 MHz:
+       488 us Luft + 187 us Overhead (Praeambel, SIFS, BlockAck,
+                                      DIFS, mittlerer Backoff) = 675 us
+    gemessen:                                                  = 4000 us
+
+**3,3 Millisekunden je Zyklus gehen fuer nichts drauf** — und der
+Overhead faellt **einmal je AGGREGAT** an, nicht je Rahmen.
+
+**Damit zeigt alles auf die eine Zahl, die ICH gewaehlt habe: das
+Empfangsfenster von 8.** Mit 8 muss der AP alle acht Rahmen neu um das
+Medium kaempfen. Er hatte **64** erbeten; ich gab 8, weil es keinen
+Nachbau von `ieee80211_sta_manage_reorder_buf` gibt und ein umsortierter
+Rahmen bei uns als solcher an TCP geht.
+
+**Und genau diese Sorge war zu gross:** unser TCP puffert Umsortierung
+selbst — `OOO_MAX_BYTES = 2 MiB` in `tcp.rs`, ein Segment vor `rcv_nxt`
+wird aufgehoben statt verworfen. Die Umsortierung, vor der ich das
+Fenster klein gehalten habe, faengt der Stapel darueber ohnehin ab.
+
+**Das Experiment kostet keine neue Version**, weil das Fenster seit
+0.29.0 in der Konfiguration steht:
+
+    spell /sys/config/wifi   ->   ampdu: 64
+
+Erwartung, wenn der Zyklus der Deckel ist: acht Mal weniger Zyklen je
+Rahmen. Bleibt es bei 16 Mbit/s, ist der Zyklus NICHT die Ursache, und
+dann ist der naechste Messpunkt die Luft selbst (Wiederholungen,
+Fremdverkehr auf Kanal 7) — dafuer gibt es `fehlalarm` und die
+Sendequittung.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
