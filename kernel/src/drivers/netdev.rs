@@ -271,6 +271,29 @@ pub fn active() -> Active {
 /// deshalb hierher, wo die Klasse bekannt ist — nicht in eine Globale, die
 /// der zuletzt gestartete Treiber gewinnt.
 pub fn active_rx_rate() -> u32 {
+    // **Ohne `active()`, und das ist Absicht.** `recv_window` ruft das hier
+    // im SEGMENTpfad und unter dem Verbindungsschloss; `active()` nimmt im
+    // Rueckfallzweig `virtio_net::is_available()`, und das ist ein
+    // `DEVICE.lock()`. Eine Schlossnahme dort hat nichts verloren -- sie
+    // waere unter `CONNECTIONS` eine zweite Ordnung, und der Pfad laeuft
+    // auch aus dem Fiber eines Treibers. Gefragt werden nur die zwei
+    // Klassen, die ueberhaupt einen Deckel haben, beide ueber Atomics; die
+    // Reihenfolge ist die von `active()` (WLAN vor USB-LAN, weil ein
+    // assoziiertes WLAN einen Dongle ohne Traegererkennung ausrankt).
+    if wasm_nic_link_up() {
+        // 2x2 HT20 auf 2,4 GHz: brutto 144 Mbit, sauber etwa 64.
+        return 8_000_000;
+    }
+    if rtl8153::is_available() {
+        return rtl8153::rx_rate();
+    }
+    // Echtes Gigabit / virtio / nichts: der Puffer IST das Fenster.
+    u32::MAX
+}
+
+/// Nur noch fuer den Bericht: dieselbe Antwort ueber `active()`.
+#[allow(dead_code)]
+fn active_rx_rate_by_iface() -> u32 {
     match active() {
         // Gigabit-Draht hinter High-Speed-USB. **Offen und benannt:** ueber
         // Kupfer wurden 342 Mbit sauber gemessen (retrans 0), also traegt
