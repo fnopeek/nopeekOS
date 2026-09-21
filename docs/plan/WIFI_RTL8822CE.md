@@ -1539,6 +1539,62 @@ NAMENTLICH in seiner Liste statt als stiller Filter im Code.
 * **Und die Frage dieser Runde:** haelt die Verbindung ueber die
   zwoelf Minuten hinweg, nach denen sie bisher einseitig wurde.
 
+### 0.25.1 — der Zwischenpuffer war halb so gross wie der Ring
+
+**Florians Beobachtung hat den Fall entschieden:** *„sobald ich traffic
+machen würde auf der karte dass die vebindung dann mal stirbt.. solang
+das nur debug oder mal ein ping ist.. scheint es relativ lange zu
+halten."* Verkehrsabhaengig — und das kann die Temperatur nicht erklaeren.
+
+    MGMT_STAGE_BYTES = RTK_DEFAULT_TX_DESC_NUM * TX_SLOT_BYTES  // 128 Plaetze
+    max_num_of_tx_queue(Q_BE) = RTK_BEQ_TX_DESC_NUM             // 256 Eintraege
+
+**Der Datenring hat doppelt so viele Eintraege wie der Zwischenpuffer
+Plaetze.** Ab dem 128. gesendeten Rahmen liegt `wp * TX_SLOT_BYTES`
+hinter dem Puffer. `npk_dma_write` prueft `off + len > pages * 4096` und
+gibt **-1** zurueck — und `tx_write_data` warf den Rueckgabewert weg.
+Geschrieben wurde also nichts, in den Buffer-Deskriptor ging trotzdem
+`dma_phys(stage) + slot`, eine Adresse ausserhalb unserer Belegung, und
+**der Chip holte sich von dort fremden Speicher und sendete ihn.**
+
+Das erklaert jede einzelne Beobachtung des vorigen Laufs, und zwar
+besser als die Drift:
+
+* **Die Schwelle ist eine ANZAHL, keine Zeit** — im Leerlauf (ein Ping,
+  der Debug-Log) dauert es lange bis 128, unter Verkehr Sekunden.
+* `tx queue enq 308 deq 308 backlog 0`, `tx drops full 0` — die
+  Buchfuehrung von `wp`/`rp` stimmte die ganze Zeit; der Chip ARBEITETE
+  die Deskriptoren ab, er las nur aus falschem Speicher.
+* Der Empfang blieb einwandfrei (eigener Ring, eigene Puffer).
+* Nirgends ein Fehler: die einzige Stelle, die es haette merken koennen,
+  war der weggeworfene Rueckgabewert.
+* Und danach ist **jeder zweite Ringumlauf kaputt** (Plaetze 128-255),
+  was von aussen aussieht wie eine Leitung, auf der manchmal etwas
+  durchkommt.
+
+**Drei Dinge gebaut, nicht eins:**
+
+1. Der Puffer wird nach dem GROESSTEN Ring bemessen, der ihn benutzt
+   (`MGMT_STAGE_SLOTS = RTK_BEQ_TX_DESC_NUM`, 256 KB → 512 KB).
+2. **Beide DMA-Schreibzugriffe werden geprueft.** Ein abgelehnter
+   Schreibzugriff ist keine Nebensache, sondern die Meldung, dass Puffer
+   und Ring nicht zusammenpassen — jetzt laut und ohne Senden.
+3. **Eine Zusicherung zur Bauzeit**, die nicht wegdriften kann:
+   `const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_BEQ_TX_DESC_NUM);`
+   Gegengeprueft — mit dem alten Wert faellt der Bau um
+   (`evaluation panicked: assertion failed`). Dazu ein Test, dass ein
+   Rahmen ueberhaupt in einen Platz passt: ein Ueberlauf DORT liefe in
+   den Nachbarplatz und nicht aus dem Puffer heraus, der Kernel saehe
+   nichts davon.
+
+**Was das fuer 0.25.0 heisst:** der Watchdog bleibt richtig und
+notwendig — er fehlte, und die drei Temperaturnachfuehrungen fehlten mit
+ihm. Aber **die Ursache des Sterbens war er nicht.** Der naechste
+Geraetelauf trennt beides sauber: haelt die Verbindung jetzt unter Last,
+war es der Puffer; bleibt ein langsames Einseitigwerden im Leerlauf
+uebrig, ist es die Drift — und `quarz` im Bericht sagt, ob die
+Nachfuehrung dagegen arbeitet.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
