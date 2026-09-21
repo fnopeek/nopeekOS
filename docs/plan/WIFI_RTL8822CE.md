@@ -1928,6 +1928,48 @@ gegen den jetzt protokollierenden Server. Die eine Zeile sagt dann:
   dann ist die Latenz der Posten, und `ping` sagte 10 ms, was fuer WLAN
   im selben Raum viel ist.
 
+### ⚠ Die Rate im Bericht war eine BEHAUPTUNG, keine Messung
+
+Florian: *„der AP liefert mehr als 15 Mbit, ich sitze mit einem Geraet
+direkt neben dem Notebook und habe das x-fache."* Damit ist die
+Gegenseite raus, und der Deckel liegt bei uns.
+
+**Wie Linux die Geschwindigkeit aushandelt — und warum wir sie nicht
+sehen:**
+
+* **Senden:** der Treiber schickt der Firmware KEINE Rate, sondern eine
+  **Maske** (`rtw_fw_send_ra_info`): welche der 64 Raten das Gegenueber
+  kann, nach RSSI beschnitten (`rtw_rate_mask_rssi`). Die **Firmware**
+  waehlt daraus laufend und meldet ihre Wahl als C2H `RA_RPT` zurueck
+  → `dm_info->tx_rate`.
+* **Empfangen:** ausgehandelt wird gar nichts — der AP entscheidet, und
+  die tatsaechliche Rate steht in **jedem Empfangsdeskriptor**
+  (`pkt_stat.rate` → `dm_info->curr_rx_rate`).
+
+**Und genau diese beiden Zahlen haben wir gesammelt und nie gezeigt.**
+Im Bericht stand `rate 0x1b`, und das war `link.highest_rate` — EINMAL
+bei der Anmeldung aus den Faehigkeiten des AP gerechnet. Eine Aussage
+darueber, was moeglich WAERE. Drei Durchsatzlaeufe lang hat sie
+„MCS15" gesagt, waehrend die Leitung mit irgendetwas anderem lief, und
+niemand konnte es sehen.
+
+0.31.0 zeigt die Messungen:
+
+    rx HT MCS7 (0x13)  tx HT MCS15 (0x1b, 412 meldungen)  angeboten 0x1b
+    ... rssi 54  snr 28/26 ...
+
+* **`meldungen 0`** hiesse: die Firmware meldet ihre Wahl gar nicht, und
+  `dm.tx_rate` steht auf **0 = CCK 1M** — womit auch
+  `rtw_phy_config_swing_table` die CCK-Kurve der
+  Sendeleistungs-Nachfuehrung nimmt statt der OFDM-Kurve.
+* **`rx` weit unter `angeboten`** heisst, der AP faehrt uns unter Wert,
+  und dann sagt `snr` daneben, ob er recht hat.
+
+Dazu nennt `rate_name` jetzt die genaue Stufe statt der Klasse — bis
+hierher stand „HT MCS8-15" fuer acht verschiedene Raten, und fuer die
+Frage „mit welcher Rate laeuft die Leitung wirklich" ist das keine
+Antwort.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
