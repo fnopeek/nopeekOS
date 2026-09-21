@@ -3170,6 +3170,12 @@ struct LinkStats {
     /// den Sendering passte.
     addba_resp: u32,
     addba_fail: u32,
+    /// Das Fenster, das wir zuletzt zugestanden haben, und das, um das
+    /// gebeten wurde. **Ohne die Zahl im Bericht ist nicht zu sehen, ob
+    /// eine geaenderte `ampdu:`-Zeile ueberhaupt gelesen wurde** — der
+    /// Treiber liest sie einmal beim Start der Schleife.
+    addba_win: u16,
+    addba_win_req: u16,
     /// Die Form der Empfangsschleife: Bliecke mit und ohne Beute, die
     /// Summe der Rahmen, und wie oft ein Blick den Stapel voll
     /// ausschoepfte.
@@ -3218,6 +3224,7 @@ impl Default for LinkStats {
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
+            addba_win: 0, addba_win_req: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
             rx_us: 0, pump_us0: 0,
             rate_hist: [0; DESC_RATE_MAX], ra_rpt_n: 0,
@@ -4009,6 +4016,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &resp[..n]) {
                     pci::tx_kick_off_queue(h, trx, q);
                     ls.addba_resp += 1;
+                    ls.addba_win = ampdu_buf;
+                    ls.addba_win_req = req.buf_size;
                     if ls.addba_resp <= 3 {
                         host::loud_begin();
                         host::print("[rtl8822ce] ADDBA angenommen: TID ");
@@ -4819,6 +4828,15 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(" erbeten, ", &mut b, &mut n);
     num(ls.addba_resp, &mut b, &mut n);
     put(" angenommen", &mut b, &mut n);
+    if ls.addba_resp > 0 {
+        put(" (fenster ", &mut b, &mut n);
+        num(ls.addba_win as u32, &mut b, &mut n);
+        put(" von ", &mut b, &mut n);
+        num(ls.addba_win_req as u32, &mut b, &mut n);
+        put(" erbetenen)", &mut b, &mut n);
+    } else if ls.addba_req > 0 {
+        put(" — AGGREGATION AUS (`ampdu: off`)", &mut b, &mut n);
+    }
     if ls.addba_fail > 0 {
         put(", ", &mut b, &mut n);
         num(ls.addba_fail, &mut b, &mut n);
