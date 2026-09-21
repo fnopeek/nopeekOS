@@ -25,17 +25,27 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "loft"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "nopeek_widgets",
- "postcard",
+ "postcard 0.7.3",
 ]
 
 [[package]]
 name = "nopeek_widgets"
 version = "0.28.0"
 dependencies = [
- "postcard",
+ "postcard 1.1.3",
+ "serde",
+]
+
+[[package]]
+name = "postcard"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a25c0b0ae06fcffe600ad392aabfa535696c8973f2253d9ac83171924c58a858"
+dependencies = [
+ "postcard-cobs",
  "serde",
 ]
 
@@ -50,6 +60,12 @@ dependencies = [
  "embedded-io 0.6.1",
  "serde",
 ]
+
+[[package]]
+name = "postcard-cobs"
+version = "0.1.5-pre"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c68cb38ed13fd7bc9dd5db8f165b7c8d9c1a315104083a2b10f11354c2af97f"
 
 [[package]]
 name = "proc-macro2"
