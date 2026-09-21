@@ -151,6 +151,37 @@ TXRPT_V1 = [
 # `report_seqnum` — die Nummernvergabe (tx.c:175).
 SEQNUM_STEPS = 6
 
+# `mgmt_census` — zaehlen, was wir verwerfen. Der Fall, auf den es
+# ankommt, ist der ADDBA Request (Kategorie 3, Aktion 0): damit erbittet
+# ein AP die Aggregation, und wir haben ihn bis 0.28.0 nicht einmal
+# gesehen.
+def mgmt(fc0, addr2, cat=None, act=None, n=26):
+    f = [fc0, 0x00, 0x00, 0x00]
+    f += mac(OURS)
+    f += mac(addr2)
+    f += mac(addr2)
+    f += [0x30, 0x12]
+    if cat is not None:
+        f += [cat, act]
+    return f[:n]
+
+
+MGMT = [
+    ("Beacon (Subtyp 8)", mgmt(0x80, THEIRS), (8, None)),
+    ("Deauth (Subtyp 12)", mgmt(0xc0, THEIRS), (12, None)),
+    ("Action: ADDBA Request (kat 3, akt 0)",
+     mgmt(0xd0, THEIRS, 3, 0), (13, (3, 0))),
+    ("Action: ADDBA Response (kat 3, akt 1)",
+     mgmt(0xd0, THEIRS, 3, 1), (13, (3, 1))),
+    ("Action: DELBA (kat 3, akt 2)",
+     mgmt(0xd0, THEIRS, 3, 2), (13, (3, 2))),
+    ("Action ohne Kategorie im Rahmen bleibt Subtyp 13",
+     mgmt(0xd0, THEIRS, 3, 0, n=24), (13, None)),
+    ("fremde Zelle zaehlt nicht", mgmt(0x80, OURS), None),
+    ("Datenrahmen ist kein Verwaltungsrahmen", mgmt(0x08, THEIRS), None),
+    ("Steuerrahmen ist kein Verwaltungsrahmen", mgmt(0xd4, THEIRS), None),
+]
+
 
 def rs(text):
     """Ein Rust-Zeichenkettenliteral. `json.dumps` flieht Nicht-ASCII als
@@ -250,6 +281,8 @@ def main():
                  r"\n(pub fn tx_report_parse.*?\n\})", "tx_report_parse")
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
                   r"\n(pub fn report_seqnum.*?\n\})", "report_seqnum")
+    rxsrc = (HERE / "src" / "rx.rs").read_text()
+    census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
 
     # Die zwei Konstanten kommen aus regs.rs — sonst prueft der Pruefer
     # seine eigene Abschrift. Sie stehen in KEINEM Linux-Header, also
@@ -268,6 +301,8 @@ const CCX_REPORT_V0_STATUS_OFF: usize = 0;
 const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0;
 const CCX_REPORT_V1_SEQNUM_OFF: usize = 8;
 const CCX_REPORT_V1_STATUS_OFF: usize = 9;
+const DOT11_FC_TYPE_MGMT: u8 = 0x00;
+const DOT11_FC_TYPE_MASK: u8 = 0x0c;
 """
     for name, want in (("DOT11_FC_DEAUTH", 0xc0), ("DOT11_FC_DISASSOC", 0xa0)):
         m = re.search(r"pub const %s: u8 = (0x[0-9a-fA-F]+);" % name, regs)
@@ -301,8 +336,18 @@ const CCX_REPORT_V1_STATUS_OFF: usize = 9;
         for v1, group in ((False, TXRPT), (True, TXRPT_V1))
         for name, f, want in group)
 
+    mgmt_cases = "\n".join(
+        '        (%s, &[%s], %s),' % (
+            rs(name), ", ".join(str(b) for b in f),
+            "None" if want is None
+            else "Some((%d, %s))" % (
+                want[0],
+                "None" if want[1] is None
+                else "Some((%d, %d))" % want[1]))
+        for name, f, want in MGMT)
+
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
-        + "\n\n" + txrpt + "\n\n" + seqnum + """
+        + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census + """
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 
@@ -370,11 +415,23 @@ fn main() {
              if seq_ok && n_distinct == 64 { "OK  " } else { "DIFF" },
              n_distinct);
 
-    let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1;
+    let mgmt: &[(&str, &[u8], Option<(u8, Option<(u8, u8)>)>)] = &[
+%s
+    ];
+    for (name, f, want) in mgmt {
+        let got = mgmt_census(f, &BSSID);
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+
+    let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
+                + mgmt.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
-""" % (cases, cfg_cases, name_cases, txrpt_cases)
+""" % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 

@@ -1399,3 +1399,16 @@ pub const VAL_FW_TRIGGER: u32 = 0x1; // reg.h:158
 pub const C2H_CCX_RPT: u32 = 0x0f; // fw.h:67
 pub const CCX_REPORT_V1_SEQNUM_OFF: usize = 8; // fw.h:372
 pub const CCX_REPORT_V1_STATUS_OFF: usize = 9; // fw.h:373
+
+// ── Der Zensus der Verwaltungsrahmen ─────────────────────────────
+// 802.11 §9.2.4.1: Typ 00 = Verwaltung, der Subtyp steht in Bit 7:4.
+pub const DOT11_FC_TYPE_MGMT: u8 = 0x00;
+pub const DOT11_FC_TYPE_MASK: u8 = 0x0c;
+/// §9.4.1.11 Kategorie 3 = Block Ack, Aktion 0 = ADDBA Request.
+/// **Das ist der Rahmen, mit dem ein AP eine Aggregation ERBITTET** —
+/// und in rtw88 beantwortet ihn mac80211, nicht der Treiber
+/// (`IEEE80211_AMPDU_RX_START` ist dort ein leeres `break`).
+pub const DOT11_ACTION_CAT_BA: u8 = 3;
+pub const DOT11_ACTION_ADDBA_REQ: u8 = 0;
+pub const DOT11_ACTION_ADDBA_RESP: u8 = 1;
+pub const DOT11_ACTION_DELBA: u8 = 2;
