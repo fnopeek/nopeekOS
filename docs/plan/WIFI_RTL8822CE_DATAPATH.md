@@ -86,7 +86,7 @@ Strom ist das ein Faktor 3 zu wenig — die Bandbreite erklaert den Deckel
 also NICHT allein, sie nimmt uns nur zusaetzlich das Zwei- bis Zwoelffache
 weg. Beide Befunde gelten nebeneinander.
 
-## Gruppe 1 — die SENDE-Aggregation. 9 Funktionen, `tx.c`
+## ✅ Gruppe 1 — die SENDE-Aggregation. GEBAUT in 0.36.0
 
     rtw_tx_work · __rtw_tx_work · rtw_txq_push · rtw_txq_push_skb
     rtw_txq_dequeue · rtw_txq_check_agg
@@ -109,10 +109,24 @@ geht einzeln raus**, mit vollem Medienzugriff und eigener Quittung. Beim
 Download faellt das kaum auf (TCP-ACKs sind klein), beim Upload ist es der
 ganze Verkehr.
 
-Was fehlt, ist nicht eine Funktion, sondern die SCHICHT: eine
-Software-Warteschlange je TID, aus der ein Arbeiter zieht — bei uns gibt es
-`rtw_ops_wake_tx_queue` gar nicht, der Rahmen geht vom Kernel geradewegs in
-den Ring.
+**Gebaut, und es war kleiner als die Karte vermuten liess.** Nachgesehen
+statt angenommen: `rtw_ops_ampdu_action` (mac80211.c) fasst fuer einen
+SENDE-Block **kein Register an** — `TX_START` sagt „sofort", `TX_OPERATIONAL`
+setzt ein Flagbit. Die ganze Aushandlung ist EIN Verwaltungsrahmen, danach
+ist es EIN Bit im Deskriptor.
+
+Also braucht es die mac80211-Schicht gar nicht, sondern:
+`sta::build_addba_req` + `parse_addba_resp`, ein Zustand am Link
+(`tx_ampdu`), und `data_pkt_info_update` setzt `ampdu_en` samt Faktor und
+Dichte **aus dem HT-Element DES AP** (tx.c:99-113 — sie sagen, was ER
+empfangen kann).
+
+Die fuenf `rtw_txq_*` stehen jetzt namentlich in `ERSETZT`: ein
+struktureller Unterschied, kein fehlendes Stueck. Zensus 15 → 10.
+
+**Drei Zustaende im Bericht, nicht zwei:** „nicht gefragt" · „Nx gefragt,
+KEINE Antwort" · „ABGELEHNT, status N". Ohne diese Unterscheidung sehen
+alle drei nach „keine Aggregation" aus.
 
 ## Gruppe 2 — der PCIe-Link. 8 Funktionen, `pci.c`
 
