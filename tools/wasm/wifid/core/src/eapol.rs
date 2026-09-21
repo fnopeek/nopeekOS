@@ -26,6 +26,10 @@ const O_MIC: usize = 81; // 16 bytes
 const O_KEY_DATA_LEN: usize = 97; // __be16
 const O_KEY_DATA: usize = 99;
 const MIC_LEN: usize = 16;
+/// How long a frame `compute_mic` can hash. A longer one would be
+/// truncated and every MIC would mismatch, so `on_eapol` turns it away
+/// at the door and counts it instead.
+const MIC_BUF: usize = 512;
 
 // key_info bits.
 const KI_PAIRWISE: u16 = 1 << 3;
@@ -89,6 +93,18 @@ pub struct Supplicant {
     gtk: [u8; 32],
     gtk_len: usize,
     gtk_id: u8,
+    /// 802.11-2020 §12.7.2: the Key Replay Counter of the last frame we
+    /// accepted from the Authenticator.
+    rx_replay: [u8; 8],
+    rx_replay_set: bool,
+    /// Frames dropped as replays, and frames seen with the SAME counter
+    /// as the last one.
+    pub replays_dropped: u32,
+    pub replays_repeated: u32,
+    /// Frames whose Key Descriptor Version we cannot compute a MIC for.
+    pub bad_key_version: u32,
+    /// Frames too long for `compute_mic`'s buffer.
+    pub too_long: u32,
 }
 
 impl Supplicant {
@@ -107,6 +123,12 @@ impl Supplicant {
             gtk: [0; 32],
             gtk_len: 0,
             gtk_id: 0,
+            rx_replay: [0; 8],
+            rx_replay_set: false,
+            replays_dropped: 0,
+            replays_repeated: 0,
+            bad_key_version: 0,
+            too_long: 0,
         };
         s.rsn_ie[..s.rsn_len].copy_from_slice(&rsn_ie[..s.rsn_len]);
         s
@@ -119,10 +141,63 @@ impl Supplicant {
         if self.gtk_len > 0 { Some((&self.gtk[..self.gtk_len], self.gtk_id)) } else { None }
     }
 
+    /// 802.11-2020 §12.7.2 — the Key Replay Counter.
+    ///
+    /// **We drop a frame whose counter is STRICTLY LOWER than the last
+    /// one we accepted, and only count one that repeats it.** The strict
+    /// reading ("already used → discard") would also drop a legitimate
+    /// retransmission, and a handshake that cannot be retried is worse
+    /// than a replay window on a network we already trust with the PSK.
+    /// `replays_repeated` says whether tightening it would be safe here;
+    /// until that number has been seen on the device, guessing would put
+    /// a working path at risk.
+    fn replay_ok(&mut self, frame: &[u8]) -> bool {
+        let got = &frame[O_REPLAY..O_REPLAY + 8];
+        if !self.rx_replay_set {
+            return true;
+        }
+        match got.cmp(&self.rx_replay[..]) {
+            core::cmp::Ordering::Less => {
+                self.replays_dropped += 1;
+                false
+            }
+            core::cmp::Ordering::Equal => {
+                self.replays_repeated += 1;
+                true
+            }
+            core::cmp::Ordering::Greater => true,
+        }
+    }
+
+    fn remember_replay(&mut self, frame: &[u8]) {
+        self.rx_replay.copy_from_slice(&frame[O_REPLAY..O_REPLAY + 8]);
+        self.rx_replay_set = true;
+    }
+
+    /// Key Descriptor Version 2 is HMAC-SHA1-128 over the frame; that is
+    /// the only one `compute_mic` can do. Version 3 (AES-128-CMAC, used
+    /// with PMF and the SHA256 AKMs) would need a different MIC, and we
+    /// never offer those AKMs — so a version we cannot compute means the
+    /// AP chose something we did not ask for. Say so instead of failing
+    /// on a MIC that was never going to match.
+    fn key_version_ok(&mut self, ki: u16) -> bool {
+        if ki & KI_TYPE_MASK == 2 {
+            return true;
+        }
+        self.bad_key_version += 1;
+        false
+    }
+
     /// Feed one received EAPOL-Key frame; build the reply into `out`.
     pub fn on_eapol(&mut self, frame: &[u8], out: &mut [u8]) -> Step {
         if frame.len() < O_KEY_DATA || frame[1] != 0x03 {
             return Step::Ignore; // not EAPOL-Key
+        }
+        if frame.len() > MIC_BUF {
+            // `compute_mic` would hash a truncated frame and every MIC
+            // would mismatch. A named limit beats a silent wrong answer.
+            self.too_long += 1;
+            return Step::Ignore;
         }
         let ki = be16(frame, O_KEY_INFO);
         if ki & KI_ACK == 0 {
@@ -140,9 +215,13 @@ impl Supplicant {
             if !self.have_ptk {
                 return Step::Ignore; // no KCK yet — nothing we could verify with
             }
+            if !self.key_version_ok(ki) || !self.replay_ok(frame) {
+                return Step::Ignore;
+            }
             if !self.verify_mic(frame) {
                 return Step::Fail;
             }
+            self.remember_replay(frame);
             if !self.extract_gtk(frame) {
                 return Step::Fail;
             }
@@ -165,9 +244,13 @@ impl Supplicant {
             if !self.have_ptk {
                 return Step::Fail;
             }
+            if !self.key_version_ok(ki) || !self.replay_ok(frame) {
+                return Step::Ignore;
+            }
             if !self.verify_mic(frame) {
                 return Step::Fail;
             }
+            self.remember_replay(frame);
             if ki & KI_ENCRYPTED != 0 && !self.extract_gtk(frame) {
                 return Step::Fail;
             }
@@ -178,8 +261,8 @@ impl Supplicant {
 
     // MIC = first 16 bytes of HMAC-SHA1(KCK, frame-with-MIC-field-zeroed).
     fn compute_mic(&self, frame: &[u8]) -> [u8; MIC_LEN] {
-        let mut tmp = [0u8; 512];
-        let n = frame.len().min(512);
+        let mut tmp = [0u8; MIC_BUF];
+        let n = frame.len().min(MIC_BUF);
         tmp[..n].copy_from_slice(&frame[..n]);
         for b in &mut tmp[O_MIC..O_MIC + MIC_LEN] {
             *b = 0;

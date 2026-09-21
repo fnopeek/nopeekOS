@@ -192,12 +192,22 @@ Folgen, in der Reihenfolge ihrer Wahrscheinlichkeit:
 * 802.11i verlangt Zufall. Ein vorhersagbarer Nonce ist der Anfang jeder
   Angriffsbeschreibung auf den Vierwegehandschlag.
 
-### 🟡 B. Kein Vergleich des Wiedereinspielzaehlers
+### ✅ B. ~~Kein Vergleich des Wiedereinspielzaehlers~~ — wifid 0.12.0
 
 `on_eapol` liest `O_REPLAY` nur, um ihn zu spiegeln — verglichen wird er
 nie. Ein wiederholtes msg1 leitet die PTK neu ab, ein wiederholtes
 Gruppen-msg1 setzt einen ALTEN Gruppenschluessel wieder ein.
 `wpa_supplicant` fuehrt dafuer `rx_replay_counter`.
+
+**Gebaut — und bewusst nicht in der strengsten Lesart.** Ein Zaehler,
+der KLEINER ist als der letzte angenommene, wird verworfen; einer, der
+ihn WIEDERHOLT, geht durch und wird nur gezaehlt. Die strenge Lesart
+(„already used → discard") wuerde auch eine legitime Wiederholung von
+msg3 wegwerfen, und ein Handschlag, der sich nicht wiederholen laesst,
+ist schlimmer als ein Wiedereinspielfenster in einem Netz, dem wir
+ohnehin den PSK anvertrauen. **`replays_repeated` sagt im naechsten
+Lauf, ob Verschaerfen hier gefahrlos waere** — raten wuerde einen
+funktionierenden Weg aufs Spiel setzen.
 
 ### 🟡 C. Das RSN-Element steht an ZWEI Stellen
 
@@ -207,29 +217,33 @@ dem Anmeldeantrag wird in msg2 gespiegelt und vom AP verglichen. Heute
 sind sie es; nichts prueft es. Genau die Form, vor der die Spec selbst
 warnt („eine zweite Stelle fuer dasselbe wuerde auseinanderdriften").
 
-### 🟡 D. `compute_mic` schneidet bei 512 Bytes ab
+### ✅ D. ~~`compute_mic` schneidet bei 512 Bytes ab~~ — wifid 0.12.0
 
 ```rust
 let n = frame.len().min(512);
 ```
 Ein laengeres msg3 (mehrere KDEs) bekaeme seine MIC ueber die ersten 512
 Bytes gerechnet — Pruefung schlaegt fehl, `Step::Fail`, und im Log steht
-nur „bad MIC". Heute unerreichbar (msg3 ist ~150 Bytes), aber es ist
-eine stille Grenze ohne Meldung.
+nur „bad MIC". Heute unerreichbar (msg3 ist ~150 Bytes), aber es war eine stille
+Grenze ohne Meldung. **Jetzt wird ein zu langer Rahmen an der Tuer
+abgewiesen und gezaehlt** statt abgeschnitten und als MIC-Fehler
+gemeldet.
 
-### 🟡 E. Die Key-Descriptor-Version wird gespiegelt, aber nie geprueft
+### ✅ E. ~~Die Key-Descriptor-Version wird nie geprueft~~ — wifid 0.12.0
 
 Wir echoen die Version des AP und rechnen **immer** HMAC-SHA1. Version 3
 (AES-CMAC, kommt mit PMF und den SHA256-AKM) ergaebe eine falsche MIC.
-Wir bieten die AKM nicht an, der AP sollte sie also nicht waehlen — aber
-es gibt keine Zeile, die es meldet, wenn er es doch tut.
+Wir bieten die AKM nicht an, der AP sollte sie also nicht waehlen —
+**jetzt gibt es die Zeile, die es meldet, wenn er es doch tut.** Vorher
+waere daraus ein „bad MIC" geworden: eine Meldung, die auf den
+Schluessel zeigt statt auf die Verfahrenswahl.
 
 ### 🟡 F. msg3s RSN-Element wird nicht gegen den Beacon geprueft
 
 `wpa_supplicant` vergleicht es (Schutz gegen Herunterstufung). Wir
 entpacken nur den Gruppenschluessel und werfen den Rest weg.
 
-### 🟢 G. Kein `EV_LINK_DOWN`
+### ✅ G. ~~Kein `EV_LINK_DOWN`~~ — wifid 0.11.0
 
 Faellt in `_ => {}`. Beim Wiederverbinden braucht `wifid` einen frischen
 Supplicant — das ist Posten 4 und dort schon benannt.

@@ -67,6 +67,22 @@ static mut LOG_FLUSHED: usize = 0;
 // exactly one commit_root". Over a cable this module is silent and the
 // assumption holds; over WiFi it does not. Suspected in the repeated npkFS
 // damage after OTA over WiFi, not proven.
+/// Eine Dezimalzahl in den Log — ohne alloc, wie alles hier.
+fn log_num(mut v: u32) {
+    let mut b = [0u8; 10];
+    let mut i = 10;
+    if v == 0 {
+        i -= 1;
+        b[i] = b'0';
+    }
+    while v > 0 {
+        i -= 1;
+        b[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    log(unsafe { core::str::from_utf8_unchecked(&b[i..]) });
+}
+
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
     unsafe {
@@ -276,7 +292,26 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
                     }
                 }
                 Step::Fail => log("[wifid] 4-way FAILED (bad MIC / unwrap)\n"),
-                Step::Ignore => {}
+                // **Ein `Ignore` ist seit 0.12.0 nicht mehr immer
+                // harmlos.** Drei Haerteregeln enden hier, und jede
+                // einzelne wuerde sonst als „nichts passiert" aussehen —
+                // genau die Form, die uns schon zweimal einen Lauf
+                // gekostet hat.
+                Step::Ignore => {
+                    if s.replays_dropped > 0 || s.bad_key_version > 0
+                        || s.too_long > 0
+                    {
+                        log("[wifid] EAPOL verworfen: wiedereinspielung ");
+                        log_num(s.replays_dropped);
+                        log(", key-version ");
+                        log_num(s.bad_key_version);
+                        log(", zu lang ");
+                        log_num(s.too_long);
+                        log(" (wiederholungen ");
+                        log_num(s.replays_repeated);
+                        log(")\n");
+                    }
+                }
             }
         }
         Some(EV_LINK_UP) => log("[wifid] link up — connected\n"),
