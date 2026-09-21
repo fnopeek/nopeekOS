@@ -26,6 +26,13 @@ CASES = [
     ("   ssid:   IvyPie_New   \\r\\n", "IvyPie_New"),
     ("# Kommentar\\nssid: A B C\\nband: 2.4\\n", "A B C"),
     ("band: 5\\nssid: X\\n", "X"),
+    # **Doppelter Schluessel: die ERSTE Zeile gewinnt.** Genau daran ist
+    # 2026-09-21 ein Geraetelauf verlorengegangen: `ampdu: 64` stand unter
+    # einem `ampdu: off`, und die untere Zeile war tot — ohne jede Meldung.
+    # Die Regel bleibt (eine Aenderung waere schlimmer als die Regel), aber
+    # `cfg_get` sagt es jetzt.
+    ("ssid: ERSTE\nssid: zweite", "ERSTE"),
+    ("ssid: ERSTE\nband: 5\nssid: zweite\nssid: dritte", "ERSTE"),
     ("ssid:", None),
     ("ssidx: Y", None),
     ("# ssid: Y", None),
@@ -52,9 +59,26 @@ def main():
             'None' if c[1] is None else 'Some("%s")' % c[1])
         for c in CASES)
 
-    main_rs = (m.group(1) + "\n\n" + m2.group(1) + """
+    # `cfg_get` warnt seit 0.43.0 bei doppelten Schluesseln — dafuer
+    # braucht die Huelle einen Wirt. Die Warnung landet auf stdout und
+    # wird von den Faellen unten mitgeprueft.
+    stub = """mod host {
+    pub fn say(s: &str) { print!("{}", s); }
+}
+
+"""
+    main_rs = (stub + m.group(1) + "\n\n" + m2.group(1) + """
 
 fn main() {
+    // Die Warnung bei doppeltem Schluessel — sie ist der eigentliche
+    // Gegenstand, und ein Test, der sie nicht prueft, prueft die Regel
+    // ohne ihren Sinn.
+    println!("--- Warnung erwartet ---");
+    let _ = cfg_get(b"ssid: a\nssid: b", b"ssid");
+    println!("--- Warnung NICHT erwartet ---");
+    let _ = cfg_get(b"ssid: a\nband: 5", b"ssid");
+    println!("--- Ende ---");
+
     let cases: &[(&str, Option<&str>)] = &[
 %s
     ];
