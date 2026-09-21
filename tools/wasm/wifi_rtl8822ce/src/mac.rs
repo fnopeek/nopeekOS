@@ -1025,3 +1025,59 @@ pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
     }
     host::w8(h, REG_CCK_CHECK, value8);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// rtw_mac_flush_queues (mac.c:1020-1080) — die Sendeschlangen leeren
+//
+// Linux tut das vor einem Kanalwechsel und vor dem Trennen. Ohne das
+// gehen nach einem Wechsel noch Rahmen auf dem ALTEN Kanal hinaus — und
+// genau dieser Fall liegt beim Wiederverbinden vor uns.
+// ═══════════════════════════════════════════════════════════════════
+
+/// rtw8822c.c:4943-4957 `prioq_addrs_8822c` — je Prioritaetsschlange
+/// `(rsvd, avail)`, in der Reihenfolge von `enum rtw_dma_mapping`
+/// (EXTRA, LOW, NORMAL, HIGH). `.wsize = true`, also 16-Bit-Zugriffe.
+const PRIOQ_ADDRS: [(u32, u32); 4] = [
+    (REG_FIFOPAGE_INFO_4, REG_FIFOPAGE_INFO_4 + 2), // EXTRA
+    (REG_FIFOPAGE_INFO_2, REG_FIFOPAGE_INFO_2 + 2), // LOW
+    (REG_FIFOPAGE_INFO_3, REG_FIFOPAGE_INFO_3 + 2), // NORMAL
+    (REG_FIFOPAGE_INFO_1, REG_FIFOPAGE_INFO_1 + 2), // HIGH
+];
+
+/// mac.c:1024-1060 `__rtw_mac_flush_prio_queue`.
+///
+/// **Die Schlange ist leer, wenn alle reservierten Seiten wieder
+/// verfuegbar sind.** Fuenf Runden zu 20 ms — Linux' eigener Kommentar
+/// sagt, dass eine volle Schlange bei 100 Mbit/s bis zu zwei Sekunden
+/// braucht und dabei Rahmen fallen koennen; die Frist hier ist also
+/// absichtlich kurz.
+fn flush_prio_queue(h: i32, prio: usize) -> bool {
+    let (rsvd_reg, avail_reg) = PRIOQ_ADDRS[prio];
+    for _ in 0..5 {
+        let rsvd = host::r16(h, rsvd_reg);
+        let avail = host::r16(h, avail_reg);
+        if rsvd == avail {
+            return true;
+        }
+        host::sleep_ms(20);
+    }
+    false
+}
+
+/// mac.c:1062-1069 `rtw_mac_flush_prio_queues` + mac.c:1071-1080
+/// `rtw_mac_flush_queues`.
+///
+/// Wir leeren immer ALLE vier — das ist Linux' Zweig „alle Schlangen
+/// angefordert oder die Zuordnung steht noch nicht", und einen Rufer,
+/// der einzelne Zugangsklassen leeren will, gibt es hier nicht.
+///
+/// Gibt zurueck, wie viele Schlangen in der Frist leer wurden.
+pub fn flush_queues(h: i32) -> u32 {
+    let mut done = 0;
+    for prio in 0..PRIOQ_ADDRS.len() {
+        if flush_prio_queue(h, prio) {
+            done += 1;
+        }
+    }
+    done
+}

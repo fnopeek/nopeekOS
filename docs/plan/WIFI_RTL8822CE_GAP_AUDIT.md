@@ -121,15 +121,20 @@ HT-Element ANSAGEN**, und Linux rechnet sie aus den Faehigkeiten des
 Gegenuebers. Wer etwas ansagt, das er nicht einhaelt, bekommt Bursts,
 die er nicht verarbeitet.
 
-### 🟡 5. Die Sendeschlangen werden nie geleert
+### ✅ 5. ~~Die Sendeschlangen werden nie geleert~~ — 0.27.0
 
 `rtw_mac_flush_queues` · `rtw_mac_flush_prio_queues` ·
 `__rtw_mac_flush_prio_queue` · `get_priority_queues` (mac.c).
 
 Linux leert die TX-FIFOs vor einem Kanalwechsel und vor dem Trennen.
-Ohne das koennen nach einem Kanalwechsel Rahmen auf dem ALTEN Kanal
-hinausgehen — und beim Wiederverbinden (Posten 4) liegt genau dieser
-Fall vor uns.
+Ohne das gehen nach einem Kanalwechsel Rahmen auf dem ALTEN Kanal
+hinaus — und beim Wiederverbinden liegt genau dieser Fall vor uns.
+
+**Portiert in 0.27.0**, samt der Adresstabelle der vier
+Prioritaetsschlangen (`prioq_addrs_8822c`) und der Frist von fuenf mal
+20 ms. Linux' eigener Kommentar sagt, dass eine volle Schlange bei
+100 Mbit/s bis zu zwei Sekunden braucht und dabei Rahmen fallen koennen
+— die kurze Frist ist Absicht, und wir melden, wenn sie nicht reicht.
 
 ### 🟡 6. Die EDCA-Parameter des AP lesen wir nicht
 
@@ -239,8 +244,10 @@ Supplicant — das ist Posten 4 und dort schon benannt.
 3. ✅ **TX-Report** (1) und ✅ **Firmware-Absturz SEHEN** (2) — 0.26.0.
    Die zwei Beobachter zuerst, weil sie nichts kaputtmachen koennen und
    den naechsten Lauf aussagekraeftig machen.
-4. ▶ **Wiederverbinden** (Posten 4 des Plans) samt `EV_LINK_DOWN` (G),
-   `rtw_mac_flush_queues` (5) und der Firmware-HEILUNG (2). Das ist
-   EIN Weg: zurueck in eine stehende Verbindung.
-5. Wiedereinspielzaehler in `wifid` (B).
-6. Dann L6 (Koexistenz) und Aggregation.
+4. ✅ **Wiederverbinden** samt `EV_LINK_DOWN` (G) und
+   `rtw_mac_flush_queues` (5) — 0.27.0 / wifid 0.11.0.
+5. ▶ **Die Firmware-HEILUNG** (`__fw_recovery_work`, 2): erkannt wird
+   der Absturz seit 0.26.0, geheilt noch nicht. Der Weg zurueck steht
+   jetzt (`reconnect`), es fehlt das Hochziehen des Geraets davor.
+6. Wiedereinspielzaehler in `wifid` (B).
+7. Dann L6 (Koexistenz) und Aggregation.

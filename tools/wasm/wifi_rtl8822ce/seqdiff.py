@@ -151,6 +151,13 @@ DEVIATION = {
         "bei uns als Kommentar, damit er nicht wie eine Auslassung "
         "aussieht -- und nicht als Code, weil ein Zweig, den niemand "
         "erreicht, beim naechsten Leser Fragen aufwirft.",
+    "__rtw_mac_flush_prio_queue":
+        "Linux schreibt beide Breiten aus (`wsize ? rtw_read16 : "
+        "rtw_read8`) und der Zaehler sieht deshalb VIER Lesezugriffe; "
+        "der 8822C setzt `.wsize = true` (rtw8822c.c:4956), es gilt "
+        "also immer der 16-Bit-Zweig. Dieselbe Folge auf denselben "
+        "Registern, nur ohne den toten Zweig — wie bei "
+        "rtw_phy_dig_write.",
     "rtw8822c_phy_cck_pd_set_reg":
         "dieselben vier Zugriffe in derselben Folge auf dieselben "
         "Register; Linux indiziert bei JEDEM `rtw8822c_cck_pd_reg[bw]"

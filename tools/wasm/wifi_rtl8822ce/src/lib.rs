@@ -830,8 +830,29 @@ pub extern "C" fn _start() {
             // `EV_READY` liesse `wifid` einen frischen Supplicant bauen,
             // der auf ein msg1 wartet, das der AP nie wieder schickt.
             let caps = rates.as_ref().map(|(c, _)| *c).unwrap_or_default();
-            link_pump(h, &hal, &mut trx, mgmt_buf, l, &mut lstats,
-                      e.addr, 0, rtwdev, &mut h2c, e, &caps, fw_feature);
+            // **Ab hier laeuft die Verbindung, und sie kann enden.**
+            // Bis 0.26.0 kehrte `link_pump` nie zurueck: ein Rauswurf
+            // hinterliess eine tote Leitung, bis jemand neu bootete.
+            // Jetzt ist der Weg zurueck derselbe wie der Weg hin —
+            // Stufe 5e und 5f, ohne den Kernel noch einmal anzumelden.
+            loop {
+                let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
+                                    &mut lstats, e.addr, 0, rtwdev,
+                                    &mut h2c, e, &caps, fw_feature);
+                if end != PumpEnd::LinkLost {
+                    break;
+                }
+                let (Some(t), Some(b)) = (_txpwr.as_ref(), target.as_ref())
+                else {
+                    break;
+                };
+                if !reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t, b,
+                              l, &mut lstats, rtwdev, &mut linked) {
+                    // Nicht aufgeben, aber auch nicht im Kreis rennen:
+                    // ein AP, der gerade neu startet, braucht Sekunden.
+                    host::sleep_ms(RECONNECT_BACKOFF_MS);
+                }
+            }
         }
     }
 
@@ -3116,6 +3137,8 @@ struct LinkStats {
     tx_no_report: u32,
     /// Die Firmware hat sich selbst fuer tot erklaert.
     fw_crash: u32,
+    /// Wie oft wir die Verbindung neu aufgebaut haben.
+    reconnects: u32,
 }
 
 impl LinkStats {
@@ -3620,10 +3643,20 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
 /// Sie bekommt Link UND Zaehler von aussen, damit Stufe 6b dort fortsetzt,
 /// wo 6a aufgehoert hat.
 #[allow(clippy::too_many_arguments)]
+#[derive(PartialEq, Clone, Copy)]
+enum PumpEnd {
+    /// Die Frist von Stufe 6a ist abgelaufen — der Normalfall dort.
+    Frist,
+    /// Die Zelle hat uns verloren (Deauth/Disassoc) oder die Firmware
+    /// hat sich fuer tot erklaert. Der Rufer verbindet neu.
+    LinkLost,
+}
+
 fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
              frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
-             e: &efuse::Efuse, caps: &sta::PeerCaps, fw_feature: u32) {
+             e: &efuse::Efuse, caps: &sta::PeerCaps, fw_feature: u32)
+    -> PumpEnd {
     chip::read_cck_gi_bnd(h, &mut d.dm);
     static mut RXBUF7: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
@@ -3832,11 +3865,13 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             ls.authorized = false;
             ls.link_up_sent = false;
-            // **Wiederverbunden wird noch nicht.** Der Posten steht im
-            // Plan und braucht die Messung, die diese Zeilen liefern —
-            // ein Reconnect auf eine unbekannte Ursache ist geraten.
-            // Bis dahin laeuft die Schleife weiter, und der Bericht sagt
-            // `NICHT verbunden` statt zu schweigen.
+
+            // **Und zurueck zum Rufer.** Stufe 6a laeuft weiter (dort
+            // ist ein Rauswurf ein Befund fuer das Tor, keine Aufgabe);
+            // in 6b baut der Rufer die Verbindung neu auf.
+            if frist_us == 0 {
+                return PumpEnd::LinkLost;
+            }
         }
 
         // ── Kommandos von wifid ──────────────────────────────────
@@ -3980,6 +4015,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                      \x20         ist gebaut, sobald das Wiederverbinden steht.\n");
                     host::loud_end();
                 }
+                if frist_us == 0 {
+                    return PumpEnd::LinkLost;
+                }
             }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
@@ -4022,8 +4060,112 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
     }
 
+    PumpEnd::Frist
 }
 
+
+/// Wie lange gewartet wird, wenn ein Anlauf scheitert. Ein AP, der
+/// gerade neu startet, braucht Sekunden; oefter zu fragen hilft nicht
+/// und fuellt nur den Log.
+const RECONNECT_BACKOFF_MS: u32 = 3000;
+
+/// **Der Weg zurueck in eine stehende Verbindung.**
+///
+/// Er ist derselbe wie der Weg hin — Stufe 5e (Auth + Assoc) und 5f
+/// (Ratenanpassung) —, mit vier Unterschieden, und jeder hat einen
+/// Grund:
+///
+/// * **Kein `netdev_register`.** Der Kernel kennt die Schnittstelle
+///   schon; ein zweites Anmelden gaebe eine zweite.
+/// * **Die Schluessel raus, BEVOR neu verhandelt wird.** Ein alter
+///   Paarschluessel im CAM entschluesselt die ersten Rahmen der neuen
+///   Verbindung falsch, und das sieht aus wie ein kaputter Handschlag.
+/// * **`rtw_mac_flush_queues`** — was noch in den Sendeschlangen liegt,
+///   gehoert zur alten Verbindung und wuerde mit dem alten Schluessel
+///   hinausgehen.
+/// * **Die Paketnummer faengt wieder bei eins an** (802.11 §12.5.3.2:
+///   sie gehoert zum SCHLUESSEL, und der ist gleich ein neuer).
+///
+/// Und ein neues `EV_READY`: `wifid` braucht einen frischen Supplicant
+/// mit neuem SNonce. **Das ist der feine Unterschied zu 0.23.0** — dort
+/// kam das zweite `EV_READY` ohne neue Verbindung, hier gehoert es dazu.
+#[allow(clippy::too_many_arguments)]
+fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             h2c: &mut fw::H2cState, e: &efuse::Efuse,
+             t: &txpower::TxPower, bss: &Bss, link: &mut Link,
+             ls: &mut LinkStats, d: &mut Dev,
+             linked: &mut Option<vif::Vif>) -> bool {
+    ls.reconnects += 1;
+    host::loud_begin();
+    host::print("[rtl8822ce] Verbindung weg — Anlauf ");
+    host::print_dec(ls.reconnects);
+    host::print(" auf \"");
+    print_ssid(&bss.ssid[..bss.ssid_len as usize]);
+    host::print("\", Kanal ");
+    host::print_dec(bss.channel as u32);
+    host::print("\n");
+    host::loud_end();
+
+    // Der Kernel soll nichts mehr in die tote Leitung schieben.
+    host::netdev_set_link(false);
+
+    // Alte Schluessel aus dem CAM. `write_cam` hat sie hineingelegt,
+    // `clear_cam` nimmt sie heraus — Platz fuer Platz, wie sie belegt
+    // wurden.
+    for slot in 0..link.cam.len() {
+        sec::clear_cam(h, &mut link.cam[slot], slot as u8);
+    }
+    link.ptk_installed = false;
+    link.tx_pn = 1;
+    link.seq = 0;
+
+    let leer = mac::flush_queues(h);
+    if leer < 4 {
+        host::loud_begin();
+        host::print("  nur ");
+        host::print_dec(leer);
+        host::print(" von 4 Sendeschlangen wurden leer — der Rest geht
+         \x20         mit dem alten Schluessel verloren
+");
+        host::loud_end();
+    }
+
+    // Stufe 5e: Auth und Assoc, auf demselben Kanal.
+    if !stage5e_connect(h, hal, trx, mgmt_buf, h2c, e, t, e.addr, bss,
+                        linked, d) {
+        return false;
+    }
+    let Some(v) = linked.as_ref() else { return false };
+
+    // Stufe 5f: die Firmware waehlt wieder die Rate.
+    let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
+    if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
+        return false;
+    }
+    if let Some((caps, si)) = rates {
+        link.si = si;
+        link.highest_rate = if caps.ht_supported {
+            tx::highest_ht_tx_rate(&caps.ht_mcs, hal.rf_2t2r)
+        } else {
+            DESC_RATE54M as u8
+        };
+    }
+
+    // Und `wifid` bekommt einen frischen Supplicant.
+    let mut ready = [0u8; 13];
+    ready[0] = EV_READY;
+    ready[1..7].copy_from_slice(&link.bssid);
+    ready[7..13].copy_from_slice(&link.mac);
+    host::wifi_send_event(&ready);
+
+    host::loud_begin();
+    host::print("  wieder angemeldet, AID ");
+    host::print_dec(linked.as_ref().map(|v| v.aid).unwrap_or(0));
+    host::print(" — der Handschlag faengt von vorn an
+");
+    host::loud_end();
+    true
+}
 
 /// Stufe 6a — Aufbau, Handschlag und die ersten acht Sekunden.
 #[allow(clippy::too_many_arguments)]
@@ -4037,8 +4179,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut l = link_setup(hal, bss, caps, si, mac);
     // Acht Sekunden: der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
-    link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000, d, h2c, e,
-              caps, fw_feature);
+    let _ = link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000, d,
+                      h2c, e, caps, fw_feature);
 
     host::print("  EAPOL rein/raus ");
     host::print_dec(ls.eapol_rx);
@@ -4292,6 +4434,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev) {
     num(ls.gtk_set, &mut b, &mut n);
     put("  rauswurf ", &mut b, &mut n);
     num(ls.kicked, &mut b, &mut n);
+    put("  neuverbunden ", &mut b, &mut n);
+    num(ls.reconnects, &mut b, &mut n);
     if ls.kicked > 0 {
         put(" (zuletzt Grund ", &mut b, &mut n);
         num(ls.last_reason as u32, &mut b, &mut n);
