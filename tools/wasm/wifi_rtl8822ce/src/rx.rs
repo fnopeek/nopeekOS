@@ -491,6 +491,9 @@ pub struct WdAcc {
     pub avg_rssi: crate::dm::Ewma,
     /// Der Ratenbericht der Firmware: `(rate, mac_id)`.
     pub ra_rpt: Option<(u8, u8)>,
+    /// Die Sendequittungen dieses Durchlaufs: `(Folgenummer, quittiert)`.
+    pub tx_rpt: [(u8, bool); 8],
+    pub n_tx_rpt: usize,
     /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -502,6 +505,7 @@ impl WdAcc {
             cfo_tail: [0; 4], cfo_cnt: [0; 4], packet_count: 0,
             num_bcn_pkt: 0, num_qry_pkt: [0; DESC_RATE_MAX],
             curr_rx_rate: 0, avg_rssi, ra_rpt: None,
+            tx_rpt: [(0, false); 8], n_tx_rpt: 0,
             rx_unicast: 0, rx_cnt: 0,
         }
     }

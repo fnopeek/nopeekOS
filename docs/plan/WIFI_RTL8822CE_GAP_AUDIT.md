@@ -50,7 +50,7 @@ aus §1b des Plans und kein Rueckstand.
 
 Nach Gewicht, nicht nach Datei.
 
-### 🔴 1. Wir wissen von KEINEM gesendeten Rahmen, ob er ankam
+### ✅ 1. ~~Wir wissen von KEINEM gesendeten Rahmen, ob er ankam~~ — 0.26.0
 
 `rtw_tx_report_enqueue` · `rtw_tx_report_tx_status` ·
 `rtw_tx_report_purge_timer` (tx.c) und der C2H `CCX_TX_RPT` dazu.
@@ -62,18 +62,40 @@ gekostet hat: 0.24 konnte nicht sehen, dass wir hinausgeworfen wurden,
 0.25.1 nicht, dass der Chip fremden Speicher sendete. Ein TX-Report
 haette beides in der ersten Minute gezeigt.
 
-**Das ist der naechste Posten nach dem Wiederverbinden.**
+**Gebaut in 0.26.0.** `rtw_tx_report_enable` (Nummer in Bits 7:2),
+`SPE_RPT` im Deskriptor, der C2H `CCX_TX_RPT` und eine achtplaetzige
+offene Liste statt Linux' `sk_buff`-Warteschlange — wir brauchen den
+Rahmen nicht zurueck, nur die Antwort. Dazu die Frist von 500 ms
+(`RTW_TX_PROBE_TIMEOUT`), die Linux als „failed to get tx report from
+firmware" meldet.
 
-### 🔴 2. Stuerzt die Firmware ab, bleiben wir einfach stehen
+**Eine benannte Abweichung:** Linux fragt nur fuer Rahmen nach, bei
+denen mac80211 `IEEE80211_TX_CTL_REQ_TX_STATUS` setzt (Steuerport).
+Diesen Weg gibt es bei uns nicht, also: **jedes EAPOL** (das sind genau
+die, von denen der AP beim letzten Fehler keins hoerte) **und ein
+Datenrahmen je Watchdog-Takt** als Lebenszeichen. Einer je zwei Sekunden
+kostet nichts und beantwortet „hoert der AP mich ueberhaupt".
+
+Im Bericht: `sendequittung 128 ok, 2 ohne ACK, 0 ohne bericht`.
+
+### ✅ 2. ~~Stuerzt die Firmware ab, bleiben wir einfach stehen~~ — halb, 0.26.0
 
 `rtw_fw_recovery` · `rtw_fw_recovery_work` · `rtw_fw_dump_crash_log` ·
 `rtw_fwcd_*` (main.c) · `rtw8822c_dump_fw_crash` (rtw8822c.c).
 
 Die Firmware meldet ihren eigenen Absturz per C2H (`C2H_HALMAC` mit
 Absturzkennung); Linux zieht daraufhin das ganze Geraet neu hoch. Bei
-uns kommt die Meldung an, wird gezaehlt und verworfen. Von aussen: die
-Leitung wird still, und niemand sagt warum. **Dieselbe Familie wie
-Punkt 1** — ein Ereignis ohne Beobachter.
+uns kam die Meldung an, wurde gezaehlt und verworfen.
+
+**0.26.0 SIEHT es jetzt.** `rtw_fw_c2h_cmd_isr` prueft
+`REG_MCU_TST_CFG == VAL_FW_TRIGGER`; bei Linux ist das eine
+Unterbrechung, bei uns ein Blick im Watchdog — derselbe Test, dieselbe
+Stelle, anderer Takt. Der Bericht sagt `FIRMWARE-ABSTURZ n`, und die
+Konsole schreibt es aus.
+
+**Offen bleibt die HEILUNG** (`__fw_recovery_work`: Geraet neu hochziehen).
+Sie gehoert mit dem Wiederverbinden zusammen — beides ist derselbe Weg
+zurueck in eine stehende Verbindung.
 
 ### 🟠 3. Der Entscheidungsbaum der Koexistenz (= L6, ~78 Funktionen)
 
@@ -211,12 +233,14 @@ Supplicant — das ist Posten 4 und dort schon benannt.
 
 ## Was daraus als naechstes zu tun ist
 
-1. **SNonce aus `npk_random_bytes`** (A) — klein, abgelaufener Blocker,
-   sicherheitsrelevant.
-2. **Eine Pruefung, dass die beiden RSN-Elemente gleich sind** (C) —
-   gehoert in `framecheck.py`, damit es nicht driften kann.
-3. **Wiederverbinden** (Posten 4 des Plans) samt `EV_LINK_DOWN` (G) und
-   `rtw_mac_flush_queues` (5).
-4. **TX-Report** (1) — der Beobachter, der zweimal gefehlt hat.
-5. **Firmware-Absturz erkennen** (2).
+1. ✅ **SNonce aus `npk_random_bytes`** (A) — wifid 0.10.0.
+2. ✅ **Pruefung, dass die beiden RSN-Elemente gleich sind** (C) —
+   `framecheck.py`, gegen eine absichtliche Abweichung geprueft.
+3. ✅ **TX-Report** (1) und ✅ **Firmware-Absturz SEHEN** (2) — 0.26.0.
+   Die zwei Beobachter zuerst, weil sie nichts kaputtmachen koennen und
+   den naechsten Lauf aussagekraeftig machen.
+4. ▶ **Wiederverbinden** (Posten 4 des Plans) samt `EV_LINK_DOWN` (G),
+   `rtw_mac_flush_queues` (5) und der Firmware-HEILUNG (2). Das ist
+   EIN Weg: zurueck in eine stehende Verbindung.
+5. Wiedereinspielzaehler in `wifid` (B).
 6. Dann L6 (Koexistenz) und Aggregation.
