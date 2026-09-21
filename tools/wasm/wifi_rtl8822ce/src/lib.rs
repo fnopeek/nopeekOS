@@ -192,7 +192,7 @@ pub extern "C" fn _start() {
     // `debug: 1` in `sys/config/wifi` holt sie zurueck. Die Datei ist
     // dieselbe, aus der Stufe 5c ihr `ssid:` liest — eine zweite Stelle
     // fuer dieselbe Sache driftet.
-    let verbose = read_debug_flag();
+    let (verbose, cfg_rc) = read_debug_flag();
     host::set_verbose(verbose);
 
     host::print("[rtl8822ce] Realtek RTL8822CE (rtw88) v");
@@ -201,9 +201,20 @@ pub extern "C" fn _start() {
     if !verbose {
         // Die eine Zeile, die auch ein stiller Lauf schuldet: dass es
         // den Treiber gibt und wo der Schalter steht.
+        //
+        // **Und ob die Datei ueberhaupt gelesen wurde.** `wifid`
+        // dokumentiert fuer genau dieses Objekt ein Rennen mit dem Rest
+        // des Bootvorgangs; ohne diesen Zusatz saehe ein gescheiterter
+        // Lesezugriff aus wie ein Schalter, der nicht greift — und das
+        // kostet einen ganzen Geraetelauf.
         host::say("[rtl8822ce] v");
         host::say(DRIVER_VERSION);
-        host::say(" — still (`debug: 1` in sys/config/wifi zeigt die Stufen)\n");
+        if cfg_rc > 0 {
+            host::say(" — still (`debug: 1` in sys/config/wifi zeigt die Stufen)\n");
+        } else {
+            host::say(" — still, und sys/config/wifi war beim Start nicht\n\
+             \x20         lesbar: ein `debug: 1` darin greift dann NICHT\n");
+        }
     }
 
     // ── PCI binden ───────────────────────────────────────────────
@@ -3756,16 +3767,23 @@ fn stage_line(ok: bool, green: &str, red: &str) {
 /// `debug:` aus `sys/config/wifi`. Fehlt die Datei oder die Zeile, ist
 /// die Antwort NEIN: ein Treiber im Autostart schweigt, bis jemand
 /// danach fragt.
-fn read_debug_flag() -> bool {
+///
+/// **Gibt den Rueckgabewert des Lesezugriffs mit zurueck**, und das ist
+/// kein Beiwerk: „kein `debug:` in der Datei" und „die Datei war nicht
+/// da" fuehren zum selben Schweigen und haben verschiedene Heilungen.
+/// Ein NEIN aus einem gescheiterten Lesezugriff ist keine Antwort auf
+/// die gestellte Frage.
+fn read_debug_flag() -> (bool, i32) {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
     if n <= 0 {
-        return false;
+        return (false, n);
     }
-    match cfg_get(&cfg[..n as usize], b"debug") {
+    let on = match cfg_get(&cfg[..n as usize], b"debug") {
         Some((a, b)) => cfg_on(&cfg[a..b]),
         None => false,
-    }
+    };
+    (on, n)
 }
 
 /// `on` oder `1` — dieselbe Regel, die `wifi_ax200` fuer `ampdu:` und
