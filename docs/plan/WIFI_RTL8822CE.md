@@ -1970,6 +1970,51 @@ hierher stand „HT MCS8-15" fuer acht verschiedene Raten, und fuer die
 Frage „mit welcher Rate laeuft die Leitung wirklich" ist das keine
 Antwort.
 
+### ✅ Ein Gruppen-Neuschluessel MITTEN im Download — und ein Instrument, das log
+
+**Die wichtigere Nachricht des Laufs**, und Florian hat sie zuerst
+gesehen: `[wifid] group rekey` waehrend einer laufenden 100-MB-
+Uebertragung, `neuschluessel 1 empfangen, 1 beantwortet`, `gtk 2`,
+`rauswurf 0`. **Genau das Szenario, an dem die Verbindung vor 0.25.1
+gestorben ist** — der AP erneuert den Gruppenschluessel, und wer nicht
+antwortet, fliegt. Jetzt unter Volllast ueberstanden, ohne einen
+verlorenen Rahmen.
+
+**Und die neue Ratenzeile hat gleich ihre eigene Luege gezeigt:**
+
+    rx OFDM 6M (0x04)   tx HT MCS4 (0x10, 6 meldungen)   angeboten 0x1b
+
+6 Mbit/s kann nicht stimmen, und das sagt die Arithmetik ohne einen
+zweiten Lauf:
+
+    1445 Byte bei 6 Mbit/s   = 1927 us je Rahmen
+    gemessen 1312 Rahmen/s   =  762 us je Rahmen
+
+**`curr_rx_rate` ist die Rate des LETZTEN Rahmens.** Eine halbe Sekunde
+nach dem Download ist das ein Beacon — und Beacons gehen auf der
+niedrigsten Grundrate. Der Bericht zeigte den Takt der Zelle, nicht den
+der Daten.
+
+Linux sammelt die richtige Zahl, und ich hatte sie portiert und nie
+gezeigt: **`cur_pkt_count.num_qry_pkt[rate]`**, ein Histogramm je Rate,
+das `rtw_phy_stat_rate_cnt` jeden Watchdog-Takt nach `last_pkt_count`
+schiebt. debugfs liest es LAUFEND mit; wir haben kein debugfs, und ein
+Bericht, den jemand NACH einer Uebertragung liest, braucht eine Zahl,
+die sie ueberlebt. **0.31.1 summiert es ueber die ganze Verbindung** und
+nennt die haeufigste Rate:
+
+    rx HT MCS7 (0x13 in 64812 von 65700, zuletzt OFDM 6M)
+
+Bei 65 000 Datenrahmen gegen 900 Beacons ist das kein Zweifelsfall
+mehr. Und `zuletzt` steht daneben, damit die Verwechslung, die mich
+erwischt hat, sichtbar bleibt statt verschwunden zu sein.
+
+**Der zweite Befund der Zeile ist echt:** `tx HT MCS4` mit nur **6**
+Meldungen in 46 Watchdog-Takten. Die Firmware waehlt fuer UNSEREN
+Sendeweg MCS4, obwohl wir MCS15 anbieten — und `snr 27/19` sagt, dass
+Pfad B deutlich schlechter steht als Pfad A. Das ist die naechste Spur,
+sobald die Empfangsrate bekannt ist.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach
