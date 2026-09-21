@@ -498,6 +498,10 @@ pub struct WdAcc {
     /// verworfen.
     pub c2h_seen: [u8; 8],
     pub n_c2h_seen: usize,
+    /// Verwaltungsrahmen dieses Durchlaufs: `(Subtyp, (Kategorie,
+    /// Aktion))`, `0xff` wo es keine Aktion gibt.
+    pub mgmt: [(u8, (u8, u8)); 8],
+    pub n_mgmt: usize,
     /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -511,6 +515,7 @@ impl WdAcc {
             curr_rx_rate: 0, avg_rssi, ra_rpt: None,
             tx_rpt: [(0, false); 8], n_tx_rpt: 0,
             c2h_seen: [0; 8], n_c2h_seen: 0,
+            mgmt: [(0, (0, 0)); 8], n_mgmt: 0,
             rx_unicast: 0, rx_cnt: 0,
         }
     }
@@ -606,4 +611,34 @@ pub fn watchdog_feed(a: &mut WdAcc, st: &RxPktStat, f: &[u8],
         a.avg_rssi.add(st.rssi as u32, crate::dm::EWMA_RSSI_PRECISION,
                        crate::dm::EWMA_RSSI_WEIGHT_RCP);
     }
+}
+
+/// **Der Zensus der Verwaltungsrahmen: zaehlen, was wir verwerfen.**
+///
+/// Dieselbe Regel, die der C2H-Zensus gerade bewiesen hat. Die Frage
+/// dahinter ist konkret: **versucht der AP ueberhaupt, eine Aggregation
+/// aufzubauen?** Er tut das mit einem Action-Rahmen (Kategorie 3,
+/// Aktion 0 = ADDBA Request), und wir verwerfen bis heute jeden
+/// Verwaltungsrahmen ausser Deauth und Disassoc. Kommt keiner, ist der
+/// Durchsatzdeckel woanders; kommt einer, ist die Antwort darauf der
+/// naechste Posten.
+///
+/// Gibt den Subtyp zurueck (0..15), und bei einem Action-Rahmen
+/// zusaetzlich `(Kategorie, Aktion)`.
+pub fn mgmt_census(f: &[u8], bssid: &[u8; 6]) -> Option<(u8, Option<(u8, u8)>)> {
+    if f.len() < 24 || f[0] & DOT11_FC_TYPE_MASK != DOT11_FC_TYPE_MGMT {
+        return None;
+    }
+    if f[10..16] != bssid[..] {
+        return None;
+    }
+    let subtype = f[0] >> 4;
+    // Action = Subtyp 13; Kategorie und Aktion stehen gleich hinter dem
+    // 24 Byte langen Kopf.
+    let act = if subtype == 13 && f.len() >= 26 {
+        Some((f[24], f[25]))
+    } else {
+        None
+    };
+    Some((subtype, act))
 }

@@ -1692,6 +1692,73 @@ Rahmen seinen eigenen Medienzugriff. 9 620 Rahmen in 66 s sind 146 je
 Sekunde — das ist der Deckel eines Senders ohne A-MPDU, nicht der der
 Luft.
 
+### ✅ Der zweite Durchsatzlauf: drei Antworten, eine offene Frage
+
+Mit 0.27.2 + wifid 0.12.0, wieder 100 MB:
+
+```
+[netbench] GET: 100 MB in 66718 ms = 12 Mbit/s
+daten rein/raus 72553/9579   rauswurf 0   neuverbunden 0
+sendequittung 43 ok, 0 ohne ACK, 1 ohne bericht   c2h 0x37x54
+watchdog 54  igi 0x36  quarz 68 (efuse 63)  thermo 32/33  txidx 5  bt aus
+```
+
+**(1) Die Sendequittung lebt, und sie ist gruen.** `43 ok, 0 ohne ACK` —
+der AP hat JEDEN gepruefte Rahmen quittiert. Der Beobachter, der zwei
+Runden lang gefehlt hat, sagt jetzt zum ersten Mal etwas, und was er
+sagt ist: die Sendeseite ist in Ordnung. Das eine `ohne bericht` ist die
+Quittung, die beim Abbruch der Messung noch offen war.
+
+**(2) Die Quarznachfuehrung ARBEITET.** `quarz 68 (efuse 63)` — fuenf
+Stufen ueber dem Werkswert. Das ist genau der Mechanismus, den 0.25.0
+portiert hat und den ich zuerst faelschlich fuer die Ursache des
+Abrisses hielt: er war es nicht (der Zwischenpuffer war es), aber er tut
+echte Arbeit, und ohne die zweite Zahl im Bericht haette man es nicht
+gesehen.
+
+**(3) Der C2H-Zensus hat seinen ersten Fall geloest — mit einem
+Nichts.** `c2h 0x37 x54` ist `C2H_ADAPTIVITY`, die Antwort auf unser
+eigenes Kommando, das der Watchdog alle zwei Sekunden schickt (54 Takte,
+54 Antworten). **Linux tut damit nichts als sie zu loggen**
+(`rtw_fw_adaptivity_result` ist reines `rtw_dbg`), Verwerfen ist also
+richtig. Aus einem Unbekannten ein geklaertes Nichts — genau wofuer der
+Zensus da ist.
+
+**Offen: die 12 Mbit/s, zweimal auf die Sekunde gleich.**
+
+    Lauf 1: 9622 Rahmen in 66,3 s
+    Lauf 2: 9583 Rahmen in 66,7 s   -> 72 553 empfangene Rahmen, 1088/s
+
+Ein Deckel, der sich zweimal auf ein Prozent wiederholt, ist strukturell
+und kein Rauschen. Die naheliegende Erklaerung ist die fehlende
+Aggregation — aber **naheliegend ist nicht gemessen**, und der Weg
+dorthin ist bemerkenswert kurz: `rtw_ops_ampdu_action` behandelt
+`IEEE80211_AMPDU_RX_START` mit einem **leeren `break`**. Die
+Empfangs-Aggregation ist also reine 802.11-Verwaltung — mac80211
+beantwortet den ADDBA Request des AP, die Hardware braucht nichts.
+
+**Also erst die Frage stellen, dann bauen.** 0.28.0 zaehlt die
+Verwaltungsrahmen unserer Zelle, die wir bis heute samt und sonders
+verwerfen — nach Subtyp, und Action-Rahmen zusaetzlich nach Kategorie
+und Aktion:
+
+    mgmt beacon 640  action 3 (zuletzt kat 3/akt 0)  ADDBA-anfragen 3  sonst 0
+
+* **`ADDBA-anfragen > 0`** → der AP WILL aggregieren und wir antworten
+  nicht. Dann ist die Antwort darauf der naechste Posten, und sie ist
+  klein.
+* **`ADDBA-anfragen 0`** → er versucht es gar nicht, und der Deckel
+  liegt woanders. Dann zaehlt als naechstes die Zeit im Empfangspfad,
+  nicht die Luft.
+
+Dieselbe Regel wie beim C2H-Zensus, und sie hat dort gerade ihren Wert
+bewiesen: **zaehlen, was man verwirft.**
+
+Dazu bleibt der Spitzenwert des Durchsatzes jetzt stehen
+(`tp 0/0 Mbit (spitze 1/12)`) — der geglaettete faellt nach dem Ende
+einer Uebertragung binnen Sekunden auf null, und wer danach `wlan`
+tippt, konnte ihn mit nichts vergleichen.
+
 ### ▶ Danach — hier weitermachen
 
 Stand: Netz läuft, **stabil ist es nicht**. Florian: *„er schmeisst uns nach

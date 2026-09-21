@@ -160,6 +160,10 @@ struct TrafficStats {
     rx_cnt: u64,
     tx_throughput: u32,
     rx_throughput: u32,
+    /// Der hoechste je gesehene Wert — der geglaettete faellt nach dem
+    /// Ende einer Uebertragung auf null.
+    tx_peak: u32,
+    rx_peak: u32,
     tx_ewma_tp: dm::Ewma,
     rx_ewma_tp: dm::Ewma,
 }
@@ -169,6 +173,7 @@ impl TrafficStats {
         TrafficStats {
             tx_unicast: 0, rx_unicast: 0, tx_cnt: 0, rx_cnt: 0,
             tx_throughput: 0, rx_throughput: 0,
+            tx_peak: 0, rx_peak: 0,
             tx_ewma_tp: dm::Ewma::new(), rx_ewma_tp: dm::Ewma::new(),
         }
     }
@@ -3145,6 +3150,13 @@ struct LinkStats {
     /// 0.27.2 wurden sie verworfen, und die ausbleibende Sendequittung
     /// war dadurch eine Null ohne Hinweis.
     c2h_ids: [(u8, u32); 4],
+    /// Verwaltungsrahmen unserer Zelle, nach Subtyp gezaehlt (16
+    /// Plaetze, einer je Subtyp — die Liste ist abgeschlossen).
+    mgmt_sub: [u32; 16],
+    /// Und fuer Action-Rahmen die Kategorie/Aktion des letzten sowie
+    /// die Zahl der **ADDBA Requests** — die Frage dieser Runde.
+    addba_req: u32,
+    last_action: (u8, u8),
 }
 
 impl LinkStats {
@@ -3169,6 +3181,17 @@ impl LinkStats {
                 self.tx_acked += 1;
             } else {
                 self.tx_lost += 1;
+            }
+        }
+    }
+
+    /// Einen Verwaltungsrahmen zaehlen.
+    fn note_mgmt(&mut self, subtype: u8, cat: u8, action: u8) {
+        self.mgmt_sub[(subtype & 0xf) as usize] += 1;
+        if cat != 0xff {
+            self.last_action = (cat, action);
+            if cat == DOT11_ACTION_CAT_BA && action == DOT11_ACTION_ADDBA_REQ {
+                self.addba_req += 1;
             }
         }
     }
@@ -3602,6 +3625,8 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
                            dm::EWMA_TP_WEIGHT_RCP);
     d.stats.tx_throughput = d.stats.tx_ewma_tp.read(dm::EWMA_TP_PRECISION);
     d.stats.rx_throughput = d.stats.rx_ewma_tp.read(dm::EWMA_TP_PRECISION);
+    d.stats.tx_peak = d.stats.tx_peak.max(d.stats.tx_throughput);
+    d.stats.rx_peak = d.stats.rx_peak.max(d.stats.rx_throughput);
     d.stats.tx_unicast = 0;
     d.stats.rx_unicast = 0;
     d.stats.tx_cnt = 0;
@@ -3770,6 +3795,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // **Zuerst der Rauswurf.** Er ist ein Verwaltungsrahmen und
             // kaeme durch `rx_to_8023` nicht hindurch. Nur SEHEN hier —
             // gehandelt wird nach dem Ringleeren.
+            // Der Zensus der Verwaltungsrahmen laeuft VOR dem Rauswurf
+            // und schliesst ihn ein — ein Deauth ist auch einer.
+            if let Some((sub, act)) = rx::mgmt_census(f, &bssid) {
+                if acc.n_mgmt < acc.mgmt.len() {
+                    acc.mgmt[acc.n_mgmt] = (sub, act.unwrap_or((0xff, 0xff)));
+                    acc.n_mgmt += 1;
+                }
+            }
             if let Some(r) = disconnect_reason(f, &bssid) {
                 if ls.gone.is_none() {
                     ls.gone = Some(r);
@@ -3848,6 +3881,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
         for i in 0..acc.n_c2h_seen {
             ls.note_c2h(acc.c2h_seen[i]);
+        }
+        for i in 0..acc.n_mgmt {
+            let (sub, (cat, a)) = acc.mgmt[i];
+            ls.note_mgmt(sub, cat, a);
         }
         if let Some((rate, mac_id)) = acc.ra_rpt {
             // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
@@ -4469,7 +4506,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             b[n + 1] = hex[(id & 0xf) as usize];
             n += 2;
         }
-        put("x", &mut b, &mut n);
+        put(" ", &mut b, &mut n);
+        put(fw::c2h_name(id), &mut b, &mut n);
+        put(" x", &mut b, &mut n);
         num(cnt, &mut b, &mut n);
     }
     if ls.fw_crash > 0 {
@@ -4489,6 +4528,25 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.kicked, &mut b, &mut n);
     put("  neuverbunden ", &mut b, &mut n);
     num(ls.reconnects, &mut b, &mut n);
+    // **Die Frage dieser Runde, in einer Zahl.** Versucht der AP
+    // ueberhaupt, eine Aggregation aufzubauen? Er tut das mit einem
+    // ADDBA Request, und wir verwerfen bis heute jeden
+    // Verwaltungsrahmen ausser Deauth und Disassoc.
+    put("\nmgmt beacon ", &mut b, &mut n);
+    num(ls.mgmt_sub[8], &mut b, &mut n);
+    put("  action ", &mut b, &mut n);
+    num(ls.mgmt_sub[13], &mut b, &mut n);
+    put(" (zuletzt kat ", &mut b, &mut n);
+    num(ls.last_action.0 as u32, &mut b, &mut n);
+    put("/akt ", &mut b, &mut n);
+    num(ls.last_action.1 as u32, &mut b, &mut n);
+    put(")  ADDBA-anfragen ", &mut b, &mut n);
+    num(ls.addba_req, &mut b, &mut n);
+    let sonst: u32 = ls.mgmt_sub.iter().enumerate()
+        .filter(|(i, _)| *i != 8 && *i != 13)
+        .map(|(_, v)| *v).sum();
+    put("  sonst ", &mut b, &mut n);
+    num(sonst, &mut b, &mut n);
     if ls.kicked > 0 {
         put(" (zuletzt Grund ", &mut b, &mut n);
         num(ls.last_reason as u32, &mut b, &mut n);
@@ -4533,10 +4591,19 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put("  bt ", &mut b, &mut n);
     put(if d.cx.bt_disabled { "aus" } else { "AN (Quarz fest)" },
         &mut b, &mut n);
+    // **Der Spitzenwert daneben.** Der geglaettete Wert faellt nach dem
+    // Ende einer Uebertragung binnen Sekunden auf null — wer danach
+    // `wlan` tippt, sieht `0/0` und kann ihn mit nichts vergleichen. Der
+    // Hoechststand bleibt stehen und ist die Zahl, die neben der von
+    // `netbench` steht.
     put("  tp ", &mut b, &mut n);
     num(d.stats.tx_throughput, &mut b, &mut n);
     put("/", &mut b, &mut n);
     num(d.stats.rx_throughput, &mut b, &mut n);
-    put(" Mbit\n", &mut b, &mut n);
+    put(" Mbit (spitze ", &mut b, &mut n);
+    num(d.stats.tx_peak, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num(d.stats.rx_peak, &mut b, &mut n);
+    put(")\n", &mut b, &mut n);
     host::driver_report(&b[..n]);
 }
