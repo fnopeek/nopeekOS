@@ -3200,6 +3200,14 @@ struct LinkStats {
     /// Auslastung des Empfangspfades.
     rx_us: u64,
     pump_us0: u64,
+    /// **Was die Luft kaputt macht**, aufsummiert: `false_alarm_statistics`
+    /// liest je Modulation einen CRC-Zaehler und SETZT IHN ZURUECK. Eine
+    /// Momentaufnahme sagt darueber nichts; die Summe ueber die
+    /// Verbindung sagt, ob der AP staendig wiederholen muss.
+    ht_ok: u64,
+    ht_err: u64,
+    ofdm_ok: u64,
+    ofdm_err: u64,
     rate_hist: [u32; DESC_RATE_MAX],
     /// Wie oft die Firmware ihre Ratenwahl gemeldet hat (`C2H_RA_RPT`).
     /// **Null hiesse: `dm.tx_rate` steht auf 0 = CCK 1M**, und damit
@@ -3227,6 +3235,7 @@ impl Default for LinkStats {
             addba_win: 0, addba_win_req: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
             rx_us: 0, pump_us0: 0,
+            ht_ok: 0, ht_err: 0, ofdm_ok: 0, ofdm_err: 0,
             rate_hist: [0; DESC_RATE_MAX], ra_rpt_n: 0,
         }
     }
@@ -4251,6 +4260,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 ls.rate_hist[i] = ls.rate_hist[i]
                     .saturating_add(d.dm.last_pkt_count.num_qry_pkt[i] as u32);
             }
+            // Dieselbe Stelle, derselbe Grund: `false_alarm_statistics`
+            // hat gerade gelesen UND zurueckgesetzt.
+            ls.ht_ok += d.dm.ht_ok_cnt as u64;
+            ls.ht_err += d.dm.ht_err_cnt as u64;
+            ls.ofdm_ok += d.dm.ofdm_ok_cnt as u64;
+            ls.ofdm_err += d.dm.ofdm_err_cnt as u64;
         }
 
         // ── Einmal je Sekunde: der Bericht fuer `wlan` ───────────
@@ -4870,6 +4885,24 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     }
     put("  fehlalarm ", &mut b, &mut n);
     num(d.dm.total_fa_cnt, &mut b, &mut n);
+    // **Der Zustand der Luft in einer Zahl.** Ein hoher Anteil heisst:
+    // der AP muss staendig wiederholen, und dann ist der Deckel die
+    // Strecke und nicht der Treiber.
+    put("  crc ht ", &mut b, &mut n);
+    num(ls.ht_err as u32, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num((ls.ht_ok + ls.ht_err) as u32, &mut b, &mut n);
+    let anteil = if ls.ht_ok + ls.ht_err > 0 {
+        ls.ht_err * 100 / (ls.ht_ok + ls.ht_err)
+    } else {
+        0
+    };
+    put(" (", &mut b, &mut n);
+    num(anteil as u32, &mut b, &mut n);
+    put(" %)  ofdm ", &mut b, &mut n);
+    num(ls.ofdm_err as u32, &mut b, &mut n);
+    put("/", &mut b, &mut n);
+    num((ls.ofdm_ok + ls.ofdm_err) as u32, &mut b, &mut n);
     put("  rssi ", &mut b, &mut n);
     num(d.dm.min_rssi as u32, &mut b, &mut n);
     // **Warum die Gegenseite waehlt, was sie waehlt.** Der
