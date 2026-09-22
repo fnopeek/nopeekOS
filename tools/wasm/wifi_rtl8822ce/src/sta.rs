@@ -627,14 +627,26 @@ pub fn parse_addba_resp(f: &[u8]) -> Option<AddbaResp> {
 /// Feld fuer Feld.
 ///
 /// **`buf_size` ist unsere Entscheidung, nicht seine.** Der AP fragt, wie
-/// viele Rahmen er offen haben darf; mac80211 antwortet mit dem, was
-/// sein Umsortierpuffer fasst. **Wir haben keinen** — es gibt keinen
-/// Nachbau von `ieee80211_sta_manage_reorder_buf`, und ein Rahmen, den
-/// eine Wiederholung nach hinten schiebt, geht bei uns als solcher an
-/// TCP. Deshalb steht hier eine KLEINE Zahl: bei acht offenen Rahmen
-/// sortiert eine Wiederholung um hoechstens sieben um, und das absorbiert
-/// jede TCP-Verbindung. Die Aggregation selbst wirkt schon bei acht —
-/// sie spart sieben von acht Medienzugriffen.
+/// viele Rahmen er offen haben darf; mac80211 antwortet mit
+/// `min(erbeten, hw.max_rx_aggregation_subframes)` — und das ist
+/// `IEEE80211_MAX_AMPDU_BUF_HT` = 64 (main.c:953), von rtw88 NICHT
+/// ueberschrieben.
+///
+/// **64 ist keine Einstellung, sondern die Decke des Protokolls.** Der
+/// komprimierte Block Ack traegt eine Bitmaske von 64 Bit, ein Bit je
+/// Rahmen; mehr gaebe es erst mit 802.11ax (`..._BUF_HE` = 256) oder
+/// 802.11be (`..._BUF_EHT` = 1024). Der 8822CE ist 802.11ac.
+///
+/// Hier stand bis 0.52.2 eine kleine Zahl, und die Begruendung darunter
+/// war: *„Wir haben keinen Umsortierpuffer."* **Seit 0.49.0 haben wir
+/// einen** (`RO_WIN` = 64, derselbe Wert), die Begruendung war also drei
+/// Versionen alt und der Deckel blieb stehen. Wer `ampdu:` nicht in
+/// seiner Konfig hatte, bekam acht offene Rahmen statt
+/// vierundsechzig — und damit hoechstens ein Achtel der Aggregation,
+/// die der AP angeboten hat.
+///
+/// `amsdu` melden wir als NEIN: A-MSDU im A-MPDU waere ein zweiter
+/// Entpacker, den es hier nicht gibt.
 ///
 /// `amsdu` melden wir als NEIN: A-MSDU im A-MPDU waere ein zweiter
 /// Entpacker, den es hier nicht gibt.
