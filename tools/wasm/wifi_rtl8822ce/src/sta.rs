@@ -46,6 +46,10 @@ pub struct PeerCaps {
     pub ht_cap: u16,
     /// `ht_cap.mcs.rx_mask[0..4]`
     pub ht_mcs: [u8; 4],
+    /// Byte 2 des HT-CAPABILITIES-Elements, zerlegt: der
+    /// Laengen-Exponent (Bit 1:0) und der Mindestabstand (Bit 4:2).
+    pub ht_ampdu_factor: u8,
+    pub ht_ampdu_density: u8,
     pub vht_supported: bool,
     pub vht_cap: u32,
     /// `vht_cap.vht_mcs.rx_mcs_map` — was das Gegenueber EMPFANGEN kann.
@@ -87,6 +91,19 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
         } else if id == WLAN_EID_HT_CAPABILITY && len >= 26 {
             c.ht_supported = true;
             c.ht_cap = u16::from_le_bytes([b[0], b[1]]);
+            // Byte 2 sind die A-MPDU-Parameter: Bit 1:0 der
+            // Laengen-Exponent, Bit 4:2 der Mindestabstand. Sie sagen,
+            // wieviel der AP am Stueck EMPFANGEN kann — also genau die
+            // zwei Zahlen, die im Sendedeskriptor stehen muessen.
+            //
+            // **Zerlegt wird hier und nicht beim Gebrauch**, weil das in
+            // Linux auch hier geschieht: `ieee80211_ht_cap_ie_to_sta_ht_cap`
+            // (net/mac80211/ht.c) legt `ampdu_factor` und `ampdu_density`
+            // getrennt ab, und `get_tx_ampdu_factor` in `tx.c` bekommt sie
+            // fertig. Wer die Maske in die Treiberfunktion zieht, hat sie
+            // eine Schicht zu tief.
+            c.ht_ampdu_factor = b[2] & 0x03; // IEEE80211_HT_AMPDU_PARM_FACTOR
+            c.ht_ampdu_density = (b[2] & 0x1c) >> 2; // ..._PARM_DENSITY
             // `ht_cap.mcs` beginnt bei Versatz 3 (nach cap und ampdu).
             c.ht_mcs.copy_from_slice(&b[3..7]);
         } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
@@ -497,6 +514,112 @@ pub fn parse_addba_req(f: &[u8]) -> Option<AddbaReq> {
         buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
         timeout: u16::from_le_bytes([f[29], f[30]]),
         ssn: u16::from_le_bytes([f[31], f[32]]),
+    })
+}
+
+/// tx.c:95-105 `get_tx_ampdu_factor` — und der Kommentar dort ist der
+/// ganze Grund fuer die Rechnung.
+///
+/// Im Deskriptor steht **nicht** der Exponent, sondern `MAX_AGG_NUM`, und
+/// dessen Wert mal zwei ist die Zahl der Rahmen. Die kleinste
+/// A-MPDU-Laenge ist 8 K, also ist die Basis 8/2 = 4.
+///
+/// Exponent 0..3 ergibt damit 3, 7, 15, 31 — und 31 ist genau der groesste
+/// Wert, den das fuenf Bit breite Feld traegt.
+pub fn tx_ampdu_factor(ampdu_factor: u8) -> u8 {
+    // `0x4` und nicht `4`, damit `seqdiff.py` die Zahl gegen Linux'
+    // `BIT(2)` halten kann — der Zahlenvergleich liest Hexliterale.
+    (0x4u8 << ampdu_factor) - 1
+}
+
+/// tx.c:107-110 `get_tx_ampdu_density` — Bit 4:2, der Mindestabstand
+/// zwischen zwei Rahmen im Aggregat.
+pub fn tx_ampdu_density(ampdu_density: u8) -> u8 {
+    ampdu_density
+}
+
+/// Die Fensterbreite, die wir ERBITTEN.
+///
+/// mac80211 nimmt fuer eine Station ohne HE `IEEE80211_MAX_AMPDU_BUF_HT`
+/// (64) und schreibt daneben, warum es nicht die Zahl des Treibers ist:
+/// manche APs stuerzen bei kleineren Werten ab (agg-tx.c:472-481).
+pub const BA_TX_BUF_SIZE: u16 = 64;
+
+/// Den ADDBA **Request** bauen — `ieee80211_send_addba_request`
+/// (net/mac80211/agg-tx.c:61-101), Feld fuer Feld.
+///
+/// **Das ist die Haelfte, die uns die ganze Zeit gefehlt hat.** Seit
+/// 0.29.0 beantworten wir die Bitte des AP und bekommen deshalb
+/// Aggregate — gefragt haben wir nie, also sendet jeder unserer Rahmen
+/// einzeln. Auf einer schnellen Strecke ist das der teuerste Posten, den
+/// es gibt: die Kosten je Sendevorgang sind fast ganz fix (AIFS, Backoff,
+/// Praeambel, SIFS, ACK), und die Datenzeit schrumpft mit der Rate.
+///
+/// `ssn` ist die Folgenummer, ab der die Sitzung zaehlt — sie faehrt um
+/// vier Stellen nach links, weil die unteren vier Bit des Feldes die
+/// Fragmentnummer sind.
+///
+/// **`amsdu` steht auf JA, obwohl wir keine A-MSDU bauen.** Linux setzt
+/// das Bit bedingungslos; es sagt, was der Absender senden DARF, nicht
+/// was er sendet. Wer hier weniger ansagt, bekommt nichts geschenkt und
+/// weicht ohne Grund ab.
+pub fn build_addba_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
+                       tid: u8, dialog_token: u8, ssn: u16,
+                       buf_size: u16, timeout: u16) -> usize {
+    out.fill(0);
+    out[0] = DOT11_FC_ACTION;
+    out[1] = 0x00;
+    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+
+    out[24] = DOT11_ACTION_CAT_BA;
+    out[25] = DOT11_ACTION_ADDBA_REQ;
+    out[26] = dialog_token;
+
+    let capab = ADDBA_PARAM_AMSDU_MASK
+        | ADDBA_PARAM_POLICY_MASK // 1 = sofortiger Block Ack
+        | (((tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
+        | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
+    out[27..29].copy_from_slice(&capab.to_le_bytes());
+    out[29..31].copy_from_slice(&timeout.to_le_bytes());
+    out[31..33].copy_from_slice(&(ssn << 4).to_le_bytes());
+    33
+}
+
+/// Was in einer ADDBA **Response** steht (802.11 §9.6.7.3).
+///
+/// Die Reihenfolge ist eine andere als im Request: hier steht der
+/// STATUS vor den Faehigkeiten, dort die Folgenummer dahinter. Wer die
+/// zwei Rahmen mit einem Parser liest, liest den Status als Fenster.
+#[derive(Clone, Copy)]
+pub struct AddbaResp {
+    pub dialog_token: u8,
+    pub status: u16,
+    pub tid: u8,
+    pub buf_size: u16,
+    pub amsdu: bool,
+    pub timeout: u16,
+}
+
+/// `ieee80211_process_addba_resp` (net/mac80211/agg-tx.c:969-1000), der
+/// lesende Teil.
+pub fn parse_addba_resp(f: &[u8]) -> Option<AddbaResp> {
+    // 24 Kopf + Kategorie + Aktion + Token + Status + capab + timeout
+    if f.len() < 24 + 1 + 1 + 1 + 2 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_ADDBA_RESP {
+        return None;
+    }
+    let capab = u16::from_le_bytes([f[29], f[30]]);
+    Some(AddbaResp {
+        dialog_token: f[26],
+        status: u16::from_le_bytes([f[27], f[28]]),
+        amsdu: capab & ADDBA_PARAM_AMSDU_MASK != 0,
+        tid: ((capab & ADDBA_PARAM_TID_MASK) >> 2) as u8,
+        buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
+        timeout: u16::from_le_bytes([f[31], f[32]]),
     })
 }
 

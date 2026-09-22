@@ -183,6 +183,26 @@ def addba_req(token=0x42, amsdu=0, policy=1, tid=5, buf=64, timeout=0,
     return f[:n]
 
 
+def addba_resp(token=0x42, status=0, amsdu=0, policy=1, tid=5, buf=32,
+               timeout=0, n=33):
+    """Eine ADDBA **Response**.
+
+    **Die Feldfolge ist eine andere als im Request**, und genau daran
+    scheitert ein Parser, der beide Rahmen ueber einen Kamm schert: hier
+    steht der STATUS vor den Faehigkeiten, dort die Folgenummer dahinter.
+    Wer den Request-Parser darauflegt, liest den Status als Fenster und
+    faehrt mit einer Sitzung weiter, die der AP abgelehnt hat.
+    """
+    capab = (amsdu & 1) | ((policy & 1) << 1) | ((tid & 0xf) << 2) \
+            | ((buf & 0x3ff) << 6)
+    f = [0xd0, 0x00, 0x00, 0x00]
+    f += mac(OURS) + mac(THEIRS) + mac(THEIRS)
+    f += [0x30, 0x12]
+    f += [3, 1, token, status & 0xff, status >> 8,
+          capab & 0xff, capab >> 8, timeout & 0xff, timeout >> 8]
+    return f[:n]
+
+
 MGMT = [
     ("Beacon (Subtyp 8)", mgmt(0x80, THEIRS), (8, None)),
     ("Deauth (Subtyp 12)", mgmt(0xc0, THEIRS), (12, None)),
@@ -390,6 +410,30 @@ CHAN = [
      100, 0x07, 1, 106, 0, (100, 0, SC_DONT_CARE)),
 ]
 
+# `txagg_from`: der Wert hinter `txagg:` -> senden wir ADDBA Requests?
+# **Vorgabe AN.** `off` ist der Notausgang, und er fuehrt in den Zustand
+# von 0.51.1 — einen, der am Geraet gemessen ist.
+TXAGG = [
+    ("off -> aus", "off", "false"),
+    ("aus -> aus", "aus", "false"),
+    ("0 -> aus", "0", "false"),
+    ("on -> an", "on", "true"),
+    ("an -> an", "an", "true"),
+    ("1 -> an", "1", "true"),
+    ("leer -> Vorgabe AN", "", "true"),
+    ("Tippfehler bleibt AN, nicht aus", "vieleicht", "true"),
+]
+
+# `tx_ampdu_factor`: der Exponent aus den HT-Faehigkeiten des AP ->
+# `MAX_AGG_NUM` im Deskriptor. tx.c:95-105: die Basis ist 4, weil im Feld
+# die HALBE Rahmenzahl steht und die kleinste A-MPDU-Laenge 8 K ist.
+AMPDU_F = [
+    ("Exponent 0 (8 K) -> 3", 0, 3),
+    ("Exponent 1 (16 K) -> 7", 1, 7),
+    ("Exponent 2 (32 K) -> 15", 2, 15),
+    ("Exponent 3 (64 K) -> 31 = der groesste Wert des 5-Bit-Feldes", 3, 31),
+]
+
 # `bw_cap_from`: der Wert hinter `bw:` -> 0/1/2 (20/40/80 MHz).
 # **Ein unverstandener Wert ist die Vorgabe (80), nicht die schmalste
 # Einstellung** — schmal ist nicht sicherer, nur langsamer.
@@ -419,6 +463,7 @@ def main():
     cent = grab(src, r"\n(const CENTERS_80: \[u8; 7\] = \[[^\]]*\];)",
                 "CENTERS_80")
     bwcapf = grab(src, r"\n(pub fn bw_cap_from.*?\n\})", "bw_cap_from")
+    txaggf = grab(src, r"\n(pub fn txagg_from.*?\n\})", "txagg_from")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
     # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
@@ -435,6 +480,16 @@ def main():
                    "parse_addba_req")
     addba_b = grab(stasrc, r"\n(pub fn build_addba_resp.*?\n\})",
                    "build_addba_resp")
+    addba_rq = grab(stasrc, r"\n(pub fn build_addba_req.*?\n\})",
+                    "build_addba_req")
+    addba_rs = grab(stasrc, r"\n(#\[derive\(Clone, Copy\)\]\npub struct AddbaResp.*?\n\})",
+                    "struct AddbaResp")
+    addba_rp = grab(stasrc, r"\n(pub fn parse_addba_resp.*?\n\})",
+                    "parse_addba_resp")
+    ampdu_f = grab(stasrc, r"\n(pub fn tx_ampdu_factor.*?\n\})",
+                   "tx_ampdu_factor")
+    ba_buf = grab(stasrc, r"\n(pub const BA_TX_BUF_SIZE: u16 = \d+;)",
+                  "BA_TX_BUF_SIZE")
     rxsrc = (HERE / "src" / "rx.rs").read_text()
     census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
 
@@ -532,6 +587,14 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
             rs(name), pri, par, vcw, vc0, mbw, w[0], w[1], w[2])
         for name, pri, par, vcw, vc0, mbw, w in CHAN)
 
+    txagg_cases = "\n".join(
+        '        (%s, %s, %s),' % (rs(name), rs(v), want)
+        for name, v, want in TXAGG)
+
+    ampduf_cases = "\n".join(
+        '        (%s, %d, %d),' % (rs(name), exp, want)
+        for name, exp, want in AMPDU_F)
+
     bwcap_cases = "\n".join(
         '        (%s, %s, %d),' % (rs(name), rs(v), want)
         for name, v, want in BWCAP)
@@ -548,7 +611,10 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + cellw + "\n\n" + vhtw + "\n\n" + cent \
-        + "\n\n" + chanp + "\n\n" + bwcapf + "\n\n" + aspmp \
+        + "\n\n" + chanp + "\n\n" + bwcapf + "\n\n" + txaggf \
+        + "\n\n" + ba_buf + "\n\n" + ampdu_f \
+        + "\n\n" + addba_rq + "\n\n" + addba_rs + "\n\n" + addba_rp \
+        + "\n\n" + aspmp \
         + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
@@ -694,6 +760,85 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    // **Was wir FRAGEN, und was von der Antwort ankommt.** Der Request
+    // wird Byte fuer Byte gegen `ieee80211_send_addba_request` gehalten:
+    // die Folgenummer faehrt um vier Stellen nach links (die unteren vier
+    // Bit sind die Fragmentnummer), und A-MSDU sowie die Policy stehen
+    // auf eins.
+    let mut req = [0u8; 256];
+    let rn = build_addba_req(&mut req, &OUR_MAC, &BSSID, 5, 0x42, 0x123,
+                             BA_TX_BUF_SIZE, 0);
+    let mut ab = 0;
+    let want_capab: u16 = 0x0001 | 0x0002 | (5 << 2) | (64 << 6);
+    let got_capab = u16::from_le_bytes([req[27], req[28]]);
+    let got_ssn = u16::from_le_bytes([req[31], req[32]]);
+    for (name, ok) in [
+        ("ADDBA Request ist 33 Byte lang", rn == 33),
+        ("ADDBA Request: Kategorie 3, Aktion 0", req[24] == 3 && req[25] == 0),
+        ("ADDBA Request: Token durchgereicht", req[26] == 0x42),
+        ("ADDBA Request: capab = amsdu|policy|tid 5|fenster 64",
+         got_capab == want_capab),
+        ("ADDBA Request: Folgenummer 0x123 steht als 0x1230",
+         got_ssn == 0x1230),
+        ("ADDBA Request: Empfaenger ist der AP", req[4..10] == BSSID),
+        ("ADDBA Request: Absender sind wir", req[10..16] == OUR_MAC),
+    ] {
+        if !ok { ab += 1; }
+        println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
+    // Und die Antwort — MIT der anderen Feldfolge.
+    let resp_frame: &[u8] = &[%s];
+    match parse_addba_resp(resp_frame) {
+        Some(r) => {
+            for (name, ok) in [
+                ("ADDBA Response: Token", r.dialog_token == 0x42),
+                ("ADDBA Response: Status 0", r.status == 0),
+                ("ADDBA Response: TID 5", r.tid == 5),
+                ("ADDBA Response: der AP gibt 32 statt 64", r.buf_size == 32),
+            ] {
+                if !ok { ab += 1; }
+                println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
+            }
+        }
+        None => { ab += 4; println!("  DIFF ADDBA Response NICHT gelesen"); }
+    }
+    // **Eine Absage muss als Absage ankommen.** Status 37 ist
+    // „abgelehnt"; wer ihn als Fenster liest, aggregiert gegen einen AP,
+    // der nein gesagt hat.
+    let nack: &[u8] = &[%s];
+    let nack_ok = parse_addba_resp(nack).map(|r| r.status) == Some(37);
+    if !nack_ok { ab += 1; }
+    println!("  {} ADDBA Response mit Status 37 kommt als 37 an",
+             if nack_ok { "OK  " } else { "DIFF" });
+    // Ein ADDBA REQUEST darf hier nicht durchgehen — sonst liest der
+    // Zustandsautomat die Frage des AP als unsere Antwort.
+    let req_as_resp = parse_addba_resp(&[%s]).is_none();
+    if !req_as_resp { ab += 1; }
+    println!("  {} ein ADDBA Request ist keine Response",
+             if req_as_resp { "OK  " } else { "DIFF" });
+    bad += ab;
+
+    let ampdufs: &[(&str, u8, u8)] = &[
+%s
+    ];
+    for (name, exp, want) in ampdufs {
+        let got = tx_ampdu_factor(*exp);
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} max_agg: {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
+    let txaggs: &[(&str, &str, bool)] = &[
+%s
+    ];
+    for (name, v, want) in txaggs {
+        let got = txagg_from(v.as_bytes());
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} txagg: {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
     let bws: &[(&str, &str, usize)] = &[
 %s
     ];
@@ -717,12 +862,17 @@ fn main() {
 
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len()
-                + bws.len();
+                + bws.len() + 7 + 4 + 2 + ampdufs.len() + txaggs.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
-       ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
+       ", ".join(str(b) for b in addba_req()),
+       chan_cases, aspm_cases,
+       ", ".join(str(b) for b in addba_resp()),
+       ", ".join(str(b) for b in addba_resp(status=37)),
+       ", ".join(str(b) for b in addba_req()),
+       ampduf_cases, txagg_cases,
        bwcap_cases, band_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
