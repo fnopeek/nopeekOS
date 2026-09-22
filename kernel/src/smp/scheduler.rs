@@ -208,6 +208,11 @@ fn random_core(max_exclusive: usize) -> usize {
     (s as usize) % max_exclusive
 }
 
+/// Number of worker cores (excludes the BSP).
+pub fn worker_count() -> usize {
+    WORKER_COUNT.load(Ordering::Relaxed)
+}
+
 pub fn init(num_workers: usize) {
     WORKER_COUNT.store(num_workers, Ordering::Release);
     STEAL_RNG.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
