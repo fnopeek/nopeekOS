@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use alloc::collections::BTreeMap;
 use spin::{Mutex, Once};
+use core::sync::atomic::{AtomicU64, Ordering};
 use super::{ipv4, arp};
 
 // RFC 6528 — Initial Sequence Number generation. Predictable ISNs (e.g. a
@@ -803,6 +804,53 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
 /// before, every send was reported as a success and a lost segment simply
 /// vanished.
 pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
+    let t_enter = crate::interrupts::rdtsc();
+    let r = send_inner(handle, data);
+    let dt = crate::interrupts::rdtsc().wrapping_sub(t_enter);
+    if r.is_err() {
+        SEND_WOULDBLOCK.fetch_add(1, Ordering::Relaxed);
+        SEND_BLOCKED_TSC.fetch_add(dt, Ordering::Relaxed);
+    } else {
+        SEND_TSC.fetch_add(dt, Ordering::Relaxed);
+    }
+    r
+}
+
+// ── Wo die Sendezeit hingeht ─────────────────────────────────────
+//
+// **Erzeugerbegrenzt oder fensterbegrenzt — das ist EINE Frage mit zwei
+// entgegengesetzten Antworten**, und wir haben sie bisher aus dem
+// Durchsatz zurueckgerechnet statt sie zu messen. `SEND_WOULDBLOCK` ist
+// der Diskriminator: bleibt er null, haben wir nie auf Quittungen
+// gewartet und der Deckel ist die Zeit in `send_inner`; steht er hoch,
+// ist `MAX_UNACKED` der Deckel und die Konstante gehoert durch
+// `tcp_sndbuf_expand` ersetzt.
+pub static SEND_TSC: AtomicU64 = AtomicU64::new(0);
+pub static SEND_BLOCKED_TSC: AtomicU64 = AtomicU64::new(0);
+pub static SEND_SEGS: AtomicU64 = AtomicU64::new(0);
+pub static SEND_WOULDBLOCK: AtomicU64 = AtomicU64::new(0);
+pub static SEND_MAXBUF: AtomicU64 = AtomicU64::new(0);
+
+/// Die Zaehler auf null, damit eine Messung nur ihren eigenen Lauf sieht.
+pub fn send_stats_reset() {
+    SEND_TSC.store(0, Ordering::Relaxed);
+    SEND_BLOCKED_TSC.store(0, Ordering::Relaxed);
+    SEND_SEGS.store(0, Ordering::Relaxed);
+    SEND_WOULDBLOCK.store(0, Ordering::Relaxed);
+    SEND_MAXBUF.store(0, Ordering::Relaxed);
+}
+
+/// (Takte in send, Takte in abgewiesenen send, Segmente, WouldBlock,
+/// groesster send_buf)
+pub fn send_stats() -> (u64, u64, u64, u64, u64) {
+    (SEND_TSC.load(Ordering::Relaxed),
+     SEND_BLOCKED_TSC.load(Ordering::Relaxed),
+     SEND_SEGS.load(Ordering::Relaxed),
+     SEND_WOULDBLOCK.load(Ordering::Relaxed),
+     SEND_MAXBUF.load(Ordering::Relaxed))
+}
+
+fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
@@ -817,8 +865,13 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 
     // Send in effective-MSS chunks immediately (no Nagle). Effective, not MSS:
     // the option bytes come out of the same 1514.
+    let buf_now = conn.send_buf.len() as u64;
+    if buf_now > SEND_MAXBUF.load(Ordering::Relaxed) {
+        SEND_MAXBUF.store(buf_now, Ordering::Relaxed);
+    }
     let mss = eff_mss(conn);
     for chunk in data.chunks(mss) {
+        SEND_SEGS.fetch_add(1, Ordering::Relaxed);
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk.len() as u32);
         conn.last_send_tick = now;
