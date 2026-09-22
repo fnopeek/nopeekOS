@@ -882,6 +882,7 @@ pub extern "C" fn _start() {
             // hinterliess eine tote Leitung, bis jemand neu bootete.
             // Jetzt ist der Weg zurueck derselbe wie der Weg hin —
             // Stufe 5e und 5f, ohne den Kernel noch einmal anzumelden.
+            let mut fehlschlaege = 0u32;
             loop {
                 let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
                                     &mut lstats, e.addr, 0, rtwdev,
@@ -889,16 +890,41 @@ pub extern "C" fn _start() {
                 if end != PumpEnd::LinkLost {
                     break;
                 }
-                let (Some(t), Some(b)) = (_txpwr.as_ref(), target.as_ref())
-                else {
+                let (Some(t), Some(b)) = (_txpwr.as_ref(), target) else {
                     break;
                 };
-                if !reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t, b,
-                              l, &mut lstats, rtwdev, &mut linked) {
-                    // Nicht aufgeben, aber auch nicht im Kreis rennen:
-                    // ein AP, der gerade neu startet, braucht Sekunden.
-                    host::sleep_ms(RECONNECT_BACKOFF_MS);
+                if reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t, &b,
+                             l, &mut lstats, rtwdev, &mut linked) {
+                    fehlschlaege = 0;
+                    continue;
                 }
+                fehlschlaege += 1;
+                // **Nach zwei Fehlschlaegen suchen wir NEU.**
+                //
+                // Bis 0.55.1 ging der Weg zurueck immer auf DIESELBE
+                // BSSID und denselben Kanal — die eine Zelle, die der
+                // Suchlauf beim Start gewaehlt hatte. Wer aus ihrer
+                // Reichweite laeuft, versuchte es von da an endlos bei
+                // einem AP, der nicht mehr da ist. Und genau dieser
+                // Fall wurde mit der Verbindungswache aus 0.55.0 erst
+                // erreichbar: vorher blieb die tote Leitung einfach
+                // stehen.
+                //
+                // Ein voller Suchlauf ist hier richtig und nicht zu
+                // teuer: die Verbindung ist ohnehin weg, es gibt nichts
+                // zu unterbrechen. **Waehrend sie STEHT**, waere er es —
+                // das ist Teil C und bekommt einen gerichteten Lauf auf
+                // den bekannten Kanaelen.
+                if fehlschlaege >= RESCAN_AFTER_TRIES {
+                    fehlschlaege = 0;
+                    host::say("[rtl8822ce] zweimal vergeblich — die Umgebung wird neu abgesucht\n");
+                    let _ = stage5c_scan(h, &hal, &mut trx, mgmt_buf,
+                                         &mut h2c, e, t, e.addr, fw_feature,
+                                         &mut target, rtwdev);
+                }
+                // Nicht aufgeben, aber auch nicht im Kreis rennen:
+                // ein AP, der gerade neu startet, braucht Sekunden.
+                host::sleep_ms(RECONNECT_BACKOFF_MS);
             }
         }
     }
@@ -5833,6 +5859,12 @@ const RX_SPIN_BUDGET: u32 = 64;
 /// und fuellt nur den Log.
 const RECONNECT_BACKOFF_MS: u32 = 3000;
 
+/// Nach wievielen vergeblichen Anlaeufen die Umgebung neu abgesucht
+/// wird. **Zwei, nicht einer**: ein AP, der gerade neu startet, ist nach
+/// drei Sekunden wieder da, und ein Suchlauf dafuer waere teurer als
+/// das Warten.
+const RESCAN_AFTER_TRIES: u32 = 2;
+
 /// **Der Weg zurueck in eine stehende Verbindung.**
 ///
 /// Er ist derselbe wie der Weg hin — Stufe 5e (Auth + Assoc) und 5f
@@ -5860,6 +5892,24 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              ls: &mut LinkStats, d: &mut Dev,
              linked: &mut Option<vif::Vif>) -> bool {
     ls.reconnects += 1;
+    // **Die Zelle kann eine ANDERE sein.** Seit 0.55.1 sucht der Rufer
+    // nach zwei Fehlschlaegen neu, und dann traegt `bss` eine andere
+    // BSSID, einen anderen Kanal, vielleicht einen anderen Namen. Wer
+    // das hier nicht nachzieht, adressiert seine Datenrahmen weiter an
+    // den AP, den er gerade verloren hat.
+    if link.bssid != bss.bssid {
+        host::loud_begin();
+        host::print("[rtl8822ce] andere Zelle: K");
+        host::print_dec(bss.channel as u32);
+        host::print(" ");
+        print_dbm(bss.best);
+        host::print("\n");
+        host::loud_end();
+    }
+    link.bssid = bss.bssid;
+    link.channel = bss.channel;
+    link.ssid = bss.ssid;
+    link.ssid_len = bss.ssid_len;
     host::loud_begin();
     host::print("[rtl8822ce] Verbindung weg — Anlauf ");
     host::print_dec(ls.reconnects);
