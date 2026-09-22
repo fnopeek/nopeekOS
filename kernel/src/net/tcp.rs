@@ -320,9 +320,22 @@ const MAX_DATA_RETRIES: u8 = 15;
 // Ceiling on unacknowledged bytes held for retransmit. A peer that stops
 // acknowledging must not grow this without bound; `send` refuses past it,
 // which is the backpressure the caller needs to see.
-/// Womit ein Sendepuffer anfaengt, bevor eine Messung vorliegt. Zehn
-/// Segmente sind `TCP_INIT_CWND`, mal Linux' Faktor 2.
-const SND_BUF_INIT: usize = 20 * 1460;
+/// Womit ein Sendepuffer anfaengt, bevor eine Messung vorliegt.
+///
+/// **Hier standen `20 * 1460` — TCP_INIT_CWND mal Linux' Faktor 2 — und
+/// das hat den Upload totgelegt.** `tcp::send` ist alles-oder-nichts,
+/// und `http_post_zeros` uebergibt Stuecke von 64 KiB: 65536 passt nie
+/// in 29200, in keinem Zustand. Wachsen konnte der Puffer nicht, weil
+/// Wachstum an Quittungen fuer Daten haengt, die nie hinausgingen.
+///
+/// Die Regel daraus: **ein Anfangswert unter der Stueckgroesse des
+/// Rufers ist ein Stillstand, kein langsamer Start.** Linux hat das
+/// Problem nicht, weil `tcp_sendmsg` nimmt, was hineinpasst, und eine
+/// KURZE Schreibung meldet; unsere Schnittstelle kann das nicht.
+///
+/// Also der alte Deckel als Anfang. Zusammen mit „nur wachsen" heisst
+/// das: nie schlechter als vor 0.405.0.
+const SND_BUF_INIT: usize = 256 * 1024;
 /// Der Deckel — `sysctl_tcp_wmem[2]`, Linux' Vorgabe.
 const SND_BUF_MAX: usize = 4 * 1024 * 1024;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
@@ -993,7 +1006,13 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
-    if conn.send_buf.len() + data.len() > snd_allowed(conn) {
+    // **Ein leerer Puffer nimmt IMMER an.** Sonst kann ein Aufruf, der
+    // groesser ist als der Deckel, nie durchkommen — und eine Absage,
+    // die sich durch Warten nicht aendert, ist ein Stillstand. Genau das
+    // war der Fehler in 0.405.0.
+    if !conn.send_buf.is_empty()
+        && conn.send_buf.len() + data.len() > snd_allowed(conn)
+    {
         return Err(TcpError::WouldBlock);
     }
 
@@ -1026,8 +1045,13 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 /// module must handle `WouldBlock` itself and sleep between tries.
 pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(), TcpError> {
     let t0 = crate::interrupts::ticks();
-    let mut zuletzt = ACK_GEN.load(Ordering::Relaxed);
     loop {
+        // **VOR dem Versuch gelesen, nicht danach.** Kommt die Quittung
+        // waehrend `send()` laeuft, steht der Zaehler danach schon
+        // hoeher — wer ihn erst dann liest, wartet auf die NAECHSTE, und
+        // wenn es keine mehr gibt, bis zur Frist. Die klassische
+        // verpasste Weckung.
+        let zuletzt = ACK_GEN.load(Ordering::Relaxed);
         match send(handle, data) {
             Err(TcpError::WouldBlock) => {}
             other => return other,
@@ -1046,7 +1070,6 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
         // `yield_ready` meldet `false`, wenn wir gar nicht in einem Fiber
         // laufen (Core 0, OTA); dort treiben wir den Stapel selbst an,
         // sonst kaeme die Quittung nie.
-        zuletzt = ACK_GEN.load(Ordering::Relaxed);
         while ACK_GEN.load(Ordering::Relaxed) == zuletzt {
             if crate::interrupts::ticks() - t0 > timeout_ticks {
                 return Err(TcpError::Timeout);
