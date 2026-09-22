@@ -37,6 +37,20 @@ pub fn uptime_secs() -> u64 {
     ticks() / 100
 }
 
+/// Microseconds since boot, from the TSC.
+///
+/// **`ticks()` is 100 Hz, and that is too coarse for a receive-side RTT.**
+/// On this link an RTT of 5 ms measures as "0 ticks" and one of 20 ms as
+/// one or two — so any window derived from it is a step function with
+/// 10 ms steps. Linux' DRS (`tcp_rcv_space_adjust`) compares an elapsed
+/// time against `rcv_rtt_est.rtt_us`, in microseconds; this is that clock.
+pub fn uptime_us() -> u64 {
+    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let per_us = (freq / 1_000_000).max(1);
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    rdtsc().saturating_sub(boot) / per_us
+}
+
 /// Read CPU Time Stamp Counter (works on all x86_64, no PIC needed).
 pub fn rdtsc() -> u64 {
     let lo: u32;

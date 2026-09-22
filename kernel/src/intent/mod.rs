@@ -2028,7 +2028,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 if f > 0 {
                     kprintln!("[npk] fenster: fest {} KB", f / 1024);
                 } else {
-                    kprintln!("[npk] fenster: automatisch (Kapazitaet x RTT)");
+                    kprintln!("[npk] fenster: automatisch (DRS — was die Anwendung je RTT abholt)");
                 }
                 kprintln!("[npk]   zuletzt angeboten {} KB, Deckel {} KB, srtt {} Takte (={} ms)",
                           w / 1024, cap / 1024, srtt, srtt * 10);
