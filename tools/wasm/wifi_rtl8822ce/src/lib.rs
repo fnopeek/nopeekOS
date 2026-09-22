@@ -3930,6 +3930,16 @@ struct LinkStats {
     last_seq_ctrl: [u32; 9],
     /// Verworfene 802.11-Wiederholungen (`dot11FrameDuplicateCount`).
     dup_rx: u32,
+    /// Rahmen mit gesetztem Retry-Bit (802.11 §9.2.4.1.8).
+    ///
+    /// **Die eine Zahl, die sagt, ob der AP Grund hat, langsamer zu
+    /// werden.** `dup_rx` misst das nicht: die Duplikatspruefung merkt
+    /// sich GENAU EINEN Sequenzwert je TID, und eine Wiederholung, die
+    /// nach einem Aggregat von 37 Rahmen kommt, trifft ihn nie. Am
+    /// Geraet standen deshalb 17 Duplikate neben 32649 „zu spaet".
+    /// Das Retry-Bit ist die Aussage des SENDERS und braucht kein
+    /// Gedaechtnis.
+    retry_rx: u32,
     /// Umsortierpuffer je TID: laeuft eine Block-Ack-Sitzung?
     ro_on: [bool; RO_TIDS],
     /// Naechste erwartete Sequenznummer (12 Bit).
@@ -4113,6 +4123,7 @@ impl Default for LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
             llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 9], dup_rx: 0,
+            retry_rx: 0,
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
             ro_since: [0; RO_TIDS], ro_sorted: 0, ro_old: 0,
@@ -5732,6 +5743,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         8
                     };
                     let sc = u16::from_le_bytes([f[22], f[23]]) as u32;
+                    if fc & 0x0800 != 0 {
+                        ls.retry_rx += 1;
+                    }
                     if fc & 0x0800 != 0 && ls.last_seq_ctrl[idx] == sc {
                         ls.dup_rx += 1;
                         return;
@@ -7651,8 +7665,11 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.data_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
     num(ls.data_tx, &mut b, &mut n);
-    put("  duplikate ", &mut b, &mut n);
+    put("  wiederholt ", &mut b, &mut n);
+    num(ls.retry_rx, &mut b, &mut n);
+    put(" (duplikate ", &mut b, &mut n);
     num(ls.dup_rx, &mut b, &mut n);
+    put(")", &mut b, &mut n);
     put("  umsortiert ", &mut b, &mut n);
     num(ls.ro_sorted, &mut b, &mut n);
     put(" (zu spaet ", &mut b, &mut n);
