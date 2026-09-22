@@ -3663,6 +3663,17 @@ struct LinkStats {
     rx_ppdu_n: u32,
     rx_data_ppdu_frames: u32,
     last_ppdu: u8,
+    /// Der Abstand zweier Sendevorgaenge des AP, aus der 802.11-Uhr.
+    last_tsf: u32,
+    rx_gap_sum: u64,
+    rx_gap_n: u32,
+    rx_gap_min: u32,
+    /// Die Umkehrzeit unseres eigenen Stapels: Daten an den Kernel ->
+    /// Rahmen vom Kernel zurueck.
+    last_rx_at: u64,
+    turn_sum: u64,
+    turn_n: u32,
+    turn_max: u64,
     last_action: (u8, u8),
     /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
     /// den Sendering passte.
@@ -3745,6 +3756,8 @@ impl Default for LinkStats {
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
+            last_tsf: 0, rx_gap_sum: 0, rx_gap_n: 0, rx_gap_min: 0,
+            last_rx_at: 0, turn_sum: 0, turn_n: 0, turn_max: 0,
             last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             addba_win: 0, addba_win_req: 0,
@@ -4896,8 +4909,37 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if st.ppdu_cnt != ls.last_ppdu {
                     ls.last_ppdu = st.ppdu_cnt;
                     ls.rx_ppdu_n += 1;
+                    // **Der Abstand zweier Sendevorgaenge, von der
+                    // HARDWARE gestempelt.** `tsf_low` ist die
+                    // 802.11-Uhr in Mikrosekunden, gesetzt beim Empfang
+                    // — keine Wirtsuhr, keine Schaetzung.
+                    //
+                    // Sie beantwortet die Frage, an der jede Rechnung
+                    // aus Raten und Laengen scheitert: **wieviel von der
+                    // Zeit sendet der AP ueberhaupt?** Steht der Abstand
+                    // bei 3 ms, waehrend das Aggregat 1 ms dauert, ist
+                    // die Luft zu einem Drittel belegt — und dann ist
+                    // nicht die Strecke der Deckel.
+                    //
+                    // Der KLEINSTE Abstand ist der Massstab: er ist das,
+                    // was die Strecke kann, wenn nichts dazwischenkommt.
+                    let d = st.tsf_low.wrapping_sub(ls.last_tsf);
+                    // Alles ueber 10 ms ist eine Pause im Verkehr, kein
+                    // Abstand — sonst misst der Mittelwert die Zeit
+                    // zwischen zwei Downloads mit.
+                    if ls.last_tsf != 0 && d > 0 && d < 10_000 {
+                        ls.rx_gap_sum += d as u64;
+                        ls.rx_gap_n += 1;
+                        if ls.rx_gap_min == 0 || d < ls.rx_gap_min {
+                            ls.rx_gap_min = d;
+                        }
+                    }
+                    ls.last_tsf = st.tsf_low;
                 }
                 ls.rx_data_ppdu_frames += 1;
+                // Der Augenblick, in dem der Kernel Daten bekommt —
+                // Anfang der Messstrecke unten.
+                ls.last_rx_at = host::now_us();
             }
             // rx.c:100-133 + phy.c:678-704 — was der Watchdog braucht.
             rx::watchdog_feed(&mut acc, st, f, &mac, &bssid,
@@ -5357,6 +5399,29 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // beantwortet „hoert der AP mich ueberhaupt".
                 let sn = if probe_due { probe_due = false; ls.arm_probe(now) }
                          else { None };
+                // **Wie lange unser Stapel braucht.**
+                //
+                // Beim Herunterladen ist praktisch jeder gesendete Rahmen
+                // eine TCP-Quittung, die von empfangenen Daten ausgeloest
+                // wurde. Der Abstand zwischen „wir haben dem Kernel Daten
+                // gegeben" und „der Kernel gibt uns einen Rahmen zurueck"
+                // ist damit die Zeit, die UNSERE Seite zur Umkehr
+                // braucht — und sie steckt eins zu eins in der RTT, die
+                // der Server misst.
+                //
+                // Das ist die Zahl, die „liegt es an der Luft oder an
+                // uns" entscheidet: bei 12,7 ms gemessener RTT und
+                // ~4,6 ms Sendezeit fehlen acht Millisekunden, und
+                // entweder stehen sie hier oder beim AP.
+                if ls.last_rx_at != 0 {
+                    let d = host::now_us().saturating_sub(ls.last_rx_at);
+                    if d < 100_000 {
+                        ls.turn_sum += d;
+                        ls.turn_n += 1;
+                        if d > ls.turn_max { ls.turn_max = d; }
+                    }
+                    ls.last_rx_at = 0;
+                }
                 if tx_8023(h, trx, mgmt_buf, link,
                            &ethbuf[..n as usize], enc, sn, qos_tid) {
                     gestapelt += 1;
@@ -6267,6 +6332,32 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" in ", &mut b, &mut n);
         num(ls.rx_ppdu_n, &mut b, &mut n);
         put(" ppdus)", &mut b, &mut n);
+        // **Und wieviel Zeit dazwischen lag.** Der kleinste Abstand ist
+        // das, was die Strecke kann; der mittlere das, was sie tut. Die
+        // zwei nebeneinander sagen, ob die Luft der Deckel ist — ohne
+        // eine einzige geschaetzte Konstante.
+        if ls.rx_gap_n > 0 {
+            put("\n  abstand ", &mut b, &mut n);
+            num((ls.rx_gap_sum / ls.rx_gap_n as u64) as u32, &mut b, &mut n);
+            put(" us im mittel, kleinster ", &mut b, &mut n);
+            num(ls.rx_gap_min, &mut b, &mut n);
+            put(" us (", &mut b, &mut n);
+            num(ls.rx_gap_n, &mut b, &mut n);
+            put(" gemessen, ueber 10 ms verworfen)", &mut b, &mut n);
+        }
+    }
+    // **Die Umkehrzeit unseres eigenen Stapels.** Von „Daten an den
+    // Kernel" bis „Rahmen vom Kernel zurueck" — beim Herunterladen ist
+    // das die Zeit, die WIR zur TCP-Quittung brauchen, und sie steckt
+    // eins zu eins in der RTT, die der Server misst.
+    if ls.turn_n > 0 {
+        put("\nstapelumkehr ", &mut b, &mut n);
+        num((ls.turn_sum / ls.turn_n as u64) as u32, &mut b, &mut n);
+        put(" us im mittel, groesste ", &mut b, &mut n);
+        num(ls.turn_max as u32, &mut b, &mut n);
+        put(" us (", &mut b, &mut n);
+        num(ls.turn_n, &mut b, &mut n);
+        put(" gemessen)", &mut b, &mut n);
     }
     if ls.tx_batch_n > 0 {
         // **Zwei Zahlen, und nur die zweite entscheidet.** `eingelegt`
