@@ -2481,6 +2481,21 @@ fn bench_get(host: &str, path: &str) {
         Ok(_) => bench_report("GET", bytes, t1.wrapping_sub(t0)),
         Err(e) => kprintln!("[netbench] GET failed after {} bytes: {}", bytes, e),
     }
+    bench_cores();
+}
+
+/// **Auf welchem Kern lief die Messung, und auf welchem der WLAN-Treiber.**
+/// Teilen sie sich einen, laufen Treiber und Leser abwechselnd statt
+/// nebeneinander — und genau das sah 2026-09-22 aus wie ein Deckel der
+/// Luft. Die Zeile sagt es in jedem Lauf, statt es aus Stillstaenden
+/// zurueckzurechnen.
+fn bench_cores() {
+    let me = crate::smp::per_core::current_core_id();
+    match crate::netdev::wasm_nic_core() {
+        Some(nic) => kprintln!("[netbench] Kern {} · WLAN-Treiber auf Kern {}{}",
+            me, nic, if me == nic { " — DERSELBE" } else { "" }),
+        None => kprintln!("[netbench] Kern {} · kein WLAN-Treiber auf einem Worker", me),
+    }
 }
 
 fn bench_put(host: &str, path: &str, mb: usize) {
@@ -2496,6 +2511,7 @@ fn bench_put(host: &str, path: &str, mb: usize) {
             // congestion control); echo whatever it reported.
             let r = reply.trim();
             if !r.is_empty() { kprintln!("[netbench] PUT(server): {}", r); }
+            bench_cores();
         }
         Err(e) => kprintln!("[netbench] PUT failed: {}", e),
     }

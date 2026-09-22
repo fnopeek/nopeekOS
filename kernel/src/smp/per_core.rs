@@ -745,9 +745,23 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue;
         }
 
+        // **Der Kern des WLAN-Treibers nimmt keine neue Arbeit an**, solange
+        // es andere Worker gibt.
+        //
+        // Ein leerer Worker sieht alle 10 ms nach neuer Arbeit; der Kern des
+        // Treibers wacht JEDE Millisekunde auf (`sleep_ms(1)` im Pumpweg)
+        // und fragt dabei zuerst hier. Er gewann deshalb praktisch jedes neue
+        // Intent — auch den Download, der die Rahmen des Treibers abholt.
+        // Ein Intent laeuft bis zum Ende und gibt den Kern nur ueber
+        // `pump_peers` her: Treiber und Leser liefen ABWECHSELND statt
+        // nebeneinander. Am Geraet (VHT80, 2026-09-22): 63 % der Laufzeit
+        // Stillstand auf der Luft, `rx ring dropped 255`, 255 Quittungen auf
+        // einmal im Sendering, Server-RTT 18 ms auf einer Strecke von 2.
+        let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
+            && super::scheduler::worker_count() > 1;
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives on the global deque (own deque first, then steal).
-        if let Some(task) = super::scheduler::next_task(cid) {
+        if let Some(task) = if nic_core { None } else { super::scheduler::next_task(cid) } {
             if task.is_fiber {
                 // App: hand to this core's fiber scheduler. It runs on its
                 // own stack and yields at npk_sleep so peers share the core.
