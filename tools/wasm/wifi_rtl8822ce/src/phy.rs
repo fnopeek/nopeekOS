@@ -991,6 +991,11 @@ pub fn ra_track(h: i32, dm: &mut DmInfo, st: &mut crate::fw::H2cState,
                             &crate::sta::PeerCaps, u8, bool)>,
                 sta_rate: Option<u8>) {
     crate::fw::update_wl_phy_info(h, st, dm, tx_tp, rx_tp);
+    // main.c:1266/1286 — der Teil von `rtw_update_sta_info`, der `dm`
+    // schreibt: die Grundmenge der Antwortraten je Band.
+    if let Some((_, _, _, band_2g)) = &si {
+        dm.rrsr_val_init = if *band_2g { RRSR_INIT_2G } else { RRSR_INIT_5G };
+    }
     ra_info_update(h, st, watch_dog_cnt, si);
     rrsr_update(h, dm, sta_rate);
 }
