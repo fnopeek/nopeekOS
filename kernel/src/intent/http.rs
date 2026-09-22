@@ -2565,6 +2565,20 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         // want opposite investigations.
         if let Err(e) = crate::net::tcp::send_blocking(handle, &chunk[..n], 1000) {
             kprintln!("[netbench] PUT stalled after {} of {} bytes: {}", sent, total, e);
+            // **Ein Stillstand muss seinen Zustand nennen.** Zweimal hat
+            // uns dieselbe Zeile ohne Zahlen einen ganzen Lauf gekostet:
+            // ein volles Fenster, ein geschlossenes Fenster und eine
+            // verpasste Weckung sehen von aussen gleich aus.
+            let (_, _, segs, wb, maxbuf) = crate::net::tcp::send_stats();
+            kprintln!("[netbench]   send_buf {} KB · Deckel {} KB · Gegenueber {} KB \
+· {} Segmente · {}x WouldBlock · Schlange voll {}x",
+                crate::net::tcp::snd_unacked_of(handle) / 1024,
+                crate::net::tcp::snd_limit_of(handle) / 1024,
+                crate::net::tcp::snd_wnd_of(handle) / 1024,
+                segs, wb,
+                crate::net::tcp::SEND_REFUSED.load(
+                    core::sync::atomic::Ordering::Relaxed));
+            let _ = maxbuf;
             let _ = crate::net::tcp::close(handle);
             return Err("send body failed");
         }

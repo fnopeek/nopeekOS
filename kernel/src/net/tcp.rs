@@ -346,6 +346,11 @@ const SND_BUF_MAX: usize = 4 * 1024 * 1024;
 /// sind wenige Mikrosekunden und damit kuerzer als jede Umlaufzeit, die
 /// wir je gemessen haben.
 const SEND_SPIN_BUDGET: u32 = 4096;
+
+/// Nach wievielen Abgabe-Runden ohne Weckung trotzdem ein neuer Versuch
+/// gemacht wird. Kostet im Normalfall nichts (die Weckung kommt lange
+/// vorher) und macht aus einem toten Warten ein langsames.
+const RETRY_ROUNDS: u32 = 16;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -991,6 +996,11 @@ pub fn snd_limit_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_buf_limit)
 }
 
+/// Wieviel gerade unquittiert im Sendepuffer liegt.
+pub fn snd_unacked_of(handle: usize) -> usize {
+    CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.send_buf.len())
+}
+
 pub fn snd_wnd_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_wnd as usize)
 }
@@ -1126,6 +1136,7 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
         // Budget leerer Blicke, dann erst schlafen: dieselbe Form wie im
         // Empfangsweg des Treibers.
         let mut leer = 0u32;
+        let mut runden = 0u32;
         while ACK_GEN.load(Ordering::Relaxed) == zuletzt {
             if leer < SEND_SPIN_BUDGET {
                 leer += 1;
@@ -1142,6 +1153,19 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
             super::poll();
             tick_connections();
             crate::smp::fiber::yield_ready();
+            // **Und nie fuer immer auf einen Zaehler warten.**
+            //
+            // Zweimal in Folge hat uns eine verpasste Weckung eine Frist
+            // gekostet — einmal, weil der Zaehler nach dem Versuch
+            // gelesen wurde, einmal, weil eine Fenster-Aktualisierung
+            // ihn nicht bewegte. Beide sind gefixt; die Klasse bleibt.
+            // Ein Warten, das SELBST wieder nachsieht, kann nur
+            // langsam werden, nicht tot.
+            runden += 1;
+            if runden >= RETRY_ROUNDS {
+                runden = 0;
+                break;
+            }
         }
     }
 }
@@ -1434,6 +1458,23 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 // sie gilt fuer JEDES Segment danach ausser dem SYN
                 // selbst (RFC 7323 §2.2).
                 conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
+                // **Und JEDE Quittung weckt den Sender**, nicht nur
+                // eine, die Daten abraeumt.
+                //
+                // Der Zaehler stand bis 0.405.3 unten im
+                // `ack_in_range`-Zweig — also nur bei NEU quittierten
+                // Bytes. Eine reine Fenster-Aktualisierung traegt
+                // `ack == snd_una` und faellt nicht hinein: der
+                // Empfaenger hat seinen Puffer geleert und macht wieder
+                // auf, und wir warten trotzdem bis zur Frist. Genau so
+                // sah es aus („PUT stalled after 3014656 bytes"), und
+                // eine Doppelquittung waehrend eines Verlusts hat
+                // dasselbe Problem.
+                //
+                // Die Weckung ist kein Urteil darueber, DASS sich etwas
+                // geaendert hat — sie sagt nur, dass ein neuer Versuch
+                // sich lohnen koennte.
+                ACK_GEN.fetch_add(1, Ordering::Relaxed);
                 // **Die Umlaufzeit gehoert an die QUITTUNG, nicht an die
                 // Daten.**
                 //
@@ -1479,7 +1520,6 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.acked_total =
                         conn.acked_total.wrapping_add(acked as u64);
                     snd_space_adjust(conn);
-                    ACK_GEN.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
