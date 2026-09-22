@@ -4296,6 +4296,10 @@ struct Roam {
     last_event: i8,
     last_scan_ms: u64,
     last_roam_ms: u64,
+    /// Stand der Fehlerzaehler beim letzten Blick — die Quote wird ueber
+    /// die RUNDE gerechnet, nicht ueber die Verbindung.
+    ofdm_ok0: u64,
+    ofdm_err0: u64,
     /// Wie oft wir gewechselt haben und wie oft wir uns umgehoert haben.
     scans: u32,
     roams: u32,
@@ -4306,7 +4310,8 @@ struct Roam {
 impl Roam {
     const fn new() -> Self {
         Roam { ave: dm::Ewma::new(), count: 0, last_event: 0,
-               last_scan_ms: 0, last_roam_ms: 0, scans: 0, roams: 0,
+               last_scan_ms: 0, last_roam_ms: 0, ofdm_ok0: 0, ofdm_err0: 0,
+               scans: 0, roams: 0,
                to: None }
     }
     /// Eine Bake der eigenen Zelle.
@@ -4852,7 +4857,7 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
         ba_tx: BaTx::new(),
-        roam: Roam::new(),
+        roam: Roam { last_roam_ms: host::now_ms(), ..Roam::new() },
         ht_param_now: bss.ht_param,
         vht_chanwidth_now: bss.vht_chanwidth,
         vht_cch0_now: bss.vht_cch0,
@@ -6222,26 +6227,43 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // feuert erst wieder, wenn der Pegel um die Hysterese
             // darueber hinausgeht — sonst loest ein einzelner schlechter
             // Beacon einen Umhoerversuch aus, und danach der naechste.
+            // **Erst nach dem Vierwegehandschlag.** Ohne diese
+            // Bedingung lief der Ausloeser schon in Stufe 6a, also
+            // WAEHREND des Handschlags — und `stage6a` wirft die
+            // Rueckgabe des Pumpens weg, der Kandidat waere also nur
+            // haengengeblieben.
             if roam_mode != RoamMode::Aus
+                && ls.authorized
+                // **Und nicht gleich nach einem Aufbau.** `authorized`
+                // steht, sobald der Handschlag durch ist; die Zelle hat
+                // dann aber noch keine vier Baken geliefert und der
+                // Verkehr faengt gerade erst an.
+                && now.saturating_sub(link.roam.last_roam_ms) > ROAM_GAP_MS
                 && link.roam.count >= SIGNAL_AVE_MIN_COUNT
                 && link.csa.is_none()
             {
                 let sig = link.roam.dbm();
                 let le = link.roam.last_event;
-                // **Nicht nur der Pegel.** Eine Zelle kann laut und
-                // trotzdem fast tot sein: faellt die Rate auf die
-                // untersten Stufen oder geht jeder vierte Rahmen kaputt,
-                // ist sie es. Beide Zahlen messen wir ohnehin.
-                let rate_tot = d.dm.curr_rx_rate > 0
-                    && d.dm.curr_rx_rate < DESC_RATEMCS0 as u8;
-                let crc_hoch = ls.ofdm_ok + ls.ofdm_err > 1000
-                    && ls.ofdm_err * 4 > ls.ofdm_ok;
+                // **Die Quote der letzten Runde, nicht die der ganzen
+                // Verbindung.**
+                //
+                // Hier stand `ls.ofdm_err * 4 > ls.ofdm_ok` auf den
+                // LAUFENDEN Summen. Die wachsen monoton: hat die Quote
+                // einmal die Schwelle ueberschritten, bleibt sie
+                // darueber, auch wenn die Strecke sich laengst erholt
+                // hat. Ein Ausloeser, der nie wieder ausgeht, ist
+                // keiner.
+                let d_ok = ls.ofdm_ok.saturating_sub(link.roam.ofdm_ok0);
+                let d_err = ls.ofdm_err.saturating_sub(link.roam.ofdm_err0);
+                link.roam.ofdm_ok0 = ls.ofdm_ok;
+                link.roam.ofdm_err0 = ls.ofdm_err;
+                let crc_hoch = d_ok + d_err > 1000 && d_err * 4 > d_ok;
                 let tief = sig < ROAM_THOLD_DBM
                     && (le == 0 || sig < le - ROAM_HYST_DB);
                 // Nie suchen, waehrend Daten fliessen: ein
                 // Umhoerversuch kostet dann Durchsatz fuer nichts.
                 let ruhig = d.stats.rx_throughput < 2 && d.stats.tx_throughput < 2;
-                if (tief || rate_tot || crc_hoch) && ruhig
+                if (tief || crc_hoch) && ruhig
                     && now.saturating_sub(link.roam.last_scan_ms)
                         > ROAM_SCAN_GAP_MS
                 {
@@ -6254,9 +6276,6 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     host::print(" (Schwelle ");
                     print_dbm(ROAM_THOLD_DBM);
                     host::print(")");
-                    if rate_tot {
-                        host::print(" · Rate am Boden");
-                    }
                     if crc_hoch {
                         host::print(" · jeder vierte Rahmen kaputt");
                     }
@@ -6497,10 +6516,33 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print("\n");
         host::loud_end();
     }
+    let andere = link.bssid != bss.bssid;
     link.bssid = bss.bssid;
     link.channel = bss.channel;
     link.ssid = bss.ssid;
     link.ssid_len = bss.ssid_len;
+    // **Die Breite der neuen Zelle** — ohne sie kommt ein
+    // Umhoerversuch auf der Breite der ALTEN zurueck.
+    link.ht_param_now = bss.ht_param;
+    link.vht_chanwidth_now = bss.vht_chanwidth;
+    link.vht_cch0_now = bss.vht_cch0;
+    if andere {
+        // **Der geglaettete Pegel gehoert der ZELLE, nicht der
+        // Verbindung.** Er stand nach einem Wechsel weiter auf dem Wert
+        // des alten AP — wir zogen zu einem starken um und rechneten
+        // weiter mit -72 dBm, also sah der naechste Kandidat sofort
+        // wieder „besser" aus. Genau das hat nonstop gewechselt.
+        //
+        // `count` faellt mit: bis vier Baken der NEUEN Zelle da sind,
+        // sagt der Mittelwert nichts, und solange wird nicht gewechselt
+        // (`SIGNAL_AVE_MIN_COUNT`, mlme.c:96).
+        link.roam.ave = dm::Ewma::new();
+        link.roam.count = 0;
+        link.roam.last_event = 0;
+        link.roam.last_roam_ms = host::now_ms();
+        link.roam.ofdm_ok0 = ls.ofdm_ok;
+        link.roam.ofdm_err0 = ls.ofdm_err;
+    }
     host::loud_begin();
     host::print("[rtl8822ce] Verbindung weg — Anlauf ");
     host::print_dec(ls.reconnects);
@@ -7159,11 +7201,18 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     let mcs0 = DESC_RATEMCS0 as usize;
     let spitze = |von: usize| ls.rate_hist.iter().enumerate().skip(von)
         .fold((0usize, 0u32), |acc, (i, &c)| if c > acc.1 { (i, c) } else { acc });
-    let (top_rate, top_cnt) = match spitze(mcs0) {
-        (_, 0) => spitze(0),
-        v => v,
-    };
     let legacy: u32 = ls.rate_hist[..mcs0].iter().sum();
+    // **Faellt es auf die Spitze ueber ALLES zurueck, gehoert auch der
+    // Nenner ueber alles.** Am Geraet stand sonst `0x04 in 304 von 0
+    // ht/vht` — ein Zaehler ohne Nenner, weil der Nenner die
+    // HT/VHT-Rahmen zaehlte und es keine gab.
+    let (top_rate, top_cnt, nur_legacy) = match spitze(mcs0) {
+        (_, 0) => {
+            let (r, c) = spitze(0);
+            (r, c, true)
+        }
+        (r, c) => (r, c, false),
+    };
     put("  rx ", &mut b, &mut n);
     put(rate_name(top_rate as u8), &mut b, &mut n);
     put(" (0x", &mut b, &mut n);
@@ -7172,10 +7221,15 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(top_cnt, &mut b, &mut n);
     put(" von ", &mut b, &mut n);
     let ges: u32 = ls.rate_hist.iter().sum();
-    num(ges - legacy, &mut b, &mut n);
-    put(" ht/vht, dazu ", &mut b, &mut n);
-    num(legacy, &mut b, &mut n);
-    put(" legacy (baken), zuletzt ", &mut b, &mut n);
+    if nur_legacy {
+        num(ges, &mut b, &mut n);
+        put(" (NUR legacy), zuletzt ", &mut b, &mut n);
+    } else {
+        num(ges - legacy, &mut b, &mut n);
+        put(" ht/vht, dazu ", &mut b, &mut n);
+        num(legacy, &mut b, &mut n);
+        put(" legacy (baken), zuletzt ", &mut b, &mut n);
+    }
     put(rate_name(d.dm.curr_rx_rate), &mut b, &mut n);
     put(")  tx ", &mut b, &mut n);
     put(rate_name(d.dm.tx_rate), &mut b, &mut n);
