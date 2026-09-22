@@ -336,8 +336,28 @@ const MAX_DATA_RETRIES: u8 = 15;
 /// Also der alte Deckel als Anfang. Zusammen mit „nur wachsen" heisst
 /// das: nie schlechter als vor 0.405.0.
 const SND_BUF_INIT: usize = 256 * 1024;
-/// Der Deckel — `sysctl_tcp_wmem[2]`, Linux' Vorgabe.
-const SND_BUF_MAX: usize = 4 * 1024 * 1024;
+/// Der Deckel.
+///
+/// **Linux nimmt hier `sysctl_tcp_wmem[2]` = 4 MB. Wir nicht, und das
+/// ist bewusst.**
+///
+/// Am Geraet gemessen (2026-09-22): mit 4 MB wuchs der Puffer auf
+/// 1-2,6 MB, waehrend die Strecke rund 62 KB traegt (250 Mbit x 2 ms).
+/// Das Vierzigfache des Bandbreiten-Verzoegerungs-Produkts ging auf die
+/// Leitung, die Puffer dazwischen liefen ueber — und **unsere Erholung
+/// kann das nicht bezahlen**: ohne SACK ist jeder Verlust ein RTO,
+/// `cwnd` faellt auf 2, und mit zwei Paketen unterwegs gibt es nie die
+/// drei Doppelquittungen, die eine schnelle Wiederholung braucht.
+/// Gemessen: 45 Zeitueberschreitungen in zehn Sekunden, 1,3 Mbit.
+///
+/// Linux kann sich 4 MB leisten, weil darunter SACK, PRR und Limited
+/// Transmit stehen. Solange die fehlen, ist der Deckel die Grenze, die
+/// sie ersetzt — und 256 KB ist der Wert, mit dem diese Strecke
+/// nachweislich 269 Mbit geliefert hat.
+///
+/// **Das ist ein Deckel aus einer MESSUNG, nicht aus dem Bauch**, und er
+/// hat ein Ablaufdatum: er gehoert angehoben, sobald SACK steht.
+const SND_BUF_MAX: usize = 256 * 1024;
 
 /// Wieviele leere Blicke auf `ACK_GEN`, bevor wir abgeben.
 ///
