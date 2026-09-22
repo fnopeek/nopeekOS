@@ -338,6 +338,14 @@ const MAX_DATA_RETRIES: u8 = 15;
 const SND_BUF_INIT: usize = 256 * 1024;
 /// Der Deckel — `sysctl_tcp_wmem[2]`, Linux' Vorgabe.
 const SND_BUF_MAX: usize = 4 * 1024 * 1024;
+
+/// Wieviele leere Blicke auf `ACK_GEN`, bevor wir abgeben.
+///
+/// Die Quittung kommt vom Treiber-Fiber auf einem ANDEREN Kern; hier zu
+/// warten heisst, sie um einen Planertakt zu verpassen. 4096 Umlaeufe
+/// sind wenige Mikrosekunden und damit kuerzer als jede Umlaufzeit, die
+/// wir je gemessen haben.
+const SEND_SPIN_BUDGET: u32 = 4096;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -1070,17 +1078,31 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
         // `yield_ready` meldet `false`, wenn wir gar nicht in einem Fiber
         // laufen (Core 0, OTA); dort treiben wir den Stapel selbst an,
         // sonst kaeme die Quittung nie.
+        //
+        // **Kurz drehen, DANN abgeben.** Blind abzugeben kostet den
+        // Planertakt: 0.405.1 wartete je Quittung bis zu 10 ms und fiel
+        // damit von 269 auf 104 Mbit, obwohl `WouldBlock` von 4,5 Mio
+        // auf 1215 gesunken war. Gedreht wird auf dem ATOMAR gelesenen
+        // Zaehler, nicht auf der Sperre — das war der ganze Punkt. Ein
+        // Budget leerer Blicke, dann erst schlafen: dieselbe Form wie im
+        // Empfangsweg des Treibers.
+        let mut leer = 0u32;
         while ACK_GEN.load(Ordering::Relaxed) == zuletzt {
+            if leer < SEND_SPIN_BUDGET {
+                leer += 1;
+                core::hint::spin_loop();
+                continue;
+            }
+            leer = 0;
             if crate::interrupts::ticks() - t0 > timeout_ticks {
                 return Err(TcpError::Timeout);
             }
-            if !crate::smp::fiber::yield_ready() {
-                // Kein Fiber (Core 0, OTA): den Stapel selbst antreiben,
-                // sonst kommt die Quittung nie.
-                super::poll();
-                tick_connections();
-            }
-            core::hint::spin_loop();
+            // Den Stapel antreiben, falls niemand sonst es tut — auf
+            // Kern 0 gibt es keinen Treiber-Fiber, der die Quittung
+            // hereinholt.
+            super::poll();
+            tick_connections();
+            crate::smp::fiber::yield_ready();
         }
     }
 }
@@ -1373,6 +1395,35 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 // sie gilt fuer JEDES Segment danach ausser dem SYN
                 // selbst (RFC 7323 §2.2).
                 conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
+                // **Die Umlaufzeit gehoert an die QUITTUNG, nicht an die
+                // Daten.**
+                //
+                // Sie stand bisher nur im Datenzweig weiter unten — also
+                // nur dann, wenn das Gegenueber uns etwas SCHICKT. Beim
+                // Hochladen schickt es nackte Quittungen, `srtt_ms`
+                // blieb 0, und `snd_space_adjust` kehrte in der ersten
+                // Zeile um: der Sendepuffer konnte nicht wachsen, weil
+                // es keine Umlaufzeit gab, an der er haette wachsen
+                // koennen. Am Geraet gemessen: `Deckel 256 KB` bei
+                // `Gegenueber 1036 KB`.
+                //
+                // Linux nimmt die Probe in `tcp_ack_update_rtt`, gerufen
+                // aus `tcp_clean_rtx_queue` — also genau hier, wo eine
+                // Quittung hereinkommt.
+                if conn.ts_ok {
+                    if let Some(tsecr) = parse_tsecr(data, data_offset) {
+                        if tsecr != 0 {
+                            let sample = ts_now_ms().wrapping_sub(tsecr);
+                            if (1..6000).contains(&sample) {
+                                conn.srtt_ms = if conn.srtt_ms == 0 {
+                                    sample
+                                } else {
+                                    (conn.srtt_ms * 7 + sample) / 8
+                                };
+                            }
+                        }
+                    }
+                }
                 if ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
                     // Drop the acknowledged prefix from the retransmit queue
                     // and restart the timer for whatever is still in flight.
