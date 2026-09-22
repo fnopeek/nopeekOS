@@ -5420,6 +5420,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // wird NUR, wenn etwas kam (rund 1400 Mal je Sekunde, also
         // 2800 Wirtsaufrufe) — bei den 65 000 leeren Bliecken waere es
         // die Messung, die den Zustand erzeugt.
+        // Fuer den Rueckruf: er darf `d` nicht anfassen.
+        let messen = d.stats.rx_throughput >= 10;
         let t_rx0 = host::now_us();
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut d.dm, &mut d.path_div,
                                hal.rf_path_num, cur_bw, link.channel,
@@ -5539,7 +5541,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     //
                     // Der KLEINSTE Abstand ist der Massstab: er ist das,
                     // was die Strecke kann, wenn nichts dazwischenkommt.
-                    let d = st.tsf_low.wrapping_sub(ls.last_tsf);
+                    let dt = st.tsf_low.wrapping_sub(ls.last_tsf);
+                    let d = if messen { dt } else { 0 };
                     // **Die langen Abstaende werden EINGEORDNET, nicht
                     // verworfen.** In 0.53.0 fielen sie aus der Rechnung,
                     // und genau sie waren der Befund: 190 Stueck a 13 ms
@@ -5699,6 +5702,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         if let Some(dbm) = acc.beacon_dbm.take() {
             link.roam.note_beacon(dbm);
         }
+        // **Gemessen wird nur, waehrend Daten fliessen.**
+        //
+        // Die Histogramme summierten bis hierher die ganze Verbindung —
+        // elf Downloads UND zweieinhalb Minuten Leerlauf dazwischen. Ein
+        // Abstand von 19 ms zwischen zwei Rahmen heisst waehrend eines
+        // Downloads „die Strecke stand still" und im Leerlauf „es war
+        // nichts zu senden". Dieselbe Zahl, zwei Bedeutungen, und der
+        // Mittelwert darueber ist keine von beiden.
+        //
+        // `rx_throughput` steht in Mbit und wird je Watchdog (zwei
+        // Sekunden) nachgezogen. Zehn ist die Grenze zwischen
+        // Hintergrundverkehr und Uebertragung.
+        let misst = d.stats.rx_throughput >= 10;
         if acc.heard_ap && ls.poll_on {
             ls.poll_on = false;
             ls.probe_send_count = 0;
@@ -6184,7 +6200,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // entweder stehen sie hier oder beim AP.
                 if ls.last_rx_at != 0 {
                     let d = host::now_us().saturating_sub(ls.last_rx_at);
-                    if d < GAP_IDLE_US as u64 {
+                    if misst && d < GAP_IDLE_US as u64 {
                         ls.turn_sum += d;
                         ls.turn_n += 1;
                         if d > ls.turn_max { ls.turn_max = d; }
@@ -7563,7 +7579,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             num(ls.rx_gap_min, &mut b, &mut n);
             put(" us (", &mut b, &mut n);
             num(ls.rx_gap_n, &mut b, &mut n);
-            put(" gemessen)", &mut b, &mut n);
+            put(" gemessen, nur bei Verkehr)", &mut b, &mut n);
             // **Die Verteilung, und sie ist der eigentliche Befund.**
             put("\n  verteilt  <0,5ms ", &mut b, &mut n);
             for (i, name) in ["", "<2ms ", "<5ms ", "<10ms ", ">=10ms "]
