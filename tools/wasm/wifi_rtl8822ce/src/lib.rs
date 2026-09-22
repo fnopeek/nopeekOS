@@ -2067,6 +2067,12 @@ impl Bss {
     }
 }
 
+/// Wie lange wir nach einem Kanalwechsel auf eine Bake warten, bevor
+/// wir umkehren. Ein Bakenintervall sind 102 ms; zehn davon sind
+/// reichlich und immer noch eine Zehntelsekunde schneller als die
+/// Verbindungswache.
+const CSA_BEACON_WAIT_MS: u64 = 1000;
+
 /// `IEEE80211_VHT_CHANWIDTH_80MHZ` — der EINZIGE Wert, aus dem wir eine
 /// Breite ableiten. `USE_HT` (0) faellt auf HT zurueck; `160MHZ` (2) und
 /// `80P80MHZ` (3) sind die abgeschafften Kodierungen, in denen Segment 0
@@ -3927,8 +3933,10 @@ struct LinkStats {
     /// Wie oft die Wache angeschlagen hat und wie oft sie recht hatte.
     poll_started: u32,
     poll_recovered: u32,
-    /// Wie oft wir dem AP auf einen neuen Kanal gefolgt sind.
+    /// Wie oft wir dem AP auf einen neuen Kanal gefolgt sind — und wie
+    /// oft dort niemand war.
     csa_done: u32,
+    csa_back: u32,
     /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
     /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
     /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
@@ -4047,6 +4055,7 @@ impl Default for LinkStats {
             mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0, addba_drop: 0,
             poll_on: false, probe_send_count: 0, probe_timeout_ms: 0,
             poll_started: 0, poll_recovered: 0, csa_done: 0,
+            csa_back: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
@@ -4492,6 +4501,9 @@ struct Link {
     /// Der Augenblick, zu dem umgezogen wird (`link->u.mgd.csa.time`,
     /// mlme.c:2992).
     csa_at_ms: u64,
+    /// Wohin zurueck, falls auf dem neuen Kanal niemand ist.
+    csa_zurueck: Option<(u8, CellWidth)>,
+    csa_frist_ms: u64,
 }
 
 /// 802.11 §12.5.3.2 — der acht Byte lange CCMP-Kopf.
@@ -4872,6 +4884,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         vht_cch0_now: bss.vht_cch0,
         csa: None,
         csa_at_ms: 0,
+        csa_zurueck: None,
+        csa_frist_ms: 0,
     };
 
     // Der Datenkanal existiert seit Kernel 0.205.0; ohne Anmeldung sieht
@@ -5499,8 +5513,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // der Kanalwechsel braucht `trx`, und der Rueckruf darf
                 // es nicht halten.
                 if f[0] == 0x80 {
-                    if let Some(c) = parse_csa(f) {
-                        acc.csa = Some(c);
+                    match parse_csa(f) {
+                        Some(c) => acc.csa = Some(c),
+                        // mlme.c:2820-2824: `else if (res)
+                        // ieee80211_sta_abort_chanswitch(link)` — `res`
+                        // ist 1, wenn in dieser Bake kein CSA-Element
+                        // steht. **Eine Ansage, die verschwindet, ist
+                        // zurueckgezogen.**
+                        None => acc.beacon_ohne_csa = true,
                     }
                     // mlme.c:6789-6798 — der Pegel JEDER Bake dieser
                     // Zelle geht in den geglaetteten Wert.
@@ -5957,6 +5977,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // Frist NEU — `(max(count, 1) - 1) * beacon_int` —, damit eine
         // verpasste Bake den Termin nicht verschiebt. `count` zaehlt im
         // Beacon herunter, und 0 wie 1 heissen beide „jetzt".
+        // **Zuruecknehmen, wenn die Ansage verschwindet** (mlme.c:2822).
+        //
+        // Hier fehlte der ganze Zweig, und er hat Florian auf einen
+        // Kanal gesetzt, auf dem der AP gar nicht war: wir merkten uns
+        // die Ankuendigung, der AP hoerte auf, sie zu senden, und wir
+        // zogen trotzdem um. Danach hoerten wir ihn mit -90 dBm statt
+        // -23, das Roaming feuerte, und die Verbindung war weg.
+        if acc.beacon_ohne_csa && acc.csa.is_none() && link.csa.is_some() {
+            link.csa = None;
+            host::say("[rtl8822ce] Kanalwechsel ZURUECKGENOMMEN — der AP kuendigt ihn nicht mehr an\n");
+        }
         if let Some(c) = acc.csa.take() {
             let neu = link.csa.map_or(true, |a| a.channel != c.channel);
             let tu = (c.count.max(1) as u64 - 1) * beacon_int as u64;
@@ -6004,7 +6035,24 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 host::print("\n");
                 host::loud_end();
+                // **Der Rueckweg, falls dort niemand ist.**
+                //
+                // mac80211 wartet nach dem Wechsel auf eine Bake
+                // (`csa.waiting_bcn`, mlme.c:2812). Wir merken uns den
+                // alten Kanal und kehren um, wenn binnen einer Sekunde
+                // keine Bake der Zelle kommt — sonst sitzt man auf einem
+                // leeren Kanal und merkt es erst, wenn die Wache
+                // anschlaegt.
+                link.csa_zurueck = Some((link.channel, CellWidth {
+                    ht_param: link.ht_param_now,
+                    vht_chanwidth: link.vht_chanwidth_now,
+                    vht_cch0: link.vht_cch0_now,
+                }));
+                link.csa_frist_ms = now + CSA_BEACON_WAIT_MS;
                 link.channel = c.channel;
+                link.ht_param_now = c.width.ht_param;
+                link.vht_chanwidth_now = c.width.vht_chanwidth;
+                link.vht_cch0_now = c.width.vht_cch0;
                 d.cur_bw = bw;
                 cur_bw = bw as u8;
                 ls.csa_done += 1;
@@ -6012,6 +6060,33 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // Kanal haben wir noch keine Bake gesehen.
                 ls.poll_on = false;
                 ls.probe_send_count = 0;
+            }
+        }
+
+        // **Kam auf dem neuen Kanal eine Bake?** Wenn nicht, zurueck.
+        if let Some((alt_ch, alt_w)) = link.csa_zurueck {
+            if acc.heard_ap {
+                link.csa_zurueck = None;
+            } else if now >= link.csa_frist_ms {
+                link.csa_zurueck = None;
+                host::loud_begin();
+                host::print("[rtl8822ce] auf K");
+                host::print_dec(link.channel as u32);
+                host::print(" ist niemand — zurueck auf K");
+                host::print_dec(alt_ch as u32);
+                host::print("\n");
+                host::loud_end();
+                let max_bw = max_bw_for(e);
+                let (_, bw, _) = chan_params(alt_ch, alt_w, max_bw);
+                let _ = switch_channel(h, hal, e, t_pwr, alt_ch, alt_w,
+                                       max_bw);
+                link.channel = alt_ch;
+                link.ht_param_now = alt_w.ht_param;
+                link.vht_chanwidth_now = alt_w.vht_chanwidth;
+                link.vht_cch0_now = alt_w.vht_cch0;
+                d.cur_bw = bw;
+                cur_bw = bw as u8;
+                ls.csa_back += 1;
             }
         }
 
@@ -6381,7 +6456,25 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                             host::print("  (wir)");
                         } else if roam_better(sig, d.cur_bw, b, max_bw) {
                             host::print("  BESSER");
-                            if best.map_or(true, |x| b.best > x.best) {
+                            // **Unter mehreren Guten gewinnt die
+                            // BREITERE, erst dann die lautere.**
+                            //
+                            // Hier stand nur `b.best > x.best`. Am
+                            // Geraet standen vier Zellen als BESSER da —
+                            // `K7 -30 dBm 20 MHz` und
+                            // `K104 -67 dBm 80 MHz` —, und die Auswahl
+                            // nahm die laute schmale. `roam_better`
+                            // prueft die Breite gegen UNS; unter den
+                            // Kandidaten hat sie niemand verglichen.
+                            let besser = match best {
+                                None => true,
+                                Some(x) => {
+                                    let (_, xbw, _) = chan_params(
+                                        x.channel, x.width(), max_bw);
+                                    (bw, b.best) > (xbw, x.best)
+                                }
+                            };
+                            if besser {
                                 best = Some(*b);
                             }
                         }
@@ -7440,10 +7533,12 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         }
         put(" dBm geglaettet)", &mut b, &mut n);
     }
-    if ls.csa_done > 0 {
+    if ls.csa_done > 0 || ls.csa_back > 0 {
         put("  kanalwechsel ", &mut b, &mut n);
         num(ls.csa_done, &mut b, &mut n);
-        put("x gefolgt", &mut b, &mut n);
+        put("x gefolgt, ", &mut b, &mut n);
+        num(ls.csa_back, &mut b, &mut n);
+        put("x umgekehrt (dort war niemand)", &mut b, &mut n);
     }
     if ls.poll_started > 0 {
         put("  wache ", &mut b, &mut n);
