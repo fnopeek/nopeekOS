@@ -5157,6 +5157,31 @@ fn ro_advance_to(ls: &mut LinkStats, tid: usize, want: u16) {
 }
 
 /// Eine Sitzung beginnt: der ADDBA nennt die Startsequenz.
+/// Eine Sitzung beenden und alles herausgeben, was noch liegt.
+///
+/// **Gerufen beim Wiederverbinden.** Eine Block-Ack-Sitzung gehoert der
+/// ASSOZIATION: nach einem Wechsel haelt der Puffer sonst Rahmen der
+/// neuen Zelle gegen die Folgenummern der alten, und die Plaetze im Pool
+/// bleiben belegt. Die zurueckgehaltenen Rahmen werden VERWORFEN, nicht
+/// zugestellt — sie gehoeren zu einer Verbindung, die es nicht mehr
+/// gibt, und TCP holt sie sich ohnehin neu.
+fn ro_close(ls: &mut LinkStats, tid: usize) {
+    if tid >= RO_TIDS {
+        return;
+    }
+    for h in 0..RO_WIN {
+        let slot = ls.ro_slot[tid][h];
+        if slot != 0 {
+            ls.ro_slot[tid][h] = 0;
+            ro_release_slot(ls, (slot - 1) as usize);
+        }
+    }
+    ls.ro_on[tid] = false;
+    ls.ro_held[tid] = 0;
+    ls.ro_head[tid] = 0;
+    ls.ro_since[tid] = 0;
+}
+
 fn ro_open(ls: &mut LinkStats, tid: u8, ssn: u16) {
     let t = tid as usize;
     if t >= RO_TIDS {
@@ -6598,6 +6623,24 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     link.ptk_installed = false;
     link.tx_pn = 1;
     link.seq = 0;
+    // **Die Block-Ack-Sitzungen gehoeren der ASSOZIATION, nicht dem
+    // Treiber.**
+    //
+    // Hier fehlte beides, und das hat den Durchsatz nach einem Wechsel
+    // halbiert: `ba_tx` stand noch auf `Laeuft` von der ALTEN Zelle,
+    // also trug jeder Datenrahmen weiter QoS und AGG_EN — an einen AP,
+    // mit dem wir nie eine Sitzung ausgehandelt hatten. Am Geraet:
+    // 180 Mbit vor dem Wechsel, 36 danach.
+    //
+    // Der Automat faengt jetzt von vorn an und fragt den NEUEN AP.
+    link.ba_tx = BaTx::new();
+    // Dasselbe in Empfangsrichtung. Der neue AP schickt zwar seinen
+    // eigenen ADDBA Request und `ro_open` setzt den TID dann zurueck —
+    // aber bis dahin wuerde der Puffer Rahmen der neuen Zelle gegen die
+    // Folgenummern der alten halten.
+    for t in 0..RO_TIDS {
+        ro_close(ls, t);
+    }
 
     let leer = mac::flush_queues(h);
     if leer < 4 {
