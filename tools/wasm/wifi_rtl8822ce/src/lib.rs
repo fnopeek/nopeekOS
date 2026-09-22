@@ -3643,6 +3643,14 @@ struct LinkStats {
     /// Und fuer Action-Rahmen die Kategorie/Aktion des letzten sowie
     /// die Zahl der **ADDBA Requests** — die Frage dieser Runde.
     addba_req: u32,
+    /// Und UNSERE Fragen, in die andere Richtung.
+    addba_tx: u32,
+    /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
+    /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
+    /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
+    tx_batch_n: u32,
+    tx_batch_sum: u32,
+    tx_batch_max: u32,
     last_action: (u8, u8),
     /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
     /// den Sendering passte.
@@ -3721,7 +3729,9 @@ impl Default for LinkStats {
             probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
-            mgmt_sub: [0; 16], addba_req: 0, last_action: (0, 0),
+            mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0,
+            tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
+            last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             addba_win: 0, addba_win_req: 0,
             rx_polls: 0, rx_empty: 0, rx_frames: 0, rx_full: 0,
@@ -3811,6 +3821,71 @@ struct TxProbe {
 
 const TX_PROBE_SLOTS: usize = 8;
 
+/// Der TID, auf dem unsere Daten laufen. Best Effort, und es ist der
+/// einzige: ohne EDCA vom AP gibt es keinen Grund, eine zweite Schlange
+/// aufzumachen, und jede weitere kostet eine eigene Block-Ack-Sitzung.
+const BA_TX_TID: u8 = 0;
+
+/// Wie lange wir auf die ADDBA-Antwort warten, bevor wir nachfragen.
+/// mac80211: `ADDBA_RESP_INTERVAL` = HZ/5.
+const BA_RESP_MS: u64 = 200;
+/// Wieviele Male. mac80211 gibt nach `HT_AGG_MAX_RETRIES` (15) auf; wir
+/// nach drei — danach sagt die Konsole, dass der AP nicht will, und eine
+/// Verbindung ohne Aggregation ist kein Fehlerzustand, sondern eine
+/// langsame Verbindung.
+const BA_MAX_TRIES: u32 = 3;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BaState {
+    /// Noch nicht gefragt — oder nicht zu fragen (`txagg: off`).
+    Aus,
+    /// Gefragt, Antwort steht aus.
+    Gefragt,
+    /// Der AP hat zugesagt. Ab hier traegt jeder Rahmen dieses TID AGG_EN.
+    Laeuft,
+    /// Abgelehnt oder nach drei Versuchen unbeantwortet. Kein Wiederholen
+    /// — ein AP, der dreimal geschwiegen hat, schweigt auch beim vierten
+    /// Mal, und eine Schleife auf dem Verwaltungspfad kostet Sendezeit,
+    /// die genau das zunichtemacht, was sie holen soll.
+    Aufgegeben,
+}
+
+/// Unsere Block-Ack-Sitzung in SENDErichtung — die Haelfte, die seit
+/// 0.29.0 fehlte.
+///
+/// In Linux liegt sie in `tid_ampdu_tx` und wird von
+/// `ieee80211_tx_ba_session_handle_start` gefahren; der Treiber sieht nur
+/// `IEEE80211_AMPDU_TX_OPERATIONAL`. Wir haben kein mac80211, also steht
+/// der Automat hier.
+#[derive(Clone, Copy)]
+struct BaTx {
+    state: BaState,
+    tid: u8,
+    /// Die Nummer, unter der wir gefragt haben. Eine Antwort mit einer
+    /// anderen gehoert zu einer frueheren Frage (agg-tx.c:1002).
+    token: u8,
+    tries: u32,
+    at_ms: u64,
+    /// Was der AP zugesagt hat, in Rahmen.
+    win: u16,
+    /// `MAX_AGG_NUM` und `AMPDU_DEN` fuer den Deskriptor, aus den
+    /// HT-Faehigkeiten des AP.
+    factor: u8,
+    density: u8,
+    /// Der Status seiner Absage, fuer den Bericht.
+    status: u16,
+}
+
+impl BaTx {
+    const fn new() -> Self {
+        BaTx { state: BaState::Aus, tid: BA_TX_TID, token: 0, tries: 0,
+               at_ms: 0, win: 0, factor: 0, density: 0, status: 0 }
+    }
+    fn laeuft(&self, tid: u8) -> bool {
+        self.state == BaState::Laeuft && self.tid == tid
+    }
+}
+
 /// Der Zustand einer stehenden Verbindung — Stufe 6a.
 struct Link {
     bssid: [u8; 6],
@@ -3828,6 +3903,8 @@ struct Link {
     /// Nummer verwirft der AP als Wiedereinspielung.
     tx_pn: u64,
     cam: [sec::CamEntry; 4],
+    /// Unsere Block-Ack-Sitzung in Senderichtung.
+    ba_tx: BaTx,
 }
 
 /// 802.11 §12.5.3.2 — der acht Byte lange CCMP-Kopf.
@@ -3854,27 +3931,50 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
 /// 802.11 ToDS: `[fc 2][dur 2][addr1=BSSID][addr2=SA][addr3=DA][seq 2]`
 /// plus LLC/SNAP (RFC 1042) und den Ethertyp.
 ///
-/// **Gewoehnliche Daten, kein QoS.** Unser Anmeldeantrag trug kein
-/// WMM-Element, also hat der AP uns als Nicht-QoS-Station angenommen —
-/// ein QoS-Rahmen waere jetzt falsch. Das haengt zusammen: wer WMM
-/// anbietet, muss QoS senden, und wer es nicht anbietet, darf nicht.
+/// **`qos` entscheidet ueber die Rahmenart, und daran haengt alles
+/// andere.** Ein Block Ack braucht einen TID, einen TID traegt nur ein
+/// QoS-Rahmen, und ohne Block Ack geht jeder Rahmen einzeln hinaus.
+///
+/// Der Kommentar, der hier stand, sagte das Gegenteil: unser
+/// Anmeldeantrag trage kein WMM-Element, also habe der AP uns als
+/// Nicht-QoS-Station angenommen. **Der Geraetelauf widerlegt ihn
+/// dreifach.** Eine HT-Station IST eine QoS-Station (802.11 §10.2.3, und
+/// wir senden HT- und VHT-Elemente); ein Block Ack gibt es nur zwischen
+/// QoS-Stationen (§10.24.2) — und der AP hat uns zwei davon ANGEBOTEN;
+/// und jeder Rahmen, den er uns schickt, ist ein QoS-Rahmen, sonst haette
+/// der Umsortierpuffer keinen TID, nach dem er ordnet. Das WMM-Element
+/// ist eine Zutat der Wi-Fi Alliance aus der Zeit vor 802.11n, nicht die
+/// Bedingung.
+///
 /// `probe` ist `IEEE80211_TX_CTL_REQ_TX_STATUS` — Linux setzt es aus
 /// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
 /// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
 /// die Firmware antworten wird.
+///
+/// **EAPOL faehrt bewusst OHNE QoS**, also genau wie bisher: der
+/// Vierwegehandschlag laeuft, bevor es eine Block-Ack-Sitzung gibt, und
+/// ein Rahmen, dessen Verlust die Verbindung kostet, ist der falsche Ort
+/// fuer eine Aenderung, die er nicht braucht.
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
-           eth: &[u8], encrypt: bool, probe: Option<u8>) -> bool {
+           eth: &[u8], encrypt: bool, probe: Option<u8>,
+           qos: Option<u8>) -> bool {
     if eth.len() < 14 {
         return false;
     }
     let mut frame = [0u8; 2048];
     let payload = &eth[14..];
-    let total = 24 + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
+    let hdrlen = if qos.is_some() { 26 } else { 24 };
+    let total = hdrlen + if encrypt { 8 } else { 0 } + 6 + 2 + payload.len();
     if total > frame.len() {
         return false;
     }
 
     frame[0] = DOT11_FC_TYPE_DATA;
+    if qos.is_some() {
+        // Der Subtyp steht in Bit 7:4, `DOT11_STYPE_QOS` ist die
+        // Nibble-Nummer — daher der Schiebeschritt.
+        frame[0] |= DOT11_STYPE_QOS << 4;
+    }
     frame[1] = 0x01; // ToDS
     if encrypt {
         frame[1] |= DOT11_FC_PROTECTED;
@@ -3884,6 +3984,15 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
     frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
     frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
+    if let Some(tid) = qos {
+        // 802.11 §9.2.4.5 — QoS Control. Bit 3:0 der TID, Bit 6:5 die
+        // Quittungsregel (00 = normal, und das ist IM Block Ack der
+        // implizite Block-Ack-Antrag), Bit 7 A-MSDU: nein. Byte 1 ist die
+        // TXOP-Dauer bzw. Schlangenlaenge und gehoert dem, der sie
+        // ANFORDERT — wir fordern nichts.
+        frame[24] = tid & 0x0f;
+        frame[25] = 0;
+    }
 
     // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
     // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
@@ -3893,11 +4002,11 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
     // auf der nichts zurueckkommt.
     let ofs = if encrypt {
-        ccmp_hdr(&mut frame[24..32], link.tx_pn, 0);
+        ccmp_hdr(&mut frame[hdrlen..hdrlen + 8], link.tx_pn, 0);
         link.tx_pn = link.tx_pn.wrapping_add(1);
-        32
+        hdrlen + 8
     } else {
-        24
+        hdrlen
     };
     frame[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
     frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
@@ -3930,12 +4039,33 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
         info.report = true;
     }
 
-    let queue = pci::Q_BE;
-    if !pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total]) {
-        return false;
+    // tx.c:361-365 — `ampdu_en` haengt in Linux an
+    // `IEEE80211_TX_CTL_AMPDU`, einer Fahne, die mac80211 setzt, SOBALD
+    // ein Block-Ack-Block offen ist. Bei uns ist die Fahne `BaState::
+    // Laeuft` auf genau diesem TID.
+    //
+    // **Aggregiert wird von der HARDWARE**, nicht vom Treiber: der Chip
+    // fasst aufeinanderfolgende Rahmen derselben MACID und desselben TID
+    // zusammen, wenn AGG_EN steht. Der Treiber sagt nur, wieviel am
+    // Stueck erlaubt ist — und das sind die Zahlen, die der AP in seinen
+    // HT-Faehigkeiten angesagt hat, nicht unsere.
+    if let Some(tid) = qos {
+        if link.ba_tx.laeuft(tid) {
+            info.ampdu_en = true;
+            info.ampdu_factor = link.ba_tx.factor;
+            info.ampdu_density = link.ba_tx.density;
+        }
     }
-    pci::tx_kick_off_queue(h, trx, queue);
-    true
+
+    // **Angestossen wird NICHT hier.** tx.c:660-676: Linux schiebt
+    // `frame_cnt` Rahmen in den Ring und ruft `rtw_hci_tx_kick_off`
+    // EINMAL danach — und das ist keine Sparsamkeit beim MMIO-Schreiben,
+    // sondern die Voraussetzung der Aggregation. Aggregiert wird von der
+    // Hardware, und sie kann nur zusammenfassen, was beim Griff nach der
+    // Sendegelegenheit schon im Ring liegt. Wer je Rahmen an die Tuer
+    // klopft, laesst sie mit einem losfahren.
+    let queue = pci::Q_BE;
+    pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total])
 }
 
 /// Wo der LLC/SNAP-Kopf eines Datenrahmens steht, und wieviel hinten
@@ -3952,7 +4082,15 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
 /// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
 /// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
 fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
-    let qos = f[0] & DOT11_STYPE_QOS != 0;
+    // **Der Subtyp steht in Bit 7:4.** Hier stand `f[0] & DOT11_STYPE_QOS`
+    // ohne den Schiebeschritt — und `DOT11_STYPE_QOS` (0x08) ist
+    // zufaellig derselbe Wert wie `DOT11_FC_TYPE_DATA`, also war die
+    // Antwort fuer JEDEN Datenrahmen „ja, QoS". Gemerkt hat es niemand,
+    // weil dieser AP uns ausschliesslich QoS-Rahmen schickt (`llc_miss`
+    // steht ueber die ganze Verbindung auf null) — die Suche daneben
+    // haette einen Nicht-QoS-Rahmen mit CCMP gar nicht gefunden, denn
+    // 24+8 = 32 steht in keinem ihrer drei Versuche.
+    let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
     let hdrlen = 24 + if qos { 2 } else { 0 };
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let crypt = if prot { 8usize } else { 0 };
@@ -4138,6 +4276,7 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         ptk_installed: false,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
+        ba_tx: BaTx::new(),
     };
 
     // Der Datenkanal existiert seit Kernel 0.205.0; ohne Anmeldung sieht
@@ -4628,6 +4767,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Fenster. Die Vorgabe ist klein und der Grund steht bei
     // `build_addba_resp`: es gibt keinen Umsortierpuffer.
     let ampdu_buf = read_ampdu_buf();
+    // **`txagg:` deckelt nur die SENDErichtung.** `ampdu:` ist die
+    // Empfangsseite und bleibt, wo sie war; die zwei Richtungen sind
+    // getrennte Sitzungen und gehoeren nicht unter einen Schalter.
+    // Vorgabe AN — der Rueckfall `off` ist genau der Zustand von 0.51.1,
+    // also einer, der gemessen ist.
+    let txagg = read_txagg();
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -4738,6 +4883,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 {
                     acc.addba = sta::parse_addba_req(f);
                 }
+                if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_RESP))
+                    && acc.addba_resp.is_none()
+                {
+                    acc.addba_resp = sta::parse_addba_resp(f);
+                }
             }
             if let Some(r) = disconnect_reason(f, &bssid) {
                 if ls.gone.is_none() {
@@ -4845,6 +4995,109 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             let (sub, (cat, a)) = acc.mgmt[i];
             ls.note_mgmt(sub, cat, a);
         }
+
+        // ── Die Aggregation FRAGEN ───────────────────────────────
+        //
+        // Der Zweig darunter beantwortet die Bitte des AP, dieser hier
+        // stellt unsere. Beides ist dieselbe Sache in zwei Richtungen,
+        // und wir hatten bis 0.52.0 nur die eine.
+        //
+        // **Gefragt wird erst nach dem Vierwegehandschlag.** Vorher
+        // liegt kein Schluessel, der AP wuerde einen Verwaltungsrahmen
+        // ungeschuetzt sehen, und vor allem: bis dahin fliessen keine
+        // Daten, also gibt es nichts zu aggregieren. Es ist auch der
+        // Moment, in dem die Folgenummer noch still steht — und die
+        // Startsequenz im Antrag MUSS die sein, ab der wir senden.
+        if let Some(r) = acc.addba_resp.take() {
+            if link.ba_tx.state == BaState::Gefragt
+                && r.dialog_token == link.ba_tx.token
+            {
+                link.ba_tx.status = r.status;
+                if r.status == 0 && r.tid == link.ba_tx.tid {
+                    link.ba_tx.state = BaState::Laeuft;
+                    // agg-tx.c:992 — der AP darf WENIGER zusagen, als wir
+                    // erbeten haben, und mehr als 64 kann HT nicht.
+                    link.ba_tx.win = r.buf_size.min(sta::BA_TX_BUF_SIZE);
+                    host::loud_begin();
+                    host::print("[rtl8822ce] Sende-Aggregation LAEUFT: TID ");
+                    host::print_dec(r.tid as u32);
+                    host::print(", der AP gibt ");
+                    host::print_dec(link.ba_tx.win as u32);
+                    host::print(" Rahmen (erbeten ");
+                    host::print_dec(sta::BA_TX_BUF_SIZE as u32);
+                    host::print("), MAX_AGG_NUM ");
+                    host::print_dec(link.ba_tx.factor as u32);
+                    host::print(", Abstand ");
+                    host::print_dec(link.ba_tx.density as u32);
+                    host::print("\n");
+                    host::loud_end();
+                } else {
+                    link.ba_tx.state = BaState::Aufgegeben;
+                    host::loud_begin();
+                    host::print("[rtl8822ce] Sende-Aggregation ABGELEHNT: Status ");
+                    host::print_dec(r.status as u32);
+                    host::print(", TID ");
+                    host::print_dec(r.tid as u32);
+                    host::print(" — die Verbindung laeuft weiter, jeder Rahmen einzeln\n");
+                    host::loud_end();
+                }
+            }
+        }
+        let ba_faellig = match link.ba_tx.state {
+            BaState::Aus => txagg && ls.authorized,
+            BaState::Gefragt => now.saturating_sub(link.ba_tx.at_ms)
+                                > BA_RESP_MS,
+            _ => false,
+        };
+        if ba_faellig {
+            if link.ba_tx.tries >= BA_MAX_TRIES {
+                link.ba_tx.state = BaState::Aufgegeben;
+                host::say("[rtl8822ce] Sende-Aggregation: der AP hat auf drei ADDBA Requests\n\x20         nicht geantwortet. Jeder Rahmen geht einzeln hinaus.\n");
+            } else {
+                // Die zwei Zahlen fuer den Deskriptor kommen aus den
+                // HT-Faehigkeiten des AP und stehen fest, sobald er
+                // zusagt — gerechnet werden sie hier, weil `caps` hier
+                // zur Hand ist.
+                link.ba_tx.factor = sta::tx_ampdu_factor(caps.ht_ampdu_factor);
+                link.ba_tx.density = sta::tx_ampdu_density(caps.ht_ampdu_density);
+                link.ba_tx.token = link.ba_tx.token.wrapping_add(1);
+                link.ba_tx.tries += 1;
+                link.ba_tx.at_ms = now;
+                link.ba_tx.state = BaState::Gefragt;
+                let mut req = [0u8; 256];
+                let n = sta::build_addba_req(&mut req, &mac, &bssid,
+                                             link.ba_tx.tid,
+                                             link.ba_tx.token, link.seq,
+                                             sta::BA_TX_BUF_SIZE, 0);
+                let mut info = tx::pkt_info_update(&req[..n], 0,
+                                                  tx::band_of(link.channel));
+                let q = tx::RTW_TX_QUEUE_MGMT;
+                if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &req[..n]) {
+                    pci::tx_kick_off_queue(h, trx, q);
+                    ls.addba_tx += 1;
+                }
+                if link.ba_tx.tries == 1 {
+                    host::loud_begin();
+                    host::print("[rtl8822ce] ADDBA Request hinaus: TID ");
+                    host::print_dec(link.ba_tx.tid as u32);
+                    host::print(", ab Folgenummer ");
+                    host::print_dec(link.seq as u32);
+                    host::print(", Fenster ");
+                    host::print_dec(sta::BA_TX_BUF_SIZE as u32);
+                    host::print("\n");
+                    host::loud_end();
+                }
+            }
+        }
+        // **Erst wenn die Sitzung steht, wird QoS gesendet.** Ein
+        // QoS-Rahmen ohne Sitzung ginge auch, aber dann aendert sich die
+        // Rahmenart mitten im Betrieb, und die Folgenummer waere schon
+        // vergeben, bevor der Antrag seine Startsequenz nennt.
+        let qos_tid = if link.ba_tx.state == BaState::Laeuft {
+            Some(link.ba_tx.tid)
+        } else {
+            None
+        };
 
         // ── Die Aggregation zulassen ─────────────────────────────
         // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
@@ -4983,7 +5236,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         // denen der AP keinen einzigen hoerte.
                         let sn = ls.arm_probe(now);
                         if tx_8023(h, trx, mgmt_buf, link,
-                                   &eth[..14 + len], enc, sn) {
+                                   &eth[..14 + len], enc, sn, None) {
+                            // Ein einzelner Rahmen, und einer, auf den
+                            // der AP wartet: sofort.
+                            pci::tx_kick_off_queue(h, trx, pci::Q_BE);
                             ls.eapol_tx += 1;
                             if ls.authorized {
                                 ls.rekey_tx += 1;
@@ -5041,7 +5297,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // ── Senden, was der IP-Stapel loswerden will ─────────────
+        //
+        // **Erst alles in den Ring, dann EINMAL anstossen** — tx.c:660-676.
+        // Die Schleife holte schon immer, bis nichts mehr da war; neu ist,
+        // dass der Anstoss danach kommt statt je Rahmen. Damit sieht die
+        // Hardware bei ihrem naechsten Griff nach der Sendegelegenheit den
+        // ganzen Stapel und kann ihn zu einem A-MPDU zusammenfassen.
         if ls.authorized {
+            let mut gestapelt = 0u32;
             loop {
                 let n = host::netdev_poll_tx(ethbuf);
                 if n <= 0 {
@@ -5058,7 +5321,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 let sn = if probe_due { probe_due = false; ls.arm_probe(now) }
                          else { None };
                 if tx_8023(h, trx, mgmt_buf, link,
-                           &ethbuf[..n as usize], enc, sn) {
+                           &ethbuf[..n as usize], enc, sn, qos_tid) {
+                    gestapelt += 1;
                     ls.data_tx += 1;
                     // tx.c `rtw_tx` — dieselbe Buchfuehrung wie beim
                     // Empfang, damit `tx_throughput` eine Zahl hat.
@@ -5066,6 +5330,16 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         d.stats.tx_unicast += n as u64;
                         d.stats.tx_cnt += 1;
                     }
+                }
+            }
+            if gestapelt > 0 {
+                pci::tx_kick_off_queue(h, trx, pci::Q_BE);
+                // Wieviel je Anstoss zusammenkommt, ist die Zahl, an der
+                // man sieht, ob ueberhaupt etwas zu aggregieren war.
+                ls.tx_batch_n += 1;
+                ls.tx_batch_sum += gestapelt;
+                if gestapelt > ls.tx_batch_max {
+                    ls.tx_batch_max = gestapelt;
                 }
             }
         }
@@ -5566,6 +5840,28 @@ fn read_bw_cap() -> usize {
     }
 }
 
+/// `txagg:` aus `sys/config/wifi` — der reine Teil fuer `framecheck.py`.
+///
+/// **Ein unverstandener Wert ist AN, also die Vorgabe.** Dieselbe Regel
+/// wie bei `band:` und `bw:`: wer sich vertippt, bekommt das, was ohne
+/// die Zeile herauskaeme. `off` ist der Notausgang, und er fuehrt in
+/// einen Zustand, der GEMESSEN ist — den von 0.51.1.
+pub fn txagg_from(v: &[u8]) -> bool {
+    !(v.starts_with(b"off") || v.starts_with(b"aus") || v == b"0")
+}
+
+fn read_txagg() -> bool {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return true;
+    }
+    match cfg_get(&cfg[..n as usize], b"txagg") {
+        Some((a, b)) => txagg_from(&cfg[a..b]),
+        None => true,
+    }
+}
+
 fn read_ampdu_buf() -> u16 {
     const VORGABE: u16 = 8;
     let mut cfg = [0u8; 512];
@@ -5881,6 +6177,47 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" erbetenen)", &mut b, &mut n);
     } else if ls.addba_req > 0 {
         put(" — AGGREGATION AUS (`ampdu: off`)", &mut b, &mut n);
+    }
+    // **Und die andere Richtung, die seit 0.29.0 fehlte.** Sie steht
+    // daneben und nicht darunter, damit man in EINER Zeile sieht, dass
+    // eine Verbindung zwei Sitzungen hat und dass sie verschiedene
+    // Zustaende haben koennen.
+    // **Und wieviel je Anstoss im Ring lag.** Eine Block-Ack-Sitzung
+    // sagt, was die Hardware aggregieren DARF; diese Zahl sagt, was sie
+    // aggregieren KANN. Steht hier eine Eins, ist der Engpass nicht die
+    // Sitzung, sondern dass nie mehr als ein Rahmen gleichzeitig da ist.
+    if ls.tx_batch_n > 0 {
+        put("\nsendestapel ", &mut b, &mut n);
+        num(ls.tx_batch_sum / ls.tx_batch_n, &mut b, &mut n);
+        put(" rahmen je anstoss im mittel, groesster ", &mut b, &mut n);
+        num(ls.tx_batch_max, &mut b, &mut n);
+        put(" (", &mut b, &mut n);
+        num(ls.tx_batch_n, &mut b, &mut n);
+        put(" anstoesse)", &mut b, &mut n);
+    }
+    put("\n  BA SENDEN ", &mut b, &mut n);
+    match link.ba_tx.state {
+        BaState::Aus => put("aus (txagg)", &mut b, &mut n),
+        BaState::Gefragt => {
+            put("gefragt, keine Antwort (", &mut b, &mut n);
+            num(link.ba_tx.tries, &mut b, &mut n);
+            put(" x)", &mut b, &mut n);
+        }
+        BaState::Laeuft => {
+            put("LAEUFT, fenster ", &mut b, &mut n);
+            num(link.ba_tx.win as u32, &mut b, &mut n);
+            put(", max_agg ", &mut b, &mut n);
+            num(link.ba_tx.factor as u32, &mut b, &mut n);
+            put(", abstand ", &mut b, &mut n);
+            num(link.ba_tx.density as u32, &mut b, &mut n);
+        }
+        BaState::Aufgegeben => {
+            put("abgelehnt (status ", &mut b, &mut n);
+            num(link.ba_tx.status as u32, &mut b, &mut n);
+            put(", ", &mut b, &mut n);
+            num(ls.addba_tx, &mut b, &mut n);
+            put(" fragen)", &mut b, &mut n);
+        }
     }
     if ls.addba_fail > 0 {
         put(", ", &mut b, &mut n);
