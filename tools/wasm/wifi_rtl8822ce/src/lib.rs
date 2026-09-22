@@ -4657,11 +4657,22 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             if st.crc_err {
                 return;
             }
-            // **Vor allem anderen: in welcher Breite kam er herein?**
-            // Nach dem Ausstieg unten zaehlt nur noch ein Teil der
-            // Rahmen mit, und eine Breite, die nur die gezaehlten
-            // Rahmen misst, misst den Ausstieg mit.
-            acc.bw_cnt[(st.bw as usize).min(3)] += 1;
+            // **In welcher Breite kam er herein — und NUR, wenn die
+            // Frage ueberhaupt beantwortet ist.**
+            //
+            // Das Breitenfeld des Deskriptors (`GET_RX_DESC_BW`) ist nur
+            // auf den Rahmen gefuellt, die einen PHY-Status tragen; in
+            // einem A-MPDU ist das einer von vielen. Ohne diese Bedingung
+            // stand im ersten Geraetelauf `20:72302 40:32 80:12482` —
+            // und das las sich, als kaeme das meiste schmal an, waehrend
+            // die Ratenmeldung `VHT 2SS` sagte, was es nur bei 80 MHz
+            // gibt. Die 12482 waren echt, die 72302 waren leere Felder.
+            //
+            // Es steht vor dem Ausstieg unten: eine Breite, die nur die
+            // weiterverarbeiteten Rahmen misst, misst den Ausstieg mit.
+            if st.phy_status {
+                acc.bw_cnt[(st.bw as usize).min(3)] += 1;
+            }
             let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
                 + st.shift as usize;
             if off >= pkt.len() {
