@@ -916,6 +916,13 @@ pub extern "C" fn _start() {
                     break;
                 }
                 let (Some(t), Some(b)) = (_txpwr.as_ref(), target) else {
+                    // **Wenn das hier je greift, endet der Treiber.**
+                    // Der Rufer schaltet danach die MAC ab, und die
+                    // Verbindung bleibt fuer immer unten. Es darf nicht
+                    // still geschehen — Florian: „zwar versucht aber
+                    // blieb stumm".
+                    host::say("[rtl8822ce] kein Ziel mehr — der Treiber \
+gibt auf\n");
                     break;
                 };
                 if reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, t, &b,
