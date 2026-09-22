@@ -5285,6 +5285,34 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
 /// Quarznachfuehrung fuer immer aus — ein Tor, das nie aufgeht. Also
 /// wird sie hier gerufen, bis L6 steht.
 #[allow(clippy::too_many_arguments)]
+/// **Wie lange jeder Teil des Watchdogs laengstens brauchte**, in us.
+///
+/// Linux laesst den Watchdog in einer Workqueue NEBEN dem Empfang laufen;
+/// bei uns steht er in der Pumpschleife, und solange er rechnet, holt
+/// niemand den Ring leer. Am Geraet (0.67.0) setzte die Schleife bis zu
+/// 119 ms aus, der Kartenring lief ueber, und TCP verlor 400-600 Segmente
+/// auf einen Schlag. `do_lck` allein darf nach Linux bis zu 100 ms pollen.
+/// Diese Zahlen sagen, WELCHER Teil es war, statt es zu raten.
+static mut WD_MAX: [u32; 8] = [0; 8];
+const WD_NAMES: [&str; 8] = ["coex", "statistik", "dig/cck", "ra/rrsr",
+                             "pfad/cfo", "dpk", "pwr_track", "adaptivity"];
+
+fn wd_mark(i: usize, tp: &mut u64) {
+    let now = host::now_us();
+    let d = now.saturating_sub(*tp).min(u32::MAX as u64) as u32;
+    // SAFETY: einfaedig, nur der Pumpfaden schreibt, der Bericht liest.
+    unsafe {
+        let m = &mut *core::ptr::addr_of_mut!(WD_MAX);
+        if d > m[i] { m[i] = d; }
+    }
+    *tp = now;
+}
+
+/// Die laengste Runde der Pumpschleife ohne ihren Schlaf, in us, und ob
+/// in ihr der Watchdog lief.
+static mut ITER_MAX: u32 = 0;
+static mut ITER_MAX_WD: bool = false;
+
 fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
              e: &efuse::Efuse, link: &mut Link, caps: &sta::PeerCaps,
              fw_feature: u32, linked: bool, beacon_int: u16) {
@@ -5314,10 +5342,12 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     d.stats.tx_cnt = 0;
     d.stats.rx_cnt = 0;
 
+    let mut tp = host::now_us();
     // main.c:275-279
     coex::wl_status_check(h, &mut d.cx);
     coex::monitor_bt_enable(h, &mut d.cx);
     coex::active_query_bt_info(h, &mut d.cx);
+    wd_mark(0, &mut tp);
 
     let band_2g = link.channel <= 14;
     // `si->ra_report.desc_rate` — was die FIRMWARE zuletzt gewaehlt hat,
@@ -5333,24 +5363,31 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     // zulaesst. Die Reihenfolge ist Linux': erst `statistics` (und darin
     // der RSSI), dann der Rest.
     phy::statistics(h, &mut d.dm, h2c, if linked { Some(&mut link.si) } else { None });
+    wd_mark(1, &mut tp);
     phy::dig(h, &mut d.dm, hal.rf_path_num, linked);
     phy::cck_pd(h, &mut d.dm, band_2g, linked);
+    wd_mark(2, &mut tp);
     phy::ra_track(h, &mut d.dm, h2c, d.stats.tx_throughput,
                   d.stats.rx_throughput, d.watch_dog_cnt,
                   if linked { Some((&mut link.si, caps, nss, band_2g)) } else { None },
                   sta_rate);
+    wd_mark(3, &mut tp);
     phy::tx_path_diversity(h, &mut d.path_div, hal.antenna_tx, hal.antenna_rx,
                            linked);
     chip::cfo_track(h, &mut d.dm, hal.rf_path_num, e.crystal_cap, linked,
                     d.cx.bt_disabled);
+    wd_mark(4, &mut tp);
     dpk::track(h, &mut d.dpk);
+    wd_mark(5, &mut tp);
     chip::pwr_track(h, &mut d.dm, e.power_track_type, &e.thermal_meter,
                     hal.rf_path_num, link.channel);
+    wd_mark(6, &mut tp);
     if fw_adapt {
         fw::adaptivity(h, h2c, &d.dm);
     } else {
         phy::adaptivity(h, &d.dm);
     }
+    wd_mark(7, &mut tp);
 
     // main.c:196-207 `rtw_sw_beacon_loss_check`. Die Firmware mit
     // `FW_FEATURE_BCN_FILTER` macht es selbst.
@@ -5889,6 +5926,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut cur_bw = d.cur_bw as u8;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
         let now = host::now_ms();
+        let t_iter = host::now_us();
+        let mut wd_ran = false;
 
         // ── Empfangen ────────────────────────────────────────────
         let mut acc = rx::WdAcc::new(link.si.avg_rssi);
@@ -6816,6 +6855,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
+            wd_ran = true;
             // ── Roaming: wechseln, BEVOR es abreisst ─────────
             //
             // mlme.c:6800-6828 `ieee80211_handle_beacon_sig`: erst ab
@@ -7119,6 +7159,16 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // auf null und wir schlafen nie; im Leerlauf ist das Budget nach
         // einem knappen halben Millisekunde aufgebraucht und wir
         // schlafen wie vorher.
+        {
+            let dt = (host::now_us() - t_iter).min(u32::MAX as u64) as u32;
+            // SAFETY: wie `WD_MAX`.
+            unsafe {
+                if dt > ITER_MAX {
+                    ITER_MAX = dt;
+                    ITER_MAX_WD = wd_ran;
+                }
+            }
+        }
         if got == 0 {
             if leer_in_folge < RX_SPIN_BUDGET {
                 leer_in_folge += 1;
@@ -7828,8 +7878,9 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
 
 /// Wieviel unser Bericht fassen darf. Der Kernel nimmt bis
 /// `drivers::report::REPORT_MAX` = 4096 (`host_core.rs:3639`); die
-/// Haelfte davon ist reichlich und laesst Luft fuer die naechste Zeile.
-const REPORT_CAP: usize = 2048;
+/// 3584 laesst dem Kernel einen Rand; 2048 war mit der Watchdog-Zeile
+/// aus 0.67.1 knapp am Ende — und `put` schneidet still ab.
+const REPORT_CAP: usize = 3584;
 
 /// docs/spec/WIFI_CLASS_ABI.md §3 — `npk_driver_report`.
 ///
@@ -8452,6 +8503,21 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // sondern Linux' eigene Regel, und man sieht es hier.
     put("\nwatchdog ", &mut b, &mut n);
     num(d.watch_dog_cnt, &mut b, &mut n);
+    // SAFETY: einfaedig; der Pumpfaden schreibt, hier nur gelesen.
+    let (wd, it, it_wd) = unsafe {
+        (*core::ptr::addr_of!(WD_MAX), ITER_MAX, ITER_MAX_WD)
+    };
+    put(" (laengste runde ", &mut b, &mut n);
+    num(it, &mut b, &mut n);
+    put(if it_wd { " us MIT watchdog; teile max" } else { " us ohne watchdog; teile max" },
+        &mut b, &mut n);
+    for (i, name) in WD_NAMES.iter().enumerate() {
+        put(" ", &mut b, &mut n);
+        put(name, &mut b, &mut n);
+        put(" ", &mut b, &mut n);
+        num(wd[i], &mut b, &mut n);
+    }
+    put(" us)", &mut b, &mut n);
     put("  igi 0x", &mut b, &mut n);
     if n + 2 <= b.len() {
         b[n] = hex[(d.dm.igi_history[0] >> 4) as usize];
