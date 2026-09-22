@@ -4201,6 +4201,11 @@ struct LinkStats {
     ro_old: u32,
     ro_timeout: u32,
     ro_full: u32,
+    /// **A-MSDU**: MPDUs mit gesetztem A-MSDU-Bit, die Teilrahmen daraus,
+    /// und wieviele ganz verworfen wurden (`goto purge` in cfg80211).
+    amsdu_rx: u32,
+    amsdu_sub: u32,
+    amsdu_bad: u32,
     /// **Der Gruppen-Neuschluessel, gezaehlt statt vermutet.** Jedes
     /// EAPOL NACH dem Handschlag ist einer (msg1 der
     /// Gruppenschluessel-Sequenz, oder ein ganz neues Vierwege), und
@@ -4373,7 +4378,8 @@ impl Default for LinkStats {
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
             ro_since: [0; RO_TIDS], ro_sorted: 0, ro_old: 0,
-            ro_timeout: 0, ro_full: 0, rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
+            ro_timeout: 0, ro_full: 0, amsdu_rx: 0, amsdu_sub: 0, amsdu_bad: 0,
+            rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
             gone: None, kicked: 0, last_reason: 0,
             probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
@@ -5006,6 +5012,20 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
 /// Findet sich LLC/SNAP nicht an der gerechneten Stelle, wird an den zwei
 /// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
 /// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
+/// cfg80211 `ieee80211_hdrlen` (util.c:430-447) fuer einen DATENrahmen
+/// einer Station: 24, bei QoS plus 2 fuer das QoS-Steuerfeld — und mit
+/// gesetztem Order-Bit plus 4 fuer HT-Control. **Die vier fehlten**: wir
+/// sagen `+HTC-VHT` an, also darf der AP das Feld senden, und dann stand
+/// der LLC/SNAP-Kopf vier Byte hinter jeder Stelle, an der wir suchten.
+/// Adressfeld 4 (FromDS und ToDS) gibt es fuer eine Station nicht.
+fn data_hdrlen(f: &[u8]) -> usize {
+    let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
+    if !qos {
+        return 24;
+    }
+    26 + if f[1] & 0x80 != 0 { 4 } else { 0 }
+}
+
 fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
     // **Der Subtyp steht in Bit 7:4.** Hier stand `f[0] & DOT11_STYPE_QOS`
     // ohne den Schiebeschritt — und `DOT11_STYPE_QOS` (0x08) ist
@@ -5015,8 +5035,7 @@ fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
     // steht ueber die ganze Verbindung auf null) — die Suche daneben
     // haette einen Nicht-QoS-Rahmen mit CCMP gar nicht gefunden, denn
     // 24+8 = 32 steht in keinem ihrer drei Versuche.
-    let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
-    let hdrlen = 24 + if qos { 2 } else { 0 };
+    let hdrlen = data_hdrlen(f);
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let crypt = if prot { 8usize } else { 0 };
     let trailing = 4 + if prot { 8usize } else { 0 };
@@ -5389,8 +5408,13 @@ const RO_TIDS: usize = 8;
 /// auseinanderlaufen: wer 64 zusagt und 32 puffert, verwirft, was er
 /// angenommen hat.
 const RO_WIN: usize = 64;
-/// Groesster 802.3-Rahmen, den wir zurueckhalten.
-const RO_FRAME: usize = 1536;
+/// **Der Puffer haelt die rohe MPDU, nicht den 802.3-Rahmen.** mac80211
+/// sortiert MPDUs um und entpackt ein A-MSDU erst DANACH
+/// (`ieee80211_rx_h_amsdu` steht in der Kette hinter dem Umsortieren);
+/// eine MPDU mit einem A-MSDU traegt viele Rahmen unter EINER
+/// Folgenummer. Die Groesse ist deshalb die groesste MPDU, die wir im
+/// VHT-Element ansagen (`MAX_MPDU_LENGTH_11454`).
+const RO_FRAME: usize = 11454;
 /// Gleichzeitig zurueckgehaltene Rahmen ueber ALLE TIDs. Im Normalfall
 /// liegt hier nichts — nur solange ein Loch offen ist. Laeuft der Pool
 /// voll, wird zugestellt statt verworfen (`ro_full` zaehlt es).
@@ -5401,12 +5425,11 @@ const RO_TIMEOUT_MS: u32 = 100;
 
 static mut RO_BUF: [[u8; RO_FRAME]; RO_POOL] = [[0; RO_FRAME]; RO_POOL];
 static mut RO_LEN: [u16; RO_POOL] = [0; RO_POOL];
-static mut RO_EAP: [bool; RO_POOL] = [false; RO_POOL];
 static mut RO_USED: [bool; RO_POOL] = [false; RO_POOL];
 
-/// Einen freien Platz im Pool nehmen und den Rahmen hineinlegen.
-fn ro_take(eth: &[u8], is_eapol: bool) -> Option<usize> {
-    if eth.len() > RO_FRAME {
+/// Einen freien Platz im Pool nehmen und die MPDU hineinlegen.
+fn ro_take(mpdu: &[u8]) -> Option<usize> {
+    if mpdu.len() > RO_FRAME {
         return None;
     }
     // SAFETY: ein Faden, ein Rufer — derselbe Vertrag wie bei RXBUF6.
@@ -5415,11 +5438,9 @@ fn ro_take(eth: &[u8], is_eapol: bool) -> Option<usize> {
         let i = used.iter().position(|u| !*u)?;
         used[i] = true;
         let buf = &mut *core::ptr::addr_of_mut!(RO_BUF);
-        buf[i][..eth.len()].copy_from_slice(eth);
+        buf[i][..mpdu.len()].copy_from_slice(mpdu);
         let lens = &mut *core::ptr::addr_of_mut!(RO_LEN);
-        lens[i] = eth.len() as u16;
-        let eaps = &mut *core::ptr::addr_of_mut!(RO_EAP);
-        eaps[i] = is_eapol;
+        lens[i] = mpdu.len() as u16;
         Some(i)
     }
 }
@@ -5433,18 +5454,17 @@ fn ro_release_slot(ls: &mut LinkStats, i: usize) {
     // SAFETY: wie `ro_take` — ein Faden, ein Rufer. Die Zeiger werden
     // ZUERST an Bezuege gebunden; ein `&(*ptr)[i]` mitten im Ausdruck
     // waere eine stillschweigende Anleihe auf einen rohen Zeiger.
-    let (len, eap) = unsafe {
+    let len = unsafe {
         let lens = &*core::ptr::addr_of!(RO_LEN);
-        let eaps = &*core::ptr::addr_of!(RO_EAP);
         let len = lens[i] as usize;
         let buf = &*core::ptr::addr_of!(RO_BUF);
         tmp[..len].copy_from_slice(&buf[i][..len]);
         let used = &mut *core::ptr::addr_of_mut!(RO_USED);
         used[i] = false;
-        (len, eaps[i])
+        len
     };
     ls.ro_sorted += 1;
-    deliver(ls, &tmp[..len], eap);
+    deliver_mpdu(ls, &tmp[..len]);
 }
 
 /// Alles freigeben, was ab dem Kopf LUECKENLOS daliegt.
@@ -5541,9 +5561,9 @@ fn ro_open(ls: &mut LinkStats, tid: u8, ssn: u16) {
 /// **Der Eintritt.** Ohne Sitzung geht der Rahmen unveraendert durch —
 /// das ist der Zustand vor dem Handschlag und jeder Rahmen ohne QoS.
 fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
-                      eth: &[u8], is_eapol: bool) {
+                      mpdu: &[u8]) {
     if !have_sn || tid >= RO_TIDS || !ls.ro_on[tid] {
-        deliver(ls, eth, is_eapol);
+        deliver_mpdu(ls, mpdu);
         return;
     }
     let d = sn.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
@@ -5565,7 +5585,7 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
     if sn == ls.ro_head[tid] && ls.ro_slot[tid][(sn as usize) % RO_WIN] == 0 {
         // Der Normalfall: er passt genau, nichts muss liegenbleiben.
         ls.ro_head[tid] = (ls.ro_head[tid] + 1) & 0x0fff;
-        deliver(ls, eth, is_eapol);
+        deliver_mpdu(ls, mpdu);
         ro_release_ready(ls, tid);
         return;
     }
@@ -5576,7 +5596,7 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
         ls.ro_old += 1;
         return;
     }
-    match ro_take(eth, is_eapol) {
+    match ro_take(mpdu) {
         Some(i) => {
             ls.ro_slot[tid][pos] = (i + 1) as u8;
             if ls.ro_held[tid] == 0 {
@@ -5589,7 +5609,7 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
             // Reihenfolge leidet, die Daten nicht — und der Zaehler sagt,
             // dass es passiert ist.
             ls.ro_full += 1;
-            deliver(ls, eth, is_eapol);
+            deliver_mpdu(ls, mpdu);
         }
     }
     ro_release_ready(ls, tid);
@@ -5623,6 +5643,125 @@ fn ro_tick(ls: &mut LinkStats) {
         ro_release_ready(ls, tid);
         ls.ro_since[tid] = now;
     }
+}
+
+/// **Eine MPDU zustellen: umwandeln, oder ein A-MSDU entpacken.**
+///
+/// Der Ort in der Kette ist der von mac80211: NACH dem Umsortieren
+/// (`ieee80211_rx_h_amsdu`, rx.c:3114, steht hinter
+/// `ieee80211_rx_reorder_ampdu`). Ob die MPDU ein A-MSDU traegt, sagt das
+/// Bit 7 des QoS-Steuerfelds (`IEEE80211_QOS_CTL_A_MSDU_PRESENT`,
+/// rx.c:914-915) — und NUR das.
+fn deliver_mpdu(ls: &mut LinkStats, f: &[u8]) {
+    let mut out = [0u8; 2048];
+    let qos = f.len() >= 26 && f[0] & (DOT11_STYPE_QOS << 4) != 0;
+    if qos && f[24] & 0x80 != 0 {
+        amsdu_to_8023s(ls, f, &mut out);
+        return;
+    }
+    if let Some((n, is_eapol)) = rx_to_8023(f, &mut out, &mut ls.llc_miss) {
+        deliver(ls, &out[..n], is_eapol);
+    }
+}
+
+/// cfg80211 `ieee80211_amsdu_to_8023s` (util.c:842-937), fuer eine
+/// Station an einer Nicht-Mesh-Zelle — also `iftype` STATION,
+/// `mesh_control` 0, und aus `__ieee80211_rx_h_amsdu` (rx.c:3028-3058)
+/// `check_da` = unsere Adresse (addr1), `check_sa` = keine.
+///
+/// Der Rumpf ist eine Folge von Teilrahmen:
+///
+///     DA(6) SA(6) Laenge(2, gross-endig) | MSDU | Fuellung auf 4 Byte
+///
+/// Der letzte hat keine Fuellung. Passt EIN Teilrahmen nicht in den Rest,
+/// wird die GANZE MPDU verworfen (`goto purge`) — auch die Teilrahmen, die
+/// schon passten. Wir sammeln deshalb erst und stellen dann zu.
+///
+/// Abwehr der A-MSDU-Einschleusung (util.c:824-825, CVE-2020-24588): beim
+/// ERSTEN Teilrahmen darf die Ziel-Adresse nicht der LLC/SNAP-Kopf sein —
+/// sonst hat jemand eine gewoehnliche MSDU in ein A-MSDU umgedeutet.
+fn amsdu_to_8023s(ls: &mut LinkStats, f: &[u8], out: &mut [u8; 2048]) {
+    ls.amsdu_rx += 1;
+    // Wo der Rumpf steht: derselbe Kopf-/CCMP-/Schwanz-Abzug wie bei einer
+    // einzelnen MSDU, nur ohne LLC/SNAP-Suche (der Rumpf eines A-MSDU
+    // beginnt mit dem ersten Teilrahmenkopf).
+    let hdrlen = data_hdrlen(f);
+    let prot = f[1] & DOT11_FC_PROTECTED != 0;
+    let start = hdrlen + if prot { 8 } else { 0 };
+    let trailing = 4 + if prot { 8 } else { 0 };
+    if f.len() < start + trailing {
+        ls.amsdu_bad += 1;
+        return;
+    }
+    let body = &f[start..f.len() - trailing];
+    let da_ok: [u8; 6] = [f[4], f[5], f[6], f[7], f[8], f[9]];
+
+    // Zwei Durchgaenge statt einer Liste: der erste prueft ALLE
+    // Teilrahmen (einer kaputt heisst alle verworfen), der zweite stellt
+    // zu. Eine feste Liste haette eine Obergrenze, die cfg80211 nicht hat.
+    if amsdu_walk(body, &da_ok, &mut |_, _| {}).is_none() {
+        ls.amsdu_bad += 1;
+        return;
+    }
+    amsdu_walk(body, &da_ok, &mut |o, len| {
+        let hdr = &body[o..o + 14];
+        let msdu = &body[o + 14..o + 14 + len];
+        // `ieee80211_get_8023_tunnel_proto` (util.c:512-525): steht vorn
+        // RFC 1042 (ausser AARP und IPX) oder der Bruecken-Tunnel, wird
+        // er samt Typfeld abgenommen und der Typ in den 802.3-Kopf gesetzt.
+        let (proto, payload) = if msdu.len() >= 8 {
+            let p = [msdu[6], msdu[7]];
+            let rfc1042 = msdu[0..6] == LLC_SNAP_HDR
+                && p != [0x80, 0xf3] && p != [0x81, 0x37];
+            let bridge = msdu[0..6] == [0xaa, 0xaa, 0x03, 0x00, 0x00, 0xf8];
+            if rfc1042 || bridge { (p, &msdu[8..]) } else { ([hdr[12], hdr[13]], msdu) }
+        } else {
+            ([hdr[12], hdr[13]], msdu)
+        };
+        if 14 + payload.len() > out.len() {
+            return;
+        }
+        out[0..12].copy_from_slice(&hdr[0..12]);
+        out[12..14].copy_from_slice(&proto);
+        out[14..14 + payload.len()].copy_from_slice(payload);
+        ls.amsdu_sub += 1;
+        let is_eapol = u16::from_be_bytes(proto) == ETHERTYPE_EAPOL;
+        deliver(ls, &out[..14 + payload.len()], is_eapol);
+    });
+}
+
+/// Die Schleife aus `ieee80211_amsdu_to_8023s` ohne das Zustellen: geht
+/// die Teilrahmen durch, ruft `each(anfang, laenge)` fuer jeden, der an
+/// uns geht (oder Rundruf ist), und gibt `None` zurueck, wo cfg80211
+/// `goto purge` nimmt.
+fn amsdu_walk(body: &[u8], da_ok: &[u8; 6],
+              each: &mut dyn FnMut(usize, usize)) -> Option<()> {
+    let mut offset = 0usize;
+    let mut last = false;
+    while !last {
+        let remaining = body.len() - offset;
+        if 14 > remaining {
+            return None;
+        }
+        let len = u16::from_be_bytes([body[offset + 12], body[offset + 13]]) as usize;
+        let subframe_len = 14 + len;
+        let padding = (4 - (subframe_len & 3)) & 3;
+        // „the last MSDU has no padding"
+        if subframe_len > remaining {
+            return None;
+        }
+        // „mitigate A-MSDU aggregation injection attacks"
+        if offset == 0 && body[0..6] == LLC_SNAP_HDR {
+            return None;
+        }
+        last = remaining <= subframe_len + padding;
+        let da = &body[offset..offset + 6];
+        if da[0] & 0x01 != 0 || da == &da_ok[..] {
+            each(offset, len);
+        }
+        offset += subframe_len + padding;
+    }
+    Some(())
 }
 
 /// **Der EINE Ausgang fuer einen empfangenen Datenrahmen.**
@@ -6010,10 +6149,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     }
                 }
             }
-            let Some((n, is_eapol)) = rx_to_8023(f, ethbuf, &mut ls.llc_miss)
-            else {
+            // Nur Datenrahmen mit Rumpf gehen weiter — dieselbe erste
+            // Pruefung wie in `rx_to_8023`. Umgewandelt wird erst beim
+            // Zustellen (`deliver_mpdu`), nach dem Umsortieren.
+            if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA
+                || f[0] & DOT11_STYPE_NODATA != 0
+            {
                 return;
-            };
+            }
             ls.data_rx += 1;
             // rx.c:14-32 `rtw_rx_stats` — nur UNICAST zaehlt, und
             // gezaehlt wird die Laenge des 802.11-Rahmens.
@@ -6021,8 +6164,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 acc.rx_unicast += f.len() as u64;
                 acc.rx_cnt += 1;
             }
-            deliver_or_reorder(ls, ro_tid, ro_sn, ro_have,
-                               &ethbuf[..n], is_eapol);
+            deliver_or_reorder(ls, ro_tid, ro_sn, ro_have, f);
         });
 
         // **Die Form der Schleife, ohne einen einzigen zusaetzlichen
@@ -8007,6 +8149,13 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(", Pool voll ", &mut b, &mut n);
     num(ls.ro_full, &mut b, &mut n);
     put(")", &mut b, &mut n);
+    put("  a-msdu ", &mut b, &mut n);
+    num(ls.amsdu_rx, &mut b, &mut n);
+    put(" (", &mut b, &mut n);
+    num(ls.amsdu_sub, &mut b, &mut n);
+    put(" teile, ", &mut b, &mut n);
+    num(ls.amsdu_bad, &mut b, &mut n);
+    put(" verworfen)", &mut b, &mut n);
     put("  eapol ", &mut b, &mut n);
     num(ls.eapol_rx, &mut b, &mut n);
     put("/", &mut b, &mut n);
