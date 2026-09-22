@@ -3724,18 +3724,47 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     out[n + 2..n + 2 + sl].copy_from_slice(&bss.ssid[..sl]);
     n += 2 + sl;
 
-    // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit
-    out[n] = 1;
-    out[n + 1] = 8;
-    out[n + 2..n + 10]
-        .copy_from_slice(&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24]);
-    n += 10;
+    // ── Die Raten, und sie haengen am BAND ───────────────────────
+    //
+    // **Hier standen 1, 2, 5.5 und 11 Mbit — auf JEDER Anmeldung, auch
+    // auf 5 GHz.** Das sind CCK/DSSS-Raten; es gibt sie im 5-GHz-Band
+    // nicht, und sie standen obendrein mit gesetztem hohen Bit da, also
+    // als BASIS-Raten. Wir haben einer reinen VHT-Zelle gesagt, wir
+    // seien eine 11b-Station.
+    //
+    // Linux baut diese Elemente je Band aus `sband->bitrates`
+    // (`ieee80211_assoc_add_rates` -> `ieee80211_put_srates_elem`,
+    // mlme.c), schneidet sie gegen die Raten des AP und setzt in einem
+    // Anmeldeantrag KEINE Basis-Bits (`basic_rates` ist dort 0). Der
+    // Kommentar daneben nennt den Grund: „some APs don't like getting a
+    // superset of their rates in the association request".
+    //
+    // Das 2,4-GHz-Bein bleibt Byte fuer Byte, wie es war — es ist am
+    // Geraet gemessen und traegt 96 Mbit. Die Basis-Bits dort sind
+    // dieselbe Abweichung von Linux, hier benannt und NICHT angefasst:
+    // ein funktionierender Pfad wird nicht auf Verdacht umgebaut.
+    if bss.channel > 14 {
+        // 6, 9, 12, 18, 24, 36, 48, 54 — alle acht passen in EIN
+        // Element, also faellt das erweiterte ganz weg.
+        out[n] = 1;
+        out[n + 1] = 8;
+        out[n + 2..n + 10]
+            .copy_from_slice(&[0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c]);
+        n += 10;
+    } else {
+        // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit
+        out[n] = 1;
+        out[n + 1] = 8;
+        out[n + 2..n + 10]
+            .copy_from_slice(&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24]);
+        n += 10;
 
-    // Extended Supported Rates: 24, 36, 48, 54 Mbit
-    out[n] = 50;
-    out[n + 1] = 4;
-    out[n + 2..n + 6].copy_from_slice(&[0x30, 0x48, 0x60, 0x6c]);
-    n += 6;
+        // Extended Supported Rates: 24, 36, 48, 54 Mbit
+        out[n] = 50;
+        out[n + 1] = 4;
+        out[n + 2..n + 6].copy_from_slice(&[0x30, 0x48, 0x60, 0x6c]);
+        n += 6;
+    }
 
     // **Die Reihenfolge ist die der Spezifikation, nicht die der
     // Kennungen.** Hier stand „die Elemente stehen in AUFSTEIGENDER
@@ -3764,16 +3793,41 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     // VHT nur auf 5 GHz: auf 2,4 GHz ist es nicht zugelassen, und ein AP
     // darf einen Antrag mit VHT im falschen Band ablehnen.
     if bss.channel > 14 {
-        n += sta::build_vht_cap_ie(&mut out[n..], e.hw_cap_ptcl,
-                                   e.hw_cap_nss, rf_path_num,
-                                   if bss.ap_vht_cap_seen {
-                                       Some(bss.ap_vht_cap)
-                                   } else {
-                                       None
-                                   });
+        let v = sta::build_vht_cap_ie(&mut out[n..], e.hw_cap_ptcl,
+                                      e.hw_cap_nss, rf_path_num,
+                                      if bss.ap_vht_cap_seen {
+                                          Some(bss.ap_vht_cap)
+                                      } else {
+                                          None
+                                      });
+        // **Was WIRKLICH hinausging, nicht die Bedingung dafuer.**
+        //
+        // Der Bericht sagte bisher „wir bieten VHT 2SS MCS0-9", und das
+        // war aus `hw_cap_ptcl` und dem Kanal GERECHNET — dieselbe
+        // Bedingung wie hier, also keine unabhaengige Aussage. Kehrte
+        // `build_vht_cap_ie` aus einem anderen Grund um, sagte die
+        // Zeile trotzdem ja. Hier steht das Byte vom Draht.
+        // SAFETY: einfaedig, ein Schreiber, und der Bericht liest es
+        // erst, wenn die Anmeldung durch ist.
+        unsafe {
+            SENT_VHT = if v >= 14 {
+                Some(u32::from_le_bytes([out[n + 2], out[n + 3],
+                                         out[n + 4], out[n + 5]]))
+            } else {
+                None
+            };
+        }
+        n += v;
+    } else {
+        // SAFETY: wie oben.
+        unsafe { SENT_VHT = None };
     }
     n
 }
+
+/// Das Feld „VHT Capabilities Info", das der letzte Anmeldeantrag
+/// wirklich getragen hat. `None` = es ging kein VHT-Element hinaus.
+static mut SENT_VHT: Option<u32> = None;
 
 /// 802.11 §9.4.2.24 — unser RSN-Element.
 ///
@@ -7723,21 +7777,27 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // `build_vht_cap_ie` kehrt UM, wenn die efuse etwas anderes als VHT
     // ansagt, und dann geht gar kein VHT-Element hinaus. Dieselbe
     // Bedingung, an derselben Zahl.
-    put("\n  wir bieten  HT ", &mut b, &mut n);
+    put("\n  wir schickten  HT ", &mut b, &mut n);
     num(e.hw_cap_nss as u32, &mut b, &mut n);
     put("SS", &mut b, &mut n);
-    let vht_ok = e.hw_cap_ptcl == EFUSE_HW_CAP_IGNORE as u8
-        || e.hw_cap_ptcl == EFUSE_HW_CAP_PTCL_VHT as u8;
-    if vht_ok && link.channel > 14 {
-        put(" + VHT ", &mut b, &mut n);
-        num(e.hw_cap_nss as u32, &mut b, &mut n);
-        put("SS MCS0-9", &mut b, &mut n);
-    } else if !vht_ok {
-        put(" + KEIN VHT (efuse ptcl ", &mut b, &mut n);
-        num(e.hw_cap_ptcl as u32, &mut b, &mut n);
-        put(")", &mut b, &mut n);
-    } else {
-        put(" + kein VHT (2,4 GHz)", &mut b, &mut n);
+    // SAFETY: einfaedig; geschrieben beim Bauen des Antrags, hier nur
+    // gelesen.
+    match unsafe { SENT_VHT } {
+        Some(cap) => {
+            put(" + VHT ", &mut b, &mut n);
+            num(e.hw_cap_nss as u32, &mut b, &mut n);
+            put("SS MCS0-9, cap 0x", &mut b, &mut n);
+            rate_hex((cap >> 24) as u8, &mut b, &mut n);
+            rate_hex((cap >> 16) as u8, &mut b, &mut n);
+            rate_hex((cap >> 8) as u8, &mut b, &mut n);
+            rate_hex(cap as u8, &mut b, &mut n);
+        }
+        None if link.channel > 14 => {
+            put(" + KEIN VHT-Element hinausgegangen (efuse ptcl ", &mut b, &mut n);
+            num(e.hw_cap_ptcl as u32, &mut b, &mut n);
+            put(")", &mut b, &mut n);
+        }
+        None => put(" + kein VHT (2,4 GHz)", &mut b, &mut n),
     }
     // **Und wie breit er seine Zelle BETREIBT** — aus der
     // Anmeldeantwort, nicht aus der Bake. Linux liest genau diese
