@@ -2142,6 +2142,12 @@ struct Bss {
     ap_vht_cap_seen: bool,
     bss_load: u8,
     bss_load_seen: bool,
+    /// **Sagt der AP WMM an?** `bss->wmm_used` in mac80211
+    /// (scan.c:139: `elems->wmm_param || elems->wmm_info`). Davon haengt
+    /// ab, ob unser Anmeldeantrag das WMM-Element traegt — und davon
+    /// wiederum, ob ein AP uns VHT gibt: hostapd streicht einer Station
+    /// ohne WMM-Element VHT (`copy_sta_vht_capab`, ieee802_11_vht.c:200).
+    wmm: bool,
 }
 
 const MAX_BSS: usize = 48;
@@ -2564,7 +2570,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
         ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false,
+        bss_load: 0, bss_load_seen: false, wmm: false,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -3052,6 +3058,15 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
             // einer 80er steht nirgendwo sonst, und aus dem primaeren
             // Kanal zu raten waere eine Behauptung ueber drei
             // Nachbarkanaele.
+            // 221 = herstellerspezifisch. Microsoft-OUI 00:50:f2, Typ 2
+            // ist WMM, Untertyp 0 das Info-, 1 das Parameter-Element —
+            // genau die Pruefung aus mac80211 `parse.c:407-421`.
+            221 if len >= 5
+                && f[i + 2..i + 5] == [0x00, 0x50, 0xf2]
+                && f[i + 5] == 2
+                && (f[i + 6] == 0 || f[i + 6] == 1) => {
+                e.wmm = true;
+            }
             192 if len >= 3 => {
                 e.vht_chanwidth = f[i + 2];
                 e.vht_cch0 = f[i + 3];
@@ -3712,7 +3727,13 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     mgmt_header(out, 0x00, mac, &bss.bssid);
     // Faehigkeiten: ESS, dazu Privacy und Short Preamble so, wie der AP
     // sie ansagt. Wer hier mehr behauptet, als der AP kann, wird abgelehnt.
-    let cap = 0x0001u16 | (bss.capability & 0x0030);
+    //
+    // **Short Preamble nur auf 2,4 GHz.** mac80211 setzt SHORT_SLOT und
+    // SHORT_PREAMBLE ausschliesslich im 2,4-GHz-Band (mlme.c:1771-1774);
+    // auf 5 GHz gibt es die lange Praeambel gar nicht, das Bit ist dort
+    // ohne Bedeutung und Linux laesst es weg.
+    let preamble = if bss.channel > 14 { 0 } else { bss.capability & 0x0020 };
+    let cap = 0x0001u16 | (bss.capability & 0x0010) | preamble;
     out[24..26].copy_from_slice(&cap.to_le_bytes());
     out[26..28].copy_from_slice(&10u16.to_le_bytes()); // Listen Interval
     let mut n = 28;
@@ -3822,8 +3843,43 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
         // SAFETY: wie oben.
         unsafe { SENT_VHT = None };
     }
+
+    // ── WMM-Information, als LETZTES Element ─────────────────────
+    //
+    // **Ohne dieses Element bekommen wir kein VHT.** hostapd streicht
+    // einer Station VHT, wenn ihr Antrag kein gueltiges WMM-Element
+    // traegt (`copy_sta_vht_capab`, ieee802_11_vht.c:200-207:
+    // `!(sta->flags & WLAN_STA_WMM)`); `check_wmm` (ieee802_11.c:5361)
+    // setzt die Fahne nur aus genau diesem Element. Am Geraet: der AP
+    // schickte uns 100 % HT40 und 0 % VHT, obwohl beide Seiten VHT80
+    // koennen — ein iPhone an derselben Box holt 500-600 Mbit.
+    //
+    // Der Kommentar an `tx_8023` hielt das Element fuer eine Altlast der
+    // Wi-Fi Alliance, weil der AP uns trotzdem HT und Block Ack gab. Das
+    // stimmt fuer HT auf DIESER Box; fuer VHT gilt die Regel oben.
+    //
+    // Gebaut wie `ieee80211_add_wmm_info_ie` (util.c:4290-4303), an der
+    // Stelle aus `ieee80211_send_assoc` (mlme.c:2299-2309): nach allen
+    // Nicht-Hersteller-Elementen, nur wenn der AP selbst WMM ansagt
+    // (`assoc_data->wmm` = `bss->wmm_used`), QoS-Info 0 — kein U-APSD.
+    if bss.wmm && n + 9 <= out.len() {
+        out[n..n + 9].copy_from_slice(&[
+            221, 7,             // herstellerspezifisch, Laenge
+            0x00, 0x50, 0xf2,   // Microsoft-OUI
+            2,                  // WME
+            0,                  // WME-Info
+            1,                  // Version
+            0,                  // QoS-Info: U-APSD nicht in Gebrauch
+        ]);
+        n += 9;
+    }
+    // SAFETY: wie oben — einfaedig, gelesen erst nach der Anmeldung.
+    unsafe { SENT_WMM = bss.wmm };
     n
 }
+
+/// Ob der letzte Anmeldeantrag das WMM-Element trug.
+static mut SENT_WMM: bool = false;
 
 /// Das Feld „VHT Capabilities Info", das der letzte Anmeldeantrag
 /// wirklich getragen hat. `None` = es ging kein VHT-Element hinaus.
@@ -3965,6 +4021,13 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     let nss = if hal.rf_2t2r { 2 } else { 1 };
     let wireless_set = sta::update_sta_info(&mut si, &caps, nss,
                                             bss.channel <= 14);
+    // main.c:1266/1286 — `rtw_update_sta_info` setzt im selben Zug die
+    // Grundmenge der Antwortraten, je Band. Unser `update_sta_info`
+    // haelt kein `dm`, also steht die Zeile hier und im Watchdog
+    // (`phy::ra_track`). **Ohne sie schrieb `rrsr_update` alle zwei
+    // Sekunden `0 & mask = 0` nach REG_RRSR** — die Raten, aus denen der
+    // MAC seine ACKs und Block-Acks waehlt.
+    d.dm.rrsr_val_init = if bss.channel <= 14 { RRSR_INIT_2G } else { RRSR_INIT_5G };
 
     host::print("  rate_id ");
     host::print_dec(si.rate_id as u32);
@@ -6687,7 +6750,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
                         vht_op_seen: false,
                         ap_vht_cap: 0, ap_vht_cap_seen: false,
-                        bss_load: 0, bss_load_seen: false,
+                        bss_load: 0, bss_load_seen: false, wmm: false,
                     }; ROAM_BSS_MAX];
                     let mut n_kand = 0usize;
                     let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
@@ -7127,7 +7190,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
         vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
         ap_vht_cap: 0, ap_vht_cap_seen: false,
-        bss_load: 0, bss_load_seen: false,
+        bss_load: 0, bss_load_seen: false, wmm: false,
     };
     *found = [leer; ROAM_BSS_MAX];
     *n_found = 0;
@@ -7835,6 +7898,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         }
         None => put(" + kein VHT (2,4 GHz)", &mut b, &mut n),
     }
+    // SAFETY: wie oben.
+    put(if unsafe { SENT_WMM } { " + WMM" } else { " + KEIN WMM (AP sagt keins an)" },
+        &mut b, &mut n);
     // **Und wie breit er seine Zelle BETREIBT** — aus der
     // Anmeldeantwort, nicht aus der Bake. Linux liest genau diese
     // Elemente und nur diese: `ieee80211_assoc_success` gibt die
