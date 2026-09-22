@@ -990,6 +990,57 @@ pub struct LinkState {
     pub l1_exit: u8,
 }
 
+/// PCI Power Management Capability (ID 0x01) — das Geraet nach **D0**
+/// holen, bevor jemand ein Register liest.
+///
+/// **Linux tut das im PCI-Kern, nicht im Treiber** (`pci_enable_device`
+/// -> `pci_power_up` -> `pci_raw_set_power_state`), und deshalb steht in
+/// rtw88 keine Zeile davon. Unser Kernel kennt Power States gar nicht:
+/// `kernel/src/drivers/pci.rs` hat keinen PM-Capability-Gang, kein D0 und
+/// keine Wartezeit. Dieselbe Klasse wie
+/// [[feedback_the_layer_above_the_driver_fills_in_what_it_never_sets]] —
+/// nur liegt die Schicht diesmal unter uns statt darueber.
+///
+/// **Was das kostet:** ein Geraet in D3hot antwortet auf JEDE
+/// MMIO-Lesung mit lauter Einsen. Stufe 0 las die Chipkennung genau
+/// einmal, nannte sie tot und der Treiber war zu Ende — mal so, mal so,
+/// je nachdem in welchem Zustand die Firmware oder der vorige Lauf die
+/// Karte hinterlassen hat. Der Konfigurationsraum antwortet dabei
+/// normal, was den Fall so verwirrend macht.
+///
+/// D3hot -> D0 braucht **10 ms** (PCI PM 1.2 §5.6.1; Linux
+/// `PCI_PM_D3HOT_WAIT`), und vorher darf nichts gelesen werden.
+///
+/// Gibt den Zustand ZURUECK, in dem das Geraet vorgefunden wurde, oder
+/// `None`, wenn es keine PM-Capability hat.
+pub fn power_up_d0(_h: i32) -> Option<u8> {
+    // Capability-Liste wie in `link_state`: 0x34 zeigt auf den ersten
+    // Eintrag, Byte 0 ist die Art, Byte 1 der naechste Zeiger. Der
+    // Zaehler deckelt eine ringfoermige Liste.
+    let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
+    let mut schritte = 0;
+    while ptr >= 0x40 && ptr != 0xff && schritte < 48 {
+        let hdr = host::pci_read_config(ptr);
+        if hdr & 0xff == 0x01 {
+            // PMCSR liegt bei cap+4, Bit 1:0 ist der Zustand.
+            let pmcsr = host::pci_read_config(ptr + 4);
+            let state = (pmcsr & 0x3) as u8;
+            if state != 0 {
+                // Wie Linux: NUR die zwei Zustandsbits ersetzen und den
+                // Rest zurueckschreiben. Bit 15 ist PME_Status und
+                // loescht sich beim Zurueckschreiben einer gelesenen
+                // Eins — das tut `pci_raw_set_power_state` genauso.
+                host::pci_write_config(ptr + 4, (pmcsr & !0x3u32) | 0);
+                host::sleep_ms(10);
+            }
+            return Some(state);
+        }
+        ptr = ((hdr >> 8) & 0xff) as u8;
+        schritte += 1;
+    }
+    None
+}
+
 pub fn link_state() -> Option<LinkState> {
     // Standard-Capability-Liste: 0x34 zeigt auf den ersten Eintrag, jeder
     // traegt seine Art in Byte 0 und den naechsten Zeiger in Byte 1.
