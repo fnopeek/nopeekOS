@@ -301,7 +301,7 @@ fn wlan_set_usage() {
     kprintln!("[wlan]   ssid: <name>        the network to join (else: loudest)");
     kprintln!("[wlan]   band: 5 | 2.4 | auto");
     kprintln!("[wlan]   ampdu: on | off     RX aggregation (throughput)");
-    kprintln!("[wlan]   txagg: on | off     TX aggregation (EXPERIMENT: tid_disable_tx=0)");
+    kprintln!("[wlan]   txagg: on | off     TX aggregation, RTL8822CE (default: on)");
     kprintln!("[wlan]   bw: 80 | 40 | 20    channel width cap, RTL8822CE (default: 80)");
     kprintln!("[wlan]   ht40: on | off      40 MHz, AX200 only (measured best: on)");
     kprintln!("[wlan]   vht: on | off       80 MHz, AX200 only (needs ht40 on; measured SLOWER)");
