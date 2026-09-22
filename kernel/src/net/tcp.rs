@@ -1041,6 +1041,11 @@ pub static SEND_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// vorbeigeraten.
 pub static FAST_RETRANS: AtomicU64 = AtomicU64::new(0);
 pub static RTO_FIRED: AtomicU64 = AtomicU64::new(0);
+/// **Kumulativ**, nicht der Live-Zaehler der Verbindung. Im Bericht
+/// stand `0 Doppelquittungen`, und das hiess nur „die letzte Quittung
+/// hat etwas abgeraeumt" — eine Zahl, die genau dann null ist, wenn man
+/// sie braucht.
+pub static DUPACKS_SEEN: AtomicU64 = AtomicU64::new(0);
 
 /// Wohin der Sendepuffer gewachsen ist, und was das Gegenueber zuletzt
 /// angeboten hat. Beides nur fuer den Bericht — ohne die zwei Zahlen ist
@@ -1077,6 +1082,7 @@ pub fn send_stats_reset() {
     SEND_REFUSED.store(0, Ordering::Relaxed);
     FAST_RETRANS.store(0, Ordering::Relaxed);
     RTO_FIRED.store(0, Ordering::Relaxed);
+    DUPACKS_SEEN.store(0, Ordering::Relaxed);
 }
 
 /// (Takte in send, Takte in abgewiesenen send, Segmente, WouldBlock,
@@ -1647,6 +1653,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     && conn.snd_wnd == vorheriges_fenster;
                 if ist_dup {
                     conn.dupacks += 1;
+                    DUPACKS_SEEN.fetch_add(1, Ordering::Relaxed);
                     if conn.dupacks == DUPACK_THRESH && !conn.in_recovery {
                         // Halbieren, eintreten, und das fehlende Segment
                         // SOFORT nachschicken statt auf den RTO zu warten.
@@ -2038,19 +2045,36 @@ pub fn tick_connections() {
                         // ankommt — am Geraet 2070 Segmente in zehn
                         // Sekunden.
                         //
-                        // `snd_nxt = snd_una` ist Go-back-N: alles ab
-                        // der Luecke geht neu hinaus, geordnet und vom
-                        // Staufenster getaktet. Die alte Anmerkung zur
-                        // effektiven MSS bleibt gewahrt — `write_xmit`
-                        // rechnet mit derselben.
+                        // **`snd_nxt` wird NICHT zurueckgespult.**
+                        //
+                        // Hier stand `snd_nxt = snd_una`, als Go-back-N
+                        // gedacht, und es hat die Verbindung getoetet:
+                        // `ack_in_range(una, ack, nxt)` laesst nur
+                        // Quittungen bis `snd_nxt` gelten. Nach dem
+                        // Ruecksetzen liegt `snd_nxt` EIN Segment ueber
+                        // `snd_una`, waehrend das Gegenueber laengst
+                        // hunderte Kilobyte hat und seinen echten Stand
+                        // quittiert — der faellt aus dem Bereich und
+                        // wird VERWORFEN. `snd_una` steht fuer immer,
+                        // `rto_tick` wird nie zurueckgesetzt, und der
+                        // RTO feuert mit Verdopplung bis zur Frist. Am
+                        // Geraet: `cwnd 1 · ssthresh 2 · 7x
+                        // Zeitueberschreitung`, 200+400+...+6400 ms.
+                        //
+                        // Linux spult `snd_nxt` nie zurueck — es ist die
+                        // hoechste je gesendete Folgenummer. Wiederholt
+                        // wird aus der Wiederholungsschlange
+                        // (`tcp_xmit_retransmit_queue`), ohne sie
+                        // anzufassen, und neue Daten gehen erst wieder
+                        // hinaus, wenn Quittungen `in_flight` unter das
+                        // Staufenster gebracht haben.
                         slot.snd_ssthresh = reno_ssthresh(slot);
                         slot.snd_cwnd = 1;
                         slot.snd_cwnd_cnt = 0;
                         slot.in_recovery = false;
                         slot.dupacks = 0;
-                        slot.snd_nxt = slot.snd_una;
                         RTO_FIRED.fetch_add(1, Ordering::Relaxed);
-                        write_xmit(slot);
+                        retransmit_head(slot);
                     }
                 }
             }
