@@ -6695,6 +6695,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                        &mut kand, &mut n_kand);
                     let max_bw = max_bw_for(e);
                     let mut best: Option<Bss> = None;
+                    let mut selbst_gut: Option<i8> = None;
                     host::loud_begin();
                     host::print("            ");
                     host::print_dec(ms);
@@ -6723,6 +6724,27 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         print_last(b);
                         if b.bssid == link.bssid {
                             host::print("  (wir)");
+                            // **Wir haben uns GERADE gemessen.**
+                            //
+                            // Am Geraet: der geglaettete Bakenpegel sagte
+                            // -81 dBm und loeste den Umzug aus, waehrend
+                            // derselbe Suchlauf dieselbe Zelle in
+                            // derselben Sekunde mit -19 dBm hoerte — 62 dB
+                            // auseinander. Umgezogen wurde von -19 auf
+                            // -53, also vom besten auf einen schlechteren
+                            // AP.
+                            //
+                            // Welche der beiden Zahlen stimmt, ist noch
+                            // offen und wird gemessen. Aber die FRISCHE
+                            // ist die, auf die man sich verlassen kann:
+                            // eine Probe von eben schlaegt einen
+                            // Mittelwert, der aus Rahmen stammt, die
+                            // niemand nachgezaehlt hat. Liegt sie ueber
+                            // der Schwelle, gibt es keinen Grund zu
+                            // gehen.
+                            if b.best > ROAM_THOLD_DBM {
+                                selbst_gut = Some(b.best);
+                            }
                         } else if roam_better(sig, d.cur_bw, b, max_bw) {
                             host::print("  BESSER");
                             // **Unter mehreren Guten gewinnt die
@@ -6751,6 +6773,20 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     }
                     host::loud_end();
 
+                    if let Some(gut) = selbst_gut {
+                        host::loud_begin();
+                        host::print("[rtl8822ce] kein Wechsel: der Suchlauf hoert UNS mit ");
+                        print_dbm(gut);
+                        host::print(" (geglaettet ");
+                        print_dbm(sig);
+                        host::print(") — die frische Probe gilt\n");
+                        host::loud_end();
+                        // Den geglaetteten Wert neu saeen, sonst loest er
+                        // beim naechsten Takt wieder aus.
+                        link.roam.ave = dm::Ewma::new();
+                        link.roam.count = 0;
+                        best = None;
+                    }
                     if let Some(z) = best {
                         if now.saturating_sub(link.roam.last_roam_ms)
                             > ROAM_GAP_MS
