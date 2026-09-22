@@ -340,6 +340,26 @@ pub extern "C" fn _start() {
     }
     fw::dump_pci_cmd("nach bind");
 
+    // ── D0, bevor jemand ein Register liest ──────────────────────
+    //
+    // Florian: „dass die karte nicht initialsiert hat.. als waers ein
+    // timing problem.. beim laden.. er bricht bei den phasen 1-5 ab."
+    // Ein Geraet in D3hot antwortet auf jede MMIO-Lesung mit lauter
+    // Einsen, waehrend der Konfigurationsraum normal antwortet — und
+    // genau das sieht aus wie ein Zeitproblem, weil es davon abhaengt,
+    // in welchem Zustand der vorige Lauf die Karte hinterlassen hat.
+    match pci::power_up_d0(0) {
+        Some(0) => {}
+        Some(st) => {
+            host::loud_begin();
+            host::print("[rtl8822ce] die Karte lag in D");
+            host::print_dec(st as u32);
+            host::print(" — nach D0 geholt und 10 ms gewartet\n");
+            host::loud_end();
+        }
+        None => host::print("[rtl8822ce] keine PM-Capability (kein D-State)\n"),
+    }
+
     // ── BAR2 abbilden ────────────────────────────────────────────
     let h = host::mmio_map_bar(BAR_REG, BAR_PAGES);
     if h < 0 {
@@ -383,11 +403,55 @@ pub extern "C" fn _start() {
     host::print("\n");
 
     // ── Kennung lesen (rtw_chip_parameter_setup) ─────────────────
-    let hal = chip_parameter_setup(h);
+    //
+    // **Einmal lesen war zu wenig.** Hier stand ein einziger Zugriff,
+    // und war die Antwort lauter Einsen, endete der Treiber. Ein Chip,
+    // der gerade aufwacht, braucht aber Zeit — und mit `power_up_d0`
+    // davor sind es genau die 10 ms, die die Spezifikation nennt.
+    // Trotzdem wird hier gewartet statt geraten: eine Frist kostet im
+    // Normalfall nichts (die erste Lesung trifft) und im Fehlerfall
+    // 200 ms statt eines Neustarts.
+    const WINDOW_WAIT_US: u64 = 200_000;
+    let t_win = host::now_us();
+    let mut hal = chip_parameter_setup(h);
+    let mut runden = 1u32;
+    while (hal.chip_version == 0xFFFF_FFFF || hal.chip_version == 0)
+        && host::now_us() - t_win < WINDOW_WAIT_US
+    {
+        host::sleep_ms(1);
+        hal = chip_parameter_setup(h);
+        runden += 1;
+    }
 
     // Ein Fenster, das nur Einsen liefert, ist keine Antwort des Chips,
     // sondern die Antwort des Busses auf eine Adresse, an der niemand ist.
     let dead = hal.chip_version == 0xFFFF_FFFF || hal.chip_version == 0;
+    if runden > 1 {
+        host::loud_begin();
+        host::print("[rtl8822ce] das Registerfenster brauchte ");
+        host::print_dec((host::now_us() - t_win) as u32);
+        host::print(" us und ");
+        host::print_dec(runden);
+        host::print(" Versuche\n");
+        host::loud_end();
+    }
+    if dead {
+        // **Der Konfigurationsraum antwortet, auch wenn MMIO es nicht
+        // tut.** Steht hier eine gueltige Kennung, ist die Karte da und
+        // es ist der Speicherpfad — eine andere Krankheit als „nicht
+        // gefunden", und ohne diese Zeile sehen beide gleich aus.
+        host::loud_begin();
+        host::print("[rtl8822ce] MMIO liefert 0x");
+        host::print_hex32(hal.chip_version);
+        host::print(", aber PCI-Konfig sagt 0x");
+        host::print_hex32(host::pci_read_config(0x00));
+        host::print(" · CMD 0x");
+        host::print_hex32(host::pci_read_config(0x04));
+        host::print(" · BAR2 0x");
+        host::print_hex32(host::pci_read_config(0x18));
+        host::print("\n");
+        host::loud_end();
+    }
 
     host::print("[rtl8822ce] Register:\n");
     host::log_reg32("SYS_CFG1 ", hal.chip_version);
