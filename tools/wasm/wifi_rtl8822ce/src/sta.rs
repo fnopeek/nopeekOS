@@ -48,8 +48,13 @@ pub struct PeerCaps {
     pub ht_mcs: [u8; 4],
     pub vht_supported: bool,
     pub vht_cap: u32,
-    /// `vht_cap.vht_mcs.rx_mcs_map`
+    /// `vht_cap.vht_mcs.rx_mcs_map` — was das Gegenueber EMPFANGEN kann.
+    /// Daraus baut `get_vht_ra_mask` die Sendemaske (main.c:1011).
     pub vht_mcs_map: u16,
+    /// `vht_cap.vht_mcs.tx_mcs_map` — was es SENDEN kann. Eine andere
+    /// Karte und eine andere Frage: `get_highest_vht_tx_rate` liest diese
+    /// (tx.c:132), und ein AP darf sich hier anders eintragen.
+    pub vht_tx_mcs_map: u16,
     /// Bitmaske der Grundraten, wie `supp_rates[NL80211_BAND_2GHZ]`:
     /// Bit 0..3 = CCK 1/2/5,5/11, Bit 4..11 = OFDM 6..54.
     pub supp_rates: u16,
@@ -88,6 +93,8 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
             c.vht_supported = true;
             c.vht_cap = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             c.vht_mcs_map = u16::from_le_bytes([b[4], b[5]]);
+            // Versatz 8:9 — hinter rx_mcs_map(4:5) und rx_highest(6:7).
+            c.vht_tx_mcs_map = u16::from_le_bytes([b[8], b[9]]);
         }
         i += 2 + len;
     }

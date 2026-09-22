@@ -508,6 +508,11 @@ pub struct WdAcc {
     /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
+    /// Die BREITE, in der die Rahmen dieses Durchlaufs hereinkamen:
+    /// 20/40/80 und ein vierter Platz fuer alles andere. Sie kommt aus
+    /// dem Empfangsstatus des Chips, ist also eine Messung und keine
+    /// Einstellung.
+    pub bw_cnt: [u32; 4],
 }
 
 impl WdAcc {
@@ -519,7 +524,7 @@ impl WdAcc {
             tx_rpt: [(0, false); 8], n_tx_rpt: 0,
             c2h_seen: [0; 8], n_c2h_seen: 0,
             mgmt: [(0, (0, 0)); 8], n_mgmt: 0, addba: None,
-            rx_unicast: 0, rx_cnt: 0,
+            rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }
     }
 

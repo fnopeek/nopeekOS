@@ -565,25 +565,37 @@ impl<'a> TxPwrIdx<'a> {
 
 // Ratengrenzen aus main.h:249-340, gebraucht fuer die Abschnitts- und
 // Streamzuordnung.
-const DESC_RATE11M: u8 = 0x03;
-const DESC_RATE6M: u8 = 0x04;
-const DESC_RATE54M: u8 = 0x0b;
-const DESC_RATEMCS0: u8 = 0x0c;
-const DESC_RATEMCS7: u8 = 0x13;
-const DESC_RATEMCS8: u8 = 0x14;
-const DESC_RATEMCS15: u8 = 0x1b;
-const DESC_RATEMCS16: u8 = 0x1c;
-const DESC_RATEMCS23: u8 = 0x23;
-const DESC_RATEMCS24: u8 = 0x24;
-const DESC_RATEMCS31: u8 = 0x2c;
-const DESC_RATEVHT1SS_MCS0: u8 = 0x2d;
-const DESC_RATEVHT1SS_MCS9: u8 = 0x36;
-const DESC_RATEVHT2SS_MCS0: u8 = 0x37;
-const DESC_RATEVHT2SS_MCS9: u8 = 0x40;
-const DESC_RATEVHT3SS_MCS0: u8 = 0x41;
-const DESC_RATEVHT3SS_MCS9: u8 = 0x4a;
-const DESC_RATEVHT4SS_MCS0: u8 = 0x4b;
-const DESC_RATEVHT4SS_MCS9: u8 = 0x53;
+//
+// **Sie werden aus `regs.rs` ABGELEITET und nicht daneben geschrieben.**
+// Hier stand eine zweite Liste von Hand, und ab `DESC_RATEMCS31` war sie
+// ganz um eins zu hoch — MCS31 als 0x2c statt 0x2b, und damit jeder
+// VHT-Anfang eine Stelle daneben. Der Fehler kippt genau den ERSTEN
+// Eintrag jedes Abschnitts, deshalb ist er nie aufgefallen:
+// `rate_to_rate_section(0x2c)` gab 7 (HT 4SS) statt 4 (VHT 1SS), und
+// `above_2ss(0x36)` sagte NEIN zur ersten 2SS-Rate. VHT-MCS0 ist die
+// Rate, die man nur am Rand der Zelle sieht.
+//
+// Die Enden (`_MCS7/9/15/23/31`) stehen als Rechnung da, weil die Reihen
+// in `main.h` lueckenlos sind: acht MCS je HT-Abschnitt, zehn je VHT.
+const DESC_RATE11M: u8 = crate::regs::DESC_RATE11M as u8;
+const DESC_RATE6M: u8 = crate::regs::DESC_RATE6M as u8;
+const DESC_RATE54M: u8 = crate::regs::DESC_RATE54M as u8;
+const DESC_RATEMCS0: u8 = crate::regs::DESC_RATEMCS0 as u8;
+const DESC_RATEMCS7: u8 = DESC_RATEMCS0 + 7;
+const DESC_RATEMCS8: u8 = crate::regs::DESC_RATEMCS8 as u8;
+const DESC_RATEMCS15: u8 = DESC_RATEMCS8 + 7;
+const DESC_RATEMCS16: u8 = crate::regs::DESC_RATEMCS16 as u8;
+const DESC_RATEMCS23: u8 = DESC_RATEMCS16 + 7;
+const DESC_RATEMCS24: u8 = crate::regs::DESC_RATEMCS24 as u8;
+const DESC_RATEMCS31: u8 = DESC_RATEMCS24 + 7;
+const DESC_RATEVHT1SS_MCS0: u8 = crate::regs::DESC_RATEVHT1SS_MCS0 as u8;
+const DESC_RATEVHT1SS_MCS9: u8 = DESC_RATEVHT1SS_MCS0 + 9;
+const DESC_RATEVHT2SS_MCS0: u8 = crate::regs::DESC_RATEVHT2SS_MCS0 as u8;
+const DESC_RATEVHT2SS_MCS9: u8 = DESC_RATEVHT2SS_MCS0 + 9;
+const DESC_RATEVHT3SS_MCS0: u8 = crate::regs::DESC_RATEVHT3SS_MCS0 as u8;
+const DESC_RATEVHT3SS_MCS9: u8 = DESC_RATEVHT3SS_MCS0 + 9;
+const DESC_RATEVHT4SS_MCS0: u8 = crate::regs::DESC_RATEVHT4SS_MCS0 as u8;
+const DESC_RATEVHT4SS_MCS9: u8 = DESC_RATEVHT4SS_MCS0 + 9;
 
 /// phy.c:1962-1990 `rtw_phy_rate_to_rate_section`.
 /// `RTW_RATE_SECTION_NUM` heisst „Rate ungueltig".

@@ -17,6 +17,14 @@ pub const DESC_RATE6M: u8 = 0x04;
 pub const DESC_RATE24M: u8 = 0x08;
 // main.h:87
 pub const RTW_BAND_2G: u8 = 1;
+pub const RTW_BAND_5G: u8 = 2;
+
+/// Das Band zu einem Kanal. **Kein Rateschritt, sondern die Frage, ob es
+/// die Rate ueberhaupt gibt**: `pkt_info_update_rate` waehlt fuer 2,4 GHz
+/// 1 Mbit DSSS, und DSSS gibt es oberhalb von Kanal 14 nicht.
+pub fn band_of(channel: u8) -> u8 {
+    if channel > 14 { RTW_BAND_5G } else { RTW_BAND_2G }
+}
 
 // tx.h:79-83 — abgelesen, nicht abgeleitet. HIGH ist 17 und H2C 19; mit
 // einem geratenen 17 fuer H2C haette `more_data` (qsel == HIGH) still
@@ -316,6 +324,53 @@ pub fn highest_ht_tx_rate(ht_mcs: &[u8; 4], rf_2t2r: bool) -> u8 {
         DESC_RATEMCS15 as u8
     } else {
         DESC_RATEMCS7 as u8
+    }
+}
+
+/// tx.c:125-165 `get_highest_vht_tx_rate`.
+///
+/// **VHT geht VOR HT** (tx.c:367-370), und das ist der Grund, warum es
+/// diese Funktion hier ueberhaupt geben muss: bis hierher fragte der
+/// Treiber nur `ht_supported`, und damit stand auf einer VHT-Verbindung
+/// `DESC_RATEMCS15` im Deskriptor — eine HT-Rate auf einer Strecke, die
+/// gerade VHT faehrt. Der Bericht meldete sie als „angeboten", waehrend
+/// die Firmware VHT-Raten zurueckmeldete: zwei Antworten auf eine Frage.
+///
+/// Gelesen wird die SENDE-Karte des Gegenuebers (`tx_mcs_map`), zwei Bit
+/// je Strom. Linux fragt `efuse->hw_cap.nss`, also UNSERE Stroeme — die
+/// Karte sagt, wie hoch der andere darf, die efuse, wie viele Stroeme wir
+/// ueberhaupt haben.
+pub fn highest_vht_tx_rate(tx_mcs_map: u16, nss: u8) -> u8 {
+    // **Die Basiswerte kommen aus `regs.rs`, nicht von Hand.** Erster
+    // Entwurf hatte hier 0x2d und 0x37 stehen — abgeschrieben aus der
+    // zweiten, verschobenen Liste in `txpower.rs`, die im selben Zug
+    // herausgeflogen ist. Beide Zahlen waren um eins zu hoch, und eine
+    // Rate um eins daneben ist eine ANDERE Rate.
+    //
+    // Die Reihen sind lueckenlos, MCS9 liegt neun ueber MCS0
+    // (main.h:297-317).
+    //
+    // `IEEE80211_VHT_MCS_SUPPORT_0_7/0_8/0_9` = 0/1/2; 3 heisst „gar
+    // nicht". Linux faellt fuer 3 in den `default`-Zweig, also auf MCS9 —
+    // `rtw_update_sta_info` hat den Strom dann ohnehin schon aus der
+    // Ratenmaske genommen.
+    let top = |code: u16| -> u8 {
+        match code {
+            0 => 7,
+            1 => 8,
+            _ => 9,
+        }
+    };
+    let vht1ss_mcs0 = crate::regs::DESC_RATEVHT1SS_MCS0 as u8;
+    if nss == 1 {
+        vht1ss_mcs0 + top(tx_mcs_map & 0x3)
+    } else if nss >= 2 {
+        crate::regs::DESC_RATEVHT2SS_MCS0 as u8 + top((tx_mcs_map & 0xc) >> 2)
+    } else {
+        // `nss == 0` — Linux' dritter Zweig. Er ist hier unerreichbar
+        // (die efuse meldet 1 oder 2), steht aber da, weil ein Port, der
+        // einen Zweig weglaesst, nicht mehr nachpruefbar ist.
+        vht1ss_mcs0 + 9
     }
 }
 

@@ -113,6 +113,43 @@ fn main() {
              LAYOUT.len() - layout_bad, LAYOUT.len());
     if layout_bad > 0 { bad += layout_bad; }
 
+    // **Die Tabelle gegen die Funktion.** `RATE_SECTION[rs]` zaehlt auf,
+    // welche Raten zum Abschnitt `rs` gehoeren; `rate_to_rate_section`
+    // beantwortet dieselbe Frage rueckwaerts, aus eigenen Konstanten.
+    // Zwei Quellen fuer eine Zuordnung — also muessen sie sich decken,
+    // und zwar in BEIDE Richtungen.
+    //
+    // Der Fall, fuer den diese Zeilen da sind: in `txpower.rs` stand eine
+    // zweite, handgeschriebene Ratenliste, ab MCS31 ganz um eins zu hoch.
+    // Sie kippt genau den ERSTEN Eintrag jedes VHT-Abschnitts — 0x2c kam
+    // als HT-4SS heraus statt als VHT-1SS —, und keine Pruefsumme darueber
+    // hat das je gesehen.
+    let mut sec_bad = 0usize;
+    for (rs, rates) in tables::RATE_SECTION.iter().enumerate() {
+        for &r in rates.iter() {
+            let got = txpower::rate_to_rate_section(r);
+            if got != rs {
+                println!("  SEKTION Rate 0x{:02x} steht in RATE_SECTION[{}], \
+rate_to_rate_section sagt {}", r, rs, got);
+                sec_bad += 1;
+            }
+        }
+    }
+    // Und die Gegenrichtung: keine Rate darf in einen Abschnitt fallen,
+    // den die Tabelle ihr nicht gibt.
+    for r in 0u8..txpower::DESC_RATE_MAX as u8 {
+        let got = txpower::rate_to_rate_section(r);
+        if got < tables::RATE_SECTION.len()
+            && !tables::RATE_SECTION[got].contains(&r) {
+            println!("  SEKTION rate_to_rate_section(0x{:02x}) = {}, aber die \
+Tabelle fuehrt sie dort nicht", r, got);
+            sec_bad += 1;
+        }
+    }
+    println!("  Ratenabschnitte: {} Abweichungen zwischen Tabelle und \
+Funktion", sec_bad);
+    bad += sec_bad;
+
     let idx = [txpower::TxPwrIdx(&EF), txpower::TxPwrIdx(&EF),
                txpower::TxPwrIdx(&EF), txpower::TxPwrIdx(&EF)];
     let ch_2g: Vec<u8> = (1..=14).collect();
