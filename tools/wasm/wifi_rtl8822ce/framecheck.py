@@ -554,6 +554,10 @@ def main():
     regs = (HERE / "src" / "regs.rs").read_text()
 
     fn = grab(src, r"\n(fn disconnect_reason.*?\n\})", "disconnect_reason")
+    amsdu_w = grab(src, r"\n(fn amsdu_walk.*?\n\})", "amsdu_walk")
+    hdrl = grab(src, r"\n(fn data_hdrlen.*?\n\})", "data_hdrlen")
+    llc_c = grab(regs, r"\n(pub const LLC_SNAP_HDR:[^\n]*)", "LLC_SNAP_HDR")
+    qos_c = grab(regs, r"\n(pub const DOT11_STYPE_QOS:[^\n]*)", "DOT11_STYPE_QOS")
     names = grab(src, r"\n(fn reason_name.*?\n\})", "reason_name")
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
@@ -791,7 +795,8 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b \
-        + "\n\n" + vhtie + """
+        + "\n\n" + vhtie \
+        + "\n\n" + amsdu_w + "\n\n" + hdrl + "\n\n" + llc_c + "\n" + qos_c + """
 
 const BSS_LEER: Bss = Bss {
     bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
@@ -903,12 +908,14 @@ fn main() {
                 && out[25] == DOT11_ACTION_ADDBA_RESP
                 && out[26] == 0x42
                 && u16::from_le_bytes([out[27], out[28]]) == WLAN_STATUS_SUCCESS
-                && (capab & ADDBA_PARAM_AMSDU_MASK) == 0
+                // A-MSDU im A-MPDU: JA, wie mac80211 aus
+                // SUPPORTS_AMSDU_IN_AMPDU (agg-rx.c:239, 256).
+                && (capab & ADDBA_PARAM_AMSDU_MASK) != 0
                 && (capab & ADDBA_PARAM_POLICY_MASK) >> 1 == 1
                 && (capab & ADDBA_PARAM_TID_MASK) >> 2 == 5
                 && (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6 == 8;
             if !ok { ab += 1; }
-            println!("  {} ADDBA Response gebaut: status 0, tid gespiegelt, unser Fenster 8",
+            println!("  {} ADDBA Response gebaut: status 0, tid gespiegelt, A-MSDU ja, unser Fenster 8",
                      if ok { "OK  " } else { "DIFF" });
             if !ok { println!("       capab {:#06x} len {}", capab, n); }
         }
@@ -920,6 +927,73 @@ fn main() {
     println!("  {} ADDBA Request zu kurz -> None",
              if short_ok { "OK  " } else { "DIFF" });
     bad += ab;
+
+    // ── A-MSDU: `amsdu_walk` gegen gebaute Ruempfe (util.c:842-937) ──
+    {
+        let me: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let other: [u8; 6] = [0x02, 0x99, 0x99, 0x99, 0x99, 0x99];
+        let sa: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        // Teilrahmen: DA SA Laenge(BE) | MSDU (LLC/SNAP + IPv4 + Nutzlast)
+        fn sub(v: &mut Vec<u8>, da: &[u8; 6], sa: &[u8; 6], n: usize, last: bool) {
+            let mut msdu = vec![0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x08, 0x00];
+            msdu.extend((0..n).map(|i| i as u8));
+            v.extend_from_slice(da);
+            v.extend_from_slice(sa);
+            v.extend_from_slice(&(msdu.len() as u16).to_be_bytes());
+            v.extend_from_slice(&msdu);
+            if !last { while v.len() %% 4 != 0 { v.push(0); } }
+        }
+        let mut ab = 0;
+        let mut run = |name: &str, body: &[u8], want: Option<Vec<usize>>| {
+            let mut got = Vec::new();
+            let r = amsdu_walk(body, &me, &mut |_, len| got.push(len));
+            let ok = match (&want, r) {
+                (None, None) => true,
+                (Some(w), Some(())) => *w == got,
+                _ => false,
+            };
+            if !ok { ab += 1; }
+            println!("  {} A-MSDU {}", if ok { "OK  " } else { "DIFF" }, name);
+            if !ok { println!("       will {:?}, bekam {:?} / {:?}", want, r, got); }
+        };
+        // Drei Teilrahmen an uns, Laengen 1483/1483/100 (1475 Nutz + 8 LLC).
+        let mut b = Vec::new();
+        sub(&mut b, &me, &sa, 1475, false);
+        sub(&mut b, &me, &sa, 1475, false);
+        sub(&mut b, &me, &sa, 92, true);
+        run("drei Teilrahmen, Fuellung, letzter ohne", &b, Some(vec![1483, 1483, 100]));
+        // Mittlerer an fremde Adresse: uebersprungen, nicht verworfen.
+        let mut b = Vec::new();
+        sub(&mut b, &me, &sa, 10, false);
+        sub(&mut b, &other, &sa, 11, false);
+        sub(&mut b, &me, &sa, 12, true);
+        run("fremde Zieladresse wird uebersprungen", &b, Some(vec![18, 20]));
+        // Rundruf-DA wird zugestellt.
+        let mut b = Vec::new();
+        sub(&mut b, &[0xff; 6], &sa, 5, true);
+        run("Rundruf-Teilrahmen", &b, Some(vec![13]));
+        // Abgeschnitten: der letzte ragt ueber das Ende -> alles verworfen.
+        let mut b = Vec::new();
+        sub(&mut b, &me, &sa, 100, false);
+        sub(&mut b, &me, &sa, 100, true);
+        let cut = b.len() - 10;
+        run("abgeschnitten -> purge", &b[..cut], None);
+        // Einschleusung: erster Teilrahmen-DA ist der LLC/SNAP-Kopf.
+        let mut b = vec![0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
+        b.extend_from_slice(&sa);
+        b.extend_from_slice(&4u16.to_be_bytes());
+        b.extend_from_slice(&[1, 2, 3, 4]);
+        run("Einschleusung (DA = RFC 1042) -> purge", &b, None);
+        // Kopflaenge: QoS 26, QoS+Order 30, ohne QoS 24.
+        let q = [0x88u8, 0x42];
+        let qo = [0x88u8, 0xc2];
+        let d = [0x08u8, 0x42];
+        let hl_ok = data_hdrlen(&q) == 26 && data_hdrlen(&qo) == 30 && data_hdrlen(&d) == 24;
+        if !hl_ok { ab += 1; }
+        println!("  {} Kopflaenge QoS 26 / QoS+HTC 30 / ohne QoS 24",
+                 if hl_ok { "OK  " } else { "DIFF" });
+        bad += ab;
+    }
 
     let chans: &[(&str, u8, CellWidth, usize, (u8, usize, u8))] = &[
 %s

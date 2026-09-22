@@ -711,11 +711,14 @@ pub fn parse_addba_resp(f: &[u8]) -> Option<AddbaResp> {
 /// vierundsechzig — und damit hoechstens ein Achtel der Aggregation,
 /// die der AP angeboten hat.
 ///
-/// `amsdu` melden wir als NEIN: A-MSDU im A-MPDU waere ein zweiter
-/// Entpacker, den es hier nicht gibt.
-///
-/// `amsdu` melden wir als NEIN: A-MSDU im A-MPDU waere ein zweiter
-/// Entpacker, den es hier nicht gibt.
+/// **`amsdu` ist JA, wie in Linux.** mac80211 setzt das Bit aus
+/// `SUPPORTS_AMSDU_IN_AMPDU` (agg-rx.c:239, 256), und rtw88 setzt die
+/// Fahne fuer den 8822C (`amsdu_in_ampdu = true`, rtw8822c.c:5356;
+/// main.c:2271). Hier stand NEIN, weil es keinen Entpacker gab — seit
+/// 0.67.0 gibt es ihn (`amsdu_to_8023s`). Ohne A-MSDU traegt ein
+/// Sendevorgang hoechstens 64 Pakete, eines je MPDU; mit ihm mehrere je
+/// MPDU, und der feste Aufwand je Sendevorgang verteilt sich auf ein
+/// Vielfaches.
 pub fn build_addba_resp(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
                         req: &AddbaReq, buf_size: u16) -> usize {
     out.fill(0);
@@ -730,8 +733,9 @@ pub fn build_addba_resp(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
     out[26] = req.dialog_token;
     out[27..29].copy_from_slice(&WLAN_STATUS_SUCCESS.to_le_bytes());
 
-    // capab: A-MSDU aus, Policy und TID wie erbeten, unsere Fenstergroesse.
-    let capab = ((req.policy << 1) & ADDBA_PARAM_POLICY_MASK)
+    // capab: A-MSDU an, Policy und TID wie erbeten, unsere Fenstergroesse.
+    let capab = ADDBA_PARAM_AMSDU_MASK
+        | ((req.policy << 1) & ADDBA_PARAM_POLICY_MASK)
         | (((req.tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
         | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
     out[29..31].copy_from_slice(&capab.to_le_bytes());
