@@ -484,7 +484,7 @@ pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
 
 /// Was in einem ADDBA Request steht (802.11 §9.6.7.2,
 /// `struct ieee80211_mgmt.u.action.u.addba_req`).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct AddbaReq {
     pub dialog_token: u8,
     pub amsdu: bool,
