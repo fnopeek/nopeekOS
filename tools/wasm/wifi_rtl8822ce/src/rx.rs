@@ -502,9 +502,20 @@ pub struct WdAcc {
     /// Aktion))`, `0xff` wo es keine Aktion gibt.
     pub mgmt: [(u8, (u8, u8)); 8],
     pub n_mgmt: usize,
-    /// Der erste ADDBA Request dieses Durchlaufs — beantwortet wird er
+    /// Die ADDBA Requests dieses Durchlaufs — beantwortet werden sie
     /// draussen, mit freiem `trx`.
-    pub addba: Option<crate::sta::AddbaReq>,
+    ///
+    /// **Es war EINER, und das war zu wenig.** Am Geraet stand
+    /// `ADDBA 14 erbeten, 8 angenommen`: ein Ringdurchlauf bringt
+    /// mehrere Rahmen auf einmal, und alles nach dem ersten fiel weg.
+    /// Der AP wiederholt zwar, aber jede Wiederholung ist eine
+    /// Sendegelegenheit, in der er NICHT aggregiert — und bis zur
+    /// Antwort bleibt seine Sitzung zu.
+    pub addba: [crate::sta::AddbaReq; 4],
+    pub n_addba: usize,
+    /// Und was auch in vier Plaetze nicht passte. Eine Zahl, damit ein
+    /// zu kleiner Puffer nicht wieder still kuerzt.
+    pub addba_drop: u32,
     /// Und die Antwort auf UNSERE Frage. Sie faehrt denselben Weg, aus
     /// demselben Grund: der Zustandswechsel gehoert nach dem Ringleeren
     /// hin, wo `link` veraenderlich ist.
@@ -527,7 +538,9 @@ impl WdAcc {
             curr_rx_rate: 0, avg_rssi, ra_rpt: None,
             tx_rpt: [(0, false); 8], n_tx_rpt: 0,
             c2h_seen: [0; 8], n_c2h_seen: 0,
-            mgmt: [(0, (0, 0)); 8], n_mgmt: 0, addba: None,
+            mgmt: [(0, (0, 0)); 8], n_mgmt: 0,
+            addba: [crate::sta::AddbaReq::default(); 4], n_addba: 0,
+            addba_drop: 0,
             addba_resp: None,
             rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }

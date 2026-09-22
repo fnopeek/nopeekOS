@@ -3645,6 +3645,8 @@ struct LinkStats {
     addba_req: u32,
     /// Und UNSERE Fragen, in die andere Richtung.
     addba_tx: u32,
+    /// Bitten des AP, die nicht einmal in den Zwischenpuffer passten.
+    addba_drop: u32,
     /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
     /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
     /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
@@ -3760,7 +3762,7 @@ impl Default for LinkStats {
             probes: [TxProbe { sn: 0, at_ms: 0, busy: false }; TX_PROBE_SLOTS],
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
-            mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0,
+            mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0, addba_drop: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
@@ -5010,9 +5012,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // wird er nach dem Ringleeren — ein Sendevorgang gehoert
                 // nicht in einen Rueckruf, der `trx` nicht halten darf.
                 if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_REQ))
-                    && acc.addba.is_none()
                 {
-                    acc.addba = sta::parse_addba_req(f);
+                    if let Some(r) = sta::parse_addba_req(f) {
+                        if acc.n_addba < acc.addba.len() {
+                            acc.addba[acc.n_addba] = r;
+                            acc.n_addba += 1;
+                        } else {
+                            acc.addba_drop += 1;
+                        }
+                    }
                 }
                 if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_RESP))
                     && acc.addba_resp.is_none()
@@ -5234,7 +5242,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
         // solange keine Antwort kommt — im Geraetelauf 180 Mal, und
         // genau so lange konnte er nicht aggregieren.
-        if let Some(req) = acc.addba.take() {
+        ls.addba_drop += acc.addba_drop;
+        for ai in 0..acc.n_addba {
+            let req = acc.addba[ai];
             if ampdu_buf > 0 {
                 let mut resp = [0u8; 256];
                 let n = sta::build_addba_resp(&mut resp, &mac, &bssid, &req,
@@ -6514,6 +6524,11 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             num(ls.addba_tx, &mut b, &mut n);
             put(" fragen)", &mut b, &mut n);
         }
+    }
+    if ls.addba_drop > 0 {
+        put(", ", &mut b, &mut n);
+        num(ls.addba_drop, &mut b, &mut n);
+        put(" NICHT GESEHEN (Puffer)", &mut b, &mut n);
     }
     if ls.addba_fail > 0 {
         put(", ", &mut b, &mut n);

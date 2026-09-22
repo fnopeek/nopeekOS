@@ -474,7 +474,7 @@ def main():
     seqnum = grab((HERE / "src" / "tx.rs").read_text(),
                   r"\n(pub fn report_seqnum.*?\n\})", "report_seqnum")
     stasrc = (HERE / "src" / "sta.rs").read_text()
-    addba_s = grab(stasrc, r"\n(#\[derive\(Clone, Copy\)\]\npub struct AddbaReq.*?\n\})",
+    addba_s = grab(stasrc, r"\n(#\[derive\(Clone, Copy, Default\)\]\npub struct AddbaReq.*?\n\})",
                    "struct AddbaReq")
     addba_p = grab(stasrc, r"\n(pub fn parse_addba_req.*?\n\})",
                    "parse_addba_req")
