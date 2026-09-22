@@ -177,7 +177,18 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
+    FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
+}
+
+/// Resident fibers per core, readable from ANY core. The queue length is not:
+/// while a core runs a fiber, that fiber is checked out of the queue.
+static FIBER_COUNT: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
+
+/// How many fibers live on `cid` (running or parked).
+pub fn fiber_count(cid: usize) -> u64 {
+    if cid >= MAX_CORES { return 0; }
+    FIBER_COUNT[cid].load(Ordering::Relaxed)
 }
 
 /// Run this core's runnable fibers round-robin until none are runnable,
@@ -263,6 +274,7 @@ pub fn run_core_fibers(cid: usize) {
         }
 
         if fiber.state == FiberState::Done {
+            FIBER_COUNT[cid].fetch_sub(1, Ordering::Relaxed);
             drop(fiber); // _start returned → free the stack
         } else {
             FIBER_QUEUES[cid].lock().push_back(fiber);
