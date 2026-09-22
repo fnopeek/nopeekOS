@@ -3658,6 +3658,11 @@ struct LinkStats {
     /// belegt ist.
     tx_ring_sum: u32,
     tx_ring_max: u32,
+    /// Die Aggregatgroesse in EMPFANGSrichtung, aus `ppdu_cnt` des
+    /// Deskriptors: Sendevorgaenge und die Rahmen darin.
+    rx_ppdu_n: u32,
+    rx_data_ppdu_frames: u32,
+    last_ppdu: u8,
     last_action: (u8, u8),
     /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
     /// den Sendering passte.
@@ -3739,6 +3744,7 @@ impl Default for LinkStats {
             mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
+            rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
             last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             addba_win: 0, addba_win_req: 0,
@@ -4870,6 +4876,29 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
+            // **Wieviele Rahmen der AP je Sendevorgang buendelt.**
+            //
+            // `ppdu_cnt` sind zwei Bit im Empfangsdeskriptor, und sie
+            // zaehlen die PPDUs hoch — rtw88 liest das Feld und benutzt
+            // es nie. Ein Wechsel heisst: neuer Sendevorgang. Damit ist
+            // `Rahmen / PPDUs` die ECHTE Aggregatgroesse in
+            // Empfangsrichtung, von der Hardware gezaehlt und nicht
+            // gerechnet.
+            //
+            // Sie ist die Gegenprobe zu `sendering` auf der Sendeseite
+            // und beantwortet die Frage, die keine Durchsatzzahl
+            // beantwortet: liegen die 41 % Effizienz an der STRECKE oder
+            // daran, dass gar nicht gebuendelt wird.
+            //
+            // Nur DATENrahmen: eine Bake ist immer ihr eigener
+            // Sendevorgang und wuerde den Schnitt druecken.
+            if f[0] & 0x0c == DOT11_FC_TYPE_DATA {
+                if st.ppdu_cnt != ls.last_ppdu {
+                    ls.last_ppdu = st.ppdu_cnt;
+                    ls.rx_ppdu_n += 1;
+                }
+                ls.rx_data_ppdu_frames += 1;
+            }
             // rx.c:100-133 + phy.c:678-704 — was der Watchdog braucht.
             rx::watchdog_feed(&mut acc, st, f, &mac, &bssid,
                               hal.rf_path_num);
@@ -6226,6 +6255,19 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // sagt, was die Hardware aggregieren DARF; diese Zahl sagt, was sie
     // aggregieren KANN. Steht hier eine Eins, ist der Engpass nicht die
     // Sitzung, sondern dass nie mehr als ein Rahmen gleichzeitig da ist.
+    // **Die Aggregatgroesse in EMPFANGSrichtung**, von der Hardware
+    // gezaehlt. Sie steht vor der Sendeseite, weil sie beim
+    // Herunterladen die groessere ist — und weil die zwei nebeneinander
+    // sagen, ob eine Richtung buendelt und die andere nicht.
+    if ls.rx_ppdu_n > 0 {
+        put("\nempfangsstapel ", &mut b, &mut n);
+        num(ls.rx_data_ppdu_frames / ls.rx_ppdu_n, &mut b, &mut n);
+        put(" rahmen je sendevorgang des AP (", &mut b, &mut n);
+        num(ls.rx_data_ppdu_frames, &mut b, &mut n);
+        put(" in ", &mut b, &mut n);
+        num(ls.rx_ppdu_n, &mut b, &mut n);
+        put(" ppdus)", &mut b, &mut n);
+    }
     if ls.tx_batch_n > 0 {
         // **Zwei Zahlen, und nur die zweite entscheidet.** `eingelegt`
         // ist, was der Treiber in EINEM Durchlauf in den Ring schob;
