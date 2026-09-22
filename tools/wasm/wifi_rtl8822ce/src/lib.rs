@@ -2072,6 +2072,10 @@ struct Bss {
     /// `TODO: channel utilization and AP load (e.g., from AP Beacon)`.
     /// Es gibt hier also keine Referenz — und eine Regel ohne Quelle und
     /// ohne Messung waere geraten.
+    /// Das Feld „VHT Capabilities Info" des AP aus seiner Bake.
+    /// Nur dafuer da, unser eigenes Angebot daran zu stutzen.
+    ap_vht_cap: u32,
+    ap_vht_cap_seen: bool,
     bss_load: u8,
     bss_load_seen: bool,
 }
@@ -2495,6 +2499,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+        ap_vht_cap: 0, ap_vht_cap_seen: false,
         bss_load: 0, bss_load_seen: false,
     }; MAX_BSS];
     let mut n_found = 0usize;
@@ -2966,6 +2971,17 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
                 e.ht_param = f[i + 3];
                 e.ht_op_seen = true;
             }
+            // 191 = VHT Capabilities (802.11 §9.4.2.157). Nur die ersten
+            // vier Byte, das Feld „VHT Capabilities Info" — daraus stutzt
+            // `build_vht_cap_ie` unser eigenes Angebot, wie mac80211 es
+            // tut (`ieee80211_add_vht_ie`, mlme.c:1481-1526). Der Grund
+            // steht dort woertlich: „Some APs apparently get confused if
+            // our capabilities are better than theirs."
+            191 if len >= 4 => {
+                e.ap_vht_cap = u32::from_le_bytes(
+                    [f[i + 2], f[i + 3], f[i + 4], f[i + 5]]);
+                e.ap_vht_cap_seen = true;
+            }
             // 192 = VHT Operation (802.11 §9.4.2.158). Byte 0 ist die
             // Breite, Byte 1 und 2 sind die zwei Mittenkanal-Segmente.
             // **Ohne dieses Element gibt es kein 80 MHz** — die Mitte
@@ -3432,6 +3448,38 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print(" · RSN CCMP/PSK");
     }
     host::print("\n");
+    // **Die rohen Elemente, so wie sie hinausgehen.**
+    //
+    // Drei Runden lang haben wir ueber den Inhalt dieses Rahmens
+    // GEREDET — ob 191 drinsteht, was es sagt, ob der AP es sieht. Er
+    // ist 60 Byte lang und steht jetzt da. Erst die rohe Eingabe
+    // abziehen, dann die Auswertung lesen.
+    //
+    // Ab Versatz 28: 24 Byte Kopf, dann Capability Info und Listen
+    // Interval, dann die Elemente.
+    if n > 28 {
+        host::print("  Antrag-Elemente:");
+        for (k, byte) in frame[28..n].iter().enumerate() {
+            host::print(if k % 16 == 0 { "\n   " } else { " " });
+            host::print_hex8(*byte);
+        }
+        host::print("\n");
+    }
+    if bss.ap_vht_cap_seen {
+        host::print("  AP VHT cap 0x");
+        host::print_hex8((bss.ap_vht_cap >> 24) as u8);
+        host::print_hex8((bss.ap_vht_cap >> 16) as u8);
+        host::print_hex8((bss.ap_vht_cap >> 8) as u8);
+        host::print_hex8(bss.ap_vht_cap as u8);
+        host::print(if bss.ap_vht_cap & IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE != 0 {
+            " · SU-Beamformer ja"
+        } else {
+            " · SU-Beamformer NEIN -> wir nehmen Beamformee zurueck"
+        });
+        host::print("\n");
+    } else if bss.channel > 14 {
+        host::print("  der AP hat in seiner Bake KEIN VHT-Element\n");
+    }
     let mut aid = 0u16;
     let (assoc_ok, assoc_status, assoc_tries) =
         exchange(h, hal, trx, mgmt_buf, rxbuf, dm, path_div,
@@ -3641,7 +3689,12 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     // darf einen Antrag mit VHT im falschen Band ablehnen.
     if bss.channel > 14 {
         n += sta::build_vht_cap_ie(&mut out[n..], e.hw_cap_ptcl,
-                                   e.hw_cap_nss, rf_path_num);
+                                   e.hw_cap_nss, rf_path_num,
+                                   if bss.ap_vht_cap_seen {
+                                       Some(bss.ap_vht_cap)
+                                   } else {
+                                       None
+                                   });
     }
     n
 }
@@ -6502,8 +6555,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         capability: 0, rsn: [0; 64], rsn_len: 0,
                         ht_param: 0, ht_op_seen: false, ht_cap: 0,
                         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
-                        vht_op_seen: false, bss_load: 0,
-                        bss_load_seen: false,
+                        vht_op_seen: false,
+                        ap_vht_cap: 0, ap_vht_cap_seen: false,
+                        bss_load: 0, bss_load_seen: false,
                     }; ROAM_BSS_MAX];
                     let mut n_kand = 0usize;
                     let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
@@ -6906,6 +6960,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
         ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
         vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+        ap_vht_cap: 0, ap_vht_cap_seen: false,
         bss_load: 0, bss_load_seen: false,
     };
     *found = [leer; ROAM_BSS_MAX];
