@@ -2585,9 +2585,11 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
             // und verlangen das Gegenteil voneinander.
             kprintln!("[netbench]   stau: cwnd {} · ssthresh {} · {} Doppelquittungen{} \
 · {}x schnell wiederholt · {}x Zeitueberschreitung",
-                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" },
+                cw, ss, crate::net::tcp::DUPACKS_SEEN.load(Relaxed),
+                if rec { " · IN ERHOLUNG" } else { "" },
                 crate::net::tcp::FAST_RETRANS.load(Relaxed),
                 crate::net::tcp::RTO_FIRED.load(Relaxed));
+            let _ = dup;
             let _ = maxbuf;
             let _ = crate::net::tcp::close(handle);
             return Err("send body failed");
@@ -2619,10 +2621,12 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
             kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{} \
 · {}x schnell wiederholt · {}x Zeitueberschreitung · Schlange voll {}x",
-                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" },
+                cw, ss, crate::net::tcp::DUPACKS_SEEN.load(Relaxed),
+                if rec { " · IN ERHOLUNG" } else { "" },
                 crate::net::tcp::FAST_RETRANS.load(Relaxed),
                 crate::net::tcp::RTO_FIRED.load(Relaxed),
                 crate::net::tcp::SEND_REFUSED.load(Relaxed));
+            let _ = dup;
         }
         if segs > 0 {
             // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.
