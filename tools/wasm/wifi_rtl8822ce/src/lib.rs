@@ -888,6 +888,30 @@ pub extern "C" fn _start() {
                 let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
                                     &mut lstats, e.addr, 0, rtwdev,
                                     &mut h2c, e, tp, &caps, fw_feature);
+                // **Der Wechsel geht denselben Weg wie ein
+                // Wiederverbinden** — Stufe 5e und 5f, mit einer anderen
+                // Zelle. `reconnect` raeumt die Schluessel, zieht den
+                // `Link` nach und laesst `wifid` einen frischen
+                // Supplicant bauen; nichts davon muessen wir zweimal
+                // schreiben.
+                if end == PumpEnd::Roam {
+                    let Some(z) = l.roam.to.take() else { break };
+                    let t0 = host::now_ms();
+                    target = Some(z);
+                    if reconnect(h, &hal, &mut trx, mgmt_buf, &mut h2c, e, tp,
+                                 &z, l, &mut lstats, rtwdev, &mut linked) {
+                        host::loud_begin();
+                        host::print("[rtl8822ce] gewechselt — Unterbruch ");
+                        host::print_dec((host::now_ms() - t0) as u32);
+                        host::print(" ms\n");
+                        host::loud_end();
+                        fehlschlaege = 0;
+                    } else {
+                        host::say("[rtl8822ce] der neue AP hat NICHT angenommen\n");
+                        host::sleep_ms(RECONNECT_BACKOFF_MS);
+                    }
+                    continue;
+                }
                 if end != PumpEnd::LinkLost {
                     break;
                 }
@@ -2722,6 +2746,35 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             host::print("\n");
         }
     }
+    // **Die Kanaele unserer SSID merken** — sie sind der Suchraum fuer
+    // das Roaming. Nur die Kanaele, nicht die Pegel: die sind gleich
+    // veraltet, sobald jemand einen Schritt geht.
+    if let Some(t) = target {
+        let mut n_ch = 0usize;
+        for b in found[..n_found].iter() {
+            if b.ssid_len != t.ssid_len
+                || b.ssid[..b.ssid_len as usize] != t.ssid[..t.ssid_len as usize]
+            {
+                continue;
+            }
+            // SAFETY: einfaedig, genau ein Schreiber, und der Suchlauf
+            // laeuft nicht parallel zum Pumpen.
+            unsafe {
+                let chs = &mut *core::ptr::addr_of_mut!(ROAM_CHANNELS);
+                if !chs[..n_ch].contains(&b.channel) && n_ch < chs.len() {
+                    chs[n_ch] = b.channel;
+                    n_ch += 1;
+                }
+            }
+        }
+        unsafe { N_ROAM_CHANNELS = n_ch };
+        host::print("  Roaming-Kanaele:");
+        for i in 0..n_ch {
+            host::print(" K");
+            host::print_dec(unsafe { ROAM_CHANNELS[i] } as u32);
+        }
+        host::print("\n");
+    }
     if let Some(b) = target {
         host::print("  Ziel fuer Stufe 5e: \"");
         print_ssid(&b.ssid[..b.ssid_len as usize]);
@@ -2766,7 +2819,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// Einen Beacon oder eine Probe Response in die Liste aufnehmen. Gibt
 /// `false` zurueck, wenn kein Platz mehr ist — eine volle Liste ist ein
 /// BEFUND und darf nicht wie ein leerer Kanal aussehen.
-fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
+fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
               signal: i8, is_beacon: bool) -> bool {
     let mut bssid = [0u8; 6];
     bssid.copy_from_slice(&f[16..22]); // addr3
@@ -2788,7 +2841,7 @@ fn record_bss(found: &mut [Bss; MAX_BSS], n: &mut usize, f: &[u8], ch: u8,
             i
         }
         None => {
-            if *n >= MAX_BSS {
+            if *n >= found.len() {
                 return false;
             }
             let i = *n;
@@ -4120,6 +4173,182 @@ fn bucket(us: u32, grenzen: &[u32; 4]) -> usize {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Roaming — der AP wechseln, BEVOR die Verbindung abreisst
+//
+// Florian: *„ich moechte ja nicht die verbindung verlieren muessen..
+// oder auf einem fast totem ap sitzen bleiben"*, und: *„wenn daneben ein
+// perfekter waere .. das waere genau der unterbruch den ich nicht
+// moechte"*.
+//
+// **Der Ausloeser kommt aus mac80211** (`ieee80211_handle_beacon_sig`,
+// mlme.c:6780-6870): ein EWMA ueber den Bakenpegel, erst ab
+// `IEEE80211_SIGNAL_AVE_MIN_COUNT` Baken, mit Schwelle UND Hysterese —
+// ein Ereignis feuert erst wieder, wenn der Pegel um die Hysterese
+// darueber hinausgeht. Ohne das loest ein einzelner schlechter Beacon
+// einen Suchlauf aus.
+//
+// **Die Auswahl ist eine SETZUNG.** Sie steht bei Linux in
+// wpa_supplicant (`wpa_scan_result_compar`), und die Quelle liegt nicht
+// im Cache — nur `wpa.c` und `wpa_common.h`. Die Regel hier hat die
+// Form, die in diesem Treiber schon gilt (`PREFER_5G_DBM`: „5 GHz ab
+// -70 dBm bevorzugt"), und die Zahlen stehen als benannte Konstanten,
+// damit man sie an Messungen aendern kann statt im Code zu suchen.
+// ═══════════════════════════════════════════════════════════════
+
+/// `roam:` aus `sys/config/wifi`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RoamMode {
+    /// Umhoeren und wechseln.
+    An,
+    /// Gar nicht umhoeren — der Zustand vor 0.57.0.
+    Aus,
+    /// Umhoeren und BERICHTEN, aber nicht wechseln. Das Werkzeug fuer
+    /// den ersten Abend: damit die Schwellen an Zahlen aus der eigenen
+    /// Wohnung festgelegt werden und nicht an geschaetzten.
+    NurBericht,
+}
+
+/// Der reine Teil, damit `framecheck.py` ihn ohne Geraet fahren kann.
+///
+/// **Ein unverstandener Wert ist AN**, dieselbe Regel wie bei `band:`,
+/// `bw:` und `txagg:`.
+pub fn roam_from(v: &[u8]) -> RoamMode {
+    if v.starts_with(b"off") || v.starts_with(b"aus") || v == b"0" {
+        RoamMode::Aus
+    } else if v.starts_with(b"nur") || v.starts_with(b"report")
+        || v.starts_with(b"bericht")
+    {
+        RoamMode::NurBericht
+    } else {
+        RoamMode::An
+    }
+}
+
+fn read_roam_mode() -> RoamMode {
+    let mut cfg = [0u8; 512];
+    let n = host::fetch("sys/config/wifi", &mut cfg);
+    if n <= 0 {
+        return RoamMode::An;
+    }
+    match cfg_get(&cfg[..n as usize], b"roam") {
+        Some((a, b)) => roam_from(&cfg[a..b]),
+        None => RoamMode::An,
+    }
+}
+
+/// mlme.c:96 `IEEE80211_SIGNAL_AVE_MIN_COUNT` — unter vier Baken sagt
+/// der geglaettete Pegel nichts.
+const SIGNAL_AVE_MIN_COUNT: u32 = 4;
+
+/// Ab hier horchen wir uns um. **Setzung**, dieselbe Schwelle, die
+/// `PREFER_5G_DBM` schon fuehrt.
+const ROAM_THOLD_DBM: i8 = -70;
+/// `cqm_rssi_hyst` — so weit muss der Pegel wieder steigen, bevor die
+/// Schwelle erneut ausloest. **Setzung.**
+const ROAM_HYST_DB: i8 = 4;
+/// Mindestabstand zweier Umhoerversuche. **Setzung**: jeder kostet
+/// Latenz, und unter zehn Sekunden aendert sich in einer Wohnung nichts.
+const ROAM_SCAN_GAP_MS: u64 = 10_000;
+/// Mindestabstand zweier Wechsel — die Hysterese gegen das Pendeln
+/// zwischen zwei gleich guten Zellen. **Setzung.**
+const ROAM_GAP_MS: u64 = 10_000;
+/// So viel staerker muss ein Kandidat sein. **Setzung.**
+const ROAM_BETTER_DB: i8 = 8;
+/// ... ODER er ist BREITER (VHT80 gegen HT40) und hoechstens so viel
+/// schwaecher. **Setzung** — und der Fall, der Florian getroffen hat:
+/// ein Repeater bei -50 dBm mit HT40 schlaegt den AP bei -55 dBm mit
+/// VHT80 und liefert die Haelfte.
+const ROAM_WIDER_TOLERANCE_DB: i8 = 6;
+/// Wie lange wir je Kanal horchen. **Ein gerichteter Probe Request wird
+/// in Millisekunden beantwortet**; passives Lauschen braeuchte ein
+/// volles Bakenintervall (102 ms) je Kanal.
+const ROAM_DWELL_MS: u32 = 25;
+/// Wieviele Kanaele wir uns aus dem Suchlauf merken.
+const ROAM_CHANNELS_MAX: usize = 6;
+/// Und wieviele Zellen ein Umhoerversuch findet.
+const ROAM_BSS_MAX: usize = 8;
+
+/// Die Kanaele, auf denen der Startsuchlauf Zellen UNSERER SSID gesehen
+/// hat.
+///
+/// **Das ist der Grund, warum ein Umhoerversuch billig ist.** Florian:
+/// *„ich moechte nicht einen ganzen suchlauf.. das macht kaum sinn.
+/// sondern eig. kennen wir ja die SSID bereits und auf welchem kanal es
+/// funkt."* Genau so macht es `bgscan simple` in wpa_supplicant auch.
+///
+/// **Die gespeicherten PEGEL benutzen wir NICHT** — die sind vom
+/// Startsuchlauf und damit von einem anderen Ort in der Wohnung. Ein
+/// alter Pegelwert ist schlechter als keiner. Gespeichert wird nur,
+/// WO wir suchen.
+static mut ROAM_CHANNELS: [u8; ROAM_CHANNELS_MAX] = [0; ROAM_CHANNELS_MAX];
+static mut N_ROAM_CHANNELS: usize = 0;
+
+/// Der Zustand des Roamings an einer stehenden Verbindung.
+#[derive(Clone, Copy)]
+struct Roam {
+    /// `ewma_beacon_signal`, `DECLARE_EWMA(beacon_signal, 4, 4)`
+    /// (mac80211 ieee80211_i.h:518). Gerechnet auf `Pegel + 128`, weil
+    /// unsere `Ewma` vorzeichenlos rechnet.
+    ave: dm::Ewma,
+    /// `count_beacon_signal`
+    count: u32,
+    /// `last_cqm_event_signal` — 0 heisst „noch nie gefeuert".
+    last_event: i8,
+    last_scan_ms: u64,
+    last_roam_ms: u64,
+    /// Wie oft wir gewechselt haben und wie oft wir uns umgehoert haben.
+    scans: u32,
+    roams: u32,
+    /// Der Kandidat, zu dem der Rufer wechseln soll.
+    to: Option<Bss>,
+}
+
+impl Roam {
+    const fn new() -> Self {
+        Roam { ave: dm::Ewma::new(), count: 0, last_event: 0,
+               last_scan_ms: 0, last_roam_ms: 0, scans: 0, roams: 0,
+               to: None }
+    }
+    /// Eine Bake der eigenen Zelle.
+    fn note_beacon(&mut self, dbm: i8) {
+        self.ave.add((dbm as i32 + 128) as u32, EWMA_BEACON_PRECISION,
+                     EWMA_BEACON_WEIGHT_RCP);
+        self.count = self.count.saturating_add(1);
+    }
+    /// Der geglaettete Pegel in dBm.
+    fn dbm(&self) -> i8 {
+        (self.ave.read(EWMA_BEACON_PRECISION) as i32 - 128) as i8
+    }
+}
+
+/// `DECLARE_EWMA(beacon_signal, 4, 4)` — Genauigkeit 4, Gewicht 1/16.
+const EWMA_BEACON_PRECISION: u32 = 4;
+const EWMA_BEACON_WEIGHT_RCP: u32 = 16;
+
+/// Ein Null-Data-Rahmen — `ieee80211_send_nullfunc` (mlme.c:2364).
+///
+/// **Das ist der Rahmen, der einen Umhoerversuch billig macht.** Mit
+/// gesetztem Power-Management-Bit sagt er dem AP „ich schlafe kurz";
+/// der PUFFERT dann unsere Pakete, statt sie auf einen Kanal zu senden,
+/// auf dem wir nicht mehr sind. Beim Zurueckkommen dasselbe mit
+/// geloeschtem Bit, und er schiebt das Gepufferte nach
+/// (`ieee80211_offchannel_ps_enable`/`_disable`, offchannel.c:25-81).
+///
+/// **Ohne ihn kostet jeder Umhoerversuch Pakete. Mit ihm nur Latenz.**
+fn build_nullfunc(out: &mut [u8; 32], mac: &[u8; 6], bssid: &[u8; 6],
+                  powersave: bool) -> usize {
+    out.fill(0);
+    // Typ Daten (0b10), Subtyp 4 = Null Data.
+    out[0] = DOT11_FC_TYPE_DATA | (4 << 4);
+    // ToDS, dazu das Power-Management-Bit (802.11 §9.2.4.1.7).
+    out[1] = 0x01 | if powersave { 0x10 } else { 0x00 };
+    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
+    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+    24
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Die Verbindungswache — mlme.c:4278-4481, 8516-8560
 //
 // **Ausbleibende Baken sind kein Verbindungsverlust.** Linux stupst den
@@ -4234,6 +4463,15 @@ struct Link {
     cam: [sec::CamEntry; 4],
     /// Unsere Block-Ack-Sitzung in Senderichtung.
     ba_tx: BaTx,
+    /// Roaming: geglaetteter Pegel, Sperren, Kandidat.
+    roam: Roam,
+    /// Die Breite, in der die Verbindung LAEUFT — als die drei Bytes,
+    /// aus denen `chan_params` sie rechnet. **Der Rueckweg von einem
+    /// Umhoerversuch braucht sie**: wer auf 20 MHz zurueckkommt, hat die
+    /// Verbindung auf 20 MHz, und niemand sagt es ihm.
+    ht_param_now: u8,
+    vht_chanwidth_now: u8,
+    vht_cch0_now: u8,
     /// Eine laufende Wechselansage: wohin, wie breit, und ab wann.
     /// `None` heisst: kein Wechsel angesagt.
     csa: Option<Csa>,
@@ -4614,6 +4852,10 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
         ba_tx: BaTx::new(),
+        roam: Roam::new(),
+        ht_param_now: bss.ht_param,
+        vht_chanwidth_now: bss.vht_chanwidth,
+        vht_cch0_now: bss.vht_cch0,
         csa: None,
         csa_at_ms: 0,
     };
@@ -4756,6 +4998,9 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
 #[allow(clippy::too_many_arguments)]
 #[derive(PartialEq, Clone, Copy)]
 enum PumpEnd {
+    /// Ein besserer AP ist gefunden — der Kandidat steht in
+    /// `link.roam.to`, und der Rufer meldet uns dort an.
+    Roam,
     /// Die Frist von Stufe 6a ist abgelaufen — der Normalfall dort.
     Frist,
     /// Die Zelle hat uns verloren (Deauth/Disassoc) oder die Firmware
@@ -5113,6 +5358,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Vorgabe AN — der Rueckfall `off` ist genau der Zustand von 0.51.1,
     // also einer, der gemessen ist.
     let txagg = read_txagg();
+    let roam_mode = read_roam_mode();
     // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
     // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
     // waere hier schlimmer als der Normalfall (sie teilt).
@@ -5215,6 +5461,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     if let Some(c) = parse_csa(f) {
                         acc.csa = Some(c);
                     }
+                    // mlme.c:6789-6798 — der Pegel JEDER Bake dieser
+                    // Zelle geht in den geglaetteten Wert.
+                    acc.beacon_dbm = Some(st.signal_power);
                 }
             }
             // **Wieviele Rahmen der AP je Sendevorgang buendelt.**
@@ -5408,6 +5657,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // ieee80211_reset_ap_probe(sdata)` — der AP hat geantwortet.
         // **Es zaehlt JEDER Rahmen von ihm**, nicht nur eine Antwort auf
         // unsere Frage: wer Daten schickt, lebt.
+        if let Some(dbm) = acc.beacon_dbm.take() {
+            link.roam.note_beacon(dbm);
+        }
         if acc.heard_ap && ls.poll_on {
             ls.poll_on = false;
             ls.probe_send_count = 0;
@@ -5963,6 +6215,134 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
+            // ── Roaming: wechseln, BEVOR es abreisst ─────────
+            //
+            // mlme.c:6800-6828 `ieee80211_handle_beacon_sig`: erst ab
+            // vier Baken, dann Schwelle mit HYSTERESE. Das Ereignis
+            // feuert erst wieder, wenn der Pegel um die Hysterese
+            // darueber hinausgeht — sonst loest ein einzelner schlechter
+            // Beacon einen Umhoerversuch aus, und danach der naechste.
+            if roam_mode != RoamMode::Aus
+                && link.roam.count >= SIGNAL_AVE_MIN_COUNT
+                && link.csa.is_none()
+            {
+                let sig = link.roam.dbm();
+                let le = link.roam.last_event;
+                // **Nicht nur der Pegel.** Eine Zelle kann laut und
+                // trotzdem fast tot sein: faellt die Rate auf die
+                // untersten Stufen oder geht jeder vierte Rahmen kaputt,
+                // ist sie es. Beide Zahlen messen wir ohnehin.
+                let rate_tot = d.dm.curr_rx_rate > 0
+                    && d.dm.curr_rx_rate < DESC_RATEMCS0 as u8;
+                let crc_hoch = ls.ofdm_ok + ls.ofdm_err > 1000
+                    && ls.ofdm_err * 4 > ls.ofdm_ok;
+                let tief = sig < ROAM_THOLD_DBM
+                    && (le == 0 || sig < le - ROAM_HYST_DB);
+                // Nie suchen, waehrend Daten fliessen: ein
+                // Umhoerversuch kostet dann Durchsatz fuer nichts.
+                let ruhig = d.stats.rx_throughput < 2 && d.stats.tx_throughput < 2;
+                if (tief || rate_tot || crc_hoch) && ruhig
+                    && now.saturating_sub(link.roam.last_scan_ms)
+                        > ROAM_SCAN_GAP_MS
+                {
+                    link.roam.last_event = sig;
+                    link.roam.last_scan_ms = now;
+                    link.roam.scans += 1;
+                    host::loud_begin();
+                    host::print("[rtl8822ce] Pegel ");
+                    print_dbm(sig);
+                    host::print(" (Schwelle ");
+                    print_dbm(ROAM_THOLD_DBM);
+                    host::print(")");
+                    if rate_tot {
+                        host::print(" · Rate am Boden");
+                    }
+                    if crc_hoch {
+                        host::print(" · jeder vierte Rahmen kaputt");
+                    }
+                    host::print(" — die bekannten Kanaele werden abgehorcht\n");
+                    host::loud_end();
+
+                    let mut kand = [Bss {
+                        bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
+                        channel: 0, best: -128, beacons: 0, resps: 0,
+                        capability: 0, rsn: [0; 64], rsn_len: 0,
+                        ht_param: 0, ht_op_seen: false, ht_cap: 0,
+                        vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
+                        vht_op_seen: false,
+                    }; ROAM_BSS_MAX];
+                    let mut n_kand = 0usize;
+                    let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
+                                       rxbuf, &mut d.dm, &mut d.path_div,
+                                       &mut kand, &mut n_kand);
+                    let max_bw = max_bw_for(e);
+                    let mut best: Option<Bss> = None;
+                    host::loud_begin();
+                    host::print("            ");
+                    host::print_dec(ms);
+                    host::print(" ms weg, ");
+                    host::print_dec(n_kand as u32);
+                    host::print(" Zellen gehoert\n");
+                    for b in kand[..n_kand].iter() {
+                        if b.ssid_len != link.ssid_len
+                            || b.ssid[..b.ssid_len as usize]
+                                != link.ssid[..link.ssid_len as usize]
+                        {
+                            continue;
+                        }
+                        let (_, bw, _) = chan_params(b.channel, b.width(),
+                                                     max_bw);
+                        host::print("            K");
+                        host::print_dec(b.channel as u32);
+                        host::print(" ");
+                        print_dbm(b.best);
+                        host::print(" ");
+                        host::print(match bw {
+                            2 => "80 MHz",
+                            1 => "40 MHz",
+                            _ => "20 MHz",
+                        });
+                        if b.bssid == link.bssid {
+                            host::print("  (wir)");
+                        } else if roam_better(sig, d.cur_bw, b, max_bw) {
+                            host::print("  BESSER");
+                            if best.map_or(true, |x| b.best > x.best) {
+                                best = Some(*b);
+                            }
+                        }
+                        host::print("\n");
+                    }
+                    host::loud_end();
+
+                    if let Some(z) = best {
+                        if now.saturating_sub(link.roam.last_roam_ms)
+                            > ROAM_GAP_MS
+                        {
+                            host::loud_begin();
+                            host::print("[rtl8822ce] ");
+                            host::print(if roam_mode == RoamMode::NurBericht {
+                                "WUERDE WECHSELN zu K"
+                            } else {
+                                "WECHSEL zu K"
+                            });
+                            host::print_dec(z.channel as u32);
+                            host::print(" ");
+                            print_dbm(z.best);
+                            host::print(" (wir: ");
+                            print_dbm(sig);
+                            host::print(")\n");
+                            host::loud_end();
+                            if roam_mode == RoamMode::An {
+                                link.roam.last_roam_ms = now;
+                                link.roam.roams += 1;
+                                link.roam.to = Some(z);
+                                return PumpEnd::Roam;
+                            }
+                        }
+                    }
+                }
+            }
+
             // mlme.c:4427-4480 `ieee80211_mgd_probe_ap(sdata, true)`.
             //
             // **Hier wurde `d.beacon_loss` bis 0.55.0 nie gelesen.** Der
@@ -6186,6 +6566,131 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 ");
     host::loud_end();
     true
+}
+
+/// Sich umhoeren, ohne die Verbindung zu verlieren.
+///
+/// Der Ablauf ist der von mac80211 (`ieee80211_offchannel_stop_vifs`,
+/// offchannel.c:83-131), auf das zusammengezogen, was wir haben:
+///
+/// 1. **dem AP sagen, dass wir kurz schlafen** — Null-Data mit gesetztem
+///    Power-Management-Bit. Ab da PUFFERT er fuer uns.
+/// 2. je bekanntem Kanal: hinwechseln, einen Probe Request mit UNSERER
+///    SSID hinaus, kurz horchen.
+/// 3. zurueck auf den eigenen Kanal, in der eigenen Breite.
+/// 4. **aufwachen** — dasselbe ohne das Bit, und er schiebt nach.
+///
+/// Gefragt wird mit RUNDRUF-Adresse und gesetzter SSID: so antwortet
+/// jede Zelle dieses Netzes, nicht nur eine.
+#[allow(clippy::too_many_arguments)]
+fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+             rxbuf: &mut [u8], dm: &mut dm::DmInfo,
+             path_div: &mut dm::PathDiv,
+             found: &mut [Bss; ROAM_BSS_MAX], n_found: &mut usize) -> u32 {
+    let mac = link.mac;
+    let leer = Bss {
+        bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
+        beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
+        ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
+        vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+    };
+    *found = [leer; ROAM_BSS_MAX];
+    *n_found = 0;
+
+    // (1) schlafen gehen
+    let mut nf = [0u8; 32];
+    let n = build_nullfunc(&mut nf, &mac, &link.bssid, true);
+    let mut info = tx::pkt_info_update(&nf[..n], 0, tx::band_of(link.channel));
+    let q = tx::RTW_TX_QUEUE_MGMT;
+    if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
+        pci::tx_kick_off_queue(h, trx, q);
+    }
+    // Dem Rahmen Zeit lassen, hinauszugehen — sonst wechseln wir den
+    // Kanal, bevor der AP erfahren hat, dass wir weg sind.
+    host::sleep_ms(2);
+
+    let t0 = host::now_us();
+    // SAFETY: einfaedig, und der Suchlauf schreibt nicht, waehrend
+    // gepumpt wird.
+    let (chs, n_ch) = unsafe {
+        (&*core::ptr::addr_of!(ROAM_CHANNELS), N_ROAM_CHANNELS)
+    };
+    for &ch in chs[..n_ch].iter() {
+        // (2) hin, fragen, horchen
+        let _ = switch_channel(h, hal, e, t_pwr, ch, CellWidth::default(), 0);
+        let mut pr = [0u8; 128];
+        let n = build_probe_req_to(&mut pr, &mac, ch, None,
+                                   &link.ssid[..link.ssid_len as usize]);
+        let mut info = tx::pkt_info_update(&pr[..n], 0, tx::band_of(ch));
+        if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &pr[..n]) {
+            pci::tx_kick_off_queue(h, trx, q);
+        }
+        let t_ch = host::now_us();
+        while host::now_us() - t_ch < ROAM_DWELL_MS as u64 * 1000 {
+            let got = pci::rx_poll(h, trx, 64, rxbuf, dm, path_div,
+                                   hal.rf_path_num, 0, ch, |st, pkt| {
+                if st.crc_err || st.is_c2h {
+                    return;
+                }
+                let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                    + st.shift as usize;
+                if off + 36 > pkt.len() {
+                    return;
+                }
+                let f = &pkt[off..];
+                let fc = f[0];
+                if fc & 0xfc != 0x80 && fc & 0xfc != 0x50 {
+                    return;
+                }
+                let _ = record_bss(found, n_found, f, ch, st.signal_power,
+                                   fc & 0xfc == 0x80);
+            });
+            if got == 0 {
+                host::sleep_ms(1);
+            }
+        }
+    }
+
+    // (3) zurueck — in der Breite, in der die Verbindung laeuft
+    let heim = CellWidth {
+        ht_param: link.ht_param_now,
+        vht_chanwidth: link.vht_chanwidth_now,
+        vht_cch0: link.vht_cch0_now,
+    };
+    let _ = switch_channel(h, hal, e, t_pwr, link.channel, heim,
+                           max_bw_for(e));
+
+    // (4) aufwachen
+    let n = build_nullfunc(&mut nf, &mac, &link.bssid, false);
+    let mut info = tx::pkt_info_update(&nf[..n], 0, tx::band_of(link.channel));
+    if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
+        pci::tx_kick_off_queue(h, trx, q);
+    }
+    ((host::now_us() - t0) / 1000) as u32
+}
+
+/// Ist der Kandidat besser als das, worauf wir sitzen?
+///
+/// **Die Regel ist eine Setzung, kein Port** — sie steht in
+/// wpa_supplicant, und die Quelle liegt nicht im Cache. Zwei Wege
+/// fuehren zum Wechsel:
+///
+/// * er ist deutlich STAERKER (`ROAM_BETTER_DB`), oder
+/// * er ist BREITER und dabei hoechstens `ROAM_WIDER_TOLERANCE_DB`
+///   schwaecher.
+///
+/// Der zweite Weg ist der Fall, der Florian getroffen hat: ein Repeater
+/// bei -50 dBm mit HT40 gewinnt jede reine Pegelwahl gegen einen AP bei
+/// -55 dBm mit VHT80 — und liefert die Haelfte.
+fn roam_better(jetzt_dbm: i8, jetzt_bw: usize, kand: &Bss,
+               max_bw: usize) -> bool {
+    let (_, kand_bw, _) = chan_params(kand.channel, kand.width(), max_bw);
+    let d = kand.best as i32 - jetzt_dbm as i32;
+    if d >= ROAM_BETTER_DB as i32 {
+        return true;
+    }
+    kand_bw > jetzt_bw && d >= -(ROAM_WIDER_TOLERANCE_DB as i32)
 }
 
 /// Stufe 6a — Aufbau, Handschlag und die ersten acht Sekunden.
@@ -6760,6 +7265,21 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // **Die Verbindungswache.** Ein Anstupser, dem eine Erholung folgt,
     // ist ein Fall, in dem wir die Verbindung FRUEHER weggeworfen
     // haetten — die zwei Zahlen nebeneinander sagen, wie oft.
+    if link.roam.scans > 0 || link.roam.roams > 0 {
+        put("  roaming ", &mut b, &mut n);
+        num(link.roam.scans, &mut b, &mut n);
+        put("x umgehoert, ", &mut b, &mut n);
+        num(link.roam.roams, &mut b, &mut n);
+        put("x gewechselt (pegel ", &mut b, &mut n);
+        let sg = link.roam.dbm();
+        if sg < 0 {
+            put("-", &mut b, &mut n);
+            num((-(sg as i32)) as u32, &mut b, &mut n);
+        } else {
+            num(sg as u32, &mut b, &mut n);
+        }
+        put(" dBm geglaettet)", &mut b, &mut n);
+    }
     if ls.csa_done > 0 {
         put("  kanalwechsel ", &mut b, &mut n);
         num(ls.csa_done, &mut b, &mut n);

@@ -482,6 +482,42 @@ AMPDU_F = [
     ("Exponent 3 (64 K) -> 31 = der groesste Wert des 5-Bit-Feldes", 3, 31),
 ]
 
+# `roam_from`: der Wert hinter `roam:`.
+# **Ein unverstandener Wert ist AN**, dieselbe Regel wie ueberall sonst.
+ROAM = [
+    ("off -> aus", "off", "RoamMode::Aus"),
+    ("aus -> aus", "aus", "RoamMode::Aus"),
+    ("0 -> aus", "0", "RoamMode::Aus"),
+    ("nurbericht -> nur berichten", "nurbericht", "RoamMode::NurBericht"),
+    ("report -> nur berichten", "report", "RoamMode::NurBericht"),
+    ("on -> an", "on", "RoamMode::An"),
+    ("leer -> Vorgabe AN", "", "RoamMode::An"),
+    ("Tippfehler bleibt AN", "jaklar", "RoamMode::An"),
+]
+
+# `roam_better`: (Name, eigener Pegel, eigene Breite, Kandidat-Pegel,
+# Kandidat ht_param, Kandidat vht_breite, Kandidat vht_mitte, erwartet)
+#
+# **Der zweite Weg ist der Fall, der Florian getroffen hat**: ein
+# Repeater mit HT40 gewinnt jede reine Pegelwahl gegen einen AP mit
+# VHT80 -- und liefert die Haelfte.
+BETTER = [
+    ("8 dB staerker, gleiche Breite -> wechseln",
+     -70, 1, -62, 0x05, 0, 0, "true"),
+    ("7 dB staerker reicht nicht",
+     -70, 1, -63, 0x05, 0, 0, "false"),
+    ("gleich stark, aber BREITER (VHT80 gegen 40) -> wechseln",
+     -55, 1, -55, 0x05, 1, 106, "true"),
+    ("6 dB schwaecher, aber breiter -> gerade noch",
+     -49, 1, -55, 0x05, 1, 106, "true"),
+    ("7 dB schwaecher und breiter -> nein",
+     -48, 1, -55, 0x05, 1, 106, "false"),
+    ("breiter angesagt, aber Mitte unplausibel -> keine Breite, nein",
+     -55, 1, -55, 0x05, 1, 104, "false"),
+    ("staerker UND schmaler -> die 8 dB entscheiden",
+     -70, 2, -60, 0x05, 0, 0, "true"),
+]
+
 # `bw_cap_from`: der Wert hinter `bw:` -> 0/1/2 (20/40/80 MHz).
 # **Ein unverstandener Wert ist die Vorgabe (80), nicht die schmalste
 # Einstellung** — schmal ist nicht sicherer, nur langsamer.
@@ -515,6 +551,19 @@ def main():
                    "struct Csa")
     csafn = grab(src, r"\n(fn parse_csa.*?\n\})", "parse_csa")
     txaggf = grab(src, r"\n(pub fn txagg_from.*?\n\})", "txagg_from")
+    roamf = grab(src, r"\n(pub fn roam_from.*?\n\})", "roam_from")
+    roame = grab(src, r"\n(#\[derive[^\n]*\]\npub enum RoamMode \{.*?\n\})",
+                 "enum RoamMode")
+    betterf = grab(src, r"\n(fn roam_better.*?\n\})", "roam_better")
+    # `roam_better` braucht die Zelle. Sie steht hier mit den Feldern,
+    # die die Regel liest — mehr gehoert nicht in den Pruefling.
+    bssstru = grab(src, r"\n(#\[derive\(Clone, Copy\)\]\nstruct Bss \{.*?\n\})",
+                   "struct Bss")
+    bsswidth = grab(src, r"\n(impl Bss \{.*?\n\})", "impl Bss")
+    roamk = grab(src, r"\n(const ROAM_BETTER_DB: i8 = \d+;)",
+                 "ROAM_BETTER_DB")
+    roamt = grab(src, r"\n(const ROAM_WIDER_TOLERANCE_DB: i8 = \d+;)",
+                 "ROAM_WIDER_TOLERANCE_DB")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
     # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
@@ -657,6 +706,15 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
             rs(name), ", ".join(str(x) for x in beacon_csa(elems)))
         for name, elems in CSA_NONE)
 
+    roam_cases = "\n".join(
+        '        (%s, %s, %s),' % (rs(name), rs(v), want)
+        for name, v, want in ROAM)
+
+    better_cases = "\n".join(
+        '        (%s, %d, %d, %d, %d, %d, %d, %s),' % (
+            rs(name), a, b_, c, d_, e_, f_, w)
+        for name, a, b_, c, d_, e_, f_, w in BETTER)
+
     bwcap_cases = "\n".join(
         '        (%s, %s, %d),' % (rs(name), rs(v), want)
         for name, v, want in BWCAP)
@@ -675,12 +733,22 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         + "\n\n" + cellw + "\n\n" + vhtw + "\n\n" + cent \
         + "\n\n" + chanp + "\n\n" + csastru + "\n\n" + csafn \
         + "\n\n" + bwcapf + "\n\n" + txaggf \
+        + "\n\n" + roame + "\n\n" + roamf \
+        + "\n\n" + roamk + "\n\n" + roamt \
+        + "\n\n" + bssstru + "\n\n" + bsswidth + "\n\n" + betterf \
         + "\n\n" + ba_buf + "\n\n" + ampdu_f \
         + "\n\n" + addba_rq + "\n\n" + addba_rs + "\n\n" + addba_rp \
         + "\n\n" + aspmp \
         + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
+
+const BSS_LEER: Bss = Bss {
+    bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
+    beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
+    ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
+    vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+};
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 const OUR_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
@@ -927,6 +995,32 @@ fn main() {
                  if ok { "OK  " } else { "DIFF" }, name);
     }
 
+    let roams: &[(&str, &str, RoamMode)] = &[
+%s
+    ];
+    for (name, v, want) in roams {
+        let got = roam_from(v.as_bytes());
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} roam: {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
+    let betters: &[(&str, i8, usize, i8, u8, u8, u8, bool)] = &[
+%s
+    ];
+    for (name, jetzt, jbw, kd, hp, vw, vc, want) in betters {
+        let mut k = BSS_LEER;
+        k.channel = 100;
+        k.best = *kd;
+        k.ht_param = *hp;
+        k.vht_chanwidth = *vw;
+        k.vht_cch0 = *vc;
+        let got = roam_better(*jetzt, *jbw, &k, 2);
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} roam_better: {}", if ok { "OK  " } else { "DIFF" }, name);
+    }
+
     let bws: &[(&str, &str, usize)] = &[
 %s
     ];
@@ -951,7 +1045,8 @@ fn main() {
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len()
                 + bws.len() + 7 + 4 + 2 + ampdufs.len() + txaggs.len()
-                + csas.len() + csanones.len();
+                + csas.len() + csanones.len() + roams.len()
+                + betters.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
@@ -962,7 +1057,7 @@ fn main() {
        ", ".join(str(b) for b in addba_resp(status=37)),
        ", ".join(str(b) for b in addba_req()),
        ampduf_cases, txagg_cases,
-       csa_cases, csanone_cases,
+       csa_cases, csanone_cases, roam_cases, better_cases,
        bwcap_cases, band_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()

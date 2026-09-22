@@ -518,6 +518,10 @@ pub struct WdAcc {
     /// jeder Rahmen von ihm setzt die Wache zurueck, nicht nur eine
     /// Bake. Ein Download ohne Baken ist eine lebende Verbindung.
     pub heard_ap: bool,
+    /// Der Pegel der letzten Bake DIESER Zelle, in dBm. Er fuettert den
+    /// geglaetteten Wert, an dem das Roaming haengt
+    /// (`ieee80211_handle_beacon_sig`).
+    pub beacon_dbm: Option<i8>,
     /// Die Wechselansage aus einer Bake dieser Zelle, wenn eine da war.
     /// Sie faehrt heraus, weil der Kanalwechsel `trx` braucht und der
     /// Rueckruf es nicht halten darf.
@@ -549,7 +553,7 @@ impl WdAcc {
             c2h_seen: [0; 8], n_c2h_seen: 0,
             mgmt: [(0, (0, 0)); 8], n_mgmt: 0,
             addba: [crate::sta::AddbaReq::default(); 4], n_addba: 0,
-            addba_drop: 0, heard_ap: false, csa: None,
+            addba_drop: 0, heard_ap: false, beacon_dbm: None, csa: None,
             addba_resp: None,
             rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }
