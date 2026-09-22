@@ -689,6 +689,49 @@ pub fn enable_hwp() -> bool {
     true
 }
 
+/// Worker ist in seiner Schleife angekommen. Ein AP, der nie startete,
+/// darf beim Verteilen nicht als „leerster Kern" zaehlen — er nimmt nie
+/// etwas, und die Arbeit bliebe liegen.
+static IN_LOOP: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+/// Ein Intent laeuft gerade auf diesem Kern (bis zum Ende, ohne abzugeben).
+static NATIVE_BUSY: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+/// Last eines Kerns fuers Verteilen: residente Fiber, plus eins, solange
+/// ein Intent ihn belegt.
+fn core_load(c: usize) -> u64 {
+    super::fiber::fiber_count(c) + NATIVE_BUSY[c].load(Ordering::Relaxed) as u64
+}
+
+/// Gehoert `cid` zu den am wenigsten belegten Workern, die Arbeit nehmen?
+///
+/// Ausgenommen sind der Kern des WLAN-Treibers und der microVM-Kern: beide
+/// nehmen nie etwas, und zaehlten sie mit, koennte das Minimum auf einem
+/// Kern liegen, der nie zugreift. Gleichstand ist erlaubt — mehrere leere
+/// Kerne duerfen gleichzeitig zugreifen, der Deque entscheidet.
+fn least_loaded(cid: usize) -> bool {
+    let workers = super::scheduler::worker_count();
+    if workers <= 1 {
+        return true;
+    }
+    let nic = crate::netdev::wasm_nic_core();
+    let vm = DEDICATED_VM_CORE.load(Ordering::Acquire) as usize;
+    let mine = core_load(cid);
+    for c in 1..=workers.min(255) {
+        // Ein Kern mitten in einem Intent kann gerade nichts annehmen;
+        // zaehlte er beim Minimum mit, wartete neue Arbeit auf das Ende
+        // eines Downloads.
+        if c == cid || Some(c) == nic || c == vm || !IN_LOOP[c].load(Ordering::Acquire)
+            || NATIVE_BUSY[c].load(Ordering::Relaxed)
+        {
+            continue;
+        }
+        if core_load(c) < mine {
+            return false;
+        }
+    }
+    true
+}
+
 /// AP Rust entry — called by trampoline after long mode transition.
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
 #[unsafe(no_mangle)]
@@ -717,6 +760,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     // is what lets us idle with plain HLT — which VMEXITs so KVM frees
     // the host core — instead of MWAIT-on-cacheline (needs cpu-pm=on).
     crate::interrupts::arm_worker_timer();
+    if (core_id as usize) < 256 {
+        IN_LOOP[core_id as usize].store(true, Ordering::Release);
+    }
 
     // Enter scheduler loop
     let cid = core_id as usize;
@@ -759,9 +805,17 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // einmal im Sendering, Server-RTT 18 ms auf einer Strecke von 2.
         let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
             && super::scheduler::worker_count() > 1;
+        // **Und allgemein: neue Arbeit nimmt nur ein Kern, der zu den am
+        // wenigsten belegten gehoert.** Dieselbe Ursache in gross: am
+        // Geraet (16 Kerne) lagen dock, bar, aml, audio_hda, i2c_hid, wifid
+        // UND der WLAN-Treiber alle auf Kern 5 — der Kern, der als erster
+        // einen Fiber hatte, wachte am haeufigsten auf und stahl damit auch
+        // alle folgenden. Fiber sind kooperativ: dreht der Treiber unter
+        // Last, warten Touchpad, Ton und Panels, und umgekehrt.
+        let take = !nic_core && least_loaded(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives on the global deque (own deque first, then steal).
-        if let Some(task) = if nic_core { None } else { super::scheduler::next_task(cid) } {
+        if let Some(task) = if take { super::scheduler::next_task(cid) } else { None } {
             if task.is_fiber {
                 // App: hand to this core's fiber scheduler. It runs on its
                 // own stack and yields at npk_sleep so peers share the core.
@@ -769,9 +823,11 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             } else {
                 // Native run-to-completion task (intent) — run directly.
                 CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
+                NATIVE_BUSY[cid].store(true, Ordering::Relaxed);
                 start_work(cid);
                 (task.func)(task.arg);
                 flush_busy(cid);
+                NATIVE_BUSY[cid].store(false, Ordering::Relaxed);
                 CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             }
             continue;
