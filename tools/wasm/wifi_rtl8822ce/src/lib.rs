@@ -5876,8 +5876,11 @@ fn read_txagg() -> bool {
     }
 }
 
+/// `ampdu:` — die Fensterbreite, die wir dem AP fuer seine Aggregation
+/// ZUSAGEN. Vorgabe ist die Decke des Protokolls, siehe
+/// `sta::build_addba_resp`.
 fn read_ampdu_buf() -> u16 {
-    const VORGABE: u16 = 8;
+    const VORGABE: u16 = sta::BA_TX_BUF_SIZE;
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
     if n <= 0 {
@@ -5901,8 +5904,9 @@ fn read_ampdu_buf() -> u16 {
         }
     }
     // Das Feld ist zehn Bit breit (`ADDBA_PARAM_BUF_SIZE_MASK`), und
-    // mehr als 64 kann HT ohnehin nicht.
-    if any { num.clamp(1, 64) } else { VORGABE }
+    // mehr als 64 kann HT/VHT ohnehin nicht — die Bitmaske des
+    // komprimierten Block Ack hat 64 Plaetze.
+    if any { num.clamp(1, sta::BA_TX_BUF_SIZE) } else { VORGABE }
 }
 
 /// `on` oder `1` — dieselbe Regel, die `wifi_ax200` fuer `ampdu:` und
