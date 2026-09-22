@@ -3651,6 +3651,13 @@ struct LinkStats {
     tx_batch_n: u32,
     tx_batch_sum: u32,
     tx_batch_max: u32,
+    /// Und wieviel die HARDWARE beim selben Augenblick noch vor sich
+    /// hatte. **Das ist die Zahl, die ueber Aggregation entscheidet** —
+    /// `tx_batch_*` sagt nur, wieviel der Treiber in EINEM Durchlauf
+    /// eingelegt hat, und das ist etwas anderes, sobald das Medium
+    /// belegt ist.
+    tx_ring_sum: u32,
+    tx_ring_max: u32,
     last_action: (u8, u8),
     /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
     /// den Sendering passte.
@@ -3731,6 +3738,7 @@ impl Default for LinkStats {
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
+            tx_ring_sum: 0, tx_ring_max: 0,
             last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             addba_win: 0, addba_win_req: 0,
@@ -5333,13 +5341,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
             if gestapelt > 0 {
+                // **Erst messen, dann anstossen.** Nach dem Anstoss ist
+                // die Zahl eine andere — die Hardware faengt an, sobald
+                // der Schreibzeiger steht.
+                let im_ring = pci::tx_pending(h, trx, pci::Q_BE);
                 pci::tx_kick_off_queue(h, trx, pci::Q_BE);
-                // Wieviel je Anstoss zusammenkommt, ist die Zahl, an der
-                // man sieht, ob ueberhaupt etwas zu aggregieren war.
                 ls.tx_batch_n += 1;
                 ls.tx_batch_sum += gestapelt;
                 if gestapelt > ls.tx_batch_max {
                     ls.tx_batch_max = gestapelt;
+                }
+                ls.tx_ring_sum += im_ring;
+                if im_ring > ls.tx_ring_max {
+                    ls.tx_ring_max = im_ring;
                 }
             }
         }
@@ -5989,8 +6003,28 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // **Die haeufigste Empfangsrate der ganzen Verbindung**, nicht die
     // des letzten Rahmens. Bei einem Download sind 65 000 Datenrahmen
     // gegen 900 Beacons kein Zweifelsfall.
-    let (top_rate, top_cnt) = ls.rate_hist.iter().enumerate()
+    // **Die haeufigste Rate der DATEN, nicht die der Baken.**
+    //
+    // Hier stand die Spitze ueber alle Raten, und am Geraet kam heraus:
+    // `rx OFDM 6M in 8350 von 15628` — bei `beacon 8320` in derselben
+    // Zeile. Eine Bake geht immer mit der niedrigsten Rate hinaus, und
+    // je laenger eine Verbindung steht, desto sicherer gewinnt sie: nach
+    // vierzehn Minuten sind es 8320 Baken gegen die paar tausend
+    // Datenrahmen, die einen PHY-Status tragen. Die Zeile sagte dann
+    // „6 Mbit" ueber eine Strecke, die gerade 240 Mbit lieferte.
+    //
+    // Gezaehlt wird jetzt ab `DESC_RATEMCS0` — alles darunter ist
+    // Legacy und auf einer HT/VHT-Verbindung Verwaltung. Gibt es keine
+    // einzige HT/VHT-Rate, faellt es auf die Spitze ueber alles zurueck,
+    // denn dann IST die Verbindung legacy.
+    let mcs0 = DESC_RATEMCS0 as usize;
+    let spitze = |von: usize| ls.rate_hist.iter().enumerate().skip(von)
         .fold((0usize, 0u32), |acc, (i, &c)| if c > acc.1 { (i, c) } else { acc });
+    let (top_rate, top_cnt) = match spitze(mcs0) {
+        (_, 0) => spitze(0),
+        v => v,
+    };
+    let legacy: u32 = ls.rate_hist[..mcs0].iter().sum();
     put("  rx ", &mut b, &mut n);
     put(rate_name(top_rate as u8), &mut b, &mut n);
     put(" (0x", &mut b, &mut n);
@@ -5999,8 +6033,10 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(top_cnt, &mut b, &mut n);
     put(" von ", &mut b, &mut n);
     let ges: u32 = ls.rate_hist.iter().sum();
-    num(ges, &mut b, &mut n);
-    put(", zuletzt ", &mut b, &mut n);
+    num(ges - legacy, &mut b, &mut n);
+    put(" ht/vht, dazu ", &mut b, &mut n);
+    num(legacy, &mut b, &mut n);
+    put(" legacy (baken), zuletzt ", &mut b, &mut n);
     put(rate_name(d.dm.curr_rx_rate), &mut b, &mut n);
     put(")  tx ", &mut b, &mut n);
     put(rate_name(d.dm.tx_rate), &mut b, &mut n);
@@ -6187,11 +6223,22 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // aggregieren KANN. Steht hier eine Eins, ist der Engpass nicht die
     // Sitzung, sondern dass nie mehr als ein Rahmen gleichzeitig da ist.
     if ls.tx_batch_n > 0 {
-        put("\nsendestapel ", &mut b, &mut n);
+        // **Zwei Zahlen, und nur die zweite entscheidet.** `eingelegt`
+        // ist, was der Treiber in EINEM Durchlauf in den Ring schob;
+        // `im ring` ist, was die Hardware im selben Augenblick noch vor
+        // sich hatte. Aggregiert wird die zweite. Sie sind verschieden,
+        // sobald das Medium belegt ist — dann stapeln sich die
+        // Deskriptoren, waehrend der Treiber einzeln nachlegt.
+        put("\nsendering ", &mut b, &mut n);
+        num(ls.tx_ring_sum / ls.tx_batch_n, &mut b, &mut n);
+        put(" deskriptoren beim anstoss im mittel, groesster ",
+            &mut b, &mut n);
+        num(ls.tx_ring_max, &mut b, &mut n);
+        put(" (eingelegt ", &mut b, &mut n);
         num(ls.tx_batch_sum / ls.tx_batch_n, &mut b, &mut n);
-        put(" rahmen je anstoss im mittel, groesster ", &mut b, &mut n);
+        put(" je durchlauf, groesster ", &mut b, &mut n);
         num(ls.tx_batch_max, &mut b, &mut n);
-        put(" (", &mut b, &mut n);
+        put(", ", &mut b, &mut n);
         num(ls.tx_batch_n, &mut b, &mut n);
         put(" anstoesse)", &mut b, &mut n);
     }
