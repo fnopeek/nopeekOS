@@ -518,6 +518,10 @@ pub struct WdAcc {
     /// jeder Rahmen von ihm setzt die Wache zurueck, nicht nur eine
     /// Bake. Ein Download ohne Baken ist eine lebende Verbindung.
     pub heard_ap: bool,
+    /// Die Wechselansage aus einer Bake dieser Zelle, wenn eine da war.
+    /// Sie faehrt heraus, weil der Kanalwechsel `trx` braucht und der
+    /// Rueckruf es nicht halten darf.
+    pub csa: Option<crate::Csa>,
     /// Und was auch in vier Plaetze nicht passte. Eine Zahl, damit ein
     /// zu kleiner Puffer nicht wieder still kuerzt.
     pub addba_drop: u32,
@@ -545,7 +549,7 @@ impl WdAcc {
             c2h_seen: [0; 8], n_c2h_seen: 0,
             mgmt: [(0, (0, 0)); 8], n_mgmt: 0,
             addba: [crate::sta::AddbaReq::default(); 4], n_addba: 0,
-            addba_drop: 0, heard_ap: false,
+            addba_drop: 0, heard_ap: false, csa: None,
             addba_resp: None,
             rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }

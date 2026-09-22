@@ -183,6 +183,54 @@ def addba_req(token=0x42, amsdu=0, policy=1, tid=5, buf=64, timeout=0,
     return f[:n]
 
 
+def beacon_csa(elems):
+    """Eine Bake mit Elementen. 24 Kopf + 8 Zeitstempel + 2 Intervall +
+    2 Faehigkeiten, dann die Elemente."""
+    f = [0x80, 0x00, 0x00, 0x00]
+    f += mac(OURS) + mac(THEIRS) + mac(THEIRS)
+    f += [0x30, 0x12]
+    f += [0] * 8            # Zeitstempel
+    f += [0x64, 0x00]       # Bakenintervall 100 TU
+    f += [0x11, 0x04]       # Faehigkeiten
+    for eid, body in elems:
+        f += [eid, len(body)] + list(body)
+    return f
+
+
+# `parse_csa`: was in einer Wechselansage steht.
+#
+# **Die Faelle, die NICHT durchgehen duerfen, stehen mit dabei.** Eine
+# Ansage ohne Kanal ist keine, und eine Bake ohne CSA-Element darf keine
+# erfinden -- sonst zieht der Treiber auf Kanal 0 um.
+CSA = [
+    ("nur Element 37: Kanal 100, in 3 Baken, Sendepause",
+     [(37, [1, 100, 3])], (1, 100, 3, 0x00, 0, 0)),
+    ("37 mit Zweitkanal OBEN (62 = 1) -> ht_param 0x05",
+     [(37, [0, 36, 5]), (62, [1])], (0, 36, 5, 0x05, 0, 0)),
+    ("37 mit Zweitkanal UNTEN (62 = 3) -> ht_param 0x07",
+     [(37, [0, 40, 2]), (62, [3])], (0, 40, 2, 0x07, 0, 0)),
+    ("37 + 194: VHT80 mit Mitte 106",
+     [(37, [1, 100, 1]), (62, [1]), (194, [1, 106, 0])],
+     (1, 100, 1, 0x05, 1, 106)),
+    ("194 im Wrapper 196 zaehlt genauso",
+     [(37, [1, 100, 1]), (62, [1]), (196, [194, 3, 1, 106, 0])],
+     (1, 100, 1, 0x05, 1, 106)),
+    ("Element 60 (erweitert) allein: Kanal steht an dritter Stelle",
+     [(60, [1, 121, 104, 2])], (1, 104, 2, 0x00, 0, 0)),
+    ("37 schlaegt 60, wenn beide da sind",
+     [(60, [1, 121, 44, 9]), (37, [0, 104, 2])], (0, 104, 2, 0x00, 0, 0)),
+    ("count 0 heisst auch jetzt",
+     [(37, [0, 52, 0])], (0, 52, 0, 0x00, 0, 0)),
+]
+
+# Und die Rahmen, aus denen KEINE Ansage werden darf.
+CSA_NONE = [
+    ("eine gewoehnliche Bake ohne CSA-Element", [(0, [0x5a]), (3, [104])]),
+    ("Element 37 zu kurz", [(37, [1, 100])]),
+    ("Kanal 0 ist keine Ansage", [(37, [1, 0, 3])]),
+]
+
+
 def addba_resp(token=0x42, status=0, amsdu=0, policy=1, tid=5, buf=32,
                timeout=0, n=33):
     """Eine ADDBA **Response**.
@@ -463,6 +511,9 @@ def main():
     cent = grab(src, r"\n(const CENTERS_80: \[u8; 7\] = \[[^\]]*\];)",
                 "CENTERS_80")
     bwcapf = grab(src, r"\n(pub fn bw_cap_from.*?\n\})", "bw_cap_from")
+    csastru = grab(src, r"\n(#\[derive[^\n]*\]\npub struct Csa \{.*?\n\})",
+                   "struct Csa")
+    csafn = grab(src, r"\n(fn parse_csa.*?\n\})", "parse_csa")
     txaggf = grab(src, r"\n(pub fn txagg_from.*?\n\})", "txagg_from")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
@@ -595,6 +646,17 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         '        (%s, %d, %d),' % (rs(name), exp, want)
         for name, exp, want in AMPDU_F)
 
+    csa_cases = "\n".join(
+        '        (%s, &[%s], (%d, %d, %d, %d, %d, %d)),' % (
+            rs(name), ", ".join(str(x) for x in beacon_csa(elems)),
+            w[0], w[1], w[2], w[3], w[4], w[5])
+        for name, elems, w in CSA)
+
+    csanone_cases = "\n".join(
+        '        (%s, &[%s]),' % (
+            rs(name), ", ".join(str(x) for x in beacon_csa(elems)))
+        for name, elems in CSA_NONE)
+
     bwcap_cases = "\n".join(
         '        (%s, %s, %d),' % (rs(name), rs(v), want)
         for name, v, want in BWCAP)
@@ -611,7 +673,8 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
         + "\n\n" + cellw + "\n\n" + vhtw + "\n\n" + cent \
-        + "\n\n" + chanp + "\n\n" + bwcapf + "\n\n" + txaggf \
+        + "\n\n" + chanp + "\n\n" + csastru + "\n\n" + csafn \
+        + "\n\n" + bwcapf + "\n\n" + txaggf \
         + "\n\n" + ba_buf + "\n\n" + ampdu_f \
         + "\n\n" + addba_rq + "\n\n" + addba_rs + "\n\n" + addba_rp \
         + "\n\n" + aspmp \
@@ -839,6 +902,31 @@ fn main() {
         println!("  {} txagg: {}", if ok { "OK  " } else { "DIFF" }, name);
     }
 
+    // **Die Wechselansage.** Der letzte Wert je Fall ist
+    // `(mode, kanal, count, ht_param, vht_breite, vht_mitte)`.
+    let csas: &[(&str, &[u8], (u8, u8, u8, u8, u8, u8))] = &[
+%s
+    ];
+    for (name, f, want) in csas {
+        let got = parse_csa(f).map(|c| (c.mode, c.channel, c.count,
+                                        c.width.ht_param,
+                                        c.width.vht_chanwidth,
+                                        c.width.vht_cch0));
+        let ok = got == Some(*want);
+        if !ok { bad += 1; }
+        println!("  {} csa: {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+    let csanones: &[(&str, &[u8])] = &[
+%s
+    ];
+    for (name, f) in csanones {
+        let ok = parse_csa(f).is_none();
+        if !ok { bad += 1; }
+        println!("  {} csa: {} -> keine Ansage",
+                 if ok { "OK  " } else { "DIFF" }, name);
+    }
+
     let bws: &[(&str, &str, usize)] = &[
 %s
     ];
@@ -862,7 +950,8 @@ fn main() {
 
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len()
-                + bws.len() + 7 + 4 + 2 + ampdufs.len() + txaggs.len();
+                + bws.len() + 7 + 4 + 2 + ampdufs.len() + txaggs.len()
+                + csas.len() + csanones.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
@@ -873,6 +962,7 @@ fn main() {
        ", ".join(str(b) for b in addba_resp(status=37)),
        ", ".join(str(b) for b in addba_req()),
        ampduf_cases, txagg_cases,
+       csa_cases, csanone_cases,
        bwcap_cases, band_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()

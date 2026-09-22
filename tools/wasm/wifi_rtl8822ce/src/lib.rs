@@ -803,11 +803,11 @@ pub extern "C" fn _start() {
     let mut link: Option<Link> = None;
     let mut lstats = LinkStats::default();
     let stage6a = match (stage5f, linked.as_ref(), target.as_ref(),
-                         rates.as_ref(), efuse.as_ref()) {
-        (true, Some(_v), Some(b), Some((caps, si)), Some(e)) =>
+                         rates.as_ref(), efuse.as_ref(), _txpwr.as_ref()) {
+        (true, Some(_v), Some(b), Some((caps, si)), Some(e), Some(tp)) =>
             stage6a_link(h, &hal, &mut trx, mgmt_buf, b, caps, *si,
                          e.addr, &mut link, &mut lstats, rtwdev, &mut h2c, e,
-                         fw_feature),
+                         tp, fw_feature),
         _ => {
             host::say("[rtl8822ce] Stufe 6a: uebersprungen, 5f steht nicht\n");
             false
@@ -884,9 +884,10 @@ pub extern "C" fn _start() {
             // Stufe 5e und 5f, ohne den Kernel noch einmal anzumelden.
             let mut fehlschlaege = 0u32;
             loop {
+                let Some(tp) = _txpwr.as_ref() else { break };
                 let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
                                     &mut lstats, e.addr, 0, rtwdev,
-                                    &mut h2c, e, &caps, fw_feature);
+                                    &mut h2c, e, tp, &caps, fw_feature);
                 if end != PumpEnd::LinkLost {
                     break;
                 }
@@ -2056,6 +2057,125 @@ const VHT_CHANWIDTH_80: u8 = 1;
 /// 20-MHz-Kanaele: 36-48, 52-64, 100-112, 116-128, 132-144, 149-161,
 /// 165-177.
 const CENTERS_80: [u8; 7] = [42, 58, 106, 122, 138, 155, 171];
+
+// ═══════════════════════════════════════════════════════════════
+// Kanalwechsel — CSA (802.11 §11.9, mac80211 spectmgmt.c:220-330 und
+// mlme.c:2742-3024)
+//
+// **Ein AP darf umziehen, und er sagt es vorher an.** Auf einem
+// DFS-Kanal ist das kein Sonderfall: erkennt er Radar, MUSS er den
+// Kanal binnen Sekunden raeumen (ETSI EN 301 893). Ein Client, der die
+// Ansage nicht liest, bleibt auf dem leeren Kanal zurueck und merkt es
+// erst, wenn die Baken ausbleiben — bei uns nach Sekunden, und dann
+// mit dem vollen Wiederverbinden.
+//
+// Wir horchen auf Kanal 104. Das ist DFS.
+// ═══════════════════════════════════════════════════════════════
+
+/// Was eine Wechselansage sagt.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Csa {
+    /// `mode` (802.11 §9.4.2.19). **1 heisst: ab jetzt nichts mehr
+    /// senden**, bis der Wechsel vollzogen ist — der AP raeumt gerade.
+    mode: u8,
+    /// Der neue primaere Kanal.
+    channel: u8,
+    /// In so vielen Bakenintervallen ist es soweit. `0` und `1` heissen
+    /// beide „jetzt" (mlme.c:2991: `(max(count, 1) - 1) * beacon_int`).
+    count: u8,
+    /// Und wie breit es danach weitergeht.
+    width: CellWidth,
+}
+
+/// `ieee80211_parse_ch_switch_ie` (spectmgmt.c:220), auf das
+/// zusammengezogen, was ein Beacon traegt.
+///
+/// Gelesen werden vier Elemente:
+/// * **37** Channel Switch Announcement — `{mode, neuer Kanal, count}`
+/// * **60** Extended CSA — dasselbe plus Betriebsklasse davor
+/// * **62** Secondary Channel Offset — wo der Zweitkanal danach liegt
+/// * **194** Wide Bandwidth Channel Switch — VHT-Breite und Mitte,
+///   allein oder im Wrapper **196**
+///
+/// **Eine Abweichung, und sie ist benannt:** Linux zieht die
+/// Betriebsklasse des Elements 60 heran, um einen BANDwechsel zu
+/// erkennen (`ieee80211_operating_class_to_band`). Wir fuehren keine
+/// Betriebsklassen; deshalb gilt bei uns Element 37, wenn es da ist,
+/// und 60 nur als Ersatz. Eine Ansage, die uns in ein anderes Band
+/// schicken will, faellt damit auf die Plausibilitaetspruefung des
+/// Kanals zurueck — dieselbe, die auch `chan_params` schuetzt.
+fn parse_csa(f: &[u8]) -> Option<Csa> {
+    // Beacon: 24 Kopf + 8 Zeitstempel + 2 Bakenintervall + 2
+    // Faehigkeiten, dann die Elemente.
+    if f.len() < 36 {
+        return None;
+    }
+    let mut csa = Csa::default();
+    let mut aus37 = false;
+    let mut sec_offs = 0u8;
+    let mut i = 36usize;
+    while i + 2 <= f.len() {
+        let id = f[i];
+        let len = f[i + 1] as usize;
+        if i + 2 + len > f.len() {
+            break;
+        }
+        let b = &f[i + 2..i + 2 + len];
+        match id {
+            37 if len >= 3 => {
+                csa.mode = b[0];
+                csa.channel = b[1];
+                csa.count = b[2];
+                aus37 = true;
+            }
+            60 if len >= 4 && !aus37 => {
+                // b[1] ist die Betriebsklasse, die wir nicht fuehren.
+                csa.mode = b[0];
+                csa.channel = b[2];
+                csa.count = b[3];
+            }
+            62 if len >= 1 => sec_offs = b[0],
+            194 if len >= 3 => {
+                csa.width.vht_chanwidth = b[0];
+                csa.width.vht_cch0 = b[1];
+            }
+            // 196 Channel Switch Wrapper — darin steckt 194.
+            196 => {
+                let mut j = 0usize;
+                while j + 2 <= b.len() {
+                    let sid = b[j];
+                    let slen = b[j + 1] as usize;
+                    if j + 2 + slen > b.len() {
+                        break;
+                    }
+                    if sid == 194 && slen >= 3 {
+                        csa.width.vht_chanwidth = b[j + 2];
+                        csa.width.vht_cch0 = b[j + 3];
+                    }
+                    j += 2 + slen;
+                }
+            }
+            _ => {}
+        }
+        i += 2 + len;
+    }
+    if csa.channel == 0 {
+        // spectmgmt.c:278 „nothing here we understand"
+        return None;
+    }
+    // Der Zweitkanal-Versatz wird in ein HT-Operation-Byte uebersetzt,
+    // damit `chan_params` ihn versteht — eine Rechnung, eine Antwort.
+    // Bit 2 (`WIDTH_ANY`) muss stehen, sonst gilt 20 MHz.
+    csa.width.ht_param = match sec_offs {
+        1 => 0x05, // Zweitkanal OBEN
+        3 => 0x07, // Zweitkanal UNTEN
+        // spectmgmt.c:307-310: ohne das Element wissen wir die Lage
+        // nach dem Wechsel nicht, und dann ist 20 MHz das Beste, was
+        // wir sagen koennen.
+        _ => 0x00,
+    };
+    Some(csa)
+}
 
 /// main.c:822-867 `rtw_get_channel_params` und main.c:759-792, der Teil von
 /// `rtw_update_channel`, der die Unterkanallage waehlt — zusammengezogen,
@@ -3754,6 +3874,8 @@ struct LinkStats {
     /// Wie oft die Wache angeschlagen hat und wie oft sie recht hatte.
     poll_started: u32,
     poll_recovered: u32,
+    /// Wie oft wir dem AP auf einen neuen Kanal gefolgt sind.
+    csa_done: u32,
     /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
     /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
     /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
@@ -3871,7 +3993,7 @@ impl Default for LinkStats {
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0, addba_drop: 0,
             poll_on: false, probe_send_count: 0, probe_timeout_ms: 0,
-            poll_started: 0, poll_recovered: 0,
+            poll_started: 0, poll_recovered: 0, csa_done: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
@@ -4112,6 +4234,12 @@ struct Link {
     cam: [sec::CamEntry; 4],
     /// Unsere Block-Ack-Sitzung in Senderichtung.
     ba_tx: BaTx,
+    /// Eine laufende Wechselansage: wohin, wie breit, und ab wann.
+    /// `None` heisst: kein Wechsel angesagt.
+    csa: Option<Csa>,
+    /// Der Augenblick, zu dem umgezogen wird (`link->u.mgd.csa.time`,
+    /// mlme.c:2992).
+    csa_at_ms: u64,
 }
 
 /// 802.11 §12.5.3.2 — der acht Byte lange CCMP-Kopf.
@@ -4486,6 +4614,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         tx_pn: 1,
         cam: [sec::CamEntry::default(); 4],
         ba_tx: BaTx::new(),
+        csa: None,
+        csa_at_ms: 0,
     };
 
     // Der Datenkanal existiert seit Kernel 0.205.0; ohne Anmeldung sieht
@@ -4936,7 +5066,8 @@ fn deliver(ls: &mut LinkStats, eth: &[u8], is_eapol: bool) {
 fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
              frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
-             e: &efuse::Efuse, caps: &sta::PeerCaps, fw_feature: u32)
+             e: &efuse::Efuse, t_pwr: &txpower::TxPower,
+             caps: &sta::PeerCaps, fw_feature: u32)
     -> PumpEnd {
     chip::read_cck_gi_bnd(h, &mut d.dm);
     static mut RXBUF7: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
@@ -4991,7 +5122,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // `rxsc == 0` — also jeder, der die ganze Breite belegt und damit der
     // Normalfall — wurde als 20 MHz gemeldet. Das ist keine fehlende
     // Messung, sondern eine falsche.
-    let cur_bw = d.cur_bw as u8;
+    let mut cur_bw = d.cur_bw as u8;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
         let now = host::now_ms();
 
@@ -5076,6 +5207,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // bei allem, was von ihm kommt, ist das die BSSID.
             if f.len() >= 16 && f[10..16] == bssid {
                 acc.heard_ap = true;
+                // **Eine Bake DIESER Zelle kann eine Wechselansage
+                // tragen.** Gelesen wird sie hier, ausgefuehrt draussen:
+                // der Kanalwechsel braucht `trx`, und der Rueckruf darf
+                // es nicht halten.
+                if f[0] == 0x80 {
+                    if let Some(c) = parse_csa(f) {
+                        acc.csa = Some(c);
+                    }
+                }
             }
             // **Wieviele Rahmen der AP je Sendevorgang buendelt.**
             //
@@ -5504,6 +5644,70 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
+        // ── Kanalwechsel (CSA) ───────────────────────────────────
+        //
+        // mlme.c:2980-3010. Jede Bake mit einer Ansage rechnet die
+        // Frist NEU — `(max(count, 1) - 1) * beacon_int` —, damit eine
+        // verpasste Bake den Termin nicht verschiebt. `count` zaehlt im
+        // Beacon herunter, und 0 wie 1 heissen beide „jetzt".
+        if let Some(c) = acc.csa.take() {
+            let neu = link.csa.map_or(true, |a| a.channel != c.channel);
+            let tu = (c.count.max(1) as u64 - 1) * beacon_int as u64;
+            // Ein TU sind 1024 us; wir rechnen in Millisekunden.
+            link.csa_at_ms = now + (tu * 1024) / 1000;
+            link.csa = Some(c);
+            if neu {
+                host::loud_begin();
+                host::print("[rtl8822ce] der AP zieht um: K");
+                host::print_dec(link.channel as u32);
+                host::print(" -> K");
+                host::print_dec(c.channel as u32);
+                host::print(", in ");
+                host::print_dec(c.count as u32);
+                host::print(" Baken (");
+                host::print(if c.mode != 0 {
+                    "ab jetzt Sendepause"
+                } else {
+                    "senden erlaubt"
+                });
+                host::print(")\n");
+                host::loud_end();
+            }
+        }
+        if let Some(c) = link.csa {
+            if now >= link.csa_at_ms {
+                link.csa = None;
+                let max_bw = max_bw_for(e);
+                let (cch, bw, _) = chan_params(c.channel, c.width, max_bw);
+                let ok = switch_channel(h, hal, e, t_pwr, c.channel,
+                                        c.width, max_bw);
+                host::loud_begin();
+                host::print("[rtl8822ce] Kanalwechsel vollzogen: K");
+                host::print_dec(c.channel as u32);
+                host::print(" · ");
+                host::print(match bw {
+                    2 => "80 MHz (Mitte K",
+                    1 => "40 MHz (Mitte K",
+                    _ => "20 MHz (K",
+                });
+                host::print_dec(cch as u32);
+                host::print(")");
+                if !ok {
+                    host::print("  — RF 0x18 traegt ihn NICHT");
+                }
+                host::print("\n");
+                host::loud_end();
+                link.channel = c.channel;
+                d.cur_bw = bw;
+                cur_bw = bw as u8;
+                ls.csa_done += 1;
+                // Die Verbindungswache faengt von vorn an: auf dem neuen
+                // Kanal haben wir noch keine Bake gesehen.
+                ls.poll_on = false;
+                ls.probe_send_count = 0;
+            }
+        }
+
         // ── Die Verbindungswache ─────────────────────────────────
         //
         // mlme.c:8516-8560, der Zweig `IEEE80211_STA_CONNECTION_POLL`:
@@ -5649,7 +5853,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // dass der Anstoss danach kommt statt je Rahmen. Damit sieht die
         // Hardware bei ihrem naechsten Griff nach der Sendegelegenheit den
         // ganzen Stapel und kann ihn zu einem A-MPDU zusammenfassen.
-        if ls.authorized {
+        // mlme.c:2982 `if (csa_ie.mode) ieee80211_vif_block_queues_csa`.
+        //
+        // **`mode = 1` heisst: ab jetzt nichts mehr senden.** Der AP
+        // raeumt den Kanal — auf einem DFS-Kanal, weil er Radar erkannt
+        // hat, und dann ist jeder weitere Rahmen von uns einer zuviel
+        // auf einer Frequenz, die frei werden muss.
+        let sendesperre = link.csa.map_or(false, |c| c.mode != 0);
+        if ls.authorized && !sendesperre {
             let mut gestapelt = 0u32;
             loop {
                 let n = host::netdev_poll_tx(ethbuf);
@@ -5983,14 +6194,15 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
                 mac: [u8; 6], link: &mut Option<Link>,
                 ls: &mut LinkStats, d: &mut Dev, h2c: &mut fw::H2cState,
-                e: &efuse::Efuse, fw_feature: u32) -> bool {
+                e: &efuse::Efuse, t_pwr: &txpower::TxPower,
+                fw_feature: u32) -> bool {
     host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
 
     let mut l = link_setup(hal, bss, caps, si, mac);
     // Acht Sekunden: der Handschlag braucht vier Rahmen und ist in
     // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
     let _ = link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000, d,
-                      h2c, e, caps, fw_feature);
+                      h2c, e, t_pwr, caps, fw_feature);
 
     host::print("  EAPOL rein/raus ");
     host::print_dec(ls.eapol_rx);
@@ -6548,6 +6760,11 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // **Die Verbindungswache.** Ein Anstupser, dem eine Erholung folgt,
     // ist ein Fall, in dem wir die Verbindung FRUEHER weggeworfen
     // haetten — die zwei Zahlen nebeneinander sagen, wie oft.
+    if ls.csa_done > 0 {
+        put("  kanalwechsel ", &mut b, &mut n);
+        num(ls.csa_done, &mut b, &mut n);
+        put("x gefolgt", &mut b, &mut n);
+    }
     if ls.poll_started > 0 {
         put("  wache ", &mut b, &mut n);
         num(ls.poll_started, &mut b, &mut n);
