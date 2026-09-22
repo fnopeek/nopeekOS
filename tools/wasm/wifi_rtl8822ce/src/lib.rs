@@ -3737,17 +3737,29 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     out[n + 2..n + 6].copy_from_slice(&[0x30, 0x48, 0x60, 0x6c]);
     n += 6;
 
-    // Die Elemente stehen in AUFSTEIGENDER Kennung: 45 HT, 48 RSN,
-    // 191 VHT. 802.11 verlangt es nicht, aber es kostet nichts, und
-    // manche APs sind darin eigen.
-
-    // HT — immer. Es entscheidet, ob wir als 11n-Station angenommen werden.
-    n += sta::build_ht_cap_ie(&mut out[n..], e.hw_cap_bw, e.hw_cap_nss);
+    // **Die Reihenfolge ist die der Spezifikation, nicht die der
+    // Kennungen.** Hier stand „die Elemente stehen in AUFSTEIGENDER
+    // Kennung", und das ist nicht die Regel: 802.11 Tabelle 9-34 ordnet
+    // den Rumpf eines Anmeldeantrags nach TABELLENPOSITION, und danach
+    // steht RSN (Ordnung 8) VOR HT Capabilities (Ordnung 13). Die
+    // Ext-Raten (Ordnung 5) stehen deshalb auch vor HT, obwohl ihre
+    // Kennung 50 groesser ist als 45 — die alte Begruendung haette
+    // genau das verboten.
+    //
+    // mac80211 macht es so: die RSN-Elemente kommen aus
+    // `ieee80211_add_before_ht_elems` (mlme.c), also vor HT. Wir hatten
+    // sie dahinter.
+    //
+    // Fuer den Vierwegehandschlag aendert sich nichts: sein MIC rechnet
+    // ueber den INHALT des RSN-Elements, nicht ueber seine Stelle.
 
     // RSN — aus dem, was der AP ansagt, EINE Wahl gebaut.
     if bss.rsn_len > 0 {
         n += build_rsn_ie(&mut out[n..], &bss.rsn[..bss.rsn_len as usize]);
     }
+
+    // HT — immer. Es entscheidet, ob wir als 11n-Station angenommen werden.
+    n += sta::build_ht_cap_ie(&mut out[n..], e.hw_cap_bw, e.hw_cap_nss);
 
     // VHT nur auf 5 GHz: auf 2,4 GHz ist es nicht zugelassen, und ein AP
     // darf einen Antrag mit VHT im falschen Band ablehnen.
