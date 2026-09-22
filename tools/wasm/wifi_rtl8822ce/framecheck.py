@@ -597,6 +597,8 @@ def main():
                    "struct AddbaReq")
     addba_p = grab(stasrc, r"\n(pub fn parse_addba_req.*?\n\})",
                    "parse_addba_req")
+    vhtie = grab(stasrc, r"\n(pub fn build_vht_cap_ie.*?\n\})",
+                 "build_vht_cap_ie")
     addba_b = grab(stasrc, r"\n(pub fn build_addba_resp.*?\n\})",
                    "build_addba_resp")
     addba_rq = grab(stasrc, r"\n(pub fn build_addba_req.*?\n\})",
@@ -669,6 +671,34 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
             sys.exit("%s ist 0x%02x, 802.11 §9.2.4.1 sagt 0x%02x"
                      % (name, got, want))
         consts += "const %s: u8 = %s;\n" % (name, m.group(1))
+
+    # **Die Konstanten fuer `build_vht_cap_ie` kommen aus DERSELBEN
+    # Quelle wie im Treiber** — `src/regs.rs`, erzeugt aus dem
+    # Kernel-Header. Sie hier noch einmal hinzuschreiben hiesse, zwei
+    # Wahrheiten zu pflegen, und der Pruefer wuerde dann seine eigene
+    # Abschrift pruefen statt den Treiber.
+    for name in ("EFUSE_HW_CAP_IGNORE", "EFUSE_HW_CAP_PTCL_VHT",
+                 "IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454",
+                 "IEEE80211_VHT_CAP_SHORT_GI_80",
+                 "IEEE80211_VHT_CAP_RXSTBC_1",
+                 "IEEE80211_VHT_CAP_HTC_VHT",
+                 "IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK",
+                 "IEEE80211_VHT_CAP_TXSTBC",
+                 "IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE",
+                 "IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE",
+                 "IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT",
+                 "IEEE80211_VHT_CAP_RXLDPC",
+                 "IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE",
+                 "IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE",
+                 "IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK",
+                 "IEEE80211_VHT_MCS_SUPPORT_0_9",
+                 "IEEE80211_VHT_MCS_NOT_SUPPORTED",
+                 "WLAN_EID_VHT_CAPABILITY"):
+        m = re.search(r"pub const %s: (u\d+) = ([^;]+);" % name, regs)
+        if not m:
+            sys.exit("%s nicht in src/regs.rs" % name)
+        consts += "#[allow(dead_code)]\nconst %s: %s = %s;\n" % (
+            name, m.group(1), m.group(2))
 
     cases = "\n".join(
         '        (%s, &[%s], %s),' % (
@@ -760,13 +790,15 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         + "\n\n" + aspmp \
         + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
-        + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
+        + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b \
+        + "\n\n" + vhtie + """
 
 const BSS_LEER: Bss = Bss {
     bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
     beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
     ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
     vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+    ap_vht_cap: 0, ap_vht_cap_seen: false,
     bss_load: 0, bss_load_seen: false,
 };
 
@@ -1062,7 +1094,77 @@ fn main() {
         println!("  {} band: {}", if ok { "OK  " } else { "DIFF" }, name);
     }
 
-    let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
+    // ── Das VHT-Element, und wie mac80211 es stutzt ──────────────
+    //
+    // `ieee80211_add_vht_ie` (mlme.c:1481-1526). Geprueft wird das
+    // FERTIGE Element, nicht eine Zwischenrechnung: Byte 2..6 sind das
+    // Feld „VHT Capabilities Info".
+    //
+    // Der Fall, der den Fehler von 0.60.1 und davor traegt, ist der
+    // erste: ein AP OHNE SU-Beamformer bekam von uns ein Element mit
+    // beiden Beamformee-Bits und STS=3.
+    let vhts: &[(&str, Option<u32>, u32, u32)] = &[
+        ("kein Bezug -> alles bleibt (rtw88 pur)",
+         None,
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+             | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE
+             | (3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT),
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+             | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE
+             | (3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT)),
+        ("AP ohne SU-Beamformer -> BEIDE Beamformee weg",
+         Some(0),
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+             | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE,
+         0),
+        ("AP mit SU, ohne MU -> nur MU weg",
+         Some(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK),
+         IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE,
+         0),
+        ("AP mit SU, ohne MU -> SU bleibt",
+         Some(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK),
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE,
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE),
+        ("AP mit SU und MU -> beide bleiben",
+         Some(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK),
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+             | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE,
+         IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+             | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE),
+        ("AP meldet STS 1 -> unsere 3 werden 1",
+         Some(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE
+              | (1 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT)),
+         IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK,
+         1 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT),
+        ("AP meldet STS 7 -> unsere 3 bleiben 3",
+         Some(IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE
+              | IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK),
+         IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK,
+         3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT),
+    ];
+    for (name, ap, mask, want) in vhts {
+        let mut out = [0u8; 32];
+        let n = build_vht_cap_ie(&mut out, EFUSE_HW_CAP_IGNORE as u8, 2, 2,
+                                 *ap);
+        let cap = u32::from_le_bytes([out[2], out[3], out[4], out[5]]);
+        let got = cap & *mask;
+        let ok = n == 14 && out[0] == WLAN_EID_VHT_CAPABILITY as u8
+            && out[1] == 12 && got == *want;
+        if !ok { bad += 1; }
+        println!("  {} vht: {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok {
+            println!("       erwartet 0x{:08x}, bekommen 0x{:08x} (len {})",
+                     want, got, n);
+        }
+    }
+
+    let total = vhts.len() + cases.len() + cfg.len() + names.len() + rpts.len() + 1
                 + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len()
                 + bws.len() + 7 + 4 + 2 + ampdufs.len() + txaggs.len()
                 + csas.len() + csanones.len() + roams.len()

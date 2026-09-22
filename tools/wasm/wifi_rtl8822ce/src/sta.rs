@@ -430,7 +430,7 @@ pub fn build_ht_cap_ie(out: &mut [u8], hw_cap_bw: u8, nss: u8) -> usize {
 /// Bedingung wie in Linux. `bfee_sts_cap` ist 3 (main.c:1905),
 /// `rf_path_num > 1` gilt hier.
 pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
-                        rf_path_num: u8) -> usize {
+                        rf_path_num: u8, ap_vht_cap: Option<u32>) -> usize {
     if hw_cap_ptcl != EFUSE_HW_CAP_IGNORE as u8
         && hw_cap_ptcl != EFUSE_HW_CAP_PTCL_VHT as u8
     {
@@ -448,6 +448,42 @@ pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
         | IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE;
     cap |= 3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT; // bfee_sts_cap
     cap |= IEEE80211_VHT_CAP_RXLDPC; // rx_ldpc
+
+    // ── Und hier stutzt mac80211, was rtw88 gesetzt hat ──────────
+    //
+    // `ieee80211_add_vht_ie` (mlme.c:1481-1526). Bis hierher war diese
+    // Funktion eine treue Portierung von `rtw_init_vht_cap` — und
+    // genau das war zu wenig: in Linux geht das Ergebnis NICHT so
+    // hinaus, wie der Treiber es baut. Dazwischen liegt eine Schicht,
+    // und ihr Kommentar sagt woertlich, wofuer sie da ist:
+    //
+    //     Some APs apparently get confused if our capabilities are
+    //     better than theirs, so restrict what we advertise in the
+    //     assoc request.
+    //
+    // Dasselbe Muster wie bei SM Power Save (0.48.0) und beim
+    // Duplikatsfilter: die Zutat sitzt eine Schicht UEBER dem Treiber,
+    // und wer nur den Treiber portiert, liefert ein Element aus, das so
+    // nie auf der Luft war.
+    //
+    // Ohne den Bezugspunkt bleibt alles stehen — ein Suchlauf ohne
+    // Bake des AP soll nicht anders anbieten als einer mit.
+    if let Some(ap) = ap_vht_cap {
+        if ap & IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE == 0 {
+            cap &= !(IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+                | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE);
+        } else if ap & IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE == 0 {
+            cap &= !IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE;
+        }
+        // Und die Zahl der Raumzeit-Stroeme, die wir als Beamformee
+        // annehmen: nie mehr, als der AP zu senden angibt.
+        let ap_sts = ap & IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+        let our_sts = cap & IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+        if ap_sts < our_sts {
+            cap &= !IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+            cap |= ap_sts;
+        }
+    }
 
     let mut mcs_map = 0u16;
     for i in 0..8u16 {
