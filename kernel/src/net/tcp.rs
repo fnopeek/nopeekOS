@@ -367,6 +367,37 @@ const SND_BUF_MAX: usize = 256 * 1024;
 /// wir je gemessen haben.
 const SEND_SPIN_BUDGET: u32 = 4096;
 
+/// **Die Staukontrolle ist AUS — und das ist eine Messung, kein
+/// Geschmack.**
+///
+/// Sie braucht eine Buchfuehrung, die wir nicht haben. Linux rechnet
+/// `tcp_packets_in_flight = packets_out - sacked_out - lost_out +
+/// retrans_out` und senkt `sacked_out` bei JEDER Doppelquittung
+/// (`tcp_add_reno_sack`), auch ohne SACK. Bei uns ist „unterwegs"
+/// schlicht `snd_nxt - snd_una`, und **diese Zahl schrumpft bei Verlust
+/// nie**.
+///
+/// Was daraus folgt, am Geraet gemessen (2026-09-22): nach dem ersten
+/// verlorenen Segment steht `snd_nxt` weit vorn — 199 KB, also 137
+/// Pakete —, `cwnd` faellt auf 1, und `write_xmit` sendet ab da NIE
+/// wieder etwas, weil `in_flight >= cwnd`. Das Einzige, was sich noch
+/// bewegt, ist eine Wiederholung je RTO: ein Segment pro 200 ms.
+/// `cwnd 1 · ssthresh 2 · 121x Zeitueberschreitung`, 10 Mbit.
+///
+/// **Ohne Verlust-Buchfuehrung ist ein Staufenster schlimmer als
+/// keines.** Ohne sie (0.405.0) lief dieselbe Strecke mit 269 Mbit
+/// durch, weil ein verlorenes Segment nur 200 ms kostete und der Rest
+/// weiterlief.
+///
+/// Die schnelle Wiederholung bleibt an: drei Doppelquittungen holen das
+/// fehlende Segment sofort statt nach 200 ms, und das kostet nichts.
+/// Aus ist nur das, was das Fenster ZUSAMMENZIEHT.
+///
+/// **Anschalten, wenn und nur wenn das hier steht**, in dieser
+/// Reihenfolge: `packets_out`/`sacked_out`/`lost_out` als echte Zaehler,
+/// `tcp_add_reno_sack`, SACK auf der Sendeseite, dann PRR.
+const CONG_CONTROL: bool = false;
+
 /// `TCP_INIT_CWND` — zehn Segmente (RFC 6928).
 const TCP_INIT_CWND: u32 = 10;
 /// `tp->reordering` in seiner Vorgabe: drei Doppelquittungen loesen die
@@ -1179,7 +1210,7 @@ fn write_xmit(conn: &mut TcpConn) {
         // hat** — ohne sie ging der ganze Puffer in einem Zug auf die
         // Luft, und was dort nicht hinpasste, war verloren.
         let in_flight = sent.div_ceil(mss) as u32;
-        if in_flight >= conn.snd_cwnd {
+        if CONG_CONTROL && in_flight >= conn.snd_cwnd {
             return;
         }
         // ── Tor 2: das Fenster des Gegenuebers
@@ -1674,14 +1705,20 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 if ist_dup {
                     conn.dupacks += 1;
                     DUPACKS_SEEN.fetch_add(1, Ordering::Relaxed);
-                    if conn.dupacks == DUPACK_THRESH && !conn.in_recovery {
+                    if conn.dupacks == DUPACK_THRESH
+                        && (!conn.in_recovery || !CONG_CONTROL)
+                    {
                         // Halbieren, eintreten, und das fehlende Segment
                         // SOFORT nachschicken statt auf den RTO zu warten.
-                        conn.snd_ssthresh = reno_ssthresh(conn);
-                        conn.snd_cwnd = conn.snd_ssthresh + DUPACK_THRESH;
-                        conn.in_recovery = true;
-                        conn.recovery_end = conn.snd_nxt;
-                        conn.snd_cwnd_cnt = 0;
+                        if CONG_CONTROL {
+                            conn.snd_ssthresh = reno_ssthresh(conn);
+                            conn.snd_cwnd =
+                                conn.snd_ssthresh + DUPACK_THRESH;
+                            conn.in_recovery = true;
+                            conn.recovery_end = conn.snd_nxt;
+                            conn.snd_cwnd_cnt = 0;
+                        }
+                        conn.dupacks = 0;
                         // **NUR das fehlende Segment, nicht das ganze
                         // Fenster.**
                         //
@@ -1739,7 +1776,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                             conn.snd_cwnd = conn.snd_ssthresh;
                             conn.snd_cwnd_cnt = 0;
                         }
-                    } else {
+                    } else if CONG_CONTROL {
                         cong_avoid(conn, acked_pkts);
                     }
                     write_xmit(conn);
@@ -2088,10 +2125,12 @@ pub fn tick_connections() {
                         // anzufassen, und neue Daten gehen erst wieder
                         // hinaus, wenn Quittungen `in_flight` unter das
                         // Staufenster gebracht haben.
-                        slot.snd_ssthresh = reno_ssthresh(slot);
-                        slot.snd_cwnd = 1;
-                        slot.snd_cwnd_cnt = 0;
-                        slot.in_recovery = false;
+                        if CONG_CONTROL {
+                            slot.snd_ssthresh = reno_ssthresh(slot);
+                            slot.snd_cwnd = 1;
+                            slot.snd_cwnd_cnt = 0;
+                            slot.in_recovery = false;
+                        }
                         slot.dupacks = 0;
                         RTO_FIRED.fetch_add(1, Ordering::Relaxed);
                         retransmit_head(slot);
