@@ -2583,8 +2583,10 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         let pct = |x: u64| if wall == 0 { 0 } else { x * 100 / wall };
         kprintln!("[netbench] sendepfad: {} Segmente · in send {} % · \
 abgewiesen {} % ({}x WouldBlock) · in net::poll {} % · groesster \
-send_buf {} KB", segs, pct(send_tsc), pct(blocked_tsc), wb,
-            pct(poll_tsc), maxbuf / 1024);
+send_buf {} KB · Deckel {} KB (Gegenueber {} KB)", segs, pct(send_tsc),
+            pct(blocked_tsc), wb, pct(poll_tsc), maxbuf / 1024,
+            crate::net::tcp::snd_limit_of(handle) / 1024,
+            crate::net::tcp::snd_wnd_of(handle) / 1024);
         if segs > 0 {
             // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.
             // 1448 Byte je Segment bei 42 Mbit sind 275 us - und alles,

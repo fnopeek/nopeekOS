@@ -184,6 +184,68 @@ fn rcv_space_adjust(conn: &mut TcpConn) {
     conn.rcvq_time_us = now;
 }
 
+/// tcp_input.c:587 `tcp_sndbuf_expand` — das Gegenstueck zu
+/// `rcvbuf_grow`.
+///
+/// **Linux rechnet den Sendepuffer aus dem STAUFENSTER**:
+/// `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1) * per_mss`, gedeckelt
+/// durch `tcp_wmem[2]`. Der Faktor 2 steht dort mit Begruendung — CUBIC
+/// braucht 1,7, aufgerundet, plus Polster fuer eine Anwendung, die
+/// langsam auf `EPOLLOUT` reagiert.
+///
+/// **Uns fehlt `snd_cwnd`, also fehlt Linux' Eingang in diese Formel.**
+/// Das ist hier benannt und nicht umschifft: wir haben keine
+/// Staukontrolle. Was wir stattdessen haben, ist dieselbe Groesse
+/// GEMESSEN statt gerechnet — wieviel in einer Umlaufzeit wirklich
+/// quittiert wurde. Der Faktor 2 bleibt Linux'.
+///
+/// Und `tcp_should_expand_sndbuf` (tcp_input.c:5804) uebersetzt sich
+/// nicht: sein Gatter ist „wenn wir das Staufenster gefuellt haben,
+/// nicht wachsen". Bei uns gibt es keins — der Puffer IST die einzige
+/// Bremse, und genau das hat die Messung gezeigt (4,5 Mio WouldBlock bei
+/// 0,85 % belegter Luft).
+fn sndbuf_grow(conn: &mut TcpConn, newval: usize) {
+    conn.snd_space = newval;
+    let want = newval.saturating_mul(2).clamp(SND_BUF_INIT, SND_BUF_MAX);
+    // **Nur wachsen** — dieselbe Regel wie tcp_input.c:922.
+    if want > conn.snd_buf_limit {
+        conn.snd_buf_limit = want;
+    }
+}
+
+/// Der Spiegel von `rcv_space_adjust`: gerufen, sooft eine Quittung
+/// Daten abgeraeumt hat.
+fn snd_space_adjust(conn: &mut TcpConn) {
+    let now = crate::interrupts::uptime_us();
+    let time = now.saturating_sub(conn.sndq_time_us);
+    let srtt_us = (conn.srtt_ms as u64).saturating_mul(1000);
+    // Ueber weniger als eine Umlaufzeit sagt die Messung nichts —
+    // dieselbe Schranke wie auf der Empfangsseite.
+    if srtt_us == 0 || time < srtt_us {
+        return;
+    }
+    let acked = conn.acked_total.saturating_sub(conn.sndq_acked0);
+    if acked > conn.snd_space as u64 {
+        sndbuf_grow(conn, acked.min(SND_BUF_MAX as u64) as usize);
+    }
+    conn.sndq_acked0 = conn.acked_total;
+    conn.sndq_time_us = now;
+}
+
+/// Wieviel darf unterwegs sein: unser Puffer UND das Fenster des
+/// Gegenuebers. Vor 0.405.0 stand hier nur `MAX_UNACKED`, und das zweite
+/// gab es gar nicht.
+fn snd_allowed(conn: &TcpConn) -> usize {
+    let peer = if conn.snd_wnd == 0 {
+        // Vor der ersten Quittung wissen wir es nicht. Ein Nullfenster
+        // NACH dem Handschlag ist dagegen echt und bremst uns richtig.
+        SND_BUF_INIT
+    } else {
+        conn.snd_wnd as usize
+    };
+    conn.snd_buf_limit.min(peer).max(eff_mss(conn))
+}
+
 fn recv_window(conn: &TcpConn) -> u16 {
     let forced = RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed);
     // **`window <KB>` bleibt, und es bleibt ein WERKZEUG.** Ohne den
@@ -258,7 +320,11 @@ const MAX_DATA_RETRIES: u8 = 15;
 // Ceiling on unacknowledged bytes held for retransmit. A peer that stops
 // acknowledging must not grow this without bound; `send` refuses past it,
 // which is the backpressure the caller needs to see.
-const MAX_UNACKED: usize = 256 * 1024;
+/// Womit ein Sendepuffer anfaengt, bevor eine Messung vorliegt. Zehn
+/// Segmente sind `TCP_INIT_CWND`, mal Linux' Faktor 2.
+const SND_BUF_INIT: usize = 20 * 1460;
+/// Der Deckel — `sysctl_tcp_wmem[2]`, Linux' Vorgabe.
+const SND_BUF_MAX: usize = 4 * 1024 * 1024;
 // 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
 // higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
@@ -446,6 +512,35 @@ struct TcpConn {
     // window). Our own advertised window is scaled by OUR_WSCALE.
     wscale_ok: bool,
     snd_wscale: u8,
+    /// **Das Fenster des Gegenuebers, skaliert** (RFC 9293 §3.8.6).
+    /// Bis 0.405.0 gab es dieses Feld nicht: `_window` wurde gelesen und
+    /// verworfen, und die einzige Bremse war `MAX_UNACKED`.
+    snd_wnd: u32,
+    /// **Unser Sendepuffer, und er WAECHST** — das Gegenstueck zu
+    /// `drs_win` auf der Empfangsseite.
+    ///
+    /// Linux fuehrt ihn in `tcp_sndbuf_expand` (tcp_input.c:587) aus dem
+    /// Staufenster nach: `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1)
+    /// * per_mss`, gedeckelt durch `tcp_wmem[2]`. Der Faktor 2 steht
+    /// dort mit Begruendung: CUBIC braucht 1,7, aufgerundet, plus
+    /// Polster fuer eine Anwendung, die langsam auf EPOLLOUT reagiert.
+    ///
+    /// **Uns fehlt `snd_cwnd`, also fehlt Linux' Eingang in die
+    /// Formel** — das ist hier benannt und nicht versteckt. Was wir
+    /// haben, ist dieselbe Frage wie beim Empfangsfenster: haben wir den
+    /// Puffer im letzten Umlauf ganz gefuellt und ist die Strecke dabei
+    /// sauber geblieben? Dann ist er zu klein. Genau so waechst
+    /// `tcp_rcv_space_adjust`, und genau so waechst dieser hier.
+    snd_buf_limit: usize,
+    /// `rcvq_space.seq` gespiegelt: wieviel das Gegenueber insgesamt
+    /// quittiert hat.
+    acked_total: u64,
+    /// Stand beim letzten Messpunkt.
+    sndq_acked0: u64,
+    /// Zeitpunkt des letzten Messpunkts.
+    sndq_time_us: u64,
+    /// Der gemessene Bedarf EINER Umlaufzeit — `rcvq_space` gespiegelt.
+    snd_space: usize,
 
     // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
     // `ts_recent` = the peer's most recent in-order TSval, echoed as our TSecr
@@ -544,6 +639,12 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        snd_wnd: 0,
+        snd_buf_limit: SND_BUF_INIT,
+        acked_total: 0,
+        sndq_acked0: 0,
+        sndq_time_us: 0,
+        snd_space: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -693,6 +794,12 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        snd_wnd: 0,
+        snd_buf_limit: SND_BUF_INIT,
+        acked_total: 0,
+        sndq_acked0: 0,
+        sndq_time_us: 0,
+        snd_space: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -787,6 +894,12 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         error: false,
         wscale_ok: false,
         snd_wscale: 0,
+        snd_wnd: 0,
+        snd_buf_limit: SND_BUF_INIT,
+        acked_total: 0,
+        sndq_acked0: 0,
+        sndq_time_us: 0,
+        snd_space: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -825,11 +938,37 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 // gewartet und der Deckel ist die Zeit in `send_inner`; steht er hoch,
 // ist `MAX_UNACKED` der Deckel und die Konstante gehoert durch
 // `tcp_sndbuf_expand` ersetzt.
+/// Zaehlt jede Quittung, die Platz gemacht hat.
+///
+/// **Sie ist da, damit `send_blocking` NICHT auf der grossen Sperre
+/// dreht.** Gemessen am 2026-09-22: 4 508 041 vergebliche `send()` in
+/// 3,1 Sekunden, also 1,45 Mio `CONNECTIONS.lock()` je Sekunde — und
+/// genau diese Sperre braucht der Empfangspfad, um eine Quittung zu
+/// verbuchen. Der Sender hat seinen eigenen Quittungsweg ausgehungert;
+/// die Strecke mass 7,8 ms Umlaufzeit, wo der Server 2,3 ms sah.
+///
+/// Linux hat dafuer `sk_stream_wait_memory`: der Sender SCHLAEFT, bis
+/// `sk_write_space` ihn weckt. Wir haben keine Warteschlangen, aber ein
+/// Zaehler ohne Sperre ist derselbe Gedanke — es gibt nichts Neues zu
+/// versuchen, solange er steht.
+pub static ACK_GEN: AtomicU64 = AtomicU64::new(0);
+
 pub static SEND_TSC: AtomicU64 = AtomicU64::new(0);
 pub static SEND_BLOCKED_TSC: AtomicU64 = AtomicU64::new(0);
 pub static SEND_SEGS: AtomicU64 = AtomicU64::new(0);
 pub static SEND_WOULDBLOCK: AtomicU64 = AtomicU64::new(0);
 pub static SEND_MAXBUF: AtomicU64 = AtomicU64::new(0);
+
+/// Wohin der Sendepuffer gewachsen ist, und was das Gegenueber zuletzt
+/// angeboten hat. Beides nur fuer den Bericht — ohne die zwei Zahlen ist
+/// nicht zu sehen, ob `tcp_sndbuf_expand` ueberhaupt gegriffen hat.
+pub fn snd_limit_of(handle: usize) -> usize {
+    CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_buf_limit)
+}
+
+pub fn snd_wnd_of(handle: usize) -> usize {
+    CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_wnd as usize)
+}
 
 /// Die Zaehler auf null, damit eine Messung nur ihren eigenen Lauf sieht.
 pub fn send_stats_reset() {
@@ -854,7 +993,7 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
-    if conn.send_buf.len() + data.len() > MAX_UNACKED {
+    if conn.send_buf.len() + data.len() > snd_allowed(conn) {
         return Err(TcpError::WouldBlock);
     }
 
@@ -887,32 +1026,39 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
 /// module must handle `WouldBlock` itself and sleep between tries.
 pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(), TcpError> {
     let t0 = crate::interrupts::ticks();
+    let mut zuletzt = ACK_GEN.load(Ordering::Relaxed);
     loop {
         match send(handle, data) {
             Err(TcpError::WouldBlock) => {}
             other => return other,
         }
-        // Bis hierher wurde gedreht, nicht gewartet: ~1 M Umlaeufe/s, die den
-        // Worker-Kern brennen und die Nachbar-Fibers einfrieren
-        // (feedback_wasm_host_call_freezes_peer_fibers, feedback_zero_cpu_wakes).
+        // **Erst wenn eine Quittung Platz gemacht hat, lohnt ein zweiter
+        // Versuch.**
         //
-        // Die Schwelle ist EIN Tick, nicht geraten: schneller als die
-        // Zeitgeberauflösung kann der Scheduler ohnehin nicht denken. Eine
-        // Antwort, die innerhalb des ersten Ticks kommt — der ganze heisse
-        // Download-Pfad, der diese Schleife einmal auf Durchsatz getrimmt hat —
-        // sieht damit keinen einzigen Kontextwechsel. Alles darueber ist
-        // Warten, und Warten gehoert dem Nachbarn.
+        // Hier stand eine Schleife, die JEDEN Umlauf `send()` rief — und
+        // damit `CONNECTIONS.lock()` nahm. Gemessen: 4 508 041 Umlaeufe
+        // in 3,1 Sekunden. Die alte Begruendung („eine Antwort innerhalb
+        // des ersten Ticks sieht keinen Kontextwechsel") galt dem
+        // Download-Pfad, wo eine Antwort tatsaechlich sofort kommt; beim
+        // SENDEN wartet man auf eine Quittung, und die braucht genau die
+        // Sperre, die wir hier in der Hand halten.
         //
         // `yield_ready` meldet `false`, wenn wir gar nicht in einem Fiber
-        // laufen (Core 0, OTA); dort bleibt es beim Drehen wie bisher.
-        if crate::interrupts::ticks() != t0 {
-            crate::smp::fiber::yield_ready();
+        // laufen (Core 0, OTA); dort treiben wir den Stapel selbst an,
+        // sonst kaeme die Quittung nie.
+        zuletzt = ACK_GEN.load(Ordering::Relaxed);
+        while ACK_GEN.load(Ordering::Relaxed) == zuletzt {
+            if crate::interrupts::ticks() - t0 > timeout_ticks {
+                return Err(TcpError::Timeout);
+            }
+            if !crate::smp::fiber::yield_ready() {
+                // Kein Fiber (Core 0, OTA): den Stapel selbst antreiben,
+                // sonst kommt die Quittung nie.
+                super::poll();
+                tick_connections();
+            }
+            core::hint::spin_loop();
         }
-
-        if crate::interrupts::ticks() - t0 > timeout_ticks { return Err(TcpError::Timeout); }
-        super::poll();
-        tick_connections();
-        core::hint::spin_loop();
     }
 }
 
@@ -1075,7 +1221,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
     let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let data_offset = ((data[12] >> 4) as usize) * 4;
     let flags = data[13];
-    let _window = u16::from_be_bytes([data[14], data[15]]);
+    let adv_window = u16::from_be_bytes([data[14], data[15]]);
 
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
     let payload = if data_offset < data.len() { &data[data_offset..] } else { &[] };
@@ -1192,6 +1338,18 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
         State::Established => {
             // ACK processing
             if flags & ACK != 0 {
+                // **Das Fenster des Gegenuebers, und bis hierher hiess
+                // es `_window`.** Es wurde gelesen und weggeworfen: wir
+                // hatten keine Flusskontrolle, sondern einen Puffer
+                // (`MAX_UNACKED`), der zufaellig ungefaehr so gross war.
+                // Ein Empfaenger, der sein Fenster schliesst, konnte uns
+                // nicht bremsen — RFC 9293 §3.8.6 ist damit schlicht
+                // nicht gebaut gewesen.
+                //
+                // Die Skalierung ist die des SYN-ACK (`snd_wscale`), und
+                // sie gilt fuer JEDES Segment danach ausser dem SYN
+                // selbst (RFC 7323 §2.2).
+                conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
                 if ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
                     // Drop the acknowledged prefix from the retransmit queue
                     // and restart the timer for whatever is still in flight.
@@ -1201,6 +1359,14 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.snd_una = ack;
                     conn.retries = 0;
                     conn.rto_tick = crate::interrupts::ticks();
+                    // **Und hier waechst der Sendepuffer** — an derselben
+                    // Stelle, an der Linux `tcp_check_space` ->
+                    // `tcp_new_space` -> `tcp_sndbuf_expand` ruft: wenn
+                    // eine Quittung Platz gemacht hat.
+                    conn.acked_total =
+                        conn.acked_total.wrapping_add(acked as u64);
+                    snd_space_adjust(conn);
+                    ACK_GEN.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
