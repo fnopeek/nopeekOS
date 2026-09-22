@@ -6046,20 +6046,34 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
     (a, b)
 }
 
+/// Wieviel unser Bericht fassen darf. Der Kernel nimmt bis
+/// `drivers::report::REPORT_MAX` = 4096 (`host_core.rs:3639`); die
+/// Haelfte davon ist reichlich und laesst Luft fuer die naechste Zeile.
+const REPORT_CAP: usize = 2048;
+
 /// docs/spec/WIFI_CLASS_ABI.md §3 — `npk_driver_report`.
 ///
 /// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
 fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
                   e: &efuse::Efuse) {
-    let mut b = [0u8; 896];
+    // **Der Kernel nimmt 4096** (`drivers::report::REPORT_MAX`); hier
+    // standen 896, und `put` schneidet STILL ab — `s.len().min(b.len() -
+    // *n)`. Mit jeder Zeile, die dazukam, fiel eine hinten heraus, und
+    // zwar ohne ein Zeichen darueber. Am Geraet endete der Bericht
+    // mitten in `abstand 2509 us im mittel, ` — genau vor den zwei
+    // Zahlen, fuer die die Version gebaut war.
+    //
+    // Zweitausend statt 896, und wenn es doch einmal nicht reicht, sagt
+    // es der Bericht am Ende selbst.
+    let mut b = [0u8; REPORT_CAP];
     let mut n = 0usize;
-    let put = |s: &str, b: &mut [u8; 896], n: &mut usize| {
+    let put = |s: &str, b: &mut [u8; REPORT_CAP], n: &mut usize| {
         let k = s.len().min(b.len() - *n);
         b[*n..*n + k].copy_from_slice(&s.as_bytes()[..k]);
         *n += k;
     };
-    let num = |v: u32, b: &mut [u8; 896], n: &mut usize| {
+    let num = |v: u32, b: &mut [u8; REPORT_CAP], n: &mut usize| {
         let mut d = [0u8; 10];
         let mut i = 10;
         let mut v = v;
@@ -6091,7 +6105,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // `tx` ist, was die FIRMWARE gewaehlt hat (C2H `RA_RPT`), `rx` was
     // im Empfangsdeskriptor JEDES Rahmens steht. Das sind die Messungen.
     let hex = b"0123456789abcdef";
-    let rate_hex = |v: u8, b: &mut [u8; 896], n: &mut usize| {
+    let rate_hex = |v: u8, b: &mut [u8; REPORT_CAP], n: &mut usize| {
         if *n + 2 <= b.len() {
             b[*n] = hex[(v >> 4) as usize];
             b[*n + 1] = hex[(v & 0xf) as usize];
@@ -6497,5 +6511,13 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put("/", &mut b, &mut n);
     num(d.stats.rx_peak, &mut b, &mut n);
     put(")\n", &mut b, &mut n);
+    // **Ein abgeschnittener Bericht muss es sagen.** Sonst liest man
+    // eine Zeile zu Ende, die keine ist — und das war genau der Fall,
+    // der diese Zeilen ausgeloest hat.
+    if n == b.len() {
+        const MARKE: &[u8] = b"\n*** BERICHT ABGESCHNITTEN ***";
+        let a = b.len() - MARKE.len();
+        b[a..].copy_from_slice(MARKE);
+    }
     host::driver_report(&b[..n]);
 }
