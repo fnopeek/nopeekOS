@@ -916,6 +916,31 @@ pub fn tx_wait_consumed(h: i32, trx: &Trx, queue: usize, frist_us: u64)
 /// `dma_unmap_single`, `ieee80211_tx_status_irqsafe`) — wir haben feste
 /// Plaetze je Ringindex und keinen Netzstapel, der eine Quittung erwartet.
 /// Gibt zurueck, wie viele Deskriptoren seit dem letzten Mal fertig wurden.
+/// Wieviele Deskriptoren die Hardware in dieser Queue noch VOR SICH hat.
+///
+/// **Das ist die Zahl, die ueber Aggregation entscheidet.** Der Chip
+/// fasst zusammen, was beim Griff nach der Sendegelegenheit im Ring
+/// liegt — nicht, was der Treiber in einem Durchlauf eingelegt hat. Die
+/// zwei sind verschieden, sobald das Medium belegt ist: dann stapeln
+/// sich die Deskriptoren im Ring, waehrend der Treiber sie einzeln
+/// nachlegt.
+///
+/// Gelesen wird derselbe Registerwert wie in `tx_isr`: der Lesezeiger
+/// der HARDWARE steht in den oberen sechzehn Bit.
+pub fn tx_pending(h: i32, trx: &Trx, queue: usize) -> u32 {
+    let idx_reg = match TXQ[queue].idx {
+        Some(reg) => reg,
+        None => return 0,
+    };
+    let hw_rp = (host::r32(h, idx_reg) >> 16) & TRX_BD_IDX_MASK;
+    let r = &trx.tx[queue];
+    if r.wp >= hw_rp {
+        r.wp - hw_rp
+    } else {
+        r.len - (hw_rp - r.wp)
+    }
+}
+
 pub fn tx_isr(h: i32, trx: &mut Trx, queue: usize) -> u32 {
     let idx_reg = match TXQ[queue].idx {
         Some(reg) => reg,
