@@ -327,31 +327,80 @@ ASPM = [
 ]
 
 SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
+SC_20_UPMOST, SC_20_LOWEST = 3, 4
 CHAN = [
+    # (Name, primaer, ht_param, vht_chanwidth, vht_cch0, max_bw, erwartet)
     ("K7, Zweitkanal UNTEN -> Mitte 5, primaer ist die obere Haelfte",
-     7, 0x07, True, (5, 1, SC_20_UPPER)),
+     7, 0x07, 0, 0, 2, (5, 1, SC_20_UPPER)),
     ("K7, Zweitkanal OBEN -> Mitte 9, primaer ist die untere Haelfte",
-     7, 0x05, True, (9, 1, SC_20_LOWER)),
+     7, 0x05, 0, 0, 2, (9, 1, SC_20_LOWER)),
     ("K7, Versatz ohne Bit 2 (Breite verboten) -> 20 MHz",
-     7, 0x03, True, (7, 0, SC_DONT_CARE)),
+     7, 0x03, 0, 0, 2, (7, 0, SC_DONT_CARE)),
     ("K13 + Zweitkanal OBEN waere K15 -> den gibt es nicht, 20 MHz",
-     13, 0x05, True, (13, 0, SC_DONT_CARE)),
+     13, 0x05, 0, 0, 2, (13, 0, SC_DONT_CARE)),
     ("K1 + Zweitkanal UNTEN waere K-1 -> 20 MHz statt Unterlauf",
-     1, 0x07, True, (1, 0, SC_DONT_CARE)),
-    ("K7 im Suchlauf (allow_40 = false) -> immer 20 MHz",
-     7, 0x07, False, (7, 0, SC_DONT_CARE)),
+     1, 0x07, 0, 0, 2, (1, 0, SC_DONT_CARE)),
+    ("K7 im Suchlauf (max_bw = 0) -> immer 20 MHz",
+     7, 0x07, 0, 0, 0, (7, 0, SC_DONT_CARE)),
     ("K7, Bit 2 an aber Versatz NONE -> 20 MHz",
-     7, 0x04, True, (7, 0, SC_DONT_CARE)),
+     7, 0x04, 0, 0, 2, (7, 0, SC_DONT_CARE)),
     ("K36 (5 GHz), Zweitkanal OBEN -> Mitte 38",
-     36, 0x05, True, (38, 1, SC_20_LOWER)),
+     36, 0x05, 0, 0, 2, (38, 1, SC_20_LOWER)),
     ("K48 (5 GHz), Zweitkanal UNTEN -> Mitte 46",
-     48, 0x07, True, (46, 1, SC_20_UPPER)),
+     48, 0x07, 0, 0, 2, (46, 1, SC_20_UPPER)),
     ("K165 (5 GHz oben), Zweitkanal OBEN waere 167 -> 20 MHz",
-     165, 0x05, True, (165, 0, SC_DONT_CARE)),
+     165, 0x05, 0, 0, 2, (165, 0, SC_DONT_CARE)),
     ("K11, Zweitkanal OBEN -> Mitte 13, gerade noch drin",
-     11, 0x05, True, (13, 1, SC_20_LOWER)),
+     11, 0x05, 0, 0, 2, (13, 1, SC_20_LOWER)),
     ("K12, Zweitkanal OBEN waere 14 -> 20 MHz (K14 nur Japan)",
-     12, 0x05, True, (12, 0, SC_DONT_CARE)),
+     12, 0x05, 0, 0, 2, (12, 0, SC_DONT_CARE)),
+
+    # ── 80 MHz ──────────────────────────────────────────────────────
+    # Die vier Viertel eines 80ers, alle an DERSELBEN Mitte 106: der
+    # primaere kann jedes von ihnen sein, und nur der Abstand sagt
+    # welches. Ein falscher Index hiesse, die 40er-Haelfte im Chip
+    # andersherum zu legen als der AP sie faehrt.
+    ("K100 in der 80er um K106 -> unterstes Viertel",
+     100, 0x07, 1, 106, 2, (106, 2, SC_20_LOWEST)),
+    ("K104 in der 80er um K106 -> unteres inneres Viertel",
+     104, 0x05, 1, 106, 2, (106, 2, SC_20_LOWER)),
+    ("K108 in der 80er um K106 -> oberes inneres Viertel",
+     108, 0x07, 1, 106, 2, (106, 2, SC_20_UPPER)),
+    ("K112 in der 80er um K106 -> oberstes Viertel",
+     112, 0x05, 1, 106, 2, (106, 2, SC_20_UPMOST)),
+    ("K36 in der 80er um K42 -> unterstes Viertel",
+     36, 0x05, 1, 42, 2, (42, 2, SC_20_LOWEST)),
+    # Und die Grenzen: was NICHT durchgeht, muss auf 40 zurueckfallen
+    # statt eine erfundene Mitte an den Chip zu geben.
+    ("Breite 0 (der AP sagt: nimm HT) -> 40 MHz",
+     100, 0x07, 0, 106, 2, (98, 1, SC_20_UPPER)),
+    ("Breite 2 (abgeschaffte 160er-Kodierung) -> 40 MHz statt geraten",
+     100, 0x05, 2, 114, 2, (102, 1, SC_20_LOWER)),
+    ("Mitte K104 ist kein 80er-Mittenkanal -> 40 MHz",
+     100, 0x05, 1, 104, 2, (102, 1, SC_20_LOWER)),
+    ("Mitte K106, primaer K120 -> 14 Schritte weg, 40 MHz",
+     120, 0x05, 1, 106, 2, (122, 1, SC_20_LOWER)),
+    ("80 MHz angesagt, aber `bw: 40` -> 40 MHz",
+     100, 0x07, 1, 106, 1, (98, 1, SC_20_UPPER)),
+    ("80 MHz angesagt, aber Bit 2 aus -> 20 MHz",
+     100, 0x03, 1, 106, 2, (100, 0, SC_DONT_CARE)),
+    ("80 MHz auf 2,4 GHz gibt es nicht -> 40 MHz",
+     7, 0x05, 1, 42, 2, (9, 1, SC_20_LOWER)),
+    ("80 MHz im Suchlauf (max_bw = 0) -> 20 MHz",
+     100, 0x07, 1, 106, 0, (100, 0, SC_DONT_CARE)),
+]
+
+# `bw_cap_from`: der Wert hinter `bw:` -> 0/1/2 (20/40/80 MHz).
+# **Ein unverstandener Wert ist die Vorgabe (80), nicht die schmalste
+# Einstellung** — schmal ist nicht sicherer, nur langsamer.
+BWCAP = [
+    ("20 -> 20 MHz", "20", 0),
+    ("20MHz -> 20 MHz", "20MHz", 0),
+    ("40 -> 40 MHz", "40", 1),
+    ("80 -> 80 MHz", "80", 2),
+    ("leer -> Vorgabe 80", "", 2),
+    ("Tippfehler bleibt 80, nicht 20", "achtzig", 2),
+    ("160 kann die Karte nicht -> Vorgabe 80", "160", 2),
 ]
 
 
@@ -363,6 +412,13 @@ def main():
     names = grab(src, r"\n(fn reason_name.*?\n\})", "reason_name")
     cfgon = grab(src, r"\n(fn cfg_on.*?\n\})", "cfg_on")
     chanp = grab(src, r"\n(fn chan_params.*?\n\})", "chan_params")
+    cellw = grab(src, r"\n(#\[derive[^\n]*\]\nstruct CellWidth \{.*?\n\})",
+                 "struct CellWidth")
+    vhtw = grab(src, r"\n(const VHT_CHANWIDTH_80: u8 = \d+;)",
+                "VHT_CHANWIDTH_80")
+    cent = grab(src, r"\n(const CENTERS_80: \[u8; 7\] = \[[^\]]*\];)",
+                "CENTERS_80")
+    bwcapf = grab(src, r"\n(pub fn bw_cap_from.*?\n\})", "bw_cap_from")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
     # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
@@ -398,7 +454,8 @@ def main():
     # DIESELBEN Zahlen fuehrt wie der Treiber, statt sie abzuschreiben.
     sc = {}
     for name, want in (("RTW_SC_DONT_CARE", 0), ("RTW_SC_20_UPPER", 1),
-                       ("RTW_SC_20_LOWER", 2)):
+                       ("RTW_SC_20_LOWER", 2), ("RTW_SC_20_UPMOST", 3),
+                       ("RTW_SC_20_LOWEST", 4)):
         m = re.search(r"pub const %s: u8 = (\d+);" % name, regs)
         if not m:
             sys.exit("%s nicht in src/regs.rs" % name)
@@ -409,6 +466,8 @@ def main():
     consts = """const RTW_SC_DONT_CARE: u8 = 0;
 const RTW_SC_20_UPPER: u8 = 1;
 const RTW_SC_20_LOWER: u8 = 2;
+const RTW_SC_20_UPMOST: u8 = 3;
+const RTW_SC_20_LOWEST: u8 = 4;
 const CCX_REPORT_V0_SEQNUM_OFF: usize = 6;
 const CCX_REPORT_V0_SEQNUM_MASK: u8 = 0xfc;
 const CCX_REPORT_V0_STATUS_OFF: usize = 0;
@@ -468,9 +527,14 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for name, v, want in ASPM)
 
     chan_cases = "\n".join(
-        '        (%s, %d, %d, %s, (%d, %d, %d)),' % (
-            rs(name), pri, par, "true" if a40 else "false", w[0], w[1], w[2])
-        for name, pri, par, a40, w in CHAN)
+        '        (%s, %d, CellWidth { ht_param: %d, vht_chanwidth: %d, '
+        'vht_cch0: %d }, %d, (%d, %d, %d)),' % (
+            rs(name), pri, par, vcw, vc0, mbw, w[0], w[1], w[2])
+        for name, pri, par, vcw, vc0, mbw, w in CHAN)
+
+    bwcap_cases = "\n".join(
+        '        (%s, %s, %d),' % (rs(name), rs(v), want)
+        for name, v, want in BWCAP)
 
     mgmt_cases = "\n".join(
         '        (%s, &[%s], %s),' % (
@@ -483,7 +547,8 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         for name, f, want in MGMT)
 
     main_rs = consts + "\n" + fn + "\n\n" + names + "\n\n" + cfgon \
-        + "\n\n" + chanp + "\n\n" + aspmp \
+        + "\n\n" + cellw + "\n\n" + vhtw + "\n\n" + cent \
+        + "\n\n" + chanp + "\n\n" + bwcapf + "\n\n" + aspmp \
         + "\n\n" + bande + "\n\n" + bandp \
         + "\n\n" + txrpt + "\n\n" + seqnum + "\n\n" + census \
         + "\n\n" + addba_s + "\n\n" + addba_p + "\n\n" + addba_b + """
@@ -607,11 +672,11 @@ fn main() {
              if short_ok { "OK  " } else { "DIFF" });
     bad += ab;
 
-    let chans: &[(&str, u8, u8, bool, (u8, usize, u8))] = &[
+    let chans: &[(&str, u8, CellWidth, usize, (u8, usize, u8))] = &[
 %s
     ];
-    for (name, pri, par, a40, want) in chans {
-        let got = chan_params(*pri, *par, *a40);
+    for (name, pri, w, mbw, want) in chans {
+        let got = chan_params(*pri, *w, *mbw);
         let ok = got == *want;
         if !ok { bad += 1; }
         println!("  {} {}", if ok { "OK  " } else { "DIFF" }, name);
@@ -629,6 +694,17 @@ fn main() {
         if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
     }
 
+    let bws: &[(&str, &str, usize)] = &[
+%s
+    ];
+    for (name, v, want) in bws {
+        let got = bw_cap_from(v.as_bytes());
+        let ok = got == *want;
+        if !ok { bad += 1; }
+        println!("  {} bw: {}", if ok { "OK  " } else { "DIFF" }, name);
+        if !ok { println!("       erwartet {:?}, bekommen {:?}", want, got); }
+    }
+
     let bands: &[(&str, &str, BandPref)] = &[
 %s
     ];
@@ -640,13 +716,14 @@ fn main() {
     }
 
     let total = cases.len() + cfg.len() + names.len() + rpts.len() + 1
-                + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len();
+                + mgmt.len() + 3 + chans.len() + aspms.len() + bands.len()
+                + bws.len();
     println!("  {} von {} Faellen richtig", total - bad, total);
     std::process::exit(if bad == 0 { 0 } else { 1 });
 }
 """ % (cases, cfg_cases, name_cases, txrpt_cases, mgmt_cases,
        ", ".join(str(b) for b in addba_req()), chan_cases, aspm_cases,
-       band_cases)
+       bwcap_cases, band_cases)
 
     loud_bad = check_loud_balance(src) + check_rsn_agreement()
 
