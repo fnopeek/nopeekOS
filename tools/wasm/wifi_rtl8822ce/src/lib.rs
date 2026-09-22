@@ -3668,12 +3668,20 @@ struct LinkStats {
     rx_gap_sum: u64,
     rx_gap_n: u32,
     rx_gap_min: u32,
+    /// Die VERTEILUNG, nicht der Mittelwert. Eimer nach `GAP_BUCKETS`,
+    /// der fuenfte ist „ueber 10 ms" und fuehrt seine Summe mit.
+    rx_gap_buckets: [u32; 5],
+    rx_gap_big_sum: u64,
+    /// Und die Abstaende, bei denen gar kein Verkehr war.
+    rx_gap_idle: u32,
     /// Die Umkehrzeit unseres eigenen Stapels: Daten an den Kernel ->
     /// Rahmen vom Kernel zurueck.
     last_rx_at: u64,
     turn_sum: u64,
     turn_n: u32,
     turn_max: u64,
+    turn_buckets: [u32; 5],
+    turn_big_sum: u64,
     last_action: (u8, u8),
     /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
     /// den Sendering passte.
@@ -3757,7 +3765,9 @@ impl Default for LinkStats {
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
             last_tsf: 0, rx_gap_sum: 0, rx_gap_n: 0, rx_gap_min: 0,
+            rx_gap_buckets: [0; 5], rx_gap_big_sum: 0, rx_gap_idle: 0,
             last_rx_at: 0, turn_sum: 0, turn_n: 0, turn_max: 0,
+            turn_buckets: [0; 5], turn_big_sum: 0,
             last_action: (0, 0),
             addba_resp: 0, addba_fail: 0,
             addba_win: 0, addba_win_req: 0,
@@ -3847,6 +3857,34 @@ struct TxProbe {
 }
 
 const TX_PROBE_SLOTS: usize = 8;
+
+/// Die Grenzen der Abstands-Eimer, in Mikrosekunden.
+///
+/// **Ein Mittelwert versteckt genau die Verteilung, um die es geht.**
+/// `abstand 1899 us im mittel` kann heissen: jedes Aggregat kommt nach
+/// 1,9 ms — oder die meisten nach 0,3 ms und alle dreissig eine Pause
+/// von dreizehn Millisekunden. Das sind zwei verschiedene Fehler, und
+/// nur der zweite ist ein Fehler.
+const GAP_BUCKETS: [u32; 4] = [500, 2_000, 5_000, 10_000];
+/// Dieselbe Frage fuer die Umkehrzeit unseres Stapels, eine
+/// Groessenordnung feiner: dort ist schon eine Millisekunde viel.
+const TURN_BUCKETS: [u32; 4] = [200, 1_000, 5_000, 20_000];
+
+/// **Ab hier ist es keine Pause mehr, sondern kein Verkehr.** Zwischen
+/// zwei Downloads liegen Sekunden; die gehoeren nicht in dieselbe
+/// Summe wie eine Stockung mitten im Strom.
+const GAP_IDLE_US: u32 = 200_000;
+
+fn bucket(us: u32, grenzen: &[u32; 4]) -> usize {
+    let mut i = 0;
+    while i < 4 {
+        if us < grenzen[i] {
+            return i;
+        }
+        i += 1;
+    }
+    4
+}
 
 /// Der TID, auf dem unsere Daten laufen. Best Effort, und es ist der
 /// einzige: ohne EDCA vom AP gibt es keinen Grund, eine zweite Schlange
@@ -4924,14 +4962,28 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     // Der KLEINSTE Abstand ist der Massstab: er ist das,
                     // was die Strecke kann, wenn nichts dazwischenkommt.
                     let d = st.tsf_low.wrapping_sub(ls.last_tsf);
-                    // Alles ueber 10 ms ist eine Pause im Verkehr, kein
-                    // Abstand — sonst misst der Mittelwert die Zeit
-                    // zwischen zwei Downloads mit.
-                    if ls.last_tsf != 0 && d > 0 && d < 10_000 {
-                        ls.rx_gap_sum += d as u64;
-                        ls.rx_gap_n += 1;
-                        if ls.rx_gap_min == 0 || d < ls.rx_gap_min {
-                            ls.rx_gap_min = d;
+                    // **Die langen Abstaende werden EINGEORDNET, nicht
+                    // verworfen.** In 0.53.0 fielen sie aus der Rechnung,
+                    // und genau sie waren der Befund: 190 Stueck a 13 ms
+                    // in einem Lauf von 5,4 s — 45 % der Zeit. Wer sie
+                    // wegwirft, misst die Strecke nur dann, wenn sie
+                    // laeuft.
+                    if ls.last_tsf != 0 && d > 0 {
+                        if d >= GAP_IDLE_US {
+                            ls.rx_gap_idle += 1;
+                        } else {
+                            let i = bucket(d, &GAP_BUCKETS);
+                            ls.rx_gap_buckets[i] += 1;
+                            if i == 4 {
+                                ls.rx_gap_big_sum += d as u64;
+                            }
+                            if d < 10_000 {
+                                ls.rx_gap_sum += d as u64;
+                                ls.rx_gap_n += 1;
+                                if ls.rx_gap_min == 0 || d < ls.rx_gap_min {
+                                    ls.rx_gap_min = d;
+                                }
+                            }
                         }
                     }
                     ls.last_tsf = st.tsf_low;
@@ -5415,10 +5467,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 // entweder stehen sie hier oder beim AP.
                 if ls.last_rx_at != 0 {
                     let d = host::now_us().saturating_sub(ls.last_rx_at);
-                    if d < 100_000 {
+                    if d < GAP_IDLE_US as u64 {
                         ls.turn_sum += d;
                         ls.turn_n += 1;
                         if d > ls.turn_max { ls.turn_max = d; }
+                        let i = bucket(d as u32, &TURN_BUCKETS);
+                        ls.turn_buckets[i] += 1;
+                        if i == 4 {
+                            ls.turn_big_sum += d;
+                        }
                     }
                     ls.last_rx_at = 0;
                 }
@@ -6357,7 +6414,28 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             num(ls.rx_gap_min, &mut b, &mut n);
             put(" us (", &mut b, &mut n);
             num(ls.rx_gap_n, &mut b, &mut n);
-            put(" gemessen, ueber 10 ms verworfen)", &mut b, &mut n);
+            put(" gemessen)", &mut b, &mut n);
+            // **Die Verteilung, und sie ist der eigentliche Befund.**
+            put("\n  verteilt  <0,5ms ", &mut b, &mut n);
+            for (i, name) in ["", "<2ms ", "<5ms ", "<10ms ", ">=10ms "]
+                .iter().enumerate()
+            {
+                if i > 0 {
+                    put("  ", &mut b, &mut n);
+                    put(name, &mut b, &mut n);
+                }
+                num(ls.rx_gap_buckets[i], &mut b, &mut n);
+            }
+            if ls.rx_gap_buckets[4] > 0 {
+                put(" (zusammen ", &mut b, &mut n);
+                num((ls.rx_gap_big_sum / 1000) as u32, &mut b, &mut n);
+                put(" ms STILLSTAND)", &mut b, &mut n);
+            }
+            if ls.rx_gap_idle > 0 {
+                put("  ·  ", &mut b, &mut n);
+                num(ls.rx_gap_idle, &mut b, &mut n);
+                put(" x kein verkehr", &mut b, &mut n);
+            }
         }
     }
     // **Die Umkehrzeit unseres eigenen Stapels.** Von „Daten an den
@@ -6372,6 +6450,26 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" us (", &mut b, &mut n);
         num(ls.turn_n, &mut b, &mut n);
         put(" gemessen)", &mut b, &mut n);
+        // **Und hier faellt die Entscheidung.** Stehen in den zwei
+        // rechten Eimern ungefaehr so viele Faelle wie oben bei
+        // `>=10ms`, dann wartet der AP auf UNS — die Pause im Funk und
+        // die Pause im Stapel sind dann dasselbe Ereignis. Stehen dort
+        // null, kommt der Stillstand von woanders.
+        put("\n  verteilt  <0,2ms ", &mut b, &mut n);
+        for (i, name) in ["", "<1ms ", "<5ms ", "<20ms ", ">=20ms "]
+            .iter().enumerate()
+        {
+            if i > 0 {
+                put("  ", &mut b, &mut n);
+                put(name, &mut b, &mut n);
+            }
+            num(ls.turn_buckets[i], &mut b, &mut n);
+        }
+        if ls.turn_big_sum > 0 {
+            put(" (zusammen ", &mut b, &mut n);
+            num((ls.turn_big_sum / 1000) as u32, &mut b, &mut n);
+            put(" ms)", &mut b, &mut n);
+        }
     }
     if ls.tx_batch_n > 0 {
         // **Zwei Zahlen, und nur die zweite entscheidet.** `eingelegt`
