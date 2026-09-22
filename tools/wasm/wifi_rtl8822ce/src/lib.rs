@@ -2724,7 +2724,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         BandPref::Only24 => "nur 2,4 GHz",
         BandPref::Only5 => "nur 5 GHz",
     });
-    *target = match (pref, best_5g) {
+    let gewaehlt = match (pref, best_5g) {
         (BandPref::Auto, Some(f)) if f.best >= PREFER_5G_DBM => {
             host::print(" -> 5 GHz genommen\n");
             Some(f)
@@ -2740,6 +2740,27 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             best_all
         }
     };
+    // **Ein Suchlauf ohne Fund loescht das Ziel NICHT.**
+    //
+    // Hier stand `*target = ...`, also auch `*target = None`. Der
+    // Wiederverbinden-Weg ruft diesen Suchlauf nach zwei Fehlschlaegen,
+    // und ein `None` faellt dort in ein `break`, das aus der Schleife
+    // HERAUS faellt: der Rufer schaltet die MAC ab und der Treiber ist
+    // zu Ende. **Ein Kanal, auf dem gerade niemand antwortet, ist kein
+    // Beweis, dass es die Zelle nicht mehr gibt.**
+    //
+    // 0.58.2 hat genau das als behoben GEMELDET und nur die Logzeile
+    // gebaut — die Wirkung stand in der Commit-Nachricht und nicht im
+    // Code. Hier ist sie.
+    match (gewaehlt, *target) {
+        (Some(g), _) => *target = Some(g),
+        (None, Some(alt)) => {
+            host::print("  nichts gefunden — das letzte bekannte Ziel bleibt: K");
+            host::print_dec(alt.channel as u32);
+            host::print("\n");
+        }
+        (None, None) => {}
+    }
     // **Die Kandidaten, nach Signal.**
     //
     // Gewaehlt wird nach Feldstaerke, und das ist eine ANNAHME: dass
@@ -6617,7 +6638,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // einer zu unterscheiden, die wegen voller Schlangen langsam ist.
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
-            publish_report(link, ls, d, e);
+            publish_report(link, ls, d, e, caps);
         }
 
         // ── RX-Stille als Wachhund ───────────────────────────────
@@ -7375,7 +7396,7 @@ const REPORT_CAP: usize = 2048;
 /// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
 /// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
 fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
-                  e: &efuse::Efuse) {
+                  e: &efuse::Efuse, caps: &sta::PeerCaps) {
     // **Der Kernel nimmt 4096** (`drivers::report::REPORT_MAX`); hier
     // standen 896, und `put` schneidet STILL ab — `s.len().min(b.len() -
     // *n)`. Mit jeder Zeile, die dazukam, fiel eine hinten heraus, und
@@ -7452,6 +7473,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     let spitze = |von: usize| ls.rate_hist.iter().enumerate().skip(von)
         .fold((0usize, 0u32), |acc, (i, &c)| if c > acc.1 { (i, c) } else { acc });
     let legacy: u32 = ls.rate_hist[..mcs0].iter().sum();
+    let vht0 = DESC_RATEVHT1SS_MCS0 as usize;
+    let ht_n: u32 = ls.rate_hist[mcs0..vht0].iter().sum();
+    let vht_n: u32 = ls.rate_hist[vht0..].iter().sum();
     // **Faellt es auf die Spitze ueber ALLES zurueck, gehoert auch der
     // Nenner ueber alles.** Am Geraet stand sonst `0x04 in 304 von 0
     // ht/vht` — ein Zaehler ohne Nenner, weil der Nenner die
@@ -7476,7 +7500,18 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" (NUR legacy), zuletzt ", &mut b, &mut n);
     } else {
         num(ges - legacy, &mut b, &mut n);
-        put(" ht/vht, dazu ", &mut b, &mut n);
+        // **HT und VHT sind zwei Klassen, und der Unterschied ist der
+        // Faktor auf der Strecke.** Die Spitzenrate darueber nennt nur
+        // EINE; steht dort eine HT-Rate, waehrend wir VHT80 angemeldet
+        // haben, sendet der AP eine Klasse unter dem, was ausgehandelt
+        // ist — und das sieht man an keiner anderen Zahl. Gezaehlt wird
+        // nichts Neues: `rate_hist` traegt den Schnitt seit je, er wurde
+        // nur nie gelesen.
+        put(" ht/vht (HT ", &mut b, &mut n);
+        num(ht_n, &mut b, &mut n);
+        put(", VHT ", &mut b, &mut n);
+        num(vht_n, &mut b, &mut n);
+        put("), dazu ", &mut b, &mut n);
         num(legacy, &mut b, &mut n);
         put(" legacy (baken), zuletzt ", &mut b, &mut n);
     }
@@ -7510,6 +7545,73 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         num(ls.bw_hist[i], &mut b, &mut n);
     }
     put(")", &mut b, &mut n);
+    // **Was der AP SELBST angibt zu koennen.**
+    //
+    // Die Zeile darueber sagt, WOMIT er sendet. Diese sagt, WOMIT ER
+    // KOENNTE — aus seiner eigenen Anmeldeantwort, die `parse_assoc_resp`
+    // seit je liest und die nirgends stand. Stehen die zwei auseinander,
+    // ist die Rate seine ENTSCHEIDUNG und nicht seine Grenze, und dann
+    // liegt der Deckel in seiner Ratenwahl statt bei uns. Fehlt VHT hier
+    // ganz, hat er uns gar nicht als VHT-Station angenommen — und DAS
+    // waere unseres.
+    let vhtmap = |m: u16, b: &mut [u8; REPORT_CAP], n: &mut usize| {
+        let mut nss = 0u32;
+        let mut top = 0u32;
+        for i in 0..8u16 {
+            let v = (m >> (i * 2)) & 3;
+            if v == 3 {
+                break;
+            }
+            nss += 1;
+            top = 7 + v as u32;
+        }
+        if nss == 0 {
+            put("keins", b, n);
+            return;
+        }
+        num(nss, b, n);
+        put("SS MCS0-", b, n);
+        num(top, b, n);
+    };
+    // **Unsere Seite zuerst.** Ohne sie unterscheidet die Zeile nicht
+    // zwischen „er hat nein gesagt" und „wir haben nie gefragt":
+    // `build_vht_cap_ie` kehrt UM, wenn die efuse etwas anderes als VHT
+    // ansagt, und dann geht gar kein VHT-Element hinaus. Dieselbe
+    // Bedingung, an derselben Zahl.
+    put("\n  wir bieten  HT ", &mut b, &mut n);
+    num(e.hw_cap_nss as u32, &mut b, &mut n);
+    put("SS", &mut b, &mut n);
+    let vht_ok = e.hw_cap_ptcl == EFUSE_HW_CAP_IGNORE as u8
+        || e.hw_cap_ptcl == EFUSE_HW_CAP_PTCL_VHT as u8;
+    if vht_ok && link.channel > 14 {
+        put(" + VHT ", &mut b, &mut n);
+        num(e.hw_cap_nss as u32, &mut b, &mut n);
+        put("SS MCS0-9", &mut b, &mut n);
+    } else if !vht_ok {
+        put(" + KEIN VHT (efuse ptcl ", &mut b, &mut n);
+        num(e.hw_cap_ptcl as u32, &mut b, &mut n);
+        put(")", &mut b, &mut n);
+    } else {
+        put(" + kein VHT (2,4 GHz)", &mut b, &mut n);
+    }
+    put("\n  ap kann  ", &mut b, &mut n);
+    let hss = caps.ht_mcs.iter().filter(|&&m| m != 0).count() as u32;
+    if caps.ht_supported && hss > 0 {
+        put("HT ", &mut b, &mut n);
+        num(hss, &mut b, &mut n);
+        put("SS MCS0-", &mut b, &mut n);
+        num(hss * 8 - 1, &mut b, &mut n);
+    } else {
+        put("kein HT", &mut b, &mut n);
+    }
+    if caps.vht_supported {
+        put("  VHT sendet ", &mut b, &mut n);
+        vhtmap(caps.vht_tx_mcs_map, &mut b, &mut n);
+        put(", empfaengt ", &mut b, &mut n);
+        vhtmap(caps.vht_mcs_map, &mut b, &mut n);
+    } else {
+        put("  KEIN VHT in der Anmeldeantwort", &mut b, &mut n);
+    }
     // Die PCIe-Strecke. Steht hier und nicht einmalig beim Start, weil
     // ASPM ein Verdaechtiger fuer den Durchsatz ist und ein Verdaechtiger
     // in DEN Bericht gehoert, den Florian einschickt.
