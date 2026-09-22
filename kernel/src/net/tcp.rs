@@ -61,26 +61,25 @@ const OUR_WSCALE: u8 = 8;
 const RCV_WND_MIN: usize = 256 * 1024;
 const RCV_WND_MAX: usize = RECV_BUF_SIZE;
 
-// Die Empfangskapazitaet der Strecke steht in `netdev::active_rx_rate()` —
-// JE SCHNITTSTELLE, nicht als Globale. Hier stand bis 0.395.0 ein
-// `static LINK_RX_RATE`, den genau ein Treiber setzte (rtl8153), und damit
-// galt der Wert des USB-Dongles auch fuer die WLAN-Karte. Ohne Dongle blieb
-// er auf `u32::MAX`, und das WLAN bot 8 MiB an. Der Grund und die Messung
-// stehen an `active_rx_rate`.
+// **`netdev::active_rx_rate()` wird hier nicht mehr gelesen.** Bis
+// 0.402.0 kam der Deckel aus „Leitungsrate x geglaettete RTT" — und die
+// Leitungsrate ist eine Zahl, die jeder Treiber UEBER SICH SELBST
+// behauptet (in `rtl8153.rs` stehen 20 MB/s, gemessen auf einem anderen
+// Blech und auf diesem nie nachgeprueft). Seit 0.403.0 misst DRS, was
+// die ANWENDUNG pro RTT wirklich abholt; die Rate wird dafuer nicht
+// gebraucht. Die Funktion bleibt, weil `netdev` sie fuer die
+// Schnittstellenauswahl fuehrt.
 
-/// Advertised receive window = min(free buffer, BDP) where BDP = link capacity ×
-/// smoothed RTT (50 ms assumed until the first TSecr-derived RTT). Keeps the
-/// sender's in-flight near the bandwidth-delay product instead of ramping the
-/// whole buffer and overflowing a slow bottleneck — without a per-link constant.
+/// Advertised receive window = min(free buffer, DRS window).
 /// Was `recv_window` zuletzt gerechnet hat: (angebotenes Fenster in Bytes,
-/// srtt in 100-Hz-Takten, Deckel in Bytes). **Die Frage, die eine Messung auf
+/// srtt in MILLISEKUNDEN, Deckel in Bytes). **Die Frage, die eine Messung auf
 /// einer langsamen Leitung stellt, ist nicht „wieviel kam an", sondern „wieviel
 /// haben WIR angeboten" — und wovon der Deckel kam.**
 static WND_LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static WND_SRTT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static WND_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// (Fenster B, srtt Takte, Deckel B) der letzten Berechnung.
+/// (Fenster B, srtt ms, Deckel B) der letzten Berechnung.
 pub fn window_diag() -> (u32, u32, u32) {
     use core::sync::atomic::Ordering::Relaxed;
     (WND_LAST.load(Relaxed), WND_SRTT.load(Relaxed), WND_CAP.load(Relaxed))
@@ -106,23 +105,98 @@ pub fn rcv_window_force() -> u32 {
     RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Unsere Zeitmarke fuer die TCP-Timestamp-Option, in Millisekunden.
+///
+/// **Hier stand `ticks()`, also 100 Hz.** Der Rueckweg `jetzt - TSecr`
+/// ist damit eine RTT in 10-ms-Stufen: 5 ms messen sich als null, 20 ms
+/// als ein bis zwei Stufen. Linux tickt seine Marke mit
+/// `TCP_TS_HZ = 1000` (tcp.h), und RFC 7323 §4 laesst alles zwischen
+/// 1 ms und 1 s zu — schneller waere falsch, weil PAWS den Umlauf
+/// braucht (2^32 ms sind 49 Tage, 2^32 us waeren 71 Minuten).
+fn ts_now_ms() -> u32 {
+    (crate::interrupts::uptime_us() / 1000) as u32
+}
+
+/// tcp_input.c:812 `tcp_rcv_rtt_update`.
+///
+/// **Das MINIMUM zaehlt, nicht der Mittelwert.** Steht der neue Wert
+/// unter dem alten, gilt er sofort; sonst wird geglaettet — und auch das
+/// nur, wenn die Empfangsschlange LEER ist. Liegt dort noch etwas, misst
+/// die Probe, wie schnell unsere Anwendung liest, nicht wie schnell die
+/// Strecke ist.
+fn rcv_rtt_update(conn: &mut TcpConn, sample_us: u32) {
+    let m = sample_us.saturating_mul(8);
+    let old = conn.rcv_rtt_us8;
+    if old == 0 || m < old {
+        conn.rcv_rtt_us8 = m;
+        return;
+    }
+    if !conn.recv_buf.is_empty() {
+        return;
+    }
+    conn.rcv_rtt_us8 = old - (old >> 3) + sample_us;
+}
+
+/// tcp_input.c:894 `tcp_rcvbuf_grow`.
+///
+/// `tcp_space_from_win`/`tcp_win_from_space` fallen weg: sie rechnen bei
+/// Linux das Verhaeltnis `skb->len / skb->truesize` heraus, also den
+/// Verschnitt der Paketpuffer. Unser `recv_buf` haelt ROHE Bytes — das
+/// Verhaeltnis ist eins, die Umrechnung die Identitaet.
+fn rcvbuf_grow(conn: &mut TcpConn, newval: u32) {
+    let oldval = conn.rcvq_space.max(1);
+    conn.rcvq_space = newval;
+
+    // „DRS is always one RTT late."
+    let mut rcvwin = (newval as u64) << 1;
+    // „slow start: allow the sender to double its rate."
+    let grow = rcvwin * (newval.saturating_sub(oldval)) as u64 / oldval as u64;
+    rcvwin += grow << 1;
+    // Was ausser der Reihe liegt, braucht zusaetzlich Platz.
+    rcvwin += conn.ooo.values().map(|v| v.len() as u64).sum::<u64>();
+
+    let rcvbuf = rcvwin.min(RCV_WND_MAX as u64) as u32;
+    // **Nur wachsen.** tcp_input.c:922.
+    if rcvbuf > conn.drs_win {
+        conn.drs_win = rcvbuf;
+    }
+}
+
+/// tcp_input.c:933 `tcp_rcv_space_adjust` — gerufen, sooft die Anwendung
+/// gelesen hat.
+fn rcv_space_adjust(conn: &mut TcpConn) {
+    let now = crate::interrupts::uptime_us();
+    let time = now.saturating_sub(conn.rcvq_time_us);
+    // Ueber weniger als eine RTT sagt die Messung nichts.
+    if conn.rcv_rtt_us8 == 0 || time < (conn.rcv_rtt_us8 >> 3) as u64 {
+        return;
+    }
+    let copied = conn.copied_total.saturating_sub(conn.rcvq_copied0);
+    // **Was noch in der Schlange liegt, wird abgezogen.** Staut es sich,
+    // ist die ANWENDUNG der Engpass, und ein groesseres Fenster hilft ihr
+    // nicht (tcp_input.c:948-949).
+    let copied = copied.saturating_sub(conn.recv_buf.len() as u64);
+    if copied > conn.rcvq_space as u64 {
+        rcvbuf_grow(conn, copied.min(u32::MAX as u64) as u32);
+    }
+    conn.rcvq_copied0 = conn.copied_total;
+    conn.rcvq_time_us = now;
+}
+
 fn recv_window(conn: &TcpConn) -> u16 {
     let forced = RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed);
-    let rate = crate::netdev::active_rx_rate();
+    // **`window <KB>` bleibt, und es bleibt ein WERKZEUG.** Ohne den
+    // Deckel gilt DRS; mit ihm misst man, was DRS haette finden sollen.
     let cap = if forced > 0 {
         (forced as usize).min(RCV_WND_MAX)
-    } else if rate == u32::MAX {
-        RCV_WND_MAX
     } else {
-        let rtt_ticks = if conn.srtt_ticks > 0 { conn.srtt_ticks as u64 } else { 5 };
-        // bytes/sec × ticks ÷ 100 Hz = bytes-in-flight for one RTT.
-        ((rate as u64 * rtt_ticks / 100) as usize).clamp(RCV_WND_MIN, RCV_WND_MAX)
+        (conn.drs_win as usize).clamp(RCV_WND_MIN, RCV_WND_MAX)
     };
     let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
     {
         use core::sync::atomic::Ordering::Relaxed;
         WND_LAST.store(free as u32, Relaxed);
-        WND_SRTT.store(conn.srtt_ticks, Relaxed);
+        WND_SRTT.store(conn.srtt_ms, Relaxed);
         WND_CAP.store(cap as u32, Relaxed);
     }
     if conn.wscale_ok {
@@ -291,10 +365,49 @@ struct TcpConn {
     // collapsed the pipeline). Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
     ooo_runs: BTreeMap<u32, u32>,
-    // Smoothed RTT in ticks, from the peer's echoed TSecr (our TSval is ticks()).
-    // Used by recv_window() to size the advertised window to link-capacity × RTT
-    // (BDP) — so the window scales with the path, not a hardcoded value.
-    srtt_ticks: u32,
+    // Smoothed RTT in MILLISECONDS, from the peer's echoed TSecr. Kept as a
+    // diagnostic only; the advertised window comes from DRS below.
+    srtt_ms: u32,
+
+    // ── DRS: Dynamic Right Sizing (Linux `tcp_rcv_space_adjust`) ────────
+    //
+    // **Der Empfaenger misst, wieviel die ANWENDUNG pro RTT wirklich
+    // abholt, und leitet das Fenster daraus ab.** Keine Leitungsrate,
+    // keine Konstante. Hier stand bis 0.403.0 `rate × srtt`, mit der Rate
+    // aus `netdev::active_rx_rate()` — einer Zahl, die jeder Treiber ueber
+    // sich selbst BEHAUPTET — und einer RTT in 10-ms-Stufen. Damit war
+    // `window 1024` von Hand noetig, und Florian hat recht: das ist eine
+    // Notloesung, keine Loesung.
+    //
+    // Drei Regeln aus tcp_input.c, und alle drei haben einen Grund:
+    //
+    // * **Es waechst nur** (`if (rcvbuf > sk->sk_rcvbuf)`, tcp_input.c:922,
+    //   und `if (copied <= space) goto new_measure`, :950). Ein Fenster,
+    //   das schrumpfen darf, geraet in eine Spirale — weniger Fenster,
+    //   weniger Durchsatz, weniger gemessener Bedarf.
+    // * **Die RTT kommt aus dem MINIMUM**, nicht aus dem geglaetteten Wert
+    //   (`if (old_sample == 0 || m < old_sample)`, :817). Der geglaettete
+    //   misst den eigenen Stau mit — ein Regelkreis mit positivem
+    //   Vorzeichen.
+    // * **Keine RTT-Probe, solange die Empfangsschlange nicht leer ist**
+    //   (`if (tp->rcv_nxt != tp->copied_seq) return`, :833). Sonst misst
+    //   man die eigene Anwendung statt der Strecke.
+
+    /// `rcv_rtt_est.rtt_us` — in ACHTELN einer Mikrosekunde, wie Linux
+    /// (`long m = sample << 3`).
+    rcv_rtt_us8: u32,
+    /// `rcvq_space.seq` — wieviel die Anwendung beim letzten Messpunkt
+    /// insgesamt abgeholt hatte. Wir zaehlen absolut statt in
+    /// Sequenznummern; dasselbe Delta.
+    rcvq_copied0: u64,
+    /// Wieviel sie insgesamt abgeholt hat (`copied_seq`).
+    copied_total: u64,
+    /// `rcvq_space.time`
+    rcvq_time_us: u64,
+    /// `rcvq_space.space` — der gemessene Bedarf einer RTT.
+    rcvq_space: u32,
+    /// `sk_rcvbuf` — das Fenster, das DRS erlaubt.
+    drs_win: u32,
 
     // Retransmit. `send_buf` holds every byte we sent and the peer has not
     // acknowledged, starting at `snd_una`; `rto_tick` is when the oldest of
@@ -405,7 +518,17 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
-        srtt_ticks: 0,
+        srtt_ms: 0,
+        rcv_rtt_us8: 0,
+        rcvq_copied0: 0,
+        copied_total: 0,
+        rcvq_time_us: 0,
+        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
+        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
+        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
+        // durch null.
+        rcvq_space: 10 * MSS as u32,
+        drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: crate::interrupts::ticks(),
@@ -544,7 +667,17 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
-        srtt_ticks: 0,
+        srtt_ms: 0,
+        rcv_rtt_us8: 0,
+        rcvq_copied0: 0,
+        copied_total: 0,
+        rcvq_time_us: 0,
+        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
+        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
+        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
+        // durch null.
+        rcvq_space: 10 * MSS as u32,
+        drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -628,7 +761,17 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
         ooo_runs: BTreeMap::new(),
-        srtt_ticks: 0,
+        srtt_ms: 0,
+        rcv_rtt_us8: 0,
+        rcvq_copied0: 0,
+        copied_total: 0,
+        rcvq_time_us: 0,
+        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
+        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
+        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
+        // durch null.
+        rcvq_space: 10 * MSS as u32,
+        drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
         retries: 0,
         last_send_tick: 0,
@@ -741,6 +884,10 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
         }
         conn.recv_buf.drain(..available);
     }
+    // tcp_input.c:930-932 „This function should be called every time
+    // data is copied to user space."
+    conn.copied_total = conn.copied_total.saturating_add(available as u64);
+    rcv_space_adjust(conn);
 
     // Window-update ACK — RATE-LIMITED.
     //
@@ -1056,10 +1203,16 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     if conn.ts_ok {
                         if let Some(tsecr) = parse_tsecr(data, data_offset) {
                             if tsecr != 0 {
-                                let sample = (crate::interrupts::ticks() as u32).wrapping_sub(tsecr);
+                                // In MILLISEKUNDEN, seit die Marke
+                                // `ts_now_ms()` ist. Alles ueber sechs
+                                // Sekunden ist keine RTT, sondern ein
+                                // Umlauf der Marke oder ein Echo aus
+                                // einer anderen Verbindung.
+                                let sample = ts_now_ms().wrapping_sub(tsecr);
                                 if (1..6000).contains(&sample) {
-                                    conn.srtt_ticks = if conn.srtt_ticks == 0 { sample }
-                                        else { (conn.srtt_ticks * 7 + sample) / 8 };
+                                    conn.srtt_ms = if conn.srtt_ms == 0 { sample }
+                                        else { (conn.srtt_ms * 7 + sample) / 8 };
+                                    rcv_rtt_update(conn, sample * 1000);
                                 }
                             }
                         }
@@ -1356,7 +1509,7 @@ fn syn_opts(opts: &mut [u8; 40]) -> usize {
     opts[7] = 1;            // NOP — align the 10-byte Timestamp to 4 bytes
     opts[8] = 8;            // Timestamp option kind
     opts[9] = 10;           // length
-    let tsval = crate::interrupts::ticks() as u32;
+    let tsval = ts_now_ms();
     opts[10..14].copy_from_slice(&tsval.to_be_bytes()); // TSval
     // opts[14..18] TSecr = 0 on a SYN
     opts[18] = 1;           // NOP — align the 3-byte WScale to a 4-byte boundary
@@ -1608,7 +1761,7 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
     if conn.ts_ok {
         opts[len] = 1; opts[len + 1] = 1;          // NOP, NOP
         opts[len + 2] = 8; opts[len + 3] = 10;     // Timestamp kind, len
-        let tsval = crate::interrupts::ticks() as u32;
+        let tsval = ts_now_ms();
         opts[len + 4..len + 8].copy_from_slice(&tsval.to_be_bytes());
         opts[len + 8..len + 12].copy_from_slice(&conn.ts_recent.to_be_bytes());
         len += 12;

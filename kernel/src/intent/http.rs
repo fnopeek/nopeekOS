@@ -251,8 +251,8 @@ fn do_http_request(args: &str, use_tls: bool) {
                     // KLEINERER Deckel als auf der schnellen Leitung. Genau
                     // verkehrt herum, und hier steht es als Zahl.
                     let (wnd, srtt, cap) = crate::net::tcp::window_diag();
-                    kprintln!("[npk]      tcp-wnd: angeboten={}K  deckel={}K  srtt={} Takte (={} ms)",
-                        wnd / 1024, cap / 1024, srtt, srtt * 10);
+                    kprintln!("[npk]      tcp-wnd: angeboten={}K  deckel={}K  srtt={} ms",
+                        wnd / 1024, cap / 1024, srtt);
                     // Do WE discard received bytes in the rx_desc walker?
                     let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
                     kprintln!("[npk]      rx-parse: frames={}  truncated_batches={}  DISCARDED={} B",
