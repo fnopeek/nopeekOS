@@ -2550,6 +2550,14 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     // leaves three chunks in flight.
     let chunk = alloc::vec![0u8; 64 * 1024];
     let mut sent = 0;
+    // **Erzeugerbegrenzt oder fensterbegrenzt.** Gemessen am 2026-09-22:
+    // 42 Mbit Upload bei 0,85 % belegter Luft und einem Treiber, der
+    // 63 000-mal je Sekunde vergeblich nach Sendearbeit sieht. Aus dem
+    // Durchsatz laesst sich beides zurueckrechnen, je nachdem welche RTT
+    // man einsetzt - also wird es jetzt gezaehlt statt gerechnet.
+    crate::net::tcp::send_stats_reset();
+    let mut poll_tsc = 0u64;
+    let t_body = crate::interrupts::rdtsc();
     while sent < total {
         let n = core::cmp::min(chunk.len(), total - sent);
         // Say WHICH failure it was. "send body failed" covers a peer that
@@ -2563,7 +2571,28 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         sent += n;
         // Drive the stack so ACKs come in and the retransmit buffer is trimmed
         // (send() has no flow control, so without this the send_buf grows).
+        let t_p = crate::interrupts::rdtsc();
         crate::net::poll();
+        poll_tsc = poll_tsc.wrapping_add(
+            crate::interrupts::rdtsc().wrapping_sub(t_p));
+    }
+    {
+        let wall = crate::interrupts::rdtsc().wrapping_sub(t_body);
+        let (send_tsc, blocked_tsc, segs, wb, maxbuf) =
+            crate::net::tcp::send_stats();
+        let pct = |x: u64| if wall == 0 { 0 } else { x * 100 / wall };
+        kprintln!("[netbench] sendepfad: {} Segmente · in send {} % · \
+abgewiesen {} % ({}x WouldBlock) · in net::poll {} % · groesster \
+send_buf {} KB", segs, pct(send_tsc), pct(blocked_tsc), wb,
+            pct(poll_tsc), maxbuf / 1024);
+        if segs > 0 {
+            // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.
+            // 1448 Byte je Segment bei 42 Mbit sind 275 us - und alles,
+            // was ein Segment WIRKLICH kostet, steht hier.
+            kprintln!("[netbench] je Segment: {} ns in send, {} ns Wanduhr",
+                crate::interrupts::tsc_to_ns(send_tsc / segs),
+                crate::interrupts::tsc_to_ns(wall / segs));
+        }
     }
 
     // Read the server's response (it measured the receive rate).

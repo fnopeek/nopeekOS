@@ -51,6 +51,13 @@ pub fn uptime_us() -> u64 {
     rdtsc().saturating_sub(boot) / per_us
 }
 
+/// TSC-Takte in Nanosekunden. Fuer Messungen, die kleiner sind als eine
+/// Mikrosekunde — die Kosten EINES TCP-Segments zum Beispiel.
+pub fn tsc_to_ns(cycles: u64) -> u64 {
+    let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);
+    cycles.saturating_mul(1_000_000_000) / freq
+}
+
 /// Read CPU Time Stamp Counter (works on all x86_64, no PIC needed).
 pub fn rdtsc() -> u64 {
     let lo: u32;
