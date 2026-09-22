@@ -4210,17 +4210,25 @@ pub enum RoamMode {
 
 /// Der reine Teil, damit `framecheck.py` ihn ohne Geraet fahren kann.
 ///
-/// **Ein unverstandener Wert ist AN**, dieselbe Regel wie bei `band:`,
-/// `bw:` und `txagg:`.
+/// **Die Vorgabe ist `NurBericht`, und das ist eine Abweichung von der
+/// Regel „ein unverstandener Wert ist die Vorgabe".**
+///
+/// Sie hat einen Grund: ein Wechsel ist ein EINGRIFF in eine laufende
+/// Verbindung, und am Geraet endete jede Neuanmeldung nach dem Wechsel
+/// in `Grund 15: Vierwegehandschlag: Zeitueberschreitung` — dreizehn
+/// Mal hintereinander. Solange das nicht bewiesen durchlaeuft, darf
+/// Roaming keine stehende Verbindung anfassen. Es HOERT sich um und
+/// SAGT, was es taete; das kostet nichts und ist genau die Messung, aus
+/// der die Schwellen kommen.
+///
+/// `on` schaltet es scharf, `off` ganz ab.
 pub fn roam_from(v: &[u8]) -> RoamMode {
     if v.starts_with(b"off") || v.starts_with(b"aus") || v == b"0" {
         RoamMode::Aus
-    } else if v.starts_with(b"nur") || v.starts_with(b"report")
-        || v.starts_with(b"bericht")
-    {
-        RoamMode::NurBericht
-    } else {
+    } else if v.starts_with(b"on") || v.starts_with(b"an") || v == b"1" {
         RoamMode::An
+    } else {
+        RoamMode::NurBericht
     }
 }
 
@@ -4228,11 +4236,11 @@ fn read_roam_mode() -> RoamMode {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
     if n <= 0 {
-        return RoamMode::An;
+        return RoamMode::NurBericht;
     }
     match cfg_get(&cfg[..n as usize], b"roam") {
         Some((a, b)) => roam_from(&cfg[a..b]),
-        None => RoamMode::An,
+        None => RoamMode::NurBericht,
     }
 }
 
@@ -4254,6 +4262,12 @@ const ROAM_SCAN_GAP_MS: u64 = 10_000;
 const ROAM_GAP_MS: u64 = 10_000;
 /// So viel staerker muss ein Kandidat sein. **Setzung.**
 const ROAM_BETTER_DB: i8 = 8;
+/// Was eine HALBIERUNG der Bandbreite kosten darf, in dB. **Setzung**,
+/// und die Groessenordnung ist nicht gegriffen: die Hälfte der Breite ist
+/// die Haelfte der Bruttorate, und drei dB mehr Pegel bringen auf einer
+/// belegten Strecke bei weitem nicht das Doppelte. Zehn dB je Stufe
+/// heisst: von 80 auf 20 MHz muss ein Kandidat zwanzig dB besser sein.
+const ROAM_NARROWER_COST_DB: i8 = 10;
 /// ... ODER er ist BREITER (VHT80 gegen HT40) und hoechstens so viel
 /// schwaecher. **Setzung** — und der Fall, der Florian getroffen hat:
 /// ein Repeater bei -50 dBm mit HT40 schlaegt den AP bei -55 dBm mit
@@ -4296,10 +4310,6 @@ struct Roam {
     last_event: i8,
     last_scan_ms: u64,
     last_roam_ms: u64,
-    /// Stand der Fehlerzaehler beim letzten Blick — die Quote wird ueber
-    /// die RUNDE gerechnet, nicht ueber die Verbindung.
-    ofdm_ok0: u64,
-    ofdm_err0: u64,
     /// Wie oft wir gewechselt haben und wie oft wir uns umgehoert haben.
     scans: u32,
     roams: u32,
@@ -4310,8 +4320,7 @@ struct Roam {
 impl Roam {
     const fn new() -> Self {
         Roam { ave: dm::Ewma::new(), count: 0, last_event: 0,
-               last_scan_ms: 0, last_roam_ms: 0, ofdm_ok0: 0, ofdm_err0: 0,
-               scans: 0, roams: 0,
+               last_scan_ms: 0, last_roam_ms: 0, scans: 0, roams: 0,
                to: None }
     }
     /// Eine Bake der eigenen Zelle.
@@ -6244,26 +6253,35 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             {
                 let sig = link.roam.dbm();
                 let le = link.roam.last_event;
-                // **Die Quote der letzten Runde, nicht die der ganzen
-                // Verbindung.**
+                // **Der Pegel ist der einzige Ausloeser — wie bei
+                // mac80211.**
                 //
-                // Hier stand `ls.ofdm_err * 4 > ls.ofdm_ok` auf den
-                // LAUFENDEN Summen. Die wachsen monoton: hat die Quote
-                // einmal die Schwelle ueberschritten, bleibt sie
-                // darueber, auch wenn die Strecke sich laengst erholt
-                // hat. Ein Ausloeser, der nie wieder ausgeht, ist
-                // keiner.
-                let d_ok = ls.ofdm_ok.saturating_sub(link.roam.ofdm_ok0);
-                let d_err = ls.ofdm_err.saturating_sub(link.roam.ofdm_err0);
-                link.roam.ofdm_ok0 = ls.ofdm_ok;
-                link.roam.ofdm_err0 = ls.ofdm_err;
-                let crc_hoch = d_ok + d_err > 1000 && d_err * 4 > d_ok;
+                // Hier standen zwei Zugaben von mir, und BEIDE waren
+                // derselbe Fehler: ein Zaehler, der nicht misst, was ich
+                // annahm.
+                //
+                // * „Rate am Boden" las `curr_rx_rate`, also die Rate des
+                //   LETZTEN Rahmens — und eine Bake geht immer mit OFDM
+                //   6M hinaus. Fast immer wahr.
+                // * „jeder vierte Rahmen kaputt" las `ofdm_err/ofdm_ok`.
+                //   Die kommen aus einem CRC32-Zaehler der HARDWARE
+                //   (rtw8822c.c:2855) und zaehlen OFDM-Rahmen AUF DEM
+                //   KANAL, auch fremde. rtw88 benutzt sie fuer nichts
+                //   ausser Debug- und Coex-Ausgaben. Auf dieser Strecke
+                //   liegt die Quote dauerhaft bei 21-25 %, also war auch
+                //   dieser Ausloeser permanent wahr — und die Verbindung
+                //   wechselte im Zehnsekundentakt.
+                //
+                // Was bleibt, ist `ieee80211_handle_beacon_sig`: Schwelle
+                // mit Hysterese auf dem geglaetteten Bakenpegel, und
+                // sonst nichts. **Ein Ausloeser, der nie wieder ausgeht,
+                // ist keiner.**
                 let tief = sig < ROAM_THOLD_DBM
                     && (le == 0 || sig < le - ROAM_HYST_DB);
                 // Nie suchen, waehrend Daten fliessen: ein
                 // Umhoerversuch kostet dann Durchsatz fuer nichts.
                 let ruhig = d.stats.rx_throughput < 2 && d.stats.tx_throughput < 2;
-                if (tief || crc_hoch) && ruhig
+                if tief && ruhig
                     && now.saturating_sub(link.roam.last_scan_ms)
                         > ROAM_SCAN_GAP_MS
                 {
@@ -6276,9 +6294,6 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     host::print(" (Schwelle ");
                     print_dbm(ROAM_THOLD_DBM);
                     host::print(")");
-                    if crc_hoch {
-                        host::print(" · jeder vierte Rahmen kaputt");
-                    }
                     host::print(" — die bekannten Kanaele werden abgehorcht\n");
                     host::loud_end();
 
@@ -6355,6 +6370,26 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                 link.roam.last_roam_ms = now;
                                 link.roam.roams += 1;
                                 link.roam.to = Some(z);
+                                // **Die Verbindung ORDENTLICH abbauen,
+                                // genau wie auf dem Rauswurf-Weg.**
+                                //
+                                // Hier stand nur `return`. Der Kernel
+                                // behielt damit seinen Traeger und schob
+                                // waehrend der ganzen Neuanmeldung
+                                // weiter Daten hinein (`tx refused
+                                // no-link`, `SENDETOR ZU`), und `wifid`
+                                // sah kein `link down` — es haette
+                                // seinen alten Supplicant behalten,
+                                // waehrend wir uns bei einer ANDEREN
+                                // Zelle anmelden.
+                                if ls.authorized || ls.link_up_sent {
+                                    host::netdev_set_link(false);
+                                    let down = [EV_LINK_DOWN,
+                                                LINK_DOWN_DEAUTH];
+                                    host::wifi_send_event(&down);
+                                }
+                                ls.authorized = false;
+                                ls.link_up_sent = false;
                                 return PumpEnd::Roam;
                             }
                         }
@@ -6540,8 +6575,6 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         link.roam.count = 0;
         link.roam.last_event = 0;
         link.roam.last_roam_ms = host::now_ms();
-        link.roam.ofdm_ok0 = ls.ofdm_ok;
-        link.roam.ofdm_err0 = ls.ofdm_err;
     }
     host::loud_begin();
     host::print("[rtl8822ce] Verbindung weg — Anlauf ");
@@ -6729,7 +6762,21 @@ fn roam_better(jetzt_dbm: i8, jetzt_bw: usize, kand: &Bss,
                max_bw: usize) -> bool {
     let (_, kand_bw, _) = chan_params(kand.channel, kand.width(), max_bw);
     let d = kand.best as i32 - jetzt_dbm as i32;
-    if d >= ROAM_BETTER_DB as i32 {
+    // **Breite wird nicht gegen Pegel verkauft.**
+    //
+    // Am Geraet: `K104 -58 dBm 80 MHz (wir)` gegen `K7 -49 dBm 20 MHz`,
+    // und die Regel nahm den zweiten — neun dB lauter, aber ein VIERTEL
+    // der Bandbreite. Die Regel schuetzte die Breite nur in die eine
+    // Richtung: der „breiter"-Zweig durfte Pegel kosten, der
+    // „staerker"-Zweig durfte Breite kosten, und niemand hat ihn daran
+    // gehindert.
+    //
+    // Jede Halbierung der Breite muss mit `ROAM_NARROWER_COST_DB`
+    // bezahlt werden. Von 80 auf 20 MHz sind das zwei Stufen — bei 10 dB
+    // je Stufe also zwanzig, und die neun dB reichen nicht mehr.
+    let schmaler = jetzt_bw.saturating_sub(kand_bw) as i32;
+    let preis = schmaler * ROAM_NARROWER_COST_DB as i32;
+    if d >= ROAM_BETTER_DB as i32 + preis {
         return true;
     }
     kand_bw > jetzt_bw && d >= -(ROAM_WIDER_TOLERANCE_DB as i32)

@@ -483,16 +483,21 @@ AMPDU_F = [
 ]
 
 # `roam_from`: der Wert hinter `roam:`.
-# **Ein unverstandener Wert ist AN**, dieselbe Regel wie ueberall sonst.
+#
+# **Hier ist die Vorgabe NICHT „an", und das ist die Abweichung von der
+# Regel, die sonst ueberall gilt.** Ein Wechsel greift in eine laufende
+# Verbindung ein; am Geraet endete jede Neuanmeldung danach in
+# `Grund 15`. Bis das bewiesen durchlaeuft, wird nur BERICHTET.
 ROAM = [
     ("off -> aus", "off", "RoamMode::Aus"),
     ("aus -> aus", "aus", "RoamMode::Aus"),
     ("0 -> aus", "0", "RoamMode::Aus"),
-    ("nurbericht -> nur berichten", "nurbericht", "RoamMode::NurBericht"),
-    ("report -> nur berichten", "report", "RoamMode::NurBericht"),
     ("on -> an", "on", "RoamMode::An"),
-    ("leer -> Vorgabe AN", "", "RoamMode::An"),
-    ("Tippfehler bleibt AN", "jaklar", "RoamMode::An"),
+    ("an -> an", "an", "RoamMode::An"),
+    ("1 -> an", "1", "RoamMode::An"),
+    ("nurbericht -> nur berichten", "nurbericht", "RoamMode::NurBericht"),
+    ("leer -> Vorgabe NUR BERICHT", "", "RoamMode::NurBericht"),
+    ("Tippfehler wechselt NICHT", "jaklar", "RoamMode::NurBericht"),
 ]
 
 # `roam_better`: (Name, eigener Pegel, eigene Breite, Kandidat-Pegel,
@@ -514,8 +519,20 @@ BETTER = [
      -48, 1, -55, 0x05, 1, 106, "false"),
     ("breiter angesagt, aber Mitte unplausibel -> keine Breite, nein",
      -55, 1, -55, 0x05, 1, 104, "false"),
-    ("staerker UND schmaler -> die 8 dB entscheiden",
-     -70, 2, -60, 0x05, 0, 0, "true"),
+    ("80 -> 20 MHz fuer 9 dB mehr Pegel: NEIN (zwei Stufen = 20 dB)",
+     -58, 2, -49, 0x05, 0, 0, "false"),
+    ("80 -> 20 MHz fuer 21 dB: ja",
+     -70, 2, -49, 0x05, 0, 0, "true"),
+    ("80 -> 40 MHz fuer 12 dB: ja (eine Stufe = 10 + 8)",
+     -70, 2, -52, 0x05, 1, 106, "true"),
+    # **Meine Erwartung war hier falsch, nicht der Code.** Mit
+    # unplausibler VHT-Mitte faellt der Kandidat auf HT40 zurueck, nicht
+    # auf 20 MHz — das HT-Byte erlaubt ja 40. Also EINE Stufe, Preis 10,
+    # und 18 dB reichen.
+    ("80 -> 40 MHz (unplausible VHT-Mitte) fuer 18 dB: ja, eine Stufe",
+     -70, 2, -52, 0x05, 1, 104, "true"),
+    ("80 -> 20 MHz (AP erlaubt keine Breite) fuer 18 dB: nein, zwei Stufen",
+     -70, 2, -52, 0x00, 0, 0, "false"),
 ]
 
 # `bw_cap_from`: der Wert hinter `bw:` -> 0/1/2 (20/40/80 MHz).
@@ -564,6 +581,8 @@ def main():
                  "ROAM_BETTER_DB")
     roamt = grab(src, r"\n(const ROAM_WIDER_TOLERANCE_DB: i8 = \d+;)",
                  "ROAM_WIDER_TOLERANCE_DB")
+    roamn = grab(src, r"\n(const ROAM_NARROWER_COST_DB: i8 = \d+;)",
+                 "ROAM_NARROWER_COST_DB")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
     # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
@@ -734,7 +753,7 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
         + "\n\n" + chanp + "\n\n" + csastru + "\n\n" + csafn \
         + "\n\n" + bwcapf + "\n\n" + txaggf \
         + "\n\n" + roame + "\n\n" + roamf \
-        + "\n\n" + roamk + "\n\n" + roamt \
+        + "\n\n" + roamk + "\n\n" + roamt + "\n\n" + roamn \
         + "\n\n" + bssstru + "\n\n" + bsswidth + "\n\n" + betterf \
         + "\n\n" + ba_buf + "\n\n" + ampdu_f \
         + "\n\n" + addba_rq + "\n\n" + addba_rs + "\n\n" + addba_rp \
