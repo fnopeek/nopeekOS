@@ -2504,6 +2504,59 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             best_all
         }
     };
+    // **Die Kandidaten, nach Signal.**
+    //
+    // Gewaehlt wird nach Feldstaerke, und das ist eine ANNAHME: dass
+    // das lauteste Netz auch das schnellste ist. Am Geraet stimmte sie
+    // nicht — ein Repeater bei -50 dBm mit HT40 schlaegt den AP bei
+    // -55 dBm mit VHT80, und liefert die HAELFTE. Gesehen haben wir es
+    // erst, als der Durchsatz einbrach und die BSSID im Bericht eine
+    // andere war.
+    //
+    // Die Zahlen dafuer liegen seit dem Suchlauf alle vor; sie standen
+    // nur nirgends. Was die Zelle KANN, entscheidet dieselbe Funktion,
+    // die spaeter auch den Kanal legt — eine Rechnung, eine Antwort.
+    if n_found > 0 {
+        host::print("  Zellen nach Signal:\n");
+        let mut gezeigt = [false; MAX_BSS];
+        for _ in 0..n_found.min(8) {
+            let mut best: Option<usize> = None;
+            for i in 0..n_found {
+                if gezeigt[i] || found[i].ssid_len == 0 {
+                    continue;
+                }
+                if best.map_or(true, |k| found[i].best > found[k].best) {
+                    best = Some(i);
+                }
+            }
+            let Some(i) = best else { break };
+            gezeigt[i] = true;
+            let b = &found[i];
+            host::print("    ");
+            print_dbm(b.best);
+            host::print("  K");
+            host::print_dec(b.channel as u32);
+            if b.channel < 100 {
+                host::print(" ");
+            }
+            host::print("  ");
+            let (_, bw, _) = chan_params(b.channel, b.width(), 2);
+            host::print(match (bw, b.channel > 14) {
+                (2, _) => "VHT80",
+                (1, true) => "VHT40",
+                (1, false) => " HT40",
+                (_, true) => "VHT20",
+                _ => " HT20",
+            });
+            host::print("  \"");
+            print_ssid(&b.ssid[..b.ssid_len as usize]);
+            host::print("\"");
+            if target.map_or(false, |t| t.bssid == b.bssid) {
+                host::print("   <- gewaehlt");
+            }
+            host::print("\n");
+        }
+    }
     if let Some(b) = target {
         host::print("  Ziel fuer Stufe 5e: \"");
         print_ssid(&b.ssid[..b.ssid_len as usize]);
