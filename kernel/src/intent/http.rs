@@ -2569,15 +2569,25 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
             // uns dieselbe Zeile ohne Zahlen einen ganzen Lauf gekostet:
             // ein volles Fenster, ein geschlossenes Fenster und eine
             // verpasste Weckung sehen von aussen gleich aus.
+            use core::sync::atomic::Ordering::Relaxed;
             let (_, _, segs, wb, maxbuf) = crate::net::tcp::send_stats();
+            let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
             kprintln!("[netbench]   send_buf {} KB · Deckel {} KB · Gegenueber {} KB \
 · {} Segmente · {}x WouldBlock · Schlange voll {}x",
                 crate::net::tcp::snd_unacked_of(handle) / 1024,
                 crate::net::tcp::snd_limit_of(handle) / 1024,
                 crate::net::tcp::snd_wnd_of(handle) / 1024,
                 segs, wb,
-                crate::net::tcp::SEND_REFUSED.load(
-                    core::sync::atomic::Ordering::Relaxed));
+                crate::net::tcp::SEND_REFUSED.load(Relaxed));
+            // **Die Zahlen, ohne die ich vier Releases lang geraten
+            // habe.** Ein Staufenster, das bei eins klebt, und ein
+            // Sendepuffer, der voll ist, sehen von aussen gleich aus —
+            // und verlangen das Gegenteil voneinander.
+            kprintln!("[netbench]   stau: cwnd {} · ssthresh {} · {} Doppelquittungen{} \
+· {}x schnell wiederholt · {}x Zeitueberschreitung",
+                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" },
+                crate::net::tcp::FAST_RETRANS.load(Relaxed),
+                crate::net::tcp::RTO_FIRED.load(Relaxed));
             let _ = maxbuf;
             let _ = crate::net::tcp::close(handle);
             return Err("send body failed");
@@ -2605,9 +2615,14 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
             crate::net::tcp::SEND_REFUSED.load(
                 core::sync::atomic::Ordering::Relaxed));
         {
+            use core::sync::atomic::Ordering::Relaxed;
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
-            kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{}",
-                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" });
+            kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{} \
+· {}x schnell wiederholt · {}x Zeitueberschreitung · Schlange voll {}x",
+                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" },
+                crate::net::tcp::FAST_RETRANS.load(Relaxed),
+                crate::net::tcp::RTO_FIRED.load(Relaxed),
+                crate::net::tcp::SEND_REFUSED.load(Relaxed));
         }
         if segs > 0 {
             // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.

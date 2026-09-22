@@ -1035,6 +1035,12 @@ pub static SEND_MAXBUF: AtomicU64 = AtomicU64::new(0);
 /// war das ein stiller Verlust (`tx drops full`), jetzt ist es Gegendruck
 /// — und die Zahl sagt, wie oft er greift.
 pub static SEND_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// Schnelle Wiederholungen und Zeitueberschreitungen. **Ohne die zwei
+/// Zahlen ist ein zu kleines Fenster nicht von einem verlorenen Segment
+/// zu unterscheiden**, und genau daran habe ich vier Releases lang
+/// vorbeigeraten.
+pub static FAST_RETRANS: AtomicU64 = AtomicU64::new(0);
+pub static RTO_FIRED: AtomicU64 = AtomicU64::new(0);
 
 /// Wohin der Sendepuffer gewachsen ist, und was das Gegenueber zuletzt
 /// angeboten hat. Beides nur fuer den Bericht — ohne die zwei Zahlen ist
@@ -1069,6 +1075,8 @@ pub fn send_stats_reset() {
     SEND_WOULDBLOCK.store(0, Ordering::Relaxed);
     SEND_MAXBUF.store(0, Ordering::Relaxed);
     SEND_REFUSED.store(0, Ordering::Relaxed);
+    FAST_RETRANS.store(0, Ordering::Relaxed);
+    RTO_FIRED.store(0, Ordering::Relaxed);
 }
 
 /// (Takte in send, Takte in abgewiesenen send, Segmente, WouldBlock,
@@ -1187,6 +1195,25 @@ fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
         let delta = conn.snd_cwnd_cnt / w;
         conn.snd_cwnd_cnt -= delta * w;
         conn.snd_cwnd += delta;
+    }
+}
+
+/// Das Segment an `snd_una` noch einmal — und nur dieses.
+/// `tcp_retransmit_skb` auf dem Kopf der Wiederholungsschlange.
+/// `snd_nxt` bleibt, wo es ist: was dahinter liegt, ist unterwegs.
+fn retransmit_head(conn: &mut TcpConn) {
+    if conn.send_buf.is_empty() {
+        return;
+    }
+    let mss = eff_mss(conn).min(1460);
+    let n = conn.send_buf.len().min(mss);
+    let mut chunk = [0u8; 1460];
+    chunk[..n].copy_from_slice(&conn.send_buf[..n]);
+    let w = recv_window(conn);
+    if send_seg(conn, conn.snd_una, conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+        conn.last_send_tick = crate::interrupts::ticks();
+    } else {
+        SEND_REFUSED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1627,9 +1654,25 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         conn.snd_cwnd = conn.snd_ssthresh + DUPACK_THRESH;
                         conn.in_recovery = true;
                         conn.recovery_end = conn.snd_nxt;
-                        conn.snd_nxt = conn.snd_una;
                         conn.snd_cwnd_cnt = 0;
-                        write_xmit(conn);
+                        // **NUR das fehlende Segment, nicht das ganze
+                        // Fenster.**
+                        //
+                        // Hier stand `snd_nxt = snd_una` — Go-back-N.
+                        // Damit wurde `in_flight` null, und `write_xmit`
+                        // schob auf der Stelle `ssthresh + 3` Pakete in
+                        // EINEM Zug hinaus: bei einem vorher grossen
+                        // Fenster mehrere hundert. Am Geraet sprang
+                        // `Schlange voll` von 0 auf 1384.
+                        //
+                        // Drei Doppelquittungen sagen „EIN Segment
+                        // fehlt, der Rest kommt an" (RFC 5681 §3.2).
+                        // Also genau dieses eine noch einmal; alles
+                        // dahinter ist unterwegs und darf es bleiben.
+                        // Go-back-N gehoert zum RTO, wo wir wirklich
+                        // nichts mehr wissen.
+                        retransmit_head(conn);
+                        FAST_RETRANS.fetch_add(1, Ordering::Relaxed);
                     } else if conn.in_recovery {
                         // „Inflate": jede weitere Doppelquittung sagt,
                         // dass ein Segment die Leitung verlassen hat.
@@ -2006,6 +2049,7 @@ pub fn tick_connections() {
                         slot.in_recovery = false;
                         slot.dupacks = 0;
                         slot.snd_nxt = slot.snd_una;
+                        RTO_FIRED.fetch_add(1, Ordering::Relaxed);
                         write_xmit(slot);
                     }
                 }
