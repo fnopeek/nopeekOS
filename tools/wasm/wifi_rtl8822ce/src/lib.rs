@@ -1953,6 +1953,19 @@ fn build_probe_req_to(out: &mut [u8; 128], mac: &[u8; 6], ch: u8,
     n + 3
 }
 
+/// Die Kanalauslastung, die eine Zelle SELBST meldet — in Prozent.
+///
+/// Fehlt das Element, steht nichts da: eine erfundene Null waere eine
+/// Aussage.
+fn print_last(b: &Bss) {
+    if !b.bss_load_seen {
+        return;
+    }
+    host::print("  belegt ");
+    host::print_dec(b.bss_load as u32 * 100 / 255);
+    host::print("%");
+}
+
 /// Eine Zeile je Antwort: BSSID, Signal und der Netzname aus dem
 /// SSID-Element. Ein Name macht aus „ein Rahmen kam" ein „wir sehen X".
 fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
@@ -2041,6 +2054,26 @@ struct Bss {
     /// bei `ht_op_seen`, und aus demselben Grund: ohne sie sieht „die
     /// Zelle faehrt 20/40" aus wie „wir lesen das Element nicht".
     vht_op_seen: bool,
+    /// Byte 2 des BSS-Load-Elements (802.11 §9.4.2.26, id 11):
+    /// **wieviel Prozent der Zeit der AP seinen Kanal belegt SIEHT**,
+    /// als 0..255.
+    ///
+    /// **Das ist die einzige Zahl im Beacon, die einen Repeater
+    /// verraten kann.** Er teilt sich die Luft mit seinem eigenen
+    /// Backhaul zur Basis — jedes Byte geht zweimal durch den Aether —
+    /// und sieht seinen Kanal deshalb deutlich voller als eine Basis am
+    /// Kabel. Pegel und Bandbreite sehen das NICHT: am Geraet meldete
+    /// der Repeater 866 Mbit bei -23 dBm und lieferte 222, weil 53 % der
+    /// Zeit sein Backhaul lief.
+    ///
+    /// **Vorerst wird der Wert nur GEZEIGT und geht in keine
+    /// Entscheidung ein.** wpa_supplicant wertet ihn auch nicht aus: an
+    /// der Stelle, wo es hingehoerte, steht in `scan.c:3425` woertlich
+    /// `TODO: channel utilization and AP load (e.g., from AP Beacon)`.
+    /// Es gibt hier also keine Referenz — und eine Regel ohne Quelle und
+    /// ohne Messung waere geraten.
+    bss_load: u8,
+    bss_load_seen: bool,
 }
 
 const MAX_BSS: usize = 48;
@@ -2462,6 +2495,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+        bss_load: 0, bss_load_seen: false,
     }; MAX_BSS];
     let mut n_found = 0usize;
     let mut probes = 0u32;
@@ -2750,6 +2784,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 (_, true) => "VHT20",
                 _ => " HT20",
             });
+            print_last(b);
             host::print("  \"");
             print_ssid(&b.ssid[..b.ssid_len as usize]);
             host::print("\"");
@@ -2897,6 +2932,12 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
             // standen darauf, als der Beacon hereinkam.
             // 45 = HT Capabilities (802.11 §9.4.2.55). Byte 0:1 ist das
             // Faehigkeitsfeld; Bit 1 sagt, ob der AP 40 MHz KANN.
+            // 11 = BSS Load (802.11 §9.4.2.26). Byte 0:1 die Zahl der
+            // Stationen, Byte 2 die Kanalauslastung als 0..255.
+            11 if len >= 3 => {
+                e.bss_load = f[i + 4];
+                e.bss_load_seen = true;
+            }
             45 if len >= 2 => {
                 e.ht_cap = u16::from_le_bytes([f[i + 2], f[i + 3]]);
             }
@@ -6426,7 +6467,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         capability: 0, rsn: [0; 64], rsn_len: 0,
                         ht_param: 0, ht_op_seen: false, ht_cap: 0,
                         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0,
-                        vht_op_seen: false,
+                        vht_op_seen: false, bss_load: 0,
+                        bss_load_seen: false,
                     }; ROAM_BSS_MAX];
                     let mut n_kand = 0usize;
                     let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
@@ -6459,6 +6501,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                             1 => "40 MHz",
                             _ => "20 MHz",
                         });
+                        print_last(b);
                         if b.bssid == link.bssid {
                             host::print("  (wir)");
                         } else if roam_better(sig, d.cur_bw, b, max_bw) {
@@ -6828,6 +6871,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
         ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
         vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+        bss_load: 0, bss_load_seen: false,
     };
     *found = [leer; ROAM_BSS_MAX];
     *n_found = 0;
