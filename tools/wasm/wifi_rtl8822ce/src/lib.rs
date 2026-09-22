@@ -1735,7 +1735,7 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // Ein Probe Request. Das baut in Linux `ieee80211_build_probe_req` —
     // die OBERE Haelfte, die hier `wifid` wird. Er steht hier, weil der
     // Sendeweg sonst nichts zu senden haette; 5c loest ihn ab.
-    let mut frame = [0u8; 64];
+    let mut frame = [0u8; 128];
     let n = build_probe_req(&mut frame, &mac, 1);
     let frame = &frame[..n];
 
@@ -1849,19 +1849,38 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// Die Sequenznummer bleibt null — `en_hwseq` steht im Deskriptor, also
 /// vergibt sie der Chip. Gebaut wird nur, was ein AP zum Antworten
 /// braucht: die drei Adressen, das leere SSID-Element und die Raten.
-fn build_probe_req(out: &mut [u8; 64], mac: &[u8; 6], ch: u8) -> usize {
+fn build_probe_req(out: &mut [u8; 128], mac: &[u8; 6], ch: u8) -> usize {
+    build_probe_req_to(out, mac, ch, None, &[])
+}
+
+/// `ieee80211_build_probe_req` mit `IEEE80211_PROBE_FLAG_DIRECTED`
+/// (net/mac80211/util.c, gerufen aus `ieee80211_ap_probereq_get`,
+/// mlme.c:4518-4521).
+///
+/// **Ein GERICHTETER Probe Request ist die Frage „lebst du noch?" an
+/// genau einen AP** — Empfaenger und BSSID sind seine Adresse, und das
+/// SSID-Element traegt seinen Namen statt der Null-Laenge. Nur er
+/// beantwortet sie, und niemand sonst auf dem Kanal muss antworten.
+///
+/// Der Suchlauf ruft weiter ohne Ziel: dort ist die leere SSID die
+/// Frage „wer ist da?".
+fn build_probe_req_to(out: &mut [u8; 128], mac: &[u8; 6], ch: u8,
+                      bssid: Option<&[u8; 6]>, ssid: &[u8]) -> usize {
     let bcast = [0xffu8; 6];
+    let ziel = bssid.unwrap_or(&bcast);
     out[0..2].copy_from_slice(&0x0040u16.to_le_bytes()); // Verwaltung, Subtyp 4
     out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
-    out[4..10].copy_from_slice(&bcast); // addr1 = Empfaenger
+    out[4..10].copy_from_slice(ziel); // addr1 = Empfaenger
     out[10..16].copy_from_slice(mac); // addr2 = wir
-    out[16..22].copy_from_slice(&bcast); // addr3 = BSSID
+    out[16..22].copy_from_slice(ziel); // addr3 = BSSID
     out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq, siehe oben
     let mut n = 24;
-    // SSID-Element, Laenge 0 = „jedes Netz"
+    // SSID-Element. Laenge 0 = „jedes Netz", sonst der Name des einen.
+    let sl = ssid.len().min(32);
     out[n] = 0;
-    out[n + 1] = 0;
-    n += 2;
+    out[n + 1] = sl as u8;
+    out[n + 2..n + 2 + sl].copy_from_slice(&ssid[..sl]);
+    n += 2 + sl;
     // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit. Das hohe Bit
     // markiert eine GRUNDrate.
     out[n] = 1;
@@ -2265,7 +2284,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut probes = 0u32;
     let mut overflow = false;
 
-    let mut frame = [0u8; 64];
+    let mut frame = [0u8; 128];
     let t_start = host::now_us();
     let mut rf_ok = 0u32;
     let mut rf_bad_first = 0u8;
@@ -3700,6 +3719,15 @@ struct LinkStats {
     addba_tx: u32,
     /// Bitten des AP, die nicht einmal in den Zwischenpuffer passten.
     addba_drop: u32,
+    /// `IEEE80211_STA_CONNECTION_POLL` — wir stupsen gerade an.
+    poll_on: bool,
+    /// `ifmgd->probe_send_count`
+    probe_send_count: u32,
+    /// `ifmgd->probe_timeout`
+    probe_timeout_ms: u64,
+    /// Wie oft die Wache angeschlagen hat und wie oft sie recht hatte.
+    poll_started: u32,
+    poll_recovered: u32,
     /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
     /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
     /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
@@ -3816,6 +3844,8 @@ impl Default for LinkStats {
             probe_sn: 0, tx_acked: 0, tx_lost: 0, tx_no_report: 0,
             fw_crash: 0, reconnects: 0, c2h_ids: [(0, 0); 4],
             mgmt_sub: [0; 16], addba_req: 0, addba_tx: 0, addba_drop: 0,
+            poll_on: false, probe_send_count: 0, probe_timeout_ms: 0,
+            poll_started: 0, poll_recovered: 0,
             tx_batch_n: 0, tx_batch_sum: 0, tx_batch_max: 0,
             tx_ring_sum: 0, tx_ring_max: 0,
             rx_ppdu_n: 0, rx_data_ppdu_frames: 0, last_ppdu: 0xff,
@@ -3941,6 +3971,31 @@ fn bucket(us: u32, grenzen: &[u32; 4]) -> usize {
     4
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Die Verbindungswache — mlme.c:4278-4481, 8516-8560
+//
+// **Ausbleibende Baken sind kein Verbindungsverlust.** Linux stupst den
+// AP erst an und gibt erst auf, wenn auch das schweigt. Wir haben
+// `rtw_sw_beacon_loss_check` seit je portiert (`d.beacon_loss`) und den
+// Wert NIE gelesen: eine Verbindung, deren AP verschwindet, blieb bei
+// uns stehen, bis jemand neu startete.
+// ═══════════════════════════════════════════════════════════════
+
+/// mlme.c:58 `max_probe_tries`.
+const MAX_PROBE_TRIES: u32 = 5;
+/// mlme.c:86 `probe_wait_ms`.
+const PROBE_WAIT_MS: u64 = 500;
+/// mlme.c:4391 `unicast_limit = max(1, max_probe_tries - 3)`.
+///
+/// **Die letzten drei Versuche gehen als Rundruf hinaus**, und der
+/// Grund steht im Quellkommentar: manche APs beantworten NUR einen
+/// Rundruf. Wer nur gerichtet fragt, erklaert die fuer tot.
+const PROBE_UNICAST_LIMIT: u32 = if MAX_PROBE_TRIES > 4 {
+    MAX_PROBE_TRIES - 3
+} else {
+    1
+};
+
 /// Der TID, auf dem unsere Daten laufen. Best Effort, und es ist der
 /// einzige: ohne EDCA vom AP gibt es keinen Grund, eine zweite Schlange
 /// aufzumachen, und jede weitere kostet eine eigene Block-Ack-Sitzung.
@@ -4011,6 +4066,12 @@ struct Link {
     bssid: [u8; 6],
     mac: [u8; 6],
     channel: u8,
+    /// Der Name der Zelle. **Er wird fuer den gerichteten Probe Request
+    /// gebraucht** (`ieee80211_ap_probereq_get`, mlme.c:4518-4521: das
+    /// SSID-Element traegt den Namen des EINEN AP, nicht die Null-Laenge)
+    /// — und spaeter, um beim Wechseln Zellen derselben SSID zu finden.
+    ssid: [u8; 32],
+    ssid_len: u8,
     si: sta::StaInfo,
     highest_rate: u8,
     /// Laufende Folgenummer fuer Datenrahmen. Der Chip vergibt sie bei
@@ -4390,6 +4451,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         bssid: bss.bssid,
         mac,
         channel: bss.channel,
+        ssid: bss.ssid,
+        ssid_len: bss.ssid_len,
         si,
         highest_rate: highest_tx_rate(caps, hal),
         seq: 0,
@@ -4982,6 +5045,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
+            // mlme.c:131-145 — JEDER Rahmen vom AP setzt die Wache
+            // zurueck, nicht nur eine Bake. `addr2` ist der Sender, und
+            // bei allem, was von ihm kommt, ist das die BSSID.
+            if f.len() >= 16 && f[10..16] == bssid {
+                acc.heard_ap = true;
+            }
             // **Wieviele Rahmen der AP je Sendevorgang buendelt.**
             //
             // `ppdu_cnt` sind zwei Bit im Empfangsdeskriptor, und sie
@@ -5167,6 +5236,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         } else {
             ls.rx_empty += 1;
+        }
+
+        // mlme.c:4525-4528 `if (!ifmgd->probe_send_count)
+        // ieee80211_reset_ap_probe(sdata)` — der AP hat geantwortet.
+        // **Es zaehlt JEDER Rahmen von ihm**, nicht nur eine Antwort auf
+        // unsere Frage: wer Daten schickt, lebt.
+        if acc.heard_ap && ls.poll_on {
+            ls.poll_on = false;
+            ls.probe_send_count = 0;
+            ls.poll_recovered += 1;
+            host::say("[rtl8822ce] der AP ist wieder da — Verbindung steht\n");
         }
 
         // Was der Ringdurchlauf dem Watchdog zugetragen hat, eintragen.
@@ -5398,6 +5478,52 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
+        // ── Die Verbindungswache ─────────────────────────────────
+        //
+        // mlme.c:8516-8560, der Zweig `IEEE80211_STA_CONNECTION_POLL`:
+        // laeuft die Frist ab und sind noch Versuche uebrig, wird noch
+        // einmal gefragt; sonst ist die Verbindung verloren.
+        if ls.poll_on && now >= ls.probe_timeout_ms {
+            if ls.probe_send_count >= MAX_PROBE_TRIES {
+                host::loud_begin();
+                host::print("[rtl8822ce] keine Antwort vom AP nach ");
+                host::print_dec(MAX_PROBE_TRIES);
+                host::print(" Anstupsern — Verbindung verloren\n");
+                host::loud_end();
+                ls.poll_on = false;
+                if ls.authorized || ls.link_up_sent {
+                    host::netdev_set_link(false);
+                    let down = [EV_LINK_DOWN, LINK_DOWN_DEAUTH];
+                    host::wifi_send_event(&down);
+                }
+                ls.authorized = false;
+                ls.link_up_sent = false;
+                if frist_us == 0 {
+                    return PumpEnd::LinkLost;
+                }
+            } else {
+                // mlme.c:4391-4396 — die letzten drei als Rundruf.
+                let gerichtet = ls.probe_send_count < PROBE_UNICAST_LIMIT;
+                let mut pr = [0u8; 128];
+                let n = build_probe_req_to(
+                    &mut pr, &mac, link.channel,
+                    if gerichtet { Some(&bssid) } else { None },
+                    if gerichtet {
+                        &link.ssid[..link.ssid_len as usize]
+                    } else {
+                        &[]
+                    });
+                let mut info = tx::pkt_info_update(&pr[..n], 0,
+                                                   tx::band_of(link.channel));
+                let q = tx::RTW_TX_QUEUE_MGMT;
+                if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &pr[..n]) {
+                    pci::tx_kick_off_queue(h, trx, q);
+                }
+                ls.probe_send_count += 1;
+                ls.probe_timeout_ms = now + PROBE_WAIT_MS;
+            }
+        }
+
         // ── Kommandos von wifid ──────────────────────────────────
         loop {
             let clen = host::wifi_poll_cmd(cmdbuf);
@@ -5600,6 +5726,20 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
+            // mlme.c:4427-4480 `ieee80211_mgd_probe_ap(sdata, true)`.
+            //
+            // **Hier wurde `d.beacon_loss` bis 0.55.0 nie gelesen.** Der
+            // Wert wird seit Stufe 6 richtig gerechnet
+            // (`rtw_sw_beacon_loss_check`), und eine Verbindung, deren AP
+            // verschwindet, blieb trotzdem stehen — bis jemand neu
+            // startete.
+            if d.beacon_loss && !ls.poll_on {
+                ls.poll_on = true;
+                ls.probe_send_count = 0;
+                ls.probe_timeout_ms = 0; // sofort fragen
+                ls.poll_started += 1;
+                host::say("[rtl8822ce] keine Baken mehr vom AP — anstupsen statt aufgeben\n");
+            }
             // `rtw_phy_stat_rate_cnt` hat das Fenster gerade nach
             // `last_pkt_count` geschoben — jetzt und nur jetzt steht es
             // vollstaendig da.
@@ -6355,6 +6495,21 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.eapol_tx, &mut b, &mut n);
     put("  schluessel ", &mut b, &mut n);
     num(ls.keys_set, &mut b, &mut n);
+    // **Die Verbindungswache.** Ein Anstupser, dem eine Erholung folgt,
+    // ist ein Fall, in dem wir die Verbindung FRUEHER weggeworfen
+    // haetten — die zwei Zahlen nebeneinander sagen, wie oft.
+    if ls.poll_started > 0 {
+        put("  wache ", &mut b, &mut n);
+        num(ls.poll_started, &mut b, &mut n);
+        put("x angestupst, ", &mut b, &mut n);
+        num(ls.poll_recovered, &mut b, &mut n);
+        put("x kam er zurueck", &mut b, &mut n);
+        if ls.poll_on {
+            put(" (laeuft gerade, versuch ", &mut b, &mut n);
+            num(ls.probe_send_count, &mut b, &mut n);
+            put(")", &mut b, &mut n);
+        }
+    }
     put("  rx-wachhund ", &mut b, &mut n);
     num(ls.rx_wd, &mut b, &mut n);
     put("\nrx-schleife ", &mut b, &mut n);
