@@ -2604,6 +2604,11 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
             crate::net::tcp::snd_wnd_of(handle) / 1024,
             crate::net::tcp::SEND_REFUSED.load(
                 core::sync::atomic::Ordering::Relaxed));
+        {
+            let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
+            kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{}",
+                cw, ss, dup, if rec { " · IN ERHOLUNG" } else { "" });
+        }
         if segs > 0 {
             // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.
             // 1448 Byte je Segment bei 42 Mbit sind 275 us - und alles,

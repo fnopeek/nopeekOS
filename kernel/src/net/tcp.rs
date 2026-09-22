@@ -347,6 +347,12 @@ const SND_BUF_MAX: usize = 4 * 1024 * 1024;
 /// wir je gemessen haben.
 const SEND_SPIN_BUDGET: u32 = 4096;
 
+/// `TCP_INIT_CWND` — zehn Segmente (RFC 6928).
+const TCP_INIT_CWND: u32 = 10;
+/// `tp->reordering` in seiner Vorgabe: drei Doppelquittungen loesen die
+/// schnelle Wiederholung aus (RFC 5681 §3.2).
+const DUPACK_THRESH: u32 = 3;
+
 /// Nach wievielen Abgabe-Runden ohne Weckung trotzdem ein neuer Versuch
 /// gemacht wird. Kostet im Normalfall nichts (die Weckung kommt lange
 /// vorher) und macht aus einem toten Warten ein langsames.
@@ -568,6 +574,29 @@ struct TcpConn {
     /// Der gemessene Bedarf EINER Umlaufzeit — `rcvq_space` gespiegelt.
     snd_space: usize,
 
+    // ── Staukontrolle, RFC 5681 / RFC 6582 (New Reno) ───────────
+    //
+    // **Bis 0.406.0 gab es sie gar nicht.** `write_xmit` schob den
+    // GANZEN Sendepuffer auf einmal hinaus — bei 1,6 MB waren das 1100
+    // Segmente in einem Zug. Solange der Puffer fest auf 256 KB stand,
+    // ging der Burst gerade noch durch; sobald `tcp_sndbuf_expand` ihn
+    // wachsen liess, lief die Luft ueber, und die Erholung schickte EIN
+    // MSS je RTO. Am Geraet: 2070 Segmente in zehn Sekunden.
+    /// `tcp_snd_cwnd` — in PAKETEN, wie bei Linux.
+    snd_cwnd: u32,
+    /// `snd_ssthresh`. Anfangs unendlich: der erste Verlust setzt ihn.
+    snd_ssthresh: u32,
+    /// `snd_cwnd_cnt` — die Teilpakete aus `tcp_cong_avoid_ai`.
+    snd_cwnd_cnt: u32,
+    /// Wieviele Doppelquittungen in Folge.
+    dupacks: u32,
+    /// Ob wir in schneller Erholung sind (RFC 6582 „recover").
+    in_recovery: bool,
+    /// `snd_nxt` beim Eintritt — erst darueber hinaus ist die Erholung
+    /// vorbei (RFC 6582 §3.2, sonst halbiert ein Verlustereignis das
+    /// Fenster mehrfach).
+    recovery_end: u32,
+
     // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
     // `ts_recent` = the peer's most recent in-order TSval, echoed as our TSecr
     // so the sender measures RTT per-segment (robust to our ACK jitter) →
@@ -671,6 +700,12 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         sndq_acked0: 0,
         sndq_time_us: 0,
         snd_space: 0,
+        snd_cwnd: TCP_INIT_CWND,
+        snd_ssthresh: u32::MAX,
+        snd_cwnd_cnt: 0,
+        dupacks: 0,
+        in_recovery: false,
+        recovery_end: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -826,6 +861,12 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         sndq_acked0: 0,
         sndq_time_us: 0,
         snd_space: 0,
+        snd_cwnd: TCP_INIT_CWND,
+        snd_ssthresh: u32::MAX,
+        snd_cwnd_cnt: 0,
+        dupacks: 0,
+        in_recovery: false,
+        recovery_end: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -926,6 +967,12 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         sndq_acked0: 0,
         sndq_time_us: 0,
         snd_space: 0,
+        snd_cwnd: TCP_INIT_CWND,
+        snd_ssthresh: u32::MAX,
+        snd_cwnd_cnt: 0,
+        dupacks: 0,
+        in_recovery: false,
+        recovery_end: 0,
         ts_ok: false,
         ts_recent: 0,
         sack_ok: false,
@@ -999,6 +1046,15 @@ pub fn snd_limit_of(handle: usize) -> usize {
 /// Wieviel gerade unquittiert im Sendepuffer liegt.
 pub fn snd_unacked_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.send_buf.len())
+}
+
+/// (cwnd in Paketen, ssthresh, Doppelquittungen, in Erholung)
+pub fn cwnd_of(handle: usize) -> (u32, u32, u32, bool) {
+    CONNECTIONS.lock()[handle].as_ref().map_or((0, 0, 0, false), |c| {
+        (c.snd_cwnd,
+         if c.snd_ssthresh == u32::MAX { 0 } else { c.snd_ssthresh },
+         c.dupacks, c.in_recovery)
+    })
 }
 
 pub fn snd_wnd_of(handle: usize) -> usize {
@@ -1082,7 +1138,22 @@ fn write_xmit(conn: &mut TcpConn) {
         if sent >= conn.send_buf.len() {
             return;
         }
+        // ── Tor 1: das Staufenster (tcp_output.c:2238 `tcp_cwnd_test`)
+        //
+        // `in_flight >= cwnd` heisst: nichts mehr hinaus, bis eine
+        // Quittung Platz macht. **Das ist die Bremse, die uns gefehlt
+        // hat** — ohne sie ging der ganze Puffer in einem Zug auf die
+        // Luft, und was dort nicht hinpasste, war verloren.
+        let in_flight = sent.div_ceil(mss) as u32;
+        if in_flight >= conn.snd_cwnd {
+            return;
+        }
+        // ── Tor 2: das Fenster des Gegenuebers
+        //           (tcp_output.c:2295 `tcp_snd_wnd_test`)
         let n = (conn.send_buf.len() - sent).min(mss);
+        if sent + n > conn.snd_wnd as usize && conn.snd_wnd != 0 {
+            return;
+        }
         chunk[..n].copy_from_slice(&conn.send_buf[sent..sent + n]);
         let seq = conn.snd_nxt;
         let w = recv_window(conn);
@@ -1095,6 +1166,33 @@ fn write_xmit(conn: &mut TcpConn) {
         conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32);
         conn.last_send_tick = crate::interrupts::ticks();
     }
+}
+
+/// `tcp_slow_start` (tcp_cong.c:454) + `tcp_cong_avoid_ai` (:468),
+/// zusammengefasst wie `tcp_reno_cong_avoid` (:493).
+fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
+    if conn.snd_cwnd < conn.snd_ssthresh {
+        // „In safe area, increase."
+        conn.snd_cwnd = (conn.snd_cwnd + acked_pkts).min(conn.snd_ssthresh);
+        return;
+    }
+    // „In dangerous area, increase slowly" — ein Paket je Fenster.
+    let w = conn.snd_cwnd.max(1);
+    if conn.snd_cwnd_cnt >= w {
+        conn.snd_cwnd_cnt = 0;
+        conn.snd_cwnd += 1;
+    }
+    conn.snd_cwnd_cnt += acked_pkts;
+    if conn.snd_cwnd_cnt >= w {
+        let delta = conn.snd_cwnd_cnt / w;
+        conn.snd_cwnd_cnt -= delta * w;
+        conn.snd_cwnd += delta;
+    }
+}
+
+/// `tcp_reno_ssthresh` (tcp_cong.c:512): die Haelfte, mindestens zwei.
+fn reno_ssthresh(conn: &TcpConn) -> u32 {
+    (conn.snd_cwnd >> 1).max(2)
 }
 
 /// Send, waiting out backpressure. NATIVE callers only — the same rule as
@@ -1163,7 +1261,6 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
             // langsam werden, nicht tot.
             runden += 1;
             if runden >= RETRY_ROUNDS {
-                runden = 0;
                 break;
             }
         }
@@ -1457,6 +1554,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 // Die Skalierung ist die des SYN-ACK (`snd_wscale`), und
                 // sie gilt fuer JEDES Segment danach ausser dem SYN
                 // selbst (RFC 7323 §2.2).
+                let vorheriges_fenster = conn.snd_wnd;
                 conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
                 // **Und JEDE Quittung weckt den Sender**, nicht nur
                 // eine, die Daten abraeumt.
@@ -1504,6 +1602,41 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         }
                     }
                 }
+                // ── Doppelquittung: RFC 5681 §3.2 ───────────────────
+                //
+                // Drei in Folge heissen „ein Segment fehlt, der Rest
+                // kommt an". Bis 0.406.0 loesten sie NICHTS aus: die
+                // einzige Erholung war der RTO, und der schickte ein MSS
+                // je 200 ms. Bei 1,5 MB unterwegs ist das kein
+                // Wiederanlauf, sondern ein Stillstand — am Geraet 2070
+                // Segmente in zehn Sekunden.
+                //
+                // Eine Doppelquittung ist eine Quittung ohne neue Bytes,
+                // ohne Nutzlast und ohne Fensteraenderung; sonst waere
+                // es eine Fensteraktualisierung.
+                let ist_dup = payload.is_empty()
+                    && ack == conn.snd_una
+                    && !conn.send_buf.is_empty()
+                    && conn.snd_wnd == vorheriges_fenster;
+                if ist_dup {
+                    conn.dupacks += 1;
+                    if conn.dupacks == DUPACK_THRESH && !conn.in_recovery {
+                        // Halbieren, eintreten, und das fehlende Segment
+                        // SOFORT nachschicken statt auf den RTO zu warten.
+                        conn.snd_ssthresh = reno_ssthresh(conn);
+                        conn.snd_cwnd = conn.snd_ssthresh + DUPACK_THRESH;
+                        conn.in_recovery = true;
+                        conn.recovery_end = conn.snd_nxt;
+                        conn.snd_nxt = conn.snd_una;
+                        conn.snd_cwnd_cnt = 0;
+                        write_xmit(conn);
+                    } else if conn.in_recovery {
+                        // „Inflate": jede weitere Doppelquittung sagt,
+                        // dass ein Segment die Leitung verlassen hat.
+                        conn.snd_cwnd += 1;
+                        write_xmit(conn);
+                    }
+                }
                 if ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
                     // Drop the acknowledged prefix from the retransmit queue
                     // and restart the timer for whatever is still in flight.
@@ -1520,6 +1653,26 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.acked_total =
                         conn.acked_total.wrapping_add(acked as u64);
                     snd_space_adjust(conn);
+                    // ── Das Staufenster nachfuehren ────────────────
+                    let mss_now = eff_mss(conn).max(1);
+                    let acked_pkts = (acked.div_ceil(mss_now) as u32).max(1);
+                    conn.dupacks = 0;
+                    if conn.in_recovery {
+                        // RFC 6582 §3.2: erst wenn alles quittiert ist,
+                        // was beim Eintritt unterwegs war, ist die
+                        // Erholung vorbei. Sonst halbiert EIN
+                        // Verlustereignis das Fenster mehrfach.
+                        let noch_offen = (conn.recovery_end
+                            .wrapping_sub(ack) as i32) > 0;
+                        if !noch_offen {
+                            conn.in_recovery = false;
+                            conn.snd_cwnd = conn.snd_ssthresh;
+                            conn.snd_cwnd_cnt = 0;
+                        }
+                    } else {
+                        cong_avoid(conn, acked_pkts);
+                    }
+                    write_xmit(conn);
                 }
             }
 
@@ -1728,8 +1881,14 @@ pub fn tick_connections() {
     // Same reason: `arp::request` hits the NIC, so collect and fire after the
     // lock is gone.
     let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
-    // Retransmits carry a payload, so they cannot ride in `pending`.
-    let mut retrans: alloc::vec::Vec<(PendingSeg, alloc::vec::Vec<u8>)> =
+    // **Wiederholungen fahren nicht mehr hier.** Sie brauchten einen
+    // eigenen Weg, weil sie eine Nutzlast tragen und `pending` nur
+    // leere Segmente kennt. Seit die Zeitueberschreitung ein echtes
+    // Verlustereignis ist (`snd_nxt = snd_una`, Fenster auf eins),
+    // schickt `write_xmit` sie aus demselben Puffer wie alles andere —
+    // eine Wiederholung ist dann nichts Besonderes mehr, sondern ein
+    // Segment, das noch einmal ungesendet ist.
+    let retrans: alloc::vec::Vec<(PendingSeg, alloc::vec::Vec<u8>)> =
         alloc::vec::Vec::new();
     {
         let mut conns = CONNECTIONS.lock();
@@ -1820,23 +1979,34 @@ pub fn tick_connections() {
                         slot.retries += 1;
                         slot.rto_tick = now;
                         slot.last_send_tick = now;
-                        // Effective MSS here too: this one carries payload, so
-                        // a full-MSS retransmit overran the MTU exactly like the
-                        // original — and was dropped the same silent way. The
-                        // retry path could never repair what the first send lost.
-                        let n = slot.send_buf.len().min(eff_mss(slot));
-                        let w = recv_window(slot);
-                        let mut opts = [0u8; 40];
-                        let len = build_seg_opts(slot, ACK, &mut opts, true);
-                        retrans.push((
-                            PendingSeg {
-                                dst_ip: slot.remote_ip, src_port: slot.local_port,
-                                dst_port: slot.remote_port, seq: slot.snd_una,
-                                ack: slot.rcv_nxt, flags: ACK | PSH, window: w,
-                                opts, opts_len: len,
-                            },
-                            slot.send_buf[..n].to_vec(),
-                        ));
+                        // ── `tcp_enter_loss` ───────────────────────
+                        //
+                        // **Eine Zeitueberschreitung ist der haerteste
+                        // Stauhinweis, den es gibt** (RFC 5681 §3.1):
+                        // Schwelle auf die Haelfte, Fenster auf EINS,
+                        // und von vorn im langsamen Start.
+                        //
+                        // Hier stand stattdessen: EIN MSS nachschicken,
+                        // `snd_nxt` unberuehrt lassen, fertig. Damit galt
+                        // nach jedem RTO der ganze Rest weiter als
+                        // unterwegs, und wiederholt wurde ein einziges
+                        // Segment je 200 ms mit Verdopplung. Bei 1,5 MB
+                        // offener Daten ist das eine Erholung, die nie
+                        // ankommt — am Geraet 2070 Segmente in zehn
+                        // Sekunden.
+                        //
+                        // `snd_nxt = snd_una` ist Go-back-N: alles ab
+                        // der Luecke geht neu hinaus, geordnet und vom
+                        // Staufenster getaktet. Die alte Anmerkung zur
+                        // effektiven MSS bleibt gewahrt — `write_xmit`
+                        // rechnet mit derselben.
+                        slot.snd_ssthresh = reno_ssthresh(slot);
+                        slot.snd_cwnd = 1;
+                        slot.snd_cwnd_cnt = 0;
+                        slot.in_recovery = false;
+                        slot.dupacks = 0;
+                        slot.snd_nxt = slot.snd_una;
+                        write_xmit(slot);
                     }
                 }
             }
