@@ -979,6 +979,10 @@ pub static SEND_BLOCKED_TSC: AtomicU64 = AtomicU64::new(0);
 pub static SEND_SEGS: AtomicU64 = AtomicU64::new(0);
 pub static SEND_WOULDBLOCK: AtomicU64 = AtomicU64::new(0);
 pub static SEND_MAXBUF: AtomicU64 = AtomicU64::new(0);
+/// Wie oft die Schlange zum Treiber ein Segment abgelehnt hat. Frueher
+/// war das ein stiller Verlust (`tx drops full`), jetzt ist es Gegendruck
+/// — und die Zahl sagt, wie oft er greift.
+pub static SEND_REFUSED: AtomicU64 = AtomicU64::new(0);
 
 /// Wohin der Sendepuffer gewachsen ist, und was das Gegenueber zuletzt
 /// angeboten hat. Beides nur fuer den Bericht — ohne die zwei Zahlen ist
@@ -998,6 +1002,7 @@ pub fn send_stats_reset() {
     SEND_SEGS.store(0, Ordering::Relaxed);
     SEND_WOULDBLOCK.store(0, Ordering::Relaxed);
     SEND_MAXBUF.store(0, Ordering::Relaxed);
+    SEND_REFUSED.store(0, Ordering::Relaxed);
 }
 
 /// (Takte in send, Takte in abgewiesenen send, Segmente, WouldBlock,
@@ -1035,17 +1040,51 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     if buf_now > SEND_MAXBUF.load(Ordering::Relaxed) {
         SEND_MAXBUF.store(buf_now, Ordering::Relaxed);
     }
-    let mss = eff_mss(conn);
-    for chunk in data.chunks(mss) {
-        SEND_SEGS.fetch_add(1, Ordering::Relaxed);
-        let seq = conn.snd_nxt;
-        conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk.len() as u32);
-        conn.last_send_tick = now;
-        let w = recv_window(conn);
-        send_seg(conn, seq, conn.rcv_nxt, ACK | PSH, w, chunk);
-    }
+    write_xmit(conn);
 
     Ok(())
+}
+
+/// tcp_output.c `tcp_write_xmit` — schiebt hinaus, was ungesendet im
+/// Puffer liegt, und **hoert auf, wenn das Geraet ablehnt**.
+///
+/// **Bis 0.405.2 gab es den Zustand „im Puffer, aber noch nicht auf der
+/// Leitung" gar nicht.** `send` schrieb jedes Stueck sofort hinaus und
+/// warf das Ergebnis weg. Lehnte die Schlange zum Treiber ab — am Geraet
+/// `tx drops full 388`, sobald der Sendepuffer auf 2 MB gewachsen war —,
+/// glaubte TCP trotzdem gesendet zu haben: `snd_nxt` lief weiter, und
+/// die Rettung hing allein am RTO, der EIN MSS je Runde nachschickt. Bei
+/// zwei Megabyte unterwegs ist das ein Stillstand, und genau so sah es
+/// aus („PUT stalled after 2293760 bytes").
+///
+/// Linux bremst hier mit `netif_stop_queue`: die Schlange sagt nein, und
+/// `tcp_write_xmit` laesst das Segment STEHEN, statt es zu verlieren.
+/// Dasselbe hier — `snd_nxt` wird erst nach einer angenommenen
+/// Uebergabe weitergesetzt, und `tick_connections` holt den Rest.
+///
+/// Damit ist das Wachstum des Sendepuffers auch sicher: mehr Puffer
+/// heisst jetzt mehr WARTENDE Bytes, nicht mehr verworfene.
+fn write_xmit(conn: &mut TcpConn) {
+    let mss = eff_mss(conn).min(1460);
+    let mut chunk = [0u8; 1460];
+    loop {
+        let sent = conn.snd_nxt.wrapping_sub(conn.snd_una) as usize;
+        if sent >= conn.send_buf.len() {
+            return;
+        }
+        let n = (conn.send_buf.len() - sent).min(mss);
+        chunk[..n].copy_from_slice(&conn.send_buf[sent..sent + n]);
+        let seq = conn.snd_nxt;
+        let w = recv_window(conn);
+        if !send_seg(conn, seq, conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+            // Voll. Nichts verloren, nur noch nicht hinaus.
+            SEND_REFUSED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        SEND_SEGS.fetch_add(1, Ordering::Relaxed);
+        conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32);
+        conn.last_send_tick = crate::interrupts::ticks();
+    }
 }
 
 /// Send, waiting out backpressure. NATIVE callers only — the same rule as
@@ -1655,6 +1694,15 @@ pub fn tick_connections() {
     {
         let mut conns = CONNECTIONS.lock();
         for slot in conns.iter_mut().flatten() {
+            // **Was die Schlange vorhin abgelehnt hat, geht jetzt
+            // hinaus.** Ohne diese Zeile bliebe es liegen, bis der Rufer
+            // das naechste Mal `send` ruft — und der wartet gerade auf
+            // eine Quittung fuer Bytes, die nie auf der Leitung waren.
+            if slot.state == State::Established
+                && slot.snd_nxt != slot.snd_una.wrapping_add(slot.send_buf.len() as u32)
+            {
+                write_xmit(slot);
+            }
             // Delayed ACK
             if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
                 let w = recv_window(slot);
@@ -1829,14 +1877,14 @@ fn send_syn(handle: usize) -> Result<(), TcpError> {
 fn send_segment(
     dst_ip: [u8; 4], src_port: u16, dst_port: u16,
     seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8],
-) {
-    send_segment_with_opts(dst_ip, src_port, dst_port, seq, ack, flags, window, payload, &[]);
+) -> bool {
+    send_segment_with_opts(dst_ip, src_port, dst_port, seq, ack, flags, window, payload, &[])
 }
 
 fn send_segment_with_opts(
     dst_ip: [u8; 4], src_port: u16, dst_port: u16,
     seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8], options: &[u8],
-) {
+) -> bool {
     let opts_padded = (options.len() + 3) & !3; // pad to 4 bytes
     let header_len = HEADER_LEN + opts_padded;
     let total_len = header_len + payload.len();
@@ -1864,7 +1912,10 @@ fn send_segment_with_opts(
     let checksum = tcp_checksum(&src_ip, &dst_ip, &pkt);
     pkt[16..18].copy_from_slice(&checksum.to_be_bytes());
 
-    let _ = ipv4::send(dst_ip, ipv4::PROTO_TCP, &pkt);
+    // **Das Ergebnis wird nicht mehr weggeworfen.** `netdev::send` lehnt
+    // ab, wenn die Schlange zum Treiber voll ist (`tx drops full`), und
+    // bis 0.405.3 glaubte TCP trotzdem, gesendet zu haben.
+    ipv4::send(dst_ip, ipv4::PROTO_TCP, &pkt)
 }
 
 fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
@@ -2077,16 +2128,17 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
     len
 }
 
-fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) {
+fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16,
+            payload: &[u8]) -> bool {
     TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let mut opts = [0u8; 40];
     let len = build_seg_opts(conn, flags, &mut opts, !payload.is_empty());
     if len > 0 {
         send_segment_with_opts(conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, ack, flags, window, payload, &opts[..len]);
+            seq, ack, flags, window, payload, &opts[..len])
     } else {
         send_segment(conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, ack, flags, window, payload);
+            seq, ack, flags, window, payload)
     }
 }
 
