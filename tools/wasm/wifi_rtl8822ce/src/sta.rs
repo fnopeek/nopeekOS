@@ -64,6 +64,27 @@ pub struct PeerCaps {
     pub supp_rates: u16,
     /// 0 = 20 MHz, 1 = 40, 2 = 80 (`ieee80211_sta.bandwidth`)
     pub bandwidth: u8,
+    // ── Die BETRIEBS-Elemente aus der Anmeldeantwort ────────────
+    //
+    // **Sie sind maßgeblich, nicht die der Bake.** Linux liest sie hier
+    // und nirgends sonst: `ieee80211_assoc_success` ruft
+    // `ieee80211_config_bw(link, elems, ...)` mit den Elementen der
+    // ANTWORT (mlme.c:7666), und `ieee80211_determine_ap_chan` leitet
+    // daraus Betriebsart und Breite ab. Wir nahmen beides aus der Bake
+    // und sahen die Antwort nie an.
+    /// Byte 1 des HT-Operation-Elements (id 61): Bit 1:0 die Lage des
+    /// Zweitkanals, Bit 2 „STA Channel Width".
+    pub ht_op_info: u8,
+    pub ht_op_seen: bool,
+    /// Byte 0:2 des VHT-Operation-Elements (id 192) — Breite und die
+    /// zwei Mittenkanal-Segmente.
+    pub vht_op_chanwidth: u8,
+    pub vht_op_cch0: u8,
+    pub vht_op_cch1: u8,
+    /// Byte 3:4 — die „Basic VHT-MCS and NSS Set". Sie sagt, was eine
+    /// Station MINDESTENS koennen muss, um in dieser Zelle zu leben.
+    pub vht_op_basic_mcs: u16,
+    pub vht_op_seen: bool,
 }
 
 /// Die Elemente einer Anmeldeantwort lesen.
@@ -106,6 +127,15 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
             c.ht_ampdu_density = (b[2] & 0x1c) >> 2; // ..._PARM_DENSITY
             // `ht_cap.mcs` beginnt bei Versatz 3 (nach cap und ampdu).
             c.ht_mcs.copy_from_slice(&b[3..7]);
+        } else if id == WLAN_EID_HT_OPERATION && len >= 2 {
+            c.ht_op_info = b[1];
+            c.ht_op_seen = true;
+        } else if id == WLAN_EID_VHT_OPERATION && len >= 5 {
+            c.vht_op_chanwidth = b[0];
+            c.vht_op_cch0 = b[1];
+            c.vht_op_cch1 = b[2];
+            c.vht_op_basic_mcs = u16::from_le_bytes([b[3], b[4]]);
+            c.vht_op_seen = true;
         } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
             c.vht_supported = true;
             c.vht_cap = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);

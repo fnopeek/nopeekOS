@@ -7739,6 +7739,41 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     } else {
         put(" + kein VHT (2,4 GHz)", &mut b, &mut n);
     }
+    // **Und wie breit er seine Zelle BETREIBT** — aus der
+    // Anmeldeantwort, nicht aus der Bake. Linux liest genau diese
+    // Elemente und nur diese: `ieee80211_assoc_success` gibt die
+    // Elemente der ANTWORT an `ieee80211_config_bw` (mlme.c:7666), und
+    // `ieee80211_determine_ap_chan` leitet daraus Betriebsart und
+    // Breite ab. Wir nahmen beides aus der Bake und sahen die Antwort
+    // nie an — wenn die zwei auseinanderstehen, steht es hier.
+    put("\n  ap betreibt  ", &mut b, &mut n);
+    if caps.vht_op_seen {
+        put("VHT-Op breite=", &mut b, &mut n);
+        num(caps.vht_op_chanwidth as u32, &mut b, &mut n);
+        put(match caps.vht_op_chanwidth {
+            0 => " (HT, also 20/40!)",
+            1 => " (80)",
+            2 => " (160)",
+            _ => " (80+80)",
+        }, &mut b, &mut n);
+        put(" mitte=", &mut b, &mut n);
+        num(caps.vht_op_cch0 as u32, &mut b, &mut n);
+        put(" basic-mcs=0x", &mut b, &mut n);
+        rate_hex((caps.vht_op_basic_mcs >> 8) as u8, &mut b, &mut n);
+        rate_hex(caps.vht_op_basic_mcs as u8, &mut b, &mut n);
+    } else {
+        put("KEIN VHT-Op in der Anmeldeantwort", &mut b, &mut n);
+    }
+    if caps.ht_op_seen {
+        put("  HT-Op sek=", &mut b, &mut n);
+        num((caps.ht_op_info & 0x3) as u32, &mut b, &mut n);
+        put(if caps.ht_op_info & 0x4 != 0 { " breit" } else { " NUR 20" },
+            &mut b, &mut n);
+    }
+    put("  (wir fahren ", &mut b, &mut n);
+    put(match link.si.bw_mode { 0 => "20", 1 => "40", _ => "80" },
+        &mut b, &mut n);
+    put(")", &mut b, &mut n);
     put("\n  ap kann  ", &mut b, &mut n);
     let hss = caps.ht_mcs.iter().filter(|&&m| m != 0).count() as u32;
     if caps.ht_supported && hss > 0 {
