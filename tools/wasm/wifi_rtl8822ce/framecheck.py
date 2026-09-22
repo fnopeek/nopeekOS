@@ -767,6 +767,7 @@ const BSS_LEER: Bss = Bss {
     beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
     ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
     vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
+    bss_load: 0, bss_load_seen: false,
 };
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
