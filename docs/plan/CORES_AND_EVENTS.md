@@ -4,7 +4,8 @@
 ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 (MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
-dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt). Rest offen.
+dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt), 3c-1 = 0.417.0 (Shell als Fiber auf
+Kern 0). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -322,6 +323,15 @@ Beide auf Kern 0. **Der Tick leert bis 3e weiter mit** — beide Wege laufen
 im Interrupt auf Kern 0 und verschachteln sich nicht. `enable_irq` steht
 hinter dem zweiten `init_mouse`, weil das die Antworten des i8042 selbst
 liest.
+
+**Gebaut (Stufe 3c-1, 0.417.0): Kern 0 hat denselben Fiber-Scheduler wie
+ein Worker.** `main` legt die Shell (`intent::run_loop`) als Fiber auf Kern 0
+(2 MiB Stack wie der Boot-Stack — keine Schutzseite) und geht in
+`per_core::core0_loop`. Die Leerlaufstellen der Shell (`core0_idle_tick`,
+beide `hlt` in `read_line_with_tab`) parken jetzt den Fiber (`core0_wait`:
+bis Eingabe oder zum naechsten Tick); die Eingabe-Interrupts signalisieren
+die Shell (`intent::wake_shell`). Kern 0 nimmt weiter keine Arbeit aus dem
+Postfach und behaelt seinen Takt. `wake_core` darf jetzt auch Kern 0 wecken.
 
 ### 3.5 Kern 0 aufloesen
 

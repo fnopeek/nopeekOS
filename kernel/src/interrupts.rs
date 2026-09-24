@@ -829,7 +829,10 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     // SAFETY: sti-shadow arms the HLT before any pending IRQ is taken.
     unsafe { core::arch::asm!("sti; hlt; cli") };
     crate::smp::per_core::record_halt(cid, rdtsc().saturating_sub(t0));
-    crate::smp::per_core::record_wake(cid, cause);
+    // Core 0's wakes are attributed by its ISRs (timer, input).
+    if cid != 0 {
+        crate::smp::per_core::record_wake(cid, cause);
+    }
     // Woken by something else: the one-shot is still pending — drop it.
     if own_timer && deadline.is_some() { disarm(); }
     if rflags & (1 << 9) != 0 {
@@ -887,12 +890,14 @@ fn lapic_eoi() {
 extern "x86-interrupt" fn ps2_irq_handler(_frame: InterruptStackFrame) {
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
     crate::keyboard::poll_ps2_irq();
+    crate::intent::wake_shell();
     lapic_eoi();
 }
 
 extern "x86-interrupt" fn xhci_irq_handler(_frame: InterruptStackFrame) {
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
     crate::xhci::msi_irq();
+    crate::intent::wake_shell();
     lapic_eoi();
 }
 

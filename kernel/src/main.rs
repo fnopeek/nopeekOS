@@ -535,7 +535,24 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Everything above is now in the log; file it before the loop takes over.
     intent::system::persist_boot_log();
 
-    intent::run_loop(vault_ref, session_id);
+    // The shell runs as a fiber on Core 0 (docs/plan/CORES_AND_EVENTS.md,
+    // 3c-1): Core 0 gets the same scheduler as a worker, so the compositor
+    // can become a fiber beside it (3c-2). 2 MiB like the boot stack —
+    // Core-0 intents run deep chains (TLS, HTTP) inline, and a fiber stack
+    // has no guard page.
+    *SHELL_ARGS.lock() = Some((vault_ref, session_id));
+    smp::fiber::admit_with_stack(0, shell_fiber, 0, 2 * 1024 * 1024);
+    smp::per_core::core0_loop();
+}
+
+static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<capability::Vault>, capability::CapId)>> =
+    spin::Mutex::new(None);
+
+fn shell_fiber(_: u64) {
+    let args = SHELL_ARGS.lock().take();
+    if let Some((vault, session)) = args {
+        intent::run_loop(vault, session);
+    }
 }
 
 /// Text-mode passphrase authentication (fallback when no framebuffer).
