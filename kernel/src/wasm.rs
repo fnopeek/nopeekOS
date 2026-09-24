@@ -2054,6 +2054,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_battery_detail(rate, remaining, full, voltage_mv, unit): the raw
+    // _BST/_BIF figures behind the percentage, for `battery`.
+    linker.func_wrap("env", "npk_battery_detail",
+        |mut caller: Caller<'_, HostState>, rate: i32, remaining: i32, full: i32,
+         voltage_mv: i32, unit: i32| {
+            host_core::npk_battery_detail(caller.data_mut(), rate, remaining, full, voltage_mv, unit)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // ── Audio mailbox + mixer ────────────────────────────────────────────
     // Apps push PCM (S16LE / 48 kHz / stereo) into per-slot rings; the HDA
     // driver pulls a mixed stream via npk_audio_poll_mix. Ungated: audio

@@ -470,8 +470,9 @@ fn power_cstate(arg: &str) {
             kprintln!("  aktiv: Port 0x{:x}", p);
         }
         kprintln!();
-        kprintln!("  'power cstate 1' / 'power cstate 2' schaltet ein, 'power cstate off'");
-        kprintln!("  zurueck. Danach 'power 10' und die Package-Zahl vergleichen.");
+        kprintln!("  Vorgabe seit 0.425: Base+2 (gemessen 3,3 -> 1,8 W Package).");
+        kprintln!("  'power cstate <n>' waehlt einen Port, 'power cstate off' zurueck");
+        kprintln!("  auf C1 — beides nur bis zum naechsten Neustart.");
         kprintln!();
         return;
     }
@@ -502,6 +503,13 @@ fn power_cstate(arg: &str) {
 
 pub fn intent_battery() {
     const SBS_ADDR: u8 = 0x0B;
+    // A notebook whose pack sits behind the EC reports through the firmware
+    // (`aml`: `_BST`/`_BIF`). That is the common case, and it carries what
+    // the SMBus path never had: the draw of the WHOLE machine.
+    if let Some(d) = crate::battery::detail() {
+        battery_from_acpi(d);
+        return;
+    }
     kprintln!();
     kprintln!("  Battery (Smart Battery over SMBus)");
     kprintln!("  ──────────────────────────────────");
@@ -551,6 +559,50 @@ pub fn intent_battery() {
 
     kprintln!("  → pack does not answer at 0x0B (behind the EC).");
     intent_ec_battery_dump();
+}
+
+fn battery_from_acpi(d: crate::battery::Detail) {
+    const UNKNOWN: u32 = 0xFFFF_FFFF;
+    let packed = crate::battery::cached();
+    kprintln!();
+    kprintln!("  Akku (ACPI _BST/_BIF, ueber aml)");
+    kprintln!("  ────────────────────────────────");
+    if packed >= 0 {
+        let st = match packed >> 8 {
+            0 => "entlaedt", 1 => "laedt", 2 => "voll", _ => "am Netz, laedt nicht",
+        };
+        kprintln!("  Ladung          {} % — {}", packed & 0xFF, st);
+    }
+    // mA/mAh need the voltage to become mW/mWh.
+    let to_mw = |v: u32| -> Option<u64> {
+        if v == UNKNOWN { return None; }
+        if d.unit == 0 { Some(v as u64) }
+        else if d.voltage_mv != UNKNOWN && d.voltage_mv > 0 { Some(v as u64 * d.voltage_mv as u64 / 1000) }
+        else { None }
+    };
+    match to_mw(d.rate) {
+        Some(mw) => {
+            kprintln!("  Entnahme        {}.{:03} W  (ganzes Geraet)", mw / 1000, mw % 1000);
+            if let (Some(rem), true) = (to_mw(d.remaining), packed >= 0 && packed >> 8 == 0) {
+                if mw > 0 {
+                    let min = rem * 60 / mw;
+                    kprintln!("  Restlaufzeit    ~{} h {:02} min bei dieser Entnahme", min / 60, min % 60);
+                }
+            }
+        }
+        None => kprintln!("  Entnahme        unbekannt (Firmware meldet keine Rate)"),
+    }
+    if let (Some(rem), Some(full)) = (to_mw(d.remaining), to_mw(d.full)) {
+        kprintln!("  Kapazitaet      {}.{:03} / {}.{:03} Wh",
+            rem / 1000, rem % 1000, full / 1000, full % 1000);
+    }
+    if d.voltage_mv != UNKNOWN {
+        kprintln!("  Spannung        {}.{:03} V", d.voltage_mv / 1000, d.voltage_mv % 1000);
+    }
+    kprintln!();
+    kprintln!("  Die Firmware frischt die Rate selbst nur alle paar Sekunden auf,");
+    kprintln!("  aml liest alle 10 s. Fuer einen Vergleich 20-30 s warten.");
+    kprintln!();
 }
 
 /// Dump the EC's 256-byte RAM so we can reverse-engineer the battery

@@ -43,6 +43,7 @@ unsafe extern "C" {
     fn npk_ec_query() -> i32;
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_battery_report(packed: i32);
+    fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn npk_sleep(ms: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_print(ptr: i32, len: i32);
@@ -210,7 +211,7 @@ pub extern "C" fn _start() {
         round += 1;
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
-        let packed = decode(table, loud && round == 1);
+        let (packed, info) = decode(table, loud && round == 1);
         if packed != last {
             if packed < 0 {
                 // Ein Akku, der sich nicht mehr meldet, ist ein Befund.
@@ -225,16 +226,25 @@ pub extern "C" fn _start() {
             last = packed;
         }
         unsafe { npk_battery_report(packed) };
+        // Die Rohwerte fuer `battery` (Entnahme des ganzen Geraets) — die
+        // Bar braucht nur den Prozentwert, eine Strommessung braucht mehr.
+        if let Some(i) = info {
+            unsafe {
+                npk_battery_detail(i.rate as i32, i.remaining_mah as i32,
+                    i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32)
+            };
+        }
         unsafe { npk_sleep(10_000) };
     }
 }
 
 /// Parse the DSDT and evaluate the first present battery; return the bar's
-/// packed encoding ((status<<8)|percent) or -1 if none.
-fn decode(table: &[u8], verbose: bool) -> i32 {
+/// packed encoding ((status<<8)|percent) or -1 if none, and the decoded
+/// battery when there is one.
+fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
     let ns = match Namespace::load(table) {
         Ok(ns) => ns,
-        Err(_) => { logln("[aml]  Namespace::load failed"); return -1; }
+        Err(_) => { logln("[aml]  Namespace::load failed"); return (-1, None); }
     };
     if verbose { logln("[aml]  namespace loaded, looking for batteries"); }
     let mut ec = HostEc { reads: 0, fails: 0, verbose };
@@ -268,7 +278,7 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
                     logln("[aml]  battery present, but _BST reports UNKNOWN remaining");
                     logln("[aml]  -> kein Prozentwert; die Bar zeigt nichts statt etwas Falsches");
                 }
-                return -1;
+                return (-1, Some(info));
             }
             if info.present {
                 // bar status: 0=discharging 1=charging 2=full 3=plugged-idle.
@@ -281,11 +291,11 @@ fn decode(table: &[u8], verbose: bool) -> i32 {
                 } else {
                     3
                 };
-                return (status << 8) | info.percent as i32;
+                return ((status << 8) | info.percent as i32, Some(info));
             }
             }
         }
     }
     if verbose { lognum("[aml]  batteries seen: ", n); }
-    -1
+    (-1, None)
 }

@@ -113,6 +113,24 @@ pub fn init() {
         kprintln!("[npk] smp: scheduler ready (shared inbox, tickless workers: {} timer + wake IPI)",
             if crate::interrupts::has_tsc_deadline() { "TSC-deadline" } else { "one-shot" });
         log_tsc_sync(online as usize);
+        enable_deep_idle();
+    }
+}
+
+/// Deep idle by default where the CPU offers it (AMD Zen on bare metal,
+/// with ARAT). Measured on the IdeaPad (Ryzen): C1 3.33 W package, Base+1
+/// 3.34 W (no gain — the package stays up), **Base+2 1.81 W**: only there do
+/// all cores reach CC6 and the package its own deep state. Netbench and
+/// audio unchanged. `power cstate off` turns it off for the session.
+/// Which port is the deepest belongs to ACPI `_CST` (Linux `acpi_idle`);
+/// until aml passes it through, Base+2 is the measured answer — the usual
+/// AMD `_CST` lists C2 = Base+1 and C3 = Base+2.
+fn enable_deep_idle() {
+    let Some(base) = per_core::amd_cstate_base() else { return };
+    match crate::interrupts::set_deep_idle(base + 2, 200) {
+        Ok(()) => kprintln!("[npk] idle: deep C-state via I/O 0x{:x} (CStateBaseAddr+2) for halts >= 200 us",
+            base + 2),
+        Err(e) => kprintln!("[npk] idle: staying in C1 — {}", e),
     }
 }
 

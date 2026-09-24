@@ -24,6 +24,29 @@ pub fn report(packed: i32) {
     }
 }
 
+/// Raw `_BST`/`_BIF` figures from the AML driver, for `battery`: what the
+/// whole machine draws. `rate`/`voltage` are 0xFFFFFFFF when unknown;
+/// `unit` 0 = mW/mWh, 1 = mA/mAh.
+#[derive(Clone, Copy)]
+pub struct Detail {
+    pub rate: u32,
+    pub remaining: u32,
+    pub full: u32,
+    pub voltage_mv: u32,
+    pub unit: u32,
+}
+
+static DETAIL: spin::Mutex<Option<Detail>> = spin::Mutex::new(None);
+
+/// Called by the AML driver via `npk_battery_detail`.
+pub fn report_detail(d: Detail) {
+    *DETAIL.lock() = Some(d);
+}
+
+pub fn detail() -> Option<Detail> {
+    *DETAIL.lock()
+}
+
 /// The latest driver report (or -1). `npk_battery()` returns this, falling
 /// back to the standardised SBS-over-SMBus path for desktops/SBS laptops.
 pub fn cached() -> i32 {

@@ -207,6 +207,12 @@ pub struct BatteryInfo {
     pub full_charge_mah: u32,
     /// 0..100, computed remaining/full.
     pub percent: u8,
+    /// _BST[1] present rate and _BST[3] voltage (mV), raw; 0xFFFFFFFF =
+    /// unknown (ACPI 6.5 §10.2.2.11).
+    pub rate: u32,
+    pub voltage_mv: u32,
+    /// _BIF[0] / _BIX[1] power unit: 0 = mW/mWh, 1 = mA/mAh.
+    pub power_unit: u32,
 }
 
 /// Evaluate `\_SB...BAT0._BST` and `_BIF`/`_BIX` for the battery device whose

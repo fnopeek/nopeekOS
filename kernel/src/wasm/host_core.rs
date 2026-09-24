@@ -565,6 +565,18 @@ pub(crate) fn npk_battery_report(ctx: &mut HostState, packed: i32) {
     crate::battery::report(packed);
 }
 
+pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
+    full: i32, voltage_mv: i32, unit: i32) {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return;
+    }
+    crate::battery::report_detail(crate::battery::Detail {
+        rate: rate as u32, remaining: remaining as u32, full: full as u32,
+        voltage_mv: voltage_mv as u32, unit: unit as u32,
+    });
+}
+
 pub(crate) fn npk_audio_open(_ctx: &mut HostState) -> i32 {
  crate::audio::open() 
 }
