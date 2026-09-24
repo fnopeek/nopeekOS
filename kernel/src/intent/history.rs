@@ -100,7 +100,37 @@ pub fn push(line: &str) {
     };
     // Written outside the lock: the store write is milliseconds of crypto
     // plus disk, and a peer fiber pushing meanwhile would spin on it.
-    let _ = crate::npkfs::upsert(HISTORY_OBJECT, &blob, crate::capability::CAP_NULL);
+    //
+    // **And not on Core 0.** `push` runs on every Enter in the shell, and the
+    // shell runs on Core 0: the encryption and the disk write stood between
+    // the key press and the next frame. One writer task on a worker takes
+    // the NEWEST blob — two Enters in quick succession must not race two
+    // writes and land the older one last. (`docs/plan/CORES_AND_EVENTS.md`)
+    *PENDING.lock() = Some(blob);
+    if crate::smp::scheduler::worker_count() == 0 {
+        write_pending(0);
+    } else if !WRITER.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::smp::scheduler::spawn(write_pending, 0);
+    }
+}
+
+/// The newest serialized history waiting to be written.
+static PENDING: spin::Mutex<Option<alloc::vec::Vec<u8>>> = spin::Mutex::new(None);
+/// A writer task is queued or running.
+static WRITER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn write_pending(_: u64) {
+    use core::sync::atomic::Ordering;
+    loop {
+        while let Some(blob) = { PENDING.lock().take() } {
+            let _ = crate::npkfs::upsert(HISTORY_OBJECT, &blob, crate::capability::CAP_NULL);
+        }
+        WRITER.store(false, Ordering::Release);
+        // A push between the last take and the clear left its blob behind.
+        if PENDING.lock().is_none() || WRITER.swap(true, Ordering::AcqRel) {
+            return;
+        }
+    }
 }
 
 /// Drop the stored log. Returns how many lines went. The freed blob stays

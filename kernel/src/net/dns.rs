@@ -89,16 +89,49 @@ pub fn cached(name: &str) -> Cached {
 pub fn want(name: &str) {
     if name.is_empty() || name.len() > 255 { return; }
     if !matches!(cached(name), Cached::Unknown) { return; }
-    let mut q = WANTED.lock();
-    if q.len() >= WANTED_MAX || q.iter().any(|n| n == name) { return; }
-    q.push_back(String::from(name));
+    {
+        let mut q = WANTED.lock();
+        if q.len() >= WANTED_MAX || q.iter().any(|n| n == name) { return; }
+        q.push_back(String::from(name));
+    }
+    // A worker resolves it (`docs/plan/CORES_AND_EVENTS.md`, stage 3). Until
+    // 0.418 Core 0 did, in its shell loop: `resolve` blocks up to 5.5 s, and
+    // everything else on Core 0 — cursor, rendering, the shell — stood still
+    // meanwhile; every DNS query of the microVM's browser went this way. A
+    // native task may block: placement gives it a free worker and marks the
+    // core busy, like any intent. Without workers, Core 0 keeps pumping.
+    if crate::smp::scheduler::worker_count() > 0
+        && !PUMP_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel)
+    {
+        crate::smp::scheduler::spawn(pump_task, 0);
+    }
 }
 
-/// Resolve one queued name. Core 0 only — it is the one context that may block
-/// here: it runs no fibers, so no driver starves behind it, and `net::poll()`
-/// keeps rendering the compositor while it waits.
+/// A resolver task is running (or queued). Set by `want`, cleared by the
+/// task once the queue is empty — re-checked after clearing, so a name
+/// queued in between is not left waiting.
+static PUMP_RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn pump_task(_: u64) {
+    use core::sync::atomic::Ordering;
+    loop {
+        while let Some(name) = { WANTED.lock().pop_front() } {
+            if resolve(&name).is_none() {
+                remember(&name, [0; 4], false);
+            }
+        }
+        PUMP_RUNNING.store(false, Ordering::Release);
+        if WANTED.lock().is_empty() || PUMP_RUNNING.swap(true, Ordering::AcqRel) {
+            return;
+        }
+    }
+}
+
+/// Resolve one queued name on Core 0 — only on a machine without workers;
+/// otherwise `want` hands the queue to a worker task.
 pub fn pump_wanted() {
     if crate::smp::per_core::current_core_id() != 0 { return; }
+    if crate::smp::scheduler::worker_count() > 0 { return; }
     let name = { WANTED.lock().pop_front() };
     let Some(name) = name else { return };
     if resolve(&name).is_none() {

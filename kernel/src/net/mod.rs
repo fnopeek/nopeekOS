@@ -294,9 +294,8 @@ pub fn tick_link_and_reconfigure() {
     // a second. It is a `udp::recv` peek and a deadline compare, and nothing at
     // all when no exchange is running.
     dhcp::tick();
-    // Also before the throttle: one queued name per pass. The microvm data plane
-    // may not block on a resolver (see `dns::cached`), so it queues the name and
-    // Core 0 does the waiting — here, where no driver fiber sits behind it.
+    // Also before the throttle: one queued name per pass — only on a machine
+    // without workers. Otherwise `dns::want` hands the queue to a worker task.
     dns::pump_wanted();
     let now = crate::interrupts::rdtsc();
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }

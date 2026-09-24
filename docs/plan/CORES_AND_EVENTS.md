@@ -5,7 +5,7 @@ ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 (MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
 dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt), 3c-1 = 0.417.0 (Shell als Fiber auf
-Kern 0). Rest offen.
+Kern 0), 0.418.0 (DNS/GC/History von Kern 0 herunter). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -332,6 +332,19 @@ beide `hlt` in `read_line_with_tab`) parken jetzt den Fiber (`core0_wait`:
 bis Eingabe oder zum naechsten Tick); die Eingabe-Interrupts signalisieren
 die Shell (`intent::wake_shell`). Kern 0 nimmt weiter keine Arbeit aus dem
 Postfach und behaelt seinen Takt. `wake_core` darf jetzt auch Kern 0 wecken.
+
+**Umgestellt nach 3c-1 — Reihenfolge geaendert.** Die Fiber auf Kern 0 sind
+kooperativ: ein Compositor-Fiber kaeme nur dran, wenn die Shell abgibt, und
+die Stellen, an denen die Maus haengt, sind genau die, an denen sie NICHT
+abgibt. Deshalb zuerst die schwere Arbeit von Kern 0 herunter, dann der
+Compositor-Fiber. **Gebaut (0.418.0):** DNS fuer die microVM
+(`dns::want` → Worker-Task statt `pump_wanted` auf Kern 0, bis 5,5 s je
+Name), npkFS-GC im Leerlauf (Worker-Task), History-Schreiben bei jedem
+Enter (ein Schreiber auf einem Worker, der neueste Stand gewinnt). Ein
+blockierender Task ist ein gewoehnlicher Intent-Task: die Platzierung gibt
+ihm einen freien Worker und markiert ihn belegt. Ohne Worker bleibt alles
+auf Kern 0. **Offen:** Modul laden/entschluesseln beim App-Start
+(`launch_app`), `lock`/Schluesselableitung, Tab-Vervollstaendigung.
 
 ### 3.5 Kern 0 aufloesen
 
