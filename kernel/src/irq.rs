@@ -77,6 +77,20 @@ static IRQ_FIRED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 #[inline]
 pub fn note_fired(vector: u8) {
     IRQ_FIRED[vector as usize].fetch_add(1, Ordering::Release);
+    let w = IRQ_WAITER[vector as usize].load(Ordering::Acquire);
+    if w != crate::smp::fiber::NO_WAKER {
+        crate::smp::fiber::signal(w, crate::smp::fiber::SIG_IRQ);
+    }
+}
+
+/// The fiber waiting on each vector (`fiber::irq_wait`). The ISR signals it,
+/// so the park ends on the interrupt itself instead of a re-check.
+static IRQ_WAITER: [core::sync::atomic::AtomicU32; 256] =
+    [const { core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER) }; 256];
+
+/// Register `w` as the fiber waiting on `vector`.
+pub fn set_waiter(vector: u8, w: crate::smp::fiber::Waker) {
+    IRQ_WAITER[vector as usize].store(w, Ordering::Release);
 }
 
 /// Current fired count for `vector`. Acquire pairs with `note_fired`.

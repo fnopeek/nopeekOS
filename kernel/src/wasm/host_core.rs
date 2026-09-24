@@ -716,6 +716,71 @@ pub(crate) fn npk_sleep(_ctx: &mut HostState, ms: i32) -> i32 {
     0
 }
 
+/// `npk_wait` mask bit: an input event is waiting — a widget event
+/// (`npk_event_poll`), a key in the terminal buffer (`npk_input_poll`), or
+/// the app's window is gone.
+const WAIT_INPUT: i32 = 1;
+
+/// Is input waiting for this app? Also true once its widget window is
+/// gone, so a parked app wakes and leaves its loop.
+fn input_ready(ctx: &HostState) -> bool {
+    let wid = ctx.widget_window_id;
+    if wid != 0
+        && (crate::shade::widgets::has_event(wid)
+            || !crate::shade::widgets::widget_window_exists(wid))
+    {
+        return true;
+    }
+    crate::wasm::has_app_key(ctx.terminal_idx)
+}
+
+/// `npk_wait(mask, timeout_ms)` — park until something in `mask` happens,
+/// or `timeout_ms` passes (< 0: no timeout). Returns the bits that fired,
+/// 0 on timeout.
+///
+/// The event-driven replacement for `loop { poll; npk_sleep(16) }`: the
+/// app's fiber gives up its core and costs nothing until an event is pushed
+/// for it (`widgets::push_event`, `wasm::push_app_key` signal it) or its
+/// deadline comes. `docs/plan/CORES_AND_EVENTS.md` §3.3.
+///
+/// Needs no capability: it only tells whether the app's OWN queues hold
+/// something, and parks only the app's own fiber.
+pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
+    let freq = crate::interrupts::tsc_freq();
+    let deadline = if timeout_ms < 0 {
+        crate::smp::fiber::NO_DEADLINE
+    } else {
+        crate::interrupts::rdtsc() + (timeout_ms as u64) * (freq / 1000)
+    };
+    // Register where the app's input will be pushed. The widget window is
+    // created lazily by the app's first scene commit, so do it here, every
+    // time — a map insert and a store, at the rate the app waits.
+    if let Some(w) = crate::smp::fiber::current_waker() {
+        if ctx.widget_window_id != 0 {
+            crate::shade::widgets::set_event_waker(ctx.widget_window_id, w);
+        }
+        crate::wasm::set_key_waker(ctx.terminal_idx, w);
+    }
+    let flushed = crate::smp::per_core::flush_busy(ctx.core_id);
+    crate::process::add_busy_tsc(ctx.pid, flushed);
+    let fired = loop {
+        if mask & WAIT_INPUT != 0 && input_ready(ctx) {
+            break WAIT_INPUT;
+        }
+        if crate::interrupts::rdtsc() >= deadline {
+            break 0;
+        }
+        if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
+            // Not in a fiber: halt in place, looking again every 10 ms.
+            let recheck = crate::interrupts::rdtsc() + freq / 100;
+            crate::interrupts::halt_until(
+                Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
+        }
+    };
+    crate::smp::per_core::start_work(ctx.core_id);
+    fired
+}
+
 pub(crate) fn npk_input_poll(ctx: &mut HostState) -> i32 {
     match pop_app_key(ctx.terminal_idx) {
         Some(k) => k as i32,
@@ -744,6 +809,9 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
     let ticks_per_ms = freq / 1000;
     let deadline = crate::interrupts::rdtsc() + ms * ticks_per_ms;
 
+    if let Some(w) = crate::smp::fiber::current_waker() {
+        crate::wasm::set_key_waker(term_idx, w);
+    }
     let result = loop {
         if let Some(k) = pop_app_key(term_idx) {
             break k as i32;
@@ -751,14 +819,10 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         if crate::interrupts::rdtsc() >= deadline {
             break -1;
         }
-        // Keys arrive from Core 0 without a wake, so look again every
-        // 10 ms. **Inside a fiber, park — don't halt.** A halt here held
-        // the whole core: `top` waits in this call, and a video playing
-        // in a fiber on the same core stood still until `top` quit
-        // (Florian, 0.410.0). Stage 2 makes the key itself the wake
-        // (`npk_wait`, docs/plan/CORES_AND_EVENTS.md).
-        let left_ms = (deadline.saturating_sub(crate::interrupts::rdtsc()) / ticks_per_ms).max(1);
-        if !crate::smp::fiber::yield_sleep(left_ms.min(10)) {
+        // Park until a key is pushed (it signals this fiber) or the
+        // deadline. A halt here used to hold the whole core — `top` waits in
+        // this call, and a video in a fiber on the same core stood still.
+        if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
             // Not in a fiber (a one-shot on Core 0): halt in place.
             let recheck = crate::interrupts::rdtsc() + freq / 100;
             crate::interrupts::halt_until(

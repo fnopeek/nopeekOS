@@ -295,12 +295,37 @@ static EVENT_QUEUES: Mutex<BTreeMap<u32, VecDeque<abi::Event>>> =
 /// Push an event into the window's queue. Oldest is dropped on
 /// overflow (bounded queue).
 pub fn push_event(window_id: u32, event: abi::Event) {
-    let mut queues = EVENT_QUEUES.lock();
-    let q = queues.entry(window_id).or_insert_with(VecDeque::new);
-    if q.len() >= MAX_EVENTS_PER_WINDOW {
-        q.pop_front();
+    {
+        let mut queues = EVENT_QUEUES.lock();
+        let q = queues.entry(window_id).or_insert_with(VecDeque::new);
+        if q.len() >= MAX_EVENTS_PER_WINDOW {
+            q.pop_front();
+        }
+        q.push_back(event);
     }
-    q.push_back(event);
+    wake_window_app(window_id);
+}
+
+/// The fiber of the app that owns each widget window, registered when the
+/// app waits (`npk_wait`). An event wakes it at once instead of on its next
+/// poll — the app used to look every 16 ms whether or not anything happened.
+static EVENT_WAKERS: Mutex<BTreeMap<u32, crate::smp::fiber::Waker>> =
+    Mutex::new(BTreeMap::new());
+
+pub fn set_event_waker(window_id: u32, w: crate::smp::fiber::Waker) {
+    EVENT_WAKERS.lock().insert(window_id, w);
+}
+
+fn wake_window_app(window_id: u32) {
+    let w = EVENT_WAKERS.lock().get(&window_id).copied();
+    if let Some(w) = w {
+        crate::smp::fiber::signal(w, crate::smp::fiber::SIG_EVENT);
+    }
+}
+
+/// Is an event waiting for this window?
+pub fn has_event(window_id: u32) -> bool {
+    EVENT_QUEUES.lock().get(&window_id).is_some_and(|q| !q.is_empty())
 }
 
 /// Non-blocking event pop. Returns None if queue is empty.
@@ -326,6 +351,10 @@ pub fn widget_window_exists(window_id: u32) -> bool {
 /// drop the now-orphaned queue.
 pub fn remove_event_queue(window_id: u32) {
     EVENT_QUEUES.lock().remove(&window_id);
+    // The app may be parked in `npk_wait`: wake it so it sees the window is
+    // gone and leaves its loop.
+    wake_window_app(window_id);
+    EVENT_WAKERS.lock().remove(&window_id);
     CLIPBOARD_SINKS.lock().remove(&window_id);
     forget_close_state(window_id);
     WINDOW_CAPS.lock().remove(&window_id);

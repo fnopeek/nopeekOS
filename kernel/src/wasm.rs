@@ -335,6 +335,30 @@ pub fn push_app_key(terminal_idx: u8, key: u8) {
         buf[h] = key;
         head.store(next, AtOrd::Release);
     }
+    let w = APP_KEY_WAKER[idx].load(AtOrd::Acquire);
+    if w != crate::smp::fiber::NO_WAKER {
+        crate::smp::fiber::signal(w, crate::smp::fiber::SIG_EVENT);
+    }
+}
+
+/// The fiber of the app reading each terminal's key buffer, registered when
+/// it waits. A key wakes it at once (`top` used to look every 10 ms).
+static APP_KEY_WAKER: [core::sync::atomic::AtomicU32; MAX_APP_BUFS] =
+    [const { core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER) }; MAX_APP_BUFS];
+
+pub(crate) fn set_key_waker(terminal_idx: u8, w: crate::smp::fiber::Waker) {
+    if let Some(slot) = APP_KEY_WAKER.get(terminal_idx as usize) {
+        slot.store(w, AtOrd::Release);
+    }
+}
+
+/// Is a key waiting in this terminal's app buffer?
+pub(crate) fn has_app_key(terminal_idx: u8) -> bool {
+    let idx = terminal_idx as usize;
+    if idx >= MAX_APP_BUFS { return false; }
+    // SAFETY: read-only look at the two indices, idx bounds checked.
+    let (_, head, tail) = unsafe { &APP_KEY_BUFS[idx] };
+    head.load(AtOrd::Acquire) != tail.load(AtOrd::Relaxed)
 }
 
 /// Pop a key from an app's input buffer. Called from worker core.
@@ -357,6 +381,7 @@ fn clear_app_key_buf(terminal_idx: u8) {
     let (_, head, tail) = unsafe { &mut APP_KEY_BUFS[idx] };
     head.store(0, AtOrd::Relaxed);
     tail.store(0, AtOrd::Relaxed);
+    APP_KEY_WAKER[idx].store(crate::smp::fiber::NO_WAKER, AtOrd::Release);
 }
 
 /// Check if the given terminal has a running WASM app.
@@ -2253,6 +2278,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     linker.func_wrap("env", "npk_input_wait",
         |mut caller: Caller<'_, HostState>, timeout_ms: i32| -> i32 {
             host_core::npk_input_wait(caller.data_mut(), timeout_ms)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
+    // npk_wait(mask, timeout_ms) -> fired bits (0 = timeout). Parks the
+    // app's fiber until an input event arrives (mask bit 1) or the timeout
+    // passes; timeout < 0 waits without one. See host_core::npk_wait.
+    linker.func_wrap("env", "npk_wait",
+        |mut caller: Caller<'_, HostState>, mask: i32, timeout_ms: i32| -> i32 {
+            host_core::npk_wait(caller.data_mut(), mask, timeout_ms)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
