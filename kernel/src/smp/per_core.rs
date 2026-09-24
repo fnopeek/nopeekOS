@@ -778,8 +778,39 @@ pub const AT_WOKE: u8 = 6;
 static WHERE: [core::sync::atomic::AtomicU8; 256] = [const { core::sync::atomic::AtomicU8::new(0) }; 256];
 static LOOP_TSC: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
+static WOKE_TSC: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
 pub fn at(c: usize, w: u8) {
-    if c < 256 { WHERE[c].store(w, Ordering::Relaxed); }
+    if c < 256 {
+        WHERE[c].store(w, Ordering::Relaxed);
+        if w == AT_WOKE {
+            WOKE_TSC[c].store(crate::interrupts::rdtsc(), Ordering::Release);
+        }
+    }
+}
+
+/// Signed TSC offset of core `c` against the caller's TSC, in cycles, by a
+/// wake-IPI round trip: the woken core stamps its own TSC first thing after
+/// `hlt`; the caller's midpoint of send and receipt is the same instant ±
+/// half the round trip. Returns (offset, round trip). None if `c` is not
+/// halted or did not answer. Costs `c` one wake.
+pub fn tsc_offset(c: usize) -> Option<(i64, u64)> {
+    if c >= 256 || c == current_core_id() || !IDLE[c].load(Ordering::SeqCst) {
+        return None;
+    }
+    let before = WOKE_TSC[c].load(Ordering::Acquire);
+    let t_send = crate::interrupts::rdtsc();
+    super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    for _ in 0..10_000_000u32 {
+        let w = WOKE_TSC[c].load(Ordering::Acquire);
+        if w != before {
+            let t_recv = crate::interrupts::rdtsc();
+            let mid = t_send / 2 + t_recv / 2;
+            return Some((w as i64 - mid as i64, t_recv.wrapping_sub(t_send)));
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 /// (breadcrumb, TSC of the last pass through the loop top, IDLE flag).
