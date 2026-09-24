@@ -74,8 +74,13 @@ fn spawn_inner(func: fn(u64), arg: u64, is_fiber: bool) {
     }
     INBOX.lock().push_back(Task { func, arg, is_fiber });
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
-    // Idle workers pick this up at their next timer wake (see
-    // per_core::smp_ap_entry). An IPI wake comes with stage 2.
+    // Idle workers have no periodic tick any more — wake them.
+    super::per_core::wake_idle_workers();
+}
+
+/// Is anything waiting in the inbox? For the idle re-check.
+pub fn has_work() -> bool {
+    !INBOX.lock().is_empty()
 }
 
 /// Take the oldest waiting task, if any.

@@ -641,8 +641,14 @@ pub fn current_core_id() -> usize {
 static APIC_TO_CORE: [core::sync::atomic::AtomicU16; 256] =
     [const { core::sync::atomic::AtomicU16::new(0) }; 256];
 
+/// Sequential core id → xAPIC id, the reverse of `APIC_TO_CORE`.
+static CORE_APIC: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
+
 fn map_apic(apic_id: u32, core_id: u32) {
     APIC_TO_CORE[(apic_id & 0xFF) as usize].store(core_id as u16, Ordering::Release);
+    if (core_id as usize) < 256 {
+        CORE_APIC[core_id as usize].store(apic_id, Ordering::Release);
+    }
 }
 
 /// Enable Hardware P-states (HWP / Speed Shift) on the current core.
@@ -708,6 +714,22 @@ pub fn enable_hwp() -> bool {
 /// darf beim Verteilen nicht als „leerster Kern" zaehlen — er nimmt nie
 /// etwas, und die Arbeit bliebe liegen.
 static IN_LOOP: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+/// Worker is halted in its idle path and needs an IPI to see new work.
+static IDLE: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+/// New work is in the inbox: send the wake IPI to every idle worker. Each
+/// one re-runs its loop; the placement rule (`least_loaded`) picks who takes
+/// it, the others halt again. Spawns are rare, so waking all idle cores is
+/// cheaper than guessing the right one and stranding the work on a miss.
+pub fn wake_idle_workers() {
+    let workers = super::scheduler::worker_count();
+    for c in 1..=workers.min(255) {
+        if IDLE[c].load(Ordering::SeqCst) {
+            super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+        }
+    }
+}
+
 /// Ein Intent laeuft gerade auf diesem Kern (bis zum Ende, ohne abzugeben).
 static NATIVE_BUSY: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
@@ -770,11 +792,11 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         core::hint::spin_loop();
     }
 
-    // Arm this core's own 100 Hz LAPIC timer so its idle HLT has a wake
-    // source independent of the host (IRQs route to the BSP only). This
-    // is what lets us idle with plain HLT — which VMEXITs so KVM frees
-    // the host core — instead of MWAIT-on-cacheline (needs cpu-pm=on).
-    crate::interrupts::arm_worker_timer();
+    // This core's own LAPIC timer, one-shot to whatever deadline it waits
+    // for — its idle HLT needs a wake source independent of the host. Plain
+    // HLT VMEXITs, so KVM frees the host core (MWAIT-on-cacheline needed
+    // cpu-pm=on). New work wakes it by IPI (`wake_idle_workers`).
+    crate::interrupts::init_worker_timer();
     if (core_id as usize) < 256 {
         IN_LOOP[core_id as usize].store(true, Ordering::Release);
     }
@@ -788,8 +810,8 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // THIS CORE when a launch is pending and runs it continuously
         // to exit (blocking the core for the guest's whole lifetime —
         // that is the point: it no longer fights Shade + the shell for
-        // Core 0). Cheap no-op when nothing is pending → we idle on
-        // the 100 Hz timer and re-check within ~10 ms. Default
+        // Core 0). Cheap no-op when nothing is pending → we halt and
+        // re-check within ~10 ms. Default
         // sentinel never matches a real cid, so ≤2-core / no-AP hosts
         // keep the exact old work-stealing loop.
         if DEDICATED_VM_CORE.load(Ordering::Acquire) == cid as u32 {
@@ -797,12 +819,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             crate::microvm::vm_core_serve();
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             update_core_freq(cid);
-            // SAFETY: ring-0 idle; the 100 Hz timer IRQ (≥) wakes us
-            // to re-check for a pending launch.
-            let t0 = crate::interrupts::rdtsc();
-            unsafe { core::arch::asm!("sti; hlt; cli"); }
-            record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
-            record_wake(cid, WAKE_HLT_FALLBACK);
+            // Re-check for a pending launch every 10 ms.
+            let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+            crate::interrupts::halt_until(Some(d), WAKE_HLT_FALLBACK);
             continue;
         }
 
@@ -829,7 +848,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // Last, warten Touchpad, Ton und Panels, und umgekehrt.
         let take = !nic_core && least_loaded(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
-        // New work arrives on the global deque (own deque first, then steal).
+        // New work arrives in the shared inbox (`scheduler::spawn`).
         if let Some(task) = if take { super::scheduler::next_task(cid) } else { None } {
             if task.is_fiber {
                 // App: hand to this core's fiber scheduler. It runs on its
@@ -849,8 +868,8 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         }
 
         // Run this core's fibers round-robin: resume any whose sleep
-        // deadline passed, park the rest. Returns when all are sleeping /
-        // none remain — then we idle on the timer and re-enter next tick.
+        // deadline passed, park the rest. Returns when all are parked /
+        // none remain — then the core halts below.
         CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
         start_work(cid);
         super::fiber::run_core_fibers(cid);
@@ -860,32 +879,34 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // Before sleep: update usage stats (delta covers work + idle since last call)
         update_core_freq(cid);
 
-        // No work — idle with plain HLT (not MWAIT-on-cacheline). HLT
-        // VMEXITs under KVM → the host scheduler deschedules the idle
-        // vCPU thread → the host core actually idles (no more 100%/turbo
-        // from cpu-pm=on passthrough). The per-core worker timer (armed
-        // above) wakes us within ~10 ms to re-check the run-queue, so a
-        // task spawned just after the check above is picked up at the
-        // next tick (≤10 ms latency; a targeted IPI wake is a future
-        // optimization). sti-shadow arms HLT before the IRQ lands; the
-        // trailing cli restores the IF=0 the loop body runs under.
-        // Tickless: a fiber that asked for a 1 ms sleep must not wait for the
-        // next 10 ms worker tick. Arm the LAPIC for the earliest parked deadline
-        // instead — still a real interrupt wake, no spinning. Without this every
-        // sub-10 ms sleep silently rounds up to 10 ms, which turns a polling
-        // driver's throughput ceiling into a function of the timer rate.
+        // Idle: halt until the earliest parked fiber is due, or until an
+        // interrupt — a device IRQ for a fiber in `irq_wait`, a kick, or
+        // the wake IPI for new work. No periodic tick.
+        //
+        // IDLE is published BEFORE the inbox is looked at again: a spawn
+        // that pushed without seeing IDLE sent no IPI, so its work must be
+        // seen by this re-check; one that saw IDLE sends the IPI, which
+        // stays pending (IF=0) and ends the halt below at once.
+        IDLE[cid].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
-        let mut reload = None;
-        match super::fiber::earliest_deadline(cid) {
-            Some(d) if d <= now => continue, // became runnable — round again
-            Some(d) => reload = crate::interrupts::arm_worker_wake_in(d - now),
-            None => {}
+        let mut wake = super::fiber::earliest_deadline(cid);
+        if matches!(wake, Some(d) if d <= now) {
+            IDLE[cid].store(false, Ordering::Relaxed);
+            continue; // became runnable — round again
         }
-        let t0 = crate::interrupts::rdtsc();
-        // SAFETY: ring-0 idle; wakes on the per-core timer (or any IRQ).
-        unsafe { core::arch::asm!("sti; hlt; cli"); }
-        if let Some(prev) = reload { crate::interrupts::restore_worker_reload(prev); }
-        record_halt(cid, crate::interrupts::rdtsc().saturating_sub(t0));
-        record_wake(cid, WAKE_HLT_FALLBACK);
+        if super::scheduler::has_work() {
+            if !nic_core && least_loaded(cid) {
+                IDLE[cid].store(false, Ordering::Relaxed);
+                continue;
+            }
+            // Work waits that this core declines — for another core. If
+            // that one is busy inside its fibers it takes the work only
+            // when it gets back to the top of its loop; look again in
+            // 10 ms so the work cannot be stranded behind a changed load.
+            let recheck = now + crate::interrupts::tsc_freq() / 100;
+            wake = Some(wake.map_or(recheck, |d| d.min(recheck)));
+        }
+        crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK);
+        IDLE[cid].store(false, Ordering::Relaxed);
     }
 }
