@@ -206,6 +206,12 @@ Kontextwechsel bleibt kooperativ und billig.
   leeren bis Budget → IRQ wieder scharf. Ersetzt `sleep_ms(1)` und die
   64-Blicke-Spinschleife.
 * audio_hda (IOC-IRQ, braucht MSI statt MSI-X), i2c_hid (GPIO-IRQ), EC (SCI).
+* **microVM-Netz-Datenebene:** der Worker parkt mit `kick_wait(PARK_SAFETY_MS
+  = 2)` und wird gemessen NIE per IRQ geweckt (`cores`, QEMU 2026-09-24:
+  `irq=0 timeout=504` je Sekunde) — ein versteckter 500-Hz-Takt auf einem
+  eigenen Kern. Die Host-NIC muss ihn wecken (virtio-net-MSI-X ist in QEMU
+  laut Memory nie aktiv geworden; beim WLAN kommt der Weckruf aus dem
+  Treiber-Fiber, der die Rahmen abliefert).
 * NVMe: eine I/O-Queue je Kern mit eigenem Vektor — dann braucht es die
   `NVME`-Sperre im Hot-Path nicht mehr, und FS-Sperren muessen nicht ueber
   einem Park gehalten werden (die Blockade von „B-2" im Memory entfaellt).
