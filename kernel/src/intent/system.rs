@@ -895,6 +895,7 @@ pub fn intent_ec_watch(args: &str) {
         }
         v
     };
+    crate::sci::report();
     let en = read_gpe(half);
     let mut line = alloc::string::String::new();
     for i in 0..half { line.push_str(&alloc::format!("{:02x} ", en[i])); }
