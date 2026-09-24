@@ -781,6 +781,36 @@ pub fn enable_hwp() -> bool {
     true
 }
 
+/// AMD Zen C-state base address (MSRC001_0073 CStateBaseAddr, bits 15:0):
+/// an I/O read of CStateBaseAddr+n is trapped by the core as a request for
+/// C-state n (ACPI `_CST` lists these ports as SystemIO entries). None off
+/// AMD, before family 17h, under a hypervisor (the MSR is not emulated and
+/// a read would #GP), or when the firmware left it 0 (no trapping).
+pub fn amd_cstate_base() -> Option<u16> {
+    if !matches!(crate::microvm::cpu::detect_vendor(), crate::microvm::cpu::Vendor::Amd) {
+        return None;
+    }
+    let (eax, ecx): (u32, u32);
+    // SAFETY: CPUID leaf 1 exists everywhere; rbx is reserved by LLVM.
+    unsafe {
+        core::arch::asm!("push rbx", "mov eax, 1", "cpuid", "pop rbx",
+            out("eax") eax, out("ecx") ecx, out("edx") _);
+    }
+    if ecx & (1 << 31) != 0 { return None; } // hypervisor
+    let base_fam = (eax >> 8) & 0xF;
+    let family = if base_fam == 0xF { base_fam + ((eax >> 20) & 0xFF) } else { base_fam };
+    if family < 0x17 { return None; }
+    let (lo, _hi): (u32, u32);
+    // SAFETY: MSRC001_0073 is architectural on AMD family 17h+ (PPR
+    // Core::X86::Msr::CStateBaseAddr), gated on vendor, family and bare metal.
+    unsafe {
+        core::arch::asm!("rdmsr", in("ecx") 0xC001_0073u32, out("eax") lo, out("edx") _hi,
+            options(nomem, nostack, preserves_flags));
+    }
+    let base = (lo & 0xFFFF) as u16;
+    if base == 0 || base > 0xFFF8 { None } else { Some(base) }
+}
+
 /// Worker ist in seiner Schleife angekommen. Ein AP, der nie startete,
 /// darf beim Verteilen nicht als „leerster Kern" zaehlen — er nimmt nie
 /// etwas, und die Arbeit bliebe liegen.

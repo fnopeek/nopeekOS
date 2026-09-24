@@ -657,6 +657,53 @@ static HAS_TSC_DEADLINE: core::sync::atomic::AtomicBool =
 const MSR_TSC_DEADLINE: u32 = 0x6E0;
 
 /// Does this CPU have the LAPIC TSC-deadline mode (CPUID.1:ECX[24])?
+/// Deep idle via an ACPI SystemIO C-state port; 0 = off (plain `hlt`, C1).
+/// Set by `set_deep_idle` (today: the `power cstate` experiment).
+static DEEP_IDLE_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+/// A halt shorter than this stays in C1 — the exit latency of a deep state
+/// would cost more than it saves (Linux's menu governor makes the same cut
+/// against the state's target residency).
+static DEEP_IDLE_MIN_TSC: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Deep entries per core (how often the deep path was actually taken).
+pub static DEEP_IDLE_COUNT: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// Turn deep idle on (`port` != 0) or off (0). Refuses anything outside the
+/// CPU's own C-state trap range and a CPU whose LAPIC timer would stop in a
+/// deep state (no ARAT) — there a core sleeping on its deadline timer would
+/// never wake.
+pub fn set_deep_idle(port: u16, min_us: u64) -> Result<(), &'static str> {
+    if port == 0 {
+        DEEP_IDLE_PORT.store(0, Ordering::Relaxed);
+        return Ok(());
+    }
+    if !has_arat() {
+        return Err("no ARAT: the LAPIC timer stops in deep C-states");
+    }
+    let base = crate::smp::per_core::amd_cstate_base().ok_or("no AMD C-state base address")?;
+    if port < base || port >= base.saturating_add(8) {
+        return Err("port outside CStateBaseAddr..+8");
+    }
+    let tsc_per_us = (tsc_freq() / 1_000_000).max(1);
+    DEEP_IDLE_MIN_TSC.store(min_us.saturating_mul(tsc_per_us), Ordering::Relaxed);
+    DEEP_IDLE_PORT.store(port, Ordering::Relaxed);
+    Ok(())
+}
+
+pub fn deep_idle_port() -> u16 { DEEP_IDLE_PORT.load(Ordering::Relaxed) }
+
+/// CPUID.06H:EAX[2] — Always Running APIC Timer (keeps counting in deep
+/// C-states).
+pub fn has_arat() -> bool {
+    let eax: u32;
+    // SAFETY: CPUID leaf 6 exists on every CPU this kernel runs on; rbx is
+    // reserved by LLVM.
+    unsafe {
+        core::arch::asm!("push rbx", "mov eax, 6", "xor ecx, ecx", "cpuid", "pop rbx",
+            out("eax") eax, out("ecx") _, out("edx") _);
+    }
+    eax & (1 << 2) != 0
+}
+
 pub fn has_tsc_deadline() -> bool {
     let ecx: u32;
     // SAFETY: CPUID leaf 1 exists on every x86_64; rbx is reserved by LLVM.
@@ -850,8 +897,31 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     }
     let t0 = rdtsc();
     crate::smp::per_core::halt_begin(cid, t0);
-    // SAFETY: sti-shadow arms the HLT before any pending IRQ is taken.
-    unsafe { core::arch::asm!("sti; hlt; cli") };
+    let port = DEEP_IDLE_PORT.load(Ordering::Relaxed);
+    let deep = port != 0 && match deadline {
+        None => true,
+        Some(d) => d.saturating_sub(t0) >= DEEP_IDLE_MIN_TSC.load(Ordering::Relaxed),
+    };
+    if deep {
+        // ACPI SystemIO C-state (Linux `io_idle`): a read of the port the
+        // core traps as its C-state entry request. Entered with IF=0, like
+        // Linux's cpuidle: a pending interrupt is a break event regardless
+        // of IF, so there is no window between arming and sleeping. The
+        // `sti; nop; cli` afterwards takes that interrupt here, as the hlt
+        // path does. No dummy PM-timer read: Linux restricts it to old Intel.
+        // SAFETY: `port` was accepted by `set_deep_idle` only inside the
+        // CPU's own C-state trap range (CStateBaseAddr..+8); reading it has
+        // no effect but the idle entry.
+        unsafe {
+            core::arch::asm!("in al, dx", in("dx") port, out("al") _,
+                options(nomem, nostack, preserves_flags));
+            core::arch::asm!("sti; nop; cli");
+        }
+        DEEP_IDLE_COUNT[cid.min(255)].fetch_add(1, Ordering::Relaxed);
+    } else {
+        // SAFETY: sti-shadow arms the HLT before any pending IRQ is taken.
+        unsafe { core::arch::asm!("sti; hlt; cli") };
+    }
     crate::smp::per_core::note_woke(cid);
     crate::smp::per_core::record_halt(cid, rdtsc().saturating_sub(t0));
     // Core 0's wakes are attributed by its ISRs (timer, input).

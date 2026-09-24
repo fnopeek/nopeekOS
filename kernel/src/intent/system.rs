@@ -380,10 +380,19 @@ pub fn intent_power(args: &str) {
         return;
     }
 
+    let args = args.trim();
+    if let Some(rest) = args.strip_prefix("cstate") {
+        power_cstate(rest.trim());
+        return;
+    }
+
     // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
     // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
     // machen. `power 5` misst fuenf Sekunden.
-    let secs: u64 = args.trim().parse().unwrap_or(2).clamp(1, 30);
+    let secs: u64 = args.parse().unwrap_or(2).clamp(1, 30);
+    let cores = crate::smp::per_core::core_count().min(256);
+    let deep0: u64 = (0..cores).map(|c| crate::interrupts::DEEP_IDLE_COUNT[c]
+        .load(core::sync::atomic::Ordering::Relaxed)).sum();
     let tsc_hz = crate::interrupts::tsc_freq().max(1);
 
     let t0 = crate::interrupts::rdtsc();
@@ -401,6 +410,8 @@ pub fn intent_power(args: &str) {
     let pkg1 = crate::smp::per_core::rapl_pkg_raw();
     let core0_e1 = crate::smp::per_core::rapl_core_raw();
     let (halt1, _) = crate::smp::per_core::halt_snapshot(0);
+    let deep1: u64 = (0..cores).map(|c| crate::interrupts::DEEP_IDLE_COUNT[c]
+        .load(core::sync::atomic::Ordering::Relaxed)).sum();
 
     let window_tsc = t1.saturating_sub(t0).max(1);
     let window_us = window_tsc / (tsc_hz / 1_000_000).max(1);
@@ -418,6 +429,13 @@ pub fn intent_power(args: &str) {
     kprintln!("  Package          {}.{:03} W", pkg_mw / 1000, pkg_mw % 1000);
     kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
     kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
+    let port = crate::interrupts::deep_idle_port();
+    if port == 0 {
+        kprintln!("  Leerlauf          C1 (hlt) — 'power cstate' fuer tiefer");
+    } else {
+        kprintln!("  Leerlauf          tief ueber Port 0x{:x}: {} Eintritte/s (alle Kerne)",
+            port, (deep1 - deep0) / secs);
+    }
     kprintln!();
     kprintln!("  Rohwerte: dPkg={} dCore0={} Einheit={} nJ Fenster={} us",
         pkg1.wrapping_sub(pkg0), core0_e1.wrapping_sub(core0_e0),
@@ -426,6 +444,59 @@ pub fn intent_power(args: &str) {
     kprintln!("  Vergleich: 'battery' nennt die Entnahme des AKKUS (Gesamt-");
     kprintln!("  system). Die Differenz ist alles, was nicht die CPU ist —");
     kprintln!("  Bildschirm, PCIe-Links, NVMe, USB, WLAN, Audio.");
+    kprintln!();
+}
+
+/// `power cstate` — deep idle, as an experiment you switch on and measure:
+///   power cstate            show what the CPU offers
+///   power cstate <n> [us]   idle through CStateBaseAddr+n, only for halts
+///                           of at least <us> microseconds (default 200)
+///   power cstate off        back to hlt (C1)
+fn power_cstate(arg: &str) {
+    kprintln!();
+    let base = crate::smp::per_core::amd_cstate_base();
+    if arg.is_empty() {
+        kprintln!("  ARAT (LAPIC-Timer laeuft im Tiefschlaf): {}",
+            if crate::interrupts::has_arat() { "ja" } else { "NEIN — Tiefschlaf gesperrt" });
+        match base {
+            Some(b) => kprintln!("  CStateBaseAddr (MSRC001_0073): 0x{:x} — Ports 0x{:x}..0x{:x}",
+                b, b, b + 7),
+            None => kprintln!("  CStateBaseAddr: keine (kein AMD Zen, Hypervisor oder 0)"),
+        }
+        let p = crate::interrupts::deep_idle_port();
+        if p == 0 {
+            kprintln!("  aktiv: C1 (hlt)");
+        } else {
+            kprintln!("  aktiv: Port 0x{:x}", p);
+        }
+        kprintln!();
+        kprintln!("  'power cstate 1' / 'power cstate 2' schaltet ein, 'power cstate off'");
+        kprintln!("  zurueck. Danach 'power 10' und die Package-Zahl vergleichen.");
+        kprintln!();
+        return;
+    }
+    if arg == "off" {
+        let _ = crate::interrupts::set_deep_idle(0, 0);
+        kprintln!("  Leerlauf wieder C1 (hlt).");
+        kprintln!();
+        return;
+    }
+    let mut it = arg.split_whitespace();
+    let n: u16 = match it.next().and_then(|v| v.parse().ok()) {
+        Some(n) if n < 8 => n,
+        _ => { kprintln!("  power cstate <0-7> [min_us] | off"); kprintln!(); return; }
+    };
+    let min_us: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let Some(b) = base else {
+        kprintln!("  Keine CStateBaseAddr — nichts einzuschalten.");
+        kprintln!();
+        return;
+    };
+    match crate::interrupts::set_deep_idle(b + n, min_us) {
+        Ok(()) => kprintln!("  Leerlauf ueber Port 0x{:x} (Base+{}) fuer Halts ab {} us.",
+            b + n, n, min_us),
+        Err(e) => kprintln!("  abgelehnt: {}", e),
+    }
     kprintln!();
 }
 
