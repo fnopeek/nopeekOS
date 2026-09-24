@@ -32,9 +32,61 @@ pub fn init() {
     if let Some(port) = find_pm1a_cnt() {
         PM1A_CNT_PORT.store(port, Ordering::Release);
         crate::kprintln!("[npk] ACPI: PM1a_CNT at {:#x}", port);
+        enable_acpi_mode(port);
     } else {
         crate::kprintln!("[npk] ACPI: PM1a_CNT not found");
     }
+}
+
+/// Take the platform out of legacy (SMM) mode into ACPI mode — ACPICA
+/// `acpi_enable` → `acpi_hw_set_mode(ACPI_SYS_MODE_ACPI)`: if PM1_CNT.SCI_EN
+/// is clear, write FADT.ACPI_ENABLE to FADT.SMI_CMD, then poll SCI_EN for up
+/// to 3 s (30000 × 100 us). Before this the firmware kept every event for
+/// itself: on the IdeaPad `ec watch` read SCI_EN 0, and the brightness keys
+/// never reached the OS at all.
+///
+/// Nothing routes the SCI yet (GSI 9 stays masked at the I/O APIC) and every
+/// GPE enable is 0, so the switch alone raises no interrupt; events are
+/// picked up by polling (aml drains the EC). The price, named: a short press
+/// of the power button is an OS event from here on — until something handles
+/// PWRBTN_STS it does nothing (a 4-s press still cuts power in hardware).
+fn enable_acpi_mode(pm1a_cnt: u16) {
+    let Some(fadt) = find_table(b"FACP") else { return };
+    ensure_mapped(fadt, 256);
+    // SAFETY: FADT mapped; SMI_CMD at 48 (u32), ACPI_ENABLE at 52 (u8).
+    let (smi_cmd, acpi_enable) = unsafe {
+        (core::ptr::read_unaligned((fadt + 48) as *const u32),
+         core::ptr::read_volatile((fadt + 52) as *const u8))
+    };
+    let sci_en = || -> bool {
+        // SAFETY: PM1a_CNT is the FADT's I/O port.
+        (unsafe { crate::serial::inw(pm1a_cnt) } & 1) != 0
+    };
+    if sci_en() {
+        crate::kprintln!("[npk] ACPI: already in ACPI mode");
+        return;
+    }
+    // ACPICA: no SMI_CMD, or no enable value, means the platform has no
+    // legacy mode to leave (hardware-reduced / ACPI-only).
+    if smi_cmd == 0 || smi_cmd > 0xFFFF || acpi_enable == 0 {
+        crate::kprintln!("[npk] ACPI: SCI_EN clear but no SMI_CMD/ACPI_ENABLE — left as is");
+        return;
+    }
+    // SAFETY: SMI_CMD is the FADT's I/O port for exactly this command.
+    unsafe { crate::serial::outb(smi_cmd as u16, acpi_enable) };
+    let tsc_100us = (crate::interrupts::tsc_freq() / 10_000).max(1);
+    for retry in 0..30_000u32 {
+        if sci_en() {
+            crate::kprintln!("[npk] ACPI: legacy -> ACPI mode ({:#x} to SMI_CMD {:#x}, {} us)",
+                acpi_enable, smi_cmd, retry * 100);
+            return;
+        }
+        let t = crate::interrupts::rdtsc();
+        while crate::interrupts::rdtsc().wrapping_sub(t) < tsc_100us {
+            core::hint::spin_loop();
+        }
+    }
+    crate::kprintln!("[npk] ACPI: firmware did not set SCI_EN within 3 s — still legacy");
 }
 
 /// Perform ACPI reset via FADT reset register.
