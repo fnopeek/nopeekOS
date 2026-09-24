@@ -4,7 +4,7 @@
 ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 (MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
-dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC). Rest offen.
+dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -310,6 +310,18 @@ kann auf manchen Maschinen ueber den alten PIC und einen ExtINT-Pin kommen
 eine Leitung maskiert auf einen Vektor dieses Kerns; eine PEGEL-Leitung
 maskiert der ISR (`irq::isr`), `irq::arm` gibt sie frei — Linux'
 `IRQF_ONESHOT`. Noch ohne Nutzer; 3b haengt die PS/2-Tastatur daran.
+
+**Gebaut (Stufe 3b, 0.416.0): Eingabe per Interrupt.** Der i8042 kommt
+ueber den I/O APIC (ISA IRQ 1, bei aktivem Aux-Port auch 12) auf Vektor 53,
+`keyboard::enable_irq` setzt dabei KBDINT/AUXINT wie Linux und leert vorher
+den Ausgabepuffer (`i8042_flush`); danach gehoert der i8042 dem Interrupt
+(`PS2_IRQ_ACTIVE`), und `read_key` fragt den Port nicht mehr ab. Jeder
+xHCI-Controller bekommt MSI-X auf Vektor 54 und `USBCMD.INTE`; der Handler
+quittiert wie `xhci_irq` (USBSTS.EINT, IMAN.IP) und leert den Ereignisring.
+Beide auf Kern 0. **Der Tick leert bis 3e weiter mit** — beide Wege laufen
+im Interrupt auf Kern 0 und verschachteln sich nicht. `enable_irq` steht
+hinter dem zweiten `init_mouse`, weil das die Antworten des i8042 selbst
+liest.
 
 ### 3.5 Kern 0 aufloesen
 

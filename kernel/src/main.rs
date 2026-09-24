@@ -224,6 +224,10 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             vga::show_status(b"PS/2 pointer online");
         }
     }
+    // The i8042 by interrupt (stage 3b) — only now: `init_mouse` above reads
+    // the controller's answers itself, and an active IRQ would take them.
+    // The tick still drains as fallback.
+    keyboard::enable_irq();
     if netdev::is_available() {
         vga::show_status(b"Network online");
 

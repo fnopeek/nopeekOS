@@ -418,13 +418,72 @@ fn poll_ps2() -> Option<u8> {
 /// drainer once active. No-op until `PS2_IRQ_ACTIVE` (set after init, only
 /// when a PS/2 mouse exists) so init can't race the IRQ and USB-mouse hosts
 /// are untouched. Core-0 only (the timer handlers run on the BSP).
+/// Route the i8042 through the I/O APIC to Core 0 (stage 3b). Call on
+/// Core 0 after `ioapic::init`.
+///
+/// Linux sets the controller's interrupt-enable bits when it registers the
+/// IRQ (`I8042_CTR_KBDINT`, `I8042_CTR_AUXINT`); firmware usually leaves
+/// KBDINT on, but nothing promises it. The output buffer is flushed first
+/// (`i8042_flush`), or a pending scancode would be read as the config byte.
+/// From here the interrupt owns the i8042 (`PS2_IRQ_ACTIVE`): `read_key`
+/// stops polling the port and takes keys from the buffer.
+pub fn enable_irq() {
+    // SAFETY: i8042 port I/O at boot, on Core 0, interrupts off below.
+    if unsafe { inb(STATUS_PORT) } == 0xFF {
+        return; // no controller
+    }
+    let aux = PS2_MOUSE_ENABLED.load(Ordering::Relaxed);
+    let (gsi, level, low) = crate::ioapic::isa_irq(1);
+    let dest = crate::interrupts::current_apic_id();
+    if !crate::ioapic::route(gsi, crate::interrupts::PS2_VECTOR, dest, level, low) {
+        kprintln!("[npk] ps2: no I/O APIC serves GSI {} — keyboard stays polled", gsi);
+        return;
+    }
+    let aux_gsi = if aux {
+        let (g, l, lo) = crate::ioapic::isa_irq(12);
+        crate::ioapic::route(g, crate::interrupts::PS2_VECTOR, dest, l, lo).then_some(g)
+    } else {
+        None
+    };
+    crate::interrupts::without_interrupts(|| {
+        // SAFETY: i8042 command/data ports; nothing else touches them yet.
+        unsafe {
+            for _ in 0..16 {
+                if inb(STATUS_PORT) & 0x01 == 0 { break; }
+                let _ = inb(DATA_PORT);
+            }
+            wait_write();
+            outb(STATUS_PORT, 0x20);
+            if let Some(cfg) = ps2_read() {
+                let want = cfg | 0x01 | if aux { 0x02 } else { 0 };
+                if want != cfg {
+                    wait_write();
+                    outb(STATUS_PORT, 0x60);
+                    wait_write();
+                    outb(DATA_PORT, want);
+                }
+            }
+        }
+        PS2_IRQ_ACTIVE.store(true, Ordering::Release);
+        crate::ioapic::unmask(gsi);
+        if let Some(g) = aux_gsi {
+            crate::ioapic::unmask(g);
+        }
+    });
+    kprintln!("[npk] ps2: IRQ 1 -> GSI {} ({}) on vector {}{} — keyboard by interrupt",
+        gsi, if level { "level" } else { "edge" }, crate::interrupts::PS2_VECTOR,
+        if aux_gsi.is_some() { ", IRQ 12 (aux) too" } else { "" });
+}
+
 pub fn poll_ps2_irq() {
     if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
         return;
     }
     let mut budget = 64u32;
-    // SAFETY: ring-0 i8042 port access; only the Core-0 timer IRQ calls this,
-    // and once active nothing else touches the i8042 (read_key reads BUF).
+    // SAFETY: ring-0 i8042 port access; only Core-0 interrupt handlers call
+    // this (the i8042 IRQ, and the timer tick as fallback) — they do not
+    // nest — and once active nothing else touches the i8042 (read_key reads
+    // BUF).
     unsafe {
         while budget > 0 {
             let status = inb(STATUS_PORT);
