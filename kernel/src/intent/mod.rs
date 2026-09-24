@@ -383,7 +383,6 @@ fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) -> b
     INTENT_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
 
     crate::smp::scheduler::spawn(
-        crate::smp::scheduler::Priority::Normal,
         intent_worker_task,
         slot as u64,
     );

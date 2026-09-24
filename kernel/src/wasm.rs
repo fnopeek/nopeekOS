@@ -455,7 +455,6 @@ fn spawn_on_worker_inner_engine(
     // npk_event_wait instead of pinning its worker core — see smp::fiber
     // + docs/plan/SCHEDULER_FIBERS.md. Native intents still use plain `spawn`.
     crate::smp::scheduler::spawn_fiber(
-        crate::smp::scheduler::Priority::Interactive,
         wasm_worker_task,
         slot as u64,
     );

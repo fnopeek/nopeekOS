@@ -547,12 +547,17 @@ static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
 
 /// Das naechste wartende Byte, oder `None`. **Muss vor dem Lesen eines neuen
 /// Scancodes gerufen werden.**
-fn take_tail() -> Option<u8> { UTF8_TAIL.lock().take() }
+/// Taken by the timer ISR (`poll_ps2_irq`) AND by `read_key` with IF=1 —
+/// the non-ISR side must mask interrupts, or a tick inside the lock spins
+/// forever on it.
+fn take_tail() -> Option<u8> {
+    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().take())
+}
 
 /// Scancode → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
 fn decode_scancode(scancode: u8) -> Option<u8> {
     let c = decode_scancode_char(scancode)?;
-    Some(UTF8_TAIL.lock().split(c))
+    Some(crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().split(c)))
 }
 
 fn decode_scancode_char(scancode: u8) -> Option<char> {

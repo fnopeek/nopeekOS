@@ -276,19 +276,12 @@ fn push_mouse_locked(evt: MouseEvent) {
 /// volles Bild. Beides liegt AUSSERHALB der Sperre — es ist teuer und
 /// braucht sie nicht.
 fn inject_pointer(evt: MouseEvent, cheap: bool) {
-    let rflags: u64;
-    // SAFETY: IF sichern und ausschalten, unten genau so wiederherstellen.
-    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
-    {
+    crate::interrupts::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
         crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
         push_mouse_locked(evt);
-    }
-    if rflags & (1 << 9) != 0 {
-        // SAFETY: IF war an — wieder anschalten.
-        unsafe { core::arch::asm!("sti") };
-    }
+    });
     if cheap {
         crate::shade::request_cursor_move();
     } else {
@@ -3152,14 +3145,20 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
 static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
     spin::Mutex::new(crate::input::Utf8Tail::new());
 
-fn take_tail() -> Option<u8> { UTF8_TAIL.lock().take() }
+/// `UTF8_TAIL` is taken by the timer ISR (`poll_events_irq` →
+/// `process_hid_report`) AND by `poll_keyboard` on Core 0 with IF=1 — so
+/// the non-ISR side must mask interrupts, or a tick inside the lock spins
+/// forever on it.
+fn take_tail() -> Option<u8> {
+    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().take())
+}
 
 /// HID-Code → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
 /// 0 heisst „diese Taste traegt kein Zeichen".
 fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
     let c = hid_to_char_ch(key, shift, alt_gr, is_de);
     if c == '\0' { return 0 }
-    UTF8_TAIL.lock().split(c)
+    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().split(c))
 }
 
 /// Convert HID keycode to a character. `'\0'` for unhandled keys.

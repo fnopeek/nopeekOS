@@ -768,6 +768,24 @@ pub fn worker_idle_hlt() {
     crate::smp::per_core::record_wake(core, crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
+/// Run `f` with this core's interrupts masked, restoring the previous IF.
+///
+/// For a spin lock that an ISR on the SAME core may also take: held with
+/// IF=1, the timer IRQ lands inside the critical section and spins on the
+/// lock its own core holds — the core is gone. Cheap (pushfq/cli/popfq), so
+/// keep `f` short; it cannot be interrupted.
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let rflags: u64;
+    // SAFETY: save RFLAGS and clear IF; restored below exactly as found.
+    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
+    let r = f();
+    if rflags & (1 << 9) != 0 {
+        // SAFETY: IF was set on entry — set it again.
+        unsafe { core::arch::asm!("sti") };
+    }
+    r
+}
+
 // ── Device interrupts (MSI-X → LAPIC vector → fiber wake) ───────────
 //
 // Real-hardware device IRQs route via MSI-X to a vector in this pool (the
