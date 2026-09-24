@@ -1066,12 +1066,26 @@ fn maybe_idle_gc() {
         return;
     }
 
+    // The sweep runs on a worker (`docs/plan/CORES_AND_EVENTS.md`, stage 3):
+    // it walks the whole tree under ROOT_MUTEX with disk I/O, and on Core 0
+    // it held the shell, the cursor and every frame for as long as it took.
+    if crate::smp::scheduler::worker_count() == 0 {
+        idle_gc_task(0);
+    } else if !GC_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::smp::scheduler::spawn(idle_gc_task, 0);
+    }
+}
+
+static GC_RUNNING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn idle_gc_task(_: u64) {
     match crate::storage::npkfs::fs::gc() {
         Ok(s) if !s.skipped && s.removed > 0 =>
             kprintln!("[npk] auto-gc: reclaimed {} orphan(s), {} kept", s.removed, s.kept),
         // skipped (a stream raced in) or nothing to reclaim — stay quiet.
         _ => {}
     }
+    GC_RUNNING.store(false, core::sync::atomic::Ordering::Release);
 }
 
 /// The shell's fiber on Core 0 (stage 3c), signalled by the input
