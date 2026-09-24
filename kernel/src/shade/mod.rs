@@ -1266,7 +1266,7 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
     if crate::smp::scheduler::worker_count() == 0 {
         launch_task(arg);
     } else {
-        crate::smp::scheduler::spawn(launch_task, arg);
+        crate::smp::scheduler::spawn("launch", launch_task, arg);
     }
 }
 

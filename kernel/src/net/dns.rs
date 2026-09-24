@@ -103,7 +103,7 @@ pub fn want(name: &str) {
     if crate::smp::scheduler::worker_count() > 0
         && !PUMP_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel)
     {
-        crate::smp::scheduler::spawn(pump_task, 0);
+        crate::smp::scheduler::spawn("dns", pump_task, 0);
     }
 }
 

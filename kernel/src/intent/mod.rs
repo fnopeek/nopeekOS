@@ -383,6 +383,7 @@ fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) -> b
     INTENT_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
 
     crate::smp::scheduler::spawn(
+        "intent",
         intent_worker_task,
         slot as u64,
     );
@@ -1074,7 +1075,7 @@ fn maybe_idle_gc() {
     if crate::smp::scheduler::worker_count() == 0 {
         idle_gc_task(0);
     } else if !GC_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel) {
-        crate::smp::scheduler::spawn(idle_gc_task, 0);
+        crate::smp::scheduler::spawn("gc", idle_gc_task, 0);
     }
 }
 

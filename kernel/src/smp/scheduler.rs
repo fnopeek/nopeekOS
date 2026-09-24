@@ -22,6 +22,9 @@ use spin::Mutex;
 /// ordering among runnable work belongs to the per-core fiber scheduler
 /// (`docs/plan/CORES_AND_EVENTS.md`), not to the inbox.
 pub struct Task {
+    /// What it is, for `cores` — a native task holds its core until it
+    /// returns, and a name is the first question when one does not.
+    pub name: &'static str,
     pub func: fn(u64),
     pub arg: u64,
     /// Run this task as a stackful FIBER on the worker core (its `func`
@@ -56,23 +59,23 @@ pub fn init(num_workers: usize) {
 // ── Public API ─────────────────────────────────────────────────
 
 /// Queue a native run-to-completion task (an intent). Callable from any core.
-pub fn spawn(func: fn(u64), arg: u64) {
-    spawn_inner(func, arg, false);
+pub fn spawn(name: &'static str, func: fn(u64), arg: u64) {
+    spawn_inner(name, func, arg, false);
 }
 
 /// Like `spawn`, but the task runs as a stackful FIBER on the worker core
 /// (`smp::fiber`). Used for `wasm_worker_task` so apps run on their own
 /// stack and yield at `npk_sleep` instead of pinning the core.
 pub fn spawn_fiber(func: fn(u64), arg: u64) {
-    spawn_inner(func, arg, true);
+    spawn_inner("fiber", func, arg, true);
 }
 
-fn spawn_inner(func: fn(u64), arg: u64, is_fiber: bool) {
+fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool) {
     if WORKER_COUNT.load(Ordering::Acquire) == 0 {
         func(arg);
         return;
     }
-    INBOX.lock().push_back(Task { func, arg, is_fiber });
+    INBOX.lock().push_back(Task { name, func, arg, is_fiber });
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
     // Idle workers have no periodic tick any more — wake them.
     super::per_core::wake_idle_workers();
