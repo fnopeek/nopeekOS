@@ -32,7 +32,6 @@ pub fn init() {
     if let Some(port) = find_pm1a_cnt() {
         PM1A_CNT_PORT.store(port, Ordering::Release);
         crate::kprintln!("[npk] ACPI: PM1a_CNT at {:#x}", port);
-        enable_acpi_mode(port);
     } else {
         crate::kprintln!("[npk] ACPI: PM1a_CNT not found");
     }
@@ -50,7 +49,9 @@ pub fn init() {
 /// picked up by polling (aml drains the EC). The price, named: a short press
 /// of the power button is an OS event from here on — until something handles
 /// PWRBTN_STS it does nothing (a 4-s press still cuts power in hardware).
-fn enable_acpi_mode(pm1a_cnt: u16) {
+pub fn enable_acpi_mode() {
+    let pm1a_cnt = PM1A_CNT_PORT.load(Ordering::Acquire);
+    if pm1a_cnt == 0 { return; }
     let Some(fadt) = find_table(b"FACP") else { return };
     ensure_mapped(fadt, 256);
     // SAFETY: FADT mapped; SMI_CMD at 48 (u32), ACPI_ENABLE at 52 (u8).
