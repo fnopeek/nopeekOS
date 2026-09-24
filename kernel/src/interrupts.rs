@@ -324,6 +324,10 @@ pub fn init() {
         // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
         IDT[VCPU_KICK_VECTOR as usize]
             .set_handler(vcpu_kick_handler as *const () as u64);
+        // Input by interrupt (stage 3b): the i8042 through the I/O APIC,
+        // the xHCI controllers through MSI-X — both to Core 0.
+        IDT[PS2_VECTOR as usize].set_handler(ps2_irq_handler as *const () as u64);
+        IDT[XHCI_VECTOR as usize].set_handler(xhci_irq_handler as *const () as u64);
         // Device-IRQ pool (MSI-X → LAPIC vector → fiber wake). See `crate::irq`.
         install_device_isrs();
 
@@ -858,6 +862,38 @@ pub fn worker_idle_hlt() {
         p => p,
     };
     halt_until(Some(rdtsc() + p), crate::smp::per_core::WAKE_HLT_FALLBACK);
+}
+
+// ── Input interrupts (stage 3b) ─────────────────────────────────────
+//
+// Keyboard and mouse used to be drained ONLY from the Core-0 timer tick —
+// up to 10 ms late, and never while the tick is gone (stage 3e). Now the
+// i8042 raises ISA IRQ 1 (and 12 for the aux port) through the I/O APIC,
+// and each xHCI controller raises MSI-X; both land on Core 0 and drain
+// right away. The tick keeps draining as a fallback until 3e: both paths
+// run in interrupt context on Core 0, so they never interleave, and the
+// xHCI path takes its controller lock with `try_lock`.
+
+/// i8042 (keyboard IRQ 1, aux IRQ 12), routed by `keyboard::enable_irq`.
+pub const PS2_VECTOR: u8 = 53;
+/// Every xHCI controller's interrupter 0, programmed by `xhci::init`.
+pub const XHCI_VECTOR: u8 = 54;
+
+fn lapic_eoi() {
+    // SAFETY: LAPIC EOI register (xAPIC base + 0xB0), identity-mapped.
+    unsafe { core::ptr::write_volatile((apic_base_any() + 0xB0) as *mut u32, 0) };
+}
+
+extern "x86-interrupt" fn ps2_irq_handler(_frame: InterruptStackFrame) {
+    crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
+    crate::keyboard::poll_ps2_irq();
+    lapic_eoi();
+}
+
+extern "x86-interrupt" fn xhci_irq_handler(_frame: InterruptStackFrame) {
+    crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
+    crate::xhci::msi_irq();
+    lapic_eoi();
 }
 
 /// Run `f` with this core's interrupts masked, restoring the previous IF.

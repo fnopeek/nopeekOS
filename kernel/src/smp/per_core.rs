@@ -192,12 +192,12 @@ pub fn halt_snapshot(core_id: usize) -> (u64, u64) {
 // bare-metal idle bug. On real HW every wake must attribute to a cause.
 pub const WAKE_CAUSES: usize = 4;
 pub const WAKE_TIMER: usize = 0;        // 100 Hz PIT / APIC timer ISR (Core 0)
-pub const WAKE_KEYBOARD: usize = 1;     // keyboard IRQ (Core 0)
+pub const WAKE_KEYBOARD: usize = 1;     // input IRQ: i8042 or xHCI (Core 0)
 pub const WAKE_HLT_FALLBACK: usize = 2; // worker idle sti;hlt;cli returned
 pub const WAKE_NPK_SLEEP: usize = 3;    // npk_sleep HLT returned
 
 /// Short labels for the `cores` breakdown, indexed by cause.
-pub const WAKE_LABELS: [&str; WAKE_CAUSES] = ["timer", "kbd", "hlt-fb", "npk-sleep"];
+pub const WAKE_LABELS: [&str; WAKE_CAUSES] = ["timer", "input", "hlt-fb", "npk-sleep"];
 
 static CORE_WAKE: [[AtomicU64; WAKE_CAUSES]; 256] = {
     const Z: AtomicU64 = AtomicU64::new(0);

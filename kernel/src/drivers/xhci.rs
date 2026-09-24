@@ -47,9 +47,11 @@ const OP_CONFIG:  u32 = 0x38;
 // USBCMD bits
 const CMD_RUN:  u32 = 1 << 0;
 const CMD_HCRST: u32 = 1 << 1;
+const CMD_INTE: u32 = 1 << 2; // interrupter enable
 
 // USBSTS bits
 const STS_HCH: u32 = 1 << 0;  // HC Halted
+const STS_EINT: u32 = 1 << 3; // event interrupt (write 1 to clear)
 const STS_CNR: u32 = 1 << 11; // Controller Not Ready
 
 // PORTSC bits
@@ -719,6 +721,16 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         return None;
     }
     kprintln!("[npk] xhci: controller running");
+
+    // Interrupter 0 by MSI-X to Core 0 (stage 3b). Until now the event ring
+    // was drained only from the timer tick. Without MSI-X the tick keeps
+    // doing it, as before.
+    if pci::program_msix(dev.addr, 0, crate::interrupts::XHCI_VECTOR,
+                         crate::interrupts::current_apic_id()) {
+        w32(oper, OP_USBSTS, STS_EINT);
+        w32(oper, OP_USBCMD, r32(oper, OP_USBCMD) | CMD_INTE);
+        kprintln!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
+    }
 
     let state = XhciState {
         pci_addr: dev.addr,
@@ -2787,6 +2799,24 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
 /// IRQ-safe: drain ALL xHCI events. Called from timer interrupt (100Hz).
 /// This is the ONLY code that talks to xHCI hardware — main thread
 /// only reads from software ring buffers (KEY_BUF / MOUSE_BUF).
+/// The xHCI interrupt (MSI-X, stage 3b): acknowledge like Linux'
+/// `xhci_irq` — USBSTS.EINT, then the interrupter's IMAN.IP, both
+/// write-1-to-clear — and drain every controller's event ring. Only EINT is
+/// written back, not the whole status word as Linux does: that would also
+/// clear PCD and friends, which nothing here reads by interrupt yet.
+/// `try_lock`: if a transfer on Core 0 holds the controllers, it drains the
+/// ring itself, and the tick is the fallback.
+pub fn msi_irq() {
+    if let Some(mut g) = CTRLS.try_lock() {
+        for slot in g.iter_mut().flatten() {
+            w32(slot.oper, OP_USBSTS, STS_EINT);
+            let ir0 = slot.rt + 0x20;
+            w32(ir0, 0x00, r32(ir0, 0x00) | 0x01);
+            drain(slot);
+        }
+    }
+}
+
 pub fn poll_events_irq() {
     if let Some(mut g) = CTRLS.try_lock() {
         for slot in g.iter_mut().flatten() {
