@@ -829,6 +829,13 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
                 return;
             }
             off = end;
+            // Pace ~10 ms per KB as before: without it only 61 of ~200 KB
+            // arrived — the close overtook what was still queued.
+            let t = crate::interrupts::rdtsc();
+            let d = t + crate::interrupts::tsc_freq() / 100;
+            while crate::interrupts::rdtsc() < d {
+                crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+            }
         }
     }
 
@@ -842,7 +849,13 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
 /// Nothing is written and no event is taken — aml keeps draining the EC.
 pub fn intent_ec_watch(args: &str) {
     use crate::serial::{inb, inw};
-    let secs: u64 = args.trim().parse().unwrap_or(15).clamp(1, 60);
+    // `ec watch take [s]`: also fetch each event (QR_EC) and print the raw
+    // answer — this steals it from aml, whose `_Qxx` then does not run.
+    let (take, rest) = match args.trim().strip_prefix("take") {
+        Some(r) => (true, r),
+        None => (false, args),
+    };
+    let secs: u64 = rest.trim().parse().unwrap_or(15).clamp(1, 60);
     let Some(fadt) = crate::acpi::find_table(b"FACP") else {
         kprintln!("[npk] no FADT");
         return;
@@ -907,6 +920,15 @@ pub fn intent_ec_watch(args: &str) {
             changes += 1;
         }
         last_ec = ec;
+        if take && ec & 0x20 != 0 {
+            match crate::ec::query_raw() {
+                Ok(q) => kprintln!("  {:>6} ms  QR_EC -> 0x{:02x}{}", ms, q,
+                    if q == 0 { " (nichts anstehend)" } else { "" }),
+                Err(e) => kprintln!("  {:>6} ms  QR_EC: {}", ms, e),
+            }
+            changes += 1;
+            last_ec = unsafe { inb(0x66) };
+        }
         let g = read_gpe(0);
         for i in 0..half {
             let rose = g[i] & !last_gpe[i];
