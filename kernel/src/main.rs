@@ -41,6 +41,7 @@ pub use gui::{theme, layers};
 // ── Standalone modules ────────────────────────────────────────
 mod interrupts;
 mod irq;
+mod notify;
 mod input;
 mod net;
 mod audio;

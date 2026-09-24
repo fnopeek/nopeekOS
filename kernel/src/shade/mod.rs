@@ -428,6 +428,21 @@ fn render_frame_cursor_only() {
     });
 }
 
+/// `Compositor::shell_fingerprint` of the last full frame.
+static SHELL_FP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// What the panels show changed with this frame: tell them
+/// (`notify::TOPIC_WINDOWS`), instead of letting them ask three times a
+/// second. Called by both full-frame paths with the fingerprint taken under
+/// the compositor lock.
+fn note_shell_fingerprint(fp: Option<u64>) {
+    if let Some(fp) = fp {
+        if SHELL_FP.swap(fp, core::sync::atomic::Ordering::Relaxed) != fp {
+            crate::notify::notify(crate::notify::TOPIC_WINDOWS);
+        }
+    }
+}
+
 fn render_frame_mode(cursor_only: bool) {
     if cursor_only {
         render_frame_cursor_only();
@@ -480,10 +495,13 @@ fn render_frame_layered() {
         }
         let t_bg = crate::interrupts::rdtsc();
 
+        let mut fp = None;
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.aurora_drawn = true;
             comp.render(back, fb.info());
+            fp = Some(comp.shell_fingerprint());
         }
+        note_shell_fingerprint(fp);
         let t_comp = crate::interrupts::rdtsc();
 
         fb.swap_buffers();
@@ -710,9 +728,12 @@ fn render_frame_legacy() {
         let info = *fb.info();
         let back = fb.shadow_back();
 
+        let mut fp = None;
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             comp.render(back, fb.info());
+            fp = Some(comp.shell_fingerprint());
         }
+        note_shell_fingerprint(fp);
 
         fb.swap_buffers();
         fb.commit_front();

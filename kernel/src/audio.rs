@@ -172,7 +172,10 @@ pub fn buffered(slot: usize) -> usize {
 
 /// Set master volume (0..=100 %).
 pub fn set_volume(pct: u8) {
-    VOLUME.store(pct.min(100), Ordering::Relaxed);
+    let v = pct.min(100);
+    if VOLUME.swap(v, Ordering::Relaxed) != v {
+        crate::notify::notify(crate::notify::TOPIC_VOLUME);
+    }
 }
 
 /// Get master volume (0..=100 %).

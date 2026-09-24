@@ -163,6 +163,9 @@ pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     let t_store = rdtsc();
     let result = commit(new);
     let t_commit = rdtsc();
+    if result.is_ok() {
+        crate::notify::path_changed(path);
+    }
 
     if super::FS_PERF_LOG && data.len() >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
@@ -208,7 +211,11 @@ pub fn delete(path: &str) -> Result<(), Error> {
     let _g = ROOT_MUTEX.lock();
     let cur = current_root()?;
     match paths::delete(&cur, path) {
-        Ok(new) => commit(new),
+        Ok(new) => {
+            let r = commit(new);
+            if r.is_ok() { crate::notify::path_changed(path); }
+            r
+        }
         Err(PathError::NotFound) => Ok(()),
         Err(e) => Err(e),
     }
@@ -219,7 +226,12 @@ pub fn rename(old: &str, new: &str) -> Result<(), Error> {
     let _g = ROOT_MUTEX.lock();
     let cur = current_root()?;
     let new_root = paths::rename(&cur, old, new)?;
-    commit(new_root)
+    let r = commit(new_root);
+    if r.is_ok() {
+        crate::notify::path_changed(old);
+        crate::notify::path_changed(new);
+    }
+    r
 }
 
 /// Copy `old` to `new`. Content-addressed alias (see `paths::copy`), so
@@ -228,7 +240,9 @@ pub fn copy(old: &str, new: &str) -> Result<(), Error> {
     let _g = ROOT_MUTEX.lock();
     let cur = current_root()?;
     let new_root = paths::copy(&cur, old, new)?;
-    commit(new_root)
+    let r = commit(new_root);
+    if r.is_ok() { crate::notify::path_changed(new); }
+    r
 }
 
 // ── Convenience: ensure a chain of dirs (mkdir -p) ────────────────────

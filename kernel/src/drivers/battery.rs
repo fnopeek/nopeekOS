@@ -19,7 +19,9 @@ static REPORT: AtomicI32 = AtomicI32::new(-1);
 
 /// Called by the AML driver via `npk_battery_report`.
 pub fn report(packed: i32) {
-    REPORT.store(packed, Ordering::Release);
+    if REPORT.swap(packed, Ordering::AcqRel) != packed {
+        crate::notify::notify(crate::notify::TOPIC_BATTERY);
+    }
 }
 
 /// The latest driver report (or -1). `npk_battery()` returns this, falling
