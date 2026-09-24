@@ -191,6 +191,21 @@ Kontextwechsel bleibt kooperativ und billig.
   state"). Seit 0.411.1 weckt `admit` den Zielkern (`per_core::wake_core`),
   und ein neuer Ready-Fiber zaehlt in der Leerlaufpruefung als faellig.
   **Jeder Weg, der einem fremden Kern Arbeit hinlegt, muss ihn wecken.**
+* **Ein TSC je Kern ist noch keine gemeinsame Uhr (0.421.3 – 0.422.0).** Auf
+  dem IdeaPad (Ryzen) meldete `cores` nach dem IRQ-Umbau schlafende Kerne als
+  „SPINNING, 100 %" — bei 3,3 W Package. Gemessen per Weck-Umlauf (der
+  geweckte Kern stempelt seinen TSC als Erstes nach `hlt`, Kern 0 nimmt die
+  Mitte aus Senden und Empfang): **jeder AP stand 1,73 s (ein anderer Boot:
+  4,14 s) vor Kern 0**, die APs untereinander auf Mikrosekunden gleich, kein
+  Drift. Die Firmware laesst Kern 0 zurueck. Jede Differenz „TSC hier minus
+  Stempel von dort" wurde negativ und von `saturating_sub` auf 0 geklemmt;
+  sichtbar wurde es erst, als die Kerne dank IRQs sekundenlang schliefen.
+  Linux markiert einen TSC ohne `TSC_ADJUST` (AMD) als instabil und nimmt
+  HPET — fuer einen taktlosen Entwurf auf dem TSC kein Weg. Da die APs sich
+  einig sind, ist Kern 0 der Ausreisser: `smp::init` schreibt nach dem
+  Parken der APs **einmal** `IA32_TSC` auf Kern 0 vorwaerts (nur bei
+  Einigkeit ≤ 100 us und Versatz > 100 us). Rest danach: 0–8 us. `cores`
+  zeigt den schlimmsten Versatz in einer Zeile.
 
 ### 3.3 Warten und Wecken
 
