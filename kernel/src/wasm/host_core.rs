@@ -751,14 +751,19 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         if crate::interrupts::rdtsc() >= deadline {
             break -1;
         }
-        // Halt, don't spin — and don't run another task inline here (that
-        // bypassed the fiber scheduler and nested app loops). Keys arrive
-        // from Core 0 without a wake, so look again every 10 ms.
-        // (Only `wifi` uses npk_input_wait today; the panels use
-        // npk_event_poll + npk_sleep, which yields.)
-        let recheck = crate::interrupts::rdtsc() + freq / 100;
-        crate::interrupts::halt_until(
-            Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
+        // Keys arrive from Core 0 without a wake, so look again every
+        // 10 ms. **Inside a fiber, park — don't halt.** A halt here held
+        // the whole core: `top` waits in this call, and a video playing
+        // in a fiber on the same core stood still until `top` quit
+        // (Florian, 0.410.0). Stage 2 makes the key itself the wake
+        // (`npk_wait`, docs/plan/CORES_AND_EVENTS.md).
+        let left_ms = (deadline.saturating_sub(crate::interrupts::rdtsc()) / ticks_per_ms).max(1);
+        if !crate::smp::fiber::yield_sleep(left_ms.min(10)) {
+            // Not in a fiber (a one-shot on Core 0): halt in place.
+            let recheck = crate::interrupts::rdtsc() + freq / 100;
+            crate::interrupts::halt_until(
+                Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
+        }
     };
 
     // Resume work tracking
