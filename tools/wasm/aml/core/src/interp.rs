@@ -535,6 +535,7 @@ impl<'a> Interp<'a> {
                 // Ereignis ohne Behandler ist kein Fehler, es ist abgeholt.
                 self.ec.note("[aml]   (no handler for that query)");
             }
+            self.ec.ec_event(q, found);
             done += 1;
         }
         done
@@ -1002,9 +1003,21 @@ impl<'a> Interp<'a> {
                 Ok((r, p2))
             }
             0x86 => {
-                // Notify(object, value) — no-op; consume both operands.
+                // Notify(object, value): nothing acts on it here, but the
+                // host hears it — that is where a firmware hotkey surfaces.
+                let b = f.body;
+                let target = match b.get(p + 1) {
+                    Some(0x5C | 0x5E | 0x2E | 0x2F | 0x41..=0x5A | 0x5F) => {
+                        let (nref, _) = name_at(b, p + 1);
+                        self.resolve(&f.scope, nref.rooted, nref.carets, &nref.segs)
+                    }
+                    _ => None,
+                };
                 let (_o, p1) = self.super_name(f, p + 1)?;
-                let (_v, p2) = self.eval(f, p1)?;
+                let (v, p2) = self.eval(f, p1)?;
+                if let Some(path) = target {
+                    self.ec.notify(&path, v.as_int());
+                }
                 Ok((Value::Uninit, p2))
             }
             0x5B => self.eval_ext(f, p),

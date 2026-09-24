@@ -50,6 +50,13 @@ pub trait Ec {
     fn mem_read(&mut self, _addr: u64) -> Option<u8> { None }
     fn note(&mut self, _s: &str) {}
     fn note_num(&mut self, _s: &str, _v: u64) {}
+    /// An EC query was fetched (`handled` = a `_Qxx` for it exists and ran).
+    /// Always reported, unlike `note`: a hotkey is one of these.
+    fn ec_event(&mut self, _q: u8, _handled: bool) {}
+    /// `Notify(object, value)` executed — what the firmware tells the OS.
+    /// Brightness hotkeys end here (0x86 up / 0x87 down on the display
+    /// output device, ACPI 6.5 §B.7).
+    fn notify(&mut self, _path: &[[u8; 4]], _value: u64) {}
 }
 
 /// A namespace object.

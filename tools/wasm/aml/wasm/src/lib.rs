@@ -80,6 +80,12 @@ fn lognum2(a: &str, x: u32, b: &str, y: u32) {
     log("\n");
 }
 
+fn loghex2(v: u8) {
+    let d = |n: u8| if n < 10 { b'0' + n } else { b'A' + n - 10 };
+    let b = [d(v >> 4), d(v & 0xF)];
+    if let Ok(t) = core::str::from_utf8(&b) { log(t); }
+}
+
 fn lognum_raw(mut v: u32) {
     let mut buf = [0u8; 12];
     let mut i = buf.len();
@@ -174,6 +180,21 @@ impl Ec for HostEc {
     }
     fn note(&mut self, s: &str) {
         if self.verbose { logln(s); }
+    }
+    fn ec_event(&mut self, q: u8, handled: bool) {
+        log("[aml] EC event _Q");
+        loghex2(q);
+        logln(if handled { " (ran)" } else { " (no handler)" });
+    }
+    fn notify(&mut self, path: &[[u8; 4]], value: u64) {
+        log("[aml]   Notify(\\");
+        for (k, seg) in path.iter().enumerate() {
+            if k > 0 { log("."); }
+            if let Ok(t) = core::str::from_utf8(seg) { log(t); }
+        }
+        log(", 0x");
+        loghex2(value as u8);
+        logln(")");
     }
     fn note_num(&mut self, s: &str, v: u64) {
         if self.verbose { lognum(s, v as u32); }

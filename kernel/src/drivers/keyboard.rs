@@ -611,6 +611,68 @@ fn wait_write() {
     }
 }
 
+// Media keys and unmapped codes arrive in the IRQ handler, where neither
+// the console nor the audio state (it notifies subscribers, under a lock)
+// may be touched. The ISR only records; `apply_deferred` acts on the shell
+// fiber, which the ISR wakes anyway.
+static PENDING_VOL: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static PENDING_MUTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Unmapped extended codes seen but not yet reported (bit per code).
+static PENDING_UNKNOWN: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+/// Already reported once (bit per code).
+static SEEN_UNKNOWN: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+/// Volume before mute; 0xFF = not muted.
+static MUTED_FROM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xFF);
+
+fn step_volume(delta: i32) {
+    PENDING_VOL.fetch_add(delta, Ordering::Relaxed);
+}
+
+fn toggle_mute() {
+    PENDING_MUTE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Every extended key we do not map, reported once per code — the Fn row
+/// of a new notebook is found this way instead of guessed.
+fn note_unknown_extended(code: u8) {
+    let c = (code & 0x7F) as usize;
+    let bit = 1u64 << (c % 64);
+    if SEEN_UNKNOWN[c / 64].fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        PENDING_UNKNOWN[c / 64].fetch_or(bit, Ordering::Relaxed);
+    }
+}
+
+/// Act on what the IRQ handler recorded. Called from the shell's idle step.
+pub fn apply_deferred() {
+    for w in 0..2 {
+        let mut bits = PENDING_UNKNOWN[w].swap(0, Ordering::Relaxed);
+        while bits != 0 {
+            let b = bits.trailing_zeros();
+            bits &= bits - 1;
+            kprintln!("[kbd] unmapped key E0 {:02x}", w as u32 * 64 + b);
+        }
+    }
+    let mut mutes = PENDING_MUTE.swap(0, Ordering::Relaxed);
+    let delta = PENDING_VOL.swap(0, Ordering::Relaxed);
+    if delta != 0 {
+        MUTED_FROM.store(0xFF, Ordering::Relaxed);
+        let v = crate::audio::get_volume() as i32;
+        crate::audio::set_volume((v + delta).clamp(0, 100) as u8);
+    }
+    while mutes > 0 {
+        mutes -= 1;
+        let prev = MUTED_FROM.swap(0xFF, Ordering::Relaxed);
+        if prev != 0xFF {
+            crate::audio::set_volume(prev);
+        } else {
+            MUTED_FROM.store(crate::audio::get_volume(), Ordering::Relaxed);
+            crate::audio::set_volume(0);
+        }
+    }
+}
+
 /// Decode a raw scancode into an ASCII character (handles modifiers + extended).
 /// Der Rest einer UTF-8-Folge — siehe `input::Utf8Tail` fuer das Warum.
 /// Eigene Instanz, weil dieser Treiber ein eigener Erzeuger ist; die
@@ -671,7 +733,13 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
             0x51 => { push_arrow(KEY_PGDN); return None; }
             0x53 => { push_arrow(KEY_DEL); return None; }
             0x52 => { push_arrow(KEY_INSERT); return None; }
-            _ => return None,
+            // Media keys, Set 1 as the i8042 translates them (Linux atkbd
+            // keymap: E0 20 KEY_MUTE, E0 2E KEY_VOLUMEDOWN, E0 30
+            // KEY_VOLUMEUP). On a notebook the Fn row sends these.
+            0x20 => { toggle_mute(); return None; }
+            0x2E => { step_volume(-5); return None; }
+            0x30 => { step_volume(5); return None; }
+            _ => { note_unknown_extended(code); return None; }
         }
     }
 
