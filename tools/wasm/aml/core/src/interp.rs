@@ -187,7 +187,7 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     // `_BST` sieben RICHTIGE Bytes liest (Rest 4745, Spannung 11971 mV) und
     // trotzdem dreimal Ones zurueckgibt.
     it.ec.note("[aml]  phase _BIF");
-    let full = it.read_full_charge(bat)?;
+    let (full, power_unit) = it.read_full_charge(bat)?;
     it.ec.note_num("[aml]  full charge: ", full as u64);
 
     it.ec.note("[aml]  phase _BST");
@@ -196,7 +196,7 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     let mut p = bat.clone();
     p.push(crate::value::seg("_BST"));
     let bst = it.call_path(&p, Vec::new())?;
-    let (state, remaining) = match &bst {
+    let (state, remaining, rate, voltage_mv) = match &bst {
         Value::Package(e) if e.len() >= 4 => {
             // Das ganze Paket zeigen: 0xFFFFFFFF in JEDEM Feld heisst "kein
             // Akku", 0xFFFFFFFF nur in einem heisst "unbekannt" — und aus
@@ -207,7 +207,8 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
                               2 => "[aml]   _BST[2] remaining=", _ => "[aml]   _BST[3] voltage=" },
                     el.borrow().as_int());
             }
-            (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32)
+            (e[0].borrow().as_int() as u32, e[2].borrow().as_int() as u32,
+             e[1].borrow().as_int() as u32, e[3].borrow().as_int() as u32)
         }
         _ => return Err(format!("_BST did not return a Package(>=4): got {}", kind(&bst))),
     };
@@ -257,30 +258,35 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
         remaining_mah: remaining,
         full_charge_mah: full,
         percent,
+        rate,
+        voltage_mv,
+        power_unit,
     })
 }
 
 impl<'a> Interp<'a> {
-    fn read_full_charge(&mut self, bat: &Path) -> R<u32> {
-        // _BIF: Package[1]=DesignCap, [2]=LastFullChargeCap.
+    /// (LastFullChargeCap, power unit) — the unit says whether `_BST`'s
+    /// rate and capacities are mW/mWh (0) or mA/mAh (1).
+    fn read_full_charge(&mut self, bat: &Path) -> R<(u32, u32)> {
+        // _BIF: Package[0]=PowerUnit, [1]=DesignCap, [2]=LastFullChargeCap.
         let mut p = bat.clone();
         p.push(crate::value::seg("_BIF"));
         if self.has(&p) {
             let v = self.call_path(&p, Vec::new())?;
             if let Value::Package(e) = &v {
                 if e.len() >= 3 {
-                    return Ok(e[2].borrow().as_int() as u32);
+                    return Ok((e[2].borrow().as_int() as u32, e[0].borrow().as_int() as u32));
                 }
             }
         }
-        // _BIX: Package[2]=DesignCap, [3]=LastFullChargeCap (Revision at [0]).
+        // _BIX: [0]=Revision, [1]=PowerUnit, [2]=DesignCap, [3]=LastFullChargeCap.
         let mut p = bat.clone();
         p.push(crate::value::seg("_BIX"));
         if self.has(&p) {
             let v = self.call_path(&p, Vec::new())?;
             if let Value::Package(e) = &v {
                 if e.len() >= 4 {
-                    return Ok(e[3].borrow().as_int() as u32);
+                    return Ok((e[3].borrow().as_int() as u32, e[1].borrow().as_int() as u32));
                 }
             }
         }
