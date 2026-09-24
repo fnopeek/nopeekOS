@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn npk_wifi_send_cmd(buf_ptr: i32, len: i32) -> i32;
     fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
     // Terminal/framebuffer output (like the driver) — visible on serial-less HW;
     // npk_log_serial is invisible on machines without a COM port (the HP).
     fn npk_print(ptr: i32, len: i32);
@@ -199,7 +200,6 @@ pub extern "C" fn _start() {
     let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
     let mut sup: Option<Supplicant> = None;
     let mut out = [0u8; 256];
-    let mut saw_event = false;
     loop {
         loop {
             let len = unsafe { npk_wifi_poll_event(ev_ptr as i32, 2048) };
@@ -208,15 +208,19 @@ pub extern "C" fn _start() {
             }
             let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
             handle_event(ev, &pmk, &mut sup, &mut out);
-            saw_event = true;
         }
         // One store per round, not one per line.
         log_flush();
-        // The 4-way is four messages, each waiting out one poll interval. At
-        // 50 ms that alone put 200 ms into a handshake the AP times out on and
-        // retries. Poll tightly while something is in flight, idle otherwise.
-        unsafe { npk_sleep(if saw_event || sup.is_some() { 4 } else { 50 }) };
-        saw_event = false;
+        // **Wait for the driver's next event instead of polling for it.**
+        // Until 0.13.0 this slept 4 ms while a handshake was in flight and
+        // 50 ms otherwise — 250 wakes a second on a connected link, where
+        // nothing happens for minutes. The kernel now wakes us when the
+        // driver queues an event (`WAIT_WIFI_EVENT`), so a 4-way message is
+        // answered at once, not one poll interval later. The supplicant has
+        // no timers of its own: no deadline.
+        // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+        const WAIT_WIFI_EVENT: i32 = 16;
+        unsafe { npk_wait(WAIT_WIFI_EVENT, -1) };
     }
 }
 
