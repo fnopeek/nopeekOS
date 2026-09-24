@@ -412,12 +412,22 @@ pub fn intent_power(args: &str) {
     // keine Messung; er wird so gekennzeichnet.
     let mut jumps = 0u32;
     let mut last = pkg0;
+    // Erste und letzte Fortschreibung: dazwischen ist die Energie ganz
+    // verbucht, an den Raendern eines festen Fensters nicht.
+    let mut first: Option<(u64, u32)> = None;
+    let mut latest: Option<(u64, u32)> = None;
     while crate::interrupts::rdtsc() < deadline {
-        // Kern 0 hat keinen Takt mehr (Stufe 3e): alle 100 ms nachsehen.
-        let d = (crate::interrupts::rdtsc() + tsc_hz / 10).min(deadline);
+        // Kern 0 hat keinen Takt mehr (Stufe 3e): alle 20 ms nachsehen.
+        let d = (crate::interrupts::rdtsc() + tsc_hz / 50).min(deadline);
         crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
         let e = crate::smp::per_core::rapl_pkg_raw();
-        if e != last { jumps += 1; last = e; }
+        if e != last {
+            jumps += 1;
+            last = e;
+            let now = crate::interrupts::rdtsc();
+            if first.is_none() { first = Some((now, e)); }
+            latest = Some((now, e));
+        }
     }
 
     let t1 = crate::interrupts::rdtsc();
@@ -443,6 +453,14 @@ pub fn intent_power(args: &str) {
     kprintln!("  Package          {}.{:03} W   (Zaehler {}x fortgeschrieben{})",
         pkg_mw / 1000, pkg_mw % 1000, jumps,
         if jumps < 20 { " — ZU WENIG, laenger messen" } else { "" });
+    if let (Some((ta, ea)), Some((tb, eb))) = (first, latest) {
+        if tb > ta + tsc_hz {
+            let us = (tb - ta) / (tsc_hz / 1_000_000).max(1);
+            let mw = crate::smp::per_core::rapl_mw(eb.wrapping_sub(ea), us);
+            kprintln!("  Package, an den Fortschreibungen gemessen: {}.{:03} W ueber {} s",
+                mw / 1000, mw % 1000, us / 1_000_000);
+        }
+    }
     kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
     kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
     let port = crate::interrupts::deep_idle_port();
