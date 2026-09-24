@@ -151,6 +151,15 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set when new content is written (cleared after render).
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// Mark the terminal for repaint and, on the clean→dirty edge, wake the
+/// shell on Core 0 — it no longer re-checks every 10 ms (stage 3e). Only
+/// the edge, or every `kprint` from a worker would send an IPI.
+fn set_dirty() {
+    if !DIRTY.swap(true, Ordering::AcqRel) {
+        crate::intent::wake_shell();
+    }
+}
+
 /// Input cursor position (for rendering blinking cursor on input line).
 static mut INPUT_CURSOR_POS: usize = 0;
 
@@ -196,7 +205,7 @@ pub fn rewrite_input(input: &[u8], input_len: usize) {
     }
     term.lens[line_idx] = max;
     term.col = max;
-    DIRTY.store(true, Ordering::Release);
+    set_dirty();
 }
 
 /// Stored prompt length for the active terminal.
@@ -313,7 +322,7 @@ pub fn clear() {
 pub fn clear_idx(idx: usize) {
     if let Some(t) = term_mut(idx) {
         t.clear();
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
     clear_selection(idx);
 }
@@ -389,7 +398,7 @@ pub fn write(s: &str) {
     };
     if let Some(t) = term_mut(idx) {
         t.write_str(s);
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
     stream_push(idx, s);
 }
@@ -405,7 +414,7 @@ pub fn write_idx(idx: usize, s: &str) {
     if let Some(t) = term_mut(idx) {
         t.write_str(s);
         TERM_DIRTY[idx].store(true, Ordering::Release);
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
     stream_push(idx, s);
 }
@@ -427,7 +436,7 @@ pub fn is_dirty() -> bool {
 
 /// Mark terminal as dirty (triggers partial re-render on next poll_render).
 pub fn mark_dirty() {
-    DIRTY.store(true, Ordering::Release);
+    set_dirty();
 }
 
 /// Clear dirty flag (called after render).
@@ -1075,7 +1084,7 @@ pub fn scroll_up(lines: usize) {
     if let Some(term) = term_mut(idx) {
         let max_scroll = term.total.saturating_sub(10);
         term.scroll_offset = (term.scroll_offset + lines).min(max_scroll);
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
 }
 
@@ -1084,7 +1093,7 @@ pub fn scroll_down(lines: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
     if let Some(term) = term_mut(idx) {
         term.scroll_offset = term.scroll_offset.saturating_sub(lines);
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
 }
 
@@ -1100,7 +1109,7 @@ pub fn set_scroll_offset(idx: usize, off: usize) {
     if let Some(term) = term_mut(idx) {
         let max_scroll = term.total.saturating_sub(1);
         term.scroll_offset = off.min(max_scroll);
-        DIRTY.store(true, Ordering::Release);
+        set_dirty();
     }
 }
 

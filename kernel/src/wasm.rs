@@ -599,6 +599,7 @@ fn wasm_worker_task(arg: u64) {
     crate::process::exit(pid);
     if (terminal_idx as usize) < MAX_APP_BUFS {
         APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
+        crate::intent::wake_shell();
     }
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
@@ -619,6 +620,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         crate::process::exit(pid);
         if (terminal_idx as usize) < MAX_APP_BUFS {
             APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
+        crate::intent::wake_shell();
         }
         JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
     };

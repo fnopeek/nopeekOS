@@ -1220,6 +1220,19 @@ impl Compositor {
     /// Called every frame (poll_render) so dwell/debounce advance even
     /// while the cursor is parked. Suppressed during a drag/resize so the
     /// dock never fights a tile being dragged toward the bottom.
+    /// Something moves on its own and needs the next frame (see
+    /// `shade::needs_tick`). The dock's dwell and debounce count CALLS, so
+    /// while either runs, or the slide has not reached its target, the loop
+    /// must keep calling at the frame rate.
+    pub fn needs_tick(&self) -> bool {
+        let dock_busy = self.dock.as_ref().is_some_and(|d| {
+            let slide = d.thickness + d.gap;
+            let target = if d.target_shown { 0 } else { slide };
+            d.dwell > 0 || d.debounce > 0 || d.offset != target
+        });
+        self.animation.is_some() || self.flash.is_some() || self.focus_glow.is_some() || dock_busy
+    }
+
     pub fn dock_update_reveal(&mut self, cursor_y: i32) {
         let dragging = self.drag.is_some();
         let baseline = self.dock_baseline() as i32;

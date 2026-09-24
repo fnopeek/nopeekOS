@@ -666,6 +666,23 @@ pub fn has_tsc_deadline() -> bool {
     }
     ecx & (1 << 24) != 0
 }
+/// Core 0 runs on the one-shot timer too (stage 3e, `make_core0_tickless`).
+static CORE0_TICKLESS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Give Core 0 the worker's one-shot timer and stop its periodic 100 Hz
+/// tick (the LVT is rewritten from periodic vector 48 to one-shot vector
+/// 50). From here Core 0 wakes only when something is due or something
+/// happens — and the tick's work is done elsewhere: the wall clock is the
+/// TSC (0.411), input comes by interrupt (0.416) or is drained by the shell
+/// when no interrupt exists, and the frequency statistics run in
+/// `core0_loop`.
+pub fn make_core0_tickless() {
+    init_worker_timer();
+    CORE0_TICKLESS.store(true, Ordering::Release);
+    kprintln!("[npk] core 0: periodic tick off — deadline timer from here ({})",
+        if HAS_TSC_DEADLINE.load(Ordering::Relaxed) { "TSC-deadline" } else { "one-shot" });
+}
+
 /// The 1 kHz VM timer owns this core's LAPIC timer; leave it alone.
 static VM_TIMER_ON: [core::sync::atomic::AtomicBool; 256] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 256];
@@ -673,6 +690,11 @@ static VM_TIMER_ON: [core::sync::atomic::AtomicBool; 256] =
 static POLL_PERIOD: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
+    // Core 0 attributes its own wakes (halt_until skips it): a timer or a
+    // wake IPI on this vector counts as `timer` in `cores`.
+    if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
+        crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
+    }
     let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
     if base != 0 {
         // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
@@ -810,7 +832,9 @@ fn disarm() {
 /// the timer is not touched; the halt ends at the next tick there.
 pub fn halt_until(deadline: Option<u64>, cause: usize) {
     let cid = crate::smp::per_core::current_core_id();
-    let own_timer = cid != 0 && cid < 256 && !VM_TIMER_ON[cid].load(Ordering::Relaxed);
+    let own_timer = cid < 256
+        && !VM_TIMER_ON[cid].load(Ordering::Relaxed)
+        && (cid != 0 || CORE0_TICKLESS.load(Ordering::Relaxed));
     let rflags: u64;
     // SAFETY: save RFLAGS and clear IF; restored below exactly as found.
     unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };

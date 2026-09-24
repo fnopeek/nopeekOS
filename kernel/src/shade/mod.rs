@@ -92,7 +92,14 @@ pub fn with_compositor<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut Compositor) -> R,
 {
-    COMPOSITOR.lock().as_mut().map(f)
+    let r = COMPOSITOR.lock().as_mut().map(f);
+    // A change from another core (a widget app focusing, flashing, closing a
+    // window) is something Core 0 has to act on — and Core 0 no longer looks
+    // every 10 ms (stage 3e). Tell it. After the lock, not under it.
+    if r.is_some() && crate::smp::per_core::current_core_id() != 0 {
+        crate::intent::wake_shell();
+    }
+    r
 }
 
 /// Create a new window. Returns the window ID, or None if no terminal slots.
@@ -889,7 +896,34 @@ pub fn take_deferred_render() -> bool {
 /// call from any core (worker cores executing WASM etc.) — actual
 /// MMIO work still runs on Core 0.
 pub fn request_render() {
-    DEFERRED_RENDER.store(true, Ordering::Relaxed);
+    // The shell loop on Core 0 renders; wake it on the edge (stage 3e).
+    if !DEFERRED_RENDER.swap(true, Ordering::AcqRel) {
+        crate::intent::wake_shell();
+    }
+}
+
+/// Does the shell loop have to come back within one frame even without an
+/// event? True while something moves on its own — a swap animation, the
+/// screenshot flash, the focus glow, the dock (its dwell and debounce count
+/// calls, and it slides) — or a guest frame waits out its rate cap, a close
+/// request waits for its answer, or a render is still pending. Otherwise the
+/// shell sleeps until something wakes it (stage 3e).
+pub fn needs_tick() -> bool {
+    DEFERRED_RENDER.load(Ordering::Relaxed)
+        || CURSOR_MOVED.load(Ordering::Relaxed)
+        || SURFACE_DIRTY.load(Ordering::Relaxed)
+        || terminal::is_dirty()
+        || widgets::close_pending()
+        || with_compositor_local(|c| c.needs_tick()).unwrap_or(false)
+}
+
+/// `with_compositor` without the cross-core wake — for Core 0's own
+/// questions, which must not wake itself.
+fn with_compositor_local<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce(&mut Compositor) -> R,
+{
+    COMPOSITOR.lock().as_mut().map(f)
 }
 
 /// Process a shade action (called from intent loop).
@@ -1628,7 +1662,9 @@ pub const SURFACE_CLIP_BLIT: bool = true;
 /// `surface::write_frame`; consumed by `poll_render`. No-op (caller uses the
 /// full `request_render`) when `SURFACE_CLIP_BLIT` is off.
 pub fn request_surface_render() {
-    SURFACE_DIRTY.store(true, Ordering::Relaxed);
+    if !SURFACE_DIRTY.swap(true, Ordering::AcqRel) {
+        crate::intent::wake_shell();
+    }
 }
 
 /// Signal a bare pointer move from the input IRQ. Picks the cheap cursor-
@@ -1640,7 +1676,9 @@ pub fn request_surface_render() {
 /// own CURSOR_MOVED logic (DEFERRED_RENDER is never cleared by it) — the
 /// dominant framebuffer cost while a window/tile was open.
 pub fn request_cursor_move() {
-    CURSOR_MOVED.store(true, Ordering::Relaxed);
+    if !CURSOR_MOVED.swap(true, Ordering::AcqRel) {
+        crate::intent::wake_shell();
+    }
 }
 
 /// Process a mouse event: handle buttons/drag, redraw cursor.

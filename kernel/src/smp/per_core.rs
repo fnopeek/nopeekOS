@@ -784,14 +784,18 @@ pub fn wake_core(c: usize) {
 }
 
 /// Core 0's loop after boot (stage 3c): the same fiber scheduler as a
-/// worker. The shell (`intent::run_loop`) is a fiber here, and so will be
-/// the compositor (3c-2) — so one of them waiting no longer stops the other.
-/// Core 0 still takes no inbox work and still has its periodic tick (until
-/// 3e); the halt ends on that tick, on any interrupt, or by the wake IPI
-/// when another core signals one of its fibers.
+/// worker, with the shell (`intent::run_loop`) as a fiber. Since stage 3e
+/// without a periodic tick: the halt ends at the earliest fiber deadline, on
+/// an interrupt, or by the wake IPI when another core signals a fiber here.
+/// Core 0 still takes no inbox work.
 pub fn core0_loop() -> ! {
+    // No periodic tick from here on (stage 3e): Core 0's LAPIC timer becomes
+    // the one-shot deadline timer every worker has.
+    crate::interrupts::make_core0_tickless();
     loop {
         super::fiber::run_core_fibers(0);
+        // Was done by the tick every second; self-throttled to 100 ms windows.
+        update_core_freq(0);
         IDLE[0].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
         match super::fiber::earliest_deadline(0) {

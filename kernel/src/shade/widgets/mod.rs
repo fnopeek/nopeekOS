@@ -424,6 +424,11 @@ static CLOSE_GUARDS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 /// was sent, whether the app has shown any sign of life since).
 static PENDING_CLOSE: Mutex<BTreeMap<u32, (u64, bool)>> = Mutex::new(BTreeMap::new());
 
+/// A close request waits for its answer (or its grace period).
+pub fn close_pending() -> bool {
+    !PENDING_CLOSE.lock().is_empty()
+}
+
 /// How long a guarded window has to REACT to `CloseRequest` before the
 /// compositor closes it anyway. Ticks run at 100 Hz, so ~2 s.
 ///

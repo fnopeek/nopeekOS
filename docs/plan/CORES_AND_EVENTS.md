@@ -5,7 +5,8 @@ ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 (MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
 dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC), 3b = 0.416.0 (Eingabe per Interrupt), 3c-1 = 0.417.0 (Shell als Fiber auf
-Kern 0), 0.418.0 (DNS/GC/History von Kern 0 herunter). Rest offen.
+Kern 0), 0.418.0/0.419.0 (DNS/GC/History/App-Start von Kern 0 herunter), 3e =
+0.420.0 (Kern 0 ohne Takt). Offen: Strom (3b-Strom), aml, Compositor-Fiber.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -348,6 +349,29 @@ Modul auf einem Worker (`launch_task`); auf Kern 0 bleibt nur die Frage, ob
 das Fenster schon offen ist. **Bewusst auf Kern 0 gelassen:** `lock`
 (Schluesselableitung — der Bildschirm ist dann ohnehin gesperrt) und die
 Tab-Vervollstaendigung (ein kurzes Verzeichnislisten).
+
+**Gebaut (Stufe 3e, 0.420.0): Kern 0 ohne Takt.** `core0_loop` schaltet
+den periodischen 100-Hz-Takt ab und gibt Kern 0 den einmaligen
+Deadline-Timer der Worker (`make_core0_tickless`). Die Shell parkt in
+`core0_wait` eine Bildzeit (10 ms), solange etwas von selbst laeuft
+(`shade::needs_tick`: Animation, Blitz, Fokus-Gluehen, Dock, Gastbild,
+Schliess-Frist, ausstehendes Rendern; `net::needs_tick`: TCP-Timer, DHCP,
+eine abgefragte Netzkarte — alle ausser dem WASM-NIC; gehaltene USB-Taste;
+Eingabe ohne Interrupt; Seriell-Modus; kooperativer Gast), sonst eine
+Sekunde (Link-Pruefung, Leerlauf-GC). Alles andere WECKT die Shell
+(`intent::wake_shell`): Eingabe-Interrupts, `request_render`,
+`request_surface_render`, `request_cursor_move`, die Flanke des
+Terminal-Dirty-Flags, `with_compositor` von einem anderen Kern, das Ende
+eines Intents oder einer Terminal-App, die Anfragen der microVM
+(loft, AP-Start, Beenden, Schliessen), der Ueberlaufring des WLAN-Treibers.
+Ein verpasster xHCI-Abholvorgang (`try_lock` im Interrupt verloren) wird
+gemerkt und von der Shell nachgeholt. Die nackten `hlt` in `cores`,
+`power` und im Sperrbildschirm sind jetzt `halt_until` mit Frist — ohne
+Takt haetten sie bis zur naechsten Taste geschlafen. **Bekannt und
+bewusst:** mit virtio-net (QEMU), intel_nic oder rtl8153 bleibt Kern 0 im
+10-ms-Raster, weil deren Empfang nur abgefragt wird; dafuer muss der
+RX-Interrupt auch die Shell wecken (virtio teilt ihn heute mit der
+microVM). Die Tick-Handler laufen nur noch waehrend des Boots.
 
 ### 3.5 Kern 0 aufloesen
 

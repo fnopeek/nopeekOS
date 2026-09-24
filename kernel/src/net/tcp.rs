@@ -2517,6 +2517,15 @@ fn close_cleanup(handle: usize) {
     CONNECTIONS.lock()[handle] = None;
 }
 
+/// Does any connection run a timer (retransmit, delayed ACK, SYN retry,
+/// TIME_WAIT, FIN timeout)? Listening and closed sockets have none. The
+/// shell loop drives `tick_connections` and must keep coming back while
+/// this holds (stage 3e).
+pub fn has_timers() -> bool {
+    CONNECTIONS.lock().iter().flatten()
+        .any(|c| !matches!(c.state, State::Closed | State::Listen))
+}
+
 pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> {
     let conns = CONNECTIONS.lock();
     let mut result = alloc::vec::Vec::new();

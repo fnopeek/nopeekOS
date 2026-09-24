@@ -404,6 +404,7 @@ fn intent_worker_task(arg: u64) {
         Ok(s) => s.trim(),
         Err(_) => {
             INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+            wake_shell();
             return;
         }
     };
@@ -436,6 +437,7 @@ fn intent_worker_task(arg: u64) {
     // Clear redirect + mark done (Core 0 prints the prompt when it detects completion)
     crate::shade::terminal::clear_output_redirect();
     INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+            wake_shell();
     crate::shade::terminal::mark_dirty();
 }
 
@@ -1101,16 +1103,34 @@ pub fn wake_shell() {
     }
 }
 
-/// Core 0's idle step in the shell loop: park the shell fiber until input
-/// or the next tick, so other Core-0 fibers run (3c-1). Outside a fiber
-/// (never after boot, but the fallback is the old HLT) halt in place.
+/// Core 0's idle step in the shell loop: park the shell fiber until
+/// something wakes it, so other Core-0 fibers run (3c-1).
+///
+/// **How long (stage 3e):** one frame (10 ms) while anything needs the loop
+/// on its own — an animation or the dock (`shade::needs_tick`), a network
+/// timer or a polled card (`net::needs_tick`), a held USB key, input that
+/// no interrupt reports, serial mode, a cooperative guest. Otherwise one
+/// second: the link check and the idle GC run on that. Everything else
+/// wakes the shell (`wake_shell`): input, render requests, terminal output,
+/// a finished intent, a microVM request. A dependency missed here shows as
+/// up to a second of lag, not as a hang.
 fn core0_wait() {
-    let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+    let freq = crate::interrupts::tsc_freq();
+    // Input that no interrupt reports is drained here (the tick used to).
+    if crate::xhci::needs_poll() || crate::xhci::take_missed_drain() {
+        crate::interrupts::without_interrupts(crate::xhci::poll_events_irq);
+    }
+    let busy = crate::shade::needs_tick()
+        || crate::net::needs_tick()
+        || crate::xhci::repeat_active()
+        || crate::xhci::needs_poll()
+        || crate::keyboard::needs_poll()
+        || !crate::shade::is_active()
+        || crate::microvm::vm_active();
+    let d = crate::interrupts::rdtsc() + if busy { freq / 100 } else { freq };
     if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, d).is_none() {
-        let t0 = crate::interrupts::rdtsc();
-        // SAFETY: ring-0 idle on Core 0, IF=1; the tick or an IRQ wakes us.
-        unsafe { core::arch::asm!("hlt"); }
-        crate::smp::per_core::record_halt(0, crate::interrupts::rdtsc().saturating_sub(t0));
+        // Not in a fiber (never after boot): halt to the same deadline.
+        crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
     }
 }
 
