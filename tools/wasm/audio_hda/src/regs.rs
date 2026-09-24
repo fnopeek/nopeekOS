@@ -35,6 +35,13 @@ pub const SD_BDLPU: u32 = 0x1C; // u32  BDL base upper
 pub const SD_CTL_SRST: u32 = 1 << 0; // stream reset
 pub const SD_CTL_RUN: u32 = 1 << 1; // stream run
 pub const SD_CTL_STRM_SHIFT: u32 = 20; // stream tag in bits [23:20]
+// hda_register.h: interrupt enables in SD_CTL byte 0 (`SD_INT_MASK`) and the
+// matching write-1-to-clear status bits in SD_STS (byte 3 of the same dword).
+pub const SD_INT_MASK: u32 = 0x1c; // DESC_ERR 0x10 | FIFO_ERR 0x08 | COMPLETE 0x04
+// INTCTL: global enable (bit 31), controller enable (bit 30), then one bit
+// per stream by its index — input streams first, so the first output stream
+// is index `iss`.
+pub const AZX_INT_GLOBAL_EN: u32 = 1 << 31;
 
 // Stream format: base 48k, 16-bit, 2ch = 0x0011.
 //   bit14 base(0=48k), bits[6:4] bits-per-sample(001=16), bits[3:0] chan-1(0001=2)
