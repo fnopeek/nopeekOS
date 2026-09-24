@@ -4477,6 +4477,15 @@ impl LinkStats {
             }
         }
     }
+
+    /// Wann `purge_probes` die naechste offene Quittung aufgibt — der
+    /// Zeitpunkt, zu dem die Pumpe wieder hinsehen muss.
+    fn next_probe_due(&self) -> Option<u64> {
+        self.probes.iter()
+            .filter(|p| p.busy)
+            .map(|p| p.at_ms + RTW_TX_PROBE_TIMEOUT_MS + 1)
+            .min()
+    }
 }
 
 /// tx.c `struct rtw_tx_report` — die Rahmen, deren Quittung aussteht.
@@ -5325,11 +5334,10 @@ fn wd_mark(i: usize, tp: &mut u64) {
 /// (`rtw_hci_start`), gelesen im Leerlauf der Pumpschleife.
 static mut IRQ_VEC: i32 = -1;
 
-/// Wie lange der Leerlauf hoechstens parkt. Die Pumpschleife fuehrt
-/// eigene Zeitgeber (Umsortier-Frist, Sondierung, CSA, Wachhund, Bericht),
-/// die keine Deadline beim Kernel anmelden — 10 ms ist ihr feinstes Raster.
-/// Sie als echte Deadlines zu fuehren ist der naechste Schritt.
-const IRQ_WAIT_MS: u32 = 10;
+/// Waehrend eines Kanalwechsels (CSA) parkt die Pumpe hoechstens so lange:
+/// Beacon-Frist und Umschaltzeitpunkt sind selten und kurz, dort bleibt es
+/// beim feinen Raster.
+const CSA_WAIT_MS: u64 = 10;
 
 static mut ITER_MAX: u32 = 0;
 static mut ITER_MAX_WD: bool = false;
@@ -5701,6 +5709,19 @@ fn ro_tick(ls: &mut LinkStats) {
         ro_release_ready(ls, tid);
         ls.ro_since[tid] = now;
     }
+}
+
+/// In wie vielen Millisekunden `ro_tick` das naechste Loch ueberspringt;
+/// None, solange nichts zurueckgehalten wird.
+fn ro_due_ms(ls: &LinkStats) -> Option<u64> {
+    if ls.ro_held.iter().all(|&h| h == 0) {
+        return None;
+    }
+    let now = host::now_us() as u32 / 1000;
+    (0..RO_TIDS)
+        .filter(|&tid| ls.ro_held[tid] != 0)
+        .map(|tid| RO_TIMEOUT_MS.saturating_sub(now.wrapping_sub(ls.ro_since[tid])) as u64)
+        .min()
 }
 
 /// **Eine MPDU zustellen: umwandeln, oder ein A-MSDU entpacken.**
@@ -7207,7 +7228,41 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 if ls.authorized && !sendesperre {
                     mask |= host::WAIT_NET_TX;
                 }
-                host::wait(mask, IRQ_WAIT_MS);
+                // **Bis zum naechsten eigenen Zeitgeber, nicht pauschal.**
+                // Jede zeitabhaengige Pruefung dieser Schleife meldet hier
+                // ihren Termin; geparkt wird bis zum fruehesten. Die 10-ms-
+                // Frist aus 0.68.0 war der Platzhalter dafuer — sie machte
+                // im Leerlauf 100 der 118 Aufwachungen je Sekunde aus.
+                let jetzt = host::now_ms();
+                let mut warte: u64 = 1000;
+                let mut faellig = |at: u64| warte = warte.min(at.saturating_sub(jetzt));
+                faellig(watch_dog_ms + RTW_WATCH_DOG_DELAY_MS);
+                faellig(report_ms + 1000);
+                faellig(rx_silent_ms + 5_001);
+                if link.ba_tx.state == BaState::Gefragt {
+                    faellig(link.ba_tx.at_ms + BA_RESP_MS + 1);
+                }
+                if ls.poll_on {
+                    faellig(ls.probe_timeout_ms);
+                }
+                if let Some(at) = ls.next_probe_due() {
+                    faellig(at);
+                }
+                if link.csa.is_some() || link.csa_zurueck.is_some() {
+                    warte = warte.min(CSA_WAIT_MS);
+                }
+                if let Some(ms) = ro_due_ms(ls) {
+                    warte = warte.min(ms);
+                }
+                if frist_us != 0 {
+                    let rest = (t0 + frist_us).saturating_sub(host::now_us()) / 1000;
+                    warte = warte.min(rest);
+                }
+                // Mindestens 1 ms: `now_ms` zaehlt in 10-ms-Schritten, und
+                // ein Termin, der „jetzt" sagt, dessen Bedingung aber erst
+                // im naechsten Schritt greift, liesse die Schleife sonst bis
+                // zu 10 ms leer drehen.
+                host::wait(mask, warte.max(1) as u32);
             }
             // `rtw_pci_interrupt_handler`: HIMR aus, bis die Runde durch ist.
             pci::disable_interrupt(h);
