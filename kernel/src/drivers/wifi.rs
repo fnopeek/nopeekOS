@@ -113,13 +113,40 @@ fn pop(q: &Mutex<VecDeque<Vec<u8>>>, out: &mut [u8]) -> Option<usize> {
 
 // ── Manager side (wifid.wasm) ──
 /// Enqueue a command for the driver. Returns false if full / oversized.
-pub fn send_cmd(msg: &[u8]) -> bool { push(&DOWNLINK, msg, &CMDS_SENT, &CMDS_DROPPED) }
+pub fn send_cmd(msg: &[u8]) -> bool {
+    let ok = push(&DOWNLINK, msg, &CMDS_SENT, &CMDS_DROPPED);
+    if ok { wake(&CMD_WAKER); }
+    ok
+}
 /// Dequeue the next event from the driver into `out`; None if empty / too small.
 pub fn poll_event(out: &mut [u8]) -> Option<usize> { pop(&UPLINK, out) }
 
 // ── Driver side (wifi_*.wasm) ──
 /// Enqueue an event for the manager. Returns false if full / oversized.
-pub fn send_event(msg: &[u8]) -> bool { push(&UPLINK, msg, &EVENTS_SENT, &EVENTS_DROPPED) }
+pub fn send_event(msg: &[u8]) -> bool {
+    let ok = push(&UPLINK, msg, &EVENTS_SENT, &EVENTS_DROPPED);
+    if ok { wake(&EVENT_WAKER); }
+    ok
+}
+
+/// The driver fiber reading commands, and the manager fiber reading
+/// events — registered when they wait (`npk_wait`), signalled on each push.
+static CMD_WAKER: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER);
+static EVENT_WAKER: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER);
+
+fn wake(slot: &core::sync::atomic::AtomicU32) {
+    let w = slot.load(Ordering::Acquire);
+    if w != crate::smp::fiber::NO_WAKER {
+        crate::smp::fiber::signal(w, crate::smp::fiber::SIG_WIFI);
+    }
+}
+
+pub fn set_cmd_waker(w: crate::smp::fiber::Waker) { CMD_WAKER.store(w, Ordering::Release); }
+pub fn set_event_waker(w: crate::smp::fiber::Waker) { EVENT_WAKER.store(w, Ordering::Release); }
+pub fn cmd_pending() -> bool { !DOWNLINK.lock().is_empty() }
+pub fn event_pending() -> bool { !UPLINK.lock().is_empty() }
 /// Dequeue the next command from the manager into `out`; None if empty / too small.
 pub fn poll_cmd(out: &mut [u8]) -> Option<usize> { pop(&DOWNLINK, out) }
 

@@ -711,6 +711,76 @@ pub const RX_TAG_MAX: u16 = 8192;
 /// Der Chip schreibt seinen Stand in die oberen zwoelf Bit desselben
 /// Registers, aus dem wir unseren lesen. Die Differenz ist die Zahl der
 /// Puffer, die er gefuellt hat.
+// ── Interrupts: `pci.c` 374-387, 480-513, 1119-1141; `pci.h` 81-145 ──
+//
+// Der 8822C ist `RTW_WCPU_3081` (rtw8822c.c:5337), also gehoert HIMR3/HISR3
+// dazu. Linux fordert EINEN MSI-Vektor an (`rtw_pci_request_irq`); die
+// Behandlung ist zweigeteilt: der harte Teil schaltet HIMR ab, der Faden
+// quittiert HISR, arbeitet und schaltet HIMR wieder an. Bei uns zaehlt der
+// Kernel-ISR nur und weckt den Treiber-Fiber — beide Haelften laufen dort.
+pub const RTK_PCI_HIMR0: u32 = 0x0B0;
+pub const RTK_PCI_HISR0: u32 = 0x0B4;
+pub const RTK_PCI_HIMR1: u32 = 0x0B8;
+pub const RTK_PCI_HISR1: u32 = 0x0BC;
+pub const RTK_PCI_HIMR3: u32 = 0x10B8;
+pub const RTK_PCI_HISR3: u32 = 0x10BC;
+
+const IMR_BCNDMAINT_E: u32 = 1 << 14;
+const IMR_C2HCMD: u32 = 1 << 10;
+const IMR_HIGHDOK: u32 = 1 << 7;
+const IMR_MGNTDOK: u32 = 1 << 6;
+const IMR_BKDOK: u32 = 1 << 5;
+const IMR_BEDOK: u32 = 1 << 4;
+const IMR_VIDOK: u32 = 1 << 3;
+const IMR_VODOK: u32 = 1 << 2;
+pub const IMR_ROK: u32 = 1 << 0;
+const IMR_TXFOVW: u32 = 1 << 9; // HIMR1
+const IMR_H2CDOK: u32 = 1 << 16; // HIMR3
+
+/// `rtw_pci_setup`: `rtwpci->irq_mask[0..3]`.
+pub const IRQ_MASK: [u32; 4] = [
+    IMR_HIGHDOK | IMR_MGNTDOK | IMR_BKDOK | IMR_BEDOK | IMR_VIDOK | IMR_VODOK
+        | IMR_ROK | IMR_BCNDMAINT_E | IMR_C2HCMD,
+    IMR_TXFOVW,
+    0,
+    IMR_H2CDOK,
+];
+
+/// `rtw_pci_enable_interrupt`.
+pub fn enable_interrupt(h: i32, exclude_rx: bool) {
+    let imr0_unmask = if exclude_rx { IMR_ROK } else { 0 };
+    host::w32(h, RTK_PCI_HIMR0, IRQ_MASK[0] & !imr0_unmask);
+    host::w32(h, RTK_PCI_HIMR1, IRQ_MASK[1]);
+    host::w32(h, RTK_PCI_HIMR3, IRQ_MASK[3]);
+}
+
+/// `rtw_pci_disable_interrupt`.
+pub fn disable_interrupt(h: i32) {
+    host::w32(h, RTK_PCI_HIMR0, 0);
+    host::w32(h, RTK_PCI_HIMR1, 0);
+    host::w32(h, RTK_PCI_HIMR3, 0);
+}
+
+/// `rtw_pci_irq_recognized`: HISR lesen, auf die Maske beschraenken und
+/// genau das Gelesene wieder loeschen (write-1-to-clear). Bleibt ein Bit
+/// stehen, erzeugt der Chip beim naechsten Ereignis KEINE neue MSI-Flanke
+/// (Kommentar in `rtw_pci_interrupt_handler`).
+pub fn irq_recognized(h: i32) -> [u32; 4] {
+    let mut st = [
+        host::r32(h, RTK_PCI_HISR0),
+        host::r32(h, RTK_PCI_HISR1),
+        0,
+        host::r32(h, RTK_PCI_HISR3),
+    ];
+    for i in 0..4 {
+        st[i] &= IRQ_MASK[i];
+    }
+    host::w32(h, RTK_PCI_HISR0, st[0]);
+    host::w32(h, RTK_PCI_HISR1, st[1]);
+    host::w32(h, RTK_PCI_HISR3, st[3]);
+    st
+}
+
 pub fn get_hw_rx_ring_nr(h: i32, trx: &Trx) -> u32 {
     let tmp = host::r32(h, RTK_PCI_RXBD_IDX_MPDUQ);
     let cur_wp = (tmp & TRX_BD_HW_IDX_MASK) >> 16;

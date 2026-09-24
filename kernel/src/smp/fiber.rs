@@ -150,6 +150,10 @@ pub const SIG_EVENT: u32 = 1 << 0;
 pub const SIG_IRQ: u32 = 1 << 1;
 /// This core's net-kick generation advanced.
 pub const SIG_KICK: u32 = 1 << 2;
+/// The IP stack queued a frame for the WASM NIC driver.
+pub const SIG_TX: u32 = 1 << 3;
+/// A wifi command (wifid → driver) or event (driver → wifid) was queued.
+pub const SIG_WIFI: u32 = 1 << 4;
 
 pub type Waker = u32;
 pub const NO_WAKER: Waker = u32::MAX;
