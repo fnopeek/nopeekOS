@@ -1092,6 +1092,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         dma_allocs: Vec::new(),
         bus_master_enabled: false,
         registered_as_netdev: false,
+        irq_vector: 0,
     });
     kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
@@ -1134,6 +1135,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         dma_allocs: Vec::new(),
         bus_master_enabled: false,
         registered_as_netdev: false,
+        irq_vector: 0,
     });
     0
 }
@@ -1182,25 +1184,32 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     // Ohne PCI-Geraet gibt es keine Konfigurationsadresse.
-    let hw = match ctx.hw.as_ref() { Some(h) if h.is_pci => h, _ => return -1 };
+    let hw = match ctx.hw.as_mut() { Some(h) if h.is_pci => h, _ => return -1 };
     if !(0..2048).contains(&entry) { return -1; }
+    // One vector per driver. Registering again returns the same one — the
+    // pool has 16 vectors and is never freed, so a loop around this call
+    // would otherwise take them all.
+    if hw.irq_vector != 0 { return hw.irq_vector as i32; }
     match crate::irq::register(hw.pci_addr, entry as u16) {
-        Some(v) => v as i32,
+        Some(v) => { hw.irq_vector = v; v as i32 }
         None => -1,
     }
 }
 
-pub(crate) fn npk_irq_arm(_ctx: &mut HostState, vector: i32) -> i64 {
-    let base = crate::interrupts::DEVICE_IRQ_VEC_BASE as i32;
-    let count = crate::interrupts::DEVICE_IRQ_VEC_COUNT as i32;
-    if vector < base || vector >= base + count { return -1; }
+/// Is `vector` the one THIS module's driver registered?
+fn owns_vector(ctx: &HostState, vector: i32) -> bool {
+    matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)
+}
+
+pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
+    // Arming re-routes the device's MSI to the calling core — only for the
+    // module that owns it.
+    if !owns_vector(ctx, vector) { return -1; }
     crate::irq::arm(vector as u8) as i64
 }
 
-pub(crate) fn npk_irq_wait(_ctx: &mut HostState, vector: i32, since: i64, timeout_ms: i32) -> i32 {
-    let base = crate::interrupts::DEVICE_IRQ_VEC_BASE as i32;
-    let count = crate::interrupts::DEVICE_IRQ_VEC_COUNT as i32;
-    if vector < base || vector >= base + count || since < 0 { return -1; }
+pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout_ms: i32) -> i32 {
+    if !owns_vector(ctx, vector) || since < 0 { return -1; }
     let t = if timeout_ms <= 0 { 1000 } else { timeout_ms as u64 };
     if crate::irq::wait(vector as u8, since as u64, t) { 1 } else { 0 }
 }
@@ -1331,6 +1340,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             dma_allocs: Vec::new(),
             bus_master_enabled: false,
             registered_as_netdev: false,
+            irq_vector: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };

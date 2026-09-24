@@ -45,8 +45,8 @@
 //!   then `arm`/`wait`, then re-acquire to service.
 //!
 //! WASM drivers use the mirror host-fns `npk_irq_register` / `npk_irq_arm` /
-//! `npk_irq_wait` (see `wasm.rs`). The device must expose an MSI-X capability
-//! (NIC / NVMe / AX200 / modern virtio do; legacy MSI-only devices are TODO).
+//! `npk_irq_wait` (see `wasm.rs`). MSI-X when the device has it (NIC / NVMe /
+//! AX200 / modern virtio), plain MSI with one vector otherwise (RTL8822CE).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
@@ -61,8 +61,20 @@ use crate::interrupts::{DEVICE_IRQ_VEC_BASE, DEVICE_IRQ_VEC_COUNT};
 #[derive(Clone, Copy)]
 struct IrqReg {
     dev: PciAddr,
+    /// MSI-X table entry, or `MSI` for a plain-MSI device (one vector).
     entry: u16,
-    last_dest: u32, // APIC ID the MSI-X entry currently targets
+    last_dest: u32, // APIC ID the message currently targets
+}
+
+/// `IrqReg::entry` of a device driven by plain MSI instead of MSI-X.
+const MSI: u16 = u16::MAX;
+
+fn set_dest(r: &IrqReg, apic: u32) {
+    if r.entry == MSI {
+        pci::msi_set_dest(r.dev, apic);
+    } else {
+        pci::msix_set_dest(r.dev, r.entry, apic);
+    }
 }
 static IRQ_REG: Mutex<[Option<IrqReg>; 256]> = Mutex::new([None; 256]);
 
@@ -142,7 +154,7 @@ pub fn route_to_current(vector: u8) {
     let mut reg = IRQ_REG.lock();
     if let Some(r) = reg[vector as usize].as_mut() {
         if r.last_dest != apic {
-            pci::msix_set_dest(r.dev, r.entry, apic);
+            set_dest(r, apic);
             r.last_dest = apic;
         }
     }
@@ -168,7 +180,7 @@ pub fn route_to_core(vector: u8, core: usize) {
     let mut reg = IRQ_REG.lock();
     if let Some(r) = reg[vector as usize].as_mut() {
         if r.last_dest != apic {
-            pci::msix_set_dest(r.dev, r.entry, apic);
+            set_dest(r, apic);
             r.last_dest = apic;
         }
     }
@@ -280,12 +292,24 @@ pub fn register(dev: PciAddr, entry: u16) -> Option<u8> {
     // VT-d IR (if the platform enabled it) silently drops our compatibility-
     // format MSIs — disable it once before programming any device MSI-X.
     ensure_msi_deliverable();
-    let vector = alloc_vector()?;
     let dest = crate::interrupts::current_apic_id();
-    if pci::program_msix(dev, entry, vector, dest) {
-        IRQ_REG.lock()[vector as usize] = Some(IrqReg { dev, entry, last_dest: dest });
-        Some(vector)
+    // MSI-X when the device has it; otherwise plain MSI with its one vector
+    // (the RTL8822CE). `entry` only means something for MSI-X.
+    let (vector, entry) = if pci::has_msix(dev) {
+        let vector = alloc_vector()?;
+        if !pci::program_msix(dev, entry, vector, dest) {
+            return None;
+        }
+        (vector, entry)
     } else {
-        None
-    }
+        let vector = alloc_vector()?;
+        if !pci::program_msi(dev, vector, dest) {
+            return None;
+        }
+        crate::kprintln!("[npk] irq: {:02x}:{:02x}.{} plain MSI on vector {:#x}",
+            dev.bus, dev.device, dev.function, vector);
+        (vector, MSI)
+    };
+    IRQ_REG.lock()[vector as usize] = Some(IrqReg { dev, entry, last_dest: dest });
+    Some(vector)
 }

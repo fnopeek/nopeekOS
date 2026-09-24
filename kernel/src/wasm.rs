@@ -80,6 +80,10 @@ struct HwDriverState {
     dma_allocs: Vec<(u64, usize)>,  // handle -> (phys_addr, page_count)
     bus_master_enabled: bool,
     registered_as_netdev: bool,
+    /// The device-IRQ vector this driver registered, 0 = none. A driver
+    /// may arm and wait on THIS vector only — any vector of the pool would
+    /// let a module re-route another driver's interrupt to its own core.
+    irq_vector: u8,
 }
 
 const MAX_MMIO_MAPS: usize = 4;

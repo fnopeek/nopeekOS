@@ -531,6 +531,87 @@ pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
     unsafe { core::ptr::write_volatile(entry_addr as *mut u32, msg_addr_lo); }
 }
 
+/// Offset of capability `id` in `dev`'s list, or 0 if it has none.
+fn find_cap(dev: PciAddr, id: u8) -> u8 {
+    if read16(dev, 0x06) & (1 << 4) == 0 {
+        return 0;
+    }
+    let mut cap = read8(dev, 0x34) & 0xFC;
+    let mut guard = 0;
+    while cap != 0 && guard < 48 {
+        if read8(dev, cap) == id {
+            return cap;
+        }
+        cap = read8(dev, cap + 1) & 0xFC;
+        guard += 1;
+    }
+    0
+}
+
+/// Does `dev` have an MSI-X capability?
+pub fn has_msix(dev: PciAddr) -> bool {
+    find_cap(dev, 0x11) != 0
+}
+
+/// Program `dev`'s plain MSI capability (0x05) for ONE vector delivered to
+/// LAPIC `dest_apic`, and enable it. For devices without MSI-X — the
+/// RTL8822CE among them: rtw88 asks Linux for exactly one MSI vector
+/// (`pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI | PCI_IRQ_INTX)`).
+///
+/// Layout (PCI 3.0 §6.8.1): Message Control in the high half of the cap's
+/// first dword (bit 0 enable, bits 6:4 multiple-message enable, bit 7 64-bit
+/// address, bit 8 per-vector masking); address at +4, then either data at +8
+/// (32-bit) or address-high at +8 and data at +0xC; mask bits after the data.
+/// MSI is disabled while it is programmed, and INTx is switched off as
+/// Linux' `pci_intx_for_msi` does.
+pub fn program_msi(dev: PciAddr, vector: u8, dest_apic: u32) -> bool {
+    let cap = find_cap(dev, 0x05);
+    if cap == 0 {
+        kprintln!("[npk] msi: {:02x}:{:02x}.{} no MSI capability (0x05)",
+            dev.bus, dev.device, dev.function);
+        return false;
+    }
+    let d0 = read32(dev, cap);
+    let ctrl = (d0 >> 16) as u16;
+    let is_64 = ctrl & (1 << 7) != 0;
+    let per_vector_mask = ctrl & (1 << 8) != 0;
+    // Disabled, one message (MME = 0) while the address/data are written.
+    let off = ctrl & !1 & !(0b111 << 4);
+    write32(dev, cap, (d0 & 0xFFFF) | ((off as u32) << 16));
+
+    write32(dev, cap + 4, 0xFEE0_0000 | ((dest_apic & 0xFF) << 12));
+    let data_off = if is_64 {
+        write32(dev, cap + 8, 0);
+        cap + 0x0C
+    } else {
+        cap + 8
+    };
+    // Message Data = vector (fixed delivery, edge). The upper half is
+    // extended data / reserved: 0.
+    write32(dev, data_off, vector as u32);
+    if per_vector_mask {
+        let mask_off = data_off + 4;
+        let m = read32(dev, mask_off);
+        write32(dev, mask_off, m & !1);
+    }
+    // INTx off (Command bit 10). Write only the command half: the status
+    // half above it is write-1-to-clear.
+    let cmd = read32(dev, 0x04) & 0xFFFF;
+    write32(dev, 0x04, cmd | (1 << 10));
+
+    write32(dev, cap, (d0 & 0xFFFF) | (((off | 1) as u32) << 16));
+    true
+}
+
+/// Re-point `dev`'s plain MSI to LAPIC `dest_apic` — one config write of the
+/// message address (the counterpart of `msix_set_dest`).
+pub fn msi_set_dest(dev: PciAddr, dest_apic: u32) {
+    let cap = find_cap(dev, 0x05);
+    if cap != 0 {
+        write32(dev, cap + 4, 0xFEE0_0000 | ((dest_apic & 0xFF) << 12));
+    }
+}
+
 /// Live MSI-X state for diagnostics (read on demand, e.g. from `disk`).
 #[derive(Clone, Copy)]
 pub struct MsixDebug {
