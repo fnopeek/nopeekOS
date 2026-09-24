@@ -421,6 +421,19 @@ pub fn wasm_nic_submit_rx(frame: &[u8]) {
 }
 
 /// WASM driver calls this to get a frame to transmit (fq_codel-scheduled)
+/// The WASM NIC driver's fiber, registered when it waits for TX work
+/// (`npk_wait`). A queued frame wakes it at once instead of on its next poll.
+static NIC_WAKER: AtomicU32 = AtomicU32::new(crate::smp::fiber::NO_WAKER);
+
+pub fn set_nic_waker(w: crate::smp::fiber::Waker) {
+    NIC_WAKER.store(w, Ordering::Release);
+}
+
+/// Frames waiting for the WASM NIC driver?
+pub fn wasm_nic_tx_pending() -> bool {
+    WASM_NIC.lock().tx.backlog() > 0
+}
+
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
     let r = WASM_NIC.lock().tx.dequeue(buf);
     if r.is_some() { TX_DEQUEUED.fetch_add(1, Ordering::Relaxed); }
@@ -461,6 +474,10 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
             // first and threw the result away, so a refused frame read as sent.
             if WASM_NIC.lock().tx.enqueue(frame) {
                 TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+                let w = NIC_WAKER.load(Ordering::Acquire);
+                if w != crate::smp::fiber::NO_WAKER {
+                    crate::smp::fiber::signal(w, crate::smp::fiber::SIG_TX);
+                }
                 Ok(())
             } else {
                 Err(NetError::NotInitialized)

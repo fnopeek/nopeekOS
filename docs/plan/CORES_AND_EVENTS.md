@@ -2,7 +2,8 @@
 
 **Stand:** 2026-09-24. Stufe 0 = Kernel 0.410.0, Stufe 1 = 0.411.x (Worker
 ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
-Wartezustand, `npk_wait`). Rest offen.
+Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
+(MSI, WLAN per Interrupt). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -241,6 +242,20 @@ Aenderungen MELDEN.
 * NVMe: eine I/O-Queue je Kern mit eigenem Vektor — dann braucht es die
   `NVME`-Sperre im Hot-Path nicht mehr, und FS-Sperren muessen nicht ueber
   einem Park gehalten werden (die Blockade von „B-2" im Memory entfaellt).
+
+**Gebaut (Stufe 2b/2c, 0.413.0 + wifi_rtl8822ce 0.68.0):**
+`irq::register` faellt auf normales MSI zurueck (`pci::program_msi`); ein
+Vektor gehoert seinem Treiber (`HwDriverState::irq_vector`), `npk_irq_arm`/
+`npk_irq_wait` nehmen nur den eigenen. `npk_wait` kennt die Treiberbits
+`WAIT_IRQ` 2, `WAIT_NET_TX` 4, `WAIT_WIFI_CMD` 8 und fuer wifid
+`WAIT_WIFI_EVENT` 16 — jedes an das Recht gebunden, das der passende
+`npk_*_poll` prueft. Der RTL8822CE-Treiber portiert `rtw_pci_enable/
+disable_interrupt` und `rtw_pci_irq_recognized` (HIMR0/1/3, HISR0/1/3,
+Masken aus `rtw_pci_setup`) und parkt im Leerlauf wie `rtw_pci_napi_poll`:
+HISR quittieren, HIMR scharf, Ring nachsehen, `npk_wait(IRQ | CMD | TX,
+10 ms)`, HIMR aus. Die 64 leeren Blicke und `sleep_ms(1)` bleiben nur fuer
+den Fall ohne MSI. **Offen:** die internen Zeitgeber der Pumpschleife als
+Deadlines — dann faellt die 10-ms-Frist.
 
 ### 3.5 Kern 0 aufloesen
 

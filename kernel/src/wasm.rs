@@ -84,6 +84,8 @@ struct HwDriverState {
     /// may arm and wait on THIS vector only — any vector of the pool would
     /// let a module re-route another driver's interrupt to its own core.
     irq_vector: u8,
+    /// `irq::fired_count` of that vector when `npk_wait` last reported it.
+    irq_seen: u64,
 }
 
 const MAX_MMIO_MAPS: usize = 4;

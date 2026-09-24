@@ -51,6 +51,29 @@ unsafe extern "C" {
     fn npk_netdev_submit_rx(buf_ptr: i32, len: i32) -> i32;
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
     fn npk_netdev_set_link(up: i32) -> i32;
+
+    // ── Interrupt statt Abfrage (docs/plan/CORES_AND_EVENTS.md, Stufe 2c)
+    fn npk_irq_register(entry: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
+}
+
+// ── Warten auf Ereignisse ────────────────────────────────────────
+
+/// `npk_wait`-Bits (Kernel `host_core::npk_wait`).
+pub const WAIT_IRQ: i32 = 2;
+pub const WAIT_NET_TX: i32 = 4;
+pub const WAIT_WIFI_CMD: i32 = 8;
+
+/// Den MSI des gebundenen Geraets anmelden. Der Vektor, oder `-1`, wenn
+/// es keinen gibt — dann bleibt der Treiber im Abfragebetrieb.
+pub fn irq_register() -> i32 {
+    unsafe { npk_irq_register(0) }
+}
+
+/// Parken, bis eines der Ereignisse in `mask` eintritt oder `timeout_ms`
+/// vergeht. Die eingetretenen Bits, 0 bei Fristablauf.
+pub fn wait(mask: i32, timeout_ms: u32) -> i32 {
+    unsafe { npk_wait(mask, timeout_ms as i32) }
 }
 
 // ── Stufe 6a: Steuerkanal, npkFS und Datenweg ────────────────────

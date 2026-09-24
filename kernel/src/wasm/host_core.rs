@@ -720,6 +720,49 @@ pub(crate) fn npk_sleep(_ctx: &mut HostState, ms: i32) -> i32 {
 /// (`npk_event_poll`), a key in the terminal buffer (`npk_input_poll`), or
 /// the app's window is gone.
 const WAIT_INPUT: i32 = 1;
+/// Driver: the device IRQ it registered (`npk_irq_register`) fired since
+/// `npk_wait` last reported it.
+const WAIT_IRQ: i32 = 2;
+/// Driver registered as the WASM NIC: the IP stack queued a frame.
+const WAIT_NET_TX: i32 = 4;
+/// Driver: wifid queued a command (`npk_wifi_poll_cmd`).
+const WAIT_WIFI_CMD: i32 = 8;
+/// Manager (NETCTL): the driver queued an event (`npk_wifi_poll_event`).
+const WAIT_WIFI_EVENT: i32 = 16;
+
+/// Which of `mask`'s conditions hold right now. Bits the caller may not
+/// wait on (a driver bit without a driver, an event bit without NETCTL)
+/// never fire.
+fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
+    let mut r = 0;
+    if mask & WAIT_INPUT != 0 && input_ready(ctx) {
+        r |= WAIT_INPUT;
+    }
+    if let Some(hw) = ctx.hw.as_mut() {
+        if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
+            let n = crate::irq::fired_count(hw.irq_vector);
+            if n != hw.irq_seen {
+                hw.irq_seen = n;
+                r |= WAIT_IRQ;
+            }
+        }
+        if mask & WAIT_NET_TX != 0 && hw.registered_as_netdev
+            && crate::netdev::wasm_nic_tx_pending()
+        {
+            r |= WAIT_NET_TX;
+        }
+        if mask & WAIT_WIFI_CMD != 0 && crate::wifi::cmd_pending() {
+            r |= WAIT_WIFI_CMD;
+        }
+    }
+    if mask & WAIT_WIFI_EVENT != 0
+        && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
+        && crate::wifi::event_pending()
+    {
+        r |= WAIT_WIFI_EVENT;
+    }
+    r
+}
 
 /// Is input waiting for this app? Also true once its widget window is
 /// gone, so a parked app wakes and leaves its loop.
@@ -736,15 +779,19 @@ fn input_ready(ctx: &HostState) -> bool {
 
 /// `npk_wait(mask, timeout_ms)` — park until something in `mask` happens,
 /// or `timeout_ms` passes (< 0: no timeout). Returns the bits that fired,
-/// 0 on timeout.
+/// 0 on timeout. Bits: `WAIT_INPUT` 1, `WAIT_IRQ` 2, `WAIT_NET_TX` 4,
+/// `WAIT_WIFI_CMD` 8, `WAIT_WIFI_EVENT` 16.
 ///
 /// The event-driven replacement for `loop { poll; npk_sleep(16) }`: the
 /// app's fiber gives up its core and costs nothing until an event is pushed
 /// for it (`widgets::push_event`, `wasm::push_app_key` signal it) or its
 /// deadline comes. `docs/plan/CORES_AND_EVENTS.md` §3.3.
 ///
-/// Needs no capability: it only tells whether the app's OWN queues hold
-/// something, and parks only the app's own fiber.
+/// Every bit is gated by what the caller already owns: the IRQ bit by the
+/// vector ITS driver registered, the NIC bit by being the registered WASM
+/// NIC, the command bit by being a driver, the event bit by NETCTL — the
+/// same rights the matching `npk_*_poll` calls check. It parks only the
+/// caller's own fiber.
 pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
     let freq = crate::interrupts::tsc_freq();
     let deadline = if timeout_ms < 0 {
@@ -755,22 +802,50 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
     // Register where the app's input will be pushed. The widget window is
     // created lazily by the app's first scene commit, so do it here, every
     // time — a map insert and a store, at the rate the app waits.
+    use crate::smp::fiber::{SIG_EVENT, SIG_IRQ, SIG_TX, SIG_WIFI};
+    let mut sig = 0;
     if let Some(w) = crate::smp::fiber::current_waker() {
-        if ctx.widget_window_id != 0 {
-            crate::shade::widgets::set_event_waker(ctx.widget_window_id, w);
+        if mask & WAIT_INPUT != 0 {
+            if ctx.widget_window_id != 0 {
+                crate::shade::widgets::set_event_waker(ctx.widget_window_id, w);
+            }
+            crate::wasm::set_key_waker(ctx.terminal_idx, w);
+            sig |= SIG_EVENT;
         }
-        crate::wasm::set_key_waker(ctx.terminal_idx, w);
+        if let Some(hw) = ctx.hw.as_ref() {
+            if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
+                // The MSI must wake THIS core; a no-op while it already does.
+                crate::irq::route_to_current(hw.irq_vector);
+                crate::irq::set_waiter(hw.irq_vector, w);
+                sig |= SIG_IRQ;
+            }
+            if mask & WAIT_NET_TX != 0 && hw.registered_as_netdev {
+                crate::netdev::set_nic_waker(w);
+                sig |= SIG_TX;
+            }
+            if mask & WAIT_WIFI_CMD != 0 {
+                crate::wifi::set_cmd_waker(w);
+                sig |= SIG_WIFI;
+            }
+        }
+        if mask & WAIT_WIFI_EVENT != 0
+            && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
+        {
+            crate::wifi::set_event_waker(w);
+            sig |= SIG_WIFI;
+        }
     }
     let flushed = crate::smp::per_core::flush_busy(ctx.core_id);
     crate::process::add_busy_tsc(ctx.pid, flushed);
     let fired = loop {
-        if mask & WAIT_INPUT != 0 && input_ready(ctx) {
-            break WAIT_INPUT;
+        let r = wait_ready(ctx, mask);
+        if r != 0 {
+            break r;
         }
         if crate::interrupts::rdtsc() >= deadline {
             break 0;
         }
-        if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
+        if crate::smp::fiber::wait(sig, deadline).is_none() {
             // Not in a fiber: halt in place, looking again every 10 ms.
             let recheck = crate::interrupts::rdtsc() + freq / 100;
             crate::interrupts::halt_until(
@@ -1093,6 +1168,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         bus_master_enabled: false,
         registered_as_netdev: false,
         irq_vector: 0,
+        irq_seen: 0,
     });
     kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
@@ -1136,6 +1212,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         bus_master_enabled: false,
         registered_as_netdev: false,
         irq_vector: 0,
+        irq_seen: 0,
     });
     0
 }
@@ -1341,6 +1418,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             bus_master_enabled: false,
             registered_as_netdev: false,
             irq_vector: 0,
+            irq_seen: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };

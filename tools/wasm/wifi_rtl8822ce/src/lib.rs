@@ -1368,9 +1368,20 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     // die Funktion kehrt ohne einen Registerzugriff zurueck.
 
     // `rtw_hci_start` = `rtw_pci_start`: setzt `rtwpci->running` und ruft
-    // `rtw_pci_enable_interrupt`. Wir fahren den Chip im Abfragebetrieb,
-    // es gibt keine Interruptleitung zu diesem Modul — die einzige
-    // Abweichung dieser Stufe, und sie steht im Papier.
+    // `rtw_pci_enable_interrupt`. Den MSI melden wir hier an
+    // (`rtw_pci_request_irq`: EIN Vektor). HIMR schalten wir erst in der
+    // Pumpschleife scharf, im Leerlauf — waehrend des Hochfahrens arbeitet
+    // der Treiber seine Schritte der Reihe nach ab und wartet auf nichts.
+    let vec = host::irq_register();
+    // SAFETY: nur dieser Fiber schreibt und liest IRQ_VEC.
+    unsafe { IRQ_VEC = vec; }
+    if vec >= 0 {
+        host::print("  MSI auf Vektor ");
+        host::print_dec(vec as u32);
+        host::print(" — Empfang per Interrupt\n");
+    } else {
+        host::print("  kein MSI — Abfragebetrieb\n");
+    }
 
     // ── Die zwei H2C-PAKETE ──────────────────────────────────────
     // Sie gehen durch die H2C-QUEUE, nicht durch die Mailbox. Der Ring
@@ -5310,6 +5321,16 @@ fn wd_mark(i: usize, tp: &mut u64) {
 
 /// Die laengste Runde der Pumpschleife ohne ihren Schlaf, in us, und ob
 /// in ihr der Watchdog lief.
+/// Der MSI-Vektor des Chips, `-1` = Abfragebetrieb. Gesetzt beim Start
+/// (`rtw_hci_start`), gelesen im Leerlauf der Pumpschleife.
+static mut IRQ_VEC: i32 = -1;
+
+/// Wie lange der Leerlauf hoechstens parkt. Die Pumpschleife fuehrt
+/// eigene Zeitgeber (Umsortier-Frist, Sondierung, CSA, Wachhund, Bericht),
+/// die keine Deadline beim Kernel anmelden — 10 ms ist ihr feinstes Raster.
+/// Sie als echte Deadlines zu fuehren ist der naechste Schritt.
+const IRQ_WAIT_MS: u32 = 10;
+
 static mut ITER_MAX: u32 = 0;
 static mut ITER_MAX_WD: bool = false;
 
@@ -7169,7 +7190,28 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
-        if got == 0 {
+        // SAFETY: nur dieser Fiber liest IRQ_VEC.
+        let irq = unsafe { IRQ_VEC } >= 0;
+        if got == 0 && irq {
+            // **Mit MSI: parken, bis der Chip etwas meldet.** Die Form von
+            // `rtw_pci_napi_poll`, wenn weniger als das Budget kam: HISR
+            // quittieren (sonst keine neue Flanke), HIMR scharf, und den Ring
+            // noch einmal ansehen — was zwischen dem letzten Blick und dem
+            // Scharfmachen ankam, loest keinen Interrupt mehr aus.
+            pci::irq_recognized(h);
+            pci::enable_interrupt(h, false);
+            if pci::get_hw_rx_ring_nr(h, trx) == 0 {
+                let mut mask = host::WAIT_IRQ | host::WAIT_WIFI_CMD;
+                // Nur, wenn diese Runde die Schlange auch leert — sonst
+                // meldet sie sich sofort wieder und die Schleife dreht leer.
+                if ls.authorized && !sendesperre {
+                    mask |= host::WAIT_NET_TX;
+                }
+                host::wait(mask, IRQ_WAIT_MS);
+            }
+            // `rtw_pci_interrupt_handler`: HIMR aus, bis die Runde durch ist.
+            pci::disable_interrupt(h);
+        } else if got == 0 {
             if leer_in_folge < RX_SPIN_BUDGET {
                 leer_in_folge += 1;
             } else {
