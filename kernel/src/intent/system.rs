@@ -177,31 +177,6 @@ pub fn intent_cores() {
             kprintln!("  {:>4}   {:>4}%   {:>7}   {:>13}   {:>5}  {}",
                 c, busy, halts_per_s, "—", qlen, role);
         }
-        if c != 0 {
-            // Breadcrumbs: where the core's loop is, and how long since it
-            // last passed its top (diagnosis of "busy, but no power").
-            let (w, lt, idle) = crate::smp::per_core::whereabouts(c);
-            let at = match w {
-                1 => "loop-top", 2 => "native", 3 => "fibers", 4 => "idle-check",
-                5 => "IN HLT", 6 => "woke", _ => "?",
-            };
-            let ago_ms = if lt == 0 { 0 } else {
-                crate::interrupts::rdtsc().saturating_sub(lt) / (tsc_hz / 1000).max(1)
-            };
-            let hs = crate::smp::per_core::halt_since(c);
-            let now = crate::interrupts::rdtsc();
-            let ms = |t: u64| -> i64 {
-                if t == 0 { 0 } else { (now as i64 - t as i64) / (tsc_hz / 1000).max(1) as i64 }
-            };
-            kprintln!("        at: {}  loop {} ms ago (signed {})  idle={}  halt_since {} ms ago  fibers={}",
-                at, ago_ms, ms(lt), idle as u8, if hs == 0 { 0 } else { ms(hs) },
-                crate::smp::fiber::fiber_count(c));
-            match crate::smp::per_core::tsc_offset(c) {
-                Some((off, rt)) => kprintln!("        tsc vs core 0: {:+} us  (round trip {} us)",
-                    off / tsc_per_us as i64, rt / tsc_per_us),
-                None => kprintln!("        tsc vs core 0: (no answer)"),
-            }
-        }
 
         // Wake-source breakdown: which cause returned each halt this
         // window. The decisive number is UNATTR = HALTS − Σcauses: large
@@ -344,6 +319,21 @@ pub fn intent_cores() {
         kprintln!("   core on exit-handling, guest starved -> its '0% CPU' is no time given)");
     }
     kprintln!();
+    // One clock? Firmware can leave core 0's TSC behind (IdeaPad: 1.7-4.1
+    // s, corrected at boot by smp::init); every figure above stands on it.
+    {
+        let mut worst = 0i64;
+        let mut seen = 0usize;
+        for c in 1..cores {
+            if let Some((off, _)) = crate::smp::per_core::tsc_offset(c) {
+                if off.abs() > worst.abs() { worst = off; }
+                seen += 1;
+            }
+        }
+        if seen > 0 {
+            kprintln!("  TSC: {} cores vs core 0, worst {:+} us", seen, worst / tsc_per_us as i64);
+        }
+    }
     kprintln!("  Read: BUSY%=100−halted. A core pegged at 100% with 0 HALTS/s");
     kprintln!("  is SPINNING (the idle-100% bug). Many HALTS/s + tiny residency");
     kprintln!("  = waking spuriously instead of staying asleep. Healthy idle =");
