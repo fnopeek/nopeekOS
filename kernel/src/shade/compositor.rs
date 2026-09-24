@@ -1134,6 +1134,31 @@ impl Compositor {
         (self.workspace_count, self.active_workspace, title)
     }
 
+    /// A fingerprint of everything `bar_info` and `window_lines` report —
+    /// focus, workspaces, and each window's identity, place, visibility,
+    /// kind and title, in z-order. Compared after every full frame
+    /// (`render_frame_layered`); a change notifies `TOPIC_WINDOWS`. No
+    /// allocation: FNV-1a over the fields.
+    pub fn shell_fingerprint(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |b: &[u8]| {
+            for &x in b {
+                h ^= x as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        eat(&[self.workspace_count, self.active_workspace]);
+        eat(&self.focused.map_or(u32::MAX, |f| f.0).to_le_bytes());
+        for wid in &self.z_order {
+            let Some(w) = self.windows.iter().find(|w| w.id == *wid) else { continue };
+            eat(&w.id.0.to_le_bytes());
+            eat(&[w.workspace, w.visible as u8, w.is_overlay as u8, w.is_dock as u8, w.is_bar as u8]);
+            eat(w.title.as_bytes());
+            eat(&[0xFF]);
+        }
+        h
+    }
+
     /// One line per real app window: `<flags>\t<workspace>\t<title>`,
     /// flags being a decimal bitmask (1 = focused, 2 = on the active
     /// workspace). Panels and transient overlays are excluded. Feeds the

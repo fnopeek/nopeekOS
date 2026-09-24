@@ -3,7 +3,8 @@
 **Stand:** 2026-09-24. Stufe 0 = Kernel 0.410.0, Stufe 1 = 0.411.x (Worker
 ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
-(MSI, WLAN per Interrupt). Rest offen.
+(MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
+dock 0.7.0 (Panels abonnieren). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -233,6 +234,15 @@ Aenderungen MELDEN.
   Also rund einmal je Minute statt dreimal je Sekunde, und trotzdem sofort.
   Dafuer braucht jede Quelle einen Weg, eine Aenderung zu MELDEN — das ist
   der eigentliche Bauposten, nicht das Warten.
+* **Gebaut (Stufe 2d, erster Teil, 0.414.0):** `kernel/src/notify.rs` —
+  Themen `TOPIC_WINDOWS` (Fingerabdruck von Fokus, Arbeitsflaechen und
+  Fensterliste nach jedem vollen Bild, `Compositor::shell_fingerprint`),
+  `TOPIC_BATTERY` (`battery::report` bei neuem Wert), `TOPIC_VOLUME`
+  (`audio::set_volume` bei neuem Wert), `TOPIC_CONFIG` (npkFS schreibt unter
+  `sys/config/`). Abonniert wird ueber `npk_wait` mit `WAIT_STATE` 32
+  (RENDER). `bar` wartet auf Eingabe | Zustand bis zur naechsten vollen
+  Minute, `dock` auf Eingabe | Zustand OHNE Frist — eine veraltete Anzeige
+  heisst dann: eine Aenderung, die niemand gemeldet hat.
 * **microVM-Netz-Datenebene:** der Worker parkt mit `kick_wait(PARK_SAFETY_MS
   = 2)` und wird gemessen NIE per IRQ geweckt (`cores`, QEMU 2026-09-24:
   `irq=0 timeout=504` je Sekunde) — ein versteckter 500-Hz-Takt auf einem

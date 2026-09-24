@@ -53,7 +53,7 @@ unsafe extern "C" {
     fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_get_fb_size() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -871,14 +871,24 @@ pub extern "C" fn _start() {
                 }
             }
             PollResult::Empty => {
-                // Focus and window opens/closes happen elsewhere — the
-                // dock is never told. Poll the compositor's window list
-                // and re-render only when the running indicators change.
+                // Focus and window opens/closes happen elsewhere; re-read
+                // the window list and re-render only when the running
+                // indicators changed.
                 if refresh_titles() {
                     alloc_reset(persistent_mark);
                     dock.commit_tree();
                 }
-                unsafe { let _ = npk_sleep(16); }
+                // **Then wait to be told.** Until 0.7.0 the dock looked
+                // every 16 ms — 60 times a second — whether anything had
+                // changed. The kernel now wakes it on an event (hover,
+                // click) or a window change (`WAIT_STATE`, the compositor's
+                // fingerprint after each frame). No deadline: an indicator
+                // that goes stale means a change nobody reported, and that
+                // must show, not be papered over by a timer.
+                // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+                const WAIT_INPUT: i32 = 1;
+                const WAIT_STATE: i32 = 32;
+                unsafe { let _ = npk_wait(WAIT_INPUT | WAIT_STATE, -1); }
             }
             PollResult::WindowGone => return,
         }

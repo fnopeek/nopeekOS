@@ -729,6 +729,10 @@ const WAIT_NET_TX: i32 = 4;
 const WAIT_WIFI_CMD: i32 = 8;
 /// Manager (NETCTL): the driver queued an event (`npk_wifi_poll_event`).
 const WAIT_WIFI_EVENT: i32 = 16;
+/// A watched topic changed — windows, battery, volume (`crate::notify`).
+/// RENDER-gated like the calls that read them (`npk_bar_state`,
+/// `npk_battery`).
+const WAIT_STATE: i32 = 32;
 
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
 /// wait on (a driver bit without a driver, an event bit without NETCTL)
@@ -761,6 +765,13 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
     {
         r |= WAIT_WIFI_EVENT;
     }
+    if mask & WAIT_STATE != 0 {
+        if let Some(w) = crate::smp::fiber::current_waker() {
+            if crate::notify::take(w) != 0 {
+                r |= WAIT_STATE;
+            }
+        }
+    }
     r
 }
 
@@ -780,7 +791,7 @@ fn input_ready(ctx: &HostState) -> bool {
 /// `npk_wait(mask, timeout_ms)` — park until something in `mask` happens,
 /// or `timeout_ms` passes (< 0: no timeout). Returns the bits that fired,
 /// 0 on timeout. Bits: `WAIT_INPUT` 1, `WAIT_IRQ` 2, `WAIT_NET_TX` 4,
-/// `WAIT_WIFI_CMD` 8, `WAIT_WIFI_EVENT` 16.
+/// `WAIT_WIFI_CMD` 8, `WAIT_WIFI_EVENT` 16, `WAIT_STATE` 32.
 ///
 /// The event-driven replacement for `loop { poll; npk_sleep(16) }`: the
 /// app's fiber gives up its core and costs nothing until an event is pushed
@@ -833,6 +844,12 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
         {
             crate::wifi::set_event_waker(w);
             sig |= SIG_WIFI;
+        }
+        if mask & WAIT_STATE != 0
+            && capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_ok()
+        {
+            crate::notify::subscribe(w);
+            sig |= crate::smp::fiber::SIG_STATE;
         }
     }
     let flushed = crate::smp::per_core::flush_busy(ctx.core_id);

@@ -42,7 +42,8 @@ unsafe extern "C" {
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
+    fn npk_unix_time() -> i64;
 }
 
 fn log(msg: &str) {
@@ -307,7 +308,6 @@ static mut LAST_LEN: usize = usize::MAX;
 // else (status<<8)|percent. Sentinel i32::MIN = never read yet.
 static mut BAT: i32 = -1;
 static mut LAST_BAT: i32 = i32::MIN;
-static mut BAT_TICK: u32 = 0;
 // Master volume (0..=100), polled each tick (cheap atomic). i32::MIN = unread.
 static mut VOL: i32 = 80;
 static mut LAST_VOL: i32 = i32::MIN;
@@ -735,9 +735,10 @@ fn state_changed() -> Option<usize> {
     // Poll battery too — it changes slowly, so throttle the SMBus reads to
     // roughly every 5 s (loop tick is 300 ms) and fold the result into the
     // same change-gate (a % or charge-state flip forces a re-commit).
-    let bat = unsafe {
-        if BAT_TICK == 0 { BAT_TICK = 16; npk_battery() } else { BAT_TICK -= 1; LAST_BAT }
-    };
+    // The bar only wakes when something changed (or the minute turned), so
+    // no throttle: on a machine with the AML driver this is a cached value,
+    // and the kernel wakes us when it moves.
+    let bat = unsafe { npk_battery() };
     let vol = unsafe { npk_audio_get_volume() };
     let cur = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
     let last = unsafe {
@@ -838,10 +839,16 @@ pub extern "C" fn _start() {
         rebuild_and_commit(&seg, len);
     }
 
-    // Ticks between size-config re-reads (300 ms each → ~3 s). Sizes are
-    // the one thing worth tuning by eye, so they must not need a restart.
-    const SIZE_POLL_TICKS: u32 = 10;
-    let mut tick: u32 = 0;
+    // **Wait for a change, don't poll for one.** Until 0.10.0 the bar woke
+    // every 300 ms and asked whether the clock, the window list, the battery
+    // or the volume had moved — 200 times a minute for one minute change.
+    // Now the kernel wakes it: WAIT_INPUT for a click, WAIT_STATE when a
+    // watched topic changes (windows, battery, volume, a config file), and
+    // the deadline is the next full minute for the clock.
+    // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+    const WAIT_INPUT: i32 = 1;
+    const WAIT_STATE: i32 = 32;
+    let mut fired = 0;
 
     loop {
         // Drain any pending click events first.
@@ -852,10 +859,11 @@ pub extern "C" fn _start() {
                 PollResult::WindowGone => return,
             }
         }
-        tick = tick.wrapping_add(1);
-        let resized = tick % SIZE_POLL_TICKS == 0 && read_sizes();
+        // Sizes come from `sys/config/bar` and are tuned by eye, so an edit
+        // must show without a restart — a config write is a watched topic.
+        let resized = fired & WAIT_STATE != 0 && read_sizes();
         // Re-render only when the live state changed (clock minute / title
-        // / active workspace), so the tree isn't rebuilt every tick.
+        // / active workspace), so the tree isn't rebuilt every wake.
         match state_changed() {
             Some(len) => rebuild_and_commit(&seg, len),
             // State is unchanged but the sizes moved — repaint at the last
@@ -868,6 +876,10 @@ pub extern "C" fn _start() {
             }
             None => {}
         }
-        unsafe { let _ = npk_sleep(300); }
+        // Until the next full minute, plus a little so the minute has
+        // surely turned when we read the clock.
+        let now = unsafe { npk_unix_time() }.max(0);
+        let to_minute_ms = (60 - now % 60) * 1000 + 50;
+        fired = unsafe { npk_wait(WAIT_INPUT | WAIT_STATE, to_minute_ms as i32) };
     }
 }
