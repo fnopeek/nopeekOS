@@ -96,6 +96,15 @@ pub fn query() -> Option<u8> {
     if q == 0 { None } else { Some(q) }
 }
 
+/// `query` without folding the outcomes together, for `ec watch take`:
+/// Ok(0) = the EC answered "nothing pending", Err = which step timed out.
+pub fn query_raw() -> Result<u8, &'static str> {
+    if !wait_ibf_clear() { return Err("IBF stuck before QR_EC"); }
+    unsafe { outb(EC_SC, CMD_QUERY); }
+    if !wait_obf_set() { return Err("no OBF after QR_EC"); }
+    Ok(unsafe { inb(EC_DATA) })
+}
+
 /// Read a little-endian 16-bit word from EC RAM (addr = low byte).
 pub fn read_u16(addr: u8) -> Option<u16> {
     let lo = read(addr)? as u16;
