@@ -206,6 +206,16 @@ Kontextwechsel bleibt kooperativ und billig.
   leeren bis Budget → IRQ wieder scharf. Ersetzt `sleep_ms(1)` und die
   64-Blicke-Spinschleife.
 * audio_hda (IOC-IRQ, braucht MSI statt MSI-X), i2c_hid (GPIO-IRQ), EC (SCI).
+* **Panels abonnieren statt abfragen** (Florian 2026-09-24). `bar` holt alle
+  300 ms `npk_bar_state` (Uhr HH:MM, Arbeitsflaechen, Fenstertitel — unter
+  der Compositor-Sperre), Lautstaerke jede Runde, Akku jede 16. Runde,
+  Groessen alle paar Runden; `dock` die Fensterliste alle 16 ms. Danach
+  wartet `bar` mit `npk_wait` auf: **Deadline zur naechsten vollen Minute**
+  (Uhr) · **Compositor-Ereignis** bei Fokus/Titel/Arbeitsflaeche/Groesse ·
+  **aml** bei geaendertem Akkustand · **Audio** bei geaenderter Lautstaerke.
+  Also rund einmal je Minute statt dreimal je Sekunde, und trotzdem sofort.
+  Dafuer braucht jede Quelle einen Weg, eine Aenderung zu MELDEN — das ist
+  der eigentliche Bauposten, nicht das Warten.
 * **microVM-Netz-Datenebene:** der Worker parkt mit `kick_wait(PARK_SAFETY_MS
   = 2)` und wird gemessen NIE per IRQ geweckt (`cores`, QEMU 2026-09-24:
   `irq=0 timeout=504` je Sekunde) — ein versteckter 500-Hz-Takt auf einem
