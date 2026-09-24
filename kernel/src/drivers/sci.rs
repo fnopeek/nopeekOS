@@ -63,7 +63,16 @@ fn blocks() -> Option<Blocks> {
 /// disables all at init and enables per handler), every status cleared,
 /// `gpe` enabled. Returns the SCI's (GSI, level, active-low). Once only.
 pub fn arm_ec(gpe: u32) -> Option<(u32, bool, bool)> {
+    // Whoever takes the SCI takes the platform into ACPI mode — not the
+    // boot path: with `acpi.legacy = 1` the firmware keeps its events (A/B
+    // for the IdeaPad, where Package power rose 1.9 -> 4.7 W and the Fn
+    // volume keys fell silent after the switch; unproven which it is).
+    if crate::config::get("acpi.legacy").as_deref() == Some("1") {
+        crate::kprintln!("[npk] sci: acpi.legacy = 1 — firmware keeps its events, no SCI");
+        return None;
+    }
     let b = blocks()?;
+    crate::acpi::enable_acpi_mode();
     if gpe >= b.gpe0_half as u32 * 8 { return None; }
     if ARMED.swap(true, Ordering::AcqRel) { return None; }
     EC_GPE.store(gpe, Ordering::Relaxed);
