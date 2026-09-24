@@ -96,6 +96,10 @@ static LEVEL: [core::sync::atomic::AtomicBool; 256] =
 /// masked. The driver unmasks it by `arm`ing it before its first `wait`.
 /// None if the pool is exhausted or no I/O APIC serves the GSI.
 pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<u8> {
+    // Checked first: the vector pool is never freed.
+    if !crate::ioapic::is_free(gsi) {
+        return None;
+    }
     let vector = alloc_vector()?;
     let dest = crate::interrupts::current_apic_id();
     if !crate::ioapic::route(gsi, vector, dest, level, active_low) {

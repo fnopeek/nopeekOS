@@ -184,6 +184,16 @@ impl Tracker {
         self.hold
     }
 
+    /// Wann `tick` wieder laufen muss — solange ein Antippen die Taste
+    /// haelt. None: kein Zeitgeber offen, der Treiber darf auf den naechsten
+    /// Bericht warten.
+    pub fn next_deadline(&self) -> Option<u64> {
+        match self.tap_state {
+            Tap::Held { since } => Some(since + TAP_MS + 1),
+            _ => None,
+        }
+    }
+
     /// Den Zeitgeber weiterdrehen, auch wenn kein Bericht kam.
     ///
     /// **Muss laufen, solange der Treiber laeuft.** Ein Antippen drueckt

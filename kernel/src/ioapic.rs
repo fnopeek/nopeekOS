@@ -51,9 +51,11 @@ struct Override {
 struct State {
     apics: Vec<IoApic>,
     overrides: Vec<Override>,
+    /// GSIs a route has been written for — one owner each.
+    routed: Vec<u32>,
 }
 
-static LOCK: Mutex<State> = Mutex::new(State { apics: Vec::new(), overrides: Vec::new() });
+static LOCK: Mutex<State> = Mutex::new(State { apics: Vec::new(), overrides: Vec::new(), routed: Vec::new() });
 
 // Redirection entry, low dword (io_apic.h `struct IO_APIC_route_entry`).
 const RTE_DELIVERY_SHIFT: u32 = 8; // 3 bits
@@ -248,12 +250,31 @@ fn with_pin<R>(gsi: u32, f: impl FnOnce(&IoApic, u32) -> R) -> Option<R> {
 /// physical destination), left MASKED — `unmask` when the driver is ready.
 /// False if no I/O APIC serves this GSI.
 pub fn route(gsi: u32, vector: u8, dest_apic: u32, level: bool, active_low: bool) -> bool {
-    with_pin(gsi, |a, pin| {
+    crate::interrupts::without_interrupts(|| {
+        let mut st = LOCK.lock();
+        if st.routed.contains(&gsi) {
+            return false; // one owner per line
+        }
+        let Some(a) = st.apics.iter().find(|a| gsi >= a.gsi_base && gsi < a.gsi_base + a.pins).copied()
+        else {
+            return false;
+        };
         let mut lo = vector as u32 | RTE_MASKED;
         if level { lo |= RTE_LEVEL; }
         if active_low { lo |= RTE_ACTIVE_LOW; }
-        write_entry(a, pin, lo, (dest_apic & 0xFF) << 24);
-    }).is_some()
+        write_entry(&a, gsi - a.gsi_base, lo, (dest_apic & 0xFF) << 24);
+        st.routed.push(gsi);
+        true
+    })
+}
+
+/// Is `gsi` served by an I/O APIC and still without an owner?
+pub fn is_free(gsi: u32) -> bool {
+    crate::interrupts::without_interrupts(|| {
+        let st = LOCK.lock();
+        !st.routed.contains(&gsi)
+            && st.apics.iter().any(|a| gsi >= a.gsi_base && gsi < a.gsi_base + a.pins)
+    })
 }
 
 pub fn mask(gsi: u32) {

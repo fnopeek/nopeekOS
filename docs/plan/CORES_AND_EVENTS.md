@@ -252,11 +252,18 @@ Aenderungen MELDEN.
   quittieren wie `snd_hdac_bus_handle_stream_irq`. Ein Aufwachen je
   Ringhaelfte (~43 ms) statt alle 4 ms. CIE bleibt aus: Codec-Verben laufen
   gepollt und nur beim Hochfahren.
-* **i2c_hid — offen, eigener Posten:** der Touchpad-Interrupt kommt ueber
-  den AMD-GPIO-Controller (AMDI0030) und damit ueber den **IOAPIC**, den wir
-  nicht programmieren (bisher alles MSI). Dafuer braucht es einen
-  IOAPIC-Treiber (Redirection-Table, GSI aus `_CRS`/MADT) — erst dann kann
-  i2c_hid auf den GPIO-IRQ warten statt alle 5 ms den Pegel zu lesen.
+* **i2c_hid 0.28.0 + Kernel 0.421.0 — Touchpad per Interrupt.** Der
+  AMD-GPIO-Block (AMDI0030) hat EINE Leitung fuer alle Pins, aus seinem
+  `_CRS`. Neu: `npk_irq_register_gsi(gsi, flags)` (HARDWARE wie
+  `npk_mmio_map_phys`, eine Leitung hat einen Besitzer, der Vektor wird erst
+  nach der Pruefung vergeben). i2c_hid richtet die Pins wie
+  `amd_gpio_irq_set_type` + `amd_gpio_irq_enable` ein, quittiert wie
+  `do_amd_gpio_irq_handler` (Pin zurueckschreiben, dann `EOI_MASK`) und
+  wartet per `npk_wait(WAIT_IRQ)` — die Pegel-Leitung gibt `npk_wait`
+  (`irq::arm`) beim erneuten Warten frei. Frist nur fuer ein offenes
+  Antippen (`GestureTracker::next_deadline`) und die ersten
+  Statistikminuten, hoechstens 1 s. Ohne Pin-Tor oder ohne Leitung bleibt
+  das 5-ms-Raster.
 * **aml — Rechenstoss alle 10 s (gemessen 2026-09-24, `cores`: ein Kern
   92-100 % ohne einen Halt ueber 500 ms).** Jede Runde `heap_reset()` +
   `Namespace::load` der GANZEN DSDT (56 KB AML) + `_BST`/`_BIF` mit vielen

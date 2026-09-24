@@ -2289,6 +2289,14 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_irq_register_gsi(gsi, flags) -> vector | -1 — a non-PCI device's
+    // I/O APIC line (flags: 1 level, 2 active-low). HARDWARE-gated.
+    linker.func_wrap("env", "npk_irq_register_gsi",
+        |mut caller: Caller<'_, HostState>, gsi: i32, flags: i32| -> i32 {
+            host_core::npk_irq_register_gsi(caller.data_mut(), gsi, flags)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_wait(mask, timeout_ms) -> fired bits (0 = timeout). Parks the
     // app's fiber until an input event arrives (mask bit 1) or the timeout
     // passes; timeout < 0 waits without one. See host_core::npk_wait.

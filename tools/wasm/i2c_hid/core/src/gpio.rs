@@ -77,6 +77,37 @@ pub fn pin_window(mmio_base: u32, mmio_len: u32, pin: u16) -> Option<PinWindow> 
     Some(PinWindow { map_base, pages, reg_off })
 }
 
+// ── Interrupts: `pinctrl-amd.{c,h}` ──────────────────────────────────
+//
+// Ein Register je Pin; die Bits aus pinctrl-amd.h. Der Block hat EINE
+// Leitung fuer alle Pins (`_CRS`), und `do_amd_gpio_irq_handler` quittiert
+// zuerst den Pin (das gelesene Register zurueckschreiben loescht die
+// Statusbits) und dann die Einheit (`EOI_MASK` im WAKE_INT_MASTER_REG).
+
+pub const LEVEL_TRIG: u32 = 1 << 8; // LEVEL_TRIG_OFF
+pub const ACTIVE_LEVEL_SHIFT: u32 = 9; // ACTIVE_LEVEL_OFF, 2 bits
+pub const ACTIVE_LEVEL_MASK: u32 = 0x3 << ACTIVE_LEVEL_SHIFT;
+pub const INTERRUPT_ENABLE: u32 = 1 << 11;
+pub const INTERRUPT_MASK: u32 = 1 << 12; // 1 = NOT masked (irq_unmask sets it)
+pub const INTERRUPT_STS: u32 = 1 << 28;
+pub const WAKE_STS: u32 = 1 << 29;
+/// `PIN_IRQ_PENDING`
+pub const PIN_IRQ_PENDING: u32 = INTERRUPT_STS | WAKE_STS;
+/// Relative to the block base.
+pub const WAKE_INT_MASTER_REG: u32 = 0xfc;
+pub const EOI_MASK: u32 = 1 << 29;
+
+/// `amd_gpio_irq_set_type` for a LEVEL line (the only kind HID over I2C
+/// uses): level trigger, the polarity, and `CLR_INTR_STAT` so a status left
+/// from before is cleared. Returns the value WITHOUT the enable bit; the
+/// caller does the debounce-settle dance and then `amd_gpio_irq_enable`.
+pub fn irq_level_config(pin_reg: u32, active_low: bool) -> u32 {
+    let mut v = pin_reg | LEVEL_TRIG;
+    v &= !ACTIVE_LEVEL_MASK;
+    v |= (if active_low { 1 } else { 0 }) << ACTIVE_LEVEL_SHIFT;
+    v | INTERRUPT_STS
+}
+
 /// Sagt der Pin „ich habe etwas"?
 ///
 /// `active_low` kommt aus dem `GpioInt` der Firmware (ACPI: `int_flags`
@@ -97,6 +128,21 @@ pub fn asserted(pin_reg: u32, active_low: bool) -> bool {
 mod tests {
     use super::*;
     use alloc::{string::ToString, vec};
+
+    /// `amd_gpio_irq_set_type(IRQ_TYPE_LEVEL_LOW)`: Pegel, aktiv-niedrig,
+    /// Status loeschen — und die Pull-/Ausgangsbits unangetastet.
+    #[test]
+    fn level_low_config_matches_set_type() {
+        let before = (1 << 20) | (0x2 << ACTIVE_LEVEL_SHIFT); // pull-up, both-edges
+        let v = irq_level_config(before, true);
+        assert_eq!(v & LEVEL_TRIG, LEVEL_TRIG);
+        assert_eq!((v & ACTIVE_LEVEL_MASK) >> ACTIVE_LEVEL_SHIFT, 1);
+        assert_eq!(v & INTERRUPT_STS, INTERRUPT_STS);
+        assert_eq!(v & (1 << 20), 1 << 20, "pull-up bleibt");
+        assert_eq!(v & INTERRUPT_ENABLE, 0, "freigegeben wird erst danach");
+        let hi = irq_level_config(0, false);
+        assert_eq!(hi & ACTIVE_LEVEL_MASK, 0);
+    }
 
     /// Die zwei Pins aus Florians IdeaPad, gegen den ueblichen AMD-Block.
     #[test]

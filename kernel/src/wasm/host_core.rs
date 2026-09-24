@@ -825,8 +825,10 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
         }
         if let Some(hw) = ctx.hw.as_ref() {
             if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
-                // The MSI must wake THIS core; a no-op while it already does.
-                crate::irq::route_to_current(hw.irq_vector);
+                // The interrupt must wake THIS core, and a level line the
+                // ISR masked is released: the driver waits again, so it has
+                // serviced the device (`irq::arm`).
+                let _ = crate::irq::arm(hw.irq_vector);
                 crate::irq::set_waiter(hw.irq_vector, w);
                 sig |= SIG_IRQ;
             }
@@ -1285,6 +1287,29 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     // would otherwise take them all.
     if hw.irq_vector != 0 { return hw.irq_vector as i32; }
     match crate::irq::register(hw.pci_addr, entry as u16) {
+        Some(v) => { hw.irq_vector = v; v as i32 }
+        None => -1,
+    }
+}
+
+/// Register I/O APIC input `gsi` for this driver — the interrupt line of a
+/// device that is not on PCI (the IdeaPad touchpads' GPIO controller, found
+/// in its ACPI `_CRS`). `flags`: bit 0 level-triggered, bit 1 active-low.
+///
+/// Gated like `npk_mmio_map_phys`, whose register window such a driver
+/// needs anyway: HARDWARE, and a bound or mapped device (`ctx.hw`). One
+/// vector per driver, and a GSI that already has an owner (the keyboard,
+/// another driver) is refused by `ioapic::route` — a module cannot take a
+/// line away from its owner. Level lines are one-shot: the kernel ISR masks
+/// them, `npk_wait` unmasks them when the driver waits again.
+pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
+    if hw.irq_vector != 0 { return hw.irq_vector as i32; }
+    if !(0..256).contains(&gsi) { return -1; }
+    match crate::irq::register_gsi(gsi as u32, flags & 1 != 0, flags & 2 != 0) {
         Some(v) => { hw.irq_vector = v; v as i32 }
         None => -1,
     }
