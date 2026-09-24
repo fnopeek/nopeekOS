@@ -41,6 +41,7 @@ pub use gui::{theme, layers};
 // ── Standalone modules ────────────────────────────────────────
 mod interrupts;
 mod irq;
+mod ioapic;
 mod notify;
 mod input;
 mod net;
@@ -152,6 +153,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // APIC timer: if PIT doesn't work (NUC/UEFI-only), use Local APIC for 100Hz ticks.
     // Must be after xhci::init so poll_events_irq can drain USB events.
     interrupts::init_apic_timer();
+    // I/O APIC: found and every non-firmware pin masked; nothing is routed
+    // through it until a driver asks (docs/plan/CORES_AND_EVENTS.md, 3a).
+    ioapic::init();
 
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();

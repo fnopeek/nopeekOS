@@ -4,7 +4,7 @@
 ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
 Wartezustand, `npk_wait`), Stufe 2b/2c = 0.413.0 + wifi_rtl8822ce 0.68.0
 (MSI, WLAN per Interrupt), Stufe 2d (erster Teil) = 0.414.0 + bar 0.10.0 +
-dock 0.7.0 (Panels abonnieren). Rest offen.
+dock 0.7.0 (Panels abonnieren), Stufe 3a = 0.415.0 (I/O APIC). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -300,6 +300,16 @@ ist weg — die Pumpe parkt bis zum fruehesten eigenen Termin (Wachhund 2 s,
 Bericht 1 s, RX-Stille 5 s, ADDBA-Antwort, Sondierung, offene
 Sendequittungen `next_probe_due`, Umsortier-Frist `ro_due_ms`, CSA mit
 10 ms), mindestens 1 ms.
+
+**Gebaut (Stufe 3a, 0.415.0): `kernel/src/ioapic.rs`.** MADT-Typ 1 (I/O
+APIC) und Typ 2 (Interrupt Source Override), Register wie Linux
+(`io_apic_read/write`, hohes Wort zuerst, `__eoi_ioapic_pin`), beim Start
+`clear_IO_APIC_pin` fuer jeden Pin — **ausser SMI- und ExtINT-Pins**: der PIT
+kann auf manchen Maschinen ueber den alten PIC und einen ExtINT-Pin kommen
+(„virtual wire"), bis Stufe 3e den Takt abschafft. `irq::register_gsi` routet
+eine Leitung maskiert auf einen Vektor dieses Kerns; eine PEGEL-Leitung
+maskiert der ISR (`irq::isr`), `irq::arm` gibt sie frei — Linux'
+`IRQF_ONESHOT`. Noch ohne Nutzer; 3b haengt die PS/2-Tastatur daran.
 
 ### 3.5 Kern 0 aufloesen
 
