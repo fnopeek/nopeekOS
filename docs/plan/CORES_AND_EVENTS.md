@@ -243,7 +243,23 @@ Eigentuemer-Fiber statt einer Kernannahme.
     sie gleichen beim Aufwachen ab). Kein IPI noetig — passt zu IF=0.
 * **Epochen-Praeemption in forge.**
 
-### 3.7 Parallel rechnen
+### 3.7 Sichtbarkeit: die Prozessliste IST die Fiberliste
+
+Heute fuehrt `process.rs` eine zweite Buchhaltung neben den Fibern, und nur
+drei Wege tragen dort ein: WASM-Apps, Terminalfenster, Intents auf einem
+Worker. Unsichtbar sind Kern-0-Intents, die microVM samt ihrer vCPU-Fiber
+(Florian 2026-09-24: YouTube laeuft mit Ton, `top` zeigt nichts) und alle
+Kernel-Fiber (Netz-Datenebene, fetch-, GPU-, 9p-Worker).
+
+Ziel: **jeder Fiber traegt beim Anlegen einen Namen** und ist damit ein
+Eintrag — Kern, Zustand (laeuft / wartet worauf: IRQ, Deadline, Postfach),
+Rechenzeit, Aufwachungen und deren Ursache. `top` liest diese Liste und
+dazu je Kern: Last, Aufwachungen/s nach Ursache (Timer, IRQ, IPI),
+IRQs je Geraet, Timer-Modus. Die Abfrage per `npk_sys_info`-Schluessel
+(eine Zahl je Aufruf) wird durch eine Momentaufnahme in einem Zug ersetzt.
+Gebaut mit Stufe 2 (der Wartezustand ist dann einer und benennbar).
+
+### 3.8 Parallel rechnen
 
 `par_for(n, f)` ueber die Kerne (Fork-Join mit Postfaechern): Rastern in
 Streifen, BLAKE3 als Baum, AES-GCM je Block-Bereich.
@@ -281,6 +297,7 @@ Beim jeweiligen Schritt verifizieren, nicht blind loeschen.
 | xHCI-/PS/2-Drain im Timer-ISR | 3 | MSI-X / eigener IRQ |
 | `FiberState::{Sleeping, WaitingIrq, WaitingKick}` + `NET_KICK_GEN` | 2 | `Waiting{mask}` + Postfach |
 | `npk_input_wait` als HLT-Schleife | 2 | `npk_wait` |
+| `process.rs` als zweite Buchhaltung neben den Fibern, `npk_sys_info`-Einzelabfragen in `top` | 2 | Fiberliste + Momentaufnahme |
 | `npk_sleep`-Pollschleifen in den Modulen | 2 | `npk_wait` + IRQ |
 | `pump_peers` (Fiber aus einem Intent heraus pumpen) | 2/3 | Intents als Fiber |
 | WLAN-Kern-Sonderregel, `least_loaded`, `NATIVE_BUSY` | 2/4 | Scheduler mit Wake-Platzierung |
