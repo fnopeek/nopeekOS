@@ -117,9 +117,21 @@ pub fn init() {
 }
 
 /// Are all TSCs one clock? Measured once the workers idle, by the same wake
-/// round trip `cores` uses. A notebook showed every worker 1.73 s AHEAD of
-/// core 0, constant over minutes — this line says whether that is so from
-/// boot on (firmware) or appears later (something writes a TSC at runtime).
+/// round trip `cores` uses (±half the round trip).
+///
+/// The IdeaPad (Ryzen) comes up with every AP 1.73 s AHEAD of core 0 —
+/// the APs agree with each other to the microsecond, constant over minutes,
+/// ~the same value on every boot: firmware leaves core 0's TSC behind. The
+/// kernel compares TSC stamps across cores everywhere (`ticks()`, halt
+/// accounting, anything a worker stamps and core 0 reads), so a fixed
+/// offset is a wrong clock, not a cosmetic one.
+///
+/// Linux has no answer we want: without TSC_ADJUST (AMD) it marks the TSC
+/// unstable and falls back to HPET, and our tickless design stands on the
+/// TSC. Since the APs agree among themselves, core 0 is the odd one out: it
+/// is moved ONCE, here, by writing IA32_TSC (MSR 0x10) forward. Anything
+/// stamped earlier on core 0 only looks older (uptime +1.7 s); deadlines
+/// already passed simply fire.
 fn log_tsc_sync(online: usize) {
     let t0 = crate::interrupts::rdtsc();
     let settle = crate::interrupts::tsc_freq() / 20; // 50 ms for the APs to park
@@ -127,8 +139,49 @@ fn log_tsc_sync(online: usize) {
         core::hint::spin_loop();
     }
     let per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1) as i64;
+    let (lo, hi, n, best) = measure_offsets(online);
+    if n == 0 {
+        kprintln!("[npk] tsc: sync not measured (no AP answered)");
+        return;
+    }
+    kprintln!("[npk] tsc: {} APs vs core 0: min {:+} us, max {:+} us",
+        n, lo / per_us, hi / per_us);
+
+    // Correct only a real, uniform offset: the APs must agree with each
+    // other (else there is no single clock to join), and the offset must be
+    // well above the measurement's own error.
+    let (off, rt) = best;
+    let agree = (hi - lo) <= 100 * per_us;
+    if !agree || off.unsigned_abs() <= 100 * per_us as u64 || off < 0 {
+        if !agree {
+            kprintln!("[npk] tsc: APs disagree among themselves — left as is");
+        }
+        return;
+    }
+    // The offset was taken against the midpoint of the round trip, so it
+    // carries ±rt/2; the smallest round trip is the best estimate.
+    let _ = rt;
+    crate::interrupts::without_interrupts(|| {
+        let now = crate::interrupts::rdtsc().wrapping_add(off as u64);
+        // SAFETY: IA32_TSC (MSR 0x10) is architectural on x86_64 and
+        // writable at CPL 0; it moves only this core's (core 0's) counter.
+        // Interrupts are off, so nothing on this core sees the jump halfway.
+        unsafe {
+            core::arch::asm!("wrmsr", in("ecx") 0x10u32,
+                in("eax") now as u32, in("edx") (now >> 32) as u32,
+                options(nostack, preserves_flags));
+        }
+    });
+    let (lo2, hi2, _, _) = measure_offsets(online);
+    kprintln!("[npk] tsc: core 0 moved {:+} us to join the APs — now min {:+} us, max {:+} us",
+        off / per_us, lo2 / per_us, hi2 / per_us);
+}
+
+/// (min, max, answered, (offset, round trip) with the smallest round trip),
+/// all in TSC cycles, of every AP against core 0.
+fn measure_offsets(online: usize) -> (i64, i64, usize, (i64, u64)) {
     let (mut lo, mut hi, mut n) = (i64::MAX, i64::MIN, 0usize);
-    let (mut lo_c, mut hi_c) = (0usize, 0usize);
+    let mut best = (0i64, u64::MAX);
     for c in 1..=online {
         let mut got = None;
         for _ in 0..1000 {
@@ -136,19 +189,14 @@ fn log_tsc_sync(online: usize) {
             if got.is_some() { break; }
             core::hint::spin_loop();
         }
-        if let Some((off, _)) = got {
-            let us = off / per_us;
-            if us < lo { lo = us; lo_c = c; }
-            if us > hi { hi = us; hi_c = c; }
+        if let Some((off, rt)) = got {
+            lo = lo.min(off);
+            hi = hi.max(off);
+            if rt < best.1 { best = (off, rt); }
             n += 1;
         }
     }
-    if n == 0 {
-        kprintln!("[npk] tsc: sync not measured (no AP answered)");
-    } else {
-        kprintln!("[npk] tsc: {} APs vs core 0: min {:+} us (core {}), max {:+} us (core {})",
-            n, lo, lo_c, hi, hi_c);
-    }
+    (lo, hi, n, best)
 }
 
 /// Read Local APIC base from MSR 0x1B
