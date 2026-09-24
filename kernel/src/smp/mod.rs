@@ -112,6 +112,42 @@ pub fn init() {
 
         kprintln!("[npk] smp: scheduler ready (shared inbox, tickless workers: {} timer + wake IPI)",
             if crate::interrupts::has_tsc_deadline() { "TSC-deadline" } else { "one-shot" });
+        log_tsc_sync(online as usize);
+    }
+}
+
+/// Are all TSCs one clock? Measured once the workers idle, by the same wake
+/// round trip `cores` uses. A notebook showed every worker 1.73 s AHEAD of
+/// core 0, constant over minutes — this line says whether that is so from
+/// boot on (firmware) or appears later (something writes a TSC at runtime).
+fn log_tsc_sync(online: usize) {
+    let t0 = crate::interrupts::rdtsc();
+    let settle = crate::interrupts::tsc_freq() / 20; // 50 ms for the APs to park
+    while crate::interrupts::rdtsc().wrapping_sub(t0) < settle {
+        core::hint::spin_loop();
+    }
+    let per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1) as i64;
+    let (mut lo, mut hi, mut n) = (i64::MAX, i64::MIN, 0usize);
+    let (mut lo_c, mut hi_c) = (0usize, 0usize);
+    for c in 1..=online {
+        let mut got = None;
+        for _ in 0..1000 {
+            got = per_core::tsc_offset(c);
+            if got.is_some() { break; }
+            core::hint::spin_loop();
+        }
+        if let Some((off, _)) = got {
+            let us = off / per_us;
+            if us < lo { lo = us; lo_c = c; }
+            if us > hi { hi = us; hi_c = c; }
+            n += 1;
+        }
+    }
+    if n == 0 {
+        kprintln!("[npk] tsc: sync not measured (no AP answered)");
+    } else {
+        kprintln!("[npk] tsc: {} APs vs core 0: min {:+} us (core {}), max {:+} us (core {})",
+            n, lo, lo_c, hi, hi_c);
     }
 }
 
