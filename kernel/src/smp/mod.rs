@@ -118,14 +118,8 @@ pub fn init() {
 }
 
 /// Deep idle by default where the CPU offers it (AMD Zen on bare metal,
-/// with ARAT). Measured on the IdeaPad (Ryzen), 60-s windows between counter
-/// updates (0.430.3): C1 4.34 W package, **Base+2 3.86 W** (-0.5 W). A first
-/// 10-s measurement said 1.81 W and was wrong: the SMU writes the energy
-/// counter in lumps, rarer the deeper the package sleeps. Base+1 showed no
-/// gain. Netbench and audio unchanged. `power cstate off` for the session.
-/// Which port is the deepest belongs to ACPI `_CST` (Linux `acpi_idle`);
-/// until aml passes it through, Base+2 is the measured answer — the usual
-/// AMD `_CST` lists C2 = Base+1 and C3 = Base+2.
+/// with ARAT): CStateBaseAddr+2. The deepest port belongs to ACPI `_CST`
+/// (Linux `acpi_idle`); until aml passes it through, +2 is the usual C3.
 fn enable_deep_idle() {
     let Some(base) = per_core::amd_cstate_base() else { return };
     match crate::interrupts::set_deep_idle(base + 2, 200) {
@@ -135,22 +129,11 @@ fn enable_deep_idle() {
     }
 }
 
-/// Are all TSCs one clock? Measured once the workers idle, by the same wake
-/// round trip `cores` uses (±half the round trip).
-///
-/// The IdeaPad (Ryzen) comes up with every AP 1.73 s AHEAD of core 0 —
-/// the APs agree with each other to the microsecond, constant over minutes,
-/// ~the same value on every boot: firmware leaves core 0's TSC behind. The
-/// kernel compares TSC stamps across cores everywhere (`ticks()`, halt
-/// accounting, anything a worker stamps and core 0 reads), so a fixed
-/// offset is a wrong clock, not a cosmetic one.
-///
-/// Linux has no answer we want: without TSC_ADJUST (AMD) it marks the TSC
-/// unstable and falls back to HPET, and our tickless design stands on the
-/// TSC. Since the APs agree among themselves, core 0 is the odd one out: it
-/// is moved ONCE, here, by writing IA32_TSC (MSR 0x10) forward. Anything
-/// stamped earlier on core 0 only looks older (uptime +1.7 s); deadlines
-/// already passed simply fire.
+/// Measure every AP's TSC against core 0 (wake round trip, ±rt/2) once the
+/// APs are parked. Firmware may leave core 0 behind; since the kernel
+/// compares TSC stamps across cores, a uniform offset is corrected once by
+/// writing IA32_TSC on core 0. Linux instead marks the TSC unstable without
+/// TSC_ADJUST (AMD) — not an option for a tickless kernel built on the TSC.
 fn log_tsc_sync(online: usize) {
     let t0 = crate::interrupts::rdtsc();
     let settle = crate::interrupts::tsc_freq() / 20; // 50 ms for the APs to park
