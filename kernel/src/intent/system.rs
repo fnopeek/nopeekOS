@@ -385,6 +385,10 @@ pub fn intent_power(args: &str) {
         power_cstate(rest.trim());
         return;
     }
+    if let Some(rest) = args.strip_prefix("trace") {
+        power_trace(rest.trim());
+        return;
+    }
 
     // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
     // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
@@ -444,6 +448,67 @@ pub fn intent_power(args: &str) {
     kprintln!("  Vergleich: 'battery' nennt die Entnahme des AKKUS (Gesamt-");
     kprintln!("  system). Die Differenz ist alles, was nicht die CPU ist —");
     kprintln!("  Bildschirm, PCIe-Links, NVMe, USB, WLAN, Audio.");
+    kprintln!();
+}
+
+/// `power trace [s]` — package power every 100 ms, with the wakes of every
+/// core in the same slice. A short window read lower than a long one on the
+/// IdeaPad (1 s 2.2 W, 10 s 3.1 W): a periodic burst the short window
+/// misses. The period and the cores awake in the burst name its source.
+fn power_trace(arg: &str) {
+    let secs: usize = arg.parse().unwrap_or(10).clamp(1, 30);
+    let n = secs * 10;
+    let cores = crate::smp::per_core::core_count().min(64);
+    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+    let slice = tsc_hz / 10;
+    let mut mw = alloc::vec![0u32; n];
+    let mut wakes = alloc::vec![[0u16; 64]; n];
+    let count = |c: usize| crate::smp::per_core::halt_snapshot(c).1;
+    let mut last_e = crate::smp::per_core::rapl_pkg_raw();
+    let mut last_w: [u64; 64] = [0; 64];
+    for c in 0..cores { last_w[c] = count(c); }
+    let mut t = crate::interrupts::rdtsc();
+    for i in 0..n {
+        let d = t + slice;
+        while crate::interrupts::rdtsc() < d {
+            crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        }
+        let now = crate::interrupts::rdtsc();
+        let e = crate::smp::per_core::rapl_pkg_raw();
+        let us = (now - t) / (tsc_hz / 1_000_000).max(1);
+        mw[i] = crate::smp::per_core::rapl_mw(e.wrapping_sub(last_e), us) as u32;
+        last_e = e;
+        for c in 0..cores {
+            let w = count(c);
+            wakes[i][c] = (w - last_w[c]).min(u16::MAX as u64) as u16;
+            last_w[c] = w;
+        }
+        t = now;
+    }
+    kprintln!();
+    kprintln!("  Package je 100 ms (mW), eine Zeile je Sekunde:");
+    for s in 0..secs {
+        let mut line = alloc::string::String::new();
+        for k in 0..10 {
+            line.push_str(&alloc::format!("{:>5}", mw[s * 10 + k]));
+        }
+        kprintln!("  {:>2}s {}", s, line);
+    }
+    // The five highest slices, and which cores woke in them.
+    let mut idx: alloc::vec::Vec<usize> = (0..n).collect();
+    idx.sort_by(|a, b| mw[*b].cmp(&mw[*a]));
+    let mut sorted = mw.clone();
+    sorted.sort();
+    kprintln!();
+    kprintln!("  Median {} mW · Minimum {} mW", sorted[n / 2], sorted[0]);
+    kprintln!("  Die fuenf hoechsten Scheiben (Kern:Aufwachungen):");
+    for &i in idx.iter().take(5) {
+        let mut who = alloc::string::String::new();
+        for c in 0..cores {
+            if wakes[i][c] > 0 { who.push_str(&alloc::format!(" {}:{}", c, wakes[i][c])); }
+        }
+        kprintln!("    {:>5} ms  {:>5} mW  {}", i * 100, mw[i], who);
+    }
     kprintln!();
 }
 
