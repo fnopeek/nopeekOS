@@ -254,7 +254,27 @@ pub extern "C" fn _start() {
 
     let mut round = 0u32;
     let mut last = i32::MIN;
+    // Wann der Akku das naechste Mal dran ist (TSC). Ein SCI allein ist
+    // KEIN Grund zu arbeiten: der EC meldet sein GPE auch nach jedem eigenen
+    // Lese-/Schreibvorgang, und wer darauf den Akku liest, weckt sich selbst
+    // — auf dem IdeaPad 60x je Sekunde, ein Kern auf 100 %. Gearbeitet wird
+    // nur bei SCI_EVT (ein echtes Ereignis) oder wenn der Akku faellig ist.
+    let tsc_per_ms = (unsafe { npk_sys_info(10) } as u64).max(1) * 1000;
+    let now = || unsafe { npk_sys_info(19) } as u64;
+    let mut battery_due = 0u64;
+    let mut work = true;
     loop {
+        if !work {
+            unsafe { npk_wait(WAIT_IRQ, 10_000) };
+            let fired = unsafe { npk_sci_service() };
+            if fired > 0 && (fired >> 16) & 0x100 != 0 {
+                logln("[aml] power button (PM1 PWRBTN_STS)");
+            }
+            work = (fired > 0 && fired & 2 != 0) || now() >= battery_due;
+            continue;
+        }
+        work = sci_vec <= 0;
+        battery_due = now() + 10_000 * tsc_per_ms;
         round += 1;
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
@@ -281,16 +301,7 @@ pub extern "C" fn _start() {
                     i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32)
             };
         }
-        if sci_vec > 0 {
-            // Wake on the SCI (the wait also unmasks it), at the latest
-            // after 10 s for the battery; then ack before draining, so an
-            // event that arrives meanwhile fires again.
-            unsafe { npk_wait(WAIT_IRQ, 10_000) };
-            let fired = unsafe { npk_sci_service() };
-            if fired > 0 && (fired >> 16) & 0x100 != 0 {
-                logln("[aml] power button (PM1 PWRBTN_STS)");
-            }
-        } else {
+        if sci_vec <= 0 {
             unsafe { npk_sleep(10_000) };
         }
     }
