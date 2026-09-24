@@ -1,7 +1,8 @@
 # Kerne und Ereignisse — der Umbau vom Takt zum Ereignis
 
-**Stand:** 2026-09-24. Stufe 0 = Kernel 0.410.0, Stufe 1 = Kernel 0.411.0
-(Worker ohne Takt). Stufen 2-5 offen.
+**Stand:** 2026-09-24. Stufe 0 = Kernel 0.410.0, Stufe 1 = 0.411.x (Worker
+ohne Takt, HW + QEMU bestaetigt), Stufe 2a = 0.412.0 (Weckgriffe, ein
+Wartezustand, `npk_wait`). Rest offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -198,6 +199,21 @@ Kontextwechsel bleibt kooperativ und billig.
 * WASM: `npk_wait(mask, timeout_ms)` + `npk_irq_*` wie gehabt. `npk_sleep(n)`
   bleibt als Sonderfall `wait({}, n)`.
 
+**Gebaut (Stufe 2a, 0.412.0):** jeder Fiber hat einen **Weckgriff**
+(`fiber::Waker`, Tabelle mit 1024 Plaetzen: Signalbits + Kern). `signal(w,
+bits)` setzt Bits und weckt den Kern (`wake_core`, IPI falls er schlaeft) —
+lockfrei, auch aus dem ISR. `fiber::wait(mask, deadline)` ist der EINE
+Wartezustand `Waiting{mask, deadline}`; `Sleeping`, `WaitingIrq`,
+`WaitingKick` sind weg. `irq_wait` meldet sich beim Vektor an
+(`irq::set_waiter`), `note_fired` signalisiert `SIG_IRQ`; `kick_wait_until`
+meldet sich je Kern an (`KICK_WAITER`), `net_kick_bump` signalisiert
+`SIG_KICK`. `widgets::push_event` und `wasm::push_app_key` signalisieren
+`SIG_EVENT` an die App, die das Fenster/Terminal liest. **`npk_wait(mask,
+timeout_ms)`** fuer Module (Bit 1 = Eingabe; < 0 = ohne Frist, 0 = Frist);
+`npk_input_wait` (`top`) laeuft darueber. Die Module selbst (`dock`, `bar`, …)
+sind noch nicht umgestellt — das ist Stufe 2d, zusammen mit den Quellen, die
+Aenderungen MELDEN.
+
 ### 3.4 Geraete
 
 * **xHCI ueber MSI-X** → Eingabe-Fiber; Maus und Tastatur kommen per
@@ -312,8 +328,8 @@ Beim jeweiligen Schritt verifizieren, nicht blind loeschen.
 | ~~Worker-100-Hz-Timer periodisch, `arm_worker_wake_in`/`restore_worker_reload`~~ | 1 ✓ | `halt_until` + one-shot |
 | `set_worker_poll_hz` (jetzt nur noch Weckperiode von `worker_idle_hlt`) | 2 | NAPI |
 | xHCI-/PS/2-Drain im Timer-ISR | 3 | MSI-X / eigener IRQ |
-| `FiberState::{Sleeping, WaitingIrq, WaitingKick}` + `NET_KICK_GEN` | 2 | `Waiting{mask}` + Postfach |
-| `npk_input_wait` als HLT-Schleife | 2 | `npk_wait` |
+| ~~`FiberState::{Sleeping, WaitingIrq, WaitingKick}`~~ | 2a ✓ | `Waiting{mask, deadline}` + Weckgriff |
+| ~~`npk_input_wait` als HLT-Schleife~~ | 2a ✓ | Fiber-Park, Taste signalisiert |
 | `process.rs` als zweite Buchhaltung neben den Fibern, `npk_sys_info`-Einzelabfragen in `top` | 2 | Fiberliste + Momentaufnahme |
 | `npk_sleep`-Pollschleifen in den Modulen | 2 | `npk_wait` + IRQ |
 | `pump_peers` (Fiber aus einem Intent heraus pumpen) | 2/3 | Intents als Fiber |

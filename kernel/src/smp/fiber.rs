@@ -18,7 +18,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Saved execution context. Only `rsp` lives here — the callee-saved
@@ -114,7 +114,7 @@ pub const DEFAULT_STACK_BYTES: usize = 128 * 1024;
 // ── Per-core fiber scheduler (Stage 2b) ────────────────────────────────
 //
 // Each app is a fiber pinned to the core that admitted it. `npk_sleep`
-// parks the running fiber (Sleeping + a TSC wake-deadline) and switches
+// parks the running fiber (Waiting + a TSC wake-deadline) and switches
 // back to the core's scheduler context, FREEING the core to run its other
 // ready fibers. So dock+bar+loft+spell multiplex over a couple of workers
 // instead of pinning a core each or nesting. No fiber migrates between
@@ -125,19 +125,131 @@ const MAX_CORES: usize = 256;
 #[derive(Clone, Copy, PartialEq)]
 enum FiberState {
     Ready,
-    Sleeping(u64), // resume once rdtsc() >= deadline
-    /// Parked on a device IRQ (`crate::irq`): resume once the vector's
-    /// fired-count moves past `since`, or `deadline` (timeout) passes. The
-    /// IRQ wakes this core out of HLT, so the scheduler re-runs and resumes
-    /// here with ~no latency — no polling.
-    WaitingIrq { vector: u8, since: u64, deadline: u64 },
-    /// Parked until this core's net-kick generation moves past `gen` (an
-    /// off-vCPU producer injected + kicked us), or `deadline` (timeout) passes.
-    /// The kick's IPI wakes this core out of HLT, so the scheduler re-runs and
-    /// resumes here in ~µs instead of waiting on the next timer tick — the
-    /// cold-start fix for the inject pipeline.
-    WaitingKick { kgen: u64, deadline: u64 },
+    /// Parked until one of `mask`'s signal bits is set on the fiber's waker
+    /// (`signal`), or TSC `deadline` passes (`NO_DEADLINE` = never). The ONE
+    /// wait state: a sleep is a wait with an empty mask, an IRQ wait is
+    /// `SIG_IRQ` (the ISR signals the waiter), a net kick is `SIG_KICK`.
+    Waiting { mask: u32, deadline: u64 },
     Done,
+}
+
+pub const NO_DEADLINE: u64 = u64::MAX;
+
+// ── Wakers: how anything reaches a parked fiber ────────────────────────
+//
+// A fiber lives in its core's queue; nobody else can touch it. What another
+// core, an ISR or Core 0 CAN touch is its waker — a slot with signal bits
+// and the core the fiber lives on. `signal` sets bits and wakes that core
+// (IPI if it is halted); the core's scheduler sees the bits and resumes the
+// fiber. Before this, every such wake was a poll: a deadline the fiber
+// set itself, re-checked on a tick.
+
+/// A window event or a terminal key is waiting for the app.
+pub const SIG_EVENT: u32 = 1 << 0;
+/// The device IRQ this fiber waits on fired.
+pub const SIG_IRQ: u32 = 1 << 1;
+/// This core's net-kick generation advanced.
+pub const SIG_KICK: u32 = 1 << 2;
+
+pub type Waker = u32;
+pub const NO_WAKER: Waker = u32::MAX;
+const MAX_WAKERS: usize = 1024;
+
+struct WakerSlot {
+    signals: core::sync::atomic::AtomicU32,
+    core: core::sync::atomic::AtomicU32,
+    used: core::sync::atomic::AtomicBool,
+}
+
+static WAKERS: [WakerSlot; MAX_WAKERS] = [const {
+    WakerSlot {
+        signals: core::sync::atomic::AtomicU32::new(0),
+        core: core::sync::atomic::AtomicU32::new(0),
+        used: core::sync::atomic::AtomicBool::new(false),
+    }
+}; MAX_WAKERS];
+
+fn alloc_waker(cid: usize) -> Waker {
+    for (i, w) in WAKERS.iter().enumerate() {
+        if w.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            w.signals.store(0, Ordering::Relaxed);
+            w.core.store(cid as u32, Ordering::Release);
+            return i as Waker;
+        }
+    }
+    NO_WAKER // table full: the fiber can still sleep, just not be signalled
+}
+
+fn free_waker(w: Waker) {
+    if let Some(slot) = WAKERS.get(w as usize) {
+        slot.signals.store(0, Ordering::Relaxed);
+        slot.used.store(false, Ordering::Release);
+    }
+}
+
+fn pending(w: Waker, mask: u32) -> bool {
+    WAKERS.get(w as usize).is_some_and(|s| s.signals.load(Ordering::Acquire) & mask != 0)
+}
+
+/// Set `bits` on waker `w` and wake the core its fiber lives on. Callable
+/// from any core and from interrupt context (lock-free).
+pub fn signal(w: Waker, bits: u32) {
+    let Some(slot) = WAKERS.get(w as usize) else { return };
+    if !slot.used.load(Ordering::Acquire) {
+        return;
+    }
+    slot.signals.fetch_or(bits, Ordering::SeqCst);
+    crate::smp::per_core::wake_core(slot.core.load(Ordering::Relaxed) as usize);
+}
+
+/// The running fiber's waker, or None outside a fiber.
+pub fn current_waker() -> Option<Waker> {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return None;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return None;
+    }
+    // SAFETY: f is the running fiber.
+    let w = unsafe { (*f).waker };
+    (w != NO_WAKER).then_some(w)
+}
+
+/// Park the running fiber until a bit of `mask` is signalled or TSC
+/// `deadline` passes. Returns the signalled bits it consumed (0 = deadline),
+/// or None when not running inside a fiber — the caller then waits another
+/// way. Bits already set return at once, so a signal that raced ahead of
+/// the park is not lost.
+pub fn wait(mask: u32, deadline: u64) -> Option<u32> {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return None;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
+    let f = unsafe { CURRENT_FIBER[cid] };
+    if f.is_null() {
+        return None;
+    }
+    // SAFETY: f is the running fiber (owned by run_core_fibers' frame).
+    let w = unsafe { (*f).waker };
+    let take = |w: Waker| -> u32 {
+        WAKERS.get(w as usize)
+            .map_or(0, |s| s.signals.fetch_and(!mask, Ordering::AcqRel) & mask)
+    };
+    let got = take(w);
+    if got != 0 {
+        return Some(got);
+    }
+    // SAFETY: as above — park, switch to the scheduler; it resumes us when a
+    // bit of `mask` is set or the deadline passes.
+    unsafe {
+        (*f).state = FiberState::Waiting { mask, deadline };
+        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    }
+    Some(take(w))
 }
 
 /// Per-core scheduler-loop context: saved on `switch` INTO a fiber,
@@ -151,7 +263,7 @@ static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
 static mut CURRENT_FIBER: [*mut Fiber; MAX_CORES] =
     [core::ptr::null_mut(); MAX_CORES];
 
-/// Per-core run queue (Ready + Sleeping fibers). Only the owning core
+/// Per-core run queue (Ready + Waiting fibers). Only the owning core
 /// touches it; the lock guards a possible Stage-5 ISR-driven wakeup and is
 /// NEVER held across a `switch`.
 static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
@@ -177,6 +289,7 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
+    fiber.waker = alloc_waker(cid);
     FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
     // A fiber placed on ANOTHER core (the microVM's AP vCPUs, the fetch /
@@ -253,12 +366,8 @@ pub fn run_core_fibers(cid: usize) {
             let mut q = FIBER_QUEUES[cid].lock();
             let idx = q.iter().position(|f| match f.state {
                 FiberState::Ready => true,
-                FiberState::Sleeping(d) => now >= d,
-                FiberState::WaitingIrq { vector, since, deadline } => {
-                    crate::irq::fired_count(vector) != since || now >= deadline
-                }
-                FiberState::WaitingKick { kgen, deadline } => {
-                    net_kick_gen(cid) != kgen || now >= deadline
+                FiberState::Waiting { mask, deadline } => {
+                    now >= deadline || pending(f.waker, mask)
                 }
                 FiberState::Done => false,
             });
@@ -281,6 +390,7 @@ pub fn run_core_fibers(cid: usize) {
 
         if fiber.state == FiberState::Done {
             FIBER_COUNT[cid].fetch_sub(1, Ordering::Relaxed);
+            free_waker(fiber.waker);
             drop(fiber); // _start returned → free the stack
         } else {
             FIBER_QUEUES[cid].lock().push_back(fiber);
@@ -305,38 +415,23 @@ pub fn earliest_deadline(cid: usize) -> Option<u64> {
         .filter_map(|f| match f.state {
             // Due now: a fiber admitted after `run_core_fibers` returned.
             FiberState::Ready => Some(0),
-            FiberState::Sleeping(d) => Some(d),
-            FiberState::WaitingIrq { deadline, .. } => Some(deadline),
-            FiberState::WaitingKick { deadline, .. } => Some(deadline),
+            // Signalled but not yet resumed: due now. A signal from another
+            // core that raced this core into its idle path lands here.
+            FiberState::Waiting { mask, .. } if pending(f.waker, mask) => Some(0),
+            FiberState::Waiting { deadline, .. } if deadline != NO_DEADLINE => Some(deadline),
+            FiberState::Waiting { .. } => None,
             FiberState::Done => None,
         })
         .min()
 }
 
 /// Park the running fiber for `ms` and yield its core to peer fibers.
-/// Returns (resumes) once the scheduler re-runs it past the deadline.
 /// Returns `false` if not running inside a fiber (caller falls back to an
-/// in-place wait). This is the heart of Stage 2b — called by `npk_sleep`.
+/// in-place wait). Called by `npk_sleep`: a wait with an empty mask.
 pub fn yield_sleep(ms: u64) -> bool {
-    let cid = crate::smp::per_core::current_core_id();
-    if cid >= MAX_CORES {
-        return false;
-    }
-    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
-    let f = unsafe { CURRENT_FIBER[cid] };
-    if f.is_null() {
-        return false;
-    }
     let freq = crate::interrupts::tsc_freq();
     let deadline = crate::interrupts::rdtsc() + ms.saturating_mul(freq / 1000);
-    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Set
-    // its state, then switch back to the core scheduler context. Resumes
-    // here when run_core_fibers switches into it again past the deadline.
-    unsafe {
-        (*f).state = FiberState::Sleeping(deadline);
-        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
-    }
-    true
+    wait(0, deadline).is_some()
 }
 
 /// Yield the running fiber but stay immediately runnable (Ready) — used by
@@ -366,29 +461,26 @@ pub fn yield_ready() -> bool {
 /// moves past `since`) or `timeout_ms` elapses. Returns true if the IRQ
 /// fired, false on timeout (or if not running inside a fiber). The caller
 /// snapshots `since` via `irq::arm(vector)` BEFORE submitting the device
-/// command, so an IRQ racing the park is never lost. The MSI-X targets this
-/// core, so the IRQ itself wakes it from HLT → the scheduler resumes us.
+/// command. The MSI-X targets this core; the ISR signals the registered
+/// waiter (`irq::set_waiter`), which ends the park.
 pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
-    let cid = crate::smp::per_core::current_core_id();
-    if cid >= MAX_CORES {
-        return false;
-    }
-    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here.
-    let f = unsafe { CURRENT_FIBER[cid] };
-    if f.is_null() {
-        return false;
-    }
+    let Some(w) = current_waker() else { return false };
     let freq = crate::interrupts::tsc_freq();
     let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
-    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park
-    // it, switch back to the scheduler; resumes here when the count advances
-    // or the deadline passes.
-    unsafe {
-        (*f).state = FiberState::WaitingIrq { vector, since, deadline };
-        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    // Register BEFORE looking at the count: an IRQ after the look then
+    // signals us, and `wait` returns at once.
+    crate::irq::set_waiter(vector, w);
+    loop {
+        if crate::irq::fired_count(vector) != since {
+            return true;
+        }
+        if crate::interrupts::rdtsc() >= deadline {
+            return false;
+        }
+        if wait(SIG_IRQ, deadline).is_none() {
+            return false;
+        }
     }
-    // Resumed: the IRQ fired iff the count advanced past the snapshot.
-    crate::irq::fired_count(vector) != since
 }
 
 /// Per-core net-kick generation. An off-vCPU producer (the net RX worker)
@@ -412,8 +504,18 @@ pub fn net_kick_bump(cid: usize) {
         // park start in kick_wait_until, read on resume → kick→resume latency.
         let _ = KICK_SENT_TSC[cid].compare_exchange(
             0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+        let w = KICK_WAITER[cid].load(Ordering::Acquire);
+        if w != NO_WAKER {
+            signal(w, SIG_KICK);
+        }
     }
 }
+
+/// The fiber that waits in `kick_wait_until` on each core. ONE per core —
+/// in practice there is one (a vCPU fiber, or the net worker on its reserved
+/// core). A second one would only be resumed by its deadline, and every
+/// kick wait has one of a few milliseconds.
+static KICK_WAITER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
 
 fn net_kick_gen(cid: usize) -> u64 {
     if cid < MAX_CORES { NET_KICK_GEN[cid].load(Ordering::Acquire) } else { 0 }
@@ -475,13 +577,17 @@ pub fn kick_wait_until(deadline: u64) -> bool {
     if f.is_null() {
         return false;
     }
+    // SAFETY: f is the running fiber.
+    let me = unsafe { (*f).waker };
     let kgen = net_kick_gen(cid);
     KICK_SENT_TSC[cid].store(0, Ordering::Relaxed); // probe: measure kicks from here
-    // SAFETY: f is the running fiber (owned by run_core_fibers' frame). Park it,
-    // switch to the scheduler; resumes when the gen advances or the deadline passes.
-    unsafe {
-        (*f).state = FiberState::WaitingKick { kgen, deadline };
-        switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
+    // Register before the loop's look at the generation: a bump after the
+    // look signals us, and `wait` returns at once.
+    KICK_WAITER[cid].store(me, Ordering::Release);
+    while net_kick_gen(cid) == kgen && crate::interrupts::rdtsc() < deadline {
+        if wait(SIG_KICK, deadline).is_none() {
+            break;
+        }
     }
     let woke = net_kick_gen(cid) != kgen;
     if woke {
@@ -522,6 +628,7 @@ extern "C" fn fiber_app_entry(_unused: u64) {
 pub struct Fiber {
     pub ctx: Context,
     state: FiberState,
+    waker: Waker,
     app_func: Option<fn(u64)>,
     app_arg: u64,
     // 16-byte-aligned backing store (Box<[u128]> guarantees align 16, which
@@ -559,6 +666,7 @@ impl Fiber {
         Fiber {
             ctx: Context { rsp: sp0 as u64 },
             state: FiberState::Ready,
+            waker: NO_WAKER,
             app_func: None,
             app_arg: 0,
             _stack: stack,
