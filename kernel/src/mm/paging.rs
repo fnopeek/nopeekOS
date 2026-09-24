@@ -268,10 +268,23 @@ pub fn read_phys_u8(addr: u64) -> Option<u8> {
     Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
 }
 
+/// Serialises every change to the page tables.
+///
+/// All cores share one set of tables, and forge maps from whichever worker
+/// runs the module (`memory.grow`, `Code::map`). `get_or_create` reads an
+/// empty slot, allocates a table and writes it — two cores doing that on the
+/// same slot each install their own table, and the mappings made through the
+/// loser vanish. Code of different modules shares page tables (the code
+/// region grows linearly), so this was not a theoretical overlap.
+///
+/// Never taken from interrupt context; nothing under it maps again.
+static PT_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingError> {
     if vaddr & 0xFFF != 0 || paddr & 0xFFF != 0 {
         return Err(PagingError::NotAligned);
     }
+    let _pt = PT_LOCK.lock();
 
     let pml4 = PML4_PHYS.load(Ordering::Relaxed);
 
@@ -322,6 +335,7 @@ pub fn unmap_page(vaddr: u64) -> Result<u64, PagingError> {
     if vaddr & 0xFFF != 0 {
         return Err(PagingError::NotAligned);
     }
+    let _pt = PT_LOCK.lock();
 
     let pml4 = PML4_PHYS.load(Ordering::Relaxed);
 

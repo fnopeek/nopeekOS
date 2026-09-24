@@ -1,29 +1,27 @@
-//! Work-Stealing Scheduler
+//! Task inbox: where new work waits until a worker core takes it.
 //!
-//! Chase-Lev deque per core (SPMC: Single Producer, Multiple Consumer).
-//! Golden rule: only the OWNER core may push()/pop(). All others steal().
+//! **One multi-producer queue, not a per-core Chase-Lev deque.** The deque
+//! allowed exactly one producer — its owner core — and `spawn` pushed into
+//! `DEQUES[0]` from wherever it was called. Apps spawn from worker cores
+//! (`npk_spawn_module`, `npk_open`, `npk_launch`, `npk_pick`, the microVM AP
+//! fallback), so two concurrent spawns could write the same slot: one task
+//! lost, the other run twice. The per-core deques were never used otherwise
+//! (`spawn_local` had no caller) and cost 256 × 256 slots of static memory.
 //!
-//! Work distribution: BSP pushes to DEQUES[0], idle APs steal from there.
-//! APs that spawn sub-tasks push to their own deque.
-//! Global WORK_AVAILABLE flag wakes all sleeping APs via MONITOR/MWAIT.
+//! Workers take from the inbox in FIFO order. This is the interim form of the
+//! per-core mailbox in `docs/plan/CORES_AND_EVENTS.md` §3.3; waking an idle
+//! core with an IPI comes with the deadline timer (stage 1/2).
 
+use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use spin::Mutex;
 
 // ── Task ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-#[allow(dead_code)]
-pub enum Priority {
-    Background = 0,
-    Normal = 1,
-    Interactive = 2,
-    Critical = 3,
-}
-
+/// A unit of new work. There is no priority: nothing ever read it, and
+/// ordering among runnable work belongs to the per-core fiber scheduler
+/// (`docs/plan/CORES_AND_EVENTS.md`), not to the inbox.
 pub struct Task {
-    pub id: u64,
-    pub priority: Priority,
     pub func: fn(u64),
     pub arg: u64,
     /// Run this task as a stackful FIBER on the worker core (its `func`
@@ -32,181 +30,19 @@ pub struct Task {
     pub is_fiber: bool,
 }
 
-static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
-
-fn alloc_task_id() -> u64 {
-    NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-// ── Per-Core Deque (Chase-Lev) ─────────────────────────────────
-//
-// SPMC: Owner pushes/pops from TAIL, thieves steal from HEAD.
-// push() and pop() are NOT thread-safe against each other from
-// different cores — only the owner core may call them.
-
-const DEQUE_CAPACITY: usize = 256;
-
-#[derive(Clone, Copy)]
-struct TaskSlot {
-    id: u64,
-    priority: u8,
-    func: Option<fn(u64)>,
-    arg: u64,
-    is_fiber: bool,
-}
-
-impl TaskSlot {
-    const EMPTY: Self = TaskSlot { id: 0, priority: 0, func: None, arg: 0, is_fiber: false };
-}
-
-pub struct WorkDeque {
-    buffer: [TaskSlot; DEQUE_CAPACITY],
-    tail: AtomicUsize,
-    head: AtomicUsize,
-}
-
-impl WorkDeque {
-    pub const fn new() -> Self {
-        WorkDeque {
-            buffer: [TaskSlot::EMPTY; DEQUE_CAPACITY],
-            tail: AtomicUsize::new(0),
-            head: AtomicUsize::new(0),
-        }
-    }
-
-    /// Push a task. OWNER CORE ONLY — not thread-safe for multiple pushers.
-    pub fn push(&mut self, task: Task) -> bool {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Acquire);
-
-        if tail.wrapping_sub(head) >= DEQUE_CAPACITY {
-            return false;
-        }
-
-        self.buffer[tail % DEQUE_CAPACITY] = TaskSlot {
-            id: task.id,
-            priority: task.priority as u8,
-            func: Some(task.func),
-            arg: task.arg,
-            is_fiber: task.is_fiber,
-        };
-
-        self.tail.store(tail.wrapping_add(1), Ordering::Release);
-        true
-    }
-
-    /// Pop from tail. OWNER CORE ONLY (LIFO — cache locality).
-    pub fn pop(&mut self) -> Option<Task> {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Relaxed);
-        if tail == head {
-            return None; // Empty
-        }
-
-        let new_tail = tail.wrapping_sub(1);
-        self.tail.store(new_tail, Ordering::Relaxed);
-        core::sync::atomic::fence(Ordering::SeqCst);
-
-        let head = self.head.load(Ordering::Relaxed);
-        if new_tail > head {
-            Some(self.slot_to_task(new_tail))
-        } else if new_tail == head {
-            // Last item — race with thieves
-            if self.head.compare_exchange(
-                head, head.wrapping_add(1),
-                Ordering::SeqCst, Ordering::Relaxed,
-            ).is_ok() {
-                self.tail.store(head.wrapping_add(1), Ordering::Relaxed);
-                Some(self.slot_to_task(new_tail))
-            } else {
-                self.tail.store(head.wrapping_add(1), Ordering::Relaxed);
-                None
-            }
-        } else {
-            self.tail.store(head, Ordering::Relaxed);
-            None
-        }
-    }
-
-    /// Steal from head. Safe to call from ANY core (FIFO — oldest first).
-    pub fn steal(&self) -> Option<Task> {
-        let head = self.head.load(Ordering::Acquire);
-        let tail = self.tail.load(Ordering::Acquire);
-
-        if head >= tail {
-            return None;
-        }
-
-        let slot = self.buffer[head % DEQUE_CAPACITY];
-
-        if self.head.compare_exchange(
-            head, head.wrapping_add(1),
-            Ordering::SeqCst, Ordering::Relaxed,
-        ).is_ok() {
-            slot.func.map(|f| Task {
-                id: slot.id,
-                priority: unsafe { core::mem::transmute(slot.priority) },
-                func: f,
-                arg: slot.arg,
-                is_fiber: slot.is_fiber,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Relaxed);
-        tail.wrapping_sub(head)
-    }
-
-    fn slot_to_task(&self, index: usize) -> Task {
-        let slot = self.buffer[index % DEQUE_CAPACITY];
-        Task {
-            id: slot.id,
-            priority: unsafe { core::mem::transmute(slot.priority) },
-            func: slot.func.unwrap(),
-            arg: slot.arg,
-            is_fiber: slot.is_fiber,
-        }
-    }
-}
-
-unsafe impl Sync for WorkDeque {}
-unsafe impl Send for WorkDeque {}
-
 // ── Global Scheduler State ─────────────────────────────────────
 
-const MAX_CORES: usize = 256;
-
-/// Per-core deques. Index = core_id. Only owner pushes/pops, others steal.
-static mut DEQUES: [WorkDeque; MAX_CORES] = {
-    const EMPTY: WorkDeque = WorkDeque::new();
-    [EMPTY; MAX_CORES]
-};
+/// New work, from any core. Never touched from interrupt context, so the
+/// spin lock needs no IRQ masking.
+static INBOX: Mutex<VecDeque<Task>> = Mutex::new(VecDeque::new());
 
 /// Number of active worker cores (excludes BSP)
 static WORKER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Total tasks spawned (monotonic counter)
 static TASKS_SPAWNED: AtomicU64 = AtomicU64::new(0);
-/// Total tasks completed
-static TASKS_COMPLETED: AtomicU64 = AtomicU64::new(0);
-/// Total steals performed
-static STEALS: AtomicU64 = AtomicU64::new(0);
-
-/// Simple PRNG for random victim selection
-static STEAL_RNG: AtomicU64 = AtomicU64::new(0x5851_F42D_4C95_7F2D);
-
-fn random_core(max_exclusive: usize) -> usize {
-    let mut s = STEAL_RNG.load(Ordering::Relaxed);
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    STEAL_RNG.store(s, Ordering::Relaxed);
-    (s as usize) % max_exclusive
-}
+/// Total tasks taken by a worker
+static TASKS_TAKEN: AtomicU64 = AtomicU64::new(0);
 
 /// Number of worker cores (excludes the BSP).
 pub fn worker_count() -> usize {
@@ -215,123 +51,56 @@ pub fn worker_count() -> usize {
 
 pub fn init(num_workers: usize) {
     WORKER_COUNT.store(num_workers, Ordering::Release);
-    STEAL_RNG.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
 }
 
 // ── Public API ─────────────────────────────────────────────────
 
-/// Spawn a task from BSP (Core 0).
-/// Pushes to BSP's own deque — idle APs will steal it automatically.
-/// This is the ONLY correct way to add work from Core 0.
-pub fn spawn(priority: Priority, func: fn(u64), arg: u64) {
-    spawn_inner(priority, func, arg, false);
+/// Queue a native run-to-completion task (an intent). Callable from any core.
+pub fn spawn(func: fn(u64), arg: u64) {
+    spawn_inner(func, arg, false);
 }
 
 /// Like `spawn`, but the task runs as a stackful FIBER on the worker core
-/// (`smp::fiber::run_app_fiber`). Used for `wasm_worker_task` so apps run
-/// on their own stack and can yield at `npk_sleep` / `npk_event_wait`
-/// instead of pinning the core (Stage 2b). Native intents keep `spawn`.
-pub fn spawn_fiber(priority: Priority, func: fn(u64), arg: u64) {
-    spawn_inner(priority, func, arg, true);
+/// (`smp::fiber`). Used for `wasm_worker_task` so apps run on their own
+/// stack and yield at `npk_sleep` instead of pinning the core.
+pub fn spawn_fiber(func: fn(u64), arg: u64) {
+    spawn_inner(func, arg, true);
 }
 
-fn spawn_inner(priority: Priority, func: fn(u64), arg: u64, is_fiber: bool) {
-    let workers = WORKER_COUNT.load(Ordering::Acquire);
-    if workers == 0 {
+fn spawn_inner(func: fn(u64), arg: u64, is_fiber: bool) {
+    if WORKER_COUNT.load(Ordering::Acquire) == 0 {
         func(arg);
         return;
     }
+    INBOX.lock().push_back(Task { func, arg, is_fiber });
+    TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    // Idle workers pick this up at their next timer wake (see
+    // per_core::smp_ap_entry). An IPI wake comes with stage 2.
+}
 
-    let task = Task {
-        id: alloc_task_id(),
-        priority,
-        func,
-        arg,
-        is_fiber,
-    };
-
-    // Push to BSP's own deque (Core 0 is the owner → safe)
-    // SAFETY: spawn() is called from BSP, DEQUES[0] owner is BSP
-    let pushed = unsafe { DEQUES[0].push(task) };
-    if pushed {
-        TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
-        // Idle workers pick this up at their next 100 Hz worker-timer
-        // tick (≤10 ms) — see per_core::smp_ap_entry. No wake flag needed.
-    } else {
-        func(arg);
+/// Take the oldest waiting task, if any.
+pub fn next_task(_core_id: usize) -> Option<Task> {
+    let t = INBOX.lock().pop_front();
+    if t.is_some() {
+        TASKS_TAKEN.fetch_add(1, Ordering::Relaxed);
     }
+    t
 }
 
-/// Spawn a sub-task from a worker AP. Pushes to the calling core's OWN deque.
-#[allow(dead_code)]
-pub fn spawn_local(core_id: usize, priority: Priority, func: fn(u64), arg: u64) {
-    let task = Task {
-        id: alloc_task_id(),
-        priority,
-        func,
-        arg,
-        is_fiber: false,
-    };
-
-    // SAFETY: core_id is the caller's own core → owner, safe to push
-    let pushed = unsafe { DEQUES[core_id].push(task) };
-    if !pushed {
-        func(arg);
-    }
-}
-
-/// Try to get work: own deque first (pop), then steal from others.
-pub fn next_task(core_id: usize) -> Option<Task> {
-    // Own deque first (LIFO — cache locality)
-    // SAFETY: core_id is caller's own index
-    let task = unsafe { DEQUES[core_id].pop() };
-    if task.is_some() {
-        return task;
-    }
-
-    // Steal from peers (try all cores, random start)
-    let workers = WORKER_COUNT.load(Ordering::Relaxed);
-    let total = workers + 1; // BSP + workers
-    let start = random_core(total);
-    for i in 0..total {
-        let victim = (start + i) % total;
-        if victim == core_id {
-            continue;
-        }
-        // SAFETY: steal() is safe from any core (SPMC consumer side)
-        let stolen = unsafe { DEQUES[victim].steal() };
-        if stolen.is_some() {
-            return stolen;
-        }
-    }
-
-    None
-}
-
-/// Record a completed task (called after task.func returns)
-#[allow(dead_code)]
-pub fn mark_completed() {
-    TASKS_COMPLETED.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Record a successful steal
-#[allow(dead_code)]
-pub fn mark_stolen() {
-    STEALS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Scheduler stats: (spawned, completed, steals, workers, queue_depths)
+/// Scheduler stats: (spawned, taken, steals, workers). `steals` is always 0
+/// since there is nothing left to steal from; the slot stays for the
+/// `npk_sys_info` ABI.
 pub fn stats() -> (u64, u64, u64, usize) {
     (
         TASKS_SPAWNED.load(Ordering::Relaxed),
-        TASKS_COMPLETED.load(Ordering::Relaxed),
-        STEALS.load(Ordering::Relaxed),
+        TASKS_TAKEN.load(Ordering::Relaxed),
+        0,
         WORKER_COUNT.load(Ordering::Relaxed),
     )
 }
 
-/// Per-core queue depth (for top display)
+/// Tasks waiting to be taken. The inbox is global; it is reported on core 0,
+/// where the old per-core view showed all pending work as well.
 pub fn queue_len(core_id: usize) -> usize {
-    if core_id >= MAX_CORES { return 0; }
-    unsafe { DEQUES[core_id].len() }
+    if core_id == 0 { INBOX.lock().len() } else { 0 }
 }

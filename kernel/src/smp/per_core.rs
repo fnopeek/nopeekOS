@@ -204,6 +204,7 @@ static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
 
 pub fn register_bsp(apic_id: u32) {
     CORES.lock().push(CoreInfo { id: 0, apic_id, state: CoreState::Bsp });
+    map_apic(apic_id, 0);
     // Detect MONITOR/MWAIT support via CPUID.01H:ECX bit 3
     let ecx: u32;
     unsafe {
@@ -340,6 +341,7 @@ pub fn rapl_mw(delta_units: u32, window_us: u64) -> u64 {
 pub fn register_ap(apic_id: u32, core_id: u32) {
     let mut cores = CORES.lock();
     cores.push(CoreInfo { id: core_id, apic_id, state: CoreState::Online });
+    map_apic(apic_id, core_id);
     CORE_COUNT.store(cores.len(), Ordering::Release);
 }
 
@@ -366,9 +368,8 @@ pub fn start_scheduler() {
 pub const NO_DEDICATED_CORE: u32 = u32::MAX;
 
 /// Worker core exclusively reserved for the microvm. It is carved out
-/// of the work-stealing pool: it never calls `next_task`, so no task
-/// is ever assigned to it (`spawn` only pushes to BSP's deque; nobody
-/// `spawn_local`s onto it) and the scheduler needs no other change.
+/// of the pool: it never calls `next_task`, so no task is ever assigned
+/// to it and the scheduler needs no other change.
 /// A1 just parks this core (proves the carve-out + stats); A2 runs the
 /// guest VMRESUME/VMRUN loop here so the guest no longer fights Shade
 /// + the shell for Core 0.
@@ -626,8 +627,22 @@ pub fn current_core_id() -> usize {
     // SAFETY: APIC MMIO is identity-mapped. One MMIO read remains (the per-core
     // APIC ID register); the rdmsr VM-exit is gone.
     let apic_id = unsafe { core::ptr::read_volatile((base + 0x20) as *const u32) } >> 24;
-    let cores = CORES.lock();
-    cores.iter().position(|c| c.apic_id == apic_id).unwrap_or(0)
+    // An unregistered id reads as core 0, as the old list search did.
+    APIC_TO_CORE[(apic_id & 0xFF) as usize].load(Relaxed) as usize
+}
+
+/// xAPIC id → sequential core id, filled once per core at registration.
+///
+/// `current_core_id` used to lock `CORES` and search the list on every call —
+/// a global lock and a bouncing cache line on the hottest paths (`poll_rx_only`,
+/// `pump_peers`, every fiber yield). The mapping never changes after boot, so
+/// a table of atomics answers it without either. The xAPIC id register holds
+/// 8 bits, hence 256 entries.
+static APIC_TO_CORE: [core::sync::atomic::AtomicU16; 256] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; 256];
+
+fn map_apic(apic_id: u32, core_id: u32) {
+    APIC_TO_CORE[(apic_id & 0xFF) as usize].store(core_id as u16, Ordering::Release);
 }
 
 /// Enable Hardware P-states (HWP / Speed Shift) on the current core.

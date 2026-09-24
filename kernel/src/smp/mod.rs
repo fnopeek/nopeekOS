@@ -110,7 +110,7 @@ pub fn init() {
         per_core::init_dedicated_vm_core(online as usize);
         per_core::start_scheduler();
 
-        kprintln!("[npk] smp: scheduler ready (work-stealing, HLT idle + per-core 100Hz timer)");
+        kprintln!("[npk] smp: scheduler ready (shared inbox, HLT idle + per-core 100Hz timer)");
     }
 }
 

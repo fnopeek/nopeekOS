@@ -936,7 +936,6 @@ pub fn vm_poll_slice() {
                             apic_id, vec
                         );
                         crate::smp::scheduler::spawn_fiber(
-                            crate::smp::scheduler::Priority::Interactive,
                             ap_vcpu_fiber_task,
                             apic_id as u64,
                         );
