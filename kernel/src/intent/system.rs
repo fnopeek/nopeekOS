@@ -319,8 +319,7 @@ pub fn intent_cores() {
         kprintln!("   core on exit-handling, guest starved -> its '0% CPU' is no time given)");
     }
     kprintln!();
-    // One clock? Firmware can leave core 0's TSC behind (IdeaPad: 1.7-4.1
-    // s, corrected at boot by smp::init); every figure above stands on it.
+    // Every figure above assumes one TSC across cores (smp::init).
     {
         let mut worst = 0i64;
         let mut seen = 0usize;
@@ -385,10 +384,6 @@ pub fn intent_power(args: &str) {
         power_cstate(rest.trim());
         return;
     }
-    if let Some(rest) = args.strip_prefix("trace") {
-        power_trace(rest.trim());
-        return;
-    }
 
     // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
     // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
@@ -405,11 +400,8 @@ pub fn intent_power(args: &str) {
     let (halt0, _) = crate::smp::per_core::halt_snapshot(0);
 
     let deadline = t0 + secs * tsc_hz;
-    // Wie oft hat die Firmware den Zaehler im Fenster fortgeschrieben? Auf
-    // dem IdeaPad (SMU) nur in Klumpen, wenn das Package wach ist — im
-    // tiefen Leerlauf stand er 10 s lang still (0,000 W), und 20 s ergaben
-    // je nach Lage 3,06 oder 1,96 W. Ein Wert aus wenigen Spruengen ist
-    // keine Messung; er wird so gekennzeichnet.
+    // The AMD SMU updates the package counter in lumps, rarer in deep idle:
+    // count the updates, and measure between the first and the last.
     let mut jumps = 0u32;
     let mut last = pkg0;
     // Erste und letzte Fortschreibung: dazwischen ist die Energie ganz
@@ -481,67 +473,6 @@ pub fn intent_power(args: &str) {
     kprintln!();
 }
 
-/// `power trace [s]` — package power every 100 ms, with the wakes of every
-/// core in the same slice. A short window read lower than a long one on the
-/// IdeaPad (1 s 2.2 W, 10 s 3.1 W): a periodic burst the short window
-/// misses. The period and the cores awake in the burst name its source.
-fn power_trace(arg: &str) {
-    let secs: usize = arg.parse().unwrap_or(10).clamp(1, 30);
-    let n = secs * 10;
-    let cores = crate::smp::per_core::core_count().min(64);
-    let tsc_hz = crate::interrupts::tsc_freq().max(1);
-    let slice = tsc_hz / 10;
-    let mut mw = alloc::vec![0u32; n];
-    let mut wakes = alloc::vec![[0u16; 64]; n];
-    let count = |c: usize| crate::smp::per_core::halt_snapshot(c).1;
-    let mut last_e = crate::smp::per_core::rapl_pkg_raw();
-    let mut last_w: [u64; 64] = [0; 64];
-    for c in 0..cores { last_w[c] = count(c); }
-    let mut t = crate::interrupts::rdtsc();
-    for i in 0..n {
-        let d = t + slice;
-        while crate::interrupts::rdtsc() < d {
-            crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
-        }
-        let now = crate::interrupts::rdtsc();
-        let e = crate::smp::per_core::rapl_pkg_raw();
-        let us = (now - t) / (tsc_hz / 1_000_000).max(1);
-        mw[i] = crate::smp::per_core::rapl_mw(e.wrapping_sub(last_e), us) as u32;
-        last_e = e;
-        for c in 0..cores {
-            let w = count(c);
-            wakes[i][c] = (w - last_w[c]).min(u16::MAX as u64) as u16;
-            last_w[c] = w;
-        }
-        t = now;
-    }
-    kprintln!();
-    kprintln!("  Package je 100 ms (mW), eine Zeile je Sekunde:");
-    for s in 0..secs {
-        let mut line = alloc::string::String::new();
-        for k in 0..10 {
-            line.push_str(&alloc::format!("{:>5}", mw[s * 10 + k]));
-        }
-        kprintln!("  {:>2}s {}", s, line);
-    }
-    // The five highest slices, and which cores woke in them.
-    let mut idx: alloc::vec::Vec<usize> = (0..n).collect();
-    idx.sort_by(|a, b| mw[*b].cmp(&mw[*a]));
-    let mut sorted = mw.clone();
-    sorted.sort();
-    kprintln!();
-    kprintln!("  Median {} mW · Minimum {} mW", sorted[n / 2], sorted[0]);
-    kprintln!("  Die fuenf hoechsten Scheiben (Kern:Aufwachungen):");
-    for &i in idx.iter().take(5) {
-        let mut who = alloc::string::String::new();
-        for c in 0..cores {
-            if wakes[i][c] > 0 { who.push_str(&alloc::format!(" {}:{}", c, wakes[i][c])); }
-        }
-        kprintln!("    {:>5} ms  {:>5} mW  {}", i * 100, mw[i], who);
-    }
-    kprintln!();
-}
-
 /// `power cstate` — deep idle, as an experiment you switch on and measure:
 ///   power cstate            show what the CPU offers
 ///   power cstate <n> [us]   idle through CStateBaseAddr+n, only for halts
@@ -565,7 +496,7 @@ fn power_cstate(arg: &str) {
             kprintln!("  aktiv: Port 0x{:x}", p);
         }
         kprintln!();
-        kprintln!("  Vorgabe seit 0.425: Base+2 (gemessen 4,34 -> 3,86 W Package, 60 s).");
+        kprintln!("  Vorgabe: Base+2.");
         kprintln!("  'power cstate <n>' waehlt einen Port, 'power cstate off' zurueck");
         kprintln!("  auf C1 — beides nur bis zum naechsten Neustart.");
         kprintln!();
@@ -938,8 +869,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
     kprintln!("[npk] tables sent ({} bytes, {} tables)", total, n);
 }
 
-/// `ec watch [s]` — read-only look at how firmware events reach us, for
-/// hotkeys that do nothing (brightness on the IdeaPad): is ACPI mode on
+/// `ec watch [s]` — read-only look at how firmware events reach us: is ACPI mode on
 /// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
 /// Nothing is written and no event is taken — aml keeps draining the EC.
 pub fn intent_ec_watch(args: &str) {

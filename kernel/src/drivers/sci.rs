@@ -9,10 +9,6 @@
 //! Order as ACPICA for an EDGE GPE (Linux `ec.c` installs its handler edge-
 //! triggered): clear the status bit first, then handle, so an event that
 //! arrives during the handling sets the bit again and fires again.
-//!
-//! Before this the EC was drained every 10 s, and on the IdeaPad the EC had
-//! dropped a hotkey event by then: `QR_EC` answered 0 while the same query
-//! within 5 ms of SCI_EVT answered 0x1C/0x1D (brightness up/down).
 
 use crate::serial::{inb, inw, outb, outw};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -63,10 +59,8 @@ fn blocks() -> Option<Blocks> {
 /// disables all at init and enables per handler), every status cleared,
 /// `gpe` enabled. Returns the SCI's (GSI, level, active-low). Once only.
 pub fn arm_ec(gpe: u32) -> Option<(u32, bool, bool)> {
-    // Whoever takes the SCI takes the platform into ACPI mode — not the
-    // boot path: with `acpi.legacy = 1` the firmware keeps its events (A/B
-    // for the IdeaPad, where Package power rose 1.9 -> 4.7 W and the Fn
-    // volume keys fell silent after the switch; unproven which it is).
+    // Whoever takes the SCI switches to ACPI mode; `acpi.legacy = 1` keeps
+    // the firmware in legacy mode.
     if crate::config::get("acpi.legacy").as_deref() == Some("1") {
         crate::kprintln!("[npk] sci: acpi.legacy = 1 — firmware keeps its events, no SCI");
         return None;
@@ -98,8 +92,7 @@ pub fn arm_ec(gpe: u32) -> Option<(u32, bool, bool)> {
 /// Ack what raised the SCI. Bit 0: the EC's GPE was set. Bit 1: the EC has
 /// an EVENT to query (status SCI_EVT) — the EC also raises its GPE when a
 /// transaction's output is ready, so bit 0 alone is mostly our own reads
-/// (Linux `ec.c` queries only on SCI_EVT; measured on the IdeaPad: ~60 GPEs
-/// a second, driven by aml's own EC accesses, until this bit was checked).
+/// (Linux `ec.c` queries only on SCI_EVT).
 /// Bits 16..31: the PM1 fixed events that were set AND enabled (bit 8 =
 /// power button).
 pub fn service() -> u32 {

@@ -40,15 +40,7 @@ pub fn init() {
 /// Take the platform out of legacy (SMM) mode into ACPI mode — ACPICA
 /// `acpi_enable` → `acpi_hw_set_mode(ACPI_SYS_MODE_ACPI)`: if PM1_CNT.SCI_EN
 /// is clear, write FADT.ACPI_ENABLE to FADT.SMI_CMD, then poll SCI_EN for up
-/// to 3 s (30000 × 100 us). Before this the firmware kept every event for
-/// itself: on the IdeaPad `ec watch` read SCI_EN 0, and the brightness keys
-/// never reached the OS at all.
-///
-/// Nothing routes the SCI yet (GSI 9 stays masked at the I/O APIC) and every
-/// GPE enable is 0, so the switch alone raises no interrupt; events are
-/// picked up by polling (aml drains the EC). The price, named: a short press
-/// of the power button is an OS event from here on — until something handles
-/// PWRBTN_STS it does nothing (a 4-s press still cuts power in hardware).
+/// to 3 s (30000 × 100 us). Called by `sci::arm_ec`.
 pub fn enable_acpi_mode() {
     let pm1a_cnt = PM1A_CNT_PORT.load(Ordering::Acquire);
     if pm1a_cnt == 0 { return; }
