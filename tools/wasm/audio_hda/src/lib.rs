@@ -593,11 +593,15 @@ pub extern "C" fn _start() {
         if irq {
             // `azx_interrupt` → `snd_hdac_bus_handle_stream_irq`: the
             // stream's bit in INTSTS, then SD_STS cleared with SD_INT_MASK
-            // (write-1-to-clear). A status left set raises no new MSI.
-            // SD_STS is byte 3 of the SD_CTL dword: write CTL back as read.
+            // (write-1-to-clear) — as a BYTE, like Linux' `writeb`.
+            //
+            // 0.4.0 wrote it as the top byte of a 32-bit write to SD_CTL.
+            // QEMU's intel-hda models SD_CTL (3 bytes) and SD_STS (1 byte)
+            // as separate registers, so the status never cleared and every
+            // register update sent another MSI: 21 330 wakes a second, the
+            // sound still playing.
             if mmio_r32(mmio, INTSTS) & (1 << iss) != 0 {
-                let v = mmio_r32(mmio, base + SD_CTL);
-                mmio_w32(mmio, base + SD_CTL, (v & 0x00FF_FFFF) | (SD_INT_MASK << 24));
+                mmio_w8(mmio, base + SD_STS, SD_INT_MASK as u8);
             }
             // **Sleep until the DMA finishes a half.** The poll was every
             // 4 ms — 250 wakes a second, silence included. One half is

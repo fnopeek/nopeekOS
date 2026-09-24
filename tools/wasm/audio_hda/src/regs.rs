@@ -23,6 +23,7 @@ pub const IRS_IRV: u16 = 1 << 1; // immediate result valid (W1C)
 pub const SD_BASE: u32 = 0x80;
 pub const SD_STRIDE: u32 = 0x20;
 pub const SD_CTL: u32 = 0x00; // 3 bytes CTL + 1 byte STS at 0x03 (accessed as u32)
+pub const SD_STS: u32 = 0x03; // u8, write-1-to-clear status (hda_register.h)
 pub const SD_LPIB: u32 = 0x04; // u32  link position in buffer (DMA read ptr)
 pub const SD_CBL: u32 = 0x08; // u32  cyclic buffer length (bytes)
 pub const SD_LVI: u32 = 0x0C; // u16  last valid BDL index

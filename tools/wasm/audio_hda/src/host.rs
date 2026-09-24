@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn npk_mmio_map_bar(bar_idx: i32, pages: i32) -> i32;
     fn npk_mmio_read16(handle: i32, offset: i32) -> i32;
     fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
+    fn npk_mmio_write8(handle: i32, offset: i32, value: i32) -> i32;
     fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
     fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
 
@@ -93,6 +94,9 @@ pub fn mmio_map_bar(bar: u8, pages: u16) -> i32 {
 }
 pub fn mmio_r16(h: i32, off: u32) -> u16 {
     unsafe { npk_mmio_read16(h, off as i32) as u16 }
+}
+pub fn mmio_w8(h: i32, off: u32, val: u8) {
+    unsafe { npk_mmio_write8(h, off as i32, val as i32) };
 }
 pub fn mmio_w16(h: i32, off: u32, val: u16) {
     unsafe { npk_mmio_write16(h, off as i32, val as i32) };
