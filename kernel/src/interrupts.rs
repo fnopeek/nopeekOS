@@ -894,7 +894,7 @@ pub const DEVICE_IRQ_VEC_COUNT: usize = 16;
 /// atomic bump is race-free across cores).
 #[inline]
 fn device_irq_common(vector: u8) {
-    crate::irq::note_fired(vector);
+    crate::irq::isr(vector);
     // LAPIC EOI: write 0 to offset 0xB0. The xAPIC base is the same physical
     // address on every core; this write hits the LAPIC of the core that took
     // the interrupt (the MSI-X destination = the driver fiber's core).

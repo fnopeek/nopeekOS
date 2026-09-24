@@ -68,13 +68,58 @@ struct IrqReg {
 
 /// `IrqReg::entry` of a device driven by plain MSI instead of MSI-X.
 const MSI: u16 = u16::MAX;
+/// `IrqReg::entry` of a line routed through an I/O APIC; the GSI is in
+/// `GSI_OF[vector]`.
+const GSI: u16 = u16::MAX - 1;
 
-fn set_dest(r: &IrqReg, apic: u32) {
-    if r.entry == MSI {
-        pci::msi_set_dest(r.dev, apic);
-    } else {
-        pci::msix_set_dest(r.dev, r.entry, apic);
+fn set_dest(r: &IrqReg, apic: u32, vector: u8) {
+    match r.entry {
+        MSI => pci::msi_set_dest(r.dev, apic),
+        GSI => crate::ioapic::set_dest(GSI_OF[vector as usize].load(Ordering::Relaxed), apic),
+        e => pci::msix_set_dest(r.dev, e, apic),
     }
+}
+
+/// GSI of a vector routed through an I/O APIC.
+static GSI_OF: [core::sync::atomic::AtomicU32; 256] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 256];
+/// The vector's line is LEVEL-triggered: the ISR masks it, `arm` unmasks it.
+///
+/// Linux' `IRQF_ONESHOT` for a threaded handler: the device keeps its line
+/// asserted until the driver has serviced it, and unmasked it would fire
+/// again the moment the LAPIC EOI lands — an interrupt storm on the driver's
+/// core that never lets the driver run.
+static LEVEL: [core::sync::atomic::AtomicBool; 256] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; 256];
+
+/// Route I/O APIC input `gsi` to a fresh vector on the CURRENT core,
+/// masked. The driver unmasks it by `arm`ing it before its first `wait`.
+/// None if the pool is exhausted or no I/O APIC serves the GSI.
+pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<u8> {
+    let vector = alloc_vector()?;
+    let dest = crate::interrupts::current_apic_id();
+    if !crate::ioapic::route(gsi, vector, dest, level, active_low) {
+        return None;
+    }
+    GSI_OF[vector as usize].store(gsi, Ordering::Relaxed);
+    LEVEL[vector as usize].store(level, Ordering::Release);
+    IRQ_REG.lock()[vector as usize] = Some(IrqReg {
+        dev: PciAddr { bus: 0, device: 0, function: 0 },
+        entry: GSI,
+        last_dest: dest,
+    });
+    crate::kprintln!("[npk] irq: GSI {} ({}, active-{}) on vector {:#x}",
+        gsi, if level { "level" } else { "edge" }, if active_low { "low" } else { "high" }, vector);
+    Some(vector)
+}
+
+/// Interrupt-context part of a device vector, before the LAPIC EOI: a
+/// level line is masked (see `LEVEL`), then the waiter is told.
+pub fn isr(vector: u8) {
+    if LEVEL[vector as usize].load(Ordering::Acquire) {
+        crate::ioapic::mask(GSI_OF[vector as usize].load(Ordering::Relaxed));
+    }
+    note_fired(vector);
 }
 static IRQ_REG: Mutex<[Option<IrqReg>; 256]> = Mutex::new([None; 256]);
 
@@ -139,7 +184,13 @@ pub fn alloc_vector() -> Option<u8> {
 /// pinned fiber; cheap (one MMIO write) for one that moves between cores.
 pub fn arm(vector: u8) -> u64 {
     route_to_current(vector);
-    fired_count(vector)
+    let since = fired_count(vector);
+    // A level line was masked by the ISR: the driver has serviced the
+    // device, so let the next assertion through.
+    if LEVEL[vector as usize].load(Ordering::Acquire) {
+        crate::ioapic::unmask(GSI_OF[vector as usize].load(Ordering::Relaxed));
+    }
+    since
 }
 
 /// Route an already-registered device IRQ to the CURRENT core. For the
@@ -154,7 +205,7 @@ pub fn route_to_current(vector: u8) {
     let mut reg = IRQ_REG.lock();
     if let Some(r) = reg[vector as usize].as_mut() {
         if r.last_dest != apic {
-            set_dest(r, apic);
+            set_dest(r, apic, vector);
             r.last_dest = apic;
         }
     }
@@ -180,7 +231,7 @@ pub fn route_to_core(vector: u8, core: usize) {
     let mut reg = IRQ_REG.lock();
     if let Some(r) = reg[vector as usize].as_mut() {
         if r.last_dest != apic {
-            set_dest(r, apic);
+            set_dest(r, apic, vector);
             r.last_dest = apic;
         }
     }
