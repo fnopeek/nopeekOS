@@ -118,10 +118,11 @@ pub fn init() {
 }
 
 /// Deep idle by default where the CPU offers it (AMD Zen on bare metal,
-/// with ARAT). Measured on the IdeaPad (Ryzen): C1 3.33 W package, Base+1
-/// 3.34 W (no gain — the package stays up), **Base+2 1.81 W**: only there do
-/// all cores reach CC6 and the package its own deep state. Netbench and
-/// audio unchanged. `power cstate off` turns it off for the session.
+/// with ARAT). Measured on the IdeaPad (Ryzen), 60-s windows between counter
+/// updates (0.430.3): C1 4.34 W package, **Base+2 3.86 W** (-0.5 W). A first
+/// 10-s measurement said 1.81 W and was wrong: the SMU writes the energy
+/// counter in lumps, rarer the deeper the package sleeps. Base+1 showed no
+/// gain. Netbench and audio unchanged. `power cstate off` for the session.
 /// Which port is the deepest belongs to ACPI `_CST` (Linux `acpi_idle`);
 /// until aml passes it through, Base+2 is the measured answer — the usual
 /// AMD `_CST` lists C2 = Base+1 and C3 = Base+2.

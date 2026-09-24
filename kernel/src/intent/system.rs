@@ -565,7 +565,7 @@ fn power_cstate(arg: &str) {
             kprintln!("  aktiv: Port 0x{:x}", p);
         }
         kprintln!();
-        kprintln!("  Vorgabe seit 0.425: Base+2 (gemessen 3,3 -> 1,8 W Package).");
+        kprintln!("  Vorgabe seit 0.425: Base+2 (gemessen 4,34 -> 3,86 W Package, 60 s).");
         kprintln!("  'power cstate <n>' waehlt einen Port, 'power cstate off' zurueck");
         kprintln!("  auf C1 — beides nur bis zum naechsten Neustart.");
         kprintln!();
