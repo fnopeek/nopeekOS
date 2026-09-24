@@ -724,9 +724,19 @@ static IDLE: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 pub fn wake_idle_workers() {
     let workers = super::scheduler::worker_count();
     for c in 1..=workers.min(255) {
-        if IDLE[c].load(Ordering::SeqCst) {
-            super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
-        }
+        wake_core(c);
+    }
+}
+
+/// Wake worker `c` if it is halted in its idle path. The caller has already
+/// published what `c` should find (a queued fiber, inbox work) — `c` sets
+/// IDLE before its last look, so either it sees the work or we see IDLE.
+pub fn wake_core(c: usize) {
+    if c == 0 || c >= 256 {
+        return;
+    }
+    if IDLE[c].load(Ordering::SeqCst) && current_core_id() != c {
+        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
     }
 }
 

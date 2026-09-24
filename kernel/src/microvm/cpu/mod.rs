@@ -916,8 +916,8 @@ pub fn vm_poll_slice() {
                 let vec = AP_SIPI_VECTORS[apic_id as usize].load(Ordering::Acquire);
                 // Place the AP on a DISTINCT idle worker core (one vCPU per
                 // core — VMX root is per-core). `fiber::admit` pushes straight
-                // to that core's fiber queue (it wakes ≤10 ms later and runs
-                // it) instead of `spawn_fiber`, whose work-stealing piled every
+                // to that core's fiber queue and wakes it by IPI (idle workers
+                // have no tick) instead of `spawn_fiber`, whose work-stealing piled every
                 // vCPU onto the one awake core → VMXON-VMfailValid on Intel.
                 match reserve_ap_core() {
                     Some(c) => {

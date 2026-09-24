@@ -179,6 +179,13 @@ Kontextwechsel bleibt kooperativ und billig.
   Postfachpruefung (Dekker). Ein Kern mit laufendem Gast behaelt den
   periodischen 1-kHz-VM-Timer (`VM_TIMER_ON`), `halt_until` fasst ihn
   dort nicht an. Kern 0 behaelt seinen Takt bis Stufe 3.
+* **Lehre aus 0.411.0:** Wer einen Fiber auf einen FREMDEN Kern legt
+  (`fiber::admit` — microVM-AP-vCPUs, fetch/GPU/9p/net-Worker), verliess sich
+  darauf, dass der Kern „spaetestens in 10 ms" nachsieht. Ohne Takt schlief
+  er weiter: der Gast wartete 10 s je CPU („CPU2 failed to report alive
+  state"). Seit 0.411.1 weckt `admit` den Zielkern (`per_core::wake_core`),
+  und ein neuer Ready-Fiber zaehlt in der Leerlaufpruefung als faellig.
+  **Jeder Weg, der einem fremden Kern Arbeit hinlegt, muss ihn wecken.**
 
 ### 3.3 Warten und Wecken
 

@@ -179,6 +179,12 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     fiber.state = FiberState::Ready;
     FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
+    // A fiber placed on ANOTHER core (the microVM's AP vCPUs, the fetch /
+    // GPU / 9p / net workers) must wake that core: an idle worker has no
+    // tick any more and would not look at its queue. It sees the new Ready
+    // fiber in its idle re-check (`earliest_deadline`) or gets the IPI.
+    core::sync::atomic::fence(Ordering::SeqCst);
+    crate::smp::per_core::wake_core(cid);
 }
 
 /// Resident fibers per core, readable from ANY core. The queue length is not:
@@ -282,8 +288,8 @@ pub fn run_core_fibers(cid: usize) {
     }
 }
 
-/// The earliest TSC deadline any parked fiber on this core is waiting for, or
-/// None if nothing is waiting on time.
+/// The earliest TSC deadline any fiber on this core is waiting for — 0 for
+/// one that is Ready — or None if nothing is waiting on time.
 ///
 /// The idle path needs this. A fiber that asks for a 1 ms sleep is otherwise
 /// resumed only by the next 100 Hz worker tick, because `run_core_fibers`
@@ -297,7 +303,8 @@ pub fn earliest_deadline(cid: usize) -> Option<u64> {
     let q = FIBER_QUEUES[cid].lock();
     q.iter()
         .filter_map(|f| match f.state {
-            FiberState::Ready => None,
+            // Due now: a fiber admitted after `run_core_fibers` returned.
+            FiberState::Ready => Some(0),
             FiberState::Sleeping(d) => Some(d),
             FiberState::WaitingIrq { deadline, .. } => Some(deadline),
             FiberState::WaitingKick { deadline, .. } => Some(deadline),
