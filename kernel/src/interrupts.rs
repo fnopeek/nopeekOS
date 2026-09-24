@@ -850,8 +850,10 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     }
     let t0 = rdtsc();
     crate::smp::per_core::halt_begin(cid, t0);
+    crate::smp::per_core::at(cid, crate::smp::per_core::AT_HLT);
     // SAFETY: sti-shadow arms the HLT before any pending IRQ is taken.
     unsafe { core::arch::asm!("sti; hlt; cli") };
+    crate::smp::per_core::at(cid, crate::smp::per_core::AT_WOKE);
     crate::smp::per_core::record_halt(cid, rdtsc().saturating_sub(t0));
     // Core 0's wakes are attributed by its ISRs (timer, input).
     if cid != 0 {

@@ -177,6 +177,22 @@ pub fn intent_cores() {
             kprintln!("  {:>4}   {:>4}%   {:>7}   {:>13}   {:>5}  {}",
                 c, busy, halts_per_s, "—", qlen, role);
         }
+        if c != 0 {
+            // Breadcrumbs: where the core's loop is, and how long since it
+            // last passed its top (diagnosis of "busy, but no power").
+            let (w, lt, idle) = crate::smp::per_core::whereabouts(c);
+            let at = match w {
+                1 => "loop-top", 2 => "native", 3 => "fibers", 4 => "idle-check",
+                5 => "IN HLT", 6 => "woke", _ => "?",
+            };
+            let ago_ms = if lt == 0 { 0 } else {
+                crate::interrupts::rdtsc().saturating_sub(lt) / (tsc_hz / 1000).max(1)
+            };
+            let hs = crate::smp::per_core::halt_since(c);
+            kprintln!("        at: {}  loop {} ms ago  idle={}  halt_since={}  fibers={}",
+                at, ago_ms, idle as u8, if hs == 0 { "0" } else { "set" },
+                crate::smp::fiber::fiber_count(c));
+        }
 
         // Wake-source breakdown: which cause returned each halt this
         // window. The decisive number is UNATTR = HALTS − Σcauses: large
