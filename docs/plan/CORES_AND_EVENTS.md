@@ -278,8 +278,11 @@ HISR quittieren, HIMR scharf, Ring nachsehen, `npk_wait(IRQ | CMD | TX,
 10 ms)`, HIMR aus. Die 64 leeren Blicke und `sleep_ms(1)` bleiben nur fuer
 den Fall ohne MSI. **Gemessen am IdeaPad:** Treiberkern 972 → 142
 Aufwachungen/s im Leerlauf (mehr als die 100 der Frist allein, also feuert
-der MSI), Bandbreite unveraendert. **Offen:** die internen Zeitgeber der
-Pumpschleife als Deadlines — dann faellt die 10-ms-Frist.
+der MSI), Bandbreite unveraendert. **wifi_rtl8822ce 0.69.0:** die 10-ms-Frist
+ist weg — die Pumpe parkt bis zum fruehesten eigenen Termin (Wachhund 2 s,
+Bericht 1 s, RX-Stille 5 s, ADDBA-Antwort, Sondierung, offene
+Sendequittungen `next_probe_due`, Umsortier-Frist `ro_due_ms`, CSA mit
+10 ms), mindestens 1 ms.
 
 ### 3.5 Kern 0 aufloesen
 
