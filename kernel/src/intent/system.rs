@@ -132,7 +132,7 @@ pub fn intent_cores() {
     let vmcore = crate::smp::per_core::dedicated_vm_core();
 
     kprintln!();
-    kprintln!("  Per-core CPU (idle-measured, {} ms window, idle=HLT+100Hz timer)", window_ms);
+    kprintln!("  Per-core CPU (idle-measured, {} ms window; core 0 ticks 100 Hz, workers wake on deadline/IRQ/IPI)", window_ms);
     kprintln!("  ─────────────────────────────────────────────────────");
     kprintln!("  CORE   BUSY%   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
     for c in 0..cores {
