@@ -696,23 +696,15 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             // ~one 3 ms slice per timer tick → the ~5 s cadence that
             // starved + crashed the browser. Idle (no VM) still hlts.
             if !crate::microvm::vm_active() {
-                // SAFETY: ring-0, IRQs enabled.
-                let t0 = crate::interrupts::rdtsc();
-                unsafe { core::arch::asm!("hlt"); }
-                crate::smp::per_core::record_halt(
-                    0, crate::interrupts::rdtsc().saturating_sub(t0));
+                core0_wait();
             }
             continue;
         } else {
             let serial = serial::SERIAL.lock();
             if !serial.has_data() {
                 drop(serial);
-                // SAFETY: ring-0 idle — 100Hz APIC timer IRQ wakes us reliably,
-                // and all input paths (keyboard, mouse, NIC) are IRQ-driven.
-                let t0 = crate::interrupts::rdtsc();
-                unsafe { core::arch::asm!("hlt"); }
-                crate::smp::per_core::record_halt(
-                    0, crate::interrupts::rdtsc().saturating_sub(t0));
+                // Serial mode: the tick wakes us to look again.
+                core0_wait();
                 continue;
             }
             // Use raw serial read — read_byte() has a legacy loop that also
@@ -1041,26 +1033,9 @@ fn core0_idle_tick() {
         // core really is busy here, and the usage figure should say so.
         return;
     }
-    let t0 = crate::interrupts::rdtsc();
-    let rflags: u64;
-    // SAFETY: read RFLAGS to preserve the caller's interrupt-enable state.
-    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-    if rflags & (1 << 9) != 0 {
-        // IF=1 already → HLT wakes on the next IRQ (timer/input).
-        unsafe { core::arch::asm!("hlt"); }
-    } else {
-        // Enable for the HLT, then restore IF=0 (sti-shadow defers the IRQ
-        // until after HLT is armed, so the wake is never lost).
-        unsafe { core::arch::asm!("sti; hlt; cli"); }
-    }
-    // Report it. This was the ONE halt site that stayed silent, and since
-    // 0.377.0 the usage figure is 100 − halted%, so a silent halt reads as
-    // full load. It is the path a FOREGROUND app idles on (`top` running,
-    // a widget focused), while the bare shell idles through
-    // `read_line_with_tab` — which is exactly why `cores` said 1 % and
-    // `top` said 100 % at the same moment.
-    crate::smp::per_core::record_halt(
-        0, crate::interrupts::rdtsc().saturating_sub(t0));
+    // Park the shell fiber until input or the next tick (3c-1); the halt
+    // itself — and its accounting — happens in `per_core::core0_loop`.
+    core0_wait();
 }
 
 /// Idle auto-GC trigger, called from the shell run-loop's ~1 Hz top.
@@ -1099,9 +1074,38 @@ fn maybe_idle_gc() {
     }
 }
 
+/// The shell's fiber on Core 0 (stage 3c), signalled by the input
+/// interrupts so a key wakes the shell at once instead of on its next tick.
+static SHELL_WAKER: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER);
+
+/// Input arrived (called from the i8042 and xHCI interrupt handlers).
+pub fn wake_shell() {
+    let w = SHELL_WAKER.load(AtOrd::Acquire);
+    if w != crate::smp::fiber::NO_WAKER {
+        crate::smp::fiber::signal(w, crate::smp::fiber::SIG_EVENT);
+    }
+}
+
+/// Core 0's idle step in the shell loop: park the shell fiber until input
+/// or the next tick, so other Core-0 fibers run (3c-1). Outside a fiber
+/// (never after boot, but the fallback is the old HLT) halt in place.
+fn core0_wait() {
+    let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+    if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, d).is_none() {
+        let t0 = crate::interrupts::rdtsc();
+        // SAFETY: ring-0 idle on Core 0, IF=1; the tick or an IRQ wakes us.
+        unsafe { core::arch::asm!("hlt"); }
+        crate::smp::per_core::record_halt(0, crate::interrupts::rdtsc().saturating_sub(t0));
+    }
+}
+
 pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // Store vault reference for worker cores
     VAULT_REF.store(vault as *const _ as *mut _, AtOrd::Release);
+    if let Some(w) = crate::smp::fiber::current_waker() {
+        SHELL_WAKER.store(w, AtOrd::Release);
+    }
 
     // Session is created by compositor::create_window (not here).
     // Pre-shade: serial-only output, no session needed.

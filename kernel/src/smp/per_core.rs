@@ -775,11 +775,30 @@ pub fn wake_idle_workers() {
 /// published what `c` should find (a queued fiber, inbox work) — `c` sets
 /// IDLE before its last look, so either it sees the work or we see IDLE.
 pub fn wake_core(c: usize) {
-    if c == 0 || c >= 256 {
+    if c >= 256 {
         return;
     }
     if IDLE[c].load(Ordering::SeqCst) && current_core_id() != c {
         super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    }
+}
+
+/// Core 0's loop after boot (stage 3c): the same fiber scheduler as a
+/// worker. The shell (`intent::run_loop`) is a fiber here, and so will be
+/// the compositor (3c-2) — so one of them waiting no longer stops the other.
+/// Core 0 still takes no inbox work and still has its periodic tick (until
+/// 3e); the halt ends on that tick, on any interrupt, or by the wake IPI
+/// when another core signals one of its fibers.
+pub fn core0_loop() -> ! {
+    loop {
+        super::fiber::run_core_fibers(0);
+        IDLE[0].store(true, Ordering::SeqCst);
+        let now = crate::interrupts::rdtsc();
+        match super::fiber::earliest_deadline(0) {
+            Some(d) if d <= now => {}
+            wake => crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK),
+        }
+        IDLE[0].store(false, Ordering::Relaxed);
     }
 }
 
