@@ -153,3 +153,47 @@ pub fn report() {
             sts, en, inw(b.pm1a_evt), inw(b.pm1a_evt + b.pm1_half), inb(0x66));
     }
 }
+
+/// `ec gpe off|on` — A/B for power measurements: take the EC's GPE out of
+/// the SCI (events are then only drained on aml's 10-s battery round).
+pub fn set_ec_gpe(on: bool) -> bool {
+    let Some(b) = blocks() else { return false };
+    if !ARMED.load(Ordering::Acquire) { return false; }
+    let gpe = EC_GPE.load(Ordering::Relaxed);
+    let port = b.gpe0 + b.gpe0_half + (gpe / 8) as u16;
+    // SAFETY: GPE0 enable byte of the FADT's block.
+    unsafe {
+        let v = inb(port);
+        let bit = 1u8 << (gpe % 8);
+        outb(port, if on { v | bit } else { v & !bit });
+    }
+    true
+}
+
+/// `ec mode legacy|acpi` — A/B: hand the events back to the firmware (SMM)
+/// with FADT.ACPI_DISABLE, or take them again with ACPI_ENABLE. Returns
+/// SCI_EN afterwards.
+pub fn set_acpi_mode(acpi: bool) -> Option<bool> {
+    let fadt = crate::acpi::find_table(b"FACP")?;
+    crate::acpi::ensure_mapped_pub(fadt, 256);
+    // SAFETY: FADT mapped; SMI_CMD 48, ACPI_ENABLE 52, ACPI_DISABLE 53,
+    // PM1a_CNT 64.
+    let (smi, en, dis, cnt) = unsafe {
+        (core::ptr::read_unaligned((fadt + 48) as *const u32),
+         core::ptr::read_volatile((fadt + 52) as *const u8),
+         core::ptr::read_volatile((fadt + 53) as *const u8),
+         core::ptr::read_unaligned((fadt + 64) as *const u32))
+    };
+    if smi == 0 || smi > 0xFFFF || cnt == 0 || cnt > 0xFFFF { return None; }
+    // SAFETY: the FADT's SMI command port and PM1a control port.
+    unsafe { outb(smi as u16, if acpi { en } else { dis }) };
+    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+    let t0 = crate::interrupts::rdtsc();
+    loop {
+        let on = unsafe { inw(cnt as u16) } & 1 != 0;
+        if on == acpi || crate::interrupts::rdtsc() - t0 > 3000 * tsc_ms {
+            return Some(on);
+        }
+        core::hint::spin_loop();
+    }
+}
