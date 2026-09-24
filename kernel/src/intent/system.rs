@@ -790,36 +790,50 @@ pub fn intent_dsdt_full() {
 /// overflow). Paced in small chunks so the NIC TX ring drains. The DSDT
 /// carries its own length at header bytes 4..8, so the receiver can self-verify
 /// the transfer is complete. Generic ACPI diagnostic.
+/// `dsdt send <ip> <port>`: DSDT and every SSDT, back to back, over one TCP
+/// connection. Each table carries its own length at bytes 4..8, so the
+/// receiver splits them (`nc -l <port> > tables.bin`). The SSDTs belong in
+/// it: CPU `_CST`, the display's `_BCL`/`_BCM` and more often live there.
 pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
-    let Some((addr, len)) = crate::acpi::dsdt() else {
+    let Some(dsdt) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
         return;
     };
-    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
-    kprintln!("[npk] dsdt send → {}.{}.{}.{}:{} ({} bytes)",
-        ip[0], ip[1], ip[2], ip[3], port, len);
+    let mut tables: [(usize, usize); 64] = [(0, 0); 64];
+    tables[0] = dsdt;
+    let mut n = 1;
+    while n < 64 {
+        match crate::acpi::find_table_nth(b"SSDT", n - 1) {
+            Some(t) => { tables[n] = t; n += 1; }
+            None => break,
+        }
+    }
+    let total: usize = tables[..n].iter().map(|t| t.1).sum();
+    kprintln!("[npk] dsdt send → {}.{}.{}.{}:{} (DSDT + {} SSDT, {} bytes)",
+        ip[0], ip[1], ip[2], ip[3], port, n - 1, total);
 
     let handle = match crate::net::tcp::connect(ip, port) {
         Ok(h) => h,
         Err(_) => { kprintln!("[npk] connect failed (is `nc -l {}` running?)", port); return; }
     };
 
-    let mut off = 0usize;
-    while off < len {
-        let end = (off + 1024).min(len);
-        if crate::net::tcp::send_blocking(handle, &b[off..end], 1000).is_err() {
-            kprintln!("[npk] send failed at offset {}", off);
-            let _ = crate::net::tcp::close(handle);
-            return;
+    for &(addr, len) in &tables[..n] {
+        // SAFETY: `acpi::dsdt` / `find_table_nth` return mapped tables.
+        let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+        let mut off = 0usize;
+        while off < len {
+            let end = (off + 1024).min(len);
+            if crate::net::tcp::send_blocking(handle, &b[off..end], 1000).is_err() {
+                kprintln!("[npk] send failed at offset {}", off);
+                let _ = crate::net::tcp::close(handle);
+                return;
+            }
+            off = end;
         }
-        off = end;
-        // Pace ~10 ms so the (fire-and-forget) segments don't overrun the ring.
-        let t0 = crate::interrupts::ticks();
-        while crate::interrupts::ticks() == t0 {}
     }
 
     let _ = crate::net::tcp::close(handle);
-    kprintln!("[npk] dsdt sent ({} bytes); verify: filesize == u32(bytes[4..8])", len);
+    kprintln!("[npk] tables sent ({} bytes, {} tables)", total, n);
 }
 
 pub fn intent_uptime() {

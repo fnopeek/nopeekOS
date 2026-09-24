@@ -1117,6 +1117,8 @@ pub fn wake_shell() {
 /// up to a second of lag, not as a hang.
 fn core0_wait() {
     let freq = crate::interrupts::tsc_freq();
+    // Media keys and unmapped-key reports the PS/2 ISR deferred to here.
+    crate::keyboard::apply_deferred();
     // Input that no interrupt reports is drained here (the tick used to).
     if crate::xhci::needs_poll() || crate::xhci::take_missed_drain() {
         crate::interrupts::without_interrupts(crate::xhci::poll_events_irq);
