@@ -254,8 +254,10 @@ disable_interrupt` und `rtw_pci_irq_recognized` (HIMR0/1/3, HISR0/1/3,
 Masken aus `rtw_pci_setup`) und parkt im Leerlauf wie `rtw_pci_napi_poll`:
 HISR quittieren, HIMR scharf, Ring nachsehen, `npk_wait(IRQ | CMD | TX,
 10 ms)`, HIMR aus. Die 64 leeren Blicke und `sleep_ms(1)` bleiben nur fuer
-den Fall ohne MSI. **Offen:** die internen Zeitgeber der Pumpschleife als
-Deadlines — dann faellt die 10-ms-Frist.
+den Fall ohne MSI. **Gemessen am IdeaPad:** Treiberkern 972 → 142
+Aufwachungen/s im Leerlauf (mehr als die 100 der Frist allein, also feuert
+der MSI), Bandbreite unveraendert. **Offen:** die internen Zeitgeber der
+Pumpschleife als Deadlines — dann faellt die 10-ms-Frist.
 
 ### 3.5 Kern 0 aufloesen
 
