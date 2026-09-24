@@ -1163,7 +1163,7 @@ pub fn vm_core_serve() {
     // like any worker until the next launch). Restore the IF=0 state
     // `smp_ap_entry`'s park loop expects (it does its own sti;hlt;cli).
     crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::arm_worker_timer();
+    crate::interrupts::init_worker_timer();
     // SAFETY: ring-0; return the core to the parked-loop invariant.
     unsafe { core::arch::asm!("cli") };
 
@@ -1456,7 +1456,7 @@ fn vcpu_fiber_task(_arg: u64) {
     // Restore this core to the 100 Hz worker idle timer + the IF=0
     // park-loop invariant `smp_ap_entry` expects.
     crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::arm_worker_timer();
+    crate::interrupts::init_worker_timer();
 
     drop(pending); // owned guest-image buffers freed
     crate::kprintln!("[microvm] vCPU fiber finished on core {}", cid);
@@ -1563,7 +1563,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
     }
 
     crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::arm_worker_timer();
+    crate::interrupts::init_worker_timer();
     crate::kprintln!("[microvm] AP vCPU fiber finished on core {}", cid);
     // Let the BSP's last-one-out teardown proceed.
     VCPU_COUNT.fetch_sub(1, Ordering::AcqRel);

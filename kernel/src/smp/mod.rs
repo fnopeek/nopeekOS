@@ -110,7 +110,8 @@ pub fn init() {
         per_core::init_dedicated_vm_core(online as usize);
         per_core::start_scheduler();
 
-        kprintln!("[npk] smp: scheduler ready (shared inbox, HLT idle + per-core 100Hz timer)");
+        kprintln!("[npk] smp: scheduler ready (shared inbox, tickless workers: {} timer + wake IPI)",
+            if crate::interrupts::has_tsc_deadline() { "TSC-deadline" } else { "one-shot" });
     }
 }
 
@@ -257,6 +258,16 @@ pub fn kick_host_core(core_id: usize) {
     };
     // FIXED delivery (mode 000), level assert (bit 14), physical dest.
     send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
+}
+
+/// Send the worker wake IPI to the core with xAPIC id `apic_id`.
+pub fn send_wake_ipi(apic_id: u32) {
+    let base = crate::interrupts::apic_base_any();
+    // FIXED delivery, level assert, physical destination. IF masked so an
+    // interrupt cannot land between the ICR-high and ICR-low writes.
+    crate::interrupts::without_interrupts(|| {
+        send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32)
+    });
 }
 
 /// Send IPI via Local APIC ICR (wait for idle first)

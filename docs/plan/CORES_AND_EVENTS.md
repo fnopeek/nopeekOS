@@ -1,6 +1,7 @@
 # Kerne und Ereignisse — der Umbau vom Takt zum Ereignis
 
-**Stand:** 2026-09-24, Kernel 0.409.0. Papier + Stufe 0 in Arbeit.
+**Stand:** 2026-09-24. Stufe 0 = Kernel 0.410.0, Stufe 1 = Kernel 0.411.0
+(Worker ohne Takt). Stufen 2-5 offen.
 **Ausloeser:** Kernel 0.408/0.409 (Treiberkern nimmt keine Intents, neue
 Arbeit an den leersten Kern) haben das WLAN von 200 auf ~400 Mbit gebracht —
 nicht durch schnelleren Code, sondern durch **Platzierung von Hand**. Das ist
@@ -169,6 +170,15 @@ Kontextwechsel bleibt kooperativ und billig.
   One-Shot-Modus. Kein periodischer Timer mehr, auf keinem Kern.
 * Der Timer-Handler tut nichts ausser „Kern aufwecken". Was heute im Tick
   steht (xHCI, PS/2, Statistik), bekommt eigene Weckquellen.
+* **Gebaut (Stufe 1, Worker):** `interrupts::halt_until(deadline, cause)`
+  ist die EINE Leerlaufstelle eines Workers — sie programmiert den
+  one-shot-Timer mit IF=0 und haelt mit `sti; hlt` an, damit ein IRQ
+  zwischen Scharfmachen und Anhalten nicht verloren geht. Neue Arbeit:
+  `per_core::wake_idle_workers` schickt Vektor 52 an jeden Worker, der
+  `IDLE` gesetzt hat; der Worker setzt `IDLE` VOR seiner letzten
+  Postfachpruefung (Dekker). Ein Kern mit laufendem Gast behaelt den
+  periodischen 1-kHz-VM-Timer (`VM_TIMER_ON`), `halt_until` fasst ihn
+  dort nicht an. Kern 0 behaelt seinen Takt bis Stufe 3.
 
 ### 3.3 Warten und Wecken
 
@@ -241,9 +251,9 @@ Jede Stufe ist einzeln messbar (`cores`: Aufwachungen/s + Last je Kern,
 | # | Stufe | Messung / Tor |
 |---|---|---|
 | **0** | Korrektheit: Kern-Postfach statt `DEQUES[0]`, Seitentabellensperre, `UTF8_TAIL`, `current_core_id` lockfrei | Bootet, Apps starten (dock+bar+loft+spell mehrfach), `cores` unveraendert |
-| **1** | Zeit: TSC-Wanduhr, Deadline-Timer + Timer-Queue je Kern, periodische Timer weg; xHCI-MSI-X | Leerlauf-Aufwachungen/s je Kern ≈ 0 statt 100; Maus/Tastatur gleich schnell |
+| **1** | Zeit: TSC-Wanduhr, Worker-Timer one-shot auf die naechste Deadline (TSC-Deadline-Modus, sonst Zaehlmodus), Weck-IPI fuer neue Arbeit. Kern 0 behaelt seinen Takt bis Stufe 3 | Leerlauf-Aufwachungen/s je Worker ≈ 0 statt 100; Apps starten ohne 10-ms-Verzug |
 | **2** | Warten/Wecken: `Waiting{mask}`, IPI-Wake, `npk_wait`; **WLAN auf MSI+NAPI**, dann audio_hda, i2c_hid, Panels | WLAN: kein `sleep_ms(1)` mehr, Einbrueche? Durchsatz ≥ 0.67; Ton ohne Knacken |
-| **3** | Kern 0 aufloesen | Maus fluessig waehrend DNS/GC/App-Start |
+| **3** | Kern 0 aufloesen; dabei xHCI ueber MSI-X (Eingabe per IRQ statt Tick) und der Takt von Kern 0 faellt | Maus fluessig waehrend DNS/GC/App-Start; Kern 0 ohne Takt |
 | **4** | Skalieren: Heap-Magazine, NVMe je Kern, TCP-Sperren, TLB-Epochen, Migration, Epochen-Praeemption | Zwei Downloads parallel skalieren; rechnender Fiber blockiert keinen Nachbarn |
 | **5** | `par_for`, paralleles Rastern | Bildzeit bei 4K |
 
@@ -255,11 +265,13 @@ Beim jeweiligen Schritt verifizieren, nicht blind loeschen.
 
 | Altlast | Stufe | Ersetzt durch |
 |---|---|---|
-| Chase-Lev `DEQUES` (256 × 256 Plaetze statisch), `spawn_local` (tot) | 0 | Kern-Postfach |
-| `current_core_id` mit Sperre + Vektorsuche | 0 | lockfreie Tabelle, spaeter GS |
-| `TICKS` als Wanduhr, PIT-/APIC-100-Hz-Tick auf Kern 0 | 1 | TSC |
-| Worker-100-Hz-Timer (Vektor 50), `set_worker_poll_hz`, `arm_worker_wake_in`/`restore_worker_reload` | 1 | Deadline-Timer |
-| xHCI-/PS/2-Drain im Timer-ISR | 1 | MSI-X / eigener IRQ |
+| ~~Chase-Lev `DEQUES` (256 × 256 Plaetze statisch), `spawn_local` (tot), `Priority`~~ | 0 ✓ | gemeinsames Postfach |
+| ~~`current_core_id` mit Sperre + Vektorsuche~~ | 0 ✓ | lockfreie Tabelle, spaeter GS |
+| ~~`TICKS` als Wanduhr~~ | 1 ✓ | TSC (`ticks()` bleibt als 10-ms-Einheit) |
+| PIT-/APIC-100-Hz-Tick auf Kern 0 | 3 | Dienst-Fiber + Deadlines |
+| ~~Worker-100-Hz-Timer periodisch, `arm_worker_wake_in`/`restore_worker_reload`~~ | 1 ✓ | `halt_until` + one-shot |
+| `set_worker_poll_hz` (jetzt nur noch Weckperiode von `worker_idle_hlt`) | 2 | NAPI |
+| xHCI-/PS/2-Drain im Timer-ISR | 3 | MSI-X / eigener IRQ |
 | `FiberState::{Sleeping, WaitingIrq, WaitingKick}` + `NET_KICK_GEN` | 2 | `Waiting{mask}` + Postfach |
 | `npk_input_wait` als HLT-Schleife | 2 | `npk_wait` |
 | `npk_sleep`-Pollschleifen in den Modulen | 2 | `npk_wait` + IRQ |

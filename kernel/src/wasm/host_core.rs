@@ -709,22 +709,8 @@ pub(crate) fn npk_sleep(_ctx: &mut HostState, ms: i32) -> i32 {
     // core-stealing helper (that was the nesting hazard).
     let freq = crate::interrupts::tsc_freq();
     let target = crate::interrupts::rdtsc() + (ms as u64) * (freq / 1000);
-    let cid = crate::smp::per_core::current_core_id();
     while crate::interrupts::rdtsc() < target {
-        let rflags: u64;
-        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-        let t0 = crate::interrupts::rdtsc();
-        if rflags & (1 << 9) != 0 {
-            // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
-            unsafe { core::arch::asm!("hlt"); }
-        } else {
-            // SAFETY: enable for the HLT, then restore IF=0.
-            unsafe { core::arch::asm!("sti; hlt; cli"); }
-        }
-        crate::smp::per_core::record_halt(
-            cid, crate::interrupts::rdtsc().saturating_sub(t0));
-        crate::smp::per_core::record_wake(
-            cid, crate::smp::per_core::WAKE_NPK_SLEEP);
+        crate::interrupts::halt_until(Some(target), crate::smp::per_core::WAKE_NPK_SLEEP);
     }
 
     0
@@ -765,28 +751,14 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         if crate::interrupts::rdtsc() >= deadline {
             break -1;
         }
-        // Don't busy-spin, and don't run the old next_task helper
-        // here: stealing a fiber task and calling its func directly
-        // would bypass the fiber scheduler and re-introduce the
-        // nesting freeze (docs/plan/SCHEDULER_FIBERS.md). Just HLT until the
-        // next interrupt; the per-core 100 Hz timer wakes us to
-        // re-check the key buffer + deadline (≤10 ms latency).
-        // IF-preserving. (Only `wifi` uses npk_input_wait today; the
-        // panels use npk_event_poll + npk_sleep, which yields.)
-        let rflags: u64;
-        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags); }
-        let t0 = crate::interrupts::rdtsc();
-        if rflags & (1 << 9) != 0 {
-            // SAFETY: IF=1 already → HLT wakes on the timer IRQ.
-            unsafe { core::arch::asm!("hlt"); }
-        } else {
-            // SAFETY: enable for the HLT, then restore IF=0.
-            unsafe { core::arch::asm!("sti; hlt; cli"); }
-        }
-        crate::smp::per_core::record_halt(
-            core_id, crate::interrupts::rdtsc().saturating_sub(t0));
-        crate::smp::per_core::record_wake(
-            core_id, crate::smp::per_core::WAKE_NPK_SLEEP);
+        // Halt, don't spin — and don't run another task inline here (that
+        // bypassed the fiber scheduler and nested app loops). Keys arrive
+        // from Core 0 without a wake, so look again every 10 ms.
+        // (Only `wifi` uses npk_input_wait today; the panels use
+        // npk_event_poll + npk_sleep, which yields.)
+        let recheck = crate::interrupts::rdtsc() + freq / 100;
+        crate::interrupts::halt_until(
+            Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
     };
 
     // Resume work tracking
