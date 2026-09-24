@@ -7221,6 +7221,21 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // Scharfmachen ankam, loest keinen Interrupt mehr aus.
             pci::irq_recognized(h);
             pci::enable_interrupt(h, false);
+            // **Und den Sendering noch einmal abraeumen — NACH dem
+            // Scharfmachen.** HIMR steht die ganze Runde ueber auf null, und
+            // bei null setzt der Chip kein HISR-Bit: eine Sendequittung
+            // (TX-DOK), die waehrend der Runde kam, loest nie einen Interrupt
+            // aus. Fuer den Empfang faengt das der Blick auf den Ring unten;
+            // fuer das Senden fehlte er. Bis 0.68.0 raeumte die 10-ms-Frist
+            // den Ring spaetestens dann ab — mit 0.69.0 schlief die Pumpe bis
+            // zu einer Sekunde, der Ring lief voll, und der Upload fiel auf
+            // 7 Mbit mit 503 Zeitueberschreitungen. Linux laesst dafuer die
+            // DOK-Interrupts waehrend der Empfangsverarbeitung an
+            // (`rtw_pci_enable_interrupt(.., exclude_rx = true)`); hier
+            // gilt: was vor diesem Aufruf quittiert wurde, raeumt er ab, was
+            // danach kommt, weckt uns.
+            pci::tx_isr(h, trx, pci::Q_BE);
+            pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
             if pci::get_hw_rx_ring_nr(h, trx) == 0 {
                 let mut mask = host::WAIT_IRQ | host::WAIT_WIFI_CMD;
                 // Nur, wenn diese Runde die Schlange auch leert — sonst
