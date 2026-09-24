@@ -466,7 +466,7 @@ pub extern "C" fn _start() {
     let mk = |buf: &mut [u8], i: usize, addr: u64, len: u32| {
         buf[i..i + 8].copy_from_slice(&addr.to_le_bytes());
         buf[i + 8..i + 12].copy_from_slice(&len.to_le_bytes());
-        buf[i + 12..i + 16].copy_from_slice(&1u32.to_le_bytes()); // IOC (unused: we poll)
+        buf[i + 12..i + 16].copy_from_slice(&1u32.to_le_bytes()); // IOC: one interrupt per half
     };
     mk(&mut bdl_buf, 0, audio_phys, half);
     mk(&mut bdl_buf, 16, audio_phys + half as u64, half);
@@ -482,10 +482,28 @@ pub extern "C" fn _start() {
     mmio_w16(mmio, base + SD_LVI, 1);
     mmio_w16(mmio, base + SD_FORMAT, FMT_48K_S16_STEREO);
     fence();
-    mmio_w32(mmio, base + SD_CTL, (STREAM_TAG << SD_CTL_STRM_SHIFT) | SD_CTL_RUN);
+    // The controller's MSI (`azx_acquire_irq`; the AMD SB preset allows MSI).
+    // With it the stream raises an interrupt at the end of each half
+    // (IOC in both BDL entries) and the loop below sleeps until then.
+    let irq = host::irq_register() >= 0;
+    let mut sd_ctl = (STREAM_TAG << SD_CTL_STRM_SHIFT) | SD_CTL_RUN;
+    if irq {
+        // `snd_hdac_stream_start`: the stream's bit in INTCTL plus the
+        // global enable, and `SD_INT_MASK` in SD_CTL with the run bit. The
+        // controller-interrupt enable (CIE) stays off: codec verbs are
+        // polled, only during bring-up, so no RIRB interrupt is wanted.
+        let ic = mmio_r32(mmio, INTCTL);
+        mmio_w32(mmio, INTCTL, ic | AZX_INT_GLOBAL_EN | (1 << iss));
+        sd_ctl |= SD_INT_MASK;
+    }
+    mmio_w32(mmio, base + SD_CTL, sd_ctl);
     fence();
 
-    log("[audio_hda] streaming from audio mailbox\n");
+    log(if irq {
+        "[audio_hda] streaming from audio mailbox (MSI: one wake per half)\n"
+    } else {
+        "[audio_hda] streaming from audio mailbox (polling)\n"
+    });
 
     // Streaming loop: a TRUE ring-buffer copy. Each poll we refill exactly the
     // region the DMA has played since last time — [write_pos, LPIB) — pulling
@@ -572,6 +590,25 @@ pub extern "C" fn _start() {
             pulled += n as u64;
             write_pos = (write_pos + n) % RING_BYTES;
         }
-        sleep_ms(4);
+        if irq {
+            // `azx_interrupt` → `snd_hdac_bus_handle_stream_irq`: the
+            // stream's bit in INTSTS, then SD_STS cleared with SD_INT_MASK
+            // (write-1-to-clear). A status left set raises no new MSI.
+            // SD_STS is byte 3 of the SD_CTL dword: write CTL back as read.
+            if mmio_r32(mmio, INTSTS) & (1 << iss) != 0 {
+                let v = mmio_r32(mmio, base + SD_CTL);
+                mmio_w32(mmio, base + SD_CTL, (v & 0x00FF_FFFF) | (SD_INT_MASK << 24));
+            }
+            // **Sleep until the DMA finishes a half.** The poll was every
+            // 4 ms — 250 wakes a second, silence included. One half is
+            // HALF_FRAMES at 48 kHz; if the interrupt never came we would
+            // still refill a half-period late, with the other half queued.
+            wait_irq(HALF_MS + 10);
+        } else {
+            sleep_ms(4);
+        }
     }
 }
+
+/// Play time of one ring half.
+const HALF_MS: u32 = (HALF_FRAMES as u32 * 1000) / 48_000;

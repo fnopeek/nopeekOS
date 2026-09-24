@@ -243,6 +243,18 @@ Aenderungen MELDEN.
   (RENDER). `bar` wartet auf Eingabe | Zustand bis zur naechsten vollen
   Minute, `dock` auf Eingabe | Zustand OHNE Frist — eine veraltete Anzeige
   heisst dann: eine Aenderung, die niemand gemeldet hat.
+* **wifid 0.13.0:** `npk_wait(WAIT_WIFI_EVENT, ohne Frist)` statt 4/50 ms.
+* **audio_hda 0.4.0:** MSI (`AZX_DCAPS_PRESET_AMD_SB` erlaubt ihn), IOC
+  in beiden BDL-Eintraegen, INTCTL = GIE + Strombit, `SD_INT_MASK` in
+  SD_CTL beim Start (`snd_hdac_stream_start`); nach jedem Aufwachen SD_STS
+  quittieren wie `snd_hdac_bus_handle_stream_irq`. Ein Aufwachen je
+  Ringhaelfte (~43 ms) statt alle 4 ms. CIE bleibt aus: Codec-Verben laufen
+  gepollt und nur beim Hochfahren.
+* **i2c_hid — offen, eigener Posten:** der Touchpad-Interrupt kommt ueber
+  den AMD-GPIO-Controller (AMDI0030) und damit ueber den **IOAPIC**, den wir
+  nicht programmieren (bisher alles MSI). Dafuer braucht es einen
+  IOAPIC-Treiber (Redirection-Table, GSI aus `_CRS`/MADT) — erst dann kann
+  i2c_hid auf den GPIO-IRQ warten statt alle 5 ms den Pegel zu lesen.
 * **microVM-Netz-Datenebene:** der Worker parkt mit `kick_wait(PARK_SAFETY_MS
   = 2)` und wird gemessen NIE per IRQ geweckt (`cores`, QEMU 2026-09-24:
   `irq=0 timeout=504` je Sekunde) — ein versteckter 500-Hz-Takt auf einem

@@ -31,6 +31,8 @@ unsafe extern "C" {
 
     fn npk_memory_fence() -> i32;
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_irq_register(entry: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
 
     // Audio mailbox (driver side): pull a mixed S16/48k/stereo buffer.
     fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
@@ -117,6 +119,19 @@ pub fn fence() {
 }
 pub fn sleep_ms(ms: u32) {
     unsafe { npk_sleep(ms as i32) };
+}
+
+/// `npk_wait`-Bit: der IRQ des gebundenen Geraets hat gefeuert.
+pub const WAIT_IRQ: i32 = 2;
+
+/// Den MSI des gebundenen Controllers anmelden; der Vektor oder -1.
+pub fn irq_register() -> i32 {
+    unsafe { npk_irq_register(0) }
+}
+
+/// Parken, bis der IRQ feuert oder `timeout_ms` vergeht.
+pub fn wait_irq(timeout_ms: u32) -> i32 {
+    unsafe { npk_wait(WAIT_IRQ, timeout_ms as i32) }
 }
 
 /// Ein Doppelwort aus dem DMA-Puffer zurueckholen.
