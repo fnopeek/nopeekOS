@@ -1355,7 +1355,11 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
     if hw.irq_vector != 0 { return -1; }
     let Some((gsi, level, low)) = crate::sci::arm_ec(gpe as u32) else { return -1 };
     match crate::irq::register_gsi(gsi, level, low) {
-        Some(v) => { hw.irq_vector = v; v as i32 }
+        Some(v) => {
+            hw.irq_vector = v;
+            crate::sci::VECTOR.store(v as u32, core::sync::atomic::Ordering::Relaxed);
+            v as i32
+        }
         None => -1,
     }
 }

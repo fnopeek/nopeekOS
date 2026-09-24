@@ -18,6 +18,13 @@ use crate::serial::{inb, inw, outb, outw};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static ARMED: AtomicBool = AtomicBool::new(false);
+/// Vector the SCI was registered on (for `report`).
+pub static VECTOR: AtomicU32 = AtomicU32::new(0);
+/// `service` calls, and how many found the EC GPE / a PM1 event / nothing.
+static CALLS: AtomicU32 = AtomicU32::new(0);
+static EC_HITS: AtomicU32 = AtomicU32::new(0);
+static PM1_HITS: AtomicU32 = AtomicU32::new(0);
+static EMPTY: AtomicU32 = AtomicU32::new(0);
 /// GPE number the EC signals on.
 static EC_GPE: AtomicU32 = AtomicU32::new(0);
 
@@ -86,6 +93,7 @@ pub fn service() -> u32 {
     let Some(b) = blocks() else { return 0 };
     let gpe = EC_GPE.load(Ordering::Relaxed);
     let mut out = 0u32;
+    CALLS.fetch_add(1, Ordering::Relaxed);
     // SAFETY: as in `arm_ec`.
     unsafe {
         let sts_port = b.gpe0 + (gpe / 8) as u16;
@@ -104,5 +112,35 @@ pub fn service() -> u32 {
             }
         }
     }
+    if out & 1 != 0 { EC_HITS.fetch_add(1, Ordering::Relaxed); }
+    if out >> 16 != 0 { PM1_HITS.fetch_add(1, Ordering::Relaxed); }
+    if out == 0 { EMPTY.fetch_add(1, Ordering::Relaxed); }
     out
+}
+
+/// Counters and the raw registers, for `ec watch`: a line that keeps
+/// firing shows as `fired` far above `EC`, with the culprit's status bit
+/// standing in the dump.
+pub fn report() {
+    let Some(b) = blocks() else { return };
+    if !ARMED.load(Ordering::Acquire) {
+        crate::kprintln!("  SCI: nicht genommen (aml < 0.4.0?)");
+        return;
+    }
+    let v = VECTOR.load(Ordering::Relaxed) as u8;
+    crate::kprintln!("  SCI: vector {:#x} fired {} · service {} (EC {}, PM1 {}, leer {})",
+        v, crate::irq::fired_count(v), CALLS.load(Ordering::Relaxed),
+        EC_HITS.load(Ordering::Relaxed), PM1_HITS.load(Ordering::Relaxed),
+        EMPTY.load(Ordering::Relaxed));
+    let mut sts = alloc::string::String::new();
+    let mut en = alloc::string::String::new();
+    // SAFETY: GPE0 / PM1a are the FADT's I/O blocks; reads only.
+    unsafe {
+        for i in 0..b.gpe0_half {
+            sts.push_str(&alloc::format!("{:02x} ", inb(b.gpe0 + i)));
+            en.push_str(&alloc::format!("{:02x} ", inb(b.gpe0 + b.gpe0_half + i)));
+        }
+        crate::kprintln!("  GPE0 STS {}· EN {}· PM1 STS {:04x} EN {:04x} · EC Status {:02x}",
+            sts, en, inw(b.pm1a_evt), inw(b.pm1a_evt + b.pm1_half), inb(0x66));
+    }
 }
