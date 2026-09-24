@@ -1726,6 +1726,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "power" | "watt" | "watts" => {
             system::intent_power(args);
         }
+        "ec" if args.trim_start().starts_with("watch") => {
+            system::intent_ec_watch(args.trim_start().trim_start_matches("watch"));
+        }
         "dsdt" => {
             // `dsdt send <ip> <port>` streams the raw table over TCP (exact
             // bytes, no terminal-mirror ring-overflow); `dsdt full` base64-
