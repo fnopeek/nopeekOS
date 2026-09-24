@@ -255,6 +255,23 @@ Aenderungen MELDEN.
   nicht programmieren (bisher alles MSI). Dafuer braucht es einen
   IOAPIC-Treiber (Redirection-Table, GSI aus `_CRS`/MADT) — erst dann kann
   i2c_hid auf den GPIO-IRQ warten statt alle 5 ms den Pegel zu lesen.
+* **aml — Rechenstoss alle 10 s (gemessen 2026-09-24, `cores`: ein Kern
+  92-100 % ohne einen Halt ueber 500 ms).** Jede Runde `heap_reset()` +
+  `Namespace::load` der GANZEN DSDT (56 KB AML) + `_BST`/`_BIF` mit vielen
+  EC-Zugriffen, die im Kernel aktiv warten (`ec.rs`, `udelay` bis 10 ms je
+  Warteschritt). Linux laedt den Namensraum einmal und wertet danach nur
+  `_BST` aus. Zu bauen: Namensraum unter einer Heap-Marke behalten, je
+  Runde nur `_BST`; spaeter (Stufe 3, IOAPIC) Akkuereignisse per EC-SCI
+  statt 10-s-Raster. Nicht vom Umbau verursacht — erst durch die ehrliche
+  Messung (0.411.2) sichtbar.
+* **wifi_rtl8822ce 0.69.1 — gelernt:** HIMR steht die Runde ueber auf null,
+  und bei null setzt der Chip kein HISR-Bit. Eine Sendequittung waehrend der
+  Runde weckte nie; 0.69.0 (Deadlines statt 10 ms) liess den Sendering
+  volllaufen: Upload 7 Mbit, 503 Zeitueberschreitungen. Jetzt `tx_isr` NACH
+  `enable_interrupt`, wie der Blick auf den RX-Ring. Upload wieder 101 Mbit,
+  0 Zeitueberschreitungen. **Jede Quelle, deren Ereignis waehrend der
+  maskierten Runde verloren gehen kann, braucht die Nachkontrolle nach dem
+  Scharfmachen.**
 * **microVM-Netz-Datenebene:** der Worker parkt mit `kick_wait(PARK_SAFETY_MS
   = 2)` und wird gemessen NIE per IRQ geweckt (`cores`, QEMU 2026-09-24:
   `irq=0 timeout=504` je Sekunde) — ein versteckter 500-Hz-Takt auf einem
