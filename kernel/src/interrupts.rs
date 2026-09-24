@@ -821,6 +821,7 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
         if own_timer { arm_at(d); }
     }
     let t0 = rdtsc();
+    crate::smp::per_core::halt_begin(cid, t0);
     // SAFETY: sti-shadow arms the HLT before any pending IRQ is taken.
     unsafe { core::arch::asm!("sti; hlt; cli") };
     crate::smp::per_core::record_halt(cid, rdtsc().saturating_sub(t0));

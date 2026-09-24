@@ -136,18 +136,48 @@ static CORE_HALT_COUNT: [AtomicU64; 256] = {
 /// there the core really is busy.
 pub fn record_halt(core_id: usize, cycles: u64) {
     if core_id >= 256 { return; }
+    // Clear the in-progress mark BEFORE adding: a concurrent snapshot then
+    // at worst misses this halt once (and sees it next time), never counts
+    // it twice.
+    HALT_SINCE[core_id].store(0, Ordering::Relaxed);
     CORE_HALT_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);
     CORE_HALT_COUNT[core_id].fetch_add(1, Ordering::Relaxed);
+}
+
+/// TSC at which the halt now in progress began, 0 if the core is not
+/// halted in `interrupts::halt_until`.
+///
+/// **Without it a sleeping core reads as SPINNING.** A halt is booked when
+/// it ENDS. While every worker woke 100×/s that was always inside the
+/// measuring window; since workers are tickless (0.411) a core with nothing
+/// to do sleeps for seconds, no halt ends in the window, and `cores`
+/// reported 100 % busy with 0 halts/s — on the hardware, for every empty
+/// core at once.
+static HALT_SINCE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// Mark `core_id` as halted from TSC `t0` on (cleared by `record_halt`).
+pub fn halt_begin(core_id: usize, t0: u64) {
+    if core_id < 256 {
+        HALT_SINCE[core_id].store(t0, Ordering::Relaxed);
+    }
+}
+
+/// Cumulative halted TSC for `core_id`, INCLUDING a halt still in progress.
+fn halted_tsc(core_id: usize) -> u64 {
+    let acc = CORE_HALT_TSC[core_id].load(Ordering::Relaxed);
+    let since = HALT_SINCE[core_id].load(Ordering::Relaxed);
+    if since == 0 {
+        acc
+    } else {
+        acc + crate::interrupts::rdtsc().saturating_sub(since)
+    }
 }
 
 /// Snapshot (cumulative halted TSC, halt-entry count) for `core_id`.
 /// Sample twice and diff to get true busy% + halt rate over a window.
 pub fn halt_snapshot(core_id: usize) -> (u64, u64) {
     if core_id >= 256 { return (0, 0); }
-    (
-        CORE_HALT_TSC[core_id].load(Ordering::Relaxed),
-        CORE_HALT_COUNT[core_id].load(Ordering::Relaxed),
-    )
+    (halted_tsc(core_id), CORE_HALT_COUNT[core_id].load(Ordering::Relaxed))
 }
 
 // ── Per-source wake attribution (1 kHz spurious-wake diagnosis) ──────
@@ -497,6 +527,19 @@ pub fn has_mwait() -> bool {
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
+    // **Evaluate only windows of at least 100 ms.** The worker loop calls
+    // this on every pass; two passes back to back with no halt between
+    // made a window of microseconds that read "100 % busy" — and that was
+    // the value left standing (`top` showed the bar's core at 87 % while
+    // `cores` measured it asleep). Until the window is long enough, keep
+    // accumulating: the snapshots stay where they are.
+    let prev = LAST_TSC_CORE[core_id].load(Ordering::Relaxed);
+    if prev != 0
+        && crate::interrupts::rdtsc().wrapping_sub(prev) < crate::interrupts::tsc_freq() / 10
+    {
+        return;
+    }
+
     // APERF/MPERF are gated by CPUID.06H:ECX[0] — absent on AMD and on KVM
     // guests with `-cpu qemu64`. Reading them unconditionally raises #GP.
     let has_apmp = HAS_APERFMPERF.load(Ordering::Relaxed);
@@ -515,7 +558,7 @@ pub fn update_core_freq(core_id: usize) {
     };
     let tsc = crate::interrupts::rdtsc();
 
-    let halted = CORE_HALT_TSC[core_id].load(Ordering::Relaxed);
+    let halted = halted_tsc(core_id);
     let prev_halted = LAST_HALT[core_id].swap(halted, Ordering::Relaxed);
     let prev_tsc = LAST_TSC_CORE[core_id].swap(tsc, Ordering::Relaxed);
     let prev_aperf = LAST_APERF[core_id].swap(aperf, Ordering::Relaxed);
