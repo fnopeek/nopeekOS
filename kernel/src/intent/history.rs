@@ -110,7 +110,7 @@ pub fn push(line: &str) {
     if crate::smp::scheduler::worker_count() == 0 {
         write_pending(0);
     } else if !WRITER.swap(true, core::sync::atomic::Ordering::AcqRel) {
-        crate::smp::scheduler::spawn(write_pending, 0);
+        crate::smp::scheduler::spawn("history", write_pending, 0);
     }
 }
 

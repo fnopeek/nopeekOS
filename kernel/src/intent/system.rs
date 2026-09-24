@@ -152,12 +152,18 @@ pub fn intent_cores() {
             "core0 (kernel/irq/shell)"
         } else if Some(c) == vmcore {
             "microvm (dedicated)"
+        } else if let Some(t) = crate::smp::per_core::native_task(c) {
+            // Leaked once per `cores` call; a handful of bytes.
+            alloc::boxed::Box::leak(alloc::format!("native task '{}'", t).into_boxed_str())
         } else if busy >= 90 && halts_per_s < 5 {
             "SPINNING (never halts!)"
         } else if halts_per_s > 200 && avg_us < 50 {
             "spin? (spurious wakes)"
         } else if crate::smp::per_core::is_active(c) {
             "running task"
+        } else if busy < 5 && crate::smp::fiber::fiber_count(c) > 0 {
+            alloc::boxed::Box::leak(alloc::format!("{} fiber(s), asleep",
+                crate::smp::fiber::fiber_count(c)).into_boxed_str())
         } else if busy < 5 {
             "idle (asleep)"
         } else {

@@ -808,6 +808,22 @@ pub fn core0_loop() -> ! {
 
 /// Ein Intent laeuft gerade auf diesem Kern (bis zum Ende, ohne abzugeben).
 static NATIVE_BUSY: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+/// The native task each core runs, as a `&'static str` split in two words.
+static NATIVE_NAME: [(AtomicUsize, AtomicUsize); 256] =
+    [const { (AtomicUsize::new(0), AtomicUsize::new(0)) }; 256];
+
+/// The native task core `c` is running right now, if any (`cores`).
+pub fn native_task(c: usize) -> Option<&'static str> {
+    if c >= 256 || !NATIVE_BUSY[c].load(Ordering::Acquire) {
+        return None;
+    }
+    let (p, l) = (&NATIVE_NAME[c].0, &NATIVE_NAME[c].1);
+    let (p, l) = (p.load(Ordering::Acquire), l.load(Ordering::Acquire));
+    if p == 0 { return None; }
+    // SAFETY: stored from a `&'static str` in the worker loop below; the
+    // pointer and length belong together and outlive everything.
+    Some(unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p as *const u8, l)) })
+}
 
 /// Last eines Kerns fuers Verteilen: residente Fiber, plus eins, solange
 /// ein Intent ihn belegt.
@@ -933,7 +949,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             } else {
                 // Native run-to-completion task (intent) — run directly.
                 CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
-                NATIVE_BUSY[cid].store(true, Ordering::Relaxed);
+                NATIVE_NAME[cid].0.store(task.name.as_ptr() as usize, Ordering::Relaxed);
+                NATIVE_NAME[cid].1.store(task.name.len(), Ordering::Relaxed);
+                NATIVE_BUSY[cid].store(true, Ordering::Release);
                 start_work(cid);
                 (task.func)(task.arg);
                 flush_busy(cid);
