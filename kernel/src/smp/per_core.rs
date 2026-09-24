@@ -155,6 +155,12 @@ pub fn record_halt(core_id: usize, cycles: u64) {
 /// core at once.
 static HALT_SINCE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
+/// Raw in-progress halt mark (diagnosis).
+pub fn halt_since(core_id: usize) -> u64 {
+    if core_id >= 256 { return 0; }
+    HALT_SINCE[core_id].load(Ordering::Relaxed)
+}
+
 /// Mark `core_id` as halted from TSC `t0` on (cleared by `record_halt`).
 pub fn halt_begin(core_id: usize, t0: u64) {
     if core_id < 256 {
@@ -757,6 +763,31 @@ pub fn enable_hwp() -> bool {
 /// darf beim Verteilen nicht als „leerster Kern" zaehlen — er nimmt nie
 /// etwas, und die Arbeit bliebe liegen.
 static IN_LOOP: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+// ── Where is each core? (diagnosis, `cores`) ────────────────────────
+//
+// `cores` said "100 % busy, 0 halts" for cores that drew no power (RAPL:
+// package 3.3 W) and ran no native task — so they were neither spinning nor
+// in `halt_until`. These breadcrumbs say where a core's loop last was, and
+// when it last passed its top.
+pub const AT_TOP: u8 = 1;
+pub const AT_NATIVE: u8 = 2;
+pub const AT_FIBERS: u8 = 3;
+pub const AT_IDLE: u8 = 4;
+pub const AT_HLT: u8 = 5;
+pub const AT_WOKE: u8 = 6;
+static WHERE: [core::sync::atomic::AtomicU8; 256] = [const { core::sync::atomic::AtomicU8::new(0) }; 256];
+static LOOP_TSC: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+pub fn at(c: usize, w: u8) {
+    if c < 256 { WHERE[c].store(w, Ordering::Relaxed); }
+}
+
+/// (breadcrumb, TSC of the last pass through the loop top, IDLE flag).
+pub fn whereabouts(c: usize) -> (u8, u64, bool) {
+    if c >= 256 { return (0, 0, false); }
+    (WHERE[c].load(Ordering::Relaxed), LOOP_TSC[c].load(Ordering::Relaxed), IDLE[c].load(Ordering::Relaxed))
+}
+
 /// Worker is halted in its idle path and needs an IPI to see new work.
 static IDLE: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 
@@ -897,6 +928,8 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     let cid = core_id as usize;
 
     loop {
+        at(cid, AT_TOP);
+        LOOP_TSC[cid].store(crate::interrupts::rdtsc(), Ordering::Relaxed);
         // Carved out of the work-stealing pool for the microvm
         // (substrate rework A2). `vm_core_serve` opens the guest ON
         // THIS CORE when a launch is pending and runs it continuously
@@ -952,6 +985,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
                 NATIVE_NAME[cid].0.store(task.name.as_ptr() as usize, Ordering::Relaxed);
                 NATIVE_NAME[cid].1.store(task.name.len(), Ordering::Relaxed);
                 NATIVE_BUSY[cid].store(true, Ordering::Release);
+                at(cid, AT_NATIVE);
                 start_work(cid);
                 (task.func)(task.arg);
                 flush_busy(cid);
@@ -966,7 +1000,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // none remain — then the core halts below.
         CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
         start_work(cid);
+        at(cid, AT_FIBERS);
         super::fiber::run_core_fibers(cid);
+        at(cid, AT_IDLE);
         flush_busy(cid);
         CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
 
