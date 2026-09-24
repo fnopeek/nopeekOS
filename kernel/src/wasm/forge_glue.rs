@@ -299,6 +299,12 @@ extern "C" fn f_npk_input_wait(vm: *const u64, timeout_ms: i32) -> i32 {
     host_core::npk_input_wait(ctx, timeout_ms)
 }
 
+extern "C" fn f_npk_irq_register_gsi(vm: *const u64, gsi: i32, flags: i32) -> i32 {
+    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    let ctx = unsafe { ctx_of(vm) };
+    host_core::npk_irq_register_gsi(ctx, gsi, flags)
+}
+
 extern "C" fn f_npk_wait(vm: *const u64, mask: i32, timeout_ms: i32) -> i32 {
     // SAFETY: `vm` ist der vmctx des rufenden Moduls.
     let ctx = unsafe { ctx_of(vm) };
@@ -1011,6 +1017,7 @@ pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
         "npk_input_poll" => f_npk_input_poll as *const () as u64,
         "npk_input_wait" => f_npk_input_wait as *const () as u64,
         "npk_wait" => f_npk_wait as *const () as u64,
+        "npk_irq_register_gsi" => f_npk_irq_register_gsi as *const () as u64,
         "npk_clear" => f_npk_clear as *const () as u64,
         "npk_self_terminal" => f_npk_self_terminal as *const () as u64,
         "npk_stream_open" => f_npk_stream_open as *const () as u64,

@@ -47,6 +47,8 @@ unsafe extern "C" {
     fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
     fn npk_sys_info(key: i32) -> i64;
 }
 
@@ -276,6 +278,7 @@ pub extern "C" fn _start() {
         return;
     }
     logln(&alloc::format!("[i2c-hid] {} pointer device(s) live", live.len()));
+    let irq = arm_irq(&found, &live);
 
     // Dauerbetrieb. Ein Treiber kehrt nicht zurueck — er horcht.
     //
@@ -395,8 +398,115 @@ pub extern "C" fn _start() {
                 l.errs = 0; l.skips = 0; l.capped = 0;
             }
         }
-        unsafe { npk_sleep(5) };
+        match &irq {
+            Some(q) => {
+                // `do_amd_gpio_irq_handler`: every pending pin acknowledged
+                // (writing back what was read clears its status bits), then
+                // the EOI to the GPIO unit. The level line the kernel masked
+                // is released when we wait again.
+                use i2c_hid_core::gpio;
+                for &off in &q.pins {
+                    let v = unsafe { npk_mmio_read32(q.handle, off as i32) } as u32;
+                    if v & gpio::PIN_IRQ_PENDING != 0 {
+                        unsafe { npk_mmio_write32(q.handle, off as i32, v as i32) };
+                    }
+                }
+                let mr = q.block_off + gpio::WAKE_INT_MASTER_REG;
+                let m = unsafe { npk_mmio_read32(q.handle, mr as i32) } as u32;
+                unsafe { npk_mmio_write32(q.handle, mr as i32, (m | gpio::EOI_MASK) as i32) };
+
+                // **Sleep until the pad reports** (docs/plan/CORES_AND_EVENTS.md).
+                // It was every 5 ms — 200 wakes a second on an untouched pad.
+                // Awake early only for our own timers: an open tap releases
+                // its button after TAP_MS, and the first minutes of stats.
+                // At most a second: a lost interrupt shows as lag, not as a
+                // dead pointer.
+                let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
+                let now_ms = now / 1000;
+                let mut wait_ms: u64 = 1000;
+                for l in live.iter() {
+                    if let Some(d) = l.track.next_deadline() {
+                        wait_ms = wait_ms.min(d.saturating_sub(now_ms).max(1));
+                    }
+                }
+                if stat_lines_left > 0 {
+                    wait_ms = wait_ms.min((next_stat_us.saturating_sub(now) / 1000).max(1));
+                }
+                const WAIT_IRQ: i32 = 2;
+                unsafe { npk_wait(WAIT_IRQ, wait_ms as i32) };
+            }
+            None => unsafe { let _ = npk_sleep(5); },
+        }
     }
+}
+
+/// The GPIO controller's interrupt, set up for every live pad.
+struct IrqMode {
+    handle: i32,
+    /// Offset of the GPIO block inside the mapped page.
+    block_off: u32,
+    /// Each pad's pin register (page offset).
+    pins: alloc::vec::Vec<u32>,
+}
+
+/// Wait on the GPIO controller's interrupt instead of polling — or say why
+/// not. Needs every live pad gated on a pin of the SAME AMD block, and that
+/// block's own line in its `_CRS`. Pin setup as `amd_gpio_irq_set_type`
+/// (level, polarity, clear status, the enable-and-wait-for-debounce dance)
+/// followed by `amd_gpio_irq_enable` (enable + unmask).
+fn arm_irq(found: &[i2c_hid_core::discover::HidDevice], live: &[Live]) -> Option<IrqMode> {
+    use i2c_hid_core::gpio;
+    let mut handle = -1;
+    let mut pins = alloc::vec::Vec::new();
+    let mut lows = alloc::vec::Vec::new();
+    for l in live {
+        let Gate::Pin { handle: h, reg_off, active_low, .. } = &l.gate else {
+            logln("[i2c-hid] interrupt: a pad reads blind — staying on the 5 ms poll");
+            return None;
+        };
+        if handle >= 0 && *h != handle {
+            logln("[i2c-hid] interrupt: pads on different GPIO blocks — staying on the 5 ms poll");
+            return None;
+        }
+        handle = *h;
+        pins.push(*reg_off);
+        lows.push(*active_low);
+    }
+    let g = found.iter().find_map(|d| d.gpio_controller.as_ref())?;
+    let Some((gsi, flags)) = g.irq else {
+        logln("[i2c-hid] interrupt: the GPIO block names no line in its _CRS — staying on the 5 ms poll");
+        return None;
+    };
+    let level = flags & 0x02 == 0;
+    let low = flags & 0x04 != 0;
+    let v = unsafe { npk_irq_register_gsi(gsi as i32, (level as i32) | ((low as i32) << 1)) };
+    if v < 0 {
+        logln(&alloc::format!(
+            "[i2c-hid] interrupt: GSI {gsi} refused (taken, or no I/O APIC) — staying on the 5 ms poll"));
+        return None;
+    }
+    for (&off, &active_low) in pins.iter().zip(lows.iter()) {
+        let o = off as i32;
+        let cfg = gpio::irq_level_config(unsafe { npk_mmio_read32(handle, o) } as u32, active_low);
+        // Enable while still masked, wait for the enable bit to read back
+        // (the debounce settles), then write the plain configuration.
+        unsafe { npk_mmio_write32(handle, o, ((cfg | gpio::INTERRUPT_ENABLE) & !gpio::INTERRUPT_MASK) as i32) };
+        for _ in 0..100_000 {
+            if unsafe { npk_mmio_read32(handle, o) } as u32 & gpio::INTERRUPT_ENABLE != 0 { break; }
+        }
+        unsafe { npk_mmio_write32(handle, o, cfg as i32) };
+        // `amd_gpio_irq_enable`.
+        let r = unsafe { npk_mmio_read32(handle, o) } as u32;
+        unsafe { npk_mmio_write32(handle, o, (r | gpio::INTERRUPT_ENABLE | gpio::INTERRUPT_MASK) as i32) };
+    }
+    let block_off = g.mmio_base & 0xFFF;
+    let mr = (block_off + gpio::WAKE_INT_MASTER_REG) as i32;
+    let m = unsafe { npk_mmio_read32(handle, mr) } as u32;
+    unsafe { npk_mmio_write32(handle, mr, (m | gpio::EOI_MASK) as i32) };
+    logln(&alloc::format!(
+        "[i2c-hid] interrupt: GSI {gsi} ({}, active-{}) on vector {v} — the pads wake the driver",
+        if level { "level" } else { "edge" }, if low { "low" } else { "high" }));
+    Some(IrqMode { handle, block_off, pins })
 }
 
 /// Den Controller ANFASSEN: abbilden, Kennung lesen, Zaehler rechnen.

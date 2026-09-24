@@ -125,6 +125,11 @@ pub struct GpioController {
     pub ids: Vec<String>,
     pub mmio_base: u32,
     pub mmio_len: u32,
+    /// Its own interrupt line — the first `ExtendedIrq` of its `_CRS` and
+    /// the descriptor's raw flags (ACPI 6.4.3.6: bit 1 edge, bit 2 active
+    /// low). One line for ALL pins; `pinctrl-amd` takes it as
+    /// `platform_get_irq(pdev, 0)`.
+    pub irq: Option<(u32, u8)>,
 }
 
 /// Einen ACPI-Pfad aus einer Zeichenkette in einen Namespace-Pfad wandeln.
@@ -218,15 +223,20 @@ fn read_gpio_controller(m: &mut Machine, path: &Path) -> GpioController {
     let ids = m.device_ids(path);
     let mut mmio_base = 0u32;
     let mut mmio_len = 0u32;
+    let mut irq = None;
     for r in resources(m, path) {
-        if let crs::Resource::Memory32Fixed { address, length } = r {
-            if mmio_base == 0 {
+        match r {
+            crs::Resource::Memory32Fixed { address, length } if mmio_base == 0 => {
                 mmio_base = address;
                 mmio_len = length;
             }
+            crs::Resource::ExtendedIrq { flags, interrupts } if irq.is_none() => {
+                irq = interrupts.first().map(|&g| (g, flags));
+            }
+            _ => {}
         }
     }
-    GpioController { path: path.clone(), ids, mmio_base, mmio_len }
+    GpioController { path: path.clone(), ids, mmio_base, mmio_len, irq }
 }
 
 /// `i2c_hid_acpi_get_descriptor` — `_DSM(guid, 1, 1, {})` gibt die Adresse
