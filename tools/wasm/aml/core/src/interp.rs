@@ -103,6 +103,25 @@ fn eisa_id(s: &str) -> u64 {
         | ((swapped & 0xFF) << 24)
 }
 
+/// The EC's GPE number: `_GPE` in the scope of an EmbeddedControl region
+/// (ACPI 6.5 §12.11, an Integer here; the Package form for a GPE block
+/// device is not handled).
+pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
+    for (path, node) in ns.nodes.iter() {
+        if let Node::Region { space: 3, .. } = node {
+            let mut g = path.clone();
+            g.pop();
+            g.push(crate::value::seg("_GPE"));
+            if let Some(Node::Name(v)) = ns.nodes.get(&g) {
+                if let Value::Int(n) = &*v.borrow() {
+                    return Some(*n as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
     let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
     // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die

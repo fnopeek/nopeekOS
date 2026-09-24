@@ -20,7 +20,7 @@ mod boot_uefi;
 // ── Module groups ──────────────────────────────────────────────
 mod drivers;
 pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
-pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi, smbus, battery, ec};
+pub use drivers::{xhci, keyboard, framebuffer, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
 pub use drivers::wifi;
 
 mod mm;

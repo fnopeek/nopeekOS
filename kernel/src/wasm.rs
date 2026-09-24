@@ -2298,6 +2298,19 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_sci_arm(gpe) -> vector | -1 and npk_sci_service() -> mask: the
+    // ACPI SCI for the AML driver's EC (drivers/sci.rs).
+    linker.func_wrap("env", "npk_sci_arm",
+        |mut caller: Caller<'_, HostState>, gpe: i32| -> i32 {
+            host_core::npk_sci_arm(caller.data_mut(), gpe)
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+    linker.func_wrap("env", "npk_sci_service",
+        |mut caller: Caller<'_, HostState>| -> i32 {
+            host_core::npk_sci_service(caller.data_mut())
+        },
+    ).map_err(|_| WasmError::HostFunctionError)?;
+
     // npk_irq_register_gsi(gsi, flags) -> vector | -1 — a non-PCI device's
     // I/O APIC line (flags: 1 level, 2 active-low). HARDWARE-gated.
     linker.func_wrap("env", "npk_irq_register_gsi",

@@ -1329,6 +1329,45 @@ pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) ->
     }
 }
 
+/// `npk_sci_arm(gpe) -> vector | -1`: the AML driver takes the ACPI SCI for
+/// its EC's GPE. Same ownership as `npk_irq_register_gsi` — the vector is
+/// this module's, and `npk_wait(WAIT_IRQ)` arms it. Once per boot.
+pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    if !(0..256).contains(&gpe) { return -1; }
+    if ctx.hw.is_none() {
+        ctx.hw = Some(HwDriverState {
+            is_pci: false,
+            pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
+            vendor_id: 0,
+            device_id: 0,
+            mmio_maps: Vec::new(),
+            dma_allocs: Vec::new(),
+            bus_master_enabled: false,
+            registered_as_netdev: false,
+            irq_vector: 0,
+            irq_seen: 0,
+        });
+    }
+    let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
+    if hw.irq_vector != 0 { return -1; }
+    let Some((gsi, level, low)) = crate::sci::arm_ec(gpe as u32) else { return -1 };
+    match crate::irq::register_gsi(gsi, level, low) {
+        Some(v) => { hw.irq_vector = v; v as i32 }
+        None => -1,
+    }
+}
+
+/// `npk_sci_service() -> mask`: ack the SCI sources (see `sci::service`).
+pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    crate::sci::service() as i32
+}
+
 /// Is `vector` the one THIS module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)

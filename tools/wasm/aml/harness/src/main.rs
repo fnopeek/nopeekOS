@@ -4,7 +4,7 @@
 //!
 //!   cargo run -p aml_harness -- ../dev/DSDT.aml
 
-use aml_core::{find_batteries, path_str, read_battery, Ec, Namespace};
+use aml_core::{ec_gpe, find_batteries, path_str, read_battery, Ec, Namespace};
 use std::collections::HashMap;
 
 /// Mock EC: returns realistic values at the HP Dragonfly battery offsets so the
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// hit ports 0x62/0x66 instead.
 struct MockEc {
     mem: HashMap<u8, u8>,
+    queries: Vec<u8>,
 }
 
 impl MockEc {
@@ -34,7 +35,9 @@ impl MockEc {
         // BPV @0xA5 = 7700 mV
         mem.insert(0xA5, 0x14);
         mem.insert(0xA6, 0x1E);
-        Self { mem }
+        Self { mem, queries: std::env::var("QUERIES").ok()
+            .map(|v| v.split(',').filter_map(|x| u8::from_str_radix(x, 16).ok()).collect())
+            .unwrap_or_default() }
     }
 }
 
@@ -48,6 +51,17 @@ impl Ec for MockEc {
         eprintln!("  ec.write[{:#04x}] <- {:#04x}", addr, val);
         self.mem.insert(addr, val);
     }
+    fn query(&mut self) -> Option<u8> {
+        if self.queries.is_empty() { None } else { Some(self.queries.remove(0)) }
+    }
+    fn ec_event(&mut self, q: u8, handled: bool) {
+        println!("  EC event _Q{:02X} handled={}", q, handled);
+    }
+    fn notify(&mut self, path: &[[u8; 4]], value: u64) {
+        let p: Vec<String> = path.iter().map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+        println!("  Notify(\\{}, {:#x})", p.join("."), value);
+    }
+    fn note(&mut self, s: &str) { if std::env::var("LOUD").is_ok() { println!("{s}"); } }
 }
 
 fn main() {
@@ -63,6 +77,7 @@ fn main() {
         }
     };
     println!("namespace: {} objects", ns.nodes.len());
+    println!("EC _GPE: {:?}", ec_gpe(&ns));
 
     let bats = find_batteries(&ns);
     println!("batteries found: {}", bats.len());
