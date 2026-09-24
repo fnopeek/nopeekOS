@@ -86,8 +86,13 @@ pub fn arm_ec(gpe: u32) -> Option<(u32, bool, bool)> {
     Some((gsi, level, low))
 }
 
-/// Ack what raised the SCI. Bit 0: the EC's GPE was set. Bits 16..31: the
-/// PM1 fixed events that were set AND enabled (bit 8 = power button).
+/// Ack what raised the SCI. Bit 0: the EC's GPE was set. Bit 1: the EC has
+/// an EVENT to query (status SCI_EVT) — the EC also raises its GPE when a
+/// transaction's output is ready, so bit 0 alone is mostly our own reads
+/// (Linux `ec.c` queries only on SCI_EVT; measured on the IdeaPad: ~60 GPEs
+/// a second, driven by aml's own EC accesses, until this bit was checked).
+/// Bits 16..31: the PM1 fixed events that were set AND enabled (bit 8 =
+/// power button).
 pub fn service() -> u32 {
     if !ARMED.load(Ordering::Acquire) { return 0; }
     let Some(b) = blocks() else { return 0 };
@@ -111,6 +116,10 @@ pub fn service() -> u32 {
                 out |= (fired as u32) << 16;
             }
         }
+    }
+    // SAFETY: EC status port, read only.
+    if unsafe { inb(0x66) } & 0x20 != 0 {
+        out |= 2;
     }
     if out & 1 != 0 { EC_HITS.fetch_add(1, Ordering::Relaxed); }
     if out >> 16 != 0 { PM1_HITS.fetch_add(1, Ordering::Relaxed); }
