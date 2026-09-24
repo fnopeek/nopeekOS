@@ -21,3 +21,4 @@ pub mod acpi;
 pub mod smbus;
 pub mod battery;
 pub mod ec;
+pub mod sci;

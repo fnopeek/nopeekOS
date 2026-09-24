@@ -229,6 +229,11 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> Result<Batte
     interp::read_battery(ns, ec, bat)
 }
 
+/// The EC's GPE number (`_GPE` next to its EmbeddedControl region).
+pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
+    interp::ec_gpe(ns)
+}
+
 /// Find every Control-Method-Battery device (`_HID == "PNP0C0A"`).
 pub fn find_batteries(ns: &Namespace) -> Vec<Path> {
     interp::find_batteries(ns)

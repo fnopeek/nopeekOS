@@ -13,7 +13,7 @@
 
 extern crate alloc;
 
-use aml_core::{find_batteries, read_battery, Ec, Namespace};
+use aml_core::{ec_gpe, find_batteries, read_battery, Ec, Namespace};
 
 // The driver needs raw firmware + EC access — declare the HARDWARE capability
 // (bit 0x40) so the kernel grants exactly that and nothing else.
@@ -43,6 +43,9 @@ unsafe extern "C" {
     fn npk_ec_query() -> i32;
     fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
     fn npk_battery_report(packed: i32);
+    fn npk_sci_arm(gpe: i32) -> i32;
+    fn npk_sci_service() -> i32;
+    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
     fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn npk_sleep(ms: i32) -> i32;
     fn npk_log_serial(ptr: i32, len: i32);
@@ -103,6 +106,8 @@ fn lognum(prefix: &str, mut v: u32) {
     if let Ok(t) = core::str::from_utf8(&buf[i..]) { log(t); }
     log("\n");
 }
+
+const WAIT_IRQ: i32 = 2;
 
 // ── bump allocator: reset to zero each tick (re-parse is fully transient) ──
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
@@ -226,6 +231,27 @@ pub extern "C" fn _start() {
     // Die erste Runde erzaehlt, danach nur noch, wenn sich das ERGEBNIS
     // aendert. Eine Wegmarke je Runde ist beim Suchen richtig und im
     // Betrieb eine Flut — der Treiber laeuft fuer immer.
+    // Das SCI nehmen: der EC meldet ueber sein GPE, und ein Hotkey-Ereignis
+    // muss binnen Millisekunden abgeholt werden — nach 10 s antwortete der
+    // EC des IdeaPad auf QR_EC nur noch mit 0 (die Helligkeitstasten
+    // kamen nie an). Ohne SCI bleibt es beim 10-s-Takt.
+    let sci_vec = {
+        heap_reset();
+        let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
+        match Namespace::load(table).ok().and_then(|ns| ec_gpe(&ns)) {
+            Some(gpe) => {
+                let v = unsafe { npk_sci_arm(gpe as i32) };
+                if v > 0 {
+                    lognum("[aml] EC events by SCI, GPE ", gpe);
+                } else {
+                    logln("[aml] SCI not available — EC polled every 10 s");
+                }
+                v
+            }
+            None => { logln("[aml] no EC _GPE — EC polled every 10 s"); -1 }
+        }
+    };
+
     let mut round = 0u32;
     let mut last = i32::MIN;
     loop {
@@ -255,7 +281,18 @@ pub extern "C" fn _start() {
                     i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32)
             };
         }
-        unsafe { npk_sleep(10_000) };
+        if sci_vec > 0 {
+            // Wake on the SCI (the wait also unmasks it), at the latest
+            // after 10 s for the battery; then ack before draining, so an
+            // event that arrives meanwhile fires again.
+            unsafe { npk_wait(WAIT_IRQ, 10_000) };
+            let fired = unsafe { npk_sci_service() };
+            if fired > 0 && (fired >> 16) & 0x100 != 0 {
+                logln("[aml] power button (PM1 PWRBTN_STS)");
+            }
+        } else {
+            unsafe { npk_sleep(10_000) };
+        }
     }
 }
 
