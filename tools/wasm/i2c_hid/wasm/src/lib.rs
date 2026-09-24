@@ -278,7 +278,7 @@ pub extern "C" fn _start() {
         return;
     }
     logln(&alloc::format!("[i2c-hid] {} pointer device(s) live", live.len()));
-    let irq = arm_irq(&found, &live);
+    let mut irq = arm_irq(&found, &live);
 
     // Dauerbetrieb. Ein Treiber kehrt nicht zurueck — er horcht.
     //
@@ -398,17 +398,44 @@ pub extern "C" fn _start() {
                 l.errs = 0; l.skips = 0; l.capped = 0;
             }
         }
-        match &irq {
+        match &mut irq {
             Some(q) => {
                 // `do_amd_gpio_irq_handler`: every pending pin acknowledged
                 // (writing back what was read clears its status bits), then
                 // the EOI to the GPIO unit. The level line the kernel masked
                 // is released when we wait again.
                 use i2c_hid_core::gpio;
-                for &off in &q.pins {
-                    let v = unsafe { npk_mmio_read32(q.handle, off as i32) } as u32;
-                    if v & gpio::PIN_IRQ_PENDING != 0 {
-                        unsafe { npk_mmio_write32(q.handle, off as i32, v as i32) };
+                // ALL pending pins of the block, as `do_amd_gpio_irq_handler`
+                // does — the line is shared by every pin. 0.28.0 acked only
+                // ours; a pin the firmware enabled (lid, hotkeys, EC) with
+                // its status standing kept the level line up for good, and
+                // the driver span. Ours are acknowledged; any other pending
+                // pin is not an interrupt anybody here handles, so it is
+                // masked — Linux: "Disabling spurious GPIO IRQ".
+                let rd = |o: u32| unsafe { npk_mmio_read32(q.handle, o as i32) } as u32;
+                let wr = |o: u32, v: u32| unsafe { npk_mmio_write32(q.handle, o as i32, v as i32) };
+                let status = ((rd(q.block_off + gpio::WAKE_INT_STATUS_REG1) as u64) << 32
+                    | rd(q.block_off + gpio::WAKE_INT_STATUS_REG0) as u64)
+                    & ((1u64 << 46) - 1);
+                for bit in 0..46u32 {
+                    if status & (1u64 << bit) == 0 { continue; }
+                    for i in 0..4u32 {
+                        let off = q.block_off + (bit * 4 + i) * 4;
+                        let v = rd(off);
+                        if v & gpio::PIN_IRQ_PENDING == 0 || v & gpio::INTERRUPT_MASK == 0 {
+                            continue;
+                        }
+                        if q.pins.contains(&off) {
+                            wr(off, v);
+                        } else {
+                            wr(off, v & !gpio::INTERRUPT_MASK);
+                            if q.spurious_logged < 8 {
+                                logln(&alloc::format!(
+                                    "[i2c-hid] interrupt: GPIO pin {} pending but nobody's — masked",
+                                    bit * 4 + i));
+                            }
+                            q.spurious_logged += 1;
+                        }
                     }
                 }
                 let mr = q.block_off + gpio::WAKE_INT_MASTER_REG;
@@ -447,6 +474,8 @@ struct IrqMode {
     block_off: u32,
     /// Each pad's pin register (page offset).
     pins: alloc::vec::Vec<u32>,
+    /// How many foreign pending pins were masked (first few are logged).
+    spurious_logged: u32,
 }
 
 /// Wait on the GPIO controller's interrupt instead of polling — or say why
@@ -506,7 +535,7 @@ fn arm_irq(found: &[i2c_hid_core::discover::HidDevice], live: &[Live]) -> Option
     logln(&alloc::format!(
         "[i2c-hid] interrupt: GSI {gsi} ({}, active-{}) on vector {v} — the pads wake the driver",
         if level { "level" } else { "edge" }, if low { "low" } else { "high" }));
-    Some(IrqMode { handle, block_off, pins })
+    Some(IrqMode { handle, block_off, pins, spurious_logged: 0 })
 }
 
 /// Den Controller ANFASSEN: abbilden, Kennung lesen, Zaehler rechnen.

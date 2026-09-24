@@ -95,6 +95,9 @@ pub const WAKE_STS: u32 = 1 << 29;
 pub const PIN_IRQ_PENDING: u32 = INTERRUPT_STS | WAKE_STS;
 /// Relative to the block base.
 pub const WAKE_INT_MASTER_REG: u32 = 0xfc;
+/// Which groups of four pins have something pending (bits 0-45).
+pub const WAKE_INT_STATUS_REG0: u32 = 0x2f8;
+pub const WAKE_INT_STATUS_REG1: u32 = 0x2fc;
 pub const EOI_MASK: u32 = 1 << 29;
 
 /// `amd_gpio_irq_set_type` for a LEVEL line (the only kind HID over I2C
