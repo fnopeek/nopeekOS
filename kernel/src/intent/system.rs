@@ -393,7 +393,7 @@ pub fn intent_power(args: &str) {
     // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
     // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
     // machen. `power 5` misst fuenf Sekunden.
-    let secs: u64 = args.parse().unwrap_or(2).clamp(1, 30);
+    let secs: u64 = args.parse().unwrap_or(2).clamp(1, 300);
     let cores = crate::smp::per_core::core_count().min(256);
     let deep0: u64 = (0..cores).map(|c| crate::interrupts::DEEP_IDLE_COUNT[c]
         .load(core::sync::atomic::Ordering::Relaxed)).sum();
@@ -405,9 +405,19 @@ pub fn intent_power(args: &str) {
     let (halt0, _) = crate::smp::per_core::halt_snapshot(0);
 
     let deadline = t0 + secs * tsc_hz;
+    // Wie oft hat die Firmware den Zaehler im Fenster fortgeschrieben? Auf
+    // dem IdeaPad (SMU) nur in Klumpen, wenn das Package wach ist — im
+    // tiefen Leerlauf stand er 10 s lang still (0,000 W), und 20 s ergaben
+    // je nach Lage 3,06 oder 1,96 W. Ein Wert aus wenigen Spruengen ist
+    // keine Messung; er wird so gekennzeichnet.
+    let mut jumps = 0u32;
+    let mut last = pkg0;
     while crate::interrupts::rdtsc() < deadline {
-        // Kern 0 hat keinen Takt mehr (Stufe 3e): bis zur Frist anhalten.
-        crate::interrupts::halt_until(Some(deadline), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        // Kern 0 hat keinen Takt mehr (Stufe 3e): alle 100 ms nachsehen.
+        let d = (crate::interrupts::rdtsc() + tsc_hz / 10).min(deadline);
+        crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        let e = crate::smp::per_core::rapl_pkg_raw();
+        if e != last { jumps += 1; last = e; }
     }
 
     let t1 = crate::interrupts::rdtsc();
@@ -430,7 +440,9 @@ pub fn intent_power(args: &str) {
     kprintln!();
     kprintln!("  CPU-Leistung (RAPL, {} s Fenster, Core 0 im hlt)", secs);
     kprintln!("  ─────────────────────────────────────────────");
-    kprintln!("  Package          {}.{:03} W", pkg_mw / 1000, pkg_mw % 1000);
+    kprintln!("  Package          {}.{:03} W   (Zaehler {}x fortgeschrieben{})",
+        pkg_mw / 1000, pkg_mw % 1000, jumps,
+        if jumps < 20 { " — ZU WENIG, laenger messen" } else { "" });
     kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
     kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
     let port = crate::interrupts::deep_idle_port();
