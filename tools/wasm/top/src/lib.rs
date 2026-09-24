@@ -158,9 +158,11 @@ pub extern "C" fn _start() {
             pad(usage, 3);
             print("%");
 
+            // 0 = the core did not run in the window (kernel 0.423+): no
+            // frequency to show, it slept.
             let mhz = sys(12 | ((i as i32) << 8) as i32);
             print("  ");
-            pad(mhz, 5);
+            if mhz == 0 { print("    -"); } else { pad(mhz, 5); }
 
             let qlen = sys(11 | ((i as i32) << 8) as i32);
             print("  ");
@@ -169,9 +171,11 @@ pub extern "C" fn _start() {
             if i == 0 {
                 print("  kernel/irq");
             } else if core_has_proc[i as usize] {
-                print("  wasm");
+                if mhz == 0 { print("  wasm (asleep)"); } else { print("  wasm"); }
             } else if usage > 5 {
                 print("  worker");
+            } else if mhz == 0 {
+                print("  idle (asleep)");
             } else {
                 print("  idle");
             }

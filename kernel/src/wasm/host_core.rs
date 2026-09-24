@@ -642,12 +642,14 @@ pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
         },
         12 => {
             let core = (key >> 8) as usize;
+            crate::smp::per_core::update_core_freq(core);
             crate::smp::per_core::core_freq_mhz(core) as i64
         },
         13 => crate::smp::per_core::max_turbo_mhz() as i64,
         14 => crate::smp::per_core::min_eff_mhz() as i64,
         15 => {
             let core = (key >> 8) as usize;
+            crate::smp::per_core::update_core_freq(core);
             crate::smp::per_core::core_usage(core) as i64
         },
         // CPUID 0x15 raw values for diagnostics

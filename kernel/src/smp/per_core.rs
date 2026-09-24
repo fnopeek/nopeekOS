@@ -158,7 +158,32 @@ static HALT_SINCE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// Mark `core_id` as halted from TSC `t0` on (cleared by `record_halt`).
 pub fn halt_begin(core_id: usize, t0: u64) {
     if core_id < 256 {
+        // The core's running cycles up to here, for a reader on another
+        // core (`update_core_freq`): APERF/MPERF are core-local MSRs and
+        // stand still while the core is halted, so this snapshot is exact
+        // until the core runs again.
+        if HAS_APERFMPERF.load(Ordering::Relaxed) {
+            let (a, m) = read_aperf_mperf();
+            RUN_APERF[core_id].store(a, Ordering::Relaxed);
+            RUN_MPERF[core_id].store(m, Ordering::Relaxed);
+        }
         HALT_SINCE[core_id].store(t0, Ordering::Relaxed);
+    }
+}
+
+/// APERF/MPERF as of the core's last halt entry (see `halt_begin`).
+static RUN_APERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+static RUN_MPERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+fn read_aperf_mperf() -> (u64, u64) {
+    // SAFETY: only called when CPUID.06H:ECX[0] says MSRs 0xE7/0xE8 exist.
+    unsafe {
+        let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
+        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi,
+            options(nomem, nostack, preserves_flags));
+        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi,
+            options(nomem, nostack, preserves_flags));
+        (((a_hi as u64) << 32) | a_lo as u64, ((m_hi as u64) << 32) | m_lo as u64)
     }
 }
 
@@ -523,7 +548,12 @@ pub fn has_mwait() -> bool {
 ///            Both MSRs stop ticking during C-states, so ratio is independent
 ///            of idle; captures true average P-state when active.
 ///
-/// Must be called ON the core being measured (rdmsr is core-local).
+/// Callable from ANY core (since 0.423): the halt counter is shared, and
+/// APERF/MPERF of another core come from the snapshot it takes at every halt
+/// entry. Before, only the core itself could measure — and a sleeping core
+/// never does, so `top` showed a value from its last burst (3.5 GHz on a
+/// core asleep for minutes). This relies on one TSC across cores
+/// (`smp::init` corrects core 0 at boot).
 pub fn update_core_freq(core_id: usize) {
     if core_id >= 256 { return; }
 
@@ -544,17 +574,12 @@ pub fn update_core_freq(core_id: usize) {
     // guests with `-cpu qemu64`. Reading them unconditionally raises #GP.
     let has_apmp = HAS_APERFMPERF.load(Ordering::Relaxed);
 
-    let (aperf, mperf): (u64, u64) = if has_apmp {
-        // SAFETY: MSRs 0xE7/0xE8 confirmed by CPUID gate above.
-        unsafe {
-            let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
-            core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi);
-            core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi);
-            (((a_hi as u64) << 32) | a_lo as u64,
-             ((m_hi as u64) << 32) | m_lo as u64)
-        }
-    } else {
+    let (aperf, mperf): (u64, u64) = if !has_apmp {
         (0, 0)
+    } else if core_id == current_core_id() {
+        read_aperf_mperf()
+    } else {
+        (RUN_APERF[core_id].load(Ordering::Relaxed), RUN_MPERF[core_id].load(Ordering::Relaxed))
     };
     let tsc = crate::interrupts::rdtsc();
 
@@ -593,7 +618,10 @@ pub fn update_core_freq(core_id: usize) {
 
     // Effective running frequency: APERF/MPERF * nominal_TSC_freq.
     // TSC is calibrated to nominal base; MPERF ticks at that same rate.
-    if delta_mperf > 0 {
+    // A core that did not run in the window has no frequency: 0 = asleep.
+    if delta_mperf == 0 {
+        CORE_MHZ[core_id].store(0, Ordering::Relaxed);
+    } else {
         let nominal_mhz = (crate::interrupts::tsc_freq() / 1_000_000) as u64;
         // Guard against overflow: cap aperf delta ratio implicitly via u128.
         let eff_mhz = ((delta_aperf as u128) * (nominal_mhz as u128)
