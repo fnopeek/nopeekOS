@@ -1729,6 +1729,16 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "ec" if args.trim_start().starts_with("watch") => {
             system::intent_ec_watch(args.trim_start().trim_start_matches("watch"));
         }
+        "ec" => {
+            // A/B switches for power measurements (see drivers/sci.rs).
+            match args.split_whitespace().collect::<alloc::vec::Vec<_>>().as_slice() {
+                ["gpe", "off"] => kprintln!("  EC-GPE aus: {}", crate::sci::set_ec_gpe(false)),
+                ["gpe", "on"] => kprintln!("  EC-GPE an: {}", crate::sci::set_ec_gpe(true)),
+                ["mode", "legacy"] => kprintln!("  SCI_EN jetzt {:?}", crate::sci::set_acpi_mode(false)),
+                ["mode", "acpi"] => kprintln!("  SCI_EN jetzt {:?}", crate::sci::set_acpi_mode(true)),
+                _ => kprintln!("  ec watch [take] [s] | ec gpe on|off | ec mode acpi|legacy"),
+            }
+        }
         "dsdt" => {
             // `dsdt send <ip> <port>` streams the raw table over TCP (exact
             // bytes, no terminal-mirror ring-overflow); `dsdt full` base64-
