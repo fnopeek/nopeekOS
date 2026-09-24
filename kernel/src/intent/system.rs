@@ -189,9 +189,18 @@ pub fn intent_cores() {
                 crate::interrupts::rdtsc().saturating_sub(lt) / (tsc_hz / 1000).max(1)
             };
             let hs = crate::smp::per_core::halt_since(c);
-            kprintln!("        at: {}  loop {} ms ago  idle={}  halt_since={}  fibers={}",
-                at, ago_ms, idle as u8, if hs == 0 { "0" } else { "set" },
+            let now = crate::interrupts::rdtsc();
+            let ms = |t: u64| -> i64 {
+                if t == 0 { 0 } else { (now as i64 - t as i64) / (tsc_hz / 1000).max(1) as i64 }
+            };
+            kprintln!("        at: {}  loop {} ms ago (signed {})  idle={}  halt_since {} ms ago  fibers={}",
+                at, ago_ms, ms(lt), idle as u8, if hs == 0 { 0 } else { ms(hs) },
                 crate::smp::fiber::fiber_count(c));
+            match crate::smp::per_core::tsc_offset(c) {
+                Some((off, rt)) => kprintln!("        tsc vs core 0: {:+} us  (round trip {} us)",
+                    off / tsc_per_us as i64, rt / tsc_per_us),
+                None => kprintln!("        tsc vs core 0: (no answer)"),
+            }
         }
 
         // Wake-source breakdown: which cause returned each halt this
