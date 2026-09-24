@@ -836,6 +836,105 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
     kprintln!("[npk] tables sent ({} bytes, {} tables)", total, n);
 }
 
+/// `ec watch [s]` — read-only look at how firmware events reach us, for
+/// hotkeys that do nothing (brightness on the IdeaPad): is ACPI mode on
+/// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
+/// Nothing is written and no event is taken — aml keeps draining the EC.
+pub fn intent_ec_watch(args: &str) {
+    use crate::serial::{inb, inw};
+    let secs: u64 = args.trim().parse().unwrap_or(15).clamp(1, 60);
+    let Some(fadt) = crate::acpi::find_table(b"FACP") else {
+        kprintln!("[npk] no FADT");
+        return;
+    };
+    crate::acpi::ensure_mapped_pub(fadt, 256);
+    // SAFETY: FADT mapped above; fields at their ACPI 6.5 §5.2.9 offsets.
+    let (smi_cmd, acpi_en, pm1a_evt, pm1a_cnt, gpe0, gpe0_len, flen) = unsafe {
+        let r32 = |o: usize| core::ptr::read_unaligned((fadt + o) as *const u32);
+        let r8 = |o: usize| core::ptr::read_volatile((fadt + o) as *const u8);
+        let mut g = r32(80) as u64;
+        if g == 0 && r32(4) >= 232 {
+            g = core::ptr::read_unaligned((fadt + 224) as *const u64);
+        }
+        (r32(48), r8(52), r32(56), r32(64), g, r8(92), r32(4))
+    };
+    kprintln!();
+    kprintln!("  FADT len {}: SMI_CMD 0x{:x} ACPI_ENABLE 0x{:x} PM1a_EVT 0x{:x} PM1a_CNT 0x{:x}",
+        flen, smi_cmd, acpi_en, pm1a_evt, pm1a_cnt);
+    kprintln!("  GPE0 0x{:x}, {} bytes ({} status + {} enable)", gpe0, gpe0_len,
+        gpe0_len / 2, gpe0_len / 2);
+    if pm1a_cnt != 0 && pm1a_cnt <= 0xFFFF {
+        // SAFETY: PM1a_CNT is an I/O port named by the FADT.
+        let cnt = unsafe { inw(pm1a_cnt as u16) };
+        kprintln!("  PM1_CNT 0x{:04x} — SCI_EN {} ({})", cnt, cnt & 1,
+            if cnt & 1 != 0 { "ACPI-Modus: Ereignisse gehen ans OS" }
+            else { "LEGACY: die Firmware (SMM) behaelt die Ereignisse" });
+    }
+    let half = (gpe0_len / 2) as usize;
+    let gpe_ok = gpe0 != 0 && gpe0 <= 0xFFFF && half > 0 && half <= 16;
+    let read_gpe = |off: usize| -> [u8; 16] {
+        let mut v = [0u8; 16];
+        if gpe_ok {
+            for i in 0..half {
+                // SAFETY: inside the GPE0 block the FADT names.
+                v[i] = unsafe { inb(gpe0 as u16 + (off + i) as u16) };
+            }
+        }
+        v
+    };
+    let en = read_gpe(half);
+    let mut line = alloc::string::String::new();
+    for i in 0..half { line.push_str(&alloc::format!("{:02x} ", en[i])); }
+    kprintln!("  GPE enable  {}", line);
+    kprintln!();
+    kprintln!("  {} s: jetzt die Helligkeitstasten druecken. Jede Aenderung erscheint.", secs);
+
+    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+    let t0 = crate::interrupts::rdtsc();
+    let end = t0 + secs * tsc_hz;
+    // SAFETY: EC status port and PM1a status, both I/O ports of the FADT/EC.
+    let mut last_ec = unsafe { inb(0x66) };
+    let mut last_gpe = read_gpe(0);
+    let mut last_pm1 = if pm1a_evt != 0 && pm1a_evt <= 0xFFFF { unsafe { inw(pm1a_evt as u16) } } else { 0 };
+    let mut changes = 0u32;
+    while crate::interrupts::rdtsc() < end && changes < 60 {
+        let now = crate::interrupts::rdtsc();
+        crate::interrupts::halt_until(Some(now + tsc_hz / 200), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        let ms = (crate::interrupts::rdtsc() - t0) / (tsc_hz / 1000).max(1);
+        let ec = unsafe { inb(0x66) };
+        if (ec ^ last_ec) & 0x20 != 0 {
+            kprintln!("  {:>6} ms  EC SCI_EVT {} (Status 0x{:02x})", ms, (ec >> 5) & 1, ec);
+            changes += 1;
+        }
+        last_ec = ec;
+        let g = read_gpe(0);
+        for i in 0..half {
+            let rose = g[i] & !last_gpe[i];
+            if rose != 0 {
+                for b in 0..8 {
+                    if rose & (1 << b) != 0 {
+                        kprintln!("  {:>6} ms  GPE {} Status gesetzt (enable {})", ms, i * 8 + b,
+                            (en[i] >> b) & 1);
+                        changes += 1;
+                    }
+                }
+            }
+        }
+        last_gpe = g;
+        if pm1a_evt != 0 && pm1a_evt <= 0xFFFF {
+            let p = unsafe { inw(pm1a_evt as u16) };
+            let rose = p & !last_pm1;
+            if rose != 0 {
+                kprintln!("  {:>6} ms  PM1_STS +0x{:04x}", ms, rose);
+                changes += 1;
+            }
+            last_pm1 = p;
+        }
+    }
+    kprintln!("  Ende ({} Aenderungen).", changes);
+    kprintln!();
+}
+
 pub fn intent_uptime() {
     let secs = crate::interrupts::uptime_secs();
     let days = secs / 86400;
