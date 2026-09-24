@@ -1222,6 +1222,30 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
         render_frame();
         return;
     }
+    // **Loading the module happens on a worker** (`docs/plan/CORES_AND_EVENTS.md`,
+    // stage 3). Reading it from npkFS, decrypting it and checking its hash
+    // took milliseconds to tens of milliseconds for a large module — on
+    // Core 0, between the click and the next frame. The check above stays
+    // here: it needs the compositor.
+    let job = alloc::boxed::Box::new(LaunchJob { name: alloc::string::String::from(name), ttl_ticks });
+    let arg = alloc::boxed::Box::into_raw(job) as u64;
+    if crate::smp::scheduler::worker_count() == 0 {
+        launch_task(arg);
+    } else {
+        crate::smp::scheduler::spawn(launch_task, arg);
+    }
+}
+
+struct LaunchJob {
+    name: alloc::string::String,
+    ttl_ticks: Option<u64>,
+}
+
+fn launch_task(arg: u64) {
+    // SAFETY: `arg` is the `Box<LaunchJob>` leaked by `launch_app_with_ttl`,
+    // handed to exactly one task.
+    let job = unsafe { alloc::boxed::Box::from_raw(arg as *mut LaunchJob) };
+    let name = job.name.as_str();
     let path = alloc::format!("sys/wasm/{}", name);
     let (bytes, _hash) = match crate::npkfs::fetch(&path) {
         Ok(v) => v,
@@ -1230,7 +1254,7 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
     // Per-app rights from the module's `.npk.caps` section (no blanket
     // WRITE); absent → safe default.
     let rights = crate::capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match crate::capability::create_module_cap(rights, ttl_ticks) {
+    let module_cap = match crate::capability::create_module_cap(rights, job.ttl_ticks) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
     };

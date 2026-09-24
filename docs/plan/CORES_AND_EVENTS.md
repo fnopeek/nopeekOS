@@ -343,8 +343,11 @@ Name), npkFS-GC im Leerlauf (Worker-Task), History-Schreiben bei jedem
 Enter (ein Schreiber auf einem Worker, der neueste Stand gewinnt). Ein
 blockierender Task ist ein gewoehnlicher Intent-Task: die Platzierung gibt
 ihm einen freien Worker und markiert ihn belegt. Ohne Worker bleibt alles
-auf Kern 0. **Offen:** Modul laden/entschluesseln beim App-Start
-(`launch_app`), `lock`/Schluesselableitung, Tab-Vervollstaendigung.
+auf Kern 0. **0.419.0:** `launch_app` laedt, entschluesselt und prueft das
+Modul auf einem Worker (`launch_task`); auf Kern 0 bleibt nur die Frage, ob
+das Fenster schon offen ist. **Bewusst auf Kern 0 gelassen:** `lock`
+(Schluesselableitung — der Bildschirm ist dann ohnehin gesperrt) und die
+Tab-Vervollstaendigung (ein kurzes Verzeichnislisten).
 
 ### 3.5 Kern 0 aufloesen
 
