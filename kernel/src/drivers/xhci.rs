@@ -730,6 +730,8 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         w32(oper, OP_USBSTS, STS_EINT);
         w32(oper, OP_USBCMD, r32(oper, OP_USBCMD) | CMD_INTE);
         kprintln!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
+    } else {
+        NEEDS_POLL.store(true, Ordering::Relaxed);
     }
 
     let state = XhciState {
@@ -2814,7 +2816,33 @@ pub fn msi_irq() {
             w32(ir0, 0x00, r32(ir0, 0x00) | 0x01);
             drain(slot);
         }
+    } else {
+        // Core 0 holds the controllers (a transfer). The ring stays
+        // undrained and the controller raises nothing new until it is —
+        // and there is no tick any more to catch it. The shell drains it on
+        // its next pass (`take_missed_drain`); the handler wakes it.
+        MISSED_DRAIN.store(true, Ordering::Release);
     }
+}
+
+static MISSED_DRAIN: AtomicBool = AtomicBool::new(false);
+
+/// An interrupt could not drain the rings: the caller must.
+pub fn take_missed_drain() -> bool {
+    MISSED_DRAIN.swap(false, Ordering::AcqRel)
+}
+
+/// A controller came up without MSI-X: its event ring is drained only by
+/// polling, and Core 0 has no tick to do it (stage 3e).
+static NEEDS_POLL: AtomicBool = AtomicBool::new(false);
+
+pub fn needs_poll() -> bool {
+    NEEDS_POLL.load(Ordering::Relaxed)
+}
+
+/// A USB key is held: its software repeat (`poll_keyboard`) needs the loop.
+pub fn repeat_active() -> bool {
+    REPEAT_KEY.load(Ordering::Relaxed) != 0
 }
 
 pub fn poll_events_irq() {

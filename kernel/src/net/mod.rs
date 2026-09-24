@@ -234,6 +234,9 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
         POLLING.store(false, Ordering::Release);
     } else {
         netdev::wasm_nic_submit_rx(frame);
+        // Core 0 drains this ring in its loop, which no longer runs every
+        // 10 ms (stage 3e): wake it.
+        crate::intent::wake_shell();
     }
 }
 
@@ -288,6 +291,16 @@ pub fn seed_active() {
 /// boot-only one-shot + the manual `dhcp`: pull the LAN cable and WiFi takes
 /// over with a fresh lease automatically. Must NOT run in IRQ context (it does
 /// USB reads + DHCP can block); call from the Core 0 shell loop.
+/// Does the network need Core 0's loop within the next frame? While a TCP
+/// connection runs a timer, a DHCP exchange is in flight, or the active card
+/// is drained only by polling (`net::poll`) — every card but the WASM NIC,
+/// whose driver fiber delivers frames itself (stage 3e).
+pub fn needs_tick() -> bool {
+    tcp::has_timers()
+        || dhcp::is_running()
+        || !matches!(netdev::active(), netdev::Active::Wasm | netdev::Active::None)
+}
+
 pub fn tick_link_and_reconfigure() {
     if crate::smp::per_core::current_core_id() != 0 { return; }
     // Before the throttle: a lease in flight is stepped on EVERY pass, not once

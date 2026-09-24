@@ -418,6 +418,18 @@ fn poll_ps2() -> Option<u8> {
 /// drainer once active. No-op until `PS2_IRQ_ACTIVE` (set after init, only
 /// when a PS/2 mouse exists) so init can't race the IRQ and USB-mouse hosts
 /// are untouched. Core-0 only (the timer handlers run on the BSP).
+/// The i8042's keyboard IRQ is routed (`enable_irq` succeeded). Without it
+/// `read_key` polls the port — and with an aux device the tick-free Core 0
+/// must drain it itself (`needs_poll`).
+static PS2_ROUTED: AtomicBool = AtomicBool::new(false);
+/// An i8042 answered (status register not 0xFF).
+static PS2_PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// Must Core 0 poll the i8042 because no interrupt tells it of a byte?
+pub fn needs_poll() -> bool {
+    PS2_PRESENT.load(Ordering::Relaxed) && !PS2_ROUTED.load(Ordering::Relaxed)
+}
+
 /// Route the i8042 through the I/O APIC to Core 0 (stage 3b). Call on
 /// Core 0 after `ioapic::init`.
 ///
@@ -432,6 +444,7 @@ pub fn enable_irq() {
     if unsafe { inb(STATUS_PORT) } == 0xFF {
         return; // no controller
     }
+    PS2_PRESENT.store(true, Ordering::Relaxed);
     let aux = PS2_MOUSE_ENABLED.load(Ordering::Relaxed);
     let (gsi, level, low) = crate::ioapic::isa_irq(1);
     let dest = crate::interrupts::current_apic_id();
@@ -465,6 +478,7 @@ pub fn enable_irq() {
             }
         }
         PS2_IRQ_ACTIVE.store(true, Ordering::Release);
+        PS2_ROUTED.store(true, Ordering::Release);
         crate::ioapic::unmask(gsi);
         if let Some(g) = aux_gsi {
             crate::ioapic::unmask(g);

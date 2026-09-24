@@ -220,12 +220,11 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
 /// the per-core usage figure is `100 − halted%`, so an unreported halt
 /// reads as full load (`smp::per_core`).
 fn idle_halt() {
-    let t0 = crate::interrupts::rdtsc();
-    // SAFETY: ring-0 idle with interrupts enabled; the 100 Hz APIC timer
-    // and every input IRQ wake us.
-    unsafe { core::arch::asm!("hlt"); }
-    crate::smp::per_core::record_halt(
-        0, crate::interrupts::rdtsc().saturating_sub(t0));
+    // One frame at most. Before boot finishes the periodic tick ends it;
+    // after `lock`, Core 0 has no tick any more (stage 3e) — a bare `hlt`
+    // would sleep until the next key and freeze the screen meanwhile.
+    let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+    crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
 /// Run the graphical login screen.

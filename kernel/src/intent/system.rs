@@ -101,12 +101,8 @@ pub fn intent_cores() {
     let window_ms: u64 = 500;
     let deadline = wall0 + window_ms * (tsc_hz / 1000);
     while crate::interrupts::rdtsc() < deadline {
-        let t0 = crate::interrupts::rdtsc();
-        // SAFETY: ring-0, IRQs enabled in the shell loop — the 100 Hz
-        // timer wakes us within ~10 ms to re-check the deadline.
-        unsafe { core::arch::asm!("hlt"); }
-        crate::smp::per_core::record_halt(
-            0, crate::interrupts::rdtsc().saturating_sub(t0));
+        // Core 0 has no periodic tick (stage 3e): halt to the deadline.
+        crate::interrupts::halt_until(Some(deadline), crate::smp::per_core::WAKE_HLT_FALLBACK);
     }
 
     // Snapshot 2
@@ -132,7 +128,7 @@ pub fn intent_cores() {
     let vmcore = crate::smp::per_core::dedicated_vm_core();
 
     kprintln!();
-    kprintln!("  Per-core CPU (idle-measured, {} ms window; core 0 ticks 100 Hz, workers wake on deadline/IRQ/IPI)", window_ms);
+    kprintln!("  Per-core CPU (idle-measured, {} ms window; every core wakes on deadline/IRQ/IPI)", window_ms);
     kprintln!("  ─────────────────────────────────────────────────────");
     kprintln!("  CORE   BUSY%   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
     for c in 0..cores {
@@ -376,12 +372,8 @@ pub fn intent_power(args: &str) {
 
     let deadline = t0 + secs * tsc_hz;
     while crate::interrupts::rdtsc() < deadline {
-        let h0 = crate::interrupts::rdtsc();
-        // SAFETY: ring-0, IRQs im Shell-Loop an — der 100-Hz-Timer weckt
-        // uns binnen ~10 ms, um die Frist erneut zu pruefen.
-        unsafe { core::arch::asm!("hlt"); }
-        crate::smp::per_core::record_halt(
-            0, crate::interrupts::rdtsc().saturating_sub(h0));
+        // Kern 0 hat keinen Takt mehr (Stufe 3e): bis zur Frist anhalten.
+        crate::interrupts::halt_until(Some(deadline), crate::smp::per_core::WAKE_HLT_FALLBACK);
     }
 
     let t1 = crate::interrupts::rdtsc();

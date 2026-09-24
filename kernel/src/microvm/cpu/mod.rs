@@ -322,6 +322,7 @@ static OPEN_LOFT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// spawn itself happens on Core 0 (`vm_poll_slice`).
 pub fn request_open_loft() {
     OPEN_LOFT_REQUESTED.store(true, Ordering::Release);
+    crate::intent::wake_shell();
 }
 
 // ── Dedicated-core path (substrate rework A2) ──────────────────────
@@ -671,6 +672,8 @@ pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
     }
     AP_SIPI_VECTORS[apic_id as usize].store(sipi_vector, Ordering::Release);
     AP_SPAWN_REQUESTED.fetch_or(1u32 << apic_id, Ordering::AcqRel);
+    // Core 0 spawns it in `vm_poll_slice`; it no longer looks every 10 ms.
+    crate::intent::wake_shell();
 }
 
 /// The BSP publishes the address of its (heap-boxed) `VmShared` so a
@@ -730,6 +733,7 @@ pub fn vm_window() -> u32 {
 pub fn vm_close_for_window(window_id: u32) {
     if window_id != 0 && window_id == ACTIVE_VM_WINDOW.load(Ordering::Acquire) {
         VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+        crate::intent::wake_shell();
     }
 }
 
@@ -741,6 +745,7 @@ pub fn vm_close_for_window(window_id: u32) {
 /// save) until the user closes the host window manually.
 pub fn note_guest_shutdown() {
     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+    crate::intent::wake_shell();
 }
 
 /// Drop the VM↔window binding + its surface and close the Shade
@@ -1170,6 +1175,7 @@ pub fn vm_core_serve() {
     drop(pending); // owned guest-image buffers freed
     // Hand off to Core 0's reaper (compositor-locking teardown).
     VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
+    crate::intent::wake_shell();
 }
 
 /// vCPU-as-fiber entry (fiber mode). Same lifecycle as `vm_core_serve` —
@@ -1370,6 +1376,7 @@ fn vcpu_fiber_task(_arg: u64) {
                     // still running, signal it down and wait for it to stop
                     // touching the shared state before we free it (close()).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+                    crate::intent::wake_shell();
                     while VCPU_COUNT.load(Ordering::Acquire) > 1 {
                         crate::smp::fiber::yield_sleep(2);
                     }
@@ -1435,6 +1442,7 @@ fn vcpu_fiber_task(_arg: u64) {
                     // Last-one-out: the BSP owns the shared box. If an AP is
                     // still running, signal down + wait before freeing (close).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+                    crate::intent::wake_shell();
                     while VCPU_COUNT.load(Ordering::Acquire) > 1 {
                         crate::smp::fiber::yield_sleep(2);
                     }
@@ -1462,6 +1470,7 @@ fn vcpu_fiber_task(_arg: u64) {
     crate::kprintln!("[microvm] vCPU fiber finished on core {}", cid);
     // Hand off to Core 0's reaper (compositor-locking teardown).
     VM_RUN_STATE.store(VM_EXITED, Ordering::Release);
+    crate::intent::wake_shell();
 }
 
 /// AP (secondary) vCPU fiber (guest SMP). Spawned by the Core-0 reaper after
