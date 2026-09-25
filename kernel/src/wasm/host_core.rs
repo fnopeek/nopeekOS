@@ -1191,6 +1191,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
         return -2;
     }
+    crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,
@@ -1235,6 +1236,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     }
     kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
+    crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,
@@ -1338,6 +1340,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
     }
     if !(0..256).contains(&gpe) { return -1; }
     if ctx.hw.is_none() {
+        crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
         ctx.hw = Some(HwDriverState {
             is_pci: false,
             pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
@@ -1507,6 +1510,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
 
     // Ein Zustand ohne PCI-Geraet, falls das Modul nie gebunden hat.
     if ctx.hw.is_none() {
+        crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
         ctx.hw = Some(HwDriverState {
             is_pci: false,
             pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },

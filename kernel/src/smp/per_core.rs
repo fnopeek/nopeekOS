@@ -252,6 +252,19 @@ pub fn timer_snapshot(core_id: usize) -> (u64, u64) {
      DEADLINE_LATE_MAX[core_id].swap(0, Ordering::Relaxed))
 }
 
+/// Cores a hardware driver lives on: a fiber there bound a device or waits
+/// on a device interrupt. A vCPU beside it would hold it off for a whole
+/// slice — the touchpad went dead that way. Sticky: drivers stay put.
+static DRIVER_CORES: AtomicU64 = AtomicU64::new(0);
+
+pub fn mark_driver_core(core_id: usize) {
+    if core_id > 0 && core_id < 64 {
+        DRIVER_CORES.fetch_or(1 << core_id, Ordering::Relaxed);
+    }
+}
+
+pub fn driver_cores() -> u64 { DRIVER_CORES.load(Ordering::Relaxed) }
+
 pub fn record_wake(core_id: usize, cause: usize) {
     if core_id >= 256 || cause >= WAKE_CAUSES { return; }
     CORE_WAKE[core_id][cause].fetch_add(1, Ordering::Relaxed);
