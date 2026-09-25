@@ -118,10 +118,12 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 /// Re-initialise to power-on state at VM open. The static outlives a single VM
 /// run, so this restores the per-VM-fresh state that `PciBus::new()` used to
 /// give the device when it lived inside the bus.
+///
+/// Device state only. The worker's attachment (`FULL_ACTIVE`, `WORKER_CORE`)
+/// belongs to the worker's start/stop: it is started before `vm_open` and, on
+/// its own core, registers before this runs — a reset here detached it.
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
     NET_IRQ_PENDING.store(false, Ordering::Release);
-    FULL_ACTIVE.store(false, Ordering::Release);
     TX_KICK.store(false, Ordering::Release);
-    WORKER_CORE.store(usize::MAX, Ordering::Release);
 }
