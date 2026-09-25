@@ -14,6 +14,7 @@ pub mod dns;
 pub mod dhcp;
 pub mod ntp;
 pub mod tcp;
+pub mod napi;
 
 use crate::netdev;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -298,7 +299,10 @@ pub fn seed_active() {
 pub fn needs_tick() -> bool {
     tcp::has_timers()
         || dhcp::is_running()
-        || !matches!(netdev::active(), netdev::Active::Wasm | netdev::Active::None)
+        // A polled card needs Core 0's cadence; one with an RX interrupt is
+        // drained by the NAPI fiber.
+        || (!matches!(netdev::active(), netdev::Active::Wasm | netdev::Active::None)
+            && !napi::active())
 }
 
 pub fn tick_link_and_reconfigure() {

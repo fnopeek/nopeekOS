@@ -115,14 +115,8 @@ const BUSY_POLL_US: u64 = 1000;
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
     STOP.store(false, Ordering::Release);
-    // The card's RX interrupt belongs on the core that DRAINS it, and that is
-    // Core 0 — it runs the IP stack and idles in `hlt` between wakes. Not on
-    // this worker: it reads the tap, not a card, and an interrupt that wakes a
-    // core which then looks at nothing is worse than no interrupt at all.
-    // No-op for a card that has no RX vector (intel / rtl8153 / AX200).
-    if let Some(v) = crate::netdev::rx_wake_vector() {
-        crate::irq::route_to_core(v, 0);
-    }
+    // The card's RX interrupt stays with the NAPI fiber (`net::napi`), which
+    // drains the card into the tap. This worker reads the tap, not a card.
     crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
