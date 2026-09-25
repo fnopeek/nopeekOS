@@ -145,6 +145,7 @@ pub fn stop_worker() {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
         core::hint::spin_loop();
     }
+    crate::microvm::devices::net_backend::set_worker_core(usize::MAX);
     crate::microvm::devices::nat::tap_reset();
 }
 
