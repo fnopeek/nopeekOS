@@ -1445,6 +1445,11 @@ impl VmContext {
 
         self.inject_pending_event();
 
+        // The guest's next timer, or the slice end, as a host one-shot on this
+        // core: its fire is the exit that delivers the tick on time.
+        crate::interrupts::arm_vcpu_timer(
+            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline)));
+
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
         let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;

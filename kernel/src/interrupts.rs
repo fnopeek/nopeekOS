@@ -308,11 +308,6 @@ pub fn init() {
         // Hardware interrupt handlers
         IDT[PIC_OFFSET_MASTER as usize].set_handler(timer_handler as *const () as u64);
         IDT[(PIC_OFFSET_MASTER + 1) as usize].set_handler(keyboard_handler as *const () as u64);
-        // Dedicated-microvm-core LAPIC timer (substrate rework A2).
-        // Global IDT is shared by all cores; only the dedicated core
-        // ever raises this vector (its own LAPIC timer) — a pure EOI.
-        IDT[DEDICATED_VM_TIMER_VECTOR as usize]
-            .set_handler(dedicated_vm_timer_handler as *const () as u64);
         // Per-core worker idle timer (one per AP) — pure EOI, see
         // `init_worker_timer`. Shared IDT; each worker raises it on its
         // own LAPIC so its idle HLT wakes without a host tick.
@@ -538,104 +533,6 @@ pub fn apic_base_any() -> u64 {
     ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000
 }
 
-// ── Dedicated-microvm-core LAPIC timer (substrate rework A2) ───────
-//
-// The core dedicated to the microvm (see `smp::per_core`) runs the
-// guest in a continuous VMRESUME/VMRUN loop. The guest's only time
-// source is an IRQ0 the run loop injects — which it can only do when
-// VMRUN *returns*. An idle guest (MWAIT) only yields VMRUN on a
-// *physical* interrupt (SVM INTERCEPT_INTR / VMX ext-int exiting).
-// The host 100 Hz timer fires on Core 0, NOT here, so without a
-// per-core source this core's guest would freeze the moment it idles.
-// So while a VM runs we arm THIS core's own LAPIC timer (periodic);
-// every fire → #VMEXIT(INTR) → the run loop regains control and does
-// its TICKS-paced injection. Disarmed when no VM runs, so a parked
-// dedicated core still truly idles. The IRQ only EOIs — it must NOT
-// touch the global TICKS (Core 0 owns the canonical wall clock).
-const DEDICATED_VM_TIMER_VECTOR: u8 = 49;
-
-/// LAPIC MMIO base for the dedicated-core EOI (xAPIC base is the same
-/// physical address on every core; each core's access hits its own
-/// LAPIC). Set by `arm_dedicated_vm_timer` because `APIC_BASE` is only
-/// populated on the APIC-timer path (Core 0 may be on PIT).
-static DEDICATED_APIC_BASE: AtomicU64 = AtomicU64::new(0);
-
-extern "x86-interrupt" fn dedicated_vm_timer_handler(_frame: InterruptStackFrame) {
-    // EOI only — purpose is purely to make VMRUN return periodically.
-    // (A Stage-1 experiment that woke the parked vCPU 1 kHz here was REVERTED: the
-    // guest is tickless (NO_HZ) and only asks for ~356 ticks/s — it does NOT want
-    // 1000, so forcing wakes didn't raise its effective HZ and just span a core.
-    // The effective HZ tracks load; it is a SYMPTOM, not the cause — as the
-    // original diagnosis already found.)
-    let base = DEDICATED_APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: LAPIC MMIO, identity-mapped, per-core EOI register.
-        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
-    }
-}
-
-/// Arm the calling core's LAPIC timer ~1 kHz periodic on
-/// `DEDICATED_VM_TIMER_VECTOR`. Called by the dedicated core right
-/// before its VM run loop. ~1 kHz (not 100 Hz): finer net/input
-/// servicing + slice cadence; the guest IRQ0 stays 100 Hz (TICKS-
-/// paced) regardless.
-pub fn arm_dedicated_vm_timer() {
-    // The periodic VM timer now owns this core's LAPIC timer: the worker
-    // one-shot must not be armed over it (`halt_until`), and it wakes the
-    // core's idle HLT on its own. `init_worker_timer` takes it back.
-    let cid = crate::smp::per_core::current_core_id();
-    if cid < 256 {
-        VM_TIMER_ON[cid].store(true, Ordering::Relaxed);
-    }
-    let (lo, hi): (u32, u32);
-    // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-    let base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
-    DEDICATED_APIC_BASE.store(base, Ordering::Relaxed);
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
-
-    // SAFETY: LAPIC MMIO regs, identity-mapped; this core's own LAPIC.
-    unsafe {
-        let b = base as *mut u8;
-        // Ensure LAPIC enabled (smp_ap_entry already did, defensive).
-        let svr = core::ptr::read_volatile(b.add(0xF0) as *const u32);
-        core::ptr::write_volatile(b.add(0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
-        // Divide = 16.
-        core::ptr::write_volatile(b.add(0x3E0) as *mut u32, 0x03);
-        // Count mode (masked) BEFORE measuring: the worker timer may have
-        // left the LVT in TSC-deadline mode, where the initial-count
-        // register is ignored and the measurement would read garbage.
-        core::ptr::write_volatile(b.add(0x320) as *mut u32,
-            (1 << 16) | DEDICATED_VM_TIMER_VECTOR as u32);
-        // Calibrate ticks/10ms against the TSC.
-        core::ptr::write_volatile(b.add(0x380) as *mut u32, 0xFFFF_FFFF);
-        let start = rdtsc();
-        let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
-        while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
-        let per_10ms = 0xFFFF_FFFFu32
-            .wrapping_sub(core::ptr::read_volatile(b.add(0x390) as *const u32));
-        let initial = (per_10ms / 10).max(1); // /10 → ~1 kHz
-        // LVT timer: periodic (bit 17) | vector.
-        core::ptr::write_volatile(b.add(0x320) as *mut u32,
-            (1 << 17) | DEDICATED_VM_TIMER_VECTOR as u32);
-        core::ptr::write_volatile(b.add(0x380) as *mut u32, initial);
-    }
-}
-
-/// Mask the calling core's LAPIC timer so a parked dedicated core
-/// takes no further IRQs. Called after the VM run loop ends.
-pub fn disarm_dedicated_vm_timer() {
-    let base = DEDICATED_APIC_BASE.load(Ordering::Relaxed);
-    if base == 0 { return; }
-    // SAFETY: LAPIC MMIO; mask bit 16 + stop the counter.
-    unsafe {
-        let b = base as *mut u8;
-        core::ptr::write_volatile(b.add(0x320) as *mut u32,
-            (1 << 16) | DEDICATED_VM_TIMER_VECTOR as u32);
-        core::ptr::write_volatile(b.add(0x380) as *mut u32, 0);
-    }
-}
-
 // ── Per-core worker timer: one-shot to the next deadline ────────────
 //
 // Stage 1 of `docs/plan/CORES_AND_EVENTS.md`. A worker used to arm a
@@ -649,10 +546,10 @@ pub fn disarm_dedicated_vm_timer() {
 // compares against the TSC itself, no conversion. Otherwise one-shot count
 // mode, converted with the LAPIC rate calibrated against the TSC.
 //
-// Core 0 keeps its periodic tick until stage 3: its loop still drains PS/2,
-// runs TCP timers and animations on it. A core running a guest vCPU keeps the
-// 1 kHz periodic VM timer (`arm_dedicated_vm_timer`), which then also wakes
-// its idle HLT.
+// A core running a guest vCPU uses the same one-shot: before every VM entry
+// it is armed to the guest's next timer deadline (`arm_vcpu_timer`) — KVM's
+// hrtimer on the vCPU's core — so the guest's clock events land on time and
+// not on a host tick.
 //
 // Both vectors are pure EOI: the interrupt returning the core from HLT IS
 // the effect.
@@ -740,13 +637,17 @@ pub fn make_core0_tickless() {
         if HAS_TSC_DEADLINE.load(Ordering::Relaxed) { "TSC-deadline" } else { "one-shot" });
 }
 
-/// The 1 kHz VM timer owns this core's LAPIC timer; leave it alone.
-static VM_TIMER_ON: [core::sync::atomic::AtomicBool; 256] =
-    [const { core::sync::atomic::AtomicBool::new(false) }; 256];
+/// TSC value the core's one-shot is armed to; 0 = not armed (fired or
+/// disarmed). Lets a vCPU skip re-arming the same deadline on every entry.
+static ARMED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// Wake period of `worker_idle_hlt` in TSC cycles; 0 = 10 ms.
 static POLL_PERIOD: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid < 256 {
+        ARMED[cid].store(0, Ordering::Relaxed);
+    }
     // Core 0 attributes its own wakes (halt_until skips it): a timer or a
     // wake IPI on this vector counts as `timer` in `cores`.
     if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
@@ -778,8 +679,7 @@ extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
 
 /// Set up the calling worker's LAPIC timer: one-shot (or TSC-deadline)
 /// mode on `WORKER_TIMER_VECTOR`, nothing armed. Each AP calls it once at
-/// boot; a core that ran a guest calls it again after the VM exits, to take
-/// the timer back from the 1 kHz periodic VM timer.
+/// boot.
 pub fn init_worker_timer() {
     let (lo, hi): (u32, u32);
     // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64 ring 0.
@@ -815,7 +715,7 @@ pub fn init_worker_timer() {
                 .max(1);
             WORKER_TIMER_INITIAL.store(n, Ordering::Relaxed);
         }
-        // Stop whatever ran before (a periodic VM timer), then set the mode:
+        // Stop whatever ran before, then set the mode:
         // TSC-deadline = LVT bits 18:17 = 10b, one-shot = 00b.
         core::ptr::write_volatile(b.add(0x380) as *mut u32, 0);
         let mode = if deadline { 0b10 << 17 } else { 0 };
@@ -827,7 +727,7 @@ pub fn init_worker_timer() {
     }
     let cid = crate::smp::per_core::current_core_id();
     if cid < 256 {
-        VM_TIMER_ON[cid].store(false, Ordering::Relaxed);
+        ARMED[cid].store(0, Ordering::Relaxed);
     }
 }
 
@@ -846,6 +746,10 @@ unsafe fn wrmsr_deadline(tsc: u64) {
 /// Arm this core's worker timer to fire at TSC `deadline`. A deadline in
 /// the past fires at once.
 fn arm_at(deadline: u64) {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid < 256 {
+        ARMED[cid].store(deadline.max(1), Ordering::Relaxed);
+    }
     if HAS_TSC_DEADLINE.load(Ordering::Relaxed) {
         // SAFETY: mode selected by `init_worker_timer`; never 0 (= disarm).
         unsafe { wrmsr_deadline(deadline.max(1)) };
@@ -864,6 +768,10 @@ fn arm_at(deadline: u64) {
 }
 
 fn disarm() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid < 256 {
+        ARMED[cid].store(0, Ordering::Relaxed);
+    }
     if HAS_TSC_DEADLINE.load(Ordering::Relaxed) {
         // SAFETY: mode selected by `init_worker_timer`; 0 disarms.
         unsafe { wrmsr_deadline(0) };
@@ -876,6 +784,18 @@ fn disarm() {
     }
 }
 
+/// Arm this core's one-shot to `deadline` before a VM entry, unless it is
+/// armed there already. The fire is a host interrupt → #VMEXIT → the run
+/// loop delivers the guest's due timer (KVM: the APIC/PIT hrtimer kicks the
+/// vCPU). Any other exit, a park or a fire resets it; the loop re-arms.
+pub fn arm_vcpu_timer(deadline: u64) {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid < 256 && ARMED[cid].load(Ordering::Relaxed) == deadline.max(1) {
+        return;
+    }
+    arm_at(deadline);
+}
+
 /// THE idle primitive of a worker: halt until an interrupt, and — if
 /// `deadline` is given — no later than that TSC value. IF is restored as
 /// found. `cause` is the wake-attribution slot for `cores`.
@@ -885,12 +805,11 @@ fn disarm() {
 /// pending and ends the halt, instead of being consumed before it and
 /// leaving the core asleep with nothing armed.
 ///
-/// On Core 0 (periodic tick) and on a core running a guest (1 kHz VM timer)
-/// the timer is not touched; the halt ends at the next tick there.
+/// On Core 0 before it went tickless the timer is not touched; the halt
+/// ends at the next tick there.
 pub fn halt_until(deadline: Option<u64>, cause: usize) {
     let cid = crate::smp::per_core::current_core_id();
     let own_timer = cid < 256
-        && !VM_TIMER_ON[cid].load(Ordering::Relaxed)
         && (cid != 0 || CORE0_TICKLESS.load(Ordering::Relaxed));
     let rflags: u64;
     // SAFETY: save RFLAGS and clear IF; restored below exactly as found.
