@@ -89,6 +89,15 @@ const RX_BUFFERS: usize = 1024;
 const TX_RECLAIM_SPINS: u32 = 4096;
 pub const MTU: usize = 1514; // Ethernet max frame
 
+/// A GSO super-frame's data buffer: eth + a full 64 KB IP packet. One per
+/// in-flight super-frame, so it is ONE data descriptor instead of one per
+/// MTU chunk (46): a 256-entry ring held five super-frames, filled at once
+/// under upload, and `send_tso` spun on it holding `DEVICE` — the lock the
+/// RX side needs to take the ACKs in.
+const TSO_SLOT_SIZE: usize = 66 * 1024;
+const TSO_SLOTS: usize = 32;
+const NO_TSO_SLOT: u8 = u8::MAX;
+
 /// VirtIO net header prepended to every packet (10 bytes, no mergeable buffers)
 #[repr(C)]
 struct VirtioNetHdr {
@@ -146,6 +155,12 @@ struct VirtioNet {
     /// happens to lose less often because the NIC engine reads
     /// synchronously). Modelled on `intel_nic::send`'s `tx_bufs`.
     tx_data: u64,
+    /// `TSO_SLOTS` super-frame buffers, `TSO_SLOT_SIZE` each.
+    tso_data: u64,
+    /// Bit per free TSO slot.
+    tso_free: u32,
+    /// Chain head descriptor → the TSO slot it holds, freed on completion.
+    tso_slot_of: alloc::vec::Vec<u8>,
 }
 
 static DEVICE: Mutex<Option<VirtioNet>> = Mutex::new(None);
@@ -298,6 +313,15 @@ pub fn init() -> bool {
         };
         core::ptr::write_bytes(tx_data as *mut u8, 0, tx_data_pages * 4096);
 
+        let tso_pages = (TSO_SLOTS * TSO_SLOT_SIZE).div_ceil(4096);
+        let tso_data = match memory::allocate_contiguous(tso_pages) {
+            Some(a) => a,
+            None => {
+                outb(io + REG_STATUS, S_FAILED);
+                return false;
+            }
+        };
+
         // Allocate RX buffers (contiguous, one per RX descriptor)
         let rx_buf_count = RX_BUFFERS.min(rx_qs as usize);
         let rx_buf_pages = (rx_buf_count * RX_BUF_SIZE + 4095) / 4096;
@@ -387,6 +411,9 @@ pub fn init() -> bool {
             tx_free_head: 0,
             tx_hdrs,
             tx_data,
+            tso_data,
+            tso_free: if TSO_SLOTS == 32 { u32::MAX } else { (1u32 << TSO_SLOTS) - 1 },
+            tso_slot_of: alloc::vec![NO_TSO_SLOT; tx_qs as usize],
         });
     }
 
@@ -489,25 +516,30 @@ const VNET_HDR_GSO_TCPV4: u8 = 1;
 /// QEMU's legacy F_GSO got NEEDS_CSUM wrong on small frames (0.226.60), so
 /// everything that fits one MSS keeps the plain `send` with a full checksum.
 pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    if frame.len() > TSO_SLOT_SIZE { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
-    let nchunks = frame.len().div_ceil(MTU).max(1);
-    let need = (nchunks + 1) as u16; // 1 hdr descriptor + one per data chunk
-
+    // Two descriptors (header, data) and a free super-frame buffer.
     dev.reclaim_tx();
-    if dev.tx_num_free < need {
+    if dev.tx_num_free < 2 || dev.tso_free == 0 {
+        dev.tx_kick();
         let mut spins = 0;
-        while dev.tx_num_free < need && spins < TX_RECLAIM_SPINS {
+        while (dev.tx_num_free < 2 || dev.tso_free == 0) && spins < TX_RECLAIM_SPINS {
             core::hint::spin_loop();
             dev.reclaim_tx();
             spins += 1;
         }
-        if dev.tx_num_free < need { return Err(NetError::QueueFull); }
+        if dev.tx_num_free < 2 || dev.tso_free == 0 { return Err(NetError::QueueFull); }
     }
+    let slot = dev.tso_free.trailing_zeros() as usize;
+    dev.tso_free &= !(1u32 << slot);
 
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
+    let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
+    dev.tso_slot_of[d0 as usize] = slot as u8;
     let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
+    let data_addr = dev.tso_data + (slot * TSO_SLOT_SIZE) as u64;
     let mut h = [0u8; NET_HDR_SIZE];
     h[0] = VNET_HDR_F_NEEDS_CSUM;
     h[1] = VNET_HDR_GSO_TCPV4;
@@ -515,38 +547,21 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     h[4..6].copy_from_slice(&mss.to_le_bytes());
     h[6..8].copy_from_slice(&(l4_off as u16).to_le_bytes()); // csum_start
     h[8..10].copy_from_slice(&16u16.to_le_bytes());          // csum_offset: tcphdr.check
-    // SAFETY: pre-allocated DMA buffers + this device's descriptor table.
+    // SAFETY: pre-allocated DMA buffers + this device's descriptor table;
+    // the slot is ours until its chain completes, `frame` fits it (checked).
     unsafe {
         core::ptr::copy_nonoverlapping(h.as_ptr(), hdr_addr as *mut u8, NET_HDR_SIZE);
+        core::ptr::copy_nonoverlapping(frame.as_ptr(), data_addr as *mut u8, frame.len());
         let dd0 = (dev.tx_desc_base + d0 as u64 * 16) as *mut VringDesc;
         (*dd0).addr = hdr_addr;
         (*dd0).len = NET_HDR_SIZE as u32;
-        (*dd0).flags = 0;
-        (*dd0).next = 0;
-    }
-
-    // Data descriptors (one MTU chunk each), chained off d0.
-    let mut prev = d0;
-    let mut off = 0usize;
-    for _ in 0..nchunks {
-        let di = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
-        let take = (frame.len() - off).min(MTU);
-        let data_addr = dev.tx_data + di as u64 * MTU as u64;
-        // SAFETY: as above; `take` ≤ MTU = the slot size.
-        unsafe {
-            core::ptr::copy_nonoverlapping(frame[off..off + take].as_ptr(),
-                                           data_addr as *mut u8, take);
-            let dd = (dev.tx_desc_base + di as u64 * 16) as *mut VringDesc;
-            (*dd).addr = data_addr;
-            (*dd).len = take as u32;
-            (*dd).flags = 0;
-            (*dd).next = 0;
-            let dp = (dev.tx_desc_base + prev as u64 * 16) as *mut VringDesc;
-            (*dp).flags |= DESC_F_NEXT;
-            (*dp).next = di;
-        }
-        prev = di;
-        off += take;
+        (*dd0).flags = DESC_F_NEXT;
+        (*dd0).next = d1;
+        let dd1 = (dev.tx_desc_base + d1 as u64 * 16) as *mut VringDesc;
+        (*dd1).addr = data_addr;
+        (*dd1).len = frame.len() as u32;
+        (*dd1).flags = 0;
+        (*dd1).next = 0;
     }
 
     // Publish the chain head (d0) on the avail ring.
@@ -562,7 +577,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
         fence(Ordering::SeqCst);
     }
     dev.tx_notify_pending = true;
-    if dev.tx_num_free < 16 { dev.tx_kick(); }
+    if dev.tx_num_free < 16 || dev.tso_free.count_ones() < 4 { dev.tx_kick(); }
     Ok(())
 }
 
@@ -695,6 +710,12 @@ impl VirtioNet {
 
             let entry_off = 4 + (self.tx_last_used % self.tx_queue_size) as u64 * 8;
             let id = unsafe { *((self.tx_used_base + entry_off) as *const u32) } as u16;
+            if let Some(slot) = self.tso_slot_of.get_mut(id as usize) {
+                if *slot != NO_TSO_SLOT {
+                    self.tso_free |= 1u32 << *slot;
+                    *slot = NO_TSO_SLOT;
+                }
+            }
 
             // Free the WHOLE descriptor chain. A plain frame is hdr→data (2); an
             // offloaded GSO super-frame spans hdr→data→data→… (many). Walk
@@ -713,7 +734,13 @@ impl VirtioNet {
 
             self.tx_last_used = self.tx_last_used.wrapping_add(1);
         }
-        unsafe { inb(self.io_base + REG_ISR); }
+        // Reading ISR deasserts the legacy INTx line. Under MSI-X there is
+        // no line to deassert, and on QEMU the port read is an exit — once
+        // per frame sent, since every send reclaims first.
+        if self.rx_msix_vector == 0 {
+            // SAFETY: this device's legacy I/O BAR.
+            unsafe { inb(self.io_base + REG_ISR); }
+        }
     }
 
     fn repost_rx(&mut self, desc_idx: usize) {
