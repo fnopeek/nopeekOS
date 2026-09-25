@@ -964,6 +964,8 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         core::ptr::write_volatile((apic_base + 0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
     }
 
+    crate::cpu_errata::apply();
+
     // Enable HWP on this AP (per-core frequency scaling)
     enable_hwp();
 

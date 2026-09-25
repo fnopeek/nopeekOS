@@ -67,6 +67,8 @@ pub fn init() {
     let bsp_id = read_apic_id(apic_base);
     per_core::register_bsp(bsp_id);
 
+    crate::cpu_errata::apply();
+
     // Enable HWP (hardware frequency scaling) on BSP
     if per_core::enable_hwp() {
         per_core::update_core_freq(0);

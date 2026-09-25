@@ -58,6 +58,7 @@ mod setup;
 mod gpu;
 mod shade;
 mod smp;
+mod cpu_errata;
 mod process;
 mod tss;
 mod microvm;

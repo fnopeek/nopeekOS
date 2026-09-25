@@ -14,6 +14,7 @@ pub type MsrResult<T> = Result<T, ()>;
 
 const MSR_TSC: u32 = 0x10;
 const MSR_APIC_BASE: u32 = 0x1B;
+const MSR_TSC_ADJUST: u32 = 0x3B;
 const MSR_SPEC_CTRL: u32 = 0x48;
 const MSR_PRED_CMD: u32 = 0x49;
 const MSR_PATCH_LEVEL: u32 = 0x8B;
@@ -41,6 +42,18 @@ const MSR_GS_BASE: u32 = 0xC000_0101;
 const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
 const MSR_TSC_AUX: u32 = 0xC000_0103;
 const MSR_HWCR: u32 = 0xC001_0015;
+const MSR_SYSCFG: u32 = 0xC001_0010;
+const MSR_NB_CFG: u32 = 0xC001_001F;
+const MSR_CPUID_7_FEATURES: u32 = 0xC001_1002;
+/// Host-owned chicken bit (see `cpu_errata`); the guest's write stays here.
+const MSR_ZEN2_SPECTRAL_CHICKEN: u32 = 0xC001_10E3;
+/// Legacy K7 perf counters (EVNTSEL0-3, PERFCTR0-3) and the core extension.
+const MSR_K7_PERF_FIRST: u32 = 0xC001_0000;
+const MSR_K7_PERF_LAST: u32 = 0xC001_0007;
+const MSR_F15H_PERF_FIRST: u32 = 0xC001_0200;
+const MSR_F15H_PERF_LAST: u32 = 0xC001_020B;
+/// HWCR.TscFreqSel: the TSC counts at P0 — true on every CPU with invariant TSC.
+const HWCR_TSC_FREQ_SEL: u64 = 1 << 24;
 const MSR_DE_CFG: u32 = 0xC001_1029;
 
 /// Fixed-range MTRRs, in the order KVM's `fixed_msr_to_seg_unit` uses.
@@ -72,17 +85,19 @@ pub struct GuestMsrs {
     mtrr_var: [u64; 16],
     mtrr_fixed: [u64; 11],
     mcg_status: u64,
+    tsc_adjust: u64,
 }
 
 impl GuestMsrs {
     pub const fn new() -> Self {
         Self {
             spec_ctrl: 0,
-            hwcr: 0,
+            hwcr: HWCR_TSC_FREQ_SEL,
             mtrr_def_type: MTRR_DEF_TYPE_RESET,
             mtrr_var: [0; 16],
             mtrr_fixed: [0; 11],
             mcg_status: 0,
+            tsc_adjust: 0,
         }
     }
 }
@@ -216,6 +231,10 @@ pub fn read(st: &GuestMsrs, vmcb: &vmcb::Vmcb, apic_id: u8, msr: u32) -> MsrResu
         // Guest view: SVME is ours, not the guest's (KVM `svm_set_efer`).
         MSR_EFER => vmcb.read_u64(vmcb::OFF_SAVE_EFER) & !EFER_SVME,
         MSR_HWCR => st.hwcr,
+        MSR_TSC_ADJUST => st.tsc_adjust,
+        // KVM answers these with 0: no SME/SEV, no NB config, no PMU (enable_pmu=0).
+        MSR_SYSCFG | MSR_NB_CFG | MSR_CPUID_7_FEATURES | MSR_ZEN2_SPECTRAL_CHICKEN => 0,
+        MSR_K7_PERF_FIRST..=MSR_K7_PERF_LAST | MSR_F15H_PERF_FIRST..=MSR_F15H_PERF_LAST => 0,
         // Feature MSR: only the LFENCE-serialising bit (KVM `kvm_get_feature_msr`).
         MSR_DE_CFG => host_rdmsr(MSR_DE_CFG) & (1 << 1),
         // Unknown: read as zero, like KVM with `ignore_msrs`. Nothing is
@@ -263,7 +282,11 @@ pub fn write(st: &mut GuestMsrs, vmcb: &mut vmcb::Vmcb, msr: u32, val: u64) -> M
             let cur = vmcb.read_u64(vmcb::OFF_SAVE_EFER);
             vmcb.write_u64(vmcb::OFF_SAVE_EFER, (val & !EFER_LMA) | (cur & EFER_LMA) | EFER_SVME);
         }
-        MSR_HWCR => st.hwcr = val,
+        MSR_HWCR => st.hwcr = val | HWCR_TSC_FREQ_SEL,
+        // Stored only; the guest's TSC offset stays ours.
+        MSR_TSC_ADJUST => st.tsc_adjust = val,
+        MSR_SYSCFG | MSR_NB_CFG | MSR_CPUID_7_FEATURES | MSR_ZEN2_SPECTRAL_CHICKEN => {}
+        MSR_K7_PERF_FIRST..=MSR_K7_PERF_LAST | MSR_F15H_PERF_FIRST..=MSR_F15H_PERF_LAST => {}
         MSR_DE_CFG => {}
         _ => { unknown(msr, Some(val)); }
     }
