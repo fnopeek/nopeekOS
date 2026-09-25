@@ -30,6 +30,8 @@
 //!   12.1.4-svm   inject_console echo round-trip
 
 mod enable;
+mod msr; // guest MSR policy: intercept-all + emulation (KVM model)
+mod guest_cpuid; // guest CPUID allowlist (KVM kvm_cpu_cap_init model)
 pub mod lapic; // per-vCPU local-APIC emulation (guest-SMP Stage 1)
 pub mod npt; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
 mod probe;

@@ -1029,7 +1029,10 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // einen Fiber hatte, wachte am haeufigsten auf und stahl damit auch
         // alle folgenden. Fiber sind kooperativ: dreht der Treiber unter
         // Last, warten Touchpad, Ton und Panels, und umgekehrt.
-        let take = !nic_core && least_loaded(cid);
+        // Ein Kern mit vCPU oder VM-Arbeiter nimmt nichts Neues an: Fiber sind
+        // kooperativ, und neben einer drehenden vCPU kaeme es kaum dran.
+        let take = !nic_core && !crate::microvm::cpu::is_vm_worker_core(cid)
+            && least_loaded(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives in the shared inbox (`scheduler::spawn`).
         if let Some(task) = if take { super::scheduler::next_task(cid) } else { None } {

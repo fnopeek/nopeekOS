@@ -69,14 +69,14 @@ pub const OFF_NRIP: usize = 0x0C8;
 // ── Misc-1 intercept bits (APM Vol 2 §15.9) ────────────────────────
 
 pub const INTERCEPT_INTR: u32 = 1 << 0;
-#[allow(dead_code)] pub const INTERCEPT_NMI: u32 = 1 << 1;
+pub const INTERCEPT_NMI: u32 = 1 << 1;
 /// CPUID — Linux uses this for early feature detection (CPU vendor,
 /// CET, AVX, MWAIT, ...). Required so we can hide CET from the guest
 /// the same way the VMX backend does.
 pub const INTERCEPT_CPUID: u32 = 1 << 18;
 pub const INTERCEPT_HLT: u32 = 1 << 24;
 #[allow(dead_code)] pub const INTERCEPT_INVLPG: u32 = 1 << 25;
-#[allow(dead_code)] pub const INTERCEPT_INVLPGA: u32 = 1 << 26;
+pub const INTERCEPT_INVLPGA: u32 = 1 << 26;
 pub const INTERCEPT_IOIO_PROT: u32 = 1 << 27;
 pub const INTERCEPT_MSR_PROT: u32 = 1 << 28;
 #[allow(dead_code)] pub const INTERCEPT_TASK_SW: u32 = 1 << 29;
@@ -91,9 +91,30 @@ pub const INTERCEPT_SHUTDOWN: u32 = 1 << 31;
 /// intercepted, otherwise the CPU generates #UD". It's intercepted
 /// from the *guest* — the host runs VMRUN unconditionally.
 pub const INTERCEPT_VMRUN: u32 = 1 << 0;
-#[allow(dead_code)] pub const INTERCEPT_VMMCALL: u32 = 1 << 1;
-#[allow(dead_code)] pub const INTERCEPT_VMSAVE: u32 = 1 << 3;
-#[allow(dead_code)] pub const INTERCEPT_VMLOAD: u32 = 1 << 2;
+pub const INTERCEPT_VMMCALL: u32 = 1 << 1;
+pub const INTERCEPT_VMSAVE: u32 = 1 << 3;
+pub const INTERCEPT_VMLOAD: u32 = 1 << 2;
+pub const INTERCEPT_STGI: u32 = 1 << 4;
+pub const INTERCEPT_CLGI: u32 = 1 << 5;
+pub const INTERCEPT_SKINIT: u32 = 1 << 6;
+pub const INTERCEPT_WBINVD: u32 = 1 << 9;
+pub const INTERCEPT_MONITOR: u32 = 1 << 10;
+pub const INTERCEPT_MWAIT: u32 = 1 << 11;
+pub const INTERCEPT_MWAIT_COND: u32 = 1 << 12;
+pub const INTERCEPT_XSETBV: u32 = 1 << 13;
+pub const INTERCEPT_RDPRU: u32 = 1 << 14;
+pub const INTERCEPT_RDPMC: u32 = 1 << 15;
+pub const INTERCEPT_INVD: u32 = 1 << 22;
+
+/// Linux guest intercept set — KVM `init_vmcb` minus what NPT makes moot
+/// (CR/INVLPG) and what we do not virtualize differently (PAUSE, SMI).
+pub const LINUX_MISC1: u32 = INTERCEPT_INTR | INTERCEPT_NMI | INTERCEPT_RDPMC
+    | INTERCEPT_CPUID | INTERCEPT_INVD | INTERCEPT_HLT | INTERCEPT_INVLPGA
+    | INTERCEPT_IOIO_PROT | INTERCEPT_MSR_PROT | INTERCEPT_SHUTDOWN;
+pub const LINUX_MISC2: u32 = INTERCEPT_VMRUN | INTERCEPT_VMMCALL | INTERCEPT_VMLOAD
+    | INTERCEPT_VMSAVE | INTERCEPT_STGI | INTERCEPT_CLGI | INTERCEPT_SKINIT
+    | INTERCEPT_WBINVD | INTERCEPT_MONITOR | INTERCEPT_MWAIT | INTERCEPT_MWAIT_COND
+    | INTERCEPT_XSETBV | INTERCEPT_RDPRU;
 
 // ── State save area offsets (relative to 0x400 = save base) ────────
 

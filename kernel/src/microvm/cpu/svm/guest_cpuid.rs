@@ -1,0 +1,135 @@
+//! Guest CPUID — an allowlist over the host's answer, after KVM's
+//! `kvm_cpu_cap_init` and `__do_cpuid_func`.
+//!
+//! Passing host CPUID through with a few bits cleared told the guest about
+//! hardware we do not virtualize: SMCA machine-check banks, the AMD extended
+//! APIC space, IBS, the PMU, SVM itself. Each of those makes Linux touch an
+//! MSR or APIC register that either reaches the host or is not there.
+
+use super::cpuid as host_cpuid;
+
+/// Highest extended leaf we answer (KVM's table ends at 0x8000_0021 for AMD
+/// features we can back).
+const MAX_EXT_LEAF: u32 = 0x8000_0021;
+
+pub fn host_xcr0() -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: XGETBV(0) is valid whenever CR4.OSXSAVE=1, which the kernel
+    // sets at boot (it saves FPU state with XSAVE).
+    unsafe {
+        core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi,
+                         options(nomem, nostack, preserves_flags));
+    }
+    ((hi as u64) << 32) | lo as u64
+}
+
+const fn bits(list: &[u32]) -> u32 {
+    let mut m = 0;
+    let mut i = 0;
+    while i < list.len() { m |= 1 << list[i]; i += 1; }
+    m
+}
+
+/// 0x8000_0001 ECX: LAHF_LM, CMP_LEGACY, CR8_LEGACY, ABM, SSE4A, MISALIGNSSE,
+/// 3DNOWPREFETCH, XOP, FMA4, TBM. Dropped vs KVM: SVM (no nested), OSVW,
+/// TOPOEXT (we give no 0x8000_001E) and PERFCTR_CORE (no vPMU).
+const EXT1_ECX: u32 = bits(&[0, 1, 4, 5, 6, 7, 8, 11, 16, 21]);
+/// 0x8000_0001 EDX: the leaf-1 aliases plus SYSCALL, NX, MMXEXT, FXSR_OPT,
+/// GBPAGES, RDTSCP, LM, 3DNOWEXT, 3DNOW.
+const EXT1_EDX: u32 = bits(&[
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 20, 22, 23, 24,
+    25, 26, 27, 29, 30, 31,
+]);
+/// 0x8000_0008 EBX: CLZERO, XSAVEERPTR, WBNOINVD, IBPB, IBRS, STIBP,
+/// STIBP_ALWAYS_ON, SSBD, SSB_NO, PSFD, BTC_NO, IBPB_RET. Not VIRT_SSBD (its
+/// MSR is not emulated) and not RDPRU (intercepted, #UD).
+const EXT8_EBX: u32 = bits(&[0, 2, 9, 12, 14, 15, 17, 24, 26, 28, 29, 30]);
+/// 0x8000_0021 EAX: NO_NESTED_DATA_BP, LFENCE_RDTSC, NULL_SEL_CLR_BASE,
+/// AUTOIBRS, NO_SMM_CTL_MSR, SBPB, IBPB_BRTYPE, SRSO_NO.
+const EXT21_EAX: u32 = bits(&[0, 2, 6, 8, 9, 27, 28, 29]);
+
+/// Leaf 1 ECX bits never shown: MONITOR, VMX, SMX, EST, TM2, CNXT-ID, xTPR,
+/// DCA, X2APIC (the LAPIC is xAPIC MMIO only), TSC_DEADLINE (MSR 0x6E0 not
+/// emulated), HYPERVISOR (keeps Linux off the paravirt leaves).
+const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18, 21, 24, 31]);
+/// Leaf 1 EDX bits never shown: PSN, DS, ACPI, TM, IA64, PBE.
+const L1_EDX_DROP: u32 = bits(&[18, 21, 22, 29, 30, 31]);
+
+/// Size of an XSAVE area for `xfeatures` (KVM `xstate_required_size`).
+fn xstate_size(xfeatures: u64, compacted: bool) -> u32 {
+    let mut size = 512 + 64;
+    for i in 2..63 {
+        if xfeatures & (1u64 << i) == 0 { continue; }
+        let (sz, off, flags, _) = host_cpuid(0xD, i);
+        size = if compacted {
+            let base = if flags & 0b10 != 0 { (size + 63) & !63 } else { size };
+            base + sz
+        } else {
+            size.max(off + sz)
+        };
+    }
+    size
+}
+
+pub fn guest_cpuid(
+    leaf: u32,
+    subleaf: u32,
+    apic_id: u8,
+    guest_cr4: u64,
+    guest_xcr0: u64,
+) -> (u32, u32, u32, u32) {
+    let (mut a, mut b, mut c, mut d) = host_cpuid(leaf, subleaf);
+    match leaf {
+        1 => {
+            c &= !L1_ECX_DROP;
+            // OSXSAVE mirrors the GUEST's CR4, not the host's.
+            c = (c & !(1 << 27)) | ((((guest_cr4 >> 18) & 1) as u32) << 27);
+            d &= !L1_EDX_DROP;
+            // Initial APIC ID = this vCPU, matching the emulated LAPIC and MP table.
+            b = (b & 0x00FF_FFFF) | ((apic_id as u32) << 24);
+        }
+        // MONITOR/MWAIT hidden; Intel perfmon; RDT; SGX; PT.
+        5 | 0xA | 0xF | 0x10 | 0x12 | 0x14 => return (0, 0, 0, 0),
+        // Thermal/power: only ARAT (KVM).
+        6 => return (4, 0, 0, 0),
+        7 if subleaf == 0 => {
+            b &= !bits(&[2, 12, 15, 25]); // SGX, PQM, PQE, Intel PT
+            // WAITPKG; PKU/OSPKE (PKRU would change the XSAVE layout); CET_SS.
+            c &= !bits(&[3, 4, 5, 7]);
+            d &= !(1 << 20); // CET_IBT — Linux's asm stubs lack ENDBR64
+        }
+        // Extended topology: EDX is the x2APIC ID → this vCPU's.
+        0xB | 0x1F => d = apic_id as u32,
+        0xD => {
+            let host = host_xcr0();
+            match subleaf {
+                0 => {
+                    a &= host as u32;
+                    d &= (host >> 32) as u32;
+                    b = xstate_size(guest_xcr0, false);
+                    c = xstate_size(host, false);
+                }
+                1 => {
+                    // No supervisor states (IA32_XSS stays 0).
+                    b = xstate_size(guest_xcr0, true);
+                    c = 0;
+                    d = 0;
+                }
+                i if i < 63 && host & (1u64 << i) != 0 => {}
+                _ => return (0, 0, 0, 0),
+            }
+        }
+        0x4000_0000..=0x4000_FFFF => return (0, 0, 0, 0),
+        0x8000_0000 => a = a.min(MAX_EXT_LEAF),
+        0x8000_0001 => { c &= EXT1_ECX; d &= EXT1_EDX; }
+        // Only invariant TSC.
+        0x8000_0007 => return (0, 0, 0, d & (1 << 8)),
+        0x8000_0008 => b &= EXT8_EBX,
+        // SVM features, topology, SEV, RDT-A: none of it is ours to give.
+        0x8000_000A | 0x8000_001E | 0x8000_001F | 0x8000_0020 => return (0, 0, 0, 0),
+        0x8000_0021 => return (a & EXT21_EAX, 0, 0, 0),
+        l if l > MAX_EXT_LEAF && l < 0x8FFF_FFFF => return (0, 0, 0, 0),
+        _ => {}
+    }
+    (a, b, c, d)
+}
