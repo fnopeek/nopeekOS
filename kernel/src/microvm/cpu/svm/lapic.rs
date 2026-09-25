@@ -278,6 +278,30 @@ pub fn pv_send_ipi(sender: u8, low: u64, high: u64, min: u64, icr: u64) -> i64 {
     count
 }
 
+/// Deliver a message-signalled interrupt (I/O APIC redirection entry or MSI)
+/// to its destination LAPIC(s) — `kvm_irq_delivery_to_apic`. `dest` is the
+/// physical APIC ID (0xFF = broadcast) or, `logical`, a flat-model bitmask;
+/// lowest priority goes to the first vCPU named.
+pub fn deliver_msg(dest: u8, logical: bool, mode: u8, vector: u8, from: u8) {
+    let delivery_mode = match mode {
+        0 => ICR_DM_FIXED,
+        1 => ICR_DM_LOWEST,
+        _ => return, // SMI / NMI / INIT / ExtINT: no such source here
+    };
+    let send = |t: u8| deliver_ipi(from, &IcrWrite { delivery_mode, shorthand: 0, dest: t, vector });
+    let n = crate::microvm::cpu::guest_vcpus();
+    if !logical {
+        if dest == 0xFF { (0..n).for_each(send); } else { send(dest); }
+        return;
+    }
+    let mut targets = (0..n.min(8)).filter(|&i| dest & (1 << i) != 0);
+    if delivery_mode == ICR_DM_LOWEST {
+        if let Some(t) = targets.next() { send(t); }
+    } else {
+        targets.for_each(send);
+    }
+}
+
 /// Clear every descriptor (VM start/teardown).
 pub fn reset_posted() {
     for t in PIR.iter() {

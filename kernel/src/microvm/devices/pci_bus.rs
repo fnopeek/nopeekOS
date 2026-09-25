@@ -107,12 +107,17 @@ pub fn handle_pci_io(
         };
         Some(((dword >> shift) as u64) & mask)
     } else {
-        // Linux's PCI enumerator does dword-aligned 4-byte writes for
-        // BAR sizing and command/status updates. Smaller writes fall
-        // through unchanged.
-        if size == 4 && lane_off == 0 {
-            write_pci_dword(bus, bus_num, slot, func, reg_dword, val_out);
-        }
+        // A byte or word write merges into its dword (read-modify-write):
+        // Linux writes the MSI-X message control as a 16-bit word.
+        let val = if size == 4 && lane_off == 0 {
+            val_out
+        } else {
+            let shift = lane_off as u32 * 8;
+            let mask: u32 = match size { 1 => 0xFF, 2 => 0xFFFF, _ => 0xFFFF_FFFF } << shift;
+            let old = read_pci_dword(bus, bus_num, slot, func, reg_dword);
+            (old & !mask) | ((val_out << shift) & mask)
+        };
+        write_pci_dword(bus, bus_num, slot, func, reg_dword, val);
         None
     }
 }
