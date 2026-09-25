@@ -29,6 +29,8 @@ const MSR_APIC_BASE: u32 = 0x1B;
 const MSR_X2APIC_FIRST: u32 = 0x800;
 const MSR_X2APIC_LAST: u32 = 0x8FF;
 const X2APIC_SELF_IPI: u32 = 0x3F0;
+/// IA32_TSC_DEADLINE (armed when LVTT is in TSC-deadline mode).
+const MSR_TSC_DEADLINE: u32 = 0x6E0;
 /// `MSR_KVM_PV_EOI_EN` (kvm_para.h).
 const MSR_KVM_PV_EOI_EN: u32 = 0x4b56_4d04;
 const KVM_MSR_ENABLED: u64 = 1;
@@ -61,6 +63,9 @@ const APIC_TDCR: u32 = 0x3E0;
 const SPIV_APIC_ENABLED: u32 = 1 << 8;
 const LVT_MASKED: u32 = 1 << 16;
 const LVT_TIMER_PERIODIC: u32 = 1 << 17;
+/// LVTT timer mode, bits 18:17: 00 one-shot, 01 periodic, 10 TSC-deadline.
+const LVT_TIMER_MODE_MASK: u32 = 0x3 << 17;
+const LVT_TIMER_TSCDEADLINE: u32 = 0x2 << 17;
 const APIC_MODE_EXTINT: u32 = 0x700;
 const ICR_BUSY: u32 = 1 << 12;
 const VECTOR_MASK: u32 = 0xFF;
@@ -295,6 +300,8 @@ pub struct LocalApic {
     timer_owed: u32,
     /// IA32_APIC_BASE.EXTD: registers are MSRs 0x800+, ICR is one 64-bit write.
     x2apic: bool,
+    /// IA32_TSC_DEADLINE in guest TSC = host TSC (no TSC offset); 0 = disarmed.
+    tsc_deadline: u64,
     /// Guest address of its PV-EOI flag (`MSR_KVM_PV_EOI_EN`), 0 = off.
     pv_eoi_gpa: u64,
     /// `KVM_APIC_PV_EOI_PENDING`: we set the guest's flag before this entry.
@@ -317,7 +324,7 @@ impl LocalApic {
         }
         LocalApic {
             regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
-            x2apic: false, pv_eoi_gpa: 0, pv_eoi_pending: false,
+            x2apic: false, tsc_deadline: 0, pv_eoi_gpa: 0, pv_eoi_pending: false,
         }
     }
 
@@ -412,6 +419,7 @@ impl LocalApic {
 
     /// Period of one count in host TSC cycles, if the timer is armed.
     fn period(&self) -> Option<u64> {
+        if self.tscdeadline_mode() { return None; }
         let tmict = self.regs[idx(APIC_TMICT)];
         if !self.sw_enabled() || self.regs[idx(APIC_LVTT)] & LVT_MASKED != 0 || tmict == 0 {
             return None;
@@ -420,12 +428,34 @@ impl LocalApic {
         (p != 0).then_some(p)
     }
 
-    fn periodic(&self) -> bool { self.regs[idx(APIC_LVTT)] & LVT_TIMER_PERIODIC != 0 }
+    fn periodic(&self) -> bool {
+        self.regs[idx(APIC_LVTT)] & LVT_TIMER_MODE_MASK == LVT_TIMER_PERIODIC
+    }
+
+    fn tscdeadline_mode(&self) -> bool {
+        self.regs[idx(APIC_LVTT)] & LVT_TIMER_MODE_MASK == LVT_TIMER_TSCDEADLINE
+    }
+
+    /// TSC-deadline expiry (`start_sw_tscdeadline` → `apic_timer_expired`):
+    /// the deadline is consumed; a masked LVTT delivers nothing.
+    fn tscdeadline_poll(&mut self) {
+        if self.tsc_deadline == 0 || rdtsc() < self.tsc_deadline { return; }
+        self.tsc_deadline = 0;
+        let lvtt = self.regs[idx(APIC_LVTT)];
+        if self.sw_enabled() && lvtt & LVT_MASKED == 0 {
+            self.accept_irq((lvtt & VECTOR_MASK) as u8);
+            crate::microvm::devices::nat::note_guest_timer();
+        }
+    }
 
     /// Expire the timer: set LVTT's vector in IRR. A periodic tick that falls
     /// due while the previous one still sits in IRR is owed (bounded) and
     /// posted once IRR is free again.
     fn timer_poll(&mut self) {
+        if self.tscdeadline_mode() {
+            self.tscdeadline_poll();
+            return;
+        }
         let Some(period) = self.period() else { return };
         let now = rdtsc();
         let elapsed = now.saturating_sub(self.timer_start_tsc);
@@ -452,6 +482,9 @@ impl LocalApic {
 
     /// Host TSC of the next timer expiry (park and host one-shot), or None.
     pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
+        if self.tscdeadline_mode() {
+            return (self.tsc_deadline != 0).then_some(self.tsc_deadline);
+        }
         let period = self.period()?;
         // An owed tick is not a deadline: it is delivered on the exit the
         // guest's EOI of the previous one causes.
@@ -461,6 +494,7 @@ impl LocalApic {
 
     /// APIC_TMCCT (`apic_get_tmcct`).
     fn tmcct(&self) -> u32 {
+        if self.tscdeadline_mode() { return 0; }
         let tmict = self.regs[idx(APIC_TMICT)];
         if tmict == 0 { return 0; }
         let elapsed_ticks = rdtsc().saturating_sub(self.timer_start_tsc) / self.divide_count();
@@ -532,6 +566,14 @@ impl LocalApic {
                     self.x2apic = true;
                     self.regs[idx(APIC_ID)] = self.apic_id as u32;
                 }
+                Ok((0, None))
+            }
+            // `kvm_set_lapic_tscdeadline_msr`: only in TSC-deadline mode.
+            (MSR_TSC_DEADLINE, None) => {
+                Ok((if self.tscdeadline_mode() { self.tsc_deadline } else { 0 }, None))
+            }
+            (MSR_TSC_DEADLINE, Some(v)) => {
+                if self.tscdeadline_mode() { self.tsc_deadline = v; }
                 Ok((0, None))
             }
             (MSR_KVM_PV_EOI_EN, None) => {
@@ -627,6 +669,8 @@ impl LocalApic {
                 }
             }
             APIC_ESR => self.regs[idx(APIC_ESR)] = 0,
+            // Ignored in TSC-deadline mode (KVM `kvm_lapic_reg_write`).
+            APIC_TMICT if self.tscdeadline_mode() => {}
             APIC_TMICT => {
                 self.regs[idx(APIC_TMICT)] = val;
                 self.timer_start_tsc = rdtsc();
@@ -637,6 +681,15 @@ impl LocalApic {
             APIC_LVTT | APIC_LVTTHMR | APIC_LVTPC | APIC_LVT0 | APIC_LVT1 | APIC_LVTERR => {
                 let mut v = val;
                 if !self.sw_enabled() { v |= LVT_MASKED; }
+                // A timer-mode change stops the timer (`apic_update_lvtt`).
+                if off & 0xFF0 == APIC_LVTT
+                    && (self.regs[idx(APIC_LVTT)] ^ v) & LVT_TIMER_MODE_MASK != 0
+                {
+                    self.regs[idx(APIC_TMICT)] = 0;
+                    self.tsc_deadline = 0;
+                    self.timer_owed = 0;
+                    self.timer_fired = false;
+                }
                 self.regs[idx(off & 0xFF0)] = v;
             }
             APIC_ICR => {

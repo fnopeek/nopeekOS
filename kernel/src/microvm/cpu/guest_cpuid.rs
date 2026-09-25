@@ -55,10 +55,14 @@ const EXT8_EBX: u32 = bits(&[0, 2, 9, 12, 14, 15, 17, 24, 26, 28, 29, 30]);
 const EXT21_EAX: u32 = bits(&[0, 2, 6, 8, 9, 27, 28, 29]);
 
 /// Leaf 1 ECX bits never shown: MONITOR, VMX, SMX, EST, TM2, CNXT-ID, xTPR,
-/// DCA, TSC_DEADLINE (MSR 0x6E0 not emulated). X2APIC and HYPERVISOR are
-/// set by us, not taken from the host: both describe the emulated platform.
-const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18, 24]);
+/// DCA. X2APIC, TSC_DEADLINE and HYPERVISOR are set by us, not taken from the
+/// host: they describe the emulated platform. TSC_DEADLINE (MSR 0x6E0, the
+/// emulated LAPIC) is what KVM guests clock from — without it Linux calibrates
+/// the LAPIC timer against the PIT, and through the I/O APIC that fails
+/// ("APIC timer disabled due to verification failure": no hrtimers at all).
+const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18]);
 const L1_ECX_X2APIC: u32 = 1 << 21;
+const L1_ECX_TSC_DEADLINE: u32 = 1 << 24;
 const L1_ECX_HYPERVISOR: u32 = 1 << 31;
 
 /// KVM paravirt leaves (`KVM_CPUID_SIGNATURE`, `KVM_CPUID_FEATURES`). The
@@ -113,7 +117,7 @@ pub fn guest_cpuid(
     let (mut a, mut b, mut c, mut d) = host_cpuid(leaf, subleaf);
     match leaf {
         1 => {
-            c = (c & !L1_ECX_DROP) | L1_ECX_X2APIC | L1_ECX_HYPERVISOR;
+            c = (c & !L1_ECX_DROP) | L1_ECX_X2APIC | L1_ECX_TSC_DEADLINE | L1_ECX_HYPERVISOR;
             if intel { c &= !INTEL_L1_ECX_DROP; }
             // OSXSAVE mirrors the GUEST's CR4, not the host's.
             c = (c & !(1 << 27)) | ((((guest_cr4 >> 18) & 1) as u32) << 27);
