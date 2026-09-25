@@ -221,10 +221,11 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // Short locked section: set the TX ISR, inject any synthetic replies (ARP /
     // DNS), decide the raise. This fiber is the sole consumer of both guest
     // rings, so dropping the lock in between is race-free.
-    let tx_raise = {
+    let (tx_raise, reply_rx_raise) = {
         let mut dev = net_backend::lock();
         dev.tx_finish(gm, tx_advanced, &tx_replies)
     };
+    let rx_raise = rx_raise || reply_rx_raise;
 
     // Flush any guest egress batched into the host NIC's TX ring. Host-stack
     // frames are no longer this fiber's business — it does not drain a card.

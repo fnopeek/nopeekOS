@@ -2264,7 +2264,12 @@ fn handle_mmio_npf_net(
             crate::microvm::devices::net_backend::note_tx_kick();
         } else {
             let advanced = net.service_queues(qidx, mem);
-            if advanced && !crate::microvm::devices::net_backend::msix_notify(qidx) {
+            // `service_queues` may complete TX and inject RX replies in one
+            // go; under MSI-X both queues' vectors fire (a spurious one is
+            // harmless: the guest finds nothing new), under INTx IRQ 10.
+            if advanced && !(crate::microvm::devices::net_backend::msix_notify(0)
+                | crate::microvm::devices::net_backend::msix_notify(1))
+            {
                 pic.pulse(10);
             }
         }
