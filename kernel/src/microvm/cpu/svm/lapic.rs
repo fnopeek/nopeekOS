@@ -155,7 +155,6 @@ pub fn access_snapshot() -> [u64; ACCESS_BUCKETS] {
 
 /// Where each vCPU's host thread is right now (`cores`): a hang shows as a
 /// phase that stopped moving. Written at the run-loop landmarks only.
-pub const PH_OUT: u8 = 0;
 pub const PH_INJECT: u8 = 1;
 pub const PH_GUEST: u8 = 2;
 pub const PH_EXIT: u8 = 3;
@@ -184,6 +183,15 @@ pub fn phase_snapshot(i: usize) -> Option<(u8, u64, usize)> {
     let core = VCPU_HOST_CORE[i].load(Ordering::Relaxed);
     if core == usize::MAX { return None; }
     Some((PHASE[i].load(Ordering::Relaxed), PHASE_TSC[i].load(Ordering::Relaxed), core))
+}
+
+/// The vCPU running on the calling host core, or 0xFF (a device worker, the
+/// shell). A sender that is a vCPU never kicks its own core.
+pub fn vcpu_on_this_core() -> u8 {
+    let cid = crate::smp::per_core::current_core_id();
+    (0..MAX_VCPUS)
+        .find(|&i| VCPU_HOST_CORE[i].load(Ordering::Relaxed) == cid)
+        .map_or(0xFF, |i| i as u8)
 }
 
 pub fn set_host_core(apic_id: u8, core: usize) {

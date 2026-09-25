@@ -572,6 +572,9 @@ fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
     else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) { c::NPF_SQFS }
     else if sh.pci.virtio_snd.bar0_in_range(gpa) { c::NPF_SND }
     else if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) { c::NPF_LAPIC }
+    else if (crate::microvm::devices::ioapic::IOAPIC_BASE
+        ..crate::microvm::devices::ioapic::IOAPIC_BASE + crate::microvm::devices::ioapic::IOAPIC_SIZE)
+        .contains(&gpa) { c::NPF_IOAPIC }
     else if gpa < sh.guest_mem.len() { c::NPF_RAM }
     else { c::NPF_OTHER }
 }
@@ -764,7 +767,12 @@ impl VmContext {
                     guest_raw_base,
                     serial,
                     pci: crate::microvm::devices::PciBus::new(),
-                    pic: crate::microvm::devices::pic8259::Pic8259::new(),
+                    pic: {
+                        // The I/O APIC's ID follows the vCPUs' in the MP table.
+                        let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
+                        pic.ioapic.set_id(crate::microvm::cpu::guest_vcpus());
+                        pic
+                    },
                     last_cfg_tick: 0,
                     last_reap_tick: 0,
                     pit: crate::microvm::devices::pit8253::Pit::new(),
@@ -1841,6 +1849,16 @@ impl VmContext {
                 crate::microvm::cpu::record_npf(npf_kind(sh, gpa));
                 // LAPIC MMIO page (0xFEE00000) → trap-and-emulate (Intel
                 // parity #2). Left EPT-not-present in ept.rs when LAPIC is on.
+                // I/O APIC page (0xFEC00000), EPT-not-present like the LAPIC's.
+                {
+                    use crate::microvm::devices::ioapic::{IOAPIC_BASE, IOAPIC_SIZE};
+                    if (IOAPIC_BASE..IOAPIC_BASE + IOAPIC_SIZE).contains(&gpa)
+                        && handle_mmio_ioapic(&mut self.vcpu.regs, sh, gpa)
+                    {
+                        last_outcome = Some(outcome);
+                        continue;
+                    }
+                }
                 if vmx_lapic_on()
                     && (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa)
                 {
@@ -2172,6 +2190,37 @@ fn handle_linux_io(
 /// xAPIC registers are 32-bit; no device IRQ-kick. An ICR write returns the
 /// decoded IPI, which `route_ipi` delivers cross-vCPU (INIT/SIPI bring-up +
 /// FIXED reschedule/TLB). Mirrors svm `handle_mmio_npf_lapic`.
+/// EPT violation on the I/O APIC page → `devices::ioapic` (register window).
+fn handle_mmio_ioapic(
+    regs: &mut vmcs::GuestRegs,
+    sh: &mut VmShared,
+    gpa: u64,
+) -> bool {
+    use crate::kprintln;
+    use crate::microvm::devices::guest_fetch::fetch_inst;
+    use crate::microvm::devices::insn_decoder::{decode_mov, width_mask};
+
+    let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
+    let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
+    let Some(buf) = fetch_inst(rip, cr3, sh.guest_mem) else {
+        kprintln!("[vmx] ioapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
+        return false;
+    };
+    let Some(dec) = decode_mov(&buf) else {
+        kprintln!("[vmx] ioapic mmio: unsupported insn @ gpa={:#x} bytes={:02x?}", gpa, &buf[..8]);
+        return false;
+    };
+    let off = (gpa - crate::microvm::devices::ioapic::IOAPIC_BASE) as u32;
+    if dec.is_write {
+        let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
+        sh.pic.ioapic.mmio(off, Some(value as u32));
+    } else {
+        let value = sh.pic.ioapic.mmio(off, None).unwrap_or(0) as u64;
+        write_gpr_vmx(regs, dec.reg, dec.width, value & width_mask(dec.width));
+    }
+    vmcs::advance_guest_rip().is_ok()
+}
+
 fn handle_mmio_lapic(
     regs: &mut vmcs::GuestRegs,
     apic: &mut LocalApic,

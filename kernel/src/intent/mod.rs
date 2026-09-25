@@ -2542,7 +2542,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
-panic=1 nokaslr noapic acpi=off tsc=reliable idle=halt \
+panic=1 nokaslr acpi=off tsc=reliable idle=halt \
 tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         tsc_khz, maxcpus,
     );
@@ -2553,6 +2553,11 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     // (cage/Wayland never starts). See cpu::guest_lapic_active().
     if !crate::microvm::cpu::guest_lapic_active() {
         let _ = write!(s, " nolapic");
+    }
+    // The I/O APIC is in the MP table only when it is emulated; otherwise the
+    // guest stays on the 8259.
+    if !crate::microvm::cpu::guest_ioapic_active() {
+        let _ = write!(s, " noapic");
     }
     if let Some(epoch) =
         crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)

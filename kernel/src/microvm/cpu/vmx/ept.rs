@@ -202,6 +202,9 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
                 .add(i)
                 .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
         }
+        // [0]: the I/O APIC page (0xFEC00000) NOT-PRESENT → trap and emulate
+        // (`devices::ioapic`).
+        pt_dummy.add(0).write_volatile(0);
 
         // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
         // NOT-PRESENT → guest LAPIC accesses EPT-violate → trap-and-emulate
@@ -319,7 +322,8 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             let pd_high = pd_high_phys as *const u64;
             let pt_dummy_phys = pd_high.add(502).read_volatile() & EPT_ADDR_MASK;
             if pt_dummy_phys != 0 {
-                let dummy = (pt_dummy_phys as *const u64).read_volatile() & EPT_ADDR_MASK;
+                // [0] is the trapped I/O APIC page; [1] maps the scratch page.
+                let dummy = (pt_dummy_phys as *const u64).add(1).read_volatile() & EPT_ADDR_MASK;
                 if dummy != 0 {
                     memory::deallocate_frame(dummy);
                 }
