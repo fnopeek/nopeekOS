@@ -24,6 +24,8 @@
 //! lifted from the convergent code. For now: simple match.
 
 pub mod rip_sample;
+pub mod guest_cpuid; // guest CPUID allowlist (KVM kvm_cpu_cap_init model)
+pub mod guest_msr; // vendor-neutral guest MSR emulation
 pub mod svm;
 pub mod vmx;
 

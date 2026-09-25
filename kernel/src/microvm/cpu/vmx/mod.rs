@@ -34,6 +34,7 @@ mod enable;
 pub mod ept; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
 mod probe;
 mod vmcs;
+mod msr; // guest MSR policy: intercept-all + emulation (KVM model)
 
 pub use probe::Capabilities;
 use probe::probe;

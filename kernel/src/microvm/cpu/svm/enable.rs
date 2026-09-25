@@ -170,7 +170,7 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     let mut hf = crate::microvm::cpu::FpuArea::boxed();
     let mut gf = crate::microvm::cpu::FpuArea::boxed();
     let outcome = run_guest_once(
-        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf, super::guest_cpuid::host_xcr0());
+        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf, crate::microvm::cpu::guest_cpuid::host_xcr0());
 
     Ok(outcome)
 }
@@ -350,7 +350,7 @@ fn run_guest_once(
     // [guest, host] XCR0, switched inside the asm next to the FPU swap
     // (KVM `kvm_load_guest_xsave_state`): the guest's XSETBV value must
     // never stay live on the host, and the host's must not leak in.
-    let xcr: [u64; 2] = [guest_xcr0, super::guest_cpuid::host_xcr0()];
+    let xcr: [u64; 2] = [guest_xcr0, crate::microvm::cpu::guest_cpuid::host_xcr0()];
     let xcr_ptr = xcr.as_ptr();
     // Per-core: VM_HSAVE_PA + host-extra-save frame for THIS core. Lazily
     // sets up any core that runs VMRUN (BSP today, AP vCPU fibers later).
@@ -588,7 +588,7 @@ fn inject_exception(vmcb: &mut vmcb::Vmcb, vector: u8, error_code: Option<u32>) 
 /// XSETBV rules (SDM/APM, KVM `__kvm_set_xcr`): x87 always on, AVX needs SSE,
 /// nothing beyond what the host itself has enabled in XCR0.
 fn xcr0_valid(v: u64) -> bool {
-    let host = super::guest_cpuid::host_xcr0();
+    let host = crate::microvm::cpu::guest_cpuid::host_xcr0();
     v & 1 != 0 && v & !host == 0 && (v & 0b100 == 0 || v & 0b010 != 0)
 }
 const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
@@ -2131,8 +2131,8 @@ impl VmContext {
             EXIT_CPUID => {
                 let leaf = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
                 let subleaf = self.vcpu.regs.rcx as u32;
-                let (eax, ebx, ecx, edx) = super::guest_cpuid::guest_cpuid(
-                    leaf, subleaf, self.vcpu.apic_id,
+                let (eax, ebx, ecx, edx) = crate::microvm::cpu::guest_cpuid::guest_cpuid(
+                    crate::microvm::cpu::guest_cpuid::Vendor::Amd, leaf, subleaf, self.vcpu.apic_id,
                     self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_CR4), self.vcpu.xcr0,
                 );
                 self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);

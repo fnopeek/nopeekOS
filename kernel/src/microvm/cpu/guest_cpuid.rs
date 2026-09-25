@@ -6,7 +6,13 @@
 //! APIC space, IBS, the PMU, SVM itself. Each of those makes Linux touch an
 //! MSR or APIC register that either reaches the host or is not there.
 
-use super::cpuid as host_cpuid;
+fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Vendor { Amd, Intel }
 
 /// Highest extended leaf we answer (KVM's table ends at 0x8000_0021 for AMD
 /// features we can back).
@@ -54,6 +60,17 @@ const EXT21_EAX: u32 = bits(&[0, 2, 6, 8, 9, 27, 28, 29]);
 const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18, 21, 24, 31]);
 /// Leaf 1 EDX bits never shown: PSN, DS, ACPI, TM, IA64, PBE.
 const L1_EDX_DROP: u32 = bits(&[18, 21, 22, 29, 30, 31]);
+/// Intel only, leaf 1 ECX: SDBG (IA32_DEBUG_INTERFACE), PDCM (PERF_CAPABILITIES).
+const INTEL_L1_ECX_DROP: u32 = bits(&[11, 15]);
+/// Intel only, leaf 7.0: MPX (its BND state is not in our XCR0), ENQCMD
+/// (PASID MSR), SGX_LC, Key Locker, PCONFIG, ARCH_LBR, CORE_CAPABILITIES
+/// (split-lock MSR).
+const INTEL_L7_EBX_DROP: u32 = bits(&[14]);
+const INTEL_L7_ECX_DROP: u32 = bits(&[23, 29, 30]);
+const INTEL_L7_EDX_DROP: u32 = bits(&[18, 19, 30]);
+/// Intel only, leaf 7.1 EAX: FRED, LKGS, LAM — each changes entry/paging
+/// semantics we do not virtualize.
+const INTEL_L7_1_EAX_DROP: u32 = bits(&[17, 18, 26]);
 
 /// Size of an XSAVE area for `xfeatures` (KVM `xstate_required_size`).
 fn xstate_size(xfeatures: u64, compacted: bool) -> u32 {
@@ -72,16 +89,19 @@ fn xstate_size(xfeatures: u64, compacted: bool) -> u32 {
 }
 
 pub fn guest_cpuid(
+    vendor: Vendor,
     leaf: u32,
     subleaf: u32,
     apic_id: u8,
     guest_cr4: u64,
     guest_xcr0: u64,
 ) -> (u32, u32, u32, u32) {
+    let intel = vendor == Vendor::Intel;
     let (mut a, mut b, mut c, mut d) = host_cpuid(leaf, subleaf);
     match leaf {
         1 => {
             c &= !L1_ECX_DROP;
+            if intel { c &= !INTEL_L1_ECX_DROP; }
             // OSXSAVE mirrors the GUEST's CR4, not the host's.
             c = (c & !(1 << 27)) | ((((guest_cr4 >> 18) & 1) as u32) << 27);
             d &= !L1_EDX_DROP;
@@ -89,7 +109,8 @@ pub fn guest_cpuid(
             b = (b & 0x00FF_FFFF) | ((apic_id as u32) << 24);
         }
         // MONITOR/MWAIT hidden; Intel perfmon; RDT; SGX; PT.
-        5 | 0xA | 0xF | 0x10 | 0x12 | 0x14 => return (0, 0, 0, 0),
+        // Key Locker; architectural perfmon extension.
+        5 | 0xA | 0xF | 0x10 | 0x12 | 0x14 | 0x19 | 0x23 => return (0, 0, 0, 0),
         // Thermal/power: only ARAT (KVM).
         6 => return (4, 0, 0, 0),
         7 if subleaf == 0 => {
@@ -97,7 +118,13 @@ pub fn guest_cpuid(
             // WAITPKG; PKU/OSPKE (PKRU would change the XSAVE layout); CET_SS.
             c &= !bits(&[3, 4, 5, 7]);
             d &= !(1 << 20); // CET_IBT — Linux's asm stubs lack ENDBR64
+            if intel {
+                b &= !INTEL_L7_EBX_DROP;
+                c &= !INTEL_L7_ECX_DROP;
+                d &= !INTEL_L7_EDX_DROP;
+            }
         }
+        7 if subleaf == 1 && intel => a &= !INTEL_L7_1_EAX_DROP,
         // Extended topology: EDX is the x2APIC ID → this vCPU's.
         0xB | 0x1F => d = apic_id as u32,
         0xD => {
@@ -110,6 +137,10 @@ pub fn guest_cpuid(
                     c = xstate_size(host, false);
                 }
                 1 => {
+                    // Intel: XSAVEOPT/XSAVEC/XGETBV1 only. VMX does not switch
+                    // IA32_XSS (XSAVES would run with the host's value) and
+                    // XFD belongs to AMX, which is not in our XCR0.
+                    if intel { a &= 0x7; }
                     // No supervisor states (IA32_XSS stays 0).
                     b = xstate_size(guest_xcr0, true);
                     c = 0;
