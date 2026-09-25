@@ -324,6 +324,9 @@ pub fn intent_cores() {
             core_of(crate::microvm::cpu::bsp_host_core()),
             core_of(crate::microvm::devices::net_backend::worker_core()),
             core_of(crate::microvm::devices::gpu_backend::worker_core()));
+        if let Some(([sent, latched], state)) = crate::microvm::devices::net_backend::msix_report() {
+            kprintln!("    net msix: sent={} latched={} (totals) {}", sent, latched, state);
+        }
         kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
                   tapfull * 1000 / window_ms, injf * 1000 / window_ms);
         // Outbound TX rate (the b1-vs-b2 upload discriminator). Read TOGETHER with

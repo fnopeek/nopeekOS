@@ -313,7 +313,10 @@ impl VirtioNet {
             0x68 => 0x09 | ((CAP_DEVICE_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_ISR_CFG as u32) << 24),
             0x70 => ISR_OFF, 0x74 => ISR_LEN,
 
-            0x78 => 0x09 | ((CAP_MSIX_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24),
+            0x78 => {
+                let next = if super::net_backend::msix_offered() { CAP_MSIX_OFF } else { 0 };
+                0x09 | ((next as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24)
+            }
             0x80 => DEVICE_OFF, 0x84 => DEVICE_LEN,
 
             // MSI-X capability (ID 0x11): table + PBA in BAR0.
