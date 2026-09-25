@@ -1459,6 +1459,7 @@ impl VmContext {
         slice_n += 1;
 
         self.inject_pending_event();
+        self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
         // The guest's next timer, or the slice end, as a host one-shot on this
         // core: its fire is the exit that delivers the tick on time.
@@ -1474,6 +1475,7 @@ impl VmContext {
         );
         super::msr::spec_ctrl_exit(host_spec);
         let exit = outcome.exit_reason;
+        self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
 
         // Guest-RIP profiler: EXIT_INTR samples a running guest.
         if exit == EXIT_INTR {
@@ -1588,7 +1590,27 @@ impl VmContext {
                 // and emulated in `svm::msr`; none reaches the host.
                 let is_write = outcome.exit_qualification & 1 != 0;
                 let msr = self.vcpu.regs.rcx as u32;
-                let ok = if is_write {
+                let wval = (self.vcpu.regs.rdx << 32)
+                    | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                let lapic_r = if crate::microvm::cpu::GUEST_LAPIC {
+                    self.vcpu.lapic.msr(msr, is_write.then_some(wval))
+                } else {
+                    None
+                };
+                let ok = if let Some(r) = lapic_r {
+                    // IA32_APIC_BASE, x2APIC registers, PV-EOI enable.
+                    match r {
+                        Ok((v, ipi)) => {
+                            if let Some(icr) = ipi { lapic::deliver_ipi(self.vcpu.apic_id, &icr); }
+                            if !is_write {
+                                self.vcpu.regs.rdx = v >> 32;
+                                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
+                            }
+                            true
+                        }
+                        Err(()) => false,
+                    }
+                } else if is_write {
                     let val = (self.vcpu.regs.rdx << 32)
                         | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
                     super::msr::write(&mut self.vcpu.msrs, &mut self.vcpu.vmcb, msr, val).is_ok()
@@ -1613,7 +1635,19 @@ impl VmContext {
             // writes #GP), so they #UD — KVM `nested_svm_check_permissions`.
             // Left unintercepted they would run natively: the VMCB carries
             // EFER.SVME=1, and VMLOAD/VMSAVE then take a HOST physical address.
-            EXIT_VMRUN | EXIT_VMMCALL | EXIT_VMLOAD | EXIT_VMSAVE | EXIT_STGI
+            // KVM hypercall (`kvm_emulate_hypercall`): nr in RAX, args in
+            // RBX/RCX/RDX/RSI, result in RAX. Only from CPL 0.
+            EXIT_VMMCALL => {
+                let nr = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+                let cpl = self.vcpu.vmcb.read_u8(vmcb::OFF_SAVE_CPL);
+                let r = &self.vcpu.regs;
+                let ret = crate::microvm::cpu::kvm_hypercall(
+                    self.vcpu.apic_id, cpl, nr, r.rbx, r.rcx, r.rdx, r.rsi);
+                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, ret as u64);
+                advance_rip(&mut *self.vcpu.vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_VMRUN | EXIT_VMLOAD | EXIT_VMSAVE | EXIT_STGI
             | EXIT_CLGI | EXIT_SKINIT | EXIT_INVLPGA | EXIT_RDPRU
             | EXIT_MONITOR | EXIT_MWAIT | EXIT_MWAIT_COND => {
                 inject_exception(&mut self.vcpu.vmcb, VEC_UD, None);

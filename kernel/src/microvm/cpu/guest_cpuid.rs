@@ -55,9 +55,22 @@ const EXT8_EBX: u32 = bits(&[0, 2, 9, 12, 14, 15, 17, 24, 26, 28, 29, 30]);
 const EXT21_EAX: u32 = bits(&[0, 2, 6, 8, 9, 27, 28, 29]);
 
 /// Leaf 1 ECX bits never shown: MONITOR, VMX, SMX, EST, TM2, CNXT-ID, xTPR,
-/// DCA, X2APIC (the LAPIC is xAPIC MMIO only), TSC_DEADLINE (MSR 0x6E0 not
-/// emulated), HYPERVISOR (keeps Linux off the paravirt leaves).
-const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18, 21, 24, 31]);
+/// DCA, TSC_DEADLINE (MSR 0x6E0 not emulated). X2APIC and HYPERVISOR are
+/// set by us, not taken from the host: both describe the emulated platform.
+const L1_ECX_DROP: u32 = bits(&[3, 5, 6, 7, 8, 10, 14, 18, 24]);
+const L1_ECX_X2APIC: u32 = 1 << 21;
+const L1_ECX_HYPERVISOR: u32 = 1 << 31;
+
+/// KVM paravirt leaves (`KVM_CPUID_SIGNATURE`, `KVM_CPUID_FEATURES`). The
+/// guest's Linux then takes the KVM paths we back: PV EOI (its EOI is a flag
+/// in its memory, no exit), PV send-IPI (one hypercall for a set of vCPUs),
+/// NOP io_delay, and x2APIC without interrupt remapping (`kvm_para_available`
+/// is `x2apic_available`). Nothing else — no kvmclock, steal time, async PF.
+const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
+const KVM_CPUID_FEATURES: u32 = 0x4000_0001;
+const KVM_FEATURE_NOP_IO_DELAY: u32 = 1 << 1;
+const KVM_FEATURE_PV_EOI: u32 = 1 << 6;
+const KVM_FEATURE_PV_SEND_IPI: u32 = 1 << 11;
 /// Leaf 1 EDX bits never shown: PSN, DS, ACPI, TM, IA64, PBE.
 const L1_EDX_DROP: u32 = bits(&[18, 21, 22, 29, 30, 31]);
 /// Intel only, leaf 1 ECX: SDBG (IA32_DEBUG_INTERFACE), PDCM (PERF_CAPABILITIES).
@@ -100,7 +113,7 @@ pub fn guest_cpuid(
     let (mut a, mut b, mut c, mut d) = host_cpuid(leaf, subleaf);
     match leaf {
         1 => {
-            c &= !L1_ECX_DROP;
+            c = (c & !L1_ECX_DROP) | L1_ECX_X2APIC | L1_ECX_HYPERVISOR;
             if intel { c &= !INTEL_L1_ECX_DROP; }
             // OSXSAVE mirrors the GUEST's CR4, not the host's.
             c = (c & !(1 << 27)) | ((((guest_cr4 >> 18) & 1) as u32) << 27);
@@ -150,7 +163,12 @@ pub fn guest_cpuid(
                 _ => return (0, 0, 0, 0),
             }
         }
-        0x4000_0000..=0x4000_FFFF => return (0, 0, 0, 0),
+        // "KVMKVMKVM\0\0\0"
+        KVM_CPUID_SIGNATURE => return (KVM_CPUID_FEATURES, 0x4b4d_564b, 0x564b_4d56, 0x4d),
+        KVM_CPUID_FEATURES => return (
+            KVM_FEATURE_NOP_IO_DELAY | KVM_FEATURE_PV_EOI | KVM_FEATURE_PV_SEND_IPI, 0, 0, 0,
+        ),
+        0x4000_0002..=0x4000_FFFF => return (0, 0, 0, 0),
         0x8000_0000 => a = a.min(MAX_EXT_LEAF),
         0x8000_0001 => { c &= EXT1_ECX; d &= EXT1_EDX; }
         // Only invariant TSC.

@@ -95,6 +95,19 @@ fn io_port_bucket(port: u16) -> usize {
     }
 }
 /// Bucket one guest port-I/O exit by port (call from the IOIO handler).
+/// `kvm_emulate_hypercall`: `nr` + four args, result for RAX. The set is
+/// what `guest_cpuid` announces — KVM_HC_SEND_IPI; the rest is -KVM_ENOSYS.
+pub fn kvm_hypercall(apic_id: u8, cpl: u8, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    const KVM_HC_SEND_IPI: u64 = 10;
+    const KVM_ENOSYS: i64 = 1000;
+    const KVM_EPERM: i64 = 1;
+    if cpl != 0 { return -KVM_EPERM; }
+    match nr {
+        KVM_HC_SEND_IPI => svm::lapic::pv_send_ipi(apic_id, a0, a1, a2, a3),
+        _ => -KVM_ENOSYS,
+    }
+}
+
 /// Nested-page-fault targets: which device BAR, the LAPIC page, a first
 /// touch of guest RAM (demand paging), or unclaimed.
 pub const NPF_BUCKETS: usize = 10;

@@ -1297,6 +1297,11 @@ pub fn basic_exit_reason(raw: u64) -> u16 {
 /// records the instruction length in VM_EXIT_INSTRUCTION_LEN; we
 /// add it to the current GUEST_RIP. Required after I/O exits
 /// (otherwise VMRESUME re-executes the trapping OUT/IN forever).
+/// Guest CPL = SS.DPL (SDM 27.3.1.5: the SS attribute DPL is the CPL).
+pub(super) fn guest_cpl() -> Result<u8, &'static str> {
+    Ok(((vmread(GUEST_SS_AR_BYTES)? >> 5) & 0x3) as u8)
+}
+
 pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
     let len = vmread(VM_EXIT_INSTRUCTION_LEN)?;
     let rip = vmread(GUEST_RIP)?;
