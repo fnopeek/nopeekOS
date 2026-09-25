@@ -558,6 +558,10 @@ pub fn rx_wake_vector() -> Option<u8> {
             0 => None,
             v => Some(v),
         },
+        Active::Intel => match intel_nic::rx_irq_vector() {
+            0 => None,
+            v => Some(v),
+        },
         _ => None,
     }
 }
