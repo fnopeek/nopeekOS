@@ -187,6 +187,10 @@ pub fn alloc_vector() -> Option<u8> {
 /// waiting core changed — a no-op for a driver that always services on its own
 /// pinned fiber; cheap (one MMIO write) for one that moves between cores.
 pub fn arm(vector: u8) -> u64 {
+    let cid = crate::smp::per_core::current_core_id();
+    if !crate::microvm::cpu::is_vcpu_core(cid) {
+        crate::smp::per_core::mark_driver_core(cid);
+    }
     route_to_current(vector);
     let since = fired_count(vector);
     // A level line was masked by the ISR: the driver has serviced the

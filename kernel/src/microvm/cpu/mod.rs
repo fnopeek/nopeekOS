@@ -469,53 +469,45 @@ pub fn guest_vcpus() -> u8 {
     workers.clamp(1, MAX_VCPUS_CAP) as u8
 }
 
-/// Bitmask of cores that must stay clear of vCPUs: the WASM NIC driver's, and
-/// the WiFi manager's.
+/// Bitmask of cores that must stay clear of vCPUs: every core a hardware
+/// driver lives on (`per_core::driver_cores` — a fiber there bound a device
+/// or waits on its interrupt), the WASM NIC driver's and the WiFi manager's.
 ///
 /// A vCPU fiber and a driver fiber on one core are cooperative peers — the
-/// driver runs only when the vCPU yields, once per `SLICE_MS` (3 ms) at best and
-/// longer whenever a single exit handler runs long (the inline GPU framebuffer
-/// copy on VMX, an npkFS write behind a 9p access). Two different things break:
+/// driver runs only when the vCPU yields, once per `SLICE_MS` (3 ms) at best.
+/// The touchpad went dead that way, and a NIC driver holds only ~50 ms of
+/// receive buffers (the host's own network rides it too).
 ///
-///   * the driver holds about 50 ms of receive buffers at 116 Mbit, and past
-///     that the firmware has nowhere left to put frames;
-///   * the manager runs the 4-way, and while it is not running the driver never
-///     reports authorized — at which point `netdev::send` refuses every frame.
+/// A core whose fibers are apps (panels, dock) is NOT protected: they sleep on
+/// events, and a vCPU yielding every slice costs them at most that slice. It
+/// was protected until 0.443 — which left QEMU's guest one vCPU on six cores.
 ///
-/// Either way the whole machine loses its network, not just the guest, because
-/// the host's own stack rides the same driver. AMD never hit this: its
-/// `reserve_offload_core` already leaves a worker core free. On Intel every
-/// worker core gets a vCPU.
-///
-/// Needs >= 3 cores — below that, starving the guest to nothing is the worse
-/// trade.
+/// Snapshotted while no VM exists: `guest_vcpus()` sizes the MP table and the
+/// IPI broadcast and must not change under a running guest.
+static PROTECTED_CORES: AtomicU32 = AtomicU32::new(0);
+
 fn protected_cores() -> u32 {
-    if crate::smp::per_core::core_count() < 3 { return 0; }
+    if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
+        return PROTECTED_CORES.load(Ordering::Acquire);
+    }
     let mut mask = 0u32;
-    if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
-    if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
-    mask | host_fiber_cores()
+    if crate::smp::per_core::core_count() >= 3 {
+        if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
+        if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
+        mask |= crate::smp::per_core::driver_cores() as u32;
+    }
+    mask &= !1; // Core 0 is never a vCPU core anyway
+    PROTECTED_CORES.store(mask, Ordering::Release);
+    mask
 }
 
-/// Worker cores carrying resident host fibers (input, audio, ACPI, panels, …).
-/// Same failure as the NIC core above, for every other driver: a vCPU on the
-/// core starves its cooperative peers — the touchpad stops while the guest
-/// runs. Recomputed only while no VM exists; during a run the snapshot is
-/// returned, because `guest_vcpus()` sizes the MP table and the IPI broadcast
-/// and must not change under a running guest (the vCPU fibers themselves would
-/// otherwise count as host fibers).
-static HOST_FIBER_CORES: AtomicU32 = AtomicU32::new(0);
-
-fn host_fiber_cores() -> u32 {
-    if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
-        return HOST_FIBER_CORES.load(Ordering::Acquire);
-    }
+/// Among the cores in `candidates` (bitmask), the one with the fewest resident
+/// fibers — an idle core first, then one whose apps sleep.
+fn least_fibered(candidates: u32) -> Option<usize> {
     let n = crate::smp::per_core::core_count().min(32);
-    let mask = (1..n)
-        .filter(|&c| crate::smp::fiber::fiber_count(c) > 0)
-        .fold(0u32, |m, c| m | (1 << c));
-    HOST_FIBER_CORES.store(mask, Ordering::Release);
-    mask
+    (1..n)
+        .filter(|&c| candidates & (1 << c) != 0)
+        .min_by_key(|&c| crate::smp::fiber::fiber_count(c))
 }
 
 /// True if `cid` runs a vCPU or a microvm worker (not a protected host core).
@@ -532,10 +524,10 @@ pub fn is_vm_worker_core(cid: usize) -> bool {
 /// vCPU fiber owns the guest for its whole lifetime, so the choice is made here
 /// rather than left to work-stealing.
 fn pick_vcpu_core() -> usize {
-    let n = crate::smp::per_core::core_count();
+    let n = crate::smp::per_core::core_count().min(32);
     if n <= 1 { return 0; }
-    let avoid = protected_cores();
-    (1..n).find(|c| avoid & (1 << c) == 0).unwrap_or(n - 1)
+    let all = ((1u64 << n) - 1) as u32 & !1;
+    least_fibered(all & !protected_cores()).unwrap_or(n - 1)
 }
 
 /// EXPERIMENT toggle: reserve a dedicated worker core for the off-vCPU net
@@ -679,6 +671,12 @@ static VCPU_CORES: AtomicU32 = AtomicU32::new(0);
 /// Cores already given a microvm worker, so the next one goes elsewhere.
 static WORKER_CORES: AtomicU32 = AtomicU32::new(0);
 
+/// Does a vCPU run on host core `cid` right now?
+pub fn is_vcpu_core(cid: usize) -> bool {
+    cid < 32 && VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE
+        && VCPU_CORES.load(Ordering::Acquire) & (1 << cid) != 0
+}
+
 /// Place a microvm worker (net data plane, GPU copy, 9p persist). Never Core 0
 /// and never a vCPU's core. In order:
 ///   1. a core nobody uses (not in `VM_CORE_MASK`) — `claim` marks it, so a
@@ -729,10 +727,11 @@ pub fn place_worker(claim: bool) -> usize {
 /// means more vCPUs than host cores, which `guest_vcpus()` avoids by capping at
 /// the worker count). Called only from the Core-0 reaper (single producer).
 fn reserve_ap_core() -> Option<usize> {
-    let ncores = crate::smp::per_core::core_count();
+    let ncores = crate::smp::per_core::core_count().min(32);
+    let all = ((1u64 << ncores) - 1) as u32 & !1;
     loop {
         let mask = VM_CORE_MASK.load(Ordering::Acquire);
-        let c = (1..ncores).find(|c| mask & (1u32 << c) == 0)?;
+        let c = least_fibered(all & !mask)?;
         if VM_CORE_MASK
             .compare_exchange(mask, mask | (1u32 << c), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -928,7 +927,7 @@ pub fn vm_open(
             inject: inject.to_vec(),
         });
         VM_CLOSE_REQUESTED.store(false, Ordering::Release);
-        // Snapshot the host-fiber cores while still idle (see `host_fiber_cores`).
+        // Snapshot the protected cores while still idle (see `protected_cores`).
         let _ = protected_cores();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         // Place it deliberately: `spawn_fiber` hands the task to whichever
