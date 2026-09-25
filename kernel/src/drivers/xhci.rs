@@ -68,11 +68,18 @@ const PORTSC_PRC:   u32 = 1 << 21; // Port Reset Change
 const PORTSC_CSC:   u32 = 1 << 17; // Connect Status Change
 const PORTSC_PEC:   u32 = 1 << 18; // Port Enabled Change
 const PORTSC_WRC:   u32 = 1 << 19; // Warm Port Reset Change
-const PORTSC_OCC:   u32 = 1 << 20; // Over-current Change
 const PORTSC_PLC:   u32 = 1 << 22; // Port Link State Change
-const PORTSC_CEC:   u32 = 1 << 23; // Config Error Change
-// RW1C bits mask — write 0 to these to avoid accidentally clearing them
-const PORTSC_RW1C: u32 = PORTSC_CSC | PORTSC_PEC | PORTSC_WRC | PORTSC_OCC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC;
+/// Read-only bits and RW state bits — Linux `XHCI_PORT_RO` / `XHCI_PORT_RWS`.
+const PORTSC_RO: u32 = (1 << 0) | (1 << 3) | (0xF << 10) | (1 << 30);
+const PORTSC_RWS: u32 = (0xF << 5) | (1 << 9) | (0x3 << 14) | (0x7 << 25);
+
+/// PORTSC value that changes nothing when written back — Linux
+/// `xhci_port_state_to_neutral`. Masking only the RW1C change bits is not
+/// enough: PED is RW1CS too, and a 1 written back DISABLES an enabled port.
+/// A second reset of an already enabled port then never completes.
+fn port_neutral(sc: u32) -> u32 {
+    sc & (PORTSC_RO | PORTSC_RWS)
+}
 
 // Port speeds
 const SPEED_FULL:  u32 = 1;
@@ -760,7 +767,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         let off = portsc_off(p);
         let sc = r32(oper, off);
         if sc & PORTSC_PP == 0 {
-            w32(oper, off, (sc & !PORTSC_RW1C) | PORTSC_PP);
+            w32(oper, off, port_neutral(sc) | PORTSC_PP);
         }
     }
 
@@ -1602,18 +1609,19 @@ fn usb_vendor_product(vid: u16, pid: u16) -> &'static str {
 
 fn reset_port(state: &XhciState, port: u32) -> bool {
     let off = portsc_off(port);
-    // Read PORTSC, preserve non-RW1C bits, set Port Reset
+    // Linux SetPortFeature(PORT_RESET): neutral state + PR.
     let sc = r32(state.oper, off);
-    w32(state.oper, off, (sc & !PORTSC_RW1C) | PORTSC_PR);
+    w32(state.oper, off, port_neutral(sc) | PORTSC_PR);
 
-    // Wait for reset complete (500ms timeout)
+    // Done when PR has self-cleared and PRC is set (hub_port_wait_reset) —
+    // not merely when PED reads 1, which an enabled port still does in the
+    // instant before the controller starts the reset. 500 ms timeout.
     let deadline = crate::interrupts::ticks() + 50;
     loop {
         let sc = r32(state.oper, off);
-        if sc & PORTSC_PED != 0 { return true; }  // Port Enabled = reset done
-        if sc & PORTSC_PRC != 0 {
-            w32(state.oper, off, (sc & !PORTSC_RW1C) | PORTSC_PRC);
-            if sc & PORTSC_PED != 0 { return true; }
+        if sc & PORTSC_PR == 0 && sc & PORTSC_PRC != 0 {
+            w32(state.oper, off, port_neutral(sc) | PORTSC_PRC);
+            return sc & PORTSC_PED != 0;
         }
         if crate::interrupts::ticks() >= deadline { break; }
         core::hint::spin_loop();
@@ -2249,7 +2257,7 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
         kprintln!("  port {}: before portsc={:#010x} (pls={})", p + 1, before, (before >> 5) & 0xF);
 
         // Issue warm reset: preserve PP, set WPR (RW1S, self-clearing).
-        w32(oper, off, (before & !PORTSC_RW1C) | PORTSC_PP | PORTSC_WPR);
+        w32(oper, off, port_neutral(before) | PORTSC_PP | PORTSC_WPR);
         // Wait up to ~500ms for the reset to complete (WRC or PRC), polling ticks.
         let deadline = crate::interrupts::ticks() + 50;
         loop {
@@ -2260,7 +2268,7 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
         }
         // Clear all change bits.
         let sc = r32(oper, off);
-        w32(oper, off, (sc & !PORTSC_RW1C) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
+        w32(oper, off, port_neutral(sc) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
             | PORTSC_PRC | PORTSC_PLC);
         // Settle, then read the resulting state.
         let s2 = crate::interrupts::ticks() + 10;
