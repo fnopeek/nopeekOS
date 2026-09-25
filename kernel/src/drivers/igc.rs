@@ -94,6 +94,15 @@ const IGC_ADVTXD_DCMD_IFCS: u32 = 0x0200_0000;
 const IGC_ADVTXD_DCMD_RS: u32 = 0x0800_0000;
 const IGC_ADVTXD_DCMD_DEXT: u32 = 0x2000_0000;
 const IGC_ADVTXD_PAYLEN_SHIFT: u32 = 14;
+const IGC_ADVTXD_DTYP_CTXT: u32 = 0x0020_0000;
+const IGC_ADVTXD_DCMD_TSE: u32 = 0x8000_0000;
+const IGC_ADVTXD_TUCMD_IPV4: u32 = 0x0000_0400;
+const IGC_ADVTXD_TUCMD_L4T_TCP: u32 = 0x0000_0800;
+const IGC_ADVTXD_MACLEN_SHIFT: u32 = 9;
+const IGC_ADVTXD_L4LEN_SHIFT: u32 = 8;
+const IGC_ADVTXD_MSS_SHIFT: u32 = 16;
+const IGC_TXD_POPTS_IXSM: u32 = 0x01;
+const IGC_TXD_POPTS_TXSM: u32 = 0x02;
 
 const IGC_DEFAULT_RXD: usize = 256;
 const IGC_DEFAULT_TXD: usize = 256;
@@ -119,6 +128,10 @@ struct Igc {
     rx_discarding: bool,
     tx_next_to_use: u16,
     tx_next_to_clean: u16,
+    /// `next_to_watch`: for the first slot of each packet, the index of its
+    /// EOP descriptor — the only one the NIC writes DD back to (RS is set on
+    /// the last descriptor; a TSO context descriptor never gets one).
+    tx_eop: [u16; IGC_DEFAULT_TXD],
     /// EIMS bit of the queue vector; 0 = no interrupt, polled.
     eims_value: u32,
 }
@@ -205,7 +218,7 @@ pub fn init(dev: pci::PciAddr, mmio: u64) -> bool {
     let mut d = Igc {
         mmio, rx_descs, rx_bufs, tx_descs, tx_bufs,
         rx_next_to_clean: 0, rx_cleaned: 0, rx_discarding: false,
-        tx_next_to_use: 0, tx_next_to_clean: 0,
+        tx_next_to_use: 0, tx_next_to_clean: 0, tx_eop: [0; IGC_DEFAULT_TXD],
         eims_value: 0,
     };
 
@@ -319,51 +332,132 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     }
 }
 
-/// `igc_clean_tx_irq`: retire descriptors the NIC reports done.
+/// `igc_clean_tx_irq`: retire whole packets whose EOP descriptor is done.
 fn tx_clean(d: &mut Igc) {
+    let n = IGC_DEFAULT_TXD as u16;
     while d.tx_next_to_clean != d.tx_next_to_use {
-        let desc = tx_desc(d, d.tx_next_to_clean);
+        let eop = d.tx_eop[d.tx_next_to_clean as usize];
+        let desc = tx_desc(d, eop);
         // SAFETY: descriptor inside our ring; `wb.status` is the olinfo word.
         let status = unsafe { core::ptr::read_volatile((desc + 12) as *const u32) };
         if status & IGC_TXD_STAT_DD == 0 { break; }
-        d.tx_next_to_clean = (d.tx_next_to_clean + 1) % IGC_DEFAULT_TXD as u16;
+        d.tx_next_to_clean = (eop + 1) % n;
     }
 }
 
-/// `igc_xmit_frame_ring` for a single-buffer frame. A full ring waits at most
-/// ~200 µs for completions, then refuses the frame (`NETDEV_TX_BUSY`) instead
-/// of spinning the caller for seconds.
+/// Descriptors free for a new packet (one always stays unused).
+fn tx_unused(d: &Igc) -> u16 {
+    let n = IGC_DEFAULT_TXD as u16;
+    (d.tx_next_to_clean + n - d.tx_next_to_use - 1) % n
+}
+
+/// Wait until `need` descriptors are free: at most ~200 µs for completions,
+/// then refuse (`NETDEV_TX_BUSY`) instead of spinning the caller for seconds.
+fn tx_reserve(d: &mut Igc, need: u16) -> Result<(), NetError> {
+    tx_clean(d);
+    if tx_unused(d) >= need { return Ok(()); }
+    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 5000;
+    loop {
+        tx_clean(d);
+        if tx_unused(d) >= need { return Ok(()); }
+        if crate::interrupts::rdtsc() >= deadline { return Err(NetError::QueueFull); }
+        core::hint::spin_loop();
+    }
+}
+
+fn write_data_desc(d: &Igc, i: u16, chunk: &[u8], cmd: u32, olinfo: u32) {
+    let buf = d.tx_bufs + i as u64 * BUF_SIZE as u64;
+    let desc = tx_desc(d, i);
+    // SAFETY: slot `i` was retired by `tx_clean`; buffer and descriptor are ours.
+    unsafe {
+        core::ptr::copy_nonoverlapping(chunk.as_ptr(), buf as *mut u8, chunk.len());
+        core::ptr::write_volatile(desc as *mut u64, buf);
+        core::ptr::write_volatile((desc + 8) as *mut u32, cmd | chunk.len() as u32);
+        core::ptr::write_volatile((desc + 12) as *mut u32, olinfo);
+    }
+}
+
+fn tx_bump_tail(d: &mut Igc, next: u16) {
+    d.tx_next_to_use = next;
+    core::sync::atomic::fence(Ordering::SeqCst); // wmb() before the tail
+    wr32(d.mmio, IGC_TDT0, next as u32);
+}
+
+/// `igc_xmit_frame_ring` for a single-buffer frame.
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     if frame.len() > MTU { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
     let d = lock.as_mut().ok_or(NetError::NotInitialized)?;
-    let n = IGC_DEFAULT_TXD as u16;
-    tx_clean(d);
-    if (d.tx_next_to_use + 1) % n == d.tx_next_to_clean {
-        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 5000;
-        loop {
-            tx_clean(d);
-            if (d.tx_next_to_use + 1) % n != d.tx_next_to_clean { break; }
-            if crate::interrupts::rdtsc() >= deadline { return Err(NetError::QueueFull); }
-            core::hint::spin_loop();
-        }
-    }
+    tx_reserve(d, 1)?;
     let i = d.tx_next_to_use;
-    let buf = d.tx_bufs + i as u64 * BUF_SIZE as u64;
-    let desc = tx_desc(d, i);
-    let len = frame.len() as u32;
-    // SAFETY: `buf` and `desc` belong to slot `i`, which the NIC has retired.
+    write_data_desc(d, i, frame,
+        IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
+        | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS,
+        (frame.len() as u32) << IGC_ADVTXD_PAYLEN_SHIFT);
+    d.tx_eop[i as usize] = i;
+    tx_bump_tail(d, (i + 1) % IGC_DEFAULT_TXD as u16);
+    Ok(())
+}
+
+/// TCPv4 segmentation offload — `igc_tso` + `igc_tx_ctxtdesc` + `igc_tx_map`.
+/// `frame` is a whole Ethernet frame (IPv4, no options, TCP) whose TCP check
+/// holds the Linux `CHECKSUM_PARTIAL` seed (pseudo-header incl. length).
+pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    let mut lock = DEVICE.lock();
+    let d = lock.as_mut().ok_or(NetError::NotInitialized)?;
+    let chunks = frame.len().div_ceil(BUF_SIZE);
+    tx_reserve(d, 1 + chunks as u16)?;
+
+    // igc_tso: IP tot_len 0 (HW fills per segment), IP check 0 (IXSM), and
+    // the payload length taken back out of the TCP seed.
+    let mut hdr = [0u8; 128];
+    if hdr_len > hdr.len() || l4_off < 34 { return Err(NetError::FrameTooLarge); }
+    hdr[..hdr_len].copy_from_slice(&frame[..hdr_len]);
+    hdr[16] = 0; hdr[17] = 0;
+    hdr[24] = 0; hdr[25] = 0;
+    let paylen = (frame.len() - l4_off) as u32;
+    let seed = u16::from_be_bytes([hdr[l4_off + 16], hdr[l4_off + 17]]);
+    let mut sum = (!seed) as u32 + paylen;
+    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
+    hdr[l4_off + 16..l4_off + 18].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+
+    let n = IGC_DEFAULT_TXD as u16;
+    let first = d.tx_next_to_use;
+    // Context descriptor.
+    let ctx = tx_desc(d, first);
+    let ip_len = (l4_off - 14) as u32;
+    // SAFETY: slot `first` is free (reserved above).
     unsafe {
-        core::ptr::copy_nonoverlapping(frame.as_ptr(), buf as *mut u8, frame.len());
-        core::ptr::write_volatile(desc as *mut u64, buf);
-        core::ptr::write_volatile((desc + 8) as *mut u32,
-            IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
-            | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS | len);
-        core::ptr::write_volatile((desc + 12) as *mut u32, len << IGC_ADVTXD_PAYLEN_SHIFT);
+        core::ptr::write_volatile(ctx as *mut u32, ip_len | (14 << IGC_ADVTXD_MACLEN_SHIFT));
+        core::ptr::write_volatile((ctx + 4) as *mut u32, 0);
+        core::ptr::write_volatile((ctx + 8) as *mut u32,
+            IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DTYP_CTXT
+            | IGC_ADVTXD_TUCMD_IPV4 | IGC_ADVTXD_TUCMD_L4T_TCP);
+        core::ptr::write_volatile((ctx + 12) as *mut u32,
+            (((hdr_len - l4_off) as u32) << IGC_ADVTXD_L4LEN_SHIFT)
+            | ((mss as u32) << IGC_ADVTXD_MSS_SHIFT));
     }
-    d.tx_next_to_use = (i + 1) % n;
-    core::sync::atomic::fence(Ordering::SeqCst); // wmb() before the tail
-    wr32(d.mmio, IGC_TDT0, d.tx_next_to_use as u32);
+    // Data descriptors; PAYLEN + checksum insertion on the first only.
+    let cmd = IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
+        | IGC_ADVTXD_DCMD_TSE;
+    let olinfo = ((frame.len() - hdr_len) as u32) << IGC_ADVTXD_PAYLEN_SHIFT
+        | ((IGC_TXD_POPTS_TXSM | IGC_TXD_POPTS_IXSM) << 8);
+    let mut i = (first + 1) % n;
+    let mut chunk = [0u8; BUF_SIZE];
+    for c in 0..chunks {
+        let off = c * BUF_SIZE;
+        let end = (off + BUF_SIZE).min(frame.len());
+        let len = end - off;
+        chunk[..len].copy_from_slice(&frame[off..end]);
+        // The rewritten headers replace the head of the first chunk.
+        if c == 0 { chunk[..hdr_len].copy_from_slice(&hdr[..hdr_len]); }
+        let last = c == chunks - 1;
+        let this_cmd = if last { cmd | IGC_ADVTXD_DCMD_EOP | IGC_ADVTXD_DCMD_RS } else { cmd };
+        write_data_desc(d, i, &chunk[..len], this_cmd, if c == 0 { olinfo } else { 0 });
+        if last { d.tx_eop[first as usize] = i; }
+        i = (i + 1) % n;
+    }
+    tx_bump_tail(d, i);
     Ok(())
 }
 

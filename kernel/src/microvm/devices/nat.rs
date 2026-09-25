@@ -550,6 +550,12 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         return;
     }
 
+    // The card segments it: one super-frame instead of ~44 software-cut
+    // segments, each with a full checksum and its own trip through ipv4::send.
+    if crate::netdev::tso_capable() && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size) {
+        return;
+    }
+
     let base_seq = u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]);
     let orig_flags = l4[13];
     let n = payload.len().div_ceil(mss);
@@ -581,6 +587,57 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         if !crate::net::ipv4::send(dst_ip, PROTO_TCP, &seg) { NS_TX_ARPMISS.fetch_add(1, AtOrd::Relaxed); }
         off += this;
     }
+}
+
+/// Hand a guest TSO super-frame to the host card whole (`netdev::send_tso`):
+/// port rewritten, TCP check = pseudo-header seed incl. length (Linux
+/// `CHECKSUM_PARTIAL`, what the guest itself hands us), IPv4 header built for
+/// the host address. False ⇒ nothing was sent; the caller segments in software
+/// (no ARP entry yet, ring full, card refused).
+fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
+                thlen: usize, mss: u16) -> bool {
+    const ETH: usize = 14;
+    let ip_total = IPV4_HDR_LEN + l4.len();
+    if ip_total > u16::MAX as usize { return false; }
+    let Some(dst_mac) = crate::net::arp::lookup(crate::net::ipv4::arp_target_for(dst_ip)) else {
+        return false;
+    };
+    let src_mac = crate::netdev::mac().unwrap_or([0; 6]);
+
+    let mut f = Vec::with_capacity(ETH + ip_total);
+    f.extend_from_slice(&dst_mac);
+    f.extend_from_slice(&src_mac);
+    f.extend_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    let mut ip = [0u8; IPV4_HDR_LEN];
+    ip[0] = 0x45;
+    ip[2..4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+    ip[6..8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+    ip[8] = 64;
+    ip[9] = PROTO_TCP;
+    ip[12..16].copy_from_slice(&our_ip);
+    ip[16..20].copy_from_slice(&dst_ip);
+    let c = ipv4_checksum(&ip);
+    ip[10..12].copy_from_slice(&c.to_be_bytes());
+    f.extend_from_slice(&ip);
+    let l4_off = f.len();
+    f.extend_from_slice(l4);
+    f[l4_off..l4_off + 2].copy_from_slice(&hp.to_be_bytes()); // src port → host port
+    // Seed = folded pseudo-header sum, NOT complemented; the card adds the
+    // segment's own sum and complements (`~tcp_v4_check(len, s, d, 0)`).
+    let mut sum: u32 = PROTO_TCP as u32 + l4.len() as u32;
+    for w in [our_ip, dst_ip] {
+        sum += u16::from_be_bytes([w[0], w[1]]) as u32 + u16::from_be_bytes([w[2], w[3]]) as u32;
+    }
+    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
+    f[l4_off + 16..l4_off + 18].copy_from_slice(&(sum as u16).to_be_bytes());
+
+    if crate::netdev::send_tso(&f, mss, l4_off, l4_off + thlen).is_err() {
+        return false;
+    }
+    let payload = l4.len() - thlen;
+    NS_TX_PKTS.fetch_add(payload.div_ceil(mss as usize) as u64, AtOrd::Relaxed);
+    NS_TX_BYTES.fetch_add(l4.len() as u64, AtOrd::Relaxed);
+    true
 }
 
 /// Outbound NAT for a guest ICMP echo request (so ping + the browser's
