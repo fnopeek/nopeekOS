@@ -200,16 +200,19 @@ pub fn init() -> bool {
         // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
         // (what QEMU's transitional device offers a legacy driver). Either lets us
         // forward the guest's GSO super-frame AS-IS (device segments + checksums).
+        // Linux `virtnet_probe`: every TSO feature sits INSIDE the F_CSUM
+        // branch. A device that cannot checksum cannot segment — QEMU with a
+        // slirp backend still lists the legacy F_GSO bit (no vnet header
+        // behind it), and trusting that bit alone cut the upload to 2 Mbit.
         let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
-        let legacy_gso = features & F_GSO != 0;
+        let legacy_gso = features & (F_CSUM | F_GSO) == (F_CSUM | F_GSO);
         let offload = modern || legacy_gso;
         kprintln!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
                   features, features & F_CSUM != 0, legacy_gso, features & F_HOST_TSO4 != 0, offload);
         if modern {
             accepted |= F_CSUM | F_HOST_TSO4;
         } else if legacy_gso {
-            // F_GSO bundles checksum; accept F_CSUM too if the device lists it.
-            accepted |= F_GSO | (features & F_CSUM);
+            accepted |= F_CSUM | F_GSO;
         }
         if offload {
             TSO.store(true, Ordering::Release);
