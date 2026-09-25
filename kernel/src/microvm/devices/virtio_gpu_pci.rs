@@ -125,7 +125,14 @@ const DISPLAY_W: u32 = 1280;
 const DISPLAY_H: u32 = 720;
 
 const NUM_QUEUES: u16 = 2;
-const MAX_QUEUE_SIZE: u16 = 64;
+/// Small on purpose: the guest's virtio-gpu driver creates no fence for a
+/// dumb primary buffer and emulates no vblank, so the ONLY thing that paces
+/// its compositor is a full controlq (`virtio_gpu_queue_ctrl_sgs` sleeps
+/// for space). 16 descriptors ≈ two frames (TRANSFER + SET_SCANOUT + FLUSH,
+/// two descriptors each) — at 64 it rendered ~10 frames ahead.
+const MAX_QUEUE_SIZE: u16 = 16;
+/// The display refresh the controlq is paced to (see `service_controlq`).
+const VBLANK_HZ: u64 = 60;
 const MAX_SCANOUTS: usize = 16;   // protocol max
 
 #[derive(Default, Clone, Copy)]
@@ -160,12 +167,10 @@ struct Resource {
     /// Host-side pixel buffer. Updated by TRANSFER_TO_HOST_2D. Layout
     /// matches `format` × `width` × `height`. None until first transfer.
     host_pixels: Option<Vec<u8>>,
-    /// Host TSC of the last ACTUALLY-COPIED transfer for THIS resource — the
-    /// 30-fps copy cap. PER-RESOURCE (not global): wlroots/cage double-buffers
-    /// by alternating two resources (res 3 ↔ 4) every frame; a global cap would
-    /// skip one buffer's transfer for stretches → the scanout flips to a stale
-    /// buffer → flicker. Per-resource keeps EACH buffer fresh at 30 fps.
-    last_transfer_tsc: u64,
+    /// Bumped by every TRANSFER into `host_pixels`.
+    frame: u64,
+    /// `frame` at this resource's last FLUSH to the surface.
+    flushed_frame: u64,
 }
 
 /// Per-scanout binding. We advertise 1 scanout (id 0); ids 1..16 stay
@@ -244,6 +249,13 @@ pub struct VirtioGpu {
     dmg_area_acc: u64,
     dmg_tile_acc: u64,
     dmg_flush_count: u32,
+
+    /// vblank pacing: the controlq takes no further command before this TSC
+    /// once a FLUSH was served (0 = not paused). What a display does: one
+    /// scan-out per refresh, the rest waits.
+    paused_until: u64,
+    /// Resource of the last FLUSH that reached the surface.
+    last_flush_res: u32,
 }
 
 impl VirtioGpu {
@@ -279,6 +291,8 @@ impl VirtioGpu {
             dmg_tile_acc: 0,
             dmg_flush_count: 0,
             d4_disconnect_until: None,
+            paused_until: 0,
+            last_flush_res: 0,
         }
     }
 
@@ -383,8 +397,12 @@ impl VirtioGpu {
         let mut last_avail = q.last_avail_idx;
         let mut used_idx = q.used_idx;
 
+        let now = crate::interrupts::rdtsc();
+        if now < self.paused_until { return false; }
+
         let mut any = false;
-        while last_avail != avail_top {
+        let mut flushed = false;
+        while last_avail != avail_top && !flushed {
             let head = match avail_ring(mem, driver_gpa, qsize, last_avail) {
                 Some(v) => v, None => break,
             };
@@ -411,6 +429,9 @@ impl VirtioGpu {
 
             // Dispatch the command + build the response payload (incl.
             // the 24-byte virtio_gpu_ctrl_hdr).
+            flushed = request.len() >= 4
+                && u32::from_le_bytes([request[0], request[1], request[2], request[3]])
+                    == VIRTIO_GPU_CMD_RESOURCE_FLUSH;
             let response = self.dispatch_control(&request, mem);
 
             // Write response across the writable descriptors in order.
@@ -435,6 +456,12 @@ impl VirtioGpu {
         let q = &mut self.queues[q_idx];
         q.last_avail_idx = last_avail;
         q.used_idx = used_idx;
+
+        // A frame went out: the next command waits for the next refresh.
+        if flushed {
+            self.paused_until = now + crate::interrupts::tsc_freq() / VBLANK_HZ;
+            super::gpu_backend::set_resume_tsc(self.paused_until);
+        }
 
         if any { self.isr |= 1; }
         any
@@ -611,11 +638,11 @@ impl VirtioGpu {
         // Replace if id exists, else push.
         if let Some(r) = self.resources.iter_mut().find(|r| r.id == id) {
             r.format = format; r.width = width; r.height = height;
-            r.backing.clear(); r.host_pixels = None; r.last_transfer_tsc = 0;
+            r.backing.clear(); r.host_pixels = None; r.frame = 0; r.flushed_frame = 0;
         } else {
             self.resources.push(Resource {
                 id, format, width, height,
-                backing: Vec::new(), host_pixels: None, last_transfer_tsc: 0,
+                backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
             });
         }
     }
@@ -688,46 +715,10 @@ impl VirtioGpu {
         ]);
         let resource_id = u32::from_le_bytes([body[24], body[25], body[26], body[27]]);
 
-        let now_tsc = crate::interrupts::rdtsc();
-        // Adaptive copy cap: the copy runs INLINE on this vCPU exit (8 MB/frame
-        // guest→host + a 2nd compositor pass), stealing net-processing cycles +
-        // the memory bus. Florian's "smaller window / hidden = faster download"
-        // exposed the coupling. 30 fps idle (smooth UI); back off to ~8 fps while
-        // ANY transfer is live (the display stays usable, the vCPU is freed for
-        // RX *and* TX). Was `download_active()` — download-only — which left the
-        // GPU at 30 fps during a speedtest UPLOAD, so the 8 MB copies contended
-        // with the per-segment TX on the vCPU and the upload hung.
-        //
-        // With the off-vCPU GPU backend active (Stage 2) this copy runs on the GPU
-        // WORKER core, NOT the vCPU — so the transfer-throttle band-aid is no longer
-        // needed: stay at 30 fps (smooth UI) and let the worker absorb it. The
-        // `recently_active` throttle only still applies on the inline path (Stage 1
-        // / no spare core), where the copy IS on the vCPU.
-        let frame_ms = if super::gpu_backend::full_active() {
-            33
-        } else if super::nat::recently_active() {
-            125
-        } else {
-            33
-        };
-        let frame_gap = (crate::interrupts::tsc_freq() / 1000) * frame_ms;
-
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
         };
-
-        // 30-fps copy cap, PER RESOURCE: the guest issues ~200 full-framebuffer
-        // transfers/s (2-3 GB/s of guest-RAM reads on the vCPU core, starving the
-        // net pump); the display only needs ~30 Hz for a browser/UI. Skip the copy
-        // when THIS resource was copied < ~33 ms ago — per-resource so a
-        // double-buffered guest (alternating res 3 ↔ 4) keeps BOTH buffers fresh
-        // (a global cap skipped one → stale-on-flip → flicker). The controlq
-        // response is still sent by the caller (we only skip the copy). NEXT lever
-        // (Florian): also damage-track the rect so each copy is small too.
-        if now_tsc.wrapping_sub(r.last_transfer_tsc) < frame_gap {
-            return;
-        }
-        r.last_transfer_tsc = now_tsc;
+        r.frame = r.frame.wrapping_add(1);
 
         // Compute bytes per pixel from format. Virtio-gpu B8G8R8A8 etc.
         // are all 4 bytes per pixel for the formats Linux's virtio-gpu
@@ -787,9 +778,17 @@ impl VirtioGpu {
         let h = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
         let resource_id = u32::from_le_bytes([body[16], body[17], body[18], body[19]]);
 
-        let r = match self.resources.iter().find(|r| r.id == resource_id) {
+        let last_res = self.last_flush_res;
+        let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
         };
+        // Same resource, nothing transferred since its last flush: the surface
+        // already shows exactly this. (A flip to the OTHER buffer must copy.)
+        if resource_id == last_res && r.frame == r.flushed_frame {
+            return;
+        }
+        r.flushed_frame = r.frame;
+        let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
 
         // One-time "first guest frame reached the host" confirmation,
@@ -835,6 +834,7 @@ impl VirtioGpu {
             self.dmg_tile_acc = 0;
         }
 
+        self.last_flush_res = resource_id;
         let wid = crate::microvm::vm_window();
         if wid != 0 {
             super::gpu_backend::note(super::gpu_backend::STAT_FLUSH_KB, pix.len() as u64 / 1024);

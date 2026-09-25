@@ -31,6 +31,7 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
 pub fn reset() {
     *GPU.lock() = VirtioGpu::new();
+    RESUME_TSC.store(0, Ordering::Release);
     D4_PENDING.store(false, Ordering::Release);
 }
 
@@ -53,6 +54,21 @@ pub fn note(kind: usize, n: u64) {
 }
 pub fn stats_snapshot() -> [u64; STAT_BUCKETS] {
     core::array::from_fn(|i| STATS[i].load(Ordering::Relaxed))
+}
+
+/// When a vblank-paused controlq may run again (`VirtioGpu::paused_until`),
+/// 0 = not paused. Lock-free, so the vCPU asks on every loop without the
+/// device lock, and its timer deadline includes it.
+static RESUME_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub(super) fn set_resume_tsc(t: u64) { RESUME_TSC.store(t, Ordering::Release); }
+pub fn resume_tsc() -> Option<u64> {
+    match RESUME_TSC.load(Ordering::Acquire) { 0 => None, t => Some(t) }
+}
+/// The pause is over: clear it and tell the caller to serve the controlq.
+pub fn take_resume(now: u64) -> bool {
+    let t = RESUME_TSC.load(Ordering::Acquire);
+    t != 0 && now >= t
+        && RESUME_TSC.compare_exchange(t, 0, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
 /// Mirror of `VirtioGpu::d4_disconnecting`, so the vCPU's per-exit look at
