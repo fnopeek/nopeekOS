@@ -7,7 +7,10 @@
 # installer + OTA pipeline pick it up.
 set -euo pipefail
 
+# Bump both together. The sha256 comes from
+# https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
 LINUX_VERSION="${LINUX_VERSION:-6.18.53}"
+LINUX_SHA256="${LINUX_SHA256:-4d6fba95c2244b08a7b4144a4d38b9be4fb31abb5e7682ae40bb5cb11374cfe0}"
 SRC_CACHE="${SRC_CACHE:-$HOME/.cache/nopeekos/linux-src}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +25,7 @@ green() { printf '\033[0;32m[npk]\033[0m %s\n' "$1"; }
 red()   { printf '\033[0;31m[npk]\033[0m %s\n' "$1" >&2; }
 
 # ── Sanity ────────────────────────────────────────────────────────
-for t in gcc make flex bison openssl curl xz tar pkg-config; do
+for t in gcc make flex bison openssl curl xz tar pkg-config sha256sum; do
     command -v "$t" > /dev/null 2>&1 || { red "missing: $t"; exit 1; }
 done
 
@@ -39,6 +42,18 @@ if [ ! -f "$TARBALL" ]; then
         "https://cdn.kernel.org/pub/linux/kernel/v6.x/${TARBALL}"
     mv "$TARBALL.part" "$TARBALL"
 fi
+
+# Checked on every run, cached tarball included: the guest kernel is
+# signed and shipped, so its source must be exactly what kernel.org
+# published for this version.
+if ! echo "${LINUX_SHA256}  $TARBALL" | sha256sum -c - >/dev/null 2>&1; then
+    red "sha256 mismatch for $TARBALL"
+    red "  expected: ${LINUX_SHA256}"
+    red "  got:      $(sha256sum "$TARBALL" | awk '{print $1}')"
+    red "  (version bump? take the new value from kernel.org sha256sums.asc)"
+    exit 1
+fi
+cyan "sha256 ok: $TARBALL"
 
 if [ ! -d "$SRCDIR" ]; then
     cyan "extracting (~1.5 GB)"
