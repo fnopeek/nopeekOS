@@ -453,7 +453,38 @@ fn protected_cores() -> u32 {
     let mut mask = 0u32;
     if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
     if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
+    mask | host_fiber_cores()
+}
+
+/// Worker cores carrying resident host fibers (input, audio, ACPI, panels, …).
+/// Same failure as the NIC core above, for every other driver: a vCPU on the
+/// core starves its cooperative peers — the touchpad stops while the guest
+/// runs. Recomputed only while no VM exists; during a run the snapshot is
+/// returned, because `guest_vcpus()` sizes the MP table and the IPI broadcast
+/// and must not change under a running guest (the vCPU fibers themselves would
+/// otherwise count as host fibers).
+static HOST_FIBER_CORES: AtomicU32 = AtomicU32::new(0);
+
+fn host_fiber_cores() -> u32 {
+    if VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE {
+        return HOST_FIBER_CORES.load(Ordering::Acquire);
+    }
+    let n = crate::smp::per_core::core_count().min(32);
+    let mask = (1..n)
+        .filter(|&c| crate::smp::fiber::fiber_count(c) > 0)
+        .fold(0u32, |m, c| m | (1 << c));
+    HOST_FIBER_CORES.store(mask, Ordering::Release);
     mask
+}
+
+/// True if `cid` runs a vCPU or a microvm worker (not a protected host core).
+/// Such a core must not pick up new host work while the guest runs.
+pub fn is_vm_worker_core(cid: usize) -> bool {
+    if cid == 0 || cid >= 32 || VM_RUN_STATE.load(Ordering::Acquire) == VM_IDLE {
+        return false;
+    }
+    let busy = VM_CORE_MASK.load(Ordering::Acquire) & !protected_cores();
+    busy & (1 << cid) != 0
 }
 
 /// Lowest worker core the network does not need. Whichever core picks up the BSP
@@ -835,6 +866,8 @@ pub fn vm_open(
             inject: inject.to_vec(),
         });
         VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        // Snapshot the host-fiber cores while still idle (see `host_fiber_cores`).
+        let _ = protected_cores();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         // Place it deliberately: `spawn_fiber` hands the task to whichever
         // worker steals it first, and that core owns the guest for its whole
@@ -857,6 +890,7 @@ pub fn vm_open(
             inject: inject.to_vec(),
         });
         VM_CLOSE_REQUESTED.store(false, Ordering::Release);
+        let _ = protected_cores();
         VM_RUN_STATE.store(VM_REQUESTED, Ordering::Release);
         return Ok(());
     }

@@ -298,6 +298,7 @@ pub fn init() {
         // compiled wasm; if it did, it is that module's trap and not the
         // kernel's. Anything else lands on the handler that was here before.
         IDT[0].set_handler(crate::forge_rt::forge_de_stub as *const () as u64);
+        IDT[2].set_handler(nmi_handler as *const () as u64);
         IDT[3].set_handler(breakpoint_handler as *const () as u64);
         IDT[6].set_handler(invalid_opcode_handler as *const () as u64);
         IDT[8].set_handler(double_fault_handler as *const () as u64);
@@ -375,6 +376,15 @@ extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
     kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
     kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
     halt_loop();
+}
+
+/// NMIs the kernel does not raise itself. They reach the host when a guest is
+/// interrupted (SVM intercepts NMI) or from firmware. Counted, not printed —
+/// an NMI may land while the console lock is held.
+pub static NMI_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
+    NMI_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {

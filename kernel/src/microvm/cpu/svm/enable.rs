@@ -24,7 +24,7 @@
 //! dance: VMRUN takes the VMCB physical address as an operand
 //! (loaded into RAX), so multiple VMCBs can coexist trivially.
 
-use super::{cpuid as host_cpuid, lapic, npt, rdmsr, vmcb, wrmsr};
+use super::{lapic, npt, rdmsr, vmcb, wrmsr};
 use super::lapic::LocalApic;
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
@@ -170,7 +170,7 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     let mut hf = crate::microvm::cpu::FpuArea::boxed();
     let mut gf = crate::microvm::cpu::FpuArea::boxed();
     let outcome = run_guest_once(
-        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf);
+        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf, super::guest_cpuid::host_xcr0());
 
     Ok(outcome)
 }
@@ -344,8 +344,14 @@ fn run_guest_once(
     vmcb_phys: u64,
     host_fpu: *mut crate::microvm::cpu::FpuArea,
     guest_fpu: *mut crate::microvm::cpu::FpuArea,
+    guest_xcr0: u64,
 ) -> vmcb::LaunchOutcome {
     let regs_ptr: *mut vmcb::GuestRegs = regs;
+    // [guest, host] XCR0, switched inside the asm next to the FPU swap
+    // (KVM `kvm_load_guest_xsave_state`): the guest's XSETBV value must
+    // never stay live on the host, and the host's must not leak in.
+    let xcr: [u64; 2] = [guest_xcr0, super::guest_cpuid::host_xcr0()];
+    let xcr_ptr = xcr.as_ptr();
     // Per-core: VM_HSAVE_PA + host-extra-save frame for THIS core. Lazily
     // sets up any core that runs VMRUN (BSP today, AP vCPU fibers later).
     let host_extra = ensure_core_host_state();
@@ -384,8 +390,9 @@ fn run_guest_once(
             "push rdx",                     // host_extra_save phys
             "push r8",                      // host_fpu  ptr
             "push r9",                      // guest_fpu ptr
-            // Stack now: [rsp+0]=guest_fpu [+8]=host_fpu
-            //   [+16]=host_extra [+24]=vmcb_phys [+32]=struct_ptr
+            "push r10",                     // xcr pair ptr
+            // Stack now: [rsp+0]=xcr [+8]=guest_fpu [+16]=host_fpu
+            //   [+24]=host_extra [+32]=vmcb_phys [+40]=struct_ptr
 
             // ── FPU SAVE/RESTORE (KVM kvm_load_guest_fpu): vmrun
             // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
@@ -395,14 +402,23 @@ fn run_guest_once(
             // XCR0-enabled components; guest owns XCR0 via XSETBV).
             // Only GPR/vm* instructions sit between this xrstor and
             // vmrun, and between vmrun and the paired xsave below.
-            "mov rcx, [rsp + 8]",           // host_fpu
+            "mov rcx, [rsp + 16]",          // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save host FPU
-            "mov rcx, [rsp + 0]",           // guest_fpu
+            "xsave64 [rcx]",                // save host FPU (host XCR0)
+            "mov r11, [rsp + 0]",           // xcr pair
+            "mov rax, [r11]",               // guest XCR0
+            "cmp rax, [r11 + 8]",
+            "je 2f",
+            "mov rdx, rax",
+            "shr rdx, 32",
+            "xor ecx, ecx",
+            "xsetbv",                       // guest XCR0 on
+            "2:",
+            "mov rcx, [rsp + 8]",           // guest_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xrstor64 [rcx]",               // restore guest FPU
+            "xrstor64 [rcx]",               // restore guest FPU (guest XCR0)
 
             // ── ENTRY: load guest GPRs from struct ────────────────
             "mov rbx, [rdi +   0]",
@@ -424,14 +440,14 @@ fn run_guest_once(
             // vmsave host FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (vmrun
             // does NOT preserve them); vmload them back on THIS core
             // right after #VMEXIT, before any GS-relative host access.
-            "mov rax, [rsp + 16]",          // host_extra_save phys
+            "mov rax, [rsp + 24]",          // host_extra_save phys
             "vmsave rax",                   // save host FS/GS/TR/LDTR/MSRs
-            "mov rax, [rsp + 24]",          // guest vmcb_phys
+            "mov rax, [rsp + 32]",          // guest vmcb_phys
             "clgi",
             "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
             "vmrun rax",
             "vmsave rax",                   // save guest's back into the guest VMCB
-            "mov rax, [rsp + 16]",          // host_extra_save phys
+            "mov rax, [rsp + 24]",          // host_extra_save phys
             "vmload rax",                   // restore host FS/GS/... while GIF=0 (atomic vs IRQs)
             "stgi",                         // only NOW open the IRQ window — host state already correct
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
@@ -452,25 +468,34 @@ fn run_guest_once(
             "push r13",
             "push r14",
             "push r15",
-            // Stack now: r15..rbx (14=112B), guest_fpu[+112],
-            //   host_fpu[+120], host_extra[+128], vmcb[+136],
-            //   struct_ptr[+144], host_callee_saved(6).
+            // Stack now: r15..rbx (14=112B), xcr[+112], guest_fpu[+120],
+            //   host_fpu[+128], host_extra[+136], vmcb[+144],
+            //   struct_ptr[+152], host_callee_saved(6).
 
             // ── FPU SAVE/RESTORE (paired exit half): no FP since
             // vmexit (only vm*/push above). Save guest FPU, restore
             // host's. Guest GPRs are on the stack now → rax/rcx/rdx
             // free to clobber.
-            "mov rcx, [rsp + 112]",         // guest_fpu
+            "mov rcx, [rsp + 120]",         // guest_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xsave64 [rcx]",                // save guest FPU
-            "mov rcx, [rsp + 120]",         // host_fpu
+            "xsave64 [rcx]",                // save guest FPU (guest XCR0)
+            "mov r11, [rsp + 112]",         // xcr pair
+            "mov rax, [r11 + 8]",           // host XCR0
+            "cmp rax, [r11]",
+            "je 3f",
+            "mov rdx, rax",
+            "shr rdx, 32",
+            "xor ecx, ecx",
+            "xsetbv",                       // host XCR0 back
+            "3:",
+            "mov rcx, [rsp + 128]",         // host_fpu
             "mov eax, 0xffffffff",
             "mov edx, 0xffffffff",
-            "xrstor64 [rcx]",               // restore host FPU
+            "xrstor64 [rcx]",               // restore host FPU (host XCR0)
 
             // Recover struct ptr (rax free to clobber).
-            "mov rax, [rsp + 144]",
+            "mov rax, [rsp + 152]",
 
             // Pop in reverse-push order, store at the right offset.
             "pop rcx", "mov [rax + 104], rcx",      // r15
@@ -487,7 +512,7 @@ fn run_guest_once(
             "pop rcx", "mov [rax +  16], rcx",      // rdx
             "pop rcx", "mov [rax +   8], rcx",      // rcx
             "pop rcx", "mov [rax +   0], rcx",      // rbx
-            "add rsp, 40",                          // discard guest_fpu,host_fpu,host_extra,vmcb,struct
+            "add rsp, 48",                          // discard xcr,guest_fpu,host_fpu,host_extra,vmcb,struct
 
             // Restore host callee-saved.
             "pop r15",
@@ -502,6 +527,7 @@ fn run_guest_once(
             in("rdx") host_extra,
             in("r8") host_fpu,
             in("r9") guest_fpu,
+            in("r10") xcr_ptr,
             clobber_abi("C"),
         );
     }
@@ -528,6 +554,43 @@ const EXIT_IOIO: u64 = 0x07B;
 const EXIT_MSR: u64 = 0x07C;
 const EXIT_SHUTDOWN: u64 = 0x07F;
 const EXIT_NPF: u64 = 0x400;
+const EXIT_NMI: u64 = 0x061;
+const EXIT_RDPMC: u64 = 0x06F;
+const EXIT_INVD: u64 = 0x076;
+const EXIT_INVLPGA: u64 = 0x07A;
+const EXIT_VMRUN: u64 = 0x080;
+const EXIT_VMMCALL: u64 = 0x081;
+const EXIT_VMLOAD: u64 = 0x082;
+const EXIT_VMSAVE: u64 = 0x083;
+const EXIT_STGI: u64 = 0x084;
+const EXIT_CLGI: u64 = 0x085;
+const EXIT_SKINIT: u64 = 0x086;
+const EXIT_WBINVD: u64 = 0x089;
+const EXIT_MONITOR: u64 = 0x08A;
+const EXIT_MWAIT: u64 = 0x08B;
+const EXIT_MWAIT_COND: u64 = 0x08C;
+const EXIT_XSETBV: u64 = 0x08D;
+const EXIT_RDPRU: u64 = 0x08E;
+
+const VEC_UD: u8 = 6;
+const VEC_GP: u8 = 13;
+
+/// Queue a hardware exception for the next VMRUN (EVENTINJ type 3). RIP is
+/// NOT advanced: the faulting instruction is the one reported.
+fn inject_exception(vmcb: &mut vmcb::Vmcb, vector: u8, error_code: Option<u32>) {
+    let mut info = vector as u64 | (3u64 << 8) | (1u64 << 31);
+    if let Some(e) = error_code {
+        info |= (1u64 << 11) | ((e as u64) << 32);
+    }
+    vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
+}
+
+/// XSETBV rules (SDM/APM, KVM `__kvm_set_xcr`): x87 always on, AVX needs SSE,
+/// nothing beyond what the host itself has enabled in XCR0.
+fn xcr0_valid(v: u64) -> bool {
+    let host = super::guest_cpuid::host_xcr0();
+    v & 1 != 0 && v & !host == 0 && (v & 0b100 == 0 || v & 0b010 != 0)
+}
 const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 // ── Re-entrant VM context (Phase 12.4 step 1c — SVM mirror of 1a) ──
@@ -749,7 +812,6 @@ pub struct Vcpu {
     reinject: u64,
     iter: u32,
     io_dropped: u32,
-    msr_log_count: u32,
     consecutive_idle: u32,
     /// Per-vCPU emulated local APIC (xAPIC MMIO @ 0xFEE00000). Inert
     /// while the guest boots `nolapic`; drives the timer + (later) IPIs
@@ -774,6 +836,11 @@ pub struct Vcpu {
     /// off → exit the VM (tears the window down on browser close instead
     /// of leaving a black idle window). Reset on any IF=1 HLT.
     if_off_halts: u32,
+    /// Emulated MSR state (MTRR, SPEC_CTRL, HWCR …) — see `svm::msr`.
+    msrs: super::msr::GuestMsrs,
+    /// Guest XCR0 (reset value 1 = x87). Swapped around VMRUN in
+    /// `run_guest_once`; the host's XCR0 is never left in the guest's hands.
+    xcr0: u64,
 }
 
 /// Handle to a microvm's `VmShared`. The BSP vCPU **owns** it, heap-boxed
@@ -871,31 +938,13 @@ impl VmContext {
         // SAFETY: freshly allocated, identity-mapped, exclusive.
         unsafe { core::ptr::write_bytes(iopm_phys as *mut u8, 0xFF, 3 * 4096); }
 
-        // MSRPM: 8 KB all-zero = pass-through every MSR. Architectural
-        // CPU-state MSRs are auto-saved/loaded by the CPU via the
-        // VMCB.SAVE area on VMRUN/VMEXIT (APM §15.11.1).
+        // MSRPM: intercept everything except the VMLOAD/VMSAVE-switched set
+        // (KVM `svm_recalc_msr_intercepts`). An all-zero map would hand the
+        // guest the host's MTRRs, TSC, SYSCFG and microcode loader.
         let msrpm_phys = memory::allocate_contiguous(2)
             .ok_or("OOM allocating MSRPM (8 KB)")?;
-        // SAFETY: as above.
-        unsafe { core::ptr::write_bytes(msrpm_phys as *mut u8, 0, 2 * 4096); }
-
-        // Intercept IA32_APIC_BASE (0x1B) reads + writes so the EXIT_MSR
-        // handler reports our emulated value — crucially with the BSP bit
-        // (bit 8) set for the boot vCPU. Without this the all-zero MSRPM
-        // passes the RDMSR straight to the host core, which is NOT the
-        // host BSP (the guest runs on an arbitrary worker core) → its
-        // APICBASE has the BSP bit clear. Linux's topology code then sees
-        // an enumerated BSP whose APICBASE BSP bit is unset, mistakes the
-        // guest for a kdump/crash kernel, and caps it at 1 CPU
-        // (`topo_is_converted_bsp`, topology.c) — which silently defeats
-        // guest SMP. MSRPM range 0 covers MSRs 0x0..0x1FFF at 2 bits each
-        // (bit0 read / bit1 write); 0x1B → bit 54 → byte 6, bits 6|7.
-        // Gated on GUEST_LAPIC: with `nolapic` we want host pass-through.
-        if crate::microvm::cpu::GUEST_LAPIC {
-            // SAFETY: msrpm_phys is a freshly allocated, identity-mapped
-            // 8 KB region we own; byte 6 is well within it.
-            unsafe { *((msrpm_phys + 6) as *mut u8) |= 0xC0; }
-        }
+        // SAFETY: freshly allocated, identity-mapped, exclusive 8 KB.
+        unsafe { super::msr::init_msrpm(msrpm_phys); }
 
         let mut vmcb = alloc::boxed::Box::new(vmcb::Vmcb::zeroed());
         let vmcb_phys = vmcb.phys_addr();
@@ -953,7 +1002,6 @@ impl VmContext {
                 reinject: 0,
                 iter: 0,
                 io_dropped: 0,
-                msr_log_count: 0,
                 consecutive_idle: 0,
                 lapic: LocalApic::new(0),
                 last_lapic_tick: 0,
@@ -961,6 +1009,8 @@ impl VmContext {
                 halt_poll_deadline: 0,
                 warm_poll: false,
                 if_off_halts: 0,
+                msrs: super::msr::GuestMsrs::new(),
+                xcr0: 1,
             },
         })
     }
@@ -1025,14 +1075,8 @@ fn setup_vmcb_linux(
     entry_rip: u64,
 ) {
     // ── Control area ──────────────────────────────────────────────
-    let misc1 = vmcb::INTERCEPT_INTR
-        | vmcb::INTERCEPT_CPUID
-        | vmcb::INTERCEPT_HLT
-        | vmcb::INTERCEPT_IOIO_PROT
-        | vmcb::INTERCEPT_MSR_PROT
-        | vmcb::INTERCEPT_SHUTDOWN;
-    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, misc1);
-    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::INTERCEPT_VMRUN);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
 
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
@@ -1095,14 +1139,8 @@ fn setup_vmcb_ap(
     sipi_vector: u8,
 ) {
     // ── Control area — identical to setup_vmcb_linux ────────────────
-    let misc1 = vmcb::INTERCEPT_INTR
-        | vmcb::INTERCEPT_CPUID
-        | vmcb::INTERCEPT_HLT
-        | vmcb::INTERCEPT_IOIO_PROT
-        | vmcb::INTERCEPT_MSR_PROT
-        | vmcb::INTERCEPT_SHUTDOWN;
-    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, misc1);
-    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::INTERCEPT_VMRUN);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
@@ -1198,7 +1236,6 @@ impl VmContext {
                 reinject: 0,
                 iter: 0,
                 io_dropped: 0,
-                msr_log_count: 0,
                 consecutive_idle: 0,
                 lapic: LocalApic::new(apic_id),
                 last_lapic_tick: 0,
@@ -1206,6 +1243,8 @@ impl VmContext {
                 halt_poll_deadline: 0,
                 warm_poll: false,
                 if_off_halts: 0,
+                msrs: super::msr::GuestMsrs::new(),
+                xcr0: 1,
             },
         })
     }
@@ -1373,7 +1412,6 @@ impl VmContext {
 
     let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
     let mut slice_n: u32 = 0;
-    const MSR_LOG_CAP: u32 = 32;
 
     // Idle detection — once init enters its pause(2)/wait-loop, the
     // only exits are external interrupts (= host timer). After
@@ -1494,8 +1532,11 @@ impl VmContext {
         // → clobbers the restored guest FPU). Pass the areas in.
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
         let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
-        let outcome =
-            run_guest_once(&mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf);
+        let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        let outcome = run_guest_once(
+            &mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf, self.vcpu.xcr0,
+        );
+        super::msr::spec_ctrl_exit(host_spec);
         let exit = outcome.exit_reason;
 
         // Guest-RIP profiler: EXIT_INTR = a host physical interrupt (per-core
@@ -2090,59 +2131,10 @@ impl VmContext {
             EXIT_CPUID => {
                 let leaf = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
                 let subleaf = self.vcpu.regs.rcx as u32;
-                let (eax, mut ebx, mut ecx, mut edx);
-                // Hide hypervisor presence + KVM paravirt leafs entirely.
-                // Without this, Linux sees the L1 KVM signature through
-                // pass-through CPUID, enables kvm-clock, then divides
-                // by zero in pvclock_tsc_khz because the WRMSR to
-                // KVM_SYSTEM_TIME_NEW is absorbed (never reaches L1 KVM)
-                // so the pvclock_vcpu_time_info struct stays zeroed.
-                if (0x4000_0000..=0x4000_FFFF).contains(&leaf) {
-                    eax = 0; ebx = 0; ecx = 0; edx = 0;
-                } else {
-                    let (a, b, c, d) = host_cpuid(leaf, subleaf);
-                    eax = a; ebx = b; ecx = c; edx = d;
-                    if leaf == 1 {
-                        // ECX bit 31: hypervisor present. Clearing it
-                        // tells Linux we're "bare metal" — no probe of
-                        // 0x40000000+ leafs, no kvm-clock activation.
-                        ecx &= !(1u32 << 31);
-                        // ECX bit 24: TSC-deadline timer. Hide it so Linux
-                        // uses the classic APIC_TMICT/TMCCT periodic timer
-                        // (which svm::lapic emulates) instead of the
-                        // TSC-deadline MSR (0x6E0), which we don't emulate.
-                        ecx &= !(1u32 << 24);
-                        // EBX bits 31:24: initial (x)APIC ID. Pass-through
-                        // would report the HOST core's ID (e.g. 2 on worker
-                        // core 2) — mismatching our emulated LAPIC + MP-table
-                        // (FW_BUG "APIC ID mismatch"). Report this vCPU's id.
-                        ebx = (ebx & 0x00FF_FFFF) | ((self.vcpu.apic_id as u32) << 24);
-                    }
-                    // Leaf 0xB/0x1F (extended topology): EDX is the 32-bit
-                    // x2APIC ID, which modern Linux uses as the CPU's APIC
-                    // ID. Same reason as leaf 1 EBX — report this vCPU's id,
-                    // not the host core's. EAX/EBX/ECX (level shifts/counts)
-                    // pass through (host topology shape; the AP's distinct
-                    // id places it on its own core — refined in Stage 3b).
-                    if leaf == 0x0B || leaf == 0x1F {
-                        edx = self.vcpu.apic_id as u32;
-                    }
-                    if leaf == 7 && subleaf == 0 {
-                        // Hide CET — host has CR4.CET=1 for IBT but
-                        // Linux's hand-asm stubs lack ENDBR64, so once
-                        // CET is on in the guest, indirect calls #CP
-                        // and BUG().
-                        ecx &= !(1u32 << 7);   // CET_SS
-                        edx &= !(1u32 << 20);  // CET_IBT
-                        // Hide PKU — CPUID 0xD includes PKRU (+8 byte)
-                        // in xsave state size; if Linux supports PK it
-                        // expects to find it, mismatched calc → WARN
-                        // + xsave-disable + fpstate_reset NULL-deref.
-                        // Simpler to hide PK from the guest entirely.
-                        ecx &= !(1u32 << 3);   // PKU
-                        ecx &= !(1u32 << 4);   // OSPKE
-                    }
-                }
+                let (eax, ebx, ecx, edx) = super::guest_cpuid::guest_cpuid(
+                    leaf, subleaf, self.vcpu.apic_id,
+                    self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_CR4), self.vcpu.xcr0,
+                );
                 self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, eax as u64);
                 self.vcpu.regs.rbx = ebx as u64;
                 self.vcpu.regs.rcx = ecx as u64;
@@ -2165,50 +2157,67 @@ impl VmContext {
                 last_outcome = Some(outcome);
             }
             EXIT_MSR => {
-                // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR
+                // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR. Every MSR is intercepted
+                // and emulated in `svm::msr`; none reaches the host.
                 let is_write = outcome.exit_qualification & 1 != 0;
                 let msr = self.vcpu.regs.rcx as u32;
-                // IA32_APIC_BASE (0x1B): report the LAPIC enabled at its
-                // architectural default base so Linux finds + uses it
-                // (guest-SMP Stage 1) WITH the BSP bit set (Stage 2: this
-                // is now intercepted via the MSRPM — see the 0x1B intercept
-                // bit in the VM-open path — and the BSP bit is what keeps
-                // Linux's topology code from capping the guest at 1 CPU).
-                // Writes (enable / relocate) are accepted but we keep the
-                // fixed base — the NPT trap page is wired at 0xFEE00000.
-                // Stage 3 (APs): return BSP set only for the BSP vCPU
-                // (apic_id 0); APs must read it clear.
-                if msr == 0x1B {
-                    // RDMSR: report enabled LAPIC at default base. WRMSR:
-                    // accept silently (keep fixed base). Single trailing
-                    // advance_rip below handles both.
-                    if !is_write {
-                        // BSP bit (8) only for the boot vCPU; APs read it
-                        // clear or Linux's topology mistakes them for a 2nd
-                        // BSP. `APIC_BASE_MSR_VALUE` has it set.
-                        let mut v = lapic::APIC_BASE_MSR_VALUE;
-                        if self.vcpu.apic_id != 0 {
-                            v &= !(1u64 << 8);
-                        }
-                        self.vcpu.regs.rdx = v >> 32;
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
-                    }
-                } else if is_write {
-                    if self.vcpu.msr_log_count < MSR_LOG_CAP {
-                        let val = (self.vcpu.regs.rdx << 32)
-                            | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
-                        kprintln!("[svm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
-                        self.vcpu.msr_log_count += 1;
-                    }
+                let ok = if is_write {
+                    let val = (self.vcpu.regs.rdx << 32)
+                        | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                    super::msr::write(&mut self.vcpu.msrs, &mut self.vcpu.vmcb, msr, val).is_ok()
                 } else {
-                    if !msr_is_known_noise(msr) && self.vcpu.msr_log_count < MSR_LOG_CAP {
-                        kprintln!("[svm] RDMSR {:#010x} → 0 (unhandled)", msr);
-                        self.vcpu.msr_log_count += 1;
+                    match super::msr::read(&self.vcpu.msrs, &self.vcpu.vmcb, self.vcpu.apic_id, msr) {
+                        Ok(v) => {
+                            self.vcpu.regs.rdx = v >> 32;
+                            self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
+                            true
+                        }
+                        Err(()) => false,
                     }
-                    self.vcpu.regs.rdx = 0;
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, 0);
+                };
+                if ok {
+                    advance_rip(&mut *self.vcpu.vmcb);
+                } else {
+                    inject_exception(&mut self.vcpu.vmcb, VEC_GP, Some(0));
                 }
+                last_outcome = Some(outcome);
+            }
+            // SVM instructions: the guest has no SVM (CPUID hides it, EFER.SVME
+            // writes #GP), so they #UD — KVM `nested_svm_check_permissions`.
+            // Left unintercepted they would run natively: the VMCB carries
+            // EFER.SVME=1, and VMLOAD/VMSAVE then take a HOST physical address.
+            EXIT_VMRUN | EXIT_VMMCALL | EXIT_VMLOAD | EXIT_VMSAVE | EXIT_STGI
+            | EXIT_CLGI | EXIT_SKINIT | EXIT_INVLPGA | EXIT_RDPRU
+            | EXIT_MONITOR | EXIT_MWAIT | EXIT_MWAIT_COND => {
+                inject_exception(&mut self.vcpu.vmcb, VEC_UD, None);
+                last_outcome = Some(outcome);
+            }
+            // No vPMU (KVM with enable_pmu=0): RDPMC faults.
+            EXIT_RDPMC => {
+                inject_exception(&mut self.vcpu.vmcb, VEC_GP, Some(0));
+                last_outcome = Some(outcome);
+            }
+            // No non-coherent DMA into the guest → both are no-ops
+            // (KVM `kvm_emulate_wbinvd`, INVD treated as WBINVD).
+            EXIT_WBINVD | EXIT_INVD => {
                 advance_rip(&mut *self.vcpu.vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_XSETBV => {
+                let idx = self.vcpu.regs.rcx as u32;
+                let val = (self.vcpu.regs.rdx << 32)
+                    | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                let cpl = self.vcpu.vmcb.read_u8(vmcb::OFF_SAVE_CPL);
+                if cpl == 0 && idx == 0 && xcr0_valid(val) {
+                    self.vcpu.xcr0 = val;
+                    advance_rip(&mut *self.vcpu.vmcb);
+                } else {
+                    inject_exception(&mut self.vcpu.vmcb, VEC_GP, Some(0));
+                }
+                last_outcome = Some(outcome);
+            }
+            // Host NMI while the guest ran: taken by the host at STGI.
+            EXIT_NMI => {
                 last_outcome = Some(outcome);
             }
             EXIT_SHUTDOWN => {
@@ -2369,16 +2378,6 @@ fn advance_rip(vmcb: &mut vmcb::Vmcb) {
 fn advance_rip_by_length(vmcb: &mut vmcb::Vmcb, length: u8) {
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     vmcb.write_u64(vmcb::OFF_SAVE_RIP, rip.wrapping_add(length as u64));
-}
-
-/// MSRs Linux probes via `safe_rdmsr` (catches #GP) — known noise on
-/// nopeekOS, suppress the per-exit log line.
-fn msr_is_known_noise(msr: u32) -> bool {
-    matches!(msr,
-        0xC001_1029 | 0xC001_0015 | 0xC001_001F | // AMD LS_CFG/HWCR/NB_CFG
-        0x0000_001B | // IA32_APIC_BASE — Linux probes early
-        0x0000_003A   // IA32_FEAT_CTL — VMX-only, absent on AMD
-    )
 }
 
 /// Dispatch one I/O VMEXIT. UART COM1 (0x3F8-0x3FF) gets proper
