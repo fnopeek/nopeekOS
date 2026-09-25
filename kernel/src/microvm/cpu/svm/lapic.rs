@@ -21,10 +21,23 @@ pub const LAPIC_SIZE: u64 = 0x1000;
 
 /// IA32_APIC_BASE MSR value: base + global enable (bit 11) + BSP (bit 8).
 pub const APIC_BASE_MSR_VALUE: u64 = LAPIC_BASE | (1 << 11) | (1 << 8);
+const APIC_BASE_X2APIC: u64 = 1 << 10;
+const APIC_BASE_ENABLE: u64 = 1 << 11;
+
+const MSR_APIC_BASE: u32 = 0x1B;
+/// x2APIC register MSRs: 0x800 + (xAPIC offset >> 4).
+const MSR_X2APIC_FIRST: u32 = 0x800;
+const MSR_X2APIC_LAST: u32 = 0x8FF;
+const X2APIC_SELF_IPI: u32 = 0x3F0;
+/// `MSR_KVM_PV_EOI_EN` (kvm_para.h).
+const MSR_KVM_PV_EOI_EN: u32 = 0x4b56_4d04;
+const KVM_MSR_ENABLED: u64 = 1;
 
 // Register offsets (apicdef.h). Index into `regs` is `off >> 4`.
 const APIC_ID: u32 = 0x20;
 const APIC_LVR: u32 = 0x30;
+const APIC_LDR: u32 = 0xD0;
+const APIC_DFR: u32 = 0xE0;
 const APIC_TASKPRI: u32 = 0x80;
 const APIC_PROCPRI: u32 = 0xA0;
 const APIC_EOI: u32 = 0xB0;
@@ -194,6 +207,31 @@ pub fn deliver_ipi(sender: u8, icr: &IcrWrite) {
     }
 }
 
+/// `kvm_pv_send_ipi` (KVM_HC_SEND_IPI): a bitmap of physical APIC IDs from
+/// `min` (64 per word in long mode), vector + delivery mode in `icr`. Returns
+/// the number of vCPUs reached, or a negative KVM error.
+pub fn pv_send_ipi(sender: u8, low: u64, high: u64, min: u64, icr: u64) -> i64 {
+    const APIC_DEST_LOGICAL: u64 = 1 << 11;
+    const APIC_SHORT_MASK: u64 = 0x3 << 18;
+    const KVM_EINVAL: i64 = 22;
+    if icr & (APIC_DEST_LOGICAL | APIC_SHORT_MASK) != 0 { return -KVM_EINVAL; }
+    let mode = icr as u32 & ICR_DM_MASK;
+    let vector = (icr & 0xFF) as u8;
+    let mut count = 0;
+    for (word, base) in [(low, min), (high, min.wrapping_add(64))] {
+        let mut bits = word;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as u64;
+            bits &= bits - 1;
+            let dest = base.wrapping_add(i);
+            if dest >= MAX_VCPUS as u64 { continue; }
+            deliver_ipi(sender, &IcrWrite { delivery_mode: mode, shorthand: 0, dest: dest as u8, vector });
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Clear every descriptor (VM start/teardown).
 pub fn reset_posted() {
     for t in PIR.iter() {
@@ -214,6 +252,12 @@ pub struct LocalApic {
     timer_fired: bool,
     /// Periodic ticks owed (IRR already held the vector when they fell due).
     timer_owed: u32,
+    /// IA32_APIC_BASE.EXTD: registers are MSRs 0x800+, ICR is one 64-bit write.
+    x2apic: bool,
+    /// Guest address of its PV-EOI flag (`MSR_KVM_PV_EOI_EN`), 0 = off.
+    pv_eoi_gpa: u64,
+    /// `KVM_APIC_PV_EOI_PENDING`: we set the guest's flag before this entry.
+    pv_eoi_pending: bool,
 }
 
 impl LocalApic {
@@ -230,7 +274,10 @@ impl LocalApic {
         if apic_id == 0 {
             regs[idx(APIC_LVT0)] = APIC_MODE_EXTINT;
         }
-        LocalApic { regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0 }
+        LocalApic {
+            regs, apic_id, timer_start_tsc: 0, timer_fired: false, timer_owed: 0,
+            x2apic: false, pv_eoi_gpa: 0, pv_eoi_pending: false,
+        }
     }
 
     #[inline]
@@ -385,6 +432,128 @@ impl LocalApic {
         }
     }
 
+    /// `apic_set_eoi`: clear the highest in-service vector.
+    fn set_eoi(&mut self) {
+        if let Some(v) = self.find_highest(APIC_ISR) {
+            self.clear_bit(APIC_ISR, v);
+            self.update_ppr();
+        }
+    }
+
+    // ── PV EOI (KVM `apic_sync_pv_eoi_to_guest` / `_from_guest`) ──
+    //
+    // With the flag set, the guest's EOI is a bit clear in its own memory
+    // instead of a trapped register write; we complete it at the next exit.
+    // Offered only when the EOI can have no side effect: nothing else pending
+    // in IRR and exactly one vector in service (edge-triggered — every vector
+    // this LAPIC accepts is).
+
+    /// Before entry: arm the guest's flag if its next EOI may be lazy.
+    pub fn pv_eoi_sync_to(&mut self, mem: &crate::microvm::devices::guest_mem::GuestMem) {
+        if self.pv_eoi_gpa == 0 || self.pv_eoi_pending { return; }
+        if self.find_highest(APIC_IRR).is_some() || self.isr_count() != 1 { return; }
+        if mem.write_u8(self.pv_eoi_gpa, 1) {
+            self.pv_eoi_pending = true;
+        }
+    }
+
+    /// After exit: flag cleared by the guest = it did EOI → complete it here;
+    /// still set = no EOI yet → take the flag back (its EOI then traps).
+    pub fn pv_eoi_sync_from(&mut self, mem: &crate::microvm::devices::guest_mem::GuestMem) {
+        if !self.pv_eoi_pending { return; }
+        self.pv_eoi_pending = false;
+        match mem.read_u8(self.pv_eoi_gpa) {
+            Some(v) if v & 1 != 0 => { let _ = mem.write_u8(self.pv_eoi_gpa, v & !1); }
+            _ => self.set_eoi(),
+        }
+    }
+
+    fn isr_count(&self) -> u32 {
+        (0..8).map(|w| self.regs[idx(APIC_ISR) + w].count_ones()).sum()
+    }
+
+    // ── MSR interface: IA32_APIC_BASE, x2APIC, PV-EOI enable ──
+
+    /// `Some(result)` if `msr` belongs to the LAPIC, `None` otherwise.
+    /// A write may yield an IPI for the caller to route.
+    pub fn msr(&mut self, msr: u32, write: Option<u64>) -> Option<Result<(u64, Option<IcrWrite>), ()>> {
+        Some(match (msr, write) {
+            (MSR_APIC_BASE, None) => {
+                let mut v = APIC_BASE_MSR_VALUE;
+                if self.apic_id != 0 { v &= !(1u64 << 8); }
+                if self.x2apic { v |= APIC_BASE_X2APIC; }
+                Ok((v, None))
+            }
+            (MSR_APIC_BASE, Some(v)) => {
+                // xAPIC → x2APIC needs the global enable; x2APIC → xAPIC is
+                // not a legal transition (SDM 10.12.5) and is ignored.
+                if v & APIC_BASE_X2APIC != 0 && v & APIC_BASE_ENABLE != 0 && !self.x2apic {
+                    self.x2apic = true;
+                    self.regs[idx(APIC_ID)] = self.apic_id as u32;
+                }
+                Ok((0, None))
+            }
+            (MSR_KVM_PV_EOI_EN, None) => {
+                Ok((if self.pv_eoi_gpa != 0 { self.pv_eoi_gpa | KVM_MSR_ENABLED } else { 0 }, None))
+            }
+            (MSR_KVM_PV_EOI_EN, Some(v)) => {
+                if v & 0x2 != 0 { return Some(Err(())); } // reserved, 4-byte aligned
+                self.pv_eoi_gpa = if v & KVM_MSR_ENABLED != 0 { v & !0x3 } else { 0 };
+                self.pv_eoi_pending = false;
+                Ok((0, None))
+            }
+            (MSR_X2APIC_FIRST..=MSR_X2APIC_LAST, w) => {
+                if !self.x2apic { return Some(Err(())); }
+                self.x2apic_access((msr - MSR_X2APIC_FIRST) << 4, w)
+            }
+            _ => return None,
+        })
+    }
+
+    /// `kvm_x2apic_msr_read` / `kvm_x2apic_msr_write`.
+    fn x2apic_access(&mut self, off: u32, write: Option<u64>) -> Result<(u64, Option<IcrWrite>), ()> {
+        match (off, write) {
+            // No DFR, no ICR2 in x2APIC mode; SELF_IPI is write-only.
+            (APIC_DFR, _) | (APIC_ICR2, _) | (X2APIC_SELF_IPI, None) => Err(()),
+            (APIC_ICR, None) => Ok((
+                self.regs[idx(APIC_ICR)] as u64 | (self.regs[idx(APIC_ICR2)] as u64) << 32,
+                None,
+            )),
+            (APIC_LDR, None) => {
+                // Cluster = id[31:4], bit id[3:0] (x2APIC logical ID, read-only).
+                let id = self.apic_id as u32;
+                Ok((((id >> 4) << 16 | 1 << (id & 0xF)) as u64, None))
+            }
+            (_, None) => Ok((self.read(off) as u64, None)),
+            (APIC_ICR, Some(v)) => {
+                note_access(APIC_ICR, true);
+                let lo = v as u32;
+                self.regs[idx(APIC_ICR)] = lo & !ICR_BUSY;
+                self.regs[idx(APIC_ICR2)] = (v >> 32) as u32;
+                Ok((0, Some(IcrWrite {
+                    delivery_mode: lo & ICR_DM_MASK,
+                    shorthand: (lo >> 18) & 0x3,
+                    dest: (v >> 32) as u8,
+                    vector: (lo & VECTOR_MASK) as u8,
+                })))
+            }
+            (X2APIC_SELF_IPI, Some(v)) => Ok((0, Some(IcrWrite {
+                delivery_mode: ICR_DM_FIXED,
+                shorthand: 1,
+                dest: self.apic_id,
+                vector: (v & 0xFF) as u8,
+            }))),
+            // Read-only in x2APIC mode.
+            (APIC_ID | APIC_LDR, Some(_)) => Err(()),
+            (APIC_EOI, Some(v)) if v != 0 => Err(()),
+            (_, Some(v)) => {
+                if v >> 32 != 0 { return Err(()); }
+                let _ = self.write(off, v as u32);
+                Ok((0, None))
+            }
+        }
+    }
+
     // ── MMIO (`kvm_lapic_reg_read` / `kvm_lapic_reg_write`) ──
 
     pub fn read(&mut self, off: u32) -> u32 {
@@ -401,13 +570,7 @@ impl LocalApic {
     pub fn write(&mut self, off: u32, val: u32) -> Option<IcrWrite> {
         note_access(off, true);
         match off & 0xFF0 {
-            APIC_EOI => {
-                // `apic_set_eoi`: clear the highest in-service vector.
-                if let Some(v) = self.find_highest(APIC_ISR) {
-                    self.clear_bit(APIC_ISR, v);
-                    self.update_ppr();
-                }
-            }
+            APIC_EOI => self.set_eoi(),
             APIC_ID => self.regs[idx(APIC_ID)] = val,
             APIC_TASKPRI => {
                 self.regs[idx(APIC_TASKPRI)] = val & 0xFF;

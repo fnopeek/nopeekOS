@@ -1437,6 +1437,7 @@ impl VmContext {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
         self.inject_pending_event()?;
+        self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
         // The guest's next timer, or the slice end, as a host one-shot on this
         // core: its fire is the exit that delivers the tick on time.
@@ -1466,6 +1467,7 @@ impl VmContext {
         crate::microvm::cpu::record_guest_cycles(prof_post.wrapping_sub(prof_pre));
         let outcome = result?;
         self.vcpu.launched = true;
+        self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
         // DIAG (bare-metal reason-33): snapshot the injection field that
         // was live for the entry we just ran, BEFORE the clear below. On
         // a VM-entry failure (reason 33) the event is never delivered, so
@@ -1736,7 +1738,26 @@ impl VmContext {
                 // RDMSR / WRMSR: every MSR outside the pass-through set is
                 // intercepted and emulated in `vmx::msr`; none reaches the host.
                 let msr = self.vcpu.regs.rcx as u32;
-                let ok = if basic == 32 {
+                let wval = (self.vcpu.regs.rdx << 32) | (self.vcpu.regs.rax & 0xFFFF_FFFF);
+                let lapic_r = if vmx_lapic_on() {
+                    self.vcpu.lapic.msr(msr, (basic == 32).then_some(wval))
+                } else {
+                    None
+                };
+                let ok = if let Some(r) = lapic_r {
+                    // IA32_APIC_BASE, x2APIC registers, PV-EOI enable.
+                    match r {
+                        Ok((v, ipi)) => {
+                            if let Some(icr) = ipi { lapic::deliver_ipi(self.vcpu.apic_id, &icr); }
+                            if basic == 31 {
+                                self.vcpu.regs.rax = v & 0xFFFF_FFFF;
+                                self.vcpu.regs.rdx = v >> 32;
+                            }
+                            true
+                        }
+                        Err(()) => false,
+                    }
+                } else if basic == 32 {
                     let val = (self.vcpu.regs.rdx << 32) | (self.vcpu.regs.rax & 0xFFFF_FFFF);
                     super::msr::write(&mut self.vcpu.msrs, msr, val).is_ok()
                 } else {
@@ -1759,7 +1780,16 @@ impl VmContext {
             // VMX, SMX, SGX and RSM: the guest has none of them (CPUID hides
             // VMX/SMX/SGX) → #UD, as KVM does without nesting. MONITOR/MWAIT
             // are hidden too.
-            11 | 17 | 18..=27 | 36 | 39 | 50 | 53 | 59 | 60 => {
+            // VMCALL: KVM hypercall (`kvm_emulate_hypercall`), see the SVM arm.
+            18 => {
+                let r = &self.vcpu.regs;
+                let ret = crate::microvm::cpu::kvm_hypercall(
+                    self.vcpu.apic_id, vmcs::guest_cpl()?, r.rax, r.rbx, r.rcx, r.rdx, r.rsi);
+                self.vcpu.regs.rax = ret as u64;
+                vmcs::advance_guest_rip()?;
+                last_outcome = Some(outcome);
+            }
+            11 | 17 | 19..=27 | 36 | 39 | 50 | 53 | 59 | 60 => {
                 vmcs::inject_exception(VEC_UD, None)?;
                 last_outcome = Some(outcome);
             }
