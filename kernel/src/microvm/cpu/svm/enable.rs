@@ -252,7 +252,9 @@ fn setup_vmcb(
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
-    vmcb.write_u8(vmcb::OFF_TLB_CTL, 1); // flush this guest's TLB
+    // First entry only: drop what a previous run left under ASID 1 on this
+    // core. `run_slice` clears it after the first VMRUN (see TLB_CTL there).
+    vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::tlb_flush_guest());
     vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE — NPT on
     vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
 
@@ -935,7 +937,9 @@ fn setup_vmcb_linux(
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
-    vmcb.write_u8(vmcb::OFF_TLB_CTL, 1); // flush this guest's TLB
+    // First entry only: drop what a previous run left under ASID 1 on this
+    // core. `run_slice` clears it after the first VMRUN (see TLB_CTL there).
+    vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::tlb_flush_guest());
     vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE
     vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
 
@@ -982,9 +986,8 @@ fn setup_vmcb_linux(
 /// trampoline. The trampoline takes the AP to protected→long mode and
 /// into `start_secondary`. The control area mirrors `setup_vmcb_linux`
 /// and **shares** the BSP's NCR3 / IOPM / MSRPM (one guest address space,
-/// one device intercept policy). `TLB_CTL=1` (flush this guest's TLB on
-/// every entry) means NPT mutations made by any vCPU are picked up by the
-/// others on their next VMRUN — no separate cross-core TLB-shootdown IPI.
+/// one device intercept policy). The NPT only gains entries while the
+/// guest runs, so the vCPUs need no cross-core NPT shootdown.
 fn setup_vmcb_ap(
     vmcb: &mut vmcb::Vmcb,
     iopm_phys: u64,
@@ -999,7 +1002,7 @@ fn setup_vmcb_ap(
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
-    vmcb.write_u8(vmcb::OFF_TLB_CTL, 1);
+    vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::tlb_flush_guest());
     vmcb.write_u64(vmcb::OFF_NESTED_CTL, 1); // NP_ENABLE
     vmcb.write_u64(vmcb::OFF_NCR3, npt_root);
 
@@ -1148,12 +1151,14 @@ impl VmContext {
         let now = crate::interrupts::ticks();
         // Live resize (D4): disconnect, then reconnect after 100 ms; a new
         // cycle at most every 250 ms while the window is dragged.
-        if crate::microvm::devices::gpu_backend::lock().tick_d4(now) {
+        if crate::microvm::devices::gpu_backend::d4_pending()
+            && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
+        {
             sh.pic.pulse(9);
         } else {
             let wid = crate::microvm::vm_window();
             if wid != 0
-                && !crate::microvm::devices::gpu_backend::lock().d4_disconnecting()
+                && !crate::microvm::devices::gpu_backend::d4_pending()
                 && crate::shade::surface::display_dirty_peek(wid)
                 && now.wrapping_sub(sh.last_cfg_tick) >= 25
             {
@@ -1497,6 +1502,11 @@ impl VmContext {
         // KVM clears control.event_inj after every run: under KVM-nested SVM
         // the CPU does not clear EVENTINJ.V, and a stale valid bit re-injects.
         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, 0);
+        // TLB_CONTROL back to DO_NOTHING (KVM `svm_flush_tlb_*` sets it only on
+        // demand). The NPT only gains entries while the guest runs — not-present
+        // to present needs no flush — so the one flush at the first entry is
+        // all. It was 1 (flush ALL ASIDs, the host's too) on every VMRUN.
+        self.vcpu.vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::TLB_DO_NOTHING);
 
         // `svm_complete_interrupts`: an external interrupt / NMI aborted
         // mid-vectoring is re-injected; exceptions and software interrupts
@@ -1507,23 +1517,91 @@ impl VmContext {
             self.vcpu.reinject = eii;
         }
 
-        // Serialize VmShared between vCPUs (guest SMP).
-        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
-        let sh = &mut *self.shared;
-
+        // Exits that touch only this vCPU take no VM_BIG_LOCK: a host
+        // interrupt, the interrupt window, an MSR (x2APIC, PV-EOI) and a
+        // hypercall (PV IPI). Behind the lock, one vCPU's EOI or IPI waited
+        // for the other's device work — a framebuffer copy, a 9p write.
         match exit {
             // A host interrupt (timer, device, kick IPI) or NMI pre-empted the
             // guest; the host took it at STGI. Pending guest events are
             // injected at the next entry.
             EXIT_INTR | EXIT_NMI => {
                 last_outcome = Some(outcome);
+                continue;
             }
             // The interrupt window opened (`svm_enable_irq_window`): the guest
             // can take the event now — the next entry injects it.
             EXIT_VINTR => {
                 clear_irq_window(&mut self.vcpu.vmcb);
                 last_outcome = Some(outcome);
+                continue;
             }
+            EXIT_MSR => {
+                // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR. Every MSR is intercepted
+                // and emulated in `svm::msr`; none reaches the host.
+                let is_write = outcome.exit_qualification & 1 != 0;
+                let msr = self.vcpu.regs.rcx as u32;
+                let wval = (self.vcpu.regs.rdx << 32)
+                    | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                let lapic_r = if crate::microvm::cpu::GUEST_LAPIC {
+                    self.vcpu.lapic.msr(msr, is_write.then_some(wval))
+                } else {
+                    None
+                };
+                let ok = if let Some(r) = lapic_r {
+                    // IA32_APIC_BASE, x2APIC registers, PV-EOI enable.
+                    match r {
+                        Ok((v, ipi)) => {
+                            if let Some(icr) = ipi { lapic::deliver_ipi(self.vcpu.apic_id, &icr); }
+                            if !is_write {
+                                self.vcpu.regs.rdx = v >> 32;
+                                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
+                            }
+                            true
+                        }
+                        Err(()) => false,
+                    }
+                } else if is_write {
+                    let val = (self.vcpu.regs.rdx << 32)
+                        | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
+                    super::msr::write(&mut self.vcpu.msrs, &mut self.vcpu.vmcb, msr, val).is_ok()
+                } else {
+                    match super::msr::read(&self.vcpu.msrs, &self.vcpu.vmcb, self.vcpu.apic_id, msr) {
+                        Ok(v) => {
+                            self.vcpu.regs.rdx = v >> 32;
+                            self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
+                            true
+                        }
+                        Err(()) => false,
+                    }
+                };
+                if ok {
+                    advance_rip(&mut *self.vcpu.vmcb);
+                } else {
+                    inject_exception(&mut self.vcpu.vmcb, VEC_GP, Some(0));
+                }
+                last_outcome = Some(outcome);
+                continue;
+            }
+            EXIT_VMMCALL => {
+                let nr = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
+                let cpl = self.vcpu.vmcb.read_u8(vmcb::OFF_SAVE_CPL);
+                let r = &self.vcpu.regs;
+                let ret = crate::microvm::cpu::kvm_hypercall(
+                    self.vcpu.apic_id, cpl, nr, r.rbx, r.rcx, r.rdx, r.rsi);
+                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, ret as u64);
+                advance_rip(&mut *self.vcpu.vmcb);
+                last_outcome = Some(outcome);
+                continue;
+            }
+            _ => {}
+        }
+
+        // Serialize VmShared between vCPUs (guest SMP).
+        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        let sh = &mut *self.shared;
+
+        match exit {
             EXIT_HLT => {
                 // A headless test guest halting is done.
                 if crate::microvm::vm_window() == 0 {
@@ -1585,68 +1663,12 @@ impl VmContext {
                 advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
-            EXIT_MSR => {
-                // EXITINFO1 bit 0: 0=RDMSR, 1=WRMSR. Every MSR is intercepted
-                // and emulated in `svm::msr`; none reaches the host.
-                let is_write = outcome.exit_qualification & 1 != 0;
-                let msr = self.vcpu.regs.rcx as u32;
-                let wval = (self.vcpu.regs.rdx << 32)
-                    | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
-                let lapic_r = if crate::microvm::cpu::GUEST_LAPIC {
-                    self.vcpu.lapic.msr(msr, is_write.then_some(wval))
-                } else {
-                    None
-                };
-                let ok = if let Some(r) = lapic_r {
-                    // IA32_APIC_BASE, x2APIC registers, PV-EOI enable.
-                    match r {
-                        Ok((v, ipi)) => {
-                            if let Some(icr) = ipi { lapic::deliver_ipi(self.vcpu.apic_id, &icr); }
-                            if !is_write {
-                                self.vcpu.regs.rdx = v >> 32;
-                                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
-                            }
-                            true
-                        }
-                        Err(()) => false,
-                    }
-                } else if is_write {
-                    let val = (self.vcpu.regs.rdx << 32)
-                        | (self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) & 0xFFFF_FFFF);
-                    super::msr::write(&mut self.vcpu.msrs, &mut self.vcpu.vmcb, msr, val).is_ok()
-                } else {
-                    match super::msr::read(&self.vcpu.msrs, &self.vcpu.vmcb, self.vcpu.apic_id, msr) {
-                        Ok(v) => {
-                            self.vcpu.regs.rdx = v >> 32;
-                            self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, v & 0xFFFF_FFFF);
-                            true
-                        }
-                        Err(()) => false,
-                    }
-                };
-                if ok {
-                    advance_rip(&mut *self.vcpu.vmcb);
-                } else {
-                    inject_exception(&mut self.vcpu.vmcb, VEC_GP, Some(0));
-                }
-                last_outcome = Some(outcome);
-            }
             // SVM instructions: the guest has no SVM (CPUID hides it, EFER.SVME
             // writes #GP), so they #UD — KVM `nested_svm_check_permissions`.
             // Left unintercepted they would run natively: the VMCB carries
             // EFER.SVME=1, and VMLOAD/VMSAVE then take a HOST physical address.
             // KVM hypercall (`kvm_emulate_hypercall`): nr in RAX, args in
             // RBX/RCX/RDX/RSI, result in RAX. Only from CPL 0.
-            EXIT_VMMCALL => {
-                let nr = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
-                let cpl = self.vcpu.vmcb.read_u8(vmcb::OFF_SAVE_CPL);
-                let r = &self.vcpu.regs;
-                let ret = crate::microvm::cpu::kvm_hypercall(
-                    self.vcpu.apic_id, cpl, nr, r.rbx, r.rcx, r.rdx, r.rsi);
-                self.vcpu.vmcb.write_u64(vmcb::OFF_SAVE_RAX, ret as u64);
-                advance_rip(&mut *self.vcpu.vmcb);
-                last_outcome = Some(outcome);
-            }
             EXIT_VMRUN | EXIT_VMLOAD | EXIT_VMSAVE | EXIT_STGI
             | EXIT_CLGI | EXIT_SKINIT | EXIT_INVLPGA | EXIT_RDPRU
             | EXIT_MONITOR | EXIT_MWAIT | EXIT_MWAIT_COND => {
@@ -1703,12 +1725,7 @@ impl VmContext {
                         continue;
                     }
                 } else if crate::microvm::devices::net_backend::bar0_in_range(gpa) {
-                    // Hold the net device lock across the MMIO handler + RX pump so
-                    // net access stays atomic (the lock is uncontended in Stage 1 —
-                    // only the vCPU touches it; the off-vCPU backend lands in Stage 2).
-                    let mut net = crate::microvm::devices::net_backend::lock();
-                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *net, &mut sh.pic, gpa, sh.guest_mem) {
-                        drop(net);
+                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pic, gpa, sh.guest_mem) {
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write-completion) NOW rather than at the next
                         // EXIT_INTR/EXIT_HLT ~10 ms out — the download rxlat fix.
@@ -2121,7 +2138,6 @@ fn write_guest_gpr(
 fn handle_mmio_npf_net(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
-    net: &mut crate::microvm::devices::virtio_net_dev::VirtioNet,
     pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
@@ -2147,9 +2163,19 @@ fn handle_mmio_npf_net(
         }
     };
 
-    let off = (gpa - net.bar0_base()) as u32;
+    let off = (gpa - crate::microvm::devices::virtio_net_dev::BAR0_BASE) as u32;
     let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
 
+    // ISR read and TX doorbell: lock-free (the worker may hold the device).
+    if let Some(v) = crate::microvm::devices::net_backend::mmio_fast(off, dec.is_write) {
+        if !dec.is_write {
+            write_guest_gpr(regs, vmcb, rax, dec.reg, dec.width, v & width_mask(dec.width));
+        }
+        advance_rip_by_length(vmcb, dec.length);
+        return true;
+    }
+
+    let mut net = crate::microvm::devices::net_backend::lock();
     if dec.is_write {
         let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
         net.mmio_write(off, dec.width, value);

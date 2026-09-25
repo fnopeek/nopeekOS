@@ -284,8 +284,11 @@ pub fn detect_vendor() -> Vendor {
 }
 
 #[allow(dead_code)] // public surface for future vendor-aware decoders
+/// A copy: `match *VENDOR.lock() { … }` keeps the guard for the whole
+/// match, and the vCPU fiber's match is its entire run.
 pub fn current_vendor() -> Vendor {
-    *VENDOR.lock()
+    let v = *VENDOR.lock();
+    v
 }
 
 /// Boot-time entry: detect vendor, run vendor-specific probe.
@@ -304,7 +307,7 @@ pub fn init() {
 
 /// Print vendor-specific virt capability snapshot.
 pub fn report() {
-    match *VENDOR.lock() {
+    match current_vendor() {
         Vendor::Intel => vmx::report(),
         Vendor::Amd => svm::report(),
         Vendor::Unknown(reason) => {
@@ -316,7 +319,7 @@ pub fn report() {
 
 /// Run the vendor-specific substrate test (`microvm test`).
 pub fn run_substrate_test() -> Result<LaunchOutcome, &'static str> {
-    match *VENDOR.lock() {
+    match current_vendor() {
         Vendor::Intel => vmx::run_substrate_test(),
         Vendor::Amd => svm::run_substrate_test(),
         Vendor::Unknown(reason) => Err(reason),
@@ -958,7 +961,7 @@ pub fn vm_open(
     if slot.is_some() {
         return Err("a microvm is already running");
     }
-    let vm = match *VENDOR.lock() {
+    let vm = match current_vendor() {
         Vendor::Intel => ActiveVm::Vmx(vmx::vm_open(bzimage, cmdline, initramfs, inject)?),
         Vendor::Amd => ActiveVm::Svm(svm::vm_open(bzimage, cmdline, initramfs, inject)?),
         Vendor::Unknown(reason) => return Err(reason),
@@ -1164,7 +1167,7 @@ pub fn vm_core_serve() {
     // composite, no hlt on this core) → near-native guest. The two
     // backends have distinct `SliceOutcome` enums, so match each
     // concretely.
-    match *VENDOR.lock() {
+    match current_vendor() {
         Vendor::Intel => {
             match vmx::vm_open(
                 &pending.bzimage,
@@ -1393,7 +1396,7 @@ fn vcpu_fiber_task(_arg: u64) {
         crate::microvm::devices::gpu_backend::start_worker(gpu_core);
     }
 
-    match *VENDOR.lock() {
+    match current_vendor() {
         Vendor::Amd => {
             match svm::vm_open(
                 &pending.bzimage,
@@ -1552,10 +1555,7 @@ fn vcpu_fiber_task(_arg: u64) {
 /// the BSP. Decrements `VCPU_COUNT` on exit so the BSP's last-one-out teardown
 /// can proceed.
 ///
-/// Vendor is resolved via `detect_vendor` (lock-free CPUID), NOT the VENDOR
-/// mutex: the BSP vCPU fiber holds that mutex for its ENTIRE run loop
-/// (`match *VENDOR.lock() { … }`), so contending on it here would block forever
-/// (the AMD v0.193.1 freeze). On Intel the AP must `close_ap` (VMXOFF on its
+/// Vendor is resolved via `detect_vendor` (lock-free CPUID). On Intel the AP must `close_ap` (VMXOFF on its
 /// own core); on AMD it just stops VMRUNning (the BSP owns teardown).
 fn ap_vcpu_fiber_task(arg: u64) {
     let apic_id = arg as u8;
@@ -1656,7 +1656,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
 /// dispatch — only Intel populates I/O exits today; the AMD VMCB
 /// EXITINFO1/2 layout will be plumbed through here when SVM lands.
 pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
-    match *VENDOR.lock() {
+    match current_vendor() {
         Vendor::Intel => vmx::decode_io_exit_qualification(qual),
         // AMD VMCB exitinfo1 layout differs (port in bits 16-31,
         // type in bit 0); plumb in svm:: when backend lands.

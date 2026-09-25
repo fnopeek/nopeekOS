@@ -25,12 +25,11 @@ pub const BAR0_BASE: u64 = 0xFE01_8000;
 pub const BAR0_SIZE: u64 = 0x4000;
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
-/// IRQ line. SHARES virtio-net's IRQ 10 (PCI INTx is shareable; the guest
-/// demuxes via each device's ISR). IRQ 8 was the legacy RTC line — under
-/// `acpi=off` the guest's rtc_cmos claims it, so our tx-completion IRQs were
-/// not delivered and cubeb stalled after one period. IRQ 10 delivers reliably
-/// (constant network traffic), so this rules out IRQ delivery as the cause.
-const IRQ_LINE: u8 = 10;
+/// IRQ line — its own. Shared with virtio-net's 10 it made every network
+/// interrupt run the sound handler too, and that handler's ISR read is an MMIO
+/// exit. Not 8: under `acpi=off` the guest's rtc_cmos claims it. 14 is the
+/// legacy primary-IDE line, and the guest has no IDE.
+const IRQ_LINE: u8 = 14;
 
 const CAP_COMMON_OFF: u8 = 0x40;
 const CAP_NOTIFY_OFF: u8 = 0x54;
@@ -631,7 +630,7 @@ impl VirtioSnd {
             0x30 => 0,
             0x34 => CAP_COMMON_OFF as u32,
             0x38 => 0,
-            0x3C => (0x01 << 8) | IRQ_LINE as u32,      // INTA, IRQ line 8
+            0x3C => (0x01 << 8) | IRQ_LINE as u32,      // INTA
 
             0x40 => 0x09 | ((CAP_NOTIFY_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_COMMON_CFG as u32) << 24),
             0x44 => 0,

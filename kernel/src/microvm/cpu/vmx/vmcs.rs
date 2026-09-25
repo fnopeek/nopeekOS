@@ -576,6 +576,33 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 
 // Secondary control bits.
 const SEC_ENABLE_EPT: u32 = 1 << 1;
+const SEC_ENABLE_VPID: u32 = 1 << 5;
+const VIRTUAL_PROCESSOR_ID: u64 = 0x0000;
+const IA32_VMX_EPT_VPID_CAP: u32 = 0x48C;
+/// The guest's VPID. One tag for every vCPU: VPIDs are per logical processor,
+/// and each vCPU owns its core.
+const GUEST_VPID: u64 = 1;
+
+/// VPID usable: allowed in the secondary controls, plus INVVPID with the
+/// all-context type (EPT_VPID_CAP bits 32 and 42) to drop a previous run's
+/// entries under the same tag.
+fn vpid_supported() -> bool {
+    // SAFETY: both capability MSRs exist whenever VMX does (checked by probe).
+    let sec = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS2) };
+    let cap = unsafe { super::rdmsr(IA32_VMX_EPT_VPID_CAP) };
+    (sec >> 32) & (SEC_ENABLE_VPID as u64) != 0 && cap & (1 << 32) != 0 && cap & (1 << 42) != 0
+}
+
+/// INVVPID all-context (type 2): drop every VPID-tagged translation on this core.
+fn invvpid_all() {
+    let desc: [u64; 2] = [0, 0];
+    // SAFETY: VMX root operation (after VMXON); the descriptor is 16 bytes and
+    // aligned by the array; type 2 support was checked in `vpid_supported`.
+    unsafe {
+        core::arch::asm!("invvpid {t}, [{d}]", t = in(reg) 2u64, d = in(reg) desc.as_ptr(),
+                         options(nostack));
+    }
+}
 const SEC_UNRESTRICTED_GUEST: u32 = 1 << 7;
 const SEC_WBINVD_EXITING: u32 = 1 << 6;
 /// Bit 3: enable native RDTSCP/RDPID execution in guest. Without
@@ -676,8 +703,14 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     );
     // Secondary controls don't have a TRUE variant — IA32_VMX_PROCBASED_
     // CTLS2 is used directly. SDM Appendix A.3.3 / A.3.4.
+    // VPID (KVM `enable_vpid`): without it every VM entry and exit flushes
+    // the guest's TLB, so each of thousands of exits a second restarts the
+    // guest on a cold TLB. EPT entries are only ever added while it runs,
+    // which needs no flush.
+    let vpid = vpid_supported();
     let secondary = fixed_ctrl(
-        SEC_ENABLE_EPT
+        if vpid { SEC_ENABLE_VPID } else { 0 }
+            | SEC_ENABLE_EPT
             | SEC_UNRESTRICTED_GUEST
             | SEC_WBINVD_EXITING
             | SEC_ENABLE_RDTSCP
@@ -705,6 +738,10 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     vmwrite(PIN_BASED_VM_EXEC_CONTROL, pin as u64)?;
     vmwrite(CPU_BASED_VM_EXEC_CONTROL, cpu as u64)?;
     vmwrite(SECONDARY_VM_EXEC_CONTROL, secondary as u64)?;
+    if vpid && secondary & SEC_ENABLE_VPID != 0 {
+        vmwrite(VIRTUAL_PROCESSOR_ID, GUEST_VPID)?;
+        invvpid_all();
+    }
     vmwrite(IO_BITMAP_A_FULL, io_bitmap_a)?;
     vmwrite(IO_BITMAP_B_FULL, io_bitmap_b)?;
     vmwrite(MSR_BITMAPS_FULL, msr_bitmap)?;

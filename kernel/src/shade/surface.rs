@@ -10,23 +10,31 @@
 //! even though one VM exists now (forward-compat contract #2 —
 //! consumer side never assumes count).
 //!
-//! Concurrency: the microvm currently runs cooperatively on Core 0
-//! (`vm_poll_slice`), so the producer (virtio-gpu FLUSH) and the
-//! consumer (Shade render) are both Core-0 and serialized — a single
-//! buffer behind the `Mutex<BTreeMap>` is correct. The API
-//! (`write_frame` / `with_front`) is already double-buffer-shaped, so
-//! moving the VM to its own core later (perf track) only changes the
-//! internals here, not any caller.
+//! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
+//! consumer (Shade render on Core 0) run on different cores. Three
+//! buffers per surface (back → ready → front): each side copies or blits
+//! with the map lock RELEASED and takes it only to swap buffers. Holding it
+//! across a multi-MB copy or blit stalled the other side for milliseconds —
+//! the vCPU on its next exit, and with it every interrupt it would have
+//! delivered.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 /// One window's bitmap content. BGRX (0x00RRGGBB packed as the host
 /// framebuffer expects), `width * height` pixels.
 pub struct GuestSurface {
-    pixels: Vec<u32>,
+    /// Newest complete frame, not yet taken by the compositor.
+    ready: Frame,
+    /// The compositor's frame (moved out while it blits).
+    front: Frame,
+    /// The producer's scratch buffer (moved out while it copies).
+    back: Frame,
+    /// `ready` holds a frame newer than `front`.
+    fresh: bool,
     pub width: u32,
     pub height: u32,
     /// Set on `write_frame`, cleared by `take_dirty`. Lets the
@@ -54,7 +62,36 @@ pub struct GuestSurface {
     display_dirty: bool,
 }
 
+#[derive(Default)]
+struct Frame {
+    pixels: Vec<u32>,
+    width: u32,
+    height: u32,
+}
+
+impl GuestSurface {
+    fn new() -> Self {
+        GuestSurface {
+            ready: Frame::default(),
+            front: Frame::default(),
+            back: Frame::default(),
+            fresh: false,
+            width: 0,
+            height: 0,
+            dirty: false,
+            damage: None,
+            tile_w: 0,
+            tile_h: 0,
+            display_dirty: false,
+        }
+    }
+}
+
 static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new());
+
+/// Any surface has `display_dirty` set — lets the vCPU ask on every exit
+/// without taking the map lock.
+static ANY_DISPLAY_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Copy a freshly-flushed `w*h` BGRX frame (raw bytes, 4 per pixel)
 /// into the window's surface and mark it dirty. Creates/resizes the
@@ -65,34 +102,33 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     if px_count == 0 || src.len() < px_count * 4 {
         return;
     }
-    let mut map = SURFACES.lock();
-    let surf = map.entry(window_id).or_insert_with(|| GuestSurface {
-        pixels: Vec::new(),
-        width,
-        height,
-        dirty: false,
-        damage: None,
-        tile_w: 0,
-        tile_h: 0,
-        display_dirty: false,
-    });
-    let realloc = surf.width != width || surf.height != height || surf.pixels.len() != px_count;
-    if realloc {
-        surf.width = width;
-        surf.height = height;
-        surf.pixels = alloc::vec![0u32; px_count];
+    let mut back = {
+        let mut map = SURFACES.lock();
+        let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
+        core::mem::take(&mut surf.back)
+    };
+    if back.pixels.len() != px_count {
+        back.pixels = alloc::vec![0u32; px_count];
     }
+    back.width = width;
+    back.height = height;
     // The guest sends little-endian BGRX bytes, which on x86 (LE) ARE the
-    // exact in-memory layout of the packed u32 the compositor reads. Bulk-
-    // copy the bytes in one memcpy instead of a per-pixel `from_le_bytes`
-    // scalar pass — that loop was a full extra frame-sized pass on the VM-
-    // pump core every guest FLUSH (TRANSFER already copied the same bytes).
-    // SAFETY: surf.pixels holds px_count u32s = px_count*4 contiguous bytes;
+    // exact in-memory layout of the packed u32 the compositor reads.
+    // SAFETY: back.pixels holds px_count u32s = px_count*4 contiguous bytes;
     // src has at least px_count*4 bytes (checked above).
     let dst = unsafe {
-        core::slice::from_raw_parts_mut(surf.pixels.as_mut_ptr() as *mut u8, px_count * 4)
+        core::slice::from_raw_parts_mut(back.pixels.as_mut_ptr() as *mut u8, px_count * 4)
     };
     dst.copy_from_slice(&src[..px_count * 4]);
+
+    let mut map = SURFACES.lock();
+    let Some(surf) = map.get_mut(&window_id) else { return };
+    let realloc = surf.width != width || surf.height != height;
+    surf.width = width;
+    surf.height = height;
+    core::mem::swap(&mut surf.ready, &mut back);
+    surf.back = back;
+    surf.fresh = true;
     surf.dirty = true;
 
     // Union the guest's damage rect (clamped to the surface) into the
@@ -141,8 +177,21 @@ pub fn with_front<F, R>(window_id: u32, f: F) -> Option<R>
 where
     F: FnOnce(&[u32], u32, u32) -> R,
 {
-    let map = SURFACES.lock();
-    map.get(&window_id).map(|s| f(&s.pixels, s.width, s.height))
+    let front = {
+        let mut map = SURFACES.lock();
+        let s = map.get_mut(&window_id)?;
+        if s.fresh {
+            core::mem::swap(&mut s.front, &mut s.ready);
+            s.fresh = false;
+        }
+        core::mem::take(&mut s.front)
+    };
+    // Blit with the lock released — the producer may publish meanwhile.
+    let r = f(&front.pixels, front.width, front.height);
+    if let Some(s) = SURFACES.lock().get_mut(&window_id) {
+        if s.front.pixels.is_empty() { s.front = front; }
+    }
+    Some(r)
 }
 
 /// Take (and clear) the union of damage rects (surface-local coords)
@@ -163,20 +212,12 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         return;
     }
     let mut map = SURFACES.lock();
-    let surf = map.entry(window_id).or_insert_with(|| GuestSurface {
-        pixels: Vec::new(),
-        width: 0,
-        height: 0,
-        dirty: false,
-        damage: None,
-        tile_w: 0,
-        tile_h: 0,
-        display_dirty: false,
-    });
+    let surf = map.entry(window_id).or_insert_with(GuestSurface::new);
     if surf.tile_w != w || surf.tile_h != h {
         surf.tile_w = w;
         surf.tile_h = h;
         surf.display_dirty = true;
+        ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
     }
 }
 
@@ -200,7 +241,8 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
 /// (and the latest tile size) then survives to the next allowed
 /// window, so the final resize size is always delivered.
 pub fn display_dirty_peek(window_id: u32) -> bool {
-    SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
+    ANY_DISPLAY_DIRTY.load(Ordering::Acquire)
+        && SURFACES.lock().get(&window_id).is_some_and(|s| s.display_dirty)
 }
 
 /// True (and clears the flag) if the tile size changed since the last
@@ -213,6 +255,9 @@ pub fn take_display_dirty(window_id: u32) -> bool {
         Some(s) => {
             let d = s.display_dirty;
             s.display_dirty = false;
+            if !map.values().any(|s| s.display_dirty) {
+                ANY_DISPLAY_DIRTY.store(false, Ordering::Release);
+            }
             d
         }
         None => false,
