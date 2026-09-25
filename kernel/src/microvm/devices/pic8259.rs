@@ -114,6 +114,8 @@ impl Kpic {
 
 pub struct Pic8259 {
     pics: [Kpic; 2],
+    /// The I/O APIC on the same lines (KVM routes GSI 0-15 to both chips).
+    pub ioapic: super::ioapic::Ioapic,
 }
 
 impl Default for Pic8259 {
@@ -135,7 +137,7 @@ impl Pic8259 {
         pics[1].elcr_mask = 0xDE;
         pics[0].irq_base = 0x08;
         pics[1].irq_base = 0x70;
-        Pic8259 { pics }
+        Pic8259 { pics, ioapic: super::ioapic::Ioapic::new() }
     }
 
     /// `pic_update_irq`: propagate the slave's request through the cascade.
@@ -160,6 +162,16 @@ impl Pic8259 {
     pub fn pulse(&mut self, irq: u8) {
         self.set_irq(irq, true);
         self.set_irq(irq, false);
+        self.ioapic.pulse(
+            super::ioapic::isa_pin(irq),
+            crate::microvm::cpu::svm::lapic::vcpu_on_this_core(),
+        );
+    }
+
+    /// The guest has masked `irq` at the 8259 — with an I/O APIC it masks all
+    /// sixteen, and the line is then served there.
+    pub fn masked(&self, irq: u8) -> bool {
+        self.pics[(irq >> 3) as usize].imr & (1 << (irq & 7)) != 0
     }
 
     /// The INTR pin (`s->output`): does the master want to interrupt the CPU?

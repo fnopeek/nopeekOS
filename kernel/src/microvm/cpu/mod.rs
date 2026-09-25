@@ -110,9 +110,9 @@ pub fn kvm_hypercall(apic_id: u8, cpl: u8, nr: u64, a0: u64, a1: u64, a2: u64, a
 
 /// Nested-page-fault targets: which device BAR, the LAPIC page, a first
 /// touch of guest RAM (demand paging), or unclaimed.
-pub const NPF_BUCKETS: usize = 10;
+pub const NPF_BUCKETS: usize = 11;
 pub const NPF_LABELS: [&str; NPF_BUCKETS] =
-    ["blk", "net", "gpu", "input", "9p", "sqfs", "snd", "lapic", "ram", "other"];
+    ["blk", "net", "gpu", "input", "9p", "sqfs", "snd", "lapic", "ram", "other", "ioapic"];
 pub const NPF_BLK: usize = 0;
 pub const NPF_NET: usize = 1;
 pub const NPF_GPU: usize = 2;
@@ -123,6 +123,7 @@ pub const NPF_SND: usize = 6;
 pub const NPF_LAPIC: usize = 7;
 pub const NPF_RAM: usize = 8;
 pub const NPF_OTHER: usize = 9;
+pub const NPF_IOAPIC: usize = 10;
 static NPF_COUNTS: [AtomicU64; NPF_BUCKETS] = [const { AtomicU64::new(0) }; NPF_BUCKETS];
 pub fn record_npf(kind: usize) {
     if kind < NPF_BUCKETS { NPF_COUNTS[kind].fetch_add(1, Ordering::Relaxed); }
@@ -615,6 +616,17 @@ fn vm_set_ap_active(on: bool) {
 /// (TSC-deadline) timer and then never receive a tick → its event loops (cage/
 /// Wayland, schedulers) hang forever. So on Intel we must keep `nolapic` in the
 /// cmdline and let the guest fall back to the PIT IRQ0 the VMX path injects.
+/// An I/O APIC in the MP table, and the guest booted without `noapic`: device
+/// lines reach the vCPUs as LAPIC vectors (PV-EOI, no 8259 port exits), and
+/// Linux enables x2APIC — which it will not do under `noapic`
+/// (`enable_IR_x2apic` returns before trying). Needs the MP table and a LAPIC.
+/// Flip to `false` + re-release to go back to the 8259.
+pub const GUEST_IOAPIC: bool = true;
+
+pub fn guest_ioapic_active() -> bool {
+    GUEST_IOAPIC && GUEST_SMP && guest_lapic_active()
+}
+
 pub fn guest_lapic_active() -> bool {
     GUEST_LAPIC
         && match current_vendor() {

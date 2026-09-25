@@ -213,6 +213,9 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
             for i in 0..512usize {
                 pt_dummy.add(i).write_volatile(dummy_page_phys | NPT_P | NPT_RW | NPT_US);
             }
+            // [0]: the I/O APIC page (0xFEC00000) NOT-PRESENT → trap and
+            // emulate (`devices::ioapic`), like the LAPIC page below.
+            pt_dummy.add(0).write_volatile(0);
             // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
             // NOT-PRESENT → guest LAPIC accesses #NPF → trap-and-emulate
             // (svm::lapic, guest-SMP Stage 1). The rest of the 2 MB →
@@ -320,7 +323,8 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
             let pd_high = pd_high_phys as *const u64;
             let pt_dummy_phys = pd_high.add(502).read_volatile() & NPT_ADDR_MASK;
             if pt_dummy_phys != 0 {
-                let dummy = (pt_dummy_phys as *const u64).read_volatile() & NPT_ADDR_MASK;
+                // [0] is the trapped I/O APIC page; [1] maps the scratch page.
+                let dummy = (pt_dummy_phys as *const u64).add(1).read_volatile() & NPT_ADDR_MASK;
                 if dummy != 0 {
                     memory::deallocate_frame(dummy);
                 }

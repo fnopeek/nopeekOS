@@ -163,7 +163,10 @@ impl Pit {
             };
             self.pending = (self.pending + owed).min(MAX_PENDING);
         }
-        if self.pending > 0 && pic.line_idle(0) {
+        // Repayment paced by the 8259's acknowledgement (KVM reinject). With
+        // the 8259 masked the tick goes to the I/O APIC, whose edge carries no
+        // acknowledgement back here; the LAPIC's IRR coalesces a burst.
+        if self.pending > 0 && (pic.line_idle(0) || pic.masked(0)) {
             pic.pulse(0);
             self.pending -= 1;
             crate::microvm::devices::nat::note_guest_timer();

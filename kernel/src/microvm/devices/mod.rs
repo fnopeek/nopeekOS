@@ -11,6 +11,7 @@
 
 pub mod guest_fetch;
 pub mod guest_mem;
+pub mod ioapic;
 pub mod insn_decoder;
 pub mod nat;
 pub mod net_backend;
