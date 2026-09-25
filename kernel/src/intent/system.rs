@@ -89,6 +89,7 @@ pub fn intent_cores() {
     let io0 = crate::microvm::cpu::io_port_snapshot();
     let np0 = crate::microvm::cpu::npf_snapshot();
     let la0 = crate::microvm::cpu::svm::lapic::access_snapshot();
+    let gs0 = crate::microvm::devices::gpu_backend::stats_snapshot();
     let wk0 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw0 = crate::smp::fiber::kick_wait_snapshot();
     let kl0 = crate::smp::fiber::kick_latency_snapshot(); // clears max
@@ -123,6 +124,7 @@ pub fn intent_cores() {
     let io1 = crate::microvm::cpu::io_port_snapshot();
     let np1 = crate::microvm::cpu::npf_snapshot();
     let la1 = crate::microvm::cpu::svm::lapic::access_snapshot();
+    let gs1 = crate::microvm::devices::gpu_backend::stats_snapshot();
     let wk1 = crate::microvm::devices::net_dataplane::wake_snapshot();
     let kw1 = crate::smp::fiber::kick_wait_snapshot();
     let kl1 = crate::smp::fiber::kick_latency_snapshot();
@@ -251,6 +253,18 @@ pub fn intent_cores() {
                 let d = np1[i].saturating_sub(np0[i]);
                 if d > 0 {
                     if !any { kprint!("    mmio-exit targets/s:"); any = true; }
+                    kprint!(" {}={}", labels[i], d * 1000 / window_ms);
+                }
+            }
+            if any { kprintln!(); }
+        }
+        {
+            let labels = crate::microvm::devices::gpu_backend::STAT_LABELS;
+            let mut any = false;
+            for i in 0..labels.len() {
+                let d = gs1[i].saturating_sub(gs0[i]);
+                if d > 0 {
+                    if !any { kprint!("    gpu/s:"); any = true; }
                     kprint!(" {}={}", labels[i], d * 1000 / window_ms);
                 }
             }

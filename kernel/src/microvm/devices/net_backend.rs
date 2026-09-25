@@ -72,6 +72,30 @@ pub fn tx_kick_pending() -> bool { TX_KICK.load(Ordering::Acquire) }
 /// root). Set by the pump (any caller), consumed by the BSP.
 static NET_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// virtio ISR status (read-to-clear). An atomic, not device state: the guest
+/// reads it on every interrupt, and behind the device lock that read waited
+/// for the worker's whole RX batch.
+static ISR: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+pub fn raise_isr() { ISR.fetch_or(1, Ordering::AcqRel); }
+pub fn take_isr() -> u8 { ISR.swap(0, Ordering::AcqRel) }
+
+/// The guest's hot BAR accesses without the device lock: the ISR read, and
+/// the TX doorbell while the worker owns the TX ring. `Some(value)` if
+/// handled (0 for a write), `None` → take the lock for the full path.
+pub fn mmio_fast(off: u32, write: bool) -> Option<u64> {
+    use super::virtio_net_dev::{ISR_OFF, ISR_LEN, NOTIFY_OFF, NOTIFY_LEN, NOTIFY_OFF_MULTIPLIER};
+    if !write && (ISR_OFF..ISR_OFF + ISR_LEN).contains(&off) {
+        return Some(take_isr() as u64);
+    }
+    if write && full_active() && (NOTIFY_OFF..NOTIFY_OFF + NOTIFY_LEN).contains(&off)
+        && (off - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER == 1
+    {
+        note_tx_kick();
+        return Some(0);
+    }
+    None
+}
+
 /// Signal that the guest's virtio-net IRQ10 should be injected.
 #[inline]
 pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
@@ -124,6 +148,7 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 /// its own core, registers before this runs — a reset here detached it.
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
+    ISR.store(0, Ordering::Release);
     NET_IRQ_PENDING.store(false, Ordering::Release);
     TX_KICK.store(false, Ordering::Release);
 }

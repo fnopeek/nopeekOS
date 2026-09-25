@@ -233,13 +233,11 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
         nat::mark_active();
     }
 
-    // irqfd: wake the guest. Raise IRQ10 when EVENT_IDX says so; otherwise still
-    // kick the vCPU so a parked one NAPI-polls the non-empty ring (a parked vCPU
-    // cannot poll on its own).
+    // irqfd: wake the guest only when EVENT_IDX asks for an interrupt. Without
+    // one the guest is inside its NAPI poll and reads the ring itself; a halted
+    // guest has re-armed used_event, so new entries always cross it.
     if rx_raise || tx_raise {
         net_backend::raise_irq();
-        crate::microvm::cpu::kick_bsp_net_irq();
-    } else if injected {
         crate::microvm::cpu::kick_bsp_net_irq();
     }
 }

@@ -56,10 +56,10 @@ const VIRTIO_PCI_CAP_ISR_CFG:    u8 = 3;
 const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
 
 const COMMON_OFF: u32 = 0x0000; const COMMON_LEN: u32 = 0x0100;
-const NOTIFY_OFF: u32 = 0x0100; const NOTIFY_LEN: u32 = 0x0100;
-const ISR_OFF:    u32 = 0x0200; const ISR_LEN:    u32 = 0x0100;
+pub const NOTIFY_OFF: u32 = 0x0100; pub const NOTIFY_LEN: u32 = 0x0100;
+pub const ISR_OFF:    u32 = 0x0200; pub const ISR_LEN:    u32 = 0x0100;
 const DEVICE_OFF: u32 = 0x0300; const DEVICE_LEN: u32 = 0x0100;
-const NOTIFY_OFF_MULTIPLIER: u32 = 4;
+pub const NOTIFY_OFF_MULTIPLIER: u32 = 4;
 
 // Common Cfg register offsets (virtio 1.2 §4.1.4.3).
 const CC_DEVICE_FEATURE_SELECT: u32 = 0x00;
@@ -232,7 +232,6 @@ pub struct VirtioNet {
 
     queues: [VirtQueue; NUM_QUEUES as usize],
 
-    isr: u8,
     pending_kick_queue: Option<u16>,
 
     /// Reusable TX read buffer (grown once; a GSO super-frame is ≤64 KiB).
@@ -261,7 +260,6 @@ impl VirtioNet {
                 last_avail_idx: 0, used_idx: 0, last_irq_used_idx: 0,
                 signalled_used_valid: false,
             }; NUM_QUEUES as usize],
-            isr: 0,
             pending_kick_queue: None,
             tx_scratch: alloc::vec::Vec::new(),
             caps: NetCaps::dns_tcp(),
@@ -337,9 +335,7 @@ impl VirtioNet {
             self.common_read(off - COMMON_OFF, width)
         } else if (ISR_OFF..ISR_OFF + ISR_LEN).contains(&off) {
             // ISR status is read-to-clear.
-            let v = self.isr as u64;
-            self.isr = 0;
-            v & width_mask(width)
+            super::net_backend::take_isr() as u64 & width_mask(width)
         } else if (DEVICE_OFF..DEVICE_OFF + DEVICE_LEN).contains(&off) {
             self.device_read(off - DEVICE_OFF, width)
         } else {
@@ -551,7 +547,7 @@ impl VirtioNet {
         // Publish used.idx (+N) with a release fence.
         q.used_idx = start_used.wrapping_add(nbuf);
         used_publish(mem, q.used_gpa(), q.used_idx);
-        self.isr |= 1;
+        super::net_backend::raise_isr();
         true
     }
 
@@ -722,7 +718,7 @@ impl VirtioNet {
         // whether to actually assert IRQ10, EVENT_IDX-gated (need_event).
         let mut raise = false;
         if advanced {
-            self.isr |= 1;
+            super::net_backend::raise_isr();
             if self.tx_should_interrupt(mem) { raise = true; }  // NAPI-TX reap
         }
 
@@ -732,7 +728,7 @@ impl VirtioNet {
             if self.inject_rx(mem, reply) { rx_advanced = true; }
         }
         if rx_advanced {
-            self.isr |= 1;
+            super::net_backend::raise_isr();
             if self.rx_should_interrupt(mem) { raise = true; }
         }
         raise

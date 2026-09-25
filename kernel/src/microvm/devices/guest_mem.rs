@@ -111,6 +111,9 @@ pub enum SecondLevel {
 /// hasn't touched yet still works (and a guest PT the insn-fetch
 /// walker reads simply faults in — no recursion: fault-in is a flat
 /// alloc+map). Not `Copy`. Threaded as `&GuestMem`.
+/// Serialises demand fault-in (see `page_host`).
+static DEMAND_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub struct GuestMem {
     boot_base: u64,
     boot_bytes: u64,
@@ -169,6 +172,11 @@ impl GuestMem {
         if cached != 0 && (cached >> 32) == pn {
             return Some((cached & 0xFFFF_FFFF) << 12);
         }
+        // One fault-in at a time: the vCPUs (#NPF) and the net worker (DMA
+        // into an untouched page) can race to the same empty PTE, and two
+        // frames for one page lose whatever the loser wrote. The walk
+        // re-checks the PTE under the lock, so the second one just reads it.
+        let _g = DEMAND_LOCK.lock();
         let host = match self.sl {
             SecondLevel::Ept => {
                 crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page)

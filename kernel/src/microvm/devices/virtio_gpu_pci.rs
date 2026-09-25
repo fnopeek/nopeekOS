@@ -316,6 +316,7 @@ impl VirtioGpu {
     pub fn signal_display_change(&mut self, now: u64) {
         const DISCONNECT_TICKS: u64 = 10; // ~100 ms at 100 Hz host-timer
         self.d4_disconnect_until = Some(now.wrapping_add(DISCONNECT_TICKS));
+        super::gpu_backend::set_d4_pending(true);
         self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
         self.isr |= 0b10; // bit 1 = device configuration changed
         self.config_generation = self.config_generation.wrapping_add(1);
@@ -329,6 +330,7 @@ impl VirtioGpu {
         match self.d4_disconnect_until {
             Some(until) if now.wrapping_sub(until) as i64 >= 0 => {
                 self.d4_disconnect_until = None;
+                super::gpu_backend::set_d4_pending(false);
                 self.events_read |= VIRTIO_GPU_EVENT_DISPLAY;
                 self.isr |= 0b10;
                 self.config_generation = self.config_generation.wrapping_add(1);
@@ -491,6 +493,7 @@ impl VirtioGpu {
             used_push(mem, device_gpa, qsize, &mut used_idx, head, written);
             last_avail = last_avail.wrapping_add(1);
             any = true;
+            super::gpu_backend::note(super::gpu_backend::STAT_CURSOR, 1);
         }
         let q = &mut self.queues[q_idx];
         q.last_avail_idx = last_avail;
@@ -513,6 +516,12 @@ impl VirtioGpu {
             request[12], request[13], request[14], request[15],
         ]);
         let ctx_id   = u32::from_le_bytes([request[16], request[17], request[18], request[19]]);
+        super::gpu_backend::note(match cmd_type {
+            VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D => super::gpu_backend::STAT_TRANSFER,
+            VIRTIO_GPU_CMD_RESOURCE_FLUSH => super::gpu_backend::STAT_FLUSH,
+            VIRTIO_GPU_CMD_SET_SCANOUT => super::gpu_backend::STAT_SCANOUT,
+            _ => super::gpu_backend::STAT_OTHER,
+        }, 1);
 
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
@@ -752,6 +761,8 @@ impl VirtioGpu {
         // how fast `copy_from_backing` walks the guest's backing pages. That
         // difference is the difference between "the browser renders" and "the
         // browser renders INSTEAD of running its network stack".
+        super::gpu_backend::note(
+            super::gpu_backend::STAT_XFER_KB, (h as u64) * (row_bytes as u64) / 1024);
         crate::microvm::devices::nat::note_gpu_transfer(
             (h as u64) * (row_bytes as u64),
             crate::interrupts::rdtsc().wrapping_sub(t0));
@@ -826,6 +837,7 @@ impl VirtioGpu {
 
         let wid = crate::microvm::vm_window();
         if wid != 0 {
+            super::gpu_backend::note(super::gpu_backend::STAT_FLUSH_KB, pix.len() as u64 / 1024);
             crate::shade::surface::write_frame(wid, pix, r.width, r.height, (x, y, dmg_w, dmg_h));
         } else {
             blit_to_host_fb(pix, r.width, r.height);

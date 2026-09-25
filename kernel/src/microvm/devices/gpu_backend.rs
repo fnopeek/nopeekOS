@@ -29,7 +29,38 @@ static GPU: Mutex<VirtioGpu> = Mutex::new(VirtioGpu::new());
 pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
-pub fn reset() { *GPU.lock() = VirtioGpu::new(); }
+pub fn reset() {
+    *GPU.lock() = VirtioGpu::new();
+    D4_PENDING.store(false, Ordering::Release);
+}
+
+/// Guest GPU traffic for `cores`: controlq commands by kind, cursorq
+/// commands, and the bytes copied on the TRANSFER and FLUSH paths.
+pub const STAT_BUCKETS: usize = 7;
+pub const STAT_LABELS: [&str; STAT_BUCKETS] =
+    ["transfer", "flush", "scanout", "other", "cursor", "xfer-KB", "flush-KB"];
+pub const STAT_TRANSFER: usize = 0;
+pub const STAT_FLUSH: usize = 1;
+pub const STAT_SCANOUT: usize = 2;
+pub const STAT_OTHER: usize = 3;
+pub const STAT_CURSOR: usize = 4;
+pub const STAT_XFER_KB: usize = 5;
+pub const STAT_FLUSH_KB: usize = 6;
+static STATS: [core::sync::atomic::AtomicU64; STAT_BUCKETS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; STAT_BUCKETS];
+pub fn note(kind: usize, n: u64) {
+    STATS[kind].fetch_add(n, Ordering::Relaxed);
+}
+pub fn stats_snapshot() -> [u64; STAT_BUCKETS] {
+    core::array::from_fn(|i| STATS[i].load(Ordering::Relaxed))
+}
+
+/// Mirror of `VirtioGpu::d4_disconnecting`, so the vCPU's per-exit look at
+/// the resize state needs no device lock. Written under the lock.
+static D4_PENDING: AtomicBool = AtomicBool::new(false);
+pub(super) fn set_d4_pending(on: bool) { D4_PENDING.store(on, Ordering::Release); }
+#[inline]
+pub fn d4_pending() -> bool { D4_PENDING.load(Ordering::Acquire) }
 
 /// Lock-free BAR0 range check (const base) — the vCPU NPF dispatch tests this on
 /// every MMIO exit, so keep it off the device lock (mirror of net_backend).

@@ -40,6 +40,16 @@ pub const OFF_MSRPM_BASE_PA: usize = 0x048;
 #[allow(dead_code)] pub const OFF_TSC_OFFSET: usize = 0x050;
 pub const OFF_ASID: usize = 0x058;
 pub const OFF_TLB_CTL: usize = 0x05C;
+/// TLB_CONTROL values (APM 15.16.1): 0 nothing, 1 flush ALL ASIDs,
+/// 3 flush this guest's ASID.
+pub const TLB_DO_NOTHING: u8 = 0;
+
+/// The first-entry flush: this guest's ASID where the CPU can
+/// (CPUID 8000_000A EDX[6] FlushByAsid), else every ASID — KVM's choice.
+pub fn tlb_flush_guest() -> u8 {
+    let r = core::arch::x86_64::__cpuid(0x8000_000A);
+    if r.edx & (1 << 6) != 0 { 3 } else { 1 }
+}
 pub const OFF_INT_CTL: usize = 0x060;
 /// `int_ctl` bits (APM Vol 2 §15.21.1 / KVM svm.h).
 pub const V_IRQ: u32 = 1 << 8;
