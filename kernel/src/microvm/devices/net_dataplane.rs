@@ -29,8 +29,10 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// test was `0 != 0` and the worker believed there was never anything to do.
 #[inline]
 fn has_work() -> bool {
-    crate::microvm::devices::nat::tap_len() > 0
-        || crate::microvm::devices::net_backend::tx_kick_pending()
+    use crate::microvm::devices::{guest_mem, nat, net_backend};
+    nat::tap_len() > 0
+        || net_backend::tx_kick_pending()
+        || guest_mem::active().is_some_and(net_backend::tx_ring_pending)
 }
 
 /// Worker wakeup attribution (surfaced in `cores`): irq = host RX MSI-X woke us
@@ -282,7 +284,12 @@ fn worker_entry(_arg: u64) {
         // is NOT the reverted lock-hammer spin — between events it only reads two
         // atomics + cpu_relax, never the device lock. Reserved worker core +
         // gated on recently_active (idle → HLT at once, no core-burn).
+        let gm = crate::microvm::devices::guest_mem::active();
         if crate::microvm::devices::nat::recently_active() {
+            // Polling: the guest need not kick TX — this loop reads the ring.
+            if let Some(gm) = gm {
+                crate::microvm::devices::net_backend::lock().tx_set_notify(gm, false);
+            }
             let freq = crate::interrupts::tsc_freq();
             let deadline = crate::interrupts::rdtsc()
                 + BUSY_POLL_US.saturating_mul((freq / 1_000_000).max(1));
@@ -301,6 +308,13 @@ fn worker_entry(_arg: u64) {
             }
             // No work and the active window expired → the transfer paused; fall
             // through to the event-park (HLT) so an idle worker never burns the core.
+        }
+        // Before parking the doorbell must ring again; a frame queued while it
+        // was off is served now instead of waiting for the park's timeout.
+        if let Some(gm) = gm {
+            if crate::microvm::devices::net_backend::lock().tx_set_notify(gm, true) {
+                continue;
+            }
         }
 
         // Park on OUR OWN doorbell — never on some card's MSI-X. `tap_push` wakes

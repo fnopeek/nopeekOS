@@ -96,6 +96,21 @@ pub fn mmio_fast(off: u32, write: bool) -> Option<u64> {
     None
 }
 
+/// Guest TX ring position for the worker's lock-free "anything queued?" look
+/// while the doorbell is off: avail ring address and the consumed index.
+static TX_AVAIL_GPA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TX_LAST_AVAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+pub fn set_tx_ring(avail_gpa: u64, last_avail: u16) {
+    TX_AVAIL_GPA.store(avail_gpa, Ordering::Release);
+    TX_LAST_AVAIL.store(last_avail as u32, Ordering::Release);
+}
+/// avail.idx (offset 2 of the avail ring) moved past what the worker took.
+pub fn tx_ring_pending(mem: &super::guest_mem::GuestMem) -> bool {
+    let gpa = TX_AVAIL_GPA.load(Ordering::Acquire);
+    gpa != 0 && mem.read_u16(gpa + 2)
+        .is_some_and(|top| top as u32 != TX_LAST_AVAIL.load(Ordering::Acquire))
+}
+
 /// Signal that the guest's virtio-net IRQ10 should be injected.
 #[inline]
 pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
@@ -148,6 +163,7 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 /// its own core, registers before this runs — a reset here detached it.
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
+    TX_AVAIL_GPA.store(0, Ordering::Release);
     ISR.store(0, Ordering::Release);
     NET_IRQ_PENDING.store(false, Ordering::Release);
     TX_KICK.store(false, Ordering::Release);
