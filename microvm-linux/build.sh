@@ -7,7 +7,7 @@
 # installer + OTA pipeline pick it up.
 set -euo pipefail
 
-LINUX_VERSION="${LINUX_VERSION:-6.18.26}"
+LINUX_VERSION="${LINUX_VERSION:-6.18.53}"
 SRC_CACHE="${SRC_CACHE:-$HOME/.cache/nopeekos/linux-src}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
