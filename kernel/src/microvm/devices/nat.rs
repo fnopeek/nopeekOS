@@ -246,11 +246,30 @@ struct L3Map {
     last_tick: u64,
 }
 
-/// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`.
-/// One lock over both, so the index can never disagree with the table.
+/// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`
+/// and two indexes into it, as conntrack hashes both tuple directions: every
+/// packet used to walk the table linearly under this lock (32 KB per
+/// packet, and slower with every flow a long test opened). One lock over
+/// all of it, so no index can disagree with the table.
 struct L3Table {
     maps: [Option<L3Map>; L3_MAX],
     used: [u64; PORT_WORDS],
+    /// Inbound: host port → slot. A host port belongs to one flow at a time
+    /// (the `used` bitmap is shared by all protocols).
+    by_port: [u16; PORT_RANGE],
+    /// Outbound: open-addressed hash of (proto, guest port, remote) → slot,
+    /// linear probing, half full at most.
+    by_flow: [u16; FLOW_BUCKETS],
+}
+
+const NO_SLOT: u16 = u16::MAX;
+const FLOW_BUCKETS: usize = L3_MAX * 2;
+
+fn flow_hash(proto: u8, gport: u16, rip: [u8; 4], rport: u16) -> usize {
+    let k = (u32::from_be_bytes(rip) as u64) << 32
+        | (gport as u64) << 16 | rport as u64;
+    let h = (k ^ (proto as u64) << 56).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (h >> 40) as usize & (FLOW_BUCKETS - 1)
 }
 
 const PORT_RANGE: usize = (L3_PORT_HI - L3_PORT_LO) as usize;
@@ -262,7 +281,61 @@ const NAT_MAX_ATTEMPTS: usize = 128;
 
 impl L3Table {
     const fn new() -> Self {
-        L3Table { maps: [const { None }; L3_MAX], used: [0; PORT_WORDS] }
+        L3Table {
+            maps: [const { None }; L3_MAX], used: [0; PORT_WORDS],
+            by_port: [NO_SLOT; PORT_RANGE], by_flow: [NO_SLOT; FLOW_BUCKETS],
+        }
+    }
+    fn flow_key(m: &L3Map) -> usize {
+        flow_hash(m.proto, m.guest_port, m.remote_ip, m.remote_port)
+    }
+    /// Slot of the outbound flow, if mapped.
+    fn find_flow(&self, proto: u8, gport: u16, rip: [u8; 4], rport: u16) -> Option<usize> {
+        let mut b = flow_hash(proto, gport, rip, rport);
+        loop {
+            let slot = self.by_flow[b];
+            if slot == NO_SLOT { return None; }
+            if let Some(m) = &self.maps[slot as usize] {
+                if m.proto == proto && m.guest_port == gport
+                    && m.remote_ip == rip && m.remote_port == rport
+                {
+                    return Some(slot as usize);
+                }
+            }
+            b = (b + 1) & (FLOW_BUCKETS - 1);
+        }
+    }
+    /// Occupy slot `i` with `m` and index it.
+    fn insert(&mut self, i: usize, m: L3Map) {
+        let mut b = Self::flow_key(&m);
+        while self.by_flow[b] != NO_SLOT { b = (b + 1) & (FLOW_BUCKETS - 1); }
+        self.by_flow[b] = i as u16;
+        self.by_port[(m.host_port - L3_PORT_LO) as usize] = i as u16;
+        self.set_port(m.host_port, true);
+        self.maps[i] = Some(m);
+    }
+    /// Take slot `i` out of the flow hash: backward-shift deletion, so a
+    /// probe chain never breaks and no tombstones pile up.
+    fn unindex_flow(&mut self, i: usize, key: usize) {
+        let mut b = key;
+        while self.by_flow[b] as usize != i { b = (b + 1) & (FLOW_BUCKETS - 1); }
+        let mut hole = b;
+        let mut j = b;
+        loop {
+            j = (j + 1) & (FLOW_BUCKETS - 1);
+            let slot = self.by_flow[j];
+            if slot == NO_SLOT { break; }
+            let Some(m) = &self.maps[slot as usize] else { break };
+            let home = Self::flow_key(m);
+            // Move j into the hole unless its home lies cyclically in (hole, j].
+            let dist_home = j.wrapping_sub(home) & (FLOW_BUCKETS - 1);
+            let dist_hole = j.wrapping_sub(hole) & (FLOW_BUCKETS - 1);
+            if dist_home >= dist_hole {
+                self.by_flow[hole] = slot;
+                hole = j;
+            }
+        }
+        self.by_flow[hole] = NO_SLOT;
     }
     #[inline]
     fn port_used(&self, hp: u16) -> bool {
@@ -277,7 +350,11 @@ impl L3Table {
     }
     /// Free slot `i` and its port together.
     fn release(&mut self, i: usize) {
-        if let Some(m) = self.maps[i].take() { self.set_port(m.host_port, false); }
+        let Some(m) = self.maps[i] else { return };
+        self.unindex_flow(i, Self::flow_key(&m));
+        self.by_port[(m.host_port - L3_PORT_LO) as usize] = NO_SLOT;
+        self.set_port(m.host_port, false);
+        self.maps[i] = None;
     }
 }
 
@@ -341,19 +418,15 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
     // far end can no longer answer — the address moved. Retire it here instead
     // of leaving it to time out; the caller gets a fresh mapping on the new
     // address, which is the only thing that can still work.
-    for i in 0..L3_MAX {
-        let Some(m) = tbl.maps[i].as_mut() else { continue };
-        if m.proto == proto && m.guest_port == gport
-            && m.remote_ip == rip && m.remote_port == rport
-        {
+    if let Some(i) = tbl.find_flow(proto, gport, rip, rport) {
+        if let Some(m) = tbl.maps[i].as_mut() {
             if m.host_ip == our_ip {
                 m.last_tick = now;
                 return Some(m.host_port);
             }
-            tbl.release(i);
-            NS_MAP_REHOMED.fetch_add(1, AtOrd::Relaxed);
-            break;
         }
+        tbl.release(i);
+        NS_MAP_REHOMED.fetch_add(1, AtOrd::Relaxed);
     }
     // `nf_nat_l4proto_unique_tuple`: start at a varying offset, probe forward
     // with an O(1) used-test, and give up after a BOUNDED number of attempts
@@ -372,10 +445,9 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
     }
     let hp = hp?;
     let slot = (0..L3_MAX).find(|&i| tbl.maps[i].is_none())?;
-    tbl.maps[slot] = Some(L3Map { proto, guest_port: gport, remote_ip: rip,
-                                   remote_port: rport, host_ip: our_ip,
-                                   host_port: hp, last_tick: now });
-    tbl.set_port(hp, true);
+    tbl.insert(slot, L3Map { proto, guest_port: gport, remote_ip: rip,
+                             remote_port: rport, host_ip: our_ip,
+                             host_port: hp, last_tick: now });
     // New flow — count by transport (UDP-heavy cold load = QUIC/HTTP-3).
     match proto {
         PROTO_TCP => { NS_TCP_FLOWS.fetch_add(1, AtOrd::Relaxed); }
@@ -389,14 +461,16 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
 /// must match. Returns the guest port to deliver to.
 fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
              now: u64) -> Option<u16> {
+    if !(L3_PORT_LO..L3_PORT_HI).contains(&hport) { return None; }
     let mut tbl = L3.lock();
-    for m in tbl.maps.iter_mut().flatten() {
-        if m.proto == proto && m.host_port == hport && m.host_ip == dst_ip
-            && m.remote_ip == rip && m.remote_port == rport
-        {
-            m.last_tick = now;
-            return Some(m.guest_port);
-        }
+    let slot = tbl.by_port[(hport - L3_PORT_LO) as usize];
+    if slot == NO_SLOT { return None; }
+    let m = tbl.maps[slot as usize].as_mut()?;
+    if m.proto == proto && m.host_ip == dst_ip
+        && m.remote_ip == rip && m.remote_port == rport
+    {
+        m.last_tick = now;
+        return Some(m.guest_port);
     }
     None
 }
@@ -934,7 +1008,14 @@ fn l3_reap(now: u64) {
 /// Tear down all L3 state (VM stopped). Idempotent.
 pub fn l3_reset() {
     L3_ACTIVE.store(false, AtOrd::Release);
-    *L3.lock() = L3Table::new();
+    // In place: a fresh `L3Table` is ~80 KB, too much for a fiber stack.
+    {
+        let mut t = L3.lock();
+        t.maps.fill(None);
+        t.used.fill(0);
+        t.by_port.fill(NO_SLOT);
+        t.by_flow.fill(NO_SLOT);
+    }
     tap_reset();
     *FRAME_POOL.lock() = Vec::new(); // release recycled buffers
 }
