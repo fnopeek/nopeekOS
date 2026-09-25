@@ -14,7 +14,7 @@
 //! (`sync_pir_to_irr`, KVM's posted-interrupt model).
 
 use crate::interrupts::rdtsc;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub const LAPIC_BASE: u64 = 0xFEE0_0000;
 pub const LAPIC_SIZE: u64 = 0x1000;
@@ -108,14 +108,20 @@ pub const MAX_VCPUS: usize = 8;
 static PIR: [[AtomicU64; 4]; MAX_VCPUS] =
     [const { [const { AtomicU64::new(0) }; 4] }; MAX_VCPUS];
 
-/// Post `vector` to vCPU `apic_id`. True on the empty→non-empty edge, so the
-/// sender kicks the target once per burst.
+/// `pi_desc.ON`: set by the poster AFTER its PIR bit, cleared by the owner
+/// BEFORE it drains PIR. Whoever flips it false→true kicks, so a post that
+/// lands after a drain always kicks — deriving the edge from the PIR words
+/// (load, then or) lost it when the owner drained in between, and the vector
+/// then sat in PIR while the target ran in guest with no exit to fold it in.
+static PIR_ON: [AtomicBool; MAX_VCPUS] = [const { AtomicBool::new(false) }; MAX_VCPUS];
+
+/// Post `vector` to vCPU `apic_id`. True when the caller must kick the
+/// target (`pi_test_and_set_on`), once per burst.
 pub fn post(apic_id: u8, vector: u8) -> bool {
     let t = apic_id as usize;
     if t >= MAX_VCPUS { return false; }
-    let was_empty = PIR[t].iter().all(|w| w.load(Ordering::Relaxed) == 0);
-    PIR[t][(vector >> 6) as usize].fetch_or(1u64 << (vector & 63), Ordering::Release);
-    was_empty
+    PIR[t][(vector >> 6) as usize].fetch_or(1u64 << (vector & 63), Ordering::AcqRel);
+    !PIR_ON[t].swap(true, Ordering::AcqRel)
 }
 
 /// Anything posted to `apic_id` and not yet folded into its IRR?
@@ -307,6 +313,7 @@ pub fn reset_posted() {
     for t in PIR.iter() {
         for w in t.iter() { w.store(0, Ordering::Relaxed); }
     }
+    for on in PIR_ON.iter() { on.store(false, Ordering::Relaxed); }
     for c in VCPU_HOST_CORE.iter() { c.store(usize::MAX, Ordering::Relaxed); }
     for a in VCPU_LAST_ACTIVE.iter() { a.store(0, Ordering::Relaxed); }
 }
@@ -397,6 +404,7 @@ impl LocalApic {
     fn sync_posted(&mut self) {
         let t = self.apic_id as usize;
         if t >= MAX_VCPUS { return; }
+        let _ = PIR_ON[t].swap(false, Ordering::AcqRel);
         for w in 0..4 {
             let bits = PIR[t][w].swap(0, Ordering::AcqRel);
             if bits == 0 { continue; }
