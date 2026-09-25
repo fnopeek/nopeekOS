@@ -315,7 +315,7 @@ pub fn init() {
             .set_handler(worker_timer_handler as *const () as u64);
         // Wake IPI for an idle worker (new work in the inbox) — pure EOI.
         IDT[WORKER_WAKE_VECTOR as usize]
-            .set_handler(worker_timer_handler as *const () as u64);
+            .set_handler(worker_wake_handler as *const () as u64);
 
         // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
         IDT[VCPU_KICK_VECTOR as usize]
@@ -643,11 +643,25 @@ static ARMED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// Wake period of `worker_idle_hlt` in TSC cycles; 0 = 10 ms.
 static POLL_PERIOD: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
+/// Wake IPI for an idle worker — pure EOI; the interrupt ending the HLT is
+/// the effect.
+extern "x86-interrupt" fn worker_wake_handler(_frame: InterruptStackFrame) {
+    if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
+        crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
+    }
+    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    if base != 0 {
+        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
+        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    }
+}
+
 extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
     let cid = crate::smp::per_core::current_core_id();
     if cid < 256 {
         ARMED[cid].store(0, Ordering::Relaxed);
     }
+    crate::smp::per_core::note_timer_fire(cid);
     // Core 0 attributes its own wakes (halt_until skips it): a timer or a
     // wake IPI on this vector counts as `timer` in `cores`.
     if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
@@ -852,7 +866,11 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
         unsafe { core::arch::asm!("sti; hlt; cli") };
     }
     crate::smp::per_core::note_woke(cid);
-    crate::smp::per_core::record_halt(cid, rdtsc().saturating_sub(t0));
+    let t1 = rdtsc();
+    crate::smp::per_core::record_halt(cid, t1.saturating_sub(t0));
+    if let Some(d) = deadline {
+        crate::smp::per_core::note_deadline_late(cid, t1.saturating_sub(d));
+    }
     // Core 0's wakes are attributed by its ISRs (timer, input).
     if cid != 0 {
         crate::smp::per_core::record_wake(cid, cause);

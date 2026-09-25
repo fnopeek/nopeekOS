@@ -79,9 +79,11 @@ pub fn intent_cores() {
     // Snapshot 1
     let mut s0 = [(0u64, 0u64); 256];
     let mut w0 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
+    let mut t0 = [(0u64, 0u64); 256];
     for c in 0..cores {
         s0[c] = crate::smp::per_core::halt_snapshot(c);
         w0[c] = crate::smp::per_core::wake_snapshot(c);
+        t0[c] = crate::smp::per_core::timer_snapshot(c);
     }
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let io0 = crate::microvm::cpu::io_port_snapshot();
@@ -109,9 +111,11 @@ pub fn intent_cores() {
     let wall1 = crate::interrupts::rdtsc();
     let mut s1 = [(0u64, 0u64); 256];
     let mut w1 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
+    let mut t1 = [(0u64, 0u64); 256];
     for c in 0..cores {
         s1[c] = crate::smp::per_core::halt_snapshot(c);
         w1[c] = crate::smp::per_core::wake_snapshot(c);
+        t1[c] = crate::smp::per_core::timer_snapshot(c);
     }
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let io1 = crate::microvm::cpu::io_port_snapshot();
@@ -200,6 +204,10 @@ pub fn intent_cores() {
         if !any { kprint!(" (none)"); }
         let unattr = dcount.saturating_sub(attributed);
         kprintln!("  | UNATTR={}/s", unattr * 1000 / window_ms);
+        // Deadline timer: one-shot fires, and the worst wake past its deadline.
+        kprintln!("        timer: fires={}/s late_max={}us",
+            t1[c].0.saturating_sub(t0[c].0) * 1000 / window_ms,
+            t1[c].1 / tsc_per_us.max(1));
     }
 
     // VM-exit mix — only when a guest ran during the window. Tells us
@@ -269,6 +277,11 @@ pub fn intent_cores() {
         // the GUEST had no RX buffer, so the frame stayed in the tap.
         let tapfull = rh1.0.saturating_sub(rh0.0);
         let injf = rh1.1.saturating_sub(rh0.1);
+        let core_of = |c: Option<usize>| c.map_or(-1i64, |c| c as i64);
+        kprintln!("    placement: vcpu0=core {} net-worker=core {} gpu-worker=core {}",
+            core_of(crate::microvm::cpu::bsp_host_core()),
+            core_of(crate::microvm::devices::net_backend::worker_core()),
+            core_of(crate::microvm::devices::gpu_backend::worker_core()));
         kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
                   tapfull * 1000 / window_ms, injf * 1000 / window_ms);
         // Outbound TX rate (the b1-vs-b2 upload discriminator). Read TOGETHER with
