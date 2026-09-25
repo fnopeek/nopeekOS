@@ -336,10 +336,11 @@ impl LocalApic {
         }
     }
 
-    /// Host TSC of the next timer expiry (the park deadline), or None.
+    /// Host TSC of the next timer expiry (park and host one-shot), or None.
     pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
         let period = self.period()?;
-        if self.timer_owed > 0 { return Some(rdtsc()); }
+        // An owed tick is not a deadline: it is delivered on the exit the
+        // guest's EOI of the previous one causes.
         if !self.periodic() && self.timer_fired { return None; }
         Some(self.timer_start_tsc.wrapping_add(period))
     }

@@ -1064,22 +1064,14 @@ pub fn vm_poll_slice() {
     }
 }
 
-/// Host-idle the dedicated core for ~one dedicated-VM-timer tick when
-/// the guest is idle (SliceOutcome::Idle), instead of spinning VMRUN.
-/// With cpu-pm dropped the HLT VMEXITs → KVM frees the host core. Records
-/// the halt so `cores` reports the dedicated core's real idle (otherwise
-/// it shows a misleading 100% busy with 0 HALTS while the guest idles).
+/// Host-idle the dedicated core while the guest is halted: until its next
+/// timer deadline or an interrupt / kick IPI (`kvm_vcpu_block`).
 #[inline]
-fn idle_host_sleep() {
-    let t0 = crate::interrupts::rdtsc();
-    // SAFETY: ring-0; the dedicated VM timer (armed in vm_core_serve)
-    // wakes us within ~1 ms.
-    unsafe { core::arch::asm!("sti; hlt") };
-    if let Some(c) = crate::smp::per_core::dedicated_vm_core() {
-        crate::smp::per_core::record_halt(
-            c, crate::interrupts::rdtsc().saturating_sub(t0));
-        crate::smp::per_core::record_wake(c, crate::smp::per_core::WAKE_HLT_FALLBACK);
-    }
+fn idle_host_sleep(next_timer_tsc: Option<u64>) {
+    crate::interrupts::halt_until(
+        Some(vcpu_block_deadline(next_timer_tsc)),
+        crate::smp::per_core::WAKE_HLT_FALLBACK,
+    );
 }
 
 /// Dedicated-core entry point — called every iteration of the
@@ -1104,12 +1096,8 @@ pub fn vm_core_serve() {
     };
     VM_RUN_STATE.store(VM_RUNNING, Ordering::Release);
 
-    // Per-core periodic VMEXIT source + host interrupts ON, so a
-    // pending tick is delivered to the EOI handler between VMRUNs —
-    // exactly how Core 0 runs the cooperative path. Without IF=1 the
-    // first tick would never EOI and the guest would freeze one
-    // iteration later; without the timer there is no tick at all.
-    crate::interrupts::arm_dedicated_vm_timer();
+    // Host interrupts ON between VMRUNs, so the one-shot armed before
+    // each entry (`arm_vcpu_timer`) and kick IPIs are taken and EOI'd.
     // SAFETY: ring-0; CLGI/STGI still brackets the VMRUN-critical
     // region inside run_guest_once. This mirrors Core 0's IF=1.
     unsafe { core::arch::asm!("sti") };
@@ -1138,7 +1126,7 @@ pub fn vm_core_serve() {
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(vmx::SliceOutcome::StillRunning) => continue,
                             Ok(vmx::SliceOutcome::Idle) => {
-                                idle_host_sleep();
+                                idle_host_sleep(ctx.next_timer_deadline_tsc());
                                 continue;
                             }
                             Ok(vmx::SliceOutcome::Exited(o)) => {
@@ -1176,7 +1164,7 @@ pub fn vm_core_serve() {
                         match ctx.run_slice(SLICE_BUDGET) {
                             Ok(svm::SliceOutcome::StillRunning) => continue,
                             Ok(svm::SliceOutcome::Idle) => {
-                                idle_host_sleep();
+                                idle_host_sleep(ctx.next_timer_deadline_tsc());
                                 continue;
                             }
                             Ok(svm::SliceOutcome::Exited(o)) => {
@@ -1201,12 +1189,8 @@ pub fn vm_core_serve() {
         Vendor::Unknown(reason) => crate::kprintln!("[microvm] {}", reason),
     }
 
-    // VM done — swap the 1 kHz VM timer back to the 100 Hz worker idle
-    // timer so this core's park-loop HLT keeps a wake source (it idles
-    // like any worker until the next launch). Restore the IF=0 state
-    // `smp_ap_entry`'s park loop expects (it does its own sti;hlt;cli).
-    crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::init_worker_timer();
+    // Restore the IF=0 state `smp_ap_entry`'s park loop expects (it does
+    // its own sti;hlt;cli).
     // SAFETY: ring-0; return the core to the parked-loop invariant.
     unsafe { core::arch::asm!("cli") };
 
@@ -1252,14 +1236,19 @@ const PARK_SAFETY_MS: u64 = 8;
 ///   * Safety cap (`PARK_SAFETY_MS`) — only an idle guest with no timer reaches it.
 /// (A bounded spin-while-active test was REVERTED: it pegged a worker core and
 /// starved the compositor — the consumer-wake must be event-driven, not spun.)
+/// Wake-up bound for a blocked vCPU: the guest's next timer tick, clamped to
+/// [now, safety]. A past deadline re-enters at once; a far or absent one
+/// re-checks no later than the safety cap.
+fn vcpu_block_deadline(next_timer_tsc: Option<u64>) -> u64 {
+    let now = crate::interrupts::rdtsc();
+    let safety = now + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
+    next_timer_tsc.map(|d| d.clamp(now, safety)).unwrap_or(safety)
+}
+
 fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
     let now = crate::interrupts::rdtsc();
     let freq = crate::interrupts::tsc_freq();
-    let safety = now + PARK_SAFETY_MS.saturating_mul(freq / 1000);
-    // Wait until the guest's next timer tick, clamped to [now, safety]: a
-    // past/overdue deadline → re-enter at once and inject; a far-future or
-    // absent one → re-check no later than the safety cap.
-    let deadline = next_timer_tsc.map(|d| d.clamp(now, safety)).unwrap_or(safety);
+    let deadline = vcpu_block_deadline(next_timer_tsc);
 
     // When the off-vCPU RX backend (or producer) owns the NIC drain, RX wakes us
     // via the net-kick generation — we must NOT arm/route the host RX IRQ here
@@ -1316,11 +1305,6 @@ fn vcpu_fiber_task(_arg: u64) {
     // so the numbers from the last run survive it — a post-mortem is the one
     // time anyone reads them.
     crate::microvm::devices::nat::reset_counters();
-
-    // 1 kHz wake source on THIS core so the fiber's idle yields resume
-    // promptly (the 100 Hz worker timer alone would stretch a 2 ms idle
-    // yield to ~10 ms). Restored to the worker timer when the guest ends.
-    crate::interrupts::arm_dedicated_vm_timer();
 
     // Spawn the data-plane worker on another core: it moves frames between the
     // tap and the guest rings, so THIS BSP vCPU does no net work beyond the TX
@@ -1501,10 +1485,6 @@ fn vcpu_fiber_task(_arg: u64) {
     // teardown might not run). Idempotent with the vm_poll_slice stop sites.
     crate::microvm::devices::net_dataplane::stop_worker();
 
-    // Restore this core to the 100 Hz worker idle timer + the IF=0
-    // park-loop invariant `smp_ap_entry` expects.
-    crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::init_worker_timer();
 
     drop(pending); // owned guest-image buffers freed
     crate::kprintln!("[microvm] vCPU fiber finished on core {}", cid);
@@ -1541,9 +1521,6 @@ fn ap_vcpu_fiber_task(arg: u64) {
         "[microvm] AP vCPU fiber (apic_id {}) opening on core {} (sipi vec {:#x})",
         apic_id, cid, vector
     );
-    // 1 kHz wake source on this core so the AP's idle yields resume promptly
-    // (mirrors the BSP fiber).
-    crate::interrupts::arm_dedicated_vm_timer();
 
     match detect_vendor() {
         Vendor::Intel => match vmx::vm_open_ap(ptr, vector, apic_id) {
@@ -1559,7 +1536,10 @@ fn ap_vcpu_fiber_task(arg: u64) {
                     unsafe { core::arch::asm!("cli") };
                     match outcome {
                         Ok(vmx::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
-                        Ok(vmx::SliceOutcome::Idle) => { crate::smp::fiber::yield_sleep(2); }
+                        Ok(vmx::SliceOutcome::Idle) => {
+                            crate::smp::fiber::kick_wait_until(
+                                vcpu_block_deadline(ctx.next_timer_deadline_tsc()));
+                        }
                         Ok(vmx::SliceOutcome::Exited(o)) => {
                             crate::kprintln!(
                                 "[microvm] AP vCPU exited — reason {:#x}",
@@ -1591,7 +1571,10 @@ fn ap_vcpu_fiber_task(arg: u64) {
                 unsafe { core::arch::asm!("cli") };
                 match outcome {
                     Ok(svm::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
-                    Ok(svm::SliceOutcome::Idle) => { crate::smp::fiber::yield_sleep(2); }
+                    Ok(svm::SliceOutcome::Idle) => {
+                        crate::smp::fiber::kick_wait_until(
+                            vcpu_block_deadline(ctx.next_timer_deadline_tsc()));
+                    }
                     Ok(svm::SliceOutcome::Exited(o)) => {
                         crate::kprintln!(
                             "[microvm] AP vCPU exited — reason {:#x}",
@@ -1611,8 +1594,6 @@ fn ap_vcpu_fiber_task(arg: u64) {
         Vendor::Unknown(_) => {}
     }
 
-    crate::interrupts::disarm_dedicated_vm_timer();
-    crate::interrupts::init_worker_timer();
     crate::kprintln!("[microvm] AP vCPU fiber finished on core {}", cid);
     // Let the BSP's last-one-out teardown proceed.
     VCPU_COUNT.fetch_sub(1, Ordering::AcqRel);

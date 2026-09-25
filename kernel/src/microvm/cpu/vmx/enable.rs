@@ -1422,6 +1422,11 @@ impl VmContext {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
         self.inject_pending_event()?;
+
+        // The guest's next timer, or the slice end, as a host one-shot on this
+        // core: its fire is the exit that delivers the tick on time.
+        crate::interrupts::arm_vcpu_timer(
+            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline)));
         // FPU host↔guest swap is now embedded inside run_guest_once's
         // asm (mirror of SVM v0.172.53), bracketing VMRESUME with zero
         // compiler-emittable code between xrstor and vmresume. A +avx2

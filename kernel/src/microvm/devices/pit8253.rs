@@ -175,9 +175,8 @@ impl Pit {
         if !self.live() {
             return None;
         }
-        if self.pending > 0 {
-            return Some(rdtsc());
-        }
+        // Owed ticks are repaid on the exit the guest's EOI causes, not by a
+        // timer.
         if !(self.mode == 2 || self.mode == 3) && self.fired {
             return None;
         }
