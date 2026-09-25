@@ -123,6 +123,34 @@ pub const MSIX_TABLE_OFF: u32 = 0x2000;
 pub const MSIX_PBA_OFF: u32 = 0x3000;
 const MSIX_ENTRY_MASKED: u32 = 1;
 
+/// The capability is offered at all (`store sys/config/microvm_msix on`,
+/// read at VM open). Off by default until the path is proven: 0.446.0 had
+/// it on and the guest's network stayed silent.
+static MSIX_OFFERED: AtomicBool = AtomicBool::new(false);
+pub fn msix_offered() -> bool { MSIX_OFFERED.load(Ordering::Acquire) }
+
+/// `cores` probe: messages sent, messages latched while masked.
+static MSIX_SENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static MSIX_LATCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// One line of MSI-X state for `cores`.
+pub fn msix_report() -> Option<([u64; 2], alloc::string::String)> {
+    if !msix_offered() { return None; }
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let _ = write!(s, "en={} fmask={} qvec=[{:#x},{:#x}] pba={:#x}",
+        MSIX_ENABLED.load(Ordering::Relaxed) as u8,
+        MSIX_FUNC_MASK.load(Ordering::Relaxed) as u8,
+        QUEUE_VECTOR[0].load(Ordering::Relaxed), QUEUE_VECTOR[1].load(Ordering::Relaxed),
+        MSIX_PENDING.load(Ordering::Relaxed));
+    for v in 0..MSIX_VECTORS {
+        let _ = write!(s, " v{}={:#x}/{:#x}/{}", v,
+            MSIX_ADDR[v].load(Ordering::Relaxed), MSIX_DATA[v].load(Ordering::Relaxed),
+            MSIX_CTRL[v].load(Ordering::Relaxed) & 1);
+    }
+    Some(([MSIX_SENT.load(Ordering::Relaxed), MSIX_LATCHED.load(Ordering::Relaxed)], s))
+}
+
 static MSIX_ENABLED: AtomicBool = AtomicBool::new(false);
 static MSIX_FUNC_MASK: AtomicBool = AtomicBool::new(false);
 static MSIX_ADDR: [core::sync::atomic::AtomicU64; MSIX_VECTORS] =
@@ -138,6 +166,10 @@ static QUEUE_VECTOR: [core::sync::atomic::AtomicU16; 2] =
     [const { core::sync::atomic::AtomicU16::new(0xFFFF) }; 2];
 
 fn msix_reset() {
+    MSIX_OFFERED.store(
+        crate::config::get("microvm_msix").is_some_and(|v| v.trim().eq_ignore_ascii_case("on")),
+        Ordering::Release,
+    );
     MSIX_ENABLED.store(false, Ordering::Release);
     MSIX_FUNC_MASK.store(false, Ordering::Release);
     for i in 0..MSIX_VECTORS {
@@ -173,8 +205,10 @@ fn msix_fire(v: usize) {
         || MSIX_CTRL[v].load(Ordering::Acquire) & MSIX_ENTRY_MASKED != 0
     {
         MSIX_PENDING.fetch_or(1 << v, Ordering::AcqRel);
+        MSIX_LATCHED.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    MSIX_SENT.fetch_add(1, Ordering::Relaxed);
     // Message address: 0xFEE, destination ID in bits 19:12, destination mode
     // (logical) in bit 2. Data: vector in 7:0, delivery mode in 10:8.
     let addr = MSIX_ADDR[v].load(Ordering::Acquire);
@@ -202,7 +236,7 @@ fn msix_flush_pending() {
 
 /// Signal queue `q` by MSI-X. `false` = MSI-X is off, use INTx (IRQ 10).
 pub fn msix_notify(q: u16) -> bool {
-    if !MSIX_ENABLED.load(Ordering::Acquire) { return false; }
+    if !msix_offered() || !MSIX_ENABLED.load(Ordering::Acquire) { return false; }
     let v = QUEUE_VECTOR.get(q as usize).map_or(0xFFFF, |x| x.load(Ordering::Acquire)) as usize;
     if v < MSIX_VECTORS { msix_fire(v); }
     true // with MSI-X on, a queue without a vector has no interrupt at all
@@ -210,6 +244,7 @@ pub fn msix_notify(q: u16) -> bool {
 
 /// MMIO into the MSI-X table / PBA (BAR0-relative `off`). `Some` if handled.
 pub fn msix_mmio(off: u32, write: Option<u32>) -> Option<u32> {
+    if !msix_offered() { return None; }
     if (MSIX_TABLE_OFF..MSIX_TABLE_OFF + 16 * MSIX_VECTORS as u32).contains(&off) {
         let rel = off - MSIX_TABLE_OFF;
         let v = (rel / 16) as usize;
