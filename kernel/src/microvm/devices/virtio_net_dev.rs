@@ -236,6 +236,8 @@ pub struct VirtioNet {
 
     /// Reusable TX read buffer (grown once; a GSO super-frame is ≤64 KiB).
     tx_scratch: alloc::vec::Vec<u8>,
+    /// TX doorbell off while the worker polls the ring (vhost_disable_notify).
+    tx_notify_off: bool,
 
     caps: NetCaps,
 }
@@ -262,6 +264,7 @@ impl VirtioNet {
             }; NUM_QUEUES as usize],
             pending_kick_queue: None,
             tx_scratch: alloc::vec::Vec::new(),
+            tx_notify_off: false,
             caps: NetCaps::dns_tcp(),
         }
     }
@@ -644,6 +647,7 @@ impl VirtioNet {
         if frame.len() < TX_FRAME_MAX { frame.resize(TX_FRAME_MAX, 0); }
 
         let evidx = self.event_idx_on();
+        let notify_off = self.tx_notify_off;
         {
             let q = &mut self.queues[1];
             if !q.ready() {
@@ -692,8 +696,14 @@ impl VirtioNet {
                     q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 }
                 if !evidx { break; }
-                // Arm: kick me when avail.idx passes what I've consumed.
-                set_avail_event(mem, q.used_gpa(), q.size, q.last_avail_idx);
+                // Arm: kick me when avail.idx passes what I've consumed — or,
+                // while the worker polls, not before a full ring.
+                let target = if notify_off {
+                    q.last_avail_idx.wrapping_add(q.size)
+                } else {
+                    q.last_avail_idx
+                };
+                set_avail_event(mem, q.used_gpa(), q.size, target);
                 fence(Ordering::SeqCst);
                 let new_top = avail_idx(mem, q.avail_gpa()).unwrap_or(q.last_avail_idx);
                 if new_top == q.last_avail_idx { break; }
@@ -704,9 +714,29 @@ impl VirtioNet {
                 q.used_idx = start_used.wrapping_add(nused);
                 used_publish(mem, q.used_gpa(), q.used_idx);
             }
+            super::net_backend::set_tx_ring(q.avail_gpa(), q.last_avail_idx);
         }
         self.tx_scratch = frame;
         payloads
+    }
+
+    /// vhost_disable_notify / vhost_enable_notify for the TX ring. Off: the
+    /// guest does not kick until a full ring is queued — the worker is polling
+    /// and reads the ring itself. On: kick on the next frame, then re-check;
+    /// `true` = a frame landed while it was off, so do not park yet.
+    pub fn tx_set_notify(&mut self, mem: &GuestMem, on: bool) -> bool {
+        if self.tx_notify_off == !on { return false; }
+        self.tx_notify_off = !on;
+        let q = self.queues[1];
+        if !q.ready() || !self.event_idx_on() { return false; }
+        if on {
+            set_avail_event(mem, q.used_gpa(), q.size, q.last_avail_idx);
+            fence(Ordering::SeqCst);
+            avail_idx(mem, q.avail_gpa()).is_some_and(|top| top != q.last_avail_idx)
+        } else {
+            set_avail_event(mem, q.used_gpa(), q.size, q.last_avail_idx.wrapping_add(q.size));
+            false
+        }
     }
 
     /// Phase 2c (under the device mutex, CHEAP): set the TX ISR, inject any
