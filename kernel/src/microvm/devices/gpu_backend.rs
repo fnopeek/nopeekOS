@@ -57,6 +57,14 @@ pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }
 pub fn set_full_active(on: bool) { FULL_ACTIVE.store(on, Ordering::Release); }
 pub fn set_worker_core(core: usize) { WORKER_CORE.store(core, Ordering::Release); }
 
+/// Core the GPU worker runs on, if one is up.
+pub fn worker_core() -> Option<usize> {
+    match WORKER_CORE.load(Ordering::Acquire) {
+        usize::MAX => None,
+        c => Some(c),
+    }
+}
+
 /// vCPU: the guest notified the controlq (`qidx`). Defer to the worker and, on the
 /// empty→set edge, wake its core out of HLT (coalesced like the net TX kick).
 pub fn note_gpu_kick(qidx: u16) {

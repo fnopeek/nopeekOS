@@ -232,6 +232,26 @@ static CORE_WAKE: [[AtomicU64; WAKE_CAUSES]; 256] = {
 
 /// Record one wake of `cause` on `core_id`. Cheap + lock-free — safe to
 /// call from interrupt context (unlike `current_core_id`, which locks).
+/// Deadline-timer health per core: one-shot fires, and the worst lateness of
+/// a halt that had a deadline (wake TSC − deadline), window peak.
+static TIMER_FIRES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+static DEADLINE_LATE_MAX: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+pub fn note_timer_fire(core_id: usize) {
+    if core_id < 256 { TIMER_FIRES[core_id].fetch_add(1, Ordering::Relaxed); }
+}
+
+pub fn note_deadline_late(core_id: usize, late_tsc: u64) {
+    if core_id < 256 { DEADLINE_LATE_MAX[core_id].fetch_max(late_tsc, Ordering::Relaxed); }
+}
+
+/// (fires, late_max_tsc) — late_max is swap-reset so `cores` reads the window peak.
+pub fn timer_snapshot(core_id: usize) -> (u64, u64) {
+    if core_id >= 256 { return (0, 0); }
+    (TIMER_FIRES[core_id].load(Ordering::Relaxed),
+     DEADLINE_LATE_MAX[core_id].swap(0, Ordering::Relaxed))
+}
+
 pub fn record_wake(core_id: usize, cause: usize) {
     if core_id >= 256 || cause >= WAKE_CAUSES { return; }
     CORE_WAKE[core_id][cause].fetch_add(1, Ordering::Relaxed);
