@@ -561,6 +561,21 @@ unsafe fn vmx_exit_root() {
 /// (RAM + EPT), the device model, and the host-tick/display bookkeeping. The
 /// BSP owns it heap-boxed (behind `SharedRef`); an AP aliases it. Mirror of
 /// svm `VmShared`.
+/// Which target a nested page fault at `gpa` hits (`cores` NPF breakdown).
+fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
+    use crate::microvm::cpu as c;
+    if sh.pci.virtio_blk.bar0_in_range(gpa) { c::NPF_BLK }
+    else if crate::microvm::devices::net_backend::bar0_in_range(gpa) { c::NPF_NET }
+    else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) { c::NPF_GPU }
+    else if sh.pci.virtio_input.bar0_in_range(gpa) { c::NPF_INPUT }
+    else if sh.pci.virtio_9p.bar0_in_range(gpa) { c::NPF_P9 }
+    else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) { c::NPF_SQFS }
+    else if sh.pci.virtio_snd.bar0_in_range(gpa) { c::NPF_SND }
+    else if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) { c::NPF_LAPIC }
+    else if gpa < sh.guest_mem.len() { c::NPF_RAM }
+    else { c::NPF_OTHER }
+}
+
 pub struct VmShared {
     /// Shared handle to the active guest memory (owned by `guest_mem`'s
     /// `ACTIVE_GM`, freed at close). A reference — NOT the owned `GuestMem` — so
@@ -1765,6 +1780,7 @@ impl VmContext {
                 // EPT permissions). For accesses landing in virtio-blk's
                 // BAR0 range we emulate; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
+                crate::microvm::cpu::record_npf(npf_kind(sh, gpa));
                 // LAPIC MMIO page (0xFEE00000) → trap-and-emulate (Intel
                 // parity #2). Left EPT-not-present in ept.rs when LAPIC is on.
                 if vmx_lapic_on()

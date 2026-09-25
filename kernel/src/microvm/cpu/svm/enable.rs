@@ -604,6 +604,21 @@ pub enum SliceOutcome {
 /// Stage 0c moves it behind a big-VM lock + shared handle so AP vCPU
 /// fibers attach to it (guest SMP). Splitting it out now (Stage 0b) is a
 /// pure, behaviour-preserving decomposition.
+/// Which target a nested page fault at `gpa` hits (`cores` NPF breakdown).
+fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
+    use crate::microvm::cpu as c;
+    if sh.pci.virtio_blk.bar0_in_range(gpa) { c::NPF_BLK }
+    else if crate::microvm::devices::net_backend::bar0_in_range(gpa) { c::NPF_NET }
+    else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) { c::NPF_GPU }
+    else if sh.pci.virtio_input.bar0_in_range(gpa) { c::NPF_INPUT }
+    else if sh.pci.virtio_9p.bar0_in_range(gpa) { c::NPF_P9 }
+    else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) { c::NPF_SQFS }
+    else if sh.pci.virtio_snd.bar0_in_range(gpa) { c::NPF_SND }
+    else if (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa) { c::NPF_LAPIC }
+    else if gpa < sh.guest_mem.len() { c::NPF_RAM }
+    else { c::NPF_OTHER }
+}
+
 pub struct VmShared {
     /// Shared handle to the active guest memory (owned by `guest_mem`'s
     /// `ACTIVE_GM`, freed at close). A reference — NOT the owned `GuestMem` —
@@ -1647,6 +1662,7 @@ impl VmContext {
             }
             EXIT_NPF => {
                 let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
+                crate::microvm::cpu::record_npf(npf_kind(sh, gpa));
                 if sh.pci.virtio_blk.bar0_in_range(gpa) {
                     if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
