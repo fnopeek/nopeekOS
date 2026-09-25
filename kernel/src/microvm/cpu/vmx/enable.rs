@@ -32,6 +32,9 @@ use crate::microvm::cpu::svm::lapic::{self, LocalApic};
 /// const check (no vendor lock — vmx code only runs on Intel). Gates every
 /// LAPIC-related VMX path; false ⇒ the validated `nolapic` boot, byte-
 /// identical. See `cpu::VMX_GUEST_LAPIC`.
+const VEC_UD: u8 = 6;
+const VEC_GP: u8 = 13;
+
 #[inline]
 fn vmx_lapic_on() -> bool {
     crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC
@@ -662,7 +665,8 @@ pub struct Vcpu {
     launched: bool,
     iter: u32,
     io_dropped: u32,
-    msr_log_count: u32,
+    /// Emulated MSR state (MTRR, SPEC_CTRL, MISC_ENABLE …) — see `vmx::msr`.
+    msrs: super::msr::GuestMsrs,
     consecutive_idle: u32,
     /// Event mid-vectoring at the last exit (IDT_VECTORING_INFO; re-injected
     /// next entry — only type 0/2). SDM §27.2.4. See the field doc on the SVM
@@ -809,7 +813,7 @@ impl VmContext {
                     launched: false,
                     iter: 0,
                     io_dropped: 0,
-                    msr_log_count: 0,
+                    msrs: super::msr::GuestMsrs::new(),
                     consecutive_idle: 0,
                     reinject: 0,
                     lapic: LocalApic::new(0),
@@ -878,7 +882,7 @@ impl VmContext {
                     launched: false,
                     iter: 0,
                     io_dropped: 0,
-                    msr_log_count: 0,
+                    msrs: super::msr::GuestMsrs::new(),
                     consecutive_idle: 0,
                     reinject: 0,
                     lapic: LocalApic::new(apic_id),
@@ -1280,7 +1284,6 @@ impl VmContext {
 
     let mut last_outcome: Option<vmcs::LaunchOutcome> = None;
     let mut slice_n: u32 = 0;
-    const MSR_LOG_CAP: u32 = 32;
 
     // Idle-detection. Once init enters its pause(2)/wait-loop, the
     // only exits we see are reason 1 (external interrupt, mostly
@@ -1401,7 +1404,9 @@ impl VmContext {
         if prof_post != 0 {
             crate::microvm::cpu::record_exit_cycles(prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
+        let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         let result = vmcs::run_guest_once(&mut self.vcpu.regs, self.vcpu.launched, hf, gf);
+        super::msr::spec_ctrl_exit(host_spec);
         prof_post = crate::interrupts::rdtsc();
         crate::microvm::cpu::record_guest_cycles(prof_post.wrapping_sub(prof_pre));
         let outcome = result?;
@@ -1530,6 +1535,12 @@ impl VmContext {
         }
 
         match basic {
+            0 if (vmcs::read_exit_intr_info().unwrap_or(0) >> 8) & 0x7 == 2 => {
+                // Host NMI while the guest ran (NMI exiting): the NMI is
+                // consumed by the exit. Counted like the host handler does.
+                crate::interrupts::NMI_COUNT.fetch_add(1, Ordering::Relaxed);
+                last_outcome = Some(outcome);
+            }
             0 => {
                 // Exception/NMI. EXCEPTION_BITMAP=0 in production —
                 // exceptions go to Linux's IDT directly. This arm
@@ -1950,74 +1961,15 @@ impl VmContext {
                 last_outcome = Some(outcome);
             }
             10 => {
-                // CPUID — VMX always exits on CPUID. Pass through
-                // to host; guest sees real CPU features. Linux uses
-                // this for early feature detection. Filtered for
-                // features we can't safely expose to the guest.
-                let leaf = self.vcpu.regs.rax as u32;
-                let subleaf = self.vcpu.regs.rcx as u32;
-                let (mut eax, mut ebx, mut ecx, mut edx) =
-                    vmcs::host_cpuid(leaf, subleaf);
-                if leaf == 1 && vmx_lapic_on() {
-                    // ECX bit 24: TSC-deadline timer. Hide it so Linux uses
-                    // the classic APIC_TMICT/TMCCT periodic timer (which
-                    // vmx::lapic emulates) instead of the TSC-deadline MSR
-                    // (0x6E0), which we don't emulate.
-                    ecx &= !(1u32 << 24);
-                    // EBX bits 31:24: initial xAPIC ID. Pass-through reports
-                    // the HOST worker core's id — mismatching our emulated
-                    // LAPIC + MP-table. Report THIS vCPU's id (BSP=0, AP=1..).
-                    ebx = (ebx & 0x00FF_FFFF) | ((self.vcpu.apic_id as u32) << 24);
-                }
-                // Leaf 0xB/0x1F (extended topology): EDX is the 32-bit x2APIC
-                // ID modern Linux uses as the CPU's APIC ID. Same reason as
-                // leaf 1 EBX — report this vCPU's id, not the host core's.
-                if vmx_lapic_on() && (leaf == 0x0B || leaf == 0x1F) {
-                    edx = self.vcpu.apic_id as u32;
-                }
-                if leaf == 7 && subleaf == 0 {
-                    // Hide CET from the guest. Host nopeekOS has
-                    // CR4.CET=1 for IBT, but Alpine vmlinuz has
-                    // hand-written asm stubs without ENDBR64 — once
-                    // CR4.CET is on, indirect calls to those stubs
-                    // raise #CP and Linux BUG()s. Clearing both bits
-                    // here + masking CR4.CET in initial GUEST_CR4
-                    // (vmcs.rs) keeps CET fully off in the guest.
-                    ecx &= !(1u32 << 7);   // CET_SS  (Shadow Stack)
-                    edx &= !(1u32 << 20);  // CET_IBT (Indirect Branch Tracking)
-                    // Hide PKU (Memory Protection Keys for Userspace).
-                    // Host CPU reports PKRU as part of XSAVE state in
-                    // CPUID 0xD (size 840 incl. 8 byte PKRU). Linux's
-                    // own xstate calculation comes to 832 (no PKRU
-                    // support gated by this PKU bit) → consistency-
-                    // check WARN, XSAVE disabled, fpstate_reset NULL-
-                    // deref panic. Easiest fix: hide PKU from the
-                    // guest entirely. Our microvm doesn't need PK.
-                    ecx &= !(1u32 << 3);   // PKU
-                    ecx &= !(1u32 << 4);   // OSPKE (driven by PKU)
-                    // Hide MPX — its XSAVE BND state is dropped in leaf
-                    // 0xD below, so the feature bit must go too or the
-                    // guest's xstate enumeration mismatches.
-                    ebx &= !(1u32 << 14);  // MPX
-                }
-                if leaf == 0xD {
-                    // Clamp the guest's XSAVE state to x87 + SSE + AVX only.
-                    // The host CPU may expose extra components (MPX BNDREGS/
-                    // BNDCSR on Intel 8th-gen Whiskey Lake, PKRU, AVX-512…);
-                    // passing leaf 0xD through verbatim makes Linux's XSAVE
-                    // size-consistency check fail (computed size != kernel
-                    // size → "XSAVE disabled" → fpstate_reset NULL-deref
-                    // panic). The N100 (Gracemont) lacks MPX, which is why
-                    // this only bit the notebook. 832 = 512 legacy + 64
-                    // header + 256 YMM_Hi128 is architectural for x87+SSE+AVX.
-                    const XSAVE_BASE_AVX: u32 = 0x340; // 832
-                    match subleaf {
-                        0 => { eax &= 0x7; ebx = XSAVE_BASE_AVX; ecx = XSAVE_BASE_AVX; edx = 0; }
-                        1 => { eax &= 0x7; ebx = XSAVE_BASE_AVX; ecx = 0; edx = 0; } // drop XSAVES/supervisor
-                        2 => { ecx = 0; edx = 0; } // AVX component: keep host size(eax)+offset(ebx)
-                        _ => { eax = 0; ebx = 0; ecx = 0; edx = 0; } // hide MPX/PKRU/AVX-512/…
-                    }
-                }
+                // CPUID — VMX always exits. Allowlist shared with SVM
+                // (`cpu::guest_cpuid`, after KVM `kvm_cpu_cap_init`). XCR0
+                // is the host's (7): XSETBV exits and never reaches hardware.
+                let (eax, ebx, ecx, edx) = crate::microvm::cpu::guest_cpuid::guest_cpuid(
+                    crate::microvm::cpu::guest_cpuid::Vendor::Intel,
+                    self.vcpu.regs.rax as u32, self.vcpu.regs.rcx as u32, self.vcpu.apic_id,
+                    vmcs::read_guest_cr4().unwrap_or(0),
+                    crate::microvm::cpu::guest_cpuid::host_xcr0(),
+                );
                 self.vcpu.regs.rax = eax as u64;
                 self.vcpu.regs.rbx = ebx as u64;
                 self.vcpu.regs.rcx = ecx as u64;
@@ -2080,57 +2032,61 @@ impl VmContext {
                 last_outcome = Some(outcome);
             }
             55 => {
-                // XSETBV — VMX always exits on this. Linux uses it
-                // during FPU/AVX init to set XCR0. Host's XCR0
-                // already has x87/SSE/AVX enabled (set in boot.s),
-                // so Linux's intended write is effectively a no-op
-                // for the bits it cares about. Just advance RIP.
-                vmcs::advance_guest_rip()?;
-                last_outcome = Some(outcome);
-            }
-            31 => {
-                // RDMSR — exits when ECX is outside MSR-bitmap ranges
-                // (0-0x1FFF and 0xC0000000-0xC0001FFF) or when the
-                // bitmap bit is set. Our bitmap is zero, so this is
-                // an out-of-range MSR. Synthesize a zero return — the
-                // safest answer for unknown info MSRs (Linux's
-                // safe_rdmsr-style code copes with bogus values).
-                let msr = self.vcpu.regs.rcx as u32;
-                // IA32_APIC_BASE (0x1B): report the LAPIC enabled at its
-                // architectural default base (Intel parity #2). Intercepted
-                // via the MSR bitmap only when LAPIC is on. The BSP bit (8) is
-                // reported ONLY for the boot vCPU (apic_id 0); an AP must read
-                // it clear or Linux's topology mistakes it for a 2nd BSP.
-                if msr == 0x1B && vmx_lapic_on() {
-                    let mut v = lapic::APIC_BASE_MSR_VALUE;
-                    if self.vcpu.apic_id != 0 {
-                        v &= !(1u64 << 8);
-                    }
-                    self.vcpu.regs.rax = v & 0xFFFF_FFFF;
-                    self.vcpu.regs.rdx = v >> 32;
+                // XSETBV — VMX always exits, and the value never reaches
+                // hardware: the host's XCR0 (x87|SSE|AVX) stays live, and
+                // CPUID 0xD offers exactly that. Validate like KVM
+                // `__kvm_set_xcr` so a bad value faults as on real hardware.
+                let val = (self.vcpu.regs.rdx << 32) | (self.vcpu.regs.rax & 0xFFFF_FFFF);
+                let host = crate::microvm::cpu::guest_cpuid::host_xcr0();
+                let ok = self.vcpu.regs.rcx as u32 == 0
+                    && val & 1 != 0 && val & !host == 0
+                    && (val & 0b100 == 0 || val & 0b010 != 0);
+                if ok {
                     vmcs::advance_guest_rip()?;
-                    last_outcome = Some(outcome);
-                    continue;
+                } else {
+                    vmcs::inject_exception(VEC_GP, Some(0))?;
                 }
-                if !msr_is_known_noise(msr) && self.vcpu.msr_log_count < MSR_LOG_CAP {
-                    kprintln!("[microvm] RDMSR {:#010x} → 0 (unhandled)", msr);
-                    self.vcpu.msr_log_count += 1;
-                }
-                self.vcpu.regs.rax = 0;
-                self.vcpu.regs.rdx = 0;
-                vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
-            32 => {
-                // WRMSR — same gating as RDMSR. Silently absorb
-                // (don't propagate to host — writing arbitrary MSRs
-                // would break the host's pstate/PMU/etc).
+            31 | 32 => {
+                // RDMSR / WRMSR: every MSR outside the pass-through set is
+                // intercepted and emulated in `vmx::msr`; none reaches the host.
                 let msr = self.vcpu.regs.rcx as u32;
-                if self.vcpu.msr_log_count < MSR_LOG_CAP {
+                let ok = if basic == 32 {
                     let val = (self.vcpu.regs.rdx << 32) | (self.vcpu.regs.rax & 0xFFFF_FFFF);
-                    kprintln!("[microvm] WRMSR {:#010x} = {:#018x} (absorbed)", msr, val);
-                    self.vcpu.msr_log_count += 1;
+                    super::msr::write(&mut self.vcpu.msrs, msr, val).is_ok()
+                } else {
+                    match super::msr::read(&self.vcpu.msrs, self.vcpu.apic_id, vmx_lapic_on(), msr) {
+                        Ok(v) => {
+                            self.vcpu.regs.rax = v & 0xFFFF_FFFF;
+                            self.vcpu.regs.rdx = v >> 32;
+                            true
+                        }
+                        Err(()) => false,
+                    }
+                };
+                if ok {
+                    vmcs::advance_guest_rip()?;
+                } else {
+                    vmcs::inject_exception(VEC_GP, Some(0))?;
                 }
+                last_outcome = Some(outcome);
+            }
+            // VMX, SMX, SGX and RSM: the guest has none of them (CPUID hides
+            // VMX/SMX/SGX) → #UD, as KVM does without nesting. MONITOR/MWAIT
+            // are hidden too.
+            11 | 17 | 18..=27 | 36 | 39 | 50 | 53 | 59 | 60 => {
+                vmcs::inject_exception(VEC_UD, None)?;
+                last_outcome = Some(outcome);
+            }
+            // No vPMU: RDPMC faults.
+            15 => {
+                vmcs::inject_exception(VEC_GP, Some(0))?;
+                last_outcome = Some(outcome);
+            }
+            // INVD / WBINVD: no non-coherent DMA into the guest → no-ops
+            // (KVM `kvm_emulate_wbinvd`, INVD treated as WBINVD).
+            13 | 54 => {
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
             }
@@ -2312,23 +2268,6 @@ impl VmContext {
         Some(o) => Ok(SliceOutcome::Exited(o)),
         None => Err("Linux guest exceeded max iterations without first VM-exit"),
     }
-    }
-}
-
-/// MSRs that Linux probes via `safe_rdmsr` (catches #GP) but we
-/// know are vendor-specific noise on a typical Intel host. Suppress
-/// the per-exit log line so the kernel's actual unhandled-MSR list
-/// stays readable. Linux behaves correctly on the synthesized 0 — its
-/// safe_rdmsr_on_cpu callers all check the return value.
-fn msr_is_known_noise(msr: u32) -> bool {
-    match msr {
-        // AMD K8/K10/Family-17h architectural MSRs that Linux probes
-        // for power/temperature features (HWP, smbus, LS_CFG). Always
-        // absent on Intel.
-        0xC001_1029 |  // AMD LS_CFG
-        0xC001_0015 |  // AMD HWCR
-        0xC001_001F => true, // AMD NB_CFG
-        _ => false,
     }
 }
 

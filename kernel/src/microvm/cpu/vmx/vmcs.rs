@@ -41,6 +41,7 @@ const HOST_TR_SELECTOR: u64 = 0x0C0C;
 
 // 64-bit host-state.
 const HOST_IA32_EFER: u64 = 0x2C02;
+const HOST_IA32_PAT: u64 = 0x2C00;
 
 // 32-bit host-state.
 const HOST_IA32_SYSENTER_CS: u64 = 0x4C00;
@@ -72,6 +73,9 @@ const GUEST_TR_SELECTOR: u64 = 0x080E;
 // 64-bit guest-state.
 const VMCS_LINK_POINTER: u64 = 0x2800;
 const GUEST_IA32_EFER: u64 = 0x2806;
+const GUEST_IA32_PAT_FIELD: u64 = 0x2804;
+/// Architectural PAT reset value (SDM §13.12.4).
+const PAT_RESET: u64 = 0x0007_0406_0007_0406;
 
 // 32-bit guest-state.
 const GUEST_ES_LIMIT: u64 = 0x4800;
@@ -129,6 +133,7 @@ const VM_EXIT_MSR_LOAD_COUNT: u64 = 0x4010;
 const VM_ENTRY_CONTROLS: u64 = 0x4012;
 const VM_ENTRY_MSR_LOAD_COUNT: u64 = 0x4014;
 const VM_ENTRY_INTR_INFO_FIELD: u64 = 0x4016;
+const VM_ENTRY_EXCEPTION_ERROR_CODE: u64 = 0x4018;
 const SECONDARY_VM_EXEC_CONTROL: u64 = 0x401E;
 
 // 64-bit control.
@@ -453,6 +458,10 @@ pub(super) fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
     // EFER (long-mode bit lives here; required when "load IA32_EFER"
     // VM-exit control is set, harmless otherwise).
     vmwrite_check(HOST_IA32_EFER, efer, "HOST_IA32_EFER")?;
+    // Host PAT (carries the framebuffer's WC entry), reloaded on every exit.
+    // SAFETY: IA32_PAT is architectural on every VMX-capable CPU.
+    let pat = unsafe { rdmsr(0x277) };
+    vmwrite_check(HOST_IA32_PAT, pat, "HOST_IA32_PAT")?;
 
     // RIP / RSP last so a failure earlier doesn't leave a stale RSP
     // pointing into a dead frame.
@@ -514,36 +523,13 @@ pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
     (port, direction_in, size_bytes)
 }
 
-/// Allocate a 4-KB MSR bitmap, fill with zeros so RDMSR/WRMSR don't
-/// VM-exit at all. Native MSR access in the guest is fine for our
-/// 12.1.1c milestone — the MSRs that matter for guest correctness
-/// (EFER, FS_BASE, GS_BASE) have GUEST_IA32_* VMCS fields the CPU
-/// auto-manages on entry/exit. Returns the bitmap phys addr.
-///
-/// Why bother with a zero bitmap at all: with use-MSR-bitmaps=0,
-/// EVERY RDMSR/WRMSR exits — Linux's startup hits dozens of MSR
-/// reads in the first few microseconds and we'd drown in exit
-/// dispatch.
-fn allocate_zero_msr_bitmap() -> Result<u64, &'static str> {
+/// Allocate the 4 KB MSR bitmap: intercept-all with the KVM pass-through set
+/// (`vmx::msr::init_msr_bitmap`). Returns the bitmap phys addr.
+fn allocate_msr_bitmap() -> Result<u64, &'static str> {
     use crate::mm::memory;
     let bitmap = memory::allocate_frame().ok_or("OOM: MSR bitmap")?;
     // SAFETY: identity-mapped, freshly allocated, exclusive.
-    unsafe { core::ptr::write_bytes(bitmap as *mut u8, 0, 4096); }
-
-    // Intel parity #2: intercept IA32_APIC_BASE (0x1B) reads AND writes so
-    // the EXIT_MSR handler emulates it (report LAPIC enabled@0xFEE00000 with
-    // the BSP bit). The WRITE intercept is critical — with a zero bitmap a
-    // guest WRMSR 0x1B would pass straight to the HOST core's APIC base
-    // register. Layout (SDM §25.6.9): read-low region @0x000, write-low @
-    // 0x800; MSR 0x1B → byte 3, bit 3. Gated on the LAPIC flag (vmx ⇒ Intel
-    // here) so the `nolapic` rollback keeps the validated zero bitmap.
-    if crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC {
-        // SAFETY: bytes 3 and 0x803 are within the 4 KB bitmap we own.
-        unsafe {
-            *((bitmap + 3) as *mut u8) |= 1 << 3;        // RDMSR 0x1B exits
-            *((bitmap + 0x803) as *mut u8) |= 1 << 3;    // WRMSR 0x1B exits
-        }
-    }
+    unsafe { super::msr::init_msr_bitmap(bitmap); }
     Ok(bitmap)
 }
 
@@ -579,6 +565,9 @@ pub fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 
 // CPU-based control bits we care about.
 const CPU_HLT_EXITING: u32 = 1 << 7;
+const CPU_MWAIT_EXITING: u32 = 1 << 10;
+const CPU_RDPMC_EXITING: u32 = 1 << 11;
+const CPU_MONITOR_EXITING: u32 = 1 << 29;
 const CPU_USE_IO_BITMAPS: u32 = 1 << 25;
 const CPU_USE_MSR_BITMAPS: u32 = 1 << 28;
 const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
@@ -586,6 +575,7 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 // Secondary control bits.
 const SEC_ENABLE_EPT: u32 = 1 << 1;
 const SEC_UNRESTRICTED_GUEST: u32 = 1 << 7;
+const SEC_WBINVD_EXITING: u32 = 1 << 6;
 /// Bit 3: enable native RDTSCP/RDPID execution in guest. Without
 /// this, RDTSCP raises #UD even when CPUID indicates support —
 /// Linux's `read_tsc` (clocksource switch) uses RDTSCP and faults
@@ -603,11 +593,6 @@ const SEC_ENABLE_INVPCID: u32 = 1 << 12;
 /// Alpine virt has in the active set 0x1807). First userspace
 /// context switch would fault otherwise.
 const SEC_ENABLE_XSAVES: u32 = 1 << 20;
-/// Bit 26: enable native UMONITOR/UMWAIT/TPAUSE (WAITPKG) in guest.
-/// Without this, TPAUSE raises #UD even when CPUID Leaf 7:ECX[5]
-/// indicates support — Linux's `delay_halt_tpause` uses TPAUSE for
-/// short kernel-mode delays (e.g. i8042 probe) and faults otherwise.
-const SEC_ENABLE_USER_WAIT_PAUSE: u32 = 1 << 26;
 
 // Pin-based control bits.
 /// Bit 0: External-interrupt exiting. When 1, host-targeted external
@@ -620,15 +605,21 @@ const SEC_ENABLE_USER_WAIT_PAUSE: u32 = 1 << 26;
 /// interrupts after VMXOFF (= post-`microvm linux` keyboard freeze
 /// observed on N100, 2026-05-02).
 const PIN_EXT_INTR_EXITING: u32 = 1 << 0;
+/// Bit 3: NMI exiting. Without it a host NMI arriving in non-root mode is
+/// delivered through the GUEST's IDT (KVM always sets it).
+const PIN_NMI_EXITING: u32 = 1 << 3;
 
 // VM-entry control bits.
 const ENTRY_IA32E_MODE_GUEST: u32 = 1 << 9;
 const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
+const ENTRY_LOAD_IA32_PAT: u32 = 1 << 14;
 
 // VM-exit control bits.
 const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
 const EXIT_SAVE_IA32_EFER: u32 = 1 << 20;
 const EXIT_LOAD_IA32_EFER: u32 = 1 << 21;
+const EXIT_SAVE_IA32_PAT: u32 = 1 << 18;
+const EXIT_LOAD_IA32_PAT: u32 = 1 << 19;
 
 /// Compute a control field's value from the desired-set, applying
 /// the must-be-0 / must-be-1 mask MSR per SDM §A.3.1: low 32 bits
@@ -655,7 +646,7 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 /// other ports pass through natively.
 pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
-    let msr_bitmap = allocate_zero_msr_bitmap()?;
+    let msr_bitmap = allocate_msr_bitmap()?;
 
     // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them (Alder
     // Lake-N does). The TRUE variants relax classic "default-1"
@@ -670,9 +661,12 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     // consistency check rejects (reason 33 on bare-metal-NUC).
     // Match KVM's universal use of TRUE_*_CTLS to get a minimal
     // control set close to SVM's.
-    let pin = fixed_ctrl(PIN_EXT_INTR_EXITING, pinbased_ctls_msr());
+    let pin = fixed_ctrl(PIN_EXT_INTR_EXITING | PIN_NMI_EXITING, pinbased_ctls_msr());
     let cpu = fixed_ctrl(
         CPU_HLT_EXITING
+            | CPU_MWAIT_EXITING
+            | CPU_RDPMC_EXITING
+            | CPU_MONITOR_EXITING
             | CPU_USE_IO_BITMAPS
             | CPU_USE_MSR_BITMAPS
             | CPU_ACTIVATE_SECONDARY,
@@ -683,10 +677,12 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let secondary = fixed_ctrl(
         SEC_ENABLE_EPT
             | SEC_UNRESTRICTED_GUEST
+            | SEC_WBINVD_EXITING
             | SEC_ENABLE_RDTSCP
             | SEC_ENABLE_INVPCID
-            | SEC_ENABLE_XSAVES
-            | SEC_ENABLE_USER_WAIT_PAUSE,
+            | SEC_ENABLE_XSAVES,
+        // No WAITPKG: CPUID hides it (guest_cpuid), so Linux never uses
+        // TPAUSE, and IA32_UMWAIT_CONTROL needs no switching.
         IA32_VMX_PROCBASED_CTLS2,
     );
     // EFER state management: CPU saves/loads guest EFER via VMCS
@@ -695,9 +691,12 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     // next entry (uncertain behaviour) and the host's EFER stays
     // unchanged across exit (also dangerous on transitioning the
     // host back to long mode).
-    let entry = fixed_ctrl(ENTRY_LOAD_IA32_EFER, entry_ctls_msr());
+    // PAT likewise: the guest's WRMSR 0x277 lands in GUEST_IA32_PAT, the host's
+    // PAT (framebuffer WC) comes back on every exit.
+    let entry = fixed_ctrl(ENTRY_LOAD_IA32_EFER | ENTRY_LOAD_IA32_PAT, entry_ctls_msr());
     let exit = fixed_ctrl(
-        EXIT_HOST_ADDR_SPACE_SIZE | EXIT_SAVE_IA32_EFER | EXIT_LOAD_IA32_EFER,
+        EXIT_HOST_ADDR_SPACE_SIZE | EXIT_SAVE_IA32_EFER | EXIT_LOAD_IA32_EFER
+            | EXIT_SAVE_IA32_PAT | EXIT_LOAD_IA32_PAT,
         exit_ctls_msr(),
     );
 
@@ -895,6 +894,7 @@ pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
     vmwrite(GUEST_SYSENTER_ESP, 0)?;
     vmwrite(GUEST_SYSENTER_EIP, 0)?;
     vmwrite(GUEST_IA32_EFER, 0)?;
+    vmwrite(GUEST_IA32_PAT_FIELD, PAT_RESET)?;
 
     vmwrite(VMCS_LINK_POINTER, !0u64)?;
 
@@ -980,6 +980,7 @@ pub(super) fn setup_guest_state_ap(sipi_vector: u8) -> Result<(), &'static str> 
     vmwrite(GUEST_SYSENTER_ESP, 0)?;
     vmwrite(GUEST_SYSENTER_EIP, 0)?;
     vmwrite(GUEST_IA32_EFER, 0)?;
+    vmwrite(GUEST_IA32_PAT_FIELD, PAT_RESET)?;
 
     vmwrite(VMCS_LINK_POINTER, !0u64)?;
 
@@ -1334,6 +1335,20 @@ pub fn inject_external_irq(vector: u8) -> Result<(), &'static str> {
     let info: u64 = (vector as u64) | (1u64 << 31);
     vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
 }
+
+/// Queue a hardware exception for the next VM-entry (type 3). RIP is NOT
+/// advanced: the faulting instruction is the one reported.
+pub fn inject_exception(vector: u8, error_code: Option<u32>) -> Result<(), &'static str> {
+    let mut info: u64 = (vector as u64) | (3u64 << 8) | (1u64 << 31);
+    if let Some(e) = error_code {
+        info |= 1u64 << 11;
+        vmwrite(VM_ENTRY_EXCEPTION_ERROR_CODE, e as u64)?;
+    }
+    vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
+}
+
+pub fn read_guest_pat() -> Result<u64, &'static str> { vmread(GUEST_IA32_PAT_FIELD) }
+pub fn write_guest_pat(v: u64) -> Result<(), &'static str> { vmwrite(GUEST_IA32_PAT_FIELD, v) }
 
 /// Read VMCS GUEST_RIP — the linear address of the guest
 /// instruction that caused the most recent VM-exit.
