@@ -29,7 +29,7 @@ use super::lapic::LocalApic;
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Big-VM lock (guest SMP). Held by a vCPU only around its post-VMRUN
 /// device/MMIO/IO handling — NEVER across `vmrun` or a fiber yield — so
@@ -38,13 +38,6 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// parallel on separate host cores. Uncontended (and never even taken)
 /// until an AP is admitted (`AP_ACTIVE`).
 static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
-
-// TEMP boot-timer diagnostic: count PIT (IRQ0/jiffies) vs LVTT injections to
-// see the actual ratio during Linux's calibrate_APIC_clock verification (the
-// "APIC timer disabled due to verification failure" → no-hrtimers root cause).
-// Printed every 200 LVTT fires while the PIT is still co-active (boot only).
-static DBG_PIT_FIRES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static DBG_LVTT_FIRES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// True once a second vCPU (AP) shares this VM. While false the BSP runs
 /// exactly as the single-vCPU path did — `VM_BIG_LOCK` is not taken, so
@@ -57,19 +50,6 @@ fn ap_active() -> bool {
     AP_ACTIVE.load(Ordering::Acquire)
 }
 
-/// True once the AP vCPU is well PAST its bring-up (its `iter` crossed
-/// `AP_ESTABLISHED_ITERS`). The idle-yield-on-shadowed-HLT optimisation is
-/// gated on this: applying it *during* AP bring-up changes the BSP's
-/// idle/sleep timing and races the cpuhp handshake (the AP got stuck after
-/// one CPUID exit — v0.193.4). Once the AP is established, both vCPUs may
-/// park on an idle `sti; hlt`. Reset on teardown. Stays false on a UP guest
-/// (no AP), which idles fine via the interruptible EXIT_INTR path anyway.
-pub static AP_ESTABLISHED: AtomicBool = AtomicBool::new(false);
-
-/// vCPU `iter` count after which the AP is considered past bring-up. The AP
-/// does at most a few×10k exits during bring-up (~100 ms); idle-spinning it
-/// reaches this in ~3 s — a large, safe margin past the handshake.
-const AP_ESTABLISHED_ITERS: u32 = 200_000;
 
 // ── MSRs (APM Vol 2 §15.4) ─────────────────────────────────────────
 
@@ -555,6 +535,7 @@ const EXIT_MSR: u64 = 0x07C;
 const EXIT_SHUTDOWN: u64 = 0x07F;
 const EXIT_NPF: u64 = 0x400;
 const EXIT_NMI: u64 = 0x061;
+const EXIT_VINTR: u64 = 0x064;
 const EXIT_RDPMC: u64 = 0x06F;
 const EXIT_INVD: u64 = 0x076;
 const EXIT_INVLPGA: u64 = 0x07A;
@@ -642,142 +623,17 @@ pub struct VmShared {
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
     pic: crate::microvm::devices::pic8259::Pic8259,
-    /// Host tick at which we last injected guest timer IRQ0. The
-    /// microvm provides no PIT/LAPIC timer event source, so without
-    /// this the guest's nanosleep/timerfd/poll-timeout never wake
-    /// (input read() wakes via virtio-input IRQ; time does not).
-    /// One IRQ0 per host tick (≈100 Hz) drives jiffies + wakeups.
-    last_timer_tick: u64,
-    /// Host TSC of the last PIT IRQ0 injection. The PIT is boot-only (jiffies +
-    /// the LVTT-vs-PIT 1:1 verification), but the guest is CONFIG_HZ=1000, so we
-    /// pace IRQ0 at ~1 kHz off the TSC to MATCH the LAPIC timer's programmed
-    /// rate — else the verification (LVTT 1 kHz vs PIT 100 Hz) fails and Linux
-    /// drops the LAPIC timer. After adoption the PIT is disabled and only the
-    /// LVTT (its own programmed deadline) ticks.
-    last_pit_tsc: u64,
-    /// `ticks()` of the last virtio-gpu display config-change IRQ —
-    /// rate-limits the resize round-trip against a drag storm. See
-    /// the vmx mirror.
+    /// i8254 channel 0 — its output is IRQ0 on the PIC.
+    pit: crate::microvm::devices::pit8253::Pit,
+    /// `ticks()` of the last virtio-gpu display config-change IRQ — debounces
+    /// the resize round-trip against a drag storm (UI timing, 250 ms).
     last_cfg_tick: u64,
-    /// Device IRQ lines (bit N = IRQ N) whose injection was deferred because
-    /// the guest was non-interruptible (IF=0) when the device completed —
-    /// the run loop injects them once the guest can take them. Avoids the
-    /// SMP qspinlock deadlock from forcing an IRQ into a critical section.
-    pending_irqs: u16,
-    /// Is the 8259 PIT (i8253 ch0) currently programmed to generate the
-    /// timer tick? True until Linux writes PIT mode-0 (port 0x43 ← 0x30,
-    /// `clockevent_i8253_disable`) to shut it down after adopting the
-    /// LAPIC timer. Gates IRQ0 injection so the PIT tick stops then and
-    /// jiffies don't double-count against the LAPIC timer. Starts true so
-    /// IRQ0 drives boot before Linux first programs the PIT.
-    pit_enabled: bool,
-    /// Boot-only fairness toggle between the PIT (IRQ0, jiffies) and the LVTT
-    /// while BOTH are co-active — i.e. during Linux's `calibrate_APIC_clock`
-    /// verification, which runs the LVTT periodic AND the PIT at ~1 kHz and
-    /// checks that ~LAPIC_CAL_LOOPS jiffies elapse per LAPIC_CAL_LOOPS LVTT
-    /// ticks. With a single EVENT_INJ slot per VMRUN and a ~1 kHz host exit
-    /// budget, the strict-priority LVTT monopolized the slot → jiffies froze →
-    /// `deltaj≈0` ∉ [CAL-2, CAL+2] → "APIC timer disabled due to verification
-    /// failure" → no hrtimers (TCP pacing/RTO/NAPI fall back to 10 ms jiffies).
-    /// True ⇒ the next co-active slot goes to the PIT; set after each LVTT tick,
-    /// cleared after each PIT tick → strict 1:1 alternation → both fire at the
-    /// same rate → ratio 1:1 → verification passes. Irrelevant once the PIT is
-    /// disabled (`pit_enabled=false`): steady-state stays LVTT-only.
-    boot_tick_want_pit: bool,
+    /// `ticks()` of the last NAT mapping reap.
+    last_reap_tick: u64,
 }
 
-/// Maximum vCPUs per guest (guest SMP). Sizes the per-vCPU IPI bitmaps;
-/// `guest_vcpus()` (the count we actually enumerate) must be ≤ this. Matches the
-/// VMX twin + `cpu::ORCH_MAX_VCPUS`/`MAX_VCPUS_CAP` so every apic_id has a slot.
-pub const MAX_VCPUS: usize = 8;
 
-/// Host core (sequential id) each vCPU is currently running on, indexed by
-/// apic_id. Written at each `run_slice` entry; read by `route_ipi` to kick the
-/// target vCPU's host core out of VMRUN on a cross-vCPU IPI send (prompt µs
-/// delivery vs the ~10 ms next-natural-exit latency that made `csd_lock_wait`
-/// burn ~50% of guest CPU). `usize::MAX` = not yet mapped (no kick).
-static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
-    [const { AtomicUsize::new(usize::MAX) }; MAX_VCPUS];
 
-/// Last TSC each vCPU took a VM-exit, indexed by apic_id. A running vCPU exits
-/// ≥1 kHz (timer/kicks); a parked/idle one (HLT → fiber yielded, no VMRUN) goes
-/// quiet. `route_ipi` reads it to classify an IPI target as preempted (stale
-/// > ~2 ms) — the PV-TLB-flush skip-ceiling measurement (rip_sample). 0 = never
-/// ran yet (treated as preempted).
-static VCPU_LAST_ACTIVE: [AtomicU64; MAX_VCPUS] =
-    [const { AtomicU64::new(0) }; MAX_VCPUS];
-
-/// Pending inter-processor-interrupt vectors per target vCPU, indexed by
-/// apic_id: `IPI_PENDING[t]` is a 256-bit bitmap (bit V = vector V pending for
-/// vCPU t). A vCPU's ICR write (FIXED IPI) sets bits in the target's word (any
-/// sender); the target vCPU drains its OWN word and injects the lowest pending
-/// vector via EVENTINJ when interruptible. Carries reschedule / call-function /
-/// TLB IPIs + the AP→BSP `complete()` cpuhp wakeup. Guest SMP only.
-///
-/// LOCK-FREE (moved out of `VmShared`/`VM_BIG_LOCK`): the target reads + injects
-/// its pending IPI without taking the big lock, so it no longer queues behind
-/// the BSP's net pump (which holds the lock during `inject_rx`) — that queuing
-/// was extending the sender's `csd_lock_wait` spin. Single-consumer per target
-/// (only vCPU t clears `IPI_PENDING[t]`), multi-producer (any sender OR's bits)
-/// → `fetch_or`/`fetch_and` are race-free here.
-static IPI_PENDING: [[AtomicU64; 4]; MAX_VCPUS] =
-    [const { [const { AtomicU64::new(0) }; 4] }; MAX_VCPUS];
-
-/// Mark `vector` pending for vCPU `apic_id`. Returns `true` only on the
-/// empty→non-empty edge (best-effort; a benign double-kick race under
-/// concurrent senders is harmless) so the caller kicks the target's host core
-/// just once per un-drained burst (coalescing — see route_ipi).
-fn ipi_set(apic_id: u8, vector: u8) -> bool {
-    let t = apic_id as usize;
-    if t >= MAX_VCPUS {
-        return false;
-    }
-    let was_empty = IPI_PENDING[t]
-        .iter()
-        .all(|w| w.load(Ordering::Relaxed) == 0);
-    IPI_PENDING[t][(vector >> 6) as usize]
-        .fetch_or(1u64 << (vector & 63), Ordering::Release);
-    was_empty
-}
-
-/// Take (and clear) the lowest pending IPI vector for `apic_id`, if any. Only
-/// the target vCPU calls this for its own slot → no take/take race; concurrent
-/// `ipi_set` from senders touches different bits atomically.
-fn ipi_take(apic_id: u8) -> Option<u8> {
-    let t = apic_id as usize;
-    if t >= MAX_VCPUS {
-        return None;
-    }
-    for w in 0..4 {
-        let word = IPI_PENDING[t][w].load(Ordering::Acquire);
-        if word != 0 {
-            let bit = word.trailing_zeros();
-            IPI_PENDING[t][w].fetch_and(!(1u64 << bit), Ordering::Release);
-            return Some((w as u32 * 64 + bit) as u8);
-        }
-    }
-    None
-}
-
-/// Non-consuming peek: does this vCPU have ANY pending cross-vCPU IPI? The warm
-/// halt-poll breaks on it and VMRUNs (where `ipi_take` injects it) — a pending IPI
-/// must NEVER wait behind the spin: the sending guest AP spins in csd_lock_wait
-/// for the ack and pegs a whole core until it lands.
-fn ipi_any_pending(apic_id: u8) -> bool {
-    let t = apic_id as usize;
-    if t >= MAX_VCPUS { return false; }
-    IPI_PENDING[t].iter().any(|w| w.load(Ordering::Acquire) != 0)
-}
-
-/// Clear all pending IPIs (VM teardown/start) so a stale vector can't inject a
-/// spurious interrupt into the next guest. Called from the reset path.
-pub fn ipi_reset() {
-    for t in IPI_PENDING.iter() {
-        for w in t.iter() {
-            w.store(0, Ordering::Relaxed);
-        }
-    }
-}
 
 /// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
 /// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
@@ -812,23 +668,12 @@ pub struct Vcpu {
     reinject: u64,
     iter: u32,
     io_dropped: u32,
-    consecutive_idle: u32,
     /// Per-vCPU emulated local APIC (xAPIC MMIO @ 0xFEE00000). Inert
     /// while the guest boots `nolapic`; drives the timer + (later) IPIs
     /// once Linux enables it. See `svm::lapic`.
     lapic: LocalApic,
-    /// `ticks()` of the last injected LAPIC-timer (LVTT) interrupt — the
-    /// per-vCPU analogue of `VmShared::last_timer_tick` (PIT IRQ0).
-    last_lapic_tick: u64,
-    /// Bounded adaptive halt-poll window (µs) + its current TSC deadline (0 =
-    /// not polling). See `HALT_POLL_MIN_US`.
+    /// Adaptive halt-poll window (µs), see `HALT_POLL_MIN_US`.
     halt_poll_us: u64,
-    halt_poll_deadline: u64,
-    /// Loop-top warm halt-poll armed: the previous exit was an idle guest HLT
-    /// during an active transfer. Spin LOCK-FREE for a real wake before the next
-    /// VMRUN instead of re-VMRUNning into an immediate re-HLT (the un-Linux
-    /// ~76k/s nested-entry spin; KVM halt_poll_ns model, but off VM_BIG_LOCK).
-    warm_poll: bool,
     /// Consecutive HLT exits taken with guest RFLAGS.IF=0. The idle path
     /// is always `sti; hlt` (IF=1); a sustained `cli; hlt` loop is Linux's
     /// no-ACPI poweroff / panic path (we boot `acpi=off`, so there is no
@@ -969,7 +814,7 @@ impl VmContext {
 
         // Fresh IPI state for this VM (IPI_PENDING is a static now, not a
         // VmShared field, so it isn't auto-reset when a new VmShared is built).
-        ipi_reset();
+        lapic::reset_posted();
         // virtio-net lives in net_backend (a static, out of VmShared) so the
         // off-vCPU backend can own it; re-arm it to power-on state per VM.
         crate::microvm::devices::net_backend::reset();
@@ -985,12 +830,9 @@ impl VmContext {
                 serial,
                 pci: crate::microvm::devices::PciBus::new(),
                 pic: crate::microvm::devices::pic8259::Pic8259::new(),
-                last_timer_tick: 0,
-                last_pit_tsc: 0,
+                pit: crate::microvm::devices::pit8253::Pit::new(),
                 last_cfg_tick: 0,
-                pending_irqs: 0,
-                pit_enabled: true,
-                boot_tick_want_pit: false,
+                last_reap_tick: 0,
             }),
             vcpu: Vcpu {
                 apic_id: 0, // BSP
@@ -1002,12 +844,8 @@ impl VmContext {
                 reinject: 0,
                 iter: 0,
                 io_dropped: 0,
-                consecutive_idle: 0,
                 lapic: LocalApic::new(0),
-                last_lapic_tick: 0,
                 halt_poll_us: HALT_POLL_MIN_US,
-                halt_poll_deadline: 0,
-                warm_poll: false,
                 if_off_halts: 0,
                 msrs: super::msr::GuestMsrs::new(),
                 xcr0: 1,
@@ -1077,6 +915,7 @@ fn setup_vmcb_linux(
     // ── Control area ──────────────────────────────────────────────
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
+    vmcb.write_u32(vmcb::OFF_INT_CTL, vmcb::V_INTR_MASKING);
 
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
@@ -1141,6 +980,7 @@ fn setup_vmcb_ap(
     // ── Control area — identical to setup_vmcb_linux ────────────────
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, vmcb::LINUX_MISC1);
     vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC2, vmcb::LINUX_MISC2);
+    vmcb.write_u32(vmcb::OFF_INT_CTL, vmcb::V_INTR_MASKING);
     vmcb.write_u64(vmcb::OFF_IOPM_BASE_PA, iopm_phys);
     vmcb.write_u64(vmcb::OFF_MSRPM_BASE_PA, msrpm_phys);
     vmcb.write_u32(vmcb::OFF_ASID, 1);
@@ -1236,12 +1076,8 @@ impl VmContext {
                 reinject: 0,
                 iter: 0,
                 io_dropped: 0,
-                consecutive_idle: 0,
                 lapic: LocalApic::new(apic_id),
-                last_lapic_tick: 0,
                 halt_poll_us: HALT_POLL_MIN_US,
-                halt_poll_deadline: 0,
-                warm_poll: false,
                 if_off_halts: 0,
                 msrs: super::msr::GuestMsrs::new(),
                 xcr0: 1,
@@ -1255,12 +1091,190 @@ impl VmContext {
         &mut *self.shared as *mut VmShared
     }
 
-    /// Absolute host TSC of the BSP vCPU's next guest LAPIC-timer tick — the
-    /// hrtimer deadline the idle park waits on (KVM `apic_timer_fn` model), so
-    /// the guest 1 kHz clock advances independent of VMRUN. `None` when no guest
-    /// timer is armed → the park falls back to its safety cap.
+    /// Host TSC of this vCPU's next timer event — the LAPIC timer, and on the
+    /// BSP the PIT — the deadline a blocked vCPU parks until (KVM's hrtimer).
     pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
-        self.vcpu.lapic.next_timer_deadline_tsc()
+        let lapic = self.vcpu.lapic.next_timer_deadline_tsc();
+        let mut dev = None;
+        if self.vcpu.apic_id == 0 {
+            dev = self.shared.pit.next_deadline_tsc();
+            // A playing sound stream is serviced every millisecond.
+            if self.shared.pci.virtio_snd.playing() {
+                let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+                dev = Some(dev.map_or(t, |d| d.min(t)));
+            }
+        }
+        match (lapic, dev) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Feed every device line and the PIT into the PIC (BSP: in PIC mode the
+    /// device lines are wired there). Lock held by the caller when APs run.
+    fn collect_device_irqs(&mut self) {
+        let sh = &mut *self.shared;
+        if crate::microvm::devices::net_backend::take_irq() {
+            sh.pic.pulse(10);
+            crate::microvm::devices::nat::note_net_irq();
+        }
+        if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(9); }
+        if sh.pci.virtio_snd.pump(sh.guest_mem) {
+            let l = sh.pci.virtio_snd.irq_line();
+            sh.pic.pulse(l);
+        }
+        if sh.pci.virtio_9p.drain_async_done(sh.guest_mem) {
+            let l = sh.pci.virtio_9p.irq_line();
+            sh.pic.pulse(l);
+        }
+        if sh.pci.virtio_input.drain_injected(sh.guest_mem) { sh.pic.pulse(12); }
+        sh.pit.poll(&mut sh.pic);
+
+        let now = crate::interrupts::ticks();
+        // Live resize (D4): disconnect, then reconnect after 100 ms; a new
+        // cycle at most every 250 ms while the window is dragged.
+        if crate::microvm::devices::gpu_backend::lock().tick_d4(now) {
+            sh.pic.pulse(9);
+        } else {
+            let wid = crate::microvm::vm_window();
+            if wid != 0
+                && !crate::microvm::devices::gpu_backend::lock().d4_disconnecting()
+                && crate::shade::surface::display_dirty_peek(wid)
+                && now.wrapping_sub(sh.last_cfg_tick) >= 25
+            {
+                let _ = crate::shade::surface::take_display_dirty(wid);
+                sh.last_cfg_tick = now;
+                crate::microvm::devices::gpu_backend::lock().signal_display_change(now);
+                sh.pic.pulse(9);
+            }
+        }
+        // NAT mapping reaper: an idle scan, once per 10 ms at most.
+        if now != sh.last_reap_tick {
+            sh.last_reap_tick = now;
+            crate::microvm::devices::nat::housekeep();
+        }
+    }
+
+    /// `kvm_cpu_has_interrupt`: the PIC's INTR if this vCPU takes it (LINT0 in
+    /// ExtINT, or no LAPIC), else a LAPIC vector above PPR.
+    fn pending_interrupt(&mut self) -> Option<bool> {
+        let lapic_on = crate::microvm::cpu::GUEST_LAPIC;
+        if self.vcpu.apic_id == 0
+            && self.shared.pic.output()
+            && (!lapic_on || self.vcpu.lapic.accept_pic_intr())
+        {
+            return Some(true);
+        }
+        if lapic_on && self.vcpu.lapic.has_interrupt().is_some() {
+            return Some(false);
+        }
+        None
+    }
+
+    /// `inject_pending_event`, before every VMRUN: re-inject what was cut off
+    /// mid-delivery, otherwise the highest-priority deliverable interrupt; if
+    /// the guest cannot take it now (IF=0, interrupt shadow, or an exception
+    /// already queued), open the interrupt window so it exits the moment it can.
+    fn inject_pending_event(&mut self) {
+        let is_bsp = self.vcpu.apic_id == 0;
+        let _big = if is_bsp && ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        if is_bsp { self.collect_device_irqs(); }
+
+        if self.vcpu.reinject != 0 {
+            self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, self.vcpu.reinject);
+            self.vcpu.reinject = 0;
+            if self.pending_interrupt().is_some() {
+                enable_irq_window(&mut self.vcpu.vmcb);
+            }
+            return;
+        }
+        let Some(from_pic) = self.pending_interrupt() else {
+            clear_irq_window(&mut self.vcpu.vmcb);
+            return;
+        };
+        let queued = self.vcpu.vmcb.read_u64(vmcb::OFF_EVENT_INJ) & (1u64 << 31) != 0;
+        if queued || !guest_interruptible(&self.vcpu.vmcb) {
+            enable_irq_window(&mut self.vcpu.vmcb);
+            return;
+        }
+        // `kvm_cpu_get_interrupt`: ExtINT first, then the LAPIC.
+        let vector = if from_pic {
+            self.shared.pic.read_irq()
+        } else {
+            match self.vcpu.lapic.has_interrupt() {
+                Some(v) => { self.vcpu.lapic.ack_interrupt(v); v }
+                None => { clear_irq_window(&mut self.vcpu.vmcb); return; }
+            }
+        };
+        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, vector as u64 | (1u64 << 31));
+        clear_irq_window(&mut self.vcpu.vmcb);
+    }
+
+    /// Anything deliverable right now (takes the lock + collects on the BSP).
+    fn event_pending(&mut self) -> bool {
+        let is_bsp = self.vcpu.apic_id == 0;
+        let _big = if is_bsp && ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        if is_bsp { self.collect_device_irqs(); }
+        self.vcpu.reinject != 0 || self.pending_interrupt().is_some()
+    }
+
+    /// `kvm_vcpu_halt` with adaptive halt-polling (`halt_poll_ns`): after a
+    /// guest HLT, true if an event arrived within the poll window (resume at
+    /// once), false to block. The spin watches only lock-free signals — this
+    /// core's kick generation (every cross-core producer kicks), a posted IPI,
+    /// the worker's RX IRQ and the timer deadlines; a hit is confirmed by the
+    /// next entry's `inject_pending_event`.
+    fn halt_poll(&mut self) -> bool {
+        if self.event_pending() {
+            return true;
+        }
+        let cid = crate::smp::per_core::current_core_id();
+        let kick_gen = crate::smp::fiber::net_kick_gen(cid);
+        let deadline = self.next_timer_deadline_tsc();
+        let start = crate::interrupts::rdtsc();
+        let budget = (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
+        loop {
+            let now = crate::interrupts::rdtsc();
+            let hit = crate::smp::fiber::net_kick_gen(cid) != kick_gen
+                || lapic::posted_pending(self.vcpu.apic_id)
+                || (self.vcpu.apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
+                || deadline.is_some_and(|d| now >= d);
+            if hit {
+                self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us * 2).min(HALT_POLL_MAX_US);
+                return true;
+            }
+            if now.wrapping_sub(start) >= budget {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us / 2).max(HALT_POLL_MIN_US);
+        // Last look after the window: a producer that fired while we stopped
+        // polling must not wait for the park.
+        self.event_pending()
+    }
+}
+
+/// `svm_set_vintr` (`svm_enable_irq_window`): request a VINTR exit the moment
+/// the guest can take an interrupt — V_IRQ at top priority, VINTR intercepted.
+fn enable_irq_window(vmcb: &mut vmcb::Vmcb) {
+    let ctl = vmcb.read_u32(vmcb::OFF_INT_CTL);
+    vmcb.write_u32(vmcb::OFF_INT_CTL,
+        (ctl & !(vmcb::V_IRQ | vmcb::V_INTR_PRIO_MASK | vmcb::V_IGN_TPR))
+        | vmcb::V_IRQ | (0xF << vmcb::V_INTR_PRIO_SHIFT));
+    let m = vmcb.read_u32(vmcb::OFF_INTERCEPT_MISC1);
+    vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, m | vmcb::INTERCEPT_VINTR);
+}
+
+/// `svm_clear_vintr`.
+fn clear_irq_window(vmcb: &mut vmcb::Vmcb) {
+    let ctl = vmcb.read_u32(vmcb::OFF_INT_CTL);
+    if ctl & vmcb::V_IRQ != 0 {
+        vmcb.write_u32(vmcb::OFF_INT_CTL, ctl & !(vmcb::V_IRQ | vmcb::V_INTR_PRIO_MASK));
+    }
+    let m = vmcb.read_u32(vmcb::OFF_INTERCEPT_MISC1);
+    if m & vmcb::INTERCEPT_VINTR != 0 {
+        vmcb.write_u32(vmcb::OFF_INTERCEPT_MISC1, m & !vmcb::INTERCEPT_VINTR);
     }
 }
 
@@ -1413,123 +1427,25 @@ impl VmContext {
     let mut last_outcome: Option<vmcb::LaunchOutcome> = None;
     let mut slice_n: u32 = 0;
 
-    // Idle detection — once init enters its pause(2)/wait-loop, the
-    // only exits are external interrupts (= host timer). After
-    // IDLE_THRESHOLD consecutive INTRs declare guest idle and bail.
-    // Threshold: Linux's TSC-calibration path can spin for thousands
-    // of host timer ticks before giving up + moving on, so we keep
-    // this generous. Phase 12.1.4-svm replaces this with a real
-    // cancel signal.
-    // Match the VMX side (200). The original 5000 was a wall-of-spin
-    // safety pad from the early AMD bring-up when TSC calibration was
-    // still suspect; with `tsc_early_khz=2000000` short-circuiting
-    // Linux's calib loop, 200 INTRs ≈ 2 s wait — short enough for
-    // fast iterate-on-qemu test cycles.
-    const IDLE_THRESHOLD: u32 = 200;
-    // Yield Core 0 after this few consecutive idle INTRs — see the
-    // vmx mirror. A parked guest must not freeze Core 0 for a whole
-    // SLICE_BUDGET of timer-tick-rate VMRUNs.
-    const IDLE_YIELD: u32 = 4;
-
-    // MAX_ITERATIONS is a *lifetime* cap on cumulative VMRUNs (never
-    // reset across slices) — a safety pad for short headless test
-    // guests. A window-bound app VM (cage/Wayland, ~60 fps × many
-    // exits/frame) blows past 100 000 in seconds; capping it kills a
-    // perfectly-running compositor (observed: colored circles, then
-    // teardown at the cap). So: no lifetime cap for a windowed VM —
-    // it runs until the window closes or the guest really exits. The
-    // per-slice `slice_n >= budget` bound below still keeps each call
-    // cooperative. saturating_add so a long-lived windowed VM's iter
-    // counter can't overflow once past the (now-irrelevant) cap.
-    // Wall-clock slice cap — see the vmx mirror for the rationale.
-    // A busy guest never reaches IDLE_YIELD, so the exit-count
-    // budget alone lets one slice run tens of ms and starves Shade
-    // (laggy UI, sluggish Mod+Q). Bound each slice to a few ms of
-    // wall time; boot still hits the exit budget first.
+    // Wall-clock slice cap: return to the fiber scheduler every few ms so the
+    // core's other fibers run; the exit budget bounds boot bursts.
     const SLICE_MS: u64 = 3;
     let slice_deadline = crate::interrupts::rdtsc()
         + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
 
-    // Publish this vCPU's host core so a peer vCPU's cross-vCPU IPI send can
-    // kick it out of VMRUN promptly (route_ipi). Once per slice — the fiber
-    // doesn't migrate mid-slice; a stale value only forfeits one fast kick.
-    if (self.vcpu.apic_id as usize) < MAX_VCPUS {
-        VCPU_HOST_CORE[self.vcpu.apic_id as usize]
-            .store(crate::smp::per_core::current_core_id(), Ordering::Relaxed);
-    }
+    // Publish this vCPU's host core so a sender can kick it.
+    lapic::set_host_core(self.vcpu.apic_id, crate::smp::per_core::current_core_id());
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
             return Ok(SliceOutcome::StillRunning);
         }
-
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
 
-        // Halt-poll adapt (KVM model): the poll caught a wake (we were polling
-        // and the guest is busy again) → grow the window. See the VMX twin.
-        if self.vcpu.halt_poll_deadline != 0 && self.vcpu.consecutive_idle == 0 {
-            self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us * 2).min(HALT_POLL_MAX_US);
-            self.vcpu.halt_poll_deadline = 0;
-        }
+        self.inject_pending_event();
 
-        // Mark the AP "established" once it is well past bring-up — this
-        // un-gates the idle-yield-on-shadowed-HLT for BOTH vCPUs (see
-        // AP_ESTABLISHED). Only the AP sets it; the BSP reads it.
-        if self.vcpu.apic_id != 0
-            && self.vcpu.iter == AP_ESTABLISHED_ITERS
-            && !AP_ESTABLISHED.load(Ordering::Relaxed)
-        {
-            AP_ESTABLISHED.store(true, Ordering::Release);
-            kprintln!("[svm] AP established (past bring-up) — idle-park enabled");
-        }
-
-        // ── KVM halt_poll model (the un-Linux re-VMRUN-spin fix) ──
-        // The previous exit was an idle guest HLT during an active transfer.
-        // Instead of re-VMRUNning straight into another immediate HLT (≈76k nested
-        // VM-entries/s for nothing — the spin that pinned the BSP at 76%), halt-poll
-        // on the HOST — LOCK-FREE, OUTSIDE VM_BIG_LOCK so the APs are never starved
-        // — until something is actually injectable, then VMRUN ONCE to deliver it.
-        // The break conditions ARE the full injectable set: the off-vCPU worker's
-        // RX/TX IRQ, a due guest timer, AND a pending cross-vCPU IPI. The IPI check
-        // is LOAD-BEARING: a guest AP that calls smp_call_function spins in
-        // csd_lock_wait until the BSP acks — if the BSP halt-polls past a pending
-        // IPI the two APs peg at 100% forever (observed: kick_wait kicked=0). A
-        // pure park on the edge-gated kick LOSES that IPI wake → do NOT replace this
-        // poll with kick_wait_until until the IPI path reliably bumps net_kick_gen.
-        // Bounded by the guest's next LAPIC deadline so jiffies still advance (4 ms
-        // safety covers a disarmed timer). One VMRUN per real event.
-        if self.vcpu.warm_poll {
-            self.vcpu.warm_poll = false;
-            let now0 = crate::interrupts::rdtsc();
-            let cap = now0 + (crate::interrupts::tsc_freq() / 250).max(1);
-            let deadline = self.vcpu.lapic.next_timer_deadline_tsc()
-                .map(|d| d.clamp(now0, cap)).unwrap_or(cap);
-            while crate::interrupts::rdtsc() < deadline {
-                if crate::microvm::devices::net_backend::irq_pending()
-                    || self.vcpu.lapic.timer_pending()
-                    || ipi_any_pending(self.vcpu.apic_id)
-                {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-        }
-
-        // Re-inject an event that #VMEXITed mid-delivery on the
-        // previous run (AMD APM §15.20; KVM svm_complete_interrupts).
-        // Highest priority for the single EVENTINJ slot: a lost
-        // in-flight interrupt corrupts the guest far worse than a
-        // skipped fresh tick (which the next EXIT_INTR regenerates).
-        if self.vcpu.reinject != 0 {
-            self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, self.vcpu.reinject);
-            self.vcpu.reinject = 0;
-        }
-
-        // Host↔guest FPU save/restore is embedded in run_guest_once's
-        // asm, bracketing vmrun with zero compiler-emittable code (a
-        // +avx2 kernel spills ymm between any Rust helper and the asm
-        // → clobbers the restored guest FPU). Pass the areas in.
+        // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
         let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
@@ -1539,25 +1455,13 @@ impl VmContext {
         super::msr::spec_ctrl_exit(host_spec);
         let exit = outcome.exit_reason;
 
-        // Guest-RIP profiler: EXIT_INTR = a host physical interrupt (per-core
-        // timer / device IRQ) preempted a RUNNING guest, so VMCB.SAVE.RIP is an
-        // unbiased PC sample of whatever is burning the vCPU. Idle vCPUs take
-        // EXIT_HLT instead and aren't sampled. Identifies the spinning-core
-        // workload (the speedtest ~250 Mbit cap). maybe_dump is cheap (lock-free
-        // cadence gate) and prints every ~5 s.
+        // Guest-RIP profiler: EXIT_INTR samples a running guest.
         if exit == EXIT_INTR {
             let rip = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RIP);
             crate::microvm::cpu::rip_sample::record(rip, self.vcpu.apic_id);
         }
         crate::microvm::cpu::rip_sample::maybe_dump();
-        // Liveness stamp for the PV-TLB-flush preempted-target measurement: a
-        // running vCPU exits ≥1 kHz, a parked one goes quiet (route_ipi reads it).
-        if (self.vcpu.apic_id as usize) < MAX_VCPUS {
-            VCPU_LAST_ACTIVE[self.vcpu.apic_id as usize]
-                .store(crate::interrupts::rdtsc(), Ordering::Relaxed);
-        }
-
-        // Exit-reason histogram (diagnosis — `cores` shows the mix).
+        lapic::note_exit(self.vcpu.apic_id);
         crate::microvm::cpu::record_vm_exit(match exit {
             EXIT_INTR => crate::microvm::cpu::VMX_INTR,
             EXIT_HLT => crate::microvm::cpu::VMX_HLT,
@@ -1568,565 +1472,68 @@ impl VmContext {
             _ => crate::microvm::cpu::VMX_OTHER,
         });
 
-        // Consume the injection slot. Proven by the v0.172.41 probe:
-        // under KVM-nested SVM the CPU does NOT clear EVENTINJ.V after
-        // a successful injection (val=0x800000xx stayed valid before
-        // the next VMRUN we never re-armed). Left set, the next VMRUN
-        // re-injects the SAME IRQ → phantom duplicate interrupts →
-        // cumulative guest corruption (rate ∝ VMRUN/s — fast on the
-        // dedicated core, ~74 s cooperative). KVM clears
-        // control.event_inj after every run for exactly this; do the
-        // same. The reinject/EXIT_INTR/MMIO sites re-arm it for the
-        // next VMRUN as needed.
+        // KVM clears control.event_inj after every run: under KVM-nested SVM
+        // the CPU does not clear EVENTINJ.V, and a stale valid bit re-injects.
         self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, 0);
 
-        // Did an event abort mid-vectoring? EXITINTINFO has the same
-        // encoding as EVENTINJ. Re-inject ONLY external interrupts
-        // (type 0) / NMI (type 2): their source is transient, so a
-        // lost one is gone forever (the udevd corruption v0.172.36
-        // fixed). Exceptions (type 3, e.g. #PF — librewolf/cage spew
-        // COW faults) and software ints (type 4) MUST NOT be
-        // re-injected: the faulting instruction was not retired (we
-        // don't advance RIP on #NPF), so the guest re-executes it and
-        // the exception re-occurs naturally — re-injecting too =
-        // double delivery → the recurring rt_sigprocmask `<ret>`
-        // corruption. Mirrors KVM svm_complete_interrupts' type
-        // discrimination.
+        // `svm_complete_interrupts`: an external interrupt / NMI aborted
+        // mid-vectoring is re-injected; exceptions and software interrupts
+        // re-occur on their own (the instruction was not retired).
         let eii = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INT_INFO);
         let eii_type = (eii >> 8) & 0x7;
         if eii & (1u64 << 31) != 0 && (eii_type == 0 || eii_type == 2) {
             self.vcpu.reinject = eii;
         }
 
-        // EXIT_HLT counts as idle too (guest halted waiting for an IRQ),
-        // so it shares the EXIT_INTR keepalive path below.
-        if exit != EXIT_INTR && exit != EXIT_HLT { self.vcpu.consecutive_idle = 0; }
-
-        // ── Lock-free fast cross-vCPU IPI delivery ──────────────────────────
-        // A kicked target vCPU injects its pending IPI WITHOUT taking
-        // VM_BIG_LOCK, so it no longer queues behind the BSP's net pump (which
-        // holds the lock during inject_rx). That queuing was extending the
-        // sender's csd_lock_wait spin (rip_sample: smp_call_function_many_cond
-        // ~40% across all vCPUs). Everything this touches is per-vCPU (vmcb /
-        // lapic / regs) or the lock-free IPI_PENDING atomic — no VmShared field
-        // — so it is sound outside the lock. Deliberately NARROW: only a running
-        // vCPU (EXIT_INTR, interruptible, no aborted-vectoring reinject pending,
-        // timer not due); HLT / IF=0 / timer-due / bring-up all fall through to
-        // the unchanged locked path (which re-checks IPI_PENDING as a fallback).
-        // Gated on AP_ESTABLISHED so AP bring-up keeps its validated in-lock
-        // timing; the `complete()` wakeup still goes through the locked path.
-        // APs ONLY: they are the ones that wait behind the BSP's lock-held pump;
-        // the BSP is usually the lock holder (doesn't wait), and its device /
-        // timer / pump injection logic stays byte-identical on the locked path.
-        if exit == EXIT_INTR
-            && self.vcpu.apic_id != 0
-            && AP_ESTABLISHED.load(Ordering::Acquire)
-            && self.vcpu.reinject == 0
-            && !self.vcpu.lapic.timer_pending()
-            && guest_interruptible(&self.vcpu.vmcb)
-        {
-            if let Some(vec) = ipi_take(self.vcpu.apic_id) {
-                let info: u64 = (vec as u64) | (1u64 << 31);
-                self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                self.vcpu.consecutive_idle = 0;
-                last_outcome = Some(outcome);
-                continue;
-            }
-        }
-
-        // Take the big-VM lock around this exit's device/memory handling
-        // when an AP shares the VM (guest SMP), so the two vCPUs serialize
-        // access to `VmShared`. Both `_big` and `sh` are dropped at the end
-        // of the loop body — `sh`'s `&mut VmShared` borrow ends before the
-        // lock releases (reverse declaration order), so only the lock holder
-        // ever has a live `&mut` to the shared state (sound aliasing across
-        // the BSP's Owned box and the AP's Borrowed pointer to it). When no
-        // AP is active the lock is not taken and this is byte-identical to
-        // the single-vCPU path.
+        // Serialize VmShared between vCPUs (guest SMP).
         let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
-        // Resolve the shared device/memory state once for this exit's
-        // handling. Through `SharedRef::DerefMut` this is a single borrow
-        // of `self.shared`, so the handlers below can still take disjoint
-        // sub-field borrows (`&mut sh.serial` + `&mut sh.pci`) the way they
-        // did when `shared` was a plain field; `self.vcpu` stays separately
-        // borrowable (disjoint field of `self`).
         let sh = &mut *self.shared;
 
-        // Pace audio on EVERY exit, not just the INTR/HLT inject path. Running
-        // the snd pump only there starved it under load (a busy guest exits via
-        // NPF/MMIO thousands of times/sec but rarely INTR/HLT), so wall-clock-
-        // paced completion fell behind → audio slow + stuttered. On every exit
-        // the pump rate scales with load. Completion latches the snd IRQ into
-        // pending_irqs; the INTR/HLT drain injects it at a safe point.
-        if self.vcpu.apic_id == 0 && sh.pci.virtio_snd.pump(sh.guest_mem) {
-            sh.pending_irqs |= 1 << sh.pci.virtio_snd.irq_line();
-        }
-        // Fold the lock-free net-IRQ signal (raised by the out-of-lock RX pump
-        // above) into pending_irqs, injected at the next safe INTR/HLT point
-        // (which yields to an overdue timer so this can't starve guest jiffies →
-        // RCU). BSP-only.
-        if self.vcpu.apic_id == 0 && crate::microvm::devices::net_backend::take_irq() {
-            sh.pending_irqs |= 1 << 10;
-        }
-        // Off-vCPU GPU worker finished a controlq batch → fold IRQ9 (line 9) the
-        // same way (it kicked the BSP). The pending_irqs path below injects it.
-        if self.vcpu.apic_id == 0 && crate::microvm::devices::gpu_backend::take_irq() {
-            sh.pending_irqs |= 1 << 9;
-        }
-
-        // Post deferred 9p write replies the async persist worker finished (the
-        // vCPU owns the virtqueue). Decouples disk persistence from the vCPU →
-        // no freeze on download-write.
-        if self.vcpu.apic_id == 0
-            && sh.pci.virtio_9p.drain_async_done(sh.guest_mem)
-        {
-            sh.pending_irqs |= 1 << sh.pci.virtio_9p.irq_line();
-        }
-
         match exit {
-            EXIT_INTR | EXIT_HLT => {
-                // Guest executed STI;HLT (idle, waiting for its next IRQ).
-                // A headless test guest means "done" → exit. A window-bound
-                // app idling is normal: fall through to the same inject-due-
-                // IRQ + idle-accounting path as a host-timer EXIT_INTR so the
-                // guest's timer/input/net wake it; never kill it on idle. The
-                // injected IRQ (EVENT_INJ) is delivered at the HLT, so the
-                // guest resumes past it — no manual RIP advance needed. The
-                // dedicated core host-idles between ticks via SliceOutcome::Idle.
-                if exit == EXIT_HLT && crate::microvm::vm_window() == 0 {
+            // A host interrupt (timer, device, kick IPI) or NMI pre-empted the
+            // guest; the host took it at STGI. Pending guest events are
+            // injected at the next entry.
+            EXIT_INTR | EXIT_NMI => {
+                last_outcome = Some(outcome);
+            }
+            // The interrupt window opened (`svm_enable_irq_window`): the guest
+            // can take the event now — the next entry injects it.
+            EXIT_VINTR => {
+                clear_irq_window(&mut self.vcpu.vmcb);
+                last_outcome = Some(outcome);
+            }
+            EXIT_HLT => {
+                // A headless test guest halting is done.
+                if crate::microvm::vm_window() == 0 {
                     sh.serial.flush();
                     kprintln!("[svm] guest HLT after {} VM-exits — exiting", self.vcpu.iter);
                     last_outcome = Some(outcome);
                     break;
                 }
-                // A WINDOWED guest that HLTs with interrupts DISABLED
-                // (RFLAGS.IF=0) is NOT idle — it has powered off / panicked
-                // (Linux's no-ACPI poweroff + panic paths both end in a
-                // `cli; hlt` loop; the idle path is always `sti; hlt` =
-                // IF=1). We boot `acpi=off`, so there is no ACPI shutdown
-                // signal — this IF check is it. Treat a sustained IF=0 HLT
-                // as a clean exit so the tile tears down when the browser
-                // closes (cage exits → PID-1 `halt -f` → cli;hlt loop)
-                // instead of hanging as a black idle window until Mod+Q.
-                if exit == EXIT_HLT {
-                    if self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
-                        self.vcpu.if_off_halts = self.vcpu.if_off_halts.saturating_add(1);
-                        if self.vcpu.if_off_halts >= 64 {
-                            sh.serial.flush();
-                            kprintln!(
-                                "[svm] guest powered off (HLT with IF=0) after {} iters — exiting",
-                                self.vcpu.iter
-                            );
-                            last_outcome = Some(outcome);
-                            break;
-                        }
-                    } else {
-                        self.vcpu.if_off_halts = 0;
+                // `cli; hlt` is Linux's no-ACPI poweroff / panic end state.
+                if self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) == 0 {
+                    self.vcpu.if_off_halts = self.vcpu.if_off_halts.saturating_add(1);
+                    if self.vcpu.if_off_halts >= 64 {
+                        sh.serial.flush();
+                        kprintln!(
+                            "[svm] guest powered off (HLT with IF=0) after {} iters — exiting",
+                            self.vcpu.iter
+                        );
+                        last_outcome = Some(outcome);
+                        break;
                     }
-                }
-                // HLT is an intercepted instruction: advance RIP past it
-                // (like KVM's skip_emulated_instruction) so that once an
-                // injected IRQ's ISR returns, the guest continues into its
-                // need_resched check and schedules — not back onto the HLT.
-                if exit == EXIT_HLT {
-                    advance_rip(&mut self.vcpu.vmcb);
-                }
-                // If the guest can't take an interrupt right now (IF=0 / in
-                // an STI/MOV-SS shadow — i.e. mid `spin_lock_irqsave`), do
-                // NOT inject anything: forcing an IRQ in via EVENTINJ here
-                // deadlocks an SMP guest's qspinlock (the guest-SMP 9p-mount
-                // livelock). Just re-enter so the guest finishes its critical
-                // section; it's busy, not idle, so skip idle-accounting too.
-                // Pending device IRQs + the timer are retried on a later exit
-                // once IF=1 (≤1 ms via the worker/VM timer).
-                // An idle `sti; hlt` runs the HLT inside the STI interrupt-
-                // shadow, so `guest_interruptible` is false even though IF=1.
-                // But the HLT CONSUMES the shadow and MUST be woken by a
-                // pending interrupt — that is the whole point of `sti; hlt`.
-                // So treat such an idle HLT as interruptible: fall through to
-                // the injection path below (deliver the pending IPI/IRQ/timer
-                // that wakes the guest — else the wakeup is LOST and the guest
-                // stalls) and the idle-park accounting. Gated on
-                // AP_ESTABLISHED so AP bring-up keeps the validated timing.
-                let idle_hlt = exit == EXIT_HLT
-                    && self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS) & (1 << 9) != 0;
-                if !guest_interruptible(&self.vcpu.vmcb)
-                    && !(idle_hlt && AP_ESTABLISHED.load(Ordering::Acquire))
-                {
-                    // A genuine IF=0 critical section (e.g. mid
-                    // `spin_lock_irqsave`), or a non-HLT instruction in an
-                    // STI/MOV-SS shadow: do NOT inject — forcing an IRQ in via
-                    // EVENTINJ here deadlocks an SMP guest's qspinlock (the
-                    // 9p-mount livelock). Re-enter so the guest finishes its
-                    // critical section; busy, not idle, so skip idle-accounting.
-                    last_outcome = Some(outcome);
-                    continue;
-                }
-                // Backend RX IRQ10, BEFORE the cross-vCPU IPI block. ROOT CAUSE
-                // of the Stage-2b "guest net dies" bug: with the RX data-plane on
-                // the worker core, IRQ10 was raised lock-free + the BSP kicked,
-                // but it only injected at the LOW-PRIORITY pending_irqs step
-                // (after the IPI block). Under a download the guest's
-                // csd_lock_wait IPI storm took the single EVENT_INJ slot on nearly
-                // every exit (step 2) → IRQ10 starved → guest never drained RX →
-                // TCP stalled → sockets died (rx 154→0). In Stage 2a IRQ10 rode
-                // the many net-MMIO exits (try_prompt_device_irq); 2b suppresses
-                // those (EVENT_IDX RX-repost), so it must be delivered here.
-                // Give it priority over the IPI but still YIELD to a due guest
-                // timer (jiffies/RCU). It's raised at NAPI rate (EVENT_IDX-gated),
-                // so the IPI flood still gets nearly every other exit → csd is
-                // barely affected. `note_net_irq()` makes `netirq/s` show the
-                // real RX-IRQ delivery rate.
-                if self.vcpu.apic_id == 0
-                    && !self.vcpu.lapic.timer_pending()
-                    && sh.pending_irqs & (1 << 10) != 0
-                {
-                    sh.pending_irqs &= !(1u16 << 10);
-                    let info: u64 = (sh.pic.vector_for_irq(10) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    crate::microvm::devices::nat::note_net_irq();
-                    continue;
-                }
-                // Cross-vCPU IPI (guest SMP): a reschedule / call-function /
-                // TLB-flush / AP→BSP `complete()` wakeup another vCPU routed
-                // to this one. No-op on a UP guest (`ipi_pending` all-zero).
-                //
-                // BUT yield to a DUE guest timer first. Before the prompt IPI
-                // kick, IPIs trickled in and this rarely had work, so the timer
-                // block below ran most exits. With the kick, a busy SMP guest's
-                // IPI flood would inject here EVERY pass and starve the 1 kHz
-                // LAPIC timer (step 2) → jiffies/TCP/NAPI hrtimers stop → the
-                // guest clock stalls and the network dies (measured: gtimer
-                // 330→71/s, drainmax 150 ms). `timer_due()` is the precise
-                // per-vCPU 1 ms deadline (the 30 ms host-tick guard used for
-                // device IRQs below is too coarse to protect a 1 ms clock), so
-                // gate on it: when the timer is due, skip the IPI this pass and
-                // let step 2 fire; the IPI stays pending and drains next pass
-                // (≤ ~1 ms later). During boot/AP-bring-up the LVTT isn't armed
-                // yet → timer_due() is false → IPIs keep absolute priority, so
-                // the cpuhp `complete()` handshake timing is unchanged.
-                if !self.vcpu.lapic.timer_pending() {
-                    if let Some(vec) = ipi_take(self.vcpu.apic_id) {
-                        let info: u64 = (vec as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                }
-                // Device IRQs, the PIT tick, display-resize, NAT pump and
-                // input are BSP-only (PIC mode delivers device lines to the
-                // boot CPU); an AP vCPU only services its own LAPIC timer
-                // (below) + cross-vCPU IPIs (above). Guest SMP, Stage 3b.
-                let is_bsp = self.vcpu.apic_id == 0;
-
-                // ── Guest timer FIRST, at the rate the GUEST programmed ──
-                // The guest is CONFIG_HZ=1000 and programs its LAPIC timer
-                // (TMICT, TSC-calibrated) for ~1 ms periods. Delivering it at our
-                // 100 Hz `ticks()` instead ran the guest's jiffies + every
-                // hrtimer (TCP pacing / delayed-ACK / RTO / NAPI) 10× slow →
-                // download bandwidth quantized to data-per-100 Hz-tick (the
-                // constant ~10 ms `drainmax`). Honour the programmed deadline
-                // here, with priority over net IRQ10 (which still fires on the
-                // many net-MMIO exits via `try_prompt_device_irq`, so it is not
-                // starved). LVTT is per-vCPU; the PIT is BSP-only + boot-only.
-                // The PIT (IRQ0, jiffies) is BSP-only + boot-only; pace it at
-                // ~1 kHz off the TSC (no i8254 reload tracking). `pit_due` is
-                // side-effect-free; `timer_tick_vector()` ⇒ the LVTT is armed.
-                let pit_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
-                let pit_active = is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled;
-                let pit_due = pit_active
-                    && crate::interrupts::rdtsc().wrapping_sub(sh.last_pit_tsc) >= pit_ms;
-                let lvtt_armed = self.vcpu.lapic.timer_tick_vector().is_some();
-
-                // Boot-verification fairness: when the PIT and LVTT are BOTH
-                // co-active, alternate (PIT's turn, or pure-PIT boot before the
-                // LVTT is armed) so neither starves the single inject slot — else
-                // the strict-priority LVTT freezes jiffies and Linux disables it.
-                if pit_due && (!lvtt_armed || sh.boot_tick_want_pit) {
-                    sh.last_pit_tsc = crate::interrupts::rdtsc();
-                    sh.last_timer_tick = crate::interrupts::ticks();
-                    sh.boot_tick_want_pit = false;
-                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    crate::microvm::devices::nat::note_guest_timer();
-                    DBG_PIT_FIRES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    continue;
-                }
-
-                // ── Guest LAPIC timer, at the rate the GUEST programmed ──
-                if self.vcpu.lapic.timer_due() {
-                    if let Some(vec) = self.vcpu.lapic.timer_tick_vector() {
-                        let info: u64 = (vec as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.last_lapic_tick = crate::interrupts::ticks();
-                        self.vcpu.consecutive_idle = 0;
-                        // Hand the next co-active slot to the PIT (verification
-                        // fairness); no-op once the PIT is gone (steady state).
-                        if pit_active { sh.boot_tick_want_pit = true; }
-                        crate::microvm::devices::nat::note_guest_timer();
-                        {
-                            use core::sync::atomic::Ordering::Relaxed;
-                            let l = DBG_LVTT_FIRES.fetch_add(1, Relaxed) + 1;
-                            if l <= 800 && l % 25 == 0 {
-                                crate::kprintln!("[boot-timer] lvtt={} pit={} pit_en={} irq0={}",
-                                    l, DBG_PIT_FIRES.load(Relaxed),
-                                    sh.pit_enabled, sh.pic.irq_unmasked(0));
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                // PIT fallback: the LVTT wasn't due this pass but the PIT is —
-                // keep jiffies advancing even when it was "the LVTT's turn".
-                if pit_due {
-                    sh.last_pit_tsc = crate::interrupts::rdtsc();
-                    sh.last_timer_tick = crate::interrupts::ticks();
-                    sh.boot_tick_want_pit = false;
-                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    crate::microvm::devices::nat::note_guest_timer();
-                    DBG_PIT_FIRES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    continue;
-                }
-
-                // Deferred device IRQ (queued while the guest was IF=0, or the
-                // per-exit net-RX pump) is now deliverable — inject the lowest
-                // pending line. BUT yield to an overdue guest timer first: with
-                // the per-exit net-RX pump, IRQ10 can be pending almost every
-                // pass; draining here unconditionally would starve jiffies →
-                // RCU stall. If the timer is overdue (≥ TIMER_MAX_SKIP=3 host
-                // ticks) skip this pass and let the timer block below fire it;
-                // pending_irqs stays set for the next pass (≤30 ms jitter).
-                if is_bsp && sh.pending_irqs != 0 {
-                    let now_t = crate::interrupts::ticks();
-                    let timer_overdue = (sh.pic.irq_unmasked(0)
-                        && sh.pit_enabled
-                        && now_t.wrapping_sub(sh.last_timer_tick) >= 3)
-                        || (self.vcpu.lapic.timer_tick_vector().is_some()
-                            && now_t.wrapping_sub(self.vcpu.last_lapic_tick) >= 3);
-                    if !timer_overdue {
-                        let line = sh.pending_irqs.trailing_zeros() as u8;
-                        sh.pending_irqs &= !(1u16 << line);
-                        let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                }
-                // Guest timer tick. The microvm has no PIT/LAPIC
-                // timer event source, so the only thing that ever
-                // wakes a time-blocked task (nanosleep/timerfd/poll
-                // timeout — the entire seatd/cage/wlroots/libwayland
-                // event-loop machinery) is this injected IRQ0. Pace
-                // to the host 100 Hz tick: one IRQ0 per host tick.
-                // Gate on Linux having unmasked IRQ0 (8259 + PIT
-                // handler installed) so the early guest doesn't take
-                // a spurious vector. Claims the single EVENT_INJ slot
-                // for this VMRUN → `continue`; EXIT_INTR fires again
-                // immediately so net/input lose nothing.
-                // D4 live-resize config-change MUST precede the
-                // timer-tick block. An idle guest (LibreWolf on
-                // about:blank) HLTs between ticks, so its only
-                // EXIT_INTR exits are fresh 100 Hz host-timer ticks
-                // (host USB is drained ON that timer, not as extra
-                // IRQs) — the timer block then `continue`s on EVERY
-                // exit and nothing past it ever runs. Rare + one-shot;
-                // costs the timer at most one tick (Linux tolerates
-                // the jitter) and is the only place an idle guest sees
-                // it. See the vmx mirror.
-                if is_bsp {
-                    let wid = crate::microvm::vm_window();
-                    let now_d4 = crate::interrupts::ticks();
-                    // Phase 2 of any in-flight D4 cycle: fire reconnect
-                    // once the 100 ms disconnect window expired.
-                    if crate::microvm::devices::gpu_backend::lock().tick_d4(now_d4) {
-                        let vector = sh.pic.vector_for_irq(9);
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        let _ = wid;
-                        continue;
-                    }
-                    // Phase 1: a fresh dirty from Shade and no cycle
-                    // in flight → kick off disconnect.
-                    if wid != 0
-                        && !crate::microvm::devices::gpu_backend::lock().d4_disconnecting()
-                        && crate::shade::surface::display_dirty_peek(wid)
-                    {
-                        // R2 debounce — one cycle per ~250 ms; flag stays
-                        // dirty during a drag so the final size lands.
-                        if now_d4.wrapping_sub(sh.last_cfg_tick) >= 25 {
-                            let _ = crate::shade::surface::take_display_dirty(wid);
-                            sh.last_cfg_tick = now_d4;
-                            crate::microvm::devices::gpu_backend::lock().signal_display_change(now_d4);
-                            let vector = sh.pic.vector_for_irq(9);
-                            let info: u64 = (vector as u64) | (1u64 << 31);
-                            self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                            self.vcpu.consecutive_idle = 0;
-                            continue;
-                        }
-                    }
-                }
-                // Bounded-skip timer floor — see the vmx mirror for
-                // the full rationale. A strict priority always starves
-                // the loser (timer-first → input dead when idle;
-                // input/net-first → TIMER dead under page-load net →
-                // RCU stall "timer wakeup didn't happen" → guest hang
-                // → libwayland 4096 overflow → cage rc=139). The timer
-                // is sacred but only needs ~100 Hz: if overdue by
-                // ≥ TIMER_MAX_SKIP host ticks it FORCES the slot
-                // (≤ ~30 ms jitter, far under any RCU threshold);
-                // otherwise input > net, then the normal timer.
-                const TIMER_MAX_SKIP: u64 = 3; // host ticks (~30 ms)
-                let now = crate::interrupts::ticks();
-                // Two ~100 Hz timer sources may be live, and BOTH must tick
-                // during the LAPIC-timer verification window: apic.c:922
-                // arms the LVTT periodic and checks that jiffies — driven by
-                // the 8259 PIT — advance 1:1 with LVTT interrupts; if the PIT
-                // froze, deltaj=0 → "APIC timer disabled due to verification
-                // failure" → Linux drops the LAPIC timer (fatal for AP
-                // bringup, which has no PIT IRQ0).
-                //   * PIT (IRQ0): jiffies during boot + verification. Gated
-                //     on `pit_enabled`, which goes false when Linux writes
-                //     PIT mode-0 (port 0x43 ← 0x30, clockevent_i8253_disable)
-                //     to shut the PIT down after adopting the LAPIC timer —
-                //     so IRQ0 stops then and jiffies don't double-count.
-                //   * LAPIC timer (LVTT vector): once Linux enables it.
-                // One EVENTINJ slot per VMRUN → inject whichever is due; the
-                // other lands next VMRUN (≥1 kHz). Both paced by the same
-                // 100 Hz `ticks()` so their rates match (the 1:1 the
-                // verification needs). Linux's wall-clock is TSC-based.
-                let pit_live = is_bsp && sh.pic.irq_unmasked(0) && sh.pit_enabled;
-                let lapic_vec = self.vcpu.lapic.timer_tick_vector();
-                // Forced slot (anti-starvation under page-load net storm —
-                // see vmx mirror): if either is overdue ≥ TIMER_MAX_SKIP host
-                // ticks, force it (≤ ~30 ms jitter, far under any RCU stall).
-                if pit_live && now.wrapping_sub(sh.last_timer_tick) >= TIMER_MAX_SKIP {
-                    sh.last_timer_tick = now;
-                    let info: u64 = (sh.pic.vector_for_irq(0) as u64) | (1u64 << 31);
-                    self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                    self.vcpu.consecutive_idle = 0;
-                    continue;
-                }
-                if let Some(vec) = lapic_vec {
-                    if now.wrapping_sub(self.vcpu.last_lapic_tick) >= TIMER_MAX_SKIP {
-                        self.vcpu.last_lapic_tick = now;
-                        let info: u64 = (vec as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                }
-                // Real net data this pass (drives idle accounting below).
-                // BSP-only: the AP never pumps the NAT (stays false).
-                let mut pumped = false;
-                if is_bsp {
-                    // Full off-vCPU mode: the `net_dataplane` worker owns the net
-                    // device (RX + TX + flush) on its own core. The BSP does NOT
-                    // touch the device here — only lock-free NAT housekeeping — so
-                    // RX and TX live on ONE path (the worker) instead of split
-                    // across the worker and the vCPU's pump. `recently_active`
-                    // (set by the worker) feeds idle-accounting; the worker's RX
-                    // IRQ10 is folded lock-free into `pending_irqs` and injected at
-                    // the top of this block, so we must NOT inject it again here.
-                    crate::microvm::devices::nat::housekeep();
-                    pumped = crate::microvm::devices::nat::recently_active();
-                    if sh.pci.virtio_input.drain_injected(sh.guest_mem) {
-                        let vector = sh.pic.vector_for_irq(12);
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                    // The worker's `raise_irq` carries RX now (folded at the top
-                    // of this block); `pumped` only feeds idle accounting.
-                    if false {
-                        let vector = sh.pic.vector_for_irq(10);
-                        let info: u64 = (vector as u64) | (1u64 << 31);
-                        self.vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-                        self.vcpu.consecutive_idle = 0;
-                        continue;
-                    }
-                }
-                // (Normal 100 Hz PIT/LAPIC slots removed — the guest timer is now
-                // delivered at its programmed rate in the priority block at the
-                // top of this match arm. The forced slots above stay as a ≤30 ms
-                // anti-starvation safety under a net-IRQ storm.)
-                // Real net data (`pumped`) means not idle. Merely having
-                // open NAT sessions does NOT — a browser keeps connections
-                // alive while sitting idle, and counting that as "busy"
-                // pinned consecutive_idle at 0 so a windowed app never
-                // yielded Idle → the dedicated core span at 100% (hlt=72k/s
-                // observed). For a windowed VM, ignore open-but-quiet
-                // sessions and let it idle (net is still pumped every
-                // iteration / host wake-up, ≤1 ms latency). Headless test
-                // guests keep the old behavior.
-                if pumped
-                    || (crate::microvm::devices::nat::active_session_count() > 0
-                        && crate::microvm::vm_window() == 0)
-                {
-                    self.vcpu.consecutive_idle = 0;
                 } else {
-                    self.vcpu.consecutive_idle = self.vcpu.consecutive_idle.saturating_add(1);
+                    self.vcpu.if_off_halts = 0;
                 }
-                // Idle-auto-exit only for an UNWINDOWED VM. A
-                // window-bound VM is an app — idle is normal, never
-                // kill it; it ends on real guest exit or window close
-                // (VM_CLOSE_REQUESTED in vm_poll_slice). See the vmx
-                // mirror for the full rationale.
-                if self.vcpu.consecutive_idle >= IDLE_THRESHOLD
-                    && crate::microvm::vm_window() == 0
-                {
-                    sh.serial.flush();
-                    kprintln!(
-                        "[svm] guest idle in userspace ({} consecutive INTRs after {} iters) — exiting cleanly",
-                        self.vcpu.consecutive_idle, self.vcpu.iter,
-                    );
-                    last_outcome = Some(outcome);
-                    break;
-                }
-                // Guest idle → yield, signalling Idle so the dedicated
-                // core host-idles before re-entering (no VMRUN spin) and
-                // Core 0 returns to the shell. Guest stays alive.
-                // BUT do NOT deep-park while network data is in flight: the
-                // ~2 ms park quantizes RX delivery, which kills a page-load's
-                // many small request→response round-trips (latency, not
-                // throughput — a single bulk stream is unaffected). Spin-pump
-                // while recently active; park once the link is quiet (power).
-                // Bounded adaptive halt-polling (KVM halt_poll_ns model) — see
-                // the VMX twin. Idle → poll the per-vCPU window for a wake, then
-                // shrink + park on expiry. Grow-on-wake is at the loop top.
-                if self.vcpu.consecutive_idle >= IDLE_YIELD {
-                    let now_tsc = crate::interrupts::rdtsc();
-                    if self.vcpu.halt_poll_deadline == 0 {
-                        self.vcpu.halt_poll_deadline = now_tsc
-                            + (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
-                    }
-                    if now_tsc >= self.vcpu.halt_poll_deadline {
-                        self.vcpu.halt_poll_us = (self.vcpu.halt_poll_us / 2).max(HALT_POLL_MIN_US);
-                        self.vcpu.halt_poll_deadline = 0;
-                        return Ok(SliceOutcome::Idle);
-                    }
-                    // else: within the poll window → keep looping (poll).
-                }
-                // Idle guest HLT during an active transfer (full off-vCPU mode,
-                // consecutive_idle < IDLE_YIELD so not the idle-park case above):
-                // arm the loop-top warm halt-poll so the next re-entry waits
-                // lock-free on the host for a real wake instead of re-VMRUNning
-                // straight into another HLT. Quiesces to the normal idle/park path
-                // the moment the transfer ends (recently_active goes false).
-                if exit == EXIT_HLT && idle_hlt
-                    && self.vcpu.consecutive_idle < IDLE_YIELD
-                    && crate::microvm::devices::net_backend::full_active()
-                    && crate::microvm::devices::nat::recently_active()
-                {
-                    self.vcpu.warm_poll = true;
-                }
+                advance_rip(&mut self.vcpu.vmcb);
                 last_outcome = Some(outcome);
+                drop(_big);
+                // `kvm_vcpu_halt`: resume at once if something is deliverable,
+                // else halt-poll, then block (the fiber parks until the next
+                // timer deadline or a kick).
+                if !self.halt_poll() {
+                    return Ok(SliceOutcome::Idle);
+                }
             }
             EXIT_CPUID => {
                 let leaf = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX) as u32;
@@ -2152,7 +1559,7 @@ impl VmContext {
                     else if info & 0x40 != 0 { 4 }
                     else { 1 };
                 crate::microvm::cpu::record_io_port(port);
-                handle_linux_io(&mut *self.vcpu.vmcb, &mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit_enabled);
+                handle_linux_io(&mut *self.vcpu.vmcb, &mut sh.serial, &mut sh.pci, &mut sh.pic, &mut self.vcpu.regs, port, dir_in, size, &mut self.vcpu.io_dropped, &mut sh.pit);
                 advance_rip(&mut *self.vcpu.vmcb);
                 last_outcome = Some(outcome);
             }
@@ -2216,10 +1623,6 @@ impl VmContext {
                 }
                 last_outcome = Some(outcome);
             }
-            // Host NMI while the guest ran: taken by the host at STGI.
-            EXIT_NMI => {
-                last_outcome = Some(outcome);
-            }
             EXIT_SHUTDOWN => {
                 sh.serial.flush();
                 if sh.serial.panic_observed {
@@ -2240,7 +1643,7 @@ impl VmContext {
             EXIT_NPF => {
                 let gpa = self.vcpu.vmcb.read_u64(vmcb::OFF_EXIT_INFO_2);
                 if sh.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2249,43 +1652,41 @@ impl VmContext {
                     // net access stays atomic (the lock is uncontended in Stage 1 —
                     // only the vCPU touches it; the off-vCPU backend lands in Stage 2).
                     let mut net = crate::microvm::devices::net_backend::lock();
-                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *net, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *net, &mut sh.pic, gpa, sh.guest_mem) {
                         drop(net);
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write-completion) NOW rather than at the next
                         // EXIT_INTR/EXIT_HLT ~10 ms out — the download rxlat fix.
-                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) {
                     let mut gpu = crate::microvm::devices::gpu_backend::lock();
-                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *gpu, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_gpu(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut *gpu, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_input, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_input(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_input, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_9p, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_9p, &mut sh.pic, gpa, sh.guest_mem) {
                         // Deliver the freshly-completed 9p write-reply IRQ NOW
                         // (latched by drain_async_done at the loop top) instead
                         // of waiting for the next EXIT_INTR/EXIT_HLT.
-                        try_prompt_device_irq(&mut self.vcpu, sh);
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_blk(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_snd.bar0_in_range(gpa) {
-                    if handle_mmio_npf_snd(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_snd, &sh.pic, &mut sh.pending_irqs, gpa, sh.guest_mem) {
+                    if handle_mmio_npf_snd(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_snd, &mut sh.pic, gpa, sh.guest_mem) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -2371,6 +1772,14 @@ impl VmContext {
 fn advance_rip(vmcb: &mut vmcb::Vmcb) {
     let nrip = vmcb.read_u64(vmcb::OFF_NRIP);
     vmcb.write_u64(vmcb::OFF_SAVE_RIP, nrip);
+    clear_interrupt_shadow(vmcb);
+}
+
+/// KVM `__svm_skip_emulated_instruction` → `svm_set_interrupt_shadow(0)`: the
+/// skipped instruction was the one an STI / MOV SS shadow covered.
+fn clear_interrupt_shadow(vmcb: &mut vmcb::Vmcb) {
+    let st = vmcb.read_u64(vmcb::OFF_INT_STATE);
+    if st & 1 != 0 { vmcb.write_u64(vmcb::OFF_INT_STATE, st & !1); }
 }
 
 /// Advance guest RIP by the decoded instruction length. Used after
@@ -2378,6 +1787,7 @@ fn advance_rip(vmcb: &mut vmcb::Vmcb) {
 fn advance_rip_by_length(vmcb: &mut vmcb::Vmcb, length: u8) {
     let rip = vmcb.read_u64(vmcb::OFF_SAVE_RIP);
     vmcb.write_u64(vmcb::OFF_SAVE_RIP, rip.wrapping_add(length as u64));
+    clear_interrupt_shadow(vmcb);
 }
 
 /// Dispatch one I/O VMEXIT. UART COM1 (0x3F8-0x3FF) gets proper
@@ -2395,10 +1805,10 @@ fn handle_linux_io(
     dir_in: bool,
     size: u8,
     io_dropped: &mut u32,
-    pit_enabled: &mut bool,
+    pit: &mut crate::microvm::devices::pit8253::Pit,
 ) {
     use crate::microvm::devices::{handle_pci_io, PCI_CONFIG_ADDR, PCI_CONFIG_DATA_END, PCI_CONFIG_DATA_START};
-    use crate::microvm::devices::pic8259::{handle_pic_io, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
+    use crate::microvm::devices::pic8259::{PIC_ELCR_MASTER, PIC_ELCR_SLAVE, PIC_MASTER_CMD, PIC_MASTER_IMR, PIC_SLAVE_CMD, PIC_SLAVE_IMR};
 
     let mask: u64 = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFF_FFFF, _ => 0xFF };
     let rax = vmcb.read_u64(vmcb::OFF_SAVE_RAX);
@@ -2415,9 +1825,10 @@ fn handle_linux_io(
         return;
     }
 
-    // 8259 PIC stub — see microvm::devices::pic8259.
-    if matches!(port, PIC_MASTER_CMD | PIC_MASTER_IMR | PIC_SLAVE_CMD | PIC_SLAVE_IMR) {
-        if let Some(v) = handle_pic_io(pic, port, dir_in, val_out as u8) {
+    // 8259 PIC + ELCR.
+    if matches!(port, PIC_MASTER_CMD | PIC_MASTER_IMR | PIC_SLAVE_CMD | PIC_SLAVE_IMR
+                    | PIC_ELCR_MASTER | PIC_ELCR_SLAVE) {
+        if let Some(v) = pic.ioport(port, dir_in, val_out as u8) {
             let new_rax = (rax & !mask) | (v & mask);
             vmcb.write_u64(vmcb::OFF_SAVE_RAX, new_rax);
         }
@@ -2425,20 +1836,9 @@ fn handle_linux_io(
     }
 
     let in_value: Option<u64> = match (port, dir_in) {
-        // i8253 PIT mode/command (0x43) write. Track whether channel 0 is
-        // programmed to generate the timer tick: a real mode program
-        // (access mode bits 5:4 != 0) on channel 0 (bits 7:6 == 0) sets
-        // pit_enabled = (operating mode != 0). Linux shuts the PIT down with
-        // mode 0 (0x30, clockevent_i8253_disable) after adopting the LAPIC
-        // timer; periodic (0x34, mode 2) / oneshot (0x38, mode 4) keep it
-        // live. Latch commands (bits 5:4 == 0) don't change the mode.
-        (0x43, false) => {
-            let v = val_out as u8;
-            if (v >> 6) & 0x3 == 0 && (v >> 4) & 0x3 != 0 {
-                *pit_enabled = ((v >> 1) & 0x7) != 0;
-            }
-            None
-        }
+        // i8254 channel 0 (the other channels are not a tick source).
+        (0x43, false) => { pit.command(val_out as u8); None }
+        (0x40, false) => { pit.write_counter(val_out as u8); None }
         (0x3F8, false) => {
             if !serial.dlab { serial.put_char(val_out as u8); }
             None
@@ -2488,59 +1888,11 @@ fn handle_linux_io(
 /// but on an SMP guest, firing a device IRQ into a `spin_lock_irqsave`
 /// critical section makes the handler spin on the held qspinlock → deadlock
 /// (the guest-SMP 9p-mount livelock). So we only inject when interruptible,
-/// and defer otherwise (see `deliver_irq` + the run-loop pending drain).
+/// and open the interrupt window otherwise (`inject_pending_event`).
 fn guest_interruptible(vmcb: &vmcb::Vmcb) -> bool {
     let rflags = vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS);
     let int_state = vmcb.read_u64(vmcb::OFF_INT_STATE);
     (rflags & (1 << 9)) != 0 && (int_state & 1) == 0
-}
-
-/// Deliver an external IRQ `line` (vector `vector`) to the guest: inject now
-/// via EVENTINJ if interruptible, else set its bit in `pending` so the run
-/// loop injects it once the guest re-enables interrupts. See
-/// `guest_interruptible` for why the gate matters on SMP.
-fn deliver_irq(vmcb: &mut vmcb::Vmcb, pending: &mut u16, line: u8, vector: u8) {
-    if guest_interruptible(vmcb) {
-        vmcb.write_u64(vmcb::OFF_EVENT_INJ, (vector as u64) | (1u64 << 31));
-    } else {
-        *pending |= 1u16 << (line as u16 & 0xF);
-    }
-}
-
-/// Promptly deliver a deferred device IRQ (a 9p async-write completion, a
-/// net-RX pump, …) latched in `pending_irqs`, at an #NPF/MMIO exit — instead
-/// of leaving it until the next EXIT_INTR/EXIT_HLT exit. During a download the
-/// guest exits almost only via #NPF, so a 9p completion latched by
-/// `drain_async_done` waited ~10 ms for the next host-timer EXIT_INTR (the
-/// rxlat spikes that cap download-to-disk at the per-write round-trip rate).
-/// VMX twin of `vmx::enable::try_prompt_device_irq`; see it for the full
-/// invariant rationale (BSP-only, interruptibility gate, one-inject-per-VMRUN
-/// = no clobber of a handler's EVENTINJ or a pending `reinject`, timer
-/// non-starvable via the same ≥3-host-tick overdue check).
-fn try_prompt_device_irq(vcpu: &mut Vcpu, sh: &mut VmShared) {
-    if vcpu.apic_id != 0 || sh.pending_irqs == 0 || vcpu.reinject != 0 {
-        return;
-    }
-    if !guest_interruptible(&vcpu.vmcb) {
-        return;
-    }
-    if vcpu.vmcb.read_u64(vmcb::OFF_EVENT_INJ) & (1u64 << 31) != 0 {
-        return;
-    }
-    let now = crate::interrupts::ticks();
-    let timer_overdue = (sh.pic.irq_unmasked(0)
-        && sh.pit_enabled
-        && now.wrapping_sub(sh.last_timer_tick) >= 3)
-        || (vcpu.lapic.timer_tick_vector().is_some()
-            && now.wrapping_sub(vcpu.last_lapic_tick) >= 3);
-    if timer_overdue {
-        return;
-    }
-    let line = sh.pending_irqs.trailing_zeros() as u8;
-    sh.pending_irqs &= !(1u16 << line);
-    let info: u64 = (sh.pic.vector_for_irq(line) as u64) | (1u64 << 31);
-    vcpu.vmcb.write_u64(vmcb::OFF_EVENT_INJ, info);
-    vcpu.consecutive_idle = 0;
 }
 
 /// #NPF on the LAPIC MMIO page (guest-SMP Stage 1). Decode the faulting
@@ -2580,7 +1932,7 @@ fn handle_mmio_npf_lapic(
     if dec.is_write {
         let value = read_guest_gpr(regs, rax, dec.reg) & width_mask(dec.width);
         if let Some(icr) = apic.write(off, value as u32) {
-            route_ipi(apic_id, &icr);
+            lapic::deliver_ipi(apic_id, &icr);
         }
     } else {
         let value = apic.read(off) as u64;
@@ -2590,102 +1942,11 @@ fn handle_mmio_npf_lapic(
     true
 }
 
-/// Kick vCPU `target`'s host core out of VMRUN so it injects the just-set IPI
-/// promptly. Skips an unmapped target and the sender's own core (`self_core`).
-fn kick_vcpu_core(target: u8, self_core: usize) {
-    let t = target as usize;
-    if t >= MAX_VCPUS {
-        return;
-    }
-    let hc = VCPU_HOST_CORE[t].load(Ordering::Relaxed);
-    if hc == usize::MAX || hc == self_core {
-        return;
-    }
-    crate::smp::kick_host_core(hc);
-}
-
-/// True if vCPU `target` looks preempted (idle/parked) right now: it hasn't
-/// taken a VM-exit in > ~2 ms. A running vCPU exits ≥1 kHz; a parked one (HLT →
-/// fiber yielded → no VMRUN) goes quiet. This is the PV-TLB-flush skip estimate
-/// — a preempted target is one KVM's PV path would mark FLUSH_TLB + skip the IPI.
-fn vcpu_preempted(target: u8) -> bool {
-    let t = target as usize;
-    if t >= MAX_VCPUS {
-        return false;
-    }
-    let last = VCPU_LAST_ACTIVE[t].load(Ordering::Relaxed);
-    if last == 0 {
-        return true; // never ran → definitely not executing guest
-    }
-    let stale = (crate::interrupts::tsc_freq() / 1000) * 2; // ~2 ms of TSC
-    crate::interrupts::rdtsc().wrapping_sub(last) > stale
-}
-
-/// Route a decoded ICR write (guest SMP). FIXED/LOWEST → mark the vector
-/// pending on the target vCPU(s) + kick its host core for prompt delivery;
-/// STARTUP → ask the orchestration layer to spawn the AP at the SIPI vector
-/// (once); INIT and other modes → no-op (the AP starts from its SIPI; we don't
-/// model NMI/SMI cross-vCPU here).
-fn route_ipi(sender: u8, icr: &lapic::IcrWrite) {
-    match icr.delivery_mode {
-        lapic::ICR_DM_STARTUP => {
-            crate::microvm::cpu::request_ap_spawn(icr.dest, icr.vector);
-        }
-        lapic::ICR_DM_FIXED | lapic::ICR_DM_LOWEST => {
-            let n = crate::microvm::cpu::guest_vcpus();
-            // The sender's own host core (so we never kick ourselves).
-            let self_core = if (sender as usize) < MAX_VCPUS {
-                VCPU_HOST_CORE[sender as usize].load(Ordering::Relaxed)
-            } else {
-                usize::MAX
-            };
-            match icr.shorthand {
-                0 => {
-                    // physical dest — kick only on the empty→non-empty edge.
-                    if ipi_set(icr.dest, icr.vector) {
-                        kick_vcpu_core(icr.dest, self_core);
-                    }
-                }
-                1 => {
-                    let _ = ipi_set(sender, icr.vector); // self — no kick
-                }
-                2 => {
-                    for t in 0..n {
-                        let edge = ipi_set(t, icr.vector);
-                        if t != sender {
-                            crate::microvm::cpu::rip_sample::note_ipi_target(
-                                vcpu_preempted(t),
-                            );
-                            if edge {
-                                kick_vcpu_core(t, self_core);
-                            }
-                        }
-                    }
-                } // all incl self
-                _ => {
-                    for t in 0..n {
-                        if t != sender {
-                            crate::microvm::cpu::rip_sample::note_ipi_target(
-                                vcpu_preempted(t),
-                            );
-                            if ipi_set(t, icr.vector) {
-                                kick_vcpu_core(t, self_core);
-                            }
-                        }
-                    }
-                } // all excl self
-            }
-        }
-        _ => {}
-    }
-}
-
 fn handle_mmio_npf_blk(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     blk: &mut crate::microvm::devices::virtio_blk_pci::VirtioBlk,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2735,7 +1996,7 @@ fn handle_mmio_npf_blk(
         let advanced = blk.service_queues(qidx, mem);
         if advanced {
             // Inject if interruptible, else defer (SMP qspinlock safety).
-            deliver_irq(vmcb, pending, blk.irq_line(), pic.vector_for_irq(blk.irq_line()));
+            pic.pulse(blk.irq_line());
         }
     }
 
@@ -2806,8 +2067,7 @@ fn handle_mmio_npf_net(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     net: &mut crate::microvm::devices::virtio_net_dev::VirtioNet,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2852,7 +2112,7 @@ fn handle_mmio_npf_net(
         } else {
             let advanced = net.service_queues(qidx, mem);
             if advanced {
-                deliver_irq(vmcb, pending, 10, pic.vector_for_irq(10));
+                pic.pulse(10);
             }
         }
     }
@@ -2866,8 +2126,7 @@ fn handle_mmio_npf_gpu(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     gpu: &mut crate::microvm::devices::virtio_gpu_pci::VirtioGpu,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2915,7 +2174,7 @@ fn handle_mmio_npf_gpu(
             let advanced = gpu.service_queues(qidx, mem);
             if advanced {
                 // virtio-gpu IRQ line = 9.
-                deliver_irq(vmcb, pending, 9, pic.vector_for_irq(9));
+                pic.pulse(9);
             }
         }
     }
@@ -2930,8 +2189,7 @@ fn handle_mmio_npf_input(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     input: &mut crate::microvm::devices::virtio_input_pci::VirtioInput,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -2971,7 +2229,7 @@ fn handle_mmio_npf_input(
         let advanced = input.service_queues(qidx, mem);
         if advanced {
             // virtio-input IRQ line = 12.
-            deliver_irq(vmcb, pending, 12, pic.vector_for_irq(12));
+            pic.pulse(12);
         }
     }
 
@@ -2985,8 +2243,7 @@ fn handle_mmio_npf_p9(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     p9: &mut crate::microvm::devices::virtio_9p_pci::Virtio9p,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -3025,7 +2282,7 @@ fn handle_mmio_npf_p9(
     if let Some(qidx) = p9.take_pending_kick() {
         let advanced = p9.service_queues(qidx, mem);
         if advanced {
-            deliver_irq(vmcb, pending, p9.irq_line(), pic.vector_for_irq(p9.irq_line()));
+            pic.pulse(p9.irq_line());
         }
     }
 
@@ -3038,8 +2295,7 @@ fn handle_mmio_npf_snd(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
     snd: &mut crate::microvm::devices::virtio_snd_pci::VirtioSnd,
-    pic: &crate::microvm::devices::pic8259::Pic8259,
-    pending: &mut u16,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
     mem: &GuestMem,
 ) -> bool {
@@ -3064,7 +2320,7 @@ fn handle_mmio_npf_snd(
     if let Some(qidx) = snd.take_pending_kick() {
         let advanced = snd.service_queues(qidx, mem);
         if advanced {
-            deliver_irq(vmcb, pending, snd.irq_line(), pic.vector_for_irq(snd.irq_line()));
+            pic.pulse(snd.irq_line());
         }
     }
 

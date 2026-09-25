@@ -40,7 +40,15 @@ pub const OFF_MSRPM_BASE_PA: usize = 0x048;
 #[allow(dead_code)] pub const OFF_TSC_OFFSET: usize = 0x050;
 pub const OFF_ASID: usize = 0x058;
 pub const OFF_TLB_CTL: usize = 0x05C;
-#[allow(dead_code)] pub const OFF_INT_CTL: usize = 0x060;
+pub const OFF_INT_CTL: usize = 0x060;
+/// `int_ctl` bits (APM Vol 2 §15.21.1 / KVM svm.h).
+pub const V_IRQ: u32 = 1 << 8;
+pub const V_INTR_PRIO_SHIFT: u32 = 16;
+pub const V_INTR_PRIO_MASK: u32 = 0xF << 16;
+pub const V_IGN_TPR: u32 = 1 << 20;
+/// Guest RFLAGS.IF masks only VIRTUAL interrupts; physical ones (host timer,
+/// kick IPIs) still exit. Without it a guest with IF=0 held our kicks back.
+pub const V_INTR_MASKING: u32 = 1 << 24;
 pub const OFF_EXIT_CODE: usize = 0x070;
 /// Interrupt shadow / guest interrupt mask (APM Vol 2 App. B). Bit 0 =
 /// interrupt shadow (set for one instruction after STI / MOV SS). Read to
@@ -69,6 +77,8 @@ pub const OFF_NRIP: usize = 0x0C8;
 // ── Misc-1 intercept bits (APM Vol 2 §15.9) ────────────────────────
 
 pub const INTERCEPT_INTR: u32 = 1 << 0;
+/// Virtual interrupt — the interrupt window (`svm_enable_irq_window`).
+pub const INTERCEPT_VINTR: u32 = 1 << 4;
 pub const INTERCEPT_NMI: u32 = 1 << 1;
 /// CPUID — Linux uses this for early feature detection (CPU vendor,
 /// CET, AVX, MWAIT, ...). Required so we can hide CET from the guest

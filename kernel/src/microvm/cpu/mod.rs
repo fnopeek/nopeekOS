@@ -825,6 +825,8 @@ static BSP_HOST_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// `VCPU_HOST_CORE`, so on Intel the off-vCPU data plane had no way to wake the
 /// guest at all — and both target machines are Intel. `BSP_HOST_CORE` is written
 /// by `vcpu_fiber_task` before either vendor's run loop starts.
+/// Also the wake for every other device source the BSP services (input,
+/// 9p replies): a blocked vCPU parks until a timer deadline or this kick.
 pub fn kick_bsp_net_irq() {
     let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
     if hc != usize::MAX {

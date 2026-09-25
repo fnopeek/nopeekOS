@@ -153,7 +153,11 @@ fn worker_entry(_: u64) {
                 if nbytes > 0 { PENDING_BYTES.fetch_sub(nbytes, Ordering::AcqRel); }
                 // Only deferred ops are awaited by the vCPU; fast-path-acked
                 // writes (reply=false) must NOT post a Done (tag could be reused).
-                if reply { DONE.lock().push_back(Done { tag, result }); }
+                if reply {
+                    DONE.lock().push_back(Done { tag, result });
+                    // The BSP posts the reply and raises the IRQ; wake it.
+                    crate::microvm::cpu::kick_bsp_net_irq();
+                }
                 last_work = crate::interrupts::ticks();
                 // Cooperative yield: lets a co-located vCPU (shared core) run,
                 // returns immediately when alone so we grab the next chunk fast.

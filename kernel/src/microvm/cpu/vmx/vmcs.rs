@@ -565,6 +565,8 @@ pub fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 
 // CPU-based control bits we care about.
 const CPU_HLT_EXITING: u32 = 1 << 7;
+/// Bit 2: exit as soon as the guest can take an external interrupt.
+const CPU_INTR_WINDOW_EXITING: u32 = 1 << 2;
 const CPU_MWAIT_EXITING: u32 = 1 << 10;
 const CPU_RDPMC_EXITING: u32 = 1 << 11;
 const CPU_MONITOR_EXITING: u32 = 1 << 29;
@@ -1298,7 +1300,14 @@ pub fn basic_exit_reason(raw: u64) -> u16 {
 pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
     let len = vmread(VM_EXIT_INSTRUCTION_LEN)?;
     let rip = vmread(GUEST_RIP)?;
-    vmwrite(GUEST_RIP, rip.wrapping_add(len))
+    vmwrite(GUEST_RIP, rip.wrapping_add(len))?;
+    // KVM `skip_emulated_instruction` → `vmx_set_interrupt_shadow(0)`: the
+    // skipped instruction was the one an STI / MOV SS shadow covered.
+    let v = vmread(GUEST_INTERRUPTIBILITY_INFO)?;
+    if v & 0b11 != 0 {
+        vmwrite(GUEST_INTERRUPTIBILITY_INFO, v & !0b11)?;
+    }
+    Ok(())
 }
 
 /// Read GUEST_CR3 from the current VMCS. Used by the CR-access
@@ -1345,6 +1354,14 @@ pub fn inject_exception(vector: u8, error_code: Option<u32>) -> Result<(), &'sta
         vmwrite(VM_ENTRY_EXCEPTION_ERROR_CODE, e as u64)?;
     }
     vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
+}
+
+/// `vmx_enable_irq_window` / its clear: toggle interrupt-window exiting.
+pub fn set_interrupt_window_exiting(on: bool) -> Result<(), &'static str> {
+    let v = vmread(CPU_BASED_VM_EXEC_CONTROL)? as u32;
+    let n = if on { v | CPU_INTR_WINDOW_EXITING } else { v & !CPU_INTR_WINDOW_EXITING };
+    if n != v { vmwrite(CPU_BASED_VM_EXEC_CONTROL, n as u64)?; }
+    Ok(())
 }
 
 pub fn read_guest_pat() -> Result<u64, &'static str> { vmread(GUEST_IA32_PAT_FIELD) }
@@ -1407,22 +1424,6 @@ pub fn guest_interruptible() -> bool {
     let rflags = vmread(GUEST_RFLAGS).unwrap_or(0);
     let intr = vmread(GUEST_INTERRUPTIBILITY_INFO).unwrap_or(0);
     (rflags & IF) != 0 && (intr & 0b11) == 0
-}
-
-/// Clear blocking-by-STI (bit 0) + blocking-by-MOV-SS (bit 1) in the guest
-/// interruptibility-state. Call after advancing past a HLT: the HLT IS the
-/// single instruction the STI shadow covered, so executing it consumes the
-/// shadow. Without this, an idle `sti; hlt` returns with blocking-by-STI
-/// still set → `guest_interruptible()` is false → the HLT handler's gate
-/// re-enters instead of injecting the wakeup + parking → a 3.3M-hlt/s spin
-/// (SVM never hit it because AMD tolerates inject-while-shadowed; VMX rejects
-/// it with reason 33, so we must clear the shadow ourselves).
-pub fn consume_sti_shadow() -> Result<(), &'static str> {
-    let v = vmread(GUEST_INTERRUPTIBILITY_INFO)?;
-    if v & 0b11 != 0 {
-        vmwrite(GUEST_INTERRUPTIBILITY_INFO, v & !0b11)?;
-    }
-    Ok(())
 }
 
 /// Read VMCS VM_ENTRY_CONTROLS — the live entry-control field
