@@ -2577,7 +2577,7 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     // forever, on the network's own critical path. A measuring tool that slows
     // the thing it measures is the third time we have paid for this.
     //
-    //     store sys/config/microvm_gdiag on
+    //     set microvm_gdiag on
     //
     // turns it back on for a session that actually wants the inside view.
     if crate::config::get("microvm_gdiag")
