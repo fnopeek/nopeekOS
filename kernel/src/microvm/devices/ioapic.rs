@@ -13,7 +13,7 @@
 //! the LAPIC's EOI broadcast wired back here, a set Remote IRR would block the
 //! pin for good.
 
-use crate::microvm::cpu::svm::lapic::{self, IcrWrite, ICR_DM_FIXED, ICR_DM_LOWEST};
+use crate::microvm::cpu::svm::lapic;
 
 pub const IOAPIC_BASE: u64 = 0xFEC0_0000;
 pub const IOAPIC_SIZE: u64 = 0x1000;
@@ -87,36 +87,13 @@ impl Ioapic {
     fn service(&mut self, pin: usize, from: u8) {
         let e = self.redirtbl[pin];
         if e & RTE_MASK != 0 { return; }
-        let vector = (e & RTE_VECTOR) as u8;
-        let mode = ((e >> RTE_DELIVERY_MODE_SHIFT) & 0x7) as u32;
-        // Fixed and lowest priority are the modes Linux programs for device
-        // pins; the rest (SMI, NMI, INIT, ExtINT) have no source here.
-        let delivery_mode = match mode {
-            0 => ICR_DM_FIXED,
-            1 => ICR_DM_LOWEST,
-            _ => return,
-        };
-        let dest = (e >> RTE_DEST_SHIFT) as u8;
-        let send = |t: u8| lapic::deliver_ipi(from, &IcrWrite {
-            delivery_mode, shorthand: 0, dest: t, vector,
-        });
-        if e & RTE_DEST_LOGICAL == 0 {
-            if dest == 0xFF {
-                (0..crate::microvm::cpu::guest_vcpus()).for_each(send);
-            } else {
-                send(dest);
-            }
-        } else {
-            // Flat logical model: bit n = the vCPU whose LDR Linux set to 1 << n.
-            // Lowest priority goes to the first one named.
-            let n = crate::microvm::cpu::guest_vcpus().min(8);
-            let mut targets = (0..n).filter(|&i| dest & (1 << i) != 0);
-            if delivery_mode == ICR_DM_LOWEST {
-                if let Some(t) = targets.next() { send(t); }
-            } else {
-                targets.for_each(send);
-            }
-        }
+        lapic::deliver_msg(
+            (e >> RTE_DEST_SHIFT) as u8,
+            e & RTE_DEST_LOGICAL != 0,
+            ((e >> RTE_DELIVERY_MODE_SHIFT) & 0x7) as u8,
+            (e & RTE_VECTOR) as u8,
+            from,
+        );
     }
 
     /// `ioapic_read_indirect`.

@@ -111,6 +111,139 @@ pub fn tx_ring_pending(mem: &super::guest_mem::GuestMem) -> bool {
         .is_some_and(|top| top as u32 != TX_LAST_AVAIL.load(Ordering::Acquire))
 }
 
+// ── MSI-X (PCI 3.0 §6.8.2): config + RX + TX vectors ──
+//
+// The table lives in atomics, not in the device: the data-plane worker fires
+// a queue's vector straight into the target vCPU's LAPIC (posted + kick) —
+// KVM's irqfd → MSI route — without the device lock and without the BSP.
+
+pub const MSIX_VECTORS: usize = 3;
+/// BAR0 offsets of the table (16 bytes per entry) and the pending-bit array.
+pub const MSIX_TABLE_OFF: u32 = 0x2000;
+pub const MSIX_PBA_OFF: u32 = 0x3000;
+const MSIX_ENTRY_MASKED: u32 = 1;
+
+static MSIX_ENABLED: AtomicBool = AtomicBool::new(false);
+static MSIX_FUNC_MASK: AtomicBool = AtomicBool::new(false);
+static MSIX_ADDR: [core::sync::atomic::AtomicU64; MSIX_VECTORS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MSIX_VECTORS];
+static MSIX_DATA: [core::sync::atomic::AtomicU32; MSIX_VECTORS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; MSIX_VECTORS];
+/// Vector control; every entry starts masked (PCI spec).
+static MSIX_CTRL: [core::sync::atomic::AtomicU32; MSIX_VECTORS] =
+    [const { core::sync::atomic::AtomicU32::new(MSIX_ENTRY_MASKED) }; MSIX_VECTORS];
+static MSIX_PENDING: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// virtio `queue_msix_vector` per queue (RX 0, TX 1); 0xFFFF = none.
+static QUEUE_VECTOR: [core::sync::atomic::AtomicU16; 2] =
+    [const { core::sync::atomic::AtomicU16::new(0xFFFF) }; 2];
+
+fn msix_reset() {
+    MSIX_ENABLED.store(false, Ordering::Release);
+    MSIX_FUNC_MASK.store(false, Ordering::Release);
+    for i in 0..MSIX_VECTORS {
+        MSIX_ADDR[i].store(0, Ordering::Relaxed);
+        MSIX_DATA[i].store(0, Ordering::Relaxed);
+        MSIX_CTRL[i].store(MSIX_ENTRY_MASKED, Ordering::Relaxed);
+    }
+    MSIX_PENDING.store(0, Ordering::Release);
+    for q in QUEUE_VECTOR.iter() { q.store(0xFFFF, Ordering::Release); }
+}
+
+/// Message control word of the capability (read side).
+pub fn msix_msgctl() -> u16 {
+    (MSIX_VECTORS as u16 - 1)
+        | if MSIX_ENABLED.load(Ordering::Acquire) { 1 << 15 } else { 0 }
+        | if MSIX_FUNC_MASK.load(Ordering::Acquire) { 1 << 14 } else { 0 }
+}
+
+/// Guest wrote the message control word: enable / function mask.
+pub fn msix_set_msgctl(v: u16) {
+    MSIX_ENABLED.store(v & (1 << 15) != 0, Ordering::Release);
+    MSIX_FUNC_MASK.store(v & (1 << 14) != 0, Ordering::Release);
+    msix_flush_pending();
+}
+
+pub fn set_queue_vector(queue: u16, vector: u16) {
+    if let Some(q) = QUEUE_VECTOR.get(queue as usize) { q.store(vector, Ordering::Release); }
+}
+
+/// Send vector `v`'s message, or latch it in the PBA while it is masked.
+fn msix_fire(v: usize) {
+    if MSIX_FUNC_MASK.load(Ordering::Acquire)
+        || MSIX_CTRL[v].load(Ordering::Acquire) & MSIX_ENTRY_MASKED != 0
+    {
+        MSIX_PENDING.fetch_or(1 << v, Ordering::AcqRel);
+        return;
+    }
+    // Message address: 0xFEE, destination ID in bits 19:12, destination mode
+    // (logical) in bit 2. Data: vector in 7:0, delivery mode in 10:8.
+    let addr = MSIX_ADDR[v].load(Ordering::Acquire);
+    let data = MSIX_DATA[v].load(Ordering::Acquire);
+    crate::microvm::cpu::svm::lapic::deliver_msg(
+        (addr >> 12) as u8,
+        addr & (1 << 2) != 0,
+        ((data >> 8) & 0x7) as u8,
+        data as u8,
+        crate::microvm::cpu::svm::lapic::vcpu_on_this_core(),
+    );
+}
+
+/// Unmasked entries with a pending bit fire now (PCI: on unmask).
+fn msix_flush_pending() {
+    if !MSIX_ENABLED.load(Ordering::Acquire) || MSIX_FUNC_MASK.load(Ordering::Acquire) { return; }
+    for v in 0..MSIX_VECTORS {
+        if MSIX_CTRL[v].load(Ordering::Acquire) & MSIX_ENTRY_MASKED == 0
+            && MSIX_PENDING.fetch_and(!(1 << v), Ordering::AcqRel) & (1 << v) != 0
+        {
+            msix_fire(v);
+        }
+    }
+}
+
+/// Signal queue `q` by MSI-X. `false` = MSI-X is off, use INTx (IRQ 10).
+pub fn msix_notify(q: u16) -> bool {
+    if !MSIX_ENABLED.load(Ordering::Acquire) { return false; }
+    let v = QUEUE_VECTOR.get(q as usize).map_or(0xFFFF, |x| x.load(Ordering::Acquire)) as usize;
+    if v < MSIX_VECTORS { msix_fire(v); }
+    true // with MSI-X on, a queue without a vector has no interrupt at all
+}
+
+/// MMIO into the MSI-X table / PBA (BAR0-relative `off`). `Some` if handled.
+pub fn msix_mmio(off: u32, write: Option<u32>) -> Option<u32> {
+    if (MSIX_TABLE_OFF..MSIX_TABLE_OFF + 16 * MSIX_VECTORS as u32).contains(&off) {
+        let rel = off - MSIX_TABLE_OFF;
+        let v = (rel / 16) as usize;
+        let field = rel % 16;
+        return Some(match (field, write) {
+            (0, None) => MSIX_ADDR[v].load(Ordering::Acquire) as u32,
+            (4, None) => (MSIX_ADDR[v].load(Ordering::Acquire) >> 32) as u32,
+            (8, None) => MSIX_DATA[v].load(Ordering::Acquire),
+            (12, None) => MSIX_CTRL[v].load(Ordering::Acquire),
+            (0, Some(x)) => {
+                let a = MSIX_ADDR[v].load(Ordering::Acquire);
+                MSIX_ADDR[v].store((a & !0xFFFF_FFFF) | x as u64, Ordering::Release); 0
+            }
+            (4, Some(x)) => {
+                let a = MSIX_ADDR[v].load(Ordering::Acquire);
+                MSIX_ADDR[v].store((a & 0xFFFF_FFFF) | (x as u64) << 32, Ordering::Release); 0
+            }
+            (8, Some(x)) => { MSIX_DATA[v].store(x, Ordering::Release); 0 }
+            (12, Some(x)) => {
+                MSIX_CTRL[v].store(x & MSIX_ENTRY_MASKED, Ordering::Release);
+                msix_flush_pending();
+                0
+            }
+            _ => 0,
+        });
+    }
+    if (MSIX_PBA_OFF..MSIX_PBA_OFF + 8).contains(&off) {
+        return Some(if write.is_none() && off == MSIX_PBA_OFF {
+            MSIX_PENDING.load(Ordering::Acquire)
+        } else { 0 });
+    }
+    None
+}
+
 /// Signal that the guest's virtio-net IRQ10 should be injected.
 #[inline]
 pub fn raise_irq() { NET_IRQ_PENDING.store(true, Ordering::Release); }
@@ -164,6 +297,7 @@ pub fn bar0_in_range(gpa: u64) -> bool {
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
     TX_AVAIL_GPA.store(0, Ordering::Release);
+    msix_reset();
     ISR.store(0, Ordering::Release);
     NET_IRQ_PENDING.store(false, Ordering::Release);
     TX_KICK.store(false, Ordering::Release);

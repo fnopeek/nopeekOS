@@ -48,6 +48,7 @@ const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 const CAP_COMMON_OFF: u8 = 0x40;
 const CAP_NOTIFY_OFF: u8 = 0x54;
 const CAP_ISR_OFF:    u8 = 0x68;
+const CAP_MSIX_OFF:   u8 = 0x88;
 const CAP_DEVICE_OFF: u8 = 0x78;
 
 const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
@@ -312,8 +313,13 @@ impl VirtioNet {
             0x68 => 0x09 | ((CAP_DEVICE_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_ISR_CFG as u32) << 24),
             0x70 => ISR_OFF, 0x74 => ISR_LEN,
 
-            0x78 => 0x09 | (0 << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24),
+            0x78 => 0x09 | ((CAP_MSIX_OFF as u32) << 8) | (16 << 16) | ((VIRTIO_PCI_CAP_DEVICE_CFG as u32) << 24),
             0x80 => DEVICE_OFF, 0x84 => DEVICE_LEN,
+
+            // MSI-X capability (ID 0x11): table + PBA in BAR0.
+            0x88 => 0x11 | ((super::net_backend::msix_msgctl() as u32) << 16),
+            0x8C => super::net_backend::MSIX_TABLE_OFF,
+            0x90 => super::net_backend::MSIX_PBA_OFF,
             _ => 0,
         }
     }
@@ -328,12 +334,16 @@ impl VirtioNet {
                 if value == 0xFFFF_FFFF { self.bar0_hi_sized = true; }
                 else { self.bar0_hi = value; self.bar0_hi_sized = false; }
             }
+            0x88 => super::net_backend::msix_set_msgctl((value >> 16) as u16),
             _ => {}
         }
     }
 
     // ── MMIO dispatch (off is BAR0-relative, computed by the run loop) ──
     pub fn mmio_read(&mut self, off: u32, width: u8) -> u64 {
+        if let Some(v) = super::net_backend::msix_mmio(off, None) {
+            return v as u64 & width_mask(width);
+        }
         if (COMMON_OFF..COMMON_OFF + COMMON_LEN).contains(&off) {
             self.common_read(off - COMMON_OFF, width)
         } else if (ISR_OFF..ISR_OFF + ISR_LEN).contains(&off) {
@@ -347,6 +357,9 @@ impl VirtioNet {
     }
 
     pub fn mmio_write(&mut self, off: u32, width: u8, value: u64) {
+        if super::net_backend::msix_mmio(off, Some(value as u32)).is_some() {
+            return;
+        }
         if (COMMON_OFF..COMMON_OFF + COMMON_LEN).contains(&off) {
             self.common_write(off - COMMON_OFF, width, value);
         } else if (NOTIFY_OFF..NOTIFY_OFF + NOTIFY_LEN).contains(&off) {
@@ -421,7 +434,10 @@ impl VirtioNet {
             }
             CC_QUEUE_SELECT => self.queue_select = val as u16,
             CC_QUEUE_SIZE => self.q_mut().size = (val as u16).min(MAX_QUEUE_SIZE),
-            CC_QUEUE_MSIX_VECTOR => self.q_mut().msix_vec = val as u16,
+            CC_QUEUE_MSIX_VECTOR => {
+                self.q_mut().msix_vec = val as u16;
+                super::net_backend::set_queue_vector(self.queue_select, val as u16);
+            }
             CC_QUEUE_ENABLE => self.q_mut().enable = val as u16,
             CC_QUEUE_DESC_LO => self.q_mut().desc_lo = val as u32,
             CC_QUEUE_DESC_HI => self.q_mut().desc_hi = val as u32,
@@ -434,6 +450,10 @@ impl VirtioNet {
     }
 
     fn reset(&mut self) {
+        // Queue vectors are virtio state (the MSI-X table itself is PCI state
+        // and survives a device reset).
+        super::net_backend::set_queue_vector(0, 0xFFFF);
+        super::net_backend::set_queue_vector(1, 0xFFFF);
         for q in self.queues.iter_mut() {
             *q = VirtQueue {
                 size: MAX_QUEUE_SIZE, msix_vec: 0xFFFF, enable: 0,

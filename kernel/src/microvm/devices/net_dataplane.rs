@@ -238,7 +238,11 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     // irqfd: wake the guest only when EVENT_IDX asks for an interrupt. Without
     // one the guest is inside its NAPI poll and reads the ring itself; a halted
     // guest has re-armed used_event, so new entries always cross it.
-    if rx_raise || tx_raise {
+    // With MSI-X each queue's vector goes straight to its vCPU (irqfd → MSI);
+    // only INTx still takes the detour through the BSP's IRQ 10.
+    let rx_intx = rx_raise && !net_backend::msix_notify(0);
+    let tx_intx = tx_raise && !net_backend::msix_notify(1);
+    if rx_intx || tx_intx {
         net_backend::raise_irq();
         crate::microvm::cpu::kick_bsp_net_irq();
     }

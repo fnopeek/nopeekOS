@@ -2264,7 +2264,7 @@ fn handle_mmio_npf_net(
             crate::microvm::devices::net_backend::note_tx_kick();
         } else {
             let advanced = net.service_queues(qidx, mem);
-            if advanced {
+            if advanced && !crate::microvm::devices::net_backend::msix_notify(qidx) {
                 pic.pulse(10);
             }
         }

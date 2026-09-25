@@ -2442,7 +2442,7 @@ fn handle_mmio_ept_net(
             crate::microvm::devices::net_backend::note_tx_kick();
         } else {
             let advanced = net.service_queues(qidx, mem);
-            if advanced {
+            if advanced && !crate::microvm::devices::net_backend::msix_notify(qidx) {
                 // virtio-net IRQ line = 10 (per pci config 0x3C).
                 pic.pulse(10);
             }
