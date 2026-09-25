@@ -1943,6 +1943,10 @@ fn handle_linux_io(
 
     let in_value: Option<u64> = match (port, dir_in) {
         // i8254 channel 0 (the other channels are not a tick source).
+        // i8042: absent. An empty bus reads all-ones, and 0xFF at the status
+        // port is how Linux sees "No controller found" at once — a 0 there
+        // made it probe the CTR into timeouts (650 ms of every guest boot).
+        (0x60 | 0x64, true) => Some(0xFF),
         (0x43, false) => { pit.command(val_out as u8); None }
         (0x40, false) => { pit.write_counter(val_out as u8); None }
         (0x3F8, false) => {

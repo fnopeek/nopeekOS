@@ -2120,6 +2120,10 @@ fn handle_linux_io(
         // i8253 channel 0: mode/command (0x43) and the counter itself (0x40).
         // The counter write is new — it was dropped on the floor before, which
         // is why the tick had no period of its own.
+        // i8042: absent — all-ones, see the SVM `handle_linux_io`.
+        (0x60 | 0x64, true) => {
+            regs.rax = (regs.rax & !mask) | (0xFFu64 & mask);
+        }
         (0x43, false) => pit.command(val_out as u8),
         (0x40, false) => pit.write_counter(val_out as u8),
         // COM1 OUT.
