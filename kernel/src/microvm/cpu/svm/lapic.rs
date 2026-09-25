@@ -114,6 +114,32 @@ static VCPU_HOST_CORE: [AtomicUsize; MAX_VCPUS] =
 /// goes quiet (the PV-TLB "preempted" estimate in `rip_sample`).
 static VCPU_LAST_ACTIVE: [AtomicU64; MAX_VCPUS] = [const { AtomicU64::new(0) }; MAX_VCPUS];
 
+/// Guest LAPIC accesses by register (`cores`): each one is a trapped MMIO
+/// exit with an instruction fetch + decode, so which register dominates
+/// decides the cure (EOI / ICR → x2APIC or PV-EOI, TMICT → TSC deadline).
+pub const ACCESS_BUCKETS: usize = 8;
+pub const ACCESS_LABELS: [&str; ACCESS_BUCKETS] =
+    ["eoi", "icr-w", "tmict-w", "tmcct-r", "tpr", "lvt", "other-r", "other-w"];
+static ACCESS_COUNTS: [AtomicU64; ACCESS_BUCKETS] = [const { AtomicU64::new(0) }; ACCESS_BUCKETS];
+
+fn note_access(off: u32, write: bool) {
+    let b = match (off & 0xFF0, write) {
+        (APIC_EOI, _) => 0,
+        (APIC_ICR | APIC_ICR2, true) => 1,
+        (APIC_TMICT, true) => 2,
+        (APIC_TMCCT, false) => 3,
+        (APIC_TASKPRI, _) => 4,
+        (APIC_LVTT..=APIC_LVTERR, _) => 5,
+        (_, false) => 6,
+        (_, true) => 7,
+    };
+    ACCESS_COUNTS[b].fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn access_snapshot() -> [u64; ACCESS_BUCKETS] {
+    core::array::from_fn(|i| ACCESS_COUNTS[i].load(Ordering::Relaxed))
+}
+
 pub fn set_host_core(apic_id: u8, core: usize) {
     if (apic_id as usize) < MAX_VCPUS {
         VCPU_HOST_CORE[apic_id as usize].store(core, Ordering::Relaxed);
@@ -362,6 +388,7 @@ impl LocalApic {
     // ── MMIO (`kvm_lapic_reg_read` / `kvm_lapic_reg_write`) ──
 
     pub fn read(&mut self, off: u32) -> u32 {
+        note_access(off, false);
         match off & 0xFF0 {
             APIC_TMCCT => self.tmcct(),
             APIC_PROCPRI => self.update_ppr(),
@@ -372,6 +399,7 @@ impl LocalApic {
     /// Returns the decoded IPI for an ICR-low write; the backend routes it.
     #[must_use]
     pub fn write(&mut self, off: u32, val: u32) -> Option<IcrWrite> {
+        note_access(off, true);
         match off & 0xFF0 {
             APIC_EOI => {
                 // `apic_set_eoi`: clear the highest in-service vector.
