@@ -905,6 +905,34 @@ pub fn bsp_host_core() -> Option<usize> {
     }
 }
 
+/// Last step before a guest entry (`vcpu_enter_guest`: IRQs off, then
+/// recheck): disable host interrupts, arm the host one-shot at `deadline`,
+/// and cancel the entry if a kick came in since `kick_gen` was read. With
+/// IF=1 here, a kick or the timer interrupt was taken by the host and exited
+/// nothing: the vCPU ran on with a posted vector or with no armed timer, and
+/// nothing ever brought it out (both vCPUs hung in guest for minutes). With
+/// IF=0 either stays pending and exits the guest at once — a deadline
+/// already past included. `false` = IF is back on, loop again.
+#[inline]
+pub fn entry_irqs_off(kick_gen: u64, host_core: usize, deadline: u64) -> bool {
+    // SAFETY: the vCPU loop runs with IF=1; `entry_irqs_on` or the VMX
+    // exit asm sets it again.
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+    crate::interrupts::arm_vcpu_timer(deadline);
+    if crate::smp::fiber::net_kick_gen(host_core) != kick_gen {
+        entry_irqs_on();
+        return false;
+    }
+    true
+}
+
+/// Host interrupts back on after the guest exit; a pending one is taken now.
+#[inline]
+pub fn entry_irqs_on() {
+    // SAFETY: counterpart of `entry_irqs_off`.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+}
+
 pub fn kick_bsp_net_irq() {
     let hc = BSP_HOST_CORE.load(Ordering::Relaxed);
     if hc != usize::MAX {

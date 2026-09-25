@@ -426,11 +426,16 @@ fn run_guest_once(
             "vmsave rax",                   // save host FS/GS/TR/LDTR/MSRs
             "mov rax, [rsp + 32]",          // guest vmcb_phys
             "clgi",
+            // Host IF=1 under GIF=0: nothing is taken here, but VMRUN saves
+            // IF=1, so a pending or arriving host interrupt exits the guest
+            // (V_INTR_MASKING: the host's IF gates physical interrupts).
+            "sti",
             "vmload rax",                   // load guest FS/GS/KernelGS/STAR/LSTAR/SFMASK/SYSENTER
             "vmrun rax",
             "vmsave rax",                   // save guest's back into the guest VMCB
             "mov rax, [rsp + 24]",          // host_extra_save phys
             "vmload rax",                   // restore host FS/GS/... while GIF=0 (atomic vs IRQs)
+            "cli",                          // taken after entry_irqs_on, not mid-exit-path
             "stgi",                         // only NOW open the IRQ window — host state already correct
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
             // clobbers; host FS/GS restored by the vmload above.
@@ -1473,7 +1478,8 @@ impl VmContext {
         + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
 
     // Publish this vCPU's host core so a sender can kick it.
-    lapic::set_host_core(self.vcpu.apic_id, crate::smp::per_core::current_core_id());
+    let host_core = crate::smp::per_core::current_core_id();
+    lapic::set_host_core(self.vcpu.apic_id, host_core);
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
@@ -1482,14 +1488,18 @@ impl VmContext {
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
 
+        let kick_gen = crate::smp::fiber::net_kick_gen(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event();
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
         // The guest's next timer, or the slice end, as a host one-shot on this
         // core: its fire is the exit that delivers the tick on time.
-        crate::interrupts::arm_vcpu_timer(
-            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline)));
+        let entry_deadline =
+            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline));
+        if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
+            continue;
+        }
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
@@ -1500,6 +1510,7 @@ impl VmContext {
             &mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf, self.vcpu.xcr0,
         );
         super::msr::spec_ctrl_exit(host_spec);
+        crate::microvm::cpu::entry_irqs_on();
         let exit = outcome.exit_reason;
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
