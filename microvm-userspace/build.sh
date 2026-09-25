@@ -26,12 +26,14 @@ set -euo pipefail
 # ── Configuration ─────────────────────────────────────────────────
 
 # Alpine release tracking. Bump these together, document the reason
-# in the commit message. Current selection: 3.23 stable, ~Q3 2025
-# release line. Older still-supported lines if needed (security
-# context): 3.20.10, 3.21.7, 3.22.4. Each major gets 2 years upstream.
-ALPINE_BRANCH="${ALPINE_BRANCH:-v3.23}"
-ALPINE_VERSION="${ALPINE_VERSION:-3.23.4}"
-ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-85498865362aa7ebececa0d725a2f2e4db7ac4e4b2850b8df21645afa0d03ee3}"
+# in the commit message. Current selection: 3.24 stable.
+# NOTE: a stable branch does NOT follow the browser. 3.23 froze LibreWolf
+# at 144 while upstream moved to 151 — rebuilding on the same branch only
+# brings library patches. Check `librewolf` in the next branch's APKINDEX
+# before assuming a rebuild updates it.
+ALPINE_BRANCH="${ALPINE_BRANCH:-v3.24}"
+ALPINE_VERSION="${ALPINE_VERSION:-3.24.2}"
+ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-c5ca053cfe1d85c5b96dff8b9bc57045f7f184a30ffb6b65776409ca90388677}"
 
 # Output naming. `alpine-base` for iter 1 (no apks). `alpine-wayland`
 # for iter 2 (Mesa + Wayland + libxkbcommon — display-runtime smoke).
@@ -40,8 +42,8 @@ BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
 # Apks to add on top of minirootfs. Pinning to package _names_ here;
-# the version comes from the pinned Alpine snapshot (`v3.23` branch
-# tracks 3.23.x, the rolling patch level — bumps via ALPINE_VERSION).
+# the version comes from the pinned Alpine snapshot (`v3.24` branch
+# tracks 3.24.x, the rolling patch level — bumps via ALPINE_VERSION).
 # Phase 12.6: this list will balloon for LibreWolf (mesa-dri-gallium,
 # gtk+3.0, libnss, freetype, fontconfig, icu-libs, pulseaudio-libs,
 # librewolf-bin, …). For iter 2 we just need the display-stack libs
