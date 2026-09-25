@@ -153,6 +153,39 @@ pub fn access_snapshot() -> [u64; ACCESS_BUCKETS] {
     core::array::from_fn(|i| ACCESS_COUNTS[i].load(Ordering::Relaxed))
 }
 
+/// Where each vCPU's host thread is right now (`cores`): a hang shows as a
+/// phase that stopped moving. Written at the run-loop landmarks only.
+pub const PH_OUT: u8 = 0;
+pub const PH_INJECT: u8 = 1;
+pub const PH_GUEST: u8 = 2;
+pub const PH_EXIT: u8 = 3;
+pub const PH_BIGLOCK: u8 = 4;
+pub const PH_HALTPOLL: u8 = 5;
+pub const PH_PARK: u8 = 6;
+pub const PH_YIELD: u8 = 7;
+pub const PHASE_LABELS: [&str; 8] =
+    ["out", "inject", "guest", "exit", "big-lock", "halt-poll", "park", "yield"];
+static PHASE: [core::sync::atomic::AtomicU8; MAX_VCPUS] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_VCPUS];
+static PHASE_TSC: [AtomicU64; MAX_VCPUS] = [const { AtomicU64::new(0) }; MAX_VCPUS];
+
+#[inline]
+pub fn phase(apic_id: u8, p: u8) {
+    let i = apic_id as usize;
+    if i < MAX_VCPUS {
+        PHASE[i].store(p, Ordering::Relaxed);
+        PHASE_TSC[i].store(rdtsc(), Ordering::Relaxed);
+    }
+}
+
+/// (phase, TSC it was entered, host core) for vCPU `i`.
+pub fn phase_snapshot(i: usize) -> Option<(u8, u64, usize)> {
+    if i >= MAX_VCPUS { return None; }
+    let core = VCPU_HOST_CORE[i].load(Ordering::Relaxed);
+    if core == usize::MAX { return None; }
+    Some((PHASE[i].load(Ordering::Relaxed), PHASE_TSC[i].load(Ordering::Relaxed), core))
+}
+
 pub fn set_host_core(apic_id: u8, core: usize) {
     if (apic_id as usize) < MAX_VCPUS {
         VCPU_HOST_CORE[apic_id as usize].store(core, Ordering::Relaxed);

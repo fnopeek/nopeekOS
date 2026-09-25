@@ -495,6 +495,15 @@ fn protected_cores() -> u32 {
         if let Some(c) = crate::netdev::wasm_nic_core() { mask |= 1 << c; }
         if let Some(c) = crate::wifi::manager_core() { mask |= 1 << c; }
         mask |= crate::smp::per_core::driver_cores() as u32;
+        // Every other fiber core too, for now: 0.444 put an AP beside the
+        // bar and both vCPUs hung in the host (no VM exits at all). With
+        // cooperative fibers and spin locks, a peer that yields while holding
+        // a lock the vCPU needs is never run again. Until that is proven or
+        // ruled out (`cores` shows each vCPU's phase), vCPUs get empty cores.
+        let n = crate::smp::per_core::core_count().min(32);
+        for c in 1..n {
+            if crate::smp::fiber::fiber_count(c) > 0 { mask |= 1 << c; }
+        }
     }
     mask &= !1; // Core 0 is never a vCPU core anyway
     PROTECTED_CORES.store(mask, Ordering::Release);
@@ -1429,11 +1438,13 @@ fn vcpu_fiber_task(_arg: u64) {
                     match outcome {
                         // Busy guest: let peers take a turn, resume next pass.
                         Ok(svm::SliceOutcome::StillRunning) => {
+                            svm::lapic::phase(0, svm::lapic::PH_YIELD);
                             crate::smp::fiber::yield_ready();
                         }
                         // Idle guest: park briefly → core runs app fibers.
                         // Event-driven on host RX IRQ while downloading.
                         Ok(svm::SliceOutcome::Idle) => {
+                            svm::lapic::phase(0, svm::lapic::PH_PARK);
                             park_vcpu_idle(ctx.next_timer_deadline_tsc());
                         }
                         Ok(svm::SliceOutcome::Exited(o)) => {
@@ -1621,8 +1632,12 @@ fn ap_vcpu_fiber_task(arg: u64) {
                 // SAFETY: ring-0.
                 unsafe { core::arch::asm!("cli") };
                 match outcome {
-                    Ok(svm::SliceOutcome::StillRunning) => { crate::smp::fiber::yield_ready(); }
+                    Ok(svm::SliceOutcome::StillRunning) => {
+                        svm::lapic::phase(apic_id, svm::lapic::PH_YIELD);
+                        crate::smp::fiber::yield_ready();
+                    }
                     Ok(svm::SliceOutcome::Idle) => {
+                        svm::lapic::phase(apic_id, svm::lapic::PH_PARK);
                         crate::smp::fiber::kick_wait_until(
                             vcpu_block_deadline(ctx.next_timer_deadline_tsc()));
                     }
