@@ -1444,7 +1444,8 @@ impl VmContext {
     let mut prof_bucket: usize = crate::microvm::cpu::VMX_OTHER;
 
     // Publish this vCPU's host core so a sender can kick it.
-    lapic::set_host_core(self.vcpu.apic_id, crate::smp::per_core::current_core_id());
+    let host_core = crate::smp::per_core::current_core_id();
+    lapic::set_host_core(self.vcpu.apic_id, host_core);
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_window() != 0 {
         if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline {
@@ -1457,14 +1458,20 @@ impl VmContext {
         if self.vcpu.launched {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
+        let kick_gen = crate::smp::fiber::net_kick_gen(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event()?;
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
         // The guest's next timer, or the slice end, as a host one-shot on this
         // core: its fire is the exit that delivers the tick on time.
-        crate::interrupts::arm_vcpu_timer(
-            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline)));
+        let entry_deadline =
+            self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline));
+        // IF stays 0 into VMRESUME (external-interrupt exiting exits on a
+        // pending interrupt regardless); the asm sets it again after the exit.
+        if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
+            continue;
+        }
         // FPU host↔guest swap is now embedded inside run_guest_once's
         // asm (mirror of SVM v0.172.53), bracketing VMRESUME with zero
         // compiler-emittable code between xrstor and vmresume. A +avx2
