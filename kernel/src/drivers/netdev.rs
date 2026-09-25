@@ -490,6 +490,31 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
 }
 
+/// Can the active card segment + checksum a TCPv4 GSO super-frame itself?
+pub fn tso_capable() -> bool {
+    match active() {
+        Active::Intel => intel_nic::tso_capable(),
+        Active::Virtio | Active::None => virtio_net::tso_capable(),
+        _ => false,
+    }
+}
+
+/// Send a TCPv4 GSO super-frame (whole Ethernet frame, IPv4 without options,
+/// TCP check = pseudo-header seed incl. length). The card cuts it into `mss`
+/// segments. Err ⇒ nothing was queued; the caller segments in software.
+pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    if !active_link_up() {
+        TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed);
+        return Err(NetError::NotInitialized);
+    }
+    match active() {
+        Active::Intel => intel_nic::send_tso(frame, mss, l4_off, hdr_len),
+        Active::Virtio | Active::None => virtio_net::send_tso(frame, mss, l4_off, hdr_len),
+        _ => Err(NetError::NotInitialized),
+    }
+    .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
+}
+
 /// Frames this guard refused, and frames a driver refused. Every caller above
 /// this line throws the Result away — `udp::send`, `ipv4::send` and
 /// `eth::send_frame` all say `let _ =` — so a packet that never reached the air

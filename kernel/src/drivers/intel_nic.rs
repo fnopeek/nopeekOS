@@ -406,6 +406,14 @@ fn wait_for_link(mmio: u64) {
     }
 }
 
+/// TCPv4 segmentation offload — I225/I226 only.
+pub fn tso_capable() -> bool { IS_IGC.load(Ordering::Acquire) }
+
+pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    if !tso_capable() { return Err(NetError::NotInitialized); }
+    igc::send_tso(frame, mss, l4_off, hdr_len)
+}
+
 /// LAPIC vector of the RX interrupt; 0 for the polled e1000 path.
 pub fn rx_irq_vector() -> u8 {
     if IS_IGC.load(Ordering::Acquire) { igc::rx_irq_vector() } else { 0 }

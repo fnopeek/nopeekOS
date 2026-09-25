@@ -3,13 +3,17 @@
 //! Legacy (0.9.5) VirtIO PCI transport with RX/TX virtqueues.
 //! Provides Ethernet frame send/receive for the TCP/IP stack.
 
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 /// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
 /// at init. Lets the off-vCPU data-plane busy-poll for RX arrival WITHOUT taking
 /// the DEVICE lock every spin iteration (the lock-hammer that made the earlier
 /// worker-spin net-negative). 0 = not yet up.
 static RX_USED_IDX_PTR: AtomicU64 = AtomicU64::new(0);
+/// The device segments and checksums TCPv4 GSO frames (`send_tso`).
+static TSO: AtomicBool = AtomicBool::new(false);
+
+pub fn tso_capable() -> bool { TSO.load(Ordering::Acquire) }
 
 /// Current host NIC RX used.idx (lock-free volatile read). The data-plane worker
 /// caches the value it last drained to; a change means a frame arrived.
@@ -208,6 +212,7 @@ pub fn init() -> bool {
             accepted |= F_GSO | (features & F_CSUM);
         }
         if offload {
+            TSO.store(true, Ordering::Release);
             kprintln!("[npk] virtio-net: TX offload negotiated ({})",
                       if modern { "CSUM+HOST_TSO4" } else { "legacy GSO" });
         }
@@ -471,6 +476,92 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     Ok(())
 }
 
+
+const VNET_HDR_F_NEEDS_CSUM: u8 = 1;
+const VNET_HDR_GSO_TCPV4: u8 = 1;
+
+/// Hand the device a TCPv4 GSO super-frame to segment and checksum — Linux
+/// virtio_net `xmit_skb` with `CHECKSUM_PARTIAL` + `SKB_GSO_TCPV4`. The TCP
+/// check must hold the pseudo-header seed. Only for REAL GSO frames: this
+/// QEMU's legacy F_GSO got NEEDS_CSUM wrong on small frames (0.226.60), so
+/// everything that fits one MSS keeps the plain `send` with a full checksum.
+pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
+    let mut lock = DEVICE.lock();
+    let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
+
+    let nchunks = frame.len().div_ceil(MTU).max(1);
+    let need = (nchunks + 1) as u16; // 1 hdr descriptor + one per data chunk
+
+    dev.reclaim_tx();
+    if dev.tx_num_free < need {
+        let mut spins = 0;
+        while dev.tx_num_free < need && spins < TX_RECLAIM_SPINS {
+            core::hint::spin_loop();
+            dev.reclaim_tx();
+            spins += 1;
+        }
+        if dev.tx_num_free < need { return Err(NetError::QueueFull); }
+    }
+
+    let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
+    let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
+    let mut h = [0u8; NET_HDR_SIZE];
+    h[0] = VNET_HDR_F_NEEDS_CSUM;
+    h[1] = VNET_HDR_GSO_TCPV4;
+    h[2..4].copy_from_slice(&(hdr_len as u16).to_le_bytes());
+    h[4..6].copy_from_slice(&mss.to_le_bytes());
+    h[6..8].copy_from_slice(&(l4_off as u16).to_le_bytes()); // csum_start
+    h[8..10].copy_from_slice(&16u16.to_le_bytes());          // csum_offset: tcphdr.check
+    // SAFETY: pre-allocated DMA buffers + this device's descriptor table.
+    unsafe {
+        core::ptr::copy_nonoverlapping(h.as_ptr(), hdr_addr as *mut u8, NET_HDR_SIZE);
+        let dd0 = (dev.tx_desc_base + d0 as u64 * 16) as *mut VringDesc;
+        (*dd0).addr = hdr_addr;
+        (*dd0).len = NET_HDR_SIZE as u32;
+        (*dd0).flags = 0;
+        (*dd0).next = 0;
+    }
+
+    // Data descriptors (one MTU chunk each), chained off d0.
+    let mut prev = d0;
+    let mut off = 0usize;
+    for _ in 0..nchunks {
+        let di = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
+        let take = (frame.len() - off).min(MTU);
+        let data_addr = dev.tx_data + di as u64 * MTU as u64;
+        // SAFETY: as above; `take` ≤ MTU = the slot size.
+        unsafe {
+            core::ptr::copy_nonoverlapping(frame[off..off + take].as_ptr(),
+                                           data_addr as *mut u8, take);
+            let dd = (dev.tx_desc_base + di as u64 * 16) as *mut VringDesc;
+            (*dd).addr = data_addr;
+            (*dd).len = take as u32;
+            (*dd).flags = 0;
+            (*dd).next = 0;
+            let dp = (dev.tx_desc_base + prev as u64 * 16) as *mut VringDesc;
+            (*dp).flags |= DESC_F_NEXT;
+            (*dp).next = di;
+        }
+        prev = di;
+        off += take;
+    }
+
+    // Publish the chain head (d0) on the avail ring.
+    // SAFETY: this device's own virtqueue memory; fenced.
+    unsafe {
+        let avail_ring = dev.tx_avail_base + 4;
+        let slot = (avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2) as *mut u16;
+        core::ptr::write_volatile(slot, d0);
+        fence(Ordering::SeqCst);
+        let avail_idx_ptr = (dev.tx_avail_base + 2) as *mut u16;
+        dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
+        core::ptr::write_volatile(avail_idx_ptr, dev.tx_avail_idx);
+        fence(Ordering::SeqCst);
+    }
+    dev.tx_notify_pending = true;
+    if dev.tx_num_free < 16 { dev.tx_kick(); }
+    Ok(())
+}
 
 /// Receive an Ethernet frame. Returns frame data (without virtio net header).
 /// Returns None if no packet available.
