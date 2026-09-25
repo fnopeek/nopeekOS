@@ -123,7 +123,7 @@ pub const MSIX_TABLE_OFF: u32 = 0x2000;
 pub const MSIX_PBA_OFF: u32 = 0x3000;
 const MSIX_ENTRY_MASKED: u32 = 1;
 
-/// The capability is offered at all (`store sys/config/microvm_msix on`,
+/// The capability is offered at all (`set microvm_msix on`,
 /// read at VM open). Off by default until the path is proven: 0.446.0 had
 /// it on and the guest's network stayed silent.
 static MSIX_OFFERED: AtomicBool = AtomicBool::new(false);
