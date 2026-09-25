@@ -1116,6 +1116,9 @@ impl VmContext {
         let mut dev = None;
         if self.vcpu.apic_id == 0 {
             dev = self.shared.pit.next_deadline_tsc();
+            if let Some(t) = crate::microvm::devices::gpu_backend::resume_tsc() {
+                dev = Some(dev.map_or(t, |d| d.min(t)));
+            }
             // A playing sound stream is serviced every millisecond.
             if self.shared.pci.virtio_snd.playing() {
                 let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
@@ -1137,6 +1140,13 @@ impl VmContext {
             crate::microvm::devices::nat::note_net_irq();
         }
         if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(9); }
+        // vblank: a paused controlq runs its next frame (virtio-gpu IRQ 9).
+        if crate::microvm::devices::gpu_backend::take_resume(crate::interrupts::rdtsc())
+            && crate::microvm::devices::gpu_backend::lock()
+                .service_queues(0, sh.guest_mem)
+        {
+            sh.pic.pulse(9);
+        }
         if sh.pci.virtio_snd.pump(sh.guest_mem) {
             let l = sh.pci.virtio_snd.irq_line();
             sh.pic.pulse(l);
