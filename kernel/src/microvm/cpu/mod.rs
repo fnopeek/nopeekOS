@@ -95,6 +95,29 @@ fn io_port_bucket(port: u16) -> usize {
     }
 }
 /// Bucket one guest port-I/O exit by port (call from the IOIO handler).
+/// Nested-page-fault targets: which device BAR, the LAPIC page, a first
+/// touch of guest RAM (demand paging), or unclaimed.
+pub const NPF_BUCKETS: usize = 10;
+pub const NPF_LABELS: [&str; NPF_BUCKETS] =
+    ["blk", "net", "gpu", "input", "9p", "sqfs", "snd", "lapic", "ram", "other"];
+pub const NPF_BLK: usize = 0;
+pub const NPF_NET: usize = 1;
+pub const NPF_GPU: usize = 2;
+pub const NPF_INPUT: usize = 3;
+pub const NPF_P9: usize = 4;
+pub const NPF_SQFS: usize = 5;
+pub const NPF_SND: usize = 6;
+pub const NPF_LAPIC: usize = 7;
+pub const NPF_RAM: usize = 8;
+pub const NPF_OTHER: usize = 9;
+static NPF_COUNTS: [AtomicU64; NPF_BUCKETS] = [const { AtomicU64::new(0) }; NPF_BUCKETS];
+pub fn record_npf(kind: usize) {
+    if kind < NPF_BUCKETS { NPF_COUNTS[kind].fetch_add(1, Ordering::Relaxed); }
+}
+pub fn npf_snapshot() -> [u64; NPF_BUCKETS] {
+    core::array::from_fn(|i| NPF_COUNTS[i].load(Ordering::Relaxed))
+}
+
 pub fn record_io_port(port: u16) {
     IO_PORT_COUNTS[io_port_bucket(port)].fetch_add(1, Ordering::Relaxed);
 }
