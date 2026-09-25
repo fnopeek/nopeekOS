@@ -411,8 +411,8 @@ pub const GUEST_SMP: bool = true;
 pub fn guest_vcpus() -> u8 {
     let mut workers = crate::smp::per_core::core_count().saturating_sub(1);
     // EXPERIMENT (RESERVE_OFFLOAD_CORE): when the off-vCPU net backend runs it
-    // needs its OWN worker core. Otherwise pick_offload_core() falls through to
-    // `ncores-1` and co-locates the net worker with a vCPU. That vCPU gets
+    // needs its OWN worker core, never a vCPU's (`place_worker`).
+    // Co-located with a vCPU, the vCPU gets
     // preempted by the worker, so it answers cross-vCPU TLB-shootdown IPIs late
     // → the other vCPUs spin in csd_lock_wait (~40%). Leaving one worker core
     // free maps each vCPU 1:1 to a core (like nested-Linux/iperf → 1 Gbit), so
@@ -512,8 +512,8 @@ fn reserve_offload_core() -> bool {
     // only where it was least needed. The worker owns the guest's rings and, for
     // a card that raises no RX interrupt, polls that card as well — so it is the
     // machine's inbound path for the guest AND, while it holds the drain guard,
-    // for the host's own sockets. `pick_offload_core()` hands out a core without
-    // MARKING it, so an AP vCPU lands on top of it at the next guest SIPI.
+    // for the host's own sockets. An unmarked core lets an AP vCPU land on top
+    // of it at the next guest SIPI, so `place_worker(true)` marks it.
     // Measured: a host TCP connection to GitHub sat ESTABLISHED with nothing
     // arriving, at the same moment the guest's network died. AMD never showed it
     // because the reservation already gave the worker a core of its own there.
@@ -633,47 +633,55 @@ static VCPU_COUNT: AtomicU32 = AtomicU32::new(0);
 /// awake core). Reset at BSP open + teardown.
 static VM_CORE_MASK: AtomicU32 = AtomicU32::new(1); // bit 0 = Core 0 reserved
 
-/// Pick the least-contended core for an async-offload worker (e.g. the 9p
-/// persist fiber). NEVER Core 0 — it is the keep-alive minimum (shell,
-/// compositor) and must not compete. Prefers a core with no vCPU on it (not in
-/// `VM_CORE_MASK`); if every worker core runs a vCPU, returns the highest one
-/// (it shares, but still off Core 0). Single-core hosts return 0 (no choice).
-/// v1: chosen at spawn. v2 (future): the worker migrates to follow load/heat.
-pub fn pick_offload_core() -> usize {
-    let ncores = crate::smp::per_core::core_count();
-    if ncores <= 1 { return 0; }
-    let mask = VM_CORE_MASK.load(Ordering::Acquire);
-    // Prefer a free (no-vCPU) worker core.
-    for c in 1..ncores {
-        if mask & (1u32 << c) == 0 { return c; }
-    }
-    // All busy with vCPUs → share the highest worker core, never Core 0.
-    ncores - 1
-}
+/// Host cores running a vCPU fiber (the BSP's and each AP's). A worker is
+/// never placed here: fibers are cooperative, and a vCPU gives its core up
+/// once per slice at best — a worker beside it answers a kick in milliseconds.
+static VCPU_CORES: AtomicU32 = AtomicU32::new(0);
+/// Cores already given a microvm worker, so the next one goes elsewhere.
+static WORKER_CORES: AtomicU32 = AtomicU32::new(0);
 
-/// Like `pick_offload_core`, but MARKS the chosen core in `VM_CORE_MASK` so the
-/// later AP placement (`reserve_ap_core`, fired by guest SIPIs) skips it — the
-/// net worker gets a core to itself instead of being overwritten by a vCPU.
-/// Used for the off-vCPU net backend when `reserve_offload_core()` is on
-/// (`guest_vcpus()` already left one worker core free for exactly this). Falls
-/// back to a shared core (no mark) if none is free. Single producer (the vCPU
-/// fiber, before guest boot → before any SIPI), same CAS discipline as
-/// `reserve_ap_core`.
-fn claim_offload_core() -> usize {
-    let ncores = crate::smp::per_core::core_count();
+/// Place a microvm worker (net data plane, GPU copy, 9p persist). Never Core 0
+/// and never a vCPU's core. In order:
+///   1. a core nobody uses (not in `VM_CORE_MASK`) — `claim` marks it, so a
+///      later AP vCPU does not land on it;
+///   2. a host-fiber core without a worker yet, fewest fibers first. Those
+///      fibers park on events; an event-driven worker shares with them fine
+///      (the NIC driver's and WiFi manager's cores excluded — they pump);
+///   3. any core that is not a vCPU's, fewest fibers first.
+/// Only when every worker core runs a vCPU does it share one.
+pub fn place_worker(claim: bool) -> usize {
+    let ncores = crate::smp::per_core::core_count().min(32);
     if ncores <= 1 { return 0; }
-    loop {
+    let vcpus = VCPU_CORES.load(Ordering::Acquire);
+    let pumps = {
+        let mut m = 0u32;
+        if let Some(c) = crate::netdev::wasm_nic_core() { m |= 1 << c; }
+        if let Some(c) = crate::wifi::manager_core() { m |= 1 << c; }
+        m
+    };
+    let chosen = loop {
         let mask = VM_CORE_MASK.load(Ordering::Acquire);
-        let Some(c) = (1..ncores).find(|c| mask & (1u32 << c) == 0) else {
-            return ncores - 1; // all busy → co-locate on highest worker core
-        };
+        let Some(c) = (1..ncores).find(|&c| mask & (1u32 << c) == 0) else { break None };
+        if !claim { break Some(c); }
         if VM_CORE_MASK
             .compare_exchange(mask, mask | (1u32 << c), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            return c;
+            break Some(c);
         }
-    }
+    };
+    let c = chosen.unwrap_or_else(|| {
+        let workers = WORKER_CORES.load(Ordering::Acquire);
+        let least = |skip: u32| (1..ncores)
+            .filter(|&c| skip & (1u32 << c) == 0)
+            .min_by_key(|&c| crate::smp::fiber::fiber_count(c));
+        least(vcpus | pumps | workers)
+            .or_else(|| least(vcpus | pumps))
+            .or_else(|| least(vcpus))
+            .unwrap_or(ncores - 1)
+    });
+    WORKER_CORES.fetch_or(1u32 << c, Ordering::AcqRel);
+    c
 }
 
 /// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
@@ -690,6 +698,7 @@ fn reserve_ap_core() -> Option<usize> {
             .compare_exchange(mask, mask | (1u32 << c), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            VCPU_CORES.fetch_or(1u32 << c, Ordering::AcqRel);
             return Some(c);
         }
     }
@@ -722,6 +731,8 @@ fn ap_orch_reset() {
     AP_SPAWN_REQUESTED.store(0, Ordering::Release);
     AP_SHARED_PTR.store(0, Ordering::Release);
     VM_CORE_MASK.store(1, Ordering::Release); // only Core 0 reserved
+    VCPU_CORES.store(0, Ordering::Release);
+    WORKER_CORES.store(0, Ordering::Release);
 }
 
 /// Decided once at boot (`set_vm_fiber_mode`, from `init_dedicated_vm_core`,
@@ -1306,6 +1317,8 @@ fn vcpu_fiber_task(_arg: u64) {
     // not OR, so a relaunch starts clean. Runs before the guest boots → before
     // any SIPI → the reaper always sees the BSP bit.
     VM_CORE_MASK.store((1u32 << 0) | (1u32 << cid), Ordering::Release);
+    VCPU_CORES.store(1u32 << cid, Ordering::Release);
+    WORKER_CORES.store(0, Ordering::Release);
     // Mark the network's cores taken so no AP vCPU and no offload worker is ever
     // placed there.
     VM_CORE_MASK.fetch_or(protected_cores(), Ordering::AcqRel);
@@ -1323,14 +1336,9 @@ fn vcpu_fiber_task(_arg: u64) {
     // machine (AMD) and both target machines (Intel) ran DIFFERENT programs —
     // months of hunting a fault on hardware the test machine could not
     // reproduce. There is one data path and every machine runs it.
-    // When the reservation experiment is on, guest_vcpus() left one worker core
-    // free and claim_offload_core() marks it so the SIPI'd APs skip it → the net
-    // worker runs on its OWN core (no vCPU co-location → no csd_lock_wait spin).
-    let worker_core = if reserve_offload_core() {
-        claim_offload_core()
-    } else {
-        pick_offload_core()
-    };
+    // `place_worker` never puts it on a vCPU's core; with the reservation on it
+    // marks a free core so the SIPI'd APs skip it.
+    let worker_core = place_worker(reserve_offload_core());
     crate::kprintln!(
         "[microvm] net worker core {} (vCPUs={}, reserve={})",
         worker_core, guest_vcpus(), reserve_offload_core()
@@ -1343,7 +1351,7 @@ fn vcpu_fiber_task(_arg: u64) {
     // cycles (the 166 ms-loaded-latency root). guest_vcpus() already left this
     // core free. Gated on FULL_GPU_BACKEND + AMD + ≥4 cores; else GPU stays inline.
     if reserve_gpu_core() {
-        let gpu_core = claim_offload_core();
+        let gpu_core = place_worker(true);
         crate::kprintln!(
             "[microvm] gpu worker core {} (off-vCPU framebuffer copy)", gpu_core);
         crate::microvm::devices::gpu_backend::start_worker(gpu_core);

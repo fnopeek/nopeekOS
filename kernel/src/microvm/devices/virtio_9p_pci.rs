@@ -1019,7 +1019,7 @@ impl Virtio9p {
             let path = f.path.clone();
             // Ensure the persist worker is running on a load-aware, non-Core-0
             // core (idempotent). Cross-core admit is safe (lock-guarded queue).
-            super::p9_async::start_worker(crate::microvm::cpu::pick_offload_core());
+            super::p9_async::start_worker(crate::microvm::cpu::place_worker(false));
             let backpressure = super::p9_async::is_full();
             super::p9_async::enqueue_start(tag, fid as u64, path, prefix, backpressure);
             // Rwrite reports THIS write's bytes, not the prefix. Ack now unless
