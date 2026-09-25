@@ -655,7 +655,8 @@ impl VirtioNet {
         for p in &payloads {
             for rep in super::nat::tap_outbound(p, &self_caps) { pending_rx.push(rep); }
         }
-        self.tx_finish(mem, advanced, &pending_rx)
+        let (tx, rx) = self.tx_finish(mem, advanced, &pending_rx);
+        tx || rx
     }
 
     /// Phase 2a (under the device mutex, CHEAP): walk the guest TX avail ring,
@@ -765,14 +766,17 @@ impl VirtioNet {
     /// Phase 2c (under the device mutex, CHEAP): set the TX ISR, inject any
     /// synthetic RX replies (ARP/DNS) the emit produced, and decide whether to
     /// raise IRQ10. `advanced` = at least one TX frame was consumed in the drain.
+    /// Returns `(tx_raise, rx_raise)` — which QUEUE wants its interrupt. Under
+    /// INTx both meant IRQ 10 and the guest's ISR handler walked every queue;
+    /// with MSI-X each queue has its own vector, and a synthetic RX reply
+    /// signalled on TX's vector was never seen (the guest waited forever on its
+    /// first DNS answer).
     pub fn tx_finish(&mut self, mem: &GuestMem, advanced: bool,
-                     pending_rx: &[alloc::vec::Vec<u8>]) -> bool {
-        // ISR reflects "queue work pending"; the RETURN value tells the run loop
-        // whether to actually assert IRQ10, EVENT_IDX-gated (need_event).
-        let mut raise = false;
+                     pending_rx: &[alloc::vec::Vec<u8>]) -> (bool, bool) {
+        let mut tx_raise = false;
         if advanced {
             super::net_backend::raise_isr();
-            if self.tx_should_interrupt(mem) { raise = true; }  // NAPI-TX reap
+            if self.tx_should_interrupt(mem) { tx_raise = true; }  // NAPI-TX reap
         }
 
         // Inject any synthetic replies (ARP/DNS) into RX.
@@ -780,11 +784,12 @@ impl VirtioNet {
         for reply in pending_rx {
             if self.inject_rx(mem, reply) { rx_advanced = true; }
         }
+        let mut rx_raise = false;
         if rx_advanced {
             super::net_backend::raise_isr();
-            if self.rx_should_interrupt(mem) { raise = true; }
+            if self.rx_should_interrupt(mem) { rx_raise = true; }
         }
-        raise
+        (tx_raise, rx_raise)
     }
 
     /// The negotiated capability mask (Copy) — the worker reads it once under the
