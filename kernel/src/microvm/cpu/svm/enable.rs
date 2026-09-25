@@ -1255,6 +1255,7 @@ impl VmContext {
     /// the worker's RX IRQ and the timer deadlines; a hit is confirmed by the
     /// next entry's `inject_pending_event`.
     fn halt_poll(&mut self) -> bool {
+        lapic::phase(self.vcpu.apic_id, lapic::PH_HALTPOLL);
         if self.event_pending() {
             return true;
         }
@@ -1473,6 +1474,7 @@ impl VmContext {
         self.vcpu.iter = self.vcpu.iter.saturating_add(1);
         slice_n += 1;
 
+        lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event();
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
@@ -1485,11 +1487,13 @@ impl VmContext {
         let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
         let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
         let outcome = run_guest_once(
             &mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf, self.vcpu.xcr0,
         );
         super::msr::spec_ctrl_exit(host_spec);
         let exit = outcome.exit_reason;
+        lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         self.vcpu.lapic.pv_eoi_sync_from(self.shared.guest_mem);
 
         // Guest-RIP profiler: EXIT_INTR samples a running guest.
@@ -1608,7 +1612,9 @@ impl VmContext {
         }
 
         // Serialize VmShared between vCPUs (guest SMP).
+        lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         let sh = &mut *self.shared;
 
         match exit {

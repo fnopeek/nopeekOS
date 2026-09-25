@@ -1029,6 +1029,7 @@ impl VmContext {
 
     /// `kvm_vcpu_halt` with adaptive halt-polling. Mirror of the SVM backend.
     fn halt_poll(&mut self) -> bool {
+        lapic::phase(self.vcpu.apic_id, lapic::PH_HALTPOLL);
         if self.event_pending() {
             return true;
         }
@@ -1448,6 +1449,7 @@ impl VmContext {
         if self.vcpu.launched {
             vmcs::sync_entry_ia32e_with_efer()?;
         }
+        lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event()?;
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
 
@@ -1473,7 +1475,9 @@ impl VmContext {
             crate::microvm::cpu::record_exit_cycles(prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
+        lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
         let result = vmcs::run_guest_once(&mut self.vcpu.regs, self.vcpu.launched, hf, gf);
+        lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         super::msr::spec_ctrl_exit(host_spec);
         prof_post = crate::interrupts::rdtsc();
         crate::microvm::cpu::record_guest_cycles(prof_post.wrapping_sub(prof_pre));
@@ -1629,7 +1633,9 @@ impl VmContext {
             _ => {}
         }
 
+        lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
         let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         // Resolve the shared device/memory state once for this exit (a single
         // `SharedRef::DerefMut` borrow of `self.shared`, so the handlers below
         // keep their disjoint sub-field borrows; `self.vcpu` stays separately

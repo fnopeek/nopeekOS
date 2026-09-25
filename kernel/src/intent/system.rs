@@ -374,6 +374,19 @@ pub fn intent_cores() {
         kprintln!("   core on exit-handling, guest starved -> its '0% CPU' is no time given)");
     }
     kprintln!();
+    // Where each vCPU's host thread is — printed even when no VM exit
+    // happened in the window, which is exactly the hang case.
+    {
+        let labels = crate::microvm::cpu::svm::lapic::PHASE_LABELS;
+        let now = crate::interrupts::rdtsc();
+        for i in 0..8usize {
+            if let Some((ph, t, core)) = crate::microvm::cpu::svm::lapic::phase_snapshot(i) {
+                kprintln!("    vcpu{} (core {}): {} since {} us",
+                    i, core, labels.get(ph as usize).copied().unwrap_or("?"),
+                    now.saturating_sub(t) / tsc_per_us.max(1));
+            }
+        }
+    }
     // Every figure above assumes one TSC across cores (smp::init).
     {
         let mut worst = 0i64;
