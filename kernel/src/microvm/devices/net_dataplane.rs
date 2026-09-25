@@ -292,7 +292,9 @@ fn worker_entry(_arg: u64) {
                 if polled { crate::net::poll_rx_only(); }
                 if has_work() { got = true; break; }
                 if crate::interrupts::rdtsc() >= deadline { break; }
-                core::hint::spin_loop();
+                // Cooperative core: a peer fiber here (the NAPI fiber filling
+                // the tap) runs between two looks instead of after the window.
+                crate::smp::fiber::yield_ready();
             }
             if got {
                 WAKE_BUSY.fetch_add(1, Ordering::Relaxed);
