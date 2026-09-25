@@ -395,6 +395,17 @@ bewusst:** mit virtio-net (QEMU), intel_nic oder rtl8153 bleibt Kern 0 im
 RX-Interrupt auch die Shell wecken (virtio teilt ihn heute mit der
 microVM). Die Tick-Handler laufen nur noch waehrend des Boots.
 
+**Nachgezogen (0.434.0): NAPI-Fiber (`net/napi.rs`).** Der offene Punkt oben
+war nicht „bewusst" harmlos: der RX-Interrupt weckte Kern 0, fand keinen
+Fiber auf dem Vektor, und die Karte wurde nur im 10-ms-Raster der Shell
+geleert — jede Host-NIC mit Interrupt auf einen Ring je 10 ms gedeckelt
+(QEMU/virtio ~250 Mbit, Host und microVM gleichermassen). Jetzt parkt ein
+eigener Fiber auf dem Vektor (`irq::arm`/`wait`), leert mit `poll_rx_only`
+und parkt wieder; der Treiber gibt den Interrupt bei leerem Ring frei.
+`net::needs_tick` haelt Kern 0 nur noch fuer abgefragte Karten im
+10-ms-Raster. Offen: intel_nic und rtl8153 haben keinen RX-Interrupt —
+igc-Port (MSI-X) ist der naechste Schritt.
+
 ### 3.5 Kern 0 aufloesen
 
 | heute auf Kern 0 | danach |

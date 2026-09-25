@@ -257,6 +257,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         } else {
             kprintln!("[npk] NTP: sync failed (using RTC time)");
         }
+        // From here the host NIC is drained on its RX interrupt, not by
+        // Core 0's shell loop.
+        net::napi::start();
     } else {
         kprintln!("[npk] No network device found.");
     }

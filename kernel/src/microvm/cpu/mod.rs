@@ -1275,7 +1275,9 @@ fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
     // No backend: THIS vCPU drains the NIC itself, so it must also wake on the
     // host RX IRQ (routed to this core). Bound the wait by the timer deadline.
     let timeout_ms = ((deadline.saturating_sub(now)) / (freq / 1000).max(1)).max(1);
-    if let Some(vec) = crate::netdev::rx_wake_vector() {
+    // Not while the NAPI fiber owns the vector: `arm` would route the card's
+    // interrupt away from the fiber that drains it.
+    if let Some(vec) = crate::netdev::rx_wake_vector().filter(|_| !crate::net::napi::active()) {
         let since = crate::irq::arm(vec); // snapshot + route IRQ to this core
         crate::smp::fiber::irq_wait(vec, since, timeout_ms);
         return;
