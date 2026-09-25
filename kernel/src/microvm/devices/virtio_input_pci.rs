@@ -134,6 +134,9 @@ pub fn push_input_event(etype: u16, code: u16, value: u32) {
         q.pop_front();
     }
     q.push_back((etype, code, value));
+    drop(q);
+    // The BSP moves it into the eventq and raises IRQ 12; wake it.
+    crate::microvm::cpu::kick_bsp_net_irq();
 }
 
 #[derive(Default, Clone, Copy)]

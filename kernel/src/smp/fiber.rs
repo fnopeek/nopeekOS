@@ -524,7 +524,8 @@ pub fn net_kick_bump(cid: usize) {
 /// kick wait has one of a few milliseconds.
 static KICK_WAITER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
 
-fn net_kick_gen(cid: usize) -> u64 {
+/// Core `cid`'s kick generation — a cheap "was I kicked since" test.
+pub fn net_kick_gen(cid: usize) -> u64 {
     if cid < MAX_CORES { NET_KICK_GEN[cid].load(Ordering::Acquire) } else { 0 }
 }
 

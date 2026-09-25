@@ -34,23 +34,13 @@ use crate::interrupts::rdtsc;
 /// The i8254 input clock, 1.193182 MHz (`PIT_TICK_RATE`, i8253.h).
 const PIT_HZ: u64 = 1_193_182;
 
-/// Never deliver two guest timer ticks closer together than this.
+/// How many owed ticks we are willing to carry (KVM `kvm_pit` reinject).
 ///
-/// Shared with the LAPIC timer ON PURPOSE and referenced from there: the two
-/// sources must be capped identically or their delivered rates diverge and
-/// Linux's calibration verification fails. The cap paces DELIVERY; what cannot
-/// be delivered now is owed (see `pending`), so the ratio survives the cap.
-pub const MIN_TICK_GAP_HZ: u64 = 1000;
-
-/// How many owed ticks we are willing to carry.
-///
-/// Not unbounded: after a long stall, repaying thousands of ticks would be an
-/// interrupt storm that starves everything else — and TCP pacing arms bursts of
-/// ~40 µs one-shots at connection setup, which is the exact storm the old code's
-/// hard 1 kHz drop-cap was written to prevent. Carrying a few keeps the ratio
-/// through ordinary scheduling jitter; dropping the rest keeps the guest's
-/// wall-clock honest, because Linux reads time from the TSC, not from counting
-/// interrupts.
+/// A tick that falls due while the previous IRQ0 is still unacknowledged is
+/// owed, and handed to the PIC once the guest has taken the last one — so
+/// `calibrate_APIC_clock` sees one jiffy per PIT period even when the vCPU
+/// did not run for a while. Bounded: after a long stall the guest's wall
+/// clock comes from the TSC anyway, and repaying thousands would be a storm.
 pub const MAX_PENDING: u32 = 8;
 
 /// Channel-0 access mode (0x43 bits 5:4).
@@ -71,8 +61,6 @@ pub struct Pit {
     half: Option<u8>,
     /// Host TSC the current count started from.
     start_tsc: u64,
-    /// Host TSC of the last delivered tick — the delivery pacer.
-    last_fire_tsc: u64,
     /// Ticks owed to the guest.
     pending: u32,
     /// One-shot latch: mode 0/4 fire once per counter write.
@@ -90,7 +78,6 @@ impl Pit {
             access: ACCESS_LOHI,
             half: None,
             start_tsc: 0,
-            last_fire_tsc: 0,
             pending: 0,
             fired: false,
         }
@@ -147,24 +134,22 @@ impl Pit {
         count.saturating_mul(crate::interrupts::tsc_freq()) / PIT_HZ
     }
 
-    /// Accrue whatever the guest is owed and hand back ONE tick if the delivery
-    /// pacer allows it. Mirrors `LocalApic::timer_due` exactly — same accrual,
-    /// same cap, same latch — because "exactly" is the whole point: these two
-    /// clocks are compared against each other by the guest.
-    pub fn due(&mut self) -> bool {
+    /// Accrue owed ticks and feed ONE to the PIC as an IRQ0 edge when the
+    /// previous one has been taken (IRR and ISR bit 0 clear) — KVM's PIT
+    /// reinject: the guest's acknowledgement paces the repayment.
+    pub fn poll(&mut self, pic: &mut super::pic8259::Pic8259) {
         if !self.live() {
-            return false;
+            return;
         }
         let period = self.period_tsc();
         if period == 0 {
-            return false;
+            return;
         }
         let now = rdtsc();
         if self.start_tsc == 0 {
             self.start_tsc = now;
         }
-        let elapsed = now.saturating_sub(self.start_tsc);
-        let periods = elapsed / period;
+        let periods = now.saturating_sub(self.start_tsc) / period;
         if periods > 0 {
             self.start_tsc = self.start_tsc.wrapping_add(periods * period);
             // One-shot (mode 0/4) owes exactly one tick per counter write.
@@ -178,38 +163,25 @@ impl Pit {
             };
             self.pending = (self.pending + owed).min(MAX_PENDING);
         }
-        if self.pending == 0 {
-            return false;
+        if self.pending > 0 && pic.line_idle(0) {
+            pic.pulse(0);
+            self.pending -= 1;
+            crate::microvm::devices::nat::note_guest_timer();
         }
-        let gap = (crate::interrupts::tsc_freq() / MIN_TICK_GAP_HZ).max(1);
-        if now.wrapping_sub(self.last_fire_tsc) < gap {
-            return false;
-        }
-        self.last_fire_tsc = now;
-        self.pending -= 1;
-        true
     }
 
-    /// Would `due()` fire right now? Non-consuming — for the yield/park checks,
-    /// which must not eat a tick the inject site is about to deliver. The LAPIC
-    /// learned this the hard way; see `lapic::timer_pending`.
-    pub fn pending_now(&self) -> bool {
+    /// Host TSC of the next tick (the park deadline), or None when stopped.
+    pub fn next_deadline_tsc(&self) -> Option<u64> {
         if !self.live() {
-            return false;
-        }
-        let period = self.period_tsc();
-        if period == 0 {
-            return false;
-        }
-        let now = rdtsc();
-        let gap = (crate::interrupts::tsc_freq() / MIN_TICK_GAP_HZ).max(1);
-        if now.wrapping_sub(self.last_fire_tsc) < gap {
-            return false;
+            return None;
         }
         if self.pending > 0 {
-            return true;
+            return Some(rdtsc());
         }
-        let start = if self.start_tsc == 0 { now } else { self.start_tsc };
-        now.saturating_sub(start) >= period && (self.mode == 2 || self.mode == 3 || !self.fired)
+        if !(self.mode == 2 || self.mode == 3) && self.fired {
+            return None;
+        }
+        let period = self.period_tsc();
+        (period != 0).then(|| self.start_tsc.wrapping_add(period))
     }
 }

@@ -269,6 +269,11 @@ impl VirtioSnd {
 
     /// Periodic pump (from the VM run loop): keep draining tx as the mailbox
     /// frees up, so playback paces even without a fresh queue-kick.
+    /// A stream is playing: buffers complete against the wall clock, so the
+    /// device needs service at a steady cadence even while the guest sleeps
+    /// (QEMU drives the same with its audio timer).
+    pub fn playing(&self) -> bool { self.slot >= 0 && self.started }
+
     pub fn pump(&mut self, mem: &GuestMem) -> bool {
         self.service_tx(mem)
     }
