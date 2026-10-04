@@ -180,6 +180,14 @@ struct Tune {
     /// Where the seek slider is being dragged to, while it is. The time
     /// readout follows it; the seek itself waits for the release.
     scrub:   Option<u16>,
+    /// Was playing when the seek drag started — resume after the seek.
+    scrub_resume: bool,
+    /// Last pointer movement over the window (ms), for hiding the bar.
+    motion_at: i64,
+    /// The last movement was over the bar itself: keep it up.
+    over_bar: bool,
+    /// Whether the scene on screen shows the bar.
+    controls_shown: bool,
     /// Seconds last drawn, so the loop only re-commits when the clock moves.
     shown_s: i64,
     /// Underruns already reported, so a stutter logs once and not per tick.
@@ -220,6 +228,10 @@ const A_SEEK:       u32 = 4;
 const A_VOL_TOGGLE: u32 = 5;
 const A_VOL_CLOSE:  u32 = 6;
 const A_VOL:        u32 = 7;
+const A_MOTION:     u32 = 8;
+const A_MOTION_BAR: u32 = 9;
+/// How long the bar stays over a playing video after the pointer stops.
+const CONTROLS_HIDE_MS: i64 = 2500;
 const TRACK_BASE:   u32 = 1000;
 /// What the two jump buttons move, in ms.
 const JUMP_MS:      u64 = 10_000;
@@ -251,6 +263,10 @@ impl Tune {
             vol: host::get_volume().clamp(0, 100) as u8,
             vol_open: false,
             scrub: None,
+            scrub_resume: false,
+            motion_at: 0,
+            over_bar: false,
+            controls_shown: true,
             shown_s: -1,
             told_underruns: 0,
             video: None,
@@ -588,6 +604,8 @@ impl Tune {
         if self.src.is_none() && self.video.is_none() { self.load(true); return; }
         self.playing = !self.playing;
         if self.playing {
+            // Am Ende stehen geblieben: Play heisst von vorn.
+            if self.drained { self.seek_to_ms(0); }
             if self.src.is_some() {
                 // Without this the first tick after a pause charges the whole
                 // paused stretch to the speaker and reports a phantom underrun.
@@ -651,6 +669,14 @@ impl Tune {
         self.load(true);
     }
 
+    /// The bar is always there for audio. Over a video it gives way to the
+    /// picture while it plays, and comes back when paused, when the pointer
+    /// moves, or while something on it is in use.
+    fn controls_visible(&self, now: i64) -> bool {
+        self.video.is_none() || !self.playing || self.vol_open || self.scrub.is_some()
+            || self.over_bar || now - self.motion_at < CONTROLS_HIDE_MS
+    }
+
     fn set_volume(&mut self, v: u8) {
         self.vol = v.min(100);
         host::set_volume(self.vol as i32);
@@ -683,7 +709,7 @@ fn render(t: &Tune) -> Widget {
     };
 
     let body = match t.video.as_ref() {
-        // Das BILD bekommt die ganze Flaeche, und nichts liegt darauf.
+        // Das BILD bekommt die ganze Flaeche.
         Some(_) => Widget::Canvas {
             id: CanvasId(VIDEO_CANVAS as u32),
             // NICHT die Videogroesse. `measure_intrinsic` nimmt diese Zahlen
@@ -748,7 +774,35 @@ fn render(t: &Tune) -> Widget {
         modifiers: alloc::vec![Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Xs.as_u16() }],
     };
 
-    let mut children = alloc::vec![body, seek, bar];
+    let controls = Widget::Column {
+        children: alloc::vec![seek, bar],
+        spacing: 0,
+        align: Align::Stretch,
+        modifiers: alloc::vec![
+            Modifier::Background(Token::Surface),
+            Modifier::OnMotion(ActionId(A_MOTION_BAR)),
+        ],
+    };
+    let mut children = match t.video {
+        // Die Leiste liegt UEBER dem Bild, damit es beim Ein- und
+        // Ausblenden nicht die Groesse wechselt.
+        Some(_) => {
+            let mut layers = alloc::vec![body];
+            if t.controls_shown {
+                layers.push(Widget::Column {
+                    children: alloc::vec![Widget::Spacer { flex: 1 }, controls],
+                    spacing: 0,
+                    align: Align::Stretch,
+                    modifiers: Vec::new(),
+                });
+            }
+            alloc::vec![Widget::Stack {
+                children: layers,
+                modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnMotion(ActionId(A_MOTION))],
+            }]
+        }
+        None => alloc::vec![body, controls],
+    };
     if t.vol_open {
         children.push(Widget::Popover {
             anchor: NodeId(NODE_VOL),
@@ -835,7 +889,8 @@ fn volume_icon(v: u8) -> IconId {
     if v == 0 { IconId::SpeakerX } else if v <= 50 { IconId::SpeakerLow } else { IconId::SpeakerHigh }
 }
 
-fn commit_scene(t: &Tune) {
+fn commit_scene(t: &mut Tune) {
+    t.controls_shown = t.controls_visible(host::ticks());
     match wire::encode(&render(t)) {
         Ok(bytes) => { if host::scene_commit(&bytes) < 0 { log("[tune] commit failed"); } }
         Err(_) => log("[tune] encode failed"),
@@ -867,11 +922,18 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
             t.load(true);
             Outcome::Render
         }
+        // Anfassen haelt an, Loslassen springt und spielt weiter, wenn es
+        // vorher lief — waehrend der Hand laeuft nichts unter ihr weg.
         Event::Slide { action: ActionId(A_SEEK), value, done } => {
+            if t.scrub.is_none() && !done {
+                t.scrub_resume = t.playing;
+                if t.playing { t.toggle(); }
+            }
             if done {
                 t.scrub = None;
                 let dur = t.duration_ms();
                 if dur > 0 { t.seek_to_ms(dur * value as u64 / SLIDER_MAX as u64); }
+                if core::mem::take(&mut t.scrub_resume) && !t.playing { t.toggle(); }
             } else {
                 t.scrub = Some(value);
             }
@@ -891,6 +953,17 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
                 return Outcome::Render;
             }
             if id == A_FORWARD { let p = t.position_ms() + JUMP_MS; t.seek_to_ms(p); return Outcome::Render; }
+            // Bewegung allein zeichnet nichts neu; die Schleife entscheidet,
+            // ob die Leiste dadurch kommt oder bleibt.
+            if id == A_MOTION || id == A_MOTION_BAR {
+                t.motion_at = host::ticks();
+                t.over_bar = id == A_MOTION_BAR;
+                return if t.controls_visible(t.motion_at) != t.controls_shown {
+                    Outcome::Render
+                } else {
+                    Outcome::Idle
+                };
+            }
             if id == A_VOL_TOGGLE { t.vol_open = !t.vol_open; return Outcome::Render; }
             if id == A_VOL_CLOSE { t.vol_open = false; return Outcome::Render; }
             if id >= TRACK_BASE {
@@ -981,10 +1054,10 @@ pub extern "C" fn _start() {
     // Log, die das haette entscheiden koennen.
     log(concat!("[tune] version ", env!("CARGO_PKG_VERSION")));
     let mut t = Tune::new();
-    commit_scene(&t);      // window appears before the first fetch
+    commit_scene(&mut t);      // window appears before the first fetch
     let autoplay = t.opened_with_file;
     t.load(autoplay);
-    commit_scene(&t);
+    commit_scene(&mut t);
 
     loop {
         // Clock and pump run on EVERY turn, not only when the poll came up
@@ -1018,7 +1091,7 @@ pub extern "C" fn _start() {
                 let outcome = handle(&mut t, ev, payload_str(plen));
                 match outcome {
                     Outcome::Idle => {}
-                    Outcome::Render => { commit_scene(&t); t.shown_s = -1; }
+                    Outcome::Render => { commit_scene(&mut t); t.shown_s = -1; }
                     Outcome::Exit => { t.sink.close(); host::close_widget(); return; }
                 }
             }
@@ -1027,8 +1100,12 @@ pub extern "C" fn _start() {
                 // decoder ran out — otherwise the last second is cut off.
                 if t.drained && t.playing && (t.video.is_some() || t.sink.lead_frames() == 0) {
                     t.playing = false;
+                    // Ein Film bleibt am Ende stehen; Musik laeuft durch den
+                    // Ordner weiter.
+                    if t.video.is_none() {
                         if t.files.len() > 1 { t.skip(1); } else { t.seek_to_ms(0); }
-                    commit_scene(&t);
+                    }
+                    commit_scene(&mut t);
                     t.shown_s = -1;
                 }
                 // Redraw once a second while playing: the clock and the
@@ -1036,7 +1113,9 @@ pub extern "C" fn _start() {
                 let secs = (t.position_ms() / 1000) as i64;
                 if t.playing && secs != t.shown_s {
                     t.shown_s = secs;
-                        commit_scene(&t);
+                        commit_scene(&mut t);
+                } else if t.controls_visible(host::ticks()) != t.controls_shown {
+                    commit_scene(&mut t);
                 }
                 // Paused, there is nothing to keep up with — poll a quarter
                 // as often and leave the core alone.

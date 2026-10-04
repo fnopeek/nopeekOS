@@ -401,6 +401,14 @@ pub enum Modifier {
     /// Nicht abgedeckte Bytes behalten die Vorgabefarbe. Ueberlappende oder
     /// unsortierte Spannen sind erlaubt; die spaetere gewinnt.
     Spans(alloc::vec::Vec<Span>),
+    /// Fire `Event::Action(id)` while the pointer MOVES over this widget,
+    /// at most every [`MOTION_INTERVAL_MS`] — and at once when the pointer
+    /// moves onto it from another `OnMotion` target (deepest wins, like
+    /// `OnClick`). For "show the controls while the mouse is being used":
+    /// apps never get raw pointer motion, and `OnHover` fires only on
+    /// entering, so a pointer that rests and then moves again inside the
+    /// same widget would go unnoticed.
+    OnMotion(ActionId),
     // Appended only.
 }
 
@@ -416,6 +424,9 @@ pub const MONO_SIZE_PX: u16 = 13;
 
 /// Upper end of `Widget::Slider::value` — per mille, fine enough for a
 /// seek bar across a full-width window.
+/// Throttle of `Modifier::OnMotion`.
+pub const MOTION_INTERVAL_MS: u32 = 200;
+
 pub const SLIDER_MAX: u16 = 1000;
 
 #[non_exhaustive]

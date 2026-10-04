@@ -243,6 +243,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::FontSize(px) => { let _ = write!(s, "FontSize({})", px); }
             Modifier::CanvasOffset { x, y } => { let _ = write!(s, "CanvasOffset({},{})", x, y); }
             Modifier::Spans(v)      => { let _ = write!(s, "Spans({})", v.len()); }
+            Modifier::OnMotion(a)   => { let _ = write!(s, "OnMotion({})", a.0); }
         }
     }
     s.push(']');

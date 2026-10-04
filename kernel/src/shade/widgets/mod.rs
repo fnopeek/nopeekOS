@@ -275,6 +275,7 @@ pub fn scroll_viewport_x_of(window_id: u32) -> Option<(abi::Rect, u32)> {
 pub fn remove_scene(window_id: u32) {
     SCENES.lock().remove(&window_id);
     LAST_HOVER.lock().remove(&window_id);
+    LAST_MOTION.lock().remove(&window_id);
     canvas::remove_window(window_id);
 }
 
@@ -925,6 +926,54 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
     if let Some(id) = new_id {
         push_event(window_id, abi::Event::Action(id));
     }
+
+    motion_pulse(window_id, x, y);
+}
+
+// Last `OnMotion` pulse per window: (target, position, tick).
+static LAST_MOTION: Mutex<BTreeMap<u32, (abi::ActionId, i32, i32, u64)>> =
+    Mutex::new(BTreeMap::new());
+
+fn find_motion_target(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+) -> Option<abi::ActionId> {
+    if !rect_contains(layout.rect, x, y) || is_disabled(widget) { return None; }
+    for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
+        if let Some(id) = find_motion_target(cw, cl, x, y) { return Some(id); }
+    }
+    modifiers_of_ref(widget).iter().find_map(|m| match m {
+        abi::Modifier::OnMotion(id) => Some(*id),
+        _ => None,
+    })
+}
+
+/// `Modifier::OnMotion`: one Action per `MOTION_INTERVAL_MS` while the
+/// pointer actually moves, immediately on a change of target. Called on
+/// every hover update, which also runs when nothing moved — so the
+/// position is compared, not just the clock.
+fn motion_pulse(window_id: u32, x: i32, y: i32) {
+    let id = {
+        let scenes = SCENES.lock();
+        let s = match scenes.get(&window_id) { Some(s) => s, None => return };
+        let popover_hit = s.popovers.iter().rev().any(|p| rect_contains(p.layout.rect, x, y));
+        if popover_hit { None } else { find_motion_target(&s.tree, &s.layout_tree, x, y) }
+    };
+    let id = match id {
+        Some(id) => id,
+        None => { LAST_MOTION.lock().remove(&window_id); return; }
+    };
+    let now = crate::interrupts::ticks();
+    let interval = (abi::MOTION_INTERVAL_MS / 10) as u64;
+    {
+        let mut last = LAST_MOTION.lock();
+        if let Some(&(prev, px, py, t)) = last.get(&window_id) {
+            if prev == id && ((px, py) == (x, y) || now.saturating_sub(t) < interval) { return; }
+        }
+        last.insert(window_id, (id, x, y, now));
+    }
+    push_event(window_id, abi::Event::Action(id));
 }
 
 /// Re-rasterize a scene's pixel buffer with the given hover path (focus /
@@ -2074,11 +2123,28 @@ pub fn slide_end() {
     push_event(d.window, abi::Event::Slide { action: d.action, value: d.value, done: true });
 }
 
-/// Keep a drag's live value in a tree the app commits mid-drag.
-fn apply_slide_override(window_id: u32, tree: &mut abi::Widget) {
-    if let Some(d) = SLIDE.lock().as_ref() {
-        if d.window == window_id { set_slider_value(tree, d.action, d.value); }
-    }
+/// Keep a drag's live value in a tree the app commits mid-drag. Returns
+/// the value it put in, so the commit can check afterwards whether the
+/// drag moved on while it was laying out.
+fn apply_slide_override(window_id: u32, tree: &mut abi::Widget) -> Option<u16> {
+    let g = SLIDE.lock();
+    let d = g.as_ref().filter(|d| d.window == window_id)?;
+    set_slider_value(tree, d.action, d.value);
+    Some(d.value)
+}
+
+/// A commit runs on a worker core and stores its scene only after layout
+/// and raster. A drag step that landed in between was overwritten by it —
+/// put the thumb back where the pointer is.
+fn reapply_slide_after_commit(window_id: u32, applied: Option<u16>) {
+    let (action, value) = match SLIDE.lock().as_ref() {
+        Some(d) if d.window == window_id && Some(d.value) != applied => (d.action, d.value),
+        _ => return,
+    };
+    let changed = SCENES.lock().get_mut(&window_id)
+        .map(|s| set_slider_value(&mut s.tree, action, value))
+        .unwrap_or(false);
+    if changed { slide_repaint(window_id); }
 }
 
 /// Ctrl+Shift+C / V routed from the compositor: copy or paste the focused
@@ -2436,7 +2502,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         Ok(t) => t,
         Err(_) => return -2,
     };
-    if window_id != 0 { apply_slide_override(window_id, &mut tree); }
+    let slide_applied = if window_id != 0 { apply_slide_override(window_id, &mut tree) } else { None };
 
     // Obtain or create the widget window. `new_window` is Some iff we
     // just created one — return its id to the caller so the next
@@ -2578,6 +2644,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         max_scroll_x,
         scroll_viewport_x: max_scroll_x_rect,
     });
+    reapply_slide_after_commit(target_id, slide_applied);
 
     // Mark the window dirty so shade paints it in the next render,
     // then request a full render on Core 0. scene_commit may run on
