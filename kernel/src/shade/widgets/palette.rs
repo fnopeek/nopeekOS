@@ -167,11 +167,27 @@ fn code_scheme() -> &'static CodeScheme {
 }
 
 pub fn current() -> Palette {
+    current_in(is_light_theme())
+}
+
+/// The palette of one theme, whichever is active. Glass (loop, dock, bar)
+/// is always dark; only ordinary apps follow the theme.
+pub fn current_in(light: bool) -> Palette {
     let mut colors = [0u32; super::abi::PALETTE_SLOTS];
     for (i, slot) in colors.iter_mut().enumerate() {
-        *slot = resolve(token_at(i));
+        *slot = resolve_in(token_at(i), light);
     }
     Palette { colors }
+}
+
+/// Palette for a widget window: dock and bar are glass and stay dark.
+pub fn for_window(window_id: u32) -> Palette {
+    if is_panel(window_id) { current_in(false) } else { current() }
+}
+
+pub fn is_panel(window_id: u32) -> bool {
+    window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
+        || DOCK_WINDOW.load(Ordering::Relaxed) == window_id)
 }
 
 /// Opacity (0..255) of floating chrome — the bar card and the dock tray.
@@ -228,7 +244,16 @@ pub fn panel_opacity(window_id: u32) -> u32 {
 }
 
 pub fn resolve(token: Token) -> u32 {
-    let is_light = is_light_theme();
+    resolve_in(token, is_light_theme())
+}
+
+/// A token as drawn on glass — loop, dock and bar are dark glass in both
+/// themes (light glass over a busy wallpaper was never as legible).
+pub fn resolve_glass(token: Token) -> u32 {
+    resolve_in(token, false)
+}
+
+pub fn resolve_in(token: Token, is_light: bool) -> u32 {
     let t = if is_light { &LIGHT } else { &DARK };
 
     match token {
@@ -249,7 +274,7 @@ pub fn resolve(token: Token) -> u32 {
         Token::AccentMuted     => accent_over(t.surface, 38),
         Token::AccentRing      => accent_over(t.surface, 56),
         Token::AccentLine      => accent_over(t.surface, 115),
-        Token::OnAccent        => on_accent(t.surface),
+        Token::OnAccent        => on_accent(t.surface, is_light),
 
         // Code tokens come from the scheme, not the theme ramp.
         Token::CodeKeyword     => code_scheme().keyword,
@@ -262,13 +287,6 @@ pub fn resolve(token: Token) -> u32 {
         Token::CodeVariable    => code_scheme().variable,
         Token::CodeConstant    => code_scheme().constant,
     }
-}
-
-/// Text and surface colour of a theme, whichever is active — glass sizes
-/// its fill for both so light and dark glass stay alike.
-pub fn theme_text_and_surface(light: bool) -> (u32, u32) {
-    let t = if light { &LIGHT } else { &DARK };
-    (t.on_surface, t.surface)
 }
 
 pub fn is_light_theme() -> bool {
@@ -354,8 +372,8 @@ fn accent_over(surface: u32, weight: u32) -> u32 {
 /// white carries. Dark mode takes a near-black tinted with the accent hue
 /// (the design's per-preset `--accent-ink`), falling back to white if the
 /// accent is itself dark.
-fn on_accent(surface: u32) -> u32 {
-    if is_light_theme() { return 0xFFFFFFFF; }
+fn on_accent(surface: u32, is_light: bool) -> u32 {
+    if is_light { return 0xFFFFFFFF; }
     let accent = accent_adjusted(surface);
     if luminance(accent) > 128 { blend(0xFF101010, accent, 24) } else { 0xFFFFFFFF }
 }

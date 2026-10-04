@@ -448,13 +448,13 @@ pub fn clear_dirty() {
 /// token — so `loop` windows turn dark-on-light in light mode, matching
 /// the widget apps. Masked to opaque RGB (the shadow buffer is opaque).
 fn theme_fg() -> u32 {
-    crate::shade::widgets::palette::resolve(
+    crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::OnSurface) & 0x00FF_FFFF
 }
 
 /// Terminal background from the active theme's Surface token.
 fn theme_bg() -> u32 {
-    crate::shade::widgets::palette::resolve(
+    crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
 }
 
@@ -463,19 +463,19 @@ fn theme_bg() -> u32 {
 /// unlike the raw wallpaper accent — so the prompt stays readable in light
 /// mode too.
 fn theme_prompt() -> u32 {
-    crate::shade::widgets::palette::resolve(
+    crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::Accent) & 0x00FF_FFFF
 }
 
 /// Selection highlight colour from the active theme (muted accent behind
 /// the selected glyphs).
 fn theme_selection() -> u32 {
-    crate::shade::widgets::palette::resolve(
+    crate::shade::widgets::palette::resolve_glass(
         crate::shade::widgets::abi::Token::AccentMuted) & 0x00FF_FFFF
 }
 
 fn theme_token(t: crate::shade::widgets::abi::Token) -> u32 {
-    crate::shade::widgets::palette::resolve(t) & 0x00FF_FFFF
+    crate::shade::widgets::palette::resolve_glass(t) & 0x00FF_FFFF
 }
 
 // ── Status lines ──────────────────────────────────────────────────────

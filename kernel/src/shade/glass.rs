@@ -45,17 +45,18 @@ pub struct Params {
     pub ink: GlassInk,
 }
 
-/// Contrast the glass must keep to the theme's text colour, ×10
-/// (60 = 6:1 — between WCAG AA 4.5 and AAA 7 for body text).
+/// Contrast the glass must keep to its text colour, ×10 (60 = 6:1 —
+/// between WCAG AA 4.5 and AAA 7 for body text).
 const CONTRAST_X10: u64 = 60;
 /// Wallpaper colour mixed into the fill (×256): ~10 % ties the glass to
 /// the picture; text keeps its neutral colour.
 const TINT_WEIGHT: u32 = 26;
-/// How far past the contrast bound the median of the picture is taken:
-/// the bound is the least legible glass, the margin makes it comfortable.
+/// How far below the brightness ceiling the median of the picture is
+/// taken: the ceiling is the least legible glass, the margin makes it
+/// comfortable.
 const MARGIN: u32 = 20;
-/// Fill weight bounds (×256), the same for both themes — light and dark
-/// glass are meant to feel alike and differ in colour, not in weight.
+/// Fill weight bounds (×256). The floor keeps glass calm on every picture —
+/// see-through more than this is a choice someone makes with `set`.
 const FILL_MIN: u32 = 160;
 const FILL_MAX: u32 = 208;
 
@@ -65,7 +66,7 @@ const NO_WALLPAPER: Stats = Stats { p10: 24, p50: 24, p90: 24, detail: 0, mean_r
 /// Blur radius for a measured detail level: the busier the picture, the
 /// more it has to be calmed before text can sit on it.
 pub fn auto_blur(detail: u32) -> usize {
-    // Florian's set measures 5-7 here and still carries fine grain that
+    // Florian's set measures 5-8 here and still carries fine grain that
     // fights text, so the scale starts at 2 (~10 px), not 1.
     (2 + detail / 4).clamp(2, 5) as usize
 }
@@ -74,27 +75,32 @@ pub fn blur_radius(detail: u32) -> usize {
     key("shade.blur").map(|v| v.min(8) as usize).unwrap_or_else(|| auto_blur(detail))
 }
 
+/// Glass is dark in both themes — loop, dock and bar are the only glass,
+/// and dark glass with light text reads over any wallpaper; only ordinary
+/// apps follow the theme.
 pub fn params() -> Params {
-    let light = palette::is_light_theme();
+    use crate::shade::widgets::abi::Token;
     let st = stats().unwrap_or(NO_WALLPAPER);
-    let text = palette::resolve(crate::shade::widgets::abi::Token::OnSurface);
-    let lt = lin(luma(text));
+    let text = luma(palette::resolve_glass(Token::OnSurface));
+    let fill = luma(palette::resolve_glass(Token::Surface));
 
-    // Contrast bound, from the text colour.
-    let (floor, ceil) = match bounds(light, lt) {
-        (f, _) if light => (key("shade.light_floor").map(|v| v.min(255)).unwrap_or(f), 255),
-        (_, c) => (0, key("shade.dark_ceil").map(|v| v.min(255)).unwrap_or(c)),
-    };
+    // Most brightness glass may have under the text, from the contrast
+    // ratio. Gamma ~2: L = v² / 255².
+    let lt = lin(text);
+    let max = ((lt + 3251) * 10 / CONTRAST_X10).saturating_sub(3251);
+    let ceil_auto = isqrt(max.min(65025)) as u32;
+    let ceil = key("shade.dark_ceil").map(|v| v.min(255)).unwrap_or(ceil_auto);
 
-    // Fill weight, ONE value for both themes — light and dark glass should
-    // feel alike. Each theme needs just enough fill to take the MEDIAN of
-    // the picture a margin past its contrast bound (the bound then holds the
-    // remaining dark or bright patches per pixel); both use the larger need.
-    let need = fill_need(true, st.p50).max(fill_need(false, st.p50));
-    let loop_auto = need.clamp(FILL_MIN, FILL_MAX);
-    let loop_opacity = key("shade.opacity").map(|v| v.min(256)).unwrap_or(loop_auto);
-    let chrome_auto = (loop_opacity * 255 / 256 + 30).min(255);
-    let chrome_opacity = key("shade.chrome_opacity").map(|v| v.min(255)).unwrap_or(chrome_auto);
+    // Fill weight: enough to take the MEDIAN of the picture a margin under
+    // the ceiling (m + a·(fill − m) = target); the ceiling then holds the
+    // remaining bright patches per pixel.
+    let m = st.p50;
+    let target = ceil.saturating_sub(MARGIN);
+    let need = if m <= target { 0 } else { (m - target) * 256 / m.abs_diff(fill).max(1) };
+    let loop_opacity = key("shade.opacity").map(|v| v.min(256))
+        .unwrap_or(need.clamp(FILL_MIN, FILL_MAX));
+    let chrome_opacity = key("shade.chrome_opacity").map(|v| v.min(255))
+        .unwrap_or((loop_opacity * 255 / 256 + 30).min(255));
 
     let tint_w = key("shade.glass_tint").map(|pct| pct.min(40) * 256 / 100).unwrap_or(TINT_WEIGHT);
 
@@ -102,33 +108,11 @@ pub fn params() -> Params {
         blur: blur_radius(st.detail),
         loop_opacity,
         chrome_opacity,
-        ink: GlassInk { floor, ceil, tint: st.mean_rgb, tint_w },
+        ink: GlassInk { ceil, tint: st.mean_rgb, tint_w },
     }
 }
 
 pub fn ink() -> GlassInk { params().ink }
-
-/// Fill weight (×256) that takes the picture's median `m` a margin past the
-/// contrast bound of one theme: m + a·(fill − m) = target.
-fn fill_need(light: bool, m: u32) -> u32 {
-    let (text, surface) = palette::theme_text_and_surface(light);
-    let (floor, ceil) = bounds(light, lin(luma(text)));
-    let target = if light { (floor + MARGIN).min(250) } else { ceil.saturating_sub(MARGIN) };
-    if (light && m >= target) || (!light && m <= target) { return 0; }
-    target.abs_diff(m) * 256 / luma(surface).abs_diff(m).max(1)
-}
-
-/// Least (light) / most (dark) luma glass may have under text of linear
-/// luminance `lt` for the contrast ratio. Gamma ~2: L = v² / 255².
-fn bounds(light: bool, lt: u64) -> (u32, u32) {
-    if light {
-        let need = (CONTRAST_X10 * (lt + 3251) / 10).saturating_sub(3251);
-        (isqrt(need.min(65025)) as u32, 255)
-    } else {
-        let max = ((lt + 3251) * 10 / CONTRAST_X10).saturating_sub(3251);
-        (0, isqrt(max.min(65025)) as u32)
-    }
-}
 
 /// `shade glass`: what was measured and what it led to.
 pub fn report() {
@@ -140,20 +124,14 @@ pub fn report() {
         None => kprintln!("  wallpaper  none (flat background)"),
     }
     let src = |k: &str| if key(k).is_some() { "set" } else { "auto" };
-    kprintln!("  theme      {}", if palette::is_light_theme() { "light" } else { "dark" });
     kprintln!("  blur       {:>3}  ({})    shade.blur", p.blur, src("shade.blur"));
     kprintln!("  loop       {:>3}  ({})    shade.opacity        0-256", p.loop_opacity, src("shade.opacity"));
     kprintln!("  dock/bar   {:>3}  ({})    shade.chrome_opacity 0-255", p.chrome_opacity, src("shade.chrome_opacity"));
-    if palette::is_light_theme() {
-        kprintln!("  floor      {:>3}  ({})    shade.light_floor    least brightness under text",
-            p.ink.floor, src("shade.light_floor"));
-    } else {
-        kprintln!("  ceiling    {:>3}  ({})    shade.dark_ceil      most brightness under text",
-            p.ink.ceil, src("shade.dark_ceil"));
-    }
+    kprintln!("  ceiling    {:>3}  ({})    shade.dark_ceil      most brightness under text",
+        p.ink.ceil, src("shade.dark_ceil"));
     kprintln!("  tint       {:>3}% ({})    shade.glass_tint     wallpaper colour in the glass",
         p.ink.tint_w * 100 / 256, src("shade.glass_tint"));
-    kprintln!("  `unset <key>` returns a value to auto.");
+    kprintln!("  Glass is dark in both themes. `unset <key>` returns a value to auto.");
 }
 
 fn key(k: &str) -> Option<u32> {

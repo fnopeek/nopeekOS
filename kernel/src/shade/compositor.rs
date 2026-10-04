@@ -207,7 +207,12 @@ fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
     use crate::shade::widgets::abi::{IconId, Token};
     // Secondary text weight, like every other piece of window chrome —
     // the close button shouldn't outshout the menu labels next to it.
-    let color = crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted) & 0x00FF_FFFF;
+    // On loop's glass it is drawn like everything else on glass: dark theme.
+    let color = if matches!(win.kind, crate::shade::window::WindowKind::Terminal) {
+        crate::shade::widgets::palette::resolve_glass(Token::OnSurfaceMuted)
+    } else {
+        crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted)
+    } & 0x00FF_FFFF;
     let req = CLOSE_BTN_GLYPH * close_btn_scale(win, scale);
     if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
         let asz = asz as u32;
@@ -1852,7 +1857,7 @@ impl Compositor {
         let y = baseline.saturating_sub(hh);
 
         // Tray-coloured bar: same token + translucency as the revealed dock.
-        let tray = crate::shade::widgets::palette::resolve(
+        let tray = crate::shade::widgets::palette::resolve_glass(
             crate::shade::widgets::abi::Token::SurfaceElevated);
         render::fill_rounded_rect_alpha(shadow, info, x, y, w, hh,
             tray & 0x00FF_FFFF, hh / 2,
@@ -1942,7 +1947,7 @@ impl Compositor {
             // widget apps — Surface bg + OnSurface text — so light mode is
             // consistent across every window instead of a lone dark tile.
             let content_bg = if paint_content {
-                crate::shade::widgets::palette::resolve(
+                crate::shade::widgets::palette::resolve_glass(
                     crate::shade::widgets::abi::Token::Surface) & 0x00FF_FFFF
             } else {
                 win.bg_color
@@ -2029,7 +2034,7 @@ impl Compositor {
                         let from_top = if max_scroll == 0 { 0 } else { travel * (max_scroll - soff) / max_scroll };
                         let ty = text_y + from_top as u32;
                         let tx = text_x + text_w.saturating_sub(6);
-                        let color = crate::shade::widgets::palette::resolve(
+                        let color = crate::shade::widgets::palette::resolve_glass(
                             crate::shade::widgets::abi::Token::OnSurfaceMuted) & 0x00FF_FFFF;
                         for py in ty..(ty + thumb_h).min(info.height) {
                             for px in tx..(tx + 4).min(info.width) {

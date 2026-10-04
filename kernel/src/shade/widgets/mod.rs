@@ -2738,7 +2738,7 @@ fn rasterize_buffer_with_overlays(
         for p in pixels.iter_mut() { *p = bg; }
     }
 
-    let pal = palette::current();
+    let pal = palette::for_window(window_id);
     let mut target = abi::RasterTarget {
         pixels:  &mut pixels,
         stride:  rect.w,

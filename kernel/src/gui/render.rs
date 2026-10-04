@@ -164,9 +164,7 @@ fn luma(c: u32) -> u32 {
 /// How a glass fill meets what lies beneath it (see `shade::glass`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GlassInk {
-    /// Least luma under dark text (light glass); 0 = none.
-    pub floor: u32,
-    /// Most luma under light text (dark glass); 255 = none.
+    /// Most luma under the (light) text on glass; 255 = none.
     pub ceil: u32,
     /// Wallpaper colour mixed into the fill, and how much (×256).
     pub tint: u32,
@@ -174,7 +172,7 @@ pub struct GlassInk {
 }
 
 impl GlassInk {
-    pub const PLAIN: GlassInk = GlassInk { floor: 0, ceil: 255, tint: 0, tint_w: 0 };
+    pub const PLAIN: GlassInk = GlassInk { ceil: 255, tint: 0, tint_w: 0 };
 
     /// The fill colour with the wallpaper's tint mixed in.
     pub fn fill(&self, fg: u32) -> u32 {
@@ -182,25 +180,21 @@ impl GlassInk {
     }
 
     pub fn key(&self) -> u64 {
-        (self.floor as u64) | (self.ceil as u64) << 8 | (self.tint_w as u64) << 16 | (self.tint as u64) << 32
+        (self.ceil as u64) | (self.tint_w as u64) << 16 | (self.tint as u64) << 32
     }
 }
 
 /// Blend a glass fill over what lies beneath, holding the contrast bound.
 ///
 /// `alpha` (0..256) is the fill weight where the backdrop allows it. Where
-/// the backdrop is darker than `floor` (light glass) or brighter than
-/// `ceil` (dark glass), the fill gets just as much more weight as it takes
-/// to reach the bound — text stays legible over any patch while the rest
-/// shows through at `alpha`. Over a blurred backdrop this varies smoothly.
+/// the backdrop is brighter than `ceil`, the fill gets just as much more
+/// weight as it takes to bring it down to the ceiling — text stays legible
+/// over a bright patch while the rest shows through at `alpha`. Over a
+/// blurred backdrop this varies smoothly.
 /// `fg` must already carry the tint (`GlassInk::fill`).
 pub fn glass_blend(fg: u32, bg: u32, alpha: u32, ink: GlassInk) -> u32 {
     let mut a = alpha.min(256);
     let (lf, lb) = (luma(fg), luma(bg));
-    if ink.floor > 0 && lb < ink.floor && lf > ink.floor {
-        let need = ((ink.floor - lb) * 256).div_ceil(lf - lb);
-        a = a.max(need.min(256));
-    }
     if ink.ceil < 255 && lb > ink.ceil && lf < ink.ceil {
         let need = ((lb - ink.ceil) * 256).div_ceil(lb - lf);
         a = a.max(need.min(256));
