@@ -304,7 +304,7 @@ def discover():
     # verschwindet jede herausgeloeste Zeile aus dem Vergleich: die
     # C-Funktion meldet dann „Zahlen fehlen" und das Stueck gar nichts.
     part_re = re.compile(
-        r"^/// ([a-z0-9_]+\.c):[\d-]+,\s+ein Stueck aus\s+`([A-Za-z_]\w*)`")
+        r"^/// ([a-z0-9_]+\.c):[\d-]+,\s+(?:ein Stueck aus|part of)\s+`([A-Za-z_]\w*)`")
     fn_re = re.compile(r"^(?:pub )?fn ([a-z0-9_]+)")
     for rf in sorted(os.listdir(R)):
         if not rf.endswith(".rs"):

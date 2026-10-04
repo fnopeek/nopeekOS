@@ -481,8 +481,7 @@ fn pwrtrack_init(dm: &mut DmInfo, thermal_meter_k: u8) {
     dm.thermal_meter_lck = thermal_meter_k;
 }
 
-/// rtw8822c.c:1961-1968, ein Stueck aus `rtw8822c_phy_set_param`.
-/// (The German phrase is the marker `seqdiff.py` and `datapath.py` parse.)
+/// rtw8822c.c:1961-1968, part of `rtw8822c_phy_set_param`.
 ///
 /// Split out because the RX path (`query_phy_status_page0`) needs the same
 /// two values: they are the scale a CCK packet's RSSI is derived from. In

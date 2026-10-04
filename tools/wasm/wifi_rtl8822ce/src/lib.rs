@@ -7324,7 +7324,7 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Strips spaces and tabs at both ends.
+/// Strips spaces and tabs at both ends, and a trailing carriage return.
 fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
     while a < b && (t[a] == b' ' || t[a] == b'\t') {
         a += 1;

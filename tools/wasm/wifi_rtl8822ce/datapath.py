@@ -182,7 +182,7 @@ def ported():
     kommt der Name nicht vor. Da hat noch nie jemand hingesehen.
     """
     strikt = re.compile(r"^///\s*(?:.*·\s*)?[a-z0-9_]+\.[ch](?::[\d-]+)?[,]?\s+"
-                        r"(?:ein Stueck aus\s+)?`([A-Za-z_]\w*)`")
+                        r"(?:(?:ein Stueck aus|part of)\s+)?`([A-Za-z_]\w*)`")
     tick = re.compile(r"`([a-z_][a-z0-9_]*)`")
     portiert, benannt = {}, {}
     for fn in sorted(os.listdir(R)):

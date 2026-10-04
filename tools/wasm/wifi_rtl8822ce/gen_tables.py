@@ -32,10 +32,10 @@ OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src/tables.rs")
 
 # (C-Name, Rust-Name, Kommentar)
 TABLES = [
-    ("rtw8822c_mac", "MAC", "rtw_phy_cfg_mac — leer beim 8822C"),
+    ("rtw8822c_mac", "MAC", "rtw_phy_cfg_mac, empty on the 8822C"),
     ("rtw8822c_bb", "BB", "rtw_phy_cfg_bb"),
     ("rtw8822c_agc", "AGC", "rtw_phy_cfg_agc"),
-    ("rtw8822c_array_mp_cal_init", "RFK_INIT", "rtw_phy_cfg_bb, ueber rtw_load_rfk_table"),
+    ("rtw8822c_array_mp_cal_init", "RFK_INIT", "rtw_phy_cfg_bb via rtw_load_rfk_table"),
     ("rtw8822c_rf_a", "RF_A", "rtw_phy_cfg_rf, RF_PATH_A"),
     ("rtw8822c_rf_b", "RF_B", "rtw_phy_cfg_rf, RF_PATH_B"),
 ] 
@@ -214,7 +214,7 @@ def coex_tables():
             rows.append([int(v, 16) for v in vals])
         ty = "u32" if cols == 2 else "u8"
         w = 8 if cols == 2 else 2
-        out.append(f"/// rtw8822c.c `{cname}` — {len(rows)} Faelle")
+        out.append(f"/// rtw8822c.c `{cname}`, {len(rows)} cases")
         out.append(f"pub static {rname}: [[{ty}; {cols}]; {len(rows)}] = [")
         for r in rows:
             out.append("    [" + ", ".join(f"0x{v:0{w}x}" for v in r) + "],")
@@ -312,13 +312,12 @@ def txpwr_by_rate_map():
           f"in {len(entries)} Gruppen, {len(special)} rechnende Sonderfaelle "
           f"({', '.join(hex(a) for a in special)})")
 
-    out = ["""/// phy.c `rtw_phy_get_rate_values_of_txpwr_by_rate` — der Teil, der
-/// ZUORDNET. Eine Registeradresse aus `bb_pg` nennt eine Gruppe von Raten;
-/// die Werte selbst kommen byteweise aus dem Tabelleneintrag.
+    out = ["""/// phy.c `rtw_phy_get_rate_values_of_txpwr_by_rate`, the mapping part. A
+/// register address from `bb_pg` names a group of rates; the values come
+/// byte by byte from the table entry.
 ///
-/// **Nicht enthalten sind die zwei Faelle, die RECHNEN** (0xE08 mit
-/// `bcd_to_dec_pwr_by_rate`, 0x86C je nach Maske). Die stehen als Code in
-/// `phy.rs` — hier waeren sie eine Zuordnung, die keine ist."""]
+/// The two computed cases (0xE08 with `bcd_to_dec_pwr_by_rate`, 0x86C
+/// depending on the mask) are code in `phy.rs`, not entries here."""]
     out.append(f"pub static TXPWR_BY_RATE_MAP: [(u32, &[u8]); {n_addr}] = [")
     for addrs, rs in entries:
         lit = ", ".join(str(v) for v in rs)
@@ -364,7 +363,7 @@ def struct_tables():
         else:
             ty = "[u32; 6]"
             fmt = lambda r: "[" + ", ".join(f"0x{v:x}" for v in r) + "]"
-        out.append(f"/// rtw8822c_table.c `{cname}` — {len(rows)} Zeilen")
+        out.append(f"/// rtw8822c_table.c `{cname}`, {len(rows)} rows")
         out.append(f"pub static {rname}: [{ty}; {len(rows)}] = [")
         for r in rows:
             out.append("    " + fmt(r) + ",")
@@ -382,9 +381,9 @@ def rate_sections():
              "rtw_ht_2s_rates", "rtw_vht_1s_rates", "rtw_vht_2s_rates",
              "rtw_ht_3s_rates", "rtw_ht_4s_rates", "rtw_vht_3s_rates",
              "rtw_vht_4s_rates"]
-    out = ["""/// phy.c:118-124 `rtw_rate_section[]` — die zehn Ratenabschnitte in
-/// der Reihenfolge von `enum rtw_rate_section`. Die LAENGEN stehen in
-/// `rtw_rate_size[]` und sind hier die Laenge des Scheibchens."""]
+    out = ["""/// phy.c:118-124 `rtw_rate_section[]`: the ten rate sections in the order
+/// of `enum rtw_rate_section`. The lengths from `rtw_rate_size[]` are the
+/// slice lengths here."""]
     out.append(f"pub static RATE_SECTION: [&[u8]; {len(names)}] = [")
     for n in names:
         m = re.search(r"const u8 " + n + r"\[\] = \{(.*?)\};", src, re.S)
@@ -596,13 +595,12 @@ def txpower_reference():
     print(f"  {'txpower (Nachrechnung)':30s} Pruefsummen "
           f"off2g 0x{c_off2g:x} off5g 0x{c_off5g:x} "
           f"lim2g 0x{c_l2:x} lim5g 0x{c_l5:x}")
-    return ["""/// `rtw_chip_board_info_setup` fuer rfe_option 1, vom Erzeuger
-/// NACHGERECHNET. Der abgeleitete Zustand ist 25 KiB gross — einzeln
-/// vergleichen geht nicht, eine Summe ueber alle Zellen schon, und die
-/// faellt bei jedem einzelnen falschen Byte auf.
+    return ["""/// `rtw_chip_board_info_setup` for rfe_option 1, recomputed by the
+/// generator. The derived state is 25 KiB; comparing it cell by cell is
+/// impractical, but a sum over all cells catches any single wrong byte.
 ///
-/// Reihenfolge: by_rate_offset_2g · _5g · by_rate_base_2g · _5g ·
-/// limit_2g · limit_5g. Summiert wird byteweise, ohne Vorzeichen.""",
+/// Order: by_rate_offset_2g · _5g · by_rate_base_2g · _5g · limit_2g ·
+/// limit_5g. Summed bytewise, unsigned.""",
             f"pub static EXPECTED_TXPWR_SUMS: [u32; 6] = [",
             f"    0x{c_off2g:08x}, 0x{c_off5g:08x}, 0x{c_b2:08x},",
             f"    0x{c_b5:08x}, 0x{c_l2:08x}, 0x{c_l5:08x},",
@@ -646,12 +644,12 @@ def channel_groups():
             pending = []
 
     lo, hi = min(groups), max(groups)
-    out = ["""/// phy.c:1872-1960 `rtw_get_channel_group` — Kanal auf Leistungsgruppe.
-/// Index ist die Kanalnummer; 0xff heisst „kein Eintrag" (Linux warnt dort
-/// und faellt auf Gruppe 0).
+    out = ["""/// phy.c:1872-1960 `rtw_get_channel_group`: channel to power group.
+/// Indexed by channel number; 0xff means no entry (Linux warns and falls
+/// back to group 0).
 ///
-/// **Kanal 2 rechnet** — CCK gibt 0, alles andere 1 — und steht deshalb
-/// hier mit dem NICHT-CCK-Wert; den Sonderfall macht `txpower.rs`."""]
+/// Channel 2 is computed (CCK gives 0, everything else 1) and is stored
+/// here with the non-CCK value; `txpower.rs` handles the special case."""]
     out.append(f"pub static CHANNEL_GROUP: [u8; {hi + 1}] = [")
     row = []
     for ch in range(hi + 1):
@@ -661,7 +659,7 @@ def channel_groups():
     if row:
         out.append("    " + ", ".join(row) + ",")
     out.append("];\n")
-    out.append("/// Die rechnenden Faelle: (Kanal, Gruppe fuer CCK, sonst)")
+    out.append("/// The computed cases: (channel, group for CCK, group otherwise)")
     out.append(f"pub static CHANNEL_GROUP_CCK: [(u8, u8, u8); {len(special)}] = [")
     for ch, cck, other in special:
         out.append(f"    ({ch}, {cck}, {other}),")
@@ -726,9 +724,8 @@ def pwr_track_table():
             ("rtw8822c_pwrtrk_5gb_n", "PWRTRK_5GB_N"),
             ("rtw8822c_pwrtrk_5gb_p", "PWRTRK_5GB_P")]
 
-    out = ["/// rtw8822c.c `rtw8822c_pwr_track_type0_tbl` — die Kurven der",
-           "/// Sendeleistungs-Nachfuehrung, 30 Stuetzstellen je Kurve",
-           "/// (`RTW_PWR_TRK_TBL_SZ`). Index = |Thermometer - efuse|."]
+    out = ["/// rtw8822c.c `rtw8822c_pwr_track_type0_tbl`: the TX power tracking curves,",
+           "/// 30 points per curve (`RTW_PWR_TRK_TBL_SZ`). Index = |thermal - efuse|."]
     n_tbl = 0
     for cname, rname in ONE:
         m = re.search(r"static const u8 %s\[RTW_PWR_TRK_TBL_SZ\] = \{(.*?)\};"
@@ -765,14 +762,13 @@ def pwr_track_table():
 
 def main():
     src = open(SRC, errors="ignore").read()
-    out = ['''//! ERZEUGT von gen_tables.py aus Linux 6.18.26 rtw8822c_table.c — nicht
-//! von Hand aendern.
+    out = ['''//! Generated by gen_tables.py from Linux 6.18.26 rtw8822c_table.c; do not
+//! edit by hand.
 //!
-//! Die sechs Tabellen, die `rtw_phy_load_tables` laedt. Jede ist ein flaches
-//! `u32`-Feld aus Paaren; was ein Paar BEDEUTET, entscheidet
-//! `rtw_parse_tbl_phy_cond` (`phy.rs`): ist im ersten Wort Bit 31 gesetzt,
-//! ist es eine Bedingung, ist Bit 30 gesetzt, endet ein Bedingungsblock —
-//! sonst sind es Adresse und Wert.
+//! The six tables `rtw_phy_load_tables` loads. Each is a flat `u32` array
+//! of pairs; `rtw_parse_tbl_phy_cond` (`phy.rs`) decides what a pair means:
+//! bit 31 set in the first word is a condition, bit 30 set ends a
+//! conditional block, otherwise it is address and value.
 #![allow(dead_code)]
 ''']
     total = 0
@@ -780,8 +776,8 @@ def main():
     dpk_out = []
     for cname, rname, note in DPK_TABLES:
         vals = parse_triples(src, cname)
-        dpk_out.append(f"/// rtw8822c_table.c `{cname}` — {len(vals)//3} "
-                       f"Tripel (Adresse, Maske, Wert) · {note}")
+        dpk_out.append(f"/// rtw8822c_table.c `{cname}`, {len(vals)//3} "
+                       f"triples (address, mask, value) · {note}")
         dpk_out.append(f"pub static {rname}: [u32; {len(vals)}] = [")
         for i in range(0, len(vals), 3):
             dpk_out.append("    " + " ".join(f"0x{v:08x}," for v in vals[i:i + 3]))
@@ -794,8 +790,8 @@ def main():
         total += len(vals)
         n = count_writes(vals)
         expected.append((rname, n))
-        out.append(f"/// rtw8822c_table.c `{cname}` — {len(vals)} Woerter "
-                   f"= {len(vals)//2} Kacheln · {note}")
+        out.append(f"/// rtw8822c_table.c `{cname}`, {len(vals)} words "
+                   f"= {len(vals)//2} pairs · {note}")
         out.append(f"pub static {rname}: [u32; {len(vals)}] = [")
         for i in range(0, len(vals), 8):
             out.append("    " + " ".join(f"0x{v:08x}," for v in vals[i:i + 8]))
@@ -803,11 +799,10 @@ def main():
         print(f"  {cname:30s} {len(vals):6d} Woerter "
               f"({len(vals) * 4 / 1024:7.1f} KiB) -> {n:5d} Schreibzugriffe")
 
-    out.append("""/// Wieviele Schreibzugriffe jede Tabelle auf UNSEREM Geraet abgibt
-/// (cut 3 = CUT_D · rfe_option 1 · PCIe · pkg 15), vom Erzeuger
-/// nachgerechnet. Der Lader haelt seine eigene Zahl dagegen: stimmt sie
-/// nicht, laeuft der Bedingungslaeufer anders als Linux' — und das ist ein
-/// Fehler, den man sonst erst als stummen Funkausfall sieht.
+    out.append("""/// Number of writes each table produces for cut 3 (CUT_D), rfe_option 1,
+/// PCIe, package 15, as computed by the generator. The loader checks its
+/// own count against it: a mismatch means the condition walker diverges
+/// from Linux, which would otherwise only show up as a silent radio failure.
 pub const EXPECTED_WRITES_CUT_D_RFE1: [(&str, u32); %d] = [""" % len(expected))
     for rname, n in expected:
         out.append(f'    ("{rname.lower()}", {n}),')

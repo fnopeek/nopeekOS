@@ -39,9 +39,9 @@ CASES = [
 
 def main():
     src = (HERE / "src" / "lib.rs").read_text()
-    m = re.search(r"/// `cfg_get` aus `wifid`.*?\n(fn cfg_get.*?\n\})",
+    m = re.search(r"\n(fn cfg_get\(.*?\n\})",
                   src, re.S)
-    m2 = re.search(r"(/// Leerzeichen und Wagenruecklauf.*?\nfn trim.*?\n\})",
+    m2 = re.search(r"\n(fn trim\(.*?\n\})",
                    src, re.S)
     if not m or not m2:
         sys.exit("cfg_get/trim nicht in src/lib.rs gefunden")
