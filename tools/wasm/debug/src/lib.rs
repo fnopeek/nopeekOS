@@ -2,10 +2,10 @@
 //!
 //! Mirrors the window's terminal over TCP to a `nc -l <port>` listener
 //! on the developer's machine. Dials out (reverse-shell style), no auth,
-//! no crypto — feature is temporary, will be replaced by real SSH later.
+//! no crypto — a stopgap until real SSH.
 //!
 //! Usage:  run debug <ip> <port>
-//! On laptop:  nc -l 22222
+//! On laptop:  nc -lk 22222
 
 #![no_std]
 
@@ -22,25 +22,21 @@ const VERSION: &str = "0.7.0";
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-/// **`debug` braucht das Netz** — es schreibt sein Protokoll ueber einen
-/// rohen TCP-Socket an ein `nc -lk` auf dem Entwicklerrechner.
-///
-/// Bis Kernel 0.337.0 stand hier nichts, und es lief trotzdem: die fuenf
-/// `npk_tcp_*` prueften GAR KEINE Kapabilitaet. Jetzt tun sie es, und damit
-/// muss das Recht dastehen, wie bei jedem anderen Modul auch.
+/// `debug` needs the network: it writes its log over a raw TCP socket to
+/// an `nc -lk` on the developer's machine. The `npk_tcp_*` calls check
+/// the NET right like for any other module.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-// READ ist dabei, weil die Vorgabe ohne Sektion `READ | EXECUTE | RENDER`
-// ist — wer eine Sektion hinschreibt, ERSETZT die Vorgabe und muss alles
-// nennen, was er behalten will.
+// READ is listed because the default without a section is
+// `READ | EXECUTE | RENDER` — a section replaces the default and must
+// name everything it wants to keep.
 static NPK_CAPS: [u8; 2] = [0x01 | 0x04 | 0x08, 0x01];   // READ|EXEC|RENDER, ext: NET
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // The banner carries the version because the failure mode of the OLD one —
-    // mirroring a single terminal, so the console goes quiet the moment output
-    // is routed elsewhere — looks exactly like a broken connection. Knowing
-    // which one is running is the first question, every time.
+    // The banner carries the version: a mirror that goes quiet looks
+    // exactly like a broken connection, so which build is running is the
+    // first question.
     host::print("[debug] reverse-mirror ");
     host::print(VERSION);
     host::print(" (global mirror)\n");
@@ -66,12 +62,11 @@ pub extern "C" fn _start() {
     host::print_dec(my_term as u32);
     host::print(")\n");
 
-    // Open the everything-sink (-1): every write, whichever terminal the kernel
-    // routed it to. Bound to one index this mirror went quiet the moment output
-    // was redirected — background messages go to the primary loop, a command's
-    // output to the loop it was typed in — and it looked like the machine had
-    // stopped answering while it was still printing. Older kernels do not know
-    // -1, so fall back to our own terminal.
+    // Open the everything-sink (-1): every write, whichever terminal the
+    // kernel routed it to. Bound to one terminal the mirror would go quiet
+    // whenever output is redirected — background messages go to the
+    // primary loop, a command's output to the loop it was typed in. Kernels
+    // that do not know -1 fall back to our own terminal.
     let mut sink = -1i32;
     if host::stream_open(sink) != 0 {
         sink = my_term;
@@ -82,15 +77,14 @@ pub extern "C" fn _start() {
         host::print("[debug] kernel has no global mirror - only this terminal\n");
     }
 
-    // Dial, then wait OUTSIDE the host call. The connect used to block in the
-    // kernel until ESTABLISHED or a 10 s timeout — and this module is a fiber,
-    // so those 10 s froze every other fiber on the same worker core, the WiFi
-    // driver included: a failing `debug` took the link down with it. Sleeping
-    // between polls leaves the core, so the driver keeps draining its card.
+    // Dial, then wait outside the host call. This module is a fiber, so a
+    // connect that blocks in the kernel would freeze every other fiber on
+    // the same worker core, drivers included; sleeping between polls
+    // leaves the core.
     // Outer loop: a mirror that gives up the moment the link hiccups is
     // useless exactly when it is needed. The far end must keep listening too
     // (`nc -lk`, or `while true; do nc -l PORT; done`) — plain `nc -l` takes
-    // ONE connection and exits.
+    // one connection and exits.
     //
     // The sink stays open across reconnects, so output produced while we were
     // away is still in its 64 KB ring when we come back.
@@ -99,7 +93,7 @@ pub extern "C" fn _start() {
     let sock = host::tcp_connect(ip, port);
     let mut connected = sock >= 0;
     if connected {
-        // 10 s at 20 ms — same ceiling the kernel used to enforce.
+        // 10 s at 20 ms.
         connected = false;
         for _ in 0..500 {
             match host::tcp_status(sock) {
@@ -113,7 +107,7 @@ pub extern "C" fn _start() {
         if sock >= 0 { host::tcp_close(sock); }
         attempt = attempt.saturating_add(1);
         // Say it the first few times, then stop — the retry itself is silent
-        // work and this print goes to the device's own screen.
+        // work and this print goes to the local screen.
         if attempt <= 3 {
             host::print("[debug] connect failed (is `nc -lk ");
             host::print_dec(port as u32);
@@ -125,11 +119,10 @@ pub extern "C" fn _start() {
         continue;
     }
     attempt = 0;
-    // Say who we are AFTER the sink and the socket exist — the banner above is
-    // printed before either, so it only ever reached the device's own screen.
-    // Which version is running, and whether it got the global mirror, is the
-    // first question when output stops arriving; it has to be answerable from
-    // the far end.
+    // Say who we are after the sink and the socket exist — the banner above
+    // is printed before either, so it only reaches the local screen. Which
+    // version is running, and whether it got the global mirror, has to be
+    // answerable from the far end.
     host::print("[debug] connected — reverse-mirror ");
     host::print(VERSION);
     host::print(if sink < 0 { " (global mirror)\n" } else { " (single terminal only)\n" });
@@ -145,19 +138,16 @@ pub extern "C" fn _start() {
         let mut did_work = false;
 
         // Did the far end hang up? `tcp_recv` never says so — it just returns
-        // 0 bytes forever in CloseWait, which is why closing `nc` used to
-        // leave this module running with nothing to talk to.
+        // 0 bytes forever in CloseWait.
         // Every 16th round only: this takes the kernel's CONNECTIONS lock,
-        // and under load the RX path takes the same lock tens of thousands
-        // of times a second. Asking every round put a third acquisition in
-        // the hot loop for an answer that changes once per session.
+        // which the RX path takes very often under load; the answer changes
+        // once per session.
         round = round.wrapping_add(1);
         match if round % 16 == 0 { host::tcp_status(sock) } else { 1 } {
             1 => {}
-            // -2 is the interesting one: the connection did not end, it FAILED
-            // — five retransmits with no acknowledgement, i.e. the link went
-            // dead under us for about six seconds. Printing the same words for
-            // both hid exactly the event worth chasing.
+            // -2 is the interesting one: the connection did not end, it failed —
+            // five retransmits with no acknowledgement, i.e. the link went dead
+            // for about six seconds. It gets its own message.
             -2 => {
                 host::print("[debug] link went dead (no ACK for ~6 s) — disconnecting\n");
                 break;
@@ -174,7 +164,7 @@ pub extern "C" fn _start() {
             match host::tcp_send(sock, &tx_buf[..n as usize]) {
                 0 => {}
                 // -2 = too much unacknowledged. Not a failure: give the
-                // retransmit a moment and offer the SAME bytes again, or the
+                // retransmit a moment and offer the same bytes again, or the
                 // mirror loses exactly the output the developer is waiting for.
                 -2 => {
                     let mut tries = 0;
@@ -188,13 +178,11 @@ pub extern "C" fn _start() {
                         }
                     }
                     if !sent {
-                        // Backpressure is not failure. A MIRROR may lose lines
+                        // Backpressure is not failure. A mirror may lose lines
                         // — the sink ring already drops the oldest on overflow
-                        // — but it must never disconnect over it. Closing here
-                        // meant that under a saturating download the mirror
-                        // shut itself down after two seconds, and announced it
-                        // over the very connection it was closing: from the far
-                        // end, silence with no reason given.
+                        // — but it must never disconnect over it, or a saturating
+                        // download would shut the mirror down without a reason
+                        // reaching the far end.
                         dropped = dropped.saturating_add(1);
                         if dropped == 1 {
                             host::print("[debug] mirror behind — dropping output, staying connected\n");
@@ -232,7 +220,7 @@ pub extern "C" fn _start() {
         }
     }
 
-    // Relay ended. Close OUR side and dial again — the reason was already
+    // Relay ended. Close our side and dial again — the reason was already
     // printed above, and how long the gap lasted is visible from the two
     // timestamps in the surrounding log.
     host::tcp_close(sock);
