@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "tune"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "nanomp3",
  "nopeek_widgets",

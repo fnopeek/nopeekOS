@@ -44,7 +44,6 @@ pub struct Sink {
     /// 48 kHz frames the driver has drained, from the wall clock.
     played:    u64,
     last_ms:   i64,
-    pub underruns: u32,
 }
 
 impl Sink {
@@ -68,7 +67,6 @@ impl Sink {
             anchor_ms: 0,
             played: 0,
             last_ms: 0,
-            underruns: 0,
         }
     }
 
@@ -133,19 +131,11 @@ impl Sink {
         if now_ms - self.anchor_ms < Self::ANCHOR_EVERY_MS { return; }
         let ring = host::audio_buffered(self.slot);
         if ring < 0 {
-            // No slot — only the wall clock remains, and overtaking what was
-            // submitted is the underrun.
-            if self.played >= self.submitted && self.submitted > 0 {
-                self.underruns = self.underruns.saturating_add(1);
-            }
+            // No slot: only the wall clock remains.
             return;
         }
         self.anchor_ms = now_ms;
         let unheard = ring as u64 / 4 + Self::HDA_RING_FRAMES;
-        // An empty ring while playing is an underrun.
-        if ring == 0 && self.submitted > self.base {
-            self.underruns = self.underruns.saturating_add(1);
-        }
         self.played = self.submitted.saturating_sub(unheard).max(self.base);
     }
 

@@ -186,8 +186,6 @@ struct Tune {
     controls_shown: bool,
     /// Seconds last drawn, so the loop only re-commits when the clock moves.
     shown_s: i64,
-    /// Underruns already reported, so a stutter logs once and not per tick.
-    told_underruns: u32,
     /// The video half, when the file has one. `None` is an ordinary audio
     /// track.
     video: Option<video::Video>,
@@ -197,21 +195,10 @@ struct Tune {
     video_t0: i64,
     /// Video time of the last frame handed to the compositor, for the UI.
     video_ms: i64,
-    /// Second of playback the lag was last reported for.
-    told_lag_s: i64,
-    /// Moving average of what one decode costs (ms); reported, varies with
-    /// the scene.
-    decode_est_ms: i64,
     /// Priming of the audio track in ms — what precedes the first audible sample.
     audio_priming_ms: i64,
     /// Still filling the queue before the clock starts.
     video_buffering: bool,
-    /// Collected per second: time in the decoder, time in commit, frames.
-    /// The clock has 10 ms granularity, so only the sum over a second is
-    /// meaningful.
-    sec_decode_ms: i64,
-    sec_commit_ms: i64,
-    sec_decoded: u32,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -265,17 +252,11 @@ impl Tune {
             over_bar: false,
             controls_shown: true,
             shown_s: -1,
-            told_underruns: 0,
             video: None,
             video_t0: 0,
             video_ms: 0,
-            told_lag_s: -1,
             audio_priming_ms: 0,
-            decode_est_ms: 20,
             video_buffering: false,
-            sec_decode_ms: 0,
-            sec_commit_ms: 0,
-            sec_decoded: 0,
         };
 
         let mut argbuf = [0u8; 512];
@@ -458,85 +439,30 @@ impl Tune {
         // Show first, then decode — both in the same turn. The due frame
         // is already on screen when decoding starts, so a long decode never
         // delays a frame and the lead stays steady.
-        let mut showed = false;
-        let t_com = host::ticks();
         {
             let v = self.video.as_mut().unwrap();
             if let Some(f) = v.take_due(ms) {
                 let (ys, cs) = video::Video::strides(f);
                 // Commit is not free: it copies the three planes across the
                 // module boundary and re-rasters the window, both inside the host
-                // call and so serial to decoding. Hence measured separately.
+                // call and so serial to decoding.
                 host::canvas_commit_yuv(VIDEO_CANVAS, &f.y, &f.u, &f.v, ys, cs,
                                         f.width as u32, f.height as u32, flags);
-                showed = true;
             }
         }
-        if showed { self.sec_commit_ms += host::ticks() - t_com; }
 
         // Re-read the clock: the commit took time, and decoding is
         // governed by the lead, which has shrunk since.
         let ms = self.clock_ms(has_audio, host::ticks());
         self.video_ms = ms;
 
-        let t_dec = host::ticks();
-        {
-            let v = self.video.as_mut().unwrap();
-            v.decode_step(ms, video::PLAY_DECODES);
-        }
-        let took = host::ticks() - t_dec;
-        self.sec_decode_ms += took;
-        if took > 0 {
-            // Moving average, 1:3. Report only — it explains why a second
-            // was expensive.
-            self.decode_est_ms = (self.decode_est_ms * 3 + took) / 4;
-        }
-        self.sec_decoded += self.video.as_mut().unwrap().take_decoded();
+        self.video.as_mut().unwrap().decode_step(ms, video::PLAY_DECODES);
 
-        // Read the clock again: decoding was long, and the lag reported
-        // next must be the current one.
-        let ms = self.clock_ms(has_audio, host::ticks());
-        self.video_ms = ms;
+        // Read the clock again: decoding can take long, and the UI shows
+        // the current position.
+        self.video_ms = self.clock_ms(has_audio, host::ticks());
 
-        let (lag, lead, ended) = {
-            let v = self.video.as_ref().unwrap();
-            (ms - v.shown_ms(), v.lead_ms(ms), v.ended())
-        };
-        if ended { self.drained = true; }
-
-        let sec = ms / 1000;
-        if sec != self.told_lag_s {
-            self.told_lag_s = sec;
-            // Reset the per-second counters only here, once per second.
-            let (dropped, shown) = {
-                let v = self.video.as_mut().unwrap();
-                (core::mem::take(&mut v.dropped), core::mem::take(&mut v.shown_count))
-            };
-            // Report what explains: a dropped frame is what the eye sees even
-            // when the clock is right, and the two times next to it say where
-            // the second went.
-            if dropped > 0 || lag > 150 {
-                let mut m = alloc::string::String::from("[tune] ");
-                push_u32(&mut m, shown);
-                m.push_str(" Bilder, ");
-                push_u32(&mut m, dropped);
-                m.push_str(" verworfen · Rueckstand ");
-                push_u32(&mut m, lag.max(0).min(u32::MAX as i64) as u32);
-                m.push_str(" ms, Vorlauf ");
-                push_u32(&mut m, lead.min(u32::MAX as i64) as u32);
-                m.push_str(" ms · dekodiert ");
-                push_u32(&mut m, self.sec_decoded);
-                m.push_str("x in ");
-                push_u32(&mut m, self.sec_decode_ms.max(0) as u32);
-                m.push_str(" ms, gemalt ");
-                push_u32(&mut m, self.sec_commit_ms.max(0) as u32);
-                m.push_str(" ms");
-                log(&m);
-            }
-            self.sec_decode_ms = 0;
-            self.sec_commit_ms = 0;
-            self.sec_decoded = 0;
-        }
+        if self.video.as_ref().unwrap().ended() { self.drained = true; }
     }
 
     /// Decode ahead until the mailbox holds `TARGET_LEAD_MS`. Runs between
@@ -1055,14 +981,6 @@ fn list_media(dir: &str) -> Vec<Track> {
     out
 }
 
-fn push_u32(s: &mut String, mut n: u32) {
-    if n == 0 { s.push('0'); return; }
-    let mut buf = [0u8; 10];
-    let mut i = 0;
-    while n > 0 { buf[i] = b'0' + (n % 10) as u8; n /= 10; i += 1; }
-    while i > 0 { i -= 1; s.push(buf[i] as char); }
-}
-
 fn split_path(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(i) => (&path[..i], &path[i + 1..]),
@@ -1107,16 +1025,6 @@ pub extern "C" fn _start() {
         t.sink.tick(now, t.playing && t.src.is_some());
         t.pump();
         t.video_tick();
-        if t.sink.underruns != t.told_underruns {
-            // A stutter that only shows as a click is a measurement thrown
-            // away — the serial mirror gets the count. Checked here and not
-            // in the redraw below, because a hard stall freezes the clock
-            // and the redraw with it.
-            t.told_underruns = t.sink.underruns;
-            let mut m = alloc::string::String::from("[tune] mailbox ran dry, total ");
-            push_u32(&mut m, t.told_underruns);
-            log(&m);
-        }
 
         match poll_event() {
             PollResult::Event(ev) => {

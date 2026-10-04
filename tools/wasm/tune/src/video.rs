@@ -72,19 +72,11 @@ pub struct Video {
     dec: Decoder,
     /// Next sample to feed the decoder, in decode order.
     next: usize,
-    /// Samples decoded since the counter was last read.
-    decoded: u32,
     /// Reused scratch for the Annex-B reframing, so a frame costs no
     /// allocation beyond the picture itself.
     au: Vec<u8>,
     /// Decoded but not yet shown, ascending by presentation time.
     queue: Vec<(i64, YuvFrame)>,
-    /// Pictures decoded and thrown away because a newer one was already due.
-    /// Not a failure — it is what keeps the picture on the clock — but it is
-    /// what the eye sees when the machine is short, so it gets counted.
-    pub dropped: u32,
-    /// Pictures handed to the screen.
-    pub shown_count: u32,
     /// Bytes the queue holds, tracked rather than recomputed: the planes do
     /// not change size, and walking them per call to add up three `len()`s
     /// would be work that grows with the lead we are trying to build.
@@ -140,11 +132,8 @@ impl Video {
             dec: Decoder::new(),
             next: 0,
             au: Vec::new(),
-            decoded: 0,
             queue: Vec::new(),
             queue_bytes: 0,
-            dropped: 0,
-            shown_count: 0,
             shown: None,
             fed_all: false,
         };
@@ -185,7 +174,6 @@ impl Video {
         // A sample the decoder refuses is one lost picture, not a lost film:
         // the next sync sample starts it again. Silence here would hide a
         // broken file, so the caller gets to log it.
-        self.decoded += 1;
         if let Ok(Some(f)) = self.dec.decode(&self.au) {
             // Insert sorted; the queue is four long, so this is cheaper than
             // keeping a heap and far cheaper than being wrong about order.
@@ -223,22 +211,14 @@ impl Video {
             let (pts, f) = self.queue.remove(0);
             self.queue_bytes = self.queue_bytes
                 .saturating_sub(f.y.len() + f.u.len() + f.v.len());
-            if advanced { self.dropped += 1; }   // the previous one never reached the screen
             self.shown = Some((pts, f));
             advanced = true;
         }
         if advanced {
-            self.shown_count += 1;
             self.shown.as_ref().map(|(_, f)| f)
         } else {
             None
         }
-    }
-
-    /// Samples decoded since the last `take_decoded`. The caller measures the
-    /// time itself; this only counts what caused it.
-    pub fn take_decoded(&mut self) -> u32 {
-        core::mem::take(&mut self.decoded)
     }
 
     fn fill(&mut self, ms: i64, budget: &mut usize) {
@@ -294,12 +274,6 @@ impl Video {
     /// hand to mouth, and the next expensive scene will be visible.
     pub fn lead_ms(&self, ms: i64) -> i64 {
         self.queue.last().map(|(p, _)| p - ms).unwrap_or(0).max(0)
-    }
-
-    /// Presentation time of the picture on screen. The gap to the caller's
-    /// clock is the lag, and it says whether the machine keeps up.
-    pub fn shown_ms(&self) -> i64 {
-        self.shown.as_ref().map(|(p, _)| *p).unwrap_or(0)
     }
 
     /// Everything fed and nothing left to show.
