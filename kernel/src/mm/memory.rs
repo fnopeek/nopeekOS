@@ -1,7 +1,7 @@
 //! Physical Memory Manager
 //!
 //! Bitmap frame allocator for 4KB pages.
-//! Parses the Multiboot2 memory map to find available RAM.
+//! Parses the UEFI memory map to find available RAM.
 //! Principle: deny by default — everything is "used" until the
 //! memory map explicitly says a region is available.
 
@@ -97,19 +97,16 @@ unsafe extern "C" {
     static __heap_start: u8;
 }
 
-/// Die Bereiche, die die Firmware als NUTZBAREN Arbeitsspeicher gemeldet
-/// hat — Kernel, Halde und die linearen Speicher der Module liegen darin.
-///
-/// Gebraucht wird das fuer genau eine Frage: darf ein Modul diese physische
-/// Adresse lesen? Alles, was hier drinliegt, ist Arbeitsspeicher und damit
-/// TABU; was draussen liegt, ist Firmware- oder Geraetefenster.
+/// Ranges the firmware reported as usable RAM (kernel, heap and module
+/// linear memories live there). Answers one question: may a module read
+/// this physical address? Anything inside is RAM and off limits; anything
+/// outside is a firmware or device window.
 static RAM_RANGES: Mutex<([(u64, u64); 64], usize)> = Mutex::new(([(0, 0); 64], 0));
 
-/// Liegt `addr` in einem als nutzbar gemeldeten RAM-Bereich?
+/// Whether `addr` lies in a range reported as usable RAM.
 ///
-/// Konservativ: kennen wir die Karte nicht (Zahl 0), gilt ALLES als RAM und
-/// damit als tabu. Lieber eine Auskunft verweigern als eine geben, die den
-/// Sandkasten oeffnet.
+/// Conservative: without a map (count 0), everything counts as RAM and is
+/// therefore off limits.
 pub fn is_usable_ram(addr: u64) -> bool {
     let g = RAM_RANGES.lock();
     let (ranges, n) = &*g;
@@ -143,7 +140,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // above. The boot_info struct lives in BSS (= part of the kernel
     // image), so no separate reservation needed.
 
-    // Die RAM-Karte merken, solange wir sie in der Hand haben.
+    // Keep the RAM map while we still have it.
     {
         let mut g = RAM_RANGES.lock();
         let (ranges, n) = &mut *g;
@@ -177,7 +174,6 @@ pub fn deallocate_frame(addr: u64) {
     ALLOCATOR.lock().deallocate(addr);
 }
 
-/// Allocate `count` contiguous physical frames. Returns base physical address.
 /// Allocate contiguous frames below a physical address limit.
 /// `limit_bytes` = 0 means no limit (use all memory).
 pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> {
@@ -220,6 +216,7 @@ pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> 
     }
 }
 
+/// Allocate `count` contiguous physical frames. Returns base physical address.
 pub fn allocate_contiguous(count: usize) -> Option<u64> {
     if count == 0 { return None; }
     let mut alloc = ALLOCATOR.lock();

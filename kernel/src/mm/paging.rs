@@ -1,8 +1,7 @@
 //! Virtual Memory Manager
 //!
 //! 4-level x86_64 paging: PML4 → PDPT → PDT → PT → 4KB page.
-//! Works alongside boot.s 2MB identity mapping.
-//! Preparation for WASM sandbox memory isolation.
+//! `init` replaces the firmware tables with our own 64 GB identity map.
 #![allow(dead_code)]
 
 use bitflags::bitflags;
@@ -208,9 +207,9 @@ pub fn init() {
     // Build our own page tables. UEFI handed us long mode running on
     // its own PML4 — those tables are in firmware-owned memory marked
     // read-only, so we can't add new entries to them later (e.g. for
-    // MMIO MMIO regions or WASM module memory). We allocate fresh
+    // MMIO regions or WASM module memory). We allocate fresh
     // tables from our frame allocator and identity-map 64 GB via
-    // 1 GB huge pages (matching what the old multiboot2 boot.s did).
+    // 1 GB huge pages.
     let pml4_phys = memory::allocate_frame()
         .expect("paging::init: failed to allocate PML4 frame");
     let pdpt_phys = memory::allocate_frame()
@@ -243,28 +242,20 @@ pub fn init() {
     kprintln!("[npk] Paging: 64 GB identity-mapped, NX enabled (own PML4 @ {:#x})", pml4_phys);
 }
 
-/// Map a 4KB virtual page to a physical frame.
-/// Automatically splits 1GB and 2MB huge pages when a different mapping
-/// (e.g. NO_CACHE for MMIO) is needed at 4KB granularity.
-/// Obergrenze der Identitaetsabbildung (siehe `init`: 64 GB).
+/// End of the identity mapping (see `init`: 64 GB).
 pub const IDENTITY_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
-/// Ein Byte an einer physischen Adresse lesen.
+/// Read one byte at a physical address (identity-mapped, so physical equals
+/// virtual). Meant for firmware windows such as ACPI SystemMemory regions.
+/// The caller must already have checked that the address is not RAM; this
+/// only checks the mapping limit.
 ///
-/// Der Kernel bildet die ersten 64 GB identisch ab, physisch ist hier also
-/// gleich virtuell. Gedacht fuer FIRMWARE-Fenster (ACPI-SystemMemory-
-/// Regionen); der Rufer muss vorher geprueft haben, dass die Adresse KEIN
-/// Arbeitsspeicher ist — diese Funktion prueft das nicht, sie prueft nur
-/// die Abbildungsgrenze.
-///
-/// Gelesen wird ueber die gewoehnliche Abbildung, also gecacht. Fuer ein
-/// Statusbyte der Firmware ist das in Ordnung; ein Register, das sich ohne
-/// unser Zutun aendert, braucht eine UC-Abbildung, und das ist hier
-/// benannt und nicht gebaut.
+/// Reads go through the normal cached mapping, which is fine for firmware
+/// status bytes. Not implemented: an uncached mapping for registers that
+/// change on their own.
 pub fn read_phys_u8(addr: u64) -> Option<u8> {
     if addr >= IDENTITY_LIMIT { return None; }
-    // SAFETY: innerhalb der Identitaetsabbildung, ein einzelnes Byte,
-    // ausschliesslich lesend.
+    // SAFETY: inside the identity mapping, a single byte, read-only.
     Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
 }
 
@@ -274,12 +265,15 @@ pub fn read_phys_u8(addr: u64) -> Option<u8> {
 /// runs the module (`memory.grow`, `Code::map`). `get_or_create` reads an
 /// empty slot, allocates a table and writes it — two cores doing that on the
 /// same slot each install their own table, and the mappings made through the
-/// loser vanish. Code of different modules shares page tables (the code
-/// region grows linearly), so this was not a theoretical overlap.
+/// loser vanish. Code of different modules shares page tables because the
+/// code region grows linearly.
 ///
 /// Never taken from interrupt context; nothing under it maps again.
 static PT_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// Map a 4KB virtual page to a physical frame.
+/// Automatically splits 1GB and 2MB huge pages when a different mapping
+/// (e.g. NO_CACHE for MMIO) is needed at 4KB granularity.
 pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingError> {
     if vaddr & 0xFFF != 0 || paddr & 0xFFF != 0 {
         return Err(PagingError::NotAligned);

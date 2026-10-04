@@ -1,40 +1,16 @@
 //! Heap Allocator
 //!
-//! Groessenklassen-Freilisten mit Grenzmarken (boundary tags). Belegen und
-//! Freigeben sind O(1); wachsen tut der Heap weiter in 64-MB-Stuecken.
+//! Segregated free lists with boundary tags. Allocation and free are O(1);
+//! the heap grows in 64 MB chunks.
 //!
-//! # Warum nicht mehr First-Fit
+//! Every block carries a header tag (size, bit 0 = free) and a footer copy
+//! of the size, so free finds its physical neighbours in O(1). Free blocks
+//! are doubly linked in the list of their size class, so coalescing can
+//! unlink a neighbour in O(1). Size classes alone are not enough: with a
+//! single sorted list, freeing is O(n) too.
 //!
-//! Der Vorgaenger hielt EINE adresssortierte, einfach verkettete Liste.
-//! Beides war O(n): `try_allocate` suchte vom Kopf her den ersten passenden
-//! Block, `insert_free_block` lief bis zur Einfuegestelle. Gemessen an einem
-//! `forge python`-Lauf (0.313.2, die Zaehler stehen unten und sind geblieben):
-//!
-//!   313 968 allocs / 313 982 frees
-//!   Schritte: 181 931 481 beim Belegen + 181 835 409 beim Freigeben
-//!   Freiliste stabil bei ~1400 Knoten
-//!
-//! Das sind **579 besuchte Knoten je Operation, auf beiden Seiten** — 363
-//! Millionen Zeigerschritte fuer einen Lauf. Die Liste waechst dabei nicht;
-//! sie ist nur lang. Deshalb reichten Groessenklassen allein NICHT: sie
-//! haetten das Belegen geheilt und das Freigeben unangetastet gelassen.
-//!
-//! Sichtbar wurde es erst im SKALIEREN, nicht in einer Zeit: derselbe
-//! Compilerlauf waechst auf dem Entwicklungsrechner linear mit der
-//! Ausgabegroesse (beak -> python: 4,3x bei 4,39x Code), am Geraet mit 10,0x.
-//! Eine konstante Verlangsamung kann keine Kurve kruemmen.
-//!
-//! # Aufbau
-//!
-//! Jeder Block traegt vorn eine Marke (Groesse, Bit 0 = frei) und hinten eine
-//! Wiederholung der Groesse. Damit findet das Freigeben seine physischen
-//! Nachbarn in O(1), ohne die Liste zu durchlaufen. Freie Bloecke haengen
-//! doppelt verkettet in der Liste ihrer Groessenklasse, damit das Verschmelzen
-//! einen Nachbarn in O(1) aushaengen kann.
-//!
-//! An beiden Enden jeder Region steht ein Scheinblock, der nie frei ist. So
-//! braucht kein Nachbarschaftstest eine Bereichspruefung — das Verschmelzen
-//! laeuft von selbst nicht ueber die Region hinaus.
+//! Each region is bracketed by sentinel blocks that are never free, so
+//! coalescing stops at the region boundary without a range check.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -47,49 +23,39 @@ const MAX_HEAP: usize = 2 * 1024 * 1024 * 1024;      // 2GB ceiling
 const MAX_REGIONS: usize = 32;
 const BLOCK_ALIGN: usize = 16;
 
-/// Marke vorn, Wiederholung hinten — je acht Bytes.
+/// Header tag and footer copy, eight bytes each.
 const TAG: usize = 8;
-/// Bit 0 der vorderen Marke. Groessen sind auf 16 ausgerichtet, also ist es frei.
+/// Bit 0 of the header tag. Sizes are 16-aligned, so the bit is unused.
 const FREE_BIT: usize = 1;
-/// Scheinblock an jedem Regionenende. Nie frei, nur Anschlag.
+/// Sentinel block at each region end. Never free.
 const SENTINEL: usize = 16;
 
 const HEADER_SIZE: usize = core::mem::size_of::<AllocHeader>();
-/// Marke + zwei Zeiger + Wiederholung.
+/// Tag + two list pointers + footer.
 const MIN_BLOCK_SIZE: usize = 32;
 
-/// Steht unmittelbar vor den Nutzdaten und findet den Blockanfang wieder.
-/// Bleibt aus dem Vorgaenger uebernommen: die Ausrichtung kann die Nutzdaten
-/// beliebig weit hinter den Blockanfang schieben, und diese beiden Zahlen sind
-/// der einzige Weg zurueck.
+/// Sits immediately before the payload and leads back to the block start.
+/// Alignment can push the payload arbitrarily far past the block start, so
+/// this is the only way back.
 #[repr(C)]
 struct AllocHeader {
     block_start: usize,
     block_size: usize,
 }
 
-/// Die beiden Zeiger eines freien Blocks, direkt hinter seiner Marke.
+/// The two list pointers of a free block, right after its tag.
 #[repr(C)]
 struct FreeNode {
     prev: *mut FreeNode,
     next: *mut FreeNode,
 }
 
-/// Bis 512 ein Kasten je 16 Bytes, darueber je eine Zweierpotenz.
+/// One bin per 16 bytes up to 512, one per power of two above.
 ///
-/// **Die 16 sind kein Geschmack, sie sind die Ausrichtung.** Blockgroessen
-/// sind Vielfache von `BLOCK_ALIGN` (16), also haelt jeder Kasten unterhalb
-/// von 512 GENAU EINE Groesse — der erste Block darin passt immer, und die
-/// Suche ist O(1).
-///
-/// Mit 32-Byte-Kaesten (0.314.x) hielt ein Kasten ZWEI Groessen, und wer die
-/// groessere brauchte, lief an allen kleineren vorbei. Am Geraet gemessen:
-/// 5,5 bis 32,2 besuchte Knoten je Belegung, je nach Zustand der Freiliste,
-/// und die Uebersetzungszeit folgte dem monoton (150 ms bei 5,5 Schritten,
-/// 190 ms bei 32,2).
-///
-/// Ueber 512 bleibt die Spanne, also auch die Suche — das sind aber nur ~8 %
-/// der Anforderungen.
+/// The 16 is `BLOCK_ALIGN`: block sizes are multiples of it, so each bin
+/// below 512 holds exactly one size and its first block always fits. A
+/// wider bin would hold several sizes and force a scan. Bins above 512
+/// still span a range and may need a short search.
 const NBINS: usize = 52;
 
 #[inline]
@@ -107,9 +73,8 @@ fn bin_of(size: usize) -> usize {
     }
 }
 
-/// Zaehler. Reine Felder, kein Format, keine Ausgabe: hier drin darf nichts
-/// allozieren. Sie bleiben nach dem Umbau, weil sie der Abnahmetest sind —
-/// `Schritte je alloc` muss von 579 auf etwa 1 fallen.
+/// Statistics. Plain fields only: nothing in here may allocate.
+/// `alloc_steps / allocs` should stay near 1.
 #[derive(Clone, Copy)]
 pub struct HeapCounters {
     pub allocs: u64,
@@ -119,7 +84,7 @@ pub struct HeapCounters {
     pub free_nodes: u64,
     pub max_free_nodes: u64,
     pub grows: u64,
-    /// Anforderungen je Zweierpotenz: [0] < 32 B, [1] < 64 B, ... [15] >= 512 KB
+    /// Requests per power of two: [0] < 32 B, [1] < 64 B, ... [15] >= 512 KB
     pub size_hist: [u64; 16],
 }
 
@@ -134,11 +99,11 @@ struct Heap {
 
 unsafe impl Send for Heap {}
 
-// ── Marken ────────────────────────────────────────────────────────────
+// ── Tags ──────────────────────────────────────────────────────────────
 
 #[inline]
 unsafe fn tag_of(block: usize) -> usize {
-    // SAFETY: `block` ist ein Blockanfang innerhalb einer Region.
+    // SAFETY: `block` is a block start inside a region.
     unsafe { *(block as *const usize) }
 }
 
@@ -154,23 +119,22 @@ unsafe fn is_free(block: usize) -> bool {
     unsafe { tag_of(block) & FREE_BIT != 0 }
 }
 
-/// Marke vorn und Wiederholung hinten in einem Zug setzen. Beide muessen
-/// immer uebereinstimmen — die hintere ist der einzige Weg, den VORGAENGER
-/// eines Blocks zu finden.
+/// Set header tag and footer together. They must always agree: the footer
+/// is the only way to find a block's predecessor.
 #[inline]
 unsafe fn set_tags(block: usize, size: usize, free: bool) {
-    // SAFETY: `block..block+size` liegt in einer Region.
+    // SAFETY: `block..block+size` lies inside a region.
     unsafe {
         *(block as *mut usize) = size | if free { FREE_BIT } else { 0 };
         *((block + size - TAG) as *mut usize) = size;
     }
 }
 
-/// Groesse des physischen Vorgaengers, aus dessen hinterer Wiederholung.
+/// Size of the physical predecessor, read from its footer.
 #[inline]
 unsafe fn prev_size(block: usize) -> usize {
-    // SAFETY: vor jedem Block steht entweder ein Block oder ein Scheinblock,
-    // beide mit gueltiger hinterer Marke.
+    // SAFETY: every block is preceded by a block or a sentinel, both with
+    // a valid footer.
     unsafe { *((block - TAG) as *const usize) }
 }
 
@@ -189,12 +153,12 @@ impl Heap {
         }
     }
 
-    /// Einen freien Block vorn in seinen Kasten haengen. O(1).
+    /// Push a free block onto the front of its bin. O(1).
     unsafe fn bin_push(&mut self, block: usize, size: usize) {
         let b = bin_of(size);
         let node = (block + TAG) as *mut FreeNode;
-        // SAFETY: `block` ist frei und mindestens MIN_BLOCK_SIZE gross, also
-        // liegen beide Zeiger im Block.
+        // SAFETY: `block` is free and at least MIN_BLOCK_SIZE, so both
+        // pointers lie inside it.
         unsafe {
             (*node).prev = ptr::null_mut();
             (*node).next = self.bins[b];
@@ -209,12 +173,12 @@ impl Heap {
         }
     }
 
-    /// Und wieder heraus, ohne Suche — das ist der Grund fuer die doppelte
-    /// Verkettung: beim Verschmelzen haengt ein NACHBAR aus, nicht der Kopf.
+    /// Unlink without a search. This is why the lists are doubly linked:
+    /// coalescing removes a neighbour, not the head.
     unsafe fn bin_remove(&mut self, block: usize, size: usize) {
         let b = bin_of(size);
         let node = (block + TAG) as *mut FreeNode;
-        // SAFETY: `node` haengt in genau diesem Kasten.
+        // SAFETY: `node` is linked in exactly this bin.
         unsafe {
             let p = (*node).prev;
             let n = (*node).next;
@@ -229,16 +193,15 @@ impl Heap {
         self.region_count = 1;
         self.total_size = size;
         self.allocated_bytes = 0;
-        // SAFETY: die Region ist reserviert und mindestens 64 MB gross.
+        // SAFETY: the region is reserved and at least 64 MB large.
         unsafe { self.lay_out_region(start, size) };
     }
 
-    /// Scheinblock, Nutzblock, Scheinblock. Die beiden Anschlaege sind nie
-    /// frei, also endet jedes Verschmelzen von selbst an der Regionengrenze —
-    /// ohne dass ein Nachbarschaftstest die Bereiche durchsuchen muesste.
+    /// Sentinel, payload block, sentinel. The sentinels are never free, so
+    /// coalescing stops at the region boundary by itself.
     unsafe fn lay_out_region(&mut self, start: usize, size: usize) {
         let body = size - 2 * SENTINEL;
-        // SAFETY: der Aufrufer haelt eine Region dieser Groesse.
+        // SAFETY: the caller owns a region of this size.
         unsafe {
             set_tags(start, SENTINEL, false);
             set_tags(start + SENTINEL + body, SENTINEL, false);
@@ -268,8 +231,8 @@ impl Heap {
         }
     }
 
-    /// Was der Block mindestens messen muss, damit `size` Bytes mit `align`
-    /// hineinpassen — samt Marke, Kopf und hinterer Wiederholung.
+    /// Minimum block size for `size` bytes at `align`, including tag,
+    /// header and footer.
     #[inline]
     fn need_for(block_start: usize, size: usize, align: usize) -> (usize, usize) {
         let data = align_up(block_start + TAG + HEADER_SIZE, align);
@@ -287,12 +250,10 @@ impl Heap {
         while h < 15 && size >= (32usize << h) { h += 1; }
         self.c.size_hist[h] += 1;
 
-        // Die untere Schranke MUSS die Ausrichtung schon enthalten, sonst
-        // faellt die Kastenwahl eine Klasse zu tief und die Suche laeuft an
-        // allen zu kleinen Bloecken dieses Kastens vorbei. Genau das kostete
-        // in 0.314.0 noch 70,4 Schritte je Belegung statt einem:
-        // `TAG + HEADER_SIZE` sind 24, ein 16-ausgerichteter Blockanfang
-        // schiebt die Nutzdaten aber auf 32.
+        // The lower bound must already include alignment, or the bin choice
+        // lands one class too low and the search walks every too-small block
+        // in it: `TAG + HEADER_SIZE` is 24, but a 16-aligned block start
+        // pushes the payload to 32.
         let data_off = align_up(TAG + HEADER_SIZE, align);
         let lower = align_up(data_off + size + TAG, BLOCK_ALIGN)
             .max(MIN_BLOCK_SIZE);
@@ -303,16 +264,16 @@ impl Heap {
             while !node.is_null() {
                 self.c.alloc_steps += 1;
                 let block = node as usize - TAG;
-                // SAFETY: `node` haengt in der Freiliste, also ist `block` ein
-                // freier Block mit gueltigen Marken.
+                // SAFETY: `node` is in the free list, so `block` is a free
+                // block with valid tags.
                 let bsize = unsafe { size_of_block(block) };
                 let (data, need) = Self::need_for(block, size, align);
                 if bsize >= need {
-                    // SAFETY: `block` ist frei und gross genug.
+                    // SAFETY: `block` is free and large enough.
                     unsafe { self.bin_remove(block, bsize) };
                     let rest = bsize - need;
                     let actual = if rest >= MIN_BLOCK_SIZE {
-                        // SAFETY: beide Teile liegen im urspruenglichen Block.
+                        // SAFETY: both parts lie inside the original block.
                         unsafe {
                             set_tags(block, need, false);
                             set_tags(block + need, rest, true);
@@ -320,13 +281,13 @@ impl Heap {
                         }
                         need
                     } else {
-                        // SAFETY: wie oben.
+                        // SAFETY: as above.
                         unsafe { set_tags(block, bsize, false) };
                         bsize
                     };
                     let header = (data - HEADER_SIZE) as *mut AllocHeader;
-                    // SAFETY: `data - HEADER_SIZE` liegt hinter der Marke und
-                    // vor den Nutzdaten desselben Blocks.
+                    // SAFETY: `data - HEADER_SIZE` lies after the tag and
+                    // before the payload of the same block.
                     unsafe {
                         (*header).block_start = block;
                         (*header).block_size = actual;
@@ -334,7 +295,7 @@ impl Heap {
                     self.allocated_bytes += actual;
                     return data as *mut u8;
                 }
-                // SAFETY: `node` ist ein gueltiger Listenknoten.
+                // SAFETY: `node` is a valid list node.
                 node = unsafe { (*node).next };
             }
         }
@@ -362,7 +323,7 @@ impl Heap {
             self.total_size += size;
             self.c.grows += 1;
 
-            // SAFETY: die Region wurde gerade zugeteilt und gehoert uns.
+            // SAFETY: the region was just allocated and is ours.
             unsafe { self.lay_out_region(start, size) };
             true
         } else {
@@ -375,8 +336,8 @@ impl Heap {
         let data_addr = ptr as usize;
         if !self.contains(data_addr) { return; }
 
-        // SAFETY: `data_addr` kam aus `try_allocate`, also steht der Kopf
-        // unmittelbar davor.
+        // SAFETY: `data_addr` came from `try_allocate`, so the header sits
+        // immediately before it.
         let header = unsafe { &*((data_addr - HEADER_SIZE) as *const AllocHeader) };
         let mut block = header.block_start;
         let mut size = header.block_size;
@@ -386,9 +347,9 @@ impl Heap {
         self.c.frees += 1;
         self.allocated_bytes -= size;
 
-        // Nach vorn verschmelzen. Der Anschlag am Regionenende ist nie frei,
-        // also endet das hier von selbst.
-        // SAFETY: `block + size` ist ein Blockanfang oder der Anschlag.
+        // Coalesce forward. The end sentinel is never free, so this stops
+        // at the region boundary.
+        // SAFETY: `block + size` is a block start or the sentinel.
         unsafe {
             let next = block + size;
             if is_free(next) {
@@ -397,7 +358,7 @@ impl Heap {
                 self.bin_remove(next, ns);
                 size += ns;
             }
-            // Und nach hinten, ueber die hintere Marke des Vorgaengers.
+            // And backward, via the predecessor's footer.
             let ps = prev_size(block);
             if ps != SENTINEL && is_free(block - ps) {
                 self.c.free_steps += 1;
@@ -446,8 +407,8 @@ pub fn init() {
         INITIAL_HEAP / (1024 * 1024), MAX_HEAP / (1024 * 1024));
 }
 
-/// Die Zaehler herausholen. Kopie, damit der Aufrufer drucken kann, ohne den
-/// Heap-Lock zu halten — kprintln alloziert.
+/// Snapshot of the counters, so the caller can print without holding the
+/// heap lock (kprintln allocates).
 pub fn counters() -> HeapCounters {
     HEAP.inner.lock().c
 }
@@ -456,7 +417,7 @@ pub fn reset_counters() {
     let mut h = HEAP.inner.lock();
     h.c.allocs = 0; h.c.frees = 0; h.c.alloc_steps = 0; h.c.free_steps = 0;
     h.c.grows = 0; h.c.size_hist = [0; 16];
-    // free_nodes NICHT zuruecksetzen: das ist ein Zustand, keine Zaehlung.
+    // Do not reset free_nodes: it is state, not a count.
     h.c.max_free_nodes = h.c.free_nodes;
 }
 
