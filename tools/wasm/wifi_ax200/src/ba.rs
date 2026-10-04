@@ -1,27 +1,22 @@
 //! RX block-ack reorder buffer — port of `iwl_mvm_reorder` (mvm/rxmq.c).
 //!
-//! An aggregating AP sends a whole A-MPDU and expects a single block ack, which
-//! means frames may arrive with holes: MPDU 5 can be on the air before the
-//! retransmission of MPDU 3. Handing that to the IP stack as-is looks like
-//! reordering to TCP and costs more than the aggregation gains, so a receiver
-//! that accepts a block-ack session MUST hold frames back until the gap closes.
-//! That buffer is this file, and it is the whole reason we declined ADDBA before.
+//! An aggregating AP sends a whole A-MPDU and expects a single block ack, so
+//! frames may arrive with holes: MPDU 5 can be on the air before the
+//! retransmission of MPDU 3. Passing that up as-is looks like reordering to TCP
+//! and costs more than aggregation gains, so a receiver that accepts a
+//! block-ack session must hold frames back until the gap closes.
 //!
 //! Differences from Linux, all because the firmware does the hard part: it hands
 //! us the session id, this frame's sequence number and the "next expected"
 //! (NSSN) in every descriptor, so there is no window arithmetic to derive. And
 //! with one RX queue there is one buffer per session instead of one per queue.
 //!
-//! Frames are stored DECODED (Ethernet, as `rx_classify` produced them) — the
-//! 802.11 header has done its job by then and the reorder decision needs only
-//! the descriptor.
+//! Frames are stored decoded (Ethernet, as `rx_classify` produced them); the
+//! reorder decision needs only the descriptor.
 //!
-//! One session PER TID, as Linux keeps them (`sta->ampdu_mlme.tid_rx[]`). A
-//! single shared session was wrong in both directions: a second ADDBA silently
-//! overwrote the first — leaking its firmware BAID, which we then could not
-//! even name to free — and a DELBA for one TID tore down whichever session
-//! happened to be in the slot. Measured on the device as `sessions 2` with one
-//! live BAID.
+//! One session per TID, as Linux keeps them (`sta->ampdu_mlme.tid_rx[]`): a
+//! second ADDBA must not overwrite the first (leaking its firmware BAID), and a
+//! DELBA for one TID must not tear down another's session.
 
 use crate::host;
 use crate::regs::*;
@@ -31,24 +26,17 @@ use crate::regs::*;
 /// family (`mvm/ops.c:1233`, the pre-BZ branch). The size actually used is
 /// negotiated per session — see `Reorder::buf_size`.
 ///
-/// It was 32 until 0.101.0, and that was the ceiling nothing else could lift.
-/// Measured at 585 Mbit (VHT80): 32 outstanding MPDUs are through in 600 us, so
-/// the per-aggregate overhead — preamble, block ack, AIFS, backoff — could not
-/// be spread over enough frames. Airtime per received frame was 29.3 us against
-/// 9.4 us at HT40, three times worse, while the medium sat half idle. A window
-/// is a count, and a count divides by the rate.
+/// A small window caps throughput at high rates: the per-aggregate overhead
+/// (preamble, block ack, AIFS, backoff) is spread over too few frames.
 pub const BA_WIN_MAX: usize = 256;
 
-/// Frames held at once, ACROSS all sessions. Storage is decoupled from the
-/// WINDOW: the window says how far ahead of a hole the AP may run, storage only
-/// has to cover the frames actually held while one stands open. Every device
-/// measurement so far reports `held 0` — holes are rare and shallow, so eight
-/// private windows of 32 were the wrong shape twice over.
+/// Frames held at once, across all sessions. Storage is decoupled from the
+/// window: the window says how far ahead of a hole the AP may run, storage only
+/// has to cover the frames actually held while one stands open, and holes are
+/// rare and shallow.
 ///
-/// 256 shared slots is the same 410 KB the eight fixed windows cost, with a
-/// window eight times as wide. Running dry is not a loss: `store` declines and
-/// the caller delivers the frame immediately, out of order, which is what the
-/// stall release does anyway.
+/// Running dry is not a loss: `store` declines and the caller delivers the
+/// frame immediately, out of order, which is what the stall release does anyway.
 pub const BA_POOL: usize = 256;
 
 /// Longest frame we keep. `rx_classify` already caps decoded frames at 1600.
@@ -175,7 +163,7 @@ pub struct Reorder {
     /// Firmware session id, or INVALID while no session is up.
     pub baid: u8,
     pub tid: u8,
-    /// The AP's dialog token for this session. A repeat ADDBA carrying the SAME
+    /// The AP's dialog token for this session. A repeat ADDBA carrying the same
     /// token is a timeout update, not a new session — Linux answers it without
     /// touching the session (`ieee80211_process_addba_request`).
     pub dialog: u8,
@@ -185,7 +173,7 @@ pub struct Reorder {
     pub timeout_tu: u16,
     /// `now_ms` of the last frame on this session, for that timeout.
     pub last_rx_ms: u64,
-    /// Negotiated window for THIS session, in MPDUs — `tid_rx->buf_size` in
+    /// Negotiated window for this session, in MPDUs — `tid_rx->buf_size` in
     /// Linux, and what `iwl_mvm_reorder` indexes with (`sn % buf_size`). Never
     /// larger than `BA_WIN_MAX`.
     pub buf_size: u16,
@@ -238,7 +226,7 @@ impl Reorder {
     /// Session accepted by the firmware: it answered with this id.
     pub fn start(&mut self, baid: u8, tid: u8, ssn: u16, dialog: u8, timeout_tu: u16,
                  buf_size: u16) {
-        // Flush FIRST, while `buf_size` still describes the window the held
+        // Flush first, while `buf_size` still describes the window the held
         // frames were stored in. Assigning the new one first would walk the
         // wrong positions and leak every pool slot beyond it.
         self.flush();
@@ -323,9 +311,9 @@ impl Reorder {
                 self.stored = self.stored.saturating_sub(1);
             }
         }
-        // Storage is shared now, so it can genuinely run out. Declining is the
-        // right answer: the caller then delivers this frame straight away, out
-        // of order — the same trade the stall release makes.
+        // Storage is shared, so it can run out. Declining is the right answer:
+        // the caller then delivers this frame straight away, out of order — the
+        // same trade the stall release makes.
         let slot = match pool_alloc() {
             Some(i) => i,
             None => {
@@ -357,7 +345,7 @@ impl Reorder {
     /// normal: NSSN moving past a sequence number means the firmware saw it, not
     /// that we hold it.
     pub fn release_upto(&mut self, nssn: u16) {
-        // A jump FORWARD wider than the window means everything held is below
+        // A forward jump wider than the window means everything held is below
         // nssn — walk the slots once instead of stepping through up to 2047
         // sequence numbers one at a time in the RX path. Only forward: NSSN can
         // legitimately sit behind head_sn after a stall release, and treating
@@ -465,7 +453,7 @@ impl Reorder {
             return false; // oversized — better out of order than dropped
         }
 
-        // An A-MSDU's NSSN advances on its FIRST sub-frame, so acting on it
+        // An A-MSDU's NSSN advances on its first sub-frame, so acting on it
         // before the last one arrives would release frames still in flight.
         if amsdu_last {
             self.release_upto(nssn);

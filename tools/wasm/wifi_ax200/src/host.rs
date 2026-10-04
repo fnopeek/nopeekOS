@@ -1,4 +1,4 @@
-//! Host function bindings for nopeekOS WASM Driver ABI
+//! Host function bindings for the nopeekOS WASM driver ABI.
 
 // Host functions are WASM imports from the `env` module, resolved by the
 // kernel at instantiation. Naming the module explicitly is what makes them
@@ -259,7 +259,7 @@ pub fn netdev_submit_rx(frame: &[u8]) {
     unsafe { npk_netdev_submit_rx(frame.as_ptr() as i32, frame.len() as i32) };
 }
 
-/// Deliver a received Ethernet frame STRAIGHT into the kernel IP stack from this
+/// Deliver a received Ethernet frame straight into the kernel IP stack from this
 /// driver fiber's context (NAPI topology: drain → stack in one hop, off Core 0).
 /// Falls back to the relay ring internally if Core 0 holds the drain guard.
 pub fn netdev_rx_deliver(frame: &[u8]) {
@@ -349,11 +349,11 @@ pub fn log_reg(name: &str, val: u32) {
 }
 
 // ── Debug tracing ────────────────────────────────────────────────
-// Verbose bring-up / per-frame traces. OFF in releases: the driver is run in a
-// window, so every print also RENDERS → hundreds of lines visibly slow the
-// connect. Flip DEBUG to true to get the full bring-up log back. Essential,
-// user-facing lines (version, scan results, AUTHORIZED, failures) use the plain
-// print* fns and are always shown.
+// Verbose bring-up and per-frame traces, off by default: the driver runs in a
+// window, so every print also renders, and hundreds of lines slow the connect.
+// Set DEBUG to true for the full bring-up log.
+// Essential user-facing lines (version, scan results, AUTHORIZED, failures) use
+// the plain print* fns and are always shown.
 pub const DEBUG: bool = false;
 
 #[inline] pub fn dprint(s: &str) { if DEBUG { print(s); } }

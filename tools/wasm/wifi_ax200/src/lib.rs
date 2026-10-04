@@ -2,11 +2,10 @@
 //!
 //! iwlwifi-mvm, device family 22000 (gen2). Strict 1:1 port of Linux 6.18.26.
 //! Plan: docs/archive/WIFI_AX200.md. Uses the nopeekOS WASM Driver ABI (npk_pci_*,
-//! npk_mmio_*, npk_dma_*) — the same ABI proven by the RTL8852BE `wifi` driver.
+//! npk_mmio_*, npk_dma_*), the same ABI as the RTL8852BE `wifi` driver.
 //!
-//! Stage 0a: bind PCI, map BAR0, read HW_REV + HW_RF_ID to confirm the chip.
-//! Stage 0b (this file): reset + APM bring-up to MAC-clock-ready, following
-//! `_iwl_trans_pcie_start_hw` for family 22000 (non-integrated AX200):
+//! Bring-up follows `_iwl_trans_pcie_start_hw` for family 22000 (non-integrated
+//! AX200): bind PCI, map BAR0, read HW_REV + HW_RF_ID to confirm the chip, then
 //!   prepare_card_hw → clear_persistence_bit → sw_reset → apm_init(→activate_nic).
 //! All register pokes are 1:1 with the Linux source (no guessed values).
 
@@ -22,22 +21,17 @@ mod host;
 mod regs;
 use regs::*;
 
-/// A panic used to spin here in silence: `loop {}` with the argument thrown
-/// away. The module then hangs with every counter frozen at the instant it
-/// died, the report stops being republished, and from the outside it is
-/// indistinguishable from "the AP went quiet" — which cost an entire evening
-/// of chasing the radio while the driver was standing still. Say where it
-/// happened; `Location` survives `strip = true` because it is static data
-/// referenced by the panic site, not a symbol.
+/// Report where the panic happened instead of hanging silently: a hung module
+/// freezes every counter and is indistinguishable from "the AP went quiet".
+/// `Location` survives `strip = true` because it is static data referenced by
+/// the panic site, not a symbol.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // Two channels on purpose. `print` reaches the terminal this driver was
-    // launched from and is worker-core safe, so it lands where someone is
-    // looking right now. `log` goes through kprintln to the serial capture,
-    // which is the ONLY thing `dmesg` reads — without it the line dies with
-    // the scrollback and cannot be recovered after a reboot. Print first: if
-    // the kprintln path stalls (it routes through shade), the visible half has
-    // already happened, and we are on our way to `loop {}` regardless.
+    // launched from and is worker-core safe. `log` goes through kprintln to the
+    // serial capture, which is the only thing `dmesg` reads and which survives a
+    // reboot. Print first: if the kprintln path stalls (it routes through shade),
+    // the visible half has already happened.
     host::print("\n[ax200] PANIC — driver stopped");
     if let Some(l) = info.location() {
         host::print(" at ");
@@ -55,10 +49,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 static FW: &[u8] = include_bytes!("../firmware/iwlwifi-cc-a0-77.ucode");
 
 /// One source for the version string: the boot banner and every status snapshot
-/// carry it, so a device measurement can never be traced to the wrong build.
-// From Cargo.toml, never by hand: this string stood at 0.60.1 for three
-// releases while the module was 0.63.0, and a report that misstates its own
-// version makes every number in it suspect.
+/// carry it, so a report can always be traced to its build. Taken from
+/// Cargo.toml so it cannot drift from the module version.
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Little-endian readers over the embedded firmware.
@@ -106,7 +98,7 @@ impl Dma {
 struct Agg {
     reorder: u32,
     status: u32,
-    /// Not an A-MSDU, or the last sub-frame of one. NSSN advances on the FIRST
+    /// Not an A-MSDU, or the last sub-frame of one. NSSN advances on the first
     /// sub-frame, so acting on it earlier releases frames still in flight.
     amsdu_last: bool,
     /// Unicast QoS data — the only thing a block-ack session covers.
@@ -127,22 +119,16 @@ struct BaPending {
     dialog: u8,
     timeout: u16,
     /// When we asked the firmware. The AP gets its answer only after the
-    /// firmware hands back a BAID — so if that never comes, the AP is left
-    /// waiting for a reply that never arrives, and at least one AP answers
-    /// that by sending NO DATA AT ALL on the TID: association up, DHCP
-    /// never completes. A pending request must therefore expire.
+    /// firmware hands back a BAID; if that never comes, the AP is left waiting,
+    /// and some APs then send no data at all on the TID (association up, DHCP
+    /// never completes). A pending request must therefore expire.
     asked_ms: u64,
 }
 
-/// Classification of a received 802.11 data frame addressed to us.
 /// Running signal strength, `DECLARE_EWMA(signal, 10, 8)` (mac80211/sta_info.h:424)
 /// — 1/8 weight on each new sample, carried at 2^10 precision so the average
-/// does not quantise to whole dBm.
-///
-/// It exists because `rssi` in the report was written ONCE, at association
-/// (`target_rssi`, from the scan), and never again. Carrying the laptop up to
-/// the AP and back changed nothing in the report, which is exactly what the
-/// number could do: it was minutes old and about a different position.
+/// does not quantise to whole dBm. Unlike the scan RSSI it tracks the link as
+/// it is now.
 #[derive(Clone, Copy)]
 pub struct SignalAvg {
     /// dBm << 10, or 0 while nothing has been measured.
@@ -186,7 +172,7 @@ enum RxKind {
     None,
     /// A data frame addressed to us whose payload we could not locate. Distinct
     /// from None on purpose: "nothing arrives" and "everything arrives and we
-    /// drop it" are opposite faults and were indistinguishable before.
+    /// drop it" are opposite faults.
     Undecoded,
     /// EAPOL-Key frame (the 4-way) → forward to wifid. `out` holds the frame.
     Eapol(usize),
@@ -197,14 +183,14 @@ enum RxKind {
 /// The AP's 802.11n capabilities, read from the HT Capability element of its
 /// beacon. Everything we do at HT level derives from these: what we may put in
 /// our own assoc request, the station flags, and the MCS set TLC scales over
-/// (rs_fw_set_supp_rates uses the PEER's rx_mask — what the AP can receive).
+/// (rs_fw_set_supp_rates uses the peer's rx_mask — what the AP can receive).
 #[derive(Clone, Copy)]
 struct HtCap {
     cap_info: u16,
     ampdu_factor: u8,  // A-MPDU length exponent (0-3)
     ampdu_density: u8, // minimum MPDU start spacing (0-7)
     mcs_rx: [u8; 2],   // rx_mask[0] = MCS 0-7, rx_mask[1] = MCS 8-15
-    /// From the HT OPERATION element, not the capability one: where the
+    /// From the HT Operation element, not the capability one: where the
     /// secondary 20 MHz channel sits. NONE means the AP runs 20 MHz only, and
     /// then a 40 MHz PHY context would be pointing at nothing.
     sec_chan_offs: u8,
@@ -212,16 +198,15 @@ struct HtCap {
     vht: bool,
     vht_cap_info: u32,
     vht_rx_mcs_map: u16,
-    /// From the VHT OPERATION element: USE_HT (fall back to the HT width) or
-    /// 80MHZ. As with HT, the capability says CAN, the operation says DOES.
+    /// From the VHT Operation element: USE_HT (fall back to the HT width) or
+    /// 80MHZ. As with HT, the capability says can, the operation says does.
     vht_chan_width: u8,
     /// Centre-frequency channel index of the 80 MHz block.
     vht_seg0: u8,
-    /// The HE (802.11ax) elements. For an AP that carries HE Capability AND an
-    /// HE Operation with the VHT-Operation-Info bit, those three bytes ARE the
+    /// The HE (802.11ax) elements. For an AP that carries HE Capability and an
+    /// HE Operation with the VHT-Operation-Info bit, those three bytes are the
     /// operating width — `ieee80211_determine_ap_chan` reads them and never
-    /// looks at element 192. A Wi-Fi 6 AP is the normal case here, so without
-    /// this the width question is answered from the wrong element.
+    /// looks at element 192. A Wi-Fi 6 AP is the normal case here.
     he: bool,
     he_oper_params: u32,
     he_vht_op: [u8; 3],
@@ -277,12 +262,10 @@ struct Ap {
     dtim_period: u8, // from the TIM element — the MAC context needs it to associate
     ht: HtCap,
     // The beacon timing the associated MAC context is built from. Linux keeps
-    // exactly these three with the SCAN RESULT and reads them back at
+    // exactly these three with the scan result and reads them back at
     // association (mac80211/mlme.c:9464 — sync_tsf from the stored beacon,
     // sync_device_ts from bss->device_ts_beacon, sync_dtim_count from its TIM).
-    // It never waits for a fresh beacon, which is what we used to do — an extra
-    // step of our own invention that failed every time and left the firmware
-    // with a made-up wake schedule.
+    // It never waits for a fresh beacon.
     tsf: u64,
     device_ts: u32,
     dtim_count: u8,
@@ -316,8 +299,8 @@ struct Stats {
     // TX, cumulative.
     tx_frames: u32,
     tx_bytes: u64,
-    tx_blocked: u32, // times the in-flight BYTE cap stopped us pulling another frame
-    tx_blocked_ring: u32, // times the ring guard did instead — the byte cap was not the limit
+    tx_blocked: u32, // times AQL stopped us pulling another frame
+    tx_blocked_ring: u32, // times the ring guard did instead
     tx_wd_recoveries: u32, // times the queue watchdog reclaimed leaked TX slots
     inflight_corrections: u32, // times the derived read pointer beat the counter
     gtk_installs: u32,     // group keys installed = 4-way once + one per rekey
@@ -331,14 +314,13 @@ struct Stats {
     tx_airtime_us: u64,
     // Is the firmware aggregating what we transmit? `frame_count` in every TX
     // response answers it outright (1 = no aggregation, >1 = aggregation), and
-    // the compressed block-ack notification is the second witness. We read
-    // neither until now, which is why "no TX aggregation" was an assumption.
+    // the compressed block-ack notification is the second witness.
     tx_subframes: u64, // sum of frame_count over all responses
     tx_agg_resp: u32,  // responses with frame_count > 1
     tx_agg_max: u8,    // largest frame_count seen
     ba_notifs: u32,    // BA_NOTIF received
     ba_reclaims: u32,  // TFD read pointers taken from them — the aggregated TX return path
-    ba_tfd_over: u32,  // tfd_cnt beyond CBA_TFD_MAX: slots we could NOT reclaim
+    ba_tfd_over: u32,  // tfd_cnt beyond CBA_TFD_MAX: slots we could not reclaim
     ba_txed: u64,      // MPDUs the firmware says it sent in aggregates
     ba_done: u64,      // …and how many were acknowledged
     last_status: u16,
@@ -355,17 +337,15 @@ struct Stats {
     // Encrypted RX, counted but never acted on. `mic_fail` is the frame Linux
     // drops in iwl_mvm_rx_crypto (rxmq.c:452); `sec_none` is the firmware
     // saying it did not decrypt a frame whose Protected bit is set — a key it
-    // does not have. Both are silent today: the frame goes up the stack as
-    // whatever the bytes happen to be, and shows up as `undecoded`.
+    // does not have. Neither drops the frame: it goes up the stack as whatever
+    // the bytes happen to be, and shows up as `undecoded`.
     // Air the AP's transmissions to us occupied, estimated per frame from the
     // rate the descriptor reports and the length: preamble + data + the SIFS
-    // and ACK we are required to answer with. Backoff and DIFS are NOT counted,
-    // so this is a LOWER bound — which is the safe direction, because the
-    // question it answers is "is the channel full?" and an under-estimate can
-    // only argue for "no".
-    //
-    // `own airtime` alone could never answer that: it is TX time, and during a
-    // download our TX is nothing but acknowledgements.
+    // and ACK we are required to answer with. Backoff and DIFS are not counted,
+    // so this is a lower bound — the safe direction, because the question it
+    // answers is "is the channel full?" and an under-estimate can only argue
+    // for "no". Our own airtime cannot answer that: during a download our TX is
+    // nothing but acknowledgements.
     rx_airtime_us: u64,
     rx_airtime_pct: u32,
     win_rx_airtime_us: u64,
@@ -380,11 +360,10 @@ struct Stats {
     rx_sec_none: u32,
     rx_undecrypted: u32,
     rx_drain_max: u32, // most frames drained in one pass — RX ring pressure
-    // Are we starved, or are we the bottleneck? With the air at 30 % and the
-    // window at 8 MB, that is the whole remaining question, and the shape of
-    // the arrivals answers it: steady frames mean the ceiling is ours, sparse
-    // bursts with idle gaps mean the AP is not delivering. Per WINDOW, then
-    // snapshot with the peak — an average over the whole uptime is idle time.
+    // Are we starved, or are we the bottleneck? The shape of the arrivals
+    // answers it: steady frames mean the ceiling is ours, sparse bursts with idle
+    // gaps mean the AP is not delivering. Per window, then snapshot with the
+    // peak — an average over the whole uptime is mostly idle time.
     win_pass_empty: u32,
     win_pass_few: u32,   // 1..=3
     win_pass_many: u32,  // 4..=15
@@ -421,10 +400,10 @@ struct Stats {
     loop_iters: u32,
     loop_busy: u32,
     deauth: u32,
-    // Requests SEEN, separate from answers given. With `ampdu on` we answer the
+    // Requests seen, separate from answers given. With `ampdu on` we answer the
     // AP only after the firmware hands back a BAID — so if that status never
-    // arrives, both answer counters stay 0 and the AP is left waiting with no
-    // reply at all. Without this number those two cases look identical.
+    // arrives, both answer counters stay 0. Without this number that case looks
+    // identical to never being asked.
     addba_seen: u32,
     addba_timeouts: u32,
     addba_declined: u32,
@@ -444,7 +423,7 @@ struct Stats {
     prof_passes: u64,
     prof_frames: u64,
     // …reduced to per-pass values before the window is cleared, exactly like the
-    // throughput numbers above: the report is built AFTER the reset.
+    // throughput numbers above: the report is built after the reset.
     prof_work_pp: u64,
     prof_sleep_pp: u64,
     prof_drain_pp: u64,
@@ -520,8 +499,7 @@ struct Rep {
 impl Rep {
     const fn new() -> Rep { Rep { b: [0; REPORT_CAP], n: 0 } }
 
-    /// Reserve the tail for a marker: silent truncation cost a whole debugging
-    /// round once already (the last two lines were simply gone from the report).
+    /// Reserve the tail for a truncation marker, so a cut-off report says so.
     const LIMIT: usize = REPORT_CAP - 16;
 
     fn s(&mut self, s: &str) {
@@ -624,7 +602,7 @@ struct Ax200 {
     target_ssid_len: u8,
     target_privacy: bool, // target is encrypted (WPA2) → assoc-req carries an RSN IE
     /// RSSI from the scan, at the moment we associated. Kept because it is what
-    /// the AP choice was made on — but it is NOT the link's signal now.
+    /// the AP choice was made on, but it is not the link's signal now.
     target_rssi: i8,
     /// The live one, averaged over every frame the AP sends us.
     link_sig: SignalAvg,
@@ -660,10 +638,9 @@ struct Ax200 {
     /// The firmware's read pointer for the data queue, derived from the TFD
     /// index every TX response carries in its header sequence
     /// (`SEQ_TO_INDEX`, cmdhdr.h:20) — the same source `iwl_pcie_reclaim`
-    /// uses. `data_in_flight` used to be a COUNTER: incremented per submit,
-    /// decremented per completion, and therefore permanently wrong the moment
-    /// one completion went missing. Derived from the two pointers it is
-    /// self-correcting: the very next completion snaps it back to the truth.
+    /// uses. Derived from the two pointers, `data_in_flight` is self-correcting:
+    /// a lost completion is fixed by the very next one, where a submit/complete
+    /// counter would stay wrong forever.
     data_read_ptr: u32,
     // Frames handed to the data queue but not yet reported complete by the FW
     // (TX_CMD response). Flow control: never enqueue past the queue depth, or we
@@ -677,7 +654,7 @@ struct Ax200 {
     key_slot_prev: Option<u8>,
     /// Is the pairwise key installed? It decides whether an EAPOL frame goes
     /// out in the clear. mac80211 (`ieee80211_tx_h_select_key`) picks the
-    /// station's PTK for EVERY frame with a payload — an EAPOL-Key frame is
+    /// station's PTK for every frame with a payload — an EAPOL-Key frame is
     /// one — and only the pre-key control port carries
     /// `IEEE80211_TX_INTFL_DONT_ENCRYPT`.
     ptk_installed: bool,
@@ -688,10 +665,10 @@ struct Ax200 {
     /// read pointer, so it inherits the self-correction instead of becoming a
     /// second, drifting truth.
     ///
-    /// Linux subtracts on completion the SAME estimate it added on submit
+    /// Linux subtracts on completion the same estimate it added on submit
     /// (`ieee80211_info_get_tx_time_est`, status.c:1158) rather than the real
-    /// airtime the hardware reports. The accounting has to balance; being
-    /// right about the past is what the airtime STATISTICS are for.
+    /// airtime the hardware reports. The accounting has to balance; the real
+    /// airtime goes into the statistics.
     aql_pending_us: u32,
     /// Per-slot estimate, so the re-derivation can walk back over it. This is
     /// the `tx_time_est` Linux stashes in each skb's control block.
@@ -700,7 +677,7 @@ struct Ax200 {
     /// empty. The queue watchdog measures from here (iwl_txq_stuck_timer).
     last_tx_done_ms: u64,
     // 802.11 sequence number for non-QoS data frames. mac80211 assigns this per
-    // frame (ieee80211_tx_h_sequence); the gen2 firmware does NOT do it for us,
+    // frame (ieee80211_tx_h_sequence); the gen2 firmware does not do it for us,
     // so every data frame must carry a unique, incrementing seq or the AP treats
     // distinct frames as duplicates (dropping TCP data, duplicating ACKed ones).
     tx_seq: u16,
@@ -711,43 +688,34 @@ struct Ax200 {
     link_published: bool,
     /// Consecutive unacknowledged transmissions, and when the firmware last
     /// answered a transmission at all. An associated link that stops being
-    /// acknowledged is dead, and nothing else notices: a deauth never comes, the
-    /// missed-beacon notification has never once fired on this hardware, and the
-    /// 4-way watchdog only guards the time BEFORE authorization. So the link
-    /// stays "up" and every packet vanishes — measured: ping 100 % loss with
-    /// state UP, and it never recovered on its own.
+    /// acknowledged is dead, and nothing else reliably notices: a deauth may never
+    /// come, the missed-beacon notification may not fire, and the 4-way watchdog
+    /// only guards the time before authorization. Without this the link stays
+    /// "up" while every packet vanishes.
     tx_fail_streak: u32,
     tx_fail_streak_peak: u32,
     last_tx_resp_ms: u64,
     want_ampdu: bool,
-    /// 40 MHz. OFF by default — this is the one that took the link down on
-    /// 2026-08-19, bisected over a whole evening: association succeeds and
-    /// then not one frame reaches us again (`to-us 0`), on both bands, with a
-    /// `pre-assoc beacon ok` right before. The port itself stays in place; the
-    /// defect is somewhere in what we hand the firmware at the width change,
-    /// and a switch beats deleting the code. Turn it on for a measurement, and
-    /// `wlan unset ht40` is one command away when it goes dark again.
+    /// 40 MHz. Off by default: with it on, association can succeed and then no
+    /// frame reaches us again, so something we hand the firmware at the width
+    /// change is still wrong. `wlan unset ht40` turns it off.
     want_ht40: bool,
     want_vht: bool,
     /// Upper bound we put on the negotiated reorder window, from
     /// `sys/config/wifi bawin`. 0 = no bound of ours, take what the AP asks
-    /// for. Exists because two device runs said 64 was SLOWER than 32 in both
-    /// widths, and comparing across sessions — different rssi, different rate
-    /// scaling, different loop rate — cannot settle that.
+    /// for. Lets window sizes be compared within one session.
     want_bawin: u16,
     want_txagg: bool,
     /// Set once the firmware has ignored a block-ack setup. Asking again costs
-    /// another silent 300 ms AND wedges the transmit path: measured on the
-    /// device, 31 frames sent / 7 acknowledged / 500 refused, and no ping.
-    /// Linux would not be sending this command at all on a firmware that
-    /// advertises BAID_ML_SUPPORT (it uses RX_BAID_ALLOCATION_CONFIG_CMD via
-    /// iwl_mvm_fw_baid_op, sta.c:2860) — until we implement that, one refusal
-    /// is all the evidence needed to stop asking.
+    /// another silent 300 ms and wedges the transmit path. Linux would not send
+    /// this command at all on a firmware that advertises BAID_ML_SUPPORT (it uses
+    /// RX_BAID_ALLOCATION_CONFIG_CMD via iwl_mvm_fw_baid_op, sta.c:2860), so one
+    /// refusal is enough to stop asking.
     ba_fw_broken: bool,
     // Diagnostics (see Stats) + what the scan found besides the chosen AP: the
-    // strongest same-SSID AP on the OTHER band. Picking purely by RSSI always
-    // lands on the near 2.4 GHz node, so the question "was there a 5 GHz one?"
-    // has to survive the scan to be answerable later.
+    // strongest same-SSID AP on the other band. Picking purely by RSSI tends to
+    // land on the near 2.4 GHz node, so "was there a 5 GHz one?" has to survive
+    // the scan to be answerable later.
     st: Stats,
     n_aps: u8,
     alt_bssid: [u8; 6],
@@ -768,7 +736,7 @@ struct Ax200 {
     want_bt_coex: bool,
     settle_ms: u32,
     sync_ok: bool,
-    /// 0 = unchecked, 1 = clean, else the LMAC error id. Sampled ONCE after
+    /// 0 = unchecked, 1 = clean, else the LMAC error id. Sampled once after
     /// bring-up: reading it needs grab_nic_access + PRPH reads, and doing that
     /// once a second from a status report pokes registers underneath a running
     /// firmware. Diagnostics must not be able to break what they measure.
@@ -986,10 +954,9 @@ impl Ax200 {
         let pages = ((bytes + 4095) / 4096) as u16;
         let handle = host::dma_alloc(pages);
         if handle < 0 {
-            // LOUD. A failed DMA allocation leaves a NONE handle that every
-            // later read and write silently ignores — the card simply never
-            // works, with no message anyone sees. `dprint` was the wrong
-            // channel for the one failure that makes the driver useless.
+            // Loud on purpose: a failed DMA allocation leaves a NONE handle that every
+            // later read and write silently ignores, so the card never works and nothing
+            // else says why.
             host::print("[ax200] FATAL: DMA alloc failed for ");
             host::print(name);
             host::print(" — the kernel's per-module allocation limit is full\n");
@@ -999,7 +966,7 @@ impl Ax200 {
     }
 
     // ── iwl_pcie_gen2_rx_init (rx.c) ────────────────────────────
-    // gen2 does NOT configure the RFH (firmware does it at alive) and the RB
+    // gen2 does not configure the RFH (firmware does it at alive) and the RB
     // page pool is filled at restock (alive). So here: set the int-coalescing
     // timer and allocate the ctxt_info-referenced RX rings. num_rxqs = 1.
     fn gen2_rx_init(&mut self) -> bool {
@@ -1034,9 +1001,9 @@ impl Ax200 {
             host::dprint("[ax200] nic_init: gen2_apm_init failed\n");
             return false;
         }
-        // iwl_op_mode_nic_config (mvm): DEFERRED. It is the op-mode/NVM layer
-        // (radio-stepping CSR bits), not the PCIe transport, and is not needed
-        // for the firmware CPU to reach ALIVE. Lands with the mvm port.
+        // iwl_op_mode_nic_config (mvm) is not done here: it is the op-mode/NVM layer
+        // (radio-stepping CSR bits), not the PCIe transport, and is not needed for the
+        // firmware CPU to reach ALIVE.
 
         if !self.gen2_rx_init() {
             return false;
@@ -1061,10 +1028,9 @@ impl Ax200 {
 
         // iwl_pcie_check_hw_rf_kill: bit clear == radio killed.
         if self.rf_killed() {
-            // A killed radio means the firmware boots, answers commands and
-            // keeps every receive buffer — and not one frame ever arrives. That
-            // is indistinguishable from a driver bug unless someone says it, so
-            // it goes over `print`.
+            // A killed radio means the firmware boots, answers commands and keeps
+            // every receive buffer, and not one frame ever arrives. That looks like a
+            // driver bug unless someone says it, so it goes over `print`.
             host::print("[ax200] HW RF-KILL asserted — the radio is off (switch/Fn key/BIOS). No frame can arrive until it is cleared.\n");
         }
 
@@ -1374,8 +1340,8 @@ impl Ax200 {
         // gen2, where every command carries the long header), a legacy command
         // with group 0 is promoted to LONG_GROUP via DEF_ID(opcode) = (1<<8) |
         // opcode. The firmware registers these "legacy" commands (TX_ANT 0x98,
-        // BT 0x9b, POWER 0x77, MCC 0xc8, MAC_CONTEXT 0x28, …) ONLY under group 1
-        // — sending them as group 0 yields a BAD_COMMAND assert. (REPLY_ERROR is
+        // BT 0x9b, POWER 0x77, MCC 0xc8, MAC_CONTEXT 0x28, …) only under group 1;
+        // sending them as group 0 yields a BAD_COMMAND assert. (REPLY_ERROR is
         // the lone exception in Linux; we never send it.)
         let group = if group == 0 { IWL_ALWAYS_LONG_GROUP } else { group };
         let wp = self.cmd_write_ptr;
@@ -1432,8 +1398,7 @@ impl Ax200 {
     // Drain newly-closed RBs from the used-BD ring, looking for a frame with the
     // given (cmd, group). Returns the matching RB on success. Mirrors the read-
     // pointer walk of iwl_pcie_rx_handle (mq path): r = closed_rb_num, walk
-    // used_bd[read..r], vid → rb_pool[vid-1]. No RB recycling — 64 posted RBs
-    // are plenty for the handful of init/NVM frames.
+    // used_bd[read..r], vid → rb_pool[vid-1].
     fn drain_rx_until(&mut self, want_cmd: u8, want_group: u8) -> Option<Dma> {
         host::fence();
         let r = self.closed_rb();
@@ -1455,11 +1420,10 @@ impl Ax200 {
                     matched = Some(rb);
                 } else {
                     // Recycle non-matched RBs (notifications, echoes — the bulk)
-                    // back into the free-BD ring. The driver is now resident, so
-                    // the 64-RB pool must be replenished or the firmware runs dry
-                    // and can post no further frames (TX completions, beacons).
+                    // back into the free-BD ring, or the firmware runs dry and
+                    // can post no further frames (TX completions, beacons).
                     // The matched RB is returned to the caller to read, so it is
-                    // NOT recycled here (that would race the firmware writing it).
+                    // not recycled here (that would race the firmware writing it).
                     self.recycle_rb(vid);
                     self.flush_free_bd();
                 }
@@ -1507,7 +1471,7 @@ impl Ax200 {
     // ── iwl_get_nvm (iwl-nvm-parse.c) — read NVM info ──────────────
     // Send NVM_GET_INFO and parse the response: nvm version, reserved-MAC count,
     // MAC SKU caps (bands / 11n / 11ac / 11ax), PHY tx/rx antenna chains, LAR.
-    // The MAC address is NOT in this response — it is read from the CSR strap/OTP
+    // The MAC address is not in this response — it is read from the CSR strap/OTP
     // registers (iwl_set_hw_address_from_csr). The channel profile in the
     // response feeds the scan channel list (Stage 4d).
     fn read_nvm(&mut self) -> bool {
@@ -1606,14 +1570,10 @@ impl Ax200 {
     }
 
     // ── Scan prerequisites from iwl_mvm_up (mvm/fw.c) ──────────────
-    // The hard pre-scan config commands. These are fire-and-forget config
-    // commands — unlike the init-phase commands they do NOT echo a response, so
-    // we just send them and pump the RX ring briefly for diagnostics. (The many
-    // best-effort / BIOS-gated commands in iwl_mvm_up — SAR, PPAG, TAS, RFI, BT
-    // coex tuning, power, RSS, SF — are deferred like op_mode_nic_config; they
-    // aren't needed for a scan to return APs.) Real validation is the scan.
     // The complete mandatory iwl_mvm_up command sequence between ALIVE and the
-    // scan, in order — no cherry-picking. Faithful omissions: configure_rxq and
+    // scan, in order. These are fire-and-forget config commands — unlike the
+    // init-phase commands they do not echo a response, so we send them and pump
+    // the RX ring briefly for diagnostics. Faithful omissions: configure_rxq and
     // rss_cfg are no-ops for a single RX queue (both `return 0` when num_rxqs==1,
     // and ours is 1); the BIOS/ACPI-gated commands (lari_cfg, ppag_init,
     // sar_init, sgom_init, tas_init) send nothing without platform tables, just
@@ -1658,9 +1618,9 @@ impl Ax200 {
         //
         // The AX200 is a combo chip: WiFi hangs off PCIe, its Bluetooth off USB
         // (8086:2723 + 8087:0029), and the two share the antenna through this
-        // coexistence logic. We implement no Bluetooth at all, so nothing here
-        // ever tells coex that BT is idle — and arbitrating an antenna on behalf
-        // of a radio that was never brought up can only cost airtime.
+        // coexistence logic. We implement no Bluetooth, so nothing ever tells coex
+        // that BT is idle, and arbitrating an antenna on behalf of a radio that was
+        // never brought up can only cost airtime.
         let on = self.want_bt_coex;
         let mut modules = 0u32;
         if on {
@@ -1708,11 +1668,8 @@ impl Ax200 {
     }
 
     // ── iwl_mvm_power_update_device (mvm/power.c) ─────────────────
-    // Device power table. Default power scheme (BPS): POWER_SAVE_ENA set, like
-    // Linux's default. CAM (flags = 0) was tried in 0.37 to kill the latency
-    // sawtooth but regressed connectivity (radio always-on → broadcast flood
-    // pins the driver core → freeze), so it is reverted. The latency spikes are
-    // most likely fiber-starvation, not power-save — the WiFi-IRQ is the real fix.
+    // Device power table. Linux's default scheme is BPS (POWER_SAVE_ENA set);
+    // here it follows the `ps:` policy, see below.
     fn send_power(&mut self) {
         // CAM (flags = 0, radio always on) unless `ps:` in sys/config/wifi says
         // otherwise — iwl_mvm_power_update_device with ps_disabled.
@@ -1720,10 +1677,8 @@ impl Ax200 {
         // We implement no dynamic power save: nothing here tracks DTIM wake
         // windows or tells the AP when we are awake. Enabling device power save
         // on top of that lets the firmware sleep between beacons on timing we
-        // never verified — and since 0.44.0 started sending is_assoc=1 with a
-        // DTIM period, it finally has the information to actually do it. A
-        // station that sleeps at the wrong moment does not look asleep; it looks
-        // associated and deaf, which is exactly the symptom being chased.
+        // never verified. A station that sleeps at the wrong moment does not look
+        // asleep; it looks associated and deaf.
         let ps = self.want_power_save;
         let mut cmd = [0u8; DEVICE_POWER_CMD_LEN];
         put_u16(&mut cmd, 0, if ps { DEVICE_POWER_FLAGS_POWER_SAVE_ENA } else { 0 });
@@ -1780,7 +1735,7 @@ impl Ax200 {
     // Add the firmware MAC context the scan references. mac80211 creates this
     // at add_interface; our driver-initiated scan must add it first or the
     // firmware silently drops the scan (scan_start_mac_or_link_id points at a
-    // non-existent context). We model a single unassociated STATION vif:
+    // non-existent context). We model a single unassociated station vif:
     // iwl_mvm_mac_ctxt_init assigns the first non-p2p station id 0 / color 0 /
     // TSF A. node_addr is our own MAC (CSR strap, OTP fallback); bssid is
     // broadcast (no BSS yet). is_assoc = 0 makes the firmware forward foreign
@@ -1842,9 +1797,9 @@ impl Ax200 {
         }
     }
 
-    /// iwl_is_rfkill_set (pcie/gen1_2/internal.h): the bit is CLEAR when the
-    /// radio is killed. Linux polls this and reports it up; we never showed it
-    /// at all, so an off switch looked exactly like a broken receive path.
+    /// iwl_is_rfkill_set (pcie/gen1_2/internal.h): the bit is clear when the
+    /// radio is killed. Reported, so an off switch does not look like a broken
+    /// receive path.
     fn rf_killed(&self) -> bool {
         self.r32(CSR_GP_CNTRL) & CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW == 0
     }
@@ -1853,7 +1808,7 @@ impl Ax200 {
     /// (rx.c: `r &= (rxq->queue_size - 1)`, the 9000-A0 wrap-around W/A).
     /// `RB_STTS_CLOSED_MASK` is 12 bits = 0..4095, the ring is 2048 — without
     /// the second mask a closed index above the ring never equals our read
-    /// index and the drain loop below never terminates.
+    /// index and the drain loop never terminates.
     fn closed_rb(&self) -> u32 {
         (host::dma_r32(self.rxq_rb_stts.handle, 0) & RB_STTS_CLOSED_MASK)
             & (NUM_RBDS as u32 - 1)
@@ -1886,8 +1841,8 @@ impl Ax200 {
         let i = vid as usize - 1;
         if self.rb_in_fw[i] {
             // The same page twice in the ring, and a write index advanced past
-            // what we can back with buffers. Linux cannot even express this —
-            // restock pulls from rx_free, and a posted buffer is not on it.
+            // what we can back with buffers. Linux cannot express this: restock
+            // pulls from rx_free, and a posted buffer is not on it.
             self.st.rb_double_post = self.st.rb_double_post.wrapping_add(1);
             return;
         }
@@ -1899,7 +1854,7 @@ impl Ax200 {
         self.free_bd_write += 1;
     }
 
-    /// Hand back every RB the firmware does NOT currently own, and publish the
+    /// Hand back every RB the firmware does not currently own, and publish the
     /// index. Returns how many were posted.
     ///
     /// Recovery for RX going quiet while associated: buffers can be stranded on
@@ -1907,13 +1862,10 @@ impl Ax200 {
     /// write pointer is published rounded down to 8, so a tail of fewer than 8
     /// stays invisible to the firmware.
     ///
-    /// It used to re-post the whole pool unconditionally. That is a producer
-    /// that ignores its consumer: every fire advanced the write index by
-    /// RX_NUM_RBS whether or not the firmware had consumed anything, so a
-    /// firmware that had stopped for its own reasons got the ring walked all
-    /// the way round onto its own read index — published as EMPTY, and then it
-    /// could never recover. Linux has no such path at all: a wedged RX path
-    /// gets `iwl_force_nmi()` and a firmware restart, never a ring poke.
+    /// Only buffers we own are posted. Re-posting the whole pool regardless
+    /// would advance the write index onto the firmware's read index and publish
+    /// the ring as empty, from which it cannot recover. Linux has no such path at
+    /// all: a wedged RX path gets `iwl_force_nmi()` and a firmware restart.
     ///
     /// A return of 0 is the useful answer: the firmware still holds every
     /// buffer, so an empty pool was never the cause and re-arming is not a cure.
@@ -1935,8 +1887,8 @@ impl Ax200 {
     fn flush_free_bd(&self) {
         host::fence();
         // Mask into the ring before rounding: free_bd_write counts monotonically
-        // (recycle_rb masks only for the slot it writes), so past NUM_RBDS this
-        // handed the hardware an index outside its own ring.
+        // (recycle_rb masks only for the slot it writes), so unmasked it would
+        // exceed NUM_RBDS and hand the hardware an index outside its ring.
         let idx = self.free_bd_write & (NUM_RBDS as u32 - 1);
         self.w32(RFH_Q0_FRBDCB_WIDX_TRG, idx & !0x7);
     }
@@ -1971,7 +1923,7 @@ impl Ax200 {
         // num_of_fragments = 0
 
         // channel_params_v7 — the NVM_CHANNEL_VALID channels from read_nvm,
-        // both bands. Per channel, the band rides in the v2.band BYTE (@ +5);
+        // both bands. Per channel, the band rides in the v2.band byte (@ +5);
         // see the band-encoding note below.
         buf[SC_OFF_CP_FLAGS] = SCAN_CHAN_FLAG_ENABLE_CHAN_ORDER;
         buf[SC_OFF_CP_COUNT] = self.n_scan_chans as u8;
@@ -1982,9 +1934,9 @@ impl Ax200 {
             // iwl_mvm_umac_scan_cfg_channels_v7, version < 17 (our cmd_ver is 15):
             // cfg.flags holds the directed-scan SSID bitmap (bits 0-19) — 0 for a
             // passive station scan (no SSID, n_aps_flag only for P2P) — and the
-            // band rides in the v2.band BYTE (@ +5), NOT in flags bits 30-31.
-            // (The v17 path puts band in flags; doing that for v15 left band=0 =
-            // PHY_BAND_5/5GHz on 2.4GHz channels → BAD scan params → FW assert.)
+            // band rides in the v2.band byte (@ +5), not in flags bits 30-31.
+            // (Only the v17 path puts band in flags; for v15 that leaves band=0 =
+            // PHY_BAND_5 on 2.4 GHz channels → bad scan params → FW assert.)
             // cfg.flags @ o stays 0 (zeroed buffer).
             buf[o + 4] = self.scan_chans[i]; // channel_num
             buf[o + 5] = self.scan_bands[i]; // v2.band (1 = 2.4 GHz, 0 = 5 GHz)
@@ -2005,11 +1957,9 @@ impl Ax200 {
     // to dBm), and the channel, de-duplicating by BSSID. Only beacon / probe-
     // response management frames carry these, so other subtypes are skipped.
     fn parse_beacon(rb: &Dma, aps: &mut [Ap], n_aps: &mut usize) {
-        // 384 bytes left 292 for the elements. A Wi-Fi 6 beacon carries RSN,
-        // Extended Capabilities, WMM, WPS and the mesh vendor blocks BEFORE
-        // VHT Operation (192) and the HE elements (255) — those fell off the
-        // end, and the walk below stopped on the cut without a word. 1600 is
-        // the buffer the data RX path already uses.
+        // A Wi-Fi 6 beacon carries RSN, Extended Capabilities, WMM, WPS and
+        // vendor blocks before VHT Operation (192) and the HE elements (255),
+        // so a short buffer cuts those off. 1600 matches the data RX path.
         let mut buf = [0u8; 1600];
         host::dma_read_buf(rb.handle, 0, &mut buf);
         let d = RX_PKT_DATA_OFF; // iwl_rx_mpdu_desc base
@@ -2032,16 +1982,15 @@ impl Ax200 {
         }
         // The frame ends where the descriptor says (`iwl_mvm_rx_mpdu_mq`:
         // len = le16(desc->mpdu_len)); past it lies the next packet in the RB.
-        // EVERY element walk below stops here, not at the buffer's end.
+        // Every element walk below stops here, not at the buffer's end.
         let mpdu_len = u16::from_le_bytes([
             buf[d + MPDU_OFF_MPDU_LEN], buf[d + MPDU_OFF_MPDU_LEN + 1]]) as usize;
         if f + mpdu_len > RB_SIZE_BYTES {
             return; // iwl_mvm_rx_mpdu_mq: "FW lied about packet len"
         }
         let end = if f + mpdu_len > buf.len() {
-            // OUR limit, not the firmware's — and the exception gets a line.
-            // This is the failure that hid VHT and HE from us, and a silent
-            // one is what let "the AP runs 20 MHz" stand for two days.
+            // Our buffer limit, not the firmware's — report it, since a silent cut
+            // hides the VHT and HE elements at the end of the beacon.
             host::print("[ax200] beacon ");
             host::print_dec(mpdu_len as u32);
             host::print(" B > parse buffer - elements past the cut are unseen\n");
@@ -2058,7 +2007,7 @@ impl Ax200 {
         let beacon_int = u16::from_le_bytes([buf[bi_off], buf[bi_off + 1]]);
         // Privacy bit of the capability field → AP is encrypted (needs RSN).
         let privacy = buf[f + DOT11_BEACON_CAP_OFF] & WLAN_CAP_PRIVACY_BIT != 0;
-        // Timing, from a BEACON only: a probe response answers our probe and its
+        // Timing, from a beacon only: a probe response answers our probe and its
         // device timestamp says nothing about the AP's beacon schedule.
         let is_beacon = subtype == DOT11_STYPE_BEACON;
         let tsf = if is_beacon {
@@ -2069,7 +2018,7 @@ impl Ax200 {
         let device_ts = if is_beacon { le32(&buf, d + MPDU_OFF_GP2_ON_AIR) } else { 0 };
 
         // De-dup by BSSID; refresh RSSI if we hear a stronger beacon, and the
-        // timing on EVERY beacon — the freshest one is the one to associate with.
+        // timing on every beacon — the freshest one is the one to associate with.
         for i in 0..*n_aps {
             if aps[i].bssid == bssid {
                 if rssi > aps[i].rssi {
@@ -2122,8 +2071,8 @@ impl Ax200 {
                     ht.mcs_rx[1] = buf[body + HT_OFF_MCS_RX_MASK + 1];
                     ht.present = true;
                 }
-                // The capability element says the AP CAN do 40 MHz; only the
-                // operation element says whether it currently DOES, and on
+                // The capability element says the AP can do 40 MHz; only the
+                // operation element says whether it currently does, and on
                 // which side the secondary channel sits.
                 WLAN_EID_HT_OPERATION if len >= 2 => {
                     ht.sec_chan_offs =
@@ -2348,8 +2297,8 @@ impl Ax200 {
                     self.sync_ok = aps[best].has_beacon;
                     self.target_valid = true;
                     // Record what we passed over: the strongest AP carrying the
-                    // same SSID on the OTHER band. Choosing by RSSI alone always
-                    // lands on the nearest 2.4 GHz node, and without this the
+                    // same SSID on the other band. Choosing by RSSI alone tends to
+                    // land on the nearest 2.4 GHz node, and without this the
                     // question "was a 5 GHz radio even in range?" is unanswerable
                     // after the scan buffer is gone.
                     self.n_aps = n_aps.min(255) as u8;
@@ -2436,22 +2385,18 @@ impl Ax200 {
             }
         }
 
-        // OFF by default, and it stays that way until a device measurement says
-        // otherwise. Aggregation is the throughput lever, but it is also the one
-        // feature that can take the whole link down (a receiver that mis-parses
-        // an aggregate carries nothing) — and recovering from that needs the
-        // network it just broke. Twice now. So the safe state is the default.
+        // Off by default. Aggregation is the throughput lever, but it is also the
+        // one feature that can take the whole link down (a receiver that mis-parses
+        // an aggregate carries nothing), and recovering from that needs the network
+        // it just broke.
         self.want_ampdu = cfg_on(cfg_get(text, b"ampdu"));
-        // VHT80 is OFF by default. Measured on the device: receiving at 80 MHz
-        // works (292 Mbit), transmitting does not — 41 % retries, more RTS
-        // failures than frames sent, and the rate control walking back down to
-        // 20 MHz. HT40 measured 81 Mbit/s with a stable link, so that is the
-        // safe state until the transmit side is understood.
+        // VHT80 is off by default: receiving at 80 MHz works, but transmitting
+        // shows heavy retries and RTS failures and the rate control walks back down
+        // to 20 MHz.
         // 40 MHz is opt-in until the width path is understood; VHT80 needs it.
-        // EXPERIMENT, not a port: Linux leaves tid_disable_tx at 0xffff on this
-        // firmware, and the firmware is supposed to run the aggregation manager
-        // itself. It does not — `aggregated 0` in three measured runs. `on`
-        // sends 0x0000 instead, which is the one thing the field could mean.
+        // txagg is an experiment, not a port: Linux leaves tid_disable_tx at 0xffff
+        // on this firmware, which is supposed to run the aggregation manager itself.
+        // `on` sends 0x0000 instead.
         self.want_txagg = cfg_on(cfg_get(text, b"txagg"));
         self.want_ht40 = cfg_on(cfg_get(text, b"ht40"));
         self.want_vht = cfg_on(cfg_get(text, b"vht"));
@@ -2743,11 +2688,10 @@ impl Ax200 {
     // ── Stage 5b': finish the connect chanctx tail (iwl_mvm_assign_vif_chanctx) ──
     // __iwl_mvm_assign_vif_chanctx does binding → power_update_mac → (quota, only
     // for monitor) and the connect flow then re-sends the MAC context with the
-    // target BSSID (iwl_mvm_mac_ctxt_changed on BSS_CHANGED_BSSID). We had skipped
-    // this whole tail and went straight to the auth TX with a MAC context still
-    // holding the scan-time broadcast BSSID + zero timing — so once session
-    // protection put the firmware on-channel and it actually processed the auth,
-    // the time-event/scheduler (UMAC) asserted. Send both before the auth.
+    // target BSSID (iwl_mvm_mac_ctxt_changed on BSS_CHANGED_BSSID). Both must go
+    // out before the auth: with the scan-time broadcast BSSID and zero timing
+    // still in the MAC context, the firmware's time-event scheduler (UMAC)
+    // asserts once session protection puts it on-channel.
     fn connect_finish_chanctx(&mut self) {
         // iwl_mvm_power_update_mac → MAC_PM_POWER_TABLE for the bss vif. Power-save
         // disabled path: only id_and_color + keep_alive_seconds, flags = 0.
@@ -2781,15 +2725,11 @@ impl Ax200 {
         host::dprint("[ax200] MAC_CONTEXT_CMD (modify, target BSSID) sent\n");
         self.pump_rx(50);
 
-        // Grab the beacon timing HERE, not after the association: this is the
-        // last point where nothing else is expected on the RX ring. Doing it
-        // after the assoc response would mean draining (and discarding) the
-        // frames the AP sends next — including the first EAPOL of the 4-way.
-        // Auth + assoc take a few ms, so the timing is still current.
-        // The timing came with the scan result (see collect_ap). Waiting here for
-        // another beacon was a step of our own invention — mac80211 does not have
-        // it — and it never once succeeded, which is why the firmware kept
-        // getting a made-up wake schedule and never reported a missed beacon.
+        // Report the beacon timing here, not after the association: this is the
+        // last point where nothing else is expected on the RX ring. After the
+        // assoc response the AP sends the first EAPOL of the 4-way immediately.
+        // The timing came with the scan result (see collect_ap); mac80211 does not
+        // wait for another beacon either.
         if self.sync_ok {
             host::print("[ax200] beacon timing from scan: dtim ");
             host::print_dec(self.sync_dtim_count as u32);
@@ -2803,25 +2743,15 @@ impl Ax200 {
 
     // ── Post-association: tell the firmware we are associated ─────────────
     // Everything below runs once, right after the assoc response. Linux does it
-    // from the BSS_CHANGED_ASSOC / sta-state path; we had none of it, so the
-    // firmware kept a MAC context that still said "not associated" for the whole
-    // life of the link.
+    // from the BSS_CHANGED_ASSOC / sta-state path; without it the firmware keeps
+    // a MAC context that says "not associated" for the whole life of the link.
 
-    // Wait for one beacon of our BSS and capture the timing the MAC context
-    // needs (iwl_mvm_set_fw_dtim_tbtt reads exactly these three): the AP's TSF
-    // and our device timestamp at beacon arrival, plus the DTIM count still to
-    // run. Also picks up the DTIM period / HT element if the scan missed them.
-    // Returns false if no beacon arrived — then we cannot claim association.
-    // iwl_mvm_mac_ctxt_cmd_sta, associated branch. Marks the MAC context as
-    // associated with the DTIM timing + AID, and drops MAC_FILTER_IN_BEACON
-    // (Linux only sets that while unassociated).
     /// `iwl_mvm_set_fw_qos_params` (mvm/mac-ctxt.c:475), line for line.
     ///
-    /// Both fields were left at zero since the first port. `qos_flags = 0`
-    /// says: no EDCA configuration, and NOT an 802.11n BSS. The firmware runs
-    /// the TX aggregation manager itself on this ucode (TLC offload), and it
-    /// has no reason to open a session for a BSS it was told is neither QoS
-    /// nor HT. Measured before this: `tx agg aggregated 0 of 22353`.
+    /// `qos_flags = 0` would say: no EDCA configuration, and not an 802.11n BSS.
+    /// The firmware runs the TX aggregation manager itself on this ucode (TLC
+    /// offload), and it has no reason to open a session for a BSS it was told is
+    /// neither QoS nor HT.
     fn fill_qos_params(&self, cmd: &mut [u8]) {
         if self.target_ht.wmm {
             for i in 0..4 {
@@ -2859,9 +2789,8 @@ impl Ax200 {
         put_u32(&mut cmd, MC_OFF_CCK_RATES, MAC_CCK_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_OFDM_RATES, MAC_OFDM_RATES_DEFAULT);
         put_u32(&mut cmd, MC_OFF_FILTER_FLAGS, MAC_FILTER_ACCEPT_GRP);
-        // What the BSS asks us to protect against. Sent as 0 until now, i.e.
-        // "nothing" — the firmware could not know that legacy or non-member
-        // stations share this channel.
+        // What the BSS asks us to protect against. Without it the firmware cannot
+        // know that legacy or non-member stations share this channel.
         let prot = self.protection_flags();
         put_u32(&mut cmd, MC_OFF_PROT_FLAGS, prot);
         self.fill_qos_params(&mut cmd);
@@ -2893,11 +2822,9 @@ impl Ax200 {
     // capabilities imply, plus the AID. On a modify Linux leaves addr zeroed and
     // lets station_flags_msk select which bits to apply.
     fn sta_assoc_update(&mut self) {
-        // The station's TX width has to match the PHY context. Left at 20 MHz
-        // it produced exactly the asymmetry measured on the device once VHT80
-        // came up: RX at 650 Mbit, TX at 26, heavy loss, then a dropped link —
-        // the receive path ran at 80 MHz while transmission was pinned to 20
-        // and the rate control had to reconcile the two.
+        // The station's TX width has to match the PHY context. Left at 20 MHz,
+        // reception runs at 80 MHz while transmission is pinned to 20, and the
+        // rate control has to reconcile the two: slow TX, heavy loss, dropped link.
         // `iwl_mvm_sta_send_to_fw` sets this from the peer's bandwidth.
         let mut flags = if self.use_vht80() {
             STA_FLG_FAT_EN_80MHZ
@@ -2958,13 +2885,13 @@ impl Ax200 {
     }
 
     // ── Reconnect after a link loss (mesh steering / deauth) ──────────────
-    // The Fritzbox + Fritz repeater run one SSID across two APs and steer the
-    // client between them with a DEAUTH. We re-scan, re-point the already-added
-    // PHY context + station + MAC context at the best AP (may be the OTHER mesh
-    // node, on a different channel) via MODIFY actions — the binding (MAC0↔PHY0)
-    // and the TX queues persist, so NO DMA is re-allocated (the DMA budget can't
-    // churn per reconnect). Then redo auth + assoc and re-arm wifid for a fresh
-    // 4-way. Returns true once associated.
+    // A mesh runs one SSID across several APs and steers the client between
+    // them with a deauth. We re-scan, re-point the already-added PHY context +
+    // station + MAC context at the best AP (may be another mesh node, on a
+    // different channel) via MODIFY actions — the binding (MAC0↔PHY0) and the TX
+    // queues persist, so no DMA is re-allocated (the DMA budget cannot churn per
+    // reconnect). Then redo auth + assoc and re-arm wifid for a fresh 4-way.
+    // Returns true once associated.
 
     // PHY_CONTEXT_CMD v4 (action MODIFY) — re-point the PHY at the new channel.
     fn update_phy_context(&mut self) {
@@ -3001,13 +2928,13 @@ impl Ax200 {
         self.pump_rx(50);
     }
 
-    /// 40 MHz only when ALL THREE agree: the AP says it can (capability
+    /// 40 MHz only when all three agree: the AP says it can (capability
     /// element), it says it currently does and on which side (operation
     /// element), and the band has the room. Anything less stays at 20 —
     /// a PHY context wider than the AP's actual channel points at silence.
     /// `iwl_mvm_sta_send_to_fw`: `tid_disable_tx = mvm_sta->tid_disable_agg`,
     /// which starts at 0xffff and is only ever cleared by `iwl_mvm_sta_tx_agg`
-    /// — unreachable on TLC-offload firmware. So 0xffff IS Linux' value here,
+    /// — unreachable on TLC-offload firmware. So 0xffff is Linux' value here,
     /// and it stays the default. `wlan set txagg on` sends 0x0000 to find out
     /// whether the firmware honours the field anyway.
     fn tid_disable_tx(&self) -> u16 {
@@ -3027,14 +2954,10 @@ impl Ax200 {
     /// falls through to `use_ht40`.
     /// `iwl_mvm_set_fw_protection_flags` (mvm/mac-ctxt.c), branch for branch.
     ///
-    /// We sent 0 unconditionally — "no protection needed" — whatever the AP
-    /// said. The firmware then has no way to know that legacy or non-member
-    /// stations share the channel, and every transmission takes its chances.
-    /// Measured on the device: `rts-fail` at 22 % of 122407 frames.
-    ///
-    /// Note this may make the firmware protect MORE, not less. That is the
-    /// point: protection costs airtime and buys collisions avoided, and the AP
-    /// is the only party that knows which trade its BSS needs.
+    /// Without these flags the firmware has no way to know that legacy or
+    /// non-member stations share the channel. They may make the firmware protect
+    /// more, not less: protection costs airtime and buys collisions avoided, and
+    /// the AP is the only party that knows which trade its BSS needs.
     fn protection_flags(&self) -> u32 {
         let mut flags = 0u32;
         if self.target_ht.erp_protect {
@@ -3062,7 +2985,7 @@ impl Ax200 {
 
     /// Where the VHT operation info comes from, per `ieee80211_determine_ap_chan`:
     /// an AP with HE Capability whose HE Operation sets VHT_OPER_INFO carries it
-    /// in THOSE three bytes, and element 192 is then not consulted at all. Any
+    /// in those three bytes, and element 192 is then not consulted at all. Any
     /// other AP answers from element 192. Returns (chan_width, seg0, from_he).
     fn vht_oper(&self) -> (u8, u8, bool) {
         let h = &self.target_ht;
@@ -3081,7 +3004,7 @@ impl Ax200 {
     }
 
     /// `iwl_mvm_get_ctrl_pos` for the HT case. The control channel is the
-    /// UPPER of the pair exactly when the secondary sits BELOW it; for 40 MHz
+    /// upper of the pair exactly when the secondary sits below it; for 40 MHz
     /// the offset term of that function is zero, so only the ABOVE bit is left.
     fn ctrl_pos(&self) -> u8 {
         if !self.use_vht80() {
@@ -3162,14 +3085,13 @@ impl Ax200 {
 
     // ── Rate scaling: TLC offload (iwl_mvm_rs_fw_rate_init, mvm/rs-fw.c) ──
     // Configure firmware rate scaling for the AP station so data frames stop
-    // going out at the fixed host rate (1 Mbit CCK in tx_raw). We advertise the
-    // station's legacy (non-HT) rate set; the firmware then picks the best rate
-    // per frame from its TLC table. Sent once after association (Linux sends it
-    // CMD_ASYNC → fire-and-forget, then a TLC_MNG_UPDATE_NOTIF reports the rate).
+    // going out at the fixed host rate (1 Mbit CCK in tx_raw). The firmware then
+    // picks the best rate per frame from its TLC table. Sent once after
+    // association (Linux sends it CMD_ASYNC → fire-and-forget, then a
+    // TLC_MNG_UPDATE_NOTIF reports the rate).
     // TLC_MNG_CONFIG_CMD cmd_ver=4 on this FW → struct iwl_tlc_config_cmd_v4.
-    // HT/VHT/HE MCS (mode HT/VHT/HE + ht_rates) is a later rung: it needs the
-    // matching cap IEs in the assoc request + station HT flags. Legacy alone
-    // already lifts us from 1 Mbit to up to 54 Mbit OFDM.
+    // HT/VHT MCS needs the matching cap IEs in the assoc request + station HT
+    // flags; legacy alone reaches up to 54 Mbit OFDM.
     fn connect_tlc_config(&mut self) {
         let mut cmd = [0u8; TLC_CMD_LEN];
         cmd[TLC_OFF_STA_ID] = AP_STA_ID;
@@ -3186,7 +3108,7 @@ impl Ax200 {
 
         if self.target_ht.present {
             cmd[TLC_OFF_MODE] = TLC_MODE_HT;
-            // ht_rates carries the PEER's receive MCS mask — what the AP can
+            // ht_rates carries the peer's receive MCS mask — what the AP can
             // take from us — per spatial stream, in the "80 MHz and below" slot.
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS1, self.target_ht.mcs_rx[0] as u16);
             put_u16(&mut cmd, TLC_OFF_HT_RATES_NSS2, self.target_ht.mcs_rx[1] as u16);
@@ -3283,7 +3205,7 @@ impl Ax200 {
     // the hex is the truth.
     //
     // Legacy code→rate mapping per iwl_mvm_legacy_hw_idx_to_mac80211_idx:
-    // OFDM code 0 is the FIRST OFDM rate (6M), CCK code 0 is 1M.
+    // OFDM code 0 is the first OFDM rate (6M), CCK code 0 is 1M.
     // iwl_v3_rate_from_v2_v3: lift a firmware rate_n_flags into the v3 layout.
     // The only difference between the two is where the NSS bit lives, so this
     // moves it from bit 4 to bit 5 and leaves the rest alone. Everything below
@@ -3343,7 +3265,7 @@ impl Ax200 {
             r.s("(none reported yet)\n");
             return;
         }
-        // Print the RAW firmware word, decode the normalised one.
+        // Print the raw firmware word, decode the normalised one.
         r.s("0x");
         r.hex(raw, 8);
         r.s(" = ");
@@ -3400,7 +3322,7 @@ impl Ax200 {
         self.st.win_airtime_us = self.st.tx_airtime_us;
         self.st.win_rx_airtime_us = self.st.rx_airtime_us;
         self.st.win_loop_iters = self.st.loop_iters;
-        // The profile is per WINDOW, not cumulative: an average over the whole
+        // The profile is per window, not cumulative: an average over the whole
         // uptime would drown the loaded second in idle ones.
         let passes = self.st.prof_passes.max(1);
         self.st.prof_work_pp = self.st.prof_work_us / passes;
@@ -3409,7 +3331,7 @@ impl Ax200 {
         self.st.prof_us_frame = if self.st.prof_frames > 0 {
             self.st.prof_rx_us / self.st.prof_frames
         } else { 0 };
-        // Keep the profile of the BUSIEST second, not just the last one. A load
+        // Keep the profile of the busiest second, not just the last one. A load
         // generator holds the terminal for its whole run, so by the time anyone
         // can type `wlan` the live window is idle again and shows nothing.
         if self.st.tput_rx_kbit > self.st.peak_tput_rx_kbit {
@@ -3419,7 +3341,7 @@ impl Ax200 {
             self.st.peak_drain_pp = self.st.prof_drain_pp;
             self.st.peak_us_frame = self.st.prof_us_frame;
             self.st.peak_prof_passes = self.st.prof_passes;
-            // Taken WITH the peak, not as separate maxima: three maxima from
+            // Taken with the peak, not as separate maxima: three maxima from
             // three different seconds would describe a second that never
             // happened, and the question is what the fastest one looked like.
             self.st.pk_rx_airtime_pct = self.st.rx_airtime_pct;
@@ -3436,10 +3358,8 @@ impl Ax200 {
             self.st.pk_pass_burst = self.st.win_pass_burst;
             self.st.pk_gap_max_us = self.st.win_gap_max_us;
         }
-        // Reset only AFTER the snapshot above has read them. The first version
-        // cleared them 36 lines earlier, with the window's other state, so the
-        // snapshot copied zeros — and a diagnostic that reports zero reads as
-        // "nothing happened" rather than "the instrument is broken".
+        // Reset only after the snapshot above has read them, or the snapshot
+        // copies zeros and "nothing happened" hides a broken instrument.
         self.st.win_pass_empty = 0;
         self.st.win_pass_few = 0;
         self.st.win_pass_many = 0;
@@ -3510,7 +3430,7 @@ impl Ax200 {
             r.d(self.target_ht.ampdu_factor as u64);
             r.c(b'/');
             r.d(self.target_ht.ampdu_density as u64);
-            // The negotiated width, and WHY — a link that quietly fell back to
+            // The negotiated width, and why — a link that quietly fell back to
             // 20 MHz looks identical to one that never tried.
             if self.use_vht80() {
                 r.s("  width 80 MHz VHT (seg0 ch ");
@@ -3522,8 +3442,7 @@ impl Ax200 {
                 r.s("  width 40 MHz (sec ");
                 r.s(if self.target_ht.sec_chan_offs == IEEE80211_HT_PARAM_CHA_SEC_BELOW
                     { "below" } else { "above" });
-                // Say WHOSE decision it was. "AP has VHT but runs HT" blamed
-                // the AP even when the reason was our own `vht` switch.
+                // Say whose decision it was: the AP's, or our own `vht` switch.
                 r.s(if !self.want_vht && self.target_ht.vht {
                     ", AP offers VHT — `wlan set vht on` to use it)"
                 } else if self.target_ht.vht {
@@ -3533,9 +3452,8 @@ impl Ax200 {
                 });
             } else {
                 r.s("  width 20 MHz (");
-                // WHOSE decision — `ht40` is off by DEFAULT, and this branch
-                // printed "AP runs 20 only" for it. That sentence is what the
-                // handover note rests on; it was our own switch talking.
+                // Whose decision: `ht40` is off by default, so "AP runs 20 only"
+                // must not be printed when it was our own switch.
                 if !self.want_ht40 {
                     r.s("WE ask for 20 - `wlan set ht40 on`)");
                 } else if self.target_ht.cap_info & IEEE80211_HT_CAP_SUP_WIDTH_20_40 == 0 {
@@ -3604,9 +3522,8 @@ impl Ax200 {
         let live = ba::sessions().iter().filter(|s| s.active()).count();
         if live > 0 {
             let (delivered, buffered, dups, old_sn, stalls, held) = ba::totals();
-            // One line PER live session: which TID carries the traffic is the
-            // question the single-session report could not answer — it showed
-            // tid 6 with `delivered 0` while every byte arrived on tid 0.
+            // One line per live session, so the report shows which TID carries the
+            // traffic.
             for sess in ba::sessions().iter().filter(|s| s.active()) {
                 r.s("aggr     A-MPDU on  baid ");
                 r.d(sess.baid as u64);
@@ -3640,10 +3557,10 @@ impl Ax200 {
             r.d(ba::NUM_TIDS as u64);
             r.s(" tids  accepted ");
             r.d(self.st.addba_accepted as u64);
-            // Storage is shared and finite now. `pool` says how close the held
-            // frames come to it; `POOL-FULL` says it was not enough and a frame
-            // went up out of order. Both are the exception, so only the second
-            // one shouts.
+            // Storage is shared and finite. `pool` says how close the held frames
+            // come to it; `POOL-FULL` says it was not enough and a frame went up out
+            // of order. Both are the exception, so only the second one is printed
+            // prominently.
             r.s("  pool ");
             r.d(ba::pool_used() as u64);
             r.c(b'/');
@@ -3700,11 +3617,9 @@ impl Ax200 {
         r.d(self.st.keys_set as u64);
         r.s("/2  authorized ");
         r.s(if self.authorized { "yes" } else { "NO" });
-        // The 4-way installs one GTK; every further one is a rekey. A rekey
-        // only ever announced itself as a log LINE, and background output is
-        // pinned to the first loop window — so in any other window it was
-        // invisible, and it was very nearly missed. A standing number cannot
-        // scroll past.
+        // The 4-way installs one GTK; every further one is a rekey. A standing
+        // counter cannot scroll past the way a log line can, and background output
+        // is pinned to the first loop window.
         if self.st.gtk_installs > 1 {
             r.s("  group rekeys ");
             r.d((self.st.gtk_installs - 1) as u64);
@@ -3730,7 +3645,7 @@ impl Ax200 {
         r.s(" Mbit/s  own airtime ");
         r.d(self.st.airtime_pct as u64);
         r.s("%  (live 1 s window)\n");
-        // Survives the end of the load, so one `wlan` AFTER a blocking transfer
+        // Survives the end of the load, so one `wlan` after a blocking transfer
         // still answers "how fast did it actually go".
         r.s("peak     tx ");
         r.kbit_as_mbit(self.st.peak_tput_tx_kbit);
@@ -3739,7 +3654,7 @@ impl Ax200 {
         r.s(" Mbit/s  ");
         r.d(self.st.peak_passes_per_s as u64);
         r.s(" passes/s  (best window since driver start)\n");
-        // The line that decides whether the AIR was the limit in that fastest
+        // The line that decides whether the air was the limit in that fastest
         // second. Near 100 = the channel was full and aggregation is the lever.
         // Well under it = the channel was idle and the ceiling is on our side.
         r.s("air      in that window: rx ");
@@ -3815,9 +3730,8 @@ impl Ax200 {
 
         // Is the firmware aggregating what we hand it? `frame_count` says so
         // per response (1 = single MPDU), the compressed block-ack says it
-        // again from the other side. Without this line "no TX aggregation" was
-        // an assumption; `tx frames` counts what we QUEUED, not what went on
-        // the air as one aggregate.
+        // again from the other side. `tx frames` counts what we queued, not what
+        // went on the air as one aggregate.
         r.s("tx agg   subframes ");
         r.d(self.st.tx_subframes);
         r.s(" over ");
@@ -3832,7 +3746,7 @@ impl Ax200 {
         r.d(self.st.ba_txed);
         r.s(" done ");
         r.d(self.st.ba_done);
-        // Whether the aggregated TX return path RAN. Without it the slots those
+        // Whether the aggregated TX return path ran. Without it the slots those
         // MPDUs sat in are never freed, and the queue wedges at its own depth.
         r.s(" reclaims ");
         r.d(self.st.ba_reclaims as u64);
@@ -3867,9 +3781,9 @@ impl Ax200 {
 
         // The poll rate, and what it implies. The loop asks for a 1 ms sleep
         // while busy, but a fiber whose core has nothing else runnable idles in
-        // HLT until the next 100 Hz worker tick — so the REAL period can be 10 ms,
+        // HLT until the next 100 Hz worker tick — so the real period can be 10 ms,
         // and then one pass' worth of AQL-admitted frames is a hard ceiling.
-        // Printing the implied ceiling makes that visible instead of theoretical.
+        // Printing the implied ceiling makes that visible.
         // The cost of one pass, in the only unit that answers "are we CPU-bound":
         // microseconds. work = everything between waking and sleeping; drain =
         // the RX half of it; slept = what a 1 ms request really took. If work
@@ -3955,9 +3869,9 @@ impl Ax200 {
         r.d(TX_INFLIGHT_MAX as u64);
         r.c(b'\n');
 
-        // What else the scan saw. The target is picked by RSSI alone, which on a
-        // dual-band mesh always means the near 2.4 GHz node — this line is how we
-        // find out whether a faster band was on the table.
+        // What else the scan saw. The target is picked mostly by RSSI, which on a
+        // dual-band mesh tends to mean the near 2.4 GHz node — this line shows
+        // whether a faster band was on the table.
         r.s("policy   power ");
         r.s(if self.want_power_save { "save (ps: on)" } else { "CAM (always on)" });
         r.s(", btcoex ");
@@ -3981,18 +3895,14 @@ impl Ax200 {
         });
         r.c(b'\n');
 
-        // Physical addresses of the rings. A driver that works with a USB
-        // dongle plugged in and not without it is not talking to the dongle —
-        // but the dongle allocates memory first, so OUR buffers land somewhere
-        // else. This project already has one address-dependent fault on record
-        // (MMIO map_page against 1 GB huge pages), so the addresses belong in
-        // any report that gets compared across boots.
+        // Physical addresses of the rings, so address-dependent faults (e.g. other
+        // devices allocating DMA memory first, or MMIO mappings against 1 GB huge
+        // pages) can be compared across boots.
         // RX ring bookkeeping. "Receives for a while, then stops" is the
         // signature of a firmware that ran out of buffers, and only these three
         // numbers moving together show that they are being handed back.
-        // Firmware assert state. The dump only ran from the TX-stall watchdog,
-        // which needs in-flight at the cap — a firmware that died at 6 in-flight
-        // never triggered it and its error table was never looked at.
+        // Firmware assert state, sampled independently of the TX-stall watchdog,
+        // which only fires when in-flight reaches the cap.
         r.s("fw       ");
         match self.fw_assert {
             0 => r.s("not checked yet"),
@@ -4049,12 +3959,12 @@ impl Ax200 {
         r.hex(self.data_tfd.phys as u32, 8);
         r.c(b'\n');
 
-        // What the firmware reports about beacons — because WE no longer see
-        // them. Once associated it stops passing them to the host (Linux sets
+        // What the firmware reports about beacons, because we no longer see them:
+        // once associated it stops passing them to the host (Linux sets
         // MAC_FILTER_IN_BEACON only while unassociated, mac-ctxt.c:704), so
         // silence here is normal and this notification is the only beacon news
-        // there is. `losses` is how often it declared the AP gone: a mesh that
-        // steers between router and repeater shows up exactly there.
+        // there is. `losses` is how often it declared the AP gone, which is where
+        // mesh steering shows up.
         r.s("beacons  fw notifs ");
         r.d(self.st.mb_notifs as u64);
         r.s("  missed ");
@@ -4070,7 +3980,7 @@ impl Ax200 {
         r.c(b'\n');
 
         // The timing the associated MAC context was built from — captured from
-        // the LAST pre-association beacon, which is the only one we ever see.
+        // the last pre-association beacon, which is the only one we ever see.
         r.s("sync     pre-assoc beacon ");
         r.s(if self.sync_ok { "ok" } else { "none (firmware got a made-up wake schedule)" });
         r.s("  tsf 0x");
@@ -4122,10 +4032,10 @@ impl Ax200 {
         let frame_len = frame.len() as u16;
         put_u16(&mut buf, TXC_OFF_LEN, frame_len);
         // offload_assist (iwl_mvm_tx_csum): the 802.11 header length in 2-byte
-        // words for EVERY frame, plus PAD when it is not a multiple of 4 — then
+        // words for every frame, plus PAD when it is not a multiple of 4 — then
         // 2 bytes go between header and payload so the payload is DWORD-aligned
         // (Linux does that alignment in the transport's TB1). A QoS header is 26
-        // bytes, so this is what makes the QoS data path work at all.
+        // bytes, so the QoS data path depends on this.
         let pad = if hdr_len % 4 != 0 { 2usize } else { 0 };
         let mut offload = ((hdr_len / 2) as u16) << TX_CMD_OFFLD_MH_SIZE_POS;
         if pad != 0 {
@@ -4186,7 +4096,7 @@ impl Ax200 {
     /// An ADDBA request arrived (`req` = category, action, dialog token,
     /// parameter set (2), timeout (2), start sequence control (2)).
     ///
-    /// Order matters: the firmware has to know about the session BEFORE the AP
+    /// Order matters: the firmware has to know about the session before the AP
     /// starts aggregating, because it is the firmware that stamps each frame
     /// with the BAID and the window position we reorder by. So we ask it first
     /// (`iwl_mvm_fw_baid_op_sta`) and answer the AP only once it has agreed —
@@ -4218,7 +4128,7 @@ impl Ax200 {
         }
         // We only implement immediate block ack, and a buffer larger than the
         // HT maximum is a malformed request — both are INVALID_QOS_PARAM, not
-        // a plain decline, so the AP learns WHY.
+        // a plain decline, so the AP learns why.
         if !immediate || asked as usize > IEEE80211_MAX_AMPDU_BUF_HT {
             decline(self, WLAN_STATUS_INVALID_QOS_PARAM);
             return;
@@ -4231,7 +4141,7 @@ impl Ax200 {
         // A repeat request on a live session. Same dialog token = the AP is
         // only updating the timeout; we have no way to change it in the
         // firmware, so we accept it unchanged and decline a real change,
-        // WITHOUT disturbing the session.
+        // without disturbing the session.
         if let Some(sess) = ba::by_tid(tid) {
             if sess.active() {
                 if sess.dialog == dialog {
@@ -4246,10 +4156,9 @@ impl Ax200 {
                     return;
                 }
                 // A genuinely new session on a TID that already has one. Linux
-                // tears the old one down FIRST (agg-rx.c:379) and sends no
-                // DELBA for it — the AP is replacing it on purpose. Skipping
-                // this is what leaked the firmware BAID: we overwrote the slot
-                // and could no longer name the old id to free it.
+                // tears the old one down first (agg-rx.c:379) and sends no
+                // DELBA for it — the AP is replacing it on purpose. Overwriting
+                // the slot instead would leak the old firmware BAID.
                 host::print("[ax200] ADDBA replaces the session on tid ");
                 host::print_dec(tid as u32);
                 host::print(" — removing the old one first\n");
@@ -4258,7 +4167,7 @@ impl Ax200 {
         }
 
         // `ieee80211_process_addba_request` (agg-rx.c:319): the ceiling comes
-        // from the PEER's capability, not from a constant of ours. An HE AP may
+        // from the peer's capability, not from a constant of ours. An HE AP may
         // run 256, a plain HT one 64. `buf_size == 0` means "your maximum".
         //
         // Then the local hardware limit, which for this family is 256 as well
@@ -4284,9 +4193,8 @@ impl Ax200 {
         }
 
         // iwl_mvm_fw_baid_op (mvm/sta.c): the capability decides which of the
-        // two commands opens the session. Skipping this branch is what cost us
-        // the link — the fallback command is not ignored by a firmware that
-        // wants the other one, it stops completing transmissions.
+        // two commands opens the session. A firmware that wants the other one does
+        // not ignore the fallback command: it stops completing transmissions.
         if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
             let mut c = [0u8; BAID_CFG_CMD_LEN];
             put_u32(&mut c, BAID_OFF_ACTION, IWL_RX_BAID_ACTION_ADD);
@@ -4311,7 +4219,7 @@ impl Ax200 {
     }
 
     /// End one TID's session: drop our buffer, free the firmware BAID, and —
-    /// only when WE are the one ending it — tell the AP with a DELBA.
+    /// only when we are the one ending it — tell the AP with a DELBA.
     ///
     /// `__ieee80211_stop_rx_ba_session`: the DELBA goes out only for
     /// `initiator == WLAN_BACK_RECIPIENT && tx`. A session the AP itself ended
@@ -4333,7 +4241,7 @@ impl Ax200 {
 
     /// Every session down — the firmware's are gone with the association, and
     /// a BAID we no longer remember is one we can never free. Linux does this
-    /// in `iwl_mvm_rm_sta`; we kept the station across a reconnect (MODIFY,
+    /// in `iwl_mvm_rm_sta`; we keep the station across a reconnect (MODIFY,
     /// not remove/re-add) and so have to do it explicitly.
     fn ba_stop_all(&mut self) {
         for tid in 0..ba::NUM_TIDS as u8 {
@@ -4402,11 +4310,11 @@ impl Ax200 {
         if fw_has_capa(IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT) {
             let mut c = [0u8; BAID_CFG_CMD_LEN];
             put_u32(&mut c, BAID_OFF_ACTION, IWL_RX_BAID_ACTION_REMOVE);
-            // iwl_mvm_fw_baid_op_cmd (sta.c:2833) has a THIRD branch we had
-            // skipped: at command version 1 the remove payload is a bare
-            // `__le32 baid` (remove_v1), not sta_id_mask + tid. Sending the v2
-            // form to a v1 firmware would have it read our station mask
-            // (BIT(0) = 1) as the BAID to free — i.e. free the wrong session.
+            // iwl_mvm_fw_baid_op_cmd (sta.c:2833) has a third branch: at command
+            // version 1 the remove payload is a bare `__le32 baid` (remove_v1), not
+            // sta_id_mask + tid. Sending the v2 form to a v1 firmware would have it
+            // read our station mask (BIT(0) = 1) as the BAID to free — i.e. free the
+            // wrong session.
             if fw_cmd_ver(DATA_PATH_GROUP, RX_BAID_ALLOCATION_CONFIG_CMD) == 1 {
                 put_u32(&mut c, BAID_OFF_STA_MASK, baid as u32);
             } else {
@@ -4433,8 +4341,8 @@ impl Ax200 {
             Some(p) => p,
             None => {
                 // An ADD_STA we sent for something else — or the answer to a
-                // request that already timed out above. Worth saying once:
-                // both counters staying at zero looked like "never called".
+                // request that already timed out above. Said once, so it is not
+                // mistaken for "never called".
                 if self.st.addba_seen > 0 && self.st.addba_timeouts == 0 {
                     host::print("[ax200] ADD_STA status arrived with no block-ack pending\n");
                 }
@@ -4475,12 +4383,11 @@ impl Ax200 {
     /// The ADDBA response frame.
     ///
     /// The parameter set is built from scratch, exactly as
-    /// `ieee80211_send_addba_resp` does, and NOT echoed from the request. That
-    /// distinction cost a release: echoing kept the AP's A-MSDU bit, which told
-    /// it that it may pack several MSDUs into one MPDU — and `rx_classify`
-    /// decodes exactly one, so every aggregated frame turned to garbage and the
-    /// link carried nothing at all. mac80211 sets the bit from its OWN
-    /// capability (SUPPORTS_AMSDU_IN_AMPDU); ours is no.
+    /// `ieee80211_send_addba_resp` does, and not echoed from the request.
+    /// Echoing would keep the AP's A-MSDU bit, telling it that it may pack
+    /// several MSDUs into one MPDU — and `rx_classify` decodes exactly one.
+    /// mac80211 sets the bit from its own capability (SUPPORTS_AMSDU_IN_AMPDU);
+    /// ours is no.
     fn ba_reply(&mut self, p: &BaPending, status: u16) {
         let mut fr = [0u8; DOT11_HDR_LEN + 9];
         fr[0] = (DOT11_STYPE_ACTION << 4) | 0x00; // management, subtype action
@@ -4507,19 +4414,18 @@ impl Ax200 {
     // Returns false if the frame was dropped because the data queue is full
     // (the firmware hasn't drained it yet) — the caller leaves it to the IP
     // stack to retransmit rather than overwrite an in-flight TFD.
-    /// `critical` = this frame has NOBODY behind it to retransmit, so it must
+    /// `critical` = this frame has nobody behind it to retransmit, so it must
     /// not be refused for flow control. EAPOL is the case that matters: wifid
     /// hands the group-rekey reply down exactly once. Dropped, the AP retries,
-    /// we drop again, and after a few rounds it simply stops talking to us —
-    /// no deauth, no error, the association still "up". Measured on the
-    /// device as four identical rekeys followed by a dead link.
+    /// we drop again, and after a few rounds it stops talking to us — no
+    /// deauth, no error, the association still "up".
     ///
-    /// Bypassing the cap is safe: it exists against bufferbloat, and the ring
-    /// holds 256 TFDs against a cap of 16.
+    /// Bypassing the AQL cap is safe: it exists against bufferbloat, and the
+    /// ring guard still keeps the write pointer from lapping the firmware.
     fn tx_8023(&mut self, dst: [u8; 6], ethertype: u16, payload: &[u8], encrypt: bool,
                critical: bool) -> bool {
         // Flow control + anti-bufferbloat: AQL, so what a queued frame costs is
-        // measured in AIRTIME at the current rate — a 67-byte ACK and a
+        // measured in airtime at the current rate — a 67-byte ACK and a
         // 1514-byte frame at 6 Mbit and at 300 Mbit are four different prices.
         // Ring guard behind it so write_ptr never laps the firmware's read
         // pointer. Caller leaves the rest in the kernel mailbox for retransmit.
@@ -4537,7 +4443,7 @@ impl Ax200 {
         fr[DOT11_OFF_ADDR2..DOT11_OFF_ADDR2 + 6].copy_from_slice(&self.mac);
         fr[DOT11_OFF_ADDR3..DOT11_OFF_ADDR3 + 6].copy_from_slice(&dst);
         // Sequence control. `iwl_mvm_tx_mpdu` (mvm/tx.c:1174) writes it into the
-        // header ONLY on the OLD TX API, and the guard is explicit:
+        // header only on the old TX API, and the guard is explicit:
         //
         //     if (ieee80211_is_data_qos(fc) && !ieee80211_is_qos_nullfunc(fc)) {
         //             seq_number = mvmsta->tid_data[tid].seq_number;
@@ -4547,12 +4453,9 @@ impl Ax200 {
         //             }
         //     }
         //
-        // We are a gen2 device, i.e. the NEW TX API, so on a QoS frame the
-        // FIRMWARE owns the sequence number — and it owns it because the
-        // block-ack window is built on it. Our comment here used to say
-        // "writing our own costs nothing and covers us if it does not".
-        // Measured: `tx agg aggregated 0 max 1 ba-notif 0` over 21583
-        // transmissions. It costs every aggregate we never got.
+        // We are a gen2 device, i.e. the new TX API, so on a QoS frame the
+        // firmware owns the sequence number — and it owns it because the
+        // block-ack window is built on it. Writing our own breaks TX aggregation.
         //
         // Non-QoS data still needs a number from us: there is no mac80211
         // underneath that would already have assigned one.
@@ -4589,7 +4492,7 @@ impl Ax200 {
             &fr[..p],
             hdr_len,
         );
-        // Record what this slot now holds BEFORE the pointer moved on, so the
+        // Record what this slot now holds before the pointer moves on, so the
         // per-pass re-derivation can walk back over it.
         let slot = (wptr_before & (IWL_DATA_QUEUE_SIZE as u32 - 1)) as usize;
         // `ieee80211_sta_update_pending_airtime(..., tx_completed = false)`.
@@ -4611,16 +4514,15 @@ impl Ax200 {
     ///
     /// Linux looks the per-MCS duration up in `airtime_mcs_groups`, a table of
     /// transmit times for an `AVG_PKT_SIZE` packet, then scales it by the real
-    /// length. That table IS a rate table — and we already decode the exact
+    /// length. That table is a rate table, and we already decode the exact
     /// rate the firmware last used (`rate_kbit`, the same numbers printed as
     /// `rate tx`). So the lookup is replaced by the rate we have; the formula,
     /// the overhead term and the aggregation thresholds are Linux's, unchanged.
     ///
-    /// The `agg_shift` ladder is the interesting part and the reason a byte cap
-    /// can never do this: Linux divides the fixed per-PPDU overhead by an
-    /// assumed aggregate length, and assumes MORE aggregation the faster the
-    /// link is. Its thresholds are stated in duration-per-AVG_PKT_SIZE, so they
-    /// are compared against exactly that.
+    /// The `agg_shift` ladder is why a byte cap can never do this: Linux divides
+    /// the fixed per-PPDU overhead by an assumed aggregate length, and assumes
+    /// more aggregation the faster the link is. Its thresholds are stated in
+    /// duration-per-AVG_PKT_SIZE, so they are compared against exactly that.
     fn expected_tx_airtime(&self, len: usize) -> u32 {
         let len = len as u32 + AQL_LEN_OVERHEAD;
         let rnf = Self::rate_v3(self.st.last_tx_rate);
@@ -4740,14 +4642,12 @@ impl Ax200 {
     // `group` = GTK (multicast) vs PTK (pairwise). rx_mic/tx_mic/tx_seq stay 0.
     /// Pick a firmware key-table slot, `iwl_mvm_set_fw_key_idx` (sta.c:3457).
     ///
-    /// Linux deliberately takes the unused slot that was freed LONGEST AGO —
-    /// that is what the per-slot `deleted` counters are for. We pinned every
-    /// group key to slot 1, so a GTK rekey overwrote the previous group key
-    /// the instant the new one arrived. The AP switches key ID 1<->2 across a
-    /// rekey and keeps sending with the OLD id for a moment; those frames then
-    /// have no key here and are dropped. Group key = BROADCAST, so ARP
-    /// requests and DHCP replies vanish while unicast (the pairwise key, its
-    /// own slot) carries on undisturbed — measured exactly so on the device.
+    /// Linux deliberately takes the unused slot that was freed longest ago —
+    /// that is what the per-slot `deleted` counters are for. Reusing one group
+    /// slot would overwrite the previous group key the instant the new one
+    /// arrives; the AP switches key ID 1<->2 across a rekey and keeps sending
+    /// with the old id for a moment, so broadcast frames (ARP, DHCP replies)
+    /// would vanish while unicast carries on.
     fn alloc_key_slot(&mut self, group: bool) -> u8 {
         if !group {
             return 0; // pairwise: one station, one slot, never rotated
@@ -4766,7 +4666,7 @@ impl Ax200 {
             // Every slot busy: free the oldest group key rather than refuse.
             best = 1;
         }
-        // Only TWO group keys can be live at once (802.11 key ids 1 and 2), so
+        // Only two group keys can be live at once (802.11 key ids 1 and 2), so
         // releasing the one before last keeps the table from filling while the
         // previous key stays valid for the whole transition.
         if let Some(old) = self.key_slot_prev.replace(best) {
@@ -4868,7 +4768,7 @@ impl Ax200 {
         let fc = buf[f];
         // Count anything unicast to our address, whatever its type. This is the
         // one number that separates "the AP stopped talking to us" from "it is
-        // talking and we discard it" — and without it both look like silence.
+        // talking and we discard it".
         if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] == our_mac[..] {
             *to_us += 1;
             // `ieee80211_rx_h_sta_process` (mac80211/rx.c:1807) feeds the signal
@@ -4889,21 +4789,17 @@ impl Ax200 {
         if fc & 0x0c != DOT11_FC_TYPE_DATA {
             return RxKind::None;
         }
-        // Accept frames to us OR to a group address (multicast bit / broadcast) —
+        // Accept frames to us or to a group address (multicast bit / broadcast) —
         // a DHCP offer / ARP reply often comes back L2-broadcast.
         let multicast = buf[f + DOT11_OFF_ADDR1] & 0x01 != 0;
         if buf[f + DOT11_OFF_ADDR1..f + DOT11_OFF_ADDR1 + 6] != our_mac[..] && !multicast {
             return RxKind::None;
         }
         let subtype = (fc >> 4) & 0xf;
-        // Data subtypes with bit 2 set carry NO BODY: Null (4) and QoS Null (12)
+        // Data subtypes with bit 2 set carry no body: Null (4) and QoS Null (12)
         // are the ones that occur — the AP's keepalive, and what Linux sends in
         // `ieee80211_mgd_probe_ap`. They have no LLC/SNAP because they have no
-        // payload, and treating that as a decode failure made a perfectly normal
-        // frame look like corruption: it counted into `undecoded` and burned the
-        // budget of a log meant for real misses. Observed as a recurring
-        // "RX payload offset mismatch: computed +88" — 56 + 24 + 8, i.e. exactly
-        // a non-QoS data header with CCMP.
+        // payload, and must not be counted as a decode failure.
         if subtype & DOT11_STYPE_NODATA != 0 {
             return RxKind::None;
         }
@@ -4917,13 +4813,10 @@ impl Ax200 {
         let rnf = le32(&buf, d + MPDU_OFF_RATE_N_FLAGS);
         let kbit = Self::rate_kbit(Self::rate_v3(rnf));
         if kbit > 0 {
-            // The whole exchange, not just the bits on the wire. The first
-            // version counted preamble + SIFS + ACK and called itself a lower
-            // bound — but DIFS and the average backoff are the BIGGEST term at
-            // HT rates (102 of 268 µs for a 1500-byte frame at 144 Mbit), so
-            // that "bound" read 1.5x low and argued the channel was idle when
-            // it was about half full. A number that misleads by 1.5x is worse
-            // than no number.
+            // The whole exchange, not just the bits on the wire: DIFS and the
+            // average backoff are the biggest term at HT rates (102 of 268 µs for a
+            // 1500-byte frame at 144 Mbit), so leaving them out under-reports a
+            // busy channel considerably.
             let cck = rnf & RATE_MCS_MOD_TYPE_MSK == RATE_MCS_MOD_TYPE_CCK;
             let preamble = match rnf & RATE_MCS_MOD_TYPE_MSK {
                 RATE_MCS_MOD_TYPE_CCK => 96,       // short preamble
@@ -4934,10 +4827,9 @@ impl Ax200 {
             // 7.5 slots). Slot and SIFS differ between the DSSS and OFDM PHYs.
             let overhead = if cck { 10 + 40 + 50 + 150 } else { 16 + 28 + 34 + 68 };
             // In an A-MPDU the preamble, SIFS, block-ack, DIFS and backoff are
-            // paid ONCE for the whole aggregate — not per subframe. Charging
-            // them per subframe made the report claim `rx 186 %` of a window,
-            // which is not a busy channel but a broken ruler. The firmware
-            // flips PHY_AMPDU_TOGGLE at the start of every new aggregate
+            // paid once for the whole aggregate, not per subframe (charging them per
+            // subframe can exceed 100 % of a window). The firmware flips
+            // PHY_AMPDU_TOGGLE at the start of every new aggregate
             // (iwl_mvm_rx_mpdu_mq), so a subframe whose toggle matches the one
             // before it costs data time only.
             let phy_info = (buf[d + MPDU_OFF_PHY_INFO] as u16)
@@ -4994,10 +4886,9 @@ impl Ax200 {
             Self::note_llc_miss(miss_log, want, f + hdrlen + IEEE80211_CCMP_HDR_LEN);
             f + hdrlen + IEEE80211_CCMP_HDR_LEN
         } else {
-            // Addressed to us, a data frame WITH a body, and LLC/SNAP is at none
-            // of the possible offsets. Silently dropping this was a blind spot.
-            // `usize::MAX` = nowhere; `0` used to be the sentinel and read like
-            // a real offset ("found +0"), which is its own small lie.
+            // Addressed to us, a data frame with a body, and LLC/SNAP is at none
+            // of the possible offsets. `usize::MAX` = nowhere (0 would read like a
+            // real offset).
             Self::note_llc_miss(miss_log, want, usize::MAX);
             return RxKind::Undecoded;
         };
@@ -5137,7 +5028,7 @@ impl Ax200 {
     // for the target AP, transmit it, and wait for the association response
     // (subtype 1) to read the status code + AID. For an encrypted AP we include a
     // WPA2-PSK-CCMP RSN element so the AP accepts the association (the 4-way
-    // handshake / key install that follows lives in wifid — Phase H).
+    // handshake / key install that follows lives in wifid).
     fn connect_send_assoc(&mut self) -> bool {
         let mut fr = [0u8; 256];
         fr[0] = DOT11_FC_ASSOC_REQ;
@@ -5185,7 +5076,7 @@ impl Ax200 {
         // HT Capability element (802.11n). Only when the AP advertised HT — an
         // AP without it would get an element it never asked for, and everything
         // downstream (station flags, TLC mode HT) derives from its parameters.
-        // The claimed width MUST match the PHY context: advertising 20/40 with
+        // The claimed width must match the PHY context: advertising 20/40 with
         // a 20 MHz radio invites frames it cannot receive, and claiming 20 with
         // a 40 MHz context wastes the half we configured. Both follow
         // `use_ht40`, which is the single place that decides.
@@ -5304,9 +5195,7 @@ impl Ax200 {
     // The chip is up and the scan has run; register as a network interface and
     // own the card from here. Same shape as aml.wasm: an infinite loop that
     // does the driver's work and yields via npk_sleep — never returns (the
-    // driver holds its DMA + the netdev registration for its lifetime). Frame
-    // bridging to the kernel netdev mailboxes (TX poll / RX submit) plugs into
-    // this loop once association brings up the data path.
+    // driver holds its DMA + the netdev registration for its lifetime).
     fn run_netdev(&mut self, associated: bool) -> ! {
         let mac = self.mac;
         if host::netdev_register(&mac) == 0 {
@@ -5319,7 +5208,7 @@ impl Ax200 {
         // The data TX queue was allocated before auth (so its SCD-response wait
         // wouldn't swallow the AP's first EAPOL frame). Tell wifid the connection
         // is ready + the MACs it needs for the PTK, then listen immediately — but
-        // ONLY if we actually associated. Otherwise the link stays down (wlan is
+        // only if we actually associated. Otherwise the link stays down (wlan is
         // registered but not primary) and we don't arm wifid for a dead BSS.
         let our_mac = self.mac;
         if associated {
@@ -5347,7 +5236,7 @@ impl Ax200 {
         let mut tx_log = 0u32;
         // Air-rate visibility. The firmware reports the TX rate it settled on
         // via TLC_MNG_UPDATE_NOTIF; the RX descriptor carries the rate the AP
-        // used towards us. Log only when either CHANGES — a per-frame log would
+        // used towards us. Log only when either changes — a per-frame log would
         // drown the ring, and the interesting event is the transition.
         let mut last_tx_rate = u32::MAX;
         let mut last_rx_rate = u32::MAX;
@@ -5371,10 +5260,9 @@ impl Ax200 {
         let mut last_rx_ms = assoc_at_ms;
         let mut handshake_deadline = assoc_at_ms + HANDSHAKE_TIMEOUT_MS;
         loop {
-            // Where the pass's time actually goes. The old `busy` counter only
-            // said whether a pass FOUND work — it was read as CPU load (by
-            // Claude, and it was wrong). This measures: work microseconds, drain
-            // microseconds, and what a 1 ms sleep really costs.
+            // Where the pass's time actually goes: work microseconds, drain
+            // microseconds, and what a 1 ms sleep really costs. Whether a pass found
+            // work says nothing about CPU load.
             let t_pass = host::now_us();
             // RX: drain + recycle the ring. EAPOL-Key frames → wifid (the 4-way);
             // decrypted IP/other data → the kernel IP stack as Ethernet frames.
@@ -5421,7 +5309,7 @@ impl Ax200 {
             let rx_frames = self.service_rx(|c, g, rb| {
                 if c == TX_CMD && g == 0 {
                     // gen2 TX completion — one per transmitted data/mgmt frame.
-                    // struct iwl_tx_resp carries what it COST on the air: the
+                    // struct iwl_tx_resp carries what it cost on the air: the
                     // retry count, the rate the firmware started at and the
                     // microseconds of airtime consumed. Reading it is the only
                     // way to tell a slow link from a retrying one.
@@ -5434,30 +5322,22 @@ impl Ax200 {
                     // stated outright — no need to count.
                     let seq = u16::from_le_bytes([tr[6], tr[7]]) as u32;
                     if (seq >> 8) & 0x1f == a_dataq {
-                        // Mask to the QUEUE WINDOW, not to 256. The write
+                        // Mask to the queue window, not to 256. The write
                         // pointer wraps at MAX_TFD_QUEUE_SIZE while the data
                         // queue holds IWL_DATA_QUEUE_SIZE entries and indexes
-                        // with `wptr & (qsize-1)`. Differencing across the two
-                        // moduli produced in-flight counts like 198 against a
-                        // cap of 16 — which blocked every transmission and
-                        // read on the device as a dead link (8 Mbit, 41 %
-                        // retries). Masked to the window the result is bounded
-                        // 0..QUEUE_SIZE-1 by construction and can never wedge
-                        // the queue. At 256 slots the two masks coincide, which
-                        // is exactly why 256 is the ceiling: an 8-bit index
-                        // cannot address a deeper queue.
-                        // No `+1`: measured on the device, the reported
-                        // index is already the NEXT slot to read, not the last
-                        // one completed. Adding one made the derived value
-                        // trail the counter by exactly one on every single
-                        // pass — five samples in a row, all off by one, with
-                        // only the first (9 vs 0) a real leak.
+                        // with `wptr & (qsize-1)`; differencing across the two
+                        // moduli yields nonsense in-flight counts that block
+                        // every transmission. Masked to the window the result is
+                        // bounded 0..QUEUE_SIZE-1 by construction. At 256 slots
+                        // the two masks coincide, which is why 256 is the
+                        // ceiling: an 8-bit index cannot address a deeper queue.
+                        // No `+1`: the reported index is already the next slot
+                        // to read, not the last one completed.
                         a_read_ptr = Some((seq & 0xff) & (IWL_DATA_QUEUE_SIZE as u32 - 1));
                     }
                     let base = RX_PKT_DATA_OFF;
                     // "frame_count: 1 no aggregation, >1 aggregation"
-                    // (fw/api/tx.h). The field has been in the struct since the
-                    // first port and unread ever since — the compiler said so.
+                    // (fw/api/tx.h).
                     let fc = tr[base + TXR_OFF_FRAME_COUNT];
                     a_subframes += fc.max(1) as u64;
                     if fc > 1 { a_agg_resp += 1; }
@@ -5491,26 +5371,22 @@ impl Ax200 {
                     a_ba_done += u16::from_le_bytes(
                         [bn[b + CBA_OFF_DONE], bn[b + CBA_OFF_DONE + 1]]) as u64;
                     // Airtime for the whole aggregate (`iwl_mvm_tx_airtime`,
-                    // mvm/tx.c:2151, from `ba_res->wireless_time`). The TX_CMD
-                    // response carries `wireless_media_time` and we have read it
-                    // since the first port — but an aggregated MPDU produces no
-                    // TX_CMD response, so on an upload only 405 of 147379 frames
-                    // reported any airtime at all and `air … tx` showed 0 %.
-                    // Same shape as the read pointer: one of two sources read.
+                    // mvm/tx.c:2151, from `ba_res->wireless_time`). An
+                    // aggregated MPDU produces no TX_CMD response, so without
+                    // this the TX airtime of an upload is almost entirely
+                    // missing from `wireless_media_time`.
                     a_airtime += u32::from_le_bytes([
                         bn[b + CBA_OFF_WIRELESS_TIME],
                         bn[b + CBA_OFF_WIRELESS_TIME + 1],
                         bn[b + CBA_OFF_WIRELESS_TIME + 2],
                         bn[b + CBA_OFF_WIRELESS_TIME + 3],
                     ]) as u64;
-                    // The RECLAIM half, and the reason 0.99.0 collapsed to
-                    // 16 Mbit: an aggregated MPDU gets NO TX_CMD response. Its
-                    // TFD slot is freed here or it is never freed at all. Linux
+                    // The reclaim half: an aggregated MPDU gets no TX_CMD
+                    // response, so its TFD slot is freed here or never. Linux
                     // does exactly this — `iwl_mvm_rx_ba_notif` walks the tfd
                     // array and hands each `tfd_index` to `iwl_mvm_tx_reclaim`
                     // as the queue's new read pointer (mvm/tx.c, new-tx-api
-                    // path). We read `txed`/`done` from this notification since
-                    // 0.93.0 and left the two fields next to them unread.
+                    // path).
                     let tfd_cnt = u16::from_le_bytes(
                         [bn[b + CBA_OFF_TFD_CNT], bn[b + CBA_OFF_TFD_CNT + 1]]) as usize;
                     if tfd_cnt > CBA_TFD_MAX {
@@ -5578,11 +5454,9 @@ impl Ax200 {
                         }
                     }
                 } else if c == REPLY_RX_MPDU_CMD && g == 0 {
-                    // DIAGNOSTIC ONLY: note a DEAUTH / DISASSOC addressed to us +
-                    // its reason, but do NOT tear down or reconnect — a reconnect
-                    // would just mask whatever made us lose the link (our bug vs a
-                    // genuinely-absent AP). Keep draining so detection never
-                    // disrupts a healthy link.
+                    // Diagnostic only: note a DEAUTH / DISASSOC addressed to us +
+                    // its reason, but do not tear down or reconnect here. Keep
+                    // draining so detection never disrupts a healthy link.
                     if let Some((st, body)) = Self::rx_mgmt_for_us(rb, &our_mac) {
                         a_mgmt += 1;
                         a_to_us += 1; // rx_classify never sees these — count here
@@ -5624,17 +5498,10 @@ impl Ax200 {
                             a_ip += 1;
                             a_rx_bytes += n as u64;
                             // The AP's downlink rate, from the RX descriptor —
-                            // sampled HERE, not for every received frame. Most of
-                            // what the ring carries is beacons and other networks'
-                            // broadcast, and a beacon always goes out at the
-                            // lowest basic rate: sampling those reported a 6 Mbit
-                            // downlink on a link actually running HT.
-                            // …and only for UNICAST frames. Moving the sample out
-                            // of the ring loop was not enough: most IP frames on a
-                            // home network are broadcast (ARP, mDNS, SSDP), and
-                            // broadcast goes out at the lowest basic rate just like
-                            // a beacon. That is why this kept reading 6 Mbit on a
-                            // link running HT.
+                            // sampled here, not for every received frame, and only
+                            // for unicast frames: beacons and broadcast (ARP, mDNS,
+                            // SSDP) go out at the lowest basic rate and would report
+                            // a 6 Mbit downlink on a link running HT.
                             rx_rate_tick += 1;
                             if a_to_us > uni_before && rx_rate_tick & 0x7 == 0 {
                                 let mut rd = [0u8; 64];
@@ -5645,9 +5512,8 @@ impl Ax200 {
                                     // Budgeted. At VHT80 the rate flaps between
                                     // MCS 8 and 9 continuously, and every line
                                     // goes to the terminal, the global mirror
-                                    // AND out over TCP — in the middle of the
-                                    // measurement it is meant to inform. The
-                                    // report carries the current rate anyway.
+                                    // and out over TCP. The report carries the
+                                    // current rate anyway.
                                     if rate_log < 8 {
                                         rate_log += 1;
                                         Self::log_rate("[ax200] RX rate -> ", rnf);
@@ -5672,11 +5538,10 @@ impl Ax200 {
                             // Hand the frame to the kernel via the relay ring;
                             // Core 0's net::poll drains it + runs the TCP tick.
                             // (Direct in-fiber delivery via npk_netdev_rx_deliver
-                            // exists but starved the Core-0 TCP tick under load →
-                            // connection drops; revisit with #2 WiFi-IRQ.)
+                            // starves the Core-0 TCP tick under load until there
+                            // is a WiFi IRQ.)
                             // The descriptor names the BAID, not the TID, so
-                            // the session is looked up by it — with one session
-                            // per TID there is more than one candidate now.
+                            // the session is looked up by it.
                             let taken = agg.reorderable && {
                                 let b = ((agg.reorder & IWL_RX_MPDU_REORDER_BAID_MASK)
                                     >> IWL_RX_MPDU_REORDER_BAID_SHIFT) as u8;
@@ -5703,24 +5568,18 @@ impl Ax200 {
             // Derived, not counted: `(write - read) & 255` is what the firmware
             // and we actually disagree about, and a swallowed completion is
             // repaired by the next one instead of leaking a slot forever.
-            // Measured before this: 8 of 16 slots lost for 314 s, and an OTA
-            // update that failed because a one-second stall killed its TLS
-            // handshake.
             let counted = self.data_in_flight.saturating_sub(tx_done);
             if let Some(rp) = a_read_ptr {
                 self.data_read_ptr = rp;
                 let derived = (self.data_write_ptr & (IWL_DATA_QUEUE_SIZE as u32 - 1))
                     .wrapping_sub(rp) & (IWL_DATA_QUEUE_SIZE as u32 - 1);
                 // Say when the two disagree by more than the frames completed
-                // in this pass — that difference IS the leak, and until now it
-                // was invisible.
-                // Only a gap of two or more is news. One is noise, and a
-                // log that writes the normal case is not a log.
+                // in this pass — that difference is the leak.
+                // Only a gap of two or more is news; one is noise.
                 // …but not while an aggregate just reclaimed. With TLC-offload
-                // aggregation on, `counted` drifts high every single pass
-                // because most frames never produce a TX_CMD response at all.
-                // That is the design working, not a leak, and a log that writes
-                // the normal case is not a log.
+                // aggregation on, `counted` drifts high every pass because most
+                // frames never produce a TX_CMD response at all. That is the
+                // design working, not a leak.
                 if derived + 1 < counted && a_ba_reclaims == 0
                     && self.st.inflight_corrections < 8
                 {
@@ -5731,13 +5590,9 @@ impl Ax200 {
                     host::print_dec(derived);
                     host::print(" — correcting\n");
                 }
-                // Only ever LOWER the count. The derived value exists to
-                // repair a leak; it must never be able to create one. Getting
-                // the two pointers into different moduli once already wedged
-                // transmission completely (in-flight 198 against a cap of 16,
-                // 8 Mbit, dead link), and a diagnostic that can block the
-                // queue is worse than the leak it fixes. Taking the minimum
-                // means a disagreement — whatever its cause — costs nothing.
+                // Only ever lower the count. The derived value exists to repair
+                // a leak; it must never be able to create one. Taking the minimum
+                // means a disagreement, whatever its cause, cannot block the queue.
                 self.data_in_flight = counted.min(derived);
             } else {
                 self.data_in_flight = counted;
@@ -5804,8 +5659,8 @@ impl Ax200 {
                 self.st.mb_received = received;
                 self.st.mb_notifs = self.st.mb_notifs.wrapping_add(1);
                 // iwl_mvm_handle_missed_beacons_notif, verbatim in its thresholds:
-                // a long run of missed beacons AND nothing received since is a
-                // link that is gone. The same run WITH data still arriving is not
+                // a long run of missed beacons and nothing received since is a
+                // link that is gone. The same run with data still arriving is not
                 // — Linux stays connected there and says it expects trouble.
                 if consec >= IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG {
                     if since_rx >= IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD {
@@ -5856,10 +5711,8 @@ impl Ax200 {
                 }
             }
             // `ieee80211_process_delba`: the frame names the TID and who is
-            // ending it. Only an INITIATOR-side DELBA concerns our RX session,
-            // and we send none back — the AP already knows. A single global
-            // flag used to tear down whichever session happened to be in the
-            // one slot, regardless of the TID the AP named.
+            // ending it. Only an initiator-side DELBA concerns our RX session,
+            // and we send none back — the AP already knows.
             if let Some((tid, initiator)) = delba.take() {
                 if initiator == WLAN_BACK_INITIATOR {
                     self.ba_stop(tid, false, 0);
@@ -5869,8 +5722,8 @@ impl Ax200 {
             ba::tick_all();
             // sta_rx_agg_session_timer_expired: a session the AP has gone quiet
             // on for longer than it asked for is stale. Linux tears it down and
-            // sends a DELBA with WLAN_REASON_QSTA_TIMEOUT. We kept such a
-            // session forever, holding a firmware BAID nothing would ever use.
+            // sends a DELBA with WLAN_REASON_QSTA_TIMEOUT; otherwise it would hold
+            // a firmware BAID nothing will ever use.
             let now_ms = host::now_ms();
             for tid in 0..ba::NUM_TIDS as u8 {
                 if ba::by_tid(tid).map(|s| s.timed_out(now_ms)).unwrap_or(false) {
@@ -5880,30 +5733,17 @@ impl Ax200 {
                     self.ba_stop(tid, true, WLAN_REASON_QSTA_TIMEOUT);
                 }
             }
-            // DIAGNOSTIC: a DEAUTH (subtype 12) / DISASSOC (10) arrived. Log it
-            // with the 802.11 reason code — do NOT reconnect (that would mask the
-            // root cause). The reason tells us whether the AP genuinely dropped us
-            // or our own behaviour provoked it:
-            //   1=unspecified  2=prev-auth-invalid  4=inactivity  6/7=class2/3
-            //   frame from nonassoc STA (= our state/TX bug)  15=4-way timeout.
             // A DEAUTH (subtype 12) / DISASSOC (10) arrived. The reason code says
             // whether the AP genuinely dropped us or our own behaviour provoked
             // it: 1=unspecified 2=prev-auth-invalid 4=inactivity 6/7=class2/3
             // frame from a nonassoc STA (= our state/TX bug) 15=4-way timeout.
-            // It is always logged and counted — then we reconnect, because in a
-            // mesh with one SSID on two APs a steering kick is NORMAL traffic
-            // and staying down until a human re-runs the driver is not an option.
-            // Count what the acknowledgements say, but do NOT act on it yet.
-            //
-            // The first version of this acted immediately and made things worse:
-            // "no transmit response for 5 s while frames are in flight" fires on
-            // an IDLE link the moment `data_in_flight` is stuck above zero — a
-            // single lost response and the driver tears down a healthy link,
-            // over and over. And eight unacknowledged frames in a row is a bad
-            // moment on a radio, not necessarily a dead AP.
-            //
-            // So: measure first. The streak is in the report; once we have seen
-            // what it does on a link that really dies, it can drive a reconnect.
+            // It is always logged and counted, then we reconnect: in a mesh with
+            // one SSID on several APs a steering kick is normal traffic.
+            // Count what the acknowledgements say, but do not act on it yet:
+            // "no transmit response while frames are in flight" also fires on an
+            // idle link whose `data_in_flight` is stuck above zero, and a run of
+            // unacknowledged frames is not necessarily a dead AP. The streak is in
+            // the report.
             let now_ms = host::now_ms();
             if a_ok > 0 {
                 self.tx_fail_streak = 0;
@@ -5957,15 +5797,14 @@ impl Ax200 {
             // firmware's read pointer).
             let mut tx_any = false;
             loop {
-                // Two different walls, counted apart: the byte cap is policy and
-                // can be raised on its own; the ring guard is the queue depth and
-                // needs IWL_DATA_QUEUE_SIZE to move with it. Which one bites is
-                // the whole question for the next size change, and one shared
-                // counter could not answer it.
+                // Two different walls, counted apart: AQL is policy and can be tuned on
+                // its own; the ring guard is the queue depth and needs
+                // IWL_DATA_QUEUE_SIZE to move with it. One shared counter could not say
+                // which one bites.
                 if !self.aql_admits() {
-                    // Not a drop: the frame stays in the kernel queue. But it IS
+                    // Not a drop: the frame stays in the kernel queue. But it is
                     // the moment the cap becomes the throughput limit, so it has
-                    // to be visible before anyone raises it.
+                    // to be visible.
                     self.st.tx_blocked = self.st.tx_blocked.wrapping_add(1);
                     break;
                 }
@@ -6014,13 +5853,9 @@ impl Ax200 {
             //     if (txq->read_ptr == txq->write_ptr) delete timer;
             //     else                                 mod_timer(+wd_timeout);
             //
-            // NOT EMPTY arms it, every completion pushes it forward. Fullness
-            // does not enter into it — and that was our bug: we required
-            // `data_in_flight >= TX_INFLIGHT_MAX`, so a PARTIAL leak was
-            // invisible. Measured on the device: 8 of 16 slots held frames the
-            // firmware never completed, for 314 s, with nothing queued behind
-            // them. Half the transmit capacity gone for the rest of the boot,
-            // every pass resetting the counter, the watchdog never firing.
+            // Not empty arms it, every completion pushes it forward. Fullness does
+            // not enter into it, so a partial leak (some slots never completed,
+            // nothing queued behind them) is caught too.
             let now_ms_pass = host::now_ms();
             if tx_done > 0 || a_ba_reclaims > 0 || self.data_in_flight == 0 {
                 self.last_tx_done_ms = now_ms_pass;
@@ -6044,12 +5879,11 @@ impl Ax200 {
                 self.st.tx_wd_recoveries = self.st.tx_wd_recoveries.wrapping_add(1);
                 self.last_tx_done_ms = now_ms_pass;
             }
-            // Adaptive pacing: while frames are flowing OR completions are still
+            // Adaptive pacing: while frames are flowing or completions are still
             // pending, poll again in 1 ms so the RX ring is drained before it
             // overflows and queue slots free up quickly; when idle, 4 ms keeps the
-            // RX latency floor low (the ping/round-trip baseline) while still
-            // yielding the core (npk_sleep yields the fiber). A proper IRQ wake is
-            // the eventual fix; 4 ms is the interim quick-win over the old 20 ms.
+            // RX latency floor low while still yielding the core (npk_sleep yields
+            // the fiber). An IRQ wake would replace this.
             // RX-silence watchdog. Frames of some kind always arrive on a live
             // channel — beacons alone are ~10/s. Total silence means the
             // firmware has no buffer to fill, not that the air went quiet.
@@ -6062,11 +5896,9 @@ impl Ax200 {
                 if armed == 0 {
                     self.st.rx_wd_dry = self.st.rx_wd_dry.wrapping_add(1);
                 }
-                // Budgeted like the TX watchdog above. This used to print
-                // unconditionally on every round, so a permanent fault read as
-                // an endless loop and the log stopped being a log. `armed` is
-                // the fact worth having: 0 means the firmware still holds every
-                // buffer, so the pool was never the cause.
+                // Budgeted like the TX watchdog above, so a permanent fault does not
+                // flood the log. `armed` is the fact worth having: 0 means the firmware
+                // still holds every buffer, so the pool was never the cause.
                 if self.st.rx_wd_fires <= 4 {
                     host::print("[ax200] RX silent - re-armed ");
                     host::print_dec(armed);
@@ -6123,17 +5955,13 @@ impl Ax200 {
                     }
                 }
             }
-            // Publish the link state from OUR state, every pass, instead of
-            // trusting one event to arrive. `false` was set at the top of
-            // reconnect() and `true` came only from wifid's AUTHORIZED — so a
-            // single missed message left the carrier down forever, and with it
-            // netdev::send refusing every packet: the link never came back by
-            // itself. Now the kernel's view follows the handshake, edge or no
-            // edge.
-            // Carrier follows the ASSOCIATION, dormant follows the
+            // Publish the link state from our state, every pass, instead of
+            // trusting one event to arrive: a single missed message would leave the
+            // carrier down forever, and netdev::send refusing every packet.
+            // Carrier follows the association, dormant follows the
             // authorization. Reported as one flag, the seconds between
-            // association and the end of the 4-way read to the kernel as "the
-            // link went away", and it answered with a full DHCP round.
+            // association and the end of the 4-way would read to the kernel as
+            // "the link went away" and trigger a full DHCP round.
             if self.authorized != self.link_published {
                 self.link_published = self.authorized;
                 host::netdev_set_link_state(self.assoc_aid != 0, !self.authorized);
@@ -6174,18 +6002,15 @@ impl Ax200 {
                     let dst = self.target_bssid;
                     // `critical`: there is no retransmit behind an EAPOL reply.
                     // And never `let _ =` on it — a handshake frame that failed
-                    // to go out is the single most important thing the log can
-                    // say, and it used to say nothing at all.
+                    // to go out is the single most important thing the log can say.
                     // Encrypt once the pairwise key exists. The 4-way's own
                     // msg2/msg4 go out before it is installed — plaintext, as
-                    // they must be. But a GROUP REKEY arrives minutes later,
-                    // with the PTK long in place, and mac80211 protects that
-                    // frame like any other data frame
-                    // (`ieee80211_tx_h_select_key`: the key is kept for
-                    // anything with `ieee80211_is_data_present`). We sent every
-                    // EAPOL frame in the clear, so the AP discarded our rekey
-                    // answer, retried four times and then stopped talking to
-                    // us — no deauth, association still "up".
+                    // they must be. But a group rekey arrives later, with the
+                    // PTK in place, and mac80211 protects that frame like any
+                    // other data frame (`ieee80211_tx_h_select_key`: the key is
+                    // kept for anything with `ieee80211_is_data_present`). An
+                    // AP discards a plaintext rekey answer and, after retrying,
+                    // stops talking to us with the association still "up".
                     let enc = self.ptk_installed;
                     if !self.tx_8023(dst, ETHERTYPE_EAPOL, &cmd[3..3 + len], enc, true) {
                         self.st.tx_eapol_dropped = self.st.tx_eapol_dropped.wrapping_add(1);
@@ -6209,18 +6034,17 @@ impl Ax200 {
             Some(CMD_AUTHORIZED) => {
                 self.authorized = true;
                 // `iwl_mvm_sta_state_assoc_to_authorized` (mvm/mac80211.c:3901).
-                // We used to set a bool and publish the link — the firmware was
-                // never told. It kept the station in the pre-authorized state
-                // for the rest of the connection, and `rs_fw_rate_init` reads
-                // exactly that:
+                // The firmware has to be told: otherwise it keeps the station in
+                // the pre-authorized state, and `rs_fw_rate_init` reads exactly
+                // that:
                 //
                 //     .max_ch_width = mvmsta->authorized ?
                 //             rs_fw_bw_from_sta_bw(link_sta)
                 //           : IWL_TLC_MNG_CH_WIDTH_20MHZ,
                 //
                 // Linux sends the same three commands again, in this order.
-                // (`iwl_mvm_enable_beacon_filter` also belongs here and is
-                // still missing — that is why `fw notifs 0` never moves.)
+                // Not implemented: `iwl_mvm_enable_beacon_filter`, which also
+                // belongs here (hence `fw notifs 0`).
                 self.mac_ctxt_assoc();      // callbacks->mac_ctxt_changed
                 self.sta_assoc_update();    // callbacks->update_sta
                 self.connect_tlc_config();  // iwl_mvm_rs_rate_init_all_links
@@ -6316,7 +6140,7 @@ impl Ax200 {
     }
 }
 
-/// Log a DMA allocation's physical address (Stage 1 diagnostics).
+/// Log a DMA allocation's physical address.
 fn log_dma(name: &str, d: &Dma) {
     host::dprint(name);
     host::dprint(": phys 0x");
@@ -6377,7 +6201,7 @@ fn fw_has_capa(cap: u32) -> bool {
     false
 }
 
-/// Log one command's firmware version (Stage 4d1 diagnostics).
+/// Log one command's firmware version.
 fn log_cmd_ver(name: &str, group: u8, cmd: u8) {
     host::dprint("[ax200]   ");
     host::dprint(name);
@@ -6491,16 +6315,11 @@ fn settle_ms_config() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // Wait before touching the card at all.
-    //
-    // The device comes up only when a USB dongle is present — and it does not
-    // matter whether that dongle has a cable. Mere presence makes
-    // netdev::is_available() true, which sends boot into a DHCP with three
-    // retries plus an NTP attempt: several seconds during which nobody touches
-    // this card. Without it autostart reaches the driver almost immediately
-    // after power-up. So the delay is the difference, and it belongs HERE,
-    // before pci_bind — not somewhere in the middle of bring-up, where a plain
-    // sleep would also strand the RX ring.
+    // Wait before touching the card at all. Bring-up right after power-up
+    // has been seen to fail where a few seconds of other boot work in
+    // between (DHCP, NTP) made it succeed. The delay belongs here, before
+    // pci_bind — a plain sleep in the middle of bring-up would strand the
+    // RX ring.
     let settle = settle_ms_config();
     if settle > 0 {
         host::sleep_ms(settle); // no ring allocated yet — sleeping is safe here
@@ -6699,19 +6518,9 @@ pub extern "C" fn _start() {
                             // goes out in there.
                             dev.load_connect_policy();
 
-                            // Let the radio settle before scanning.
-                            //
-                            // The device only works when it was booted with a
-                            // USB dongle plugged in — which changes nothing
-                            // about this card except how long the rest of boot
-                            // takes (enumeration, plus a DHCP that succeeds
-                            // instead of running into three timeouts). Every
-                            // other difference has been ruled out by now: the
-                            // DMA addresses come out byte-identical, the init
-                            // sequence matches iwl_run_unified_mvm_ucode
-                            // exactly, power save and BT coex are off. What is
-                            // left is that we start scanning sooner. Configurable
-                            // so it can be measured rather than believed.
+                            // Let the radio settle before scanning. Configurable (`settle_ms`)
+                            // because starting the scan too soon after bring-up is the remaining
+                            // suspect when the device fails to see APs.
                             // ── Stage 4d2a: scan-config prerequisites ──
                             dev.run_scan_prereqs();
                             host::dprint("[ax200] Stage 4d2a OK — full iwl_mvm_up pre-scan seq sent\n");
@@ -6737,15 +6546,14 @@ pub extern "C" fn _start() {
                                     // ── Stage 5b': power + MAC context (target BSSID) ──
                                     // The chanctx tail Linux runs before the auth TX.
                                     dev.connect_finish_chanctx();
-                                    // Allocate the data TX queue BEFORE auth so its
+                                    // Allocate the data TX queue before auth so its
                                     // SCD-response wait doesn't discard the AP's
                                     // first EAPOL frame, and the post-assoc listen
                                     // can begin immediately.
                                     if !dev.alloc_data_queue() {
-                                        // Without this queue there is no path
-                                        // for EAPOL, so the 4-way cannot run and
-                                        // the link can never authorize. `dprint`
-                                        // was the wrong channel for that.
+                                        // Without this queue there is no path for EAPOL,
+                                        // so the 4-way cannot run and the link can never
+                                        // authorize; say so loudly.
                                         host::print("[ax200] FATAL: data TX queue DMA alloc failed — no 4-way, no traffic\n");
                                     }
                                     // ── Stage 5c/5d: AUTH → ASSOC mgmt dialog ──
@@ -6770,7 +6578,7 @@ pub extern "C" fn _start() {
                                 // run_netdev never returns: the driver owns the
                                 // card and the `wlan` interface for its lifetime
                                 // (same model as aml.wasm). It only tells wifid the
-                                // link is READY (→ the 4-way) when we actually
+                                // link is ready (→ the 4-way) when we actually
                                 // associated — otherwise wifid would arm a
                                 // supplicant for a BSS we never joined and stall.
                                 dev.run_netdev(associated);
@@ -6795,8 +6603,7 @@ pub extern "C" fn _start() {
 
     // Halt the chip before returning: the kernel frees our DMA buffers on
     // return and a still-running firmware must not DMA into them afterwards.
-    // (Probe-stage driver — we return rather than idle; npk_input_wait HLTs
-    // without yielding, which would pin the core. A persistent yielding
-    // run-loop arrives with Stage 4+.)
+    // We return rather than idle: npk_input_wait HLTs without yielding,
+    // which would pin the core.
     dev.stop();
 }

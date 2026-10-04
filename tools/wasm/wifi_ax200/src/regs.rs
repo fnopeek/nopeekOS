@@ -1,9 +1,9 @@
-//! AX200 register definitions — verified 1:1 against Linux 6.18.26
+//! AX200 register definitions, checked 1:1 against Linux 6.18.26
 //! `drivers/net/wireless/intel/iwlwifi/iwl-csr.h` (CSR_BASE = 0x000).
 //!
 //! Only offsets verified against the header live here. Bit masks are added
-//! per stage as each function is ported (strict 1:1, no guessed values —
-//! see memory/feedback_linux_strict.md). BAR0 carries the CSR block.
+//! as each function is ported (strict 1:1, no guessed values). BAR0 carries
+//! the CSR block.
 
 // ── PCI identity ─────────────────────────────────────────────────
 pub const AX200_VENDOR: u16 = 0x8086;
@@ -141,19 +141,15 @@ pub const CMD_QUEUE_CB_SIZE: u8 = 2; // TFD_QUEUE_CB_SIZE(32) = ilog2(32)-3
 // ── Stage 3: RX restock + ALIVE notification ─────────────────────
 // RFH free-RBD write-pointer trigger (direct MMIO in BAR0, gen2 < BZ).
 pub const RFH_Q0_FRBDCB_WIDX_TRG: u32 = 0x1C80;
-// RB pool size. Three numbers have stood here: 64 ("enough for the alive
-// notification"), 256, then 512. The last one took the link down, so it is out
-// again — 256 is the only value this driver has been MEASURED at (99 Mbit,
-// drain-peak 241/256). Each RB = 1 page.
+// RB pool size, each RB = 1 page.
 //
-// Linux does not pick this number, it derives it: the pool is
+// Linux derives this number rather than picking it: the pool is
 // `trans_pcie->num_rx_bufs - 1` = NUM_RBDS - 1 = 2047 buffers in a 2048-slot
 // ring (pcie/gen1_2/rx.c, iwl_pcie_rx_init). The -1 is the ring rule, spelled
-// out in rx.c:126 — write == read must mean EMPTY, so N slots can hold at most
-// N-1 entries. Raising this towards 2047 is a throughput question and needs a
-// device measurement per step plus room in the kernel's MAX_DMA_ALLOCS /
-// MAX_DMA_PAGES; it is no longer a correctness question, because the free-BD
-// ring now tracks buffer ownership instead of trusting the pool to be small.
+// out in rx.c:126 — write == read must mean empty, so N slots can hold at most
+// N-1 entries. Raising this towards 2047 is a throughput question and needs
+// room in the kernel's MAX_DMA_ALLOCS / MAX_DMA_PAGES; it is not a correctness
+// question, because the free-BD ring tracks buffer ownership.
 pub const RX_NUM_RBS: usize = 512;
 // The ring rule, machine-checked instead of remembered: Linux itself stops one
 // short of the ring (num_rbds - 1 = 2047 for this chip).
@@ -362,9 +358,9 @@ pub const SC_OFF_GP_SCAN_START_MAC: usize = 11;
 // ── Stage 4d2b1b: MAC context (iwl_mac_ctx_cmd, fw/api/mac.h) ─────
 // A scan references a firmware MAC context (scan_start_mac_or_link_id).
 // mac80211 creates it on add_interface (iwl_mvm_mac_ctxt_add); our driver-
-// initiated scan must add it first. NOTE: no aux station / TX queue is added
-// — for ADD_STA cmd_ver >= 12 (this firmware) iwl_mvm_has_new_station_api is
-// true, so iwl_mvm_up does NOT call iwl_mvm_add_aux_sta; the firmware uses an
+// initiated scan must add it first. No aux station / TX queue is added:
+// for ADD_STA cmd_ver >= 12 (this firmware) iwl_mvm_has_new_station_api is
+// true, so iwl_mvm_up does not call iwl_mvm_add_aux_sta; the firmware uses an
 // internal aux station for scan activity (mvm/fw.c:1459, mvm/mvm.h:1509).
 // MAC_CONTEXT_CMD is opcode 0x28 in the legacy group (group 0).
 pub const MAC_CONTEXT_CMD_OP: u8 = 0x28;
@@ -391,10 +387,10 @@ pub const MAC_PROT_FLG_HT_PROT: u32 = 1 << 23;
 pub const MAC_PROT_FLG_FAT_PROT: u32 = 1 << 24;
 pub const MC_OFF_FILTER_FLAGS: usize = 52; // __le32
 // ── MAC_QOS_PARAM_API_S_VER_1, inside struct iwl_mac_ctx_cmd ──────
-// We left both of these at zero since the first port. That tells the firmware
-// there is no EDCA configuration and this is not an 802.11n BSS — and a
-// firmware that does not know it is in an HT/QoS BSS has no reason to open a
-// TX aggregation session. `iwl_mvm_set_fw_qos_params` (mvm/mac-ctxt.c:475).
+// Leaving these at zero tells the firmware there is no EDCA configuration and
+// this is not an 802.11n BSS — and a firmware that does not know it is in an
+// HT/QoS BSS has no reason to open a TX aggregation session.
+// `iwl_mvm_set_fw_qos_params` (mvm/mac-ctxt.c:475).
 pub const MC_OFF_QOS_FLAGS: usize = 56;  // __le32
 pub const MC_OFF_AC: usize = 60;         // struct iwl_ac_qos ac[AC_NUM + 1]
 pub const AC_QOS_LEN: usize = 8;
@@ -410,23 +406,21 @@ pub const MAC_QOS_FLG_TGN: u32 = 1 << 1;
 // `mac80211_ac_to_ucode_ac` (mvm/utils.c:175) and `iwl_mvm_ac_to_tx_fifo`
 // (mvm/mac-ctxt.c:17) are.
 pub const AC_TO_UCODE_AC: [usize; 4] = [3, 2, 1, 0]; // AC_VO, AC_VI, AC_BE, AC_BK
-// `iwl_mvm_mac_ac_to_tx_fifo` (mvm/mvm.h) picks between THREE tables, and the
-// one printed at mac-ctxt.c:17 is the LEGACY one:
+// `iwl_mvm_mac_ac_to_tx_fifo` (mvm/mvm.h) picks between three tables, and the
+// one printed at mac-ctxt.c:17 is the legacy one:
 //
 //     if (device_family >= IWL_DEVICE_FAMILY_BZ) return iwl_mvm_ac_to_bz_tx_fifo[ac];
 //     if (iwl_mvm_has_new_tx_api(mvm))           return iwl_mvm_ac_to_gen2_tx_fifo[ac];
 //     return iwl_mvm_ac_to_tx_fifo[ac];
 //
-// We are 22000 with the new TX API, so it is the GEN2 table — and gen2
+// We are 22000 with the new TX API, so it is the gen2 table — and gen2
 // numbers the FIFOs differently (`enum iwl_gen2_tx_fifo`, fw/api/txq.h:57):
-// CMD = 0, EDCA_BK = 1, EDCA_BE = 2, EDCA_VI = 3, EDCA_VO = 4.
-// 0.95.0 shipped the legacy [3,2,1,0]: BE landed in BK's FIFO and BK in the
-// COMMAND FIFO. Measured: `blocked` 45 -> 21570, `tx drops full` 0 -> 7569.
+// CMD = 0, EDCA_BK = 1, EDCA_BE = 2, EDCA_VI = 3, EDCA_VO = 4. The legacy
+// [3,2,1,0] would put BE in BK's FIFO and BK in the command FIFO.
 pub const AC_TO_TX_FIFO: [u8; 4] = [4, 3, 2, 1];     // VO, VI, BE, BK (gen2)
-// Aggregation-manager experiment. Linux keeps tid_disable_tx at 0xffff on
-// TLC-offload firmware (mac80211 never opens a TX BA session, so nothing ever
-// clears it). Three attempts have not produced a single aggregate, so this is
-// the switch that tests the field itself instead of arguing about it.
+// Linux keeps tid_disable_tx at 0xffff on TLC-offload firmware (mac80211 never
+// opens a TX BA session, so nothing ever clears it). This modify bit lets the
+// driver set the field explicitly.
 pub const STA_MODIFY_TID_DISABLE_TX: u8 = 1 << 1;
 pub const TID_DISABLE_AGG_NONE: u16 = 0x0000;
 
@@ -587,9 +581,9 @@ pub const IWL_RX_REORDER_DATA_INVALID_BAID: u8 = 0x7f;
 
 // ── RX block-ack allocation — RX_BAID_ALLOCATION_CONFIG_CMD (DATA_PATH/0x16) ──
 //
-// iwl_mvm_fw_baid_op (mvm/sta.c) picks between TWO ways to open an RX
-// aggregation session, and we had ported only one of them. Firmware that
-// advertises IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT wants THIS command; the
+// iwl_mvm_fw_baid_op (mvm/sta.c) picks between two ways to open an RX
+// aggregation session. Firmware that advertises
+// IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT wants this command; the
 // ADD_STA route with STA_MODIFY_ADD_BA_TID is the fallback for older
 // firmware. Sending the fallback to a card that wants this one is not merely
 // ignored — the firmware answers nothing and stops completing transmissions,
@@ -626,18 +620,18 @@ pub const IWL_RX_MPDU_STATUS_DUPLICATE: u32 = 1 << 22;
 pub const IWL_RX_MPDU_MFLG2_AMSDU: u8 = 0x40;
 pub const IWL_RX_MPDU_AMSDU_LAST_SUBFRAME: u8 = 0x80;
 // ── Missed beacons (fw/api/mac.h, mvm/mac-ctxt.c) ─────────────────────────
-// Once associated the firmware STOPS passing beacons to the host — Linux sets
+// Once associated the firmware stops passing beacons to the host — Linux sets
 // MAC_FILTER_IN_BEACON only while unassociated (mac-ctxt.c:704-711). Noticing
-// that the AP is gone is therefore not our job but the firmware's, and this
-// notification is how it tells us. Ignoring it means sitting on a dead link:
-// exactly what an AP does when it steers a client to the other mesh node.
+// that the AP is gone is therefore the firmware's job, and this notification
+// is how it tells us. Ignoring it means sitting on a dead link, e.g. when an AP
+// steers a client to another mesh node.
 pub const MISSED_BEACONS_NOTIFICATION: u8 = 0xa2;
 pub const MB_OFF_SINCE_LAST_RX: usize = 4;  // __le32 consec_missed_beacons_since_last_rx
 pub const MB_OFF_CONSEC: usize = 8;         // __le32 consec_missed_beacons
 pub const MB_OFF_EXPECTED: usize = 12;      // __le32 num_expected_beacons
 pub const MB_OFF_RECEIVED: usize = 16;      // __le32 num_recvd_beacons
 // iwl-modparams.h. Long threshold + "nothing received since" = the link is gone;
-// many missed beacons WHILE data still flows is not, and Linux says so out loud.
+// many missed beacons while data still flows is not, and Linux logs that case.
 pub const IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD: u32 = 4;
 pub const IWL_MVM_MISSED_BEACONS_THRESHOLD: u32 = 8;
 pub const IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG: u32 = 19;
@@ -650,7 +644,7 @@ pub const FR_OFF_NSSN: usize = 2;
 // mac_flags1: bits 7:4 = (MIC+CRC length / 2) the RADA may not have stripped.
 // iwl_mvm_create_skb: mic_crc_len = u8_get_bits(mac_flags1, 0xf0) << 1.
 pub const MFLG1_MIC_CRC_LEN_MASK: u8 = 0xf0;
-// mac_flags2: the firmware DWORD-aligns the payload by inserting 2 bytes AFTER
+// mac_flags2: the firmware DWORD-aligns the payload by inserting 2 bytes after
 // the IV when (802.11 header + IV) is not a multiple of 4 — which is exactly the
 // QoS-header + CCMP case (26 + 8 = 34). Missing this shifts every payload by 2.
 pub const MFLG2_PAD: u8 = 0x20;
@@ -659,8 +653,8 @@ pub const RX_STATUS_SEC_MASK: u32 = 0x7 << 8;
 pub const RX_STATUS_SEC_CCM: u32 = 0x2 << 8;
 pub const RX_STATUS_SEC_NONE: u32 = 0x0 << 8;
 // …and whether it worked. For CCM/GCM iwl_mvm_rx_crypto checks exactly one bit
-// and drops the frame when it is clear (rxmq.c:452). We only count — a
-// diagnostic that changes the data path cannot measure the data path.
+// and drops the frame when it is clear (rxmq.c:452). We only count, so the
+// diagnostic does not change the data path it measures.
 pub const RX_STATUS_MIC_OK: u32 = 1 << 6;
 pub const RX_STATUS_DECRYPTED: u32 = 1 << 11;
 pub const IEEE80211_CCMP_HDR_LEN: usize = 8;
@@ -684,15 +678,14 @@ pub const SSID_MAX: usize = 32;
 // BINDING v2 (BINDING_CDB_SUPPORT=yes → full struct), CDB_SUPPORT=no → lmac_id 0.
 pub const PHY_BAND_5_U8: u8 = 0; // PHY_BAND_5
 pub const IWL_PHY_CHANNEL_MODE20: u8 = 0;
-/// fw/api/phy-ctxt.h:17. MODE80 = 0x2 and MODE160 = 0x3 exist too — the next
-/// rung, once VHT is negotiated.
+/// fw/api/phy-ctxt.h:17. MODE80 = 0x2 and MODE160 = 0x3 exist too.
 pub const IWL_PHY_CHANNEL_MODE40: u8 = 1;
 pub const IWL_PHY_CHANNEL_MODE80: u8 = 2;
 /// phy-ctxt.h:37 — for VHT, bits 1:0 are the control channel's distance from
 /// the centre in 20 MHz steps; bit 2 says it sits above.
 pub const IWL_PHY_CTRL_POS_OFFS_MSK: u8 = 0x3;
 /// Control-channel position (phy-ctxt.h:35). For HT the bit simply means "the
-/// control channel is the UPPER of the two", i.e. the secondary sits below.
+/// control channel is the upper of the two", i.e. the secondary sits below.
 pub const IWL_PHY_CTRL_POS_ABOVE: u8 = 0x4;
 pub const IWL_LMAC_24G_INDEX: u32 = 0; // no CDB → lmac_id always 0
 pub const FW_CTXT_INVALID: u32 = 0xffff_ffff;
@@ -708,7 +701,7 @@ pub const PC_OFF_CI_WIDTH: usize = 13;    // ci.width u8 (MODE20)
 pub const PC_OFF_CI_CTRL_POS: usize = 14; // ci.ctrl_pos u8 (0 for 20 MHz)
 pub const PC_OFF_LMAC_ID: usize = 16;     // __le32 (ci.reserved @15)
 // struct iwl_phy_context_cmd continues: rxchain_info @20, dsp_cfg_flags @24,
-// secondary_ctrl_chnl_loc @28. rxchain_info is the SAME encoding the RLC
+// secondary_ctrl_chnl_loc @28. rxchain_info is the same encoding the RLC
 // command uses (iwl_mvm_phy_ctxt_set_rxchain fills both from one helper), and
 // leaving it zero means PHY_RX_CHAIN_VALID = 0 — no receive antennas declared
 // for this PHY context at all.
@@ -776,9 +769,9 @@ pub const STA_FLAGS_MSK_ADD: u32 = (3 << 26) | (3 << 28) | (1 << 17); // 0x3C020
 // A-MPDU limits the AP advertised. Without them the firmware keeps the station
 // at its "just added" defaults and TLC has nothing to scale into.
 pub const STA_FLG_FAT_EN_20MHZ: u32 = 0 << 26;
-/// fw/api/sta.h:87 — the station's TX channel width. A two-bit FIELD, so the
+/// fw/api/sta.h:87 — the station's TX channel width. A two-bit field, so the
 /// value replaces rather than ORs; 20 MHz being 0 is why leaving it unset
-/// silently pins transmission to 20 MHz however wide the PHY is configured.
+/// pins transmission to 20 MHz however wide the PHY is configured.
 pub const STA_FLG_FAT_EN_40MHZ: u32 = 1 << 26;
 pub const STA_FLG_FAT_EN_80MHZ: u32 = 2 << 26;
 pub const STA_FLG_FAT_EN_MSK: u32 = 3 << 26;
@@ -846,7 +839,7 @@ pub const TLC_OFF_HT_RATES_NSS2: usize = TLC_OFF_HT_RATES + 6; // [1][0]
 pub const TLC_FLAGS_STBC: u16 = 1 << 0;
 pub const TLC_FLAGS_LDPC: u16 = 1 << 1;
 // TLC_MNG_UPDATE_NOTIF (DATA_PATH_GROUP/0xF7, notif_ver 3): the firmware reports
-// the rate it settled on. This is the ONLY way to see the negotiated air rate
+// the rate it settled on. This is the only way to see the negotiated air rate
 // from the host — without it we cannot tell 1 Mbit CCK from MCS 15.
 // struct iwl_tlc_update_notif: sta_id u8, reserved[3], flags __le32, rate __le32.
 pub const TLC_MNG_UPDATE_NOTIF: u8 = 0xF7;
@@ -862,10 +855,10 @@ pub const RATE_MCS_MOD_TYPE_HE: u32 = 4 << 8;
 pub const RATE_MCS_CODE_MSK: u32 = 0x1f;   // MCS index / legacy rate index
 pub const RATE_MCS_NSS_MSK: u32 = 0x20;    // 0 = 1 stream, 1 = 2 streams
 // …but only in the v3 format. This firmware reports v2 (TX_CMD cmd_ver 9 < 11),
-// where the SAME field sits one bit lower. Everything else is identical —
+// where the same field sits one bit lower. Everything else is identical —
 // iwl_v3_rate_from_v2_v3 does nothing but move this one bit. Read with the v3
-// mask, a v2 word turns "MCS 7, 2 streams" into "MCS 23, 1 stream": a rate that
-// does not exist, and no Mbit figure at all.
+// mask, a v2 word turns "MCS 7, 2 streams" into "MCS 23, 1 stream", a rate that
+// does not exist.
 pub const RATE_MCS_NSS_MSK_V2: u32 = 0x10;
 // fw_rates_ver: TX_CMD cmd_ver >= 11 means the firmware talks v3 (iwl_mvm_has_rate_v3).
 pub const TX_CMD_VER_RATE_V3: u8 = 11;
@@ -878,7 +871,7 @@ pub const TLC_NON_HT_RATES_24: u16 = 0x0FFF;
 pub const TLC_NON_HT_RATES_5: u16 = 0x0FF0;
 
 // ── Stage 5c: gen2 TX data path (send an 802.11 frame) ───────────
-// TX_CMD = 0x1c. The device TX command is a SHORT 4-byte iwl_cmd_header
+// TX_CMD = 0x1c. The device TX command is a short 4-byte iwl_cmd_header
 // (cmd, group_id=0, sequence) followed by iwl_tx_cmd_v9 (TX_CMD cmd_ver=9) and
 // the 802.11 frame. Unlike host commands, TX uses the short header (group 0).
 pub const TX_CMD: u8 = 0x1c;
@@ -892,11 +885,11 @@ pub const TXC_OFF_FLAGS: usize = 8;     // tx_cmd_v9.flags __le32
 pub const TXC_OFF_DRAM: usize = 12;     // tx_cmd_v9.dram_info (8 B, 0 = no key)
 pub const TXC_OFF_RATE: usize = 20;     // tx_cmd_v9.rate_n_flags __le32
 pub const TXC_OFF_FRAME: usize = 24;    // 802.11 frame (hdr[]) starts here
-// iwl_tx_flags (NEW gen2 set — NOT the gen1 TX_CMD_FLG_*).
+// iwl_tx_flags (the gen2 set, not the gen1 TX_CMD_FLG_*).
 pub const IWL_TX_FLAGS_CMD_RATE: u32 = 1 << 0; // use rate_n_flags from the cmd
 pub const IWL_TX_FLAGS_ENCRYPT_DIS: u32 = 1 << 1; // unencrypted
 // offload_assist (enum iwl_tx_offload_assist_flags_pos). iwl_mvm_tx_csum fills
-// MH_SIZE for EVERY frame — the 802.11 header length in 2-byte words — and sets
+// MH_SIZE for every frame — the 802.11 header length in 2-byte words — and sets
 // PAD when that length is not a multiple of 4, in which case the transport
 // inserts 2 bytes between header and payload to DWORD-align the payload. That
 // is exactly the QoS case (26 bytes); getting it wrong misplaces the CCMP IV.
@@ -961,7 +954,7 @@ pub const IEEE80211_HT_CAP_SGI_40: u16 = 0x0040;
 
 // ── VHT (802.11ac) ────────────────────────────────────────────────────
 // ── HE (802.11ax) — carried inside the extension element (255) ──
-// An AX200 talking to a Wi-Fi 6 AP gets its operating width from HERE, not
+// An AX200 talking to a Wi-Fi 6 AP gets its operating width from here, not
 // from the standalone VHT Operation element: `ieee80211_determine_ap_chan`
 // (mac80211/mlme.c) takes the 3-byte VHT Operation Information out of the HE
 // Operation element whenever the AP carries HE Capability and sets the
@@ -972,7 +965,7 @@ pub const WLAN_EID_EXT_HE_OPERATION: u8 = 36;
 // struct ieee80211_he_operation: __le32 he_oper_params, __le16 he_mcs_nss_set,
 // u8 optional[]. Offsets are from the element body, i.e. including the leading
 // extension-ID byte. ieee80211_he_oper_size: the VHT Operation Information is
-// the FIRST optional field, so it starts right after he_mcs_nss_set.
+// the first optional field, so it starts right after he_mcs_nss_set.
 pub const HE_OP_OFF_PARAMS: usize = 1;        // __le32
 pub const HE_OP_OFF_VHT_OPER_INFO: usize = 7; // 1 + 4 + 2
 pub const HE_OP_MIN_LEN: usize = 7;
@@ -1047,7 +1040,7 @@ pub const WLAN_ACTION_ADDBA_REQ: u8 = 0;
 pub const WLAN_ACTION_ADDBA_RESP: u8 = 1;
 pub const WLAN_ACTION_DELBA: u8 = 2;
 pub const WLAN_STATUS_SUCCESS: u16 = 0;
-// include/linux/ieee80211.h — verified against 6.18.26, not remembered.
+// include/linux/ieee80211.h (6.18.26).
 pub const WLAN_STATUS_UNSPECIFIED_QOS: u16 = 32;
 pub const WLAN_STATUS_INVALID_QOS_PARAM: u16 = 38;
 pub const WLAN_REASON_UNSPECIFIED: u16 = 1;
@@ -1121,7 +1114,7 @@ pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08; // fc byte0 & 0x0c == data
 pub const DOT11_FC_PROTECTED: u8 = 0x40;  // fc byte1 — payload is encrypted
 pub const DOT11_STYPE_QOS: u8 = 0x08;    // subtype bit → +2-byte QoS control
-/// Data subtypes with this bit carry NO BODY — Null (4) and QoS Null (12).
+/// Data subtypes with this bit carry no body — Null (4) and QoS Null (12).
 /// `ieee80211_is_nullfunc` / `ieee80211_is_qos_nullfunc` in Linux.
 pub const DOT11_STYPE_NODATA: u8 = 0x04;
 // Control-channel wire ops (docs/spec/WIFI_CLASS_ABI.md). downlink = manager→driver.
@@ -1139,8 +1132,8 @@ pub const EV_READY: u8 = 0x83;
 pub const IWL_DATA_TID: u8 = 0;
 // Data TX queue depth. 256 is what Linux gives this hardware, and the number is
 // derived, not chosen. `iwl_mvm_get_queue_size` (mvm/sta.c:812) asks for 1024 on
-// an HE peer — ours is one — but the transport clamps it twice in
-// `iwl_txq_dyn_alloc` (pcie/gen1_2/tx-gen2.c:1033):
+// an HE peer, but the transport clamps it twice in `iwl_txq_dyn_alloc`
+// (pcie/gen1_2/tx-gen2.c:1033):
 //
 //     size = min(size, bc_tbl_size / sizeof(u16));   // 320 on this family
 //     size = rounddown_pow_of_two(size);             // -> 256
@@ -1151,27 +1144,17 @@ pub const IWL_DATA_TID: u8 = 0;
 // pointer in 8 bits of the header sequence (`SEQ_TO_INDEX`), so a deeper queue
 // would alias. Three independent limits, all at 256.
 //
-// 64 was our own number. Measured at 74 Mbit with the byte cap in place
-// (0.98.0): the byte cap never fired once, the RING guard fired 4565 times and
-// sat at peak 62/62, and fq_codel dropped 2292 of 21487 ACKs the driver could
-// not take. The queue depth WAS the throughput limit, and it said so itself.
-//
 // The TFD slot index = write_ptr & (size-1); cb_size = ilog2(size)-3 (must
-// match the size). Costs 592 KB of DMA against 148 KB at 64 slots.
+// match the size).
 pub const IWL_DATA_QUEUE_SIZE: usize = 256;
 
 // ── AQL — Airtime Queue Limits (net/mac80211) ────────────────────────────
 //
-// The anti-bufferbloat cap on the data queue, and it counts MICROSECONDS OF
-// AIRTIME, not bytes and not frames.
-//
-// It was a frame count until 0.98.0 and a byte count until 0.104.0. Both were
-// our own numbers, and both were wrong for the same reason: what a queued
-// frame costs the medium is a TIME, and that time depends on the rate the
-// firmware happens to be using. 43 full-size frames are 52 us each at
-// 240 Mbit and 2069 us each at 6 Mbit — the same byte cap is a reasonable
-// queue in one case and two and a half seconds of bufferbloat in the other.
-// Linux solved this in 2019 and the mechanism has a name.
+// The anti-bufferbloat cap on the data queue. It counts microseconds of
+// airtime, not bytes and not frames: what a queued frame costs the medium
+// depends on the rate the firmware happens to be using, so a fixed byte or
+// frame cap is a reasonable queue at a high rate and seconds of bufferbloat at
+// a low one.
 //
 // `ieee80211_txq_airtime_check` (mac80211/tx.c:4164) admits a frame when
 //
@@ -1179,11 +1162,10 @@ pub const IWL_DATA_QUEUE_SIZE: usize = 256;
 //     total_pending < aql_threshold && pending < aql_limit_high     -> yes
 //     otherwise                                                     -> no
 //
-// with the defaults from include/net/cfg80211.h:3602. We have ONE station and
-// in practice one AC, so `total_pending` and this station's `pending` are the
-// same counter and the 24000 ceiling can never bind before the 12000 one —
-// the branch is kept anyway, so the day a second station exists it is already
-// right.
+// with the defaults from include/net/cfg80211.h:3602. With one station and
+// one AC, `total_pending` and this station's `pending` are the same counter
+// and the 24000 ceiling cannot bind before the 12000 one; the branch is kept
+// so that a second station is already handled correctly.
 pub const AQL_LIMIT_LOW_US: u32 = 5_000;    // IEEE80211_DEFAULT_AQL_TXQ_LIMIT_L
 pub const AQL_LIMIT_HIGH_US: u32 = 12_000;  // IEEE80211_DEFAULT_AQL_TXQ_LIMIT_H
 pub const AQL_THRESHOLD_US: u32 = 24_000;   // IEEE80211_AQL_THRESHOLD
@@ -1203,46 +1185,19 @@ pub const AQL_MIN_US: u32 = 4;
 /// read pointer. AQL is what limits us in practice; this is the wall behind it,
 /// and it binds only when the airtime estimate is so small that thousands of
 /// frames would fit in 12 ms. Must stay < QUEUE_SIZE-1.
-///
-/// History of the frame cap this replaced, kept because the numbers were
-/// measured on the device and the next size change has to beat them:
-///
-///     Deckel 16:  blocked 4100, fq_codel verwarf 3267 ("driver too slow")
-///     Deckel 32:  46 Mbit (Server 53)  retrans 101
-///     Deckel 48:  57 Mbit (Server 69)  retrans 5  ssthresh 364  rtt 65 ms
-///
-/// Schon damals notiert: "fq_codels Plaetze laufen ueber, waehrend der Treiber
-/// am Deckel steht. Der naechste Hebel liegt dort, nicht bei dieser Zahl."
 pub const TX_INFLIGHT_MAX: u32 = IWL_DATA_QUEUE_SIZE as u32 - 2;
-/// TX queue watchdog. Linux arms it whenever the queue is NOT EMPTY and pushes
+/// TX queue watchdog. Linux arms it whenever the queue is not empty and pushes
 /// it forward on every completion; it does not care how full the queue is.
-///
-/// The INTERVAL is deliberately not Linux's: `IWL_LONG_WD_TIMEOUT` is 10 s
-/// (`cfg/22000.c:32`) because Linux's reaction is to force an NMI and restart
-/// the firmware — a sledgehammer you want to be very sure about. Ours only
-/// hands leaked slots back, and it cannot lap the firmware: the ring holds 256
-/// TFDs while `TX_INFLIGHT_MAX` caps us at 16, so even an early reclaim leaves
-/// ~32 of 256 outstanding at worst.
-///
-/// Measured on the device at 10 s: four leaked slots cost a 100 MB transfer
-/// 26 s for what the server sent in 9.2 s, with the server reporting a 333 ms
-/// RTT — a third of a second of ACKs we could not send. A frame that has not
-/// been acknowledged after a second is lost; the firmware's own retry sequence
-/// is over long before that.
 /// Linux: `cfg/22000.c` sets `.wd_timeout = IWL_LONG_WD_TIMEOUT` = 10000 for
-/// this family (iwl-config.h:87). Ours was 1000 — our own number, from the
-/// commit that "lowered it from 10 s to 1 s". On a saturated channel a frame
-/// legitimately takes more than a second to get out, so the watchdog declared
-/// a healthy queue stuck and set `data_in_flight = 0` — which is not true, the
-/// slots are not free — and then we oversubscribed the queue on top of an
-/// already busy link. Measured during an OTA over WiFi: it fired again and
-/// again while the update crawled. Back to the value Linux uses.
+/// this family (iwl-config.h:87). A shorter timeout misfires on a saturated
+/// channel, where a frame legitimately takes more than a second to get out: it
+/// would declare a healthy queue stuck and free slots the firmware still owns.
 pub const TX_WD_TIMEOUT_MS: u64 = 10_000;
 pub const DATA_QUEUE_CB_SIZE: u32 = 5; // TFD_QUEUE_CB_SIZE(256) = ilog2(256)-3
-// Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its OWN
+// Per-slot TX staging stride. Each in-flight TFD's TB1 must point at its own
 // payload region, or back-to-back frames clobber each other's data before the
-// firmware DMAs it (the bug behind "dies under load once the rate went up").
-// One full dev-cmd + 802.11 data frame (24 + ~1532) fits in 2 KiB.
+// firmware DMAs it. One full dev-cmd + 802.11 data frame (24 + ~1532) fits in
+// 2 KiB.
 pub const TX_PAYLOAD_STRIDE: usize = 2048;
 // ADD_STA_KEY (0x17 LEGACY → LONG_GROUP, cmd_ver 3). struct iwl_mvm_add_sta_key_cmd
 // = common(52) + rx_mic(8) + tx_mic(8) + tx_seq(8) = 76 B. CCMP: mic/seq all 0.
@@ -1256,8 +1211,8 @@ pub const KEY_OFF_RX_SEQ: usize = 36;      // u8[16] (rx_secur_seq_cnt / RSC)
 // iwl_sta_key_flag: CCMP encryption + key id + group/MFP.
 pub const STA_KEY_FLG_CCM: u16 = 2 << 0;
 pub const STA_KEY_FLG_KEYID_POS: u16 = 8;
-/// Firmware key-table size, `fw/api/sta.h:190`. We used exactly two of the
-/// sixteen — slot 0 for the pairwise key, slot 1 for EVERY group key.
+/// Firmware key-table size, `fw/api/sta.h:190`. Slot 0 holds the pairwise key,
+/// slot 1 every group key.
 pub const STA_KEY_MAX_NUM: u8 = 16;
 pub const STA_KEY_IDX_INVALID: u8 = 0xff;
 pub const STA_KEY_MULTICAST: u16 = 1 << 14;
@@ -1272,11 +1227,11 @@ pub const DOT11_FC1_TODS: u8 = 0x01;
 // host learns what an on-air transmission actually cost: how many times it was
 // retried, and how many microseconds of airtime it burned.
 // ── BA_NOTIF (0xc5, group 0) — struct iwl_compressed_ba_notif ──────
-// With TLC offload the FIRMWARE runs the TX aggregation manager: mac80211 sets
+// With TLC offload the firmware runs the TX aggregation manager: mac80211 sets
 // IEEE80211_HW_TX_AMPDU_SETUP_IN_HW and ieee80211_start_tx_ba_session refuses
 // to do it in software (agg-tx.c:628). The host never sends an ADDBA request
 // and never clears tid_disable_tx — Linux keeps 0xffff on this firmware too.
-// What the host DOES get is this notification per aggregate, and it is the
+// What the host does get is this notification per aggregate, and it is the
 // only place we can see whether our transmissions are being aggregated at all.
 pub const BA_NOTIF: u8 = 0xc5;
 pub const CBA_OFF_STA_ID: usize = 4;      // u8
@@ -1322,15 +1277,14 @@ pub const BAND_PREF_AUTO: u8 = 0; // prefer 5 GHz when it is strong enough
 pub const BAND_PREF_5: u8 = 1;    // 5 GHz only (fall back if none)
 pub const BAND_PREF_24: u8 = 2;   // 2.4 GHz only (fall back if none)
 // Above this RSSI a 5 GHz AP is worth taking over a louder 2.4 GHz one: the
-// band is uncongested and, in a repeater mesh, usually the router itself rather
-// than a node whose backhaul halves the throughput. wpa_supplicant's band
+// band is less congested and, in a mesh, usually the router itself rather than
+// a node whose backhaul halves the throughput. wpa_supplicant's band
 // preference works the same way — a signal floor, not a pure RSSI contest.
 pub const BAND_PREF_5_MIN_RSSI: i8 = -60;
 // …and never more than this far below the best 2.4 GHz AP of the same network.
-// A floor alone is not enough: 5 GHz at -64 dBm clears any sane floor while a
-// 2.4 GHz radio of the same mesh sits at -46, and the wider band cannot make up
-// an 18 dB deficit. Measured case: at -64 not even a beacon of the chosen BSS
-// arrived, so the association completed and then nothing else ever did.
+// A floor alone is not enough: a 5 GHz AP far below a strong 2.4 GHz node of
+// the same mesh may associate and then lose every beacon, and the wider band
+// cannot make up a large signal deficit.
 pub const BAND_PREF_5_MAX_PENALTY_DB: i16 = 12;
 pub const PICK_STRONGEST: u8 = 0;
 pub const PICK_5G_PREFERRED: u8 = 1;
@@ -1338,10 +1292,9 @@ pub const PICK_BAND_FORCED: u8 = 2;
 pub const PICK_SSID_FILTERED: u8 = 3;
 
 // Status snapshot published via npk_driver_report. One screen of text.
-// The kernel accepts REPORT_MAX = 4096; staying well under it costs nothing and
-// the report has outgrown 1600 — at which point `s()` silently stopped writing
-// and the last lines (sync, scan) vanished without a trace. Truncation now says
-// so, because a report that quietly ends early is worse than no report.
+// The kernel accepts REPORT_MAX = 4096; staying well under it costs nothing.
+// Truncation is reported, because a report that quietly ends early is worse
+// than no report.
 pub const REPORT_CAP: usize = 3072;
 // How often the snapshot is refreshed. 1 s is short enough to show a speed test
 // live and long enough that formatting never lands in the hot path.
