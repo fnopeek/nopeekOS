@@ -1,47 +1,31 @@
-//! Geraete im eigenen Netz: angeheftetes Vertrauen statt „ignorieren".
+//! Devices on the local network: pinned trust instead of "ignore errors".
 //!
-//! # Das Problem, und warum es keins von uns ist
+//! A router at `https://192.168.178.1` cannot have a publicly trusted
+//! certificate: no CA issues one for a private address, and the name on its
+//! self-signed certificate is not the IP the user types. The result is
+//! always `hostname mismatch` + `untrusted root`, a gap in the Web PKI.
 //!
-//! Ein Router unter `https://192.168.178.1` KANN kein oeffentlich vertrautes
-//! Zertifikat haben. Keine CA stellt eines fuer eine private Adresse aus,
-//! und der Name, auf den das Geraet sein selbstsigniertes ausstellt, ist
-//! nicht die IP, die man tippt. Beides zusammen ergibt zwangslaeufig
-//! `hostname mismatch` + `untrusted root`. Das ist eine Luecke in der
-//! Web-PKI, kein Fehler in beak.
+//! Skipping verification for private addresses is not an option: the LAN is
+//! not a safe place, and a compromised device on it could impersonate the
+//! router and collect its password. Instead this is trust on first use,
+//! then pinned (the SSH model):
 //!
-//! # Warum nicht einfach ignorieren
+//! 1. The user names the address explicitly (`set net.lan_devices`); the
+//!    default is empty.
+//! 2. Only a literal private address counts, never a name. A name could
+//!    resolve elsewhere next time; an address in the URL cannot change.
+//! 3. On first connect the leaf certificate's fingerprint is recorded. From
+//!    then on it must be identical; a different one is a hard error even
+//!    for an allowed address.
 //!
-//! Weil das LAN kein sicherer Ort ist. Ein uebernommenes Geraet im selben
-//! Netz — eine Kamera, ein Drucker, irgendein Ding — koennte den Router
-//! dann unbemerkt spielen, und der Nutzer gibt dort sein Kennwort ein.
-//! „Bei privaten Adressen nicht pruefen" macht genau den Angriff moeglich,
-//! gegen den TLS da ist.
+//! The trade-off: the first connection is unauthenticated, everything after
+//! it is not. An attacker must already be in place at first contact.
 //!
-//! # Was statt dessen
+//! Only the two errors an honest device necessarily triggers are forgiven.
+//! Expired, unparsable or badly signed certificates stay fatal.
 //!
-//! **Vertrauen beim ersten Mal, danach angeheftet** — das Modell von SSH.
-//!
-//! 1. Der Nutzer nennt die Adresse ausdruecklich (`set net.lan_devices`).
-//!    Ohne diesen Schritt passiert nichts; die Vorgabe ist leer.
-//! 2. Nur eine LITERALE private Adresse zaehlt, nie ein Name. Ein Name
-//!    koennte beim zweiten Aufloesen woandershin zeigen; eine Adresse, die
-//!    im URL steht, kann sich nicht verwandeln.
-//! 3. Beim ersten Verbinden wird der Fingerabdruck des Blattzertifikats
-//!    gemerkt. Ab dann muss es DASSELBE sein — ein anderes ist ein harter
-//!    Fehler, auch wenn die Adresse freigegeben ist.
-//!
-//! Damit ist der Tausch benannt: **wir geben die Erstverbindung preis** (da
-//! wissen wir nicht, mit wem wir reden), **und behalten alles danach**. Ein
-//! Angreifer muss beim allerersten Kontakt schon dagestanden haben; wer
-//! sich spaeter dazwischenschiebt, faellt auf.
-//!
-//! Nachgelassen werden auch nur die zwei Fehler, die ein echtes Geraet
-//! zwangslaeufig ausloest. Abgelaufen, kaputt geparst, falsch signiert —
-//! alles das bleibt toedlich.
-//!
-//! **Sitzungsgebunden.** Die Anheftung steht im RAM und ist nach einem
-//! Neustart weg, genau wie der Keksbehaelter. Vertrauen auf Platte ist eine
-//! eigene Entscheidung mit einer eigenen Diskussion.
+//! Pins live in RAM and are lost on reboot. Persisting trust to disk is a
+//! separate decision.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -49,19 +33,17 @@ use spin::Mutex;
 
 use super::certstore::CertError;
 
-/// Was gemerkt wurde: Adresse -> Fingerabdruck des Blattzertifikats.
+/// What was recorded: address -> fingerprint of the leaf certificate.
 static PINS: Mutex<Vec<(String, [u8; 32])>> = Mutex::new(Vec::new());
 
-/// Ist `host` eine literale private Adresse, die der Nutzer freigegeben hat?
+/// Is `host` a literal private address that the user has allowed?
 ///
-/// Zwei Bedingungen, beide noetig: die Adresse steht in `net.lan_devices`,
-/// UND sie ist wirklich privat. Die zweite ist nicht Zierrat — sonst
-/// koennte ein Tippfehler in der Konfiguration eine oeffentliche Adresse
-/// freigeben, und der Nutzer saehe es nie.
+/// Both conditions are required: the address is listed in
+/// `net.lan_devices`, and it really is private. The second check keeps a
+/// typo in the configuration from silently allowing a public address.
 fn is_allowed_device(host: &str) -> bool {
     let bare = host.split(':').next().unwrap_or(host);
-    // NUR literale Adressen. Ein Name kaeme hier nie an derselben Stelle
-    // heraus wie beim naechsten Aufloesen.
+    // Literal addresses only: a name may resolve differently next time.
     let Some(ip) = crate::intent::parse_ip_pub(bare) else { return false };
     if crate::intent::reach::classify_ip(ip) == crate::intent::reach::Reach::Public {
         return false;
@@ -70,20 +52,20 @@ fn is_allowed_device(host: &str) -> bool {
     list.split(',').map(str::trim).any(|e| !e.is_empty() && e == bare)
 }
 
-/// Darf dieser Fehler fuer dieses Geraet nachgelassen werden?
+/// May this error be forgiven for an allowed device?
 ///
-/// Nur die zwei, die ein selbstsigniertes Geraetezertifikat zwangslaeufig
-/// ausloest. Alles andere heisst: mit diesem Zertifikat stimmt etwas, das
-/// auch ein ehrliches Geraet nicht hat.
+/// Only the two a self-signed device certificate necessarily triggers.
+/// Anything else means something is wrong that an honest device would not
+/// show.
 fn is_forgivable(e: CertError) -> bool {
     matches!(e, CertError::HostnameMismatch | CertError::UntrustedRoot)
 }
 
-/// Die zweite Chance. `Ok(())` heisst: durchlassen.
+/// The second chance. `Ok(())` means: let it through.
 ///
-/// Gerufen NUR, wenn `verify_chain` schon nein gesagt hat — diese Funktion
-/// kann nichts erlauben, was die richtige Pruefung erlaubt haette, und
-/// nichts verbieten, was sie schon verboten hat.
+/// Called only after `verify_chain` has rejected the chain, so this cannot
+/// allow anything the regular check would have allowed, nor forbid anything
+/// it already forbade.
 pub fn second_chance(host: &str, leaf_der: &[u8], why: CertError) -> Result<(), CertError> {
     if !is_forgivable(why) || !is_allowed_device(host) {
         return Err(why);
@@ -96,8 +78,8 @@ pub fn second_chance(host: &str, leaf_der: &[u8], why: CertError) -> Result<(), 
         if *known == fp {
             return Ok(());
         }
-        // **Das ist der Fall, fuer den es die Anheftung gibt.** Die Adresse
-        // ist freigegeben, aber jemand anders antwortet. Nicht durchlassen.
+        // The case pinning exists for: the address is allowed, but someone
+        // else answers. Reject.
         crate::kprintln!(
             "[npk] LAN-ANHEFTUNG: {} zeigt ein ANDERES Zertifikat als beim ersten Mal.",
             bare);
@@ -107,8 +89,7 @@ pub fn second_chance(host: &str, leaf_der: &[u8], why: CertError) -> Result<(), 
         return Err(why);
     }
 
-    // Erstkontakt. Hier wird das Vertrauen geschenkt, und genau hier ist es
-    // ungedeckt — also sagt der Lauf es, statt es zu verschweigen.
+    // First contact. Trust is granted here without backing, so log it.
     crate::kprintln!("[npk] LAN-Geraet {} beim ERSTEN Mal angenommen ({:?}).", bare, why);
     crate::kprintln!("[npk]   Fingerabdruck {:02x}{:02x}{:02x}{:02x}… ab jetzt angeheftet.",
         fp[0], fp[1], fp[2], fp[3]);
@@ -120,8 +101,8 @@ pub fn second_chance(host: &str, leaf_der: &[u8], why: CertError) -> Result<(), 
 mod tests {
     use super::*;
 
-    /// Nur die zwei Fehler, die ein ehrliches Geraet ausloest. Alles andere
-    /// bleibt toedlich — auch mit freigegebener Adresse.
+    /// Only the two errors an honest device triggers are forgivable; all
+    /// others stay fatal, even for an allowed address.
     #[test]
     fn only_the_two_unavoidable_errors_are_forgivable() {
         assert!(is_forgivable(CertError::HostnameMismatch));

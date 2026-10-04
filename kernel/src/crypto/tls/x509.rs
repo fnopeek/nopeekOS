@@ -353,7 +353,7 @@ fn parse_key_usage(value: &[u8]) -> Option<u16> {
     let mut bits: u16 = 0;
     for (byte_idx, &b) in bs.value[1..].iter().enumerate().take(2) {
         for bit in 0..8 {
-            // Skip the unused trailing bits in the LAST byte.
+            // Skip the unused trailing bits in the last byte.
             if byte_idx == bs.value.len() - 2
                 && bit >= 8u32.saturating_sub(unused_bits) as usize {
                 break;

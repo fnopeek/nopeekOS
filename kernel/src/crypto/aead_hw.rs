@@ -1,11 +1,8 @@
 //! AES-256-GCM, hand-glued from `aes` (AES-NI multi-block CTR) +
-//! `ghash` (PCLMULQDQ single-block, replaced in v0.88.1 with a 4-way
-//! aggregated implementation).
+//! `ghash` (PCLMULQDQ).
 //!
-//! Step 1 (v0.88.0): same backends as `aes-gcm 0.10` but with our own
-//! AEAD glue. Goal: bit-for-bit identical output to `Aes256Gcm`. This
-//! validates the framework without performance risk; once roundtrips
-//! pass we can swap in custom GHASH for the actual win.
+//! Same backends as `aes-gcm 0.10` but with our own AEAD glue; output is
+//! bit-for-bit identical to `Aes256Gcm`.
 //!
 //! Layout follows NIST SP 800-38D:
 //!   1. Hash subkey  H = AES_K(0^128)

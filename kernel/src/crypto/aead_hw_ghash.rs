@@ -1,7 +1,7 @@
 //! 4-way aggregated GHASH using PCLMULQDQ — drop-in for `ghash::GHash`.
 //!
-//! `ghash 0.5` is built on `polyval 0.6.2` with single-block multiply +
-//! reduction per block (~12-15 cycles/block latency-bound on N100).
+//! `ghash 0.5` is built on `polyval` with single-block multiply +
+//! reduction per block, which is latency-bound.
 //! Aggregating 4 blocks lets us share the reduction step:
 //!
 //!   batch X[0..4] :=
@@ -11,21 +11,19 @@
 //!         ⊕  X[3]   × H¹
 //!     (one final reduction over the 256-bit accumulator)
 //!
-//! 4 multiplications + 1 reduction vs 4 × (multiply + reduction). Saves
-//! ~3 reductions per 4 blocks → ~1.5–2× GHASH throughput.
+//! 4 multiplications + 1 reduction vs 4 × (multiply + reduction), saving
+//! ~3 reductions per 4 blocks.
 //!
-//! Wire format compatible with `ghash::GHash` — validated against it
-//! per-build via the `disk` bytes-match check. If a byte ever
-//! differs, treat as Corrupt and bail.
+//! Must be wire-compatible with `ghash::GHash`; any differing byte is a
+//! bug.
 //!
 //! GHASH polynomial: x¹²⁸ + x⁷ + x² + x + 1.
 //! Bytes are read big-endian (most-significant power first), so we
 //! byte-reverse via `pshufb` at the I/O boundary — exactly what Linux
 //! `arch/x86/crypto/ghash-clmulni-intel_asm.S` does.
 
-// Skeleton for a 4-way aggregated GHASH path. Not wired into the AEAD
-// hot path: per-block bytes-match against the `ghash` crate failed in
-// v0.88.4, deferred for its own session. Kept as starting point.
+// Not wired into the AEAD hot path: its output does not yet match the
+// `ghash` crate byte for byte. Kept as a starting point.
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
 

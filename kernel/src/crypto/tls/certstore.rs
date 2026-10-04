@@ -16,13 +16,13 @@ use spin::Mutex;
 use super::x509::{self, X509Cert, KeyType, KU_DIGITAL_SIGNATURE, KU_KEY_CERT_SIGN};
 use super::sha256;
 
-/// ISRG Root X1 (Let's Encrypt) — covers ~60% of the web
+/// ISRG Root X1 (Let's Encrypt).
 const ISRG_ROOT_X1_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x1.der");
 
 /// DigiCert Global Root G2 — covers Anthropic, Cloudflare, etc.
 const DIGICERT_GLOBAL_G2_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g2.der");
 
-/// AAA Certificate Services (Comodo/Sectigo) — covers Cloudflare default certs
+/// AAA Certificate Services (Comodo/Sectigo) — Cloudflare's older default root.
 const AAA_CERT_SERVICES_DER: &[u8] = include_bytes!("../../../certs/aaa_certificate_services.der");
 
 /// Google Trust Services Root R1 — covers Google services
@@ -30,12 +30,8 @@ const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../../certs/gts_root_r1.der");
 
 /// USERTrust ECC Certification Authority — Sectigo's modern ECC root.
 /// Sectigo cross-signs newer roots (Public Server Authentication Root
-/// E46) under USERTrust ECC, so adding the cross-anchor here covers
-/// github.com + most Sectigo-issued ECDSA certs in 2025+.
-///
-/// **"Covers" only as far as the SERVER cooperates** — see the two Sectigo
-/// roots below. That sentence was written from the certificate's structure,
-/// and the structure is only half the question.
+/// E46) under USERTrust ECC, so this anchor covers servers that send the
+/// cross-signed path (see the Sectigo roots below for servers that do not).
 const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.der");
 
 /// USERTrust RSA Certification Authority — Sectigo's modern RSA root.
@@ -44,49 +40,37 @@ const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.de
 const USERTRUST_RSA_DER: &[u8] = include_bytes!("../../../certs/usertrust_rsa.der");
 
 /// Amazon Root CA 1 — anchors CloudFront, which fronts a large share of
-/// the web (doc.rust-lang.org among them). Its absence was measured, not
-/// guessed: those sites failed with `certificate: untrusted root CA`.
+/// the web.
 const AMAZON_ROOT_CA1_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca1.der");
 
 /// ISRG Root X2 — Let's Encrypt's ECDSA hierarchy, a separate anchor from
-/// X1. Servers that chain to X2 rather than offering an X1-anchored
-/// variant were unreachable with X1 alone.
+/// X1. Servers that chain only to X2 are unreachable with X1 alone.
 const ISRG_ROOT_X2_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x2.der");
 
-/// GTS Root R4 — Google Trust Services' ECDSA root, and the counterpart to
-/// R1 in exactly the way X2 is to X1: R1 anchors Google's RSA
-/// intermediates (WR1/WR2), R4 their ECDSA ones (WE1/WE2). Having only R1
-/// was not "most of Google", it was "none of the ECDSA half".
-///
-/// **Cloudflare's default certificates now come from GTS**, so this is not
-/// a Google-only anchor: measured over 38 real hosts, R4 is what
-/// `cdnjs.cloudflare.com`, `unpkg.com` and `cdn.fonts.net` chain to — two
-/// of the most-linked script CDNs on the web. arcade.ch stylesheet import
-/// died on exactly this: `TLS error: certificate: untrusted root CA`.
+/// GTS Root R4 — Google Trust Services' ECDSA root, the counterpart to R1:
+/// R1 anchors Google's RSA intermediates (WR1/WR2), R4 the ECDSA ones
+/// (WE1/WE2). Cloudflare's default certificates also chain here, so major
+/// script CDNs (cdnjs, unpkg) depend on it.
 const GTS_ROOT_R4_DER: &[u8] = include_bytes!("../../../certs/gts_root_r4.der");
 
-/// GlobalSign Root CA - R3 — anchors `crates.io` (GlobalSign Atlas) and
-/// orf.at. RSA 2048, and it EXPIRES 2029-03-18: the earliest expiry in this
-/// list by six years, so it is the first one to come back to.
+/// GlobalSign Root CA - R3 — anchors `crates.io` (GlobalSign Atlas).
+/// RSA 2048, expires 2029-03-18, the earliest expiry in this list.
 const GLOBALSIGN_ROOT_R3_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r3.der");
 
-/// SwissSign RSA TLS Root CA 2022 - 1 — the Swiss Post's anchor, and with
-/// it a good part of Swiss public-sector TLS. In the same measurement it
-/// was the only anchor no other host shared, which is precisely why it
-/// would never have been guessed.
+/// SwissSign RSA TLS Root CA 2022 - 1 — the Swiss Post's anchor, used by
+/// much of Swiss public-sector TLS.
 const SWISSSIGN_RSA_2022_DER: &[u8] = include_bytes!("../../../certs/swisssign_rsa_2022.der");
 
-/// DigiCert Global Root G3 — the ECDSA twin of G2, and the third time the
-/// same shape bit: akamai, blick.ch, credit-suisse.com, faz.net and
-/// DigiCert's own OCSP responder all chain here, none of them to G2.
+/// DigiCert Global Root G3 — the ECDSA twin of G2. Many DigiCert ECDSA
+/// chains (e.g. Akamai) end here, not at G2.
 const DIGICERT_GLOBAL_G3_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g3.der");
 
 /// GlobalSign Root R46 — GlobalSign's 2019 RSA root, a different anchor
-/// from the 2009 "Root CA - R3" above. bbc.co.uk, europa.eu, theguardian.com.
+/// from the 2009 "Root CA - R3" above.
 const GLOBALSIGN_ROOT_R46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r46.der");
 
-/// GlobalSign Root E46 — the ECDSA twin of R46. See the note on twins below:
-/// this one is INFERRED, not measured.
+/// GlobalSign Root E46 — the ECDSA twin of R46, included by the twin rule
+/// below rather than for a known host.
 const GLOBALSIGN_ROOT_E46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_e46.der");
 
 /// Starfield Root Certificate Authority - G2 — GoDaddy/Starfield, and with
@@ -94,68 +78,51 @@ const GLOBALSIGN_ROOT_E46_DER: &[u8] = include_bytes!("../../../certs/globalsign
 const STARFIELD_G2_DER: &[u8] = include_bytes!("../../../certs/starfield_g2.der");
 
 /// DigiCert TLS RSA4096 Root G5 — DigiCert's 2021 hierarchy, separate from
-/// the Global Root G2/G3 pair. raiffeisen.ch.
+/// the Global Root G2/G3 pair.
 const DIGICERT_TLS_RSA4096_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_rsa4096_g5.der");
 
-/// DigiCert TLS ECC P384 Root G5 — the ECDSA twin of RSA4096 G5. INFERRED.
+/// DigiCert TLS ECC P384 Root G5 — the ECDSA twin of RSA4096 G5 (twin rule).
 const DIGICERT_TLS_ECC_P384_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_ecc_p384_g5.der");
 
-/// T-TeleSec GlobalRoot Class 2 — Deutsche Telekom, and with it a good part
-/// of German public-sector TLS (bundesbank.de measured).
+/// T-TeleSec GlobalRoot Class 2 — Deutsche Telekom, used by much of German
+/// public-sector TLS.
 const TTELESEC_GLOBALROOT_CLASS2_DER: &[u8] = include_bytes!("../../../certs/ttelesec_globalroot_class2.der");
 
-/// HARICA TLS RSA Root CA 2021 — the Greek academic CA, which is what
-/// bund.de chains to. Named here because nobody would have guessed it:
-/// a German federal portal on a Greek university's root.
+/// HARICA TLS RSA Root CA 2021 — the Greek academic CA; bund.de chains to it.
 const HARICA_TLS_RSA_2021_DER: &[u8] = include_bytes!("../../../certs/harica_tls_rsa_2021.der");
 
-/// Amazon Root CA 2/3/4 — the rest of the family around CA 1. CA 3 is
-/// measured (telekom.de); 2 and 4 complete the RSA-4096 / ECDSA-P384 pair
-/// the same way, see the note on twins below.
+/// Amazon Root CA 2/3/4 — the rest of the family around CA 1, covering the
+/// RSA-4096 and ECDSA-P384 hierarchies (see the twin rule below).
 const AMAZON_ROOT_CA2_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca2.der");
 const AMAZON_ROOT_CA3_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca3.der");
 const AMAZON_ROOT_CA4_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca4.der");
 
 /// IdenTrust Commercial Root CA 1 — its own hierarchy, not only the
-/// DST-Root cross-sign people remember it for. ing.de, identrust.com.
+/// DST-Root cross-sign.
 const IDENTRUST_COMMERCIAL_CA1_DER: &[u8] = include_bytes!("../../../certs/identrust_commercial_root_ca1.der");
 
-/// D-TRUST (Bundesdruckerei) — German public-sector TLS, and it takes TWO
-/// anchors because the hierarchy was renewed: the 2009 EV root carries
-/// elster.de (the German tax portal), the 2023 BR root carries
-/// bsi.bund.de — the federal office for information security itself.
-/// The 2009 one expires 2029-11-05.
+/// D-TRUST (Bundesdruckerei) — German public-sector TLS. Two anchors because
+/// the hierarchy was renewed: the 2009 EV root (elster.de) and the 2023 BR
+/// root (bsi.bund.de). The 2009 one expires 2029-11-05.
 const DTRUST_CLASS3_EV_2009_DER: &[u8] = include_bytes!("../../../certs/dtrust_root_class3_ca2_ev_2009.der");
 const DTRUST_BR_2023_DER: &[u8] = include_bytes!("../../../certs/dtrust_br_root_ca2_2023.der");
 
-/// Certum (Asseco, PL), Buypass (NO) and Actalis (IT) — three European CAs
-/// with a national customer base each. Each was found on its own site only,
-/// which is weak evidence on its own; they are here because a European
-/// desktop that cannot open a Polish, Norwegian or Italian government or
-/// bank page is not finished, and an anchor costs ~1.4 KB.
+/// Certum (Asseco, PL), Buypass (NO) and Actalis (IT) — European CAs with a
+/// national customer base each (government and bank sites).
 const CERTUM_TRUSTED_ROOT_DER: &[u8] = include_bytes!("../../../certs/certum_trusted_root_ca.der");
 const BUYPASS_CLASS3_DER: &[u8] = include_bytes!("../../../certs/buypass_class3_root_ca.der");
 const ACTALIS_ROOT_DER: &[u8] = include_bytes!("../../../certs/actalis_authentication_root_ca.der");
 
-/// Sectigo Public Server Authentication Root E46 / R46 — DIRECTLY, although
-/// USERTrust ECC/RSA cross-sign them and the note above said that covers it.
-///
-/// **Eine Kreuzsignatur hilft nur, wenn der SERVER ihren Pfad mitliefert.**
-/// Der Anker ist da, aber die Kette dorthin baut nicht der Client, sondern
-/// der Server aus dem, was er schickt. github.com und code.jquery.com
-/// liefern den Weg ueber USERTrust und gingen deshalb durch;
-/// `www.dkb.de` schickt genau zwei Karten — sein Blatt und
-/// "Public Server Authentication CA EV E36" — und deren Aussteller ist Root
-/// E46 und sonst nichts. Ohne diesen Anker: "unable to get local issuer
-/// certificate", auf der Anmeldeseite einer Bank.
-///
-/// Gefunden hat es NICHT die Aufzaehlung der Aussteller (die nannte E46, und
-/// E46 galt als abgedeckt), sondern erst der Lauf, der den GANZEN Boden als
-/// einzigen Speicher gegen alle Wirte hielt.
+/// Sectigo Public Server Authentication Root E46 / R46 — anchored directly,
+/// although USERTrust ECC/RSA cross-sign them. A cross-signature only helps
+/// when the server sends the cross-signed path; the client cannot build a
+/// chain from certificates it was not given. Some servers send only their
+/// leaf and an intermediate issued by E46 (e.g. "Public Server
+/// Authentication CA EV E36"), which fails without this anchor.
 const SECTIGO_PSA_E46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_e46.der");
 const SECTIGO_PSA_R46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_r46.der");
 
-/// Built-in anchors. This set is the FLOOR: it ships inside the signed
+/// Built-in anchors. This set is the floor: it ships inside the signed
 /// kernel, cannot be removed by an update or by the user, and is what
 /// guarantees the update host stays reachable even when the npkFS store
 /// is empty, stale, or broken. Everything else is delivered as data —
@@ -193,46 +160,21 @@ const ROOT_CERTS: &[&[u8]] = &[
     SECTIGO_PSA_R46_DER,
 ];
 
-// **Wie diese Liste entstanden ist — nicht geraten, ausgezaehlt.** Fuer 88
-// echte Wirte (der Zielkorpus, die Skript- und Schriften-CDNs, die er
-// verlinkt, dazu Schweizer und deutsche Behoerden, Banken, Zeitungen und die
-// grossen Paketspeicher) wurde der ANKER bestimmt, den OpenSSL WIRKLICH
-// benutzt: die hoechste `depth=`-Zeile. **Nicht die letzte Karte der
-// gelieferten Kette** — die ist meistens ein Zwischenzertifikat, und wer sie
-// nimmt, traegt Namen wie „DigiCert Global G2 TLS RSA SHA256 2020 CA1" in
-// eine Wurzelliste ein. Danach jede neue Wurzel EINZELN als `-CAfile` gegen
-// ihre Wirte gehalten, mit `-no-CApath`: das beweist die Kette, statt sich
-// auf einen Fingerabdruck aus dem Gedaechtnis zu verlassen. 18 von 18 gruen.
+// How this list is chosen: each anchor is the root OpenSSL actually uses
+// for real hosts (the highest `depth=` line), not the last certificate the
+// server sends, which is usually an intermediate.
 //
-// **Das Muster, das dabei dreimal dasselbe war: jede grosse CA fuehrt eine
-// RSA- und eine ECDSA-Wurzel, und hier stand immer nur eine von beiden.**
-// ISRG X1 ohne X2 (schon einmal nachgetragen), GTS R1 ohne R4, DigiCert G2
-// ohne G3. Es ist kein Zufall und keine Reihe von Einzelfaellen: die eine
-// Wurzel zu haben heisst nicht „die meisten Server dieser CA", sondern „die
-// Haelfte" — und WELCHE Haelfte entscheidet der Server, nicht wir. Deshalb
-// stehen zwei Anker hier, die NICHT gemessen wurden, sondern gefolgert:
-// `GLOBALSIGN_ROOT_E46` und `DIGICERT_TLS_ECC_P384_G5`, die ECDSA-Zwillinge
-// zweier Wurzeln, die gemessen gebraucht werden. Beide sind als gefolgert
-// markiert, damit die naechste Messung sie bestaetigen oder wegwerfen kann.
+// Twin rule: every large CA runs an RSA and an ECDSA root, and which one a
+// server uses is the server's choice. Having one of the pair covers only
+// half of that CA's hosts, so twins are included even where no host was
+// seen to need them (`GLOBALSIGN_ROOT_E46`, `DIGICERT_TLS_ECC_P384_G5`).
 //
-// `AAA_CERT_SERVICES` traf in beiden Laeufen KEINEN Wirt mehr — Cloudflares
-// alte Vorgabewurzel. Sie bleibt trotzdem: der Boden ist da, um erreichbar zu
-// sein, nicht um knapp zu sein, und eine Wurzel zu ENTFERNEN ist eine
-// Entscheidung fuer Geraete im Feld, nicht fuer diese Messung.
+// `AAA_CERT_SERVICES` stays although few hosts still chain to it: the floor
+// exists for reachability, not minimality, and removing an anchor affects
+// machines in the field.
 //
-// **Der dritte Lauf ging absichtlich auf den SCHWANZ** — 30 Wirte, ausgesucht
-// nach Ausstellern, die in den ersten 88 gar nicht vorkamen: Behoerden,
-// Banken und Anbieter in DE/CH/PL/NO/IT/EE. Er fand neun weitere Anker, und
-// zwei davon sind der Grund, warum ein Zensus des Schwanzes sein muss:
-// `www.bsi.bund.de` — das Bundesamt fuer Sicherheit in der
-// Informationstechnik — und `www.elster.de` haengen an D-TRUST, das in
-// keiner CDN-Messung der Welt auftaucht. Das Muster oben schlug dabei ein
-// VIERTES Mal zu: Amazon Root CA 1 war da, CA 3 (ECDSA) nicht, und
-// telekom.de haengt an CA 3.
-//
-// **Was als naechstes ablaeuft:** `GLOBALSIGN_ROOT_R3` am 2029-03-18, dann
-// `DTRUST_CLASS3_EV_2009` am 2029-11-05. Wer nach 2029 liest: crates.io und
-// orf.at hingen am ersten, elster.de am zweiten.
+// Next expiries: `GLOBALSIGN_ROOT_R3` (expires 2029-03-18), then
+// `DTRUST_CLASS3_EV_2009` (expires 2029-11-05).
 
 /// npkFS directory holding the data-delivered anchors. Off limits to WASM
 /// apps — write access here is the power to mint a MITM anchor for the
@@ -471,12 +413,12 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
 
 // ── Validity dates ────────────────────────────────────────────────────
 //
-// Below this, the clock is not believable and the check is SKIPPED rather
+// Below this, the clock is not believable and the check is skipped rather
 // than enforced. A dead CMOS battery reads the year 2000; enforcing
-// against that would reject every certificate on earth and take HTTPS
-// down completely — a far worse failure than honouring a stale one. The
-// floor only has to be late enough that a plausible clock is a useful
-// clock: 2025-01-01.
+// against that would reject every certificate and take HTTPS down
+// completely, a far worse failure than honouring a stale one. The floor
+// only has to be late enough that a plausible clock is a useful clock:
+// 1 January 2025.
 const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
 
 /// Current UTC seconds, or `None` when no source is trustworthy.
@@ -566,12 +508,12 @@ fn anchors_chain(current: &X509Cert, root_der: &[u8]) -> bool {
         return true;
     }
 
-    // The last cert IS one of our trusted roots. Match it by IDENTITY —
-    // same subject + same public key — NOT by verifying its own signature.
-    // This is required for cross-signed roots: e.g. google.* now serves GTS
+    // The last cert is one of our trusted roots. Match it by identity —
+    // same subject + same public key — not by verifying its own signature.
+    // This is required for cross-signed roots: e.g. a server may send GTS
     // Root R1 cross-signed by GlobalSign Root CA (issuer != subject), so its
     // self-signature check fails against GTS R1's own key even though the key
-    // IS our anchor. The chain up to `current` was already signature-verified
+    // is our anchor. The chain up to `current` was already signature-verified
     // by the caller, and an anchor is trusted by its key (RFC 5280 §6.1 trust
     // anchor), so matching the embedded key is sufficient and correct. The
     // `verify_signature` arm keeps the classic self-signed path.
@@ -588,10 +530,10 @@ fn anchors_chain(current: &X509Cert, root_der: &[u8]) -> bool {
 }
 
 // Signature algorithm OIDs — SHA-256 and SHA-384 only.
-// SHA-1 (`1.2.840.113549.1.1.5`) is rejected: collision-broken since 2017,
-// last accepted by mainstream CAs ~2016. We never verify root self-signatures
-// (roots are matched by subject DN against the embedded set), so SHA-1 only
-// matters for intermediate/leaf chain hops — and there it's a hard reject.
+// SHA-1 (`1.2.840.113549.1.1.5`) is rejected as collision-broken. Root
+// self-signatures are never verified (roots are matched against the
+// embedded set), so SHA-1 only matters for intermediate/leaf chain hops,
+// and there it is a hard reject.
 // 1.2.840.10045.4.3.2 = ecdsa-with-SHA256
 const OID_ECDSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
 // 1.2.840.10045.4.3.3 = ecdsa-with-SHA384
@@ -680,7 +622,7 @@ fn ecdsa_p384_verify_sha384(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool
 }
 
 /// Verify an ECDSA P-384 signature over raw data.
-/// Computes SHA-384 ourselves, then uses PrehashVerifier (proven path on bare metal).
+/// Computes SHA-384 here, then uses PrehashVerifier.
 /// pubkey: 97-byte uncompressed SEC1 point.
 /// data: the raw data that was signed.
 /// signature: DER-encoded ECDSA signature.
@@ -690,7 +632,7 @@ pub fn verify_p384_sha384(pubkey: &[u8], data: &[u8], signature: &[u8]) -> bool 
 }
 
 /// Verify an ECDSA P-384 signature over a pre-computed SHA-384 digest.
-/// Same path as TLS cert verification — proven on bare metal.
+/// Same path as TLS cert verification.
 pub fn verify_p384_prehash_384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u8]) -> bool {
     use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
     use p384::ecdsa::signature::hazmat::PrehashVerifier;
@@ -711,15 +653,14 @@ pub fn verify_p384_prehash_384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u
     vk.verify_prehash(prehash, &sig).is_ok()
 }
 
-/// Deckt dieses Blattzertifikat auch DIESEN Namen?
+/// Does this leaf certificate also cover `hostname`?
 ///
-/// Fuer Connection Coalescing (RFC 7540 §9.1.1): eine schon aufgebaute
-/// Verbindung darf einen zweiten Namen bedienen, wenn sie zur selben Adresse
-/// geht UND das Zertifikat den Namen deckt. Der Rest der Kette wurde beim
-/// Handshake geprueft und aendert sich nicht — nur der Name ist neu, also ist
-/// der Name die einzige Frage. Bewusst DIESELBE Funktion wie im Handshake:
-/// zwei Namenspruefungen nebeneinander laufen auseinander, und die schwaechere
-/// gewinnt dann immer.
+/// For connection coalescing (RFC 7540 §9.1.1): an established connection
+/// may serve a second name if it goes to the same address and the
+/// certificate covers the name. The rest of the chain was checked during
+/// the handshake, so the name is the only open question. Deliberately the
+/// same matcher as the handshake: two name checks drift apart, and the
+/// weaker one always wins.
 pub fn covers(leaf_der: &[u8], hostname: &str) -> bool {
     match x509::parse_x509(leaf_der) {
         Some(leaf) => cn_matches(&leaf, hostname),
@@ -852,8 +793,8 @@ impl<'a> Iterator for SanIter<'a> {
     }
 }
 
-// `Copy`, damit ein Fehler weitergereicht werden kann, ohne ihn zu
-// verbrauchen: `lanpin::second_chance` muss ihn pruefen UND zurueckgeben.
+// `Copy` so an error can be passed on without being consumed:
+// `lanpin::second_chance` must inspect it and still return it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertError {
     EmptyChain,

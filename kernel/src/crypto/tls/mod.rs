@@ -11,7 +11,7 @@ pub mod rsa;
 pub mod asn1;
 pub mod x509;
 pub mod certstore;
-/// Geraete im eigenen Netz — angeheftetes Vertrauen statt „ignorieren".
+/// Devices on the local network: pinned trust instead of ignoring errors.
 pub mod lanpin;
 
 use alloc::string::{String, ToString};
@@ -339,33 +339,24 @@ pub struct TlsSession {
     /// we offered nothing or the server stayed silent — then HTTP/1.1 is
     /// implied, since that is what an ALPN-less connection has always meant.
     alpn: Option<String>,
-    /// Das Blattzertifikat der Gegenstelle, roh. Aufgehoben fuer genau eine
-    /// Frage: deckt es auch einen ZWEITEN Namen? Das ist die Bedingung fuers
-    /// Coalescing (RFC 7540 §9.1.1) — `de.wikipedia.org`,
-    /// `thumb.wikimedia.org` und `auth.wikimedia.org` liegen auf derselben
-    /// Adresse und auf demselben Zertifikat, und wir bauen zu jedem einzeln
-    /// auf: gemessen 3 x 90 ms je Seitenaufbau.
-    ///
-    /// Roh und nicht als Namensliste, damit die Frage von derselben Funktion
-    /// beantwortet wird wie beim Handshake.
+    /// The peer's leaf certificate, raw. Kept to answer whether it also
+    /// covers a second name, the condition for connection coalescing
+    /// (RFC 7540 §9.1.1) when several hosts share an address and a
+    /// certificate. Raw rather than a name list so the question is answered
+    /// by the same function as in the handshake.
     leaf_der: Vec<u8>,
-    /// Wohin diese Verbindung geht. Der erste Teil derselben Bedingung.
+    /// Where this connection goes; the other half of the coalescing condition.
     peer: ([u8; 4], u16),
-    /// Halb angekommene Bytes eines Satzes, fuer den NICHT-blockierenden
-    /// Leser (`tls_poll`).
-    ///
-    /// **Der Unterschied zwischen Holen und Lauschen.** `tls_recv` wartet auf
-    /// einen Satz — richtig fuer eine Antwort, die man angefordert hat, und
-    /// falsch fuer eine Verbindung, die meistens still ist und irgendwann von
-    /// selbst etwas sagt. Ein WebSocket ist der zweite Fall: ein Browser
-    /// fragt ihn in JEDEM Bild, und zehn Millisekunden Warten je Bild waeren
-    /// der Preis fuer nichts. Also sammeln statt warten — was ankommt, liegt
-    /// hier, bis ein Satz vollstaendig ist.
+    /// Partially received bytes of a record, for the non-blocking reader
+    /// (`tls_poll`). `tls_recv` waits for a record, which suits a requested
+    /// response but not a mostly idle connection that speaks on its own,
+    /// such as a WebSocket polled every frame. Bytes collect here until a
+    /// record is complete.
     rx: Vec<u8>,
-    /// Der ENTSCHLUESSELTE Rest. Ein Satz ist bis zu 16 KB gross, der Puffer
-    /// des Rufers darf kleiner sein — und der Satzzaehler rueckt beim
-    /// Entschluesseln vor, ein weggeworfener Klartext waere unwiederbringlich.
-    /// Also wird hier abgelegt, was diesmal nicht mehr hineinpasst.
+    /// Decrypted remainder. A record is up to 16 KB and the caller's buffer
+    /// may be smaller; the record sequence number advances on decryption,
+    /// so discarded plaintext could not be recovered. What does not fit is
+    /// kept here for the next call.
     rx_plain: Vec<u8>,
 }
 
@@ -379,12 +370,12 @@ impl TlsSession {
         self.alpn.as_deref()
     }
 
-    /// Adresse und Port der Gegenstelle.
+    /// Peer address and port.
     pub fn peer(&self) -> ([u8; 4], u16) {
         self.peer
     }
 
-    /// Darf diese Verbindung `hostname` bedienen? Siehe `leaf_der`.
+    /// May this connection serve `hostname`? See `leaf_der`.
     pub fn covers(&self, hostname: &str) -> bool {
         certstore::covers(&self.leaf_der, hostname)
     }
@@ -408,9 +399,9 @@ pub enum TlsError {
 }
 
 /// Reason strings a peer can cause, named so the classifier that turns them
-/// into error kinds can match the CONSTANT rather than a copy of the text.
-/// Reworded literals in two places is how a message quietly becomes
-/// "unknown" on the error page — which is exactly what happened to alert 40.
+/// into error kinds can match the constant rather than a copy of the text.
+/// A literal reworded in one of two places silently becomes "unknown" on
+/// the error page.
 pub mod reasons {
     pub const HANDSHAKE_REJECTED: &str = "server rejected handshake (alert 40)";
     pub const VERSION_UNSUPPORTED: &str = "protocol version not supported";
@@ -608,15 +599,14 @@ pub fn tls_connect_alpn(
     }
 
     let cert_refs: Vec<&[u8]> = cert_chain.iter().map(|c| c.as_slice()).collect();
-    // Die richtige Pruefung zuerst und unveraendert. `second_chance` kann
-    // nichts erlauben, was hier durchgefallen waere — sie sieht den Fehler
-    // erst, nachdem er feststeht, und laesst genau zwei davon nach, und auch
-    // die nur fuer eine vom Nutzer benannte private Adresse.
+    // The regular check first, unchanged. `second_chance` cannot allow
+    // anything that failed here: it sees the error only after it is final,
+    // forgives just two kinds, and only for a user-named private address.
     if let Err(e) = certstore::verify_chain(&cert_refs, hostname) {
         lanpin::second_chance(hostname, cert_refs[0], e)
             .map_err(TlsError::CertificateError)?;
     }
-    // Das GEPRUEFTE Blatt aufheben — nicht das, was spaeter irgendwo liegt.
+    // Keep the verified leaf, not whatever is around later.
     let leaf_der = cert_chain[0].clone();
 
     // === Verify Finished ===
@@ -721,9 +711,9 @@ pub fn tls_recv(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
     tls_recv_patient(session, buf, QUIET_TRANSFER, ATTEMPT_TICKS)
 }
 
-/// Wie `tls_recv`, aber der Aufrufer bestimmt, wie lange auf den Anfang einer
-/// Antwort gewartet wird. Wer weiss, dass noch KEIN Byte gekommen ist, nimmt
-/// `QUIET_FIRST_BYTE`; wer mitten im Koerper steht, `QUIET_TRANSFER`.
+/// Like `tls_recv`, but the caller decides how long to wait for the start
+/// of a response. Use `QUIET_FIRST_BYTE` when no byte has arrived yet and
+/// `QUIET_TRANSFER` in the middle of a body.
 pub fn tls_recv_patient(
     session: &mut TlsSession, buf: &mut [u8], max_quiet: u32, attempt: u64,
 ) -> Result<usize, TlsError> {
@@ -765,27 +755,23 @@ pub fn tls_recv_patient(
     Ok(copy_len)
 }
 
-/// **Lauschen statt holen** — ein Satz, wenn einer vollstaendig da ist,
-/// sonst `Ok(0)`, und zwar SOFORT.
+/// Listen rather than fetch: returns a record if one is complete, otherwise
+/// `Ok(0)` immediately.
 ///
-/// `tls_recv` wartet mindestens einen Versuch (10 s Deckel, ein Tick
-/// Mindestwartezeit); das ist richtig fuer eine angeforderte Antwort und
-/// falsch fuer eine Verbindung, die von selbst spricht. Hier wird nur
-/// abgeholt, was der TCP-Stapel schon hat, in `session.rx` gesammelt und erst
-/// entschluesselt, wenn Kopf und Nutzlast beisammen sind.
+/// `tls_recv` waits at least one attempt (10 s cap, one tick minimum), right
+/// for a requested response and wrong for a connection that speaks on its
+/// own. This only takes what the TCP stack already has, collects it in
+/// `session.rx` and decrypts once header and payload are complete.
 ///
-/// `Ok(0)` heisst „noch nichts" und NICHT „zu" — ein geschlossener Strom
-/// meldet sich als `Err`. Das ist dieselbe Unterscheidung, die `tls_recv`
-/// schon trifft (ein `ChangeCipherSpec` oder eine Handschlagsnachricht in der
-/// Datenphase sind auch 0).
+/// `Ok(0)` means "nothing yet", not "closed"; a closed stream reports `Err`.
+/// That is the same distinction `tls_recv` makes (a `ChangeCipherSpec` or a
+/// handshake message in the data phase also yields 0).
 pub fn tls_poll(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsError> {
-    // 1. Einsammeln, was ohne Warten da ist — aber nur, solange Platz ist.
-    //
-    // **Ein voller Puffer ist Gegendruck, kein Protokollfehler.** Wer daraus
-    // ein `Err` macht, beendet eine gesunde Verbindung, sobald die Gegenstelle
-    // einmal schneller spricht als der Rufer abholt — und genau das tut ein
-    // CDP-Strom. Wird hier nichts mehr abgeholt, laeuft das TCP-Fenster zu
-    // und die Gegenstelle hoert von selbst auf: so ist Gegendruck gedacht.
+    // 1. Collect what is available without waiting, but only while there is
+    //    room. A full buffer is backpressure, not a protocol error: turning
+    //    it into `Err` would kill a healthy connection whenever the peer
+    //    talks faster than the caller reads. When nothing is drained, the
+    //    TCP window closes and the peer stops on its own.
     let mut chunk = [0u8; 2048];
     while session.rx.len() < RX_HIGH_WATER {
         match tcp::recv(session.tcp_handle, &mut chunk) {
@@ -796,11 +782,11 @@ pub fn tls_poll(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
         }
     }
 
-    // 2. Entschluesseln, solange ganze Saetze dastehen und der Rufer noch
-    //    nicht genug hat. Ein uebersprungener Satz (Sitzungskarte,
-    //    `ChangeCipherSpec`, leerer Klartext) beendet die Runde NICHT — sonst
-    //    hiesse `Ok(0)` mal „noch nichts" und mal „hier lag nur nichts fuer
-    //    dich", und der Rufer kann die zwei nicht auseinanderhalten.
+    // 2. Decrypt while whole records are present and the caller wants more.
+    //    A skipped record (session ticket, `ChangeCipherSpec`, empty
+    //    plaintext) does not end the round; otherwise `Ok(0)` would mean
+    //    both "nothing yet" and "nothing for you here", and the caller could
+    //    not tell them apart.
     while session.rx_plain.len() < buf.len() {
         if session.rx.len() < 5 { break }
         let ct = session.rx[0];
@@ -824,23 +810,23 @@ pub fn tls_poll(session: &mut TlsSession, buf: &mut [u8]) -> Result<usize, TlsEr
         let real_ct = plaintext[plaintext.len() - 1];
         let data = &plaintext[..plaintext.len() - 1];
         if real_ct == CT_ALERT { return Err(TlsError::HandshakeFailed("alert received")) }
-        // Eine Sitzungskarte mitten im Strom ist kein Datensatz — ueberspringen,
-        // wie `tls_recv` es tut.
+        // A session ticket mid-stream is not a data record; skip it like
+        // `tls_recv` does.
         if real_ct == CT_HANDSHAKE { continue }
         session.rx_plain.extend_from_slice(data);
     }
 
-    // 3. Herausgeben, was passt. Der Rest bleibt liegen und kommt beim
-    //    naechsten Aufruf — **kein Byte wird weggeworfen**.
+    // 3. Hand out what fits. The rest stays for the next call; no byte is
+    //    discarded.
     let n = session.rx_plain.len().min(buf.len());
     buf[..n].copy_from_slice(&session.rx_plain[..n]);
     session.rx_plain.drain(..n);
     Ok(n)
 }
 
-/// Ab hier wird nicht mehr vom TCP-Stapel nachgeladen: vier Saetze liegen
-/// dann schon unentschluesselt da. Kein Deckel, der etwas verwirft — eine
-/// Marke, ab der wir aufhoeren zu fragen.
+/// Stop pulling from the TCP stack once this much undecrypted data is
+/// buffered (four records). Not a cap that discards anything, only a mark
+/// where we stop asking.
 const RX_HIGH_WATER: usize = MAX_RECORD_PAYLOAD * 4;
 
 
@@ -915,8 +901,7 @@ fn build_client_hello(random: &[u8; 32], x25519_pub: &[u8; 32], p384_pub: &[u8; 
     put_u16(&mut extensions, 0x0503); // ecdsa_secp384r1_sha384
     put_u16(&mut extensions, 0x0805); // rsa_pss_rsae_sha384
 
-    // ALPN (RFC 7301) — omitted entirely when we offer nothing, which keeps
-    // the ClientHello byte-identical to what shipped before.
+    // ALPN (RFC 7301) — omitted entirely when we offer nothing.
     if !alpn_offer.is_empty() {
         let mut list = Vec::new();
         for proto in alpn_offer {
@@ -1132,8 +1117,8 @@ fn send_record(handle: usize, content_type: u8, payload: &[u8]) -> Result<(), Tl
 fn recv_record(
     handle: usize, max_quiet: u32, attempt: u64,
 ) -> Result<(u8, Vec<u8>), TlsError> {
-    // Read 5-byte header. Die Geduld gilt dem KOPF — sobald er da ist, ist die
-    // Gegenstelle am Antworten und die Nutzlast bekommt die volle Nachsicht.
+    // Read 5-byte header. The patience applies to the header; once it has
+    // arrived the peer is answering and the payload gets the full allowance.
     let mut header = [0u8; 5];
     recv_exact(handle, &mut header, max_quiet, attempt)?;
 
@@ -1152,29 +1137,22 @@ fn recv_record(
 
 /// Patience for a record that is already flowing: a quiet link is not a
 /// closed one. Each attempt waits 10 s; six of them give a minute, the same
-/// order as the TCP retransmit budget (TCP_RETR2). Under a run of transmit
-/// stalls a single attempt ended the record — and the caller saw a truncated
-/// body it could only report as "short download".
+/// order as the TCP retransmit budget (TCP_RETR2). A single attempt would
+/// end the record under a run of transmit stalls and truncate the body.
 pub const QUIET_TRANSFER: u32 = 6;
 
-/// Wie lange ein Versuch wartet, in Ticks (100 Hz).
+/// How long one attempt waits, in ticks (100 Hz).
 pub const ATTEMPT_TICKS: u64 = 1000; // 10 s
 
-/// Patience for the FIRST byte of an answer, auf einer FRISCHEN Verbindung.
-/// Ein Server darf sich Zeit lassen, bevor er zu antworten beginnt.
+/// Patience for the first byte of an answer on a fresh connection. A server
+/// may take its time before it starts answering.
 pub const QUIET_FIRST_BYTE: u32 = 1;
 
-/// Und auf einer WIEDERVERWENDETEN. Hier ist die Wette eine andere: der
-/// Server kann zwischen zwei Benutzungen weggegangen sein, ohne FIN und ohne
-/// RST — gemessen an thumb.wikimedia.org, das nach jeder bedienten Runde
-/// still nicht mehr antwortet. Vorhersagen laesst sich das nicht (nach
-/// `poll_rx_only` sah die Verbindung gesund aus), also zaehlt nur, wie
-/// schnell es auffaellt.
-///
-/// Die Zahl ist am PREIS DER ALTERNATIVE bemessen, nicht geraten: ein
-/// frischer Aufbau zu diesem Host kostet gemessen 50-80 ms (`tcp 20 + tls 30
-/// + preface 0`). Laenger als gut zehnmal so lange zu warten, nur um ihn zu
-/// sparen, ist ein schlechtes Geschaeft.
+/// The same on a reused connection. Here the bet differs: the server may
+/// have gone away between two uses without FIN or RST, and the connection
+/// still looks healthy. The value is sized against the cost of the
+/// alternative: a fresh connection costs tens of milliseconds, so waiting
+/// much longer than that to save one is a bad trade.
 pub const ATTEMPT_TICKS_REUSED: u64 = 100; // 1 s
 
 fn recv_exact(

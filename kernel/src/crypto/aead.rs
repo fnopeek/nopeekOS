@@ -257,8 +257,7 @@ pub const TAG_SIZE: usize = 16;
 
 // AES-256-GCM via the `aes-gcm` crate. The crate's `aes` backend
 // auto-detects AES-NI at runtime via `cpufeatures` and falls back to
-// constant-time soft AES on CPUs without it. N100 has AES-NI, so the
-// fast path is taken in practice.
+// constant-time soft AES on CPUs without it.
 //
 // File-system encryption uses AES-GCM; TLS keeps ChaCha20-Poly1305 for
 // cipher-suite compatibility with peers that negotiate it.

@@ -2,7 +2,7 @@
 //!
 //! This key is used to verify kernel update signatures.
 //! The corresponding private key is kept offline by the maintainer.
-//! Private key: update.key (NEVER commit this!)
+//! Private key: update.key (never commit it).
 
 /// P-384 uncompressed public key (97 bytes: 0x04 || x || y).
 pub const UPDATE_PUB_KEY: [u8; 97] = [
