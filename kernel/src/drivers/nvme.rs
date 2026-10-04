@@ -51,10 +51,9 @@ const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 
 // Queue sizes (entries)
 const ADMIN_QUEUE_SIZE: u16 = 16;
-// 256 entries is universally supported by NVMe controllers (CAP.MQES on
-// any modern SSD is well above this). 1024 worked on the test rig but
-// blocks at-rest decryption if an SSD reports a smaller MQES — keycheck
-// fails to read and the user sees "wrong passphrase" with no clue why.
+// 256 entries is universally supported (CAP.MQES on any modern SSD is well
+// above this). A larger queue fails init on SSDs with a smaller MQES, and
+// then at-rest decryption cannot read its keycheck.
 const IO_QUEUE_SIZE: u16 = 256;
 
 // Submission Queue Entry (64 bytes)
@@ -264,9 +263,9 @@ fn io_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, BlkErr
             if status_code != 0 {
                 return Err(BlkError::IoError);
             }
-            // One-shot HW validation (B-1): the poll completed this command;
-            // if the MSI-X ISR also fired (count advanced), the device-IRQ
-            // path works end-to-end. Logged once, in non-ISR context.
+            // One-shot check: the poll completed this command; if the MSI-X
+            // ISR also fired (count advanced), the device-IRQ path works end
+            // to end. Logged once, in non-ISR context.
             nvme_msix_confirm(state.msix_vector);
             return Ok(entry);
         }
@@ -275,10 +274,8 @@ fn io_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, BlkErr
     Err(BlkError::Timeout)
 }
 
-/// One-shot confirmation that NVMe completions raise our MSI-X ISR. Validates
-/// the `host-device-irq` foundation on real hardware without changing the
-/// (poll-based) completion logic. Removed once B-2 makes `io_command` actually
-/// wait on the IRQ.
+/// One-shot confirmation that NVMe completions raise our MSI-X ISR, without
+/// changing the poll-based completion logic.
 static MSIX_CONFIRMED: AtomicBool = AtomicBool::new(false);
 fn nvme_msix_confirm(vector: u8) {
     if vector != 0 && !MSIX_CONFIRMED.load(Ordering::Relaxed) {
@@ -293,10 +290,8 @@ fn nvme_msix_confirm(vector: u8) {
 
 /// Initialize the NVMe controller.
 pub fn init() -> bool {
-    // Find NVMe device by class code (01h:08h)
-    // Die Absage war STUMM, und damit sah "keine NVMe da" genauso aus wie
-    // "Treiber nicht gerufen". Eine Zeile kostet nichts und ist auf einem
-    // Geraet ohne Platte die einzige Auskunft, die es gibt.
+    // Find NVMe device by class code (01h:08h). The absence is logged: on a
+    // machine without a disk it is the only clue there is.
     let dev = match pci::find_by_class(NVME_CLASS, NVME_SUBCLASS) {
         Some(d) => d,
         None => {
@@ -340,21 +335,13 @@ pub fn init() -> bool {
     // Read capabilities
     let cap = mmio_read64(bar0_virt, REG_CAP);
     let doorbell_stride = 4u32 << ((cap >> 32) & 0xF) as u32; // DSTRD field
-    // CAP.MQES ist NULLBASIERT: der groesste zulaessige Wert 0xFFFF heisst
-    // 65536 Eintraege. `as u16 + 1` lief dabei ueber und ergab 0 — und mit
-    // 0 lehnt die Pruefung darunter JEDE Queue-Groesse ab. Ausgerechnet der
-    // Controller, der am meisten kann, kam damit nicht hoch.
-    //
-    // Gemeldet an einer KIOXIA [1e0f:000c] in einem Lenovo IdeaPad Flex 5
-    // 14ALC7: "version 1.4.0, max queue 0" — die Version las sich sauber,
-    // der Controller antwortete also; nur die Rechnung daneben war falsch.
-    // In u32, damit der groesste zulaessige Wert auch der groesste bleibt.
+    // CAP.MQES is zero-based: the maximum 0xFFFF means 65536 entries, which
+    // overflows u16 (e.g. KIOXIA [1e0f:000c] reports it). Hence u32.
     let max_queue_entries = (cap & 0xFFFF) as u32 + 1;
     let version = mmio_read32(bar0_virt, REG_VS);
 
-    // CAP roh mit ins Log: eine 0 kann aus einem ueberlaufenen Plus kommen
-    // ODER aus einem Register, das gar nicht antwortet, und die zwei Faelle
-    // sehen in der gerechneten Zahl gleich aus.
+    // Log raw CAP too: a computed 0 could come from an overflow or from a
+    // register that does not answer.
     kprintln!("[npk] nvme: version {}.{}.{}, CAP={:#018x}, max queue {}",
         version >> 16, (version >> 8) & 0xFF, version & 0xFF,
         cap, max_queue_entries);
@@ -460,16 +447,15 @@ pub fn init() -> bool {
     }
 
     // ONCS (Optional NVM Command Support) at byte 520 (2 bytes); bit 2 =
-    // Dataset Management (TRIM/Deallocate). The old code read byte 256, which
-    // is OACS — Optional *Admin* Command Support — so TRIM detection keyed off
-    // the firmware-download bit by accident.
+    // Dataset Management (TRIM/Deallocate). Not byte 256: that is OACS
+    // (Optional Admin Command Support).
     unsafe {
         state.oncs = core::ptr::read_volatile(buf.add(520) as *const u16);
     }
     // VWC (Volatile Write Cache) at byte 525; bit 0 = a volatile write cache is
     // present. When set, completed writes may sit in controller DRAM until an
     // NVM Flush — which is exactly why the npkFS commit issues a flush barrier
-    // before the superblock. Logged so the property is visible on real HW.
+    // before the superblock. Logged so the property is visible.
     let vwc_present = unsafe { core::ptr::read_volatile(buf.add(525) as *const u8) } & 1 != 0;
 
     // MDTS (Maximum Data Transfer Size) at offset 77, 1 byte. Units of
@@ -531,12 +517,12 @@ pub fn init() -> bool {
     };
     unsafe { core::ptr::write_bytes(io_cq as *mut u8, 0, io_cq_pages * 4096); }
 
-    // Set up MSI-X completion interrupts for the I/O CQ (foundation:
-    // host-device-irq). Allocate a LAPIC vector + program the device's MSI-X
-    // table entry 0 to deliver to this (BSP) core. MSI-X writes go straight
-    // to the LAPIC (no PIC/IOAPIC), so the masked-PIC setup is irrelevant. If
-    // the device has no usable MSI-X, the vector stays 0 and the CQ is created
-    // without interrupts (IEN=0) → pure poll, exactly the old behavior.
+    // Set up MSI-X completion interrupts for the I/O CQ. Allocate a LAPIC
+    // vector + program the device's MSI-X table entry 0 to deliver to this
+    // (BSP) core. MSI-X writes go straight to the LAPIC (no PIC/IOAPIC), so
+    // the masked-PIC setup is irrelevant. If the device has no usable MSI-X,
+    // the vector stays 0 and the CQ is created without interrupts (IEN=0),
+    // i.e. pure poll.
     state.msix_vector = crate::irq::register(dev.addr, 0).unwrap_or(0);
     let ien = if state.msix_vector != 0 { 1u32 << 1 } else { 0 }; // cdw11 bit1 = IEN
     if state.msix_vector != 0 {
@@ -590,12 +576,11 @@ pub fn init() -> bool {
             Ok(_) => kprintln!("[npk] nvme: interrupt coalescing disabled"),
             Err(_) => kprintln!("[npk] nvme: set-features (coalescing) not supported"),
         }
-        // We set INTMS=0xFFFFFFFF early ("mask all, we poll") and never cleared
-        // it. The spec says MSI-X uses the per-vector table mask and ignores
-        // INTMS — but some Intel controllers honor it anyway and gate the MSI.
-        // Clear it (INTMC) now that MSI-X is configured + unmasked, so it can't
-        // suppress our completion interrupt. Harmless if the controller is
-        // spec-compliant (write ignored under MSI-X).
+        // INTMS was set to 0xFFFFFFFF above ("mask all, we poll"). The spec
+        // says MSI-X uses the per-vector table mask and ignores INTMS, but
+        // some Intel controllers honor it anyway and gate the MSI. Clear it
+        // (INTMC) now that MSI-X is configured + unmasked. Harmless on a
+        // spec-compliant controller (write ignored under MSI-X).
         mmio_write32(bar0_virt, REG_INTMC, 0xFFFF_FFFF);
         kprintln!("[npk] nvme: INTMS cleared (INTMC) for MSI-X");
     }
@@ -729,10 +714,8 @@ pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
 pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkError> {
     if items.is_empty() { return Ok(()); }
 
-    // Batch larger than the pool → fall back to sequential. We could
-    // chunk this internally but `cache::flush` won't ever exceed the
-    // cache slot count (64 in practice, our pool holds 32 — chunk
-    // boundary handled here).
+    // Batch larger than the pool → fall back to sequential. `cache::flush`
+    // never exceeds its cache slot count, so no internal chunking.
     if items.len() > DMA_POOL_SLOTS {
         for &(block, buf) in items {
             write_block(block, buf)?;
@@ -755,9 +738,9 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
 
     // Stage every payload into its own DMA pool slot + push every SQ
-    // entry, then ring the doorbell exactly once. The SQ has 64 slots;
-    // `items.len() ≤ DMA_POOL_SLOTS = 32`, so we can't wrap into our
-    // own un-acked head.
+    // entry, then ring the doorbell exactly once. Assumes `items.len()`
+    // stays below `IO_QUEUE_SIZE`, so the tail cannot wrap into our own
+    // un-acked head.
     for (i, &(block, buf)) in items.iter().enumerate() {
         let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
         if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
@@ -780,12 +763,9 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
         state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
     }
 
-    // Memory fence between SQ entry stores and the doorbell write.
-    // x86 stores are normally ordered, but during the deadlock chase
-    // adding kprintlns between submit + drain made the issue go away —
-    // those acted as MMIO-serializing barriers. An explicit SeqCst
-    // fence pins the ordering deterministically without the serial
-    // overhead, and matches what real NVMe drivers do.
+    // Memory fence between SQ entry stores and the doorbell write. x86
+    // stores are normally ordered, but an explicit SeqCst fence pins the
+    // ordering deterministically, as real NVMe drivers do.
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     ring_sq_doorbell(state, 1, state.io_sq_tail);
 
@@ -982,9 +962,8 @@ fn drain_one_completion(state: &mut NvmeState) -> Result<(), BlkError> {
         if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
         ring_cq_doorbell(state, 1, state.io_cq_head);
 
-        // [nvme-spin] measure how long this completion busy-spun. Tells us
-        // whether the poll wastes real CPU (→ worth the lock-restructure to
-        // an IRQ-park) or completes in µs (→ leave it). Pure measurement.
+        // [nvme-spin] Record how long this completion busy-spun, to tell
+        // whether the poll wastes real CPU. Measurement only.
         record_drain(t0, state.msix_vector);
 
         let status_code = (entry.status >> 1) & 0x7FF;
@@ -1220,9 +1199,8 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
 ///
 /// Submit-phase batches up to `MAX_INFLIGHT_MULTI` cmds at once so the
 /// SSD's internal channels can pipeline all of them. Critical for
-/// fragmented blobs — a 1 MB blob split into 257 single-block extents
-/// goes from 257 sequential round-trips (~8.5 ms) to ~9 batches × 32
-/// cmds parallel (~1.5 ms expected).
+/// fragmented blobs, where many single-block extents would otherwise be
+/// sequential round-trips.
 pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<(), BlkError> {
     if extents.is_empty() { return Ok(()); }
     // Sanity-check size: total blocks must match output buffer.
@@ -1454,7 +1432,7 @@ pub fn max_blocks_per_cmd() -> u32 {
 
 /// (LAPIC vector, total completion-IRQ fires) for the I/O-CQ MSI-X, or None
 /// if MSI-X isn't set up (poll-only). For the `disk` diagnostic — `fires > 0`
-/// proves the host-device-irq path works on this hardware.
+/// proves the device-IRQ path works.
 pub fn msix_status() -> Option<(u8, u64)> {
     let guard = NVME.lock();
     let v = guard.as_ref()?.msix_vector;
@@ -1466,7 +1444,7 @@ pub fn msix_status() -> Option<(u8, u64)> {
 
 /// Live MSI-X capability + table-entry read-back for the `disk` diagnostic.
 /// Shows whether our programming stuck (entry unmasked, MSI-X enabled, addr/
-/// data correct) — so we can debug "programmed but no IRQ" without the boot log.
+/// data correct), to tell "programmed but no IRQ" apart without the boot log.
 pub fn msix_debug() -> Option<crate::pci::MsixDebug> {
     let dev = NVME.lock().as_ref().map(|s| s.pci_addr)?;
     crate::pci::msix_debug(dev, 0)

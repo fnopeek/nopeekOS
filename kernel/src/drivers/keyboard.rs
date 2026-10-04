@@ -12,10 +12,8 @@ const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 
 // Lock-free ring buffer for decoded key events (interrupt-safe).
-// 512 (was 64): a pasted line (e.g. a long URL) arrives as a fast key burst;
-// the shell drains one key per loop iteration, so a small ring overflowed mid-
-// paste and silently dropped the tail of the line. 512 absorbs any pasteable
-// line (matches INPUT_BUF_SIZE).
+// A pasted line arrives as a fast key burst while the shell drains one key
+// per loop iteration; 512 (= INPUT_BUF_SIZE) absorbs any pasteable line.
 const BUF_SIZE: usize = 512;
 static mut KEY_BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
 static BUF_HEAD: AtomicUsize = AtomicUsize::new(0);
@@ -65,10 +63,8 @@ pub fn init() {
         // Check if PS/2 controller exists (0xFF = no controller)
         let status = inb(STATUS_PORT);
         if status == 0xFF {
-            // Sagen, dass es ihn nicht gibt. Vorher war das stumm, und damit
-            // war die Frage "haengt die eingebaute Tastatur ueberhaupt am
-            // i8042?" am Geraet nicht zu beantworten — ohne Tastatur laesst
-            // sich auch kein Diagnosebefehl tippen.
+            // Report the absence: without a keyboard no diagnostic command
+            // can be typed to find out.
             kprintln!("[npk] ps2: no i8042 — a built-in keyboard must come from USB or I2C-HID");
             return; // No PS/2 controller (USB-only system)
         }
@@ -82,13 +78,10 @@ pub fn init() {
         // Enable keyboard (send 0xAE to command port)
         outb(STATUS_PORT, 0xAE);
 
-        // Scancode-UEBERSETZUNG (Konfigbit 6). `decode_scancode` liest Satz 1,
-        // und den liefert der Controller NUR mit eingeschalteter Uebersetzung.
-        // Eine Maschine, die rein ueber UEFI startet, kann ihn mit geloeschtem
-        // Bit uebergeben; die Tastatur sendet dann Satz 2, und jeder Scancode
-        // decodiert zu Unsinn oder zu gar nichts — genau das Bild einer
-        // "toten" Tastatur. Lesen, aendern, schreiben: wo das Bit schon steht,
-        // passiert nichts.
+        // Scancode translation (config bit 6). `decode_scancode` reads set 1,
+        // which the controller delivers only with translation on. UEFI-only
+        // firmware may hand over the bit cleared; the keyboard then sends set
+        // 2 and looks dead. Read-modify-write, a no-op where the bit is set.
         wait_write();
         outb(STATUS_PORT, 0x20);
         match ps2_read() {
@@ -123,20 +116,16 @@ pub fn init() {
 // situation as the keyboard. We enable the aux device and read its 3-byte
 // packets in the shared i8042 drain (`poll_ps2`), feeding them into the same
 // pointer ring the USB mouse uses (`xhci::inject_mouse`). Only enabled when no
-// USB mouse is present (so QEMU/NUC USB-mouse setups are untouched). A Synaptics
-// touchpad in PS/2-compatibility mode shows up here as a standard relative
-// mouse — basic cursor + click (gestures/precision need the I2C-HID path later).
+// USB mouse is present. A Synaptics touchpad in PS/2-compatibility mode shows
+// up here as a standard relative mouse (cursor + click only).
 
 static PS2_MOUSE_ENABLED: AtomicBool = AtomicBool::new(false);
 /// True once a PS/2 mouse is up and the i8042 is drained from the Core-0
-/// TIMER IRQ (`poll_ps2_irq`) instead of the run loop. Mirrors how the USB
-/// mouse is serviced (`xhci::poll_events_irq` in the same handlers) → the
-/// polled PS/2 mouse samples at the timer rate independent of the loop's
-/// HLT/spin (fixes laggy-mouse-when-a-window-is-open). When set, the IRQ is
-/// the SOLE i8042 drainer and `read_key` must NOT poll (the IRQ would
-/// preempt it between the STATUS and DATA reads → wrong byte). Stays false
-/// on USB-mouse hosts (QEMU/NUC) so their input path is byte-for-byte
-/// unchanged.
+/// timer IRQ (`poll_ps2_irq`) instead of the run loop, like the USB mouse
+/// (`xhci::poll_events_irq`), so it samples at the timer rate regardless of
+/// the loop's HLT/spin. When set, the IRQ is the sole i8042 drainer and
+/// `read_key` must not poll (the IRQ would preempt it between the STATUS and
+/// DATA reads and a byte would be misread). Stays false on USB-mouse hosts.
 static PS2_IRQ_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PM_IDX: AtomicU8 = AtomicU8::new(0);
 static PM_B0: AtomicU8 = AtomicU8::new(0);
@@ -180,30 +169,20 @@ pub fn init_mouse() -> bool {
         wait_write();
         outb(DATA_PORT, cfg & !0x20);
     }
-    // Reset (0xFF) antwortet ACK 0xFA, dann Selbsttest 0xAA, dann die
-    // Geraete-ID: 0x00 Standard-PS/2 (3 Byte), 0x03 mit Rad (4 Byte),
-    // 0x04 fuenf Tasten (4 Byte).
-    //
-    // Die drei Bytes wurden verworfen, und `mouse_write` prueft das ACK
-    // nicht — die Zeile darunter meldete also "touchpad/mouse on i8042
-    // aux", sobald IRGENDEIN Byte zurueckkam. Auf einem Geraet, dessen
-    // Touchpad in Wahrheit an I2C-HID haengt, ist das eine falsche
-    // Auskunft, und eine falsche ist schlimmer als keine: sie laesst
-    // niemanden weitersuchen.
-    // Erst den Aux-Port SELBST pruefen: 0xA9 "test auxiliary interface"
-    // antwortet 0x00 wenn er in Ordnung ist, 0x01/0x02 Taktleitung haengt,
-    // 0x03 Datenleitung haengt, 0x04 kein Aux-Port. Das ist billiger und
-    // eindeutiger, als aus der Antwort auf ein Reset zu raten — und wir
-    // haben den Befehl nie benutzt.
+    // Reset (0xFF) answers ACK 0xFA, then self-test 0xAA, then the device
+    // id: 0x00 standard PS/2 (3 bytes), 0x03 wheel (4 bytes), 0x04 five
+    // buttons (4 bytes). `mouse_write` does not check the ACK, so the answer
+    // is validated below.
+    // First test the aux port itself: 0xA9 "test auxiliary interface"
+    // answers 0x00 when ok, 0x01/0x02 clock line stuck, 0x03/0x04 data line
+    // stuck. Unambiguous, unlike guessing from the reset answer.
     unsafe {
         wait_write();
         outb(STATUS_PORT, 0xA9);
     }
     let aux_test = ps2_read();
 
-    // Reset (0xFF), MIT Wiederholung auf 0xFE ("Resend"). Das schreibt das
-    // PS/2-Protokoll so vor, und wir haben es nie getan — ein einzelnes
-    // 0xFE hat der alte Code sogar als "Geraet vorhanden" gewertet.
+    // Reset (0xFF), retried on 0xFE ("resend") as the PS/2 protocol requires.
     let mut ack = None;
     for _ in 0..3 {
         ack = mouse_write(0xFF);
@@ -212,10 +191,8 @@ pub fn init_mouse() -> bool {
     let bat = ps2_read();   // 0xAA self-test
     let id  = ps2_read();   // device id
     let v = |o: Option<u8>| o.map(|b| b as u16).unwrap_or(0x100);
-    // Die Zahl allein kostet den naechsten Leser eine Suche, und sie sagt
-    // sehr Verschiedenes: 0x00 heisst "Port in Ordnung, nur nichts dran",
-    // alles andere heisst "dieser Kanal funktioniert nicht" — und das
-    // trennt "Touchpad haengt woanders" von "wir machen etwas falsch".
+    // 0x00 means "port ok, nothing attached"; anything else means the
+    // channel itself does not work.
     let why = match aux_test {
         Some(0x00) => "port ok",
         Some(0x01) => "clock line stuck low",
@@ -227,9 +204,9 @@ pub fn init_mouse() -> bool {
     };
     kprintln!("[npk] ps2: aux test={:#x} ({}) reset ack={:#x} self-test={:#x} id={:#x} (0x100 = no answer)",
         v(aux_test), why, v(ack), v(bat), v(id));
-    // Lenient: der Selbsttest ist das eigentliche Lebenszeichen, und
-    // mancher Controller verschluckt das ACK — also reicht 0xAA an
-    // irgendeiner der drei Stellen. Fehlt es ganz, ist der Aux-Port leer.
+    // Lenient: the self-test is the real sign of life and some controllers
+    // swallow the ACK, so 0xAA in any of the three slots counts. Without it
+    // the aux port is empty.
     if ack != Some(0xAA) && bat != Some(0xAA) && id != Some(0xAA) {
         kprintln!("[npk] ps2: no aux self-test (0xAA) in the reset answer — aux port treated as empty");
         return false;
@@ -250,11 +227,9 @@ pub fn init_mouse() -> bool {
 }
 
 /// Host TSC of the last PS/2 mouse byte. On UEFI machines IRQ12 is masked,
-/// so the mouse is *polled* in the Core-0 run loop. When a window is focused
-/// the loop HLTs between 100 Hz timer ticks → the mouse samples + cursor
-/// redraw at only ~100 Hz with pipeline latency → laggy. `core0_idle_tick`
-/// reads this so it can keep the loop SPINNING (full sample rate, smooth
-/// cursor) while the mouse is moving, and HLT (low power) once it stops.
+/// so the mouse is polled in the Core-0 run loop, which HLTs between 100 Hz
+/// timer ticks. `core0_idle_tick` reads this to keep the loop spinning (full
+/// sample rate) while the mouse moves, and HLT once it stops.
 static LAST_MOUSE_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// True if a PS/2 mouse byte arrived within ~`ms` of now — i.e. the user is
@@ -301,8 +276,8 @@ fn feed_mouse(byte: u8) {
                 dx: clamp(dx),
                 dy: clamp(-dy),   // PS/2 +Y is up; screen +Y is down
                 scroll: 0,
-                // Das PS/2-Basispaket hat drei Bytes und keine Rolldaten;
-                // erst IntelliMouse (4 Bytes) traegt sie.
+                // The basic 3-byte PS/2 packet carries no scroll data; only
+                // the 4-byte IntelliMouse format does.
                 hscroll: 0,
             });
         }
@@ -397,8 +372,8 @@ fn poll_ps2() -> Option<u8> {
                 }
                 continue;
             }
-            // Wartet noch die zweite Haelfte eines Zeichens? Die zuerst —
-            // vor dem naechsten Scancode, sonst geht sie verloren.
+            // Pending rest of a multi-byte character goes first, before the
+            // next scancode, or it is lost.
             if let Some(b) = take_tail() { return Some(b) }
             let scancode = inb(DATA_PORT);
             if let Some(c) = decode_scancode(scancode) {
@@ -409,15 +384,6 @@ fn poll_ps2() -> Option<u8> {
     }
 }
 
-/// Drain the i8042 from the Core-0 TIMER IRQ (called next to
-/// `xhci::poll_events_irq`). Non-blocking — NO busy-wait (IRQ context); a
-/// 3-byte mouse packet split across ticks completes on the next tick
-/// (≤ one timer period). Keyboard scancodes → `push_key` (the BUF
-/// `read_key` reads); aux bytes → `feed_mouse` (→ `update_atomic` +
-/// `request_render`, exactly like the USB mouse). This is the SOLE i8042
-/// drainer once active. No-op until `PS2_IRQ_ACTIVE` (set after init, only
-/// when a PS/2 mouse exists) so init can't race the IRQ and USB-mouse hosts
-/// are untouched. Core-0 only (the timer handlers run on the BSP).
 /// The i8042's keyboard IRQ is routed (`enable_irq` succeeded). Without it
 /// `read_key` polls the port — and with an aux device the tick-free Core 0
 /// must drain it itself (`needs_poll`).
@@ -430,7 +396,7 @@ pub fn needs_poll() -> bool {
     PS2_PRESENT.load(Ordering::Relaxed) && !PS2_ROUTED.load(Ordering::Relaxed)
 }
 
-/// Route the i8042 through the I/O APIC to Core 0 (stage 3b). Call on
+/// Route the i8042 through the I/O APIC to Core 0. Call on
 /// Core 0 after `ioapic::init`.
 ///
 /// Linux sets the controller's interrupt-enable bits when it registers the
@@ -489,6 +455,12 @@ pub fn enable_irq() {
         if aux_gsi.is_some() { ", IRQ 12 (aux) too" } else { "" });
 }
 
+/// Drain the i8042 from a Core-0 interrupt (i8042 IRQ, or the timer tick
+/// next to `xhci::poll_events_irq`). Non-blocking, no busy-wait; a mouse
+/// packet split across calls completes on the next one. Keyboard scancodes
+/// go to `push_key` (the BUF `read_key` reads), aux bytes to `feed_mouse`.
+/// The sole i8042 drainer once active; a no-op until `PS2_IRQ_ACTIVE` is set
+/// after init, so init cannot race it. Core 0 only.
 pub fn poll_ps2_irq() {
     if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
         return;
@@ -673,15 +645,13 @@ pub fn apply_deferred() {
     }
 }
 
-/// Decode a raw scancode into an ASCII character (handles modifiers + extended).
-/// Der Rest einer UTF-8-Folge — siehe `input::Utf8Tail` fuer das Warum.
-/// Eigene Instanz, weil dieser Treiber ein eigener Erzeuger ist; die
-/// Rechnung ist die geteilte.
+/// Rest of a pending UTF-8 sequence (see `input::Utf8Tail`). Own instance
+/// because this driver is a separate producer.
 static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
     spin::Mutex::new(crate::input::Utf8Tail::new());
 
-/// Das naechste wartende Byte, oder `None`. **Muss vor dem Lesen eines neuen
-/// Scancodes gerufen werden.**
+/// Next pending byte, or `None`. Must be called before reading a new
+/// scancode.
 /// Taken by the timer ISR (`poll_ps2_irq`) AND by `read_key` with IF=1 —
 /// the non-ISR side must mask interrupts, or a tick inside the lock spins
 /// forever on it.
@@ -689,7 +659,8 @@ fn take_tail() -> Option<u8> {
     crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().take())
 }
 
-/// Scancode → erstes Byte des Zeichens; der Rest wandert in `UTF8_TAIL`.
+/// Decode a raw scancode (modifiers + extended) to the first byte of its
+/// character; the rest goes to `UTF8_TAIL`.
 fn decode_scancode(scancode: u8) -> Option<u8> {
     let c = decode_scancode_char(scancode)?;
     Some(crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().split(c)))
@@ -712,9 +683,9 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
 
     // Handle extended scancodes (arrow keys, Home, End, etc.)
     if is_extended {
-        // Modifiers: handle BOTH press and release (must run before the
-        // release-gate below, or the key-up event is swallowed and the
-        // modifier stays stuck — was the case for Super on PS/2 polling).
+        // Modifiers: handle both press and release (must run before the
+        // release gate below, or the key-up is swallowed and the modifier
+        // sticks).
         match code {
             0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }   // Right Ctrl
             0x38 => { ALT_GR.store(!released, Ordering::Relaxed); return None; } // AltGr (Right Alt)
@@ -813,9 +784,8 @@ pub fn irq_handler() {
     let scancode = unsafe { inb(DATA_PORT) };
     if let Some(c) = decode_scancode(scancode) {
         push_key(c);
-        // Ein Zeichen ausserhalb von ASCII besteht aus mehreren Bytes; sie
-        // muessen DIREKT hintereinander in den Ring, sonst steht ein
-        // Tastendruck zwischen den Haelften eines Buchstabens.
+        // A non-ASCII character is several bytes; they must enter the ring
+        // back to back, or another key could land between them.
         while let Some(b) = take_tail() { push_key(b) }
     }
 }
@@ -848,9 +818,8 @@ fn scancode_to_char_us(code: u8, shift: bool, caps: bool) -> Option<char> {
 
     if code as usize >= NORMAL.len() { return None; }
 
-    // Die US-Tabelle bleibt Bytes — sie IST ASCII, jedes Zeichen darin passt
-    // in eins. Nur die Rueckgabe ist ein Zeichen, damit beide Layouts
-    // dieselbe Form haben.
+    // The US table is plain ASCII bytes; the return type is `char` so both
+    // layouts share one signature.
     let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
     if ch == 0 { return None; }
 
@@ -868,10 +837,10 @@ fn altgr_char_de(code: u8) -> Option<char> {
         0x04 => Some('#'),   // AltGr+3
         0x08 => Some('|'),   // AltGr+7
         0x0D => Some('~'),   // AltGr+^
-        0x12 => Some('€'),   // AltGr+e — xkb: AD03 dritte Ebene EuroSign
-        0x1A => Some('['),   // AltGr+ü
+        0x12 => Some('€'),   // AltGr+e — xkb: AD03 third level EuroSign
+        0x1A => Some('['),   // AltGr+AD11 (u-umlaut)
         0x1B => Some(']'),   // AltGr+¨
-        0x28 => Some('{'),   // AltGr+ä
+        0x28 => Some('{'),   // AltGr+AC11 (a-umlaut)
         0x2B => Some('}'),   // AltGr+$
         0x56 => Some('\\'),  // AltGr+<
         _ => None,
@@ -882,32 +851,24 @@ fn altgr_char_de(code: u8) -> Option<char> {
 fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<char> {
     // ISO-Extra key (102-key layout, left of Z): scancode 0x56.
     // Plain → `<`, Shift → `>`, AltGr → `\` (latter handled by
-    // altgr_char_de above). The key is OUT OF RANGE of the layout
+    // altgr_char_de above). The key is out of range of the layout
     // arrays below (which only cover 0x00–0x39), so it needs to
     // be special-cased before the array index.
     if code == 0x56 {
         return Some(if shift { '>' } else { '<' });
     }
 
-    // **Die Tabellen stammen aus `/usr/share/X11/xkb/symbols/ch`,
-    // `xkb_symbols "basic"` (German (Switzerland)) — nicht aus dem
-    // Gedaechtnis.** Der Unterschied ist keiner, den man raten kann: auf dem
-    // DEUTSCHschweizer Layout liegt `ü` UNGESCHIFTET und `è` auf Shift, beim
-    // franzoesischschweizerischen genau andersherum (dieselbe Datei, Block
-    // `fr`, ueberschreibt die drei Tasten).
-    //
-    // Bis hierher stand in beiden Tabellen die Zweitbelegung dieser Tasten:
-    // `[ ] ; '` — also genau die Zeichen, die AltGr ohnehin liefert. Ein
-    // Umlaut liess sich damit auf dieser Maschine ueberhaupt nicht tippen,
-    // und bei `ç` stand woertlich `non-ASCII→0`.
+    // Tables from `/usr/share/X11/xkb/symbols/ch`, `xkb_symbols "basic"`
+    // (German (Switzerland)). On the Swiss German layout u-umlaut is unshifted
+    // and e-grave shifted; Swiss French (block `fr`) swaps these three keys.
     #[rustfmt::skip]
     const NORMAL: [char; 58] = [
         '\0','\u{1B}','1','2','3','4','5','6',        // 0x00-0x07
-        '7', '8', '9', '0', '\'','^','\u{8}','\t',      // 0x08-0x0F  0x0D = ^ (Totaste, hier direkt)
-        'q', 'w', 'e', 'r', 't', 'z', 'u', 'i',     // 0x10-0x17  (z/y getauscht)
-        'o', 'p', 'ü', '¨', '\n','\0','a', 's',      // 0x18-0x1F  AD11=ü, AD12=¨
-        'd', 'f', 'g', 'h', 'j', 'k', 'l', 'ö',     // 0x20-0x27  AC10=ö
-        'ä', '§', '\0','$', 'y', 'x', 'c', 'v',      // 0x28-0x2F  AC11=ä, TLDE=§
+        '7', '8', '9', '0', '\'','^','\u{8}','\t',      // 0x08-0x0F  0x0D = ^ (dead key, emitted directly)
+        'q', 'w', 'e', 'r', 't', 'z', 'u', 'i',     // 0x10-0x17  (z/y swapped)
+        'o', 'p', 'ü', '¨', '\n','\0','a', 's',      // 0x18-0x1F  AD11, AD12
+        'd', 'f', 'g', 'h', 'j', 'k', 'l', 'ö',     // 0x20-0x27  AC10
+        'ä', '§', '\0','$', 'y', 'x', 'c', 'v',      // 0x28-0x2F  AC11, TLDE
         'b', 'n', 'm', ',', '.', '-', '\0','*',      // 0x30-0x37
         '\0',' ',                                    // 0x38-0x39
     ];
@@ -929,8 +890,7 @@ fn scancode_to_char_de(code: u8, shift: bool, caps: bool) -> Option<char> {
     let ch = if shift { SHIFTED[code as usize] } else { NORMAL[code as usize] };
     if ch == '\0' { return None; }
 
-    // Feststelltaste kehrt die Schreibung um — und zwar UNICODE-weise, sonst
-    // bliebe `ü` als einziges Zeichen der Tabelle davon unberuehrt.
+    // Caps Lock flips case Unicode-aware, so umlauts are affected too.
     if caps && ch.is_alphabetic() {
         let flipped = if shift { ch.to_lowercase().next() } else { ch.to_uppercase().next() };
         if let Some(f) = flipped { return Some(f) }

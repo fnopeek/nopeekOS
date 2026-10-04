@@ -122,16 +122,13 @@ pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
     }
 }
 
-/// Die `index`-te Tabelle mit dieser Signatur — samt Laenge.
+/// The `index`-th table with this signature, with its length.
 ///
-/// **Es gibt mehr als eine SSDT.** Linux laedt die DSDT UND jede SSDT in
-/// denselben Namespace (`acpi_tb_load_namespace`); wer nur die DSDT liest,
-/// dem fehlen Namen, die andere Tabellen deklarieren. Auf Florians IdeaPad
-/// haengt genau daran die Basis der Operationsregion, in der die
-/// Freigabebits der I2C-Controller stehen: `FRTB` ist in der DSDT nicht
-/// aufloesbar.
+/// There can be more than one SSDT. Linux loads the DSDT and every SSDT into
+/// one namespace (`acpi_tb_load_namespace`); reading only the DSDT misses
+/// names declared elsewhere (e.g. an operation region base used by the DSDT).
 ///
-/// `find_table` gibt immer die ERSTE; hier laesst sich durchzaehlen.
+/// `find_table` always returns the first; this one can enumerate.
 pub fn find_table_nth(sig: &[u8; 4], index: usize) -> Option<(usize, usize)> {
     let rsdp = find_rsdp()?;
     let revision = unsafe { *rsdp.add(15) };
@@ -191,7 +188,7 @@ pub fn dsdt() -> Option<(usize, usize)> {
 }
 
 /// FADT "Preferred PM Profile" (offset 45): 2 = Mobile (laptop). Used to
-/// gate the EC battery driver so desktops (NUC = profile 1) never probe for
+/// gate the EC battery driver so desktops (profile 1) never probe for
 /// a battery and show a phantom one.
 pub fn is_mobile() -> bool {
     let Some(fadt) = find_table(b"FACP") else { return false };

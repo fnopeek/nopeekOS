@@ -540,25 +540,22 @@ pub fn init() -> bool {
         log_link_diag();
     }
     crate::kprintln!("[npk] rtl8153: link {}", if up { "up" } else { "down (no cable?)" });
-    // Die saubere Empfangskapazitaet DIESER Strecke merken. Sie geht nicht
-    // mehr in eine Globale des TCP-Stapels — dort galt sie fuer JEDE
-    // Schnittstelle, auch fuer die WLAN-Karte (siehe
-    // `netdev::active_rx_rate`). Hier steht sie, weil hier die USB-Klasse
-    // bekannt ist, und `netdev` holt sie sich fuer die aktive Schnittstelle.
-    // SuperSpeed hat die USB-Luft und bleibt ungedeckelt.
+    // Record the clean RX capacity of this link; it is per interface, not a
+    // TCP-stack global (see `netdev::active_rx_rate`). It lives here because
+    // the USB speed class is known here. SuperSpeed is left uncapped.
     RX_RATE.store(
         if crate::xhci::nic_speed_class() < 2 { 20_000_000 } else { u32::MAX },
         Ordering::Release);
     true
 }
 
-/// Saubere Empfangskapazitaet dieser Strecke in Bytes/s, `u32::MAX` = kein
-/// Deckel. Gesetzt von `init`, gelesen von `netdev::active_rx_rate` — eine
-/// Zahl ohne Schloss, damit sie im Segmentpfad nichts kostet.
+/// Clean RX capacity of this link in bytes/s, `u32::MAX` = no cap. Set by
+/// `init`, read by `netdev::active_rx_rate`; lock-free so the segment path
+/// pays nothing.
 static RX_RATE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(u32::MAX);
 
-/// Fuer `netdev::active_rx_rate`.
+/// For `netdev::active_rx_rate`.
 pub fn rx_rate() -> u32 { RX_RATE.load(Ordering::Acquire) }
 
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Acquire) }
@@ -583,9 +580,9 @@ pub fn tally_reset() {
 }
 
 /// Read + print the chip's hardware tally counters. `rx_missed` is the RX FIFO
-/// overflow drop count straight from the silicon — the definitive answer to
-/// whether the gigabit-wire→USB2-pipe mismatch is overflowing the chip (i.e.
-/// flow control is not throttling the switch) vs. loss happening elsewhere.
+/// overflow drop count from the chip: it tells whether a gigabit wire into a
+/// USB2 pipe overflows the chip (flow control not throttling the switch) or
+/// the loss happens elsewhere.
 pub fn dump_tally(label: &str) {
     if !is_available() { return; }
     let mut b = [0u8; 64];
@@ -595,13 +592,8 @@ pub fn dump_tally(label: &str) {
     }
     // `struct tally_counter` (r8152): tx_packets 0, rx_packets 8, tx_errors
     // 16, rx_errors 24, rx_missed 28, align 30, … tx_aborted 60,
-    // tx_underrun 62.
-    //
-    // **tx_packets stand ganz vorne und wurde nie gelesen.** Damit fehlte
-    // die halbe Antwort: `rx_missed = 0` sagt zwar „der Chip laeuft nicht
-    // ueber, wir sind nicht zu langsam" — aber ob unsere eigenen Rahmen
-    // ueberhaupt HINAUSgehen, sagte keine Zahl. Bei einem `connect
-    // timeout` nach drei SYN ist genau das die Frage.
+    // tx_underrun 62. tx_packets shows whether our own frames leave at all,
+    // which rx_missed cannot answer.
     let tx_packets = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
     let rx_packets = u64::from_le_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]);
     let tx_errors = u64::from_le_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]);

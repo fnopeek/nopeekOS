@@ -96,14 +96,12 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
     None
 }
 
-/// Find first PCI device matching class + subclass
 /// Print every PCI mass-storage controller (class 01h) with its subclass
 /// and prog-if.
 ///
-/// The storage drivers bind by EXACT class, so on a machine where none
-/// matches, the installer halted with "No block device found" and nothing
-/// to go on — and without a disk there is no npkFS, so `dmesg prev` cannot
-/// answer it either. The subclass alone usually names the cause.
+/// The storage drivers bind by exact class; when none matches there is no
+/// disk and no npkFS to keep a log, and the subclass alone usually names the
+/// cause.
 pub fn report_mass_storage() {
     let mut found = 0u32;
     for bus in 0u16..=255 {
@@ -141,22 +139,17 @@ pub fn report_mass_storage() {
     }
 }
 
+/// Find first PCI device matching class + subclass
 pub fn find_by_class(class: u8, subclass: u8) -> Option<PciDevice> {
     find_by_class_n(class, subclass, 0)
 }
 
 /// The `index`-th device of this class, in PCI scan order.
 ///
-/// Eine Klasse kann mehrfach besetzt sein, und welcher Treffer zuerst
-/// kommt, ist Zufall der Busreihenfolge. Fast jede Maschine hat ZWEI
-/// HD-Audio-Controller — den der GPU (HDMI/DP) und den der Southbridge
-/// (Lautsprecher) —, und `find_by_class` gab immer den ersten. Damit lief
-/// der Ton in einen DisplayPort, an dem nichts haengt.
-///
-/// Der Kernel entscheidet dabei NICHT, welcher der richtige ist: er reicht
-/// den n-ten heraus, und welcher taugt, weiss nur der Treiber (hier: der
-/// Codec mit einem analogen Ausgangspin). Dieselbe Trennung wie bei
-/// `drivers::report` — der Kernel traegt, er urteilt nicht.
+/// A class may occur several times, in bus order: most machines have two
+/// HD Audio controllers (the GPU's for HDMI/DP and the chipset's for the
+/// speakers). The kernel does not pick one; only the driver knows which
+/// fits (e.g. the codec with an analog output pin).
 pub fn find_by_class_n(class: u8, subclass: u8, index: u32) -> Option<PciDevice> {
     let mut seen = 0u32;
     for bus in 0u16..=255 {
@@ -209,8 +202,8 @@ pub fn enable_bus_master(addr: PciAddr) {
     write32(addr, 0x04, cmd | 0x04);
 }
 
-/// Die Bridge finden, hinter der `bus` haengt: Sekundaerbus <= bus <=
-/// Subordinatbus. Erst Bus 0 (der Normalfall), dann der volle Durchgang.
+/// Find the bridge behind which `bus` sits: secondary <= bus <=
+/// subordinate. Bus 0 first (the common case), then a full scan.
 fn find_bridge_for_bus(bus: u8) -> Option<PciAddr> {
     let mut search = |b: u8| -> Option<PciAddr> {
         for dev in 0..32u8 {
@@ -242,23 +235,17 @@ fn find_bridge_for_bus(bus: u8) -> Option<PciAddr> {
     None
 }
 
-/// Bus-Mastering auf JEDER Bridge zwischen `addr` und der Wurzel einschalten.
+/// Enable bus mastering on every bridge between `addr` and the root.
 ///
-/// Eine PCI-Bridge leitet eine Transaktion von ihrem Sekundaerbus nur dann
-/// nach oben weiter, wenn in IHREM Kommandoregister Bus Master gesetzt ist
-/// (PCI-zu-PCI-Bridge-Spezifikation 1.2, §3.2.5.3). Steht es dort nicht,
-/// schickt das Geraet seine Leseanfrage ab und bekommt einen Master Abort —
-/// waehrend MMIO von der CPU nach unten tadellos funktioniert, weil das die
-/// andere Richtung ist.
-///
-/// Das trifft genau die Geraete, die die Firmware NICHT selbst benutzt hat:
-/// NVMe (Boot) und xHCI (Tastatur) kommen mit eingeschalteten Bridges aus
-/// UEFI, eine WLAN-Karte nicht. Gefunden am RTL8822CE im IdeaPad, nachdem
-/// drei andere Erklaerungen gemessen und verworfen waren.
+/// A PCI bridge forwards a transaction upstream from its secondary bus only
+/// if Bus Master is set in its own command register (PCI-to-PCI Bridge spec
+/// 1.2, §3.2.5.3). Otherwise the device's DMA read gets a Master Abort while
+/// CPU MMIO downstream still works. Firmware enables this only for devices it
+/// used itself (NVMe for boot, xHCI for the keyboard), not e.g. a WLAN card.
 pub fn enable_bus_master_path(addr: PciAddr) {
     let mut bus = addr.bus;
-    // Acht Ebenen sind mehr, als eine reale Topologie tief wird; der Deckel
-    // ist gegen einen Ring in kaputten Bus-Nummern, nicht gegen Tiefe.
+    // Eight levels exceed any real topology; the cap guards against a loop
+    // in broken bus numbers, not against depth.
     for _ in 0..8 {
         if bus == 0 { return; }
         let Some(bridge) = find_bridge_for_bus(bus) else {
@@ -407,8 +394,8 @@ pub fn msix_enabled(addr: PciAddr) -> bool {
 /// if the device has no MSI-X capability or `entry` is out of range.
 ///
 /// MSI-X writes go straight to the LAPIC (message address
-/// `0xFEE0_0000 | apic<<12`) — no PIC/IOAPIC involved, so the HP firmware
-/// PIC-reinit SMI trap is irrelevant. The MSI-X table lives in a device BAR
+/// `0xFEE0_0000 | apic<<12`) — no PIC/IOAPIC involved, so firmware SMI traps
+/// on PIC reinit are irrelevant. The MSI-X table lives in a device BAR
 /// (the cap's Table Offset/BIR); we write it via identity-mapped MMIO.
 pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> bool {
     // Walk the capability list for MSI-X (cap ID 0x11).
@@ -492,7 +479,7 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
 }
 
 /// Re-point an already-programmed MSI-X table `entry` of `dev` to deliver to
-/// LAPIC `dest_apic` — rewrites ONLY the message address (one MMIO write).
+/// LAPIC `dest_apic` — rewrites only the message address (one MMIO write).
 /// Lets the IRQ subsystem route a device's interrupt to whichever core is
 /// about to wait on it (so the IRQ wakes the right core out of HLT). The entry
 /// must already be programmed + the table page mapped (via `program_msix`).
@@ -553,7 +540,7 @@ pub fn has_msix(dev: PciAddr) -> bool {
     find_cap(dev, 0x11) != 0
 }
 
-/// Program `dev`'s plain MSI capability (0x05) for ONE vector delivered to
+/// Program `dev`'s plain MSI capability (0x05) for one vector delivered to
 /// LAPIC `dest_apic`, and enable it. For devices without MSI-X — the
 /// RTL8822CE among them: rtw88 asks Linux for exactly one MSI vector
 /// (`pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI | PCI_IRQ_INTX)`).

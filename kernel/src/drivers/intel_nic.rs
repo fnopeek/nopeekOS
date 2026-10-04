@@ -106,13 +106,9 @@ const TXD_CMD_IFCS: u8  = 1 << 1;   // Insert FCS/CRC
 const TXD_CMD_RS: u8    = 1 << 3;   // Report Status
 const TXD_STAT_DD: u8   = 1 << 0;   // Descriptor Done
 
-// 32. Briefly bumped to 256 in v0.225.24 (to give the microvm RX producer more
-// headroom — it drains this shared ring only every ~2.7 ms on a shared core).
-// REVERTED in v0.225.28: it correlated with intermittent HOST OTA-download
-// truncation ("size mismatch"), and it is the ONLY host-NIC change in that
-// window. The host's own download path busy-spins the drain so it never needed
-// the extra depth; the microvm's ring-depth need is better met by a faster
-// producer cadence (dedicated core + spin), NOT by enlarging this shared HW ring.
+// Ring depth. The host download path busy-spins the drain and needs no more;
+// a consumer that drains slowly should poll faster rather than deepen this
+// shared ring.
 const NUM_RX_DESC: usize = 32;
 const NUM_TX_DESC: usize = 32;
 const RX_BUF_SIZE: usize = 2048;

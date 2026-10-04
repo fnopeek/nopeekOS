@@ -227,8 +227,7 @@ pub fn block_count() -> Option<u64> {
     };
     let after_offset = total.map(|t| t.saturating_sub(PARTITION_OFFSET.load(Ordering::Acquire)))?;
     let part_size = PARTITION_SIZE.load(Ordering::Acquire);
-    // 0 = unset → fall back to the historical "whole disk minus offset"
-    // behaviour. With a real GPT partition the installer sets a positive
+    // 0 = unset → "whole disk minus offset". With a real GPT partition the installer sets a positive
     // size and we cap there so the bitmap can't allocate into the
     // backup-GPT region at the end of the disk (writes would hit
     // BlkError::OutOfRange).
@@ -260,10 +259,9 @@ pub fn has_discard() -> bool {
 }
 
 pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
-    // Same partition_offset correction as read_block / write_block —
-    // without it, TRIM commands land in the ESP / GPT area in front of
-    // our partition and slowly shred the bootloader + previously-
-    // written kernel.bin. Every delete's flush_trims() was doing this.
+    // Same partition_offset correction as read_block / write_block;
+    // without it, TRIM would hit the ESP / GPT area in front of our
+    // partition and destroy the bootloader and kernel.
     let actual = start + PARTITION_OFFSET.load(Ordering::Acquire);
     if nvme::is_available() {
         nvme::discard_blocks(actual, count)

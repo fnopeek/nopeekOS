@@ -13,8 +13,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // Battery state reported by the AML driver (aml.wasm), encoded as the bar
 // expects: (status << 8) | percent, or -1 for "no battery / no report yet".
 // The driver runs the firmware's _BST/_BIF (vendor-independent) and pushes
-// here; `npk_battery()` returns this. Replaces the old per-device EC offset
-// hardcode (which only worked on one HP model).
+// here; `npk_battery()` returns this.
 static REPORT: AtomicI32 = AtomicI32::new(-1);
 
 /// Called by the AML driver via `npk_battery_report`.
@@ -79,9 +78,8 @@ pub struct BatteryState {
 
 /// Read the current battery state via the standardised SBS-over-SMBus path
 /// (works when the pack sits directly on the bus). Laptops that hide the pack
-/// behind the EC report through the AML driver instead — see [`cached`]. The
-/// former per-device EC offset hardcode was removed in favour of aml.wasm,
-/// which runs the firmware's own `_BST`/`_BIF` and is vendor-independent.
+/// behind the EC report through the AML driver instead, which runs the
+/// firmware's own `_BST`/`_BIF` — see [`cached`].
 pub fn read() -> Option<BatteryState> {
     read_sbs()
 }

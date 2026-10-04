@@ -1,15 +1,14 @@
 //! Intel I225/I226 (igc) data path — ported from Linux
 //! `drivers/net/ethernet/intel/igc/igc_main.c`.
 //!
-//! Replaces the igc branch of `intel_nic`, which polled a 32-descriptor ring
-//! with no interrupt: at 1 Gbit/s that is ~0.4 ms of traffic, so any gap in
-//! the polling dropped frames on the card. Here: 256-descriptor rings
-//! (`IGC_DEFAULT_RXD/TXD`), one MSI-X vector for queue pair 0 with hardware
-//! auto-mask (`igc_configure_msix`), the NAPI fiber (`net::napi`) drains on
-//! the interrupt and re-arms it when the ring is empty (`igc_ring_irq_enable`).
+//! A polled 32-descriptor ring holds only ~0.4 ms of traffic at 1 Gbit/s, so
+//! this uses 256-descriptor rings (`IGC_DEFAULT_RXD/TXD`), one MSI-X vector
+//! for queue pair 0 with hardware auto-mask (`igc_configure_msix`), and the
+//! NAPI fiber (`net::napi`) drains on the interrupt and re-arms it when the
+//! ring is empty (`igc_ring_irq_enable`).
 //!
-//! Link and PHY stay as the firmware left them (no `CTRL.RST`), as before:
-//! the ports below are the parts of `igc_configure`/`igc_up` that set up the
+//! Link and PHY stay as the firmware left them (no `CTRL.RST`): the ports
+//! below are the parts of `igc_configure`/`igc_up` that set up the
 //! queues and the interrupt, not the PHY bring-up.
 
 use core::sync::atomic::{AtomicU8, Ordering};

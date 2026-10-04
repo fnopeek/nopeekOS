@@ -156,8 +156,8 @@ pub fn report() {
     }
 }
 
-/// `ec gpe off|on` — A/B for power measurements: take the EC's GPE out of
-/// the SCI (events are then only drained on aml's 10-s battery round).
+/// `ec gpe off|on` (diagnostic): take the EC's GPE out of the SCI or put it
+/// back. While off, events are only drained on aml's periodic battery round.
 pub fn set_ec_gpe(on: bool) -> bool {
     let Some(b) = blocks() else { return false };
     if !ARMED.load(Ordering::Acquire) { return false; }
@@ -172,7 +172,7 @@ pub fn set_ec_gpe(on: bool) -> bool {
     true
 }
 
-/// `ec mode legacy|acpi` — A/B: hand the events back to the firmware (SMM)
+/// `ec mode legacy|acpi` (diagnostic): hand the events back to the firmware (SMM)
 /// with FADT.ACPI_DISABLE, or take them again with ACPI_ENABLE. Returns
 /// SCI_EN afterwards.
 pub fn set_acpi_mode(acpi: bool) -> Option<bool> {

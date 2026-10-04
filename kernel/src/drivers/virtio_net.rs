@@ -6,9 +6,8 @@
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
 
 /// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
-/// at init. Lets the off-vCPU data-plane busy-poll for RX arrival WITHOUT taking
-/// the DEVICE lock every spin iteration (the lock-hammer that made the earlier
-/// worker-spin net-negative). 0 = not yet up.
+/// at init. Lets the off-vCPU data plane busy-poll for RX arrival without
+/// taking the DEVICE lock every spin iteration. 0 = not yet up.
 static RX_USED_IDX_PTR: AtomicU64 = AtomicU64::new(0);
 /// The device segments and checksums TCPv4 GSO frames (`send_tso`).
 static TSO: AtomicBool = AtomicBool::new(false);
@@ -68,17 +67,10 @@ const DESC_F_WRITE: u16 = 2;
 
 const RX_QUEUE: u16 = 0;
 const TX_QUEUE: u16 = 1;
-// RX ring depth. 32 buffers (~48 KB) under-runs at high throughput: if
-// `net::poll()` can't drain in time (BSP vCPU pump spinning, Core 0
-// compositing, or the POLLING guard contended), the ring fills and
-// QEMU/slirp DROPS inbound frames → guest TCP sees loss → backs off →
-// throughput collapse + latency spikes. 256 buffers (~387 KB ≈ 3 ms at 1 Gbit)
-// was too shallow: a download burst that outran a brief drain gap overflowed the
-// host NIC RX ring → QEMU/slirp DROPPED frames → the SERVER retransmitted →
-// its cwnd collapsed (the measured per-connection download lottery: server
-// total_retrans 6-14 on slow runs, 0 on fast). 1024 gives ~12 ms of cushion so
-// a transient burst is absorbed instead of lost. Needs QEMU `rx_queue_size=1024`
-// (else capped to the device's actual queue size via `RX_BUFFERS.min(rx_qs)`).
+// RX ring depth. If `net::poll()` cannot drain in time, a full ring makes
+// QEMU drop inbound frames, the sender retransmits and its cwnd collapses.
+// 1024 buffers give ~12 ms of cushion at 1 Gbit. Needs QEMU
+// `rx_queue_size=1024` (else capped via `RX_BUFFERS.min(rx_qs)`).
 const RX_BUFFERS: usize = 1024;
 
 // On a full TX ring, spin-reclaim this many times before dropping the
@@ -90,10 +82,9 @@ const TX_RECLAIM_SPINS: u32 = 4096;
 pub const MTU: usize = 1514; // Ethernet max frame
 
 /// A GSO super-frame's data buffer: eth + a full 64 KB IP packet. One per
-/// in-flight super-frame, so it is ONE data descriptor instead of one per
-/// MTU chunk (46): a 256-entry ring held five super-frames, filled at once
-/// under upload, and `send_tso` spun on it holding `DEVICE` — the lock the
-/// RX side needs to take the ACKs in.
+/// in-flight super-frame, so it is one data descriptor instead of one per MTU
+/// chunk; otherwise the ring fills under upload and `send_tso` spins holding
+/// `DEVICE`, the lock the RX side needs to take ACKs in.
 const TSO_SLOT_SIZE: usize = 66 * 1024;
 const TSO_SLOTS: usize = 32;
 const NO_TSO_SLOT: u8 = u8::MAX;
@@ -150,10 +141,8 @@ struct VirtioNet {
     /// Pre-allocated DMA-stable TX data pool — one MTU-sized slot per
     /// descriptor. `send` copies the caller's frame here so the device
     /// reads from memory that outlives the caller's stack-local `Vec`
-    /// (which otherwise would be dropped + heap-recycled before QEMU's
-    /// slirp main loop wakes up to do the DMA, on real HW this race
-    /// happens to lose less often because the NIC engine reads
-    /// synchronously). Modelled on `intel_nic::send`'s `tx_bufs`.
+    /// (which may be freed and reused before QEMU's slirp loop does the DMA).
+    /// Modelled on `intel_nic::send`'s `tx_bufs`.
     tx_data: u64,
     /// `TSO_SLOTS` super-frame buffers, `TSO_SLOT_SIZE` each.
     tso_data: u64,
@@ -186,11 +175,9 @@ pub fn init() -> bool {
     // config layout: device config moves 20 → 24). Falls back to polling if
     // the device has no usable MSI-X.
     //
-    // net-RX wired end-to-end: (1) here — enable RX MSI-X; (2) nat::pump routes
-    // the IRQ to the vCPU/BSP-pump core; (3) the IRQ wakes that core out of HLT
-    // → the run-loop pump delivers RX promptly (event-driven, not pump-cadence-
-    // bound); (4) recv() does NAPI-style RX-IRQ suppression during the drain so
-    // the device doesn't interrupt per packet.
+    // Path: enable RX MSI-X here; nat::pump routes the IRQ to the vCPU/BSP-pump
+    // core, waking it out of HLT; recv() suppresses RX IRQs NAPI-style during a
+    // drain so the device does not interrupt per packet.
     const NET_RX_IRQ_ENABLED: bool = true;
     let rx_vec = if NET_RX_IRQ_ENABLED {
         crate::irq::register(dev.addr, 0).unwrap_or(0)
@@ -215,10 +202,9 @@ pub fn init() -> bool {
         // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
         // (what QEMU's transitional device offers a legacy driver). Either lets us
         // forward the guest's GSO super-frame AS-IS (device segments + checksums).
-        // Linux `virtnet_probe`: every TSO feature sits INSIDE the F_CSUM
-        // branch. A device that cannot checksum cannot segment — QEMU with a
-        // slirp backend still lists the legacy F_GSO bit (no vnet header
-        // behind it), and trusting that bit alone cut the upload to 2 Mbit.
+        // Linux `virtnet_probe`: every TSO feature sits inside the F_CSUM
+        // branch. A device that cannot checksum cannot segment; QEMU with a
+        // slirp backend still lists the legacy F_GSO bit without backing it.
         let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
         let legacy_gso = features & (F_CSUM | F_GSO) == (F_CSUM | F_GSO);
         let offload = modern || legacy_gso;
@@ -299,10 +285,8 @@ pub fn init() -> bool {
 
         // Allocate TX data pool — one MTU slot per descriptor. The
         // sender copies the frame here so the descriptor points at
-        // memory that outlives the caller's stack frame. Without this
-        // QEMU + slirp races the heap allocator and DMA-reads recycled
-        // garbage (intermittent under real HW, deterministic under
-        // QEMU on AMD-host where slirp's event loop wakes up later).
+        // memory that outlives the caller's stack frame; otherwise QEMU/slirp
+        // can DMA-read recycled heap memory.
         let tx_data_pages = (tx_qs as usize * MTU + 4095) / 4096;
         let tx_data = match memory::allocate_contiguous(tx_data_pages) {
             Some(a) => a,
@@ -422,8 +406,7 @@ pub fn init() -> bool {
 }
 
 /// LAPIC vector the host NIC raises on RX (0 = none / polling). The microvm
-/// routes this IRQ to its vCPU core (step 2) so RX arrival wakes the vCPU to
-/// pump. Returns 0 until net-RX is enabled end-to-end.
+/// routes this IRQ to its vCPU core so RX arrival wakes the vCPU to pump.
 pub fn rx_irq_vector() -> u8 {
     DEVICE.lock().as_ref().map_or(0, |d| d.rx_msix_vector)
 }
@@ -494,7 +477,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     }
 
     // Batch the TX doorbell: an outw() notify is a VM-exit, and notifying per
-    // frame was a per-packet exit on the upload path (the asymmetry vs download).
+    // frame would be a per-packet exit on the upload path.
     // Mark pending; net::poll() flushes it once per cycle (tx_flush). Flush
     // immediately only if the ring is filling, so QEMU drains before send() has
     // to spin-reclaim.
@@ -512,9 +495,9 @@ const VNET_HDR_GSO_TCPV4: u8 = 1;
 
 /// Hand the device a TCPv4 GSO super-frame to segment and checksum — Linux
 /// virtio_net `xmit_skb` with `CHECKSUM_PARTIAL` + `SKB_GSO_TCPV4`. The TCP
-/// check must hold the pseudo-header seed. Only for REAL GSO frames: this
-/// QEMU's legacy F_GSO got NEEDS_CSUM wrong on small frames (0.226.60), so
-/// everything that fits one MSS keeps the plain `send` with a full checksum.
+/// check must hold the pseudo-header seed. Only for real GSO frames: QEMU's
+/// legacy F_GSO gets NEEDS_CSUM wrong on small frames, so anything that fits
+/// one MSS uses the plain `send` with a full checksum.
 pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result<(), NetError> {
     if frame.len() > TSO_SLOT_SIZE { return Err(NetError::FrameTooLarge); }
     let mut lock = DEVICE.lock();
@@ -746,8 +729,7 @@ impl VirtioNet {
     fn repost_rx(&mut self, desc_idx: usize) {
         // Re-add this buffer to the RX available ring — but DON'T ring the
         // doorbell per packet. An `outw` to the notify port is a VM-exit; doing
-        // it once per received packet costs a VM-exit per packet (~100k/s under
-        // load) and was a major throughput/latency tax. We publish the buffer to
+        // it once per received packet costs a VM-exit per packet. We publish the buffer to
         // the avail ring now and batch the notify (see recv): one doorbell per
         // drain instead of per packet. A mid-burst safety notify keeps the device
         // from running dry if a caller doesn't drain to empty.

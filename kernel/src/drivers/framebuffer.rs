@@ -158,7 +158,7 @@ pub fn set_shadow_ggtt(a: u32, b: u32) {
 
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
-const FG_COLOR: u32 = 0x00E8E8E8; // Near-white (was light gray)
+const FG_COLOR: u32 = 0x00E8E8E8; // Near-white
 const BG_COLOR: u32 = 0x00000000; // Black
 /// Colour of the `[npk]` tag. Neutral grey: dim enough to read as a tag
 /// rather than as content, without putting a hue on every boot line.
@@ -166,13 +166,11 @@ static NPK_TAG_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 
 /// Rows the console scrolls at once when it fills up.
 ///
-/// A scroll repaints everything, and on real hardware the framebuffer is
-/// effectively uncached (firmware MTRR — see `diagnose_fb_memory_type`), so
-/// that full blit runs at ~155 MB/s: ~50 ms per scroll at 1080p, four times
-/// that at 4K. Scrolling one row per line spends it on EVERY line of boot
-/// output — measured 268 lines over 67 rows = ~200 full blits. Moving
-/// several rows at a time amortises it; the text jumps instead of sliding,
-/// which is what framebuffer consoles have always done at boot.
+/// A scroll repaints everything, and a framebuffer left uncached by a
+/// firmware MTRR (see `diagnose_fb_memory_type`) blits slowly, so scrolling
+/// one row per line costs a full blit per boot line. Moving several rows at
+/// a time amortises it; the text jumps instead of sliding, as framebuffer
+/// consoles do at boot.
 const SCROLL_ROWS: u32 = 8;
 
 pub fn set_npk_color(color: u32) {
@@ -200,12 +198,10 @@ pub fn init_from_gpu() {
         width, height, addr, bpp, crate::gpu::driver_name());
 
     // Map framebuffer pages (for GOP; Intel Xe uses identity-mapped RAM).
-    // WRITE_COMBINE is essential: the GOP MMIO framebuffer is otherwise
-    // effectively uncached on real Intel HW (firmware MTRR), so every CPU
-    // blit write is a separate UC transaction → brutally slow scrolling /
-    // dragging / cursor on bare metal (QEMU's fb is RAM, so it never showed
-    // there). WC batches writes into burst transactions. PAT index 5 = WC is
-    // programmed in paging::init.
+    // Write-combining is essential: the GOP MMIO framebuffer is otherwise
+    // uncached on Intel hardware (firmware MTRR), so every CPU write is a
+    // separate UC transaction (QEMU's fb is RAM and hides this). WC batches
+    // writes into bursts. PAT index 5 = WC is programmed in paging::init.
     if !crate::gpu::is_native() {
         let fb_size = pitch as u64 * height as u64;
         for page_off in (0..fb_size).step_by(4096) {
@@ -217,9 +213,8 @@ pub fn init_from_gpu() {
                     | crate::paging::PageFlags::WRITE_COMBINE,
             );
         }
-        // Diagnose the EFFECTIVE memory type of the FB: a firmware MTRR of
-        // type UC over this region overrides our PAT WC (UC always wins) →
-        // the blit runs at ~150 MB/s instead of GB/s. Read-only.
+        // Diagnose the effective memory type of the FB: a firmware UC MTRR
+        // over this region overrides our PAT WC (UC always wins). Read-only.
         diagnose_fb_memory_type(addr);
     }
 
@@ -465,9 +460,9 @@ pub fn dump_memory_type() {
     crate::kprintln!("[mtrr] native_gpu={} (WC mapping only applied for GOP)",
         crate::gpu::is_native());
     // Which display device is this, and did the native (display-only) Xe
-    // driver claim it? On a non-ADL-N GPU it falls back to the slow GOP UC
-    // blit — the device ID tells us if it's a trivial ID-add (Gen12) or a
-    // new display-gen port.
+    // driver claim it? An unsupported GPU falls back to the slow GOP UC
+    // blit; the device ID tells whether it is an ID-add (Gen12) or a new
+    // display generation.
     if let Some(dev) = crate::pci::find_by_class(0x03, 0x00) {
         crate::kprintln!(
             "[gfx] display PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] native_detected={} driver={}",
@@ -479,10 +474,9 @@ pub fn dump_memory_type() {
     diagnose_fb_memory_type(addr);
 }
 
-/// Read-only: report the framebuffer's EFFECTIVE memory type (firmware
+/// Read-only: report the framebuffer's effective memory type (firmware
 /// MTRRs vs our PAT WC). A UC MTRR over this region overrides PAT WC (UC
-/// always wins) → the ~150 MB/s blit we measured. Confirms the root cause
-/// before we touch MTRR programming.
+/// always wins) and makes the blit slow.
 fn diagnose_fb_memory_type(fb_addr: u64) {
     // SAFETY: rdmsr on architectural MTRR/PAT MSRs, all read-only.
     unsafe fn rdmsr(msr: u32) -> u64 {
@@ -538,7 +532,7 @@ fn diagnose_fb_memory_type(fb_addr: u64) {
         else { "(NOT WC → overrides our PAT WC → slow UC blit, this is the wall)" },
     );
 
-    // Read back the FB PTE and decode its PAT index — confirm WE asked WC.
+    // Read back the FB PTE and decode its PAT index to confirm we asked for WC.
     if let Some((entry, level)) = crate::paging::leaf_entry(fb_addr) {
         let pwt = (entry >> 3) & 1;
         let pcd = (entry >> 4) & 1;

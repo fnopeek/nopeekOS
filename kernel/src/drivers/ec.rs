@@ -3,7 +3,7 @@
 //! Ported from Linux `drivers/acpi/ec.c` (polling path). The EC is the
 //! microcontroller that owns battery / thermal / lid state on laptops; its
 //! 256-byte RAM is read one byte at a time via the RD_EC command over the
-//! ISA ports 0x62 (data) / 0x66 (status+command). On HP (and most x86) the
+//! ISA ports 0x62 (data) / 0x66 (status+command). On most x86 laptops the
 //! battery lives here as plain EC-RAM fields (remaining/full capacity,
 //! status) that the DSDT's `_BST`/`_BIF` read.
 //!
@@ -27,7 +27,7 @@ const CMD_READ: u8 = 0x80; // RD_EC
 const CMD_WRITE: u8 = 0x81; // WR_EC
 const CMD_QUERY: u8 = 0x84; // QR_EC
 
-/// Statusbit: der EC hat ein EREIGNIS zu melden (ec.c: `ACPI_EC_FLAG_SCI`).
+/// Status bit: the EC has an event pending (ec.c: `ACPI_EC_FLAG_SCI`).
 const EC_FLAG_SCI: u8 = 0x20;
 
 fn udelay(us: u64) {
@@ -70,24 +70,18 @@ pub fn read(addr: u8) -> Option<u8> {
     Some(unsafe { inb(EC_DATA) })
 }
 
-/// Eine anstehende EC-ABFRAGE abholen (`QR_EC`), oder `None`.
+/// Fetch a pending EC query (`QR_EC`), or `None`.
 ///
-/// Der EC meldet Ereignisse — Akku rein/raus, Netzteil, Deckel, Tasten —
-/// indem er Bit 5 seines Statusregisters setzt. Das Betriebssystem holt
-/// daraufhin mit `QR_EC` (0x84) eine Ereignisnummer ab und ruft im AML
-/// `_Q<nr>`. Erst DORT traegt die Firmware ihren Zustand nach; eine DSDT
-/// mit 56 solchen Behandlern (gemessen auf einem Lenovo IdeaPad) haengt
-/// ihre halbe Geraeteverwaltung daran.
+/// The EC signals events (battery, AC adapter, lid, hotkeys) by setting bit 5
+/// of its status register. The OS then fetches an event number with `QR_EC`
+/// (0x84) and runs `_Q<nr>` in AML; only there does the firmware update its
+/// state. Without it, e.g. a battery's `_STA` may never report "present".
 ///
-/// Wir haben das nie getan, und deshalb stand dort auf einem Notebook mit
-/// vollem Akku `_STA = 0x0F` — Geraet da, Bit4 frei, also "kein Akku
-/// eingelegt". Die Firmware war nie gefragt worden.
-///
-/// Weg aus Linux `drivers/acpi/acpica`/`ec.c`, Abfragepfad: Statusbit
-/// pruefen, Kommando schreiben, EIN Byte lesen. Null heisst "nichts
-/// anliegend" (ec.c behandelt 0 ausdruecklich als leere Abfrage).
+/// Query path from Linux `ec.c`: check the status bit, write the command,
+/// read one byte. Zero means "nothing pending" (ec.c treats 0 as an empty
+/// query).
 pub fn query() -> Option<u8> {
-    // SAFETY: ring-0 ISA-Portzugriff auf den EC, wie im ganzen Modul.
+    // SAFETY: ring-0 ISA port access to the EC, as throughout this module.
     if unsafe { inb(EC_SC) } & EC_FLAG_SCI == 0 { return None; }
     if !wait_ibf_clear() { return None; }
     unsafe { outb(EC_SC, CMD_QUERY); }

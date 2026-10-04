@@ -226,7 +226,7 @@ pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
 /// Durability barrier. We negotiate write-through (no VIRTIO_BLK_F_FLUSH in
 /// `init`), so per the virtio spec the device keeps no volatile write cache and
 /// there is nothing to flush — an explicit no-op so `blkdev::flush()` has a
-/// backend on the QEMU path. (HW durability testing targets NVMe regardless.)
+/// backend on the QEMU path.
 pub fn flush() -> Result<(), BlkError> {
     Ok(())
 }

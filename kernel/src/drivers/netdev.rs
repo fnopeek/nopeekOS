@@ -13,21 +13,16 @@ pub const MTU: usize = 1514;
 
 static WASM_NIC_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WASM_NIC: Mutex<WasmNic> = Mutex::new(WasmNic::empty());
-/// The spill ring lives in its OWN static, and that is not cosmetic: a static
-/// goes into `.bss` only if it is entirely zero, and the granularity is the
-/// whole symbol. Sharing one with `FqCodel` — whose `link: [EMPTY; CAP]` is
-/// `[0xFFFF; 64]` — put 128 non-zero bytes next to three quarters of a
-/// megabyte of zeros and wrote all of it into the kernel image. Measured:
-/// `.data` 351 672 -> 1 030 840, `.bss` unchanged, kernel.efi +663 KB — on an
-/// image that ships over the very WiFi link it was meant to fix.
+/// The spill ring has its own static so it stays in `.bss`: a static lands
+/// there only if the whole symbol is zero, and `FqCodel` contains non-zero
+/// initializers that would pull the entire ring into `.data` and the image.
 /// Never nest this lock inside another; `register_wasm_nic` is the one place
 /// that holds both, and it takes WASM_NIC first.
 static WASM_NIC_RX: Mutex<Ring<RX_RING>> = Mutex::new(Ring::new());
 
-// Frame ring between the kernel net stack and a WASM NIC driver. Unlike a
-// single-slot mailbox (which overwrites — and so DROPS — an undrained frame on
-// the next submit), this absorbs bursts: the producer drops only when the ring
-// is genuinely full, never clobbering a frame already queued. One slot is kept
+// Frame ring between the kernel net stack and a WASM NIC driver. It absorbs
+// bursts: the producer drops only when the ring is full, never clobbering a
+// frame already queued. One slot is kept
 // empty to distinguish full from empty. All access is under the WASM_NIC_RX
 // lock, so plain indices suffice (no atomics needed).
 struct Ring<const N: usize> {
@@ -62,21 +57,13 @@ impl<const N: usize> Ring<N> {
     fn clear(&mut self) { self.head = 0; self.tail = 0; }
 }
 
-// RX is a FALLBACK: the driver normally delivers each frame straight into the IP
+// RX is a fallback: the driver normally delivers each frame straight into the IP
 // stack from its own fiber (net::wasm_deliver_rx, the NAPI topology) and only
 // spills to this ring when Core 0 holds the drain guard.
 //
-// 64 was sized for "occasionally, briefly". Measured on the device at ~100
-// Mbit: `rx ring in 798365 dropped 1508 (ring full — driver outran core-0
-// drain)`, while the DRIVER's own pool reported `pool-exhausted 0` — so the
-// frames survived the radio, survived the card, and were thrown away here.
-// Every one of them is a retransmission the sender then has to make, which is
-// what kept the congestion window small all evening.
-//
-// 512 entries ≈ 775 KB — of BSS, now that the ring has its own all-zero
-// static. The first attempt at this number landed in `.data` and put 663 KB
-// into every OTA kernel download. The guard is held for the length of one
-// Core-0 drain, and at 100 Mbit 64 frames is under a millisecond of cover.
+// The ring must cover one full Core-0 drain at line rate; every frame dropped
+// here costs the sender a retransmission. 512 entries is about 775 KB of
+// `.bss`.
 const RX_RING: usize = 512;
 
 struct WasmNic {
@@ -141,27 +128,22 @@ pub fn wasm_nic_available() -> bool {
 }
 
 // RFC 2863, as Linux implements it in `link_watch.c` / `rfc2863_policy`: a
-// link has TWO independent facts, not one.
+// link has two independent facts.
 //
 //   carrier — the physical/association link exists
 //   dormant — it exists but is not usable yet (802.1X / WPA not done)
 //   operstate UP = carrier && !dormant
 //
-// We had a single `link_up` carrying all three meanings, so every 4-way
-// handshake — a second of `authorized == false` on a perfectly healthy
-// association — read as "the link went away" and re-ran DHCP.
+// Keeping them apart means a 4-way handshake (rekey) is not mistaken for a
+// lost link that would re-run DHCP.
 static WASM_CARRIER: AtomicBool = AtomicBool::new(false);
 static WASM_DORMANT: AtomicBool = AtomicBool::new(false);
 
 /// Driver reports carrier and dormant separately (npk_netdev_set_link_state).
 ///
-/// **Jeder Wechsel geht ins Log, mit seinem Takt.** Der Zustand der Karte
-/// entschied bisher still darueber, ob `netdev::send` ueberhaupt noch einen
-/// Rahmen annimmt (`active_link_up`) — und ein Traegerverlust von einer
-/// halben Sekunde sah hinterher genauso aus wie „das WLAN war die ganze
-/// Zeit da". `tick_link_and_reconfigure` protokolliert zwar Linkwechsel,
-/// laeuft aber nur am Prompt (aus `read_line_with_tab`), also waehrend
-/// eines Downloads GAR NICHT. Genau dann faellt es aus.
+/// Every change is logged with its tick: this state decides whether `send`
+/// accepts frames at all, and `tick_link_and_reconfigure` only logs link
+/// changes while the prompt is running, not during a transfer.
 pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
     let was_c = WASM_CARRIER.swap(carrier, Ordering::AcqRel);
     let was_d = WASM_DORMANT.swap(dormant, Ordering::AcqRel);
@@ -185,7 +167,7 @@ pub fn wasm_nic_link_up() -> bool {
         && !WASM_DORMANT.load(Ordering::Acquire)
 }
 
-/// Association exists, whether or not it is keyed yet. This is what must NOT
+/// Association exists, whether or not it is keyed yet. This is what must not
 /// flap during a rekey, and what the link-change logic keys on.
 pub fn wasm_nic_carrier() -> bool {
     wasm_nic_available() && WASM_CARRIER.load(Ordering::Acquire)
@@ -206,17 +188,16 @@ static INTEL_LINK: AtomicBool = AtomicBool::new(false);
 /// Cached NIC preference: true = prefer WiFi (wlan), false = prefer wired (LAN).
 /// Refreshed by refresh_link_state() (Core 0, ~1 Hz) from config `net_prefer`,
 /// so active() stays cheap + IRQ-safe. Default = wired (the usual convention).
-/// Whichever side is preferred wins ONLY when it has a usable link; otherwise we
+/// Whichever side is preferred wins only when it has a usable link; otherwise we
 /// fall back to the other interface if it has one.
 static PREFER_WIFI: AtomicBool = AtomicBool::new(false);
 
-/// Refresh the cached wired link state. Core 0 only (~1 Hz). ONLY the intel NIC
-/// is polled live — a cheap, safe MMIO STATUS.LU read. The rtl8153 carrier is
-/// NOT polled: reading it needs a USB control transfer, which takes the xHCI NIC
+/// Refresh the cached wired link state. Core 0 only (~1 Hz). Only the intel NIC
+/// is polled live, a cheap MMIO STATUS.LU read. The rtl8153 carrier is not
+/// polled: reading it needs a USB control transfer, which takes the xHCI NIC
 /// lock, and a timer IRQ landing mid-lock (poll_mouse takes the same lock)
-/// deadlocks Core 0 (observed: networking died after ~20 ticks, instantly when
-/// the USB NIC also carried traffic). A USB-LAN NIC's cable state is inferred
-/// from presence + the WiFi link instead — see active().
+/// deadlocks Core 0. A USB-LAN NIC's cable state is inferred from presence and
+/// the WiFi link instead; see active().
 pub fn refresh_link_state() {
     INTEL_LINK.store(intel_nic::link_up(), Ordering::Relaxed);
     PREFER_WIFI.store(
@@ -228,7 +209,7 @@ pub fn refresh_link_state() {
 }
 
 /// The active interface, honouring the `net_prefer` config (cached in
-/// PREFER_WIFI). The preferred side (wired by default, or WiFi) wins ONLY when it
+/// PREFER_WIFI). The preferred side (wired by default, or WiFi) wins only when it
 /// has a usable link; if it has none we fall back to the other interface if that
 /// one does. "Usable link" = intel STATUS.LU live (read live), or a USB-LAN
 /// (rtl8153) present (its carrier can't be safely probed, so presence is the best
@@ -247,11 +228,10 @@ pub fn active() -> Active {
         if intel_up { return Active::Intel; }
         if rtl_present { return Active::Rtl; }
     } else {
-        // Prefer wired — but only a PROVEN wired link (intel STATUS.LU) outranks
+        // Prefer wired, but only a proven wired link (intel STATUS.LU) outranks
         // a proven WiFi link. A USB-LAN (rtl8153) has no carrier detect, so a
-        // cable-less / merely-enumerated dongle must NOT strand a working WiFi
-        // link (that would route DHCP out the dead NIC → no lease). So it ranks
-        // BELOW associated WiFi.
+        // cable-less dongle must not strand a working WiFi link (DHCP would go
+        // out the dead NIC); it ranks below associated WiFi.
         if intel_up { return Active::Intel; }
         if wifi_up { return Active::Wasm; }
         if rtl_present { return Active::Rtl; }
@@ -263,68 +243,45 @@ pub fn active() -> Active {
     Active::None
 }
 
-/// Saubere Empfangskapazitaet der AKTIVEN Schnittstelle in Bytes/s.
-/// `u32::MAX` = kein Deckel.
+/// Clean receive capacity of the active interface in bytes/s; `u32::MAX` means
+/// no cap. Used to size the TCP receive window: offering the whole buffer on a
+/// slow link fills the AP's queue with our own packets (bufferbloat).
 ///
-/// **Das hier war eine GLOBALE, und gesetzt hat sie genau ein Treiber.**
-/// `rtl8153::init` rief `tcp::set_link_rx_rate(20_000_000)`, und damit galt
-/// der Wert des USB-Dongles fuer JEDE Schnittstelle — auch fuer die
-/// WLAN-Karte, die ihre Kapazitaet nie gemeldet hat. Steckte der Dongle,
-/// bekam das WLAN versehentlich ein vernuenftiges Fenster; steckte er
-/// nicht, blieb der Wert auf `u32::MAX` und das WLAN bot den GANZEN Puffer
-/// an: 8 MiB auf einer 50-Mbit-Strecke, also das Dreissigfache ihres BDP.
-///
-/// Gemessen am Geraet (2026-09-21): `snd_wnd=8387072` und `rtt=47203` us
-/// auf einer Strecke, die unbelastet 3-5 ms hat. Die uebrigen ~42 ms waren
-/// unsere eigenen Pakete in der Warteschlange des AP — der lief ueber,
-/// `lost=106` bei `retr=175` (8,6 %), und der Durchsatz fiel auf 1,4 Mbit.
-/// Bufferbloat, von uns verursacht.
-///
-/// Die Kapazitaet ist eine Eigenschaft der LINK-KLASSE, und sie gehoert
-/// deshalb hierher, wo die Klasse bekannt ist — nicht in eine Globale, die
-/// der zuletzt gestartete Treiber gewinnt.
+/// Capacity is a property of the link class, so it lives here where the class
+/// is known rather than in a global set by whichever driver started last.
 pub fn active_rx_rate() -> u32 {
-    // **Ohne `active()`, und das ist Absicht.** `recv_window` ruft das hier
-    // im SEGMENTpfad und unter dem Verbindungsschloss; `active()` nimmt im
-    // Rueckfallzweig `virtio_net::is_available()`, und das ist ein
-    // `DEVICE.lock()`. Eine Schlossnahme dort hat nichts verloren -- sie
-    // waere unter `CONNECTIONS` eine zweite Ordnung, und der Pfad laeuft
-    // auch aus dem Fiber eines Treibers. Gefragt werden nur die zwei
-    // Klassen, die ueberhaupt einen Deckel haben, beide ueber Atomics; die
-    // Reihenfolge ist die von `active()` (WLAN vor USB-LAN, weil ein
-    // assoziiertes WLAN einen Dongle ohne Traegererkennung ausrankt).
+    // Deliberately avoids `active()`: `recv_window` calls this on the segment
+    // path under the connection lock, and `active()` may take `DEVICE.lock()`
+    // via `virtio_net::is_available()`, which would add a second lock order
+    // under `CONNECTIONS`. Only the two classes that have a cap are checked,
+    // both via atomics, in the order `active()` uses (WiFi before USB-LAN).
     if wasm_nic_link_up() {
-        // 2x2 HT20 auf 2,4 GHz: brutto 144 Mbit, sauber etwa 64.
+        // 2x2 HT20 on 2.4 GHz: 144 Mbit gross, about 64 Mbit clean.
         return 8_000_000;
     }
     if rtl8153::is_available() {
         return rtl8153::rx_rate();
     }
-    // Echtes Gigabit / virtio / nichts: der Puffer IST das Fenster.
+    // Real gigabit / virtio / none: the buffer is the window.
     u32::MAX
 }
 
-/// Nur noch fuer den Bericht: dieselbe Antwort ueber `active()`.
+/// Same answer via `active()`, for reporting only.
 #[allow(dead_code)]
 fn active_rx_rate_by_iface() -> u32 {
     match active() {
-        // Gigabit-Draht hinter High-Speed-USB. **Offen und benannt:** ueber
-        // Kupfer wurden 342 Mbit sauber gemessen (retrans 0), also traegt
-        // diese Strecke mehr als die 160 Mbit, die hier stehen. Die Zahl
-        // stammt vom HP-Notebook und ist nicht nachgemessen; sie bleibt,
-        // bis sie EINZELN gemessen wird.
+        // Gigabit copper behind high-speed USB.
         Active::Rtl => rtl8153::rx_rate(),
-        // 2x2 HT20 auf 2,4 GHz: brutto 144 Mbit, sauber etwa 64. Mit dem
-        // BDP aus `rate x RTT` und der Untergrenze RCV_WND_MIN landet eine
-        // gesunde Strecke damit bei 256 KB — genug fuer 512 Mbit bei 4 ms,
-        // also kein Deckel, aber das Dreissigfache weniger Ueberschuss.
+        // 2x2 HT20 on 2.4 GHz: 144 Mbit gross, about 64 Mbit clean. With
+        // BDP = rate x RTT and the RCV_WND_MIN floor, a healthy link ends up
+        // at 256 KB, enough for 512 Mbit at 4 ms.
         Active::Wasm => 8_000_000,
-        // Echtes Gigabit / virtio: der Puffer IST das Fenster.
+        // Real gigabit / virtio: the buffer is the window.
         Active::Intel | Active::Virtio | Active::None => u32::MAX,
     }
 }
 
-/// Does the ACTIVE interface have a usable link right now? Distinct from
+/// Does the active interface have a usable link right now? Distinct from
 /// `active_id`, which only says which interface would be used: a WiFi NIC is
 /// registered (and therefore "active" by fallback) from the moment the driver
 /// starts, long before it is associated and keyed. Anything that waits for the
@@ -339,10 +296,8 @@ pub fn active_link_up() -> bool {
     }
 }
 
-/// Name of the active interface, for the one log line that has to say WHY the
-/// link "changed". Without it a WiFi carrier that blinks for a single sample
-/// reads as "link changed -> requesting DHCP" with no hint that the stack
-/// briefly routed over a cable-less NIC and back.
+/// Name of the active interface, so a link-change log line can say which
+/// interface the stack switched to.
 pub fn active_name() -> &'static str {
     match active() {
         Active::None => "none",
@@ -365,7 +320,7 @@ pub fn active_id() -> u8 {
 }
 
 // ── WASM-NIC path counters (read by the `wlan` intent) ────────────────────
-// The whole point is to tell WHERE frames are lost between driver and stack:
+// They tell where frames are lost between driver and stack:
 // a spill ring that overflows and an AQM that drops look identical from the
 // outside (throughput just sags), so each side counts its own drops.
 static RX_TO_RING: AtomicU64 = AtomicU64::new(0);   // frames put in the fallback ring
@@ -420,7 +375,6 @@ pub fn wasm_nic_submit_rx(frame: &[u8]) {
     }
 }
 
-/// WASM driver calls this to get a frame to transmit (fq_codel-scheduled)
 /// The WASM NIC driver's fiber, registered when it waits for TX work
 /// (`npk_wait`). A queued frame wakes it at once instead of on its next poll.
 static NIC_WAKER: AtomicU32 = AtomicU32::new(crate::smp::fiber::NO_WAKER);
@@ -434,6 +388,7 @@ pub fn wasm_nic_tx_pending() -> bool {
     WASM_NIC.lock().tx.backlog() > 0
 }
 
+/// WASM driver calls this to get a frame to transmit (fq_codel-scheduled).
 pub fn wasm_nic_poll_tx(buf: &mut [u8; MTU]) -> Option<usize> {
     let r = WASM_NIC.lock().tx.dequeue(buf);
     if r.is_some() { TX_DEQUEUED.fetch_add(1, Ordering::Relaxed); }
@@ -449,18 +404,13 @@ pub fn wasm_nic_poll_rx(buf: &mut [u8; MTU]) -> Option<usize> {
 
 pub fn send(frame: &[u8]) -> Result<(), NetError> {
     // Never hand a frame to an interface that has no link. active() falls back
-    // to mere PRESENCE when nothing has a carrier, which is right for display
-    // and wrong for the data path: on a machine whose only device is a WiFi card
-    // that has not finished associating, every DHCP attempt went to the driver,
-    // reached the firmware, and sat in its TX queue unsendable. in-flight never
-    // returned to zero and the association never completed — while the same
-    // machine with any wired device present worked, because the traffic went
-    // there instead and left the radio alone.
+    // to mere presence when nothing has a carrier, which is right for display
+    // and wrong for the data path: frames queued to a WiFi card that is still
+    // associating sit unsendable in the firmware's TX queue and can stall the
+    // association itself.
     if !active_link_up() {
-        // **Die erste Abweisung sagt es, danach jede tausendste.** Ohne sie
-        // ist ein geschlossenes Sendetor von einem stillen Netz nicht zu
-        // unterscheiden: beide Male passiert nichts, und der Zaehler wurde
-        // nur von `net`/`wlan` gedruckt — also erst, wenn jemand FRAGT.
+        // Log the first rejection and every thousandth after it; otherwise a
+        // closed TX gate is indistinguishable from a silent network.
         let n = TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n % 1000 == 0 {
             crate::kprintln!("[npk] wlan: SENDETOR ZU — {} Rahmen abgewiesen, aktiv={} (takt {})",
@@ -470,8 +420,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     }
     match active() {
         Active::Wasm => {
-            // Count what was TAKEN, not what was offered. The old order counted
-            // first and threw the result away, so a refused frame read as sent.
+            // Count what was taken, not what was offered.
             if WASM_NIC.lock().tx.enqueue(frame) {
                 TX_ENQUEUED.fetch_add(1, Ordering::Relaxed);
                 let w = NIC_WAKER.load(Ordering::Acquire);
@@ -518,8 +467,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
 /// Frames this guard refused, and frames a driver refused. Every caller above
 /// this line throws the Result away — `udp::send`, `ipv4::send` and
 /// `eth::send_frame` all say `let _ =` — so a packet that never reached the air
-/// is indistinguishable from one that got no answer. It cost two wrong theories
-/// about DNS before anyone could ask the question.
+/// is indistinguishable from one that got no answer.
 pub fn tx_reject_stats() -> (u32, u32) {
     (TX_REJECT_NO_LINK.load(Ordering::Relaxed), TX_ERR.load(Ordering::Relaxed))
 }
@@ -540,14 +488,10 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
 
 // ── RX wake signal, card-neutral ──────────────────────────────────────────
 //
-// The microvm data plane used to ask `drivers::virtio_net` directly whether an
-// RX IRQ existed and how far the device's used ring had advanced. On the two
-// target machines there IS no virtio NIC, so both answers were 0: the worker's
-// "is there work" test became `0 != 0`, and the vector it parked on and routed
-// was vector zero. That is not a regression — that path never ran on this
-// hardware. Every card answers for itself here instead.
+// The microvm data plane asks here whether an RX IRQ exists and whether new
+// frames arrived, so it never names a driver; every card answers for itself.
 
-/// Frames a POLLED driver has handed the stack (intel / rtl8153 / WASM NIC).
+/// Frames a polled driver has handed the stack (intel / rtl8153 / WASM NIC).
 /// Monotonic; only ever compared for inequality against a caller's snapshot.
 static RX_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 64-bit extension of the virtio device's 16-bit RX used.idx.
@@ -557,7 +501,7 @@ static VIRTIO_RX_SEQ: AtomicU64 = AtomicU64::new(0);
 fn bump_rx_seq() { RX_SEQ.fetch_add(1, Ordering::Relaxed); }
 
 /// A driver made `n` received frames available to the stack. Called where the
-/// frame ARRIVES, not where it is drained, so a consumer that is behind still
+/// frame arrives, not where it is drained, so a consumer that is behind still
 /// sees the sequence move.
 #[inline]
 pub fn note_rx_available(n: u64) { RX_SEQ.fetch_add(n, Ordering::Relaxed); }
@@ -591,7 +535,7 @@ pub fn rx_wake_vector() -> Option<u8> {
     }
 }
 
-/// Monotonic count of frames the ACTIVE driver has provided. Changes when a
+/// Monotonic count of frames the active driver has provided. Changes when a
 /// frame arrives, whether or not anyone has drained it. Switching cards
 /// switches counters, so this is only ever compared for inequality — never
 /// subtracted across a link change.
@@ -643,7 +587,7 @@ pub struct IfaceInfo {
 pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     let mut v = alloc::vec::Vec::new();
     // `primary` is the interface the dispatch actually uses (active()), and
-    // `link_up` is the cached REAL carrier — so a pulled cable shows DOWN and
+    // `link_up` is the cached real carrier, so a pulled cable shows down and
     // the WiFi link takes over, matching what the stack does.
     let act = active();
     if intel_nic::is_available() {
