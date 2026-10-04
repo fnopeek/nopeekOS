@@ -274,11 +274,15 @@ pub fn intent_run_driver(args: &str) {
         }
     };
 
-    // Create PCI device capability
+    // A capability for this PCI device, plus what the module declares in
+    // `.npk.caps` (as on the `run` path): without that a driver started here
+    // lacks HARDWARE for MMIO by address, GSI interrupts and the audio mixer.
     let a = dev.addr;
     let driver_cap = match capability::create_driver_cap(
         a.bus, a.device, a.function,
-        capability::Rights::READ | capability::Rights::WRITE | capability::Rights::EXECUTE | capability::Rights::DELEGATE,
+        capability::Rights::READ | capability::Rights::WRITE | capability::Rights::EXECUTE
+            | capability::Rights::DELEGATE
+            | capability::widget_rights_from_wasm(&wasm_bytes),
         None, // no expiry for drivers
     ) {
         Ok(id) => id,

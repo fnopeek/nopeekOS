@@ -560,8 +560,11 @@ pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
 }
 
 /// Audio slots belong to the module that opened them (`ctx.pid`); submit,
-/// buffered and close answer only to that module.
+/// buffered and close answer only to that module. pid 0 is the shared
+/// identity of the inline execution paths, not an owner (same rule as
+/// `fetch::submit`).
 pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
+    if ctx.pid == 0 { return -1; }
     crate::audio::open_for(ctx.pid)
 }
 
@@ -1024,6 +1027,9 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
 pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
                               host_ptr: i32, host_len: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1 }
+    // pid 0 is the shared identity of the inline execution paths, not an
+    // owner (same rule as `fetch::submit`).
+    if ctx.pid == 0 { return -1 }
     if port <= 0 || port > 65535 { return -1 }
     let Some(host) = read_str(mem, host_ptr, host_len) else { return -1 };
     // The bare name, without port, goes into SNI and certificate checks.
