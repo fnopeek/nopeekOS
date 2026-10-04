@@ -1,12 +1,11 @@
-//! Eine WOFF-Datei entpacken und gegen eine Referenz-TTF stellen.
+//! Unpacks a WOFF file and compares it with a reference TTF.
 //!
 //!   cargo run --release --example woffcheck -- x.woff2 [x.ttf]
 //!   cargo run --release --example woffcheck -- x.woff
 //!
-//! BEIDE Container, weil beide im Netz stehen: `wOF2` geht durch `woff2`,
-//! `wOFF` durch `woff`. Verglichen werden die TABELLEN, nicht die Datei:
-//! Reihenfolge, Ausrichtung und Pruefsummen darf ein Entpacker anders
-//! schreiben, der INHALT nicht.
+//! Both containers: `wOF2` goes through `woff2`, `wOFF` through `woff`.
+//! Tables are compared, not the file: an unpacker may write order, alignment
+//! and checksums differently, but not the content.
 fn main() {
     let a = std::env::args().nth(1).expect("woff2");
     let src = std::fs::read(&a).expect("lesen");
@@ -28,7 +27,7 @@ fn main() {
     };
     println!("{}: {} B -> {} B", a.rsplit('/').next().unwrap(), src.len(), got.len());
     let mine = tables(&got);
-    // Laedt fontdue es?
+    // Does fontdue load it?
     match fontdue::Font::from_bytes(got.as_slice(), fontdue::FontSettings::default()) {
         Ok(f) => {
             let m = f.metrics('A', 16.0);
@@ -58,9 +57,8 @@ fn main() {
     }
     println!("  {} von {} Tabellen gleich", theirs.len() - bad, theirs.len());
 
-    // **Der eigentliche Beweis: dieselben PIXEL.** Ein `glyf`, das anders
-    // kodiert ist, darf denselben Umriss haben — und genau das muss geprueft
-    // werden, nicht die Bytezahl.
+    // The real check is identical pixels: a differently encoded `glyf` may
+    // describe the same outline, so the byte count proves nothing.
     let (Ok(a), Ok(b)) = (
         fontdue::Font::from_bytes(got.as_slice(), fontdue::FontSettings::default()),
         fontdue::Font::from_bytes(rf.as_slice(), fontdue::FontSettings::default()),

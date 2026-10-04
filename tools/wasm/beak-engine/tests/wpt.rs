@@ -1,21 +1,18 @@
-//! WPT reftest oracle — the objective CSS-fidelity gate (docs/spec/BROWSER.md §10).
+//! WPT reftest oracle, the objective CSS-fidelity gate (docs/spec/BROWSER.md §10).
 //!
 //! For every vendored Web-Platform-Test reftest under `tests/wpt/`, render the
-//! TEST file and its `<link rel="match">` REFERENCE through the beak engine and
+//! test file and its `<link rel="match">` reference through the beak engine and
 //! pixel-compare them. A reftest passes when test ≈ reference (both rendered by
-//! OUR engine, so identical structure/font cancels out — only the property
-//! under test can differ). This turns fidelity into a measured pass/fail per
-//! spec feature instead of eyeballing, and each failing reftest is a concrete,
-//! self-verifying work item.
+//! our engine, so identical structure/font cancels out; only the property
+//! under test can differ). Each failing reftest is a concrete, self-verifying
+//! work item.
 //!
 //! Vendored from web-platform-tests/wpt (css/…). Run:
 //!   cargo test --release --manifest-path tools/wasm/beak-engine/Cargo.toml \
 //!     --test wpt -- --nocapture
 //!
-//! The run is the project's tempo — every decision waits on this number — so it
-//! is built to be cheap: tests are GROUPED BY REFERENCE (228 of them share
-//! `ref-if-there-is-no-red.xht`, and 2605 of 5736 reference renders were pure
-//! duplicate work), and the groups are spread over every core.
+//! Built to be cheap: tests are grouped by reference (many share e.g.
+//! `ref-if-there-is-no-red.xht`), and the groups are spread over every core.
 //!
 //! `WPT_FILTER=<substr>`  narrow to one feature · `WPT_DUMP=<dir>` write BMPs ·
 //! `WPT_JOBS=<n>` thread count · `WPT_BLESS=1` rewrite the baseline.
@@ -93,7 +90,7 @@ fn diff_fraction(a: &[u8], b: &[u8]) -> f64 {
     differ as f64 / px as f64
 }
 
-/// Fraction of pixels that are NOT the white canvas — the reference's "ink".
+/// Fraction of pixels that are not the white canvas: the reference's "ink".
 /// If a reference renders (near-)blank, the reftest is INCONCLUSIVE: a blank
 /// test would trivially "match" a blank reference, so equality proves nothing.
 /// This guards against false passes on features we don't render yet (e.g. an
@@ -152,7 +149,7 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
         if p.is_dir() {
             collect_tests(&p, out);
         } else if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
-            // WPT reftests come as .html AND .xht (XHTML). Exclude the *-ref.*
+            // WPT reftests come as .html and .xht (XHTML). Exclude the *-ref.*
             // reference files (they're loaded via each test's rel=match href).
             let is_ref = n.ends_with("-ref.html") || n.ends_with("-ref.xht");
             let is_test = n.ends_with(".html") || n.ends_with(".xht");
@@ -170,7 +167,7 @@ const PASS_MAX_DIFF: f64 = 0.005; // ≤0.5% of pixels may differ
 const MIN_REF_INK: f64 = 0.001; // 0.1% of the canvas
 
 /// What one reftest came out as. `Skip` is a corpus problem (missing reference
-/// file), not a result — it stays out of the tally, as it always has.
+/// file), not a result; it stays out of the tally.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Pass,
@@ -233,13 +230,9 @@ fn run_group(g: &Group, root: &Path, dump: Option<&str>, out: &mut Vec<Res>) {
         let ta = render(&html);
         let d = diff_fraction(&ta, &ra);
         if let Some(dir) = dump {
-            // **Der ganze Dateiname, nicht der Stamm.** `…-001.html` und
-            // `…-001.xht` sind ZWEI Tests im selben Ordner, und mit dem Stamm
-            // schrieben sie dieselbe Datei: die zweite ueberschrieb die
-            // erste, und wer danach hinsah, verglich stillschweigend den
-            // falschen Test. Genau so ist mir eine Stunde an
-            // `margin-collapse-min-height-001` vergangen — die Bilder zeigten
-            // eine andere Seite, und nichts sagte es.
+            // The whole file name, not the stem: `…-001.html` and `…-001.xht`
+            // are two tests in the same directory and would otherwise write
+            // the same file.
             let name = t.file_name().unwrap().to_str().unwrap().replace('.', "_");
             write_bmp(&Path::new(dir).join(format!("{name}-test.bmp")), &ta, W, H);
             write_bmp(&Path::new(dir).join(format!("{name}-ref.bmp")), &ra, W, H);
@@ -249,10 +242,10 @@ fn run_group(g: &Group, root: &Path, dump: Option<&str>, out: &mut Vec<Res>) {
     }
 }
 
-/// A test's FAMILY: its name with the trailing numbering stripped
+/// A test's family: its name with the trailing numbering stripped
 /// (`CSS2/margin-collapse-042.xht` → `CSS2/margin-collapse`). Counting failures
-/// by family rather than by suite is what surfaces a single missing lever —
-/// the biggest suite always looks like the biggest problem.
+/// by family rather than by suite surfaces a single missing lever; the
+/// biggest suite always looks like the biggest problem.
 fn family(rel: &str) -> String {
     let (suite, rest) = rel.split_once('/').unwrap_or(("", rel));
     let name = rest.rsplit('/').next().unwrap_or(rest);
@@ -282,9 +275,9 @@ fn strip_numbering(s: &str) -> &str {
     &s[..e]
 }
 
-/// Compare against the committed baseline and print the DELTA by name. The
+/// Compare against the committed baseline and print the delta by name. The
 /// total alone never says which side moved: a correct feature routinely makes
-/// a *reference* render for the first time, and the honest score dips.
+/// a reference render for the first time, and the honest score dips.
 fn report_baseline(results: &[Res], baseline: &Path) {
     let Ok(text) = fs::read_to_string(baseline) else {
         eprintln!("  [wpt] no baseline at {} — run with WPT_BLESS=1 to write one", baseline.display());
@@ -324,7 +317,7 @@ fn report_baseline(results: &[Res], baseline: &Path) {
     }
 }
 
-/// Rank the remaining failures so the next lever can be *queried* rather than
+/// Rank the remaining failures so the next lever can be queried rather than
 /// guessed at. Two views, because they answer different questions: which family
 /// is biggest, and which family is one detail away from green.
 fn report_census(results: &[Res]) {
@@ -398,8 +391,8 @@ fn wpt_reftests() {
     }
     let mut groups: Vec<Group> =
         groups.into_iter().map(|(ref_path, tests)| Group { ref_path, tests }).collect();
-    // Longest-processing-time first: hand the 228-test groups out before the
-    // singletons, or one thread finishes minutes after the rest.
+    // Longest-processing-time first: hand the large groups out before the
+    // singletons, or one thread finishes long after the rest.
     groups.sort_by(|a, b| b.tests.len().cmp(&a.tests.len()).then(a.ref_path.cmp(&b.ref_path)));
 
     let jobs = std::env::var("WPT_JOBS")
@@ -425,7 +418,7 @@ fn wpt_reftests() {
         }
     });
 
-    // Sorted, so two logs diff cleanly and the per-test lines read as before.
+    // Sorted, so two logs diff cleanly.
     let mut results = sink.into_inner().unwrap();
     results.sort_by(|a, b| a.rel.cmp(&b.rel));
 

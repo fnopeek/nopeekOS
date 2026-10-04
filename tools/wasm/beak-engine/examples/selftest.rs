@@ -1,11 +1,9 @@
-// Die eingebaute Pruefseite host-seitig durchspielen — dieselbe Datei, die
-// beak ausliefert. Was hier NEIN sagt, sagt auf dem Geraet auch NEIN; der
-// Unterschied waere ein Befund fuer sich.
+// Runs the built-in test page host-side, the same file beak ships. A line
+// that fails here should fail in beak too; a difference is a finding.
 use beak_engine::js::dombind::Doc;
 
-/// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
-/// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
-/// Werkzeug eine andere Plattform als das Geraet.
+/// Randomness for host tools, from `/dev/urandom`. Without it there is no
+/// `crypto`, and the tool would measure a different platform than beak.
 fn host_random(out: &mut [u8]) -> bool {
     use std::io::Read;
     match std::fs::File::open("/dev/urandom") {
@@ -15,10 +13,10 @@ fn host_random(out: &mut [u8]) -> bool {
 }
 
 thread_local! {
-    /// Die Engine, aus der das erzwungene Neuauslegen kommt — dieselbe, die
-    /// danach die Klickketten legt. Ein `fn`-Zeiger faengt nichts ein, also
-    /// muss sie hier stehen; am Geraet ist sie aus demselben Grund eine
-    /// Globale (`beak/src/lib.rs`).
+    /// The engine the forced relayout comes from, the same one that later
+    /// builds the click chains. A `fn` pointer captures nothing, so it has to
+    /// live here; in beak it is a global for the same reason
+    /// (`beak/src/lib.rs`).
     static ENG: beak_engine::Engine = {
         let mut e = beak_engine::Engine::new();
         e.set_theme(beak_engine::Theme {
@@ -29,9 +27,8 @@ thread_local! {
     };
 }
 
-/// **Neu auslegen auf Verlangen**, host-seitig — derselbe Weg wie
-/// `host_relayout` im Wirt. Ohne ihn waere die Zeile `fresh` hier rot und am
-/// Geraet gruen ([[feedback_the_test_path_must_be_the_real_path]]).
+/// Relayout on demand, host-side; the same path as `host_relayout` in the
+/// host. The test path must be the real path, or the `fresh` line differs.
 fn host_relayout(ip: &mut beak_engine::js::interp::Interp) {
     let html = include_str!("../../beak/src/selftest.html");
     ENG.with(|eng| {
@@ -53,9 +50,8 @@ fn main() {
     let html = include_str!("../../beak/src/selftest.html");
     let dom = beak_engine::dom::parse(html);
     let doc = Doc::from_dom(&dom);
-    // MIT dem Knoten: er ist `document.currentScript` und die Einfuegestelle
-    // von `document.write`. Ohne ihn liefe die Probe auf einer anderen
-    // Plattform als das Geraet ([[feedback_the_test_path_must_be_the_real_path]]).
+    // With the node: it is `document.currentScript` and the insertion point
+    // of `document.write`, as in beak.
     let scripts: Vec<(String, u32)> = page_scripts(&doc)
         .into_iter()
         .filter_map(|r| match r { ScriptRef::Inline(t, _, n) => Some((t, n)), _ => None })
@@ -64,36 +60,27 @@ fn main() {
 
     let mut sess = beak_engine::js::Session::new(50_000_000);
     sess.interp.set_document(doc);
-    // Der Haken, wie ihn der Wirt setzt. Die Pruefseite haengt ein Element
-    // ein und misst es im selben Schritt — ohne ihn meldet es 0.
+    // The hook as the host sets it. The test page inserts an element and
+    // measures it in the same step; without the hook it reports 0.
     ENG.with(|eng| eng.set_hit_all(true));
-    // `NORELAYOUT=1` nimmt den Haken heraus. Nicht Zierde: damit laesst sich
-    // pruefen, dass die Zeile `fresh` ueberhaupt noch beissen KANN — ohne
-    // Haken sagt sie „0/0 statt 240".
+    // `NORELAYOUT=1` removes the hook, to check that the `fresh` line can
+    // still fail (it then reports "0/0 statt 240").
     if std::env::var("NORELAYOUT").is_err() { sess.interp.relayout = Some(host_relayout); }
     sess.interp.set_media(1024.0, 768.0, false);
-    // Dieselbe Adresse wie am Geraet (`selftest::URL`). Ohne sie stuende hier
-    // `about:blank` und dort `beak:selftest` — und die eine Sache, die diese
-    // Seite kann, ist Wirt und Geraet VERGLEICHBAR zu machen.
+    // Same URL as beak (`selftest::URL`), so host and beak runs are
+    // comparable.
     sess.interp.set_location("beak:selftest");
-    // Und die Uhr. Am Geraet setzt `beak/src/lib.rs` sie aus
-    // `npk_unix_time()`; ohne dieselbe Zeile hier stuende `Date.now()`
-    // host-seitig bei 1970, und die Pruefzeile waere auf dem Rechner
-    // DAUERHAFT rot — ein Warnlicht, das immer leuchtet, liest niemand mehr.
-    // Beidseitig gesetzt prueft sie, was sie soll: kommt die Uhr des Wirts
-    // in der Engine an?
+    // And the clock, set as `beak/src/lib.rs` sets it from `npk_unix_time()`.
+    // Without it `Date.now()` would sit at 1970 host-side and the line would
+    // be permanently red; set on both sides it checks that the host clock
+    // reaches the engine.
     sess.interp.epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0);
-    // Der Kaskadenkontext — GENAU wie beak ihn einreicht (`beak/src/lib.rs`).
-    //
-    // Er fehlte hier, und dadurch lief `getComputedStyle` host-seitig auf dem
-    // Ausweichpfad (nur Inline-Stil) statt auf dem echten. Die Zeile
-    // `CSSStyleDeclaration benannt` war deshalb host GRUEN und am Geraet ROT:
-    // ein Testpfad, der nicht der echte ist, ist kein Test
-    // ([[feedback_the_test_path_must_be_the_real_path]]) — und diesmal hat er
-    // die Luecke nicht nur verpasst, er hat sie ZUGEDECKT.
+    // The cascade context exactly as beak submits it (`beak/src/lib.rs`).
+    // Without it `getComputedStyle` takes the inline-style-only fallback
+    // instead of the real path.
     let theme = beak_engine::Theme {
         bg: beak_engine::Rgb(255, 255, 255), text: beak_engine::Rgb(0, 0, 0),
         heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
@@ -125,26 +112,18 @@ fn main() {
     let d = sess.interp.doc.as_ref().unwrap();
     println!("Behandler angemeldet: {}", d.has_listeners);
 
-    // Die Klicks, die auf dem Geraet der Finger macht — und ZWAR UEBER DAS
-    // LAYOUT, nicht ueber den Baum.
-    //
-    // Die erste Fassung baute die Kette mit `ancestors()` aus dem Baum. Damit
-    // pruefte sie alles ausser dem einen Schritt, an dem es am Geraet
-    // scheiterte: beak nimmt die Kette aus `lay.element_chain(x, y)`, und ein
-    // `<button>` stand dort nicht drin. Host gruen, Geraet stumm — ein
-    // Testpfad, der nicht der echte ist, ist kein Test
-    // ([[feedback_verify_the_call_path]]).
+    // The clicks, routed through the layout and not the tree: beak takes the
+    // dispatch chain from `lay.element_chain(x, y)`, and a chain built from
+    // `ancestors()` would skip exactly that step.
     println!("\n── Klicks (Kette aus dem LAYOUT, wie in beak) ──");
     let lay = ENG.with(|engine| {
         engine.set_hit_all(sess.interp.doc.as_ref().unwrap().has_listeners);
         engine.set_scripted_dom(Some(sess.interp.doc.as_mut().unwrap().to_dom()));
         engine.layout_forms(html, "", 1024, &Default::default())
     });
-    // Die Kaesten einreichen — GENAU wie beak es je Bild tut. Ohne das
-    // antwortet `getBoundingClientRect` hier mit Nullen, und die Zeile `geom`
-    // waere host-seitig rot und am Geraet gruen: derselbe Fehler wie bei der
-    // Klickkette und beim Kaskadenkontext, dritte Auspraegung
-    // ([[feedback_the_test_path_must_be_the_real_path]]).
+    // Submit the boxes exactly as beak does each frame. Without it
+    // `getBoundingClientRect` returns zeros and the `geom` line would differ
+    // from beak.
     sess.interp.set_geometry(beak_engine::js::interp::Geometry {
         boxes: std::rc::Rc::new(lay.element_rects()),
         scroll: (0, 0),
@@ -167,11 +146,9 @@ fn main() {
             println!("{id}: der Klickpunkt ({cx},{cy}) findet das Element NICHT — Kette {chain:?}");
         }
         for _ in 0..times {
-            // **Mit dem ORT, wie der Wirt** — er schickt seit 0.186.0
-            // `dispatch_at`. Ohne die Koordinaten waere `e.clientX` hier
-            // `undefined` und am Geraet eine Zahl, und die Zeile `mausev`
-            // stuende host rot und Geraet gruen
-            // ([[feedback_the_test_path_must_be_the_real_path]]).
+            // With the position, as the host sends it (`dispatch_at`).
+            // Without coordinates `e.clientX` would be `undefined` here and
+            // the `mausev` line would differ from beak.
             match beak_engine::js::dombind::dispatch_at(&mut sess.interp, "click", &nodes,
                 Some((cx as f64, cy as f64, cx as f64, cy as f64))) {
                 Ok(p) => { let _ = p; }
@@ -179,8 +156,8 @@ fn main() {
             }
         }
     }
-    // Mehrere Runden: die Promise-Kette endet in einem `setTimeout`, das
-    // erst faellig wird, nachdem die Kette durch ist.
+    // Several rounds: the promise chain ends in a `setTimeout` that only
+    // becomes due after the chain has run.
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     for line in sess.interp.take_console() { println!("{line}"); }
     let d = sess.interp.doc.as_ref().unwrap();

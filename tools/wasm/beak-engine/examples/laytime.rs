@@ -1,12 +1,7 @@
 extern crate alloc;
-// Was kostet ein Layout auf einer ECHTEN Seite?
+// What a layout costs on a real page.
 //
-// Die Custom Properties laufen seit 0.59.0 durch die Kaskade statt durch
-// einen Textlauf davor — je Element eine Karte statt einmal je Blatt. Diese
-// Probe sagt, was das wirklich kostet; „sollte schnell genug sein" ist keine
-// Zahl ([[feedback_remeasure_before_claiming_a_delta]]).
-//
-//   PAGE=<pfad ohne .html> W=1902 N=5 cargo run --release --example laytime
+//   PAGE=<path without .html> W=1902 N=5 cargo run --release --example laytime
 fn main() {
     let base = std::env::var("PAGE").expect("PAGE=<pfad ohne .html>");
     let html = std::fs::read_to_string(format!("{base}.html")).expect("html");
@@ -26,9 +21,8 @@ fn main() {
     }
     println!("   bestes von {n}: {best:.1} ms");
 
-    // Und was kostet dasselbe, wenn sich nur EIN Steuerelement geaendert hat?
-    // Das ist die Zahl, die zaehlt: bis 0.71.0 ging jeder Tastendruck in einem
-    // Feld den vollen Weg oben.
+    // And the cost when only one form control changed, which is what every
+    // keystroke in a field pays.
     let mut state = beak_engine::forms::FormState::default();
     let eng = beak_engine::Engine::new();
     let mut lay = eng.layout_forms(&html, &css, width, &state);

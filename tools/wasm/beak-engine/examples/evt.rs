@@ -1,5 +1,5 @@
-// Der Beweis fuer die Zustellung: ein Klick loest einen Behandler aus, der
-// den Baum aendert — und das Layout malt die Aenderung.
+// Checks event delivery: a click fires a handler that changes the tree, and
+// the layout paints the change.
 fn main() {
     use beak_engine::{Engine, Rgb, Theme};
     use beak_engine::js::dombind;
@@ -38,9 +38,9 @@ fn main() {
     };
     let (r0, lay) = count(&engine);
 
-    // Wo liegt der Knopf? Aus dem Layout, nicht geraten.
+    // Button position comes from the layout.
     let btn_seq = sess.interp.doc.as_ref().unwrap()
-        .by_seq(0).map(|_| 0); // Platzhalter, gleich richtig
+        .by_seq(0).map(|_| 0); // placeholder
     let _ = btn_seq;
     let (bx, by) = lay.ops.iter().find_map(|o| match o {
         beak_engine::layout::DrawOp::Rect { x, y, w, h, .. } if *w == 80 && *h == 24 => Some((*x+5, *y+5)),
@@ -48,7 +48,7 @@ fn main() {
     let chain = lay.element_chain(bx, by);
     println!("Treffer bei ({bx},{by}) -> seq-Kette {chain:?}");
 
-    // seq -> Arena-Knoten
+    // seq -> arena node
     let nodes: Vec<u32> = chain.iter()
         .filter_map(|s| sess.interp.doc.as_ref().unwrap().by_seq(*s)).collect();
     let prevented = matches!(dombind::dispatch(&mut sess.interp, "click", &nodes), Ok(true));

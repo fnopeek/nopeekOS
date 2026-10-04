@@ -1,22 +1,18 @@
-// Je Bootstrap-Komponente eine Zeile: wie hoch, wieviele Zeichenbefehle?
+// One line per Bootstrap component: height and draw-command count.
 //
-// Der Sinn der Komponentenvorlage steht und faellt damit, dass ein Befund
-// EINEN Block nennt. Ein Diff ueber die ganze Seite sagt „4,2 % anders" und
-// hilft niemandem; diese Tabelle sagt „c-modal ist 14 000 px hoch", und dann
-// weiss man, wo man hinschaut.
+// A diff over the whole page says "4.2 % different"; a per-block table names
+// the block that is wrong.
 //
-//   cargo run --release --example cmpcheck            (Breite 1902, wie am Geraet)
+//   cargo run --release --example cmpcheck            (width 1902)
 //   W=1000 cargo run --release --example cmpcheck
-//   CMP=c-modal cargo run --release --example cmpcheck   nur einen Block
+//   CMP=c-modal cargo run --release --example cmpcheck   one block only
 //
-// Jeder Block wird EINZELN ausgelegt, mit demselben Kopf wie die ganze Seite.
-// Das isoliert: was in einem Block schiefgeht, kann den naechsten nicht mehr
-// verschieben, und die Hoehe ist die des Blocks und nicht die seiner Nachbarn.
+// Each block is laid out on its own with the page's head. That isolates it:
+// an error in one block cannot shift the next, and the height is the block's
+// own.
 fn main() {
-    // Zwei Vorlagen, dasselbe Werkzeug: `FIX=tailwind` prueft die
-    // Utility-Familien, ohne `FIX` die Bootstrap-Komponenten. Ein zweites
-    // Rahmenwerk belastet andere Ecken — und was BEIDE richtig malen, ist
-    // wahrscheinlich wirklich richtig.
+    // Two fixtures, one tool: `FIX=tailwind` checks the utility families,
+    // without `FIX` the Bootstrap components.
     let tw = std::env::var("FIX").is_ok_and(|f| f == "tailwind");
     let page = if tw { include_str!("../../../fixtures/tailwind.html") }
                else { include_str!("../../../fixtures/components.html") };
@@ -25,8 +21,8 @@ fn main() {
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     let only = std::env::var("CMP").ok();
 
-    // Der eigene <style>-Block der Vorlage gehoert dazu — er zeichnet den
-    // Rahmen um jeden Block, und ohne ihn misst man eine andere Seite.
+    // The fixture's own <style> block draws the frame around each block and
+    // belongs to the page being measured.
     let own = between(page, "<style>", "</style>").unwrap_or_default();
 
     println!("\n── {} einzeln, @{width}px ──\n", if tw { "Tailwind-Utilities" } else { "Bootstrap-Komponenten" });
@@ -60,7 +56,7 @@ fn between(s: &str, a: &str, b: &str) -> Option<String> {
     Some(s[i..j].to_string())
 }
 
-/// Jeden `<section id="…">…</section>`-Block als (id, html).
+/// Every `<section id="…">…</section>` block as (id, html).
 fn sections(page: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut rest = page;

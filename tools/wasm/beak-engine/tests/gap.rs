@@ -1,5 +1,5 @@
 //! CSS gap analysis: for a real page + its real stylesheets, count how many
-//! DOM elements each declared property actually WINS on, then split that by
+//! DOM elements each declared property actually wins on, then split that by
 //! whether the engine implements the property.
 //!
 //! GAPHTML=wiki.html GAPCSS=wiki.css cargo test --release --test gap -- --nocapture
@@ -10,10 +10,7 @@ use beak_engine::css::{self, ElemInfo, Stylesheet};
 use beak_engine::dom::{self, Element, Node};
 
 /// Every property `style::apply_one` actually handles, read out of the source
-/// at run time. This list used to be maintained by hand and went stale twice —
-/// once claiming `background-image` was missing months after it shipped, which
-/// put a phantom item at the top of the priority list. Deriving it costs one
-/// file read and cannot drift.
+/// at run time so the list cannot drift from the code.
 fn implemented() -> std::collections::HashSet<String> {
     let src = fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/style.rs"),
@@ -75,11 +72,10 @@ fn walk<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemInfo<'a>>) {
 
     let mut m = ctx.ss.matched(&ei, ancestors, &[], sib_count, css::Media::new(ctx.w, false));
     m.sort_by_key(|(layer, spec, ord, _, _)| (*layer, *spec, *ord));
-    // last writer per property wins (ignoring !important — close enough for a
-    // frequency census)
+    // last writer per property wins
     let mut winner: HashMap<&str, &str> = HashMap::new();
     for (_, _, _, decls, imp) in &m {
-        // `!important` wins last — a census that ignored it undercounted.
+        // `!important` declarations come last, so they win.
         let decls = decls.iter().chain(imp.iter());
         for (p, v) in decls {
             winner.insert(css::prop_name(*p), v.as_str());
@@ -134,7 +130,7 @@ fn walk_with_prev<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemIn
     m.sort_by_key(|(layer, spec, ord, _, _)| (*layer, *spec, *ord));
     let mut winner: HashMap<&str, &str> = HashMap::new();
     for (_, _, _, decls, imp) in &m {
-        // `!important` wins last — a census that ignored it undercounted.
+        // `!important` declarations come last, so they win.
         let decls = decls.iter().chain(imp.iter());
         for (p, v) in decls {
             winner.insert(css::prop_name(*p), v.as_str());

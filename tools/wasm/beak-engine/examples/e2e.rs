@@ -1,7 +1,5 @@
-// Der Beweis: ein Skript veraendert den Baum, und das BILD aendert sich.
-//
-// Ohne diesen Lauf ist die DOM-Bindung nur eine Behauptung — die Arena und
-// beaks Baum waren bis eben zwei getrennte Welten.
+// Checks that a script changing the tree changes the painted image, i.e.
+// that the DOM binding and beak's tree are the same document.
 fn main() {
     use beak_engine::{Engine, Rgb, Theme};
     let theme = Theme { bg: Rgb(255,255,255), text: Rgb(0,0,0), heading: Rgb(0,0,0),
@@ -15,8 +13,8 @@ fn main() {
     let mut engine = Engine::new();
     engine.set_theme(theme);
 
-    // Nicht am Debug-Text gemessen, sondern an den Zeichenbefehlen selbst:
-    // wie viele Rechtecke gemalt werden, und welcher Text im Bild steht.
+    // Measured on the draw commands, not on debug text: how many rects are
+    // painted and which text appears.
     let count = |e: &Engine| {
         use beak_engine::layout::DrawOp;
         let l = e.layout_forms(html, "", 400, &Default::default());
@@ -29,7 +27,7 @@ fn main() {
     let before = count(&engine);
     println!("vorher:  {} Rechtecke, Text: {:?}", before.0, before.1);
 
-    // Skript laufen lassen — auf DEMSELBEN Dokument.
+    // Run the script on the same document.
     let dom = beak_engine::dom::parse(html);
     let mut sess = beak_engine::js::Session::new(u64::MAX);
     sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));

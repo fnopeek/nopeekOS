@@ -1,15 +1,12 @@
-//! Warum ist dieses Bild nicht angekommen? — der Dekoder mit GRUND.
+//! Runs the image decoder host-side and reports why an image was dropped.
+//! `image dropped: undecodable or over budget` names two failures in one
+//! sentence; this says which one.
 //!
-//! `[beak] image dropped: undecodable or over budget` nennt zwei Fehler in
-//! einem Satz, und nur einer davon ist je der richtige
-//! ([[feedback_a_denial_and_a_timeout_are_two_failures]]). Hier laeuft
-//! derselbe Weg host-seitig, und die Absage sagt, WELCHER.
+//!   cargo run --release --example imgcheck -- image.jpg [...]
+//!   cargo run --release --example imgcheck -- page.html   # list only
 //!
-//!   cargo run --release --example imgcheck -- bild.jpg [...]
-//!   cargo run --release --example imgcheck -- seite.html   # nur die Liste
-//!
-//! Eine `.html` wird nicht dekodiert, sondern AUFGEZAEHLT — mit `image_srcs`,
-//! also der Liste, die beak selbst holt, nicht einer zweiten aus einem grep.
+//! An `.html` is not decoded but enumerated with `image_srcs`, i.e. the same
+//! list beak itself fetches.
 
 fn kind(b: &[u8]) -> &'static str {
     if b.len() >= 8 && b[0..8] == *b"\x89PNG\r\n\x1a\n" { "PNG" }

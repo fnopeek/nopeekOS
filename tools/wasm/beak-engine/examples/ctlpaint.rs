@@ -1,17 +1,17 @@
-//! Der SCHNELLWEG beim Tippen, gegen ein volles Auslegen gehalten.
+//! Checks the typing fast path against a full layout.
 //!
-//! `repaint_controls` ersetzt die Befehle EINES Steuerelements an Ort und
-//! Stelle. Stimmt seine Spanne nicht, frisst die Ersetzung den Nachbarn — und
-//! am Geraet sieht das aus wie „der Text daneben wird ausgeblendet".
+//! `repaint_controls` replaces the commands of one control in place. If its
+//! span is wrong, the replacement eats the neighbour and the adjacent text
+//! disappears.
 //!
-//! Gefahren wird die Reihenfolge des WIRTS, nicht eine zweite:
-//!   1. auslegen, wie die Seite ankommt (leerer Zustand)
-//!   2. in ein Feld tippen und den Fokus setzen
-//!   3. `repaint_controls` — der Weg jedes Tastendrucks
-//!   4. dasselbe noch einmal GANZ auslegen
-//!   5. beide Befehlslisten Zeile fuer Zeile vergleichen
+//! Runs the host's order, not a second one:
+//!   1. lay out the page as it arrives (empty state)
+//!   2. type into a field and set focus
+//!   3. `repaint_controls`, the path of every keystroke
+//!   4. lay out the same state fully again
+//!   5. compare both command lists line by line
 //!
-//!   URL=… W=1605 CTL=<id> TEXT=abc cargo run --release --example ctlpaint -- seite.html dir/
+//!   URL=… W=1605 CTL=<id> TEXT=abc cargo run --release --example ctlpaint -- page.html dir/
 
 use beak_engine::js::dombind::ScriptRef;
 
@@ -24,8 +24,8 @@ fn main() {
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let refs = beak_engine::js::dombind::page_scripts(&doc);
 
-    // Derselbe Deckel wie im Wirt — die Probe soll nicht an einer Grenze
-    // scheitern, die es am Geraet nicht gibt.
+    // Same cap as the host, so the probe does not fail at a limit beak does
+    // not have.
     let mut sess = beak_engine::js::Session::new(20_000_000_000);
     sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
     let media = beak_engine::css::Media::new(1902.0, false);
@@ -43,13 +43,12 @@ fn main() {
         viewport_w: 1902.0,
     });
     sess.interp.set_media(1902.0, 1000.0, false);
-    // `DEPTH=` hebt den Aufrufdeckel — die Frage „echte Endlosschleife oder
-    // nur tiefer als 400?" ist sonst nicht zu beantworten.
+    // `DEPTH=` raises the call-depth cap, to tell a real endless recursion
+    // from one that is merely deeper than the default.
     if let Ok(d) = std::env::var("DEPTH") {
         if let Ok(n) = d.parse() { sess.interp.max_depth = n; }
     }
-    // `STEPS=` hebt den Schrittdeckel — die Frage „wie teuer ist die Rechnung
-    // dieser Seite wirklich?" ist sonst nicht zu beantworten.
+    // `STEPS=` raises the step cap, to see what the page really costs.
     if let Ok(d) = std::env::var("STEPS") {
         if let Ok(n) = d.parse() { sess.interp.max_steps = n; }
     }
@@ -73,8 +72,8 @@ fn main() {
             }
         };
         let n0 = sess.interp.console.len();
-        // Ein Modul: erst den GANZEN Graphen holen, dann verknuepfen, dann
-        // auswerten — genau die Reihenfolge, die beak am Geraet faehrt.
+        // A module: fetch the whole graph, then link, then evaluate, the
+        // order beak uses.
         if is_mod || is_module(&src) {
             match run_module_graph(&mut sess, &label, &src, &dir) {
                 Ok(()) => { ran += 1; println!("ok   {label} (Modul, {} B)", src.len()); }
@@ -105,11 +104,10 @@ fn main() {
         for l in &sess.interp.console[n0..] { println!("       | {l}"); }
     }
     let n0 = sess.interp.console.len();
-    // **Die Reihenfolge des WIRTS, und sie ist der ganze Punkt.** Erst die
-    // Stilblattrunden (ein geholtes Blatt laesst eine Komponente fertig
-    // bauen), dann `DOMContentLoaded`, dann EIN LAYOUT — und erst danach
-    // `load`. Wer die Geometrie vor den Runden einreicht, misst einen Baum,
-    // den es so nie gab: die Komponenten sind dann noch leer.
+    // The host's order is the point: stylesheet rounds first (a fetched sheet
+    // lets a component finish building), then `DOMContentLoaded`, then one
+    // layout, and only then `load`. Submitting geometry before the rounds
+    // measures a tree that never existed: the components are still empty.
     let mut timers = 0;
     let (mut sheets_ok, mut sheets_bad) = (0usize, 0usize);
     for _ in 0..64 {
@@ -136,8 +134,8 @@ fn main() {
     }
     for _ in 0..64 { let t = sess.interp.run_timers(); timers += t; if t == 0 { break } }
     for l in &sess.interp.console[n0..] { println!("  timer| {l}"); }
-    // `DUMP=1` zeigt, was am Ende im Baum steht — die Frage „laufen die
-    // Skripte" ist nicht dieselbe wie „haben sie etwas gebaut".
+    // `DUMP=1` shows the final tree: "did the scripts run" is not the same
+    // question as "did they build anything".
     if std::env::var("DUMP").is_ok() {
         if let Some(d) = sess.interp.doc.as_mut() {
             let dom = d.to_dom();
@@ -146,12 +144,11 @@ fn main() {
             println!("\n── Baum nach den Skripten ──\n{out}");
         }
     }
-    // `SUBMIT=<id>` faehrt den GANZEN Absendeweg: `submit`-Ereignis, was der
-    // Behandler ausrechnet, die Auftraege aus `form.submit()`, und am Ende
-    // die fertige Eingabe. Genau die Reihenfolge, die der Wirt faehrt.
-    // `TYPE=id=wert[,id=wert]` tippt in Felder, bevor abgeschickt wird — der
-    // Weg, den der Benutzer nimmt. Geschrieben wird der SCHMUTZIGE Wert, also
-    // genau das, was ein Tastendruck im Wirt auch setzt.
+    // `SUBMIT=<id>` runs the whole submit path: the `submit` event, what the
+    // handler computes, the jobs from `form.submit()`, and the resulting
+    // request, in the host's order.
+    // `TYPE=id=value[,id=value]` types into fields before submitting. It
+    // writes the dirty value, exactly what a keystroke in the host sets.
     if let Ok(spec) = std::env::var("TYPE") {
         let dom = sess.interp.doc.as_mut().map(|d| d.to_dom());
         if let Some(dom) = dom {
@@ -192,10 +189,10 @@ fn main() {
                 println!("\nSUBMIT auf #{want} (seq {seq}): {}, {n} Zeitgeber",
                          if prevented { "abgefangen" } else { "durchgelassen" });
                 for l in &sess.interp.console[n0..] { println!("       | {l}"); }
-                // Der Baum kann sich geaendert haben — neu einsammeln.
+                // The tree may have changed; collect again.
                 let dom = sess.interp.doc.as_mut().map(|d| d.to_dom()).unwrap();
                 let forms2 = beak_engine::forms::collect(&dom);
-                // Dieselbe Bruecke wie im Wirt — nicht eine zweite.
+                // The same bridge as the host, not a second one.
                 if let Some(d) = sess.interp.doc.as_ref() {
                     beak_engine::js::dombind::pull_control_values(d, &forms2, &mut state);
                 }
@@ -212,7 +209,7 @@ fn main() {
         }
     }
 
-    // ── Der Vergleich ──────────────────────────────────────────────────────
+    // ── Comparison ─────────────────────────────────────────────────────────
     let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
     let dom2 = sess.interp.doc.as_mut().map(|d| d.to_dom()).unwrap();
     let mut css = String::new();
@@ -224,8 +221,7 @@ fn main() {
     let mut eng = beak_engine::Engine::new();
     eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
                   link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
-    // `H=` ist keine Kosmetik: `vh` und `min-height:100vh` haengen daran,
-    // und eine Seite, die ihr Fenster fuellt, liegt sonst 225 px zu hoch.
+    // `H=` matters: `vh` and `min-height:100vh` depend on it.
     eng.set_viewport_h(std::env::var("H").ok().and_then(|v| v.parse().ok()).unwrap_or(993));
     eng.set_scripted_dom(Some(dom2));
     let empty = beak_engine::forms::FormState::default();
@@ -258,10 +254,10 @@ fn main() {
         println!("  seq={seq} {:?} {},{} {}x{} — Befehle {at}..{} ({len} Stueck)",
                  c.kind, c.x, c.y, c.w, c.h, at + len);
     }
-    // `STATE0=<wert>`: so, wie das Feld schon AUSGELEGT ist, bevor getippt
-    // wird. Damit laesst sich der zweite Tastendruck pruefen — der erste
-    // faellt bei einem Feld, das nichts malt, ohnehin auf ein Auslegen
-    // zurueck, und danach ist die Spanne nicht mehr leer.
+    // `STATE0=<value>`: the field's value as already laid out before typing.
+    // This tests the second keystroke; the first one falls back to a layout
+    // for a field that paints nothing, after which the span is no longer
+    // empty.
     if let Ok(v) = std::env::var("STATE0") {
         let mut s0 = beak_engine::forms::FormState::default();
         s0.focus = Some(seq);
@@ -274,9 +270,9 @@ fn main() {
                      c.kind, c.x, c.y, c.w, c.h, at + len);
         }
     }
-    // `DUPES=1`: welche Elemente MEHRFACH einen Kasten aufgezeichnet haben.
-    // `getBoundingClientRect` gibt die VEREINIGUNG (`node_box`), also macht ein
-    // zweiter Eintrag den Kasten stillschweigend groesser.
+    // `DUPES=1`: elements that recorded a box more than once.
+    // `getBoundingClientRect` returns the union (`node_box`), so a second
+    // entry silently enlarges the box.
     if std::env::var("DUPES").is_ok() {
         let rects = lay.element_rects();
         let mut by: std::collections::BTreeMap<u32, Vec<(i32, i32, i32, i32)>> = Default::default();
@@ -318,7 +314,7 @@ fn main() {
         shown += 1;
         if shown >= 25 { println!("  … abgeschnitten"); break }
     }
-    // Was der Schnellweg VERLOREN hat, egal an welcher Stelle.
+    // What the fast path lost, wherever it is.
     let missing: Vec<&String> = fresh.iter().filter(|o| !fast.contains(o)).collect();
     let extra: Vec<&String> = fast.iter().filter(|o| !fresh.contains(o)).collect();
     if !missing.is_empty() {
@@ -367,15 +363,15 @@ fn pos(src: &str, at: usize) -> String {
     format!("{line}:{} ...{}<<HIER>>{}...", at - ls + 1, &src[from..at], &src[at..to])
 }
 
-/// Hat der Quelltext `import`/`export` auf oberster Ebene? Die Datei sagt es
-/// nicht, also entscheidet der Parser: was NUR als Modul parst, ist eines.
+/// Whether the source has top-level `import`/`export`. The file does not
+/// say, so the parser decides: what parses only as a module is one.
 fn is_module(src: &str) -> bool {
     beak_engine::js::parse(src, false).is_err() && beak_engine::js::parse(src, true).is_ok()
 }
 
-/// Der Ursprung, gegen den Modul-Adressen absolut werden. `import.meta.url`
-/// muss eine ECHTE Adresse sein — die Komponenten der Fritzbox bauen daraus
-/// `new URL(x, import.meta.url)`, und ein blosser Pfad ist da keine Basis.
+/// The origin module URLs are resolved against. `import.meta.url` must be a
+/// real URL: components build `new URL(x, import.meta.url)`, and a bare path
+/// is no base there.
 fn origin() -> String {
     let u = std::env::var("URL").unwrap_or_default();
     match u.find("://") {
@@ -387,13 +383,10 @@ fn origin() -> String {
     }
 }
 
-/// Eine Adresse gegen die des Importeurs aufloesen.
+/// Resolves a URL against the importer's.
 ///
-/// **Dieselbe Funktion, die beak am Geraet faehrt.** Die Probe hatte hier
-/// erst ihre eigene — und die normalisierte `.`/`..`, waehrend beaks Wirt es
-/// nicht tat. Ergebnis: host-seitig lief der Modulgraph, am Geraet explodierte
-/// er (106 geladen, 179 offen). Eine Probe, die einen ANDEREN Pfad misst als
-/// das Ziel, ist keine ([[feedback_the_test_path_must_be_the_real_path]]).
+/// The same function beak uses; a probe with its own resolution would
+/// measure a different path than the target.
 fn resolve_path(base: &str, spec: &str) -> String {
     use beak_engine::js::url;
     match url::parse_abs(base) {
@@ -402,8 +395,8 @@ fn resolve_path(base: &str, spec: &str) -> String {
     }
 }
 
-/// Wo die Datei zu einer Adresse liegt: `curl` hat sie unter dem Pfad mit
-/// `_` statt `/` abgelegt.
+/// Where the file for a URL lives: `curl` stored it under the path with `_`
+/// instead of `/`.
 fn local(dir: &str, url: &str) -> String {
     let org = origin();
     let p = url.strip_prefix(&org).unwrap_or(url);
@@ -415,7 +408,7 @@ fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str,
     let entry = format!("{}/__entry__{}", origin(), label.replace(' ', "_"));
     let prog = beak_engine::js::parse(src, true).map_err(|e| format!("SyntaxError: {} @{}", e.msg, pos(src, e.at)))?;
     sess.interp.add_module(&entry, std::rc::Rc::new(prog));
-    // Holen, bis der Graph geschlossen ist.
+    // Fetch until the graph is closed.
     let mut queue = vec![entry.clone()];
     while let Some(u) = queue.pop() {
         for spec in sess.interp.module_requests(&u) {
@@ -440,7 +433,7 @@ fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str,
     })
 }
 
-/// Den Baum als Umriss: Marke, id/class, und Text gekuerzt.
+/// The tree as an outline: tag, id/class, and truncated text.
 fn dump(e: &beak_engine::dom::Element, depth: usize, out: &mut String) {
     if depth > 12 { return }
     let pad = "  ".repeat(depth);
@@ -462,7 +455,7 @@ fn dump(e: &beak_engine::dom::Element, depth: usize, out: &mut String) {
     }
 }
 
-/// Die `seq` des Elements mit dieser id.
+/// The `seq` of the element with this id.
 fn find_seq(el: &beak_engine::dom::Element, id: &str) -> Option<u32> {
     if el.attr("id") == Some(id) { return Some(el.seq) }
     for c in &el.children {
@@ -473,8 +466,8 @@ fn find_seq(el: &beak_engine::dom::Element, id: &str) -> Option<u32> {
     None
 }
 
-/// Jedes `<link rel=stylesheet>` im Baum, in Baumreihenfolge, aus dem
-/// Verzeichnis gelesen. Dieselbe Reihenfolge, in der der Wirt sie anhaengt.
+/// Every `<link rel=stylesheet>` in the tree, in tree order, read from the
+/// directory. Same order in which the host appends them.
 fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n: &mut usize) {
     if el.tag == "link"
         && el.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) {
@@ -494,7 +487,7 @@ fn collect_links(el: &beak_engine::dom::Element, dir: &str, out: &mut String, n:
     }
 }
 
-/// BGRA nach BMP, von unten nach oben — wie das Format es will.
+/// BGRA to BMP, bottom-up as the format requires.
 fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
     let row = (w * 3 + 3) & !3;
     let size = 54 + (row * h) as usize;
@@ -519,8 +512,8 @@ fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
     o
 }
 
-/// Einmal auslegen und der Maschine die Kaesten reichen — sonst antwortet
-/// `getBoundingClientRect` mit Nullen, und eine Probe, die misst, misst nichts.
+/// Lays out once and hands the boxes to the machine; otherwise
+/// `getBoundingClientRect` answers with zeros.
 fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     let Some(dom) = sess.interp.doc.as_mut().map(|d| d.to_dom()) else { return };
     let mut css = String::new();
@@ -532,15 +525,13 @@ fn feed_geometry(sess: &mut beak_engine::js::Session, html: &str, dir: &str) {
     let mut eng = beak_engine::Engine::new();
     eng.set_theme(Theme { bg: Rgb(255,255,255), text: Rgb(33,37,41), heading: Rgb(33,37,41),
                           link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
-    // Ohne diese Zeile zeichnet das Layout gar keine Element-Kaesten auf, und
-    // `element_rects()` ist leer — derselbe Schalter, den der Wirt setzt,
-    // sobald eine Seite Skripte faehrt.
+    // Without this the layout records no element boxes and `element_rects()`
+    // is empty; the same switch the host sets once a page runs scripts.
     eng.set_hit_all(true);
     eng.set_scripted_dom(Some(dom));
     let mut lay = eng.layout_ext(html, &css, width);
-    // Die Schriften der Seite holen und NOCHMAL auslegen — dieselbe Runde,
-    // die der Wirt faehrt. Ohne den zweiten Lauf misst die Probe mit der
-    // eingebauten Schrift und vergleicht dann Breiten, die es nicht gibt.
+    // Fetch the page's fonts and lay out again, the round the host runs.
+    // Without it the probe measures with the built-in font.
     let (mut ok, mut bad) = (0usize, 0usize);
     for _ in 0..4 {
         let want = eng.take_pending_fonts();

@@ -33,7 +33,7 @@ fn dump(label: &str, html: &str) {
 
 #[test]
 fn diag() {
-    // DCSSIMG=<html> DCSS=<css> [DW=w] — for every element that WINS a
+    // DCSSIMG=<html> DCSS=<css> [DW=w] — for every element that wins a
     // background-image or mask-image, report what would stop us painting it:
     // the display type (an inline box has no box decoration) and whether there
     // is a background-colour for a mask to stencil.
@@ -116,9 +116,9 @@ fn diag() {
         let css = fs::read_to_string(&cp).expect("css");
         let w: f32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400.0);
         let ss = css::parse(&css);
-        // ElemInfo borrows a live element now (so a selector can see children
-        // and element state), so the chain is built by parsing a snippet with
-        // the shape we want rather than by hand-filling a struct.
+        // ElemInfo borrows a live element (so a selector can see children and
+        // element state), so the chain is built by parsing a snippet with the
+        // shape we want rather than by hand-filling a struct.
         let dom = beak_engine::dom::parse(
             "<html class='client-js vector-feature-language-in-header-enabled'>\
              <body class='skin-vector-2022'>\
@@ -165,7 +165,7 @@ fn diag() {
         }
         return;
     }
-    // DOPS=<html> DCSS=<css> DW=<w> — the WHOLE display list, in paint order.
+    // DOPS=<html> DCSS=<css> DW=<w> — the whole display list, in paint order.
     // Use when a widget is visibly wrong and you need to see which rect is the
     // stray one, not just where the text landed.
     if let Ok(hp) = std::env::var("DOPS") {
@@ -194,7 +194,7 @@ fn diag() {
         }
         return;
     }
-    // DDUMP=<html> DCSS=<css> DW=<w> — dump every TEXT op with its y, plus the
+    // DDUMP=<html> DCSS=<css> DW=<w> — dump every text op with its y, plus the
     // page height. Tells you where a marker text lands (push-down debugging).
     if let Ok(hp) = std::env::var("DDUMP") {
         let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
@@ -337,20 +337,19 @@ fn diag() {
     }
 
     // DIMG=<html> DCSS=<css> DIMGDIR=<dir> DW=<w> DOUT=<bmp> — render a real
-    // page WITH its images, to check that decoded pixels actually reach the
-    // canvas (the device showed grey placeholder boxes). Files in DIMGDIR are
-    // named after the src with '/' and ':' replaced by '_'.
+    // page with its images, to check that decoded pixels actually reach the
+    // canvas. Files in DIMGDIR are named after the src with '/' and ':'
+    // replaced by '_'.
     if let Ok(hp) = std::env::var("DIMG") {
         let html = fs::read_to_string(&hp).expect("html");
         let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
         let dir = std::env::var("DIMGDIR").expect("DIMGDIR");
         let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1400);
         let mut eng = Engine::new();
-        // DTHEME=dark reproduces what the device does when the compositor
-        // palette is dark: the PAGE stays whatever colour its CSS says, but
-        // anything we derive from the theme (form-control chrome, placeholder
-        // text, the default text colour) flips. Device-only colour reports are
-        // otherwise impossible to reproduce here.
+        // DTHEME=dark renders as beak does on a dark compositor palette: the
+        // page keeps whatever colour its CSS says, but anything derived from
+        // the theme (form-control chrome, placeholder text, the default text
+        // colour) flips.
         eng.set_theme(if std::env::var("DTHEME").as_deref() == Ok("dark") {
             Theme::DARK
         } else {
@@ -409,7 +408,7 @@ fn diag() {
             }
         }
         println!("CSS images loaded from disk: {css_ok}");
-        // The tallest filled rects — an enormous empty box shows up here.
+        // The tallest filled rects; an enormous empty box shows up here.
         let mut rects: Vec<(i32,i32,i32,i32,beak_engine::layout::Rgba)> = lay.ops.iter().filter_map(|o| match o {
             beak_engine::layout::DrawOp::RoundRect { x, y, w, h, color, .. }
             | beak_engine::layout::DrawOp::Rect { x, y, w, h, color } => Some((*h,*y,*x,*w,*color)),
@@ -452,9 +451,9 @@ fn diag() {
         return;
     }
 
-    // DTIME=<html> DCSS=<css> DW=<width> [DN=<runs>] — how long do parse+
-    // cascade+layout and paint actually take? Native, so it is a LOWER bound
-    // for the device, which runs the same code under the wasmi interpreter.
+    // DTIME=<html> DCSS=<css> DW=<width> [DN=<runs>] — how long parse+cascade+
+    // layout and paint take. Native, so it is a lower bound for beak, which
+    // runs the same code under a Wasm runtime.
 
     if let Ok(hp) = std::env::var("DTIME") {
         let html = fs::read_to_string(&hp).expect("html");
@@ -466,9 +465,8 @@ fn diag() {
                               link: Rgb(13,110,253), muted: Rgb(108,117,125), rule: Rgb(222,226,230) });
         println!("html {} B, css {} B, width {}", html.len(), css.len(), w);
         for i in 0..n {
-            // Break the "layout" number into its three real phases — on the
-            // device this whole call is 13 s, so knowing WHICH part decides
-            // what to fix.
+            // Break the "layout" number into its three real phases, to know
+            // which part to fix.
             let t_dom = std::time::Instant::now();
             let dom = beak_engine::dom::parse(&html);
             let d_dom = t_dom.elapsed();
@@ -500,7 +498,7 @@ fn diag() {
     }
 
     // DPAINT=<html> DCSS=<css> DW=<width> DVH=<viewport height> — measure the
-    // paint the DEVICE actually does: one viewport-sized buffer, repainted at a
+    // paint beak actually does: one viewport-sized buffer, repainted at a
     // series of scroll offsets, which is what a scroll costs. DTIME paints the
     // whole document once, so it hides both the per-frame canvas clear and the
     // fact that a scrolled frame still walks the entire display list.
@@ -527,7 +525,7 @@ fn diag() {
         }
         println!("ops {} (rect {nr}, text {nt} / {glyphs} glyphs, img {ni})   page height {}   viewport {w}x{vh}",
                  lay.ops.len(), lay.height);
-        // Every guessed src costs a FULL re-layout when its pixels land.
+        // Every guessed src costs a full re-layout when its pixels land.
         println!("guessed image boxes: {}", lay.guessed_image_srcs.len());
         for s in &lay.guessed_image_srcs {
             println!("   {s}");
@@ -543,8 +541,8 @@ fn diag() {
                     px += ((x1 - x0).max(0) as i64) * ((y1 - y0).max(0) as i64);
                 }
             }
-            // Warm the glyph cache first: the device keeps it across frames, so
-            // the steady-state scroll cost is what matters, not the first paint.
+            // Warm the glyph cache first: beak keeps it across frames, so the
+            // steady-state scroll cost is what matters, not the first paint.
             eng.paint(&lay, w, vh, scroll, &mut buf);
             let t = std::time::Instant::now();
             for _ in 0..5 {
@@ -563,8 +561,8 @@ fn diag() {
         let css = std::env::var("DCSS").ok().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
         let w: u32 = std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
         let mut eng = Engine::new();
-        // DDARK=1 renders on the DARK palette — the device default, and the one
-        // difference that makes a page look fine here and black there.
+        // DDARK=1 renders on the dark palette, beak's default; a page can look
+        // fine on light and black on dark.
         eng.set_theme(if std::env::var("DDARK").is_ok() {
             Theme::DARK
         } else {
@@ -650,9 +648,8 @@ fn sizeof_style() {
 }
 
 /// DPHASE=<html> DCSS=<css> [DW=w] [DH=h] — split the one "parse+cascade+
-/// layout" number the device reports into its three phases, and time what a
-/// pure viewport-HEIGHT change actually costs. The dock bar shifting beak by a
-/// few pixels re-ran all three on device (~6.4 s each, twice per hover).
+/// layout" number into its three phases, and time what a pure viewport-height
+/// change costs (e.g. the dock bar resizing the window).
 #[test]
 fn phase() {
     let Ok(hp) = std::env::var("DPHASE") else { return };
@@ -685,7 +682,7 @@ fn phase() {
     let _ = eng.layout_ext(&html, &css, w);
     let t_same = t.elapsed();
 
-    // ONLY the viewport height changes — the dock-hover case.
+    // Only the viewport height changes (the dock-hover case).
     eng.set_viewport_h(h - 40);
     let t = std::time::Instant::now();
     let _ = eng.layout_ext(&html, &css, w);
@@ -702,7 +699,7 @@ fn phase() {
 
 /// DHOVER=<html> DCSS=<css> [DW=] — the census that decides how `:hover`
 /// should invalidate: lay the page out at rest, then with the pointer on each
-/// of a few real links, and count how many elements actually get a DIFFERENT
+/// of a few real links, and count how many elements actually get a different
 /// computed style. If that is a handful, targeted invalidation is the answer;
 /// if it is hundreds, only a cheaper layout is.
 #[test]
@@ -730,8 +727,8 @@ fn hover_cost_census() {
         return;
     }
 
-    // Probe a grid over the VISIBLE area — a box below the fold cannot change
-    // a pixel, and the first census wasted every probe that way.
+    // Probe a grid over the visible area; a box below the fold cannot change
+    // a pixel.
     let (vw, vh) = (w, 1000u32);
     let mut probes: Vec<(i32, i32)> = Vec::new();
     for gy in (20..vh as i32).step_by(37) {
@@ -782,7 +779,7 @@ fn hover_cost_census() {
     }
 }
 
-/// Paint both layouts and count differing pixels, plus their bounding box —
+/// Paint both layouts and count differing pixels, plus their bounding box:
 /// exactly what a damage-driven repaint would have to redraw.
 fn pixels_differ(
     eng: &beak_engine::Engine,
@@ -813,15 +810,15 @@ fn pixels_differ(
 }
 
 // ── DHOPS: the op-level hover census ───────────────────────────────────────
-// The pixel census (DHOVER) said HOW MUCH changes. This says WHAT changes in
-// the display list, which is what decides the shape of a paint-only path:
-// if the op COUNT is stable and only colour fields move, a patch is enough;
-// if ops appear/disappear, the list has to be re-emitted.
+// The pixel census (DHOVER) says how much changes. This says what changes in
+// the display list, which decides the shape of a paint-only path: if the op
+// count is stable and only colour fields move, a patch is enough; if ops
+// appear or disappear, the list has to be re-emitted.
 //
 //   DHOPS=<html> DCSS=<css> [DW=1880] [DN=40]
 //     cargo test --release --test diag hover_op_census -- --nocapture
 
-/// Everything about an op that the rasteriser reads, as text — so two ops
+/// Everything about an op that the rasteriser reads, as text, so two ops
 /// compare field-by-field without the engine needing `PartialEq`.
 fn op_full(op: &DrawOp) -> String {
     match op {
@@ -841,7 +838,7 @@ fn op_full(op: &DrawOp) -> String {
     }
 }
 
-/// The part of an op that a paint-only change must NOT be able to move: kind
+/// The part of an op that a paint-only change must not be able to move: kind
 /// plus geometry. Two ops with the same shape differ only in appearance.
 fn op_shape(op: &DrawOp) -> String {
     match op {
@@ -861,7 +858,7 @@ fn hover_op_census() {
     let want: usize = std::env::var("DN").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
     let html = fs::read_to_string(&hp).expect("DHOPS");
 
-    // What do the sheet's `:hover` rules even DECLARE? A text census over the
+    // What do the sheet's `:hover` rules declare? A text census over the
     // whole sheet is an upper bound (not every rule matches), but it is the
     // cheap half of the answer and it names the properties to classify first.
     {
@@ -941,8 +938,8 @@ fn hover_op_census() {
             if hovered.is_empty() || !seen.insert(hovered.clone()) {
                 continue;
             }
-            // Lay the page out at rest, then hot, then PATCH the resting one
-            // and see whether it came out the same. That is the whole claim.
+            // Lay the page out at rest, then hot, then patch the resting one
+            // and check whether it came out the same.
             eng.set_hover(Vec::new());
             let mut base = eng.layout_ext(&html, &css, w);
             let verdict = eng.set_hover(hovered.clone());
@@ -967,9 +964,9 @@ fn hover_op_census() {
             eng.set_hover(Vec::new());
             let hot_full: Vec<String> = hot.ops.iter().map(op_full).collect();
             if hot_full == rest_full {
-                // The pointer is inside something a rule COULD match, but no
+                // The pointer is inside something a rule could match, but no
                 // rule applies: a full layout would produce the same list, so
-                // answering it without one is the whole point.
+                // the answer must come without one.
                 idle += 1;
                 if patched {
                     idle_repainted += 1;
@@ -1000,7 +997,7 @@ fn hover_op_census() {
                 *bail.entry(why).or_insert(0usize) += 1;
             }
             let hot_shape: Vec<String> = hot.ops.iter().map(op_shape).collect();
-            // Align on GEOMETRY: ops that keep their kind+rect are the same box
+            // Align on geometry: ops that keep their kind+rect are the same box
             // painted again. What is left over is a true insert or delete.
             let al = lcs(&rest_shape, &hot_shape);
             let repaint = al.iter().filter(|&&(i, j)| rest_full[i] != hot_full[j]).count();
@@ -1010,7 +1007,7 @@ fn hover_op_census() {
                 geom_stable += 1;
             }
             // The engine's verdict against what the pixels actually did. An
-            // op that MOVED would prove the "paint only" claim wrong; ops
+            // op that moved would prove the "paint only" claim wrong; ops
             // added or removed at unchanged rects would not.
             let moved = al.iter().any(|&(i, j)| rest_shape[i] != hot_shape[j]);
             if claims_paint_only {
@@ -1102,7 +1099,7 @@ fn hover_op_census() {
 
 /// Longest common subsequence as index pairs. The op lists are in document
 /// order and edits are local, so this aligns "the same box, painted again"
-/// against "an op that genuinely appeared" — an index-wise diff cannot, it
+/// against "an op that genuinely appeared"; an index-wise diff cannot, it
 /// reports every op after an insertion as changed.
 fn lcs(a: &[String], b: &[String]) -> Vec<(usize, usize)> {
     let (n, m) = (a.len(), b.len());
@@ -1149,7 +1146,7 @@ fn hover_box_dump() {
     for b in lay.hover_boxes.iter().filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
         println!("  seq {:>5}  x={:<5} y={:<5} w={:<5} h={:<4}", b.seq, b.x, b.y, b.w, b.h);
     }
-    // …and the same seqs' OTHER boxes, if any (an inline box spanning lines).
+    // …and the same seqs' other boxes, if any (an inline box spanning lines).
     let hit: Vec<u32> = lay.hover_at(x, y);
     println!("hover_at -> {hit:?}");
     for s in hit.iter().take(8) {
@@ -1165,8 +1162,7 @@ fn hover_box_dump() {
 ///   cargo test --release --test diag -- --nocapture img_visibility_census
 ///
 /// Counts image boxes by where they sit: a batch that lands entirely below the
-/// fold used to cost a full-viewport repaint (~50 ms on the device) and show
-/// nothing.
+/// fold would otherwise cost a full-viewport repaint and show nothing.
 #[test]
 fn img_visibility_census() {
     let Ok(hp) = std::env::var("DIMG") else { return };
@@ -1188,10 +1184,8 @@ fn img_visibility_census() {
             _ => {}
         }
     }
-    // A GUESSED box is the expensive kind: when its pixels land the page moves
-    // and the shell pays a FULL re-layout, wherever the image sits. On the
-    // device that was 1110-1710 ms on an article — more than the fetch and the
-    // repaints together.
+    // A guessed box is the expensive kind: when its pixels land the page moves
+    // and the shell pays a full re-layout, wherever the image sits.
     println!("  guessed boxes  {:>4} of {} distinct srcs: {:?}",
              lay.guessed_image_srcs.len(),
              lay.ops.iter().filter(|o| matches!(o, DrawOp::Image { .. })).count(),
@@ -1206,7 +1200,7 @@ fn img_visibility_census() {
     println!("  background ops {:>4} total, {:>4} in the first viewport, {:>4} below the fold",
              bgs.len(), bg_vis, bgs.len() - bg_vis);
 
-    // The shell fetches in batches, in document order — so simulate the batches
+    // The shell fetches in batches, in document order, so simulate the batches
     // and count how many of them would have repainted for nothing.
     let batch: usize = std::env::var("DBATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
     let mut srcs: Vec<String> = Vec::new();

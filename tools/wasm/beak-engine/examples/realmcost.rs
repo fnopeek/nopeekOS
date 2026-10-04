@@ -1,16 +1,14 @@
-// Wieviel kostet ein Realm, und wird er beim Fallenlassen frei?
+// What a realm costs, and whether dropping it frees it.
 //
-// Gebaut am 2026-09-04, nachdem der test262-Lauf mit 59 GB vom OOM-Killer
-// erschossen wurde. Die Antwort war: 973 KB je Realm, und NICHTS wurde frei —
-// die Form eines JS-Realms ist ringfoermig, und `Rc` kommt aus einem Ring nie
-// auf null. Seit `Interp::teardown` misst die dritte Zeile +0 KB; wer an den
-// Prototypen oder am globalen Gegenstand etwas hinzufuegt, prueft sie hier.
+// A JS realm is cyclic and `Rc` never reaches zero inside a cycle; that is
+// what `Interp::teardown` is for. Anyone adding to the prototypes or the
+// global object should re-check the third line here.
 //
-//   cargo run --release --example realmcost      (N=<zahl> fuer mehr Laeufe)
+//   cargo run --release --example realmcost      (N=<count> for more runs)
 //
-// Die erste Zeile misst den PREIS eines gehaltenen Realms, die zweite sagt
-// nichts ueber ein Leck (der Zuteiler gibt nicht an das System zurueck), und
-// die dritte ist die eigentliche Frage: kostet der n+1-te Realm noch etwas?
+// The first line is the cost of a held realm; the second says nothing about
+// a leak (the allocator does not return memory to the system); the third is
+// the actual question: does the (n+1)-th realm still cost anything?
 fn rss_kb() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap();
     for l in s.lines() {

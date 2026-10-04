@@ -1,6 +1,6 @@
-//! Eine GANZE HTML-Datei so rendern, wie der WPT-Laeufer es tut, und die
-//! Zeichenbefehle nennen. `opdump` nimmt nur ein Schnipsel — fuer einen
-//! Reftest braucht es die Datei samt ihrem eigenen `<style>`.
+//! Renders a whole HTML file the way the WPT runner does and lists the draw
+//! commands. `opdump` takes a snippet only; a reftest needs the file with
+//! its own `<style>`.
 fn main() {
     let p = std::env::args().nth(1).expect("datei");
     let html = std::fs::read_to_string(&p).expect("lesen");
@@ -11,7 +11,7 @@ fn main() {
         heading: beak_engine::Rgb(0, 0, 0), link: beak_engine::Rgb(0, 0, 238),
         muted: beak_engine::Rgb(96, 96, 96), rule: beak_engine::Rgb(128, 128, 128),
     });
-    // `CSSFILE=` fuer eine Seite, deren Blatt nicht im `<style>` steht.
+    // `CSSFILE=` for a page whose stylesheet is not in a `<style>`.
     let css = std::env::var("CSSFILE").ok()
         .map(|f| std::fs::read_to_string(f).expect("css")).unwrap_or_default();
     let lay = eng.layout_ext(&html, &css, w);

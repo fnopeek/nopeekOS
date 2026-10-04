@@ -1,15 +1,12 @@
-//! Was von den WIRKLICH gerufenen DOM-Schnittstellen fehlt — nach Aufrufzahl.
+//! Which of the DOM interfaces real pages call are missing, ranked by call
+//! count.
 //!
-//! Die Rangfolge kommt nicht aus dem Bauch, sondern aus einer Chromium-Messung
-//! auf denselben zwoelf Zielseiten: `tools/jsscope/out/apicensus.json` haelt
-//! je Seite fest, welche DOM-Schnittstelle wie oft gerufen wurde, getrennt
-//! nach Laden und Bedienen. Dieser Test setzt jeden Eintrag gegen das, was
-//! die Engine hat, und gibt die Luecke geordnet aus.
-//!
-//! Warum das noetig war: der erste Anlauf dieser Runde baute nach der
-//! test262-Fehlerkarte. Die nannte Generatoren als groesste Luecke — im
-//! echten Korpus stirbt daran KEIN einziges Skript. Der Zensus nannte
-//! stattdessen `addEventListener` (33 360 Aufrufe) und `atob` (10 426).
+//! The ranking comes from a Chromium census over the target pages:
+//! `tools/jsscope/out/apicensus.json` records per page how often each DOM
+//! interface member was called, split by load and interaction. This test
+//! checks every entry against what the engine has and prints the gap in
+//! order. A test-suite failure map ranks by what tests exercise, not by what
+//! real scripts die on.
 //!
 //!   APICENSUS=<tools>/jsscope/out/apicensus.json \
 //!     cargo test --test apigap -- --nocapture
@@ -25,11 +22,11 @@ fn api_gap() {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         println!("[apigap] {path} nicht lesbar"); return;
     };
-    // Kein JSON-Crate in den Abhaengigkeiten und keins noetig: gebraucht
-    // werden nur die `"Iface.member": zahl`-Paare, und die stehen flach da.
+    // No JSON crate needed: only the flat `"Iface.member": number` pairs are
+    // used.
     let mut agg: BTreeMap<String, u64> = BTreeMap::new();
-    // Nach `split('"')` stehen die Zeichenketten auf den UNGERADEN Plaetzen,
-    // und was danach kommt, auf dem naechsten geraden.
+    // After `split('"')` the strings sit at odd indices and what follows them
+    // at the next even one.
     let parts: Vec<&str> = raw.split('"').collect();
     let mut k = 1;
     while k + 1 < parts.len() {
@@ -44,7 +41,7 @@ fn api_gap() {
         *agg.entry(name).or_default() += num.parse::<u64>().unwrap_or(0);
     }
 
-    // Die Probe laeuft IN der Engine: nur sie weiss, was sie hat.
+    // The probe runs inside the engine: only it knows what it has.
     let mut src = String::from(PROBE);
     for (k, v) in &agg {
         let Some((iface, member)) = k.split_once('.') else { continue };

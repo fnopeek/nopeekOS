@@ -1,12 +1,11 @@
-//! Die KAESTEN einer Datei nennen — Etikett, Ort, Groesse.
+//! Lists the boxes of a file: label, position, size.
 //!
-//! `pagedump` zeigt, was gemalt wird; ein Kasten ohne Farbe malt nichts und
-//! ist trotzdem der, um den es geht (Raender, `min-height`, Zusammenfall).
-//! Das ist die Seite, die man gegen `getBoundingClientRect` eines echten
-//! Browsers halten kann.
+//! `pagedump` shows what is painted; a box without a colour paints nothing
+//! but may be the one that matters (margins, `min-height`, collapsing).
+//! The output can be compared with a real browser's `getBoundingClientRect`.
 //!
-//!   cargo run --release --example boxprobe <datei.html>
-//!   W=800 BOX=div.p cargo run --release --example boxprobe <datei.html>
+//!   cargo run --release --example boxprobe <file.html>
+//!   W=800 BOX=div.p cargo run --release --example boxprobe <file.html>
 fn main() {
     let p = std::env::args().nth(1).expect("datei");
     let html = std::fs::read_to_string(&p).expect("lesen");

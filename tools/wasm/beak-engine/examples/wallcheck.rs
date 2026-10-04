@@ -1,14 +1,10 @@
-// Woran stirbt echter, ausgelieferter Code ZUERST?
+// Finds what real, shipped code dies on first: the scripts Chromium parsed
+// while loading the target pages, not test262. Runs without a DOM by default,
+// to tell whether the language or the host environment is the wall.
 //
-// Nicht test262, sondern die Skripte, die Chromium beim Laden der zwoelf
-// Zielseiten geparst hat. Ohne DOM — das ist erwartet und genau der Punkt:
-// die Frage ist, ob die SPRACHE die Wand ist oder die Wirtsumgebung.
-//
-// **Je SEITE eine Umgebung, nicht je Datei.** Die erste Fassung fuhr jedes
-// Skript einzeln und meldete 98 mal `mw is not defined` — aber `mw` wird von
-// einem SCHWESTERSKRIPT derselben Seite gesetzt. Ein Browser teilt die
-// Umgebung, also muss diese Messung es auch tun, sonst misst sie die
-// Isolation und nicht die Engine.
+// One environment per page, not per file: scripts set globals for their
+// siblings (e.g. `mw`), and a browser shares the environment. Running each
+// file alone would measure the isolation, not the engine.
 fn main() {
     let root = std::env::var("JSCORPUS").unwrap();
     let mut pages: std::collections::BTreeMap<String, Vec<std::path::PathBuf>> = Default::default();
@@ -18,8 +14,8 @@ fn main() {
             let name = e.file_name().to_string_lossy().to_string();
             let mut fs_: Vec<_> = std::fs::read_dir(e.path()).unwrap().flatten()
                 .map(|x| x.path()).filter(|p| p.extension().is_some_and(|x| x == "js")).collect();
-            // In der Reihenfolge, in der `measure.mjs` sie abgelegt hat — das
-            // ist die Reihenfolge, in der der Browser sie geparst hat.
+            // In the order `measure.mjs` stored them, which is the order the
+            // browser parsed them.
             fs_.sort_by_key(|p| {
                 p.file_stem().and_then(|s| s.to_str())
                  .and_then(|s| s.rsplit("__").next().map(|n| n.parse::<u32>().unwrap_or(0)))
@@ -34,20 +30,19 @@ fn main() {
     println!("\n── Echter Korpus: eine Umgebung je Seite, MIT ihrem DOM ──\n");
     for (page, files) in &pages {
         let (mut pok, mut pn) = (0usize, 0usize);
-        // Eine Umgebung fuer die ganze Seite. Ein Absturz in Skript 3 darf die
-        // Umgebung nicht mitnehmen, also faengt jeder Lauf fuer sich.
+        // One environment for the whole page. A crash in one script must not
+        // take the environment down, so each run is caught on its own.
         let mut sess = beak_engine::js::Session::new(2_000_000);
-        // Das ECHTE HTML der Seite dazu — `measure.mjs` hat es neben den
-        // Skripten abgelegt. Ohne Dokument misst dieser Lauf nur die Sprache;
-        // mit ihm misst er, was ein Skript im Browser vorfindet.
+        // The page's real HTML, stored next to the scripts by `measure.mjs`.
+        // Without a document this measures only the language; with it, what a
+        // script finds in a browser.
         let html_path = std::path::Path::new(&root).parent().unwrap()
             .join("html").join(format!("{page}.html"));
         if let Ok(html) = std::fs::read_to_string(&html_path) {
             let dom = beak_engine::dom::parse(&html);
             sess.interp.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
-            // Fenster + Farbschema wie im Browser, sonst faellt jede Seite
-            // schon an `innerWidth`/`matchMedia` aus und der Lauf misst das
-            // Werkzeug statt die Engine.
+            // Window and colour scheme as in a browser, or every page fails on
+            // `innerWidth`/`matchMedia` and the run measures the tool.
             sess.interp.set_media(1280.0, 800.0, false);
         }
         for f in files {
@@ -68,9 +63,8 @@ fn main() {
                 Ok(Ok(())) => { ok += 1; pok += 1; continue }
                 Ok(Err(e)) => e,
             };
-            // `WCPAGE=<seite>` (oder `*`) nennt Datei UND Grund. Der Histogramm-Balken
-            // sagt WAS die Wand ist, nicht WO — und beim Vergleich zweier
-            // Staende ist genau das die Frage.
+            // `WCPAGE=<page>` (or `*`) prints file and reason. The histogram
+            // says what the wall is, not where.
             let want = std::env::var("WCPAGE").unwrap_or_default();
             if want == page.as_str() || want == "*" {
                 println!("    {} — {why}", f.file_name().unwrap().to_string_lossy());

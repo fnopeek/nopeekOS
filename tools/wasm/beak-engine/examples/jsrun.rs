@@ -1,14 +1,12 @@
-//! Eine JS-Datei laufen lassen und sagen, was sie auf die Konsole geschrieben
-//! hat.
+//! Runs a JS file and prints what it wrote to the console.
 //!
-//! `js::run` sammelt die Konsole ein und wirft sie weg — fuer eine Probe ist
-//! genau die Konsole aber das Ergebnis. `CAP=1` setzt die Schrittgrenze, damit
-//! eine Endlosschleife als `RangeError` endet statt als haengender Lauf.
+//! `js::run` collects the console and discards it; for a probe the console is
+//! the result. `CAP=1` sets the step limit so an endless loop ends as a
+//! `RangeError` instead of hanging.
 //!
 //!   cargo run --release --example jsrun -- probe.js
-/// Zufall fuer die HOST-Werkzeuge — aus `/dev/urandom`, nicht aus einer
-/// Bequemlichkeit. Ohne sie gaebe es hier kein `crypto`, und dann misst das
-/// Werkzeug eine andere Plattform als das Geraet.
+/// Randomness for host tools, from `/dev/urandom`. Without it there is no
+/// `crypto`, and the tool would measure a different platform than beak.
 fn host_random(out: &mut [u8]) -> bool {
     use std::io::Read;
     match std::fs::File::open("/dev/urandom") {
@@ -21,8 +19,8 @@ fn main() {
     beak_engine::js::random::set_source(host_random);
     let arg = std::env::args().nth(1).unwrap_or_default();
     let script = std::fs::read_to_string(&arg).unwrap_or(arg);
-    // `MODULE=1` parst als Modul. beak versucht am Geraet BEIDES — die Datei
-    // sagt nicht, was sie ist —, also muss die Probe das auch koennen.
+    // `MODULE=1` parses as a module. beak tries both, since the file does not
+    // say which it is, so the probe must be able to as well.
     let module = std::env::var("MODULE").is_ok();
     let prog = match beak_engine::js::parse(&script, module) {
         Ok(p) => p,
@@ -38,19 +36,17 @@ fn main() {
         }
     };
     let mut i = beak_engine::js::interp::Interp::new();
-    // `NOVM=1` faehrt dieselbe Datei ohne die Befehlsmaschine. Der Diff der
-    // beiden Ausgaben ist die einzige Art, zu pruefen, dass die zwei
-    // Maschinen dieselbe Bedeutung haben — und nicht nur dieselbe Zahl.
+    // `NOVM=1` runs the same file without the bytecode machine. Diffing the
+    // two outputs checks that both machines have the same semantics.
     if std::env::var("NOVM").is_ok() { i.vm_off = true; }
-    // `HTML=<datei|text>` haengt ein Dokument an. Ohne das gibt es `document`
-    // GAR NICHT — das ist Absicht der Engine und keine Luecke des Werkzeugs.
+    // `HTML=<file|text>` attaches a document. Without it there is no `document`
+    // at all; that is by design of the engine.
     if let Ok(h) = std::env::var("HTML") {
         let html = std::fs::read_to_string(&h).unwrap_or(h);
         let dom = beak_engine::dom::parse(&html);
         i.set_document(beak_engine::js::dombind::Doc::from_dom(&dom));
-        // Denselben Kaskadenkontext einreichen, den beak einreicht — sonst
-        // antwortet `getComputedStyle` hier anders als am Geraet, und die
-        // Probe prueft eine Maschine, die es so nicht gibt.
+        // Submit the same cascade context beak submits, or `getComputedStyle`
+        // answers differently here than in beak.
         let media = beak_engine::css::Media::new(1024.0, std::env::var("DARK").is_ok());
         let ext = std::env::var("CSS").ok().and_then(|p| std::fs::read_to_string(p).ok())
             .unwrap_or_default();
@@ -67,14 +63,14 @@ fn main() {
             },
             viewport_w: 1024.0,
         });
-        // Ein Fenster dazu, sonst gibt es `matchMedia` nicht. `DARK=1` dreht
-        // das Farbschema.
+        // A window too, or there is no `matchMedia`. `DARK=1` flips the colour
+        // scheme.
         i.set_media(1024.0, 768.0, std::env::var("DARK").is_ok());
     }
     if std::env::var("CAP").is_ok() { i.max_steps = 2_000_000; }
     let r = i.run_program(&prog);
-    // Zeitgeber UND Microtasks nachlaufen lassen — eine Probe, die auf
-    // `setTimeout` endet, haette sonst kein Ergebnis.
+    // Drain timers and microtasks; a probe that ends on `setTimeout` would
+    // otherwise have no result.
     for _ in 0..64 { if i.run_timers() == 0 { break } }
     for l in &i.console { println!("{l}"); }
     if let Err(beak_engine::js::interp::Abrupt::Throw(v)) = r {

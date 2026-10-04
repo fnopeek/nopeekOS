@@ -1,4 +1,4 @@
-// Was macht beak aus einem Ligatur-Icon-Namen? `argv[1]` ist die Schrift.
+// What beak makes of a ligature icon name. `argv[1]` is the font.
 fn main() {
     let path = std::env::args().nth(1).expect("schrift");
     let bytes = std::fs::read(&path).expect("lesbar");
@@ -17,7 +17,7 @@ fn main() {
     }
 }
 
-// Was die Substitutionen kosten: dieselbe Schrift zweimal geparst.
+// Cost of the substitutions: the same font parsed twice.
 fn cost(bytes: &[u8]) {
     use fontdue::{Font, FontSettings};
     for on in [false, true] {

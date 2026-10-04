@@ -1,17 +1,11 @@
-//! Wieviel Halde kostet was — GEHALTEN und als SPITZE, getrennt.
-//!
-//! Ausgeloest von einem Absturz am Geraet: beak gab beim Beenden 79 MB zurueck,
-//! davon 59 MB gewachsen, und `beakbench` zeigte, dass das Schriftrastern
-//! allein von 11 auf 89 MiB treibt. Was `beakbench` NICHT trennen kann, ist
-//! „braucht der Browser das dauerhaft" von „das war eine Spitze beim Parsen,
-//! und talc gibt Seiten nie zurueck" — die Antwort entscheidet, ob hier etwas
-//! zu holen ist.
+//! Heap cost per component, held and peak separately: "the browser needs this
+//! permanently" versus "a peak while parsing, and talc never returns pages".
 //!
 //!     cargo run --release --example heapcheck
 //!
-//! Der Allokator zaehlt Bytes, nicht Seiten: eine Wasm-Halde ist immer
-//! groesser als die Summe der lebenden Allokationen (Verschnitt, Bins), aber
-//! das VERHAELTNIS von gehalten zu Spitze ist dasselbe.
+//! The allocator counts bytes, not pages: a Wasm heap is always larger than
+//! the sum of live allocations (fragmentation, bins), but the ratio of held
+//! to peak is the same.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -21,7 +15,7 @@ static PEAK: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
-// SAFETY: reicht jede Anfrage an `System` durch und zaehlt nur mit.
+// SAFETY: forwards every request to `System` and only counts.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(l) };
@@ -67,12 +61,12 @@ fn main() {
     let start = LIVE.load(Relaxed);
     reset();
 
-    // Die sechs eingebauten Gesichter — der Posten, um den es geht.
+    // The six built-in faces.
     let f = beak_engine::fonts::Fonts::new();
     zeile("Fonts::new() (6 Gesichter)", start);
     let nach_fonts = LIVE.load(Relaxed);
 
-    // Je Gesicht einzeln — ueber `add_web`, das denselben Parser fuehrt.
+    // Each face on its own, via `add_web`, which runs the same parser.
     println!();
     let mut g = beak_engine::fonts::Fonts::new();
     for (n, name) in ["inter.ttf", "inter-bold.ttf", "inter-italic.ttf",
@@ -87,9 +81,8 @@ fn main() {
 
     drop(f);
 
-    // **Und jetzt die Frage, die zaehlt: wieviele Gesichter fasst eine ECHTE
-    // Seite an?** Faul zu laden hilft nur, wenn eine Seite nicht ohnehin alle
-    // sechs beruehrt.
+    // How many faces does a real page touch? Lazy loading only helps if a
+    // page does not touch all six anyway.
     for p in std::env::args().skip(1) {
         let Ok(html) = std::fs::read_to_string(&p) else { continue };
         let css = std::fs::read_to_string(p.replace(".html", ".css")).unwrap_or_default();
@@ -97,17 +90,16 @@ fn main() {
         let vor = LIVE.load(Relaxed);
         let fonts = beak_engine::fonts::Fonts::new();
         let dom = beak_engine::dom::parse(&html);
-        // Mit dem externen Blatt, sonst misst man eine Seite ohne ihr CSS —
-        // und die fasst weniger Gesichter an als die echte.
+        // With the external stylesheet; a page without its CSS touches fewer
+        // faces than the real one.
         let sheet = beak_engine::css::collect_all(&dom, &css, beak_engine::css::Media::new(1902.0, false));
         let lay = beak_engine::layout::layout(
             &fonts, &dom, &sheet, &beak_engine::image::ImageMap::new(),
             1902, 993, &beak_engine::Theme::DARK,
             &beak_engine::forms::FormState::default(), false, &[], false);
         let name = p.rsplit('/').next().unwrap_or(&p);
-        // **Die SPITZE bestimmt die Halde, nicht das Gehaltene.** Ein
-        // Wasm-Heap waechst auf den groessten gleichzeitigen Stand und gibt
-        // nie zurueck; was danach frei wird, senkt ihn nicht mehr.
+        // The peak sizes the heap, not what is held: a Wasm heap grows to the
+        // largest simultaneous use and never shrinks.
         println!("  {:<24} {} von 6 Gesichtern   gehalten {:>6.1} MB   SPITZE {:>6.1} MB   ({} px hoch)",
                  name, fonts.loaded_faces(), mb(LIVE.load(Relaxed).saturating_sub(vor)),
                  mb(PEAK.load(Relaxed).saturating_sub(vor)), lay.height);

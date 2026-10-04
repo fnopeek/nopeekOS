@@ -25,7 +25,7 @@ fn main() {
         (r"^\s*$", "", "   ", Some("   ")),
         ("x|y|z", "", "aaz", Some("z")),
         (r"\$\d+", "", "cost $42", Some("$42")),
-        ("(a+)+$", "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaab", None),  // katastrophal
+        ("(a+)+$", "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaab", None),  // catastrophic backtracking
     ];
     let (mut ok, mut bad) = (0, 0);
     for (pat, fl, hay, want) in cases {

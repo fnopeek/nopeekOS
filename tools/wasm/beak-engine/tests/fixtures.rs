@@ -1,19 +1,13 @@
-//! Jede Klasse in einer Vorlage muss im Blatt auch eine Regel HABEN.
+//! Every class used in a fixture must have a rule in the stylesheet.
 //!
-//! Der Grund ist eine Stunde Fehlersuche: die Tailwind-Vorlage benutzte
-//! `left-2`, das vendorierte Blatt kennt aber nur `top-*`/`bottom-*`/`inset-*`
-//! — Tailwind v4 gibt nur aus, was seine Quelle wirklich benutzt, und diese
-//! Quelle war eine andere. Der Kasten stand deshalb bei x=0, und das sah
-//! haargenau nach einem Fehler in unserem `position:absolute` aus. Er war
-//! keiner: das Blatt sagte nichts, also tat die Maschine nichts.
-//!
-//! Eine Vorlage, die eine Klasse ohne Regel zeigt, ist ein Orakel, das luegt —
-//! und zwar in die teure Richtung: sie meldet einen Fehler, den es nicht gibt.
-//! Diese Probe haelt Vorlage und Blatt zusammen, damit das nicht ein zweites
-//! Mal eine Runde kostet.
+//! Tailwind v4 emits only the classes its source uses, so a fixture can use a
+//! class the vendored stylesheet lacks. The box then sits wrong and looks
+//! exactly like an engine bug. A fixture with a rule-less class is an oracle
+//! that reports bugs that do not exist; this test keeps fixture and
+//! stylesheet together.
 
-/// Selektor-Text einer Klasse, so wie ein Blatt ihn schreibt: `:` und `/` und
-/// `.` werden in Tailwind mit Backslash geschuetzt.
+/// Selector text of a class as a stylesheet writes it: Tailwind escapes `:`,
+/// `/` and `.` with a backslash.
 fn selector(class: &str) -> String {
     let mut out = String::from(".");
     for c in class.chars() {
@@ -25,16 +19,16 @@ fn selector(class: &str) -> String {
     out
 }
 
-/// Steht `sel` im Blatt — und endet dort auch, statt der Anfang eines
-/// laengeren Namens zu sein (`.p-1` darf nicht auf `.p-10` passen)?
+/// Whether `sel` occurs in the stylesheet and ends there, rather than being
+/// the prefix of a longer name (`.p-1` must not match `.p-10`).
 fn defined(css: &str, sel: &str) -> bool {
     let mut from = 0;
     while let Some(i) = css[from..].find(sel) {
         let at = from + i;
         let after = css[at + sel.len()..].chars().next().unwrap_or(' ');
         let ok_after = !matches!(after, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '\\');
-        // Ein Selektor faengt nicht mitten in einem Namen an: das Zeichen davor
-        // darf kein Namenszeichen sein (sonst passt `.p-1` auf `.grid-cols-1`).
+        // A selector does not start mid-name: the preceding character must
+        // not be a name character (or `.p-1` matches `.grid-cols-1`).
         let before = css[..at].chars().next_back().unwrap_or(' ');
         let ok_before = !matches!(before, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_');
         if ok_after && ok_before {
@@ -62,8 +56,8 @@ fn classes(html: &str) -> Vec<String> {
 }
 
 fn check(name: &str, html: &str, sheet: &str) {
-    // Der eigene <style>-Block der Vorlage zaehlt mit: er definiert den Rahmen
-    // um jeden Block, und der gehoert nicht ins fremde Blatt.
+    // The fixture's own <style> block counts too: it defines the frame around
+    // each block, which is not part of the vendored stylesheet.
     let own = html.split("<style>").nth(1).and_then(|s| s.split("</style>").next()).unwrap_or("");
     let missing: Vec<String> = classes(html)
         .into_iter()

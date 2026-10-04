@@ -1,13 +1,10 @@
-// Eine eingefrorene Seite rendern und als BMP ablegen — zum ANSEHEN.
+// Renders a frozen page and writes it as BMP, for viewing.
 //
-// Die Komponentenvorlage prueft, was ich prüfen wollte. Diese hier prüft, was
-// ein Betreiber wirklich ausliefert — eingefroren, also zweimal gleich.
-//
-//   PAGE=<pfad ohne .html> W=1902 OUT=x.bmp cargo run --release --example pagerender
+//   PAGE=<path without .html> W=1902 OUT=x.bmp cargo run --release --example pagerender
 fn main() {
     let base = std::env::var("PAGE").expect("PAGE=<pfad ohne .html>");
     let html = std::fs::read_to_string(format!("{base}.html")).expect("html");
-    // `CSSFILE=` fuer eine Vorlage, deren Blatt nicht neben ihr liegt.
+    // `CSSFILE=` for a fixture whose stylesheet is not next to it.
     let css = match std::env::var("CSSFILE") {
         Ok(f) => std::fs::read_to_string(f).expect("css"),
         Err(_) => std::fs::read_to_string(format!("{base}.css")).unwrap_or_default(),
@@ -27,7 +24,7 @@ fn main() {
               base.rsplit('/').next().unwrap_or(&base), lay.ops.len(), lay.links.len());
 }
 
-/// BGRA nach BMP. Von unten nach oben, wie das Format es will.
+/// BGRA to BMP, bottom-up as the format requires.
 fn to_bmp(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
     let row = (w * 4) as usize;
     let pixels = row * h as usize;

@@ -1,13 +1,13 @@
-// Der WebSocket-Code gegen einen ECHTEN Server — host-seitig.
+// Runs the WebSocket framing code against a real server, host-side.
 //
-// Die Rahmen rechnet DIESE Datei, also derselbe Code, den beak faehrt; die
-// TLS-Leitung liegt draussen (`tools/wsdrive.py`), weil der Motor kein `std`
-// kennt und keinen Strom aufmachen kann. Zeilenprotokoll auf stdin:
+// This file computes the frames with the same code beak runs; the TLS link
+// lives outside (`tools/wsdrive.py`) because the engine has no `std` and
+// cannot open a stream. Line protocol on stdin:
 //
-//     RX <hex>     Bytes von der Leitung hereingeben
-//     SEND <text>  einen Textrahmen hinauslegen
+//     RX <hex>     feed bytes from the wire
+//     SEND <text>  send a text frame
 //
-// Geantwortet wird mit `EV <ereignis>`, `TX <hex>` und `OK`.
+// Replies are `EV <event>`, `TX <hex>` and `OK`.
 use beak_engine::js::websocket::{Event, Socket};
 use std::io::{BufRead, Write};
 
@@ -21,8 +21,8 @@ fn to_hex(b: &[u8]) -> String {
 fn main() {
     let url = std::env::args().nth(1).expect("URL");
     let origin = std::env::args().nth(2).expect("Herkunft");
-    // Fester Zufall: der Lauf soll wiederholbar sein. Fuer die Maske ist das
-    // hier richtig und auf dem Geraet falsch — §5.3 verlangt dort echten.
+    // Fixed randomness so runs are repeatable. Acceptable for a probe; real
+    // use needs true randomness for the mask (RFC 6455 §5.3).
     let mut sock = Socket::new(1, &url, &origin, true, [0x5a; 16]).expect("URL zerlegen");
     let mut mask = || [0xa1u8, 0xb2, 0xc3, 0xd4];
     let out = std::io::stdout();

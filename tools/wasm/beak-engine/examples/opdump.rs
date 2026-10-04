@@ -1,12 +1,11 @@
-// Was malt beak für ein Schnipsel — Befehl für Befehl?
+// What beak paints for a snippet, command by command.
 fn main() {
-    // `CSS=` uebersteuert das Blatt — fuer eine Probe, die eine einzelne
-    // Regel prueft und nicht Bootstrap.
+    // `CSS=` overrides the stylesheet, for a probe that checks a single rule.
     let mut css = match std::env::var("CSS") {
         Ok(c) => c,
         Err(_) => include_str!("../assets/bootstrap.min.css").to_string(),
     };
-    // `CSSADD=` haengt an — um EINE Regel gegen das echte Blatt zu halten.
+    // `CSSADD=` appends, to test one rule against the real stylesheet.
     if let Ok(f) = std::env::var("CSSFILE") { css = std::fs::read_to_string(f).expect("css"); }
     if let Ok(extra) = std::env::var("CSSADD") { css.push_str(&extra); }
     let body = std::env::var("BODY").unwrap_or_else(|_|

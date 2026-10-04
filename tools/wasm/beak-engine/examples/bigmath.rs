@@ -1,5 +1,5 @@
-//! Die Bignum-Rechnung gegen node halten, OHNE die Engine dazwischen.
-//! Ein Fehler in `Big` ist sonst nur als merkwuerdiges JS-Ergebnis sichtbar.
+//! Checks the bignum arithmetic against node, without the engine in between.
+//! A bug in `Big` would otherwise only show up as an odd JS result.
 use beak_engine::js::bigint::Big;
 
 fn main() {

@@ -1,12 +1,9 @@
-// Was kostet `getComputedStyle` — und was kostet es, wenn das Skript vorher
-// den Baum angefasst hat?
+// What `getComputedStyle` costs, with and without a preceding tree mutation.
 //
-// Seit 0.74.0 rechnet die Kaskade auf dem LEBENDEN Baum. Der wird aus der
-// JS-Arena gebaut und zwischengespeichert; jede Aenderung macht den Speicher
-// ungueltig. Diese Probe sagt, was beides wirklich kostet — „sollte schnell
-// genug sein" ist keine Zahl ([[feedback_remeasure_before_claiming_a_delta]]).
+// The cascade runs on the live tree, which is built from the JS arena and
+// cached; every mutation invalidates the cache.
 //
-//   PAGE=<pfad ohne .html> N=200 cargo run --release --example gcstime
+//   PAGE=<path without .html> N=200 cargo run --release --example gcstime
 fn main() {
     let base = std::env::var("PAGE").expect("PAGE=<pfad ohne .html>");
     let html = std::fs::read_to_string(format!("{base}.html")).expect("html");
@@ -33,9 +30,8 @@ fn main() {
     println!("   {} — {} Knoten in der Arena, {} KB CSS",
              base.rsplit('/').next().unwrap_or(&base), nodes, css.len() / 1024);
 
-    // Die Schleifenzahl wird EINGESETZT, nicht ersetzt. `replace("N", …)` traf
-    // auch das N in `tagName`; die Probe mass danach etwas anderes, als sie
-    // behauptete, und das sah aus wie ein Fehler in der Engine.
+    // The loop count is inserted, not substituted: `replace("N", …)` would
+    // also hit the N in `tagName`.
     let mut run = |sess: &mut beak_engine::js::Session, body: &str| -> f64 {
         let src = format!("var e = document.documentElement;\nfor (var i = 0; i < {n}; i++) {{ {body} }}");
         let prog = beak_engine::js::parse(&src, false).expect("parst");
@@ -44,17 +40,16 @@ fn main() {
         t.elapsed().as_secs_f64() * 1e6 / n as f64
     };
 
-    // Ohne Aenderung dazwischen: der Baum steht, der Zwischenspeicher greift,
-    // gemessen wird die Kaskade auf einer Vorfahrenkette.
+    // No mutation in between: the tree stands, the cache hits; this measures
+    // the cascade over an ancestor chain.
     let warm = run(&mut sess, "getComputedStyle(e).color;");
-    // Mit einer Aenderung davor: jede erzwingt einen Neubau des Baums.
+    // With a mutation before each call: every one forces a tree rebuild.
     let cold = run(&mut sess, "e.setAttribute('class', 'x' + i); getComputedStyle(e).color;");
 
     println!("   Abfrage, Baum unveraendert  : {warm:8.1} µs");
     println!("   Abfrage nach einer Aenderung: {cold:8.1} µs");
 
-    // Der Neubau allein, damit die Zahl darueber nachpruefbar ist statt nur
-    // plausibel.
+    // The rebuild alone, so the figure above can be checked.
     let d = sess.interp.doc.as_ref().expect("doc");
     let t = std::time::Instant::now();
     for _ in 0..20 { std::hint::black_box(d.live_dom()); }

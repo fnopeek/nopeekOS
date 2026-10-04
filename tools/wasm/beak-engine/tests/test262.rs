@@ -1,38 +1,36 @@
-//! test262 als PARSE-Orakel — die Sprachzahl, bevor es eine Auswertung gibt.
+//! test262 as a parse oracle: a language score independent of evaluation.
 //!
-//! test262 sagt zu jeder Datei, ob sie gueltiges JavaScript ist:
+//! test262 states for each file whether it is valid JavaScript:
 //!
-//! - `negative: { phase: parse }` → der Parser MUSS ablehnen.
-//! - alles andere → der Parser MUSS annehmen. Auch `phase: resolution` und
-//!   `phase: runtime`: die sind syntaktisch einwandfrei und scheitern spaeter.
+//! - `negative: { phase: parse }` → the parser must reject.
+//! - everything else → the parser must accept. Including `phase: resolution`
+//!   and `phase: runtime`: those are syntactically fine and fail later.
 //!
-//! Das ist ein vollstaendiges, hartes Urteil ueber die Grammatik, ganz ohne
-//! Interpreter — und deshalb die Leiter, die vor der Maschine steht.
+//! That is a complete verdict on the grammar without an interpreter.
 //!
-//! Der Korpus liegt NICHT im Repo (273 MB). Pfad ueber `TEST262=`; ohne die
-//! Variable ueberspringt der Test sich selbst und sagt, wie man ihn anschaltet.
+//! The corpus is not in the repo. Path via `TEST262=`; without the variable
+//! the test skips itself and says how to enable it.
 //!
 //!   TEST262=~/…/tools/test262-upstream cargo test --release \
 //!     --manifest-path tools/wasm/beak-engine/Cargo.toml --test test262 -- --nocapture
 //!
-//! `T262_FILTER=<substr>` grenzt ein · `T262_SHOW=<n>` zeigt n Fehler.
+//! `T262_FILTER=<substr>` narrows · `T262_SHOW=<n>` shows n failures.
 //!
-//! Verglichen wird gegen `tools/test262/out/baseline-v8.json`: ein Test, den
-//! wir reissen und V8 besteht, ist UNSERE Luecke. Die eigene Prozentzahl allein
-//! sagt wenig — test262 laeuft den Motoren voraus.
+//! Compared against `tools/test262/out/baseline-v8.json`: a test we fail and
+//! V8 passes is our gap. The own percentage alone says little, since test262
+//! runs ahead of the engines.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Verzeichnisse ausserhalb des Ziels — dieselbe Politik wie
-/// `tools/test262/subset.json`, hier auf das reduziert, was fuers PARSEN zaehlt.
+/// Directories outside the target; the same policy as
+/// `tools/test262/subset.json`, reduced to what matters for parsing.
 const SKIP_DIRS: &[&str] = &["intl402", "staging"];
 
-/// Nur SYNTAX-Vorschlaege, die wir bewusst nicht bauen. Der Unterschied zum
-/// Ausfuehrungslauf ist gross und lehrreich: `Temporal` parst tadellos (es
-/// fehlen nur Builtins), also faellt es hier NICHT weg. Ausgeschlossen ist
-/// allein, was die Grammatik selbst aendert.
+/// Only syntax proposals we deliberately do not build. `Temporal` parses fine
+/// (only builtins are missing), so it is not excluded here; only what changes
+/// the grammar itself is.
 const SKIP_FEATURES: &[&str] = &[
     "decorators",
     "explicit-resource-management",   // `using x = …`
@@ -42,15 +40,12 @@ const SKIP_FEATURES: &[&str] = &[
     "import-defer",
 ];
 
-/// Der ZWEITE Nenner fuer den Ausfuehrungslauf — dieselbe Politik wie
+/// The second denominator, for the execution run; the same policy as
 /// `tools/test262/subset.json`.
 ///
-/// Er ist LAENGER als der fuers Parsen, und das ist kein Widerspruch:
-/// `Temporal` parst tadellos und faellt dort zurecht nicht weg, aber
-/// AUSFUEHREN kann es nur, wer es gebaut hat — und wir bauen es erklaertermassen
-/// nicht. Die erste Fassung dieses Laufs zaehlte 4436 Temporal-Tests als
-/// Misserfolg mit; das ist kein ehrlicher Nenner, das ist eine
-/// selbstgemachte Niederlage.
+/// It is longer than the parse list, which is consistent: `Temporal` parses
+/// fine, but only an engine that implements it can execute it, and we
+/// deliberately do not.
 const SKIP_FEATURES_EXEC: &[&str] = &[
     "Temporal", "Intl.Era-monthcode", "explicit-resource-management", "decorators",
     "Atomics", "Atomics.pause", "SharedArrayBuffer", "import-assertions",
@@ -60,14 +55,14 @@ const SKIP_FEATURES_EXEC: &[&str] = &[
     "immutable-arraybuffer", "error-stack-accessor",
 ];
 
-/// Der `$DONE`, den ein `async`-Test ruft — unsere Fassung von
+/// The `$DONE` an `async` test calls; our version of
 /// `harness/doneprintHandle.js`.
 ///
-/// **Ein WAHRER Grund ist ein Fehler**, alles andere (kein Argument,
-/// `undefined`, `null`) ist Erfolg — wortgleich mit dem `if (error)` der
-/// mitgelieferten Datei. Ein zweiter Aufruf ist selbst ein Fehler: die
-/// Spezifikation der Fahne sagt „the sole asynchronous test of a file", und
-/// ein Test, der zweimal fertig wird, hat einen Rueckruf zu viel gefeuert.
+/// A truthy reason is a failure; anything else (no argument, `undefined`,
+/// `null`) is success, matching the `if (error)` of the harness file. A
+/// second call is itself a failure: the flag's spec says "the sole
+/// asynchronous test of a file", and a test that finishes twice fired one
+/// callback too many.
 const DONE_SRC: &str = r#"
 var __t262_done = 0, __t262_err = undefined;
 function $DONE(error) {
@@ -76,17 +71,16 @@ function $DONE(error) {
 }
 "#;
 
-/// Die Schlange leeren und ablesen, was `$DONE` gemeldet hat.
+/// Drains the job queue and reads what `$DONE` reported.
 ///
-/// Gerufen wird das NUR fuer `async`-Tests: fuer jeden anderen waere das
-/// Fahren der Schlange eine zweite Semantik — ein gewoehnlicher Test ist
-/// fertig, wenn sein letzter Befehl gelaufen ist.
+/// Called only for `async` tests: for any other, running the queue would be
+/// a second semantics; an ordinary test is done when its last statement ran.
 fn async_outcome(
     s: &mut beak_engine::js::Session,
     r: Result<(), String>,
 ) -> Result<(), String> {
     use beak_engine::js::value::Value;
-    // Ein Wurf im Skript selbst bleibt der Wurf — `$DONE` kam dann nie dazu.
+    // A throw in the script itself stays the throw; `$DONE` was never reached.
     r.as_ref().map_err(|e| e.clone())?;
     beak_engine::js::promise::run_jobs(&mut s.interp);
     let g = s.interp.realm.global.clone();
@@ -105,10 +99,9 @@ fn async_outcome(
                         .unwrap_or_else(|_| String::from("$DONE mit einem Grund")),
             })
         }
-        // **Das ist die haeufigste ehrliche Absage**, nicht ein Laeuferfehler:
-        // die Kette blieb irgendwo stehen, meist an einem Merkmal, das es
-        // nicht gibt. Sie muss so heissen, sonst sucht der naechste Leser den
-        // Fehler im Geruest.
+        // The most common legitimate failure, not a runner bug: the chain
+        // stalled somewhere, usually at a missing feature. It must be named
+        // so, or the reader looks for the error in the harness.
         _ => Err(String::from("$DONE wurde nie gerufen")),
     }
 }
@@ -188,14 +181,13 @@ fn test262_parse() {
 
     let (mut run, mut pass) = (0usize, 0usize);
     let (mut skip_dir, mut skip_feat) = (0usize, 0usize);
-    // Getrennt gezaehlt, weil sie voellig verschieden wiegen: eine Datei, die
-    // wir faelschlich ABLEHNEN, kostet die ganze Seite. Eine, die wir
-    // faelschlich ANNEHMEN, ist ein fehlender Fruehfehler — laestig, aber die
-    // Seite laeuft.
+    // Counted separately because they weigh very differently: a file we wrongly
+    // reject costs the whole page; one we wrongly accept is a missing early
+    // error, annoying but the page runs.
     let (mut n_reject, mut n_accept) = (0usize, 0usize);
     let mut accept_fam: std::collections::BTreeMap<String, usize> = Default::default();
-    // Gezaehlt wird immer, gesammelt nur bis zum Deckel — sonst meldet der
-    // Bericht die Groesse des Deckels und nicht die Zahl.
+    // Always counted, collected only up to the cap, or the report would show
+    // the cap instead of the count.
     let mut wrong_reject: Vec<(String, String)> = Vec::new();
     let mut wrong_accept: Vec<String> = Vec::new();
 
@@ -234,13 +226,10 @@ fn test262_parse() {
                 }
                 (true, Ok(())) => {
                     n_accept += 1;
-                    // Nach Familie gebuendelt statt einzeln: 5000 Pfade sind
-                    // keine Information, "welche Fruehfehler-Familie fehlt"
-                    // ist eine ([[feedback_census_by_family_not_suite]]).
-                    // Nach der REGEL gebuendelt, nicht nach dem Verzeichnis:
-                    // test262 nennt sie in `description`, und "Klassen 1810"
-                    // ist eine Adresse, keine Diagnose. Der Teil vor dem
-                    // ersten Doppelpunkt/Klammer traegt die Regel.
+                    // Grouped by rule, not individually or by directory:
+                    // thousands of paths are no information. test262 names
+                    // the rule in `description`; the part before the first
+                    // colon/parenthesis carries it.
                     let d = m.description.trim_start_matches(['|', '>', ' ']);
                     let rule: String = d.split(['(', ':']).next().unwrap_or(d)
                         .chars().take(64).collect();
@@ -264,9 +253,8 @@ fn test262_parse() {
     eprintln!("   faelschlich ABGELEHNT:  {n_reject:5}   (kostet die Seite — das ist die Zahl)");
     eprintln!("   faelschlich ANGENOMMEN: {n_accept:5}   (fehlender Fruehfehler — die Seite laeuft trotzdem)");
 
-    // Nach Grund gruppiert, mit EINEM Beispielpfad je Grund — eine Liste von
-    // 400 Pfaden sagt nichts, "welche Meldung wie oft, und wo nachsehen" sagt,
-    // was als naechstes zu bauen ist.
+    // Grouped by reason, with one example path per reason: which message how
+    // often, and where to look, says what to build next.
     let mut by_msg: std::collections::BTreeMap<&str, (usize, &str)> = Default::default();
     for (path, msg) in &wrong_reject {
         let e = by_msg.entry(msg.as_str()).or_insert((0, path.as_str()));
@@ -286,13 +274,12 @@ fn test262_parse() {
     for (f, n) in fams.iter().take(28) { eprintln!("      {n:5}  {f}"); }
 }
 
-/// Die zweite Zahl, und fuer beak die wichtigere: parst das, was der
-/// ZIELKORPUS wirklich ausliefert?
+/// The second score, and for beak the more important one: does what the
+/// target corpus actually ships parse?
 ///
-/// test262 misst die Sprache, dieser Test misst das Web. Die Skripte sind die,
-/// die Chromium beim Laden der zwoelf Seiten geparst hat (`tools/jsscope/js/`,
-/// abgelegt von `measure.mjs`) — also echter, ausgelieferter, minifizierter
-/// Code und keine Testfaelle.
+/// test262 measures the language, this measures the web. The scripts are
+/// those Chromium parsed while loading the target pages (`tools/jsscope/js/`,
+/// stored by `measure.mjs`): real, shipped, minified code, not test cases.
 ///
 ///   JSCORPUS=~/…/tools/jsscope/js cargo test --release \
 ///     --manifest-path tools/wasm/beak-engine/Cargo.toml --test test262 -- --nocapture
@@ -318,19 +305,15 @@ fn corpus_parse() {
         let e = by_page.entry(page).or_insert((0, 0));
         e.1 += 1;
         bytes_all += src.len();
-        // Ein ausgeliefertes Skript kann Script ODER Modul sein, und die Datei
-        // sagt es nicht. Beides versuchen: nur wenn KEINES parst, ist es eine
-        // Luecke.
+        // A shipped script may be a script or a module, and the file does not
+        // say. Try both: only if neither parses is it a gap.
         if beak_engine::js::parses(&src, false).is_ok()
             || beak_engine::js::parses(&src, true).is_ok() {
             ok += 1; e.0 += 1; bytes_ok += src.len();
         } else {
-            // Die Meldung aus dem MODUL-Versuch: die drei Ausreisser des
-            // ersten Laufs waren allesamt Module, und der Skript-Fehler
-            // ("unexpected keyword" bei `export`) sagte darueber nichts.
-            // Der Fehler aus dem MODUL-Versuch. `or_else` liefert den zweiten
-            // Fehler, nicht den ersten — und der Skript-Fehler bei einem Modul
-            // ist immer nur "unexpected keyword" beim `export`, also nutzlos.
+            // The error from the module attempt. `or_else` yields the second
+            // error, not the first, and the script error for a module is
+            // always just "unexpected keyword" at `export`, which says nothing.
             let err = beak_engine::js::parses(&src, true).unwrap_err();
             if fails.len() < 40 {
                 fails.push((p.strip_prefix(&root).unwrap().to_string_lossy().to_string(),
@@ -354,16 +337,15 @@ fn corpus_parse() {
 }
 
 
-/// Der AUSFUEHRUNGSLAUF. test262 sagt hier nicht mehr nur „ist das gueltige
-/// Syntax", sondern „tut es das Richtige" — und das ist die Zahl, gegen die
-/// jede weitere Arbeit an der Maschine gemessen wird.
+/// The execution run: not only "is this valid syntax" but "does it do the
+/// right thing".
 ///
-/// Verglichen wird gegen `tools/test262/out/baseline-v8.json` (V8: 99,41 %).
-/// Die eigene Zahl allein sagt wenig; die DIFFERENZ sagt alles.
+/// Compared against `tools/test262/out/baseline-v8.json`. The own score alone
+/// says little; the difference says everything.
 ///
 ///   TEST262=<…> cargo test --release --test test262 exec -- --nocapture
 ///
-/// `T262_FILTER` grenzt ein · `T262_SHOW` zeigt n Fehler.
+/// `T262_FILTER` narrows · `T262_SHOW` shows n failures.
 #[test]
 fn test262_exec() {
     let Ok(root) = std::env::var("TEST262") else {
@@ -375,37 +357,32 @@ fn test262_exec() {
     if !tests.is_dir() { eprintln!("[test262] kein Checkout unter {}", tests.display()); return; }
     let filter = std::env::var("T262_FILTER").unwrap_or_default();
     let show: usize = std::env::var("T262_SHOW").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-    // `T262_FAILLIST=<datei>` schreibt JEDEN gescheiterten Namen dorthin.
+    // `T262_FAILLIST=<file>` writes every failed name there.
     let faillist = std::env::var("T262_FAILLIST").ok();
     let mut all_fails: Vec<String> = Vec::new();
-    // Wieviel schon auf der BEFEHLSMASCHINE laeuft — die Zahl, die steigen
-    // soll, waehrend die Bestehensquote steht.
+    // How much already runs on the bytecode machine.
     let (mut vm_ran, mut vm_declined) = (0u64, 0u64);
     let (mut vm_calls, mut vm_calls_slow) = (0u64, 0u64);
     let mut vm_calls_native = 0u64;
     let mut by_decline: BTreeMap<&'static str, u64> = BTreeMap::new();
-    // Und dieselbe Zaehlung fuer FUNKTIONSRUMPFE. Seit Generatoren und
-    // async/await eigene Maschinen bekommen, sagt ein Rumpf ab, ohne dass das
-    // Programm absagt — ohne diese Zeile waere die Absage unsichtbar.
+    // The same count for function bodies: a body can decline (generators,
+    // async) without its program declining, and would otherwise be invisible.
     let mut by_fdecline: BTreeMap<&'static str, u64> = BTreeMap::new();
-    // Die Sonde fuer den strengen Modus (`--features strict-probe`). Gezaehlt
-    // wird JE VARIANTE und getrennt nach Ausgang: nur so sagt der Lauf, wie
-    // viele der FEHLER an einer dieser Stellen vorbeikamen — die Fahnen der
-    // Tests sagen es nicht.
+    // The strict-mode probe (`--features strict-probe`). Counted per variant
+    // and by outcome: only that says how many failures passed one of these
+    // points; the tests' flags do not.
     #[cfg(feature = "strict-probe")]
     let mut probe_fail = [0u64; beak_engine::js::STRICT_SITES];
     #[cfg(feature = "strict-probe")]
     let mut probe_pass = [0u64; beak_engine::js::STRICT_SITES];
     #[cfg(feature = "strict-probe")]
     let (mut probe_fail_any, mut probe_pass_any) = (0u64, 0u64);
-    // Und: welche Stelle traf welchen gescheiterten Test — fuer die Rangliste
-    // nach Verzeichnis.
+    // Which point hit which failed test, for the ranking by directory.
     #[cfg(feature = "strict-probe")]
     let mut probe_names: Vec<(String, [u32; beak_engine::js::STRICT_SITES], String)> = Vec::new();
 
-    // **`$262` anmelden — der Laeufer ist der Wirt.** Die Engine baut es nur,
-    // wenn jemand es bestellt; eine Seite sieht es nie. 455 Dateien scheiterten
-    // ohne es mit `ReferenceError`, an einer Luecke im Geruest statt im Motor.
+    // Register `$262`: the runner is the host. The engine builds it only on
+    // request; a page never sees it.
     beak_engine::js::test262::enable();
 
     let hread = |f: &str| fs::read_to_string(harness.join(f)).unwrap_or_default();
@@ -413,8 +390,8 @@ fn test262_exec() {
     let mut hcache = |f: &str| -> String {
         hmap.entry(f.to_string()).or_insert_with(|| fs::read_to_string(harness.join(f)).unwrap_or_default()).clone()
     };
-    // EINMAL geparst, dann nur noch ausgefuehrt. Der Vorspann je Variante neu
-    // zu parsen war der erste Entwurf und hat den Lauf allein damit verbracht.
+    // Parsed once, then only executed; reparsing the prelude per variant
+    // would dominate the run.
     let prologue_src = format!("{}\n{}\n", hread("assert.js"), hread("sta.js"));
     let strict_src = format!("\"use strict\";\n{prologue_src}");
     let Ok(prologue) = beak_engine::js::parse(&prologue_src, false) else {
@@ -434,9 +411,8 @@ fn test262_exec() {
     let mut fails: Vec<(String, String)> = Vec::new();
     let mut slow: Vec<(u128, String)> = Vec::new();
     let trace = std::env::var("T262_TRACE").ok();
-    // Die Phasen IM echten Lauf, nicht in einer Nebenmessung. Die
-    // Nebenmessung sagte 46 µs je Variante und lag um den Faktor 100 daneben,
-    // weil sie den teuren Fall nicht enthielt: sie parste nichts.
+    // Phase timings inside the real run, not in a side measurement, which
+    // would miss the expensive cases.
     let (mut t_read, mut t_parse, mut t_exec) = (0u128, 0u128, 0u128);
     let mut by_msg: std::collections::BTreeMap<String, (usize, String)> = Default::default();
 
@@ -447,15 +423,8 @@ fn test262_exec() {
         let Ok(src) = fs::read_to_string(p) else { continue };
         let m = frontmatter(&src);
 
-        // **Module brauchen einen Aufloeser, und den gibt es hier nicht** —
-        // eigene Zeile im Bericht, NICHT unter "bestanden".
-        //
-        // `async` stand hier bis 2026-09-11 daneben, mit der Begruendung, es
-        // gebe keine Promises. Die gibt es seit 0.92.0, Generatoren und
-        // async-Funktionen seit der Befehlsmaschine — 5485 Dateien lagen also
-        // als "uebergangen" im Bericht, weil niemand den Kommentar nachgelesen
-        // hat, als der Grund wegfiel.
-        // [[feedback_a_comment_that_names_its_condition_expires]]
+        // Modules need a resolver, which this runner lacks; they get their own
+        // line in the report, not under "passed".
         if m.flags.iter().any(|f| f == "module") { skip_kind += 1; continue; }
         let is_async = m.flags.iter().any(|f| f == "async");
         if m.features.iter().any(|f| SKIP_FEATURES_EXEC.contains(&f.as_str())) {
@@ -471,38 +440,29 @@ fn test262_exec() {
             run += 1;
             let mut text = String::new();
             if strict && !raw { text.push_str("\"use strict\";\n"); }
-            // Die Hilfsdateien aus dem Zwischenspeicher: `propertyHelper.js`
-            // allein sind 510 Zeilen, und sie je Variante von der Platte zu
-            // holen ist Arbeit fuer nichts.
-            // **`$DONE` gehoert VOR die Hilfsdateien.** `asyncHelpers.js`
-            // prueft `hasOwnProperty(globalThis, "$DONE")` und wirft sonst,
-            // bevor der Test ueberhaupt anfaengt. Der mitgelieferte
-            // `doneprintHandle.js` schreibt sein Ergebnis mit `print` auf die
-            // AUSGABE, weil ein Kommandozeilen-Laeufer nichts anderes hat; wir
-            // fahren die Sitzung selbst und lesen es danach aus dem globalen
-            // Objekt — dieselbe Semantik (ein wahrer Grund ist ein Fehler),
-            // ohne den Umweg ueber Text.
+            // Harness files come from the cache rather than disk per variant.
+            // `$DONE` goes before the harness files: `asyncHelpers.js` checks
+            // `hasOwnProperty(globalThis, "$DONE")` and throws otherwise. The
+            // stock `doneprintHandle.js` prints its result, since a
+            // command-line runner has nothing else; we drive the session
+            // ourselves and read it from the global object afterwards (same
+            // semantics: a truthy reason is a failure).
             if is_async && !raw { text.push_str(DONE_SRC); }
             if !raw { for inc in &m.includes { text.push_str(&hcache(inc)); text.push('\n'); } }
             text.push_str(&src);
 
             let neg = m.negative_parse || m.negative_other;
-            // Wer laenger braucht als das, wird SOFORT genannt — mit
-            // `flush`, damit die Zeile auch dann steht, wenn der Lauf danach
-            // haengt. Ein Testlaeufer, der ohne Angabe stehenbleiben kann,
-            // ist nicht fertig: dreimal in dieser Sitzung habe ich stattdessen
-            // geraten, wo die Zeit bleibt.
-            // Der Name VOR dem Lauf, nicht danach. Ein Test, der nie
-            // zurueckkehrt, taucht in einer Meldung danach nie auf — genau
-            // daran ist die Suche nach dem Haenger in `built-ins/Object`
-            // zweimal vorbeigelaufen. Nur mit `T262_TRACE`, weil eine Datei je
-            // Variante sonst selbst Zeit kostet.
+            // Slow tests are reported immediately, with `flush`, so the line
+            // stands even if the run hangs afterwards.
+            // The name is written before the run, not after: a test that never
+            // returns would never appear in a report afterwards. Only with
+            // `T262_TRACE`, since a file per variant costs time itself.
             if let Some(mark) = &trace {
                 let _ = fs::write(mark, format!("{rel}{}", if strict { " [strict]" } else { "" }));
             }
             let t_r = std::time::Instant::now();
-            // Ein Absturz im Interpreter darf den LAUF nicht beenden — sonst
-            // misst ein einziger `unwrap` gar nichts mehr. Getrennt gezaehlt.
+            // A crash in the interpreter must not end the run, or a single
+            // `unwrap` stops all measurement. Counted separately.
             t_read += t_r.elapsed().as_nanos();
             let t0 = std::time::Instant::now();
             let mut np = 0u128;
@@ -518,35 +478,35 @@ fn test262_exec() {
                     Err(e) => return Err(format!("SyntaxError: {} @{}", e.msg, e.at)),
                 };
                 np = tp.elapsed().as_nanos();
-                // `T262_NOVM=1` faehrt denselben Lauf ohne die Befehlsmaschine.
-                // Der Diff der beiden Fehlerlisten ist die einzige Art, die
-                // Umstellung ehrlich zu pruefen.
+                // `T262_NOVM=1` runs the same pass without the bytecode
+                // machine. Diffing both failure lists checks the two machines
+                // against each other.
                 let mut s = if std::env::var("T262_NOVM").is_ok() {
                     beak_engine::js::Session::new_without_vm(beak_engine::js::TEST_STEPS)
                 } else {
                     beak_engine::js::Session::new(beak_engine::js::TEST_STEPS)
                 };
-                // Nur der TEST zaehlt fuer die Deckung, nicht der Vorspann:
-                // der ist immer derselbe und wuerde die Zahl verwaessern.
+                // Only the test counts for coverage, not the prelude: it is
+                // always the same and would dilute the figure.
                 let r = if raw {
                     s.run(&prog)
                 } else {
                     match s.run(if strict { &prologue_strict } else { &prologue }) {
                         Err(e) => Err(e),
                         Ok(()) => {
-                            // VOR dem Testprogramm ablesen und danach abziehen:
-                            // der Vorspann laeuft locker und trifft die Stellen
-                            // selbst, er wuerde sonst jede Zeile gleich faerben.
+                            // Read before the test program and subtract after:
+                            // the prelude hits the points itself and would
+                            // otherwise colour every line the same.
                             #[cfg(feature = "strict-probe")]
                             let probe0 = s.interp.strict_probe;
                             let (a, b) = (s.interp.vm_ran, s.interp.vm_declined);
                             let (ca, cb) = (s.interp.vm_calls, s.interp.vm_calls_slow);
                             let cn = s.interp.vm_calls_native;
                             let r = s.run(&prog);
-                            // **Ein async-Test ist erst fertig, wenn die
-                            // Schlange leer ist.** Ohne sie zu fahren liefe
-                            // kein einziges `.then`, und JEDER dieser Tests
-                            // meldete "„$DONE wurde nie gerufen"".
+                            // An async test is only done when the job queue is
+                            // empty. Without draining it no `.then` would run
+                            // and every such test would report `$DONE` as
+                            // never called.
                             let r = if is_async { async_outcome(&mut s, r) } else { r };
                             fdecl = s.interp.func_declines.iter()
                                 .map(|(k, v)| (*k, *v)).collect();
@@ -601,11 +561,10 @@ fn test262_exec() {
                     if ok { probe_pass_any += 1; } else { probe_fail_any += 1; }
                 }
                 if !ok && hit {
-                    // MIT der Meldung. Eine getroffene Stelle heisst nicht,
-                    // dass der Test daran stirbt — `propertyHelper.js` schreibt
-                    // selbst auf nicht schreibbare Eigenschaften und faengt den
-                    // Fehler ab. Erst die Meldung sagt, ob der fehlende Wurf
-                    // die URSACHE war.
+                    // With the message: a hit point does not mean the test
+                    // dies there (`propertyHelper.js` writes to non-writable
+                    // properties itself and catches the error). Only the
+                    // message says whether the missing throw was the cause.
                     let why = match &out {
                         Err(_) => "LAEUFER: Absturz".to_string(),
                         Ok(Err(e)) => e.clone(),
@@ -621,10 +580,10 @@ fn test262_exec() {
                 Ok(Err(e)) => e,
                 Ok(Ok(())) => "erwartete einen Fehler, es lief durch".to_string(),
             };
-            // Nach der GANZEN Meldung gebuendelt, nicht nur nach ihrer Art.
-            // "30221 ReferenceError" ist keine Diagnose; "Symbol is not
-            // defined" ist eine. Zahlen und Anfuehrungszeichen fallen weg,
-            // damit dieselbe Ursache nicht in tausend Varianten zerfaellt.
+            // Grouped by the whole message, not just its kind:
+            // "ReferenceError" is no diagnosis, "Symbol is not defined" is.
+            // Numbers and quotes are dropped so one cause does not split into
+            // a thousand variants.
             let norm: String = why.chars()
                 .map(|c| if c.is_ascii_digit() { '#' } else { c })
                 .collect::<String>()
@@ -632,29 +591,25 @@ fn test262_exec() {
             let key: String = norm.chars().take(64).collect();
             let e = by_msg.entry(key).or_insert((0, rel.clone()));
             e.0 += 1;
-            // Der Deckel galt der Bildschirmausgabe; `T262_FAILDETAIL` will
-            // alle. Ein Deckel, der still die Haelfte der Karte abschneidet,
-            // ist schlimmer als eine lange Datei.
+            // The cap applies to the screen output; `T262_FAILDETAIL` wants
+            // everything.
             if fails.len() < 5000 || std::env::var("T262_FAILDETAIL").is_ok() {
                 fails.push((rel.clone(), why));
             }
-            // ALLE Namen, nicht nur die ersten 5000: nur eine vollstaendige
-            // Liste laesst sich gegen einen zweiten Lauf diffen, und der Diff
-            // ist die einzige ehrliche Pruefung einer Umstellung.
+            // All names, not just the first ones: only a complete list can be
+            // diffed against a second run.
             //
-            // MIT der Betriebsart. Gezaehlt wird die VARIANTE (eine Datei ohne
-            // Fahne laeuft zweimal), und ohne die Marke fallen beide auf einen
-            // Namen zusammen: ein Fix, der nur den strengen Modus bewegt,
-            // aendert die Liste dann NICHT. Genau die Blindstelle, die bei der
-            // Arbeit am strengen Modus jede Messung wertlos machen wuerde.
+            // With the mode: the variant is what is counted (a file without a
+            // flag runs twice), and without the marker both collapse into one
+            // name, so a fix that moves only strict mode would not change
+            // the list.
             all_fails.push(format!("{rel}{}", if strict { " [strict]" } else { "" }));
         }
     }
 
-    // `T262_FAILDETAIL=<datei>`: JEDER Fehler mit seiner Meldung. Die
-    // Buendelung im Bericht zeigt zwanzig Zeilen und eine Beispieldatei —
-    // fuer „welche Verzeichnisse stecken hinter DIESER Meldung" reicht das
-    // nicht, und genau das ist die Frage vor jeder Planung.
+    // `T262_FAILDETAIL=<file>`: every failure with its message. The grouped
+    // report shows twenty lines and one example file; this answers which
+    // directories lie behind a given message.
     if let Ok(path) = std::env::var("T262_FAILDETAIL") {
         let mut out = String::new();
         for (rel, why) in &fails {
