@@ -559,13 +559,15 @@ pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
     });
 }
 
-pub(crate) fn npk_audio_open(_ctx: &mut HostState) -> i32 {
- crate::audio::open() 
+/// Audio slots belong to the module that opened them (`ctx.pid`); submit,
+/// buffered and close answer only to that module.
+pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
+    crate::audio::open_for(ctx.pid)
 }
 
-pub(crate) fn npk_audio_close(_ctx: &mut HostState, slot: i32) -> i32 {
-    if slot >= 0 { crate::audio::close(slot as usize); }
-    0
+pub(crate) fn npk_audio_close(ctx: &mut HostState, slot: i32) -> i32 {
+    if slot < 0 { return -1; }
+    if crate::audio::close_for(slot as usize, ctx.pid) { 0 } else { -1 }
 }
 
 pub(crate) fn npk_audio_set_volume(_ctx: &mut HostState, pct: i32) -> i32 {
@@ -949,7 +951,16 @@ pub(crate) fn npk_stream_close(_ctx: &mut HostState, idx: i32) -> i32 {
     0
 }
 
-pub(crate) fn npk_key_inject(_ctx: &mut HostState, byte: i32) -> i32 {
+/// Injects a key byte into the shell's input queue.
+///
+/// Requires `Rights::HARDWARE`: the shell executes what arrives there with
+/// its own authority, so an ungated injection would let any module run
+/// commands.
+pub(crate) fn npk_key_inject(ctx: &mut HostState, byte: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
     crate::keyboard::inject_byte((byte & 0xFF) as u8);
     0
 }
@@ -1506,9 +1517,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
 /// `dx`/`dy` are `i32` here but `i8` in the event: a fast movement is split
 /// into steps rather than clamped, so the pointer does not lag behind.
 ///
-/// Requires `Rights::HARDWARE`. Note: `npk_key_inject` checks no right at
-/// all, so any module can type into the shell; that is a known open issue,
-/// not the model for this function.
+/// Requires `Rights::HARDWARE`, like `npk_key_inject`.
 pub(crate) fn npk_pointer_inject(
     ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
 ) -> i32 {
@@ -2567,12 +2576,15 @@ pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, b
     len as i32
 }
 
-pub(crate) fn npk_audio_submit(mem: &mut [u8], _ctx: &mut HostState, slot: i32, ptr: i32, len: i32) -> i32 {
+pub(crate) fn npk_audio_submit(mem: &mut [u8], ctx: &mut HostState, slot: i32, ptr: i32, len: i32) -> i32 {
     if slot < 0 || ptr < 0 || len < 0 { return -1; }
     let data = &*mem;
     let (start, end) = (ptr as usize, ptr as usize + len as usize);
     if end > data.len() { return -1; }
-    crate::audio::submit(slot as usize, &data[start..end]) as i32
+    match crate::audio::submit_for(slot as usize, ctx.pid, &data[start..end]) {
+        Some(n) => n as i32,
+        None => -1,
+    }
 }
 
 /// `npk_audio_buffered(slot)` — bytes still sitting in the slot's ring,
@@ -2583,16 +2595,22 @@ pub(crate) fn npk_audio_submit(mem: &mut [u8], _ctx: &mut HostState, slot: i32, 
 /// wall clock and the audio crystal drift apart. For music nobody notices;
 /// for lipsync over a film the error accumulates, which is why every player
 /// that shows pictures makes the audio output its master clock.
-///
-/// Ungated and without an ownership check, like `npk_audio_submit` and
-/// `npk_audio_close`: audio slots have no owner. A read stricter than the
-/// write beside it would buy nothing.
-pub(crate) fn npk_audio_buffered(_ctx: &mut HostState, slot: i32) -> i32 {
+pub(crate) fn npk_audio_buffered(ctx: &mut HostState, slot: i32) -> i32 {
     if slot < 0 { return -1; }
-    crate::audio::buffered(slot as usize) as i32
+    match crate::audio::buffered_for(slot as usize, ctx.pid) {
+        Some(n) => n as i32,
+        None => -1,
+    }
 }
 
-pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, max: i32) -> i32 {
+/// Drains the mixed output of every slot: the audio driver's side.
+/// Requires `Rights::HARDWARE`; anyone else could record or starve all
+/// playback.
+pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, max: i32) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
     if ptr < 0 || max < 0 { return -1; }
     let data = &mut *mem;
     let (start, end) = (ptr as usize, ptr as usize + max as usize);

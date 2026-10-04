@@ -22,15 +22,15 @@ const VERSION: &str = "0.7.0";
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
-/// `debug` needs the network: it writes its log over a raw TCP socket to
-/// an `nc -lk` on the developer's machine. The `npk_tcp_*` calls check
-/// the NET right like for any other module.
+/// `debug` needs the network (its log goes over a raw TCP socket to an
+/// `nc -lk`, gated by NET) and HARDWARE (it injects remote key bytes via
+/// `npk_key_inject`).
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 // READ is listed because the default without a section is
 // `READ | EXECUTE | RENDER` — a section replaces the default and must
 // name everything it wants to keep.
-static NPK_CAPS: [u8; 2] = [0x01 | 0x04 | 0x08, 0x01];   // READ|EXEC|RENDER, ext: NET
+static NPK_CAPS: [u8; 2] = [0x01 | 0x04 | 0x08 | 0x40, 0x01];   // READ|EXEC|RENDER|HARDWARE, ext: NET
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {

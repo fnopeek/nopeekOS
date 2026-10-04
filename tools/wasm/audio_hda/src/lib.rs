@@ -22,11 +22,11 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-// Driver only needs to bind a PCI device -> EXECUTE right. The default caps
-// grant READ|EXECUTE|RENDER; we declare EXECUTE explicitly (least privilege).
+// EXECUTE to bind the PCI device, HARDWARE to drain the kernel mixer
+// (`npk_audio_poll_mix`).
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [0x04];
+static NPK_CAPS: [u8; 1] = [0x04 | 0x40];
 
 // ── audio buffer geometry ───────────────────────────────────────────────
 // HDA playback ring: two halves fed from the kernel audio mailbox. The DMA

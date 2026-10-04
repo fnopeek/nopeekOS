@@ -144,8 +144,17 @@ static DMA_BUF: Mutex<Option<u64>> = Mutex::new(None);
 ///
 /// 256 slots × 4 KB = 1 MB. Sized to hold `MAX_INFLIGHT` cmds × 128
 /// blocks/cmd = 256 slots, so a 1 MB read can keep two cmds in flight
-/// simultaneously. Must stay strictly below `IO_QUEUE_SIZE` (256).
+/// simultaneously.
 const DMA_POOL_SLOTS: usize = 256;
+
+/// Largest batch submitted at once. An NVMe queue of N entries holds at
+/// most N - 1 commands: with N outstanding, tail == head and the
+/// controller sees an empty queue (NVMe base spec 4.1, "Full Queue").
+const MAX_BATCH: usize = if DMA_POOL_SLOTS < IO_QUEUE_SIZE as usize {
+    DMA_POOL_SLOTS
+} else {
+    IO_QUEUE_SIZE as usize - 1
+};
 static DMA_POOL_BASE: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Number of NVMe commands `read_extent` / `write_extent` keep in
@@ -703,7 +712,7 @@ pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     Ok(())
 }
 
-/// Submit up to `DMA_POOL_SLOTS` write-block commands in parallel and
+/// Submit up to `MAX_BATCH` write-block commands in parallel and
 /// wait for them all. Returns Ok only if every command completed
 /// without error. Falls back to per-block sequential writes when the
 /// batch is too large or the pool isn't available.
@@ -716,7 +725,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
 
     // Batch larger than the pool → fall back to sequential. `cache::flush`
     // never exceeds its cache slot count, so no internal chunking.
-    if items.len() > DMA_POOL_SLOTS {
+    if items.len() > MAX_BATCH {
         for &(block, buf) in items {
             write_block(block, buf)?;
         }
@@ -738,9 +747,8 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
 
     // Stage every payload into its own DMA pool slot + push every SQ
-    // entry, then ring the doorbell exactly once. Assumes `items.len()`
-    // stays below `IO_QUEUE_SIZE`, so the tail cannot wrap into our own
-    // un-acked head.
+    // entry, then ring the doorbell exactly once. `items.len() <= MAX_BATCH`,
+    // so the tail cannot wrap onto our own un-acked head.
     for (i, &(block, buf)) in items.iter().enumerate() {
         let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
         if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
@@ -799,7 +807,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
     overall_err.map_or(Ok(()), Err)
 }
 
-/// Submit up to `DMA_POOL_SLOTS` read-block commands in parallel and
+/// Submit up to `MAX_BATCH` read-block commands in parallel and
 /// wait for them all. `output` is the destination buffer, sized
 /// `blocks.len() * BLOCK_SIZE` — block i lands at `output[i*B..i*B+B]`.
 /// Falls back to sequential `read_block` when the batch exceeds the
@@ -827,12 +835,11 @@ pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkErr
         }
     };
 
-    // Chunk into pool-sized groups so a 256-block fetch (1 MB blob)
-    // runs as 8 × 32-block parallel batches instead of 256 serial.
-    if blocks.len() > DMA_POOL_SLOTS {
+    // Chunk into batches that fit both the DMA pool and the queue.
+    if blocks.len() > MAX_BATCH {
         let mut offset = 0;
         while offset < blocks.len() {
-            let take = (blocks.len() - offset).min(DMA_POOL_SLOTS);
+            let take = (blocks.len() - offset).min(MAX_BATCH);
             let chunk_blocks = &blocks[offset..offset + take];
             let chunk_out = &mut output[offset * BLOCK_SIZE..(offset + take) * BLOCK_SIZE];
             read_blocks_batch_inner(chunk_blocks, chunk_out, pool_base)?;
@@ -844,7 +851,7 @@ pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkErr
     read_blocks_batch_inner(blocks, output, pool_base)
 }
 
-/// Single ≤ DMA_POOL_SLOTS read batch. Pool-based, queue-depth ≈ N.
+/// Single ≤ MAX_BATCH read batch. Pool-based, queue-depth ≈ N.
 fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool_base: u64) -> Result<(), BlkError> {
 
     let mut nvme = NVME.lock();

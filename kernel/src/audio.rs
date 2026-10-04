@@ -25,12 +25,13 @@ struct Slot {
     head: usize,      // read offset into `buf`
     len: usize,       // bytes currently buffered
     drained: u64,     // total bytes pulled by `poll_mix` since `open` (real 48 kHz clock)
+    owner: Option<u32>, // pid of the opening module; None = kernel
     buf: [u8; SLOT_BYTES],
 }
 
 impl Slot {
     const fn new() -> Self {
-        Self { active: false, auto_close: false, head: 0, len: 0, drained: 0, buf: [0u8; SLOT_BYTES] }
+        Self { active: false, auto_close: false, head: 0, len: 0, drained: 0, owner: None, buf: [0u8; SLOT_BYTES] }
     }
 }
 
@@ -40,8 +41,19 @@ static SLOTS: Mutex<[Slot; NUM_SLOTS]> =
     Mutex::new([Slot::new(), Slot::new(), Slot::new(), Slot::new()]);
 static VOLUME: AtomicU8 = AtomicU8::new(80); // master, 0..=100 %
 
-/// Allocate a streaming slot. Returns the slot index or -1 if all are in use.
+/// Allocate a streaming slot for the kernel. Returns the slot index or -1
+/// if all are in use.
 pub fn open() -> i32 {
+    open_owned(None)
+}
+
+/// Allocate a streaming slot owned by module `pid`; only that module may
+/// submit to, query or close it (`*_for`).
+pub fn open_for(pid: u32) -> i32 {
+    open_owned(Some(pid))
+}
+
+fn open_owned(owner: Option<u32>) -> i32 {
     let mut slots = SLOTS.lock();
     for (i, s) in slots.iter_mut().enumerate() {
         if !s.active {
@@ -50,10 +62,41 @@ pub fn open() -> i32 {
             s.head = 0;
             s.len = 0;
             s.drained = 0;
+            s.owner = owner;
             return i as i32;
         }
     }
     -1
+}
+
+fn owned(s: &Slot, pid: u32) -> bool {
+    s.active && s.owner == Some(pid)
+}
+
+/// `close` for a module: only its own slot. Returns false otherwise.
+pub fn close_for(slot: usize, pid: u32) -> bool {
+    if slot >= NUM_SLOTS { return false; }
+    let mut slots = SLOTS.lock();
+    if !owned(&slots[slot], pid) { return false; }
+    slots[slot].active = false;
+    slots[slot].len = 0;
+    true
+}
+
+/// `submit` for a module: None unless the slot belongs to `pid`.
+pub fn submit_for(slot: usize, pid: u32, data: &[u8]) -> Option<usize> {
+    if slot >= NUM_SLOTS { return None; }
+    let mut slots = SLOTS.lock();
+    if !owned(&slots[slot], pid) { return None; }
+    Some(push(&mut slots[slot], data))
+}
+
+/// `buffered` for a module: None unless the slot belongs to `pid`.
+pub fn buffered_for(slot: usize, pid: u32) -> Option<usize> {
+    if slot >= NUM_SLOTS { return None; }
+    let slots = SLOTS.lock();
+    if !owned(&slots[slot], pid) { return None; }
+    Some(slots[slot].len)
 }
 
 /// Release a streaming slot (discards anything still buffered).
@@ -81,6 +124,10 @@ pub fn submit(slot: usize, data: &[u8]) -> usize {
     let mut slots = SLOTS.lock();
     let s = &mut slots[slot];
     if !s.active { return 0; }
+    push(s, data)
+}
+
+fn push(s: &mut Slot, data: &[u8]) -> usize {
     let free = SLOT_BYTES - s.len;
     let n = data.len().min(free);
     let mut w = (s.head + s.len) % SLOT_BYTES;
@@ -101,6 +148,7 @@ pub fn play_oneshot(data: &[u8]) -> bool {
             let n = data.len().min(SLOT_BYTES);
             s.active = true;
             s.auto_close = true;
+            s.owner = None;
             s.head = 0;
             s.len = n;
             s.buf[..n].copy_from_slice(&data[..n]);
