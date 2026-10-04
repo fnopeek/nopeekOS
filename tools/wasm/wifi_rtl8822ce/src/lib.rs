@@ -1,53 +1,29 @@
-//! wifi_rtl8822ce — Realtek RTL8822CE (Wi-Fi 5, 2T2R, PCIe), WASM-Treiber.
+//! wifi_rtl8822ce — Realtek RTL8822CE (Wi-Fi 5, 2T2R, PCIe) WASM driver.
 //!
-//! Strikte 1:1-Portierung von Linux 6.18.26,
-//! `drivers/net/wireless/realtek/rtw88/` (Modul `rtw_8822ce`).
-//! Plan: `docs/plan/WIFI_RTL8822CE.md` · Karte:
+//! Strict 1:1 port of Linux 6.18.26, `drivers/net/wireless/realtek/rtw88/`
+//! (module `rtw_8822ce`). Plan: `docs/plan/WIFI_RTL8822CE.md`, map:
 //! `docs/plan/WIFI_RTL8822CE_LINUX_MAP.md`.
 //!
-//! **Stufe 0: die Tuer.** PCI binden, Bus-Master, **BAR2**
-//! abbilden (pci.c `rtw_pci_io_mapping`: `u8 bar_id = 2` — nicht BAR0), und
-//! `REG_SYS_CFG1` lesen wie `rtw_chip_parameter_setup` es tut.
+//! The driver runs as a chain of stages, each behind a gate:
 //!
-//! **Stufe 0 SCHREIBT NICHTS.** Kein Register wird angefasst, keine
-//! Power-Sequenz gefahren. Was hier schiefgeht, kann also nicht an einem
-//! Schreibzugriff von uns liegen — und das ist der ganze Sinn einer ersten
-//! Stufe, die nur eine Frage stellt.
+//! - 0: bind PCI, enable bus master, map BAR2 (pci.c `rtw_pci_io_mapping`:
+//!   `u8 bar_id = 2`, not BAR0) and read `REG_SYS_CFG1` as
+//!   `rtw_chip_parameter_setup` does. Writes nothing. Gate: plausible
+//!   `chip_version`, RF type 2T2R, and 8-bit reads agree with 32-bit reads.
+//! - 1: `rtw_mac_power_on` (`mac.rs`) with the four power sequence tables in
+//!   `pwrseq.rs`, generated from the C source. Gate in both directions:
+//!   `REG_CR` leaves `0xea` on power-on and returns to it on power-off.
+//! - 2a: `rtw_pci_init_trx_ring` + `rtw_pci_reset_buf_desc` (`pci.rs`), in
+//!   Linux order: the ring registers are programmed before the MAC powers on
+//!   (`rtw_power_on` calls `rtw_hci_setup` before `rtw_mac_power_on`). Gate:
+//!   every address and count register reads back, with MAC off and on.
+//! - 2b: `rtw_download_firmware` (`mac.rs` + `fw.rs` + `tx.rs`) via the BCN
+//!   queue and DDMA into dmem/imem/emem. Gate: `REG_MCUFW_CTRL` reads
+//!   `FW_READY`.
 //!
-//! **Die Stufen 0-2a sind Diagnose und KEHREN ZURUECK.** Ein Treiber, der
-//! nicht endet, haelt das Terminal, aus dem er gestartet wurde
-//! (`spawn_on_worker` setzt `APP_RUNNING`) — und ein Lauf, nach dem man nicht
-//! weiterarbeiten kann, ist beim Suchen schlimmer als kein Lauf. Der Chip
-//! bleibt dabei AUS zurueck, und der Kernel gibt beim Ende alles DMA frei.
-//! Erst wenn die Firmware laeuft und Frames fliessen (ab 2b), wird daraus ein
-//! Treiber, der bleiben muss — und dann ist der Startweg die Frage, nicht das
-//! Modul.
-//!
-//! **Ab 2b kommt eine zweite Pflicht dazu, und die stand schon im AX200:**
-//! „the kernel frees our DMA buffers on return and a still-running firmware
-//! must not DMA into them afterwards". Solange nur der MAC an- und wieder
-//! ausgeht, ist das erledigt; sobald eine Firmware laeuft, muss sie VOR dem
-//! Zurueckkehren angehalten werden.
-//!
-//! Gate: `chip_version` plausibel, RF-Typ 2T2R, und der frische 8-Bit-Pfad
-//! (`npk_mmio_read8`) liefert byteweise dasselbe wie der 32-Bit-Pfad.
-//!
-//! **Stufe 1: der Strom.** `rtw_mac_power_on` vollstaendig (`mac.rs`), mit
-//! den vier Power-Sequenz-Tabellen aus `pwrseq.rs` — erzeugt aus der
-//! C-Quelle, nicht abgetippt. Noch keine Firmware, noch keine Ringe.
-//! Gate in BEIDE Richtungen: `REG_CR` verlaesst `0xea` beim Einschalten und
-//! kehrt beim Abschalten dorthin zurueck. Nur eine Richtung zu messen hiesse,
-//! einen Zustand zu pruefen, den der Chip vielleicht schon hatte.
-//!
-//! **Stufe 2b: die Firmware.** `rtw_download_firmware` vollstaendig
-//! (`mac.rs` + `fw.rs` + `tx.rs`), 202600 Bytes ueber die BCN-Queue und
-//! DDMA nach dmem/imem/emem. Gate: `REG_MCUFW_CTRL` liest `FW_READY`.
-//!
-//! **Stufe 2a: die Ringe.** `rtw_pci_init_trx_ring` + `rtw_pci_reset_buf_desc`
-//! (`pci.rs`), in Linux' Reihenfolge — die Ringregister werden programmiert,
-//! BEVOR der MAC angeht (`rtw_power_on` ruft `rtw_hci_setup` vor
-//! `rtw_mac_power_on`). Gate: jedes Adress- und Anzahlregister gibt zurueck,
-//! was hineingeschrieben wurde, einmal mit MAC aus und einmal mit MAC an.
+//! Whenever the driver returns, running firmware must be stopped first: the
+//! kernel frees our DMA buffers on return, and firmware must not DMA into
+//! them afterwards.
 
 #![no_std]
 
@@ -81,13 +57,12 @@ use regs::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()] =
     *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
-/// Nie still sterben: ein `loop {}` ohne Meldung sieht von aussen aus wie
-/// „der Chip antwortet nicht" und hat beim AX200 einen Abend gekostet.
-/// `Location` ueberlebt `strip = true`, weil es statische Daten sind.
+/// Never die silently: a bare `loop {}` looks like an unresponsive chip from
+/// the outside. `Location` survives `strip = true` because it is static data.
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    // Eine Panik ist nie Stufenausgabe: laut, auch ohne `debug: 1`, und
-    // die Klammer wird nicht mehr geschlossen — danach kommt nichts.
+    // A panic is never stage output: loud even without `debug: 1`, and the
+    // loud bracket is not closed again since nothing follows.
     host::loud_begin();
     host::print("\n[rtl8822ce] PANIC — Treiber gestoppt");
     if let Some(l) = info.location() {
@@ -101,38 +76,26 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-/// Eine Quelle fuer die Version — Banner und Bericht koennen nicht
-/// auseinanderlaufen.
+/// Single source for the version, so banner and report cannot diverge.
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// rtw8822c.c `.fw_name = "rtw88/rtw8822c_fw.bin"` — mitgeliefert wie der
-/// AX200-Blob. Version 9.9.15, und `check_firmware_size` rechnet den Kopf
-/// gegen die Dateilaenge nach, bevor ein Byte an den Chip geht.
+/// rtw8822c.c `.fw_name = "rtw88/rtw8822c_fw.bin"`, bundled. Version 9.9.15;
+/// `check_firmware_size` checks the header against the file length before a
+/// byte goes to the chip.
 static FW: &[u8] = include_bytes!("../firmware/rtw8822c_fw.bin");
 
-/// `hal.current_band_type` ist beim Download noch 0 — gesetzt wird es erst
-/// in `rtw_set_channel`, also lange danach. Das entscheidet in
-/// `rtw_tx_pkt_info_update_rate`, welcher Zweig gilt, und wir nehmen
-/// denselben wie Linux.
+/// `hal.current_band_type` is still 0 at download time; it is set later in
+/// `rtw_set_channel`. It selects the branch in
+/// `rtw_tx_pkt_info_update_rate`, and we take the same one as Linux.
 const BAND_AT_FWDL: u8 = 0;
 
-/// **`struct rtw_dev` — der Zustand, der so lange lebt wie der Treiber.**
+/// `struct rtw_dev`: state that lives as long as the driver, as `rtwdev`
+/// lives from load to unload in Linux.
 ///
-/// Bis 0.26.0 legte JEDE Stufe ihr eigenes `DmInfo`, `DpkInfo` und
-/// `Coex` an. Solange nur Stufen liefen, war das folgenlos; mit dem
-/// Watchdog ist es ein Fehler, und zwar ein stiller:
-///
-/// * `cfo_track.crystal_cap` kommt aus `rtw_phy_init` (dem Wert der
-///   efuse). Ein frisches `DmInfo` traegt dort NULL — die
-///   Quarznachfuehrung wuerde von null hochlaufen statt von der
-///   Werkseinstellung.
-/// * `dpk_info.thermal_dpk` kommt aus der Kalibrierung von Stufe 5d.
-///   Ohne sie kehrt `dpk_track` in der ersten Zeile um.
-/// * `coex.bt_disabled` entscheidet, ob die Quarznachfuehrung ueberhaupt
-///   laufen darf.
-///
-/// In Linux liegt all das in `rtwdev` und lebt vom Laden bis zum
-/// Entladen. Hier jetzt auch.
+/// It must not be recreated per stage: `cfo_track.crystal_cap` comes from
+/// `rtw_phy_init` (the efuse value), `dpk_info.thermal_dpk` from the stage 5d
+/// calibration (without it `dpk_track` returns at once), and
+/// `coex.bt_disabled` decides whether crystal tracking may run at all.
 struct Dev {
     dm: dm::DmInfo,
     path_div: dm::PathDiv,
@@ -140,27 +103,22 @@ struct Dev {
     cx: coex::Coex,
     /// main.h:660-672 `struct rtw_traffic_stats`
     stats: TrafficStats,
-    /// `rtwdev->watch_dog_cnt` — `rtw_phy_ra_info_update` laeuft nur auf
-    /// jedem vierten.
+    /// `rtwdev->watch_dog_cnt`; `rtw_phy_ra_info_update` runs only on every
+    /// fourth tick.
     watch_dog_cnt: u32,
     /// `RTW_FLAG_BUSY_TRAFFIC`
     busy_traffic: bool,
     /// `rtwdev->beacon_loss`
     beacon_loss: bool,
-    /// `hal->current_band_width` — die Breite, auf der die PHY GERADE
-    /// steht, gesetzt von Stufe 5e beim Kanalwechsel.
-    ///
-    /// **Sie steht hier, damit sie nur EINMAL entschieden wird.** Stufe 5f
-    /// klemmte die Breite des Gegenuebers vorher gegen ein zweites
-    /// `chan_params` auf denselben Eingaben — dieselbe Rechnung an einer
-    /// zweiten Stelle, und damit eine zweite Antwort, sobald eine von
-    /// beiden sich aendert.
+    /// `hal->current_band_width`: the width the PHY is currently on, set by
+    /// stage 5e on a channel switch. Kept here so stage 5f does not decide
+    /// it a second time from the same inputs.
     cur_bw: usize,
 }
 
-/// main.h:660-672 `struct rtw_traffic_stats`. Die Einheiten stehen dort
-/// als Kommentar und sind hier Teil des Namens: Bytes je zwei Sekunden,
-/// umgerechnet mit `RTW_TP_SHIFT`.
+/// main.h:660-672 `struct rtw_traffic_stats`. The units from the C comments
+/// are part of the field names: bytes per two seconds, converted with
+/// `RTW_TP_SHIFT`.
 #[derive(Default, Clone, Copy)]
 struct TrafficStats {
     tx_unicast: u64,
@@ -169,8 +127,8 @@ struct TrafficStats {
     rx_cnt: u64,
     tx_throughput: u32,
     rx_throughput: u32,
-    /// Der hoechste je gesehene Wert — der geglaettete faellt nach dem
-    /// Ende einer Uebertragung auf null.
+    /// Highest value ever seen; the smoothed value drops to zero after a
+    /// transfer ends.
     tx_peak: u32,
     rx_peak: u32,
     tx_ewma_tp: dm::Ewma,
@@ -188,7 +146,7 @@ impl TrafficStats {
     }
 }
 
-/// Ergebnis von `rtw_chip_parameter_setup` (main.c:1876-1900).
+/// Result of `rtw_chip_parameter_setup` (main.c:1876-1900).
 struct Hal {
     chip_version: u32,
     cut_version: u8,
@@ -196,44 +154,40 @@ struct Hal {
     vendor_id: u8,
     rf_2t2r: bool,
     rf_path_num: u8,
-    /// main.c:1884-1893 — bei 2T2R beide `BB_PATH_AB`, sonst `BB_PATH_A`.
+    /// main.c:1884-1893: `BB_PATH_AB` for both on 2T2R, else `BB_PATH_A`.
     antenna_tx: u8,
     antenna_rx: u8,
-    /// main.c:2183 die Vorgabe, main.c:1903 das ODER mit `BIT_VHT_DACK`.
-    /// `rtw_core_start` schreibt das ins Register, NACHDEM `mac_init` dort
-    /// `WLAN_RCR_CFG` hinterlassen hat — „rcr reset after powered on".
+    /// Default from main.c:2183, ORed with `BIT_VHT_DACK` at main.c:1903.
+    /// `rtw_core_start` writes it to the register after `mac_init` left
+    /// `WLAN_RCR_CFG` there ("rcr reset after powered on").
     rcr: u32,
 }
 
-/// main.c `rtw_chip_parameter_setup` — der Teil, der aus EINEM Register
-/// liest. Der Rest der Funktion setzt nur Felder aus `chip`.
+/// main.c `rtw_chip_parameter_setup`, the part that reads a register. The
+/// rest of the function only copies fields from `chip`.
 fn chip_parameter_setup(h: i32) -> Hal {
     let chip_version = host::r32(h, REG_SYS_CFG1);
     let rf_2t2r = chip_version & BIT_RF_TYPE_ID != 0;
     Hal {
         chip_version,
         cut_version: bit_get_chip_ver(chip_version),
-        // main.c:1883 — gesetztes BIT_RTL_ID heisst NICHT mp_chip.
+        // main.c:1883: a set BIT_RTL_ID means not mp_chip.
         mp_chip: if chip_version & BIT_RTL_ID != 0 { 0 } else { 1 },
         vendor_id: bit_get_vendor_id(chip_version),
         rf_2t2r,
         rf_path_num: if rf_2t2r { 2 } else { 1 },
         antenna_tx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
         antenna_rx: if rf_2t2r { BB_PATH_AB } else { BB_PATH_A },
-        // main.c:2183 „default rx filter setting" plus main.c:1903.
+        // main.c:2183 "default rx filter setting" plus main.c:1903.
         rcr: BIT_APP_FCS | BIT_APP_MIC | BIT_APP_ICV | BIT_PKTCTL_DLEN
             | BIT_HTC_LOC_CTRL | BIT_APP_PHYSTS | BIT_AB | BIT_AM | BIT_APM
             | BIT_VHT_DACK,
     }
 }
 
-/// Der 8-Bit-Pfad ist neu im Kernel. Bevor irgendetwas darauf aufbaut, wird
-/// er GEGEN den bewaehrten 32-Bit-Pfad gehalten: vier Bytes einzeln gelesen
-/// muessen dasselbe Wort ergeben. Dasselbe fuer 16 Bit.
-///
-/// Das ist billig und es ist read-only — und es beantwortet in einer Zeile
-/// die Frage, die sonst erst in Stufe 1 mitten in der Power-Sequenz auffaellt,
-/// wo zehn andere Dinge gleichzeitig neu sind.
+/// Checks the 8- and 16-bit MMIO paths against the 32-bit path: four single
+/// byte reads must yield the same word. Read-only, and it catches a broken
+/// narrow path before the power sequence depends on it.
 fn check_access_widths(h: i32, word: u32) -> bool {
     let b0 = host::r8(h, REG_SYS_CFG1) as u32;
     let b1 = host::r8(h, REG_SYS_CFG1 + 1) as u32;
@@ -258,12 +212,10 @@ fn check_access_widths(h: i32, word: u32) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // ── Wie laut? ────────────────────────────────────────────────
-    // **Zuerst, vor der ersten Zeile.** Im Autostart druckt der Treiber
-    // sechs Stufen mit ihren Toren und macht die Konsole unbrauchbar;
-    // `debug: 1` in `sys/config/wifi` holt sie zurueck. Die Datei ist
-    // dieselbe, aus der Stufe 5c ihr `ssid:` liest — eine zweite Stelle
-    // fuer dieselbe Sache driftet.
+    // ── Verbosity ────────────────────────────────────────────────
+    // Decided before the first output line. Stage output is off by default;
+    // `debug: 1` in `sys/config/wifi` enables it. Stage 5c reads `ssid:` from
+    // the same file, so the configuration lives in one place.
     let (verbose, cfg_rc) = read_debug_flag();
     host::set_verbose(verbose);
 
@@ -271,14 +223,10 @@ pub extern "C" fn _start() {
     host::print(DRIVER_VERSION);
     host::print(" — Stufe 0: binden, BAR2, Chipkennung\n");
     if !verbose {
-        // Die eine Zeile, die auch ein stiller Lauf schuldet: dass es
-        // den Treiber gibt und wo der Schalter steht.
-        //
-        // **Und ob die Datei ueberhaupt gelesen wurde.** `wifid`
-        // dokumentiert fuer genau dieses Objekt ein Rennen mit dem Rest
-        // des Bootvorgangs; ohne diesen Zusatz saehe ein gescheiterter
-        // Lesezugriff aus wie ein Schalter, der nicht greift — und das
-        // kostet einen ganzen Geraetelauf.
+        // The one line a silent run still prints: the driver exists, where
+        // the switch is, and whether the file was read at all. `wifid`
+        // documents a race with the rest of boot for this object; without
+        // this, a failed read looks like a switch that does nothing.
         host::say("[rtl8822ce] v");
         host::say(DRIVER_VERSION);
         if cfg_rc > 0 {
@@ -289,9 +237,8 @@ pub extern "C" fn _start() {
         }
     }
 
-    // ── `rtwdev`: der Zustand ueber den ganzen Treiberlauf ───────
-    // Gross genug, um nicht auf den Stapel zu gehoeren (die
-    // DACK-Sicherungen und die Ratenzaehler machen den Loewenanteil).
+    // ── `rtwdev`: state for the whole driver run ─────────────────
+    // Too large for the stack (DACK backups and rate counters dominate).
     static mut DEV: Dev = Dev {
         dm: dm::DmInfo::new(),
         path_div: dm::PathDiv::new(),
@@ -303,12 +250,12 @@ pub extern "C" fn _start() {
         beacon_loss: false,
         cur_bw: 0,
     };
-    // SAFETY: einfaedig, genau ein Rufer, und `_start` kehrt erst
-    // zurueck, wenn der Treiber endet.
+    // SAFETY: single-threaded, exactly one caller, and `_start` returns only
+    // when the driver ends.
     let rtwdev = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
 
-    // ── PCI binden ───────────────────────────────────────────────
-    // rtw8822ce.c fuehrt zwei Geraete-IDs fuer denselben Chip.
+    // ── Bind PCI ─────────────────────────────────────────────────
+    // rtw8822ce.c lists two device IDs for the same chip.
     let mut dev = RTL8822CE_DEVICE;
     let mut rc = host::pci_bind(RTL_VENDOR, dev);
     if rc != 0 {
@@ -331,23 +278,19 @@ pub extern "C" fn _start() {
     host::print_hex16(dev);
     host::print("\n");
 
-    // Rueckgabewert lesen, nicht wegwerfen: ohne Busmaster kann der Chip
-    // keinen Deskriptor aus dem Hauptspeicher holen, und das sieht dann aus
-    // wie ein Fehler im Treiber statt wie eine fehlende Erlaubnis.
+    // Check the result: without bus mastering the chip cannot fetch a
+    // descriptor from memory, which would look like a driver bug rather
+    // than a missing permission.
     let bm = host::pci_enable_bus_master();
     if bm != 0 {
         host::say("[rtl8822ce] Bus-Master konnte nicht eingeschaltet werden\n");
     }
     fw::dump_pci_cmd("nach bind");
 
-    // ── D0, bevor jemand ein Register liest ──────────────────────
-    //
-    // Florian: „dass die karte nicht initialsiert hat.. als waers ein
-    // timing problem.. beim laden.. er bricht bei den phasen 1-5 ab."
-    // Ein Geraet in D3hot antwortet auf jede MMIO-Lesung mit lauter
-    // Einsen, waehrend der Konfigurationsraum normal antwortet — und
-    // genau das sieht aus wie ein Zeitproblem, weil es davon abhaengt,
-    // in welchem Zustand der vorige Lauf die Karte hinterlassen hat.
+    // ── D0 before any register read ──────────────────────────────
+    // A device in D3hot answers every MMIO read with all ones while config
+    // space answers normally. That looks like a timing problem because it
+    // depends on the state a previous run left the card in.
     match pci::power_up_d0(0) {
         Some(0) => {}
         Some(st) => {
@@ -360,7 +303,7 @@ pub extern "C" fn _start() {
         None => host::print("[rtl8822ce] keine PM-Capability (kein D-State)\n"),
     }
 
-    // ── BAR2 abbilden ────────────────────────────────────────────
+    // ── Map BAR2 ─────────────────────────────────────────────────
     let h = host::mmio_map_bar(BAR_REG, BAR_PAGES);
     if h < 0 {
         host::say("[rtl8822ce] BAR2 nicht abbildbar — Stufe 0 endet hier\n");
@@ -371,7 +314,7 @@ pub extern "C" fn _start() {
     host::print(", 64 KiB)\n");
 
     // ── `rtw_pci_phy_cfg` / `rtw_pci_link_cfg` ───────────────────
-    // Muss NACH der BAR-Abbildung stehen: der DBI-Weg laeuft ueber MMIO.
+    // Must follow the BAR mapping: the DBI path goes through MMIO.
     pci::link_cfg(h);
     let aspm_vorher = match read_aspm_pref() {
         Some(an) => pci::aspm_host_set(an).map(|v| (v, Some(an))),
@@ -402,15 +345,10 @@ pub extern "C" fn _start() {
     }
     host::print("\n");
 
-    // ── Kennung lesen (rtw_chip_parameter_setup) ─────────────────
-    //
-    // **Einmal lesen war zu wenig.** Hier stand ein einziger Zugriff,
-    // und war die Antwort lauter Einsen, endete der Treiber. Ein Chip,
-    // der gerade aufwacht, braucht aber Zeit — und mit `power_up_d0`
-    // davor sind es genau die 10 ms, die die Spezifikation nennt.
-    // Trotzdem wird hier gewartet statt geraten: eine Frist kostet im
-    // Normalfall nichts (die erste Lesung trifft) und im Fehlerfall
-    // 200 ms statt eines Neustarts.
+    // ── Read the chip ID (rtw_chip_parameter_setup) ──────────────
+    // Poll instead of reading once: a waking chip may need time even after
+    // the 10 ms `power_up_d0` waits per spec. Normally the first read hits;
+    // on failure this costs 200 ms instead of a reboot.
     const WINDOW_WAIT_US: u64 = 200_000;
     let t_win = host::now_us();
     let mut hal = chip_parameter_setup(h);
@@ -423,8 +361,8 @@ pub extern "C" fn _start() {
         runden += 1;
     }
 
-    // Ein Fenster, das nur Einsen liefert, ist keine Antwort des Chips,
-    // sondern die Antwort des Busses auf eine Adresse, an der niemand ist.
+    // All ones is not the chip answering but the bus answering an address
+    // where nobody is.
     let dead = hal.chip_version == 0xFFFF_FFFF || hal.chip_version == 0;
     if runden > 1 {
         host::loud_begin();
@@ -436,10 +374,9 @@ pub extern "C" fn _start() {
         host::loud_end();
     }
     if dead {
-        // **Der Konfigurationsraum antwortet, auch wenn MMIO es nicht
-        // tut.** Steht hier eine gueltige Kennung, ist die Karte da und
-        // es ist der Speicherpfad — eine andere Krankheit als „nicht
-        // gefunden", und ohne diese Zeile sehen beide gleich aus.
+        // Config space answers even when MMIO does not. A valid ID there
+        // means the card is present and the memory path is the problem,
+        // which is a different failure from "not found".
         host::loud_begin();
         host::print("[rtl8822ce] MMIO liefert 0x");
         host::print_hex32(hal.chip_version);
@@ -459,9 +396,9 @@ pub extern "C" fn _start() {
     host::log_reg32("SYS_PWCTL", host::r32(h, REG_SYS_PW_CTRL));
     host::log_reg32("SYS_STAT1", host::r32(h, REG_SYS_STATUS1));
 
-    // Die zwei Werte, die Linux SELBST als Klartext vergleicht — und der
-    // erste ist ausdruecklich ein 8-Bit-Lesezugriff (mac.c
-    // `rtw_mac_power_switch`: `rtw_read8(rtwdev, REG_CR) == 0xea`).
+    // The two values Linux itself compares literally; the first is
+    // explicitly an 8-bit read (mac.c `rtw_mac_power_switch`:
+    // `rtw_read8(rtwdev, REG_CR) == 0xea`).
     let cr = host::r8(h, REG_CR);
     let fwctrl = host::r16(h, REG_MCUFW_CTRL);
     host::print("  CR (8)   = 0x");
@@ -475,7 +412,7 @@ pub extern "C" fn _start() {
         "  → keine laufende Firmware\n"
     });
 
-    // ── Auswertung ───────────────────────────────────────────────
+    // ── Evaluation ───────────────────────────────────────────────
     host::print("[rtl8822ce] Chip: cut ");
     host::print_dec(hal.cut_version as u32);
     host::print(" (Maske 0x");
@@ -504,10 +441,10 @@ pub extern "C" fn _start() {
     }
     host::print("[rtl8822ce] Stufe 0: GRUEN\n");
 
-    // ── Stufe 2a: die Ringe (rtw_pci_setup_resource) ─────────────
-    // Die Reihenfolge ist Linux': rtw_power_on ruft rtw_hci_setup — und
-    // damit rtw_pci_setup — VOR rtw_mac_power_on. Die Ringregister liegen
-    // im PCIe-Block und leben unabhaengig vom MAC.
+    // ── Stage 2a: rings (rtw_pci_setup_resource) ─────────────────
+    // Linux order: rtw_power_on calls rtw_hci_setup, and with it
+    // rtw_pci_setup, before rtw_mac_power_on. The ring registers live in the
+    // PCIe block, independent of the MAC.
     let mut trx = match pci::init_trx_ring() {
         Some(t) => t,
         None => {
@@ -527,7 +464,7 @@ pub extern "C" fn _start() {
     host::print("[rtl8822ce] Ringregister mit MAC AUS:\n");
     let rings_off_ok = pci::verify_rings(h, &trx);
 
-    // ── Stufe 1: der Strom ───────────────────────────────────────
+    // ── Stage 1: power ───────────────────────────────────────────
     host::print("[rtl8822ce] Stufe 1: Power-Sequenz (");
     host::print_dec(pwr_cmds_for_us(hal.cut_version) as u32);
     host::print(" von 54 Kommandos gelten fuer PCIe + cut ");
@@ -562,11 +499,9 @@ pub extern "C" fn _start() {
     let pwr_on_ok = gate("MAC laeuft nach der Power-Sequenz (CR != 0xea)",
                          on_ok && cr_on != CR_POWER_OFF);
 
-    // Dieselbe Pruefung mit laufendem MAC. Linux programmiert die Ringe
-    // nach dem Firmware-Download NOCH EINMAL (`rtw_hci_setup` in
-    // `__rtw_download_firmware`, Kommentar: „reset desc and index") — also
-    // ist die Frage, ob dazwischen etwas verlorengeht, berechtigt und
-    // billig zu beantworten.
+    // Same check with the MAC running. Linux programs the rings again after
+    // the firmware download (`rtw_hci_setup` in `__rtw_download_firmware`,
+    // "reset desc and index"), so check that nothing is lost in between.
     host::print("[rtl8822ce] dieselben Register mit MAC AN:\n");
     let rings_on_ok = pci::verify_rings(h, &trx);
     let rx_idx = host::r32(h, pci::RTK_PCI_RXBD_IDX_MPDUQ);
@@ -581,10 +516,9 @@ pub extern "C" fn _start() {
     let rings_ok = gate("Ringregister halten ihre Werte (MAC aus UND an)",
                         rings_off_ok && rings_on_ok);
 
-    // ── Stufe 2b: die Firmware (rtw_download_firmware) ───────────
-    // Reihenfolge wie `rtw_power_on`: hci_setup, mac_power_on, DANN der
-    // Download. Vorher gibt es keinen laufenden MAC, durch dessen BCN-Queue
-    // die Seiten gehen koennten.
+    // ── Stage 2b: firmware (rtw_download_firmware) ───────────────
+    // Order as in `rtw_power_on`: hci_setup, mac_power_on, then the
+    // download. The pages go through the BCN queue of a running MAC.
     let hdr = mac::parse_fw_hdr(FW);
     host::print("[rtl8822ce] Stufe 2b: Firmware v");
     host::print_dec(hdr.version as u32);
@@ -598,30 +532,29 @@ pub extern "C" fn _start() {
     host::print_hex32(hdr.feature);
     host::print("\n");
 
-    // `rtwdev->fifo` lebt in Linux ueber den ganzen Treiber und ist bis zum
-    // ersten `rtw_mac_init` NULL. Der Download liest daraus `rsvd_boundary`
-    // — hier also noch 0, genau wie dort.
+    // `rtwdev->fifo` lives for the whole driver in Linux and is NULL until
+    // the first `rtw_mac_init`. The download reads `rsvd_boundary` from it,
+    // so it is 0 here, as there.
     let mut fifo = mac::Fifo::default();
 
-    // Die Merkmalsbits der Firmware entscheiden, welche H2C-Kommandos sie
-    // ueberhaupt kennt (`rtw_fw_feature_check`). Sie stehen im Kopf des
-    // Abbilds, also gibt es sie schon vor dem Download.
+    // The firmware feature bits decide which H2C commands it knows
+    // (`rtw_fw_feature_check`). They are in the image header, so they are
+    // available before the download.
     let fw_feature = mac::parse_fw_hdr(FW).feature;
 
-    // `rtwdev->h2c` — EINER fuer das ganze Geraet. Die Reihenfolge der vier
-    // Postfaecher ist der Sinn der Sache: der Treiber reicht sie im Kreis
-    // weiter, damit die Firmware Zeit hat, das vorige zu leeren. Bis 0.17.0
-    // legte jede Stufe einen eigenen an und fing wieder bei Fach 0 an.
+    // `rtwdev->h2c`: one per device. The driver rotates through the four
+    // mailboxes so the firmware has time to drain the previous one; a fresh
+    // state per stage would restart at box 0.
     let mut h2c = fw::H2cState::default();
 
     let stage_buf = host::dma_alloc_below(
         (pci::RSVD_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
-    // Der H2C-Ring braucht einen EIGENEN Zwischenpuffer: der oben ist fuer
-    // den Firmware-Download gedacht und genau ein Stueck gross.
+    // The H2C ring needs its own staging buffer; the one above is for the
+    // firmware download and exactly one chunk large.
     let h2c_buf = host::dma_alloc_below(
         (pci::H2C_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
-    // Und die MGMT-Queue einen dritten: ihre Rahmen sind bis 2 KB gross,
-    // das H2C-Raster von 128 Bytes traegt keinen einzigen davon.
+    // The MGMT queue needs a third: its frames are up to 2 KB, and the
+    // 128-byte H2C slots cannot hold one.
     let mgmt_buf = host::dma_alloc_below(
         (pci::MGMT_STAGE_BYTES.div_ceil(4096)) as u16, 1024);
     let fw_ok = match stage_buf {
@@ -645,7 +578,7 @@ pub extern "C" fn _start() {
     };
     let stage2b = gate("Firmware laeuft (MCUFW_CTRL liest FW_READY)", fw_ok);
 
-    // ── Stufe 2c: efuse und hw_feature ───────────────────────────
+    // ── Stage 2c: efuse and hw_feature ───────────────────────────
     let mut stage2c = false;
     let mut efuse = None;
     if stage2b {
@@ -688,7 +621,7 @@ pub extern "C" fn _start() {
             host::print_hex8(e.hw_cap_hci);
             host::print("\n");
 
-            // main.c: is_valid_ether_addr — nicht null, nicht multicast.
+            // main.c: is_valid_ether_addr — not zero, not multicast.
             let valid = e.addr != [0u8; 6]
                 && e.addr != [0xffu8; 6]
                 && e.addr[0] & 0x01 == 0;
@@ -699,10 +632,9 @@ pub extern "C" fn _start() {
         }
     }
 
-    // Wie Linux es in rtw_chip_efuse_info_setup tut: wieder ausschalten.
-    // Ab hier ist das PFLICHT und nicht Kosmetik — eine laufende Firmware
-    // darf nicht mehr in Puffer schreiben, die der Kernel beim Zurueckkehren
-    // freigibt (dieselbe Begruendung steht am Ende von wifi_ax200).
+    // Power off again, as rtw_chip_efuse_info_setup does. Required from here
+    // on: running firmware must not write into buffers the kernel frees on
+    // return.
     mac::mac_power_off(h, hal.cut_version);
     let cr_off = host::r8(h, REG_CR);
     host::print("  nach AUS: CR = 0x");
@@ -729,11 +661,10 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 2c: GRUEN\n",
         "[rtl8822ce] Stufe 2c: NEIN — nicht weiterbauen, bevor das steht\n");
 
-    // ── Stufe 4b: rtw_chip_board_info_setup ──────────────────────
-    // Sie steht VOR Stufe 3, weil sie in Linux vor `rtw_power_on` steht:
+    // ── Stage 4b: rtw_chip_board_info_setup ──────────────────────
+    // Runs before stage 3 because it precedes `rtw_power_on` in Linux:
     // `rtw_chip_info_setup` = parameter_setup -> efuse_info_setup ->
-    // board_info_setup. Die Nummer 4b ist die Reihenfolge, in der wir
-    // gebaut haben, nicht die, in der gelaufen wird.
+    // board_info_setup. Stage numbers are build order, not run order.
     let (stage4b, _txpwr) = match efuse.as_ref() {
         Some(e) if stage2c => stage4b_board_info_setup(e.rfe_option),
         _ => {
@@ -742,20 +673,17 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 3a: rtw_power_on, bis rtw_mac_init ─────────────────
+    // ── Stage 3a: rtw_power_on up to rtw_mac_init ────────────────
     //
-    // Alles davor war `rtw_chip_info_setup` — in Linux die Probe-Zeit, die
-    // den Chip anschaltet, NUR um die efuse zu lesen, und ihn danach wieder
-    // ausschaltet. Das hier ist der ZWEITE Zyklus, `rtw_power_on`
-    // (main.c:1374), und er faengt wieder ganz vorne an:
+    // Everything before was `rtw_chip_info_setup`, the probe-time cycle that
+    // powers the chip only to read the efuse. This is the second cycle,
+    // `rtw_power_on` (main.c:1374), starting from the beginning:
     //
     //     rtw_hci_setup -> rtw_mac_power_on -> rtw_download_firmware
     //                   -> rtw_mac_init
     //
-    // Die Firmware wird also ein zweites Mal geladen. Das ist keine
-    // Verschwendung aus Unachtsamkeit, sondern was Linux tut: zwischen den
-    // Zyklen war der MAC aus, und ein ausgeschalteter MAC hat keine
-    // Firmware mehr.
+    // The firmware is loaded a second time, as in Linux: the MAC was off in
+    // between, and a powered-off MAC has no firmware.
     let mut stage3b = false;
     let mut stage3c = false;
     let stage3a = match (stage2c, efuse.as_ref()) {
@@ -777,7 +705,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 4a: der Rest von rtw_power_on und rtw_core_start ───
+    // ── Stage 4a: rest of rtw_power_on and rtw_core_start ────────
     let stage4a = match (stage3c, efuse.as_ref()) {
         (true, Some(e)) => stage4a_power_on_tail(h, &hal, &mut trx, h2c_buf, &mut h2c,
                                                  &mut fifo, e, rtwdev),
@@ -787,7 +715,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 4c: rtw_set_channel ────────────────────────────────
+    // ── Stage 4c: rtw_set_channel ────────────────────────────────
     let stage4c = match (stage4a && stage4b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage4c_set_channel(h, &hal, e, t, rtwdev),
         _ => {
@@ -796,7 +724,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 5a: der Empfangsweg ────────────────────────────────
+    // ── Stage 5a: receive path ───────────────────────────────────
     let stage5a = if stage4c {
         stage5a_rx(h, &hal, &mut trx, rtwdev)
     } else {
@@ -804,7 +732,7 @@ pub extern "C" fn _start() {
         false
     };
 
-    // ── Stufe 5b: der Sendeweg ───────────────────────────────────
+    // ── Stage 5b: transmit path ──────────────────────────────────
     let stage5b = match (stage5a, efuse.as_ref()) {
         (true, Some(e)) => stage5b_tx(h, &hal, &mut trx, mgmt_buf, e.addr, rtwdev),
         _ => {
@@ -813,7 +741,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 5c: der Suchlauf ───────────────────────────────────
+    // ── Stage 5c: scan ───────────────────────────────────────────
     let mut target: Option<Bss> = None;
     let stage5c = match (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
         (true, Some(e), Some(t)) => stage5c_scan(h, &hal, &mut trx, mgmt_buf,
@@ -826,7 +754,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 5d: die RF-Kalibrierung ────────────────────────────
+    // ── Stage 5d: RF calibration ─────────────────────────────────
     let stage5d = match (stage5c, efuse.as_ref()) {
         (true, Some(e)) => stage5d_calibration(h, &hal, &mut trx, h2c_buf, &mut h2c, e, rtwdev),
         _ => {
@@ -835,7 +763,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 5e: Auth und Assoc ─────────────────────────────────
+    // ── Stage 5e: auth and assoc ─────────────────────────────────
     let mut linked: Option<vif::Vif> = None;
     let stage5e = match (stage5d, efuse.as_ref(), _txpwr.as_ref(),
                          target.as_ref()) {
@@ -852,7 +780,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 5f: die Ratenanpassung ─────────────────────────────
+    // ── Stage 5f: rate adaptation ────────────────────────────────
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
     let stage5f = match (stage5e, linked.as_ref(), target.as_ref()) {
         (true, Some(v), Some(b)) =>
@@ -863,7 +791,7 @@ pub extern "C" fn _start() {
         }
     };
 
-    // ── Stufe 6a: Steuerkanal, Handschlag, Datenweg ──────────────
+    // ── Stage 6a: control port, handshake, data path ─────────────
     let mut link: Option<Link> = None;
     let mut lstats = LinkStats::default();
     let stage6a = match (stage5f, linked.as_ref(), target.as_ref(),
@@ -919,45 +847,34 @@ pub extern "C" fn _start() {
         "[rtl8822ce] Stufe 6a: GRUEN — DER HANDSCHLAG IST DURCH\n",
         "[rtl8822ce] Stufe 6a: NEIN — nicht weiterbauen, bevor das steht\n");
 
-    // ── Stufe 6b: stehenbleiben ──────────────────────────────────
+    // ── Stage 6b: stay running ───────────────────────────────────
     //
-    // **Hier kehrt der Treiber nicht mehr zurueck.** Bis 6a lief eine
-    // Stufenkette, und am Ende schaltete `mac_power_off` den Chip ab — die
-    // Verbindung stand, die DHCP-Adresse kam, und Sekunden spaeter war
-    // beides weg. Ein Treiber, der seine Arbeit beendet, ist kein Treiber.
-    //
-    // Die Zusammenfassung steht deshalb DAVOR: wer nie zurueckkehrt, kann
-    // sie hinterher nicht mehr drucken.
+    // From here the driver does not return; powering the chip off at the
+    // end would drop the link. The summary is printed before, since nothing
+    // runs after this point.
     if stage6a {
         if let (Some(e), Some(l)) = (efuse.as_ref(), link.as_mut()) {
             host::print("[rtl8822ce] Stufe 6b: der Treiber bleibt stehen —\n             \x20         Bericht je Sekunde, RX-Wachhund, kein\n             \x20         Abschalten mehr\n");
-            // **Die eine Zeile eines stillen Laufs.** Sie steht hier und
-            // nicht bei AUTHORIZED: erst hinter den Toren von 6a ist sie
-            // eine Aussage ueber eine VERBINDUNG und nicht ueber einen
-            // Zwischenstand. Wer sie liest, muss nichts weiter fragen.
+            // The one line of a silent run. It is placed after the 6a gates
+            // so that it reports a connection, not an intermediate state.
             report_connected(l, target.as_ref(), linked.as_ref());
-            // **Dieselbe Schleife, derselbe Link, dieselben Zaehler.**
-            // 6b setzt fort, statt neu anzufangen — ein zweites
-            // `EV_READY` liesse `wifid` einen frischen Supplicant bauen,
-            // der auf ein msg1 wartet, das der AP nie wieder schickt.
+            // Same loop, same link, same counters: 6b continues rather than
+            // restarts. A second `EV_READY` would make `wifid` build a fresh
+            // supplicant waiting for an msg1 the AP never sends again.
             let caps = rates.as_ref().map(|(c, _)| *c).unwrap_or_default();
-            // **Ab hier laeuft die Verbindung, und sie kann enden.**
-            // Bis 0.26.0 kehrte `link_pump` nie zurueck: ein Rauswurf
-            // hinterliess eine tote Leitung, bis jemand neu bootete.
-            // Jetzt ist der Weg zurueck derselbe wie der Weg hin —
-            // Stufe 5e und 5f, ohne den Kernel noch einmal anzumelden.
+            // From here the link runs and can end. Reconnecting takes the
+            // same path as connecting, stages 5e and 5f, without registering
+            // with the kernel again.
             let mut fehlschlaege = 0u32;
             loop {
                 let Some(tp) = _txpwr.as_ref() else { break };
                 let end = link_pump(h, &hal, &mut trx, mgmt_buf, l,
                                     &mut lstats, e.addr, 0, rtwdev,
                                     &mut h2c, e, tp, &caps, fw_feature);
-                // **Der Wechsel geht denselben Weg wie ein
-                // Wiederverbinden** — Stufe 5e und 5f, mit einer anderen
-                // Zelle. `reconnect` raeumt die Schluessel, zieht den
-                // `Link` nach und laesst `wifid` einen frischen
-                // Supplicant bauen; nichts davon muessen wir zweimal
-                // schreiben.
+                // A roam takes the same path as a reconnect, stages 5e and
+                // 5f, with a different cell. `reconnect` clears the keys,
+                // updates the `Link` and has `wifid` build a fresh
+                // supplicant.
                 if end == PumpEnd::Roam {
                     let Some(z) = l.roam.to.take() else { break };
                     let t0 = host::now_ms();
@@ -980,11 +897,9 @@ pub extern "C" fn _start() {
                     break;
                 }
                 let (Some(t), Some(b)) = (_txpwr.as_ref(), target) else {
-                    // **Wenn das hier je greift, endet der Treiber.**
-                    // Der Rufer schaltet danach die MAC ab, und die
-                    // Verbindung bleibt fuer immer unten. Es darf nicht
-                    // still geschehen — Florian: „zwar versucht aber
-                    // blieb stumm".
+                    // If this ever triggers, the driver ends: the caller
+                    // powers off the MAC and the link stays down for good.
+                    // It must not happen silently.
                     host::say("[rtl8822ce] kein Ziel mehr — der Treiber \
 gibt auf\n");
                     break;
@@ -995,22 +910,12 @@ gibt auf\n");
                     continue;
                 }
                 fehlschlaege += 1;
-                // **Nach zwei Fehlschlaegen suchen wir NEU.**
-                //
-                // Bis 0.55.1 ging der Weg zurueck immer auf DIESELBE
-                // BSSID und denselben Kanal — die eine Zelle, die der
-                // Suchlauf beim Start gewaehlt hatte. Wer aus ihrer
-                // Reichweite laeuft, versuchte es von da an endlos bei
-                // einem AP, der nicht mehr da ist. Und genau dieser
-                // Fall wurde mit der Verbindungswache aus 0.55.0 erst
-                // erreichbar: vorher blieb die tote Leitung einfach
-                // stehen.
-                //
-                // Ein voller Suchlauf ist hier richtig und nicht zu
-                // teuer: die Verbindung ist ohnehin weg, es gibt nichts
-                // zu unterbrechen. **Waehrend sie STEHT**, waere er es —
-                // das ist Teil C und bekommt einen gerichteten Lauf auf
-                // den bekannten Kanaelen.
+                // After two failures, scan again instead of retrying the
+                // same BSSID and channel: a station that moved out of range
+                // would otherwise retry an AP that is no longer there. A
+                // full scan is fine here because the link is already down;
+                // while the link is up, a directed scan on known channels
+                // is used instead.
                 if fehlschlaege >= RESCAN_AFTER_TRIES {
                     fehlschlaege = 0;
                     host::say("[rtl8822ce] zweimal vergeblich — die Umgebung wird neu abgesucht\n");
@@ -1018,43 +923,37 @@ gibt auf\n");
                                          &mut h2c, e, t, e.addr, fw_feature,
                                          &mut target, rtwdev);
                 }
-                // Nicht aufgeben, aber auch nicht im Kreis rennen:
-                // ein AP, der gerade neu startet, braucht Sekunden.
+                // Do not give up, but do not spin either: a restarting AP
+                // needs seconds.
                 host::sleep_ms(RECONNECT_BACKOFF_MS);
             }
         }
     }
 
-    // Ab hier nur noch, wenn eine Stufe NICHT steht: der Kernel gibt
-    // gleich die DMA-Puffer frei, in die eine laufende Firmware sonst
-    // weiterschriebe.
+    // Reached only when a stage failed: the kernel is about to free the DMA
+    // buffers that running firmware would otherwise keep writing into.
     mac::mac_power_off(h, hal.cut_version);
 
 
-    // Zurueckkehren, nicht schlafen. Der Kernel raeumt danach auf: DMA
-    // freigeben, PCI loesen, und den Bericht loeschen — letzteres mit der
-    // ausdruecklichen Begruendung, dass die Zahlen eines toten Treibers nicht
-    // wie lebende aussehen duerfen. Das Ergebnis dieser Stufen steht deshalb
-    // HIER im Terminal und nicht in `wlan`.
-    // Der Chip ist hier bereits aus (Stufe 1 schaltet ihn zuletzt ab), also
-    // kann niemand mehr in die gleich freigegebenen Puffer schreiben.
-    // **Hierher kommt nur ein Lauf, der NICHT steht** — mit Verbindung
-    // kehrt 6b nie zurueck. Also laut, auch ohne `debug: 1`.
+    // Return rather than sleep. The kernel then frees DMA, unbinds PCI and
+    // clears the report, so a dead driver's numbers do not look live; the
+    // stage results are therefore printed to the terminal here and not
+    // shown in `wlan`. The chip is already off, so nothing can write into
+    // the buffers being freed. Only a failed run gets here (with a link, 6b
+    // never returns), so this is loud even without `debug: 1`.
     host::say("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
 }
 
-/// main.c:2064-2081 `rtw_chip_board_info_setup` — Stufe 4b.
+/// main.c:2064-2081 `rtw_chip_board_info_setup`, stage 4b.
 ///
-/// **Sie steht hier und nicht spaeter, weil sie in Linux hier steht:**
-/// `rtw_chip_info_setup` ruft `parameter_setup`, dann `efuse_info_setup`,
-/// dann `board_info_setup` — alles zur Probe-Zeit, VOR `rtw_power_on`. Sie
-/// fasst kein Register an; sie fuellt die Tabellen, aus denen
-/// `rtw_set_channel` spaeter die Sendeleistung rechnet.
+/// It runs here because Linux runs it here: `rtw_chip_info_setup` calls
+/// `parameter_setup`, `efuse_info_setup`, then `board_info_setup`, all at
+/// probe time before `rtw_power_on`. It touches no register; it fills the
+/// tables `rtw_set_channel` later derives TX power from.
 ///
-/// Das Gate braucht deshalb kein Geraet: `gen_tables.py` rechnet dieselbe
-/// Kette in Python nach und legt Pruefsummen ueber die 25 KiB abgeleiteten
-/// Zustand ab. Stimmt eine nicht, ist ein einzelnes Byte anders — und das
-/// faellt hier auf statt als schiefe Sendeleistung auf einem Kanal.
+/// The gate needs no hardware: `gen_tables.py` computes the same chain in
+/// Python and stores checksums over the derived state, so a single wrong
+/// byte shows up here rather than as skewed TX power on one channel.
 fn stage4b_board_info_setup(rfe_option: u8) -> (bool, Option<txpower::TxPower>) {
     host::print("[rtl8822ce] Stufe 4b: rtw_chip_board_info_setup (Sendeleistung)\n");
 
@@ -1099,7 +998,7 @@ fn stage4b_board_info_setup(rfe_option: u8) -> (bool, Option<txpower::TxPower>) 
         }
     }
 
-    // Eine Zahl zum Anfassen: die Grenze fuer FCC, 20 MHz, CCK, Kanal 1.
+    // A concrete sample: the FCC limit for 20 MHz, CCK, channel 1.
     host::print("  Beispiel: FCC/20MHz/CCK/Kanal 1 -> ");
     let v = t.limit_2g[0][0][0][0];
     if v < 0 {
@@ -1123,12 +1022,11 @@ fn stage4b_board_info_setup(rfe_option: u8) -> (bool, Option<txpower::TxPower>) 
     (ok, Some(t))
 }
 
-/// main.c:1374-1411 `rtw_power_on`, bis einschliesslich `rtw_mac_init`.
+/// main.c:1374-1411 `rtw_power_on`, up to and including `rtw_mac_init`.
 ///
-/// Was danach kommt (`phy_set_param`, `mac_postinit`, `hci_start`, die
-/// H2C-Nachrichten und die Koexistenz) ist Stufe 3b und 3c — es steht hier
-/// bewusst NICHT als Platzhalter, damit niemand eine halbe Kette fuer eine
-/// ganze haelt.
+/// What follows (`phy_set_param`, `mac_postinit`, `hci_start`, the H2C
+/// messages and coexistence) is stages 3b and 3c, deliberately not stubbed
+/// here so a partial chain cannot pass for a complete one.
 fn power_on_and_mac_init(
     h: i32, hal: &Hal, trx: &mut pci::Trx, stage_buf: i32, fifo: &mut mac::Fifo,
 ) -> bool {
@@ -1147,8 +1045,8 @@ fn power_on_and_mac_init(
     host::print_hex8(host::r8(h, REG_CR));
     host::print("\n");
 
-    // rtw_wait_firmware_completion entfaellt: unsere Firmware liegt im
-    // Binaerbild, es gibt kein asynchrones Nachladen, auf das zu warten waere.
+    // rtw_wait_firmware_completion is not needed: the firmware is part of the
+    // binary, there is no asynchronous load to wait for.
 
     // rtw_download_firmware
     if stage_buf < 0 {
@@ -1184,8 +1082,8 @@ fn power_on_and_mac_init(
     let dt = host::now_us() - t0;
     *fifo = f;
 
-    // Der Seitenplan im Klartext. Er ist die Zahl, an der ab jetzt jede
-    // Reserved Page haengt — und er steht nirgendwo sonst.
+    // The page plan in plain text. Every reserved page depends on it, and it
+    // is printed nowhere else.
     host::print("  Seitenplan: txff ");
     host::print_dec(f.txff_pg_num as u32);
     host::print(" Seiten, rsvd ");
@@ -1210,33 +1108,31 @@ fn power_on_and_mac_init(
     host::print_dec(dt as u32);
     host::print(" us)\n");
 
-    // Die Gates der Stufe: die zwei Quittungen der Hardware und die zwei
-    // Zahlen, die aus Linux' eigener Rechnung fallen.
+    // The stage gates: the two hardware acknowledgements and the two numbers
+    // that follow from Linux' own computation.
     let llt = host::r8(h, REG_AUTO_LLT_V1) & BIT_AUTO_INIT_LLT_V1 as u8;
     let mut ok = true;
     ok &= gate("Link-List-Tabelle gebaut (AUTO_INIT_LLT_V1 geloescht)", llt == 0);
     ok &= gate("rsvd_boundary == 1938 (2048 Seiten minus 110 reservierte)",
                f.rsvd_boundary == 1938);
-    // rtw_pci_interface_cfg auf cut >= D.
+    // rtw_pci_interface_cfg on cut >= D.
     let mix = host::r32(h, REG_HCI_MIX_CFG);
     ok &= gate("PCIE_EMAC_PDN_AUX_TO_FAST_CLK steht (cut D)",
                mix & BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK != 0);
-    // Der MAC laeuft: REG_CR traegt alle acht TRX-Bits.
+    // The MAC is running: REG_CR carries all eight TRX bits.
     let cr = host::r8(h, REG_CR);
     ok &= gate("REG_CR traegt MAC_TRX_ENABLE", cr & MAC_TRX_ENABLE == MAC_TRX_ENABLE);
     ok
 }
 
-/// main.c:1413 `chip->ops->phy_set_param` — Stufe 3b (Tabellen) und
-/// 3c (BB/RF-Aufbau) in einem Zug, weil `rtw_phy_load_tables` MITTEN in
-/// `rtw8822c_phy_set_param` steht und nicht daneben.
+/// main.c:1413 `chip->ops->phy_set_param`: stages 3b (tables) and 3c (BB/RF
+/// setup) together, because `rtw_phy_load_tables` sits inside
+/// `rtw8822c_phy_set_param`.
 ///
-/// Die zwei Gates sind getrennt, weil sie verschiedene Fragen stellen:
-/// **3b** — kommt aus den Tabellen ueberhaupt etwas an? Gemessen wird das
-/// am RF-Register 0x00 BEIDER Pfade: es traegt nach dem Laden den Wert, den
-/// die Tabelle hineingeschrieben hat, und ist weder 0 noch 0xfffff.
-/// **3c** — hoert der Empfaenger? Gemessen an `false_alarm_statistics`:
-/// die CCA-Zaehler des Chips laufen nur, wenn die BB arbeitet.
+/// The two gates ask different questions. 3b: did the tables arrive? RF
+/// register 0x00 of both paths holds the value the table wrote, neither 0
+/// nor 0xfffff. 3c: did `phy_set_param` complete with both RF paths
+/// answering.
 fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
     -> (bool, bool) {
     host::print("[rtl8822ce] Stufe 3b/3c: rtw8822c_phy_set_param\n");
@@ -1253,8 +1149,8 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
     host::print(" us\n");
 
     // ── Gate 3b ──────────────────────────────────────────────────
-    // `rtw_phy_read_rf` geht ueber das direkte Fenster; ein Pfad, der nicht
-    // antwortet, liefert 0xfffff (alle Bits) oder 0.
+    // `rtw_phy_read_rf` uses the direct window; a path that does not answer
+    // returns 0xfffff (all bits) or 0.
     let mut rf_ok = true;
     for path in [phy::RF_PATH_A, phy::RF_PATH_B] {
         let v0 = phy::read_rf(h, path, 0x00, phy::RFREG_MASK);
@@ -1274,26 +1170,14 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
     stage3b &= gate("beide RF-Pfade antworten mit Tabellenwerten", rf_ok);
 
     // ── Gate 3c ──────────────────────────────────────────────────
-    // **Das Gate stand in 0.10.0 an der falschen Stelle**, und in 0.10.1
-    // stand es an der zweiten falschen Stelle. Beide Fehler sind derselbe:
-    // eine Bedingung erfinden, die Linux nicht hat.
-    //
-    // 0.10.0 fragte nach CCA-Ereignissen. Die kann es hier nicht geben,
-    // auch in Linux nicht: `false_alarm_statistics` laeuft dort erst im
-    // Wachhund (main.c:280), also NACH `rtw_coex_power_on_setting` (das die
-    // gemeinsame Antenne umlegt) und NACH `rtw_set_channel` (das AGC,
-    // CCA-Maske und RX-Filter programmiert). Beides ist Stufe 4.
-    //
-    // 0.10.1 fragte nach der Konvergenz der DAC-Kalibrierung. **Linux
-    // prueft das nirgends** — `rtw8822c_rf_dac_cal` laeuft zehnmal und geht
-    // weiter, ob der Restversatz unter 5 faellt oder nicht. Wir haben kein
-    // Linux auf diesem Geraet, koennen also nicht wissen, was dort
-    // herauskaeme. Ein Gate ohne Vergleichsmass ist eine Meinung
-    // ([[feedback_a_test_of_a_state_must_say_when]]).
-    //
-    // Was Stufe 3c beantworten KANN: lief `phy_set_param` durch und
-    // antworten beide RF-Pfade mit dem, was die Tabellen hineingeschrieben
-    // haben. Die Konvergenz steht als BEFUND darunter, mit Zahlen.
+    // The gate must not invent conditions Linux does not have. CCA events
+    // cannot occur yet, in Linux either: `false_alarm_statistics` runs only
+    // in the watchdog (main.c:280), after `rtw_coex_power_on_setting`
+    // switches the shared antenna and after `rtw_set_channel` programs AGC,
+    // CCA mask and RX filter, both stage 4. DAC calibration convergence is
+    // not checked by Linux either: `rtw8822c_rf_dac_cal` runs ten times and
+    // continues regardless. So the gate is that `phy_set_param` completed
+    // and both RF paths answer; convergence is printed as a finding below.
     let stage3c = gate("phy_set_param lief durch, beide RF-Pfade antworten",
                        rf_ok);
 
@@ -1303,9 +1187,9 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
         "  [Befund] die DAC-Kalibrierung konvergiert NICHT auf beiden Pfaden.\n                    Linux prueft das nicht, wir haben kein Vergleichsmass —\n                    benannt und offen, siehe docs/plan/WIFI_RTL8822CE.md\n"
     });
 
-    // Gemessen, aber NICHT gewertet: die Zaehler stehen hier
-    // erwartungsgemaess auf 0. Sie stehen trotzdem im Log, weil sie ab
-    // Stufe 4 das Gate sind und man dann die Ausgangslage kennen will.
+    // Measured but not gated: the counters are expected to be 0 here. They
+    // are logged because from stage 4 on they are the gate, and the baseline
+    // is useful then.
     chip::false_alarm_statistics(h, dm);
     host::sleep_ms(50);
     chip::false_alarm_statistics(h, dm);
@@ -1339,17 +1223,16 @@ fn phy_set_param_and_check(h: i32, hal: &Hal, e: &efuse::Efuse, d: &mut Dev)
     (stage3b, stage3c)
 }
 
-/// main.c:1413-1434 der Rest von `rtw_power_on`, dann main.c:1517-1533
-/// `rtw_core_start` bis zum RCR-Schreibzugriff.
+/// main.c:1413-1434 the rest of `rtw_power_on`, then main.c:1517-1533
+/// `rtw_core_start` up to the RCR write.
 ///
-///     rtw_mac_postinit        beim 8822C NULL (rtw8822c.c:4967) -> nichts
-///     rtw_hci_start           = rtw_pci_start: schaltet NUR Interrupts
-///                               frei. Wir pollen -> BENANNTE ABWEICHUNG,
-///                               siehe docs/plan/WIFI_RTL8822CE.md
-///     rtw_fw_send_general_info    H2C-PAKET durch die H2C-Queue
-///     rtw_fw_send_phydm_info      dito
-///     rtw_coex_power_on_setting   Antenne auf BT
-///     rtw_coex_init_hw_config     danach auf INIT
+///     rtw_mac_postinit        NULL on the 8822C (rtw8822c.c:4967) -> nothing
+///     rtw_hci_start           = rtw_pci_start: only enables interrupts.
+///                               Deviation: see docs/plan/WIFI_RTL8822CE.md
+///     rtw_fw_send_general_info    H2C packet through the H2C queue
+///     rtw_fw_send_phydm_info      likewise
+///     rtw_coex_power_on_setting   antenna to BT
+///     rtw_coex_init_hw_config     then to INIT
 ///     rtw_sec_enable_sec_engine
 ///     rtw_write32(REG_RCR, hal->rcr)
 fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
@@ -1364,16 +1247,16 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     let cx = &mut d.cx;
 
-    // `rtw_mac_postinit`: `chip->ops->mac_postinit` ist beim 8822C NULL,
-    // die Funktion kehrt ohne einen Registerzugriff zurueck.
+    // `rtw_mac_postinit`: `chip->ops->mac_postinit` is NULL on the 8822C,
+    // the function returns without a register access.
 
-    // `rtw_hci_start` = `rtw_pci_start`: setzt `rtwpci->running` und ruft
-    // `rtw_pci_enable_interrupt`. Den MSI melden wir hier an
-    // (`rtw_pci_request_irq`: EIN Vektor). HIMR schalten wir erst in der
-    // Pumpschleife scharf, im Leerlauf — waehrend des Hochfahrens arbeitet
-    // der Treiber seine Schritte der Reihe nach ab und wartet auf nichts.
+    // `rtw_hci_start` = `rtw_pci_start`: sets `rtwpci->running` and calls
+    // `rtw_pci_enable_interrupt`. The MSI is registered here
+    // (`rtw_pci_request_irq`: one vector). HIMR is armed later in the pump
+    // loop when idle; during bring-up the driver works through its steps in
+    // order and waits on nothing.
     let vec = host::irq_register();
-    // SAFETY: nur dieser Fiber schreibt und liest IRQ_VEC.
+    // SAFETY: only this fiber reads and writes IRQ_VEC.
     unsafe { IRQ_VEC = vec; }
     if vec >= 0 {
         host::print("  MSI auf Vektor ");
@@ -1383,9 +1266,9 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
         host::print("  kein MSI — Abfragebetrieb\n");
     }
 
-    // ── Die zwei H2C-PAKETE ──────────────────────────────────────
-    // Sie gehen durch die H2C-QUEUE, nicht durch die Mailbox. Der Ring
-    // dafuer steht seit Stufe 3a (`init_h2c`).
+    // ── The two H2C packets ──────────────────────────────────────
+    // They go through the H2C queue, not the mailbox. Its ring exists since
+    // stage 3a (`init_h2c`).
     let wp_before = trx.tx[pci::Q_H2C].wp;
     let gi = fw::send_general_info(h, trx, h2c_buf, h2c, fifo);
     let pi = fw::send_phydm_info(h, trx, h2c_buf, h2c, e.rfe_option,
@@ -1400,10 +1283,9 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print(if pi { "ok" } else { "FEHLER" });
     host::print("\n");
 
-    // Der Chip holt die Eintraege selbst ab: die oberen zwoelf Bit des
-    // Indexregisters sind SEIN Lesezeiger. **Gewartet, nicht gestochert** —
-    // in 0.11.0 stand er auf 1, waehrend unserer schon auf 2 stand, und das
-    // war nur die Zeit zwischen Anstoss und Lesung.
+    // The chip fetches the entries itself: the upper twelve bits of the
+    // index register are its read pointer. Wait for it rather than sample
+    // once, since right after the kick it may still lag behind ours.
     let (consumed, dt_h2c, hw_idx) =
         pci::h2c_wait_consumed(h, trx, 10_000);
     host::print("  H2C-Queue: Schreibzeiger ");
@@ -1416,9 +1298,9 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print_dec(dt_h2c as u32);
     host::print(" us)\n");
 
-    // ── Die Koexistenz, und damit die ANTENNE ────────────────────
-    // `wifi_only = !efuse->btcoex` (main.c:1431). Unsere efuse sagt
-    // btcoex JA, also ist es false und der INIT-Zweig gilt.
+    // ── Coexistence, and with it the antenna ─────────────────────
+    // `wifi_only = !efuse->btcoex` (main.c:1431). With btcoex set in the
+    // efuse it is false, and the INIT branch applies.
     let wifi_only = !e.btcoex;
     host::print("  Coex: btcoex ");
     host::print(if e.btcoex { "JA" } else { "nein" });
@@ -1437,8 +1319,8 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     let scbd_after = coex::read_scbd_raw(h);
     let dt = host::now_us() - t0;
 
-    // ROH, ohne die Maske von `read_scbd` — sonst laesst sich eine 0 nicht
-    // von „unser eigener Schreibzugriff kam nie an" unterscheiden.
+    // Raw, without the mask of `read_scbd`; otherwise a 0 cannot be told
+    // apart from "our own write never arrived".
     host::print("  Score-Board roh: vorher 0x");
     host::print_hex16(scbd_before);
     host::print(", nach power_on 0x");
@@ -1455,7 +1337,7 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print_dec(dt as u32);
     host::print(" us\n");
 
-    // **Das ist die Sache, um die es geht.** Wo steht die Antenne?
+    // The point of this stage: where is the antenna?
     let ant = coex::read_ant_state(h);
     host::print("  Antenne: LTE_COEX_CTRL 0x");
     host::print_hex32(ant.lte_coex_ctrl);
@@ -1483,14 +1365,13 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     ok &= gate("beide H2C-Pakete geschrieben", gi && pi);
     ok &= gate("die Firmware hat die H2C-Queue leergeraeumt", consumed);
 
-    // **Das Score-Board ist KEIN Gate.** Es ist ein gemeinsames Postfach:
-    // die Bits, die uns interessieren wuerden, schreibt der BT-Kern. Laeuft
-    // der nicht, steht dort 0 — und das ist dann wahr, nicht falsch. Linux
-    // prueft es nirgends. Was wir pruefen koennen, ist die Wirkung:
+    // The score board is not a gate. It is a shared mailbox whose relevant
+    // bits are written by the BT core; with BT not running it reads 0, which
+    // is correct. Linux never checks it. What can be checked is the effect:
     //
-    // Bei `bt_disabled` nimmt `set_ant_path(COEX_SET_ANT_INIT)` den Zweig
-    // GNT_BT = SW_LOW (1), GNT_WL = SW_HIGH (3) — die Antenne geht an
-    // WLAN. Laeuft BT, ist es umgekehrt, und dann teilt die PTA sie.
+    // With `bt_disabled`, `set_ant_path(COEX_SET_ANT_INIT)` takes the branch
+    // GNT_BT = SW_LOW (1), GNT_WL = SW_HIGH (3), giving the antenna to WLAN.
+    // With BT running it is the other way round and the PTA shares it.
     let (want_wl, want_bt) = if cx.bt_disabled {
         (COEX_GNT_SET_SW_HIGH, COEX_GNT_SET_SW_LOW)
     } else {
@@ -1501,7 +1382,7 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     ok &= gate("der Pfadbesitzer ist WLAN", ant.wifi_owns_path);
     ok &= gate("RCR steht auf hal->rcr", rcr == hal.rcr);
 
-    // ── Und die Frage, fuer die 4a da ist ────────────────────────
+    // ── And the question 4a is for ───────────────────────────────
     let dm = &mut d.dm;
     chip::false_alarm_statistics(h, dm);
     host::sleep_ms(50);
@@ -1524,27 +1405,24 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     ok
 }
 
-/// main.c:1440-1476 `rtw_set_channel` — Stufe 4c.
+/// main.c:1440-1476 `rtw_set_channel`, stage 4c.
 ///
-///     rtw_get_channel_params      aus der Kanalwahl werden Mittenkanal,
-///                                 Bandbreite und Unterkanallage
-///     rtw_update_channel          derselbe Zustand in `hal`
+///     rtw_get_channel_params      center channel, bandwidth and primary
+///                                 position from the channel choice
+///     rtw_update_channel          the same state in `hal`
 ///     chip->ops->set_channel      = rtw8822c_set_channel: BB, MAC, RF,
 ///                                   toggle_igi
-///     rtw_coex_switchband_notify  BENANNTE ABWEICHUNG, siehe unten
-///     rtw_phy_set_tx_power_level  aus den Tabellen von 4b wird ein
-///                                 Leistungsindex je Rate und Pfad
+///     rtw_coex_switchband_notify  deviation, see below
+///     rtw_phy_set_tx_power_level  the 4b tables become a power index per
+///                                 rate and path
 ///
-/// **Der Kanal kommt hier von uns, nicht von mac80211.**
-/// `rtw_get_channel_params` liest in Linux eine `cfg80211_chan_def`; die
-/// gibt es ohne obere Haelfte nicht. Fuer 20 MHz ist das Ergebnis dieser
-/// Funktion genau `center = primary = Kanal`, und das ist, was hier
-/// eingesetzt wird — die Rechnung fuer 40 und 80 MHz kommt mit der Stufe,
-/// die eine Bandbreite auswaehlt.
+/// The channel comes from us, not from mac80211: `rtw_get_channel_params`
+/// reads a `cfg80211_chan_def` in Linux. For 20 MHz its result is exactly
+/// `center = primary = channel`, which is what is used here.
 fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
                        t: &txpower::TxPower, d: &mut Dev) -> bool {
-    // Kanal 1, 20 MHz. Der niedrigste 2,4-GHz-Kanal ist der, auf dem am
-    // ehesten jemand funkt — und genau darum geht es beim Messen.
+    // Channel 1, 20 MHz: the lowest 2.4 GHz channel is the one most likely
+    // to carry traffic, which is what the measurement needs.
     const CH: u8 = 1;
     const BW: usize = 0; // RTW_CHANNEL_WIDTH_20
     const PRIMARY_IDX: u8 = RTW_SC_DONT_CARE;
@@ -1553,9 +1431,9 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
     host::print_dec(CH as u32);
     host::print(", 20 MHz)\n");
 
-    // `rtw_update_channel` — bei 20 MHz ist der Mittenkanal der primaere,
-    // und `cch_by_bw[20M]` traegt ihn. Der Rest von `hal` (sar_band,
-    // current_band_*) wird hier als lokale Groesse gefuehrt.
+    // `rtw_update_channel`: at 20 MHz the center channel is the primary, and
+    // `cch_by_bw[20M]` holds it. The rest of `hal` (sar_band,
+    // current_band_*) is kept as locals here.
     let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..*t };
     t2.cch_by_bw[0] = CH;
 
@@ -1563,10 +1441,10 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
     chip::set_channel(h, CH, BW, PRIMARY_IDX);
     let dt_ch = host::now_us() - t0;
 
-    // `rtw_coex_switchband_notify` gehoert zur laufenden Koexistenz
-    // (`rtw_coex_run_coex` mit COEX_RSN_2GSWITCHBAND) und braucht den
-    // Verkehrszustand, den erst eine Verbindung hat. BENANNT UND NICHT
-    // GEBAUT — er entscheidet nicht, ob der Empfaenger hoert.
+    // `rtw_coex_switchband_notify` belongs to running coexistence
+    // (`rtw_coex_run_coex` with COEX_RSN_2GSWITCHBAND) and needs traffic
+    // state that only a link has. Not implemented; it does not decide
+    // whether the receiver hears.
 
     // `rtw_phy_set_tx_power_level`
     let t0 = host::now_us();
@@ -1600,7 +1478,7 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
     host::print_dec(tbl[1][0x13] as u32);
     host::print("\n");
 
-    // RF 0x18 traegt jetzt Band, Kanal und Bandbreite — zurueckgelesen.
+    // RF 0x18 now carries band, channel and bandwidth; read back.
     let rf18_a = phy::read_rf(h, phy::RF_PATH_A, 0x18, phy::RFREG_MASK);
     let rf18_b = phy::read_rf(h, phy::RF_PATH_B, 0x18, phy::RFREG_MASK);
     host::print("  RF 0x18: A 0x");
@@ -1616,11 +1494,11 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
     let mut ok = true;
     ok &= gate("RF 0x18 traegt auf beiden Pfaden den gesetzten Kanal",
                rf18_a & 0xff == CH as u32 && rf18_b & 0xff == CH as u32);
-    // 20 MHz ist RF18_BW_20M = BIT(13)|BIT(12), also 0x3 im Feld.
+    // 20 MHz is RF18_BW_20M = BIT(13)|BIT(12), i.e. 0x3 in the field.
     ok &= gate("RF 0x18 traegt die Bandbreite 20 MHz",
                (rf18_a >> 12) & 0x3 == 0x3);
 
-    // ── Das Gate, das seit 0.10.0 auf seine Stufe gewartet hat ───
+    // ── The receiver gate ────────────────────────────────────────
     let dm = &mut d.dm;
     chip::false_alarm_statistics(h, dm);
     host::sleep_ms(200);
@@ -1661,8 +1539,7 @@ fn stage4c_set_channel(h: i32, hal: &Hal, e: &efuse::Efuse,
     ok
 }
 
-/// Wieviele der 54 Kommandos auf UNSEREM Geraet ueberhaupt laufen. Eine
-/// Zahl, die man sonst erst beim Suchen vermisst.
+/// How many of the 54 power sequence commands apply to this cut.
 fn pwr_cmds_for_us(cut: u8) -> usize {
     let m = cut_version_to_mask(cut);
     let mut n = 0;
@@ -1679,21 +1556,20 @@ fn pwr_cmds_for_us(cut: u8) -> usize {
     n
 }
 
-/// Stufe 5a — der WIRT um `pci::rx_poll` herum, nicht der Port selbst.
+/// Stage 5a: the host around `pci::rx_poll`, not the port itself.
 ///
-/// Der Port ist `pci::rx_poll` (= `rtw_pci_rx_napi`); hier steht nur, wie
-/// lange gefragt wird und was gemeldet wird. Linux laeuft dort aus dem
-/// Interrupt in NAPI; wir haben keine Geraete-Interrupts (benannte
-/// Abweichung seit Stufe 2), also wird der Schreibzeiger gelesen.
+/// The port is `pci::rx_poll` (= `rtw_pci_rx_napi`); this only decides how
+/// long to poll and what to report. Linux runs it from the interrupt in
+/// NAPI; here the write pointer is polled.
 fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
-    /// Derselbe Kanal wie in Stufe 4c — `hal.current_channel`.
+    /// Same channel as stage 4c (`hal.current_channel`).
     const CH_5A: u8 = 1;
 
     host::print("[rtl8822ce] Stufe 5a: der Empfangsweg\n");
 
-    // `dm_info` traegt die CCK-Verstaerkungsgrenzen, an denen ein
-    // CCK-Paket seine Signalstaerke bekommt. Sie stehen in der Hardware,
-    // seit `phy_set_param` sie dort gelesen hat.
+    // `dm_info` carries the CCK gain limits a CCK packet's signal strength
+    // is computed from. They are in hardware since `phy_set_param` read
+    // them.
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
@@ -1703,13 +1579,12 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
     host::print_dec(dm.cck_gi_l_bnd as u32);
     host::print("\n");
 
-    // Ein ganzer Empfangspuffer. Er liegt statisch, weil dieser Treiber
-    // keinen Allokator hat und 11 KB auf dem Stapel nicht stehen.
+    // A full receive buffer. Static because this driver has no allocator
+    // and 11 KB do not belong on the stack.
     static mut RXBUF: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: Einfaeden, ein Rufer, und der Puffer verlaesst diese
-    // Funktion nicht. Es gibt in diesem Treiber keinen zweiten Pfad, der
-    // ihn anfasst.
+    // SAFETY: single-threaded, one caller, and the buffer does not leave
+    // this function. No other path in this driver touches it.
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
 
     let mut total = 0u32;
@@ -1719,9 +1594,9 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
     let mut best: i8 = -128;
     let mut rounds = 0u32;
 
-    // 2000 ms. Ein Beacon-Intervall sind 102,4 ms, also kommt in dieser
-    // Zeit von JEDEM erreichbaren Netz mehr als ein Rahmen — wenn der Weg
-    // traegt. Kommt in zwei Sekunden nichts, ist es kein Timing-Problem.
+    // 2000 ms. A beacon interval is 102.4 ms, so every reachable network
+    // sends more than one frame in this time if the path works. Nothing in
+    // two seconds is not a timing problem.
     let t0 = host::now_us();
     while host::now_us() - t0 < 2_000_000 {
         rounds += 1;
@@ -1738,7 +1613,7 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
             if st.signal_power > best {
                 best = st.signal_power;
             }
-            // Die ersten acht ganz, damit man SIEHT, was ankommt.
+            // Show the first eight in full, to see what arrives.
             if shown < 8 && !st.crc_err {
                 shown += 1;
                 print_pkt(st, pkt);
@@ -1773,9 +1648,9 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
     ok
 }
 
-/// Eine Zeile je Paket: Laenge, Rate, Bandbreite, Kanal, Signal — und die
-/// ersten Bytes des Rahmens, denn an `frame_control` sieht man, ob es ein
-/// Beacon ist.
+/// One line per packet: length, rate, bandwidth, channel, signal, and the
+/// first bytes of the frame, since `frame_control` shows whether it is a
+/// beacon.
 fn print_pkt(st: &rx::RxPktStat, pkt: &[u8]) {
     let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
         + st.shift as usize;
@@ -1801,7 +1676,7 @@ fn print_pkt(st: &rx::RxPktStat, pkt: &[u8]) {
         let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
         host::print(" · fc 0x");
         host::print_hex16(fc);
-        // 802.11: Typ in Bits 3:2, Subtyp in 7:4. 0x80 = Beacon.
+        // 802.11: type in bits 3:2, subtype in 7:4. 0x80 = beacon.
         if fc & 0xfc == 0x80 {
             host::print(" BEACON");
         }
@@ -1819,20 +1694,18 @@ fn print_dbm(v: i8) {
     host::print(" dBm");
 }
 
-/// Stufe 5b — der Sendeweg, und die Antwort darauf.
+/// Stage 5b: the transmit path, and the answer to it.
 ///
-/// Der Port bekommt seine Adresse (`rtw_ops_add_interface`), dann geht ein
-/// Probe Request hinaus und wir hoeren zu. **Das Gate ist die ANTWORT**,
-/// nicht der verbrauchte Deskriptor: dass der Chip einen Deskriptor abholt,
-/// sagt nur, dass DMA laeuft — dass ein fremder AP antwortet, sagt, dass
-/// der Rahmen die Antenne verlassen hat und richtig gebaut war.
+/// The port gets its address (`rtw_ops_add_interface`), a probe request goes
+/// out and we listen. The gate is the response, not the consumed
+/// descriptor: a fetched descriptor only shows that DMA works, a response
+/// from an AP shows the frame left the antenna and was well-formed.
 ///
-/// **Kalibriert wird hier bewusst nicht.** `rtw_set_channel` setzt am Ende
-/// `need_rfk = true`, und `rtw_chip_prepare_tx` fuehrt GAPK/IQK/DPK erst
-/// aus, wenn mac80211 `mgd_prepare_tx` ruft — also VOR dem Anmelden, nicht
-/// beim Kanalwechsel. Linux' Kommentar nennt den Grund: waehrend eines
-/// Scans auf jedem Kanal zu kalibrieren dauert zu lange. Ein Probe Request
-/// geht in Linux genauso unkalibriert hinaus wie hier.
+/// No calibration here. `rtw_set_channel` sets `need_rfk = true`, and
+/// `rtw_chip_prepare_tx` runs GAPK/IQK/DPK only when mac80211 calls
+/// `mgd_prepare_tx`, i.e. before association, not on channel switch; per
+/// Linux' comment, calibrating on every channel during a scan takes too
+/// long. A probe request goes out uncalibrated in Linux too.
 fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
               mac: [u8; 6], d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5b: der Sendeweg\n");
@@ -1841,9 +1714,9 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         return false;
     }
 
-    // `rtw_ops_add_interface`, Zweig STATION. Ohne diesen Schritt steht im
-    // Port-Register keine Adresse, und `BIT_APM` im RCR laesst dann nur
-    // Broadcast durch — eine Probe Response ist an UNS gerichtet.
+    // `rtw_ops_add_interface`, STATION branch. Without it the port register
+    // holds no address and `BIT_APM` in RCR lets only broadcast through,
+    // while a probe response is addressed to us.
     let vif = vif::add_interface_station(h, mac);
     host::print("  Port 0: Adresse ");
     for (i, b) in mac.iter().enumerate() {
@@ -1865,9 +1738,9 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 
     let mut ok = gate("die Adresse steht im Port-Register", addr_ok);
 
-    // Ein Probe Request. Das baut in Linux `ieee80211_build_probe_req` —
-    // die OBERE Haelfte, die hier `wifid` wird. Er steht hier, weil der
-    // Sendeweg sonst nichts zu senden haette; 5c loest ihn ab.
+    // A probe request. In Linux `ieee80211_build_probe_req` builds it, in the
+    // upper half, which is `wifid` here. It lives here so the transmit path
+    // has something to send; stage 5c supersedes it.
     let mut frame = [0u8; 128];
     let n = build_probe_req(&mut frame, &mac, 1);
     let frame = &frame[..n];
@@ -1889,8 +1762,8 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok &= gate("ein Verwaltungsrahmen geht in die MGMT-Queue",
                queue == tx::RTW_TX_QUEUE_MGMT);
 
-    // Dreimal, mit Abstand: ein einzelner Probe Request kann kollidieren,
-    // und ein AP darf ihn auch schlicht verwerfen.
+    // Three times, spaced out: a single probe request can collide, and an AP
+    // may simply drop it.
     let mut sent = 0u32;
     let mut consumed = 0u32;
     let mut last_us = 0u64;
@@ -1923,14 +1796,14 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok &= gate("der Chip holt die Sendedeskriptoren ab", consumed == sent
                && sent > 0);
 
-    // Und jetzt zuhoeren. Eine Probe Response ist Subtyp 5.
+    // Now listen. A probe response is subtype 5.
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF2: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: wie in Stufe 5a — ein Faden, ein Rufer, der Puffer verlaesst
-    // diese Funktion nicht.
+    // SAFETY: as in stage 5a: one thread, one caller, the buffer does not
+    // leave this function.
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF2) };
 
     let mut resp = 0u32;
@@ -1948,12 +1821,12 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
-            // Subtyp 5 = Probe Response, Typ 0 = Verwaltung.
+            // Subtype 5 = probe response, type 0 = management.
             if fc & 0xfc != 0x50 {
                 return;
             }
-            // `addr1` ist unsere Adresse — sonst haette der Filter ihn
-            // gar nicht durchgelassen, aber gemessen ist besser.
+            // `addr1` is our address; the filter would have dropped it
+            // otherwise, but check anyway.
             if pkt[off + 4..off + 10] != mac[..] {
                 return;
             }
@@ -1977,61 +1850,58 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
-/// `ieee80211_build_probe_req` in klein: ein Wildcard-Probe-Request.
+/// `ieee80211_build_probe_req` in small: a wildcard probe request.
 ///
-/// Die Sequenznummer bleibt null — `en_hwseq` steht im Deskriptor, also
-/// vergibt sie der Chip. Gebaut wird nur, was ein AP zum Antworten
-/// braucht: die drei Adressen, das leere SSID-Element und die Raten.
+/// The sequence number stays zero: `en_hwseq` is set in the descriptor, so
+/// the chip assigns it. Only what an AP needs to answer is built: the three
+/// addresses, the empty SSID element and the rates.
 fn build_probe_req(out: &mut [u8; 128], mac: &[u8; 6], ch: u8) -> usize {
     build_probe_req_to(out, mac, ch, None, &[])
 }
 
-/// `ieee80211_build_probe_req` mit `IEEE80211_PROBE_FLAG_DIRECTED`
-/// (net/mac80211/util.c, gerufen aus `ieee80211_ap_probereq_get`,
+/// `ieee80211_build_probe_req` with `IEEE80211_PROBE_FLAG_DIRECTED`
+/// (net/mac80211/util.c, called from `ieee80211_ap_probereq_get`,
 /// mlme.c:4518-4521).
 ///
-/// **Ein GERICHTETER Probe Request ist die Frage „lebst du noch?" an
-/// genau einen AP** — Empfaenger und BSSID sind seine Adresse, und das
-/// SSID-Element traegt seinen Namen statt der Null-Laenge. Nur er
-/// beantwortet sie, und niemand sonst auf dem Kanal muss antworten.
-///
-/// Der Suchlauf ruft weiter ohne Ziel: dort ist die leere SSID die
-/// Frage „wer ist da?".
+/// A directed probe request asks exactly one AP "are you still there?":
+/// receiver and BSSID are its address and the SSID element carries its
+/// name instead of zero length. The scan calls it without a target, where
+/// the empty SSID asks "who is there?".
 fn build_probe_req_to(out: &mut [u8; 128], mac: &[u8; 6], ch: u8,
                       bssid: Option<&[u8; 6]>, ssid: &[u8]) -> usize {
     let bcast = [0xffu8; 6];
     let ziel = bssid.unwrap_or(&bcast);
-    out[0..2].copy_from_slice(&0x0040u16.to_le_bytes()); // Verwaltung, Subtyp 4
+    out[0..2].copy_from_slice(&0x0040u16.to_le_bytes()); // mgmt, subtype 4
     out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
-    out[4..10].copy_from_slice(ziel); // addr1 = Empfaenger
-    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[4..10].copy_from_slice(ziel); // addr1 = receiver
+    out[10..16].copy_from_slice(mac); // addr2 = us
     out[16..22].copy_from_slice(ziel); // addr3 = BSSID
-    out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq, siehe oben
+    out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq, see above
     let mut n = 24;
-    // SSID-Element. Laenge 0 = „jedes Netz", sonst der Name des einen.
+    // SSID element. Length 0 = "any network", otherwise the one name.
     let sl = ssid.len().min(32);
     out[n] = 0;
     out[n + 1] = sl as u8;
     out[n + 2..n + 2 + sl].copy_from_slice(&ssid[..sl]);
     n += 2 + sl;
-    // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit. Das hohe Bit
-    // markiert eine GRUNDrate.
+    // Supported Rates: 1, 2, 5.5, 11, 6, 9, 12, 18 Mbit. The high bit marks
+    // a basic rate.
     out[n] = 1;
     out[n + 1] = 8;
     out[n + 2..n + 10]
         .copy_from_slice(&[0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24]);
     n += 10;
-    // DS Parameter Set: der Kanal, auf dem wir fragen.
+    // DS Parameter Set: the channel we probe on.
     out[n] = 3;
     out[n + 1] = 1;
     out[n + 2] = ch;
     n + 3
 }
 
-/// Die Kanalauslastung, die eine Zelle SELBST meldet — in Prozent.
+/// The channel load a cell reports itself, in percent.
 ///
-/// Fehlt das Element, steht nichts da: eine erfundene Null waere eine
-/// Aussage.
+/// Without the element nothing is printed; an invented zero would be a
+/// claim.
 fn print_last(b: &Bss) {
     if !b.bss_load_seen {
         return;
@@ -2041,8 +1911,8 @@ fn print_last(b: &Bss) {
     host::print("%");
 }
 
-/// Eine Zeile je Antwort: BSSID, Signal und der Netzname aus dem
-/// SSID-Element. Ein Name macht aus „ein Rahmen kam" ein „wir sehen X".
+/// One line per response: BSSID, signal and the network name from the SSID
+/// element.
 fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
     host::print("    von ");
     for i in 0..6 {
@@ -2054,8 +1924,8 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
     host::print(" · ");
     print_dbm(st.signal_power);
     host::print(" · SSID \"");
-    // 24 Kopf + 12 feste Felder (Zeitstempel, Intervall, Faehigkeiten),
-    // dann die Elemente. Das SSID-Element hat die Kennung 0.
+    // 24 header + 12 fixed fields (timestamp, interval, capabilities), then
+    // the elements. The SSID element has ID 0.
     let mut i = 36;
     while i + 2 <= f.len() {
         let id = f[i];
@@ -2075,8 +1945,8 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
     host::print("\"\n");
 }
 
-/// Eine gefundene Funkzelle. Nur das, was aus Beacon oder Probe Response
-/// sicher herausfaellt — nichts Abgeleitetes.
+/// A discovered cell. Only what follows directly from a beacon or probe
+/// response, nothing derived.
 #[derive(Clone, Copy)]
 struct Bss {
     bssid: [u8; 6],
@@ -2086,99 +1956,78 @@ struct Bss {
     best: i8,
     beacons: u16,
     resps: u16,
-    /// Faehigkeitsfeld aus Beacon/Probe Response (802.11 §9.4.1.4).
+    /// Capability field from beacon/probe response (802.11 §9.4.1.4).
     capability: u16,
-    /// Das RSN-Element des AP, roh. Daraus waehlt der Anmeldeantrag
-    /// SEINE Verfahren — ein AP lehnt sonst mit Status 43 ab.
+    /// The AP's RSN element, raw. The association request picks the AP's
+    /// suites from it; otherwise the AP rejects with status 43.
     rsn: [u8; 64],
     rsn_len: u8,
-    /// Byte 1 des HT-Operation-Elements (802.11 §9.4.2.56, id 61):
-    /// Bit 1:0 die Lage des Zweitkanals, Bit 2 ob der AP ueberhaupt
-    /// breiter als 20 MHz zulaesst. **Ohne dieses Byte gibt es kein
-    /// HT40** — welche HAELFTE die breite Zelle belegt, sagt allein der
-    /// AP, und eine geratene Haelfte ist ein anderer Kanal.
+    /// Byte 1 of the HT Operation element (802.11 §9.4.2.56, id 61): bits
+    /// 1:0 the secondary channel offset, bit 2 whether the AP allows more
+    /// than 20 MHz at all. Without it there is no HT40: only the AP says
+    /// which half the wide cell occupies.
     ht_param: u8,
-    /// **War das HT-Operation-Element ueberhaupt da?** `ht_param == 0`
-    /// heisst sonst zweierlei: „der AP faehrt 20 MHz" ODER „wir haben das
-    /// Element nie gesehen". Das sind zwei verschiedene Baustellen.
+    /// Whether the HT Operation element was present. Otherwise
+    /// `ht_param == 0` means either "the AP runs 20 MHz" or "never seen".
     ht_op_seen: bool,
-    /// Byte 0:1 des HT-CAPABILITIES-Elements (id 45). Bit 1 ist
-    /// `SUP_WIDTH_20_40`: was der AP KANN. Das HT-Operation-Element sagt,
-    /// was er gerade TUT. Nur beide nebeneinander beantworten die Frage,
-    /// ob 20 MHz seine Entscheidung oder unsere Luecke ist.
+    /// Bytes 0:1 of the HT Capabilities element (id 45). Bit 1 is
+    /// `SUP_WIDTH_20_40`: what the AP can do, while HT Operation says what
+    /// it currently does.
     ht_cap: u16,
-    /// Byte 0 des VHT-Operation-Elements (802.11 §9.4.2.158, id 192):
-    /// die Breite, die die Zelle FAEHRT. `0` = „nimm die HT-Angabe",
-    /// `1` = 80 MHz (und, mit Segment 1, auch 160 und 80+80), `2` und `3`
-    /// sind die mit 802.11-2016 ABGESCHAFFTEN Kodierungen fuer 160 und
-    /// 80+80.
+    /// Byte 0 of the VHT Operation element (802.11 §9.4.2.158, id 192): the
+    /// width the cell runs. `0` = use the HT information, `1` = 80 MHz (and,
+    /// with segment 1, also 160 and 80+80); `2` and `3` are the encodings
+    /// for 160 and 80+80 deprecated in 802.11-2016.
     vht_chanwidth: u8,
-    /// Byte 1: Mittenkanal-Segment 0. Bei Breite `1` ist das die Mitte
-    /// der PRIMAEREN 80 MHz — auch dann, wenn der AP 160 faehrt. Genau
-    /// dafuer ist das Feld da: wer nur 80 kann, findet hier seinen Kanal,
-    /// ohne die 160 zu verstehen (802.11 Tabelle 9-250; in mac80211
-    /// `ieee80211_chandef_vht_oper`, Fall `supp_chwidth == 0` →
-    /// `ccf1 = 0` → `center_freq1 = cf0`).
+    /// Byte 1: center channel segment 0. With width `1` this is the center
+    /// of the primary 80 MHz, even if the AP runs 160, so an 80-only station
+    /// finds its channel here (802.11 table 9-250; mac80211
+    /// `ieee80211_chandef_vht_oper`, case `supp_chwidth == 0` → `ccf1 = 0`
+    /// → `center_freq1 = cf0`).
     vht_cch0: u8,
-    /// Byte 2: Mittenkanal-Segment 1 — bei 160 MHz die Mitte der ganzen
-    /// 160. Wir LESEN es nur fuer den Bericht: unsere VHT-Faehigkeiten
-    /// sagen „kein 160", und dann ist die Antwort laut derselben Tabelle
-    /// Segment 0.
+    /// Byte 2: center channel segment 1, at 160 MHz the center of the whole
+    /// 160. Read for the report only: our VHT capabilities say "no 160", and
+    /// then per the same table the answer is segment 0.
     vht_cch1: u8,
-    /// War das VHT-Operation-Element ueberhaupt da? Dieselbe Frage wie
-    /// bei `ht_op_seen`, und aus demselben Grund: ohne sie sieht „die
-    /// Zelle faehrt 20/40" aus wie „wir lesen das Element nicht".
+    /// Whether the VHT Operation element was present, for the same reason
+    /// as `ht_op_seen`.
     vht_op_seen: bool,
-    /// Byte 2 des BSS-Load-Elements (802.11 §9.4.2.26, id 11):
-    /// **wieviel Prozent der Zeit der AP seinen Kanal belegt SIEHT**,
-    /// als 0..255.
+    /// The AP's "VHT Capabilities Info" field from its beacon, used only to
+    /// trim our own offer.
     ///
-    /// **Das ist die einzige Zahl im Beacon, die einen Repeater
-    /// verraten kann.** Er teilt sich die Luft mit seinem eigenen
-    /// Backhaul zur Basis — jedes Byte geht zweimal durch den Aether —
-    /// und sieht seinen Kanal deshalb deutlich voller als eine Basis am
-    /// Kabel. Pegel und Bandbreite sehen das NICHT: am Geraet meldete
-    /// der Repeater 866 Mbit bei -23 dBm und lieferte 222, weil 53 % der
-    /// Zeit sein Backhaul lief.
-    ///
-    /// **Vorerst wird der Wert nur GEZEIGT und geht in keine
-    /// Entscheidung ein.** wpa_supplicant wertet ihn auch nicht aus: an
-    /// der Stelle, wo es hingehoerte, steht in `scan.c:3425` woertlich
-    /// `TODO: channel utilization and AP load (e.g., from AP Beacon)`.
-    /// Es gibt hier also keine Referenz — und eine Regel ohne Quelle und
-    /// ohne Messung waere geraten.
-    /// Das Feld „VHT Capabilities Info" des AP aus seiner Bake.
-    /// Nur dafuer da, unser eigenes Angebot daran zu stutzen.
+    /// `bss_load` below is byte 2 of the BSS Load element (802.11
+    /// §9.4.2.26, id 11): the share of time the AP sees its channel busy,
+    /// as 0..255. It is the only beacon value that can reveal a range extender,
+    /// whose backhaul shares the air and makes its channel look busier.
+    /// Reported only, it decides nothing; wpa_supplicant does not use it
+    /// either (`scan.c:3425`: `TODO: channel utilization and AP load`).
     ap_vht_cap: u32,
     ap_vht_cap_seen: bool,
     bss_load: u8,
     bss_load_seen: bool,
-    /// **Sagt der AP WMM an?** `bss->wmm_used` in mac80211
-    /// (scan.c:139: `elems->wmm_param || elems->wmm_info`). Davon haengt
-    /// ab, ob unser Anmeldeantrag das WMM-Element traegt — und davon
-    /// wiederum, ob ein AP uns VHT gibt: hostapd streicht einer Station
-    /// ohne WMM-Element VHT (`copy_sta_vht_capab`, ieee802_11_vht.c:200).
+    /// Whether the AP announces WMM: `bss->wmm_used` in mac80211 (scan.c:139:
+    /// `elems->wmm_param || elems->wmm_info`). It decides whether our
+    /// association request carries the WMM element, and with it whether the
+    /// AP grants VHT: hostapd strips VHT from a station without WMM element
+    /// (`copy_sta_vht_capab`, ieee802_11_vht.c:200).
     wmm: bool,
 }
 
 const MAX_BSS: usize = 48;
 
-/// Was die ZELLE ueber ihre Breite sagt — die rohen Bytes aus ihren
-/// Operation-Elementen, nicht deren Deutung.
+/// What the cell says about its width: the raw bytes from its operation
+/// elements, not their interpretation.
 ///
-/// Es steht als eigener Wert da, weil `chan_params` und `switch_channel`
-/// inzwischen DREI Angaben brauchen und der Suchlauf keine davon hat.
-/// Drei Bytes einzeln durchzureichen hiesse, an jeder Rufstelle die
-/// Reihenfolge richtig zu treffen; `CellWidth::default()` ist „ich weiss
-/// nichts ueber diese Zelle", und das ist genau der Zustand des
-/// Suchlaufs.
+/// A value of its own so `chan_params` and `switch_channel` get the three
+/// bytes in one piece. `CellWidth::default()` means "nothing known about
+/// this cell", which is the state during a scan.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 struct CellWidth {
-    /// Byte 1 des HT-Operation-Elements (id 61).
+    /// Byte 1 of the HT Operation element (id 61).
     ht_param: u8,
-    /// Byte 0 des VHT-Operation-Elements (id 192).
+    /// Byte 0 of the VHT Operation element (id 192).
     vht_chanwidth: u8,
-    /// Byte 1 des VHT-Operation-Elements: Mittenkanal-Segment 0.
+    /// Byte 1 of the VHT Operation element: center channel segment 0.
     vht_cch0: u8,
 }
 
@@ -2192,76 +2041,66 @@ impl Bss {
     }
 }
 
-/// Wie lange wir nach einem Kanalwechsel auf eine Bake warten, bevor
-/// wir umkehren. Ein Bakenintervall sind 102 ms; zehn davon sind
-/// reichlich und immer noch eine Zehntelsekunde schneller als die
-/// Verbindungswache.
+/// How long to wait for a beacon after a channel switch before turning back.
+/// A beacon interval is 102 ms; ten of them are plenty and still shorter
+/// than the link watchdog.
 const CSA_BEACON_WAIT_MS: u64 = 1000;
 
-/// `IEEE80211_VHT_CHANWIDTH_80MHZ` — der EINZIGE Wert, aus dem wir eine
-/// Breite ableiten. `USE_HT` (0) faellt auf HT zurueck; `160MHZ` (2) und
-/// `80P80MHZ` (3) sind die abgeschafften Kodierungen, in denen Segment 0
-/// die Mitte der ganzen 160 traegt statt die unserer 80 — daraus unsere
-/// Haelfte zu RECHNEN waere eine Behauptung ueber einen Fall, den seit
-/// 802.11-2016 kein AP mehr sendet und den wir nie gemessen haben. Sie
-/// fallen deshalb auf HT zurueck und werden im Bericht genannt.
+/// `IEEE80211_VHT_CHANWIDTH_80MHZ`, the only value a width is derived from.
+/// `USE_HT` (0) falls back to HT; `160MHZ` (2) and `80P80MHZ` (3) are the
+/// deprecated encodings in which segment 0 holds the center of the whole
+/// 160 instead of our 80. No AP sends them since 802.11-2016, so they fall
+/// back to HT and are named in the report.
 const VHT_CHANWIDTH_80: u8 = 1;
 
-/// Die zulaessigen Mittenkanaele eines 80-MHz-Blocks im 5-GHz-Band.
-/// Sie liegen fest im Raster (802.11 Anhang E), jeder deckt vier
-/// 20-MHz-Kanaele: 36-48, 52-64, 100-112, 116-128, 132-144, 149-161,
-/// 165-177.
+/// The valid center channels of an 80 MHz block in the 5 GHz band. They are
+/// fixed in the grid (802.11 annex E), each covering four 20 MHz channels:
+/// 36-48, 52-64, 100-112, 116-128, 132-144, 149-161, 165-177.
 const CENTERS_80: [u8; 7] = [42, 58, 106, 122, 138, 155, 171];
 
 // ═══════════════════════════════════════════════════════════════
-// Kanalwechsel — CSA (802.11 §11.9, mac80211 spectmgmt.c:220-330 und
+// Channel switch — CSA (802.11 §11.9, mac80211 spectmgmt.c:220-330 and
 // mlme.c:2742-3024)
 //
-// **Ein AP darf umziehen, und er sagt es vorher an.** Auf einem
-// DFS-Kanal ist das kein Sonderfall: erkennt er Radar, MUSS er den
-// Kanal binnen Sekunden raeumen (ETSI EN 301 893). Ein Client, der die
-// Ansage nicht liest, bleibt auf dem leeren Kanal zurueck und merkt es
-// erst, wenn die Baken ausbleiben — bei uns nach Sekunden, und dann
-// mit dem vollen Wiederverbinden.
-//
-// Wir horchen auf Kanal 104. Das ist DFS.
+// An AP may move and announces it beforehand. On a DFS channel this is
+// routine: on detecting radar it must vacate the channel within seconds
+// (ETSI EN 301 893). A client that ignores the announcement stays behind on
+// the empty channel and notices only when beacons stop.
 // ═══════════════════════════════════════════════════════════════
 
-/// Was eine Wechselansage sagt.
+/// What a channel switch announcement says.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Csa {
-    /// `mode` (802.11 §9.4.2.19). **1 heisst: ab jetzt nichts mehr
-    /// senden**, bis der Wechsel vollzogen ist — der AP raeumt gerade.
+    /// `mode` (802.11 §9.4.2.19). 1 means: stop transmitting until the
+    /// switch is done, the AP is vacating.
     mode: u8,
-    /// Der neue primaere Kanal.
+    /// The new primary channel.
     channel: u8,
-    /// In so vielen Bakenintervallen ist es soweit. `0` und `1` heissen
-    /// beide „jetzt" (mlme.c:2991: `(max(count, 1) - 1) * beacon_int`).
+    /// Number of beacon intervals until the switch. `0` and `1` both mean
+    /// "now" (mlme.c:2991: `(max(count, 1) - 1) * beacon_int`).
     count: u8,
-    /// Und wie breit es danach weitergeht.
+    /// The width after the switch.
     width: CellWidth,
 }
 
-/// `ieee80211_parse_ch_switch_ie` (spectmgmt.c:220), auf das
-/// zusammengezogen, was ein Beacon traegt.
+/// `ieee80211_parse_ch_switch_ie` (spectmgmt.c:220), reduced to what a
+/// beacon carries.
 ///
-/// Gelesen werden vier Elemente:
-/// * **37** Channel Switch Announcement — `{mode, neuer Kanal, count}`
-/// * **60** Extended CSA — dasselbe plus Betriebsklasse davor
-/// * **62** Secondary Channel Offset — wo der Zweitkanal danach liegt
-/// * **194** Wide Bandwidth Channel Switch — VHT-Breite und Mitte,
-///   allein oder im Wrapper **196**
+/// Four elements are read:
+/// * 37 Channel Switch Announcement: `{mode, new channel, count}`
+/// * 60 Extended CSA: the same, preceded by the operating class
+/// * 62 Secondary Channel Offset: where the secondary channel lies after
+/// * 194 Wide Bandwidth Channel Switch: VHT width and center, alone or in
+///   wrapper 196
 ///
-/// **Eine Abweichung, und sie ist benannt:** Linux zieht die
-/// Betriebsklasse des Elements 60 heran, um einen BANDwechsel zu
-/// erkennen (`ieee80211_operating_class_to_band`). Wir fuehren keine
-/// Betriebsklassen; deshalb gilt bei uns Element 37, wenn es da ist,
-/// und 60 nur als Ersatz. Eine Ansage, die uns in ein anderes Band
-/// schicken will, faellt damit auf die Plausibilitaetspruefung des
-/// Kanals zurueck — dieselbe, die auch `chan_params` schuetzt.
+/// Deviation: Linux uses the operating class of element 60 to detect a band
+/// change (`ieee80211_operating_class_to_band`). We do not track operating
+/// classes, so element 37 wins when present and 60 is only a fallback. An
+/// announcement into another band falls back on the channel plausibility
+/// check that also guards `chan_params`.
 fn parse_csa(f: &[u8]) -> Option<Csa> {
-    // Beacon: 24 Kopf + 8 Zeitstempel + 2 Bakenintervall + 2
-    // Faehigkeiten, dann die Elemente.
+    // Beacon: 24 header + 8 timestamp + 2 beacon interval + 2 capabilities,
+    // then the elements.
     if f.len() < 36 {
         return None;
     }
@@ -2284,7 +2123,7 @@ fn parse_csa(f: &[u8]) -> Option<Csa> {
                 aus37 = true;
             }
             60 if len >= 4 && !aus37 => {
-                // b[1] ist die Betriebsklasse, die wir nicht fuehren.
+                // b[1] is the operating class, which we do not track.
                 csa.mode = b[0];
                 csa.channel = b[2];
                 csa.count = b[3];
@@ -2294,7 +2133,7 @@ fn parse_csa(f: &[u8]) -> Option<Csa> {
                 csa.width.vht_chanwidth = b[0];
                 csa.width.vht_cch0 = b[1];
             }
-            // 196 Channel Switch Wrapper — darin steckt 194.
+            // 196 Channel Switch Wrapper, containing 194.
             196 => {
                 let mut j = 0usize;
                 while j + 2 <= b.len() {
@@ -2318,91 +2157,84 @@ fn parse_csa(f: &[u8]) -> Option<Csa> {
         // spectmgmt.c:278 „nothing here we understand"
         return None;
     }
-    // Der Zweitkanal-Versatz wird in ein HT-Operation-Byte uebersetzt,
-    // damit `chan_params` ihn versteht — eine Rechnung, eine Antwort.
-    // Bit 2 (`WIDTH_ANY`) muss stehen, sonst gilt 20 MHz.
+    // The secondary channel offset is translated into an HT Operation byte
+    // so `chan_params` understands it: one computation, one answer. Bit 2
+    // (`WIDTH_ANY`) must be set, otherwise 20 MHz applies.
     csa.width.ht_param = match sec_offs {
-        1 => 0x05, // Zweitkanal OBEN
-        3 => 0x07, // Zweitkanal UNTEN
-        // spectmgmt.c:307-310: ohne das Element wissen wir die Lage
-        // nach dem Wechsel nicht, und dann ist 20 MHz das Beste, was
-        // wir sagen koennen.
+        1 => 0x05, // secondary channel above
+        3 => 0x07, // secondary channel below
+        // spectmgmt.c:307-310: without the element the position after the
+        // switch is unknown, and 20 MHz is the best we can say.
         _ => 0x00,
     };
     Some(csa)
 }
 
-/// main.c:822-867 `rtw_get_channel_params` und main.c:759-792, der Teil von
-/// `rtw_update_channel`, der die Unterkanallage waehlt — zusammengezogen,
-/// weil beide dieselbe Fallunterscheidung fahren und wir keine `chandef`
-/// haben, sondern das HT-Operation-Byte des AP.
+/// main.c:822-867 `rtw_get_channel_params` and main.c:759-792, the part of
+/// `rtw_update_channel` that picks the primary channel position, merged
+/// because both run the same case analysis and we have no `chandef`, only
+/// the AP's HT Operation byte.
 ///
-/// Linux rechnet in FREQUENZEN (`primary_freq > center_freq`), wir in
-/// Kanalnummern. Das ist dieselbe Aussage: ein Kanalschritt sind 5 MHz,
-/// und der Vergleich dreht sich mit. Ausgeschrieben, damit es nachpruefbar
-/// ist statt geglaubt:
+/// Linux works in frequencies (`primary_freq > center_freq`), we in channel
+/// numbers. That is the same statement: one channel step is 5 MHz.
 ///
 /// ```text
-///   Zweitkanal OBEN  (0x1): Mitte = primaer + 2, primaer ist die UNTERE
-///   Zweitkanal UNTEN (0x3): Mitte = primaer - 2, primaer ist die OBERE
+///   secondary above (0x1): center = primary + 2, primary is the lower
+///   secondary below (0x3): center = primary - 2, primary is the upper
 /// ```
 ///
-/// **80 MHz** kommt aus dem VHT-Operation-Element und ist der Grund,
-/// warum hier eine `CellWidth` steht und nicht mehr ein Byte:
-/// `rtw_get_channel_params` unterscheidet bei 80 MHz die Lage des
-/// primaeren 20ers in VIER Stufen (main.c:769-791), und die Mitte kommt
-/// nicht aus einer Rechnung, sondern aus dem Element.
+/// 80 MHz comes from the VHT Operation element. `rtw_get_channel_params`
+/// distinguishes four positions of the primary 20 at 80 MHz
+/// (main.c:769-791), and the center comes from the element, not from a
+/// computation.
 ///
 /// ```text
-///   |primaer - Mitte| == 2 : der primaere ist ein INNERES Viertel
-///                            -> RTW_SC_20_UPPER / _LOWER
-///   |primaer - Mitte| == 6 : er ist ein AEUSSERES
-///                            -> RTW_SC_20_UPMOST / _LOWEST
+///   |primary - center| == 2 : primary is an inner quarter
+///                             -> RTW_SC_20_UPPER / _LOWER
+///   |primary - center| == 6 : it is an outer one
+///                             -> RTW_SC_20_UPMOST / _LOWEST
 /// ```
 ///
-/// `max_bw` ist die Obergrenze, die der RUFER erlaubt: `0` im Suchlauf
-/// (dort ist jede Breite ueber 20 MHz eine Behauptung ueber den
-/// Nachbarkanal), sonst das Minimum aus Karte und `bw:` aus der Konfig.
+/// `max_bw` is the limit the caller allows: `0` during a scan (any width
+/// above 20 MHz would be a claim about the neighbor channel), otherwise the
+/// minimum of card and `bw:` from the config.
 fn chan_params(primary: u8, w: CellWidth, max_bw: usize) -> (u8, usize, u8) {
     const SEC_OFFSET: u8 = 0x03; // IEEE80211_HT_PARAM_CHA_SEC_OFFSET
     const SEC_ABOVE: u8 = 0x01; // IEEE80211_HT_PARAM_CHA_SEC_ABOVE
     const SEC_BELOW: u8 = 0x03; // IEEE80211_HT_PARAM_CHA_SEC_BELOW
     const WIDTH_ANY: u8 = 0x04; // IEEE80211_HT_PARAM_CHAN_WIDTH_ANY
 
-    // **Beide Bedingungen, nicht eine.** Ein AP darf den Zweitkanal nennen
-    // und die Breite trotzdem verbieten (Bit 2 aus), waehrend er gerade
-    // einen 20-MHz-Nachbarn schuetzt. Wer nur den Versatz liest, sendet
-    // dann 40 MHz in eine Zelle, die 20 erwartet.
+    // Both conditions, not one. An AP may name the secondary channel and
+    // still forbid the width (bit 2 clear) while protecting a 20 MHz
+    // neighbor; reading only the offset would send 40 MHz into a 20 MHz
+    // cell.
     //
-    // **Das Bit gilt auch fuer 80 MHz.** In 802.11 heisst es „STA Channel
-    // Width" und sagt: alles ueber 20 MHz ist hier gerade untersagt. Ein
-    // VHT-Operation-Element daneben aendert daran nichts — deshalb steht
-    // die Pruefung VOR dem VHT-Zweig und nicht in ihm.
+    // The bit also applies to 80 MHz: 802.11 calls it "STA Channel Width",
+    // meaning anything above 20 MHz is currently forbidden. A VHT Operation
+    // element does not change that, so the check precedes the VHT branch.
     if max_bw == 0 || w.ht_param & WIDTH_ANY == 0 {
         return (primary, 0, RTW_SC_DONT_CARE);
     }
 
-    // ── 80 MHz ───────────────────────────────────────────────────────
+    // ── 80 MHz ───────────────────────────────────────────────────
     //
-    // **Wir nehmen Segment 0 und rechnen nichts.** Unsere VHT-Faehigkeiten
-    // melden `supp_chan_width = 0` (kein 160, kein 80+80), und fuer genau
-    // diesen Fall schreibt 802.11 Tabelle 9-250 vor, dass Segment 0 die
-    // Mitte UNSERER 80 MHz traegt — auch an einem 160-MHz-AP, der seine
-    // 160er-Mitte daneben in Segment 1 legt. mac80211 faehrt dieselbe
-    // Zeile (`ccf1 = 0` → `center_freq1 = cf0`).
+    // Take segment 0 and compute nothing. Our VHT capabilities report
+    // `supp_chan_width = 0` (no 160, no 80+80), and for that case 802.11
+    // table 9-250 has segment 0 carry the center of our 80 MHz, even at a
+    // 160 MHz AP that puts its 160 center into segment 1. mac80211 does the
+    // same (`ccf1 = 0` → `center_freq1 = cf0`).
     //
-    // Geprueft wird wie beim 40er, und aus demselben Grund: die Eingabe
-    // ist ein Byte aus einem fremden Beacon. Zwei Bedingungen zusammen
-    // legen die Mitte eindeutig fest — sie muss ein Mittenkanal des
-    // 80-MHz-Rasters sein, UND der primaere muss eines ihrer vier Viertel
-    // sein. Passt eines von beiden nicht, gilt der 40er-Weg darunter:
-    // eine schmalere Breite ist immer erlaubt, eine erfundene Mitte nie.
+    // Checked like the 40 MHz case because the input is a byte from a
+    // foreign beacon: the center must be a center channel of the 80 MHz
+    // grid and the primary must be one of its four quarters. Otherwise the
+    // 40 MHz path below applies; a narrower width is always allowed, an
+    // invented center never.
     if max_bw >= 2 && primary > 14 && w.vht_chanwidth == VHT_CHANWIDTH_80 {
         let c = w.vht_cch0;
         let d = if c > primary { c - primary } else { primary - c };
         if CENTERS_80.contains(&c) && (d == 2 || d == 6) {
-            // main.c:769-791, in Kanaelen statt Frequenzen: 10 MHz
-            // Abstand sind zwei Kanalschritte, 30 MHz sind sechs.
+            // main.c:769-791 in channels instead of frequencies: 10 MHz are
+            // two channel steps, 30 MHz are six.
             let idx = match (primary > c, d) {
                 (true, 2) => RTW_SC_20_UPPER,
                 (true, _) => RTW_SC_20_UPMOST,
@@ -2413,24 +2245,19 @@ fn chan_params(primary: u8, w: CellWidth, max_bw: usize) -> (u8, usize, u8) {
         }
     }
 
-    // ── 40 MHz ───────────────────────────────────────────────────────
+    // ── 40 MHz ───────────────────────────────────────────────────
     let center = match w.ht_param & SEC_OFFSET {
         SEC_ABOVE => primary.saturating_add(2),
         SEC_BELOW => primary.saturating_sub(2),
         _ => return (primary, 0, RTW_SC_DONT_CARE),
     };
 
-    // **Eine Zutat gegenueber Linux, und hier ist der Grund.** `rtw88`
-    // bekommt eine `cfg80211_chan_def`, die cfg80211 vorher geprueft hat
-    // (`cfg80211_chandef_valid`); es RECHNET nur noch. Wir haben kein
-    // cfg80211 — unsere Eingabe ist ein Byte aus einem fremden Beacon,
-    // und wenn das „Zweitkanal oben" auf Kanal 13 sagt, faehrt die
-    // Rechnung auf Kanal 15. Den gibt es nicht, seine Sendeleistung steht
-    // in keiner Tabelle, und in Europa ist er nicht zugelassen.
-    //
-    // Geprueft wird deshalb der MITTENkanal gegen das Band, aus dem der
-    // primaere kommt. Faellt er heraus, gilt 20 MHz — ein schmaler Kanal
-    // ist immer erlaubt, ein erfundener nie.
+    // An addition over Linux: `rtw88` receives a `cfg80211_chan_def` that
+    // cfg80211 already validated (`cfg80211_chandef_valid`). We have no
+    // cfg80211; our input is a byte from a foreign beacon, and "secondary
+    // above" on channel 13 would compute channel 15, which does not exist
+    // and has no TX power entry. So the center channel is checked against
+    // the primary's band; if it falls outside, 20 MHz applies.
     let plausibel = if primary <= 14 {
         (1..=13).contains(&center)
     } else {
@@ -2440,8 +2267,8 @@ fn chan_params(primary: u8, w: CellWidth, max_bw: usize) -> (u8, usize, u8) {
         return (primary, 0, RTW_SC_DONT_CARE);
     }
 
-    // main.c:766-768: liegt der primaere UEBER der Mitte, ist er die obere
-    // Haelfte. Bei „Zweitkanal oben" ist er also die untere.
+    // main.c:766-768: a primary above the center is the upper half, so with
+    // "secondary above" it is the lower one.
     if center > primary {
         (center, 1, RTW_SC_20_LOWER)
     } else {
@@ -2449,45 +2276,41 @@ fn chan_params(primary: u8, w: CellWidth, max_bw: usize) -> (u8, usize, u8) {
     }
 }
 
-/// main.c:880-913 `rtw_set_channel` — der Teil, der auf JEDEN Kanal passt.
+/// main.c:880-913 `rtw_set_channel`, the part that fits any channel.
 ///
-/// `primary` ist der Kanal, auf dem die Zelle ihre Beacons sendet, `w`
-/// das, was sie ueber ihre Breite sagt. Der Suchlauf ruft mit
-/// `max_bw = 0` — auf einem Kanal, den man nur abhorcht, ist jede Breite
-/// ueber 20 MHz eine Behauptung ueber den Nachbarkanal.
+/// `primary` is the channel the cell sends beacons on, `w` what it says
+/// about its width. The scan calls with `max_bw = 0`: on a channel that is
+/// only listened to, any width above 20 MHz is a claim about the neighbor.
 ///
-/// **Was an den Chip geht, ist der MITTENkanal**, nicht der primaere
-/// (main.c:817 `hal->current_channel = center_channel`) — und deshalb
-/// prueft auch die Gegenprobe an RF 0x18 gegen die Mitte.
+/// The chip gets the center channel, not the primary (main.c:817
+/// `hal->current_channel = center_channel`), so the RF 0x18 cross-check
+/// compares against the center too.
 fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
                   primary: u8, w: CellWidth, max_bw: usize) -> bool {
     let (ch, bw, primary_idx) = chan_params(primary, w, max_bw);
 
-    // `rtw_update_channel`: der 20-MHz-Eintrag ist IMMER der primaere
-    // Kanal, der Eintrag der laufenden Breite die Mitte (main.c:754-757).
+    // `rtw_update_channel`: the 20 MHz entry is always the primary channel,
+    // the entry of the current width the center (main.c:754-757).
     let mut t2 = txpower::TxPower { cch_by_bw: t.cch_by_bw, ..*t };
     t2.cch_by_bw[0] = primary;
     t2.cch_by_bw[bw] = ch;
-    // **Bei 80 MHz fehlt sonst der 40er-Eintrag, und das ist kein
-    // Schoenheitsfehler.** `rtw_phy_get_tx_power_limit` nimmt das MINIMUM
-    // ueber ALLE Breiten von 20 bis zur laufenden (phy.c:2149-2196) und
-    // schlaegt dafuer `cch_by_bw[1]` nach. Steht dort die Null, findet
-    // `channel_to_idx` keinen Kanal und die Grenze faellt ganz weg — wir
-    // saehen also ausgerechnet auf der breitesten Einstellung KEINE
-    // Sendeleistungsgrenze.
+    // At 80 MHz the 40 MHz entry must be filled too:
+    // `rtw_phy_get_tx_power_limit` takes the minimum over all widths from
+    // 20 up to the current one (phy.c:2149-2196) and looks up
+    // `cch_by_bw[1]`. A zero there makes `channel_to_idx` find no channel,
+    // and the limit would vanish entirely.
     //
-    // main.c:777-791: die 40er-Mitte liegt in derselben HAELFTE der 80
-    // wie der primaere Kanal, also vier Schritte von der 80er-Mitte weg.
+    // main.c:777-791: the 40 MHz center lies in the same half of the 80 as
+    // the primary, four steps from the 80 MHz center.
     if bw == 2 {
         t2.cch_by_bw[1] = if primary > ch { ch + 4 } else { ch - 4 };
     }
 
     chip::set_channel(h, ch, bw, primary_idx);
 
-    // `rtw_coex_switchband_notify` steht hier in Linux, mit drei
-    // verschiedenen Gruenden je nach Band und Suchlauf. Er muendet in
-    // `rtw_coex_run_coex` — die LAUFENDE Koexistenz, die den Verkehrs- und
-    // BT-Zustand braucht. Benannt und nicht gebaut, seit Stufe 4c.
+    // Linux calls `rtw_coex_switchband_notify` here, with three reasons by
+    // band and scan state. It leads into `rtw_coex_run_coex`, the running
+    // coexistence that needs traffic and BT state. Not implemented.
 
     let band = if ch > 14 { txpower::PHY_BAND_5G } else { txpower::PHY_BAND_2G };
     let mut tbl = [[0u8; txpower::DESC_RATE_MAX]; txpower::RTW_RF_PATH_MAX];
@@ -2499,43 +2322,41 @@ fn switch_channel(h: i32, hal: &Hal, e: &efuse::Efuse, t: &txpower::TxPower,
                                 band, e.regd as usize);
     chip::set_tx_power_index(h, hal.rf_path_num, &tbl);
 
-    // `need_rfk` wird beim Suchen NICHT gesetzt — genau das ist der Sinn des
-    // `RTW_FLAG_SCANNING`-Zweigs: auf jedem Kanal zu kalibrieren dauert zu
-    // lange. Die Kalibrierung gehoert vor das Anmelden.
+    // `need_rfk` is not set while scanning; that is the point of the
+    // `RTW_FLAG_SCANNING` branch: calibrating on every channel takes too
+    // long. Calibration belongs before association.
 
-    // Und die Gegenprobe: RF 0x18 traegt Band, Kanal und Bandbreite. Sie
-    // kostet zwei Lesezugriffe und sagt etwas ueber UNS statt ueber die
-    // Nachbarschaft — ob ein Netz auf einem Kanal funkt, entscheidet nicht
-    // der Treiber, ob der Chip den Kanal angenommen hat schon.
+    // Cross-check: RF 0x18 carries band, channel and bandwidth. Two reads
+    // that tell whether the chip accepted the channel, which, unlike
+    // whether anyone transmits there, is up to the driver.
     let a = phy::read_rf(h, phy::RF_PATH_A, 0x18, phy::RFREG_MASK);
     let b = phy::read_rf(h, phy::RF_PATH_B, 0x18, phy::RFREG_MASK);
     a & 0xff == ch as u32 && b & 0xff == ch as u32
 }
 
-/// Stufe 5c — der Suchlauf.
+/// Stage 5c: the scan.
 ///
-/// **Aktiv auf 2,4 GHz, passiv auf 5 GHz.** Aktiv heisst: ein Probe Request
-/// hinaus, dann zuhoeren. Passiv heisst: nur zuhoeren. Der Unterschied ist
-/// keine Bequemlichkeit — auf welchen 5-GHz-Kanaelen gesendet werden DARF,
-/// entscheidet die Zulassungszone, und die Regeln dafuer gehoeren der
-/// oberen Haelfte (`wifid`/cfg80211), nicht dem Treiber. Empfangen ist
-/// ueberall erlaubt, also hoert der Suchlauf dort, wo er nicht fragen darf.
+/// Active on 2.4 GHz, passive on 5 GHz. Active means a probe request, then
+/// listen; passive means only listen. Which 5 GHz channels may be
+/// transmitted on depends on the regulatory domain, and those rules belong
+/// to the upper half (`wifid`/cfg80211), not the driver. Receiving is
+/// allowed everywhere, so the scan listens where it may not ask.
 #[allow(clippy::too_many_arguments)]
 fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
                 fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev) -> bool {
-    // 2,4 GHz: die dreizehn Kanaele, die es in Europa gibt. Kanal 14 ist
-    // nur in Japan und nur mit DSSS zugelassen — er steht bewusst nicht da.
+    // 2.4 GHz: the thirteen channels allowed in Europe. Channel 14 is
+    // allowed only in Japan and only with DSSS, so it is left out.
     const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-    // 5 GHz: UNII-1 bis UNII-3, wie cfg80211 sie fuehrt. Nur zum Hoeren.
+    // 5 GHz: UNII-1 to UNII-3 as cfg80211 lists them. Listen only.
     const PASSIVE_5G: [u8; 25] = [
         36, 40, 44, 48, 52, 56, 60, 64,
         100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
         149, 153, 157, 161, 165,
     ];
-    // Ein Beacon-Intervall sind 102,4 ms. Wer kuerzer horcht, verpasst ein
-    // Netz nicht wegen schwachem Signal, sondern wegen der Uhr.
+    // A beacon interval is 102.4 ms. Listening shorter misses a network
+    // because of the clock, not a weak signal.
     const DWELL_MS: u32 = 130;
 
     host::print("[rtl8822ce] Stufe 5c: der Suchlauf\n");
@@ -2544,11 +2365,11 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         return false;
     }
 
-    // `rtw_core_scan_start`. Die Adresse steht seit 5b im Port (mac80211
-    // reicht hier eine ggf. gewuerfelte durch; wir nehmen unsere eigene).
-    // `rtw_leave_lps` und `RTW_FLAG_DIG_DISABLE` sind bei uns wirkungslos —
-    // es gibt weder Stromsparen noch eine laufende Verstaerkungsregelung.
-    // `rtw_coex_scan_notify` ist dieselbe benannte Luecke wie oben.
+    // `rtw_core_scan_start`. The address is in the port since 5b (mac80211
+    // may pass a randomized one here; we use our own). `rtw_leave_lps` and
+    // `RTW_FLAG_DIG_DISABLE` have no effect here: there is neither power
+    // saving nor running gain control. `rtw_coex_scan_notify` is the same
+    // gap as above.
     let notify = fw_feature & FW_FEATURE_NOTIFY_SCAN != 0;
     host::print("  fw feature 0x");
     host::print_hex32(fw_feature);
@@ -2571,7 +2392,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF3: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    // SAFETY: one thread, one caller, the buffer does not leave the function.
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF3) };
 
     let mut found: [Bss; MAX_BSS] = [Bss {
@@ -2627,8 +2448,8 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         return;
                     }
                     let fc = u16::from_le_bytes([pkt[off], pkt[off + 1]]);
-                    // Beacon (0x80) und Probe Response (0x50) tragen
-                    // beide denselben Rumpf: 12 feste Bytes, dann Elemente.
+                    // Beacon (0x80) and probe response (0x50) share the same
+                    // body: 12 fixed bytes, then elements.
                     let is_beacon = fc & 0xfc == 0x80;
                     let is_resp = fc & 0xfc == 0x50;
                     if !is_beacon && !is_resp {
@@ -2655,7 +2476,7 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print_hex8(fw::hmetfr(h));
         host::print("\n");
     }
-    // Zurueck auf den Kanal, auf dem die Stufen davor gemessen haben.
+    // Back to the channel the earlier stages measured on.
     let _ = switch_channel(h, hal, e, t, 1, CellWidth::default(), 0);
 
     let dauer = (host::now_us() - t_start) / 1000;
@@ -2732,19 +2553,12 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    // **Das Ziel kommt aus `sys/config/wifi_ssid`, nicht aus der
-    // Lautstaerke.** docs/spec/WIFI_CLASS_ABI.md sagt warum: ohne
-    // SSID-Filter nimmt der Treiber den lautesten AP IRGENDEINES Netzes,
-    // auch den des Nachbarn — und fuer den hat `wifid` keinen PSK. Das
-    // endet in einem stillen MIC-Fehlschlag, und niemand sieht, woran.
-    // Nur 2,4 GHz: dort duerfen wir senden, auf 5 GHz haben wir nur
-    // gehorcht.
-    // **Eine Datei, `key: value` je Zeile — dieselbe, die `wifid` und
-    // `wifi_ax200` lesen.** Bis 0.20.0 stand hier `sys/config/wifi_ssid`;
-    // das steht so in einem veralteten Absatz der Spec, und es waere eine
-    // ZWEITE Stelle gewesen, die dasselbe konfiguriert. Zwei Stellen
-    // driften auseinander, und dann assoziiert der Treiber zu einem Netz,
-    // fuer das `wifid` keinen PSK hat.
+    // The target comes from the SSID filter in `sys/config/wifi`, not from
+    // signal strength. docs/spec/WIFI_CLASS_ABI.md gives the reason: without
+    // it the driver picks the loudest AP of any network, possibly a
+    // neighbor's, for which `wifid` has no PSK; that ends in a silent MIC
+    // failure. One file, `key: value` per line, the same one `wifid` and
+    // `wifi_ax200` read, so the network cannot diverge from the PSK.
     let mut cfg = [0u8; 512];
     let cn = host::fetch("sys/config/wifi", &mut cfg);
     let want = if cn > 0 {
@@ -2763,17 +2577,13 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    // **5 GHz ist jetzt waehlbar.** Hier stand `b.channel <= 14`, also
-    // wurde jede 5-GHz-Zelle gesucht, gemessen, gedruckt — und dann
-    // weggeworfen. Der Suchlauf faehrt die 25 Kanaele PASSIV (siehe
-    // `PASSIVE_5G`), es geht dort also kein Probe Request raus, und das
-    // ist genau die Sorgfalt, die ein DFS-Kanal verlangt: erst hoeren,
-    // dann senden.
+    // 5 GHz cells are selectable. The scan covers them passively (see
+    // `PASSIVE_5G`), so no probe request goes out there, which is the care
+    // a DFS channel requires: listen first, then transmit.
     //
-    // `Auto` nimmt 5 GHz, sobald es brauchbar steht, sonst das staerkste
-    // ueberhaupt. Eine reine "staerkstes Signal"-Wahl waere falsch: ein
-    // 2,4-GHz-AP im selben Raum ist fast immer lauter als sein
-    // 5-GHz-Zwilling und wuerde ihn dauerhaft verdecken.
+    // `Auto` takes 5 GHz when it is usable, otherwise the strongest overall.
+    // Pure strongest-signal selection would be wrong: a 2.4 GHz AP in the
+    // same room is almost always louder than its 5 GHz twin.
     let pref = read_band_pref();
     let mut best_all: Option<Bss> = None;
     let mut best_5g: Option<Bss> = None;
@@ -2826,18 +2636,10 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             best_all
         }
     };
-    // **Ein Suchlauf ohne Fund loescht das Ziel NICHT.**
-    //
-    // Hier stand `*target = ...`, also auch `*target = None`. Der
-    // Wiederverbinden-Weg ruft diesen Suchlauf nach zwei Fehlschlaegen,
-    // und ein `None` faellt dort in ein `break`, das aus der Schleife
-    // HERAUS faellt: der Rufer schaltet die MAC ab und der Treiber ist
-    // zu Ende. **Ein Kanal, auf dem gerade niemand antwortet, ist kein
-    // Beweis, dass es die Zelle nicht mehr gibt.**
-    //
-    // 0.58.2 hat genau das als behoben GEMELDET und nur die Logzeile
-    // gebaut — die Wirkung stand in der Commit-Nachricht und nicht im
-    // Code. Hier ist sie.
+    // A scan without a result does not clear the target. The reconnect path
+    // calls this scan after two failures, and a `None` there breaks out of
+    // the loop and ends the driver. A channel where nobody answers right now
+    // does not prove the cell is gone.
     match (gewaehlt, *target) {
         (Some(g), _) => *target = Some(g),
         (None, Some(alt)) => {
@@ -2847,18 +2649,11 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
         (None, None) => {}
     }
-    // **Die Kandidaten, nach Signal.**
-    //
-    // Gewaehlt wird nach Feldstaerke, und das ist eine ANNAHME: dass
-    // das lauteste Netz auch das schnellste ist. Am Geraet stimmte sie
-    // nicht — ein Repeater bei -50 dBm mit HT40 schlaegt den AP bei
-    // -55 dBm mit VHT80, und liefert die HAELFTE. Gesehen haben wir es
-    // erst, als der Durchsatz einbrach und die BSSID im Bericht eine
-    // andere war.
-    //
-    // Die Zahlen dafuer liegen seit dem Suchlauf alle vor; sie standen
-    // nur nirgends. Was die Zelle KANN, entscheidet dieselbe Funktion,
-    // die spaeter auch den Kanal legt — eine Rechnung, eine Antwort.
+    // The candidates, by signal. Selection is by signal strength, which
+    // assumes the loudest network is also the fastest; a nearby range extender
+    // with less width can beat a farther AP with more. The report lists what
+    // each cell can do, computed by the same function that later sets the
+    // channel.
     if n_found > 0 {
         host::print("  Zellen nach Signal:\n");
         let mut gezeigt = [false; MAX_BSS];
@@ -2901,9 +2696,8 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             host::print("\n");
         }
     }
-    // **Die Kanaele unserer SSID merken** — sie sind der Suchraum fuer
-    // das Roaming. Nur die Kanaele, nicht die Pegel: die sind gleich
-    // veraltet, sobald jemand einen Schritt geht.
+    // Remember the channels of our SSID as the search space for roaming.
+    // Channels only, not levels: those are stale as soon as someone moves.
     if let Some(t) = target {
         let mut n_ch = 0usize;
         for b in found[..n_found].iter() {
@@ -2912,8 +2706,8 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             {
                 continue;
             }
-            // SAFETY: einfaedig, genau ein Schreiber, und der Suchlauf
-            // laeuft nicht parallel zum Pumpen.
+            // SAFETY: single-threaded, one writer, and the scan does not run
+            // concurrently with the pump.
             unsafe {
                 let chs = &mut *core::ptr::addr_of_mut!(ROAM_CHANNELS);
                 if !chs[..n_ch].contains(&b.channel) && n_ch < chs.len() {
@@ -2950,15 +2744,13 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
 
     let mut ok = true;
-    // **Das Gate misst UNS, nicht die Nachbarschaft.** Ob auf einem Kanal
-    // jemand funkt, entscheidet nicht der Treiber — ob der Chip den Kanal
-    // angenommen hat, schon. Die Zahl der gefundenen Netze ist ein BEFUND
-    // und steht oben.
+    // The gate measures us, not the neighborhood. Whether anyone transmits
+    // on a channel is not up to the driver; whether the chip accepted the
+    // channel is. The number of networks found is a finding, printed above.
     ok &= gate("jeder angefahrene Kanal steht danach im RF", rf_ok == n_ch);
-    // **Hier gehoert dieses Tor hin und nicht in 5b.** Dass ein Rahmen die
-    // Antenne verlaesst, beweist nur eine ANTWORT — und ob auf EINEM Kanal
-    // gerade jemand antwortet, ist ein Muenzwurf. Ueber dreizehn Kanaele
-    // ist es keiner mehr.
+    // This gate belongs here and not in 5b. Only a response proves a frame
+    // left the antenna, and whether anyone answers on one channel is a coin
+    // toss; over thirteen channels it is not.
     ok &= gate("ein fremder AP antwortet auf unseren Probe Request\n         \x20         (ueber alle aktiven Kanaele)", n_resp > 0);
     ok &= gate("der Suchlauf findet Netze", n_found > 0);
     let mehr_als_einer = {
@@ -2971,22 +2763,18 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
-/// Einen Beacon oder eine Probe Response in die Liste aufnehmen. Gibt
-/// `false` zurueck, wenn kein Platz mehr ist — eine volle Liste ist ein
-/// BEFUND und darf nicht wie ein leerer Kanal aussehen.
+/// Adds a beacon or probe response to the list. Returns `false` when the
+/// list is full; a full list is a finding and must not look like an empty
+/// channel.
 fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
               signal: i8, is_beacon: bool) -> bool {
     let mut bssid = [0u8; 6];
     bssid.copy_from_slice(&f[16..22]); // addr3
 
-    // **Die Elemente werden bei JEDEM Rahmen neu gelesen.**
-    //
-    // Hier stand vorher ein `return` fuer eine schon bekannte Zelle: sie
-    // bekam nur ihren Zaehler hochgesetzt, und die Elemente blieben die
-    // des ERSTEN Rahmens, den wir je von ihr gesehen haben. Damit
-    // entschied der Zufall — Beacon oder Probe Response, frueh oder spaet
-    // —, welche Kanalbreite wir ihr fuer immer zuschreiben. Linux
-    // aktualisiert den BSS-Eintrag mit jedem Beacon.
+    // Elements are parsed again for every frame, as Linux updates the BSS
+    // entry with every beacon. Keeping those of the first frame would let
+    // chance (beacon or probe response, early or late) decide the channel
+    // width attributed to a cell forever.
     let idx = match found[..*n].iter().position(|b| b.bssid == bssid) {
         Some(i) => {
             if signal > found[i].best {
@@ -3010,8 +2798,8 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
         }
     };
     let e = &mut found[idx];
-    // 24 Kopf + 8 Zeitstempel + 2 Beacon-Intervall, dann das
-    // Faehigkeitsfeld, dann die Elemente.
+    // 24 header + 8 timestamp + 2 beacon interval, then the capability
+    // field, then the elements.
     if f.len() >= 36 {
         e.capability = u16::from_le_bytes([f[34], f[35]]);
     }
@@ -3028,19 +2816,18 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
                 e.ssid[..take].copy_from_slice(&f[i + 2..i + 2 + take]);
                 e.ssid_len = take as u8;
             }
-            // 48 = RSN (802.11 §9.4.2.24). Roh behalten, samt Kopf.
+            // 48 = RSN (802.11 §9.4.2.24). Kept raw, including the header.
             48 if len + 2 <= 64 => {
                 e.rsn[..len + 2].copy_from_slice(&f[i..i + 2 + len]);
                 e.rsn_len = (len + 2) as u8;
             }
-            // 61 = HT Operation (802.11 §9.4.2.56). Byte 0 ist der
-            // primaere Kanal, Byte 1 traegt die Lage des Zweitkanals.
-            // Wir behalten nur Byte 1 — den Kanal wissen wir, wir
-            // standen darauf, als der Beacon hereinkam.
-            // 45 = HT Capabilities (802.11 §9.4.2.55). Byte 0:1 ist das
-            // Faehigkeitsfeld; Bit 1 sagt, ob der AP 40 MHz KANN.
-            // 11 = BSS Load (802.11 §9.4.2.26). Byte 0:1 die Zahl der
-            // Stationen, Byte 2 die Kanalauslastung als 0..255.
+            // 61 = HT Operation (802.11 §9.4.2.56). Byte 0 is the primary
+            // channel, byte 1 the secondary channel offset; only byte 1 is
+            // kept, the channel is the one we were on.
+            // 45 = HT Capabilities (802.11 §9.4.2.55). Bytes 0:1 are the
+            // capability field; bit 1 says whether the AP can do 40 MHz.
+            // 11 = BSS Load (802.11 §9.4.2.26). Bytes 0:1 the station count,
+            // byte 2 the channel utilization as 0..255.
             11 if len >= 3 => {
                 e.bss_load = f[i + 4];
                 e.bss_load_seen = true;
@@ -3052,26 +2839,24 @@ fn record_bss(found: &mut [Bss], n: &mut usize, f: &[u8], ch: u8,
                 e.ht_param = f[i + 3];
                 e.ht_op_seen = true;
             }
-            // 191 = VHT Capabilities (802.11 §9.4.2.157). Nur die ersten
-            // vier Byte, das Feld „VHT Capabilities Info" — daraus stutzt
-            // `build_vht_cap_ie` unser eigenes Angebot, wie mac80211 es
-            // tut (`ieee80211_add_vht_ie`, mlme.c:1481-1526). Der Grund
-            // steht dort woertlich: „Some APs apparently get confused if
-            // our capabilities are better than theirs."
+            // 191 = VHT Capabilities (802.11 §9.4.2.157). Only the first four
+            // bytes, "VHT Capabilities Info": `build_vht_cap_ie` trims our
+            // offer to it, as mac80211 does (`ieee80211_add_vht_ie`,
+            // mlme.c:1481-1526), because "Some APs apparently get confused
+            // if our capabilities are better than theirs."
             191 if len >= 4 => {
                 e.ap_vht_cap = u32::from_le_bytes(
                     [f[i + 2], f[i + 3], f[i + 4], f[i + 5]]);
                 e.ap_vht_cap_seen = true;
             }
-            // 192 = VHT Operation (802.11 §9.4.2.158). Byte 0 ist die
-            // Breite, Byte 1 und 2 sind die zwei Mittenkanal-Segmente.
-            // **Ohne dieses Element gibt es kein 80 MHz** — die Mitte
-            // einer 80er steht nirgendwo sonst, und aus dem primaeren
-            // Kanal zu raten waere eine Behauptung ueber drei
-            // Nachbarkanaele.
-            // 221 = herstellerspezifisch. Microsoft-OUI 00:50:f2, Typ 2
-            // ist WMM, Untertyp 0 das Info-, 1 das Parameter-Element —
-            // genau die Pruefung aus mac80211 `parse.c:407-421`.
+            // 192 = VHT Operation (802.11 §9.4.2.158). Byte 0 is the width,
+            // bytes 1 and 2 the two center channel segments. Without it
+            // there is no 80 MHz: the center of an 80 is stated nowhere
+            // else, and guessing from the primary would be a claim about
+            // three neighbor channels.
+            // 221 = vendor specific. Microsoft OUI 00:50:f2, type 2 is WMM,
+            // subtype 0 the info and 1 the parameter element, the check
+            // from mac80211 `parse.c:407-421`.
             221 if len >= 5
                 && f[i + 2..i + 5] == [0x00, 0x50, 0xf2]
                 && f[i + 5] == 2
@@ -3102,14 +2887,13 @@ fn print_ssid(s: &[u8]) {
     }
 }
 
-/// rtw8822c.c:4179-4186 `rtw8822c_phy_calibration` — Stufe 5d.
+/// rtw8822c.c:4179-4186 `rtw8822c_phy_calibration`, stage 5d.
 ///
-/// **Sie laeuft hier, weil Linux sie hier laufen laesst.** `rtw_set_channel`
-/// setzt nur `need_rfk = true`; ausgefuehrt wird sie in
-/// `rtw_chip_prepare_tx`, das mac80211 aus `mgd_prepare_tx` ruft — also
-/// nach dem Suchlauf und VOR dem Anmelden. Waehrend des Suchens auf jedem
-/// Kanal zu kalibrieren dauert zu lange, und genau das sagt der Kommentar
-/// in `main.c`.
+/// It runs here because Linux runs it here: `rtw_set_channel` only sets
+/// `need_rfk = true`; it executes in `rtw_chip_prepare_tx`, which mac80211
+/// calls from `mgd_prepare_tx`, i.e. after the scan and before association.
+/// Calibrating on every channel while scanning takes too long, as the
+/// comment in `main.c` says.
 #[allow(clippy::too_many_arguments)]
 fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
                        h2c: &mut fw::H2cState,
@@ -3120,8 +2904,8 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
         return false;
     }
 
-    // `dm_flags` wird in Linux NUR aus debugfs beschrieben; beim Start ist
-    // es null, und damit ist keine Kalibrierung abgeschaltet.
+    // `dm_flags` is written only from debugfs in Linux; at start it is zero,
+    // so no calibration is disabled.
     const DM_FLAGS: u32 = 0;
 
     host::print("  power_track_type ");
@@ -3134,19 +2918,17 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print_dec(h2c.last_box_num as u32);
     host::print("\n");
 
-    // **Die C2H-Antworten der Firmware holt bisher niemand ab.** Auf PCIe
-    // kommen sie durch DENSELBEN Empfangsring wie die Funkrahmen, an
-    // `pkt_stat.is_c2h` getrennt. Linux liest sie fortwaehrend; bei uns
-    // laeuft `rx_poll` nur in den Messfenstern von 5a bis 5c. Was seit dem
-    // letzten Fenster aufgelaufen ist, wird hier zuerst geleert — eine
-    // Firmware, deren Ausgang keiner leert, ist ein Verdaechtiger fuer
-    // jedes „die Firmware antwortet nicht".
+    // Firmware C2H responses arrive on PCIe through the same RX ring as
+    // radio frames, separated by `pkt_stat.is_c2h`. Linux reads them
+    // continuously; here `rx_poll` runs only in the measurement windows of
+    // 5a to 5c, so whatever accumulated since is drained first. Firmware
+    // whose output nobody drains may appear not to respond.
     {
         let mut dmx = dm::DmInfo::new();
         let mut pdx = dm::PathDiv::default();
         static mut RXBUF4: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
             [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-        // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst den Block nicht.
+        // SAFETY: one thread, one caller, the buffer does not leave the block.
         let b = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF4) };
         let mut c2h = 0u32;
         let mut frames = 0u32;
@@ -3184,9 +2966,8 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
 
     let mut gapk = txgapk::GapkInfo::new();
     let dpkinfo = &mut d.dpk;
-    // `rtw_load_rfk_table` hat die RFK-Tabelle in Stufe 3c geschrieben und
-    // setzt dabei dieses Flag (phy.c:1847). Ohne geladene Tabelle gaebe es
-    // keine DPK — die Reihenfolge ist der Grund, nicht ein Sonderfall.
+    // `rtw_load_rfk_table` wrote the RFK table in stage 3c and sets this
+    // flag (phy.c:1847). Without a loaded table there would be no DPK.
     dpkinfo.is_dpk_pwr_on = true;
     let mut bt_iqk_timeout = false;
 
@@ -3294,10 +3075,9 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     host::print_dec(((host::now_us() - t_all) / 1000) as u32);
     host::print(" ms\n");
 
-    // ── Und die Frage, die zaehlt: hoert der Empfaenger danach noch? ──
-    // Eine Kalibrierung, die den Empfang kaputtmacht, ist schlimmer als
-    // keine. Dieselbe Messung wie in Stufe 4c, damit die Zahlen
-    // vergleichbar sind.
+    // ── Does the receiver still hear after calibration? ──────────
+    // A calibration that breaks reception is worse than none. Same
+    // measurement as stage 4c, so the numbers compare.
     let dm = &mut d.dm;
     chip::false_alarm_statistics(h, dm);
     host::sleep_ms(200);
@@ -3333,28 +3113,25 @@ fn print_signed(v: i32) {
     }
 }
 
-/// Stufe 5e — Authentifizierung und Anmeldung.
+/// Stage 5e: authentication and association.
 ///
-/// **Die Reihenfolge ist Linux' Reihenfolge**: Kanal des Ziels setzen →
-/// `rtw_chip_prepare_tx` (die Kalibrierung aus 5d, denn `rtw_set_channel`
-/// hat `need_rfk` gesetzt) → `PORT_SET_BSSID` → Auth → Assoc → und bei
-/// Erfolg `net_type = RTW_NET_MGD_LINKED` mit der AID in den Port, dazu
-/// `rtw_fw_media_status_report`.
+/// Linux order: set the target's channel → `rtw_chip_prepare_tx` (the 5d
+/// calibration, since `rtw_set_channel` set `need_rfk`) → `PORT_SET_BSSID`
+/// → auth → assoc → on success `net_type = RTW_NET_MGD_LINKED` with the AID
+/// in the port, plus `rtw_fw_media_status_report`.
 ///
-/// **Was daneben steht und hier NICHT gebaut ist, namentlich:**
-/// * `rtw_update_sta_info` + `rtw_fw_send_ra_info` — die Ratenanpassung
-///   braucht die HT/VHT-Faehigkeiten des Gegenuebers aus der
-///   Anmeldeantwort. Das ist ein Elementeparser der OBEREN Haelfte, und
-///   ohne ihn waere jede Ratenmaske geraten.
-/// * `rtw_fw_download_rsvd_page` + `rtw_send_rsvd_page_h2c` — PS-Poll,
-///   Null- und QoS-Null-Rahmen in den reservierten Seitenbereich. Der Weg
-///   dahin steht seit Stufe 2 (`download_firmware` schreibt dort), der
-///   INHALT ist obere Haelfte.
+/// Not part of this stage:
+/// * `rtw_update_sta_info` + `rtw_fw_send_ra_info`: rate adaptation needs
+///   the peer's HT/VHT capabilities from the association response (stage
+///   5f).
+/// * `rtw_fw_download_rsvd_page` + `rtw_send_rsvd_page_h2c`: PS-Poll, null
+///   and QoS null frames in the reserved page area. The path exists since
+///   stage 2 (`download_firmware` writes there); the content is upper half.
 /// * `rtw_fw_default_port`, `rtw_coex_media_status_notify`,
 ///   `rtw_bf_assoc`, `rtw_set_ampdu_factor`, `rtw_fw_beacon_filter_config`.
-/// * Der Vierwegehandschlag und der Schluesselspeicher — ab da ist es
-///   `wifid`, und eine Anmeldung ohne ihn endet nach wenigen Sekunden in
-///   einem Deauth. Das Tor dieser Stufe steht DAVOR.
+/// * The four-way handshake and key store: that is `wifid`, and without it
+///   an association ends in a deauth within seconds. This stage's gate is
+///   before that.
 #[allow(clippy::too_many_arguments)]
 fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                    h2c: &mut fw::H2cState, e: &efuse::Efuse,
@@ -3366,19 +3143,16 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print_dec(bss.channel as u32);
     host::print("\n");
 
-    // `rtw_set_channel` auf den Kanal des Ziels — und **hier zum ersten
-    // Mal mit der Breite, die die Zelle ansagt.** Bis 0.32.x stand die
-    // Breite auf 20 MHz genagelt, waehrend der Anmeldeantrag
-    // `SUP_WIDTH_20_40` versprach und jeder Sendedeskriptor 40 MHz
-    // eintrug: drei Stellen, drei Antworten.
+    // `rtw_set_channel` to the target's channel, with the width the cell
+    // announces, so association request, TX descriptors and PHY agree.
     let max_bw = max_bw_for(e);
     let (cch, bw, _) = chan_params(bss.channel, bss.width(), max_bw);
     if !switch_channel(h, hal, e, t, bss.channel, bss.width(), max_bw) {
         host::print("  RF 0x18 traegt den Zielkanal NICHT\n");
         return false;
     }
-    // **Hier faellt die Entscheidung, und nur hier.** Stufe 5f liest sie,
-    // statt sie ein zweites Mal zu rechnen.
+    // The width is decided here and only here; stage 5f reads it instead of
+    // computing it again.
     d.cur_bw = bw;
     host::print("  Kanal ");
     host::print_dec(bss.channel as u32);
@@ -3390,10 +3164,9 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     });
     host::print_dec(cch as u32);
     host::print(")");
-    // **Das rohe Byte dazu.** Ohne es sieht „der AP erlaubt kein HT40"
-    // genauso aus wie „wir lesen das Element falsch" — und beides endet
-    // in derselben Zeile `20 MHz`. Der Zweitkanal steht in Bit 1:0, die
-    // Erlaubnis fuer mehr als 20 MHz in Bit 2.
+    // The raw byte as well: without it "the AP allows no HT40" looks the
+    // same as "we parse the element wrong". Secondary channel in bits 1:0,
+    // permission for more than 20 MHz in bit 2.
     host::print(" · HT-Operation 0x");
     host::print_hex8(bss.ht_param);
     host::print(" (");
@@ -3407,11 +3180,10 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     } else {
         ", nur 20 MHz)"
     });
-    // **Kann er 40, oder tut er nur 20?** Das HT-Operation-Element sagt,
-    // was der AP GERADE faehrt; Bit 1 seiner HT-FAEHIGKEITEN sagt, was er
-    // KANN. Nur beide nebeneinander trennen „seine Entscheidung" von
-    // „unsere Luecke" — und ein Element, das gar nicht da war, ist ein
-    // dritter Fall, der bisher wie „nur 20 MHz" aussah.
+    // Can it do 40, or does it only run 20? HT Operation says what the AP
+    // currently runs, bit 1 of its HT capabilities what it can. Both
+    // together separate its decision from our gap, and a missing element is
+    // a third case.
     host::print(" · AP kann 40: ");
     host::print(if bss.ht_cap & 0x0002 != 0 { "JA" } else { "nein" });
     if !bss.ht_op_seen {
@@ -3419,11 +3191,9 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     host::print("\n");
 
-    // **Dasselbe fuer die 80 MHz, und aus demselben Grund.** Eine Zeile
-    // `40 MHz` auf einem 5-GHz-AP hat drei moegliche Ursachen — die Zelle
-    // faehrt wirklich nur 40, sie sendet kein VHT-Operation-Element, oder
-    // ihre Mitte hat unsere Pruefung nicht bestanden. Ohne die rohen
-    // Bytes sehen alle drei gleich aus.
+    // The same for 80 MHz: `40 MHz` on a 5 GHz AP has three possible causes
+    // (the cell really runs 40, it sends no VHT Operation element, or its
+    // center failed our check), indistinguishable without the raw bytes.
     if bss.channel > 14 {
         host::print("  VHT-Operation ");
         if bss.vht_op_seen {
@@ -3438,9 +3208,8 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             host::print(" · Mitte K");
             host::print_dec(bss.vht_cch0 as u32);
             if bss.vht_cch1 != 0 {
-                // Ein zweites Segment heisst: der AP faehrt breiter als
-                // 80. Wir nehmen trotzdem Segment 0 — das ist genau die
-                // Zeile, fuer die 802.11 es dort hinschreibt.
+                // A second segment means the AP runs wider than 80. We still
+                // take segment 0, which is what 802.11 puts there for us.
                 host::print(" · Segment 1 K");
                 host::print_dec(bss.vht_cch1 as u32);
                 host::print(" (er faehrt breiter, wir nehmen die primaeren 80)");
@@ -3458,8 +3227,8 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print("\n");
     }
 
-    // `rtw_chip_prepare_tx`: `need_rfk` steht, also wird kalibriert — und
-    // zwar auf DIESEM Kanal, nicht auf dem des Suchlaufs.
+    // `rtw_chip_prepare_tx`: `need_rfk` is set, so calibrate, on this
+    // channel rather than the scan's.
     let mut gapk = txgapk::GapkInfo::new();
     let dpkinfo = &mut d.dpk;
     dpkinfo.is_dpk_pwr_on = true;
@@ -3483,8 +3252,8 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     });
     host::print(")\n");
 
-    // `rtw_ops_bss_info_changed`, Zweig `BSS_CHANGED_BSSID`. Ab jetzt
-    // nimmt die Hardware Rahmen dieser Zelle an.
+    // `rtw_ops_bss_info_changed`, branch `BSS_CHANGED_BSSID`. From now on
+    // the hardware accepts frames of this cell.
     let mut vifc = vif::add_interface_station(h, mac);
     vifc.bssid = bss.bssid;
     vif::port_config(h, &vifc, PORT_SET_BSSID);
@@ -3494,20 +3263,20 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF5: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    // SAFETY: one thread, one caller, the buffer does not leave the function.
     let rxbuf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF5) };
 
     let mut frame = [0u8; 256];
     let mut ok = true;
 
-    // ── Authentifizierung (Open System) ──────────────────────────
-    // Auch WPA2 authentifiziert OFFEN; die Schluessel kommen erst nach
-    // der Anmeldung, im Vierwegehandschlag.
+    // ── Authentication (Open System) ─────────────────────────────
+    // WPA2 authenticates open too; keys come after association, in the
+    // four-way handshake.
     let n = build_auth_req(&mut frame, &mac, &bss.bssid);
     let (auth_ok, auth_status, auth_tries) =
         exchange(h, hal, trx, mgmt_buf, rxbuf, dm, path_div,
                  &frame[..n], &mac, bss.channel, d.cur_bw as u8, 0xb0, |f| {
-            // Auth-Antwort: Algorithmus, Folge 2, Status.
+            // Auth response: algorithm, sequence 2, status.
             if f.len() < 30 {
                 return None;
             }
@@ -3522,7 +3291,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         return false;
     }
 
-    // ── Anmeldung ────────────────────────────────────────────────
+    // ── Association ──────────────────────────────────────────────
     let n = build_assoc_req(&mut frame, &mac, bss, e, hal.rf_path_num);
     host::print("  Anmeldeantrag ");
     host::print_dec(n as u32);
@@ -3538,15 +3307,9 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::print(" · RSN CCMP/PSK");
     }
     host::print("\n");
-    // **Die rohen Elemente, so wie sie hinausgehen.**
-    //
-    // Drei Runden lang haben wir ueber den Inhalt dieses Rahmens
-    // GEREDET — ob 191 drinsteht, was es sagt, ob der AP es sieht. Er
-    // ist 60 Byte lang und steht jetzt da. Erst die rohe Eingabe
-    // abziehen, dann die Auswertung lesen.
-    //
-    // Ab Versatz 28: 24 Byte Kopf, dann Capability Info und Listen
-    // Interval, dann die Elemente.
+    // The raw elements as they go out, to compare against the evaluation.
+    // From offset 28: 24 bytes header, then capability info and listen
+    // interval, then the elements.
     if n > 28 {
         host::print("  Antrag-Elemente:");
         for (k, byte) in frame[28..n].iter().enumerate() {
@@ -3574,17 +3337,17 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let (assoc_ok, assoc_status, assoc_tries) =
         exchange(h, hal, trx, mgmt_buf, rxbuf, dm, path_div,
                  &frame[..n], &mac, bss.channel, d.cur_bw as u8, 0x10, |f| {
-            // Anmeldeantwort: Faehigkeiten, Status, AID.
+            // Association response: capabilities, status, AID.
             if f.len() < 30 {
                 return None;
             }
             Some(u16::from_le_bytes([f[26], f[27]]))
         });
     if assoc_ok && assoc_status == 0 {
-        // Die AID steht im SELBEN Rahmen wie der Status, zwei Byte
-        // dahinter. `exchange` traegt nur eine Zahl zurueck, also legt
-        // der Leser sie daneben ab.
-        // SAFETY: einfaedig, ein Schreiber, ein Leser.
+        // The AID is in the same frame as the status, two bytes after it.
+        // `exchange` returns only one number, so the reader stores it
+        // alongside.
+        // SAFETY: single-threaded, one writer, one reader.
         aid = unsafe { LAST_ASSOC_AID };
     }
     host::print("  Assoc: ");
@@ -3617,19 +3380,19 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
-/// Die AID der letzten Anmeldeantwort. Sie steht im selben Rahmen wie der
-/// Status, und der Rueckgabeweg von `exchange` traegt nur EINE Zahl.
+/// The AID of the last association response. It is in the same frame as the
+/// status, and `exchange` returns only one number.
 static mut LAST_ASSOC_AID: u16 = 0;
 
-/// Und der ganze Rahmen dazu: Stufe 5f liest daraus die Faehigkeiten des
-/// AP (HT, VHT, Raten). In Linux baut mac80211 daraus `ieee80211_sta`.
+/// The whole frame as well: stage 5f reads the AP's capabilities (HT, VHT,
+/// rates) from it. In Linux mac80211 builds `ieee80211_sta` from it.
 static mut LAST_ASSOC_RESP: [u8; 256] = [0; 256];
 static mut LAST_ASSOC_RESP_LEN: usize = 0;
 
-/// Einen Verwaltungsrahmen senden und auf die Antwort warten.
+/// Sends a management frame and waits for the response.
 ///
-/// Dreimal, mit Abstand: ein einzelner Rahmen kann kollidieren, und ein AP
-/// darf ihn verwerfen. Gibt (Antwort gekommen, Status, Versuche) zurueck.
+/// Three times, spaced out: a single frame can collide, and an AP may drop
+/// it. Returns (response received, status, attempts).
 #[allow(clippy::too_many_arguments)]
 fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             rxbuf: &mut [u8], dm: &mut dm::DmInfo,
@@ -3645,8 +3408,8 @@ fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
         pci::tx_kick_off_queue(h, trx, queue);
         let (_done, _us, _hw) = pci::tx_wait_consumed(h, trx, queue, 50_000);
-        // `rtw_pci_tx_isr` — den Lesezeiger nachziehen, sonst zaehlt der
-        // Ring sich ueber mehrere Rahmen voll.
+        // `rtw_pci_tx_isr`: advance the read pointer, otherwise the ring
+        // fills up over several frames.
         pci::tx_isr(h, trx, queue);
 
         let mut status: Option<u16> = None;
@@ -3670,9 +3433,10 @@ fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     return;
                 }
                 if let Some(v) = parse(f) {
-                    // Bei der Anmeldeantwort traegt derselbe Rahmen die AID.
+                    // For the association response the same frame carries
+                    // the AID.
                     if want_fc == 0x10 && f.len() >= 32 {
-                        // SAFETY: einfaedig, ein Schreiber.
+                        // SAFETY: single-threaded, one writer.
                         unsafe {
                             LAST_ASSOC_AID =
                                 u16::from_le_bytes([f[28], f[29]]);
@@ -3716,33 +3480,31 @@ fn report_exchange(got: bool, status: u16, tries: u32) {
     host::print("\n");
 }
 
-/// 802.11 §9.3.3.12 — Authentifizierungsrahmen, Open System, Folge 1.
+/// 802.11 §9.3.3.12: authentication frame, Open System, sequence 1.
 fn build_auth_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6])
     -> usize
 {
     mgmt_header(out, 0xb0, mac, bssid);
-    out[24..26].copy_from_slice(&0u16.to_le_bytes()); // Algorithmus 0 = offen
-    out[26..28].copy_from_slice(&1u16.to_le_bytes()); // Folge 1
+    out[24..26].copy_from_slice(&0u16.to_le_bytes()); // algorithm 0 = open
+    out[26..28].copy_from_slice(&1u16.to_le_bytes()); // sequence 1
     out[28..30].copy_from_slice(&0u16.to_le_bytes()); // Status 0
     30
 }
 
-/// 802.11 §9.3.3.6 — Anmeldeantrag.
+/// 802.11 §9.3.3.6: association request.
 ///
-/// **Mit HT- und VHT-Element.** Ohne sie nimmt der AP uns als
-/// LEGACY-Station an und laesst HT auch in seiner Antwort weg — in 0.19.0
-/// kam genau das heraus: `ra_mask 0x0ff5`, keine MCS-Bits, Deckel bei
-/// OFDM 54M. Ein Antrag, der weniger anbietet, bekommt weniger.
+/// With HT and VHT elements. Without them the AP treats us as a legacy
+/// station and omits HT in its response too; a request that offers less
+/// gets less.
 fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
                    e: &efuse::Efuse, rf_path_num: u8) -> usize {
     mgmt_header(out, 0x00, mac, &bss.bssid);
-    // Faehigkeiten: ESS, dazu Privacy und Short Preamble so, wie der AP
-    // sie ansagt. Wer hier mehr behauptet, als der AP kann, wird abgelehnt.
+    // Capabilities: ESS, plus privacy and short preamble as the AP announces
+    // them. Claiming more than the AP supports gets rejected.
     //
-    // **Short Preamble nur auf 2,4 GHz.** mac80211 setzt SHORT_SLOT und
-    // SHORT_PREAMBLE ausschliesslich im 2,4-GHz-Band (mlme.c:1771-1774);
-    // auf 5 GHz gibt es die lange Praeambel gar nicht, das Bit ist dort
-    // ohne Bedeutung und Linux laesst es weg.
+    // Short preamble only on 2.4 GHz: mac80211 sets SHORT_SLOT and
+    // SHORT_PREAMBLE only in the 2.4 GHz band (mlme.c:1771-1774); on 5 GHz
+    // the bit is meaningless and Linux omits it.
     let preamble = if bss.channel > 14 { 0 } else { bss.capability & 0x0020 };
     let cap = 0x0001u16 | (bss.capability & 0x0010) | preamble;
     out[24..26].copy_from_slice(&cap.to_le_bytes());
@@ -3756,28 +3518,21 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
     out[n + 2..n + 2 + sl].copy_from_slice(&bss.ssid[..sl]);
     n += 2 + sl;
 
-    // ── Die Raten, und sie haengen am BAND ───────────────────────
+    // ── Rates, which depend on the band ──────────────────────────
     //
-    // **Hier standen 1, 2, 5.5 und 11 Mbit — auf JEDER Anmeldung, auch
-    // auf 5 GHz.** Das sind CCK/DSSS-Raten; es gibt sie im 5-GHz-Band
-    // nicht, und sie standen obendrein mit gesetztem hohen Bit da, also
-    // als BASIS-Raten. Wir haben einer reinen VHT-Zelle gesagt, wir
-    // seien eine 11b-Station.
+    // 1, 2, 5.5 and 11 Mbit are CCK/DSSS rates that do not exist in the
+    // 5 GHz band. Linux builds these elements per band from
+    // `sband->bitrates` (`ieee80211_assoc_add_rates` ->
+    // `ieee80211_put_srates_elem`, mlme.c), intersects them with the AP's
+    // rates and sets no basic bits in an association request (`basic_rates`
+    // is 0 there), because "some APs don't like getting a superset of their
+    // rates in the association request".
     //
-    // Linux baut diese Elemente je Band aus `sband->bitrates`
-    // (`ieee80211_assoc_add_rates` -> `ieee80211_put_srates_elem`,
-    // mlme.c), schneidet sie gegen die Raten des AP und setzt in einem
-    // Anmeldeantrag KEINE Basis-Bits (`basic_rates` ist dort 0). Der
-    // Kommentar daneben nennt den Grund: „some APs don't like getting a
-    // superset of their rates in the association request".
-    //
-    // Das 2,4-GHz-Bein bleibt Byte fuer Byte, wie es war — es ist am
-    // Geraet gemessen und traegt 96 Mbit. Die Basis-Bits dort sind
-    // dieselbe Abweichung von Linux, hier benannt und NICHT angefasst:
-    // ein funktionierender Pfad wird nicht auf Verdacht umgebaut.
+    // The 2.4 GHz branch keeps its basic bits, a known deviation from Linux
+    // left in place because the path works.
     if bss.channel > 14 {
-        // 6, 9, 12, 18, 24, 36, 48, 54 — alle acht passen in EIN
-        // Element, also faellt das erweiterte ganz weg.
+        // 6, 9, 12, 18, 24, 36, 48, 54: all eight fit into one element, so
+        // the extended one is omitted.
         out[n] = 1;
         out[n + 1] = 8;
         out[n + 2..n + 10]
@@ -3798,32 +3553,24 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
         n += 6;
     }
 
-    // **Die Reihenfolge ist die der Spezifikation, nicht die der
-    // Kennungen.** Hier stand „die Elemente stehen in AUFSTEIGENDER
-    // Kennung", und das ist nicht die Regel: 802.11 Tabelle 9-34 ordnet
-    // den Rumpf eines Anmeldeantrags nach TABELLENPOSITION, und danach
-    // steht RSN (Ordnung 8) VOR HT Capabilities (Ordnung 13). Die
-    // Ext-Raten (Ordnung 5) stehen deshalb auch vor HT, obwohl ihre
-    // Kennung 50 groesser ist als 45 — die alte Begruendung haette
-    // genau das verboten.
-    //
-    // mac80211 macht es so: die RSN-Elemente kommen aus
-    // `ieee80211_add_before_ht_elems` (mlme.c), also vor HT. Wir hatten
-    // sie dahinter.
-    //
-    // Fuer den Vierwegehandschlag aendert sich nichts: sein MIC rechnet
-    // ueber den INHALT des RSN-Elements, nicht ueber seine Stelle.
+    // Element order follows the specification, not the element IDs: 802.11
+    // table 9-34 orders an association request body by table position, so
+    // RSN (order 8) precedes HT Capabilities (order 13), and the extended
+    // rates (order 5) precede HT although ID 50 is larger than 45. mac80211
+    // emits RSN from `ieee80211_add_before_ht_elems` (mlme.c), before HT.
+    // The four-way handshake MIC covers the RSN element's content, not its
+    // position.
 
-    // RSN — aus dem, was der AP ansagt, EINE Wahl gebaut.
+    // RSN: one choice built from what the AP announces.
     if bss.rsn_len > 0 {
         n += build_rsn_ie(&mut out[n..], &bss.rsn[..bss.rsn_len as usize]);
     }
 
-    // HT — immer. Es entscheidet, ob wir als 11n-Station angenommen werden.
+    // HT always: it decides whether we are accepted as an 11n station.
     n += sta::build_ht_cap_ie(&mut out[n..], e.hw_cap_bw, e.hw_cap_nss);
 
-    // VHT nur auf 5 GHz: auf 2,4 GHz ist es nicht zugelassen, und ein AP
-    // darf einen Antrag mit VHT im falschen Band ablehnen.
+    // VHT only on 5 GHz: it is not allowed on 2.4 GHz, and an AP may reject
+    // a request with VHT in the wrong band.
     if bss.channel > 14 {
         let v = sta::build_vht_cap_ie(&mut out[n..], e.hw_cap_ptcl,
                                       e.hw_cap_nss, rf_path_num,
@@ -3832,15 +3579,10 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
                                       } else {
                                           None
                                       });
-        // **Was WIRKLICH hinausging, nicht die Bedingung dafuer.**
-        //
-        // Der Bericht sagte bisher „wir bieten VHT 2SS MCS0-9", und das
-        // war aus `hw_cap_ptcl` und dem Kanal GERECHNET — dieselbe
-        // Bedingung wie hier, also keine unabhaengige Aussage. Kehrte
-        // `build_vht_cap_ie` aus einem anderen Grund um, sagte die
-        // Zeile trotzdem ja. Hier steht das Byte vom Draht.
-        // SAFETY: einfaedig, ein Schreiber, und der Bericht liest es
-        // erst, wenn die Anmeldung durch ist.
+        // Record what actually went out, not the condition for it, so the
+        // report reflects the wire even if `build_vht_cap_ie` declined.
+        // SAFETY: single-threaded, one writer, and the report reads it only
+        // after association completed.
         unsafe {
             SENT_VHT = if v >= 14 {
                 Some(u32::from_le_bytes([out[n + 2], out[n + 3],
@@ -3851,72 +3593,64 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
         }
         n += v;
     } else {
-        // SAFETY: wie oben.
+        // SAFETY: as above.
         unsafe { SENT_VHT = None };
     }
 
-    // ── WMM-Information, als LETZTES Element ─────────────────────
+    // ── WMM information, as the last element ─────────────────────
     //
-    // **Ohne dieses Element bekommen wir kein VHT.** hostapd streicht
-    // einer Station VHT, wenn ihr Antrag kein gueltiges WMM-Element
-    // traegt (`copy_sta_vht_capab`, ieee802_11_vht.c:200-207:
-    // `!(sta->flags & WLAN_STA_WMM)`); `check_wmm` (ieee802_11.c:5361)
-    // setzt die Fahne nur aus genau diesem Element. Am Geraet: der AP
-    // schickte uns 100 % HT40 und 0 % VHT, obwohl beide Seiten VHT80
-    // koennen — ein iPhone an derselben Box holt 500-600 Mbit.
+    // Without it there is no VHT: hostapd strips VHT from a station whose
+    // request carries no valid WMM element (`copy_sta_vht_capab`,
+    // ieee802_11_vht.c:200-207: `!(sta->flags & WLAN_STA_WMM)`), and
+    // `check_wmm` (ieee802_11.c:5361) sets that flag only from this
+    // element.
     //
-    // Der Kommentar an `tx_8023` hielt das Element fuer eine Altlast der
-    // Wi-Fi Alliance, weil der AP uns trotzdem HT und Block Ack gab. Das
-    // stimmt fuer HT auf DIESER Box; fuer VHT gilt die Regel oben.
-    //
-    // Gebaut wie `ieee80211_add_wmm_info_ie` (util.c:4290-4303), an der
-    // Stelle aus `ieee80211_send_assoc` (mlme.c:2299-2309): nach allen
-    // Nicht-Hersteller-Elementen, nur wenn der AP selbst WMM ansagt
-    // (`assoc_data->wmm` = `bss->wmm_used`), QoS-Info 0 — kein U-APSD.
+    // Built like `ieee80211_add_wmm_info_ie` (util.c:4290-4303), placed as in
+    // `ieee80211_send_assoc` (mlme.c:2299-2309): after all non-vendor
+    // elements, only if the AP announces WMM itself (`assoc_data->wmm` =
+    // `bss->wmm_used`), QoS info 0 (no U-APSD).
     if bss.wmm && n + 9 <= out.len() {
         out[n..n + 9].copy_from_slice(&[
-            221, 7,             // herstellerspezifisch, Laenge
-            0x00, 0x50, 0xf2,   // Microsoft-OUI
+            221, 7,             // vendor specific, length
+            0x00, 0x50, 0xf2,   // Microsoft OUI
             2,                  // WME
-            0,                  // WME-Info
+            0,                  // WME info
             1,                  // Version
-            0,                  // QoS-Info: U-APSD nicht in Gebrauch
+            0,                  // QoS info: U-APSD not in use
         ]);
         n += 9;
     }
-    // SAFETY: wie oben — einfaedig, gelesen erst nach der Anmeldung.
+    // SAFETY: as above; single-threaded, read only after association.
     unsafe { SENT_WMM = bss.wmm };
     n
 }
 
-/// Ob der letzte Anmeldeantrag das WMM-Element trug.
+/// Whether the last association request carried the WMM element.
 static mut SENT_WMM: bool = false;
 
-/// Das Feld „VHT Capabilities Info", das der letzte Anmeldeantrag
-/// wirklich getragen hat. `None` = es ging kein VHT-Element hinaus.
+/// The "VHT Capabilities Info" field the last association request actually
+/// carried. `None` = no VHT element went out.
 static mut SENT_VHT: Option<u32> = None;
 
-/// 802.11 §9.4.2.24 — unser RSN-Element.
+/// 802.11 §9.4.2.24: our RSN element.
 ///
-/// **Es ist BYTE-GLEICH mit dem in `wifid`** (`wasm/src/lib.rs:124`), und
-/// das ist kein Zufall, sondern ein Vertrag, den die ABI nicht ausdrueckt:
-/// der Vierwegehandschlag rechnet seinen MIC ueber GENAU das RSN-Element,
-/// das die Station im Anmeldeantrag geschickt hat. Weicht unseres ab,
-/// verwirft der AP msg2 — und sagt nicht warum.
+/// It must be byte-identical to the one in `wifid` (`wasm/src/lib.rs:124`),
+/// a contract the ABI does not express: the four-way handshake computes its
+/// MIC over exactly the RSN element the station sent in the association
+/// request. If ours differs, the AP drops msg2 without saying why.
 ///
-/// CCMP als Gruppen- und Paarschluessel, PSK als Authentifizierung.
+/// CCMP as group and pairwise cipher, PSK as authentication.
 const RSN_IE_WPA2_CCMP_PSK: [u8; 22] = [
     0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f,
     0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
 ];
 
-/// Unser RSN-Element schreiben — und MELDEN, wenn der AP etwas anderes
-/// ansagt, als wir anbieten koennen.
+/// Writes our RSN element, and reports when the AP announces something
+/// other than what we can offer.
 ///
-/// **Ein Antrag waehlt, ein Beacon zaehlt auf**: das Element des AP nennt
-/// alle Verfahren, die er kann; unseres nennt genau eines. Kann er CCMP
-/// nicht als Gruppenchiffre, scheitert die Verbindung spaeter im
-/// Handschlag — und dann soll hier schon stehen, warum.
+/// A request chooses, a beacon enumerates: the AP's element lists every
+/// suite it supports, ours names exactly one. If the AP cannot do CCMP as
+/// group cipher, the handshake fails later, and the reason is printed here.
 fn build_rsn_ie(out: &mut [u8], ap: &[u8]) -> usize {
     const CCMP: [u8; 4] = [0x00, 0x0f, 0xac, 0x04];
     if ap.len() >= 8 && ap[4..8] != CCMP {
@@ -3926,45 +3660,41 @@ fn build_rsn_ie(out: &mut [u8], ap: &[u8]) -> usize {
     RSN_IE_WPA2_CCMP_PSK.len()
 }
 
-/// Der gemeinsame 24-Byte-Kopf eines Verwaltungsrahmens an einen AP.
-/// Die Folgenummer bleibt null — `en_hwseq` steht im Sendedeskriptor,
-/// also vergibt sie der Chip.
+/// The common 24-byte header of a management frame to an AP. The sequence
+/// number stays zero: `en_hwseq` is set in the TX descriptor, so the chip
+/// assigns it.
 fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
                bssid: &[u8; 6]) {
     out.fill(0);
     out[0] = subtype_fc;
     out[1] = 0x00;
     out[2..4].copy_from_slice(&0u16.to_le_bytes()); // duration
-    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
-    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[4..10].copy_from_slice(bssid); // addr1 = receiver
+    out[10..16].copy_from_slice(mac); // addr2 = us
     out[16..22].copy_from_slice(bssid); // addr3 = BSSID
     out[22..24].copy_from_slice(&0u16.to_le_bytes()); // seq
 }
 
-/// Stufe 5f — die Ratenanpassung.
+/// Stage 5f: rate adaptation.
 ///
-/// Der Treiber schickt der Firmware KEINE Rate, sondern eine MASKE:
-/// welche der 64 Raten dieses Gegenueber kann. Die Firmware waehlt daraus
-/// laufend und meldet ihre Wahl als `C2H_RA_RPT` zurueck — und genau das
-/// ist das Tor dieser Stufe. Eine Maske, die niemand beantwortet, ist eine
-/// Behauptung.
+/// The driver sends the firmware a mask, not a rate: which of the 64 rates
+/// the peer supports. The firmware picks from it continuously and reports
+/// its choice as `C2H_RA_RPT`, which is this stage's gate.
 ///
-/// **Die Maske kommt aus der Anmeldeantwort**, die Stufe 5e aufgehoben
-/// hat: HT- und VHT-Element, unterstuetzte Raten. In Linux baut mac80211
-/// daraus `ieee80211_sta`; hier steht der Parser in `sta.rs` und gehoert
-/// spaeter `wifid`.
+/// The mask comes from the association response kept by stage 5e: HT and
+/// VHT elements, supported rates. In Linux mac80211 builds
+/// `ieee80211_sta` from it; here the parser is in `sta.rs`.
 ///
-/// **Nicht gebaut und namentlich:** `rtw_fw_download_rsvd_page` +
-/// `rtw_send_rsvd_page_h2c`. Die reservierten Seiten tragen PS-Poll, Null-
-/// und QoS-Null-Rahmen, die die FIRMWARE im Stromsparbetrieb selbst
-/// sendet. Stromsparen gibt es hier nicht, also wuerden die Seiten
-/// geschrieben und nie gelesen. Sie gehoeren zu LPS, nicht hierher.
+/// Not implemented: `rtw_fw_download_rsvd_page` + `rtw_send_rsvd_page_h2c`.
+/// The reserved pages hold PS-Poll, null and QoS null frames the firmware
+/// sends itself in power save; there is no power save here, so they belong
+/// with LPS.
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
                  hal: &Hal, vifc: &vif::Vif, bss: &Bss,
                  out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
-    // SAFETY: einfaedig, und 5e hat vorher geschrieben.
+    // SAFETY: single-threaded, and 5e wrote it before.
     let (resp, len) = unsafe {
         (&*core::ptr::addr_of!(LAST_ASSOC_RESP), LAST_ASSOC_RESP_LEN)
     };
@@ -3975,21 +3705,13 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
 
     let mut caps = sta::parse_assoc_resp(&resp[..len]);
 
-    // **Die Breite einer Station ist das MINIMUM aus ihrem Koennen und der
-    // Zelle** (mac80211 `ieee80211_sta_cur_vht_bw`). `parse_assoc_resp`
-    // kennt nur das Koennen — der Kommentar dort sagt es woertlich: „Ohne
-    // die Zelle bleibt das, was das Gegenueber kann." Hier haben wir die
-    // Zelle, also gehoert die Klemme hierher.
-    //
-    // Ohne sie trug jeder Sendedeskriptor 40 MHz, waehrend die PHY auf 20
-    // stand. Ein Deskriptor, der eine andere Breite behauptet als das
-    // Funkteil fuehrt, ist kein Schoenheitsfehler: die Firmware waehlt
-    // ihre Raten danach.
-    // **Die Zahl kommt aus 5e und wird nicht nachgerechnet.** Sie haengt
-    // inzwischen an drei Elementen und an der Konfiguration; dieselbe
-    // Rechnung ein zweites Mal zu fahren hiesse, zwei Antworten zu
-    // pflegen, und die eine hier entscheidet, was in JEDEN Sendedeskriptor
-    // geschrieben wird.
+    // A station's width is the minimum of its capability and the cell
+    // (mac80211 `ieee80211_sta_cur_vht_bw`). `parse_assoc_resp` knows only
+    // the capability; the cell is known here, so the clamp belongs here. A
+    // TX descriptor claiming a different width than the radio runs matters:
+    // the firmware picks its rates by it.
+    // The cell width comes from 5e and is not recomputed; it decides what
+    // goes into every TX descriptor.
     let zellen_bw = d.cur_bw;
     if caps.bandwidth > zellen_bw as u8 {
         caps.bandwidth = zellen_bw as u8;
@@ -4032,12 +3754,11 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     let nss = if hal.rf_2t2r { 2 } else { 1 };
     let wireless_set = sta::update_sta_info(&mut si, &caps, nss,
                                             bss.channel <= 14);
-    // main.c:1266/1286 — `rtw_update_sta_info` setzt im selben Zug die
-    // Grundmenge der Antwortraten, je Band. Unser `update_sta_info`
-    // haelt kein `dm`, also steht die Zeile hier und im Watchdog
-    // (`phy::ra_track`). **Ohne sie schrieb `rrsr_update` alle zwei
-    // Sekunden `0 & mask = 0` nach REG_RRSR** — die Raten, aus denen der
-    // MAC seine ACKs und Block-Acks waehlt.
+    // main.c:1266/1286: `rtw_update_sta_info` also sets the base set of
+    // response rates per band. Our `update_sta_info` holds no `dm`, so this
+    // line is here and in the watchdog (`phy::ra_track`). Without it
+    // `rrsr_update` would write `0 & mask = 0` to REG_RRSR, the rates the
+    // MAC picks its ACKs and block ACKs from.
     d.dm.rrsr_val_init = if bss.channel <= 14 { RRSR_INIT_2G } else { RRSR_INIT_5G };
 
     host::print("  rate_id ");
@@ -4069,13 +3790,13 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     host::print("\n");
     ok &= gate("die Firmware nimmt die Ratenmaske an", ra);
 
-    // ── Und jetzt zuhoeren, was die Firmware daraus macht ────────
+    // ── Now listen to what the firmware makes of it ──────────────
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
     static mut RXBUF6: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: ein Faden, ein Rufer, der Puffer verlaesst die Funktion nicht.
+    // SAFETY: one thread, one caller, the buffer does not leave the function.
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF6) };
 
     let mut ra_rpt = 0u32;
@@ -4135,10 +3856,8 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     ok
 }
 
-/// main.h:250-262 `DESC_RATE*` als Namen — fuer den Bericht.
-/// **Der genaue Name, nicht die Klasse.** Bis 0.31.0 stand hier
-/// „HT MCS8-15" fuer acht verschiedene Raten — fuer die Frage „mit
-/// welcher Rate laeuft die Leitung wirklich" ist das keine Antwort.
+/// main.h:250-262 `DESC_RATE*` as names, for the report. The exact name,
+/// not the class.
 fn rate_name(r: u8) -> &'static str {
     const HT: [&str; 16] = [
         "HT MCS0", "HT MCS1", "HT MCS2", "HT MCS3", "HT MCS4", "HT MCS5",
@@ -4167,9 +3886,9 @@ fn rate_name(r: u8) -> &'static str {
     }
 }
 
-/// Die Zaehler der Verbindung. Sie gehoeren dem LINK, nicht der Stufe —
-/// 6b setzt fort, wo 6a aufgehoert hat, und ein Zaehler, der dabei auf
-/// null springt, ist eine Luege ueber die Leitung.
+/// The link counters. They belong to the link, not the stage: 6b continues
+/// where 6a stopped, and a counter that resets in between misreports the
+/// link.
 #[derive(Clone, Copy)]
 struct LinkStats {
     eapol_rx: u32,
@@ -4182,133 +3901,122 @@ struct LinkStats {
     extra_reported: u32,
     llc_miss: u32,
     rx_wd: u32,
-    /// **Das letzte Sequenz-Kontrollfeld je TID** (Platz 8 = ohne QoS),
-    /// `u32::MAX` = noch keins. `rx.c:1480` `last_seq_ctrl[seqno_idx]`.
+    /// The last sequence control field per TID (slot 8 = non-QoS),
+    /// `u32::MAX` = none yet. `rx.c:1480` `last_seq_ctrl[seqno_idx]`.
     last_seq_ctrl: [u32; 9],
-    /// Verworfene 802.11-Wiederholungen (`dot11FrameDuplicateCount`).
+    /// Dropped 802.11 retransmissions (`dot11FrameDuplicateCount`).
     dup_rx: u32,
-    /// Rahmen mit gesetztem Retry-Bit (802.11 §9.2.4.1.8).
+    /// Frames with the retry bit set (802.11 §9.2.4.1.8).
     ///
-    /// **Die eine Zahl, die sagt, ob der AP Grund hat, langsamer zu
-    /// werden.** `dup_rx` misst das nicht: die Duplikatspruefung merkt
-    /// sich GENAU EINEN Sequenzwert je TID, und eine Wiederholung, die
-    /// nach einem Aggregat von 37 Rahmen kommt, trifft ihn nie. Am
-    /// Geraet standen deshalb 17 Duplikate neben 32649 „zu spaet".
-    /// Das Retry-Bit ist die Aussage des SENDERS und braucht kein
-    /// Gedaechtnis.
+    /// This shows whether the AP has reason to slow down. `dup_rx` does
+    /// not: the duplicate check remembers exactly one sequence value per
+    /// TID, and a retransmission after an aggregate never hits it. The
+    /// retry bit is the sender's statement and needs no memory.
     retry_rx: u32,
-    /// Umsortierpuffer je TID: laeuft eine Block-Ack-Sitzung?
+    /// Reorder buffer per TID: is a block ack session running?
     ro_on: [bool; RO_TIDS],
-    /// Naechste erwartete Sequenznummer (12 Bit).
+    /// Next expected sequence number (12 bits).
     ro_head: [u16; RO_TIDS],
-    /// Platz im Fenster -> Poolindex + 1, 0 = leer.
+    /// Window slot -> pool index + 1, 0 = empty.
     ro_slot: [[u8; RO_WIN]; RO_TIDS],
-    /// Wieviele Rahmen dieser TID gerade liegen.
+    /// How many frames of this TID are currently held.
     ro_held: [u8; RO_TIDS],
-    /// Wann der Kopf zuletzt blockiert wurde (ms), fuer die Frist.
+    /// When the head was last blocked (ms), for the timeout.
     ro_since: [u32; RO_TIDS],
-    /// Zaehler fuer den Bericht.
+    /// Counters for the report.
     ro_sorted: u32,
     ro_old: u32,
     ro_timeout: u32,
     ro_full: u32,
-    /// **A-MSDU**: MPDUs mit gesetztem A-MSDU-Bit, die Teilrahmen daraus,
-    /// und wieviele ganz verworfen wurden (`goto purge` in cfg80211).
+    /// A-MSDU: MPDUs with the A-MSDU bit set, the subframes from them, and
+    /// how many were dropped whole (`goto purge` in cfg80211).
     amsdu_rx: u32,
     amsdu_sub: u32,
     amsdu_bad: u32,
-    /// **Der Gruppen-Neuschluessel, gezaehlt statt vermutet.** Jedes
-    /// EAPOL NACH dem Handschlag ist einer (msg1 der
-    /// Gruppenschluessel-Sequenz, oder ein ganz neues Vierwege), und
-    /// jede Antwort darauf zaehlt daneben. „3 empfangen, 0 beantwortet"
-    /// heisst an uns; „3/3" und trotzdem Rauswurf heisst woanders — und
-    /// der Grundcode sagt dann wo.
+    /// Group rekeys. Every EAPOL after the handshake is one (msg1 of the
+    /// group key sequence, or a whole new four-way), and every answer is
+    /// counted next to it. "3 received, 0 answered" points at us; "3/3"
+    /// followed by a kick points elsewhere, and the reason code says where.
     rekey_rx: u32,
     rekey_tx: u32,
-    /// Jede GTK, die `wifid` uns ins CAM schreiben laesst.
+    /// Every GTK `wifid` has us write into the CAM.
     gtk_set: u32,
-    /// Was die Empfangsschleife gesehen hat und die Schleife DANACH
-    /// behandelt: `(war es ein Deauth, Grundcode)`. Im Rueckruf steht
-    /// nur das Sehen — `netdev_set_link` und `EV_LINK_DOWN` gehoeren
-    /// nicht in einen Rueckruf, der mitten im Ringleeren laeuft.
+    /// What the receive loop saw, handled by the loop afterwards: `(was it
+    /// a deauth, reason code)`. The callback only records;
+    /// `netdev_set_link` and `EV_LINK_DOWN` do not belong in a callback that
+    /// runs while the ring is being drained.
     gone: Option<(bool, u16)>,
-    /// Wie oft wir hinausgeworfen wurden, und womit zuletzt begruendet.
+    /// How often we were kicked, and the last reason given.
     kicked: u32,
     last_reason: u16,
-    /// **Die Sendequittung der Firmware** (`rtw_tx_report_*`, tx.c).
-    /// Bis 0.26.0 wussten wir von KEINEM gesendeten Rahmen, ob er
-    /// ankam — genau der Beobachter, der bei zwei Fehlern hintereinander
-    /// gefehlt hat.
+    /// The firmware's TX report (`rtw_tx_report_*`, tx.c): whether a sent
+    /// frame arrived.
     probes: [TxProbe; TX_PROBE_SLOTS],
     probe_sn: u8,
-    /// quittiert · nicht quittiert · gar keine Antwort der Firmware
+    /// acknowledged · not acknowledged · no firmware report at all
     tx_acked: u32,
     tx_lost: u32,
     tx_no_report: u32,
-    /// Die Firmware hat sich selbst fuer tot erklaert.
+    /// The firmware declared itself dead.
     fw_crash: u32,
-    /// Wie oft wir die Verbindung neu aufgebaut haben.
+    /// How often we rebuilt the link.
     reconnects: u32,
-    /// **Der Zensus der unbehandelten C2H-Kennungen.** Vier Plaetze,
-    /// jeder `(Kennung, Anzahl)` — mehr verschiedene schickt diese
-    /// Firmware nicht, und die haeufigste ist die interessante. Bis
-    /// 0.27.2 wurden sie verworfen, und die ausbleibende Sendequittung
-    /// war dadurch eine Null ohne Hinweis.
+    /// Census of unhandled C2H IDs. Four slots, each `(id, count)`: this
+    /// firmware sends no more distinct ones, and the most frequent is the
+    /// interesting one.
     c2h_ids: [(u8, u32); 4],
-    /// Verwaltungsrahmen unserer Zelle, nach Subtyp gezaehlt (16
-    /// Plaetze, einer je Subtyp — die Liste ist abgeschlossen).
+    /// Management frames of our cell, counted by subtype (16 slots, one per
+    /// subtype; the list is closed).
     mgmt_sub: [u32; 16],
-    /// Und fuer Action-Rahmen die Kategorie/Aktion des letzten sowie
-    /// die Zahl der **ADDBA Requests** — die Frage dieser Runde.
+    /// For action frames, category/action of the last one and the number of
+    /// ADDBA requests.
     addba_req: u32,
-    /// Und UNSERE Fragen, in die andere Richtung.
+    /// And our own requests, in the other direction.
     addba_tx: u32,
-    /// Bitten des AP, die nicht einmal in den Zwischenpuffer passten.
+    /// AP requests that did not even fit into the staging buffer.
     addba_drop: u32,
-    /// `IEEE80211_STA_CONNECTION_POLL` — wir stupsen gerade an.
+    /// `IEEE80211_STA_CONNECTION_POLL`: we are currently probing the AP.
     poll_on: bool,
     /// `ifmgd->probe_send_count`
     probe_send_count: u32,
     /// `ifmgd->probe_timeout`
     probe_timeout_ms: u64,
-    /// Wie oft die Wache angeschlagen hat und wie oft sie recht hatte.
+    /// How often the watchdog fired and how often it was right.
     poll_started: u32,
     poll_recovered: u32,
-    /// Wie oft wir dem AP auf einen neuen Kanal gefolgt sind — und wie
-    /// oft dort niemand war.
+    /// How often we followed the AP to a new channel, and how often nobody
+    /// was there.
     csa_done: u32,
     csa_back: u32,
-    /// Wieviele Rahmen je Anstoss im Ring lagen. **Es ist die
-    /// Obergrenze dessen, was die Hardware aggregieren KANN** — liegt
-    /// dort im Mittel einer, hilft die beste Block-Ack-Sitzung nichts.
+    /// How many frames were in the ring per kick. It bounds what the
+    /// hardware can aggregate: with one on average, the best block ack
+    /// session does not help.
     tx_batch_n: u32,
     tx_batch_sum: u32,
     tx_batch_max: u32,
-    /// Und wieviel die HARDWARE beim selben Augenblick noch vor sich
-    /// hatte. **Das ist die Zahl, die ueber Aggregation entscheidet** —
-    /// `tx_batch_*` sagt nur, wieviel der Treiber in EINEM Durchlauf
-    /// eingelegt hat, und das ist etwas anderes, sobald das Medium
-    /// belegt ist.
+    /// And how much the hardware still had queued at the same moment. This
+    /// decides aggregation; `tx_batch_*` only says how much the driver
+    /// queued in one pass, which differs once the medium is busy.
     tx_ring_sum: u32,
     tx_ring_max: u32,
-    /// Die Aggregatgroesse in EMPFANGSrichtung, aus `ppdu_cnt` des
-    /// Deskriptors: Sendevorgaenge und die Rahmen darin.
+    /// Aggregate size in the receive direction, from the descriptor's
+    /// `ppdu_cnt`: transmissions and the frames in them.
     rx_ppdu_n: u32,
     rx_data_ppdu_frames: u32,
     last_ppdu: u8,
-    /// Der Abstand zweier Sendevorgaenge des AP, aus der 802.11-Uhr.
+    /// Interval between two AP transmissions, from the 802.11 clock.
     last_tsf: u32,
     rx_gap_sum: u64,
     rx_gap_n: u32,
     rx_gap_min: u32,
-    /// Die VERTEILUNG, nicht der Mittelwert. Eimer nach `GAP_BUCKETS`,
-    /// der fuenfte ist „ueber 10 ms" und fuehrt seine Summe mit.
+    /// The distribution, not the mean. Buckets per `GAP_BUCKETS`; the fifth
+    /// is "over 10 ms" and keeps its sum.
     rx_gap_buckets: [u32; 5],
     rx_gap_big_sum: u64,
-    /// Und die Abstaende, bei denen gar kein Verkehr war.
+    /// And the intervals with no traffic at all.
     rx_gap_idle: u32,
-    /// Die Umkehrzeit unseres eigenen Stapels: Daten an den Kernel ->
-    /// Rahmen vom Kernel zurueck.
+    /// Turnaround time of our own stack: data to the kernel -> frame back
+    /// from the kernel.
     last_rx_at: u64,
     turn_sum: u64,
     turn_n: u32,
@@ -4316,70 +4024,57 @@ struct LinkStats {
     turn_buckets: [u32; 5],
     turn_big_sum: u64,
     last_action: (u8, u8),
-    /// Wie oft wir zugestimmt haben — und wie oft die Antwort nicht in
-    /// den Sendering passte.
+    /// How often we agreed, and how often the response did not fit into
+    /// the TX ring.
     addba_resp: u32,
     addba_fail: u32,
-    /// Das Fenster, das wir zuletzt zugestanden haben, und das, um das
-    /// gebeten wurde. **Ohne die Zahl im Bericht ist nicht zu sehen, ob
-    /// eine geaenderte `ampdu:`-Zeile ueberhaupt gelesen wurde** — der
-    /// Treiber liest sie einmal beim Start der Schleife.
+    /// The window we last granted and the one requested. Shows whether a
+    /// changed `ampdu:` line was read; the driver reads it once when the
+    /// loop starts.
     addba_win: u16,
     addba_win_req: u16,
-    /// Die Form der Empfangsschleife: Bliecke mit und ohne Beute, die
-    /// Summe der Rahmen, und wie oft ein Blick den Stapel voll
-    /// ausschoepfte.
+    /// Shape of the receive loop: polls with and without frames, the frame
+    /// sum, and how often a poll drained the whole batch.
     rx_polls: u32,
     rx_empty: u32,
     rx_frames: u32,
     rx_full: u32,
-    /// **Das Ratenhistogramm ueber die GANZE Verbindung.**
+    /// Wall time in `rx_poll` when it returned frames, and how long the loop
+    /// has run overall; their ratio is the receive path load.
     ///
-    /// Linux fuehrt `cur_pkt_count.num_qry_pkt[rate]` je Watchdog-Takt
-    /// und schiebt es nach `last_pkt_count`; debugfs liest es LAUFEND
-    /// mit. Wir haben kein debugfs — ein Bericht, den jemand NACH einer
-    /// Uebertragung liest, braucht eine Zahl, die sie ueberlebt.
-    ///
-    /// Und er braucht sie dringend: `curr_rx_rate` ist die Rate des
-    /// LETZTEN Rahmens, und eine halbe Sekunde nach einem Download ist
-    /// das ein Beacon — die gehen auf der niedrigsten Grundrate. Der
-    /// Bericht zeigte deshalb „OFDM 6M", waehrend die Daten mit etwas
-    /// ganz anderem kamen.
-    /// Wanduhrzeit in `rx_poll`, wenn es etwas brachte, und wie lange
-    /// die Schleife insgesamt laeuft. Ihr Verhaeltnis ist die
-    /// Auslastung des Empfangspfades.
+    /// `rate_hist` below is the rate histogram over the whole link. Linux
+    /// keeps `cur_pkt_count.num_qry_pkt[rate]` per watchdog tick and shifts
+    /// it into `last_pkt_count`, read live via debugfs. Without debugfs, a
+    /// report read after a transfer needs a number that outlasts it;
+    /// `curr_rx_rate` is the rate of the last frame, which is usually a
+    /// beacon at the lowest basic rate.
     rx_us: u64,
     pump_us0: u64,
-    /// **Was die Luft kaputt macht**, aufsummiert: `false_alarm_statistics`
-    /// liest je Modulation einen CRC-Zaehler und SETZT IHN ZURUECK. Eine
-    /// Momentaufnahme sagt darueber nichts; die Summe ueber die
-    /// Verbindung sagt, ob der AP staendig wiederholen muss.
+    /// What corrupts the air, summed: `false_alarm_statistics` reads one
+    /// CRC counter per modulation and resets it. A snapshot says nothing;
+    /// the sum over the link shows whether the AP keeps retransmitting.
     ht_ok: u64,
     ht_err: u64,
     ofdm_ok: u64,
     ofdm_err: u64,
     rate_hist: [u32; DESC_RATE_MAX],
-    /// In welcher BREITE die Rahmen wirklich hereinkamen — 20/40/80 und
-    /// ein vierter Platz fuer alles andere.
+    /// The width frames actually arrived in: 20/40/80 and a fourth slot for
+    /// anything else.
     ///
-    /// **Es ist die einzige Zahl, die 80 MHz BEWEIST.** Alles andere im
-    /// Bericht (`bw 80 MHz`) ist unsere eigene Einstellung: was wir in den
-    /// Deskriptor schreiben und in die PHY gesetzt haben. Der
-    /// Empfangsstatus sagt, was der AP wirklich sendet — und ob beides
-    /// zusammenpasst, dafuer gibt es sonst keinen Zeugen.
+    /// The only proof of 80 MHz: everything else in the report is our own
+    /// setting (descriptor and PHY), while the RX status says what the AP
+    /// really sends.
     bw_hist: [u32; 4],
-    /// Wie oft die Firmware ihre Ratenwahl gemeldet hat (`C2H_RA_RPT`).
-    /// **Null hiesse: `dm.tx_rate` steht auf 0 = CCK 1M**, und damit
-    /// waehlt `config_swing_table` die CCK-Kurve der
-    /// Sendeleistungs-Nachfuehrung.
+    /// How often the firmware reported its rate choice (`C2H_RA_RPT`). Zero
+    /// would mean `dm.tx_rate` is 0 = CCK 1M, which makes
+    /// `config_swing_table` pick the CCK curve of TX power tracking.
     ra_rpt_n: u32,
 }
 
 impl Default for LinkStats {
-    /// **Von Hand, weil `[u32; 84]` kein `Default` hat** (die Ableitung
-    /// reicht nur bis 32). `zeroed` waere hier richtig und trotzdem
-    /// falsch: ein `unsafe` fuer eine Struktur aus lauter Zahlen und
-    /// `bool` spart nichts und verpflichtet den naechsten Leser.
+    /// By hand because `[u32; 84]` has no `Default` (derive goes up to 32).
+    /// `zeroed` would work but needs an `unsafe` for a struct of plain
+    /// numbers and `bool`.
     fn default() -> Self {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
@@ -4418,12 +4113,11 @@ impl Default for LinkStats {
 }
 
 impl LinkStats {
-    /// tx.c:166-211 `rtw_tx_report_enable` + `rtw_tx_report_enqueue` in
-    /// einem: Nummer vergeben und Platz belegen.
+    /// tx.c:166-211 `rtw_tx_report_enable` + `rtw_tx_report_enqueue` in one:
+    /// assign a number and take a slot.
     ///
-    /// Gibt `None`, wenn alle acht Plaetze belegt sind — dann antwortet
-    /// die Firmware ohnehin nicht, und eine neunte Frage macht es nicht
-    /// besser.
+    /// Returns `None` when all eight slots are busy; the firmware is not
+    /// answering then anyway, and a ninth request does not help.
     fn arm_probe(&mut self, now: u64) -> Option<u8> {
         let slot = self.probes.iter().position(|p| !p.busy)?;
         let sn = tx::report_seqnum(&mut self.probe_sn);
@@ -4431,7 +4125,7 @@ impl LinkStats {
         Some(sn)
     }
 
-    /// tx.c:229-256 `rtw_tx_report_handle` — die Antwort zuordnen.
+    /// tx.c:229-256 `rtw_tx_report_handle`: match the answer.
     fn settle_probe(&mut self, sn: u8, acked: bool) {
         if let Some(p) = self.probes.iter_mut().find(|p| p.busy && p.sn == sn) {
             p.busy = false;
@@ -4443,7 +4137,7 @@ impl LinkStats {
         }
     }
 
-    /// Einen Verwaltungsrahmen zaehlen.
+    /// Counts a management frame.
     fn note_mgmt(&mut self, subtype: u8, cat: u8, action: u8) {
         self.mgmt_sub[(subtype & 0xf) as usize] += 1;
         if cat != 0xff {
@@ -4454,9 +4148,8 @@ impl LinkStats {
         }
     }
 
-    /// Eine unbehandelte C2H-Kennung zaehlen. Vier Plaetze, danach nur
-    /// noch die, die schon dastehen — der Zensus soll die haeufigste
-    /// finden, nicht jede einzelne.
+    /// Counts an unhandled C2H ID. Four slots, after that only the ones
+    /// already present: the census is meant to find the most frequent one.
     fn note_c2h(&mut self, id: u8) {
         if let Some(e) = self.c2h_ids.iter_mut().find(|e| e.1 > 0 && e.0 == id) {
             e.1 += 1;
@@ -4467,8 +4160,8 @@ impl LinkStats {
         }
     }
 
-    /// tx.c:179-194 `rtw_tx_report_purge_timer` — „failed to get tx
-    /// report from firmware". Eine Frist, keine Rundenzahl.
+    /// tx.c:179-194 `rtw_tx_report_purge_timer`: "failed to get tx report
+    /// from firmware". A deadline, not a round count.
     fn purge_probes(&mut self, now: u64) {
         for p in self.probes.iter_mut() {
             if p.busy && now.wrapping_sub(p.at_ms) > RTW_TX_PROBE_TIMEOUT_MS {
@@ -4478,8 +4171,8 @@ impl LinkStats {
         }
     }
 
-    /// Wann `purge_probes` die naechste offene Quittung aufgibt — der
-    /// Zeitpunkt, zu dem die Pumpe wieder hinsehen muss.
+    /// When `purge_probes` gives up the next open report, i.e. when the pump
+    /// has to look again.
     fn next_probe_due(&self) -> Option<u64> {
         self.probes.iter()
             .filter(|p| p.busy)
@@ -4488,14 +4181,12 @@ impl LinkStats {
     }
 }
 
-/// tx.c `struct rtw_tx_report` — die Rahmen, deren Quittung aussteht.
+/// tx.c `struct rtw_tx_report`: frames awaiting a TX report.
 ///
-/// **Linux haengt dafuer die `sk_buff`s in eine Warteschlange**, weil es
-/// sie danach an mac80211 zurueckgibt. Wir brauchen den Rahmen nicht
-/// mehr, nur die Frage „ist er angekommen?" — also eine Folgenummer und
-/// wann gefragt wurde. Acht Plaetze: mehr als acht offene Quittungen
-/// hiesse, dass die Firmware gar nicht antwortet, und dann sagt das der
-/// Zaehler `tx_no_report`.
+/// Linux queues the `sk_buff`s because it hands them back to mac80211. We
+/// only need "did it arrive?", so a sequence number and when it was asked.
+/// Eight slots: more open reports mean the firmware is not answering, which
+/// `tx_no_report` counts.
 #[derive(Clone, Copy, Default)]
 struct TxProbe {
     sn: u8,
@@ -4505,21 +4196,18 @@ struct TxProbe {
 
 const TX_PROBE_SLOTS: usize = 8;
 
-/// Die Grenzen der Abstands-Eimer, in Mikrosekunden.
+/// Bucket limits for the gap histogram, in microseconds.
 ///
-/// **Ein Mittelwert versteckt genau die Verteilung, um die es geht.**
-/// `abstand 1899 us im mittel` kann heissen: jedes Aggregat kommt nach
-/// 1,9 ms — oder die meisten nach 0,3 ms und alle dreissig eine Pause
-/// von dreizehn Millisekunden. Das sind zwei verschiedene Fehler, und
-/// nur der zweite ist ein Fehler.
+/// A mean hides the distribution: an average of 1.9 ms can mean every
+/// aggregate arrives after 1.9 ms, or most after 0.3 ms with a long stall
+/// every thirtieth. Only the second is a problem.
 const GAP_BUCKETS: [u32; 4] = [500, 2_000, 5_000, 10_000];
-/// Dieselbe Frage fuer die Umkehrzeit unseres Stapels, eine
-/// Groessenordnung feiner: dort ist schon eine Millisekunde viel.
+/// The same for our stack's turnaround, an order of magnitude finer: there
+/// a millisecond is already a lot.
 const TURN_BUCKETS: [u32; 4] = [200, 1_000, 5_000, 20_000];
 
-/// **Ab hier ist es keine Pause mehr, sondern kein Verkehr.** Zwischen
-/// zwei Downloads liegen Sekunden; die gehoeren nicht in dieselbe
-/// Summe wie eine Stockung mitten im Strom.
+/// Beyond this it is no stall but no traffic. Seconds between two downloads
+/// do not belong in the same sum as a stall mid-stream.
 const GAP_IDLE_US: u32 = 200_000;
 
 fn bucket(us: u32, grenzen: &[u32; 4]) -> usize {
@@ -4534,55 +4222,41 @@ fn bucket(us: u32, grenzen: &[u32; 4]) -> usize {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Roaming — der AP wechseln, BEVOR die Verbindung abreisst
+// Roaming: switch AP before the link breaks
 //
-// Florian: *„ich moechte ja nicht die verbindung verlieren muessen..
-// oder auf einem fast totem ap sitzen bleiben"*, und: *„wenn daneben ein
-// perfekter waere .. das waere genau der unterbruch den ich nicht
-// moechte"*.
+// The trigger comes from mac80211 (`ieee80211_handle_beacon_sig`,
+// mlme.c:6780-6870): an EWMA over beacon signal, only after
+// `IEEE80211_SIGNAL_AVE_MIN_COUNT` beacons, with threshold and hysteresis;
+// an event fires again only once the level moves past the hysteresis.
+// Without that a single bad beacon would trigger a scan.
 //
-// **Der Ausloeser kommt aus mac80211** (`ieee80211_handle_beacon_sig`,
-// mlme.c:6780-6870): ein EWMA ueber den Bakenpegel, erst ab
-// `IEEE80211_SIGNAL_AVE_MIN_COUNT` Baken, mit Schwelle UND Hysterese —
-// ein Ereignis feuert erst wieder, wenn der Pegel um die Hysterese
-// darueber hinausgeht. Ohne das loest ein einzelner schlechter Beacon
-// einen Suchlauf aus.
-//
-// **Die Auswahl ist eine SETZUNG.** Sie steht bei Linux in
-// wpa_supplicant (`wpa_scan_result_compar`), und die Quelle liegt nicht
-// im Cache — nur `wpa.c` und `wpa_common.h`. Die Regel hier hat die
-// Form, die in diesem Treiber schon gilt (`PREFER_5G_DBM`: „5 GHz ab
-// -70 dBm bevorzugt"), und die Zahlen stehen als benannte Konstanten,
-// damit man sie an Messungen aendern kann statt im Code zu suchen.
+// Candidate selection is a policy choice. In Linux it lives in
+// wpa_supplicant (`wpa_scan_result_compar`). The rule here has the same
+// shape as `PREFER_5G_DBM`, and the numbers are named constants so they
+// can be tuned.
 // ═══════════════════════════════════════════════════════════════
 
-/// `roam:` aus `sys/config/wifi`.
+/// `roam:` from `sys/config/wifi`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoamMode {
-    /// Umhoeren und wechseln.
+    /// Scan and switch.
     An,
-    /// Gar nicht umhoeren — der Zustand vor 0.57.0.
+    /// Do not scan at all.
     Aus,
-    /// Umhoeren und BERICHTEN, aber nicht wechseln. Das Werkzeug fuer
-    /// den ersten Abend: damit die Schwellen an Zahlen aus der eigenen
-    /// Wohnung festgelegt werden und nicht an geschaetzten.
+    /// Scan and report, but do not switch, so thresholds can be set from
+    /// real numbers.
     NurBericht,
 }
 
-/// Der reine Teil, damit `framecheck.py` ihn ohne Geraet fahren kann.
+/// The pure part, so `framecheck.py` can run it without hardware.
 ///
-/// **Die Vorgabe ist `NurBericht`, und das ist eine Abweichung von der
-/// Regel „ein unverstandener Wert ist die Vorgabe".**
+/// The default is `NurBericht`, an exception to the rule that an unknown
+/// value means the default: a switch interferes with a running link, and
+/// until re-association after a switch is reliable, roaming must not touch
+/// a working link. It scans and reports what it would do, which costs
+/// nothing and yields the numbers for the thresholds.
 ///
-/// Sie hat einen Grund: ein Wechsel ist ein EINGRIFF in eine laufende
-/// Verbindung, und am Geraet endete jede Neuanmeldung nach dem Wechsel
-/// in `Grund 15: Vierwegehandschlag: Zeitueberschreitung` — dreizehn
-/// Mal hintereinander. Solange das nicht bewiesen durchlaeuft, darf
-/// Roaming keine stehende Verbindung anfassen. Es HOERT sich um und
-/// SAGT, was es taete; das kostet nichts und ist genau die Messung, aus
-/// der die Schwellen kommen.
-///
-/// `on` schaltet es scharf, `off` ganz ab.
+/// `on` arms it, `off` disables it.
 pub fn roam_from(v: &[u8]) -> RoamMode {
     if v.starts_with(b"off") || v.starts_with(b"aus") || v == b"0" {
         RoamMode::Aus
@@ -4605,76 +4279,68 @@ fn read_roam_mode() -> RoamMode {
     }
 }
 
-/// mlme.c:96 `IEEE80211_SIGNAL_AVE_MIN_COUNT` — unter vier Baken sagt
-/// der geglaettete Pegel nichts.
+/// mlme.c:96 `IEEE80211_SIGNAL_AVE_MIN_COUNT`: below four beacons the
+/// smoothed level means nothing.
 const SIGNAL_AVE_MIN_COUNT: u32 = 4;
 
-/// Ab hier horchen wir uns um. **Setzung**, dieselbe Schwelle, die
-/// `PREFER_5G_DBM` schon fuehrt.
+/// Start scanning below this. Policy; the same threshold as
+/// `PREFER_5G_DBM`.
 const ROAM_THOLD_DBM: i8 = -70;
-/// `cqm_rssi_hyst` — so weit muss der Pegel wieder steigen, bevor die
-/// Schwelle erneut ausloest. **Setzung.**
+/// `cqm_rssi_hyst`: how far the level must rise again before the threshold
+/// fires again. Policy.
 const ROAM_HYST_DB: i8 = 4;
-/// Mindestabstand zweier Umhoerversuche. **Setzung**: jeder kostet
-/// Latenz, und unter zehn Sekunden aendert sich in einer Wohnung nichts.
+/// Minimum interval between two scans. Policy: each costs latency.
 const ROAM_SCAN_GAP_MS: u64 = 10_000;
-/// Mindestabstand zweier Wechsel — die Hysterese gegen das Pendeln
-/// zwischen zwei gleich guten Zellen. **Setzung.**
+/// Minimum interval between two switches, the hysteresis against
+/// ping-ponging between two equally good cells. Policy.
 const ROAM_GAP_MS: u64 = 10_000;
-/// So viel staerker muss ein Kandidat sein. **Setzung.**
+/// How much stronger a candidate must be. Policy.
 const ROAM_BETTER_DB: i8 = 8;
-/// Was eine HALBIERUNG der Bandbreite kosten darf, in dB. **Setzung**,
-/// und die Groessenordnung ist nicht gegriffen: die Hälfte der Breite ist
-/// die Haelfte der Bruttorate, und drei dB mehr Pegel bringen auf einer
-/// belegten Strecke bei weitem nicht das Doppelte. Zehn dB je Stufe
-/// heisst: von 80 auf 20 MHz muss ein Kandidat zwanzig dB besser sein.
+/// What halving the bandwidth may cost, in dB. Policy: half the width is
+/// half the gross rate, and a few dB more signal on a busy link gives far
+/// less than double. Ten dB per step means a candidate must be twenty dB
+/// better to go from 80 to 20 MHz.
 const ROAM_NARROWER_COST_DB: i8 = 10;
-/// ... ODER er ist BREITER (VHT80 gegen HT40) und hoechstens so viel
-/// schwaecher. **Setzung** — und der Fall, der Florian getroffen hat:
-/// ein Repeater bei -50 dBm mit HT40 schlaegt den AP bei -55 dBm mit
-/// VHT80 und liefert die Haelfte.
+/// ... or the candidate is wider (VHT80 vs. HT40) and at most this much
+/// weaker. Policy: a stronger but narrower range extender can deliver half the
+/// throughput of a weaker, wider AP.
 const ROAM_WIDER_TOLERANCE_DB: i8 = 6;
-/// Wie lange wir je Kanal horchen. **Ein gerichteter Probe Request wird
-/// in Millisekunden beantwortet**; passives Lauschen braeuchte ein
-/// volles Bakenintervall (102 ms) je Kanal.
+/// How long to listen per channel. A directed probe request is answered
+/// within milliseconds; passive listening would need a full beacon
+/// interval (102 ms) per channel.
 const ROAM_DWELL_MS: u32 = 25;
-/// Wieviele Kanaele wir uns aus dem Suchlauf merken.
+/// How many channels to remember from the scan.
 const ROAM_CHANNELS_MAX: usize = 6;
-/// Und wieviele Zellen ein Umhoerversuch findet.
+/// And how many cells one roam scan can find.
 const ROAM_BSS_MAX: usize = 8;
 
-/// Die Kanaele, auf denen der Startsuchlauf Zellen UNSERER SSID gesehen
-/// hat.
+/// The channels on which the initial scan saw cells of our SSID.
 ///
-/// **Das ist der Grund, warum ein Umhoerversuch billig ist.** Florian:
-/// *„ich moechte nicht einen ganzen suchlauf.. das macht kaum sinn.
-/// sondern eig. kennen wir ja die SSID bereits und auf welchem kanal es
-/// funkt."* Genau so macht es `bgscan simple` in wpa_supplicant auch.
-///
-/// **Die gespeicherten PEGEL benutzen wir NICHT** — die sind vom
-/// Startsuchlauf und damit von einem anderen Ort in der Wohnung. Ein
-/// alter Pegelwert ist schlechter als keiner. Gespeichert wird nur,
-/// WO wir suchen.
+/// This is what makes a roam scan cheap: the SSID and its channels are
+/// already known, as with `bgscan simple` in wpa_supplicant. The stored
+/// levels are not used; they are from the initial scan and possibly another
+/// place, and a stale level is worse than none. Only where to look is
+/// stored.
 static mut ROAM_CHANNELS: [u8; ROAM_CHANNELS_MAX] = [0; ROAM_CHANNELS_MAX];
 static mut N_ROAM_CHANNELS: usize = 0;
 
-/// Der Zustand des Roamings an einer stehenden Verbindung.
+/// Roaming state of a running link.
 #[derive(Clone, Copy)]
 struct Roam {
-    /// `ewma_beacon_signal`, `DECLARE_EWMA(beacon_signal, 4, 4)`
-    /// (mac80211 ieee80211_i.h:518). Gerechnet auf `Pegel + 128`, weil
-    /// unsere `Ewma` vorzeichenlos rechnet.
+    /// `ewma_beacon_signal`, `DECLARE_EWMA(beacon_signal, 4, 4)` (mac80211
+    /// ieee80211_i.h:518). Computed on `level + 128` because our `Ewma` is
+    /// unsigned.
     ave: dm::Ewma,
     /// `count_beacon_signal`
     count: u32,
-    /// `last_cqm_event_signal` — 0 heisst „noch nie gefeuert".
+    /// `last_cqm_event_signal`; 0 means "never fired".
     last_event: i8,
     last_scan_ms: u64,
     last_roam_ms: u64,
-    /// Wie oft wir gewechselt haben und wie oft wir uns umgehoert haben.
+    /// How often we switched and how often we scanned.
     scans: u32,
     roams: u32,
-    /// Der Kandidat, zu dem der Rufer wechseln soll.
+    /// The candidate the caller should switch to.
     to: Option<Bss>,
 }
 
@@ -4684,53 +4350,49 @@ impl Roam {
                last_scan_ms: 0, last_roam_ms: 0, scans: 0, roams: 0,
                to: None }
     }
-    /// Eine Bake der eigenen Zelle.
+    /// A beacon of our own cell.
     fn note_beacon(&mut self, dbm: i8) {
         self.ave.add((dbm as i32 + 128) as u32, EWMA_BEACON_PRECISION,
                      EWMA_BEACON_WEIGHT_RCP);
         self.count = self.count.saturating_add(1);
     }
-    /// Der geglaettete Pegel in dBm.
+    /// The smoothed level in dBm.
     fn dbm(&self) -> i8 {
         (self.ave.read(EWMA_BEACON_PRECISION) as i32 - 128) as i8
     }
 }
 
-/// `DECLARE_EWMA(beacon_signal, 4, 4)` — Genauigkeit 4, Gewicht 1/16.
+/// `DECLARE_EWMA(beacon_signal, 4, 4)`: precision 4, weight 1/16.
 const EWMA_BEACON_PRECISION: u32 = 4;
 const EWMA_BEACON_WEIGHT_RCP: u32 = 16;
 
-/// Ein Null-Data-Rahmen — `ieee80211_send_nullfunc` (mlme.c:2364).
+/// A null data frame, `ieee80211_send_nullfunc` (mlme.c:2364).
 ///
-/// **Das ist der Rahmen, der einen Umhoerversuch billig macht.** Mit
-/// gesetztem Power-Management-Bit sagt er dem AP „ich schlafe kurz";
-/// der PUFFERT dann unsere Pakete, statt sie auf einen Kanal zu senden,
-/// auf dem wir nicht mehr sind. Beim Zurueckkommen dasselbe mit
-/// geloeschtem Bit, und er schiebt das Gepufferte nach
-/// (`ieee80211_offchannel_ps_enable`/`_disable`, offchannel.c:25-81).
-///
-/// **Ohne ihn kostet jeder Umhoerversuch Pakete. Mit ihm nur Latenz.**
+/// This makes a roam scan cheap: with the power management bit set it tells
+/// the AP "dozing", and the AP buffers our packets instead of sending them
+/// to a channel we have left. On return the same with the bit cleared, and
+/// the AP flushes the buffer (`ieee80211_offchannel_ps_enable`/`_disable`,
+/// offchannel.c:25-81). Without it each scan loses packets; with it, only
+/// latency.
 fn build_nullfunc(out: &mut [u8; 32], mac: &[u8; 6], bssid: &[u8; 6],
                   powersave: bool) -> usize {
     out.fill(0);
-    // Typ Daten (0b10), Subtyp 4 = Null Data.
+    // Type data (0b10), subtype 4 = null data.
     out[0] = DOT11_FC_TYPE_DATA | (4 << 4);
-    // ToDS, dazu das Power-Management-Bit (802.11 §9.2.4.1.7).
+    // ToDS, plus the power management bit (802.11 §9.2.4.1.7).
     out[1] = 0x01 | if powersave { 0x10 } else { 0x00 };
-    out[4..10].copy_from_slice(bssid); // addr1 = Empfaenger
-    out[10..16].copy_from_slice(mac); // addr2 = wir
+    out[4..10].copy_from_slice(bssid); // addr1 = receiver
+    out[10..16].copy_from_slice(mac); // addr2 = us
     out[16..22].copy_from_slice(bssid); // addr3 = BSSID
     24
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Die Verbindungswache — mlme.c:4278-4481, 8516-8560
+// Link watchdog — mlme.c:4278-4481, 8516-8560
 //
-// **Ausbleibende Baken sind kein Verbindungsverlust.** Linux stupst den
-// AP erst an und gibt erst auf, wenn auch das schweigt. Wir haben
-// `rtw_sw_beacon_loss_check` seit je portiert (`d.beacon_loss`) und den
-// Wert NIE gelesen: eine Verbindung, deren AP verschwindet, blieb bei
-// uns stehen, bis jemand neu startete.
+// Missing beacons are not link loss. Linux probes the AP first and gives up
+// only when that stays silent too. `rtw_sw_beacon_loss_check` feeds
+// `d.beacon_loss`.
 // ═══════════════════════════════════════════════════════════════
 
 /// mlme.c:58 `max_probe_tries`.
@@ -4739,67 +4401,62 @@ const MAX_PROBE_TRIES: u32 = 5;
 const PROBE_WAIT_MS: u64 = 500;
 /// mlme.c:4391 `unicast_limit = max(1, max_probe_tries - 3)`.
 ///
-/// **Die letzten drei Versuche gehen als Rundruf hinaus**, und der
-/// Grund steht im Quellkommentar: manche APs beantworten NUR einen
-/// Rundruf. Wer nur gerichtet fragt, erklaert die fuer tot.
+/// The last three attempts go out as broadcast; per the source comment some
+/// APs answer only broadcast probes.
 const PROBE_UNICAST_LIMIT: u32 = if MAX_PROBE_TRIES > 4 {
     MAX_PROBE_TRIES - 3
 } else {
     1
 };
 
-/// Der TID, auf dem unsere Daten laufen. Best Effort, und es ist der
-/// einzige: ohne EDCA vom AP gibt es keinen Grund, eine zweite Schlange
-/// aufzumachen, und jede weitere kostet eine eigene Block-Ack-Sitzung.
+/// The TID our data runs on. Best effort, and the only one: without EDCA
+/// from the AP there is no reason for a second queue, and each costs its
+/// own block ack session.
 const BA_TX_TID: u8 = 0;
 
-/// Wie lange wir auf die ADDBA-Antwort warten, bevor wir nachfragen.
-/// mac80211: `ADDBA_RESP_INTERVAL` = HZ/5.
+/// How long to wait for the ADDBA response before asking again. mac80211:
+/// `ADDBA_RESP_INTERVAL` = HZ/5.
 const BA_RESP_MS: u64 = 200;
-/// Wieviele Male. mac80211 gibt nach `HT_AGG_MAX_RETRIES` (15) auf; wir
-/// nach drei — danach sagt die Konsole, dass der AP nicht will, und eine
-/// Verbindung ohne Aggregation ist kein Fehlerzustand, sondern eine
-/// langsame Verbindung.
+/// How many times. mac80211 gives up after `HT_AGG_MAX_RETRIES` (15), we
+/// after three; a link without aggregation is slow, not broken.
 const BA_MAX_TRIES: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BaState {
-    /// Noch nicht gefragt — oder nicht zu fragen (`txagg: off`).
+    /// Not asked yet, or not to be asked (`txagg: off`).
     Aus,
-    /// Gefragt, Antwort steht aus.
+    /// Asked, response pending.
     Gefragt,
-    /// Der AP hat zugesagt. Ab hier traegt jeder Rahmen dieses TID AGG_EN.
+    /// The AP agreed. From here every frame of this TID carries AGG_EN.
     Laeuft,
-    /// Abgelehnt oder nach drei Versuchen unbeantwortet. Kein Wiederholen
-    /// — ein AP, der dreimal geschwiegen hat, schweigt auch beim vierten
-    /// Mal, und eine Schleife auf dem Verwaltungspfad kostet Sendezeit,
-    /// die genau das zunichtemacht, was sie holen soll.
+    /// Rejected, or unanswered after three attempts. No retry: an AP silent
+    /// three times stays silent, and a loop on the management path costs
+    /// airtime.
     Aufgegeben,
 }
 
-/// Unsere Block-Ack-Sitzung in SENDErichtung — die Haelfte, die seit
-/// 0.29.0 fehlte.
+/// Our block ack session in the transmit direction.
 ///
-/// In Linux liegt sie in `tid_ampdu_tx` und wird von
-/// `ieee80211_tx_ba_session_handle_start` gefahren; der Treiber sieht nur
-/// `IEEE80211_AMPDU_TX_OPERATIONAL`. Wir haben kein mac80211, also steht
-/// der Automat hier.
+/// In Linux it lives in `tid_ampdu_tx`, driven by
+/// `ieee80211_tx_ba_session_handle_start`; the driver only sees
+/// `IEEE80211_AMPDU_TX_OPERATIONAL`. Without mac80211 the state machine is
+/// here.
 #[derive(Clone, Copy)]
 struct BaTx {
     state: BaState,
     tid: u8,
-    /// Die Nummer, unter der wir gefragt haben. Eine Antwort mit einer
-    /// anderen gehoert zu einer frueheren Frage (agg-tx.c:1002).
+    /// The token we asked with. A response with another one belongs to an
+    /// earlier request (agg-tx.c:1002).
     token: u8,
     tries: u32,
     at_ms: u64,
-    /// Was der AP zugesagt hat, in Rahmen.
+    /// What the AP granted, in frames.
     win: u16,
-    /// `MAX_AGG_NUM` und `AMPDU_DEN` fuer den Deskriptor, aus den
-    /// HT-Faehigkeiten des AP.
+    /// `MAX_AGG_NUM` and `AMPDU_DEN` for the descriptor, from the AP's HT
+    /// capabilities.
     factor: u8,
     density: u8,
-    /// Der Status seiner Absage, fuer den Bericht.
+    /// The status of its rejection, for the report.
     status: u16,
 }
 
@@ -4813,61 +4470,58 @@ impl BaTx {
     }
 }
 
-/// Der Zustand einer stehenden Verbindung — Stufe 6a.
+/// State of a running link, stage 6a.
 struct Link {
     bssid: [u8; 6],
     mac: [u8; 6],
     channel: u8,
-    /// Der Name der Zelle. **Er wird fuer den gerichteten Probe Request
-    /// gebraucht** (`ieee80211_ap_probereq_get`, mlme.c:4518-4521: das
-    /// SSID-Element traegt den Namen des EINEN AP, nicht die Null-Laenge)
-    /// — und spaeter, um beim Wechseln Zellen derselben SSID zu finden.
+    /// The cell name. Needed for the directed probe request
+    /// (`ieee80211_ap_probereq_get`, mlme.c:4518-4521: the SSID element
+    /// carries the one AP's name, not zero length) and to find cells of the
+    /// same SSID when roaming.
     ssid: [u8; 32],
     ssid_len: u8,
     si: sta::StaInfo,
     highest_rate: u8,
-    /// Laufende Folgenummer fuer Datenrahmen. Der Chip vergibt sie bei
-    /// `en_hwseq` selbst, aber `pkt_info.seq` steht trotzdem im
-    /// Deskriptor — Linux fuellt es aus dem Rahmenkopf.
+    /// Running sequence number for data frames. The chip assigns it with
+    /// `en_hwseq`, but `pkt_info.seq` is still in the descriptor; Linux fills
+    /// it from the frame header.
     seq: u16,
     ptk_installed: bool,
-    /// 802.11 §12.5.3.2 — die 48-Bit-Paketnummer des Paarschluessels.
-    /// Sie faengt bei eins an und zaehlt je Rahmen hoch; eine wiederholte
-    /// Nummer verwirft der AP als Wiedereinspielung.
+    /// 802.11 §12.5.3.2: the 48-bit packet number of the pairwise key. It
+    /// starts at one and increments per frame; the AP drops a repeated
+    /// number as a replay.
     tx_pn: u64,
     cam: [sec::CamEntry; 4],
-    /// Unsere Block-Ack-Sitzung in Senderichtung.
+    /// Our block ack session in the transmit direction.
     ba_tx: BaTx,
-    /// Roaming: geglaetteter Pegel, Sperren, Kandidat.
+    /// Roaming: smoothed level, holds, candidate.
     roam: Roam,
-    /// Die Breite, in der die Verbindung LAEUFT — als die drei Bytes,
-    /// aus denen `chan_params` sie rechnet. **Der Rueckweg von einem
-    /// Umhoerversuch braucht sie**: wer auf 20 MHz zurueckkommt, hat die
-    /// Verbindung auf 20 MHz, und niemand sagt es ihm.
+    /// The width the link runs in, as the three bytes `chan_params` computes
+    /// it from. The return from a roam scan needs them, otherwise the link
+    /// silently comes back at 20 MHz.
     ht_param_now: u8,
     vht_chanwidth_now: u8,
     vht_cch0_now: u8,
-    /// Eine laufende Wechselansage: wohin, wie breit, und ab wann.
-    /// `None` heisst: kein Wechsel angesagt.
+    /// A pending channel switch announcement: where, how wide, from when.
+    /// `None` means none announced.
     csa: Option<Csa>,
-    /// Der Augenblick, zu dem umgezogen wird (`link->u.mgd.csa.time`,
-    /// mlme.c:2992).
+    /// When to move (`link->u.mgd.csa.time`, mlme.c:2992).
     csa_at_ms: u64,
-    /// Wohin zurueck, falls auf dem neuen Kanal niemand ist.
+    /// Where to return if nobody is on the new channel.
     csa_zurueck: Option<(u8, CellWidth)>,
     csa_frist_ms: u64,
 }
 
-/// 802.11 §12.5.3.2 — der acht Byte lange CCMP-Kopf.
+/// 802.11 §12.5.3.2: the eight-byte CCMP header.
 ///
-/// Die Paketnummer steht in zwei Stuecken, und das ist kein Versehen der
-/// Spezifikation: Byte 2 ist reserviert und Byte 3 traegt das ExtIV-Bit
-/// und die Schluesselnummer, damit ein alter WEP-Empfaenger den Rahmen
-/// als erweitert erkennt.
+/// The packet number is split in two parts by design: byte 2 is reserved
+/// and byte 3 carries the ExtIV bit and key ID, so a legacy WEP receiver
+/// recognizes the frame as extended.
 fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
     out[0] = (pn & 0xff) as u8; // PN0
     out[1] = ((pn >> 8) & 0xff) as u8; // PN1
-    out[2] = 0; // reserviert
+    out[2] = 0; // reserved
     out[3] = 0x20 | (key_id << 6); // ExtIV | KeyID
     out[4] = ((pn >> 16) & 0xff) as u8; // PN2
     out[5] = ((pn >> 24) & 0xff) as u8; // PN3
@@ -4875,37 +4529,24 @@ fn ccmp_hdr(out: &mut [u8], pn: u64, key_id: u8) {
     out[7] = ((pn >> 40) & 0xff) as u8; // PN5
 }
 
-/// docs/spec/WIFI_CLASS_ABI.md §2b — ein Ethernet-Rahmen als
-/// 802.11-Datenrahmen an den AP.
+/// docs/spec/WIFI_CLASS_ABI.md §2b: an Ethernet frame as an 802.11 data
+/// frame to the AP.
 ///
-/// 802.3: `[DA 6][SA 6][ethertype 2][Nutzlast]`
+/// 802.3: `[DA 6][SA 6][ethertype 2][payload]`
 /// 802.11 ToDS: `[fc 2][dur 2][addr1=BSSID][addr2=SA][addr3=DA][seq 2]`
-/// plus LLC/SNAP (RFC 1042) und den Ethertyp.
+/// plus LLC/SNAP (RFC 1042) and the ethertype.
 ///
-/// **`qos` entscheidet ueber die Rahmenart, und daran haengt alles
-/// andere.** Ein Block Ack braucht einen TID, einen TID traegt nur ein
-/// QoS-Rahmen, und ohne Block Ack geht jeder Rahmen einzeln hinaus.
+/// `qos` selects the frame type, and everything depends on it: block ack
+/// needs a TID, only a QoS frame carries one, and without block ack every
+/// frame goes out alone. An HT station is a QoS station (802.11 §10.2.3),
+/// and block ack exists only between QoS stations (§10.24.2).
 ///
-/// Der Kommentar, der hier stand, sagte das Gegenteil: unser
-/// Anmeldeantrag trage kein WMM-Element, also habe der AP uns als
-/// Nicht-QoS-Station angenommen. **Der Geraetelauf widerlegt ihn
-/// dreifach.** Eine HT-Station IST eine QoS-Station (802.11 §10.2.3, und
-/// wir senden HT- und VHT-Elemente); ein Block Ack gibt es nur zwischen
-/// QoS-Stationen (§10.24.2) — und der AP hat uns zwei davon ANGEBOTEN;
-/// und jeder Rahmen, den er uns schickt, ist ein QoS-Rahmen, sonst haette
-/// der Umsortierpuffer keinen TID, nach dem er ordnet. Das WMM-Element
-/// ist eine Zutat der Wi-Fi Alliance aus der Zeit vor 802.11n, nicht die
-/// Bedingung.
+/// `probe` is `IEEE80211_TX_CTL_REQ_TX_STATUS`, which mac80211 sets for
+/// frames whose loss costs the link (control port, i.e. EAPOL). Returns the
+/// sequence number the firmware will report under.
 ///
-/// `probe` ist `IEEE80211_TX_CTL_REQ_TX_STATUS` — Linux setzt es aus
-/// mac80211 fuer die Rahmen, deren Verlust die Verbindung kostet
-/// (Steuerport, also EAPOL). Gibt die Folgenummer zurueck, unter der
-/// die Firmware antworten wird.
-///
-/// **EAPOL faehrt bewusst OHNE QoS**, also genau wie bisher: der
-/// Vierwegehandschlag laeuft, bevor es eine Block-Ack-Sitzung gibt, und
-/// ein Rahmen, dessen Verlust die Verbindung kostet, ist der falsche Ort
-/// fuer eine Aenderung, die er nicht braucht.
+/// EAPOL goes without QoS: the four-way handshake runs before any block ack
+/// session exists.
 fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
            eth: &[u8], encrypt: bool, probe: Option<u8>,
            qos: Option<u8>) -> bool {
@@ -4922,8 +4563,8 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
 
     frame[0] = DOT11_FC_TYPE_DATA;
     if qos.is_some() {
-        // Der Subtyp steht in Bit 7:4, `DOT11_STYPE_QOS` ist die
-        // Nibble-Nummer — daher der Schiebeschritt.
+        // The subtype is in bits 7:4 and `DOT11_STYPE_QOS` is the nibble
+        // value, hence the shift.
         frame[0] |= DOT11_STYPE_QOS << 4;
     }
     frame[1] = 0x01; // ToDS
@@ -4931,27 +4572,24 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
         frame[1] |= DOT11_FC_PROTECTED;
     }
     frame[2..4].copy_from_slice(&0u16.to_le_bytes());
-    frame[4..10].copy_from_slice(&link.bssid); // addr1 = Empfaenger
-    frame[10..16].copy_from_slice(&link.mac); // addr2 = Quelle
-    frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = Ziel
+    frame[4..10].copy_from_slice(&link.bssid); // addr1 = receiver
+    frame[10..16].copy_from_slice(&link.mac); // addr2 = source
+    frame[16..22].copy_from_slice(&eth[0..6]); // addr3 = destination
     frame[22..24].copy_from_slice(&(link.seq << 4).to_le_bytes());
     if let Some(tid) = qos {
-        // 802.11 §9.2.4.5 — QoS Control. Bit 3:0 der TID, Bit 6:5 die
-        // Quittungsregel (00 = normal, und das ist IM Block Ack der
-        // implizite Block-Ack-Antrag), Bit 7 A-MSDU: nein. Byte 1 ist die
-        // TXOP-Dauer bzw. Schlangenlaenge und gehoert dem, der sie
-        // ANFORDERT — wir fordern nichts.
+        // 802.11 §9.2.4.5 QoS Control: bits 3:0 the TID, bits 6:5 the ack
+        // policy (00 = normal, which under block ack is the implicit block
+        // ack request), bit 7 A-MSDU: no. Byte 1 is TXOP duration or queue
+        // size and belongs to whoever requests it; we request nothing.
         frame[24] = tid & 0x0f;
         frame[25] = 0;
     }
 
-    // **Der CCMP-Kopf wird vom TREIBER geschrieben, nicht von der
-    // Hardware.** `rtw_ops_set_key` setzt `IEEE80211_KEY_FLAG_GENERATE_IV`,
-    // und das heisst in mac80211: der Stapel macht acht Byte Platz und
-    // schreibt die Paketnummer hinein (`ccmp_pn2hdr`), die Hardware
-    // verschluesselt nur. Ohne ihn stehen unsere Rahmen fuer den AP nicht
-    // zur Entschluesselung bereit — und das sieht aus wie eine Leitung,
-    // auf der nichts zurueckkommt.
+    // The driver writes the CCMP header, not the hardware. `rtw_ops_set_key`
+    // sets `IEEE80211_KEY_FLAG_GENERATE_IV`, which in mac80211 means the
+    // stack reserves eight bytes and writes the packet number into them
+    // (`ccmp_pn2hdr`); the hardware only encrypts. Without it the AP cannot
+    // decrypt our frames.
     let ofs = if encrypt {
         ccmp_hdr(&mut frame[hdrlen..hdrlen + 8], link.tx_pn, 0);
         link.tx_pn = link.tx_pn.wrapping_add(1);
@@ -4960,12 +4598,12 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
         hdrlen
     };
     frame[ofs..ofs + 6].copy_from_slice(&LLC_SNAP_HDR);
-    frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // Ethertyp
+    frame[ofs + 6..ofs + 8].copy_from_slice(&eth[12..14]); // ethertype
     frame[ofs + 8..ofs + 8 + payload.len()].copy_from_slice(payload);
 
     let mut info = tx::TxPktInfo::default();
-    // `rtw_tx_pkt_info_update` fuer einen Datenrahmen: erst die Rate,
-    // dann die gemeinsamen Felder.
+    // `rtw_tx_pkt_info_update` for a data frame: rate first, then the common
+    // fields.
     tx::data_pkt_info_update(&mut info, link.seq, Some(&link.si),
                              link.highest_rate);
     let a1 = &frame[4..10];
@@ -4974,32 +4612,30 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     info.offset = tx::TX_PKT_DESC_SZ as u8;
     info.ls = true;
     info.mac_id = link.si.mac_id;
-    // `rtw_tx_pkt_info_update_sec`: mit installiertem Schluessel traegt der
-    // Deskriptor die acht Byte des CCMP-Kopfes als zusaetzliche Laenge.
+    // `rtw_tx_pkt_info_update_sec`: with a key installed the descriptor
+    // carries the eight bytes of the CCMP header as extra length.
     if encrypt {
         info.sec_type = 0x3; // AES
     }
 
     link.seq = link.seq.wrapping_add(1) & 0x0fff;
 
-    // tx.c:432-433 `if (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)`.
-    // Die Nummer vergibt der Rufer (`rtw_tx_report_enable`), weil er sie
-    // gleich darauf in seine offene Liste eintraegt.
+    // tx.c:432-433 `if (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)`. The
+    // caller assigns the number (`rtw_tx_report_enable`) because it enters
+    // it into its open list right after.
     if let Some(sn) = probe {
         info.sn = sn as u16;
         info.report = true;
     }
 
-    // tx.c:361-365 — `ampdu_en` haengt in Linux an
-    // `IEEE80211_TX_CTL_AMPDU`, einer Fahne, die mac80211 setzt, SOBALD
-    // ein Block-Ack-Block offen ist. Bei uns ist die Fahne `BaState::
-    // Laeuft` auf genau diesem TID.
+    // tx.c:361-365: `ampdu_en` follows `IEEE80211_TX_CTL_AMPDU`, which
+    // mac80211 sets once a block ack session is open; here that is
+    // `BaState::Laeuft` on this TID.
     //
-    // **Aggregiert wird von der HARDWARE**, nicht vom Treiber: der Chip
-    // fasst aufeinanderfolgende Rahmen derselben MACID und desselben TID
-    // zusammen, wenn AGG_EN steht. Der Treiber sagt nur, wieviel am
-    // Stueck erlaubt ist — und das sind die Zahlen, die der AP in seinen
-    // HT-Faehigkeiten angesagt hat, nicht unsere.
+    // The hardware aggregates, not the driver: the chip combines consecutive
+    // frames of the same MACID and TID when AGG_EN is set. The driver only
+    // says how much is allowed at once, using the limits the AP announced in
+    // its HT capabilities, not ours.
     if let Some(tid) = qos {
         if link.ba_tx.laeuft(tid) {
             info.ampdu_en = true;
@@ -5008,36 +4644,28 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
         }
     }
 
-    // **Angestossen wird NICHT hier.** tx.c:660-676: Linux schiebt
-    // `frame_cnt` Rahmen in den Ring und ruft `rtw_hci_tx_kick_off`
-    // EINMAL danach — und das ist keine Sparsamkeit beim MMIO-Schreiben,
-    // sondern die Voraussetzung der Aggregation. Aggregiert wird von der
-    // Hardware, und sie kann nur zusammenfassen, was beim Griff nach der
-    // Sendegelegenheit schon im Ring liegt. Wer je Rahmen an die Tuer
-    // klopft, laesst sie mit einem losfahren.
+    // No kick here. tx.c:660-676: Linux queues `frame_cnt` frames and calls
+    // `rtw_hci_tx_kick_off` once afterwards. That is a precondition for
+    // aggregation, not an MMIO saving: the hardware can only combine what
+    // is already in the ring when it gets a transmit opportunity.
     let queue = pci::Q_BE;
     pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total])
 }
 
-/// Wo der LLC/SNAP-Kopf eines Datenrahmens steht, und wieviel hinten
-/// nicht dazugehoert.
+/// The 802.11 header length of a data frame, which locates the LLC/SNAP
+/// header.
 ///
-/// **Ein verschluesselter Rahmen traegt acht Byte CCMP-Kopf zwischen dem
-/// 802.11-Kopf und den Nutzdaten**, und die Hardware entfernt ihn NICHT:
-/// `rtw_rx_fill_rx_status` setzt `RX_FLAG_DECRYPTED`, aber nicht
-/// `RX_FLAG_IV_STRIPPED` — in Linux raeumt mac80211 ihn weg. Hinten haengen
-/// die Pruefsumme (immer) und bei CCMP der acht Byte lange MIC, beides
-/// weil `WLAN_RCR_CFG` APP_FCS und APP_MIC gesetzt hat.
+/// cfg80211 `ieee80211_hdrlen` (util.c:430-447) for a station's data frame:
+/// 24, plus 2 for QoS control with QoS, plus 4 for HT control when the
+/// order bit is set (we announce `+HTC-VHT`, so the AP may send it). Address
+/// field 4 (FromDS and ToDS) does not occur for a station.
 ///
-/// Findet sich LLC/SNAP nicht an der gerechneten Stelle, wird an den zwei
-/// anderen moeglichen gesucht und das GEMELDET. Ein stiller Fehlgriff
-/// hier verwirft jeden Rahmen und sieht aus wie eine tote Leitung.
-/// cfg80211 `ieee80211_hdrlen` (util.c:430-447) fuer einen DATENrahmen
-/// einer Station: 24, bei QoS plus 2 fuer das QoS-Steuerfeld — und mit
-/// gesetztem Order-Bit plus 4 fuer HT-Control. **Die vier fehlten**: wir
-/// sagen `+HTC-VHT` an, also darf der AP das Feld senden, und dann stand
-/// der LLC/SNAP-Kopf vier Byte hinter jeder Stelle, an der wir suchten.
-/// Adressfeld 4 (FromDS und ToDS) gibt es fuer eine Station nicht.
+/// An encrypted frame carries the eight-byte CCMP header between the 802.11
+/// header and the payload, and the hardware does not strip it:
+/// `rtw_rx_fill_rx_status` sets `RX_FLAG_DECRYPTED` but not
+/// `RX_FLAG_IV_STRIPPED`; in Linux mac80211 removes it. At the end are the
+/// FCS (always) and with CCMP the eight-byte MIC, because `WLAN_RCR_CFG`
+/// sets APP_FCS and APP_MIC.
 fn data_hdrlen(f: &[u8]) -> usize {
     let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
     if !qos {
@@ -5047,14 +4675,8 @@ fn data_hdrlen(f: &[u8]) -> usize {
 }
 
 fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
-    // **Der Subtyp steht in Bit 7:4.** Hier stand `f[0] & DOT11_STYPE_QOS`
-    // ohne den Schiebeschritt — und `DOT11_STYPE_QOS` (0x08) ist
-    // zufaellig derselbe Wert wie `DOT11_FC_TYPE_DATA`, also war die
-    // Antwort fuer JEDEN Datenrahmen „ja, QoS". Gemerkt hat es niemand,
-    // weil dieser AP uns ausschliesslich QoS-Rahmen schickt (`llc_miss`
-    // steht ueber die ganze Verbindung auf null) — die Suche daneben
-    // haette einen Nicht-QoS-Rahmen mit CCMP gar nicht gefunden, denn
-    // 24+8 = 32 steht in keinem ihrer drei Versuche.
+    // The subtype is in bits 7:4. `DOT11_STYPE_QOS` (0x08) without the shift
+    // equals `DOT11_FC_TYPE_DATA`, which would mark every data frame as QoS.
     let hdrlen = data_hdrlen(f);
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let crypt = if prot { 8usize } else { 0 };
@@ -5093,25 +4715,21 @@ fn llc_offset(f: &[u8], miss: &mut u32) -> Option<(usize, usize)> {
     Some((found, trailing))
 }
 
-/// **Der Rauswurf, und warum er bisher unsichtbar war.**
+/// Detects a deauthentication or disassociation from our AP.
 ///
-/// `rx_to_8023` filtert in seiner ERSTEN Zeile auf Datenrahmen. Ein
-/// Deauth ist ein VERWALTUNGSrahmen und faellt dort lautlos durch: aus
-/// Treibersicht stirbt die Verbindung nicht, sie wird nur still — und
-/// genau deshalb wirkt ein Rauswurf zufaellig. Der Kernel glaubt
-/// derweil weiter an `carrier UP` und schiebt Pakete in eine tote
-/// Leitung.
+/// `rx_to_8023` filters for data frames in its first line, so a deauth (a
+/// management frame) would otherwise pass unnoticed: the link goes silent
+/// while the kernel still believes `carrier UP`.
 ///
-/// 802.11 §9.4.1.7: Deauthentication (Subtyp 12) und Disassociation
-/// (Subtyp 10) tragen einen Grundcode, little-endian, direkt hinter dem
-/// 24 Byte langen Kopf. Gibt `(war es ein Deauth, Grundcode)` zurueck.
+/// 802.11 §9.4.1.7: deauthentication (subtype 12) and disassociation
+/// (subtype 10) carry a little-endian reason code right after the 24-byte
+/// header. Returns `(was it a deauth, reason code)`.
 ///
-/// **Nur von `addr2 == BSSID`.** Die Luft ist voll; der Deauth einer
-/// fremden Zelle geht uns nichts an, und ein Treiber, der auf ihn
-/// hoert, legt seine eigene Verbindung wegen des Nachbarn nieder.
+/// Only from `addr2 == BSSID`: a deauth of another cell is none of our
+/// business.
 fn disconnect_reason(f: &[u8], bssid: &[u8; 6]) -> Option<(bool, u16)> {
-    // 24 Byte Kopf + 2 Byte Grund. Kuerzer ist kein gueltiger Rahmen,
-    // und raten waere hier schlimmer als schweigen.
+    // 24 bytes header + 2 bytes reason. Anything shorter is not a valid
+    // frame, and guessing would be worse than silence.
     if f.len() < 26 {
         return None;
     }
@@ -5126,9 +4744,8 @@ fn disconnect_reason(f: &[u8], bssid: &[u8; 6]) -> Option<(bool, u16)> {
     Some((deauth, u16::from_le_bytes([f[24], f[25]])))
 }
 
-/// 802.11 §9.4.1.7 Tabelle 9-49. **Die 15 und die 16 sind die Frage
-/// dieser Runde**: sie waeren die Bestaetigung, dass es am Handschlag
-/// bzw. am Gruppen-Neuschluessel haengt und nicht an der Luft.
+/// 802.11 §9.4.1.7 table 9-49. 15 and 16 point at the four-way handshake
+/// and the group rekey respectively, rather than at the air.
 fn reason_name(code: u16) -> &'static str {
     match code {
         1 => "unspezifiziert",
@@ -5155,18 +4772,18 @@ fn reason_name(code: u16) -> &'static str {
     }
 }
 
-/// docs/spec/WIFI_CLASS_ABI.md §2b, Demux-Regel: ein empfangener
-/// 802.11-Datenrahmen wird zu 802.3 und geht dann entweder als `EAPOL_RX`
-/// an `wifid` oder in den IP-Stapel.
+/// docs/spec/WIFI_CLASS_ABI.md §2b, demux rule: a received 802.11 data frame
+/// becomes 802.3 and goes either to `wifid` as `EAPOL_RX` or to the IP
+/// stack.
 ///
-/// Gibt die Laenge des 802.3-Rahmens in `out` zurueck und ob es EAPOL war.
+/// Returns the length of the 802.3 frame in `out` and whether it was EAPOL.
 fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
     -> Option<(usize, bool)>
 {
     if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA {
         return None;
     }
-    // Null und QoS-Null tragen keinen Rumpf.
+    // Null and QoS null carry no body.
     if f[0] & DOT11_STYPE_NODATA != 0 {
         return None;
     }
@@ -5180,7 +4797,7 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
     if out.len() < 14 + payload.len() {
         return None;
     }
-    // FromDS: addr1 = wir, addr2 = BSSID, addr3 = Quelle.
+    // FromDS: addr1 = us, addr2 = BSSID, addr3 = source.
     out[0..6].copy_from_slice(&f[4..10]);
     out[6..12].copy_from_slice(&f[16..22]);
     out[12..14].copy_from_slice(&f[llc + 6..llc + 8]);
@@ -5188,32 +4805,11 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
     Some((14 + payload.len(), et == ETHERTYPE_EAPOL))
 }
 
-/// PLATZ
-///
-/// **Hier hoert der Stufentest auf und der Treiber faengt an.** Bis 5f
-/// arbeitete `main` eine Kette ab und schaltete den Chip aus; hier laeuft
-/// eine Schleife: Empfangsring leeren, Sendequittungen einsammeln,
-/// Kommandos von `wifid` ausfuehren, Ereignisse hinaufmelden.
-///
-/// **Den Handschlag rechnet `wifid`, nicht wir** — er ist
-/// herstellerunabhaengig und steht einmal da
-/// (`tools/wasm/wifid/core/src/eapol.rs`). Der Treiber transportiert die
-/// Rahmen und schreibt die fertigen Schluessel in den Speicher. Genau so
-/// steht es in `docs/spec/WIFI_CLASS_ABI.md` §1: der Treiber sieht nie
-/// den PSK.
+/// tx.c:367-374, the order in `rtw_tx_data_pkt_info_update`.
 #[allow(clippy::too_many_arguments)]
-/// Den Link aufbauen: beim Kernel anmelden und `wifid` scharf machen.
 ///
-/// **Das darf genau EINMAL geschehen.** Ein zweites `EV_READY` laesst
-/// `wifid` einen frischen Supplicant bauen, der auf ein msg1 wartet, das
-/// der AP nie wieder schickt — genau das ist in 0.23.0 passiert, weil
-/// Stufe 6b die Funktion von 6a ein zweites Mal rief.
-/// tx.c:367-374, die Reihenfolge in `rtw_tx_data_pkt_info_update`.
-///
-/// **VHT steht VOR HT, und das war die Luecke.** Beide Rufstellen fragten
-/// nur `ht_supported` — auf einer VHT-Verbindung kam damit
-/// `DESC_RATEMCS15` heraus, also eine HT-Rate fuer eine Strecke, die VHT
-/// faehrt.
+/// VHT is checked before HT; checking only `ht_supported` would pick an HT
+/// rate (`DESC_RATEMCS15`) on a VHT link.
 fn highest_tx_rate(caps: &sta::PeerCaps, hal: &Hal) -> u8 {
     let nss = if hal.rf_2t2r { 2 } else { 1 };
     if caps.vht_supported {
@@ -5221,13 +4817,17 @@ fn highest_tx_rate(caps: &sta::PeerCaps, hal: &Hal) -> u8 {
     } else if caps.ht_supported {
         tx::highest_ht_tx_rate(&caps.ht_mcs, hal.rf_2t2r)
     } else if caps.supp_rates & 0x000f == caps.supp_rates {
-        // tx.c:371 `supp_rates[0] <= 0xf` — nur die vier CCK-Bits.
+        // tx.c:371 `supp_rates[0] <= 0xf`: only the four CCK bits.
         DESC_RATE11M as u8
     } else {
         DESC_RATE54M as u8
     }
 }
 
+/// Sets up the link: registers with the kernel and arms `wifid`.
+///
+/// Must happen exactly once per link: a second `EV_READY` makes `wifid`
+/// build a fresh supplicant waiting for an msg1 the AP never sends again.
 fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
               mac: [u8; 6]) -> Link {
     let link = Link {
@@ -5253,15 +4853,14 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         csa_frist_ms: 0,
     };
 
-    // Der Datenkanal existiert seit Kernel 0.205.0; ohne Anmeldung sieht
-    // ihn der IP-Stapel nicht.
+    // Without registration the IP stack does not see the data channel.
     let reg = host::netdev_register(&mac);
     host::print("  netdev_register ");
     host::print(if reg >= 0 { "ok" } else { "FEHLGESCHLAGEN" });
     host::print("\n");
 
-    // `EV_READY` = [0x83][ap_mac 6][our_mac 6] — damit baut `wifid` seinen
-    // Supplicant fuer GENAU diese Zelle.
+    // `EV_READY` = [0x83][ap_mac 6][our_mac 6]: `wifid` builds its
+    // supplicant for exactly this cell.
     let mut ready = [0u8; 13];
     ready[0] = EV_READY;
     ready[1..7].copy_from_slice(&bss.bssid);
@@ -5274,45 +4873,13 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
     link
 }
 
-/// main.c:224-310 `rtw_watch_dog_work` — **alle zwei Sekunden, das
-/// ganze Leben einer Verbindung lang.**
-///
-/// Bis 0.26.0 gab es sie nicht. Gebaut war der Aufbau, und danach blieb
-/// der Chip sich selbst ueberlassen: kein Quarz-Nachziehen, keine
-/// Sendeleistung ueber die Temperatur, keine Vorverzerrungs-Nachfuehrung,
-/// keine RSSI an die Ratenwahl der Firmware. Drei davon sind SENDEseite,
-/// und ein Empfaenger rastet sich an jeder Praeambel neu ein — ein
-/// Sender nicht. Das ist die Form, in der eine Leitung einseitig wird,
-/// ohne dass irgendwo ein Fehler steht.
-///
-/// **Vier Posten aus Linux stehen hier NICHT, und jeder hat seinen
-/// Grund:**
-///
-/// * `rtw_leave_lps` / `rtw_enter_lps` / `rtw_recalc_lps` — wir fahren
-///   kein Power-Save (offener Posten im Plan).
-/// * `rtw_hci_dynamic_rx_agg` — `.dynamic_rx_agg = NULL` fuer PCI
-///   (pci.c:1605), also auf unserem Bus ein Nichts.
-/// * `rtw_dynamic_csi_rate` — kehrt um, solange die Gegenstelle keine
-///   Beamforming-Rolle hat; wir bauen `bf.c` nicht.
-/// * `rtw_coex_run_coex` (ueber `wl_status_change_notify`) — der
-///   Entscheidungsbaum der Koexistenz ist L6 des Plans, 111 Funktionen,
-///   eigene Stufe.
-///
-/// **Eine Abweichung, die hier stehen MUSS:** `rtw_coex_monitor_bt_enable`
-/// wird in Linux nur aus `rtw_coex_run_coex` gerufen. Sie erzeugt
-/// `bt_disabled`, und daran haengt `rtw8822c_cfo_need_adjust`. Ohne sie
-/// bliebe die Zahl auf ihrem Anfangswert stehen, der Riegel zu und die
-/// Quarznachfuehrung fuer immer aus — ein Tor, das nie aufgeht. Also
-/// wird sie hier gerufen, bis L6 steht.
+/// Longest duration of each watchdog part, in us.
 #[allow(clippy::too_many_arguments)]
-/// **Wie lange jeder Teil des Watchdogs laengstens brauchte**, in us.
 ///
-/// Linux laesst den Watchdog in einer Workqueue NEBEN dem Empfang laufen;
-/// bei uns steht er in der Pumpschleife, und solange er rechnet, holt
-/// niemand den Ring leer. Am Geraet (0.67.0) setzte die Schleife bis zu
-/// 119 ms aus, der Kartenring lief ueber, und TCP verlor 400-600 Segmente
-/// auf einen Schlag. `do_lck` allein darf nach Linux bis zu 100 ms pollen.
-/// Diese Zahlen sagen, WELCHER Teil es war, statt es zu raten.
+/// Linux runs the watchdog in a workqueue beside reception; here it runs in
+/// the pump loop, and nobody drains the ring while it computes, so a long
+/// part can overflow the ring. `do_lck` alone may poll up to 100 ms per
+/// Linux. These numbers show which part it was.
 static mut WD_MAX: [u32; 8] = [0; 8];
 const WD_NAMES: [&str; 8] = ["coex", "statistik", "dig/cck", "ra/rrsr",
                              "pfad/cfo", "dpk", "pwr_track", "adaptivity"];
@@ -5320,7 +4887,7 @@ const WD_NAMES: [&str; 8] = ["coex", "statistik", "dig/cck", "ra/rrsr",
 fn wd_mark(i: usize, tp: &mut u64) {
     let now = host::now_us();
     let d = now.saturating_sub(*tp).min(u32::MAX as u64) as u32;
-    // SAFETY: einfaedig, nur der Pumpfaden schreibt, der Bericht liest.
+    // SAFETY: single-threaded, only the pump thread writes, the report reads.
     unsafe {
         let m = &mut *core::ptr::addr_of_mut!(WD_MAX);
         if d > m[i] { m[i] = d; }
@@ -5328,26 +4895,43 @@ fn wd_mark(i: usize, tp: &mut u64) {
     *tp = now;
 }
 
-/// Die laengste Runde der Pumpschleife ohne ihren Schlaf, in us, und ob
-/// in ihr der Watchdog lief.
-/// Der MSI-Vektor des Chips, `-1` = Abfragebetrieb. Gesetzt beim Start
-/// (`rtw_hci_start`), gelesen im Leerlauf der Pumpschleife.
+/// The chip's MSI vector, `-1` = polling. Set at start (`rtw_hci_start`),
+/// read when the pump loop is idle.
 static mut IRQ_VEC: i32 = -1;
 
-/// Waehrend eines Kanalwechsels (CSA) parkt die Pumpe hoechstens so lange:
-/// Beacon-Frist und Umschaltzeitpunkt sind selten und kurz, dort bleibt es
-/// beim feinen Raster.
+/// During a channel switch (CSA) the pump parks at most this long: beacon
+/// deadline and switch time are rare and short, so the fine grid stays.
 const CSA_WAIT_MS: u64 = 10;
 
+/// The longest pump loop iteration without its sleep, in us, and whether
+/// the watchdog ran in it.
 static mut ITER_MAX: u32 = 0;
 static mut ITER_MAX_WD: bool = false;
 
+/// main.c:224-310 `rtw_watch_dog_work`, every two seconds for the life of a
+/// link: crystal tracking, TX power over temperature, DPK tracking, RSSI to
+/// the firmware's rate selection.
+///
+/// Not implemented here:
+///
+/// * `rtw_leave_lps` / `rtw_enter_lps` / `rtw_recalc_lps`: no power save.
+/// * `rtw_hci_dynamic_rx_agg`: `.dynamic_rx_agg = NULL` for PCI
+///   (pci.c:1605).
+/// * `rtw_dynamic_csi_rate`: returns while the peer has no beamforming role;
+///   `bf.c` is not ported.
+/// * `rtw_coex_run_coex` (via `wl_status_change_notify`): the coexistence
+///   decision tree (L6 of the plan, 111 functions).
+///
+/// Deviation: `rtw_coex_monitor_bt_enable` is called only from
+/// `rtw_coex_run_coex` in Linux. It produces `bt_disabled`, which
+/// `rtw8822c_cfo_need_adjust` depends on; without it crystal tracking would
+/// stay off forever. So it is called here until L6 exists.
 fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
              e: &efuse::Efuse, link: &mut Link, caps: &sta::PeerCaps,
              fw_feature: u32, linked: bool, beacon_int: u16) {
     let received_beacons = d.dm.cur_pkt_count.num_bcn_pkt;
 
-    // main.c:241-248 — die Schwelle ist 100 Rahmen je Takt.
+    // main.c:241-248: the threshold is 100 frames per tick.
     let busy_pre = d.busy_traffic;
     d.busy_traffic = d.stats.tx_cnt > RTW_BUSY_TRAFFIC_THRESHOLD
         || d.stats.rx_cnt > RTW_BUSY_TRAFFIC_THRESHOLD;
@@ -5355,7 +4939,7 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
         // `rtw_coex_wl_status_change_notify(rtwdev, 0)` -> run_coex (L6)
     }
 
-    // main.c:255-268 — Bytes je zwei Sekunden in Mbit/s, geglaettet.
+    // main.c:255-268: bytes per two seconds in Mbit/s, smoothed.
     let tx_mbps = (d.stats.tx_unicast >> RTW_TP_SHIFT) as u32;
     let rx_mbps = (d.stats.rx_unicast >> RTW_TP_SHIFT) as u32;
     d.stats.tx_ewma_tp.add(tx_mbps, dm::EWMA_TP_PRECISION,
@@ -5379,18 +4963,17 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     wd_mark(0, &mut tp);
 
     let band_2g = link.channel <= 14;
-    // `si->ra_report.desc_rate` — was die FIRMWARE zuletzt gewaehlt hat,
-    // nicht was wir angeboten haben. Sie meldet es als C2H `RA_RPT`;
-    // solange keiner kam, steht dort die Anfangsrate.
+    // `si->ra_report.desc_rate`: what the firmware last picked, not what we
+    // offered. It reports it as C2H `RA_RPT`; until one arrives this holds
+    // the initial rate.
     let sta_rate = if linked { Some(link.si.ra_report_desc_rate) } else { None };
     let nss = if hal.rf_2t2r { 2 } else { 1 };
     let fw_adapt = fw_feature & FW_FEATURE_ADAPTIVITY != 0;
 
-    // **Eine Ausleihe, zwei Rufe.** `si` und `rssi_si` sind in Linux
-    // derselbe Iterator ueber dieselbe Station; hier muessen sie
-    // nacheinander gehen, weil der Ausleiher nur eine mutable Referenz
-    // zulaesst. Die Reihenfolge ist Linux': erst `statistics` (und darin
-    // der RSSI), dann der Rest.
+    // Two calls, one borrow at a time: `si` and `rssi_si` are the same
+    // iterator over the same station in Linux, but here only one mutable
+    // reference is allowed. Linux order: `statistics` first (RSSI included),
+    // then the rest.
     phy::statistics(h, &mut d.dm, h2c, if linked { Some(&mut link.si) } else { None });
     wd_mark(1, &mut tp);
     phy::dig(h, &mut d.dm, hal.rf_path_num, linked);
@@ -5418,8 +5001,8 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     }
     wd_mark(7, &mut tp);
 
-    // main.c:196-207 `rtw_sw_beacon_loss_check`. Die Firmware mit
-    // `FW_FEATURE_BCN_FILTER` macht es selbst.
+    // main.c:196-207 `rtw_sw_beacon_loss_check`. Firmware with
+    // `FW_FEATURE_BCN_FILTER` does it itself.
     if fw_feature & FW_FEATURE_BCN_FILTER == 0 && beacon_int > 0 {
         // watchdog_delay = 2000000 / 1024 TU
         let watchdog_delay = 2_000_000u32 / 1024;
@@ -5430,62 +5013,47 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     d.watch_dog_cnt = d.watch_dog_cnt.wrapping_add(1);
 }
 
-/// Die Schleife des Treibers. `frist_us == 0` heisst: nicht mehr aufhoeren.
-///
-/// Sie bekommt Link UND Zaehler von aussen, damit Stufe 6b dort fortsetzt,
-/// wo 6a aufgehoert hat.
+/// Why `link_pump` returned.
 #[allow(clippy::too_many_arguments)]
 #[derive(PartialEq, Clone, Copy)]
 enum PumpEnd {
-    /// Ein besserer AP ist gefunden — der Kandidat steht in
-    /// `link.roam.to`, und der Rufer meldet uns dort an.
+    /// A better AP was found; the candidate is in `link.roam.to`, and the
+    /// caller associates there.
     Roam,
-    /// Die Frist von Stufe 6a ist abgelaufen — der Normalfall dort.
+    /// Stage 6a's deadline expired, the normal case there.
     Frist,
-    /// Die Zelle hat uns verloren (Deauth/Disassoc) oder die Firmware
-    /// hat sich fuer tot erklaert. Der Rufer verbindet neu.
+    /// The cell dropped us (deauth/disassoc) or the firmware declared
+    /// itself dead. The caller reconnects.
     LinkLost,
 }
 
-// ── Umsortierpuffer fuer empfangene A-MPDUs ───────────────────────
+// ── Reorder buffer for received A-MPDUs ──────────────────────────
 //
 // `ieee80211_rx_reorder_ampdu` + `ieee80211_sta_reorder_release`
-// (net/mac80211/rx.c), 802.11 §10.24.7 „Receive reordering buffer control".
+// (net/mac80211/rx.c), 802.11 §10.24.7 "Receive reordering buffer control".
 //
-// **Warum es ihn braucht, gemessen statt behauptet.** Ein Rahmen, der im
-// A-MPDU ausfaellt, kommt im NAECHSTEN Buendel nach — wir lieferten bis
-// hierher in ANKUNFTsreihenfolge, also 6,7,8…63 und dann 5. Unser TCP sieht
-// eine Luecke, schickt Doppelquittungen, und drei davon loesen beim Sender
-// eine Schnellwiederholung aus, die ueberfluessig ist. Auf Florians
-// 5-GHz-Strecke (10 % CRC) am 2026-09-21 gemessen:
-//
-//     Fenster  256 KB  ->  81 Mbit   retr  40   dsack  40
-//     Fenster 1024 KB  ->  68 Mbit   retr 802   dsack 887
-//
-// Mehr Fenster, zwanzigfache Wiederholungsrate, WENIGER Durchsatz — bei
-// `lost=0` und `dsack ~ retr`, also war fast jede ueberfluessig. Ohne
-// Umsortierung laesst sich das Empfangsfenster gar nicht aufmachen, und
-// ohne grosses Fenster kommt man an 380 Mbit Bruttorate nie heran.
+// A frame lost within an A-MPDU arrives in the next burst. Delivered in
+// arrival order (6, 7, 8 … 63, then 5), TCP sees a gap and sends duplicate
+// ACKs, three of which trigger a needless fast retransmit at the sender.
+// Without reordering the receive window cannot be opened wide.
 
-/// So viele TIDs koennen gleichzeitig eine Sitzung haben. Florians AP
-/// macht zwei auf (TID 0 und 6).
+/// How many TIDs can have a session at once. APs commonly open two (TID 0
+/// and 6).
 const RO_TIDS: usize = 8;
-/// Die Fensterbreite, die wir im ADDBA ZUSAGEN. Beides darf nicht
-/// auseinanderlaufen: wer 64 zusagt und 32 puffert, verwirft, was er
-/// angenommen hat.
+/// The window size we grant in ADDBA. Grant and buffer must match: granting
+/// 64 and buffering 32 drops what was accepted.
 const RO_WIN: usize = 64;
-/// **Der Puffer haelt die rohe MPDU, nicht den 802.3-Rahmen.** mac80211
-/// sortiert MPDUs um und entpackt ein A-MSDU erst DANACH
-/// (`ieee80211_rx_h_amsdu` steht in der Kette hinter dem Umsortieren);
-/// eine MPDU mit einem A-MSDU traegt viele Rahmen unter EINER
-/// Folgenummer. Die Groesse ist deshalb die groesste MPDU, die wir im
-/// VHT-Element ansagen (`MAX_MPDU_LENGTH_11454`).
+/// The buffer holds the raw MPDU, not the 802.3 frame. mac80211 reorders
+/// MPDUs and unpacks an A-MSDU only afterwards (`ieee80211_rx_h_amsdu`
+/// comes after reordering in the chain); one MPDU with an A-MSDU carries
+/// many frames under one sequence number. The size is the largest MPDU we
+/// announce in the VHT element (`MAX_MPDU_LENGTH_11454`).
 const RO_FRAME: usize = 11454;
-/// Gleichzeitig zurueckgehaltene Rahmen ueber ALLE TIDs. Im Normalfall
-/// liegt hier nichts — nur solange ein Loch offen ist. Laeuft der Pool
-/// voll, wird zugestellt statt verworfen (`ro_full` zaehlt es).
+/// Frames held at once across all TIDs. Normally empty, only while a hole
+/// is open. When the pool is full, frames are delivered rather than
+/// dropped (`ro_full` counts it).
 const RO_POOL: usize = 64;
-/// Frist fuer ein Loch, danach wird darueber hinweg freigegeben.
+/// Deadline for a hole, after which frames are released past it.
 /// mac80211: `HT_RX_REORDER_BUF_TIMEOUT` = HZ/10.
 const RO_TIMEOUT_MS: u32 = 100;
 
@@ -5493,12 +5061,12 @@ static mut RO_BUF: [[u8; RO_FRAME]; RO_POOL] = [[0; RO_FRAME]; RO_POOL];
 static mut RO_LEN: [u16; RO_POOL] = [0; RO_POOL];
 static mut RO_USED: [bool; RO_POOL] = [false; RO_POOL];
 
-/// Einen freien Platz im Pool nehmen und die MPDU hineinlegen.
+/// Takes a free pool slot and stores the MPDU in it.
 fn ro_take(mpdu: &[u8]) -> Option<usize> {
     if mpdu.len() > RO_FRAME {
         return None;
     }
-    // SAFETY: ein Faden, ein Rufer — derselbe Vertrag wie bei RXBUF6.
+    // SAFETY: one thread, one caller, the same contract as RXBUF6.
     unsafe {
         let used = &mut *core::ptr::addr_of_mut!(RO_USED);
         let i = used.iter().position(|u| !*u)?;
@@ -5511,15 +5079,15 @@ fn ro_take(mpdu: &[u8]) -> Option<usize> {
     }
 }
 
-/// Den Rahmen an Platz `i` zustellen und den Platz freigeben.
+/// Delivers the frame in slot `i` and frees the slot.
 fn ro_release_slot(ls: &mut LinkStats, i: usize) {
-    // Der Rahmen wird ZUERST kopiert, dann zugestellt: `deliver` nimmt
-    // `&mut LinkStats`, und eine Anleihe auf den Pool darueber hinaus
-    // waere ein zweiter veraenderlicher Zugriff auf denselben Speicher.
+    // Copy the frame first, then deliver: `deliver` takes `&mut LinkStats`,
+    // and a borrow of the pool across it would be a second mutable access
+    // to the same memory.
     let mut tmp = [0u8; RO_FRAME];
-    // SAFETY: wie `ro_take` — ein Faden, ein Rufer. Die Zeiger werden
-    // ZUERST an Bezuege gebunden; ein `&(*ptr)[i]` mitten im Ausdruck
-    // waere eine stillschweigende Anleihe auf einen rohen Zeiger.
+    // SAFETY: as `ro_take`: one thread, one caller. The pointers are bound
+    // to references first; `&(*ptr)[i]` inside an expression would be an
+    // implicit borrow through a raw pointer.
     let len = unsafe {
         let lens = &*core::ptr::addr_of!(RO_LEN);
         let len = lens[i] as usize;
@@ -5533,7 +5101,7 @@ fn ro_release_slot(ls: &mut LinkStats, i: usize) {
     deliver_mpdu(ls, &tmp[..len]);
 }
 
-/// Alles freigeben, was ab dem Kopf LUECKENLOS daliegt.
+/// Releases everything contiguous from the head.
 fn ro_release_ready(ls: &mut LinkStats, tid: usize) {
     loop {
         let h = (ls.ro_head[tid] as usize) % RO_WIN;
@@ -5548,14 +5116,13 @@ fn ro_release_ready(ls: &mut LinkStats, tid: usize) {
     }
 }
 
-/// Den Kopf bis `want` vorschieben und alles darunter herausgeben —
-/// Loecher werden dabei uebersprungen (`ieee80211_sta_reorder_release`).
+/// Advances the head to `want` and releases everything below it, skipping
+/// holes (`ieee80211_sta_reorder_release`).
 fn ro_advance_to(ls: &mut LinkStats, tid: usize, want: u16) {
-    // **Ein Sprung weiter als das Fenster laeuft nicht Platz fuer Platz.**
-    // Die Entfernung kann bis 2047 betragen (halber Sequenzraum); dann
-    // waeren das 2047 Runden fuer hoechstens 64 liegende Rahmen. Hier
-    // wird stattdessen einmal ueber das Fenster gegangen und der Kopf
-    // direkt gesetzt.
+    // A jump beyond the window does not step slot by slot. The distance can
+    // be up to 2047 (half the sequence space), which would be 2047 rounds for
+    // at most 64 held frames; instead walk the window once and set the head
+    // directly.
     let dist = want.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
     if dist as usize > RO_WIN {
         for k in 0..RO_WIN {
@@ -5582,15 +5149,13 @@ fn ro_advance_to(ls: &mut LinkStats, tid: usize, want: u16) {
     }
 }
 
-/// Eine Sitzung beginnt: der ADDBA nennt die Startsequenz.
-/// Eine Sitzung beenden und alles herausgeben, was noch liegt.
+/// Ends a session and drops everything still held.
 ///
-/// **Gerufen beim Wiederverbinden.** Eine Block-Ack-Sitzung gehoert der
-/// ASSOZIATION: nach einem Wechsel haelt der Puffer sonst Rahmen der
-/// neuen Zelle gegen die Folgenummern der alten, und die Plaetze im Pool
-/// bleiben belegt. Die zurueckgehaltenen Rahmen werden VERWORFEN, nicht
-/// zugestellt — sie gehoeren zu einer Verbindung, die es nicht mehr
-/// gibt, und TCP holt sie sich ohnehin neu.
+/// Called on reconnect. A block ack session belongs to the association:
+/// after a switch the buffer would hold frames of the new cell against the
+/// sequence numbers of the old one, and pool slots would stay taken. Held
+/// frames are dropped, not delivered; they belong to a link that no longer
+/// exists, and TCP fetches them again anyway.
 fn ro_close(ls: &mut LinkStats, tid: usize) {
     if tid >= RO_TIDS {
         return;
@@ -5608,24 +5173,23 @@ fn ro_close(ls: &mut LinkStats, tid: usize) {
     ls.ro_since[tid] = 0;
 }
 
+/// A session starts: the ADDBA names the starting sequence.
 fn ro_open(ls: &mut LinkStats, tid: u8, ssn: u16) {
     let t = tid as usize;
     if t >= RO_TIDS {
         return;
     }
     ls.ro_on[t] = true;
-    // **Bits 4..15, nicht das ganze Feld.** Das Block-Ack-Startfeld ist
-    // ein Sequenz-KONTROLLfeld: die unteren vier Bits sind die
-    // Fragmentnummer. Wer es ungeschoben nimmt, setzt den Kopf um das
-    // Sechzehnfache daneben — und der erste echte Rahmen sieht dann aus
-    // wie einer aus der fernen Vergangenheit.
+    // Bits 4..15, not the whole field. The block ack starting sequence is a
+    // sequence control field whose lower four bits are the fragment number;
+    // unshifted, the head would be off by a factor of sixteen.
     ls.ro_head[t] = (ssn >> 4) & 0x0fff;
     ls.ro_held[t] = 0;
     ls.ro_slot[t] = [0; RO_WIN];
 }
 
-/// **Der Eintritt.** Ohne Sitzung geht der Rahmen unveraendert durch —
-/// das ist der Zustand vor dem Handschlag und jeder Rahmen ohne QoS.
+/// The entry point. Without a session the frame passes unchanged, as
+/// before the handshake and for every non-QoS frame.
 fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
                       mpdu: &[u8]) {
     if !have_sn || tid >= RO_TIDS || !ls.ro_on[tid] {
@@ -5633,23 +5197,21 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
         return;
     }
     let d = sn.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
-    // **Der Sequenzraum ist 12 Bit, also ist „aelter" die obere Haelfte.**
-    // Ein Rahmen unter dem Kopf ist zu spaet und war laengst durch ein
-    // Loch oder eine Frist ersetzt — ihn jetzt noch zuzustellen hiesse,
-    // die Reihenfolge, die wir gerade hergestellt haben, wieder zu
-    // brechen.
+    // The sequence space is 12 bits, so "older" is the upper half. A frame
+    // below the head is too late and was already skipped by a hole or a
+    // timeout; delivering it now would break the order just restored.
     if d >= 0x800 {
         ls.ro_old += 1;
         return;
     }
     if d >= RO_WIN as u16 {
-        // Der Sender ist weiter, als unser Fenster reicht: den Kopf
-        // nachziehen, bis `sn` gerade noch hineinpasst.
+        // The sender is ahead of our window: advance the head until `sn`
+        // just fits.
         let want = sn.wrapping_sub(RO_WIN as u16 - 1) & 0x0fff;
         ro_advance_to(ls, tid, want);
     }
     if sn == ls.ro_head[tid] && ls.ro_slot[tid][(sn as usize) % RO_WIN] == 0 {
-        // Der Normalfall: er passt genau, nichts muss liegenbleiben.
+        // The normal case: it fits exactly, nothing is held.
         ls.ro_head[tid] = (ls.ro_head[tid] + 1) & 0x0fff;
         deliver_mpdu(ls, mpdu);
         ro_release_ready(ls, tid);
@@ -5657,8 +5219,8 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
     }
     let pos = (sn as usize) % RO_WIN;
     if ls.ro_slot[tid][pos] != 0 {
-        // Schon belegt — ein Duplikat, das der Tiefe-1-Zwischenspeicher
-        // nicht gesehen hat, weil andere Rahmen dazwischen lagen.
+        // Slot already taken: a duplicate the depth-1 cache missed because
+        // other frames came in between.
         ls.ro_old += 1;
         return;
     }
@@ -5671,9 +5233,8 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
             ls.ro_held[tid] += 1;
         }
         None => {
-            // **Ein voller Pool wird ZUGESTELLT, nicht verworfen.** Die
-            // Reihenfolge leidet, die Daten nicht — und der Zaehler sagt,
-            // dass es passiert ist.
+            // A full pool delivers rather than drops. Order suffers, the data
+            // does not, and the counter records it.
             ls.ro_full += 1;
             deliver_mpdu(ls, mpdu);
         }
@@ -5681,15 +5242,12 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
     ro_release_ready(ls, tid);
 }
 
-/// Einmal je Runde: ein Loch, das zu lange offen ist, wird uebersprungen.
-/// Ohne das haelt ein einziger verlorener Rahmen den Strom an, bis der
-/// Sender 64 weitere geschickt hat.
+/// Once per round: a hole open too long is skipped. Otherwise a single lost
+/// frame stalls the stream until the sender has sent 64 more.
 fn ro_tick(ls: &mut LinkStats) {
-    // **Zuerst die billige Frage.** Diese Funktion steht in der
-    // Pumpschleife, und die dreht ueber eine Million Mal je Sitzung. Der
-    // Normalfall ist „es liegt nichts" — dann darf sie keinen einzigen
-    // Wirtsaufruf kosten. `now_us()` wird erst gefragt, wenn wirklich ein
-    // Loch offen ist.
+    // The cheap check first. This runs in the pump loop on every iteration,
+    // and the normal case "nothing held" must cost no host call; `now_us()`
+    // is asked only when a hole is open.
     if ls.ro_held.iter().all(|&h| h == 0) {
         return;
     }
@@ -5702,8 +5260,8 @@ fn ro_tick(ls: &mut LinkStats) {
             continue;
         }
         ls.ro_timeout += 1;
-        // Den Kopf um EINEN weiterschieben — das Loch ist damit
-        // uebersprungen — und dann alles herausgeben, was zusammenhaengt.
+        // Advance the head by one, skipping the hole, then release
+        // everything contiguous.
         let want = (ls.ro_head[tid] + 1) & 0x0fff;
         ro_advance_to(ls, tid, want);
         ro_release_ready(ls, tid);
@@ -5711,8 +5269,8 @@ fn ro_tick(ls: &mut LinkStats) {
     }
 }
 
-/// In wie vielen Millisekunden `ro_tick` das naechste Loch ueberspringt;
-/// None, solange nichts zurueckgehalten wird.
+/// In how many milliseconds `ro_tick` skips the next hole; `None` while
+/// nothing is held.
 fn ro_due_ms(ls: &LinkStats) -> Option<u64> {
     if ls.ro_held.iter().all(|&h| h == 0) {
         return None;
@@ -5724,13 +5282,13 @@ fn ro_due_ms(ls: &LinkStats) -> Option<u64> {
         .min()
 }
 
-/// **Eine MPDU zustellen: umwandeln, oder ein A-MSDU entpacken.**
+/// Delivers an MPDU: convert it, or unpack an A-MSDU.
 ///
-/// Der Ort in der Kette ist der von mac80211: NACH dem Umsortieren
-/// (`ieee80211_rx_h_amsdu`, rx.c:3114, steht hinter
-/// `ieee80211_rx_reorder_ampdu`). Ob die MPDU ein A-MSDU traegt, sagt das
-/// Bit 7 des QoS-Steuerfelds (`IEEE80211_QOS_CTL_A_MSDU_PRESENT`,
-/// rx.c:914-915) — und NUR das.
+/// The position in the chain is mac80211's: after reordering
+/// (`ieee80211_rx_h_amsdu`, rx.c:3114, follows
+/// `ieee80211_rx_reorder_ampdu`). Whether the MPDU carries an A-MSDU is
+/// decided by bit 7 of the QoS control field
+/// (`IEEE80211_QOS_CTL_A_MSDU_PRESENT`, rx.c:914-915) and nothing else.
 fn deliver_mpdu(ls: &mut LinkStats, f: &[u8]) {
     let mut out = [0u8; 2048];
     let qos = f.len() >= 26 && f[0] & (DOT11_STYPE_QOS << 4) != 0;
@@ -5743,27 +5301,27 @@ fn deliver_mpdu(ls: &mut LinkStats, f: &[u8]) {
     }
 }
 
-/// cfg80211 `ieee80211_amsdu_to_8023s` (util.c:842-937), fuer eine
-/// Station an einer Nicht-Mesh-Zelle — also `iftype` STATION,
-/// `mesh_control` 0, und aus `__ieee80211_rx_h_amsdu` (rx.c:3028-3058)
-/// `check_da` = unsere Adresse (addr1), `check_sa` = keine.
+/// cfg80211 `ieee80211_amsdu_to_8023s` (util.c:842-937) for a station in a
+/// non-mesh cell: `iftype` STATION, `mesh_control` 0, and from
+/// `__ieee80211_rx_h_amsdu` (rx.c:3028-3058) `check_da` = our address
+/// (addr1), `check_sa` = none.
 ///
-/// Der Rumpf ist eine Folge von Teilrahmen:
+/// The body is a sequence of subframes:
 ///
-///     DA(6) SA(6) Laenge(2, gross-endig) | MSDU | Fuellung auf 4 Byte
+///     DA(6) SA(6) length(2, big-endian) | MSDU | padding to 4 bytes
 ///
-/// Der letzte hat keine Fuellung. Passt EIN Teilrahmen nicht in den Rest,
-/// wird die GANZE MPDU verworfen (`goto purge`) — auch die Teilrahmen, die
-/// schon passten. Wir sammeln deshalb erst und stellen dann zu.
+/// The last one has no padding. If one subframe does not fit the rest, the
+/// whole MPDU is dropped (`goto purge`), including subframes that fit, so
+/// we validate first and deliver after.
 ///
-/// Abwehr der A-MSDU-Einschleusung (util.c:824-825, CVE-2020-24588): beim
-/// ERSTEN Teilrahmen darf die Ziel-Adresse nicht der LLC/SNAP-Kopf sein —
-/// sonst hat jemand eine gewoehnliche MSDU in ein A-MSDU umgedeutet.
+/// A-MSDU injection defense (util.c:824-825, CVE-2020-24588): the first
+/// subframe's destination address must not be the LLC/SNAP header,
+/// otherwise a plain MSDU was reinterpreted as an A-MSDU.
 fn amsdu_to_8023s(ls: &mut LinkStats, f: &[u8], out: &mut [u8; 2048]) {
     ls.amsdu_rx += 1;
-    // Wo der Rumpf steht: derselbe Kopf-/CCMP-/Schwanz-Abzug wie bei einer
-    // einzelnen MSDU, nur ohne LLC/SNAP-Suche (der Rumpf eines A-MSDU
-    // beginnt mit dem ersten Teilrahmenkopf).
+    // Locate the body: the same header/CCMP/trailer arithmetic as for a
+    // single MSDU, without the LLC/SNAP search (an A-MSDU body starts with
+    // the first subframe header).
     let hdrlen = data_hdrlen(f);
     let prot = f[1] & DOT11_FC_PROTECTED != 0;
     let start = hdrlen + if prot { 8 } else { 0 };
@@ -5775,9 +5333,9 @@ fn amsdu_to_8023s(ls: &mut LinkStats, f: &[u8], out: &mut [u8; 2048]) {
     let body = &f[start..f.len() - trailing];
     let da_ok: [u8; 6] = [f[4], f[5], f[6], f[7], f[8], f[9]];
 
-    // Zwei Durchgaenge statt einer Liste: der erste prueft ALLE
-    // Teilrahmen (einer kaputt heisst alle verworfen), der zweite stellt
-    // zu. Eine feste Liste haette eine Obergrenze, die cfg80211 nicht hat.
+    // Two passes instead of a list: the first checks all subframes (one bad
+    // means all dropped), the second delivers. A fixed list would impose a
+    // limit cfg80211 does not have.
     if amsdu_walk(body, &da_ok, &mut |_, _| {}).is_none() {
         ls.amsdu_bad += 1;
         return;
@@ -5785,9 +5343,9 @@ fn amsdu_to_8023s(ls: &mut LinkStats, f: &[u8], out: &mut [u8; 2048]) {
     amsdu_walk(body, &da_ok, &mut |o, len| {
         let hdr = &body[o..o + 14];
         let msdu = &body[o + 14..o + 14 + len];
-        // `ieee80211_get_8023_tunnel_proto` (util.c:512-525): steht vorn
-        // RFC 1042 (ausser AARP und IPX) oder der Bruecken-Tunnel, wird
-        // er samt Typfeld abgenommen und der Typ in den 802.3-Kopf gesetzt.
+        // `ieee80211_get_8023_tunnel_proto` (util.c:512-525): with RFC 1042
+        // (except AARP and IPX) or bridge tunnel in front, it is removed with
+        // its type field and the type goes into the 802.3 header.
         let (proto, payload) = if msdu.len() >= 8 {
             let p = [msdu[6], msdu[7]];
             let rfc1042 = msdu[0..6] == LLC_SNAP_HDR
@@ -5809,10 +5367,9 @@ fn amsdu_to_8023s(ls: &mut LinkStats, f: &[u8], out: &mut [u8; 2048]) {
     });
 }
 
-/// Die Schleife aus `ieee80211_amsdu_to_8023s` ohne das Zustellen: geht
-/// die Teilrahmen durch, ruft `each(anfang, laenge)` fuer jeden, der an
-/// uns geht (oder Rundruf ist), und gibt `None` zurueck, wo cfg80211
-/// `goto purge` nimmt.
+/// The loop of `ieee80211_amsdu_to_8023s` without delivery: walks the
+/// subframes, calls `each(start, length)` for each one addressed to us (or
+/// broadcast), and returns `None` where cfg80211 does `goto purge`.
 fn amsdu_walk(body: &[u8], da_ok: &[u8; 6],
               each: &mut dyn FnMut(usize, usize)) -> Option<()> {
     let mut offset = 0usize;
@@ -5825,11 +5382,11 @@ fn amsdu_walk(body: &[u8], da_ok: &[u8; 6],
         let len = u16::from_be_bytes([body[offset + 12], body[offset + 13]]) as usize;
         let subframe_len = 14 + len;
         let padding = (4 - (subframe_len & 3)) & 3;
-        // „the last MSDU has no padding"
+        // "the last MSDU has no padding"
         if subframe_len > remaining {
             return None;
         }
-        // „mitigate A-MSDU aggregation injection attacks"
+        // "mitigate A-MSDU aggregation injection attacks"
         if offset == 0 && body[0..6] == LLC_SNAP_HDR {
             return None;
         }
@@ -5843,13 +5400,9 @@ fn amsdu_walk(body: &[u8], da_ok: &[u8; 6],
     Some(())
 }
 
-/// **Der EINE Ausgang fuer einen empfangenen Datenrahmen.**
-///
-/// Herausgeloest, weil es ihn seit dem Umsortierpuffer ZWEIMAL gibt: der
-/// Rahmen, der in Reihenfolge ankommt, geht sofort hier hindurch; einer,
-/// der ein Loch fuellt, wird gespeichert und spaeter durch dieselbe Tuer
-/// geschickt. Zwei Ausgaenge waeren zwei Semantiken, und eine davon wuerde
-/// irgendwann abweichen.
+/// The single exit for a received data frame. An in-order frame passes
+/// through here at once; one that fills a hole is stored and sent through
+/// the same door later, so both paths share one semantics.
 fn deliver(ls: &mut LinkStats, eth: &[u8], is_eapol: bool) {
     if eth.len() < 14 {
         return;
@@ -5859,21 +5412,15 @@ fn deliver(ls: &mut LinkStats, eth: &[u8], is_eapol: bool) {
         if ls.authorized {
             ls.rekey_rx += 1;
         }
-        // `EV_EAPOL_RX` = [0x84][len u16 LE][Rahmen] — und der
-        // Rahmen ist der EAPOL-RUMPF hinter dem Ethertyp.
+        // `EV_EAPOL_RX` = [0x84][len u16 LE][frame], where the frame is the
+        // EAPOL body after the ethertype.
         //
-        // **Auf die ANGESAGTE Laenge kuerzen.** Der EAPOL-Kopf
-        // traegt sie in den Bytes 2..4 (802.1X, gross-endig), und
-        // der ganze Rahmen ist 4 + diese Zahl. Was die Hardware
-        // dahinter anhaengt, gehoert nicht dazu: `WLAN_RCR_CFG`
-        // hat APP_FCS, APP_MIC und APP_ICV gesetzt, also liefert
-        // der Deskriptor mehr Bytes, als der Rahmen lang ist.
-        //
-        // **Das ist nicht kosmetisch.** `wifid` rechnet den MIC
-        // ueber die GANZE Scheibe, die es bekommt
-        // (`compute_mic`: `frame.len()`). Vier Bytes zu viel, und
-        // msg3 schlaegt fehl — msg1 nicht, denn das traegt gar
-        // keinen MIC. Genau dieses Muster stand im Geraetelauf.
+        // Trim to the declared length. The EAPOL header carries it in bytes
+        // 2..4 (802.1X, big-endian), and the whole frame is 4 + that number.
+        // `WLAN_RCR_CFG` sets APP_FCS, APP_MIC and APP_ICV, so the descriptor
+        // delivers more bytes than the frame has. `wifid` computes the MIC
+        // over the whole slice it gets (`compute_mic`: `frame.len()`), so
+        // extra bytes would make msg3 fail.
         let raw = &eth[14..];
         let body = if raw.len() >= 4 {
             let declared =
@@ -5905,6 +5452,15 @@ fn deliver(ls: &mut LinkStats, eth: &[u8], is_eapol: bool) {
     }
 }
 
+/// The driver loop: drain the RX ring, collect TX reports, execute `wifid`
+/// commands, report events upward.
+///
+/// `wifid` computes the handshake (`tools/wasm/wifid/core/src/eapol.rs`);
+/// the driver carries the frames and writes the finished keys. Per
+/// `docs/spec/WIFI_CLASS_ABI.md` §1 the driver never sees the PSK.
+///
+/// `frist_us == 0` means run forever. Link and counters come from the
+/// caller so stage 6b continues where 6a stopped.
 fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
              frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
@@ -5916,7 +5472,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
     static mut ETHBUF: [u8; 2048] = [0; 2048];
     static mut CMDBUF: [u8; 2048] = [0; 2048];
-    // SAFETY: einfaedig, je ein Rufer, keiner verlaesst diese Funktion.
+    // SAFETY: single-threaded, one caller each, none leaves this function.
     let (rxbuf, ethbuf, cmdbuf) = unsafe {
         (&mut *core::ptr::addr_of_mut!(RXBUF7),
          &mut *core::ptr::addr_of_mut!(ETHBUF),
@@ -5924,63 +5480,53 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     };
 
 
-    // `frist_us == 0` heisst: nicht mehr aufhoeren. Stufe 6a gibt acht
-    // Sekunden vor — der Handschlag braucht vier Rahmen und ist in
-    // Millisekunden durch, wer laenger wartet, wartet auf einen Fehler.
-    // Stufe 6b ruft dieselbe Schleife ohne Frist.
+    // Stage 6a passes eight seconds: the handshake takes four frames and
+    // completes within milliseconds, so waiting longer means waiting for an
+    // error. Stage 6b calls the same loop without a deadline.
 
-    // Der Rueckruf braucht die BSSID, um einen Deauth der EIGENEN Zelle
-    // von dem des Nachbarn zu unterscheiden. Als Kopie, damit er `link`
-    // nicht festhalten muss, waehrend die Schleife darauf schreibt.
+    // The callback needs the BSSID to tell a deauth of our own cell from a
+    // neighbor's. A copy, so it does not hold `link` while the loop writes
+    // to it.
     let bssid = link.bssid;
 
     let t0 = host::now_us();
     let mut report_ms = host::now_ms();
     let mut rx_silent_ms = host::now_ms();
     let mut watch_dog_ms = host::now_ms();
-    // Ein Datenrahmen je Watchdog-Takt bekommt eine Quittung.
+    // One data frame per watchdog tick requests a TX report.
     let mut probe_due = true;
     let mut leer_in_folge = 0u32;
     if ls.pump_us0 == 0 {
         ls.pump_us0 = host::now_us();
     }
-    // **Das Empfangsfenster der Aggregation, aus `sys/config/wifi`.**
-    // `ampdu: off` schaltet sie ab, `ampdu: 16` gibt ein anderes
-    // Fenster. Die Vorgabe ist klein und der Grund steht bei
-    // `build_addba_resp`: es gibt keinen Umsortierpuffer.
+    // The receive aggregation window from `sys/config/wifi`: `ampdu: off`
+    // disables it, `ampdu: 16` sets another window.
     let ampdu_buf = read_ampdu_buf();
-    // **`txagg:` deckelt nur die SENDErichtung.** `ampdu:` ist die
-    // Empfangsseite und bleibt, wo sie war; die zwei Richtungen sind
-    // getrennte Sitzungen und gehoeren nicht unter einen Schalter.
-    // Vorgabe AN — der Rueckfall `off` ist genau der Zustand von 0.51.1,
-    // also einer, der gemessen ist.
+    // `txagg:` limits only the transmit direction. `ampdu:` is the receive
+    // side; the two directions are separate sessions and do not share a
+    // switch. Default on.
     let txagg = read_txagg();
     let roam_mode = read_roam_mode();
-    // `bss_conf.beacon_int` — 100 TU ist der Wert, den praktisch jeder AP
-    // ansagt; aus dem Beacon gelesen wird er noch nicht, und eine Null
-    // waere hier schlimmer als der Normalfall (sie teilt).
+    // `bss_conf.beacon_int`: 100 TU is what practically every AP announces.
+    // It is not read from the beacon yet, and zero would be worse than the
+    // normal case (it divides).
     let beacon_int: u16 = 100;
-    // **Die Breite, auf der die PHY steht, geht in den Empfangsstatus.**
-    // Hier stand eine NULL, und die heisst „20 MHz": jeder Rahmen mit
-    // `rxsc == 0` — also jeder, der die ganze Breite belegt und damit der
-    // Normalfall — wurde als 20 MHz gemeldet. Das ist keine fehlende
-    // Messung, sondern eine falsche.
+    // The width the PHY is on goes into the RX status: zero would mean
+    // 20 MHz, and every frame with `rxsc == 0` (the full width, the normal
+    // case) would be reported as 20 MHz.
     let mut cur_bw = d.cur_bw as u8;
     while frist_us == 0 || host::now_us() - t0 < frist_us {
         let now = host::now_ms();
         let t_iter = host::now_us();
         let mut wd_ran = false;
 
-        // ── Empfangen ────────────────────────────────────────────
+        // ── Receive ──────────────────────────────────────────────
         let mut acc = rx::WdAcc::new(link.si.avg_rssi);
-        // **Die Zeit IM Ring, und warum sie hier gemessen wird.**
-        // `rahmen/blick 1,2` kann zweierlei heissen: schnell genug, oder
-        // exakt so langsam wie die Ankunft. Zwischen beidem entscheidet
-        // nur, wieviel Wanduhrzeit im Empfangspfad steckt. Gemessen
-        // wird NUR, wenn etwas kam (rund 1400 Mal je Sekunde, also
-        // 2800 Wirtsaufrufe) — bei den 65 000 leeren Bliecken waere es
-        // die Messung, die den Zustand erzeugt.
-        // Fuer den Rueckruf: er darf `d` nicht anfassen.
+        // Time spent in the ring. Frames per poll near one can mean fast
+        // enough or exactly as slow as arrival; only the wall time in the
+        // receive path tells them apart. Measured only when something came,
+        // so the measurement does not dominate the empty polls.
+        // For the callback, which must not touch `d`.
         let messen = d.stats.rx_throughput >= 10;
         let t_rx0 = host::now_us();
         let got = pci::rx_poll(h, trx, 64, rxbuf, &mut d.dm, &mut d.path_div,
@@ -5989,19 +5535,13 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             if st.crc_err {
                 return;
             }
-            // **In welcher Breite kam er herein — und NUR, wenn die
-            // Frage ueberhaupt beantwortet ist.**
+            // The width the frame came in, only when the descriptor answers
+            // it. The width field (`GET_RX_DESC_BW`) is filled only on
+            // frames carrying a PHY status, one of many in an A-MPDU; empty
+            // fields would read as 20 MHz.
             //
-            // Das Breitenfeld des Deskriptors (`GET_RX_DESC_BW`) ist nur
-            // auf den Rahmen gefuellt, die einen PHY-Status tragen; in
-            // einem A-MPDU ist das einer von vielen. Ohne diese Bedingung
-            // stand im ersten Geraetelauf `20:72302 40:32 80:12482` —
-            // und das las sich, als kaeme das meiste schmal an, waehrend
-            // die Ratenmeldung `VHT 2SS` sagte, was es nur bei 80 MHz
-            // gibt. Die 12482 waren echt, die 72302 waren leere Felder.
-            //
-            // Es steht vor dem Ausstieg unten: eine Breite, die nur die
-            // weiterverarbeiteten Rahmen misst, misst den Ausstieg mit.
+            // It precedes the early exit below, so the count covers all
+            // frames, not only those processed further.
             if st.phy_status {
                 acc.bw_cnt[(st.bw as usize).min(3)] += 1;
             }
@@ -6010,10 +5550,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             if off >= pkt.len() {
                 return;
             }
-            // **C2H wurde bis 0.26.0 verworfen.** Der Ratenbericht der
-            // Firmware ist die Eingabe von `config_swing_table` und
-            // `rrsr_update`; ohne ihn rechnet der Watchdog auf der
-            // Anfangsrate.
+            // C2H: the firmware rate report feeds `config_swing_table` and
+            // `rrsr_update`; without it the watchdog computes on the initial
+            // rate.
             if st.is_c2h {
                 if let Some(c) = fw::c2h_parse(&pkt[off..]) {
                     if c.id as u32 == C2H_RA_RPT
@@ -6027,9 +5566,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                             && c.payload.first().copied()
                                == Some(C2H_CCX_RPT as u8))
                     {
-                        // **Beide Wege.** `C2H_CCX_TX_RPT` traegt die
-                        // Quittung selbst (V0), `C2H_HALMAC` traegt sie
-                        // als Unterkommando 0x0f (V1) — fw.c:93-113.
+                        // Both paths: `C2H_CCX_TX_RPT` carries the report
+                        // directly (V0), `C2H_HALMAC` as subcommand 0x0f
+                        // (V1), fw.c:93-113.
                         let v1 = c.id as u32 == C2H_HALMAC;
                         if let Some(r) = fw::tx_report_parse(c.payload, v1) {
                             if acc.n_tx_rpt < acc.tx_rpt.len() {
@@ -6038,10 +5577,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                             }
                         }
                     } else if acc.n_c2h_seen < acc.c2h_seen.len() {
-                        // **Und was sonst hereinkommt, wird gezaehlt.**
-                        // Dass die Quittung ausblieb, war in 0.26.0 eine
-                        // Null ohne Hinweis; ein Zensus der Kennungen
-                        // haette die Frage in EINEM Lauf beantwortet.
+                        // Count whatever else arrives, so a missing report
+                        // shows up with the IDs that came instead.
                         acc.c2h_seen[acc.n_c2h_seen] = c.id;
                         acc.n_c2h_seen += 1;
                     }
@@ -6049,72 +5586,55 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
-            // mlme.c:131-145 — JEDER Rahmen vom AP setzt die Wache
-            // zurueck, nicht nur eine Bake. `addr2` ist der Sender, und
-            // bei allem, was von ihm kommt, ist das die BSSID.
+            // mlme.c:131-145: every frame from the AP resets the watchdog,
+            // not only a beacon. `addr2` is the sender, the BSSID for
+            // anything from it.
             if f.len() >= 16 && f[10..16] == bssid {
                 acc.heard_ap = true;
-                // **Eine Bake DIESER Zelle kann eine Wechselansage
-                // tragen.** Gelesen wird sie hier, ausgefuehrt draussen:
-                // der Kanalwechsel braucht `trx`, und der Rueckruf darf
-                // es nicht halten.
+                // A beacon of this cell can carry a channel switch
+                // announcement. Parsed here, executed outside: the switch
+                // needs `trx`, which the callback must not hold.
                 if f[0] == 0x80 {
                     match parse_csa(f) {
                         Some(c) => acc.csa = Some(c),
                         // mlme.c:2820-2824: `else if (res)
-                        // ieee80211_sta_abort_chanswitch(link)` — `res`
-                        // ist 1, wenn in dieser Bake kein CSA-Element
-                        // steht. **Eine Ansage, die verschwindet, ist
-                        // zurueckgezogen.**
+                        // ieee80211_sta_abort_chanswitch(link)`; `res` is 1
+                        // when this beacon has no CSA element. An
+                        // announcement that disappears is withdrawn.
                         None => acc.beacon_ohne_csa = true,
                     }
-                    // mlme.c:6789-6798 — der Pegel JEDER Bake dieser
-                    // Zelle geht in den geglaetteten Wert.
+                    // mlme.c:6789-6798: the level of every beacon of this
+                    // cell goes into the smoothed value.
                     acc.beacon_dbm = Some(st.signal_power);
                 }
             }
-            // **Wieviele Rahmen der AP je Sendevorgang buendelt.**
+            // How many frames the AP bundles per transmission. `ppdu_cnt`
+            // is two bits in the RX descriptor counting PPDUs (rtw88 reads
+            // it and never uses it); a change means a new transmission.
+            // `frames / PPDUs` is the real aggregate size in the receive
+            // direction, counted by hardware. It is the counterpart to the
+            // TX ring numbers and tells whether low efficiency is the link
+            // or missing aggregation.
             //
-            // `ppdu_cnt` sind zwei Bit im Empfangsdeskriptor, und sie
-            // zaehlen die PPDUs hoch — rtw88 liest das Feld und benutzt
-            // es nie. Ein Wechsel heisst: neuer Sendevorgang. Damit ist
-            // `Rahmen / PPDUs` die ECHTE Aggregatgroesse in
-            // Empfangsrichtung, von der Hardware gezaehlt und nicht
-            // gerechnet.
-            //
-            // Sie ist die Gegenprobe zu `sendering` auf der Sendeseite
-            // und beantwortet die Frage, die keine Durchsatzzahl
-            // beantwortet: liegen die 41 % Effizienz an der STRECKE oder
-            // daran, dass gar nicht gebuendelt wird.
-            //
-            // Nur DATENrahmen: eine Bake ist immer ihr eigener
-            // Sendevorgang und wuerde den Schnitt druecken.
+            // Data frames only: a beacon is always its own transmission and
+            // would lower the average.
             if f[0] & 0x0c == DOT11_FC_TYPE_DATA {
                 if st.ppdu_cnt != ls.last_ppdu {
                     ls.last_ppdu = st.ppdu_cnt;
                     ls.rx_ppdu_n += 1;
-                    // **Der Abstand zweier Sendevorgaenge, von der
-                    // HARDWARE gestempelt.** `tsf_low` ist die
-                    // 802.11-Uhr in Mikrosekunden, gesetzt beim Empfang
-                    // — keine Wirtsuhr, keine Schaetzung.
+                    // Interval between two transmissions, stamped by the
+                    // hardware: `tsf_low` is the 802.11 clock in
+                    // microseconds, set on reception. It shows how much of
+                    // the time the AP transmits at all: an interval of 3 ms
+                    // for a 1 ms aggregate means the air is a third busy,
+                    // and then the link rate is not the limit.
                     //
-                    // Sie beantwortet die Frage, an der jede Rechnung
-                    // aus Raten und Laengen scheitert: **wieviel von der
-                    // Zeit sendet der AP ueberhaupt?** Steht der Abstand
-                    // bei 3 ms, waehrend das Aggregat 1 ms dauert, ist
-                    // die Luft zu einem Drittel belegt — und dann ist
-                    // nicht die Strecke der Deckel.
-                    //
-                    // Der KLEINSTE Abstand ist der Massstab: er ist das,
-                    // was die Strecke kann, wenn nichts dazwischenkommt.
+                    // The smallest interval is the yardstick: what the link
+                    // can do when nothing interferes.
                     let dt = st.tsf_low.wrapping_sub(ls.last_tsf);
                     let d = if messen { dt } else { 0 };
-                    // **Die langen Abstaende werden EINGEORDNET, nicht
-                    // verworfen.** In 0.53.0 fielen sie aus der Rechnung,
-                    // und genau sie waren der Befund: 190 Stueck a 13 ms
-                    // in einem Lauf von 5,4 s — 45 % der Zeit. Wer sie
-                    // wegwirft, misst die Strecke nur dann, wenn sie
-                    // laeuft.
+                    // Long intervals are bucketed, not discarded: dropping
+                    // them would measure the link only while it runs.
                     if ls.last_tsf != 0 && d > 0 {
                         if d >= GAP_IDLE_US {
                             ls.rx_gap_idle += 1;
@@ -6136,26 +5656,25 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ls.last_tsf = st.tsf_low;
                 }
                 ls.rx_data_ppdu_frames += 1;
-                // Der Augenblick, in dem der Kernel Daten bekommt —
-                // Anfang der Messstrecke unten.
+                // The moment the kernel gets data, the start of the
+                // turnaround measurement below.
                 ls.last_rx_at = host::now_us();
             }
-            // rx.c:100-133 + phy.c:678-704 — was der Watchdog braucht.
+            // rx.c:100-133 + phy.c:678-704: what the watchdog needs.
             rx::watchdog_feed(&mut acc, st, f, &mac, &bssid,
                               hal.rf_path_num);
-            // **Zuerst der Rauswurf.** Er ist ein Verwaltungsrahmen und
-            // kaeme durch `rx_to_8023` nicht hindurch. Nur SEHEN hier —
-            // gehandelt wird nach dem Ringleeren.
-            // Der Zensus der Verwaltungsrahmen laeuft VOR dem Rauswurf
-            // und schliesst ihn ein — ein Deauth ist auch einer.
+            // Disconnects first: a deauth is a management frame and would
+            // not pass `rx_to_8023`. Only observe here, act after draining.
+            // The management census runs before and includes it, a deauth
+            // is one too.
             if let Some((sub, act)) = rx::mgmt_census(f, &bssid) {
                 if acc.n_mgmt < acc.mgmt.len() {
                     acc.mgmt[acc.n_mgmt] = (sub, act.unwrap_or((0xff, 0xff)));
                     acc.n_mgmt += 1;
                 }
-                // **Der ADDBA Request wird nur GESEHEN**, beantwortet
-                // wird er nach dem Ringleeren — ein Sendevorgang gehoert
-                // nicht in einen Rueckruf, der `trx` nicht halten darf.
+                // The ADDBA request is only recorded here and answered after
+                // draining: a transmission does not belong in a callback that
+                // must not hold `trx`.
                 if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_ADDBA_REQ))
                 {
                     if let Some(r) = sta::parse_addba_req(f) {
@@ -6179,23 +5698,18 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 return;
             }
-            // **Doppelte 802.11-Wiederholungen verwerfen** —
+            // Drop duplicate 802.11 retransmissions:
             // `ieee80211_rx_h_check_dup` (rx.c:1438-1490), 802.11-2012
-            // §9.3.2.10 „Duplicate detection and recovery".
+            // §9.3.2.10 "Duplicate detection and recovery".
             //
-            // Der AP wiederholt einen Rahmen auf MAC-Ebene, wenn unsere
-            // Quittung ausbleibt oder zu spaet kommt. Die Wiederholung
-            // traegt dasselbe Sequenz-Kontrollfeld und das Retry-Bit. Wer
-            // sie nicht verwirft, liefert dieselben Bytes ZWEIMAL an TCP.
+            // The AP retransmits at MAC level when our ACK is missing or
+            // late; the retransmission carries the same sequence control
+            // field and the retry bit. Not dropping it delivers the same
+            // bytes to TCP twice.
             //
-            // Am Geraet gemessen (2026-09-21, WLAN mit D-SACK): der Server
-            // meldete `dsack=481` bei `retrans=186`. Eine TCP-Wiederholung
-            // kann hoechstens EIN Duplikat erzeugen — die uebrigen ~295
-            // entstanden also UNTER TCP, und das hier ist die Stelle.
-            //
-            // Verglichen wird das GANZE Feld, nicht nur die Sequenznummer:
-            // die unteren vier Bits sind die Fragmentnummer, und zwei
-            // Bruchstuecke desselben Rahmens sind keine Duplikate.
+            // The whole field is compared, not only the sequence number: the
+            // lower four bits are the fragment number, and two fragments of
+            // the same frame are not duplicates.
             let mut ro_tid = RO_TIDS;
             let mut ro_sn = 0u16;
             let mut ro_have = false;
@@ -6217,12 +5731,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         return;
                     }
                     ls.last_seq_ctrl[idx] = sc;
-                    // **Nur ganze Rahmen werden umsortiert.** Die unteren
-                    // vier Bits sind die Fragmentnummer; ein Bruchstueck
-                    // gehoert in die Zusammensetzung, nicht in den
-                    // Umsortierpuffer, und die faehrt mac80211 auch
-                    // getrennt (`ieee80211_rx_h_defragment` laeuft VOR
-                    // dem Puffer).
+                    // Only whole frames are reordered. The lower four bits
+                    // are the fragment number; a fragment belongs to
+                    // defragmentation, which mac80211 runs separately and
+                    // before the buffer (`ieee80211_rx_h_defragment`).
                     if is_qos && idx < RO_TIDS && sc & 0x000f == 0 {
                         ro_tid = idx;
                         ro_sn = (sc >> 4) as u16;
@@ -6230,17 +5742,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     }
                 }
             }
-            // Nur Datenrahmen mit Rumpf gehen weiter — dieselbe erste
-            // Pruefung wie in `rx_to_8023`. Umgewandelt wird erst beim
-            // Zustellen (`deliver_mpdu`), nach dem Umsortieren.
+            // Only data frames with a body continue, the same first check as
+            // in `rx_to_8023`. Conversion happens on delivery
+            // (`deliver_mpdu`), after reordering.
             if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA
                 || f[0] & DOT11_STYPE_NODATA != 0
             {
                 return;
             }
             ls.data_rx += 1;
-            // rx.c:14-32 `rtw_rx_stats` — nur UNICAST zaehlt, und
-            // gezaehlt wird die Laenge des 802.11-Rahmens.
+            // rx.c:14-32 `rtw_rx_stats`: only unicast counts, and the length
+            // of the 802.11 frame is counted.
             if f[4] & 0x01 == 0 {
                 acc.rx_unicast += f.len() as u64;
                 acc.rx_cnt += 1;
@@ -6248,13 +5760,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             deliver_or_reorder(ls, ro_tid, ro_sn, ro_have, f);
         });
 
-        // **Die Form der Schleife, ohne einen einzigen zusaetzlichen
-        // Wirtsaufruf gemessen.** Wieviele Rahmen ein Blick bringt sagt,
-        // auf welcher Seite der Deckel liegt: knapp ueber eins heisst,
-        // wir sehen schneller nach als etwas kommt (die Luft ist die
-        // Grenze); volle Stapel heissen, wir kommen nicht nach.
-        // Ein Loch, das zu lange offen steht, haelt sonst den ganzen
-        // Strom an. Einmal je Runde reicht — die Frist ist 100 ms.
+        // A hole open too long would stall the whole stream. Once per round
+        // is enough; the timeout is 100 ms.
+        // Below, the loop shape, measured without an extra host call:
+        // frames per poll near one means we look faster than frames arrive
+        // (the air is the limit); full batches mean we cannot keep up.
         ro_tick(ls);
         if got > 0 {
             ls.rx_polls += 1;
@@ -6268,24 +5778,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
 
         // mlme.c:4525-4528 `if (!ifmgd->probe_send_count)
-        // ieee80211_reset_ap_probe(sdata)` — der AP hat geantwortet.
-        // **Es zaehlt JEDER Rahmen von ihm**, nicht nur eine Antwort auf
-        // unsere Frage: wer Daten schickt, lebt.
+        // ieee80211_reset_ap_probe(sdata)`: the AP answered. Every frame from
+        // it counts, not only a reply to our probe: whoever sends data is
+        // alive.
         if let Some(dbm) = acc.beacon_dbm.take() {
             link.roam.note_beacon(dbm);
         }
-        // **Gemessen wird nur, waehrend Daten fliessen.**
-        //
-        // Die Histogramme summierten bis hierher die ganze Verbindung —
-        // elf Downloads UND zweieinhalb Minuten Leerlauf dazwischen. Ein
-        // Abstand von 19 ms zwischen zwei Rahmen heisst waehrend eines
-        // Downloads „die Strecke stand still" und im Leerlauf „es war
-        // nichts zu senden". Dieselbe Zahl, zwei Bedeutungen, und der
-        // Mittelwert darueber ist keine von beiden.
-        //
-        // `rx_throughput` steht in Mbit und wird je Watchdog (zwei
-        // Sekunden) nachgezogen. Zehn ist die Grenze zwischen
-        // Hintergrundverkehr und Uebertragung.
+        // Measure only while data flows. A 19 ms gap between two frames means
+        // "the link stalled" during a download and "nothing to send" when
+        // idle; a sum over both means neither. `rx_throughput` is in Mbit and
+        // updated per watchdog tick (two seconds); ten separates background
+        // traffic from a transfer.
         let misst = d.stats.rx_throughput >= 10;
         if acc.heard_ap && ls.poll_on {
             ls.poll_on = false;
@@ -6294,7 +5797,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             host::say("[rtl8822ce] der AP ist wieder da — Verbindung steht\n");
         }
 
-        // Was der Ringdurchlauf dem Watchdog zugetragen hat, eintragen.
+        // Merge what the ring pass collected for the watchdog.
         acc.merge(&mut d.dm, &mut link.si);
         for i in 0..4 {
             ls.bw_hist[i] = ls.bw_hist[i].saturating_add(acc.bw_cnt[i]);
@@ -6313,18 +5816,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             ls.note_mgmt(sub, cat, a);
         }
 
-        // ── Die Aggregation FRAGEN ───────────────────────────────
+        // ── Request aggregation ──────────────────────────────────
         //
-        // Der Zweig darunter beantwortet die Bitte des AP, dieser hier
-        // stellt unsere. Beides ist dieselbe Sache in zwei Richtungen,
-        // und wir hatten bis 0.52.0 nur die eine.
+        // The branch below answers the AP's request, this one makes ours:
+        // the same thing in two directions.
         //
-        // **Gefragt wird erst nach dem Vierwegehandschlag.** Vorher
-        // liegt kein Schluessel, der AP wuerde einen Verwaltungsrahmen
-        // ungeschuetzt sehen, und vor allem: bis dahin fliessen keine
-        // Daten, also gibt es nichts zu aggregieren. Es ist auch der
-        // Moment, in dem die Folgenummer noch still steht — und die
-        // Startsequenz im Antrag MUSS die sein, ab der wir senden.
+        // Ask only after the four-way handshake: before it there is no key,
+        // no data flows, so nothing to aggregate. It is also the moment the
+        // sequence number is still idle, and the starting sequence in the
+        // request must be the one we send from.
         if let Some(r) = acc.addba_resp.take() {
             if link.ba_tx.state == BaState::Gefragt
                 && r.dialog_token == link.ba_tx.token
@@ -6332,8 +5832,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 link.ba_tx.status = r.status;
                 if r.status == 0 && r.tid == link.ba_tx.tid {
                     link.ba_tx.state = BaState::Laeuft;
-                    // agg-tx.c:992 — der AP darf WENIGER zusagen, als wir
-                    // erbeten haben, und mehr als 64 kann HT nicht.
+                    // agg-tx.c:992: the AP may grant less than requested, and
+                    // HT cannot do more than 64.
                     link.ba_tx.win = r.buf_size.min(sta::BA_TX_BUF_SIZE);
                     host::loud_begin();
                     host::print("[rtl8822ce] Sende-Aggregation LAEUFT: TID ");
@@ -6371,10 +5871,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 link.ba_tx.state = BaState::Aufgegeben;
                 host::say("[rtl8822ce] Sende-Aggregation: der AP hat auf drei ADDBA Requests\n\x20         nicht geantwortet. Jeder Rahmen geht einzeln hinaus.\n");
             } else {
-                // Die zwei Zahlen fuer den Deskriptor kommen aus den
-                // HT-Faehigkeiten des AP und stehen fest, sobald er
-                // zusagt — gerechnet werden sie hier, weil `caps` hier
-                // zur Hand ist.
+                // The two descriptor values come from the AP's HT
+                // capabilities and are fixed once it agrees; computed here
+                // because `caps` is at hand.
                 link.ba_tx.factor = sta::tx_ampdu_factor(caps.ht_ampdu_factor);
                 link.ba_tx.density = sta::tx_ampdu_density(caps.ht_ampdu_density);
                 link.ba_tx.token = link.ba_tx.token.wrapping_add(1);
@@ -6406,20 +5905,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
-        // **Erst wenn die Sitzung steht, wird QoS gesendet.** Ein
-        // QoS-Rahmen ohne Sitzung ginge auch, aber dann aendert sich die
-        // Rahmenart mitten im Betrieb, und die Folgenummer waere schon
-        // vergeben, bevor der Antrag seine Startsequenz nennt.
+        // Send QoS only once the session is up. A QoS frame without a
+        // session would work, but the frame type would change mid-link and
+        // the sequence number would be used before the request names its
+        // starting sequence.
         let qos_tid = if link.ba_tx.state == BaState::Laeuft {
             Some(link.ba_tx.tid)
         } else {
             None
         };
 
-        // ── Die Aggregation zulassen ─────────────────────────────
-        // Der AP bittet mit einem ADDBA Request und wiederholt ihn,
-        // solange keine Antwort kommt — im Geraetelauf 180 Mal, und
-        // genau so lange konnte er nicht aggregieren.
+        // ── Allow aggregation ────────────────────────────────────
+        // The AP asks with an ADDBA request and repeats it until answered;
+        // it cannot aggregate until then.
         ls.addba_drop += acc.addba_drop;
         for ai in 0..acc.n_addba {
             let req = acc.addba[ai];
@@ -6435,10 +5933,10 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     ls.addba_resp += 1;
                     ls.addba_win = ampdu_buf;
                     ls.addba_win_req = req.buf_size;
-                    // **Erst jetzt**, und mit der Startsequenz aus SEINER
-                    // Bitte: ab diesem Rahmen aggregiert der AP, und ab
-                    // hier muss umsortiert werden. Frueher gaebe es einen
-                    // Kopf ohne Sitzung, spaeter ein Loch am Anfang.
+                    // Only now, with the starting sequence from its request:
+                    // from this frame on the AP aggregates and reordering is
+                    // needed. Earlier would leave a head without a session,
+                    // later a hole at the start.
                     ro_open(ls, req.tid, req.ssn);
                     if ls.addba_resp <= 3 {
                         host::loud_begin();
@@ -6462,27 +5960,25 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
         if let Some((rate, mac_id)) = acc.ra_rpt {
             ls.ra_rpt_n += 1;
-            // fw.c:308 — `dm_info->tx_rate` unabhaengig von der Station,
-            // `si->ra_report.desc_rate` nur bei passender mac_id.
+            // fw.c:308: `dm_info->tx_rate` regardless of station,
+            // `si->ra_report.desc_rate` only for a matching mac_id.
             d.dm.tx_rate = rate;
             if link.si.mac_id == mac_id {
                 link.si.ra_report_desc_rate = rate;
             }
         }
 
-        // ── Der Rauswurf, gehandelt ──────────────────────────────
-        // Gesehen hat ihn der Rueckruf oben; hier ist der Ring leer und
-        // `link` wieder frei. **Der Kernel erfaehrt es als erster** —
-        // bis hierher glaubte er an `carrier UP` und schob Pakete in
-        // eine tote Leitung.
+        // ── Disconnect, handled ──────────────────────────────────
+        // The callback above saw it; here the ring is drained and `link` is
+        // free again. The kernel learns first, since until now it believed
+        // `carrier UP` and pushed packets into a dead link.
         if let Some((deauth, reason)) = ls.gone.take() {
             ls.kicked += 1;
             ls.last_reason = reason;
 
-            // **Gezaehlt wird jeder, gedruckt die ersten drei.** Ein AP
-            // schickt seinen Rauswurf gern als Salve; die vierte Zeile
-            // sagt nichts, was die erste nicht sagte, und der Zaehler im
-            // Bericht bleibt vollstaendig.
+            // Every one is counted, the first three printed. An AP tends to
+            // send its deauth as a burst, and the counter in the report stays
+            // complete.
             if ls.kicked <= 3 {
                 host::loud_begin();
                 host::print("[rtl8822ce] ");
@@ -6515,27 +6011,22 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             ls.authorized = false;
             ls.link_up_sent = false;
 
-            // **Und zurueck zum Rufer.** Stufe 6a laeuft weiter (dort
-            // ist ein Rauswurf ein Befund fuer das Tor, keine Aufgabe);
-            // in 6b baut der Rufer die Verbindung neu auf.
+            // Return to the caller. Stage 6a continues (a deauth there is a
+            // finding for the gate, not a task); in 6b the caller rebuilds
+            // the link.
             if frist_us == 0 {
                 return PumpEnd::LinkLost;
             }
         }
 
-        // ── Kanalwechsel (CSA) ───────────────────────────────────
+        // ── Channel switch (CSA) ─────────────────────────────────
         //
-        // mlme.c:2980-3010. Jede Bake mit einer Ansage rechnet die
-        // Frist NEU — `(max(count, 1) - 1) * beacon_int` —, damit eine
-        // verpasste Bake den Termin nicht verschiebt. `count` zaehlt im
-        // Beacon herunter, und 0 wie 1 heissen beide „jetzt".
-        // **Zuruecknehmen, wenn die Ansage verschwindet** (mlme.c:2822).
-        //
-        // Hier fehlte der ganze Zweig, und er hat Florian auf einen
-        // Kanal gesetzt, auf dem der AP gar nicht war: wir merkten uns
-        // die Ankuendigung, der AP hoerte auf, sie zu senden, und wir
-        // zogen trotzdem um. Danach hoerten wir ihn mit -90 dBm statt
-        // -23, das Roaming feuerte, und die Verbindung war weg.
+        // mlme.c:2980-3010. Every beacon with an announcement recomputes the
+        // deadline, `(max(count, 1) - 1) * beacon_int`, so a missed beacon
+        // does not shift it. `count` counts down in the beacon; 0 and 1 both
+        // mean "now". Withdraw when the announcement disappears
+        // (mlme.c:2822), otherwise we would move to a channel the AP never
+        // went to.
         if acc.beacon_ohne_csa && acc.csa.is_none() && link.csa.is_some() {
             link.csa = None;
             host::say("[rtl8822ce] Kanalwechsel ZURUECKGENOMMEN — der AP kuendigt ihn nicht mehr an\n");
@@ -6543,7 +6034,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         if let Some(c) = acc.csa.take() {
             let neu = link.csa.map_or(true, |a| a.channel != c.channel);
             let tu = (c.count.max(1) as u64 - 1) * beacon_int as u64;
-            // Ein TU sind 1024 us; wir rechnen in Millisekunden.
+            // One TU is 1024 us; we compute in milliseconds.
             link.csa_at_ms = now + (tu * 1024) / 1000;
             link.csa = Some(c);
             if neu {
@@ -6587,14 +6078,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 host::print("\n");
                 host::loud_end();
-                // **Der Rueckweg, falls dort niemand ist.**
-                //
-                // mac80211 wartet nach dem Wechsel auf eine Bake
-                // (`csa.waiting_bcn`, mlme.c:2812). Wir merken uns den
-                // alten Kanal und kehren um, wenn binnen einer Sekunde
-                // keine Bake der Zelle kommt — sonst sitzt man auf einem
-                // leeren Kanal und merkt es erst, wenn die Wache
-                // anschlaegt.
+                // The way back if nobody is there. mac80211 waits for a
+                // beacon after the switch (`csa.waiting_bcn`, mlme.c:2812).
+                // We remember the old channel and return if no beacon of the
+                // cell arrives within a second, rather than sitting on an
+                // empty channel until the watchdog fires.
                 link.csa_zurueck = Some((link.channel, CellWidth {
                     ht_param: link.ht_param_now,
                     vht_chanwidth: link.vht_chanwidth_now,
@@ -6608,14 +6096,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 d.cur_bw = bw;
                 cur_bw = bw as u8;
                 ls.csa_done += 1;
-                // Die Verbindungswache faengt von vorn an: auf dem neuen
-                // Kanal haben wir noch keine Bake gesehen.
+                // The link watchdog starts over: no beacon seen on the new
+                // channel yet.
                 ls.poll_on = false;
                 ls.probe_send_count = 0;
             }
         }
 
-        // **Kam auf dem neuen Kanal eine Bake?** Wenn nicht, zurueck.
+        // Did a beacon arrive on the new channel? If not, go back.
         if let Some((alt_ch, alt_w)) = link.csa_zurueck {
             if acc.heard_ap {
                 link.csa_zurueck = None;
@@ -6642,11 +6130,11 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
-        // ── Die Verbindungswache ─────────────────────────────────
+        // ── Link watchdog ────────────────────────────────────────
         //
-        // mlme.c:8516-8560, der Zweig `IEEE80211_STA_CONNECTION_POLL`:
-        // laeuft die Frist ab und sind noch Versuche uebrig, wird noch
-        // einmal gefragt; sonst ist die Verbindung verloren.
+        // mlme.c:8516-8560, branch `IEEE80211_STA_CONNECTION_POLL`: when the
+        // deadline expires and attempts remain, probe again; otherwise the
+        // link is lost.
         if ls.poll_on && now >= ls.probe_timeout_ms {
             if ls.probe_send_count >= MAX_PROBE_TRIES {
                 host::loud_begin();
@@ -6666,7 +6154,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     return PumpEnd::LinkLost;
                 }
             } else {
-                // mlme.c:4391-4396 — die letzten drei als Rundruf.
+                // mlme.c:4391-4396: the last three as broadcast.
                 let gerichtet = ls.probe_send_count < PROBE_UNICAST_LIMIT;
                 let mut pr = [0u8; 128];
                 let n = build_probe_req_to(
@@ -6688,7 +6176,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
-        // ── Kommandos von wifid ──────────────────────────────────
+        // ── Commands from wifid ──────────────────────────────────
         loop {
             let clen = host::wifi_poll_cmd(cmdbuf);
             if clen <= 0 {
@@ -6696,7 +6184,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
             let cmd = &cmdbuf[..clen as usize];
             match cmd.first().copied() {
-                // TX_EAPOL: [op][len u16 LE][Rahmen]
+                // TX_EAPOL: [op][len u16 LE][frame]
                 Some(CMD_TX_EAPOL) if cmd.len() >= 3 => {
                     let len = ((cmd[2] as usize) << 8) | cmd[1] as usize;
                     if cmd.len() >= 3 + len {
@@ -6706,23 +6194,20 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         eth[12..14]
                             .copy_from_slice(&ETHERTYPE_EAPOL.to_be_bytes());
                         eth[14..14 + len].copy_from_slice(&cmd[3..3 + len]);
-                        // **Verschluesselt, sobald die PTK steht.** msg2 und
-                        // msg4 gehen im Klartext hinaus, wie sie muessen —
-                        // ein GRUPPEN-Neuschluessel kommt Minuten spaeter,
-                        // mit der PTK laengst im Speicher, und der AP
-                        // erwartet ihn geschuetzt.
+                        // Encrypted once the PTK is installed. msg2 and msg4
+                        // go out in the clear as required; a group rekey
+                        // comes later with the PTK in place, and the AP
+                        // expects it protected.
                         let enc = link.ptk_installed;
-                        // **EAPOL bekommt IMMER eine Quittung.** In Linux
-                        // kommt das aus mac80211: Rahmen des Steuerports
-                        // tragen `IEEE80211_TX_CTL_REQ_TX_STATUS`. Es
-                        // sind die Rahmen, deren Verlust die Verbindung
-                        // kostet — und beim letzten Fehler genau die, von
-                        // denen der AP keinen einzigen hoerte.
+                        // EAPOL always requests a TX report. In Linux this
+                        // comes from mac80211: control port frames carry
+                        // `IEEE80211_TX_CTL_REQ_TX_STATUS`, since their loss
+                        // costs the link.
                         let sn = ls.arm_probe(now);
                         if tx_8023(h, trx, mgmt_buf, link,
                                    &eth[..14 + len], enc, sn, None) {
-                            // Ein einzelner Rahmen, und einer, auf den
-                            // der AP wartet: sofort.
+                            // A single frame the AP is waiting for: kick at
+                            // once.
                             pci::tx_kick_off_queue(h, trx, pci::Q_BE);
                             ls.eapol_tx += 1;
                             if ls.authorized {
@@ -6743,8 +6228,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     if cmd.len() >= 5 + key_len + 6 {
                         let key = &cmd[5..5 + key_len];
                         let group = key_type == 1;
-                        // Paarschluessel auf Platz 0, Gruppenschluessel auf
-                        // seinen Index — so haelt es auch mac80211.
+                        // Pairwise key in slot 0, group key at its index, as
+                        // mac80211 does.
                         let slot = if group { key_idx.min(3) } else { 0 };
                         let addr = if group { [0xffu8; 6] } else { link.bssid };
                         sec::write_cam(h, &mut link.cam[slot as usize], slot,
@@ -6765,7 +6250,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         host::print(" Bytes\n");
                     }
                 }
-                // AUTHORIZED: der Handschlag ist durch.
+                // AUTHORIZED: the handshake is done.
                 Some(CMD_AUTHORIZED) => {
                     ls.authorized = true;
                     host::netdev_set_link(true);
@@ -6780,19 +6265,16 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
-        // ── Senden, was der IP-Stapel loswerden will ─────────────
+        // ── Send what the IP stack wants out ─────────────────────
         //
-        // **Erst alles in den Ring, dann EINMAL anstossen** — tx.c:660-676.
-        // Die Schleife holte schon immer, bis nichts mehr da war; neu ist,
-        // dass der Anstoss danach kommt statt je Rahmen. Damit sieht die
-        // Hardware bei ihrem naechsten Griff nach der Sendegelegenheit den
-        // ganzen Stapel und kann ihn zu einem A-MPDU zusammenfassen.
-        // mlme.c:2982 `if (csa_ie.mode) ieee80211_vif_block_queues_csa`.
+        // Queue everything first, then kick once (tx.c:660-676), so at its
+        // next transmit opportunity the hardware sees the whole batch and
+        // can combine it into one A-MPDU.
         //
-        // **`mode = 1` heisst: ab jetzt nichts mehr senden.** Der AP
-        // raeumt den Kanal — auf einem DFS-Kanal, weil er Radar erkannt
-        // hat, und dann ist jeder weitere Rahmen von uns einer zuviel
-        // auf einer Frequenz, die frei werden muss.
+        // mlme.c:2982 `if (csa_ie.mode) ieee80211_vif_block_queues_csa`:
+        // `mode = 1` means stop transmitting. The AP is vacating the channel,
+        // on a DFS channel because it detected radar, and every further frame
+        // from us is one too many on a frequency that must be cleared.
         let sendesperre = link.csa.map_or(false, |c| c.mode != 0);
         if ls.authorized && !sendesperre {
             let mut gestapelt = 0u32;
@@ -6802,29 +6284,19 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     break;
                 }
                 let enc = link.ptk_installed;
-                // **Ein Datenrahmen je Watchdog-Takt wird quittiert.**
-                // Das ist eine benannte Abweichung: Linux erfaehrt den
-                // Sendeerfolg ueber mac80211 und fragt deshalb nur fuer
-                // Steuerrahmen nach. Uns fehlt dieser Weg ganz, und eine
-                // Leitung, auf der NICHTS quittiert wird, war zweimal der
-                // Fehler. Einer je zwei Sekunden kostet nichts und
-                // beantwortet „hoert der AP mich ueberhaupt".
+                // One data frame per watchdog tick requests a TX report.
+                // Deviation: Linux learns TX success via mac80211 and asks
+                // only for control frames. We lack that path entirely, and
+                // one report every two seconds answers "does the AP hear me"
+                // at no cost.
                 let sn = if probe_due { probe_due = false; ls.arm_probe(now) }
                          else { None };
-                // **Wie lange unser Stapel braucht.**
-                //
-                // Beim Herunterladen ist praktisch jeder gesendete Rahmen
-                // eine TCP-Quittung, die von empfangenen Daten ausgeloest
-                // wurde. Der Abstand zwischen „wir haben dem Kernel Daten
-                // gegeben" und „der Kernel gibt uns einen Rahmen zurueck"
-                // ist damit die Zeit, die UNSERE Seite zur Umkehr
-                // braucht — und sie steckt eins zu eins in der RTT, die
-                // der Server misst.
-                //
-                // Das ist die Zahl, die „liegt es an der Luft oder an
-                // uns" entscheidet: bei 12,7 ms gemessener RTT und
-                // ~4,6 ms Sendezeit fehlen acht Millisekunden, und
-                // entweder stehen sie hier oder beim AP.
+                // Our stack's turnaround. During a download practically
+                // every transmitted frame is a TCP ACK triggered by received
+                // data, so the time between "data to the kernel" and "frame
+                // back from the kernel" is our side's turnaround, which adds
+                // directly to the RTT the server measures. It separates "the
+                // air" from "us".
                 if ls.last_rx_at != 0 {
                     let d = host::now_us().saturating_sub(ls.last_rx_at);
                     if misst && d < GAP_IDLE_US as u64 {
@@ -6843,8 +6315,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                            &ethbuf[..n as usize], enc, sn, qos_tid) {
                     gestapelt += 1;
                     ls.data_tx += 1;
-                    // tx.c `rtw_tx` — dieselbe Buchfuehrung wie beim
-                    // Empfang, damit `tx_throughput` eine Zahl hat.
+                    // tx.c `rtw_tx`: the same accounting as on receive, so
+                    // `tx_throughput` has a value.
                     if ethbuf[0] & 0x01 == 0 {
                         d.stats.tx_unicast += n as u64;
                         d.stats.tx_cnt += 1;
@@ -6852,9 +6324,9 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
             if gestapelt > 0 {
-                // **Erst messen, dann anstossen.** Nach dem Anstoss ist
-                // die Zahl eine andere — die Hardware faengt an, sobald
-                // der Schreibzeiger steht.
+                // Measure first, then kick: after the kick the number
+                // changes, the hardware starts as soon as the write pointer
+                // is set.
                 let im_ring = pci::tx_pending(h, trx, pci::Q_BE);
                 pci::tx_kick_off_queue(h, trx, pci::Q_BE);
                 ls.tx_batch_n += 1;
@@ -6869,14 +6341,14 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
-        // `rtw_pci_tx_isr` — den Lesezeiger nachziehen.
+        // `rtw_pci_tx_isr`: advance the read pointer.
         pci::tx_isr(h, trx, pci::Q_BE);
         pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
 
-        // ── Alle zwei Sekunden: `rtw_watch_dog_work` ─────────────
-        // **Der Takt ist Linux'**: `RTW_WATCH_DOG_DELAY_TIME` = HZ * 2.
-        // Die Nachfuehrungen darin rechnen auf dem, was seit dem letzten
-        // Takt hereinkam — ein anderer Takt waere ein anderer Regler.
+        // ── Every two seconds: `rtw_watch_dog_work` ──────────────
+        // The period is Linux': `RTW_WATCH_DOG_DELAY_TIME` = HZ * 2. The
+        // tracking loops in it compute on what arrived since the last tick;
+        // another period would be another controller.
         ls.purge_probes(now);
         if now.wrapping_sub(watch_dog_ms) >= RTW_WATCH_DOG_DELAY_MS {
             watch_dog_ms = now;
@@ -6898,57 +6370,37 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             watch_dog(h, hal, d, h2c, e, link, caps, fw_feature,
                       ls.authorized || ls.link_up_sent, beacon_int);
             wd_ran = true;
-            // ── Roaming: wechseln, BEVOR es abreisst ─────────
+            // ── Roaming: switch before the link breaks ───────────
             //
-            // mlme.c:6800-6828 `ieee80211_handle_beacon_sig`: erst ab
-            // vier Baken, dann Schwelle mit HYSTERESE. Das Ereignis
-            // feuert erst wieder, wenn der Pegel um die Hysterese
-            // darueber hinausgeht — sonst loest ein einzelner schlechter
-            // Beacon einen Umhoerversuch aus, und danach der naechste.
-            // **Erst nach dem Vierwegehandschlag.** Ohne diese
-            // Bedingung lief der Ausloeser schon in Stufe 6a, also
-            // WAEHREND des Handschlags — und `stage6a` wirft die
-            // Rueckgabe des Pumpens weg, der Kandidat waere also nur
-            // haengengeblieben.
+            // mlme.c:6800-6828 `ieee80211_handle_beacon_sig`: only after
+            // four beacons, then a threshold with hysteresis. The event fires
+            // again only once the level moves past the hysteresis; otherwise
+            // a single bad beacon triggers a scan, and then the next one.
+            // Only after the four-way handshake: during it the trigger would
+            // fire in stage 6a, which discards the pump's result.
             if roam_mode != RoamMode::Aus
                 && ls.authorized
-                // **Und nicht gleich nach einem Aufbau.** `authorized`
-                // steht, sobald der Handschlag durch ist; die Zelle hat
-                // dann aber noch keine vier Baken geliefert und der
-                // Verkehr faengt gerade erst an.
+                // And not right after a setup: `authorized` is set once the
+                // handshake completes, but the cell has not yet delivered
+                // four beacons and traffic is just starting.
                 && now.saturating_sub(link.roam.last_roam_ms) > ROAM_GAP_MS
                 && link.roam.count >= SIGNAL_AVE_MIN_COUNT
                 && link.csa.is_none()
             {
                 let sig = link.roam.dbm();
                 let le = link.roam.last_event;
-                // **Der Pegel ist der einzige Ausloeser — wie bei
-                // mac80211.**
-                //
-                // Hier standen zwei Zugaben von mir, und BEIDE waren
-                // derselbe Fehler: ein Zaehler, der nicht misst, was ich
-                // annahm.
-                //
-                // * „Rate am Boden" las `curr_rx_rate`, also die Rate des
-                //   LETZTEN Rahmens — und eine Bake geht immer mit OFDM
-                //   6M hinaus. Fast immer wahr.
-                // * „jeder vierte Rahmen kaputt" las `ofdm_err/ofdm_ok`.
-                //   Die kommen aus einem CRC32-Zaehler der HARDWARE
-                //   (rtw8822c.c:2855) und zaehlen OFDM-Rahmen AUF DEM
-                //   KANAL, auch fremde. rtw88 benutzt sie fuer nichts
-                //   ausser Debug- und Coex-Ausgaben. Auf dieser Strecke
-                //   liegt die Quote dauerhaft bei 21-25 %, also war auch
-                //   dieser Ausloeser permanent wahr — und die Verbindung
-                //   wechselte im Zehnsekundentakt.
-                //
-                // Was bleibt, ist `ieee80211_handle_beacon_sig`: Schwelle
-                // mit Hysterese auf dem geglaetteten Bakenpegel, und
-                // sonst nichts. **Ein Ausloeser, der nie wieder ausgeht,
-                // ist keiner.**
+                // The signal level is the only trigger, as in mac80211
+                // (`ieee80211_handle_beacon_sig`: threshold with hysteresis
+                // on the smoothed beacon level). `curr_rx_rate` is the rate
+                // of the last frame, usually a beacon at OFDM 6M, and
+                // `ofdm_err/ofdm_ok` come from a hardware CRC32 counter
+                // (rtw8822c.c:2855) that counts all OFDM frames on the
+                // channel, including foreign ones; neither is a usable
+                // trigger. A trigger that never turns off is none.
                 let tief = sig < ROAM_THOLD_DBM
                     && (le == 0 || sig < le - ROAM_HYST_DB);
-                // Nie suchen, waehrend Daten fliessen: ein
-                // Umhoerversuch kostet dann Durchsatz fuer nichts.
+                // Never scan while data flows: a scan then costs throughput
+                // for nothing.
                 let ruhig = d.stats.rx_throughput < 2 && d.stats.tx_throughput < 2;
                 if tief && ruhig
                     && now.saturating_sub(link.roam.last_scan_ms)
@@ -7011,39 +6463,20 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         print_last(b);
                         if b.bssid == link.bssid {
                             host::print("  (wir)");
-                            // **Wir haben uns GERADE gemessen.**
-                            //
-                            // Am Geraet: der geglaettete Bakenpegel sagte
-                            // -81 dBm und loeste den Umzug aus, waehrend
-                            // derselbe Suchlauf dieselbe Zelle in
-                            // derselben Sekunde mit -19 dBm hoerte — 62 dB
-                            // auseinander. Umgezogen wurde von -19 auf
-                            // -53, also vom besten auf einen schlechteren
-                            // AP.
-                            //
-                            // Welche der beiden Zahlen stimmt, ist noch
-                            // offen und wird gemessen. Aber die FRISCHE
-                            // ist die, auf die man sich verlassen kann:
-                            // eine Probe von eben schlaegt einen
-                            // Mittelwert, der aus Rahmen stammt, die
-                            // niemand nachgezaehlt hat. Liegt sie ueber
-                            // der Schwelle, gibt es keinen Grund zu
-                            // gehen.
+                            // We just measured ourselves. The smoothed beacon
+                            // level and a fresh probe of the same cell can
+                            // disagree widely; the fresh probe is the one to
+                            // trust. If it is above the threshold, there is
+                            // no reason to leave.
                             if b.best > ROAM_THOLD_DBM {
                                 selbst_gut = Some(b.best);
                             }
                         } else if roam_better(sig, d.cur_bw, b, max_bw) {
                             host::print("  BESSER");
-                            // **Unter mehreren Guten gewinnt die
-                            // BREITERE, erst dann die lautere.**
-                            //
-                            // Hier stand nur `b.best > x.best`. Am
-                            // Geraet standen vier Zellen als BESSER da —
-                            // `K7 -30 dBm 20 MHz` und
-                            // `K104 -67 dBm 80 MHz` —, und die Auswahl
-                            // nahm die laute schmale. `roam_better`
-                            // prueft die Breite gegen UNS; unter den
-                            // Kandidaten hat sie niemand verglichen.
+                            // Among several good candidates the wider one
+                            // wins, then the louder. `roam_better` compares
+                            // width against us; here candidates are compared
+                            // with each other.
                             let besser = match best {
                                 None => true,
                                 Some(x) => {
@@ -7068,8 +6501,8 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         print_dbm(sig);
                         host::print(") — die frische Probe gilt\n");
                         host::loud_end();
-                        // Den geglaetteten Wert neu saeen, sonst loest er
-                        // beim naechsten Takt wieder aus.
+                        // Reseed the smoothed value, otherwise it fires again
+                        // on the next tick.
                         link.roam.ave = dm::Ewma::new();
                         link.roam.count = 0;
                         best = None;
@@ -7096,18 +6529,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                 link.roam.last_roam_ms = now;
                                 link.roam.roams += 1;
                                 link.roam.to = Some(z);
-                                // **Die Verbindung ORDENTLICH abbauen,
-                                // genau wie auf dem Rauswurf-Weg.**
-                                //
-                                // Hier stand nur `return`. Der Kernel
-                                // behielt damit seinen Traeger und schob
-                                // waehrend der ganzen Neuanmeldung
-                                // weiter Daten hinein (`tx refused
-                                // no-link`, `SENDETOR ZU`), und `wifid`
-                                // sah kein `link down` — es haette
-                                // seinen alten Supplicant behalten,
-                                // waehrend wir uns bei einer ANDEREN
-                                // Zelle anmelden.
+                                // Tear the link down properly, as on the
+                                // deauth path: otherwise the kernel keeps its
+                                // carrier and pushes data during the whole
+                                // re-association, and `wifid` sees no link
+                                // down and keeps its old supplicant while we
+                                // associate with another cell.
                                 if ls.authorized || ls.link_up_sent {
                                     host::netdev_set_link(false);
                                     let down = [EV_LINK_DOWN,
@@ -7123,57 +6550,51 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
 
-            // mlme.c:4427-4480 `ieee80211_mgd_probe_ap(sdata, true)`.
-            //
-            // **Hier wurde `d.beacon_loss` bis 0.55.0 nie gelesen.** Der
-            // Wert wird seit Stufe 6 richtig gerechnet
-            // (`rtw_sw_beacon_loss_check`), und eine Verbindung, deren AP
-            // verschwindet, blieb trotzdem stehen — bis jemand neu
-            // startete.
+            // mlme.c:4427-4480 `ieee80211_mgd_probe_ap(sdata, true)`. Beacon
+            // loss is computed by `rtw_sw_beacon_loss_check`; without acting
+            // on it a link whose AP vanished would stay up forever.
             if d.beacon_loss && !ls.poll_on {
                 ls.poll_on = true;
                 ls.probe_send_count = 0;
-                ls.probe_timeout_ms = 0; // sofort fragen
+                ls.probe_timeout_ms = 0; // probe at once
                 ls.poll_started += 1;
                 host::say("[rtl8822ce] keine Baken mehr vom AP — anstupsen statt aufgeben\n");
             }
-            // `rtw_phy_stat_rate_cnt` hat das Fenster gerade nach
-            // `last_pkt_count` geschoben — jetzt und nur jetzt steht es
-            // vollstaendig da.
+            // `rtw_phy_stat_rate_cnt` has just shifted the window into
+            // `last_pkt_count`; now and only now it is complete.
             for i in 0..DESC_RATE_MAX {
                 ls.rate_hist[i] = ls.rate_hist[i]
                     .saturating_add(d.dm.last_pkt_count.num_qry_pkt[i] as u32);
             }
-            // Dieselbe Stelle, derselbe Grund: `false_alarm_statistics`
-            // hat gerade gelesen UND zurueckgesetzt.
+            // Same place, same reason: `false_alarm_statistics` has just read
+            // and reset.
             ls.ht_ok += d.dm.ht_ok_cnt as u64;
             ls.ht_err += d.dm.ht_err_cnt as u64;
             ls.ofdm_ok += d.dm.ofdm_ok_cnt as u64;
             ls.ofdm_err += d.dm.ofdm_err_cnt as u64;
         }
 
-        // ── Einmal je Sekunde: der Bericht fuer `wlan` ───────────
-        // Die Luft ist fuer den Kernel unsichtbar. Rate, Zaehler und
-        // Schluesselzustand stehen nirgends sonst — ohne sie ist eine
-        // Leitung, die wegen einer Legacy-Rate langsam ist, nicht von
-        // einer zu unterscheiden, die wegen voller Schlangen langsam ist.
+        // ── Once per second: the report for `wlan` ───────────────
+        // The air is invisible to the kernel. Rate, counters and key state
+        // appear nowhere else; without them a link slow because of a legacy
+        // rate cannot be told from one slow because of full queues.
         if now.wrapping_sub(report_ms) >= 1000 {
             report_ms = now;
             publish_report(link, ls, d, e, caps);
         }
 
-        // ── RX-Stille als Wachhund ───────────────────────────────
-        // Auf einer lebenden Zelle kommt IMMER etwas: Beacons allein sind
-        // zehn je Sekunde. Voelliges Schweigen heisst, dass der Ring
-        // steht, nicht dass die Luft leer ist.
+        // ── RX silence as a watchdog ─────────────────────────────
+        // A live cell always sends something, beacons alone are ten per
+        // second. Complete silence means the ring is stuck, not that the air
+        // is empty.
         if got > 0 {
             rx_silent_ms = now;
         } else if now.wrapping_sub(rx_silent_ms) > 5_000 {
             rx_silent_ms = now;
             ls.rx_wd += 1;
             if ls.rx_wd <= 4 {
-                // Ein stehender Ring ist kein Stufenbefund, sondern ein
-                // Fehler: laut, auch ohne `debug: 1`.
+                // A stuck ring is not a stage finding but an error: loud even
+                // without `debug: 1`.
                 host::loud_begin();
                 host::print("[rtl8822ce] RX still seit 5 s — Ringzeiger rp=");
                 host::print_dec(trx.rx.rp);
@@ -7184,26 +6605,18 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             }
         }
 
-        // ── Wann wir die Hand vom Ring nehmen ────────────────────
+        // ── When to let go of the ring ───────────────────────────
         //
-        // **Hier stand `if got == 0 { sleep_ms(1) }`, und das war der
-        // Durchsatzdeckel.** Zwischen zwei Buendeln ist der Ring einen
-        // Moment leer — beim ersten leeren Blick eine ganze Millisekunde
-        // zu schlafen heisst, hoechstens tausend Mal je Sekunde
-        // nachzusehen. Gemessen: 1375 Rahmen/s bei 1,37 Rahmen je Blick,
-        // also genau `1000 x Buendelgroesse`. Die Aggregation aus 0.29.0
-        // machte die Buendel groesser und brachte deshalb nur +26 %
-        // statt eines Vielfachen.
-        //
-        // Jetzt die Form, die Linux NAPI nennt: **ein Budget leerer
-        // Blicke, dann erst schlafen** — und liegend bleiben, bis wieder
-        // etwas kommt. Unter Last faellt der Zaehler bei jedem Buendel
-        // auf null und wir schlafen nie; im Leerlauf ist das Budget nach
-        // einem knappen halben Millisekunde aufgebraucht und wir
-        // schlafen wie vorher.
+        // Between two bursts the ring is briefly empty; sleeping a whole
+        // millisecond on the first empty poll would cap polling at a thousand
+        // per second and throughput at `1000 x burst size`. Instead the shape
+        // Linux calls NAPI: a budget of empty polls, then sleep, and stay
+        // parked until something arrives. Under load the counter resets on
+        // every burst and we never sleep; when idle the budget runs out
+        // within half a millisecond.
         {
             let dt = (host::now_us() - t_iter).min(u32::MAX as u64) as u32;
-            // SAFETY: wie `WD_MAX`.
+            // SAFETY: as `WD_MAX`.
             unsafe {
                 if dt > ITER_MAX {
                     ITER_MAX = dt;
@@ -7211,43 +6624,36 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
             }
         }
-        // SAFETY: nur dieser Fiber liest IRQ_VEC.
+        // SAFETY: only this fiber reads IRQ_VEC.
         let irq = unsafe { IRQ_VEC } >= 0;
         if got == 0 && irq {
-            // **Mit MSI: parken, bis der Chip etwas meldet.** Die Form von
-            // `rtw_pci_napi_poll`, wenn weniger als das Budget kam: HISR
-            // quittieren (sonst keine neue Flanke), HIMR scharf, und den Ring
-            // noch einmal ansehen — was zwischen dem letzten Blick und dem
-            // Scharfmachen ankam, loest keinen Interrupt mehr aus.
+            // With MSI: park until the chip signals. The shape of
+            // `rtw_pci_napi_poll` when less than the budget arrived: ack HISR
+            // (otherwise no new edge), arm HIMR, and look at the ring again,
+            // since whatever arrived between the last poll and arming raises
+            // no interrupt.
             pci::irq_recognized(h);
             pci::enable_interrupt(h, false);
-            // **Und den Sendering noch einmal abraeumen — NACH dem
-            // Scharfmachen.** HIMR steht die ganze Runde ueber auf null, und
-            // bei null setzt der Chip kein HISR-Bit: eine Sendequittung
-            // (TX-DOK), die waehrend der Runde kam, loest nie einen Interrupt
-            // aus. Fuer den Empfang faengt das der Blick auf den Ring unten;
-            // fuer das Senden fehlte er. Bis 0.68.0 raeumte die 10-ms-Frist
-            // den Ring spaetestens dann ab — mit 0.69.0 schlief die Pumpe bis
-            // zu einer Sekunde, der Ring lief voll, und der Upload fiel auf
-            // 7 Mbit mit 503 Zeitueberschreitungen. Linux laesst dafuer die
-            // DOK-Interrupts waehrend der Empfangsverarbeitung an
-            // (`rtw_pci_enable_interrupt(.., exclude_rx = true)`); hier
-            // gilt: was vor diesem Aufruf quittiert wurde, raeumt er ab, was
-            // danach kommt, weckt uns.
+            // Clear the TX ring once more, after arming. HIMR is zero for the
+            // whole round, and with zero the chip sets no HISR bit, so a TX
+            // completion (TX-DOK) during the round never raises an
+            // interrupt. For receive the ring check below catches that; for
+            // transmit this does. Linux keeps the DOK interrupts enabled
+            // during RX processing (`rtw_pci_enable_interrupt(..,
+            // exclude_rx = true)`); here, whatever completed before this call
+            // is reaped by it, whatever completes after wakes us.
             pci::tx_isr(h, trx, pci::Q_BE);
             pci::tx_isr(h, trx, tx::RTW_TX_QUEUE_MGMT);
             if pci::get_hw_rx_ring_nr(h, trx) == 0 {
                 let mut mask = host::WAIT_IRQ | host::WAIT_WIFI_CMD;
-                // Nur, wenn diese Runde die Schlange auch leert — sonst
-                // meldet sie sich sofort wieder und die Schleife dreht leer.
+                // Only if this round also drains the queue; otherwise it
+                // signals again at once and the loop spins.
                 if ls.authorized && !sendesperre {
                     mask |= host::WAIT_NET_TX;
                 }
-                // **Bis zum naechsten eigenen Zeitgeber, nicht pauschal.**
-                // Jede zeitabhaengige Pruefung dieser Schleife meldet hier
-                // ihren Termin; geparkt wird bis zum fruehesten. Die 10-ms-
-                // Frist aus 0.68.0 war der Platzhalter dafuer — sie machte
-                // im Leerlauf 100 der 118 Aufwachungen je Sekunde aus.
+                // Until the earliest own timer, not a fixed period. Every
+                // time-dependent check in this loop reports its deadline
+                // here, and we park until the earliest one.
                 let jetzt = host::now_ms();
                 let mut warte: u64 = 1000;
                 let mut faellig = |at: u64| warte = warte.min(at.saturating_sub(jetzt));
@@ -7273,13 +6679,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     let rest = (t0 + frist_us).saturating_sub(host::now_us()) / 1000;
                     warte = warte.min(rest);
                 }
-                // Mindestens 1 ms: `now_ms` zaehlt in 10-ms-Schritten, und
-                // ein Termin, der „jetzt" sagt, dessen Bedingung aber erst
-                // im naechsten Schritt greift, liesse die Schleife sonst bis
-                // zu 10 ms leer drehen.
+                // At least 1 ms: `now_ms` counts in 10 ms steps, and a
+                // deadline that says "now" while its condition triggers only
+                // in the next step would otherwise spin for up to 10 ms.
                 host::wait(mask, warte.max(1) as u32);
             }
-            // `rtw_pci_interrupt_handler`: HIMR aus, bis die Runde durch ist.
+            // `rtw_pci_interrupt_handler`: HIMR off until the round is done.
             pci::disable_interrupt(h);
         } else if got == 0 {
             if leer_in_folge < RX_SPIN_BUDGET {
@@ -7296,46 +6701,41 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 }
 
 
-/// Wieviele leere Blicke auf den Ring, bevor wir uns schlafen legen.
+/// How many empty ring polls before going to sleep.
 ///
-/// Eine Schleifenrunde kostet ein halbes Dutzend Wirtsaufrufe, also
-/// grob fuenf bis zehn Mikrosekunden. 64 leere Runden sind damit knapp
-/// eine halbe Millisekunde Wachbleiben — unter Last kommt der naechste
-/// Rahmen lange vorher, im Leerlauf ist es ein einmaliger Preis je
-/// Beacon.
+/// One loop round costs half a dozen host calls, roughly five to ten
+/// microseconds, so 64 empty rounds keep us awake for about half a
+/// millisecond. Under load the next frame comes much sooner; when idle it
+/// is a one-time cost per beacon.
 const RX_SPIN_BUDGET: u32 = 64;
 
-/// Wie lange gewartet wird, wenn ein Anlauf scheitert. Ein AP, der
-/// gerade neu startet, braucht Sekunden; oefter zu fragen hilft nicht
-/// und fuellt nur den Log.
+/// How long to wait after a failed attempt. A restarting AP needs seconds;
+/// asking more often does not help and only fills the log.
 const RECONNECT_BACKOFF_MS: u32 = 3000;
 
-/// Nach wievielen vergeblichen Anlaeufen die Umgebung neu abgesucht
-/// wird. **Zwei, nicht einer**: ein AP, der gerade neu startet, ist nach
-/// drei Sekunden wieder da, und ein Suchlauf dafuer waere teurer als
-/// das Warten.
+/// After how many failed attempts the surroundings are scanned again. Two,
+/// not one: a restarting AP is back after three seconds, and a scan would
+/// cost more than waiting.
 const RESCAN_AFTER_TRIES: u32 = 2;
 
-/// **Der Weg zurueck in eine stehende Verbindung.**
+/// The way back into a running link.
 ///
-/// Er ist derselbe wie der Weg hin — Stufe 5e (Auth + Assoc) und 5f
-/// (Ratenanpassung) —, mit vier Unterschieden, und jeder hat einen
-/// Grund:
+/// The same as the way in, stage 5e (auth + assoc) and 5f (rate
+/// adaptation), with four differences:
 ///
-/// * **Kein `netdev_register`.** Der Kernel kennt die Schnittstelle
-///   schon; ein zweites Anmelden gaebe eine zweite.
-/// * **Die Schluessel raus, BEVOR neu verhandelt wird.** Ein alter
-///   Paarschluessel im CAM entschluesselt die ersten Rahmen der neuen
-///   Verbindung falsch, und das sieht aus wie ein kaputter Handschlag.
-/// * **`rtw_mac_flush_queues`** — was noch in den Sendeschlangen liegt,
-///   gehoert zur alten Verbindung und wuerde mit dem alten Schluessel
-///   hinausgehen.
-/// * **Die Paketnummer faengt wieder bei eins an** (802.11 §12.5.3.2:
-///   sie gehoert zum SCHLUESSEL, und der ist gleich ein neuer).
+/// * No `netdev_register`: the kernel already knows the interface; a second
+///   registration would create a second one.
+/// * Keys out before renegotiating: an old pairwise key in the CAM would
+///   decrypt the first frames of the new link wrongly, which looks like a
+///   broken handshake.
+/// * `rtw_mac_flush_queues`: whatever is still queued belongs to the old
+///   link and would go out with the old key.
+/// * The packet number restarts at one (802.11 §12.5.3.2: it belongs to the
+///   key, and the key is about to be new).
 ///
-/// Und ein neues `EV_READY`: `wifid` braucht einen frischen Supplicant
-/// mit neuem SNonce. **Das ist der feine Unterschied zu 0.23.0** — dort
-/// kam das zweite `EV_READY` ohne neue Verbindung, hier gehoert es dazu.
+/// And a new `EV_READY`: `wifid` needs a fresh supplicant with a new
+/// SNonce. Unlike a stray second `EV_READY`, this one comes with a new
+/// association.
 #[allow(clippy::too_many_arguments)]
 fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              h2c: &mut fw::H2cState, e: &efuse::Efuse,
@@ -7343,11 +6743,9 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              ls: &mut LinkStats, d: &mut Dev,
              linked: &mut Option<vif::Vif>) -> bool {
     ls.reconnects += 1;
-    // **Die Zelle kann eine ANDERE sein.** Seit 0.55.1 sucht der Rufer
-    // nach zwei Fehlschlaegen neu, und dann traegt `bss` eine andere
-    // BSSID, einen anderen Kanal, vielleicht einen anderen Namen. Wer
-    // das hier nicht nachzieht, adressiert seine Datenrahmen weiter an
-    // den AP, den er gerade verloren hat.
+    // The cell can be a different one: after two failures the caller scans
+    // again, and `bss` may carry another BSSID, channel or name. Without
+    // updating here, data frames would still go to the AP just lost.
     if link.bssid != bss.bssid {
         host::loud_begin();
         host::print("[rtl8822ce] andere Zelle: K");
@@ -7362,21 +6760,17 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     link.channel = bss.channel;
     link.ssid = bss.ssid;
     link.ssid_len = bss.ssid_len;
-    // **Die Breite der neuen Zelle** — ohne sie kommt ein
-    // Umhoerversuch auf der Breite der ALTEN zurueck.
+    // The width of the new cell; without it a roam scan would return at the
+    // width of the old one.
     link.ht_param_now = bss.ht_param;
     link.vht_chanwidth_now = bss.vht_chanwidth;
     link.vht_cch0_now = bss.vht_cch0;
     if andere {
-        // **Der geglaettete Pegel gehoert der ZELLE, nicht der
-        // Verbindung.** Er stand nach einem Wechsel weiter auf dem Wert
-        // des alten AP — wir zogen zu einem starken um und rechneten
-        // weiter mit -72 dBm, also sah der naechste Kandidat sofort
-        // wieder „besser" aus. Genau das hat nonstop gewechselt.
-        //
-        // `count` faellt mit: bis vier Baken der NEUEN Zelle da sind,
-        // sagt der Mittelwert nichts, und solange wird nicht gewechselt
-        // (`SIGNAL_AVE_MIN_COUNT`, mlme.c:96).
+        // The smoothed level belongs to the cell, not the link: carrying
+        // the old AP's value over would make the next candidate look better
+        // at once and cause constant switching. `count` resets with it:
+        // until four beacons of the new cell arrive the mean says nothing,
+        // and no switch happens (`SIGNAL_AVE_MIN_COUNT`, mlme.c:96).
         link.roam.ave = dm::Ewma::new();
         link.roam.count = 0;
         link.roam.last_event = 0;
@@ -7392,33 +6786,25 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("\n");
     host::loud_end();
 
-    // Der Kernel soll nichts mehr in die tote Leitung schieben.
+    // The kernel must stop pushing into the dead link.
     host::netdev_set_link(false);
 
-    // Alte Schluessel aus dem CAM. `write_cam` hat sie hineingelegt,
-    // `clear_cam` nimmt sie heraus — Platz fuer Platz, wie sie belegt
-    // wurden.
+    // Old keys out of the CAM. `write_cam` put them in, `clear_cam` takes
+    // them out, slot by slot as they were used.
     for slot in 0..link.cam.len() {
         sec::clear_cam(h, &mut link.cam[slot], slot as u8);
     }
     link.ptk_installed = false;
     link.tx_pn = 1;
     link.seq = 0;
-    // **Die Block-Ack-Sitzungen gehoeren der ASSOZIATION, nicht dem
-    // Treiber.**
-    //
-    // Hier fehlte beides, und das hat den Durchsatz nach einem Wechsel
-    // halbiert: `ba_tx` stand noch auf `Laeuft` von der ALTEN Zelle,
-    // also trug jeder Datenrahmen weiter QoS und AGG_EN — an einen AP,
-    // mit dem wir nie eine Sitzung ausgehandelt hatten. Am Geraet:
-    // 180 Mbit vor dem Wechsel, 36 danach.
-    //
-    // Der Automat faengt jetzt von vorn an und fragt den NEUEN AP.
+    // Block ack sessions belong to the association, not the driver. Left as
+    // `Laeuft` from the old cell, every data frame would keep carrying QoS
+    // and AGG_EN to an AP we never negotiated a session with. The state
+    // machine starts over and asks the new AP.
     link.ba_tx = BaTx::new();
-    // Dasselbe in Empfangsrichtung. Der neue AP schickt zwar seinen
-    // eigenen ADDBA Request und `ro_open` setzt den TID dann zurueck —
-    // aber bis dahin wuerde der Puffer Rahmen der neuen Zelle gegen die
-    // Folgenummern der alten halten.
+    // The same in the receive direction. The new AP sends its own ADDBA
+    // request and `ro_open` resets the TID then, but until that the buffer
+    // would hold frames of the new cell against the old sequence numbers.
     for t in 0..RO_TIDS {
         ro_close(ls, t);
     }
@@ -7434,14 +6820,14 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         host::loud_end();
     }
 
-    // Stufe 5e: Auth und Assoc, auf demselben Kanal.
+    // Stage 5e: auth and assoc, on the same channel.
     if !stage5e_connect(h, hal, trx, mgmt_buf, h2c, e, t, e.addr, bss,
                         linked, d) {
         return false;
     }
     let Some(v) = linked.as_ref() else { return false };
 
-    // Stufe 5f: die Firmware waehlt wieder die Rate.
+    // Stage 5f: the firmware picks the rate again.
     let mut rates: Option<(sta::PeerCaps, sta::StaInfo)> = None;
     if !stage5f_rates(h, trx, h2c, hal, v, bss, &mut rates, d) {
         return false;
@@ -7451,7 +6837,7 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         link.highest_rate = highest_tx_rate(&caps, hal);
     }
 
-    // Und `wifid` bekommt einen frischen Supplicant.
+    // And `wifid` gets a fresh supplicant.
     let mut ready = [0u8; 13];
     ready[0] = EV_READY;
     ready[1..7].copy_from_slice(&link.bssid);
@@ -7467,20 +6853,20 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     true
 }
 
-/// Sich umhoeren, ohne die Verbindung zu verlieren.
+/// Scans without losing the link.
 ///
-/// Der Ablauf ist der von mac80211 (`ieee80211_offchannel_stop_vifs`,
-/// offchannel.c:83-131), auf das zusammengezogen, was wir haben:
+/// The sequence is mac80211's (`ieee80211_offchannel_stop_vifs`,
+/// offchannel.c:83-131), reduced to what we have:
 ///
-/// 1. **dem AP sagen, dass wir kurz schlafen** — Null-Data mit gesetztem
-///    Power-Management-Bit. Ab da PUFFERT er fuer uns.
-/// 2. je bekanntem Kanal: hinwechseln, einen Probe Request mit UNSERER
-///    SSID hinaus, kurz horchen.
-/// 3. zurueck auf den eigenen Kanal, in der eigenen Breite.
-/// 4. **aufwachen** — dasselbe ohne das Bit, und er schiebt nach.
+/// 1. tell the AP we doze: null data with the power management bit set,
+///    from then on it buffers for us.
+/// 2. for each known channel: switch, send a probe request with our SSID,
+///    listen briefly.
+/// 3. back to our own channel, in our own width.
+/// 4. wake up: the same without the bit, and the AP flushes.
 ///
-/// Gefragt wird mit RUNDRUF-Adresse und gesetzter SSID: so antwortet
-/// jede Zelle dieses Netzes, nicht nur eine.
+/// Probes use the broadcast address with our SSID set, so every cell of
+/// this network answers, not just one.
 #[allow(clippy::too_many_arguments)]
 fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
@@ -7499,7 +6885,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     *found = [leer; ROAM_BSS_MAX];
     *n_found = 0;
 
-    // (1) schlafen gehen
+    // (1) doze
     let mut nf = [0u8; 32];
     let n = build_nullfunc(&mut nf, &mac, &link.bssid, true);
     let mut info = tx::pkt_info_update(&nf[..n], 0, tx::band_of(link.channel));
@@ -7507,18 +6893,18 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
         pci::tx_kick_off_queue(h, trx, q);
     }
-    // Dem Rahmen Zeit lassen, hinauszugehen — sonst wechseln wir den
-    // Kanal, bevor der AP erfahren hat, dass wir weg sind.
+    // Give the frame time to go out; otherwise we switch channel before the
+    // AP learns we are gone.
     host::sleep_ms(2);
 
     let t0 = host::now_us();
-    // SAFETY: einfaedig, und der Suchlauf schreibt nicht, waehrend
-    // gepumpt wird.
+    // SAFETY: single-threaded, and the scan does not write while the pump
+    // runs.
     let (chs, n_ch) = unsafe {
         (&*core::ptr::addr_of!(ROAM_CHANNELS), N_ROAM_CHANNELS)
     };
     for &ch in chs[..n_ch].iter() {
-        // (2) hin, fragen, horchen
+        // (2) switch, probe, listen
         let _ = switch_channel(h, hal, e, t_pwr, ch, CellWidth::default(), 0);
         let mut pr = [0u8; 128];
         let n = build_probe_req_to(&mut pr, &mac, ch, None,
@@ -7553,7 +6939,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         }
     }
 
-    // (3) zurueck — in der Breite, in der die Verbindung laeuft
+    // (3) back, in the width the link runs
     let heim = CellWidth {
         ht_param: link.ht_param_now,
         vht_chanwidth: link.vht_chanwidth_now,
@@ -7562,7 +6948,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let _ = switch_channel(h, hal, e, t_pwr, link.channel, heim,
                            max_bw_for(e));
 
-    // (4) aufwachen
+    // (4) wake up
     let n = build_nullfunc(&mut nf, &mac, &link.bssid, false);
     let mut info = tx::pkt_info_update(&nf[..n], 0, tx::band_of(link.channel));
     if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
@@ -7571,35 +6957,24 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ((host::now_us() - t0) / 1000) as u32
 }
 
-/// Ist der Kandidat besser als das, worauf wir sitzen?
+/// Whether the candidate is better than the current cell.
 ///
-/// **Die Regel ist eine Setzung, kein Port** — sie steht in
-/// wpa_supplicant, und die Quelle liegt nicht im Cache. Zwei Wege
-/// fuehren zum Wechsel:
+/// The rule is a policy, not a port; in Linux it lives in wpa_supplicant.
+/// Two ways lead to a switch:
 ///
-/// * er ist deutlich STAERKER (`ROAM_BETTER_DB`), oder
-/// * er ist BREITER und dabei hoechstens `ROAM_WIDER_TOLERANCE_DB`
-///   schwaecher.
+/// * it is clearly stronger (`ROAM_BETTER_DB`), or
+/// * it is wider and at most `ROAM_WIDER_TOLERANCE_DB` weaker.
 ///
-/// Der zweite Weg ist der Fall, der Florian getroffen hat: ein Repeater
-/// bei -50 dBm mit HT40 gewinnt jede reine Pegelwahl gegen einen AP bei
-/// -55 dBm mit VHT80 — und liefert die Haelfte.
+/// The second covers a stronger but narrower range extender, which wins
+/// any pure signal comparison against a weaker, wider AP while delivering
+/// less.
 fn roam_better(jetzt_dbm: i8, jetzt_bw: usize, kand: &Bss,
                max_bw: usize) -> bool {
     let (_, kand_bw, _) = chan_params(kand.channel, kand.width(), max_bw);
     let d = kand.best as i32 - jetzt_dbm as i32;
-    // **Breite wird nicht gegen Pegel verkauft.**
-    //
-    // Am Geraet: `K104 -58 dBm 80 MHz (wir)` gegen `K7 -49 dBm 20 MHz`,
-    // und die Regel nahm den zweiten — neun dB lauter, aber ein VIERTEL
-    // der Bandbreite. Die Regel schuetzte die Breite nur in die eine
-    // Richtung: der „breiter"-Zweig durfte Pegel kosten, der
-    // „staerker"-Zweig durfte Breite kosten, und niemand hat ihn daran
-    // gehindert.
-    //
-    // Jede Halbierung der Breite muss mit `ROAM_NARROWER_COST_DB`
-    // bezahlt werden. Von 80 auf 20 MHz sind das zwei Stufen — bei 10 dB
-    // je Stufe also zwanzig, und die neun dB reichen nicht mehr.
+    // Width is not traded for signal: every halving of the width must be
+    // paid with `ROAM_NARROWER_COST_DB`. From 80 to 20 MHz are two steps, at
+    // 10 dB each twenty.
     let schmaler = jetzt_bw.saturating_sub(kand_bw) as i32;
     let preis = schmaler * ROAM_NARROWER_COST_DB as i32;
     if d >= ROAM_BETTER_DB as i32 + preis {
@@ -7608,7 +6983,7 @@ fn roam_better(jetzt_dbm: i8, jetzt_bw: usize, kand: &Bss,
     kand_bw > jetzt_bw && d >= -(ROAM_WIDER_TOLERANCE_DB as i32)
 }
 
-/// Stufe 6a — Aufbau, Handschlag und die ersten acht Sekunden.
+/// Stage 6a: setup, handshake and the first eight seconds.
 #[allow(clippy::too_many_arguments)]
 fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
@@ -7619,8 +6994,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("[rtl8822ce] Stufe 6a: der Steuerkanal und der Datenweg\n");
 
     let mut l = link_setup(hal, bss, caps, si, mac);
-    // Acht Sekunden: der Handschlag braucht vier Rahmen und ist in
-    // Millisekunden durch; wer laenger wartet, wartet auf einen Fehler.
+    // Eight seconds: the handshake takes four frames and completes within
+    // milliseconds; waiting longer means waiting for an error.
     let _ = link_pump(h, hal, trx, mgmt_buf, &mut l, ls, mac, 8_000_000, d,
                       h2c, e, t_pwr, caps, fw_feature);
 
@@ -7648,9 +7023,8 @@ fn stage6a_link(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
-/// Ein Tor. **Ein gefallenes geht immer hinaus** — sonst sagt ein
-/// stiller Lauf nicht, wo er stehengeblieben ist, und das waere genau
-/// der Zustand, aus dem die sechs Stufen herausfuehren sollten.
+/// A gate. A failed one is always printed, otherwise a silent run would not
+/// say where it stopped.
 fn gate(name: &str, ok: bool) -> bool {
     if !ok {
         host::loud_begin();
@@ -7664,18 +7038,18 @@ fn gate(name: &str, ok: bool) -> bool {
     ok
 }
 
-/// Die belegten Plaetze des C2H-Zensus.
+/// The occupied slots of the C2H census.
 fn d_c2h(ls: &LinkStats) -> impl Iterator<Item = (u8, u32)> + '_ {
     ls.c2h_ids.iter().filter(|e| e.1 > 0).map(|e| (e.0, e.1))
 }
 
-/// **Die eine Zeile, die auch ein stiller Lauf druckt.**
+/// The one line a silent run prints.
 ///
-/// Sie steht nicht im `driver_report` — der landet in `wlan` und ist
-/// Zustand, der sich je Sekunde erneuert. Hier steht das EREIGNIS: die
-/// Verbindung ist zustande gekommen, mit wem, wie schnell und wie breit.
+/// It is not part of `driver_report`, which goes to `wlan` and is state
+/// refreshed every second. This is the event: the link is up, with whom,
+/// how fast and how wide.
 ///
-///     [rtl8822ce] verbunden: "HomeAP_New" K7 -49 dBm · HT MCS8-15
+///     [rtl8822ce] verbunden: "MyNet" K7 -49 dBm · HT MCS8-15
 ///                 (0x1b) · 40 MHz · AID 3
 fn report_connected(link: &Link, bss: Option<&Bss>, vif: Option<&vif::Vif>) {
     host::loud_begin();
@@ -7713,8 +7087,8 @@ fn report_connected(link: &Link, bss: Option<&Bss>, vif: Option<&vif::Vif>) {
     host::loud_end();
 }
 
-/// Eine Zeile der Schlusszusammenfassung. Gruen ist Stufenausgabe, rot
-/// geht immer hinaus.
+/// One line of the final summary. Green is stage output, red is always
+/// printed.
 fn stage_line(ok: bool, green: &str, red: &str) {
     if ok {
         host::print(green);
@@ -7723,15 +7097,11 @@ fn stage_line(ok: bool, green: &str, red: &str) {
     }
 }
 
-/// `debug:` aus `sys/config/wifi`. Fehlt die Datei oder die Zeile, ist
-/// die Antwort NEIN: ein Treiber im Autostart schweigt, bis jemand
-/// danach fragt.
+/// `debug:` from `sys/config/wifi`. A missing file or line means no: a
+/// driver in autostart stays silent until asked.
 ///
-/// **Gibt den Rueckgabewert des Lesezugriffs mit zurueck**, und das ist
-/// kein Beiwerk: „kein `debug:` in der Datei" und „die Datei war nicht
-/// da" fuehren zum selben Schweigen und haben verschiedene Heilungen.
-/// Ein NEIN aus einem gescheiterten Lesezugriff ist keine Antwort auf
-/// die gestellte Frage.
+/// Also returns the read's return value: "no `debug:` in the file" and "the
+/// file was missing" lead to the same silence but have different fixes.
 fn read_debug_flag() -> (bool, i32) {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
@@ -7745,43 +7115,24 @@ fn read_debug_flag() -> (bool, i32) {
     (on, n)
 }
 
-/// `ampdu:` aus `sys/config/wifi` — das Empfangsfenster der
-/// Aggregation.
-///
-/// **Drei Faelle, und alle drei absichtlich:** die Zeile fehlt → die
-/// Vorgabe (8, siehe `build_addba_resp`); `off`/`0` → gar keine
-/// Aggregation, der Zustand bis 0.28.0; eine ZAHL → genau dieses
-/// Fenster. So kann der naechste Lauf 8 gegen 32 messen, ohne dass
-/// jemand neu uebersetzt — und eine Messung schlaegt eine Vermutung
-/// darueber, wieviel Umsortierung TCP hier vertraegt.
-/// `aspm:` aus `sys/config/wifi` — `an` · `aus` · `wie-gefunden`.
-///
-/// **Vorgabe ist AUS, und das ist eine Entscheidung mit zwei Seiten.** Der
-/// Treiber schlaeft nie (kein LPS, §6 des Plans), also hat das Stromsparen
-/// des Links bei uns keinen Gegenpart, der es wieder aufweckt — und die
-/// Karte sagt selbst, dass sie 64 us braucht, um aus L1 herauszukommen.
-/// Dafuer kostet es Leerlaufstrom, und genau daran haengt ein anderer
-/// offener Posten (`project_idle_power_21w`). Deshalb ein Schalter und
-/// kein stilles Verhalten: `aspm: an` faehrt die Gegenprobe.
-/// Welches Band die Konfiguration will.
+/// Which band the configuration wants.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BandPref {
-    /// Vorgabe: 5 GHz, sobald es brauchbar steht, sonst 2,4.
+    /// Default: 5 GHz when usable, otherwise 2.4.
     Auto,
-    /// Nur 2,4 GHz — der Rueckfall, wenn 5 GHz Aerger macht.
+    /// Only 2.4 GHz, the fallback when 5 GHz causes trouble.
     Only24,
-    /// Nur 5 GHz — fuer die Messung, damit kein starker
-    /// 2,4-GHz-Nachbar die Entscheidung uebernimmt.
+    /// Only 5 GHz, for measurements, so no strong 2.4 GHz neighbor takes
+    /// over the decision.
     Only5,
 }
 
-/// `band:` aus `sys/config/wifi`. Der reine Teil, damit `framecheck.py`
-/// ihn ohne Geraet fahren kann.
+/// `band:` from `sys/config/wifi`. The pure part, so `framecheck.py` can run
+/// it without hardware.
 ///
-/// **Ein unverstandener Wert ist `Auto`, nicht ein Band.** Anders als bei
-/// `aspm` gibt es hier keine "sichere" Seite: wer sich vertippt, soll die
-/// Vorgabe bekommen und nicht in einem Band festsitzen, in dem sein Netz
-/// vielleicht gar nicht funkt.
+/// An unknown value is `Auto`, not a band. Unlike `aspm` there is no safe
+/// side here: a typo should yield the default, not lock into a band the
+/// network may not use.
 pub fn band_pref_from(v: &[u8]) -> BandPref {
     if v.starts_with(b"5") {
         BandPref::Only5
@@ -7804,11 +7155,17 @@ fn read_band_pref() -> BandPref {
     }
 }
 
-/// Ab dieser Feldstaerke ist 5 GHz die bessere Wahl (Klassen-ABI
-/// `WIFI_CLASS_ABI.md`: „5 GHz ab -70 dBm bevorzugt"). Darunter traegt
-/// 2,4 GHz weiter, und ein schwaches 5-GHz-Signal waere ein Rueckschritt.
+/// From this signal strength on 5 GHz is the better choice (class ABI
+/// `WIFI_CLASS_ABI.md`: "prefer 5 GHz from -70 dBm"). Below it 2.4 GHz
+/// reaches further, and a weak 5 GHz signal would be a step back.
 const PREFER_5G_DBM: i8 = -70;
 
+/// `aspm:` from `sys/config/wifi`: `an` · `aus` · `wie-gefunden`.
+///
+/// The default is off. The driver never sleeps (no LPS), so link power
+/// saving has no counterpart that wakes it, and the card itself reports
+/// 64 us to exit L1. It costs idle power instead, so it is a switch rather
+/// than silent behavior.
 fn read_aspm_pref() -> Option<bool> {
     let mut cfg = [0u8; 512];
     let n = host::fetch("sys/config/wifi", &mut cfg);
@@ -7821,14 +7178,12 @@ fn read_aspm_pref() -> Option<bool> {
     }
 }
 
-/// Der reine Teil von `read_aspm_pref` — getrennt, damit `framecheck.py`
-/// ihn ohne Geraet und ohne Dateisystem fahren kann.
+/// The pure part of `read_aspm_pref`, separate so `framecheck.py` can run it
+/// without hardware or file system.
 ///
-/// `Some(true)` anschalten · `Some(false)` ausschalten · `None` nicht
-/// anfassen. **Ein unverstandener Wert heisst AUS, nicht „nicht
-/// anfassen"** — wer etwas hinschreibt, will etwas aendern, und die
-/// sichere Auslegung eines Tippfehlers ist die Vorgabe, nicht das
-/// Gegenteil davon.
+/// `Some(true)` enable · `Some(false)` disable · `None` leave alone. An
+/// unknown value means off, not "leave alone": whoever writes something
+/// wants a change, and the safe reading of a typo is the default.
 fn aspm_pref_from(v: &[u8]) -> Option<bool> {
     if v.starts_with(b"an") || v.starts_with(b"on") || v == b"1" {
         Some(true)
@@ -7839,18 +7194,15 @@ fn aspm_pref_from(v: &[u8]) -> Option<bool> {
     }
 }
 
-/// Die groesste Breite, die wir fahren duerfen — `RTW_CHANNEL_WIDTH_*`,
-/// also 0/1/2.
+/// The widest channel we may use, `RTW_CHANNEL_WIDTH_*`, i.e. 0/1/2.
 ///
-/// **Zwei Quellen, und das Minimum davon.** Die Karte sagt in der efuse,
-/// was sie kann (`hw_cap_bw`, ein Bitfeld: Bit 0 immer, Bit 1 fuer 40,
-/// Bit 2 fuer 80 — der 8822CE meldet 0x07 und kann damit 80, aber kein
-/// 160). `bw:` in `sys/config/wifi` ist die Hand am Regler: wer eine
-/// Messreihe fahren oder eine breite Einstellung ausschliessen will,
-/// schreibt `bw: 40` hin.
+/// The minimum of two sources. The card states its capability in the efuse
+/// (`hw_cap_bw`, a bit field: bit 0 always, bit 1 for 40, bit 2 for 80; the
+/// 8822CE reports 0x07, so 80 but no 160). `bw:` in `sys/config/wifi` caps
+/// it by hand, e.g. `bw: 40`.
 fn max_bw_for(e: &efuse::Efuse) -> usize {
     let mut bw = 0usize;
-    // Das hoechste gesetzte Bit ist das Koennen der Karte.
+    // The highest set bit is the card's capability.
     for i in 0..3usize {
         if e.hw_cap_bw & (1 << i) != 0 {
             bw = i;
@@ -7859,15 +7211,12 @@ fn max_bw_for(e: &efuse::Efuse) -> usize {
     bw.min(read_bw_cap())
 }
 
-/// `bw:` aus `sys/config/wifi` — der reine Teil, damit `framecheck.py`
-/// ihn ohne Geraet fahren kann.
+/// `bw:` from `sys/config/wifi`, the pure part, so `framecheck.py` can run
+/// it without hardware.
 ///
-/// **Ein unverstandener Wert ist die Vorgabe (80), nicht die schmalste
-/// Einstellung.** Es ist dieselbe Regel wie bei `band:`: wer sich
-/// vertippt, soll das bekommen, was ohne die Zeile herauskaeme, und nicht
-/// in einer Einstellung festsitzen, die er nicht gewaehlt hat. Anders als
-/// bei `aspm:` gibt es hier keine „sichere" Seite — schmal ist nicht
-/// sicherer, nur langsamer.
+/// An unknown value is the default (80), not the narrowest setting, the
+/// same rule as for `band:`. Unlike `aspm:` there is no safe side here:
+/// narrow is not safer, only slower.
 pub fn bw_cap_from(v: &[u8]) -> usize {
     if v.starts_with(b"20") {
         0
@@ -7890,12 +7239,10 @@ fn read_bw_cap() -> usize {
     }
 }
 
-/// `txagg:` aus `sys/config/wifi` — der reine Teil fuer `framecheck.py`.
+/// `txagg:` from `sys/config/wifi`, the pure part for `framecheck.py`.
 ///
-/// **Ein unverstandener Wert ist AN, also die Vorgabe.** Dieselbe Regel
-/// wie bei `band:` und `bw:`: wer sich vertippt, bekommt das, was ohne
-/// die Zeile herauskaeme. `off` ist der Notausgang, und er fuehrt in
-/// einen Zustand, der GEMESSEN ist — den von 0.51.1.
+/// An unknown value is on, the default, as for `band:` and `bw:`. `off` is
+/// the escape hatch.
 pub fn txagg_from(v: &[u8]) -> bool {
     !(v.starts_with(b"off") || v.starts_with(b"aus") || v == b"0")
 }
@@ -7912,9 +7259,9 @@ fn read_txagg() -> bool {
     }
 }
 
-/// `ampdu:` — die Fensterbreite, die wir dem AP fuer seine Aggregation
-/// ZUSAGEN. Vorgabe ist die Decke des Protokolls, siehe
-/// `sta::build_addba_resp`.
+/// `ampdu:`: the window we grant the AP for its aggregation. Missing line:
+/// the protocol maximum (see `sta::build_addba_resp`); `off`/`0`: no
+/// aggregation; a number: exactly that window.
 fn read_ampdu_buf() -> u16 {
     const VORGABE: u16 = sta::BA_TX_BUF_SIZE;
     let mut cfg = [0u8; 512];
@@ -7939,21 +7286,21 @@ fn read_ampdu_buf() -> u16 {
             break;
         }
     }
-    // Das Feld ist zehn Bit breit (`ADDBA_PARAM_BUF_SIZE_MASK`), und
-    // mehr als 64 kann HT/VHT ohnehin nicht — die Bitmaske des
-    // komprimierten Block Ack hat 64 Plaetze.
+    // The field is ten bits wide (`ADDBA_PARAM_BUF_SIZE_MASK`), and HT/VHT
+    // cannot do more than 64 anyway: the compressed block ack bitmap has 64
+    // slots.
     if any { num.clamp(1, sta::BA_TX_BUF_SIZE) } else { VORGABE }
 }
 
-/// `on` oder `1` — dieselbe Regel, die `wifi_ax200` fuer `ampdu:` und
-/// `ps:` fuehrt. Ein unbekanntes Wort ist ein NEIN und keine Vermutung.
+/// `on` or `1`, the same rule `wifi_ax200` uses for `ampdu:` and `ps:`. An
+/// unknown word is no, not a guess.
 fn cfg_on(v: &[u8]) -> bool {
     v.starts_with(b"on") || v.starts_with(b"1")
 }
 
-/// `cfg_get` aus `wifid`/`wifi_ax200` — eine Zeile `key: value`, `#` ist
-/// ein Kommentar. Gibt die GRENZEN des Wertes zurueck, nicht eine
-/// Scheibe: der Puffer wird daneben weiterbenutzt.
+/// `cfg_get` from `wifid`/`wifi_ax200`: one `key: value` line, `#` starts a
+/// comment. Returns the bounds of the value, not a slice, because the
+/// buffer is used alongside.
 fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
     let mut start = 0usize;
     while start <= text.len() {
@@ -7977,7 +7324,7 @@ fn cfg_get(text: &[u8], key: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
-/// Leerzeichen und Wagenruecklauf an beiden Enden weg.
+/// Strips spaces and tabs at both ends.
 fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
     while a < b && (t[a] == b' ' || t[a] == b'\t') {
         a += 1;
@@ -7988,27 +7335,19 @@ fn trim(t: &[u8], mut a: usize, mut b: usize) -> (usize, usize) {
     (a, b)
 }
 
-/// Wieviel unser Bericht fassen darf. Der Kernel nimmt bis
-/// `drivers::report::REPORT_MAX` = 4096 (`host_core.rs:3639`); die
-/// 3584 laesst dem Kernel einen Rand; 2048 war mit der Watchdog-Zeile
-/// aus 0.67.1 knapp am Ende — und `put` schneidet still ab.
+/// How large our report may be. The kernel accepts up to
+/// `drivers::report::REPORT_MAX` = 4096; this leaves the kernel a margin.
+/// `put` truncates silently, which the report marks at its end.
 const REPORT_CAP: usize = 3584;
 
-/// docs/spec/WIFI_CLASS_ABI.md §3 — `npk_driver_report`.
+/// docs/spec/WIFI_CLASS_ABI.md §3: `npk_driver_report`.
 ///
-/// Ein Klartextblock, den das Intent `wlan` neben die Kernelsicht druckt.
-/// Der Kernel parst nichts; was berichtenswert ist, ist Geraetewissen.
+/// A plain text block the `wlan` intent prints beside the kernel view. The
+/// kernel parses nothing; what is worth reporting is device knowledge.
 fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
                   e: &efuse::Efuse, caps: &sta::PeerCaps) {
-    // **Der Kernel nimmt 4096** (`drivers::report::REPORT_MAX`); hier
-    // standen 896, und `put` schneidet STILL ab — `s.len().min(b.len() -
-    // *n)`. Mit jeder Zeile, die dazukam, fiel eine hinten heraus, und
-    // zwar ohne ein Zeichen darueber. Am Geraet endete der Bericht
-    // mitten in `abstand 2509 us im mittel, ` — genau vor den zwei
-    // Zahlen, fuer die die Version gebaut war.
-    //
-    // Zweitausend statt 896, und wenn es doch einmal nicht reicht, sagt
-    // es der Bericht am Ende selbst.
+    // `put` truncates silently (`s.len().min(b.len() - *n)`); if the buffer
+    // is ever too small, the report says so at its end.
     let mut b = [0u8; REPORT_CAP];
     let mut n = 0usize;
     let put = |s: &str, b: &mut [u8; REPORT_CAP], n: &mut usize| {
@@ -8039,14 +7378,10 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         &mut b, &mut n);
     put("  kanal ", &mut b, &mut n);
     num(link.channel as u32, &mut b, &mut n);
-    // **Drei Raten, und nur eine davon war bisher zu sehen.**
-    //
-    // `angeboten` ist `link.highest_rate` — einmal bei der Anmeldung aus
-    // den Faehigkeiten des AP gerechnet. Das ist eine BEHAUPTUNG ueber
-    // das Moegliche, und sie stand hier bis 0.31.0 allein als „rate".
-    //
-    // `tx` ist, was die FIRMWARE gewaehlt hat (C2H `RA_RPT`), `rx` was
-    // im Empfangsdeskriptor JEDES Rahmens steht. Das sind die Messungen.
+    // Three rates. `angeboten` is `link.highest_rate`, computed once at
+    // association from the AP's capabilities: a claim about what is
+    // possible. `tx` is what the firmware picked (C2H `RA_RPT`), `rx` what
+    // each frame's RX descriptor says. Those are the measurements.
     let hex = b"0123456789abcdef";
     let rate_hex = |v: u8, b: &mut [u8; REPORT_CAP], n: &mut usize| {
         if *n + 2 <= b.len() {
@@ -8055,23 +7390,12 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             *n += 2;
         }
     };
-    // **Die haeufigste Empfangsrate der ganzen Verbindung**, nicht die
-    // des letzten Rahmens. Bei einem Download sind 65 000 Datenrahmen
-    // gegen 900 Beacons kein Zweifelsfall.
-    // **Die haeufigste Rate der DATEN, nicht die der Baken.**
-    //
-    // Hier stand die Spitze ueber alle Raten, und am Geraet kam heraus:
-    // `rx OFDM 6M in 8350 von 15628` — bei `beacon 8320` in derselben
-    // Zeile. Eine Bake geht immer mit der niedrigsten Rate hinaus, und
-    // je laenger eine Verbindung steht, desto sicherer gewinnt sie: nach
-    // vierzehn Minuten sind es 8320 Baken gegen die paar tausend
-    // Datenrahmen, die einen PHY-Status tragen. Die Zeile sagte dann
-    // „6 Mbit" ueber eine Strecke, die gerade 240 Mbit lieferte.
-    //
-    // Gezaehlt wird jetzt ab `DESC_RATEMCS0` — alles darunter ist
-    // Legacy und auf einer HT/VHT-Verbindung Verwaltung. Gibt es keine
-    // einzige HT/VHT-Rate, faellt es auf die Spitze ueber alles zurueck,
-    // denn dann IST die Verbindung legacy.
+    // The most frequent data rate over the whole link, not the beacons'
+    // rate. A beacon always goes out at the lowest rate, and the longer a
+    // link stands, the more surely beacons would win a plain maximum. So
+    // counting starts at `DESC_RATEMCS0`; everything below is legacy and on
+    // an HT/VHT link management traffic. Without any HT/VHT rate it falls
+    // back to the peak over all, because then the link is legacy.
     let mcs0 = DESC_RATEMCS0 as usize;
     let spitze = |von: usize| ls.rate_hist.iter().enumerate().skip(von)
         .fold((0usize, 0u32), |acc, (i, &c)| if c > acc.1 { (i, c) } else { acc });
@@ -8079,10 +7403,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     let vht0 = DESC_RATEVHT1SS_MCS0 as usize;
     let ht_n: u32 = ls.rate_hist[mcs0..vht0].iter().sum();
     let vht_n: u32 = ls.rate_hist[vht0..].iter().sum();
-    // **Faellt es auf die Spitze ueber ALLES zurueck, gehoert auch der
-    // Nenner ueber alles.** Am Geraet stand sonst `0x04 in 304 von 0
-    // ht/vht` — ein Zaehler ohne Nenner, weil der Nenner die
-    // HT/VHT-Rahmen zaehlte und es keine gab.
+    // When falling back to the peak over all, the denominator must be over
+    // all too; otherwise it counts HT/VHT frames, of which there are none.
     let (top_rate, top_cnt, nur_legacy) = match spitze(mcs0) {
         (_, 0) => {
             let (r, c) = spitze(0);
@@ -8103,13 +7425,11 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" (NUR legacy), zuletzt ", &mut b, &mut n);
     } else {
         num(ges - legacy, &mut b, &mut n);
-        // **HT und VHT sind zwei Klassen, und der Unterschied ist der
-        // Faktor auf der Strecke.** Die Spitzenrate darueber nennt nur
-        // EINE; steht dort eine HT-Rate, waehrend wir VHT80 angemeldet
-        // haben, sendet der AP eine Klasse unter dem, was ausgehandelt
-        // ist — und das sieht man an keiner anderen Zahl. Gezaehlt wird
-        // nichts Neues: `rate_hist` traegt den Schnitt seit je, er wurde
-        // nur nie gelesen.
+        // HT and VHT are two classes, and the difference is a factor on the
+        // link. The peak rate above names one; an HT rate while we
+        // associated VHT80 means the AP sends one class below what was
+        // negotiated, which no other number shows. `rate_hist` already
+        // carries the split.
         put(" ht/vht (HT ", &mut b, &mut n);
         num(ht_n, &mut b, &mut n);
         put(", VHT ", &mut b, &mut n);
@@ -8131,10 +7451,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(match link.si.bw_mode { 0 => "20", 1 => "40", _ => "80" },
         &mut b, &mut n);
     put(" MHz", &mut b, &mut n);
-    // **Und daneben, was WIRKLICH ankam.** Die Zahl davor ist unsere
-    // Einstellung; diese hier kommt aus dem Empfangsstatus des Chips.
-    // Stehen sie auseinander, faehrt der AP eine andere Breite als wir —
-    // und das sieht man an keiner anderen Stelle.
+    // And next to it what actually arrived. The number before is our
+    // setting; this one comes from the chip's RX status. If they differ,
+    // the AP runs another width than we do.
     put(" (empfangen ", &mut b, &mut n);
     for (i, name) in ["20", "40", "80", "?"].iter().enumerate() {
         if ls.bw_hist[i] == 0 {
@@ -8148,15 +7467,11 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         num(ls.bw_hist[i], &mut b, &mut n);
     }
     put(")", &mut b, &mut n);
-    // **Was der AP SELBST angibt zu koennen.**
-    //
-    // Die Zeile darueber sagt, WOMIT er sendet. Diese sagt, WOMIT ER
-    // KOENNTE — aus seiner eigenen Anmeldeantwort, die `parse_assoc_resp`
-    // seit je liest und die nirgends stand. Stehen die zwei auseinander,
-    // ist die Rate seine ENTSCHEIDUNG und nicht seine Grenze, und dann
-    // liegt der Deckel in seiner Ratenwahl statt bei uns. Fehlt VHT hier
-    // ganz, hat er uns gar nicht als VHT-Station angenommen — und DAS
-    // waere unseres.
+    // What the AP itself claims it can do, from its own association
+    // response (`parse_assoc_resp`). The line above says what it sends
+    // with, this one what it could. If they differ, the rate is its
+    // decision, not its limit; if VHT is missing here entirely, it did not
+    // accept us as a VHT station, which would be on our side.
     let vhtmap = |m: u16, b: &mut [u8; REPORT_CAP], n: &mut usize| {
         let mut nss = 0u32;
         let mut top = 0u32;
@@ -8176,16 +7491,14 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put("SS MCS0-", b, n);
         num(top, b, n);
     };
-    // **Unsere Seite zuerst.** Ohne sie unterscheidet die Zeile nicht
-    // zwischen „er hat nein gesagt" und „wir haben nie gefragt":
-    // `build_vht_cap_ie` kehrt UM, wenn die efuse etwas anderes als VHT
-    // ansagt, und dann geht gar kein VHT-Element hinaus. Dieselbe
-    // Bedingung, an derselben Zahl.
+    // Our side first, so the line distinguishes "it said no" from "we never
+    // asked": `build_vht_cap_ie` declines if the efuse announces anything
+    // other than VHT, and then no VHT element goes out.
     put("\n  wir schickten  HT ", &mut b, &mut n);
     num(e.hw_cap_nss as u32, &mut b, &mut n);
     put("SS", &mut b, &mut n);
-    // SAFETY: einfaedig; geschrieben beim Bauen des Antrags, hier nur
-    // gelesen.
+    // SAFETY: single-threaded; written when building the request, only read
+    // here.
     match unsafe { SENT_VHT } {
         Some(cap) => {
             put(" + VHT ", &mut b, &mut n);
@@ -8203,16 +7516,15 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         }
         None => put(" + kein VHT (2,4 GHz)", &mut b, &mut n),
     }
-    // SAFETY: wie oben.
+    // SAFETY: as above.
     put(if unsafe { SENT_WMM } { " + WMM" } else { " + KEIN WMM (AP sagt keins an)" },
         &mut b, &mut n);
-    // **Und wie breit er seine Zelle BETREIBT** — aus der
-    // Anmeldeantwort, nicht aus der Bake. Linux liest genau diese
-    // Elemente und nur diese: `ieee80211_assoc_success` gibt die
-    // Elemente der ANTWORT an `ieee80211_config_bw` (mlme.c:7666), und
-    // `ieee80211_determine_ap_chan` leitet daraus Betriebsart und
-    // Breite ab. Wir nahmen beides aus der Bake und sahen die Antwort
-    // nie an — wenn die zwei auseinanderstehen, steht es hier.
+    // How wide the AP operates its cell, from the association response, not
+    // the beacon. Linux reads exactly these elements:
+    // `ieee80211_assoc_success` passes the response elements to
+    // `ieee80211_config_bw` (mlme.c:7666), and `ieee80211_determine_ap_chan`
+    // derives mode and width from them. A mismatch with the beacon shows
+    // here.
     put("\n  ap betreibt  ", &mut b, &mut n);
     if caps.vht_op_seen {
         put("VHT-Op breite=", &mut b, &mut n);
@@ -8259,9 +7571,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     } else {
         put("  KEIN VHT in der Anmeldeantwort", &mut b, &mut n);
     }
-    // Die PCIe-Strecke. Steht hier und nicht einmalig beim Start, weil
-    // ASPM ein Verdaechtiger fuer den Durchsatz ist und ein Verdaechtiger
-    // in DEN Bericht gehoert, den Florian einschickt.
+    // The PCIe link. Reported here rather than once at start because ASPM
+    // can affect throughput.
     if let Some(l) = pci::link_state() {
         put("\npcie gen", &mut b, &mut n);
         num(l.speed as u32, &mut b, &mut n);
@@ -8325,9 +7636,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.eapol_tx, &mut b, &mut n);
     put("  schluessel ", &mut b, &mut n);
     num(ls.keys_set, &mut b, &mut n);
-    // **Die Verbindungswache.** Ein Anstupser, dem eine Erholung folgt,
-    // ist ein Fall, in dem wir die Verbindung FRUEHER weggeworfen
-    // haetten — die zwei Zahlen nebeneinander sagen, wie oft.
+    // Link watchdog and roaming: a probe followed by a recovery is a case in
+    // which the link would otherwise have been dropped.
     if link.roam.scans > 0 || link.roam.roams > 0 {
         put("  roaming ", &mut b, &mut n);
         num(link.roam.scans, &mut b, &mut n);
@@ -8369,7 +7679,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(" blicke mit beute, ", &mut b, &mut n);
     num(ls.rx_empty, &mut b, &mut n);
     put(" leer, ", &mut b, &mut n);
-    // Rahmen je Blick mit einer Nachkommastelle, in ganzen Zahlen.
+    // Frames per poll with one decimal, in integers.
     let zehntel = if ls.rx_polls > 0 {
         ls.rx_frames.saturating_mul(10) / ls.rx_polls
     } else {
@@ -8381,16 +7691,15 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put(" rahmen/blick, ", &mut b, &mut n);
     num(ls.rx_full, &mut b, &mut n);
     put(" volle stapel, ", &mut b, &mut n);
-    // Auslastung in Prozent: Zeit im Ring gegen Zeit der Schleife.
+    // Load in percent: time in the ring against loop time.
     let lauf = host::now_us().wrapping_sub(ls.pump_us0).max(1);
     num(((ls.rx_us.saturating_mul(100)) / lauf) as u32, &mut b, &mut n);
     put(" % der zeit im empfangspfad (", &mut b, &mut n);
     let je = if ls.rx_frames > 0 { ls.rx_us / ls.rx_frames as u64 } else { 0 };
     num(je as u32, &mut b, &mut n);
     put(" us je rahmen)", &mut b, &mut n);
-    // **Die Zeile, die sagt, ob der AP uns HOERT.** Bis 0.26.0 stand
-    // hier nichts dergleichen: „raus 360" hiess nur, dass wir 360 Rahmen
-    // in einen Ring gelegt haben.
+    // Whether the AP hears us: the TX report counters. A sent count alone
+    // only says how many frames went into a ring.
     put("\nsendequittung ", &mut b, &mut n);
     num(ls.tx_acked, &mut b, &mut n);
     put(" ok, ", &mut b, &mut n);
@@ -8414,9 +7723,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put("  FIRMWARE-ABSTURZ ", &mut b, &mut n);
         num(ls.fw_crash, &mut b, &mut n);
     }
-    // **Die Zeile, die diese Runde beantwortet.** Ein Neuschluessel
-    // laeuft Minuten nach dem Handschlag und hinterlaesst sonst keine
-    // Spur; ein Rauswurf war bis hierher gar nicht sichtbar.
+    // Rekeys and disconnects. A rekey runs minutes after the handshake and
+    // leaves no other trace.
     put("\nneuschluessel ", &mut b, &mut n);
     num(ls.rekey_rx, &mut b, &mut n);
     put(" empfangen, ", &mut b, &mut n);
@@ -8427,10 +7735,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.kicked, &mut b, &mut n);
     put("  neuverbunden ", &mut b, &mut n);
     num(ls.reconnects, &mut b, &mut n);
-    // **Die Frage dieser Runde, in einer Zahl.** Versucht der AP
-    // ueberhaupt, eine Aggregation aufzubauen? Er tut das mit einem
-    // ADDBA Request, und wir verwerfen bis heute jeden
-    // Verwaltungsrahmen ausser Deauth und Disassoc.
+    // Management frames by subtype, including whether the AP attempts to set
+    // up aggregation (ADDBA requests).
     put("\nmgmt beacon ", &mut b, &mut n);
     num(ls.mgmt_sub[8], &mut b, &mut n);
     put("  action ", &mut b, &mut n);
@@ -8453,18 +7759,12 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     } else if ls.addba_req > 0 {
         put(" — AGGREGATION AUS (`ampdu: off`)", &mut b, &mut n);
     }
-    // **Und die andere Richtung, die seit 0.29.0 fehlte.** Sie steht
-    // daneben und nicht darunter, damit man in EINER Zeile sieht, dass
-    // eine Verbindung zwei Sitzungen hat und dass sie verschiedene
-    // Zustaende haben koennen.
-    // **Und wieviel je Anstoss im Ring lag.** Eine Block-Ack-Sitzung
-    // sagt, was die Hardware aggregieren DARF; diese Zahl sagt, was sie
-    // aggregieren KANN. Steht hier eine Eins, ist der Engpass nicht die
-    // Sitzung, sondern dass nie mehr als ein Rahmen gleichzeitig da ist.
-    // **Die Aggregatgroesse in EMPFANGSrichtung**, von der Hardware
-    // gezaehlt. Sie steht vor der Sendeseite, weil sie beim
-    // Herunterladen die groessere ist — und weil die zwei nebeneinander
-    // sagen, ob eine Richtung buendelt und die andere nicht.
+    // Aggregation in both directions. The aggregate size in the receive
+    // direction, counted by hardware, comes first because it is the larger
+    // one when downloading. Next the transmit session and how much was in
+    // the ring per kick: the session says what the hardware may aggregate,
+    // the ring depth what it can. A one there means the bottleneck is not
+    // the session but that never more than one frame is queued.
     if ls.rx_ppdu_n > 0 {
         put("\nempfangsstapel ", &mut b, &mut n);
         num(ls.rx_data_ppdu_frames / ls.rx_ppdu_n, &mut b, &mut n);
@@ -8473,10 +7773,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" in ", &mut b, &mut n);
         num(ls.rx_ppdu_n, &mut b, &mut n);
         put(" ppdus)", &mut b, &mut n);
-        // **Und wieviel Zeit dazwischen lag.** Der kleinste Abstand ist
-        // das, was die Strecke kann; der mittlere das, was sie tut. Die
-        // zwei nebeneinander sagen, ob die Luft der Deckel ist — ohne
-        // eine einzige geschaetzte Konstante.
+        // And the time in between. The smallest interval is what the link
+        // can do, the mean what it does; together they show whether the air
+        // is the limit, without any estimated constant.
         if ls.rx_gap_n > 0 {
             put("\n  abstand ", &mut b, &mut n);
             num((ls.rx_gap_sum / ls.rx_gap_n as u64) as u32, &mut b, &mut n);
@@ -8485,7 +7784,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             put(" us (", &mut b, &mut n);
             num(ls.rx_gap_n, &mut b, &mut n);
             put(" gemessen, nur bei Verkehr)", &mut b, &mut n);
-            // **Die Verteilung, und sie ist der eigentliche Befund.**
+            // The distribution is the actual finding.
             put("\n  verteilt  <0,5ms ", &mut b, &mut n);
             for (i, name) in ["", "<2ms ", "<5ms ", "<10ms ", ">=10ms "]
                 .iter().enumerate()
@@ -8508,10 +7807,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
             }
         }
     }
-    // **Die Umkehrzeit unseres eigenen Stapels.** Von „Daten an den
-    // Kernel" bis „Rahmen vom Kernel zurueck" — beim Herunterladen ist
-    // das die Zeit, die WIR zur TCP-Quittung brauchen, und sie steckt
-    // eins zu eins in der RTT, die der Server misst.
+    // Our own stack's turnaround, from "data to the kernel" to "frame back
+    // from the kernel". When downloading this is the time we take for the
+    // TCP ACK, which adds directly to the RTT the server measures.
     if ls.turn_n > 0 {
         put("\nstapelumkehr ", &mut b, &mut n);
         num((ls.turn_sum / ls.turn_n as u64) as u32, &mut b, &mut n);
@@ -8520,11 +7818,10 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(" us (", &mut b, &mut n);
         num(ls.turn_n, &mut b, &mut n);
         put(" gemessen)", &mut b, &mut n);
-        // **Und hier faellt die Entscheidung.** Stehen in den zwei
-        // rechten Eimern ungefaehr so viele Faelle wie oben bei
-        // `>=10ms`, dann wartet der AP auf UNS — die Pause im Funk und
-        // die Pause im Stapel sind dann dasselbe Ereignis. Stehen dort
-        // null, kommt der Stillstand von woanders.
+        // If the two right buckets hold about as many cases as `>=10ms`
+        // above, the AP is waiting for us: the pause on air and the pause in
+        // the stack are the same event. If they are zero, the stall comes
+        // from elsewhere.
         put("\n  verteilt  <0,2ms ", &mut b, &mut n);
         for (i, name) in ["", "<1ms ", "<5ms ", "<20ms ", ">=20ms "]
             .iter().enumerate()
@@ -8542,12 +7839,10 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         }
     }
     if ls.tx_batch_n > 0 {
-        // **Zwei Zahlen, und nur die zweite entscheidet.** `eingelegt`
-        // ist, was der Treiber in EINEM Durchlauf in den Ring schob;
-        // `im ring` ist, was die Hardware im selben Augenblick noch vor
-        // sich hatte. Aggregiert wird die zweite. Sie sind verschieden,
-        // sobald das Medium belegt ist — dann stapeln sich die
-        // Deskriptoren, waehrend der Treiber einzeln nachlegt.
+        // Two numbers, only the second decides. `eingelegt` is what the
+        // driver queued in one pass; `im ring` is what the hardware still had
+        // queued at that moment, and that is what gets aggregated. They
+        // differ once the medium is busy.
         put("\nsendering ", &mut b, &mut n);
         num(ls.tx_ring_sum / ls.tx_batch_n, &mut b, &mut n);
         put(" deskriptoren beim anstoss im mittel, groesster ",
@@ -8607,15 +7902,13 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         put(reason_name(ls.last_reason), &mut b, &mut n);
         put(")", &mut b, &mut n);
     }
-    // **Die Zeile, die beweist, dass der Watchdog laeuft.** Vier Zahlen,
-    // die sich bewegen muessen: der Takt, die Verstaerkungsregelung, der
-    // Quarz (gegen den Wert der efuse) und die Temperatur. Steht der
-    // Quarz auf dem efuse-Wert und `bt` auf „an", ist die Nachfuehrung
-    // durch den Koexistenz-Riegel abgestellt — das ist kein Fehler,
-    // sondern Linux' eigene Regel, und man sieht es hier.
+    // Proof that the watchdog runs: tick, gain control, crystal (against the
+    // efuse value) and temperature must move. Crystal at the efuse value
+    // with `bt` on means tracking is held off by the coexistence lock, which
+    // is Linux' own rule.
     put("\nwatchdog ", &mut b, &mut n);
     num(d.watch_dog_cnt, &mut b, &mut n);
-    // SAFETY: einfaedig; der Pumpfaden schreibt, hier nur gelesen.
+    // SAFETY: single-threaded; the pump thread writes, only read here.
     let (wd, it, it_wd) = unsafe {
         (*core::ptr::addr_of!(WD_MAX), ITER_MAX, ITER_MAX_WD)
     };
@@ -8638,9 +7931,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     }
     put("  fehlalarm ", &mut b, &mut n);
     num(d.dm.total_fa_cnt, &mut b, &mut n);
-    // **Der Zustand der Luft in einer Zahl.** Ein hoher Anteil heisst:
-    // der AP muss staendig wiederholen, und dann ist der Deckel die
-    // Strecke und nicht der Treiber.
+    // The state of the air in one number. A high share means the AP keeps
+    // retransmitting, and then the link is the limit, not the driver.
     put("  crc ht ", &mut b, &mut n);
     num(ls.ht_err as u32, &mut b, &mut n);
     put("/", &mut b, &mut n);
@@ -8658,19 +7950,17 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num((ls.ofdm_ok + ls.ofdm_err) as u32, &mut b, &mut n);
     put("  rssi ", &mut b, &mut n);
     num(d.dm.min_rssi as u32, &mut b, &mut n);
-    // **Warum die Gegenseite waehlt, was sie waehlt.** Der
-    // Stoerabstand je Pfad steht in jedem Empfangsdeskriptor
-    // (`query_phy_status_page1`) und sagt, ob eine niedrige Rate
-    // berechtigt ist oder ob jemand unter Wert faehrt.
+    // Why the peer picks what it picks. The SNR per path is in every RX
+    // descriptor (`query_phy_status_page1`) and shows whether a low rate is
+    // justified.
     put("  snr ", &mut b, &mut n);
     num(d.dm.rx_snr[0].max(0) as u32, &mut b, &mut n);
     put("/", &mut b, &mut n);
     num(d.dm.rx_snr[1].max(0) as u32, &mut b, &mut n);
-    // **Zwei Zahlen, die sich gegenseitig aufloesen.** Allein sagt der
-    // Quarzwert nichts: erst der Abstand zur efuse sagt, ob die
-    // Nachfuehrung ueberhaupt etwas tut. Steht er auf dem efuse-Wert und
-    // `bt` auf „aus", dann hat sie gelaufen und nichts zu korrigieren
-    // gefunden — steht er darauf und `bt` auf „AN", ist sie abgestellt.
+    // Two numbers that explain each other. The crystal value alone says
+    // nothing; only its distance from the efuse shows whether tracking does
+    // anything. At the efuse value with `bt` off it ran and found nothing to
+    // correct; with `bt` on it is held off.
     put("  quarz ", &mut b, &mut n);
     num(d.dm.cfo_track.crystal_cap as u32, &mut b, &mut n);
     put(" (efuse ", &mut b, &mut n);
@@ -8685,11 +7975,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put("  bt ", &mut b, &mut n);
     put(if d.cx.bt_disabled { "aus" } else { "AN (Quarz fest)" },
         &mut b, &mut n);
-    // **Der Spitzenwert daneben.** Der geglaettete Wert faellt nach dem
-    // Ende einer Uebertragung binnen Sekunden auf null — wer danach
-    // `wlan` tippt, sieht `0/0` und kann ihn mit nichts vergleichen. Der
-    // Hoechststand bleibt stehen und ist die Zahl, die neben der von
-    // `netbench` steht.
+    // The peak next to it. The smoothed value drops to zero within seconds
+    // after a transfer, so the peak is what stays comparable afterwards.
     put("  tp ", &mut b, &mut n);
     num(d.stats.tx_throughput, &mut b, &mut n);
     put("/", &mut b, &mut n);
@@ -8699,9 +7986,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put("/", &mut b, &mut n);
     num(d.stats.rx_peak, &mut b, &mut n);
     put(")\n", &mut b, &mut n);
-    // **Ein abgeschnittener Bericht muss es sagen.** Sonst liest man
-    // eine Zeile zu Ende, die keine ist — und das war genau der Fall,
-    // der diese Zeilen ausgeloest hat.
+    // A truncated report must say so; otherwise a cut line reads as a
+    // complete one.
     if n == b.len() {
         const MARKE: &[u8] = b"\n*** BERICHT ABGESCHNITTEN ***";
         let a = b.len() - MARKE.len();
