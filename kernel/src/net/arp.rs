@@ -18,11 +18,9 @@ struct ArpEntry {
     ip: [u8; 4],
     mac: [u8; 6],
     valid: bool,
-    /// Tick the mapping was last confirmed. An entry that never expires cannot
-    /// be wrong only once: it is wrong until the next boot. Symptom seen on the
-    /// device — everything through the gateway silently failed (DNS, TCP to the
-    /// internet) while LAN-direct traffic kept working, which is exactly what a
-    /// stale next-hop MAC looks like from the outside.
+    /// Tick the mapping was last confirmed. An entry that never expires stays
+    /// wrong until the next boot; a stale next-hop MAC breaks everything
+    /// through the gateway while LAN-direct traffic keeps working.
     at: u64,
 }
 
@@ -91,7 +89,7 @@ pub fn request(target_ip: [u8; 4]) {
 }
 
 /// Announce our address on the current interface (gratuitous ARP: an ARP
-/// request for our OWN address, so everyone on the segment refreshes the
+/// request for our own address, so everyone on the segment refreshes the
 /// IP→MAC binding).
 ///
 /// The address is global state while the MAC belongs to whichever interface is
@@ -143,13 +141,11 @@ const RETRANS_TICKS: u64 = 5; // 50 ms
 /// request every `RETRANS_TICKS` and polls the network stack until the reply
 /// lands or the timeout (in 100 Hz ticks) elapses.
 ///
-/// Retransmitting is the point. A single request is a coin flip over WiFi — the
-/// request is a broadcast frame, the reply a unicast one, and losing either left
-/// nothing to try again. The caller then sent its real packet to L2 broadcast,
-/// which the gateway drops: the first DNS query after boot failed until
-/// something else happened to warm the cache. Wired hid this for years.
+/// Retransmitting matters over WiFi: the request is a broadcast frame and the
+/// reply a unicast one, and either can be lost. Without a reply the caller's
+/// packet goes to L2 broadcast, which the gateway drops.
 ///
-/// MUST NOT be called while holding any network-stack lock (CONNECTIONS,
+/// Must not be called while holding any network-stack lock (CONNECTIONS,
 /// etc.) — `super::poll` dispatches through the same locks and would
 /// deadlock.
 pub fn resolve(ip: [u8; 4], timeout_ticks: u64) -> Option<[u8; 6]> {

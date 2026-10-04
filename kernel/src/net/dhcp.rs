@@ -17,11 +17,6 @@ const MSG_OFFER: u8    = 2;
 const MSG_REQUEST: u8  = 3;
 const MSG_ACK: u8      = 5;
 
-/// What to leave behind when DHCP fails. The QEMU user-mode address only means
-/// something under QEMU; on real hardware it is a fiction that makes `net` show
-/// an address nobody can reach — and, worse, makes the retry logic think a lease
-/// exists. Outside QEMU we leave 0.0.0.0, which is the truth and what the
-/// link-state tick keys its retry on.
 /// MAC the current lease was issued to. A lease is only ours to re-request from
 /// the interface that got it.
 static LEASE_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
@@ -29,10 +24,13 @@ static LEASE_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
 /// The gateway's MAC at the time the lease was granted. If the same one answers
 /// after a link came back, we are on the same segment and the lease still holds:
 /// no DHCP is needed at all. This is what dhcpcd does before it considers any
-/// exchange, and it is what turns a mesh hand-off from a multi-second stall into
-/// one ARP round trip.
+/// exchange, and it turns a mesh hand-off into one ARP round trip.
 static LEASE_GW_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
 
+/// What to leave behind when DHCP fails. The QEMU user-mode address only means
+/// something under QEMU; elsewhere it would show an unreachable address and
+/// make the retry logic think a lease exists. Outside QEMU we leave 0.0.0.0,
+/// which is what the link-state tick keys its retry on.
 fn no_lease() {
     *LEASE_MAC.lock() = [0; 6];
     *LEASE_GW_MAC.lock() = [0; 6];
@@ -45,12 +43,9 @@ fn no_lease() {
 
 // ── The exchange, as a state machine ─────────────────────────────────────
 //
-// This used to be straight-line code with a three-second busy-spin per reply,
-// run up to three times over: up to nine seconds in which Core 0 did nothing
-// else. Core 0 is the terminal, so that was the whole machine stopping — and it
-// stopped LONGEST exactly when the link was broken, which is when a user most
-// wants a prompt. Every step below returns immediately; `tick()` picks the
-// reply up on a later pass of the Core-0 loop.
+// Core 0 runs the terminal and must not block waiting for a reply, least of
+// all on a broken link. Every step below returns immediately; `tick()` picks
+// the reply up on a later pass of the Core-0 loop.
 //
 // This is safe because a UDP listener keeps the last datagram for its port
 // until someone takes it: a reply landing between two ticks waits for us.
@@ -58,8 +53,7 @@ fn no_lease() {
 const BCAST: [u8; 4] = [255, 255, 255, 255];
 
 /// How long one attempt waits before it is re-sent. A server on a working link
-/// answers in milliseconds; the old three seconds only ever elapsed on a link
-/// that was not going to answer at all.
+/// answers in milliseconds.
 const REPLY_WAIT_MS: u64 = 1000;
 const DISCOVER_TRIES: u8 = 3;
 const REQUEST_TRIES: u8 = 3;
@@ -83,7 +77,7 @@ struct Exchange {
 static EXCHANGE: spin::Mutex<Option<Exchange>> = spin::Mutex::new(None);
 
 /// A lease is in, but the gateway has not answered ARP yet. Its MAC is what
-/// lets the NEXT link change skip the exchange entirely, so it is worth
+/// lets the next link change skip the exchange entirely, so it is worth
 /// recording late rather than waiting for it now.
 static GW_PENDING: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -118,12 +112,11 @@ pub fn start() -> Start {
     };
 
     // Keep our previous lease if we had a real one, so re-running DHCP (e.g. on
-    // a link switch) doesn't needlessly churn the address — but ONLY if it was
+    // a link switch) doesn't needlessly churn the address — but only if it was
     // this interface's lease. The address is global state while a lease belongs
     // to one MAC: hinting the wired NIC's address from the WiFi NIC asks the
-    // server for something it has already given to someone else, so it hands out
-    // a different one, and switching back repeats it in reverse. That is the
-    // .72/.73 ping-pong on a machine with both interfaces up.
+    // server for an address bound to another MAC, so the two interfaces would
+    // keep trading addresses.
     let prev = arp::our_ip();
     let same_iface = *LEASE_MAC.lock() == mac;
     let hint = if same_iface && prev != [0, 0, 0, 0] && prev != [10, 0, 2, 15] {
@@ -134,9 +127,8 @@ pub fn start() -> Start {
 
     // Rung 0 (dhcpcd's shortcut, not in the RFC): the same gateway MAC means the
     // same segment, so the lease we hold is still good and there is nothing to
-    // renegotiate. Cache-only — this used to block up to 300 ms on an ARP round
-    // trip, and the whole point here is that nothing blocks. A cold cache just
-    // means we take the rung below instead.
+    // renegotiate. Cache-only, because nothing here may block; a cold cache
+    // just means we take the rung below instead.
     if hint != [0, 0, 0, 0] {
         let gw = super::ipv4::gateway();
         let known = *LEASE_GW_MAC.lock();
@@ -156,7 +148,7 @@ pub fn start() -> Start {
     udp::listen(CLIENT_PORT);
     arp::set_ip([0, 0, 0, 0]);
 
-    // Rung 1, INIT-REBOOT: we still hold an address, so ask for THAT one — a
+    // Rung 1, INIT-REBOOT: we still hold an address, so ask for that one — a
     // broadcast REQUEST carrying it in option 50 and no server identifier. One
     // round trip when the server still knows us. Silence falls through to the
     // full exchange, which is the point of the rung.

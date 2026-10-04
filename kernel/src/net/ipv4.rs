@@ -50,13 +50,11 @@ pub fn handle_ipv4(data: &[u8]) {
     let _src_ip = &data[12..16];
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
-    // The microvm tap gets first refusal, BEFORE the filter below. A guest flow
-    // is keyed on the address it went OUT with; asking "is this addressed to the
-    // address we happen to hold right now" first throws the reply away whenever
-    // that address has moved — a DHCP renewal, a carrier blink — and every live
-    // flow dies silently at this line. The tap's own test is "does it match a
-    // mapping", which is the question that has an answer. Cheap no-op when no
-    // VM is up.
+    // The microvm tap gets first refusal, before the filter below. A guest
+    // flow is keyed on the address it went out with; filtering on our current
+    // address first would drop its replies whenever that address moved (DHCP
+    // renewal, carrier blink). The tap matches against its own mappings.
+    // Cheap no-op when no VM is up.
     if crate::microvm::devices::nat::tap_inbound(&data[..total_len.min(data.len())]) {
         return;
     }
@@ -113,9 +111,8 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> 
     let mut resolved = true;
     let arp_target = arp_target_for(dst_ip);
     let dst_mac = if arp_target == [255, 255, 255, 255] {
-        // A broadcast destination IS the broadcast MAC. Asking ARP who owns
-        // 255.255.255.255 put a nonsense request on the air before every DHCP
-        // packet, and the answer could only ever be "nobody".
+        // A broadcast destination is the broadcast MAC; asking ARP who owns
+        // 255.255.255.255 can only ever get no answer.
         eth::BROADCAST
     } else {
         match arp::lookup(arp_target) {

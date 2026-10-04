@@ -66,9 +66,8 @@ pub fn no_listener_stats() -> (u32, u16) {
 }
 
 /// Every UDP datagram that reached this layer, whoever it was for. Cumulative;
-/// callers take a snapshot and report the DELTA, because "2 since boot" says
-/// nothing about the lookup that just failed — which is exactly the mistake the
-/// first version of this counter invited.
+/// callers take a snapshot and report the delta, since a total since boot
+/// says nothing about the lookup that just failed.
 pub fn rx_total() -> u32 {
     RX_TOTAL.load(core::sync::atomic::Ordering::Relaxed)
 }

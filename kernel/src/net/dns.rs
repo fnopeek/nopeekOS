@@ -11,9 +11,8 @@ use super::udp;
 
 const DNS_PORT: u16 = 53;
 const LOCAL_PORT: u16 = 10053;
-/// 16 was one page load. A browser opening a single site touches twenty to
-/// forty names, so every entry was evicted before it was used twice and the
-/// cache never answered anything.
+/// A browser opening a single site touches twenty to forty names; the cache
+/// must hold more than one page load or nothing is ever used twice.
 const CACHE_SIZE: usize = 64;
 
 static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]); // QEMU user-mode DNS
@@ -28,11 +27,10 @@ struct DnsEntry {
     /// true = an address. false = the resolver tried and got nothing; the entry
     /// exists to keep the next asker from starting the same doomed lookup.
     valid: bool,
-    /// **Zwei Sorten Fehlschlag, und nur eine ist eine Auskunft.** `true`
-    /// heisst: der Aufloeser hat GEANTWORTET und den Namen nicht gekannt.
-    /// `false` heisst: nichts kam zurueck — das kann eine verlorene Frame
-    /// sein, und daraus eine halbe Minute Ausfall zu machen waere aus einer
-    /// Stoerung ein Defekt.
+    /// Two kinds of failure, and only one is information. `true`: the
+    /// resolver answered and did not know the name. `false`: nothing came
+    /// back, which may be a single lost frame and must not block the name
+    /// for the whole negative TTL.
     denied: bool,
     /// Tick this entry was written. Evicts the oldest instead of always slot 0,
     /// and expires a negative entry.
@@ -66,13 +64,11 @@ pub fn server() -> [u8; 4] { *DNS_SERVER.lock() }
 
 /// Cache-only lookup. Never sends, never waits.
 ///
-/// For callers that MUST NOT block. The microvm data plane is one: it runs on
+/// For callers that must not block. The microvm data plane is one: it runs on
 /// the vCPU fiber inside the virtio-net MMIO exit, and a blocking resolve there
 /// does not just freeze the guest — `fiber::pump_peers()` bails out inside a
 /// fiber, so the WASM NIC driver fiber sharing that core stops posting receive
-/// buffers. The card has ~50 ms of them at 116 Mbit. After that the answer we
-/// are waiting for is one of the frames that can no longer arrive, so the wait
-/// runs its full budget and the radio is gone with it.
+/// buffers, and the reply being waited for can then never arrive.
 pub fn cached(name: &str) -> Cached {
     let now = crate::interrupts::ticks();
     let cache = CACHE.lock();
@@ -85,7 +81,7 @@ pub fn cached(name: &str) -> Cached {
 
 /// Queue a name for the background resolver. Deduplicates against the cache and
 /// against the queue; drops silently when the queue is full — the caller that
-/// could not be answered asks again, and that retry IS the retry.
+/// could not be answered asks again, and that is the retry.
 pub fn want(name: &str) {
     if name.is_empty() || name.len() > 255 { return; }
     if !matches!(cached(name), Cached::Unknown) { return; }
@@ -94,12 +90,10 @@ pub fn want(name: &str) {
         if q.len() >= WANTED_MAX || q.iter().any(|n| n == name) { return; }
         q.push_back(String::from(name));
     }
-    // A worker resolves it (`docs/plan/CORES_AND_EVENTS.md`, stage 3). Until
-    // 0.418 Core 0 did, in its shell loop: `resolve` blocks up to 5.5 s, and
-    // everything else on Core 0 — cursor, rendering, the shell — stood still
-    // meanwhile; every DNS query of the microVM's browser went this way. A
-    // native task may block: placement gives it a free worker and marks the
-    // core busy, like any intent. Without workers, Core 0 keeps pumping.
+    // A worker resolves it (`docs/plan/CORES_AND_EVENTS.md`, stage 3):
+    // `resolve` blocks up to 5.5 s, which Core 0 (cursor, rendering, shell)
+    // cannot afford. A native task may block; placement gives it a free
+    // worker. Without workers, Core 0 keeps pumping.
     if crate::smp::scheduler::worker_count() > 0
         && !PUMP_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel)
     {
@@ -167,26 +161,19 @@ fn remember_kind(name: &str, ip: [u8; 4], valid: bool, denied: bool) {
 
 /// Resolve a hostname to IPv4 address. Blocking (polls for reply).
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
-    // Ein leerer Name ist keine Frage. `want()` prueft das seit je, `resolve`
-    // nicht — und am Geraet stand deshalb `dns: reply for  carried no A
-    // record` im Log, eine Abfrage nach der Wurzelzone.
+    // An empty name would be a query for the root zone.
     if name.is_empty() || name.len() > 255 {
         return None;
     }
-    // Check cache first — the POSITIVE one and the negative one.
-    //
-    // **Ein „den Namen gibt es nicht" ist eine Antwort und gehoert in den
-    // Cache.** `cached()` fuehrt das Negativfach seit je, aber `resolve`
-    // schrieb es nie und las es nie: jeder Aufruf mit demselben toten Namen
-    // zahlte die volle Runde noch einmal.
+    // Check the cache first, positive and negative: "this name does not
+    // exist" is an answer, and asking again would pay the full round trip.
     {
         let cache = CACHE.lock();
         if let Some(e) = cache.iter().flatten().find(|e| e.name == name) {
             if e.valid {
                 return Some(e.ip);
             }
-            // Nur ein AUSGESPROCHENES Nein spart die Runde. Eine
-            // Zeitueberschreitung wird wieder versucht.
+            // Only an explicit no skips the query; a timeout is retried.
             if e.denied && crate::interrupts::ticks().wrapping_sub(e.stamp) < NEG_TTL_TICKS {
                 return None;
             }
@@ -200,24 +187,19 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     };
     let query = build_query(name, id);
 
-    // Warm the next hop's MAC. `arp::resolve` returns at once on a cache hit;
-    // the blind 100 ms spin that stood here paid its timeout on EVERY uncached
-    // name — five per Wikipedia load — which is why `dns` read a constant
-    // ~110 ms while a TCP round trip to the same network took 20.
-    // `arp_target_for` because a resolver off our subnet answers via the
-    // gateway, and warming the resolver's own IP would never complete.
+    // Warm the next hop's MAC. `arp::resolve` returns at once on a cache hit,
+    // so this costs nothing when warm. `arp_target_for` because a resolver off
+    // our subnet answers via the gateway, and warming the resolver's own IP
+    // would never complete.
     //
-    // 300 ms, not 100: the window is paid ONCE, on a cold cache, because every
-    // name shares the same next hop. 100 ms held exactly one WiFi round trip,
-    // so a single lost frame sent the query to L2 broadcast and the first
-    // lookup after boot failed.
+    // 300 ms: the window is paid only on a cold cache, since every name shares
+    // the same next hop, and it must survive a lost frame over WiFi.
     let dns_server = *DNS_SERVER.lock();
     let hop = super::ipv4::arp_target_for(dns_server);
     if super::arp::resolve(hop, 30).is_none() {
-        // Say it. The first lookup after boot fails often enough to be a known
-        // annoyance, and from the outside "no MAC for the next hop" and "the
-        // resolver did not answer" are the same silence — with opposite causes.
-        // Only the failing case prints, so a warm cache stays quiet.
+        // Say it: from the outside "no MAC for the next hop" and "the resolver
+        // did not answer" are the same silence, with opposite causes. Only the
+        // failing case prints, so a warm cache stays quiet.
         crate::kprintln!("[npk] dns: next hop {}.{}.{}.{} did not answer ARP in 300 ms \
                           - query goes out to L2 broadcast", hop[0], hop[1], hop[2], hop[3]);
     }
@@ -229,29 +211,23 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         return None;
     }
 
-    // Split into legs: UDP has no retransmit of its own, so a single dropped
-    // datagram used to cost the whole timeout AND then fail. Now it costs one leg.
+    // Split into legs: UDP has no retransmit of its own, so a dropped datagram
+    // costs one leg instead of the whole budget.
     //
-    // The total was 2 s and that was simply too short. Measured on the device:
-    // the first lookup after boot failed while the next hop's MAC was already
-    // known — so nothing was lost on our side, the resolver just had not answered
-    // yet. It is the RECURSION that takes the time; the same name a second later
-    // comes out of the router's cache instantly. glibc gives a server 5 s before
-    // it gives up, twice over, and undercutting that by more than half turned a
-    // slow answer into a failed one. 5.5 s, still front-loaded so the common fast
-    // case is unaffected.
+    // 5.5 s in total, front-loaded so the common fast case is unaffected.
+    // Recursion on a cold resolver can take seconds; glibc gives a server 5 s
+    // before giving up.
     const LEGS: [u64; 4] = [50, 100, 200, 200]; // 100 Hz ticks
     let mut result = None;
     let mut answered_on = 0usize;
     // Datagrams that reached our port at all, and the id of the first one we
     // rejected. "Nothing arrived", "something arrived that was not ours" and
-    // "ours arrived and parsed to nothing" are three different faults that all
-    // end as one silent failure, and we have now guessed wrong about which one
-    // it is twice.
+    // "ours arrived and parsed to nothing" are three different faults that
+    // would otherwise end as one silent failure.
     let mut seen = 0u32;
     let mut foreign_id: Option<u16> = None;
-    // Hat UNSERE Antwort den Weg zurueck gefunden? Das ist nicht dasselbe wie
-    // „steht eine Adresse darin": eine Antwort ohne A-Satz ist eine Antwort.
+    // Did our reply come back at all? Not the same as "it carries an
+    // address": a reply without an A record is still an answer.
     let mut answered = false;
     let mut sent = 0usize;
     let t_start = crate::interrupts::ticks();
@@ -265,17 +241,14 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             super::poll();
             if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
                 seen += 1;
-                // Only OUR reply ends the wait — a negative answer is an
+                // Only our reply ends the wait — a negative answer is an
                 // answer, a stale one is not.
                 if is_reply_to(&data, id) {
                     result = parse_response(&data);
                     answered_on = n + 1;
                     answered = true;
                     if result.is_none() {
-                        // **Das ist kein Fehlschlag, das ist ein Nein.** Frueher
-                        // folgten hier noch zwei Zeilen, die „nach 5,5 s (4
-                        // Versuche)" behaupteten — beide Zahlen fest im Code,
-                        // waehrend die Antwort auf Bein 1 in Millisekunden kam.
+                        // Not a failure but a no: report the measured time.
                         crate::kprintln!(
                             "[npk] dns: {} gibt es nicht — der Aufloeser hat nach {} ms \
                              geantwortet ({} Bytes, an={}, rcode={})",
@@ -294,8 +267,8 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             core::hint::spin_loop();
         }
     }
-    // Which leg answered is the whole question: leg 1 is a healthy resolver, a
-    // later one means the budget was the thing that used to fail us.
+    // Which leg answered matters: leg 1 is a healthy resolver, a later one
+    // means slow recursion rather than a lost frame.
     if answered_on > 1 {
         crate::kprintln!("[npk] dns: {} answered on attempt {} (slow recursion, not a lost frame)",
             name, answered_on);
@@ -306,23 +279,17 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // A failed lookup names what it had to work with. Whether the next hop's MAC
     // was known decides where to look next, and reconstructing that afterwards
     // is impossible — by the time anyone asks, the cache is warm.
-    // **Nur wenn wirklich nichts kam.** Eine Antwort ohne A-Satz hat oben
-    // schon ihre eine Zeile bekommen; sie hier noch einmal als „keine Antwort"
-    // zu melden war die Meldung, die am Geraet sechzehnmal untereinander stand
-    // und nach einem Netzfehler aussah.
+    // Only when nothing came back: a reply without an A record was already
+    // reported above.
     if result.is_none() && !answered {
-        // Die GEMESSENE Zeit und die Zahl der wirklich abgeschickten Beine —
-        // „5,5 s (4 Versuche)" stand als Konstante da und log jedes Mal, wenn
-        // der Weg frueher endete ([[feedback_a_value_written_once_is_not_a_measurement]]).
+        // The measured time and the number of legs actually sent.
         let waited_ms = crate::interrupts::ticks().wrapping_sub(t_start) * 10;
         crate::kprintln!("[npk] dns: no answer for {} after {} ms ({} attempts sent), \
                           next hop {}, {} datagram(s) on our port, id 0x{:04x} wanted",
             name, waited_ms, sent,
             if super::arp::lookup(hop).is_some() { "was resolved" } else { "still UNRESOLVED" },
             seen, id);
-        // Eine fremde Kennung ist ein EIGENER Befund — sie nur dann nennen,
-        // wenn wirklich eine kam. „0x0000 seen" stand auch da, wenn gar
-        // nichts Fremdes eintraf, und las sich wie ein zweiter Fehler.
+        // A foreign id is a separate finding; name it only if one arrived.
         if let Some(f) = foreign_id {
             crate::kprintln!("[npk] dns: ein Datagramm auf unserem Port trug die fremde \
                               Kennung 0x{:04x} — nicht unsere Antwort", f);
@@ -341,12 +308,9 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         }
     }
 
-    // Cache result — und das NEIN genauso.
-    //
-    // Nur ein „geantwortet, keine Adresse" wird negativ gemerkt. Eine
-    // Zeitueberschreitung nicht: die kann eine verlorene Frame sein, und sie
-    // fuer die ganze TTL festzuschreiben macht aus einer Stoerung einen
-    // Ausfall.
+    // Cache the result, including an explicit no. A timeout is not cached:
+    // it may be a single lost frame, and pinning it for the whole TTL would
+    // turn a glitch into an outage.
     match result {
         Some(ip) => remember(name, ip, true),
         None if answered => remember_kind(name, [0; 4], false, true),

@@ -41,90 +41,72 @@ fn generate_isn(saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
     hash_part.wrapping_add(timer)
 }
 
-// A single LibreWolf page load opens ~20+ parallel TLS connections
-// (CDNs, telemetry, OCSP, …). 16 was a single-`https`-intent ceiling;
-// the browser exhausts it instantly → connects fail / stall →
-// PR_IO_TIMEOUT_ERROR. 128 matches the NAT session table.
+// A single browser page load opens 20+ parallel TLS connections (CDNs,
+// telemetry, OCSP, …). 128 matches the NAT session table.
 const MAX_CONNECTIONS: usize = 128;
 const MSS: u16 = 1460; // standard Ethernet MSS
 // The SYN/SYN-ACK window is never scaled (RFC 7323), so it's capped at 16-bit.
 const INITIAL_WINDOW: u16 = 65535;
 // TCP Window Scaling (RFC 7323). Without it the window is capped at 64 KiB and
-// throughput = 64 KiB / RTT (~4 MB/s on a CDN regardless of link/NIC — the
-// observed global slowness). We advertise `free >> OUR_WSCALE`.
+// throughput at 64 KiB / RTT. We advertise `free >> OUR_WSCALE`.
 // WSCALE 8 so the 16-bit window field can express the full 8 MiB buffer
-// (8 MiB >> 8 = 32768 ≤ 65535). History: WSCALE 5 / 1 MiB capped a flow at
-// ~727 Mbit; WSCALE 7 / 4 MiB reached ~650 avg but never plateaued (4 MiB ≈
-// the BDP to a ~35 ms-RTT mirror = throughput·RTT, so zero headroom → any RTT
-// jitter underfills). 8 MiB = ~2× BDP headroom → fill the pipe to ~native.
+// (8 MiB >> 8 = 32768 ≤ 65535), which leaves headroom over the
+// bandwidth-delay product so RTT jitter does not underfill the pipe.
 const OUR_WSCALE: u8 = 8;
 
 const RCV_WND_MIN: usize = 256 * 1024;
 const RCV_WND_MAX: usize = RECV_BUF_SIZE;
 
-// **`netdev::active_rx_rate()` wird hier nicht mehr gelesen.** Bis
-// 0.402.0 kam der Deckel aus „Leitungsrate x geglaettete RTT" — und die
-// Leitungsrate ist eine Zahl, die jeder Treiber UEBER SICH SELBST
-// behauptet (in `rtl8153.rs` stehen 20 MB/s, gemessen auf einem anderen
-// Blech und auf diesem nie nachgeprueft). Seit 0.403.0 misst DRS, was
-// die ANWENDUNG pro RTT wirklich abholt; die Rate wird dafuer nicht
-// gebraucht. Die Funktion bleibt, weil `netdev` sie fuer die
-// Schnittstellenauswahl fuehrt.
+// The receive window is sized by DRS (what the application actually reads
+// per RTT), not by a link rate the driver claims about itself.
 
-/// Advertised receive window = min(free buffer, DRS window).
-/// Was `recv_window` zuletzt gerechnet hat: (angebotenes Fenster in Bytes,
-/// srtt in MILLISEKUNDEN, Deckel in Bytes). **Die Frage, die eine Messung auf
-/// einer langsamen Leitung stellt, ist nicht „wieviel kam an", sondern „wieviel
-/// haben WIR angeboten" — und wovon der Deckel kam.**
+/// What `recv_window` last computed: (advertised window in bytes, srtt in
+/// milliseconds, cap in bytes). On a slow link the question is how much we
+/// offered and where the cap came from, not how much arrived.
 static WND_LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static WND_SRTT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static WND_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-/// (Fenster B, srtt ms, Deckel B) der letzten Berechnung.
+/// (window bytes, srtt ms, cap bytes) of the last computation.
 pub fn window_diag() -> (u32, u32, u32) {
     use core::sync::atomic::Ordering::Relaxed;
     (WND_LAST.load(Relaxed), WND_SRTT.load(Relaxed), WND_CAP.load(Relaxed))
 }
 
-/// Handfester Deckel fuer das angebotene Fenster in BYTES, 0 = aus.
+/// Manual cap on the advertised window in bytes, 0 = off.
 ///
-/// **Ein Werkzeug, kein Schalter.** Bei gesaettigter Strecke gilt
-/// `RTT = Fenster / Rate`, also stehen Fenster und RTT im Gleichschritt und
-/// EINE Messung sagt nicht, ob die Luft oder wir der Deckel sind. Das sagt
-/// nur die FORM der Kurve ueber mehrere Fenster: steigt der Durchsatz mit,
-/// waren wir es; bleibt er stehen und nur die RTT waechst, ist es die Luft.
+/// A diagnostic tool, not a setting. On a saturated path RTT = window /
+/// rate, so one measurement cannot tell whether the air or we are the
+/// limit; the shape of throughput over several windows can: if it rises
+/// with the window, we were the limit; if only the RTT grows, the air is.
 static RCV_WND_FORCE: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 
-/// `net window <KB>` setzt den Deckel, `net window auto` nimmt ihn weg.
+/// `net window <KB>` sets the cap, `net window auto` removes it.
 pub fn set_rcv_window_force(bytes: u32) {
     RCV_WND_FORCE.store(bytes, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Aktueller handfester Deckel in Bytes (0 = aus).
+/// Current manual cap in bytes (0 = off).
 pub fn rcv_window_force() -> u32 {
     RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Unsere Zeitmarke fuer die TCP-Timestamp-Option, in Millisekunden.
+/// Our clock for the TCP timestamp option, in milliseconds.
 ///
-/// **Hier stand `ticks()`, also 100 Hz.** Der Rueckweg `jetzt - TSecr`
-/// ist damit eine RTT in 10-ms-Stufen: 5 ms messen sich als null, 20 ms
-/// als ein bis zwei Stufen. Linux tickt seine Marke mit
-/// `TCP_TS_HZ = 1000` (tcp.h), und RFC 7323 §4 laesst alles zwischen
-/// 1 ms und 1 s zu — schneller waere falsch, weil PAWS den Umlauf
-/// braucht (2^32 ms sind 49 Tage, 2^32 us waeren 71 Minuten).
+/// A 100 Hz tick would measure RTTs in 10 ms steps. Linux uses
+/// `TCP_TS_HZ = 1000` (tcp.h); RFC 7323 §4 allows 1 ms to 1 s, and a faster
+/// clock would break PAWS (2^32 ms is 49 days, 2^32 us only 71 minutes).
 fn ts_now_ms() -> u32 {
     (crate::interrupts::uptime_us() / 1000) as u32
 }
 
 /// tcp_input.c:812 `tcp_rcv_rtt_update`.
 ///
-/// **Das MINIMUM zaehlt, nicht der Mittelwert.** Steht der neue Wert
-/// unter dem alten, gilt er sofort; sonst wird geglaettet — und auch das
-/// nur, wenn die Empfangsschlange LEER ist. Liegt dort noch etwas, misst
-/// die Probe, wie schnell unsere Anwendung liest, nicht wie schnell die
-/// Strecke ist.
+/// The minimum counts, not the mean: a lower sample applies at once, a
+/// higher one is smoothed, and only while the receive queue is empty.
+/// Otherwise the sample measures how fast our application reads, not the
+/// path.
 fn rcv_rtt_update(conn: &mut TcpConn, sample_us: u32) {
     let m = sample_us.saturating_mul(8);
     let old = conn.rcv_rtt_us8;
@@ -140,10 +122,9 @@ fn rcv_rtt_update(conn: &mut TcpConn, sample_us: u32) {
 
 /// tcp_input.c:894 `tcp_rcvbuf_grow`.
 ///
-/// `tcp_space_from_win`/`tcp_win_from_space` fallen weg: sie rechnen bei
-/// Linux das Verhaeltnis `skb->len / skb->truesize` heraus, also den
-/// Verschnitt der Paketpuffer. Unser `recv_buf` haelt ROHE Bytes — das
-/// Verhaeltnis ist eins, die Umrechnung die Identitaet.
+/// `tcp_space_from_win`/`tcp_win_from_space` are omitted: in Linux they
+/// account for `skb->len / skb->truesize` overhead, and our `recv_buf`
+/// holds raw bytes, so the conversion is the identity.
 fn rcvbuf_grow(conn: &mut TcpConn, newval: u32) {
     let oldval = conn.rcvq_space.max(1);
     conn.rcvq_space = newval;
@@ -153,29 +134,28 @@ fn rcvbuf_grow(conn: &mut TcpConn, newval: u32) {
     // „slow start: allow the sender to double its rate."
     let grow = rcvwin * (newval.saturating_sub(oldval)) as u64 / oldval as u64;
     rcvwin += grow << 1;
-    // Was ausser der Reihe liegt, braucht zusaetzlich Platz.
+    // Out-of-order data needs room on top.
     rcvwin += conn.ooo.values().map(|v| v.len() as u64).sum::<u64>();
 
     let rcvbuf = rcvwin.min(RCV_WND_MAX as u64) as u32;
-    // **Nur wachsen.** tcp_input.c:922.
+    // Only grow. tcp_input.c:922.
     if rcvbuf > conn.drs_win {
         conn.drs_win = rcvbuf;
     }
 }
 
-/// tcp_input.c:933 `tcp_rcv_space_adjust` — gerufen, sooft die Anwendung
-/// gelesen hat.
+/// tcp_input.c:933 `tcp_rcv_space_adjust` — called whenever the application
+/// has read.
 fn rcv_space_adjust(conn: &mut TcpConn) {
     let now = crate::interrupts::uptime_us();
     let time = now.saturating_sub(conn.rcvq_time_us);
-    // Ueber weniger als eine RTT sagt die Messung nichts.
+    // Less than one RTT says nothing.
     if conn.rcv_rtt_us8 == 0 || time < (conn.rcv_rtt_us8 >> 3) as u64 {
         return;
     }
     let copied = conn.copied_total.saturating_sub(conn.rcvq_copied0);
-    // **Was noch in der Schlange liegt, wird abgezogen.** Staut es sich,
-    // ist die ANWENDUNG der Engpass, und ein groesseres Fenster hilft ihr
-    // nicht (tcp_input.c:948-949).
+    // Subtract what is still queued: if it backs up, the application is the
+    // bottleneck and a larger window does not help (tcp_input.c:948-949).
     let copied = copied.saturating_sub(conn.recv_buf.len() as u64);
     if copied > conn.rcvq_space as u64 {
         rcvbuf_grow(conn, copied.min(u32::MAX as u64) as u32);
@@ -184,43 +164,34 @@ fn rcv_space_adjust(conn: &mut TcpConn) {
     conn.rcvq_time_us = now;
 }
 
-/// tcp_input.c:587 `tcp_sndbuf_expand` — das Gegenstueck zu
-/// `rcvbuf_grow`.
+/// tcp_input.c:587 `tcp_sndbuf_expand` — the counterpart of `rcvbuf_grow`.
 ///
-/// **Linux rechnet den Sendepuffer aus dem STAUFENSTER**:
-/// `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1) * per_mss`, gedeckelt
-/// durch `tcp_wmem[2]`. Der Faktor 2 steht dort mit Begruendung — CUBIC
-/// braucht 1,7, aufgerundet, plus Polster fuer eine Anwendung, die
-/// langsam auf `EPOLLOUT` reagiert.
+/// Linux derives the send buffer from the congestion window:
+/// `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1) * per_mss`, capped by
+/// `tcp_wmem[2]`. The factor 2 covers CUBIC's 1.7 plus slack for an
+/// application slow to react to `EPOLLOUT`.
 ///
-/// **Uns fehlt `snd_cwnd`, also fehlt Linux' Eingang in diese Formel.**
-/// Das ist hier benannt und nicht umschifft: wir haben keine
-/// Staukontrolle. Was wir stattdessen haben, ist dieselbe Groesse
-/// GEMESSEN statt gerechnet — wieviel in einer Umlaufzeit wirklich
-/// quittiert wurde. Der Faktor 2 bleibt Linux'.
-///
-/// Und `tcp_should_expand_sndbuf` (tcp_input.c:5804) uebersetzt sich
-/// nicht: sein Gatter ist „wenn wir das Staufenster gefuellt haben,
-/// nicht wachsen". Bei uns gibt es keins — der Puffer IST die einzige
-/// Bremse, und genau das hat die Messung gezeigt (4,5 Mio WouldBlock bei
-/// 0,85 % belegter Luft).
+/// Without congestion control there is no `snd_cwnd`; instead we use the
+/// same quantity measured: how much was acknowledged in one RTT. The
+/// factor 2 stays. `tcp_should_expand_sndbuf` (tcp_input.c:5804) does not
+/// translate: its gate is a filled congestion window, and here the buffer
+/// is the only brake.
 fn sndbuf_grow(conn: &mut TcpConn, newval: usize) {
     conn.snd_space = newval;
     let want = newval.saturating_mul(2).clamp(SND_BUF_INIT, SND_BUF_MAX);
-    // **Nur wachsen** — dieselbe Regel wie tcp_input.c:922.
+    // Only grow — the same rule as tcp_input.c:922.
     if want > conn.snd_buf_limit {
         conn.snd_buf_limit = want;
     }
 }
 
-/// Der Spiegel von `rcv_space_adjust`: gerufen, sooft eine Quittung
-/// Daten abgeraeumt hat.
+/// The mirror of `rcv_space_adjust`: called whenever an ACK has cleared
+/// data.
 fn snd_space_adjust(conn: &mut TcpConn) {
     let now = crate::interrupts::uptime_us();
     let time = now.saturating_sub(conn.sndq_time_us);
     let srtt_us = (conn.srtt_ms as u64).saturating_mul(1000);
-    // Ueber weniger als eine Umlaufzeit sagt die Messung nichts —
-    // dieselbe Schranke wie auf der Empfangsseite.
+    // Less than one RTT says nothing — the same bound as on the receive side.
     if srtt_us == 0 || time < srtt_us {
         return;
     }
@@ -232,13 +203,12 @@ fn snd_space_adjust(conn: &mut TcpConn) {
     conn.sndq_time_us = now;
 }
 
-/// Wieviel darf unterwegs sein: unser Puffer UND das Fenster des
-/// Gegenuebers. Vor 0.405.0 stand hier nur `MAX_UNACKED`, und das zweite
-/// gab es gar nicht.
+/// How much may be in flight: bounded by our buffer and by the peer's
+/// window.
 fn snd_allowed(conn: &TcpConn) -> usize {
     let peer = if conn.snd_wnd == 0 {
-        // Vor der ersten Quittung wissen wir es nicht. Ein Nullfenster
-        // NACH dem Handschlag ist dagegen echt und bremst uns richtig.
+        // Unknown before the first ACK. A zero window after the handshake
+        // is real and correctly stops us.
         SND_BUF_INIT
     } else {
         conn.snd_wnd as usize
@@ -248,8 +218,8 @@ fn snd_allowed(conn: &TcpConn) -> usize {
 
 fn recv_window(conn: &TcpConn) -> u16 {
     let forced = RCV_WND_FORCE.load(core::sync::atomic::Ordering::Relaxed);
-    // **`window <KB>` bleibt, und es bleibt ein WERKZEUG.** Ohne den
-    // Deckel gilt DRS; mit ihm misst man, was DRS haette finden sollen.
+    // Without a manual cap DRS decides; with one, `net window` measures what
+    // DRS should have found.
     let cap = if forced > 0 {
         (forced as usize).min(RCV_WND_MAX)
     } else {
@@ -298,129 +268,83 @@ fn ooo_runs_trim(runs: &mut BTreeMap<u32, u32>, want: u32) {
 const MAX_RETRIES: u8 = 3;
 const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 // Cold-cache ARP while a SYN waits: one WiFi round trip between probes, and a
-// total budget matching the old blocking pre-resolve (~500 ms) before the SYN
-// goes out to broadcast regardless.
+// total budget of ~500 ms before the SYN goes out to broadcast regardless.
 const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
 const ARP_MAX_TRIES: u8 = 10;
 const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
-// Retransmit timeout for DATA. Base 200 ms, doubled per attempt (RFC 6298
+// Retransmit timeout for data. Base 200 ms, doubled per attempt (RFC 6298
 // style), give up after MAX_DATA_RETRIES, then the connection is honestly
 // dead instead of silently one-way.
 const RTO_TICKS_BASE: u64 = 20; // 200 ms = Linux TCP_RTO_MIN (HZ/5)
 /// Retransmissions before an established connection is declared dead.
-/// Linux's `TCP_RETR2` is 15 (include/net/tcp.h:119); mine was 5, chosen
-/// without reference when the retransmit engine went in — about 6 s with the
-/// backoff below. Six seconds is nothing on a WiFi link carrying a saturating
-/// download: measured on the device, the `debug` mirror died with
-/// "no ACK for ~6 s" in the middle of a 1 GB transfer that itself completed
-/// fine. A stalled OTA connection was given the same six seconds.
-/// With the shift capped at 5 the RTO tops out at 6.4 s, so 15 attempts span
-/// roughly 70 s — patient, and still bounded.
+/// Same as Linux `TCP_RETR2` (include/net/tcp.h:119). With the shift capped
+/// at 5 the RTO tops out at 6.4 s, so 15 attempts span roughly 70 s; a
+/// saturated WiFi link can stall for several seconds without being dead.
 const MAX_DATA_RETRIES: u8 = 15;
 // Ceiling on unacknowledged bytes held for retransmit. A peer that stops
 // acknowledging must not grow this without bound; `send` refuses past it,
 // which is the backpressure the caller needs to see.
-/// Womit ein Sendepuffer anfaengt, bevor eine Messung vorliegt.
+/// Initial send buffer, before any measurement.
 ///
-/// **Hier standen `20 * 1460` — TCP_INIT_CWND mal Linux' Faktor 2 — und
-/// das hat den Upload totgelegt.** `tcp::send` ist alles-oder-nichts,
-/// und `http_post_zeros` uebergibt Stuecke von 64 KiB: 65536 passt nie
-/// in 29200, in keinem Zustand. Wachsen konnte der Puffer nicht, weil
-/// Wachstum an Quittungen fuer Daten haengt, die nie hinausgingen.
-///
-/// Die Regel daraus: **ein Anfangswert unter der Stueckgroesse des
-/// Rufers ist ein Stillstand, kein langsamer Start.** Linux hat das
-/// Problem nicht, weil `tcp_sendmsg` nimmt, was hineinpasst, und eine
-/// KURZE Schreibung meldet; unsere Schnittstelle kann das nicht.
-///
-/// Also der alte Deckel als Anfang. Zusammen mit „nur wachsen" heisst
-/// das: nie schlechter als vor 0.405.0.
+/// `tcp::send` is all-or-nothing (unlike Linux `tcp_sendmsg`, which takes
+/// what fits and reports a short write), and callers pass 64 KiB chunks.
+/// A starting value below the caller's chunk size is a deadlock, not a slow
+/// start: growth depends on ACKs for data that could never be sent.
 const SND_BUF_INIT: usize = 256 * 1024;
-/// Der Deckel.
+/// Send buffer ceiling.
 ///
-/// **Linux nimmt hier `sysctl_tcp_wmem[2]` = 4 MB. Wir nicht, und das
-/// ist bewusst.**
-///
-/// Am Geraet gemessen (2026-09-22): mit 4 MB wuchs der Puffer auf
-/// 1-2,6 MB, waehrend die Strecke rund 62 KB traegt (250 Mbit x 2 ms).
-/// Das Vierzigfache des Bandbreiten-Verzoegerungs-Produkts ging auf die
-/// Leitung, die Puffer dazwischen liefen ueber — und **unsere Erholung
-/// kann das nicht bezahlen**: ohne SACK ist jeder Verlust ein RTO,
-/// `cwnd` faellt auf 2, und mit zwei Paketen unterwegs gibt es nie die
-/// drei Doppelquittungen, die eine schnelle Wiederholung braucht.
-/// Gemessen: 45 Zeitueberschreitungen in zehn Sekunden, 1,3 Mbit.
-///
-/// Linux kann sich 4 MB leisten, weil darunter SACK, PRR und Limited
-/// Transmit stehen. Solange die fehlen, ist der Deckel die Grenze, die
-/// sie ersetzt — und 256 KB ist der Wert, mit dem diese Strecke
-/// nachweislich 269 Mbit geliefert hat.
-///
-/// **Das ist ein Deckel aus einer MESSUNG, nicht aus dem Bauch**, und er
-/// hat ein Ablaufdatum: er gehoert angehoben, sobald SACK steht.
+/// Linux uses `sysctl_tcp_wmem[2]` = 4 MB, which it can afford because of
+/// SACK, PRR and Limited Transmit. Without them, every loss overflowing
+/// intermediate buffers is an RTO, so a buffer far above the
+/// bandwidth-delay product collapses throughput. Raise this once SACK
+/// exists.
 const SND_BUF_MAX: usize = 256 * 1024;
 
-/// Wieviele leere Blicke auf `ACK_GEN`, bevor wir abgeben.
+/// Empty looks at `ACK_GEN` before yielding.
 ///
-/// Die Quittung kommt vom Treiber-Fiber auf einem ANDEREN Kern; hier zu
-/// warten heisst, sie um einen Planertakt zu verpassen. 4096 Umlaeufe
-/// sind wenige Mikrosekunden und damit kuerzer als jede Umlaufzeit, die
-/// wir je gemessen haben.
+/// The ACK comes from the driver fiber on another core; yielding here
+/// means missing it by a scheduler pass. 4096 spins are a few
+/// microseconds, shorter than any realistic RTT.
 const SEND_SPIN_BUDGET: u32 = 4096;
 
-/// **Die Staukontrolle ist AUS — und das ist eine Messung, kein
-/// Geschmack.**
+/// Congestion control is off: it needs loss accounting we do not have.
 ///
-/// Sie braucht eine Buchfuehrung, die wir nicht haben. Linux rechnet
-/// `tcp_packets_in_flight = packets_out - sacked_out - lost_out +
-/// retrans_out` und senkt `sacked_out` bei JEDER Doppelquittung
-/// (`tcp_add_reno_sack`), auch ohne SACK. Bei uns ist „unterwegs"
-/// schlicht `snd_nxt - snd_una`, und **diese Zahl schrumpft bei Verlust
-/// nie**.
+/// Linux computes `tcp_packets_in_flight = packets_out - sacked_out -
+/// lost_out + retrans_out` and lowers `sacked_out` on every duplicate ACK
+/// (`tcp_add_reno_sack`), even without SACK. Here "in flight" is simply
+/// `snd_nxt - snd_una`, which never shrinks on loss: after one lost
+/// segment `cwnd` drops and `write_xmit` would never send again, leaving
+/// one retransmit per RTO. Without loss accounting a congestion window is
+/// worse than none.
 ///
-/// Was daraus folgt, am Geraet gemessen (2026-09-22): nach dem ersten
-/// verlorenen Segment steht `snd_nxt` weit vorn — 199 KB, also 137
-/// Pakete —, `cwnd` faellt auf 1, und `write_xmit` sendet ab da NIE
-/// wieder etwas, weil `in_flight >= cwnd`. Das Einzige, was sich noch
-/// bewegt, ist eine Wiederholung je RTO: ein Segment pro 200 ms.
-/// `cwnd 1 · ssthresh 2 · 121x Zeitueberschreitung`, 10 Mbit.
-///
-/// **Ohne Verlust-Buchfuehrung ist ein Staufenster schlimmer als
-/// keines.** Ohne sie (0.405.0) lief dieselbe Strecke mit 269 Mbit
-/// durch, weil ein verlorenes Segment nur 200 ms kostete und der Rest
-/// weiterlief.
-///
-/// Die schnelle Wiederholung bleibt an: drei Doppelquittungen holen das
-/// fehlende Segment sofort statt nach 200 ms, und das kostet nichts.
-/// Aus ist nur das, was das Fenster ZUSAMMENZIEHT.
-///
-/// **Anschalten, wenn und nur wenn das hier steht**, in dieser
-/// Reihenfolge: `packets_out`/`sacked_out`/`lost_out` als echte Zaehler,
-/// `tcp_add_reno_sack`, SACK auf der Sendeseite, dann PRR.
+/// Fast retransmit stays on (three duplicate ACKs resend at once); only
+/// window reduction is off. Enable only once these exist, in order:
+/// `packets_out`/`sacked_out`/`lost_out` as real counters,
+/// `tcp_add_reno_sack`, sender-side SACK, then PRR.
 const CONG_CONTROL: bool = false;
 
-/// `TCP_INIT_CWND` — zehn Segmente (RFC 6928).
+/// `TCP_INIT_CWND` — ten segments (RFC 6928).
 const TCP_INIT_CWND: u32 = 10;
-/// `tp->reordering` in seiner Vorgabe: drei Doppelquittungen loesen die
-/// schnelle Wiederholung aus (RFC 5681 §3.2).
+/// Default `tp->reordering`: three duplicate ACKs trigger fast retransmit
+/// (RFC 5681 §3.2).
 const DUPACK_THRESH: u32 = 3;
 
-/// Nach wievielen Abgabe-Runden ohne Weckung trotzdem ein neuer Versuch
-/// gemacht wird. Kostet im Normalfall nichts (die Weckung kommt lange
-/// vorher) und macht aus einem toten Warten ein langsames.
+/// Yield rounds without a wakeup after which we try again anyway. Costs
+/// nothing normally (the wakeup comes long before) and turns a dead wait
+/// into a slow one.
 const RETRY_ROUNDS: u32 = 16;
-// 4 MiB receive buffer → ~4 MiB window with scaling → fills the bandwidth-delay
-// product for ~gigabit even at tens-of-ms RTT (1 MiB was the cap at ~11 ms;
-// higher-RTT CDNs need more). Grown lazily (VecDeque::new), so an idle
-// connection costs nothing and only an actively-bursting one approaches 4 MiB.
+// 8 MiB receive buffer → 8 MiB window with scaling → fills the bandwidth-delay
+// product for ~gigabit even at tens-of-ms RTT. Grown lazily (VecDeque::new),
+// so an idle connection costs nothing and only an actively bursting one
+// approaches the limit.
 // Host TCP only ever has a handful of live connections (OTA/https/dns), so the
 // worst-case footprint is small; the guest browser uses its own (microvm) TCP.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
 // ACK coalescing: send one ACK per N in-order segments (a held ACK is still
-// flushed by the 40 ms timer). 8 ≈ one ACK per ~11.7 KB at 1460 MSS, cutting
-// our TX-ACK packet rate ~4× (38500→9600/s at 850 Mbit) — fewer packets through
-// the single-threaded path (QEMU slirp) and less work on the busy-spin RX core.
-// Safe now that timestamps give the sender a per-segment RTT regardless.
+// flushed by the 40 ms timer). 8 ≈ one ACK per ~11.7 KB at 1460 MSS, which
+// cuts the ACK packet rate and the work on the busy-spin RX core. Safe because
+// timestamps give the sender a per-segment RTT regardless.
 const ACK_COALESCE: u16 = 8;
 // Cap on buffered out-of-order data per connection. Beyond this, new
 // ahead-segments are dropped (the sender will retransmit) so a lossy link
@@ -502,80 +426,65 @@ struct TcpConn {
     recv_buf: VecDeque<u8>,
     send_buf: Vec<u8>,
     // Out-of-order reassembly: segments received ahead of a gap, keyed by
-    // stream offset (seq - rcv_irs). Without this a single lost packet forced
-    // the sender into go-back-N (retransmit the whole window) which re-burst
-    // and re-overflowed the USB-NIC FIFO → collapse. With it only the one lost
-    // segment is retransmitted. Bounded by OOO_MAX_BYTES (else dropped → the
-    // sender retransmits). Offsets assume < 4 GiB per connection.
+    // stream offset (seq - rcv_irs). Without it a single lost packet forces
+    // the sender into go-back-N (retransmit the whole window), and the re-burst
+    // can overflow small NIC FIFOs again. Bounded by OOO_MAX_BYTES (else
+    // dropped → the sender retransmits). Offsets assume < 4 GiB per connection.
     ooo: BTreeMap<u32, Vec<u8>>,
     ooo_bytes: usize,
     // Coalesced [start,end) runs of `ooo`, kept in sync — so building SACK
-    // blocks is O(runs), not an O(n)-segments full-map scan per ACK (that cost
-    // ~38µs/pkt once a large window let `ooo` reach thousands of entries and
-    // collapsed the pipeline). Advisory: a desync only makes SACK suboptimal,
+    // blocks is O(runs), not a scan over thousands of `ooo` entries per ACK
+    // with a large window. Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
     ooo_runs: BTreeMap<u32, u32>,
-    // Smoothed RTT in MILLISECONDS, from the peer's echoed TSecr. Kept as a
+    // Smoothed RTT in milliseconds, from the peer's echoed TSecr. Kept as a
     // diagnostic only; the advertised window comes from DRS below.
     srtt_ms: u32,
 
     // ── DRS: Dynamic Right Sizing (Linux `tcp_rcv_space_adjust`) ────────
     //
-    // **Der Empfaenger misst, wieviel die ANWENDUNG pro RTT wirklich
-    // abholt, und leitet das Fenster daraus ab.** Keine Leitungsrate,
-    // keine Konstante. Hier stand bis 0.403.0 `rate × srtt`, mit der Rate
-    // aus `netdev::active_rx_rate()` — einer Zahl, die jeder Treiber ueber
-    // sich selbst BEHAUPTET — und einer RTT in 10-ms-Stufen. Damit war
-    // `window 1024` von Hand noetig, und Florian hat recht: das ist eine
-    // Notloesung, keine Loesung.
+    // The receiver measures how much the application actually reads per RTT
+    // and derives the window from that; no link rate, no constant. Three
+    // rules from tcp_input.c:
     //
-    // Drei Regeln aus tcp_input.c, und alle drei haben einen Grund:
-    //
-    // * **Es waechst nur** (`if (rcvbuf > sk->sk_rcvbuf)`, tcp_input.c:922,
-    //   und `if (copied <= space) goto new_measure`, :950). Ein Fenster,
-    //   das schrumpfen darf, geraet in eine Spirale — weniger Fenster,
-    //   weniger Durchsatz, weniger gemessener Bedarf.
-    // * **Die RTT kommt aus dem MINIMUM**, nicht aus dem geglaetteten Wert
-    //   (`if (old_sample == 0 || m < old_sample)`, :817). Der geglaettete
-    //   misst den eigenen Stau mit — ein Regelkreis mit positivem
-    //   Vorzeichen.
-    // * **Keine RTT-Probe, solange die Empfangsschlange nicht leer ist**
-    //   (`if (tp->rcv_nxt != tp->copied_seq) return`, :833). Sonst misst
-    //   man die eigene Anwendung statt der Strecke.
+    // * It only grows (`if (rcvbuf > sk->sk_rcvbuf)`, tcp_input.c:922, and
+    //   `if (copied <= space) goto new_measure`, :950). A window that may
+    //   shrink spirals down: less window, less throughput, less measured need.
+    // * The RTT comes from the minimum, not the smoothed value
+    //   (`if (old_sample == 0 || m < old_sample)`, :817). The smoothed value
+    //   includes our own queueing, a positive feedback loop.
+    // * No RTT sample while the receive queue is non-empty
+    //   (`if (tp->rcv_nxt != tp->copied_seq) return`, :833), or it measures
+    //   our application instead of the path.
 
-    /// `rcv_rtt_est.rtt_us` — in ACHTELN einer Mikrosekunde, wie Linux
+    /// `rcv_rtt_est.rtt_us` — in eighths of a microsecond, like Linux
     /// (`long m = sample << 3`).
     rcv_rtt_us8: u32,
-    /// `rcvq_space.seq` — wieviel die Anwendung beim letzten Messpunkt
-    /// insgesamt abgeholt hatte. Wir zaehlen absolut statt in
-    /// Sequenznummern; dasselbe Delta.
+    /// `rcvq_space.seq` — total bytes the application had read at the last
+    /// measurement point. Counted absolutely instead of in sequence numbers;
+    /// the delta is the same.
     rcvq_copied0: u64,
-    /// Wieviel sie insgesamt abgeholt hat (`copied_seq`).
+    /// Total bytes the application has read (`copied_seq`).
     copied_total: u64,
     /// `rcvq_space.time`
     rcvq_time_us: u64,
-    /// `rcvq_space.space` — der gemessene Bedarf einer RTT.
+    /// `rcvq_space.space` — the measured need of one RTT.
     rcvq_space: u32,
-    /// `sk_rcvbuf` — das Fenster, das DRS erlaubt.
+    /// `sk_rcvbuf` — the window DRS allows.
     drs_win: u32,
 
     // Retransmit. `send_buf` holds every byte we sent and the peer has not
     // acknowledged, starting at `snd_una`; `rto_tick` is when the oldest of
-    // them went out. Without this a single lost segment was lost FOREVER:
-    // the peer keeps a hole it can never fill, buffers everything after it
-    // out-of-order and delivers nothing more to its application, while our
-    // side happily reports every send as a success. Invisible for browsing
-    // (there the PEER retransmits to us and our own sends are one short
-    // request), fatal for anything that streams outward — `debug` went mute
-    // at the first radio loss while its keyboard direction kept working.
+    // them went out. Without retransmit a single lost segment leaves a hole
+    // the peer can never fill, so it delivers nothing more to its application
+    // while our sends all report success.
     retries: u8,
     last_send_tick: u64,
     rto_tick: u64,
 
     // Delayed ACK
-    /// Ein EINMALIGER D-SACK-Block (RFC 2883): der Bereich eines Segments,
-    /// das wir schon hatten. Wird beim naechsten Quittungsbau als ERSTER
-    /// SACK-Block ausgegeben und danach sofort geloescht.
+    /// A one-shot D-SACK block (RFC 2883): the range of a segment we already
+    /// had. Emitted as the first SACK block of the next ACK, then cleared.
     dsack: Option<(u32, u32)>,
     ack_pending: bool,
     ack_tick: u64,
@@ -595,57 +504,39 @@ struct TcpConn {
     // window). Our own advertised window is scaled by OUR_WSCALE.
     wscale_ok: bool,
     snd_wscale: u8,
-    /// **Das Fenster des Gegenuebers, skaliert** (RFC 9293 §3.8.6).
-    /// Bis 0.405.0 gab es dieses Feld nicht: `_window` wurde gelesen und
-    /// verworfen, und die einzige Bremse war `MAX_UNACKED`.
+    /// The peer's window, scaled (RFC 9293 §3.8.6).
     snd_wnd: u32,
-    /// **Unser Sendepuffer, und er WAECHST** — das Gegenstueck zu
-    /// `drs_win` auf der Empfangsseite.
-    ///
-    /// Linux fuehrt ihn in `tcp_sndbuf_expand` (tcp_input.c:587) aus dem
-    /// Staufenster nach: `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1)
-    /// * per_mss`, gedeckelt durch `tcp_wmem[2]`. Der Faktor 2 steht
-    /// dort mit Begruendung: CUBIC braucht 1,7, aufgerundet, plus
-    /// Polster fuer eine Anwendung, die langsam auf EPOLLOUT reagiert.
-    ///
-    /// **Uns fehlt `snd_cwnd`, also fehlt Linux' Eingang in die
-    /// Formel** — das ist hier benannt und nicht versteckt. Was wir
-    /// haben, ist dieselbe Frage wie beim Empfangsfenster: haben wir den
-    /// Puffer im letzten Umlauf ganz gefuellt und ist die Strecke dabei
-    /// sauber geblieben? Dann ist er zu klein. Genau so waechst
-    /// `tcp_rcv_space_adjust`, und genau so waechst dieser hier.
+    /// Our send buffer, which grows — the counterpart of `drs_win` on the
+    /// receive side. Linux derives it from the congestion window in
+    /// `tcp_sndbuf_expand` (tcp_input.c:587); without `snd_cwnd` we grow it
+    /// like `tcp_rcv_space_adjust` does: if the last RTT filled the buffer
+    /// on a clean path, it is too small. See `sndbuf_grow`.
     snd_buf_limit: usize,
-    /// `rcvq_space.seq` gespiegelt: wieviel das Gegenueber insgesamt
-    /// quittiert hat.
+    /// Mirror of `rcvq_space.seq`: total bytes the peer has acknowledged.
     acked_total: u64,
-    /// Stand beim letzten Messpunkt.
+    /// Value at the last measurement point.
     sndq_acked0: u64,
-    /// Zeitpunkt des letzten Messpunkts.
+    /// Time of the last measurement point.
     sndq_time_us: u64,
-    /// Der gemessene Bedarf EINER Umlaufzeit — `rcvq_space` gespiegelt.
+    /// The measured need of one RTT — mirror of `rcvq_space`.
     snd_space: usize,
 
-    // ── Staukontrolle, RFC 5681 / RFC 6582 (New Reno) ───────────
+    // ── Congestion control, RFC 5681 / RFC 6582 (New Reno) ───────────
     //
-    // **Bis 0.406.0 gab es sie gar nicht.** `write_xmit` schob den
-    // GANZEN Sendepuffer auf einmal hinaus — bei 1,6 MB waren das 1100
-    // Segmente in einem Zug. Solange der Puffer fest auf 256 KB stand,
-    // ging der Burst gerade noch durch; sobald `tcp_sndbuf_expand` ihn
-    // wachsen liess, lief die Luft ueber, und die Erholung schickte EIN
-    // MSS je RTO. Am Geraet: 2070 Segmente in zehn Sekunden.
-    /// `tcp_snd_cwnd` — in PAKETEN, wie bei Linux.
+    // Limits how much of the send buffer `write_xmit` pushes at once; see
+    // `CONG_CONTROL` for why window reduction is currently off.
+    /// `tcp_snd_cwnd` — in packets, like Linux.
     snd_cwnd: u32,
-    /// `snd_ssthresh`. Anfangs unendlich: der erste Verlust setzt ihn.
+    /// `snd_ssthresh`. Initially infinite: the first loss sets it.
     snd_ssthresh: u32,
-    /// `snd_cwnd_cnt` — die Teilpakete aus `tcp_cong_avoid_ai`.
+    /// `snd_cwnd_cnt` — the fractional packets of `tcp_cong_avoid_ai`.
     snd_cwnd_cnt: u32,
-    /// Wieviele Doppelquittungen in Folge.
+    /// Consecutive duplicate ACKs.
     dupacks: u32,
-    /// Ob wir in schneller Erholung sind (RFC 6582 „recover").
+    /// Whether we are in fast recovery (RFC 6582 "recover").
     in_recovery: bool,
-    /// `snd_nxt` beim Eintritt — erst darueber hinaus ist die Erholung
-    /// vorbei (RFC 6582 §3.2, sonst halbiert ein Verlustereignis das
-    /// Fenster mehrfach).
+    /// `snd_nxt` on entry; recovery ends only beyond it (RFC 6582 §3.2,
+    /// otherwise one loss event halves the window several times).
     recovery_end: u32,
 
     // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
@@ -657,9 +548,8 @@ struct TcpConn {
 
     // Selective ACK (RFC 2018). `sack_ok` once both SYNs carried SACK-permitted.
     // As the receiver we then tell the sender which out-of-order ranges we
-    // already hold (straight from `ooo`), so it retransmits ONLY the real holes
-    // instead of everything past the cumulative ACK — the difference between a
-    // loss collapsing throughput and a one-segment recovery.
+    // already hold (straight from `ooo`), so it retransmits only the real holes
+    // instead of everything past the cumulative ACK.
     sack_ok: bool,
 
     // Next-hop MAC not yet known: the SYN is held back until ARP answers.
@@ -682,20 +572,19 @@ fn alloc_port() -> u16 {
     p
 }
 
-/// Open a TCP connection WITHOUT waiting for the handshake: the handle comes
+/// Open a TCP connection without waiting for the handshake: the handle comes
 /// back at once, the caller asks `connect_status` until it answers.
 ///
 /// This is the form modules get. A blocking wait inside a host call freezes
 /// every other fiber on that worker core — including the WiFi driver, whose
 /// card then goes unpolled for the whole wait (the RB pool holds milliseconds).
 /// `fiber::pump_peers` cannot cover it: it returns early when called from
-/// inside a fiber, and a module IS a fiber.
+/// inside a fiber, and a module is a fiber.
 ///
 /// The cold-cache ARP wait becomes part of the same state machine: we ask
 /// once here and hold the SYN back (`arp_pending`) until `tick_connections`
 /// sees the answer. Sending it to broadcast meanwhile is what most gateways
-/// drop — the symptom was `debug <ip> <port>` needing 2–3 attempts on a
-/// fresh boot unless a `ping` had warmed the cache.
+/// drop.
 pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
     let local_port = alloc_port();
     let iss = generate_isn(arp::our_ip(), remote_ip, local_port, remote_port);
@@ -725,10 +614,9 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         rcvq_copied0: 0,
         copied_total: 0,
         rcvq_time_us: 0,
-        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
-        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
-        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
-        // durch null.
+        // `tcp_init_buffer_space`: start from what a fresh connection offers
+        // anyway, `TCP_INIT_CWND * advmss`. Without a start value
+        // `rcvbuf_grow` divides by zero.
         rcvq_space: 10 * MSS as u32,
         drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
@@ -787,7 +675,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
 }
 
 /// Connection state: 1 = usable, 0 = still handshaking, -1 = the peer hung up
-/// cleanly, -2 = it FAILED (reset, or we ran out of retransmits — i.e. the
+/// cleanly, -2 = it failed (reset, or we ran out of retransmits — i.e. the
 /// link stopped acknowledging).
 ///
 /// The two negatives are worth separating: "the far end closed" and "the link
@@ -800,15 +688,14 @@ pub fn connect_status(handle: usize) -> i32 {
         Some(ref c) if c.closed || c.state == State::Closed => -1,
         // Same predicate as `conn_healthy`: a peer FIN moves us to CloseWait
         // and sets `closed`, so a module polling this learns the far end hung
-        // up. `recv` never tells it — it just returns 0 bytes forever, which
-        // is why `debug` kept running after `nc` was closed.
+        // up. `recv` never tells it — it just returns 0 bytes forever.
         Some(ref c) if c.established && c.state == State::Established => 1,
         Some(_) => 0,
         None => -1,
     }
 }
 
-/// Open a TCP connection, blocking until established. NATIVE callers only —
+/// Open a TCP connection, blocking until established. Native callers only —
 /// they run as a task on a worker core, where `super::poll` pumps the peer
 /// fibers so the NIC keeps being drained while we wait. A module must use
 /// `connect_start` + `connect_status` instead; see the note there.
@@ -824,10 +711,8 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         match connect_status(handle) {
             1 => break,
             // -2 is our own retry budget running out; -1 is the peer closing
-            // the connection (a RST answers a SYN with a refusal). Reporting
-            // both as ConnectionRefused told us "nothing is listening" when the
-            // truth was "we gave up asking" — opposite investigations, third
-            // time today that one message covered two causes.
+            // the connection (a RST answers a SYN with a refusal). They call
+            // for opposite investigations, so they get different errors.
             -2 => {
                 if let Some(ref c) = CONNECTIONS.lock()[handle] {
                     crate::kprintln!(
@@ -845,11 +730,10 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
         }
 
         if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
-            // Say HOW FAR it got. A connect that dies has three distinct
-            // shapes and one message: next hop never resolved (`arp_pending`
-            // still set, or it gave up and broadcast), SYN sent and never
-            // answered (`retries` climbing), or the state machine stuck
-            // somewhere else entirely. Guessing between them costs an evening.
+            // Say how far it got. A connect that dies has three distinct
+            // shapes: next hop never resolved (`arp_pending` still set, or it
+            // gave up and broadcast), SYN sent and never answered (`retries`
+            // climbing), or the state machine stuck somewhere else entirely.
             if let Some(ref c) = CONNECTIONS.lock()[handle] {
                 crate::kprintln!(
                     "[tcp] connect timeout: state {:?} arp_pending {} arp_tries {} syn_retries {}",
@@ -886,10 +770,9 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         rcvq_copied0: 0,
         copied_total: 0,
         rcvq_time_us: 0,
-        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
-        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
-        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
-        // durch null.
+        // `tcp_init_buffer_space`: start from what a fresh connection offers
+        // anyway, `TCP_INIT_CWND * advmss`. Without a start value
+        // `rcvbuf_grow` divides by zero.
         rcvq_space: 10 * MSS as u32,
         drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
@@ -992,10 +875,9 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         rcvq_copied0: 0,
         copied_total: 0,
         rcvq_time_us: 0,
-        // `tcp_init_buffer_space` setzt den Startwert aus dem, was eine
-        // frische Verbindung ohnehin anbietet. Zehn Segmente ist
-        // `TCP_INIT_CWND * advmss`; ohne Startwert teilt `rcvbuf_grow`
-        // durch null.
+        // `tcp_init_buffer_space`: start from what a fresh connection offers
+        // anyway, `TCP_INIT_CWND * advmss`. Without a start value
+        // `rcvbuf_grow` divides by zero.
         rcvq_space: 10 * MSS as u32,
         drs_win: RCV_WND_MIN as u32,
         send_buf: Vec::new(),
@@ -1035,11 +917,9 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
 
 /// Send data on a connection. Buffers and sends immediately (no Nagle).
 ///
-/// The bytes are ALSO kept in `send_buf` until the peer acknowledges them,
+/// The bytes are also kept in `send_buf` until the peer acknowledges them,
 /// so `tick_connections` can retransmit. Returns `WouldBlock` when too much
-/// is already unacknowledged — that is real backpressure, not an error:
-/// before, every send was reported as a success and a lost segment simply
-/// vanished.
+/// is already unacknowledged — that is real backpressure, not an error.
 pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let t_enter = crate::interrupts::rdtsc();
     let r = send_inner(handle, data);
@@ -1053,28 +933,17 @@ pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     r
 }
 
-// ── Wo die Sendezeit hingeht ─────────────────────────────────────
+// ── Where send time goes ─────────────────────────────────────────
 //
-// **Erzeugerbegrenzt oder fensterbegrenzt — das ist EINE Frage mit zwei
-// entgegengesetzten Antworten**, und wir haben sie bisher aus dem
-// Durchsatz zurueckgerechnet statt sie zu messen. `SEND_WOULDBLOCK` ist
-// der Diskriminator: bleibt er null, haben wir nie auf Quittungen
-// gewartet und der Deckel ist die Zeit in `send_inner`; steht er hoch,
-// ist `MAX_UNACKED` der Deckel und die Konstante gehoert durch
-// `tcp_sndbuf_expand` ersetzt.
-/// Zaehlt jede Quittung, die Platz gemacht hat.
+// Producer-limited or window-limited: `SEND_WOULDBLOCK` tells them apart.
+// If it stays zero we never waited for ACKs and the limit is time spent in
+// `send_inner`; if it is high, the send buffer limit is the cap.
+/// Counts every ACK that freed send-buffer space.
 ///
-/// **Sie ist da, damit `send_blocking` NICHT auf der grossen Sperre
-/// dreht.** Gemessen am 2026-09-22: 4 508 041 vergebliche `send()` in
-/// 3,1 Sekunden, also 1,45 Mio `CONNECTIONS.lock()` je Sekunde — und
-/// genau diese Sperre braucht der Empfangspfad, um eine Quittung zu
-/// verbuchen. Der Sender hat seinen eigenen Quittungsweg ausgehungert;
-/// die Strecke mass 7,8 ms Umlaufzeit, wo der Server 2,3 ms sah.
-///
-/// Linux hat dafuer `sk_stream_wait_memory`: der Sender SCHLAEFT, bis
-/// `sk_write_space` ihn weckt. Wir haben keine Warteschlangen, aber ein
-/// Zaehler ohne Sperre ist derselbe Gedanke — es gibt nichts Neues zu
-/// versuchen, solange er steht.
+/// Lets `send_blocking` wait without spinning on `CONNECTIONS`, the lock
+/// the receive path needs to process the very ACK being waited for. The
+/// lock-free analogue of Linux `sk_stream_wait_memory` / `sk_write_space`:
+/// nothing new is worth trying while it stands still.
 pub static ACK_GEN: AtomicU64 = AtomicU64::new(0);
 
 pub static SEND_TSC: AtomicU64 = AtomicU64::new(0);
@@ -1082,35 +951,29 @@ pub static SEND_BLOCKED_TSC: AtomicU64 = AtomicU64::new(0);
 pub static SEND_SEGS: AtomicU64 = AtomicU64::new(0);
 pub static SEND_WOULDBLOCK: AtomicU64 = AtomicU64::new(0);
 pub static SEND_MAXBUF: AtomicU64 = AtomicU64::new(0);
-/// Wie oft die Schlange zum Treiber ein Segment abgelehnt hat. Frueher
-/// war das ein stiller Verlust (`tx drops full`), jetzt ist es Gegendruck
-/// — und die Zahl sagt, wie oft er greift.
+/// How often the driver queue refused a segment. This is backpressure, not
+/// loss; the count says how often it applies.
 pub static SEND_REFUSED: AtomicU64 = AtomicU64::new(0);
-/// Schnelle Wiederholungen und Zeitueberschreitungen. **Ohne die zwei
-/// Zahlen ist ein zu kleines Fenster nicht von einem verlorenen Segment
-/// zu unterscheiden**, und genau daran habe ich vier Releases lang
-/// vorbeigeraten.
+/// Fast retransmits and RTO expiries. Without these, a too-small window
+/// cannot be told apart from a lost segment.
 pub static FAST_RETRANS: AtomicU64 = AtomicU64::new(0);
 pub static RTO_FIRED: AtomicU64 = AtomicU64::new(0);
-/// **Kumulativ**, nicht der Live-Zaehler der Verbindung. Im Bericht
-/// stand `0 Doppelquittungen`, und das hiess nur „die letzte Quittung
-/// hat etwas abgeraeumt" — eine Zahl, die genau dann null ist, wenn man
-/// sie braucht.
+/// Cumulative duplicate ACKs, not the connection's live counter, which is
+/// reset by every ACK that clears data.
 pub static DUPACKS_SEEN: AtomicU64 = AtomicU64::new(0);
 
-/// Wohin der Sendepuffer gewachsen ist, und was das Gegenueber zuletzt
-/// angeboten hat. Beides nur fuer den Bericht — ohne die zwei Zahlen ist
-/// nicht zu sehen, ob `tcp_sndbuf_expand` ueberhaupt gegriffen hat.
+/// How far the send buffer has grown (with `snd_wnd_of`, what the peer last
+/// offered). Diagnostics: shows whether `tcp_sndbuf_expand` took effect.
 pub fn snd_limit_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_buf_limit)
 }
 
-/// Wieviel gerade unquittiert im Sendepuffer liegt.
+/// Bytes currently unacknowledged in the send buffer.
 pub fn snd_unacked_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.send_buf.len())
 }
 
-/// (cwnd in Paketen, ssthresh, Doppelquittungen, in Erholung)
+/// (cwnd in packets, ssthresh, duplicate ACKs, in recovery)
 pub fn cwnd_of(handle: usize) -> (u32, u32, u32, bool) {
     CONNECTIONS.lock()[handle].as_ref().map_or((0, 0, 0, false), |c| {
         (c.snd_cwnd,
@@ -1123,7 +986,7 @@ pub fn snd_wnd_of(handle: usize) -> usize {
     CONNECTIONS.lock()[handle].as_ref().map_or(0, |c| c.snd_wnd as usize)
 }
 
-/// Die Zaehler auf null, damit eine Messung nur ihren eigenen Lauf sieht.
+/// Reset the counters so a measurement sees only its own run.
 pub fn send_stats_reset() {
     SEND_TSC.store(0, Ordering::Relaxed);
     SEND_BLOCKED_TSC.store(0, Ordering::Relaxed);
@@ -1136,8 +999,8 @@ pub fn send_stats_reset() {
     DUPACKS_SEEN.store(0, Ordering::Relaxed);
 }
 
-/// (Takte in send, Takte in abgewiesenen send, Segmente, WouldBlock,
-/// groesster send_buf)
+/// (TSC in send, TSC in refused send, segments, WouldBlock, largest
+/// send_buf)
 pub fn send_stats() -> (u64, u64, u64, u64, u64) {
     (SEND_TSC.load(Ordering::Relaxed),
      SEND_BLOCKED_TSC.load(Ordering::Relaxed),
@@ -1150,10 +1013,9 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
-    // **Ein leerer Puffer nimmt IMMER an.** Sonst kann ein Aufruf, der
-    // groesser ist als der Deckel, nie durchkommen — und eine Absage,
-    // die sich durch Warten nicht aendert, ist ein Stillstand. Genau das
-    // war der Fehler in 0.405.0.
+    // An empty buffer always accepts. Otherwise a call larger than the limit
+    // could never get through, and a refusal that waiting cannot change is a
+    // deadlock.
     if !conn.send_buf.is_empty()
         && conn.send_buf.len() + data.len() > snd_allowed(conn)
     {
@@ -1176,25 +1038,15 @@ fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     Ok(())
 }
 
-/// tcp_output.c `tcp_write_xmit` — schiebt hinaus, was ungesendet im
-/// Puffer liegt, und **hoert auf, wenn das Geraet ablehnt**.
+/// tcp_output.c `tcp_write_xmit` — pushes out what is unsent in the buffer
+/// and stops when the device refuses.
 ///
-/// **Bis 0.405.2 gab es den Zustand „im Puffer, aber noch nicht auf der
-/// Leitung" gar nicht.** `send` schrieb jedes Stueck sofort hinaus und
-/// warf das Ergebnis weg. Lehnte die Schlange zum Treiber ab — am Geraet
-/// `tx drops full 388`, sobald der Sendepuffer auf 2 MB gewachsen war —,
-/// glaubte TCP trotzdem gesendet zu haben: `snd_nxt` lief weiter, und
-/// die Rettung hing allein am RTO, der EIN MSS je Runde nachschickt. Bei
-/// zwei Megabyte unterwegs ist das ein Stillstand, und genau so sah es
-/// aus („PUT stalled after 2293760 bytes").
-///
-/// Linux bremst hier mit `netif_stop_queue`: die Schlange sagt nein, und
-/// `tcp_write_xmit` laesst das Segment STEHEN, statt es zu verlieren.
-/// Dasselbe hier — `snd_nxt` wird erst nach einer angenommenen
-/// Uebergabe weitergesetzt, und `tick_connections` holt den Rest.
-///
-/// Damit ist das Wachstum des Sendepuffers auch sicher: mehr Puffer
-/// heisst jetzt mehr WARTENDE Bytes, nicht mehr verworfene.
+/// Like Linux with `netif_stop_queue`: when the driver queue says no, the
+/// segment stays in the buffer instead of being lost. `snd_nxt` advances
+/// only after an accepted handoff, and `tick_connections` sends the rest.
+/// A larger send buffer therefore means more waiting bytes, not more
+/// dropped ones; otherwise recovery would hinge on the RTO resending one
+/// MSS per round.
 fn write_xmit(conn: &mut TcpConn) {
     let mss = eff_mss(conn).min(1460);
     let mut chunk = [0u8; 1460];
@@ -1203,17 +1055,15 @@ fn write_xmit(conn: &mut TcpConn) {
         if sent >= conn.send_buf.len() {
             return;
         }
-        // ── Tor 1: das Staufenster (tcp_output.c:2238 `tcp_cwnd_test`)
+        // ── Gate 1: the congestion window (tcp_output.c:2238 `tcp_cwnd_test`)
         //
-        // `in_flight >= cwnd` heisst: nichts mehr hinaus, bis eine
-        // Quittung Platz macht. **Das ist die Bremse, die uns gefehlt
-        // hat** — ohne sie ging der ganze Puffer in einem Zug auf die
-        // Luft, und was dort nicht hinpasste, war verloren.
+        // `in_flight >= cwnd`: nothing more until an ACK makes room.
+        // Disabled while `CONG_CONTROL` is off.
         let in_flight = sent.div_ceil(mss) as u32;
         if CONG_CONTROL && in_flight >= conn.snd_cwnd {
             return;
         }
-        // ── Tor 2: das Fenster des Gegenuebers
+        // ── Gate 2: the peer's window
         //           (tcp_output.c:2295 `tcp_snd_wnd_test`)
         let n = (conn.send_buf.len() - sent).min(mss);
         if sent + n > conn.snd_wnd as usize && conn.snd_wnd != 0 {
@@ -1223,7 +1073,7 @@ fn write_xmit(conn: &mut TcpConn) {
         let seq = conn.snd_nxt;
         let w = recv_window(conn);
         if !send_seg(conn, seq, conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
-            // Voll. Nichts verloren, nur noch nicht hinaus.
+            // Full. Nothing lost, just not sent yet.
             SEND_REFUSED.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -1234,14 +1084,14 @@ fn write_xmit(conn: &mut TcpConn) {
 }
 
 /// `tcp_slow_start` (tcp_cong.c:454) + `tcp_cong_avoid_ai` (:468),
-/// zusammengefasst wie `tcp_reno_cong_avoid` (:493).
+/// combined as in `tcp_reno_cong_avoid` (:493).
 fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
     if conn.snd_cwnd < conn.snd_ssthresh {
-        // „In safe area, increase."
+        // "In safe area, increase."
         conn.snd_cwnd = (conn.snd_cwnd + acked_pkts).min(conn.snd_ssthresh);
         return;
     }
-    // „In dangerous area, increase slowly" — ein Paket je Fenster.
+    // "In dangerous area, increase slowly" — one packet per window.
     let w = conn.snd_cwnd.max(1);
     if conn.snd_cwnd_cnt >= w {
         conn.snd_cwnd_cnt = 0;
@@ -1255,9 +1105,9 @@ fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
     }
 }
 
-/// Das Segment an `snd_una` noch einmal — und nur dieses.
-/// `tcp_retransmit_skb` auf dem Kopf der Wiederholungsschlange.
-/// `snd_nxt` bleibt, wo es ist: was dahinter liegt, ist unterwegs.
+/// Resend the segment at `snd_una`, and only that one: `tcp_retransmit_skb`
+/// on the head of the retransmit queue. `snd_nxt` stays put; what lies
+/// beyond it is in flight.
 fn retransmit_head(conn: &mut TcpConn) {
     if conn.send_buf.is_empty() {
         return;
@@ -1274,49 +1124,35 @@ fn retransmit_head(conn: &mut TcpConn) {
     }
 }
 
-/// `tcp_reno_ssthresh` (tcp_cong.c:512): die Haelfte, mindestens zwei.
+/// `tcp_reno_ssthresh` (tcp_cong.c:512): half, at least two.
 fn reno_ssthresh(conn: &TcpConn) -> u32 {
     (conn.snd_cwnd >> 1).max(2)
 }
 
-/// Send, waiting out backpressure. NATIVE callers only — the same rule as
+/// Send, waiting out backpressure. Native callers only — the same rule as
 /// `connect`: this polls, which pumps the peer fibers on a worker core. A
 /// module must handle `WouldBlock` itself and sleep between tries.
 pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(), TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
-        // **VOR dem Versuch gelesen, nicht danach.** Kommt die Quittung
-        // waehrend `send()` laeuft, steht der Zaehler danach schon
-        // hoeher — wer ihn erst dann liest, wartet auf die NAECHSTE, und
-        // wenn es keine mehr gibt, bis zur Frist. Die klassische
-        // verpasste Weckung.
+        // Read before the attempt, not after: an ACK arriving during `send()`
+        // would otherwise be missed, and we would wait for the next one (or
+        // the timeout). The classic lost wakeup.
         let zuletzt = ACK_GEN.load(Ordering::Relaxed);
         match send(handle, data) {
             Err(TcpError::WouldBlock) => {}
             other => return other,
         }
-        // **Erst wenn eine Quittung Platz gemacht hat, lohnt ein zweiter
-        // Versuch.**
+        // A second attempt is only worth it once an ACK has made room.
+        // Retrying `send()` in a loop would hammer `CONNECTIONS.lock()`, the
+        // lock the ACK itself needs.
         //
-        // Hier stand eine Schleife, die JEDEN Umlauf `send()` rief — und
-        // damit `CONNECTIONS.lock()` nahm. Gemessen: 4 508 041 Umlaeufe
-        // in 3,1 Sekunden. Die alte Begruendung („eine Antwort innerhalb
-        // des ersten Ticks sieht keinen Kontextwechsel") galt dem
-        // Download-Pfad, wo eine Antwort tatsaechlich sofort kommt; beim
-        // SENDEN wartet man auf eine Quittung, und die braucht genau die
-        // Sperre, die wir hier in der Hand halten.
+        // `yield_ready` returns `false` outside a fiber (Core 0, OTA); there
+        // we drive the stack ourselves, or the ACK would never arrive.
         //
-        // `yield_ready` meldet `false`, wenn wir gar nicht in einem Fiber
-        // laufen (Core 0, OTA); dort treiben wir den Stapel selbst an,
-        // sonst kaeme die Quittung nie.
-        //
-        // **Kurz drehen, DANN abgeben.** Blind abzugeben kostet den
-        // Planertakt: 0.405.1 wartete je Quittung bis zu 10 ms und fiel
-        // damit von 269 auf 104 Mbit, obwohl `WouldBlock` von 4,5 Mio
-        // auf 1215 gesunken war. Gedreht wird auf dem ATOMAR gelesenen
-        // Zaehler, nicht auf der Sperre — das war der ganze Punkt. Ein
-        // Budget leerer Blicke, dann erst schlafen: dieselbe Form wie im
-        // Empfangsweg des Treibers.
+        // Spin briefly on the atomic counter, then yield: yielding blindly
+        // costs a scheduler pass per ACK. The same shape as the driver's
+        // receive path.
         let mut leer = 0u32;
         let mut runden = 0u32;
         while ACK_GEN.load(Ordering::Relaxed) == zuletzt {
@@ -1329,20 +1165,14 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
             if crate::interrupts::ticks() - t0 > timeout_ticks {
                 return Err(TcpError::Timeout);
             }
-            // Den Stapel antreiben, falls niemand sonst es tut — auf
-            // Kern 0 gibt es keinen Treiber-Fiber, der die Quittung
-            // hereinholt.
+            // Drive the stack in case nobody else does — on core 0 there
+            // is no driver fiber to bring the ACK in.
             super::poll();
             tick_connections();
             crate::smp::fiber::yield_ready();
-            // **Und nie fuer immer auf einen Zaehler warten.**
-            //
-            // Zweimal in Folge hat uns eine verpasste Weckung eine Frist
-            // gekostet — einmal, weil der Zaehler nach dem Versuch
-            // gelesen wurde, einmal, weil eine Fenster-Aktualisierung
-            // ihn nicht bewegte. Beide sind gefixt; die Klasse bleibt.
-            // Ein Warten, das SELBST wieder nachsieht, kann nur
-            // langsam werden, nicht tot.
+            // Never wait on the counter forever: a missed wakeup (e.g. a
+            // window update that does not bump it) must make the wait slow,
+            // not dead, so retry after a bounded number of rounds.
             runden += 1;
             if runden >= RETRY_ROUNDS {
                 break;
@@ -1359,10 +1189,9 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
 
     let pre_len = conn.recv_buf.len();
     let available = pre_len.min(buf.len());
-    // Bulk copy out of the ring buffer instead of byte-by-byte pop_front
-    // (that was ~112M pop_front/s at 100 MB/s — pure call overhead). The
-    // VecDeque exposes its contents as up to two contiguous slices; memcpy
-    // each, then drain in one shot.
+    // Bulk copy out of the ring buffer instead of byte-by-byte pop_front.
+    // The VecDeque exposes its contents as up to two contiguous slices;
+    // memcpy each, then drain in one shot.
     {
         let (a, b) = conn.recv_buf.as_slices();
         let na = a.len().min(available);
@@ -1372,23 +1201,20 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
         }
         conn.recv_buf.drain(..available);
     }
-    // tcp_input.c:930-932 „This function should be called every time
+    // tcp_input.c:930-932 "This function should be called every time
     // data is copied to user space."
     conn.copied_total = conn.copied_total.saturating_add(available as u64);
     rcv_space_adjust(conn);
 
-    // Window-update ACK — RATE-LIMITED.
+    // Window-update ACK, rate-limited.
     //
     // We must re-advertise the window the consumer just reopened so a
-    // trickle / zero-window sender resumes (the case this ACK was added for:
-    // a TLS sender that bursts then goes quiet, no more handle_tcp data-ACKs,
-    // → window stuck small → peer zero-window-probes → ~31 KiB/s sawtooth).
-    // But a BULK plain-http download calls recv() once PER PACKET (~70k/s, not
-    // per ~16 KiB TLS record), so ACKing on every drain floods the TX path:
-    // ~70k ACKs/s, each an alloc + a virtio TX-doorbell VM-exit → pegs the
-    // worker core AND defeats the handle_tcp ACK-coalescing.
+    // trickle / zero-window sender resumes (e.g. a TLS sender that bursts then
+    // goes quiet, leaving the window stuck small). But a bulk plain-http
+    // download calls recv() once per packet, so ACKing on every drain would
+    // flood the TX path and defeat the handle_tcp ACK coalescing.
     //
-    // So: ACK immediately only when the window was actually CONSTRAINED
+    // So: ACK immediately only when the window was actually constrained
     // (buffer >1/4 full → window shrinking, the trickle/zero-window case),
     // otherwise at most once per ~64 KiB freed. handle_tcp's coalesced
     // data-ACKs carry the (wide-open) window the rest of the time.
@@ -1410,13 +1236,9 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
 pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Result<usize, TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
-        // NIC-drain only (the TLS / OTA-https recv hot path). The old code ran
-        // the FULL super::poll() — tcp::tick_connections (128-slot scan +
-        // CONNECTIONS lock) + shade::poll_render — AND then tick_connections()
-        // AGAIN, every spin iteration at ~1 M/s: double the 128-slot scan + lock,
-        // contending the CONNECTIONS lock with actual packet processing →
-        // pegged the worker core AND throttled https/OTA throughput. Core 0's
-        // poll() runs the TCP timers; here we just drain RX, like tcp_recv_poll.
+        // NIC-drain only (the TLS / OTA-https recv hot path). The full
+        // super::poll() at spin rate would contend the CONNECTIONS lock with
+        // actual packet processing; poll_rx_only throttles the TCP timers.
         super::poll_rx_only();
 
         let n = recv(handle, buf)?;
@@ -1433,19 +1255,15 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
         }
 
         if crate::interrupts::ticks() - t0 > timeout_ticks {
-            // `Err(Timeout)`, NOT `Ok(0)`. Both used to mean the same thing
-            // here, and `Ok(0)` is how a caller learns the peer hung up — so a
-            // link that merely went quiet for the timeout read as end-of-file.
-            // Measured: an OTA module download reported
-            // "short download (113728 of 1432235)" after a run of one-second
-            // transmit stalls. The transfer was not aborted; it was declared
-            // finished. A caller that can distinguish the two can wait longer.
+            // `Err(Timeout)`, not `Ok(0)`: `Ok(0)` is how a caller learns the
+            // peer hung up, and a link that merely went quiet must not read as
+            // end-of-file. A caller that can distinguish the two can wait
+            // longer.
             return Err(TcpError::Timeout);
         }
-        // Timer-NAPI: HLT instead of spinning (the OTA-update / https core-peg
-        // Florian saw — same root as tcp_recv_poll). Records the halt so `cores`
-        // is honest. Wakes on the per-core timer (100 Hz here; OTA payloads are
-        // small so the latency is fine), the NIC re-fills the ring in the gap.
+        // Timer-NAPI: HLT instead of spinning, so the core is not pegged.
+        // Records the halt so `cores` is accurate. Wakes on the per-core timer;
+        // the NIC re-fills the ring in the gap.
         crate::interrupts::worker_idle_hlt();
     }
 }
@@ -1461,8 +1279,8 @@ pub fn conn_healthy(handle: usize) -> bool {
         if c.state == State::Established && !c.closed && !c.error)
 }
 
-/// Wohin diese Verbindung geht. Fuers Coalescing: zwei Namen duerfen sich
-/// eine Verbindung nur teilen, wenn sie zur selben Adresse fuehren.
+/// Where this connection goes. For connection coalescing: two names may
+/// share a connection only if they lead to the same address.
 pub fn peer(handle: usize) -> Option<([u8; 4], u16)> {
     let conns = CONNECTIONS.lock();
     match conns.get(handle) {
@@ -1475,11 +1293,9 @@ pub fn peer(handle: usize) -> Option<([u8; 4], u16)> {
 ///
 /// Linux's `close()` does not wait either: the socket lingers in the
 /// background and only `SO_LINGER` — off by default — makes it block.
-/// Waiting here spun on the caller's core for up to 2 s. Measured on the
-/// device: a peer that answers `Connection: close` turned a 140 ms document
-/// fetch into 2150 ms, and the time landed outside every span the HTTP client
-/// prints, so it read as an unexplained gap. A host call that spins also
-/// freezes every other fiber on that worker core.
+/// Waiting here would spin on the caller's core for every `Connection: close`
+/// peer, and a host call that spins also freezes every other fiber on that
+/// worker core.
 ///
 /// The FIN goes out, the slot stays in FinWait1, and `tick_connections`
 /// carries it to TimeWait or reaps it if the peer never answers.
@@ -1627,51 +1443,21 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
         State::Established => {
             // ACK processing
             if flags & ACK != 0 {
-                // **Das Fenster des Gegenuebers, und bis hierher hiess
-                // es `_window`.** Es wurde gelesen und weggeworfen: wir
-                // hatten keine Flusskontrolle, sondern einen Puffer
-                // (`MAX_UNACKED`), der zufaellig ungefaehr so gross war.
-                // Ein Empfaenger, der sein Fenster schliesst, konnte uns
-                // nicht bremsen — RFC 9293 §3.8.6 ist damit schlicht
-                // nicht gebaut gewesen.
-                //
-                // Die Skalierung ist die des SYN-ACK (`snd_wscale`), und
-                // sie gilt fuer JEDES Segment danach ausser dem SYN
-                // selbst (RFC 7323 §2.2).
+                // The peer's window: flow control per RFC 9293 §3.8.6. The
+                // scale is the SYN-ACK's (`snd_wscale`) and applies to every
+                // segment except the SYN itself (RFC 7323 §2.2).
                 let vorheriges_fenster = conn.snd_wnd;
                 conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
-                // **Und JEDE Quittung weckt den Sender**, nicht nur
-                // eine, die Daten abraeumt.
-                //
-                // Der Zaehler stand bis 0.405.3 unten im
-                // `ack_in_range`-Zweig — also nur bei NEU quittierten
-                // Bytes. Eine reine Fenster-Aktualisierung traegt
-                // `ack == snd_una` und faellt nicht hinein: der
-                // Empfaenger hat seinen Puffer geleert und macht wieder
-                // auf, und wir warten trotzdem bis zur Frist. Genau so
-                // sah es aus („PUT stalled after 3014656 bytes"), und
-                // eine Doppelquittung waehrend eines Verlusts hat
-                // dasselbe Problem.
-                //
-                // Die Weckung ist kein Urteil darueber, DASS sich etwas
-                // geaendert hat — sie sagt nur, dass ein neuer Versuch
-                // sich lohnen koennte.
+                // Every ACK wakes the sender, not only one that clears data:
+                // a pure window update carries `ack == snd_una`, and the
+                // sender must notice the reopened window. The wakeup does not
+                // claim anything changed, only that a retry might be worth it.
                 ACK_GEN.fetch_add(1, Ordering::Relaxed);
-                // **Die Umlaufzeit gehoert an die QUITTUNG, nicht an die
-                // Daten.**
-                //
-                // Sie stand bisher nur im Datenzweig weiter unten — also
-                // nur dann, wenn das Gegenueber uns etwas SCHICKT. Beim
-                // Hochladen schickt es nackte Quittungen, `srtt_ms`
-                // blieb 0, und `snd_space_adjust` kehrte in der ersten
-                // Zeile um: der Sendepuffer konnte nicht wachsen, weil
-                // es keine Umlaufzeit gab, an der er haette wachsen
-                // koennen. Am Geraet gemessen: `Deckel 256 KB` bei
-                // `Gegenueber 1036 KB`.
-                //
-                // Linux nimmt die Probe in `tcp_ack_update_rtt`, gerufen
-                // aus `tcp_clean_rtx_queue` — also genau hier, wo eine
-                // Quittung hereinkommt.
+                // The RTT sample belongs to the ACK, not to the data: during
+                // an upload the peer sends bare ACKs, and without a sample
+                // `snd_space_adjust` could never grow the send buffer. Linux
+                // samples in `tcp_ack_update_rtt`, called from
+                // `tcp_clean_rtx_queue`, where an ACK comes in.
                 if conn.ts_ok {
                     if let Some(tsecr) = parse_tsecr(data, data_offset) {
                         if tsecr != 0 {
@@ -1686,18 +1472,15 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         }
                     }
                 }
-                // ── Doppelquittung: RFC 5681 §3.2 ───────────────────
+                // ── Duplicate ACK: RFC 5681 §3.2 ─────────────────────
                 //
-                // Drei in Folge heissen „ein Segment fehlt, der Rest
-                // kommt an". Bis 0.406.0 loesten sie NICHTS aus: die
-                // einzige Erholung war der RTO, und der schickte ein MSS
-                // je 200 ms. Bei 1,5 MB unterwegs ist das kein
-                // Wiederanlauf, sondern ein Stillstand — am Geraet 2070
-                // Segmente in zehn Sekunden.
+                // Three in a row mean "one segment is missing, the rest is
+                // arriving". Without fast retransmit the only recovery is
+                // the RTO, one MSS per round, which stalls a large window.
                 //
-                // Eine Doppelquittung ist eine Quittung ohne neue Bytes,
-                // ohne Nutzlast und ohne Fensteraenderung; sonst waere
-                // es eine Fensteraktualisierung.
+                // A duplicate ACK acknowledges no new bytes, carries no
+                // payload and does not change the window; otherwise it is a
+                // window update.
                 let ist_dup = payload.is_empty()
                     && ack == conn.snd_una
                     && !conn.send_buf.is_empty()
@@ -1708,8 +1491,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     if conn.dupacks == DUPACK_THRESH
                         && (!conn.in_recovery || !CONG_CONTROL)
                     {
-                        // Halbieren, eintreten, und das fehlende Segment
-                        // SOFORT nachschicken statt auf den RTO zu warten.
+                        // Halve, enter recovery, and resend the missing
+                        // segment now instead of waiting for the RTO.
                         if CONG_CONTROL {
                             conn.snd_ssthresh = reno_ssthresh(conn);
                             conn.snd_cwnd =
@@ -1719,27 +1502,16 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                             conn.snd_cwnd_cnt = 0;
                         }
                         conn.dupacks = 0;
-                        // **NUR das fehlende Segment, nicht das ganze
-                        // Fenster.**
-                        //
-                        // Hier stand `snd_nxt = snd_una` — Go-back-N.
-                        // Damit wurde `in_flight` null, und `write_xmit`
-                        // schob auf der Stelle `ssthresh + 3` Pakete in
-                        // EINEM Zug hinaus: bei einem vorher grossen
-                        // Fenster mehrere hundert. Am Geraet sprang
-                        // `Schlange voll` von 0 auf 1384.
-                        //
-                        // Drei Doppelquittungen sagen „EIN Segment
-                        // fehlt, der Rest kommt an" (RFC 5681 §3.2).
-                        // Also genau dieses eine noch einmal; alles
-                        // dahinter ist unterwegs und darf es bleiben.
-                        // Go-back-N gehoert zum RTO, wo wir wirklich
-                        // nichts mehr wissen.
+                        // Only the missing segment, not the whole window:
+                        // everything behind it is in flight and may stay
+                        // so. Go-back-N (`snd_nxt = snd_una`) would make
+                        // `write_xmit` burst hundreds of packets at once; it
+                        // belongs to the RTO, where we really know nothing.
                         retransmit_head(conn);
                         FAST_RETRANS.fetch_add(1, Ordering::Relaxed);
                     } else if conn.in_recovery {
-                        // „Inflate": jede weitere Doppelquittung sagt,
-                        // dass ein Segment die Leitung verlassen hat.
+                        // "Inflate": every further duplicate ACK means a
+                        // segment has left the network.
                         conn.snd_cwnd += 1;
                         write_xmit(conn);
                     }
@@ -1753,22 +1525,20 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.snd_una = ack;
                     conn.retries = 0;
                     conn.rto_tick = crate::interrupts::ticks();
-                    // **Und hier waechst der Sendepuffer** — an derselben
-                    // Stelle, an der Linux `tcp_check_space` ->
-                    // `tcp_new_space` -> `tcp_sndbuf_expand` ruft: wenn
-                    // eine Quittung Platz gemacht hat.
+                    // The send buffer grows here — where Linux calls
+                    // `tcp_check_space` -> `tcp_new_space` ->
+                    // `tcp_sndbuf_expand`: when an ACK has made room.
                     conn.acked_total =
                         conn.acked_total.wrapping_add(acked as u64);
                     snd_space_adjust(conn);
-                    // ── Das Staufenster nachfuehren ────────────────
+                    // ── Update the congestion window ────────────────
                     let mss_now = eff_mss(conn).max(1);
                     let acked_pkts = (acked.div_ceil(mss_now) as u32).max(1);
                     conn.dupacks = 0;
                     if conn.in_recovery {
-                        // RFC 6582 §3.2: erst wenn alles quittiert ist,
-                        // was beim Eintritt unterwegs war, ist die
-                        // Erholung vorbei. Sonst halbiert EIN
-                        // Verlustereignis das Fenster mehrfach.
+                        // RFC 6582 §3.2: recovery ends only once everything
+                        // in flight at entry is acknowledged; otherwise one
+                        // loss event halves the window several times.
                         let noch_offen = (conn.recovery_end
                             .wrapping_sub(ack) as i32) > 0;
                         if !noch_offen {
@@ -1795,8 +1565,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     }
                     let space = RECV_BUF_SIZE - conn.recv_buf.len();
                     let copy = payload.len().min(space);
-                    // Bulk append — NOT byte-by-byte push_back (that was ~87M
-                    // push_back/s at ~700 Mbit). extend reserves once + copies.
+                    // Bulk append, not byte-by-byte push_back: extend reserves
+                    // once and copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
                     // Gap just filled — pull any now-contiguous segments out of
@@ -1828,18 +1598,16 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 
                     // Keep the SACK run-set in sync with what's now delivered, and
                     // refresh the RTT estimate from the peer's echoed TSecr (our
-                    // TSval is ticks(), so ticks()-TSecr = RTT). recv_window() turns
-                    // that into the window via link-capacity × RTT.
+                    // TSval is `ts_now_ms()`, so now - TSecr = RTT); it feeds DRS
+                    // via `rcv_rtt_update`.
                     let delivered = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
                     ooo_runs_trim(&mut conn.ooo_runs, delivered);
                     if conn.ts_ok {
                         if let Some(tsecr) = parse_tsecr(data, data_offset) {
                             if tsecr != 0 {
-                                // In MILLISEKUNDEN, seit die Marke
-                                // `ts_now_ms()` ist. Alles ueber sechs
-                                // Sekunden ist keine RTT, sondern ein
-                                // Umlauf der Marke oder ein Echo aus
-                                // einer anderen Verbindung.
+                                // In milliseconds. Anything over six
+                                // seconds is not an RTT but a clock wrap or
+                                // an echo from another connection.
                                 let sample = ts_now_ms().wrapping_sub(tsecr);
                                 if (1..6000).contains(&sample) {
                                     conn.srtt_ms = if conn.srtt_ms == 0 { sample }
@@ -1876,7 +1644,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     if (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
                         // AHEAD = a real gap (an earlier segment was lost). Buffer
                         // this segment for reassembly + send a duplicate ACK so the
-                        // sender fast-retransmits ONLY the hole (RFC 5681) — not the
+                        // sender fast-retransmits only the hole (RFC 5681) — not the
                         // whole window. Bounded; over budget or already-have → skip.
                         TCP_OOO_AHEAD.fetch_add(1, Relaxed);
                         let off = seq.wrapping_sub(conn.rcv_irs);
@@ -1893,29 +1661,17 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                         conn.ack_pending = false;
                     } else {
-                        // BEHIND = wir haben diese Bytes schon. **Jetzt mit
-                        // D-SACK (RFC 2883) statt mit Schweigen.**
-                        //
-                        // Hier stand, man duerfe nicht erneut quittieren, weil
-                        // drei gleiche Quittungen eine Schnellwiederholung
-                        // ausloesen (v0.219.7/8). Der Schluss war zu breit: eine
-                        // Quittung, die einen BEREITS QUITTIERTEN Bereich als
-                        // ersten SACK-Block nennt, ist genau das Gegenteil eines
-                        // Doppels — der Sender liest daran ab, dass seine
-                        // Wiederholung ueberfluessig war, und nimmt seine
-                        // Fensterkuerzung ZURUECK (Linux: `tcp_dsack_seen` ->
-                        // `tcp_undo_cwnd_reduction`).
-                        //
-                        // Ohne das blutet er bei jedem Mal. Am Geraet gemessen
-                        // (2026-09-21, WLAN): `retrans=371` bei `lost=0` — der
-                        // Server wiederholte 371-mal, ohne ein einziges Paket
-                        // als verloren zu fuehren, und wir konnten es ihm nicht
-                        // sagen. Ein `dsack=0` in seinem `tcp_info` war deshalb
-                        // nie eine Aussage ueber die Leitung, sondern ueber uns.
+                        // BEHIND = we already have these bytes. Answer with a
+                        // D-SACK (RFC 2883): an ACK naming an already
+                        // acknowledged range as its first SACK block tells the
+                        // sender its retransmit was spurious, so it undoes its
+                        // window reduction (Linux: `tcp_dsack_seen` ->
+                        // `tcp_undo_cwnd_reduction`). It is not a duplicate ACK
+                        // and does not trigger fast retransmit.
                         TCP_OOO_BEHIND.fetch_add(1, Relaxed);
                         if !payload.is_empty() {
                             let end = seq.wrapping_add(payload.len() as u32);
-                            // Nur der Teil, den wir WIRKLICH schon haben.
+                            // Only the part we really already have.
                             let hi = if (end.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
                                 conn.rcv_nxt
                             } else {
@@ -1980,30 +1736,25 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 pub fn tick_connections() {
     let now = crate::interrupts::ticks();
 
-    // Collect the segments to send WHILE holding the lock (they read conn
+    // Collect the segments to send while holding the lock (they read conn
     // state), then drop the lock and hit the NIC. Holding CONNECTIONS
-    // across the TX doorbell blocked worker-core `recv` behind Core-0's
-    // periodic ACKs/retries (contention ④).
+    // across the TX doorbell would block worker-core `recv` behind Core-0's
+    // periodic ACKs/retries.
     let mut pending: alloc::vec::Vec<PendingSeg> = alloc::vec::Vec::new();
     // Same reason: `arp::request` hits the NIC, so collect and fire after the
     // lock is gone.
     let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
-    // **Wiederholungen fahren nicht mehr hier.** Sie brauchten einen
-    // eigenen Weg, weil sie eine Nutzlast tragen und `pending` nur
-    // leere Segmente kennt. Seit die Zeitueberschreitung ein echtes
-    // Verlustereignis ist (`snd_nxt = snd_una`, Fenster auf eins),
-    // schickt `write_xmit` sie aus demselben Puffer wie alles andere —
-    // eine Wiederholung ist dann nichts Besonderes mehr, sondern ein
-    // Segment, das noch einmal ungesendet ist.
+    // Retransmits are not collected here: `retransmit_head` and `write_xmit`
+    // send them from the send buffer like any other segment. `retrans` stays
+    // empty.
     let retrans: alloc::vec::Vec<(PendingSeg, alloc::vec::Vec<u8>)> =
         alloc::vec::Vec::new();
     {
         let mut conns = CONNECTIONS.lock();
         for slot in conns.iter_mut().flatten() {
-            // **Was die Schlange vorhin abgelehnt hat, geht jetzt
-            // hinaus.** Ohne diese Zeile bliebe es liegen, bis der Rufer
-            // das naechste Mal `send` ruft — und der wartet gerade auf
-            // eine Quittung fuer Bytes, die nie auf der Leitung waren.
+            // Send what the driver queue refused earlier. Otherwise it would
+            // wait for the caller's next `send`, while the caller waits for
+            // an ACK for bytes that never went out.
             if slot.state == State::Established
                 && slot.snd_nxt != slot.snd_una.wrapping_add(slot.send_buf.len() as u32)
             {
@@ -2041,9 +1792,8 @@ pub fn tick_connections() {
                         slot.arp_tries += 1;
                         slot.last_send_tick = now;
                         if slot.arp_tries > ARP_MAX_TRIES {
-                            // Give up asking and send anyway (to broadcast),
-                            // exactly as the old ~500 ms pre-resolve did on
-                            // timeout. From here the normal SYN retry runs.
+                            // Give up asking and send anyway (to broadcast).
+                            // From here the normal SYN retry runs.
                             slot.arp_pending = false;
                             send_syn_now = true;
                         } else {
@@ -2088,43 +1838,17 @@ pub fn tick_connections() {
                         slot.last_send_tick = now;
                         // ── `tcp_enter_loss` ───────────────────────
                         //
-                        // **Eine Zeitueberschreitung ist der haerteste
-                        // Stauhinweis, den es gibt** (RFC 5681 §3.1):
-                        // Schwelle auf die Haelfte, Fenster auf EINS,
-                        // und von vorn im langsamen Start.
+                        // An RTO is the strongest congestion signal
+                        // (RFC 5681 §3.1): halve the threshold, window to
+                        // one, slow start again.
                         //
-                        // Hier stand stattdessen: EIN MSS nachschicken,
-                        // `snd_nxt` unberuehrt lassen, fertig. Damit galt
-                        // nach jedem RTO der ganze Rest weiter als
-                        // unterwegs, und wiederholt wurde ein einziges
-                        // Segment je 200 ms mit Verdopplung. Bei 1,5 MB
-                        // offener Daten ist das eine Erholung, die nie
-                        // ankommt — am Geraet 2070 Segmente in zehn
-                        // Sekunden.
-                        //
-                        // **`snd_nxt` wird NICHT zurueckgespult.**
-                        //
-                        // Hier stand `snd_nxt = snd_una`, als Go-back-N
-                        // gedacht, und es hat die Verbindung getoetet:
-                        // `ack_in_range(una, ack, nxt)` laesst nur
-                        // Quittungen bis `snd_nxt` gelten. Nach dem
-                        // Ruecksetzen liegt `snd_nxt` EIN Segment ueber
-                        // `snd_una`, waehrend das Gegenueber laengst
-                        // hunderte Kilobyte hat und seinen echten Stand
-                        // quittiert — der faellt aus dem Bereich und
-                        // wird VERWORFEN. `snd_una` steht fuer immer,
-                        // `rto_tick` wird nie zurueckgesetzt, und der
-                        // RTO feuert mit Verdopplung bis zur Frist. Am
-                        // Geraet: `cwnd 1 · ssthresh 2 · 7x
-                        // Zeitueberschreitung`, 200+400+...+6400 ms.
-                        //
-                        // Linux spult `snd_nxt` nie zurueck — es ist die
-                        // hoechste je gesendete Folgenummer. Wiederholt
-                        // wird aus der Wiederholungsschlange
-                        // (`tcp_xmit_retransmit_queue`), ohne sie
-                        // anzufassen, und neue Daten gehen erst wieder
-                        // hinaus, wenn Quittungen `in_flight` unter das
-                        // Staufenster gebracht haben.
+                        // `snd_nxt` is not rewound. `ack_in_range(una, ack,
+                        // nxt)` only accepts ACKs up to `snd_nxt`; after a
+                        // rewind the peer's real cumulative ACK would fall
+                        // outside the range and be discarded forever. Like
+                        // Linux, `snd_nxt` stays the highest sequence ever
+                        // sent and the head is resent from the retransmit
+                        // queue (`tcp_xmit_retransmit_queue`).
                         if CONG_CONTROL {
                             slot.snd_ssthresh = reno_ssthresh(slot);
                             slot.snd_cwnd = 1;
@@ -2173,10 +1897,9 @@ pub fn tick_connections() {
 /// SYN options: MSS(4) + SACK-permitted(2) + NOP,NOP + Timestamp(kind=8,10) +
 /// NOP + WScale(3) = 22, padded to 24. Returns the length written.
 ///
-/// Shared by the first SYN and every retransmit. The retry used to send a
-/// bare SYN: whenever the first one was lost — the normal case on a cold ARP
-/// cache — the connection silently came up without window scaling, SACK or
-/// timestamps, i.e. capped at a 64 KiB window for its whole life.
+/// Shared by the first SYN and every retransmit: a retry with a bare SYN
+/// would bring the connection up without window scaling, SACK or timestamps,
+/// capped at a 64 KiB window for its whole life.
 fn syn_opts(opts: &mut [u8; 40]) -> usize {
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
@@ -2249,9 +1972,8 @@ fn send_segment_with_opts(
     let checksum = tcp_checksum(&src_ip, &dst_ip, &pkt);
     pkt[16..18].copy_from_slice(&checksum.to_be_bytes());
 
-    // **Das Ergebnis wird nicht mehr weggeworfen.** `netdev::send` lehnt
-    // ab, wenn die Schlange zum Treiber voll ist (`tx drops full`), und
-    // bis 0.405.3 glaubte TCP trotzdem, gesendet zu haben.
+    // The result matters: `netdev::send` refuses when the driver queue is
+    // full, and the caller must not treat the segment as sent.
     ipv4::send(dst_ip, ipv4::PROTO_TCP, &pkt)
 }
 
@@ -2282,8 +2004,6 @@ fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// Scan a segment's TCP options for the Window Scale option (kind 3) and
-/// return its shift count. `data_offset` is the TCP header length in bytes.
 /// Did the peer's options carry SACK-permitted (kind 4, len 2)?
 fn parse_sack_permitted(seg: &[u8], data_offset: usize) -> bool {
     let end = data_offset.min(seg.len());
@@ -2318,11 +2038,10 @@ fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
     out[0] = 5;                       // SACK option kind
     let mut p = 2;
     let mut take = 0usize;
-    // **Der D-SACK-Block steht VORN, und das ist der ganze Vertrag.**
-    // RFC 2883 §4: der erste Block einer SACK-Option darf einen Bereich
-    // nennen, der bereits quittiert ist — daran und nur daran erkennt der
-    // Sender ein Duplikat. Steht er nicht an erster Stelle, ist er ein
-    // gewoehnlicher SACK-Block und sagt das Gegenteil.
+    // The D-SACK block must come first (RFC 2883 §4): only the first block
+    // of a SACK option may name an already acknowledged range, and that is
+    // how the sender recognises a duplicate. Anywhere else it is an ordinary
+    // SACK block and says the opposite.
     if let Some((l, r)) = conn.dsack {
         out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
         out[p..p + 4].copy_from_slice(&r.to_be_bytes()); p += 4;
@@ -2340,6 +2059,8 @@ fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
     p
 }
 
+/// Scan a segment's TCP options for the Window Scale option (kind 3) and
+/// return its shift count. `data_offset` is the TCP header length in bytes.
 fn parse_wscale(seg: &[u8], data_offset: usize) -> Option<u8> {
     let end = data_offset.min(seg.len());
     let mut i = HEADER_LEN;
@@ -2386,8 +2107,8 @@ fn parse_ts(seg: &[u8], data_offset: usize) -> Option<u32> {
 }
 
 /// Scan for the Timestamp option (kind 8) and return TSecr — the peer's echo of
-/// OUR most recent TSval. Since our TSval is `ticks()`, `ticks() - TSecr` is a
-/// receiver-measured RTT (used for window auto-tuning).
+/// our most recent TSval. Since our TSval is `ts_now_ms()`, now - TSecr is an
+/// RTT in milliseconds (used for window auto-tuning).
 fn parse_tsecr(seg: &[u8], data_offset: usize) -> Option<u32> {
     let end = data_offset.min(seg.len());
     let mut i = HEADER_LEN;
@@ -2410,23 +2131,10 @@ fn parse_tsecr(seg: &[u8], data_offset: usize) -> Option<u32> {
     None
 }
 
-/// Send a segment for a known connection, adding the Timestamp option (our
-/// TSval + the peer's echoed TSval) when timestamps were negotiated (RFC 7323).
-/// All connection-originated segments (ACKs, data, FIN) must carry it so the
-/// sender gets a clean per-segment RTT sample despite our ACK jitter.
-/// Build the TCP option list (Timestamp, then SACK blocks during a gap;
-/// both 4-byte aligned via leading NOPs) for `conn`/`flags` into `opts`,
-/// returning its length. Shared by the inline `send_seg` and the deferred
-/// tick path, which materializes segments under the CONNECTIONS lock and
-/// sends them after dropping it.
-/// Bytes `build_seg_opts` will add to a DATA segment on this connection. The
-/// payload has to shrink by exactly this much, or the frame overruns the MTU.
-///
-/// It did. With timestamps negotiated every segment carries 12 option bytes, so
-/// a full-size one was 14 + 20 + (20+12) + 1460 = 1526 against an MTU of 1514,
-/// and `fq_codel::enqueue` dropped it without a word. Pure ACKs are 66 bytes
-/// and sailed through, which is why every download worked and the first upload
-/// ever attempted stalled after exactly MAX_UNACKED bytes with zero ACKs back.
+/// Bytes `build_seg_opts` will add to a data segment on this connection. The
+/// payload has to shrink by exactly this much, or the frame overruns the MTU:
+/// with timestamps every segment carries 12 option bytes, and a full 1460-byte
+/// payload would make a 1526-byte frame.
 fn data_opts_len(conn: &TcpConn) -> usize {
     if conn.ts_ok { 12 } else { 0 }
 }
@@ -2437,6 +2145,11 @@ fn eff_mss(conn: &TcpConn) -> usize {
     (MSS as usize).saturating_sub(data_opts_len(conn)).max(1)
 }
 
+/// Build the TCP option list (Timestamp, then SACK blocks during a gap;
+/// both 4-byte aligned via leading NOPs) for `conn`/`flags` into `opts`,
+/// returning its length. Shared by the inline `send_seg` and the deferred
+/// tick path, which materializes segments under the CONNECTIONS lock and
+/// sends them after dropping it.
 fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: bool) -> usize {
     let mut len = 0;
     if conn.ts_ok {
@@ -2448,10 +2161,9 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
         len += 12;
     }
     // SACK blocks: only on a pure ACK while we hold out-of-order data (a gap).
-    // Never on a SYN — that advertises SACK-permitted instead.
-    // SACK blocks ride on a PURE ACK only. On a data segment they would push
-    // the frame past the MTU again — `eff_mss` budgets for the timestamp and
-    // nothing else, and a variable option length cannot be budgeted for at all.
+    // Never on a SYN — that advertises SACK-permitted instead. On a data
+    // segment they would push the frame past the MTU: `eff_mss` budgets for
+    // the timestamp only, and a variable option length cannot be budgeted for.
     if conn.sack_ok && flags & SYN == 0 && !has_payload
         && (!conn.ooo.is_empty() || conn.dsack.is_some()) {
         let mut sack = [0u8; 26]; // 2 + 8*3
@@ -2465,6 +2177,10 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
     len
 }
 
+/// Send a segment for a known connection, adding the Timestamp option (our
+/// TSval + the peer's echoed TSval) when timestamps were negotiated (RFC 7323).
+/// All connection-originated segments (ACKs, data, FIN) must carry it so the
+/// sender gets a clean per-segment RTT sample despite our ACK jitter.
 fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16,
             payload: &[u8]) -> bool {
     TCP_TX_SEGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2480,8 +2196,8 @@ fn send_seg(conn: &TcpConn, seq: u32, ack: u32, flags: u8, window: u16,
 }
 
 /// A fully-resolved zero-payload segment captured under the CONNECTIONS
-/// lock so it can be sent (the NIC doorbell) AFTER the lock is dropped.
-/// Keeps `tick_connections` from holding the lock across TX, which blocked
+/// lock so it can be sent (the NIC doorbell) after the lock is dropped.
+/// Keeps `tick_connections` from holding the lock across TX, which would block
 /// worker-core `recv` behind Core-0's periodic delayed-ACKs / SYN retries.
 struct PendingSeg {
     dst_ip: [u8; 4],
@@ -2520,7 +2236,7 @@ fn close_cleanup(handle: usize) {
 /// Does any connection run a timer (retransmit, delayed ACK, SYN retry,
 /// TIME_WAIT, FIN timeout)? Listening and closed sockets have none. The
 /// shell loop drives `tick_connections` and must keep coming back while
-/// this holds (stage 3e).
+/// this holds.
 pub fn has_timers() -> bool {
     CONNECTIONS.lock().iter().flatten()
         .any(|c| !matches!(c.state, State::Closed | State::Listen))

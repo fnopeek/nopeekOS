@@ -1,12 +1,8 @@
 //! NAPI: the host NIC is drained by its own fiber, woken by the card's RX
 //! interrupt — Linux `napi_schedule` → `net_rx_action` → `napi_poll`.
 //!
-//! Before this, a card with an RX interrupt was still drained only by Core 0's
-//! `net::poll()`, inside the shell loop. Since Core 0 lost its tick (stage 3e)
-//! that loop runs every 10 ms at best: the interrupt woke the core, found no
-//! fiber waiting on the vector and went back to sleep. Every host NIC with an
-//! interrupt was therefore capped at one ring per 10 ms — ~250 Mbit for
-//! virtio-net's 256 buffers, host traffic and microvm traffic alike.
+//! Core 0 is tickless, so draining from its shell loop would cap a card at
+//! one ring per loop pass; the interrupt must wake a fiber that drains.
 //!
 //! The drain itself is `poll_rx_only` (NIC → `eth::handle_frame`, TCP timers,
 //! TX flush); the driver re-enables its RX interrupt when it finds the ring
@@ -45,7 +41,7 @@ fn napi_fiber(_arg: u64) {
             crate::smp::fiber::yield_sleep(IDLE_PARK_MS);
             continue;
         };
-        // Snapshot BEFORE draining (and route the vector to this core): an
+        // Snapshot before draining (and route the vector to this core): an
         // interrupt that lands during the drain advances the count past the
         // snapshot, so the wait below returns at once — no lost wakeup.
         let since = crate::irq::arm(vector);

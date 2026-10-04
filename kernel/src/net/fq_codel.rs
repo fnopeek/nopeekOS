@@ -3,11 +3,11 @@
 //! for the software TX queue in front of a slow NIC (the WASM WiFi driver).
 //!
 //! Two cooperating parts, exactly as Linux:
-//!  - **fq** — packets are hashed into per-flow sub-queues, scheduled by deficit
+//!  - fq — packets are hashed into per-flow sub-queues, scheduled by deficit
 //!    round-robin with a "new flows first" rule. A sparse flow (a ping, a DNS
 //!    lookup) is serviced ahead of a bulk flow, so it never waits behind the
 //!    bulk backlog.
-//!  - **CoDel** — per flow, the sojourn time of the head packet is tracked; once
+//!  - CoDel — per flow, the sojourn time of the head packet is tracked; once
 //!    it stays above TARGET for longer than INTERVAL a controlled drop schedule
 //!    starts (drop rate ∝ √count via the same Newton reciprocal-sqrt control
 //!    law as Linux). Latency is held near TARGET instead of building bufferbloat.
@@ -25,22 +25,13 @@ const FLOWS: usize = 16; // per-flow sub-queues (power of two)
 const FLOW_MASK: u32 = FLOWS as u32 - 1;
 // Total packet slots shared across all flows.
 //
-// 64 was far below anything CoDel can work with — Linux's fq_codel defaults to
-// 10240 packets. A tail-drop queue that shallow defeats the AQM it sits under:
-// CoDel decides by how long a packet SAT in the queue, and it needs room to
-// observe that. Below it, the queue just overflows.
-//
-// It showed the moment this system sent bulk data for the first time.
-// `tcp::send` bursts a whole 64 KiB chunk — 45 segments — in one call, and
-// MAX_UNACKED lets ~180 segments go out before any ACK. Against 64 slots the
-// overflow is arithmetic, not bad luck: measured `drops full 76` on a link with
-// 4 % air retries and every block-ack acknowledged. The air was fine; the queue
-// was three times too small for what TCP is allowed to have in flight.
-//
-// 256 slots = 388 KB, and it holds a full MAX_UNACKED window (181 segments)
-// with room for CoDel to do its job. It costs nothing in the kernel image: the
+// CoDel decides by how long a packet sat in the queue and needs room to
+// observe that; a shallow tail-drop queue just overflows (Linux defaults to
+// 10240 packets). `tcp::send` bursts a 64 KiB chunk (45 segments) per call and
+// the TCP send buffer (256 KiB) allows ~180 in flight, so 256 slots (388 KB) hold a
+// full window with room for CoDel. It costs nothing in the kernel image: the
 // struct is all-zero-initialised and lives in .bss — see `new()` below, which
-// is deliberately NOT allowed to write a sentinel.
+// must not write a sentinel.
 const CAP: usize = 256;
 const EMPTY: u16 = u16::MAX;
 const QUANTUM: i32 = MTU as i32; // DRR quantum (bytes)
@@ -97,7 +88,7 @@ struct Flow {
 }
 
 impl Flow {
-    /// All-zero, for the const initialiser ONLY. `head`/`tail` are not valid
+    /// All-zero, for the const initialiser only. `head`/`tail` are not valid
     /// yet — `lazy_init` sets them to EMPTY before anything reads them.
     const fn zeroed() -> Self {
         Flow { head: 0, tail: 0, deficit: 0, in_list: 0, codel: Codel::new() }
@@ -159,11 +150,10 @@ pub struct FqCodel {
 }
 
 impl FqCodel {
-    /// EVERY field here must be zero. A single non-zero byte — `EMPTY` is
-    /// 0xffff — drags the whole 388 KB struct out of .bss and into the kernel
-    /// image as literal bytes. It did: `WASM_NIC` sat in .data at 98 KB because
-    /// `link` and `Flow::head/tail` were initialised to EMPTY, and both are
-    /// rebuilt by `lazy_init` before anything reads them anyway.
+    /// Every field here must be zero. A single non-zero byte (`EMPTY` is
+    /// 0xffff) drags the whole 388 KB struct out of .bss and into the kernel
+    /// image as literal bytes. `link` and `Flow::head/tail` are set to EMPTY
+    /// by `lazy_init` before anything reads them.
     pub const fn new() -> Self {
         const F: Flow = Flow::zeroed();
         FqCodel {
@@ -258,16 +248,12 @@ impl FqCodel {
 
     /// Enqueue one Ethernet frame. Drops (tail / fattest-flow) if the pool is
     /// full — never blocks.
-    /// Returns false when the frame was NOT taken. It used to return nothing,
-    /// and the caller counted every call as enqueued — so a frame refused here
-    /// was indistinguishable from one that went out. That is how 186 of 237
-    /// TX frames vanished with `drops 0` and `backlog 0`.
+    /// Returns false when the frame was not taken, so the caller can count it.
     pub fn enqueue(&mut self, frame: &[u8]) -> bool {
         if frame.is_empty() || frame.len() > MTU {
-            // An over-MTU frame is a BUG upstream, not congestion: nothing here
+            // An over-MTU frame is a bug upstream, not congestion: nothing here
             // can make it fit, and dropping it silently makes the sender look
-            // like a dead peer. Counted apart from congestion drops so the two
-            // can never be confused again.
+            // like a dead peer. Counted apart from congestion drops.
             if !frame.is_empty() { self.drops_oversize += 1; }
             return false;
         }
