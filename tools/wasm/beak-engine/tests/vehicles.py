@@ -4,7 +4,7 @@
 The raw pass rate never lies about the suite, but it is not the number that
 predicts what a page looks like: a large block of the corpus tests specs no
 browser ships, so those tests can only ever be failures. This counts them by
-CONTENT, because the filename does not say so — `css-grid/column-align-items-
+content, because the filename does not say so — `css-grid/column-align-items-
 001.html` reads like grid alignment and is a `display: grid-lanes` test.
 
 Run from `tools/wasm/beak-engine/` after a `WPT_BLESS=1` run:
@@ -32,18 +32,12 @@ VEHICLES = [
     ("display: run-in", re.compile(r"display\s*:\s*run-in")),
     # needs full grid track sizing underneath it first
     ("subgrid", re.compile(r"\bsubgrid\b")),
-    # **Kein Spec-Problem, ein FIXTURE-Problem** — und deshalb ein eigener
-    # Eimer statt stillschweigend dazugerechnet. Diese Tests messen die
-    # Namensaufloesung von `font-family` mit einer Schriftfamilie, die
-    # installiert sein muss (`CSSTest …`, Mozillas Testpaket; Ahem daneben).
-    # Ohne sie koennen sie nur scheitern, und `font-family-name-000` sagt das
-    # woertlich: „Test will fail if CSSTest fonts are not installed".
-    #
-    # Sie sind damit nicht UNGEWINNBAR wie die vier darueber — wer die
-    # Schriften mitliefert, macht sie lauffaehig. Sie stehen hier, damit die
-    # Zahl transparent bleibt: 18 Fehler, die nichts ueber unser Layout
-    # sagen, sind in einer Rangliste der groessten Familien sonst Platz zwei
-    # und ziehen die Arbeit auf einen Posten, den es nicht gibt.
+    # Not a spec problem but a fixture problem, hence its own bucket. These
+    # tests check `font-family` name matching against fonts that must be
+    # installed (Mozilla's `CSSTest …` package, plus Ahem); without them
+    # they can only fail ("Test will fail if CSSTest fonts are not
+    # installed"). Shipping the fonts would make them winnable; listing
+    # them keeps them from topping a ranking of failing families.
     ("Testschrift fehlt (CSSTest/Ahem)", re.compile(r"CSSTest|\bAhem\b")),
 ]
 

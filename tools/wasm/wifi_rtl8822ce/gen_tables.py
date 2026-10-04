@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""Erzeugt src/tables.rs aus rtw8822c_table.c.
+"""Generate src/tables.rs from rtw8822c_table.c and rtw8822c.c.
 
-46 105 Zeilen Parametertabellen schreibt niemand ab. Erzeugt werden genau
-die sechs Tabellen, die `rtw_phy_load_tables` (phy.c:1850) laedt:
+The parameter tables loaded by `rtw_phy_load_tables` (phy.c:1850):
 
     mac · bb · agc · rfk_init (array_mp_cal_init) · rf_a · rf_b
 
-**Nicht erzeugt** werden `bb_pg_type0` und `txpwr_lmt_type0/5`. Die gehoeren
-zu `rtw_chip_board_info_setup` (main.c:2064) und damit zur Sendeleistung —
-ein anderer Aufrufweg, ein anderer Parser, eine andere Stufe. Sie hier
-mitzunehmen hiesse, 100 KiB Daten ins Modul zu legen, die kein Code liest.
+plus the DPK, coex, TX power and power tracking tables below.
 
-Die Zahlen, gegen die geprueft wird, stehen in der Quelle selbst: jede
-Tabelle ist ein `u32`-Feld, und `rtw_parse_tbl_phy_cond` laeuft ueber
-`size / 2` Kacheln zu je zwei Woertern — eine ungerade Laenge waere ein
-Lesefehler und kein Sonderfall.
+Each parameter table is a `u32` array that `rtw_parse_tbl_phy_cond` walks
+in `size / 2` pairs of words; an odd length is a parse error.
 
     python3 tools/wasm/wifi_rtl8822ce/gen_tables.py
 """
@@ -30,7 +24,7 @@ SRC = os.path.expanduser(
     "realtek/rtw88/rtw8822c_table.c")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src/tables.rs")
 
-# (C-Name, Rust-Name, Kommentar)
+# (C name, Rust name, comment)
 TABLES = [
     ("rtw8822c_mac", "MAC", "rtw_phy_cfg_mac, empty on the 8822C"),
     ("rtw8822c_bb", "BB", "rtw_phy_cfg_bb"),
@@ -40,10 +34,8 @@ TABLES = [
     ("rtw8822c_rf_b", "RF_B", "rtw_phy_cfg_rf, RF_PATH_B"),
 ] 
 
-# Stufe 5d — die drei Tabellen von `rtw8822c_do_dpk`. Sie sind TRIPEL
-# (Adresse, Maske, Wert) und werden mit `rtw_write32_mask` geschrieben
-# (`rtw8822c_parse_tbl_dpk`), nicht paarweise wie alle anderen. Ein
-# Paar-Leser haette sie still falsch gelesen.
+# The three tables of `rtw8822c_do_dpk` are triples (address, mask, value)
+# written with `rtw_write32_mask` (`rtw8822c_parse_tbl_dpk`), not pairs.
 DPK_TABLES = [
     ("rtw8822c_dpk_mac_bb", "DPK_MAC_BB", "rtw8822c_dpk_mac_bb_setting"),
     ("rtw8822c_dpk_afe_is_dpk", "DPK_AFE_IS_DPK", "rtw8822c_dpk_afe_setting(true)"),
@@ -55,11 +47,9 @@ _MASK_NAMES = None
 
 
 def mask_names():
-    """Benannte Masken aus den Linux-Headern (`MASKDWORD` & Co.).
+    """Named masks from the Linux headers (`MASKDWORD` etc.).
 
-    Die AFE-Tabellen schreiben ihre Maske als NAMEN. Ein Leser, der nur
-    Zahlen kennt, muesste sie ueberspringen — und eine uebersprungene
-    Maske ist ein stiller Schreibfehler auf echte Hardware.
+    The AFE tables write their masks as names.
     """
     global _MASK_NAMES
     if _MASK_NAMES is not None:
@@ -90,7 +80,7 @@ def mask_names():
 
 
 def parse_triples(src, name):
-    """`{addr, bitmask, data}` — mit BIT()/GENMASK() in der Maske."""
+    """`{addr, bitmask, data}`, with BIT()/GENMASK() in the mask."""
     m = re.search(r"static const u32\s+" + name + r"\[\]\s*=\s*\{(.*?)\n\};",
                   src, re.S)
     if not m:
@@ -127,19 +117,17 @@ def parse(src, name):
     if not m:
         sys.exit(f"Tabelle {name} nicht gefunden")
     body = m.group(1)
-    # Alles, was kein Hexwort ist, waere eine Form, die dieser Leser nicht
-    # kennt — und still zu ueberspringen waere der Fehler, den man erst am
-    # Geraet sieht.
+    # Anything other than a hex word is a form this parser does not know;
+    # fail instead of skipping it.
     stripped = re.sub(r"0x[0-9A-Fa-f]+", "", body)
     if re.search(r"[^\s,]", stripped):
         sys.exit(f"{name}: unerwarteter Inhalt {stripped.strip()[:60]!r}")
     return [int(v, 16) for v in re.findall(r"0x[0-9A-Fa-f]+", body)]
 
 
-# Das Geraet, gegen das gerechnet wird: Lenovo IdeaPad Flex 5 14ALC7,
-# gemessen im Geraetelauf von 0.9.0 (cut 3 = CUT_D, rfe_option 1, PCIe).
-# `pkg` ist 15, weil `hal->pkg_type` im ganzen rtw88 NIE beschrieben wird und
-# `rtw_phy_setup_phy_cond` dann `pkg ? pkg : 15` nimmt.
+# Chip condition the write counts are computed for: cut 3 (CUT_D),
+# rfe_option 1, PCIe. `pkg` is 15 because rtw88 never writes
+# `hal->pkg_type`, and `rtw_phy_setup_phy_cond` then uses `pkg ? pkg : 15`.
 DRV = dict(rfe=1, intf=1, pkg=15, plat=4, cut=3)
 
 
@@ -150,7 +138,7 @@ def fields(w):
 
 
 def check_positive(c):
-    """phy.c:1130-1171, Zweig fuer alles ausser 8812A/8821A."""
+    """phy.c:1130-1171, the branch for everything except 8812A/8821A."""
     if c["cut"] and c["cut"] != DRV["cut"]:
         return False
     if c["pkg"] and c["pkg"] != DRV["pkg"]:
@@ -161,12 +149,10 @@ def check_positive(c):
 
 
 def count_writes(vals):
-    """phy.c:1169-1220 `rtw_parse_tbl_phy_cond`, nachgerechnet.
+    """phy.c:1169-1220 `rtw_parse_tbl_phy_cond`, recomputed.
 
-    Das ist KEINE zweite Umsetzung derselben Regel zum Spass: sie sagt vorher,
-    wie viele Schreibzugriffe das Geraet sehen MUSS. Weicht der Treiber davon
-    ab, ist sein Bedingungslaeufer falsch — und das faellt in der ersten Zeile
-    des Geraetelaufs auf statt in einem stummen Funkfehler."""
+    Predicts how many writes the driver must issue per table; a different
+    count at runtime means the driver's condition walker is wrong."""
     pos = None
     matched, skipped = True, False
     n = 0
@@ -190,11 +176,9 @@ def count_writes(vals):
 
 
 def coex_tables():
-    """Die vier Koexistenz-Tabellen aus rtw8822c.c.
-
-    Zwei Paarlisten (`coex_table_para`: bt, wl) und zwei Fuenferlisten
-    (`coex_tdma_para`: para[0..5]). Sie stehen in der Chipdatei, nicht in
-    der Tabellendatei — abtippen waere hier genauso falsch wie dort."""
+    """The four coex tables from rtw8822c.c (the chip file, not the table
+    file): two pair lists (`coex_table_para`: bt, wl) and two five-column
+    lists (`coex_tdma_para`: para[0..5])."""
     src = open(C_SRC, errors="ignore").read()
     out = []
     for cname, rname, cols in (
@@ -233,10 +217,10 @@ MAIN_H = os.path.expanduser(
 
 
 def desc_rates():
-    """`enum rtw_rate_index` aus main.h — DESC_RATE1M und Freunde."""
+    """`enum rtw_rate_index` from main.h: DESC_RATE1M and the rest."""
     h = open(MAIN_H, errors="ignore").read()
-    # Die DESC_RATE* stehen in `enum rtw_rate_section`-Naehe, nicht in
-    # `rtw_rate_index` — gesucht wird der Block, der DESC_RATE1M enthaelt.
+    # Look for the enum block that contains DESC_RATE1M rather than for an
+    # enum name.
     m = None
     for cand in re.finditer(r"enum \w+ \{(.*?)\n\};", h, re.S):
         if "DESC_RATE1M" in cand.group(1):
@@ -260,15 +244,12 @@ def desc_rates():
 def txpwr_by_rate_map():
     """phy.c `rtw_phy_get_rate_values_of_txpwr_by_rate`.
 
-    304 Zeilen `switch`, die NICHTS tun als eine Registeradresse auf eine
-    Gruppe von Raten abzubilden — Daten in Schaltergestalt. Also erzeugt.
+    A `switch` that only maps a register address to a group of rates.
 
-    Zwei Faelle bleiben ausdruecklich draussen und stehen als CODE in
-    phy.rs, weil sie rechnen statt zuzuordnen: **0xE08** nimmt
-    `bcd_to_dec_pwr_by_rate(val, 1)` statt `tbl_to_dec_pwr_by_rate`, und
-    **0x86C** haengt an der MASKE (0xffffff00 gibt drei Raten ab Index 1,
-    0x000000ff eine einzige aus BCD). Sie werden hier namentlich gemeldet,
-    nicht stillschweigend uebergangen."""
+    Two cases compute instead of map and are code in phy.rs: 0xE08 uses
+    `bcd_to_dec_pwr_by_rate(val, 1)` instead of `tbl_to_dec_pwr_by_rate`,
+    and 0x86C depends on the mask (0xffffff00 gives three rates from index
+    1, 0x000000ff a single one from BCD). They are reported by address."""
     rates = desc_rates()
     src = open(PHY_SRC, errors="ignore").read()
     m = re.search(r"rtw_phy_get_rate_values_of_txpwr_by_rate\(struct"
@@ -276,11 +257,11 @@ def txpwr_by_rate_map():
     if not m:
         sys.exit("rtw_phy_get_rate_values_of_txpwr_by_rate nicht gefunden")
 
-    entries = []          # (adressen, raten)
-    special = []          # adressen, die rechnen statt zuzuordnen
-    pending = []          # `case 0x...:` ohne Rumpf -> Durchfall
-    cur = {}              # rate[i] = NAME des laufenden Rumpfes
-    calc = False          # rechnet dieser Rumpf?
+    entries = []          # (addresses, rates)
+    special = []          # addresses that compute instead of map
+    pending = []          # `case 0x...:` without body -> fall through
+    cur = {}              # rate[i] = name in the current body
+    calc = False          # does this body compute?
 
     for raw in m.group(1).split("\n"):
         line = raw.strip()
@@ -329,16 +310,12 @@ def txpwr_by_rate_map():
 
 
 def struct_tables():
-    """Die Tabellen, die keine flachen u32-Felder sind.
+    """The tables in rtw8822c_table.c that are not flat u32 arrays.
 
-    `bb_pg` traegt sechs Spalten (band, rf_path, tx_num, addr, bitmask,
-    data), `txpwr_lmt` ebenfalls sechs (regd, band, bw, rs, ch, lmt) — die
-    letzte VORZEICHENBEHAFTET. **Beide RFE-Typen werden erzeugt**, nicht nur
-    der, den unser Geraet gerade meldet: `rtw_get_rfe_def` schlaegt in
-    `rtw8822c_rfe_defs[]` nach, und wer nur einen Eintrag baut, hat einen
-    Treiber fuer genau ein Board.
-
-    Sie stehen in der TABELLENdatei, nicht in der Chipdatei."""
+    `bb_pg` has six columns (band, rf_path, tx_num, addr, bitmask, data),
+    `txpwr_lmt` also six (regd, band, bw, rs, ch, lmt), the last one signed.
+    Every RFE type is generated, since `rtw_get_rfe_def` selects from
+    `rtw8822c_rfe_defs[]` per board."""
     src = open(SRC, errors="ignore").read()
     out = []
     for cname, rname, cols, signed in (
@@ -373,8 +350,8 @@ def struct_tables():
 
 
 def rate_sections():
-    """phy.c:55-124 — die zehn Ratengruppen und ihre Laengen, plus die
-    5-GHz-Kanalliste aus phy.c:1581. Alles Felder, alles erzeugt."""
+    """phy.c:55-124: the ten rate sections and their lengths, plus the
+    5 GHz channel list from phy.c:1581."""
     rates = desc_rates()
     src = open(PHY_SRC, errors="ignore").read()
     names = ["rtw_cck_rates", "rtw_ofdm_rates", "rtw_ht_1s_rates",
@@ -410,16 +387,11 @@ def rate_sections():
 
 
 def txpower_reference():
-    """Rechnet `rtw_chip_board_info_setup` NACH und legt Pruefsummen ab.
+    """Recompute `rtw_chip_board_info_setup` and emit checksums.
 
-    Dieselbe Machart wie die Schreibzugriffszahlen der Parametertabellen:
-    eine zweite Umsetzung derselben Regel, die VORHERSAGT, was der Treiber
-    herausbekommen muss. 25 KiB abgeleiteter Zustand lassen sich nicht
-    einzeln vergleichen; eine Summe ueber alle Zellen schon, und sie faellt
-    bei jedem einzelnen falschen Byte auf.
-
-    Gerechnet wird fuer rfe_option 1 -- unser Geraet -- also mit
-    txpwr_lmt_type0."""
+    An independent implementation that predicts the driver's derived TX
+    power state; a sum over all cells catches any single wrong byte.
+    Computed for rfe_option 1, i.e. with txpwr_lmt_type0."""
     MAXP = 0x7f
     NREGD, NBW, NRS, N2G, N5G, NPATH, NRATE = 13, 3, 10, 14, 49, 4, 0x54
     WW = 12
@@ -436,7 +408,7 @@ def txpower_reference():
             out.append(v)
         return out
 
-    # --- die Zuordnung Adresse -> Raten, wie txpwr_by_rate_map sie erzeugt
+    # --- address -> rates, as txpwr_by_rate_map builds it
     rates_enum = desc_rates()
     phy = open(PHY_SRC, errors="ignore").read()
     mm = re.search(r"rtw_phy_get_rate_values_of_txpwr_by_rate\(struct"
@@ -609,14 +581,12 @@ def txpower_reference():
 
 
 def channel_groups():
-    """phy.c:1872-1960 `rtw_get_channel_group` — 89 Zeilen `switch`, die
-    einen Kanal auf eine Leistungsgruppe abbilden. Wieder Daten in
-    Schaltergestalt.
+    """phy.c:1872-1960 `rtw_get_channel_group`: a `switch` mapping a
+    channel to a power group.
 
-    **Eine Ausnahme rechnet**, und welche das ist, liest der Erzeuger aus
-    der Quelle statt sie zu raten: die Zeile `return rate <= DESC_RATE11M ?
-    A : B`. Hier steht dafuer der NICHT-CCK-Wert B; den CCK-Wert A traegt
-    `txpower.rs` als Sonderfall."""
+    One case computes, `return rate <= DESC_RATE11M ? A : B`, found in the
+    source. The table holds the non-CCK value B; `txpower.rs` handles the
+    CCK value A."""
     src = open(PHY_SRC, errors="ignore").read()
     m = re.search(r"static u8 rtw_get_channel_group\(u8 channel, u8 rate\)"
                   r"\n\{(.*?)\n\}\n", src, re.S)
@@ -672,8 +642,8 @@ def channel_groups():
 
 
 def db_invert_table():
-    """phy.c:28-53 `db_invert_table[12][8]` — 96 Zahlen, aus denen die
-    dB-Umrechnung des RSSI besteht. Abtippen waere 96 Gelegenheiten."""
+    """phy.c:28-53 `db_invert_table[12][8]`: the 96 values of the RSSI dB
+    conversion."""
     src = open(PHY_SRC, errors="ignore").read()
     m = re.search(r"static const u32 db_invert_table\[12\]\[8\] = \{(.*?)\n\};",
                   src, re.S)
@@ -694,23 +664,19 @@ def db_invert_table():
 
 
 def pwr_track_table():
-    """rtw8822c.c:5100-5277 — die zwanzig Kurven der Sendeleistungs-
-    Nachfuehrung, `struct rtw_pwr_track_tbl rtw8822c_pwr_track_type0_tbl`.
+    """rtw8822c.c:5100-5277: the twenty TX power tracking curves,
+    `struct rtw_pwr_track_tbl rtw8822c_pwr_track_type0_tbl`.
 
-    **Sie sind die Antwort des Chips auf seine eigene Temperatur.** Je
-    Pfad und Band eine Kurve mit 30 Stuetzstellen: wieviel Sendeindex
-    dazu oder weg muss, wenn der Thermometerwert um N von dem der efuse
-    abweicht. Ohne sie driftet die Sendeleistung, waehrend der Empfang
-    unveraendert gut bleibt — und das sieht aus wie eine Leitung, auf der
-    nichts mehr zurueckkommt.
+    Per path and band a 30-point curve: how much to add to or subtract from
+    the TX index when the thermal meter deviates by N from the efuse value.
+    Without it TX power drifts with temperature.
 
-    Fuer den 8822C gibt es genau EINE Tabelle: alle sieben RFE-Varianten
-    zeigen auf `type0` (rtw8822c.c:5277-5285). Deshalb waehlt hier nichts
-    nach RFE aus — das waere eine erfundene Verzweigung.
+    All seven 8822C RFE variants point at `type0` (rtw8822c.c:5277-5285), so
+    nothing here selects by RFE.
     """
     src = open(C_SRC, errors="ignore").read()
 
-    # (C-Name, Rust-Name, 5G?), in der Reihenfolge von struct rtw_swing_table
+    # (C name, Rust name), in the order of struct rtw_swing_table
     ONE = [("rtw8822c_pwrtrk_2ga_n", "PWRTRK_2GA_N"),
            ("rtw8822c_pwrtrk_2ga_p", "PWRTRK_2GA_P"),
            ("rtw8822c_pwrtrk_2gb_n", "PWRTRK_2GB_N"),

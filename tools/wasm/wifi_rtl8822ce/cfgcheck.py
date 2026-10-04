@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""`cfg_get` aus lib.rs host-seitig gegen Randfaelle fahren.
+"""Run `cfg_get` from lib.rs on the host against edge cases.
 
-Der Konfigurationsleser ist von Hand geschrieben, mit Indexrechnung, und
-er entscheidet, ob der Treiber sein Ziel findet. Greift er daneben,
-bleibt `target` leer, Stufe 5e wird uebersprungen — und nichts im Log
-sagt, dass ein Parser schuld war.
+The config reader is hand-written index arithmetic and decides whether the
+driver finds its target. If it misreads, `target` stays empty, stage 5e is
+skipped, and nothing in the log points at the parser.
 
-Dieselben Faelle, die `wifid`s eigener `cfg_get` koennen muss: Kommentare,
-fuehrende Leerzeichen, ein Doppelpunkt IM Wert, ein Schluessel, der nur
-ein Praefix ist.
+The cases are the ones wifid's own `cfg_get` must handle: comments, leading
+whitespace, a colon inside the value, a key that is only a prefix.
 """
 import os
 import pathlib

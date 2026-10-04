@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Die TLS-Leitung fuer `beak-engine/examples/wsreal.rs`.
+"""TLS transport for `beak-engine/examples/wsreal.rs`.
 
-Der Motor rechnet die Rahmen, dieses Skript traegt sie. So laeuft UNSER
-WebSocket-Code gegen einen echten Server, ohne Geraet.
+The engine computes the WebSocket frames, this script carries them, so our
+WebSocket code runs against a real server on the host.
 """
 import json, socket, ssl, subprocess, sys, select, time
 
@@ -30,7 +30,7 @@ p = subprocess.Popen([EXE, url, "https://" + HOST],
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
 
 def pump():
-    """Bis `OK`, und alles was der Motor hinauslegen will, geht raus."""
+    """Read until `OK`; return every frame the engine wants to send."""
     out = []
     while True:
         line = p.stdout.readline().rstrip("\n")

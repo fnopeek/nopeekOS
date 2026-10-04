@@ -7,18 +7,17 @@ description = "nopeekOS kernel"
 
 [features]
 installer = []
-# Bundle the ~261 MB LibreWolf userspace sqfs into the installer
-# kernel binary so a fresh USB-stick install has the browser ready
-# without an OTA round-trip. Off by default (keeps the regular
-# kernel.efi small); flipped on by `./build.sh usb-full` /
-# `./build.sh qemu-installer-full`.
+# Bundle the LibreWolf userspace sqfs into the installer kernel binary
+# so a fresh USB-stick install has the browser ready without an OTA
+# round-trip. Off by default (keeps the regular kernel.efi small);
+# enabled by `./build.sh usb-full` / `./build.sh qemu-installer-full`.
 bundle-userspace = []
 
 [dependencies]
 spin = "0.12"         # Spinlock (no_std mutex)
 
 # forge: our own WASM-to-x86-64 compiler. no_std + alloc, and its only
-# dependency is the wasmparser wasmi already brings — so it adds a code
+# dependency is the wasmparser wasmi already brings, so it adds a code
 # generator to the tree, not a dependency tree.
 forge_core = { path = "../forge/core" }
 
@@ -29,10 +28,8 @@ version = "1.1"
 default-features = false
 features = ["prefer-btree-collections"]
 
-# miniz_oxide: no_std inflate fuer `Content-Encoding: gzip` auf dem
-# Empfangsweg. Gemessen 4,1-9,9x weniger Bytes je Seite des beak-Zielkorpus
-# (docs/plan/JS_SCOPE_CONTENT_WEB.md). Dieselbe Crate, die iris/wallpaper/
-# beak-engine fuer PNG benutzen.
+# miniz_oxide: no_std inflate for `Content-Encoding: gzip` on the receive
+# path. The same crate iris/wallpaper/beak-engine use for PNG.
 [dependencies.miniz_oxide]
 version = "0.9"
 default-features = false
@@ -42,22 +39,20 @@ features = ["with-alloc"]
 version = "1.8"
 default-features = false
 
-# RustCrypto: battle-tested crypto primitives (no_std).
-# As of v0.85.x SSE/AVX2 are enabled in target-feature, so any RustCrypto
-# crate's SIMD backend is fair game now. ChaCha20-Poly1305 + X25519 are
-# still hand-rolled in this kernel (csprng.rs / aead.rs / tls/x25519.rs)
-# from the days when SIMD intrinsics #UD'd here — could swap for the
-# crates if we ever want to delete those modules.
+# RustCrypto: crypto primitives (no_std). SSE/AVX2 are enabled in the
+# target, so the crates' SIMD backends are usable. ChaCha20-Poly1305 and
+# X25519 are still hand-rolled (csprng.rs / aead.rs / tls/x25519.rs) and
+# could be replaced by the crates.
 #
-# HELD BACK ON PURPOSE — do not "update" this block (checked 2026-08-11).
+# Held back on purpose; do not update this block on its own.
 # RustCrypto split into two incompatible generations:
 #
 #   sha2 0.10 · hmac/hkdf 0.12 · ecdsa 0.16 · p256/p384 0.13 → digest 0.10, signature 2
 #   sha2 0.11 · hmac/hkdf 0.13 · ecdsa 0.17 · p256/p384 0.14 → digest 0.11, signature 3
 #
-# `rsa` has not released the new generation (0.9.10 is current and wants
-# digest 0.10 / sha2 0.10 / signature <2.3). We need RSA for X.509 chains,
-# so moving this block alone drags in BOTH sha2 + digest versions and
+# `rsa` has not released the new generation (it wants digest 0.10 /
+# sha2 0.10 / signature <2.3). We need RSA for X.509 chains, so moving
+# this block alone drags in both sha2 + digest versions and
 # breaks the type match where a Sha384 digest is fed to Pkcs1v15.
 # Move all of it together, once rsa ships the new generation.
 #
@@ -95,49 +90,35 @@ default-features = false
 features = ["verifying"]
 
 # RSA PKCS#1 v1.5 signature verification for X.509 chains.
-# Replaces the hand-rolled BigInt math we used to ship in
-# `crypto/tls/rsa.rs`. Constant-time BigUint via `crypto-bigint`.
-# This crate is what pins the whole hash/signature block above to the
-# old RustCrypto generation — watch it for a release past 0.9.
+# Constant-time BigUint via `crypto-bigint`. This crate pins the whole
+# hash/signature block above to the old RustCrypto generation; watch it
+# for a release past 0.9.
 [dependencies.rsa]
 version = "0.9"
 default-features = false
 
-# AES-256-GCM — primary symmetric cipher.
+# AES-256-GCM, the primary symmetric cipher.
 # Storage: at-rest encryption of every npkFS blob (HW AES-NI + PCLMULQDQ
 # enabled in target-feature, runtime cpufeatures dispatch).
 # TLS 1.3: TLS_AES_128_GCM_SHA256 + TLS_AES_256_GCM_SHA384 cipher suites.
 [dependencies.aes-gcm]
-# Was held at 0.10 until 2026-08-11: back then 0.11-rc + polyval 0.7 cost 3×
-# on the N100 (Atom-class, measured 718 → 243 MB/s dec) because polyval 0.7
-# prefers AVX-512 and falls to soft there, while polyval 0.6 used the legacy
-# single-block PCLMULQDQ the N100 does accelerate.
-#
-# Measured on the released 0.11 (2026-08-11, dev host under QEMU — NOT the
-# N100, and not bare metal): AES-GCM enc 1469 → 2587 MB/s, dec 1577 → 2797 MB/s,
-# +76 %, with BLAKE3 (unchanged crate) moving 1.5 % as the control. So the
-# regression looks Atom-specific rather than general — but the 718 → 243 figure
-# above came from bare-metal N100, so the two are not directly comparable.
-# Re-measure on bare metal, and on the N100 if it ever becomes a target again.
+# polyval 0.7 (under aes-gcm 0.11) prefers AVX-512 and falls back to soft
+# code on Atom-class CPUs, where polyval 0.6 used the single-block PCLMULQDQ
+# they do accelerate. Check throughput when targeting such a CPU.
 version = "0.11"
 default-features = false
 features = ["aes", "alloc"]
 
-# cpufeatures — runtime CPU feature detection (cached after first
-# call). aes-gcm + blake3 use this to dispatch to HW or soft path.
-# We poll it directly from the `disk` intent to print which features
-# the userland actually sees, so a HW-vs-detection mismatch is
-# obvious in one glance.
+# cpufeatures: runtime CPU feature detection (cached after first call).
+# aes-gcm + blake3 use it to dispatch to HW or soft path. The `disk`
+# intent queries it directly to print which features are detected.
 [dependencies.cpufeatures]
 version = "0.3"
 
-# `aes` + `ctr` + `ghash` direct deps for our custom AES-GCM
-# implementation in `crypto::aead_hw`. The combined aes-gcm crate is
-# mostly already optimal (AES-CTR via the aes crate is ~1.5 GB/s on
-# N100), but its `ghash` backend was single-block PCLMULQDQ (~720 MB/s)
-# which capped the whole AEAD. Step 1 (v0.88.0) built our own AEAD glue
-# around the same primitives to validate the framework. Step 2 swaps in
-# a 4-way aggregated GHASH for the win.
+# `aes` + `ctr` + `ghash`: direct deps for our own AES-GCM in
+# `crypto::aead_hw`. The aes-gcm crate's `ghash` backend is single-block
+# PCLMULQDQ, which caps the whole AEAD; aead_hw uses a 4-way aggregated
+# GHASH around the same primitives.
 [dependencies.aes]
 version = "0.9"
 default-features = false
@@ -150,7 +131,7 @@ default-features = false
 version = "0.6"
 default-features = false
 
-# Widget pipeline (Phase 10) ───────────────────────────────────────────
+# Widget pipeline ───────────────────────────────────────────────────────
 
 # postcard: wire format for widget trees (WASM → kernel).
 # Version-prefixed, variant-order-stable, no_std + alloc.
@@ -172,7 +153,7 @@ default-features = false
 features = ["hashbrown"]
 
 # hashbrown 0.15 replaced the `ahash` feature with `default-hasher`
-# (foldhash underneath). fontdue 0.9.4 requires ^0.15, so pinning the same
+# (foldhash underneath). fontdue requires ^0.15, so pinning the same
 # line here keeps exactly one hashbrown in the tree instead of two.
 [dependencies.hashbrown]
 version = "0.15"

@@ -11,9 +11,9 @@ license = "AGPL-3.0-or-later"
 crate-type = ["rlib"]
 
 [features]
-# Die wachsende Halde. Optional, weil sie `talc` mitbringt und ein Modul wie
-# `top` (3,5 KB) mit einem Bump-Allokator vollstaendig bedient ist. Wer je
-# Bild alloziert und freigibt, schaltet sie ein.
+# Growing heap. Optional because it pulls in `talc`, and a small module is
+# served fine by a bump allocator. Enable it if you allocate and free per
+# frame.
 heap = ["dep:talc", "dep:spin"]
 
 [dependencies]
@@ -32,7 +32,7 @@ features = ["alloc"]
 
 [dev-dependencies]
 # Tests run on the host with std; the crate itself stays no_std.
-# No extra deps needed — std is picked up automatically under cfg(test).
+# No extra deps needed; std is picked up automatically under cfg(test).
 
 [profile.release]
 opt-level = "s"

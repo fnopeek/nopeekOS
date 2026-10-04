@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""Haelt jede Konstante in src/*.rs gegen ihre Quellzeile in Linux.
+"""Checks every constant in src/*.rs against its source line in Linux.
 
-Die Regel aus memory/feedback_linux_strict.md lautet „vor jedem Commit: grep
-gegen reg.h". Von Hand macht das niemand zuverlaessig, also macht es hier ein
-Skript: jede Zeile der Form
+Every line of the form
 
-    pub const NAME: uN = <ausdruck>;
+    pub const NAME: uN = <expr>;
 
-(in regs.rs, pwrseq.rs, pci.rs, tx.rs, mac.rs, fw.rs, chip.rs) wird gegen
-`#define NAME ...` ODER einen Enum-Eintrag `NAME = ...` in der Linux-Quelle
-ausgewertet und verglichen. Gibt es den Namen in Linux nicht, ist es unsere
-eigene Konstante und es gibt nichts zu vergleichen.
+(in the files listed in RS_FILES) is evaluated and compared against
+`#define NAME ...` or an enum entry `NAME = ...` in the Linux source. A name
+that Linux does not have is our own constant and is not compared.
 
-**Beide Seiten werden REKURSIV aufgeloest.** Ein `#define WLAN_SIFS_CFG
-(WLAN_SIFS_CCK_CONT_TX | (WLAN_SIFS_OFDM_CONT_TX << BIT_SHIFT_SIFS_OFDM_CTX)
-| ...)` ueber drei Zeilen ist sonst „nicht auswertbar" und faellt still durch
-— und genau solche zusammengesetzten Werte sind die, die man beim Abtippen
-falsch macht.
+Both sides are resolved recursively, so composite values such as a
+multi-line `#define WLAN_SIFS_CFG (WLAN_SIFS_CCK_CONT_TX | ...)` are checked
+instead of being skipped as unevaluable.
 
-Gesucht wird nicht nur in den Headern: `WLAN_*`, `FAST_EDCA_*` und
-`MAC_CLK_SPEED` stehen in **rtw8822c.c**, `REG_SND_PTCL_CTRL` in **bf.h**.
+Definitions are searched in .c files too: `WLAN_*`, `FAST_EDCA_*` and
+`MAC_CLK_SPEED` live in rtw8822c.c, `REG_SND_PTCL_CTRL` in bf.h.
 
     python3 tools/wasm/wifi_rtl8822ce/check_regs.py
 """
@@ -30,28 +25,22 @@ import sys
 D = os.path.expanduser("~/.cache/nopeekos/linux-src/linux-6.18.26/"
                        "drivers/net/wireless/realtek/rtw88")
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
-# Alle Dateien mit Konstanten, nicht nur regs.rs: TX_DESC_QSEL_H2C stand in
-# tx.rs und war geraten (17 statt 19).
+# Every file with constants, not only regs.rs.
 RS_FILES = ("regs.rs", "pwrseq.rs", "pci.rs", "tx.rs", "mac.rs", "fw.rs",
             "chip.rs", "efuse.rs")
-# rtw8822c.c steht MIT in der Liste, aber hinten: gibt es einen Namen in
-# einem Header UND in der Chipdatei, gilt der Header.
-# `include/linux/ieee80211.h` liegt AUSSERHALB des Treiberbaums und
-# traegt die Bits, mit denen rtw88 die Faehigkeiten des Gegenuebers
-# liest (HT/VHT). Von Hand getippt waere jedes davon ungeprueft.
+# Order matters: a name defined in a header and in rtw8822c.c takes the
+# header's value. `include/linux/ieee80211.h` lies outside the driver tree
+# and carries the HT/VHT capability bits rtw88 reads from the peer.
 C_FILES = ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h", "bf.h",
            "efuse.h", "sec.h", "coex.h", "phy.h", "rtw8822c.h", "rtw8822c.c",
-           # Auch die .c-Dateien: `RA_MASK_*` stehen in main.c, nicht in
-           # einem Header. **Der Generator las sie, der Pruefer nicht** —
-           # und zwei Werkzeuge mit verschiedenen Quellen lassen genau dort
-           # eine Luecke, wo der Generator am meisten hilft.
+           # .c files too (e.g. `RA_MASK_*` in main.c); keep this list in
+           # step with the sources the generator reads.
            "main.c", "phy.c", "fw.c", "tx.c", "pci.c", "coex.c", "mac.c",
            "../../../../../include/linux/ieee80211.h")
 
 
-# Namen aus Headern AUSSERHALB von rtw88, die in einer Definition vorkommen.
-# Die Alternative waere, die betroffene Zeile ungeprueft durchzulassen — und
-# eine stille Ausnahme ist genau das, wogegen dieses Skript gebaut ist.
+# Names from headers outside rtw88 that appear in a definition; without
+# them the affected lines would pass unchecked.
 EXTERNAL = {
     # include/uapi/linux/nl80211.h, enum nl80211_band
     "NL80211_BAND_2GHZ": 0,
@@ -62,19 +51,17 @@ EXTERNAL = {
 
 
 def implicit_enums(path, text):
-    """Aufzaehlungen OHNE geschriebene Werte.
+    """Enum entries without written values.
 
-    `enum rtw_rf_band { RF_BAND_2G_CCK, RF_BAND_2G_OFDM, ... }` zaehlt von
-    null hoch, und kein Zeichen davon steht im Text. Fuer einen Pruefer,
-    der nach `NAME = wert` sucht, ist so eine Aufzaehlung UNSICHTBAR — und
-    ein vertauschter Bandindex waere ein Fehler, den niemand meldet.
-    Explizite Werte setzen den Zaehler neu, wie in C.
+    `enum rtw_rf_band { RF_BAND_2G_CCK, RF_BAND_2G_OFDM, ... }` counts up
+    from zero with no `NAME = value` in the text. Explicit values reset the
+    counter, as in C.
     """
     out = {}
     for m in re.finditer(r"\benum\s+\w*\s*\{([^}]*)\}", text, re.S):
         body = m.group(1)
-        # Kommentare raus, bevor an den Kommas geteilt wird — sonst frisst
-        # ein `/* … */` hinter einem Eintrag den Namen des naechsten.
+        # Strip comments before splitting on commas, or a `/* ... */` after
+        # one entry swallows the name of the next.
         body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
         body = re.sub(r"//[^\n]*", "", body)
         line0 = text[:m.start()].count("\n") + 1
@@ -99,15 +86,15 @@ def implicit_enums(path, text):
 
 
 def linux_defs():
-    """name -> (datei, zeile, ausdruck). Fortsetzungszeilen zusammengezogen."""
+    """name -> (file, line, expr), with continuation lines joined."""
     out = {n: ("nl80211.h", 0, str(v)) for n, v in EXTERNAL.items()}
     for f in C_FILES:
         p = os.path.join(D, f)
         if not os.path.exists(p):
             continue
         raw = open(p, errors="ignore").read()
-        # Zeilennummer vor dem Zusammenziehen merken: `\`-Fortsetzungen
-        # verschieben sonst jede Angabe dahinter.
+        # Record the line number before joining, or `\` continuations shift
+        # every later one.
         joined, lineno, buf, start = [], 0, "", 1
         for n, line in enumerate(raw.split("\n"), 1):
             if not buf:
@@ -122,8 +109,8 @@ def linux_defs():
             if m and m.group(1) not in out:
                 out[m.group(1)] = (f, n, m.group(2).split("/*")[0].strip())
             else:
-                # Enum-Eintraege: RTW_DMA_MAPPING_HIGH, TX_DESC_QSEL_*,
-                # DESC_RATE* stehen so da und nicht als Makro.
+                # Enum entries such as RTW_DMA_MAPPING_HIGH, TX_DESC_QSEL_*,
+                # DESC_RATE*.
                 m = re.match(r"\s*([A-Z][A-Z0-9_]*)\s*=\s*"
                              r"((?:GENMASK\([^)]*\)|BIT\([^)]*\)|[^,\n}])+)", line)
                 if m and m.group(1) not in out:
@@ -134,15 +121,15 @@ def linux_defs():
 
 
 def evaluate(expr, defs, depth=0):
-    """Rechnet einen C- oder Rust-Ausdruck aus und loest Namen ueber `defs`
-    auf. `None` heisst „nicht aufloesbar", nicht „null"."""
+    """Evaluates a C or Rust expression, resolving names through `defs`.
+    `None` means unresolvable, not zero."""
     if depth > 12:
         return None
-    # Rust schreibt bitweises NICHT als `!`, Python als `~`; und unsere
-    # Ausdruecke stehen ueber mehrere Zeilen.
+    # Rust writes bitwise NOT as `!`, Python as `~`; expressions may span
+    # several lines.
     expr = " ".join(expr.split())
     expr = re.sub(r"!(?!=)", "~", expr)
-    # C-Zahlensuffixe: `0x3ff000ULL` ist dieselbe Zahl wie `0x3ff000`.
+    # C integer suffixes: `0x3ff000ULL` equals `0x3ff000`.
     expr = re.sub(r"\b(0[xX][0-9a-fA-F]+|\d+)(?:ULL|UL|LL|[uU]|[lL])\b",
                   r"\1", expr)
     e = expr.replace("_", "") if re.fullmatch(r"0[xX][0-9a-fA-F_]+", expr.strip()) else expr
@@ -157,15 +144,15 @@ def evaluate(expr, defs, depth=0):
     e = e.replace(" as ", " ")
     for nm in sorted(set(re.findall(r"\b[A-Za-z_]\w*\b", e)), key=len, reverse=True):
         if nm in ("BIT", "GENMASK"):
-            continue  # als Funktion im Auswertungsraum, siehe unten
+            continue  # provided as a function in the eval namespace below
         if nm not in defs:
             return None
         v = evaluate(defs[nm][2], defs, depth + 1)
         if v is None:
             return None
         e = re.sub(r"\b" + re.escape(nm) + r"\b", f"({v})", e)
-    # `BIT(NAME)` bleibt uebrig, wenn das Argument selbst ein Name war —
-    # der ist oben schon ersetzt, also rechnet die Funktion hier zu Ende.
+    # `BIT(NAME)` remains when the argument was a name; that name is
+    # substituted above, so the functions finish the evaluation here.
     env = {"BIT": lambda n: 1 << n,
            "GENMASK": lambda hi, lo: ((1 << (hi + 1)) - 1) ^ ((1 << lo) - 1)}
     try:
@@ -175,12 +162,10 @@ def evaluate(expr, defs, depth=0):
 
 
 def vif_port_defs():
-    """`rtw_vif_port[0]` aus mac80211.c — eine TABELLE, kein `#define`.
+    """`rtw_vif_port[0]` from mac80211.c, a table rather than `#define`s.
 
-    Ohne diesen Leser sind die acht Adressen des Ports unsichtbar fuer den
-    Pruefer, und ein falsches `PORT0_MAC_ADDR` sieht am Geraet genau aus wie
-    „der AP antwortet nicht". Siehe
-    feedback_a_constant_with_no_name_is_invisible_to_a_constant_checker.
+    Exposes the port's register addresses as `PORT0_*` so they are checked
+    like any other constant.
     """
     path = os.path.join(D, "mac80211.c")
     if not os.path.exists(path):
@@ -204,13 +189,11 @@ def vif_port_defs():
 
 
 def peer_driver_defs():
-    """Die Steuerkanal-Konstanten des AX200-Treibers.
+    """Control-channel constants of the AX200 driver.
 
-    `CMD_*`, `EV_*` und die 802.11-Rahmenbits stehen NICHT in Linux —
-    sie kommen aus `docs/spec/WIFI_CLASS_ABI.md`. Gegen die Spec kann
-    dieser Pruefer nicht rechnen, aber gegen den ZWEITEN Treiber, der
-    dieselbe ABI spricht: weichen die beiden voneinander ab, redet der
-    Manager mit einem von ihnen falsch, und niemand merkt es.
+    `CMD_*`, `EV_*` and the 802.11 frame bits are not in Linux; they come
+    from `docs/spec/WIFI_CLASS_ABI.md`. They are checked against the other
+    driver that speaks the same ABI, so the two cannot drift apart.
     """
     peer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "..", "wifi_ax200", "src", "regs.rs")
@@ -244,7 +227,7 @@ def main():
                 ours[m.group(1)] = (f, m.group(2).strip())
                 order.append(m.group(1))
 
-    # Unsere eigenen Namen duerfen in unseren Ausdruecken vorkommen.
+    # Our own names may appear in our expressions.
     mixed = dict(defs)
     for nm, (f, expr) in ours.items():
         mixed.setdefault(nm, (f, 0, expr))

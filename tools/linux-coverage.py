@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Zaehlt mechanisch aus, welche Linux-Funktionen einer unserer Treiber
-ueberhaupt erwaehnt. Grundlage der Karten in docs/plan/WIFI_*_LINUX_MAP.md.
+"""Count which Linux functions one of our drivers mentions at all.
+Basis of the maps in docs/plan/WIFI_*_LINUX_MAP.md.
 
-Heuristik, und sie ist grosszuegig: eine Funktion gilt als "erwaehnt", wenn ihr
-Name irgendwo in unseren Quellen vorkommt — auch nur in einem Kommentar. Die
-Zahl ist damit eine OBERGRENZE der Abdeckung, nie eine Untergrenze.
+Generous heuristic: a function counts as mentioned when its name occurs
+anywhere in our sources, even in a comment. The number is an upper bound
+of coverage, never a lower bound.
 
-    python3 tools/linux-coverage.py                    # AX200 (Vorgabe)
-    python3 tools/linux-coverage.py -v                 # mit den fehlenden Namen
+    python3 tools/linux-coverage.py                    # AX200 (default)
+    python3 tools/linux-coverage.py -v                 # list missing names
     python3 tools/linux-coverage.py --chip rtl8822ce   # RTL8822CE / rtw88
-    python3 tools/linux-coverage.py --chip rtl8822ce --tree ~/pfad/zu/linux
+    python3 tools/linux-coverage.py --chip rtl8822ce --tree ~/path/to/linux
 
-Ein neuer Chip ist ein Eintrag in CHIPS: wo unsere Quellen liegen und welche
-Linux-Baeume dagegen gezaehlt werden.
+A new chip is one entry in CHIPS: where our sources are and which Linux
+directories are counted against them.
 """
 import os, re, sys
 
 DEFAULT_TREE = os.path.expanduser("~/.cache/nopeekos/linux-src/linux-6.18.26")
 
-# name -> (unsere Quellen, {Gruppe: [Linux-Verzeichnisse relativ zum Baum]})
+# name -> (our sources, {group: [Linux directories relative to the tree]})
 CHIPS = {
     "ax200": (
         "tools/wasm/wifi_ax200/src",
@@ -34,16 +34,16 @@ CHIPS = {
     "rtl8822ce": (
         "tools/wasm/wifi_rtl8822ce/src",
         {
-            # rtw88 liegt flach in EINEM Verzeichnis; die Trennung Kern /
-            # Chip / Bus macht erst die Dateiliste, deshalb filtert KEEP.
+            # rtw88 is one flat directory; core / chip / bus are separated
+            # only by file name, hence the KEEP filter.
             "rtw88":    ["drivers/net/wireless/realtek/rtw88"],
             "mac80211": ["net/mac80211"],
         },
     ),
 }
 
-# Dateien, die zu einem Chip gar nicht gehoeren (andere Chips im selben
-# Verzeichnis). Ohne das zaehlt rtw88 acht fremde Chips mit.
+# Files that belong to other chips in the same directory; without this
+# rtw88 would count eight unrelated chips.
 KEEP = {
     "rtl8822ce": lambda f: not re.match(
         r"rtw8(703b|723|812a|814a|821[ac]|822b|8xxa)", f) and f not in (
@@ -74,7 +74,7 @@ def main(argv):
         elif a == "--tree":
             i += 1; tree = os.path.expanduser(argv[i])
         elif not a.startswith("-"):
-            tree = os.path.expanduser(a)          # alte Aufrufform
+            tree = os.path.expanduser(a)          # legacy positional form
         i += 1
 
     if chip not in CHIPS:
@@ -83,8 +83,7 @@ def main(argv):
     keep = KEEP.get(chip, lambda f: True)
 
     if not os.path.isdir(src_dir):
-        # Ein Treiber, der noch nicht existiert, ist 0 % — das ist eine
-        # Aussage und kein Fehler.
+        # A driver that does not exist yet is 0 %, not an error.
         print(f"(noch keine Quellen unter {src_dir} — Abdeckung 0)")
         ours = ""
     else:
@@ -113,8 +112,7 @@ def main(argv):
         for f, ns, hit in sorted(rows, key=lambda r: -len(r[2])):
             print(f"  {f:30s} {len(hit):4d}/{len(ns):5d}")
             if verbose:
-                # ns gehoert zu DIESER Zeile — vorher stand hier die
-                # Namensmenge der zuletzt gelesenen Datei, fuer jede Zeile.
+                # ns is the name set of this row's file.
                 print("      fehlt: " + ", ".join(sorted(ns - set(hit))))
         print(f"  {'SUMME':30s} {g_hit:4d}/{g_tot:5d}")
 

@@ -1,14 +1,9 @@
 #!/bin/bash
-# Das Tor vor JEDER Freigabe des Treibers.
+# Gate before every driver release: the six checkers, a build, and
+# tools/forge-gate.py, all in one place so none can be skipped.
 #
-# Es gab die sechs Pruefer und daneben `tools/forge-gate.py`, und genau
-# das war der Fehler: vor 0.58.1, 0.58.2 und 0.59.0 lief das Forge-Tor
-# nicht mit, weil es an einer anderen Stelle steht und man es vergessen
-# KANN. Ein Tor, an das man sich erinnern muss, ist keins.
-#
-# forge-gate steht bewusst ZULETZT: es prueft das uebersetzte Modul,
-# also braucht es einen frischen Build. Wer die Quelle aendert und nur
-# das Tor faehrt, prueft das Modul von gestern.
+# forge-gate runs last because it checks the compiled module and needs a
+# fresh build; otherwise it would check a stale module.
 set -u
 cd "$(dirname "$0")"
 fehler=0

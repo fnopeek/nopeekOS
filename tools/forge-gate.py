@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
-"""Freigabe-Tor: kein Modul geht raus, das forge nicht ganz uebersetzen kann.
+"""Release gate: no module ships that forge cannot compile completely.
 
-Wir shippen Software. Ein Modul, das der Compiler nicht vollstaendig
-uebersetzt, ist damit gar kein Auslieferungskandidat — und die Laufzeit
-braucht keine Entscheidung mehr, welchen Motor sie nimmt.
+A module the compiler does not fully translate is not a release candidate,
+so the runtime never has to choose between engines.
 
-Geprueft wird ZWEIERLEI, und das zweite ist der Grund, warum „hat uebersetzt"
-nicht reicht:
+Two checks, and the second is why "it compiled" is not enough:
 
-1. **Alle Funktionen.** `forge_harness --roadmap` meldet den Anteil. Alles
-   unter 100 % heisst: irgendwo steht ein Trap-Stumpf, und das Modul faellt
-   beim ersten Aufruf dieser Funktion hinein — nicht beim Laden, wo man es
-   merken wuerde.
-2. **Alle Importe.** Ein Import, den die Bruecke nicht kennt, landet ebenfalls
-   auf dem Stumpf. Die Namen stehen in den beiden erzeugten Tabellen
-   `kernel/src/wasm/forge_glue.rs` (env) und `kernel/src/wasi/forge_glue.rs`
+1. All functions. `forge_harness --roadmap` reports the share. Anything
+   below 100 % means a trap stub somewhere, hit on the first call of that
+   function rather than at load time.
+2. All imports. An import the glue does not know also lands on a stub.
+   The names come from the two generated tables
+   `kernel/src/wasm/forge_glue.rs` (env) and `kernel/src/wasi/forge_glue.rs`
    (wasi_snapshot_preview1).
 
-Laeuft ueber `release/modules/*.wasm`, nicht ueber den Bauweg: `aml` und
-`wifid` werden von Hand gestaged und kaemen sonst daran vorbei. Einzelne
-Dateien lassen sich als Argumente uebergeben — so laesst sich das Tor selbst
-pruefen, ohne etwas nach `release/` zu legen.
+Runs over `release/modules/*.wasm`, not the build path, because `aml` and
+`wifid` are staged by hand and would otherwise bypass it. Individual files
+can be passed as arguments to test the gate without touching `release/`.
 """
 import glob
 import os
@@ -44,9 +40,8 @@ def leb(b, i):
 
 
 def imports(path):
-    """(modul, name) je importierter FUNKTION. Speicher, Tabellen und Globale
-    ueberspringt der Leser, ohne sie zu deuten — sie landen nie auf einem
-    Trap-Stumpf."""
+    """(module, name) per imported function. Memories, tables and globals
+    are skipped without decoding; they never land on a trap stub."""
     b = open(path, "rb").read()
     if b[:8] != b"\0asm\x01\0\0\0":
         raise SystemExit(f"{path}: kein wasm")
@@ -70,20 +65,20 @@ def imports(path):
                 if kind == 0:
                     _, j = leb(b, j)
                     out.append((mod, nm))
-                elif kind == 1:  # Tabelle
+                elif kind == 1:  # table
                     j += 1
                     lim = b[j]
                     j += 1
                     _, j = leb(b, j)
                     if lim:
                         _, j = leb(b, j)
-                elif kind == 2:  # Speicher
+                elif kind == 2:  # memory
                     lim = b[j]
                     j += 1
                     _, j = leb(b, j)
                     if lim:
                         _, j = leb(b, j)
-                elif kind == 3:  # Globale
+                elif kind == 3:  # global
                     j += 2
         i = end
     return out

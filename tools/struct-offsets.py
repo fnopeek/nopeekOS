@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""PROTOTYP: C-Struktur aus fw/api/*.h -> Feldoffsets, gegen unsere Konstanten.
+"""Prototype: C struct from fw/api/*.h -> field offsets, checked against our constants.
 
-Zweck ist nicht dieses Skript, sondern der Beweis, dass die Offsets MECHANISCH
-aus dem Linux-Header kommen koennen statt aus Handarbeit. Es zeigt pro Feld,
-ob wir eine Konstante darauf haben — ein nicht belegtes Feld ist ein Kandidat
-fuer stille Nullen (genau so lagen `qos_flags` und `ac[]` monatelang leer).
+Shows that offsets can come mechanically from the Linux header instead of
+by hand. Per field it reports whether we have a constant for it; an
+uncovered field is a candidate for silently zero data.
 
-GRENZEN, und sie sind der eigentliche Punkt: ein Regex-Parser scheitert an
-`struct iwl_ac_qos ac[AC_NUM+1]`, an Unions und an Bitfeldern. Der Nachfolger
-ist kein besserer Regex, sondern `rust-bindgen` (bzw. libclang) auf
-`fw/api/*.h` mit einem kleinen Shim fuer `__le32`/`u8`. Dann sind die Offsets
-exakt und ein Linux-Versionssprung wird zu einem `cargo build`-Diff.
+Limits: a regex parser fails on `struct iwl_ac_qos ac[AC_NUM+1]`, unions
+and bitfields. The successor is not a better regex but `rust-bindgen`
+(or libclang) on `fw/api/*.h` with a small shim for `__le32`/`u8`; then
+offsets are exact and a Linux version bump becomes a `cargo build` diff.
 
     python3 tools/struct-offsets.py
 """

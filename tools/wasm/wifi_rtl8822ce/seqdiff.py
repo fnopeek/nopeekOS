@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
-"""Vergleicht die FOLGE der Registerzugriffe: Linux gegen unsere Portierung.
+"""Compares the sequence of register accesses: Linux against our port.
 
-Nicht die WERTE — das tut `check_regs.py` —, sondern: dieselbe Art
-(read/write/set/clr/mask), dieselbe Breite, dasselbe Register, in derselben
-Reihenfolge. Genau da sitzen Portierfehler, die kein Compiler sieht: eine
-vertauschte Zeile, ein vergessener Zugriff, ein 16-Bit-Schreibzugriff, wo
-Linux 8 Bit schreibt (Regel 3 des Plans: „Write-Breite ist Semantik").
+Not the values (that is `check_regs.py`), but the same kind
+(read/write/set/clr/mask), the same width and the same register, in the
+same order. This catches swapped lines, missing accesses and a 16-bit write
+where Linux writes 8 bits; the write width is semantics.
 
-**Was es NICHT sieht:** berechnete Werte. `rtw_write32(base + 0x68, temp)`
-wird gegen `host::w32(h, base_addr + 0x68, temp)` verglichen -- steht bei uns
-`temp + 1`, faellt das nicht auf, weil `temp` keine Hexzahl ist. Verglichen
-werden die Art, die Breite, das Register und die nackten Zahlen; die
-Rechnung dahinter liest ein Mensch.
+Computed values are not seen: `rtw_write32(base + 0x68, temp)` is compared
+with `host::w32(h, base_addr + 0x68, temp)`, and `temp + 1` on our side would
+pass because `temp` is not a hex number. Kind, width, register and literal
+numbers are compared; the arithmetic is left to a human reader.
 
-Zweiter Vergleich: die FOLGE ALLER HEXZAHLEN im Rumpf. Bei der
-DAC-Kalibrierung stehen mehrere hundert Magiezahlen wie `0x0a11fb88`, die
-keine benannte Konstante sind — `check_regs.py` kann sie also nicht sehen,
-und ein Zahlendreher faellt sonst erst am Geraet auf, als Funkfehler.
+Second comparison: the sequence of all hex numbers in the body. The DAC
+calibration has hundreds of magic values such as `0x0a11fb88` that are not
+named constants and that `check_regs.py` therefore cannot see.
 
-**Was uebersprungen wird, steht NAMENTLICH in `OTHER_BUS`.** Ein Zugriff, der
-nur auf USB oder SDIO gilt, fehlt bei uns mit Absicht — und die Ausnahme wird
-hier aufgezaehlt statt stillschweigend gefiltert. Steht eine gemeldete
-Ausnahme gar nicht mehr in der Quelle, ist das ein Fehler: dann hat Linux sich
-bewegt und wir nicht.
+Accesses that exist only on USB or SDIO are listed by name in `OTHER_BUS`
+rather than filtered silently. A listed exception that is no longer in the
+source is reported as an error: Linux has moved and we have not.
 
     python3 tools/wasm/wifi_rtl8822ce/seqdiff.py
 """
@@ -37,10 +32,9 @@ R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 C_OPS = re.compile(
     r"rtw_(write|read)(8|16|32)(_set|_clr|_mask)?\s*\(\s*rtwdev\s*,\s*([^,)]+)")
 
-# `read_poll_timeout(rtw_read32_mask, val, …, rtwdev, REG, MASK)` — der
-# Zugriff steht als ARGUMENT eines Makros, nicht als Aufruf. Fuer C_OPS ist
-# er unsichtbar, und die Funktion meldete deshalb weniger Zugriffe als sie
-# macht. Mindestens fuenf Stellen in rtw88 arbeiten so.
+# `read_poll_timeout(rtw_read32_mask, val, ..., rtwdev, REG, MASK)` passes
+# the accessor as a macro argument, which C_OPS does not see; poll_expand
+# rewrites it into a plain call.
 C_POLL = re.compile(
     r"read_poll_timeout(?:_atomic)?\s*\(\s*"
     r"rtw_(write|read)(8|16|32)(_set|_clr|_mask)?\s*,"
@@ -52,34 +46,26 @@ HEX = re.compile(r"0[xX][0-9a-fA-F][0-9a-fA-F_]*")
 
 
 def hexes(body, strip_comments):
-    """Alle Hexzahlen des Rumpfes in Quellreihenfolge.
+    """All hex numbers of the body in source order.
 
-    Der zweite Vergleich neben der Zugriffsfolge, und der wichtigere fuer die
-    DAC-Kalibrierung: dort stehen mehrere hundert Magiezahlen wie
-    `0x0a11fb88`, die keine Konstante sind und die `check_regs.py` deshalb
-    nicht sehen kann. Ein Zahlendreher faellt hier auf und sonst nirgends.
-
-    Kommentare fliegen vorher raus — unsere tragen Adressen im Text."""
+    Comments are stripped first; ours mention addresses in the text."""
     if strip_comments:
         body = re.sub(r"//[^\n]*", "", body)
-        # Unsere Seite schreibt dieselben Masken als `1 << n`.
+        # Our side writes the same masks as `1 << n`.
         body = re.sub(r"\b1(?:u8|u16|u32|u64|usize|i8|i16|i32|i64)?"
                       r"\s*<<\s*(\d+)\b",
                       lambda m: "0x%x" % (1 << int(m.group(1))), body)
     else:
         body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
-        # `rtw_dbg(..., "[DACK] ADCK 0x%08x=0x08%x\n", ...)` enthaelt 0x08.
-        # Eine Formatzeichenkette ist kein Registerwert.
+        # Format strings such as "[DACK] ADCK 0x%08x=0x08%x\n" are not
+        # register values.
         body = re.sub(r'"(?:[^"\\]|\\.)*"', '""', body)
-        # Ganze Logzeilen raus: `rtw_dbg(..., base_addr + 0x68, temp)` traegt
-        # Adressen als ARGUMENTE, und die sind keine Registerarbeit.
+        # Drop whole log calls: `rtw_dbg(..., base_addr + 0x68, temp)` has
+        # addresses as arguments that are not register accesses.
         body = re.sub(r"\brtw_(?:dbg|err|warn|info)\s*\([^;]*?\);", "", body,
                       flags=re.S)
-        # `GENMASK(27, 16)` und `BIT(12)` sind ZAHLEN, nur anders
-        # geschrieben. Ohne diese Zeile meldet jede Funktion, die in Linux
-        # eine Maske als Makro schreibt und bei uns als Hexzahl, einen
-        # Unterschied -- und jede davon braeuchte eine eigene Ausnahme.
-        # Vier Funktionen der DPK allein waren das.
+        # `GENMASK(27, 16)` and `BIT(12)` are numbers; expand them so a mask
+        # written as a macro in Linux and as hex on our side compares equal.
         body = re.sub(r"GENMASK\(\s*(\d+)\s*,\s*(\d+)\s*\)",
                       lambda m: "0x%x" % (((1 << (int(m.group(1))
                                                   - int(m.group(2)) + 1)) - 1)
@@ -88,8 +74,8 @@ def hexes(body, strip_comments):
                       lambda m: "0x%x" % (1 << int(m.group(1))), body)
     return [int(v.replace("_", ""), 16) for v in HEX.findall(body)]
 
-# Zugriffe, die in Linux NUR im SDIO- oder USB-Zweig stehen. Auf PCIe ist
-# dieser Zweig unerreichbar, also fehlen sie bei uns.
+# Accesses that Linux has only in the SDIO or USB branch; unreachable on
+# PCIe, so absent from our port.
 OTHER_BUS = {
     "txdma_queue_mapping": [
         ("r", "32", "REG_SDIO_FREE_TXPG"),       # SDIO
@@ -103,16 +89,16 @@ OTHER_BUS = {
     ],
 }
 
-# Hexzahlen, die nur im Zweig eines anderen Busses stehen.
+# Hex numbers that appear only in another bus's branch.
 HEX_OTHER_BUS = {
     "__priority_queue_cfg": [0x2],  # USB: rtw_write8_set(..., BIT(1))
-    # rtw8822c.h:183 XCAP_MASK -- bei uns beim NAMEN genannt und von
-    # check_regs.py gegen die Quelle geprueft, deshalb keine Zahl im Code.
+    # rtw8822c.h:183 XCAP_MASK: named on our side and checked by
+    # check_regs.py, so no literal in the code.
     "rtw8822c_phy_set_param": [0x7f],
 }
 
-# Funktionen, deren ZUGRIFFSFOLGE bewusst von Linux abweicht, mit Grund.
-# Die Abweichung steht hier namentlich, nicht als stiller Filter im Code.
+# Functions whose access sequence deliberately differs from Linux, with
+# the reason; listed by name instead of filtered silently.
 DEVIATION = {
     "rtw_dbi_read8":
         "Linux benutzt die Variable `read_addr` fuer den letzten Lesezugriff "
@@ -182,8 +168,8 @@ DEVIATION = {
         "zusammengefasst, und davor steht die RF-0x3e-Diagnose.",
 }
 
-# Funktionen, deren Zahlenfolge sich NICHT vergleichen laesst, mit Grund.
-# Die Zugriffsfolge wird trotzdem geprueft.
+# Functions whose hex sequence cannot be compared, with the reason. Their
+# access sequence is still checked.
 HEX_SKIP = {
     "rtw_get_channel_params":
         "Linux liest eine fertige `cfg80211_chan_def` und vergleicht "
@@ -290,19 +276,17 @@ HEX_SKIP = {
 }
 
 def discover():
-    """Findet die Paare (C-Funktion, Rust-Funktion) SELBST.
+    """Finds the (C function, Rust function) pairs from the sources.
 
-    Jede portierte Funktion traegt ihren Ursprung im Doc-Kommentar, in der
-    Form "/// <datei>.c:<zeilen> `<c_name>`", und direkt darunter steht
-    ihre Rust-Fassung. Eine handverlesene Liste laesst genau die Funktion
-    aus, um die es gerade geht — das ist in 0.10.2 passiert: `dac_cal_adc`
-    stand nicht drin, und dort lag der Fehler.
+    Every ported function carries its origin in its doc comment, in the form
+    "/// <file>.c:<lines> `<c_name>`", followed by its Rust definition. A
+    piece of a C function that stands on its own on our side uses
+    "/// <file>.c:<lines>, part of `<c_name>`" (or "ein Stueck aus") and is
+    appended to that function's sequence.
     """
     pairs, parts = [], {}
     src_re = re.compile(r"^/// (?:.*·\s*)?([a-z0-9_]+\.c):[\d-]+\s+`([A-Za-z_]\w*)`")
-    # Ein STUECK einer C-Funktion, das bei uns eigen steht. Ohne diese Form
-    # verschwindet jede herausgeloeste Zeile aus dem Vergleich: die
-    # C-Funktion meldet dann „Zahlen fehlen" und das Stueck gar nichts.
+    # A piece of a C function that is a separate function on our side.
     part_re = re.compile(
         r"^/// ([a-z0-9_]+\.c):[\d-]+,\s+(?:ein Stueck aus|part of)\s+`([A-Za-z_]\w*)`")
     fn_re = re.compile(r"^(?:pub )?fn ([a-z0-9_]+)")
@@ -319,14 +303,12 @@ def discover():
                 if not m:
                     continue
             cfile, cname = m.groups()
-            # die naechste Funktionsdefinition unter dem Kommentarblock
+            # The next function definition below the comment block.
             for j in range(i + 1, min(i + 40, len(lines))):
                 if lines[j].startswith("///") or lines[j].startswith("//"):
                     continue
-                # Ein Attribut steht ZWISCHEN Kommentar und Definition.
-                # Brach der Finder hier ab, meldete die Funktion still
-                # „null Zugriffe" — und eine stille Null sieht aus wie
-                # Uebereinstimmung.
+                # Attributes may stand between comment and definition; skip
+                # them, or the function silently reports zero accesses.
                 if lines[j].lstrip().startswith("#["):
                     continue
                 fm = fn_re.match(lines[j])
@@ -342,21 +324,18 @@ def discover():
 
 
 def c_body(path, name):
-    """Der Rumpf der C-Funktion `name` — ueber ihre Definitionszeile."""
+    """The body of C function `name`, found via its definition line."""
     src = open(os.path.join(L, path), errors="ignore").read()
-    # Der Rueckgabetyp darf auf der ZEILE DAVOR stehen
-    # (`struct sk_buff *\nrtw_tx_write_data_h2c_get(`).
-    # `enum rtw_tx_queue_type rtw_tx_queue_mapping(` hat einen Rueckgabetyp
-    # aus ZWEI Woertern. Mit nur einem blieb die Funktion ohne Rumpf, und
-    # eine Funktion ohne Rumpf wird uebersprungen statt geprueft.
+    # The return type may stand on the previous line
+    # (`struct sk_buff *\nrtw_tx_write_data_h2c_get(`) and may be two words
+    # (`enum rtw_tx_queue_type rtw_tx_queue_mapping(`).
     pat = re.compile(r"^(?:(?:static\s+)?(?:const\s+)?"
                      r"(?:(?:enum|struct|union|unsigned|signed)\s+)?"
                      r"[A-Za-z_]\w*[\s*]+)?"
                      + re.escape(name) + r"\s*\(", re.M)
     for m in pat.finditer(src):
-        # Eine Vorwaertsdeklaration endet mit `;` und hat keinen Rumpf.
-        # `rtw8822c_config_trx_mode` steht in rtw8822c.c zweimal, und der
-        # erste Treffer ist die Deklaration in Zeile 23.
+        # Skip forward declarations (ending in `;`), e.g.
+        # `rtw8822c_config_trx_mode` in rtw8822c.c.
         head = src[m.start():m.start() + 400]
         brace, semi = head.find("{"), head.find(";")
         if brace != -1 and (semi == -1 or brace < semi):
@@ -382,9 +361,8 @@ def rs_body(path, sig):
     return src[i:k]
 
 
-# Lokale Namen, die auf beiden Seiten dasselbe Register meinen. Sie stehen
-# hier einzeln, weil eine allgemeine Normierung auch echte Unterschiede
-# wegbuegeln wuerde.
+# Local names that mean the same register on both sides. Listed one by one
+# because a general normalisation would also hide real differences.
 ALIAS = {
     "addrs[i]": "DACK_ADDRS[i]",
     "bd_idx": "idx",
@@ -394,9 +372,9 @@ ALIAS = {
     "sipi_addr[rf_path]": "RF_SIPI_ADDR[rf_path]",
     "edcca_th[EDCCA_TH_L2H_IDX].hw_reg.addr": "addr",
     "edcca_th[EDCCA_TH_H2L_IDX].hw_reg.addr": "addr",
-    # Stufe 5b: derselbe Zugriff, andere Schreibweise des Ausdrucks.
+    # Same access, different spelling of the expression.
     "start+i": "start+iasu32",
-    # Stufe 5d: Schleifenvariable bzw. GROSSGESCHRIEBENE Tabelle.
+    # Loop variable, or a table that is an upper-case const on our side.
     "reg[i]": "r",
     "reg[path]+addr*4": "REG[path]+addr*4",
     "0x1b18+offset[path]": "0x1b18+OFFSET[path]",
@@ -407,17 +385,15 @@ ALIAS = {
     "three_wire[path]": "THREE_WIRE[path]",
     "cfg1_1b00[path]": "CFG1_1B00[path]",
     "cfg2_1b00[path]": "CFG2_1B00[path]",
-    # Stufe 5e
     "bd_idx_addr": "idx_reg",
 }
 
-# Umbenennungen, die NUR in einer Funktion gelten. Ein globaler Eintrag fuer
-# einen so gewoehnlichen Namen wie `addr` faerbt sonst jede andere Funktion
-# mit -- beim ersten Versuch brach damit `rtw_phy_set_edcca_th`.
+# Renames that apply within one function only; a global entry for a name
+# as common as `addr` would affect every other function.
 ALIAS_IN = {
-    # rtw_vif_port_config zieht `addr`/`mask` erst in lokale Variablen; bei
-    # uns steht das Tabellenfeld direkt da. Die Adressen selbst prueft
-    # check_regs.py gegen dieselbe Tabelle in mac80211.c.
+    # rtw_vif_port_config copies `addr`/`mask` into locals; we use the table
+    # field directly. check_regs.py checks the addresses against the same
+    # table in mac80211.c.
     "rtw_vif_port_config": {
         "addr": ["c.net_type.0", "c.aid.0", "c.bcn_ctrl.0"],
     },
@@ -431,11 +407,11 @@ def norm(s):
 
 
 def apply_alias_in(name, c):
-    """Die funktionslokalen Umbenennungen, der REIHE nach angewandt.
+    """Applies the function-local renames in order.
 
-    `rtw_vif_port_config` schreibt dreimal ueber dieselbe lokale Variable
-    `addr`; welches Tabellenfeld gemeint ist, sagt allein die Reihenfolge.
-    Deshalb zaehlt ein Zaehler je Name mit.
+    `rtw_vif_port_config` writes through the same local `addr` three times;
+    only the order tells which table field is meant, so a counter per name
+    picks the candidate.
     """
     table = ALIAS_IN.get(name)
     if not table:
@@ -455,11 +431,11 @@ def apply_alias_in(name, c):
 
 
 def poll_expand(body):
-    """Jeden `read_poll_timeout(rtw_readXX, …)` in einen gewoehnlichen
-    Aufruf umschreiben, damit `C_OPS` ihn sieht."""
+    """Rewrites each `read_poll_timeout(rtw_readXX, ...)` into a plain call
+    so that `C_OPS` sees it."""
     def rep(m):
         kind, width, mod, rest = m.groups()
-        # Die Argumente hinter `false,` sind die des Lesers: rtwdev, REG, …
+        # The arguments from `rtwdev` on belong to the accessor.
         parts = [p.strip() for p in rest.split(",")]
         try:
             i = parts.index("rtwdev")
@@ -520,14 +496,13 @@ def main():
         try:
             c = c_seq(c_body(cf, csig))
             r = rs_seq(rs_body(rf, rsig))
-            # Was bei uns herausgeloest steht, gehoert fuer den Vergleich
-            # zurueck an seinen Platz.
+            # Pieces split out on our side count towards their C function.
             for prf, prsig in parts.get(name, []):
                 r += rs_seq(rs_body(prf, prsig))
             c = apply_alias_in(name, c)
         except ValueError:
-            # Kein Rumpf zu finden: eine Tabelle, eine Konstante oder eine
-            # Funktion, die in Linux anders heisst. Nichts zu vergleichen.
+            # No body found: a table, a constant or a function named
+            # differently in Linux. Nothing to compare.
             skipped.append(name)
             continue
         for t in OTHER_BUS.get(name, []):

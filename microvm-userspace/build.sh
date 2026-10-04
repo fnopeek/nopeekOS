@@ -1,79 +1,60 @@
 #!/usr/bin/env bash
-# microvm-userspace/build.sh — build a Linux userspace bundle for the
+# microvm-userspace/build.sh: build a Linux userspace bundle for the
 # nopeekOS MicroVM.
 #
 # Output: release/apps/<name>/<name>-<ver>.cpio.gz (signed in
 # release/apps/<name>/<name>-<ver>.cpio.gz.sig by `./build.sh release`).
 #
-# The bundle is **not** embedded in the kernel binary. Distribution
-# path: `install <name>` fetches it OTA-style via GitHub raw, verifies
-# ECDSA P-384, stores in npkFS. `microvm <name>` then loads it from
-# npkFS as a second initramfs (or future: read-only virtio-blk sqfs).
+# The bundle is not embedded in the regular kernel binary. `install
+# <name>` fetches it OTA-style, verifies ECDSA P-384 and stores it in
+# npkFS; `microvm <name>` loads it from there.
 #
-# Iteration 1: just Alpine minirootfs + our PID-1 as /init. Gives an
-# interactive busybox-ash shell inside the MicroVM.
-# Iteration 2: + Mesa + Wayland-libs (apk add).
-# Iteration 3: + LibreWolf (built from Alpine APKBUILD on top).
+# Contents: Alpine minirootfs + our PID-1 as /init + the apks below.
 #
 # Trust split (see docs/archive/PHASE12_MICROVM.md):
-#   - Kernel + microvm-init: compiled + signed by us, fully audited.
+#   - Kernel + microvm-init: compiled + signed by us.
 #   - Alpine minirootfs: pinned tarball + pinned sha256.
-#   - Future apks: pinned version + pinned blake3 per package
-#     from a pinned Alpine snapshot date.
+#   - apks: package names here, versions from the pinned Alpine branch;
+#     apk verifies them against the signed index.
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────
 
-# Alpine release tracking. Bump these together, document the reason
-# in the commit message. Current selection: 3.24 stable.
-# NOTE: a stable branch does NOT follow the browser. 3.23 froze LibreWolf
-# at 144 while upstream moved to 151 — rebuilding on the same branch only
-# brings library patches. Check `librewolf` in the next branch's APKINDEX
-# before assuming a rebuild updates it.
+# Alpine release tracking. Bump these together and give the reason in
+# the commit message. A stable branch does not follow the browser:
+# rebuilding on the same branch only brings library patches. Check
+# `librewolf` in the next branch's APKINDEX before assuming a rebuild
+# updates it.
 ALPINE_BRANCH="${ALPINE_BRANCH:-v3.24}"
 ALPINE_VERSION="${ALPINE_VERSION:-3.24.2}"
 ALPINE_MINIROOTFS_SHA256="${ALPINE_MINIROOTFS_SHA256:-c5ca053cfe1d85c5b96dff8b9bc57045f7f184a30ffb6b65776409ca90388677}"
 
-# Output naming. `alpine-base` for iter 1 (no apks). `alpine-wayland`
-# for iter 2 (Mesa + Wayland + libxkbcommon — display-runtime smoke).
-# Iter 3 will rename to `librewolf` with the browser on top.
+# Output naming; the bundle is named after its main client.
 BUNDLE_NAME="${BUNDLE_NAME:-librewolf}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
-# Apks to add on top of minirootfs. Pinning to package _names_ here;
-# the version comes from the pinned Alpine snapshot (`v3.24` branch
-# tracks 3.24.x, the rolling patch level — bumps via ALPINE_VERSION).
-# Phase 12.6: this list will balloon for LibreWolf (mesa-dri-gallium,
-# gtk+3.0, libnss, freetype, fontconfig, icu-libs, pulseaudio-libs,
-# librewolf-bin, …). For iter 2 we just need the display-stack libs
-# so we can verify they at least LOAD inside our microvm.
-# Phase 12.6: LibreWolf in a cage kiosk, the actual end goal. The
-# Phase-B substrate (timer, seat, sqfs, input, display bridge) is
-# proven with weston-simple-shm; now the real client.
-#   cage      — kiosk Wayland compositor (one client = the browser)
-#   librewolf — the browser (Alpine community, Firefox fork, pulls
-#               gtk/nss/fontconfig/freetype/… via apk deps)
-#   seatd     — libseat daemon (Alpine libseat has no builtin backend)
-#   libinput  — wlroots evdev input
-#   eudev     — udevd + udevadm + libudev. wlroots' libinput backend
-#               AND its DRM/session backend discover devices via the
-#               udev MONITOR; with no udev they find ZERO input
-#               devices (keyboard/mouse never reach the browser) and
-#               never see the DRM connector hotplug we raise on a
-#               tile resize (no live reflow). One package unblocks
-#               both. udevd is run + `udevadm trigger`+`settle`'d in
-#               launch_wayland before cage.
-#   mesa-gbm  — wlroots DRM backend buffer alloc (pixman SW renderer,
+# Apks to add on top of minirootfs. Package names only; versions come
+# from the pinned Alpine branch (patch level via ALPINE_VERSION).
+#   cage      - kiosk Wayland compositor (one client = the browser)
+#   librewolf - the browser (Firefox fork; pulls gtk/nss/fontconfig/
+#               freetype/... via apk deps)
+#   seatd     - libseat daemon (Alpine libseat has no builtin backend)
+#   libinput  - wlroots evdev input
+#   eudev     - udevd + udevadm + libudev. wlroots' libinput and
+#               DRM/session backends discover devices via the udev
+#               monitor; without udev they find no input devices and
+#               never see the DRM connector hotplug raised on a tile
+#               resize. launch_wayland runs udevd, `udevadm trigger`
+#               and `settle` before cage.
+#   mesa-gbm  - wlroots DRM backend buffer alloc (pixman SW renderer,
 #               no GL driver)
-# weston-clients dropped — the SHM test client is no longer needed.
-# font-dejavu + font-noto: Alpine minirootfs ships ZERO fonts, so
-# fontconfig (pulled by librewolf) has nothing → all GTK + web text
-# renders as tofu boxes. dejavu covers Latin UI/body; noto adds
-# broad Unicode + a sane sans default so real pages look right.
+# font-dejavu + font-noto: the minirootfs ships no fonts, so without them
+# all GTK and web text renders as tofu. dejavu covers Latin UI/body;
+# noto adds broad Unicode and a sans default.
 # alsa-lib: libasound for LibreWolf's cubeb ALSA backend (no PulseAudio /
-# PipeWire in the bundle). cubeb opens the ALSA "default" PCM → our virtio-snd
-# card (card 0) → host audio mailbox → audio_hda → speaker.
+# PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
+# the virtio-snd card (card 0) backed by the host audio path.
 APK_PACKAGES="${APK_PACKAGES:-cage librewolf seatd libinput eudev mesa-gbm font-dejavu font-noto alsa-lib}"
 
 # ── Paths ────────────────────────────────────────────────────────
@@ -111,12 +92,12 @@ if [ ! -f "$CACHE/$TARBALL" ]; then
 fi
 
 # Verify against pinned hash. Mismatch = either upstream tampering or
-# our pin drifted past available retention — bail loudly either way.
+# our pin drifted past available retention; bail either way.
 echo "${ALPINE_MINIROOTFS_SHA256}  $CACHE/$TARBALL" | sha256sum -c - >/dev/null \
     || { red "sha256 mismatch on $TARBALL"; exit 1; }
 green "verified $TARBALL ($(stat -c%s "$CACHE/$TARBALL") bytes)"
 
-# ── Build PID-1 (idempotent — `cargo build --release` no-ops if fresh)
+# ── Build PID-1 (idempotent; `cargo build --release` no-ops if fresh)
 
 cyan "building PID-1 (microvm-init)"
 (cd "$PID1_DIR" && cargo build --release --locked >/dev/null 2>&1)
@@ -150,7 +131,7 @@ if [ -n "$APK_PACKAGES" ]; then
     APK_CACHE_DIR="$CACHE/apks"
     mkdir -p "$APK_CACHE_DIR"
     # Bind the host cache dir into the chroot so apk reuses
-    # downloaded .apks across builds — speeds up re-runs.
+    # downloaded .apks across builds.
     mkdir -p "$STAGE/var/cache/apk"
 
     unshare --user --map-root-user --mount --pid --fork --mount-proc \
@@ -160,30 +141,27 @@ if [ -n "$APK_PACKAGES" ]; then
             chroot '$STAGE' /sbin/apk update 2>&1 | tail -3
             chroot '$STAGE' /sbin/apk add --no-progress $APK_PACKAGES 2>&1 | tail -20
             # Pre-build the fontconfig cache inside the image. The
-            # guest has no RTC (clock = year 2000) so it can't trust
-            # 2026-dated font dirs at runtime ('mtime in the future'
-            # → fonts not scanned → tofu). A prebuilt cache means
-            # fontconfig serves fonts without a runtime scan.
+            # guest has no RTC, so font dirs can look newer than its
+            # clock ('mtime in the future', fonts not scanned, tofu).
+            # A prebuilt cache serves fonts without a runtime scan.
             chroot '$STAGE' /usr/bin/fc-cache -f 2>&1 | tail -3 || true
         "
 
-    # Apk leaves /var/cache/apk populated with symlinks/copies — wipe
+    # Apk leaves /var/cache/apk populated with symlinks/copies; wipe
     # it so the cpio doesn't carry duplicate-of-host-cache bytes.
     rm -rf "$STAGE/var/cache/apk"/*
 
-    # Drop the temporary resolver — guest will set its own.
+    # Drop the temporary resolver; the guest sets its own.
     : > "$STAGE/etc/resolv.conf"
 fi
 
-# Drop our PID-1 as /init — Linux execs /init as PID-1 when an
-# initramfs is in use. Overrides anything Alpine ships (Alpine's
-# minirootfs typically has no /init, openrc lives at /sbin/init,
-# but be safe).
+# Install our PID-1 as /init: Linux execs /init as PID-1 when an
+# initramfs is in use. Overrides anything Alpine ships (openrc lives
+# at /sbin/init).
 cp "$PID1_BIN" "$STAGE/init"
 chmod +x "$STAGE/init"
 
-# Friendly /etc/motd so an interactive shell session greets us with
-# clear "yes you're in the microvm" signal.
+# /etc/motd so an interactive shell shows it is inside the microvm.
 cat > "$STAGE/etc/motd" <<'MOTD'
 
    nopeekOS MicroVM — Alpine userspace iteration 1
@@ -193,14 +171,12 @@ cat > "$STAGE/etc/motd" <<'MOTD'
 
 MOTD
 
-# /etc/machine-id — LibreWolf's a11y stack spawns a DBus session bus
+# /etc/machine-id: LibreWolf's a11y stack spawns a DBus session bus,
 # which refuses to start without one ("Cannot spawn a message bus
-# without a machine-id"), costing a multi-second startup timeout
-# (visible 2× in the boot log). dbus also checks
-# /var/lib/dbus/machine-id. A FIXED 32-hex value (not dbus-uuidgen):
+# without a machine-id") and costs a startup timeout. dbus also checks
+# /var/lib/dbus/machine-id. A fixed 32-hex value (not dbus-uuidgen):
 # the squashfs is signed over its bytes, so the image must be
-# byte-reproducible across rebuilds — a random id would break the sig
-# and there is one VM, no fleet, so a constant id is correct here.
+# byte-reproducible, and with a single VM a constant id is correct.
 MACHINE_ID="2d8b9f1c4e6a7d0b3f5c8e1a9d4b7c0e"
 printf '%s\n' "$MACHINE_ID" > "$STAGE/etc/machine-id"
 mkdir -p "$STAGE/var/lib/dbus"
@@ -208,7 +184,7 @@ ln -sfn /etc/machine-id "$STAGE/var/lib/dbus/machine-id"
 
 # ── Pack as cpio.gz (newc format = what Linux's initramfs unpacker
 #    expects). Strip uid/gid noise to keep the cpio reproducible
-#    across rebuilds — needed because the sig is over the bytes.
+#    across rebuilds; the sig is over the bytes.
 
 cyan "packing bundle ($(find "$STAGE" -type f | wc -l) files)"
 mkdir -p "$OUT_DIR"
@@ -245,7 +221,7 @@ sha256    = "${SHA}"
 alpine    = "${ALPINE_VERSION}"
 MANIFEST
 
-# ── 'current' pointer — symlink to latest version for OTA convenience.
+# ── 'current' pointer: symlink to the latest version for OTA.
 ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.cpio.gz"      "$OUT_DIR/current.cpio.gz"
 ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.manifest"     "$OUT_DIR/current.manifest"
 
@@ -264,10 +240,9 @@ cyan  "       sha256: ${SHA}"
 #
 # The kernel asset manifest carries a `url=` line for the large
 # lane; `https_get_streaming` follows the 302 redirect chain to
-# objects.githubusercontent.com transparently. We default to the
-# small-lane path here — if the bundle has grown beyond what raw
-# can serve, `./build.sh release` will fail uploads to raw and the
-# operator moves the file into `large/` and uses `release-large`.
+# objects.githubusercontent.com transparently. This script stages to
+# the small lane; if the bundle is too large for raw, move the file
+# into `large/` and use `release-large`.
 SIZE_BYTES=$(stat -c%s "$OUT")
 if [ "$SIZE_BYTES" -lt $((30 * 1024 * 1024)) ]; then
     OTA_SLOT="$REPO_ROOT/release/assets/microvm-userspace.cpio.gz"
@@ -283,28 +258,26 @@ else
     cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
 fi
 
-# ── Squashfs form — the path PID-1 actually loads ────────────────
+# ── Squashfs form: the path PID-1 actually loads ─────────────────
 #
 # PID-1's `try_switch_to_sqfs` mounts the bundle read-only from
-# /dev/vdb (slot-5 RO virtio-blk) and chroots into it — RAM-cheap
-# (decompress-on-read) vs unpacking a 290 MB cpio into a tmpfs.
+# /dev/vdb (slot-5 RO virtio-blk) and chroots into it; decompress-on-read
+# is cheaper in RAM than unpacking the cpio into a tmpfs.
 #
-# **gzip compression is mandatory, not a preference.** zstd's FSE
-# decompressor faults on the stack canary (`gs:[0x28]`) in our
-# minimal guest env — the first `-fstack-protector-strong` function
-# on the squashfs read path #PFs. gzip's inflate path has no such
-# canary dependency. (Lesson from the Alpine sqfs bring-up; applies
-# to every future bundle incl. LibreWolf.)
+# gzip compression is mandatory. zstd's FSE decompressor faults on the
+# stack canary (`gs:[0x28]`) in our minimal guest env: the first
+# `-fstack-protector-strong` function on the squashfs read path #PFs.
+# gzip's inflate path has no such canary dependency.
 SQFS_OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs"
 cyan "building squashfs (gzip) — PID-1's load path"
 # -all-root: everything root-owned inside the guest. -noappend:
 # fresh image. -no-xattrs: our minimal guest doesn't carry them.
 # -all-time/-mkfs-time 0: epoch (1970) timestamps. The guest has
-# no RTC (clock = year 2000); real 2026 mtimes look "in the future"
-# to it, which makes fontconfig refuse to scan the font dirs
-# ("mtime in the future. New fonts may not be detected" → tofu).
-# Epoch is in the past for any guest clock. Also makes the image
-# reproducible (the .sig is over the bytes).
+# no RTC; real mtimes look "in the future" to it, which makes
+# fontconfig refuse to scan the font dirs ("mtime in the future. New
+# fonts may not be detected", tofu). Epoch is in the past for any
+# guest clock, and it makes the image reproducible (the .sig is over
+# the bytes).
 mksquashfs "$STAGE" "$SQFS_OUT.tmp" \
     -comp gzip -all-root -noappend -no-xattrs \
     -all-time 0 -mkfs-time 0 -quiet \
@@ -317,7 +290,7 @@ ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs" "$OUT_DIR/current.sqfs"
 green "built squashfs: ${SQFS_SIZE} bytes → ${SQFS_OUT}"
 cyan  "       sha256: ${SQFS_SHA}"
 
-# Same two-lane staging as the cpio. `microvm-userspace.sqfs` →
+# Same two-lane staging as the cpio. `microvm-userspace.sqfs` maps to
 # AssetSpec [microvm:userspace-sqfs] (build.sh release signs it).
 if [ "$SQFS_SIZE" -lt $((30 * 1024 * 1024)) ]; then
     SQFS_SLOT="$REPO_ROOT/release/assets/microvm-userspace.sqfs"

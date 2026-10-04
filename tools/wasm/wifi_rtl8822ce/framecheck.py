@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""`disconnect_reason` aus lib.rs host-seitig gegen echte Rahmen fahren.
+"""Run `disconnect_reason` from lib.rs on the host against real frames.
 
-**Warum das ein eigener Pruefer ist.** Die Funktion ist der einzige Weg,
-auf dem der Treiber einen Rauswurf ueberhaupt SIEHT. Greift sie daneben,
-gibt sie `None` — und `None` ist genau der Zustand, aus dem wir kommen:
-die Verbindung wird still, niemand meldet etwas, und der naechste
-Geraetelauf ist verschenkt. Ein Offset daneben ist hier keine falsche
-Zahl, sondern Schweigen.
+This is the only way the driver notices being kicked off. If it misreads,
+it returns `None`, which is indistinguishable from a silent link: a wrong
+offset here does not give a wrong number, it gives silence.
 
-Geprueft wird gegen von Hand gebaute 802.11-Rahmen: der Kopf ist 24 Byte
-(FC 2, Duration 2, addr1/2/3 je 6, SeqCtl 2), der Grundcode steht
-little-endian in 24..26 (802.11 §9.4.1.7). `addr2` ist der Sender, also
-der AP — ein Deauth aus einer FREMDEN Zelle darf unsere Verbindung nicht
-niederlegen.
+Checked against hand-built 802.11 frames: the header is 24 bytes (FC 2,
+Duration 2, addr1/2/3 6 each, SeqCtl 2), the reason code is little-endian
+at 24..26 (802.11 §9.4.1.7). `addr2` is the sender, i.e. the AP; a deauth
+from a foreign cell must not take our link down.
 
-Dazu `cfg_on`, der Leser hinter `debug: 1`.
+Also covers `cfg_on`, the reader behind `debug: 1`, and the other parsers
+listed in the case tables below.
 """
 import os
 import pathlib
@@ -35,17 +32,16 @@ def mac(s):
 
 
 def frame(fc0, addr2, reason=None, extra=0, cut=None, addr3=None):
-    """Ein 802.11-Rahmen: 24 Byte Kopf, dahinter der Grundcode.
+    """An 802.11 frame: 24-byte header followed by the reason code.
 
-    `addr3` steht getrennt, damit der Pruefer ueberhaupt MERKEN kann, ob
-    die Funktion addr2 oder addr3 liest — im Normalfall sind beide der
-    AP, und dann faellt ein Offset daneben durch jeden Test.
+    `addr3` is separate so the check can tell whether the function reads
+    addr2 or addr3; normally both are the AP and an offset error would pass.
 
-    SeqCtl ist absichtlich nicht null: ein Grundcode, der zwei Bytes zu
-    frueh gelesen wird, ergibt sonst zufaellig die richtige Antwort."""
+    SeqCtl is deliberately non-zero, so a reason code read two bytes early
+    cannot accidentally yield the right answer."""
     f = [fc0, 0x00, 0x00, 0x00]      # FC, Duration
-    f += mac(OURS)                    # addr1 = wir
-    f += mac(addr2)                   # addr2 = Sender
+    f += mac(OURS)                    # addr1 = us
+    f += mac(addr2)                   # addr2 = sender
     f += mac(addr3 if addr3 else addr2)
     f += [0x30, 0x12]                 # SeqCtl
     if reason is not None:
@@ -54,7 +50,7 @@ def frame(fc0, addr2, reason=None, extra=0, cut=None, addr3=None):
     return f[:cut] if cut is not None else f
 
 
-# (Name, Rahmen, erwartet)  —  erwartet = None | (deauth?, grund)
+# (name, frame, expected); expected = None | (is_deauth, reason)
 CASES = [
     ("Deauth vom eigenen AP, Grund 15 (4-way timeout)",
      frame(0xc0, THEIRS, 15), (True, 15)),
@@ -85,7 +81,7 @@ CASES = [
      frame(0xc1, THEIRS, 15), None),
 ]
 
-# `cfg_on` — dieselbe Regel wie `ampdu:`/`ps:` im AX200.
+# `cfg_on`: the same rule as `ampdu:`/`ps:` in the AX200 driver.
 CFG_ON = [
     ("1", True), ("on", True), ("On", False), ("1 ", True),
     ("0", False), ("off", False), ("yes", False), ("", False),
@@ -95,14 +91,13 @@ CFG_ON = [
 NAMES = [(15, "Vierwegehandschlag"), (16, "Gruppenschluessel"),
          (7, "Klasse-3-Rahmen"), (999, "unbekannt")]
 
-# `tx_report_parse` — die Sendequittung der Firmware (fw.h:370-371, V0:
-# Folgenummer in payload[6] & 0xfc, Status in payload[0] & 0xc0).
+# `tx_report_parse`: the firmware TX report (fw.h:370-371, V0: sequence
+# number in payload[6] & 0xfc, status in payload[0] & 0xc0).
 #
-# **Ein Offset daneben heisst hier wieder Schweigen**: die Quittung
-# passt dann auf keine offene Nummer, der Zaehler `tx_no_report` laeuft
-# hoch, und es sieht aus, als antworte die Firmware nicht.
+# A wrong offset matches no pending number, `tx_no_report` climbs, and it
+# looks as if the firmware never answers.
 def rpt(status, seq, n=9):
-    """V0: Status in Byte 0, Nummer in Byte 6."""
+    """V0: status in byte 0, sequence number in byte 6."""
     f = [0] * n
     if n > 0:
         f[0] = status
@@ -112,8 +107,8 @@ def rpt(status, seq, n=9):
 
 
 def rpt1(status, seq, n=10):
-    """V1 (Unterkommando von C2H_HALMAC): Nummer in Byte 8, Status in
-    Byte 9 — und Byte 0 ist die Unterkommandokennung 0x0f."""
+    """V1 (C2H_HALMAC subcommand): sequence number in byte 8, status in
+    byte 9; byte 0 is the subcommand id 0x0f."""
     f = [0] * n
     f[0] = 0x0f
     if n > 8:
@@ -137,7 +132,7 @@ TXRPT = [
     ("leer", [], None),
 ]
 
-# Derselbe Leser, andere Aufteilung — der Weg, den DIESE Firmware nimmt.
+# Same reader, V1 layout: the one this firmware uses.
 TXRPT_V1 = [
     ("V1: quittiert", rpt1(0x00, 0x04), (0x04, True)),
     ("V1: nicht quittiert", rpt1(0xc0, 0x08), (0x08, False)),
@@ -148,13 +143,11 @@ TXRPT_V1 = [
     ("V1: zu kurz", rpt1(0x00, 0x04, n=9), None),
 ]
 
-# `report_seqnum` — die Nummernvergabe (tx.c:175).
+# `report_seqnum`: sequence number allocation (tx.c:175).
 SEQNUM_STEPS = 6
 
-# `mgmt_census` — zaehlen, was wir verwerfen. Der Fall, auf den es
-# ankommt, ist der ADDBA Request (Kategorie 3, Aktion 0): damit erbittet
-# ein AP die Aggregation, und wir haben ihn bis 0.28.0 nicht einmal
-# gesehen.
+# `mgmt_census`: count what we drop. The case that matters is the ADDBA
+# Request (category 3, action 0), with which an AP asks for aggregation.
 def mgmt(fc0, addr2, cat=None, act=None, n=26):
     f = [fc0, 0x00, 0x00, 0x00]
     f += mac(OURS)
@@ -166,11 +159,10 @@ def mgmt(fc0, addr2, cat=None, act=None, n=26):
     return f[:n]
 
 
-# `parse_addba_req` / `build_addba_resp` — 802.11 §9.6.7.2-3.
+# `parse_addba_req` / `build_addba_resp`: 802.11 §9.6.7.2-3.
 #
-# **Ein Feld daneben heisst hier: der AP lehnt ab und wiederholt**, also
-# genau der Zustand von vorher, nur mit mehr Verkehr. Die Vorlage baut
-# den Rahmen Byte fuer Byte nach ieee80211.h.
+# A wrong field makes the AP reject and retry. The frame is built byte by
+# byte after ieee80211.h.
 def addba_req(token=0x42, amsdu=0, policy=1, tid=5, buf=64, timeout=0,
               ssn=0x1230, n=33):
     capab = (amsdu & 1) | ((policy & 1) << 1) | ((tid & 0xf) << 2) \
@@ -184,24 +176,24 @@ def addba_req(token=0x42, amsdu=0, policy=1, tid=5, buf=64, timeout=0,
 
 
 def beacon_csa(elems):
-    """Eine Bake mit Elementen. 24 Kopf + 8 Zeitstempel + 2 Intervall +
-    2 Faehigkeiten, dann die Elemente."""
+    """A beacon with elements: 24 header + 8 timestamp + 2 interval +
+    2 capabilities, then the elements."""
     f = [0x80, 0x00, 0x00, 0x00]
     f += mac(OURS) + mac(THEIRS) + mac(THEIRS)
     f += [0x30, 0x12]
-    f += [0] * 8            # Zeitstempel
-    f += [0x64, 0x00]       # Bakenintervall 100 TU
-    f += [0x11, 0x04]       # Faehigkeiten
+    f += [0] * 8            # timestamp
+    f += [0x64, 0x00]       # beacon interval 100 TU
+    f += [0x11, 0x04]       # capabilities
     for eid, body in elems:
         f += [eid, len(body)] + list(body)
     return f
 
 
-# `parse_csa`: was in einer Wechselansage steht.
+# `parse_csa`: the contents of a channel switch announcement.
 #
-# **Die Faelle, die NICHT durchgehen duerfen, stehen mit dabei.** Eine
-# Ansage ohne Kanal ist keine, und eine Bake ohne CSA-Element darf keine
-# erfinden -- sonst zieht der Treiber auf Kanal 0 um.
+# Includes cases that must not parse: an announcement without a channel is
+# none, and a beacon without a CSA element must not invent one, or the
+# driver would move to channel 0.
 CSA = [
     ("nur Element 37: Kanal 100, in 3 Baken, Sendepause",
      [(37, [1, 100, 3])], (1, 100, 3, 0x00, 0, 0)),
@@ -223,7 +215,7 @@ CSA = [
      [(37, [0, 52, 0])], (0, 52, 0, 0x00, 0, 0)),
 ]
 
-# Und die Rahmen, aus denen KEINE Ansage werden darf.
+# Frames that must not yield an announcement.
 CSA_NONE = [
     ("eine gewoehnliche Bake ohne CSA-Element", [(0, [0x5a]), (3, [104])]),
     ("Element 37 zu kurz", [(37, [1, 100])]),
@@ -233,13 +225,11 @@ CSA_NONE = [
 
 def addba_resp(token=0x42, status=0, amsdu=0, policy=1, tid=5, buf=32,
                timeout=0, n=33):
-    """Eine ADDBA **Response**.
+    """An ADDBA Response.
 
-    **Die Feldfolge ist eine andere als im Request**, und genau daran
-    scheitert ein Parser, der beide Rahmen ueber einen Kamm schert: hier
-    steht der STATUS vor den Faehigkeiten, dort die Folgenummer dahinter.
-    Wer den Request-Parser darauflegt, liest den Status als Fenster und
-    faehrt mit einer Sitzung weiter, die der AP abgelehnt hat.
+    The field order differs from the Request: here the status precedes the
+    capabilities. Applying the Request parser would read the status as the
+    buffer size and continue a session the AP rejected.
     """
     capab = (amsdu & 1) | ((policy & 1) << 1) | ((tid & 0xf) << 2) \
             | ((buf & 0x3ff) << 6)
@@ -269,8 +259,8 @@ MGMT = [
 
 
 def rs(text):
-    """Ein Rust-Zeichenkettenliteral. `json.dumps` flieht Nicht-ASCII als
-    `\\uXXXX`, und Rust schreibt das `\\u{XXXX}` — also selbst setzen."""
+    """A Rust string literal. `json.dumps` escapes non-ASCII as `\\uXXXX`,
+    which Rust writes as `\\u{XXXX}`, so build it by hand."""
     out = '"'
     for c in text:
         if c == '"' or c == '\\':
@@ -288,16 +278,12 @@ def grab(src, pattern, what):
 
 
 def check_rsn_agreement():
-    """Das RSN-Element steht an ZWEI Stellen und muss byte-gleich sein.
+    """The RSN element exists in two places and must be byte-identical.
 
-    Der Treiber schreibt es in den Anmeldeantrag
-    (`RSN_IE_WPA2_CCMP_PSK`), `wifid` spiegelt es in msg2 des
-    Vierwegehandschlags (`RSN_IE`) — und der AP VERGLEICHT die beiden.
-    Weichen sie ab, schlaegt msg3 fehl, und im Log steht „bad MIC": eine
-    Meldung, die auf den Schluessel zeigt und nicht auf den Text.
-
-    Zwei Stellen fuer denselben Wert driften. Deshalb steht hier die
-    Zusicherung und nicht nur eine Warnung im Kommentar.
+    The driver puts it in the association request (`RSN_IE_WPA2_CCMP_PSK`),
+    wifid mirrors it in msg2 of the 4-way handshake (`RSN_IE`), and the AP
+    compares them. A mismatch fails msg3 with "bad MIC", which points at the
+    key rather than the element.
     """
     ours = HERE / "src" / "lib.rs"
     theirs = HERE.parent / "wifid" / "wasm" / "src" / "lib.rs"
@@ -325,12 +311,11 @@ def check_rsn_agreement():
 
 
 def check_loud_balance(src):
-    """Jede `loud_begin`-Klammer braucht ihr `loud_end`.
+    """Every `loud_begin` needs its `loud_end`.
 
-    **Eine offene Klammer macht den ganzen Posten wirkungslos**: ab da
-    ist der Treiber dauerhaft laut, und das sieht aus wie ein Schalter,
-    der nicht greift. Die EINE Ausnahme ist der Panikbehandler — danach
-    kommt nichts mehr, was still sein koennte.
+    An unbalanced pair leaves the driver loud for good, which looks like a
+    switch that does not work. The panic handler is the one exception:
+    nothing runs after it.
     """
     chunks, cur, name = [], [], "(Dateikopf)"
     for line in src.split("\n"):
@@ -355,17 +340,9 @@ def check_loud_balance(src):
     return bad
 
 
-# `chan_params`: (Name, primaer, ht_param, allow_40) -> (Mitte, bw, idx)
-#
-# Die vier interessanten Faelle stehen VOR den langweiligen: ohne Bit 2 darf
-# es kein HT40 geben, auch wenn der Versatz dasteht; und ein Versatz, der aus
-# dem Band laeuft, muss auf 20 MHz zurueckfallen statt einen Kanal zu
-# erfinden, den es nicht gibt.
-# `band_pref_from`: der Wert hinter `band:` -> auto / nur 2,4 / nur 5.
-# **Ein unverstandener Wert ist Auto, nicht ein Band.** Anders als bei
-# `aspm` gibt es hier keine sichere Seite: wer sich vertippt, soll die
-# Vorgabe bekommen statt in einem Band festzusitzen, in dem sein Netz
-# vielleicht gar nicht funkt.
+# `band_pref_from`: the value after `band:` -> auto / 2.4 only / 5 only.
+# An unrecognised value means auto, not a band: a typo should give the
+# default rather than lock onto a band the network may not use.
 BAND = [
     ("5 -> nur 5 GHz", "5", "BandPref::Only5"),
     ("5ghz -> nur 5 GHz", "5ghz", "BandPref::Only5"),
@@ -379,7 +356,7 @@ BAND = [
     ("6 (gibt es fuer uns nicht) -> auto", "6", "BandPref::Auto"),
 ]
 
-# `aspm_pref_from`: der Wert hinter `aspm:` -> an / aus / nicht anfassen.
+# `aspm_pref_from`: the value after `aspm:` -> on / off / leave as found.
 ASPM = [
     ("an -> einschalten", "an", "Some(true)"),
     ("on -> einschalten", "on", "Some(true)"),
@@ -397,7 +374,10 @@ ASPM = [
 SC_DONT_CARE, SC_20_UPPER, SC_20_LOWER = 0, 1, 2
 SC_20_UPMOST, SC_20_LOWEST = 3, 4
 CHAN = [
-    # (Name, primaer, ht_param, vht_chanwidth, vht_cch0, max_bw, erwartet)
+    # `chan_params`: (name, primary, ht_param, vht_chanwidth, vht_cch0,
+    # max_bw, expected (center, bw, idx)). Without bit 2 there is no HT40
+    # even if an offset is given, and an offset that leaves the band falls
+    # back to 20 MHz instead of inventing a channel.
     ("K7, Zweitkanal UNTEN -> Mitte 5, primaer ist die obere Haelfte",
      7, 0x07, 0, 0, 2, (5, 1, SC_20_UPPER)),
     ("K7, Zweitkanal OBEN -> Mitte 9, primaer ist die untere Haelfte",
@@ -423,11 +403,9 @@ CHAN = [
     ("K12, Zweitkanal OBEN waere 14 -> 20 MHz (K14 nur Japan)",
      12, 0x05, 0, 0, 2, (12, 0, SC_DONT_CARE)),
 
-    # ── 80 MHz ──────────────────────────────────────────────────────
-    # Die vier Viertel eines 80ers, alle an DERSELBEN Mitte 106: der
-    # primaere kann jedes von ihnen sein, und nur der Abstand sagt
-    # welches. Ein falscher Index hiesse, die 40er-Haelfte im Chip
-    # andersherum zu legen als der AP sie faehrt.
+    # 80 MHz: the four quarters around the same center 106. The primary
+    # can be any of them; only the distance says which. A wrong index puts
+    # the 40 MHz half in the chip opposite to the AP.
     ("K100 in der 80er um K106 -> unterstes Viertel",
      100, 0x07, 1, 106, 2, (106, 2, SC_20_LOWEST)),
     ("K104 in der 80er um K106 -> unteres inneres Viertel",
@@ -438,8 +416,8 @@ CHAN = [
      112, 0x05, 1, 106, 2, (106, 2, SC_20_UPMOST)),
     ("K36 in der 80er um K42 -> unterstes Viertel",
      36, 0x05, 1, 42, 2, (42, 2, SC_20_LOWEST)),
-    # Und die Grenzen: was NICHT durchgeht, muss auf 40 zurueckfallen
-    # statt eine erfundene Mitte an den Chip zu geben.
+    # Limits: anything invalid falls back to 40 MHz rather than giving the
+    # chip an invented center.
     ("Breite 0 (der AP sagt: nimm HT) -> 40 MHz",
      100, 0x07, 0, 106, 2, (98, 1, SC_20_UPPER)),
     ("Breite 2 (abgeschaffte 160er-Kodierung) -> 40 MHz statt geraten",
@@ -458,9 +436,8 @@ CHAN = [
      100, 0x07, 1, 106, 0, (100, 0, SC_DONT_CARE)),
 ]
 
-# `txagg_from`: der Wert hinter `txagg:` -> senden wir ADDBA Requests?
-# **Vorgabe AN.** `off` ist der Notausgang, und er fuehrt in den Zustand
-# von 0.51.1 — einen, der am Geraet gemessen ist.
+# `txagg_from`: the value after `txagg:` -> do we send ADDBA Requests?
+# Default on; `off` is the escape hatch to no TX aggregation.
 TXAGG = [
     ("off -> aus", "off", "false"),
     ("aus -> aus", "aus", "false"),
@@ -472,9 +449,9 @@ TXAGG = [
     ("Tippfehler bleibt AN, nicht aus", "vieleicht", "true"),
 ]
 
-# `tx_ampdu_factor`: der Exponent aus den HT-Faehigkeiten des AP ->
-# `MAX_AGG_NUM` im Deskriptor. tx.c:95-105: die Basis ist 4, weil im Feld
-# die HALBE Rahmenzahl steht und die kleinste A-MPDU-Laenge 8 K ist.
+# `tx_ampdu_factor`: the exponent from the AP's HT capabilities ->
+# `MAX_AGG_NUM` in the descriptor. tx.c:95-105: the base is 4 because the
+# field holds half the frame count and the smallest A-MPDU length is 8 K.
 AMPDU_F = [
     ("Exponent 0 (8 K) -> 3", 0, 3),
     ("Exponent 1 (16 K) -> 7", 1, 7),
@@ -482,12 +459,11 @@ AMPDU_F = [
     ("Exponent 3 (64 K) -> 31 = der groesste Wert des 5-Bit-Feldes", 3, 31),
 ]
 
-# `roam_from`: der Wert hinter `roam:`.
+# `roam_from`: the value after `roam:`.
 #
-# **Hier ist die Vorgabe NICHT „an", und das ist die Abweichung von der
-# Regel, die sonst ueberall gilt.** Ein Wechsel greift in eine laufende
-# Verbindung ein; am Geraet endete jede Neuanmeldung danach in
-# `Grund 15`. Bis das bewiesen durchlaeuft, wird nur BERICHTET.
+# Unlike the other switches the default is not on: switching interrupts a
+# running link and re-association after a switch is not yet reliable
+# (reason 15), so the default only reports.
 ROAM = [
     ("off -> aus", "off", "RoamMode::Aus"),
     ("aus -> aus", "aus", "RoamMode::Aus"),
@@ -500,12 +476,11 @@ ROAM = [
     ("Tippfehler wechselt NICHT", "jaklar", "RoamMode::NurBericht"),
 ]
 
-# `roam_better`: (Name, eigener Pegel, eigene Breite, Kandidat-Pegel,
-# Kandidat ht_param, Kandidat vht_breite, Kandidat vht_mitte, erwartet)
+# `roam_better`: (name, own level, own width, candidate level, candidate
+# ht_param, candidate vht width, candidate vht center, expected)
 #
-# **Der zweite Weg ist der Fall, der Florian getroffen hat**: ein
-# Repeater mit HT40 gewinnt jede reine Pegelwahl gegen einen AP mit
-# VHT80 -- und liefert die Haelfte.
+# Width counts as well as level: an HT40 cell would win any pure
+# signal-level choice against a VHT80 AP while delivering half the rate.
 BETTER = [
     ("8 dB staerker, gleiche Breite -> wechseln",
      -70, 1, -62, 0x05, 0, 0, "true"),
@@ -525,19 +500,17 @@ BETTER = [
      -70, 2, -49, 0x05, 0, 0, "true"),
     ("80 -> 40 MHz fuer 12 dB: ja (eine Stufe = 10 + 8)",
      -70, 2, -52, 0x05, 1, 106, "true"),
-    # **Meine Erwartung war hier falsch, nicht der Code.** Mit
-    # unplausibler VHT-Mitte faellt der Kandidat auf HT40 zurueck, nicht
-    # auf 20 MHz — das HT-Byte erlaubt ja 40. Also EINE Stufe, Preis 10,
-    # und 18 dB reichen.
+    # An implausible VHT center falls back to HT40, not 20 MHz, since the
+    # HT byte allows 40: one step, cost 10, so 18 dB suffice.
     ("80 -> 40 MHz (unplausible VHT-Mitte) fuer 18 dB: ja, eine Stufe",
      -70, 2, -52, 0x05, 1, 104, "true"),
     ("80 -> 20 MHz (AP erlaubt keine Breite) fuer 18 dB: nein, zwei Stufen",
      -70, 2, -52, 0x00, 0, 0, "false"),
 ]
 
-# `bw_cap_from`: der Wert hinter `bw:` -> 0/1/2 (20/40/80 MHz).
-# **Ein unverstandener Wert ist die Vorgabe (80), nicht die schmalste
-# Einstellung** — schmal ist nicht sicherer, nur langsamer.
+# `bw_cap_from`: the value after `bw:` -> 0/1/2 (20/40/80 MHz).
+# An unrecognised value gives the default (80), not the narrowest setting;
+# narrow is not safer, only slower.
 BWCAP = [
     ("20 -> 20 MHz", "20", 0),
     ("20MHz -> 20 MHz", "20MHz", 0),
@@ -576,8 +549,7 @@ def main():
     roame = grab(src, r"\n(#\[derive[^\n]*\]\npub enum RoamMode \{.*?\n\})",
                  "enum RoamMode")
     betterf = grab(src, r"\n(fn roam_better.*?\n\})", "roam_better")
-    # `roam_better` braucht die Zelle. Sie steht hier mit den Feldern,
-    # die die Regel liest — mehr gehoert nicht in den Pruefling.
+    # `roam_better` needs the cell struct, with only the fields it reads.
     bssstru = grab(src, r"\n(#\[derive\(Clone, Copy\)\]\nstruct Bss \{.*?\n\})",
                    "struct Bss")
     bsswidth = grab(src, r"\n(impl Bss \{.*?\n\})", "impl Bss")
@@ -589,7 +561,7 @@ def main():
                  "ROAM_NARROWER_COST_DB")
     aspmp = grab(src, r"\n(fn aspm_pref_from.*?\n\})", "aspm_pref_from")
     bandp = grab(src, r"\n(pub fn band_pref_from.*?\n\})", "band_pref_from")
-    # **Mit dem derive-Attribut**, sonst fehlt dem Pruefling das `==`.
+    # Include the derive attribute, otherwise the test lacks `==`.
     bande = grab(src, r"\n(#\[derive[^\n]*\]\npub enum BandPref \{.*?\n\})",
                  "enum BandPref")
     txrpt = grab((HERE / "src" / "fw.rs").read_text(),
@@ -618,9 +590,9 @@ def main():
     rxsrc = (HERE / "src" / "rx.rs").read_text()
     census = grab(rxsrc, r"\n(pub fn mgmt_census.*?\n\})", "mgmt_census")
 
-    # Die zwei Konstanten kommen aus regs.rs — sonst prueft der Pruefer
-    # seine eigene Abschrift. Sie stehen in KEINEM Linux-Header, also
-    # sieht check_regs.py sie nicht; hier ist ihre einzige Kontrolle.
+    # These two constants come from regs.rs, not a local copy. They are in
+    # no Linux header, so check_regs.py does not see them; this is their
+    # only check.
     for name, want in (("CCX_REPORT_V0_SEQNUM_OFF", 6),
                        ("CCX_REPORT_V0_STATUS_OFF", 0)):
         m = re.search(r"pub const %s: usize = (\d+);" % name, regs)
@@ -629,9 +601,9 @@ def main():
         if int(m.group(1)) != want:
             sys.exit("%s ist %s, fw.h:370-371 sagt %d"
                      % (name, m.group(1), want))
-    # Die drei Unterkanal-Namen kommen aus regs.rs. check_regs.py haelt sie
-    # gegen main.h:106-108; hier wird nur sichergestellt, dass der Pruefer
-    # DIESELBEN Zahlen fuehrt wie der Treiber, statt sie abzuschreiben.
+    # The subchannel constants come from regs.rs; check_regs.py checks them
+    # against main.h:106-108. Here we only ensure the test uses the same
+    # values as the driver.
     sc = {}
     for name, want in (("RTW_SC_DONT_CARE", 0), ("RTW_SC_20_UPPER", 1),
                        ("RTW_SC_20_LOWER", 2), ("RTW_SC_20_UPMOST", 3),
@@ -676,11 +648,9 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
                      % (name, got, want))
         consts += "const %s: u8 = %s;\n" % (name, m.group(1))
 
-    # **Die Konstanten fuer `build_vht_cap_ie` kommen aus DERSELBEN
-    # Quelle wie im Treiber** — `src/regs.rs`, erzeugt aus dem
-    # Kernel-Header. Sie hier noch einmal hinzuschreiben hiesse, zwei
-    # Wahrheiten zu pflegen, und der Pruefer wuerde dann seine eigene
-    # Abschrift pruefen statt den Treiber.
+    # The constants for `build_vht_cap_ie` come from `src/regs.rs`
+    # (generated from the kernel header), the same source the driver uses,
+    # so the test checks the driver and not its own copy.
     for name in ("EFUSE_HW_CAP_IGNORE", "EFUSE_HW_CAP_PTCL_VHT",
                  "IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454",
                  "IEEE80211_VHT_CAP_SHORT_GI_80",

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Erzeugt src/pwrseq.rs aus rtw8822c.c.
+"""Generate src/pwrseq.rs from rtw8822c.c.
 
-Die vier Power-Sequenz-Tabellen des 8822C sind 54 Kommandos in einer
-C-Initialisierung. Abschreiben ist die eine Fehlerquelle, die man hier
-vollstaendig vermeiden kann — also wird erzeugt, und der Erzeuger prueft
-die Anzahl gegen die Quelle.
+The four 8822C power sequence tables are generated instead of copied by
+hand; the generator checks the field count of every entry against the
+source.
 
     python3 tools/wasm/wifi_rtl8822ce/gen_pwrseq.py
 """
@@ -24,7 +23,7 @@ TABLES = [
     "trans_cardemu_to_carddis_8822c",
 ]
 
-# main.h:924-953 — 1:1, keine Herleitung aus dem Zusammenhang.
+# main.h:924-953, 1:1.
 CONST = {
     "RTW_PWR_CMD_READ": 0x00, "RTW_PWR_CMD_WRITE": 0x01,
     "RTW_PWR_CMD_POLLING": 0x02, "RTW_PWR_CMD_DELAY": 0x03,
@@ -52,7 +51,7 @@ def value_of(expr):
         sys.exit(f"unbekannter Ausdruck in der Quelle: {expr!r} -> {e!r}")
     try:
         return int(eval(e, {"__builtins__": {}}, {}))
-    except Exception as exc:          # noqa: BLE001 - die Quelle ist der Fehler
+    except Exception as exc:          # noqa: BLE001 - the source is at fault
         sys.exit(f"nicht auswertbar: {expr!r} -> {e!r} ({exc})")
 
 
@@ -62,7 +61,7 @@ def parse_table(src, name):
     if not m:
         sys.exit(f"Tabelle {name} nicht gefunden")
     body = m.group(1)
-    # Jede Zeile ist ein {...}-Block mit sieben Feldern.
+    # Each entry is a {...} block with seven fields.
     rows = []
     for entry in re.finditer(r"\{(.*?)\}", body, re.S):
         fields = [f.strip() for f in entry.group(1).split(",")]
@@ -125,7 +124,7 @@ pub const RTW_PWR_POLLING_CNT: u32 = 20000;
                        f"mask: 0x{mask:02x}, value: 0x{val:02x} }},")
         out.append("];\n")
 
-    # rtw8822c.c:4855-4864 — welche Tabellen in welcher Reihenfolge.
+    # rtw8822c.c:4855-4864: which tables, in which order.
     out.append("""/// rtw8822c.c `card_enable_flow_8822c`
 pub static CARD_ENABLE_FLOW: [&[PwrCmd]; 2] =
     [&TRANS_CARDDIS_TO_CARDEMU, &TRANS_CARDEMU_TO_ACT];

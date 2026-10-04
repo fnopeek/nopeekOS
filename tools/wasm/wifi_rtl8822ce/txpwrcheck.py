@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-"""Haelt die Rust-Sendeleistungskette gegen die Nachrechnung des Erzeugers.
+"""Checks the Rust tx-power chain against the generator's recomputation.
 
-`gen_tables.py` rechnet `rtw_chip_board_info_setup` ein zweites Mal nach —
-in Python, aus derselben Linux-Quelle, aber als andere Umsetzung — und legt
-sechs Pruefsummen in `src/tables.rs` ab. Dieses Werkzeug baut `txpower.rs`
-HOST-SEITIG und haelt seine eigenen Summen dagegen.
+`gen_tables.py` computes `rtw_chip_board_info_setup` a second time, in
+Python from the same Linux source, and stores six checksums in
+`src/tables.rs`. This tool builds `txpower.rs` on the host and compares its
+own sums against them.
 
-**Warum ohne Geraet:** `rtw_chip_board_info_setup` fasst kein Register an.
-Es fuellt 25 KiB abgeleiteten Zustand, aus dem `rtw_set_channel` spaeter die
-Sendeleistung rechnet. Ein einzelnes falsches Byte darin ist am Geraet eine
-schiefe Sendeleistung auf einem Kanal — und nichts, was ein Log zeigt.
-
-Gegengeprueft: ein `size - 3` statt `size - 2` in der VHT-Basisrate (EIN
-Zeichen) schlaegt auf alle sechs Summen durch.
+`rtw_chip_board_info_setup` touches no register: it fills 25 KiB of derived
+state from which `rtw_set_channel` later computes tx power. A wrong byte
+there shows up only as skewed power on one channel, never in a log, so it
+is checked here without hardware.
 
     python3 tools/wasm/wifi_rtl8822ce/txpwrcheck.py
 """
@@ -191,9 +188,8 @@ def main():
         (tmp / "src").mkdir()
         (tmp / "Cargo.toml").write_text(CARGO)
         (tmp / "src" / "main.rs").write_text(MAIN)
-        # Die Modulkopf-Attribute und inneren Doc-Kommentare stoeren beim
-        # `include!`; sie fliegen fuer die Gegenprobe raus, die Quelle
-        # selbst bleibt unberuehrt.
+        # Inner attributes and `//!` comments break `include!`; strip them
+        # from the copies, the sources stay untouched.
         for name in ("tables", "txpower", "regs"):
             s = (SRC / f"{name}.rs").read_text()
             s = re.sub(r"^#!\[[^\]]*\]\s*$", "", s, flags=re.M)
@@ -205,10 +201,8 @@ def main():
         r = subprocess.run(["cargo", "run", "--release", "-q"], cwd=tmp,
                            env=env, capture_output=True, text=True)
         sys.stdout.write(r.stdout)
-        # Bei einem Fehlschlag IMMER auch stderr zeigen. Die alte Bedingung
-        # („nur wenn stdout leer ist") verschluckte genau den Fall, fuer den
-        # dieses Werkzeug da ist: eine Panik MITTEN im Lauf, mit den ersten
-        # Zeilen schon auf stdout.
+        # Always show stderr on failure: a panic mid-run leaves partial
+        # output on stdout.
         if r.returncode != 0:
             sys.stderr.write(r.stderr)
         sys.exit(r.returncode)

@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Fehlende Registerkonstanten aus den Linux-Headern erzeugen.
+"""Generate missing register constants from the Linux headers.
 
-Abtippen ist die fehleranfaelligste Arbeit in diesem Treiber, und
-`check_regs.py` faengt sie erst NACH dem Tippen. Hier steht der Weg
-davor: Namen hineingeben, fertige Rust-Zeilen mit Quellenangabe heraus.
-Was es in Linux nicht gibt, wird GEMELDET statt geraten.
+Names in, Rust lines with a source reference out. Names that Linux does
+not define are reported, not guessed. check_regs.py verifies the result.
 
     python3 gen_regs.py NAME NAME ...
 """
@@ -15,9 +13,8 @@ import sys
 D = os.path.expanduser(
     "~/.cache/nopeekos/linux-src/linux-6.18.26/"
     "drivers/net/wireless/realtek/rtw88")
-# `include/linux/ieee80211.h` liegt AUSSERHALB des Treiberbaums und
-# traegt die Bits, mit denen rtw88 die Faehigkeiten des Gegenuebers
-# liest (HT/VHT). Von Hand getippt waere jedes davon ungeprueft.
+# include/linux/ieee80211.h lies outside the driver tree and holds the
+# HT/VHT capability bits rtw88 reads from the peer.
 FILES = ("reg.h", "mac.h", "fw.h", "main.h", "pci.h", "tx.h", "rx.h", "bf.h",
          "efuse.h", "sec.h", "coex.h", "phy.h", "rtw8822c.h", "rtw8822c.c", "main.c", "phy.c", "fw.c",
          "tx.c", "pci.c", "coex.c", "mac.c",
@@ -35,15 +32,13 @@ def defs():
             m = re.match(r"\s*#define\s+([A-Za-z_]\w*)\s+(.+?)\s*$", line)
             if m and m.group(1) not in out:
                 out[m.group(1)] = (f, i, m.group(2).strip())
-        # Aufzaehlungen — auch die OHNE geschriebene Werte. `enum
-        # rtw_rf_band { RF_BAND_2G_CCK, ... }` zaehlt von null hoch, und
-        # kein Zeichen davon steht im Text.
+        # Enums, including entries without explicit values: `enum
+        # rtw_rf_band { RF_BAND_2G_CCK, ... }` counts up from zero.
         for m in re.finditer(r"\benum\s+\w*\s*\{([^}]*)\}", src, re.S):
             body = m.group(1)
-            # **Kommentare RAUS, bevor an den Kommas geteilt wird.** Steht
-            # hinter einem Eintrag ein `/* … */`, landet es beim NAECHSTEN
-            # Stueck, und dessen Name faellt still weg — so verschwanden
-            # WLAN_EID_RSN und WLAN_EID_DS_PARAMS.
+            # Strip comments before splitting on commas; a trailing
+            # `/* ... */` would otherwise land in the next piece and drop
+            # that entry's name.
             body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
             body = re.sub(r"//[^\n]*", "", body)
             ln = src[:m.start()].count("\n") + 1
@@ -68,9 +63,8 @@ def defs():
 
 
 def rust(expr, table=None):
-    """C-Ausdruck -> Rust. BIT/GENMASK werden AUSGERECHNET, damit die
-    Zeile ohne Hilfsmakro lesbar ist; check_regs.py rechnet beide Seiten
-    unabhaengig nach."""
+    """C expression -> Rust. BIT/GENMASK are evaluated so the line needs no
+    helper macro; check_regs.py recomputes both sides independently."""
     table = table or {}
     e = expr.strip()
     m = re.fullmatch(r"BIT\((\d+)\)", e)
@@ -83,16 +77,15 @@ def rust(expr, table=None):
         return f"0x{v:08x}", f"GENMASK({hi}, {lo})"
     if re.fullmatch(r"0x[0-9a-fA-F]+|\d+", e):
         return e, None
-    # Zusammengesetzt, z. B. `(BIT(31) | BIT(30))`. Ausrechnen statt
-    # aufgeben — check_regs.py rechnet beide Seiten danach unabhaengig nach,
-    # also ist das keine zweite Wahrheit, nur eine bequemere Schreibweise.
+    # Compound, e.g. `(BIT(31) | BIT(30))`: evaluate it. check_regs.py
+    # recomputes both sides independently.
     t = re.sub(r"\b(0x[0-9a-fA-F]+|\d+)(?:ULL|UL|LL|U|L)\b", r"\1", e)
     t = re.sub(r"BIT\((\d+)\)", r"(1 << \1)", t)
     t = re.sub(r"GENMASK\((\d+),\s*(\d+)\)",
                lambda m: str(((1 << (int(m.group(1)) - int(m.group(2)) + 1)) - 1)
                              << int(m.group(2))), t)
-    # Namen in zusammengesetzten Ausdruecken (RA_MASK_HT_RATES ist das ODER
-    # dreier anderer) werden aus derselben Tabelle aufgeloest.
+    # Names inside compound expressions (RA_MASK_HT_RATES is the OR of
+    # three others) resolve from the same table.
     for name in set(re.findall(r"\b[A-Z][A-Z0-9_]{2,}\b", t)):
         if name in table:
             sub, _ = rust(table[name][2], table)
@@ -102,7 +95,7 @@ def rust(expr, table=None):
     if not re.fullmatch(r"[0-9a-fA-FxX()<>|&~+*\s-]+", t):
         return None, None
     try:
-        v = eval(t, {"__builtins__": {}}, {})  # noqa: S307 — nur Zahlen
+        v = eval(t, {"__builtins__": {}}, {})  # noqa: S307 - numbers only
     except Exception:
         return None, None
     if not isinstance(v, int) or v < 0 or v > 0xffff_ffff_ffff_ffff:
@@ -133,9 +126,8 @@ def main():
             continue
         where = f"{f}:{ln}" if ln else f
         tail = f"  {note}" if note else ""
-        # Was nicht in 32 Bit passt, ist u64 — `RA_MASK_VHT_RATES_3SS` ist
-        # `0x3ff000ULL << 20`, und als u32 waere es still abgeschnitten.
-        # `val` kann `1 << 7` sein (aus BIT) oder eine Hexzahl.
+        # Values wider than 32 bits become u64 (`RA_MASK_VHT_RATES_3SS` is
+        # `0x3ff000ULL << 20`). `val` is either `1 << n` (from BIT) or hex.
         try:
             num = int(val, 0)
         except ValueError:

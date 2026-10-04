@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# nopeekOS – Build & Run Script
+# nopeekOS: build and run script
 # ============================================================
 #
 # Usage: ./build.sh <command> [args]
@@ -9,7 +9,7 @@
 #   build                Compile kernel + create bootable ISO
 #   qemu                 Build + run in QEMU (KVM, host CPU, serial)
 #   qemu-gui             Build + run in QEMU with framebuffer GUI
-#   boot / qemu-gui-boot Boot the EXISTING installed disk (NO rebuild, GUI)
+#   boot / qemu-gui-boot Boot the existing installed disk (no rebuild, GUI)
 #   qemu-boot            Same, serial only
 #   debug                Build + run in QEMU with GDB stub on :1234
 #
@@ -22,9 +22,9 @@
 #   qemu-installer       Installer + run (wipes disk, fresh install)
 #   qemu-installer-gui   Same with framebuffer
 #   usb /dev/sdX         Build self-contained installer + flash USB
-#                        (bundles browser + all modules → offline-ready)
+#                        (bundles all modules; usb-full adds the browser)
 #   release              Sign kernel + modules + assets (ECDSA P-384)
-#   sign-modules         Sign ONLY release/modules/ (kernel untouched)
+#   sign-modules         Sign only release/modules/ (kernel untouched)
 #
 # Without argument: build + qemu
 
@@ -39,13 +39,12 @@ export RUST_TARGET_PATH="$PROJECT_DIR/targets"
 KERNEL_BIN="$PROJECT_DIR/target/$TARGET/release/nopeekos-kernel"
 KERNEL_EFI="$PROJECT_DIR/target/kernel.efi"
 INSTALLER_DISK="$PROJECT_DIR/target/installer.img"
-# Mit DISK_IMG=... laesst sich eine EIGENE Testplatte verwenden. Zwei
-# QEMU-Laeufe auf derselben Datei gehen nicht (QEMU nimmt eine Schreibsperre),
-# und wer nebenher mit mtools in die ESP schreibt, veraendert die Platte
-# einer laufenden Sitzung.
+# DISK_IMG=... selects a separate test disk. Two QEMU runs cannot share one
+# file (QEMU takes a write lock), and writing into the ESP with mtools
+# changes the disk of a running session.
 DISK_IMG="${DISK_IMG:-$PROJECT_DIR/target/disk.img}"
 
-# OVMF firmware (UEFI) — read-only CODE + writable per-VM VARS.
+# OVMF firmware (UEFI): read-only CODE + writable per-VM VARS.
 # Arch: /usr/share/edk2-ovmf/x64/  Debian/Ubuntu: /usr/share/OVMF/
 OVMF_CODE_SRC="/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_SRC="/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd"
@@ -53,7 +52,7 @@ OVMF_VARS_SRC="/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd"
 [ -f "$OVMF_VARS_SRC" ] || OVMF_VARS_SRC="/usr/share/OVMF/OVMF_VARS_4M.fd"
 OVMF_VARS_LOCAL="$PROJECT_DIR/target/OVMF_VARS.fd"
 
-# Farben
+# Colours
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -73,7 +72,7 @@ INSTALL_DATA="$PROJECT_DIR/kernel/src/install_data"
 
 build_microvm_initramfs() {
     # Build the Rust PID-1 + cpio.gz initramfs that the kernel
-    # embeds via include_bytes! Skip silently if bsdtar is missing
+    # embeds via include_bytes!. Skip silently if bsdtar is missing,
     # so a partial environment can still build the kernel against the
     # last-committed initramfs.
     INIT_DIR="$PROJECT_DIR/microvm/linux/init"
@@ -94,14 +93,12 @@ build_microvm_initramfs() {
     INITRAMFS_TMP=$(mktemp -d)
     cp "$INIT_BIN" "$INITRAMFS_TMP/init"
     chmod +x "$INITRAMFS_TMP/init"
-    # Reproducible, and that is not cosmetic: the kernel embeds this file, so a
-    # byte that changes for no reason changes the kernel hash — and every OTA
-    # then reports "+ asset sys/microvm/initramfs.cpio.gz" for a file nobody
-    # touched. `newc` carries an mtime AND an inode number, and a fresh mktemp
-    # dir supplies a new one of each per build; gzip stamps its own mtime on
-    # top. `--reproducible` zeroes the first two, `-n` drops the third, and
-    # `touch -d @0` settles the file's own timestamp. Verified: two runs a
-    # second apart, identical sha256.
+    # Must be reproducible: the kernel embeds this file, so a changed byte
+    # changes the kernel hash and OTA reports an unchanged asset as new.
+    # `newc` carries an mtime and an inode number, a fresh mktemp dir
+    # supplies new ones per build, and gzip stamps its own mtime.
+    # `--reproducible` zeroes the first two, `-n` drops the third, and
+    # `touch -d @0` settles the file's own timestamp.
     touch -d @0 "$INITRAMFS_TMP/init"
     if command -v cpio >/dev/null 2>&1; then
         (cd "$INITRAMFS_TMP" && echo init | cpio -o -H newc --reproducible 2>/dev/null | gzip -n9 > "$INIT_OUT")
@@ -115,8 +112,8 @@ build_microvm_initramfs() {
 
 # PIE relocation guard. boot.s's self-relocation loop only applies
 # R_X86_64_RELATIVE entries; a GOT/PLT/absolute dynamic reloc would be
-# silently skipped → wrong pointer → boot crash on relocating firmware.
-# Fail the build loudly here instead of debugging a black screen later.
+# silently skipped, leaving a wrong pointer and a boot crash on
+# relocating firmware. Fail the build here instead.
 assert_relative_only() {
     local elf="$1"
     local bad
@@ -133,11 +130,9 @@ assert_relative_only() {
     fi
 }
 
-# Die beiden ABI-Wege muessen DIESELBEN Host-Calls kennen.
-#
-# Ein Modul laeuft unter wasmi ODER unter forge, und wer einen Namen nur in
-# einer der beiden Tabellen eintraegt, merkt es erst am Geraet — unter dem
-# anderen Motor fehlt die Funktion einfach. Das ist hier schon passiert.
+# Both ABI paths must register the same host calls. A module runs under
+# wasmi or under forge; a name in only one table is missing under the
+# other engine, and nothing else catches it before runtime.
 check_host_abi() {
     python3 - "$PROJECT_DIR" <<'PYEOF' || { err "host-ABI tables differ"; exit 1; }
 import re, sys
@@ -182,7 +177,7 @@ build() {
 
     # Convert ELF to PE32+ UEFI Application. UEFI firmware finds the
     # resulting kernel.efi as /EFI/BOOT/BOOTX64.EFI on the ESP and
-    # runs it directly — no GRUB, no multiboot. See tools/pe-fixup.py
+    # runs it directly (no GRUB, no multiboot). See tools/pe-fixup.py
     # for why objcopy alone produces a PE that OVMF rejects.
     log "Converting to UEFI PE+ binary..."
     assert_relative_only "$KERNEL_BIN"
@@ -202,11 +197,10 @@ build() {
 build_installer_disk() {
     log "Building installer boot disk..."
     rm -f "$INSTALLER_DISK"
-    # Size the ESP to the actual kernel.efi + headroom. A plain installer
-    # is ~3 MB, but the bundle-userspace (usb-full) build bakes the
-    # ~261 MB LibreWolf sqfs in via include_bytes! → a ~272 MB .efi that
-    # a fixed 96 MB image can't hold (mcopy → "Disk full"). +64 MB covers
-    # GPT + FAT metadata with room to spare.
+    # Size the ESP to the actual kernel.efi + headroom: the
+    # bundle-userspace (usb-full) build bakes the LibreWolf sqfs in via
+    # include_bytes!, which a fixed-size image cannot hold. +64 MB covers
+    # GPT + FAT metadata.
     local efi_mb=$(( ($(stat -c%s "$KERNEL_EFI") / 1024 / 1024) + 1 ))
     local disk_mb=$(( efi_mb + 64 ))
     [ "$disk_mb" -lt 96 ] && disk_mb=96
@@ -230,7 +224,7 @@ build_installer() {
     mkdir -p "$INSTALL_DATA"
 
     # Pass 1: regular kernel (no embedded data). Produces the kernel.efi
-    # that the installer copies onto the NVMe ESP — that file is what
+    # that the installer copies onto the NVMe ESP; that file is what
     # the installed system runs from on every subsequent UEFI boot.
     log "Pass 1: building base kernel..."
     # Placeholder so include_bytes!("install_data/kernel.efi") in
@@ -256,17 +250,16 @@ build_installer() {
 
     # Pre-Pass 2: stage bundled assets (font + WASM modules) into
     # install_data/assets/ so the installer kernel's include_bytes!
-    # calls find them. Paths MUST match BUNDLED_ASSETS in
-    # kernel/src/install_data/assets/mod.rs — if you add a new asset
-    # there, add the copy below too.
+    # calls find them. Paths must match BUNDLED_ASSETS in
+    # kernel/src/install_data/assets/mod.rs; a new asset there needs a
+    # copy below too.
     log "Staging bundled assets for installer..."
     ASSETS_DIR="$INSTALL_DATA/assets"
     mkdir -p "$ASSETS_DIR"
 
     # Fonts + their licences: fetch from sys/fonts/ (canonical source
     # tree). Both faces are SIL OFL 1.1, which requires the licence text
-    # to travel with every copy — so the .txt files are bundled too, not
-    # just kept in the repo.
+    # to travel with every copy, so the .txt files are bundled too.
     for f in inter-variable.ttf ibm-plex-mono.ttf LICENSE-Inter.txt LICENSE-IBM-Plex.txt; do
         if [ -f "$PROJECT_DIR/sys/fonts/$f" ]; then
             cp "$PROJECT_DIR/sys/fonts/$f" "$ASSETS_DIR/$f"
@@ -286,10 +279,9 @@ build_installer() {
         touch "$ASSETS_DIR/phosphor.atlas"
     fi
 
-    # Linux-virt bzImage: fetched manually once into release/assets/
-    # (Alpine v3.23 main/x86_64 linux-virt-*-r*.apk → boot/vmlinuz-virt).
-    # Phase 12.1.1c-3+ MicroVM substrate. Optional — installer compiles
-    # without it; runtime `microvm linux` will refuse if missing.
+    # Linux-virt bzImage for the MicroVM, placed in release/assets/
+    # (built by `./build.sh build-linux`). Optional: the installer
+    # compiles without it; `microvm linux` refuses if it is missing.
     if [ -f "$PROJECT_DIR/release/assets/linux-virt.bzImage" ]; then
         cp "$PROJECT_DIR/release/assets/linux-virt.bzImage" "$ASSETS_DIR/linux-virt.bzImage"
         ok "  microvm: linux-virt.bzImage ($(du -h "$ASSETS_DIR/linux-virt.bzImage" | cut -f1))"
@@ -299,8 +291,8 @@ build_installer() {
     fi
 
     # MicroVM initramfs: built by `./build.sh release` from
-    # microvm/linux/init/. Phase 12.1.3+. Optional — installer compiles
-    # without it; runtime `microvm linux` falls back to no-initramfs.
+    # microvm/linux/init/. Optional: the installer compiles without it;
+    # `microvm linux` falls back to no initramfs.
     if [ -f "$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz" ]; then
         cp "$PROJECT_DIR/release/assets/microvm-initramfs.cpio.gz" "$ASSETS_DIR/microvm-initramfs.cpio.gz"
         ok "  microvm: initramfs ($(du -h "$ASSETS_DIR/microvm-initramfs.cpio.gz" | cut -f1))"
@@ -309,13 +301,11 @@ build_installer() {
         touch "$ASSETS_DIR/microvm-initramfs.cpio.gz"
     fi
 
-    # MicroVM userspace bundle (LibreWolf, ~261 MB squashfs). Only
-    # staged when BUNDLE_USERSPACE=1 → the `bundle-userspace` cargo
-    # feature includes the file via include_bytes!. The resulting
-    # installer kernel is ~260 MB larger but the USB is fully
-    # self-contained: first boot has the browser without any OTA.
-    # Without BUNDLE_USERSPACE the asset arrives via the next
-    # `update` from GitHub Releases (manifest.large url= override).
+    # MicroVM userspace bundle (LibreWolf squashfs). Only staged when
+    # BUNDLE_USERSPACE=1; the `bundle-userspace` cargo feature then
+    # includes it via include_bytes!, so first boot has the browser
+    # without any OTA. Otherwise the asset arrives via the next `update`
+    # from GitHub Releases (manifest.large url= override).
     if [ "${BUNDLE_USERSPACE:-0}" = "1" ]; then
         SQFS_SRC="$PROJECT_DIR/release/assets/large/microvm-userspace.sqfs"
         if [ -f "$SQFS_SRC" ]; then
@@ -357,10 +347,9 @@ build_installer() {
     echo "];" >> "$ASSETS_DIR/wallpapers.rs"
 
     # WASM modules + their .version files: fetch from release/modules/
-    # (produced by prior release build). Expect all four first-party
-    # modules. The .version file is what lets `intent::install` and
-    # `intent::update::update_all_modules` tell that a bundled module
-    # is already up-to-date — without it they trigger redownloads.
+    # (produced by a prior release build). The .version file lets
+    # `intent::install` and `intent::update::update_all_modules` tell
+    # that a bundled module is up to date; without it they redownload.
     for mod in top debug wallpaper drun dock bar loft spell pick iris snap beak volume tune testdisk aml wifid wifi_ax200 audio_hda; do
         WASM_SRC="$PROJECT_DIR/release/modules/${mod}.wasm"
         VER_SRC="$PROJECT_DIR/release/modules/${mod}.version"
@@ -383,7 +372,7 @@ build_installer() {
 
     # Pass 2: installer kernel (embeds the Pass-1 kernel.efi + assets
     # via the `installer` Cargo feature → include_bytes!).
-    # BUNDLE_USERSPACE=1 → also bakes in the 261 MB LibreWolf sqfs
+    # BUNDLE_USERSPACE=1 also bakes in the LibreWolf sqfs
     # via the `bundle-userspace` feature.
     log "Pass 2: building installer kernel..."
     PASS2_FEATURES="installer"
@@ -402,7 +391,7 @@ build_installer() {
 
     ok "Pass 2: installer ELF $(du -h "$KERNEL_BIN" | cut -f1)"
 
-    # The installer kernel itself is also UEFI-bootable — that's how
+    # The installer kernel itself is also UEFI-bootable; that is how
     # it runs from the USB stick / installer-disk image.
     log "Pass 2: converting installer to UEFI PE+..."
     assert_relative_only "$KERNEL_BIN"
@@ -417,18 +406,14 @@ build_installer() {
 # QEMU
 # ============================================================
 
-# Persistent QEMU disk image (256 MB floor: installer alone plants
-# ~14 MB of bundled assets — 12 MB Alpine bzImage + 1.6 MB modules
-# + 879 KB font + icons — plus npkFS metadata + headroom for blobs).
-# Created once on demand and kept between runs so npkFS state survives.
+# Persistent QEMU disk image. Created once on demand and kept between
+# runs so npkFS state survives.
 ensure_disk_img() {
     if [ ! -f "$DISK_IMG" ]; then
-        # 16 GiB sparse — only host blocks for data actually written.
-        # 1 GiB was too small once streaming downloads + the Mesa
-        # (267 MB) / LibreWolf (~300-500 MB) userspace bundles landed,
-        # and failed/aborted streaming writes leak orphan chunk blobs
-        # until the next gc(), so headroom matters. Sparse keeps the
-        # host cost == actual npkFS usage.
+        # 16 GiB sparse: only blocks actually written cost host space.
+        # The userspace bundles are large, and aborted streaming writes
+        # leave orphan chunk blobs until the next gc(), so headroom
+        # matters.
         log "Creating 16GB sparse disk image..."
         truncate -s 16G "$DISK_IMG"
         ok "Disk image: $DISK_IMG (16G sparse)"
@@ -436,8 +421,8 @@ ensure_disk_img() {
 }
 
 # Guard for the boot-only targets: refuse to launch on a missing or empty
-# (never-installed) disk — otherwise QEMU boots a blank 16G sparse image and
-# just sits at the UEFI shell, which looks like a hang.
+# (never-installed) disk; otherwise QEMU boots a blank sparse image and
+# sits at the UEFI shell, which looks like a hang.
 require_installed_disk() {
     if [ ! -f "$DISK_IMG" ]; then
         err "No disk image at $DISK_IMG — install first: ./build.sh qemu-installer-gui"
@@ -454,7 +439,7 @@ require_installed_disk() {
     fi
 }
 
-# qemu-installer modes wipe the disk first — the installer's job is
+# qemu-installer modes wipe the disk first: the installer's job is
 # to lay down a fresh npkFS, and a stale disk would just trigger the
 # "already set up, log in" path on second boot.
 wipe_disk_img() {
@@ -472,7 +457,7 @@ wipe_disk_img() {
 #
 # kvm uses -cpu host so the guest sees the host vendor's virt extensions
 # (VMX on Intel, SVM on AMD). tcg-intel/tcg-amd force a specific vendor
-# CPU model regardless of host — slow, but the only way to test the VMX
+# CPU model regardless of host: slow, but the only way to test the VMX
 # backend on AMD or the SVM backend on Intel.
 ensure_uefi_vars() {
     if [ ! -f "$OVMF_CODE_SRC" ]; then
@@ -488,8 +473,8 @@ ensure_uefi_vars() {
 # run_qemu_generic <display> <accel> <mode> [extra qemu args...]
 #   display:  serial | gui
 #   accel:    kvm | tcg-intel | tcg-amd
-#   mode:     normal     — OVMF + NVMe disk only (boots installed system)
-#             installer  — OVMF + NVMe (wiped) + installer USB image
+#   mode:     normal     - OVMF + NVMe disk only (boots installed system)
+#             installer  - OVMF + NVMe (wiped) + installer USB image
 run_qemu_generic() {
     local display="$1"
     local accel="$2"
@@ -501,16 +486,11 @@ run_qemu_generic() {
     local -a accel_args
     case "$accel" in
         kvm)
-            # No cpu-pm=on: as of v0.186.0 worker APs arm their own 100 Hz
-            # LAPIC timer (interrupts.rs arm_worker_timer) and idle with
-            # plain HLT instead of MWAIT-on-the-WORK_AVAILABLE-cacheline.
-            # cpu-pm=on used to be required because that MONITOR watch only
-            # works with real-HW MWAIT passthrough — but passthrough HLT/
-            # MWAIT never VMEXITs, so KVM never descheduled the idle vCPU
-            # threads and ALL host cores sat at 100%/turbo while the guest
-            # idled. Plain HLT VMEXITs → KVM blocks the idle thread → host
-            # cores actually idle, and the per-core timer wakes the workers
-            # so apps still start (no more native-ShadeBar fallback).
+            # No cpu-pm=on: worker APs arm their own LAPIC timer
+            # (interrupts.rs arm_worker_timer) and idle with plain HLT.
+            # With cpu-pm=on, HLT/MWAIT never VMEXIT, so KVM never
+            # deschedules idle vCPU threads and the host cores spin while
+            # the guest idles. Plain HLT VMEXITs and lets KVM block them.
             accel_args=(-enable-kvm -cpu host,+invtsc)
             ;;
         tcg-intel)
@@ -530,30 +510,26 @@ run_qemu_generic() {
     # The framebuffer size is fixed at boot, but GTK defaults to zoom-to-fit:
     # it rescales that buffer to whatever size the window ends up with. Under
     # a tiling WM the window is never exactly that size, so every frame goes
-    # through a resample and small text turns mushy — very visible in screen
-    # recordings and screenshots. zoom-to-fit=off keeps one guest pixel on one
-    # host pixel; show-menubar=off drops the GTK menu strip so the window IS
-    # the framebuffer (nothing to crop out afterwards). Note this needs the
-    # window to float, otherwise the tiler shrinks it and QEMU crops instead
-    # of scaling. Override with e.g. QEMU_GTK=zoom-to-fit=on for the old
-    # behaviour, or QEMU_GTK=full-screen=on for a fullscreen demo.
+    # through a resample and small text turns mushy. zoom-to-fit=off keeps
+    # one guest pixel on one host pixel; show-menubar=off drops the GTK menu
+    # strip so the window is the framebuffer. This needs the window to
+    # float, otherwise the tiler shrinks it and QEMU crops instead of
+    # scaling. Override with e.g. QEMU_GTK=zoom-to-fit=on, or
+    # QEMU_GTK=full-screen=on for fullscreen.
     #
     # Resolution: xres/yres land in the stdvga EDID, OVMF picks the matching
-    # mode, and the kernel simply takes whatever GOP mode it is handed
-    # (boot_uefi.rs). An unsupported size does NOT fail — OVMF silently falls
-    # back to 1280x800, i.e. you get LESS than 1080p and no error anywhere.
-    # That is what QEMU_RES_OK guards: measured on this box (edk2 OVMF 4m,
-    # QEMU 11.1.1) by booting each mode and reading the size back off a
-    # monitor `screendump`, not copied from the OVMF mode table.
+    # mode, and the kernel takes whatever GOP mode it is handed
+    # (boot_uefi.rs). An unsupported size does not fail: OVMF silently falls
+    # back to 1280x800. QEMU_RES_OK lists the modes that come up, found by
+    # booting each one and reading the size back off a monitor `screendump`.
     #
-    # 3840x2160 and 3200x2400 both fall back — and it is NOT a VRAM shortage:
-    # 4K stays at 1280x800 with 64 and 128 MB too, while 2800x2100 comes up
-    # fine on 32. The ceiling sits in the EDID/mode negotiation, so raising
-    # vgamem is not the fix. vgamem is still derived from w*h*4 (power of
-    # two) because the working modes do need it.
+    # 3840x2160 and 3200x2400 both fall back, and not for lack of VRAM: the
+    # ceiling sits in the EDID/mode negotiation, so raising vgamem is not
+    # the fix. vgamem is still derived from w*h*4 (power of two) because
+    # the working modes need it.
     #
-    # NOTE the guest flips to 2x UI scaling above 2560 wide (gui/font.rs
-    # scale_for), so 2800x2100 renders at 1400x1050 worth of usable area.
+    # The guest switches to 2x UI scaling above 2560 wide (gui/font.rs
+    # scale_for), so 2800x2100 gives 1400x1050 of usable area.
     local -a display_args
     if [ "$display" = "gui" ]; then
         local QEMU_RES_OK="1920x1080 1920x1200 2560x1440 2560x1600 2560x2048 2800x2100"
@@ -596,7 +572,7 @@ run_qemu_generic() {
 
     # The installer drive is only attached on `installer` mode. With
     # a fresh NVRAM + wiped NVMe disk, OVMF auto-discovers any disk
-    # whose ESP contains /EFI/BOOT/BOOTX64.EFI — the only such disk
+    # whose ESP contains /EFI/BOOT/BOOTX64.EFI; the only such disk
     # is our installer USB, so it boots that.
     local -a installer_args=()
     if [ "$firmware" = "installer" ] && [ -f "$INSTALLER_DISK" ]; then
@@ -606,10 +582,10 @@ run_qemu_generic() {
         )
     fi
 
-    # Network backend. Default: slirp (-nic user) — easy, no host setup, but
-    # single-threaded and caps ~300-340 Mbit. QEMU_NET=tap uses a vhost/tap
-    # device (kernel-accelerated, near line-rate) to test our stack WITHOUT the
-    # slirp ceiling. Requires a host tap device set up once (see message), e.g.:
+    # Network backend. Default: slirp (-nic user), no host setup, but
+    # single-threaded with a low throughput ceiling. QEMU_NET=tap uses a
+    # vhost/tap device (kernel-accelerated) to test our stack without that
+    # ceiling. Requires a host tap device set up once (see message), e.g.:
     #   sudo ip tuntap add dev tap0 mode tap user "$USER"
     #   sudo ip addr add 172.30.0.1/24 dev tap0 && sudo ip link set tap0 up
     #   # + NAT to your uplink:  sudo iptables -t nat -A POSTROUTING -s 172.30.0.0/24 -j MASQUERADE
@@ -625,53 +601,44 @@ run_qemu_generic() {
         info "Network: vhost/tap ($tapdev) — bypassing slirp"
     else
         # Explicit device (not the -nic shorthand) so we can request MSI-X
-        # vectors (config + RX + TX). The shorthand's virtio-net exposes NO
-        # MSI-X capability, which blocks net-RX's event-driven RX IRQ
-        # (confirmed: "[npk] msix: 00:03.0 no MSI-X capability"). Transitional
-        # (1af4:1000) so the legacy driver still binds; slirp backend unchanged.
-        # rx_queue_size=1024: deepen the host NIC RX ring (default 256) so a
-        # download burst that outruns a brief drain gap is absorbed instead of
-        # dropped by QEMU/slirp (the dropped frames made the SERVER retransmit →
-        # its cwnd collapsed → the download lottery). Pairs with RX_BUFFERS=1024.
-        # (tx_queue_size stays 256 — slirp/non-vhost caps TX at 256; download
-        # loss is RX-side anyway.)
+        # vectors (config + RX + TX); the shorthand's virtio-net exposes no
+        # MSI-X capability, which blocks the event-driven RX IRQ.
+        # Transitional (1af4:1000) so the legacy driver still binds.
+        # rx_queue_size=1024 (default 256) absorbs a download burst during a
+        # brief drain gap instead of dropping it, which would make the
+        # server retransmit and shrink its cwnd. Pairs with RX_BUFFERS=1024.
+        # tx_queue_size stays 256: non-vhost backends cap TX at 256.
         net_args=(
             -netdev user,id=net0
             -device virtio-net-pci,netdev=net0,vectors=3,rx_queue_size=1024
         )
     fi
-    # QEMU_NET=none: GAR KEINE NIC. Damit laeuft der Gast in den Zweig
-    # `!net_up` und sucht den USB-Ethernet-Dongle — der einzige Weg, den
-    # xHCI-Dongle-Scan lokal zu pruefen (die HP-Notebooks ohne Kabelport
-    # gehen ihn bei jedem Start).
+    # QEMU_NET=none: no NIC at all. The guest then takes the `!net_up`
+    # branch and scans for a USB Ethernet dongle, which tests the xHCI
+    # dongle scan locally.
     if [ "${QEMU_NET:-}" = "none" ]; then
         net_args=(-nic none)
         log "QEMU_NET=none: no NIC at all (exercises the USB-dongle scan)"
     fi
     echo ""
 
-    # Serial output: COM1 → live file unbuffered AND mirrored to stdio
-    # for interactive typing (installer prompt etc.). Two QEMU `-serial`
-    # arms give two COM ports — COM1 (interactive stdio) + COM2 (file
-    # log). Kernel mirrors every byte from COM1 (0x3F8) to COM2 (0x2F8)
-    # so a `pkill -9 qemu` can't lose buffered stdio output — every
-    # byte hit COM2's file backend synchronously already.
+    # Serial output: two QEMU `-serial` arms give COM1 (interactive stdio,
+    # e.g. the installer prompt) and COM2 (file log). The kernel mirrors
+    # every byte from COM1 (0x3F8) to COM2 (0x2F8), so a `pkill -9 qemu`
+    # cannot lose buffered stdio output: COM2's file backend is synchronous.
     # After QEMU exits inspect with:  cat target/serial.log
     local serial_log="$PROJECT_DIR/target/serial.log"
     rm -f "$serial_log"
     log "Serial log: $serial_log"
 
-    # Audio-Senke: live hoeren, wenn dieses QEMU es kann, sonst in eine
-    # Datei. Die Backends sind bei Arch eigene Pakete (qemu-audio-pipewire /
-    # -pa), also entscheidet nicht die QEMU-Version, sondern was installiert
-    # ist — und das fragen wir QEMU selbst, statt es zu raten.
-    #
-    # Die Datei ist kein Notnagel: sie ist das schaerfere Werkzeug, weil man
-    # sie gegen ffmpeg halten kann. Nur hoert man sie eben nicht.
-    # USB: normalerweise ein Controller mit Tastatur UND Maus.
-    # QEMU_USB=split legt einen ZWEITEN xHCI an und haengt die Maus dort hin
-    # — die Lage auf Florians IdeaPad (Tastatur 04:00.3, Maus 04:00.4). Ohne
-    # das laesst sich "Geraet am anderen Controller" lokal gar nicht pruefen.
+    # Audio sink: play live if this QEMU has a live backend, otherwise
+    # write to a file. Backends are separate packages on some distros
+    # (qemu-audio-pipewire / -pa), so QEMU itself is asked what is
+    # installed. The file is also useful on its own: it can be compared
+    # against ffmpeg.
+    # USB: normally one controller with keyboard and mouse.
+    # QEMU_USB=split adds a second xHCI and puts the mouse there, to test
+    # input devices on separate controllers.
     local -a usb_args=(
         -device qemu-xhci,id=xhci
         -device usb-kbd,bus=xhci.0
@@ -806,7 +773,7 @@ write_usb() {
 }
 
 # ============================================================
-# Hilfsfunktionen
+# Helpers
 # ============================================================
 
 check_deps() {
@@ -917,9 +884,9 @@ case "${1:-}" in
         build
         run_qemu_generic gui kvm normal
         ;;
-    # Boot the EXISTING installed disk without rebuilding the kernel.
-    # Normal-mode boot runs straight from disk.img's ESP — the fresh
-    # kernel.efi is only used by the installer — so `build` is wasted work
+    # Boot the existing installed disk without rebuilding the kernel.
+    # Normal-mode boot runs straight from disk.img's ESP (the fresh
+    # kernel.efi is only used by the installer), so `build` is wasted work
     # when you just want to boot what's already installed. Use these for a
     # fast relaunch; use OTA `update` inside the OS (or a fresh installer
     # run) to change the installed kernel.
@@ -964,10 +931,9 @@ case "${1:-}" in
         ;;
     qemu-installer-full)
         # Same as qemu-installer but bakes the LibreWolf userspace sqfs
-        # (~261 MB) into the installer kernel so the QEMU NVMe is fully
-        # seeded with the browser bundle — no `update` needed before
-        # `browser` works post-install. Use for testing the bundled-
-        # browser flow end-to-end.
+        # into the installer kernel, so the QEMU NVMe is seeded with the
+        # browser bundle and `browser` works without `update`. Tests the
+        # bundled-browser flow end-to-end.
         check_deps
         BUNDLE_USERSPACE=1 build_installer
         build_installer_disk
@@ -986,47 +952,41 @@ case "${1:-}" in
         build_installer
         ;;
     usb)
-        # Bootable install stick (~15 MB EFI). Bundles microVM Linux +
-        # initramfs, all WASM modules, fonts/icons/wallpapers — but NOT
-        # the 261 MB LibreWolf sqfs: embedding it makes a ~290 MB EFI
-        # image that some laptop firmware (e.g. HP) cannot LoadImage (it
-        # can't allocate ~294 MB contiguous), so it bootloops. The
-        # browser bundle arrives via OTA `update` post-install, or use
-        # `usb-full` for the (large) embedded variant on firmware that
-        # tolerates it.
+        # Bootable install stick. Bundles microVM Linux + initramfs, all
+        # WASM modules, fonts/icons/wallpapers, but not the LibreWolf
+        # sqfs: embedding it makes an EFI image too large for some
+        # firmware to LoadImage (no contiguous allocation that big), which
+        # bootloops. The browser bundle arrives via OTA `update` after
+        # install, or use `usb-full` on firmware that tolerates it.
         check_deps
         build_installer
         write_usb "${2:-}"
         ;;
     usb-full)
-        # Same as `usb` but embeds the LibreWolf sqfs (~261 MB) so a
-        # fresh install has the browser with no OTA. WARNING: the
-        # resulting ~290 MB EFI fails to load on some firmware (HP
-        # laptops) — use `usb` there. See [[project_uefi_relocatable]].
+        # Same as `usb` but embeds the LibreWolf sqfs, so a fresh install
+        # has the browser with no OTA. The resulting EFI fails to load on
+        # some firmware; use `usb` there.
         check_deps
         BUNDLE_USERSPACE=1 build_installer
         write_usb "${2:-}"
         ;;
     build-linux)
-        # Build the custom MicroVM Linux kernel — see microvm-linux/.
+        # Build the custom MicroVM Linux kernel; see microvm-linux/.
         # Output: release/assets/linux-virt.bzImage. Idempotent (skips
         # configure if config fragment unchanged + bzImage already up
         # to date in the source dir).
         bash "$PROJECT_DIR/microvm-linux/build.sh"
         ;;
     sign-modules)
-        # Module signieren, OHNE den Kernel anzufassen.
+        # Sign modules without touching the kernel.
         #
-        # `release` ruft intern `build`, und weil die WASM-Module als Assets
-        # im Kernelbild liegen, aendert sich dabei kernel.efi — ein
-        # Versionssprung und ein 5-MB-OTA-Download fuer eine Aenderung von
-        # 95 KB. Bei sieben Iterationen an einem Abend ist das sechsmal
-        # umsonst.
+        # `release` runs `build`, and because the WASM modules are assets in
+        # the kernel image, kernel.efi changes too: a version bump and a full
+        # kernel OTA download for a module-only change.
         #
-        # Signiert wird nur, was sich WIRKLICH geaendert hat: eine
-        # ECDSA-Signatur ist nicht deterministisch, ein blindes Neusignieren
-        # schriebe alle 21 Dateien um und fuellte den Verlauf mit Rauschen.
-        # Verglichen wird der sha384 gegen den, den das Manifest fuehrt.
+        # Only modules that actually changed are signed: ECDSA signatures are
+        # not deterministic, so blind re-signing would rewrite every file.
+        # The sha384 is compared against the one in the manifest.
         RELEASE_DIR="$PROJECT_DIR/release"
         KEY_FILE="$PROJECT_DIR/update.key"
         [ -d "$RELEASE_DIR/modules" ] || { err "no release/modules/"; exit 1; }
@@ -1064,7 +1024,7 @@ sha384=${MOD_SHA}
         RELEASE_DIR="$PROJECT_DIR/release"
         mkdir -p "$RELEASE_DIR"
 
-        # Copy kernel.efi (the PE+ UEFI app — what OTA `update` fetches
+        # Copy kernel.efi (the PE+ UEFI app that OTA `update` fetches
         # and writes to /EFI/BOOT/BOOTX64.EFI).
         cp "$KERNEL_EFI" "$RELEASE_DIR/kernel.efi"
 
@@ -1102,7 +1062,7 @@ MANIFEST
         mkdir -p "$RELEASE_DIR/assets"
         ASSET_MANIFEST=""
         if [ -d "$PROJECT_DIR/sys/fonts" ]; then
-            # .ttf plus the OFL licence texts — SIL OFL requires the
+            # .ttf plus the OFL licence texts: SIL OFL requires the
             # licence to travel with every copy of the font, including
             # to systems that only ever see it via OTA.
             for font_src in "$PROJECT_DIR/sys/fonts/"*.ttf "$PROJECT_DIR/sys/fonts/"LICENSE-*.txt; do
@@ -1126,7 +1086,7 @@ sha384=${ASSET_SHA}
             done
         fi
 
-        # Icon atlas — regenerated by tools/regen-icons from
+        # Icon atlas, regenerated by tools/regen-icons from
         # icons/phosphor/*.svg, committed as release/assets/*.atlas.
         if [ -f "$RELEASE_DIR/assets/phosphor.atlas" ]; then
             ATLAS_SIZE=$(stat -c%s "$RELEASE_DIR/assets/phosphor.atlas")
@@ -1144,13 +1104,13 @@ sha384=${ATLAS_SHA}
             fi
         fi
 
-        # Root CA anchors — every DER in release/assets/certs/ is signed and
+        # Root CA anchors: every DER in release/assets/certs/ is signed and
         # listed as `[cert:<filename>]`, mapped to `sys/certs/<filename>`
         # (intent/update.rs). Adding or replacing an
         # anchor is dropping a file here, no kernel change.
         #
         # Adding a root CA means every certificate it signs is trusted by the
-        # whole system — a security boundary, not a bugfix. Check the SHA-256
+        # whole system; this is a security boundary. Check the SHA-256
         # against the CA's published value before putting a file here:
         #   openssl x509 -inform DER -in <file> -noout -subject -enddate \
         #       -fingerprint -sha256
@@ -1166,8 +1126,8 @@ sha384=${ATLAS_SHA}
                 CA_SHA=$(openssl dgst -sha384 -hex "$ca" 2>/dev/null | awk '{print $NF}')
 
                 # Refuse to ship something that is not a certificate: a
-                # malformed anchor is skipped at load time on the device,
-                # which looks like the update silently not working.
+                # malformed anchor is skipped at load time, which looks
+                # like the update silently not working.
                 if ! openssl x509 -inform DER -in "$ca" -noout >/dev/null 2>&1; then
                     err "Not a DER certificate, refusing to ship: assets/certs/$CA_NAME"
                     exit 1
@@ -1186,8 +1146,8 @@ sha384=${CA_SHA}
             done
         fi
 
-        # MicroVM initramfs — already built by build_microvm_initramfs()
-        # called from build(); just sign + manifest it here. Phase 12.1.3.
+        # MicroVM initramfs, already built by build_microvm_initramfs()
+        # from build(); only sign + manifest it here.
         INITRAMFS_FILE="$RELEASE_DIR/assets/microvm-initramfs.cpio.gz"
         if [ -f "$INITRAMFS_FILE" ]; then
             INITRAMFS_SIZE=$(stat -c%s "$INITRAMFS_FILE")
@@ -1205,7 +1165,7 @@ sha384=${INITRAMFS_SHA}
             fi
         fi
 
-        # CPython standard library — placed under release/assets/ by
+        # CPython standard library, placed under release/assets/ by
         # tools/stage-python.sh. Optional: absent entry means OTA leaves
         # whatever is already installed alone.
         if [ -f "$RELEASE_DIR/assets/python313.zip" ]; then
@@ -1224,9 +1184,8 @@ sha384=${PYLIB_SHA}
             fi
         fi
 
-        # Linux-virt bzImage — placed manually under release/assets/
-        # by the maintainer (Alpine v3.23 main/x86_64 linux-virt apk →
-        # boot/vmlinuz-virt). Phase 12.1.1c-3+ MicroVM payload.
+        # Linux-virt bzImage for the MicroVM, placed under release/assets/
+        # (built by `./build.sh build-linux`).
         if [ -f "$RELEASE_DIR/assets/linux-virt.bzImage" ]; then
             BZIMG_SIZE=$(stat -c%s "$RELEASE_DIR/assets/linux-virt.bzImage")
             BZIMG_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/linux-virt.bzImage" 2>/dev/null | awk '{print $NF}')
@@ -1243,19 +1202,16 @@ sha384=${BZIMG_SHA}
             fi
         fi
 
-        # MicroVM userspace bundle — produced by
-        # microvm-userspace/build.sh. Optional. Currently
-        # alpine-wayland; future iterations add Mesa/LibreWolf on
-        # top via Alpine APKBUILD. NOT bundled into the kernel
-        # binary (BUNDLED_ASSETS) — pure OTA asset.
+        # MicroVM userspace bundle, produced by
+        # microvm-userspace/build.sh. Optional. Not bundled into the
+        # kernel binary (BUNDLED_ASSETS); a pure OTA asset.
         #
-        # Small enough to live on raw.githubusercontent? Treat as a
-        # regular release asset (path under release/assets/). When
-        # the bundle grows past raw-content limits (~50 MB warning,
-        # 100 MB hard cap) move it to release/assets/large/ and ship
-        # via `./build.sh release-large <tag>` — that path adds a
-        # `url=` line pointing at GitHub Releases and the kernel
-        # follows the 302 redirect chain transparently.
+        # Small enough for raw.githubusercontent: a regular release asset
+        # under release/assets/. Past the raw-content limits (~50 MB
+        # warning, 100 MB hard cap) move it to release/assets/large/ and
+        # ship via `./build.sh release-large <tag>`, which adds a `url=`
+        # line pointing at GitHub Releases; the kernel follows the 302
+        # redirect chain.
         USERSPACE_FILE="$RELEASE_DIR/assets/microvm-userspace.cpio.gz"
         if [ -f "$USERSPACE_FILE" ]; then
             US_SIZE=$(stat -c%s "$USERSPACE_FILE")
@@ -1273,7 +1229,7 @@ sha384=${US_SHA}
             fi
         fi
 
-        # Squashfs form of the userspace bundle — read-only, PID-1
+        # Squashfs form of the userspace bundle: read-only, PID-1
         # mounts it from /dev/vdb. Same provenance as the cpio above
         # but RAM-efficient. Optional; ship whichever form exists.
         USERSPACE_SQFS="$RELEASE_DIR/assets/microvm-userspace.sqfs"
@@ -1311,12 +1267,10 @@ sha384=${USQ_SHA}
             ok "Asset manifest written"
         fi
 
-        # Freigabe-Tor: kein Modul geht raus, das forge nicht GANZ uebersetzen
-        # kann. Wir shippen Software — ein Modul, bei dem eine Funktion oder
-        # ein Import auf dem Trap-Stumpf landet, wuerde am Geraet erst beim
-        # ERSTEN AUFRUF dieser Stelle stehenbleiben, nicht beim Laden. Das
-        # gehoert hierher und nicht in `stage-module.sh`: `aml` und `wifid`
-        # werden von Hand gestaged und kaemen dort vorbei.
+        # Release gate: no module ships unless forge translates all of it.
+        # A function or import that lands on the trap stub would fail only
+        # on its first call, not at load time. The gate lives here and not
+        # in `stage-module.sh` because `aml` and `wifid` are staged by hand.
         if [ -d "$RELEASE_DIR/modules" ]; then
             log "forge-Tor: Module pruefen..."
             if ! python3 "$PROJECT_DIR/tools/forge-gate.py"; then
@@ -1365,11 +1319,11 @@ sha384=${MOD_SHA}
         # Anything bigger than ~50 MB cannot ship via
         # raw.githubusercontent.com reliably (warnings start there,
         # hard cap ~100 MB). Drop those into release/assets/large/
-        # (gitignored) and run `./build.sh release-large <tag>`. We:
+        # (gitignored) and run `./build.sh release-large <tag>`. Steps:
         #
         #   1. sha384 + sign each file with update.key (same key
         #      as kernel + module OTA).
-        #   2. `gh release create <tag>` (idempotent — if it exists
+        #   2. `gh release create <tag>` (idempotent; if it exists
         #      we just upload more assets).
         #   3. `gh release upload <tag> <file> <file>.sig`.
         #   4. write `release/assets/manifest.large` with each
@@ -1383,8 +1337,7 @@ sha384=${MOD_SHA}
             err "example: ./build.sh release-large assets/alpine-wayland-mesa-0.1.0"
             exit 1
         fi
-        # These are set in the `release)` arm but not here — this arm
-        # ran with `set -u` against unset vars (never exercised before).
+        # Set in the `release)` arm too; this arm runs under `set -u`.
         RELEASE_DIR="$PROJECT_DIR/release"
         KEY_FILE="$PROJECT_DIR/update.key"
         LARGE_DIR="$RELEASE_DIR/assets/large"
@@ -1442,7 +1395,7 @@ sha384=${MOD_SHA}
         UPLOADED=0
         for asset in "$LARGE_DIR"/*; do
             [ -f "$asset" ] || continue
-            # Skip any pre-existing .sig — we regenerate fresh.
+            # Skip any pre-existing .sig; it is regenerated.
             case "$asset" in *.sig) continue;; esac
 
             NAME=$(basename "$asset")
@@ -1453,7 +1406,7 @@ sha384=${MOD_SHA}
                 -out "${asset}.sig" "$asset"
 
             # Section name follows the AssetSpec table convention:
-            # microvm-userspace.cpio.gz → [microvm:userspace]
+            # microvm-userspace.cpio.gz -> [microvm:userspace]
             case "$NAME" in
                 microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
                 microvm-userspace.sqfs)    SECTION="microvm:userspace-sqfs" ;;

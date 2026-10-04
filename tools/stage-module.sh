@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a WASM app and stage it into release/modules/ so the next
-# installer/OTA build picks it up. `build.sh release` only SIGNS what is
-# already there — it never compiles WASM.
+# installer/OTA build picks it up. `build.sh release` only signs what is
+# already there; it never compiles WASM.
 #
 #   tools/stage-module.sh loft spell dock bar
 set -euo pipefail
@@ -10,9 +10,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 for mod in "$@"; do
     src="$ROOT/tools/wasm/$mod"
-    # Module mit eigenem core/harness (aml, i2c_hid) legen ihre Crate eine
-    # Ebene tiefer. Das stand bisher nur im Memory als "von Hand bauen" —
-    # und genau solche Handgriffe vergisst man bei der Freigabe.
+    # Modules with their own core/harness (aml, i2c_hid) keep the crate
+    # one level deeper.
     if [ ! -f "$src/Cargo.toml" ] && [ -f "$src/wasm/Cargo.toml" ]; then
         src="$src/wasm"
     fi

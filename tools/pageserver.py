@@ -1,45 +1,42 @@
 #!/usr/bin/env python3
 """Serve frozen test pages to nopeekOS, so a render is comparable twice.
 
-Wikipedia is the right target for "what does the real web need"; it is the
-wrong one for "does this look right". It changes between the run we compare
-against and the run beak fetches: another article of the day, another image
-count, another WAN. This server delivers the SAME BYTES every time.
+A live site changes between two runs (other content, other image count,
+other network path); this server delivers the same bytes every time.
 
   python3 tools/pageserver.py 8080            # any port, no root needed
   python3 tools/pageserver.py                 # port 80 (needs root or
                                               # CAP_NET_BIND_SERVICE)
 
-Binds 0.0.0.0, so the NUC or notebook on the same network reaches it too, not
+Binds 0.0.0.0, so real hardware on the same network reaches it too, not
 just QEMU.
 
-From nopeekOS — **the switch is off by default and has to be set once**:
+From nopeekOS (the switch is off by default and has to be set once):
 
   set net.allow_plain_http 1
   beak http://10.0.2.2:8080/components        # QEMU (slirp host alias)
-  beak http://192.168.1.50:8080/components    # NUC / notebook, same network
+  beak http://192.168.1.50:8080/components    # hardware, same network
 
-The kernel refuses `http://` outright unless that key is `1` AND the host is
-a literal private address (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16) —
-a NAME is not accepted, because its DNS record can point somewhere else. Both
-the switch and `host:port` parsing arrived in kernel 0.319.0; before that
-neither existed. Turn the switch off again when the measurement is done: a
-hostile page can use it to probe the local network over plain HTTP.
+The kernel refuses `http://` unless that key is `1` and the host is a
+literal private address (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16);
+a name is not accepted, because its DNS record can point somewhere else.
+Turn the switch off again when done: a hostile page can use it to probe
+the local network over plain HTTP.
 
 Routes:
 
   /                     index of everything on offer
   /<name>               a fixture from tools/fixtures/ (ours, versioned)
-  /bootstrap.min.css    the ONE vendored copy, from beak-engine/assets/
+  /bootstrap.min.css    the one vendored copy, from beak-engine/assets/
   /tailwind.css         same, for the Tailwind fixture
   /frozen/<name>        a snapshot from --frozen <dir>, its stylesheet links
                         rewritten to /frozen/<name>.css so nothing reaches
                         the real site
-  anything else         404, and the path is LOGGED — that log is the point:
-                        it says which sub-resources a page actually asked for
+  anything else         404, and the path is logged: the log says which
+                        sub-resources a page actually asked for
 
 Every response is identity-encoded (no gzip) and carries Content-Length, so
-what the device receives is byte-for-byte what is on disk.
+the client receives byte-for-byte what is on disk.
 """
 import os
 import re
@@ -48,8 +45,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 FIXTURES = os.path.join(ROOT, "tools", "fixtures")
-# Die eingefrorenen Blaetter, die eine Vorlage per `<link>` holt. EINE Kopie,
-# die im Repo liegt — der Server verweist darauf, statt sie zu duplizieren.
+# Frozen stylesheets a fixture loads via `<link>`; served from the single
+# copy in the repo instead of a duplicate.
 ASSETS = os.path.join(ROOT, "tools", "wasm", "beak-engine", "assets")
 SHEETS = {"/bootstrap.min.css": "bootstrap.min.css", "/tailwind.css": "tailwind.css"}
 FROZEN = None
@@ -58,9 +55,8 @@ TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
          ".png": "image/png", ".jpg": "image/jpeg", ".woff2": "font/woff2"}
 
-# A frozen snapshot still carries the ORIGINAL <link href>, pointing at the
-# site it came from. Left alone, serving it locally would send beak back to
-# the real server for the CSS — and the whole point was to stop doing that.
+# A frozen snapshot still carries the original <link href> of its site, which
+# would send the client back to the real server for the CSS.
 # `fetchpage.sh` concatenates every sheet into one `<name>.css`, so one link
 # replaces all of them and the rest are dropped.
 LINK = re.compile(rb'<link[^>]+rel=["\']?stylesheet["\']?[^>]*>', re.I)
@@ -93,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         # No keep-alive: the plain-HTTP path in nopeekOS speaks HTTP/1.0 and
-        # closes anyway. Saying so keeps both sides honest about the timing.
+        # closes anyway.
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
@@ -120,8 +116,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.file(full)
         except FileNotFoundError:
             pass
-        # The 404 log line is not noise — it names every sub-resource the page
-        # wanted and we do not have.
+        # The 404 log line names every sub-resource the page wanted and we do
+        # not have.
         self.send(b"not here\n", "text/plain; charset=utf-8", 404)
 
     def frozen(self, rest: str):

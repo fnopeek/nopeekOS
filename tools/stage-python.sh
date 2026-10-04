@@ -3,10 +3,10 @@
 # signs and publishes it.
 #
 # Python is not built from this repo: `tools/stage-module.sh` compiles a
-# Rust crate, and CPython is a C cross-build that takes ~20 minutes and
-# needs a wasi sysroot. It is built once, out of tree, and lives in
+# Rust crate, and CPython is a C cross-build that needs a wasi sysroot.
+# It is built out of tree and lives in
 #   ../tools/python-wasi/          (see that directory's README)
-# This script only copies. Nothing here compiles anything.
+# This script only copies.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,9 +15,8 @@ SRC="${1:-$ROOT/../tools/python-wasi}"
 [ -f "$SRC/python.wasm" ] || { echo "no python.wasm in $SRC" >&2; exit 1; }
 [ -f "$SRC/lib/python313.zip" ] || { echo "no lib/python313.zip in $SRC" >&2; exit 1; }
 
-# The zip MUST be stored, not deflated: this interpreter has no zlib and
-# a compressed member raises ZipImportError on the first import. Check it
-# here rather than discovering it on the device.
+# The zip must be stored, not deflated: this interpreter has no zlib and
+# a compressed member raises ZipImportError on the first import.
 if ! python3 - "$SRC/lib/python313.zip" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -30,8 +29,8 @@ then
 fi
 
 # The version comes from a file next to the artifact, not from grepping
-# the binary: OTA compares this string, and a version that shifts because
-# a build happened to lay bytes out differently is worse than no version.
+# the binary: OTA compares this string, and it must not shift with the
+# byte layout of a build.
 [ -f "$SRC/VERSION" ] || { echo "no VERSION in $SRC" >&2; exit 1; }
 PYVER=$(tr -d '[:space:]' < "$SRC/VERSION")
 

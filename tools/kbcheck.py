@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
-"""kbcheck.py — die Tastaturtabellen gegen die xkb-Referenz halten.
+"""kbcheck.py: check the keyboard tables against the xkb reference.
 
-    python3 tools/kbcheck.py            # meldet jede Abweichung, Exit 1 wenn eine da ist
+    python3 tools/kbcheck.py            # reports every mismatch, exit 1 if any
 
-**Warum es das gibt.** nopeekOS hat ZWEI Tastaturtreiber — PS/2
-(`kernel/src/drivers/keyboard.rs`) und USB-HID (`kernel/src/drivers/xhci.rs`)
-—, und jeder fuehrt seine eigenen vier Tabellen (us/de, ungeschiftet/Shift).
-0.333.0 hat die de_CH-Umlaute im PS/2-Treiber nachgetragen und den anderen
-uebersehen; die NUC haengt an USB, also aenderte sich am Geraet gar nichts.
-Wer eine der acht Tabellen anfasst, hat ein Achtel angefasst.
+nopeekOS has two keyboard drivers, PS/2 (`kernel/src/drivers/keyboard.rs`)
+and USB HID (`kernel/src/drivers/xhci.rs`), and each keeps its own four
+tables (us/de, unshifted/shift). A change to one of the eight tables has to
+be mirrored in the others.
 
-**Wie geprueft wird — und was daran nicht geraten ist.** Die Sollwerte kommen
-aus `/usr/share/X11/xkb/symbols/{us,ch}`, also aus derselben Datei, die jedes
-Linux benutzt. Die schwierige Frage ist nicht „welches Zeichen", sondern
-„welcher INDEX": ein HID-Code ist etwas anderes als ein PS/2-Scancode, und
-beide aus dem Gedaechtnis zuzuordnen ist genau die Sorte Fehler, die dieses
-Werkzeug finden soll.
-
-Deshalb wird die Zuordnung an unseren EIGENEN US-Tabellen kalibriert: fuer
-jede xkb-Taste wird ihr US-Zeichen der ersten Ebene in unserer US-Tabelle
-gesucht, und dessen Index IST der Index dieser Taste. Das ist zirkelfrei,
-solange die US-Tabelle stimmt — und die ist reines ASCII und seit Jahren in
-Gebrauch. Ein Zeichen, das mehrfach vorkommt, wird uebersprungen statt
-geraten.
+Expected values come from `/usr/share/X11/xkb/symbols/{us,ch}`. The hard
+part is the index, not the character: a HID usage is not a PS/2 scancode.
+So the mapping is calibrated on our own US tables: for each xkb key, its
+level-1 US character is looked up in our US table, and that position is the
+key's index. This holds as long as the US table is right (plain ASCII). A
+character that occurs more than once is skipped rather than guessed.
 """
 
 import os
@@ -32,9 +23,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XKB = "/usr/share/X11/xkb/symbols"
 
-# xkb-Zeichennamen → das Zeichen. Nur, was in `us` und `ch` vorkommt; ein
-# unbekannter Name wird zu None und die Taste faellt aus der Pruefung, statt
-# ein falsches Soll zu behaupten.
+# xkb keysym names -> character, only those used in `us` and `ch`. An unknown
+# name maps to None and the key drops out of the check instead of asserting a
+# wrong expectation.
 SYM = {
     'grave': '`', 'asciitilde': '~', 'exclam': '!', 'at': '@', 'numbersign': '#',
     'dollar': '$', 'percent': '%', 'asciicircum': '^', 'ampersand': '&',
@@ -66,8 +57,7 @@ def parse_layout(path, block):
     return out
 
 
-# Ein Rust-Zeichen- oder Byteliteral. Wichtig: NICHT an Kommas zerlegen —
-# `b','` ist selbst eines.
+# A Rust char or byte literal. Do not split on commas: `b','` is one.
 TOK = re.compile(r"b?'(?:\\u\{[0-9a-fA-F]+\}|\\.|[^'])'|0x[0-9A-Fa-f]+|\b0\b")
 
 
@@ -101,7 +91,7 @@ def main():
     us = parse_layout(os.path.join(XKB, 'us'), 'basic')
     ch_over = parse_layout(os.path.join(XKB, 'ch'), 'basic')
     ch = dict(us)
-    ch.update(ch_over)          # ch(basic) erbt von us
+    ch.update(ch_over)          # ch(basic) inherits from us
 
     KB = 'kernel/src/drivers/keyboard.rs'
     XH = 'kernel/src/drivers/xhci.rs'
@@ -127,7 +117,7 @@ def main():
     for kind in ('ps2', 'hid'):
         for key in sorted(ch):
             if key not in us:
-                continue        # ISO-Extra u. a.: eigener Sonderfall im Code
+                continue        # ISO extra key etc.: special-cased in the code
             idx = index_of(kind, key)
             if idx is None:
                 continue
