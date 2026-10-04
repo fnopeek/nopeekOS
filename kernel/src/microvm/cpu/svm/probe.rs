@@ -1,8 +1,8 @@
 //! SVM capability probe.
 //!
-//! Does NOT enable SVM, does NOT touch EFER. Pure read-side detection.
+//! Does not enable SVM and does not touch EFER. Pure read-side detection.
 //! Bring-up (EFER.SVME, host-save area, VM_HSAVE_PA MSR) lives in
-//! 12.1.0b-svm (`enable.rs`).
+//! `enable.rs`.
 //!
 //! Reference: AMD APM Vol. 2, §15.4 (Enabling SVM) and §15.3
 //! (CPUID Function 8000_000Ah).
@@ -21,9 +21,9 @@ pub struct Capabilities {
     /// Need ≥ 1 (we use ASID 1 for our single guest).
     pub asid_count: u32,
     /// Nested paging available (CPUID 8000_000A EDX[0]). AMD's
-    /// equivalent of Intel EPT — required for our 256 MB guest-RAM
-    /// window. nopeekOS bails if this is false; supported on every
-    /// AMD CPU since Barcelona/K10 (2007).
+    /// equivalent of Intel EPT — required for the guest-RAM window.
+    /// nopeekOS bails if this is false; supported on every AMD CPU
+    /// since Barcelona/K10.
     pub nested_paging: bool,
     /// Next-RIP save (CPUID 8000_000A EDX[3]). On VM-exit the CPU
     /// stores the address of the instruction *following* the
@@ -41,11 +41,10 @@ pub struct Capabilities {
     pub decode_assists: bool,
     /// AVIC — Advanced Virtual Interrupt Controller (CPUID 8000_000A
     /// EDX[13]). Hardware delivers guest→guest IPIs (incl. TLB-shootdown
-    /// IPIs) directly into the target vCPU's vAPIC with NO #VMEXIT when the
-    /// target is running — exactly the `csd_lock_wait` fix. CRITICAL for us:
-    /// nopeekOS runs nested under KVM, so this bit is only set if KVM
-    /// virtualizes AVIC for its guest (nested AVIC). If false here, AVIC is
-    /// bare-metal-only and not worth building for the QEMU path.
+    /// IPIs) directly into the target vCPU's vAPIC with no #VMEXIT when the
+    /// target is running, avoiding `csd_lock_wait` stalls. When nopeekOS
+    /// itself runs nested under KVM, this bit is only set if KVM
+    /// virtualizes AVIC for its guest (nested AVIC).
     pub avic: bool,
 }
 

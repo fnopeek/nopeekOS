@@ -1,25 +1,18 @@
 //! Guest physical memory accessors.
 //!
 //! `GuestMem` is the single translation point between a guest-physical
-//! address and host memory. In B1 the guest RAM window is still one
-//! contiguous host range, so translation is `host_phys = base + gpa`.
-//! B3 turns this into a scattered, demand-paged lookup *without*
-//! touching any caller — every device-side guest access already goes
-//! through here. Callers therefore MUST NOT assume linearity or that a
-//! multi-page buffer is contiguous in host memory; use the accessors.
+//! address and host memory. Every device-side guest access goes through
+//! here, so callers must not assume linearity or that a multi-page
+//! buffer is contiguous in host memory; use the accessors.
 //!
 //! All accessors bounds-check against `len` (the advertised guest RAM
 //! size) so a buggy/malicious guest descriptor can't drag us into
 //! kernel memory.
 //!
-//! `GUEST_RAM_BYTES` is the canonical guest-RAM size. It used to be
-//! duplicated in five places (this file, `guest_fetch`,
-//! `vmx::ept::GUEST_WINDOW_BYTES`, svm npt window,
-//! `bzimage::GUEST_RAM_TOTAL`); a stale copy from the 256 MB→1 GB bump
-//! silently turned every virtio DMA / insn-fetch above the stale bound
-//! into a no-op (→ SQUASHFS/EIO corruption under a memory-hungry
-//! guest). Those four now reference this constant; B2 replaces it with
-//! a runtime value chosen at `vm_open`.
+//! `GUEST_RAM_BYTES` is the canonical guest-RAM size; `guest_fetch`,
+//! `vmx::ept`, svm `npt` and `bzimage` reference it rather than keeping
+//! copies, since a stale copy silently turns every virtio DMA / insn
+//! fetch above its bound into a no-op.
 
 #![allow(dead_code)]
 
@@ -28,7 +21,7 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use core::ptr;
 
-/// The active microvm's `GuestMem`, held OUTSIDE `VmShared` so the off-vCPU
+/// The active microvm's `GuestMem`, held outside `VmShared` so the off-vCPU
 /// network backend can share `&GuestMem` across cores without aliasing the
 /// vCPU's `&mut VmShared`. Sound because `GuestMem` is `&self`-only + `Sync`
 /// (its only interior mutability is the atomic software TLB) — a vCPU's
@@ -73,24 +66,18 @@ pub fn clear_active() {
 /// net hot path reuses. 8 KiB per VM.
 const TLB_SIZE: usize = 1024;
 
-/// Canonical guest-RAM size: 2 GiB. Real-world browsers (Firefox/
-/// LibreWolf with e10s + content sandboxing on) routinely hit 1 GiB
-/// resident with a couple of moderate tabs — 1 GiB is below the
-/// floor of "browser actually works". Bumped from 1 GiB once B4
-/// multi-PD landed (the single-PD path capped us at 1 GiB).
-///
-/// Cap (host has 4 GiB QEMU / NUC bare metal has 16 GiB). With B3
-/// demand-paging on, only the 256 MiB boot window is committed
-/// contiguous at vm_open; the rest is faulted in 4 KiB at a time as
-/// the guest touches it.
+/// Canonical guest-RAM size: 2 GiB. Browsers (Firefox/LibreWolf with
+/// e10s + content sandboxing) routinely reach 1 GiB resident with a
+/// couple of moderate tabs. With demand paging on, only the 256 MiB
+/// boot window is committed contiguously at vm_open; the rest is
+/// faulted in 4 KiB at a time as the guest touches it.
 pub const GUEST_RAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// B3 demand-paging master switch. `false` → the whole guest is one
+/// Demand-paging master switch. `false` → the whole guest is one
 /// contiguous block (boot window = full guest, no demand PTs, no
 /// scatter walk). `true` → the 256 MiB hybrid (contiguous boot
-/// window + 4 KiB demand region). Re-enabled to back the 2 GiB bump:
-/// a contiguous 2 GiB block on a 4 GiB host is fragile, demand-paging
-/// commits only touched pages and lets the host stay responsive.
+/// window + 4 KiB demand region). A contiguous multi-GiB block is
+/// fragile on a small host; demand paging commits only touched pages.
 pub const DEMAND_ENABLED: bool = true;
 
 /// Which second-level paging format backs the demand region, so
@@ -101,19 +88,19 @@ pub enum SecondLevel {
     Npt,
 }
 
+/// Serialises demand fault-in (see `page_host`).
+static DEMAND_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 /// Translates guest-physical addresses to host memory for one VM.
 ///
-/// B3 hybrid: `[0, boot_bytes)` is one contiguous host block
+/// Hybrid: `[0, boot_bytes)` is one contiguous host block
 /// (`boot_base`, 2-MB EPT/NPT leaves — fast, fault-free early boot);
 /// `[boot_bytes, len)` is demand-paged 4 KB on first touch. The
-/// page-table tree IS the gpa→host map — `page_host` walks/faults via
+/// page-table tree is the gpa→host map — `page_host` walks/faults via
 /// `ept`/`npt::demand_fault_in`, so a host DMA to a page the guest
 /// hasn't touched yet still works (and a guest PT the insn-fetch
 /// walker reads simply faults in — no recursion: fault-in is a flat
 /// alloc+map). Not `Copy`. Threaded as `&GuestMem`.
-/// Serialises demand fault-in (see `page_host`).
-static DEMAND_LOCK: spin::Mutex<()> = spin::Mutex::new(());
-
 pub struct GuestMem {
     boot_base: u64,
     boot_bytes: u64,
@@ -121,13 +108,12 @@ pub struct GuestMem {
     table_root: u64,
     sl: SecondLevel,
     /// Software TLB for the demand region: caches the page-table walk
-    /// (`demand_fault_in`) that `page_host` would otherwise repeat on EVERY
-    /// access. The demand map is STABLE once faulted (a guest page → one host
-    /// frame for the VM's life — no remapping until balloon, which doesn't
-    /// exist), so entries never need invalidation. Each slot is ONE atomic u64
-    /// packing `(page>>12)<<32 | (host>>12)` → lock-free, no torn reads, safe
-    /// for concurrent AP-vCPU access. 0 = empty. Killed the `inject=33µs`
-    /// per-frame walk (RX buffers are reused → near-100% hit rate).
+    /// (`demand_fault_in`) that `page_host` would otherwise repeat on every
+    /// access. The demand map is stable once faulted (a guest page → one
+    /// host frame for the VM's life), so entries never need invalidation.
+    /// Each slot is one atomic u64 packing `(page>>12)<<32 | (host>>12)` →
+    /// lock-free, no torn reads, safe for concurrent AP-vCPU access.
+    /// 0 = empty. RX buffers are reused, so the hit rate is near 100%.
     tlb: [AtomicU64; TLB_SIZE],
 }
 

@@ -1,4 +1,4 @@
-//! virtio-blk-pci device emulation (Phase 12.2 step 2).
+//! virtio-blk-pci device emulation.
 //!
 //! Modern transitional virtio (1.0+) — vendor 0x1AF4, device 0x1042,
 //! class 01_80_00. Linux's `virtio-pci` driver attaches via the four
@@ -12,12 +12,8 @@
 //!   0x0100  Notify Cfg     — driver writes to kick a queue
 //!   0x0200  ISR            — interrupt status (read-to-clear, 1 byte)
 //!   0x0300  Device Cfg     — virtio-blk specifics (capacity, …)
-//!   0x0400+ unused         — reserved for follow-up features
+//!   0x0400+ unused         — reserved
 //! ```
-//!
-//! Phase 12.2.2 wires reads + writes for all four regions, but does
-//! NOT yet trap virtqueue notify writes for processing. Real I/O,
-//! virtqueue parsing and IRQ injection follow in 12.2.3.
 
 #![allow(dead_code)]
 
@@ -98,9 +94,9 @@ pub const SQFS_BAR0_BASE: u64 = 0xFE01_0000;
 /// IRQ line for the sqfs device. 9/10/11/12 are taken by
 /// gpu/net/blk/input; 5 is a free master-PIC line.
 const SQFS_IRQ_LINE: u8 = 5;
-/// npkFS object holding the userspace `.sqfs`. Populated by the OTA
-/// asset pipeline (Bundle milestone); absent until then → empty
-/// backing → guest squashfs mount fails → PID-1 falls back.
+/// npkFS object holding the userspace `.sqfs`, delivered as an OTA asset.
+/// If absent → empty backing → guest squashfs mount fails → PID-1 falls
+/// back.
 const SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
 
 /// Per-queue state.
@@ -161,9 +157,8 @@ pub struct VirtioBlk {
     /// bundle is immutable, distributed via OTA — never persisted.
     persist: bool,
 
-    /// Backing store for the virtual disk. Sized to capacity.
-    /// In-RAM for 12.2.3; will be replaced by an npkFS-backed,
-    /// AES-GCM-encrypted profile-image in 12.2.4+.
+    /// Backing store for the virtual disk. Sized to capacity, held in RAM
+    /// and persisted to npkFS by `save()`.
     backing: alloc::vec::Vec<u8>,
 
     /// Set by mmio_write when the driver kicks a queue. The hypervisor
@@ -181,7 +176,7 @@ const CAPACITY_SECTORS: u64 = 1048576; // 512 MiB — ext4 home image (/dev/vda)
 
 impl VirtioBlk {
     /// Slot 1 — the read-write, npkFS-persisted per-app home image.
-    /// PID-1 mounts it ext4 at `/home/nopeek` so the app's profile
+    /// PID-1 mounts it ext4 as the guest user home so the app's profile
     /// (LibreWolf cookies/history/bookmarks/prefs/extensions) survives
     /// reboots. Cache stays in tmpfs to keep the image small.
     pub fn new() -> Self {
@@ -253,23 +248,23 @@ impl VirtioBlk {
     /// VM exits the run loop. npkFS encrypts every blob with AES-256-GCM
     /// at rest using the user's master key, so storing the plaintext
     /// here yields an encrypted-at-rest profile image automatically.
-    /// Per-sector AEAD with sector-in-AAD (per spec) is a future
-    /// optimization — only matters once we want partial random-access
-    /// without re-encrypting the whole image. For 12.2.4 the whole-blob
-    /// approach gives us crash-loss-bounded persistence (last save wins).
+    /// Per-sector AEAD with sector-in-AAD would allow partial
+    /// random-access without re-encrypting the whole image; the
+    /// whole-blob approach gives crash-loss-bounded persistence (last save
+    /// wins).
     pub fn save(&self) {
         if !self.persist {
             return; // read-only sqfs bundle — nothing to write back.
         }
-        // STREAM the save in 1 MiB chunks instead of a whole-blob upsert.
+        // Stream the save in 1 MiB chunks instead of a whole-blob upsert.
         // upsert encodes + AES-GCM-encrypts the entire image at once, which
-        // needs ~image-size of transient buffers ON TOP of the resident
-        // backing — at 512 MiB that OOM'd the host (256 MiB alloc failed on
-        // a 4-6 GB box already holding the 2 GiB guest + sqfs). The streaming
-        // writer caps peak at one ~1 MiB chunk, and content-addressed dedup
-        // means the mostly-zero fresh image collapses to a handful of blobs
-        // (every all-zero chunk hashes identically → stored once). It
-        // atomically replaces the old image at `finish` (same as upsert).
+        // needs ~image-size of transient buffers on top of the resident
+        // backing and can exhaust host memory next to a large guest. The
+        // streaming writer caps peak at one ~1 MiB chunk, and
+        // content-addressed dedup means the mostly-zero fresh image collapses
+        // to a handful of blobs (every all-zero chunk hashes identically →
+        // stored once). It atomically replaces the old image at `finish`
+        // (same as upsert).
         let mut w = match crate::npkfs::open_streaming_write(PROFILE_PATH) {
             Ok(w) => w,
             Err(e) => { kprintln!("[virtio-blk] save open failed: {:?}", e); return; }
@@ -479,7 +474,7 @@ impl VirtioBlk {
             // ISR is read-to-clear; writes ignored.
         } else if off >= DEVICE_OFF && off < DEVICE_OFF + DEVICE_LEN {
             // Device-cfg writes — virtio-blk allows writeback-cache toggle.
-            // 12.2.2 ignores; we report no-cache features anyway.
+            // Ignored; we report no-cache features anyway.
         }
     }
 
@@ -488,7 +483,7 @@ impl VirtioBlk {
         let v: u64 = match off {
             CC_DEVICE_FEATURE_SELECT => self.device_feature_select as u64,
             CC_DEVICE_FEATURE => {
-                // VIRTIO_F_VERSION_1 (bit 32) is REQUIRED for the
+                // VIRTIO_F_VERSION_1 (bit 32) is required for the
                 // Linux modern virtio-pci driver to claim the device —
                 // `vp_modern_probe` bails with -ENODEV if it's missing.
                 // Selector 0 = bits 0..31, selector 1 = bits 32..63.
@@ -605,14 +600,14 @@ const fn width_mask(width: u8) -> u64 {
 }
 
 /// Where the encrypted per-app home image lives in npkFS. Keyed per app
-/// (hardcoded "browser" for now; parameterised when the app framework
-/// lands so codium/office get their own `apps/<app>/home.img`).
+/// (hardcoded "browser"; other apps would get their own
+/// `apps/<app>/home.img`).
 const PROFILE_PATH: &str = "sys/microvm/apps/browser/home.img";
 
 /// Embedded sparse template of a freshly-mke2fs'd empty 512 MiB ext4.
 /// Format: `"NHT1" | image_size:u32 | num_entries:u32 | (sector_idx:u32,
 /// data:[u8;512])*` — only the non-zero sectors of the fresh fs (133 of
-/// them). Lets the host seed a valid empty ext4 with NO inflate/gzip
+/// them). Lets the host seed a valid empty ext4 with no inflate/gzip
 /// crate in the kernel: alloc zeros, patch the listed sectors in.
 /// Regenerate with `python3 tools/gen_home_template.py [SIZE_MIB]` if the
 /// size/layout ever changes (must match CAPACITY_SECTORS).
@@ -645,8 +640,8 @@ fn load_or_init_backing() -> alloc::vec::Vec<u8> {
 
 /// Cheap content fingerprint (wrapping byte sum, non-zero count) for
 /// persistence diagnosis: lets us see across a save→reboot→load cycle
-/// whether the SAME bytes come back (persist OK) or the template
-/// (write/persist broken). TEMP — remove with the diag.
+/// whether the same bytes come back (persist OK) or the template
+/// (write/persist broken).
 fn img_fingerprint(data: &[u8]) -> (u64, usize) {
     let mut sum: u64 = 0;
     let mut nz: usize = 0;

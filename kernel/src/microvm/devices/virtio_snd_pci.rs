@@ -9,7 +9,7 @@
 //! capture). We service control + tx; event/rx are stubs (output-only).
 //!
 //! PCI cap chain / Common Cfg / MMIO machinery is the shared modern-virtio
-//! pattern, identical to `virtio_net_pci.rs`. Only the device-cfg, the
+//! pattern, as in the other virtio devices. Only the device-cfg, the
 //! control-queue protocol and the tx PCM path are sound-specific.
 
 #![allow(dead_code)]
@@ -25,10 +25,10 @@ pub const BAR0_BASE: u64 = 0xFE01_8000;
 pub const BAR0_SIZE: u64 = 0x4000;
 const BAR0_SIZE_MASK_LO: u32 = !((BAR0_SIZE as u32) - 1) | 0b0100;
 
-/// IRQ line — its own. Shared with virtio-net's 10 it made every network
-/// interrupt run the sound handler too, and that handler's ISR read is an MMIO
-/// exit. Not 8: under `acpi=off` the guest's rtc_cmos claims it. 14 is the
-/// legacy primary-IDE line, and the guest has no IDE.
+/// IRQ line — its own. Sharing virtio-net's 10 would make every network
+/// interrupt run the sound handler too, and that handler's ISR read is an
+/// MMIO exit. Not 8: under `acpi=off` the guest's rtc_cmos claims it. 14 is
+/// the legacy primary-IDE line, and the guest has no IDE.
 const IRQ_LINE: u8 = 14;
 
 const CAP_COMMON_OFF: u8 = 0x40;
@@ -99,20 +99,18 @@ const D_OUTPUT: u8 = 0;
 /// (48 kHz × 2 ch × 2 bytes = 192000 B/s ÷ 100 = 1920). Drives the wall-clock
 /// pacing of tx-buffer completion in `service_tx`.
 ///
-/// WHY wall-clock and not audio_hda's actual drain: the guest virtio-snd driver
-/// is 100 % device-clocked — its hw_ptr, period wakeups and A/V delay ALL come
-/// from when/how much the device completes tx buffers (sound/virtio/
-/// virtio_pcm_msg.c: hw_ptr advances only in msg_complete; no guest timer). A
-/// real device (QEMU virtio_snd_pcm_out_cb) completes each buffer as the real
-/// audio sink consumes it, at the sink's regular small period, never starved.
-/// Our sink (audio_hda.wasm) is a polled best-effort loop that drains in 43 ms
-/// gulps and can be starved under browser load — pacing completion off its
-/// `drained` counter (v0.222.37) made the guest's whole clock gulpy + starvable
-/// → crackle + long buffering + pause-burst. The host HDA plays at exactly
-/// 48 kHz, so a 192000 B/s wall-clock is a faithful, smooth, drain-independent
-/// model of real consumption (this is the model that played 3 min of music
-/// cleanly at v0.222.21). Drift vs the HDA crystal is ~0.01 % and bounded by the
-/// free_space ceiling.
+/// Why wall-clock and not audio_hda's actual drain: the guest virtio-snd
+/// driver is fully device-clocked — its hw_ptr, period wakeups and A/V
+/// delay all come from when/how much the device completes tx buffers
+/// (sound/virtio/virtio_pcm_msg.c: hw_ptr advances only in msg_complete; no
+/// guest timer). A real device (QEMU virtio_snd_pcm_out_cb) completes each
+/// buffer as the sink consumes it, at a regular small period. Our sink
+/// (audio_hda.wasm) is a polled best-effort loop that drains in large gulps
+/// and can be starved under load, so pacing off its drain makes the guest's
+/// clock gulpy and starvable (crackle, long buffering). The host HDA plays
+/// at exactly 48 kHz, so a 192000 B/s wall clock is a faithful, smooth,
+/// drain-independent model of real consumption. Drift vs the HDA crystal
+/// is tiny and bounded by the free_space ceiling.
 const BYTES_PER_TICK: u64 = 192_000 / 100;
 
 /// Fixed buffering downstream of the mailbox: audio_hda's HDA ring is 2 halves of
@@ -124,27 +122,24 @@ const HDA_RING_BYTES: u64 = 16_384;
 /// real-time budget uses this directly.
 const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
 
-/// How far ahead of real-time playback we keep the mailbox filled (~43 ms). With
-/// the budget paced to exact real time the mailbox hovered near empty (HW: buf
-/// troughed at ~450 B = 2 ms); audio_hda refills in bursts (one worker-timer
-/// period of drain at once, ~tens of ms), so a burst-pull against a near-empty
-/// mailbox drained it to silence → residual stutter. This lead keeps a cushion;
-/// it's reported to the guest as latency_bytes so A/V stays synced. Frame-aligned.
+/// How far ahead of real-time playback we keep the mailbox filled (~43 ms).
+/// audio_hda refills in bursts (one worker-timer period of drain at once),
+/// so a burst pull against a near-empty mailbox would drain it to silence.
+/// This lead keeps a cushion; it's reported to the guest as latency_bytes
+/// so A/V stays synced. Frame-aligned.
 const LEAD: u64 = 8_192;
 
-/// Hard cap on mailbox fill (~107 ms). The CPU TSC runs ~0.2 % faster than the
-/// HDA codec crystal, so `bytes_completed` (TSC-paced) creeps ahead of what
-/// audio_hda drains → the mailbox slowly fills. Without the lead, network feed
-/// gaps drained it back down; WITH the lead it doesn't bottom out, so the drift
-/// would accumulate until the mailbox is full and the `free_space` ceiling
-/// throttles completion to the drain rate → the guest clock creeps slow ("the
-/// speed bug came back after a while"). Capping the fill here bounds `buf` so the
-/// drift is bled off continuously instead → real-time pace holds. Must be > LEAD.
+/// Hard cap on mailbox fill (~107 ms). The CPU TSC can run slightly faster
+/// than the HDA codec crystal, so `bytes_completed` (TSC-paced) creeps
+/// ahead of what audio_hda drains and the mailbox slowly fills. With the
+/// lead it never bottoms out, so the drift would accumulate until the
+/// `free_space` ceiling throttles completion to the drain rate and the
+/// guest clock creeps slow. Capping the fill here bleeds the drift off
+/// continuously. Must be > LEAD.
 const MAX_FILL: u64 = 20_480;
 
-/// Verbose lifecycle + rate diagnostics (host serial → run window). On while we
-/// stabilise audio; strip once solid (cheap — lifecycle is a few lines/stream,
-/// the rate heartbeat is throttled to ~2 s).
+/// Verbose lifecycle + rate diagnostics (host serial). Cheap: lifecycle is
+/// a few lines per stream, the rate heartbeat is throttled to ~2 s.
 const SND_DIAG: bool = true;
 static DBG_LAST_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static DBG_BYTES_AT_HB: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -193,22 +188,21 @@ pub struct VirtioSnd {
     /// Wall-clock playback pacing. A real audio device returns each PCM buffer on
     /// the used-ring only *after* it has been played; completing instantly
     /// fast-forwards the guest's ALSA hw_ptr → underrun → cubeb error. We pace
-    /// completion off a smooth 192000 B/s clock derived from the TSC — NOT
+    /// completion off a smooth 192000 B/s clock derived from the TSC, not
     /// `interrupts::ticks()`, whose 100 Hz counter is incremented by Core 0's
-    /// timer IRQ and runs slow when Core 0 is busy compositing the browser tile
-    /// under load (→ the guest's audio clock dragged "too slow / delayed", worse
-    /// at higher resolution). The TSC advances at a constant rate regardless of
-    /// interrupt load. `play_start_tsc` = TSC at PCM_START; `bytes_completed` =
-    /// PCM bytes returned to the guest since then.
+    /// timer IRQ and runs slow when Core 0 is busy under load (dragging the
+    /// guest's audio clock). The TSC advances at a constant rate regardless
+    /// of interrupt load. `play_start_tsc` = TSC at PCM_START;
+    /// `bytes_completed` = PCM bytes returned to the guest since then.
     play_start_tsc: u64,
     bytes_completed: u64,
 
     /// Guest's PCM period size in bytes (from SET_PARAMS). Sizes the pacing
     /// cushion: the wall-clock budget may lead `bytes_completed` by at most two
-    /// periods. When the guest stops feeding (YouTube buffering / pause) while the
+    /// periods. When the guest stops feeding (buffering / pause) while the
     /// stream stays `started`, the budget would otherwise run far ahead and be
-    /// handed back as one instant burst on resume → hw_ptr jump → underrun →
-    /// cubeb error → "can't pause / silent reload". Clamping keeps resume paced.
+    /// handed back as one instant burst on resume → hw_ptr jump → underrun.
+    /// Clamping keeps resume paced.
     period_bytes: u32,
 }
 
@@ -266,11 +260,10 @@ impl VirtioSnd {
         }
     }
 
-    /// Periodic pump (from the VM run loop): keep draining tx as the mailbox
-    /// frees up, so playback paces even without a fresh queue-kick.
-    /// A stream is playing: buffers complete against the wall clock, so the
-    /// device needs service at a steady cadence even while the guest sleeps
-    /// (QEMU drives the same with its audio timer).
+    /// Periodic pump (from the VM run loop). While a stream is playing,
+    /// buffers complete against the wall clock, so the device needs service
+    /// at a steady cadence even while the guest sleeps (QEMU drives the same
+    /// with its audio timer).
     pub fn playing(&self) -> bool { self.slot >= 0 && self.started }
 
     pub fn pump(&mut self, mem: &GuestMem) -> bool {
@@ -376,9 +369,8 @@ impl VirtioSnd {
                 // One OUTPUT stream only. If a slot is still held from a stream
                 // that wasn't cleanly released (cubeb hard-erroring and
                 // re-initialising after an underrun), reuse + clear it instead
-                // of leaking a second slot — four leaked re-inits exhaust the
-                // mailbox, open() returns -1, and every reinit ("OpenCubeb
-                // failed") is then permanently silent.
+                // of leaking a second slot: a few leaked re-inits would
+                // exhaust the mailbox, and every later stream would be silent.
                 if self.slot < 0 { self.slot = crate::audio::open(); }
                 else { crate::audio::reset(self.slot as usize); }
                 self.started = false;
@@ -408,9 +400,9 @@ impl VirtioSnd {
                 // (virtsnd_pcm_msg_pending_num == 0) before it considers the
                 // stream released. Pacing always leaves a few tx buffers un-
                 // completed in the avail ring, so without this flush the guest's
-                // wait TIMES OUT ("failed to flush I/O queue") and the next stream
-                // (resume after pause / page reload) starts on an inconsistent
-                // queue → permanent silence. Flush BEFORE closing the slot.
+                // wait times out ("failed to flush I/O queue") and the next
+                // stream starts on an inconsistent queue → silence. Flush
+                // before closing the slot.
                 self.started = false;
                 let flushed = self.flush_tx(mem);
                 if SND_DIAG { crate::kprintln!("[snd] RELEASE slot={} flushed={}", self.slot, flushed); }
@@ -424,7 +416,7 @@ impl VirtioSnd {
         }
     }
 
-    /// Complete (return on the used ring) EVERY pending tx buffer immediately,
+    /// Complete (return on the used ring) every pending tx buffer immediately,
     /// ignoring pacing. Required on PCM_RELEASE: the guest's sync_stop() blocks
     /// until the tx queue is empty, so any buffer left in the avail ring hangs
     /// the teardown (and corrupts the next stream). We discard the un-played PCM
@@ -469,7 +461,7 @@ impl VirtioSnd {
     // ── tx (playback) queue ──────────────────────────────────────────────
     // Chain: [virtio_snd_pcm_xfer {le32 stream_id}] [PCM data...] [virtio_snd_pcm_status {le32 status; le32 latency} writable]
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
-        // Per virtio-sound: do NOT consume tx buffers until PCM_START. cubeb
+        // Per virtio-sound: do not consume tx buffers until PCM_START. cubeb
         // pre-fills the tx queue before START; completing that pre-roll early
         // advances the guest's ALSA hw_ptr before playback begins -> underrun
         // -> cubeb errors right at START. Hold the pre-roll until started.
@@ -489,10 +481,9 @@ impl VirtioSnd {
         let mut chunk = [0u8; 4096];
 
         // Real-time playback budget from the TSC (constant rate, immune to
-        // interrupt-load jitter — `interrupts::ticks()` runs slow when Core 0 is
-        // busy compositing under load, which dragged the guest's audio clock too
-        // slow). Buffers complete only up to this watermark, so the guest sees an
-        // honest real-time sink instead of an instant drain.
+        // interrupt-load jitter, unlike `interrupts::ticks()`). Buffers
+        // complete only up to this watermark, so the guest sees an honest
+        // real-time sink instead of an instant drain.
         let tsc_now = crate::interrupts::rdtsc();
         let tsc_hz = crate::interrupts::tsc_freq().max(1);
         // Real-time playback position (bytes that should have reached the speaker
@@ -502,7 +493,7 @@ impl VirtioSnd {
 
         // Complete up to LEAD ahead of real playback so the mailbox keeps a
         // cushion against audio_hda's bursty poll-pulls (else it momentarily
-        // empties → silence → brief dropout, seen on YouTube + webradio).
+        // empties → brief dropout).
         let mut budget = position.saturating_add(LEAD);
 
         // Cushion clamp: while the guest stopped feeding (buffering / pause) the
@@ -520,9 +511,8 @@ impl VirtioSnd {
             budget = target;
         }
 
-        // Rate heartbeat (~2 s): actual bytes completed vs the 192000 B/s target
-        // — confirms the guest's clock runs real-time. Also prints ticks() so we
-        // can see how far the IRQ-counter lagged the TSC under load.
+        // Rate heartbeat (~2 s): actual bytes completed vs the 192000 B/s target,
+        // plus ticks() to show how far the IRQ counter lags the TSC under load.
         if SND_DIAG {
             let last = DBG_LAST_HB.load(core::sync::atomic::Ordering::Relaxed);
             if tsc_now.wrapping_sub(last) > tsc_hz.saturating_mul(2) {

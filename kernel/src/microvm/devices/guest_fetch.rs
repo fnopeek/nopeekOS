@@ -6,15 +6,15 @@
 //!
 //! Same code works for VMX, where decode-assists doesn't exist at all.
 //!
-//! Assumptions (valid for any Linux ≥ 5.x in our MicroVM):
+//! Assumptions (valid for the Linux guests we run):
 //! - 4-level long-mode paging (CR4.PAE=1, EFER.LME=1, CR0.PG=1)
 //! - Guest page tables live in guest RAM, read via `GuestMem`. The
 //!   walk is gpa-based; `GuestMem` owns gpa→host translation + bounds
-//!   (B3: scattered/demand-paged — including the guest PT pages this
-//!   walk itself reads).
+//!   (demand-paged — including the guest PT pages this walk itself
+//!   reads).
 //!
-//! No support for 5-level paging (LA57) — Alpine's vmlinuz-virt 6.18
-//! doesn't enable it; we'd need to detect CR4.LA57 and add a PML5 walk.
+//! Not implemented: 5-level paging (LA57) — would need a CR4.LA57 check
+//! and a PML5 walk.
 
 #![allow(dead_code)]
 
@@ -73,11 +73,10 @@ pub fn fetch_inst(
 fn read_15_bytes(guest_phys: u64, mem: &GuestMem) -> Option<[u8; 15]> {
     // x86 instructions are at most 15 bytes. If the instruction starts
     // late enough in a page that 15 bytes would cross a 4 KB boundary,
-    // we'd need to do a second walk for the next page. Bail for now —
-    // Linux's MMIO accessors don't generate such instructions in
-    // practice (each is an aligned `mov`, ~3-7 bytes, well within a
-    // single page). This single-page guarantee also keeps the
-    // `GuestMem` read within one (B3) demand-paged frame.
+    // we'd need to do a second walk for the next page. Not implemented:
+    // Linux's MMIO accessors are aligned `mov`s of a few bytes, well
+    // within a single page. This single-page guarantee also keeps the
+    // `GuestMem` read within one demand-paged frame.
     let page_off = guest_phys & 0xFFF;
     if page_off > 0xFF1 { return None; }
 

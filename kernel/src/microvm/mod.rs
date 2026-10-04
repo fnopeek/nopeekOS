@@ -1,4 +1,4 @@
-//! MicroVM subsystem (Phase 12).
+//! MicroVM subsystem.
 //!
 //! Hosts the per-app Linux MicroVM plumbing:
 //!   * `cpu/`   — Intel VMX + AMD SVM backends, vendor dispatch
@@ -9,7 +9,7 @@
 //! etc.; dispatch to the matching backend (Intel VMX or AMD SVM)
 //! happens in `cpu::*`.
 //!
-//! Long-term shape (`docs/plan/MICROKERNEL_REFACTOR.md`):
+//! Layout:
 //! ```text
 //! microvm/
 //! ├── mod.rs         — public API re-export

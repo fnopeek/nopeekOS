@@ -1,9 +1,9 @@
 //! Off-vCPU virtio-net data plane for the microvm — the vhost-net model.
 //!
-//! Ported 1:1 from the in-kernel virtio-net DEVICE backend Linux runs:
+//! Ported 1:1 from the in-kernel virtio-net device backend Linux runs:
 //!   * `drivers/vhost/net.c` — `handle_rx` / `handle_tx` (the worker pulls the
 //!     tap one frame at a time, copies into the guest ring while the guest has
-//!     RX buffers, and STOPS when it doesn't — real backpressure, no synthetic
+//!     RX buffers, and stops when it doesn't — real backpressure, no synthetic
 //!     staging queue).
 //!   * `drivers/vhost/vhost.c` — `vhost_add_used_and_signal` / `vhost_signal` /
 //!     `vhost_notify` (EVENT_IDX: raise the guest IRQ only when used.idx crosses
@@ -13,7 +13,7 @@
 //!     Here: `raise_irq()` (folds IRQ10) + `kick_bsp_net_irq()` (wakes the
 //!     parked vCPU fiber).
 //!
-//! Why off-vCPU: the whole RX+TX data plane runs on ONE dedicated core (this
+//! Why off-vCPU: the whole RX+TX data plane runs on one dedicated core (this
 //! fiber), so the vCPUs only ring the TX doorbell (a lock-free flag) and reap
 //! their IRQ. The vCPU is never the drainer, so it can't serialize the producer
 //! behind the consumer.
@@ -23,10 +23,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// True iff there is RX or TX work RIGHT NOW — a frame in the tap or a queued
-/// guest TX kick. Lock-free, and card-neutral: this used to compare the QEMU
-/// virtio NIC's used.idx, which on both target machines reads 0 forever, so the
-/// test was `0 != 0` and the worker believed there was never anything to do.
+/// True iff there is RX or TX work right now — a frame in the tap or a queued
+/// guest TX kick. Lock-free and card-neutral (it never looks at a NIC's
+/// ring, whose index may not be meaningful for every card).
 #[inline]
 fn has_work() -> bool {
     use crate::microvm::devices::{guest_mem, nat, net_backend};
@@ -112,7 +111,7 @@ const BUSY_POLL_US: u64 = 1000;
 /// Spawn the data-plane fiber on `core` (load-aware, never Core 0). Idempotent
 /// within a VM session. `full` = the off-vCPU vhost path (RX+TX on this core).
 /// On a `!full` IRQ-driven NIC the BSP keeps the ring drained itself, so the
-/// fiber is a NO-OP there; it runs `!full` only for a POLLED NIC that needs an
+/// fiber is a no-op there; it runs `!full` only for a polled NIC that needs an
 /// independent drainer.
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
@@ -122,12 +121,10 @@ pub fn start_worker(core: usize) {
     crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
-/// The active card raises no RX interrupt, so SOMEBODY has to poll it — Linux
-/// gives such a device a poller too. Doing it here is not the old "the worker
-/// drains the NIC and therefore only ever sees what IT pulled": the frames go
-/// through the same one door as everyone else's (`eth::handle_frame` →
-/// `nat::tap_inbound`), and the worker's own wake still hangs on its doorbell,
-/// not on this card.
+/// The active card raises no RX interrupt, so somebody has to poll it, as
+/// Linux gives such a device a poller too. The frames still go through the
+/// same path as everyone else's (`eth::handle_frame` → `nat::tap_inbound`),
+/// and the worker's own wake still hangs on its doorbell, not on this card.
 #[inline]
 fn nic_needs_polling() -> bool { crate::netdev::rx_wake_vector().is_none() }
 
@@ -157,22 +154,20 @@ const RX_PKT_WEIGHT: u64 = 256;
 
 /// vhost `handle_rx` + `handle_tx`: one pass on this core, then wake the guest.
 ///
-/// The fiber does NOT touch a network card. Whoever drains the host NIC — Core
-/// 0, a recv spin, or the AX200's WASM driver from its own fiber — ends in
-/// `nat::tap_inbound`, and this reads the tap. That is what makes one data path
-/// possible: where a frame ENTERS no longer decides whether this worker can see
-/// it. Under the old shape the WASM driver delivered straight into
-/// `eth::handle_frame`, which this function never looked at.
+/// The fiber does not touch a network card. Whoever drains the host NIC —
+/// Core 0, a recv spin, or a WASM driver from its own fiber — ends in
+/// `nat::tap_inbound`, and this reads the tap, so where a frame enters does
+/// not decide whether this worker can see it.
 ///
-/// Lock discipline (the ACK-jitter fix): the device mutex is held only for the
-/// SHORT guest-ring section (inject + TX ring walk). The vCPU spins on that same
-/// mutex for its per-IRQ ISR read, which sits on the guest's ACK/NAPI path, so
-/// the expensive masquerade + segmentation runs outside it.
+/// Lock discipline: the device mutex is held only for the short guest-ring
+/// section (inject + TX ring walk). The vCPU spins on that same mutex for
+/// its per-IRQ ISR read, which sits on the guest's ACK/NAPI path, so the
+/// expensive masquerade + segmentation runs outside it.
 fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     use crate::microvm::devices::{nat, net_backend};
 
-    // ── handle_rx: move frames from the TAP into the guest RX ring while the
-    //    guest has buffers, and STOP when it doesn't. vhost leaves the frame in
+    // ── handle_rx: move frames from the tap into the guest RX ring while the
+    //    guest has buffers, and stop when it doesn't. vhost leaves the frame in
     //    the socket and waits to be told buffers were refilled — it stages it
     //    nowhere else. That is the whole of the backpressure: the tap fills,
     //    the producer counts a drop, the far end slows down. ──
@@ -228,7 +223,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     let rx_raise = rx_raise || reply_rx_raise;
 
     // Flush any guest egress batched into the host NIC's TX ring. Host-stack
-    // frames are no longer this fiber's business — it does not drain a card.
+    // frames are not this fiber's business — it does not drain a card.
     crate::netdev::tx_flush();
 
     // Mark the data plane active so the halt-poll stays warm through a transfer.
@@ -278,17 +273,16 @@ fn worker_entry(_arg: u64) {
             last_tick = now;
         }
 
-        // HALT-POLL (KVM/NAPI busy-poll, the Linux model): during an ACTIVE
-        // transfer, stay WARM instead of HLTing between bursts. The RX→ACK loop
-        // (worker injects RX → guest ACKs → worker egresses the ACK) must not hit
-        // the ~1 ms HLT/timer granularity: a delayed ACK makes the server fire a
-        // Tail-Loss-Probe → SPURIOUS retransmit (measured: dsack==retrans, lost=0)
-        // → its cwnd/pacing get confused → throughput collapses (the lottery). So
-        // busy-poll the LOCK-FREE has_work() condition for up to BUSY_POLL_US; the
-        // instant RX arrives or an ACK is queued, loop and service it in µs. This
-        // is NOT the reverted lock-hammer spin — between events it only reads two
-        // atomics + cpu_relax, never the device lock. Reserved worker core +
-        // gated on recently_active (idle → HLT at once, no core-burn).
+        // Halt-poll (KVM/NAPI busy-poll): during an active transfer, stay warm
+        // instead of HLTing between bursts. The RX→ACK loop (worker injects RX
+        // → guest ACKs → worker egresses the ACK) must not hit the HLT/timer
+        // granularity: a delayed ACK makes the server fire a Tail-Loss-Probe,
+        // a spurious retransmit that confuses its cwnd/pacing and collapses
+        // throughput. So busy-poll the lock-free has_work() condition for up
+        // to BUSY_POLL_US; the instant RX arrives or an ACK is queued, loop
+        // and service it. Between events this reads only two atomics +
+        // cpu_relax, never the device lock. Reserved worker core + gated on
+        // recently_active (idle → HLT at once, no core burn).
         let gm = crate::microvm::devices::guest_mem::active();
         if crate::microvm::devices::nat::recently_active() {
             // Polling: the guest need not kick TX — this loop reads the ring.
@@ -322,10 +316,10 @@ fn worker_entry(_arg: u64) {
             }
         }
 
-        // Park on OUR OWN doorbell — never on some card's MSI-X. `tap_push` wakes
+        // Park on our own doorbell, never on some card's MSI-X. `tap_push` wakes
         // this core on the tap's empty→occupied edge and `note_tx_kick` on a
         // guest TX kick; both go through `kick_host_core`, which bumps this
-        // core's kick generation BEFORE the IPI. Announce the park first, then
+        // core's kick generation before the IPI. Announce the park first, then
         // re-check, so a frame that lands in the arming window is never lost:
         // either we see it here, or the producer sees `parked` and kicks, and the
         // scheduler re-tests the generation on every scan.

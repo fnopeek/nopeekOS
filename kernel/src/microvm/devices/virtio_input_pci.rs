@@ -1,4 +1,4 @@
-//! virtio-input-pci device emulation (Phase 12.4c).
+//! virtio-input-pci device emulation.
 //!
 //! Modern virtio (1.0+) input device — vendor 0x1AF4, device 0x1052
 //! (= 0x1040 + 18, virtio-spec device-id 18). Two virtqueues:
@@ -15,9 +15,9 @@
 //!   off  8  u8[128] u         (read-only, content depends on select)
 //! ```
 //!
-//! Smoke-test scope for 12.4c: device appears in PCI scan, Linux probes
-//! it, /dev/input/event0 falls out — but we never inject any events.
-//! Real event injection (Shade compositor → guest) comes in 12.4d.
+//! Host input (keyboard, absolute pointer, wheel) is queued from the
+//! Shade surface window via `push_input_event` and delivered by
+//! `drain_injected`.
 
 #![allow(dead_code)]
 
@@ -118,8 +118,7 @@ const MAX_QUEUE_SIZE: u16 = 256;
 /// Shade Surface-window branch (Core 0) and drained into the eventq
 /// by `drain_injected` on the timer tick. Bounded — drop oldest on
 /// overflow (a wedged guest must not OOM the host). Single global:
-/// one focused Surface VM at a time (forward-compat #2 — keyed
-/// generalisation later, with the registry).
+/// one focused Surface VM at a time.
 static INPUT_Q: spin::Mutex<alloc::collections::VecDeque<(u16, u16, u32)>> =
     spin::Mutex::new(alloc::collections::VecDeque::new());
 
@@ -231,8 +230,7 @@ impl VirtioInput {
     }
 
     /// Process queue notify. q0 = eventq (driver fills with empty
-    /// buffers, host will populate when events arrive — for 12.4c we
-    /// have no events to inject, just leave buffers queued).
+    /// buffers; `drain_injected` populates them when events arrive).
     /// q1 = statusq (driver writes LED state, we ack via used-ring).
     pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         match queue_idx {
@@ -534,7 +532,7 @@ impl VirtioInput {
     }
 
     /// Latch the (size, u) response for the current (select, subsel).
-    /// virtio 1.2 §5.8.5: the device MUST guarantee that once `select`
+    /// virtio 1.2 §5.8.5: the device must guarantee that once `select`
     /// is set, `size` and `u` reflect that selection coherently — i.e.
     /// we re-derive on every selector write, not lazily on read.
     fn recompute_cfg(&mut self) {
@@ -586,12 +584,8 @@ impl VirtioInput {
             }
             // EV_KEY — advertise the full 0..=255 keycode range (32
             // bytes). Linux's input core drops any EV_KEY whose code
-            // isn't set in dev->keybit (test_bit in input_handle_event)
-            // — so declaring only KEY_ESC/KEY_A meant every other
-            // injected key (e.g. KEY_SPACE=57) was silently filtered
-            // before evdev, even though the eventq/IRQ path worked.
-            // Covering the standard keyboard range fixes injection now
-            // and is what Phase B's real per-scancode mapping needs.
+            // isn't set in dev->keybit (test_bit in input_handle_event),
+            // so every injectable key must be declared here.
             x if x == EV_KEY => {
                 let _ = (KEY_ESC, KEY_A); // (kept as named refs)
                 for code in 0..=255usize {
@@ -599,14 +593,14 @@ impl VirtioInput {
                 }
                 // Pointer buttons live above the keyboard range
                 // (BTN_LEFT = 0x110). Set exactly the three we inject —
-                // NOT a blanket 0x100..0x2ff — so the guest input stack
+                // not a blanket 0x100..0x2ff — so the guest input stack
                 // classifies this as a plain pointer, not a tablet
                 // (BTN_TOOL_*/BTN_TOUCH would flip libinput to tablet
-                // semantics later in Phase B).
+                // semantics).
                 self.set_bit(BTN_LEFT as usize);
                 self.set_bit(BTN_RIGHT as usize);
                 self.set_bit(BTN_MIDDLE as usize);
-                // u16 math: BTN_MIDDLE=0x112 → 35. Must NOT cast to u8
+                // u16 math: BTN_MIDDLE=0x112 → 35. Must not cast to u8
                 // before the divide (0x112 as u8 = 18 → size 3, which
                 // truncates the bitmap below KEY_SPACE=57 and Linux's
                 // input core then filters every real key).

@@ -1,17 +1,17 @@
-//! virtio-gpu-pci device emulation (Phase 12.4).
+//! virtio-gpu-pci device emulation.
 //!
 //! Modern virtio (1.0+) GPU device — vendor 0x1AF4, device 0x1050,
 //! class 0x03_80_00 (Display controller / Other). Two virtqueues:
 //!   q0 = controlq (resource/scanout commands)
 //!   q1 = cursorq  (cursor updates — acknowledged but ignored)
 //!
-//! 12.4.0 scope: 2D scanout end-to-end. We accept:
+//! 2D scanout end-to-end. We accept:
 //!   * GET_DISPLAY_INFO → report one 1280×720 display
 //!   * RESOURCE_CREATE_2D → track resource (id, fmt, w, h)
 //!   * RESOURCE_ATTACH_BACKING → record guest page list per resource
 //!   * SET_SCANOUT → bind resource to scanout 0
 //!   * TRANSFER_TO_HOST_2D → copy guest pages → host-side resource buffer
-//!   * RESOURCE_FLUSH → log + (eventually) composite into shade
+//!   * RESOURCE_FLUSH → composite into the bound Shade surface
 //!   * RESOURCE_UNREF / DETACH_BACKING → drop resource
 //!   * Cursor cmds → respond OK_NODATA, no rendering
 //!
@@ -84,17 +84,17 @@ const DC_NUM_CAPSETS:   u32 = 0x0C;
 
 /// `events_read` bit: the display configuration changed → the guest
 /// must re-issue GET_DISPLAY_INFO. Raised by `signal_display_change`
-/// when Shade resizes the tile (D4 live-resize round-trip).
+/// when Shade resizes the tile (live-resize round-trip).
 const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1 << 0;
 
 /// virtio-gpu feature bit. We advertise EDID so the guest's
 /// virtio_gpu_config_changed_work_func also calls
 /// virtio_gpu_cmd_get_edids on every DISPLAY event. The EDID callback
-/// in turn calls drm_kms_helper_hotplug_event() **unconditionally** —
-/// where drm_helper_hpd_irq_event would NOT, because the connector
+/// in turn calls drm_kms_helper_hotplug_event() unconditionally,
+/// where drm_helper_hpd_irq_event would not, because the connector
 /// stays "connected" across a tile resize. That's the only path that
 /// makes wlroots/cage actually rescan the output and propagate a new
-/// xdg_surface.configure to the client (LibreWolf etc.).
+/// xdg_surface.configure to the client.
 const VIRTIO_GPU_F_EDID: u32 = 1 << 1;
 
 // virtio-gpu protocol command/response types
@@ -126,10 +126,10 @@ const DISPLAY_H: u32 = 720;
 
 const NUM_QUEUES: u16 = 2;
 /// Small on purpose: the guest's virtio-gpu driver creates no fence for a
-/// dumb primary buffer and emulates no vblank, so the ONLY thing that paces
+/// dumb primary buffer and emulates no vblank, so the only thing that paces
 /// its compositor is a full controlq (`virtio_gpu_queue_ctrl_sgs` sleeps
 /// for space). 16 descriptors ≈ two frames (TRANSFER + SET_SCANOUT + FLUSH,
-/// two descriptors each) — at 64 it rendered ~10 frames ahead.
+/// two descriptors each); a larger queue lets it render many frames ahead.
 const MAX_QUEUE_SIZE: u16 = 16;
 /// The display refresh the controlq is paced to (see `service_controlq`).
 const VBLANK_HZ: u64 = 60;
@@ -215,7 +215,7 @@ pub struct VirtioGpu {
     /// Per-scanout bindings.
     scanouts: [Scanout; MAX_SCANOUTS],
 
-    /// D4 disconnect/reconnect state. wlroots/cage only ever picks an
+    /// Disconnect/reconnect state. wlroots/cage only ever picks an
     /// output mode at connector-up time — a "preferred mode changed
     /// while still connected" hotplug uevent is silently ignored. To
     /// force a real mode-set on tile resize we synthesize a connector
@@ -243,9 +243,8 @@ pub struct VirtioGpu {
     set_scanout_log_count: u32,
 
     /// [gpu-dmg] instrumentation: rolling sum of FLUSH damage-rect area vs
-    /// tile area, logged every `DMG_LOG_EVERY` flushes so we can see on HW
-    /// whether the guest sends tight damage rects (→ damage-clipped MMIO
-    /// blit is a big 4K win) or dirties the whole scanout (→ no win).
+    /// tile area, logged every `DMG_LOG_EVERY` flushes, showing whether the
+    /// guest sends tight damage rects or dirties the whole scanout.
     dmg_area_acc: u64,
     dmg_tile_acc: u64,
     dmg_flush_count: u32,
@@ -309,7 +308,7 @@ impl VirtioGpu {
         self.pending_kick_queue.take()
     }
 
-    /// Shade resized the tile → start a D4 disconnect/reconnect cycle.
+    /// Shade resized the tile → start a disconnect/reconnect cycle.
     /// Phase 1 (this call): GET_DISPLAY_INFO will report the connector
     /// as `enabled=0`, the guest sees `connector_status_disconnected`,
     /// wlroots/cage tears down the output. Phase 2 (`tick_d4`, ~100 ms
@@ -321,9 +320,9 @@ impl VirtioGpu {
     ///
     /// Why two phases: wlroots only mode-sets at connector-up time.
     /// A "preferred mode changed while still connected" hotplug uevent
-    /// (which our prior signal_display_change emitted) is silently
-    /// dropped. The disconnect/reconnect round-trip is the one path
-    /// every Wayland compositor honors because it's what real HW does.
+    /// is silently dropped. The disconnect/reconnect round-trip is the
+    /// one path every Wayland compositor honors because it's what real
+    /// HW does.
     ///
     /// Caller injects IRQ 9 right after this returns. Pass the current
     /// host tick from `interrupts::ticks()`.
@@ -336,7 +335,7 @@ impl VirtioGpu {
         self.config_generation = self.config_generation.wrapping_add(1);
     }
 
-    /// Phase 2 of the D4 cycle: if a disconnect window is pending and
+    /// Phase 2 of the resize cycle: if a disconnect window is pending and
     /// the reconnect tick has been reached, flip the connector back to
     /// `enabled=1` and raise a fresh DISPLAY event. Returns `true` iff
     /// the reconnect fired (caller injects IRQ 9 then).
@@ -354,7 +353,7 @@ impl VirtioGpu {
         }
     }
 
-    /// True while we're in the disconnect half of a D4 cycle. Used by
+    /// True while we're in the disconnect half of a resize cycle. Used by
     /// the vmx/svm run-loop to suppress fresh DISPLAY events until the
     /// reconnect has fired (otherwise back-to-back resizes would queue
     /// disconnects without the matching reconnect).
@@ -553,14 +552,14 @@ impl VirtioGpu {
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
                 let _ = ctx_id;
-                // D4: report the bound window's content rect so the
+                // Report the bound window's content rect so the
                 // guest renders to the tile size (no host scaling).
                 // Falls back to the default if Shade hasn't placed the
                 // window yet / VM unbound (dev fullscreen path).
                 let (dw, dh) = crate::shade::surface::tile_size(
                     crate::microvm::vm_window())
                     .unwrap_or((DISPLAY_W, DISPLAY_H));
-                // Disconnect half of a D4 cycle: report enabled=0 so
+                // Disconnect half of a resize cycle: report enabled=0 so
                 // the guest connector goes status_disconnected → the
                 // compositor tears down the output.
                 let enabled = !self.d4_disconnecting();
@@ -745,21 +744,17 @@ impl VirtioGpu {
             if dst_lin + row_bytes > host_buf.len() { break; }
             copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);
         }
-        // The per-frame pixel-copy cost on the vCPU core — in CYCLES, not just
-        // bytes. The comment here has claimed to measure this for months while
-        // recording only the byte count, and bytes cannot answer the question:
-        // 179 MB/s is either 3 % of a core or 90 % of one depending entirely on
-        // how fast `copy_from_backing` walks the guest's backing pages. That
-        // difference is the difference between "the browser renders" and "the
-        // browser renders INSTEAD of running its network stack".
+        // The per-frame pixel-copy cost on the vCPU core, in cycles: the
+        // byte count alone cannot say how much of a core the copy takes,
+        // which depends on how fast `copy_from_backing` walks the guest's
+        // backing pages.
         super::gpu_backend::note(
             super::gpu_backend::STAT_XFER_KB, (h as u64) * (row_bytes as u64) / 1024);
         crate::microvm::devices::nat::note_gpu_transfer(
             (h as u64) * (row_bytes as u64),
             crate::interrupts::rdtsc().wrapping_sub(t0));
 
-        // One-time bring-up confirmation; the pixel pipeline is proven
-        // (LibreWolf renders) so the per-frame churn is just noise.
+        // One-time bring-up confirmation; per-frame logging is noise.
         let n = self.transfer_log_count;
         self.transfer_log_count = n.saturating_add(1);
         if n < 1 {
@@ -783,7 +778,7 @@ impl VirtioGpu {
             Some(r) => r, None => return,
         };
         // Same resource, nothing transferred since its last flush: the surface
-        // already shows exactly this. (A flip to the OTHER buffer must copy.)
+        // already shows exactly this. (A flip to the other buffer must copy.)
         if resource_id == last_res && r.frame == r.flushed_frame {
             return;
         }
@@ -791,10 +786,8 @@ impl VirtioGpu {
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
 
-        // One-time "first guest frame reached the host" confirmation,
-        // no hex preview (it was always-zero bring-up debug + an
-        // expensive per-flush String build). The pixel pipeline is
-        // proven end-to-end; further flushes are silent.
+        // One-time "first guest frame reached the host" confirmation;
+        // further flushes are silent.
         let n = self.flush_log_count;
         self.flush_log_count = n.saturating_add(1);
         if n < 1 {
@@ -811,7 +804,7 @@ impl VirtioGpu {
         // fullscreen blit only if unbound (e.g. compositor not up).
         // The FLUSH rect (x,y,w,h) is the guest's damage region for this
         // present. Clamp it to the resource and forward it so the host
-        // blits only the changed pixels (4K win) instead of the whole tile.
+        // blits only the changed pixels instead of the whole tile.
         let dmg_w = w.min(r.width.saturating_sub(x.min(r.width)));
         let dmg_h = h.min(r.height.saturating_sub(y.min(r.height)));
 
@@ -821,9 +814,8 @@ impl VirtioGpu {
         self.dmg_flush_count = self.dmg_flush_count.wrapping_add(1);
         if self.dmg_flush_count % DMG_LOG_EVERY == 0 && self.dmg_tile_acc > 0 {
             let pct = self.dmg_area_acc.saturating_mul(100) / self.dmg_tile_acc;
-            // HW confirmed the guest dirties 100% of the scanout every frame,
-            // so only shout when partial damage actually appears (a future
-            // guest/compositor that would make damage-clipping pay off).
+            // Guests typically dirty 100% of the scanout every frame, so only
+            // report when partial damage actually appears.
             if pct < 95 {
                 kprintln!(
                     "[gpu-dmg] {} flushes: avg damage {}% of tile (last {}x{}+{}+{} of {}x{})",
@@ -1229,7 +1221,7 @@ fn write_cvt_dtd(dtd: &mut [u8], w: u32, h: u32) {
 
 /// Build a GET_DISPLAY_INFO response: ctrl_hdr + array of 16
 /// virtio_gpu_display_one. Only scanout 0 is reported; `enabled` is
-/// driven by the D4 disconnect/reconnect state (false during the
+/// driven by the disconnect/reconnect state (false during the
 /// disconnect half of a tile-resize round-trip).
 fn build_display_info_resp(flags: u32, fence_id: u64, disp_w: u32, disp_h: u32, enabled: bool) -> Vec<u8> {
     // Per virtio-gpu spec: VIRTIO_GPU_MAX_SCANOUTS = 16.

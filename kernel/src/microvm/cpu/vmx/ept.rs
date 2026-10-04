@@ -1,30 +1,12 @@
-//! Extended Page Tables (EPT) — Phase 12.1.1a/c-1/c-3.
+//! Extended Page Tables (EPT).
 //!
-//! Maps a 64-MB guest-physical window [0, 64 MB) onto a contiguous
-//! 64-MB host-physical region using 2-MB EPT large pages (32 leaf
-//! entries in a single PD). The host backing region is allocated
-//! once via `memory::allocate_contiguous(GUEST_RAM_FRAMES + slack)`;
-//! the caller rounds the result up to a 2-MB boundary and passes
-//! that base in.
-//!
-//! Why non-identity (12.1.1c-1 vs the v0.97 1-GB identity map):
-//! the guest will copy Linux's bzImage into its address space at
-//! guest-phys 0x10000 (setup) and 0x100000 (protected-mode kernel)
-//! — but host_phys 0x100000 is the kernel.bin's own load address
-//! (Multiboot2 puts us at 1 MB). A non-identity EPT separates the
-//! two so the guest can write freely without corrupting host code.
-//!
-//! Why 64 MB: Alpine 6.18 linux-virt's `init_size` field reports
-//! 0x25ff000 ≈ 38 MB — that's how much memory Linux's early boot
-//! needs for decompression buffers + brk + page tables before
-//! it sees its own memory map. 16 MB (12.1.1c-1) was enough for
-//! the real-mode HLT-test substrate but cannot host real Linux.
-//! 64 MB rounded up gives Linux some headroom and stays in a
-//! single PD's range (32 × 2-MB leaves; one PML4 + one PDPT + one
-//! PD covers everything). Larger windows would need a second PD.
-//!
-//! Tables are leaked (same lifecycle as VMXON / VMCS regions in
-//! `vmx/enable.rs`).
+//! Maps guest-physical RAM onto host-physical memory at an offset
+//! (non-identity), so the guest can place Linux at guest-phys 0x10000 /
+//! 0x100000 without touching the host kernel image at the same host
+//! addresses. The low boot window is one contiguous block of 2-MB leaves;
+//! the rest of guest RAM is demand-paged 4 KB on EPT violation. The high
+//! MMIO range [3 GiB, 4 GiB) has its own PD (scratch page, trapped
+//! LAPIC/IOAPIC pages).
 //!
 //! Reference: Intel SDM Vol. 3C §28.2 (EPT Mechanism), Vol. 3D
 //! Appendix A.10 (VPID and EPT Capabilities).
@@ -60,13 +42,12 @@ const GUEST_RAM_ALIGN_SLACK: usize = 511;
 /// Bits [51:12] of an EPT entry hold the next-level / page phys addr.
 const EPT_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// B3 hybrid split: `[0, BOOT_WINDOW_BYTES)` is one contiguous 2-MB-
-/// leaf block (fast boot, no faults on the early path, covers the
-/// kernel image + initramfs @ 0x0C00_0000 + boot_params); everything
-/// above is demand-paged 4 KB on EPT-violation. 256 MiB is reliably
-/// allocatable even on a fragmented host (the 1 GiB contiguous alloc
-/// was the fragmentation problem); the lazy region is the page cache
-/// / browser heap, the bulk on a ≥1 GiB guest.
+/// Hybrid split: `[0, BOOT_WINDOW_BYTES)` is one contiguous 2-MB-leaf
+/// block (fast boot, no faults on the early path, covers the kernel image
+/// + initramfs @ 0x0C00_0000 + boot_params); everything above is
+/// demand-paged 4 KB on EPT violation. 256 MiB stays allocatable on a
+/// fragmented host, where a 1 GiB contiguous block may not; the lazy
+/// region is the page cache / browser heap, the bulk on a ≥1 GiB guest.
 pub const BOOT_WINDOW_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Round a raw `allocate_contiguous` base up to the next 2-MB
@@ -77,42 +58,36 @@ pub fn round_up_to_2mb(raw_base: u64) -> u64 {
 
 /// Contiguous boot window size for a guest of `guest_bytes`
 /// (= `min(BOOT_WINDOW_BYTES, guest_bytes)`, 2-MB-aligned). A guest
-/// ≤ 256 MiB (small-host B2 policy) is fully contiguous → no demand
-/// region, behaviour identical to B2.
+/// ≤ 256 MiB is fully contiguous → no demand region.
 pub fn boot_window_bytes(guest_bytes: u64) -> u64 {
     if crate::microvm::devices::guest_mem::DEMAND_ENABLED {
         guest_bytes.min(BOOT_WINDOW_BYTES)
     } else {
         // Demand off → whole guest contiguous (boot_leaves ==
-        // guest_leaves, no demand PTs): exactly B2/A2.
+        // guest_leaves, no demand PTs).
         guest_bytes
     }
 }
 
-/// 4 KB host frames to allocate **contiguously** for the boot window
-/// (+ 2-MB-align slack). The demand region needs NO upfront
+/// 4 KB host frames to allocate contiguously for the boot window
+/// (+ 2-MB-align slack). The demand region needs no upfront
 /// allocation — only touched 4 KB pages are committed on fault.
 pub fn boot_frames_for(guest_bytes: u64) -> usize {
     (boot_window_bytes(guest_bytes) / 4096) as usize + GUEST_RAM_ALIGN_SLACK
 }
 
 /// Build the EPT. Maps:
-///   - guest-physical [0, 64 MB) → host-physical [host_base, +64 MB)
-///     via 32 × 2-MB leaf entries (PD)
-///   - guest-physical [0xFEC00000, 0xFF000000) → 4 KB dummy scratch
-///     page (aliased): 4 MB of guest-phys → same single host page
-///     via PT-level mapping. Covers IOAPIC (0xFEC00000), HPET
-///     (0xFED00000), and LAPIC (0xFEE00000). Reads return scratch
-///     contents (initially zero), writes land in scratch — not real
-///     MMIO semantics, but enough to absorb Linux's early MMIO
-///     probes without EPT-violating. With `nolapic noapic acpi=off
-///     pci=off` cmdline, Linux barely touches this anyway; mapping
-///     it is just defence in depth.
+///   - guest-physical [0, boot window) → host-physical
+///     [boot_base, +boot window) via 2-MB leaf entries;
+///   - [boot window, guest_bytes) via PD→PT sub-tables with all-absent
+///     4-KB PTEs, faulted in on demand;
+///   - guest-physical [0xFEC00000, 0xFF000000) (IOAPIC, HPET, LAPIC) →
+///     a 4 KB scratch page via PT-level mapping, except the trapped
+///     IOAPIC page and (with LAPIC emulation) the LAPIC page, which are
+///     left not-present so accesses EPT-fault into the emulators.
 /// Returns `(eptp, pml4_phys)` — the EPTP to VMWRITE into
 /// VMCS::EPT_POINTER, and the PML4 phys for `demand_fault_in` /
-/// `release`. `boot_base` backs `[0, boot_window_bytes(guest_bytes))`
-/// contiguously (2-MB leaves); `[boot, guest_bytes)` gets PD→PT
-/// sub-tables with all-absent 4-KB PTEs, faulted in on demand.
+/// `release`.
 pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'static str> {
     if boot_base & (TWO_MB - 1) != 0 {
         return Err("EPT: boot_base must be 2-MB aligned for 2-MB EPT pages");
@@ -135,10 +110,10 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     let pt_dummy_phys = memory::allocate_frame().ok_or("OOM: EPT PT_DUMMY")?;
     let pt_lapic_phys = memory::allocate_frame().ok_or("OOM: EPT PT_LAPIC")?;
     let dummy_page_phys = memory::allocate_frame().ok_or("OOM: EPT dummy page")?;
-    // Trap the guest LAPIC page (0xFEE00000) into the emulator (vmx::lapic,
-    // Intel parity #2) by leaving it EPT-not-present. Only when LAPIC
-    // emulation is on; otherwise keep the old aliased scratch (byte-
-    // identical rollback for the `nolapic` boot). Mirrors svm/npt.rs.
+    // Trap the guest LAPIC page (0xFEE00000) into the emulator (vmx::lapic)
+    // by leaving it EPT-not-present. Only when LAPIC emulation is on;
+    // otherwise keep the aliased scratch for the `nolapic` boot. Mirrors
+    // svm/npt.rs.
     let lapic_trap = crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC;
     let mut pd_physs = [0u64; 3];
     for p in 0..num_pds {
@@ -183,11 +158,10 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
 
         // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
         // IOAPIC + HPET, scratch). PD_HIGH[503] covers [0xFEE00000,
-        // 0xFF000000) = the LAPIC: when emulating, point it at a SEPARATE
+        // 0xFF000000) = the LAPIC: when emulating, point it at a separate
         // PT_LAPIC whose first page (0xFEE00000) is left not-present so the
         // guest's LAPIC MMIO EPT-faults into vmx::lapic; the rest stays
-        // scratch. When not emulating, alias it to PT_DUMMY like before
-        // (byte-identical scratch for the `nolapic` boot).
+        // scratch. When not emulating, alias it to PT_DUMMY.
         let pd_high = pd_high_phys as *mut u64;
         core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
         pd_high.add(502).write_volatile(pt_dummy_phys | EPT_RWX);
@@ -202,12 +176,12 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
                 .add(i)
                 .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
         }
-        // [0]: the I/O APIC page (0xFEC00000) NOT-PRESENT → trap and emulate
+        // [0]: the I/O APIC page (0xFEC00000) not present → trap and emulate
         // (`devices::ioapic`).
         pt_dummy.add(0).write_volatile(0);
 
         // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
-        // NOT-PRESENT → guest LAPIC accesses EPT-violate → trap-and-emulate
+        // not present → guest LAPIC accesses EPT-violate → trap-and-emulate
         // (vmx::lapic). The rest of the 2 MB → dummy scratch (harmless if
         // ever touched). Only consulted when `lapic_trap` (PD_HIGH[503]
         // points here); built unconditionally — a leaked frame otherwise.
@@ -227,9 +201,9 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
 /// Walk PML4[0]→PDPT[0]→PD→PT for a demand-region `gpa` and return
 /// the host phys of its 4 KB page, allocating + mapping a zeroed
 /// frame on first touch. Called from the EPT-violation handler
-/// (guest fault) AND `GuestMem` (host DMA to an untouched page) —
+/// (guest fault) and `GuestMem` (host DMA to an untouched page) —
 /// idempotent: an already-present PTE returns its existing frame.
-/// `gpa` MUST be ≥ the boot window (caller guarantees; the boot
+/// `gpa` must be ≥ the boot window (caller guarantees; the boot
 /// region is 2-MB leaves, never PT-walked). No INVEPT needed: the
 /// entry was not-present so there is no stale TLB for it.
 pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
@@ -237,7 +211,7 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & EPT_ADDR_MASK) as *const u64;
-        // B4: PDPT[0..3] holds the guest-RAM PDs (1 GiB each); pick by gpa.
+        // PDPT[0..3] holds the guest-RAM PDs (1 GiB each); pick by gpa.
         let pdpt_idx = (gpa / ONE_GB) as usize;
         if pdpt_idx >= 3 {
             return None; // PDPT[3] is the MMIO hole, never demand-faulted

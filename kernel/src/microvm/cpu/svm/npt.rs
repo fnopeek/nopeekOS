@@ -10,26 +10,24 @@
 //!
 //! Two modes are used by the SVM backend:
 //!
-//! * `allocate_identity_npt()` — guest 0..256 MB → host 0..256 MB.
+//! * `allocate_identity_npt()` — guest window → host, identity.
 //!   Used by the substrate test where the guest stub lives wherever
 //!   the frame allocator hands it out. Only safe when the stub
-//!   happens to fall below 256 MB.
+//!   happens to fall inside the window.
 //!
-//! * `allocate_window_npt(host_base)` — guest 0..256 MB → host
-//!   `host_base..host_base+256 MB`. Used by `run_linux` so the guest
-//!   can write freely at GPA 0x10000/0x90000/0x100000/... without
-//!   stomping on the host kernel image (which sits at host_phys 1 MB
-//!   from Multiboot2). Mirrors `vmx::ept::install_window`.
+//! * `allocate_window_npt(host_base)` — guest RAM → host
+//!   `host_base..`. Used by `run_linux` so the guest can write freely at
+//!   GPA 0x10000/0x90000/0x100000/... without stomping on the host
+//!   kernel image at the same host addresses. Mirrors
+//!   `vmx::ept::install_window`.
 //!
-//! Both modes use 2 MB pages (3-frame NPT footprint: PML4+PDPT+PD).
-//! 1 GB pages tested unstable on KVM nested SVM (exit-code 0); 2 MB
-//! stays inside the well-shadowed path.
+//! The boot window uses 2 MB pages; 1 GB pages are unreliable under KVM
+//! nested SVM (exit code 0).
 //!
 //! `allocate_window_npt` additionally maps the high MMIO region
-//! [0xFEC00000, 0xFF000000) (IOAPIC + HPET + LAPIC) to a single
-//! aliased scratch page. With `nolapic noapic acpi=off` Linux barely
-//! touches it — the mapping is defence-in-depth so an early MMIO
-//! probe doesn't NPF before we've added a real exit handler.
+//! [0xFEC00000, 0xFF000000) (IOAPIC + HPET + LAPIC) to an aliased
+//! scratch page, except the IOAPIC and LAPIC pages, which stay
+//! not-present so accesses fault into the emulators.
 
 use crate::mm::memory;
 
@@ -77,36 +75,35 @@ pub fn boot_window_bytes(guest_bytes: u64) -> u64 {
     if crate::microvm::devices::guest_mem::DEMAND_ENABLED {
         guest_bytes.min(BOOT_WINDOW_BYTES)
     } else {
-        // Demand off → whole guest contiguous: exactly B2/A2.
+        // Demand off → whole guest contiguous.
         guest_bytes
     }
 }
 
-/// 4 KB host frames to allocate **contiguously** for the boot window
+/// 4 KB host frames to allocate contiguously for the boot window
 /// (+ 2-MB-align slack). The demand region is faulted 4 KB at a time;
 /// mirrors `ept::boot_frames_for`.
 pub fn boot_frames_for(guest_bytes: u64) -> usize {
     (boot_window_bytes(guest_bytes) / 4096) as usize + GUEST_RAM_ALIGN_SLACK
 }
 
-/// Build a fresh NPT root that identity-maps `0..256 MB` of guest
+/// Build a fresh NPT root that identity-maps `GUEST_WINDOW_BYTES` of guest
 /// physical to host physical via 2 MB pages. Returns the physical
 /// address of the PML4 page, suitable for VMCB.NCR3.
 ///
 /// Allocates 3 frames per call (PML4 + PDPT + PD). Frames are leaked
 /// alongside the rest of the per-call substrate-test allocations.
 pub fn allocate_identity_npt() -> Result<u64, &'static str> {
-    // Substrate test: fixed 1 GiB, behaviour unchanged by B2.
+    // Substrate test: the whole guest window.
     build_npt(0, GUEST_WINDOW_BYTES, /* with_mmio_scratch */ false)
 }
 
-/// Build a fresh NPT root that maps `0..256 MB` of guest physical to
-/// host physical `host_base..host_base+256 MB` via 2 MB pages, plus a
-/// scratch alias for [0xFEC00000, 0xFF000000) (IOAPIC + HPET +
-/// LAPIC). Returns NCR3.
+/// Build a fresh NPT root that maps guest RAM to host physical
+/// `host_base..` (contiguous boot window + 4 KB demand region), plus a
+/// scratch alias for [0xFEC00000, 0xFF000000) (IOAPIC + HPET + LAPIC).
+/// Returns NCR3.
 ///
-/// `host_base` must be 2 MB aligned. Allocates 6 frames (PML4 + PDPT
-/// + PD + PD_HIGH + PT_DUMMY + dummy_page). Frames are leaked.
+/// `host_base` must be 2 MB aligned.
 pub fn allocate_window_npt(host_base: u64, guest_bytes: u64) -> Result<u64, &'static str> {
     if host_base & (TWO_MB - 1) != 0 {
         return Err("NPT: host_base must be 2 MB aligned");
@@ -116,7 +113,7 @@ pub fn allocate_window_npt(host_base: u64, guest_bytes: u64) -> Result<u64, &'st
 
 /// Inner builder. `host_base = 0` gives identity mapping; non-zero
 /// shifts the leaf addresses by `host_base`. Maps exactly
-/// `guest_bytes` (single PD, ≤ 1 GiB; B4 adds multi-PD).
+/// `guest_bytes` (one PD per GiB, up to `MAX_GUEST_BYTES`).
 fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Result<u64, &'static str> {
     if guest_bytes == 0 || guest_bytes & (TWO_MB - 1) != 0 {
         return Err("NPT: guest_bytes must be a non-zero multiple of 2 MB");
@@ -213,12 +210,12 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
             for i in 0..512usize {
                 pt_dummy.add(i).write_volatile(dummy_page_phys | NPT_P | NPT_RW | NPT_US);
             }
-            // [0]: the I/O APIC page (0xFEC00000) NOT-PRESENT → trap and
+            // [0]: the I/O APIC page (0xFEC00000) not present → trap and
             // emulate (`devices::ioapic`), like the LAPIC page below.
             pt_dummy.add(0).write_volatile(0);
             // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
-            // NOT-PRESENT → guest LAPIC accesses #NPF → trap-and-emulate
-            // (svm::lapic, guest-SMP Stage 1). The rest of the 2 MB →
+            // not present → guest LAPIC accesses #NPF → trap-and-emulate
+            // (svm::lapic). The rest of the 2 MB →
             // dummy scratch (harmless if ever touched).
             let pt_lapic = pt_lapic_phys as *mut u64;
             pt_lapic.add(0).write_volatile(0); // LAPIC page: trap on access
@@ -233,8 +230,8 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
 
 /// Walk PML4[0]→PDPT[0]→PD→PT for a demand-region `gpa`; allocate +
 /// map a zeroed 4 KB frame on first touch, return its host phys.
-/// Idempotent. Called from the #NPF handler AND `GuestMem` (host DMA
-/// to an untouched page). `gpa` MUST be ≥ the boot window. No
+/// Idempotent. Called from the #NPF handler and `GuestMem` (host DMA
+/// to an untouched page). `gpa` must be ≥ the boot window. No
 /// INVLPGA needed: the entry was not-present (no stale TLB).
 /// Mirrors `ept::demand_fault_in`.
 pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
@@ -242,7 +239,7 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
     unsafe {
         let pml4 = pml4_phys as *const u64;
         let pdpt = (pml4.read_volatile() & NPT_ADDR_MASK) as *const u64;
-        // B4: pick the right guest-RAM PD from PDPT[0..3] by gpa.
+        // Pick the right guest-RAM PD from PDPT[0..3] by gpa.
         let pdpt_idx = (gpa / ONE_GB) as usize;
         if pdpt_idx >= 3 {
             return None; // PDPT[3] is MMIO, never demand-faulted

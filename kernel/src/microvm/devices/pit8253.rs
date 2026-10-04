@@ -8,26 +8,21 @@
 //!   * `pit_set_oneshot` → 0x43 ← 0x38 (mode 4)
 //!   * `pit_next_event`  → counter lo,hi (mode already 4)
 //!
-//! Why this exists at all: the old emulation kept a single `pit_enabled`
-//! bool and no reload value, so it had no PERIOD — it was paced at a
-//! hardcoded 1 kHz off the host TSC to "MATCH the LAPIC timer's programmed
-//! rate". That guess is the thing Linux checks. `calibrate_APIC_clock()`
-//! runs the LAPIC timer periodically and counts JIFFIES against it,
-//! requiring one LAPIC tick per jiffy within ±2 over the run. Two sources
-//! paced by two different rules only hold that ratio by luck, and on this
-//! hardware the luck runs out: the guest prints
+//! Why reload tracking matters: `calibrate_APIC_clock()` runs the LAPIC
+//! timer periodically and counts jiffies against it, requiring one LAPIC
+//! tick per jiffy within ±2 over the run. A PIT paced by a fixed guess
+//! rather than its programmed reload only holds that ratio by luck; when
+//! it fails the guest prints
 //!
 //!     APIC timer disabled due to verification failure
 //!     Clockevents: could not switch to one-shot mode: lapic is not functional
-//!     Could not switch to high resolution mode on CPU 0 … 5
 //!
-//! after which it has no hrtimers on any CPU — and TCP pacing, TSQ, TLP and
-//! RACK all hang off hrtimers. A guest that renders fine and sends two
-//! frames in three seconds looks exactly like that.
+//! and has no hrtimers on any CPU — and TCP pacing, TSQ, TLP and RACK all
+//! hang off hrtimers.
 //!
 //! So: real reload tracking, a period derived from it, and — the part that
 //! makes the ratio hold regardless of how often the vCPU gets to run — a
-//! BACKLOG. A missed tick is owed, not lost.
+//! backlog. A missed tick is owed, not lost.
 
 use crate::interrupts::rdtsc;
 
@@ -134,7 +129,7 @@ impl Pit {
         count.saturating_mul(crate::interrupts::tsc_freq()) / PIT_HZ
     }
 
-    /// Accrue owed ticks and feed ONE to the PIC as an IRQ0 edge when the
+    /// Accrue owed ticks and feed one to the PIC as an IRQ0 edge when the
     /// previous one has been taken (IRR and ISR bit 0 clear) — KVM's PIT
     /// reinject: the guest's acknowledgement paces the repayment.
     pub fn poll(&mut self, pic: &mut super::pic8259::Pic8259) {

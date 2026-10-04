@@ -1,25 +1,11 @@
-//! VMCS field setup — Phase 12.1.0d-1 / 12.1.0d-2b.
+//! VMCS field setup.
 //!
 //! Provides VMWRITE/VMREAD wrappers, the SDM Appendix-B field
 //! encodings we need, and the host-state / guest-state / execution-
 //! control / VMLAUNCH pipeline that runs after VMPTRLD inside VMX
-//! root mode.
-//!
-//! 12.1.0d-1 (shipped, NUC-validated):
-//!   - All HOST_* fields written + read back to validate the
-//!     VMWRITE / VMREAD pipe and the host-state math.
-//!
-//! 12.1.0d-2b (this file, post-NUC fix v0.96.0):
-//!   - Long-mode flat-segment guest with shared CR3 (no EPT). All
-//!     GUEST_* fields written.
-//!   - Pin/Proc/Entry/Exit execution controls computed via the
-//!     allowed-0 / allowed-1 mask MSRs.
-//!   - `launch_test()` overrides HOST_RIP/HOST_RSP just-in-time to a
-//!     resume label inside its own asm! block, runs VMLAUNCH; the
-//!     guest hits `hlt` (HLT-exiting=1), VM-exit fires, the CPU
-//!     loads host state and lands at the resume label. We VMREAD
-//!     VM_EXIT_REASON and return it.
-//!
+//! root mode. Host-state fields are written and read back to validate
+//! the VMWRITE/VMREAD path; execution controls are computed via the
+//! allowed-0 / allowed-1 mask MSRs.
 //! Reference: Intel SDM Vol. 3C §24 (Virtual-Machine Control
 //! Structures), §26.2-§26.4 (Host/Guest State Checks, Loading on
 //! VM Entry), §27 (VM Exits), Appendix B (Field Encoding in VMCS).
@@ -27,8 +13,7 @@
 use super::rdmsr;
 
 // ── VMCS field encodings (SDM Appendix B) ──────────────────────────
-// Only the host-state set we touch in 12.1.0d-1 plus VM_EXIT_REASON
-// for the trampoline.
+// VMCS field encodings used by this module.
 
 // 16-bit host-state.
 const HOST_ES_SELECTOR: u64 = 0x0C00;
@@ -173,14 +158,11 @@ const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
 const IA32_VMX_EXIT_CTLS: u32 = 0x483;
 const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
 const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
-// "TRUE" variants exist when IA32_VMX_BASIC bit 55 = 1 (Alder Lake-N
-// definitely has them). The TRUE MSRs relax "default-1" bits in the
-// classic MSRs to "may-be-0", letting us actually clear bits like
-// CR3-load-exiting (no point with EPT) and ACK_INTR_ON_EXIT. KVM uses
-// these universally; we did not, which forced our control fields into
-// a state that diverges from a minimal-VMX setup and from SVM
-// semantics. Discovered while chasing the bare-metal-NUC reason-33
-// VM-entry failure (v0.172.61+).
+// "TRUE" variants exist when IA32_VMX_BASIC bit 55 = 1. The TRUE MSRs
+// relax "default-1" bits in the classic MSRs to "may-be-0", so bits like
+// CR3-load-exiting (pointless with EPT) can be cleared. KVM uses these
+// universally; the classic MSRs force a control set that diverges from a
+// minimal VMX setup and from SVM semantics.
 const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48D;
 const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48E;
 const IA32_VMX_TRUE_EXIT_CTLS: u32 = 0x48F;
@@ -367,9 +349,8 @@ fn snapshot_host() -> HostSnapshot {
 
 /// Resolve the TSS base from the GDT entry that TR selects. In long
 /// mode a TSS descriptor is 16 bytes (system-segment with the upper
-/// 32 bits of base in bytes 8..12). When TR is 0 — the boot-time
-/// state on this kernel today — there is no TSS and we report base 0.
-/// 12.1.0d-2 will install a real TSS before VMLAUNCH.
+/// 32 bits of base in bytes 8..12). When TR is 0 there is no TSS and we
+/// report base 0.
 fn resolve_tr_base(tr_selector: u16, gdtr_base: u64) -> u64 {
     let index = (tr_selector >> 3) as u64;
     if index == 0 {
@@ -400,15 +381,12 @@ fn resolve_tr_base(tr_selector: u16, gdtr_base: u64) -> u64 {
 ///
 /// `host_rsp` is captured at the call site (one frame above) so it
 /// describes a slot that is still live when the function returns.
-/// 12.1.0d-2 will replace this with a dedicated VM-exit stack.
 pub(super) fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
     let snap = snapshot_host();
     let tr_base = resolve_tr_base(snap.tr, snap.gdtr_base);
 
-    // Selector fields must have TI=0 and RPL=0 per SDM §26.2.3 — we
-    // mask the bottom 3 bits so a stray RPL doesn't cause VMLAUNCH
-    // to fail later on. (Today CS=0x08, DS/SS/ES=0x10, FS/GS=0, TR=0
-    // — all already RPL-0; the mask is defence in depth.)
+    // Selector fields must have TI=0 and RPL=0 per SDM §26.2.3; mask the
+    // bottom 3 bits so a stray RPL can't make VMLAUNCH fail later.
     let cs = (snap.cs & 0xFFF8) as u64;
     let ss = (snap.ss & 0xFFF8) as u64;
     let ds = (snap.ds & 0xFFF8) as u64;
@@ -492,7 +470,7 @@ fn exit_trampoline_addr() -> u64 {
 /// will probe PCI config (0xCF8/0xCFC), keyboard (0x60/0x64), CMOS
 /// (0x70/0x71), PIC (0x20/0xA0), PIT (0x40-0x43) and so on. Without
 /// trapping, those I/O instructions execute natively against the
-/// host's real hardware on the NUC — quietly corrupting host
+/// host's real hardware, corrupting host
 /// state. We trap everything and ignore (return 0 for IN, no-op
 /// for OUT) anything our handler doesn't explicitly understand.
 ///
@@ -619,7 +597,7 @@ const SEC_ENABLE_INVPCID: u32 = 1 << 12;
 /// XSAVES raises #UD even when CPUID Leaf 0xD subleaf 1:EAX[3]
 /// indicates support — Linux uses XSAVES for context switch when
 /// supervisor xstates are present (CET_S = XFEATURE bit 12, which
-/// Alpine virt has in the active set 0x1807). First userspace
+/// Linux's virt kernel has in its active set). First userspace
 /// context switch would fault otherwise.
 const SEC_ENABLE_XSAVES: u32 = 1 << 20;
 
@@ -631,11 +609,10 @@ const SEC_ENABLE_XSAVES: u32 = 1 << 20;
 /// the guest's IDT — but the guest's EOI write to the LAPIC MMIO
 /// goes through EPT into our scratch page (not the real LAPIC), so
 /// real-LAPIC ISR stays set forever and the host stops receiving
-/// interrupts after VMXOFF (= post-`microvm linux` keyboard freeze
-/// observed on N100, 2026-05-02).
+/// interrupts after VMXOFF.
 const PIN_EXT_INTR_EXITING: u32 = 1 << 0;
 /// Bit 3: NMI exiting. Without it a host NMI arriving in non-root mode is
-/// delivered through the GUEST's IDT (KVM always sets it).
+/// delivered through the guest's IDT (KVM always sets it).
 const PIN_NMI_EXITING: u32 = 1 << 3;
 
 // VM-entry control bits.
@@ -677,19 +654,14 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
     let msr_bitmap = allocate_msr_bitmap()?;
 
-    // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them (Alder
-    // Lake-N does). The TRUE variants relax classic "default-1"
-    // bits — most notably CR3-load/store-exiting (bits 15/16 of
-    // PROCBASED) which the classic MSR forces on but with EPT
-    // active provides no benefit (the guest's CR3 is opaque to
-    // the host; EPT walks it without our help). Forcing CR3-exit
-    // also produces a guest-trap sequence that does NOT exist on
-    // SVM (where we never trap CR3) and our trap-handler's
-    // write_guest_cr3 + advance_rip leaves the GUEST_CR3 / RIP /
-    // VPID-TLB combo in a state that the next VMRESUME's
-    // consistency check rejects (reason 33 on bare-metal-NUC).
-    // Match KVM's universal use of TRUE_*_CTLS to get a minimal
-    // control set close to SVM's.
+    // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them. The TRUE
+    // variants relax classic "default-1" bits, notably CR3-load/store-
+    // exiting (bits 15/16 of PROCBASED), which the classic MSR forces on
+    // but which is useless with EPT (the guest's CR3 is opaque to the
+    // host). Forced CR3 exits add a trap path SVM does not have, and our
+    // write_guest_cr3 + advance_rip handling of it can leave GUEST_CR3 /
+    // RIP / VPID-TLB in a state the next VMRESUME rejects (reason 33).
+    // Match KVM's universal use of TRUE_*_CTLS for a minimal control set.
     let pin = fixed_ctrl(PIN_EXT_INTR_EXITING | PIN_NMI_EXITING, pinbased_ctls_msr());
     let cpu = fixed_ctrl(
         CPU_HLT_EXITING
@@ -753,10 +725,9 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     // doesn't dereference them.
     //
     // EXCEPTION_BITMAP: trap only #CP (vector 21, CET control-flow
-    // protection). Linux's early boot specifically RELIES on its
-    // own #PF handler (`early_idt_handler_array` → `early_make_pgtable`)
-    // to build the direct-map page tables lazily — trapping #PF
-    // breaks that lazy-PT mechanism (12.1.1c-3b3b6 lesson).
+    // protection). Linux's early boot relies on its own #PF handler
+    // (`early_idt_handler_array` → `early_make_pgtable`) to build the
+    // direct-map page tables lazily; trapping #PF breaks that.
     //
     // #CP is different: when CR4.CET=1 inherits from host into the
     // guest and Linux hits an indirect call to a non-ENDBR target
@@ -857,13 +828,12 @@ pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
     let cr0_f1 = unsafe { rdmsr(0x487) };
     let cr0_prot = (((1u64 << 0) | cr0_f0) & cr0_f1) & !(1u64 << 31);
 
-    // CR4: take host CR4 with VMXE etc., but clear CET (bit 23).
-    // Host nopeekOS has CR4.CET=1 for IBT defense — inheriting
-    // that into the guest enables CET-IBT enforcement against
-    // Alpine vmlinuz's hand-written asm stubs that lack ENDBR64,
-    // raising #CP with err_code=3 (ENDBRANCH violation) early in
-    // boot. CPUID Leaf 7 is also filtered (see enable.rs CPUID
-    // handler) so Linux never tries to re-enable CET via cr4_init.
+    // CR4: take host CR4 with VMXE etc., but clear CET (bit 23). The
+    // host runs with CR4.CET=1 for IBT; inheriting that into the guest
+    // enforces CET-IBT against Linux asm stubs that lack ENDBR64,
+    // raising #CP (ENDBRANCH violation) early in boot. CPUID leaf 7 is
+    // also filtered (see the CPUID handler) so Linux never re-enables
+    // CET via cr4_init.
     let host_cr4: u64;
     // SAFETY: pure register read.
     unsafe { core::arch::asm!("mov {}, cr4", out(reg) host_cr4, options(nostack, preserves_flags)); }
@@ -1110,22 +1080,18 @@ pub(super) fn run_guest_once(
     // SAFETY: see fn-level docs. The asm respects every register
     // dependency by ordering: launched-flag check sets ZF before
     // r10 is overwritten with the guest's r10; rdi (struct ptr) is
-    // overwritten LAST; post-exit save spills all guest GPRs to
+    // overwritten last; post-exit save spills all guest GPRs to
     // stack first (so rdi stays guest's value), then reloads struct
     // ptr from the saved slot before storing.
     //
-    // FPU xsave/xrstor lives INSIDE this asm block (mirror of SVM
-    // v0.172.53 fix). Rust-helper FPU swap around the call left a
-    // window where the +avx2 compiler could spill `vmovups ymm`
-    // between the helper and the asm, clobbering the just-restored
-    // guest FPU. Putting xsave64/xrstor64 inside the asm — with
-    // only GPR/vm* instructions between xrstor and vmresume —
-    // eliminates the window. v53 was applied to SVM only at the
-    // time ("VMX keeps the helper form (untested path)"); now that
-    // VMX is the path under test on bare-metal NUC, port it.
+    // FPU xsave/xrstor lives inside this asm block: a Rust-helper FPU
+    // swap around the call leaves a window where the +avx2 compiler can
+    // spill `vmovups ymm` between the helper and the asm, clobbering the
+    // just-restored guest FPU. With only GPR/vm* instructions between
+    // xrstor and vmresume there is no such window.
     unsafe {
         core::arch::asm!(
-            // ── PROLOGUE: save host callee-saved + 3 pointers ─────
+            // ── Prologue: save host callee-saved + 3 pointers ─────
             "push rbp",
             "push rbx",
             "push r12",
@@ -1146,7 +1112,7 @@ pub(super) fn run_guest_once(
             "lea rax, [rip + 2f]",
             "vmwrite rcx, rax",
 
-            // ── FPU SAVE/RESTORE (KVM kvm_load_guest_fpu): VMRESUME
+            // ── FPU save/restore (KVM kvm_load_guest_fpu): VMRESUME
             // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
             // adjacent to vmresume — a +avx2-built kernel spills
             // `ymm` anywhere between a Rust helper and the asm,
@@ -1164,7 +1130,7 @@ pub(super) fn run_guest_once(
             "mov edx, 0xffffffff",
             "xrstor64 [rcx]",               // restore guest FPU
 
-            // ── ENTRY: load guest GPRs from struct ───────────────
+            // ── Entry: load guest GPRs from struct ───────────────
             // r10 is caller-saved per System V ABI, so we use it as
             // a scratch for the launched flag without preservation.
             "mov r10, rsi",                 // r10 = launched
@@ -1188,7 +1154,7 @@ pub(super) fn run_guest_once(
             "mov r13, [rdi + 104]",
             "mov r14, [rdi + 112]",
             "mov r15, [rdi + 120]",
-            "mov rdi, [rdi +  56]",         // rdi LAST (overwrites
+            "mov rdi, [rdi +  56]",         // rdi last (overwrites
                                             // struct ptr)
             "jz 9f",                        // ZF set → !launched →
                                             // VMLAUNCH path
@@ -1200,7 +1166,7 @@ pub(super) fn run_guest_once(
             "vmlaunch",
             // fall-through to fail handler
 
-            // ── FAIL HANDLER ─────────────────────────────────────
+            // ── Fail handler ─────────────────────────────────────
             // VMRESUME/VMLAUNCH failed — no transition happened.
             // GPRs still hold the guest values we loaded. FPU still
             // has the guest state we xrestored. Restore host FPU
@@ -1228,7 +1194,7 @@ pub(super) fn run_guest_once(
             "sti",
             "jmp 5f",
 
-            // ── POST-VM-EXIT: save guest GPRs ────────────────────
+            // ── Post-VM-exit: save guest GPRs ────────────────────
             "2:",
             // Push all 15 guest GPRs onto stack so we can reuse rdi
             // (currently guest's rdi) without losing it. Order is
@@ -1252,7 +1218,7 @@ pub(super) fn run_guest_once(
             // Stack now: 15 GPRs [rsp+0..119], guest_fpu [+120],
             //   host_fpu [+128], struct_ptr [+136], callee_saved [+144..]
 
-            // ── FPU SAVE/RESTORE (paired exit half) ──────────────
+            // ── FPU save/restore (paired exit half) ──────────────
             // Guest GPRs are on the stack now → rax/rcx/rdx free to
             // clobber. Save guest FPU, restore host's.
             "mov rcx, [rsp + 120]",         // guest_fpu
@@ -1330,15 +1296,15 @@ pub fn basic_exit_reason(raw: u64) -> u16 {
     (raw & 0xFFFF) as u16
 }
 
-/// Advance GUEST_RIP past the just-exited instruction. The CPU
-/// records the instruction length in VM_EXIT_INSTRUCTION_LEN; we
-/// add it to the current GUEST_RIP. Required after I/O exits
-/// (otherwise VMRESUME re-executes the trapping OUT/IN forever).
 /// Guest CPL = SS.DPL (SDM 27.3.1.5: the SS attribute DPL is the CPL).
 pub(super) fn guest_cpl() -> Result<u8, &'static str> {
     Ok(((vmread(GUEST_SS_AR_BYTES)? >> 5) & 0x3) as u8)
 }
 
+/// Advance GUEST_RIP past the just-exited instruction. The CPU
+/// records the instruction length in VM_EXIT_INSTRUCTION_LEN; we
+/// add it to the current GUEST_RIP. Required after I/O exits
+/// (otherwise VMRESUME re-executes the trapping OUT/IN forever).
 pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
     let len = vmread(VM_EXIT_INSTRUCTION_LEN)?;
     let rip = vmread(GUEST_RIP)?;
@@ -1387,7 +1353,7 @@ pub fn inject_external_irq(vector: u8) -> Result<(), &'static str> {
     vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
 }
 
-/// Queue a hardware exception for the next VM-entry (type 3). RIP is NOT
+/// Queue a hardware exception for the next VM-entry (type 3). RIP is not
 /// advanced: the faulting instruction is the one reported.
 pub fn inject_exception(vector: u8, error_code: Option<u32>) -> Result<(), &'static str> {
     let mut info: u64 = (vector as u64) | (3u64 << 8) | (1u64 << 31);
@@ -1443,10 +1409,8 @@ pub fn read_guest_cs_ar() -> Result<u64, &'static str> {
 }
 
 /// Read VM_ENTRY_INTR_INFO_FIELD — the event (if any) we asked the CPU
-/// to inject on the entry that just ran. Diagnostic for the bare-metal
-/// reason-33 path: confirms whether an injection was pending at a
-/// failing VM-entry (a failed entry never delivers, so the field still
-/// holds what we wrote).
+/// to inject on the entry that just ran. Diagnostic for entry failures:
+/// a failed entry never delivers, so the field still holds what we wrote.
 pub fn read_entry_intr_info() -> Result<u64, &'static str> {
     vmread(VM_ENTRY_INTR_INFO_FIELD)
 }
@@ -1455,12 +1419,11 @@ pub fn read_entry_intr_info() -> Result<u64, &'static str> {
 /// now: RFLAGS.IF=1 and no interruptibility blocking (bit 0 blocking-
 /// by-STI, bit 1 blocking-by-MOV-SS). This is the gate KVM applies in
 /// `vmx_interrupt_allowed()` before injecting an external interrupt.
-/// Injecting one while the guest is NOT interruptible (e.g. IF=0 in a
-/// CLI'd critical section — observed mid i8042 status poll) makes the
-/// VM-entry fail with reason 33 on bare-metal Intel; AMD's VMRUN
-/// tolerates it (delivers a guest #GP), which is why QEMU/AMD never
-/// tripped on it. NMI-blocking (bit 3) is irrelevant to maskable
-/// external interrupts and is not checked.
+/// Injecting one while the guest is not interruptible (e.g. IF=0 in a
+/// CLI'd critical section) makes the VM-entry fail with reason 33 on
+/// bare-metal Intel; AMD's VMRUN tolerates it (delivers a guest #GP).
+/// NMI-blocking (bit 3) is irrelevant to maskable external interrupts
+/// and is not checked.
 pub fn guest_interruptible() -> bool {
     const IF: u64 = 1 << 9;
     let rflags = vmread(GUEST_RFLAGS).unwrap_or(0);
@@ -1516,17 +1479,15 @@ pub fn read_exit_intr_error_code() -> Result<u64, &'static str> {
 ///   valid, bit 31 = valid.
 /// Must be re-injected on the next entry or the guest loses an
 /// interrupt mid-vectoring → corrupt state (the VMX equivalent of
-/// the SVM EXITINTINFO/`svm_complete_interrupts` path; see svm
-/// enable.rs v0.172.36+).
+/// the SVM EXITINTINFO/`svm_complete_interrupts` path).
 pub fn read_idt_vectoring_info() -> Result<u64, &'static str> {
     vmread(IDT_VECTORING_INFO_FIELD)
 }
 
 /// Read IDT_VECTORING_ERROR_CODE — companion to IDT_VECTORING_INFO_
-/// FIELD when bit 11 is set. We currently only re-inject external
-/// IRQs (type 0) and NMIs (type 2), neither of which carry an error
-/// code, so this is unused but kept for symmetry with the exit-info
-/// readers and future use if exception re-injection lands.
+/// FIELD when bit 11 is set. Only external IRQs (type 0) and NMIs
+/// (type 2) are re-injected, neither of which carries an error code,
+/// so this is currently unused.
 #[allow(dead_code)]
 pub fn read_idt_vectoring_error_code() -> Result<u64, &'static str> {
     vmread(IDT_VECTORING_ERROR_CODE)
@@ -1538,10 +1499,9 @@ pub fn read_idt_vectoring_error_code() -> Result<u64, &'static str> {
 /// verbatim), and (b) defensively clear the slot to 0 after every
 /// VMRESUME. On bare-metal VMX the CPU auto-clears the valid bit
 /// after a successful injection (SDM §27.6), but under nested VMX
-/// (KVM emulating VMX on AMD) it MAY leave the bit set — left there,
-/// the next VMRESUME re-injects the same event = phantom duplicate
-/// interrupt → cumulative guest corruption. This is the VMX
-/// equivalent of the SVM EVENTINJ-stale bug fixed in v0.172.42.
+/// (KVM emulating VMX on AMD) it may leave the bit set; the next
+/// VMRESUME would then re-inject the same event as a phantom duplicate
+/// interrupt.
 pub fn write_entry_intr_info(info: u64) -> Result<(), &'static str> {
     vmwrite(VM_ENTRY_INTR_INFO_FIELD, info)
 }

@@ -1,35 +1,30 @@
-//! Off-vCPU network backend for the microvm (vhost-style), Stage 1.
+//! Off-vCPU network backend for the microvm (vhost-style).
 //!
-//! Owns the virtio-net device OUTSIDE `VmShared`/`VM_BIG_LOCK` so a future
-//! dedicated backend fiber (Stage 2) can run the whole data-plane — host-NIC
-//! drain + `inject_rx` (RX) + `service_tx` (TX) — on its own core while the
-//! vCPUs only ring the notify doorbell. Today the device is still serviced
-//! inline from the vCPU exit handlers (behavior-neutral); they just reach it
-//! through this lock instead of the old `sh.pci.virtio_net` field.
+//! Owns the virtio-net device outside `VmShared`/`VM_BIG_LOCK` so the
+//! data-plane worker fiber can run it — `inject_rx` (RX) + `service_tx`
+//! (TX) — on its own core while the vCPUs only ring the notify doorbell.
 //!
 //! Why out of `VmShared`: the run loop hands the lock holder an exclusive
-//! `&mut VmShared`. A second core touching `virtio_net` while a vCPU holds that
-//! borrow would alias. `GuestMem` is already `&self` (interior mutability), so
-//! the backend can share `&GuestMem` soundly — only the device STATE needed to
-//! move out. Lock order: a vCPU may take `VM_BIG_LOCK` then this lock; the
-//! backend takes ONLY this lock (never `VM_BIG_LOCK`), so no cycle.
+//! `&mut VmShared`. A second core touching `virtio_net` while a vCPU holds
+//! that borrow would alias. `GuestMem` is already `&self` (interior
+//! mutability), so the backend can share `&GuestMem` soundly; only the
+//! device state needed to move out. Lock order: a vCPU may take
+//! `VM_BIG_LOCK` then this lock; the backend takes only this lock (never
+//! `VM_BIG_LOCK`), so no cycle.
 //!
-//! Single instance: exactly one microvm runs at a time. A future multi-microvm
-//! world makes this per-VM (an array keyed by VM id).
+//! Single instance: exactly one microvm runs at a time.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 use super::virtio_net_dev::VirtioNet;
 
-/// Guest TX kick (q1 notify) doorbell, set by the vCPU's net-MMIO exit in full
-/// mode INSTEAD of servicing TX inline. The worker fiber drains it → service_tx +
-/// tx_flush on ITS core, so RX and TX share one core / one NET path: no
-/// cross-core NET-lock fight (the worker holding the lock for RX-inject was
-/// delaying the vCPU's TX/ACK egress → throttling downloads, which also need
-/// prompt ACKs). Stage 2c — the symmetric counterpart to the RX backend.
+/// Guest TX kick (q1 notify) doorbell, set by the vCPU's net-MMIO exit
+/// instead of servicing TX inline. The worker fiber drains it → service_tx +
+/// tx_flush on its core, so RX and TX share one core / one NET path and no
+/// cross-core NET-lock fight delays the vCPU's TX/ACK egress.
 static TX_KICK: AtomicBool = AtomicBool::new(false);
 /// Host core the worker fiber runs on, so a vCPU TX-kick can wake it out of its
-/// RX-IRQ park promptly (else TX waits up to the 2 ms park timeout → slow ACKs).
+/// RX-IRQ park promptly (else TX waits for the park timeout → slow ACKs).
 static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Worker records its core at startup so TX-kicks can target it.
@@ -60,21 +55,20 @@ pub fn note_tx_kick() {
 /// Worker: take the TX-kick doorbell (clears it). True ⇒ run service_tx.
 pub fn take_tx_kick() -> bool { TX_KICK.swap(false, Ordering::AcqRel) }
 
-/// Lock-free peek (does NOT clear): is a guest TX kick pending? Used by the
+/// Lock-free peek (does not clear): is a guest TX kick pending? Used by the
 /// data-plane busy-poll so a queued ACK is egressed without HLTing first.
 pub fn tx_kick_pending() -> bool { TX_KICK.load(Ordering::Acquire) }
 
-/// Guest RX/TX IRQ (IRQ10) raised by the net pump, which now runs OUTSIDE
-/// `VM_BIG_LOCK` (it no longer touches `VmShared`). The BSP folds this into its
-/// `pending_irqs` at a safe injection point. A lock-free atomic instead of
-/// `sh.pending_irqs |= 1<<10` so the pump needs no `VmShared` borrow → APs no
-/// longer block behind the BSP pump on a TLB-shootdown exit (the csd_lock_wait
-/// root). Set by the pump (any caller), consumed by the BSP.
+/// Guest RX/TX IRQ (IRQ10) raised by the net pump, which runs outside
+/// `VM_BIG_LOCK` (it does not touch `VmShared`). The BSP folds this into its
+/// `pending_irqs` at a safe injection point. A lock-free atomic, so the
+/// pump needs no `VmShared` borrow and APs never block behind it on a
+/// TLB-shootdown exit. Set by the pump (any caller), consumed by the BSP.
 static NET_IRQ_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// virtio ISR status (read-to-clear). An atomic, not device state: the guest
-/// reads it on every interrupt, and behind the device lock that read waited
-/// for the worker's whole RX batch.
+/// reads it on every interrupt, and behind the device lock that read would
+/// wait for the worker's whole RX batch.
 static ISR: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 pub fn raise_isr() { ISR.fetch_or(1, Ordering::AcqRel); }
 pub fn take_isr() -> u8 { ISR.swap(0, Ordering::AcqRel) }
@@ -124,8 +118,7 @@ pub const MSIX_PBA_OFF: u32 = 0x3000;
 const MSIX_ENTRY_MASKED: u32 = 1;
 
 /// The capability is offered at all (`set microvm_msix on`,
-/// read at VM open). Off by default until the path is proven: 0.446.0 had
-/// it on and the guest's network stayed silent.
+/// read at VM open). Off by default.
 static MSIX_OFFERED: AtomicBool = AtomicBool::new(false);
 pub fn msix_offered() -> bool { MSIX_OFFERED.load(Ordering::Acquire) }
 
@@ -310,25 +303,24 @@ pub fn lock() -> MutexGuard<'static, VirtioNet> {
     NET.lock()
 }
 
-/// LOCK-FREE BAR0 range check for the vCPU's NPF/EPT exit dispatch. Every non-blk
-/// MMIO exit used to take the device mutex JUST to range-check the gpa — which
-/// collided with the off-vCPU worker holding it (the ACK-jitter contention). The
-/// BAR is fixed at `BAR0_BASE` (Linux keeps it there; confirmed in the boot log),
-/// so the range test needs no lock. The mutex is taken only AFTER a hit, for the
-/// actual MMIO service.
+/// Lock-free BAR0 range check for the vCPU's NPF/EPT exit dispatch, so an
+/// MMIO exit does not take the device mutex just to range-check the gpa
+/// (which would collide with the off-vCPU worker holding it). The BAR is
+/// fixed at `BAR0_BASE` (Linux keeps it there), so the range test needs no
+/// lock. The mutex is taken only after a hit, for the actual MMIO service.
 #[inline]
 pub fn bar0_in_range(gpa: u64) -> bool {
     gpa >= super::virtio_net_dev::BAR0_BASE
         && gpa < super::virtio_net_dev::BAR0_BASE + super::virtio_net_dev::BAR0_SIZE
 }
 
-/// Re-initialise to power-on state at VM open. The static outlives a single VM
-/// run, so this restores the per-VM-fresh state that `PciBus::new()` used to
-/// give the device when it lived inside the bus.
+/// Re-initialise to power-on state at VM open. The static outlives a single
+/// VM run, so this restores per-VM-fresh device state.
 ///
 /// Device state only. The worker's attachment (`FULL_ACTIVE`, `WORKER_CORE`)
-/// belongs to the worker's start/stop: it is started before `vm_open` and, on
-/// its own core, registers before this runs — a reset here detached it.
+/// belongs to the worker's start/stop: it is started before `vm_open` and,
+/// on its own core, registers before this runs, so resetting it here would
+/// detach it.
 pub fn reset() {
     *NET.lock() = VirtioNet::new();
     TX_AVAIL_GPA.store(0, Ordering::Release);

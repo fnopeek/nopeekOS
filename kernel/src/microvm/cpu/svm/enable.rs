@@ -1,4 +1,4 @@
-//! SVM root-mode entry + VMRUN loops — 12.1.0b-svm through 12.1.1c-svm.
+//! SVM root-mode entry + VMRUN loops.
 //!
 //! Two consumer-facing entry points:
 //!   - `enable_and_test()` — real-mode HLT/IOIO substrate test.
@@ -6,7 +6,7 @@
 //!     and a 5-byte stub `mov al,'O'; out 0x80,al; hlt`, enables
 //!     EFER.SVME, VMRUNs, returns the resulting exit-code.
 //!   - `run_linux()` — Linux Boot Protocol 32-bit entry. Allocates
-//!     256 MB guest RAM, builds a non-identity NPT window, copies
+//!     guest RAM, builds a non-identity NPT window, copies
 //!     bzImage parts in via `microvm::linux::bzimage`, and dispatches
 //!     a VMRUN/VMEXIT loop with handlers for HLT / IOIO / CPUID /
 //!     MSR / INTR / SHUTDOWN / NPF.
@@ -18,7 +18,7 @@
 //! Instruction), §15.17 (Global Interrupt Flag), §15.10 (I/O
 //! Intercepts), §15.11 (MSR Intercepts), §15.25 (Nested Paging).
 //!
-//! Compared to VMX 12.1.0b: SVM has no separate VMXON region — the
+//! Compared to VMX: SVM has no separate VMXON region — the
 //! host-save area is conceptually similar, but selected by an MSR
 //! rather than a region pointer. There's also no VMCLEAR/VMPTRLD
 //! dance: VMRUN takes the VMCB physical address as an operand
@@ -32,17 +32,17 @@ use crate::mm::memory;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Big-VM lock (guest SMP). Held by a vCPU only around its post-VMRUN
-/// device/MMIO/IO handling — NEVER across `vmrun` or a fiber yield — so
+/// device/MMIO/IO handling — never across `vmrun` or a fiber yield — so
 /// the BSP and an AP vCPU serialize all access to the shared `VmShared`
 /// (device model + guest memory) while their VMRUNs run truly in
-/// parallel on separate host cores. Uncontended (and never even taken)
-/// until an AP is admitted (`AP_ACTIVE`).
+/// parallel on separate host cores. Never taken until an AP is admitted
+/// (`AP_ACTIVE`).
 static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 /// True once a second vCPU (AP) shares this VM. While false the BSP runs
-/// exactly as the single-vCPU path did — `VM_BIG_LOCK` is not taken, so
-/// the hot loop is byte-identical. Set by the orchestration layer when it
-/// spawns the AP fiber, cleared after the last vCPU exits.
+/// the single-vCPU path and `VM_BIG_LOCK` is not taken. Set by the
+/// orchestration layer when it spawns the AP fiber, cleared after the
+/// last vCPU exits.
 pub static AP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[inline]
@@ -70,9 +70,8 @@ const VM_HSAVE_PA: u32 = 0xC001_0117;
 /// intercept) on success.
 ///
 /// Allocates everything fresh on each call; nothing is freed. This
-/// matches `vmx::enable::enable_and_test`, and at the rate
-/// substrate-test runs (a couple of times per session) the leak is
-/// negligible.
+/// matches `vmx::enable::enable_and_test`; the substrate test runs
+/// rarely, so the leak is negligible.
 pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     // 1. EFER.SVME on. APM §15.4: "VMRUN faults with #UD if EFER.SVME=0".
     //    The VM_HSAVE_PA host-save area is programmed per-core lazily on
@@ -102,8 +101,8 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     //    E6 80      out 0x80, al
     //    F4         hlt
     //    Five bytes total. With IOIO_PROT + IOPM bit set, the OUT
-    //    triggers VMEXIT_IOIO (0x7B). Without IOIO intercept (the
-    //    earlier 12.1.0b path), it would fall through to HLT.
+    //    triggers VMEXIT_IOIO (0x7B). Without the IOIO intercept it
+    //    would fall through to HLT.
     let stub_phys = memory::allocate_frame()
         .ok_or("OOM allocating guest stub")?;
     // SAFETY: exclusive, identity-mapped.
@@ -141,8 +140,8 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     //    so we explicitly STGI on return.
     // Memory fence: setup_vmcb wrote 200+ scattered bytes into VMCB;
     // ensure they're visible to the CPU's VMRUN consistency-check
-    // path before we hand off. Empirically without this on KVM
-    // nested SVM the VMCB read-side races into stale zeros.
+    // path before we hand off. Under KVM nested SVM the VMCB read side
+    // can otherwise see stale zeros.
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     // FPU areas for the in-asm save/restore (the stub doesn't touch
@@ -175,10 +174,9 @@ fn enable_efer_svme() -> Result<(), &'static str> {
 /// `[_; 256]` arrays in `smp::per_core`).
 const MAX_CORES: usize = 256;
 
-/// Per-core SVM host state, indexed by core id. Both are
-/// per-PHYSICAL-CORE resources, so a single global frame is a
-/// correctness bug the moment two cores run VMRUN concurrently
-/// (guest SMP / multiple microvms):
+/// Per-core SVM host state, indexed by core id. Both are per physical
+/// core resources, so a single global frame breaks as soon as two cores
+/// run VMRUN concurrently (guest SMP / multiple microvms):
 ///   * `HOST_SAVE_FRAMES` — the VM_HSAVE_PA target. VM_HSAVE_PA is a
 ///     per-core MSR; the CPU writes host state there on VMRUN and
 ///     reads it on VMEXIT. Two cores pointing at one frame clobber
@@ -186,20 +184,19 @@ const MAX_CORES: usize = 256;
 ///   * `HOST_EXTRA_FRAMES` — the `vmsave`/`vmload` frame for host
 ///     FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (`vmrun` preserves none —
 ///     APM Vol 2 §15.5.2). Concurrent vmsave/vmload against one frame
-///     corrupts FS/GS → process-agnostic guest corruption (the
-///     historical "A2 regression", now cross-core).
+///     corrupts FS/GS.
 /// Each slot is lazily allocated the first time its core runs a VMRUN
-/// (`ensure_core_host_state`), so any core — including future AP vCPU
-/// fibers — is set up automatically without a separate init path.
+/// (`ensure_core_host_state`), so any core — including AP vCPU fibers —
+/// is set up without a separate init path.
 static HOST_SAVE_FRAMES: [AtomicU64; MAX_CORES] =
     { const Z: AtomicU64 = AtomicU64::new(0); [Z; MAX_CORES] };
 static HOST_EXTRA_FRAMES: [AtomicU64; MAX_CORES] =
     { const Z: AtomicU64 = AtomicU64::new(0); [Z; MAX_CORES] };
 
-/// Ensure THIS core has SVM enabled, its VM_HSAVE_PA programmed to a
+/// Ensure this core has SVM enabled, its VM_HSAVE_PA programmed to a
 /// private host-save frame, and a private host-extra-save frame
 /// allocated; return the extra-save frame phys. Idempotent per core
-/// (one atomic load + branch on the hot path). MUST run on the core
+/// (one atomic load + branch on the hot path). Must run on the core
 /// that will execute VMRUN — VM_HSAVE_PA is a per-core MSR. No
 /// intra-core race (one core runs this serially); distinct cores
 /// touch distinct slots.
@@ -212,7 +209,7 @@ fn ensure_core_host_state() -> u64 {
         // SAFETY: freshly allocated, identity-mapped, exclusive.
         unsafe { core::ptr::write_bytes(p as *mut u8, 0, 4096); }
         // SAFETY: VM_HSAVE_PA is architectural + per-core; p is page-aligned
-        // and identity-mapped. Programs THIS core's host-save area.
+        // and identity-mapped. Programs this core's host-save area.
         unsafe { wrmsr(VM_HSAVE_PA, p); }
         HOST_SAVE_FRAMES[cid].store(p, Ordering::Release);
     }
@@ -232,10 +229,9 @@ fn ensure_core_host_state() -> u64 {
 ///     only). CS.base = stub_phys, RIP = 0 → execution starts at
 ///     the 5-byte "OK" stub: mov al,0x4F; out 0x80,al; hlt.
 ///   * Intercept HLT + I/O (so VMEXIT fires on `out 0x80, al`).
-///   * Intercept VMRUN (mandatory — guest can't run nested SVM
-///     because we don't support nested-nested in 12.1).
-///   * NPT on (12.1.1a-svm), guest paging off so guest physical =
-///     guest linear and NPT translates straight through.
+///   * Intercept VMRUN (mandatory; nested SVM is not supported).
+///   * NPT on, guest paging off so guest physical = guest linear and
+///     NPT translates straight through.
 fn setup_vmcb(
     vmcb: &mut vmcb::Vmcb,
     iopm_phys: u64,
@@ -334,8 +330,8 @@ fn run_guest_once(
     // never stay live on the host, and the host's must not leak in.
     let xcr: [u64; 2] = [guest_xcr0, crate::microvm::cpu::guest_cpuid::host_xcr0()];
     let xcr_ptr = xcr.as_ptr();
-    // Per-core: VM_HSAVE_PA + host-extra-save frame for THIS core. Lazily
-    // sets up any core that runs VMRUN (BSP today, AP vCPU fibers later).
+    // Per-core: VM_HSAVE_PA + host-extra-save frame for this core. Lazily
+    // sets up any core that runs VMRUN (BSP and AP vCPU fibers).
     let host_extra = ensure_core_host_state();
 
     // SAFETY: EFER.SVME is set (caller guarantee), VM_HSAVE_PA
@@ -348,7 +344,7 @@ fn run_guest_once(
     //   in: rdi = struct ptr, rsi = vmcb_phys
     //   1. push rdi (struct ptr) — survives VMRUN via host-save RSP
     //   2. mov rax, rsi (vmcb_phys into VMRUN operand reg)
-    //   3. load guest GPRs from struct, rdi LAST
+    //   3. load guest GPRs from struct, rdi last
     //   4. CLGI; vmrun rax; STGI
     //   5. spill all 14 guest GPRs to stack
     //   6. recover struct ptr from stack[14*8 = 112]
@@ -356,7 +352,7 @@ fn run_guest_once(
     //   8. discard struct ptr
     unsafe {
         core::arch::asm!(
-            // ── PROLOGUE: save host callee-saved (clobber_abi("C")
+            // ── Prologue: save host callee-saved (clobber_abi("C")
             //              expects them preserved across the asm).
             "push rbp",
             "push rbx",
@@ -376,7 +372,7 @@ fn run_guest_once(
             // Stack now: [rsp+0]=xcr [+8]=guest_fpu [+16]=host_fpu
             //   [+24]=host_extra [+32]=vmcb_phys [+40]=struct_ptr
 
-            // ── FPU SAVE/RESTORE (KVM kvm_load_guest_fpu): vmrun
+            // ── FPU save/restore (KVM kvm_load_guest_fpu): vmrun
             // preserves no x87/SSE/AVX/AVX-512. Must be in-asm,
             // adjacent to vmrun — a +avx2-built kernel spills `ymm`
             // anywhere between a Rust helper and the asm, clobbering
@@ -402,7 +398,7 @@ fn run_guest_once(
             "mov edx, 0xffffffff",
             "xrstor64 [rcx]",               // restore guest FPU (guest XCR0)
 
-            // ── ENTRY: load guest GPRs from struct ────────────────
+            // ── Entry: load guest GPRs from struct ────────────────
             "mov rbx, [rdi +   0]",
             "mov rcx, [rdi +   8]",
             "mov rdx, [rdi +  16]",
@@ -416,11 +412,11 @@ fn run_guest_once(
             "mov r14, [rdi +  96]",
             "mov r15, [rdi + 104]",
             "mov rsi, [rdi +  24]",         // rsi (was vmcb_phys input)
-            "mov rdi, [rdi +  32]",         // rdi LAST
+            "mov rdi, [rdi +  32]",         // rdi last
 
-            // ── HOST EXTRA-STATE SAVE + VMRUN + RESTORE ───────────
+            // ── Host extra-state save + VMRUN + restore ───────────
             // vmsave host FS/GS/KernelGS/TR/LDTR/SYSCALL MSRs (vmrun
-            // does NOT preserve them); vmload them back on THIS core
+            // does not preserve them); vmload them back on this core
             // right after #VMEXIT, before any GS-relative host access.
             "mov rax, [rsp + 24]",          // host_extra_save phys
             "vmsave rax",                   // save host FS/GS/TR/LDTR/MSRs
@@ -436,11 +432,11 @@ fn run_guest_once(
             "mov rax, [rsp + 24]",          // host_extra_save phys
             "vmload rax",                   // restore host FS/GS/... while GIF=0 (atomic vs IRQs)
             "cli",                          // taken after entry_irqs_on, not mid-exit-path
-            "stgi",                         // only NOW open the IRQ window — host state already correct
+            "stgi",                         // only now open the IRQ window — host state already correct
             // After VMEXIT: rsp restored by CPU, all GPRs hold guest
             // clobbers; host FS/GS restored by the vmload above.
 
-            // ── EXIT: spill 14 guest GPRs to stack ────────────────
+            // ── Exit: spill 14 guest GPRs to stack ────────────────
             "push rbx",
             "push rcx",
             "push rdx",
@@ -459,7 +455,7 @@ fn run_guest_once(
             //   host_fpu[+128], host_extra[+136], vmcb[+144],
             //   struct_ptr[+152], host_callee_saved(6).
 
-            // ── FPU SAVE/RESTORE (paired exit half): no FP since
+            // ── FPU save/restore (paired exit half): no FP since
             // vmexit (only vm*/push above). Save guest FPU, restore
             // host's. Guest GPRs are on the stack now → rax/rcx/rdx
             // free to clobber.
@@ -530,7 +526,7 @@ fn run_guest_once(
     }
 }
 
-// ── Linux launcher (12.1.1c-svm) ───────────────────────────────────
+// ── Linux launcher ────────────────────────────────────────────────
 
 // AMD VMEXIT codes used by the Linux loop. APM Vol 2 Appendix C lists
 // the full set; we match against the ones we expect Linux to trigger.
@@ -564,7 +560,7 @@ const VEC_UD: u8 = 6;
 const VEC_GP: u8 = 13;
 
 /// Queue a hardware exception for the next VMRUN (EVENTINJ type 3). RIP is
-/// NOT advanced: the faulting instruction is the one reported.
+/// not advanced: the faulting instruction is the one reported.
 fn inject_exception(vmcb: &mut vmcb::Vmcb, vector: u8, error_code: Option<u32>) {
     let mut info = vector as u64 | (3u64 << 8) | (1u64 << 31);
     if let Some(e) = error_code {
@@ -581,16 +577,12 @@ fn xcr0_valid(v: u64) -> bool {
 }
 const EXIT_INVALID: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
-// ── Re-entrant VM context (Phase 12.4 step 1c — SVM mirror of 1a) ──
+// ── Re-entrant VM context ──────────────────────────────────────────
 //
 // Same decomposition as vmx::enable: open() / run_slice(budget) /
-// close() so the Core-0 event loop can interleave Shade rendering
-// between bounded slices (docs/archive/PHASE12_DISPLAY_BRIDGE.md R1). SVM is
-// simpler than VMX: no VMXON/VMCS bracket — EFER.SVME stays on for
-// the life of the kernel (by design, see module header) and the VMCB
-// is a leaked Box, so close() is a no-op. Step 1c is
-// behaviour-preserving: run_linux calls run_slice(u32::MAX) once,
-// identical to the old run_linux_loop.
+// close() so the caller can interleave other work between bounded
+// slices. SVM is simpler than VMX: no VMXON/VMCS bracket; EFER.SVME
+// stays on for the life of the kernel (see module header).
 
 /// Outcome of one bounded slice of guest execution (SVM).
 pub enum SliceOutcome {
@@ -605,12 +597,6 @@ pub enum SliceOutcome {
     Exited(vmcb::LaunchOutcome),
 }
 
-/// State shared by ALL vCPUs of one microvm: the single guest address
-/// space (RAM + NPT), the device model, and the host-tick/display
-/// bookkeeping. Today the one vCPU owns it directly inside `VmContext`;
-/// Stage 0c moves it behind a big-VM lock + shared handle so AP vCPU
-/// fibers attach to it (guest SMP). Splitting it out now (Stage 0b) is a
-/// pure, behaviour-preserving decomposition.
 /// Which target a nested page fault at `gpa` hits (`cores` NPF breakdown).
 fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
     use crate::microvm::cpu as c;
@@ -629,9 +615,13 @@ fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
     else { c::NPF_OTHER }
 }
 
+/// State shared by all vCPUs of one microvm: the single guest address
+/// space (RAM + NPT), the device model, and the host-tick/display
+/// bookkeeping. AP vCPU fibers reach it through `SharedRef`; access is
+/// serialized by `VM_BIG_LOCK`.
 pub struct VmShared {
     /// Shared handle to the active guest memory (owned by `guest_mem`'s
-    /// `ACTIVE_GM`, freed at close). A reference — NOT the owned `GuestMem` —
+    /// `ACTIVE_GM`, freed at close). A reference, not the owned `GuestMem`,
     /// so the off-vCPU net backend can hold the same `&'static GuestMem` without
     /// aliasing this `&mut VmShared` (the borrow governs the pointer, not the
     /// `Sync` pointee).
@@ -639,7 +629,7 @@ pub struct VmShared {
     /// NPT PML4 (= NCR3) phys — `close()` passes it to `npt::release`
     /// to free demand-faulted frames + demand PTs + NPT tables.
     npt_pml4: u64,
-    /// Base of the **contiguous boot-window** allocation (pre-2 MB-
+    /// Base of the contiguous boot-window allocation (pre-2 MB-
     /// align), + the IOPM/MSRPM frames — all freed in close(). The
     /// demand region is freed via `npt::release`.
     guest_raw_base: u64,
@@ -662,7 +652,7 @@ pub struct VmShared {
 
 /// Bounded adaptive halt-polling (KVM `halt_poll_ns` model) — see the VMX twin.
 /// Idle vCPU polls its window for a wake before parking; grows on a caught wake,
-/// shrinks on expiry. Replaces the old global `recently_active` spin. µs units.
+/// shrinks on expiry. µs units.
 const HALT_POLL_MIN_US: u64 = 5;
 const HALT_POLL_MAX_US: u64 = 200;
 
@@ -677,7 +667,7 @@ pub struct Vcpu {
     /// topology code rejects the CPU. We virtualize it instead of passing
     /// the host core's APIC ID through (which would differ per worker core).
     apic_id: u8,
-    /// Owned (not leaked) so it's reclaimed on drop — relaunch fix.
+    /// Owned (not leaked) so it's reclaimed on drop.
     vmcb: alloc::boxed::Box<vmcb::Vmcb>,
     vmcb_phys: u64,
     regs: vmcb::GuestRegs,
@@ -694,8 +684,8 @@ pub struct Vcpu {
     iter: u32,
     io_dropped: u32,
     /// Per-vCPU emulated local APIC (xAPIC MMIO @ 0xFEE00000). Inert
-    /// while the guest boots `nolapic`; drives the timer + (later) IPIs
-    /// once Linux enables it. See `svm::lapic`.
+    /// while the guest boots `nolapic`; drives the timer + IPIs once
+    /// Linux enables it. See `svm::lapic`.
     lapic: LocalApic,
     /// Adaptive halt-poll window (µs), see `HALT_POLL_MIN_US`.
     halt_poll_us: u64,
@@ -713,19 +703,18 @@ pub struct Vcpu {
     xcr0: u64,
 }
 
-/// Handle to a microvm's `VmShared`. The BSP vCPU **owns** it, heap-boxed
+/// Handle to a microvm's `VmShared`. The BSP vCPU owns it, heap-boxed
 /// so its address is stable while the BSP's `VmContext` moves on the fiber
-/// stack; an AP vCPU (guest SMP, Stage 3b) holds `Borrowed` — a raw pointer
-/// to the same box. `Deref`/`DerefMut` make every `self.shared.X` access
-/// work unchanged for both. Concurrent access between vCPUs is serialized
-/// by `VM_BIG_LOCK` (taken around post-VMRUN device handling), NOT by this
-/// handle — it only resolves *which* `VmShared` a vCPU's exit-handler sees.
+/// stack; an AP vCPU holds `Borrowed` — a raw pointer to the same box.
+/// `Deref`/`DerefMut` make every `self.shared.X` access work for both.
+/// Concurrent access between vCPUs is serialized by `VM_BIG_LOCK` (taken
+/// around post-VMRUN device handling), not by this handle — it only
+/// resolves which `VmShared` a vCPU's exit handler sees.
 pub enum SharedRef {
     Owned(alloc::boxed::Box<VmShared>),
     /// AP vCPU: aliases the BSP's box. Valid for the VM's lifetime — the
     /// BSP frees the box only after the last vCPU has exited (last-one-out
     /// refcount), so the pointer never dangles while an AP runs.
-    /// Constructed in Stage 3b-2 (AP spawn).
     Borrowed(*mut VmShared),
 }
 
@@ -762,7 +751,7 @@ impl core::ops::DerefMut for SharedRef {
 }
 
 /// Persistent state of one Linux microvm across cooperative slices
-/// (SVM backend). Core-agnostic (forward-compat contract #1). Composed
+/// (SVM backend). Core-agnostic. Composed
 /// of `VmShared` (all-vCPU, behind `SharedRef`) + one `Vcpu`.
 pub struct VmContext {
     shared: SharedRef,
@@ -772,8 +761,8 @@ pub struct VmContext {
 impl VmContext {
     /// Enable SVM, set up the host-save area, build NPT, place the
     /// guest image, configure the VMCB, pre-inject the UART RX FIFO.
-    /// Mirrors the old `run_linux` setup. No teardown-on-error needed:
-    /// SVM has no VMXOFF analogue; EFER.SVME staying on is intended.
+    /// No teardown-on-error needed: SVM has no VMXOFF analogue; EFER.SVME
+    /// staying on is intended.
     pub fn open(
         bzimage_bytes: &[u8],
         cmdline: &[u8],
@@ -832,9 +821,8 @@ impl VmContext {
             kprintln!("[svm] pre-injected {} bytes into UART RX FIFO", inject.len());
         }
 
-        // Memory fence — see lesson 2 in project_svm_bringup.md. The
-        // VMCB writes above must be visible to the CPU's VMRUN
-        // consistency-check path.
+        // Memory fence: the VMCB writes above must be visible to the
+        // CPU's VMRUN consistency-check path.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Fresh IPI state for this VM (IPI_PENDING is a static now, not a
@@ -888,20 +876,16 @@ impl VmContext {
     /// when the VmContext drops (no explicit free here). EFER.SVME
     /// stays on for the life of the kernel by design (no analogue to
     /// VMXOFF).
-    ///
-    /// B3: `npt::release` now walks + frees the demand frames, demand
-    /// PTs, and NPT tables (no longer leaked).
     pub fn close(&mut self) {
-        // Stop the off-vCPU net backend FIRST: it holds &'static GuestMem via
+        // Stop the off-vCPU net backend first: it holds &'static GuestMem via
         // guest_mem::active(); clear_active() below frees it, so the worker must
         // have stopped touching it. Bounded-waits for the fiber to exit;
         // idempotent (the teardown path calls it again).
         crate::microvm::devices::net_dataplane::stop_worker();
-        // Persist the home image to npkFS BEFORE freeing. close() is
-        // reached on EVERY teardown — crucially the Mod+Q window-close
-        // path (VM_CLOSE_REQUESTED → break → close), where run_slice's
-        // own loop-end save() never runs (it returned StillRunning).
-        // Without this the browser profile is lost on every Mod+Q.
+        // Persist the home image to npkFS before freeing. close() is
+        // reached on every teardown, including the window-close path
+        // (VM_CLOSE_REQUESTED → break → close), where run_slice's own
+        // loop-end save() never runs (it returned StillRunning).
         self.shared.pci.virtio_blk.save();
         // Demand-faulted frames + demand PTs + NPT tables.
         npt::release(self.shared.npt_pml4, self.shared.guest_mem.len());
@@ -919,7 +903,7 @@ impl VmContext {
     }
 }
 
-/// B3: allocate only the **contiguous boot window** (256 MiB or the
+/// Allocate only the contiguous boot window (256 MiB or the
 /// whole guest if smaller); `[boot, guest_bytes)` is demand-paged
 /// 4 KB. Returns `(boot_base, npt_root=ncr3=pml4, boot_raw_base)`.
 fn alloc_guest_ram_and_npt(guest_bytes: u64) -> Result<(u64, u64, u64), &'static str> {
@@ -993,12 +977,12 @@ fn setup_vmcb_linux(
     vmcb.write_u64(vmcb::OFF_SAVE_G_PAT, 0x0007_0406_0007_0406);
 }
 
-/// Configure an AP vCPU's VMCB for a SIPI start (guest SMP, Stage 3b):
+/// Configure an AP vCPU's VMCB for a SIPI start (guest SMP):
 /// 16-bit real mode at CS = `(vector<<8):0000`, i.e. physical entry
 /// `vector<<12`, which is where Linux's BSP copied the real-mode AP
 /// trampoline. The trampoline takes the AP to protected→long mode and
 /// into `start_secondary`. The control area mirrors `setup_vmcb_linux`
-/// and **shares** the BSP's NCR3 / IOPM / MSRPM (one guest address space,
+/// and shares the BSP's NCR3 / IOPM / MSRPM (one guest address space,
 /// one device intercept policy). The NPT only gains entries while the
 /// guest runs, so the vCPUs need no cross-core NPT shootdown.
 fn setup_vmcb_ap(
@@ -1062,8 +1046,8 @@ fn setup_vmcb_ap(
 }
 
 impl VmContext {
-    /// Build an AP vCPU that **shares** an already-open BSP's `VmShared`
-    /// (guest SMP, Stage 3b). `shared` aliases the BSP's heap-boxed
+    /// Build an AP vCPU that shares an already-open BSP's `VmShared`
+    /// (guest SMP). `shared` aliases the BSP's heap-boxed
     /// `VmShared` (valid for the VM lifetime via the last-one-out
     /// refcount); `sipi_vector` is the SIPI start page; `apic_id` is the
     /// AP's id (1..). No guest RAM / NPT / device allocation here — those
@@ -1172,7 +1156,7 @@ impl VmContext {
         sh.pit.poll(&mut sh.pic);
 
         let now = crate::interrupts::ticks();
-        // Live resize (D4): disconnect, then reconnect after 100 ms; a new
+        // Live resize: disconnect, then reconnect after 100 ms; a new
         // cycle at most every 250 ms while the window is dragged.
         if crate::microvm::devices::gpu_backend::d4_pending()
             && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
@@ -1336,7 +1320,7 @@ struct SerialState {
     /// guest shut itself down (LibreWolf X → cage exit → PID-1 halt). Drives
     /// the auto-close-and-save so the user doesn't need a second Mod+Q.
     halt_observed: bool,
-    /// Phase 12.1.4-svm — RX FIFO. Pre-injected by the host before
+    /// RX FIFO. Pre-injected by the host before
     /// VMRUN; drained when the guest reads RBR (0x3F8 IN). LSR.DR
     /// (bit 0) on 0x3FD IN reflects `rx_pos < rx_n`.
     rx: [u8; 128],
@@ -1460,9 +1444,8 @@ fn line_contains(hay: &[u8], needle: &[u8]) -> bool {
 /// shell's response time when the guest never makes progress.
 impl VmContext {
     /// Run the guest for up to `budget` VMEXITs, or until it exits.
-    /// `Ok(StillRunning)` = budget hit, re-enterable (step 1b);
-    /// `Ok(Exited(o))` = guest left; `Err` = fault. Body is the old
-    /// `run_linux_loop` verbatim, `self.`-scoped.
+    /// `Ok(StillRunning)` = budget hit, re-enterable;
+    /// `Ok(Exited(o))` = guest left; `Err` = fault.
     pub fn run_slice(&mut self, budget: u32) -> Result<SliceOutcome, &'static str> {
     use crate::kprintln;
 
@@ -1538,7 +1521,7 @@ impl VmContext {
         // TLB_CONTROL back to DO_NOTHING (KVM `svm_flush_tlb_*` sets it only on
         // demand). The NPT only gains entries while the guest runs — not-present
         // to present needs no flush — so the one flush at the first entry is
-        // all. It was 1 (flush ALL ASIDs, the host's too) on every VMRUN.
+        // enough; flushing on every VMRUN would also flush the host's ASID.
         self.vcpu.vmcb.write_u8(vmcb::OFF_TLB_CTL, vmcb::TLB_DO_NOTHING);
 
         // `svm_complete_interrupts`: an external interrupt / NMI aborted
@@ -1552,8 +1535,8 @@ impl VmContext {
 
         // Exits that touch only this vCPU take no VM_BIG_LOCK: a host
         // interrupt, the interrupt window, an MSR (x2APIC, PV-EOI) and a
-        // hypercall (PV IPI). Behind the lock, one vCPU's EOI or IPI waited
-        // for the other's device work — a framebuffer copy, a 9p write.
+        // hypercall (PV IPI). Behind the lock, one vCPU's EOI or IPI would
+        // wait for the other's device work (a framebuffer copy, a 9p write).
         match exit {
             // A host interrupt (timer, device, kick IPI) or NMI pre-empted the
             // guest; the host took it at STGI. Pending guest events are
@@ -1616,6 +1599,8 @@ impl VmContext {
                 last_outcome = Some(outcome);
                 continue;
             }
+            // KVM hypercall (`kvm_emulate_hypercall`): nr in RAX, args in
+            // RBX/RCX/RDX/RSI, result in RAX. Only from CPL 0.
             EXIT_VMMCALL => {
                 let nr = self.vcpu.vmcb.read_u64(vmcb::OFF_SAVE_RAX);
                 let cpl = self.vcpu.vmcb.read_u8(vmcb::OFF_SAVE_CPL);
@@ -1701,9 +1686,7 @@ impl VmContext {
             // SVM instructions: the guest has no SVM (CPUID hides it, EFER.SVME
             // writes #GP), so they #UD — KVM `nested_svm_check_permissions`.
             // Left unintercepted they would run natively: the VMCB carries
-            // EFER.SVME=1, and VMLOAD/VMSAVE then take a HOST physical address.
-            // KVM hypercall (`kvm_emulate_hypercall`): nr in RAX, args in
-            // RBX/RCX/RDX/RSI, result in RAX. Only from CPL 0.
+            // EFER.SVME=1, and VMLOAD/VMSAVE then take a host physical address.
             EXIT_VMRUN | EXIT_VMLOAD | EXIT_VMSAVE | EXIT_STGI
             | EXIT_CLGI | EXIT_SKINIT | EXIT_INVLPGA | EXIT_RDPRU
             | EXIT_MONITOR | EXIT_MWAIT | EXIT_MWAIT_COND => {
@@ -1762,8 +1745,8 @@ impl VmContext {
                 } else if crate::microvm::devices::net_backend::bar0_in_range(gpa) {
                     if handle_mmio_npf_net(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pic, gpa, sh.guest_mem) {
                         // Deliver a deferred device IRQ (esp. an async 9p
-                        // write-completion) NOW rather than at the next
-                        // EXIT_INTR/EXIT_HLT ~10 ms out — the download rxlat fix.
+                        // write completion) now rather than at the next
+                        // EXIT_INTR/EXIT_HLT.
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1780,7 +1763,7 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
                     if handle_mmio_npf_p9(&mut *self.vcpu.vmcb, &mut self.vcpu.regs, &mut sh.pci.virtio_9p, &mut sh.pic, gpa, sh.guest_mem) {
-                        // Deliver the freshly-completed 9p write-reply IRQ NOW
+                        // Deliver the freshly-completed 9p write-reply IRQ now
                         // (latched by drain_async_done at the loop top) instead
                         // of waiting for the next EXIT_INTR/EXIT_HLT.
                         last_outcome = Some(outcome);
@@ -1808,7 +1791,7 @@ impl VmContext {
                         continue;
                     }
                 }
-                // Local APIC MMIO (guest-SMP Stage 1). The LAPIC page
+                // Local APIC MMIO. The LAPIC page
                 // (0xFEE00000) is left NPT-not-present (npt.rs) so the
                 // guest's xAPIC accesses #NPF here → trap-and-emulate.
                 // Inert while booting `nolapic`.
@@ -1821,7 +1804,7 @@ impl VmContext {
                         continue;
                     }
                 }
-                // B3: demand-paged guest RAM. #NPF on a gpa inside the
+                // Demand-paged guest RAM. #NPF on a gpa inside the
                 // advertised window but above the contiguous boot
                 // block = first touch of a 4-KB demand page → fault it
                 // in + re-enter. Order: MMIO BAR ranges first (above),
@@ -1869,7 +1852,7 @@ impl VmContext {
 
     // Persist the virtio-blk profile-image to npkFS (encrypted at
     // rest). Reached only when the loop ended (guest exit / cap), not
-    // on a StillRunning yield — identical to the old run_linux_loop.
+    // on a StillRunning yield.
     self.shared.pci.virtio_blk.save();
 
     match last_outcome {
@@ -1882,7 +1865,7 @@ impl VmContext {
 /// Advance guest RIP across an *intercept* exit (CPUID / IOIO / MSR /
 /// HLT etc.) via NRIP_SAVE. Requires CPUID 8000_000A EDX[3].
 ///
-/// NRIP_SAVE is **undefined for #NPF and other hardware exceptions**
+/// NRIP_SAVE is undefined for #NPF and other hardware exceptions
 /// (APM Vol 2 §15.7.1) — KVM nested SVM zeroes it, which would land
 /// the next VMRUN at RIP=0 and panic the guest. MMIO emulation must
 /// use `advance_rip_by_length` instead.
@@ -1955,8 +1938,8 @@ fn handle_linux_io(
     let in_value: Option<u64> = match (port, dir_in) {
         // i8254 channel 0 (the other channels are not a tick source).
         // i8042: absent. An empty bus reads all-ones, and 0xFF at the status
-        // port is how Linux sees "No controller found" at once — a 0 there
-        // made it probe the CTR into timeouts (650 ms of every guest boot).
+        // port is how Linux sees "No controller found" at once; a 0 there
+        // makes it probe the CTR into timeouts.
         (0x60 | 0x64, true) => Some(0xFF),
         (0x43, false) => { pit.command(val_out as u8); None }
         (0x40, false) => { pit.write_counter(val_out as u8); None }
@@ -1992,33 +1975,22 @@ fn handle_linux_io(
     }
 }
 
-/// Handle a #NPF on virtio-blk's BAR0 MMIO range. Uses SVM
-/// decode-assists (CPUID 8000_000A EDX[7], probed at init) to read the
-/// faulting instruction bytes from the VMCB, decodes the MOV form,
-/// emulates the access against the device's MMIO model and advances
-/// RIP via NRIP_SAVE.
-///
-/// Returns `true` if the fault was handled. `false` falls through to
-/// the generic NPF dump path (decode failure, unsupported opcode).
 /// Can the guest take a maskable external interrupt right now? RFLAGS.IF=1
-/// AND no interrupt shadow (the 1-instruction block after STI / MOV SS).
+/// and no interrupt shadow (the 1-instruction block after STI / MOV SS).
 /// Mirrors KVM `svm_interrupt_allowed` / the VMX `guest_interruptible`.
 ///
-/// EVENTINJ is a FORCED injection — AMD delivers it regardless of guest IF
+/// EVENTINJ is a forced injection — AMD delivers it regardless of guest IF
 /// (APM Vol 2 §15.20). Harmless on a UP guest (spinlocks compile to no-ops),
 /// but on an SMP guest, firing a device IRQ into a `spin_lock_irqsave`
-/// critical section makes the handler spin on the held qspinlock → deadlock
-/// (the guest-SMP 9p-mount livelock). So we only inject when interruptible,
-/// and open the interrupt window otherwise (`inject_pending_event`).
+/// critical section makes the handler spin on the held qspinlock, a
+/// deadlock. So we only inject when interruptible, and open the interrupt
+/// window otherwise (`inject_pending_event`).
 fn guest_interruptible(vmcb: &vmcb::Vmcb) -> bool {
     let rflags = vmcb.read_u64(vmcb::OFF_SAVE_RFLAGS);
     let int_state = vmcb.read_u64(vmcb::OFF_INT_STATE);
     (rflags & (1 << 9)) != 0 && (int_state & 1) == 0
 }
 
-/// #NPF on the LAPIC MMIO page (guest-SMP Stage 1). Decode the faulting
-/// MOV, service it against the per-vCPU `LocalApic`, advance RIP. xAPIC
-/// registers are 32-bit; no device IRQ-kick (unlike the virtio handlers).
 /// #NPF on the I/O APIC page → `devices::ioapic` (register window).
 fn handle_mmio_npf_ioapic(
     vmcb: &mut vmcb::Vmcb,
@@ -2053,6 +2025,9 @@ fn handle_mmio_npf_ioapic(
     true
 }
 
+/// #NPF on the LAPIC MMIO page. Decode the faulting MOV, service it
+/// against the per-vCPU `LocalApic`, advance RIP. xAPIC registers are
+/// 32-bit; no device IRQ kick (unlike the virtio handlers).
 fn handle_mmio_npf_lapic(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
@@ -2097,6 +2072,14 @@ fn handle_mmio_npf_lapic(
     true
 }
 
+/// Handle a #NPF on virtio-blk's BAR0 MMIO range. Uses SVM
+/// decode-assists (CPUID 8000_000A EDX[7], probed at init) to read the
+/// faulting instruction bytes from the VMCB, decodes the MOV form,
+/// emulates the access against the device's MMIO model and advances
+/// RIP via NRIP_SAVE.
+///
+/// Returns `true` if the fault was handled. `false` falls through to
+/// the generic NPF dump path (decode failure, unsupported opcode).
 fn handle_mmio_npf_blk(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
@@ -2216,8 +2199,7 @@ fn write_guest_gpr(
 }
 
 /// Handle a #NPF on virtio-net's BAR0. Mirror of `handle_mmio_npf_blk`
-/// for the second device. To be de-duplicated alongside the VMX twin
-/// when virtio-gpu lands.
+/// for the second device.
 fn handle_mmio_npf_net(
     vmcb: &mut vmcb::Vmcb,
     regs: &mut vmcb::GuestRegs,
@@ -2269,9 +2251,9 @@ fn handle_mmio_npf_net(
 
     if let Some(qidx) = net.take_pending_kick() {
         if crate::microvm::devices::net_backend::full_active() && qidx == 1 {
-            // TX off-vCPU (Stage 2c): hand the TX kick to the worker, which owns
-            // service_tx + tx_flush on its core — RX and TX then share one core /
-            // one NET path (no cross-core NET-lock fight delaying ACK egress).
+            // TX off-vCPU: hand the TX kick to the worker, which owns
+            // service_tx + tx_flush on its core, so RX and TX share one core
+            // and one NET path (no cross-core NET-lock fight delaying ACK egress).
             crate::microvm::devices::net_backend::note_tx_kick();
         } else {
             let advanced = net.service_queues(qidx, mem);
@@ -2333,11 +2315,11 @@ fn handle_mmio_npf_gpu(
 
     if let Some(qidx) = gpu.take_pending_kick() {
         if crate::microvm::devices::gpu_backend::full_active() {
-            // Off-vCPU: defer the heavy ~8 MB copy + write_frame to the GPU worker
-            // on its own core (it raises IRQ9 + kicks the BSP). The vCPU exit stays
-            // cheap → no framebuffer copy stealing net cycles. note_gpu_kick is
-            // lock-free (atomics); the worker briefly waits for this exit to drop
-            // the gpu_backend lock on return — no cycle (it never takes VM_BIG_LOCK).
+            // Off-vCPU: defer the heavy framebuffer copy + write_frame to the
+            // GPU worker on its own core (it raises IRQ9 + kicks the BSP), so
+            // the vCPU exit stays cheap. note_gpu_kick is lock-free (atomics);
+            // the worker briefly waits for this exit to drop the gpu_backend
+            // lock on return — no cycle (it never takes VM_BIG_LOCK).
             crate::microvm::devices::gpu_backend::note_gpu_kick(qidx);
         } else {
             let advanced = gpu.service_queues(qidx, mem);

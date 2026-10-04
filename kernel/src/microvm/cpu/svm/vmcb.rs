@@ -14,11 +14,9 @@
 //! and 4 KB aligned; the host-save area (separate, pointed to by
 //! VM_HSAVE_PA MSR) has the same constraints.
 //!
-//! For 12.1.0b-svm we touch a minimal subset (asid, tlb_ctl,
-//! intercepts, iopm/msrpm bases, exit fields, plus segment/CR/RFLAGS
-//! for the guest stub). The full struct is sketched as offset
-//! constants — accessor methods on `Vmcb` take an offset and a value
-//! so additional fields can be plumbed without touching this file.
+//! Fields are offset constants; accessor methods on `Vmcb` take an
+//! offset and a value, so additional fields can be plumbed without
+//! touching this file.
 
 use core::ptr;
 
@@ -32,7 +30,7 @@ pub const VMCB_SIZE: usize = 4096;
 #[allow(dead_code)] pub const OFF_INTERCEPT_EXC: usize = 0x008;
 /// Misc intercepts vector 1 — INTR/NMI/SMI/INIT/VINTR/.../HLT/IO/MSR.
 pub const OFF_INTERCEPT_MISC1: usize = 0x00C;
-/// Misc intercepts vector 2 — VMRUN (mandatory!) /VMMCALL/VMSAVE/...
+/// Misc intercepts vector 2 — VMRUN (mandatory) /VMMCALL/VMSAVE/...
 pub const OFF_INTERCEPT_MISC2: usize = 0x010;
 #[allow(dead_code)] pub const OFF_PAUSE_FILTER_THRESH: usize = 0x03C;
 pub const OFF_IOPM_BASE_PA: usize = 0x040;
@@ -40,7 +38,7 @@ pub const OFF_MSRPM_BASE_PA: usize = 0x048;
 #[allow(dead_code)] pub const OFF_TSC_OFFSET: usize = 0x050;
 pub const OFF_ASID: usize = 0x058;
 pub const OFF_TLB_CTL: usize = 0x05C;
-/// TLB_CONTROL values (APM 15.16.1): 0 nothing, 1 flush ALL ASIDs,
+/// TLB_CONTROL values (APM 15.16.1): 0 nothing, 1 flush all ASIDs,
 /// 3 flush this guest's ASID.
 pub const TLB_DO_NOTHING: u8 = 0;
 
@@ -56,8 +54,8 @@ pub const V_IRQ: u32 = 1 << 8;
 pub const V_INTR_PRIO_SHIFT: u32 = 16;
 pub const V_INTR_PRIO_MASK: u32 = 0xF << 16;
 pub const V_IGN_TPR: u32 = 1 << 20;
-/// Guest RFLAGS.IF masks only VIRTUAL interrupts; physical ones (host timer,
-/// kick IPIs) still exit. Without it a guest with IF=0 held our kicks back.
+/// Guest RFLAGS.IF masks only virtual interrupts; physical ones (host timer,
+/// kick IPIs) still exit, so a guest with IF=0 cannot hold host kicks back.
 pub const V_INTR_MASKING: u32 = 1 << 24;
 pub const OFF_EXIT_CODE: usize = 0x070;
 /// Interrupt shadow / guest interrupt mask (APM Vol 2 App. B). Bit 0 =
@@ -107,7 +105,7 @@ pub const INTERCEPT_SHUTDOWN: u32 = 1 << 31;
 
 // ── Misc-2 intercept bits ──────────────────────────────────────────
 
-/// VMRUN intercept — MANDATORY per APM §15.5.1: "VMRUN must be
+/// VMRUN intercept — mandatory per APM §15.5.1: "VMRUN must be
 /// intercepted, otherwise the CPU generates #UD". It's intercepted
 /// from the *guest* — the host runs VMRUN unconditionally.
 pub const INTERCEPT_VMRUN: u32 = 1 << 0;
@@ -185,7 +183,7 @@ pub const OFF_SAVE_G_PAT: usize = 0x400 + 0x268;
 /// Real-mode 16-bit data segment: P=1, S=1, type=Data/Write/Accessed (0011).
 #[allow(dead_code)] pub const ATTR_DATA_RM: u16 = 0x93;
 /// 32-bit prot-mode code segment: ATTR_CODE_RM + D=1 (32-bit) + G=1
-/// (4 KB granularity). Used by 12.1.1b-svm "OK" port-0x80 stub.
+/// (4 KB granularity). Used by the substrate-test port-0x80 stub.
 pub const ATTR_CODE_PM32: u16 = 0xC9B;
 /// 32-bit prot-mode data segment: ATTR_DATA_RM + D=1 + G=1.
 pub const ATTR_DATA_PM32: u16 = 0xC93;
@@ -260,7 +258,7 @@ impl Vmcb {
 
     /// Physical address of this VMCB. SAFETY: caller guarantees
     /// the VMCB was allocated from the kernel's identity-mapped
-    /// contiguous region (every Vmcb in 12.1.0b lives there).
+    /// contiguous region.
     pub fn phys_addr(&self) -> u64 {
         ptr::addr_of!(self.bytes) as u64
     }

@@ -6,15 +6,15 @@
 //!   * ARP-Request for 10.99.0.1 → synth ARP-Reply (link-layer)
 //!   * UDP to 10.99.0.1:53        → host `net::dns::resolve`, synth
 //!                                  DNS-Reply
-//!   * everything else (TCP/UDP/QUIC to real remotes) → **L3
-//!     masquerade**: we do NOT terminate. Outbound packets are SNAT'd
+//!   * everything else (TCP/UDP/QUIC to real remotes) → L3
+//!     masquerade: we do not terminate. Outbound packets are SNAT'd
 //!     to our host IP + a masquerade port and sent via the host IP
 //!     layer; replies are intercepted in `net::ipv4` (`tap_inbound`),
 //!     rewritten back to the guest, put in the tap, and injected by the
-//!     data-plane worker. The
-//!     guest's real Linux TCP/UDP/QUIC runs end-to-end with the
-//!     server — reliability/ordering/SACK/window-scaling are theirs,
-//!     not ours. See the `L3 masquerade NAT` section below.
+//!     data-plane worker. The guest's real Linux TCP/UDP/QUIC runs
+//!     end-to-end with the server — reliability/ordering/SACK/
+//!     window-scaling are theirs, not ours. See the `L3 masquerade NAT`
+//!     section below.
 //!
 //! ARP/DNS handlers return a fully-built virtio-net frame (virtio hdr
 //! + ethernet + IPv4/UDP/payload); `virtio_net_pci.rs` walks the
@@ -33,7 +33,7 @@ use spin::Mutex;
 pub const GUEST_MAC:   [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x6B];
 /// MAC the host pretends to be on the synthetic gateway.
 pub const GATEWAY_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x6E, 0x70, 0x01];
-/// Synthetic gateway IP. ARP, DNS, and (later) NAT all live here.
+/// Synthetic gateway IP. ARP and DNS live here.
 pub const GATEWAY_IP:  [u8; 4] = [10, 99, 0, 1];
 /// Guest IP — PID-1 hard-codes the same value via SIOCSIFADDR.
 pub const GUEST_IP:    [u8; 4] = [10, 99, 0, 2];
@@ -71,9 +71,8 @@ const VNET_HDR_GSO_TCPV4: u8 = 1;
 const VNET_HDR_GSO_ECN: u8 = 0x80;
 
 /// Per-VM network policy. The browser default (`dns_tcp`) allows DNS +
-/// TCP + UDP (QUIC) through the L3 masquerade; ICMP still needs an
-/// explicit cap. Future work threads this through the microvm session
-/// cap so different apps can have different policies.
+/// TCP + UDP (QUIC) through the L3 masquerade; ICMP needs an explicit
+/// cap.
 #[derive(Clone, Copy, Debug)]
 pub struct NetCaps {
     pub allow_dns:  bool,
@@ -100,7 +99,7 @@ impl Default for NetCaps {
 // ===========================================================================
 // L3 masquerade NAT
 //
-// We do NOT terminate TCP. The guest's real Linux TCP/UDP/QUIC talks
+// We do not terminate TCP. The guest's real Linux TCP/UDP/QUIC talks
 // end-to-end with the real server; we only rewrite IP packets:
 //   outbound  guest(10.99.0.2:p → R:q)  →  send from our_ip:HP → R:q
 //   inbound   R:q → our_ip:HP           →  inject  R:q → 10.99.0.2:p
@@ -113,27 +112,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtOrd};
 
 const L3_MAX: usize = 1024;
 
-// ── Throughput / NAT-usage instrumentation (page-load perf diagnosis) ──
-// Cheap relaxed counters; `pump` prints a one-line host-side `[netstat]`
-// summary every ~5 s while a VM is active (NOT guest kmsg → no [guest] spam),
-// so we can see whether page-load slowness is throughput, NAT-table drops, or
-// latency. Window counters reset each summary; HIGHWATER + DROPS are lifetime.
+// ── Throughput / NAT-usage instrumentation ──
+// Cheap relaxed counters, reported by `netstat`. Window counters reset each
+// summary; HIGHWATER + DROPS are lifetime.
 static NS_RX_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_RX_PKTS: AtomicU64 = AtomicU64::new(0);
 static NS_TX_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_TX_PKTS: AtomicU64 = AtomicU64::new(0);
-/// Three different walls, counted apart. One shared counter is how the ax200
-/// TX path hid a partial leak for a boot, and the same trap sits here: a full
-/// staging queue is BACKPRESSURE (healthy, TCP slows down), a full masquerade
-/// table means NO NEW FLOW CAN OPEN (the browser dies while old sockets live),
-/// and an egress refusal means the frame never reached the wire. They look
-/// identical from outside — throughput just sags — and only apart do they say
-/// where to look.
 /// What the guest actually handed us, before any classification. `NS_TX_PKTS`
-/// counts only MASQUERADED egress, so a guest that has sent nothing but ARP and
-/// IPv6 router solicitations reads as zero there — and "the guest never spoke"
-/// and "the guest spoke and we dropped it" are opposite faults. Counted here,
-/// at the door.
+/// counts only masqueraded egress, so a guest that has sent nothing but ARP
+/// and IPv6 router solicitations reads as zero there, and "the guest never
+/// spoke" and "the guest spoke and we dropped it" are opposite faults.
+/// Counted here, at the door.
 static NS_GUEST_KICKS: AtomicU64 = AtomicU64::new(0);   // guest rang the TX doorbell
 static NS_GUEST_FRAMES: AtomicU64 = AtomicU64::new(0);  // frames taken off its TX ring
 static NS_GUEST_ARP: AtomicU64 = AtomicU64::new(0);     // …of which ARP
@@ -143,39 +133,40 @@ static NS_START_TICK: AtomicU64 = AtomicU64::new(0);
 
 pub fn note_guest_kick() { NS_GUEST_KICKS.fetch_add(1, AtOrd::Relaxed); }
 
-/// Where a guest IPv4 frame goes when it does NOT come out the other side.
-/// `handle_ipv4` has five silent `return None`s; between them they can swallow
-/// every packet a guest sends and leave the report showing a healthy zero in
-/// every loss column. Counted, so the gap between "frames in" and "packets out"
-/// has to name itself.
+/// Where a guest IPv4 frame goes when it does not come out the other side.
+/// `handle_ipv4` has several silent `return None`s; counting them makes the
+/// gap between "frames in" and "packets out" name itself.
 static NS_IP_MALFORMED: AtomicU64 = AtomicU64::new(0); // length / total-len clamp
 static NS_IP_TO_GW: AtomicU64 = AtomicU64::new(0);     // addressed to the gateway, not DNS
 static NS_IP_DNS: AtomicU64 = AtomicU64::new(0);       // answered (or queued) by our resolver
 static NS_IP_PROTO: AtomicU64 = AtomicU64::new(0);     // not TCP / UDP / ICMP
-/// The rest of the silent exits, outbound and in. Every one of these could
-/// swallow a guest's whole session while the report showed zeroes everywhere.
+/// The rest of the silent exits, outbound and in.
 static NS_TX_RUNT: AtomicU64 = AtomicU64::new(0);      // frame shorter than vnet+eth
 static NS_TX_BADTCP: AtomicU64 = AtomicU64::new(0);    // emit_tcp_out bailed on the header
 static NS_TX_ARPMISS: AtomicU64 = AtomicU64::new(0);   // went out to L2 broadcast
 static NS_TX_RINGBAD: AtomicU64 = AtomicU64::new(0);   // guest TX queue unusable
 static NS_TX_TRUNC: AtomicU64 = AtomicU64::new(0);     // descriptor chain broke mid-frame
-/// An inbound TCP segment addressed to a port in OUR masquerade range that
-/// matched no mapping. It does not stop here: `tap_inbound` returns false, the
-/// host stack takes it, finds no socket, and answers the server with a RST
-/// (tcp.rs:894). That is our own machine tearing down the guest's connection.
-/// A page that loads for a second and then dies looks exactly like this, and
-/// nothing counted it.
+/// An inbound TCP segment addressed to a port in our masquerade range that
+/// matched no mapping. It does not stop here: `tap_inbound` returns false,
+/// the host stack takes it, finds no socket, and answers the server with a
+/// RST, tearing down the guest's connection. A page that loads for a moment
+/// and then dies looks exactly like this.
 static NS_RX_UNMATCHED: AtomicU64 = AtomicU64::new(0);
 
 pub fn note_tx_ring_bad() { NS_TX_RINGBAD.fetch_add(1, AtOrd::Relaxed); }
 pub fn note_tx_truncated() { NS_TX_TRUNC.fetch_add(1, AtOrd::Relaxed); }
 
+// Three different walls, counted apart: a full staging queue is
+// backpressure (healthy, TCP slows down), a full masquerade table means no
+// new flow can open (the browser dies while old sockets live), and an
+// egress refusal means the frame never reached the wire. From outside all
+// three look like sagging throughput; only apart do they say where to look.
 static NS_DROP_TABLE: AtomicU64 = AtomicU64::new(0);  // L3 masquerade table full
 static NS_DROP_EGRESS: AtomicU64 = AtomicU64::new(0); // host NIC refused the frame
 static NS_HIGHWATER: AtomicU64 = AtomicU64::new(0);
 static NS_LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// The guest RX ring had no buffer posted, so the frame stayed in the tap.
-/// High = the GUEST is the limiter, not us.
+/// High = the guest is the limiter, not us.
 static NS_INJECT_FALSE: AtomicU64 = AtomicU64::new(0);
 /// New-flow counts by transport, to spot QUIC: a cold page that opens lots of
 /// UDP flows is using HTTP/3.
@@ -184,17 +175,15 @@ static NS_UDP_FLOWS: AtomicU64 = AtomicU64::new(0);
 
 /// Last successful RX inject (TSC). Drives the BSP vCPU's idle park decision:
 /// while RX is recently active the vCPU parks event-driven on the host NIC RX
-/// IRQ (`irq_wait`) instead of a blind 10 ms timer sleep, so a download lull is
-/// woken the moment the next batch arrives (drainmax 10 ms → ~sub-ms).
+/// IRQ (`irq_wait`) instead of a blind timer sleep, so a download lull is
+/// woken the moment the next batch arrives.
 static NS_LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
-/// GPU-throttle signal: TSC of the last *bulk* RX frame (a GRO superframe >4 KB,
-/// only produced by a sustained download — browsing/idle frames are <1500 B).
-/// The virtio-gpu framebuffer copy runs INLINE on the vCPU exit (steals net-
-/// processing cycles + the memory bus); while this is recent it backs off from
-/// ~30 fps to ~8 fps so the download isn't throttled by pixel copies. Florian's
-/// "smaller window / hidden desktop = faster download" observation exposed the
-/// coupling. Probe to size the win before the full off-vCPU GPU copy.
+/// GPU-throttle signal: TSC of the last bulk RX frame (a GRO superframe
+/// >4 KB, only produced by a sustained download; browsing/idle frames are
+/// <1500 B). While this is recent, an inline virtio-gpu framebuffer copy
+/// (which steals net-processing cycles and memory bandwidth from the vCPU)
+/// backs off to a lower frame rate.
 static DL_LAST_BULK_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// True if a bulk RX frame arrived in the last ~250 ms (= an active download).
@@ -214,7 +203,7 @@ pub fn recently_active() -> bool {
     now.wrapping_sub(NS_LAST_ACTIVITY.load(AtOrd::Relaxed)) < window
 }
 
-/// Mark the data plane active NOW (a frame moved RX or TX). The off-vCPU
+/// Mark the data plane active now (a frame moved RX or TX). The off-vCPU
 /// `net_dataplane` worker calls this each pass it does real work, so
 /// `recently_active()` gates its halt-poll.
 pub fn mark_active() {
@@ -235,22 +224,20 @@ struct L3Map {
     guest_port: u16,
     remote_ip: [u8; 4],
     remote_port: u16,
-    /// The host address this flow went out with. NOT `arp::our_ip()` at read
-    /// time: a DHCP renewal or a carrier blink mid-session changes that, and a
-    /// mapping keyed on "the address we happen to hold now" is silently orphaned
-    /// the moment it moves — outbound leaves under a port the server never saw,
-    /// inbound is discarded before anything looks at it. The flow is keyed on
-    /// the address it was BORN with, which is the address the replies carry.
+    /// The host address this flow went out with, not `arp::our_ip()` at read
+    /// time: a DHCP renewal or a carrier blink mid-session changes that, and
+    /// a mapping keyed on the current address would be orphaned the moment
+    /// it moves. The flow is keyed on the address it was born with, which is
+    /// the address the replies carry.
     host_ip: [u8; 4],
     host_port: u16,
     last_tick: u64,
 }
 
 /// Masquerade table plus a bit per host port in `[L3_PORT_LO, L3_PORT_HI)`
-/// and two indexes into it, as conntrack hashes both tuple directions: every
-/// packet used to walk the table linearly under this lock (32 KB per
-/// packet, and slower with every flow a long test opened). One lock over
-/// all of it, so no index can disagree with the table.
+/// and two indexes into it, as conntrack hashes both tuple directions, so
+/// no packet walks the table linearly. One lock over all of it, so no index
+/// can disagree with the table.
 struct L3Table {
     maps: [Option<L3Map>; L3_MAX],
     used: [u64; PORT_WORDS],
@@ -362,15 +349,12 @@ static L3: Mutex<L3Table> = Mutex::new(L3Table::new());
 /// Gates the host-RX inbound intercept. Off ⇒ `tap_inbound` is a cheap
 /// `false` so a guest-less host (plain OTA/https) is never touched.
 static L3_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// Recycled frame buffers for the inbound staging path. Each download packet
-/// used to `vec![0u8; ~1514]` (allocator free-list walk + memset) and free it
-/// after injection — the dominant inbound per-packet cost (~2.6µs/pkt: the
-/// first-fit allocator walks an O(n) free list under churn, plus the memset).
-/// Linux solves this with skb pools; we keep a small ring of buffers that the
-/// producer (tap_inbound) borrows and the consumer (the worker) returns, so
-/// after warmup the datapath does ZERO heap alloc/free — only the unavoidable
-/// payload memcpy. Bounded so it can't grow without limit; only used while a VM
-/// is active (the BSP is the sole accessor, so the lock is uncontended).
+/// Recycled frame buffers for the inbound staging path. A fresh
+/// `vec![0u8; ~1514]` per packet (allocator free-list walk + memset) would
+/// dominate the inbound per-packet cost. As with Linux's skb pools, the
+/// producer (tap_inbound) borrows buffers and the consumer (the worker)
+/// returns them, so after warmup the datapath does no heap alloc/free,
+/// only the payload memcpy. Bounded so it can't grow without limit.
 static FRAME_POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 const FRAME_POOL_MAX: usize = TAP_RING + 16;
 const FRAME_BUF_CAP: usize = 2048; // ≥ vnet+eth+MTU, so resize never reallocs
@@ -398,10 +382,8 @@ fn frame_pool_put(buf: Vec<u8>) {
     let mut pool = FRAME_POOL.lock();
     if pool.len() < FRAME_POOL_MAX { pool.push(buf); }
 }
-/// Find an existing mapping for this guest flow or allocate one.
-/// Returns the masquerade host port.
 /// The masquerade table is full: no new flow can open. Budgeted, because if it
-/// fires it fires for every packet of every new connection — and a log that
+/// fires it fires for every packet of every new connection, and a log that
 /// writes the flood is no longer a log. `netstat` carries the running count.
 fn note_table_full() {
     let n = NS_DROP_TABLE.fetch_add(1, AtOrd::Relaxed);
@@ -411,6 +393,8 @@ fn note_table_full() {
     }
 }
 
+/// Find an existing mapping for this guest flow or allocate one.
+/// Returns the masquerade host port.
 fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Option<u16> {
     let our_ip = crate::net::arp::our_ip();
     let mut tbl = L3.lock();
@@ -429,10 +413,9 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, now: u64) -> Opti
         NS_MAP_REHOMED.fetch_add(1, AtOrd::Relaxed);
     }
     // `nf_nat_l4proto_unique_tuple`: start at a varying offset, probe forward
-    // with an O(1) used-test, and give up after a BOUNDED number of attempts
-    // (then re-roll once). The old code walked all 1024 entries per candidate
-    // port — ~10^6 comparisons under the lock for one new flow on a full table,
-    // and a browser opens ~65 UDP flows per page.
+    // with an O(1) used-test, and give up after a bounded number of attempts
+    // (then re-roll once), so a full table cannot cost a linear search per
+    // candidate port under the lock.
     let mut off = (crate::interrupts::rdtsc() as usize) % PORT_RANGE;
     let mut hp: Option<u16> = None;
     for _round in 0..2 {
@@ -477,26 +460,16 @@ fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
 
 /// Recompute the TCP/UDP checksum after an address/port rewrite.
 ///
-/// UDP used to be handled by ZEROING the field, on the grounds that a zero
-/// checksum is legal for UDP-over-IPv4 (RFC 768) and cheaper than a pass over
-/// the payload. Both halves of that are true and the conclusion is still wrong
-/// for a masquerade: the datagram ARRIVED with a checksum, and throwing it away
-/// is not translation, it is damage. What we hand on is a packet that claims to
-/// be unprotected — and the far end is entitled to treat it accordingly.
-///
-/// It hid for as long as it did because of who reads the packet next. Under
-/// QEMU the masqueraded datagram goes to slirp, a userspace stack that
-/// terminates the flow and re-originates it on the outside; it never looks at
-/// the field. On real hardware the very same packet goes straight onto the
-/// wire to a real server. And the guest is a browser: `flows 6 tcp 25 udp` —
-/// four out of five of its connections are HTTP/3, which is QUIC, which is UDP.
+/// UDP is not zeroed even though a zero checksum is legal for UDP-over-IPv4
+/// (RFC 768): the datagram arrived with a checksum, and handing on a packet
+/// that claims to be unprotected is damage, not translation. Most of a
+/// browser's flows are QUIC, i.e. UDP.
 ///
 /// Outbound we must compute in full: with `VIRTIO_NET_F_CSUM` negotiated the
 /// guest hands us CHECKSUM_PARTIAL, so the field holds a pseudo-header seed and
-/// not a checksum. Inbound the datagram arrives complete and we could update
-/// incrementally, but the same full pass keeps ONE implementation for both
-/// directions — a few hundred nanoseconds against a class of bug that cost an
-/// evening.
+/// not a checksum. Inbound the datagram arrives complete and could be updated
+/// incrementally, but the same full pass keeps one implementation for both
+/// directions.
 fn fix_l4_checksum(proto: u8, src_ip: [u8; 4], dst_ip: [u8; 4], l4: &mut [u8]) {
     if proto == PROTO_TCP {
         if l4.len() < TCP_HDR_LEN { return; }
@@ -549,8 +522,8 @@ fn udp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
 /// Incremental ones-complement checksum update (RFC 1624). Adjust an existing
 /// checksum for a set of changed 16-bit words in O(changes) instead of
 /// recomputing over the whole segment — `HC' = ~(~HC + Σ(~old + new))`. NAT only
-/// rewrites the IP + port (≤3 words), so this replaces the full ~1500-byte
-/// `tcp_checksum` loop that dominated the inbound per-packet cost (~2.6µs/pkt).
+/// rewrites the IP + port (≤3 words), so this avoids a full pass over the
+/// segment on the inbound hot path.
 fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
     let mut sum = (!old_check) as u32;
     for &(old, new) in changes {
@@ -574,11 +547,10 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
     let our_ip = crate::net::arp::our_ip();
     if proto == PROTO_TCP {
         // TCP: software TSO segmentation (gso_size > 0 + payload past one MSS) or
-        // a single segment. Either way the TCP checksum is recomputed in full —
-        // with VIRTIO_NET_F_CSUM negotiated the guest now offloads its checksum
-        // (CHECKSUM_PARTIAL: the field holds only the pseudo-header seed), so the
-        // old incremental update has no valid base. Full recompute is correct
-        // whether or not CSUM is on and is required per-segment anyway.
+        // a single segment. Either way the TCP checksum is recomputed in full:
+        // with VIRTIO_NET_F_CSUM negotiated the guest offloads its checksum
+        // (CHECKSUM_PARTIAL: the field holds only the pseudo-header seed), so
+        // an incremental update has no valid base.
         emit_tcp_out(hp, our_ip, dst_ip, l4, gso_size);
     } else {
         // UDP (and anything else routed here): single datagram, port rewrite +
@@ -624,7 +596,7 @@ fn emit_tcp_out(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4],
         return;
     }
 
-    // The card segments it: one super-frame instead of ~44 software-cut
+    // The card segments it: one super-frame instead of many software-cut
     // segments, each with a full checksum and its own trip through ipv4::send.
     if crate::netdev::tso_capable() && emit_tcp_tso(hp, our_ip, dst_ip, l4, thlen, gso_size) {
         return;
@@ -696,7 +668,7 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
     let l4_off = f.len();
     f.extend_from_slice(l4);
     f[l4_off..l4_off + 2].copy_from_slice(&hp.to_be_bytes()); // src port → host port
-    // Seed = folded pseudo-header sum, NOT complemented; the card adds the
+    // Seed = folded pseudo-header sum, not complemented; the card adds the
     // segment's own sum and complements (`~tcp_v4_check(len, s, d, 0)`).
     let mut sum: u32 = PROTO_TCP as u32 + l4.len() as u32;
     for w in [our_ip, dst_ip] {
@@ -759,10 +731,6 @@ fn fix_icmp_checksum(icmp: &mut [u8]) {
     icmp[2..4].copy_from_slice(&c.to_be_bytes());
 }
 
-/// Host-RX intercept. `ip` is a full IPv4 packet already filtered to
-/// our IP. If it matches a masquerade mapping, rewrite it back to the
-/// guest, enqueue for `pump`, and return true (consume — the host
-/// stack must NOT also process it). Cheap `false` when no VM is up.
 /// Return a frame buffer (from `tap_inbound`) to the recycle pool after it has
 /// been injected into the guest ring — no per-packet heap churn.
 pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
@@ -776,11 +744,9 @@ pub fn recycle_frame(buf: Vec<u8>) { frame_pool_put(buf); }
 // a silent overwrite; `tun_do_read` consumes and blocks on the socket's wait
 // queue when it is empty.
 //
-// This replaces "the worker drains the host NIC". Where a frame ENTERS used to
-// depend on the card — cable/virtio came through `netdev::recv` behind the
-// POLLING guard the worker took for itself, while the AX200's WASM driver
-// delivers straight into `eth::handle_frame`, which the worker could not see at
-// all. Now every card ends in the same place and the worker never touches a NIC.
+// Every card's receive path (driver polling or a WASM driver delivering
+// straight into `eth::handle_frame`) ends in this ring, and the worker never
+// touches a NIC.
 // ===========================================================================
 
 /// tun's `dev->tx_queue_len = TUN_READQ_SIZE` is 500. 512 keeps the power of two.
@@ -802,13 +768,12 @@ impl Tap {
 static TAP: Mutex<Tap> = Mutex::new(Tap::new());
 /// Lock-free depth, so the worker's "is there work" test takes no lock.
 static TAP_LEN: AtomicU64 = AtomicU64::new(0);
-/// `tun_net_xmit`'s `tx_dropped`: the ring was full. This is BACKPRESSURE and
-/// healthy in moderation — it is not the masquerade table filling up and not an
-/// egress refusal, and the whole point of counting the three apart is that from
-/// outside all three look like "throughput sagged" (see the note at the top).
+/// `tun_net_xmit`'s `tx_dropped`: the ring was full. This is backpressure and
+/// healthy in moderation, not the masquerade table filling up and not an
+/// egress refusal (see the note on the drop counters).
 static NS_TAP_FULL: AtomicU64 = AtomicU64::new(0);
-/// Frames actually handed to the guest. PROGRESS, not fill level: a ring that
-/// sits at 40 of 512 tells you nothing, a delivered-count that stops moving
+/// Frames actually handed to the guest. Progress, not fill level: a ring that
+/// sits at 40 of 512 tells you nothing, a delivered count that stops moving
 /// tells you everything.
 static NS_TAP_DELIVERED: AtomicU64 = AtomicU64::new(0);
 /// Flows retired because the host address moved under them (DHCP renewal,
@@ -816,7 +781,7 @@ static NS_TAP_DELIVERED: AtomicU64 = AtomicU64::new(0);
 /// like the far end went quiet.
 static NS_MAP_REHOMED: AtomicU64 = AtomicU64::new(0);
 /// The worker is parked on its doorbell. Linux's wait queue: `sk_data_ready`
-/// wakes nobody when no reader sleeps there, so a producer feeding a RUNNING
+/// wakes nobody when no reader sleeps there, so a producer feeding a running
 /// consumer sends no wakeup at all. Without this the empty→occupied edge would
 /// IPI a busy-polling worker at line rate.
 static WORKER_PARKED: AtomicBool = AtomicBool::new(false);
@@ -849,7 +814,7 @@ fn tap_push(frame: Vec<u8>) -> bool {
     // one wakeup, not one per frame.
     if was_empty && WORKER_PARKED.load(AtOrd::SeqCst) {
         if let Some(c) = super::net_backend::worker_core() {
-            // Bumps the target core's kick generation BEFORE the IPI, so a wake
+            // Bumps the target core's kick generation before the IPI, so a wake
             // racing the park is never lost — the scheduler re-tests the
             // generation every scan and finds the fiber runnable.
             crate::smp::kick_host_core(c);
@@ -906,11 +871,11 @@ pub fn tap_reset() {
     WORKER_PARKED.store(false, AtOrd::SeqCst);
 }
 
-/// THE inbound acceptance test, and the only translation. Called from
-/// `ipv4::handle_ipv4` for every received IPv4 packet, BEFORE the "is this
-/// addressed to the address we happen to hold right now" filter: a guest flow is
-/// keyed on the address it went out with, and asking the other question first
-/// discards the reply before anything has looked at it.
+/// The inbound acceptance test, and the only translation. Called from
+/// `ipv4::handle_ipv4` for every received IPv4 packet, before the "is this
+/// addressed to the address we hold right now" filter: a guest flow is
+/// keyed on the address it went out with, and asking the other question
+/// first would discard the reply.
 ///
 /// Returns true if the packet was guest traffic and is now the tap's problem —
 /// the host stack must not also process it. A cheap `false` when no VM is up.
@@ -936,8 +901,8 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
         Some(g) => g,
         None => {
             // Not ours by the mapping. A TCP port inside our masquerade range is
-            // not the host's either, and the host stack answers it with a RST —
-            // our own machine tearing down the guest's connection.
+            // not the host's either, and the host stack would answer it with a
+            // RST, tearing down the guest's connection.
             if proto == PROTO_TCP && (L3_PORT_LO..L3_PORT_HI).contains(&host_port) {
                 NS_RX_UNMATCHED.fetch_add(1, AtOrd::Relaxed);
             }
@@ -978,15 +943,14 @@ pub fn tap_inbound(ip: &[u8]) -> bool {
     true
 }
 
-/// Which data path this kernel is running, for `netstat`. QEMU, the NUC and the
-/// notebook must all print the SAME id — that, not any throughput number, is
-/// the acceptance of the rebuild: one path, taken by every machine.
+/// Which data path this kernel is running, for `netstat`, so different
+/// machines can be compared on the path they take.
 pub fn path_id() -> &'static str { "tap-v1" }
 
 /// Lock-free NAT housekeeping for the full off-vCPU data plane: reap idle
 /// masquerade mappings so the table can't fill over a long session. In full mode
 /// the device-touching work (`tx_flush`/RX drain) is the `net_dataplane` worker's
-/// job — the BSP only needs this, and it takes NO net-device lock (so the BSP
+/// job — the BSP only needs this, and it takes no net-device lock (so the BSP
 /// never contends with the worker on the hot path). The worker owns RX+TX; the
 /// vCPU owns guest execution + IRQ injection. That's the single, unified path.
 pub fn housekeep() {
@@ -1098,11 +1062,10 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
     let proto = ip[9];
     let src_ip: [u8; 4] = ip[12..16].try_into().ok()?;
     let dst_ip: [u8; 4] = ip[16..20].try_into().ok()?;
-    // Clamp L4 to the IP total-length. The guest TX buffer is bigger
-    // than the packet (min-frame / driver padding); &ip[ihl..] would
-    // append that garbage to every outbound segment → the server
-    // misframes the response → Firefox reads a wild length → ~4 GiB
-    // alloc → crash. Inbound is already clamped in net/ipv4.rs.
+    // Clamp L4 to the IP total length. The guest TX buffer is bigger than
+    // the packet (min-frame / driver padding); &ip[ihl..] would append that
+    // garbage to every outbound segment, and the server would misframe the
+    // response. Inbound is already clamped in net/ipv4.rs.
     let ip_total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
     if ip_total < ihl || ip_total > ip.len() { NS_IP_MALFORMED.fetch_add(1, AtOrd::Relaxed); return None; }
     let l4 = &ip[ihl..ip_total];
@@ -1157,9 +1120,9 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
 
 /// rcode-relevant outcome of a lookup. The NoData vs NxDomain split is
 /// load-bearing: a non-A query (AAAA / HTTPS-SVCB type 65) on a name
-/// that exists MUST be NOERROR/NODATA, not NXDOMAIN. Firefox queries
+/// that exists must be NOERROR/NODATA, not NXDOMAIN. Firefox queries
 /// the HTTPS RR before every connection and reads NXDOMAIN as "host
-/// does not exist" → "secure site not available".
+/// does not exist".
 enum DnsOutcome {
     Answer([u8; 4]),  // A record
     NoData,           // NOERROR, no answer — name exists, no such RR type
@@ -1170,13 +1133,11 @@ enum DnsOutcome {
 /// the reply with the correct rcode.
 ///
 /// Cache only. This runs on the vCPU fiber, inside the virtio-net MMIO exit,
-/// with the device mutex held — `net::dns::resolve` would spin here for up to
-/// its whole 5.5 s budget. That is not merely a frozen guest: `pump_peers()`
-/// bails out inside a fiber, so the WASM NIC driver fiber sharing this core
-/// stops posting receive buffers, the card runs dry after its ~50 ms worth, and
-/// the reply that would end the wait is one of the frames that can no longer
-/// arrive. Measured on the notebook: one page loaded, then the radio was gone
-/// and the host had no network either.
+/// with the device mutex held; `net::dns::resolve` would spin here for its
+/// whole timeout budget. Meanwhile `pump_peers()` bails out inside a fiber,
+/// so a WASM NIC driver fiber sharing this core stops posting receive
+/// buffers, the card runs dry, and the reply that would end the wait can no
+/// longer arrive — the host loses its network too.
 ///
 /// So: hit → answer, known-bad → NXDOMAIN, unknown → hand the name to Core 0
 /// and drop the query. UDP DNS is retried by whoever asked, and the retry
@@ -1316,8 +1277,8 @@ fn build_ipv4_udp_reply(
 
 fn write_eth(buf: &mut [u8], dst: &[u8; 6], src: &[u8; 6], ethertype: u16) {
     // virtio_net_hdr at offset 0..12. Per virtio 1.2 §5.1.6.4.1, with
-    // VIRTIO_F_VERSION_1 negotiated and VIRTIO_NET_F_MRG_RXBUF NOT
-    // negotiated, num_buffers (bytes 10..12, LE) MUST be 1 or Linux's
+    // VIRTIO_F_VERSION_1 negotiated and VIRTIO_NET_F_MRG_RXBUF not
+    // negotiated, num_buffers (bytes 10..12, LE) must be 1 or Linux's
     // virtio_net driver drops the packet silently in receive_buf().
     // Everything else stays zero (no offloads, no GSO).
     buf[10] = 1;
@@ -1381,32 +1342,28 @@ fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// Guest timer-IRQ injections this window (PIT IRQ0 + LAPIC LVTT). Confirms the
-/// CONFIG_HZ=1000 fix: should read ~1000/s (the guest's programmed rate), not
-/// the old ~100/s (our wall-clock pacing). Incremented from the SVM inject path.
+/// Guest timer-IRQ injections this window (PIT IRQ0 + LAPIC LVTT). Should
+/// match the guest's programmed tick rate. Incremented from the inject path.
 static NS_GTIMER: AtomicU64 = AtomicU64::new(0);
 pub fn note_guest_timer() { NS_GTIMER.fetch_add(1, AtOrd::Relaxed); }
-/// Cumulative guest timer-IRQ injections (LVTT+PIT). Surfaced in `cores` to
-/// MEASURE the effective guest HZ: ~1000/s = the guest's programmed 1 kHz tick
-/// is delivered; <1000/s = the BSP's 2ms parks are freezing the guest timer
-/// (floor b) → the guest's delayed-ACK/RTO/pacing slow → the slow download
-/// regime. Tests the "1000 vs 100, mal gut mal schlecht" hypothesis directly.
+/// Cumulative guest timer-IRQ injections (LVTT+PIT), surfaced in `cores` to
+/// measure the effective guest HZ: below the guest's programmed rate means
+/// idle parks are delaying its timer, which slows its delayed-ACK/RTO/pacing.
 pub fn guest_timer_count() -> u64 { NS_GTIMER.load(AtOrd::Relaxed) }
 /// Cumulative outbound TX (segments, bytes) — surfaced in `cores` as segs/s +
-/// avg segment size during an upload. The b1-vs-b2 discriminator: a high segs/s
-/// with the worker core pegged = the SW-TSO emit pipeline is the cap (b1, the
-/// lock-split + host-TX batching lift it); the same segs/s with an idle worker =
-/// the cap is cwnd × inflated bridge RTT (b2, an ACK-clock the emit path can't
-/// raise). Monotonic in full mode (pump's swap never runs); diff two snapshots.
+/// avg segment size during an upload. A high segs/s with the worker core
+/// pegged means the SW-TSO emit pipeline is the cap; the same segs/s with an
+/// idle worker means the cap is cwnd × bridge RTT. Monotonic; diff two
+/// snapshots.
 pub fn tx_stats() -> (u64, u64) {
     (NS_TX_PKTS.load(AtOrd::Relaxed), NS_TX_BYTES.load(AtOrd::Relaxed))
 }
 /// Count of net-RX IRQ10 actually raised to the guest (after ITR moderation).
-/// vs the per-packet rate it would be without — the io-EOI-storm signal.
+/// vs the per-packet rate it would be without (EOI-storm signal).
 static NS_NET_IRQ: AtomicU64 = AtomicU64::new(0);
 pub fn note_net_irq() { NS_NET_IRQ.fetch_add(1, AtOrd::Relaxed); }
 /// Bridge RX health for `cores`: (tap ring-full drops, guest-ring-full stalls).
-/// A ring-full drop is BACKPRESSURE — the producer outran the guest and the far
+/// A ring-full drop is backpressure — the producer outran the guest and the far
 /// end slows down. `inject_false` is the guest being the limiter: it had no RX
 /// buffer posted, so the frame stayed in the tap and nothing was lost.
 pub fn rx_health_snapshot() -> (u64, u64) {
@@ -1417,9 +1374,8 @@ pub fn rx_health_snapshot() -> (u64, u64) {
 pub fn note_inject_false() { NS_INJECT_FALSE.fetch_add(1, AtOrd::Relaxed); }
 
 /// virtio-gpu TRANSFER_TO_HOST pixel bytes copied on the vCPU core (the browser
-/// rendering). If high during a download, the framebuffer copy is stealing vCPU
-/// cycles from the net pump (the framebuffer↔pump contention) — Florian's
-/// "graphics?" hypothesis, measured.
+/// rendering). If high during a download, the framebuffer copy is stealing
+/// vCPU cycles from the net pump.
 static NS_GPU_BYTES: AtomicU64 = AtomicU64::new(0);
 static NS_GPU_XFERS: AtomicU64 = AtomicU64::new(0);
 static NS_GPU_CYC: AtomicU64 = AtomicU64::new(0);
@@ -1429,27 +1385,21 @@ pub fn note_gpu_transfer(bytes: u64, cycles: u64) {
     NS_GPU_XFERS.fetch_add(1, AtOrd::Relaxed);
 }
 
-/// Everything the bridge knows about itself, for `netstat`.
-///
-/// The counters were always there; they lived behind a debug const that had
-/// been `false` for months, so the one path nobody could see was the one
-/// between the guest and the wire. This is the `wlan` treatment: no console
-/// traffic, one screen on demand, and the numbers arranged so the reader can
-/// tell the failures APART rather than watching a single "throughput sagged".
+/// Everything the bridge knows about itself, for `netstat`: one screen on
+/// demand, no console traffic, arranged so the reader can tell the failures
+/// apart.
 pub struct BridgeStats {
     pub active: bool,
     pub up_s: u64,
-    /// Identity of the data path, so the three machines can be COMPARED rather
-    /// than each believed on its own. Same path id on QEMU, NUC and notebook is
-    /// the acceptance test of the whole rebuild.
+    /// Identity of the data path, so different machines can be compared.
     pub path: &'static str,
     pub version: &'static str,
     pub vendor: &'static str,
     pub nic: &'static str,
     pub worker_core: Option<usize>,
     /// Tap: current depth, capacity, frames delivered to the guest, and the
-    /// ring-full drops. Progress (`tap_delivered`) is the number that matters —
-    /// a fill level says nothing (feedback_watchdog_that_only_fires_at_full).
+    /// ring-full drops. Progress (`tap_delivered`) is the number that matters;
+    /// a fill level says nothing.
     pub tap: u64, pub tap_cap: usize,
     pub tap_delivered: u64, pub tap_delivered_ps: u64, pub tap_full: u64,
     pub rehomed: u64,
@@ -1471,10 +1421,9 @@ pub struct BridgeStats {
     pub tx_ringbad: u64, pub tx_trunc: u64, pub rx_unmatched: u64,
 }
 
-// Previous snapshot, so a second `netstat` a few seconds later reads as a RATE.
-// Cumulative counters answer "did this ever work"; only the rate answers "is it
-// working right now", which is the whole question when a link dies after five
-// seconds.
+// Previous snapshot, so a second `netstat` a few seconds later reads as a rate.
+// Cumulative counters answer "did this ever work"; only the rate answers "is
+// it working right now".
 static RPT_TSC: AtomicU64 = AtomicU64::new(0);
 static RPT_RX: AtomicU64 = AtomicU64::new(0);
 static RPT_TX: AtomicU64 = AtomicU64::new(0);
@@ -1577,17 +1526,11 @@ pub fn reset_sessions() {
     // Belt-and-suspenders: clear the shared NIC-drain guard so a microvm run
     // can never leave the HOST's own networking (DNS / OTA) bricked.
     crate::net::reset_poll_guard();
-    // The COUNTERS deliberately survive teardown — see `reset_counters`.
+    // The counters deliberately survive teardown — see `reset_counters`.
 }
 
-/// Zero the bridge counters. At VM **start**, not at teardown.
-///
-/// They used to be zeroed here on the way out, which meant the numbers existed
-/// only while the guest was alive: close the browser, ask `netstat` what
-/// happened, get nothing. The one moment anyone wants a post-mortem is right
-/// after the thing died, and that was exactly the moment the evidence was
-/// erased. Zeroing on the way IN gives every run a clean window and leaves the
-/// last run readable until the next launch.
+/// Zero the bridge counters. At VM start, not at teardown, so the last run
+/// stays readable for a post-mortem until the next launch.
 pub fn reset_counters() {
     for c in [&NS_RX_BYTES, &NS_RX_PKTS, &NS_TX_BYTES, &NS_TX_PKTS,
               &NS_DROP_TABLE, &NS_DROP_EGRESS,

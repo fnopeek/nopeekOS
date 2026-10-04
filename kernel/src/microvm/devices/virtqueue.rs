@@ -61,7 +61,7 @@ pub fn avail_idx(mem: &GuestMem, avail_gpa: u64) -> Option<u16> {
 
 /// VIRTQ_AVAIL_F_NO_INTERRUPT — the driver sets this in avail.flags (@ +0) while
 /// it polls the ring (Linux NAPI does this between the IRQ and re-enabling), to
-/// tell the device NOT to send an interrupt. Honouring it avoids a spurious-IRQ
+/// tell the device not to send an interrupt. Honouring it avoids a spurious-IRQ
 /// storm that preempts the guest's ring-drain.
 pub const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 

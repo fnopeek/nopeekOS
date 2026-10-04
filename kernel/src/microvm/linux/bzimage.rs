@@ -1,8 +1,7 @@
 //! Linux Boot Protocol — bzImage setup-header parser.
 //!
-//! Phase 12.1.1c-3b1: read-only parsing only. The full loader
-//! (copy parts into guest RAM, build boot_params + e820 + cmdline,
-//! VMLAUNCH at code32_start) lands in 12.1.1c-3b2.
+//! Parses the setup header and loads the image into guest RAM (boot_params,
+//! e820, cmdline, initramfs) for 32-bit entry at code32_start.
 //!
 //! Linux ships its kernel image as a "bzImage" — a concatenation of
 //! a legacy real-mode bootsector + a multi-sector setup section +
@@ -116,9 +115,9 @@ pub fn protected_kernel_size(header: &SetupHeader) -> usize {
     (header.syssize as usize) * 16
 }
 
-// ── Loader (Phase 12.1.1c-3b3b2) ───────────────────────────────────
+// ── Loader ─────────────────────────────────────────────────────────────
 
-/// Boot-params guest-physical layout (under our 256-MB EPT window):
+/// Boot-params guest-physical layout:
 ///   0x10000   setup-section (boot sector + setup_sects sectors,
 ///             ~16 KB) — needed for legacy compatibility / EFI even
 ///             when entry is 32-bit.
@@ -126,9 +125,9 @@ pub fn protected_kernel_size(header: &SetupHeader) -> usize {
 ///   0x90000   boot_params struct (4 KB zero-page, includes a copy
 ///             of the setup-header at offset 0x1F1).
 ///   0x100000  protected-mode kernel image (= bzImage[setup_section..])
-///   0xC000000 initramfs (= 192 MB, well above kernel's `init_size`
-///             which is ~38 MB for Alpine virt 6.18). Linux frees
-///             this region after unpacking the cpio into rootfs.
+///   0xC000000 initramfs (192 MB, well above a typical kernel
+///             `init_size`). Linux frees this region after unpacking
+///             the cpio into rootfs.
 const SETUP_GUEST_PHYS: u64 = 0x10000;
 const CMDLINE_GUEST_PHYS: u64 = 0x20000;
 const BOOT_PARAMS_GUEST_PHYS: u64 = 0x90000;
@@ -151,8 +150,8 @@ use crate::microvm::devices::guest_mem::GuestMem;
 // `[0, RAM_TOTAL) RAM` entry omits the BIOS hole, which on some kernel
 // paths trips memory-layout assumptions and leaves the direct-map L4
 // entry empty for low-RAM regions. Splitting per PC convention works
-// around it. The extended-memory size is `mem.len()` — the canonical
-// guest-RAM size (`guest_mem::GUEST_RAM_BYTES`, B2: runtime).
+// around it. The extended-memory size is `mem.len()` — the guest-RAM
+// size chosen at VM open.
 
 /// Linux loadflags bits we need.
 const LOADFLAG_LOADED_HIGH: u8 = 1 << 0;
@@ -225,8 +224,7 @@ pub fn load_into_guest_ram(
 
     // Place the guest image. `GuestMem` bounds-checks every write
     // against the window; the explicit checks above give a precise
-    // error before we start. B1: window is contiguous, so these are
-    // plain copies; B3: `GuestMem` faults pages in / splits per page.
+    // error before we start; `GuestMem` handles demand-paged pages.
     mem.write_bytes(SETUP_GUEST_PHYS, &bzimage[..setup_size]);
     mem.write_bytes(
         KERNEL_GUEST_PHYS,
@@ -292,7 +290,7 @@ pub fn load_into_guest_ram(
     // Copy boot_params into guest RAM at 0x90000.
     mem.write_bytes(BOOT_PARAMS_GUEST_PHYS, &bp);
 
-    // Guest-SMP Stage 2: enumerate the vCPUs via an MP-table in the
+    // Guest SMP: enumerate the vCPUs via an MP table in the
     // BIOS window (0xF0000, RESERVED above in our e820). Linux scans
     // for it when booted `acpi=off` and counts GUEST_VCPUS CPUs.
     if crate::microvm::cpu::GUEST_SMP {

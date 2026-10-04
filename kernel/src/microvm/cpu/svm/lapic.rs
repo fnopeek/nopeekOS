@@ -108,11 +108,11 @@ pub const MAX_VCPUS: usize = 8;
 static PIR: [[AtomicU64; 4]; MAX_VCPUS] =
     [const { [const { AtomicU64::new(0) }; 4] }; MAX_VCPUS];
 
-/// `pi_desc.ON`: set by the poster AFTER its PIR bit, cleared by the owner
-/// BEFORE it drains PIR. Whoever flips it false→true kicks, so a post that
-/// lands after a drain always kicks — deriving the edge from the PIR words
-/// (load, then or) lost it when the owner drained in between, and the vector
-/// then sat in PIR while the target ran in guest with no exit to fold it in.
+/// `pi_desc.ON`: set by the poster after its PIR bit, cleared by the owner
+/// before it drains PIR. Whoever flips it false→true kicks, so a post that
+/// lands after a drain always kicks. Deriving the edge from the PIR words
+/// instead would lose it when the owner drains in between, leaving the
+/// vector in PIR while the target runs in guest with no exit to fold it in.
 static PIR_ON: [AtomicBool; MAX_VCPUS] = [const { AtomicBool::new(false) }; MAX_VCPUS];
 
 /// Post `vector` to vCPU `apic_id`. True when the caller must kick the

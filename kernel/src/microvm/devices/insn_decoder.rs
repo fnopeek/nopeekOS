@@ -3,10 +3,10 @@
 //! Scope: just the MOV variants Linux's MMIO accessors lower to.
 //! Linux `ioread{8,16,32,64}` / `iowrite{8,16,32,64}` compile to plain
 //! MOV with simple memory operands (typical: `[reg+disp]`). That covers
-//! every PCI-config and virtio-modern register access in Phase 12.2.
+//! every PCI-config and virtio-modern register access.
 //!
 //! Anything more exotic (REP MOVS, atomic ops, vector ops on MMIO)
-//! returns `None`; the caller logs and bails. We can extend on demand.
+//! returns `None`; the caller logs and bails.
 //!
 //! Reference: Intel SDM Vol 2 / AMD APM Vol 3.
 

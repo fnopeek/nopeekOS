@@ -1,7 +1,4 @@
-//! SVM (AMD-V) — Phase 12 MicroVM substrate, AMD backend.
-//!
-//! Status: 12.1.0a-svm — probe + report. Bring-up
-//! (EFER.SVME, host-save, VMCB, VMRUN) lands in 12.1.0b-svm.
+//! SVM (AMD-V) — AMD backend of the MicroVM substrate.
 //!
 //! The AMD equivalent of Intel VMX is documented in *AMD64
 //! Architecture Programmer's Manual, Volume 2: System Programming*
@@ -17,22 +14,11 @@
 //! | Nested paging        | EPT (4-level)    | NPT (4-level, same shape, different MSR) |
 //! | I/O intercept        | I/O bitmap (2×4 KB) | IOPM (12 KB, ports 0..0xFFFF) |
 //! | MSR intercept        | MSR bitmap (4 KB) | MSRPM (8 KB) |
-//!
-//! Phase 12.1 milestones (mirroring VMX bring-up):
-//!   12.1.0a-svm  probe + report                          ← this
-//!   12.1.0b-svm  EFER.SVME + host-save + trivial VMRUN
-//!   12.1.0c/d-svm  VMCB save-area complete, host VMSAVE/VMLOAD
-//!   12.1.1a-svm  NPT identity-map (256 MB)
-//!   12.1.1b-svm  Real-mode unrestricted guest + I/O bitmap
-//!   12.1.1c-svm  Linux bzImage 32-bit boot protocol entry
-//!   12.1.1d-svm  Panic detection (shared SerialState scanner)
-//!   12.1.3-svm   initramfs + Rust-PID-1 (init crate already exists)
-//!   12.1.4-svm   inject_console echo round-trip
 
 mod enable;
 mod msr; // guest MSR policy: intercept-all + emulation (KVM model)
-pub mod lapic; // per-vCPU local-APIC emulation (guest-SMP Stage 1)
-pub mod npt; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
+pub mod lapic; // per-vCPU local-APIC emulation
+pub mod npt; // demand_fault_in / boot_window_bytes used by guest_mem
 mod probe;
 mod vmcb;
 
@@ -99,8 +85,8 @@ pub fn run_substrate_test() -> Result<super::LaunchOutcome, &'static str> {
 
 pub use enable::{SliceOutcome, VmContext};
 
-/// Open a re-entrant VM context (12.4 step 1b). Probe-gated like
-/// `run_linux`. The caller drives `run_slice` + `close`.
+/// Open a re-entrant VM context. Probe-gated like `run_linux`. The caller
+/// drives `run_slice` + `close`.
 pub fn vm_open(
     bzimage: &[u8],
     cmdline: &[u8],
@@ -114,10 +100,10 @@ pub fn vm_open(
     }
 }
 
-/// Open an AP vCPU context (guest SMP, Stage 3b) sharing the BSP's
-/// `VmShared` at `shared_ptr` (a `*mut VmShared` as a u64), entering real
-/// mode at `sipi_vector`. The caller drives `run_slice` (NOT `close` — the
-/// BSP owns the shared state).
+/// Open an AP vCPU context (guest SMP) sharing the BSP's `VmShared` at
+/// `shared_ptr` (a `*mut VmShared` as a u64), entering real mode at
+/// `sipi_vector`. The caller drives `run_slice` (not `close` — the BSP owns
+/// the shared state).
 pub fn vm_open_ap(
     shared_ptr: u64,
     sipi_vector: u8,
@@ -155,7 +141,7 @@ pub(super) unsafe fn rdmsr(msr: u32) -> u64 {
 
 /// Write MSR. Same caveat as `rdmsr`. WRMSR can fail with #GP if
 /// the value violates reserved bits — caller handles that case.
-#[allow(dead_code)] // 12.1.0b will call this for VM_HSAVE_PA + EFER
+#[allow(dead_code)] // used by enable.rs for VM_HSAVE_PA + EFER
 pub(super) unsafe fn wrmsr(msr: u32, val: u64) {
     let lo = val as u32;
     let hi = (val >> 32) as u32;

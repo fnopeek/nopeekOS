@@ -1,37 +1,14 @@
-//! VMX (Intel VT-x) — Phase 12 MicroVM substrate.
+//! VMX (Intel VT-x) backend of the MicroVM substrate.
 //!
-//! Layered as `kernel-side primitives only` per
-//! `docs/plan/MICROKERNEL_REFACTOR.md` and `docs/archive/PHASE12_MICROVM.md`:
-//! kernel owns VMX/VMCS/EPT/VT-d/VCPU-threads, WASM-Manager owns
-//! lifecycle + bridges.
+//! Kernel-side primitives only: the kernel owns VMX/VMCS/EPT/vCPU
+//! threads, the WASM manager owns lifecycle and bridges.
 //!
-//! As of v0.100.0 the boot path no longer enters VMX root mode —
-//! `init()` only probes capabilities. The VMXON/VMCS/EPT/VMLAUNCH
-//! pipeline is exercised on demand via the `microvm` shell-intent
-//! (`run_substrate_test`), which matches the eventual per-app
-//! lifecycle: `microvm <appname>` will spawn a per-app VM, not a
-//! single boot-time VM.
-//!
-//! Phase 12.1 milestones:
-//!   12.1.0a   probe + report                          ✓ v0.90.0
-//!   12.1.0b   VMXON region + CR4.VMXE + round-trip    ✓ v0.91.0
-//!   12.1.0c   VMCS region + VMCLEAR + VMPTRLD         ✓ v0.92.0
-//!   12.1.0d-1 Host-state VMWRITE/VMREAD + trampoline  ✓ v0.93.0
-//!   12.1.0d-2a TSS install (HOST_TR_SELECTOR ≠ 0)     ✓ v0.94.0
-//!   12.1.0d-2b Guest-state + controls + VMLAUNCH      ✓ v0.95.0…0.96.0
-//!   12.1.1a   EPT identity-map (1 GB)                 ✓ v0.97.0
-//!   12.1.1b   Real-mode unrestricted guest + I/O exit ✓ v0.98.0
-//!   12.1.1c-1 Non-identity 16 MB EPT window           ✓ v0.99.0…0.99.1
-//!   12.1.1c-2 VMX bring-up off the boot path          ✓ v0.100.x
-//!   12.1.1c-3 Alpine bzImage loader + microvm linux   ✓ v0.101…0.127
-//!             (Linux booted to rootfs-panic = expected)
-//!   12.1.1d   Formal panic detection                  ✓ v0.129.0
-//!   12.1.3    initramfs + Rust-PID-1                  ✓ v0.130.0
-//!   12.1.4    inject_console round-trip               ✓ v0.137.0
-//!   12.1.2    virtio-console backend                  ← next
+//! The boot path does not enter VMX root mode; `init()` only probes
+//! capabilities. VMXON/VMCS/EPT/VMLAUNCH run on demand via the `microvm`
+//! shell intent.
 
 mod enable;
-pub mod ept; // demand_fault_in / boot_window_bytes used by guest_mem (B3)
+pub mod ept; // demand_fault_in / boot_window_bytes used by guest_mem
 mod probe;
 mod vmcs;
 mod msr; // guest MSR policy: intercept-all + emulation (KVM model)
@@ -101,15 +78,15 @@ pub fn run_substrate_test() -> Result<vmcs::LaunchOutcome, &'static str> {
 
 pub use enable::{SliceOutcome, VmContext};
 
-/// Open a re-entrant VM context (12.4 step 1b). Probe-gated like
-/// `run_linux`. The caller drives `run_slice` + `close`.
+/// Open a re-entrant VM context. Probe-gated like `run_linux`. The
+/// caller drives `run_slice` + `close`.
 pub fn vm_open(
     bzimage: &[u8],
     cmdline: &[u8],
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<VmContext, &'static str> {
-    // Fiber/dedicated mode runs this on a WORKER core, not Core 0. VMX
+    // Fiber/dedicated mode runs this on a worker core, not Core 0. VMX
     // rejects HOST_TR_SELECTOR=0 at VM-entry; worker cores keep the boot
     // GDT with TR=0 (only the BSP `ltr`'d at boot). Install a private TSS
     // on this core first so `write_host_state` captures a valid HOST_TR.
@@ -125,8 +102,8 @@ pub fn vm_open(
 
 /// Open an AP vCPU context (guest SMP) sharing the BSP's `VmShared` at
 /// `shared_ptr` (a `*mut VmShared` as a u64), entering real mode at
-/// `sipi_vector`. Enters VMX root ON THIS (the AP's) worker core. The caller
-/// drives `run_slice` then `close_ap` (NOT `close` — the BSP owns the shared
+/// `sipi_vector`. Enters VMX root on this (the AP's) worker core. The caller
+/// drives `run_slice` then `close_ap` (not `close`; the BSP owns the shared
 /// state).
 pub fn vm_open_ap(
     shared_ptr: u64,

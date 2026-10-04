@@ -1,33 +1,29 @@
-//! virtio-net device (modern, virtio 1.2) — clean port of the QEMU/Linux
-//! reference, replacing the hand-rolled `virtio_net_pci.rs`.
+//! virtio-net device (modern, virtio 1.2), ported from the QEMU/Linux
+//! reference (`drivers/net/virtio_net.c` + `drivers/virtio/virtio_ring.c`).
 //!
-//! What the old device got wrong (and this one does right, 1:1 from
-//! `drivers/net/virtio_net.c` + `drivers/virtio/virtio_ring.c`):
-//!
-//!   * **Mergeable RX buffers** (`VIRTIO_NET_F_MRG_RXBUF`, the QEMU default).
+//!   * Mergeable RX buffers (`VIRTIO_NET_F_MRG_RXBUF`, the QEMU default).
 //!     The guest posts single-descriptor buffers (`virtqueue_add_inbuf ...
-//!     num_sg=1`); a frame is delivered across N of them, `num_buffers=N` in the
-//!     first buffer's header. The old device used `GUEST_TSO4` → "big packets"
-//!     mode → each RX buffer a ~19-descriptor page chain → only ~queue_size/19
-//!     buffers fit (shallow ring, burst starvation) AND a 19-descriptor walk +
-//!     19-page skb reconstruction per frame. Mergeable = deep ring (one buffer
-//!     per descriptor) + cheap inject + cheap guest skb.
+//!     num_sg=1`); a frame is delivered across N of them, `num_buffers=N` in
+//!     the first buffer's header. Without it, `GUEST_TSO4` puts the guest in
+//!     "big packets" mode: each RX buffer is a ~19-descriptor page chain, so
+//!     only ~queue_size/19 buffers fit (shallow ring, burst starvation) and
+//!     every frame costs a 19-descriptor walk. Mergeable = deep ring (one
+//!     buffer per descriptor) + cheap inject + cheap guest skb.
 //!
-//!   * **EVENT_IDX** (`VIRTIO_RING_F_EVENT_IDX`). The guest publishes
+//!   * EVENT_IDX (`VIRTIO_RING_F_EVENT_IDX`). The guest publishes
 //!     `used_event` (interrupt me only when used.idx crosses this) in
 //!     `avail->ring[size]`; the device publishes `avail_event` (kick me only
-//!     when avail.idx crosses this) in `used->ring[size]`. This replaces the
-//!     binary NO_INTERRUPT/NO_NOTIFY flags with precise suppression →
-//!     dramatically fewer guest IRQs (the EOI storm) and, on RX, zero repost
-//!     doorbells (the device polls, so it sets avail_event far ahead).
+//!     when avail.idx crosses this) in `used->ring[size]`. Precise
+//!     suppression instead of the binary NO_INTERRUPT/NO_NOTIFY flags →
+//!     far fewer guest IRQs and, on RX, zero repost doorbells (the device
+//!     polls, so it sets avail_event far ahead).
 //!
-//!   * **Batched used-ring updates.** A frame's N used entries are written, then
-//!     `used.idx` is published once (one release fence), then ONE interrupt
+//!   * Batched used-ring updates. A frame's N used entries are written, then
+//!     `used.idx` is published once (one release fence), then one interrupt
 //!     decision — not a fence+ISR per descriptor.
 //!
-//! The synthetic gateway (ARP/DNS/NAT/GRO/TX-GSO) still lives in `super::nat`;
-//! this file owns only the wire-level device. TX (incl. TX-GSO segmentation via
-//! `nat::tap_outbound`/`emit_tcp_out`) is unchanged in spirit, ported here.
+//! The synthetic gateway (ARP/DNS/NAT/TX-GSO) lives in `super::nat`; this
+//! file owns only the wire-level device.
 
 #![allow(dead_code)]
 
@@ -37,7 +33,7 @@ use core::sync::atomic::{fence, Ordering};
 use super::guest_mem::GuestMem;
 use super::nat::{GUEST_MAC, NetCaps};
 
-// ── PCI identity / BAR / capability layout (unchanged — proven enumeration) ──
+// ── PCI identity / BAR / capability layout ──
 const VIRTIO_VENDOR:     u32 = 0x1AF4;
 const VIRTIO_NET_DEVICE: u32 = 0x1041;
 
@@ -96,8 +92,8 @@ const VIRTIO_F_VERSION_1:       u32 = 32;  // bit 0 of feature word 1
 const VIRTIO_RING_F_EVENT_IDX:  u32 = 29;  // used_event / avail_event
 
 // Low feature word (bits 0..31) we advertise. Mergeable + GSO both directions +
-// EVENT_IDX. NOT HOST_TSO6 (NAT is IPv4-only) and NOT INDIRECT_DESC (TX walker
-// doesn't handle indirect tables yet).
+// EVENT_IDX. Not HOST_TSO6 (NAT is IPv4-only) and not INDIRECT_DESC (the TX
+// walker doesn't handle indirect tables).
 const FEAT_LO: u32 =
       (1 << VIRTIO_NET_F_CSUM)
     | (1 << VIRTIO_NET_F_GUEST_CSUM)
@@ -125,7 +121,7 @@ const NUM_BUFFERS_OFF: u64 = 10;
 // Split-ring descriptor flags (virtio 1.2 §2.7.5).
 const VRING_DESC_F_NEXT:  u16 = 1;
 const VRING_DESC_F_WRITE: u16 = 2;
-// Ring flags (used when EVENT_IDX is NOT negotiated).
+// Ring flags (used when EVENT_IDX is not negotiated).
 const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
 const VRING_USED_F_NO_NOTIFY:     u16 = 1;
 
@@ -191,7 +187,7 @@ fn used_event(mem: &GuestMem, avail_gpa: u64, size: u16) -> u16 {
     mem.read_u16(avail_gpa + 4 + size as u64 * 2).unwrap_or(0)
 }
 
-/// Write one used-ring element at slot `(used_base_idx) % size` WITHOUT
+/// Write one used-ring element at slot `(used_base_idx) % size` without
 /// advancing used.idx (the publish is batched). used: flags(2) idx(2) ring[].
 #[inline]
 fn used_fill(mem: &GuestMem, used_gpa: u64, size: u16, slot_idx: u16, id: u16, len: u32) {
@@ -291,7 +287,7 @@ impl VirtioNet {
 
     pub fn take_pending_kick(&mut self) -> Option<u16> { self.pending_kick_queue.take() }
 
-    // ── PCI config space (identical layout to the proven device) ──
+    // ── PCI config space ──
     pub fn pci_read_dword(&self, reg: u8) -> u32 {
         match reg {
             0x00 => (VIRTIO_NET_DEVICE << 16) | VIRTIO_VENDOR,
@@ -420,13 +416,6 @@ impl VirtioNet {
                 if self.device_status == 0 {
                     self.reset();
                 } else if self.device_status & VIRTIO_STATUS_DRIVER_OK != 0 {
-                    // GRO exists ONLY on this path. The AMD backend uses
-                    // `tap_inbound`, which is pure: no coalescing, no
-                    // staging queue. So every super-frame we assemble here has
-                    // never run anywhere but on Intel hardware, and it is the
-                    // one place inbound where we take what Linux is about to
-                    // receive, rebuild it, and put our own caps on it.
-                    //
                     kprintln!(
                         "[net-dev] DRIVER_OK lo=0x{:08x} hi=0x{:08x} mrg={} eventidx={} gso={} gro={}",
                         self.driver_features[0], self.driver_features[1],
@@ -505,7 +494,7 @@ impl VirtioNet {
         }
     }
 
-    /// With EVENT_IDX, tell the guest NOT to kick the RX queue (we poll it): set
+    /// With EVENT_IDX, tell the guest not to kick the RX queue (we poll it): set
     /// avail_event past the current avail.idx by ~the whole ring. Without
     /// EVENT_IDX, fall back to the used.flags NO_NOTIFY bit.
     fn arm_rx_no_kick(&mut self, mem: &GuestMem) {
@@ -525,7 +514,7 @@ impl VirtioNet {
     /// Inject one full frame (payload incl. 12-byte vnet header). Consumes as
     /// many single-descriptor RX buffers as the frame needs, writes one used
     /// element per buffer, sets `num_buffers=N` in the first buffer's header,
-    /// and publishes used.idx once. Does NOT raise the interrupt — the caller
+    /// and publishes used.idx once. Does not raise the interrupt — the caller
     /// batches that via `rx_should_interrupt`. Returns false (rolling back) if
     /// the guest hasn't posted enough buffers for the whole frame.
     pub fn inject_rx(&mut self, mem: &GuestMem, payload: &[u8]) -> bool {
@@ -584,31 +573,28 @@ impl VirtioNet {
     pub fn rx_should_interrupt(&mut self, mem: &GuestMem) -> bool {
         let q = &mut self.queues[0];
         if !q.ready() { return false; }
-        // QEMU virtio_should_notify opens with `smp_mb()` and the comment "We
-        // need to expose used array entries before checking used event." That
-        // barrier was not ported, and on x86 it is the ONE reordering the
-        // hardware allows: our store of used.idx may still sit in the store
-        // buffer while the load of used_event below executes. The guest does its
-        // half correctly (store used_event; mfence; load used.idx), so a missing
-        // fence on our side is a textbook Dekker miss — both sides read stale and
-        // neither wakes the other.
+        // QEMU virtio_should_notify opens with `smp_mb()`: "We need to expose
+        // used array entries before checking used event." On x86 this is the
+        // one reordering the hardware allows: our store of used.idx may still
+        // sit in the store buffer while the load of used_event below executes.
+        // The guest does its half (store used_event; mfence; load used.idx), so
+        // without the fence on our side both sides can read stale values and
+        // neither wakes the other (a Dekker miss).
         //
-        // Ordinarily a lost notification is a hiccup. Here it is terminal,
-        // because `last_irq_used_idx` below only moves FORWARD: once it has
-        // passed the guest's used_event, `need_event` is false for every future
-        // check, and the guest can only move used_event from inside NAPI, which
-        // only runs on an interrupt. Nothing in the device re-opens that loop —
-        // and with the RX ring drained, nothing is injected either, so the
-        // decision is never even re-evaluated. That is the absorbing state:
-        // works, then one handshake is missed, then silence.
+        // A lost notification here is terminal: `last_irq_used_idx` only moves
+        // forward, so once it has passed the guest's used_event, `need_event`
+        // is false for every future check, and the guest can only move
+        // used_event from inside NAPI, which only runs on an interrupt. With
+        // the RX ring drained nothing is injected either, so the decision is
+        // never re-evaluated.
         fence(Ordering::SeqCst);
         if self.driver_features[0] & (1 << VIRTIO_RING_F_EVENT_IDX) != 0 {
             let ev = used_event(mem, q.avail_gpa(), q.size);
             // QEMU virtio_should_notify: `old = signalled_used; signalled_used =
             // used_idx; need_event(used_event, used_idx, old)`. signalled_used is
-            // updated on EVERY check, NOT only when we fire — else last_irq runs
+            // updated on every check, not only when we fire — else last_irq runs
             // ahead of the guest's used_event and need_event stays false forever
-            // (no IRQ → idle NAPI never wakes → network hangs after a while).
+            // (no IRQ → idle NAPI never wakes → network hangs).
             let old = q.last_irq_used_idx;
             let valid = q.signalled_used_valid;
             q.signalled_used_valid = true;
@@ -623,14 +609,14 @@ impl VirtioNet {
         }
     }
 
-    /// Back-compat name used by the pump: true iff the guest currently wants an
-    /// RX interrupt. Delegates to the EVENT_IDX-aware decision.
+    /// True iff the guest currently wants an RX interrupt. Delegates to the
+    /// EVENT_IDX-aware decision.
     pub fn rx_wants_irq(&mut self, mem: &GuestMem) -> bool {
         self.rx_should_interrupt(mem)
     }
 
     /// RX buffers the guest has posted (avail - consumed). With mergeable each is
-    /// one descriptor, so this is the true depth (no /19 big-packets penalty).
+    /// one descriptor, so this is the true depth.
     pub fn rx_avail_count(&self, mem: &GuestMem) -> u64 {
         let q = self.queues[0];
         if !q.ready() { return 0; }
@@ -641,11 +627,10 @@ impl VirtioNet {
     }
 
     // ── TX: read guest frames, segment GSO, forward; batched used + EVENT_IDX ──
-    /// Combined TX service for the INLINE callers (Intel/VMX + AMD non-full):
-    /// drain the ring (cheap, device-touching), emit the segments, finish. AMD
-    /// full mode does NOT use this — the worker calls the three pieces below with
-    /// the expensive `process_tx` emit run OUTSIDE the device mutex (the TX half
-    /// of the v0.226.63 ACK-jitter fix; see net_dataplane::service_full).
+    /// Combined TX service for inline callers: drain the ring (cheap,
+    /// device-touching), emit the segments, finish. The off-vCPU worker
+    /// instead calls the three pieces below with the expensive `process_tx`
+    /// emit run outside the device mutex (see net_dataplane::service_full).
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
         super::nat::note_guest_kick();
         let self_caps = self.caps;
@@ -659,7 +644,7 @@ impl VirtioNet {
         tx || rx
     }
 
-    /// Phase 2a (under the device mutex, CHEAP): walk the guest TX avail ring,
+    /// Phase 2a (under the device mutex, cheap): walk the guest TX avail ring,
     /// copy each frame's bytes into an owned Vec, publish the used ring. No
     /// segmentation / checksum / host-NIC send here — those are the expensive
     /// part and run lock-free in the caller (`nat::tap_outbound`). Returns one
@@ -690,7 +675,7 @@ impl VirtioNet {
 
             // EVENT_IDX "process, then arm notification, then re-check" loop:
             // after draining we publish avail_event = last consumed avail.idx so
-            // the guest kicks on the NEXT frame; we re-read avail.idx to catch a
+            // the guest kicks on the next frame; we re-read avail.idx to catch a
             // frame that landed in the arming window (else TX stalls after one).
             loop {
                 while q.last_avail_idx != avail_top {
@@ -763,14 +748,13 @@ impl VirtioNet {
         }
     }
 
-    /// Phase 2c (under the device mutex, CHEAP): set the TX ISR, inject any
+    /// Phase 2c (under the device mutex, cheap): set the TX ISR, inject any
     /// synthetic RX replies (ARP/DNS) the emit produced, and decide whether to
     /// raise IRQ10. `advanced` = at least one TX frame was consumed in the drain.
-    /// Returns `(tx_raise, rx_raise)` — which QUEUE wants its interrupt. Under
-    /// INTx both meant IRQ 10 and the guest's ISR handler walked every queue;
+    /// Returns `(tx_raise, rx_raise)` — which queue wants its interrupt. Under
+    /// INTx both mean IRQ 10 and the guest's ISR handler walks every queue;
     /// with MSI-X each queue has its own vector, and a synthetic RX reply
-    /// signalled on TX's vector was never seen (the guest waited forever on its
-    /// first DNS answer).
+    /// signalled on TX's vector would never be seen.
     pub fn tx_finish(&mut self, mem: &GuestMem, advanced: bool,
                      pending_rx: &[alloc::vec::Vec<u8>]) -> (bool, bool) {
         let mut tx_raise = false;

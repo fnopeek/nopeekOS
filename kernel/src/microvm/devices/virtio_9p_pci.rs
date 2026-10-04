@@ -14,16 +14,9 @@
 //! the outbound T-message, the driver-writable descriptors receive the
 //! inbound R-message.
 //!
-//! The 9P server maps operations onto npkFS, rooted (and CONFINED) at
+//! The 9P server maps operations onto npkFS, rooted (and confined) at
 //! `home/<user>/` so the guest can see/read/write the user's files and
 //! they show up live in loft — never `sys/`, never other apps' images.
-//!
-//! STATUS — step 1 (this commit): device skeleton + virtqueue request/
-//! response plumbing + `Tversion`. Everything else returns `Rlerror`,
-//! so the guest binds the device but a `mount` fails cleanly (no crash).
-//! The real ops (attach/walk/readdir/getattr/lopen/read → then write)
-//! land next, gated behind the guest never mounting 9p yet (PID-1
-//! doesn't issue the mount until the server is ready).
 
 #![allow(dead_code)]
 
@@ -34,9 +27,8 @@ use alloc::collections::BTreeMap;
 use crate::kprintln;
 use super::guest_mem::GuestMem;
 
-/// Bounded diagnostic log (write-path bring-up). Caps total `[9p]` diag
-/// lines so a long session can't spam; remove once the write path is
-/// validated. Usable from both methods and the free npkfs_* helpers.
+/// Bounded diagnostic log. Caps total `[9p]` diag lines so a long session
+/// can't spam. Usable from both methods and the free npkfs_* helpers.
 static P9_DIAG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 macro_rules! p9diag {
     ($($a:tt)*) => {{
@@ -47,10 +39,10 @@ macro_rules! p9diag {
 }
 use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
 
-// ── 9p I/O stats (download-bottleneck diagnosis) ──────────────────────
-// Reveals the GUEST's write pattern: writes/s, throughput, avg write size,
-// fsync/s, and how many Twrites hit the slow (deferred-backpressure) vs fast
-// (ack-on-buffer) path. Emitted ~every 5 s while there's write traffic.
+// ── 9p I/O stats ───────────────────────────────────────────────────────
+// Shows the guest's write pattern: writes/s, throughput, avg write size,
+// fsync/s, and how many Twrites hit the slow (deferred-backpressure) vs
+// fast (ack-on-buffer) path. Emitted every few seconds during write traffic.
 use core::sync::atomic::{AtomicU64, Ordering as AtO};
 static STAT_TWRITES: AtomicU64 = AtomicU64::new(0);
 static STAT_TWRITE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -58,11 +50,11 @@ static STAT_TFSYNC: AtomicU64 = AtomicU64::new(0);
 static STAT_TREAD: AtomicU64 = AtomicU64::new(0);
 static STAT_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static STAT_LAST_TICK: AtomicU64 = AtomicU64::new(0);
-// Round-trip decomposition (where do the ~555 µs/write go?). The streaming
-// (download) Twrite path stamps the inter-Twrite TSC gap = the full synchronous
-// round-trip period the guest sees per chunk. P9 MMIO exits (notify + ISR-read)
-// and per-message host service time localise that gap to host vs guest vs
-// exit-count. All TSC; emit_9p_stat converts to µs.
+// Round-trip decomposition. The streaming (download) Twrite path stamps
+// the inter-Twrite TSC gap = the full synchronous round-trip period the
+// guest sees per chunk. P9 MMIO exits (notify + ISR-read) and per-message
+// host service time localise that gap to host vs guest vs exit count. All
+// TSC; emit_9p_stat converts to µs.
 static STAT_TWRITE_GAP_SUM: AtomicU64 = AtomicU64::new(0);
 static STAT_TWRITE_GAP_MAX: AtomicU64 = AtomicU64::new(0);
 static STAT_LAST_TWRITE_TSC: AtomicU64 = AtomicU64::new(0);
@@ -177,16 +169,9 @@ const MOUNT_TAG: &[u8] = b"npkhome";
 
 /// Largest 9P message we negotiate. Bounds the per-request buffers.
 ///
-/// Kept at 128 KiB: bumping to 512 KiB (with a guest `msize=524288`
-/// mount) put a large download at Linux's `VIRTQUEUE_NUM = 128`
-/// descriptor edge and correlated with a ~500 MB download abort (the
-/// old StreamingWriter-OOM point — a larger/altered write pattern can
-/// break the sequential-append promotion at virtio_9p_pci t_write,
-/// reverting to the buffered path that OOMs). No upside anyway: the
-/// microvm download is RX-pump-cadence-limited (~1700 pump/s × small
-/// batch ≈ 4 MB/s), not 9p-round-trip-limited — so fewer 9P messages
-/// move nothing. Revisit only once the RX-delivery cadence is fixed
-/// and the disk/9p path actually becomes the bottleneck.
+/// Kept at 128 KiB: a larger msize puts a large download at Linux's
+/// `VIRTQUEUE_NUM = 128` descriptor edge and changes the write pattern
+/// that the sequential-append streaming promotion in t_write relies on.
 const MAX_MSIZE: u32 = 128 * 1024;
 
 #[derive(Default, Clone, Copy)]
@@ -233,7 +218,7 @@ pub struct Virtio9p {
     log_count: u32,
 
     /// npkFS path the 9P root attaches to (e.g. "home/nopeek"). Every
-    /// fid lives UNDER this prefix — walks cannot escape it (the
+    /// fid lives under this prefix — walks cannot escape it (the
     /// confinement invariant). Resolved once at device creation.
     root: String,
     /// Active fids: fid number → resolved npkFS path + open-file cache.
@@ -275,16 +260,16 @@ struct Fid {
     /// Set once a write grows the file past STREAM_PROMOTE_BYTES while
     /// appending sequentially (a download): subsequent writes are handed to the
     /// async persist worker (`p9_async`) — the actual `StreamingWriter` lives on
-    /// the worker's core, NOT here, so the vCPU never blocks on disk. Replies
+    /// the worker's core, not here, so the vCPU never blocks on disk. Replies
     /// are deferred until the worker has durably persisted.
     async_stream: bool,
     /// Next expected write offset for the streamed file (= bytes handed to the
     /// worker so far). The vCPU enforces sequential appends here without holding
-    /// the writer; a non-sequential write is rejected (EIO), as before.
+    /// the writer; a non-sequential write is rejected (EIO).
     stream_next: u64,
 }
 
-/// Promote a buffered file to streaming once it reaches this size AND the
+/// Promote a buffered file to streaming once it reaches this size and the
 /// current write appended at the end. Small files (configs, editor saves) stay
 /// fully buffered; only big sequential downloads stream.
 const STREAM_PROMOTE_BYTES: usize = 4 * 1024 * 1024;
@@ -568,7 +553,7 @@ impl Virtio9p {
 
             if let Some(kind) = self.pending_defer.take() {
                 // Async write/clunk: the worker will persist; remember where to
-                // post the reply and DON'T touch the used-ring now (deferred).
+                // post the reply and don't touch the used-ring now (deferred).
                 let tagv = if req.len() >= 7 { u16::from_le_bytes([req[5], req[6]]) } else { 0 };
                 let fid = if req.len() >= 11 { rd_u32(&req, 7) } else { 0 };
                 self.in_flight.insert(tagv, InFlight { queue_idx, head, wtargets, kind, fid });
@@ -645,8 +630,8 @@ impl Virtio9p {
 
     // ── 9P2000.L protocol ───────────────────────────────────────────
 
-    /// Process one T-message, return the R-message bytes. STEP 1:
-    /// only `Tversion` is real; everything else → `Rlerror(ENOSYS)`.
+    /// Process one T-message, return the R-message bytes. Unsupported
+    /// operations reply `Rlerror(ENOSYS)`.
     fn process_message(&mut self, req: &[u8]) -> Vec<u8> {
         emit_9p_stat();
         // Header: size[4] type[1] tag[2]
@@ -844,7 +829,7 @@ impl Virtio9p {
         let (path, is_dir) = match self.fids.get(&fid) { Some(f) => (f.path.clone(), f.is_dir), None => return rlerror(tag, EINVAL) };
         if !is_dir {
             let data = if is_magic(&path) {
-                // Capstone: opening the magic file pops loft on the host.
+                // Opening the magic file pops loft on the host.
                 crate::microvm::cpu::request_open_loft();
                 p9diag!("[9p] .open-in-loft opened → spawning loft on host");
                 MAGIC_OPEN_CONTENT.to_vec()
@@ -920,7 +905,7 @@ impl Virtio9p {
     }
 
     /// Tlcreate: fid[4] name[s] flags[4] mode[4] gid[4]. Creates a file
-    /// in the dir `fid` points to; `fid` is then RE-BOUND to the new
+    /// in the dir `fid` points to; `fid` is then re-bound to the new
     /// open file (9P2000.L semantics).
     fn t_lcreate(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 6 { return rlerror(tag, EINVAL); }
@@ -957,7 +942,7 @@ impl Virtio9p {
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
 
         // Async streaming mode (large sequential download, already promoted):
-        // hand the chunk to the persist worker and DEFER the reply — the vCPU
+        // hand the chunk to the persist worker and defer the reply — the vCPU
         // never blocks on disk, so the guest keeps draining the socket (ACKs
         // flow, TCP ramps). The worker persists durably; drain_async_done posts
         // the Rwrite once it's done.
@@ -982,8 +967,8 @@ impl Virtio9p {
                 STAT_TWRITE_GAP_SUM.fetch_add(gap, AtO::Relaxed);
                 STAT_TWRITE_GAP_MAX.fetch_max(gap, AtO::Relaxed);
             }
-            // Backpressure: only DEFER the reply (make the guest wait) when the
-            // worker is behind, so host RAM stays bounded. Otherwise ack NOW —
+            // Backpressure: only defer the reply (make the guest wait) when the
+            // worker is behind, so host RAM stays bounded. Otherwise ack now —
             // the data is buffered host-side and persists async; 9p durability
             // is at Tfsync/Tclunk (they wait for the worker → file is durable).
             let backpressure = super::p9_async::is_full();
@@ -1006,7 +991,7 @@ impl Virtio9p {
         }
         f.dirty = true;
 
-        // Promote to async streaming once the buffer is large AND this write
+        // Promote to async streaming once the buffer is large and this write
         // appended at the end (the download pattern). Hand the buffered prefix
         // to the worker via Start (defer this reply); the worker owns the
         // StreamingWriter from here, so the vCPU never holds the whole file.
@@ -1022,7 +1007,7 @@ impl Virtio9p {
             super::p9_async::start_worker(crate::microvm::cpu::place_worker(false));
             let backpressure = super::p9_async::is_full();
             super::p9_async::enqueue_start(tag, fid as u64, path, prefix, backpressure);
-            // Rwrite reports THIS write's bytes, not the prefix. Ack now unless
+            // Rwrite reports this write's bytes, not the prefix. Ack now unless
             // the worker is already behind (then defer for backpressure).
             if backpressure {
                 STAT_DEFERRED.fetch_add(1, AtO::Relaxed);
@@ -1123,7 +1108,7 @@ impl Virtio9p {
         let oldp = join_confined(&self.root, &olddir, &oldname);
         let newp = join_confined(&self.root, &newdir, newname);
         if oldp.len() <= olddir.len() || newp.len() <= newdir.len() { return rlerror(tag, EINVAL); }
-        // POSIX rename OVERWRITES the destination; npkFS rename refuses an
+        // POSIX rename overwrites the destination; npkFS rename refuses an
         // existing target. This is exactly the download case: Firefox
         // pre-creates a 0-byte final file, downloads into a .part, then
         // renames .part over it. Delete the target first so the move lands.
@@ -1165,9 +1150,8 @@ const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
 /// Magic synthetic file: opening `file:///tmp/npkhome/.open-in-loft` in
-/// the guest browser triggers the host to spawn loft (the cross-boundary
-/// "open my files" capstone). Synthesised by the server — not a real
-/// npkFS object, never listed by readdir.
+/// the guest browser triggers the host to spawn loft. Synthesised by the
+/// server — not a real npkFS object, never listed by readdir.
 const MAGIC_OPEN_SUFFIX: &str = "/.open-in-loft";
 static MAGIC_OPEN_CONTENT: &[u8] = b"Opening your files in loft on nopeekOS...\n";
 fn is_magic(path: &str) -> bool { path.ends_with(MAGIC_OPEN_SUFFIX) }
@@ -1203,7 +1187,7 @@ fn path_hash(s: &str) -> u64 {
     h
 }
 
-/// Join one path component onto `cur`, CONFINED to `root`: `.` is a
+/// Join one path component onto `cur`, confined to `root`: `.` is a
 /// no-op, `..` pops a component but never above `root`, and embedded
 /// slashes / unknown forms are rejected. This is the guest's only lever
 /// on which npkFS paths it can reach — it can never escape home/<user>/.

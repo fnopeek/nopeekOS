@@ -1,24 +1,22 @@
-//! Guest-RIP statistical profiler — finds WHAT a spinning vCPU executes.
+//! Guest-RIP statistical profiler — finds what a spinning vCPU executes.
 //!
-//! Diagnosis tool for the "one host core pegged at 100% while the others idle"
-//! symptom (the speedtest ~250 Mbit cap). A busy guest vCPU runs guest code
-//! without trapping, so VM-exit-site sampling is blind to it; we need an
-//! unbiased program-counter sample of the RUNNING guest.
+//! A busy guest vCPU runs guest code without trapping, so VM-exit-site
+//! sampling is blind to it; this takes an unbiased program-counter sample
+//! of the running guest.
 //!
-//! Sampling point — SVM (the AMD QEMU dev box): every `EXIT_INTR` is a host
-//! physical interrupt (the per-core host timer at ~100 Hz, or a device IRQ)
-//! that preempted a *running* guest. The VMCB save area then holds the exact
-//! guest RIP at the moment of preemption — a clean PC sample. An *idle* vCPU
-//! halts (`EXIT_HLT`, a different exit) so it is never sampled: the histogram
-//! concentrates on whatever is actually burning CPU. (VMX/bare-metal Intel
-//! would use the VMX-preemption timer; not wired yet — QEMU/AMD reproduces the
-//! cap, so SVM sampling suffices for the diagnosis.)
+//! Sampling point (SVM): every `EXIT_INTR` is a host physical interrupt
+//! (the per-core host timer, or a device IRQ) that preempted a running
+//! guest. The VMCB save area then holds the exact guest RIP at the moment
+//! of preemption. An idle vCPU halts (`EXIT_HLT`, a different exit) so it
+//! is never sampled: the histogram concentrates on whatever is actually
+//! burning CPU. Not implemented for VMX (would use the VMX-preemption
+//! timer).
 //!
 //! Aggregation: a Space-Saving heavy-hitter table (48 slots, 64-byte RIP
-//! buckets) survives true hot spots under bounded memory, plus a per-vCPU
-//! sample count so we see WHICH vCPU spins. Dumped every ~5 s, then reset for an
-//! independent next window. Resolve the raw hex RIPs offline against the guest
-//! `System.map` (`~/.cache/nopeekos/linux-src/linux-6.18.26/System.map`).
+//! buckets) keeps true hot spots under bounded memory, plus a per-vCPU
+//! sample count. Dumped every `WINDOW_SECS`, then reset for an
+//! independent next window. Resolve the raw hex RIPs offline against the
+//! guest kernel's `System.map`.
 //!
 //! Gated by `DEBUG`; `record`/`maybe_dump` compile to an early return when off.
 
@@ -26,10 +24,9 @@ use crate::kprintln;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-/// Master switch. Set false (and rebuild) to strip the probe once the spinning
-/// core is identified. `record()` runs on EVERY exit (~30k/s) + the ~5 s dump
-/// (~13 kprintln lines) BLOCKS its core ~60ms on the UART THRE spin — on for
-/// diagnosis (csd visibility), strip before shipping.
+/// Master switch. `record()` runs on every exit, and each dump blocks its
+/// core on the UART for tens of milliseconds, so keep this off unless
+/// diagnosing.
 const DEBUG: bool = false;
 
 const SLOTS: usize = 48;
@@ -61,9 +58,9 @@ static H: Mutex<Hist> = Mutex::new(Hist::new());
 static LAST_DUMP_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// PV-TLB-flush ceiling probe: of all cross-vCPU IPI targets (TLB shootdowns
-/// etc.), how many were PREEMPTED (idle/parked, not running guest) at send time.
-/// That fraction is exactly what KVM_FEATURE_PV_TLB_FLUSH could skip the IPI +
-/// csd_lock_wait for — high → PV pays off, low → vCPUs are all-busy and the
+/// etc.), how many were preempted (idle/parked, not running guest) at send time.
+/// That fraction is what KVM_FEATURE_PV_TLB_FLUSH could skip the IPI +
+/// csd_lock_wait for — high → PV pays off, low → vCPUs are all busy and the
 /// lever is vCPU count instead. Measured host-side, no guest changes needed.
 static IPI_TARGETS: AtomicU64 = AtomicU64::new(0);
 static IPI_TARGETS_PREEMPTED: AtomicU64 = AtomicU64::new(0);

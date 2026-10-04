@@ -1,22 +1,16 @@
 //! Off-vCPU GPU backend for the microvm (vhost/virtio-gpu-style).
 //!
-//! Mirrors `net_backend`: moves the virtio-gpu device OUT of `VmShared` so a
-//! dedicated GPU worker fiber can drain the controlq + do the ~8 MB framebuffer
-//! copy + `write_frame` on ITS OWN core, while the vCPU only notes the controlq
-//! doorbell (a cheap exit). The inline copy on the vCPU exit was the browser's
-//! net-throttle root: cage renders the UI → constant TRANSFER_TO_HOST_2D + FLUSH
-//! → 8 MB/frame copy on the same vCPU that services the net → bufferbloat + the
-//! ugly framerate-throttle workaround. Off-vCPU removes the contention entirely.
-//!
-//! Stage 1 (this commit) is behavior-neutral: the device is still serviced inline
-//! from the vCPU exit handlers, they just reach it through this lock instead of
-//! `sh.pci.virtio_gpu`. Stage 2 wires the doorbell-defer + the worker fiber.
+//! Mirrors `net_backend`: moves the virtio-gpu device out of `VmShared` so a
+//! dedicated GPU worker fiber can drain the controlq + do the framebuffer
+//! copy + `write_frame` on its own core, while the vCPU only notes the
+//! controlq doorbell (a cheap exit). Inline, the per-frame copy runs on the
+//! same vCPU that services the network and competes with it.
 //!
 //! Why out of VmShared: the GPU copy reads guest pages (`guest_mem::active()`,
 //! already `&self`) and writes the compositor surface (global `shade::surface`).
-//! Only the device STATE needed to move out so the worker can hold it across
+//! Only the device state needed to move out so the worker can hold it across
 //! cores without aliasing the vCPU's `&mut VmShared`. Lock order: a vCPU takes
-//! `VM_BIG_LOCK` then this lock; the worker takes ONLY this lock — no cycle.
+//! `VM_BIG_LOCK` then this lock; the worker takes only this lock — no cycle.
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
@@ -24,8 +18,8 @@ use super::virtio_gpu_pci::{VirtioGpu, BAR0_BASE};
 
 static GPU: Mutex<VirtioGpu> = Mutex::new(VirtioGpu::new());
 
-/// Acquire the GPU device. The vCPU takes this only AFTER `VM_BIG_LOCK`; the
-/// worker takes ONLY this — lock order is acyclic.
+/// Acquire the GPU device. The vCPU takes this only after `VM_BIG_LOCK`; the
+/// worker takes only this — lock order is acyclic.
 pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
@@ -85,7 +79,7 @@ pub fn bar0_in_range(gpa: u64) -> bool {
     gpa >= BAR0_BASE && gpa < BAR0_BASE + 0x4000
 }
 
-// ── Stage 2 scaffolding (inert in Stage 1): controlq doorbell defer ──
+// ── Off-vCPU worker: controlq doorbell defer ──
 /// Pending controlq notify from the vCPU. 0xFFFF = none. On the doorbell the vCPU
 /// sets the qidx here (instead of servicing inline) + wakes the worker's core;
 /// the GPU worker drains it on its own core.
@@ -93,11 +87,10 @@ static GPU_KICK: AtomicU16 = AtomicU16::new(0xFFFF);
 static WORKER_CORE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static FULL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Compile-time gate for the off-vCPU GPU worker (clean OTA rollback).
-/// OFF: the off-vCPU GPU's async IRQ9 delivery to the guest is unreliable —
-/// cage's virtio-gpu driver stalled waiting for a completion that never arrived
-/// ("no new frames"), so the GPU stays INLINE on the vCPU (synchronous
-/// deliver_irq) for now. Re-enable only once the worker→guest IRQ path is proven.
+/// Compile-time gate for the off-vCPU GPU worker. Off: the off-vCPU GPU's
+/// async IRQ9 delivery to the guest is unreliable (cage's virtio-gpu driver
+/// can stall waiting for a completion that never arrives), so the GPU stays
+/// inline on the vCPU (synchronous deliver_irq).
 pub const FULL_GPU_BACKEND: bool = false;
 #[inline]
 pub fn full_active() -> bool { FULL_ACTIVE.load(Ordering::Acquire) }
@@ -137,14 +130,14 @@ pub fn raise_irq() { GPU_IRQ_PENDING.store(true, Ordering::Release); }
 #[inline]
 pub fn take_irq() -> bool { GPU_IRQ_PENDING.swap(false, Ordering::AcqRel) }
 
-// ── The off-vCPU GPU worker fiber (Stage 2) ──
+// ── The off-vCPU GPU worker fiber ──
 static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
-/// service_queues does the ~8 MB framebuffer copy + write_frame; give it a roomy
+/// service_queues does the framebuffer copy + write_frame; give it a roomy
 /// fiber stack (the default 128 KiB has no guard page).
 const WORKER_STACK_BYTES: usize = 256 * 1024;
 
-/// Spawn the GPU worker on its OWN reserved `core`. Idempotent per VM session.
+/// Spawn the GPU worker on its own reserved `core`. Idempotent per VM session.
 /// Only when `FULL_GPU_BACKEND` + a core was reserved (see `mod::guest_vcpus`).
 pub fn start_worker(core: usize) {
     if WORKER_RUNNING.swap(true, Ordering::AcqRel) { return; }
@@ -175,7 +168,7 @@ fn worker_entry(_arg: u64) {
             return;
         }
         // Drain any deferred controlq notify: do the heavy copy + write_frame on
-        // THIS core, off the vCPU. Raise IRQ9 + wake the BSP to inject it.
+        // this core, off the vCPU. Raise IRQ9 + wake the BSP to inject it.
         if let Some(qidx) = take_gpu_kick() {
             if let Some(gm) = crate::microvm::devices::guest_mem::active() {
                 let advanced = GPU.lock().service_queues(qidx, gm);

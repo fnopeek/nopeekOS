@@ -1,23 +1,21 @@
 //! Asynchronous 9p write persistence.
 //!
-//! The synchronous 9p Twrite path persisted each streamed chunk INLINE on the
-//! vCPU exit handler — freezing the whole guest vCPU (no RX pump, no guest TCP
-//! softirqs) for the put/encrypt and, on close, the commit. On a 1 Gbit
-//! download-to-disk that collapsed throughput ~8× (measured: speedtest-to-RAM
-//! 460 Mbit vs file-to-disk 56 Mbit): the guest couldn't ACK while it was
-//! blocked waiting for each chunk's Rwrite, so the sender never ramped.
+//! Persisting each streamed chunk inline on the vCPU exit handler would
+//! freeze the whole guest vCPU (no RX pump, no guest TCP softirqs) for the
+//! put/encrypt and, on close, the commit; the guest could not ACK while
+//! waiting for each chunk's Rwrite, so a download-to-disk would never ramp.
 //!
-//! This module moves npkFS persistence onto a worker fiber on ANOTHER core. The
-//! vCPU enqueues a chunk and replies LATER (deferred Rwrite via the device's
-//! in-flight table), so it never freezes — the guest kernel keeps running TCP,
-//! ACKs flow, the sender ramps. Durability is preserved: the reply is posted
-//! only AFTER the worker actually persisted, and `Finish` runs the full 4-phase
-//! commit (FLUSH/FUA) before its reply. Nothing is ack'd before it is durable.
+//! This module moves npkFS persistence onto a worker fiber on another core.
+//! The vCPU enqueues a chunk and replies later (deferred Rwrite via the
+//! device's in-flight table), so it never freezes. Durability is preserved:
+//! the reply is posted only after the worker actually persisted, and
+//! `Finish` runs the full 4-phase commit (FLUSH/FUA) before its reply.
+//! Nothing is ack'd before it is durable.
 //!
-//! Concurrency is race-free by ownership split: the worker touches ONLY the FS
-//! + these two queues; the vCPU owns the virtqueue, guest memory, and fid
-//! table. Data crosses as owned `Vec<u8>` through the queues — no shared device
-//! state across cores.
+//! Concurrency is race-free by ownership split: the worker touches only the
+//! FS + these two queues; the vCPU owns the virtqueue, guest memory, and fid
+//! table. Data crosses as owned `Vec<u8>` through the queues — no shared
+//! device state across cores.
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -86,10 +84,9 @@ pub fn enqueue_finish(tag: u16, key: u64) {
 pub fn poll_done() -> Option<Done> { DONE.lock().pop_front() }
 
 /// Persist worker stack. npkFS writes (AES + B-tree COW) and especially the
-/// commit at `finish()` (journal + bitmap + superblock) run a deep call chain —
-/// fine on the main kernel stack but it overflows the default 128 KiB fiber
-/// stack, which has no guard page → silent memory smash → worker death → the
-/// guest hangs on its next 9p write. 1 MiB is generous headroom.
+/// commit at `finish()` (journal + bitmap + superblock) run a deep call chain
+/// that overflows the default 128 KiB fiber stack, which has no guard page.
+/// 1 MiB is generous headroom.
 const WORKER_STACK_BYTES: usize = 1024 * 1024;
 
 /// Spawn the persist worker on `core` (chosen load-aware, never Core 0).
@@ -100,7 +97,7 @@ pub fn start_worker(core: usize) {
     crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
-/// Stop the worker at VM teardown and WAIT (bounded) for it to exit, so it
+/// Stop the worker at VM teardown and wait (bounded) for it to exit, so it
 /// drops any in-flight writers — which balances the npkFS stream gc-guard
 /// (`ACTIVE_STREAMS`) and leaves a clean slate for the next launch. The worker
 /// runs on its own core, so this brief spin on the teardown core doesn't block
@@ -114,19 +111,19 @@ pub fn stop_worker() {
     }
 }
 
-/// Ticks (100 Hz → 10 ms each) to stay HOT after the last persisted chunk
+/// Ticks (100 Hz → 10 ms each) to stay hot after the last persisted chunk
 /// before parking. The synchronous per-chunk 9p round-trip means the guest
-/// waits for each Rwrite; if the worker parks between chunks it wakes only on
-/// the ~10 ms per-core timer, gating throughput at ~1 chunk/10 ms. Staying hot
-/// (cooperative `yield_ready`, not a parking `yield_sleep`) during a transfer
-/// keeps the round-trip in the µs range. ~300 ms hot window covers gaps.
+/// waits for each Rwrite; if the worker parks between chunks it wakes only
+/// on the per-core timer, gating throughput at one chunk per tick. Staying
+/// hot (cooperative `yield_ready`, not a parking `yield_sleep`) during a
+/// transfer keeps the round-trip in the µs range.
 const HOT_TICKS: u64 = 30;
 
 fn worker_entry(_: u64) {
     let mut writers: BTreeMap<u64, crate::storage::npkfs::fs::StreamingWriter> = BTreeMap::new();
     let mut last_work = crate::interrupts::ticks();
     loop {
-        // Check teardown FIRST so close is snappy (abandon any queued writes;
+        // Check teardown first so close is snappy (abandon any queued writes;
         // dropping `writers` balances the stream gc-guard).
         if STOP.load(Ordering::Acquire) {
             writers.clear();
@@ -152,7 +149,7 @@ fn worker_entry(_: u64) {
                 }
                 if nbytes > 0 { PENDING_BYTES.fetch_sub(nbytes, Ordering::AcqRel); }
                 // Only deferred ops are awaited by the vCPU; fast-path-acked
-                // writes (reply=false) must NOT post a Done (tag could be reused).
+                // writes (reply=false) must not post a Done (tag could be reused).
                 if reply {
                     DONE.lock().push_back(Done { tag, result });
                     // The BSP posts the reply and raises the IRQ; wake it.

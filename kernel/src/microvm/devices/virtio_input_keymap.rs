@@ -4,11 +4,11 @@
 //! ASCII (Shift baked in by the host keyboard driver), specials arrive
 //! as `KeyCode::Enter/Tab/Up/...`, and `Ctrl+letter` arrives as the
 //! control byte (0x01..0x1A) with `modifiers.ctrl`. The guest runs the
-//! default **US** xkb map, so we translate the *desired character* to
+//! default US xkb map, so we translate the *desired character* to
 //! the US evdev keycode (+ whether Shift must be held) that produces
 //! it, then wrap Ctrl/Alt from the modifier snapshot.
 //!
-//! Emission follows the proven virtio-input discipline (v0.169.3):
+//! Emission follows the virtio-input discipline:
 //! every state change is its own `EV_KEY` + `SYN_REPORT` frame, and
 //! every press has a matching release (the input core de-dupes a
 //! press of an already-down key). Modifiers are pressed before / and

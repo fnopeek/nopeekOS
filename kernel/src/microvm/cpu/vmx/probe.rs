@@ -1,7 +1,7 @@
 //! VMX capability probe.
 //!
-//! Does NOT enable VMX, does NOT touch CR4. Pure read-side detection.
-//! Bring-up (CR4.VMXE, IA32_FEATURE_CONTROL, VMXON) lives in 12.1.0b.
+//! Does not enable VMX and does not touch CR4. Pure read-side detection.
+//! Bring-up (CR4.VMXE, IA32_FEATURE_CONTROL, VMXON) lives in `enable.rs`.
 //!
 //! Reference: Intel SDM Vol. 3C §23.6 (Discovering Support for VMX),
 //! §A.1 (Basic VMX Information).
@@ -19,14 +19,14 @@ pub struct Capabilities {
     /// per SDM §A.1, but explicit because allocators must honour it.
     pub vmxon_region_size: u32,
     /// IA32_VMX_EPT_VPID_CAP MSR is readable (i.e. secondary
-    /// processor-based controls expose EPT). Required for Phase 12.1.1+.
+    /// processor-based controls expose EPT). Required for the Linux guest.
     pub ept_supported: bool,
     /// Unrestricted-guest secondary control available — lets the guest
     /// run in real mode without trampolining through paged 32-bit.
-    /// Phase 12.1.1+ Linux boot benefits from this.
+    /// The Linux boot benefits from this.
     pub unrestricted_guest: bool,
     /// VPID (tagged TLB) available. Reduces TLB flush cost on
-    /// VM-entry/exit. Required for sane Phase 12.6 multi-VM density.
+    /// VM-entry/exit.
     pub vpid: bool,
 }
 
@@ -38,7 +38,7 @@ pub fn probe() -> Option<Capabilities> {
     }
 
     // IA32_FEATURE_CONTROL gates VMXON. Bit 2 (VMX outside SMX) must
-    // be set AND bit 0 (lock) decides whether we can still toggle it.
+    // be set, and bit 0 (lock) decides whether we can still toggle it.
     let feat_ctrl = unsafe { super::rdmsr(IA32_FEATURE_CONTROL) };
     let locked = feat_ctrl & FEAT_CTRL_LOCK != 0;
     let vmx_outside_smx = feat_ctrl & FEAT_CTRL_VMX_OUTSIDE_SMX != 0;

@@ -1,10 +1,11 @@
 //! Guest CPUID — an allowlist over the host's answer, after KVM's
 //! `kvm_cpu_cap_init` and `__do_cpuid_func`.
 //!
-//! Passing host CPUID through with a few bits cleared told the guest about
-//! hardware we do not virtualize: SMCA machine-check banks, the AMD extended
-//! APIC space, IBS, the PMU, SVM itself. Each of those makes Linux touch an
-//! MSR or APIC register that either reaches the host or is not there.
+//! An allowlist rather than host CPUID with a few bits cleared: passing
+//! host CPUID through would advertise hardware we do not virtualize (SMCA
+//! machine-check banks, the AMD extended APIC space, IBS, the PMU, SVM
+//! itself), and each of those makes Linux touch an MSR or APIC register
+//! that either reaches the host or is not there.
 
 fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
@@ -119,7 +120,7 @@ pub fn guest_cpuid(
         1 => {
             c = (c & !L1_ECX_DROP) | L1_ECX_X2APIC | L1_ECX_TSC_DEADLINE | L1_ECX_HYPERVISOR;
             if intel { c &= !INTEL_L1_ECX_DROP; }
-            // OSXSAVE mirrors the GUEST's CR4, not the host's.
+            // OSXSAVE mirrors the guest's CR4, not the host's.
             c = (c & !(1 << 27)) | ((((guest_cr4 >> 18) & 1) as u32) << 27);
             d &= !L1_EDX_DROP;
             // Initial APIC ID = this vCPU, matching the emulated LAPIC and MP table.

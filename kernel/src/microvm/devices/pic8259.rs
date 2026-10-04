@@ -6,9 +6,9 @@
 //! `read_irq` (`kvm_pic_read_irq`: acknowledge the highest request, move it
 //! to ISR, return its vector) and `output` (the INTR pin, `pic_irq_request`).
 //!
-//! The stub this replaces tracked only the mask and the vector base; device
-//! lines were injected straight into the guest past a mask or a running
-//! handler, and the guest's EOI went nowhere.
+//! Device lines go through IRR/IMR/ISR as on hardware, so a masked line
+//! or one whose handler is still running is not delivered, and the
+//! guest's EOI completes the in-service interrupt.
 
 pub const PIC_MASTER_CMD: u16 = 0x20;
 pub const PIC_MASTER_IMR: u16 = 0x21;

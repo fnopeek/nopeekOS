@@ -1,5 +1,5 @@
 //! Intel MP-table builder — enumerates the guest's vCPUs for a Linux
-//! guest booted `acpi=off` (no MADT). Guest-SMP Stage 2.
+//! guest booted `acpi=off` (no MADT).
 //!
 //! Linux scans three fixed windows for the 16-byte floating pointer
 //! `_MP_` (`mpparse_find_mptable`, mpparse.c:612): `[0,0x400)`,
@@ -7,18 +7,14 @@
 //! pointer at 0xF0000 (the BIOS window, RESERVED in our e820 so Linux
 //! won't reuse it) and the config table right behind it at 0xF0010.
 //!
-//! Layout + validation are ported 1:1 from the kernel that runs against
-//! it (`~/.cache/nopeekos/linux-src/linux-6.18.26`):
+//! Layout + validation are ported 1:1 from the Linux kernel that parses it:
 //!   * structs — `arch/x86/include/asm/mpspec_def.h`
 //!   * scan / checksum / parse — `arch/x86/kernel/mpparse.c`
 //!     (`smp_scan_config`, `smp_check_mpc`, `smp_read_mpc`).
 //!
-//! Stage 2 emits the minimum that makes Linux count 2 CPUs: the floating
-//! pointer + a `PCMP` header (non-zero LAPIC address, mandatory) + two
-//! `mpc_cpu` (type 0) entries; with the I/O APIC also the bus / IOAPIC /
-//! INTSRC / LINTSRC entries of `io_entries`. The AP is enumerated but not started:
-//! INIT/SIPI at the LAPIC ICR is decoded + logged in `svm::lapic`, Linux
-//! times out on the AP and continues with 1 CPU online (Stage 3 spawns it).
+//! Emits the floating pointer + a `PCMP` header (non-zero LAPIC address,
+//! mandatory) + one `mpc_cpu` (type 0) entry per vCPU; with the I/O APIC
+//! also the bus / IOAPIC / INTSRC / LINTSRC entries of `io_entries`.
 
 use crate::microvm::devices::guest_mem::GuestMem;
 
@@ -27,7 +23,7 @@ const MPF_GUEST_PHYS: u64 = 0xF_0000;
 /// Config table — directly behind the floating pointer.
 const MPC_GUEST_PHYS: u64 = 0xF_0010;
 
-/// LAPIC MMIO base reported in the config table. MUST be non-zero or
+/// LAPIC MMIO base reported in the config table. Must be non-zero or
 /// `smp_check_mpc` rejects the whole table (mpparse.c:156). Matches
 /// `svm::lapic::LAPIC_BASE` / `APIC_DEFAULT_PHYS_BASE`.
 const LAPIC_PHYS: u32 = 0xFEE0_0000;
@@ -71,7 +67,7 @@ fn checksum(buf: &[u8]) -> u8 {
 }
 
 /// Append one `mpc_cpu` (type 0, 20 bytes) entry. `cpufeature` /
-/// `featureflag` are unused by Linux 6.18's `MP_processor_info` (it only
+/// `featureflag` are unused by Linux's `MP_processor_info` (it only
 /// calls `topology_register_apic`), so we leave them zero.
 fn push_cpu(buf: &mut alloc::vec::Vec<u8>, apicid: u8, bsp: bool) {
     let cpuflag = CPU_ENABLED | if bsp { CPU_BOOTPROCESSOR } else { 0 };
