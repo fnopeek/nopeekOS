@@ -1,11 +1,11 @@
 //! npkFS path layer — read & mutate via `(root_tree_hash, slash_path)`.
 //!
 //! Pure functions over the storage layer: each mutation takes the
-//! current root Tree hash + a path + payload, and returns a NEW root
+//! current root Tree hash + a path + payload, and returns a new root
 //! Tree hash. Old roots remain walkable (content-addressed snapshots).
 //!
 //! Atomicity: nothing in this layer touches the superblock's
-//! `root_tree_hash`. The high-level `fs` API (Step 5+) decides when to
+//! `root_tree_hash`. The high-level `fs` API decides when to
 //! flip the superblock to the new root, which is what makes the user-
 //! visible mutation atomic. A crash mid-mutation here just leaves
 //! orphan Tree blobs in the object store — they're collected by GC.
@@ -106,10 +106,9 @@ fn fetch_tree(hash: &[u8; 32]) -> Result<Vec<TreeEntry>, PathError> {
 /// for File these are byte sizes, for Dir already-recursive sums, so
 /// the sum stays correct by induction).
 ///
-/// `saturating_add` instead of `.sum()`: 9.2 EB is unreachable in
+/// `saturating_add` instead of `.sum()`: overflow is unreachable in
 /// practice, but `Iterator::sum` on `u64` panics in debug and wraps
-/// silently in release. Saturating is the disciplined kernel-side
-/// move and costs nothing.
+/// silently in release.
 fn store_tree(entries: Vec<TreeEntry>) -> Result<([u8; 32], u64), PathError> {
     let recursive_size: u64 = entries.iter()
         .fold(0u64, |acc, e| acc.saturating_add(e.size));
@@ -290,8 +289,7 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
 
     // Stream-hash the would-be Blob's content address (no alloc, no
     // encode) so we can skip `data.to_vec() + encode_and_hash() +
-    // storage::put` entirely when the blob already exists. ~1 ms/MB
-    // saved on dedup hits.
+    // storage::put` entirely when the blob already exists.
     let blob_hash = super::object::blob_content_hash(data);
 
     if !storage::has(&blob_hash) {
@@ -381,7 +379,7 @@ pub fn delete(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
 }
 
 /// Move `old_path` to `new_path`. Same parent or cross-parent both work.
-/// `new_path` must NOT already exist (no implicit overwrite).
+/// `new_path` must not already exist (no implicit overwrite).
 pub fn rename(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathError> {
     let old_segs = parse_path(old)?;
     let new_segs = parse_path(new)?;
@@ -396,7 +394,7 @@ pub fn rename(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathErr
         return Err(PathError::InvalidPath);
     }
 
-    // Detach phase: dirs need NOT be empty here — we're carrying the
+    // Detach phase: dirs need not be empty here — we're carrying the
     // subtree across, not rmdir'ing it.
     let (entry, root1) = remove_entry_at(root, &old_segs, /* require_empty_dir */ false)?;
 
@@ -409,7 +407,7 @@ pub fn rename(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathErr
 /// Copy `old_path` to `new_path`. Content-addressed: the copy shares the
 /// source's `hash`, so a File aliases the same Blob and a Dir aliases the
 /// whole subtree — O(1), no data duplication, dedup keeps both alive.
-/// `new_path` must NOT already exist (no implicit overwrite).
+/// `new_path` must not already exist (no implicit overwrite).
 pub fn copy(root: &[u8; 32], old: &str, new: &str) -> Result<[u8; 32], PathError> {
     let old_segs = parse_path(old)?;
     let new_segs = parse_path(new)?;

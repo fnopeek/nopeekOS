@@ -203,11 +203,9 @@ impl Fat32Writer {
     /// Write file data starting at `first_cluster`, refusing to run past the
     /// `max_clusters` that were reserved for it.
     ///
-    /// Without that bound this wrote happily past the end of the file's FAT
-    /// chain: the directory entry then advertised the full size while the
-    /// chain stopped short, so anything following the chain — i.e. the UEFI
-    /// firmware — read a truncated image and refused to boot, with the file
-    /// still listing at the right size. Silent corruption; fail loudly instead.
+/// Without that bound, the directory entry would advertise the full size
+/// while the chain stops short, so UEFI firmware following the chain reads
+/// a truncated image and refuses to boot. Fail loudly instead.
     fn write_file_data(
         &self,
         first_cluster: u32,
@@ -276,11 +274,8 @@ pub fn create_esp(
     // Reserve a contiguous run for the kernel image, so a later OTA can
     // overwrite it in place without re-laying-out the FAT.
     //
-    // This used to be a flat 8192 clusters = 4 MiB, which the kernel quietly
-    // outgrew: the image was written past the end of its own chain and the
-    // machine stopped booting. Derive it from the image instead — double the
-    // current size, with a floor — so the reservation tracks reality and
-    // still leaves room to grow.
+    // Derived from the image (double the current size, with a floor) so the
+    // reservation leaves room for the kernel to grow.
     let kernel_clusters = ((kernel_efi.len() + 511) / 512) as u32;
     let reserved = (kernel_clusters.saturating_mul(2)).max(MIN_KERNEL_RESERVED);
 
@@ -368,13 +363,12 @@ impl Fat32Reader {
             .map_err(|_| "FAT32 read error")
     }
 
-    /// Every raw block write on this path lands OUTSIDE npkFS, so a sector
-    /// number that has run past the partition writes into whatever follows it
-    /// — which on this disk is the filesystem. Nothing bounded it: the chain
-    /// is followed through the on-disk FAT, and one bad entry there is enough
-    /// to send `cluster_to_sector` anywhere. Refusing is always better than
-    /// scribbling; a failed kernel update leaves the old one bootable, a
-    /// scribbled npkFS does not.
+    /// Every raw block write on this path lands outside npkFS, so a sector
+    /// number past the partition writes into whatever follows it, which is
+    /// the filesystem. The chain is followed through the on-disk FAT, and
+    /// one bad entry there can send `cluster_to_sector` anywhere. Refusing is
+    /// always better than scribbling: a failed kernel update leaves the old
+    /// one bootable, a scribbled npkFS does not.
     fn write_sector(&self, rel_sector: u32, buf: &[u8; 512]) -> Result<(), &'static str> {
         if rel_sector >= self.total_sectors {
             crate::kprintln!(
@@ -388,7 +382,7 @@ impl Fat32Reader {
 
     fn cluster_to_sector(&self, cluster: u32) -> u32 {
         // Saturating: cluster 0/1 are reserved and would underflow, and an
-        // overflow here used to wrap into a plausible-looking sector.
+        // overflow would wrap into a plausible-looking sector.
         self.data_start
             .saturating_add(cluster.saturating_sub(2).saturating_mul(self.spc))
     }
@@ -409,13 +403,11 @@ impl Fat32Reader {
         if val >= 0x0FFF_FFF8 { Ok(None) } else { Ok(Some(val)) }
     }
 
-    /// Write a FAT entry (both copies).
-    /// Append one FREE cluster to the chain ending at `last`, and return it.
+    /// Append one free cluster to the chain ending at `last`, and return it.
     ///
-    /// The old code took `last + 1` on faith. In our ESP layout that happens
-    /// to be free, but a wrong guess would splice another file's cluster into
-    /// the kernel — silent corruption of the one file the machine boots from.
-    /// So scan the FAT for an entry that is actually 0.
+    /// Scans the FAT for an entry that is actually 0 rather than assuming
+    /// `last + 1` is free; a wrong guess would splice another file's
+    /// cluster into the kernel image.
     fn extend_chain(&self, last: u32) -> Result<u32, &'static str> {
         let usable = (self.total_sectors.saturating_sub(self.data_start)) / self.spc + 2;
         let mut cand = last + 1;
@@ -439,6 +431,7 @@ impl Fat32Reader {
         Ok(u32::from_le_bytes([sec[o], sec[o + 1], sec[o + 2], sec[o + 3]]) & 0x0FFF_FFFF)
     }
 
+    /// Write a FAT entry (both copies).
     fn fat_write(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
         let offset_bytes = cluster as u64 * 4;
         let fat_sector = (offset_bytes / 512) as u32;
@@ -537,7 +530,7 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
     // No fixed limit: the chain grows into free clusters when the image
-    // outgrows it (see `extend_chain`). What must NOT happen is the chain
+    // outgrows it (see `extend_chain`). What must not happen is the chain
     // shrinking back to the file size afterwards — see below.
 
     // Write data to existing clusters (follow FAT chain)
@@ -562,15 +555,11 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
         clusters_used += 1;
 
         if clusters_used >= new_clusters && written >= data.len() {
-            // Done writing. Deliberately do NOT truncate the chain here.
-            //
-            // This used to set EOC at the last written cluster and free the
-            // rest, which quietly shrank the reservation to exactly the
-            // current image on every update — so OTA worked exactly once and
-            // the next, slightly larger kernel no longer fit ("need 8243
-            // clusters, reservation is 8241"). The chain being longer than
-            // the file is fine: the directory entry's size is what defines
-            // the file, and firmware reads only that many bytes.
+            // Done writing. Deliberately do not truncate the chain here:
+            // shrinking it to the current image would leave no room for a
+            // slightly larger kernel on the next update. A chain longer than
+            // the file is fine; the directory entry's size defines the file,
+            // and firmware reads only that many bytes.
             break;
         }
 

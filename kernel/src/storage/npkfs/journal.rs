@@ -7,7 +7,7 @@
 //! Crash safety: journal entries are written with committed=0, then the
 //! superblock is written, then entries are marked committed=1. On replay,
 //! only committed=1 entries are processed, so a crash between journal write
-//! and superblock write does NOT corrupt the filesystem.
+//! and superblock write does not corrupt the filesystem.
 
 use alloc::vec::Vec;
 use super::types::*;
@@ -37,14 +37,14 @@ impl Journal {
     }
 
     /// Phase 1: Write pending frees to journal with committed=0.
-    /// Called BEFORE writing the new superblock.
+    /// Called before writing the new superblock.
     pub fn prepare(&mut self, cache: &mut BlockCache) -> Result<(), FsError> {
         if self.pending_frees.is_empty() { return Ok(()); }
 
         self.seq += 1;
         self.uncommitted_blocks.clear();
 
-        // Write ALL pending frees across multiple journal blocks if needed
+        // Write all pending frees across multiple journal blocks if needed
         let mut offset = 0;
         while offset < self.pending_frees.len() {
             let remaining = self.pending_frees.len() - offset;
@@ -78,7 +78,7 @@ impl Journal {
     }
 
     /// Phase 2: Mark journal entries as committed.
-    /// Called AFTER writing the new superblock.
+    /// Called after writing the new superblock.
     pub fn finalize(&mut self, cache: &mut BlockCache) -> Result<(), FsError> {
         for &journal_block in &self.uncommitted_blocks {
             let mut buf = [0u8; BLOCK_SIZE];

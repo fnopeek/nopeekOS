@@ -1,11 +1,9 @@
 //! Copy-on-Write B-tree, keyed by 32-byte content hashes.
 //!
-//! Forked from v1's btree.rs (variable-length 64-byte names) with the
-//! key shape changed to fixed 32-byte hashes and the leaf-entry shape
-//! to `BTreeEntryRaw`. COW + fixup-path + node-split + node-checksum logic
-//! carries over verbatim, which is deliberate — those are the parts
-//! with hard-won correctness fixes (see v1 commit history) and porting
-//! them by hand would re-open old bugs.
+//! Fixed 32-byte hash keys, `BTreeEntryRaw` leaf entries. COW,
+//! fixup-path, node-split and node-checksum logic follow the original
+//! name-keyed B-tree unchanged; those parts carry subtle correctness
+//! fixes and should not be rewritten casually.
 
 use alloc::vec::Vec;
 
@@ -287,9 +285,7 @@ pub fn delete(
 }
 
 /// Walk every entry in the tree in key order, calling `f` for each.
-/// Used by GC + diagnostic intents (Steps 5 + 9). Reachable from no
-/// caller in Step 2 yet — kept here so Step 3+ doesn't need to revisit
-/// the btree module.
+/// Used by GC and diagnostic intents.
 #[allow(dead_code)]
 pub fn iter_all<F: FnMut(&BTreeEntryRaw)>(
     cache: &mut BlockCache, root: u64, f: &mut F,
@@ -345,7 +341,7 @@ fn fsck_subtree(
     }
 }
 
-/// **Best-effort** traversal used only by `iter_all` (GC enumeration):
+/// Best-effort traversal used only by `iter_all` (GC enumeration):
 /// a node that is out-of-range, unreadable, has a bad magic / type, or
 /// a corrupt `num_entries` is logged and skipped rather than aborting
 /// the whole sweep — one bad pointer must not wedge GC forever. Depth-
@@ -588,7 +584,7 @@ fn fixup_path_split(
             }
             set_internal_entry(&mut new_buf, pos, split_key, left);
             // The entry that was at `pos` (now at `pos+1`) keeps its key,
-            // but its child pointer must become `right` — same fix as v1.
+            // but its child pointer must become `right`.
             let off = NODE_HEADER_SIZE + (pos + 1) * INTERNAL_ENTRY_SIZE + 32;
             new_buf[off..off + 8].copy_from_slice(&right.to_le_bytes());
 
@@ -708,9 +704,9 @@ fn remove_from_parent(
     let mut new_buf = buf;
     let mut new_hdr = hdr;
 
-    // Same fix as v1: removing the rightmost child means promoting the
-    // child at slot n-1 into the right_child header field. Forgetting
-    // this leaves right_child dangling on a freed leaf.
+    // Removing the rightmost child means promoting the child at slot n-1
+    // into the right_child header field. Forgetting this leaves
+    // right_child dangling on a freed leaf.
     if child_idx < n {
         for i in child_idx..n - 1 {
             let key = <[u8; 32]>::try_from(internal_key(&buf, i + 1)).unwrap();

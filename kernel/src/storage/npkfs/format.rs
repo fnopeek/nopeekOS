@@ -3,22 +3,19 @@
 //! Disk layout: block 0 reserved (MBR/GPT/UEFI), blocks 1–8 = SB slots,
 //! blocks 9–264 = journal area, block 265+ = bitmap & data.
 //!
-//! v3 (this kernel) extends the v2 `TreeEntry` shape by adding an
-//! `mtime` field (UTC seconds since the Unix epoch). Old v2 disks
-//! cannot be read — the on-disk magic shifted from `npkFS\x02\0\0`
-//! to `npkFS\x03\0\0` and the postcard wire shape of `Tree` payloads
-//! changed. Mount-time guard halts with a reinstall message when v2
-//! magic is detected.
+//! v3 extends the v2 `TreeEntry` shape with an `mtime` field (UTC
+//! seconds since the Unix epoch). v2 disks cannot be read: the magic is
+//! `npkFS\x03\0\0` and the postcard wire shape of `Tree` payloads differs.
+//! The mount-time guard halts with a reinstall message on v2 magic.
 //!
-//! The B-tree node layout (block-level) is unchanged across v2 → v3
-//! — only the typed Object payload (TreeEntry list) shifted shape. So
-//! `BTREE_NODE_MAGIC` stays `"NPK2"` even at superblock version 3.
+//! The block-level B-tree node layout is the same in v2 and v3, so
+//! `BTREE_NODE_MAGIC` stays `"NPK2"` at superblock version 3.
 
 #![allow(dead_code)]
 
 use super::types::{Extent, BLOCK_SIZE};
 
-// ── Layout (block geometry, unchanged since v1) ───────────────────────
+// ── Layout (block geometry) ───────────────────────────────────────────
 pub use super::types::{
     SUPERBLOCK_SLOTS,
     SUPERBLOCK_START,
@@ -41,11 +38,10 @@ pub const DISK_MAGIC_V2: [u8; 8] = *b"npkFS\x02\0\0";
 /// On-disk format version field of the superblock.
 pub const DISK_VERSION: u32 = 3;
 
-/// B-tree node magic. ASCII "NPK2" little-endian. Unchanged across
-/// v2 → v3: the block-level node layout (header + leaf entries keyed
-/// by 32-byte hash, internal entries with 32-byte key + 8-byte child
-/// pointer) didn't shift; only the typed Object payload above the
-/// storage layer changed shape.
+/// B-tree node magic. ASCII "NPK2" little-endian. The same in v2 and v3:
+/// the block-level node layout (header + leaf entries keyed by 32-byte
+/// hash, internal entries with 32-byte key + 8-byte child pointer) did
+/// not change; only the typed Object payload above the storage layer did.
 pub const BTREE_NODE_MAGIC: u32 = 0x324B504E;
 
 pub const BTREE_INTERNAL: u8 = 1;
@@ -54,10 +50,10 @@ pub const BTREE_LEAF: u8 = 2;
 // ── Per-leaf entry ────────────────────────────────────────────────────
 
 /// Direct extents stored inline in a leaf entry. More extents go through
-/// the indirect chain (same format as v1).
+/// the indirect chain.
 pub const DIRECT_EXTENTS: usize = 3;
 
-/// Extents per indirect block (see v1's identical layout).
+/// Extents per indirect block.
 pub const EXTENTS_PER_INDIRECT: usize = 255;
 
 /// B-tree leaf entry. Keyed by `hash` (the BLAKE3 of the plaintext
@@ -101,18 +97,17 @@ pub const NODE_HEADER_SIZE: usize = 16;
 pub const CHECKSUM_SIZE: usize = 32;
 
 // Reserve the 32-byte BLAKE3 checksum trailer (at BLOCK_SIZE-32), same as
-// MAX_LEAF_ENTRIES does. Without it the constant was 102, but entry 101 sits at
-// offset 16+101*40 = 4056..4096 and overlaps the checksum at 4064 — writing the
-// checksum then clobbers that entry's child pointer with hash bytes (a
-// high-entropy garbage block number → OutOfRange on the next descent), and it
-// slips past read_node's checksum verify because the clobbered bytes ARE the
-// checksum. 101 keeps the last entry below 4064.
+// MAX_LEAF_ENTRIES does. Entry 101 would sit at offset 16+101*40 =
+// 4056..4096 and overlap the checksum at 4064; writing the checksum would
+// clobber its child pointer, and read_node's checksum verify would not
+// notice because the clobbered bytes are the checksum. 101 keeps the last
+// entry below 4064.
 pub const MAX_INTERNAL_KEYS: usize =
     (BLOCK_SIZE - NODE_HEADER_SIZE - CHECKSUM_SIZE) / INTERNAL_ENTRY_SIZE; // 101
 pub const MAX_LEAF_ENTRIES: usize =
     (BLOCK_SIZE - NODE_HEADER_SIZE - CHECKSUM_SIZE) / LEAF_ENTRY_SIZE; // 36
 
-// ── Node header (same shape as v1 but distinct magic) ─────────────────
+// ── Node header ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -127,8 +122,7 @@ pub struct BTreeNodeHeader {
 
 // ── Superblock ────────────────────────────────────────────────────────
 
-/// 4096-byte superblock. Adds `root_tree_hash` for Step 4 (path
-/// walker / mutations) — populated 0 in Step 2 since no path layer exists.
+/// 4096-byte superblock.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct SuperblockRaw {
@@ -141,9 +135,9 @@ pub struct SuperblockRaw {
     pub bitmap_start: u64,
     pub bitmap_count: u64,
     pub data_start: u64,
-    /// B-tree root block address (Step 2 entry point: hash → BTreeEntryRaw).
+/// B-tree root block address (entry point: hash → BTreeEntryRaw).
     pub btree_root: u64,
-    /// Hash of the root Tree object (Step 4+). Zero in Step 2.
+/// Hash of the root Tree object. Zero while no root Tree exists.
     pub root_tree_hash: [u8; 32],
     pub object_count: u64,
     pub journal_head: u64,

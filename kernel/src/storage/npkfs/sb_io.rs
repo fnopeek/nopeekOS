@@ -38,8 +38,8 @@ pub fn read_best(cache: &mut BlockCache) -> Result<Option<SuperblockRaw>, FsErro
 
 /// What the superblock ring actually looks like, slot by slot. `read_best`
 /// answers "did I find one", which is not the same question as "is there a
-/// filesystem here" — it says `continue` to a failed READ just as readily as
-/// to an empty slot. Boot used that single bit to decide whether to format.
+/// filesystem here": it skips a failed read just as readily as an empty
+/// slot, so it must not decide whether formatting is safe.
 #[derive(Default, Clone, Copy)]
 pub struct SbProbe {
     /// The block could not be read at all — device, offset or partition.
@@ -48,7 +48,7 @@ pub struct SbProbe {
     pub blank: usize,
     /// A current-version superblock whose checksum verifies.
     pub valid: usize,
-    /// Current magic + version, checksum does NOT verify: damaged.
+    /// Current magic + version, checksum does not verify: damaged.
     pub bad_checksum: usize,
     /// An npkFS magic from an older on-disk version.
     pub legacy: usize,
@@ -57,7 +57,7 @@ pub struct SbProbe {
 }
 
 impl SbProbe {
-    /// Every slot readable and every slot empty. The ONLY state in which
+    /// Every slot readable and every slot empty. The only state in which
     /// formatting destroys nothing.
     pub fn is_pristine(&self) -> bool {
         self.blank as u64 == SUPERBLOCK_SLOTS && self.read_errors == 0
@@ -113,9 +113,9 @@ pub fn read_legacy_magic(cache: &mut BlockCache) -> Option<u8> {
     None
 }
 
-/// Commit the next-generation superblock DURABLY: write it straight to disk
+/// Commit the next-generation superblock durably: write it straight to disk
 /// with FUA (bypassing the write-back cache) so it is on stable media when this
-/// returns, and drop any stale cached copy of the slot. The caller MUST have
+/// returns, and drop any stale cached copy of the slot. The caller must have
 /// issued a `blkdev::flush()` first so everything the SB references is already
 /// durable — otherwise a power-loss could expose an SB pointing at not-yet-
 /// persisted data (block double-alloc on remount).

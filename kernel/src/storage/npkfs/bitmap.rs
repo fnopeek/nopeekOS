@@ -17,15 +17,14 @@ pub struct Bitmap {
     dirty: bool,
     /// Per-bitmap-block dirty flag. `sync()` only writes blocks marked
     /// dirty here, instead of pushing all `bitmap_count` blocks
-    /// through the 64-slot block cache (which used to thrash every
-    /// commit, capping write IOPS at ~17 on a multi-GB partition).
+    /// through the 64-slot block cache on every commit.
     dirty_blocks: Vec<bool>,
     trim_pending: Vec<(u64, u64)>,
     alloc_cursor: u64, // Next-fit: start searching here
 }
 
 impl Bitmap {
-    /// Load bitmap from disk. the superblock passes layout primitives
+    /// Load bitmap from disk. The superblock passes layout primitives
     /// directly; bitmap layout is identical between v1 and v2.
     pub fn load_args(
         cache: &mut BlockCache,
@@ -161,9 +160,8 @@ impl Bitmap {
 
     /// Mark the bitmap-block that owns `block`'s allocation bit as
     /// needing flush. With ~32K bits per 4 KB bitmap-block, a typical
-    /// fs::write (5-10 newly allocated blocks clustered together) only
-    /// dirties 1-2 bitmap-blocks — vs. the previous "rewrite all
-    /// `bitmap_count` blocks every commit" which thrashed the cache.
+    /// fs::write (a few newly allocated blocks clustered together) only
+    /// dirties 1-2 bitmap-blocks.
     fn mark_block_dirty(&mut self, block: u64) {
         let byte_idx = block as usize / 8;
         let bitmap_block_idx = byte_idx / BLOCK_SIZE;

@@ -11,7 +11,7 @@
 //!   - Reserved variants hold their slot via #[allow(dead_code)]
 //!   - postcard variant tags are u32 varints — order matters
 //!
-//! Step-1 scope: in-memory only. No disk, no path walker, no B-tree.
+//! This module is the in-memory encoding only; disk I/O lives in `storage`.
 
 #![allow(dead_code)]
 
@@ -50,7 +50,7 @@ pub enum EntryKind {
 ///
 /// `flags` is a u8 bitmap of per-entry metadata. For `File` entries the
 /// low two bits record the object shape so GC can decide reachability
-/// WITHOUT reading the object (see `FLAG_BLOB` / `FLAG_CHUNKED`):
+/// without reading the object (see `FLAG_BLOB` / `FLAG_CHUNKED`):
 ///   - `FLAG_BLOB`    (0x02): single `Object::Blob` — a leaf, GC skips it.
 ///   - `FLAG_CHUNKED` (0x01): `Object::Chunked` manifest — GC reads it to
 ///                            reach the chunk blobs.
@@ -74,19 +74,17 @@ pub struct TreeEntry {
 /// variant payload, so `Blob(b"")` and `Tree(vec![])` hash to
 /// different values even though both are "empty".
 ///
-/// Variant order is **append-only**. The postcard tag is the
+/// Variant order is append-only. The postcard tag is the
 /// variant index, so reordering or removing variants breaks every
 /// on-disk object.
 ///
 /// `Chunked` references a sequence of regular `Blob` chunk objects
 /// by their content addresses. Used when a file is too large to
 /// materialize in a single `Vec<u8>` during write — the path layer
-/// can stream the source into N fixed-size chunks (default 16 MB),
-/// store each as its own `Blob`, then emit a `Chunked` manifest
-/// pointing at all of them. On read, `fs::read` stitches the
-/// chunks back into one `Vec<u8>` for consumer transparency; for
-/// the multi-GB case a future streaming reader can iterate
-/// chunk-by-chunk against the same on-disk layout.
+/// can stream the source into N fixed-size chunks, store each as its
+/// own `Blob`, then emit a `Chunked` manifest pointing at all of them.
+/// On read, `fs::read` stitches the chunks back into one `Vec<u8>` for
+/// consumer transparency.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Object {
     Blob(Vec<u8>),
@@ -172,7 +170,7 @@ impl Object {
 }
 
 /// Compute the content-address (BLAKE3 hash) that `Object::Blob(data)`
-/// would produce, **without** allocating the encoded form. Streams
+/// would produce, without allocating the encoded form. Streams
 /// the postcard wire bytes into a `blake3::Hasher`:
 ///
 ///   `update([variant_tag = 0])`
@@ -180,9 +178,9 @@ impl Object {
 ///   `update(data)`
 ///
 /// Used by the path layer to skip `data.to_vec() + encode_and_hash()`
-/// (~1 ms / MB on the test rig) when the blob already exists in
-/// storage. If the hash misses, callers fall back to the full encode
-/// path; if it hits, we go straight to tree-rebuild.
+/// when the blob already exists in storage. If the hash misses, callers
+/// fall back to the full encode path; if it hits, we go straight to
+/// tree-rebuild.
 pub fn blob_content_hash(data: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[0u8]); // postcard variant tag for `Object::Blob`
@@ -211,11 +209,10 @@ fn encode_varint_u64(mut x: u64, buf: &mut [u8; 10]) -> usize {
 /// and returns the inner blob `Vec<u8>` by shifting the postcard
 /// prefix off the front in-place.
 ///
-/// `Object::decode` allocates a fresh `Vec<u8>` and copies — for a
-/// 1 MB blob that's ~1 ms wasted (measured 920 µs in the testdisk
-/// profile). `drain(0..prefix)` is a single memmove of the same
-/// payload by ~6 bytes, ~10× faster (~0.1 ms / MB). The wire format
-/// is unchanged: postcard for `Object::Blob(Vec<u8>)` lays down
+/// `Object::decode` allocates a fresh `Vec<u8>` and copies;
+/// `drain(0..prefix)` is a single memmove of the same payload by a few
+/// bytes. The wire format is unchanged: postcard for
+/// `Object::Blob(Vec<u8>)` lays down
 ///
 ///   [variant_tag = 0u8 (1 byte)]
 ///   [length      = u32 varint (1–5 bytes)]

@@ -80,12 +80,9 @@ pub fn read(path: &str) -> Result<Option<Vec<u8>>, Error> {
 }
 
 /// Same as [`read`] but also returns the file's content-address (the
-/// walk hash from the tree, which is BLAKE3 of the encoded Blob). Used
-/// by the v1-compat bridge to avoid recomputing a fresh BLAKE3 over
-/// every read — `storage::get` already verifies integrity against the
-/// walk hash before handing the plaintext back, so re-hashing is pure
-/// overhead. On a 1 MB read with AVX2 BLAKE3, the redundant hash costs
-/// ~0.6 ms — measurable in the testdisk huge-file numbers.
+/// walk hash from the tree, which is BLAKE3 of the encoded Blob), so
+/// callers need not recompute BLAKE3 over every read: `storage::get`
+/// already verifies integrity against the walk hash.
 pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
@@ -107,10 +104,10 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
     let encoded_len = bytes.len();
     let t_get = rdtsc();
 
-    // Fast path: in-place blob decoder (saves ~0.9 ms / MB vs full
-    // postcard decode). Falls back to a full decode if the variant
-    // tag isn't `Blob(0)` — typically `Chunked(2)` for files written
-    // via the streaming writer.
+    // Fast path: in-place blob decoder, cheaper than a full postcard
+    // decode. Falls back to a full decode if the variant tag isn't
+    // `Blob(0)` — typically `Chunked(2)` for files written via the
+    // streaming writer.
     let blob = if bytes.first() == Some(&0) {
         super::object::decode_blob_inplace(bytes)
             .map_err(|_| PathError::Corrupt)?
@@ -279,12 +276,12 @@ pub struct GcStats {
 // ── Streaming-write activity (GC race guard) ──────────────────────────
 //
 // A `StreamingWriter` flushes chunk Blobs via `storage::put`, which
-// updates the in-memory B-tree root WITHOUT committing (only `finish`
+// updates the in-memory B-tree root without committing (only `finish`
 // commits, under ROOT_MUTEX). So mid-stream, the flushed chunks are
 // visible to GC's orphan enumeration yet unreachable from any committed
 // root — GC would delete the in-progress download's data. This counter
 // lets GC detect an in-flight stream and back off. Incremented when a
-// writer is constructed, decremented on its Drop (finish OR abort), so
+// writer is constructed, decremented on its Drop (finish or abort), so
 // it's balanced regardless of how the writer ends.
 static ACTIVE_STREAMS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
@@ -310,7 +307,7 @@ fn stream_end()   { ACTIVE_STREAMS.fetch_sub(1, core::sync::atomic::Ordering::Re
 static MUTATIONS_SINCE_GC: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
-/// Mutations to accumulate before the idle trigger runs GC. ~Git's
+/// Mutations to accumulate before the idle trigger runs GC. Like Git's
 /// loose-object threshold, scaled down: enough churn to be worth a sweep,
 /// low enough that orphans never pile up unbounded on an active disk.
 pub const GC_PRESSURE_THRESHOLD: usize = 128;
@@ -352,8 +349,8 @@ fn read_tree_for_gc(hash: &[u8; 32]) -> Result<Option<Vec<TreeEntry>>, ()> {
 /// `FLAG_BLOB` never reach this.
 ///
 /// Returns `false` if the object (manifest) could not be read — its chunks
-/// are then UNKNOWN, so the caller must mark the whole GC walk incomplete and
-/// skip the sweep. A corrupt manifest's chunks are NOT orphans: the live
+/// are then unknown, so the caller must mark the whole GC walk incomplete and
+/// skip the sweep. A corrupt manifest's chunks are not orphans: the live
 /// committed file still references them, so freeing them corrupts the fs.
 #[must_use]
 fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]>) -> bool {
@@ -390,7 +387,7 @@ fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]
 /// Concurrency: holds ROOT_MUTEX so no path-layer mutation runs during
 /// GC. Sweep deletes use the regular `storage::remove` path so each
 /// goes through the journal + 4-phase commit; safe but slow on large
-/// orphan sets. Battle-test (Step 10) decides whether to batch.
+/// orphan sets.
 pub fn gc() -> Result<GcStats, Error> {
     use hashbrown::HashSet;
 
@@ -411,20 +408,20 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let roots = storage::all_root_hashes().map_err(Error::Storage)?;
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
-    // Work-list holds Tree hashes ONLY (roots + Dir entries). File
+    // Work-list holds Tree hashes only (roots + Dir entries). File
     // entries are marked reachable straight from their parent Tree's
     // `kind` + `flags` — so GC never reads a single-Blob file's body
     // (the bulk of the disk). Only Trees and Chunked manifests are read.
     // This is what makes GC cheap enough to run automatically.
     let mut tree_work: alloc::vec::Vec<[u8; 32]> = roots;
 
-    // Whether the reachability walk read EVERY object it needed. If any tree
-    // or manifest came back missing/unreadable/corrupt, the set is INCOMPLETE
-    // and we must NOT sweep: the unread subtree's objects would look like
-    // orphans and we'd free blocks the committed root still references —
-    // turning a localized corruption into an unmountable filesystem (boots to
-    // installer). Leaking orphan blocks until the fs is healthy is the safe
-    // failure mode; deleting live data is not.
+    // Whether the reachability walk read every object it needed. If any tree
+    // or manifest came back missing/unreadable/corrupt, the set is incomplete
+    // and we must not sweep: the unread subtree's objects would look like
+    // orphans and we'd free blocks the committed root still references,
+    // turning a localized corruption into an unmountable filesystem.
+    // Leaking orphan blocks until the fs is healthy is the safe failure
+    // mode; deleting live data is not.
     let mut mark_incomplete = false;
 
     while let Some(hash) = tree_work.pop() {
@@ -435,7 +432,7 @@ pub fn gc() -> Result<GcStats, Error> {
             Ok(Some(e)) => e,
             // A hash we reached from a root/Dir must resolve to a Tree. Missing
             // (Ok(None)), non-Tree, or unreadable (Err) all mean this subtree's
-            // children are UNKNOWN → the mark is incomplete → skip the sweep.
+            // children are unknown → the mark is incomplete → skip the sweep.
             Ok(None) | Err(()) => { mark_incomplete = true; continue; }
         };
         for e in entries {
@@ -443,7 +440,7 @@ pub fn gc() -> Result<GcStats, Error> {
             match e.kind {
                 EntryKind::Dir => tree_work.push(e.hash),
                 EntryKind::File => {
-                    // Mark the file object itself reachable WITHOUT reading it.
+                    // Mark the file object itself reachable without reading it.
                     reachable.insert(e.hash);
                     let chunked = e.flags & super::object::TreeEntry::FLAG_CHUNKED != 0;
                     let known_blob = e.flags & super::object::TreeEntry::FLAG_BLOB != 0;
@@ -554,28 +551,23 @@ pub fn last_gc() -> Option<LastGc> { *LAST_GC.lock() }
 // the whole payload in a single `Vec<u8>` would blow the kernel heap
 // budget — and AES-GCM is one-shot in the audited `aes-gcm` crate, so
 // the encrypt step doubles the residency on top. The streaming writer
-// avoids that: it accumulates an in-RAM chunk buffer (default 16 MiB),
-// flushes it as a regular content-addressed `Blob` once full, and at
-// `finish` emits an `Object::Chunked` manifest pointing at all the
-// chunk hashes. Peak download RAM is therefore one chunk + manifest
-// overhead, independent of total size.
+// avoids that: it accumulates an in-RAM chunk buffer, flushes it as a
+// regular content-addressed `Blob` once full, and at `finish` emits an
+// `Object::Chunked` manifest pointing at all the chunk hashes. Peak RAM
+// is therefore one chunk + manifest overhead, independent of total size.
 //
 // Reads are transparent: `fs::read` detects `Object::Chunked` and
-// stitches the chunks back into one `Vec<u8>` for consumers. A future
-// streaming-reader variant can iterate the manifest without
-// materializing the full payload, but is out of scope here — the
-// write-side fix is what unblocks `http <huge-url> > path` and
-// >100 MB OTA bundles today.
+// stitches the chunks back into one `Vec<u8>` for consumers. Not
+// implemented: a streaming reader that iterates the manifest without
+// materializing the full payload.
 
-/// Default streaming-write chunk size. Kept at 1 MiB because each chunk is
-/// hashed in one shot with `blake3::hash(&chunk)`, and BLAKE3's one-shot path
-/// (`compress_subtree_wide`) recurses divide-and-conquer over the whole buffer
-/// with per-level on-stack arrays. At 16 MiB that recursion (depth ~11) blew
-/// the kernel/task stack → smashed return addresses → wild RIP/RSP crash
-/// (observed on the 16 GB notebook: RSP ran past physical RAM, #PF in
-/// blake3_hash_many). 1 MiB keeps the recursion shallow (~depth 7, a few KB of
-/// stack). Manifest overhead is still negligible (32 B per 1 MiB). Reads stitch
-/// chunks transparently, so existing 16 MiB-chunk objects stay readable.
+/// Default streaming-write chunk size. Each chunk is hashed in one shot
+/// with `blake3::hash(&chunk)`, and BLAKE3's one-shot path
+/// (`compress_subtree_wide`) recurses divide-and-conquer over the whole
+/// buffer with per-level on-stack arrays; much larger chunks overflow the
+/// kernel task stack. 1 MiB keeps the recursion shallow (a few KB of
+/// stack), and manifest overhead stays negligible (32 B per chunk). Reads
+/// stitch chunks of any size, so objects with larger chunks stay readable.
 pub const STREAMING_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Stitch a `Chunked` manifest back into a single `Vec<u8>`. Used by
@@ -601,6 +593,9 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
     Ok(out)
 }
 
+/// Chunks between deferred-batch flushes during a streaming write.
+const STREAM_COMMIT_EVERY: usize = 16;
+
 /// Append-only streaming writer for a single file. Created via
 /// [`open_streaming_write`]; feed it with [`StreamingWriter::write`]
 /// chunks (any size) and call [`StreamingWriter::finish`] when done.
@@ -610,9 +605,6 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
 /// path tree is only updated atomically at `finish`. This is the
 /// failure mode we want: a partial download never appears as a
 /// half-written file.
-/// Chunks between deferred-batch flushes during a streaming write.
-const STREAM_COMMIT_EVERY: usize = 16;
-
 pub struct StreamingWriter {
     path: alloc::string::String,
     chunk_size: usize,
@@ -654,14 +646,11 @@ impl StreamingWriter {
         }
         self.chunk_hashes.push(hash);
         self.written += chunk_len as u64;
-        // Drain the deferred batch every so often. Without this a 249 MB
-        // download runs its ENTIRE length with the bitmap, the object btree
-        // and `pending_old_blocks` uncommitted — and the first unrelated
-        // writer to commit (over WiFi that is wifid's log, constantly) takes
-        // that whole batch with it. Committing here costs one four-phase
-        // flush per `STREAM_COMMIT_EVERY` chunks, which is noise next to the
-        // transfer itself, and it does NOT publish the file: the path tree is
-        // still only touched by `finish`.
+        // Drain the deferred batch every so often. Otherwise a long
+        // download runs its entire length with the bitmap, the object btree
+        // and `pending_old_blocks` uncommitted, and the first unrelated
+        // writer to commit takes that whole batch with it. This does not
+        // publish the file: the path tree is still only touched by `finish`.
         if self.chunk_hashes.len() % STREAM_COMMIT_EVERY == 0 {
             storage::flush_pending()?;
         }
@@ -704,7 +693,7 @@ impl StreamingWriter {
 /// names a Dir, `finish` errors with `AlreadyExists`.
 pub fn open_streaming_write(path: &str) -> StreamingWriter {
     // Mark a stream in flight so GC backs off until `finish`/drop. Done
-    // here (at construction) so BOTH the public wrapper and the direct
+    // here (at construction) so both the public wrapper and the direct
     // 9p caller are covered. Balanced by `Drop`.
     stream_begin();
     StreamingWriter {

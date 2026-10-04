@@ -1,10 +1,9 @@
 //! npkFS storage entry points: mkfs / mount / unmount / put / get / has / remove.
 //!
-//! Step-2 scope: a content-addressed object store. Caller hands in
+//! A content-addressed object store. The caller hands in
 //! `(hash, payload)` where `hash == BLAKE3(payload)`; we encrypt on
 //! disk (if a master key is set), index by hash in the B-tree, and
-//! verify on read. No path layer, no Tree-walker — those land in
-//! Steps 3-4.
+//! verify on read. The path layer lives above this in `fs`/`paths`.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -33,7 +32,7 @@ struct State {
     generation: u64,
     /// B-tree COW old blocks accumulated across uncommitted `put`s.
     /// Drained, journaled, and freed in one shot by `commit_root` —
-    /// turns the per-write cost from 5× 4-phase commits into 1.
+    /// turns the per-write cost from five 4-phase commits into one.
     pending_old_blocks: Vec<u64>,
 }
 
@@ -42,9 +41,8 @@ static FS: Mutex<Option<State>> = Mutex::new(None);
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
 /// Halt with an explicit reinstall message when a legacy npkFS magic
-/// is detected on disk. Mirrors the v1 → v2 break that landed at
-/// v0.83 — no in-place migration was the design then, same story
-/// now for v2 → v3.
+/// is detected on disk. There is no in-place migration between on-disk
+/// format versions.
 fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("");
     kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
@@ -60,16 +58,12 @@ fn halt_for_legacy_disk(version: u8) -> ! {
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 
-/// Halt when the disk holds an npkFS that would not mount. NOTHING has been
-/// written at this point, and nothing will be — that is the whole purpose of
-/// this function.
+/// Halt when the disk holds an npkFS that would not mount. Nothing has been
+/// written at this point, and nothing will be.
 ///
-/// Boot used to answer this situation with `mkfs()`. A hung download followed
-/// by `halt`, one unreadable superblock, a GPT probe that came back empty
-/// because NVMe was not ready yet — each of them ended in a formatted disk
-/// and a setup wizard, which reads from the outside exactly like "the
-/// filesystem broke". It did not break; we overwrote it, and with it every
-/// trace of why the mount failed.
+/// Formatting here instead would turn any transient failure (an unreadable
+/// superblock, a GPT probe before NVMe is ready) into a wiped disk and
+/// destroy every trace of why the mount failed.
 pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
     kprintln!("");
     kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
@@ -92,7 +86,7 @@ pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 
-/// Format the entire disk to npkFS v3. **Destructive**: any pre-v3
+/// Format the entire disk to npkFS v3. Destructive: any pre-v3
 /// data is gone after this call. The boot-time mount guard refuses
 /// older formats with a reinstall message, so this only runs
 /// deliberately (installer / explicit intent).
@@ -120,7 +114,7 @@ pub fn mkfs() -> Result<(), FsError> {
     let mut bmap = Bitmap::new_for_mkfs(total_blocks, bitmap_start, bitmap_count, data_start);
 
     // Empty B-tree: btree_root = 0 means "no root yet"; first put()
-    // allocates a leaf. Same convention as v1.
+    // allocates a leaf.
     let install_salt = crate::csprng::random_256();
     let mut salt_16 = [0u8; 16];
     salt_16.copy_from_slice(&install_salt[..16]);
@@ -166,7 +160,7 @@ pub fn probe_disk() -> Result<sb_io::SbProbe, FsError> {
 }
 
 /// Mount an existing v3 disk. Errors with `NotFormatted` if no v3
-/// superblock validates AND no recognized legacy version is present.
+/// superblock validates and no recognized legacy version is present.
 /// If a legacy (v2) magic is detected the kernel halts with an
 /// explicit reinstall message — there is no in-place migration.
 pub fn mount() -> Result<(), FsError> {
@@ -209,7 +203,7 @@ pub fn mount() -> Result<(), FsError> {
 }
 
 /// Drop in-memory state. Used by the self-test to simulate a remount.
-/// Does **not** flush — caller is responsible for a successful prior commit.
+/// Does not flush; caller is responsible for a successful prior commit.
 pub fn unmount() {
     *FS.lock() = None;
 }
@@ -324,8 +318,8 @@ fn fsck_mark(seen: &mut [u64], dup: &mut [u64], rep: &mut FsckReport, block: u64
 /// Read-only filesystem integrity scan. Walks the committed B-tree, builds a
 /// block-level refcount over every node + every object's data extents +
 /// indirect-chain blocks, and reports:
-///   - `double_alloc`: a block reachable from two places — THE corruption we
-///     keep chasing (data written over a B-tree node / another object),
+///   - `double_alloc`: a block reachable from two places, i.e. data written
+///     over a B-tree node or another object,
 ///   - `out_of_range`: a child/extent pointer past the device end,
 ///   - `free_but_referenced`: a referenced block the allocator thinks is free
 ///     (it will be handed out again → a future double-alloc).
@@ -400,9 +394,9 @@ pub fn self_check() -> Result<FsckReport, FsError> {
 /// Drain accumulated TRIM-pending ranges and issue them to the SSD.
 /// Each `bitmap.free` adds to an in-memory list; this drains it in
 /// one batch (merged + sorted ranges → fewer NVMe DEALLOCATE commands).
-/// Pulled out of the per-commit hot path because synchronous TRIMs
-/// were capping write IOPS; call this from `gc` or a periodic idle
-/// sweep so the SSD's FTL eventually learns which blocks are free.
+/// Kept out of the per-commit hot path because synchronous TRIMs cap
+/// write IOPS; call this from `gc` or a periodic idle sweep so the SSD's
+/// FTL eventually learns which blocks are free.
 pub fn trim() -> Result<(), FsError> {
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
@@ -453,22 +447,16 @@ pub fn current_root() -> Option<[u8; 32]> {
     Some(lock.as_ref()?.sb.root_tree_hash)
 }
 
-/// Atomically flip the superblock to a new root Tree hash AND commit
-/// every accumulated `put` from this batch. One 4-phase commit covers
-/// the SB-flip plus all the Tree/Blob writes, B-tree COW old blocks,
-/// and bitmap+journal updates from the batch. A crash before this
-/// returns leaves the SB on disk pointing at the previous root —
-/// the in-cache uncommitted changes vanish, FS is consistent.
-/// Commit everything `put` has deferred, WITHOUT touching the path tree.
+/// Commit everything `put` has deferred, without touching the path tree.
 ///
-/// `put` defers its commit on the documented assumption of "N puts, then
-/// exactly one `commit_root`" — true for a file write, wildly false for a
-/// streaming download, which does hundreds of puts and commits once at the
-/// very end. Until then the in-memory bitmap, the object btree and
-/// `pending_old_blocks` all run far ahead of the disk, and any UNRELATED
-/// writer that commits in that window takes the whole batch with it.
-/// Bounding the batch keeps the two views close and makes a long download's
-/// progress durable as it goes.
+/// `put` defers its commit assuming "N puts, then exactly one
+/// `commit_root`". That holds for a file write but not for a streaming
+/// download, which does hundreds of puts and commits once at the end.
+/// Until then the in-memory bitmap, the object btree and
+/// `pending_old_blocks` run far ahead of the disk, and any unrelated writer
+/// that commits in that window takes the whole batch with it. Bounding the
+/// batch keeps the two views close and makes a long download's progress
+/// durable as it goes.
 pub fn flush_pending() -> Result<(), FsError> {
     let root = {
         let lock = FS.lock();
@@ -482,6 +470,12 @@ pub fn flush_pending() -> Result<(), FsError> {
     commit_root(root)
 }
 
+/// Atomically flip the superblock to a new root Tree hash and commit
+/// every accumulated `put` from this batch. One 4-phase commit covers
+/// the SB-flip plus all the Tree/Blob writes, B-tree COW old blocks,
+/// and bitmap+journal updates from the batch. A crash before this
+/// returns leaves the SB on disk pointing at the previous root —
+/// the in-cache uncommitted changes vanish, FS is consistent.
 pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
@@ -501,7 +495,7 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
     for &b in &pending {
         fs.journal.record_free(b, 1);
     }
-    // journal_head is set inside commit(), AFTER prepare() advances it.
+    // journal_head is set inside commit(), after prepare() advances it.
     let r = commit(fs, &pending);
     if r.is_ok() {
         // Feed the auto-GC pressure counter (Git `gc --auto` model). Only
@@ -534,12 +528,9 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
-    // Cheap dedup-check FIRST. Content-addressing means equal payload
-    // ⇒ equal hash; if `hash` is already in the btree the rest of this
-    // function is wasted work — blake3-integrity (~0.6 ms / MB) and
-    // AES-GCM encrypt (~1.6 ms / MB) on the same MB we'd then throw
-    // away. Used to live AFTER encrypt, costing 2.2 ms per duplicate
-    // 1 MB write.
+    // Cheap dedup check first. Content addressing means equal payload
+    // ⇒ equal hash; if `hash` is already in the btree, the integrity hash
+    // and encryption below would be wasted work.
     {
         let mut lock = FS.lock();
         let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
@@ -555,14 +546,12 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     }
     let t_hash = rdtsc();
 
-    // Encrypt only if the caller asked AND we have a master key. The
+    // Encrypt only if the caller asked and we have a master key. The
     // result's length (= payload.len() + 16 AEAD tag) is what the read
     // path uses to infer "this object was AEAD-wrapped".
     //
-    // AES-256-GCM via aes-gcm crate. With SSE + AES-NI enabled in
-    // boot.s/trampoline.s, the crate's cpufeatures runtime detects
-    // AES-NI on the N100 and dispatches to the hardware path
-    // (AESENC + PCLMULQDQ for GHASH).
+    // AES-256-GCM via the aes-gcm crate, which detects AES-NI at runtime
+    // and uses the hardware path (AESENC + PCLMULQDQ for GHASH).
     let encrypted = if encrypt {
         crypto::get_master_key().map(|master_key| {
             let obj_key = crypto::derive_object_key(&master_key, hash);
@@ -620,8 +609,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     // bitmap (reclaimed at next gc / not visible to any walk).
     //
     // One `write_extent` per FS extent → one NVMe cmd per extent (or
-    // per `MAX_BLOCKS_PER_CMD` chunk for very large extents). A 1 MB
-    // contiguous extent drops from 256 single-page cmds to ~2 cmds.
+    // per `MAX_BLOCKS_PER_CMD` chunk for very large extents).
     for ext in &all_extents {
         for b in 0..ext.block_count {
             fs.cache.invalidate(ext.start_block + b);
@@ -636,14 +624,11 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
         let raw_end = write_data.len().min(consumed + span);
         let raw_len = raw_end.saturating_sub(consumed);
 
-        // A failed device write must give the blocks BACK. Every other
-        // error path in this function rolls the allocation back (the
-        // DiskFull loop frees, the btree-insert failure calls
-        // rollback_alloc) — this one used to return through `?` and leak
-        // every extent it had just reserved. On a link that aborts
-        // transfers, that leak repeats per retry: a 249 MB asset can
-        // strand its blocks several times over, and the next symptom is
-        // DiskFull on a disk that looks half empty.
+        // A failed device write must give the blocks back, like every
+        // other error path here (the DiskFull loop frees, the btree-insert
+        // failure calls rollback_alloc). Otherwise each retry of an aborted
+        // transfer strands its extents, ending in DiskFull on a disk that
+        // looks half empty.
         let res = if raw_len == span {
             crate::blkdev::write_extent(
                 ext.start_block, ext.block_count, &write_data[consumed..raw_end],
@@ -763,15 +748,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
         all_extents.extend(read_indirect_extents(&mut fs.cache, entry.indirect_block)?);
     }
 
-    // Everything below (NVMe DMA + AES-GCM decrypt, ~10ms/4MB) needs only
-    // the extent list + a couple of sizes — not `fs`. Copy those out and
-    // DROP the global FS lock here so unrelated storage users (Core-0
-    // render reading icons/fonts, worker-core browser save(), gc, any
-    // WASM npk_fs_read) don't serialize behind this read's slow tail. The
-    // object is reachable from the committed btree root we just walked, so
-    // gc (which marks reachable blocks) won't free these extents; the only
-    // residual race — entry removed + gc + realloc inside this window — is
-    // caught by the AES-GCM tag below (→ Corrupt), never a crash/escape.
+    // Everything below (NVMe DMA + AES-GCM decrypt) needs only the extent
+    // list + a couple of sizes, not `fs`. Copy those out and drop the
+    // global FS lock here so unrelated storage users (render reading
+    // icons/fonts, browser saves, gc, WASM npk_fs_read) don't serialize
+    // behind this read's slow tail. The object is reachable from the
+    // committed btree root we just walked, so gc (which marks reachable
+    // blocks) won't free these extents; the only residual race — entry
+    // removed + gc + realloc inside this window — is caught by the AES-GCM
+    // tag below (→ Corrupt), never a crash/escape.
     let disk_size = entry.disk_size;
     let plaintext_size = entry.plaintext_size;
     let extent_list: Vec<(u64, u64)> = all_extents.iter()
@@ -792,10 +777,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     let t_alloc = rdtsc();
 
     // Submit all extents through the multi-extent path so the SSD can
-    // pipeline them in parallel. For a contiguous blob (1 extent) this
-    // matches the old `read_extent` cost; for a fragmented blob (e.g.
-    // 1 MB split into 257 single-block extents after lots of churn)
-    // the parallelism saves seconds-per-MB at the worst.
+    // pipeline them in parallel; this matters for fragmented blobs.
     crate::blkdev::read_multi_extent(&extent_list, &mut staging[..total_bytes])?;
     let t_dma = rdtsc();
 
@@ -823,15 +805,14 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     let t_dec = rdtsc();
     let plaintext = staging;
 
-    // BLAKE3-verify intentionally elided. AES-GCM's tag already
+    // BLAKE3 verify intentionally elided. AES-GCM's tag already
     // authenticates the ciphertext under (key, nonce), and both
     // are derived from `hash` via `derive_object_key` /
     // `derive_nonce`. Tampering anywhere — hash field in the btree
     // entry, ciphertext on disk, AEAD tag — invalidates the tag
     // check above and we return Corrupt then. A fresh BLAKE3 over
     // the plaintext only catches scenarios already covered by the
-    // tag (or BLAKE3 collisions, ~2¹²⁸ unreachable). Removing it
-    // saves ~600 µs per 1 MB read (~25% throughput gain).
+    // tag (or BLAKE3 collisions).
 
     if super::FS_PERF_LOG && total_bytes >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
@@ -893,12 +874,12 @@ pub fn remove(hash: &[u8; 32]) -> Result<(), FsError> {
     fs.sb.object_count = fs.sb.object_count.saturating_sub(1);
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.sb.generation = fs.generation;
-    // journal_head is set inside commit(), AFTER prepare() advances it.
+    // journal_head is set inside commit(), after prepare() advances it.
 
     commit(fs, &old_blocks)?;
 
     // Phase 4: free + invalidate cache for direct, indirect-data, and
-    // indirect-chain blocks. Same staging as v1.
+    // indirect-chain blocks.
     for i in 0..direct_count {
         let ext = &entry.extents[i];
         fs.bitmap.free(ext.start_block, ext.block_count);
@@ -946,20 +927,17 @@ fn rollback_alloc(fs: &mut State, extents: &[Extent], indirect_block: u64) {
 fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // Phase 1: write journal entries with committed=0 (safe to crash).
     fs.journal.prepare(&mut fs.cache)?;
-    // Snapshot head+seq AFTER prepare advanced them — prepare wrote this
+    // Snapshot head+seq after prepare advanced them: prepare wrote this
     // commit's entries at [old_head, head) and bumped `head` past them.
-    // The SB must record the post-prepare head so `replay` scans BACKWARDS
-    // from just past this commit's entries and actually finds them. Setting
-    // journal_head before prepare (the old bug) made the SB point at the
-    // START of this commit, so replay read the previous commit first
-    // (seq < expected → break) and never recovered the latest commit's
-    // frees → freed COW/data blocks leaked after a crash, and the next
-    // mount resumed the journal at a stale head.
+    // The SB must record the post-prepare head so `replay` scans backwards
+    // from just past this commit's entries and finds them. Pointing at the
+    // start of this commit would make replay read the previous commit
+    // first and never recover the latest commit's frees.
     fs.sb.journal_seq = fs.journal.seq();
     fs.sb.journal_head = fs.journal.head();
 
     // Phase 2: persist bitmap + the data/metadata the new superblock
-    // references, with a REAL durability barrier before the SB. `cache.flush()`
+    // references, with a real durability barrier before the SB. `cache.flush()`
     // only pushes bytes into the controller's volatile write cache; on real
     // hardware the SB could otherwise reach NAND before the btree/bitmap/data
     // it points at, and a power-loss there leaves the SB referencing
@@ -974,7 +952,7 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     sb_io::write_next_durable(&mut fs.cache, &mut fs.sb)?;
 
     // Phase 3: mark journal committed. The SB is durable now, so committed=1
-    // can never reach media before it. We deliberately do NOT force a barrier
+    // can never reach media before it. We deliberately do not force a barrier
     // here: if power is lost before this persists, replay simply skips the
     // (still committed=0) entry and the freed COW blocks leak — a benign,
     // gc-reclaimable space leak, never corruption.
@@ -988,14 +966,14 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
         fs.cache.invalidate(*b);
     }
     // TRIM deferred. Each NVMe DEALLOCATE is synchronous (FTL flush)
-    // and a typical fs::write triggers ~5 commits with a few freed
-    // blocks each — running flush_trims here capped write IOPS at ~3.
-    // Freed blocks stay tracked in `trim_pending` (memory only) until
-    // a future idle-task drains them in big batches.
+    // and a typical fs::write triggers several commits with a few freed
+    // blocks each, so trimming here would cap write IOPS. Freed blocks
+    // stay tracked in `trim_pending` (memory only) until an idle task
+    // drains them in big batches.
     Ok(())
 }
 
-// ══ Indirect extent chain (same wire format as v1) ════════════════════
+// ══ Indirect extent chain ═════════════════════════════════════════════
 //
 // Per 4 KB block:
 //   [0..4]   count: u32 (extents in this block)

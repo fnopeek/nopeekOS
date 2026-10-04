@@ -119,10 +119,6 @@ impl BlockCache {
 
     /// Flush all dirty blocks to disk in a single batched submission
     /// (NVMe queue-depth N → 1 disk round-trip instead of N).
-    ///
-    /// Re-enabled with diagnostic kprintlns in `nvme::write_blocks_batch`
-    /// — we're chasing a deadlock that triggered on the second testdisk
-    /// run; the trace will show the exact SQ/CQ state where it sticks.
     pub fn flush(&mut self) -> Result<(), FsError> {
         let mut batch: alloc::vec::Vec<(u64, &[u8; BLOCK_SIZE])> =
             alloc::vec::Vec::new();

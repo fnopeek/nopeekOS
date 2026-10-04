@@ -1,8 +1,6 @@
 //! npkFS — content-addressed filesystem.
 //!
-//! Single flat layer (no `v1/` `v2/` namespacing — those got
-//! consolidated when the v1 path-as-key backend was retired and v2
-//! Git-style trees became the canonical implementation).
+//! Git-style trees of content-addressed objects over a COW B-tree.
 //!
 //! Submodules:
 //!   `object`  — `Blob`/`Tree` wire format (postcard + BLAKE3)
@@ -37,11 +35,10 @@ pub mod fs;
 pub use types::{FsError, BLOCK_SIZE};
 
 /// Per-operation perf-timing logs (`[put]`/`[get]`/`[fs::read]`/
-/// `[fs::write]` with µs breakdowns). Profiling instrumentation for
-/// npkFS throughput-tuning sessions — off by default because a large
-/// streaming download flushes one 16 MiB chunk after another and
-/// each would emit a `[put]` line, drowning the console. Flip to
-/// `true` when actively profiling the FS.
+/// `[fs::write]` with µs breakdowns). Off by default because a large
+/// streaming download flushes one chunk after another and each would
+/// emit a `[put]` line, drowning the console. Flip to `true` when
+/// profiling the FS.
 pub(crate) const FS_PERF_LOG: bool = false;
 
 use alloc::string::String;
@@ -73,15 +70,10 @@ pub fn is_mounted() -> bool { storage::is_mounted() }
 
 /// Make everything durable, then return. For shutdown and reboot.
 ///
-/// `halt` used to power the machine off with `out dx, al` three lines after
-/// printing "Goodbye" — no drain, no cache flush, no device flush. The COW
-/// design is meant to survive exactly that, and mostly it does. But during a
-/// streaming download hundreds of megabytes of allocation, a moved object
-/// btree root and the whole deferred `pending_old_blocks` batch live only in
-/// memory, and pulling the power there has never been tested. Florian reaches
-/// for `halt` precisely when a download has hung — i.e. always in that state.
-///
-/// Draining first costs one four-phase commit and removes the entire question.
+/// The COW design survives a power cut in general, but during a streaming
+/// download a large allocation, a moved object btree root and the whole
+/// deferred `pending_old_blocks` batch live only in memory. Draining first
+/// costs one four-phase commit and removes that window.
 pub fn sync() {
     if !storage::is_mounted() { return; }
     if let Err(e) = storage::flush_pending() {
@@ -116,8 +108,7 @@ pub fn upsert(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], Fs
 /// Read an object. Returns `(plaintext, content_hash)`. The hash is
 /// the walk hash from the tree (BLAKE3 of the encoded Blob); already
 /// verified against the on-disk integrity by `storage::get` before
-/// the bytes are handed back. We don't re-hash the plaintext — that
-/// was a 0.6 ms tax per 1 MB read for no security gain.
+/// the bytes are handed back, so the plaintext is not re-hashed.
 pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
     let path = clean_path(name);
     validate(path)?;
@@ -130,7 +121,7 @@ pub fn fetch(name: &str) -> Result<(Vec<u8>, [u8; 32]), FsError> {
 
 /// Open a streaming writer for `name`. Use this for inputs that don't
 /// fit comfortably in a single `Vec<u8>` (downloads, ISO images, media
-/// blobs). The writer accumulates 16 MiB chunks, encrypt-stores each
+/// blobs). The writer accumulates fixed-size chunks, encrypt-stores each
 /// as its own content-addressed `Blob`, and on `finish` emits an
 /// `Object::Chunked` manifest pointing at every chunk. Peak heap
 /// during a multi-GB write stays at one chunk + manifest overhead.
@@ -187,7 +178,7 @@ pub fn copy(old: &str, new: &str) -> Result<(), FsError> {
 
 /// Flat list of every File in the tree, recursively. Format:
 /// `(slash_path, byte_size, blake3_hash)`. Walks the entire root tree.
-/// Acceptable until callers migrate to per-directory `fs::list(path)`.
+/// Callers that need one directory should use `fs::list(path)`.
 pub fn list() -> Result<Vec<(String, u64, [u8; 32])>, FsError> {
     let mut out = Vec::new();
     walk_recursive(String::new(), &mut out)?;
