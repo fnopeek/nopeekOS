@@ -1227,8 +1227,6 @@ whether a `update` is enough or modules must be `install`-ed too:
 - `module <name>:` — only `install <name>` required
 - `abi+kernel:` — kernel + all SDK-using apps, coordinated release
 - `kernel+module <name>:` — both, because they belong together
-- **Known bug:** `run wifi` on worker core crashes; `driver wifi` on Core 0 works
-  (MMIO `map_page` conflict with 1GB huge pages).
 
 ## Release-Flow Plumbing (mandatory)
 
