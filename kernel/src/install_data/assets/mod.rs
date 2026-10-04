@@ -259,4 +259,17 @@ fn seed_wallpapers() {
             Err(e) => kprintln!("[npk]   FAILED: {} — {:?}", target, e),
         }
     }
+
+    // The first boot shows a chosen picture, not a random one — unless
+    // someone already chose.
+    if crate::config::get("wallpaper").is_none()
+        && WALLPAPERS.iter().any(|a| a.fs_path == INITIAL_WALLPAPER)
+    {
+        crate::config::set("wallpaper",
+            &alloc::format!("home/{}/pictures/wallpapers/{}", user, INITIAL_WALLPAPER));
+    }
 }
+
+/// The wallpaper of a fresh install: the calmest of the set — glass reads
+/// best over it in both themes.
+const INITIAL_WALLPAPER: &str = "ice-cosmic-waves.png";
