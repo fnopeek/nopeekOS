@@ -141,9 +141,9 @@ fn poll_event() -> PollResult {
     }
 }
 
-// Bump allocator — same pattern as drun. Bumped to 512 KB because we
-// now hold the full catalog (every installed app) for the Add-to-dock
-// submenu, and may re-render multiple times per session.
+// Bump allocator — same pattern as drun. 512 KB because it holds the full
+// catalog (every installed app) for the Add-to-dock submenu, and may
+// re-render multiple times per session.
 const HEAP_SIZE: usize = 512 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
@@ -207,26 +207,24 @@ const CELL_RADIUS: u8 = 9;
 const DASH_W_ACTIVE: u16 = 12;
 const DASH_W_RUNNING: u16 = 3;
 const DASH_H: u16 = 2;
-/// Ausgleichsmarke ueber der Kachel — siehe `icon_cell`. Unsichtbar,
-/// belegt aber Platz, genau wie der Laufstrich einer ruhenden Anwendung.
+/// Balancing mark above the tile — see `icon_cell`. Invisible but
+/// space-holding, like the dash of an app that is not running.
 const CELL_LIFT: u16 = 2;
-/// Abstand zwischen den drei Teilen der Zelle. Er steht ZWEIMAL in der
-/// Spalte (Marke|Kachel und Kachel|Strich), deshalb ist er 1 und nicht
-/// `Spacing::Xs`.
+/// Gap between the three parts of the cell. It appears twice in the column
+/// (mark|tile and tile|dash), hence 1 rather than `Spacing::Xs`.
 const CELL_GAP: u16 = 1;
 /// Tile + gap + dash → the cell column's height.
 const DOCK_HEIGHT: i32 = 50;
 const CELL_FOOTPRINT: i32 = 36; // tile + inter-cell gap
-/// Waagrechte Polsterung IM Tray — Platz fuer den Eckbogen der Pille.
-/// Gerechnet, nicht geschaetzt: die engste Stelle verlangt 4,8 px (siehe
-/// `render`), 12 lassen 7,2 px Luft.
+/// Horizontal padding inside the tray — room for the pill's corner arc.
+/// Computed: the tightest spot needs 4.8 px (see `render`), 12 leaves
+/// 7.2 px to spare.
 const TRAY_PAD_X: u16 = 12;
-/// Senkrechte Polsterung. Sie setzt die Tray-Hoehe (40 + 2x4 = 48) und
-/// damit den Pill-Radius (24). Nicht anfassen, ohne die Rechnung in
-/// `render` neu zu machen.
+/// Vertical padding. Sets the tray height (40 + 2x4 = 48) and with it the
+/// pill radius (24). Redo the arithmetic in `render` before changing it.
 const TRAY_PAD_Y: u16 = 4;
-/// Fensterbreite = Zellen + dies. Traegt jetzt auch die zwei mal
-/// `TRAY_PAD_X`, sonst nimmt der Bogen den Zellen ihren Platz weg.
+/// Window width = cells + this. Includes twice `TRAY_PAD_X`, otherwise the
+/// arc takes space from the cells.
 const SIDE_PADDING: i32 = 24 + 2 * TRAY_PAD_X as i32;
 /// Approximate compositor `DOCK_BOTTOM_GAP * scale` (kernel default is 12,
 /// HiDPI scale 2× → 24). Subtracted from the expanded window height so
@@ -265,9 +263,9 @@ struct Dock {
     /// (stable across remove+insert) instead of index.
     moving:     Option<String>,
     /// True for one MouseButton{Left, down} after entering drag-reorder
-    /// mode — the compositor pushes Action(MENU_MOVE) **and** the
-    /// raw left-down for the same physical click, so without this flag
-    /// the down would immediately re-exit the drag we just entered.
+    /// mode — the compositor pushes Action(MENU_MOVE) and the raw left-down
+    /// for the same physical click, so without this flag the down would
+    /// immediately re-exit the drag we just entered.
     suppress_next_press: bool,
     /// Screen height, fetched once at startup. Used to expand the dock
     /// window when a menu is open so the popover has room above the tray
@@ -338,7 +336,7 @@ impl Dock {
         // The tray: a SurfaceElevated pill holding the icons.
         // TRAY_PAD_Y (4 px) top and bottom bumps the Row's intrinsic height
         // from (icon+OnHover-pad) = 40 to a full 48 px → matches DOCK_HEIGHT
-        // in the idle window AND keeps the visible tray the same size when
+        // in the idle window and keeps the visible tray the same size when
         // the menu-expand wraps it in a bottom-anchored Column (whose Spacer
         // would otherwise let the tray collapse to its intrinsic 40 px and
         // make the pill look shorter on right-click).
@@ -348,28 +346,21 @@ impl Dock {
             align:     Align::Center,
             modifiers: alloc::vec![
                 Modifier::Background(Token::SurfaceElevated),
-                // Pill = ganz rund: der Rasterer klemmt den Radius auf
-                // `min(w/2, h/2)`, bei 48 px Hoehe also echte Halbkreise.
+                // Pill = fully round: the rasterizer clamps the radius to
+                // `min(w/2, h/2)`, so at 48 px height true semicircles.
                 Modifier::Rounded(Radius::Pill.as_u8()),
-                // Waagrecht MEHR als senkrecht, und das ist der Punkt.
+                // More padding horizontally than vertically, on purpose.
                 //
-                // Der Eckbogen frisst waagrechten Platz, und am meisten
-                // nicht ganz oben, sondern dort, wo der Bogen der Pille
-                // und der Bogen der Kachel gegeneinander laufen.
-                // Ausgerechnet fuer 48 px Tray und eine 34er Kachel mit
-                // Radius 9: die engste Stelle liegt bei y = 6,4 px und
-                // verlangt **4,8 px**. Mit den 4 px von vorher schnitte
-                // die Pille 0,8 px in die erste und letzte Kachel — beim
-                // Hover-Highlight sichtbar.
+                // The corner arc eats horizontal space, most of all not at the
+                // very top but where the pill's arc and the tile's arc run into
+                // each other. For a 48 px tray and a 34 px tile with radius 9 the
+                // tightest spot is at y = 6.4 px and needs 4.8 px; less and the
+                // pill cuts into the first and last tile, visible on hover.
                 //
-                // Heute stehen dort zufaellig ~13 px, weil die zwei
-                // flexiblen Abstandhalter die Icons zentrieren. Das ist
-                // ein NEBENPRODUKT: wer ein Icon dazupinnt, verbraucht
-                // den Schlupf, und dann schneidet es doch. Also
-                // ausdruecklich 12 px, unabhaengig von der Zentrierung.
-                //
-                // Senkrecht bleiben es 4: die Hoehe bestimmt den
-                // Pill-Radius, und 48 px sind auch DOCK_HEIGHT.
+                // The centring spacers usually leave more slack, but pinning
+                // another icon consumes it — so 12 px explicitly, independent of
+                // the centring. Vertically it stays 4: the height sets the pill
+                // radius, and 48 px is also DOCK_HEIGHT.
                 Modifier::PaddingXY { x: TRAY_PAD_X, y: TRAY_PAD_Y },
             ],
         };
@@ -719,24 +710,21 @@ fn icon_cell(
         RunState::Idle    => prefab::mark(DASH_W_RUNNING, DASH_H, None),
     };
 
-    // Die Kachel haengt ohne Ausgleich ZU HOCH, und der Grund ist der
-    // Laufstrich: unter der Kachel stehen Abstand und Strich, ueber ihr
-    // nichts. Gemessen in der 48 px hohen Ablage waren das 9 px ueber dem
-    // Symbol und 15 darunter — die Differenz ist genau Abstand + Strich.
-    // Bei einer Anwendung, die NICHT laeuft, ist der Strich unsichtbar
-    // (aber platzhaltend), und dann sieht man die 15 als leere Flaeche.
+    // Without balancing, the tile sits too high: below it are the gap
+    // and the dash, above it nothing. For an app that is not running
+    // the dash is invisible but space-holding, so the gap shows as
+    // empty space under the icon.
     //
-    // Ausgeglichen wird mit einer ebenso unsichtbaren Marke oben. Die
-    // beiden Zahlen sind ausgerechnet und nicht gesetzt: die Spalte muss
-    // bei 40 bleiben (sonst waechst die Ablage und mit ihr der
-    // Pill-Radius), und der Abstand zaehlt ZWEIMAL, weil er zwischen
-    // Marke und Kachel ebenso steht wie zwischen Kachel und Strich —
+    // An equally invisible mark on top balances it. The column must
+    // stay at 40 (otherwise the tray grows and with it the pill
+    // radius), and the gap counts twice — between mark and tile as
+    // well as between tile and dash —
     //
-    //     M + 2*S + 34 + 2 = 40   und   Symbol mittig
+    //     M + 2*S + 34 + 2 = 40   with the icon centred
     //
-    // hat genau eine ganzzahlige Loesung: M = 2, S = 1. Ergebnis 12 px
-    // ueber dem Symbol und 12 darunter, die Hover-Kachel ebenfalls
-    // mittig (7/7), und der Strich bleibt auf demselben Pixel wie vorher.
+    // has exactly one integer solution: M = 2, S = 1. That gives
+    // 12 px above and below the icon and a centred hover tile, with
+    // the dash on the same pixel.
     Widget::Column {
         children:  alloc::vec![prefab::mark(1, CELL_LIFT, None), tile, dash],
         spacing:   CELL_GAP,
@@ -878,14 +866,12 @@ pub extern "C" fn _start() {
                     alloc_reset(persistent_mark);
                     dock.commit_tree();
                 }
-                // **Then wait to be told.** Until 0.7.0 the dock looked
-                // every 16 ms — 60 times a second — whether anything had
-                // changed. The kernel now wakes it on an event (hover,
-                // click) or a window change (`WAIT_STATE`, the compositor's
-                // fingerprint after each frame). No deadline: an indicator
-                // that goes stale means a change nobody reported, and that
-                // must show, not be papered over by a timer.
-                // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+                // Then wait to be told. The kernel wakes the dock on an event
+                // (hover, click) or a window change (`WAIT_STATE`, the
+                // compositor's fingerprint after each frame). No deadline: an
+                // indicator that goes stale means a change nobody reported, and
+                // that must show, not be papered over by a timer.
+                // docs/plan/CORES_AND_EVENTS.md.
                 const WAIT_INPUT: i32 = 1;
                 const WAIT_STATE: i32 = 32;
                 unsafe { let _ = npk_wait(WAIT_INPUT | WAIT_STATE, -1); }
