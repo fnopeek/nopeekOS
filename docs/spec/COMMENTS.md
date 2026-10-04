@@ -68,7 +68,8 @@ history were deleted?** If it only makes sense as history, it is history.
 
 ## Tooling
 
-`tools/comments.py` (Rust sources, `tools/wasm/vendor/` excluded):
+`tools/comments.py` (Rust, Python, shell and TOML; `tools/wasm/vendor/` excluded;
+for shell and TOML only full-line `#` comments, for Python also docstrings):
 
 - `lint --staged` — runs in the pre-commit hook (`tools/hooks/pre-commit`);
   fails on comment blocks touched by the commit that break these rules.

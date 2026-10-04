@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Comment tooling for the Rust sources. Rules: docs/spec/COMMENTS.md.
+"""Comment tooling for the sources. Rules: docs/spec/COMMENTS.md.
 
     comments.py archive OUT_DIR       dump every comment block, per source file
     comments.py audit [--md FILE]     per-file counts of rule violations
@@ -7,16 +7,22 @@
     comments.py lint [--staged | --rev REV] [--warn]
                                       check comment blocks touched by a diff
 
-Scope: every tracked *.rs file outside EXCLUDE.
+Scope: every tracked *.rs, *.py, *.sh and *.toml file outside EXCLUDE.
+Rust: all comments. Python: `#` comments and docstrings. Shell and TOML:
+full-line `#` comments (a trailing `#` cannot be told from shell syntax).
 """
 
+import ast
+import io
 import os
 import re
+import tokenize
 import subprocess
 import sys
 from dataclasses import dataclass, field
 
 EXCLUDE = ("tools/wasm/vendor/",)
+PATTERNS = ("*.rs", "*.py", "*.sh", "*.toml")
 
 # ---------------------------------------------------------------- lexer
 
@@ -141,8 +147,68 @@ def lex(src):
     return out
 
 
+def lex_hash(src):
+    """Full-line `#` comments of a shell script or TOML file; the code stream
+    is every other line, whitespace-normalized. Line 1 `#!` is code."""
+    out = Lexed()
+    for i, ln in enumerate(src.splitlines(), 1):
+        st = ln.lstrip()
+        if st.startswith("#") and not (i == 1 and st.startswith("#!")):
+            out.comments.append(Comment(i, i, ln.strip(), False))
+        else:
+            out.tokens.extend(ln.split())
+    return out
+
+
+def lex_py(src):
+    """`#` comments and docstrings of a Python file. The code stream is the
+    AST with every docstring blanked, so it compares equal exactly when only
+    comments and docstrings changed."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return lex_hash(src)
+    out = Lexed()
+    lines = src.splitlines()
+    try:
+        for t in tokenize.generate_tokens(io.StringIO(src).readline):
+            if t.type == tokenize.COMMENT:
+                (r, c) = t.start
+                if r == 1 and t.string.startswith("#!"):
+                    continue
+                trailing = bool(lines[r - 1][:c].strip())
+                out.comments.append(Comment(r, r, t.string, trailing))
+    except (tokenize.TokenError, IndentationError):
+        return lex_hash(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+                    and isinstance(b[0].value.value, str):
+                e = b[0]
+                out.comments.append(Comment(e.lineno, e.end_lineno,
+                                            "\n".join(lines[e.lineno - 1:e.end_lineno]), False))
+                e.value.value = ""
+    out.comments.sort(key=lambda c: c.start)
+    out.tokens = [ast.dump(tree)]
+    return out
+
+
+def lex_for(path, src):
+    if path.endswith(".rs"):
+        return lex(src)
+    if path.endswith(".py"):
+        return lex_py(src)
+    return lex_hash(src)
+
+
+def _line_comment(text):
+    t = text.lstrip()
+    return t.startswith("//") or t.startswith("#")
+
+
 def blocks(lexed, src_lines):
-    """Merge adjacent full-line `//` comments into blocks.
+    """Merge adjacent full-line `//` or `#` comments into blocks.
 
     Returns (start, end, text, context) where context is the code line the
     block documents (the next code line, or its own line if trailing)."""
@@ -150,7 +216,7 @@ def blocks(lexed, src_lines):
     cur = None
     for c in lexed.comments:
         if (cur and not c.trailing and not cur[3] and c.start == cur[1] + 1
-                and c.text.lstrip().startswith("//") and cur[2].lstrip().startswith("//")):
+                and _line_comment(c.text) and _line_comment(cur[2])):
             cur = (cur[0], c.end, cur[2] + "\n" + c.text, False)
             continue
         if cur:
@@ -167,7 +233,7 @@ def blocks(lexed, src_lines):
         else:
             for k in range(end, min(end + 40, len(src_lines))):
                 s = src_lines[k].strip()
-                if s and not s.startswith("//") and not s.startswith("*") and not s.startswith("/*"):
+                if s and not s.startswith(("//", "*", "/*", "#")):
                     ctx = s
                     break
         out.append((start, end, text, ctx.strip()[:120]))
@@ -176,8 +242,8 @@ def blocks(lexed, src_lines):
 
 def body(text):
     """Comment text without markers."""
-    t = re.sub(r"^\s*(//[/!]?|/\*[*!]?|\*/|\*)", "", text, flags=re.M)
-    return t.replace("*/", "")
+    t = re.sub(r"^\s*(//[/!]?|/\*[*!]?|\*/|\*|#+)", "", text, flags=re.M)
+    return t.replace("*/", "").replace('"""', "").replace("\'\'\'", "")
 
 # ---------------------------------------------------------------- rules
 
@@ -252,7 +318,7 @@ def git(*args, check=True):
 
 
 def tracked():
-    return [f for f in git("ls-files", "*.rs").split()
+    return [f for f in git("ls-files", *PATTERNS).split()
             if not f.startswith(EXCLUDE)]
 
 
@@ -275,7 +341,7 @@ def cmd_archive(out_dir):
         src = show("HEAD", path)
         if src is None:
             continue
-        bl = blocks(lex(src), src.splitlines())
+        bl = blocks(lex_for(path, src), src.splitlines())
         if not bl:
             continue
         dst = os.path.join(out_dir, path + ".md")
@@ -297,7 +363,7 @@ def audit_rows():
         lines = src.splitlines()
         cl = 0
         counts = {}
-        for start, end, text, _ in blocks(lex(src), lines):
+        for start, end, text, _ in blocks(lex_for(path, src), lines):
             n = end - start + 1
             cl += n
             for v in violations(text):
@@ -362,7 +428,7 @@ def cmd_audit(md):
 
 
 def cmd_verify(rev):
-    changed = [p for p in git("diff", "--name-only", rev, "--", "*.rs").split()
+    changed = [p for p in git("diff", "--name-only", rev, "--", *PATTERNS).split()
                if not p.startswith(EXCLUDE)]
     bad = 0
     for path in changed:
@@ -371,7 +437,7 @@ def cmd_verify(rev):
             print(f"ADDED/REMOVED  {path}")
             bad += 1
             continue
-        a, b = lex(old).tokens, lex(read(path)).tokens
+        a, b = lex_for(path, old).tokens, lex_for(path, read(path)).tokens
         if a != b:
             k = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             print(f"CODE CHANGED   {path}: token {k}: {a[k:k+6]} -> {b[k:k+6]}")
@@ -384,7 +450,7 @@ def cmd_verify(rev):
 def added_lines(diff_args):
     out = {}
     path = None
-    for ln in git("diff", "-U0", "--diff-filter=AM", *diff_args, "--", "*.rs").splitlines():
+    for ln in git("diff", "-U0", "--diff-filter=AM", *diff_args, "--", *PATTERNS).splitlines():
         if ln.startswith("+++ "):
             p = ln[4:]
             path = p[2:] if p.startswith("b/") else None
@@ -404,7 +470,7 @@ def cmd_lint(staged, rev, warn):
         src = show("", path) if staged else read(path)
         if src is None:
             continue
-        for start, end, text, ctx in blocks(lex(src), src.splitlines()):
+        for start, end, text, ctx in blocks(lex_for(path, src), src.splitlines()):
             if not any(start <= l <= end for l in lines):
                 continue
             v = [k for k in violations(text) if k not in INFO]
