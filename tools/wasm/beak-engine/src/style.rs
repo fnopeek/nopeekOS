@@ -1,17 +1,14 @@
-//! style.rs — computed style + the UA default stylesheet, as data.
+//! Computed style and the UA default stylesheet, as data.
 //!
-//! docs/spec/CONFORMANCE.md's rule: be *standard-shaped* from the start. Slice-0 baked
-//! per-tag pixel sizes into the layout code; this replaces that with a real
-//! cascade seam:
+//! The cascade, in order:
 //!
 //! ```text
 //!   inherited(parent) → UA sheet(tag) → inline style="…"  → ComputedStyle
 //! ```
 //!
-//! Author `<style>`/linked CSS (selectors, specificity) slot in *between* the
-//! UA sheet and inline styles later — the pipeline shape is already correct.
-//! Colours resolve against the active `Theme` so pages follow light/dark like
-//! the rest of the UI (until pages set their own `color`, which we honor).
+//! Author stylesheets (selectors, specificity) slot in between the UA sheet
+//! and inline styles. UA colours resolve against the active `Theme`, so pages
+//! that set no `color` of their own follow light/dark like the rest of the UI.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -28,22 +25,20 @@ pub enum Display {
     None,
     Block,
     Inline,
-    /// `display: contents` — the element generates NO box at all; its children
-    /// lay out as if they were the parent's (css-display-3 §3.1). Kept as its
-    /// own value rather than resolved away in the cascade because which box
-    /// the CHILDREN need decides how the parent's flow takes them: all-inline
-    /// children join the line box being built, a block-level one gets a
-    /// transparent block. `resolve` has already stripped every property that
-    /// only describes a box, so neither choice can paint or move anything.
+    /// `display: contents`: the element generates no box; its children lay out
+    /// as if they were the parent's (css-display-3 §3.1). Kept as its own value
+    /// rather than resolved away in the cascade because the children decide how
+    /// the parent's flow takes them: all-inline children join the current line
+    /// box, a block-level one gets a transparent block. `resolve` has already
+    /// stripped every property that only describes a box, so neither choice can
+    /// paint or move anything.
     Contents,
     /// `display: inline-block` — a block box inside, an atomic inline box
     /// outside: it takes part in a line box like an image, but lays its own
     /// content out with the full block box model.
     InlineBlock,
-    /// `display: inline-flex` — innen ein Flex-Container, aussen ein atomarer
-    /// Inline-Kasten. Bis 0.62.0 wurde es wie `flex` behandelt, also
-    /// block-artig: eine `.btn-group` legte sich damit ueber die ganze Breite
-    /// statt sich auf ihre Knoepfe zu schrumpfen.
+    /// `display: inline-flex`: a flex container inside, an atomic inline box
+    /// outside, so it shrinks to its items instead of taking the full width.
     InlineFlex,
     ListItem,
     /// `<table>` — establishes the (simplified) table formatting context in
@@ -53,10 +48,10 @@ pub enum Display {
     Flex,
     /// `display: grid` — grid formatting context (explicit columns + auto rows).
     Grid,
-    /// `display: table-caption` — a `<caption>` box by any other name. Sized to
+    /// `display: table-caption`: a `<caption>` box by any other name. Sized to
     /// the finished table rather than sizing it, so it must be recognised or a
-    /// long caption widens the table it describes (MediaWiki's image thumbs are
-    /// exactly this: `figure{display:table}` + `figcaption{display:table-caption}`).
+    /// long caption widens the table it describes (common pattern:
+    /// `figure{display:table}` + `figcaption{display:table-caption}`).
     TableCaption,
     /// `display: table-row` — a row inside a (CSS) table. Laid by `layout_table`.
     TableRow,
@@ -97,7 +92,7 @@ pub enum TextAlign {
     Justify,
 }
 
-/// CSS `line-height`. A unitless number inherits AS a number (each descendant
+/// CSS `line-height`. A unitless number inherits as a number (each descendant
 /// resolves it against its own font-size); a length/percentage inherits as the
 /// already-computed px. Keeping the two apart is what makes `body{line-height:
 /// 1.5}` scale a nested heading instead of squashing it.
@@ -162,8 +157,7 @@ impl ListStyle {
         matches!(self, ListStyle::Disc | ListStyle::Circle | ListStyle::Square)
     }
     /// A disclosure triangle. Drawn as a shape, not as a glyph: the subsetted
-    /// Inter faces carry no U+25B8/U+25BE (`assets/subset.sh` keeps
-    /// U+0000-2E7F, and Inter simply has no small triangles in it).
+    /// Inter faces carry no U+25B8/U+25BE.
     pub fn is_disclosure(self) -> bool {
         matches!(self, ListStyle::DisclosureClosed | ListStyle::DisclosureOpen)
     }
@@ -276,10 +270,10 @@ pub enum Justify {
 }
 
 /// `overflow-x` / `overflow-y`. Kept as the keyword rather than a pair of
-/// booleans because two different questions are asked of it and they do not
-/// agree: whether the box CLIPS its paint (`hidden`/`clip`), and whether it is
-/// a scroll container (`hidden`/`scroll`/`auto` — `clip` is not one, which is
-/// exactly what stops it zeroing a flex item's automatic minimum size).
+/// booleans because two questions are asked of it and they do not agree:
+/// whether the box clips its paint (`hidden`/`clip`), and whether it is a
+/// scroll container (`hidden`/`scroll`/`auto`; `clip` is not one, which is
+/// what keeps it from zeroing a flex item's automatic minimum size).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Overflow {
     Visible,
@@ -291,7 +285,7 @@ pub enum Overflow {
 
 impl Overflow {
     /// Paint outside the padding box is cut away. `auto`/`scroll` deliberately
-    /// do NOT: without in-page scroll containers, clipping there would hide
+    /// do not clip: without in-page scroll containers, clipping there would hide
     /// content the user is meant to be able to reach.
     pub fn clips(self) -> bool {
         matches!(self, Overflow::Hidden | Overflow::Clip)
@@ -303,11 +297,10 @@ impl Overflow {
     }
 }
 
-/// `object-fit` (css-images-3 §5.5) — how a replaced element's own pixels are
+/// `object-fit` (css-images-3 §5.5): how a replaced element's pixels are
 /// scaled into the content box the layout gave it. Purely a paint decision:
-/// the box keeps the size `width`/`height` resolved either way, only the
-/// picture inside it moves. `Fill` is the initial value and is the stretch
-/// every `<img>` got before this existed.
+/// the box keeps the size `width`/`height` resolved, only the picture inside
+/// moves. `Fill` is the initial value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ObjectFit {
     Fill,
@@ -318,9 +311,9 @@ pub enum ObjectFit {
 }
 
 /// Which of a box's three nested rectangles a background is measured against:
-/// `background-clip` says where it is PAINTED, `background-origin` where the
-/// image is positioned from. Defaults differ — clip is the border box, origin
-/// the padding box — so one enum with two fields, not one shared setting.
+/// `background-clip` says where it is painted, `background-origin` where the
+/// image is positioned from. Defaults differ (clip is the border box, origin
+/// the padding box), so one enum with two fields, not one shared setting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BoxEdge {
     Border,
@@ -329,7 +322,7 @@ pub enum BoxEdge {
 }
 
 impl BoxEdge {
-    /// Shrink a BORDER box to this edge. Returns `(x, y, w, h)`.
+    /// Shrink a border box to this edge. Returns `(x, y, w, h)`.
     pub fn shrink(self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
         let (mut l, mut t, mut r, mut b) = match self {
             BoxEdge::Border => return (x, y, w, h),
@@ -351,10 +344,10 @@ impl BoxEdge {
     }
 }
 
-/// `align-content` — how a multi-line flex container packs its LINES (and a
-/// grid its row tracks) in whatever cross space is left over. The six
-/// distributions are `Justify`'s; `stretch` belongs to this property alone and
-/// is its initial value, which is why it is not folded into that enum.
+/// `align-content`: how a multi-line flex container packs its lines (and a
+/// grid its row tracks) in the leftover cross space. The six distributions
+/// are `Justify`'s; `stretch` belongs to this property alone and is its
+/// initial value, which is why it is not folded into that enum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ContentAlign {
     Stretch,
@@ -384,21 +377,21 @@ pub enum FlexBasis {
 }
 
 /// One edge of a box's border: its used width (px) and colour. A side paints
-/// only when `width > 0` AND `color` is set. The four sides are independent
+/// only when `width > 0` and `color` is set. The four sides are independent
 /// (`border-top`/`-right`/… may differ).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BorderSide {
-    /// The USED width — what layout and paint read. It is the specified width
-    /// only while a style is in effect, and 0 otherwise.
+    /// The used width, which layout and paint read. It equals the specified
+    /// width only while a style is in effect, and is 0 otherwise.
     pub width: f32,
     /// `None` means `currentColor` — the initial value, and still unresolved.
     /// `finish_borders` turns it into the element's own `color` once the whole
     /// cascade has run, so a later `color` declaration still reaches it.
     pub color: Option<Rgba>,
-    /// `border-style: hidden`. Paints exactly like `none` on its own box, but
-    /// in a collapsed table it is not the same thing: `hidden` SUPPRESSES the
-    /// grid line it meets, beating every other border there (CSS2.1 §17.6.2
-    /// rule 1), while `none` is merely the weakest candidate.
+    /// `border-style: hidden`. Paints like `none` on its own box, but in a
+    /// collapsed table `hidden` suppresses the grid line it meets, beating every
+    /// other border there (CSS2.1 §17.6.2 rule 1), while `none` is merely the
+    /// weakest candidate.
     pub hidden: bool,
     /// The specified `border-width`, kept apart from the used one. The two
     /// halves arrive in either order and neither implies the other: a width
@@ -406,21 +399,21 @@ pub struct BorderSide {
     pub spec_width: f32,
     /// A `border-style` other than `none`/`hidden` is in effect.
     pub styled: bool,
-    /// `border-color: transparent` — a VALUE, not an absence. The side keeps
-    /// its width and paints nothing, which differs from both a colour and from
+    /// `border-color: transparent`: a value, not an absence. The side keeps its
+    /// width and paints nothing, which differs from both a colour and from
     /// leaving the property unset (that means `currentColor`).
     pub see_through: bool,
     /// A width or style declaration reached this side. `border: none` is a
-    /// DECLARATION, and it computes to the same used width as a side nobody
-    /// touched — only this bit tells them apart. It matters where the UA
-    /// supplies a frame of its own: a form control's, which the page then
-    /// suppresses (`paint_control`).
+    /// declaration and computes to the same used width as an untouched side;
+    /// only this bit tells them apart. It matters where the UA supplies a frame
+    /// of its own (a form control's), which the page may suppress
+    /// (`paint_control`).
     pub specified: bool,
 }
 
-/// Inter's x-height and "0" advance as a fraction of the em, measured at
-/// size 100 (55.0 and 63.09). `parse_length` has no font to ask — it sees only
-/// `Units` — so the metrics come here as constants instead of being guessed.
+/// Inter's x-height and "0" advance as a fraction of the em (55.0 and 63.09
+/// at size 100). `parse_length` has no font to ask, only `Units`, so the
+/// metrics are constants here.
 pub const EX_PER_EM: f32 = 0.55;
 pub const CH_PER_EM: f32 = 0.63;
 
@@ -445,12 +438,10 @@ impl BorderSide {
         self.specified = true;
         self.sync();
     }
-    /// Apply one `border-color` token, reporting whether it was one. A page
-    /// that hides a button's frame writes `border-color: transparent`; treating
-    /// that as "no colour parsed" drops the declaration and leaves the frame
-    /// standing — which is how Wikipedia's icon buttons came out as empty
-    /// rectangles. `rgba(0,0,0,0)` says the same thing and must land here too:
-    /// it is how DuckDuckGo reserves the hover frame around every result.
+    /// Apply one `border-color` token, reporting whether it was one.
+    /// `border-color: transparent` (or `rgba(0,0,0,0)`) must land here as a
+    /// value; treating it as "no colour parsed" would drop the declaration and
+    /// leave a frame the page meant to hide.
     fn set_color(&mut self, tok: &str, theme: &Theme) -> bool {
         match parse_color_val(tok, theme) {
             Some(ColorVal::Transparent) => {
@@ -461,10 +452,10 @@ impl BorderSide {
                 self.color = Some(c);
                 self.see_through = false;
             }
-            // A side with no colour already MEANS `currentcolor` — that is
-            // its initial value, and `finish_borders` fills it in from the
-            // element's own `color` after the whole cascade has run. So the
-            // deferral this keyword needs is the state the field starts in.
+            // A side with no colour already means `currentcolor`: that is its initial
+            // value, and `finish_borders` fills it in from the element's own `color`
+            // after the cascade has run. So the deferral this keyword needs is the
+            // state the field starts in.
             Some(ColorVal::CurrentColor) => {
                 self.color = None;
                 self.see_through = false;
@@ -474,16 +465,16 @@ impl BorderSide {
         true
     }
 
-    /// Take only the WIDTH half from another side — `border-top-width:
-    /// inherit` must not drag the style or colour along with it.
+    /// Take only the width half from another side: `border-top-width: inherit`
+    /// must not drag the style or colour along with it.
     fn copy_width(&mut self, from: &BorderSide) {
         self.spec_width = from.spec_width;
         self.specified = true;
         self.sync();
     }
 
-    /// Take only the STYLE half. `styled` decides the used width, so `sync`
-    /// has to run after it.
+    /// Take only the style half. `styled` decides the used width, so `sync` has
+    /// to run after it.
     fn copy_style(&mut self, from: &BorderSide) {
         self.styled = from.styled;
         self.hidden = from.hidden;
@@ -491,8 +482,8 @@ impl BorderSide {
         self.sync();
     }
 
-    /// Take only the COLOUR half, `transparent` included — that is carried by
-    /// `see_through`, not by the colour being absent.
+    /// Take only the colour half, `transparent` included (carried by
+    /// `see_through`, not by the colour being absent).
     fn copy_color(&mut self, from: &BorderSide) {
         self.color = from.color;
         self.see_through = from.see_through;
@@ -540,10 +531,9 @@ pub enum Len {
     /// `calc()` in affine form `pct% of basis + px` — calc is linear in the
     /// percentage basis, so any mix of `%`/px/em resolves to (pct, px).
     Calc { pct: f32, px: f32 },
-    /// `min-content` / `max-content` / `fit-content`: a size the CONTENT
-    /// decides, not the containing block. Which of the three it is only
-    /// matters on the inline axis; on the block axis all three are the
-    /// content height.
+    /// `min-content` / `max-content` / `fit-content`: a size the content decides,
+    /// not the containing block. Which of the three only matters on the inline
+    /// axis; on the block axis all three are the content height.
     Intrinsic(Intrinsic),
 }
 
@@ -583,8 +573,8 @@ impl Len {
     }
 
     /// `auto` in the sense that matters to sizing: no length from the parent.
-    /// An intrinsic keyword is NOT auto for stretching — that is the whole
-    /// difference — so callers that stretch must ask `intrinsic()` too.
+    /// An intrinsic keyword is not auto for stretching, so callers that stretch
+    /// must ask `intrinsic()` too.
     pub fn is_auto(self) -> bool {
         matches!(self, Len::Auto)
     }
@@ -615,74 +605,62 @@ pub enum BgSize {
     Fixed(Option<Len>, Option<Len>),
 }
 
-/// Ein Farbstopp eines Verlaufs.
+/// A colour stop of a gradient.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct GradStop {
     pub color: Rgba,
-    /// Lage auf der Achse. `px` sagt, in welcher Einheit: als Anteil 0..1,
-    /// oder absolut in px. `NaN` heisst „nicht angegeben" — die Luecken
-    /// werden gleichmaessig gefuellt, wie es die Spezifikation vorschreibt.
+    /// Position on the gradient line. `px` says which unit: a fraction 0..1 or
+    /// absolute px. `NaN` means "not given"; gaps are filled evenly, as the spec
+    /// requires.
     ///
-    /// Eine px-Lage KANN hier nicht in einen Anteil umgerechnet werden: sie
-    /// misst gegen die Verlaufsachse, und deren Laenge kennt erst der Kasten.
-    /// 14 von 86 gesetzten Stopps im Messkorpus sind px — sie als „nicht
-    /// angegeben" zu behandeln hiesse, sie still gleichmaessig zu verteilen.
+    /// A px position cannot be turned into a fraction here: it measures against
+    /// the gradient line, whose length only the box knows.
     pub pos: f32,
     pub px: bool,
-    /// `currentcolor`. Sie steht beim Parsen noch nicht fest — die Farbe des
-    /// Elements wird erst aufgeloest, wenn der Kasten gemalt wird. Kostet
-    /// nichts: das Byte liegt in der Auffuellung neben `px`.
+    /// `currentcolor`. Not known at parse time; the element's colour is resolved
+    /// when the box is painted.
     pub cur: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GradKind { Linear, Radial }
 
-/// Wie viele Farbstopps ein Verlauf tragen darf.
+/// Maximum number of colour stops a gradient may carry.
 ///
-/// **Ausgezaehlt, nicht geraten**: ueber 23 echte Stilblaetter (Fritzbox +
-/// der Messkorpus) haben 109 Verlaeufe zwei Stopps, 31 drei, 7 vier, zwei
-/// sechs und zwei zehn — dazwischen liegt nichts. Sechs deckt also genau so
-/// viel wie acht, und die beiden Ausreisser sind Tailwind-MASKEN, die wir
-/// ohnehin nicht malen.
-///
-/// Der Platz ist der Grund fuer die Sparsamkeit: der Verlauf liegt in
-/// `BgLayer`, `BgLayer` zweimal in `ComputedStyle` (Hintergrund und Maske),
-/// und `ComputedStyle` ist die heisseste Struktur des Motors. Gemessen:
-/// 1312 B ohne Verlaeufe, 1472 B mit sechs Stopps, 1520 B mit acht.
+/// Real stylesheets use two to four, occasionally six or ten. The limit is
+/// kept small because the gradient lives in `BgLayer`, which appears twice in
+/// `ComputedStyle` (background and mask), the hottest structure in the engine.
 pub const MAX_STOPS: usize = 6;
 
-/// `Gradient::corner`: keine Ecke, oder eine der vier.
+/// `Gradient::corner`: no corner, or one of the four.
 pub const CORNER_NONE: u8 = 0;
 pub const CORNER_TR: u8 = 1;
 pub const CORNER_BR: u8 = 2;
 pub const CORNER_BL: u8 = 3;
 pub const CORNER_TL: u8 = 4;
 
-/// Ein Farbverlauf als Hintergrund.
+/// A colour gradient as a background.
 ///
-/// **Warum er IM Stil liegt und nicht in einer Tabelle daneben.** Ein
-/// `url()`-Hintergrund traegt nur einen Schluessel, weil die Bytes anderswo
-/// liegen; ein Verlauf hat keine Bytes. Ein Index in eine Blatt-Tabelle ginge
-/// nicht: `var()` wird beim GEBRAUCH aufgeloest, der Text am Blatt ist also
-/// ein anderer als der, den die Kaskade sieht — und genau so schreibt die
-/// Fritzbox ihren Kopf (`linear-gradient(90deg, var(--blue-100), …)`).
+/// It lives in the style rather than in a side table: a `url()` background
+/// carries only a key because its bytes live elsewhere, but a gradient has no
+/// bytes. An index into a stylesheet table would not work either, because
+/// `var()` is resolved on use, so the sheet text differs from what the
+/// cascade sees.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Gradient {
     pub kind: GradKind,
-    /// Anzahl gueltiger Stopps. 0 heisst: kein Verlauf.
+    /// Number of valid stops. 0 means no gradient.
     pub n: u8,
     pub repeating: bool,
-    /// Nur radial: `circle` statt der Vorgabe `ellipse`. Ein Kreis hat EINEN
-    /// Radius, eine Ellipse zwei — auf einem breiten Kasten sind das zwei
-    /// deutlich verschiedene Bilder. Das Byte liegt in der Auffuellung.
+    /// Radial only: `circle` instead of the default `ellipse`. A circle has one
+    /// radius, an ellipse two; on a wide box they are different images.
     pub circle: bool,
-    /// `to <ecke>`, wenn eine angegeben war — `CORNER_NONE` sonst. Der
-    /// Winkel dazu steht erst am Kasten fest; `angle` traegt bis dahin die
-    /// 45-Grad-Naeherung.
+    /// `to <corner>` if one was given, `CORNER_NONE` otherwise. The angle for it
+    /// is only known at the box; until then `angle` carries the 45-degree
+    /// approximation.
     pub corner: u8,
-    /// Grad im Uhrzeigersinn von „nach oben" — die Zaehlweise von CSS.
-    /// `to bottom` ist 180, `to right` ist 90.
+    /// Degrees clockwise from "up", as CSS counts. `to bottom` is 180, `to right`
+    /// is 90.
     pub angle: f32,
     pub stops: [GradStop; MAX_STOPS],
 }
@@ -700,12 +678,11 @@ impl Gradient {
     pub fn is_some(&self) -> bool { self.n >= 2 }
     pub fn stops(&self) -> &[GradStop] { &self.stops[..self.n as usize] }
 
-    /// Der Winkel der Achse an einem `w` x `h` grossen Kasten.
+    /// The angle of the gradient line on a `w` x `h` box.
     ///
-    /// Fuer alles ausser einer Ecke ist das schlicht `angle`. Fuer eine Ecke
-    /// liegt die Achse so, dass ihre Senkrechte durch die Mitte die beiden
-    /// Nachbarecken trifft (css-images-3 §3.4.1) — das haengt am
-    /// Seitenverhaeltnis, nicht am Schluesselwort.
+    /// For anything but a corner this is `angle`. For a corner the line lies so
+    /// that its perpendicular through the centre meets the two neighbouring
+    /// corners (css-images-3 §3.4.1), which depends on the aspect ratio.
     pub fn angle_for(&self, w: f32, h: f32) -> f32 {
         if self.corner == CORNER_NONE || w <= 0.0 || h <= 0.0 {
             return self.angle;
@@ -719,11 +696,11 @@ impl Gradient {
         }
     }
 
-    /// `currentcolor`-Stopps mit der Farbe des Elements fuellen.
+    /// Fill `currentcolor` stops with the element's colour.
     ///
-    /// Erst hier, nicht beim Parsen: css-color-4 §6.2 loest `currentcolor`
-    /// zum Gebrauchswert auf, und beim Parsen der Deklaration kann `color`
-    /// noch gar nicht feststehen.
+    /// Done here, not at parse time: css-color-4 §6.2 resolves `currentcolor` at
+    /// used-value time, and `color` may not be known when the declaration is
+    /// parsed.
     pub fn with_current(&self, color: Rgba) -> Gradient {
         let mut g = *self;
         for st in g.stops.iter_mut().take(g.n as usize) {
@@ -735,11 +712,11 @@ impl Gradient {
         g
     }
 
-    /// Derselbe Verlauf, aber mit Stopps als reine Anteile 0..1 — px gegen
-    /// die Achsenlaenge `line` gerechnet, offene Lagen gefuellt.
+    /// The same gradient with stops as plain fractions 0..1: px computed against
+    /// the line length `line`, missing positions filled.
     ///
-    /// Das geschieht beim MALEN, nicht beim Parsen: `line` haengt am Kasten,
-    /// und derselbe Stil malt zwei verschieden breite Kaesten.
+    /// Done at paint time, because `line` depends on the box and one style may
+    /// paint boxes of different widths.
     pub fn resolved(&self, line: f32) -> Gradient {
         let mut g = *self;
         let line = if line > 0.0 { line } else { 1.0 };
@@ -753,11 +730,11 @@ impl Gradient {
         g
     }
 
-    /// Die Farbe an der Stelle `t` der Achse (0..1 ausserhalb erlaubt).
+    /// The colour at position `t` on the line (outside 0..1 allowed).
     ///
-    /// Zwischen zwei Stopps wird MIT VORMULTIPLIZIERTEM Alpha gemischt —
-    /// `transparent` ist `rgba(0,0,0,0)`, und ein naiver Mittelwert zoege
-    /// einen Verlauf nach Schwarz statt ihn ausblenden zu lassen.
+    /// Between two stops the mix uses premultiplied alpha: `transparent` is
+    /// `rgba(0,0,0,0)`, and a naive average would pull a gradient towards black
+    /// instead of fading it out.
     pub fn at(&self, t: f32) -> Rgba {
         let n = self.n as usize;
         if n == 0 {
@@ -783,10 +760,10 @@ impl Gradient {
         }
         let (a, b) = (self.stops[i - 1], self.stops[i]);
         let span = b.pos - a.pos;
-        // Zwei Stopps auf derselben Lage sind eine harte Kante.
+        // Two stops at the same position are a hard edge.
         let f = if span > 1e-6 { (t - a.pos) / span } else { 1.0 };
-        // Sind beide Stopps deckend, ist das Vormultiplizieren ein Umweg mit
-        // drei Divisionen — und dieser Zweig laeuft je PIXEL.
+        // If both stops are opaque, premultiplying is a detour with three divisions,
+        // and this branch runs per pixel.
         if a.color.a == 255 && b.color.a == 255 {
             let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) as u8;
             return Rgba {
@@ -799,7 +776,7 @@ impl Gradient {
     }
 }
 
-/// Zwei Farben mischen, vormultipliziert (css-images-3 §3.4.2).
+/// Mix two colours, premultiplied (css-images-3 §3.4.2).
 fn mix_premul(a: Rgba, b: Rgba, f: f32) -> Rgba {
     let (aa, ba) = (a.a as f32 / 255.0, b.a as f32 / 255.0);
     let oa = aa + (ba - aa) * f;
@@ -824,8 +801,8 @@ fn mix_premul(a: Rgba, b: Rgba, f: f32) -> Rgba {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BgLayer {
     pub image: Option<u64>,
-    /// Ein Farbverlauf statt eines Bildes. `n == 0` heisst „keiner" — ein
-    /// `Option` waere hier nur ein Byte Verpackung mehr.
+    /// A gradient instead of an image. `n == 0` means none; an `Option` would only
+    /// add a byte of wrapping.
     pub gradient: Gradient,
     /// (repeat-x, repeat-y).
     pub repeat: (bool, bool),
@@ -898,33 +875,28 @@ pub enum ZIndex {
     Inherit,
 }
 
-/// One `box-shadow` layer, outer only.
+/// One `box-shadow` layer, outer or inset.
 ///
-/// Real pages use two very different things under one name: a soft drop shadow
-/// (`0 2px 8px rgba(...)`) and a **hairline rule** (`0 1px #c8ccd1`), which is a
-/// zero-blur shadow standing in for a border the author did not want in the box
-/// model. The second is a plain rectangle and is what shows up as a missing
-/// separator; the first needs a blur kernel and looks fine while absent. So only
-/// `blur == 0` is painted, and a blurred shadow keeps being skipped rather than
-/// drawn as a hard slab.
+/// Pages use two different things under one name: a soft drop shadow
+/// (`0 2px 8px rgba(...)`) and a hairline rule (`0 1px #c8ccd1`), a zero-blur
+/// shadow standing in for a border the author did not want in the box model.
+/// A style keeps one sharp (`blur == 0`) and one blurred outer layer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoxShadow {
     pub dx: f32,
     pub dy: f32,
     pub blur: f32,
     pub spread: f32,
-    /// `None` = `currentColor`, resolved at PAINT time. Resolving it here would
-    /// take whatever `color` happened to be cascaded so far — and `box-shadow`
-    /// is routinely written before `color` in the same block.
+    /// `None` = `currentColor`, resolved at paint time. Resolving it here would
+    /// take whatever `color` was cascaded so far, and `box-shadow` is often
+    /// written before `color` in the same block.
     pub color: Option<Rgba>,
 }
 
 impl BoxShadow {
-    /// Whether we have a paint for this layer at all. The single source for it:
-    /// `paintable_shadow` picks the layer with it and `shadow_ops` draws the
-    /// layer with it, so neither can drift into painting what the other skipped.
-    /// Eine SCHARFE Schicht — auf echten Seiten meist ein Haarstrich, den der
-    /// Autor nicht im Kastenmodell haben wollte.
+    /// Whether this is a sharp layer (`blur == 0`). The single source for it:
+    /// `paintable_shadow` sorts layers with it and `shadow_ops` draws with it, so
+    /// the two cannot drift apart.
     pub fn paints(&self) -> bool {
         self.blur == 0.0
     }
@@ -938,7 +910,7 @@ pub struct ComputedStyle {
     pub font_px: f32,
     /// The *parent's* font-size — the base for resolving this element's own
     /// `font-size` in `em`/`%`/`inherit` (CSS: font-size em/% is parent-
-    /// relative, NOT relative to the value a UA/earlier rule already set).
+    /// relative, not relative to the value a UA/earlier rule already set).
     /// Recomputed per element in `inherit_reset`; never compounds.
     pub em_base: f32,
     /// The root element's computed `font-size` — the basis for `rem`.
@@ -952,80 +924,73 @@ pub struct ComputedStyle {
     pub bold: bool,
     pub italic: bool,
     pub mono: bool,
-    /// Die ERSTE Familie aus `font-family`, als Streuwert.
+    /// The first family from `font-family`, as a hash.
     ///
-    /// **Nicht der Name, nur seine Zahl.** Ein `ComputedStyle` wird millionenfach
-    /// kopiert; eine Zeichenkette darin waere eine Allokation je Element. Der
-    /// Streuwert reicht: `Fonts` haelt die geladenen `@font-face`-Gesichter unter
-    /// derselben Zahl. 0 heisst „keine benannte Familie" (die eingebauten
-    /// Gesichter entscheiden dann wie bisher ueber `bold`/`italic`/`mono`).
+    /// Only the hash, not the name: `ComputedStyle` is copied constantly and a
+    /// string would be an allocation per element. `Fonts` keeps loaded
+    /// `@font-face` faces under the same number. 0 means no named family (the
+    /// built-in faces then decide by `bold`/`italic`/`mono`).
     pub family: u32,
     pub pre: bool, // white-space: pre (no collapse, honor newlines)
-    /// `white-space: nowrap` — whitespace still collapses, but the line never
-    /// breaks at one. Inherited. Real pages use it to keep a label, a
-    /// coordinate pair or a table header on one line; wrapping it anyway makes
-    /// the box a line taller and, under `position: absolute`, overlaps
-    /// whatever it was placed above.
+    /// `white-space: nowrap`: whitespace still collapses, but the line never
+    /// breaks at it. Inherited. Wrapping such a label anyway makes the box a line
+    /// taller and, under `position: absolute`, overlaps what it was placed above.
     pub nowrap: bool,
     /// `visibility: hidden`/`collapse` — the box still lays out and still takes
     /// its space, but paints nothing. Inherited, so a descendant can set
     /// `visible` and reappear inside a hidden ancestor (CSS2.1 §11.2).
     pub hidden: bool,
-    /// The box (and its whole subtree) is fully transparent — `opacity: 0`.
-    /// Unlike `visibility` this cannot be undone further down: opacity groups
-    /// the subtree, so a descendant with `opacity: 1` is still invisible. It
-    /// stays HIT-TESTABLE, which is exactly what a checkbox-hack click overlay
-    /// (`position:absolute; width:100%; height:100%; opacity:0`) needs.
+    /// The box and its whole subtree are fully transparent (`opacity: 0`).
+    /// Unlike `visibility` this cannot be undone further down: opacity groups the
+    /// subtree. It stays hit-testable, which a transparent click overlay
+    /// (`position:absolute; width:100%; height:100%; opacity:0`) relies on.
     pub transparent: bool,
-    /// `opacity`, 0..1. Below 1 it scales the alpha of every op the element
-    /// and its subtree emit (see `Ctx::apply_filter`) — an approximation of
-    /// the group compositing the spec asks for: two OVERLAPPING descendants
-    /// show through each other instead of being flattened first. Exact group
-    /// opacity needs an offscreen buffer per stacking context.
+    /// `opacity`, 0..1. Below 1 it scales the alpha of every op the element and
+    /// its subtree emit (see `Ctx::apply_filter`). This approximates the group
+    /// compositing the spec asks for: two overlapping descendants show through
+    /// each other instead of being flattened first. Exact group opacity needs an
+    /// offscreen buffer per stacking context.
     pub opacity: f32,
-    /// Alpha, mit der der TEXT und der Kastenschmuck dieses Elements
-    /// vormultipliziert werden — aufgesammelt ueber die INLINE-Vorfahren.
+    /// Alpha premultiplied into this element's text and box decoration,
+    /// accumulated over its inline ancestors.
     ///
-    /// Ein Block bekommt seinen `opacity`/`filter` nachtraeglich ueber seinen
-    /// Befehlsbereich gelegt (`Ctx::apply_filter`). Ein Inline-Kasten hat
-    /// keinen solchen Bereich: seine Laeufe werden erst beim Schliessen der
-    /// Zeile ausgegeben, lange nachdem das Element vorbei ist. Also traegt er
-    /// seine Deckung hier mit, und seine Nachfahren multiplizieren ihre dazu.
+    /// A block gets its `opacity`/`filter` applied afterwards over its op range
+    /// (`Ctx::apply_filter`). An inline box has no such range: its runs are only
+    /// emitted when the line closes, long after the element ended. So it carries
+    /// its opacity here and its descendants multiply theirs in.
     ///
-    /// Auf allem, was einen eigenen Bereich HAT (Block, Inline-Block, Float,
-    /// ausser Fluss), steht sie wieder auf 1 — sonst wuerde dieselbe Deckung
-    /// zweimal angewandt. Der Preis dafuer ist benannt: ein BLOCK innerhalb
-    /// eines halbdurchsichtigen Inline-Kastens verliert dessen Deckung.
+    /// Anything with its own range (block, inline-block, float, out of flow)
+    /// resets it to 1, otherwise the same opacity would apply twice. Known
+    /// limit: a block inside a translucent inline box loses that opacity.
     pub inline_fade: f32,
-    /// This element's OWN `opacity: 0`, before it is folded into `transparent`.
-    /// Kept apart so a later declaration in the same cascade can undo an
-    /// earlier one, while an ANCESTOR's transparency still can't be undone.
+    /// This element's own `opacity: 0`, before it is folded into `transparent`.
+    /// Kept apart so a later declaration in the same cascade can undo an earlier
+    /// one, while an ancestor's transparency still cannot be undone.
     pub opacity_zero: bool,
     pub color: Rgba,
     pub text_align: TextAlign,
-    /// `<center>` and `<div align=center>` centre BLOCK-level children too,
-    /// not just inline content — the behaviour browsers spell `text-align:
-    /// -moz-center`. Plain CSS `text-align: center` must NOT do this, which
-    /// is why it needs its own inherited flag rather than riding on the
-    /// alignment value. The `<center><table>` idiom depends on it entirely.
+    /// `<center>` and `<div align=center>` centre block-level children too, not
+    /// just inline content (what browsers spell `text-align: -moz-center`). Plain
+    /// CSS `text-align: center` must not do this, so it needs its own inherited
+    /// flag. The `<center><table>` idiom depends on it.
     pub center_blocks: bool,
     pub list_style: ListStyle,
     pub line_height: LineHeight,
-    /// `direction: rtl` — the inline base direction. This engine does no bidi
-    /// reordering (no RTL faces are embedded); what it does honour is the part
-    /// that governs layout of LTR content inside an RTL container: `start`/
-    /// `end` text alignment flip, so an unstyled RTL block right-aligns.
+    /// `direction: rtl`, the inline base direction. No bidi reordering is done;
+    /// what is honoured is the part that governs LTR content inside an RTL
+    /// container: `start`/`end` alignment flip, so an unstyled RTL block
+    /// right-aligns.
     pub rtl: bool,
     pub text_transform: TextTransform,
-    /// `text-align-last` — alignment of a block's LAST line. `None` = `auto`,
+    /// `text-align-last`: alignment of a block's last line. `None` = `auto`,
     /// i.e. defer to `text-align`.
     pub text_align_last: Option<TextAlign>,
-    /// `text-indent` — how far the block's FIRST line box starts in from its
+    /// `text-indent`: how far the block's first line box starts in from its
     /// content edge. Inherited; a percentage resolves against the containing
     /// block's width. Negative values hang the first line out to the left.
     pub text_indent: Len,
-    /// `letter-spacing` in px — extra advance after EVERY character of a run,
-    /// the last one included, which is what browsers measure an inline box as.
+    /// `letter-spacing` in px: extra advance after every character of a run,
+    /// the last one included, which is how browsers measure an inline box.
     /// Inherited. `normal` is 0.
     pub letter_spacing: f32,
     /// `word-spacing` in px — extra advance on every word separator. Inherited.
@@ -1042,20 +1007,19 @@ pub struct ComputedStyle {
     pub margin_top: f32,
     pub margin_bottom: f32,
     /// `margin-top: auto` / `margin-bottom: auto`. In normal flow a vertical
-    /// `auto` is zero (CSS2.1 §10.6.3), so the number above is enough there —
-    /// but a flex item's auto margin EATS the free space on its axis
+    /// `auto` is zero (CSS2.1 §10.6.3), so the number above is enough there, but
+    /// a flex item's auto margin absorbs the free space on its axis
     /// (css-flexbox-1 §8.1), which a zero cannot express.
     pub margin_top_auto: bool,
     pub margin_bottom_auto: bool,
     pub margin_left: Len,
     pub margin_right: Len,
-    /// A PERCENTAGE on `padding` (top, right, bottom, left) and on the vertical
-    /// `margin`s, kept unresolved until the containing block's width is known.
-    /// Both axes resolve against the WIDTH (CSS 2.1 §8.1, §8.3) — that is not a
-    /// typo in the spec: it is what makes `padding-top: 56.25%` an aspect ratio
-    /// rather than a height, which is how every responsive video embed on the
-    /// web reserves its box. `0.0` means "no percentage here"; a literal `0%`
-    /// resolves to the same zero either way, so it needs no separate marker.
+    /// A percentage on `padding` (top, right, bottom, left) and on the vertical
+    /// margins, kept unresolved until the containing block's width is known.
+    /// Both axes resolve against the width (CSS 2.1 §8.1, §8.3); that is what
+    /// makes `padding-top: 56.25%` an aspect ratio, the usual way responsive
+    /// video embeds reserve their box. `0.0` means "no percentage here"; a
+    /// literal `0%` resolves to the same zero, so it needs no separate marker.
     pub pct_pad: [f32; 4],
     pub pct_margin_tb: [f32; 2],
     pub pad_top: f32,
@@ -1068,75 +1032,64 @@ pub struct ComputedStyle {
     /// governs the box `box-sizing` names — the content box by default, the
     /// border box under `border-box`.
     pub aspect_ratio: Option<f32>,
-    /// Which of this element's winning declarations carried a viewport-HEIGHT
-    /// unit (`vh`/`vmin`/`vmax`), as a bitmask: bit 0 = a property that sizes
-    /// or positions the box outright, bit 1 = `max-height`, bit 2 =
-    /// `min-height`. The caps are kept apart because a cap that never BINDS
-    /// changes no geometry at all — Wikipedia's menus are all
-    /// `max-height: 75vh` and never reach it — so layout can flag those only
-    /// when they actually clamp. Per-element, so deliberately NOT inherited.
+    /// Which of this element's winning declarations carried a viewport-height
+    /// unit (`vh`/`vmin`/`vmax`), as a bitmask: bit 0 = a property that sizes or
+    /// positions the box outright, bit 1 = `max-height`, bit 2 = `min-height`.
+    /// The caps are kept apart because a cap that never binds changes no
+    /// geometry, so layout can flag them only when they actually clamp.
+    /// Per element, so deliberately not inherited.
     pub vh_seen: u8,
-    /// `appearance: none` — the page opts this form control OUT of the UA
-    /// widget look (css-ui-4 §4) and draws the whole thing itself.
+    /// `appearance: none`: the page opts this form control out of the UA widget
+    /// look (css-ui-4 §4) and draws it itself.
     pub appearance_none: bool,
-    /// `display: flow-root` — a block box whose ONLY difference from `block`
-    /// is that it establishes a block formatting context. A flag rather than a
-    /// `Display` variant precisely because that is the whole difference:
-    /// everything that matches on `display` would otherwise need an arm that
-    /// says "same as block".
+    /// `display: flow-root`: a block box whose only difference from `block` is
+    /// that it establishes a block formatting context. A flag rather than a
+    /// `Display` variant because that is the whole difference; every match on
+    /// `display` would otherwise need an arm saying "same as block".
     pub bfc_root: bool,
     pub contain_size: bool, // `contain: size`/`strict` — content contributes no size
     pub contain_intrinsic: Option<(f32, f32)>, // `contain-intrinsic-size` (w, h) px
     pub bg: Option<Rgba>, // background-color (None = transparent)
-    /// Hat die SEITE einen Hintergrund gesetzt — auch `transparent`?
+    /// Did the page set a background at all, `transparent` included?
     ///
-    /// `bg: None` heisst „durchsichtig" und sagt nicht, wer das entschieden
-    /// hat. Fuer ein Steuerelement ist das der Unterschied zwischen „male
-    /// deine UA-Flaeche" und „die Seite malt selbst": Bootstrap gibt
-    /// `.btn-outline-*` ein `--bs-btn-bg: transparent`, und ohne diese Fahne
-    /// bekam ein Umriss-Knopf trotzdem die graue Flaeche des Themas.
+    /// `bg: None` means transparent and does not say who decided it. For a form
+    /// control that is the difference between "paint your UA surface" and "the
+    /// page paints itself": an outline button with `background: transparent`
+    /// must not get the theme's grey surface.
     pub bg_set: bool,
     /// `background-image` + its placement properties.
     pub bg_layer: BgLayer,
-    /// `background-clip` — which box the background (colour AND image) is
-    /// painted inside. A page uses it to keep a background off a translucent
-    /// or dashed border, which is exactly where the difference shows.
+    /// `background-clip`: which box the background (colour and image) is painted
+    /// inside. Pages use it to keep a background off a translucent or dashed
+    /// border.
     pub bg_clip: BoxEdge,
-    /// `background-origin` — which box `background-position` and a percentage
+    /// `background-origin`: which box `background-position` and a percentage
     /// `background-size` resolve against. The padding box by default, so a
     /// bordered box centres its image inside the border, not across it.
     pub bg_origin: BoxEdge,
-    /// `mask-image` + its placement. A mask does not paint the image: it
-    /// stencils the element's own `background-color` through the image's alpha
-    /// — which is how icon systems (MediaWiki's Vector, Codex) draw a
-    /// recolourable icon from one SVG.
+    /// `mask-image` and its placement. A mask does not paint the image: it
+    /// stencils the element's own `background-color` through the image's alpha,
+    /// which is how icon systems draw a recolourable icon from one SVG.
     pub mask_layer: BgLayer,
     pub border_top: BorderSide,
     pub border_right: BorderSide,
     pub border_bottom: BorderSide,
     pub border_left: BorderSide,
     /// `outline` (css-ui-4 §3). A `BorderSide` because it has the same three
-    /// parts — but it never enters the box model: no layout code may read it.
+    /// parts, but it never enters the box model: no layout code may read it.
     pub outline: BorderSide,
     pub outline_offset: f32,
-    /// Hat die SEITE ueber den Umriss etwas gesagt?
+    /// Did the page say anything about the outline?
     ///
-    /// **Der Unterschied zwischen „kein Umriss" und „ich will keinen" ist der
-    /// ganze Punkt.** Ein Browser malt den Fokusring als `outline` und laesst
-    /// die Seite ihn mit `outline: none` abschalten. beak kennt `:focus` in
-    /// der Kaskade nicht, kann die UA-Regel also nicht dort hinschreiben —
-    /// aber es kann merken, ob die Seite die Eigenschaft ueberhaupt in die
-    /// Hand genommen hat. Hat sie das, gilt ihr Wort; hat sie es nicht, malt
-    /// beak seinen eigenen Ring.
+    /// "No outline" and "I want none" differ. Browsers paint the focus ring as an
+    /// `outline` and let the page turn it off with `outline: none`. `:focus` is
+    /// not part of our cascade, so the UA rule cannot live there; instead this
+    /// records whether the page took control of the property. If it did, its
+    /// value applies; otherwise beak paints its own ring.
     pub outline_set: bool,
-    /// `accent-color` (css-ui-4 §5.1) — die Farbe, mit der ein Kaestchen, ein
-    /// Radioknopf, ein Schieber und ein Fortschrittsbalken gemalt werden.
-    ///
-    /// **VERERBT**, und `None` heisst `auto`: dann malt das Thema. Eine Seite,
-    /// die ihre Kaestchen in ihrer eigenen Akzentfarbe will, schreibt genau
-    /// diese eine Zeile — `sandbox.nopeek.ch` dreimal
-    /// (`.network-checkbox input { accent-color: var(--accent) }`), und ohne
-    /// sie bekam sie unsere Themenfarbe statt ihrer.
+    /// `accent-color` (css-ui-4 §5.1): the colour of checkboxes, radio buttons,
+    /// sliders and progress bars. Inherited; `None` means `auto`, i.e. the theme
+    /// colour.
     pub accent: Option<Rgba>,
     // — positioning —
     pub position: Position,
@@ -1148,23 +1101,21 @@ pub struct ComputedStyle {
     pub is_link: bool,
     pub is_rule: bool, // <hr> — painted as a divider
     pub is_break: bool, // <br> — forced line break in inline flow
-    /// This element is a `<details>`'s disclosure control — its first
-    /// `<summary>` child. Element identity, not a box property, so it is NOT
-    /// settable from CSS: a page that writes `summary { list-style: none }`
-    /// (most of them do) removes the triangle, and the box must stay clickable
-    /// anyway. `record_inspect` turns this into the toggle rect the shell
-    /// hit-tests.
+    /// This element is a `<details>`'s disclosure control (its first `<summary>`
+    /// child). Element identity, not a box property, so it is not settable from
+    /// CSS: `summary { list-style: none }` removes the triangle, and the box must
+    /// stay clickable anyway. `record_inspect` turns this into the toggle rect
+    /// the shell hit-tests.
     pub is_summary: bool,
     /// `vertical-align` — not inherited. On a table cell it aligns the content
     /// box in the row; on an inline-level box it shifts the box on the line.
     pub valign: VAlign,
     /// `text-decoration-line` as `DECO_*` bits. CSS propagates a decoration to
-    /// in-flow descendants rather than inheriting it (css-text-decor-3 §1.2);
-    /// we inherit, which paints the same pixels for every construct we have —
-    /// the difference only shows where a descendant tries to *cancel* one.
+    /// in-flow descendants rather than inheriting it (css-text-decor-3 §1.2); we
+    /// inherit, which paints the same pixels for every construct we have. The
+    /// difference only shows where a descendant tries to cancel one.
     pub deco: u8,
-    /// `text-decoration-color`. `None` = `currentColor`, which is the initial
-    /// value and what the line used to be painted in unconditionally.
+    /// `text-decoration-color`. `None` = `currentColor`, the initial value.
     pub deco_color: Option<Rgba>,
     // — flex container —
     pub flex_row: bool, // flex-direction: row (true) vs column (false)
@@ -1172,8 +1123,8 @@ pub struct ComputedStyle {
     pub flex_balance: bool, // flex-wrap: balance (css-flexbox-2 line balancing)
     pub justify: Justify,
     pub align_items: CrossAlign,
-    /// `align-content` — line packing on the cross axis. Container-level, so a
-    /// flex ITEM never reads it.
+    /// `align-content`: line packing on the cross axis. Container-level, so a
+    /// flex item never reads it.
     pub align_content: ContentAlign,
     // — flex item —
     pub flex_grow: f32,
@@ -1187,14 +1138,11 @@ pub struct ComputedStyle {
     pub grid_nrows: u8,
     pub grid_row_tracks: [GridTrack; MAX_GRID_COLS],
     pub grid_auto_rows: GridTrack,
-    /// `grid-auto-columns` — the size of an IMPLICIT column, one past the last
-    /// `grid-template-columns` track. Without it every implicit column fell back
-    /// to the `auto` default and a `grid-auto-columns: 100px` row came out
-    /// content-sized.
+    /// `grid-auto-columns`: the size of an implicit column, one past the last
+    /// `grid-template-columns` track.
     pub grid_auto_cols: GridTrack,
     /// `column-gap` / `row-gap`. A `Len`, because a percentage gap resolves
-    /// against the container's own content box on that axis — and dropping the
-    /// percentage silently made `gap: 10%` a gap of nothing.
+    /// against the container's own content box on that axis.
     pub grid_col_gap: Len,
     pub grid_row_gap: Len,
     pub justify_items: CrossAlign,
@@ -1229,13 +1177,10 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse` — cell borders merge with their neighbours'
     /// and with the table's, and `border-spacing` no longer applies.
     pub border_collapse: bool,
-    /// `overflow-x`/`overflow-y` are `hidden`/`clip` — the box paints nothing
-    /// of its content past its padding box on that axis. `auto`/`scroll`
-    /// deliberately do NOT set these: without in-page scroll containers,
-    /// clipping there would hide content the user is meant to be able to reach.
-    /// Two axes, because a page that scrolls a panel vertically and forbids
-    /// horizontal overflow writes exactly `overflow-x: hidden; overflow-y:
-    /// auto`, and a single flag can only get one of those two right.
+    /// `overflow-x`/`overflow-y`: whether the box paints its content past its
+    /// padding box on that axis (see `Overflow::clips`). Two axes, because a
+    /// panel that scrolls vertically and forbids horizontal overflow writes
+    /// `overflow-x: hidden; overflow-y: auto`, and one flag cannot express both.
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
     /// `text-overflow: ellipsis` — a line the box clips on the inline axis
@@ -1246,18 +1191,17 @@ pub struct ComputedStyle {
     /// `object-fit` — how a replaced element's pixels fill the content box.
     /// Not inherited.
     pub object_fit: ObjectFit,
-    /// `background-color` was declared as `currentcolor` (or as a relative
-    /// colour over it). Kept as a FLAG beside the resolved colour, not folded
-    /// into it, because css-color-4 §6.2 resolves the keyword at used-value
-    /// time: a child that writes `background-color: inherit` inherits the
-    /// unresolved value and resolves it against ITS OWN `color`. Every other
-    /// colour field already defers by having `None` mean `currentcolor` —
-    /// `bg`'s `None` means transparent, so this one needs the flag.
+    /// `background-color` was declared as `currentcolor` (or a relative colour
+    /// over it). Kept as a flag beside the resolved colour because css-color-4
+    /// §6.2 resolves the keyword at used-value time: a child that writes
+    /// `background-color: inherit` inherits the unresolved value and resolves it
+    /// against its own `color`. Other colour fields defer by having `None` mean
+    /// `currentcolor`; `bg`'s `None` means transparent, so this one needs a flag.
     pub bg_cc: bool,
-    /// `filter`, as the one colour transform the whole chain composes to.
-    /// Not inherited, but it does apply to the element's whole SUBTREE — which
-    /// layout does by walking the op range the box produced, not by passing it
-    /// down the cascade (a descendant must not be able to cancel it).
+    /// `filter`, as the one colour transform the whole chain composes to. Not
+    /// inherited, but it applies to the element's whole subtree, which layout
+    /// does by walking the op range the box produced, not via the cascade (a
+    /// descendant must not be able to cancel it).
     pub filter: Option<crate::color::ColorFilter>,
     /// `overflow-wrap`/`word-wrap: break-word` or `word-break: break-all`/
     /// `break-word` — a word longer than its line may be split mid-word rather
@@ -1267,30 +1211,26 @@ pub struct ComputedStyle {
     /// allows an ellipse per corner (`r1 / r2`), we keep the horizontal radius.
     /// Percentages resolve against the border-box width at paint time.
     pub radius: [Len; 4],
-    /// `box-shadow`: the first OUTER, zero-blur layer of the list — see
-    /// `paintable_shadow` for why the first *paintable* one and not the first.
+    /// `box-shadow`: the first outer, zero-blur layer of the list; see
+    /// `paintable_shadow` for why the first paintable one and not the first.
     pub shadow: Option<BoxShadow>,
-    /// Die erste WEICHE aeussere Schicht. Getrennt vom scharfen Platz, weil
-    /// beide gleichzeitig sichtbar sein koennen — und der weiche liegt
-    /// hinter dem scharfen.
+    /// The first blurred outer layer. Separate from the sharp one because both
+    /// can be visible at once; the blurred one lies behind the sharp one.
     pub shadow_soft: Option<BoxShadow>,
-    /// Die erste INNERE Schicht ohne Weichzeichnung.
+    /// The first inset layer without blur.
     ///
-    /// Sieht nach einer Randerscheinung aus und ist die Art, wie Bootstrap
-    /// 5.3 seine Tabellen streift:
+    /// A common table-striping technique:
     ///
     ///     box-shadow: inset 0 0 0 9999px var(--bs-table-bg-type)
     ///
-    /// Ein innerer Schatten mit 9999 px Ausdehnung IST eine Fuellung ueber
-    /// dem Hintergrund — und weil er ueber dem Hintergrund liegt, faerbt er
-    /// die Zelle, ohne deren eigenes `background-color` zu ersetzen. Genau
-    /// dafuer haben sie ihn gewaehlt.
+    /// An inset shadow with a 9999 px spread is a fill above the background, so
+    /// it colours the cell without replacing its own `background-color`.
     pub shadow_inset: Option<BoxShadow>,
-    /// `transform: translate(...)` as a paint-time offset, in px and in
-    /// PERCENT of the box's own size (`Len::Pct`) — the `translate(-50%,-50%)`
-    /// centring idiom needs the latter. Only translation: rotation and scale
-    /// would need a transformed raster path, and every other transform value
-    /// leaves this `None` rather than being approximated.
+    /// `transform: translate(...)` as a paint-time offset, in px and in percent
+    /// of the box's own size (`Len::Pct`), which the `translate(-50%,-50%)`
+    /// centring idiom needs. Only translation: rotation and scale would need a
+    /// transformed raster path, and any other transform leaves this `None`
+    /// rather than being approximated.
     pub translate: Option<(Len, Len)>,
     /// `caption-side: bottom` — the caption renders below the table grid
     /// instead of above it. Inherited (CSS2.1 §17.4.1), so it can be set on
@@ -1300,9 +1240,9 @@ pub struct ComputedStyle {
     /// border nor background in the separated model (CSS2.1 §17.6.1.1).
     pub empty_cells_hide: bool,
     /// `<table border>` / `<table cellpadding>`: HTML presentational hints that
-    /// style the table's CELLS, not the table (HTML §15.3.8). The cells are
-    /// several levels down (`tr`, row groups), so they ride down as inherited
-    /// state instead of needing an ancestor-attribute lookup. `None` = the
+    /// style the table's cells, not the table (HTML §15.3.8). The cells are
+    /// several levels down (`tr`, row groups), so the values ride down as
+    /// inherited state instead of an ancestor-attribute lookup. `None` = the
     /// attribute is absent.
     pub attr_cell_border: Option<f32>,
     pub attr_cell_padding: Option<f32>,
@@ -1321,8 +1261,8 @@ pub struct ComputedStyle {
 pub const COUNTER_OPS_MAX: usize = 4;
 
 impl ComputedStyle {
-    /// Clips on BOTH axes — what a baseline or a formatting-context decision
-    /// asks about, as opposed to which edge a paint is cut against.
+    /// Clips on both axes: what a baseline or formatting-context decision asks,
+    /// as opposed to which edge a paint is cut against.
     pub fn overflow_clip(&self) -> bool {
         self.overflow_x.clips() && self.overflow_y.clips()
     }
@@ -1562,10 +1502,9 @@ fn parse_deco(v: &str) -> u8 {
 
 /// The bases a length may need that are not the containing block: `em` (the
 /// element's own font-size, or its inherited one while `font-size` itself is
-/// being resolved), `rem` (the ROOT element's computed font-size) and the
-/// viewport for `vw`/`vh`/`vmin`/`vmax`. `em` and `rem` differ the moment a
-/// document sets `html { font-size: … }` — the `62.5%` "1rem = 10px" idiom is
-/// everywhere, and treating `rem` as `em` scales such a page by 1.6x.
+/// being resolved), `rem` (the root element's computed font-size) and the
+/// viewport for `vw`/`vh`/`vmin`/`vmax`. `em` and `rem` differ as soon as a
+/// document sets `html { font-size: … }` (the common `62.5%` idiom).
 #[derive(Clone, Copy, Debug)]
 pub struct Units {
     pub em: f32,
@@ -1758,13 +1697,13 @@ pub fn resolve(
                viewport_w, &empty, &mut own)
 }
 
-/// Wie [`resolve`], aber mit den Custom Properties des ELTERNTEILS — und es
-/// gibt die eigenen zurueck.
+/// Like [`resolve`], but with the parent's custom properties, and returns
+/// the element's own.
 ///
-/// `own` bleibt `None`, wenn das Element keine einzige Custom Property setzt.
-/// Das ist der Normalfall und der Grund fuer die Form: Bootstraps `:root`
-/// traegt ueber 200 Namen, und die je Element zu KOPIEREN waere teurer als
-/// die ganze Kaskade. Wer nichts setzt, teilt die Karte des Elternteils.
+/// `own` stays `None` if the element sets no custom property, the common
+/// case: a root can carry hundreds of names, and copying them per element
+/// would cost more than the cascade. An element that sets nothing shares the
+/// parent's map.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_in(
     subject: &ElemInfo,
@@ -1778,9 +1717,9 @@ pub fn resolve_in(
     inherited: &crate::vars::VarMap,
     own: &mut Option<crate::vars::VarMap>,
 ) -> ComputedStyle {
-    // The SUBJECT arrives as an `ElemInfo`, not a bare `Element`: it carries the
-    // pointer state, and a caller that built it by hand would silently cascade
-    // `:hover` as false. The compiler now asks every call site for it.
+    // The subject arrives as an `ElemInfo`, not a bare `Element`: it carries the
+    // pointer state, and a caller that built one by hand would silently cascade
+    // `:hover` as false.
     let el = subject.el;
     let mut s = inherit_reset(parent);
     ua_rule(&el.tag, parent, theme, &mut s);
@@ -1790,21 +1729,20 @@ pub fn resolve_in(
     if el.tag == "a" && el.attr("href").is_some() {
         s.deco |= DECO_UNDERLINE;
     }
-    // A `<dialog>` without `open` is not rendered (HTML §4.11.4). This IS an
-    // ordinary UA-sheet rule — it sits before the author cascade, so a page
-    // that shows its own dialog with CSS still can.
+    // A `<dialog>` without `open` is not rendered (HTML §4.11.4). This is an
+    // ordinary UA-sheet rule; it sits before the author cascade, so a page that
+    // shows its own dialog with CSS still can.
     if el.tag == "dialog" && el.attr("open").is_none() {
         s.display = Display::None;
     }
-    // `<details>`/`<summary>` (HTML §4.11.1). The FIRST `<summary>` child is
-    // the disclosure control: it renders whatever the state, and carries the
-    // marker. A `<summary>` anywhere else is a plain block, which is why this
-    // cannot live in `ua_rule` — that only sees the tag.
+    // `<details>`/`<summary>` (HTML §4.11.1). The first `<summary>` child is the
+    // disclosure control: it renders whatever the state and carries the marker.
+    // A `<summary>` anywhere else is a plain block, which is why this cannot live
+    // in `ua_rule` (it only sees the tag).
     //
     // The marker is set here, before the author cascade, so `summary {
-    // list-style: none }` (which most pages write) removes it. `is_summary` is
-    // NOT: the box has to stay clickable even with the triangle gone, or the
-    // reader can never open the section.
+    // list-style: none }` removes it. `is_summary` is not: the box has to stay
+    // clickable even with the triangle gone.
     if el.tag == "summary"
         && ancestors.last().is_some_and(|p| p.el.tag == "details")
         && !prev_siblings.iter().any(|p| p.el.tag == "summary")
@@ -1813,20 +1751,17 @@ pub fn resolve_in(
         s.display = Display::ListItem;
         s.list_style =
             if open { ListStyle::DisclosureOpen } else { ListStyle::DisclosureClosed };
-        // Room for the marker. A list marker is painted OUTSIDE the content
-        // edge (there is no `list-style-position` yet), and a `<summary>` has
-        // no `<ul>` around it to have paid for that space — the triangle would
-        // land in the margin, and at the left edge of the page outside it.
+        // Room for the marker. A list marker is painted outside the content edge
+        // (no `list-style-position` yet), and a `<summary>` has no `<ul>` around it
+        // to provide that space; the triangle would land in the margin.
         s.pad_left = 16.0;
         s.is_summary = true;
     }
     // A button-like control is `box-sizing: border-box` in the UA sheet (HTML
-    // rendering §15.5.1) — unlike a text field, which stays content-box. It is
-    // what pages build on: Google puts a `height:30px` button inside a
-    // `height:30px` bordered wrapper and expects it to fit exactly. Read as
-    // content-box the button came out 8px taller than its own frame and hung
-    // out the bottom. `ua_rule` can't do this — it only sees the tag, and
-    // `<input>` is a button or a text field depending on its `type`.
+    // rendering §15.5.1), unlike a text field, which stays content-box. Pages
+    // rely on it, e.g. a `height:30px` button inside a `height:30px` bordered
+    // wrapper. `ua_rule` cannot do this: it only sees the tag, and `<input>` is
+    // a button or a text field depending on its `type`.
     if matches!(
         crate::forms::kind_of(el),
         Some(ControlKind::Submit | ControlKind::Reset | ControlKind::Button
@@ -1834,9 +1769,7 @@ pub fn resolve_in(
     ) {
         s.box_border = true;
         // …and `text-align: center` (HTML rendering §15.5.1). It is the button
-        // sheet's own rule, and with the children laid out it is what actually
-        // centres the label — the painter used to do it by hand, which no
-        // child box could inherit.
+        // sheet's own rule and what centres the label of the laid-out children.
         s.text_align = crate::style::TextAlign::Center;
     }
 
@@ -1847,11 +1780,10 @@ pub fn resolve_in(
         Some("ltr") => s.rtl = false,
         _ => {}
     }
-    // `<table>`'s presentational attributes (HTML §15.3.8). `cellspacing` is
-    // the one the reftest corpus leans on: it writes `cellspacing="0"`, and
-    // without this the UA's 2px default silently applies where the page asked
-    // for none. `border`/`cellpadding` style the cells, so they ride down as
-    // inherited state (see `attr_cell_border`).
+    // `<table>`'s presentational attributes (HTML §15.3.8). Without
+    // `cellspacing` the UA's 2px default would apply where `cellspacing="0"`
+    // asked for none. `border`/`cellpadding` style the cells, so they ride down
+    // as inherited state (see `attr_cell_border`).
     if el.tag == "table" {
         if let Some(n) = el.attr("cellspacing").and_then(|v| parse_length(v.trim(), s.units())) {
             s.border_spacing = (n.max(0.0), n.max(0.0));
@@ -1872,29 +1804,23 @@ pub fn resolve_in(
     }
 
     // `bgcolor` is a presentational hint for `background-color` (HTML §15.3.3),
-    // the same family as `<table border>`/`cellpadding` above, and it sits
-    // between the UA sheet and the author cascade so author CSS still wins.
-    // Old table-built pages carry their whole colour scheme in it — Hacker
-    // News' orange masthead is a `bgcolor` on a `<td>`.
+    // the same family as `<table border>`/`cellpadding` above. It sits between
+    // the UA sheet and the author cascade, so author CSS still wins. Old
+    // table-built pages carry their whole colour scheme in it.
     if let Some(c) = el.attr("bgcolor").and_then(|v| parse_color(v.trim(), theme)) {
         s.bg = Some(c);
     }
 
     // `width`/`height` as presentational hints (HTML Rendering §15.3.5-6).
-    // Table-built pages do their centring with spacer cells — Google's home
-    // page is `<td width="25%">&nbsp;</td>` either side of the search box —
-    // and an ignored attribute collapses the spacer to nothing, which slams
-    // the content against the left edge. The value is a "dimension": a bare
-    // number is pixels, a trailing `%` a percentage.
+    // Table-built pages centre with spacer cells (`<td width="25%">&nbsp;</td>`
+    // on either side), and an ignored attribute collapses the spacer to nothing.
+    // The value is a "dimension": a bare number is pixels, a trailing `%` a
+    // percentage.
     //
-    // **`<img>` stand hier NICHT, mit der Begruendung, `img_box` lese die
-    // Attribute ohnehin — und das war der Fehler.** `img_box` liest sie erst,
-    // wenn der Kasten schon gelegt wird; bis dahin sagt die Kaskade `auto`,
-    // und jeder, der VORHER fragt, bekommt die falsche Antwort: ein
-    // `<img width=30 height=30>` in einer streckenden Flexzeile kam 30x60
-    // heraus (Chromium 30x30), weil seine Quergroesse als `auto` galt. Doppelt
-    // angewandt wird nichts — `img_box` nimmt `css(st.width)` ZUERST und faellt
-    // nur ohne sie auf das Attribut zurueck, und das ist derselbe Wert.
+    // `<img>` is included: `img_box` reads the attributes only when it places
+    // the box, and anyone asking earlier (e.g. a stretching flex line) must see
+    // the size here, not `auto`. Nothing is applied twice: `img_box` takes
+    // `css(st.width)` first, which is the same value.
     if matches!(
         el.tag.as_str(),
         "table" | "td" | "th" | "col" | "colgroup" | "hr" | "img" | "embed" | "video" | "canvas"
@@ -1908,15 +1834,11 @@ pub fn resolve_in(
     }
 
     // `align` is a presentational hint for `text-align` (HTML Rendering
-    // §15.3.3). It is inherited, so a cell's `align="center"` centres
-    // everything inside it — which is the other half of how table-built pages
-    // centre: `<td width="25%">` spacers place the cell, `align="center"`
-    // places the content INSIDE it. With only the first, Google's search box
-    // sat at the left edge of a correctly-centred cell.
+    // §15.3.3). It is inherited, so a cell's `align="center"` centres everything
+    // inside it; table-built pages pair it with width spacers to centre content.
     //
-    // `<table align>` is deliberately absent: there it means float/auto
-    // margins, not text alignment, and treating it as this would centre a
-    // table's text instead of the table.
+    // `<table align>` is deliberately absent: there it means float/auto margins,
+    // not text alignment.
     if matches!(
         el.tag.as_str(),
         "td" | "th" | "tr" | "thead" | "tbody" | "tfoot" | "col" | "colgroup"
@@ -1936,7 +1858,7 @@ pub fn resolve_in(
         }
     }
 
-    // Author cascade WITH `!important` (CSS Cascade 4 §6.3): two passes. Normal
+    // Author cascade with `!important` (CSS Cascade 4 §6.3): two passes. Normal
     // declarations first (UA < author-normal < inline-normal), then `!important`
     // on top (author-important < inline-important) — so an `!important` decl
     // wins its property regardless of specificity/order.
@@ -1944,26 +1866,25 @@ pub fn resolve_in(
     if !sheet.is_empty() {
         let mut matched = sheet.matched(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
         matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
-        // Pass 1 — normal <style> declarations, low→high layer/specificity.
-        // `revert-layer` needs to know which layer a declaration came from, so
-        // it is resolved before anything is applied — and only when the sheet
-        // actually contains one, which no page but a cascade reftest does.
-        // Die mit `@property` angemeldeten Anfangswerte, EINMAL an der
-        // Wurzel: sie stehen unter allem, was eine Regel setzt, und vererben
-        // sich von dort nach unten. Ohne sie bleibt bei Tailwind jedes
-        // `var(--tw-…)` unaufgeloest und die Deklaration faellt weg.
+        // Pass 1: normal <style> declarations, low→high layer/specificity.
+        // `revert-layer` needs to know which layer a declaration came from, so it
+        // is resolved before anything is applied, and only when the sheet
+        // contains one.
+        // Initial values registered with `@property` are set once at the root:
+        // they sit beneath everything a rule sets and inherit downwards. Without
+        // them a `var()` naming a registered property stays unresolved and the
+        // declaration is dropped.
         if ancestors.is_empty() {
             for (name, val) in &sheet.registered {
                 set_var(own, inherited, name, val);
             }
         }
 
-        // ── Custom Properties zuerst ──────────────────────────────────
+        // ── Custom properties first ───────────────────────────────────
         //
-        // Vor jeder anderen Deklaration, denn jede andere darf sie lesen. Und
-        // in derselben Kaskadenordnung: Ebene, Spezifitaet, Reihenfolge —
-        // eine Regel, die dieses Element nicht trifft, steht hier gar nicht
-        // erst in der Liste. Genau das war der Fehler des Textlaufs.
+        // Before any other declaration, because any other may read them. In the
+        // same cascade order (layer, specificity, order); a rule that does not
+        // match this element is not in the list at all.
         for (_, _, _, _, _, customs, _) in &matched {
             for (name, val) in *customs {
                 set_var(own, inherited, name, val);
@@ -2005,9 +1926,9 @@ pub fn resolve_in(
         if let Some(decls) = inline {
             apply_declarations_pass_vars(decls, theme, Some(parent), &mut s, false, own, inherited);
         }
-        // Pass 2 — `!important`, where the layer axis reverses (css-cascade-5
-        // §6.4.4): the FIRST layer wins, and an unlayered important loses to
-        // every layered one. Specificity and order keep their direction.
+        // Pass 2: `!important`, where the layer axis reverses (css-cascade-5
+        // §6.4.4): the first layer wins, and an unlayered important loses to every
+        // layered one. Specificity and order keep their direction.
         matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (crate::css::imp_rank(*layer), *spec, *order));
         let dead_imp = if has_revert { resolve_revert_layers(&matched, true) } else { Vec::new() };
         for (layer, _, _, _, imp, _, _) in &matched {
@@ -2039,16 +1960,15 @@ pub fn resolve_in(
     if matches!(s.z_index, ZIndex::Inherit) {
         s.z_index = parent.z_index;
     }
-    // A CLOSED `<details>` renders only its disclosure control; the rest is
-    // skipped (HTML §4.11.1). This runs AFTER the author cascade on purpose:
-    // a browser hides the skipped contents through the shadow tree, where no
+    // A closed `<details>` renders only its disclosure control; the rest is
+    // skipped (HTML §4.11.1). This runs after the author cascade on purpose: a
+    // browser hides the skipped contents through the shadow tree, where no
     // author rule can reach them, so `details:not([open]) > div { display:
     // block }` must not reveal them either.
     //
-    // Element children only. A bare text node directly inside `<details>` is
-    // not covered — measured at 0 of 446 in the corpus (see
-    // `docs/plan/HTML_GAP_2026_08.md`), and covering it would mean a guard at
-    // each of the eleven places layout turns a `Node::Text` into a run.
+    // Not implemented: a bare text node directly inside `<details>` is not
+    // hidden; covering it would need a guard wherever layout turns a
+    // `Node::Text` into a run.
     if !s.is_summary
         && ancestors
             .last()
@@ -2056,23 +1976,21 @@ pub fn resolve_in(
     {
         s.display = Display::None;
     }
-    // `overflow` on the root element — and on `<body>` while the root keeps
-    // `visible` — propagates to the VIEWPORT, and the element's own used value
+    // `overflow` on the root element, and on `<body>` while the root keeps
+    // `visible`, propagates to the viewport, and the element's own used value
     // becomes `visible` (css-overflow-3 §3.3). So the box itself neither clips
     // nor establishes a formatting context.
     if el.tag == "html" || el.tag == "body" {
         s.overflow_x = Overflow::Visible;
         s.overflow_y = Overflow::Visible;
     }
-    // A float or an out-of-flow box is blockified (css-display-3 §2.7): it
-    // never joins a line box, so `inline`/`inline-block` there is just a block.
-    // `inline` matters for generated content — a page underlines its active tab
-    // with `a::after { position: absolute; … }` and states no display at all,
-    // relying on exactly this rule to give it a box.
-    // The internal table displays blockify too, and that is the whole of what
-    // `top`/`left` "do not apply" to them means: out of flow, the box is no
-    // longer a row or a cell, so the offsets it was given are an ordinary
-    // absolutely positioned block's.
+    // A float or an out-of-flow box is blockified (css-display-3 §2.7): it never
+    // joins a line box, so `inline`/`inline-block` there is just a block. This
+    // matters for generated content: `a::after { position: absolute; … }` with
+    // no display relies on it to get a box.
+    // The internal table displays blockify too, and that is what "`top`/`left`
+    // do not apply" to them means: out of flow, the box is no longer a row or a
+    // cell, so its offsets are an ordinary absolutely positioned block's.
     let out_of_flow =
         s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed);
     if out_of_flow
@@ -2114,14 +2032,12 @@ pub fn resolve_in(
         s.pct_margin_tb = [0.0; 2];
     }
     // `vertical-align` applies to inline-level boxes and table cells only
-    // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in
-    // a line box, and leaving the value on it would ride down into the text
-    // runs the box creates and shift its whole content — which is exactly what
-    // `vertical-align-sub-001` catches (two absolutely positioned spans that
-    // must coincide).
-    // A `<td>`/`<th>` carries `display: block` from the UA sheet — the table
-    // machinery recognises cells by tag/role, not by display — so the tag has
-    // to be part of the test.
+    // (CSS2.1 §10.8.1). An out-of-flow or block-level box is never aligned in a
+    // line box, and leaving the value on it would ride down into the text runs
+    // the box creates and shift its whole content.
+    // A `<td>`/`<th>` carries `display: block` from the UA sheet (the table
+    // machinery recognises cells by tag/role, not by display), so the tag has to
+    // be part of the test.
     let is_cell = matches!(s.display, Display::TableCell) || el.tag == "td" || el.tag == "th";
     if !is_cell
         && (matches!(s.position, Position::Absolute | Position::Fixed)
@@ -2133,9 +2049,8 @@ pub fn resolve_in(
     // Opacity groups the subtree: a transparent ancestor wins over anything
     // this element declares, but within this element the cascade decides.
     s.transparent |= s.opacity_zero;
-    // Die Deckung, die dieses Element seinen Laeufen mitgibt — siehe
-    // `inline_fade`. Nur ein reiner Inline-Kasten sammelt; alles mit einem
-    // eigenen Befehlsbereich faengt wieder bei 1 an.
+    // The opacity this element passes to its runs; see `inline_fade`. Only a
+    // pure inline box accumulates; anything with its own op range restarts at 1.
     let own_alpha = s.opacity * s.filter.map_or(1.0, |f| f.a);
     s.inline_fade = if s.display == Display::Inline
         && s.float == FloatKind::None
@@ -2151,15 +2066,10 @@ pub fn resolve_in(
     if s.bg_cc {
         s.bg = Some(s.color);
     }
-    // **Was schwebt oder absolut steht, ist block-artig** (css-display-3 §2.7).
-    // Ohne die Regel blieb ein `display: inline-flex` mit `float: right` ein
-    // ATOMARER INLINE: er stand auf der Zeile statt zu fliessen. Auf DDGs
-    // Wissenskasten war das der „Directions"-Knopf, der links vor dem Titel
-    // klebte, statt rechts neben ihm zu stehen.
-    //
-    // `getComputedStyle` rechnete dieselbe Regel schon — aber NUR fuer
-    // Flexkinder und nur fuer die Antwort, nicht fuers Layout. Jetzt eine
-    // Funktion fuer beide ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+    // A float or an absolutely positioned box is blockified (css-display-3
+    // §2.7); otherwise e.g. a floated `inline-flex` would stay an atomic inline
+    // on the line instead of floating. `getComputedStyle` uses the same
+    // `blockify`, so layout and the reported value agree.
     if s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed) {
         s.display = blockify(s.display);
     }
@@ -2168,11 +2078,11 @@ pub fn resolve_in(
     s
 }
 
-/// Die block-artige Entsprechung eines `display` (css-display-3 §2.7).
+/// The blockified equivalent of a `display` (css-display-3 §2.7).
 ///
-/// Gilt fuer alles, was aus dem Fluss faellt — schwebend, absolut, fest — und
-/// fuer ein Flex- oder Rasterkind. `list-item`, `block`, `flex` und `grid`
-/// bleiben, wie sie sind; `none` und `contents` erzeugen gar keinen Kasten.
+/// Applies to anything out of flow (floated, absolute, fixed) and to a flex
+/// or grid item. `list-item`, `block`, `flex` and `grid` stay as they are;
+/// `none` and `contents` generate no box at all.
 pub fn blockify(d: Display) -> Display {
     match d {
         Display::Inline | Display::InlineBlock | Display::TableCell | Display::TableCaption
@@ -2183,16 +2093,16 @@ pub fn blockify(d: Display) -> Display {
     }
 }
 
-/// `display: contents` — the element generates no box (css-display-3 §3.1).
+/// `display: contents`: the element generates no box (css-display-3 §3.1).
 ///
 /// Everything that only describes a box has nothing left to describe, and
-/// `inherit_reset` is exactly that split already: what it copies from its
-/// argument is the INHERITED half of the style, what it writes literally is
-/// the initial value of the non-inherited half. Applying it to the element's
-/// own computed style therefore keeps `color`/`font`/`text-align` — which the
-/// children must still inherit through it — and drops the margins, padding,
-/// borders, background, size, `position`, `float` and `overflow` in one go,
-/// with no list of properties to keep in step with the struct.
+/// `inherit_reset` is exactly that split: what it copies from its argument is
+/// the inherited half of the style, what it writes literally is the initial
+/// value of the non-inherited half. Applying it to the element's own computed
+/// style keeps `color`/`font`/`text-align` (which the children still inherit
+/// through it) and drops margins, padding, borders, background, size,
+/// `position`, `float` and `overflow` in one go, with no property list to
+/// keep in step with the struct.
 ///
 /// A replaced or void element has no children to put in its place, so there
 /// `display: contents` computes to `none` instead (css-display-4 §3.3).
@@ -2228,12 +2138,11 @@ fn unbox_contents(tag: &str, s: &mut ComputedStyle) {
 /// Resolve `el`'s `::before`/`::after` generated box: the winning `content`
 /// declaration (by the same specificity/order cascade as any other property)
 /// plus the pseudo-element's own computed style. Returns `None` when there is
-/// no matching rule, `content` is `none`/`normal`/unparseable (`attr()`,
-/// `counter()`, `open-quote`, `url()`, … are out of scope — docs/spec/CONFORMANCE.md's
-/// forward-compatible rule: produce nothing rather than mis-render), or the
-/// pseudo box itself computes to `display: none`.
+/// no matching rule, `content` is `none`/`normal`/unparseable (unsupported
+/// components produce nothing rather than mis-render), or the pseudo box
+/// itself computes to `display: none`.
 ///
-/// `own` is `el`'s OWN already-resolved computed style — the pseudo box
+/// `own` is `el`'s own already-resolved computed style; the pseudo box
 /// inherits from it exactly as a real child element would.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_pseudo(
@@ -2256,8 +2165,8 @@ pub fn resolve_pseudo(
     }
     matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
     // The `content` declarations in cascade order (later overrides earlier). An
-    // INVALID one is dropped at parse time (CSS Syntax 3 §4), so the winner is
-    // the LAST one that parses — not simply the last one. The template may
+    // invalid one is dropped at parse time (CSS Syntax 3 §4), so the winner is
+    // the last one that parses, not simply the last one. The template may
     // reference counters (`counter()`/`counters()`), resolved later against the
     // layout-time counter stack; a plain string is a single `Text` piece.
     let mut content_vals: Vec<&str> = Vec::new();
@@ -2280,29 +2189,24 @@ pub fn resolve_pseudo(
             }
         }
     }
-    // Layout only knows how to place the pseudo box as an anonymous INLINE
-    // text run (see `layout.rs`'s `pseudo()`); `display: none` produces no
-    // box. Any other display (`block`, `list-item`, …) is a box shape we
-    // don't lay out here — docs/spec/CONFORMANCE.md's forward-compatible rule: produce
-    // nothing rather than render it wrong. An explicit `width`/`height` is
-    // the same story a level down: generated content is emitted as a plain
-    // text run, so a sized spacer (the common `content: "…"; display:
-    // inline-block; width: N%` idiom some reftest references use as an
-    // indent trick) would flow as unsized text instead of reserving that
-    // width — visibly wrong, so skip it too.
-    // Same blockification as a real element (css-display-3 §2.7) — a generated
-    // box that is floated or out of flow never joins a line box. This is what
-    // gives `a::after { position: absolute }` a box when the page states no
-    // display at all.
+    // Layout places the pseudo box as an anonymous inline text run (see
+    // `layout.rs`'s `pseudo()`); `display: none` produces no box. Any other
+    // display (`block`, `list-item`, …) is a box shape not laid out here, so it
+    // produces nothing rather than render wrong. An explicit `width`/`height` is
+    // the same a level down: a sized spacer (`content: "…"; display:
+    // inline-block; width: N%`) would flow as unsized text instead of reserving
+    // that width, so it is skipped too.
+    // Same blockification as a real element (css-display-3 §2.7): a floated or
+    // out-of-flow generated box never joins a line box, which gives
+    // `a::after { position: absolute }` a box without a stated display.
     if matches!(s.display, Display::Inline | Display::InlineBlock)
         && (s.float != FloatKind::None || matches!(s.position, Position::Absolute | Position::Fixed))
     {
         s.display = Display::Block;
     }
     s.transparent |= s.opacity_zero;
-    // Die Deckung, die dieses Element seinen Laeufen mitgibt — siehe
-    // `inline_fade`. Nur ein reiner Inline-Kasten sammelt; alles mit einem
-    // eigenen Befehlsbereich faengt wieder bei 1 an.
+    // The opacity this element passes to its runs; see `inline_fade`. Only a
+    // pure inline box accumulates; anything with its own op range restarts at 1.
     let own_alpha = s.opacity * s.filter.map_or(1.0, |f| f.a);
     s.inline_fade = if s.display == Display::Inline
         && s.float == FloatKind::None
@@ -2323,15 +2227,13 @@ pub fn resolve_pseudo(
 }
 
 impl ComputedStyle {
-    /// Does this generated element produce a BOX we lay out as a rectangle —
-    /// the CSS-icon idiom, `content: ""` plus a size plus a `background-image`?
+    /// Does this generated element produce a box laid out as a rectangle (the
+    /// CSS-icon idiom: `content: ""` plus a size plus a `background-image`)?
     ///
     /// Deliberately a closed list. `display: none` produces nothing, and the
     /// table-internal roles have no content box of their own, so generated
-    /// content in them renders nothing at all — `before-content-display-012`
-    /// puts `content: "FAIL"` on a `display: table-column-group` and asserts
-    /// that nothing appears. Anything not listed here and not `inline` keeps
-    /// the old forward-compatible answer: produce nothing rather than guess.
+    /// content in them renders nothing at all. Anything not listed here and not
+    /// `inline` produces nothing rather than a guess.
     pub fn is_generated_box(&self) -> bool {
         matches!(
             self.display,
@@ -2358,13 +2260,11 @@ pub enum ContentPiece {
     Attr(String),
 }
 
-/// Parse a CSS `content` value into its component pieces: concatenated
-/// `<string>` tokens (`"a" 'b'`), `counter()`/`counters()` and `attr()`, in
-/// order. Any OTHER component (`open-quote`/`close-quote`, `url()`, an unknown
-/// identifier) is out of scope: rather than mis-render, the WHOLE value
-/// produces no content — the caller then generates nothing, per
-/// docs/spec/CONFORMANCE.md's forward-compatible rule. `none`/`normal` also produce
-/// nothing (no box).
+/// Parse a CSS `content` value into its pieces: concatenated `<string>`
+/// tokens (`"a" 'b'`), `counter()`/`counters()` and `attr()`, in order. Any
+/// other component (`open-quote`/`close-quote`, `url()`, an unknown
+/// identifier) is unsupported, and rather than mis-render, the whole value
+/// produces no content. `none`/`normal` also produce nothing (no box).
 pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
     let v = v.trim();
     if v.is_empty() || v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
@@ -2397,11 +2297,10 @@ pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
             let args = split_top_commas(&inside);
             let name = args.first().map(|s| s.trim()).filter(|s| !s.is_empty())?;
             let name_hash = counter_hash(name);
-            // A wrong argument count or an unrecognised `<counter-style>` makes
-            // the WHOLE `content` value invalid — it is dropped so an earlier
-            // valid declaration wins (CSS Syntax 3 §4), and an unimplemented but
-            // syntactically-valid style falls into the same "produce nothing"
-            // bucket per docs/spec/CONFORMANCE.md's forward-compatible rule.
+            // A wrong argument count or an unrecognised `<counter-style>` makes the
+            // whole `content` value invalid; it is dropped so an earlier valid
+            // declaration wins (CSS Syntax 3 §4). An unimplemented but syntactically
+            // valid style also produces nothing.
             if lname == "counter" {
                 // `counter(name)` | `counter(name, <style>)`
                 if args.len() > 2 {
@@ -2429,10 +2328,10 @@ pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
         if matches!(chars.peek(), Some('(')) && lname == "attr" {
             chars.next(); // consume '('
             let inside = read_until_close(&mut chars)?;
-            // CSS2.1 `attr(X)` takes exactly one argument — an attribute NAME,
-            // not a string. The type/fallback arguments are css-values-5 and
-            // would change what the value means, so they invalidate it here
-            // rather than being ignored.
+            // CSS2.1 `attr(X)` takes exactly one argument, an attribute name, not a
+            // string. The type/fallback arguments are css-values-5 and would change
+            // what the value means, so they invalidate it here rather than being
+            // ignored.
             let args = split_top_commas(&inside);
             let [name] = args.as_slice() else { return None };
             let name = name.trim();
@@ -2449,7 +2348,7 @@ pub fn parse_content_template(v: &str) -> Option<Vec<ContentPiece>> {
     if pieces.is_empty() { None } else { Some(pieces) }
 }
 
-/// Parse ONE CSS `<string>` token, with `chars` positioned on the opening
+/// Parse one CSS `<string>` token, with `chars` positioned on the opening
 /// quote. Consumes through the closing quote. Handles css-syntax-3 §4.3.7
 /// escapes: `\` + 1-6 hex digits (+ one optional trailing whitespace) is a code
 /// point (`\A` = U+000A, the "forced line break" idiom); `\` + an actual
@@ -2601,12 +2500,9 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         | "noscript" => {
             s.display = Display::None;
         }
-        // `<noscript>` gehoert wieder dazu, und der alte Kommentar hier sagte
-        // selbst, unter welcher Bedingung: „a browser hides it only while
-        // scripting is ENABLED … which is literally beak's case." Beaks Fall
-        // ist es seit Stage 1 nicht mehr — beak faehrt Skripte. Der Parser
-        // liest den Inhalt jetzt als Rohtext (`dom.rs::RAWTEXT`), diese Zeile
-        // ist der zweite Riegel.
+        // `<noscript>` is hidden because beak runs scripts (HTML hides it while
+        // scripting is enabled); the parser also reads its content as raw text
+        // (`dom.rs::RAWTEXT`).
         "body" => {
             s.display = Display::Block;
             s.margin_top = 8.0;
@@ -2622,10 +2518,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.display = Display::Block;
         }
         // `<center>` is `display: block; text-align: center` (HTML rendering
-        // §15.3.2). Left as the initial `inline` it swallows whatever it wraps
-        // into a line box — and a `<table>` inside it collapses to running text.
-        // Hacker News wraps its ENTIRE page in one, so the whole site rendered
-        // as a single paragraph.
+        // §15.3.2). Left as the initial `inline` it would pull whatever it wraps
+        // into a line box, and a `<table>` inside it would collapse into text.
         "center" => {
             s.display = Display::Block;
             s.text_align = TextAlign::Center;
@@ -2636,8 +2530,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // containers for their own content (`th` also bold). `tr`/`tbody`/… are
         // walked by `layout_table`, so their display is only a fallback.
         // No default margin: the HTML UA sheet gives `<table>` none (only
-        // `border-spacing`), and inventing one shifts everything after a table
-        // by half an em relative to what every reftest reference assumes.
+        // `border-spacing`).
         "table" => {
             s.display = Display::Table;
             // The HTML UA sheet's `border-spacing: 2px` (HTML §15.3.8). It is
@@ -2668,9 +2561,7 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
                 s.text_align = TextAlign::Center;
             }
         }
-        // §15.3.8 gibt `<caption>` nur `text-align: center`. Fett und ein
-        // Abstand darunter waren unsere Zutat — und eine Tabellenueberschrift,
-        // die fett ist, wo die Seite sie mager erwartet, faellt auf.
+        // §15.3.8 gives `<caption>` only `text-align: center`; no bold, no gap.
         "caption" => {
             s.display = Display::Block;
             s.text_align = TextAlign::Center;
@@ -2681,8 +2572,8 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.margin_bottom = em;
         }
 
-        // Headings — Groesse und Rand aus HTML §15.3.6, nicht nach Augenmass.
-        // Der Rand ist in em der UEBERSCHRIFT, oben wie unten gleich.
+        // Headings: size and margin from HTML §15.3.6. The margin is in ems of the
+        // heading itself, equal above and below.
         "h1" => heading(s, theme, em, 2.00, 0.67),
         "h2" => heading(s, theme, em, 1.50, 0.83),
         "h3" => heading(s, theme, em, 1.17, 1.00),
@@ -2693,18 +2584,14 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         // Lists.
         "ul" | "ol" | "menu" => {
             s.display = Display::Block;
-            // `padding-inline-start: 40px` (HTML §15.3.6), nicht 26 nach
-            // Augenmass: jede Liste einer ungestalteten Seite stand 14 px zu
-            // weit links, und ein Reftest backt die Zahl als Pixel ein.
+            // `padding-inline-start: 40px` (HTML §15.3.6).
             s.pad_left = 40.0;
             s.margin_top = em;
             s.margin_bottom = em;
             s.list_style = if tag == "ol" { ListStyle::Decimal } else { ListStyle::Disc };
-            // Eine Liste IN einer Liste hat keinen Aussenrand. Die
-            // Spezifikation sagt „irgendein Listen-Vorfahr"; wir sehen den
-            // Elter, und der ist bei der Schachtelung, die vorkommt, das
-            // `<li>`. `li > div > ul` faellt durch — und faellt auf, sobald es
-            // jemand misst.
+            // A list inside a list has no outer margin. The spec says "any list
+            // ancestor"; we see the parent, which for common nesting is the `<li>`.
+            // Not handled: `li > div > ul`.
             if parent.display == Display::ListItem {
                 s.margin_top = 0.0;
                 s.margin_bottom = 0.0;
@@ -2719,17 +2606,14 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "dt" => s.display = Display::Block,
         "dd" => {
             s.display = Display::Block;
-            // `margin-inline-start: 40px` — ein RAND, keine Polsterung: ein
-            // Hintergrund auf `<dd>` faengt links bei 40 px an, nicht bei 0.
+            // `margin-inline-start: 40px`: a margin, not padding, so a background on
+            // `<dd>` starts at 40 px, not at 0.
             s.margin_left = Len::Px(40.0);
         }
 
-        // `margin-block: 1em; margin-inline: 40px` (HTML §15.3.3) — ein RAND
-        // aussen, keine Polsterung innen. Der Unterschied ist sichtbar,
-        // sobald das Zitat einen Hintergrund oder Rahmen traegt. Und keine
-        // eigene Farbe: die Spezifikation faerbt `<blockquote>` nicht, und ein
-        // grauer Kasten auf einer Seite, die ihn schwarz erwartet, ist unser
-        // Geschmack im Blatt eines fremden Autors.
+        // `margin-block: 1em; margin-inline: 40px` (HTML §15.3.3): an outer margin,
+        // not inner padding, which shows once the quote has a background or
+        // border. No colour of its own: the spec does not colour `<blockquote>`.
         "blockquote" | "figure" => {
             s.display = Display::Block;
             s.margin_top = em;
@@ -2752,17 +2636,15 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
             s.margin_bottom = em * 0.5;
         }
 
-        // `font-style: italic` (HTML §15.3.3). Die einzige Vorgabe, die
-        // `<address>` von einem `<div>` unterscheidet.
+        // `font-style: italic` (HTML §15.3.3), the only default that distinguishes
+        // `<address>` from a `<div>`.
         "address" => {
             s.display = Display::Block;
             s.italic = true;
         }
 
-        // §15.3.11: 2 px Aussenrand, ein 2 px `groove`-Rahmen und eine
-        // Polsterung, die oben und unten verschieden ist. Ohne den Rahmen war
-        // ein `<fieldset>` von einem `<div>` nicht zu unterscheiden — und das
-        // Feld, das es umschliesst, ist genau der Zweck des Elements.
+        // §15.3.11: 2 px margin, a 2 px `groove` border, and padding that differs
+        // top and bottom.
         "fieldset" => {
             s.display = Display::Block;
             s.margin_left = Len::Px(2.0);
@@ -2778,12 +2660,10 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
                 side.color = Some(theme.rule.into());
             }
         }
-        // `<legend>` ist kein gewoehnlicher Block: es schrumpft auf seinen
-        // Text und sitzt auf dem oberen Rahmen seines `<fieldset>`. Die
-        // Spezifikation beschreibt das als eigenen Kasten; `fit-content` holt
-        // die BREITE davon ein (96 statt 1854 px), die Lage auf dem Rahmen
-        // noch nicht — die kostet ein Loch im Rahmen und einen Kasten, der aus
-        // dem Fluss faellt, und das ist eine eigene Arbeit.
+        // `<legend>` is not an ordinary block: it shrinks to its text and sits on
+        // the top border of its `<fieldset>`. `fit-content` gives the width. Not
+        // implemented: the placement on the border (a gap in the border and a box
+        // out of flow).
         "legend" => {
             s.display = Display::Block;
             s.width = Len::Intrinsic(Intrinsic::Fit);
@@ -2802,15 +2682,14 @@ fn ua_rule(tag: &str, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedSty
         "s" | "del" | "strike" => s.deco |= DECO_LINE_THROUGH,
         "i" | "em" | "cite" | "var" | "dfn" => s.italic = true,
         "code" | "kbd" | "samp" | "tt" => s.mono = true,
-        // `smaller` und `larger` sind EINE Stufe der Schriftskala, also
-        // /1,2 und ×1,2 (css-fonts-4 §3.3) — nicht 0,85 und 1,15 nach
-        // Augenmass. Chromium rechnet aus 16 px genau 13,3333 und 19,2.
+        // `smaller` and `larger` are one step of the font-size scale, i.e. /1.2 and
+        // ×1.2 (css-fonts-4 §3.3).
         "small" => s.font_px = em / 1.2,
         "big" => s.font_px = em * 1.2,
         "mark" => s.color = theme.link.into(),
         "br" => s.is_break = true,
-        // Superscript / subscript: `font-size: smaller`, von der Grundlinie
-        // gehoben bzw. gesenkt (HTML §15.3.4).
+        // Superscript / subscript: `font-size: smaller`, raised or lowered from the
+        // baseline (HTML §15.3.4).
         "sup" => {
             s.font_px = em / 1.2;
             s.valign = VAlign::Super;
@@ -2833,10 +2712,6 @@ fn heading(s: &mut ComputedStyle, theme: &Theme, em: f32, scale: f32, margin_em:
     s.margin_bottom = s.font_px * margin_em;
 }
 
-/// Parse and apply a `style="a: b; c: d"` declaration list. This is real CSS
-/// declaration syntax (css-syntax-3), just without selectors — the same parser
-/// a `<style>` rule body will use. Unknown properties are ignored (forward
-/// compatible, like a browser).
 /// Split a declaration value into (value, is_important). `!important` is a
 /// trailing flag (css-syntax-3): optional whitespace, then `!important`
 /// (case-insensitive).
@@ -2850,35 +2725,29 @@ fn split_important(v: &str) -> (&str, bool) {
     }
 }
 
-/// Apply the `style="…"` declarations whose importance matches `important`, so
-/// callers run the two cascade passes. css-syntax-3 syntax, unknown props skipped.
-/// Eine Custom Property setzen — und dabei ihren eigenen Wert einsetzen.
+/// Set a custom property, substituting its own value.
 ///
-/// `skip` ist ihr eigener Name: `--x: var(--x, 1rem)` heisst „nimm den
-/// geerbten Wert, sonst 1rem" (so schreibt es Wikipedia). Wuerde sie sich
-/// selbst finden, bliebe ein `var()` stehen und die Deklaration waere
-/// ungueltig.
+/// `skip` is its own name: `--x: var(--x, 1rem)` means "the inherited value,
+/// else 1rem". If it found itself, a `var()` would remain and the declaration
+/// would be invalid.
 fn set_var(own: &mut Option<crate::vars::VarMap>, inherited: &crate::vars::VarMap,
            name: &str, val: &str) {
-    // Erst hier kopieren: wer nichts setzt, teilt die Karte des Elternteils.
+    // Copy only now: an element that sets nothing shares the parent's map.
     if own.is_none() { *own = Some(inherited.clone()); }
     let map = own.as_mut().unwrap();
-    // ROH ablegen, nicht ersetzen. Der Wert einer Custom Property wird erst
-    // eingesetzt, wenn ihn jemand BENUTZT (css-variables-1 §3) — und dann gegen
-    // die fertige Karte. Wer hier schon ersetzt, friert den Stand der Kaskade
-    // von diesem Augenblick ein: Tailwind schreibt
+    // Store raw, do not substitute. A custom property's value is substituted
+    // only when it is used (css-variables-1 §3), against the final map.
+    // Substituting here would freeze the cascade at this point, so a later rule
+    // that sets a referenced variable would come too late:
     //
     //     .ring-4        { --tw-ring-shadow: … var(--tw-ring-color,currentcolor) }
     //     .ring-blue-500 { --tw-ring-color:  var(--color-blue-500) }
     //
-    // und die Farbregel steht HINTER der Breitenregel. Eingesetzt wurde
-    // deshalb der Ausweichwert `currentcolor`, und `ring-4 ring-blue-500`
-    // malte einen Ring in der Textfarbe. Ringe im Schleifchen fangen die
-    // Paesse in `expand` ab, nicht mehr diese Stelle.
+    // Cycles are caught by the passes in `expand`.
     crate::vars::var_set(map, name, val);
 }
 
-/// Die Custom Properties eines `style`-Attributs.
+/// The custom properties of a `style` attribute.
 fn inline_customs(decls: &str, important: bool) -> alloc::vec::Vec<(String, String)> {
     let mut out = alloc::vec::Vec::new();
     for decl in crate::css::split_decls(decls) {
@@ -2892,7 +2761,7 @@ fn inline_customs(decls: &str, important: bool) -> alloc::vec::Vec<(String, Stri
     out
 }
 
-/// Eine gewoehnliche Deklaration anwenden, `var()` vorher ersetzt.
+/// Apply an ordinary declaration, with `var()` substituted first.
 fn apply_var_decl(prop: Prop, v: &str, theme: &Theme, parent: &ComputedStyle,
                   s: &mut ComputedStyle, own: &Option<crate::vars::VarMap>,
                   inherited: &crate::vars::VarMap) {
@@ -2947,8 +2816,8 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, parent: Option<&ComputedS
     }
 }
 
-/// Apply a single `prop: val` declaration. Shared by inline styles now and by
-/// author `<style>` rules later.
+/// Apply a single `prop: val` declaration. Shared by inline styles and
+/// author `<style>` rules.
 impl ComputedStyle {
     /// The `em`/`rem` bases for parsing this element's declarations.
     pub fn units(&self) -> Units {
@@ -2962,7 +2831,7 @@ pub const VH_MAX_HEIGHT: u8 = 2;
 pub const VH_MIN_HEIGHT: u8 = 4;
 
 /// Does this declaration value carry a length relative to the viewport
-/// HEIGHT? `vw` alone does not: a width-only dependency is already covered by
+/// height? `vw` alone does not: a width-only dependency is already covered by
 /// the layout width being part of the cache key.
 fn has_viewport_h_unit(v: &str) -> bool {
     let b = v.as_bytes();
@@ -2992,8 +2861,8 @@ fn is_revert_layer(v: &str) -> bool {
 
 /// Which `(property, layer)` pairs a winning `revert-layer` removes from the
 /// cascade. `matched` is in ascending cascade order, so a property's winner is
-/// its LAST declaration; if that one says `revert-layer`, its whole layer goes
-/// out for that property and the next-lower layer's declaration takes over —
+/// its last declaration; if that one says `revert-layer`, its whole layer goes
+/// out for that property and the next-lower layer's declaration takes over,
 /// which may itself be a `revert-layer`, hence the loop.
 ///
 /// Unlayered rules revert against the UA sheet, which is already applied by
@@ -3004,8 +2873,8 @@ fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Ve
         let mut winner: Vec<(Prop, u16, bool)> = Vec::new();
         for (layer, _, _, decls, imp, _, _) in matched {
             for (p, v) in if important { *imp } else { *decls } {
-                // `all: revert-layer` reverts the layer for EVERY property, so
-                // a dead `All` takes the whole layer with it.
+                // `all: revert-layer` reverts the layer for every property, so a dead `All`
+                // takes the whole layer with it.
                 if dead.contains(&(*p, *layer)) || dead.contains(&(Prop::All, *layer)) {
                     continue;
                 }
@@ -3035,8 +2904,8 @@ fn resolve_revert_layers(matched: &[crate::css::Matched], important: bool) -> Ve
 }
 
 /// One declaration, with the CSS-wide keywords taken first. `parent` is what
-/// `inherit` reads; a caller with no parent to hand (the UA sheet, which never
-/// writes one) passes `None` and gets the old behaviour.
+/// `inherit` reads; a caller with no parent (the UA sheet, which never writes
+/// one) passes `None`, and the keywords go to the per-property handling.
 fn apply_decl(prop: Prop, v: &str, theme: &Theme, parent: Option<&ComputedStyle>, s: &mut ComputedStyle) {
     if let (Some(kw), Some(p)) = (wide_keyword(v), parent) {
         if apply_wide(prop, kw, p, theme, s) {
@@ -3046,11 +2915,10 @@ fn apply_decl(prop: Prop, v: &str, theme: &Theme, parent: Option<&ComputedStyle>
     apply_one(prop, v, theme, s);
 }
 
-/// A CSS-wide keyword (css-cascade-5 §7). `revert` is deliberately absent:
-/// it rolls back to the UA ORIGIN, which would mean snapshotting every
-/// element's style after `ua_rule` and before the author cascade — a copy of
-/// a large `Copy` struct per element, for a keyword six tests in the whole
-/// corpus write. It keeps its previous per-property handling.
+/// A CSS-wide keyword (css-cascade-5 §7). Not implemented: `revert`. It rolls
+/// back to the UA origin, which would need a snapshot of every element's
+/// style between `ua_rule` and the author cascade; it keeps its per-property
+/// handling.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Wide {
     Inherit,
@@ -3058,10 +2926,8 @@ pub enum Wide {
     Unset,
 }
 
-/// Is this declaration value a CSS-wide keyword? These apply to EVERY
-/// property, so before this they were handled property by property — a
-/// handful had an arm, and on the rest `border-bottom-color: inherit` simply
-/// failed to parse and left the previous declaration standing.
+/// Is this declaration value a CSS-wide keyword? These apply to every
+/// property, so they are handled here once rather than per property.
 pub fn wide_keyword(v: &str) -> Option<Wide> {
     let v = v.trim();
     // Cheap gate: the three keywords are 5-7 bytes and start with i/u.
@@ -3082,12 +2948,12 @@ pub fn wide_keyword(v: &str) -> Option<Wide> {
 /// Apply a CSS-wide keyword to one property.
 ///
 /// `inherit` takes the parent's computed value. `unset` takes whichever of
-/// inherit/initial the property's inheritance says — which `inherit_reset`
-/// already encodes exactly: what it copies from the parent is inherited, what
-/// it leaves at the default is not. `initial` reads from a fresh root style.
+/// inherit/initial the property's inheritance says, which `inherit_reset`
+/// already encodes: what it copies from the parent is inherited, what it
+/// leaves at the default is not. `initial` reads from a fresh root style.
 ///
-/// Returns false for a property with no arm here, so the caller can fall
-/// through to the old per-property handling rather than silently dropping it.
+/// Returns false for a property with no arm here, so the caller falls
+/// through to the per-property handling rather than dropping it.
 pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s: &mut ComputedStyle) -> bool {
     let owned;
     let src: &ComputedStyle = match kw {
@@ -3102,11 +2968,11 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         }
     };
     match prop {
-        // `all` is every property at once, minus `direction`/`unicode-bidi`,
-        // which css-cascade-5 §3.2 excludes by name. Everything else in the
-        // struct that is NOT a property has to survive: the document-global
-        // bases, the presentational-attribute hints, and the element-identity
-        // flags the UA sheet set.
+        // `all` is every property at once, minus `direction`/`unicode-bidi`, which
+        // css-cascade-5 §3.2 excludes by name. Everything in the struct that is not
+        // a property has to survive: the document-global bases, the
+        // presentational-attribute hints, and the element-identity flags the UA
+        // sheet set.
         Prop::All => {
             let rtl = s.rtl;
             let (rem, vw, vh, seen) = (s.rem_base, s.vw, s.vh, s.vh_seen);
@@ -3306,11 +3172,8 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
 }
 
 pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
-    // CSS keywords are case-insensitive, so this used to lowercase every value
-    // it was handed. On a real article that is ~152 000 declarations per
-    // layout of which ~500 actually carry an uppercase letter: 151 500 heap
-    // allocations to produce a copy identical to the input. Borrow instead,
-    // and only allocate for the 0.3 % that need it.
+    // CSS keywords are case-insensitive, but almost no value carries an
+    // uppercase letter. Borrow, and allocate a lowercased copy only when needed.
     let t = val.trim();
     let lowered: String;
     let v: &str = if t.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -3320,8 +3183,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         t
     };
     // Only declarations that actually reach an element pass here, so this
-    // counts MATCHED rules rather than occurrences in the stylesheet text —
-    // Wikipedia's three stray `vh`s never match anything.
+    // counts matched rules rather than occurrences in the stylesheet text.
     if has_viewport_h_unit(&v) {
         s.vh_seen |= match prop {
             Prop::MaxHeight => VH_MAX_HEIGHT,
@@ -3330,9 +3192,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         };
     }
     // Font-relative bases for this element, taken once: `apply_one` handles a
-    // single declaration, so `font-size` (which uses its own inherited base)
-    // is the only property that could move them, and it does so for the NEXT
-    // call — matching the cascade's declaration order.
+    // single declaration, so `font-size` (which uses its own inherited base) is
+    // the only property that could move them, and it does so for the next call,
+    // matching the cascade's declaration order.
     let u = s.units();
     match prop {
         // `all` only ever carries a CSS-wide keyword, and `apply_wide` has
@@ -3345,8 +3207,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "inline" => Display::Inline,
                 "contents" => Display::Contents,
                 "inline-block" => Display::InlineBlock,
-                // A block box that establishes a BFC — the explicit spelling
-                // of the `overflow: hidden` clearfix, without the clipping.
+                // A block box that establishes a BFC: the explicit spelling of the
+                // `overflow: hidden` clearfix, without the clipping.
                 "flow-root" => {
                     s.bfc_root = true;
                     Display::Block
@@ -3377,11 +3239,11 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         // `word-wrap` is the legacy alias of `overflow-wrap`; `word-break:
-        // break-word` is a deprecated spelling with the same effect. All three
-        // land on one flag — we break at a character, not by script rules, so
-        // `break-all` is not distinguished from `break-word`.
-        // Two values are `x y`; a single one applies to both. Only a box that
-        // clips on BOTH axes is clipped here (see `overflow_clip`).
+        // break-word` is a deprecated spelling with the same effect. All three land
+        // on one flag: we break at a character, not by script rules, so `break-all`
+        // is not distinguished from `break-word`.
+        // Two values are `x y`; a single one applies to both. Only a box that clips
+        // on both axes is clipped here (see `overflow_clip`).
         Prop::Overflow => {
             let mut it = v.split_whitespace();
             let x = it.next().unwrap_or("");
@@ -3391,16 +3253,16 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::OverflowX => s.overflow_x = parse_overflow(v.trim()),
         Prop::OverflowY => s.overflow_y = parse_overflow(v.trim()),
-        // `text-overflow` takes two values in css-ui-4 (line-start, line-end);
-        // only the END one is ever anything but `clip` on a real page, and the
-        // one-value form sets exactly that. A `<string>` custom ellipsis is
-        // parsed as "not `clip`" rather than rendered literally.
+        // `text-overflow` takes two values in css-ui-4 (line-start, line-end); only
+        // the end one is normally anything but `clip`, and the one-value form sets
+        // exactly that. A `<string>` custom ellipsis is parsed as "not `clip`"
+        // rather than rendered literally.
         Prop::TextOverflow => s.ellipsis = v.split_whitespace().next_back().is_some_and(|t| t != "clip"),
-        // A chain of only colour functions composes to one matrix; anything
-        // else (`blur`, `drop-shadow`, `url()`) leaves the property alone, so
-        // the page gets its own pixels rather than a guess at a blur.
-        // The identity is kept as `None` — it is `filter: none`, and carrying
-        // it would put every op of the subtree through a no-op transform.
+        // A chain of only colour functions composes to one matrix; anything else
+        // (`blur`, `drop-shadow`, `url()`) leaves the property alone, so the page
+        // gets its own pixels rather than a guess at a blur.
+        // The identity is kept as `None` (`filter: none`); carrying it would put
+        // every op of the subtree through a no-op transform.
         Prop::Filter | Prop::WebkitFilter => {
             if let Some(f) = crate::color::parse_filter(v) {
                 s.filter = (f != crate::color::ColorFilter::IDENTITY).then_some(f);
@@ -3442,8 +3304,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         }
         Prop::BorderTopLeftRadius | Prop::BorderTopRightRadius | Prop::BorderBottomRightRadius
         | Prop::BorderBottomLeftRadius => {
-            // One corner takes `h v`; we keep the horizontal radius.
-            // Klammernbewusst: eine Ecke kann `calc(…) calc(…)` tragen.
+            // One corner takes `h v`; we keep the horizontal radius. Paren-aware: a
+            // corner may carry `calc(…) calc(…)`.
             if let Some(n) = parse_len_opt(css_tokens(&v).first().copied().unwrap_or(""), u) {
                 let i = match prop {
                     Prop::BorderTopLeftRadius => 0,
@@ -3479,9 +3341,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.italic = matches!(v, "italic" | "oblique");
         }
         Prop::FontSize => {
-            // em/%/inherit/relative keywords resolve against the PARENT font
-            // (em_base), NOT the running value — so nothing compounds and a
-            // later cascade winner (incl. `inherit`) is exact, not multiplied.
+            // em/%/inherit/relative keywords resolve against the parent font
+            // (em_base), not the running value, so nothing compounds and a later
+            // cascade winner (incl. `inherit`) is exact, not multiplied.
             let base = s.em_base;
             let px = match v {
                 "inherit" | "unset" => Some(base),
@@ -3494,10 +3356,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "xx-large" => Some(BASE_FONT_PX * 2.0),
                 "larger" => Some(base * 1.2),
                 "smaller" => Some(base / 1.2),
-                // Ohne Einheit ist es keine Laenge und damit eine ungueltige
-                // Deklaration — die faellt WEG und laesst den geerbten Wert
-                // stehen, statt als 700-px-Schrift durchzukommen
-                // ([[feedback_unknown_unit_invalidates_the_declaration]]).
+                // Without a unit it is not a length, so the declaration is invalid and
+                // dropped, keeping the inherited value.
                 _ if unitless_nonzero(&v) => None,
                 _ => parse_length(&v, Units { em: base, ..s.units() }),
             };
@@ -3506,8 +3366,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             }
         }
         // `line-height: normal | <number> | <length> | <percentage>`. A bare
-        // number stays a number (inherits as a ratio); everything else computes
-        // to px against THIS element's font-size, per CSS 2.1 §10.8.1.
+        // number stays a number (inherits as a ratio); everything else computes to
+        // px against this element's font-size, per CSS 2.1 §10.8.1.
         Prop::LineHeight => {
             let t = v.trim();
             s.line_height = if t == "normal" {
@@ -3520,12 +3380,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             } else if let Ok(n) = t.parse::<f32>() {
                 LineHeight::Num(n)
             } else if is_unitless_calc(t) {
-                // **`calc()` ohne Einheit ist eine ZAHL, keine Laenge.**
-                // Tailwind v4 schreibt JEDE Zeilenhoehe so — `.text-xs` bringt
-                // `line-height: calc(1 / .75)` mit. Als Laenge gelesen sind
-                // das 1,3 PIXEL: die Zeilenkaesten fallen auf null zusammen,
-                // aufeinanderfolgende Absaetze werden uebereinandergedruckt,
-                // und der Text landet mit negativem y ueber dem Seitenrand.
+                // A `calc()` without units is a number, not a length (e.g.
+                // `line-height: calc(1 / .75)`). Read as a length it would be about one
+                // pixel and the line boxes would collapse.
                 match parse_len_opt(t, u) {
                     Some(Len::Px(v)) => LineHeight::Num(v),
                     _ => s.line_height,
@@ -3550,9 +3407,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         // space's own advance, which is not known here — dropped, not guessed.
         Prop::LetterSpacing | Prop::WordSpacing => {
             let t = v.trim();
-            // A percentage resolves against the element's own font-size
-            // (css-text-4 §8.1/§8.2) — not against a containing block, which is
-            // what `parse_length` would do with it.
+            // A percentage resolves against the element's own font-size (css-text-4
+            // §8.1/§8.2), not against a containing block, which is what
+            // `parse_length` would do with it.
             let px = if t == "normal" {
                 Some(0.0)
             } else if let Some(n) = t.strip_suffix('%') {
@@ -3618,8 +3475,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 "justify" => TextAlign::Justify,
                 "end" => TextAlign::End,
                 "start" => TextAlign::Start,
-                // `match-parent` on a LTR root computes to `left`; `inherit`/
-                // `unset` are already the inherited value we started from.
+                // `match-parent` on an LTR root computes to `left`; `inherit`/`unset` are
+                // already the inherited value we started from.
                 "match-parent" | "inherit" | "unset" => s.text_align,
                 _ => s.text_align,
             };
@@ -3663,19 +3520,18 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.pre = false;
                 s.nowrap = true;
             }
-            // `inherit`/`unset`/garbage: an invalid or non-recomputable value
-            // drops (CSS Syntax 3 §4), keeping whatever the cascade already
-            // set — for `inherit` specifically, that's already the parent's
-            // value, since `pre` is copied from `parent` before this runs.
+            // `inherit`/`unset`/garbage: an invalid or non-recomputable value drops
+            // (CSS Syntax 3 §4), keeping whatever the cascade already set; for
+            // `inherit` that is the parent's value, since `pre` is copied from
+            // `parent` before this runs.
             _ => {}
         },
         // `collapse` differs from `hidden` only on table rows/columns (where it
         // removes the track); everywhere else the spec says treat it as
         // `hidden`, and we have no row-removal to do.
         Prop::Opacity => {
-            // Also `50%` — css-color-4 allows a percentage everywhere a
-            // <alpha-value> is taken, and Tailwind's `opacity-*` emits plain
-            // numbers while hand-written CSS often does not.
+            // Also `50%`: css-color-4 allows a percentage wherever an <alpha-value> is
+            // taken.
             let t = v.trim();
             let parsed = match t.strip_suffix('%') {
                 Some(n) => n.trim().parse::<f32>().map(|p| p / 100.0),
@@ -3722,9 +3578,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             };
         }
         // css-ui-4 §4. Only `none` concerns us: it says "do not draw the UA
-        // widget", and the page then supplies the whole look. Every other
-        // value (`auto`, `button`, `textfield`, …) keeps our chrome. The
-        // prefixed spellings still carry the real web's styled controls.
+        // widget", and the page supplies the whole look. Every other value
+        // (`auto`, `button`, `textfield`, …) keeps our chrome. The prefixed
+        // spellings are still in wide use.
         Prop::Appearance | Prop::WebkitAppearance | Prop::MozAppearance => s.appearance_none = v == "none",
         Prop::Contain => s.contain_size = v.split_whitespace().any(|k| k == "size" || k == "strict"),
         Prop::ContainIntrinsicSize => {
@@ -3793,7 +3649,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         // — background + border —
         // `background-color` is a single property; `background` is a shorthand
-        // that resets every longhand it covers — including the image — and is
+        // that resets every longhand it covers (including the image) and is
         // applied as a unit or not at all.
         Prop::BackgroundColor => {
             let vt = v.trim();
@@ -3814,9 +3670,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Background => {
             let vt = v.trim();
             if let Some(cv) = parse_color_val(vt, theme) {
-                // The whole value is one colour — the overwhelmingly common
-                // case, and the only one where a function colour's internal
-                // spaces must not be read as separate tokens.
+                // The whole value is one colour: the common case, and the only one where
+                // a function colour's internal spaces must not be read as separate
+                // tokens.
                 s.bg = match cv {
                     ColorVal::Rgb(c) => Some(c),
                     ColorVal::Transparent => None,
@@ -3841,18 +3697,17 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::BackgroundImage => {
             let image = parse_bg_image(val);
             let gradient = parse_gradient(val, theme);
-            // Einen Wert, den wir gar nicht lesen koennen, VERWIRFT css-syntax-3
-            // — der vorige bleibt stehen. `-webkit-gradient(…)` ist so einer,
-            // und Blaetter schreiben ihn als Vorspann vor die
-            // Standardschreibweise. Ihn als „kein Bild" zu nehmen loeschte
-            // genau den Verlauf, der eine Zeile spaeter kommt.
+            // A value we cannot read at all is dropped (css-syntax-3) and the previous
+            // one stays. `-webkit-gradient(…)` is such a value, written as a prefix
+            // line before the standard spelling; taking it as "no image" would erase
+            // the gradient declared next.
             if image.is_some() || gradient.is_some() || v == "none" {
                 s.bg_layer.image = image;
                 s.bg_layer.gradient = gradient;
             }
         }
-        // `background-clip: text` stencils the background through the glyphs —
-        // a different mechanism, not a smaller box — so it is left alone rather
+        // `background-clip: text` stencils the background through the glyphs, a
+        // different mechanism rather than a smaller box, so it is left alone rather
         // than approximated by one of the three rectangles.
         Prop::BackgroundClip | Prop::WebkitBackgroundClip => {
             if let Some(e) = parse_box_edge(&v) {
@@ -3879,12 +3734,12 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.bg_layer.size = sz;
             }
         }
-        // `mask` is still shipped prefixed by the icon systems that use it, and
-        // the two spellings are the same property to us.
+        // `mask` is still shipped prefixed by the icon systems that use it, and the
+        // two spellings are the same property to us.
         Prop::Mask | Prop::WebkitMask => {
-            // A mask takes no colour of its own — it stencils the element's
-            // `background-color` — so the shorthand's colour, `currentcolor`
-            // included, has nothing to land on here.
+            // A mask takes no colour of its own (it stencils the element's
+            // `background-color`), so the shorthand's colour, `currentcolor` included,
+            // has nothing to land on here.
             if let Some((_, layer, ..)) = parse_bg_shorthand(val, &v, u, theme, &mut false) {
                 s.mask_layer = layer;
             }
@@ -3912,9 +3767,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.border_bottom = side;
             s.border_left = side;
         }
-        // `outline` reuses the border shorthand grammar (width || style ||
-        // colour) — css-ui-4 §3.5 defines it that way, minus `outline-style:
-        // auto`, which is the UA's own focus ring and not a value we can draw.
+        // `outline` reuses the border shorthand grammar (width || style || colour),
+        // as css-ui-4 §3.5 defines it, minus `outline-style: auto`, which is the
+        // UA's own focus ring and not a value we can draw.
         Prop::Outline => { s.outline = parse_border_shorthand(&v, u, theme); s.outline_set = true; }
         Prop::OutlineWidth => {
             s.outline_set = true;
@@ -3944,10 +3799,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 s.outline_offset = px;
             }
         }
-        // `auto` ist der Anfangswert und heisst „das Thema entscheidet".
-        // Jede andere Farbe gilt; eine unlesbare laesst den Vorgaenger stehen
-        // (dieselbe Regel wie ueberall — ein gescheiterter Parse verwirft die
-        // Deklaration, er loescht nicht).
+        // `auto` is the initial value and means "the theme decides". Any other
+        // colour applies; an unreadable one leaves the previous value (a failed
+        // parse drops the declaration, it does not clear).
         Prop::AccentColor => {
             let t = v.trim();
             if t.eq_ignore_ascii_case("auto") {
@@ -4131,9 +3985,8 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::AlignSelf => s.align_self = parse_cross(&v),
         // `gap` shorthand is `<row-gap> <column-gap>`; the longhands set one axis.
         Prop::Gap | Prop::GridGap => {
-            // Klammernbewusst, wie `padding` und `margin` — sonst zerfaellt
-            // `gap: calc(.25rem * 3)` in drei Wortstuecke und der Abstand ist
-            // null. Tailwind schreibt jedes `gap-*` so.
+            // Paren-aware, like `padding` and `margin`; otherwise
+            // `gap: calc(.25rem * 3)` would split into three tokens.
             let t = css_tokens(&v);
             let mut it = t.into_iter();
             let row = it.next().map(|t| parse_len(t, u)).filter(|l| *l != Len::Auto);
@@ -4265,10 +4118,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 }
 
 /// A CSS `<integer>`, saturating to the 32-bit signed range instead of
-/// rejecting out-of-range literals as invalid (CSS Values & Units — Range
-/// Checking: values outside the supported range are clamped, not dropped).
-/// Accepts an optional leading `+`/`-` and ASCII digits only; `None` for
-/// anything else (empty, non-digit, signs-only).
+/// rejecting out-of-range literals (css-values range checking: values
+/// outside the supported range are clamped, not dropped). Accepts an
+/// optional leading `+`/`-` and ASCII digits only; `None` for anything else.
 fn parse_saturating_i32(v: &str) -> Option<i32> {
     let t = v.trim();
     let (neg, digits) = match t.strip_prefix('-') {
@@ -4288,7 +4140,7 @@ fn parse_saturating_i32(v: &str) -> Option<i32> {
 
 /// A `<length>`/`auto`/`%` value for the box model.
 /// Fallible length parse. `None` = the value is invalid, so the caller must
-/// KEEP the previously-cascaded value — an invalid declaration is dropped, it
+/// keep the previously cascaded value: an invalid declaration is dropped, it
 /// does not reset the property to its default (CSS Syntax 3 §4). `auto` is a
 /// valid keyword and returns `Some(Len::Auto)`.
 fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
@@ -4312,14 +4164,11 @@ fn parse_len_opt(v: &str, u: Units) -> Option<Len> {
 }
 
 /// Does this value start with a CSS math function? `values.rs` evaluates all
-/// four; this is only the gate that sends them there. `min`/`max`/`clamp` were
-/// missing from it, so `width: max(20px, 10px)` fell through to a plain length
-/// parse, failed, and became `auto` — while the same expression inside a custom
-/// property resolved fine, because `vars.rs` calls the resolver directly.
+/// four; this is only the gate that sends them there.
 fn is_math_fn(v: &str) -> bool {
-    // `get` rather than a range index: a value may now begin with a multi-byte
-    // character — an escape that decoded to U+FFFD is one — and slicing to a
-    // byte length would land inside it and panic.
+    // `get` rather than a range index: a value may begin with a multi-byte
+    // character (an escape decoded to U+FFFD), and slicing to a byte length
+    // would land inside it and panic.
     ["calc(", "min(", "max(", "clamp("]
         .iter()
         .any(|f| v.get(..f.len()).is_some_and(|h| h.eq_ignore_ascii_case(f)))
@@ -4338,7 +4187,7 @@ fn first_layer(v: &str) -> &str {
 }
 
 /// One layer off the front of a comma-separated list, plus what is left. `""`
-/// as the rest means the list is done — a trailing comma yields one empty
+/// as the rest means the list is done; a trailing comma yields one empty
 /// final layer, which every caller rejects on its own terms.
 fn next_layer(v: &str) -> (&str, &str) {
     let b = v.as_bytes();
@@ -4362,11 +4211,10 @@ fn parse_bg_image(val: &str) -> Option<u64> {
     crate::css::url_value(first_layer(val)).map(|u| crate::css::url_key(&u))
 }
 
-/// Die Argumente einer Funktion auf OBERSTER Ebene trennen.
+/// Split a function's arguments at the top level.
 ///
-/// Ein Komma in `rgba(0,0,0,.5)` trennt keine Argumente — ohne diese
-/// Klammerzaehlung zerfaellt jeder Verlauf mit einer `rgba()`-Farbe in
-/// Bruchstuecke.
+/// A comma in `rgba(0,0,0,.5)` does not separate arguments; without paren
+/// counting every gradient with an `rgba()` colour would fall apart.
 fn split_top(s: &str) -> alloc::vec::Vec<&str> {
     let mut out = alloc::vec::Vec::new();
     let (mut depth, mut start) = (0i32, 0usize);
@@ -4383,7 +4231,7 @@ fn split_top(s: &str) -> alloc::vec::Vec<&str> {
     out
 }
 
-/// Der Rumpf einer Funktion, wenn der Text mit ihrem Namen beginnt.
+/// The body of a function, if the text starts with its name.
 fn fn_body<'a>(v: &'a str, name: &str) -> Option<&'a str> {
     let t = v.trim();
     let rest = t.strip_prefix(name)?.trim_start();
@@ -4399,8 +4247,8 @@ fn fn_body<'a>(v: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-/// Ein Winkel in Grad. `0deg` zeigt nach OBEN und dreht im Uhrzeigersinn —
-/// das ist die Zaehlweise von CSS und nicht die der Mathematik.
+/// An angle in degrees. `0deg` points up and turns clockwise, as CSS counts,
+/// not as mathematics does.
 fn parse_angle(v: &str) -> Option<f32> {
     let t = v.trim();
     let (num, unit) = t.split_at(t.find(|c: char| c.is_ascii_alphabetic() || c == '%')
@@ -4415,15 +4263,14 @@ fn parse_angle(v: &str) -> Option<f32> {
     })
 }
 
-/// `to right`, `to bottom left`, … als Winkel — und, bei einer ECKE, als
-/// Eckenschluessel.
+/// `to right`, `to bottom left`, … as an angle and, for a corner, as a
+/// corner key.
 ///
-/// Eine Ecke ist keine feste Zahl: css-images-3 §3.4.1 verlangt, dass die
-/// Achse so liegt, dass die Senkrechte durch die Mitte die beiden
-/// NACHBARecken trifft. Auf einem 800x60-Kasten sind das 85,7 Grad und nicht
-/// 45 — der Unterschied zwischen „fast waagrecht" und „diagonal". Der Winkel
-/// haengt also am Kasten und wird erst beim Malen gerechnet; hier faellt nur
-/// der Schluessel an, plus die 45-Grad-Naeherung als Rueckfalltyp.
+/// A corner is not a fixed number: css-images-3 §3.4.1 places the line so
+/// that its perpendicular through the centre meets the two neighbouring
+/// corners. On an 800x60 box that is 85.7 degrees, not 45. The angle depends
+/// on the box and is computed at paint time; here only the key is returned,
+/// plus the 45-degree approximation as a fallback.
 fn side_angle(v: &str) -> Option<(f32, u8)> {
     let rest = v.trim().strip_prefix("to ")?;
     let mut up = false; let mut down = false; let mut left = false; let mut right = false;
@@ -4447,13 +4294,13 @@ fn side_angle(v: &str) -> Option<(f32, u8)> {
     })
 }
 
-/// Das ` in <farbraum> [<hue>]` vom ersten Parameter abtrennen.
+/// Split ` in <colorspace> [<hue>]` off the first argument.
 ///
-/// Zurueck kommt der Rest (oft leer) und ob eine Angabe da war.
+/// Returns the rest (often empty) and whether an interpolation was given.
 fn split_interpolation(a0: &str) -> (&str, bool) {
     let t = a0.trim();
     if let Some(r) = t.strip_prefix("in ") {
-        // Nur die Angabe, keine Richtung: `linear-gradient(in oklab, …)`.
+        // Only the interpolation, no direction: `linear-gradient(in oklab, …)`.
         let _ = r;
         return ("", true);
     }
@@ -4474,11 +4321,11 @@ fn split_interpolation(a0: &str) -> (&str, bool) {
     (t, false)
 }
 
-/// Den Verlaufsaufruf aus einer Schicht herausschneiden — er kann hinter
-/// einer Farbe stehen. Zurueck kommt der Text ab dem Funktionsnamen.
+/// Cut the gradient call out of a layer; it may follow a colour. Returns the
+/// text from the function name on.
 fn gradient_token(layer: &str) -> Option<&str> {
     let at = layer.find("-gradient(")?;
-    // Zurueck bis zum Anfang des Bezeichners (`repeating-radial` …).
+    // Back to the start of the identifier (`repeating-radial` …).
     let b = layer.as_bytes();
     let mut start = at;
     while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'-') {
@@ -4487,16 +4334,14 @@ fn gradient_token(layer: &str) -> Option<&str> {
     Some(layer[start..].trim())
 }
 
-/// Einen Verlauf aus `background-image` lesen.
+/// Read a gradient from `background-image`.
 ///
-/// Gebaut wird, was echte Seiten schreiben — ausgezaehlt ueber 23 Blaetter:
-/// `linear-gradient` (172 Vorkommen), `radial-gradient` (36), je auch in der
-/// `repeating-`Form. `conic-gradient` (11) fehlt noch und wird ehrlich
-/// abgelehnt statt als linearer gemalt.
+/// Supports `linear-gradient` and `radial-gradient`, each also in the
+/// `repeating-` form. Not implemented: `conic-gradient`; it is rejected
+/// rather than painted as a linear one.
 pub fn parse_gradient(val: &str, theme: &Theme) -> Gradient {
-    // Der Verlauf steht nicht zwingend am Anfang: `background: #eee
-    // linear-gradient(…)` ist eine Kurzform, und die Farbe kommt zuerst.
-    // Ohne diese Suche verlor die Deklaration ihren Verlauf still.
+    // The gradient need not come first: `background: #eee linear-gradient(…)`
+    // is a shorthand with the colour first.
     let Some(v) = gradient_token(first_layer(val)) else { return Gradient::NONE };
     let (repeating, rest) = match v.strip_prefix("repeating-") {
         Some(r) => (true, r),
@@ -4512,16 +4357,15 @@ pub fn parse_gradient(val: &str, theme: &Theme) -> Gradient {
     let args = split_top(body);
     if args.is_empty() { return Gradient::NONE }
 
-    // Erstes Argument: Richtung oder Form — oder schon der erste Farbstopp.
+    // First argument: direction or shape, or already the first colour stop.
     let mut angle = if kind == GradKind::Linear { 180.0 } else { 0.0 };
     let mut circle = false;
     let mut corner = CORNER_NONE;
     let mut first = 0usize;
-    // `in oklab` / `in hsl longer hue` sagt, in WELCHEM Raum gemischt wird.
-    // Wir mischen in sRGB und lassen die Angabe fallen — ein etwas anderer
-    // Mittelweg zwischen denselben Farben. Sie mitzulesen ist trotzdem
-    // Pflicht: Tailwind v4 schreibt JEDEN Verlauf so, und ohne diesen
-    // Zweig faellt der erste Parameter durch und der Verlauf ganz weg.
+    // `in oklab` / `in hsl longer hue` names the interpolation space. We mix
+    // in sRGB and drop it (a slightly different path between the same colours),
+    // but it must still be parsed, or the first argument falls through and the
+    // whole gradient is lost.
     let (a0, interp) = split_interpolation(args[0]);
     if interp && a0.is_empty() { first = 1; }
     if let Some((a, c)) = side_angle(a0) { angle = a; corner = c; first = 1; }
@@ -4529,24 +4373,22 @@ pub fn parse_gradient(val: &str, theme: &Theme) -> Gradient {
     else if kind == GradKind::Radial
         && (a0.starts_with("circle") || a0.starts_with("ellipse") || a0.starts_with("at ")
             || a0.starts_with("closest") || a0.starts_with("farthest")) {
-        // Von der Form wird nur `circle` gelesen — die Mitte und die
-        // Groessenwoerter (`closest-side` …) fallen auf die Vorgabe
-        // „Mitte, farthest-corner" zurueck, und das ist der haeufigste Fall.
+        // Of the shape only `circle` is read; the centre and the size keywords
+        // (`closest-side` …) fall back to the default "centre, farthest-corner".
         circle = a0.starts_with("circle");
         first = 1;
     }
 
     let mut g = Gradient { kind, n: 0, repeating, circle, corner, angle, stops: Gradient::NONE.stops };
-    // Ein Stopp kann ZWEI Positionen tragen (`red 0% 40%`) — das ist die
-    // Kurzform fuer zwei Stopps derselben Farbe.
+    // A stop may carry two positions (`red 0% 40%`), shorthand for two stops of
+    // the same colour.
     for a in &args[first..] {
         if g.n as usize >= MAX_STOPS { break }
         let mut it = split_ws_top(a);
         let Some(cs) = it.first().copied() else { continue };
-        // Ein Farbstopp, den wir nicht lesen koennen, laesst den GANZEN
-        // Verlauf fallen. Ihn zu ueberspringen waere schlimmer: die
-        // uebrigen Stopps ruecken auf und malen ein anderes Bild, das
-        // aussieht, als haetten wir es gekonnt.
+        // A colour stop we cannot read drops the whole gradient. Skipping it would
+        // be worse: the remaining stops shift and paint a different image that looks
+        // as if it were right.
         let color = match parse_color_val(cs, theme) {
             Some(ColorVal::Rgb(c)) => (c, false),
             Some(ColorVal::Transparent) => (Rgba { c: Rgb(0, 0, 0), a: 0 }, false),
@@ -4568,12 +4410,12 @@ pub fn parse_gradient(val: &str, theme: &Theme) -> Gradient {
         }
     }
     if g.n < 2 { return Gradient::NONE }
-    // Die Luecken bleiben offen: `fill_positions` laeuft in `resolved()`,
-    // wenn die Achsenlaenge feststeht und px-Lagen Anteile geworden sind.
+    // The gaps stay open: `fill_positions` runs in `resolved()`, once the line
+    // length is known and px positions have become fractions.
     g
 }
 
-/// Wie `split_top`, aber an Leerzeichen — fuer `red 0% 40%`.
+/// Like `split_top`, but on whitespace, for `red 0% 40%`.
 fn split_ws_top(s: &str) -> alloc::vec::Vec<&str> {
     let mut out = alloc::vec::Vec::new();
     let (mut depth, mut start) = (0i32, 0usize);
@@ -4594,10 +4436,8 @@ fn split_ws_top(s: &str) -> alloc::vec::Vec<&str> {
     out
 }
 
-/// Eine Stopp-Position als Anteil 0..1. Laengen ohne Bezug (px) koennen hier
-/// noch nicht aufgeloest werden — die Kastenbreite steht erst im Layout fest.
-/// Eine Stopp-Lage: Anteil (`50%`) oder absolut (`40px`). Der Rueckgabewert
-/// sagt mit, welches von beidem — umrechnen kann erst der Kasten.
+/// A stop position: fraction (`50%`) or absolute (`40px`). The return value
+/// says which; only the box can convert.
 fn pct_or_len(v: &str) -> Option<(f32, bool)> {
     let t = v.trim();
     if let Some(p) = t.strip_suffix('%') {
@@ -4606,17 +4446,16 @@ fn pct_or_len(v: &str) -> Option<(f32, bool)> {
     if let Some(p) = t.strip_suffix("px") {
         return p.trim().parse::<f32>().ok().map(|x| (x, true));
     }
-    // Eine nackte Null IST eine Laenge — `#000 0 10px` steht so in echten
-    // Blaettern. Ohne diesen Zweig faellt sie auf „nicht angegeben" zurueck
-    // und wird still verteilt.
+    // A bare zero is a length (`#000 0 10px`); without this branch it would
+    // fall back to "not given" and be distributed.
     if t == "0" {
         return Some((0.0, true));
     }
     None
 }
 
-/// Die Luecken zwischen gesetzten Positionen gleichmaessig fuellen — so
-/// schreibt es die Spezifikation vor (css-images-3 §3.4.3).
+/// Fill the gaps between given positions evenly, as css-images-3 §3.4.3
+/// requires.
 fn fill_positions(g: &mut Gradient) {
     let n = g.n as usize;
     if n < 2 { return }
@@ -4633,7 +4472,7 @@ fn fill_positions(g: &mut Gradient) {
         for k in i..j { g.stops[k].pos = a + step * (k - start) as f32; }
         i = j;
     }
-    // Eine Position darf nie kleiner sein als die davor.
+    // A position may never be smaller than the one before.
     for i in 1..n {
         if g.stops[i].pos < g.stops[i - 1].pos { g.stops[i].pos = g.stops[i - 1].pos; }
     }
@@ -4750,12 +4589,11 @@ fn parse_bg_size(v: &str, u: Units) -> Option<BgSize> {
 
 /// The `background`/`mask` shorthand, parsed as a unit: `(colour, layer)`.
 ///
-/// `None` means the value is INVALID and the whole declaration must be dropped
-/// (css-syntax-3 §4) — `background: "red"` and `background:\0020red` are the
-/// reftests that insist on it. That distinction is the whole reason this
-/// returns a result instead of mutating: a shorthand resets every longhand it
-/// covers, so treating an unparseable value as "no colour named" would clear a
-/// perfectly good background instead of leaving it alone.
+/// `None` means the value is invalid and the whole declaration must be
+/// dropped (css-syntax-3 §4). That is why this returns a result instead of
+/// mutating: a shorthand resets every longhand it covers, so treating an
+/// unparseable value as "no colour named" would clear a good background
+/// instead of leaving it alone.
 fn parse_bg_shorthand(
     val: &str,
     v: &str,
@@ -4767,9 +4605,9 @@ fn parse_bg_shorthand(
 ) -> Option<(Option<Rgba>, BgLayer, BoxEdge, BoxEdge)> {
     let mut layer = BgLayer::NONE;
     let mut color = None;
-    // A `<box>` in the shorthand sets ORIGIN; a second one sets clip. With only
-    // one, both take it (css-backgrounds-3 §3.10) — which is why they are
-    // tracked as one `Option` that fills twice.
+    // A `<box>` in the shorthand sets origin; a second one sets clip. With only
+    // one, both take it (css-backgrounds-3 §3.10), which is why they are tracked
+    // as one `Option` that fills twice.
     let (mut origin, mut clip) = (None, None);
     layer.image = parse_bg_image(val);
     layer.gradient = parse_gradient(val, theme);
@@ -4792,11 +4630,10 @@ fn parse_bg_shorthand(
         } else if let Some(e) = parse_box_edge(tok) {
             if origin.is_none() { origin = Some(e) } else { clip = Some(e) }
         } else if matches!(tok, "scroll" | "fixed" | "local" | "none") || tok.starts_with("url(")
-            // Ein Verlauf ist hier schon als `layer.gradient` gelesen; dieser
-            // Zweig ueberspringt nur sein TOKEN, damit es nicht als Farbe oder
-            // Platzangabe missverstanden wird. Er behaelt den Reset
-            // (`background: <gradient>` HAT keine Farbe) statt
-            // dropping the declaration and leaving a stale one in place.
+            // A gradient has already been read as `layer.gradient`; this branch only
+            // skips its token so it is not mistaken for a colour or position. It keeps
+            // the reset (`background: <gradient>` has no colour) instead of dropping
+            // the declaration and leaving a stale one in place.
             || tok.contains("-gradient(")
         {
             // attachment / the image — not the layer's placement
@@ -4831,12 +4668,9 @@ fn size_non_negative(l: &Len) -> bool {
     }
 }
 
-/// Assign a size property only if the value is valid AND non-negative, else
-/// keep the prior value (invalid declaration dropped).
-/// Parse an HTML *dimension* attribute value: a bare number is pixels, a
-/// trailing `%` is a percentage (HTML §2.4.4.4). Deliberately NOT the CSS
-/// length parser — `width="200"` carries no unit and CSS would reject it,
-/// which is precisely how these attributes came to be ignored.
+/// Parse an HTML dimension attribute value: a bare number is pixels, a
+/// trailing `%` is a percentage (HTML §2.4.4.4). Deliberately not the CSS
+/// length parser: `width="200"` carries no unit and CSS would reject it.
 fn parse_dimension_attr(v: &str) -> Option<Len> {
     let v = v.trim();
     let (num, pct) = match v.strip_suffix('%') {
@@ -4887,7 +4721,7 @@ fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
     }
 }
 
-/// Whether a token can start a `font-size` — the shorthand's anchor: everything
+/// Whether a token can start a `font-size`, the shorthand's anchor: everything
 /// before it is style/variant/weight, everything after it is the family.
 fn is_font_size_token(t: &str) -> bool {
     let head = t.split('/').next().unwrap_or("");
@@ -4901,11 +4735,8 @@ fn is_font_size_token(t: &str) -> bool {
     if !head.starts_with(|c: char| c.is_ascii_digit() || c == '.') {
         return false;
     }
-    // **Eine blosse Zahl ist KEINE Schriftgroesse.** `font: 700 13px/1.6 x`
-    // fing sonst bei der `700` an: das Gewicht wurde zur Groesse, `13px/1.6`
-    // zur Familie. Gemessen an der eigenen Komponentenvorlage — eine Zeile
-    // Text wurde 285 statt 21 px hoch, und die Schreibweise steht auf halben
-    // Web. Eine Laenge braucht eine Einheit; einzige Ausnahme ist die 0.
+    // A bare number is not a font size: in `font: 700 13px/1.6 x` the `700` is
+    // the weight. A length needs a unit; the only exception is 0.
     let num_end = head.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(head.len());
     let (num, unit) = head.split_at(num_end);
     !unit.is_empty() || num.parse::<f32>() == Ok(0.0)
@@ -4920,7 +4751,7 @@ fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
     if t.is_empty() {
         return;
     }
-    // `inherit` restores the parent's font; `em_base` IS the parent's size.
+    // `inherit` restores the parent's font; `em_base` is the parent's size.
     // System-font keywords have no user-configurable faces here, so they take
     // the UA body font.
     if matches!(t, "inherit" | "unset" | "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar") {
@@ -4962,11 +4793,10 @@ fn apply_font_shorthand(v: &str, theme: &Theme, s: &mut ComputedStyle) {
     }
 }
 
-/// Ist das ein `calc()`, in dem keine Einheit und kein Prozent vorkommt?
+/// Is this a `calc()` with no unit and no percentage in it?
 ///
-/// Dann ist sein Ergebnis eine ZAHL. Der Unterschied entscheidet bei
-/// `line-height` zwischen einem Verhaeltnis und einer Laenge — und zwischen
-/// einer lesbaren Seite und uebereinandergedrucktem Text.
+/// Then its result is a number. For `line-height` that decides between a
+/// ratio and a length.
 fn is_unitless_calc(v: &str) -> bool {
     let t = v.trim();
     if t.len() < 6 || !t[..5].eq_ignore_ascii_case("calc(") {
@@ -4975,9 +4805,8 @@ fn is_unitless_calc(v: &str) -> bool {
     if t.contains('%') {
         return false;
     }
-    // Ein Einheitenzeichen steht IMMER direkt hinter einer Ziffer oder einem
-    // Punkt. Ein blosser Buchstabe ist dagegen ein Funktionsname (`min`,
-    // `max`, `var` sind vorher schon ersetzt).
+    // A unit always follows a digit or a dot directly. A bare letter is a
+    // function name (`min`, `max`, `var` are substituted before this).
     let b = t.as_bytes();
     for i in 1..b.len() {
         if b[i].is_ascii_alphabetic() && (b[i - 1].is_ascii_digit() || b[i - 1] == b'.') {
@@ -4987,18 +4816,16 @@ fn is_unitless_calc(v: &str) -> bool {
     true
 }
 
-/// Einen gerechneten Stil als Deklarationstext ausgeben — die Antwort von
+/// Serialize a computed style as declaration text: the answer of
 /// `getComputedStyle`.
 ///
-/// **Was hier NICHT drin ist, und warum.** Ein Browser gibt fuer `width` den
-/// BENUTZTEN Wert in px zurueck, und der entsteht erst im Layout. Diese
-/// Funktion laeuft VOR dem Layout, also steht hier der angegebene Wert
-/// (`auto`, `50%`). Das ist eine Teilantwort und als solche benannt — eine
-/// erfundene Pixelzahl waere schlimmer, weil sie aussaehe wie eine Messung
-/// ([[feedback_invented_fallback_hides_the_fault]]).
+/// Browsers return the used value in px for `width`, which only layout
+/// produces. This runs before layout, so the specified value (`auto`, `50%`)
+/// is returned instead; an invented pixel value would look like a
+/// measurement.
 ///
-/// Die Liste deckt, was Seiten wirklich lesen. Was nicht daraufsteht,
-/// beantwortet die leere Zeichenkette — wie jede nicht gesetzte Eigenschaft.
+/// The list covers what pages read. Anything not listed answers the empty
+/// string, like any unset property.
 pub fn serialize_computed(s: &ComputedStyle) -> String {
     let mut o = String::with_capacity(512);
     let mut put = |k: &str, v: &str| {
@@ -5035,8 +4862,8 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("height", &len(s.height));
     put("min-width", &len(s.min_width));
     put("max-width", &len(s.max_width));
-    // Oben/unten sind bereits aufgeloest, links/rechts koennen `auto` sein
-    // (das ist die Zentrierung) — deshalb zwei verschiedene Formen.
+    // Top/bottom are already resolved, left/right may be `auto` (centring), so
+    // two different forms.
     put("margin-top", &if s.margin_top_auto { "auto".into() } else { px(s.margin_top) });
     put("margin-bottom", &if s.margin_bottom_auto { "auto".into() } else { px(s.margin_bottom) });
     put("margin-left", &len(s.margin_left));
@@ -5052,17 +4879,14 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("opacity", &if s.transparent || s.opacity_zero { "0".into() } else { trim_f32(s.opacity) });
     put("visibility", if s.transparent { "hidden" } else { "visible" });
 
-    // **Einunddreissig von dreiundvierzig gefragten Eigenschaften kamen leer
-    // zurueck**, gemessen auf DuckDuckGos Ergebnisseite. Das ist keine
-    // Kosmetik: eine Positionierungsbibliothek fragt `position`, bevor sie
-    // rechnet, ein Rollbeobachter `overflow`, ein Flexhelfer `flex-grow`. Wer
-    // "" bekommt, nimmt den falschen Zweig — und die Seite legt sich SELBST
-    // falsch aus, ohne dass im Layout ein Fehler steckt.
+    // Scripts branch on these (`position` for positioning libraries, `overflow`
+    // for scroll observers, `flex-grow` for flex helpers); an empty answer sends
+    // the page down the wrong path.
     //
-    // Geantwortet wird aus DEMSELBEN Feld, aus dem das Layout rechnet. Wo das
-    // Feld weniger weiss als CSS (aus `flex-direction: row-reverse` ist nur
-    // `flex_row` uebrig), steht hier, was das Layout TUT — zwei Wahrheiten
-    // waeren schlimmer als eine grobe.
+    // Answers come from the same field layout computes from. Where the field
+    // knows less than CSS (from `flex-direction: row-reverse` only `flex_row`
+    // remains), the answer is what layout does; two truths would be worse than
+    // one coarse one.
     put("position", match s.position {
         Position::Static => "static", Position::Relative => "relative",
         Position::Absolute => "absolute", Position::Fixed => "fixed",
@@ -5088,8 +4912,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     };
     put("overflow-x", ovf(s.overflow_x));
     put("overflow-y", ovf(s.overflow_y));
-    // Die Kurzform gibt es nur, wenn beide Achsen dasselbe sagen — so
-    // serialisiert ein Browser sie auch.
+    // The shorthand only when both axes agree, as browsers serialize it.
     if s.overflow_x == s.overflow_y { put("overflow", ovf(s.overflow_x)); }
     put("min-height", &len(s.min_height));
     put("max-height", &len(s.max_height));
@@ -5121,18 +4944,17 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     });
     put("text-indent", &len(s.text_indent));
     put("box-sizing", if s.box_border { "border-box" } else { "content-box" });
-    // `white-space` fuehrt beak als EINE Frage — bricht die Zeile um oder
-    // nicht. `pre` und `pre-wrap` unterscheidet das Feld nicht; hier steht,
-    // was das Layout tut.
+    // `white-space` is one question here: does the line wrap or not. The field
+    // does not distinguish `pre` from `pre-wrap`; the answer is what layout does.
     put("white-space", if s.nowrap { "nowrap" } else { "normal" });
     put("vertical-align", match s.valign {
         VAlign::Baseline => "baseline", VAlign::Sub => "sub", VAlign::Super => "super",
         VAlign::Top => "top", VAlign::Middle => "middle", VAlign::Bottom => "bottom",
         VAlign::TextTop => "text-top", VAlign::TextBottom => "text-bottom",
     });
-    // Die Kurzform `gap`, wenn beide Achsen dasselbe sagen — wie `overflow`.
+    // The shorthand `gap` when both axes agree, like `overflow`.
     if s.grid_col_gap == s.grid_row_gap { put("gap", &len(s.grid_row_gap)); }
-    // Vier Ecken; gleich grosse schreibt ein Browser als EINEN Wert.
+    // Four corners; equal ones are written as one value, as browsers do.
     let r = &s.radius;
     put("border-radius", &if r.iter().all(|x| *x == r[0]) { len(r[0]) } else {
         alloc::format!("{} {} {} {}", len(r[0]), len(r[1]), len(r[2]), len(r[3]))
@@ -5140,7 +4962,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     o
 }
 
-/// `1.5` statt `1.5000`, `2` statt `2.0` — so schreibt ein Browser es auch.
+/// `1.5` rather than `1.5000`, `2` rather than `2.0`, as browsers write it.
 fn trim_f32(v: f32) -> String {
     let r = alloc::format!("{v:.4}");
     let r = r.trim_end_matches('0').trim_end_matches('.');
@@ -5149,7 +4971,7 @@ fn trim_f32(v: f32) -> String {
 
 /// `<a> [<b>]` — a two-sided logical shorthand. One value applies to both.
 fn split_sides(v: &str) -> [&str; 2] {
-    // Klammernbewusst, aus demselben Grund wie `four_values`.
+    // Paren-aware, for the same reason as `four_values`.
     let t = css_tokens(v);
     let a = t.first().copied().unwrap_or("0");
     [a, t.get(1).copied().unwrap_or(a)]
@@ -5178,9 +5000,8 @@ fn parse_list_style(v: &str) -> Option<ListStyle> {
     })
 }
 
-/// Top/bottom margin: `auto` computes to 0 for block boxes.
 /// A top/bottom margin: the used length in normal flow, plus whether the
-/// author wrote `auto`. Both are needed — see `ComputedStyle::margin_top_auto`.
+/// author wrote `auto`. Both are needed; see `ComputedStyle::margin_top_auto`.
 fn set_margin_tb(v: &str, u: Units, px: &mut f32, auto: &mut bool, pct: &mut f32) {
     *auto = v.trim() == "auto";
     // A margin may be negative, so no sign filter here — unlike padding.
@@ -5194,14 +5015,13 @@ fn margin_lr(v: &str, u: Units) -> Len {
     parse_len(v, u)
 }
 
-/// A padding length. Negative is invalid (padding ≥ 0) → keeps `prior`.
 /// `transform` → a translation, or `None` for anything else.
 ///
 /// `translate(x[,y])` / `translateX(x)` / `translateY(y)` only. A rotation or a
 /// scale is deliberately dropped rather than approximated: half a transform
 /// moves a box to a place neither the author nor the untransformed layout
-/// intended. Percentages resolve against the BOX's own size, not the containing
-/// block, so they are kept as `Len::Pct` until paint.
+/// intended. Percentages resolve against the box's own size, not the
+/// containing block, so they are kept as `Len::Pct` until paint.
 fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
     let t = v.trim();
     let (name, args) = t.split_once('(')?;
@@ -5228,30 +5048,18 @@ fn parse_translate(v: &str, u: Units) -> Option<(Len, Len)> {
     }
 }
 
-/// One `box-shadow` layer: `[inset]? [<color>]? <dx> <dy> [<blur>] [<spread>]
-/// [<color>]?` → `(inset, layer)`. `None` means the layer is INVALID, which is
-/// not the same as "we don't paint it": `inset` is perfectly valid CSS we
-/// simply have no inner-shadow paint for, so it comes back as
-/// `Some((true, …))` and lets the declaration REPLACE whatever stood before.
-/// Returning `None` for it left the previous shadow painted instead.
-/// Lengths keep their order; the colour may sit at either end (CSS Backgrounds 3
-/// §7.1). An omitted colour stays `None` = `currentColor`, resolved at paint.
-/// The one layer of a `box-shadow` list we can actually paint, or `None` for a
-/// list where no layer is paintable. The outer `Option` is VALIDITY: `None`
-/// means some layer failed to parse, so the whole declaration is dropped and
-/// the box keeps the shadow it had (CSS Syntax 3 §9 — a bad value invalidates
-/// the declaration, not just the layer).
+/// The `box-shadow` layers a style keeps: `(sharp, soft, inset)`, the first
+/// outer zero-blur layer, the first outer blurred layer and the first inset
+/// zero-blur layer. The outer `Option` of `paintable_shadow` is validity:
+/// `None` means some layer failed to parse, so the whole declaration is
+/// dropped and the box keeps the shadow it had (CSS Syntax 3 §9: a bad value
+/// invalidates the declaration, not just the layer).
 ///
-/// Which layer: the FIRST paintable one, not the first one. Layers paint
-/// front-to-back, so the first paintable layer is also the topmost one we would
-/// draw. Taking layer 1 unconditionally cost DuckDuckGo its searchbox ring —
-/// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)` puts the only sharp
-/// layer LAST, and the two blurred ones ahead of it are skipped at paint time.
-///
-/// Measured across duckduckgo.com and two Wikipedia articles: 7 declarations
-/// hide their ring behind a blurred layer this way, and **no** declaration has
-/// more than one paintable layer — so a list of layers would cost every
-/// `ComputedStyle` copy several more words for a case real pages do not write.
+/// Which layer: the first of each kind, not layer 1. A list like
+/// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)` puts the sharp
+/// ring last, behind two blurred layers. Pages rarely write more than one
+/// layer of each kind, so a full list would only make every `ComputedStyle`
+/// copy larger.
 type ShadowSet = (Option<BoxShadow>, Option<BoxShadow>, Option<BoxShadow>);
 
 fn paintable_shadow(v: &str, u: Units) -> Option<ShadowSet> {
@@ -5261,26 +5069,20 @@ fn paintable_shadow(v: &str, u: Units) -> Option<ShadowSet> {
     loop {
         let (layer, tail) = next_layer(rest);
         let (inset, sh) = parse_box_shadow(layer, u)?;
-        // Alpha 0 malt nichts — so eine Schicht darf ihren Platz nicht
-        // belegen. Tailwind v4 fuellt jede unbenutzte Schicht seiner Liste mit
-        // `0 0 #0000`, und die steht VOR der echten: sie ist unscharf-frei,
-        // also galt sie als der scharfe Anteil, und der Ring dahinter fiel
-        // heraus. Ein `ring-4` malte damit nichts.
+        // Alpha 0 paints nothing, so such a layer must not take a slot. Placeholder
+        // lists (e.g. `0 0 #0000` for unused layers) put it ahead of the real one,
+        // which would otherwise be dropped.
         let invisible = sh.color.is_some_and(|c| c.a == 0);
         if invisible {
-            // Gueltig geparst, nur ohne Wirkung — die Deklaration bleibt.
+            // Validly parsed, just without effect; the declaration stays.
         } else if inset {
             if sh.paints() && inset_hit.is_none() {
                 inset_hit = Some(sh);
             }
         } else {
-            // Zwei Plaetze, weil echte Seiten zwei verschiedene Dinge unter
-            // demselben Namen schreiben und BEIDE sichtbar sind: DDG legt
-            // einen 1-px-Ring hinter zwei weiche Schichten, Bootstrap malt
-            // Karten mit einer einzigen weichen. Eine volle Liste waere
-            // gemessen unnoetig — keine der geprueften Deklarationen hat mehr
-            // als einen scharfen UND einen weichen Anteil —, und sie kostete
-            // jede `ComputedStyle`-Kopie mehrere Woerter.
+            // Two slots, because pages write two different things under the same name
+            // and both are visible: a 1-px ring behind blurred layers, or a card with a
+            // single blurred shadow.
             if sh.paints() {
                 if sharp.is_none() { sharp = Some(sh) }
             } else if soft.is_none() {
@@ -5304,9 +5106,9 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
             inset = true;
             continue;
         }
-        // `calc(4px + var(--x))` ist nach der Var-Ersetzung eine Rechnung, und
-        // `parse_length` kennt nur Einheiten. Ohne das ist die ganze Schicht
-        // ungueltig — Tailwinds Ringbreite ist IMMER eine Rechnung.
+        // `calc(4px + var(--x))` is a calculation after var() substitution, and
+        // `parse_length` only knows units. Without this the whole layer would be
+        // invalid.
         let len = if is_math_fn(tok) {
             crate::values::resolve_length(
                 tok,
@@ -5326,29 +5128,22 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
             color = Some(c);
             continue;
         }
-        // Eine DURCHSICHTIGE Farbe ist eine gueltige Schicht, keine kaputte.
-        //
-        // `parse_color` gibt fuer `#0000` nichts zurueck, und der Zweig
-        // darunter erklaerte damit die ganze Deklaration fuer ungueltig.
-        // Tailwind v4 baut seine Schatten aus einer Liste von Platzhaltern
-        // (`box-shadow: var(--tw-inset-shadow), … , var(--tw-shadow)`), und
-        // die unbenutzten sind genau `0 0 #0000` — ein einziger davon
-        // loeschte den echten Schatten gleich mit. Auf einer Tailwind-Seite
-        // hatte damit NICHTS einen Schatten.
+        // A transparent colour is a valid layer, not a broken one. `parse_color`
+        // returns nothing for `#0000`, and the branch below would declare the whole
+        // declaration invalid; placeholder layers `0 0 #0000` in a shadow list
+        // would then erase the real shadow.
         if matches!(parse_color_val(tok, &Theme::DARK), Some(ColorVal::Transparent)) {
             color = Some(Rgba { c: Rgb(0, 0, 0), a: 0 });
             continue;
         }
-        // `currentcolor` ist die Vorgabe dieser Eigenschaft (css-backgrounds-3
-        // §7.1) und steht hier als `None` — genau wie eine weggelassene Farbe.
-        // Ausgeschrieben wurde sie trotzdem abgelehnt, und das ist der Fall,
-        // den Tailwind schreibt: `var(--tw-ring-color, currentcolor)`. Ohne
-        // eine gesetzte Ringfarbe malte `ring-4` deshalb nichts.
+        // `currentcolor` is this property's default (css-backgrounds-3 §7.1) and is
+        // stored as `None`, like an omitted colour. Spelled out it must be accepted
+        // too, e.g. as the fallback in `var(--ring-color, currentcolor)`.
         if matches!(parse_color_val(tok, &Theme::DARK), Some(ColorVal::CurrentColor)) {
             continue;
         }
-        // An unknown token invalidates the layer rather than being ignored —
-        // otherwise a value we cannot read paints something the author never
+        // An unknown token invalidates the layer rather than being ignored;
+        // otherwise a value we cannot read would paint something the author never
         // asked for.
         return None;
     }
@@ -5372,11 +5167,10 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
 /// `(5, 10)`, `5px` → `(5, 0)`. `None` means it is not a length at all and the
 /// declaration is dropped (the side keeps what it had).
 ///
-/// The `calc` case is measured, not parsed: every CSS math function on lengths
-/// is LINEAR in its percentage, so evaluating it against a basis of 0 and of
-/// 100 gives the constant and the coefficient without a second expression
-/// walker. `calc(50% - 0px)` against a reference that writes plain `50%` is
-/// exactly the pair `grid-calc-margin` compares.
+/// The `calc` case is evaluated, not parsed: every CSS math function on
+/// lengths is linear in its percentage, so evaluating it against a basis of 0
+/// and of 100 gives the constant and the coefficient without a second
+/// expression walker.
 fn length_parts(v: &str, u: Units) -> Option<(f32, f32)> {
     let t = v.trim();
     if let Some(n) = t.strip_suffix('%') {
@@ -5395,11 +5189,10 @@ fn length_parts(v: &str, u: Units) -> Option<(f32, f32)> {
     parse_length(t, u).map(|p| (p, 0.0))
 }
 
-/// One padding side. A plain negative length is INVALID and keeps what the side
-/// had; a value that carries a percentage is valid whatever its sign, because
-/// its used value is only known once the basis is — `calc(100% - 21.5rem)` is
-/// how Tailwind pads the end of a scrolling row, and it is negative only until
-/// the containing block is measured. That one is clamped to zero at USE time
+/// One padding side. A plain negative length is invalid and keeps what the
+/// side had; a value that carries a percentage is valid whatever its sign,
+/// because its used value is only known once the basis is (e.g.
+/// `calc(100% - 21.5rem)`). That one is clamped to zero at use time
 /// (css-values-4 §10), which is `resolve_pct_box`'s `.max(0.0)`.
 fn set_pad(v: &str, u: Units, px: &mut f32, pct: &mut f32) {
     if let Some((p, q)) = length_parts(v, u) {
@@ -5411,9 +5204,8 @@ fn set_pad(v: &str, u: Units, px: &mut f32, pct: &mut f32) {
 }
 
 /// A border-width keyword/length → px. `thin`/`medium`/`thick` = 1/3/5px.
-/// A NEGATIVE length is invalid, not zero: the declaration is dropped and the
-/// side keeps the width it had (`border-top-width-012` and its siblings turn
-/// on exactly that difference).
+/// A negative length is invalid, not zero: the declaration is dropped and the
+/// side keeps the width it had.
 fn border_width_kw(tok: &str, u: Units) -> Option<f32> {
     match tok.trim() {
         "" => None,
@@ -5457,8 +5249,8 @@ fn parse_border_shorthand(v: &str, u: Units, theme: &Theme) -> BorderSide {
         side.set_spec_width(w);
     }
     // The shorthand resets the whole side whatever it names, so writing it at
-    // all is taking control of the frame — `border: red` suppresses one just as
-    // `border: none` does.
+    // all takes control of the frame: `border: red` suppresses a UA frame just
+    // as `border: none` does.
     side.specified = true;
     side
 }
@@ -5476,12 +5268,8 @@ fn four_sides<'a>(toks: &[&'a str]) -> Option<[&'a str; 4]> {
 
 /// Expand a 1–4 token box shorthand into (top, right, bottom, left).
 fn four_values(v: &str) -> (&str, &str, &str, &str) {
-    // **Klammernbewusst zerlegen.** `split_whitespace` machte aus
-    // `padding: calc(2 * 10px)` drei Seiten (`calc(2`, `*`, `10px)`), und
-    // uebrig blieb Unsinn — die Deklaration fiel weg, und der Kasten hatte
-    // GAR KEINE Polsterung. Tailwind schreibt jede Abstandsklasse so
-    // (`.p-4{padding:calc(var(--spacing) * 4)}`), also war auf einer
-    // Tailwind-Seite jedes `p-*`, `m-*`, `gap-*` wirkungslos.
+    // Split paren-aware: `split_whitespace` would turn `padding: calc(2 * 10px)`
+    // into three sides (`calc(2`, `*`, `10px)`) and drop the declaration.
     let p: alloc::vec::Vec<&str> = css_tokens(v);
     match p.len() {
         0 => ("0", "0", "0", "0"),
@@ -5567,10 +5355,10 @@ fn parse_track(t: &str, u: Units) -> GridTrack {
     } else if let Some(p) = t.strip_suffix('%') {
         GridTrack::Pct(p.trim().parse().unwrap_or(0.0))
     } else if let Some(inner) = t.strip_prefix("minmax(").and_then(|r| r.strip_suffix(')')) {
-        // minmax(min, max): size by the MAX (min=0 lets it shrink to fit). A
-        // bare max length must become a Fixed CAP — not unbounded `Auto`
-        // max-content, which blows a `minmax(0,59.25rem)` content column up to
-        // the whole article's unwrapped width.
+        // minmax(min, max): size by the max (min=0 lets it shrink to fit). A bare
+        // max length must become a Fixed cap, not unbounded `Auto` max-content,
+        // which would blow a `minmax(0,59.25rem)` content column up to the whole
+        // unwrapped content width.
         let max_part = inner.split(',').nth(1).unwrap_or(inner).trim();
         parse_track(max_part, u)
     } else {
@@ -5611,8 +5399,6 @@ fn split_top_level(v: &str) -> alloc::vec::Vec<alloc::string::String> {
     out
 }
 
-/// Split a value at the top-level `/` (respecting `repeat(…)`/`minmax(…)`
-/// parens), returning `(before, after)`. `None` if there is no top-level slash.
 /// Parse `grid-template-areas` strings into the container's named-area map. Each
 /// quoted string is a row; whitespace-separated tokens are cell names (`.` =
 /// empty). An area's rectangle is the bounding box of its cells.
@@ -5725,7 +5511,7 @@ fn parse_line_placement(v: &str) -> (i16, u16) {
 
 /// `justify-content` / the second half of `place-content`. `<overflow-position>`
 /// (`safe`/`unsafe`) only says what to do when the content does not fit, which
-/// never changes where it sits when it does — so the keyword is skipped and the
+/// never changes where it sits when it does, so the keyword is skipped and the
 /// position behind it decides.
 fn parse_justify(v: &str) -> Justify {
     match v.trim_start().strip_prefix("safe ").or_else(|| v.trim_start().strip_prefix("unsafe ")).unwrap_or(v).trim() {
@@ -5738,7 +5524,7 @@ fn parse_justify(v: &str) -> Justify {
     }
 }
 
-/// `align-content` — the six distributions plus `stretch`, which is the
+/// `align-content`: the six distributions plus `stretch`, which is the
 /// initial value and the one no other alignment property has.
 fn parse_content_align(v: &str) -> ContentAlign {
     let v = v.trim();
@@ -5759,9 +5545,9 @@ fn parse_content_align(v: &str) -> ContentAlign {
 fn parse_cross(v: &str) -> Option<CrossAlign> {
     // `<baseline-position>` is two words (`first baseline` / `last baseline`)
     // and `<overflow-position>` prefixes one (`safe center`). Dropping the
-    // qualifier leaves the position that decides where the box goes; keeping
-    // the whole string made the value UNKNOWN, and an unknown `align-items`
-    // fell back to `stretch` — which sizes the item instead of aligning it.
+    // qualifier leaves the position that decides where the box goes; an
+    // unknown `align-items` would fall back to `stretch`, which sizes the item
+    // instead of aligning it.
     let v = v.trim();
     let v = ["first ", "last ", "safe ", "unsafe "]
         .iter()
@@ -5837,14 +5623,11 @@ fn apply_flex_shorthand(v: &str, s: &mut ComputedStyle) {
     s.flex_basis = basis.unwrap_or(if nums.is_empty() { FlexBasis::Auto } else { FlexBasis::Px(0.0) });
 }
 
-/// Parse a CSS `<length>` to px. Supports `px`, `em`/`rem` (relative to
-/// `em_base`), and bare numbers (treated as px).
-/// Eine Zahl ohne Einheit und ungleich null — in CSS keine Laenge.
+/// A number without a unit and not zero: not a length in CSS.
 ///
-/// Nur `font-size` fragt das heute. `parse_length` selbst laesst so etwas
-/// weiterhin durch, und das ist eine benannte Luecke, keine Absicht: sie zu
-/// schliessen beruehrt jede Laengeneigenschaft auf einmal und gehoert
-/// gemessen, nicht nebenbei erledigt.
+/// Only `font-size` asks this. `parse_length` itself still accepts such
+/// values (treating them as px); known limit, since tightening it affects
+/// every length property at once.
 fn unitless_nonzero(v: &str) -> bool {
     let t = v.trim();
     match t.parse::<f32>() {
@@ -5856,19 +5639,16 @@ fn unitless_nonzero(v: &str) -> bool {
 fn parse_length(v: &str, u: Units) -> Option<f32> {
     let v = v.trim();
     // Font-relative first so "rem" is matched before the "em" suffix eats it.
-    // `rem` is ROOT-relative (not em_base) — else nested rem compounds wrongly.
+    // `rem` is root-relative (not em_base), else nested rem compounds wrongly.
     if let Some(n) = v.strip_suffix("rem") {
         return n.trim().parse::<f32>().ok().map(|f| f * u.rem);
     }
     if let Some(n) = v.strip_suffix("em") {
         return n.trim().parse::<f32>().ok().map(|f| f * u.em);
     }
-    // `ex`/`ch`. Missing here they fell through as INVALID, which is not
-    // "ignore the unit" but "ignore the declaration": `outline-width: 0ex`
-    // then left the shorthand's `medium` in place and drew a ring the page had
-    // just switched off. The factors are MEASURED off our own font rather than
-    // both guessed at 0.5 — a `ch` is the "0" advance, and at 0.5 a
-    // `width: 20ch` column came out 26 % too narrow.
+    // `ex`/`ch`. Without them a declaration like `outline-width: 0ex` would be
+    // invalid and dropped, not just the unit. The factors come from our own
+    // font; a `ch` is the "0" advance (see `CH_PER_EM`).
     if let Some(n) = v.strip_suffix("ex") {
         return n.trim().parse::<f32>().ok().map(|f| f * EX_PER_EM * u.em);
     }
@@ -5879,7 +5659,7 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
         // No containing measure here → treat % of em (rough; refined later).
         return n.trim().parse::<f32>().ok().map(|f| f * u.em / 100.0);
     }
-    // Viewport-percentage units (CSS Values 3 §5.1.2). BEFORE the absolute
+    // Viewport-percentage units (CSS Values 3 §5.1.2). Before the absolute
     // table: `vmin` ends in `in`, so the inch arm would eat it otherwise.
     const VP: &[(&str, fn(&Units) -> f32)] = &[
         ("vmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
@@ -5919,7 +5699,7 @@ fn parse_color(v: &str, _theme: &Theme) -> Option<Rgba> {
 }
 
 /// As [`parse_color`], but keeps "fully transparent" apart from "no value".
-/// Use it wherever the property HAS a paint-nothing state (a border side, a
+/// Use it wherever the property has a paint-nothing state (a border side, a
 /// background); `parse_color` alone silently turns `rgba(0,0,0,0)` into the
 /// inherited colour.
 fn parse_color_val(v: &str, _theme: &Theme) -> Option<ColorVal> {
@@ -5971,30 +5751,28 @@ mod tests {
         }
     }
 
-    /// `resolve` takes the SUBJECT as an `ElemInfo` (it carries the pointer
+    /// `resolve` takes the subject as an `ElemInfo` (it carries the pointer
     /// state). A test that is not about `:hover` states the resting one.
     fn subject(dom: &dom::Dom) -> css::ElemInfo<'_> {
         css::ElemInfo::of(first_el(dom))
     }
 
-    /// `apply_one` takes a resolved `Prop` since 0.24.1; a test states the
-    /// property the way a stylesheet does. Going through `prop_key` also means
-    /// a test naming a property that does not exist fails loudly (`Unknown`)
-    /// instead of quietly asserting on an untouched style.
+    /// `apply_one` takes a resolved `Prop`; a test states the property the way a
+    /// stylesheet does. Going through `prop_key` also means a test naming a
+    /// property that does not exist fails loudly (`Unknown`) instead of quietly
+    /// asserting on an untouched style.
     fn apply_one(name: &str, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         let p = css::prop_key(name);
         assert_ne!(css::prop_name(p), "(unknown)", "no such property: {name}");
         super::apply_one(p, val, theme, s);
     }
 
-    /// Das UA-Blatt gegen HTML §15.3 — die Zahlen, nicht das Aussehen.
+    /// The UA sheet against HTML §15.3: the numbers, not the look.
     ///
-    /// Gemessen an Chromium (`getComputedStyle`, 16 px Grundschrift), weil
-    /// eine Vorgabe, die „vernuenftig aussieht", trotzdem falsch ist: ein
-    /// Reftest backt sie als Literal-Pixel ein, und eine echte Seite ist
-    /// gegen sie gestaltet. `tools/fixtures/ua.html` faehrt dieselben
-    /// Elemente durch `<tools>/gallery/run.py`; dieser Test ist die billige
-    /// Fassung davon, die bei jedem `cargo test` mitlaeuft.
+    /// Values match Chromium's `getComputedStyle` at a 16 px base font: a
+    /// default that merely looks reasonable is still wrong, because reftests
+    /// bake it in as literal pixels and real pages are designed against it.
+    /// `tools/fixtures/ua.html` covers the same elements end to end.
     #[test]
     fn the_ua_sheet_carries_the_specs_numbers_not_ours() {
         let theme = Theme::DARK;
@@ -6006,7 +5784,7 @@ mod tests {
             resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0)
         };
         let px = |l: Len| match l { Len::Px(v) => v, _ => f32::NAN };
-        // (Tag, Schriftgroesse, Rand oben = Rand unten) — §15.3.6.
+        // (tag, font size, margin top = margin bottom), §15.3.6.
         for (tag, fs, m) in [("h1", 32.0, 21.44), ("h2", 24.0, 19.92), ("h3", 18.72, 18.72),
                              ("h4", 16.0, 21.28), ("h5", 13.28, 22.1776), ("h6", 10.72, 24.9776)] {
             let s = ua(&alloc::format!("<{tag}>x</{tag}>"));
@@ -6027,7 +5805,7 @@ mod tests {
         for tag in ["blockquote", "figure"] {
             let s = ua(&alloc::format!("<{tag}>x</{tag}>"));
             assert_eq!((s.margin_top, s.margin_bottom), (16.0, 16.0), "{tag}");
-            // Ein RAND, keine Polsterung: ein Hintergrund faengt bei 40 px an.
+            // A margin, not padding: a background starts at 40 px.
             assert_eq!((px(s.margin_left), px(s.margin_right), s.pad_left), (40.0, 40.0, 0.0), "{tag}");
         }
         let s = ua("<pre>x</pre>");
@@ -6037,7 +5815,7 @@ mod tests {
         let s = ua("<address>x</address>");
         assert!(s.italic, "address ist kursiv");
         assert_eq!((s.margin_top, s.margin_bottom), (0.0, 0.0), "und hat keinen Rand");
-        // `smaller`/`larger` sind eine Stufe der Skala: /1,2 und ×1,2.
+        // `smaller`/`larger` are one step of the scale: /1.2 and ×1.2.
         for (html, fs) in [("<p>x<small>y</small></p>", 16.0 / 1.2),
                            ("<p>x<big>y</big></p>", 16.0 * 1.2),
                            ("<p>x<sub>y</sub></p>", 16.0 / 1.2),
@@ -6065,10 +5843,8 @@ mod tests {
                 "0.35em / 0.75em / 0.625em, war {}/{}/{}", s.pad_top, s.pad_left, s.pad_bottom);
     }
 
-    /// A CSS-wide keyword applies to EVERY property. Before this it was
-    /// handled property by property, so `border-bottom-color: inherit` did not
-    /// parse — and a failed parse leaves the PREVIOUS declaration standing,
-    /// which is how a rule that says "red, then inherit" painted red.
+    /// A CSS-wide keyword applies to every property, e.g.
+    /// `border-bottom-color: inherit` must parse and override an earlier `red`.
     #[test]
     fn css_wide_keywords_reach_every_property() {
         let theme = Theme::DARK;
@@ -6079,7 +5855,7 @@ mod tests {
             root.display = Display::Block;
             resolve(&subject(&dom), &root, &theme, &sheet, &[], &[], 0, 1000.0)
         };
-        // `inherit` on a NON-inherited property: the parent's value, not the
+        // `inherit` on a non-inherited property: the parent's value, not the
         // initial one. Declared after `red`, so it also proves the earlier
         // declaration is overridden rather than left in place.
         let mut parent = ComputedStyle::root(&theme);
@@ -6126,10 +5902,8 @@ mod tests {
         assert_eq!(st.color, theme.heading);
     }
 
-    /// `:link` / `:any-link` are how a page states its link colour. Before they
-    /// parsed, the whole selector was dropped and the page silently kept the UA
-    /// colour — and it loses to a bare `a` rule only because `a:link` is one
-    /// class-level step more specific, which is exactly what the drop cost us.
+    /// `:link` / `:any-link` are how a page states its link colour. If they did
+    /// not parse, the whole selector would be dropped and the UA colour kept.
     #[test]
     fn link_pseudo_classes_select_anchors_that_have_an_href() {
         let theme = Theme::DARK;
@@ -6145,7 +5919,7 @@ mod tests {
         assert_eq!(color(link, "a:link{color:red}"), red);
         assert_eq!(color(link, "a:any-link{color:red}"), red);
         // Specificity: `a:link` (0,1,1) beats a bare `a` (0,0,1) whatever the
-        // order — the reason dropping the selector was not merely a no-op.
+        // order.
         assert_eq!(color(link, "a:link{color:red} a{color:lime}"), red);
 
         // An anchor with no href is not a link (Selectors 4 §8.1).
@@ -6156,9 +5930,9 @@ mod tests {
         assert_eq!(color(link, "a{color:lime} a:visited{color:red}"), lime);
     }
 
-    /// The four viewport-percentage units, everywhere a length is read.
-    /// `vmin` is the one that needs care: it ends in `in`, so the inch arm of
-    /// the absolute table eats it unless the viewport arms come first.
+    /// The four viewport-percentage units, everywhere a length is read. `vmin`
+    /// needs care: it ends in `in`, so the inch arm of the absolute table eats it
+    /// unless the viewport arms come first.
     #[test]
     fn viewport_units_resolve_against_the_viewport() {
         let st = |css: &str| {
@@ -6177,19 +5951,16 @@ mod tests {
         assert_eq!(st("max-width:25vw").max_width, Len::Px(250.0));
         assert_eq!(st("padding-left:10vw").pad_left, 100.0);
         // A viewport unit is a length like any other: it composes with `calc()`
-        // and it is a valid `font-size`, where it must NOT be read as an `em`.
+        // and it is a valid `font-size`, where it must not be read as an `em`.
         assert_eq!(st("width:calc(50vw - 20px)").width, Len::Px(480.0));
         assert_eq!(st("font-size:5vw").font_px, 50.0);
         // Nothing above may disturb the inch/mm arms that follow it.
         assert_eq!(st("width:1in").width, Len::Px(96.0));
     }
 
-    /// The CSS math functions have to reach the BOX MODEL, not just custom
-    /// properties. `values.rs` evaluated all four from the start, but
-    /// `parse_len_opt` only routed `calc(`, so `width: max(20px, 10px)` failed
-    /// its length parse and fell back to `auto`; and the padding parse called
-    /// `parse_length` directly, so `padding: calc(…)` was dropped entirely.
-    /// `length_parts` owns both now, and carries the percentage with it.
+    /// The CSS math functions have to reach the box model, not just custom
+    /// properties: `width: max(20px, 10px)` and `padding: calc(…)` go through
+    /// `length_parts`, which also carries the percentage.
     #[test]
     fn math_functions_reach_the_box_model() {
         let st = |css: &str| {
@@ -6229,14 +6000,14 @@ mod tests {
         assert_eq!(side("border-top-style:solid;border-top-width:5px").width, 5.0);
         assert_eq!(side("border-top-width:5px;border-top-style:solid").width, 5.0, "either order");
         assert_eq!(side("border-top:5px solid;border-top-style:none").width, 0.0, "none takes it away");
-        // An invalid width leaves the specified one alone — it does not fall
-        // back to 0, which is what `border-top-width-012` checks.
+        // An invalid width leaves the specified one alone; it does not fall back
+        // to 0.
         assert_eq!(side("border-top-style:solid;border-top-width:-1pt").width, 3.0);
         let c = Rgba::opaque(Rgb(0, 128, 0));
         assert_eq!(side("border-top-style:solid;color:#008000").color, Some(c), "currentColor, resolved late");
         assert_eq!(side("color:#008000;border-top-style:solid").color, Some(c), "either order");
-        // `transparent` is a VALUE: the width stays, nothing paints, and it is
-        // not the same as leaving the colour unset (that means currentColor).
+        // `transparent` is a value: the width stays, nothing paints, and it is not
+        // the same as leaving the colour unset (that means currentColor).
         let t = side("border-top:1px solid #f00;border-top-color:transparent");
         assert_eq!(t.width, 1.0, "a transparent border still takes its space");
         assert_eq!(t.color, None, "and paints nothing");
@@ -6294,7 +6065,7 @@ mod tests {
         let sheet2 = css::parse(".b{color:#00ff00 !important}");
         let st2 = resolve(&subject(&dom2), &root, &theme, &sheet2, &[], &[], 0, 1000.0);
         assert_eq!(st2.color, Rgb(0, 255, 0), "author !important beats inline normal");
-        // a later normal declaration must NOT override an earlier !important.
+        // a later normal declaration must not override an earlier !important.
         let dom3 = dom::parse("<body><p class=\"b\">x</p></body>");
         let sheet3 = css::parse(".b{color:#00ff00 !important} p{color:#ff0000}");
         let st3 = resolve(&subject(&dom3), &root, &theme, &sheet3, &[], &[], 0, 1000.0);
@@ -6329,9 +6100,9 @@ mod tests {
         }
     }
 
-    /// The value arrives at `apply_one` lowercased for keyword matching — a
-    /// `data:` URI must NOT be taken from that copy, or its base64 payload is
-    /// silently corrupted.
+    /// The value arrives at `apply_one` lowercased for keyword matching; a
+    /// `data:` URI must not be taken from that copy, or its base64 payload is
+    /// corrupted.
     #[test]
     fn data_uri_keeps_its_case() {
         let theme = Theme::DARK;
@@ -6367,7 +6138,7 @@ mod tests {
         assert_eq!(st.bg_layer.image, None, "the shorthand resets every longhand it covers");
     }
 
-    /// A keyword binds to its own axis whatever the order — `center right`
+    /// A keyword binds to its own axis whatever the order: `center right`
     /// means x=right, y=center (css-backgrounds-3 §3.6).
     #[test]
     fn background_position_keywords_bind_per_axis() {
@@ -6409,8 +6180,8 @@ mod tests {
         assert_eq!(st.mask_layer.repeat, (false, false));
     }
 
-    /// Ein Verlauf ist kein `url()` — er darf keinen Bildschluessel setzen,
-    /// sonst suchte der Rasterer Bytes, die es nie geben wird.
+    /// A gradient is not a `url()`: it must not set an image key, or the
+    /// rasteriser would look for bytes that never exist.
     #[test]
     fn gradient_is_not_an_image_key() {
         let theme = Theme::DARK;
@@ -6430,13 +6201,13 @@ mod tests {
         let g = g.resolved(100.0);
         assert_eq!(g.stops()[0].pos, 0.0);
         assert_eq!(g.stops()[1].pos, 1.0);
-        // Vorgaberichtung ist „nach unten", nicht „nach rechts".
+        // The default direction is "to bottom", not "to right".
         assert_eq!(parse_gradient("linear-gradient(red, blue)", &theme).angle, 180.0);
         assert_eq!(parse_gradient("linear-gradient(45deg, red, blue)", &theme).angle, 45.0);
     }
 
-    /// Offene Lagen werden gleichmaessig verteilt — aber ERST beim Malen,
-    /// weil eine px-Lage bis dahin keine Zahl auf der Achse ist.
+    /// Missing positions are distributed evenly, but only at paint time, because
+    /// a px position is not a number on the line until then.
     #[test]
     fn gradient_fills_open_positions_against_the_line() {
         let theme = Theme::DARK;
@@ -6448,7 +6219,7 @@ mod tests {
         let g = parse_gradient("linear-gradient(red, lime 40px, blue)", &theme);
         assert!(g.stops()[1].px);
         assert_eq!(g.resolved(200.0).stops()[1].pos, 0.2);
-        // Derselbe Stil an einem anderen Kasten: eine andere Lage.
+        // The same style on a different box: a different position.
         assert_eq!(g.resolved(80.0).stops()[1].pos, 0.5);
     }
 
@@ -6459,13 +6230,13 @@ mod tests {
         assert_eq!(g.at(0.0), Rgba::opaque(Rgb(0, 0, 0)));
         assert_eq!(g.at(1.0), Rgba::opaque(Rgb(255, 255, 255)));
         assert_eq!(g.at(0.5), Rgba::opaque(Rgb(127, 127, 127)));
-        // Ausserhalb der Achse wird der Randstopp gehalten.
+        // Outside the line the edge stop is held.
         assert_eq!(g.at(-3.0), Rgba::opaque(Rgb(0, 0, 0)));
         assert_eq!(g.at(9.0), Rgba::opaque(Rgb(255, 255, 255)));
     }
 
-    /// `transparent` ist `rgba(0,0,0,0)`. Ohne vormultipliziertes Mischen
-    /// liefe der Verlauf durch Schwarz statt einfach auszublenden.
+    /// `transparent` is `rgba(0,0,0,0)`. Without premultiplied mixing the
+    /// gradient would pass through black instead of fading out.
     #[test]
     fn gradient_fades_out_without_going_grey() {
         let theme = Theme::DARK;
@@ -6485,9 +6256,8 @@ mod tests {
         assert_eq!(g.at(0.25), g.at(0.75));
     }
 
-    /// `conic-gradient` wird ehrlich abgelehnt statt als linearer gemalt.
-    /// Tailwind v4 schreibt jeden Verlauf mit Mischraum. Ohne den Zweig
-    /// dafuer fiel der erste Parameter durch und der Verlauf ganz weg.
+    /// `conic-gradient` is rejected rather than painted as a linear one. A
+    /// gradient with an interpolation space (`in oklab`) must still parse.
     #[test]
     fn an_interpolation_space_does_not_kill_the_gradient() {
         let theme = Theme::DARK;
@@ -6503,27 +6273,27 @@ mod tests {
         assert_eq!(g.angle, 90.0);
     }
 
-    /// Die Ecke ist kein fester Winkel: die Achse steht senkrecht auf der
-    /// Verbindung der beiden NACHBARecken, haengt also am Kasten.
+    /// The corner is not a fixed angle: the line is perpendicular to the line
+    /// joining the two neighbouring corners, so it depends on the box.
     #[test]
     fn a_corner_keyword_takes_its_angle_from_the_box() {
         let theme = Theme::DARK;
         let g = parse_gradient("linear-gradient(to top right, red, blue)", &theme);
         assert_eq!(g.corner, CORNER_TR);
-        // Ein breiter flacher Kasten: fast waagrecht.
+        // A wide flat box: nearly horizontal.
         assert!((g.angle_for(800.0, 60.0) - 85.7).abs() < 0.2, "{}", g.angle_for(800.0, 60.0));
-        // Ein hoher schmaler: fast senkrecht.
+        // A tall narrow one: nearly vertical.
         assert!((g.angle_for(60.0, 200.0) - 16.7).abs() < 0.2, "{}", g.angle_for(60.0, 200.0));
-        // Quadratisch: die 45 Grad, die die Naeherung immer nahm.
+        // Square: exactly 45 degrees, the approximation's value.
         assert!((g.angle_for(100.0, 100.0) - 45.0).abs() < 0.01);
-        // Eine Seite bleibt eine Seite.
+        // A side stays a side.
         let g = parse_gradient("linear-gradient(to right, red, blue)", &theme);
         assert_eq!(g.corner, CORNER_NONE);
         assert_eq!(g.angle_for(800.0, 60.0), 90.0);
     }
 
-    /// `background: <farbe> <verlauf>` — die Kurzform stellt die Farbe voran,
-    /// und der Verlauf ging dabei still verloren.
+    /// `background: <colour> <gradient>`: the shorthand puts the colour first,
+    /// and the gradient must still be found.
     #[test]
     fn the_shorthand_finds_a_gradient_behind_a_colour() {
         let theme = Theme::DARK;
@@ -6533,8 +6303,8 @@ mod tests {
         assert_eq!(st.bg, Some(Rgba::opaque(Rgb(238, 238, 238))));
     }
 
-    /// Ein Vorspann in fremder Schreibweise darf den Standardwert nicht
-    /// loeschen — und in der anderen Reihenfolge auch nicht.
+    /// A prefixed value in an unknown spelling must not erase the standard
+    /// value, in either order.
     #[test]
     fn an_unreadable_background_image_keeps_the_previous_one() {
         let theme = Theme::DARK;
@@ -6555,16 +6325,16 @@ mod tests {
     }
 }
 
-/// Der Streuwert der ERSTEN Familie einer `font-family`-Liste.
+/// The hash of the first family of a `font-family` list.
 ///
-/// Nur die erste: eine Ersatzkette wie `"Foo", Arial, sans-serif` sagt „nimm
-/// Foo, wenn du es hast". Hat beak `Foo` nicht, faellt es ohnehin auf seine
-/// eingebaute Schrift zurueck — und die IST der Rest der Kette.
+/// Only the first: a fallback chain like `"Foo", Arial, sans-serif` says
+/// "take Foo if you have it". Without `Foo`, beak falls back to its built-in
+/// font, which stands in for the rest of the chain.
 pub fn family_hash(list: &str) -> u32 {
     let first = list.split(',').next().unwrap_or("").trim()
         .trim_matches(['"', '\'']).trim();
     if first.is_empty() { return 0 }
-    // Gattungsnamen sind keine Familien, sie sind die Ersatzkette selbst.
+    // Generic names are not families; they are the fallback chain itself.
     let low = first.to_ascii_lowercase();
     if matches!(low.as_str(), "serif" | "sans-serif" | "monospace" | "cursive"
                 | "fantasy" | "system-ui" | "ui-serif" | "ui-sans-serif"
@@ -6574,7 +6344,7 @@ pub fn family_hash(list: &str) -> u32 {
     hash_name(&low)
 }
 
-/// FNV-1a ueber den kleingeschriebenen Namen. 0 bleibt fuer „keine" frei.
+/// FNV-1a over the lowercased name. 0 stays reserved for "none".
 pub fn hash_name(low: &str) -> u32 {
     let mut h: u32 = 0x811c9dc5;
     for b in low.bytes() {
@@ -6586,27 +6356,15 @@ pub fn hash_name(low: &str) -> u32 {
 
 #[cfg(test)]
 mod size_probe {
-    /// Der Preis der Verlaeufe, festgenagelt statt geschaetzt.
+    /// The size of `ComputedStyle`, pinned.
     ///
-    /// `ComputedStyle` wird je Element kopiert und gemerkt; waechst sie
-    /// unbemerkt weiter, zahlt das jede Seite. Faellt dieser Test, ist das
-    /// keine Regression — es ist die Frage, ob das neue Feld seinen Platz
-    /// wert ist.
+    /// It is copied and memoised per element; if it grows unnoticed, every page
+    /// pays. A failure here is not a regression but the question whether the new
+    /// field is worth its space.
     #[test]
     fn the_style_stays_small() {
         assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
         assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
-        // 1472 -> 1496: sechs `f32` fuer die Prozentanteile von `padding` und
-        // den senkrechten `margin`s. Der Platz ist es wert — ohne sie fielen
-        // ALLE VIER Polsterungen in Prozent auf null, und `padding-top: 56.25%`
-        // ist die Art, wie das Web ein 16:9-Kaestchen reserviert.
-        //
-        // 1496 -> 1504: `outline_set`. EIN bool, und es kostet acht Bytes,
-        // weil es hinter dem letzten `f32` keine Luecke mehr gibt. Der Platz
-        // ist es wert: ohne ihn kann beak „die Seite will keinen Fokusring"
-        // nicht von „die Seite hat nichts gesagt" unterscheiden, und dann
-        // faerbt der Fokus den Rahmen der Seite um — auf DuckDuckGos
-        // Suchfeld sah das aus wie ein Fehler und war einer.
         assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1504);
     }
 }

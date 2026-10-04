@@ -1,12 +1,10 @@
-//! values.rs — CSS `<length>` / `<percentage>` / `calc()` resolution.
+//! CSS `<length>` / `<percentage>` / `calc()` resolution (css-values-4).
 //!
-//! One place that turns a length token into pixels, given the resolution
-//! context (font-relative bases, the percentage basis, and the viewport for
-//! `vw`/`vh`/`vmin`/`vmax`). Supports absolute + font-relative + viewport units
-//! and `calc()` with `+ - * /` and nesting. Host-testable, no OS.
-//!
-//! Pure `core`/`alloc`, `f32` throughout — the whole thing unit-tests on the
-//! dev box with no target in the loop.
+//! Turns a length token into pixels, given the resolution context
+//! (font-relative bases, the percentage basis, and the viewport for
+//! `vw`/`vh`/`vmin`/`vmax`). Supports absolute, font-relative and viewport
+//! units and `calc()` with `+ - * /` and nesting. Pure `core`/`alloc`,
+//! `f32` throughout, host-testable.
 
 use core::str;
 
@@ -97,8 +95,7 @@ fn resolve_unit(n: f32, unit: &str, ctx: &LenCtx) -> Option<f32> {
     } else if eq("ex") {
         n * crate::style::EX_PER_EM * ctx.em
     } else if eq("ch") {
-        // NOT the same as `ex`: a `ch` is the "0" advance. Both were 0.5 here,
-        // which made every `ch` length 26 % too narrow — see `CH_PER_EM`.
+        // Not the same as `ex`: a `ch` is the advance of "0"; see `CH_PER_EM`.
         n * crate::style::CH_PER_EM * ctx.em
     } else {
         return None;
@@ -422,10 +419,8 @@ mod tests {
     }
 
     #[test]
-    /// `ex` and `ch` are DIFFERENT: the x-height and the "0" advance. Both sat
-    /// at 0.5em, which made every `ch` length 26 % too narrow — a `width: 60ch`
-    /// text column came out at 47 characters. The factors are measured off our
-    /// own font, see `style::CH_PER_EM`.
+    /// `ex` and `ch` differ: the x-height and the advance of "0". The factors
+    /// come from our own font, see `style::CH_PER_EM`.
     fn ex_and_ch_use_the_real_font_metrics() {
         approx("1ex", 16.0 * crate::style::EX_PER_EM);
         approx("2ch", 2.0 * 16.0 * crate::style::CH_PER_EM);

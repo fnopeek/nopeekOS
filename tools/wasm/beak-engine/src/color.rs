@@ -1,41 +1,37 @@
-//! color.rs — CSS `<color>` parsing.
+//! CSS `<color>` parsing (css-color-4).
 //!
-//! Owns ALL colour syntax: hex (#rgb/#rgba/#rrggbb/#rrggbbaa), the functional
+//! Owns all colour syntax: hex (#rgb/#rgba/#rrggbb/#rrggbbaa), the functional
 //! forms rgb()/rgba()/hsl()/hsla() (comma- and space/slash-separated, int and
-//! %), and the full CSS Color Module Level 4 named-colour set. Host-testable,
-//! no OS in the loop.
+//! %), and the full named-colour set. Host-testable.
 //!
-//! Alpha is parsed and KEPT. It travels as `Rgba` to the display list, where
-//! the rasteriser composites it over whatever is already in the buffer — the
-//! backdrop is only known there, never here. Alpha ZERO stays a case of its
-//! own: it is not a shade of a colour, it is the absence of one. Pages reserve
-//! a frame's space with `border: 1px solid rgba(0,0,0,0)`, and that must paint
+//! Alpha is parsed and kept. It travels as `Rgba` to the display list, where
+//! the rasteriser composites it over the backdrop, which is only known there.
+//! Alpha zero is a case of its own: it is the absence of a colour, not a
+//! shade. `border: 1px solid rgba(0,0,0,0)` reserves space and must paint
 //! nothing rather than blend nothing.
 //!
-//! `no_std`-safe: only `core`/`alloc`. No libm — the float helpers avoid
-//! `round`/`floor`/`abs`/`rem_euclid` (std-only) and use casts + `%` + a
-//! hand-rolled `fabs`.
+//! `no_std`: only `core`/`alloc`. No libm, so the float helpers avoid
+//! `round`/`floor`/`abs`/`rem_euclid` and use casts, `%` and a hand-rolled
+//! `fabs`.
 
 use crate::layout::{Rgb, Rgba};
 use alloc::vec::Vec;
 
-/// A parsed `<color>`. `Transparent` is a VALUE, not an absence — see the
-/// module note. Callers that own a "paint nothing" state (a border side, a
+/// A parsed `<color>`. `Transparent` is a value, not an absence (see the
+/// module note). Callers that own a "paint nothing" state (a border side, a
 /// background) must honour it; the rest can use [`parse_color`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColorVal {
     Rgb(Rgba),
     Transparent,
-    /// `currentcolor` — the element's OWN computed `color`, and NOT resolved
-    /// here. It cannot be: css-color-4 §6.2 resolves it at used-value time, so
-    /// a computed value that still says `currentcolor` is what a descendant
-    /// inherits, and the descendant resolves it against its own `color`. That
-    /// is the whole of `background-color: inherit` under a `currentcolor`
-    /// background — resolving early makes the child wear its parent's colour.
+    /// `currentcolor`: the element's own computed `color`, not resolved here.
+    /// css-color-4 §6.2 resolves it at used-value time, so a computed value that
+    /// still says `currentcolor` is what a descendant inherits, and the
+    /// descendant resolves it against its own `color`. Resolving early would make
+    /// the child wear its parent's colour.
     ///
-    /// Kept apart from `None` for the same reason `Transparent` is: `None`
-    /// means "this declaration said nothing usable, keep the previous one",
-    /// which is the opposite of what `currentcolor` asks for.
+    /// Kept apart from `None` for the same reason as `Transparent`: `None` means
+    /// "this declaration said nothing usable, keep the previous one".
     CurrentColor,
 }
 
@@ -54,19 +50,16 @@ pub fn parse_color_val(v: &str) -> Option<ColorVal> {
     Some(if a == 0 { ColorVal::Transparent } else { ColorVal::Rgb(Rgba { c: rgb, a }) })
 }
 
-/// CSS Color 5 relative syntax — `<fn>(from <origin> <channels>)`.
+/// css-color-5 relative syntax: `<fn>(from <origin> <channels>)`.
 ///
-/// Only the IDENTITY channel list is accepted: the three channel keywords of
-/// that function, in order, and an optional `/ alpha`. Then the result IS the
-/// origin, whatever colour space the function names, and the origin's own
-/// `currentcolor`-ness travels with it — which is exactly what the sixteen
-/// `css-color/relative-currentcolor-*` reftests are about (measured: fourteen
-/// of them write the identity, and relative syntax appears NOWHERE else in the
-/// corpus, so this is the whole of what the form is worth here).
+/// Only the identity channel list is accepted: the three channel keywords of
+/// that function, in order, and an optional `/ alpha`. Then the result is the
+/// origin, whatever colour space the function names, and the origin's
+/// `currentcolor`-ness travels with it.
 ///
-/// Anything else — a substituted channel (`hsl(from C 120 s l)`), a
-/// permutation (`rgb(from C g r b)`), a `calc()` over a channel — returns
-/// `None`, so the declaration is left alone rather than painted as its origin.
+/// Anything else (a substituted channel `hsl(from C 120 s l)`, a permutation
+/// `rgb(from C g r b)`, a `calc()` over a channel) returns `None`, so the
+/// declaration is left alone rather than painted as its origin.
 fn parse_relative(v: &str) -> Option<ColorVal> {
     let open = v.find('(')?;
     let name = v[..open].trim().to_ascii_lowercase();
@@ -196,7 +189,7 @@ fn parse_rgba(v: &str) -> Option<(Rgb, u8)> {
 }
 
 /// An alpha token: `0`–`1` number or `0%`–`100%`, clamped. Anything we cannot
-/// read is OPAQUE — we never make content vanish on a guess.
+/// read is opaque; content never vanishes on a guess.
 fn alpha_255(tok: &str) -> u8 {
     let t = tok.trim();
     if let Some(p) = t.strip_suffix('%') {
@@ -276,7 +269,7 @@ fn tokens(s: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `rgb()`/`rgba()`. Comma- OR space-separated, modern `r g b / a` slash-alpha,
+/// `rgb()`/`rgba()`. Comma- or space-separated, modern `r g b / a` slash-alpha,
 /// channels as int (0–255) or percentage (0–100%).
 fn parse_rgb(inner: &str) -> Option<(Rgb, u8)> {
     let slash = inner.split_once('/');
@@ -404,9 +397,8 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Rgb {
 // ── CSS Color 4: hwb / lab / lch / oklab / oklch / color() ─────────────────
 //
 // Each functional colour is converted to linear sRGB, gamma-encoded, and
-// simple-clipped into gamut. f32 throughout — the oracle's ±20/255 tolerance
-// is far looser than f32 rounding. Matrices/constants are the CSS Color 4
-// "Sample code for color conversions" values (drafts.csswg.org/css-color-4).
+// simple-clipped into gamut. f32 throughout. Matrices and constants are the
+// css-color-4 "Sample code for color conversions" values.
 
 /// Split off an optional `/ alpha` tail, keeping the channels.
 fn split_slash(inner: &str) -> &str {
@@ -525,10 +517,9 @@ fn num_or_pct(tok: &str) -> Option<f32> {
 
 /// lab/oklab lightness. lab: `%`=0..100 or number; oklab: `%`=0..1 or number.
 ///
-/// CLAMPED, which is not the same as clipping the result: css-color-4 §9.2
-/// makes lightness itself range-limited, so `lab(150 …)` IS `lab(100 …)` and
-/// the two must come out byte-identical. Letting 150 through fed a lightness
-/// no colour has into the conversion and landed somewhere else entirely.
+/// Clamped, which is not the same as clipping the result: css-color-4 §9.2
+/// range-limits lightness itself, so `lab(150 …)` is `lab(100 …)` and both
+/// must produce identical output.
 fn lab_l(tok: &str, ok: bool) -> Option<f32> {
     if tok == "none" {
         return Some(0.0);
@@ -913,16 +904,15 @@ static NAMED: &[(&str, u8, u8, u8)] = &[
 mod tests {
     use super::*;
 
-    /// Most assertions below predate alpha and are about the CHANNELS; keep
-    /// them speaking plain `Rgb` rather than restating `Rgba::opaque` 80 times.
-    /// The alpha-specific tests call `parse_color_val` and see it.
+    /// Most assertions below are about the channels; they use plain `Rgb`
+    /// rather than restating `Rgba::opaque` everywhere. The alpha-specific tests
+    /// call `parse_color_val`.
     fn parse_color(v: &str) -> Option<Rgb> {
         super::parse_color(v).map(|c| c.c)
     }
 
-    /// `currentcolor` is a VALUE, not a failure to parse — the difference is
-    /// what lets a background follow the element's own text colour instead of
-    /// keeping whatever the previous declaration said.
+    /// `currentcolor` is a value, not a parse failure; that lets a background
+    /// follow the element's own text colour.
     #[test]
     fn currentcolor_is_a_value_of_its_own() {
         assert_eq!(parse_color_val("currentcolor"), Some(ColorVal::CurrentColor));
@@ -931,9 +921,9 @@ mod tests {
         assert_eq!(parse_color("currentcolor"), None);
     }
 
-    /// Relative syntax with the IDENTITY channel list is its origin, in every
-    /// colour space — including when the origin is `currentcolor`, whose
-    /// deferral has to survive the trip.
+    /// Relative syntax with the identity channel list is its origin, in every
+    /// colour space, including when the origin is `currentcolor`, whose deferral
+    /// has to survive.
     #[test]
     fn relative_syntax_with_identity_channels_is_the_origin() {
         for v in [
@@ -994,7 +984,7 @@ mod tests {
 
     #[test]
     fn hex4_drops_alpha() {
-        // #rgba — alpha nibble parsed and discarded, opaque RGB returned.
+        // #rgba: the test wrapper drops the alpha nibble and returns opaque RGB.
         assert_eq!(parse_color("#f008"), Some(Rgb(255, 0, 0)));
         assert_eq!(parse_color("#abcd"), Some(Rgb(0xaa, 0xbb, 0xcc)));
     }
@@ -1071,11 +1061,10 @@ mod tests {
         }
     }
 
-    /// A partial alpha is carried, not flattened and not dropped. All three
-    /// spellings of "1 % red" mean the same colour, and the rasteriser is what
-    /// finally composites it — duckduckgo.com draws its searchbox outline as
-    /// `rgba(0,0,0,.08)`, which painted opaque is a hard black rule where the
-    /// page asked for a hairline you can barely see.
+    /// A partial alpha is carried, neither flattened nor dropped. All three
+    /// spellings of "1 % red" mean the same colour, and the rasteriser
+    /// composites it; painted opaque, a faint `rgba(0,0,0,.08)` hairline would
+    /// become a hard black rule.
     #[test]
     fn a_partial_alpha_is_carried_to_the_display_list() {
         for v in ["rgba(255,0,0,0.01)", "#ff000001", "rgb(255 0 0 / 1%)"] {
@@ -1219,21 +1208,18 @@ mod tests {
 
 // ── filter: the colour functions (filter-effects-1 §18.1) ─────────────────
 
-/// A `filter` chain reduced to ONE colour transform.
+/// A `filter` chain reduced to one colour transform.
 ///
-/// Every colour filter the spec defines — `grayscale`, `sepia`, `saturate`,
-/// `hue-rotate`, `invert`, `brightness`, `contrast`, `opacity` — is given
-/// there as a matrix over the RGB triple, and matrices compose. So a chain of
-/// any length costs one 3x4 multiply per pixel rather than a walk over the
-/// list, and `ComputedStyle` carries a fixed 52 bytes instead of a `Vec`.
+/// Every colour filter the spec defines (`grayscale`, `sepia`, `saturate`,
+/// `hue-rotate`, `invert`, `brightness`, `contrast`, `opacity`) is a matrix
+/// over the RGB triple, and matrices compose. A chain of any length costs one
+/// 3x4 multiply per pixel, and `ComputedStyle` carries a fixed size instead
+/// of a `Vec`.
 ///
-/// `blur` and `drop-shadow` are deliberately NOT here: they MOVE pixels rather
-/// than recolour them, so no matrix can express them. Neither appears in
-/// `assets/bootstrap.min.css` or Wikipedia's `resolved.css` — measured, all 46
-/// `filter` declarations there are `invert`, `grayscale`, `brightness` and
-/// `hue-rotate` — and between them they carry two reftests. A declaration that
-/// names one is dropped whole (the chain is all-or-nothing), so a page gets
-/// its unfiltered pixels rather than a wrong approximation of a blur.
+/// Not implemented: `blur` and `drop-shadow`. They move pixels rather than
+/// recolour them, so no matrix can express them. A declaration naming one is
+/// dropped whole (the chain is all-or-nothing), so the page gets its
+/// unfiltered pixels rather than a wrong approximation.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ColorFilter {
     /// Three rows of `[r, g, b, offset]`, over channels in 0..1.
@@ -1268,9 +1254,9 @@ impl ColorFilter {
         Rgba { c: Rgb(ch(0), ch(4), ch(8)), a: round_u8(clamp(c.a as f32 * self.a, 0.0, 255.0)) }
     }
 
-    /// The same transform on one BGRA source pixel, for the image paths — the
-    /// only place the pixels exist at all, since an image travels to the
-    /// display list as a key.
+    /// The same transform on one BGRA source pixel, for the image paths; an
+    /// image travels to the display list as a key, so the pixels exist only
+    /// there.
     pub fn apply_bgra(&self, px: [u8; 4]) -> [u8; 4] {
         let out = self.apply(Rgba { c: Rgb(px[2], px[1], px[0]), a: px[3] });
         [out.c.2, out.c.1, out.c.0, out.a]
@@ -1332,8 +1318,8 @@ fn filter_fn(name: &str, arg: &str) -> Option<ColorFilter> {
     // argument is a full inversion.
     let amount = if arg.is_empty() { 1.0 } else { num_or_pct_val(arg)? };
     // `grayscale`, `sepia`, `invert` and `opacity` saturate at 1; `saturate`,
-    // `brightness` and `contrast` have no upper bound. Bootstrap writes
-    // `grayscale(100)` — a plain number, not a percentage — and means 1.
+    // `brightness` and `contrast` have no upper bound. `grayscale(100)`
+    // (a plain number, not a percentage) therefore means 1.
     let unit = clamp(amount, 0.0, 1.0);
     let diag = |k: f32, off: f32| ColorFilter {
         m: [k, 0.0, 0.0, off, 0.0, k, 0.0, off, 0.0, 0.0, k, off],

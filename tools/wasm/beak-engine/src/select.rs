@@ -1,30 +1,15 @@
-//! Text auf der Seite markieren — und damit kopieren und finden.
+//! Text selection on the page: copy and find.
 //!
-//! **Warum das fehlte und warum es zaehlt.** Nach „Links anklicken" ist
-//! Markieren und Kopieren die meistbenutzte Handlung in einem Browser
-//! ueberhaupt, und beak konnte sie nicht: `grep` ueber die Shell zaehlte
-//! null Treffer (`docs/plan/BROWSER_TABS.md` §B4). Die Adresszeile kann es
-//! seit 0.150.0 — die Seite ist ein Bild auf einer Leinwand, und ein Bild
-//! markiert man nicht.
+//! The display list is a sequence of `DrawOp::Text`, each with position, size,
+//! font choice and text, so "which character is under this point" is a
+//! computation, and the same computation in reverse yields the highlight
+//! rectangles. Measuring needs the faces held by `Engine`, so the public
+//! interface lives there (`Engine::text_pos_at` and neighbours); this module
+//! holds the arithmetic.
 //!
-//! **Die Vorarbeit war schon da.** Die Anzeigeliste ist keine Pixelwand: sie
-//! ist eine Folge von `DrawOp::Text`, jeder mit Ort, Groesse, Schriftwahl und
-//! seinem Text. Damit ist „welcher Buchstabe liegt unter diesem Punkt" eine
-//! Rechnung und keine Suche — und dieselbe Rechnung rueckwaerts gibt die
-//! Rechtecke zum Hervorheben.
-//!
-//! Die Masse gehoeren dem MOTOR, nicht dem Layout: eine Textbreite haengt am
-//! Gesicht, und die Gesichter haelt `Engine`. Deshalb steht die
-//! Schnittstelle dort (`Engine::text_pos_at` und Nachbarn) und hier nur die
-//! Rechnung.
-//!
-//! **Reihenfolge = Anzeigeliste.** Ein Bereich ist ein Paar aus Orten, und
-//! „von … bis" braucht eine Ordnung. Genommen wird die der Anzeigeliste, und
-//! die ist fuer Text die Dokumentreihenfolge — nicht, weil das immer stimmt
-//! (ein `position:absolute`-Kasten wird spaeter gemalt und steht vielleicht
-//! weiter oben), sondern weil es die einzige Ordnung ist, die es umsonst
-//! gibt. Was dabei herauskommt, ist die Reihenfolge, in der die Seite
-//! GEZEICHNET wird; fuer gewoehnlichen Fliesstext ist das die gelesene.
+//! Ordering follows the display list, which for text is document order. It is
+//! paint order, not reading order (an absolutely positioned box is painted
+//! later but may sit higher); for ordinary flowing text the two agree.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -32,20 +17,18 @@ use alloc::vec::Vec;
 use crate::fonts::Fonts;
 use crate::layout::{DrawOp, Layout};
 
-/// Ein Ort im Text der Seite: der wievielte Zeichenbefehl, und das wievielte
-/// Byte darin.
+/// A position in the page text: index of the text draw op and byte offset in it.
 ///
-/// `Ord` vergleicht erst den Befehl, dann das Byte — genau die Ordnung, die
-/// „von hier bis dort" braucht. Ein Bereich wird deshalb nie verkehrt herum
-/// gehalten, sondern beim Gebrauch sortiert: wer nach links zieht, meint
-/// dasselbe wie wer nach rechts zieht.
+/// `Ord` compares the op first, then the byte. A range is never stored
+/// reversed; it is sorted on use, so dragging left selects the same as
+/// dragging right.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct TextPos {
     pub op: u32,
     pub off: u32,
 }
 
-/// Ein Zeichenbefehl, aufbereitet: sein Kasten und was zum Messen noetig ist.
+/// A text draw op, prepared: its box and what is needed to measure it.
 struct Run<'a> {
     idx: u32,
     x: i32,
@@ -73,7 +56,7 @@ fn runs(lay: &Layout) -> Vec<Run<'_>> {
     out
 }
 
-/// Breite eines Stuecks in diesem Lauf.
+/// Width of a substring in this run.
 fn width(fonts: &Fonts, r: &Run, s: &str) -> f32 {
     let face = fonts.pick(r.bold, r.italic, r.mono, r.family);
     crate::layout::measure_sp_pub(face, s, r.size, r.sp)
@@ -84,29 +67,27 @@ fn height(fonts: &Fonts, r: &Run) -> i32 {
     libm::ceilf(crate::layout::line_gap_pub(face, r.size)) as i32
 }
 
-/// Der Ort im Text unter `(x, y)` in Dokumentkoordinaten.
+/// The text position under `(x, y)` in document coordinates.
 ///
-/// Trifft der Punkt keinen Lauf, wird der NAECHSTE genommen — erst senkrecht
-/// (welche Zeile), dann waagerecht (welches Ende). Das ist kein
-/// Entgegenkommen, sondern die Bedingung dafuer, dass Ziehen funktioniert:
-/// wer ueber den rechten Rand hinauszieht, meint „bis zum Zeilenende", und
-/// wer in den Rand zwischen zwei Absaetzen faehrt, meint einen von beiden.
+/// If the point hits no run, the nearest one is taken: first vertically
+/// (which line), then horizontally (which end). Dragging depends on this:
+/// past the right edge means "to end of line", and the gap between two
+/// paragraphs means one of them.
 pub fn text_pos_at(fonts: &Fonts, lay: &Layout, x: i32, y: i32) -> Option<TextPos> {
     let rs = runs(lay);
     if rs.is_empty() { return None }
 
-    // Abstand einer Zeile zum Zeiger, senkrecht. 0 heisst: der Punkt liegt
-    // darin.
+    // Vertical distance of a line to the pointer; 0 means the point is inside.
     let vdist = |r: &Run| -> i32 {
         let h = height(fonts, r).max(1);
         if y < r.y { r.y - y } else if y >= r.y + h { y - (r.y + h) + 1 } else { 0 }
     };
     let best = rs.iter().map(vdist).min()?;
-    // Alle Laeufe DIESER Zeile, in Anzeigereihenfolge.
+    // All runs of this line, in display order.
     let line: Vec<&Run> = rs.iter().filter(|r| vdist(r) == best).collect();
 
-    // Waagerecht: der Lauf, der den Punkt enthaelt; sonst der letzte, der
-    // davor beginnt; sonst der erste.
+    // Horizontally: the run containing the point, else the last one starting
+    // before it, else the first.
     let mut chosen = line[0];
     for r in &line {
         let w = libm::ceilf(width(fonts, r, r.text)) as i32;
@@ -116,11 +97,11 @@ pub fn text_pos_at(fonts: &Fonts, lay: &Layout, x: i32, y: i32) -> Option<TextPo
     Some(TextPos { op: chosen.idx, off: byte_at(fonts, chosen, x) })
 }
 
-/// Das Byte, an dem der Punkt in DIESEM Lauf liegt.
+/// The byte at which the point lies in this run.
 ///
-/// Gerundet auf die naechste Zeichengrenze: wer auf die linke Haelfte eines
-/// Buchstabens zeigt, meint davor. So macht es jeder Editor, und ohne das
-/// laesst sich das erste Zeichen einer Zeile nicht mitnehmen.
+/// Rounded to the nearest character boundary: pointing at the left half of a
+/// glyph means before it, as in every editor; otherwise the first character
+/// of a line could not be selected.
 fn byte_at(fonts: &Fonts, r: &Run, x: i32) -> u32 {
     let rel = (x - r.x) as f32;
     if rel <= 0.0 { return 0 }
@@ -135,7 +116,7 @@ fn byte_at(fonts: &Fonts, r: &Run, x: i32) -> u32 {
     r.text.len() as u32
 }
 
-/// Die Rechtecke, die den Bereich hervorheben — Dokumentkoordinaten.
+/// The rectangles highlighting the range, in document coordinates.
 pub fn selection_rects(fonts: &Fonts, lay: &Layout, a: TextPos, b: TextPos)
     -> Vec<(i32, i32, i32, i32)>
 {
@@ -156,14 +137,11 @@ pub fn selection_rects(fonts: &Fonts, lay: &Layout, a: TextPos, b: TextPos)
     out
 }
 
-/// Der ausgewaehlte Text.
+/// The selected text.
 ///
-/// Zwischen zwei Laeufen steht ein Zeilenumbruch, wenn sie auf
-/// verschiedenen Zeilen liegen, sonst nichts — ein Absatz kommt aus mehreren
-/// Laeufen (fett, kursiv, ein Link mittendrin), und dazwischen gehoert kein
-/// Trenner. Ein Leerzeichen zu setzen waere falsch: die Laeufe tragen ihre
-/// Leerzeichen selbst, und `wortA` + `wortB` sind im Original vielleicht
-/// `wortAwortB`.
+/// Runs on different lines are joined with a newline, runs on the same line
+/// with nothing: a paragraph consists of several runs (bold, italic, links)
+/// and they carry their own spaces, so inserting a separator would be wrong.
 pub fn selected_text(lay: &Layout, a: TextPos, b: TextPos) -> String {
     let (a, b) = if a <= b { (a, b) } else { (b, a) };
     let mut out = String::new();
@@ -182,23 +160,19 @@ pub fn selected_text(lay: &Layout, a: TextPos, b: TextPos) -> String {
     out
 }
 
-/// Alle Vorkommen von `needle` im Text der Seite, ohne Ruecksicht auf Gross-
-/// und Kleinschreibung — als Bereiche, die `selection_rects` hervorheben kann.
+/// All case-insensitive occurrences of `needle` in the page text, as ranges
+/// that `selection_rects` can highlight.
 ///
-/// **Je Lauf, nicht ueber die ganze Seite.** Ein Wort, das eine Zeile
-/// ueberschreitet oder mitten im Wort fett wird, faellt damit durch. Das ist
-/// die ehrliche Grenze dieser Fassung, und sie ist benannt statt versteckt:
-/// laufuebergreifend zu suchen hiesse, den Text zusammenzusetzen und die
-/// Rueckabbildung auf Laeufe zu fuehren — machbar, aber eine andere Groesse.
+/// Limit: matches are found within a single run only; a word that wraps or
+/// changes style mid-word is not found.
 pub fn find_all(lay: &Layout, needle: &str) -> Vec<(TextPos, TextPos)> {
     let mut out = Vec::new();
     if needle.is_empty() { return out }
     let low_needle = needle.to_lowercase();
     for r in runs(lay) {
-        // Kleinschreiben kann die BYTELAENGE aendern (ẞ → ß ist gleich lang,
-        // aber İ → i̇ nicht), und dann zeigen die Fundstellen ins Leere.
-        // Deshalb nur dann ueber die kleingeschriebene Fassung suchen, wenn
-        // sie dieselbe Laenge hat — sonst zeichengenau vergleichen.
+        // Lowercasing can change the byte length (İ → i̇), and then the match
+        // offsets would be wrong. Search the lowercased text only if its length is
+        // unchanged; otherwise compare character by character.
         let low = r.text.to_lowercase();
         if low.len() == r.text.len() {
             let mut from = 0usize;
@@ -228,25 +202,24 @@ mod tests {
         (eng, l)
     }
 
-    /// Der Punkt trifft das Zeichen, auf das er zeigt — und die Rueckreise
-    /// gibt denselben Text her.
+    /// The point hits the character it points at, and the round trip yields the
+    /// same text.
     #[test]
     fn a_point_hits_the_character_under_it() {
         let (eng, l) = lay("<body><p>Hallo Welt</p></body>");
-        // Ganz links im Absatz: vor dem H.
+        // Far left in the paragraph: before the H.
         let runs = super::runs(&l);
         let r = &runs[0];
         assert_eq!(r.text, "Hallo Welt");
         let a = eng.text_pos_at(&l, r.x, r.y + 4).expect("Anfang");
         assert_eq!(a.off, 0, "links vom ersten Buchstaben ist Offset 0");
-        // Weit rechts: hinter dem letzten.
+        // Far right: after the last character.
         let b = eng.text_pos_at(&l, r.x + 10_000, r.y + 4).expect("Ende");
         assert_eq!(b.off as usize, r.text.len(), "rechts vom letzten ist das Ende");
         assert_eq!(eng.selected_text(&l, a, b), "Hallo Welt");
     }
 
-    /// Rueckwaerts gezogen ist derselbe Bereich. Ohne das gibt jede Auswahl
-    /// von rechts nach links nichts her.
+    /// A range dragged backwards is the same range.
     #[test]
     fn dragging_backwards_selects_the_same_thing() {
         let (eng, l) = lay("<body><p>Hallo Welt</p></body>");
@@ -257,8 +230,8 @@ mod tests {
         assert_eq!(eng.selection_rects(&l, a, b).len(), eng.selection_rects(&l, b, a).len());
     }
 
-    /// Ueber zwei Absaetze hinweg kommt ein Zeilenumbruch dazwischen — aber
-    /// NICHT zwischen zwei Laeufen derselben Zeile.
+    /// Across two paragraphs there is a newline in between, but not between
+    /// two runs on the same line.
     #[test]
     fn a_line_break_only_between_lines() {
         let (eng, l) = lay("<body><p>eins</p><p>zwei</p></body>");
@@ -268,7 +241,7 @@ mod tests {
         let b = TextPos { op: rs[1].idx, off: rs[1].text.len() as u32 };
         assert_eq!(eng.selected_text(&l, a, b), "eins\nzwei");
 
-        // Fett mitten im Satz: ein Absatz, mehrere Laeufe, KEIN Umbruch.
+        // Bold in mid-sentence: one paragraph, several runs, no newline.
         let (eng2, l2) = lay("<body><p>a<b>b</b>c</p></body>");
         let rs2 = super::runs(&l2);
         let a2 = TextPos { op: rs2[0].idx, off: 0 };
@@ -278,7 +251,7 @@ mod tests {
         assert!(!got.contains('\n'), "eine Zeile, kein Umbruch: {got:?}");
     }
 
-    /// Die Hervorhebung liegt AUF dem Text, nicht daneben.
+    /// The highlight lies on the text, not beside it.
     #[test]
     fn the_highlight_covers_the_text_it_names() {
         let (eng, l) = lay("<body><p>Hallo Welt</p></body>");
@@ -291,12 +264,12 @@ mod tests {
         assert_eq!(x, r.x, "faengt am Lauf an");
         assert_eq!(y, r.y);
         assert!(h > 0 && w > 0, "{w}x{h}");
-        // "Hallo" ist kuerzer als "Hallo Welt".
+        // "Hallo" is shorter than "Hallo Welt".
         let all = eng.selection_rects(&l, a, TextPos { op: r.idx, off: r.text.len() as u32 });
         assert!(w < all[0].2, "der Teil ist schmaler als das Ganze: {w} vs {}", all[0].2);
     }
 
-    /// Suchen ist gross-/kleinschreibungsblind und findet jedes Vorkommen.
+    /// Search is case-insensitive and finds every occurrence.
     #[test]
     fn find_is_case_blind_and_finds_every_hit() {
         let (eng, l) = lay("<body><p>Welt welt WELT</p></body>");
@@ -309,13 +282,13 @@ mod tests {
         assert!(eng.find_all(&l, "gibtesnicht").is_empty());
     }
 
-    /// Ein Umlaut ist zwei Bytes — eine Auswahl darf nie mitten hinein.
+    /// An umlaut is two bytes; a selection must never split it.
     #[test]
     fn a_selection_never_splits_a_character() {
         let (eng, l) = lay("<body><p>Grüezi wohl</p></body>");
         let r = &super::runs(&l)[0];
-        // Jeden Pixel des Laufs abtasten: jeder Offset muss eine
-        // Zeichengrenze sein, sonst schneidet `selected_text` in ein Zeichen.
+        // Probe every pixel of the run: each offset must be a character boundary,
+        // otherwise `selected_text` cuts into a character.
         let w = super::width(&eng_fonts(&eng), r, r.text) as i32;
         for x in r.x..=(r.x + w + 4) {
             let p = eng.text_pos_at(&l, x, r.y + 4).unwrap();

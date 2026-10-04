@@ -1,34 +1,13 @@
-//! vars.rs — CSS Custom Properties (`--name`) und `var()`.
+//! CSS custom properties (`--name`) and `var()` (css-variables-1).
 //!
-//! **Sie werden in der KASKADE aufgeloest, je Element** — `style::resolve_in`
-//! sammelt sie aus den Regeln, die dieses Element wirklich treffen, erbt sie
-//! vom Elternteil und setzt sie beim Anwenden eines Wertes ein. Hier steht
-//! nur noch, was eine Karte IST und wie aus einem Wert ein fertiger wird.
+//! They are resolved in the cascade, per element: `style::resolve_in`
+//! collects them from the rules that actually match the element, inherits
+//! them from the parent and substitutes them when a value is applied. This
+//! module holds the per-element map and the substitution of a value.
 //!
-//! Bis 0.59.0 lief davor ein Textlauf ueber das ganze Blatt, mit einer
-//! globalen Karte: ein Wert je Name fuer das ganze Dokument. Das traegt genau
-//! ein Muster — `:root` setzt eine Palette, alles liest daraus — und bricht
-//! bei dem, das jedes moderne Rahmenwerk benutzt: die Basisklasse liest die
-//! Variable, jede Variante setzt sie neu.
-//!
-//!     .btn         { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
-//!     .btn-primary { --bs-btn-bg: #0d6efd }
-//!     .btn-link    { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
-//!
-//! `.btn-link` trifft einen `<button class="btn btn-primary">` nie und gewann
-//! trotzdem die globale Karte: **jeder Bootstrap-Knopf war durchsichtig.**
-//! Dasselbe traf Hinweise, Tabellenstreifen und `list-group .active`.
-//!
-//! Mit dem Textlauf sind auch seine Heuristiken weg — er musste RATEN, welcher
-//! Block „unbedingt" gilt, und tat das an der Selektor-Zeichenkette. Ein
-//! Kommentar davor (Bootstraps Kopfzeile, mit Versionsnummer und URLs) reichte,
-//! um `:root` fuer bedingt zu halten; dann gewann `[data-bs-theme=dark]`, und
-//! die Seite war dunkel, ohne dass irgendwo ein `data-bs-theme` stand. Die
-//! Kaskade muss nichts raten: sie TRIFFT.
-//!
-//! Gemessen hat der Umbau nichts gekostet — auf drei eingefrorenen Seiten
-//! 56,6/45,5/56,2 ms vorher gegen 57,5/44,5/47,2 ms nachher. Der Textlauf ueber
-//! ein 368-KB-Blatt war eben auch nicht gratis.
+//! A single document-wide map is not enough: frameworks set a variable in a
+//! base class and override it in each variant, so only the rules that match
+//! the element may decide its value.
 
 use alloc::string::{String, ToString};
 
@@ -76,9 +55,8 @@ fn parse_var_args(input: &str, open: usize) -> Option<(usize, String, Option<Str
 
 /// `true` if bytes at `i` spell `var(` (case-insensitive on `var`).
 ///
-/// Das Zeichen DAVOR gehoert zur Frage: ein Funktionsname ist ein ganzer
-/// Bezeichner, also ist `notvar(--x)` die Funktion `notvar` und kein `var()`.
-/// Ohne die Schranke setzte `expand` dort mitten im Namen ein.
+/// The preceding byte matters: a function name is a whole identifier, so
+/// `notvar(--x)` is the function `notvar`, not `var()`.
 fn is_var_at(b: &[u8], i: usize) -> bool {
     if i > 0 {
         let p = b[i - 1];
@@ -148,50 +126,32 @@ fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
 }
 
-// ── Je Element, nicht je Dokument ───────────────────────────────────────────
+// ── Per element, not per document ───────────────────────────────────────────
 //
-// Frueher lief hier ein Textlauf ueber das ganze Blatt: EINE Karte, ein Wert
-// je Name fuer das ganze Dokument. Das traegt das Muster, fuer das es gebaut
-// war (`:root` setzt eine Palette), und bricht bei dem, das jedes moderne
-// Rahmenwerk benutzt — die Basisklasse liest die Variable, jede Variante
-// setzt sie neu:
-//
-//     .btn         { --bs-btn-bg: transparent; background: var(--bs-btn-bg) }
-//     .btn-primary { --bs-btn-bg: #0d6efd }
-//     .btn-link    { --bs-btn-bg: transparent }   <- steht ZULETZT im Blatt
-//
-// `.btn-link` trifft einen `<button class="btn btn-primary">` nie und gewann
-// trotzdem: jeder Bootstrap-Knopf war durchsichtig. Eine Custom Property ist
-// eine GEERBTE Eigenschaft — sie gehoert in die Kaskade, je Element. Dort
-// steht sie jetzt (`style::resolve_in`); hier bleibt nur, was eine Karte ist
-// und wie ein Wert daraus entsteht.
+// A custom property is an inherited property, so it belongs in the cascade
+// (`style::resolve_in`). This part holds the map and the substitution.
 
-/// Die Custom Properties, die auf einem Element gelten.
+/// The custom properties in effect on an element.
 ///
-/// Eine flache Liste und keine Karte: ein Element traegt selten mehr als ein
-/// paar Dutzend, und ein linearer Vergleich ueber kurze Namen ist billiger
-/// als das Hashen, das eine Karte je Zugriff kostet.
+/// A flat list rather than a hash map: an element rarely carries more than a
+/// few dozen, and a linear compare over short names is cheaper than hashing.
 pub type VarMap = alloc::vec::Vec<(alloc::rc::Rc<str>, alloc::rc::Rc<str>)>;
 
-/// Steht ein `var()` in diesem Wert? Ein Bytescan, damit der Normalfall —
-/// die allermeisten Deklarationen haben keins — nichts kostet.
+/// Does this value contain a `var()`? A byte scan, so the common case (no
+/// `var()`) costs nothing.
 pub fn has_var(v: &str) -> bool { contains_var(v.as_bytes()) }
 
 pub fn var_get<'a>(map: &'a VarMap, name: &str) -> Option<&'a str> {
     let v = map.iter().find(|(k, _)| &**k == name).map(|(_, v)| &**v)?;
-    // `--x: initial` macht die Eigenschaft GARANTIERT UNGUELTIG (CSS Variables
-    // 1 §3.1) — sie gilt als nicht gesetzt, und ein `var(--x, rueckfall)`
-    // nimmt den Rueckfall. Das ist kein Randfall: Bootstrap schaltet damit
-    // seine Tabellenfarben um
-    // (`--bs-table-color-type: initial`, dann `var(--bs-table-color-type,
-    // var(--bs-table-color))`), und als Zeichenkette gelesen faerbte es jede
-    // Zelle mit dem Wort „initial".
+    // `--x: initial` makes the property guaranteed-invalid (css-variables-1
+    // §3.1): it counts as unset, and `var(--x, fallback)` takes the fallback.
+    // Frameworks use this to switch values.
     if v.trim() == "initial" { return None }
     Some(v)
 }
 
-/// Setzen oder ersetzen. Ersetzen statt Anhaengen, damit die Liste nicht mit
-/// jeder ueberschriebenen Deklaration waechst.
+/// Set or replace. Replacing keeps the list from growing with every
+/// overridden declaration.
 pub fn var_set(map: &mut VarMap, name: &str, value: &str) {
     match map.iter_mut().find(|(k, _)| &**k == name) {
         Some(slot) => slot.1 = alloc::rc::Rc::from(value),
@@ -199,13 +159,12 @@ pub fn var_set(map: &mut VarMap, name: &str, value: &str) {
     }
 }
 
-/// `var()` in einem Wert ersetzen, gegen die Karte DIESES Elements.
+/// Substitute `var()` in a value against this element's map.
 ///
-/// `skip` ist der Name, dessen eigener Wert gerade ausgerechnet wird: er darf
-/// sich nicht selbst einsetzen. `--x: var(--x, 1rem)` ist die Schreibweise,
-/// mit der eine Seite „nimm den geerbten Wert, sonst 1rem" sagt (Wikipedia
-/// tut das); wuerde er sich selbst finden, bliebe ein `var()` stehen und die
-/// Deklaration waere ungueltig.
+/// `skip` is the name whose own value is being computed: it must not
+/// substitute itself. `--x: var(--x, 1rem)` means "the inherited value, else
+/// 1rem"; finding itself would leave a `var()` behind and invalidate the
+/// declaration.
 pub fn expand(value: &str, map: &VarMap, skip: Option<&str>) -> String {
     if !contains_var(value.as_bytes()) {
         return value.into();
@@ -220,9 +179,9 @@ pub fn expand(value: &str, map: &VarMap, skip: Option<&str>) -> String {
     cur.0
 }
 
-/// Deckel gegen Ringe: `--a: var(--b); --b: var(--a)` hoert von selbst nicht
-/// auf. Was danach noch ein `var()` traegt, ist ungueltig — und das ist die
-/// richtige Antwort, nicht ein erfundener Wert.
+/// Cycle cap: `--a: var(--b); --b: var(--a)` never terminates on its own.
+/// Anything still carrying a `var()` afterwards is invalid, which is the
+/// correct answer.
 const MAX_PASSES: usize = 16;
 
 fn expand_pass(input: &str, map: &VarMap, skip: Option<&str>) -> (String, bool) {
@@ -249,9 +208,8 @@ fn expand_pass(input: &str, map: &VarMap, skip: Option<&str>) -> (String, bool) 
                 match (hit, fallback) {
                     (Some(v), _) => out.push_str(v),
                     (None, Some(f)) => out.push_str(&f),
-                    // Kein Wert und kein Rueckfall: das `var()` bleibt stehen,
-                    // der Wertparser scheitert daran, und die Deklaration
-                    // faellt weg — CSS Variables 1 §3.
+                    // No value and no fallback: the `var()` stays, the value parser fails
+                    // on it, and the declaration is dropped (css-variables-1 §3).
                     (None, None) => { out.push_str(&input[i..end]); i = end; continue }
                 }
                 changed = true;
@@ -277,12 +235,11 @@ mod tests {
         pairs.iter().map(|(k, v)| (alloc::rc::Rc::from(*k), alloc::rc::Rc::from(*v))).collect()
     }
 
-    /// Die Farbe, die eine Seite auf ihr erstes Textstueck malt.
+    /// The colour a page paints on its first text run.
     ///
-    /// Der kuerzeste ehrliche Weg, einen KASKADIERTEN Wert zu pruefen: er geht
-    /// durch Parser, Treffer, Kaskade, Vererbung und Einsetzung — also durch
-    /// alles, was hier zu pruefen ist. Eine Probe direkt auf `expand` sagt
-    /// ueber die Kaskade nichts.
+    /// Checks a cascaded value end to end: parser, matching, cascade,
+    /// inheritance and substitution. A probe on `expand` alone says nothing
+    /// about the cascade.
     fn painted_text(html: &str, css: &str) -> Option<(u8, u8, u8)> {
         let mut eng = crate::Engine::new();
         let lay = eng.layout_ext(html, css, 800);
@@ -292,9 +249,9 @@ mod tests {
         })
     }
 
-    /// Alle Fuellfarben einer Seite. Eine Liste und kein „die erste": welche
-    /// Fuellung die Leinwand ist und welche das Element, haengt am Aufbau der
-    /// Seite — und die Probe soll den WERT pruefen, nicht die Malreihenfolge.
+    /// All fill colours of a page. A list rather than "the first": which fill is
+    /// the canvas and which the element depends on page structure, and the probe
+    /// checks the value, not the paint order.
     fn fills(html: &str, css: &str) -> alloc::vec::Vec<(u8, u8, u8)> {
         let mut eng = crate::Engine::new();
         let lay = eng.layout_ext(html, css, 800);
@@ -305,11 +262,9 @@ mod tests {
         }).collect()
     }
 
-    /// Eine Custom Property wird erst beim GEBRAUCH eingesetzt, nicht beim
-    /// Setzen (css-variables-1 §3). Sonst friert die Regel, die zuerst kommt,
-    /// den Stand der Kaskade ein — und eine Regel dahinter, die eine benutzte
-    /// Variable erst setzt, kommt zu spaet. Genau so schreibt Tailwind seine
-    /// Ringe: die Breite steht vor der Farbe.
+    /// A custom property is substituted on use, not when it is set
+    /// (css-variables-1 §3). Otherwise the first rule would freeze the cascade
+    /// state, and a later rule that sets a used variable would come too late.
     #[test]
     fn a_variable_may_be_set_after_the_one_that_uses_it() {
         let c = painted_text(
@@ -319,22 +274,17 @@ mod tests {
         assert_eq!(c, Some((255, 0, 0)), "die spaetere Regel entscheidet, nicht der Ausweichwert");
     }
 
-    // ── Die Kaskade: WER entscheidet den Wert ───────────────────────────────
+    // ── The cascade: who decides the value ──────────────────────────────────
 
-    /// **Der Fehler, wegen dem die Aufloesung in die Kaskade gezogen wurde.**
-    ///
-    /// Bis 0.59.0 lief ein Textlauf ueber das ganze Blatt mit einer globalen
-    /// Karte. `.c` trifft das Element nicht und gewann trotzdem — auf einer
-    /// echten Seite hiess das: `.btn-link{--bs-btn-bg:transparent}` steht
-    /// zuletzt im Blatt, und JEDER Bootstrap-Knopf war durchsichtig.
+    /// A rule that does not match the element must not supply its variables,
+    /// even if it comes last in the sheet.
     #[test]
     fn a_rule_that_does_not_match_must_not_decide_the_value() {
         let css = ".a{--x:#00f;color:var(--x)} .b{--x:#f00} .c{--x:#0f0}";
         assert_eq!(painted_text("<p class='a b'>x</p>", css), Some((255, 0, 0)));
     }
 
-    /// Und die Umkehrung: die eigene Regel des Elements gewinnt gegen eine
-    /// gleichnamige, die woanders steht.
+    /// Conversely: the element's own rule wins over a same-named one elsewhere.
     #[test]
     fn the_element_own_declaration_wins_over_a_later_foreign_one() {
         let css = ".btn{--bg:transparent;background-color:var(--bg)}\
@@ -344,8 +294,7 @@ mod tests {
         assert!(f.contains(&(13, 110, 253)), "die Fuellung des Elements fehlt: {f:?}");
     }
 
-    /// Eine Custom Property wird VERERBT — der Kern der Sache, und der Grund,
-    /// warum sie nicht bloss je Element gilt.
+    /// A custom property is inherited.
     #[test]
     fn a_custom_property_inherits_to_descendants() {
         let css = ".wrap{--c:#0f0} .deep{color:var(--c)}";
@@ -353,8 +302,7 @@ mod tests {
                    Some((0, 255, 0)));
     }
 
-    /// Und ein Nachfahre darf sie ueberschreiben, ohne den Vorfahren zu
-    /// beruehren.
+    /// A descendant may override it without affecting the ancestor.
     #[test]
     fn a_descendant_may_shadow_an_inherited_value() {
         let css = ".wrap{--c:#f00} .inner{--c:#00f} .t{color:var(--c)}";
@@ -367,10 +315,7 @@ mod tests {
         assert_eq!(painted_text("<p>x</p>", ":root{--c:#f00} p{color:var(--c)}"), Some((255, 0, 0)));
     }
 
-    /// Ein Kommentar vor einer Regel gehoert nicht in ihren Selektor —
-    /// und seit die Kaskade wirklich TRIFFT, kann er es auch nicht mehr.
-    /// Gemessen an Bootstrap 5.3.3: die Kopfzeile trug Versionsnummer und
-    /// URLs, und der Dunkelblock gewann die ganze helle Palette.
+    /// A comment before a rule is not part of its selector.
     #[test]
     fn a_theme_block_that_matches_nothing_stays_out() {
         let css = "/*! Thing v5.3.3 (https://example.com/) */\
@@ -380,8 +325,8 @@ mod tests {
         assert_eq!(painted_text("<p>x</p>", css), Some((255, 255, 255)));
     }
 
-    /// Und wenn das Attribut DA ist, gewinnt der Dunkelblock — sonst waere
-    /// die Regel darueber bloss ein „nie".
+    /// When the attribute is present, the dark block wins; otherwise the rule
+    /// above would only test "never".
     #[test]
     fn the_same_theme_block_wins_when_it_does_match() {
         let css = ":root,[data-t=light]{--bg:#fff} [data-t=dark]{--bg:#000} p{color:var(--bg)}";
@@ -389,9 +334,8 @@ mod tests {
                    Some((0, 0, 0)));
     }
 
-    /// MediaWiki liefert eine Definition je Benutzereinstellung und die Seite
-    /// traegt genau eine davon. Die andere darf nicht gewinnen — frueher
-    /// brauchte es dafuer eine Heuristik, heute reicht das Treffen.
+    /// Of several definitions keyed on a document attribute, only the one that
+    /// matches may win.
     #[test]
     fn only_the_class_the_root_carries_counts() {
         let css = "html.pref-1{--s:#f00} html.pref-2{--s:#0f0} p{color:var(--s)}";
@@ -399,21 +343,21 @@ mod tests {
                    Some((255, 0, 0)));
     }
 
-    /// Spezifitaet schlaegt Reihenfolge, wie bei jeder anderen Eigenschaft.
+    /// Specificity beats order, as for any other property.
     #[test]
     fn specificity_decides_before_order() {
         let css = "#id{--c:#f00} .cls{--c:#0f0} p{color:var(--c)}";
         assert_eq!(painted_text("<p id='id' class='cls'>x</p>", css), Some((255, 0, 0)));
     }
 
-    /// Ein `@media`, das nicht gilt, liefert auch keine Variablen.
+    /// An `@media` that does not apply supplies no variables.
     #[test]
     fn a_media_block_that_does_not_apply_contributes_nothing() {
         let css = ":root{--c:#f00} @media (max-width:480px){:root{--c:#0f0}} p{color:var(--c)}";
         assert_eq!(painted_text("<p>x</p>", css), Some((255, 0, 0)));
     }
 
-    // ── Die Einsetzung: WAS aus einem Wert wird ─────────────────────────────
+    // ── Substitution: what a value becomes ──────────────────────────────────
 
     #[test]
     fn simple_substitution() {
@@ -430,9 +374,9 @@ mod tests {
         assert_eq!(expand("var(--c, blue)", &map(&[("--c", "green")]), None), "green");
     }
 
-    /// Kein Wert und kein Rueckfall: das `var()` bleibt stehen, der
-    /// Wertparser scheitert daran, und die Deklaration faellt weg. Genau das
-    /// verlangt CSS Variables 1 §3 — ein leerer Wert waere etwas anderes.
+    /// No value and no fallback: the `var()` stays, the value parser fails on
+    /// it, and the declaration is dropped, as css-variables-1 §3 requires. An
+    /// empty value would be something else.
     #[test]
     fn undefined_without_fallback_stays_and_invalidates() {
         assert_eq!(expand("var(--nope)", &map(&[]), None), "var(--nope)");
@@ -476,16 +420,14 @@ mod tests {
         assert_eq!(expand("var(--c) var(--c)", &map(&[("--c", "1px")]), None), "1px 1px");
     }
 
-    /// **Wikipedias Schreibweise.** `--fs: var(--fs, 1rem)` heisst „nimm den
-    /// geerbten Wert, sonst 1rem". Duerfte sie sich selbst finden, bliebe ein
-    /// `var()` stehen und die Deklaration waere ungueltig — die Suchleiste
-    /// verlor daran einmal ihre Lupe.
+    /// `--fs: var(--fs, 1rem)` means "the inherited value, else 1rem". If it
+    /// found itself, a `var()` would remain and the declaration would be invalid.
     #[test]
     fn a_self_referential_declaration_takes_the_fallback() {
         assert_eq!(expand("var(--fs,1rem)", &map(&[]), Some("--fs")), "1rem");
     }
 
-    /// Ein Ring aus zwei Namen dreht sich nicht ewig.
+    /// A cycle of two names does not loop forever.
     #[test]
     fn a_cycle_terminates() {
         let m = map(&[("--a", "var(--b)"), ("--b", "var(--a)")]);
@@ -499,7 +441,7 @@ mod tests {
         assert_eq!(expand("var(--a)", &m, None), "#0f0");
     }
 
-    /// Die Form, in der Bootstrap seine Palette weiterreicht.
+    /// A palette passed on through nested variables.
     #[test]
     fn bootstrap_like_chain() {
         let m = map(&[("--bs-blue", "#0d6efd"), ("--bs-primary", "var(--bs-blue)")]);
