@@ -1,10 +1,10 @@
-//! AAC aus einer MP4 — die Tonhaelfte des Containers.
+//! AAC from an MP4 — the audio half of the container.
 //!
-//! Der Dekoder liegt in `<repo>/tools/wasm/vendor/rusty_aac` (siehe dort
-//! VENDOR.md); hier steht nur, was er nicht wissen will: wo die Rahmen in der
-//! Datei liegen, wie lang der Strom ist, und wohin ein Sprung fuehrt.
+//! The decoder lives in `tools/wasm/vendor/rusty_aac` (see its VENDOR.md);
+//! this file holds only what it does not want to know: where the frames sit
+//! in the file, how long the stream is, and where a seek lands.
 //!
-//! Ein AAC-Rahmen traegt 1024 Samples je Kanal und passt damit in
+//! An AAC frame carries 1024 samples per channel and so fits in
 //! [`MAX_BLOCK_FRAMES`](crate::source::MAX_BLOCK_FRAMES) (1152).
 
 
@@ -16,14 +16,14 @@ pub struct Aac {
     track: mp4::Track,
     dec: rusty_aac::decode::Decoder,
     info: Info,
-    /// Naechster Rahmen, den `next_block` dekodiert.
+    /// Next frame `next_block` decodes.
     next: usize,
-    /// Ausgabeposition in Frames der Quellrate.
+    /// Output position in frames at the source rate.
     frame: u64,
 }
 
 impl Aac {
-    /// `track` muss die Tonspur eines bereits geparsten MP4 sein.
+    /// `track` must be the audio track of an already parsed MP4.
     pub fn from_track(data: &'static [u8], track: mp4::Track) -> Option<Aac> {
         let cfg_bytes = match &track.codec {
             mp4::Codec::Aac { config } => config.clone(),
@@ -32,13 +32,13 @@ impl Aac {
         let cfg = rusty_aac::parse_audio_specific_config(&cfg_bytes).ok()?;
         if cfg.sample_rate == 0 || cfg.channels == 0 { return None; }
 
-        // Die Dauer kommt aus der Sampletabelle und nicht aus einer Schaetzung
-        // — und sie zaehlt in der QUELLrate, weil der Rufer danach mit
-        // `info().rate` weiterrechnet.
+        // The duration comes from the sample table, not an estimate, and
+        // counts at the source rate because the caller continues with
+        // `info().rate`.
         let total = track.duration as u128 * cfg.sample_rate as u128
             / track.timescale.max(1) as u128;
 
-        // Bitrate aus den wirklichen Bytes: Summe der Rahmen durch die Dauer.
+        // Bitrate from the actual bytes: sum of frame sizes over the duration.
         let bytes: u64 = track.samples.iter().map(|s| s.size as u64).sum();
         let ms = track.duration_ms().max(1);
         let kbps = (bytes * 8 / ms) as u32;
@@ -61,15 +61,13 @@ impl Aac {
         })
     }
 
-    /// Wieviele Samples der Strom vor seinem ersten HOERBAREN ueberspringt.
+    /// How many samples the stream skips before its first audible one.
     ///
-    /// Ein AAC-Encoder beginnt mit Vorlaufsamples, die nicht zum Ton
-    /// gehoeren, und die Edit-List des Containers sagt, wieviele. Gemessen an
-    /// einem Handyvideo: ffmpeg schneidet **genau** `edit_start` = 2112
-    /// Samples weg, und unser Dekoder stimmt danach bis auf 1 LSB.
-    ///
-    /// Das ist keine Kosmetik: die Videospur derselben Datei hatte 0. Wer
-    /// beide Zeitachsen roh spielt, hat Ton und Bild 48 ms auseinander.
+    /// An AAC encoder starts with priming samples that are not part of the
+    /// sound, and the container's edit list says how many; ffmpeg trims exactly
+    /// `edit_start` of them. The video track of the same file usually has 0, so
+    /// playing both timelines raw puts sound and picture apart (48 ms for 2112
+    /// samples at 44.1 kHz).
     pub fn priming(&self) -> u64 {
         self.track.edit_start
     }
@@ -84,8 +82,8 @@ impl Source for Aac {
             let s = self.track.samples[self.next];
             self.next += 1;
             let Some(au) = self.data.get(s.offset..s.offset + s.size) else { break };
-            // Ein abgelehnter Rahmen ist ein Loch und kein Ende: der naechste
-            // faengt sich wieder, weil jeder AAC-Rahmen fuer sich steht.
+            // A rejected frame is a gap, not the end: the next one recovers,
+            // because every AAC frame stands alone.
             let Ok(d) = self.dec.decode(au, None) else { continue };
             let frames = d.frames().min(out.len() / ch);
             if frames == 0 { continue; }
@@ -97,9 +95,9 @@ impl Source for Aac {
     }
 
     fn seek(&mut self, frame: u64) -> u64 {
-        // Rahmen suchen, dessen Zeitspanne `frame` enthaelt. Der Dekoder
-        // faengt bei AAC-LC an jedem Rahmen an; der erste danach klingt
-        // weich, weil ihm die Ueberlappung des Vorgaengers fehlt.
+        // Find the frame whose span contains `frame`. AAC-LC can start at
+        // any frame; the first one after a seek sounds soft because it lacks
+        // the overlap of its predecessor.
         let rate = self.info.rate.max(1) as u128;
         let ts = self.track.timescale.max(1) as u128;
         let want = frame as u128 * ts / rate;

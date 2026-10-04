@@ -9,9 +9,8 @@
 //! it into a flat `Vec<Sample>` of (offset, size, dts, pts, sync). That is
 //! everything a player needs; the rest of the format is metadata we skip.
 //!
-//! What it does NOT do, and says so instead of guessing: fragmented MP4
-//! (`moof`), where the sample table lives in the fragments rather than in
-//! `moov`.
+//! Not supported, and reported instead of guessed: fragmented MP4 (`moof`),
+//! where the sample table lives in the fragments rather than in `moov`.
 
 use alloc::vec::Vec;
 
@@ -98,9 +97,8 @@ pub enum Kind { Video, Audio }
 
 #[derive(Clone)]
 // `Aac`, the four-character code in `Other`, and the audio track's rate and
-// channel count are parsed and not yet read. That is deliberate: they are
-// what the AUDIO half will need, and a container that parses only what today
-// happens to consume is a container that gets re-read later.
+// channel count are parsed even where no consumer reads them yet, so the
+// container never has to be re-read for them.
 #[allow(dead_code)]
 pub enum Codec {
     /// H.264. `sps`/`pps` come from `avcC` and have to be prepended to the
@@ -137,18 +135,16 @@ pub struct Track {
     pub colour: Colour,
     /// Clockwise display rotation in degrees (0, 90, 180, 270) from the
     /// `tkhd` matrix. A phone films landscape and writes the matrix; the
-    /// coded picture is NOT the picture the viewer expects. Dropping this
-    /// is how a player shows every holiday video on its side.
+    /// coded picture is not the picture the viewer expects.
     pub rotation: u16,
     pub rate: u32,
     pub channels: u8,
     /// First media time the edit list asks for, in this track's timescale.
     ///
-    /// Not cosmetic: the two tracks of one file carry DIFFERENT values. A
-    /// phone recording here has 0 on the video and 2112 on the audio — the
+    /// Not cosmetic: the two tracks of one file carry different values. A
+    /// typical phone recording has 0 on the video and 2112 on the audio — the
     /// AAC encoder's priming samples, 48 ms. Playing the media timeline
-    /// straight puts sound and picture that far apart, and it is the single
-    /// easiest way to ship a player that is subtly out of sync.
+    /// straight puts sound and picture that far apart.
     pub edit_start: u64,
     pub samples: Vec<Sample>,
 }
@@ -249,8 +245,6 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
                 let (ver, _) = t.full()?;
                 // creation, modification, track_id, reserved, duration
                 t.skip(if ver == 1 { 32 } else { 20 })?;
-                // reserved(8) layer(2) altgroup(2) volume(2) reserved(2)
-                // matrix(36), then width/height as 16.16 fixed point.
                 // reserved(8) layer(2) altgroup(2) volume(2) reserved(2),
                 // then the 3x3 display matrix, then width/height as 16.16.
                 t.skip(16)?;
@@ -304,7 +298,7 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
     let tables = parse_stbl(stbl)?;
 
     // `stsd` carries the real picture size for video; `tkhd`'s is the
-    // DISPLAY size and may differ (anamorphic, or a track matrix). The
+    // display size and may differ (anamorphic, or a track matrix). The
     // decoder outputs coded pixels, so the coded size wins where we have it.
     let (w, h) = match tables.visual {
         Some((vw, vh)) if vw > 0 && vh > 0 => (vw as u32, vh as u32),
@@ -317,10 +311,10 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
             Codec::Avc { sps, .. } => sps.first().and_then(|s| sps_colour(s)),
             _ => None,
         })
-        // Drei Quellen, in dieser Reihenfolge: die `colr`-Box des Containers,
-        // das VUI des SPS, und erst dann die Konvention nach Bildhoehe (SD
-        // wurde unter Rec. 601 gedreht, HD unter Rec. 709). Die Hoehenregel
-        // ist ein Rateschritt und steht deshalb zuletzt.
+        // Three sources, in this order: the container's `colr` box, the SPS
+        // VUI, and only then the convention by picture height (SD was shot
+        // under Rec. 601, HD under Rec. 709). The height rule is a guess and
+        // therefore comes last.
         .unwrap_or(Colour { bt709: h > 576, full_range: false });
     Some(Track {
         kind,
@@ -330,7 +324,7 @@ fn parse_trak(trak: &[u8], file: &[u8]) -> Option<Track> {
         width: w,
         height: h,
         // Untagged is the normal case for anything not made for broadcast,
-        // and then the picture's HEIGHT is the convention: SD was shot under
+        // and then the picture height is the convention: SD was shot under
         // Rec. 601, HD under Rec. 709. Guessing 709 for a 544-line clip
         // tilts every strong red — which looks like a decoder bug and is a
         // missing tag.
@@ -367,7 +361,7 @@ fn matrix_rotation(c: &mut Cur) -> Option<u16> {
 
 /// The media time an `edts`/`elst` asks playback to start at.
 ///
-/// Only the shape that every muxer writes is honoured: ONE entry, rate 1.0,
+/// Only the shape that every muxer writes is honoured: one entry, rate 1.0,
 /// a non-negative media time. Multiple segments, an empty edit (`-1`) or a
 /// changed rate describe an edit we do not perform, and shifting the clock
 /// by a number taken out of such a list would be worse than leaving it —

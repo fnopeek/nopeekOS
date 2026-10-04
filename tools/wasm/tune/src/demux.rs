@@ -1,13 +1,11 @@
-//! Der Containerschnitt: EINE Datei, zwei Stroeme.
+//! The container seam: one file, two streams.
 //!
-//! Bis hierher kannte tune nur [`Source`](crate::source::Source) — einen
-//! Strom von Tonbloecken. Ein Film hat zwei, und sie muessen aus DERSELBEN
-//! Lesung des Containers kommen: zwei Parser auf einer Datei sind zwei
-//! Gelegenheiten, verschiedener Meinung zu sein.
+//! A film has an audio and a video stream, and both must come from the same
+//! read of the container — two parsers on one file are two chances to
+//! disagree.
 //!
-//! **Der Weg fuer Ton allein wird dadurch nicht laenger.** Eine MP3 ist ein
-//! Demux mit einem Strom; `open` gibt sie unveraendert an `source::open`
-//! weiter, und kein Byte geht durch neuen Code.
+//! Audio alone takes no longer path: an MP3 is a demux with one stream, and
+//! `open` passes it to `source::open` unchanged.
 
 use alloc::boxed::Box;
 
@@ -19,20 +17,19 @@ use crate::video::{OpenError, Video};
 pub struct Demux {
     pub audio: Option<Box<dyn Source>>,
     pub video: Option<Video>,
-    /// Vorlaufsamples der TONspur, in deren eigener Rate — was vor dem
-    /// ersten hoerbaren Sample liegt. Steht hier und nicht hinter dem
-    /// `Source`-Vertrag, weil es eine Eigenschaft des CONTAINERS ist und
-    /// nicht des Dekoders: dieselbe Datei hat auf Video und Ton
-    /// verschiedene Werte (gemessen: Video 0, Ton 2112).
+    /// Priming samples of the audio track, at its own rate — what precedes the
+    /// first audible sample. Kept here rather than behind the `Source`
+    /// contract because it is a property of the container, not the decoder:
+    /// the same file has different values on video and audio.
     pub audio_priming: u64,
-    /// Warum kein Bild da ist, wenn die Datei eigentlich eines haette.
-    /// `None` heisst „war nie eine Frage" — eine MP3 hat kein Bild und
-    /// schuldet dafuer keine Erklaerung.
+    /// Why there is no picture although the file would have one. `None`
+    /// means the question never arose — an MP3 has no picture and owes no
+    /// explanation.
     pub video_error: Option<OpenError>,
 }
 
-/// Nach INHALT entscheiden, nicht nach Endung — dieselbe Regel, nach der
-/// `source::open` seit je den Tondekoder waehlt.
+/// Decide by content, not by extension — the same rule `source::open`
+/// uses to pick the audio decoder.
 pub fn open(bytes: &'static [u8]) -> Demux {
     if !mp4::looks_like(bytes) {
         return Demux { audio: source::open(bytes), video: None, audio_priming: 0, video_error: None };
@@ -42,9 +39,9 @@ pub fn open(bytes: &'static [u8]) -> Demux {
         return Demux { audio: None, video: None, audio_priming: 0, video_error: Some(OpenError::NotMp4) };
     };
     if m.fragmented {
-        // Die Sampletabellen stehen in den Fragmenten, nicht im `moov`. Das
-        // zu sagen ist eine andere Auskunft als „geht nicht", und nur eine
-        // davon ist unser Fehler.
+        // The sample tables live in the fragments, not in `moov`. That is a
+        // different answer from "cannot play", and only one of the two is our
+        // shortcoming.
         return Demux { audio: None, video: None, audio_priming: 0, video_error: Some(OpenError::Fragmented) };
     }
 

@@ -18,10 +18,9 @@ pub struct Mp3 {
     info:  Info,
     frame: u64,
     /// Byte offset of every `stride`-th frame, built by walking the frame
-    /// headers once at open. Costs one pass over ~9000 headers and gives
-    /// what no tag does: an exact duration and a seek that lands on the
-    /// frame asked for. The Xing table it replaces is quantised to 1/256
-    /// of the file — measured 832 ms off on a four-minute VBR track.
+    /// headers once at open. Costs one pass over the headers and gives what
+    /// no tag does: an exact duration and a seek that lands on the frame
+    /// asked for. The Xing table is quantised to 1/256 of the file.
     index:  alloc::vec::Vec<u32>,
     stride: u32,
     /// Samples per frame, constant within a stream.

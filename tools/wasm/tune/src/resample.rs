@@ -1,16 +1,15 @@
 //! Source rate → 48 kHz S16 stereo, cubic (Catmull-Rom) interpolation.
 //!
 //! Split out of [`crate::sink`] so it touches no host function and can be
-//! run and measured off the device: the harness in `tools/wasm/tune/tests`
-//! compiles THIS file, not a second copy of the same arithmetic.
+//! run and measured host-side: the harness in `tools/wasm/tune/tests`
+//! compiles this file, not a second copy of the same arithmetic.
 //!
-//! Why cubic and not linear: measured against ffmpeg's polyphase resampler
-//! on 30 s of 44.1 kHz material, linear interpolation lost 2.1 dB across
-//! 10–15 kHz and added 3.9 dB of imaging above 15 kHz. Four taps instead of
-//! two cost about 1 % of a core on the device and take the error back into
-//! the tenths of a dB.
+//! Why cubic and not linear: against a polyphase resampler, linear
+//! interpolation loses about 2 dB across 10–15 kHz and adds audible imaging
+//! above 15 kHz. Four taps instead of two take the error back into the
+//! tenths of a dB at little cost.
 //!
-//! Known limit: a source ABOVE 48 kHz (only WAV can be) is decimated with
+//! Known limit: a source above 48 kHz (only WAV can be) is decimated with
 //! no low-pass, so anything it carries above 24 kHz folds back. Nothing in
 //! MP3 can reach that case.
 
