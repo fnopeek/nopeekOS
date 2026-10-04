@@ -1,46 +1,44 @@
-//! Die forge-Seite der Host-Bruecke.
+//! The forge side of the host bridge.
 //!
-//! Ein Adapter je Host-Funktion, und jeder tut genau zwei Dinge: `mem` und
-//! `ctx` aus dem vmctx holen und `host_core` rufen. Der wasmi-Adapter in
-//! `wasm.rs` holt dieselben zwei anders. Alles darunter ist EINE
-//! Implementierung — zwei Host-Schichten zu vergleichen wuerde die
-//! Host-Schichten messen, nicht die Compiler.
+//! One adapter per host function, each doing exactly two things: fetch `mem`
+//! and `ctx` from the vmctx and call `host_core`. The wasmi adapter in
+//! `wasm.rs` fetches the same two differently; everything below is a single
+//! implementation shared by both.
 //!
-//! Die Aufrufform gibt der Generator vor: `rdi` = vmctx, ganzzahlige
-//! Argumente ab `rsi`, Rueckgabe in `rax`. Das ist SysV, also passt
-//! `extern "C"` ohne Zutun — auch fuer die drei mit mehr als fuenf
-//! Argumenten, die dadurch ueber den Stapel gehen.
+//! Calling convention set by the code generator: `rdi` = vmctx, integer
+//! arguments from `rsi`, return in `rax`. That is SysV, so `extern "C"` fits
+//! as is, including functions with more than five arguments, which spill to
+//! the stack.
 //!
-//! DIESE DATEI IST ERZEUGT. Sie folgt den Signaturen in `host_core.rs`.
+//! This file is generated and follows the signatures in `host_core.rs`.
 
 use super::host_core;
 use super::HostState;
 use forge_core::vmctx;
 
-/// Der Zustand, den diese Instanz gehoert. Der Zeiger steht im vmctx, nicht in
-/// einem `static` — zwei Module auf zwei Kernen haetten sich einen `static`
-/// geteilt.
+/// The state owned by this instance. The pointer lives in the vmctx, not in a
+/// `static`, so two modules on two cores do not share it.
 ///
 /// # Safety
-/// `vm` muss der vmctx einer Instanz sein, die ueber `NpkHost` gebaut wurde;
-/// nur dann ist `HOST_CTX` ein gueltiger `HostState`.
+/// `vm` must be the vmctx of an instance built via `NpkHost`; only then is
+/// `HOST_CTX` a valid `HostState`.
 unsafe fn ctx_of<'a>(vm: *const u64) -> &'a mut HostState {
     unsafe { &mut *(*vm.add(vmctx::HOST_CTX as usize / 8) as *mut HostState) }
 }
 
-/// Gastspeicher und Zustand. Beide werden bei JEDEM Aufruf neu gelesen: die
-/// Basis bewegt sich nie, aber `memory.grow` verschiebt das Ende.
+/// Guest memory and state, re-read on every call: the base never moves, but
+/// `memory.grow` moves the end.
 ///
 /// # Safety
-/// Wie `ctx_of`, und `MEM_BASE`/`MEM_SIZE` muessen die Reservierung dieser
-/// Instanz beschreiben.
+/// As for `ctx_of`, and `MEM_BASE`/`MEM_SIZE` must describe this instance's
+/// reservation.
 pub(crate) unsafe fn parts<'a>(vm: *const u64) -> (&'a mut [u8], &'a mut HostState) {
     unsafe {
         let base = *vm.add(vmctx::MEM_BASE as usize / 8);
         let size = *vm.add(vmctx::MEM_SIZE as usize / 8) as usize;
-        // Ein Modul ohne Speicher bekommt eine LEERE Scheibe, keine mit
-        // Nullzeiger: `read_str` und die anderen antworten darauf schon mit
-        // "ausserhalb", also braucht kein Adapter einen Sonderfall.
+        // A module without memory gets an empty slice, not a null pointer;
+        // `read_str` and friends already report out-of-bounds for it, so no
+        // adapter needs a special case.
         let mem = if base == 0 {
             core::slice::from_raw_parts_mut(core::ptr::NonNull::<u8>::dangling().as_ptr(), 0)
         } else {
@@ -50,10 +48,9 @@ pub(crate) unsafe fn parts<'a>(vm: *const u64) -> (&'a mut [u8], &'a mut HostSta
     }
 }
 
-/// Was `forge_rt` fragen muss, um die Tabelle zu fuellen.
+/// What `forge_rt` queries to fill the import table.
 ///
-/// Steht bereit, faehrt aber noch niemand: den Ausfuehrungspfad gibt es erst,
-/// wenn `install` uebersetzt und den Codeblob ablegt.
+/// Unused until `install` compiles modules and stores the code blob.
 #[allow(dead_code)]
 pub(crate) struct NpkHost(pub(crate) *mut HostState);
 
@@ -62,135 +59,134 @@ impl crate::forge_rt::HostImports for NpkHost {
         self.0 as u64
     }
     fn resolve(&self, module: &str, name: &str) -> Option<u64> {
-        // Ein Modul kann beide ABIs importieren — beak nur `env`, python nur
-        // wasi. Der Host beantwortet deshalb beide, statt dass der Aufrufer
-        // sich einen aussuchen muesste.
+        // A module may import either ABI (`env` or wasi), so the host answers
+        // both instead of making the caller pick one.
         resolve(module, name).or_else(|| crate::wasi::forge_glue::resolve(module, name))
     }
 }
 
 extern "C" fn f_npk_http_status(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_http_status(ctx)
 }
 
 extern "C" fn f_npk_fs_usage(vm: *const u64) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_fs_usage(ctx)
 }
 
 extern "C" fn f_npk_clipboard_len(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_clipboard_len(ctx)
 }
 
 extern "C" fn f_npk_window_set_close_guard(vm: *const u64, on: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_close_guard(ctx, on)
 }
 
 extern "C" fn f_npk_screen_size(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_screen_size(ctx)
 }
 
 extern "C" fn f_npk_ticks(vm: *const u64) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_ticks(ctx)
 }
 
 extern "C" fn f_npk_now_us(vm: *const u64) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_now_us(ctx)
 }
 
 extern "C" fn f_npk_unix_time(vm: *const u64) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_unix_time(ctx)
 }
 
 extern "C" fn f_npk_theme_token(vm: *const u64, token_id: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_theme_token(ctx, token_id)
 }
 
 extern "C" fn f_npk_cursor_pos(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_cursor_pos(ctx)
 }
 
 extern "C" fn f_npk_screen_flash(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_screen_flash(ctx)
 }
 
 extern "C" fn f_npk_window_set_overlay(vm: *const u64, w: i32, h: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_overlay(ctx, w, h)
 }
 
 extern "C" fn f_npk_window_set_modal(vm: *const u64, modal: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_modal(ctx, modal)
 }
 
 extern "C" fn f_npk_window_set_overlay_at(vm: *const u64, x: i32, y: i32, w: i32, h: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_overlay_at(ctx, x, y, w, h)
 }
 
 extern "C" fn f_npk_window_set_light_dismiss(vm: *const u64, on: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_light_dismiss(ctx, on)
 }
 
 extern "C" fn f_npk_window_set_clipboard_sink(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_clipboard_sink(ctx)
 }
 
 extern "C" fn f_npk_window_set_dock(vm: *const u64, w: i32, h: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_dock(ctx, w, h)
 }
 
 extern "C" fn f_npk_window_set_panel(vm: *const u64, edge: i32, behavior: i32, w: i32, h: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_window_set_panel(ctx, edge, behavior, w, h)
 }
 
 extern "C" fn f_npk_battery(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_battery(ctx)
 }
 
 extern "C" fn f_npk_acpi_mem_read(vm: *const u64, hi: i32, lo: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_acpi_mem_read(ctx, hi, lo)
 }
 
 extern "C" fn f_npk_mmio_map_phys(vm: *const u64, hi: i32, lo: i32, pages: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_map_phys(ctx, hi, lo, pages)
 }
@@ -198,459 +194,459 @@ extern "C" fn f_npk_mmio_map_phys(vm: *const u64, hi: i32, lo: i32, pages: i32) 
 extern "C" fn f_npk_pointer_inject(
     vm: *const u64, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
 ) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pointer_inject(ctx, dx, dy, buttons, scroll, hscroll)
 }
 
 extern "C" fn f_npk_ec_query(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_ec_query(ctx)
 }
 
 extern "C" fn f_npk_ec_read(vm: *const u64, addr: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_ec_read(ctx, addr)
 }
 
 extern "C" fn f_npk_ec_write(vm: *const u64, addr: i32, val: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_ec_write(ctx, addr, val)
 }
 
 extern "C" fn f_npk_battery_report(vm: *const u64, packed: i32) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_battery_report(ctx, packed)
 }
 
 extern "C" fn f_npk_battery_detail(vm: *const u64, rate: i32, remaining: i32,
     full: i32, voltage_mv: i32, unit: i32) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_battery_detail(ctx, rate, remaining, full, voltage_mv, unit)
 }
 
 extern "C" fn f_npk_audio_open(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_audio_open(ctx)
 }
 
 extern "C" fn f_npk_audio_close(vm: *const u64, slot: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_audio_close(ctx, slot)
 }
 
 extern "C" fn f_npk_audio_set_volume(vm: *const u64, pct: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_audio_set_volume(ctx, pct)
 }
 
 extern "C" fn f_npk_audio_get_volume(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_audio_get_volume(ctx)
 }
 
 extern "C" fn f_npk_workspace_switch(vm: *const u64, n: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_workspace_switch(ctx, n)
 }
 
 extern "C" fn f_npk_power(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_power(ctx)
 }
 
 extern "C" fn f_npk_close_widget(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_close_widget(ctx)
 }
 
 extern "C" fn f_npk_get_fb_size(vm: *const u64) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_get_fb_size(ctx)
 }
 
 extern "C" fn f_npk_sys_info(vm: *const u64, key: i32) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_sys_info(ctx, key)
 }
 
 extern "C" fn f_npk_sleep(vm: *const u64, ms: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_sleep(ctx, ms)
 }
 
 extern "C" fn f_npk_input_poll(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_input_poll(ctx)
 }
 
 extern "C" fn f_npk_input_wait(vm: *const u64, timeout_ms: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_input_wait(ctx, timeout_ms)
 }
 
 extern "C" fn f_npk_sci_arm(vm: *const u64, gpe: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_sci_arm(ctx, gpe)
 }
 
 extern "C" fn f_npk_sci_service(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_sci_service(ctx)
 }
 
 extern "C" fn f_npk_irq_register_gsi(vm: *const u64, gsi: i32, flags: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_irq_register_gsi(ctx, gsi, flags)
 }
 
 extern "C" fn f_npk_wait(vm: *const u64, mask: i32, timeout_ms: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_wait(ctx, mask, timeout_ms)
 }
 
 extern "C" fn f_npk_clear(vm: *const u64) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_clear(ctx)
 }
 
 extern "C" fn f_npk_self_terminal(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_self_terminal(ctx)
 }
 
 extern "C" fn f_npk_stream_open(vm: *const u64, idx: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_stream_open(ctx, idx)
 }
 
 extern "C" fn f_npk_stream_close(vm: *const u64, idx: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_stream_close(ctx, idx)
 }
 
 extern "C" fn f_npk_key_inject(vm: *const u64, byte: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_key_inject(ctx, byte)
 }
 
 extern "C" fn f_npk_tls_connect(vm: *const u64, host_ptr: i32, host_len: i32,
                                 port: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tls_connect(mem, ctx, host_ptr, host_len, port)
 }
 
 extern "C" fn f_npk_tls_send(vm: *const u64, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tls_send(mem, ctx, handle, buf_ptr, buf_len)
 }
 
 extern "C" fn f_npk_tls_recv(vm: *const u64, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tls_recv(mem, ctx, handle, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_tls_close(vm: *const u64, handle: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (_mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tls_close(ctx, handle)
 }
 
 extern "C" fn f_npk_tcp_connect(vm: *const u64, ip_packed: i32, port: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_tcp_connect(ctx, ip_packed, port)
 }
 
 extern "C" fn f_npk_tcp_status(vm: *const u64, handle: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_tcp_status(ctx, handle)
 }
 
 extern "C" fn f_npk_tcp_close(vm: *const u64, handle: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_tcp_close(ctx, handle)
 }
 
 extern "C" fn f_npk_debug_target_ip(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_debug_target_ip(ctx)
 }
 
 extern "C" fn f_npk_debug_target_port(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_debug_target_port(ctx)
 }
 
 extern "C" fn f_npk_pci_bind(vm: *const u64, vendor: i32, device: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_bind(ctx, vendor, device)
 }
 
 extern "C" fn f_npk_pci_bind_class(vm: *const u64, class: i32, subclass: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_bind_class(ctx, class, subclass)
 }
 
 extern "C" fn f_npk_pci_bind_class_n(vm: *const u64, class: i32, subclass: i32, index: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_bind_class_n(ctx, class, subclass, index)
 }
 
 extern "C" fn f_npk_pci_read_config(vm: *const u64, offset: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_read_config(ctx, offset)
 }
 
 extern "C" fn f_npk_pci_write_config(vm: *const u64, offset: i32, value: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_write_config(ctx, offset, value)
 }
 
 extern "C" fn f_npk_pci_enable_bus_master(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_pci_enable_bus_master(ctx)
 }
 
 extern "C" fn f_npk_irq_register(vm: *const u64, entry: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_irq_register(ctx, entry)
 }
 
 extern "C" fn f_npk_irq_arm(vm: *const u64, vector: i32) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_irq_arm(ctx, vector)
 }
 
 extern "C" fn f_npk_irq_wait(vm: *const u64, vector: i32, since: i64, timeout_ms: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_irq_wait(ctx, vector, since, timeout_ms)
 }
 
 extern "C" fn f_npk_mmio_map_bar(vm: *const u64, bar_idx: i32, pages: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_map_bar(ctx, bar_idx, pages)
 }
 
 extern "C" fn f_npk_mmio_read32(vm: *const u64, handle: i32, offset: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_read32(ctx, handle, offset)
 }
 
 extern "C" fn f_npk_mmio_write32(vm: *const u64, handle: i32, offset: i32, value: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_write32(ctx, handle, offset, value)
 }
 
 extern "C" fn f_npk_mmio_read16(vm: *const u64, handle: i32, offset: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_read16(ctx, handle, offset)
 }
 
 extern "C" fn f_npk_mmio_write16(vm: *const u64, handle: i32, offset: i32, value: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_write16(ctx, handle, offset, value)
 }
 
 extern "C" fn f_npk_mmio_read8(vm: *const u64, handle: i32, offset: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_read8(ctx, handle, offset)
 }
 
 extern "C" fn f_npk_mmio_write8(vm: *const u64, handle: i32, offset: i32, value: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_write8(ctx, handle, offset, value)
 }
 
 extern "C" fn f_npk_mmio_read64(vm: *const u64, handle: i32, offset: i32) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_read64(ctx, handle, offset)
 }
 
 extern "C" fn f_npk_mmio_write64(vm: *const u64, handle: i32, offset: i32, value: i64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_mmio_write64(ctx, handle, offset, value)
 }
 
 extern "C" fn f_npk_dma_alloc(vm: *const u64, pages: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_dma_alloc(ctx, pages)
 }
 
 extern "C" fn f_npk_dma_alloc_below(vm: *const u64, pages: i32, limit_mb: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_dma_alloc_below(ctx, pages, limit_mb)
 }
 
 extern "C" fn f_npk_dma_phys_addr(vm: *const u64, handle: i32) -> i64 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_dma_phys_addr(ctx, handle)
 }
 
 extern "C" fn f_npk_dma_read32(vm: *const u64, handle: i32, offset: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_dma_read32(ctx, handle, offset)
 }
 
 extern "C" fn f_npk_dma_write32(vm: *const u64, handle: i32, offset: i32, value: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_dma_write32(ctx, handle, offset, value)
 }
 
 extern "C" fn f_npk_memory_fence(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_memory_fence(ctx)
 }
 
 extern "C" fn f_npk_netdev_set_link(vm: *const u64, up: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_netdev_set_link(ctx, up)
 }
 
 extern "C" fn f_npk_netdev_set_link_state(vm: *const u64, carrier: i32, dormant: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_netdev_set_link_state(ctx, carrier, dormant)
 }
 
 extern "C" fn f_npk_fetch(vm: *const u64, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fetch(mem, ctx, name_ptr, name_len, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_response_headers(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_response_headers(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_random_bytes(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_random_bytes(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_http_final_url(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_final_url(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_content_type(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_content_type(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_last_error(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_last_error(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_store(vm: *const u64, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_store(mem, ctx, name_ptr, name_len, data_ptr, data_len)
 }
 
 extern "C" fn f_npk_home_dir(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_home_dir(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_locale(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_locale(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_launch_arg(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_launch_arg(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_clipboard_set(vm: *const u64, ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_clipboard_set(mem, ctx, ptr, len)
 }
 
 extern "C" fn f_npk_clipboard_get(vm: *const u64, ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_clipboard_get(mem, ctx, ptr, max)
 }
 
 extern "C" fn f_npk_scene_commit(vm: *const u64, ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_scene_commit(mem, ctx, ptr, len)
 }
 
 extern "C" fn f_npk_canvas_commit(vm: *const u64, canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_canvas_commit(mem, ctx, canvas_id, ptr, len, width, height)
 }
@@ -658,339 +654,339 @@ extern "C" fn f_npk_canvas_commit(vm: *const u64, canvas_id: i32, ptr: i32, len:
 extern "C" fn f_npk_canvas_commit_yuv(vm: *const u64, canvas_id: i32, y_ptr: i32,
                                       u_ptr: i32, v_ptr: i32, ys: i32, cs: i32,
                                       width: i32, height: i32, flags: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_canvas_commit_yuv(mem, ctx, canvas_id, y_ptr, u_ptr, v_ptr,
                                      ys, cs, width, height, flags)
 }
 
 extern "C" fn f_npk_canvas_rect(vm: *const u64, canvas_id: i32, out_ptr: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_canvas_rect(mem, ctx, canvas_id, out_ptr)
 }
 
 extern "C" fn f_npk_capture_screen(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_capture_screen(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_event_poll(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_event_poll(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_list_modules(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_list_modules(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_app_meta(vm: *const u64, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_app_meta(mem, ctx, name_ptr, name_len, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_spawn_module(vm: *const u64, name_ptr: i32, name_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_spawn_module(mem, ctx, name_ptr, name_len)
 }
 
 extern "C" fn f_npk_run_intent(vm: *const u64, verb_ptr: i32, verb_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_run_intent(mem, ctx, verb_ptr, verb_len)
 }
 
 extern "C" fn f_npk_bar_state(vm: *const u64, buf_ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_bar_state(mem, ctx, buf_ptr, max)
 }
 
 extern "C" fn f_npk_window_titles(vm: *const u64, buf_ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_window_titles(mem, ctx, buf_ptr, max)
 }
 
 extern "C" fn f_npk_acpi_dsdt(vm: *const u64, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_acpi_dsdt(mem, ctx, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_acpi_table(vm: *const u64, sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_acpi_table(mem, ctx, sig, index, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_audio_submit(vm: *const u64, slot: i32, ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_audio_submit(mem, ctx, slot, ptr, len)
 }
 
 extern "C" fn f_npk_audio_buffered(vm: *const u64, slot: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (_mem, ctx) = unsafe { parts(vm) };
     host_core::npk_audio_buffered(ctx, slot)
 }
 
 extern "C" fn f_npk_audio_poll_mix(vm: *const u64, ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_audio_poll_mix(mem, ctx, ptr, max)
 }
 
 extern "C" fn f_npk_fs_list(vm: *const u64, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fs_list(mem, ctx, prefix_ptr, prefix_len, out_ptr, out_cap, recursive)
 }
 
 extern "C" fn f_npk_fs_stat(vm: *const u64, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fs_stat(mem, ctx, name_ptr, name_len, out_ptr)
 }
 
 extern "C" fn f_npk_set_wallpaper(vm: *const u64, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_set_wallpaper(mem, ctx, ptr, len, width, height)
 }
 
 extern "C" fn f_npk_set_theme(vm: *const u64, ptr: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_set_theme(mem, ctx, ptr)
 }
 
 extern "C" fn f_npk_stream_read(vm: *const u64, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_stream_read(mem, ctx, idx, buf_ptr, buf_len)
 }
 
 extern "C" fn f_npk_tcp_send(vm: *const u64, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tcp_send(mem, ctx, handle, buf_ptr, buf_len)
 }
 
 extern "C" fn f_npk_tcp_recv(vm: *const u64, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_tcp_recv(mem, ctx, handle, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_dma_read(vm: *const u64, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_dma_read(mem, ctx, handle, dma_off, wasm_ptr, len)
 }
 
 extern "C" fn f_npk_dma_write(vm: *const u64, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_dma_write(mem, ctx, handle, dma_off, wasm_ptr, len)
 }
 
 extern "C" fn f_npk_netdev_register(vm: *const u64, mac_ptr: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_netdev_register(mem, ctx, mac_ptr)
 }
 
 extern "C" fn f_npk_print(vm: *const u64, ptr: i32, len: i32) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_print(mem, ctx, ptr, len)
 }
 
 extern "C" fn f_npk_log(vm: *const u64, ptr: i32, len: i32) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_log(mem, ctx, ptr, len)
 }
 
 extern "C" fn f_npk_log_serial(vm: *const u64, ptr: i32, len: i32) {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_log_serial(mem, ctx, ptr, len)
 }
 
 extern "C" fn f_npk_http_request(vm: *const u64, url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_request(mem, ctx, url_ptr, url_len, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_send(vm: *const u64, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_send(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_begin(vm: *const u64, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_begin(mem, ctx, method_ptr, method_len, url_ptr, url_len, hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
 }
 
 extern "C" fn f_npk_net_context(vm: *const u64, url_ptr: i32, url_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_net_context(mem, ctx, url_ptr, url_len)
 }
 
 extern "C" fn f_npk_http_begin_many(vm: *const u64, urls_ptr: i32, urls_len: i32, out_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_begin_many(mem, ctx, urls_ptr, urls_len, out_max)
 }
 
 extern "C" fn f_npk_http_begin_many_hdr(vm: *const u64, urls_ptr: i32, urls_len: i32,
                                         hdrs_ptr: i32, hdrs_len: i32, out_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_begin_many_hdr(mem, ctx, urls_ptr, urls_len, hdrs_ptr, hdrs_len, out_max)
 }
 
 extern "C" fn f_npk_http_poll(vm: *const u64, handle: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_http_poll(ctx, handle)
 }
 
 extern "C" fn f_npk_http_take(vm: *const u64, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_take(mem, ctx, handle, buf_ptr, buf_max)
 }
 
 extern "C" fn f_npk_http_take_many(vm: *const u64, handle: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_take_many(mem, ctx, handle, out_ptr, out_max, lens_ptr, lens_max)
 }
 
 extern "C" fn f_npk_http_cancel(vm: *const u64, handle: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let ctx = unsafe { ctx_of(vm) };
     host_core::npk_http_cancel(ctx, handle)
 }
 
 extern "C" fn f_npk_http_request_many(vm: *const u64, urls_ptr: i32, urls_len: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_http_request_many(mem, ctx, urls_ptr, urls_len, out_ptr, out_max, lens_ptr, lens_max)
 }
 
 extern "C" fn f_npk_open(vm: *const u64, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_open(mem, ctx, app_ptr, app_len, arg_ptr, arg_len)
 }
 
 extern "C" fn f_npk_launch(vm: *const u64, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_launch(mem, ctx, app_ptr, app_len, arg_ptr, arg_len)
 }
 
 extern "C" fn f_npk_pick(vm: *const u64, mode: i32, start_ptr: i32, start_len: i32, suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_pick(mem, ctx, mode, start_ptr, start_len, suggest_ptr, suggest_len, tag)
 }
 
 extern "C" fn f_npk_pick_result(vm: *const u64, path_ptr: i32, path_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_pick_result(mem, ctx, path_ptr, path_len)
 }
 
 extern "C" fn f_npk_pick_mkdir(vm: *const u64, path_ptr: i32, path_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_pick_mkdir(mem, ctx, path_ptr, path_len)
 }
 
 extern "C" fn f_npk_fs_delete(vm: *const u64, name_ptr: i32, name_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fs_delete(mem, ctx, name_ptr, name_len)
 }
 
 extern "C" fn f_npk_fs_rename(vm: *const u64, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fs_rename(mem, ctx, old_ptr, old_len, new_ptr, new_len)
 }
 
 extern "C" fn f_npk_fs_copy(vm: *const u64, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_fs_copy(mem, ctx, old_ptr, old_len, new_ptr, new_len)
 }
 
 extern "C" fn f_npk_wifi_send_cmd(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_wifi_send_cmd(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_wifi_poll_event(vm: *const u64, buf_ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_wifi_poll_event(mem, ctx, buf_ptr, max)
 }
 
 extern "C" fn f_npk_wifi_poll_cmd(vm: *const u64, buf_ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_wifi_poll_cmd(mem, ctx, buf_ptr, max)
 }
 
 extern "C" fn f_npk_wifi_send_event(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_wifi_send_event(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_driver_report(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_driver_report(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_netdev_submit_rx(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_netdev_submit_rx(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_netdev_rx_deliver(vm: *const u64, buf_ptr: i32, len: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_netdev_rx_deliver(mem, ctx, buf_ptr, len)
 }
 
 extern "C" fn f_npk_netdev_poll_tx(vm: *const u64, buf_ptr: i32, max: i32) -> i32 {
-    // SAFETY: `vm` ist der vmctx des rufenden Moduls.
+    // SAFETY: `vm` is the vmctx of the calling module.
     let (mem, ctx) = unsafe { parts(vm) };
     host_core::npk_netdev_poll_tx(mem, ctx, buf_ptr, max)
 }
 
-/// Adresse der Routine fuer einen Import, oder nichts — dann behaelt der
-/// Schlitz den Trap-Stumpf und das Modul sagt beim ersten Aufruf Bescheid.
+/// Address of the routine for an import, or `None`; the slot then keeps the
+/// trap stub and the module faults on the first call.
 pub(crate) fn resolve(module: &str, name: &str) -> Option<u64> {
     if module != "env" {
         return None;

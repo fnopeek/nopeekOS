@@ -1,13 +1,11 @@
-//! Host-Funktionen, motorneutral.
+//! Engine-neutral host functions.
 //!
-//! Jede Funktion hier arbeitet auf `(&mut HostState, Argumente)` und sonst
-//! nichts. Was sich je Motor unterscheidet, ist nur, WIE der Zustand
-//! beschafft wird: der Interpreter reicht `caller.data_mut()` durch, der
-//! Compiler holt ihn aus dem vmctx. Beide fahren dieselbe Implementierung —
-//! zwei Host-Schichten zu vergleichen wuerde die Host-Schichten messen.
+//! Every function here works on `(&mut HostState, args)` and nothing else.
+//! Engines differ only in how they obtain the state: the interpreter passes
+//! `caller.data_mut()`, the compiler takes it from the vmctx. Both share
+//! this one implementation.
 //!
-//! Hier stehen die Funktionen, die den Gastspeicher NICHT anfassen. Wer ihn
-//! braucht, bekommt zusaetzlich `mem: &mut [u8]`.
+//! Functions that need guest memory additionally take `mem: &mut [u8]`.
 #![allow(clippy::too_many_arguments)]
 
 use super::{
@@ -23,8 +21,7 @@ use crate::drivers::pci;
 use alloc::vec::Vec;
 use alloc::string::String;
 
-/// Eine UTF-8-Zeichenkette aus dem Gastspeicher. Der Rumpf ist der von
-/// `read_wasm_str`, nur ohne den Motor davor.
+/// A UTF-8 string from guest memory; `read_wasm_str` without the engine.
 pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
     let start = ptr as usize;
     let end = (start + len as usize).min(data.len());
@@ -34,7 +31,7 @@ pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
     core::str::from_utf8(&buf).ok().map(String::from)
 }
 
-/// Bytes aus dem Gastspeicher, oder nichts, wenn der Bereich nicht passt.
+/// Bytes from guest memory, or `None` if the range does not fit.
 pub(crate) fn read_bytes(data: &[u8], ptr: i32, len: i32) -> Option<alloc::vec::Vec<u8>> {
     if ptr < 0 || len <= 0 { return None; }
     let start = ptr as usize;
@@ -43,8 +40,8 @@ pub(crate) fn read_bytes(data: &[u8], ptr: i32, len: i32) -> Option<alloc::vec::
     Some(data[start..end].to_vec())
 }
 
-/// `bytes` in den Gastspeicher an `ptr` schreiben; liefert die Laenge oder -1,
-/// wenn der Bereich nicht passt.
+/// Writes `bytes` to guest memory at `ptr`; returns the length, or -1 if
+/// the range does not fit.
 pub(crate) fn write_bytes(data: &mut [u8], ptr: i32, bytes: &[u8]) -> i32 {
     if ptr < 0 { return -1; }
     let start = ptr as usize;
@@ -57,8 +54,8 @@ pub(crate) fn write_bytes(data: &mut [u8], ptr: i32, bytes: &[u8]) -> i32 {
     bytes.len() as i32
 }
 
-/// Gemeinsamer Rumpf der beiden poll-Funktionen: eine Nachricht aus `dequeue`
-/// in den Gastpuffer holen (durch `max` begrenzt), Laenge oder -1.
+/// Shared body of both poll functions: copies one message from `dequeue`
+/// into the guest buffer (capped by `max`); returns the length or -1.
 fn wifi_poll_into(
     mem: &mut [u8],
     buf_ptr: i32,
@@ -141,30 +138,26 @@ pub(crate) fn npk_unix_time(_ctx: &mut HostState) -> i64 {
     crate::rtc::read_unix_time().unwrap_or(0) as i64
 }
 
-/// Zufall aus dem CSPRNG des Kernels in den Speicher des Moduls.
+/// Fills module memory from the kernel CSPRNG.
 ///
-/// **Ohne Kapabilitaet, wie `npk_unix_time`.** Zufall ist keine Ressource des
-/// Benutzers und verraet nichts ueber ihn: er gibt Bytes HERAUS und liest
-/// nichts. Ihn zu gaten hiesse, jedem Modul eine Berechtigung zu geben, die
-/// niemand je verweigern wuerde.
+/// Not capability-gated, like `npk_unix_time`: randomness is not a user
+/// resource and reveals nothing about the user.
 ///
-/// Die Quelle ist derselbe ChaCha20-Strom wie fuer Kapabilitaetsmarken —
-/// aus RDRAND geseedet, alle 64 Bloecke neu verschluesselt. Eine zweite,
-/// schwaechere Quelle fuer „bloss eine Seite" waere genau die Falle: aus
-/// `crypto.getRandomValues` baut Seitencode Sitzungsmarken.
+/// The source is the same ChaCha20 stream used for capability tokens
+/// (seeded from RDRAND, rekeyed every 64 blocks). There is deliberately no
+/// weaker second source: page code builds session tokens from
+/// `crypto.getRandomValues`.
 ///
-/// Liefert die Zahl der geschriebenen Bytes, oder -1.
+/// Returns the number of bytes written, or -1.
 pub(crate) fn npk_random_bytes(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if buf_ptr < 0 || len <= 0 { return -1; }
-    // Derselbe Deckel, den die Webplattform kennt (WebCrypto 10.1.1): mehr
-    // als 64 KiB auf einmal verlangt niemand, und ohne Deckel haelt ein
-    // Modul den RNG-Mutex beliebig lange.
+    // Same 64 KiB cap as WebCrypto 10.1.1; without it a module could hold
+    // the RNG mutex arbitrarily long.
     if len > 65_536 { return -1; }
     let start = buf_ptr as usize;
     let n = len as usize;
-    // `checked_add`: ein umlaufendes `start + n` gaebe start > end und
-    // brauchte den Kernel beim Schneiden zum Absturz — ein Halt, den der
-    // Gast ausloest.
+    // `checked_add`: a wrapping `start + n` would give start > end and the
+    // slice would panic the kernel on guest input.
     let Some(end) = start.checked_add(n) else { return -1 };
     if end > mem.len() { return -1; }
     crate::security::csprng::fill(&mut mem[start..end]);
@@ -176,9 +169,7 @@ pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return 0;
     }
-    // One table, in palette.rs — the local copy here stopped at
-    // Danger and silently answered 0 for Page/AccentRing/… long
-    // after those tokens existed.
+    // The only token table lives in palette.rs; do not copy it here.
     if token_id < 0 { return 0; }
     let token = match crate::shade::widgets::palette::token_from_id(token_id as usize) {
         Some(t) => t,
@@ -262,10 +253,9 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
         let ok = comp.set_overlay(crate::shade::WindowId(wid), w as u32, h as u32);
         // The overlay path always wants this window focused — drun
         // and any other launcher style app drives keyboard from
-        // here. The promote-or-create branch above already focuses,
-        // but if the app calls set_overlay a second time (or after
-        // some other host fn shifted focus elsewhere) we need to
-        // re-claim it so keys don't end up routed at a stale window.
+        // here. The branch above already focuses, but a repeated
+        // set_overlay (or a focus shift in between) must re-claim it
+        // so keys are not routed to a stale window.
         if ok {
             comp.focus_window(crate::shade::WindowId(wid));
         }
@@ -378,7 +368,7 @@ pub(crate) fn npk_window_set_dock(ctx: &mut HostState, w: i32, h: i32) -> i32 {
     if wid == 0 {
         // Promote the spawning terminal to a widget window if there
         // is one; otherwise create a fresh widget window. Unlike
-        // the overlay path we do NOT focus it — the dock is a
+        // the overlay path we do not focus it — the dock is a
         // background overlay that never owns keyboard focus.
         let terminal_idx = ctx.terminal_idx;
         let promoted = if terminal_idx != 255 {
@@ -478,26 +468,20 @@ pub(crate) fn npk_battery(ctx: &mut HostState) -> i32 {
     }
 }
 
-/// Ein Byte aus einer SystemMemory-Operationsregion lesen.
+/// Reads one byte from an ACPI SystemMemory operation region.
 ///
-/// Manche Firmware spricht mit ihrem Embedded Controller nicht ueber die
-/// ISA-Ports, sondern ueber ein speichergemapptes Fenster — auf einem
-/// Lenovo IdeaPad lesen `_STA` und `_BST` des Akkus `0xFE800008`. Ohne
-/// diesen Zugang erfindet der Interpreter dort eine 0, und die Firmware
-/// schliesst daraus auf "kein Akku".
+/// Some firmware talks to its embedded controller through a memory-mapped
+/// window instead of the ISA ports (Lenovo IdeaPad battery `_STA`/`_BST`
+/// read `0xFE800008`). Without this the interpreter would return 0 and the
+/// firmware would conclude there is no battery.
 ///
-/// **Sicherheit.** Die Frage aus dem Checkpoint lautet: kann ein Modul
-/// damit aus seinem Sandkasten? Drei Schranken sagen nein:
-///
-///  * `Rights::HARDWARE` — dasselbe Recht wie fuer die EC-Ports, und das
-///    hat genau ein Modul.
-///  * **Nur LESEN.** Ein Schreibzugriff auf beliebiges MMIO koennte
-///    Geraete umprogrammieren; der bleibt auf dem Notizblock des
-///    Interpreters und geht nirgendwohin.
-///  * **Niemals Arbeitsspeicher.** Jede Adresse, die in einem als nutzbar
-///    gemeldeten RAM-Bereich liegt, wird abgelehnt — und darin liegen
-///    Kernel, Halde und die linearen Speicher aller Module. Kennt der
-///    Kernel die Karte nicht, gilt alles als RAM, also alles als tabu.
+/// Sandbox bounds:
+///  * `Rights::HARDWARE`, the same right as for the EC ports.
+///  * Read only. Writes to arbitrary MMIO could reprogram devices; they
+///    stay in the interpreter's scratch space.
+///  * Never RAM. Any address inside a usable RAM range is refused (kernel,
+///    heap and every module's linear memory live there). Without a memory
+///    map, everything counts as RAM.
 pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
@@ -505,9 +489,7 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     }
     let addr = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
     if crate::memory::is_usable_ram(addr) {
-        // Nur die ersten paar melden. Der Treiber misst fuer immer, und
-        // eine Absage je Runde ist nach einer Minute eine Flut — die
-        // AUSKUNFT ist einmal wertvoll, die Wiederholung nie.
+        // Log only the first few: the driver polls forever.
         use core::sync::atomic::{AtomicU32, Ordering};
         static REFUSED: AtomicU32 = AtomicU32::new(0);
         let n = REFUSED.fetch_add(1, Ordering::Relaxed);
@@ -524,7 +506,7 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     }
 }
 
-/// Eine anstehende EC-Abfrage abholen. -1 = nichts anliegend / kein Recht.
+/// Takes a pending EC query. -1 = nothing pending or no right.
 pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
@@ -669,10 +651,9 @@ pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
         17 => { let (_, ebx, _) = crate::interrupts::cpuid15(); ebx as i64 },
         18 => { let (_, _, ecx) = crate::interrupts::cpuid15(); ecx as i64 },
 
-        // 19 → raw TSC reading (monotonic, high-resolution).
-        // Combine with key=10 (tsc_mhz) to convert ticks → time.
-        // 64-bit TSC fits in i64 (sign bit unused for ~150 years
-        // at 2 GHz), so the cast is safe.
+        // 19 → raw TSC reading; combine with key 10 (TSC MHz) to convert
+        // to time. The sign bit stays clear for ~150 years at 2 GHz.
+        // SAFETY: rdtsc has no preconditions.
         19 => unsafe { core::arch::x86_64::_rdtsc() as i64 },
 
         // ── Process tracking (keys 20-29) → process table ──
@@ -683,27 +664,21 @@ pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
         // 30: BLAKE3 MB/s, 31: AES-GCM enc MB/s,
         // 32: AES-GCM dec(in-place) MB/s,
         // 33: raw blkdev write MB/s, 34: raw blkdev read MB/s.
-        // First call across any of these triggers ~100 ms of
-        // measurement; results live in BENCH_CACHE until reboot.
+        // The first call runs the measurement; results live in
+        // BENCH_CACHE until reboot.
         30..=34 => bench_sys_info(key),
 
         // ── fsck self-check (key 40) → read-only integrity scan ──
-        // Runs on every call (NOT cached), logs a full report to
+        // Runs on every call (not cached), logs a full report to
         // serial, and returns the total problem count (0 = clean,
-        // -1 = scan error). testdisk calls this at the END of its run
-        // so corruption surfaces in-flight — a reboot would brick the
-        // mount before we could ever see it.
+        // -1 = scan error). testdisk calls it at the end of its run so
+        // corruption surfaces before a reboot would fail the mount.
         40 => fsck_sys_info(),
 
-        // ── 50: sollen Treiber ihre Diagnosezeilen drucken? ──────────
-        //
-        // Jede Fundgeschichte in diesem Baum haengt an einer Logzeile, die
-        // jemand VORHER eingebaut hat — die Zeilen gehoeren also nicht
-        // geloescht. Sie gehoeren nur nicht in den Normalbetrieb: rohe
-        // Deskriptoren, Registerspuren, Sekundenzaehler. Ein Treiber fragt
-        // das EINMAL beim Start und schweigt danach.
-        //
-        // Vorgabe AUS. `set log.drivers 1` holt alles zurueck.
+        // ── 50: should drivers print their diagnostic lines? ──
+        // Raw descriptors, register traces and counters are kept in the
+        // drivers but stay quiet in normal operation. A driver asks once
+        // at start. Default off; `set log.drivers 1` enables them.
         50 => if crate::config::get("log.drivers").as_deref() == Some("1") { 1 } else { 0 },
 
         _ => -1,
@@ -719,8 +694,8 @@ pub(crate) fn npk_sleep(_ctx: &mut HostState, ms: i32) -> i32 {
     }
 
     // Fallback: not inside a fiber (degenerate no-worker host, or a
-    // one-shot wasm on Core 0) → HLT-idle until the deadline. NO
-    // core-stealing helper (that was the nesting hazard).
+    // one-shot wasm on Core 0) → HLT-idle until the deadline. No
+    // core-stealing helper: that would risk nesting.
     let freq = crate::interrupts::tsc_freq();
     let target = crate::interrupts::rdtsc() + (ms as u64) * (freq / 1000);
     while crate::interrupts::rdtsc() < target {
@@ -813,7 +788,7 @@ fn input_ready(ctx: &HostState) -> bool {
 /// deadline comes. `docs/plan/CORES_AND_EVENTS.md` §3.3.
 ///
 /// Every bit is gated by what the caller already owns: the IRQ bit by the
-/// vector ITS driver registered, the NIC bit by being the registered WASM
+/// vector its driver registered, the NIC bit by being the registered WASM
 /// NIC, the command bit by being a driver, the event bit by NETCTL — the
 /// same rights the matching `npk_*_poll` calls check. It parks only the
 /// caller's own fiber.
@@ -839,7 +814,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
         }
         if let Some(hw) = ctx.hw.as_ref() {
             if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
-                // The interrupt must wake THIS core, and a level line the
+                // The interrupt must wake this core, and a level line the
                 // ISR masked is released: the driver waits again, so it has
                 // serviced the device (`irq::arm`).
                 let _ = crate::irq::arm(hw.irq_vector);
@@ -928,8 +903,8 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
             break -1;
         }
         // Park until a key is pushed (it signals this fiber) or the
-        // deadline. A halt here used to hold the whole core — `top` waits in
-        // this call, and a video in a fiber on the same core stood still.
+        // deadline. Halting here would hold the whole core and starve other
+        // fibers on it.
         if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
             // Not in a fiber (a one-shot on Core 0): halt in place.
             let recheck = crate::interrupts::rdtsc() + freq / 100;
@@ -979,17 +954,13 @@ pub(crate) fn npk_key_inject(_ctx: &mut HostState, byte: i32) -> i32 {
     0
 }
 
-/// **Ein roher Socket ist mindestens so maechtig wie `npk_http_*`** und
-/// gehoert an dasselbe Recht.
+/// A raw socket is at least as powerful as `npk_http_*` and needs the same
+/// right.
 ///
-/// Bis Kernel 0.337.0 prueften die fuenf `npk_tcp_*` GAR NICHTS: die Tabelle
-/// in `forge_glue::resolve` loest nach NAMEN auf, Importe werden beim Laden
-/// nicht gegen die Kapabilitaet gehalten, und ein Modul ohne `.npk.caps`
-/// bekommt `READ | EXECUTE | RENDER` — also kein `NET`. Damit konnte jedes
-/// Modul, das den Namen importiert, eine Verbindung zu jeder Adresse und
-/// jedem Port aufmachen und beliebige Bytes tauschen. Das ist genau die
-/// Frage aus dem Sicherheits-Checkpoint von `CLAUDE.md`, und die Antwort war
-/// nicht „nein".
+/// `forge_glue::resolve` binds imports by name and does not check them
+/// against capabilities at load time, so every socket call must check
+/// `NET` itself. A module without `.npk.caps` gets `READ | EXECUTE |
+/// RENDER`, i.e. no `NET`.
 fn net_allowed(ctx: &mut HostState) -> bool {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
@@ -1000,24 +971,21 @@ fn net_allowed(ctx: &mut HostState) -> bool {
     true
 }
 
-// ── TLS-Stromsocket ──────────────────────────────────────────────────────
+// ── TLS stream socket ────────────────────────────────────────────────────
 //
-// **Der Strom war schon da, nur nicht herausgefuehrt.** `crypto::tls` bietet
-// `tls_connect`, `tls_send`, `tls_poll` und `tls_close` auf einem
-// gewoehnlichen `tcp_handle` — das ist ein Byte-Socket, und was fehlte, war
-// allein die Tuer fuer ein Modul. Gebraucht wird sie fuer `wss://`: ein
-// WebSocket ist TLS plus ein Handschlag plus Rahmen, und die beiden letzten
-// gehoeren in die Engine, nicht hierher.
+// Exposes `crypto::tls` (`tls_connect`/`tls_send`/`tls_poll`/`tls_close` on
+// a plain `tcp_handle`) to modules, for `wss://`. The WebSocket handshake
+// and framing belong in the engine, not here.
 //
-// **Anders als das Jobsystem von `npk_http_*`:** dort ist eine Anfrage ein
-// Auftrag mit Anfang und Ende, hier ist es eine LANGE Verbindung, die
-// meistens still ist. Deshalb eine eigene Tabelle statt einer Warteschlange.
+// Unlike the `npk_http_*` job system (a request with a start and an end),
+// this is a long-lived, mostly idle connection, hence a slot table instead
+// of a queue.
 
 const MAX_TLS: usize = 8;
 
 struct TlsSlot {
-    /// Wem er gehoert. Ein Griff wird NUR dem Prozess beantwortet, der ihn
-    /// geoeffnet hat — dieselbe Regel wie bei den HTTP-Griffen.
+    /// Owner. A handle is served only to the process that opened it, as
+    /// with the HTTP handles.
     pid: u32,
     session: crate::crypto::tls::TlsSession,
 }
@@ -1025,7 +993,7 @@ struct TlsSlot {
 static TLS_SLOTS: spin::Mutex<[Option<TlsSlot>; MAX_TLS]> =
     spin::Mutex::new([const { None }; MAX_TLS]);
 
-/// Gemeinsamer Riegel fuer jeden Zugriff auf einen bestehenden Griff.
+/// Common gate for every access to an existing handle.
 fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     if !net_allowed(ctx) { return None }
     if handle < 0 || handle as usize >= MAX_TLS { return None }
@@ -1037,28 +1005,23 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     }
 }
 
-/// `npk_tls_connect(ip, port, host_ptr, host_len) -> Griff | -1`
+/// `npk_tls_connect(ip, port, host_ptr, host_len) -> handle | -1`
 ///
-/// **Blockiert fuer den Handschlag** (gemessen 60 ms: 10 ms TCP + 50 ms TLS)
-/// — dieselbe Groessenordnung, die `open_tls` im HTTP-Weg ohnehin kostet, und
-/// er faellt einmal je Verbindung an. Was ein Modul NICHT darf, ist zehn
-/// Sekunden blockieren: ein Modul ist eine Faser, und die haelt ihren
-/// Arbeitskern an. Wird das je spuerbar, ist die Antwort dieselbe wie bei
-/// `npk_tcp_connect` — in `start` und `status` teilen.
+/// Blocks for the handshake, once per connection, like `open_tls` on the
+/// HTTP path. The module's fiber holds its worker core meanwhile; if that
+/// ever matters, split it into `start` and `status` like `npk_tcp_connect`.
 pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
                               host_ptr: i32, host_len: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1 }
     if port <= 0 || port > 65535 { return -1 }
     let Some(host) = read_str(mem, host_ptr, host_len) else { return -1 };
-    // Der Name gehoert in SNI und in die Zertifikatspruefung, ohne Port.
+    // The bare name, without port, goes into SNI and certificate checks.
     let bare: String = String::from(host.split(':').next().unwrap_or(&host));
     if bare.is_empty() || bare.len() > 253 { return -1 }
-    // **Der NAME kommt herein, nicht die Adresse** — und damit macht
-    // `resolve_checked` beides in einem Zug: aufloesen UND die Reichweite
-    // pruefen. Ein Modul, das selbst aufloest, braeuchte dafuer einen eigenen
-    // DNS-Zugang, und dann liefe die Aufloesung an der Klasse vorbei, gegen
-    // die JEDE Anfrage der laufenden Seite geprueft wird (0.147.0). Genau das
-    // Loch nochmal, nur ueber einen anderen Socket.
+    // The module passes a name, not an address, so `resolve_checked` both
+    // resolves and checks the reach class (`ctx.net_reach`) in one step.
+    // Resolving in the module would bypass the reach check every request of
+    // the current page is held to.
     let ip = match crate::intent::http::resolve_checked(&bare, Some(ctx.net_reach)) {
         Ok(ip) => ip,
         Err(e) => {
@@ -1104,11 +1067,10 @@ pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
     }
 }
 
-/// `npk_tls_recv(handle, ptr, cap) -> n | 0 (noch nichts) | -1 (zu/Fehler)`
+/// `npk_tls_recv(handle, ptr, cap) -> n | 0 (nothing yet) | -1 (closed/error)`
 ///
-/// **Kommt SOFORT zurueck.** `tls_poll` sammelt nur, was der TCP-Stapel schon
-/// hat; ein Browser fragt das in jedem Bild, und Warten waere der Preis fuer
-/// nichts.
+/// Returns immediately: `tls_poll` only collects what the TCP stack already
+/// has. A browser polls this every frame.
 pub(crate) fn npk_tls_recv(mem: &mut [u8], ctx: &mut HostState,
                            handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
@@ -1142,15 +1104,12 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
         (ip_packed & 0xFF) as u8,
     ];
     if port <= 0 || port > 65535 { return -1; }
-    // **Die REICHWEITE gilt hier bewusst NICHT.** Sie ist die Regel einer
-    // SEITE: `ctx.net_reach` sagt, welche Klasse das gerade geladene Dokument
-    // erreichen darf, damit eine oeffentliche Seite nicht ins Heimnetz greift.
-    // Ein Modul ist keine Seite — es ist installierte Software mit einer
-    // erklaerten Kapabilitaet, und bei `debug` IST das Heimnetz der Zweck (es
-    // schreibt sein Protokoll an ein `nc -lk` auf dem Entwicklerrechner).
-    //
-    // Der TLS-Weg unten ist der andere Fall: den faehrt beak fuer eine Seite,
-    // und dort gilt sie.
+    // The reach class is deliberately not applied here. `ctx.net_reach` is
+    // a page rule (a public page must not reach the local network); a
+    // module is installed software with a declared capability, and for
+    // `debug` the local network is the point (it logs to `nc -lk`).
+    // The TLS path above is used by beak on behalf of a page and does apply
+    // it.
     match crate::net::tcp::connect_start(ip, port as u16) {
         Ok(h) => h as i32,
         Err(_) => -1,
@@ -1214,11 +1173,10 @@ pub(crate) fn npk_pci_bind_class(ctx: &mut HostState, class: i32, subclass: i32)
 }
 
 /// Bind the `index`-th PCI device of a class. Same rights check as
-/// `npk_pci_bind_class`; `index` 0 is exactly the old behaviour.
+/// `npk_pci_bind_class`; `index` 0 is the first match.
 ///
-/// Damit kann ein Treiber die Geraete seiner Klasse DURCHGEHEN, statt den
-/// ersten nehmen zu muessen. Das Urteil, welches taugt, bleibt bei ihm —
-/// der Kernel kennt keine Lautsprecher.
+/// Lets a driver walk the devices of its class; deciding which one fits is
+/// the driver's job.
 pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i32, index: i32) -> i32 {
     let cls = class as u8;
     let sub = subclass as u8;
@@ -1255,8 +1213,8 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
 pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,
-        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
-        // antworten hiesse, auf 00:00.0 zu greifen.
+        // Without a PCI device there is no config address; answering
+        // would access 00:00.0.
         _ => return -1,
     };
     if offset < 0 || offset > 255 { return -1; }
@@ -1266,8 +1224,8 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,
-        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
-        // antworten hiesse, auf 00:00.0 zu greifen.
+        // Without a PCI device there is no config address; answering
+        // would access 00:00.0.
         _ => return -1,
     };
     if offset < 0 || offset > 255 { return -1; }
@@ -1278,24 +1236,24 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
 pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) if h.is_pci => h,
-        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
-        // antworten hiesse, auf 00:00.0 zu greifen.
+        // Without a PCI device there is no config address; answering
+        // would access 00:00.0.
         _ => return -1,
     };
     pci::enable_bus_master(hw.pci_addr);
     // Also enable memory space
     let cmd = pci::read32(hw.pci_addr, 0x04);
     pci::write32(hw.pci_addr, 0x04, cmd | 0x06);
-    // Und auf jeder Bridge darueber: ohne Bus Master DORT leitet sie die
-    // Anfrage des Geraets nicht nach oben weiter, und das Geraet bekommt
-    // einen Master Abort auf voellig gueltiges RAM.
+    // And on every bridge above: without bus mastering there, the bridge
+    // does not forward the device's requests upstream and the device gets
+    // a master abort on valid RAM.
     pci::enable_bus_master_path(hw.pci_addr);
     hw.bus_master_enabled = true;
     0
 }
 
 pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
-    // Ohne PCI-Geraet gibt es keine Konfigurationsadresse.
+    // Without a PCI device there is no config address.
     let hw = match ctx.hw.as_mut() { Some(h) if h.is_pci => h, _ => return -1 };
     if !(0..2048).contains(&entry) { return -1; }
     // One vector per driver. Registering again returns the same one — the
@@ -1309,8 +1267,8 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
 }
 
 /// Register I/O APIC input `gsi` for this driver — the interrupt line of a
-/// device that is not on PCI (the IdeaPad touchpads' GPIO controller, found
-/// in its ACPI `_CRS`). `flags`: bit 0 level-triggered, bit 1 active-low.
+/// device that is not on PCI (e.g. a GPIO controller for I2C touchpads,
+/// found in its ACPI `_CRS`). `flags`: bit 0 level-triggered, bit 1 active-low.
 ///
 /// Gated like `npk_mmio_map_phys`, whose register window such a driver
 /// needs anyway: HARDWARE, and a bound or mapped device (`ctx.hw`). One
@@ -1375,7 +1333,7 @@ pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
     crate::sci::service() as i32
 }
 
-/// Is `vector` the one THIS module's driver registered?
+/// Is `vector` the one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)
 }
@@ -1396,8 +1354,8 @@ pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout
 pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) if h.is_pci => h,
-        // Ohne PCI-Geraet gibt es keine Konfigurationsadresse — hier zu
-        // antworten hiesse, auf 00:00.0 zu greifen.
+        // Without a PCI device there is no config address; answering
+        // would access 00:00.0.
         _ => return -1,
     };
     if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 256 { return -1; }
@@ -1456,34 +1414,25 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     handle as i32
 }
 
-/// Einen PHYSISCHEN MMIO-Bereich abbilden, der nicht zu einem PCI-Geraet
-/// gehoert.
+/// Maps a physical MMIO range that does not belong to a PCI device.
 ///
-/// Gebraucht fuer Hardware, die die Firmware nur ueber ACPI ansagt: auf
-/// AMD-Renoir/Lucienne haengen die I2C-Controller (Touchpad!) an fester
-/// MMIO im FCH und tauchen im PCI-Raum gar nicht auf. `npk_mmio_map_bar`
-/// greift dort nicht.
+/// For hardware announced only via ACPI: on AMD Renoir/Lucienne the I2C
+/// controllers sit at fixed MMIO in the FCH and do not appear in PCI space,
+/// so `npk_mmio_map_bar` cannot reach them.
 ///
-/// Die Abbildung landet in derselben Handle-Tabelle wie ein BAR, also
-/// lesen und schreiben die vorhandenen `npk_mmio_read*`/`write*` sie
-/// unveraendert.
+/// The mapping goes into the same handle table as a BAR, so the existing
+/// `npk_mmio_read*`/`write*` work on it unchanged.
 ///
-/// **Sicherheits-Checkpoint: kann ein Modul damit aus seinem Sandkasten?**
-/// Ein Modul mit `Rights::HARDWARE` kann heute schon ein PCI-BAR abbilden
-/// und DMA anfordern; der Zuwachs ist begrenzt, aber nicht null. Vier
-/// Schranken:
-///
-///  * **`Rights::HARDWARE`** — dasselbe Recht wie EC-Ports und DSDT.
-///  * **Niemals Arbeitsspeicher.** Geprueft wird JEDE Seite der Spanne,
-///    nicht nur die erste: eine Spanne, die am Rand eines Lochs beginnt,
-///    darf nicht in den RAM hineinreichen. Kennt der Kernel die Karte
-///    nicht, gilt alles als RAM, also alles als tabu.
-///  * **Niemals LAPIC oder IOAPIC.** Eine Schreibung nach
-///    `0xFEE0_0000` ist ein Interrupt an einen beliebigen Vektor auf einem
-///    beliebigen Kern — das ist Codeausfuehrung im Kernel, nicht
-///    Geraetezugriff. Der IOAPIC daneben routet fremde Interrupts.
-///  * **Deckel** auf die Spanne (16 Seiten = 64 KiB) und auf die Zahl der
-///    Abbildungen (`MAX_MMIO_MAPS`), wie bei einem BAR.
+/// Sandbox bounds:
+///  * `Rights::HARDWARE`, the same right as EC ports and DSDT.
+///  * Never RAM. Every page of the span is checked, not just the first,
+///    so a span starting at the edge of a hole cannot reach into RAM.
+///    Without a memory map, everything counts as RAM.
+///  * Never LAPIC or IOAPIC. A write to `0xFEE0_0000` is an interrupt to
+///    any vector on any core, i.e. code execution in the kernel; the IOAPIC
+///    routes other devices' interrupts.
+///  * Caps on the span (16 pages = 64 KiB) and on the number of mappings
+///    (`MAX_MMIO_MAPS`), as for a BAR.
 pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
@@ -1501,14 +1450,14 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — that is RAM", a);
             return -1;
         }
-        // LAPIC [0xFEE00000, 0xFEF00000) und IOAPIC [0xFEC00000, 0xFED00000).
+        // LAPIC [0xFEE00000, 0xFEF00000) and IOAPIC [0xFEC00000, 0xFED00000).
         if (0xFEE0_0000..0xFEF0_0000).contains(&a) || (0xFEC0_0000..0xFED0_0000).contains(&a) {
             kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — interrupt controller", a);
             return -1;
         }
     }
 
-    // Ein Zustand ohne PCI-Geraet, falls das Modul nie gebunden hat.
+    // A driver state without a PCI device if the module never bound one.
     if ctx.hw.is_none() {
         crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
         ctx.hw = Some(HwDriverState {
@@ -1529,8 +1478,8 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
 
     for i in 0..n {
         let a = base + (i * 4096) as u64;
-        // SAFETY: geprueft — kein RAM, kein Interruptcontroller. NO_CACHE,
-        // weil Geraeteregister nicht zwischengespeichert werden duerfen.
+        // SAFETY: checked above to be neither RAM nor an interrupt
+        // controller. NO_CACHE because device registers must not be cached.
         if let Err(e) = crate::paging::map_page(
             a, a,
             crate::paging::PageFlags::PRESENT
@@ -1548,20 +1497,18 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
     handle as i32
 }
 
-/// Eine Zeigerbewegung einspeisen.
+/// Injects a pointer movement.
 ///
-/// Geht in dieselbe Schlange, aus der PS/2 und USB schon kommen
-/// (`xhci::inject_mouse`) — kein zweiter Weg in den Compositor. Damit
-/// stehen Touchpad, Maus und was noch kommt nebeneinander, statt sich zu
-/// verdraengen.
+/// Uses the same queue as PS/2 and USB (`xhci::inject_mouse`), so all
+/// pointing devices coexist and there is no second path into the
+/// compositor.
 ///
-/// `dx`/`dy` sind hier `i32`, im Ereignis `i8`: eine schnelle Bewegung wird
-/// in Schritte ZERLEGT, statt geklemmt zu werden. Klemmen hiesse, dass der
-/// Zeiger bei schnellen Strichen zurueckbleibt.
+/// `dx`/`dy` are `i32` here but `i8` in the event: a fast movement is split
+/// into steps rather than clamped, so the pointer does not lag behind.
 ///
-/// Rechte: `Rights::HARDWARE`. **`npk_key_inject` prueft daneben GAR
-/// KEINS** — jedes Modul kann Tastendruecke in die Shell schreiben. Das ist
-/// ein eigener Befund und ausdruecklich nicht die Vorlage hier.
+/// Requires `Rights::HARDWARE`. Note: `npk_key_inject` checks no right at
+/// all, so any module can type into the shell; that is a known open issue,
+/// not the model for this function.
 pub(crate) fn npk_pointer_inject(
     ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
 ) -> i32 {
@@ -1573,8 +1520,8 @@ pub(crate) fn npk_pointer_inject(
     let s = scroll.clamp(-127, 127) as i8;
     let h = hscroll.clamp(-127, 127) as i8;
     let (mut rx, mut ry) = (dx, dy);
-    // Hoechstens ein paar Schritte — eine absurde Zahl darf keine Schleife
-    // aufhalten, und mehr als 16 x 127 Punkte ist keine Handbewegung.
+    // Bounded: an absurd value must not stall the loop, and more than
+    // 16 x 127 points is not a hand movement.
     for step in 0..16 {
         let sx = rx.clamp(-127, 127);
         let sy = ry.clamp(-127, 127);
@@ -1585,7 +1532,7 @@ pub(crate) fn npk_pointer_inject(
             buttons: b,
             dx: sx as i8,
             dy: sy as i8,
-            // Der Rollwert gehoert EINMAL dazu, nicht an jeden Teilschritt.
+            // Scroll is sent once, not with every partial step.
             scroll: if step == 0 { s } else { 0 },
             hscroll: if step == 0 { h } else { 0 },
         });
@@ -1652,12 +1599,11 @@ pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, va
     0
 }
 
-// 8-bit MMIO. Realtek rtw88 (RTL8822CE) rechnet seinen halben Registersatz
-// in Bytes: die Power-Sequenz ist ein read8/write8-Interpreter, und Register
-// wie REG_SYS_FUNC_EN+1 sind als EINZELNES Byte gemeint. Ein 32-Bit-RMW ist
-// dafuer kein Ersatz — er liest und schreibt drei Nachbarbytes mit, und bei
-// Registern mit Leseeffekt ist das ein anderer Vorgang. Linux waehlt die
-// Breite absichtlich; wir uebernehmen sie.
+// 8-bit MMIO. rtw88 (RTL8822CE) addresses much of its register set in
+// bytes: the power sequence is a read8/write8 interpreter, and registers
+// like REG_SYS_FUNC_EN+1 mean a single byte. A 32-bit RMW also touches
+// three neighbouring bytes, which differs on registers with read side
+// effects. Linux chooses the width deliberately; we follow it.
 pub(crate) fn npk_mmio_read8(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) => h,
@@ -1733,7 +1679,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let total: usize = hw.dma_allocs.iter().map(|(_, p)| *p).sum();
     if total + page_count > MAX_DMA_PAGES { return -1; }
 
-    // DMA buffers MUST be below 4GB — PCIe TX BD has 32-bit address field
+    // DMA buffers must be below 4 GB: the PCIe TX BD has a 32-bit address field.
     let phys = match crate::memory::allocate_contiguous_below(page_count, 0x1_0000_0000) {
         Some(p) => p,
         None => return -1,
@@ -1745,22 +1691,19 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     handle as i32
 }
 
-/// Wie `npk_dma_alloc`, aber der Treiber nennt die OBERGRENZE selbst.
+/// Like `npk_dma_alloc`, but the driver chooses the upper limit.
 ///
-/// `npk_dma_alloc` sucht unter 4 GB, und `allocate_contiguous_below` sucht
-/// von oben nach unten — das Ergebnis liegt damit immer direkt unter dem
-/// PCI-MMIO-Loch. Auf AMD-Blech ist genau dort TSEG/DPR: die CPU liest und
-/// schreibt dort, ein GERAET wird abgewiesen, und der Chip bekommt einen
-/// Master Abort auf eine Adresse, die aussieht wie gueltiges RAM.
+/// `allocate_contiguous_below` searches top-down, so a 4 GB limit always
+/// lands right below the PCI MMIO hole. On AMD platforms that is where
+/// TSEG/DPR sits: the CPU can access it, a device is rejected and gets a
+/// master abort on what looks like valid RAM.
 ///
-/// Welche Adressen ein Geraet erreichen kann, ist Geraetewissen und gehoert
-/// deshalb in den Treiber, nicht in eine Konstante hier. `limit_mb <= 0`
-/// heisst 4 GB, also das alte Verhalten; mehr als 4 GB gibt es nicht, weil
-/// jedes Geraet mit 32-Bit-Deskriptoren sonst stillschweigend falsch laege.
+/// Which addresses a device can reach is device knowledge and belongs in
+/// the driver. `limit_mb <= 0` means 4 GB; nothing above 4 GB is allowed,
+/// since devices with 32-bit descriptors would silently break.
 ///
-/// Sicherheit: derselbe Weg, dieselben Deckel, dieselbe Bitmap. Der Ruger
-/// waehlt eine Obergrenze, keine Adresse — er kann sich damit keinen
-/// fremden Speicher aussuchen.
+/// Same path, caps and bitmap as `npk_dma_alloc`. The caller picks a limit,
+/// not an address, so it cannot select foreign memory.
 pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -1851,9 +1794,8 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         Some(s) => s,
         None => return -1,
     };
-    // Der private Bereich eines anderen Moduls ist zu — auch mit READ auf
-    // alles. Der EIGENE ist dagegen offen, auch ohne READ: siehe
-    // `wasm::is_own_private`.
+    // Another module's private area is closed, even with global READ. The
+    // module's own area is open even without READ (`wasm::is_own_private`).
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fetch DENIED ({} gehoert einem anderen Modul)", name);
         return -1;
@@ -1897,7 +1839,7 @@ pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf
     let n = hdrs.len().min(buf_max as usize);
     let data = &mut *mem;
     let start = buf_ptr as usize;
-    // checked_add: a wrapping `start + n` would panic the KERNEL on
+    // checked_add: a wrapping `start + n` would panic the kernel on
     // the slice index — a guest-triggerable halt.
     match start.checked_add(n) {
         Some(end) if end <= data.len() => {
@@ -1922,7 +1864,7 @@ pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     let data = &mut *mem;
     let start = buf_ptr as usize;
     // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the KERNEL on the slice index — a guest-triggerable halt.
+    // panic the kernel on the slice index — a guest-triggerable halt.
     match start.checked_add(n) {
         Some(end) if end <= data.len() => {
             data[start..end].copy_from_slice(&url.as_bytes()[..n]);
@@ -1946,7 +1888,7 @@ pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr
     let data = &mut *mem;
     let start = buf_ptr as usize;
     // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the KERNEL on the slice index — a guest-triggerable halt.
+    // panic the kernel on the slice index — a guest-triggerable halt.
     match start.checked_add(n) {
         Some(end) if end <= data.len() => {
             data[start..end].copy_from_slice(&ct.as_bytes()[..n]);
@@ -1970,7 +1912,7 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     let data = &mut *mem;
     let start = buf_ptr as usize;
     // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the KERNEL on the slice index — a guest-triggerable halt.
+    // panic the kernel on the slice index — a guest-triggerable halt.
     match start.checked_add(n) {
         Some(end) if end <= data.len() => {
             data[start..end].copy_from_slice(&err.as_bytes()[..n]);
@@ -1989,30 +1931,30 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
 
     // Apps may not write the module store or the trust store — see
     // is_trust_critical_path.
-    // Checked BEFORE the grant path so a per-file grant can never
+    // Checked before the grant path so a per-file grant can never
     // become a way in there.
     if is_trust_critical_path(&name) {
         kprintln!("[npk] WASM: npk_store DENIED ({} is read-only to apps)", name);
         return -1;
     }
-    // Der private Bereich eines anderen Moduls ist zu — auch mit READ und
-    // WRITE auf alles. Siehe `wasm::private_area_owner`.
+    // Another module's private area is closed, even with global READ and
+    // WRITE. See `wasm::private_area_owner`.
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_store DENIED ({} gehoert einem anderen Modul)", name);
         return -1;
     }
 
-    // Three ways to be allowed to write, narrowest last:
+    // Four ways to be allowed to write, narrowest last:
     //   1. blanket WRITE from `.npk.caps`
     //   2. a grant for exactly this file — what the user handed over
     //      by picking the path in a trusted dialog
-    //   3. the app's OWN settings file, `sys/config/<module>`. An
+    //   3. the app's own settings file, `sys/config/<module>`. An
     //      app that keeps preferences shouldn't need write access to
     //      the whole store for it, and the name is the kernel's to
     //      derive — a module can't claim someone else's.
-    //   4. der EIGENE private Bereich, `priv/<module>/…` — er braucht gar
-    //      keine Kapabilitaet, denn er ist keine Datei im Speicher der
-    //      Maschine, sondern der Zustand dieses Programms.
+    //   4. the app's own private area, `priv/<module>/…`. It needs no
+    //      capability: it is this program's state, not a file of the
+    //      machine's store.
     let own_config = alloc::format!("sys/config/{}", ctx.module_name);
     let has_write = capability::check_global(&cap_id, capability::Rights::WRITE).is_ok()
         || capability::check_path_grant(&cap_id, &name, capability::Rights::WRITE)
@@ -2022,16 +1964,10 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         kprintln!("[npk] WASM: npk_store DENIED (no WRITE, no grant for {})", name);
         return -1;
     }
-    // **Was der private Bereich NICHT sein soll: ein Weg, ohne WRITE die
-    // Platte zu fuellen.** Ein Modul ohne Schreibrecht darf seinen eigenen
-    // Zustand behalten — das ist der Zweck —, aber „Zustand" hat eine
-    // Groessenordnung. Wer mehr braucht, braucht WRITE und damit die Frage
-    // an den Benutzer.
-    //
-    // Offen und benannt: das ist ein Deckel je SCHREIBVORGANG, kein
-    // Gesamtkontingent. Viele kleine Dateien laufen daran vorbei. Ein echtes
-    // Kontingent muesste den Bereich bei jedem Schreiben auszaehlen; das
-    // gehoert gemessen, bevor es gebaut wird.
+    // The private area must not be a way to fill the disk without WRITE.
+    // Larger data needs WRITE, and with it the user's consent.
+    // Not implemented: a total quota. This caps each write, so many small
+    // files still get past it.
     const PRIVATE_WRITE_MAX: i32 = 1024 * 1024;
     if by_private && data_len > PRIVATE_WRITE_MAX {
         kprintln!("[npk] WASM: npk_store DENIED ({} B in den privaten Bereich, Deckel {} B)",
@@ -2151,8 +2087,7 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
         (start, end)
     };
 
-    // Heap copy, 200–600 bytes for a typical tree. The borrow checker
-    // used to force it; with `mem` a parameter it no longer does.
+    // Heap copy; a typical tree is a few hundred bytes.
     let payload: alloc::vec::Vec<u8> = mem[bytes_start..bytes_end].to_vec();
 
     let mut prev_window = ctx.widget_window_id;
@@ -2217,11 +2152,11 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
 /// repacking them. `flags`: bit 0 = Rec. 709 (else Rec. 601), bit 1 = full
 /// range (else limited/studio).
 ///
-/// **Why this exists next to `npk_canvas_commit`:** converting Y′CbCr to
-/// BGRA inside a module costs 145 % of a core at 1080p30 — measured, and
-/// more than decoding the frame. Here the conversion happens in the blit,
-/// natively and only for the pixels that land in the canvas rect, and the
-/// frame crosses the boundary at 1.5 bytes per pixel instead of 4.
+/// Why this exists next to `npk_canvas_commit`: converting Y′CbCr to BGRA
+/// inside a module costs more than decoding the frame. Here the conversion
+/// happens natively in the blit, only for the pixels that land in the
+/// canvas rect, and the frame crosses the boundary at 1.5 bytes per pixel
+/// instead of 4.
 pub(crate) fn npk_canvas_commit_yuv(
     mem: &mut [u8], ctx: &mut HostState,
     canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32,
@@ -2310,8 +2245,7 @@ pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     // buffer): it always holds the final composite (background +
     // windows + cursor) that's physically on screen. The shadow
     // double-buffer can be mid-swap when we (on a worker core)
-    // read it, yielding a stale background-only frame — the
-    // reason an earlier shadow capture missed all the windows.
+    // read it, yielding a stale background-only frame.
     // Row-by-row into a tight BGRA temp (pitch may exceed w*4).
     let mut tmp = alloc::vec![0u8; need];
     let src = info.addr as *const u8;
@@ -2369,8 +2303,7 @@ pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
         return -1;
     }
 
-    // v2: `sys/wasm` is a real directory. List immediate children
-    // directly instead of scanning + prefix-filtering the whole tree.
+    // `sys/wasm` is a real directory: list its immediate children.
     let entries = match crate::npkfs::fs::list("sys/wasm") {
         Ok(Some(v)) => v,
         Ok(None) => alloc::vec::Vec::new(),
@@ -2579,19 +2512,17 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     write_len as i32
 }
 
-/// Die `index`-te ACPI-Tabelle mit dieser Signatur in den Modulspeicher.
+/// Copies the `index`-th ACPI table with this signature into module memory.
 ///
-/// `sig` traegt die vier Zeichen little-endian in einem `i32` — so, wie
-/// sie im Speicher stehen (`SSDT` = 0x54445353).
+/// `sig` holds the four characters little-endian in an `i32`, as they sit
+/// in memory (`SSDT` = 0x54445353).
 ///
-/// **Warum es das braucht:** eine Firmware verteilt ihren Namespace ueber
-/// die DSDT UND beliebig viele SSDTs, und Linux laedt sie alle in
-/// denselben (`acpi_tb_load_namespace`). Wer nur die DSDT liest, dem
-/// fehlen Namen, die woanders deklariert sind — auf Florians IdeaPad die
-/// Basis der Region, in der die Freigabebits der I2C-Controller stehen.
+/// Firmware spreads its namespace over the DSDT and any number of SSDTs,
+/// and Linux loads them all into one (`acpi_tb_load_namespace`); reading
+/// only the DSDT misses names declared elsewhere.
 ///
-/// Rueckgabe: Laenge, oder die BENOETIGTE Laenge wenn der Puffer zu klein
-/// ist, oder -1 (kein Recht / gibt es nicht).
+/// Returns the length, the required length if the buffer is too small, or
+/// -1 (no right / no such table).
 pub(crate) fn npk_acpi_table(
     mem: &mut [u8], ctx: &mut HostState, sig: i32, index: i32, buf_ptr: i32, buf_max: i32,
 ) -> i32 {
@@ -2607,7 +2538,7 @@ pub(crate) fn npk_acpi_table(
     if len > buf_max as usize {
         return len as i32;
     }
-    // SAFETY: find_table_nth hat [addr, addr+len) abgebildet.
+    // SAFETY: find_table_nth mapped [addr, addr+len).
     let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
     let data = &mut *mem;
     let start = buf_ptr as usize;
@@ -2647,16 +2578,15 @@ pub(crate) fn npk_audio_submit(mem: &mut [u8], _ctx: &mut HostState, slot: i32, 
 /// `npk_audio_buffered(slot)` — bytes still sitting in the slot's ring,
 /// or -1 for a closed/invalid slot.
 ///
-/// **This is the play clock.** Without it an app can only estimate what has
+/// This is the play clock. Without it an app can only estimate what has
 /// been heard from the wall clock (`submitted - elapsed * rate`), and the
 /// wall clock and the audio crystal drift apart. For music nobody notices;
 /// for lipsync over a film the error accumulates, which is why every player
 /// that shows pictures makes the audio output its master clock.
 ///
-/// Ungated and without an ownership check, exactly like `npk_audio_submit`
-/// and `npk_audio_close` next to it — the audio slots have no owner today.
-/// That is a gap worth its own decision, not one to half-close here: a read
-/// that is stricter than the write beside it buys nothing.
+/// Ungated and without an ownership check, like `npk_audio_submit` and
+/// `npk_audio_close`: audio slots have no owner. A read stricter than the
+/// write beside it would buy nothing.
 pub(crate) fn npk_audio_buffered(_ctx: &mut HostState, slot: i32) -> i32 {
     if slot < 0 { return -1; }
     crate::audio::buffered(slot as usize) as i32
@@ -2686,16 +2616,14 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
         }
     };
 
-    // v2: directories are real Tree objects, listings come straight
-    // from them — no scan + prefix-filter pass.
+    // Directories are real Tree objects; listings come straight from them.
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let prefix_for_list = prefix.trim_matches('/');
 
-    // **Auflisten ist auch Lesen.** Ein fremder privater Bereich darf nicht
-    // einmal als NAME erscheinen: dass `priv/tune` existiert, ist schon eine
-    // Auskunft. Deshalb zwei Schritte — der verlangte Pfad muss erlaubt
-    // sein, UND jeder Eintrag wird noch einmal an seinem vollen Pfad
-    // geprueft. Ohne den zweiten waere `list("")` das Loch neben der Tuer.
+    // Listing is reading. Another module's private area must not appear
+    // even as a name, since its existence is information. So the requested
+    // path must be allowed, and every entry is checked again at its full
+    // path; otherwise `list("")` would leak it.
     if !crate::wasm::private_area_allows(prefix_for_list, &ctx.module_name) {
         return -1;
     }
@@ -2748,7 +2676,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
                 } else {
                     alloc::format!("{}/{}", abs, e.name)
                 };
-                // Nicht bloss ueberspringen: gar nicht erst hineinsteigen.
+                // Skip it and do not descend into it.
                 if !visible(&child_abs) { continue }
                 match e.kind {
                     crate::npkfs::object::EntryKind::File => {
@@ -2788,7 +2716,7 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
     };
 
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
-        return -1;   // still: ein fremder privater Bereich EXISTIERT nicht
+        return -1;   // silently: another module's private area does not exist
     }
     let (size, is_dir, mtime) = match crate::npkfs::fs::stat(&name) {
         Ok(Some(s)) => {
@@ -3010,9 +2938,8 @@ pub(crate) fn npk_log_serial(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len
             serial.write_byte(b'\r');
             serial.write_byte(b'\n');
         }
-        // ...and to the remote mirror, which was blind to every app
-        // that logs this way. Outside the SERIAL lock: the sink takes
-        // its own, and holding two is how a deadlock is built.
+        // ...and to the remote mirror. Outside the SERIAL lock: the sink
+        // takes its own, and holding both risks a deadlock.
         crate::shade::terminal::stream_push_global(&s);
         crate::shade::terminal::stream_push_global("\n");
     }
@@ -3053,11 +2980,11 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         },
         Some(&mut info),
         &crate::intent::http::HttpRequest {
-            // The document itself: 4,1x-9,9x fewer bytes on the wire,
-            // measured (docs/plan/JS_SCOPE_CONTENT_WEB.md §8).
+            // The document itself compresses well
+            // (docs/plan/JS_SCOPE_CONTENT_WEB.md §8).
             accept_gzip: tls,
-            // And over HTTP/2: this is the request Wikimedia
-            // throttles, four of them per page load (BROWSER.md §8.1).
+            // HTTP/2 avoids per-connection throttling by some servers
+            // (BROWSER.md §8.1).
             try_h2: tls,
             plain: !tls,
             ..Default::default()
@@ -3082,7 +3009,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
 
     let write_len = out.len().min(cap);
     // Bounds-checked write: buf_ptr is guest-controlled, and a
-    // wrapping `start + len` would panic the KERNEL on the slice index.
+    // wrapping `start + len` would panic the kernel on the slice index.
     write_bytes(mem, buf_ptr, &out[..write_len])
 }
 
@@ -3102,7 +3029,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
     };
     // The method sits at the very front of the request line and the
     // headers end it — a newline in either rewrites the request, and
-    // everything after it is read as a SECOND one. This is the check
+    // everything after it is read as a second one. This is the check
     // that stops a sandboxed app from smuggling requests through us.
     if !crate::intent::http::method_is_safe(&method) {
         kprintln!("[npk] WASM: npk_http_send rejected method");
@@ -3154,9 +3081,9 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         accept_gzip: tls,
         try_h2: tls,
         plain: !tls,
-        // Alles, was ueber die WASM-Grenze kommt, ist Seitencode — auch
-        // wenn beak es weiterreicht. Die Reichweite steht am Kontext, nicht
-        // an der Anfrage, und der Kernel hat sie selbst ausgerechnet.
+        // Everything crossing the WASM boundary counts as page code, even
+        // when beak forwards it. The reach comes from the context, which
+        // the kernel computed itself, not from the request.
         from_reach: Some(ctx.net_reach),
     };
     let res = crate::intent::http::https_request_streaming(
@@ -3203,19 +3130,15 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
 // the caller's word — so guessing a small integer cannot read another app's
 // document.
 
-/// Start one request. Returns a handle (>= 1), or -1 with the reason in
-/// `npk_http_last_error`. Same validation as `npk_http_send`: it is the same
-/// request, only nobody waits for it here.
-/// Den Reichweiten-Kontext dieses Moduls setzen.
+/// Sets this module's reach context.
 ///
-/// **Der Kernel glaubt dem Modul den Namen, aber nicht die Klasse.** beak
-/// reicht die Adresse des Dokuments ein; welcher Netzbereich das ist,
-/// rechnet diese Funktion selbst aus — sonst waere die Grenze eine, die das
-/// Modul im Sandkasten selbst zieht, und das ist keine.
+/// The kernel trusts the module for the document URL but not for its class:
+/// beak passes the address, and this function computes the network class
+/// itself. Otherwise the sandbox would be drawing its own boundary.
 ///
-/// Eine Adresse ohne Herkunft (`beak:selftest`, `about:blank`) und alles,
-/// was sich nicht aufloesen laesst, faellt auf `Public` zurueck: die
-/// strengste Klasse, nicht die bequemste.
+/// An address without an origin (`beak:selftest`, `about:blank`) and
+/// anything that does not resolve falls back to `Public`, the strictest
+/// class.
 pub(crate) fn npk_net_context(
     mem: &mut [u8], ctx: &mut HostState, url_ptr: i32, url_len: i32,
 ) -> i32 {
@@ -3235,6 +3158,9 @@ pub(crate) fn npk_net_context(
     0
 }
 
+/// Start one request. Returns a handle (>= 1), or -1 with the reason in
+/// `npk_http_last_error`. Same validation as `npk_http_send`: it is the same
+/// request, only nobody waits for it here.
 pub(crate) fn npk_http_begin(
     mem: &mut [u8], ctx: &mut HostState,
     method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32,
@@ -3311,10 +3237,8 @@ pub(crate) fn npk_http_begin(
 /// Start a batch. Returns a handle (>= 1) or -1; the answer comes back
 /// through `npk_http_take_many`.
 ///
-/// Ohne Kopfzeilen — die Fassung, die vor 0.333.0 die einzige war. Sie
-/// bleibt, damit ein Modul, das gegen sie gebaut wurde, weiter LAEUFT: eine
-/// geaenderte Signatur waere ein Bindefehler, und ein Bindefehler heisst
-/// „die App startet gar nicht", nicht „ein Bild fehlt".
+/// Without headers. Kept so modules built against this signature still
+/// link: a changed signature is a bind error, and the app would not start.
 pub(crate) fn npk_http_begin_many(
     mem: &mut [u8], ctx: &mut HostState,
     urls_ptr: i32, urls_len: i32, out_max: i32,
@@ -3322,21 +3246,17 @@ pub(crate) fn npk_http_begin_many(
     npk_http_begin_many_hdr(mem, ctx, urls_ptr, urls_len, 0, 0, out_max)
 }
 
-/// Wie [`npk_http_begin_many`], aber mit einer KEKSZEILE JE ADRESSE.
+/// Like [`npk_http_begin_many`], but with one cookie line per URL, so
+/// subresources of a logged-in page (images, stylesheets, scripts) carry
+/// the session too.
 ///
-/// **Warum es das geben muss.** Bis hierher trug nur der Weg fuer eine
-/// einzelne Anfrage (`Work::One`) Kopfzeilen; der Stapelweg trug keine. Das
-/// Dokument kam also angemeldet zurueck und JEDE Unterressource darin —
-/// Bilder, Blaetter, Skripte — anonym. Auf einer Seite hinter einer
-/// Anmeldung sieht das aus wie ein Bildfehler und ist keiner.
+/// `hdrs` is a block of lines positional to `urls`: line `i` is the value
+/// of the `Cookie` header for `urls[i]`, or empty. Empty lines are not
+/// filtered out, otherwise positions shift and a cookie goes to the wrong
+/// URL.
 ///
-/// `hdrs` ist ein Block aus Zeilen, POSITIONELL zu `urls`: Zeile `i` ist der
-/// Wert der `Cookie`-Kopfzeile fuer `urls[i]`, oder leer. Leere Zeilen
-/// werden NICHT weggefiltert — sonst verrutschen die Positionen, und ein
-/// Keks landete an der falschen Adresse.
-///
-/// Das Keksglas gehoert dem Browser, nicht dem Kernel: hier wird nur
-/// weitergereicht und geprueft.
+/// The cookie jar belongs to the browser; the kernel only validates and
+/// forwards.
 pub(crate) fn npk_http_begin_many_hdr(
     mem: &mut [u8], ctx: &mut HostState,
     urls_ptr: i32, urls_len: i32, hdrs_ptr: i32, hdrs_len: i32, out_max: i32,
@@ -3358,11 +3278,10 @@ pub(crate) fn npk_http_begin_many_hdr(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    // Die Kekse: eine Zeile je Adresse, in derselben Reihenfolge. Geprueft
-    // wird jede mit demselben Massstab wie eine Kopfzeile am
-    // Einzelanfrage-Weg — eine, die nicht besteht, wird zu KEINEM Keks statt
-    // zu einer abgelehnten Anfrage: ein fehlender Keks ist ein Bild, das
-    // anonym kommt, eine Absage waere gar kein Bild.
+    // One cookie line per URL, in order, checked like a header on the
+    // single-request path. A line that fails becomes no cookie rather than
+    // a refused request: the resource then loads anonymously instead of
+    // not at all.
     let cookies: alloc::vec::Vec<String> = if hdrs_len > 0 {
         match read_str(mem, hdrs_ptr, hdrs_len) {
             Some(blob) => blob
@@ -3440,7 +3359,7 @@ pub(crate) fn npk_http_take_many(
     handle: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32,
 ) -> i32 {
     if out_max <= 0 || lens_max <= 0 || out_ptr < 0 || lens_ptr < 0 { return -1; }
-    // Asked BEFORE taking: `take` destroys the job, so a length table too
+    // Asked before taking: `take` destroys the job, so a length table too
     // small to hold the answer has to be refused while the answer still
     // exists — otherwise a caller that sized it wrong loses the batch.
     match crate::intent::fetch::result_count(ctx.pid, handle) {
@@ -3460,7 +3379,7 @@ pub(crate) fn npk_http_take_many(
     for n in &reply.lens {
         lens.extend_from_slice(&n.to_le_bytes());
     }
-    // Refused, not truncated. The length table describes the WHOLE blob, so a
+    // Refused, not truncated. The length table describes the whole blob, so a
     // short write would leave the caller slicing bodies out of bytes that were
     // never written. (`npk_http_take` may truncate — there is no table there.)
     if reply.body.len() > out_max as usize { return -1; }
@@ -3575,18 +3494,18 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
         Ok(id) => id,
         Err(_) => return -1,
     };
-    // Launching an app ON a file is the user pointing at it — grant
+    // Launching an app on a file is the user pointing at it — grant
     // that one path so the app can save it back without holding
     // WRITE over the whole store.
     if let Some(a) = arg.as_deref() {
         capability::grant_path(module_cap, a,
             capability::Rights::READ | capability::Rights::WRITE);
     }
-    // Create the widget window NOW (synchronously, titled with the
+    // Create the widget window now (synchronously, titled with the
     // module name) instead of lazily on first scene_commit. The
     // app spawns asynchronously, so without this a rapid second
     // open (e.g. a double-click = two opens) would see no window
-    // yet and spawn a DUPLICATE instance. Pre-creating lets the
+    // yet and spawn a duplicate instance. Pre-creating lets the
     // next open find it and route an Event::Open tab instead.
     let win = match crate::shade::with_compositor(|c| c.create_widget_window(&app)) {
         Some(id) => id,
@@ -3787,9 +3706,9 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
         kprintln!("[npk] WASM: npk_fs_rename DENIED (module/trust store is read-only to apps)");
         return -1;
     }
-    // BEIDE Seiten. Nur die Quelle zu pruefen liesse eine Datei in einen
-    // fremden privaten Bereich schieben, nur das Ziel liesse eine aus einem
-    // herausholen.
+    // Both sides: checking only the source would let a file be moved into
+    // another module's private area, checking only the target would let
+    // one be moved out.
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_rename DENIED (privater Bereich eines anderen Moduls)");
@@ -3818,8 +3737,8 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
         kprintln!("[npk] WASM: npk_fs_copy DENIED (module/trust store is read-only to apps)");
         return -1;
     }
-    // Wie beim Umbenennen: beide Seiten. Eine Kopie AUS einem fremden
-    // privaten Bereich heraus waere derselbe Diebstahl wie ein Lesen.
+    // Both sides, as for rename: copying out of another module's private
+    // area is the same as reading it.
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_copy DENIED (privater Bereich eines anderen Moduls)");

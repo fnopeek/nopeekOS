@@ -16,42 +16,30 @@ use crate::drivers::pci;
 pub(crate) mod host_core;
 pub(crate) mod forge_glue;
 
-// ── Welcher Motor faehrt ein Modul ────────────────────────────────────
+// ── Which engine runs a module ────────────────────────────────────────
 //
-// Die Wahl gehoert NICHT an jeden Startweg. Autostart, Treiber, Dienste und
-// Einmallaeufe kommen alle irgendwo anders herein — und `dock`, `bar`,
-// `audio_hda`, `wifid` startet ueberhaupt niemand von Hand. Ein Modul von
-// Hand zu starten pruefte ausserdem einen ANDEREN Pfad als den, auf dem es im
-// Betrieb hochkommt: andere Capabilities, andere Fensterbehandlung.
-//
-// Deshalb eine Fahne, die einen Neustart uebersteht. Umlegen, neu starten,
-// und der ganze Desktop laeuft unter forge — oder eben nicht, und man sieht
-// es sofort. Die Intent-Shell selbst ist nativ, also bleibt ein Prompt
-// erreichbar, auch wenn ein Modul kippt.
+// One persistent flag instead of a choice per spawn path: autostart,
+// drivers, services and one-shot runs all enter elsewhere, and a module
+// must run on the same engine it uses in normal operation. The intent shell
+// is native, so a prompt stays reachable even if a module fails.
 static FORGE_DEFAULT: AtomicBool = AtomicBool::new(false);
 
-/// Aus der Konfiguration lesen. Nach `config::load()` aufrufen.
+/// Read the engine choice from the config. Call after `config::load()`.
 ///
-/// **Ohne Eintrag gilt forge.** Am 2026-09-01 lief das ganze System einmal
-/// damit durch — alle 21 Module auf ihren echten Startwegen, Autostart und
-/// Treiber eingeschlossen. Ein frisch installiertes System soll den Compiler
-/// bekommen, ohne dass jemand einen Schalter kennt.
-///
-/// `wasm.engine=wasmi` in der Konfiguration schaltet zurueck; der Weg dahin
-/// ist `forge default off`, und er funktioniert auch dann noch, wenn kein
-/// einziges Modul startet — die Intent-Shell ist nativ.
+/// Without an entry forge is the default. `wasm.engine=wasmi` switches back
+/// (set via `forge default off`, which works even if no module starts).
 pub fn load_engine_default() {
     let on = crate::config::get("wasm.engine").as_deref() != Some("wasmi");
     FORGE_DEFAULT.store(on, AtOrd::Release);
     kprintln!("[npk] WASM: {}", if on { "forge" } else { "wasmi (per Konfiguration)" });
 }
 
-/// Welcher Motor faehrt, wenn der Aufrufer nichts anderes sagt.
+/// The engine used when the caller does not say otherwise.
 pub fn forge_is_default() -> bool {
     FORGE_DEFAULT.load(AtOrd::Acquire)
 }
 
-/// Umlegen und merken.
+/// Switch the default engine and persist it.
 pub fn set_engine_default(forge: bool) {
     FORGE_DEFAULT.store(forge, AtOrd::Release);
     crate::config::set("wasm.engine", if forge { "forge" } else { "wasmi" });
@@ -63,13 +51,10 @@ pub struct WasmResult {
 
 /// Hardware driver state for WASM modules that access PCI devices.
 struct HwDriverState {
-    /// Haengt dieser Zustand an einem PCI-Geraet?
-    ///
-    /// Seit es `npk_mmio_map_phys` gibt, kann ein Treiber Hardware fahren,
-    /// die NICHT auf PCI liegt — der Designware-I2C im AMD-FCH zum
-    /// Beispiel. Dann ist `pci_addr` ohne Bedeutung, und jeder Ruf, der
-    /// damit in den Konfigurationsraum greift, muss abgelehnt werden statt
-    /// auf 00:00.0 zu landen.
+    /// Whether this state belongs to a PCI device. A driver using
+    /// `npk_mmio_map_phys` may drive non-PCI hardware (e.g. the DesignWare
+    /// I2C in the AMD FCH); then `pci_addr` is meaningless and every
+    /// config-space access must be refused instead of landing on 00:00.0.
     is_pci: bool,
     pci_addr: pci::PciAddr,
     #[allow(dead_code)] // populated for future audit/debug, not yet read
@@ -81,7 +66,7 @@ struct HwDriverState {
     bus_master_enabled: bool,
     registered_as_netdev: bool,
     /// The device-IRQ vector this driver registered, 0 = none. A driver
-    /// may arm and wait on THIS vector only — any vector of the pool would
+    /// may arm and wait on this vector only — any vector of the pool would
     /// let a module re-route another driver's interrupt to its own core.
     irq_vector: u8,
     /// `irq::fired_count` of that vector when `npk_wait` last reported it.
@@ -89,11 +74,9 @@ struct HwDriverState {
 }
 
 const MAX_MMIO_MAPS: usize = 4;
-/// Per-module DMA allocation slots. Was 128, which the AX200 driver hit with
-/// 64 one-page receive buffers plus its rings — and 64 buffers is 12 ms of
-/// headroom at 64 Mbit, against a `worker_idle_hlt` that parks the core for up
-/// to 10 ms between drains. Linux allocates 2048 for this chip. Each slot is a
-/// (phys, pages) pair, so the ceiling is bookkeeping, not memory.
+/// Per-module DMA allocation slots. A WiFi driver needs many one-page
+/// receive buffers plus its rings (Linux allocates 2048 for the AX200). Each
+/// slot is a (phys, pages) pair, so the ceiling is bookkeeping, not memory.
 const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
@@ -111,18 +94,17 @@ pub(crate) struct HostState {
     pid: u32,
     /// Hardware driver state (only set for driver modules)
     hw: Option<HwDriverState>,
-    /// Die Reichweite des Dokuments, das dieses Modul gerade anzeigt.
+    /// Network reach of the document this module currently shows.
     ///
-    /// **Vorgabe `Public`, und das ist die strenge Wahl.** Ein Modul, das
-    /// nie etwas sagt, gilt als oeffentliche Seite und kommt damit nicht ins
-    /// private Netz. Nur wer `npk_net_context` ruft und dabei eine private
-    /// Adresse nennt, bekommt mehr — und auch das erst, nachdem der Kernel
-    /// die Adresse selbst AUFGELOEST hat.
+    /// Defaults to `Public`, the strict choice: a module that never says
+    /// otherwise cannot reach the private network. Only `npk_net_context`
+    /// with a private address widens it, and only after the kernel has
+    /// resolved that address itself.
     pub(crate) net_reach: crate::intent::http::Reach,
     /// Shade window id owned by this WASM app for widget rendering.
     /// 0 = no widget window yet (first scene_commit allocates one).
-    /// Phase 10: set when the app calls npk_scene_commit, reused on
-    /// subsequent commits so the same window is updated in place.
+    /// Set when the app calls npk_scene_commit, reused on subsequent
+    /// commits so the same window is updated in place.
     widget_window_id: u32,
     /// Module name, used as the window title when the app's first
     /// scene_commit (or npk_window_set_overlay) creates its widget
@@ -137,12 +119,11 @@ pub(crate) struct HostState {
     http_final_url: Option<String>,
     /// The last `npk_http_request`'s `Content-Type`. Read back via
     /// `npk_http_content_type` — a browser cannot decode a document
-    /// without it, and guessing the charset wrong costs the WHOLE page.
+    /// without it, and guessing the charset wrong breaks the whole page.
     http_content_type: Option<String>,
     /// Why the last `npk_http_request` failed, as `kind\tmessage`. Read
     /// back via `npk_http_last_error`. Without it every failure reaches the
-    /// caller as a bare -1, which is how an untrusted certificate ended up
-    /// rendering as a blank page.
+    /// caller as a bare -1.
     http_last_error: Option<String>,
     /// The last `npk_http_send` response's header block and status. Read back
     /// via `npk_http_response_headers` / `npk_http_status`. A browser needs
@@ -192,9 +173,8 @@ fn picker_module_name() -> String {
 // ── Worker-Core WASM Jobs ──────────────────────────────────────
 
 // Concurrent in-flight WASM spawn slots. A worker takes its slot out of
-// the array as soon as it starts, so this caps *pending* (not-yet-started)
-// spawns. 4 was too low once dock + bar + loft + iris are all resident —
-// a transient one-shot (a screenshot) couldn't even get queued.
+// the array as soon as it starts, so this caps pending (not-yet-started)
+// spawns; it must leave room for a one-shot while resident apps start.
 const MAX_WASM_JOBS: usize = 16;
 
 struct WasmJob {
@@ -210,7 +190,7 @@ struct WasmJob {
     /// the app via `npk_launch_arg`. Set by `npk_open`.
     launch_arg: Option<String>,
     /// Run this one under forge instead of the interpreter. Per job, not
-    /// global: ein Fehler in der Bruecke legt so nicht jede App um.
+    /// global, so a bug in the bridge does not take down every app.
     use_forge: bool,
 }
 
@@ -232,12 +212,10 @@ const APP_KEY_BUF_SIZE: usize = 32;
 const MAX_APP_BUFS: usize = 256;
 /// `terminal_idx` sentinel for "whatever terminal is focused". Spawn paths that
 /// have no window of their own pass it (drivers from autostart, sandboxed
-/// runs). It MUST be excluded before treating the index as a slot: 255 is
-/// smaller than MAX_APP_BUFS, so it used to pass the bounds check, land in
-/// `write_idx(255)` — a slot that is never allocated — and be dropped without
-/// a trace. Every line an autostarted driver printed went there. Four kernel
-/// lines and nothing from the driver is what that looks like from the outside,
-/// and it cost an evening.
+/// runs). It must be excluded before treating the index as a slot: 255 is
+/// smaller than MAX_APP_BUFS, so it passes the bounds check and would land in
+/// `write_idx(255)`, a slot that is never allocated, and output would be
+/// dropped silently.
 const TERM_IDX_ACTIVE: u8 = 255;
 
 static mut APP_KEY_BUFS: [([u8; APP_KEY_BUF_SIZE], AtomicUsize, AtomicUsize); MAX_APP_BUFS] = {
@@ -348,7 +326,7 @@ pub fn push_app_key(terminal_idx: u8, key: u8) {
 }
 
 /// The fiber of the app reading each terminal's key buffer, registered when
-/// it waits. A key wakes it at once (`top` used to look every 10 ms).
+/// it waits. A key wakes it at once instead of on the next poll.
 static APP_KEY_WAKER: [core::sync::atomic::AtomicU32; MAX_APP_BUFS] =
     [const { core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER) }; MAX_APP_BUFS];
 
@@ -384,6 +362,7 @@ fn pop_app_key(terminal_idx: u8) -> Option<u8> {
 fn clear_app_key_buf(terminal_idx: u8) {
     let idx = terminal_idx as usize;
     if idx >= MAX_APP_BUFS { return; }
+    // SAFETY: idx bounds checked; runs before the app starts reading.
     let (_, head, tail) = unsafe { &mut APP_KEY_BUFS[idx] };
     head.store(0, AtOrd::Relaxed);
     tail.store(0, AtOrd::Relaxed);
@@ -403,17 +382,10 @@ pub fn spawn_on_worker(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, mod
     spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None)
 }
 
-/// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
-/// NOT set APP_RUNNING for the terminal — the intent shell keeps receiving keys
-/// and the window continues to function normally. Used by debug.wasm.
-/// Wie [`spawn_on_worker`], aber mit einem STARTARGUMENT — der Weg, den der
-/// Terminal-Start einer Fensteranwendung nimmt.
-///
-/// Warum ueberhaupt: der blockierende Ausfuehrungsweg (`execute_inner`) setzt
-/// `pid: 0`, und ohne Prozessnummer lehnt `fetch::begin_one` jeden
-/// asynchronen Abruf ab ("async fetch needs a process"). Vom Prompt aus
-/// konnte beak damit zwar aufgehen, aber nie eine Seite laden — vom Dock
-/// aus ging es, weil der Klickweg schon immer hier vorbeikam.
+/// Like [`spawn_on_worker`], but with a launch argument; the path a terminal
+/// launch of a windowed app takes. The blocking path (`execute_inner`) runs
+/// with `pid: 0`, and `fetch::begin_one` refuses async fetches without a
+/// process.
 pub fn spawn_on_worker_with_arg(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     launch_arg: Option<String>,
@@ -421,21 +393,23 @@ pub fn spawn_on_worker_with_arg(
     spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, launch_arg)
 }
 
+/// Spawn a WASM module as a background task. Unlike spawn_on_worker, this does
+/// not set APP_RUNNING for the terminal — the intent shell keeps receiving keys
+/// and the window continues to function normally. Used by debug.wasm.
 pub fn spawn_on_worker_background(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
     spawn_on_worker_inner(wasm_bytes, cap_id, terminal_idx, module_name, false, 0, None)
 }
 
-/// Spawn a widget-kind WASM app (Phase 10). The caller pre-allocates a
+/// Spawn a widget-kind WASM app. The caller pre-allocates a
 /// widget window and passes its id — the worker sets `widget_window_id`
 /// in HostState so the first `npk_scene_commit` targets it directly.
-/// Does NOT allocate a terminal or set APP_RUNNING — widget apps use
+/// Does not allocate a terminal or set APP_RUNNING — widget apps use
 /// `npk_event_poll` for input, not the per-terminal key buffer.
 pub fn spawn_widget_app(wasm_bytes: Vec<u8>, cap_id: CapId, module_name: &str, widget_wid: u32) -> bool {
     spawn_on_worker_inner(wasm_bytes, cap_id, 255, module_name, false, widget_wid, None)
 }
 
-/// Wie `spawn_on_worker`, aber unter forge. Derselbe Weg, dieselbe Jobqueue,
-/// dasselbe Fenster — nur der Motor ist ein anderer.
+/// Like `spawn_on_worker`, but under forge: same job queue, same window.
 pub fn spawn_on_worker_forge(wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str) -> bool {
     spawn_on_worker_inner_engine(wasm_bytes, cap_id, terminal_idx, module_name, true, 0, None, true)
 }
@@ -444,9 +418,8 @@ fn spawn_on_worker_inner(
     wasm_bytes: Vec<u8>, cap_id: CapId, terminal_idx: u8, module_name: &str,
     foreground: bool, widget_wid: u32, launch_arg: Option<String>,
 ) -> bool {
-    // Kein verdrahtetes `false` mehr: hier kommen Autostart, Treiber, Dienste
-    // und Widget-Apps alle durch, und sie sollen denselben Motor fahren wie
-    // alles andere.
+    // Autostart, drivers, services and widget apps all pass here and run on
+    // the default engine like everything else.
     let e = forge_is_default();
     spawn_on_worker_inner_engine(
         wasm_bytes, cap_id, terminal_idx, module_name, foreground, widget_wid, launch_arg, e)
@@ -604,18 +577,16 @@ fn wasm_worker_task(arg: u64) {
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
 
-/// Derselbe Job, unter forge. Bewusst NEBEN `wasm_worker_task` und nicht
-/// hinein: der Interpreterpfad bleibt Zeile fuer Zeile, wie er war, solange
-/// dieser hier nicht gemessen ist. Der Preis ist ein doppelter Nachlauf von
-/// zehn Zeilen — billiger als ein Umbau an dem Weg, an dem jede App haengt.
+/// The same job under forge. Kept separate from `wasm_worker_task` so the
+/// interpreter path stays untouched; the cost is a duplicated cleanup tail.
 fn forge_worker_task(slot: usize, job: WasmJob) {
     let terminal_idx = job.terminal_idx;
     let core_id = crate::smp::per_core::current_core_id();
     let name_str = core::str::from_utf8(&job.name[..job.name_len as usize]).unwrap_or("?");
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
 
-    // Ab hier muss jeder Ausgang aufraeumen, sonst bleibt ein Prozess stehen
-    // und das Terminal nimmt keine Tasten mehr an.
+    // From here every exit must clean up, otherwise a process is left behind
+    // and the terminal stops accepting keys.
     let done = |pid: u32, terminal_idx: u8, slot: usize| {
         crate::process::exit(pid);
         if (terminal_idx as usize) < MAX_APP_BUFS {
@@ -644,8 +615,8 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         return;
     };
 
-    // Der Zustand gehoert hier UNS — unter wasmi haelt ihn der Store. Er darf
-    // sich nicht bewegen, solange die Instanz seinen Zeiger im vmctx hat.
+    // Here we own the state (under wasmi the Store holds it). It must not
+    // move while the instance holds its pointer in the vmctx.
     let mut hs = HostState {
         output: String::new(),
         cap_id: job.cap_id,
@@ -668,16 +639,15 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
 
     let host = forge_glue::NpkHost(&raw mut hs);
     let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
-        // Vier Dinge koennen hier scheitern, und die Meldung sagte keins davon.
-        // Der haeufigste Grund sind fehlende Rahmen — also stehen sie da.
+        // The most common cause is a lack of frames, so report free memory.
         let (frames, mb) = crate::mm::memory::stats();
         kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen (frei: {} Rahmen = {} MB)",
             name_str, frames, mb);
         done(pid, terminal_idx, slot);
         return;
     };
-    // Ein Import auf dem Trap-Stumpf wuerde beim ersten Aufruf stehenbleiben.
-    // Das jetzt sagen ist besser als es spaeter als Absturz zu lesen.
+    // An import bound to the trap stub stops on first call; say so now
+    // rather than have it look like a crash later.
     let open = inst.unresolved_imports();
     if open > 0 {
         kprintln!("[npk] forge: {} — {} Importe unaufgeloest, das Modul wird stehenbleiben",
@@ -693,8 +663,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         kprintln!("[npk] forge: {} endete mit {}", name_str, forge_core::trap::name(trap));
     }
 
-    // Wie im Interpreterpfad: Hardware zurueck, Pfadrechte weg. Beide
-    // arbeiten schon auf `&mut HostState`, also gilt hier dasselbe.
+    // As in the interpreter path: release hardware, revoke path grants.
     cleanup_instance_state(&mut hs);
     capability::revoke_path_grants(&hs.cap_id);
     crate::process::set_memory(pid, inst.memory_size() as u32);
@@ -718,13 +687,9 @@ pub fn execute_sandboxed_with_fuel(
     execute_inner(wasm_bytes, func_name, args, cap_id, fuel, None)
 }
 
-/// Wie [`execute_sandboxed_with_fuel`], aber mit einem STARTARGUMENT.
-///
-/// Das ist dieselbe Zeichenkette, die `npk_open`/`npk_launch` einem Modul
-/// mitgeben und die es mit `npk_launch_arg` abholt — nur kam sie bisher
-/// ausschliesslich von einer anderen App. Von der Shell aus gab es keinen
-/// Weg: `beak https://…` startete beak ohne die Adresse, obwohl beak sie
-/// beim Start liest und ansteuert.
+/// Like [`execute_sandboxed_with_fuel`], but with a launch argument: the
+/// same string `npk_open`/`npk_launch` pass and the module reads with
+/// `npk_launch_arg`, here supplied from the shell (`beak https://…`).
 pub fn execute_sandboxed_with_arg(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
     launch_arg: Option<String>,
@@ -746,9 +711,7 @@ fn execute_inner(
         }
     }
     // Clone the engine (cheap Arc bump) and drop the ENGINE lock so two
-    // one-shot decodes (run/wallpaper) can run concurrently. The resident
-    // + `execute` paths already do this; only this one held the lock over
-    // the whole instantiate+call.
+    // one-shot decodes (run/wallpaper) can run concurrently.
     let engine = {
         let guard = ENGINE.lock();
         guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
@@ -830,8 +793,8 @@ pub fn execute_wasi(
         let guard = ENGINE.lock();
         guard.as_ref().ok_or(WasmError::NotInitialized)?.clone()
     };
-    // Dieselbe Teilung wie im forge-Pfad, sonst sind die Spalten nicht
-    // vergleichbar: auch wasmi bereitet das Modul einmal auf.
+    // Time preparation and run separately, as the forge path does, so the
+    // two engines report comparable figures.
     let t_c = crate::interrupts::ticks();
     let module = Module::new(&engine, wasm_bytes)
         .map_err(|_| WasmError::InvalidModule)?;
@@ -883,11 +846,10 @@ pub fn execute_wasi(
     }
 }
 
-/// Der Einmallauf unter forge — wallpaper und `run <mod> <func> <args>`.
+/// One-shot run under forge (wallpaper, `run <mod> <func> <args>`).
 ///
-/// forges Eintritt nimmt drei `u32`; alles darueber oder mit anderen Typen
-/// bleibt beim Interpreter, und zwar SICHTBAR statt still. Der haeufige Fall
-/// (`"_start"` ohne Argumente, wie wallpaper ihn ruft) geht durch.
+/// The forge entry takes three `u32`; anything else falls back to the
+/// interpreter, with a log line. Returns `None` for that fallback.
 fn execute_inner_forge(
     wasm_bytes: &[u8], func_name: &str, args: &[Val], cap_id: CapId, fuel: u64,
     launch_arg: Option<String>,
@@ -949,14 +911,13 @@ fn execute_inner_forge(
     })
 }
 
-/// Wie `execute_wasi`, aber unter forge. Bewusst daneben und nicht darin: der
-/// Interpreterpfad bleibt, wie er ist, solange dieser hier nicht gemessen ist.
+/// Like `execute_wasi`, but under forge, kept separate from the interpreter
+/// path.
 ///
-/// Der Unterschied ist genau einer — wie das Programm sich verabschiedet.
-/// Unter wasmi kommt `proc_exit` als `Err` mit Status zurueck; unter forge
-/// rollt es ueber `host_trap` ab und hinterlegt den Status vorher im
-/// wasi-Zustand. Beide enden im selben Zustand, also liest der Rueckweg hier
-/// dasselbe.
+/// The one difference is how the program exits: under wasmi `proc_exit`
+/// returns as an `Err` carrying the status; under forge it unwinds through
+/// `host_trap` after storing the status in the wasi state, which is read
+/// here.
 pub fn execute_wasi_forge(
     wasm_bytes: &[u8],
     cap_id: CapId,
@@ -964,9 +925,8 @@ pub fn execute_wasi_forge(
     ctx: alloc::boxed::Box<crate::wasi::WasiCtx>,
     terminal_idx: u8,
 ) -> Result<i32, WasmError> {
-    // Eine Gesamtzahl verbirgt, welche Haelfte sich bewegt hat. Bei forge ist
-    // die eine Haelfte das Uebersetzen des ganzen Moduls — bei python 7,44 MB,
-    // und das faellt bei JEDEM Start an, solange der Codeblob nicht liegt.
+    // Report compile and run time separately: compiling the whole module is
+    // paid on every start while no cached code blob exists.
     let t_c = crate::interrupts::ticks();
     let m = forge_core::compile(wasm_bytes).map_err(|_| WasmError::InvalidModule)?;
     let compile_ms = crate::interrupts::ticks().saturating_sub(t_c) * 10;
@@ -974,8 +934,8 @@ pub fn execute_wasi_forge(
         .and_then(|i| m.offset_of(i))
         .ok_or(WasmError::FunctionNotFound)?;
 
-    // Der Zustand gehoert hier UNS — unter wasmi haelt ihn der Store. Er darf
-    // sich nicht bewegen, solange die Instanz seinen Zeiger im vmctx hat.
+    // Here we own the state (under wasmi the Store holds it). It must not
+    // move while the instance holds its pointer in the vmctx.
     let mut hs = HostState {
         output: String::new(),
         cap_id,
@@ -1011,10 +971,10 @@ pub fn execute_wasi_forge(
     kprintln!("[npk]   forge: laufen {} ms",
         crate::interrupts::ticks().saturating_sub(t_r) * 10);
     match trap {
-        // Sauber aus `_start` zurueck: ein wasi-Programm tut das selten, aber
-        // es ist erlaubt und bedeutet Status 0.
+        // Returning from `_start` is rare for a wasi program but allowed,
+        // and means status 0.
         forge_core::trap::NONE => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
-        // Der normale Abgang: `proc_exit` hat den Status vorher hinterlegt.
+        // The normal exit: `proc_exit` has stored the status.
         forge_core::trap::EXIT => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
@@ -1044,9 +1004,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // The second ABI. Inert without a grant in HostState.wasi.
     crate::wasi::link(linker).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_print(ptr, len) — write to output buffer or directly to terminal
-    // Where an app's output goes, in one place — npk_print and the
-    // wasi fd_write path must not drift apart.
+    // npk_print(ptr, len) — write to output buffer or directly to terminal.
+    // Routed through one place so npk_print and wasi fd_write cannot drift.
     linker.func_wrap("env", "npk_print",
         |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1070,7 +1029,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // bypassing the shade-terminal write path used by kprintln.
     //
     // Needed by widget-only apps (drun) that run when no terminal
-    // window exists: kprintln locks SERIAL *and* routes a copy through
+    // window exists: kprintln locks SERIAL and routes a copy through
     // `shade::terminal::write`, which can stall during early boot or
     // when the active-terminal slot has no backing buffer. Direct
     // serial lives inside the same SERIAL mutex but skips the
@@ -1096,7 +1055,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_http_request(url_ptr, url_len, buf_ptr, buf_max) -> bytes or -1
-    // Outbound HTTPS GET for the native browser (beak). Parses the URL,
+    // Outbound HTTPS GET for the native browser. Parses the URL,
     // fetches the body (following redirects) via the same TLS path OTA
     // uses, and copies up to buf_max bytes into the caller's buffer.
     // NET-gated — distinct from npkFS READ and from WiFi NETCTL.
@@ -1113,16 +1072,15 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     //               hdrs_ptr, hdrs_len, body_ptr, body_len,
     //               buf_ptr, buf_max) -> bytes, or -1
     //
-    // The general request `npk_http_request` was the narrow case of: any
-    // method, caller-supplied headers, a request body, and the response's
-    // status + headers readable afterwards. That is what a login (POST) and
-    // a cookie jar (`Set-Cookie`) need, and neither was expressible before.
+    // The general form of `npk_http_request`: any method, caller-supplied
+    // headers, a request body, and the response's status + headers readable
+    // afterwards (needed for POST logins and `Set-Cookie`).
     //
-    // `hdrs` is newline-separated `Name: value` lines. Cookie POLICY stays
+    // `hdrs` is newline-separated `Name: value` lines. Cookie policy stays
     // out of the kernel — which cookie belongs on which request is RFC 6265,
     // and that is the browser's job; the kernel only carries bytes.
     //
-    // A non-2xx does NOT fail here: a 404 page and a 403 explaining itself
+    // A non-2xx does not fail here: a 404 page and a 403 explaining itself
     // are documents a person needs to read. The status comes back through
     // `npk_http_status`.
     //
@@ -1160,7 +1118,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_http_request_many(urls_ptr, urls_len, out_ptr, out_max,
     //                       lens_ptr, lens_max) -> count, or -1
     //
-    // Fetch many URLs in ONE call, multiplexed over HTTP/2 where the host
+    // Fetch many URLs in one call, multiplexed over HTTP/2 where the host
     // offers it. `urls` is a newline-separated list; the bodies are written
     // back-to-back into `out`, and `lens` receives one little-endian i32 per
     // URL — the byte count written, or -1 for a resource that failed or did
@@ -1181,7 +1139,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // ── Fetching without standing still ────────────────────────────────
     //
     // The two requests above, split into "start it" and "collect it". A
-    // module that calls npk_http_send is INSIDE the host call until the
+    // module that calls npk_http_send is inside the host call until the
     // exchange ends — it cannot paint, cannot read a key, and its peer
     // fibers do not run. These five let it keep its loop: begin -> handle,
     // poll between frames, take when the answer is there. The wait itself
@@ -1191,13 +1149,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
     // npk_net_context(url_ptr, url_len) -> 0, or -1
     //
-    // Der Browser sagt, WELCHES Dokument er gerade anzeigt. Der Kernel loest
-    // die Adresse SELBST auf und merkt sich nur die Klasse (oeffentlich /
-    // privat / lokal) — nie den Namen, denn ein Name kann beim zweiten
-    // Aufloesen woandershin zeigen.
+    // The browser declares which document it is showing. The kernel resolves
+    // the address itself and keeps only the class (public / private / local),
+    // never the name, since a name may resolve elsewhere the second time.
     //
-    // Ohne diesen Aufruf gilt das Modul als oeffentliche Seite. Das ist die
-    // strenge Vorgabe und deshalb sicher zu vergessen.
+    // Without this call the module counts as a public page; that default is
+    // the strict one, so forgetting the call is safe.
     linker.func_wrap("env", "npk_net_context",
         |mut caller: Caller<'_, HostState>, url_ptr: i32, url_len: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1230,9 +1187,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_http_begin_many_hdr(urls_ptr, urls_len, hdrs_ptr, hdrs_len, out_max)
-    // Wie oben, aber mit einer Keks-Zeile JE ADRESSE. Eigene Funktion und
-    // keine geaenderte Signatur: eine geaenderte waere fuer jedes bereits
-    // ausgelieferte Modul ein Bindefehler.
+    // As above, but with a cookie line per URL. A separate function rather
+    // than a changed signature, which would break linking of existing modules.
     linker.func_wrap("env", "npk_http_begin_many_hdr",
         |mut caller: Caller<'_, HostState>, urls_ptr: i32, urls_len: i32,
          hdrs_ptr: i32, hdrs_len: i32, out_max: i32| -> i32 {
@@ -1282,17 +1238,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_random_bytes(buf_ptr, len) -> geschriebene Bytes, oder -1
+    // npk_random_bytes(buf_ptr, len) -> bytes written, or -1
     //
-    // Zufall aus dem CSPRNG des Kernels (ChaCha20, aus RDRAND geseedet).
-    // OHNE Kapabilitaet, wie `npk_unix_time`: er gibt Bytes heraus und liest
-    // nichts, und eine Berechtigung, die niemand je verweigert, ist keine.
-    //
-    // **Der Grund, warum es das gibt:** beak braucht
-    // `crypto.getRandomValues` fuer Seiten, und `Math.random` dafuer
-    // auszugeben waere schlimmer als die Luecke — Seitencode baut daraus
-    // Sitzungsmarken. Gedeckelt auf 64 KiB je Aufruf (WebCrypto 10.1.1),
-    // damit ein Modul den RNG-Mutex nicht beliebig lange haelt.
+    // Randomness from the kernel CSPRNG (ChaCha20 seeded from RDRAND), backing
+    // `crypto.getRandomValues`. No capability, like `npk_unix_time`: it reads
+    // nothing. Capped at 64 KiB per call (WebCrypto 10.1.1) so a module cannot
+    // hold the RNG mutex arbitrarily long.
     linker.func_wrap("env", "npk_random_bytes",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, len: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1305,7 +1256,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_http_final_url(buf_ptr, buf_max) -> len, or -1
     // The URL the last npk_http_request's body actually came from, after
     // redirects. A browser resolves relative sub-resources against this
-    // (the document base URL) — resolving against the *requested* URL
+    // (the document base URL) — resolving against the requested URL
     // instead makes every sub-resource repeat the redirect. NET-gated.
     linker.func_wrap("env", "npk_http_final_url",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
@@ -1323,8 +1274,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     //
     // A document's bytes do not say what encoding they are in. Without this
     // a browser can only assume UTF-8, and one byte that is not valid UTF-8
-    // costs it the entire page — which is exactly what made google.ch render
-    // blank. NET-gated, like the request it describes.
+    // costs it the entire page. NET-gated, like the request it describes.
     linker.func_wrap("env", "npk_http_content_type",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1340,9 +1290,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // a stable token (`cert.untrusted`, `cert.expired`, `net.connect`, …)
     // and message is the human wording. Cleared on success.
     //
-    // Exists because the request itself can only answer "no": every failure
-    // arrives as -1, so a browser could not tell a rejected certificate from
-    // an empty document and drew nothing either way. NET-gated, like the
+    // The request itself only returns -1, so without this a browser cannot
+    // tell a rejected certificate from an empty document. NET-gated, like the
     // request whose outcome it describes.
     linker.func_wrap("env", "npk_http_last_error",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
@@ -1397,10 +1346,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     //
     // Deliberately ungated: which language to draw labels in is a display
     // preference, not access to data. Gating it on READ would force a
-    // render-only app (beak declares RENDER|CANVAS|NET, no filesystem
-    // read) to take a filesystem capability just to spell its own menu —
-    // and a failed call falls back to English, so the symptom is one app
-    // silently out of language with the rest of the desktop.
+    // render-only app to take a filesystem capability just to spell its
+    // own menu.
     linker.func_wrap("env", "npk_locale",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1426,12 +1373,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // ── Clipboard (cross-app copy/paste) ──────────────────────────────
     //
     // A single kernel-owned selection buffer (crate::shade::clipboard).
-    // Gated on RENDER + focus: only the *currently focused* widget app may
+    // Gated on RENDER + focus: only the currently focused widget app may
     // read or write it — a background app cannot snoop the clipboard, the
-    // same focus-ambient contract as receiving keystrokes. (When a future
-    // third-party app store lands, promote clipboard-read to a declared
-    // CLIPBOARD cap — needs a 2nd `.npk.caps` byte; the 1-byte section is
-    // full today.)
+    // same focus-ambient contract as receiving keystrokes. A dedicated
+    // CLIPBOARD cap would need a second `.npk.caps` byte; the 1-byte
+    // section is full.
 
     // npk_clipboard_set(ptr, len) -> i32
     // Copy `len` UTF-8 bytes from guest memory into the clipboard as Text.
@@ -1456,7 +1402,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
     // npk_clipboard_get(ptr, max) -> i32
     // Write up to `max` clipboard bytes into the guest buffer. Returns the
-    // FULL text length (so the app can detect truncation and re-query with
+    // full text length (so the app can detect truncation and re-query with
     // a bigger buffer), 0 if empty, or -1 (denied / not focused / bad ptr).
     linker.func_wrap("env", "npk_clipboard_get",
         |mut caller: Caller<'_, HostState>, ptr: i32, max: i32| -> i32 {
@@ -1486,8 +1432,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
     // npk_launch(app_ptr, app_len, arg_ptr, arg_len) -> 0 / -1
     // Fire-and-forget launch of sys/wasm/<app> with `arg` as its launch
-    // argument + per-app caps — like npk_open but WITHOUT a pre-created
-    // window and WITHOUT singleton routing. The window (if any) is created
+    // argument + per-app caps — like npk_open but without a pre-created
+    // window and without singleton routing. The window (if any) is created
     // lazily on the app's first scene_commit, so a one-shot tool that
     // never commits (e.g. a full-screen screenshot) never shows a window
     // — and so never appears in its own capture. EXECUTE-gated.
@@ -1510,10 +1456,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     //             so an app with several dialogs tells them apart by it)
     //
     // The picker module is named by `sys/config/picker` (default `pick`),
-    // NEVER by the caller: the whole point is that the dialog is a piece
+    // never by the caller: the whole point is that the dialog is a piece
     // of trusted UI the requester cannot substitute. So this is RENDER-
     // gated, not EXECUTE-gated — asking for a dialog must not require the
-    // right to launch arbitrary modules, or an app would need MORE
+    // right to launch arbitrary modules, or an app would need more
     // authority to pick a file than to write one.
     //
     // The requester needs no READ to browse: the picker does the listing
@@ -1564,7 +1510,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_pick_mkdir(path_ptr, path_len) -> 0 / -1
     // Create a directory on behalf of an open file dialog.
     //
-    // This exists so the picker can offer "New folder" WITHOUT holding
+    // This exists so the picker can offer "New folder" without holding
     // WRITE. Giving it WRITE would hand the module that browses every
     // file the right to overwrite them too — the one thing the portal is
     // built to avoid. So the capability is this single verb instead:
@@ -1584,7 +1530,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_scene_commit(ptr, len) -> i32
-    // Phase 10 widget pipeline: WASM app hands the kernel a version-
+    // Widget pipeline: the WASM app hands the kernel a version-
     // prefixed postcard-serialized Widget tree. Compositor does the
     // rest (version check, deserialize, layout, raster, per-window
     // scene store, shade render). Requires RENDER right.
@@ -1606,7 +1552,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_canvas_commit(canvas_id, ptr, len, width, height) -> 0 / -1
-    // P10.10 escape hatch: upload a raw BGRA32 bitmap into the app's
+    // Escape hatch: upload a raw BGRA32 bitmap into the app's
     // `Widget::Canvas` with the matching id. CANVAS-gated. The app must
     // already own a widget window (commit a scene first) — the bitmap is
     // keyed by (window_id, canvas_id); the render walker blits it
@@ -1651,9 +1597,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // identifies the machine — so it needs no capability, like the theme
     // query. Resolution is the 100 Hz timer, i.e. 10 ms steps; enough to
     // attribute phases of a page load, not enough to time a single glyph.
-    //
-    // Stage 1 needs this anyway for `setTimeout`/`requestAnimationFrame`
-    // (docs/spec/BROWSER.md §10 lists `now_ms` in the Platform surface).
+    // Backs `setTimeout`/`requestAnimationFrame` (docs/spec/BROWSER.md §10).
     linker.func_wrap("env", "npk_ticks",
         |mut caller: Caller<'_, HostState>| -> i64 {
             host_core::npk_ticks(caller.data_mut())
@@ -1662,11 +1606,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
     // npk_now_us() -> microseconds since boot, from the TSC, or 0.
     //
-    // Same "clock, not calendar" argument as npk_ticks, so equally ungated — but
-    // fine enough to time ONE pass of a driver loop, which 10 ms steps cannot.
-    // That resolution is the whole difference between "the driver is busy" and
-    // "the driver is waiting": the WiFi driver's own busy counter only ever said
-    // whether a pass found work, and got read as CPU load (by me).
+    // Same "clock, not calendar" argument as npk_ticks, so equally ungated, but
+    // fine enough to time one pass of a driver loop, which 10 ms steps cannot.
     linker.func_wrap("env", "npk_now_us",
         |mut caller: Caller<'_, HostState>| -> i64 {
             host_core::npk_now_us(caller.data_mut())
@@ -1684,7 +1625,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_theme_token(token_id) -> RGBA u32 (0xAARRGGBB) for the ACTIVE theme
+    // npk_theme_token(token_id) -> RGBA u32 (0xAARRGGBB) for the active theme
     // (light/dark aware), or 0 for an unknown token. RENDER-gated. Lets an app
     // that paints its own surface (e.g. the browser's Canvas) match the theme's
     // colours instead of hardcoding them.
@@ -1712,7 +1653,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_cursor_pos() -> (x << 16) | y, or -1
     //
     // Screen coordinates, the same space `Event::MouseMove` and
-    // `Event::MouseButton` report. RENDER-gated AND focus-gated: an app
+    // `Event::MouseButton` report. RENDER-gated and focus-gated: an app
     // may learn where the pointer is only while it holds focus, so a
     // background module cannot watch the mouse.
     //
@@ -1728,7 +1669,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // CAPTURE-gated: same right as reading the screen, because this is
     // the acknowledgement for exactly that act. Paints a white wash over
     // the finished frame for ~150 ms. The caller is expected to capture
-    // FIRST and flash after, so the wash can never be in the shot; the
+    // first and flash after, so the wash can never be in the shot; the
     // compositor also draws it last, after every window.
     linker.func_wrap("env", "npk_screen_flash",
         |mut caller: Caller<'_, HostState>| -> i32 {
@@ -1768,11 +1709,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_list_modules(buf_ptr, buf_max) -> i32
     // Writes a NUL-separated list of module names from `sys/wasm/*` into
     // the caller's buffer. Returns bytes written, or -1 on cap denied /
-    // buffer too small. The trailing entry is NOT terminated — caller
+    // buffer too small. The trailing entry is not terminated — caller
     // splits on 0x00.
     //
-    // RENDER-gated because only GUI apps (drun) need this today. Adjust
-    // if terminal utilities ever want the same API.
+    // RENDER-gated because only GUI apps (drun) need it.
     linker.func_wrap("env", "npk_list_modules",
         |mut caller: Caller<'_, HostState>, buf_ptr: i32, buf_max: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -1783,12 +1723,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
-    // Returns ONLY the `.npk.app_meta` custom-section payload of the module
+    // Returns only the `.npk.app_meta` custom-section payload of the module
     // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun/dock) read an
-    // app's icon/name/description with this WITHOUT fetching the whole module
-    // — beak carries >2 MB of embedded fonts, and the old client-side reader
-    // fetched the full wasm into a fixed 2 MB buffer, truncating beak so its
-    // trailing app_meta section was lost → the app vanished from the catalog.
+    // app's icon/name/description with this without fetching the whole
+    // module, which can be several MB (the section sits at the end).
     // `name` is confined to a bare child of `sys/wasm/` (no path traversal).
     // RENDER-gated like npk_list_modules.
     linker.func_wrap("env", "npk_app_meta",
@@ -1823,11 +1761,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_run_intent(verb_ptr, verb_len) -> i32
     // Trigger a built-in system intent that isn't a WASM module — the
     // launcher path for microvm-backed apps. Currently `browser` is
-    // the only verb; future apps (office, ide, …) just add a match
-    // arm. Returns 0 on accepted, -1 on cap denied / unknown verb /
-    // unsupported on the cooperative path.
+    // the only verb. Returns 0 on accepted, -1 on cap denied / unknown
+    // verb / unsupported on the cooperative path.
     //
-    // Safety from a worker core: vm_open under A2 (dedicated VM core)
+    // Safe from a worker core: vm_open with a dedicated VM core
     // is pure atomic + mutex (stash PENDING_VM → return; the
     // dedicated core picks it up via vm_core_serve and runs the
     // entire VM lifecycle on itself). Cooperative path (≤2 cores)
@@ -1912,7 +1849,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // overlay (no tiling strut), never modal, never focused on reveal,
     // global across workspaces. Starts hidden; the compositor slides it
     // in when the cursor holds the bottom edge. Like set_overlay but
-    // bottom-anchored instead of centred, and it does NOT grab focus.
+    // bottom-anchored instead of centred, and it does not grab focus.
     //
     // Returns 0 on success, -1 on cap denied / bad args / no compositor.
     linker.func_wrap("env", "npk_window_set_dock",
@@ -1924,9 +1861,9 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_window_set_panel(edge, behavior, w, h) -> i32
     // Generalised edge panel (see docs/spec/PANEL.md): edge 0=Bottom 1=Top,
     // behavior 0=AutoHide overlay (dock) 1=Strut (bar). Creates/promotes
-    // the caller's widget window WITHOUT grabbing focus (like the dock),
+    // the caller's widget window without grabbing focus (like the dock),
     // then hands it to the compositor's panel config. `set_dock` above is
-    // now the (Bottom, AutoHide) wrapper of this.
+    // the (Bottom, AutoHide) wrapper of this.
     //
     // Returns 0 on success, -1 on cap denied / bad args / no compositor.
     linker.func_wrap("env", "npk_window_set_panel",
@@ -1975,7 +1912,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // ── AML battery driver (aml.wasm) host-fns — all HARDWARE-gated ──────
+    // ── AML battery driver (aml.wasm) host functions, HARDWARE-gated ─────
     // npk_acpi_dsdt(buf_ptr, buf_max) -> i32: copy the DSDT (firmware AML)
     // into the caller's buffer; returns the DSDT length. If it exceeds
     // buf_max nothing is copied (caller sizes its buffer up). -1 on error.
@@ -1995,8 +1932,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_acpi_table(sig, index, buf_ptr, buf_max) -> len. Die n-te Tabelle
-    // mit dieser Signatur; `sig` sind die vier Zeichen little-endian.
+    // npk_acpi_table(sig, index, buf_ptr, buf_max) -> len. The n-th table
+    // with this signature; `sig` is the four characters, little-endian.
     linker.func_wrap("env", "npk_acpi_table",
         |mut caller: Caller<'_, HostState>, sig: i32, index: i32, buf_ptr: i32, buf_max: i32| -> i32 {
             let Some(m) = caller.get_export("memory").and_then(|e| e.into_memory())
@@ -2006,16 +1943,16 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_mmio_map_phys(hi, lo, pages) -> handle, or -1. Fuer Hardware, die
-    // nicht auf PCI liegt (FCH-I2C: Touchpad). Rechte + RAM-/APIC-Verbot
-    // stehen in host_core.
+    // npk_mmio_map_phys(hi, lo, pages) -> handle, or -1. For hardware not on
+    // PCI (e.g. the FCH I2C controller). Rights and the RAM/APIC exclusion
+    // are enforced in host_core.
     linker.func_wrap("env", "npk_mmio_map_phys",
         |mut caller: Caller<'_, HostState>, hi: i32, lo: i32, pages: i32| -> i32 {
             host_core::npk_mmio_map_phys(caller.data_mut(), hi, lo, pages)
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // npk_pointer_inject(dx, dy, buttons, scroll, hscroll) -> 0, oder -1 ohne Recht.
+    // npk_pointer_inject(dx, dy, buttons, scroll, hscroll) -> 0, or -1 without the right.
     linker.func_wrap("env", "npk_pointer_inject",
         |mut caller: Caller<'_, HostState>, dx: i32, dy: i32, buttons: i32, scroll: i32,
          hscroll: i32| -> i32 {
@@ -2270,12 +2207,11 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_sleep(ms) -> 0 — sleep for N milliseconds.
-    // Stage 2b: PARK this app's fiber + yield the worker core back to the
-    // per-core scheduler, which runs the core's other ready fibers while we
-    // sleep. So dock+bar+loft+spell multiplex over a couple of workers
-    // instead of each pinning a core (or nesting via the old next_task
-    // helper, which froze the dock — see docs/plan/SCHEDULER_FIBERS.md). The fiber is
-    // resumed once the deadline passes.
+    // Parks this app's fiber and yields the worker core to the per-core
+    // scheduler, which runs the core's other ready fibers meanwhile, so many
+    // apps multiplex over a few workers instead of each pinning a core
+    // (docs/plan/SCHEDULER_FIBERS.md). The fiber resumes once the deadline
+    // passes.
     linker.func_wrap("env", "npk_sleep",
         |mut caller: Caller<'_, HostState>, ms: i32| -> i32 {
             host_core::npk_sleep(caller.data_mut(), ms)
@@ -2377,22 +2313,12 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
-    // ── TCP Socket Host Functions (debug shell + future apps) ────
+    // ── TCP/TLS socket host functions ────────────────────────────
 
-    // npk_tcp_connect(ip_packed, port) -> handle (>=0) or -1 on error.
-    // ip_packed = (a << 24) | (b << 16) | (c << 8) | d.
-    //
-    // NON-BLOCKING: returns as soon as the handshake is started. Ask
-    // `npk_tcp_status` until it answers; `npk_tcp_send` refuses until then.
-    // It used to block up to 10 s, and a module IS a fiber — so a failing
-    // `debug` froze every other fiber on its worker core for those 10 s,
-    // the WiFi driver among them. Its card went unpolled (64 RX buffers =
-    // milliseconds), and the link died with the command.
     // ── npk_tls_* ────────────────────────────────────────────────────────
     //
-    // **In BEIDEN Wegen**, sonst laeuft es unter forge und stirbt unter dem
-    // Interpreter (oder umgekehrt) — der Fehler, den `feedback_the_second_
-    // engine_only_runs_where_the_first_one_called` beschreibt.
+    // Must be registered in both ABI paths (here and forge_glue), otherwise a
+    // module works under one engine and fails under the other.
     linker.func_wrap("env", "npk_tls_connect",
         |mut caller: Caller<'_, HostState>, host_ptr: i32, host_len: i32,
          port: i32| -> i32 {
@@ -2424,6 +2350,13 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
         },
     ).map_err(|_| WasmError::HostFunctionError)?;
 
+    // npk_tcp_connect(ip_packed, port) -> handle (>=0) or -1 on error.
+    // ip_packed = (a << 24) | (b << 16) | (c << 8) | d.
+    //
+    // Non-blocking: returns as soon as the handshake is started. Ask
+    // `npk_tcp_status` until it answers; `npk_tcp_send` refuses until then.
+    // A module is a fiber, so blocking here would stall every other fiber
+    // on its worker core, drivers included.
     linker.func_wrap("env", "npk_tcp_connect",
         |mut caller: Caller<'_, HostState>, ip_packed: i32, port: i32| -> i32 {
             host_core::npk_tcp_connect(caller.data_mut(), ip_packed, port)
@@ -2460,8 +2393,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_tcp_close(handle) -> 0. Sends the FIN and returns; the graceful
-    // wait is the kernel's job, not a module's — it spun up to 2 s here,
-    // and 2 s of a frozen worker core is the WiFi driver not draining.
+    // wait is the kernel's job, not a module's, since spinning here would
+    // freeze the worker core.
     linker.func_wrap("env", "npk_tcp_close",
         |mut caller: Caller<'_, HostState>, handle: i32| -> i32 {
             host_core::npk_tcp_close(caller.data_mut(), handle)
@@ -2545,7 +2478,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_irq_arm(vector) -> fired-count snapshot, or -1 on a bad vector. Call
-    // BEFORE submitting/enabling the device work that triggers the IRQ; pass
+    // before submitting/enabling the device work that triggers the IRQ; pass
     // the result to npk_irq_wait. Also routes the IRQ to the calling core.
     linker.func_wrap("env", "npk_irq_arm",
         |mut caller: Caller<'_, HostState>, vector: i32| -> i64 {
@@ -2606,10 +2539,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
     // npk_mmio_read8(handle, offset) -> u8 as i32
     // npk_mmio_write8(handle, offset, value) -> 0 or -1
-    // Echtes 8-Bit-MMIO. rtw88 (RTL8822CE) fuehrt seine Power-Sequenz als
-    // read8/write8-Interpreter und meint Register wie REG_SYS_FUNC_EN+1 als
-    // EINZELNES Byte. Ein 32-Bit-RMW beruehrt drei Nachbarbytes und ist damit
-    // ein anderer Vorgang — Linux waehlt die Breite absichtlich.
+    // True 8-bit MMIO. rtw88 (RTL8822CE) runs its power sequence as a
+    // read8/write8 interpreter and addresses registers like REG_SYS_FUNC_EN+1
+    // as a single byte. A 32-bit RMW touches three neighbouring bytes and is
+    // a different operation; Linux picks the width on purpose.
     linker.func_wrap("env", "npk_mmio_read8",
         |mut caller: Caller<'_, HostState>, handle: i32, offset: i32| -> i32 {
             host_core::npk_mmio_read8(caller.data_mut(), handle, offset)
@@ -2637,10 +2570,10 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_dma_alloc_below(page_count, limit_mb) -> handle or -1
-    // Der Treiber nennt die Obergrenze selbst. `allocate_contiguous_below`
-    // sucht von oben, also liegt eine 4-GB-Grenze immer direkt unter dem
-    // PCI-MMIO-Loch — auf AMD-Blech genau dort, wo TSEG/DPR jedes Geraet
-    // abweist, waehrend die CPU dort ungestoert liest und schreibt.
+    // The driver names the upper limit itself. `allocate_contiguous_below`
+    // searches from the top, so a 4 GB limit always lands right below the
+    // PCI MMIO hole — on AMD platforms exactly where TSEG/DPR rejects device
+    // DMA while the CPU can still read and write it.
     linker.func_wrap("env", "npk_dma_alloc_below",
         |mut caller: Caller<'_, HostState>, pages: i32, limit_mb: i32| -> i32 {
             host_core::npk_dma_alloc_below(caller.data_mut(), pages, limit_mb)
@@ -2787,7 +2720,7 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     ).map_err(|_| WasmError::HostFunctionError)?;
 
     // npk_netdev_rx_deliver(buf_ptr, len) -> 0 / -1 — driver delivers a received
-    // frame STRAIGHT into the IP stack from its own fiber (the NAPI topology:
+    // frame straight into the IP stack from its own fiber (the NAPI topology:
     // drain → stack in one context, no relay-ring + Core-0 hop). Falls back to
     // the ring internally if Core 0 holds the drain guard. Preferred over
     // npk_netdev_submit_rx for the hot path.
@@ -2823,8 +2756,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
     // npk_netdev_set_link_state(carrier, dormant) -> 0 — the RFC 2863 pair
     // Linux keeps (`rfc2863_policy`): `carrier` = the association exists,
     // `dormant` = it exists but is not usable yet (WPA not done). operstate
-    // is UP only when carrier && !dormant. One flag for all three meanings
-    // made every authorization phase look like the link had gone away.
+    // is UP only when carrier && !dormant, so an authorization phase does
+    // not look like a lost link.
     linker.func_wrap("env", "npk_netdev_set_link_state",
         |mut caller: Caller<'_, HostState>, carrier: i32, dormant: i32| -> i32 {
             host_core::npk_netdev_set_link_state(caller.data_mut(), carrier, dormant)
@@ -2839,8 +2772,8 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 fn cleanup_instance_state(state: &mut HostState) {
     // A dead driver's snapshot must not read as live numbers.
     crate::drivers::report::clear(&state.module_name);
-    // A browser closed mid-load would otherwise hold its slots — and its
-    // megabytes of reserved answer — until the next boot.
+    // Otherwise an app closed mid-load holds its fetch slots and reserved
+    // buffers until the next boot.
     crate::intent::fetch::release_owner(state.pid);
     if let Some(hw) = state.hw.take() {
         let mut total_pages = 0usize;
@@ -2861,77 +2794,41 @@ fn cleanup_instance_state(state: &mut HostState) {
     }
 }
 
-/// True if `name` targets the module store (`sys/wasm/…`) or the trust
-/// store (`sys/certs/…`) — the two directories where a write is a
-/// privilege escalation rather than a file operation.
+/// Root of the per-module private areas.
 ///
-/// WASM apps must NOT write or delete in the module store: it holds the
-/// executable modules plus
-/// their `.npk.caps` declarations, and modules are NOT re-verified at
-/// launch — so an app with WRITE that could overwrite a module (or plant
-/// a new one with caps=ALL) would escalate to arbitrary rights. The
-/// install/update intents reach npkFS directly (root), not through these
-/// host fns, so they are unaffected. The paths layer rejects `.`/`..`
-/// segments, so after trimming slashes a literal `sys/wasm/` prefix is
-/// the only way to actually land in the module store.
+/// `priv/<module>/…` is the one place in storage that no capability opens:
+/// elsewhere READ reads and WRITE writes, here the name decides, and the
+/// kernel assigns the name. Not even a module with all rights can enter
+/// another module's private area. This is where state that is itself a
+/// credential (e.g. browser cookies) can persist without being readable by
+/// every app holding READ.
 ///
-/// The trust store is the same class of hole with a different blast
-/// radius: a file written under `sys/certs/` becomes a root CA the whole
-/// system honours, so an app that could write there could mint itself an
-/// anchor and silently authenticate any server it likes. Both directories
-/// are read-only to apps for the same reason — writing them is a
-/// privilege escalation, not a file operation.
-/// Das Modul, dem dieser Pfad GEHOERT — oder `None`, wenn er niemandem
-/// gehoert (also allen).
-///
-/// **`priv/<modul>/…` ist der einzige Ort im Speicher, den eine
-/// Kapabilitaet nicht aufmacht.** Ueberall sonst gilt: wer READ hat, liest;
-/// wer WRITE hat, schreibt. Hier nicht — hier entscheidet der NAME, und den
-/// vergibt der Kernel, nicht das Modul. Auch ein Programm mit allen Rechten
-/// kommt in einen fremden privaten Bereich nicht hinein.
-///
-/// **Warum es das braucht.** beak muss seine Kekse ueber einen Neustart
-/// retten, sonst ist jede Anmeldung eine Sitzung lang. Ein Keks ist aber
-/// keine Datei wie andere: er IST die Anmeldung. In `sys/config/beak`
-/// abgelegt haette ihn jede App mit READ lesen koennen — `npk_fetch` prueft
-/// die Kapabilitaet und danach jeden Pfad —, und damit waere aus „Kekse
-/// bleiben erhalten" ein Weg geworden, alle Sitzungen der Maschine
-/// abzugreifen. Das ist keine Datei-Frage, das ist eine Rechte-Frage.
-///
-/// Die Regel ist bewusst symmetrisch (Lesen, Schreiben, Auflisten, Loeschen,
-/// Umbenennen, Kopieren): eine Grenze, die nur eine Richtung kennt, ist
-/// keine. Und sie gilt fuer JEDE App, nicht nur fuer beak — spell, tune und
-/// loft haben denselben Bedarf.
-///
-/// Preis, und er ist beabsichtigt: der Dateimanager sieht diese Ordner
-/// nicht. Ein privater Bereich, den ein anderes Programm anzeigen kann, ist
-/// keiner.
+/// The rule is symmetric (read, write, list, delete, rename, copy); a
+/// boundary in one direction only is none. The file manager does not see
+/// these folders, by design.
 pub(crate) const PRIVATE_ROOT: &str = "priv";
 
+/// The module that owns this path, or `None` if nobody owns it (then
+/// capabilities decide as usual).
 pub(crate) fn private_area_owner(name: &str) -> Option<&str> {
-    // **Ueber SEGMENTE, nicht ueber Praefixe.** `privat/x` ist nicht
-    // `priv/x`, `priv//beak/x` ist es sehr wohl, und das Vergessen des
-    // Trenners ist die Art, wie diese Sorte Wache ueblicherweise leckt
-    // (siehe `is_trust_critical_path` daneben). npkFS normalisiert nicht —
-    // `clean_path` schneidet nur die Raender —, also normalisiert die Wache.
+    // Match on segments, not prefixes: `privat/x` is not `priv/x`, but
+    // `priv//beak/x` is. npkFS does not normalise (`clean_path` only trims
+    // the ends), so the guard does.
     let mut segs = name.split('/').filter(|s| !s.is_empty() && *s != ".");
     if segs.next() != Some(PRIVATE_ROOT) { return None }
-    // Ein `..` unter `priv/` ist kein Versehen. Der Besitzer wird dann zur
-    // leeren Zeichenkette, und die ist kein Modulname — es kommt also
-    // NIEMAND hinein, auch der rechtmaessige Besitzer nicht. Die Absage in
-    // die sichere Richtung.
+    // A `..` under `priv/` makes the owner the empty string, which is no
+    // module name, so nobody gets in, not even the rightful owner. Fails safe.
     if name.split('/').any(|s| s == "..") { return Some("") }
     match segs.next() {
         Some(owner) => Some(owner),
-        // `priv` allein ist der Ordner ueber allen privaten Bereichen: er
-        // gehoert niemandem, und Auflisten darf man ihn. Was DARIN steht,
-        // filtert `npk_fs_list` Eintrag fuer Eintrag.
+        // `priv` itself belongs to nobody and may be listed; `npk_fs_list`
+        // filters its entries one by one.
         None => None,
     }
 }
 
-/// Darf `module` diesen Pfad anfassen? Fuer alles ausserhalb von `priv/`
-/// immer ja — dort entscheiden weiter die Kapabilitaeten.
+/// May `module` touch this path? Always true outside `priv/`, where
+/// capabilities decide.
 pub(crate) fn private_area_allows(name: &str, module: &str) -> bool {
     match private_area_owner(name) {
         Some(owner) => owner == module,
@@ -2939,29 +2836,32 @@ pub(crate) fn private_area_allows(name: &str, module: &str) -> bool {
     }
 }
 
-/// Ist das der EIGENE private Bereich dieses Moduls?
+/// Is this the module's own private area? Then no capability is needed:
+/// persisting one's own state is a different ability from reading the
+/// machine's storage, so a module without READ/WRITE can still keep it.
 ///
-/// **Dann braucht es keine Kapabilitaet.** Das ist der Punkt, an dem
-/// „Kapabilitaeten, keine Berechtigungen" etwas Konkretes heisst: die
-/// Faehigkeit, den eigenen Zustand ueber einen Neustart zu retten, ist NICHT
-/// dieselbe wie die Faehigkeit, den Speicher der Maschine zu lesen. beak
-/// traegt `RENDER | CANVAS | NET` und soll genau das behalten — ein Browser
-/// mit Lese- und Schreibrecht auf alles ist die Sorte Programm, gegen die
-/// dieses System gebaut ist. Trotzdem muss er seine Kekse behalten duerfen.
-///
-/// Der Name ist die Berechtigung, und den Namen vergibt der Kernel: ein
-/// Modul kann `priv/<sich selbst>` nicht verlassen und den eines anderen
-/// nicht betreten, ganz gleich, was in seinem `.npk.caps` steht.
+/// The name is the authorisation, and the kernel assigns it: a module cannot
+/// leave `priv/<itself>` or enter another's, whatever its `.npk.caps` says.
 pub(crate) fn is_own_private(name: &str, module: &str) -> bool {
     !module.is_empty() && private_area_owner(name) == Some(module)
 }
 
+/// True if `name` targets the module store (`sys/wasm/…`) or the trust
+/// store (`sys/certs/…`) — the two directories where a write is a
+/// privilege escalation rather than a file operation.
+///
+/// Modules are not re-verified at launch, so an app that could overwrite a
+/// module (or plant one with caps=ALL) would escalate to arbitrary rights.
+/// A file under `sys/certs/` becomes a root CA the whole system honours.
+/// The install/update intents reach npkFS directly, not through these host
+/// functions. The paths layer rejects `.`/`..` segments, so after trimming
+/// slashes a literal prefix is the only way to land in either store.
 fn is_trust_critical_path(name: &str) -> bool {
     let c = name.trim_matches('/');
     if c == "sys/wasm" || c.starts_with("sys/wasm/") {
         return true;
     }
-    // Prefix match on a path SEGMENT — a plain `starts_with` would also
+    // Prefix match on a path segment — a plain `starts_with` would also
     // catch a sibling like `sys/certsomething`, and missing the trailing
     // separator is how this class of guard usually leaks.
     let certs = crate::tls::certstore::STORE_DIR;
@@ -2969,10 +2869,8 @@ fn is_trust_critical_path(name: &str) -> bool {
 }
 
 /// Extract a WASM custom section's payload by name, walking the module header.
-/// Kernel-side counterpart to the reader that used to live in the SDK's
-/// app_catalog — here the whole (possibly multi-MB) module is available, so a
-/// section at the tail (like `.npk.app_meta`) is always found regardless of
-/// module size.
+/// The whole (possibly multi-MB) module is available here, so a section at
+/// the tail (like `.npk.app_meta`) is found regardless of module size.
 fn extract_wasm_custom_section<'a>(wasm: &'a [u8], target: &str) -> Option<&'a [u8]> {
     if wasm.len() < 8 || &wasm[0..4] != b"\0asm" || wasm[4..8] != [1, 0, 0, 0] {
         return None;
