@@ -1,8 +1,8 @@
 //! Wallpaper WASM module for nopeekOS.
 //!
 //! Two modes, both via `_start`:
-//!   1. **Decode**: target file is a filename → fetch PNG → decode → set.
-//!   2. **Generate**: target starts with `@demos:<W>x<H>:<wp_dir>` →
+//!   1. Decode: target file is a filename → fetch PNG → decode → set.
+//!   2. Generate: target starts with `@demos:<W>x<H>:<wp_dir>` →
 //!      write 4 gradient wallpapers into `<wp_dir>/<theme>`.
 //!
 //! The kernel picks the mode by writing `.npk-wallpaper-target`
@@ -75,7 +75,7 @@ fn store(name: &str, data: &[u8]) -> bool {
 //   - per-row unfilter buffer:           ~37 MB
 //   - final BGRA buffer:                 ~37 MB
 //   - miniz_oxide internal state:        ~5 MB
-// Total: ~158 MB worst-case at 4K. 128 MB blew up at v0.4.1.
+// Total: ~158 MB worst-case at 4K, so 128 MB is not enough.
 // 256 MB linear memory is fine — wasmi grows on demand and the
 // module's lifetime is one intent invocation.
 const HEAP_SIZE: usize = 256 * 1024 * 1024; // 256 MB
@@ -388,12 +388,10 @@ fn fill_noise(pixels: &mut [u8], w: u32, h: u32, fg: (u8,u8,u8), bg: (u8,u8,u8))
 // --- Decode mode (PNG → BGRA → set framebuffer) ---
 
 fn run_decode(filename: &str) {
-    // 32 MB cap — covers a high-quality 4K JPEG-equivalent PNG (the
-    // shipped npk01.png is 9 MB at native 1080p; high-detail 4K
-    // wallpapers can hit 20-25 MB). Anything larger would need
-    // streaming decode, which `npk_fetch` doesn't support today.
-    // Was 6 MB before v0.4.1: truncated 9 MB inputs → decode panic
-    // on missing IEND chunk.
+    // 32 MB cap — covers a high-detail 4K PNG (these can reach 20-25 MB).
+    // Anything larger would need streaming decode, which `npk_fetch`
+    // doesn't support. A truncated input fails the decode on the missing
+    // IEND chunk.
     let max_size = 32 * 1024 * 1024;
     let mut img_buf = vec![0u8; max_size];
     let img_len = match fetch(filename, &mut img_buf) {
@@ -499,7 +497,6 @@ fn run_demos(spec: &str) {
 
 /// Fill a BGRA pixel slice with the bilinear-interpolated gradient of
 /// `theme`, plus a sine streak overlay and a bottom-right radial glow.
-/// The pixel math mirrors the original kernel implementation.
 fn fill_gradient(pixels: &mut [u8], w: u32, h: u32, t: &Theme) {
     for y in 0..h {
         let fy = y * 1000 / h;
