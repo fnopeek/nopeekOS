@@ -7,8 +7,8 @@ use nopeek_widgets::IconId;
 fn main() {
     let meta = AppMeta {
         display_name: "tune".into(),
-        description:  "Audio player".into(),
-        icon:         IconRef::Builtin(IconId::MusicNotes),
+        description:  "Media player".into(),
+        icon:         IconRef::Builtin(IconId::PlayCircle),
     };
     let bytes = encode(&meta).expect("encode AppMeta");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");

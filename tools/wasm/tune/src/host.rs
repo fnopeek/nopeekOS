@@ -20,6 +20,8 @@ unsafe extern "C" {
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_audio_get_volume() -> i32;
     fn npk_audio_buffered(slot: i32) -> i32;
+    fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
+                suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
     fn npk_canvas_commit_yuv(canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32,
                              ys: i32, cs: i32, w: i32, h: i32, flags: i32) -> i32;
 }
@@ -43,6 +45,10 @@ pub fn launch_arg(buf: *mut u8, max: usize) -> i32 {
     unsafe { npk_launch_arg(buf as i32, max as i32) }
 }
 pub fn close_widget() { unsafe { let _ = npk_close_widget(); } }
+/// Open the system file dialog. The answer arrives as `Event::Picked`.
+pub fn pick_open(start: &str) -> i32 {
+    unsafe { npk_pick(0, start.as_ptr() as i32, start.len() as i32, 0, 0, 0) }
+}
 pub fn ticks() -> i64 { unsafe { npk_ticks() } }
 pub fn sleep(ms: i32) { unsafe { let _ = npk_sleep(ms); } }
 pub fn log(msg: &str) { unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32) } }

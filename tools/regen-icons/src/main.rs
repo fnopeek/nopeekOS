@@ -94,6 +94,7 @@ const ICONS: &[IconEntry] = &[
     IconEntry { id: 48, svg: "skip-forward.svg",        name: "SkipForward" },
     IconEntry { id: 49, svg: "file-audio.svg",          name: "FileAudio" },
     IconEntry { id: 50, svg: "arrow-counter-clockwise.svg", name: "ArrowCounterClockwise" },
+    IconEntry { id: 51, svg: "play-circle.svg",         name: "PlayCircle" },
 ];
 
 /// Rasterized sizes, in actual pixels (not HiDPI-scaled).

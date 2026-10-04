@@ -233,6 +233,7 @@ const A_VOL_CLOSE:  u32 = 6;
 const A_VOL:        u32 = 7;
 const A_MOTION:     u32 = 8;
 const A_MOTION_BAR: u32 = 9;
+const A_OPEN:       u32 = 10;
 /// How long the bar stays over a playing video after the pointer stops.
 const CONTROLS_HIDE_MS: i64 = 2500;
 /// At most this often a new scene while a slider is being dragged.
@@ -712,10 +713,16 @@ fn render(t: &Tune) -> Widget {
             (title, i.artist.clone().unwrap_or_default())
         }
         None => (
-            t.files.get(t.idx).map(|f| strip_ext(&f.name)).unwrap_or_else(|| "no audio here".to_string()),
+            t.files.get(t.idx).map(|f| strip_ext(&f.name)).unwrap_or_default(),
             t.error.clone().unwrap_or_default(),
         ),
     };
+
+    // Nothing in the folder and nothing opened: no player to show, only
+    // the way to a file.
+    if t.files.is_empty() && t.src.is_none() && t.video.is_none() {
+        return empty_state(t);
+    }
 
     let body = match t.video.as_ref() {
         // Das BILD bekommt die ganze Flaeche.
@@ -857,6 +864,30 @@ fn render(t: &Tune) -> Widget {
     }
 }
 
+fn empty_state(t: &Tune) -> Widget {
+    let mut children = alloc::vec![
+        Widget::Spacer { flex: 1 },
+        Widget::Icon { id: IconId::PlayCircle, size: 48, modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+        Widget::Text { content: "Nothing to play".to_string(), style: TextStyle::Heading, modifiers: Vec::new() },
+    ];
+    if let Some(e) = t.error.as_ref() {
+        children.push(Widget::Text { content: e.clone(), style: TextStyle::Muted, modifiers: Vec::new() });
+    }
+    children.push(Widget::Button {
+        label: "Open file…".to_string(),
+        icon: IconId::FolderOpen,
+        on_click: ActionId(A_OPEN),
+        modifiers: alloc::vec![Modifier::Margin(Padding::Sm.as_u16())],
+    });
+    children.push(Widget::Spacer { flex: 1 });
+    Widget::Column {
+        children,
+        spacing: Spacing::Sm.as_u16(),
+        align: Align::Center,
+        modifiers: alloc::vec![Modifier::Flex(1)],
+    }
+}
+
 /// Without a picture the area belongs to the folder: what is playing on
 /// top, every track below it.
 fn audio_body(t: &Tune, title: &str, artist: &str) -> Widget {
@@ -914,6 +945,12 @@ fn commit_scene(t: &mut Tune) {
     }
 }
 
+/// The system file dialog, starting in the folder tune is looking at.
+fn open_dialog(t: &Tune) {
+    let start = if t.dir.is_empty() { read_home_dir() } else { t.dir.clone() };
+    if host::pick_open(&start) < 0 { log("[tune] file dialog unavailable"); }
+}
+
 /// A mid-drag redraw, throttled: every scene is a full layout and raster
 /// in the compositor, and a drag sends a step with every mouse packet.
 fn slide_redraw(t: &mut Tune) -> Outcome {
@@ -941,6 +978,20 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
         }
         Event::Key(KeyCode::Up) => { let v = t.vol.saturating_add(5); t.set_volume(v); Outcome::Render }
         Event::Key(KeyCode::Down) => { let v = t.vol.saturating_sub(5); t.set_volume(v); Outcome::Render }
+        Event::Chord { letter: b'o', shift: false, alt: false } => { open_dialog(t); Outcome::Idle }
+        Event::Picked { path, .. } => {
+            // Leer = abgebrochen.
+            if path.is_empty() { return Outcome::Idle; }
+            let (_, name) = split_path(&path);
+            if !is_media(name) {
+                t.error = Some(alloc::format!("{} is not a media file", name));
+                return Outcome::Render;
+            }
+            t.error = None;
+            t.point_at(&path);
+            t.load(true);
+            Outcome::Render
+        }
         Event::Open(_) => {
             // Already running and asked to open another file (loft
             // double-click): switch tracks rather than spawning a twin.
@@ -991,6 +1042,7 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
                     Outcome::Idle
                 };
             }
+            if id == A_OPEN { open_dialog(t); return Outcome::Idle; }
             if id == A_VOL_TOGGLE { t.vol_open = !t.vol_open; return Outcome::Render; }
             if id == A_VOL_CLOSE { t.vol_open = false; return Outcome::Render; }
             if id >= TRACK_BASE {

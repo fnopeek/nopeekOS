@@ -99,6 +99,7 @@ const _: () = {
     assert!(IconId::SkipForward       as u16 == 48);
     assert!(IconId::FileAudio         as u16 == 49);
     assert!(IconId::ArrowCounterClockwise as u16 == 50);
+    assert!(IconId::PlayCircle        as u16 == 51);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

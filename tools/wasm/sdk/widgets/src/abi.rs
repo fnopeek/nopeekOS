@@ -178,6 +178,7 @@ pub enum IconId {
     SkipForward       = 48,
     FileAudio         = 49,
     ArrowCounterClockwise = 50,
+    PlayCircle          = 51,
     // Appended only.
 }
 
