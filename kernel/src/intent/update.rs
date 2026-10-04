@@ -150,10 +150,6 @@ struct Plan {
     modules_current: usize,
     assets: Vec<AssetJob>,
     assets_current: usize,
-    /// Wallpapers whose system copy is current but whose user copy is gone.
-    /// Restoring it is a local repair, but it still writes — so it is part of
-    /// the plan instead of a side effect of looking.
-    wallpaper_copies: Vec<String>,
 }
 
 impl Plan {
@@ -161,12 +157,10 @@ impl Plan {
         self.kernel.is_none()
             && self.modules.is_empty()
             && self.assets.is_empty()
-            && self.wallpaper_copies.is_empty()
     }
 
     fn count(&self) -> usize {
-        self.kernel.iter().count() + self.modules.len()
-            + self.assets.len() + self.wallpaper_copies.len()
+        self.kernel.iter().count() + self.modules.len() + self.assets.len()
     }
 
     /// "kernel v0.240.0, 18 modules, 14 assets" — everything that needs nothing.
@@ -252,9 +246,9 @@ fn build_plan() -> Option<Plan> {
     };
 
     let (modules, modules_current) = super::install::plan_modules();
-    let (assets, assets_current, wallpaper_copies) = plan_assets();
+    let (assets, assets_current) = plan_assets();
 
-    Some(Plan { kernel, modules, modules_current, assets, assets_current, wallpaper_copies })
+    Some(Plan { kernel, modules, modules_current, assets, assets_current })
 }
 
 fn print_plan(plan: &Plan) {
@@ -271,9 +265,6 @@ fn print_plan(plan: &Plan) {
     for a in &plan.assets {
         let what = if a.present { "" } else { "  (new)" };
         kprintln!("[npk]   + asset    {:<28} {}{}", a.npkfs_path, fmt_size(a.entry.size), what);
-    }
-    for w in &plan.wallpaper_copies {
-        kprintln!("[npk]   + copy     {:<28} (user copy missing)", w);
     }
 
     // One line for everything that needs nothing — this used to be one line
@@ -312,9 +303,6 @@ fn apply_plan(plan: Plan) {
         kprintln!("[npk]   * trust store reloaded — {} stored anchor(s)", n);
     }
 
-    for name in &plan.wallpaper_copies {
-        sync_wallpaper_to_user(name, false);
-    }
 
     let plural = |n: usize, one: &str, many: &str| if n == 1 { String::from(one) } else { alloc::format!("{} {}", n, many) };
     kprintln!("[npk]");
@@ -431,55 +419,40 @@ struct AssetJob {
 }
 
 /// Diff release/assets/manifest against npkFS-resident assets. Reads only:
-/// returns the jobs to run, how many were already current, and the
-/// wallpapers whose user copy needs restoring.
-fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
+/// returns the jobs to run and how many were already current.
+fn plan_assets() -> (Vec<AssetJob>, usize) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
     let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE) {
         Ok(d) => d,
-        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
     };
 
     let entries = match parse_asset_manifest(&manifest_data) {
         Ok(e) => e,
-        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
     };
 
     let mut jobs = Vec::new();
     let mut current = 0usize;
-    let mut wallpaper_copies = Vec::new();
 
     for entry in entries {
-        // A `[wallpaper:<name>]` section needs NO compile-time entry: the
-        // section name IS the filename, so shipping a new wallpaper is
-        // dropping a file into `release/assets/wallpapers/` — no kernel
-        // change and no reinstall. The trust chain is unchanged: size and
-        // sha384 come from the manifest and every asset is still checked
-        // against its own detached signature on apply.
         let (npkfs_path, remote_filename) = match ASSETS.iter().find(|s| s.section == entry.section) {
             Some(s) => (String::from(s.npkfs_path), String::from(s.remote_filename)),
-            None => match entry.section.strip_prefix("wallpaper:").filter(|n| safe_asset_name(n)) {
+            // Root CA anchors are data, not code: the section name IS the
+            // filename, so shipping or replacing an anchor is dropping a file
+            // into `release/assets/certs/` — no kernel change, no reinstall.
+            // The trust chain is unchanged: size and sha384 come from the
+            // manifest and every asset is checked against its own detached
+            // signature on apply, exactly like the kernel.
+            None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
                 Some(name) => (
-                    alloc::format!("sys/wallpapers/{}", name),
-                    alloc::format!("wallpapers/{}", name),
+                    alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
+                    alloc::format!("certs/{}", name),
                 ),
-                // Root CA anchors, same data-not-code deal as wallpapers:
-                // the section name IS the filename, so shipping or
-                // replacing an anchor is dropping a file into
-                // `release/assets/certs/` — no kernel change, no reinstall.
-                // The trust chain is unchanged: size and sha384 come from
-                // the manifest and every asset is checked against its own
-                // detached signature on apply, exactly like the kernel.
-                None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
-                    Some(name) => (
-                        alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
-                        alloc::format!("certs/{}", name),
-                    ),
-                    None => {
-                        kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
-                        continue;
-                    }
-                },
+                None => {
+                    kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
+                    continue;
+                }
             },
         };
 
@@ -488,15 +461,6 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
 
         if local_hash.as_ref() == Some(&entry.sha384) {
             current += 1;
-            // The SYSTEM copy is current — the copy the user actually sees
-            // may not be. `wallpaper list`/`set` read only the home folder,
-            // and this hash check never looks there, so a deleted or missing
-            // user copy stays missing however often `update` runs.
-            if let Some(name) = npkfs_path.strip_prefix("sys/wallpapers/") {
-                if user_wallpaper_missing(name) {
-                    wallpaper_copies.push(String::from(name));
-                }
-            }
             continue;
         }
 
@@ -504,7 +468,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
         jobs.push(AssetJob { entry, npkfs_path, remote_filename, present });
     }
 
-    (jobs, current, wallpaper_copies)
+    (jobs, current)
 }
 
 /// Download, verify and store one planned asset. Prints its own result line;
@@ -682,21 +646,13 @@ fn apply_asset(job: &AssetJob) -> bool {
             Err(e) => { kprintln!("[npk]   ! asset     publish failed: {:?}", e); return false; }
         }
 
-        // A system wallpaper is only reachable through the user's own
-        // wallpapers/ folder — that is the single directory `wallpaper
-        // list` and `wallpaper set` read. Refresh the user copy so an OTA
-        // wallpaper actually appears, and so REPLACING npk01 replaces what
-        // the user sees rather than leaving the install-time copy behind.
-        if let Some(name) = spec.npkfs_path.strip_prefix("sys/wallpapers/") {
-            sync_wallpaper_to_user(name, true);
-        }
         true
     }
 }
 
 /// A manifest-supplied asset name we are willing to turn into a path.
 /// Deliberately strict — the name becomes part of an npkFS path, so anything
-/// that could climb out of `sys/wallpapers/` is refused. The manifest is
+/// that could climb out of its directory is refused. The manifest is
 /// signature-checked per asset, but a name is not a place to be trusting.
 fn safe_asset_name(name: &str) -> bool {
     !name.is_empty()
@@ -705,36 +661,8 @@ fn safe_asset_name(name: &str) -> bool {
         && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b'_')
 }
 
-/// Does the user's own copy of a system wallpaper need restoring? Read-only,
-/// so the plan phase can ask without changing anything.
-fn user_wallpaper_missing(name: &str) -> bool {
-    let Some(user) = crate::config::get("name").filter(|n| !n.is_empty()) else { return false };
-    !crate::npkfs::exists(&alloc::format!("home/{}/pictures/wallpapers/{}", user, name))
-}
-
-/// Mirror `sys/wallpapers/<name>` into the user's wallpapers folder — the only
-/// directory `wallpaper list` and `wallpaper set` read.
-///
-/// `force` says whether an EXISTING user copy may be replaced. A wallpaper that
-/// just changed over OTA overwrites (the point of shipping one is that the
-/// picture changes); an unchanged one only fills a gap, so a copy the user
-/// edited or renamed survives every later `update`.
-fn sync_wallpaper_to_user(name: &str, force: bool) {
-    use crate::security::capability::CAP_NULL;
-    let Some(user) = crate::config::get("name").filter(|n| !n.is_empty()) else { return };
-    let target = alloc::format!("home/{}/pictures/wallpapers/{}", user, name);
-    if !force && crate::npkfs::exists(&target) {
-        return;
-    }
-    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wallpapers/{}", name)) else { return };
-    match crate::npkfs::store(&target, &bytes, CAP_NULL) {
-        Ok(_) => kprintln!("[npk]   {} ({})", target, if force { "user copy refreshed" } else { "user copy restored" }),
-        Err(e) => kprintln!("[npk]   user copy failed: {} — {:?}", target, e),
-    }
-}
-
 /// One asset's two paths, borrowed — the static table and the dynamic
-/// wallpaper case produce the same shape.
+/// cert case produce the same shape.
 struct AssetRef<'a> {
     npkfs_path: &'a str,
     remote_filename: &'a str,

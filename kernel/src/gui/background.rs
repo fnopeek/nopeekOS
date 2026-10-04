@@ -103,22 +103,7 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         }
     };
 
-    // Nearest-neighbour scale to framebuffer size.
-    for ty in 0..target_h {
-        if ty % 256 == 0 { crate::xhci::poll_events(); }
-        let sy = (ty as u64 * h as u64 / target_h as u64) as u32;
-        for tx in 0..target_w {
-            let sx = (tx as u64 * w as u64 / target_w as u64) as u32;
-            let src_off = (sy * w + sx) as usize * 4;
-            if src_off + 3 >= pixels.len() { continue; }
-            let b = pixels[src_off] as u32;
-            let g = pixels[src_off + 1] as u32;
-            let r = pixels[src_off + 2] as u32;
-            let pixel = (r << 16) | (g << 8) | b;
-            let dst_off = (ty * info.pitch + tx * 4) as usize;
-            unsafe { *(buf.add(dst_off) as *mut u32) = pixel; }
-        }
-    }
+    scale_cover(pixels, w, h, buf, info);
 
     unsafe {
         WALLPAPER = buf;
@@ -406,4 +391,71 @@ fn isqrt(v: u32) -> u32 {
     let mut y = (x + 1) / 2;
     while y < x { x = y; y = (x + v / x) / 2; }
     x
+}
+
+// ── Scaling ───────────────────────────────────────────────────────────
+
+/// Fit the image to the screen the way a photo frame does: fill it, keep
+/// the aspect ratio, crop the overhang evenly (centre). Shrinking averages
+/// every source pixel a screen pixel covers — a 4K image on an HD screen
+/// otherwise keeps every second pixel and drops the rest, and fine lines
+/// turn into stairs. Enlarging interpolates bilinearly. Done once, when the
+/// wallpaper is set.
+fn scale_cover(src: &[u8], w: u32, h: u32, dst: *mut u8, info: &FbInfo) {
+    let (tw, th, pitch) = (info.width as u64, info.height as u64, info.pitch as usize);
+    let (w64, h64) = (w as u64, h as u64);
+    if w == 0 || h == 0 || src.len() < (w64 * h64 * 4) as usize { return; }
+    // Source window that maps onto the screen, in 16.16 fixed point:
+    // the larger of the two scale factors wins, the other axis is cropped.
+    let (cw, ch) = if w64 * th > h64 * tw {
+        (h64 * tw * 65536 / th, h64 * 65536)        // wider than the screen
+    } else {
+        (w64 * 65536, w64 * th * 65536 / tw)        // taller (or equal)
+    };
+    let ox = (w64 * 65536 - cw) / 2;
+    let oy = (h64 * 65536 - ch) / 2;
+    let px_at = |x: u64, y: u64| -> (u32, u32, u32) {
+        let o = ((y.min(h64 - 1) * w64 + x.min(w64 - 1)) * 4) as usize;
+        (src[o + 2] as u32, src[o + 1] as u32, src[o] as u32)
+    };
+    let shrinking = cw >= tw * 65536;
+
+    for ty in 0..th {
+        if ty % 128 == 0 { crate::xhci::poll_events(); }
+        let fy0 = oy + ty * ch / th;
+        let fy1 = oy + (ty + 1) * ch / th;
+        let row = unsafe { dst.add(ty as usize * pitch) as *mut u32 };
+        for tx in 0..tw {
+            let fx0 = ox + tx * cw / tw;
+            let fx1 = ox + (tx + 1) * cw / tw;
+            let (r, g, b) = if shrinking {
+                // Box average over the covered source pixels.
+                let (sx0, sx1) = (fx0 >> 16, ((fx1 + 65535) >> 16).max((fx0 >> 16) + 1));
+                let (sy0, sy1) = (fy0 >> 16, ((fy1 + 65535) >> 16).max((fy0 >> 16) + 1));
+                let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+                for sy in sy0..sy1.min(h64) {
+                    for sx in sx0..sx1.min(w64) {
+                        let (pr, pg, pb) = px_at(sx, sy);
+                        r += pr; g += pg; b += pb; n += 1;
+                    }
+                }
+                let n = n.max(1);
+                (r / n, g / n, b / n)
+            } else {
+                // Bilinear at the pixel centre.
+                let cx = ((fx0 + fx1) / 2).saturating_sub(32768);
+                let cy = ((fy0 + fy1) / 2).saturating_sub(32768);
+                let (x0, y0) = (cx >> 16, cy >> 16);
+                let (wx, wy) = (((cx >> 8) & 0xFF) as u32, ((cy >> 8) & 0xFF) as u32);
+                let (a, bq, c, d) = (px_at(x0, y0), px_at(x0 + 1, y0), px_at(x0, y0 + 1), px_at(x0 + 1, y0 + 1));
+                let mix = |p: u32, q: u32, s: u32, t: u32| {
+                    ((p * (256 - wx) + q * wx) * (256 - wy) + (s * (256 - wx) + t * wx) * wy) >> 16
+                };
+                (mix(a.0, bq.0, c.0, d.0), mix(a.1, bq.1, c.1, d.1), mix(a.2, bq.2, c.2, d.2))
+            };
+            // SAFETY: tx < width, ty < height; `dst` is screen-sized with
+            // the framebuffer pitch (allocated in set_wallpaper).
+            unsafe { *row.add(tx as usize) = (r << 16) | (g << 8) | b; }
+        }
+    }
 }
