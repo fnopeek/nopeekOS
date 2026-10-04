@@ -6,9 +6,9 @@
 //!
 //! `FEATURES` below is the contract between validator and code generator:
 //! the validator rejects anything the generator cannot emit, so a module
-//! that reaches codegen is by construction inside the 164 opcodes counted
-//! over every module in `release/modules/`. Widening it is a decision, not
-//! an accident — see docs/plan/WASM_SPEED_2026_08.md.
+//! that reaches codegen is by construction inside the opcode set our
+//! modules use. Widening it is a decision, not an accident — see
+//! docs/plan/WASM_SPEED_2026_08.md.
 
 #![no_std]
 
@@ -27,8 +27,7 @@ pub mod x64;
 /// builds the context cannot drift apart — a wrong offset here is a wild
 /// pointer, not a compile error.
 pub mod vmctx {
-    /// Base of linear memory. Pinned in its own register later; for now the
-    /// generator loads it per access.
+    /// Base of linear memory. Generated code keeps it in a pinned register.
     pub const MEM_BASE: i32 = 0;
     /// Current size of linear memory in bytes.
     pub const MEM_SIZE: i32 = 8;
@@ -37,7 +36,7 @@ pub mod vmctx {
     /// Base of the function table: one code pointer per slot.
     pub const TABLE: i32 = 24;
     pub const TABLE_LEN: i32 = 32;
-    /// Fuel remaining. Moves into a pinned register once metering lands.
+    /// Fuel remaining. Generated code keeps it in a pinned register.
     pub const FUEL: i32 = 40;
     /// Array of host function pointers, one per import.
     pub const HOST_FNS: i32 = 48;
@@ -46,7 +45,7 @@ pub mod vmctx {
     /// eight for the pointers, four for the ids.
     pub const TABLE_SIGS: i32 = 56;
     /// Largest the memory may become, in pages. `memory.grow` refuses beyond
-    /// it and answers -1, which is a RESULT in wasm and not a trap.
+    /// it and answers -1, which is a result in wasm and not a trap.
     pub const MEM_MAX_PAGES: i32 = 64;
     /// The one runtime routine generated code has to call: growing memory
     /// needs a mapping changed, which no instruction can do.
@@ -78,7 +77,7 @@ pub mod vmctx {
     pub const GLOBAL_STRIDE: i32 = 8;
 }
 
-/// Why a module stopped. A trap is a RESULT in wasm — the module is finished,
+/// Why a module stopped. A trap is a result in wasm — the module is finished,
 /// but nothing else is wrong — so it has to be reportable rather than fatal.
 pub mod trap {
     pub const NONE: u32 = 0;
@@ -94,7 +93,7 @@ pub mod trap {
     pub const UNCOMPILED: u32 = 7;
     /// A host function ended the run instead of returning. wasi programs leave
     /// this way — through `proc_exit`, a clean finish included. The status
-    /// itself does NOT travel here; it belongs to the embedder's state, which
+    /// itself does not travel here; it belongs to the embedder's state, which
     /// the host function already holds.
     pub const EXIT: u32 = 8;
 
@@ -122,11 +121,11 @@ use wasmparser::{
 /// Exactly what our modules use, and nothing more. No SIMD, no threads, no
 /// reference types, no exceptions, no multi-value.
 ///
-/// `CALL_INDIRECT_OVERLONG` is an ENCODING allowance, not a proposal: LLVM
+/// `CALL_INDIRECT_OVERLONG` is an encoding allowance, not a proposal: LLVM
 /// writes `call_indirect`'s table immediate as an overlong LEB, which was
-/// illegal before reference types. Without it 13 of our 21 modules — every
-/// one that has a `call_indirect` — are rejected at the first one. It admits
-/// no new opcode and no new semantics.
+/// illegal before reference types. Without it every module that has a
+/// `call_indirect` is rejected at the first one. It admits no new opcode
+/// and no new semantics.
 pub const fn features() -> WasmFeatures {
     WasmFeatures::WASM1
         .union(WasmFeatures::BULK_MEMORY)
@@ -257,7 +256,7 @@ pub struct ModulePlan {
     pub imported_funcs: Vec<(String, String)>,
     /// Type index per *defined* function, in index order.
     pub funcs: Vec<u32>,
-    /// Type index per function index across the WHOLE space — imports first,
+    /// Type index per function index across the whole space — imports first,
     /// then defined. What a `call` needs to know the callee's shape.
     pub func_type_of: Vec<u32>,
     pub memory: Option<(u64, Option<u64>)>,
@@ -279,7 +278,7 @@ pub struct ModulePlan {
     /// table.
     pub elem_init: Vec<(u32, Vec<u32>)>,
     /// Canonical signature id per type index. wasm compares function types
-    /// STRUCTURALLY, so two different type indices with the same shape must
+    /// structurally, so two different type indices with the same shape must
     /// pass the same `call_indirect` check — comparing raw type indices would
     /// reject calls the spec allows.
     pub sig_id: Vec<u32>,
@@ -356,7 +355,7 @@ pub struct CompiledModule {
     /// one object — that is what makes a call a single instruction instead of
     /// a load and an indirect jump.
     pub code: Vec<u8>,
-    /// Offset into `code` per DEFINED function; `None` where generation
+    /// Offset into `code` per defined function; `None` where generation
     /// refused. A call to one of those is aimed at the trap stub, so a
     /// half-translated module cannot quietly run into the wrong place.
     pub offsets: Vec<Option<usize>>,
@@ -427,12 +426,11 @@ struct Linked {
 /// Places functions as they come out of the generator, instead of collecting
 /// them all and concatenating at the end.
 ///
-/// The difference is not tidiness. Holding every function's buffer until the
-/// end means thousands of live blocks in a heap whose free list is walked on
-/// every allocation — and on the device that turned a translation that scales
-/// linearly with output size into one that scales eight times worse. Taking
-/// each function's bytes immediately, and letting its buffer go, keeps the
-/// number of live blocks roughly flat no matter how large the module is.
+/// Holding every function's buffer until the end means thousands of live
+/// blocks in a heap whose free list is walked on every allocation, which
+/// makes translation scale worse than linearly. Taking each function's
+/// bytes immediately, and letting its buffer go, keeps the number of live
+/// blocks roughly flat no matter how large the module is.
 struct Linker {
     code: Vec<u8>,
     offsets: Vec<Option<usize>>,
@@ -557,11 +555,9 @@ impl Linker {
     }
 }
 
-/// The loop the code generator will live in: read an operator, hand it to the
-/// validator, then emit. Here it only measures — but the shape is final.
 /// Validate a module against `features()` and collect what the code generator
-/// needs. One pass: the validator's type stack is the same one the register
-/// allocator will ride on, so nothing is walked twice.
+/// needs. One pass — read an operator, hand it to the validator, then emit —
+/// so nothing is walked twice.
 pub fn plan(wasm: &[u8]) -> Result<ModulePlan, Error> {
     Ok(walk(wasm, None)?.0)
 }

@@ -1,9 +1,8 @@
 //! wasm to x86-64, one function at a time, one pass.
 //!
-//! The operand stack lives in frame slots, not registers — the simplest thing
-//! that can be correct, and the baseline the register cache will later have to
-//! beat by a measured amount. Building the cache first would leave no number
-//! to compare against.
+//! Every operand-stack value has a frame slot; a small register cache keeps
+//! values out of memory between operators and is flushed to the slots
+//! wherever control joins or a call happens.
 //!
 //! A function that meets an opcode the generator does not emit fails with the
 //! opcode's name instead of producing wrong code. That failure is also the
@@ -23,7 +22,7 @@ use wasmparser::{BlockType, Operator, ValType};
 /// `[rbp + 16 + 8*j]` once the return address and its own `rbp` are pushed.
 const ARG_REGS: [Reg; 5] = [Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
 
-/// Frame offset of the `j`-th stack argument as the CALLEE sees it.
+/// Frame offset of the `j`-th stack argument as the callee sees it.
 fn incoming_arg(j: usize) -> i32 {
     16 + 8 * j as i32
 }
@@ -38,7 +37,7 @@ fn outgoing_bytes(n: usize) -> i32 {
 const A: Reg = Reg::Rax;
 const B: Reg = Reg::Rcx;
 const C: Reg = Reg::Rdx;
-/// A fourth scratch that is NOT an argument register, so a call target can be
+/// A fourth scratch that is not an argument register, so a call target can be
 /// held while the arguments are loaded on top of `rcx` and `rdx`.
 const T: Reg = Reg::R11;
 
@@ -47,31 +46,27 @@ const T: Reg = Reg::R11;
 /// constant.
 const VMCTX: Reg = Reg::R14;
 
-/// Base of linear memory, pinned for the whole function. Worth a register:
-/// loads and stores are 10.7 % of beak's instructions, and pinning removes one
-/// load from every single one.
-///
-/// Fuel remaining, as a signed count. Pinned for the same reason as the other
-/// two: a resource limit that costs a memory round trip per basic block is
-/// what makes Winch pay +87 % for metering where Cranelift pays +24 %, and the
-/// difference between those two is the difference between 5x and 10x.
+/// Fuel remaining, as a signed count, pinned for the whole function: a
+/// resource limit that costs a memory round trip per basic block makes
+/// metering several times more expensive.
 ///
 /// Signed on purpose — the counter is allowed to go past zero inside a block
 /// and is caught at the next check, which is why no check is needed per block.
 const FUEL: Reg = Reg::R15;
 
+/// Base of linear memory, pinned for the whole function; loads and stores
+/// are frequent enough that this removes a load from a large share of all
+/// instructions.
+///
 /// It never has to be reloaded: the instance reserves its address space once
 /// and `memory.grow` only makes more of that same range readable, so the base
-/// is fixed for the instance's life. An implementation that moved memory on
-/// growth would have to reload this after every call — ours does not, and the
-/// guard-page reservation is exactly why.
+/// is fixed for the instance's life.
 const MEMBASE: Reg = Reg::R13;
 
-/// No frame slots are reserved any more. `r13` and `r14` used to be saved and
-/// restored in every function; they are now set ONCE by the entry trampoline
-/// and are the same for every function of an instance, so saving them per call
-/// was six instructions of pure ceremony. Only the boundary to native code
-/// needs them preserved, and that is exactly what the trampoline is.
+/// No frame slots are reserved. `r13` and `r14` are set once by the entry
+/// trampoline and are the same for every function of an instance, so only
+/// the boundary to native code needs them preserved — and that is what the
+/// trampoline does.
 const RESERVED_SLOTS: u32 = 0;
 
 /// A `call rel32` whose target had no address yet. `at` is the offset of the
@@ -94,13 +89,6 @@ pub struct ModuleCtx<'a> {
     pub globals: &'a [(ValType, bool)],
 }
 
-/// The bridge between native code and a module's functions. Native callers
-/// have their own idea of `r13`/`r14`, so somebody has to save them, set up
-/// the instance's, make the call and put them back — and doing that once at
-/// the boundary is cheaper than doing it in every function.
-///
-/// It is called as
-/// `entry(vmctx, target, a, b, c)` and passes the three arguments on.
 /// Where a trap lands: name the reason, put the stack back the way the entry
 /// trampoline left it, and resume there. Four instructions unwind any depth of
 /// wasm frames — and because it needs only `r14`, which generated code never
@@ -113,6 +101,13 @@ pub fn emit_trap_routine(asm: &mut Asm) {
     asm.jmp_mem(VMCTX, vmctx::TRAP_RESUME);
 }
 
+/// The bridge between native code and a module's functions. Native callers
+/// have their own idea of `r13`/`r14`, so somebody has to save them, set up
+/// the instance's, make the call and put them back — and doing that once at
+/// the boundary is cheaper than doing it in every function.
+///
+/// It is called as `entry(vmctx, target, a, b, c)` and passes the three
+/// arguments on.
 pub fn emit_entry(asm: &mut Asm) {
     asm.push(Reg::Rbp);
     asm.mov_rr64(Reg::Rbp, Reg::Rsp);
@@ -158,15 +153,12 @@ pub fn emit_entry(asm: &mut Asm) {
 }
 
 pub struct CompiledFunc {
-    /// The generated bytes — and EMPTIED as soon as the module linker has
-    /// taken them.
+    /// The generated bytes — emptied as soon as the module linker has taken
+    /// them.
     ///
     /// A module of ten thousand functions must not hold ten thousand live
     /// buffers: the kernel's heap keeps its free blocks on a singly linked
-    /// list, so every allocation walks past everything still alive. Measured
-    /// on the device, that was the whole story — translating scaled linearly
-    /// with output size on the development machine and 8x worse than linear
-    /// there, and the only difference between the two runs is that allocator.
+    /// list, so every allocation walks past everything still alive.
     pub code: Vec<u8>,
     pub relocs: Vec<Reloc>,
     /// Offsets of `jmp rel32`s aimed at the module's trap routine.
@@ -213,13 +205,13 @@ struct Ctrl {
     dead: bool,
 }
 
-/// Does this value need REX.W — that is, is it a 64-bit INTEGER? Floats never
+/// Does this value need REX.W — that is, is it a 64-bit integer? Floats never
 /// answer yes here; their width is carried by `Fw`.
 fn w64(t: ValType) -> bool {
     matches!(t, ValType::I64)
 }
 
-/// Does the value occupy all eight bytes of its slot? True for i64 AND f64,
+/// Does the value occupy all eight bytes of its slot? True for i64 and f64,
 /// which is a different question from `w64` and used in different places —
 /// conflating the two is how an f64 ends up half-stored.
 fn wide(t: ValType) -> bool {
@@ -241,7 +233,7 @@ const FA: Xmm = Xmm::X0;
 const FB: Xmm = Xmm::X1;
 const FC: Xmm = Xmm::X2;
 
-/// Float arguments have their OWN sequence of registers in SysV, counted
+/// Float arguments have their own sequence of registers in SysV, counted
 /// separately from the integer ones. A signature of (i32, f64, i32) puts the
 /// integers in the first two integer slots and the double in `xmm0` — not in
 /// "the second argument register".
@@ -295,11 +287,10 @@ enum Loc {
     Imm(i64),
     /// Still sitting in its local's frame slot. `local.get` copies a value in
     /// wasm, so nothing needs to move until somebody actually wants it — and
-    /// `LocalGet` alone is 23,4 % of all instructions, `I32Const` another 17 %.
-    /// Between them that is two fifths of every push, and the cheapest way to
-    /// serve a push is not to emit anything at all.
+    /// `local.get` and `i32.const` together are a large share of all pushes;
+    /// the cheapest way to serve a push is not to emit anything at all.
     ///
-    /// The catch is that a local can be WRITTEN between the get and the use,
+    /// The catch is that a local can be written between the get and the use,
     /// and wasm copied the value at the get. `local.set`/`local.tee` therefore
     /// have to settle any pending reference to the local they are about to
     /// overwrite.
@@ -312,15 +303,14 @@ struct Val {
     loc: Loc,
 }
 
-/// The registers the operand stack may live in — deliberately DISJOINT from
+/// The registers the operand stack may live in — deliberately disjoint from
 /// the operators' scratch (`rax`, `rcx`, `rdx`, `r11` and `xmm0..2`).
 ///
-/// That separation is what makes the cache cheap to introduce: no operator
-/// has to learn about allocation, because nothing it writes can ever hold a
-/// stack value. The price is a register move in and out instead of leaving a
-/// value where it was produced — and on this hardware a register-to-register
-/// move is usually eliminated in the rename stage, while a store followed by
-/// a load is not.
+/// That separation is what makes the cache cheap: no operator has to learn
+/// about allocation, because nothing it writes can ever hold a stack value.
+/// The price is a register move in and out instead of leaving a value where
+/// it was produced — and a register-to-register move is usually eliminated
+/// in the rename stage, while a store followed by a load is not.
 ///
 /// All of them are caller-saved in SysV, so spilling before a call is enough;
 /// `rbx` and `r12` stay out rather than being saved in every prologue.
@@ -349,7 +339,7 @@ struct Ctx<'a> {
     /// them at the trap routine.
     trap_relocs: Vec<usize>,
     n_locals: u32,
-    /// The operand stack. Its LENGTH is the depth — one source of truth, so a
+    /// The operand stack. Its length is the depth — one source of truth, so a
     /// push that forgets its type cannot happen.
     stack: Vec<Val>,
     max_stack: u32,
@@ -357,8 +347,7 @@ struct Ctx<'a> {
     ctrl: Vec<Ctrl>,
     /// Instructions counted since the last time the fuel register was
     /// updated. Charged in one go at the next control-flow edge, so metering
-    /// costs one `sub` per basic block — measured at 5,8 wasm instructions —
-    /// instead of one per instruction.
+    /// costs one `sub` per basic block instead of one per instruction.
     fuel_pending: i64,
     /// False after a branch, until an `else` or an `end` brings control back.
     /// Unreachable code is not emitted: the validator types it
@@ -367,16 +356,12 @@ struct Ctx<'a> {
 }
 
 
-// ── Auszaehlung: wohin gehen die erzeugten Bytes? ─────────────────────
+// ── Census: where do the generated bytes go? ──────────────────────
 //
-// Haengt am schon vorhandenen Merkmal `census` (Host-Werkzeug), damit im
-// Kernel weder Zaehler noch Atomics landen. Ohne das Merkmal sind die drei
-// Funktionen leer und verschwinden.
-//
-// Die Frage war, ob der Abstand zu Cranelift (1,43x auf python) an der
-// Registerhaltung ueber Blockgrenzen haengt: forge muss vor jedem
-// Loop/If/Else/End/Br/BrIf/BrTable/Return und jedem Aufruf den ganzen
-// Wertestapel in Schlitze schreiben.
+// Behind the host-tool feature `census`, so neither counters nor atomics
+// end up in the kernel. Without the feature the functions are empty and
+// vanish. Counts spills, reloads, local and argument moves — the cost of
+// flushing the operand stack at block boundaries and calls.
 pub mod census {
     #[cfg(feature = "census")]
     use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -415,9 +400,9 @@ pub mod census {
     #[cfg(feature = "census")]
     pub static ARG_COUNT: AtomicU64 = AtomicU64::new(0);
 
-    /// Argumente eines Aufrufs, aus ihren Schlitzen geladen. Der zweite Leser
-    /// neben `pop_to` — ohne ihn sieht die Spill-Bilanz aus, als wuerde
-    /// niemand zurueckholen, was `spill_all` wegschreibt.
+    /// Arguments of a call, loaded from their slots. The second reader next to
+    /// `pop_to` — without it the spill balance would look as if nobody reloads
+    /// what `spill_all` writes out.
     #[inline(always)]
     pub fn arg(_bytes: usize) {
         #[cfg(feature = "census")]
@@ -616,14 +601,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Alles UNTER den obersten `keep` Werten in die Schlitze. Vor einem Aufruf
-    /// ist das die Pflicht — der Aufgerufene besitzt jedes Cache-Register.
+    /// Everything below the top `keep` values into the slots. Before a call
+    /// this is mandatory — the callee owns every cache register.
     ///
-    /// Die Argumente selbst gehoeren NICHT dazu: sie muessen in den
-    /// Argumentregistern stehen, und der Weg dorthin ueber einen Schlitz ist
-    /// ein Umweg. Gezaehlt an python: 172 514 Spills und 149 355 Argumentladen
-    /// waren zusammen 18,2 % der erzeugten Bytes, und der groesste Teil davon
-    /// war ein Wert, der nur von einem Register in ein anderes wollte.
+    /// The arguments themselves are excluded: they belong in the argument
+    /// registers, and going there through a slot is a detour, usually for a
+    /// value that only wanted to move from one register to another.
     fn spill_below(&mut self, keep: usize) {
         let n = self.stack.len().saturating_sub(keep);
         for i in 0..n {
@@ -631,20 +614,16 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Die Faelle, die ein direkter Zug NICHT kann — hier, wo `r11` noch frei
-    /// ist. Danach braucht `load_args` weder Spill noch Hilfsregister, und das
-    /// ist die Bedingung dafuer, dass `call_indirect` sein Sprungziel in `r11`
-    /// halten darf.
+    /// The cases a direct move cannot handle — done here, while `r11` is still
+    /// free. Afterwards `load_args` needs neither a spill nor a helper register,
+    /// which is the condition for `call_indirect` holding its target in `r11`.
     ///
-    /// Drei Sorten gehen in ihren Schlitz:
-    /// 1. Ein Argument, dessen Register das ZIEL eines ANDEREN Arguments ist —
-    ///    der Zug dorthin wuerde es ueberschreiben. (Ueberschneidung: `rsi`,
-    ///    `r8`, `r9` sind beides.)
-    /// 2. Fliesskomma-Argumente. Cache- und Argument-XMM ueberschneiden sich
-    ///    ebenfalls; die alte, sichere Form kostet hier wenig, weil die
-    ///    Ganzzahlen die Masse stellen.
-    /// 3. Argumente, die ueber den Stapel gehen — sie werden aus ihrem Schlitz
-    ///    geschrieben.
+    /// Three kinds go to their slot:
+    /// 1. An argument whose register is the destination of another argument —
+    ///    the move there would overwrite it. (`rsi`, `r8`, `r9` are both.)
+    /// 2. Float arguments. Cache and argument XMM registers overlap as well;
+    ///    the slot path costs little here because integers dominate.
+    /// 3. Arguments passed on the stack — they are written from their slot.
     fn spill_arg_conflicts(&mut self, places: &[Place], base: usize) {
         let mut is_dest = [false; 16];
         for p in places {
@@ -731,7 +710,7 @@ impl<'a> Ctx<'a> {
         self.note_depth();
     }
 
-    /// Take the top into a CACHE register and keep it there — in place if it
+    /// Take the top into a cache register and keep it there — in place if it
     /// already is one. The caller may write it and hand it straight back with
     /// `push_reg`, which is how the last move disappears from the hot path.
     fn pop_to_pool(&mut self) -> Reg {
@@ -776,11 +755,10 @@ impl<'a> Ctx<'a> {
         self.note_depth();
     }
 
-    /// Take the top value into `r`, whatever it costs: nothing if it is
-    /// already there, a register move if it is elsewhere, a load if it was
-    /// spilled. The caller owns `r` afterwards and must give it back.
-    /// Take the top value into `r`. `r` is operator scratch and never holds a
-    /// stack value, so nothing has to be evicted first.
+    /// Take the top value into `r`: nothing if it is already there, a register
+    /// move if it is elsewhere, a load if it was spilled. `r` is operator
+    /// scratch and never holds a stack value, so nothing has to be evicted
+    /// first; the caller owns `r` afterwards.
     fn pop_to(&mut self, r: Reg) -> Option<ValType> {
         let v = self.stack.pop()?;
         match v.loc {
@@ -857,9 +835,8 @@ impl<'a> Ctx<'a> {
         Some(v.ty)
     }
 
-    /// Read the top into `r` without consuming it. The value keeps its own
-    /// place, so `r` is a copy and the caller must free it.
-    /// Read the top into `r` without consuming it — the value keeps its place.
+    /// Read the top into `r` without consuming it — the value keeps its place,
+    /// so `r` is a copy.
     fn peek_to(&mut self, r: Reg) {
         let Some(v) = self.stack.last().copied() else { return };
         match v.loc {
@@ -902,7 +879,7 @@ impl<'a> Ctx<'a> {
         self.asm.load64(r, VMCTX, vmctx::GLOBALS);
     }
 
-    /// Charge everything counted so far. Must come BEFORE anything that sets
+    /// Charge everything counted so far. Must come before anything that sets
     /// flags for a branch — `sub` writes the flags too.
     fn fuel_flush(&mut self) {
         if self.fuel_pending == 0 {
@@ -995,8 +972,8 @@ pub fn compile_func(
 
     let mut f = Ctx {
         // Roughly what a function of this length comes to, so the per-function
-        // buffer does not grow either. Measured at 8,5 bytes per wasm
-        // instruction; sixteen leaves room without wasting much.
+        // buffer does not grow either: about 8.5 bytes per wasm instruction;
+        // sixteen leaves room without wasting much.
         asm: Asm::with_capacity(ops.len() * 16),
         m,
         local_types,
@@ -1137,19 +1114,14 @@ pub fn compile_func(
 fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
     use Operator::*;
 
-    // One unit per operator — but NOT for the purely structural ones.
+    // One unit per operator — but not for the purely structural ones.
     //
-    // This lands within 1,9 % of the interpreter's own count on beak's warm
-    // layout (709 681 859 against 723 152 293). Charging bulk memory by the
-    // BYTE was tried and is wrong — it overshoots by 20-30 %, so the
-    // interpreter bills a copy roughly flat. What the last two per cent are
-    // is still open; it is close enough that the kernel's existing budgets
-    // keep their meaning, which was the point. A
-    // `block`, a `loop`, an `else` or an `end` is a bracket in the binary
+    // A `block`, a `loop`, an `else` or an `end` is a bracket in the binary
     // format, not something that runs; the interpreter charges nothing for
-    // them either. Matching its rule matters beyond tidiness: the kernel's
-    // budgets (10 G for `run`, PYTHON_FUEL) were all calibrated against the
-    // interpreter, and they have to keep meaning the same thing.
+    // them either. Matching its rule matters: the kernel's budgets (`run`,
+    // PYTHON_FUEL) were calibrated against the interpreter and must keep
+    // meaning the same thing. Bulk memory is charged flat, like the
+    // interpreter, not per byte.
     if f.reachable && !matches!(op, Block { .. } | Loop { .. } | Else | End | Nop) {
         f.fuel_pending += 1;
     }
@@ -1183,9 +1155,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             if !dead {
                 f.spill_all();
             }
-            // Mark the head BEFORE the check, not after. A loop is the only
+            // Mark the head before the check, not after. A loop is the only
             // place execution can go round for ever, so the check has to sit
-            // ON the back edge — recorded after it, the edge jumps straight
+            // on the back edge — recorded after it, the edge jumps straight
             // past and the loop is checked exactly once, on the way in.
             let head = f.asm.pos();
             if !dead {
@@ -1473,20 +1445,19 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         // --- division ---
         //
         // wasm traps on a zero divisor, and `div_s` traps once more on
-        // `INT_MIN / -1`. x86 raises #DE for BOTH of those and for nothing
+        // `INT_MIN / -1`. x86 raises #DE for both of those and for nothing
         // else once the high half is set up — after `cdq`/`cqo` the dividend
         // is exactly the operand, so the only quotient that fails to fit is
-        // `INT_MIN / -1`. So the hardware's condition IS wasm's condition, and
+        // `INT_MIN / -1`. So the hardware's condition is wasm's condition, and
         // no compare is emitted.
         //
-        // That leaves one operator out of step: `rem_s` must NOT trap on
+        // That leaves one operator out of step: `rem_s` must not trap on
         // `INT_MIN % -1` — the answer is 0. A divisor of -1 gives a remainder
-        // of zero for EVERY dividend, so the shortcut is a plain special case
+        // of zero for every dividend, so the shortcut is a plain special case
         // rather than a check for the pair.
         //
-        // The price: the trap handler has to claim #DE from generated code,
-        // exactly as it has to claim #PF from a guard page. Until it exists,
-        // both are equally fatal.
+        // The price: the fault handler has to claim #DE from generated code,
+        // exactly as it claims #PF from a guard page.
         I32DivS => div_op(f, false, true, false),
         I32DivU => div_op(f, false, false, false),
         I32RemS => div_op(f, false, true, true),
@@ -1500,7 +1471,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         I64Eqz => eqz(f, true),
 
         // `bsr`/`bsf` leave the destination undefined for a zero input and
-        // say so in ZF. The sentinel is arranged so the SAME final `xor`
+        // say so in ZF. The sentinel is arranged so the same final `xor`
         // produces wasm's answer, which keeps the whole thing branch-free.
         I32Clz => clz(f, false),
         I64Clz => clz(f, true),
@@ -1511,10 +1482,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.popcnt(false, A, A);
             f.push_from_ty(A, ValType::I32);
         }
-        // The emitter took its width flag from the start; only this arm was
-        // missing. It is not a niche opcode: a pure-Rust H.264 decoder built
-        // for wasm32 lands two functions on it, and they carry 23 % of the
-        // module's instructions.
+        // Not a niche opcode: a pure-Rust H.264 decoder built for wasm32
+        // spends a large share of its instructions on it.
         I64Popcnt => {
             f.pop_to(A);
             f.asm.popcnt(true, A, A);
@@ -1678,7 +1647,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
 
         // The only operator that cannot be done with instructions alone: it
         // needs a mapping changed. So it calls the one runtime routine, and
-        // afterwards the pinned memory base MUST be reloaded — this is the
+        // afterwards the pinned memory base must be reloaded — this is the
         // case the invariant on MEMBASE was written for.
         MemoryGrow { mem } => {
             if *mem != 0 {
@@ -1703,9 +1672,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
 
         // --- bulk memory ---
         //
-        // The first operators where the guard page is NOT enough. A guard
-        // catches one access; these walk a RANGE, and the specification wants
-        // the trap BEFORE the first byte moves. Faulting halfway would already
+        // The first operators where the guard page is not enough. A guard
+        // catches one access; these walk a range, and the specification wants
+        // the trap before the first byte moves. Faulting halfway would already
         // have changed memory — observably different from the interpreter.
         // So the bounds are checked up front, in 64 bits, where `dst + len`
         // cannot overflow because both halves are u32.
@@ -2026,11 +1995,11 @@ fn load_args(f: &mut Ctx, params: &[ValType], places: &[Place], n_stack: usize) 
         match places[i] {
             Place::Int(k) => {
                 let dst = ARG_REGS[k];
-                // `spill_arg_conflicts` hat vorher alles weggeraeumt, was ein
-                // direkter Zug nicht kann. Was hier noch in einem Register
-                // steht, darf ohne Umweg dorthin, wo es hin soll.
+                // `spill_arg_conflicts` has already cleared everything a direct
+                // move cannot handle. Whatever is still in a register may go
+                // straight to its destination.
                 match f.stack[base + i].loc {
-                    Loc::Gpr(r) if r == dst => {} // sitzt schon richtig
+                    Loc::Gpr(r) if r == dst => {} // already in place
                     Loc::Gpr(r) => {
                         if wide(*t) { f.asm.mov_rr64(dst, r); } else { f.asm.mov_rr32(dst, r); }
                     }
@@ -2042,8 +2011,8 @@ fn load_args(f: &mut Ctx, params: &[ValType], places: &[Place], n_stack: usize) 
                         }
                     }
                     Loc::Local(idx) => {
-                        // Direkt aus dem Variablenschlitz; der Umweg ueber den
-                        // Stapelschlitz waere eine Kopie ohne Zweck.
+                        // Straight from the local's slot; going through the stack slot
+                        // would be a pointless copy.
                         let src = f.local(idx);
                         if wide(*t) {
                             f.asm.load64(dst, Reg::Rbp, src);
@@ -2069,8 +2038,8 @@ fn load_args(f: &mut Ctx, params: &[ValType], places: &[Place], n_stack: usize) 
 }
 
 /// After a call there is nothing to repair. The instance reserves its address
-/// space once and only ever makes more of it readable, so **the memory base
-/// never moves** — not across a call, not across `memory.grow`. That falls out
+/// space once and only ever makes more of it readable, so the memory base
+/// never moves — not across a call, not across `memory.grow`. That falls out
 /// of the guard-page design rather than being an extra promise, and it is what
 /// lets the base stay pinned without a reload per call.
 fn after_call(f: &mut Ctx, n_args: usize, results: &[ValType], arg_bytes: i32) {
@@ -2100,14 +2069,10 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
     let (params, results) = callee_shape(f.m, ti)?;
     let n = params.len();
 
-    // Nothing in a register survives a call, also muss alles UNTER den
-    // Argumenten in die Schlitze. Die Argumente selbst nicht — `load_args`
-    // zieht sie direkt in die Argumentregister, statt sie erst wegzuschreiben
-    // und sofort wieder zu holen.
-    // EINMAL rechnen. `arg_places` legt ein Vec an, und zweimal je
-    // Aufrufstelle waren am Geraet gemessen +22 % Allokationen beim
-    // Uebersetzen (314 214 -> 383 471) — ohne dass irgendjemand etwas davon
-    // hat.
+    // Nothing in a register survives a call, so everything below the
+    // arguments goes to its slot. The arguments themselves do not —
+    // `load_args` moves them straight into the argument registers.
+    // Compute the places once: `arg_places` allocates a Vec.
     let (places, n_stack) = arg_places(params);
     f.spill_below(n);
     let base = f.stack.len() - n;
@@ -2139,7 +2104,7 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
 }
 
 /// The one place a bounds check really is needed: a table index cannot be
-/// covered by a guard page. The signature check compares CANONICAL ids, not
+/// covered by a guard page. The signature check compares canonical ids, not
 /// type indices — wasm types are structural, and comparing indices would
 /// reject calls the spec allows.
 fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
@@ -2147,12 +2112,12 @@ fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
     let n = params.len();
     let want = *f.m.sig_id.get(type_index as usize).ok_or("callee-type")?;
 
-    // Wie im direkten Pfad, und aus demselben Grund noch strenger: das
-    // Sprungziel landet weiter unten in `r11`, und genau dort materialisiert
-    // ein Spill. ALLES Wegschreiben muss deshalb VOR dieser Stelle passieren —
-    // der Tabellenindex liegt ueber den Argumenten, also erst er, dann die
-    // Konflikte, dann faellt bis zum Aufruf kein Spill mehr an.
-    let (places, n_stack) = arg_places(params); // einmal, siehe `call_direct`
+    // As in the direct path, and stricter for the same reason: the call
+    // target ends up in `r11` below, which is exactly where a spill
+    // materialises. So all spilling must happen before that point — the
+    // table index sits above the arguments, so it first, then the
+    // conflicts, and no spill occurs until the call.
+    let (places, n_stack) = arg_places(params); // once, see `call_direct`
     f.spill_below(n + 1);
     f.pop_to(B); // table index, zero-extended by the 32-bit move
     let base = f.stack.len() - n;
@@ -2178,7 +2143,7 @@ fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
 }
 
 /// Turn a memory immediate into a displacement, folding an oversized offset
-/// into the address register. `disp32` is SIGNED, so an offset above 2 GiB
+/// into the address register. `disp32` is signed, so an offset above 2 GiB
 /// cannot be encoded — and since both the address and the offset are u32, the
 /// sum still fits inside the 8 GiB reservation, so folding is safe.
 fn mem_disp(
@@ -2300,7 +2265,7 @@ fn fsign(f: &mut Ctx, fw: Fw, kind: Sign) {
             f.fpop_to(FA);
             f.asm.mov_r64_imm64(A, mask);
             f.asm.gpr_to_xmm(true, FB, A);
-            // Clear the sign: keep everything the mask does NOT cover.
+            // Clear the sign: keep everything the mask does not cover.
             f.asm.fandn(fw, FB, FA);
             f.asm.fmov(FA, FB);
         }
@@ -2375,14 +2340,14 @@ fn fcmp(f: &mut Ctx, fw: Fw, kind: FCmp) {
             f.asm.fucomi(fw, FA, FB);
             f.asm.set_cond(Cond::E, A);
             f.asm.set_cond(Cond::Np, B);
-            f.asm.and32(A, B); // equal AND ordered
+            f.asm.and32(A, B); // equal and ordered
         }
         FCmp::Ne => {
             f.asm.fucomi(fw, FA, FB);
             f.asm.set_cond(Cond::Ne, A);
             f.asm.set_cond(Cond::P, B);
-            f.asm.or32(A, B); // different OR unordered — `ne` is the one
-                              // comparison that is TRUE for a NaN
+            f.asm.or32(A, B); // different or unordered — `ne` is the one
+                              // comparison that is true for a NaN
         }
         FCmp::Gt => {
             f.asm.fucomi(fw, FA, FB);
@@ -2410,7 +2375,7 @@ fn int_to_f(f: &mut Ctx, fw: Fw, w: bool) {
     f.fpush_from(FA, if fw.is_double() { ValType::F64 } else { ValType::F32 });
 }
 
-/// u64 to float. x86 only converts SIGNED integers, so a value with the top
+/// u64 to float. x86 only converts signed integers, so a value with the top
 /// bit set has to be halved first, converted, and doubled back. Halving with
 /// a plain shift would throw away the lowest bit and round wrong, so the lost
 /// bit is folded back in — round-to-odd — before the conversion.
@@ -2435,7 +2400,7 @@ fn u64_to_f(f: &mut Ctx, fw: Fw) {
 }
 
 /// Signed saturating truncation. `cvtt*2si` answers with the "integer
-/// indefinite" value — the minimum — for a NaN, for either overflow, AND for
+/// indefinite" value — the minimum — for a NaN, for either overflow, and for
 /// a legitimate minimum. wasm wants 0 for the NaN, the maximum for a positive
 /// overflow, and the minimum for the other two, so the ambiguous answer has
 /// to be taken apart afterwards. It is the rare path, so it sits behind the
@@ -2532,11 +2497,10 @@ enum Rhs {
     Reg,
 }
 
-/// Take the right-hand operand off the stack WITHOUT materialising it, if it
+/// Take the right-hand operand off the stack without materialising it, if it
 /// is somewhere an instruction can reach directly. This is where most of the
-/// remaining memory traffic goes away: `LocalGet` is 23,4 % of all
-/// instructions and `I32Const` 17 %, and as a right-hand operand neither of
-/// them needs a register at all.
+/// remaining memory traffic goes away: `local.get` and `i32.const` are very
+/// common, and as a right-hand operand neither needs a register at all.
 fn take_rhs(f: &mut Ctx) -> Rhs {
     let Some(top) = f.stack.last().copied() else {
         return Rhs::Reg;
@@ -2669,7 +2633,7 @@ fn eqz(f: &mut Ctx, w: bool) {
 
 /// `clz`: `bsr` gives the index of the highest set bit, so `width-1 - index`
 /// is the answer — and `xor` with `width-1` computes that. The sentinel for a
-/// zero input is picked so the SAME `xor` turns it into `width`:
+/// zero input is picked so the same `xor` turns it into `width`:
 /// `63 ^ 31 = 32`, `127 ^ 63 = 64`. `mov` and `cmov` leave flags alone, so
 /// ZF from `bsr` still holds when the `cmov` reads it.
 fn clz(f: &mut Ctx, w: bool) {

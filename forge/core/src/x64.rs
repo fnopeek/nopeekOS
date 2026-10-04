@@ -261,7 +261,7 @@ impl Asm {
     pub fn load16u_idx(&mut self, dst: Reg, base: Reg, index: Reg, disp: i32) {
         self.ext_load_idx(false, 0xB7, dst, base, index, disp);
     }
-    /// Sign-extending narrow loads. Here the width DOES matter: filling 64
+    /// Sign-extending narrow loads. Here the width does matter: filling 64
     /// bits with the sign is a different instruction from filling 32.
     pub fn load8s_idx(&mut self, w: bool, dst: Reg, base: Reg, index: Reg, disp: i32) {
         self.ext_load_idx(w, 0xBE, dst, base, index, disp);
@@ -609,7 +609,7 @@ impl Asm {
     /// when the source is zero, and leave the destination undefined in that
     /// case, which is why every use pairs them with a `cmov`.
     ///
-    /// This is deliberately NOT `lzcnt`/`tzcnt`: those need BMI1, and
+    /// Deliberately not `lzcnt`/`tzcnt`: those need BMI1, and
     /// `targets/x86_64-nopeek.json` promises only up to SSE4.2 + AVX2. On a
     /// CPU without BMI1 their encodings decode as `bsr`/`bsf` with different
     /// semantics — a silent wrong answer, not a fault.
@@ -738,8 +738,7 @@ impl Asm {
     }
 
     /// `ud2` — an unmistakable fault. wasm's `unreachable` must not be able
-    /// to look like a successful return; once the trap handler exists this
-    /// becomes a jump to it.
+    /// to look like a successful return.
     pub fn ud2(&mut self) {
         self.b(0x0F);
         self.b(0x0B);
@@ -973,7 +972,7 @@ impl Asm {
     pub fn fsqrt(&mut self, fw: Fw, dst: Xmm, src: Xmm) {
         self.farith(fw, 0x51, dst, src);
     }
-    /// The hardware's min/max, which do NOT match wasm's on NaN or on signed
+    /// The hardware's min/max, which do not match wasm's on NaN or on signed
     /// zero — see the generator for what has to be built around them.
     pub fn fmin_raw(&mut self, fw: Fw, dst: Xmm, src: Xmm) {
         self.farith(fw, 0x5D, dst, src);
