@@ -13,11 +13,13 @@
 //! `yield` never has to unwind through a Rust frame, even when the generator
 //! is driven by a builtin such as `Array.from`:
 //!
-//!     Array.from                (Rust)
-//!       Interp::call(gen.next)  (Rust)
-//!         next                  (Rust)
-//!           Vm::resume          <- the generator's own VM
-//!             Frame(body) ip=17 ... Op::Yield -> returns "suspended"
+//! ```text
+//! Array.from                (Rust)
+//!   Interp::call(gen.next)  (Rust)
+//!     next                  (Rust)
+//!       Vm::resume          <- the generator's own VM
+//!         Frame(body) ip=17 ... Op::Yield -> returns "suspended"
+//! ```
 //!
 //! One `next()` costs one Rust frame regardless of the caller. A `yield`
 //! always belongs to the generator body itself, and any call made from there

@@ -1816,8 +1816,10 @@ fn mul255(x: u8, y: u8) -> u8 {
 ///
 /// The coverage of a Gaussian-blurred rectangle is separable:
 ///
-///     a(x,y) = A * S(x; left, right) * S(y; top, bottom)
-///     S(t; a, b) = Phi((t-a)/sigma) - Phi((t-b)/sigma)
+/// ```text
+/// a(x,y) = A * S(x; left, right) * S(y; top, bottom)
+/// S(t; a, b) = Phi((t-a)/sigma) - Phi((t-b)/sigma)
+/// ```
 ///
 /// This is exact, not an approximation: convolving a rectangle with a
 /// separable kernel splits into two one-dimensional ones. A pixel costs one

@@ -1221,7 +1221,9 @@ pub struct ComputedStyle {
     ///
     /// A common table-striping technique:
     ///
-    ///     box-shadow: inset 0 0 0 9999px var(--bs-table-bg-type)
+    /// ```text
+    /// box-shadow: inset 0 0 0 9999px var(--bs-table-bg-type)
+    /// ```
     ///
     /// An inset shadow with a 9999 px spread is a fill above the background, so
     /// it colours the cell without replacing its own `background-color`.

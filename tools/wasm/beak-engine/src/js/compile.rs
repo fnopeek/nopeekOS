@@ -676,17 +676,19 @@ impl Compiler {
     /// must know how it was resumed (value, throw or `return`) to forward
     /// exactly that to the inner iterator. That is what `Vm::Resume` carries.
     ///
-    ///     <x>
-    ///     DelegateStart            ; get inner iterator, push `undefined`
-    ///   top:
-    ///     DelegateCall(giveup)     ; next / throw / return, per resumption
-    ///     [Await]                  ; async generator only
-    ///     DelegateStep(end)        ; done -> end, else push value
-    ///     Yield | YieldDelegate    ; hand out and suspend
-    ///     Jump top
-    ///   giveup:                    ; inner iterator has no `return`
-    ///     Ret                      ; the outer generator gives up
-    ///   end:
+    /// ```text
+    ///   <x>
+    ///   DelegateStart            ; get inner iterator, push `undefined`
+    /// top:
+    ///   DelegateCall(giveup)     ; next / throw / return, per resumption
+    ///   [Await]                  ; async generator only
+    ///   DelegateStep(end)        ; done -> end, else push value
+    ///   Yield | YieldDelegate    ; hand out and suspend
+    ///   Jump top
+    /// giveup:                    ; inner iterator has no `return`
+    ///   Ret                      ; the outer generator gives up
+    /// end:
+    /// ```
     fn yield_delegate(&mut self, arg: &Expr) -> CompileResult<()> {
         self.expr(arg)?;
         self.chunk.emit(Op::DelegateStart(self.in_async));
