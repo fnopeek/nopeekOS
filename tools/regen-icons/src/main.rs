@@ -21,7 +21,7 @@
 //!                    size S contributes exactly S*S bytes
 //! ```
 //!
-//! `IconId` values match the frozen enum in
+//! `IconId` values match the frozen numbers in
 //! `kernel/src/shade/widgets/abi.rs` — see the `ICONS` table below.
 //! Appending a new IconId = add a row, regen, commit atlas + kernel
 //! ABI extension in the same release.
@@ -41,8 +41,8 @@ struct IconEntry {
     name: &'static str,
 }
 
-/// The v1 icon set. Order matches the kernel's IconId enum; new
-/// icons must be appended, not inserted.
+/// The icon set. Order matches the kernel's IconId numbering; new icons
+/// must be appended, not inserted.
 const ICONS: &[IconEntry] = &[
     IconEntry { id: 1,  svg: "folder.svg",              name: "Folder" },
     IconEntry { id: 2,  svg: "file.svg",                name: "File" },

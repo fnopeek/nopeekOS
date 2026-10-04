@@ -1,6 +1,6 @@
 //! Host test for the wasi grant boundary.
 //!
-//! `include!`s the SAME file the kernel compiles, so this exercises the
+//! `include!`s the same file the kernel compiles, so this exercises the
 //! bytes that ship — not a re-implementation that could drift from them.
 //!
 //!   cargo run --manifest-path tools/wasi-path-test/Cargo.toml
@@ -47,7 +47,7 @@ fn main() {
     ok(R, R, "/etc/passwd", "sys/python/etc/passwd");
     ok(R, R, "//a//b", "sys/python/a/b");
 
-    // Prefix confusion: "sys/pythonista" is NOT under "sys/python".
+    // Prefix confusion: "sys/pythonista" is not under "sys/python".
     escapes("sys/pythonista", R, "x");
     escapes("sys/python2", R, "");
 

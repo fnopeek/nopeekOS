@@ -2,7 +2,7 @@
 //!
 //! The kernel is a `no_std` binary, so `cargo test` cannot run inside it —
 //! a host build hits a duplicate `_start` at link time. This crate pulls the
-//! REAL kernel sources in via `#[path]` (std supplies `alloc`), so the tested
+//! real kernel sources in via `#[path]` (std supplies `alloc`), so the tested
 //! code and the shipped code are the same bytes and cannot drift.
 //!
 //! Run: `cargo test --manifest-path tools/hpack-test/Cargo.toml`
