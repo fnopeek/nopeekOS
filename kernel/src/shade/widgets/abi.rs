@@ -216,6 +216,7 @@ pub enum IconId {
     SkipBack            = 47,
     SkipForward         = 48,
     FileAudio           = 49,
+    ArrowCounterClockwise = 50,
     // Appended only.
 }
 
@@ -494,6 +495,10 @@ pub const FONT_SIZE_MAX: u16 = 64;
 
 // ── Widget ────────────────────────────────────────────────────────────
 
+/// Upper end of `Widget::Slider::value` — per mille, fine enough for a
+/// seek bar across a full-width window.
+pub const SLIDER_MAX: u16 = 1000;
+
 /// Widget tree node. A single `Widget` = root of a render commit.
 ///
 /// Variant order frozen at v1. Reserved slots (`Popover`/`Tooltip`/`Menu`)
@@ -610,6 +615,19 @@ pub enum Widget {
         spans:       Vec<Span>,
         modifiers:   Vec<Modifier>,
     },
+    /// Horizontal value track with a draggable thumb. `value` runs from
+    /// 0 to [`SLIDER_MAX`]. The compositor owns the drag: the thumb follows
+    /// the pointer without a round trip, and the app hears
+    /// `Event::Slide { action: on_change, .. }` — `done: false` while the
+    /// value moves, once more with `done: true` on release. While a drag
+    /// is in progress the compositor keeps its own value on screen, so an
+    /// app that re-commits mid-drag (a player advancing its position)
+    /// does not yank the thumb back.
+    Slider {
+        value:     u16,
+        on_change: ActionId,
+        modifiers: Vec<Modifier>,
+    },
     // Appended only.
 }
 
@@ -713,6 +731,11 @@ pub enum Event {
     /// wird uebersprungen. MUSS im Gleichschritt mit der SDK-Kopie in
     /// `tools/wasm/sdk/widgets/src/abi.rs` bleiben.
     WheelX { dx: i32 },
+    /// A `Widget::Slider` moved. `action` is its `on_change`, `value` in
+    /// 0..=[`SLIDER_MAX`]. `done: false` while the pointer drags (only
+    /// when the value changed), `done: true` once on release — apps that
+    /// do expensive work (seeking) wait for that one.
+    Slide { action: ActionId, value: u16, done: bool },
     // Appended only.
 }
 

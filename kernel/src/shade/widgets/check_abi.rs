@@ -169,6 +169,7 @@ fn _widget_wire_position(w: &Widget) -> usize {
         Widget::Tooltip  { .. } => 13,
         Widget::Menu     { .. } => 14,
         Widget::TextArea { .. } => 15,
+        Widget::Slider   { .. } => 16,
     }
 }
 
@@ -232,6 +233,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Chord { .. }      => 12,
         Event::Zoom { .. }       => 13,
         Event::WheelX { .. }     => 14,
+        Event::Slide { .. }      => 15,
     }
 }
 

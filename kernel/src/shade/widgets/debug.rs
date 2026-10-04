@@ -80,6 +80,7 @@ fn widget_label(w: &Widget) -> String {
         Widget::Tooltip  { .. }           => String::from("Tooltip (RESERVED)"),
         Widget::Menu     { items, .. }    => alloc::format!("Menu({}) (RESERVED)", items.len()),
         Widget::TextArea { value, .. }    => alloc::format!("TextArea({} bytes)", value.len()),
+        Widget::Slider   { value, .. }    => alloc::format!("Slider={}", value),
     }
 }
 
@@ -181,6 +182,10 @@ fn write_node(out: &mut String, w: &Widget, depth: usize) {
         Widget::TextArea { value, placeholder, spans, modifiers } => {
             let _ = writeln!(out, "[npk] {}TextArea {} bytes {} spans placeholder={:?}{}",
                 indent, value.len(), spans.len(), placeholder, fmt_mods(modifiers));
+        }
+        Widget::Slider { value, on_change, modifiers } => {
+            let _ = writeln!(out, "[npk] {}Slider value={} → Slide({}){}",
+                indent, value, on_change.0, fmt_mods(modifiers));
         }
     }
 }

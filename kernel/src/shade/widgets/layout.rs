@@ -240,6 +240,9 @@ fn widget_children(w: &Widget) -> &[Widget] {
     }
 }
 
+/// Thumb diameter of a `Widget::Slider`, and with it the slider's height.
+pub(super) const SLIDER_THUMB: u32 = 14;
+
 // ── Pass 1: intrinsic measurement ─────────────────────────────────────
 
 /// Compute the node's preferred size with no container constraints.
@@ -312,6 +315,7 @@ fn mods_of_widget(w: &Widget) -> &[Modifier] {
         Widget::Input   { modifiers, .. } |
         Widget::TextArea{ modifiers, .. } |
         Widget::Checkbox{ modifiers, .. } |
+        Widget::Slider  { modifiers, .. } |
         Widget::Canvas  { modifiers, .. } |
         Widget::Popover { modifiers, .. } |
         Widget::Tooltip { modifiers, .. } |
@@ -457,6 +461,13 @@ fn measure_intrinsic(w: &Widget) -> Size {
             Size { w: 16 + pad.0 * 2, h: 16 + pad.1 * 2 }
         }
 
+        // Height = the thumb, so the whole strip around a thin track is
+        // grabbable. Width is a floor; sliders are meant to Flex/stretch.
+        Widget::Slider { modifiers, .. } => {
+            let pad = padding(modifiers);
+            Size { w: 80 + pad.0 * 2, h: SLIDER_THUMB + pad.1 * 2 }
+        }
+
         Widget::Spacer { .. } => Size::default(),
 
         Widget::Divider => Size { w: 0, h: 1 },
@@ -569,7 +580,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             LayoutNode::leaf(inner)
         }
 
-        Widget::Canvas { .. } => {
+        Widget::Canvas { .. } | Widget::Slider { .. } => {
             LayoutNode::leaf(inner)
         }
 
@@ -718,6 +729,7 @@ fn unpack_modifiers(w: &Widget, container: Rect) -> (Rect, Rect) {
         Widget::Button  { modifiers, .. } |
         Widget::Input   { modifiers, .. } |
         Widget::Checkbox{ modifiers, .. } |
+        Widget::Slider  { modifiers, .. } |
         Widget::Canvas  { modifiers, .. } |
         Widget::Popover { modifiers, .. } |
         Widget::Tooltip { modifiers, .. } |

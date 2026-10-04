@@ -1363,6 +1363,7 @@ fn modifiers_of_ref(w: &abi::Widget) -> &[abi::Modifier] {
         abi::Widget::Input    { modifiers, .. } |
         abi::Widget::TextArea { modifiers, .. } |
         abi::Widget::Checkbox { modifiers, .. } |
+        abi::Widget::Slider   { modifiers, .. } |
         abi::Widget::Canvas   { modifiers, .. } |
         abi::Widget::Popover  { modifiers, .. } |
         abi::Widget::Tooltip  { modifiers, .. } |
@@ -1963,6 +1964,123 @@ pub fn text_select_end(window_id: u32) {
     }
 }
 
+// ── Slider drag ───────────────────────────────────────────────────────
+//
+// The compositor moves the thumb itself: an app busy decoding must not
+// make the bar lag behind the pointer. The live value is written into the
+// cached tree, and `scene_commit` re-applies it to every tree the app
+// commits while the drag lasts.
+
+struct SlideDrag {
+    window: u32,
+    action: abi::ActionId,
+    /// Screen rect of the slider at press time.
+    track:  abi::Rect,
+    value:  u16,
+}
+
+static SLIDE: Mutex<Option<SlideDrag>> = Mutex::new(None);
+
+pub fn sliding() -> bool { SLIDE.lock().is_some() }
+
+fn slider_value_at(track: abi::Rect, x: i32) -> u16 {
+    let d = layout::SLIDER_THUMB.min(track.h).min(track.w);
+    let travel = track.w.saturating_sub(d);
+    if travel == 0 { return 0; }
+    let off = (x - track.x - (d / 2) as i32).clamp(0, travel as i32) as u32;
+    (off * abi::SLIDER_MAX as u32 / travel) as u16
+}
+
+fn find_slider(
+    widget: &abi::Widget,
+    layout: &layout::LayoutNode,
+    x: i32, y: i32,
+) -> Option<(abi::ActionId, abi::Rect)> {
+    if !rect_contains(layout.rect, x, y) || is_disabled(widget) { return None; }
+    if let abi::Widget::Slider { on_change, .. } = widget {
+        return Some((*on_change, layout.rect));
+    }
+    for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
+        if let Some(hit) = find_slider(cw, cl, x, y) { return Some(hit); }
+    }
+    None
+}
+
+/// Set every slider with `on_change == action` to `value`, popover
+/// contents included. Returns true if anything changed.
+fn set_slider_value(tree: &mut abi::Widget, action: abi::ActionId, value: u16) -> bool {
+    let mut changed = false;
+    if let abi::Widget::Slider { on_change, value: v, .. } = tree {
+        if *on_change == action && *v != value { *v = value; changed = true; }
+    }
+    for c in widget_children_mut(tree) {
+        changed |= set_slider_value(c, action, value);
+    }
+    changed
+}
+
+fn slide_repaint(window_id: u32) {
+    rerender_state_only(window_id);
+    mark_dirty(window_id);
+    crate::shade::request_render();
+}
+
+/// A left press at (x,y): start dragging the slider under it, if any.
+/// The press already counts as a move — clicking the track jumps there.
+pub fn slide_begin(window_id: u32, x: i32, y: i32) -> bool {
+    let (action, track, value) = {
+        let mut scenes = SCENES.lock();
+        let scene = match scenes.get_mut(&window_id) { Some(s) => s, None => return false };
+        let hit = scene.popovers.iter().rev()
+            .find(|p| rect_contains(p.layout.rect, x, y))
+            .map(|p| find_slider(&p.child, &p.layout, x, y))
+            .unwrap_or_else(|| find_slider(&scene.tree, &scene.layout_tree, x, y));
+        let (action, track) = match hit { Some(h) => h, None => return false };
+        let value = slider_value_at(track, x);
+        set_slider_value(&mut scene.tree, action, value);
+        (action, track, value)
+    };
+    *SLIDE.lock() = Some(SlideDrag { window: window_id, action, track, value });
+    slide_repaint(window_id);
+    push_event(window_id, abi::Event::Slide { action, value, done: false });
+    true
+}
+
+/// Pointer moved with the button held.
+pub fn slide_move(x: i32) {
+    let (window, action, value) = {
+        let mut g = SLIDE.lock();
+        let d = match g.as_mut() { Some(d) => d, None => return };
+        let v = slider_value_at(d.track, x);
+        if v == d.value { return; }
+        d.value = v;
+        (d.window, d.action, v)
+    };
+    let changed = SCENES.lock().get_mut(&window)
+        .map(|s| set_slider_value(&mut s.tree, action, value))
+        .unwrap_or(false);
+    if changed { slide_repaint(window); }
+    push_event(window, abi::Event::Slide { action, value, done: false });
+}
+
+/// Button released: report the final value once more, with `done`.
+pub fn slide_end() {
+    let d = match SLIDE.lock().take() { Some(d) => d, None => return };
+    // The cached tree now shows a value the app never committed. Forget
+    // the payload hash so its next commit is applied even if it is
+    // byte-identical to the one before the drag (an app that declined
+    // the new value must be able to put the thumb back).
+    if let Some(s) = SCENES.lock().get_mut(&d.window) { s.payload_hash = [0; 32]; }
+    push_event(d.window, abi::Event::Slide { action: d.action, value: d.value, done: true });
+}
+
+/// Keep a drag's live value in a tree the app commits mid-drag.
+fn apply_slide_override(window_id: u32, tree: &mut abi::Widget) {
+    if let Some(d) = SLIDE.lock().as_ref() {
+        if d.window == window_id { set_slider_value(tree, d.action, d.value); }
+    }
+}
+
 /// Ctrl+Shift+C / V routed from the compositor: copy or paste the focused
 /// text widget's selection via the existing clipboard handler.
 pub fn clipboard_copy(window_id: u32) -> bool { widget_clipboard(window_id, b'c') }
@@ -2314,10 +2432,11 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         }
     }
 
-    let tree: abi::Widget = match postcard::from_bytes(body) {
+    let mut tree: abi::Widget = match postcard::from_bytes(body) {
         Ok(t) => t,
         Err(_) => return -2,
     };
+    if window_id != 0 { apply_slide_override(window_id, &mut tree); }
 
     // Obtain or create the widget window. `new_window` is Some iff we
     // just created one — return its id to the caller so the next

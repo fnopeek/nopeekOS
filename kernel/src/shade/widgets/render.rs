@@ -936,6 +936,30 @@ fn paint_node_eff(
             rast.rect(target, inner, Fill::Solid(fill));
         }
 
+        Widget::Slider { value, .. } => {
+            // A thin track through the middle, filled up to the thumb's
+            // centre. The thumb travels inside the rect so it is never
+            // clipped at either end.
+            let d = super::layout::SLIDER_THUMB.min(rect.h).min(rect.w);
+            let travel = rect.w.saturating_sub(d);
+            let v = (*value).min(super::abi::SLIDER_MAX) as u32;
+            let cx = rect.x + (d / 2) as i32 + (travel * v / super::abi::SLIDER_MAX as u32) as i32;
+            let track_h = 4u32.min(rect.h);
+            let ty = rect.y + ((rect.h - track_h) / 2) as i32;
+            rast.rect_rounded(target,
+                Rect { x: rect.x, y: ty, w: rect.w, h: track_h },
+                Fill::Solid(Token::SurfaceMuted), 2);
+            let filled = (cx - rect.x).max(0) as u32;
+            if filled > 0 {
+                rast.rect_rounded(target,
+                    Rect { x: rect.x, y: ty, w: filled, h: track_h },
+                    Fill::Solid(Token::Accent), 2);
+            }
+            rast.rect_rounded(target,
+                Rect { x: cx - (d / 2) as i32, y: rect.y + ((rect.h - d) / 2) as i32, w: d, h: d },
+                Fill::Solid(Token::Accent), (d / 2) as u8);
+        }
+
         Widget::Divider => {
             rast.rect(target, rect, Fill::Solid(Token::Border));
         }
@@ -1010,6 +1034,7 @@ fn modifiers_of(w: &Widget) -> &[Modifier] {
         Widget::Input   { modifiers, .. } |
         Widget::TextArea{ modifiers, .. } |
         Widget::Checkbox{ modifiers, .. } |
+        Widget::Slider  { modifiers, .. } |
         Widget::Canvas  { modifiers, .. } |
         Widget::Popover { modifiers, .. } |
         Widget::Tooltip { modifiers, .. } |

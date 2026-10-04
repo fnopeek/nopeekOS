@@ -1852,7 +1852,9 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     {
         let (mx, my) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
-        update_widget_text_selection(mx, my, btn & 1 != 0, prev & 1 != 0);
+        if !update_widget_slider(mx, my, btn & 1 != 0, prev & 1 != 0) {
+            update_widget_text_selection(mx, my, btn & 1 != 0, prev & 1 != 0);
+        }
     }
 
     // If nothing above scheduled a real render (no button, no drag, no
@@ -1910,6 +1912,21 @@ fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
             }
         }
     }
+}
+
+/// `Widget::Slider` drag. Returns true while the gesture belongs to a
+/// slider, so a press on one does not also start a text selection.
+fn update_widget_slider(mx: i32, my: i32, lmb: bool, was: bool) -> bool {
+    if widgets::sliding() {
+        if lmb { widgets::slide_move(mx); } else { widgets::slide_end(); }
+        return true;
+    }
+    if lmb && !was {
+        if let Some(wid) = focused_widget_id() {
+            return widgets::slide_begin(wid, mx, my);
+        }
+    }
+    false
 }
 
 /// Widget text drag-selection for the focused Input/TextArea. Mirrors

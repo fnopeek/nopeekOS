@@ -1,11 +1,10 @@
 //! tune — the audio player for nopeekOS.
 //!
 //! Layout (top → bottom):
-//!   toolbar  — note icon · title / artist · spacer · "1:23 / 4:07"
-//!   progress — segmented bar, one click = one seek
-//!   transport— skip back · play/pause · skip forward · master volume
-//!   playlist — every audio file in the folder, current one highlighted
-//!   footer   — npkFS path · "MP3 · 192 kbps · 44.1 kHz · stereo"
+//!   body — the picture (video), or title + folder playlist (audio)
+//!   seek — `Widget::Slider`, edge to edge; seeks on release
+//!   bar  — play/pause · −10 s · +10 s · "24:10 / 46:02" · spacer · volume
+//!          (volume opens a popover with its own slider)
 //!
 //! The player itself knows no formats. It pulls f32 frames out of a
 //! [`source::Source`], hands them to [`sink::Sink`] (resample → 48 kHz S16
@@ -176,6 +175,11 @@ struct Tune {
     /// Launched with a file to open, as opposed to launched bare.
     opened_with_file: bool,
     vol:     u8,
+    /// Volume popover open.
+    vol_open: bool,
+    /// Where the seek slider is being dragged to, while it is. The time
+    /// readout follows it; the seek itself waits for the release.
+    scrub:   Option<u16>,
     /// Seconds last drawn, so the loop only re-commits when the clock moves.
     shown_s: i64,
     /// Underruns already reported, so a stutter logs once and not per tick.
@@ -210,13 +214,17 @@ struct Tune {
 }
 
 const A_PLAY_PAUSE: u32 = 1;
-const A_PREV:       u32 = 2;
-const A_NEXT:       u32 = 3;
-const SEEK_BASE:    u32 = 100;
-const SEEK_CELLS:   u32 = 40;
-const VOL_BASE:     u32 = 200;
-const VOL_STEPS:    u32 = 10;
+const A_BACK:       u32 = 2;
+const A_FORWARD:    u32 = 3;
+const A_SEEK:       u32 = 4;
+const A_VOL_TOGGLE: u32 = 5;
+const A_VOL_CLOSE:  u32 = 6;
+const A_VOL:        u32 = 7;
 const TRACK_BASE:   u32 = 1000;
+/// What the two jump buttons move, in ms.
+const JUMP_MS:      u64 = 10_000;
+/// Anchor of the volume popover.
+const NODE_VOL:     u32 = 1;
 /// Playlist rows drawn at once. The scene is rebuilt every second while
 /// playing, so a folder of two thousand files would re-encode and re-lay-out
 /// two thousand rows per second for a clock that moved by one digit. The
@@ -241,6 +249,8 @@ impl Tune {
             error: None,
             opened_with_file: false,
             vol: host::get_volume().clamp(0, 100) as u8,
+            vol_open: false,
+            scrub: None,
             shown_s: -1,
             told_underruns: 0,
             video: None,
@@ -348,7 +358,29 @@ impl Tune {
             });
             return;
         }
+        self.log_format();
         self.playing = play;
+    }
+
+    /// What was opened, once per file. The player shows no format line, so
+    /// the serial log is where a device run says what it is measuring.
+    fn log_format(&self) {
+        let mut m = String::from("[tune] ");
+        if let Some(v) = self.video.as_ref() {
+            m.push_str(&alloc::format!("H.264 {}x{}", v.width, v.height));
+            if v.rotation != 0 { m.push_str(&alloc::format!(" gedreht {}\u{b0}", v.rotation)); }
+            m.push_str(" · ");
+        }
+        match self.src.as_ref() {
+            Some(s) => {
+                let i = s.info();
+                m.push_str(i.kind);
+                if i.bitrate_kbps > 0 { m.push_str(&alloc::format!(" {} kbps", i.bitrate_kbps)); }
+                m.push_str(&alloc::format!(" {} Hz {} ch", i.rate, i.channels));
+            }
+            None => m.push_str("ohne Ton"),
+        }
+        log(&m);
     }
 
     fn info_rate(&self) -> u32 { self.src.as_ref().map(|s| s.info().rate).unwrap_or(48_000) }
@@ -650,82 +682,120 @@ fn render(t: &Tune) -> Widget {
         ),
     };
 
-    let head = Widget::Column {
-        children: alloc::vec![
-            Widget::Text { content: title, style: TextStyle::Title, modifiers: Vec::new() },
-            Widget::Text { content: artist, style: TextStyle::Muted, modifiers: Vec::new() },
-        ],
-        spacing: 0,
-        align: Align::Start,
-        modifiers: Vec::new(),
+    let body = match t.video.as_ref() {
+        // Das BILD bekommt die ganze Flaeche, und nichts liegt darauf.
+        Some(_) => Widget::Canvas {
+            id: CanvasId(VIDEO_CANVAS as u32),
+            // NICHT die Videogroesse. `measure_intrinsic` nimmt diese Zahlen
+            // als UNTERGRENZE der Spalte; ein 2560 breites Bild haette auf
+            // einem 1920er Schirm das Layout getrieben statt sich einzufuegen.
+            // Die wirkliche Groesse entsteht aus `Flex(1)` und dem
+            // contain-fit des Compositors, der das gespeicherte Bild
+            // unabhaengig davon einpasst.
+            width: 320,
+            height: 180,
+            modifiers: alloc::vec![Modifier::Flex(1), Modifier::Background(Token::Page)],
+        },
+        None => audio_body(t, &title, &artist),
     };
 
-    let toolbar = prefab::toolbar(alloc::vec![
-        Widget::Icon {
-            id: if t.video.is_some() { IconId::Image } else { IconId::MusicNotes },
-            size: 24, modifiers: Vec::new() },
-        head,
-        Widget::Spacer { flex: 1 },
-        prefab::text_badge(if dur > 0 {
-            alloc::format!("{} / {}", fmt_time(pos), fmt_time(dur))
-        } else {
-            fmt_time(pos)
-        }),
-    ]);
-
-    // Segmented progress bar. The ABI gives clicks, not drags, so the
-    // segments double as the seek stops — the same idiom the volume
-    // overlay uses for its level.
-    let filled = if dur > 0 { (pos * SEEK_CELLS as u64 / dur).min(SEEK_CELLS as u64) as u32 } else { 0 };
-    let mut cells: Vec<Widget> = Vec::with_capacity(SEEK_CELLS as usize);
-    for i in 0..SEEK_CELLS {
-        let tok = if i < filled { Token::Accent } else { Token::SurfaceMuted };
-        let mut mods = alloc::vec![
-            Modifier::Flex(1),
-            Modifier::MinHeight(10),
-            Modifier::Background(tok),
-            Modifier::Rounded(2),
-        ];
-        if dur > 0 { mods.push(Modifier::OnClick(ActionId(SEEK_BASE + i))); }
-        cells.push(Widget::Text { content: " ".to_string(), style: TextStyle::Body, modifiers: mods });
-    }
-    let progress = Widget::Row {
-        children: cells,
-        spacing: 2,
-        align: Align::Center,
-        modifiers: alloc::vec![Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: 0 }],
+    // While dragging, the readout shows where the thumb is, not where the
+    // decoder is — that is the number the hand is looking for.
+    let shown = match t.scrub {
+        Some(v) if dur > 0 => dur * v as u64 / SLIDER_MAX as u64,
+        _ => pos,
+    };
+    let value = match t.scrub {
+        Some(v) => v,
+        None if dur > 0 => (pos * SLIDER_MAX as u64 / dur).min(SLIDER_MAX as u64) as u16,
+        None => 0,
+    };
+    let seek = Widget::Slider {
+        value,
+        on_change: ActionId(A_SEEK),
+        modifiers: if dur > 0 { Vec::new() } else { alloc::vec![Modifier::Disabled(Vec::new())] },
     };
 
-    let mut vol_cells: Vec<Widget> = Vec::with_capacity(VOL_STEPS as usize);
-    for i in 0..VOL_STEPS {
-        let level = ((i + 1) * (100 / VOL_STEPS)) as u8;
-        let tok = if level <= t.vol { Token::Accent } else { Token::SurfaceMuted };
-        vol_cells.push(Widget::Text {
-            content: " ".to_string(),
-            style: TextStyle::Body,
-            modifiers: alloc::vec![
-                Modifier::MinWidth(10),
-                Modifier::MinHeight(14),
-                Modifier::Background(tok),
-                Modifier::Rounded(Radius::Sm.as_u8()),
-                Modifier::OnClick(ActionId(VOL_BASE + i)),
-            ],
+    let mut time = alloc::vec![
+        Widget::Text { content: fmt_time(shown), style: TextStyle::Mono, modifiers: Vec::new() },
+    ];
+    if dur > 0 {
+        time.push(Widget::Text {
+            content: alloc::format!("/ {}", fmt_time(dur)),
+            style: TextStyle::Mono,
+            modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
         });
     }
 
-    let transport = Widget::Row {
+    let mut vol_btn = prefab::icon_button(volume_icon(t.vol), 16, Some(ActionId(A_VOL_TOGGLE)), None);
+    if let Widget::Row { modifiers, .. } | Widget::Column { modifiers, .. } | Widget::Stack { modifiers, .. } = &mut vol_btn {
+        modifiers.push(Modifier::NodeId(NodeId(NODE_VOL)));
+    }
+
+    let bar = Widget::Row {
         children: alloc::vec![
-            prefab::icon_button(IconId::SkipBack, 20, Some(ActionId(A_PREV)), None),
             prefab::icon_button(
                 if t.playing { IconId::Pause } else { IconId::Play },
-                24, Some(ActionId(A_PLAY_PAUSE)), None),
-            prefab::icon_button(IconId::SkipForward, 20, Some(ActionId(A_NEXT)), None),
+                16, Some(ActionId(A_PLAY_PAUSE)), None),
+            prefab::icon_button(IconId::ArrowCounterClockwise, 16, Some(ActionId(A_BACK)), None),
+            prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(A_FORWARD)), None),
+            Widget::Row { children: time, spacing: Spacing::Xs.as_u16(), align: Align::Center, modifiers: Vec::new() },
             Widget::Spacer { flex: 1 },
-            Widget::Icon { id: volume_icon(t.vol), size: 16, modifiers: Vec::new() },
-            Widget::Row { children: vol_cells, spacing: 2, align: Align::Center, modifiers: Vec::new() },
+            vol_btn,
         ],
-        spacing: Spacing::Sm.as_u16(),
+        spacing: Spacing::Xs.as_u16(),
         align: Align::Center,
+        modifiers: alloc::vec![Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Xs.as_u16() }],
+    };
+
+    let mut children = alloc::vec![body, seek, bar];
+    if t.vol_open {
+        children.push(Widget::Popover {
+            anchor: NodeId(NODE_VOL),
+            child: Box::new(Widget::Row {
+                children: alloc::vec![
+                    Widget::Slider {
+                        value: (t.vol as u32 * SLIDER_MAX as u32 / 100) as u16,
+                        on_change: ActionId(A_VOL),
+                        modifiers: alloc::vec![Modifier::MinWidth(120)],
+                    },
+                    Widget::Text {
+                        content: alloc::format!("{}", t.vol),
+                        style: TextStyle::Mono,
+                        modifiers: alloc::vec![Modifier::MinWidth(24)],
+                    },
+                ],
+                spacing: Spacing::Sm.as_u16(),
+                align: Align::Center,
+                modifiers: alloc::vec![
+                    Modifier::Padding(Padding::Sm.as_u16()),
+                    Modifier::Background(Token::SurfaceElevated),
+                    Modifier::Rounded(Radius::Sm.as_u8()),
+                ],
+            }),
+            on_dismiss: ActionId(A_VOL_CLOSE),
+            modifiers: Vec::new(),
+        });
+    }
+
+    Widget::Column {
+        children,
+        spacing: 0,
+        align: Align::Stretch,
+        modifiers: alloc::vec![Modifier::Flex(1)],
+    }
+}
+
+/// Without a picture the area belongs to the folder: what is playing on
+/// top, every track below it.
+fn audio_body(t: &Tune, title: &str, artist: &str) -> Widget {
+    let head = Widget::Column {
+        children: alloc::vec![
+            Widget::Text { content: title.to_string(), style: TextStyle::Title, modifiers: Vec::new() },
+            Widget::Text { content: artist.to_string(), style: TextStyle::Muted, modifiers: Vec::new() },
+        ],
+        spacing: 0,
+        align: Align::Start,
         modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
     };
 
@@ -753,56 +823,11 @@ fn render(t: &Tune) -> Widget {
         modifiers: alloc::vec![Modifier::Flex(1)],
     };
 
-    // Solange ein Film laeuft, bekommt das BILD die Flaeche. Die Liste
-    // waere daneben richtig und hier falsch: sie ist das Groesste in der
-    // Spalte, und ein Video in einer Restzeile ist kein Video.
-    let body = match t.video.as_ref() {
-        Some(_) => Widget::Canvas {
-            id: CanvasId(VIDEO_CANVAS as u32),
-            // NICHT die Videogroesse. `measure_intrinsic` nimmt diese Zahlen
-            // als UNTERGRENZE der Spalte; ein 2560 breites Bild haette auf
-            // einem 1920er Schirm das Layout getrieben statt sich einzufuegen.
-            // Die wirkliche Groesse entsteht aus `Flex(1)` und dem
-            // contain-fit des Compositors, der das gespeicherte Bild
-            // unabhaengig davon einpasst.
-            width: 320,
-            height: 180,
-            modifiers: alloc::vec![Modifier::Flex(1)],
-        },
-        None => list,
-    };
-
-    let right = match t.src.as_ref() {
-        Some(s) => {
-            let i = s.info();
-            let ch = if i.channels >= 2 { "stereo" } else { "mono" };
-            if i.bitrate_kbps > 0 {
-                alloc::format!("{} · {} kbps · {} Hz · {}", i.kind, i.bitrate_kbps, i.rate, ch)
-            } else {
-                alloc::format!("{} · {} Hz · {}", i.kind, i.rate, ch)
-            }
-        }
-        None => match t.video.as_ref() {
-            Some(v) if v.rotation != 0 =>
-                alloc::format!("H.264 · {}x{} · gedreht {}\u{b0}", v.width, v.height, v.rotation),
-            Some(v) => alloc::format!("H.264 · {}x{}", v.width, v.height),
-            None => String::new(),
-        },
-    };
-
     Widget::Column {
-        children: alloc::vec![
-            toolbar,
-            progress,
-            transport,
-            Widget::Divider,
-            body,
-            Widget::Divider,
-            prefab::footer(&t.dir, &right),
-        ],
-        spacing: Spacing::Sm.as_u16(),
+        children: alloc::vec![head, Widget::Divider, list],
+        spacing: Spacing::Xs.as_u16(),
         align: Align::Stretch,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        modifiers: alloc::vec![Modifier::Flex(1)],
     }
 }
 
@@ -842,29 +867,32 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
             t.load(true);
             Outcome::Render
         }
+        Event::Slide { action: ActionId(A_SEEK), value, done } => {
+            if done {
+                t.scrub = None;
+                let dur = t.duration_ms();
+                if dur > 0 { t.seek_to_ms(dur * value as u64 / SLIDER_MAX as u64); }
+            } else {
+                t.scrub = Some(value);
+            }
+            Outcome::Render
+        }
+        // Volume follows the hand: a level is cheap to set and the ear is
+        // the feedback.
+        Event::Slide { action: ActionId(A_VOL), value, .. } => {
+            t.set_volume((value as u32 * 100 / SLIDER_MAX as u32) as u8);
+            Outcome::Render
+        }
         Event::Action(ActionId(id)) => {
             if id == A_PLAY_PAUSE { t.toggle(); return Outcome::Render; }
-            if id == A_PREV {
-                // Within the first three seconds "back" means the previous
-                // track; after that it means the start of this one — the
-                // behaviour every physical player has.
-                if t.position_ms() > 3000 { t.seek_to_ms(0); } else { t.skip(-1); }
+            if id == A_BACK {
+                let p = t.position_ms().saturating_sub(JUMP_MS);
+                t.seek_to_ms(p);
                 return Outcome::Render;
             }
-            if id == A_NEXT { t.skip(1); return Outcome::Render; }
-            if (SEEK_BASE..SEEK_BASE + SEEK_CELLS).contains(&id) {
-                let dur = t.duration_ms();
-                if dur > 0 {
-                    let cell = (id - SEEK_BASE) as u64;
-                    t.seek_to_ms(dur * cell / SEEK_CELLS as u64);
-                }
-                return Outcome::Render;
-            }
-            if (VOL_BASE..VOL_BASE + VOL_STEPS).contains(&id) {
-                let step = 100 / VOL_STEPS;
-                t.set_volume((((id - VOL_BASE) + 1) * step) as u8);
-                return Outcome::Render;
-            }
+            if id == A_FORWARD { let p = t.position_ms() + JUMP_MS; t.seek_to_ms(p); return Outcome::Render; }
+            if id == A_VOL_TOGGLE { t.vol_open = !t.vol_open; return Outcome::Render; }
+            if id == A_VOL_CLOSE { t.vol_open = false; return Outcome::Render; }
             if id >= TRACK_BASE {
                 let i = (id - TRACK_BASE) as usize;
                 if i < t.files.len() { t.idx = i; t.load(true); }
