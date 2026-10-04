@@ -69,7 +69,7 @@ pub fn show_boot_banner() {
     write_line(b"/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ", COLOR_CYAN);
     write_line(b"           /_/", COLOR_CYAN);
     blank_line();
-    write_line(b"  nopeekOS - AI-native Operating System v0.1.0", COLOR_BRIGHT);
+    write_line(b"  nopeekOS", COLOR_BRIGHT);
     write_line(b"  Phase 1 - Bare Metal Boot", COLOR_DARK);
     blank_line();
 }

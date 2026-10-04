@@ -2,7 +2,7 @@
 
 ## What is nopeekOS?
 
-An AI-native operating system, rethought from scratch.
+An operating system, rethought from scratch.
 Not a Unix clone. Not POSIX. No legacy.
 
 See README.md for the full vision and phase planning.

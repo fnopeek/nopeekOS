@@ -3,7 +3,7 @@ name = "nopeekos-kernel"
 version = "0.461.0"
 edition = "2024"
 authors = ["nopeek"]
-description = "nopeekOS – AI-native Operating System Kernel"
+description = "nopeekOS kernel"
 
 [features]
 installer = []

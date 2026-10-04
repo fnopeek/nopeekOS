@@ -85,7 +85,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     kprintln!("           /_/");
     kprintln!();
     // The real crate version, so a boot log identifies the image it came from.
-    kprintln!("[npk] AI-native Operating System v{}", env!("CARGO_PKG_VERSION"));
+    kprintln!("[npk] nopeekOS v{}", env!("CARGO_PKG_VERSION"));
     kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
 

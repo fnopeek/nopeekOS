@@ -11,8 +11,8 @@ pub fn intent_status(vault: &Vault) {
     let checks_passed = crate::audit::checks_passed();
 
     kprintln!();
-    kprintln!("  nopeekOS v{} – AI-native Operating System", env!("CARGO_PKG_VERSION"));
-    kprintln!("  ──────────────────────────────────────────");
+    kprintln!("  nopeekOS v{}", env!("CARGO_PKG_VERSION"));
+    kprintln!("  ──────────────────");
     kprintln!("  Uptime:        {}m {}s", uptime / 60, uptime % 60);
     kprintln!("  Phase:         2 (Capability Enforcement)");
     let cores = crate::smp::per_core::core_count();
@@ -1783,8 +1783,8 @@ pub fn intent_help_topic(topic: &str) {
 
 pub fn intent_about() {
     kprintln!();
-    kprintln!("  nopeekOS – AI-native Operating System");
-    kprintln!("  ──────────────────────────────────────");
+    kprintln!("  nopeekOS");
+    kprintln!("  ────────");
     kprintln!();
     kprintln!("  Not a Unix clone. Not POSIX. No legacy.");
     kprintln!("  Built for AI as the operator, humans as the conductor.");
