@@ -185,9 +185,20 @@ pub fn current() -> Palette {
 /// <0..255>` (255 = flat, ~180 = clearly see-through). Light mode stays
 /// lower because a near-white panel washes out faster.
 pub fn chrome_opacity() -> u32 {
-    let dflt = if is_light_theme() { 200 } else { 235 };
+    let dflt = if is_light_theme() { 150 } else { 235 };
     opacity_key("shade.chrome_opacity").unwrap_or(dflt)
 }
+
+/// Least luma (0..255) light glass lets through beneath dark ink — see
+/// `render::glass_blend`. The glass is see-through over bright parts of the
+/// wallpaper and lifts only the dark ones. `set shade.light_floor <0..255>`
+/// (0 = off). Dark mode: 0, its light ink needs no floor.
+pub fn glass_floor() -> u32 {
+    if !is_light_theme() { return 0; }
+    opacity_key("shade.light_floor").unwrap_or(LIGHT_GLASS_FLOOR)
+}
+
+const LIGHT_GLASS_FLOOR: u32 = 170;
 
 fn opacity_key(key: &str) -> Option<u32> {
     crate::config::get(key)

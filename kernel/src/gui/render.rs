@@ -156,6 +156,31 @@ fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// Rec. 601 luma, 0..255.
+fn luma(c: u32) -> u32 {
+    (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + (c & 0xFF) * 114) / 1000
+}
+
+/// Blend a glass fill over what lies beneath, with a readability floor.
+///
+/// `alpha` (0..256) is how see-through the glass is where the backdrop is
+/// bright. Where it is darker than `floor`, the fill gets just as much more
+/// weight as it takes to lift the result to `floor` — dark ink stays
+/// legible over a dark patch while a bright one shows through at `alpha`.
+/// Over a blurred backdrop this varies smoothly. `floor == 0` is a plain
+/// blend (dark theme: light ink needs no floor).
+pub fn glass_blend(fg: u32, bg: u32, alpha: u32, floor: u32) -> u32 {
+    let mut a = alpha.min(256);
+    if floor > 0 {
+        let (lf, lb) = (luma(fg), luma(bg));
+        if lb < floor && lf > floor {
+            let need = ((floor - lb) * 256).div_ceil(lf - lb);
+            a = a.max(need.min(256));
+        }
+    }
+    blend(fg, bg, a)
+}
+
 // ── Signed-distance-field rounded-corner AA (Hyprland-style) ──────────
 //
 // Q24.8 fixed-point. Pixel center at (px+0.5, py+0.5). Corner-arc-center
@@ -399,10 +424,11 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
     let wp = crate::gui::background::glass_source_ptr();
     if wp.is_null() { return None; }
     let generation = crate::gui::background::wallpaper_generation();
+    let floor = crate::shade::widgets::palette::glass_floor();
     let pitch_px = info.pitch as usize / 4;
     let (width, height) = (info.width as usize, info.height as usize);
     let mut k = 0xcbf29ce484222325u64;
-    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64,
+    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64, floor as u64,
               info.width as u64, info.height as u64] {
         k ^= v;
         k = k.wrapping_mul(0x0000_0100_0000_01b3);
@@ -416,7 +442,7 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
             let base = py * pitch_px;
             for px in 0..width {
                 let wpx = unsafe { *wprow.add(px) };
-                buf[base + px] = blend(bg_color, wpx, opacity);
+                buf[base + px] = glass_blend(bg_color, wpx, opacity, floor);
             }
         }
         *g = Some((k, pitch_px as u32, buf));

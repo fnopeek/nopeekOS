@@ -31,8 +31,9 @@ const DOCK_BOTTOM_GAP: u32 = 12;
 /// How much more see-through the terminal is in light mode (0..256). The
 /// same white share that frosts a dark wallpaper turns a light one into a
 /// sheet of paper: at 200 (dark's default) light glass hid the wallpaper,
-/// at 220 it was a white page. Over the blurred backdrop ~62 % reads as glass.
-const LIGHT_TERMINAL_OPACITY_DROP: u32 = 40;
+/// at 220 it was a white page. Light runs at ~40 % and relies on the
+/// readability floor (`palette::glass_floor`) over dark patches.
+const LIGHT_TERMINAL_OPACITY_DROP: u32 = 100;
 
 
 /// Focus halo. The focused tile bleeds a little accent into the gap around
@@ -2092,6 +2093,7 @@ impl Compositor {
                     // crisp glyphs, AA corners from the rasteriser, wallpaper in
                     // the gaps — no halo, no per-pill detection.
                     if win.is_dock || win.is_bar {
+                        let floor = crate::shade::widgets::palette::glass_floor();
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
@@ -2104,7 +2106,9 @@ impl Compositor {
                                 if a < 255 {
                                     let cur = render::read_pixel(shadow, info, dx, dy);
                                     let base = background::glass_base_at(info, dx, dy, cur);
-                                    if base != cur { render::put_pixel(shadow, info, dx, dy, base); }
+                                    render::put_pixel(shadow, info, dx, dy,
+                                        render::glass_blend(px & 0x00FF_FFFF, base, a, floor));
+                                    continue;
                                 }
                                 render::blend_pixel(shadow, info, dx, dy,
                                     px & 0x00FF_FFFF, a);
