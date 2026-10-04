@@ -1,17 +1,14 @@
-//! loft 0.2 — file browser, fresh rewrite against the v3 mockup.
+//! loft — file browser.
 //!
 //! Layout (top → bottom):
-//!   menu_bar      — Datei / Bearbeiten / Ansicht / Gehe zu / Hilfe
+//!   menu_bar      — File / Edit / View / Go / Help
 //!   toolbar       — back / forward / up / refresh + breadcrumb + search
-//!   body          — sidebar │ grid (with empty-state)
-//!   footer        — nav hints   ·   counts + selection
+//!   body          — sidebar │ grid or list (with empty-state)
 //!
 //! Auto-focused search filters the current directory live (substring,
-//! ASCII case-insensitive). Up/Down navigate the filtered grid;
-//! Enter opens the selected entry; Esc clears the search if non-empty,
-//! otherwise closes the window. Menu-bar clicks are intentionally
-//! no-ops in v0.2 — dropdown overlays land once `Widget::Popover`
-//! ships (Phase 11).
+//! ASCII case-insensitive). Up/Down navigate the filtered view;
+//! Enter opens the selected entry; Esc closes an open menu, then clears
+//! the search if non-empty, otherwise closes the window.
 
 #![no_std]
 
@@ -166,10 +163,10 @@ fn poll_event() -> PollResult {
 
 fn close_self() { unsafe { let _ = npk_close_widget(); } }
 
-// ── Bump allocator (1 MB — bigger than drun/loft 0.1 because the grid
-//    can cover hundreds of entries in a deep directory). State alloc'd
-//    before `persistent_mark` survives `alloc_reset` between commits;
-//    everything after the mark is rebuilt from scratch each frame. ──
+// ── Bump allocator (1 MB — the grid can cover hundreds of entries in a
+//    deep directory). State allocated before `persistent_mark` survives
+//    `alloc_reset` between commits; everything after the mark is rebuilt
+//    from scratch each frame. ──
 const HEAP_SIZE: usize = 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
@@ -291,8 +288,8 @@ struct Entry {
     name:    String,
     /// ASCII-lowercased mirror of `name`, computed once at parse
     /// time so refilter() doesn't allocate a fresh lowercase string
-    /// on every keystroke. Critical for typing latency once the
-    /// directory is large.
+    /// on every keystroke; matters for typing latency in large
+    /// directories.
     name_lc: String,
     /// For files: the file's own byte size. For folders: the recursive
     /// sum of every descendant file's size, filled in by
@@ -311,7 +308,7 @@ struct Entry {
     stats_pending: bool,
     /// UTC seconds since the Unix epoch, captured at write time by
     /// the kernel. Zero = unknown (RTC was unreadable when the entry
-    /// was created). Filled in from the v3 `npk_fs_list` ABI tail.
+    /// was created). Filled in from the `npk_fs_list` record tail.
     mtime:   u64,
 }
 
@@ -469,19 +466,12 @@ impl Loft {
     /// Resolve the handler app for a file name via its extension:
     /// `sys/config/associations` overrides first, then built-in defaults.
     /// Returns None for unknown types (loft does nothing on open).
-    /// Wie `associated_app`, aber mit dem VERZEICHNIS daneben.
+    /// Like `associated_app`, but with the directory alongside.
     ///
-    /// **Die Konfigurationen des Systems haben keine Endung**, und ohne
-    /// sie gab die Zuordnung `None` zurueck — ein Doppelklick auf
-    /// `sys/config/wifi` tat schlicht nichts. Das war nicht nur
-    /// unbequem: der Weg ueber `npk_open` ist der EINZIGE, der dem
-    /// Editor ein Schreibrecht fuer genau diese Datei mitgibt (der
-    /// Kernel vergibt es, weil der Benutzer auf die Datei gezeigt hat).
-    /// Ohne ihn konnte niemand eine mehrzeilige Konfiguration schreiben:
-    /// `store` ersetzt das Objekt mit EINER Zeile, und `spell` aus der
-    /// Shell bekommt weder WRITE noch eine Erlaubnis fuer den Pfad.
-    ///
-    /// Also: was unter `sys/config/` liegt, ist Text.
+    /// System configs have no extension, yet opening them must work: the
+    /// `npk_open` path is the only one that gives the editor write access to
+    /// exactly this file (the kernel grants it because the user pointed at
+    /// the file). So everything under `sys/config/` is text.
     fn associated_app_in(&self, dir: &str, name: &str) -> Option<String> {
         if dir == "sys/config" || dir.starts_with("sys/config/") {
             if let Some((_, app)) = self.assoc.iter().find(|(k, _)| *k == "conf") {
@@ -506,10 +496,9 @@ impl Loft {
             | "xml" | "html" | "htm" | "c" | "h" | "py" | "js" | "ts"
                 => Some("spell".to_string()),
             "png" => Some("iris".to_string()),
-            // Only what tune can actually decode today; a .flac would open
-            // a player that can say nothing but "unsupported format".
-            // Seit tune 0.2.0 auch Bewegtbild — aber nur H.264 in MP4, und
-            // ein fragmentiertes sagt es selbst, statt schwarz zu bleiben.
+            // Only what tune can actually decode; a .flac would open a
+            // player that can say nothing but "unsupported format". Video
+            // is H.264 in MP4 only.
             "mp3" | "wav" | "mp4" | "m4v" | "mov" | "m4a" | "aac" => Some("tune".to_string()),
             _ => None,
         }
@@ -714,8 +703,7 @@ impl Loft {
     }
 
     /// One row down. In the grid a row is `GRID_COLS` entries; in the list
-    /// — which is the default view — a row is ONE entry. Multiplying
-    /// unconditionally made Down skip three files at a time.
+    /// — the default view — a row is one entry.
     fn select_delta_y(&mut self, dy: isize) {
         let stride = match self.view_mode {
             ViewMode::Grid => GRID_COLS as isize,
@@ -855,11 +843,11 @@ fn render(lf: &Loft) -> Widget {
     let body = if lf.rename_open { render_rename_dialog(lf) } else { render_body(lf) };
 
     // Custom outer column instead of `prefab::panel`: panel's
-    // Padding-Xs + Spacing-Md kept the menu-bar bg from reaching
-    // the window edges + put a 12 px gap between menu and divider.
-    // Loft wants the menu strip + sidebar fill to be flush —
-    // file-manager idiom (Thunar / Files / Finder all do this).
-    // Footer removed (noise) — the body fills to the bottom edge.
+    // Padding-Xs + Spacing-Md would keep the menu-bar bg from reaching
+    // the window edges and put a 12 px gap between menu and divider.
+    // Loft wants the menu strip + sidebar fill flush — the
+    // file-manager idiom (Thunar / Files / Finder). No footer; the
+    // body fills to the bottom edge.
     let mut children: Vec<Widget> = alloc::vec![
         menu,
         Widget::Divider,
@@ -1058,10 +1046,10 @@ fn render_toolbar(lf: &Loft) -> Widget {
 
 /// Hand-rolled search input with always-visible chrome — `prefab::input`
 /// blends with the panel by design (drun's launcher look), but loft's
-/// toolbar wants the search bar to read as a discrete, framed widget
-/// matching the v3 mockup. Same magnifier prefix + Heading text +
-/// focus-accent border, plus a baseline `SurfaceMuted` fill and a
-/// `Border` stroke that's visible without focus too.
+/// toolbar wants the search bar to read as a discrete, framed widget.
+/// Same magnifier prefix + Heading text + focus-accent border, plus a
+/// baseline `SurfaceMuted` fill and a `Border` stroke that's visible
+/// without focus too.
 fn search_input(query: &str) -> Widget {
     let raw = Widget::Input {
         value:       query.to_string(),
@@ -1081,10 +1069,10 @@ fn search_input(query: &str) -> Widget {
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![
-            // Asymmetric on purpose: uniform Padding tied the side air to
-            // the row height, so shrinking the field to 30 px squeezed the
-            // magnifier against the border. (The Input adds ~4 px of its
-            // own chrome, so x=8 reads as the design's 12.)
+            // Asymmetric on purpose: uniform Padding ties the side air to the
+            // row height, so a 30 px field would squeeze the magnifier against
+            // the border. (The Input adds ~4 px of its own chrome, so x=8
+            // reads as the design's 12.)
             Modifier::PaddingXY { x: 8, y: 0 },
             Modifier::MinHeight(FIELD_H),
             Modifier::Background(Token::SurfaceMuted),
@@ -1146,10 +1134,9 @@ fn storage_meter() -> Option<Widget> {
 }
 
 fn render_body(lf: &Loft) -> Widget {
-    // Sidebar — PLACES (Home/Documents/Downloads/Pictures/Projects)
-    // + DEVICES (Filesystem/Trash) per the mockup. `nav_row`
-    // selected-state lights up when the current dir matches a
-    // sidebar path verbatim.
+    // Sidebar — Places (Home/Documents/Downloads/Pictures/Projects)
+    // + Devices (Filesystem/Trash). `nav_row` selected-state lights
+    // up when the current dir matches a sidebar path verbatim.
     let mut places_rows: Vec<Widget> = Vec::new();
     let mut devices_rows: Vec<Widget> = Vec::new();
     for (i, p) in lf.sidebar.iter().enumerate() {
@@ -1162,11 +1149,11 @@ fn render_body(lf: &Loft) -> Widget {
         if is_device(&p.label) { devices_rows.push(row); }
         else { places_rows.push(row); }
     }
-    // Sections scroll; the capacity meter is a fixed footer BELOW that
+    // Sections scroll; the capacity meter is a fixed footer below that
     // scroll, so it stays glued to the bottom edge at any window height.
-    // Putting it inside the scrolled column (or leaning on
-    // `prefab::sidebar_pane`, which appends its own trailing Spacer)
-    // left it floating in the middle of the leftover space.
+    // Inside the scrolled column (or with `prefab::sidebar_pane`, which
+    // appends its own trailing Spacer) it would float in the middle of
+    // the leftover space.
     let sections = Widget::Column {
         children:  alloc::vec![
             prefab::sidebar_section("PLACES",  places_rows),
@@ -1232,9 +1219,9 @@ fn render_body(lf: &Loft) -> Widget {
         align:   Align::Stretch,
         // Flex(1) makes the body absorb all leftover vertical space in
         // the parent Column. Sidebar inherits via Stretch align so its
-        // SurfaceMuted bg now reaches the footer divider regardless of
-        // grid content height. Without this the body is intrinsic-sized
-        // and the bg ends where its tallest child does.
+        // SurfaceMuted bg reaches the bottom regardless of grid content
+        // height. Without this the body is intrinsic-sized and the bg
+        // ends where its tallest child does.
         modifiers: alloc::vec![Modifier::Flex(1)],
     }
 }
@@ -1265,8 +1252,7 @@ fn render_grid(lf: &Loft) -> Widget {
 /// Detail-list view: one row per entry, columns Name | Size | Files |
 /// Type | Modified, spanning the full window width (Name flexes to fill
 /// the slack). Headers are clickable — a click sorts by that column,
-/// clicking the active column flips direction (▲/▼ marker). English
-/// headers (Florian's request — international FS UX).
+/// clicking the active column flips direction (▲/▼ marker).
 fn render_list(lf: &Loft) -> Widget {
     let source = lf.source();
     // Folder size/count is only computed for the browse listing; in
@@ -1512,9 +1498,9 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         Event::Key(KeyCode::Down)      => { lf.select_delta_y( 1); Outcome::Rerender }
         Event::Key(KeyCode::Left)      => {
             // Compositor consumes Left/Right when the search Input
-            // is focused; if we get this event it means search is
-            // empty AND focus is somewhere non-editing — fall back
-            // to grid horizontal nav.
+            // is focused; if we get this event, search is empty and
+            // focus is somewhere non-editing — fall back to grid
+            // horizontal nav.
             lf.select_delta_x(-1); Outcome::Rerender
         }
         Event::Key(KeyCode::Right)     => { lf.select_delta_x( 1); Outcome::Rerender }
@@ -1770,9 +1756,9 @@ fn dir_signature(entries: &[Entry]) -> u64 {
 
 /// Recursive listing — `recursive=1` to the host fn — for search
 /// mode. Each entry's `name` is the full sub-path under `prefix`
-/// (e.g. "wallpapers/aurora" when listing under
-/// "home/florian/pictures"), so a search hit visually points at the
-/// match's location. Skips synthetic `.dir` markers.
+/// (e.g. "wallpapers/aurora" when listing under "home/<user>/pictures"),
+/// so a search hit visually points at the match's location. Skips
+/// synthetic `.dir` markers.
 fn list_dir_recursive(prefix: &str) -> Vec<Entry> {
     list_dir_internal(prefix, 1)
 }
@@ -1893,11 +1879,9 @@ fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
 }
 
 fn dir_exists(path: &str) -> bool {
-    // npk_fs_stat returns 17 bytes since kernel v0.146 (size + is_dir
-    // + mtime). Kept buffer-sized to the wider shape; the is_dir byte
-    // sits at offset 8 in both v2 and v3 ABI so the check stays
-    // forward-compat against future appends. `n > 0` distinguishes a
-    // valid stat from "not found" (0) or "error" (-1).
+    // `npk_fs_stat` writes 17 bytes (size + is_dir + mtime); the is_dir
+    // byte sits at offset 8. `n > 0` distinguishes a valid stat from
+    // "not found" (0) or "error" (-1).
     let mut out = [0u8; 17];
     let n = unsafe {
         npk_fs_stat(
@@ -1964,10 +1948,6 @@ fn unique_in(dir: &str, name: &str) -> String {
     }
 }
 
-// Wire: name\0size_le_u64(8)\0is_dir_u8(1)\0mtime_le_u64(8) on
-// kernel ≥ v0.146; older kernels stop after is_dir (10 trailing
-// bytes). Parse defensively — accept either shape so the loft
-// .wasm boots on a stale-kernel disk during dev cycles.
 // ── Path helpers ──────────────────────────────────────────────────────
 
 fn parent_path(path: &str) -> String {
@@ -2008,9 +1988,8 @@ fn type_for(e: &Entry) -> String {
 
 /// Render a Unix-second timestamp as "YYYY-MM-DD HH:MM" UTC. Zero
 /// → "—" (mtime unknown — RTC was unreadable when the entry was
-/// created, or the entry was written by a pre-v3 kernel that
-/// didn't have the field). No std::time, no chrono — pure integer
-/// math against the proleptic Gregorian calendar, matching what
+/// written). No std::time, no chrono — pure integer math against the
+/// proleptic Gregorian calendar, matching what
 /// `kernel/src/drivers/rtc.rs::datetime_to_unix` reverses.
 fn format_mtime(secs: u64) -> String {
     if secs == 0 { return "—".to_string(); }
@@ -2073,10 +2052,10 @@ fn icon_for(e: &Entry) -> IconId {
         "md" | "txt" | "log" | "cfg" | "toml" | "json" | "yaml" | "yml" => IconId::FileText,
         "rs" | "wasm" | "sh" | "py" | "c" | "h" | "hpp" | "cpp" | "go" => IconId::Code,
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" => IconId::Image,
-        // The icon says what the file IS, not what we can play yet.
+        // The icon says what the file is, not what we can play.
         "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac" => IconId::FileAudio,
-        // Kein eigenes Filmsymbol im Atlas — `Image` ist das naechste, das
-        // stimmt: ein Film ist eine Folge davon.
+        // No film icon in the atlas — `Image` is the closest that fits: a
+        // film is a sequence of them.
         "mp4" | "m4v" | "mov" | "mkv" | "webm" | "avi" => IconId::Image,
         _ => IconId::File,
     }
@@ -2093,9 +2072,9 @@ fn push_usize(s: &mut String, mut n: usize) {
 }
 
 fn push_size(s: &mut String, bytes: u64) {
-    // Powers of 1024 — KB / MB / GB. Two decimals once we leave bytes,
-    // mockup-aligned ("2.4 GB" rather than "2456 MB"). Pure integer
-    // math (no f64 in no_std without messing with the linker).
+    // Powers of 1024 — KB / MB / GB. Two decimals once we leave bytes
+    // ("2.4 GB" rather than "2456 MB"). Pure integer math (no f64 in
+    // no_std without messing with the linker).
     const K: u64 = 1024;
     const M: u64 = K * 1024;
     const G: u64 = M * 1024;
@@ -2196,10 +2175,9 @@ pub extern "C" fn _start() {
                     // on disk (new screenshot, download, …). Skip while a
                     // search or menu is active so we don't disturb the user.
                     if loft.open_menu.is_none() && loft.query.is_empty() {
-                        // Probe via a THROWAWAY listing + reset so an
-                        // unchanged folder leaks nothing in the bump heap
-                        // (this runs ~every 1.4 s). Only a real change does
-                        // the persistent re-list + re-render.
+                        // Probe via a throwaway listing + reset so an unchanged
+                        // folder leaks nothing in the bump heap. Only a real
+                        // change does the persistent re-list + re-render.
                         alloc_reset(persistent_mark);
                         let new_sig = dir_signature(&list_dir(&loft.current));
                         alloc_reset(persistent_mark);
