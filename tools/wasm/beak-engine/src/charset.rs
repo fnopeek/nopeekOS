@@ -2,9 +2,8 @@
 //!
 //! The engine takes `&str`, so bytes that are not valid UTF-8 have to become
 //! valid UTF-8 somewhere. Doing that with `from_utf8().unwrap_or("")` is a
-//! cliff: ONE bad byte discards the entire document, and the reader gets a
-//! blank page. google.ch hit exactly that — it serves ISO-8859-1, so every
-//! umlaut in it was an invalid byte.
+//! cliff: one bad byte discards the entire document. A page served as
+//! ISO-8859-1 has an invalid byte in every umlaut.
 //!
 //! Only two encodings are handled: UTF-8, and windows-1252 for everything
 //! legacy-Latin. That covers the Western web; a page in Shift_JIS or GBK
@@ -33,7 +32,7 @@ pub fn detect(content_type: Option<&str>, body: &[u8]) -> Encoding {
     if let Some(enc) = meta_encoding(body) {
         return enc;
     }
-    // Nothing declared. Valid UTF-8 is overwhelmingly likely to BE UTF-8;
+    // Nothing declared. Valid UTF-8 is overwhelmingly likely to be UTF-8;
     // anything else is legacy-Latin far more often than not. Note this also
     // makes pure ASCII come out as UTF-8, which is correct and free.
     if core::str::from_utf8(body).is_ok() {
@@ -60,7 +59,7 @@ fn charset_param(content_type: &str) -> Option<&str> {
 ///
 /// Bounded to the first 1024 bytes, as the HTML standard specifies: the
 /// declaration has to come early to be usable at all, and scanning a whole
-/// 3 MB document for it would cost more than it saves.
+/// large document for it would cost more than it saves.
 ///
 /// Returns the decoded `Encoding` rather than the label, so nothing borrows
 /// from the scratch buffer below.
@@ -68,8 +67,8 @@ fn meta_encoding(body: &[u8]) -> Option<Encoding> {
     // The document is not valid UTF-8 — that is the whole reason we are
     // here — so it cannot simply be viewed as `&str`. Every byte above ASCII
     // becomes a placeholder: markup and charset labels are ASCII, so nothing
-    // that matters is lost, and a non-ASCII byte sitting in a comment or a
-    // title BEFORE the declaration no longer cuts the scan short.
+    // that matters is lost, and a non-ASCII byte in a comment or a title
+    // before the declaration does not cut the scan short.
     const HEAD: usize = 1024;
     let n = body.len().min(HEAD);
     let mut ascii = [0u8; HEAD];
@@ -206,7 +205,7 @@ pub fn decoded_len(src: &[u8]) -> usize {
     src.iter().map(|&b| cp1252_to_utf8(b).1).sum()
 }
 
-/// Transcode windows-1252 → UTF-8 **inside** `buf`, in place.
+/// Transcode windows-1252 → UTF-8 inside `buf`, in place.
 ///
 /// `len` is the current byte count; the result is longer, so the work goes
 /// back to front: the last source byte is read before anything has been
@@ -233,7 +232,7 @@ pub fn transcode_in_place(buf: &mut [u8], len: usize) -> Option<usize> {
 
 /// Replace every byte that is not part of a valid UTF-8 sequence with `?`.
 ///
-/// Length-preserving, so it needs no room. For a document that IS UTF-8 but
+/// Length-preserving, so it needs no room. For a document that is UTF-8 but
 /// carries a few broken bytes, this is the right repair — transcoding the
 /// whole thing as windows-1252 instead would double-encode every correct
 /// accent in it.
@@ -264,9 +263,8 @@ pub const TRUNCATED: &str = "windows-1252 (no room, repaired)";
 
 /// Bring `buf[..len]` to valid UTF-8 in place, and say what it took.
 ///
-/// This is the whole policy in one place, because the failure it replaces —
-/// `from_utf8().unwrap_or("")` — was a blank page, and the one thing every
-/// branch here must guarantee is that a document never becomes nothing.
+/// The whole policy in one place. Every branch must guarantee that a
+/// document never becomes nothing.
 pub fn to_utf8_in_place(
     buf: &mut [u8],
     len: usize,
@@ -299,7 +297,7 @@ mod tests {
     use super::*;
 
 
-    /// A document that IS UTF-8 but carries a stray bad byte must keep its
+    /// A document that is UTF-8 but carries a stray bad byte must keep its
     /// correct accents — transcoding the whole thing would double-encode
     /// every one of them.
     #[test]
@@ -314,7 +312,7 @@ mod tests {
         assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "grün?");
     }
 
-    /// The google.ch shape end to end: Latin-1 bytes, header says so.
+    /// End to end: Latin-1 bytes, and the header says so.
     #[test]
     fn a_latin1_document_becomes_readable_utf8() {
         let mut buf = [0u8; 64];
@@ -326,7 +324,7 @@ mod tests {
     }
 
     /// The property that matters most: whatever the input, the result is
-    /// valid UTF-8 and never empty. That is the blank page, gone.
+    /// valid UTF-8 and never empty.
     #[test]
     fn no_input_can_produce_an_empty_or_invalid_document() {
         let patterns: [&[u8]; 6] = [
@@ -400,7 +398,7 @@ mod tests {
     #[test]
     fn transcoding_grows_the_text_in_place() {
         let mut buf = [0u8; 32];
-        buf[..3].copy_from_slice(&[b'f', 0xFC, b'r']); // "für" in Latin-1
+        buf[..3].copy_from_slice(&[b'f', 0xFC, b'r']); // U+00FC between f and r, in Latin-1
         let n = transcode_in_place(&mut buf, 3).unwrap();
         assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "für");
     }

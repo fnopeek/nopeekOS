@@ -1,17 +1,16 @@
-//! forms.rs — HTML forms (Stage 0: no JS).
+//! forms.rs — HTML forms.
 //!
 //! Three pieces, all host-testable and host-free:
 //!   * `collect` — the document's `<form>`s and their controls, in document
 //!     order, each keyed by its element `seq` (see `dom::Element::seq`).
-//!   * `FormState` — the *user's* edits only (typed text, checked boxes, which
+//!   * `FormState` — the user's edits only (typed text, checked boxes, which
 //!     control has focus). Unmodified controls fall back to their attributes,
 //!     so a fresh state is exactly the page's defaults.
 //!   * `submit` — the successful controls of one form, URL-encoded
 //!     (`application/x-www-form-urlencoded`, HTML §4.10.21/22).
 //!
 //! The shell owns the state and does the navigating; layout only reads state
-//! to paint the control. No JS means no `onsubmit`/validation — a GET form is
-//! a URL builder, which is all a search box needs.
+//! to paint the control. Constraint validation is not implemented.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -61,23 +60,18 @@ pub struct Control {
     pub form: Option<usize>,
     /// `<select>` choices as (value, label).
     pub options: Vec<(String, String)>,
-    /// Was auf dem Bedienelement STEHT — der Text eines `<button>`, das
-    /// `value` eines `<input type=submit>`.
-    ///
-    /// Getrennt von `default_value`, weil es etwas anderes ist: der Text
-    /// eines `<button>` ist NICHT sein Wert (HTML §4.10.6). Gebraucht wird er
-    /// zum Hinsehen — Googles Einwilligungsseite hat vier Formulare auf
-    /// dieselbe Adresse, und ohne die Beschriftung sind „Alle ablehnen" und
-    /// „Alle akzeptieren" im Log nicht zu unterscheiden.
+    /// What the control displays: the text of a `<button>`, the `value` of an
+    /// `<input type=submit>`. Kept apart from `default_value` because a
+    /// button's text is not its value (HTML §4.10.6); used to tell otherwise
+    /// identical forms apart in logs.
     pub label: String,
 }
 
 pub struct FormDef {
     pub action: String,
     pub method_get: bool,
-    /// Die `seq` des `<form>` selbst. Ein Skript schickt ueber `form.submit()`
-    /// ein ELEMENT ab, nicht einen Knopf — ohne diese Zahl ist das Formular
-    /// aus dem Baum nicht wiederzufinden.
+    /// The `seq` of the `<form>` itself. `form.submit()` submits an element,
+    /// not a button, and this is how the form is found again in the tree.
     pub seq: u32,
 }
 
@@ -206,15 +200,13 @@ fn control_of(e: &Element, kind: ControlKind, form: Option<usize>) -> Control {
             .unwrap_or_default();
     }
     if kind.is_submit() && e.tag == "input" && e.attr("value").is_none() {
-        // A bare `<input type=submit>` still submits a name=value pair using
-        // the UA's default label. Only a MISSING `value` gets it: HTML
-        // §4.10.5.1.20 makes `value=""` an explicit empty label, and pages
-        // rely on that to put their own icon there by CSS — DDG's search
-        // button carries a magnifier that way, and stamping "Absenden" into it
-        // both hid the icon and submitted a value the page never asked for.
+        // A bare `<input type=submit>` still submits a name=value pair using the
+        // UA's default label. Only a missing `value` gets it: HTML §4.10.5.1.20
+        // makes `value=""` an explicit empty label, which pages use to show their
+        // own icon via CSS.
         default_value = "Absenden".to_string();
     }
-    // Die Beschriftung: bei `<button>` der Text, bei `<input>` sein `value`.
+    // The label: a `<button>`'s text, an `<input>`'s `value`.
     let mut label = if e.tag == "button" { text_of(e) } else { default_value.clone() };
     if label.len() > 60 { label.truncate(60); }
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -271,10 +263,9 @@ pub struct FormState {
     pub focus: Option<u32>,
     /// Caret position in the focused control's value, as a byte offset.
     pub caret: usize,
-    /// Angefangene UTF-8-Folge. **Ein Tastendruck traegt ein BYTE, und `ä`
-    /// sind zwei** — das erste allein ist noch kein Zeichen und darf nicht in
-    /// den Wert, sonst stuende dort kein gueltiges UTF-8. Fuer ASCII bleibt
-    /// der Puffer immer leer.
+    /// Pending UTF-8 sequence. A key press carries one byte and U+00E4 is two;
+    /// a lone lead byte must not enter the value, or it would not be valid
+    /// UTF-8. Always empty for ASCII.
     pub pending: [u8; 4],
     pub pending_len: u8,
 }
@@ -284,15 +275,14 @@ impl FormState {
     pub fn value_or<'a>(&'a self, seq: u32, default: &'a str) -> &'a str {
         self.values.get(&seq).map(|s| s.as_str()).unwrap_or(default)
     }
-    /// Der Wert, den der Benutzer gesetzt hat — oder `None`, wenn er das Feld
-    /// nie angefasst hat. `value_or` kann das nicht sagen: dort ist „nie
-    /// getippt" von „leer getippt" nicht zu unterscheiden, und ein Neumalen
-    /// muss den Unterschied kennen (leer heisst Platzhalter).
+    /// The value the user set, or `None` if the field was never touched.
+    /// `value_or` cannot tell "never typed" from "typed empty", and a repaint
+    /// needs that difference (empty shows the placeholder).
     pub fn value_set(&self, seq: u32) -> Option<&str> {
         self.values.get(&seq).map(|s| s.as_str())
     }
-    /// Wurde dieses Kaestchen ueberhaupt angefasst? `None` heisst: der
-    /// Vorgabewert aus dem Attribut gilt noch.
+    /// Was this box touched at all? `None` means the attribute default still
+    /// applies.
     pub fn checked_set(&self, seq: u32) -> Option<bool> {
         self.checked.get(&seq).copied()
     }
@@ -308,8 +298,8 @@ impl FormState {
     pub fn set_value(&mut self, seq: u32, v: String) {
         self.values.insert(seq, v);
     }
-    /// Ein Haekchen direkt setzen. Der Weg fuer ein Skript und fuer eine
-    /// Probe; der Benutzerweg ist `toggle`, der die Radiogruppe mitfuehrt.
+    /// Set a check mark directly, for scripts and probes. The user path is
+    /// `toggle`, which also updates the radio group.
     pub fn set_checked(&mut self, seq: u32, on: bool) {
         self.checked.insert(seq, on);
     }
@@ -330,8 +320,8 @@ impl FormState {
             self.checked.insert(seq, !now);
         }
     }
-    /// Advance a `<select>` to its next option (we have no dropdown popover
-    /// inside the canvas yet — clicking cycles, which is enough to pick).
+    /// Advance a `<select>` to its next option. There is no dropdown popover;
+    /// clicking cycles.
     pub fn cycle_select(&mut self, forms: &Forms, seq: u32) {
         let c = match forms.get(seq) {
             Some(c) if c.kind == ControlKind::Select && !c.options.is_empty() => c,
@@ -369,10 +359,9 @@ pub fn submit(forms: &Forms, state: &FormState, activated: Option<u32>) -> Optio
     build(forms, state, form, activated)
 }
 
-/// Wie `submit`, aber fuer ein `<form>`-ELEMENT — das ist der Weg, den ein
-/// Skript nimmt (`form.submit()`). Kein Knopf ist dabei aktiviert, also
-/// traegt auch keiner seinen Namen bei; genau das schreibt die Spezifikation
-/// fuer den skriptgesteuerten Fall vor.
+/// Like `submit`, but for a `<form>` element: the path `form.submit()`
+/// takes. No button is activated, so none contributes its name, as the
+/// spec requires for script-driven submission.
 pub fn submit_form(forms: &Forms, state: &FormState, form_seq: u32) -> Option<Submission> {
     let form = forms.forms.iter().position(|f| f.seq == form_seq)?;
     build(forms, state, form, None)
@@ -524,9 +513,9 @@ mod tests {
 
     #[test]
     fn real_world_search_forms() {
-        // Markup as shipped by the two search boxes we actually target. Both
-        // carry hidden fields that must ride along, and a submit button with
-        // no `name` (not a successful control).
+        // Markup as shipped by two real search boxes. Both carry hidden fields
+        // that must ride along, and a submit button with no `name` (not a
+        // successful control).
         let marginalia = "<body><form id=\"search-form\" action=\"/search\" method=\"get\">\
              <input type=\"hidden\" name=\"profile\" value=\"corpo\">\
              <input type=\"text\" value=\"\" placeholder=\"Search the web!\" name=\"query\" id=\"searchInput\" />\
@@ -564,15 +553,8 @@ mod tests {
         assert!(submit(&f, &st, None).is_none());
     }
 
-    /// **Die Beschriftung ist nicht der Wert.** Der Text eines `<button>`
-    /// ist laut HTML §4.10.6 nicht sein `value`, und `collect` speichert ihn
-    /// deshalb getrennt.
-    ///
-    /// Gebraucht wird er zum Hinsehen: Googles Einwilligungsseite traegt vier
-    /// Formulare auf dieselbe Adresse, und im Log sahen sie alle gleich aus —
-    /// „Alle ablehnen" und „Alle akzeptieren" waren nicht zu unterscheiden.
-    /// Wer da blind das erste nimmt, wirft eine Muenze ueber eine
-    /// Entscheidung des Benutzers.
+    /// The label is not the value: a `<button>`'s text is not its `value`
+    /// (HTML §4.10.6), so `collect` stores it separately.
     #[test]
     fn ein_knopf_traegt_seine_beschriftung_getrennt_vom_wert() {
         let f = collect(&crate::dom::parse(
@@ -584,13 +566,13 @@ mod tests {
         let b: Vec<(&str, &str)> = f.controls.iter().filter(|c| c.kind.is_submit())
             .map(|c| (c.label.as_str(), c.default_value.as_str())).collect();
         assert_eq!(b, [
-            // Text steht in `label`, das `value` bleibt das `value`.
+            // Text goes to `label`; `value` stays the `value`.
             ("Alle ablehnen", "0"),
-            // Mehrfache Leerzeichen werden zusammengezogen.
+            // Runs of spaces are collapsed.
             ("Alle akzeptieren", ""),
-            // Bei `<input>` ist die Beschriftung sein `value` …
+            // For `<input>` the label is its `value` …
             ("Los", "Los"),
-            // … und ohne `value` die Vorgabe des Wirts.
+            // … and without `value`, the UA default.
             ("Absenden", "Absenden"),
         ]);
     }

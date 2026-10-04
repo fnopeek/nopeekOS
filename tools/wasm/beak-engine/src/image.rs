@@ -2,8 +2,8 @@
 //!
 //! PNG (grayscale/RGB/palette/gray+alpha, bit depths 1/2/4/8/16, non-interlaced,
 //! with PLTE + tRNS transparency), JPEG (baseline + progressive, via the
-//! no_std zune-jpeg decoder), ICO (`ico`) and SVG (`svg`). Other formats (GIF,
-//! WebP) fall back to a labelled placeholder box in layout. The
+//! no_std zune-jpeg decoder), ICO (`ico`), SVG (`svg`) and lossy WebP (`webp`).
+//! Other formats (GIF) fall back to a labelled placeholder box in layout. The
 //! shell fetches the bytes (the engine is host-free); the engine decodes them
 //! into `Image`s keyed by the original `src`, ready for layout + paint.
 
@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use hashbrown::HashMap;
 
-/// A decoded image: premultiplied? no — straight BGRA, top-down, `w`×`h`.
+/// A decoded image: straight (not premultiplied) BGRA, top-down, `w`×`h`.
 pub struct Image {
     pub bgra: Vec<u8>,
     pub w: u32,
@@ -23,24 +23,20 @@ pub struct Image {
 /// attribute exactly as written in the HTML (the shell stores them so).
 pub type ImageMap = HashMap<String, Rc<Image>>;
 
-/// Cap on decoded pixels per ONE image — a decompression bomb declares
-/// 40000×40000 in a header of 30 bytes, and this is where that is refused
-/// before anything is allocated for it.
+/// Cap on decoded pixels per image. A decompression bomb declares
+/// 40000×40000 in a 30-byte header; this refuses it before anything is
+/// allocated.
 ///
-/// It is NOT a memory policy: `zeroed` fails gracefully and the heap grows.
-/// So it belongs far above any picture a camera or a screen produces — a phone
-/// photograph is 12 MP and a 4K screenshot 8.3 MP, and the old 4 MP refused
-/// both. 32 MP is 8000×4000.
+/// Not a memory policy (`zeroed` fails gracefully), so it sits far above any
+/// camera photo or screenshot. 32 MP is 8000×4000.
 pub(crate) const MAX_PIXELS: usize = 32_000_000;
 
 /// Why an image did not make it into the store.
 ///
-/// The two cases look identical in code (`decode` gave `None`, or the budget
-/// said no) and are opposite at the device: one is a picture we cannot read,
-/// the other a limit WE set on a picture that is perfectly fine. Reporting
-/// them as one sentence — "undecodable or over budget" — sent a whole session
-/// after a JPEG decoder that was never at fault
-/// ([[feedback_a_denial_and_a_timeout_are_two_failures]]).
+/// Both look the same in code (`decode` gave `None`, or the budget said no)
+/// but mean opposite things: a picture we cannot read, or a limit we set on
+/// a picture that is fine. They are reported separately so a budget clip is
+/// not mistaken for a decoder bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reject {
     /// No decoder took the bytes: unsupported format, or malformed data.
@@ -61,7 +57,7 @@ impl core::fmt::Display for Reject {
     }
 }
 
-/// Allocate `n` zeroed bytes WITHOUT aborting on OOM — `try_reserve` returns
+/// Allocate `n` zeroed bytes without aborting on OOM — `try_reserve` returns
 /// `Err` instead of calling `handle_alloc_error`, so an oversize image degrades
 /// to a placeholder (decode → `None`) rather than killing the whole app/tab.
 pub(crate) fn zeroed(n: usize) -> Option<Vec<u8>> {
@@ -82,7 +78,7 @@ pub fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
     if meta.trim_end().to_ascii_lowercase().ends_with("base64") {
         return base64_decode(payload);
     }
-    // Percent-decoding. `+` is NOT a space here (that is form encoding, not
+    // Percent-decoding. `+` is not a space here (that is form encoding, not
     // RFC 2397) — treating it as one corrupts SVG path data.
     let b = payload.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -186,13 +182,9 @@ fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     }
     let out = dec.decode().ok()?;
     let count = w.checked_mul(h)?;
-    // How many channels came back, measured rather than assumed. We ask for
-    // RGB, and a YCbCr source obliges — but a SINGLE-COMPONENT (grayscale)
-    // JPEG returns one byte per pixel whatever was requested, and
-    // `get_output_colorspace` just echoes the request rather than reporting
-    // that. The buffer length is the only truthful signal. Wikipedia serves
-    // its scanned aerial photographs exactly this way; assuming 3 channels
-    // threw the whole image away and left a blank figure on the page.
+    // Count the channels from the buffer length instead of assuming 3: a
+    // single-component (grayscale) JPEG returns one byte per pixel whatever
+    // was requested, and `get_output_colorspace` just echoes the request.
     let channels = out.len().checked_div(count)?;
     if !(1..=4).contains(&channels) {
         return None;
@@ -257,7 +249,7 @@ fn decode_png(data: &[u8]) -> Option<Image> {
                     return None;
                 }
                 // Early dimension guard: reject an oversize image at IHDR (the
-                // FIRST chunk) so we never accumulate its IDAT / allocate raw +
+                // first chunk) so we never accumulate its IDAT / allocate raw +
                 // bgra — the OOM spike is bounded before it starts.
                 if (width as usize).saturating_mul(height as usize) > MAX_PIXELS {
                     return None;
@@ -455,51 +447,32 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 // ── Pixel budgets ───────────────────────────────────────────────────────────
 //
-// These used to be four slices of a `static mut HEAP: [u8; 128 MB]` — shares of
-// a pot nobody measured. The heap grows now (see `GrowingHeap` in the shell),
-// so they are not shares any more and they are not what stops beak from
-// running out of memory. What they still do is name the point where we stop
-// believing a page is legitimate: a document may not make us decode an
-// unbounded number of pixels just by asking.
+// Not a memory policy — the heap grows, and `zeroed` uses `try_reserve` and
+// degrades to a placeholder. These are an anti-abuse ceiling: a document may
+// not make us decode an unbounded number of pixels just by asking. They sit
+// well above what heavy real pages decode (over 100 MB of BGRA is normal for
+// a modern CMS front page). Every clip is logged with its `Reject` reason.
 //
-// **They were set from a guess, and the guess was under a normal page.**
-// arcade.ch — a Swiss IT company's front page, 5.3 MB of pictures on the wire —
-// decodes to 131 MB of BGRA across 50 images. The budget ran out after #49 and
-// dropped the last two logos. Nothing on that page is unreasonable: eleven
-// 1152×1152 PNGs and three 1920×1080 headers, each painted into a box a few
-// hundred pixels wide. That is what today's CMS ships.
-//
-// So the numbers are now what they claim to be — an anti-abuse ceiling, an
-// order of magnitude above the worst REAL page measured, not a memory policy.
-// The memory policy is one layer down and can be measured there: `zeroed`
-// uses `try_reserve` and degrades to a placeholder, and the heap grows.
-// **Every clip still says so in the log, and now it says WHICH clip** (see
-// `Reject`) — the next real page that hits one will tell us.
-//
-// They stay four rather than one because a page full of icons must not be able
-// to starve its `<img>`s, or the reverse.
+// Four separate budgets so a page full of icons cannot starve its `<img>`s,
+// or the reverse.
 
-/// Decoded BGRA one page's `<img>`s may hold.
-///
-/// 131 MB measured on arcade.ch, so 128 MB was BELOW the normal case. A page
-/// that wants more than a gigabyte of pixels is no longer a page.
+/// Decoded BGRA one page's `<img>`s may hold. A page that wants more than a
+/// gigabyte of pixels is no longer a page.
 pub(crate) const TOTAL_BUDGET: usize = 1024 * 1024 * 1024;
 
 /// Decoded BGRA the cross-navigation cache may hold for
 /// `background-image`/`mask-image` layers.
 ///
 /// Half of what the `<img>` cache gets, because backgrounds are sprites and
-/// icons rather than photographs — and counted SEPARATELY from it, because two
+/// icons rather than photographs — and counted separately from it, because two
 /// stores sharing one constant would hold twice the memory the number says.
 pub(crate) const CSS_CACHE_BUDGET: usize = 64 * 1024 * 1024;
 
 /// Decoded BGRA the cross-navigation `<img>` cache may hold.
 ///
-/// The pictures a live page is still using cost nothing here (`Rc`), so this
-/// bounds only what NO page holds any more — the price of going back being
-/// free. Measured on the device: four navigations across two Wikipedia pages
-/// filled 3 MB of it — but ONE arcade.ch is 131 MB, and a cache that cannot
-/// hold a single page it just left buys nothing on the way back.
+/// Pictures a live page still uses cost nothing here (`Rc`), so this bounds
+/// only what no page holds any more. It must fit at least one heavy page, or
+/// going back to the page just left gains nothing.
 pub(crate) const IMG_CACHE_BUDGET: usize = 256 * 1024 * 1024;
 
 /// Decoded BGRA one page's `background-image`/`mask-image` layers may hold.

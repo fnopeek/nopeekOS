@@ -41,9 +41,9 @@ fn apply_picture(pic: &mut Element, media: Media) {
         if e.tag != "source" {
             continue;
         }
-        // A `type` we cannot decode has to be SKIPPED, not taken and then
-        // failed: taking an `image/webp` source would replace a picture that
-        // renders today with one that renders nothing.
+        // A `type` we cannot decode has to be skipped, not taken and then failed:
+        // taking an `image/webp` source would replace a picture that renders with
+        // one that renders nothing.
         if let Some(t) = e.attr("type") {
             if !decodable_type(t) {
                 continue;
@@ -80,9 +80,9 @@ fn apply_picture(pic: &mut Element, media: Media) {
             continue;
         }
         set_attr(e, "src", &url);
-        // A `<source>`'s own `width`/`height` are the image's dimensions when
-        // that source is used — that is the whole point of the wide-viewport
-        // variant (Wikipedia's footer swaps a 25×25 icon for an 84×29 button).
+        // A `<source>`'s own `width`/`height` are the image's dimensions when that
+        // source is used, e.g. a small icon below a breakpoint and a wider button
+        // above it.
         if let Some(w) = &w {
             set_attr(e, "width", w);
         }
@@ -94,8 +94,8 @@ fn apply_picture(pic: &mut Element, media: Media) {
 
 /// `srcset` on a bare `<img>`: only used when there is no `src` to fall back
 /// on, or when the chosen candidate is a different URL at 1x. Density
-/// candidates above 1x are deliberately NOT taken — we render at 1x, and
-/// fetching the 2x asset would double the bytes for no visible gain.
+/// candidates above 1x are deliberately not taken: we render at 1x, and the
+/// 2x asset would cost bytes for no visible gain.
 fn apply_img_srcset(img: &mut Element, media: Media) {
     let Some(set) = img.attr("srcset").map(ToString::to_string) else { return };
     let sizes = img.attr("sizes").map(ToString::to_string);
@@ -118,32 +118,23 @@ fn set_attr(el: &mut Element, name: &str, value: &str) {
 /// The formats `image::decode` handles. Anything else must not be selected.
 fn decodable_type(t: &str) -> bool {
     let t = t.trim().to_ascii_lowercase();
-    // `image/webp` is deliberately NOT here, even though `webp::decode` exists
-    // since 0.40.0. Two measured reasons, both against taking it:
-    //
-    // 1. The type says nothing about lossy vs lossless. We decode `VP8 ` only,
-    //    so an `image/webp` source could still be a `VP8L` we have to decline —
-    //    and by then the `<img>` fallback is already gone. That is the exact
-    //    trade the skip below was written for.
-    // 2. It costs more. Under wasmi the same picture is 597 instructions per
-    //    pixel as WebP against 220 as JPEG (beakbench, 2026-08-25). The
-    //    `<picture>` markup on the corpus pairs every webp source with a JPEG
-    //    one-for-one (236 : 236), so declining loses no image at all — it just
-    //    takes the cheaper of two encodings of the same photo.
-    //
-    // The decoder earns its keep on the OTHER case: a bare `<img src="…webp">`
-    // with no fallback, which is 87 of 118 images on srf.ch.
+    // `image/webp` is deliberately not here although `webp::decode` exists:
+    // 1. The type does not say lossy vs lossless. Only `VP8 ` is decoded, so an
+    //    `image/webp` source could be a `VP8L` we must decline, and by then the
+    //    `<img>` fallback is gone.
+    // 2. WebP decodes several times slower per pixel than JPEG, and `<picture>`
+    //    markup typically pairs each webp source with a JPEG one.
+    // The WebP decoder serves the other case: a bare `<img src="….webp">`.
     matches!(t.as_str(), "image/png" | "image/jpeg" | "image/jpg" | "image/svg+xml")
 }
 
 /// Split a `srcset` into `(url, descriptor)` candidates — HTML "parse a srcset
 /// attribute".
 ///
-/// The separator is WHITESPACE, not the comma: a URL is a run of non-whitespace
-/// characters, and only a comma that ends that run (or follows the descriptor)
-/// starts the next candidate. That is what makes a `data:` URI work, since its
-/// commas sit inside an unbroken run — splitting on ',' cuts it in half and
-/// hands the tail on as a URL of its own.
+/// The separator is whitespace, not the comma: a URL is a run of
+/// non-whitespace characters, and only a comma that ends that run (or
+/// follows the descriptor) starts the next candidate. That keeps a `data:`
+/// URI, whose commas sit inside an unbroken run, in one piece.
 fn srcset_candidates(srcset: &str) -> Vec<(&str, Option<&str>)> {
     let mut out = Vec::new();
     let mut rest = srcset;
@@ -248,7 +239,7 @@ mod tests {
 
     #[test]
     fn a_source_replaces_the_img_src_and_its_dimensions() {
-        // Wikipedia's footer: a 25×25 icon below 500px, an 84×29 button above.
+        // A 25×25 icon below 500px, an 84×29 button above.
         let html = "<body><picture>\
             <source media=\"(min-width: 500px)\" srcset=\"/wide.svg\" width=\"84\" height=\"29\">\
             <img src=\"/small.svg\" width=\"25\" height=\"25\"></picture></body>";
@@ -290,11 +281,8 @@ mod tests {
 
     #[test]
     fn a_data_uri_survives_the_srcset_split() {
-        // DuckDuckGo's home page ships its logo as
-        // `<picture><source srcSet="data:image/svg+xml;base64,…">`. The commas
-        // inside a data: URI are not candidate separators — splitting on them
-        // handed the base64 tail on as a URL of its own, which no fetch can
-        // ever satisfy.
+        // A logo shipped as `<picture><source srcSet="data:image/svg+xml;base64,…">`.
+        // The commas inside a data: URI are not candidate separators.
         let uri = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iYSIvPg==";
         assert_eq!(pick(uri, None, 800.0), Some(uri));
         assert_eq!(pick(&alloc::format!("{uri} 2x"), None, 800.0), Some(uri));
@@ -309,8 +297,8 @@ mod tests {
     fn a_comma_only_separates_when_it_ends_the_url_run() {
         // Trailing commas end the candidate and leave it descriptor-less …
         assert_eq!(pick("/a.png,, /b.png 2x", None, 800.0), Some("/a.png"));
-        // … while a comma INSIDE the run is just part of the URL, which is the
-        // whole reason a data: URI survives.
+        // … while a comma inside the run is just part of the URL, which is why a
+        // data: URI survives.
         assert_eq!(pick("/a,b.png 2x", None, 800.0), Some("/a,b.png"));
     }
 

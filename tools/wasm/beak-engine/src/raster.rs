@@ -36,29 +36,24 @@ impl HoverChange {
 }
 
 pub struct Engine {
-    /// Die Schriften. `RefCell`, weil eine Seite ihre eigenen erst NACH dem
-    /// ersten Auslegen mitbringt und `layout` nur `&self` hat.
+    /// The fonts. `RefCell` because a page brings its own fonts only after the
+    /// first layout, and `layout` takes `&self`.
     fonts: core::cell::RefCell<Fonts>,
-    /// Schriften, die die Seite verlangt und die noch fehlen: `(Adresse,
-    /// Familie, Gewicht, kursiv)`. Der Wirt holt sie und meldet sich mit
-    /// `add_font` zurueck — dieselbe Runde wie beim Modulgraphen und den
-    /// nachgeladenen Stilblaettern.
+    /// Fonts the page asks for that are still missing: `(url, family, weight,
+    /// italic)`. The shell fetches them and calls back with `add_font`, the same
+    /// round trip as the module graph and late stylesheets.
     pending_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
-    /// Die Adresse, unter der das MALEN zuletzt vergeblich nach Pixeln suchte.
+    /// The key under which painting last looked for pixels and found none.
     ///
-    /// **Der Platzhalter ist stumm**, und damit sieht „nie angefragt" genauso
-    /// aus wie „geholt, dekodiert, und beim Malen unter einem anderen
-    /// Schluessel gesucht". Auf DuckDuckGos Trefferliste stand im Log
-    /// „4 von 4 dekodiert" und auf dem Schirm blieben die Kaestchen leer —
-    /// die Frage, mit welcher Zeichenkette gesucht wurde, konnte niemand
-    /// beantworten ([[feedback_the_fast_path_must_say_it_ran]]).
+    /// The placeholder is silent, so "never requested" looks the same as
+    /// "decoded, then looked up under a different key"; this records which key
+    /// was used.
     img_miss: core::cell::RefCell<Option<alloc::string::String>>,
-    /// Gesichter, deren Bytes SCHON dastehen — ein `@font-face` mit
-    /// `data:`-Adresse. Sie warten hier, weil `note_font_faces` unter einem
-    /// gehaltenen `self.sheet` laeuft und `add_font` es leert; `load_inline_fonts`
-    /// nimmt sie, wenn nichts mehr entliehen ist.
+    /// Faces whose bytes are already here (an `@font-face` with a `data:` url).
+    /// They wait because `note_font_faces` runs while `self.sheet` is borrowed and
+    /// `add_font` clears it; `load_inline_fonts` takes them once nothing is borrowed.
     inline_fonts: core::cell::RefCell<alloc::vec::Vec<(alloc::string::String, u32, u16, bool)>>,
-    /// Adressen, die schon angefragt wurden — sonst fragt jedes Auslegen neu.
+    /// Urls already requested, so each layout does not ask again.
     asked_fonts: core::cell::RefCell<alloc::vec::Vec<alloc::string::String>>,
     /// Rasterised-glyph cache keyed by (char, size-bits, face-id). fontdue's
     /// rasterise is not free; without this every glyph is re-rasterised every
@@ -82,21 +77,20 @@ pub struct Engine {
     css_img_budget: core::cell::Cell<usize>,
     /// Remaining decoded-BGRA budget for the current page (streaming decode).
     img_budget: core::cell::Cell<usize>,
-    /// Auswahl und Fundstellen — siehe `set_marks`.
+    /// Selection and find matches, see `set_marks`.
     #[allow(clippy::type_complexity)]
     marks: RefCell<(Option<(crate::select::TextPos, crate::select::TextPos)>,
                     Vec<(crate::select::TextPos, crate::select::TextPos)>)>,
-    /// Decoded `<img>` pixels kept ACROSS navigations, keyed by the RESOLVED
-    /// url and oldest-first.
+    /// Decoded `<img>` pixels kept across navigations, keyed by the resolved url,
+    /// oldest first.
     ///
-    /// Keyed by url and NOT by the `src` attribute, which is what `images` uses
-    /// — `/logo.png` is a different picture on a different host, and a cache
-    /// that confused the two would show one site's image on another's page.
+    /// Keyed by url, not by the `src` attribute that `images` uses: `/logo.png`
+    /// on another host is a different picture, and confusing the two would show
+    /// one site's image on another's page.
     ///
-    /// `Rc` is what makes it cheap: an image the next page uses again costs
-    /// its pixels ONCE, shared between this cache and the page map. Only
-    /// pictures no live page holds are paid for twice, and `IMG_CACHE_BUDGET`
-    /// bounds those.
+    /// `Rc` makes it cheap: an image the next page reuses costs its pixels once,
+    /// shared between this cache and the page map. Only pictures no live page
+    /// holds are paid for twice, and `IMG_CACHE_BUDGET` bounds those.
     img_cache: RefCell<Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
     /// Bytes of BGRA currently in `img_cache`.
     img_cache_bytes: core::cell::Cell<usize>,
@@ -116,7 +110,7 @@ pub struct Engine {
     /// tool). Off by default so the label-formatting cost is only paid while the
     /// user is inspecting; the shell toggles it and re-lays-out.
     inspect: core::cell::Cell<bool>,
-    /// The pointer state the LAST layout was made with. `repaint_hover` needs
+    /// The pointer state the previous layout was made with. `repaint_hover` needs
     /// both: the style a box is painted with now, and the one it should be
     /// painted with next.
     hover_prev: RefCell<Vec<u32>>,
@@ -125,75 +119,59 @@ pub struct Engine {
     /// rather than in every layout signature.
     hover: RefCell<Vec<u32>>,
     /// A tick source lent by the shell, so a layout can report what each phase
-    /// cost on the machine that is actually slow. `None` on the host, where
-    /// `tests/diag.rs` times the phases from outside.
+    /// cost. `None` on the host, where `tests/diag.rs` times the phases from
+    /// outside.
     clock: core::cell::Cell<Option<fn() -> u64>>,
-    /// Ist der Schreibzeiger in DIESEM Bild sichtbar? Der Wirt kippt es im
-    /// Takt; das Layout bleibt dabei stehen.
+    /// Whether the caret is visible in this frame. The shell toggles it on a
+    /// timer; the layout stays as it is.
     caret_on: core::cell::Cell<bool>,
-    /// Der Steuerelement-Zustand des letzten Auslegens.
+    /// The form-control state of the last layout.
     ///
-    /// **Fuer das Neuauslegen auf Verlangen.** Der Haken des Wirts ist ein
-    /// `fn`-Zeiger und faengt nichts ein; die getippten Werte liegen aber in
-    /// einer Variablen der Bildschleife. Mit `FormState::default()`
-    /// auszulegen waere falsch — ein Feld mit Text ist breiter als ein leeres,
-    /// und die Kaesten gingen an die Seite zurueck. Also merkt sich die
-    /// Engine, womit sie zuletzt gerufen wurde.
+    /// Used by on-demand relayout: the shell's hook is a `fn` pointer and captures
+    /// nothing, while the typed values live in the frame loop. Laying out with
+    /// `FormState::default()` would be wrong (a field with text is wider than an
+    /// empty one) and those boxes go back to the page, so the engine remembers
+    /// what it was last called with.
     last_forms: core::cell::RefCell<crate::forms::FormState>,
     /// Why the last pointer repaint gave up — see `Engine::repaint_bail`.
     repaint_bail: core::cell::Cell<&'static str>,
-    /// The last parsed DOCUMENT with the fingerprint of the inputs that built
-    /// it. Parsing a real page is ~170 ms on the device, and a page is laid out
-    /// several times over its life from unchanged bytes — an image landing, a
-    /// form key, the pointer entering a link. Every one of those re-parsed the
-    /// whole HTML for nothing.
+    /// Parsed documents with the fingerprint of the inputs that built them,
+    /// most recently used first. Index 0 is the current page, and every reader
+    /// below takes that one.
     ///
-    /// The width and the palette are part of the identity because
-    /// `picture::resolve` BAKES the winning `srcset` candidate into the tree:
-    /// the same bytes at a different width are a different document.
-    /// Parsed documents, most-recently-used FIRST — **index 0 is the current
-    /// page** and every reader below takes that one.
+    /// A page is laid out several times over its life from unchanged bytes (an
+    /// image landing, a form key, the pointer entering a link), and each of those
+    /// would otherwise re-parse the whole HTML. More than one slot because going
+    /// back is the most common navigation, and the DOM being returned to would
+    /// otherwise have been dropped by the page in between.
     ///
-    /// More than one slot because going back is the most common navigation
-    /// there is, and the DOM the reader is returning to was thrown away by the
-    /// page in between. Measured on the device: revisiting an article whose
-    /// bytes had not changed cost 110 ms parse + 710 ms cascade a second time,
-    /// purely because one other page had been visited.
-    ///
-    /// Keyed by content (plus width and theme), so it can only ever hand back
-    /// a document identical to the one that would have been parsed. A page
-    /// that answers differently every request — a live front page — misses by
-    /// construction, and that is correct rather than unfortunate.
+    /// Width and palette are part of the key because `picture::resolve` bakes the
+    /// winning `srcset` candidate into the tree: the same bytes at another width
+    /// are a different document. Keyed by content, so a hit is always identical to
+    /// what a parse would produce; a page that differs on every request misses by
+    /// construction.
     dom: RefCell<Vec<(u64, crate::dom::Dom)>>,
-    /// Ein vom SKRIPT veraenderter Baum. Ist er gesetzt, wird nicht geparst
-    /// und nicht zwischengespeichert — er IST das Dokument.
+    /// A tree modified by script. When set it is not parsed or cached; it is the
+    /// document.
     ///
-    /// So herum, weil der Zwischenspeicher auf dem HTML-Fingerabdruck sitzt:
-    /// derselbe Quelltext, aber ein anderer Baum, und der Abdruck wuesste
-    /// nichts davon.
+    /// The parse cache is keyed by the HTML fingerprint, which would not see a
+    /// different tree built from the same source.
     scripted: RefCell<Option<crate::dom::Dom>>,
-    /// Zaehlt hoch, sobald ein Skript den Baum veraendert hat. Geht in den
-    /// SCHLUESSEL des Stilblatts ein — ein Skript kann ein `<style>`
-    /// hinzufuegen, und dann waere das zwischengespeicherte Blatt falsch.
+    /// Incremented whenever a script changes the tree.
     scripted_gen: core::cell::Cell<u64>,
-    /// Fuer JEDES Element einen Treffer-Kasten aufzeichnen, nicht nur fuer die
-    /// mit `:hover`-Regeln.
+    /// Record a hit box for every element, not only those with `:hover` rules.
     ///
-    /// beak schaltet das ein, sobald eine Seite Ereignisbehandler angemeldet
-    /// hat: ohne einen Kasten je Element gibt es keinen Weg vom Klickpunkt zum
-    /// Knoten. Aus, solange keiner da ist — die Liste ist ein `push` je
-    /// Element, und dieser Pfad wurde einmal gemessen und gekuerzt.
+    /// Turned on once a page registers event handlers: without a box per element
+    /// there is no way from a click point to its node. Off otherwise, because it
+    /// costs a `push` per element on a hot path.
     hit_all: core::cell::Cell<bool>,
-    /// The last parsed stylesheet with the fingerprint of the inputs that built
-    /// it. Parsing a real page's CSS is a third of a layout, and a page is laid
-    /// out several times over its life (images landing, a form key, a resize)
-    /// from unchanged bytes — so the parse is repeated for nothing.
-    /// Collected stylesheets, same shape and same rule as `dom`: index 0 is
-    /// the current page's.
+    /// Collected stylesheets with the fingerprint of their inputs; same shape and
+    /// rule as `dom`, index 0 is the current page's. Parsing a real page's CSS is
+    /// a large share of a layout and would otherwise repeat on every relayout.
     sheet: RefCell<Vec<(u64, crate::css::Stylesheet)>>,
     /// How often a document was really parsed, and a sheet really collected.
-    /// The point of the slots above is that these stop counting on a revisit,
-    /// and a time is too noisy to assert on.
+    /// These stop counting on a revisit, which is what the slots above are for;
+    /// tests assert on counts because times are too noisy.
     docs_parsed: core::cell::Cell<u64>,
     sheets_collected: core::cell::Cell<u64>,
 }
@@ -221,12 +199,12 @@ impl Default for Engine {
     }
 }
 
-/// Insert into a cross-navigation cache, oldest-first, evicting from the front
+/// Insert into a cross-navigation cache, oldest first, evicting from the front
 /// until the budget holds.
 ///
-/// An evicted entry's pixels stay alive as long as a page still references them
-/// (`Rc`) — eviction bounds the CACHE, not the page. Both caches share this one
-/// routine and one budget, so they cannot drift apart.
+/// An evicted entry's pixels stay alive while a page still references them
+/// (`Rc`); eviction bounds the cache, not the page. Both caches share this
+/// routine so they cannot drift apart.
 fn cache_put(
     slots: &RefCell<alloc::vec::Vec<(alloc::string::String, alloc::rc::Rc<crate::image::Image>)>>,
     bytes: &core::cell::Cell<usize>,
@@ -259,28 +237,17 @@ fn cache_put(
 
 /// How many parsed documents (and stylesheets) to keep.
 ///
-/// Three, not more: a `Dom` plus its `Stylesheet` for a real article is
-/// megabytes, and this shares a 128 MB heap with a 24 MB page image budget and
-/// an 8 MB image cache. Three covers what it is for — the page you are on, the
-/// one you came from, and the one before that.
+/// A `Dom` plus its `Stylesheet` for a real article is megabytes, sharing the
+/// heap with the page image budget and the image cache. Three covers the
+/// current page, the one before, and the one before that.
 const DOC_SLOTS: usize = 3;
 
-/// Move the entry keyed `key` to the front and say whether it was there.
+/// The tree the most recent layout was built from: the scripted tree if there
+/// is one, else the cached parse.
 ///
-/// Front means current: every reader takes index 0, so a hit has to be
-/// promoted and not merely found.
-/// Der Baum, aus dem das LETZTE Layout gebaut wurde.
-///
-/// **Der Grund, warum das eine eigene Funktion ist:** `layout_forms` umgeht den
-/// Parse-Zwischenspeicher, sobald ein Skript einen Baum zurueckgeschrieben hat
-/// (`let dom_hit = scripted || promote(…)`). Damit bleibt `self.dom` auf jeder
-/// Seite mit Skripten LEER — und beide Schnellwege, die ihn lasen, gaben
-/// stillschweigend auf. Der Hover-Weg (gemessen 0,16 ms gegen 24 ms Layout)
-/// und der Steuerelement-Weg liefen auf keiner echten Seite.
-///
-/// Gemerkt hat es niemand, weil der eine Weg nichts sagte und der andere
-/// seinen Grund nur im Fehlerfall meldete
-/// ([[feedback-the-fast-path-must-say-it-ran]]).
+/// `layout_forms` bypasses the parse cache once a script has written a tree
+/// back, so `self.dom` stays empty on scripted pages. Every fast path that
+/// needs the current document must go through this.
 fn current_dom<'a>(
     scripted: &'a Option<crate::dom::Dom>,
     cached: &'a alloc::vec::Vec<(u64, crate::dom::Dom)>,
@@ -291,6 +258,10 @@ fn current_dom<'a>(
     }
 }
 
+/// Move the entry keyed `key` to the front and say whether it was there.
+///
+/// Front means current: every reader takes index 0, so a hit has to be
+/// promoted and not merely found.
 fn promote<T>(slots: &mut alloc::vec::Vec<(u64, T)>, key: u64) -> bool {
     match slots.iter().position(|(k, _)| *k == key) {
         Some(0) => true,
@@ -324,8 +295,7 @@ impl Engine {
             img_cache_bytes: core::cell::Cell::new(0),
             css_cache: RefCell::new(Vec::new()),
             css_cache_bytes: core::cell::Cell::new(0),
-            // 600 keeps the historical behaviour of the reftest canvas for any
-            // caller that never sets it.
+            // 600 is the reftest canvas height, for callers that never set it.
             viewport_h: core::cell::Cell::new(600),
             inspect: core::cell::Cell::new(false),
             hover: RefCell::new(Vec::new()),
@@ -357,17 +327,17 @@ impl Engine {
         self.inspect.set(on);
     }
 
-    /// Tell the engine which elements the pointer is inside — `Layout::hover_at`
-    /// produces the list from the previous layout. Says what the change COSTS:
-    /// a pointer that stayed in the same elements must cost nothing, and one
-    /// that entered something which only recolours must not cost a layout.
+    /// Tell the engine which elements the pointer is inside (`Layout::hover_at`
+    /// produces the list from the previous layout). Says what the change costs:
+    /// a pointer that stayed in the same elements costs nothing, and one that
+    /// entered something which only recolours must not cost a layout.
     pub fn set_hover(&self, seqs: Vec<u32>) -> HoverChange {
         let mut cur = self.hover.borrow_mut();
         if *cur == seqs {
             return HoverChange::Unchanged;
         }
-        // Only the elements that GAINED or LOST the state can restyle; one that
-        // is in both lists is unaffected by the move.
+        // Only elements that gained or lost the state can restyle; one in both lists
+        // is unaffected by the move.
         let moved: Vec<u32> = cur
             .iter()
             .chain(seqs.iter())
@@ -379,12 +349,11 @@ impl Engine {
         HoverChange::Changed { paint_only: self.hover_is_paint_only(&moved) }
     }
 
-    /// Can the elements whose pointer state just changed only be REPAINTED?
+    /// Can the elements whose pointer state just changed simply be repainted?
     ///
-    /// True when no `:hover` rule that could gain or lose on any of them
-    /// declares a property that moves something. Conservative in the direction
-    /// that matters: an unknown answer is "no", which costs a layout we might
-    /// not have needed — never a stale page.
+    /// True when no `:hover` rule that could gain or lose on any of them declares
+    /// a property that moves something. Unknown answers are "no": that costs an
+    /// unneeded layout, never a stale page.
     fn hover_is_paint_only(&self, moved: &[u32]) -> bool {
         let held = self.sheet.borrow();
         let Some((_, sheet)) = held.first() else { return false };
@@ -410,19 +379,11 @@ impl Engine {
         !walk(&dom.root, moved, &sheet.hover_layout_set)
     }
 
-    /// Answer a paint-only pointer change by patching the display list, with
-    /// no parse, no cascade over the page and no box arithmetic.
+    /// Repaint form controls instead of laying out the page; `false` means it is
+    /// not possible and the caller must lay out.
     ///
-    /// Only call it after `set_hover` said `paint_only`. `false` means the
-    /// patch could not be made with certainty and the caller must lay out —
-    /// the layout it was given is then untouched, because every change is
-    /// applied only once all of them are known to be possible.
-    /// Ein Steuerelement neu malen statt die Seite auszulegen. `false` heisst:
-    /// es geht nicht, legt aus.
-    ///
-    /// Der Anrufer ist jedes Ereignis, das nur den Zustand eines Kastens
-    /// aendert — Tastendruck im Feld, Fokus, Fokusverlust, Haekchen. Auf
-    /// Wikipedia kostete jedes davon 280 ms.
+    /// Called for every event that only changes a box's state: a key in a field,
+    /// focus, blur, a checkbox toggle.
     pub fn repaint_controls(&self, lay: &mut Layout, state: &crate::forms::FormState) -> bool {
         let held = self.sheet.borrow();
         let scripted = self.scripted.borrow();
@@ -435,8 +396,8 @@ impl Engine {
             self.repaint_bail.set("kein Baum im Zwischenspeicher");
             return false;
         };
-        // Nur eine `:checked`-Regel kann durch die Kaskade etwas anderes
-        // umstylen; `:focus` und Verwandte matchen bei uns nie.
+        // Only a `:checked` rule can restyle anything else through the cascade;
+        // `:focus` and relatives never match here.
         let may_restyle = |seq: u32| {
             if sheet.checked_set.is_empty() {
                 return false;
@@ -450,7 +411,7 @@ impl Engine {
                     _ => None,
                 })
             }
-            // Kein Element gefunden heisst: nicht entscheidbar, also auslegen.
+            // Element not found means undecidable, so lay out.
             find(&dom.root, seq).map_or(true, |el| sheet.checked_set.may_match(el))
         };
         match crate::layout::repaint_controls(lay, &self.fonts.borrow(), &self.theme, state, &may_restyle) {
@@ -462,6 +423,13 @@ impl Engine {
         }
     }
 
+    /// Answer a paint-only pointer change by patching the display list, with
+    /// no parse, no cascade over the page and no box arithmetic.
+    ///
+    /// Only call it after `set_hover` said `paint_only`. `false` means the
+    /// patch could not be made with certainty and the caller must lay out; the
+    /// layout is then untouched, because changes are applied only once all of
+    /// them are known to be possible.
     pub fn repaint_hover(&self, lay: &mut Layout) -> bool {
         match self.try_repaint_hover(lay) {
             Ok(()) => true,
@@ -472,10 +440,9 @@ impl Engine {
         }
     }
 
-    /// Why the last `repaint_hover` handed the page to a layout. `""` when the
-    /// last one succeeded. Worth saying ONCE per page on the device: a browser
-    /// that quietly lays out on every pointer move looks like the feature was
-    /// never built ([[feedback-log-the-exception-not-the-rule]]).
+    /// Why the last `repaint_hover` handed the page to a layout; `""` when it
+    /// succeeded. Worth logging once per page: quietly laying out on every pointer
+    /// move is otherwise indistinguishable from the fast path not existing.
     pub fn repaint_bail(&self) -> &'static str {
         self.repaint_bail.get()
     }
@@ -522,9 +489,9 @@ impl Engine {
         }
         let mut groups = Vec::new();
         for &seq in &moved {
-            // Bounded on purpose: repainting an element at a time only beats a
-            // layout while the subtree is small. `nav:hover` over a menu of a
-            // few dozen items is worth it; the same rule on `<body>` is not.
+            // Bounded: repainting element by element only beats a layout while the
+            // subtree is small. `nav:hover` over a menu is worth it; the same rule on
+            // `<body>` is not.
             const SUBTREE_CAP: usize = 128;
             let mut kids_off = Vec::new();
             let mut kids_on = Vec::new();
@@ -568,17 +535,15 @@ impl Engine {
     }
 
     /// Open/close the `<details>` owning the `<summary>` at `seq`
-    /// (`Layout::hit_toggle` names it). Returns whether anything changed — the
+    /// (`Layout::hit_toggle` names it). Returns whether anything changed; the
     /// caller re-lays-out only then.
     ///
-    /// This EDITS the cached document: the `open` content attribute is what
-    /// the state actually is, so `details[open] > summary` in the page's own
-    /// stylesheet gets the right answer for free — rustdoc and MDN both style
-    /// the open state that way. Keeping the state beside the DOM instead would
-    /// have meant two truths and one of them invisible to the cascade.
+    /// This edits the cached document: the `open` content attribute is the state,
+    /// so `details[open] > summary` in the page's own stylesheet matches without
+    /// a second source of truth beside the DOM.
     ///
-    /// It lives as long as the parsed document does: navigating away and back
-    /// re-parses and starts closed again, which is what a browser does too.
+    /// It lives as long as the parsed document: navigating away and back
+    /// re-parses and starts closed, as browsers do.
     pub fn toggle_details(&self, seq: u32) -> bool {
         let mut held = self.dom.borrow_mut();
         let Some((_, dom)) = held.first_mut() else { return false };
@@ -621,26 +586,23 @@ impl Engine {
         self.theme = theme;
     }
 
-    /// Die Farben, mit denen die Engine kaskadiert. `getComputedStyle` muss
-    /// dieselben nehmen, sonst antwortet es ueber eine andere Seite als die
-    /// gemalte.
+    /// The palette the engine cascades with. `getComputedStyle` must use the same
+    /// one, or it describes a different page than the painted one.
     pub fn theme(&self) -> Theme {
         self.theme
     }
 
-    /// Start a fresh page's image set: clear the previous decode + reset the
-    /// per-page budget. The shell then fetches + `add_image`s each `<img>` ONE
-    /// AT A TIME (streaming) so the compressed bytes never pile up — decode the
-    /// image, keep only its pixels, reuse the same fetch scratch for the next.
-    /// `images_begin` clears the PAGE map, never the cross-navigation cache —
-    /// that is the whole point of the cache surviving a navigation.
-    /// Wonach das letzte Malen vergeblich suchte, und wie viele Bilder der
-    /// Speicher haelt. Der Wirt fragt danach, wenn ein Kasten leer bleibt.
+    /// What the last paint looked up in vain, and how many images the map holds.
+    /// The shell asks when a box stays empty.
     pub fn image_miss(&self) -> Option<(alloc::string::String, usize)> {
         let miss = self.img_miss.borrow_mut().take()?;
         Some((miss, self.images.borrow().len()))
     }
 
+    /// Start a fresh page's image set: clear the previous decode and reset the
+    /// per-page budget. The shell then fetches and `add_image`s each `<img>` one
+    /// at a time, so compressed bytes never pile up. Clears the page map only,
+    /// never the cross-navigation cache.
     pub fn images_begin(&mut self) {
         self.images.get_mut().clear();
         self.img_budget.set(crate::image::TOTAL_BUDGET);
@@ -652,11 +614,10 @@ impl Engine {
         self.glyphs.get_mut().clear();
     }
 
-    /// Decode ONE image and store it under `src`. The compressed `bytes` are
-    /// borrowed (dropped by the caller right after) — only the decoded pixels
-    /// are retained. A rejection names ITSELF (`Reject`) rather than being one
-    /// `false` for two opposite failures; the box keeps its placeholder either
-    /// way, but only the caller can say which one to put in the log.
+    /// Decode one image and store it under `src`. The compressed `bytes` are
+    /// borrowed; only the decoded pixels are retained. A rejection says which
+    /// kind it is (`Reject`), so the caller can log it; the box keeps its
+    /// placeholder either way.
     pub fn add_image(&mut self, src: &str, bytes: &[u8]) -> Result<(), crate::image::Reject> {
         self.store_image(src, bytes)
     }
@@ -675,10 +636,9 @@ impl Engine {
 
     /// Serve `pairs` of `(src, url)` from the cross-navigation cache.
     ///
-    /// Returns the `src`s that were served — the shell drops those from its
-    /// fetch queue. Called BEFORE the first layout, which is where it pays
-    /// twice: no request, no decode, and the box is definite on the first
-    /// layout instead of being guessed and moving the page later.
+    /// Returns the `src`s that were served; the shell drops those from its fetch
+    /// queue. Called before the first layout, so there is no request, no decode,
+    /// and the box is definite on the first layout instead of moving later.
     pub fn adopt_cached(&mut self, pairs: &[(alloc::string::String, alloc::string::String)])
         -> Vec<alloc::string::String>
     {
@@ -702,22 +662,17 @@ impl Engine {
         served
     }
 
-    /// Insert into the cross-navigation cache, oldest-first, evicting from the
-    /// front until the budget holds. An evicted entry's pixels stay alive as
-    /// long as a page still references them (`Rc`) — eviction bounds the
-    /// CACHE, not the page.
+    /// Insert into the `<img>` cross-navigation cache (see the free `cache_put`).
     fn cache_put(&mut self, url: &str, img: alloc::rc::Rc<crate::image::Image>) {
         cache_put(&self.img_cache, &self.img_cache_bytes,
                   crate::image::IMG_CACHE_BUDGET, url, img);
     }
 
-    /// How many documents this engine has actually parsed, and how many
-    /// stylesheets it has actually collected, since it was created.
-    /// Den vom Skript veraenderten Baum einreichen. Ab jetzt legt das Layout
-    /// IHN aus, nicht mehr das geparste HTML.
+    /// Hand in the tree as modified by script; from now on layout uses it instead
+    /// of the parsed HTML.
     ///
-    /// `None` nimmt das zurueck — bei einer Navigation muss das passieren,
-    /// sonst zeigt die naechste Seite den Baum der vorigen.
+    /// `None` withdraws it, which must happen on navigation, or the next page
+    /// shows the previous page's tree.
     pub fn set_scripted_dom(&self, dom: Option<crate::dom::Dom>) {
         *self.scripted.borrow_mut() = dom;
         self.scripted_gen.set(self.scripted_gen.get().wrapping_add(1));
@@ -725,21 +680,12 @@ impl Engine {
 
     pub fn has_scripted_dom(&self) -> bool { self.scripted.borrow().is_some() }
 
-    /// Die Bildadressen aus dem Baum, den das LAYOUT benutzt.
+    /// Image urls from the tree that layout uses.
     ///
-    /// **Die Bildsammlung las das urspruengliche HTML** — auf einer Seite, die
-    /// ihren Inhalt per Skript baut, steht dort nichts. DuckDuckGos
-    /// Ergebnisseite ist eine Huelle, die React fuellt: die Karte im
-    /// Wissenskasten und die Seitensymbole der Treffer kamen deshalb nie auch
-    /// nur zur ANFRAGE, und im Geraetelog stand keine einzige Zeile zu ihrem
-    /// Wirt
-    /// ([[feedback_the_second_engine_only_runs_where_the_first_one_called]]).
-    ///
-    /// Der Skriptbaum wird so gelesen, wie das Layout ihn liest — ohne
-    /// `picture::resolve`, denn das laeuft auf ihm auch dort nicht (eine
-    /// eigene, benannte Luecke: ein per Skript eingehaengtes `<picture>`
-    /// waehlt seinen Kandidaten nicht). Ohne Skriptbaum ist es Zeichen fuer
-    /// Zeichen die alte Antwort.
+    /// On a page that builds its content by script, the original HTML holds none
+    /// of the images, so this reads the scripted tree when there is one. It is
+    /// read the way layout reads it, without `picture::resolve`.
+    /// Not implemented: a script-inserted `<picture>` does not pick its candidate.
     pub fn image_srcs_now(&self, html: &str, width: u32) -> alloc::vec::Vec<alloc::string::String> {
         let held = self.scripted.borrow();
         match &*held {
@@ -752,21 +698,18 @@ impl Engine {
         }
     }
 
-    /// Welche `@font-face`-Schriften die Seite verlangt und noch nicht hat.
+    /// Record the `@font-face` fonts the page asks for and does not have yet.
     ///
-    /// Nur die ERSTE Quelle je Gesicht: die Liste ist die Rangfolge der Seite,
-    /// und beak liest WOFF2 und rohes sfnt — die erste Angabe ist praktisch
-    /// immer WOFF2.
+    /// Only the first source per face: the list is the page's preference order,
+    /// and beak reads WOFF2 and raw sfnt, which the first entry practically always
+    /// is.
     fn note_font_faces(&self, sheet: &crate::css::Stylesheet) {
         for f in &sheet.faces {
             let Some(url) = f.src.first() else { continue };
             if self.asked_fonts.borrow().iter().any(|u| u == url) { continue }
             self.asked_fonts.borrow_mut().push(url.clone());
-            // **Ein `data:`-Gesicht braucht kein Netz** — seine Bytes stehen im
-            // Blatt. Dem Wirt gegeben hiesse, `data:application` als
-            // RECHNERnamen aufzuloesen: die Anfrage scheitert, das Gesicht
-            // fehlt, und ein Stueck der Adresse liegt beim Aufloeser. Bei
-            // CSS-Bildern loest die Engine sie seit je selbst auf.
+            // A `data:` face needs no network; its bytes are in the sheet. Handing it to
+            // the shell would send `data:application` to the resolver as a host name.
             let list = if url.starts_with("data:") || url.starts_with("DATA:") {
                 &self.inline_fonts
             } else {
@@ -776,18 +719,17 @@ impl Engine {
         }
     }
 
-    /// Was der Wirt holen soll. Leert die Liste — jede Adresse wird einmal
-    /// angefragt.
+    /// What the shell should fetch. Drains the list, so each url is requested
+    /// once.
     pub fn take_pending_fonts(&self) -> alloc::vec::Vec<(alloc::string::String, u32, u16, bool)> {
         core::mem::take(&mut self.pending_fonts.borrow_mut())
     }
 
-    /// Die `data:`-Gesichter dekodieren und aufnehmen. Liefert true, wenn
-    /// eines dazukam — dann muss neu ausgelegt werden, wie bei einer geholten
-    /// Schrift auch.
+    /// Decode and add the `data:` faces. Returns true if one was added, which
+    /// requires a relayout like a fetched font.
     ///
-    /// Der Wirt ruft das, WEIL hier nichts mehr entliehen ist: `add_font`
-    /// leert die Blatt- und Baumzwischenspeicher.
+    /// The shell calls this when nothing is borrowed: `add_font` clears the sheet
+    /// and document caches.
     pub fn load_inline_fonts(&self) -> bool {
         let want = core::mem::take(&mut *self.inline_fonts.borrow_mut());
         let mut loaded = false;
@@ -800,19 +742,18 @@ impl Engine {
         loaded
     }
 
-    /// Eine geholte Schrift aufnehmen. `bytes` darf WOFF2 oder rohes sfnt
-    /// sein; alles andere wird abgelehnt, statt als kaputte Schrift zu enden.
+    /// How many of the six built-in faces have been parsed so far.
     ///
-    /// Liefert false, wenn die Bytes nicht lesbar waren — der Wirt meldet das.
-    /// Wieviele der sechs eingebauten Gesichter bisher geparst wurden.
-    ///
-    /// Sie werden FAUL geladen (siehe `fonts::LazyFace`), und „faul" ist ohne
-    /// diese Zahl eine Behauptung: eine Seite, die doch alle sechs anfasst,
-    /// spart nichts, und man saehe es nicht.
+    /// They load lazily (see `fonts::LazyFace`); this number is how a page that
+    /// touches all six anyway becomes visible.
     pub fn loaded_faces(&self) -> usize {
         self.fonts.borrow().loaded_faces()
     }
 
+    /// Add a fetched font. `bytes` may be WOFF2, WOFF or raw sfnt; anything else is
+    /// rejected rather than ending up as a broken font.
+    ///
+    /// Returns false if the bytes were unreadable; the shell logs that.
     pub fn add_font(&self, family: u32, weight: u16, italic: bool, bytes: &[u8]) -> bool {
         let owned;
         let sfnt: &[u8] = if bytes.starts_with(b"wOF2") {
@@ -824,7 +765,7 @@ impl Engine {
         };
         let ok = self.fonts.borrow_mut().add_web(family, weight, italic, sfnt);
         if ok {
-            // Alles, was mit der alten Schrift gemessen wurde, ist ueberholt.
+            // Everything measured with the old fonts is stale.
             self.sheet.borrow_mut().clear();
             self.dom.borrow_mut().clear();
             self.glyphs.borrow_mut().clear();
@@ -832,88 +773,86 @@ impl Engine {
         ok
     }
 
-    // ── Text auf der Seite markieren ────────────────────────────────────
+    // ── Marking text on the page ───────────────────────────────────────
     //
-    // Die Rechnung steht in `select.rs`; hier ist sie nur an die Schriften
-    // angeschlossen, denn ohne Gesicht gibt es keine Textbreite.
+    // The arithmetic lives in `select.rs`; here it is only wired to the fonts,
+    // since there is no text width without a face.
 
-    /// Der Ort im Text unter einem Punkt in Dokumentkoordinaten.
+    /// The text position under a point in document coordinates.
     pub fn text_pos_at(&self, lay: &Layout, x: i32, y: i32) -> Option<crate::select::TextPos> {
         crate::select::text_pos_at(&self.fonts.borrow(), lay, x, y)
     }
 
-    /// Die Rechtecke, die einen Bereich hervorheben.
+    /// The rectangles that highlight a range.
     pub fn selection_rects(&self, lay: &Layout, a: crate::select::TextPos,
                            b: crate::select::TextPos) -> Vec<(i32, i32, i32, i32)> {
         crate::select::selection_rects(&self.fonts.borrow(), lay, a, b)
     }
 
-    /// Was in diesem Bereich steht.
+    /// The text in this range.
     pub fn selected_text(&self, lay: &Layout, a: crate::select::TextPos,
                          b: crate::select::TextPos) -> alloc::string::String {
         crate::select::selected_text(lay, a, b)
     }
 
-    /// Alle Fundstellen von `needle` auf der Seite.
+    /// All occurrences of `needle` on the page.
     pub fn find_all(&self, lay: &Layout, needle: &str)
         -> Vec<(crate::select::TextPos, crate::select::TextPos)> {
         crate::select::find_all(lay, needle)
     }
 
-    /// Was hervorgehoben wird, wenn als naechstes gemalt wird.
+    /// What is highlighted on the next paint.
     ///
-    /// Der erste Bereich ist die AUSWAHL, die weiteren sind Fundstellen einer
-    /// Suche — beide werden gleich gemalt, nur in verschiedenen Farben, und
-    /// beide sind Zustand des Wirts, nicht des Layouts: ein Neuauslegen darf
-    /// eine Markierung nicht loeschen.
+    /// The first range is the selection, the rest are find matches; both are
+    /// painted the same way in different colours. Both are shell state, not
+    /// layout state: a relayout must not clear a mark.
     pub fn set_marks(&self, sel: Option<(crate::select::TextPos, crate::select::TextPos)>,
                      found: Vec<(crate::select::TextPos, crate::select::TextPos)>) {
         *self.marks.borrow_mut() = (sel, found);
     }
 
-    /// Die Schriften, geliehen — nur fuer die Proben in `select.rs`, die
-    /// dieselbe Messung fahren muessen wie der Motor.
+    /// The fonts, borrowed; only for the tests in `select.rs`, which must measure
+    /// the same way as the engine.
     #[cfg(test)]
     pub fn fonts_ref(&self) -> core::cell::Ref<'_, Fonts> { self.fonts.borrow() }
 
     pub fn web_font_count(&self) -> usize { self.fonts.borrow().web_count() }
 
-    /// Wie oft der Baum seit dem Start durch Skripte ersetzt wurde.
+    /// How often script has replaced the tree since start.
     ///
-    /// Der Wirt braucht die Zahl, um sein FORMULARMODELL nachzuziehen: eine
-    /// Seite, die ihre Maske erst per Skript baut, hat sonst Steuerelemente
-    /// im Bild, die es fuer `submit` gar nicht gibt.
+    /// The shell uses it to refresh its form model: a page that builds its form
+    /// by script would otherwise show controls that do not exist for `submit`.
     pub fn scripted_gen(&self) -> u64 { self.scripted_gen.get() }
 
-    /// Etwas auf dem lebenden Baum ausrechnen — ohne ihn herauszugeben, denn
-    /// er gehoert dem Motor.
+    /// Compute something on the live tree without handing it out; the engine
+    /// owns it.
     pub fn with_scripted<R>(&self, f: impl FnOnce(&crate::dom::Dom) -> R) -> Option<R> {
         self.scripted.borrow().as_ref().map(f)
     }
 
-    /// Der `<title>` des Dokuments, aus dem zuletzt ausgelegt wurde.
+    /// The `<title>` of the document last laid out.
     ///
-    /// **Aus dem BAUM, den der Motor ohnehin haelt** — nicht aus einem
-    /// zweiten Parse: `current_dom` gibt den Baum des letzten Layouts, und
-    /// das ist der geskriptete, sobald es einen gibt. Damit sieht ein
-    /// Tabstreifen auch ein `document.title = …`.
+    /// Read from the tree the engine already holds (`current_dom`), which is the
+    /// scripted one once there is one, so `document.title = …` is seen too.
     ///
-    /// Der Baum steht erst NACH dem Auslegen. Wer beim Ankommen des Dokuments
-    /// fragt, bekommt den Titel der VORIGEN Seite.
+    /// The tree exists only after layout; asking when the document arrives
+    /// returns the previous page's title.
     pub fn title(&self) -> Option<alloc::string::String> {
         let scripted = self.scripted.borrow();
         let cached = self.dom.borrow();
         current_dom(&scripted, &cached).and_then(crate::dom::title)
     }
 
-    /// Treffer-Kaesten fuer alle Elemente aufzeichnen (siehe `hit_all`).
+    /// Record hit boxes for all elements (see `hit_all`).
     pub fn set_hit_all(&self, on: bool) { self.hit_all.set(on); }
 
+    /// How many documents this engine has actually parsed, and how many
+    /// stylesheets it has actually collected, since it was created.
     pub fn parse_counts(&self) -> (u64, u64) {
         (self.docs_parsed.get(), self.sheets_collected.get())
     }
 
-    /// Entries and bytes BOTH cross-navigation caches hold, for the trace.
+    /// Entries and bytes held by both cross-navigation caches, for the trace.
     pub fn img_cache_stats(&self) -> (usize, usize) {
         (self.img_cache.borrow().len() + self.css_cache.borrow().len(),
          self.img_cache_bytes.get() + self.css_cache_bytes.get())
@@ -936,9 +875,8 @@ impl Engine {
     }
 
     /// Decode every `data:` `<img src>` in the document. Such a src carries its
-    /// own bytes — there is nothing to fetch, and the pixels must exist BEFORE
-    /// layout because the intrinsic size decides the box. Mirrors
-    /// `resolve_css_images`, which does the same for `url(data:…)`.
+    /// own bytes, and the pixels must exist before layout because the intrinsic
+    /// size decides the box. Mirrors `resolve_css_images` for `url(data:…)`.
     fn resolve_data_uri_images(&self, dom: &crate::dom::Dom) {
         fn walk(el: &crate::dom::Element, eng: &Engine) {
             for c in &el.children {
@@ -949,9 +887,8 @@ impl Engine {
                                 && !eng.images.borrow().contains_key(src)
                             {
                                 if let Some(bytes) = crate::image::decode_data_uri(src) {
-                                    // Eine Absage hier hat keinen Weg ins Log —
-                                    // die Bytes stehen im Dokument, es gibt keinen
-                                    // Wirt, der sie geholt haette und sie melden koennte.
+                                    // A rejection here has no route to the log: the bytes are in the document
+                                    // and no shell fetched them.
                                     let _ = eng.store_image(src, &bytes);
                                 }
                             }
@@ -964,8 +901,8 @@ impl Engine {
         walk(&dom.root, self);
     }
 
-    /// Decode + store a whole batch at once (holds all compressed bytes) — kept
-    /// for tests / non-streaming callers; the shell uses `images_begin` +
+    /// Decode and store a whole batch at once (holds all compressed bytes); for
+    /// tests and non-streaming callers. The shell uses `images_begin` +
     /// `add_image` to avoid hoarding.
     pub fn set_images(&mut self, pairs: &[(alloc::string::String, Vec<u8>)]) {
         self.images_begin();
@@ -974,34 +911,34 @@ impl Engine {
         }
     }
 
-    /// Parse + lay out a document at `width`. Scroll-independent. Collects the
+    /// Parse and lay out a document at `width`. Scroll-independent. Collects the
     /// page's `<style>` blocks into the author stylesheet used by the cascade.
     pub fn layout(&self, html: &str, width: u32) -> Layout {
         self.layout_ext(html, "", width)
     }
 
-    /// Like `layout`, but also applies `external_css` — the concatenated bytes
-    /// of the page's `<link rel=stylesheet>` files, which the shell fetches
-    /// (the engine is host-free) and passes in. External CSS cascades before
-    /// inline `<style>` (document/head order).
-    /// Lend the engine a monotonic tick source, so `Layout::phase` reports
-    /// what parse, cascade and layout each cost. Purely optional — the engine
-    /// stays free of host functions either way.
-    /// Der Steuerelement-Zustand des letzten Auslegens, als Kopie.
+    /// The form-control state of the last layout, as a copy.
     ///
-    /// Eine KOPIE und keine Entleihung: der Rufer legt damit sofort neu aus,
-    /// und `layout_forms` schreibt dabei in dasselbe Feld zurueck.
+    /// A copy rather than a borrow: the caller lays out again right away, and
+    /// `layout_forms` writes back into the same field.
     pub fn last_forms(&self) -> crate::forms::FormState {
         self.last_forms.borrow().clone()
     }
 
-    /// Den Schreibzeiger fuer das naechste Bild an- oder ausknipsen.
+    /// Switch the caret on or off for the next frame.
     pub fn set_caret_on(&self, on: bool) { self.caret_on.set(on); }
 
+    /// Lend the engine a monotonic tick source, so `Layout::phase` reports
+    /// what parse, cascade and layout each cost. Optional; the engine stays free
+    /// of host functions either way.
     pub fn set_clock(&self, f: fn() -> u64) {
         self.clock.set(Some(f));
     }
 
+    /// Like `layout`, but also applies `external_css`: the concatenated bytes
+    /// of the page's `<link rel=stylesheet>` files, which the shell fetches
+    /// (the engine is host-free) and passes in. External CSS cascades before
+    /// inline `<style>` (document/head order).
     pub fn layout_ext(&self, html: &str, external_css: &str, width: u32) -> Layout {
         self.layout_forms(html, external_css, width, &crate::forms::FormState::default())
     }
@@ -1026,9 +963,8 @@ impl Engine {
         let dom_hit = scripted || promote(&mut self.dom.borrow_mut(), dom_key);
         if !dom_hit {
             let mut dom = crate::dom::parse(html);
-            // `<picture>`/`srcset` is folded into the `<img>` before anything
-            // reads a `src` — layout, the fetch list and the draw op then all
-            // see the one URL that actually won.
+            // `<picture>`/`srcset` is folded into the `<img>` before anything reads a
+            // `src`, so layout, the fetch list and the draw op all see the winning url.
             crate::picture::resolve(&mut dom, crate::css::Media::new(width as f32, self.theme.is_dark()));
             self.docs_parsed.set(self.docs_parsed.get() + 1);
             let mut held = self.dom.borrow_mut();
@@ -1038,27 +974,19 @@ impl Engine {
         let held_dom = self.dom.borrow();
         let held_scripted = self.scripted.borrow();
         let dom = match held_scripted.as_ref() { Some(d) => d, None => &held_dom[0].1 };
-        // The cascade also reads the document's own `<style>` blocks and the
-        // viewport width (media queries), so both are part of the identity.
-        // The theme is part of the identity too: `prefers-color-scheme` decides
-        // which rules apply, and `resolve_vars` BAKES the winning custom
-        // properties into the text it hands on — so a light and a dark sheet
-        // are different documents, not the same one read differently.
+        // The sheet key covers every input of the cascade: the document's `<style>`
+        // text and the viewport width (media queries), and the theme, because
+        // `prefers-color-scheme` decides which rules apply and `resolve_vars` bakes
+        // the winning custom properties into its output.
         let t_parse = now();
         let media = crate::css::Media::new(width as f32, self.theme.is_dark());
-        // The viewport HEIGHT is part of the identity too, since `resolve_vars`
-        // bakes custom properties down and one may hold a `vh` length. Without
-        // it a purely vertical window resize would keep the stale sheet.
+        // The viewport height too, since a baked custom property may hold a `vh`
+        // length.
         //
-        // **Der Skriptbaum steht mit seinem INHALT im Schluessel, nicht mit
-        // einem Zaehler.** Bis 0.184.0 ging `scripted_gen` hier ein, und das
-        // heisst: jede einzelne DOM-Aenderung — ein `classList.toggle` —
-        // machte das ganze Blatt ungueltig und `parse` lief ueber 1,06 MB
-        // neu (gemessen auf DDGs Ergebnisseite: 15,8 ms je Auslegen). Am
-        // Baum haengt die Kaskade aber nur an zwei Dingen: dem Text der
-        // `<style>`-Bloecke und den `url()` in `style`-Attributen. Das erste
-        // steht jetzt im Schluessel, das zweite wird bei einem Treffer
-        // nachgetragen.
+        // A scripted tree enters by its `<style>` text, not by a change counter:
+        // the cascade depends on the tree only through that text and the `url()`s in
+        // `style` attributes, and the latter are added on a hit below. Keying on a
+        // counter would re-parse every sheet on any DOM change.
         let style_text = crate::css::style_text(dom);
         let key = fingerprint(html.as_bytes())
             ^ fingerprint(external_css.as_bytes()).rotate_left(17)
@@ -1074,9 +1002,8 @@ impl Engine {
             held.insert(0, (key, collected));
             held.truncate(DOC_SLOTS);
         } else {
-            // Ein `style="background-image:url(…)"`, das ein Skript eben
-            // gesetzt hat, steht in keinem geparsten Blatt — es muss in die
-            // Tabelle, sonst hat der Befehl beim Malen keine Adresse.
+            // A `style="background-image:url(…)"` just set by script is in no parsed
+            // sheet; it has to enter the url table, or the paint op has no url.
             crate::css::add_inline_urls(dom, &mut self.sheet.borrow_mut()[0].1);
         }
         let t_css = now();
@@ -1093,10 +1020,9 @@ impl Engine {
 
     /// Rasterise the inline `<svg>`s a layout painted, under their store keys.
     ///
-    /// This runs AFTER layout on purpose: `currentColor` is the element's
-    /// computed `color` and the box is CSS's, so neither is known before the
-    /// cascade. The box is definite from the markup either way, so nothing has
-    /// to be laid out twice.
+    /// Runs after layout because `currentColor` is the element's computed
+    /// `color` and the box is CSS's, neither known before the cascade. The box is
+    /// definite from the markup, so nothing is laid out twice.
     fn resolve_inline_svgs(&self, dom: &crate::dom::Dom, lay: &Layout) {
         if lay.inline_svgs.is_empty() {
             return;
@@ -1174,10 +1100,9 @@ impl Engine {
     /// As [`Self::add_css_image`], and keep the pixels under `url` for the next
     /// navigation.
     ///
-    /// `url_key` is a hash of the `url()` text as the sheet wrote it, so it is
-    /// unique only WITHIN one document — two sites both saying `url(/bg.png)`
-    /// share a key. Across navigations the RESOLVED url is the only honest
-    /// identity, exactly as for `<img>`.
+    /// `url_key` hashes the `url()` text as written, so it is unique only within
+    /// one document; two sites both writing `url(/bg.png)` share a key. Across
+    /// navigations the resolved url is the identity, as for `<img>`.
     pub fn add_css_image_cached(&self, key: u64, url: &str, bytes: &[u8])
         -> Result<(), crate::image::Reject>
     {
@@ -1189,7 +1114,7 @@ impl Engine {
     }
 
     /// Serve one background layer from the cross-navigation cache. True on a
-    /// hit — the shell then does not queue it for fetching.
+    /// hit; the shell then does not queue it for fetching.
     pub fn adopt_css_cached(&self, key: u64, url: &str) -> bool {
         let hit = self.css_cache.borrow().iter()
             .find(|(u, _)| u == url)
@@ -1211,7 +1136,7 @@ impl Engine {
         self.css_img_budget.set(crate::image::CSS_BUDGET);
     }
 
-    /// Lay out with the UA sheet ONLY — no author `<style>`/`<link>` CSS
+    /// Lay out with the UA sheet only, without author `<style>`/`<link>` CSS
     /// (reader mode; docs/spec/BROWSER.md §9.7 "never worse than clean content").
     pub fn layout_ua(&self, html: &str, width: u32) -> Layout {
         self.layout_ua_forms(html, width, &crate::forms::FormState::default())
@@ -1238,22 +1163,16 @@ impl Engine {
         )
     }
 
-    /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
-    /// `w * h * 4` BGRA bytes).
-    /// Paint only the viewport rows `y0..y1` — the same picture [`Self::paint`]
+    /// Paint only the viewport rows `y0..y1`: the same picture [`Self::paint`]
     /// would put there, without touching the rest of the buffer.
     ///
-    /// This is what makes a scroll cheap. Scrolling does not change the page;
-    /// it moves it. The pixels that merely moved are shifted with one
-    /// `copy_within`, and only the newly exposed band is drawn — against ~60-80
-    /// ms for a full 1902x1000 repaint on the device, which is what every
-    /// scroll used to cost.
+    /// This makes scrolling cheap: pixels that merely moved are shifted with one
+    /// `copy_within`, and only the newly exposed band is drawn.
     ///
-    /// No clipping had to be added anywhere for this, and that is the whole
-    /// trick: every drawing primitive already clips against `(0, 0, w, h)` of
-    /// the buffer it is handed. A band is just a narrower buffer — hand over
-    /// those rows' slice, say `h = y1 - y0`, and move the scroll offset down by
-    /// `y0` so document coordinates still land where they belong.
+    /// No extra clipping is needed: every primitive already clips against
+    /// `(0, 0, w, h)` of the buffer it is handed. A band is a narrower buffer:
+    /// pass those rows' slice with `h = y1 - y0` and the scroll offset moved down
+    /// by `y0`, so document coordinates still land where they belong.
     pub fn paint_band(
         &self,
         layout: &Layout,
@@ -1273,15 +1192,12 @@ impl Engine {
         self.paint(layout, w, y1 - y0, scroll_y + y0 as i32, band);
     }
 
-    /// Auswahl und Fundstellen, NACH allem anderen und halbdurchsichtig.
+    /// Selection and find matches, painted after everything else, translucent.
     ///
-    /// Ein Browser malt die Auswahl deckend HINTER den Text und dreht dessen
-    /// Farbe um. Das ginge hier auch — aber es hiesse, den Anstrich in zwei
-    /// Durchgaenge zu teilen und jedem Textbefehl anzusehen, ob er markiert
-    /// ist. Ein durchscheinender Schleier darueber liest sich auf hellem wie
-    /// dunklem Grund und kostet einen Durchgang ueber ein paar Rechtecke.
-    /// Die ehrlichere Naeherung, und sie steht hier statt in einem Kommentar
-    /// weiter unten.
+    /// Browsers paint the selection opaque behind the text and invert the text
+    /// colour; that would need two passes and a per-text-op check. A translucent
+    /// wash on top reads on light and dark backgrounds and costs one pass over a
+    /// few rectangles.
     fn paint_marks(&self, layout: &Layout, wi: i32, hi: i32, scroll_y: i32, out: &mut [u8]) {
         let marks = self.marks.borrow();
         let (sel, found) = (&marks.0, &marks.1);
@@ -1294,13 +1210,15 @@ impl Engine {
                 fill(out, wi, hi, x, vy, rw, rh, color);
             }
         };
-        // Fundstellen zuerst, damit die Auswahl darueber liegt: wer waehrend
-        // einer Suche etwas markiert, soll seine Markierung sehen.
+        // Matches first so the selection lies on top: a selection made during a
+        // search must stay visible.
         let hit = Rgba { c: self.theme.link, a: 70 };
         for (a, b) in found { wash(*a, *b, hit); }
         if let Some((a, b)) = sel { wash(*a, *b, Rgba { c: self.theme.link, a: 110 }); }
     }
 
+    /// Paint the slice `[scroll_y, scroll_y + h)` into `out` (must be
+    /// `w * h * 4` BGRA bytes).
     pub fn paint(&self, layout: &Layout, w: u32, h: u32, scroll_y: i32, out: &mut [u8]) {
         let (wi, hi) = (w as i32, h as i32);
         // Canvas = the propagated body background (falls back to theme bg).
@@ -1310,10 +1228,8 @@ impl Engine {
                 DrawOp::Rect { x, y, w: rw, h: rh, color } => {
                     fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
                 }
-                // **Der Schreibzeiger blinkt, also wird er hier ausgelassen
-                // statt weggelassen.** Ein Takt darf kein Neuauslegen kosten
-                // — am Geraet sind das 10-40 ms, zweimal je Sekunde. So
-                // bleibt das Layout stehen und nur der Anstrich wechselt.
+                // The caret blinks, so it is skipped here rather than left out of the
+                // layout: a blink must not cost a relayout, only a repaint.
                 DrawOp::Caret { x, y, w: rw, h: rh, color } => {
                     if self.caret_on.get() {
                         fill(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *color);
@@ -1326,8 +1242,7 @@ impl Engine {
                     stroke_check(out, wi, hi, *x, *y - scroll_y, *cw, *ch, *color);
                 }
                 DrawOp::Shadow { x, y, w: rw, h: rh, blur, color, dx, dy, spread, r } => {
-                    // Der Kasten, der ausgespart bleibt: das Schattenrechteck
-                    // zurueckgerechnet auf den Rahmenkasten.
+                    // The box left uncovered: the shadow rect mapped back to the border box.
                     let keep = (*x - *dx + *spread, *y - *dy + *spread - scroll_y,
                                 *rw - 2 * *spread, *rh - 2 * *spread);
                     fill_shadow(out, wi, hi, *x, *y - scroll_y, *rw, *rh, *blur, *color, keep, *r);
@@ -1337,8 +1252,7 @@ impl Engine {
                     if vy > hi || vy + (*size as i32) + 6 < 0 {
                         continue; // fully off-screen line → skip
                     }
-                    // Der Ausschnitt steht in DOKUMENTkoordinaten; hier wird
-                    // gerollt, also faehrt er dieselbe Strecke mit.
+                    // The clip is in document coordinates; scrolling moves it the same way.
                     let cv = clip.map(|(cx, cy, cw, ch)| (cx, cy - scroll_y, cw, ch));
                     self.draw_run(out, wi, hi, *x, vy, *size, *color, *bold, *italic, *mono, *family, *sp, text, cv);
                 }
@@ -1347,10 +1261,9 @@ impl Engine {
                     if vy > hi || vy + *ih < 0 {
                         continue;
                     }
-                    // Look the pixels up at PAINT time, so an image that
-                    // arrives after layout needs only a repaint. A miss (not
-                    // fetched yet, or an undecodable format) draws the
-                    // placeholder that layout used to emit as separate ops.
+                    // Look the pixels up at paint time, so an image that arrives after layout
+                    // needs only a repaint. A miss (not fetched yet, or undecodable) draws the
+                    // placeholder.
                     match self.images.borrow().get(src) {
                         Some(img) => blit_image(out, wi, hi, *x, vy, *iw, *ih, img, *fit, filt(layout, *filter)),
                         None => {
@@ -1373,10 +1286,9 @@ impl Engine {
                         continue;
                     }
                     let cl = (clip.0, clip.1 - scroll_y, clip.2, clip.3);
-                    // A missing background draws NOTHING — unlike `<img>`,
-                    // there is no placeholder for one: the box is styled and
-                    // sized either way, so an absent decoration must simply be
-                    // absent rather than a grey frame over the content.
+                    // A missing background draws nothing. Unlike `<img>` there is no
+                    // placeholder: the box is styled and sized either way, so an absent
+                    // decoration is simply absent.
                     if let Some(img) = self.css_images.borrow().get(key) {
                         blit_bg(out, wi, hi, *x, vy, *bw, *bh, cl, img, *repeat, *pos, *size, *tint, filt(layout, *filter));
                     }
@@ -1427,18 +1339,17 @@ impl Engine {
         bold: bool,
         italic: bool,
         mono: bool,
-        // Streuwert der `font-family` — dieselbe Zahl, mit der das Layout
-        // gemessen hat. Ohne sie malte der Rasterer die eingebaute Schrift
-        // unter die Breiten einer Seitenschrift.
+        // `font-family` hash: the same value layout measured with, so the run is
+        // painted in the face whose widths the line box reserved.
         family: u32,
-        // `(letter-spacing, word-spacing)` — the SAME pair layout measured the
-        // run with. Advancing the pen by anything else puts the glyphs somewhere
-        // the line box did not reserve.
+        // `(letter-spacing, word-spacing)`: the same pair layout measured the run
+        // with. Advancing the pen by anything else puts glyphs where the line box
+        // did not reserve room.
         sp: (f32, f32),
         text: &str,
-        // Der Ausschnitt in ANSICHTskoordinaten, `None` heisst die ganze
-        // Leinwand. Er klemmt dieselben vier Grenzen wie der Rand des
-        // Puffers, also kostet er kein Pixel mehr.
+        // The clip in viewport coordinates, `None` meaning the whole canvas. It
+        // narrows the same four bounds as the buffer edge, so it costs nothing per
+        // pixel.
         clip: Option<(i32, i32, i32, i32)>,
     ) {
         let (klx, klty, klr, klb) = match clip {
@@ -1454,19 +1365,18 @@ impl Engine {
         let mut pen = x as f32;
         // One borrow for the whole run instead of three per character.
         let mut cache = self.glyphs.borrow_mut();
-        // **Dieselbe Regel wie beim Messen, sonst landen die Glyphen neben
-        // dem Kasten, den die Zeile reserviert hat** — Ligaturen ausser bei
-        // `letter-spacing`, das sie laut css-text-3 §8.2 aufbricht.
-        // `shape` gibt je Glyphe die Byte-Spanne der Quelle, und daraus kommt
-        // die Laufweite, die das Layout gerechnet hat.
+        // The same rule as when measuring, or glyphs land beside the box the line
+        // reserved: ligatures, except under `letter-spacing`, which breaks them
+        // (css-text-3 §8.2). `shape` gives each glyph its source byte span, from
+        // which the advance layout computed follows.
         let ligated = sp.0 == 0.0 && font.ligatures().is_some();
         let run: Vec<(u32, f32)> = if ligated {
             font.shape(text)
                 .into_iter()
                 .map(|(g, at, n)| {
                     let extra: f32 = text[at..at + n].chars().map(|c| crate::layout::char_spacing(c, sp)).sum();
-                    // Der Glyphenspeicher unterscheidet Zeichen von Index am
-                    // hohen Bit: sonst kollidierte Glyphe 65 mit `A`.
+                    // The glyph cache tells glyph indices from chars by the high bit;
+                    // otherwise glyph 65 would collide with `A`.
                     (g as u32 | 0x8000_0000, extra)
                 })
                 .collect()
@@ -1474,10 +1384,8 @@ impl Engine {
             text.chars().map(|c| (c as u32, crate::layout::char_spacing(c, sp))).collect()
         };
         for (unit, extra) in run {
-            // Dasselbe wie beim MESSEN: ein Formatierungszeichen hat keine
-            // Glyphe und keine Laufweite. Wer es hier malen liesse, schoebe
-            // den Stift um genau das weiter, was die Messung nicht gerechnet
-            // hat ([[feedback_intrinsic_shared_path]]).
+            // As when measuring: a format character has no glyph and no advance.
+            // Painting it would move the pen by what measurement did not count.
             if unit & 0x8000_0000 == 0
                 && char::from_u32(unit).is_some_and(crate::layout::is_zero_width_format_pub)
             {
@@ -1522,16 +1430,15 @@ fn idx(w: i32, x: i32, y: i32) -> usize {
     ((y * w + x) * 4) as usize
 }
 
-/// Fill a rect by building ONE row and copying it, rather than storing four
+/// Fill a rect by building one row and copying it, rather than storing four
 /// bytes per pixel.
 ///
-/// This is the hottest loop in the app. A frame clears the canvas and then
-/// paints roughly another viewport of backgrounds on top, so about 3.7 M pixels
-/// are written per scroll step — and under the wasmi interpreter every one of
-/// those byte stores is an interpreted instruction with its own bounds check.
-/// `copy_within` compiles to `memory.copy`, a single instruction the host
-/// executes as a native memmove, so an N-pixel row costs log2(N) copies to
-/// build plus one copy per further row instead of 4·N·rows stores.
+/// This is the hottest loop in the renderer: a frame clears the canvas and
+/// paints about another viewport of backgrounds on top. Under an interpreter
+/// every byte store is an instruction with its own bounds check, while
+/// `copy_within` compiles to a single `memory.copy` that the host runs as a
+/// native memmove. An N-pixel row costs log2(N) copies to build plus one copy
+/// per further row, instead of 4·N·rows stores.
 fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgba) {
     let x0 = x.max(0);
     let y0 = y.max(0);
@@ -1540,11 +1447,9 @@ fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    // A translucent fill has to READ each destination pixel, so none of the
-    // row-copy trick below applies — every pixel is its own blend. Kept behind
-    // this branch rather than folded into the loop so the opaque case, which is
-    // the overwhelming majority and the hottest loop in the app, still costs
-    // one `memory.copy` per row.
+    // A translucent fill has to read each destination pixel, so the row-copy
+    // trick does not apply. Kept in its own branch so the opaque case, by far
+    // the most common, still costs one `memory.copy` per row.
     if !c.is_opaque() {
         for py in y0..y1 {
             let mut i = idx(w, x0, py);
@@ -1576,7 +1481,7 @@ fn fill(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, c: Rgb
 
 /// How far a rounded rect's left and right edges move inwards on the row whose
 /// top is `row_y` (rect-local), in fractional pixels. Radii are `[tl, tr, br,
-/// bl]` (CSS corner order) and are treated as circular — CSS allows an ellipse
+/// bl]` (CSS corner order) and are treated as circular; CSS allows an ellipse
 /// per corner, we take one radius.
 fn round_insets(row_y: f32, rh: f32, r: [f32; 4]) -> (f32, f32) {
     let [tl, tr, br, bl] = r;
@@ -1631,12 +1536,11 @@ fn fill_span(out: &mut [u8], w: i32, h: i32, y: i32, xl: f32, xr: f32, c: Rgba) 
     edge(rr - 1.0, 1.0 - (rr - xr));
 }
 
-/// Die Kachelgroesse eines Verlaufs.
+/// The tile size of a gradient.
 ///
-/// Ein Verlauf hat KEINE eigene Groesse (css-images-3 §4.3): sein Vorgabemass
-/// ist die Positionierflaeche selbst. Damit fallen `auto`, `cover` und
-/// `contain` alle auf die Flaeche zurueck, und nur eine ausdrueckliche
-/// Groesse macht daraus eine Kachel.
+/// A gradient has no intrinsic size (css-images-3 §4.3): its default size is
+/// the positioning area. So `auto`, `cover` and `contain` all fall back to
+/// the area, and only an explicit size makes it a tile.
 fn grad_tile_size(area: (i32, i32), size: BgSize) -> (i32, i32) {
     let (aw, ah) = (area.0 as f32, area.1 as f32);
     match size {
@@ -1649,13 +1553,11 @@ fn grad_tile_size(area: (i32, i32), size: BgSize) -> (i32, i32) {
     }
 }
 
-/// Einen Farbverlauf ueber die Positionierflaeche `x,y,gw,gh` malen —
-/// gekachelt nach `size`/`pos`/`repeat`, beschnitten auf `cl` und auf die
-/// Eckenradien `r`.
+/// Paint a gradient over the positioning area `x,y,gw,gh`, tiled by
+/// `size`/`pos`/`repeat`, clipped to `cl` and to the corner radii `r`.
 ///
-/// Die Kachelung ist dieselbe wie bei einem Bild und aus demselben Grund:
-/// `background-image` ist EINE Eigenschaft, und ein Verlauf steht darin an
-/// derselben Stelle wie ein `url()`.
+/// Tiling is the same as for an image: a gradient occupies the same place in
+/// `background-image` as a `url()`.
 #[allow(clippy::too_many_arguments)]
 fn fill_gradient(
     out: &mut [u8],
@@ -1678,8 +1580,8 @@ fn fill_gradient(
     let (tw, th) = grad_tile_size((gw, gh), size);
     let ox = x + bg_offset(pos.0, gw, tw);
     let oy = y + bg_offset(pos.1, gh, th);
-    // Wie in `blit_bg`: wie viele Kacheln zurueck und vor, bis der Malbereich
-    // verlassen ist. Eine nicht wiederholte Achse hat genau eine.
+    // As in `blit_bg`: how many tiles back and forward until the painting area
+    // is left. A non-repeating axis has exactly one.
     let span = |origin: i32, box_lo: i32, box_hi: i32, tile: i32, rep: bool| -> (i32, i32) {
         if !rep {
             return (0, 0);
@@ -1697,13 +1599,12 @@ fn fill_gradient(
     }
 }
 
-/// EINE Kachel des Verlaufs.
+/// One tile of a gradient.
 ///
-/// Drei Wege, und der Grund ist die Groesse: ein Seitenhintergrund ist
-/// 1902x1000 = 1,9 Mio Pixel, und jedes einzeln zu rechnen kostet mehr als
-/// alles andere im Bild zusammen. Ein SENKRECHTER Verlauf hat je Zeile genau
-/// eine Farbe — eine Zeile ist ein `memory.copy`. Nur der schraege und der
-/// radiale laufen wirklich Pixel fuer Pixel.
+/// Three paths, because of size: a page background is millions of pixels, and
+/// computing each one dominates the frame. A vertical gradient has one colour
+/// per row, so a row is one `memory.copy`; a horizontal one computes one row
+/// and copies it. Only diagonal and radial gradients go pixel by pixel.
 #[allow(clippy::too_many_arguments)]
 fn fill_gradient_tile(
     out: &mut [u8],
@@ -1717,7 +1618,7 @@ fn fill_gradient_tile(
     r: [f32; 4],
     g: &Gradient,
 ) {
-    // Sichtbarer Bereich: Kachel ∩ Malbereich ∩ Bild.
+    // Visible area: tile ∩ painting area ∩ canvas.
     let x0 = x.max(cl.0).max(0);
     let y0 = y.max(cl.1).max(0);
     let x1 = (x + gw).min(cl.0 + cl.2).min(w);
@@ -1728,9 +1629,9 @@ fn fill_gradient_tile(
     let (fw, fh) = (gw as f32, gh as f32);
     let (cx, cy) = (x as f32 + fw / 2.0, y as f32 + fh / 2.0);
     let rounded = r.iter().any(|&v| v > 0.0);
-    // Die Rundung gehoert dem MALBEREICH, nicht der Kachel: mit einem Rahmen
-    // sind das zwei verschiedene Rechtecke, und die Ecke, die der Verlauf
-    // nicht ueberlaufen darf, ist die des Malbereichs.
+    // The rounding belongs to the painting area, not the tile: with a border
+    // these are two different rectangles, and the corner the gradient must not
+    // overflow is the painting area's.
     let span = |py: i32| -> (i32, i32) {
         if !rounded {
             return (x0, x1);
@@ -1742,9 +1643,9 @@ fn fill_gradient_tile(
     };
 
     if g.kind == GradKind::Radial {
-        // Mitte, `farthest-corner`. Eine Ellipse behaelt das Seitenverhaeltnis
-        // des Kastens und geht durch die Ecke — das Wurzel-Zwei-Fache der
-        // halben Seiten. Ein Kreis hat EINEN Radius: den Abstand zur Ecke.
+        // Centre, `farthest-corner`. An ellipse keeps the box's aspect ratio and
+        // passes through the corner: sqrt(2) times the half sides. A circle has one
+        // radius, the distance to the corner.
         let (rx, ry) = if g.circle {
             let rad = libm::sqrtf(fw * fw + fh * fh) / 2.0;
             (rad, rad)
@@ -1766,18 +1667,18 @@ fn fill_gradient_tile(
         return;
     }
 
-    // CSS zaehlt den Winkel im Uhrzeigersinn ab „nach oben"; die Achse zeigt
-    // damit nach `(sin, -cos)` in Bildkoordinaten (y waechst nach unten).
+    // CSS measures the angle clockwise from "up", so the axis points along
+    // `(sin, -cos)` in image coordinates (y grows downwards).
     let rad = g.angle_for(fw, fh) * core::f32::consts::PI / 180.0;
     let (sa, ca) = (libm::sinf(rad), libm::cosf(rad));
     let line = libm::fabsf(fw * sa) + libm::fabsf(fh * ca);
     let gr = g.resolved(line);
     let inv = if line > 0.0 { 1.0 / line } else { 0.0 };
-    // `t` an einem Pixel: die Projektion auf die Achse, auf 0..1 normiert.
+    // `t` at a pixel: its projection onto the axis, normalised to 0..1.
     let t_at = |px: f32, py: f32| 0.5 + ((px - cx) * sa - (py - cy) * ca) * inv;
 
     if libm::fabsf(sa) < 0.0005 {
-        // Senkrecht: eine Farbe je Zeile.
+        // Vertical: one colour per row.
         for py in y0..y1 {
             let (sx, ex) = span(py);
             if ex <= sx {
@@ -1792,9 +1693,8 @@ fn fill_gradient_tile(
     }
 
     if libm::fabsf(ca) < 0.0005 {
-        // Waagrecht: jede Zeile ist dieselbe Farbfolge. Einmal rechnen, dann
-        // nur noch schreiben — das nimmt der heissesten Schleife im Bild die
-        // Winkelrechnung und die Stoppsuche je Pixel.
+        // Horizontal: every row is the same colour sequence. Compute it once,
+        // then only write; this removes the angle math and stop search per pixel.
         let mut row: Vec<Rgba> = Vec::with_capacity((x1 - x0) as usize);
         for px in x0..x1 {
             row.push(gr.at(t_at(px as f32 + 0.5, 0.0)));
@@ -1825,13 +1725,12 @@ fn fill_gradient_tile(
     }
 }
 
-/// Fill a rounded rect, or — when `ring > 0` — only a border of that thickness
+/// Fill a rounded rect, or, when `ring > 0`, only a border of that thickness
 /// along its inside edge. Radii are in px, `[tl, tr, br, bl]`.
 ///
-/// A solid fill only walks rows inside the corner bands; everything between
-/// them is ONE `fill` call. So a page-tall background with a 2px radius still
-/// costs one `memory.copy` per row instead of a per-pixel loop over millions
-/// of pixels.
+/// A solid fill walks rows only inside the corner bands; everything between
+/// them is one `fill` call, so a page-tall background with a small radius
+/// still costs one `memory.copy` per row.
 #[allow(clippy::too_many_arguments)]
 fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, r: [f32; 4], c: Rgba, ring: f32) {
     if rw <= 0 || rh <= 0 {
@@ -1842,19 +1741,15 @@ fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, 
         return;
     }
     let (fx, fy, fw, fh) = (x as f32, y as f32, rw as f32, rh as f32);
-    // Erst jeden Radius auf die Kastenseite deckeln, DANN die Paare summieren.
-    //
-    // Sonst laeuft die Summe ueber: Tailwind schreibt seine Pille als
-    // `border-radius: 3.40282e38px` — und das ist f32::MAX, also ist
-    // `r[0] + r[1]` unendlich, `extent / sum` wird 0, und der Faktor unten
-    // setzt ALLE Radien auf null. Die Pille kam als Rechteck heraus.
-    // Deckeln aendert die Form nicht: ein Radius groesser als die Seite ist
-    // ohnehin nicht darstellbar, und die Verhaeltnisse zwischen den Ecken
-    // bleiben, weil danach immer noch EIN gemeinsamer Faktor wirkt.
+    // Cap each radius at the box side first, then sum the pairs. Otherwise the
+    // sum can overflow: a pill written as `border-radius: 3.40282e38px` (f32::MAX)
+    // makes `r[0] + r[1]` infinite and the factor below zeroes every radius.
+    // Capping does not change the shape, since a radius larger than the side
+    // cannot be drawn and one common factor still applies afterwards.
     let cap = fw.max(fh);
     let r = [r[0].min(cap), r[1].min(cap), r[2].min(cap), r[3].min(cap)];
-    // A radius may not exceed half the box, and CSS scales ALL of them by one
-    // factor when any pair overflows its side (css-backgrounds-3 §5.5) —
+    // A radius may not exceed half the box, and CSS scales all of them by one
+    // factor when any pair overflows its side (css-backgrounds-3 §5.5);
     // clamping each corner on its own would change the shape.
     let mut scale = 1.0f32;
     for (sum, extent) in [(r[0] + r[1], fw), (r[3] + r[2], fw), (r[0] + r[3], fh), (r[1] + r[2], fh)] {
@@ -1881,7 +1776,7 @@ fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, 
         return;
     }
 
-    // Ring: the hole's radii shrink with the border but never go negative — a
+    // Ring: the hole's radii shrink with the border but never go negative; a
     // border thicker than the radius leaves a square inner corner, as browsers
     // do. Rows above and below the hole are border across their whole span.
     let inner = [
@@ -1904,49 +1799,37 @@ fn fill_round(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh: i32, 
     }
 }
 
-/// `ceil` as an i32 — `core` has no `f32::ceil` in `no_std`.
+/// `ceil` as an i32; `core` has no `f32::ceil` in `no_std`.
 fn ceil_f(v: f32) -> i32 {
     libm::ceilf(v.max(0.0)) as i32
 }
 
-/// Two 0..255 coverages multiplied, rounded — `255 * x == x`, so an opaque
-/// colour leaves a coverage untouched and the antialiasing is bit-identical to
-/// what it was before alpha existed.
+/// Two 0..255 coverages multiplied and rounded. `255 * x == x`, so an opaque
+/// colour leaves a coverage untouched.
 #[inline]
 fn mul255(x: u8, y: u8) -> u8 {
     ((x as u32 * y as u32 + 127) / 255) as u8
 }
 
-/// Blend `c` at `a`/255 coverage over the pixel starting at byte `i`. Takes the
-/// offset rather than (x, y) so the caller can walk a row by adding 4 instead of
-/// recomputing `y * w + x` for every pixel it touches.
 #[inline]
-/// Ein weichgezeichneter Schlagschatten.
+/// A blurred box shadow.
 ///
-/// **Die Deckung eines gaussisch weichgezeichneten Rechtecks ist trennbar:**
+/// The coverage of a Gaussian-blurred rectangle is separable:
 ///
-///     a(x,y) = A * S(x; links, rechts) * S(y; oben, unten)
+///     a(x,y) = A * S(x; left, right) * S(y; top, bottom)
 ///     S(t; a, b) = Phi((t-a)/sigma) - Phi((t-b)/sigma)
 ///
-/// Das ist keine Naeherung, sondern exakt — die Faltung eines Rechtecks mit
-/// einem trennbaren Kern zerfaellt in zwei eindimensionale. Damit kostet ein
-/// Pixel EINE Multiplikation statt einer Faltung, und das Waagrechte wird
-/// einmal je Schatten gerechnet statt einmal je Zeile.
+/// This is exact, not an approximation: convolving a rectangle with a
+/// separable kernel splits into two one-dimensional ones. A pixel costs one
+/// multiplication instead of a convolution, and the horizontal profile is
+/// computed once per shadow rather than once per row.
 ///
-/// `sigma = blur / 2`, wie CSS Backgrounds 3 §7.1.1 es vorschreibt: der
-/// Radius spannt zwei Standardabweichungen.
+/// `sigma = blur / 2`, as CSS Backgrounds 3 §7.1.1 specifies: the blur radius
+/// spans two standard deviations.
 ///
-/// **Die Ecken folgen dem `border-radius`** — seit 0.187.0. Der Kommentar
-/// hier sagte vorher, der Unterschied liege bei 6 px Radius unter der
-/// Sichtbarkeitsschwelle. Das stimmt fuer eine KARTE und nicht fuer eine
-/// KAPSEL: DuckDuckGos Suchfeld ist 40 px hoch mit 24 px Radius, und sein
-/// Ring ist ein Schatten. Eckig gemalt war es der ganze Unterschied zum
-/// Browserbild ([[feedback_a_comment_that_names_its_condition_expires]]).
-///
-/// **Der trennbare Weg bleibt, wo er stimmt.** Ohne Radius ist die Deckung
-/// exakt `fx * fy`, und daran wird nichts gerechnet. Nur INNERHALB der vier
-/// Eckquadrate tritt die Abstandsfunktion an ihre Stelle — dort, und nur
-/// dort, war das Rechteck falsch.
+/// Corners follow `border-radius`. Without a radius the coverage stays
+/// exactly `fx * fy`; only inside the four corner squares does a distance
+/// function take its place.
 #[allow(clippy::too_many_arguments)]
 fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
                blur: f32, color: Rgba, keep: (i32, i32, i32, i32), r: [f32; 4]) {
@@ -1954,26 +1837,26 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
         return;
     }
     let sigma = (blur * 0.5).max(0.01);
-    // Jenseits von drei Sigma ist die Deckung unter einem halben Prozent.
+    // Beyond three sigma the coverage is below half a percent.
     let pad = libm::ceilf(sigma * 3.0) as i32;
     let (x0, y0) = ((x - pad).max(0), (y - pad).max(0));
     let (x1, y1) = ((x + w + pad).min(cw), (y + h + pad).min(ch));
     if x1 <= x0 || y1 <= y0 {
         return;
     }
-    // Das waagrechte Profil einmal, nicht je Zeile.
+    // The horizontal profile once, not per row.
     let mut fx: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity((x1 - x0) as usize);
     for px in x0..x1 {
         fx.push(span(px as f32 + 0.5, x as f32, (x + w) as f32, sigma));
     }
-    // Die Radien auf den Kasten klemmen: mehr als die halbe Kante gibt es
-    // nicht (CSS Backgrounds 3 §5.5).
+    // Clamp the radii to the box: no more than half the edge
+    // (CSS Backgrounds 3 §5.5).
     let lim = (w.min(h) as f32) * 0.5;
     let r = [r[0].min(lim).max(0.0), r[1].min(lim).max(0.0),
              r[2].min(lim).max(0.0), r[3].min(lim).max(0.0)];
     let round = r.iter().any(|&v| v > 0.0);
-    // Mittelpunkt und Radius der Ecke, in deren Quadrat dieser Punkt liegt —
-    // sonst `None`, und dann gilt der trennbare Weg unveraendert.
+    // Centre and radius of the corner whose square contains this point;
+    // `None` otherwise, and the separable path applies unchanged.
     let corner = |px: f32, py: f32| -> Option<(f32, f32, f32)> {
         let (l, t, rr, b) = (x as f32, y as f32, (x + w) as f32, (y + h) as f32);
         for (i, (cx, cy, sx, sy)) in [(l, t, 1.0f32, 1.0f32), (rr, t, -1.0, 1.0),
@@ -1995,22 +1878,19 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
         let inside_y = py >= keep.1 && py < keep.1 + keep.3;
         let row = (py * cw) as usize * 4;
         for (k, px) in (x0..x1).enumerate() {
-            // Ein AEUSSERER Schatten wird nicht in den RAHMENkasten gemalt
-            // (CSS Backgrounds 3 §7.1.1). Unter einem deckenden Kasten faellt
-            // das nicht auf; unter einem durchsichtigen ist es der Ring, den
-            // ein Browser dort auch zeigt.
+            // An outer shadow is not painted inside the border box
+            // (CSS Backgrounds 3 §7.1.1). Under an opaque box that is invisible; under a
+            // translucent one it is the ring browsers show too.
             //
-            // Ausgespart wird der RAHMENkasten, nicht das Schattenrechteck.
-            // Dieselben sind die beiden nur ohne Versatz und ohne Spread —
-            // Tailwinds `shadow-lg` hat beides (`0 10px 15px -3px`), und die
-            // falsche Aussparung schnitt einen weissen Zapfen genau in den
-            // Streifen unter dem Kasten, wo der Schatten am dunkelsten ist.
+            // The excluded area is the border box, not the shadow rect. They coincide
+            // only without offset and spread; with both (e.g. `0 10px 15px -3px`) the
+            // wrong exclusion cuts a gap where the shadow is darkest.
             if inside_y && px >= keep.0 && px < keep.0 + keep.2 {
                 continue;
             }
-            // **Im Eckquadrat entscheidet der ABSTAND, nicht das Produkt.**
-            // Auf den geraden Kanten geben beide dasselbe (eine Kante weit
-            // weg traegt den Faktor eins), also stossen sie stetig aneinander.
+            // In a corner square the distance decides, not the product. On the
+            // straight edges both agree (a far edge contributes a factor of one), so
+            // they meet continuously.
             let cov = match if round { corner(px as f32 + 0.5, py as f32 + 0.5) } else { None } {
                 Some((ox, oy, rad)) => {
                     let (dx, dy) = (px as f32 + 0.5 - ox, py as f32 + 0.5 - oy);
@@ -2029,28 +1909,27 @@ fn fill_shadow(out: &mut [u8], cw: i32, ch: i32, x: i32, y: i32, w: i32, h: i32,
     }
 }
 
-/// Wieviel einer gaussisch verschmierten Kante liegt bei `t` noch im Band
-/// `[a, b]`? `Phi` ueber die Fehlerfunktion — `libm` hat sie, also braucht es
-/// hier keine Naeherung, die man spaeter erklaeren muss.
+/// How much of a Gaussian-blurred edge at `t` still lies in the band
+/// `[a, b]`. `Phi` via the error function from `libm`, so no approximation.
 fn span(t: f32, a: f32, b: f32, sigma: f32) -> f32 {
     let k = 1.0 / (sigma * core::f32::consts::SQRT_2);
     let phi = |z: f32| 0.5 * (1.0 + libm::erff(z));
     (phi((t - a) * k) - phi((t - b) * k)).clamp(0.0, 1.0)
 }
 
-/// Der Haken eines Kaestchens: zwei Striche im Kasten `w`x`h`.
+/// A checkbox tick: two strokes in the box `w`x`h`.
 ///
-/// Die drei Punkte sind die Verhaeltnisse, die jeder Browser malt — kurzer
-/// Strich nach unten rechts, langer nach oben rechts. Die Kantenglaettung
-/// kommt aus dem ABSTAND zum Strich, nicht aus einer Ueberabtastung: bei
-/// 13 px ist der Haken zwei Striche breit, und jede Stufe waere sichtbar.
+/// The three points are the proportions browsers draw: a short stroke down to
+/// the right, a long one up to the right. Antialiasing comes from the distance
+/// to the stroke, not supersampling: at 13 px the tick is two strokes wide and
+/// every step would show.
 fn stroke_check(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, cw: i32, ch: i32, color: Rgba) {
     if cw <= 0 || ch <= 0 || color.a == 0 { return }
     let (fw, fh) = (cw as f32, ch as f32);
-    // Die Ecken des Hakens, in Anteilen des Kastens.
+    // The tick's corners, as fractions of the box.
     let pts = [(0.22 * fw, 0.52 * ch as f32), (0.42 * fw, 0.73 * fh), (0.78 * fw, 0.28 * fh)];
-    let hw = (fw.min(fh) * 0.085).max(0.9); // halbe Strichbreite
-    // Nur die Zeilen und Spalten anfassen, die der Haken ueberhaupt trifft.
+    let hw = (fw.min(fh) * 0.085).max(0.9); // half stroke width
+    // Only the box's rows and columns, clipped to the buffer.
     let (x0, y0) = ((x.max(0)), (y.max(0)));
     let (x1, y1) = ((x + cw).min(w), (y + ch).min(h));
     for py in y0..y1 {
@@ -2068,8 +1947,8 @@ fn stroke_check(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, cw: i32, ch: i32
                 let dd = libm::sqrtf(dx * dx + dy * dy);
                 if dd < d { d = dd }
             }
-            // Ein Pixel, dessen Mitte genau auf dem Rand liegt, ist halb
-            // gedeckt — daher das halbe Pixel Zugabe.
+            // A pixel whose centre lies exactly on the edge is half covered, hence the
+            // extra half pixel.
             let cov = (hw + 0.5 - d).clamp(0.0, 1.0);
             if cov <= 0.0 { continue }
             let a = (cov * color.a as f32) as u8;
@@ -2079,6 +1958,9 @@ fn stroke_check(out: &mut [u8], w: i32, h: i32, x: i32, y: i32, cw: i32, ch: i32
     }
 }
 
+/// Blend `c` at `a`/255 coverage over the pixel starting at byte `i`. Takes the
+/// offset rather than (x, y) so the caller can walk a row by adding 4 instead of
+/// recomputing `y * w + x` for every pixel it touches.
 fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
     if a == 255 {
         out[i] = c.2;
@@ -2095,8 +1977,6 @@ fn blend_at(out: &mut [u8], i: usize, c: Rgb, a: u8) {
     out[i + 3] = 255;
 }
 
-/// Nearest-neighbour scale a decoded `img` (BGRA) into a `dw`×`dh` box at
-/// (dx, dy), alpha-blending over `out`. Clipped to the buffer.
 /// Resolve `background-size` against the positioning area (css-backgrounds-3
 /// §3.9). `auto` on one axis keeps the intrinsic aspect ratio.
 fn bg_tile_size(area: (i32, i32), img: (u32, u32), size: BgSize) -> (i32, i32) {
@@ -2146,8 +2026,8 @@ fn blit_bg(
     dy: i32,
     dw: i32,
     dh: i32,
-    // The painting area (`background-clip`). `d*` above is the POSITIONING
-    // area, which is what the tile grid is anchored to and measured against.
+    // The painting area (`background-clip`). `d*` above is the positioning
+    // area, which the tile grid is anchored to and measured against.
     clip: (i32, i32, i32, i32),
     img: &crate::image::Image,
     repeat: (bool, bool),
@@ -2174,7 +2054,7 @@ fn blit_bg(
     };
     let (ix0, ix1) = span(ox, clip.0, clip.0 + clip.2, tw, repeat.0);
     let (iy0, iy1) = span(oy, clip.1, clip.1 + clip.3, th, repeat.1);
-    // Clip to the painting area AND to the surface in one rect, so the inner
+    // Clip to the painting area and to the surface in one rect, so the inner
     // loop never tests bounds per pixel.
     let (cx0, cx1) = (clip.0.max(0), (clip.0 + clip.2).min(w));
     let (cy0, cy1) = (clip.1.max(0), (clip.1 + clip.3).min(h));
@@ -2193,9 +2073,8 @@ fn blit_bg(
             if x1 <= x0 {
                 continue;
             }
-            // Source column per destination column, resolved once per tile
-            // rather than a multiply+divide per pixel (the interpreter charges
-            // ~150× for a per-pixel loop — see the wasmi hot-loop note).
+            // Source column per destination column, resolved once per tile rather
+            // than a multiply and divide per pixel.
             let cols: Vec<usize> = (x0..x1)
                 .map(|px| ((px - tx0) * img.w as i32 / tw).clamp(0, img.w as i32 - 1) as usize * 4)
                 .collect();
@@ -2245,13 +2124,12 @@ fn blit_bg(
 }
 
 /// Where a replaced element's pixels land inside the content box the layout
-/// gave it — `object-fit` (css-images-3 §5.5). Returns the rectangle the
-/// picture is DRAWN into, which for `cover`/`none` may be larger than the box
-/// (the caller clips) and for `contain`/`scale-down` smaller (it letterboxes).
+/// gave it: `object-fit` (css-images-3 §5.5). Returns the rectangle the
+/// picture is drawn into, which for `cover`/`none` may be larger than the box
+/// (the caller clips) and for `contain`/`scale-down` smaller (letterboxed).
 ///
-/// `object-position` is not implemented; the picture is centred, which is that
-/// property's initial value (`50% 50%`) and what every use of `object-fit` on
-/// the two vendored sheets asks for.
+/// Not implemented: `object-position`; the picture is centred, which is that
+/// property's initial value (`50% 50%`).
 fn object_rect(fit: ObjectFit, dx: i32, dy: i32, dw: i32, dh: i32, iw: i32, ih: i32) -> (i32, i32, i32, i32) {
     let (bw, bh, sw, sh) = (dw as f32, dh as f32, iw as f32, ih as f32);
     let scale = match fit {
@@ -2260,8 +2138,8 @@ fn object_rect(fit: ObjectFit, dx: i32, dy: i32, dw: i32, dh: i32, iw: i32, ih: 
         ObjectFit::Contain => (bw / sw).min(bh / sh),
         ObjectFit::Cover => (bw / sw).max(bh / sh),
         ObjectFit::None => 1.0,
-        // `scale-down` is `none` and `contain`, whichever comes out smaller —
-        // an image that already fits keeps its own size instead of growing.
+        // `scale-down` is `none` or `contain`, whichever is smaller: an image
+        // that already fits keeps its own size instead of growing.
         ObjectFit::ScaleDown => (bw / sw).min(bh / sh).min(1.0),
     };
     let (rw, rh) = ((sw * scale + 0.5).max(1.0) as i32, (sh * scale + 0.5).max(1.0) as i32);
@@ -2274,6 +2152,8 @@ fn filt(layout: &Layout, idx: u16) -> Option<ColorFilter> {
     layout.filters.get((idx as usize).checked_sub(1)?).copied()
 }
 
+/// Nearest-neighbour scale a decoded `img` (BGRA) into a `dw`×`dh` box at
+/// (dx, dy), alpha-blending over `out`. Clipped to the buffer.
 #[allow(clippy::too_many_arguments)]
 fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32, img: &crate::image::Image, fit: ObjectFit, filter: Option<ColorFilter>) {
     if dw <= 0 || dh <= 0 || img.w == 0 || img.h == 0 {
@@ -2300,9 +2180,9 @@ fn blit_image(out: &mut [u8], w: i32, h: i32, dx: i32, dy: i32, dw: i32, dh: i32
         let mut di = idx(w, x0, py);
         for &sx in &cols {
             let si = srow + sx;
-            // `filter` recolours the SOURCE pixel. Read through a local copy
-            // only when there is one, so the unfiltered blit keeps indexing
-            // straight into the decoded buffer.
+            // `filter` recolours the source pixel. Read through a local copy only
+            // when there is one, so the unfiltered blit indexes straight into the
+            // decoded buffer.
             let px = match filter {
                 None => [img.bgra[si], img.bgra[si + 1], img.bgra[si + 2], img.bgra[si + 3]],
                 Some(f) => f.apply_bgra([img.bgra[si], img.bgra[si + 1], img.bgra[si + 2], img.bgra[si + 3]]),
@@ -2327,16 +2207,16 @@ mod tests {
     use super::*;
     use crate::layout::{Rgb, Theme};
 
-    /// A decodable image in plain bytes — SVG is one of the formats
+    /// A decodable image in plain bytes. SVG is one of the formats
     /// `image::decode` accepts, so a test needs no binary fixture.
     const RED_10: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#;
 
     #[test]
     fn a_band_paints_exactly_what_a_full_frame_would() {
         // The claim behind the cheap scroll: painting rows y0..y1 into a slice
-        // produces the same bytes a whole frame would have in those rows.
-        // Deliberately with boxes and text that STRADDLE the band edges — an
-        // op crossing a boundary is where a missing clip would show.
+        // produces the same bytes a whole frame would have in those rows. Boxes
+        // and text deliberately straddle the band edges, where a missing clip would
+        // show.
         let eng = Engine::new();
         let html = "<body style=\"background:#123\">\
             <div style=\"height:80px;background:#c00\">Erste Zeile mit Text</div>\
@@ -2380,8 +2260,8 @@ mod tests {
 
     #[test]
     fn the_oldest_document_is_the_one_that_goes() {
-        // DOC_SLOTS = 3. A fourth page pushes the least recently used out —
-        // and the two still held stay free.
+        // DOC_SLOTS = 3. A fourth page pushes the least recently used out, and the
+        // two still held stay free.
         let eng = Engine::new();
         let pages = ["<p>1</p>", "<p>2</p>", "<p>3</p>", "<p>4</p>"];
         for p in pages {
@@ -2401,7 +2281,7 @@ mod tests {
         assert!(eng.add_image_cached("logo.png", "https://a.example/logo.png", RED_10).is_ok());
         eng.images_begin(); // a navigation: the page map goes, the cache stays
 
-        // The SAME src string on ANOTHER host is another picture. Serving it
+        // The same src string on another host is another picture. Serving it
         // from the cache would put one site's image on another site's page.
         let miss = eng.adopt_cached(&[(
             alloc::string::String::from("logo.png"),
@@ -2425,7 +2305,7 @@ mod tests {
         assert!(eng.add_css_image_cached(7, "https://a.example/bg.png", RED_10).is_ok());
         eng.css_images_begin(); // a navigation
 
-        // Another site writing the SAME `url(/bg.png)` hashes to the same key
+        // Another site writing the same `url(/bg.png)` hashes to the same key
         // and is a different picture. The key alone would have served it.
         assert!(!eng.adopt_css_cached(7, "https://b.example/bg.png"),
             "same url_key, other host -> miss");
@@ -2436,10 +2316,9 @@ mod tests {
 
     #[test]
     fn an_adopted_image_makes_the_box_definite() {
-        // The point of adopting BEFORE the first layout: with the pixels
-        // already here the box is not guessed, so the arriving image never
-        // moves the page — which is the full re-layout that cost 1110-1710 ms
-        // on the device.
+        // The point of adopting before the first layout: with the pixels already
+        // here the box is not guessed, so the arriving image never forces a
+        // relayout that moves the page.
         let mut eng = Engine::new();
         eng.add_image_cached("/x.svg", "https://a.example/x.svg", RED_10).unwrap();
         eng.images_begin();
@@ -2458,7 +2337,7 @@ mod tests {
 
     /// An inline SVG `data:` URI, quote-safe: the SVG's own attribute quotes
     /// are percent-encoded, so the URI survives being nested inside a CSS
-    /// string inside an HTML attribute (which is how real pages ship them).
+    /// string inside an HTML attribute (as real pages ship them).
     const MASK_LEFT_HALF: &str = "data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22\
         %20width=%2220%22%20height=%2220%22%20viewBox=%220%200%2020%2020%22%3E\
         %3Cpath%20d=%22M0%200%20H10%20V20%20H0%20Z%22%20fill=%22%23000%22/%3E%3C/svg%3E";
@@ -2482,7 +2361,7 @@ mod tests {
         page(html, 40, 40)(x, y)
     }
 
-    /// `pixel_at` over a content box of a given size — inline content needs a
+    /// `pixel_at` over a content box of a given size; inline content needs a
     /// line's worth of width. Returns a reader so one paint answers many probes.
     fn page(html: &str, cw: u32, ch: u32) -> impl Fn(u32, u32) -> (u8, u8, u8) {
         let (w, h) = (PAD * 2 + cw, PAD * 2 + ch);
@@ -2497,19 +2376,16 @@ mod tests {
         }
     }
 
-    /// A 4x1 PNG — red, green, blue, yellow — as a `data:` URI, so a test can
-    /// say where the picture landed without a fetch. Four columns and one row
-    /// make the aspect ratio (4:1) unmistakable against a square box.
+    /// A 4x1 PNG (red, green, blue, yellow) as a `data:` URI, so a test can say
+    /// where the picture landed without a fetch. Four columns and one row make
+    /// the aspect ratio (4:1) unmistakable against a square box.
     const STRIPES_4X1: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2Xpia\
         AAAAEklEQVR42mP4z8DAAMb//zMAABzwBPxjoz6tAAAAAElFTkSuQmCC";
 
-    /// **Ein Ausschnitt, der nicht mitwandert, schneidet an der ALTEN Stelle.**
-    /// Der Inhalt eines atomaren Inline wird bei 0,0 ausgelegt, dort
-    /// beschnitten und danach an seine Zeilenstelle verschoben. Blieb der
-    /// Ausschnitt stehen, wurde der Lauf an seiner neuen Stelle gegen ein
-    /// Rechteck an der alten geschnitten — uebrig blieb, wo sich beide um ein
-    /// Pixel ueberlappten, eine senkrechte Linie von einem Pixel. Auf
-    /// DuckDuckGos Trefferliste standen die quer durch die Seite.
+    /// A clip must move with its op. The content of an atomic inline is laid out
+    /// at 0,0, clipped there, then shifted to its place in the line; a clip left
+    /// behind cuts the run against a rectangle at the old position, leaving only
+    /// a one-pixel vertical sliver where the two overlap.
     #[test]
     fn ein_ausschnitt_wandert_mit_seinem_befehl() {
         let (w, h) = (400u32, 40u32);
@@ -2521,7 +2397,7 @@ mod tests {
              color:#ff0000;font-size:20px'>HHHHHH</span></div></body>", w);
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
         eng.paint(&lay, w, h, 0, &mut buf);
-        // Rote Tinte RECHTS von x=200 — dort steht der Kasten wirklich.
+        // Red ink right of x=200, where the box really is.
         let mut ink = 0;
         for y in 0..h {
             for x in 200..320u32 {
@@ -2532,18 +2408,16 @@ mod tests {
         assert!(ink > 60, "der Text steht an seiner Stelle, nicht als Streifen anderswo ({ink} Punkte)");
     }
 
-    /// **Die Kette von der Ankunft bis zum Pixel**, mit einer
-    /// protokollrelativen Adresse — genau der Fall von DuckDuckGos
-    /// Trefferliste (`//external-content.duckduckgo.com/ip3/x.ico`). Der Log
-    /// sagte „4 von 4 dekodiert", und die Kaestchen blieben leer; diese Zeile
-    /// fragt, ob zwischen ABLEGEN und MALEN derselbe Schluessel steht.
+    /// The chain from arrival to pixel, with a protocol-relative url
+    /// (`//h.example/x.png`): the key an image is stored under must be the key
+    /// painting looks it up by.
     #[test]
     fn ein_geholtes_bild_wird_auch_gemalt() {
         let png = crate::image::decode_data_uri(STRIPES_4X1).expect("Testbild");
         let (w, h) = (60u32, 40u32);
         let mut eng = Engine::new();
         eng.set_theme(light());
-        // Wie der Wirt es tut: erst die Runde beginnen, dann das Bild ablegen.
+        // As the shell does it: start the round, then store the image.
         eng.images_begin();
         eng.add_image_cached("//h.example/x.png", "https://h.example/x.png", &png)
             .expect("dekodiert");
@@ -2552,16 +2426,15 @@ mod tests {
              style='display:block;width:40px;height:20px'></body>", w);
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
         eng.paint(&lay, w, h, 0, &mut buf);
-        // Das Testbild ist rot/gruen/blau/gelb — der erste Streifen ist ROT.
+        // The test image is red/green/blue/yellow; the first stripe is red.
         let i = ((2 * w + 2) * 4) as usize;
         let (r, g, b) = (buf[i + 2], buf[i + 1], buf[i]);
         assert!(r > 200 && g < 80 && b < 80,
                 "das geholte Bild wird gemalt, nicht der Platzhalter — gelesen ({r},{g},{b})");
     }
 
-    /// Dieselbe Kette in der REIHENFOLGE DES GERAETS: erst auslegen, dann
-    /// kommt das Bild an, dann wird neu gemalt. Genau das tut der Wirt, und
-    /// genau da blieben DuckDuckGos Kaestchen leer.
+    /// The same chain in the shell's order: lay out, then the image arrives,
+    /// then repaint.
     #[test]
     fn ein_spaet_geholtes_bild_wird_auch_gemalt() {
         let png = crate::image::decode_data_uri(STRIPES_4X1).expect("Testbild");
@@ -2571,11 +2444,11 @@ mod tests {
         eng.images_begin();
         let html = "<body style='margin:0'><img src='//h.example/x.png' \
                     style='display:block;width:40px;height:20px'></body>";
-        let lay = eng.layout(html, w);          // ausgelegt, Bild noch nicht da
+        let lay = eng.layout(html, w);          // laid out, image not here yet
         eng.add_image_cached("//h.example/x.png", "https://h.example/x.png", &png)
             .expect("dekodiert");
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
-        eng.paint(&lay, w, h, 0, &mut buf);     // nur neu MALEN, nicht neu auslegen
+        eng.paint(&lay, w, h, 0, &mut buf);     // repaint only, no relayout
         let i = ((2 * w + 2) * 4) as usize;
         let (r, g, b) = (buf[i + 2], buf[i + 1], buf[i]);
         assert!(r > 200 && g < 80 && b < 80,
@@ -2589,7 +2462,7 @@ mod tests {
     }
 
     /// `object-fit` decides how a replaced element's pixels fill the box the
-    /// layout gave it — the box itself is 20x20 in every one of these.
+    /// layout gave it; the box itself is 20x20 in every one of these.
     #[test]
     fn object_fit_places_the_picture_inside_the_box() {
         // `fill` is the initial value: stretched to the box, aspect ignored,
@@ -2600,14 +2473,14 @@ mod tests {
         assert_eq!(p(17, 10), (255, 255, 0), "fill: fourth stripe at the right edge");
         assert_eq!(p(2, 2), (255, 0, 0), "fill: the box is full top to bottom");
 
-        // `contain`: scaled down to 20x5 and centred — letterboxed above/below.
+        // `contain`: scaled down to 20x5 and centred, letterboxed above/below.
         let html = stripes("contain");
         let p = page(&html, 40, 40);
         assert_eq!(p(2, 10), (255, 0, 0), "contain: full width, all four stripes");
         assert_eq!(p(17, 10), (255, 255, 0));
         assert_eq!(p(2, 2), (255, 255, 255), "contain: letterbox above the picture");
 
-        // `cover`: scaled UP to 80x20 and cropped to the box — only the two
+        // `cover`: scaled up to 80x20 and cropped to the box; only the two
         // middle stripes survive, and nothing spills outside the box.
         let html = stripes("cover");
         let p = page(&html, 40, 40);
@@ -2640,8 +2513,8 @@ mod tests {
         assert_eq!(p(4, 10), (0, 255, 0), "-o-object-fit: cover crops like the plain name");
     }
 
-    /// A mask paints the element's own background-colour through the image's
-    /// alpha — it does NOT paint the image. This SVG is opaque on its left half
+    /// A mask paints the element's own background colour through the image's
+    /// alpha; it does not paint the image. This SVG is opaque on its left half
     /// only, so the box must be red on the left and untouched on the right.
     #[test]
     fn mask_image_stencils_the_background_colour() {
@@ -2654,9 +2527,9 @@ mod tests {
         assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
     }
 
-    /// An `outline` is drawn OUTSIDE the border box and takes no space — that
-    /// is the whole reason the property exists separately from `border`: a
-    /// focus ring has to appear without moving the page under the reader.
+    /// An `outline` is drawn outside the border box and takes no space; that is
+    /// why the property exists separately from `border`: a focus ring has to
+    /// appear without moving the page under the reader.
     #[test]
     fn an_outline_rings_the_box_from_outside_and_moves_nothing() {
         let boxed = "<div style='width:20px;height:20px;background:#0000ff'></div>";
@@ -2667,7 +2540,7 @@ mod tests {
         assert_eq!(pixel_at(boxed, 10, 10), (0, 0, 255));
         assert_eq!(pixel_at(ringed, 10, 10), (0, 0, 255), "the box keeps its own paint");
 
-        // The ring sits in the two pixels OUTSIDE the border box.
+        // The ring sits in the two pixels outside the border box.
         assert_eq!(pixel_at(ringed, 10, 25), (255, 255, 255), "no ring below at rest…");
         let off = "<div style='width:20px;height:20px;background:#0000ff;\
                    outline:2px solid #ff0000;outline-offset:4px'></div>";
@@ -2687,7 +2560,7 @@ mod tests {
 
     /// `:hover` all the way to a pixel: lay out once to learn the geometry, ask
     /// the layout what the pointer is inside, hand that back to the engine, lay
-    /// out again — which is exactly the loop the shell runs on `MouseMove`.
+    /// out again. That is the loop the shell runs on `MouseMove`.
     ///
     /// A cascade test would pass on a rule that resolves and never reaches the
     /// screen; only the pixel says the feature works.
@@ -2721,13 +2594,9 @@ mod tests {
         assert_eq!(probe(&eng.layout(html, w)), (255, 255, 255));
     }
 
-    /// The whole point: a pointer change that only recolours is answered by
-    /// PATCHING the display list, and the result has to be indistinguishable
-    /// from having laid the page out again.
-    ///
-    /// Measured on Wikipedia's Main_Page: 0.16 ms against 24 ms, and 55 of the
-    /// 64 hover targets on the page take this path — the rest fall back, which
-    /// is what every guard in `repaint_hover` exists to do.
+    /// A pointer change that only recolours is answered by patching the display
+    /// list, and the result has to be indistinguishable from laying the page out
+    /// again.
     #[test]
     fn a_repaint_answers_a_hover_exactly_as_a_layout_would() {
         let html = "<style>a{color:#0000ee}a:hover{color:#ff0000;text-decoration:underline}</style>\
@@ -2752,10 +2621,10 @@ mod tests {
         assert!(dump_ops(&full).contains("Rgb(255, 0, 0), a: 255"), "the link is red now");
     }
 
-    /// A background that only exists under the pointer has nothing to replace
-    /// — it has to be INSERTED, and where it goes is the box's own insertion
-    /// point. The finished display list no longer holds an index for that, so
-    /// each hit rect carries the op that sits there, by content.
+    /// A background that only exists under the pointer has nothing to replace;
+    /// it has to be inserted, at the box's own insertion point. The finished
+    /// display list no longer holds an index for that, so each hit rect carries
+    /// the op that sits there, by content.
     ///
     /// The rect it is painted at is not the hit rect: an inline box's
     /// background covers its font's ascent + descent, not the line box, and
@@ -2769,8 +2638,8 @@ mod tests {
             // block: painted at the border box
             "<a href=\"/x\" style=\"display:block;width:60px;height:20px\">link</a>",
         ] {
-            // Only paint-class properties: a `border-left` would ADVANCE the
-            // inline flow, which is a layout and `set_hover` says so.
+            // Only paint-class properties: a `border-left` would advance the inline
+            // flow, which is a layout, and `set_hover` says so.
             let html = alloc::format!(
                 "<style>a{{color:#00e}}a:hover{{background:#f00;border-bottom-color:#0f0}}</style>{body}"
             );
@@ -2787,7 +2656,7 @@ mod tests {
         }
     }
 
-    /// A hover rule that can MOVE something is not a repaint, and the engine
+    /// A hover rule that can move something is not a repaint, and the engine
     /// has to say so before anyone tries.
     #[test]
     fn a_hover_that_moves_a_box_is_not_a_repaint() {
@@ -2801,8 +2670,8 @@ mod tests {
         };
         assert_eq!(probe("a:hover{color:#f00}"), HoverChange::Changed { paint_only: true });
         assert_eq!(probe("a:hover{padding-left:20px}"), HoverChange::Changed { paint_only: false });
-        // A property we do not implement cannot move anything — and MediaWiki
-        // writes `cursor:pointer` into a third of its hover rules.
+        // A property we do not implement cannot move anything; `cursor:pointer`
+        // is common in real hover rules.
         assert_eq!(probe("a:hover{cursor:pointer;color:#f00}"), HoverChange::Changed { paint_only: true });
         // …but one layout property in the same rule is enough.
         assert_eq!(probe("a:hover{cursor:pointer;display:block}"), HoverChange::Changed { paint_only: false });
@@ -2831,7 +2700,7 @@ mod tests {
             }
             !ok
         };
-        // A pseudo-element with TEXT of its own: `content` is not part of what
+        // A pseudo-element with text of its own: `content` is not part of what
         // the element says, so its run cannot be identified.
         assert!(gives_up(
             "a:hover::after{content:'x';color:#f00}",
@@ -2844,31 +2713,29 @@ mod tests {
         ));
     }
 
-    /// Ein aeusserer Schatten wird aus dem RAHMENkasten ausgespart, nicht aus
-    /// seinem eigenen Rechteck. Bei `0 10px 15px -3px` sind das zwei
-    /// verschiedene Rechtecke, und die falsche Aussparung liess genau den
-    /// Streifen unter dem Kasten weiss — dort, wo der Schatten am
-    /// dunkelsten ist.
+    /// An outer shadow is cut out of the border box, not out of its own rect.
+    /// With `0 10px 15px -3px` those are different rectangles, and the wrong
+    /// cut leaves the strip below the box white, where the shadow is darkest.
     #[test]
     fn an_offset_shadow_is_cut_out_of_the_border_box_not_of_itself() {
         let html = "<div style='margin:20px;width:60px;height:40px;background:#fff;\
                     box-shadow:0 10px 15px -3px rgba(0,0,0,.4)'></div>";
         let p = page(html, 140, 90);
-        // Der Kasten selbst bleibt weiss.
+        // The box itself stays white.
         assert_eq!(p(50, 40), (255, 255, 255), "im Kasten kein Schatten");
-        // Direkt darunter steht der dunkelste Teil.
+        // Directly below sits the darkest part.
         let under = p(50, 62).0;
         assert!(under < 235, "unter dem Kasten muss es dunkel sein, ist {under}");
-        // Und er wird nach unten hin heller.
+        // And it fades out further down.
         assert!(p(50, 75).0 > under, "der Schatten laeuft aus");
     }
 
-    /// `filter` recolours the element AND its whole subtree — the box's own
+    /// `filter` recolours the element and its whole subtree: the box's own
     /// background, the text inside it, and an image's pixels, which are only
     /// looked up at paint time and so travel as an index instead of a colour.
     #[test]
     fn filter_recolours_the_box_and_its_subtree() {
-        // `invert(100%)` on yellow is blue — the css-color reftest's case.
+        // `invert(100%)` on yellow is blue (the css-color reftest's case).
         let inv = "<div style='width:20px;height:20px;background:#ffff00;filter:invert(100%)'></div>";
         assert_eq!(pixel_at(inv, 10, 10), (0, 0, 255));
 
@@ -2885,18 +2752,18 @@ mod tests {
         let p = page(&html, 40, 40);
         assert_eq!(p(2, 10), (0, 255, 255), "red inverts to cyan");
 
-        // A chain composes into ONE transform: inverting twice is identity.
+        // A chain composes into one transform: inverting twice is identity.
         let twice = "<div style='width:20px;height:20px;background:#ffff00;\
                      filter:invert(1) invert(1)'></div>";
         assert_eq!(pixel_at(twice, 10, 10), (255, 255, 0));
 
-        // `grayscale(100)` — Bootstrap writes the amount as a bare number and
-        // means 1. Luma of pure red is 0.213 → 54.
+        // `grayscale(100)`: pages write the amount as a bare number and mean 1.
+        // Luma of pure red is 0.213 → 54.
         let gray = "<div style='width:20px;height:20px;background:#ff0000;filter:grayscale(100)'></div>";
         assert_eq!(pixel_at(gray, 10, 10), (54, 54, 54));
 
-        // `blur` cannot be a matrix, so the whole declaration is dropped
-        // rather than half-applied — the box keeps its own colour.
+        // `blur` cannot be a matrix, so the whole declaration is dropped rather
+        // than half-applied; the box keeps its own colour.
         let blur = "<div style='width:20px;height:20px;background:#ffff00;\
                     filter:invert(1) blur(2px)'></div>";
         assert_eq!(pixel_at(blur, 10, 10), (255, 255, 0));
@@ -2904,8 +2771,7 @@ mod tests {
 
     /// `display: contents` generates no box: no border, and the children take
     /// the place the box would have had. Inline-level content joins the line
-    /// its parent is building — which is the half a transparent block cannot
-    /// do, and the half every one of these tests turns on.
+    /// its parent is building, which a transparent block cannot do.
     #[test]
     fn display_contents_generates_no_box() {
         let eng = Engine::new();
@@ -2926,15 +2792,12 @@ mod tests {
         assert_eq!(rows.len(), 3, "three line boxes, one per block: {rows:?}");
     }
 
-    /// **Die `visually-hidden`-Technik des ganzen Webs**: ein Kasten von 1x1
-    /// mit `overflow:hidden` und einem langen Text darin. Ein Textbefehl wurde
-    /// vorher GANZ behalten, sobald er den Ausschnitt irgendwo beruehrte — und
-    /// bei 1x1 beruehrt er ihn immer. Auf DuckDuckGos Kopfzeile stand
-    /// „Search Settings" damit lesbar quer ueber dem Zahnrad.
+    /// The `visually-hidden` technique: a 1x1 box with `overflow:hidden` and a
+    /// long text inside. A text op that touches a clip must be cut to it, not
+    /// kept whole; at 1x1 it always touches.
     ///
-    /// Geprueft wird in PIXELN, nicht an einer Zahl: der Fehler war einer des
-    /// MALENS, der Kasten war die ganze Zeit richtig 1x1
-    /// ([[feedback_paint_test_not_parse_test]]).
+    /// Checked in pixels, because the box geometry is correct either way; only
+    /// painting can get it wrong.
     #[test]
     fn ein_versteckter_kasten_malt_seinen_text_nicht_daneben() {
         let html = "<div style='position:relative;height:30px;background:#ffffff'>\
@@ -2946,7 +2809,7 @@ mod tests {
         let lay = eng.layout(html, w);
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
         eng.paint(&lay, w, h, 0, &mut buf);
-        // Ab x=8 ist der 1x1-Kasten vorbei; dahinter darf keine Tinte liegen.
+        // Past x=8 the 1x1 box is over; no ink may lie beyond it.
         let mut ink = 0;
         for y in 0..h {
             for x in 8..w {
@@ -2957,16 +2820,13 @@ mod tests {
         assert_eq!(ink, 0, "{ink} Pixel Tinte ausserhalb eines 1x1-Kastens mit overflow:hidden");
     }
 
-    /// **Die Bildsammlung las das urspruengliche HTML.** Auf einer Seite, die
-    /// ihren Inhalt per Skript baut, steht dort nichts: DuckDuckGos
-    /// Ergebnisseite ist eine Huelle, die React fuellt, und ihre Karte wie ihre
-    /// Seitensymbole kamen nie auch nur zur ANFRAGE — im Geraetelog stand
-    /// keine einzige Zeile zu `external-content.duckduckgo.com`.
+    /// Image urls come from the tree layout uses. A page that builds its content
+    /// by script has none of its images in the original HTML.
     #[test]
     fn bilder_kommen_aus_dem_baum_den_das_layout_benutzt() {
         let huelle = "<html><body><div id=root></div></body></html>";
         let eng = Engine::new();
-        // Ohne Skriptbaum: Zeichen fuer Zeichen die alte Antwort.
+        // Without a scripted tree: the answer from the HTML.
         assert!(eng.image_srcs_now(huelle, 800).is_empty());
 
         let gebaut = crate::dom::parse(
@@ -2980,7 +2840,7 @@ mod tests {
                    "die per Skript gebaute Karte wird gefunden, das `data:` NICHT gemeldet");
     }
 
-    /// `text-overflow: ellipsis` — Bootstrap's `.text-truncate` idiom. The box
+    /// `text-overflow: ellipsis`, as in Bootstrap's `.text-truncate`. The box
     /// keeps the width it was given; only what is painted inside it changes.
     #[test]
     fn text_overflow_ends_a_clipped_line_in_an_ellipsis() {
@@ -2989,30 +2849,29 @@ mod tests {
         let eng = Engine::new();
         let dump = dump_ops(&eng.layout(truncate, 400));
         let run = dump.lines().find(|l| l.starts_with('T')).expect("one text run");
-        // Die Zeile traegt seit dem Text-Ausschnitt ein `clip=` am Ende; der
-        // Text steht davor, und geprueft wird der Text.
+        // The run line ends in `clip=`; the text stands before it and is what is
+        // checked.
         assert!(run.contains("\u{2026}\""), "the run ends in an ellipsis: {run}");
         assert!(!run.contains("not fit"), "and the tail it replaced is gone: {run}");
 
-        // `clip` is the initial value, and the same box under it keeps the
-        // whole run — the difference is the property, not the overflow.
+        // `clip` is the initial value, and the same box under it keeps the whole
+        // run: the difference is the property, not the overflow.
         let clipped = truncate.replace("text-overflow:ellipsis", "text-overflow:clip");
         let dump = dump_ops(&eng.layout(&clipped, 400));
         assert!(dump.contains("not fit"), "text-overflow:clip changes nothing");
     }
 
-    /// A hover rule reaches a pseudo-element, and MediaWiki underlines the
-    /// article tabs with exactly that: an absolutely positioned `::after` that
-    /// is 2 px tall, transparent at rest and coloured under the pointer.
+    /// A hover rule reaches a pseudo-element, as in tab underlines made of an
+    /// absolutely positioned 2 px `::after` that is transparent at rest and
+    /// coloured under the pointer (e.g. MediaWiki).
     ///
-    /// Its box is generated during layout and paints NOTHING at rest, so there
+    /// Its box is generated during layout and paints nothing at rest, so there
     /// is no op to replace and none inside it to insert ahead of. What it can
-    /// name is its predecessor — everything its element painted comes first.
+    /// name is its predecessor: everything its element painted comes first.
     #[test]
     fn a_pseudo_element_that_lights_up_is_repainted_too() {
-        // The real shape: a tab link is itself a flex box (that is how Vector
-        // centres its label), and the underline hangs off it as an absolutely
-        // positioned `::after`.
+        // The real shape: the tab link is itself a flex box centring its label,
+        // and the underline hangs off it as an absolutely positioned `::after`.
         let html = "<style>a{display:flex;position:relative;color:#00e;width:80px;height:24px}\
                     a::after{content:'';display:block;position:absolute;left:0;bottom:0;width:100%;height:2px}\
                     a:hover::after{background-color:#f00}</style>\
@@ -3041,18 +2900,15 @@ mod tests {
         let eng = Engine::new();
         eng.set_hover(alloc::vec![]);
         let lay = eng.layout(html, 400);
-        // The `::after` sits 40 px below the link. A point inside IT is not
+        // The `::after` sits 40 px below the link. A point inside it is not
         // inside the link.
         let b = lay.hover_boxes.iter().find(|b| b.pseudo == crate::css::PseudoElem::None).copied().expect("own box");
         assert!(lay.hover_at(b.x + 2, b.y + 50).is_empty(), "the pseudo must not be a target");
         assert!(!lay.hover_at(b.x + 2, b.y + b.h / 2).is_empty(), "the link itself is one");
     }
 
-    /// Everything a layout draws must survive being written down and read back
-    /// — the comparison the repaint tests lean on.
-    /// **Das Gate fuer den Schnellweg: neu gemalt muss BYTEGLEICH sein zu neu
-    /// ausgelegt.** Alles andere waere ein zweiter Renderpfad, der langsam
-    /// auseinanderlaeuft ([[feedback-byte-identical-render-gate]]).
+    /// The fast-path gate: repainted must be byte-identical to laid out again.
+    /// Anything else would be a second render path that slowly drifts apart.
     #[test]
     fn repainting_a_control_equals_laying_the_page_out_again() {
         let html = "<style>body{margin:0}input{width:200px}</style>\
@@ -3064,8 +2920,7 @@ mod tests {
         let seq = lay.controls.first().map(|c| c.seq).expect("ein Feld");
         let cb = lay.controls.get(1).map(|c| c.seq).expect("ein Kaestchen");
 
-        // Fokus + getippter Wert + Haken — alles, was ein Klick und eine Taste
-        // auslesen.
+        // Focus, typed value and checkbox: everything a click and a key change.
         state.focus = Some(seq);
         state.set_value(seq, alloc::string::String::from("Hallo"));
         state.caret = 5;
@@ -3076,17 +2931,14 @@ mod tests {
         assert_eq!(dump_ops(&lay), dump_ops(&fresh), "neu gemalt != neu ausgelegt");
     }
 
-    /// **Derselbe Vergleich, aber mit einem Kasten, der einen HINTERGRUND
-    /// hat.** Der wird UNTER den schon gemalten Inhalt geschoben, also vor
-    /// jedes Feld darin — und die notierte Befehlsspanne des Feldes blieb
-    /// dabei stehen. Der Schnellweg ersetzte danach fremde Befehle: getippter
-    /// Text lag unter dem alten Kasten (unsichtbar), und der Text daneben
-    /// rutschte in der Malreihenfolge nach hinten. Am Geraet sah das aus wie
-    /// „das Feld zeigt erst beim Verlassen etwas an und blendet dabei den
-    /// Text daneben weg".
+    /// The same comparison with an ancestor that has a background. The
+    /// background is pushed under already-painted content, i.e. in front of
+    /// every field inside it, and a control's recorded op range must move with
+    /// it; otherwise the fast path replaces unrelated ops (typed text ends up
+    /// hidden under the old box, and neighbouring text falls back in paint
+    /// order).
     ///
-    /// Ein Verlauf am Vorfahren macht es schlimmer (ein Befehl mehr je
-    /// Kasten), deshalb steht er hier mit drin.
+    /// A gradient on the ancestor adds one more op per box, so it is included.
     #[test]
     fn a_background_above_the_control_does_not_move_its_op_range() {
         let html = "<style>body{margin:0}                    .card{background:#eee;background-image:linear-gradient(90deg,#fff,#eee);padding:8px}                    .row{background:#ddd;padding:4px}input{width:200px}</style>                    <div class=card><span>Beschriftung</span>                    <div class=row><input id=q><button id=b>Los</button></div>                    <p>und danach</p></div>";
@@ -3102,8 +2954,8 @@ mod tests {
         assert_eq!(dump_ops(&lay), dump_ops(&fresh), "neu gemalt != neu ausgelegt");
     }
 
-    /// Und wenn eine `:checked`-Regel Kaesten bewegen kann, gibt der Schnellweg
-    /// auf, statt ein Menue zu, das sich haette oeffnen muessen.
+    /// And when a `:checked` rule can move boxes, the fast path gives up
+    /// rather than leaving shut a menu that should have opened.
     #[test]
     fn a_checked_rule_sends_the_page_to_a_layout() {
         let html = "<style>input:checked ~ .menu{display:block}.menu{display:none}</style>\
@@ -3116,6 +2968,8 @@ mod tests {
         assert!(!eng.repaint_controls(&mut lay, &state), "muss auslegen");
     }
 
+    /// Everything a layout draws must survive being written down and read back;
+    /// the comparison the repaint tests lean on.
     fn dump_ops(l: &Layout) -> alloc::string::String {
         use core::fmt::Write;
         let mut s = alloc::string::String::new();
@@ -3157,7 +3011,7 @@ mod tests {
         s
     }
 
-    /// Without a mask the same box is a plain filled rect — the guard that the
+    /// Without a mask the same box is a plain filled rect; the guard that the
     /// mask path is what changed, not background painting in general.
     #[test]
     fn a_plain_background_colour_still_fills_the_whole_box() {
@@ -3181,11 +3035,10 @@ mod tests {
         assert_eq!(pixel_at(&html, 2, 2), (255, 255, 255), "and nowhere else");
     }
 
-    /// The spelling MediaWiki actually ships: a double-quoted `url()` whose
-    /// payload carries BACKSLASH-ESCAPED quotes. Stopping at the first inner
-    /// quote truncates the URI into something that still parses as a URL and
-    /// then silently decodes to nothing — so this is a paint test, not a
-    /// parse test.
+    /// A double-quoted `url()` whose payload carries backslash-escaped quotes,
+    /// as MediaWiki ships it. Stopping at the first inner quote truncates the uri
+    /// into something that still parses as a url and then decodes to nothing,
+    /// so this is a paint test, not a parse test.
     #[test]
     fn a_data_uri_with_escaped_quotes_still_paints() {
         let svg = "data:image/svg+xml;utf8,<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" \
@@ -3199,9 +3052,9 @@ mod tests {
         assert_eq!(pixel_at(&html, 16, 10), (255, 255, 255), "right half stays clear");
     }
 
-    /// An inline box has no block geometry — only the fragments it leaves in
+    /// An inline box has no block geometry, only the fragments it leaves in
     /// line boxes. It still paints a background over them, and its horizontal
-    /// padding is part of that background AND advances the text after it.
+    /// padding is part of that background and advances the text after it.
     #[test]
     fn an_inline_box_paints_its_own_background() {
         let at = page("<span style='background-color:#ff0000;padding-left:10px'>l</span>", 120, 40);
@@ -3210,7 +3063,7 @@ mod tests {
     }
 
     /// The `a.external` shape: the icon lives in the padding the box reserves
-    /// past its text, so nothing shows unless BOTH the padding advances the
+    /// past its text, so nothing shows unless both the padding advances the
     /// flow and the fragment paints its background image.
     #[test]
     fn an_inline_background_image_lands_in_the_padding() {
@@ -3227,17 +3080,17 @@ mod tests {
     }
 
     /// A box that only wraps an icon has no text at all. Its padding still
-    /// keeps the line box alive (CSS 2.1 §9.4.2) — otherwise the whole
-    /// `.vector-icon` pattern paints nothing.
+    /// keeps the line box alive (CSS 2.1 §9.4.2); otherwise the common
+    /// icon-span pattern paints nothing.
     #[test]
     fn an_empty_inline_box_still_gets_a_line_to_paint_on() {
         let at = page("<span style='background-color:#ff0000;padding-left:12px'></span>", 120, 40);
         assert_eq!(at(4, 8), (255, 0, 0));
     }
 
-    /// Broken over two lines, an inline box leaves one rectangle per line —
-    /// and only the first carries its left border (`box-decoration-break:
-    /// slice`, the default).
+    /// Broken over two lines, an inline box leaves one rectangle per line, and
+    /// only the first carries its left border (`box-decoration-break: slice`,
+    /// the default).
     #[test]
     fn an_inline_box_broken_over_two_lines_paints_both_fragments() {
         let at = page(
@@ -3252,8 +3105,8 @@ mod tests {
     }
 
     /// Clicking a `<summary>` opens its section and closing it puts the page
-    /// back. The state is the `open` CONTENT attribute, so the page's own
-    /// `details[open]` rules see it — rustdoc and MDN both style that state.
+    /// back. The state is the `open` content attribute, so the page's own
+    /// `details[open]` rules see it.
     #[test]
     fn toggling_a_details_opens_and_closes_it() {
         let html = "<body><details><summary>head</summary><p>body text</p></details></body>";
@@ -3274,7 +3127,7 @@ mod tests {
         let shut2 = eng.layout_ext(html, "", 800);
         assert_eq!(shut2.height, shut.height, "closing must return to where it was");
 
-        // A seq that is not a summary changes nothing — an unknown one too.
+        // A seq that is not a summary changes nothing, and neither does an unknown one.
         assert!(!eng.toggle_details(u32::MAX), "no such element");
     }
 }

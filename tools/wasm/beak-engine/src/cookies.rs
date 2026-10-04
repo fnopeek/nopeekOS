@@ -3,16 +3,12 @@
 //! Policy lives here, in the browser, not in the kernel: which cookie belongs
 //! on which request is a browser rule, and the kernel only carries bytes.
 //!
-//! **This jar is session-only — nothing is written to disk.** A cookie is a
-//! session credential, and a credential at rest is a separate decision with a
-//! separate security discussion (where it lives, who else can read it, whether
-//! it is encrypted). Until that decision is made, closing beak logs you out,
-//! which is the safe end of that trade.
+//! Only persistent cookies survive a restart (see `serialize`); session cookies
+//! live until beak quits.
 //!
-//! Not implemented: `SameSite` (needs a notion of the initiating context,
-//! which arrives with scripting), public-suffix rejection beyond the crude
+//! Not implemented: `SameSite`, public-suffix rejection beyond the crude
 //! check in `domain_ok`, and cookies on sub-resource requests (only the
-//! document request carries them today).
+//! document request carries them).
 
 extern crate alloc;
 use alloc::string::{String, ToString};
@@ -20,7 +16,7 @@ use alloc::vec::Vec;
 
 /// One stored cookie. `domain` is stored without a leading dot; `host_only`
 /// records whether the server named a `Domain` at all, because a host-only
-/// cookie must NOT be sent to sub-domains.
+/// cookie must not be sent to sub-domains.
 struct Cookie {
     name: String,
     value: String,
@@ -28,9 +24,8 @@ struct Cookie {
     path: String,
     host_only: bool,
     secure: bool,
-    /// `HttpOnly`: der Keks geht auf die Anfrage, aber NICHT an ein Skript.
-    /// Der ganze Sinn der Fahne — sie ist die Gegenmassnahme gegen XSS, und
-    /// sie zaehlt erst, seit beak Seitenskripte laufen laesst.
+    /// `HttpOnly`: sent on requests but never shown to script; the
+    /// mitigation against XSS stealing the session.
     http_only: bool,
     /// Absolute expiry, seconds since the epoch. `None` = session cookie,
     /// which for this jar means "until beak quits".
@@ -83,12 +78,8 @@ pub fn store_from_script(url: &str, decl: &str, now: i64) {
     global().store_from_script(url, decl, now)
 }
 
-/// Die NAMEN der Kekse, die fuer diese Adresse mitgehen — ohne Werte.
-///
-/// **Ein Keks ist ein Geheimnis, sein Name ist es nicht.** Und ohne die Namen
-/// ist „5 held" keine Auskunft: Googles Einwilligung schickte im Kreis, und
-/// aus dem Log war nicht zu sehen, ob `SOCS` ueberhaupt mitging. Genau die
-/// Frage, die eine Zeile beantwortet und ein Nachmittag nicht.
+/// The names of the cookies sent for this URL, without values: a name is
+/// not a secret, and it makes diagnostics possible.
 pub fn names_for(url: &str, now: i64) -> String {
     let mut out = String::new();
     for part in header_for(url, now).split("; ") {
@@ -99,9 +90,8 @@ pub fn names_for(url: &str, now: i64) -> String {
     out
 }
 
-/// Was der Behaelter fuer diesen Host haelt, nach Namen — auch die, die
-/// gerade NICHT mitgehen (falscher Pfad, `Secure` auf http, abgelaufen).
-/// Der Unterschied zu `names_for` ist die halbe Diagnose.
+/// Every cookie held for this host by name, including those not sent right
+/// now (wrong path, `Secure` over http, expired). For diagnostics.
 pub fn names_held(host_url: &str) -> String {
     let (host, _, _) = split_url(host_url);
     let jar = global();
@@ -180,7 +170,7 @@ fn path_match(req: &str, path: &str) -> bool {
 ///
 /// The real rule needs the Public Suffix List. This is the crude stand-in:
 /// the domain must contain a dot and must not be the bare two-label tail of
-/// a well-known multi-label suffix. It errs toward REFUSING, which costs a
+/// a well-known multi-label suffix. It errs toward refusing, which costs a
 /// cookie; erring the other way costs the session.
 fn domain_ok(host: &str, domain: &str) -> bool {
     if domain.is_empty() || !domain.contains('.') || domain.starts_with('.') {
@@ -208,17 +198,13 @@ fn domain_ok(host: &str, domain: &str) -> bool {
 
 /// Parse the `Expires` date, into seconds since the epoch.
 ///
-/// TWO spellings are in live use and a jar has to take both — measured
-/// 2026-08-09 against six real sites:
-/// * `Wdy, DD Mon YYYY HH:MM:SS GMT` — RFC 7231 IMF-fixdate (Wikipedia,
-///   GitHub)
+/// Two spellings are in live use and a jar has to take both:
+/// * `Wdy, DD Mon YYYY HH:MM:SS GMT` — RFC 7231 IMF-fixdate
 /// * `Wdy, DD-Mon-YYYY HH:MM:SS GMT` — the old Netscape cookie date, which
-///   RFC 6265 §5.1.1 requires a parser to accept (Google, Amazon)
+///   RFC 6265 §5.1.1 requires a parser to accept
 ///
-/// Reading only the first spelling turned every Google and Amazon cookie
-/// into a session cookie — and, worse, would have ignored a server logging
-/// you out with an expiry in the past, so we would have kept sending a
-/// cookie we were told to drop.
+/// Reading only the first would turn dated cookies into session cookies and
+/// ignore a logout expressed as an expiry in the past.
 ///
 /// Anything unparseable returns `None` → the cookie is treated as a session
 /// cookie. That is the safe direction: it lives no longer than beak does.
@@ -240,8 +226,7 @@ fn parse_http_date(s: &str) -> Option<i64> {
         t.next().unwrap_or("0").parse().ok()?,
         t.next().unwrap_or("0").parse().ok()?,
     );
-    // Howard Hinnant's days_from_civil — the same algorithm loft uses to show
-    // an npkFS mtime, run the other way.
+    // Howard Hinnant's days_from_civil.
     let y = if mon <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -255,17 +240,17 @@ fn parse_http_date(s: &str) -> Option<i64> {
 impl Jar {
 /// Take everything a response said with `Set-Cookie` and update the jar.
 ///
-/// `headers` may cover a whole redirect CHAIN: the host writes a `:hop <url>`
-/// marker before each response's block. That is not a detail — a login is a
-/// POST answered by a 303 that carries the session cookie, and the cookie
-/// belongs to the host that SENT it, not to wherever the chain ended.
+/// `headers` may cover a whole redirect chain: the host writes a `:hop <url>`
+/// marker before each response's block. A login is often a POST answered by
+/// a 303 that carries the session cookie, and the cookie belongs to the host
+/// that sent it, not to wherever the chain ended.
 /// `url` is the origin for a block that carries no marker.
 ///
-/// ⚠ The marker is trusted, and it may be trusted for exactly one reason:
-/// no HTTP field name may begin with a colon, and the host DROPS any
-/// response line that does (`capture_headers`). A server that could write
-/// its own `:hop` would file its cookies against a host it does not own.
-/// Whoever changes either side owns both.
+/// The marker can be trusted only because no HTTP field name may begin with
+/// a colon and the host drops any response line that does
+/// (`capture_headers`). Otherwise a server could write its own `:hop` and
+/// file cookies against a host it does not own. Both sides must change
+/// together.
 pub fn store(&mut self, url: &str, headers: &str, now: i64) {
     let (mut host, mut path, _) = split_url(url);
     for line in headers.split('\n') {
@@ -331,22 +316,21 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64, from_s
         None => expires,
     };
 
-    // Cookie name prefixes (RFC 6265bis §4.1.3). These are a promise the NAME
-    // itself carries, so a server that breaks the promise gets nothing —
-    // otherwise `__Host-session` means nothing, and meaning nothing is worse
-    // than not existing. Google already ships `__Secure-ENID`.
+    // Cookie name prefixes (RFC 6265bis §4.1.3). The name itself carries a
+    // promise, so a server that breaks it gets nothing; otherwise
+    // `__Host-session` would mean nothing.
     if name.starts_with("__Secure-") && !secure {
         return;
     }
-    // `__Host-` demands the Path=/ ATTRIBUTE, not merely a path that happens
+    // `__Host-` demands the Path=/ attribute, not merely a path that happens
     // to be "/": with no attribute the default path is the request's own
     // directory, which is not the promise the name makes.
     if name.starts_with("__Host-") && (!secure || !domain.is_empty() || path != "/") {
         return;
     }
 
-    // Ein Skript kann `HttpOnly` nicht vergeben — sonst waere die Fahne ein
-    // Selbstbedienungsladen und schuetzte nichts (RFC 6265bis 5.7).
+    // A script cannot set `HttpOnly`, or the flag would protect nothing
+    // (RFC 6265bis 5.7).
     if from_script {
         http_only = false;
     }
@@ -365,10 +349,8 @@ fn store_one(&mut self, host: &str, req_path: &str, decl: &str, now: i64, from_s
     // Replacing on (name, domain, path) is what makes deletion work: a server
     // logs you out by re-sending the same cookie with an expiry in the past.
     let jar = &mut self.cookies;
-    // Und es kann einen HttpOnly-Keks auch nicht UEBERSCHREIBEN. Ohne diese
-    // Zeile waere die Fahne zu umgehen: erst den Keks mit eigenem Wert neu
-    // setzen, dann zurueckzulesen, was man selbst geschrieben hat — das ist
-    // kein Leck mehr, aber es ist eine Uebernahme der Sitzung.
+    // Nor can a script overwrite an `HttpOnly` cookie: writing a value and
+    // reading it back would be a session takeover.
     if from_script && jar.iter().any(|c| c.name == name && c.domain == domain
                                         && c.path == path && c.http_only) {
         return;
@@ -398,17 +380,16 @@ pub fn header_for(&mut self, url: &str, now: i64) -> String {
     self.collect(url, now, false)
 }
 
-/// Was `document.cookie` einem Skript zeigt: dasselbe, ohne die
-/// `HttpOnly`-Kekse. Getrennte Funktion und nicht ein Argument an
-/// `header_for`, damit an jeder Aufrufstelle STEHT, wer fragt.
+/// What `document.cookie` shows a script: the same, without `HttpOnly`
+/// cookies. A separate function rather than a flag on `header_for`, so
+/// every call site states who is asking.
 pub fn script_header_for(&mut self, url: &str, now: i64) -> String {
     self.collect(url, now, true)
 }
 
-/// Was ein Skript mit `document.cookie = "..."` gesetzt hat. Eine einzelne
-/// Erklaerung, ohne `Set-Cookie:` davor — genau das, was die Zuweisung
-/// uebergibt. Die Regeln sind dieselben wie fuer den Server, mit zwei
-/// Ausnahmen, die in `store_one` stehen.
+/// File one `document.cookie = "..."` assignment: a single cookie string
+/// without the `Set-Cookie:` prefix. Same rules as for a server, with the
+/// two exceptions noted in `store_one`.
 pub fn store_from_script(&mut self, url: &str, decl: &str, now: i64) {
     let (host, path, _) = split_url(url);
     if host.is_empty() {
@@ -449,29 +430,25 @@ fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
 }
 }
 
-// ── Ueber einen Neustart hinweg ───────────────────────────────────────────
+// ── Persistence across restarts ──────────────────────────────────────────
 //
-// **Nur die DAUERHAFTEN.** Ein Keks ohne `Expires`/`Max-Age` ist ein
-// Sitzungskeks, und „Sitzung" heisst: bis der Browser endet. Ihn zu
-// speichern waere nicht bequemer, sondern falsch — die Seite hat
-// ausdruecklich gesagt, dass er nicht bleiben soll, und bei einem
-// Anmeldekeks ist das eine Sicherheitsaussage.
+// Only persistent cookies are saved. A cookie without `Expires`/`Max-Age`
+// is a session cookie and must end with the browser; for a login cookie
+// that is a security statement.
 //
-// Das Format ist eine Zeile je Keks, Felder durch Tabulator getrennt. Ein
-// Kekswert DARF laut RFC 6265 §4.1.1 weder Steuerzeichen noch Komma,
-// Semikolon, Anfuehrungszeichen oder Rueckstrich enthalten, ein Tabulator
-// ist also nie darin — und eine Zeile, in der doch einer steckt, wird
-// UEBERSPRUNGEN statt geschrieben. Eine kaputte Zeile darf die Datei nicht
-// unlesbar machen.
+// Format: one line per cookie, fields separated by tabs. A cookie value may
+// not contain control characters (RFC 6265 §4.1.1), so a tab never appears
+// in it; a line that has one anyway is skipped rather than written, so one
+// bad entry cannot make the file unreadable.
 const FILE_TAG: &str = "npkcookies 1";
 
 impl Jar {
-    /// Die dauerhaften Kekse als Text. Leer, wenn keiner bleiben soll.
+    /// The persistent cookies as text. Empty if none should be kept.
     pub fn serialize(&self, now: i64) -> String {
         let mut out = String::new();
         for c in &self.cookies {
-            let Some(exp) = c.expires else { continue };   // Sitzungskeks
-            if exp <= now { continue }                     // schon abgelaufen
+            let Some(exp) = c.expires else { continue };   // session cookie
+            if exp <= now { continue }                     // already expired
             let f = [&c.name, &c.value, &c.domain, &c.path];
             if f.iter().any(|x| x.contains('\t') || x.contains('\n')) { continue }
             if out.is_empty() { out.push_str(FILE_TAG); out.push('\n'); }
@@ -482,11 +459,10 @@ impl Jar {
         out
     }
 
-    /// Zurueckgelesene Kekse einfuegen. Liefert, wie viele ankamen.
+    /// Insert cookies read back from storage. Returns how many were added.
     ///
-    /// Abgelaufene und unlesbare Zeilen werden still uebergangen: die Datei
-    /// ist Zustand, kein Vertrag, und eine halbe Zeile darf nicht den Rest
-    /// kosten.
+    /// Expired and unparseable lines are skipped silently: the file is state,
+    /// not a contract, and a broken line must not cost the rest.
     pub fn load(&mut self, text: &str, now: i64) -> usize {
         let mut n = 0;
         for line in text.lines() {
@@ -510,10 +486,10 @@ impl Jar {
     }
 }
 
-/// Die dauerhaften Kekse des Browsers als Text.
+/// The browser's persistent cookies as text.
 pub fn serialize(now: i64) -> String { global().serialize(now) }
 
-/// Gespeicherte Kekse ins Glas des Browsers.
+/// Load saved cookies into the browser's jar.
 pub fn load(text: &str, now: i64) -> usize { global().load(text, now) }
 
 #[cfg(test)]
@@ -542,7 +518,7 @@ mod tests {
         assert_eq!(j.header_for("https://example.com/", 1000), "");
     }
 
-    /// Die Fahne, wegen der es `script_header_for` ueberhaupt gibt.
+    /// The reason `script_header_for` exists.
     #[test]
     fn an_httponly_cookie_goes_on_the_request_but_never_to_a_script() {
         let mut j = jar();
@@ -555,12 +531,12 @@ mod tests {
     fn a_script_cannot_hand_itself_the_httponly_flag() {
         let mut j = jar();
         j.store_from_script("https://example.com/", "sid=abc; HttpOnly", 1000);
-        // Gesetzt ist er — aber ohne die Fahne, also sieht das Skript ihn.
+        // Set, but without the flag, so the script sees it.
         assert_eq!(j.script_header_for("https://example.com/", 1000), "sid=abc");
     }
 
-    /// Der Angriff, den die vorige Regel allein offen liesse: den Keks nicht
-    /// lesen, sondern ueberschreiben und dann das Eigene zurueckholen.
+    /// The attack the previous rule alone would leave open: overwrite the
+    /// cookie instead of reading it, then read back one's own value.
     #[test]
     fn a_script_cannot_overwrite_an_httponly_cookie() {
         let mut j = jar();
@@ -621,13 +597,11 @@ mod tests {
         assert_eq!(j.header_for("https://example.com/", 2_000_000_000), "b=2");
     }
 
-    /// Header blocks copied verbatim from live responses on 2026-08-09. The
-    /// synthetic tests above all used one date spelling; these caught that two
-    /// are in use, and that reading only one silently turned every Google and
-    /// Amazon cookie into a session cookie.
+    /// Header blocks in the shape real servers send. They cover both date
+    /// spellings; reading only one turns dated cookies into session cookies.
     #[test]
     fn real_sites_headers_land_in_the_jar_as_they_should() {
-        // Google: Netscape date (dashes), Domain=.google.com, a __Secure- name.
+        // Netscape date (dashes), Domain=.google.com, a __Secure- name.
         let mut j = jar();
         j.store("https://www.google.com/", concat!(
             "set-cookie: SOCS=CAAaBgiAht_TBg; expires=Wed, 08-Sep-2027 17:02:09 GMT; path=/; domain=.google.com; Secure; SameSite=lax\r\n",
@@ -640,17 +614,16 @@ mod tests {
         // Domain=.google.com reaches a sub-domain, but never a neighbour.
         assert!(j.header_for("https://news.google.com/", 1_786_294_929).contains("SOCS="));
         assert_eq!(j.header_for("https://google.com.evil.test/", 1_786_294_929), "");
-        // A dated cookie must OUTLIVE the session — that is the whole point
-        // of the date, and the dash spelling is what got it wrong.
+        // A dated cookie must outlive the session — the dash spelling is the
+        // one easy to get wrong.
         assert!(!j.header_for("https://www.google.com/", 1_800_000_000).is_empty());
         // …and still expire when it says. 2028-01-01 = 1830297600. This one
-        // goes LAST: reading the jar prunes what has expired, so a test that
-        // then asks about an earlier moment is asking a jar that already
-        // threw those cookies away. Time only moves forward in a browser.
+        // goes last: reading the jar prunes what has expired, so a later
+        // question about an earlier moment would ask a pruned jar.
         assert_eq!(j.header_for("https://www.google.com/", 1_830_297_600), "");
 
-        // Wikipedia: no space after the semicolons, lowercase `secure`,
-        // RFC 1123 date, one host-only and one Domain cookie side by side.
+        // No space after the semicolons, lowercase `secure`, RFC 1123 date, one
+        // host-only and one Domain cookie side by side.
         let mut j = jar();
         j.store("https://de.wikipedia.org/wiki/Schweiz", concat!(
             "set-cookie: WMF-Last-Access=09-Aug-2026;Path=/;HttpOnly;secure;Expires=Thu, 10 Sep 2026 12:00:00 GMT\r\n",
@@ -660,14 +633,13 @@ mod tests {
         let h = j.header_for("https://de.wikipedia.org/wiki/X", 1_786_294_929);
         assert!(h.contains("WMF-Last-Access=09-Aug-2026"), "{h}");
         assert!(h.contains("GeoIP=CH:ZH:Zweidlen-Dorf:47.56:8.47:v4"), "a value may hold colons: {h}");
-        // The host-only one does NOT cross to another wikipedia sub-domain;
+        // The host-only one does not cross to another wikipedia sub-domain;
         // the Domain= ones do.
         let h2 = j.header_for("https://en.wikipedia.org/wiki/X", 1_786_294_929);
         assert!(!h2.contains("WMF-Last-Access="), "{h2}");
         assert!(h2.contains("WMF-Last-Access-Global="), "{h2}");
 
-        // GitHub's login page: the session cookie has no date at all, which is
-        // exactly what a login cookie looks like.
+        // A login page: the session cookie has no date at all.
         let mut j = jar();
         j.store("https://github.com/login", concat!(
             "set-cookie: _gh_sess=xQWvHNb1oK7%2Fiz; path=/; HttpOnly; secure; SameSite=Lax\r\n",
@@ -675,7 +647,7 @@ mod tests {
         ), 1_786_294_929);
         assert!(j.header_for("https://github.com/", 1_786_294_929).contains("_gh_sess=xQWvHNb1oK7%2Fiz"));
 
-        // Amazon: Netscape dates again, everything on .amazon.de.
+        // Netscape dates again, everything on .amazon.de.
         let mut j = jar();
         j.store("https://www.amazon.de/", concat!(
             "set-cookie: session-id=258-2923272-2531756; Domain=.amazon.de; Expires=Mon, 09-Aug-2027 17:02:10 GMT; Path=/; Secure\r\n",
@@ -687,9 +659,8 @@ mod tests {
     }
 
     /// A login is a POST answered by a 303 that carries the session cookie.
-    /// Reading only the last response in the chain threw it away — Google's
-    /// consent page took the click, saved nothing, and sent you straight back
-    /// to itself.
+    /// Reading only the last response in the chain would drop it, and a
+    /// consent page would keep sending you back to itself.
     #[test]
     fn a_cookie_set_on_a_redirect_belongs_to_the_host_that_sent_it() {
         let mut j = jar();
@@ -707,7 +678,7 @@ mod tests {
         // search request, which is the whole point of accepting it.
         assert!(j.header_for("https://www.google.com/search?q=x", 1_786_294_929).contains("SOCS="));
 
-        // A hop that sets a HOST-ONLY cookie scopes it to that hop's host and
+        // A hop that sets a host-only cookie scopes it to that hop's host and
         // to no other — the marker is what makes the difference visible.
         let mut j = jar();
         j.store(
@@ -746,9 +717,8 @@ mod tests {
         assert_eq!(j.header_for("https://example.com/", 1000), "__Host-d=4");
     }
 
-    /// The exact bytes Google answers a consent POST with, captured
-    /// 2026-08-09 — the 303 that carries the decision. If this cookie does
-    /// not land, the consent page sends you straight back to itself, forever.
+    /// A consent POST answered by a 303 that carries the decision. If this
+    /// cookie does not land, the consent page sends you back to itself forever.
     #[test]
     fn googles_consent_answer_is_stored_and_rides_the_next_search() {
         let mut j = jar();
@@ -775,9 +745,8 @@ mod tests {
         assert_eq!(j.header_for("https://example.com/", 1000), "s=1");
     }
 
-    /// **Ein Sitzungskeks ueberlebt den Neustart NICHT.** Das ist keine
-    /// Sparsamkeit: die Seite hat gesagt, dass er nicht bleiben soll, und
-    /// bei einer Anmeldung ist das eine Sicherheitsaussage.
+    /// A session cookie does not survive a restart: the site said it should
+    /// not stay, and for a login that is a security statement.
     #[test]
     fn only_cookies_with_an_expiry_survive_a_restart() {
         let mut j = jar();
@@ -793,9 +762,8 @@ mod tests {
         assert_eq!(fresh.header_for("https://example.com/", 1000), "keep=xyz");
     }
 
-    /// Hin und zurueck muss jede Fahne mitnehmen — `Secure` und `HttpOnly`
-    /// sind Grenzen, und eine Grenze, die beim Speichern verloren geht, ist
-    /// schlimmer als keine.
+    /// A round trip keeps every flag: `Secure` and `HttpOnly` are boundaries,
+    /// and losing one on save would be worse than having none.
     #[test]
     fn the_round_trip_keeps_every_flag() {
         let mut j = jar();
@@ -805,16 +773,16 @@ mod tests {
         let text = j.serialize(1000);
         let mut fresh = jar();
         fresh.load(&text, 1000);
-        // Secure: nicht ueber http.
+        // Secure: not over http.
         assert_eq!(fresh.header_for("http://example.com/app/", 1000), "");
         assert_eq!(fresh.header_for("https://example.com/app/", 1000), "t=1");
-        // Path: nicht ausserhalb.
+        // Path: not outside.
         assert_eq!(fresh.header_for("https://example.com/", 1000), "");
-        // HttpOnly: nicht ans Skript.
+        // HttpOnly: not to script.
         assert_eq!(fresh.script_header_for("https://example.com/app/", 1000), "");
     }
 
-    /// Eine kaputte Zeile darf die Datei nicht kosten.
+    /// A broken line must not cost the file.
     #[test]
     fn a_broken_line_does_not_cost_the_file() {
         let mut j = jar();
@@ -829,7 +797,7 @@ mod tests {
         assert!(h.contains("a=b") && h.contains("e=f"), "{h}");
     }
 
-    /// Abgelaufenes kommt nicht zurueck — weder beim Schreiben noch beim Lesen.
+    /// Expired cookies do not come back — neither on serialize nor on load.
     #[test]
     fn an_expired_cookie_comes_back_from_neither_side() {
         let mut j = jar();

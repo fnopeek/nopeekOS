@@ -1,14 +1,13 @@
 //! dom.rs — tolerant HTML tree construction (WHATWG §13 subset).
 //!
-//! Slice-0 emitted a flat `Vec<Block>`; that threw away the structure both
-//! inline flow and the CSS cascade need. This builds a real node tree —
-//! elements with attributes + children, and text nodes — with the tolerant
-//! recovery real pages rely on (implied `</p>`/`</li>`, unmatched end tags
-//! ignored, raw-text `<script>`/`<style>`). Not the full state machine yet;
-//! it grows toward it against html5lib-tests (docs/spec/CONFORMANCE.md).
+//! Builds a node tree (elements with attributes and children, text nodes)
+//! with the tolerant recovery real pages rely on: implied `</p>`/`</li>`,
+//! unmatched end tags ignored, raw-text `<script>`/`<style>`. Not the full
+//! state machine; it grows toward it against html5lib-tests
+//! (docs/spec/CONFORMANCE.md).
 //!
-//! The tree is owned (no `Rc`/arena) — enough for a render-only pass. Live
-//! mutation (Stage 2, JS-driven) will move to an arena; the shape stays.
+//! The tree is owned (no `Rc`/arena); scripting works on its own arena and
+//! writes back through `Element::bare`.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -25,35 +24,28 @@ pub struct Element {
     pub tag: String,
     pub attrs: Vec<(String, String)>,
     pub children: Vec<Node>,
-    /// Document-order index, assigned at parse time. A stable identity for one
-    /// element across re-layouts of the SAME document — form controls key their
-    /// live state (typed value, checked, focus) on it. Tree position can't serve
-    /// as the key: layout skips `display:none` subtrees, so any counter kept
-    /// during layout would drift from one kept during a plain DOM walk.
+    /// Document-order index, assigned at parse time: a stable identity for one
+    /// element across re-layouts of the same document. Form controls key their
+    /// live state (typed value, checked, focus) on it. Tree position cannot
+    /// serve: layout skips `display:none` subtrees, so a layout-time counter
+    /// would drift from one kept during a plain DOM walk.
     pub seq: u32,
-    /// Derived from `attrs` ONCE, by `index_attrs` at parse time. There is no
-    /// scripting, and the two things that DO edit the tree afterwards —
-    /// `picture::resolve` folding a `<source>` into an `<img>`, and
-    /// `Engine::toggle_details` flipping `open` — touch neither class, id nor
-    /// tag, so none of this goes stale. `ElemInfo` used to re-derive all of it
-    /// on every construction, ~30 000× per layout.
-    /// Measured by doubling the work: **12.5 % of a whole layout**, spread so
-    /// thin across `flow_children` and the cascade that no single function
-    /// looked expensive.
+    /// Derived from `attrs` once, by `index_attrs`. Anything that later changes
+    /// class, id or tag must re-run it. Cached because selector matching reads
+    /// these on every element of every layout.
     pub classes: Vec<String>,
     pub id: Option<String>,
     pub bloom: crate::css::Bloom,
-    /// What the SOURCE said. Live form state (a box the reader ticked) is a
-    /// different thing and travels in `ElemState`.
+    /// What the source said. Live form state (a box the reader ticked) travels
+    /// separately in `ElemState`.
     pub checked_attr: bool,
     pub disabled_attr: bool,
 }
 
 impl Element {
-    /// Ein Element von aussen bauen — der Weg zurueck aus der JS-Arena
-    /// (`js::dombind::Doc::to_dom`). Die abgeleiteten Felder sind LEER; wer
-    /// das benutzt, muss `index_attrs` rufen, sonst sieht der Selektor-
-    /// Vergleich weder Klassen noch id.
+    /// Build an element from outside, the way back from the JS arena
+    /// (`js::dombind::Doc::to_dom`). The derived fields are empty; the caller
+    /// must run `index_attrs`, or selector matching sees neither classes nor id.
     pub fn bare(tag: String, seq: u32) -> Element { Element::new(tag, seq) }
 
     fn new(tag: String, seq: u32) -> Element {
@@ -70,8 +62,8 @@ impl Element {
         }
     }
 
-    /// Fill the derived fields. MUST run after `attrs` is final — for foreign
-    /// content that is after the SVG name fixups, not before.
+    /// Fill the derived fields. Must run after `attrs` is final; for foreign
+    /// content that is after the SVG name fixups.
     pub fn index_attrs(&mut self) {
         let classes: Vec<String> = self
             .attr("class")
@@ -106,10 +98,9 @@ impl Dom {
     }
 
     /// The document's root element (`<html>`), or the synthetic container when
-    /// the page has none. Its style has to be resolved even though it is never
-    /// painted: `html { font-size: … }` is what every `rem` resolves against,
-    /// and the `62.5%` "1rem = 10px" idiom is common enough that skipping it
-    /// scales a whole page.
+    /// the page has none. Its style must be resolved although it is never
+    /// painted: every `rem` resolves against `html { font-size }`, and the
+    /// `62.5%` "1rem = 10px" idiom is common.
     pub fn root_element(&self) -> &Element {
         find_tag(&self.root, "html").unwrap_or(&self.root)
     }
@@ -137,18 +128,10 @@ const VOID: &[&str] = &[
 ];
 // Raw-text elements: everything up to the matching close is literal text.
 //
-// **`noscript` steht hier, seit beak Skripte fahren kann.** Bei
-// eingeschaltetem Skripting liest der Parser den Inhalt eines `<noscript>`
-// laut HTML §13.2.5 als ROHTEXT — er baut daraus gar keine Elemente. Solange
-// beak keine Skripte hatte, war das Gegenteil richtig, und der alte
-// Kommentar in `style.rs` sagte das auch so.
-//
-// Was daran haengt, ist keine Feinheit: Googles Ergebnisseite legt in ihr
-// `<noscript>` ein `<style>table,div,span,p{display:none}</style>` UND ein
-// `<meta http-equiv="refresh" url=/httpservice/retry/enablejs>`. Als Markup
-// gelesen versteckt das jede Tabelle, jeden Kasten und jeden Absatz der
-// Seite und navigiert dann weg — bei einem Browser, der sehr wohl Skripte
-// fährt. [[feedback_the_named_gap_may_not_be_the_gap]]
+// `noscript` is raw text because scripting is enabled: HTML §13.2.5 then
+// reads its content as text and builds no elements from it. Parsed as
+// markup, a `<noscript>` holding `<style>div{display:none}</style>` or a
+// `<meta http-equiv=refresh>` would hide or navigate away the page.
 const RAWTEXT: &[&str] = &["script", "style", "noscript"];
 // Block-level starters that imply a `</p>` when a `<p>` is still open.
 const BLOCK_STARTERS: &[&str] = &[
@@ -265,16 +248,13 @@ pub fn parse(html: &str) -> Dom {
     Dom { root }
 }
 
-/// "If there is no child summary element, the user agent should provide its own
-/// legend" (HTML §4.11.1). Without one a closed `<details>` renders as NOTHING
-/// — no triangle, no label, no box to click — and its contents are unreachable
-/// rather than merely folded away. That is a worse page than showing
-/// everything, so the control is not optional.
+/// "If there is no child summary element, the user agent should provide its
+/// own legend" (HTML §4.11.1). Without one a closed `<details>` renders as
+/// nothing and its contents are unreachable, so the control is not optional.
 ///
 /// A browser puts this in the shadow tree; we insert it into the DOM, which
-/// costs the `<details>`' own children one position in `:nth-child`. Measured
-/// before choosing: 0 of 533 `<details>` in the page corpus and 4 of 7 in WPT
-/// lack a summary, and none of those is selected by index.
+/// shifts the `<details>`' own children by one in `:nth-child`. Summary-less
+/// `<details>` selected by index are rare enough to accept that.
 fn imply_details_summary(root: &mut Element, seq: &mut u32) {
     fn walk(el: &mut Element, seq: &mut u32) {
         if el.tag == "details"
@@ -294,13 +274,11 @@ fn imply_details_summary(root: &mut Element, seq: &mut u32) {
     walk(root, seq);
 }
 
-/// HTML's tree construction inserts `<html>` and `<body>` even when the source
-/// omits the tags (HTML Standard §13.2.6), and both are ordinary elements the
-/// cascade can target. Without them a document that writes neither — routine in
-/// hand-written pages and test suites — has nothing for `html { … }` /
-/// `body { … }` to match, so those rules silently do nothing. `seq` is left at
-/// 0 on the implied elements: they carry no form state, and every parsed
-/// element keeps the index it was given.
+/// HTML's tree construction inserts `<html>` and `<body>` even when the
+/// source omits the tags (HTML §13.2.6), and both are ordinary elements the
+/// cascade can target; without them `html { … }` / `body { … }` match
+/// nothing. `seq` stays 0 on the implied elements: they carry no form state,
+/// and every parsed element keeps its index.
 fn imply_html_body(root: &mut Element) {
     fn make(tag: &str, children: Vec<Node>) -> Element {
         let mut el = Element::new(String::from(tag), 0);
@@ -567,28 +545,21 @@ fn decode_all(s: &str) -> String {
 /// match, consumes just the `&` and returns it literally.
 fn decode_entity(s: &str) -> (String, usize) { decode_entity_at(s, false) }
 
-/// Dasselbe, aber mit der Auskunft, ob wir in einem ATTRIBUT stehen — und das
-/// ist keine Feinheit, sondern der Unterschied zwischen einem funktionierenden
-/// und einem zerstoerten Link.
+/// Like `decode_entity`, but knowing whether we are inside an attribute.
 ///
-/// **Die Tabelle ist jetzt die ganze** (`entities::NAMED`, 2125 Namen).
-/// Vorher standen fuenfzehn hier, und jeder andere Name landete als TEXT auf
-/// der Seite: DuckDuckGos Vorlage schreibt `&ZeroWidthSpace;`, und das stand
-/// zehnmal woertlich in der Randspalte.
+/// Uses the full named table (`entities::NAMED`). Two rules from WHATWG
+/// §13.2.5.72 f.:
 ///
-/// Zwei Regeln der Spezifikation (WHATWG §13.2.5.72 f.), beide hier:
-///
-/// * **Ohne `;` gilt nur die Altlast** — die 106 Namen, die HTML weiter ohne
-///   Semikolon zulaesst, und davon die LAENGSTE Uebereinstimmung.
-/// * **In einem Attribut wird eine Altlast NICHT ersetzt**, wenn danach `=`
-///   oder ein alphanumerisches Zeichen steht. Genau dafuer gibt es die Regel:
-///   `?a&copy=1` ist ein Abfrageteil und kein Copyright-Zeichen.
+/// * Without `;` only the legacy names apply (the 106 HTML still accepts
+///   without a semicolon), longest match first.
+/// * Inside an attribute a legacy name is not replaced when `=` or an
+///   alphanumeric follows, so `?a&copy=1` stays a query string.
 fn decode_entity_at(s: &str, in_attr: bool) -> (String, usize) {
     debug_assert!(s.starts_with('&'));
     let rest = &s[1..];
 
-    // Numerisch: `&#123;` / `&#x7b;`. Der Leser darf hier NICHT ueber die
-    // Ziffern hinauslaufen, sonst frisst ein `&#` ohne `;` den halben Text.
+    // Numeric: `&#123;` / `&#x7b;`. The reader must not run past the digits,
+    // or a `&#` without `;` would swallow the following text.
     if let Some(num) = rest.strip_prefix('#') {
         let hex = num.starts_with(['x', 'X']);
         let digits = &num[usize::from(hex)..];
@@ -598,8 +569,8 @@ fn decode_entity_at(s: &str, in_attr: bool) -> (String, usize) {
         if n > 0 {
             let body = &digits[..n];
             let cp = if hex { u32::from_str_radix(body, 16).ok() } else { body.parse::<u32>().ok() };
-            // Das `;` gehoert dazu, wenn es da ist; fehlt es, ist der Verweis
-            // laut Spezifikation trotzdem gueltig (mit Parse-Fehler).
+            // Include the `;` if present; without it the reference is still valid
+            // (with a parse error).
             let semi = usize::from(digits[n..].starts_with(';'));
             let adv = 1 + 1 + usize::from(hex) + n + semi;
             return (cp.and_then(char::from_u32).map(String::from).unwrap_or_default(), adv);
@@ -607,8 +578,8 @@ fn decode_entity_at(s: &str, in_attr: bool) -> (String, usize) {
         return (String::from("&"), 1);
     }
 
-    // Benannt. Der Name laeuft bis zum ersten Zeichen, das keiner sein kann —
-    // laenger als der laengste der Tabelle braucht niemand zu lesen.
+    // Named. The name runs to the first character that cannot be part of
+    // one, capped at the longest name in the table.
     let name_len = rest.char_indices()
         .take_while(|(k, c)| *k < entities::MAX_NAME && c.is_ascii_alphanumeric())
         .map(|(k, c)| k + c.len_utf8())
@@ -619,15 +590,15 @@ fn decode_entity_at(s: &str, in_attr: bool) -> (String, usize) {
         if let Some(c) = entities::lookup(name) {
             return (String::from(c), 1 + name_len + 1);
         }
-        // Kein bekannter Name: woertlich stehen lassen, wie bisher.
+        // Unknown name: leave it literal.
         let mut lit = String::from("&");
         lit.push_str(name);
         lit.push(';');
         return (lit, 1 + name_len + 1);
     }
 
-    // Kein Semikolon — nur die Altlast, und im Attribut nur, wenn danach
-    // weder `=` noch ein alphanumerisches Zeichen kommt.
+    // No semicolon: legacy names only, and inside an attribute only when
+    // neither `=` nor an alphanumeric follows.
     if name_len > 0 {
         if let Some((c, n)) = entities::longest_legacy(name) {
             let next = rest[n..].chars().next();
@@ -686,9 +657,7 @@ mod tests {
         collapse_ws(&s)
     }
 
-    /// **Die Tabelle war fuenfzehn Namen gross, das Web hat 2125.** Alles
-    /// andere stand woertlich auf der Seite — DuckDuckGos Randspalte zeigte
-    /// zehnmal `&ZeroWidthSpace;` als Text.
+    /// Every named reference is replaced, not only a handful.
     #[test]
     fn jeder_benannte_verweis_wird_ersetzt() {
         let dom = parse("<p>a&ZeroWidthSpace;b &times; 3&deg; &middot; &shy;x &nixda;</p>");
@@ -696,25 +665,24 @@ mod tests {
                    "a\u{200b}b \u{d7} 3\u{b0} \u{b7} \u{ad}x &nixda;");
     }
 
-    /// Ohne `;` gilt nur die Altlast — und in einem ATTRIBUT auch die nicht,
-    /// wenn `=` oder ein Buchstabe folgt. Sonst zerlegt `?a&copy=1` sich
-    /// selbst (WHATWG §13.2.5.73).
+    /// Without `;` only legacy names apply, and inside an attribute not even
+    /// those when `=` or a letter follows (WHATWG §13.2.5.73).
     #[test]
     fn eine_altlast_ohne_semikolon_zerstoert_keinen_link() {
         let dom = parse("<a href=\"/x?a&copy=1&amp;b=2\" title=\"&copy 2026\">&copy 2026</a>");
         let a = match &dom.body().children[0] { Node::Element(e) => e, _ => panic!() };
         assert_eq!(a.attr("href"), Some("/x?a&copy=1&b=2"));
-        // Kein `=` dahinter: dort wird ersetzt, im Attribut wie im Text.
+        // No `=` after it: replaced, in the attribute as in text.
         assert_eq!(a.attr("title"), Some("\u{a9} 2026"));
         assert_eq!(text_of(a), "\u{a9} 2026");
     }
 
-    /// Der numerische Leser darf nicht ueber seine Ziffern hinauslaufen.
+    /// The numeric reader must not run past its digits.
     #[test]
     fn ein_numerischer_verweis_endet_an_seinen_ziffern() {
         let dom = parse("<p>&#65;&#x42;&#67 D &# E</p>");
-        // `&#67` ohne `;` ist ein Parse-Fehler und wird TROTZDEM ersetzt
-        // (WHATWG §13.2.5.80) — deshalb klebt das C am B.
+        // `&#67` without `;` is a parse error but still replaced
+        // (WHATWG §13.2.5.80), so the C joins the B.
         assert_eq!(text_of(dom.body()), "ABC D &# E");
     }
 

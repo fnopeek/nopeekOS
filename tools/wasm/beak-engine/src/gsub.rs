@@ -1,27 +1,21 @@
 //! GSUB ligature substitution — the step between "which characters" and
 //! "which glyphs".
 //!
-//! **Why it exists.** An icon font does not map its symbol to a codepoint; it
-//! maps the WORD to one glyph, as a ligature. `<i class="fos-icon">home</i>`
-//! carries four characters that are each an empty glyph, and the picture is
-//! the ligature of all four. Without this, that element measured 1 px where a
-//! browser gives it 24.
+//! An icon font maps a word, not a codepoint, to its symbol, as a ligature:
+//! `<i class="fos-icon">home</i>` is four characters that are each an empty
+//! glyph, and the picture is the ligature of all four.
 //!
-//! **Why fontdue does not do it.** `FontSettings::load_substitutions` only
-//! makes the ligature GLYPHS rasterisable by index — fontdue has no shaper and
-//! says so ("singular characters do not have enough context to be
-//! substituted"). The substitution itself is ours.
+//! fontdue does not do this: `FontSettings::load_substitutions` only makes
+//! the ligature glyphs rasterisable by index; fontdue has no shaper.
 //!
-//! Only ligatures (GSUB lookup type 4), and only from the features that are ON
-//! by default: `liga`, `clig`, `rlig`. `dlig` (discretionary) and `hlig`
-//! (historical) are opt-in through `font-variant-ligatures`, and applying them
-//! unasked would change body text nobody asked to change. Contextual lookups
-//! (types 5–8) are not applied — an icon font does not use them, and half a
-//! shaper is worse than none.
+//! Only ligatures (GSUB lookup type 4), and only from the features that are
+//! on by default: `liga`, `clig`, `rlig`. `dlig` and `hlig` are opt-in via
+//! `font-variant-ligatures`. Contextual lookups (types 5–8) are not applied;
+//! icon fonts do not use them, and half a shaper is worse than none.
 
 use alloc::vec::Vec;
 
-/// The ligature substitutions of ONE face, keyed by the first component glyph.
+/// The ligature substitutions of one face, keyed by the first component glyph.
 ///
 /// Sorted by that first glyph so a lookup is a binary search: the common case
 /// is a run whose glyphs are not the start of any ligature, and that case has
@@ -29,21 +23,16 @@ use alloc::vec::Vec;
 #[derive(Default)]
 pub struct Ligatures {
     by_first: Vec<(u16, Vec<Lig>)>,
-    /// Die mittlere und die groesste Zeichenbreite der Schrift, in Em.
-    ///
-    /// **Sie stehen hier, weil hier schon die echten Tabellen gelesen
-    /// werden** — `fontdue` wertet weder `OS/2` noch `hhea` aus, und ein
-    /// zweiter Leser fuer dieselben Bytes waere eine zweite Wahrheit ueber
-    /// dieselbe Schrift. Gebraucht werden sie fuer die EIGENBREITE eines
-    /// `<input size=n>` und eines `<textarea cols=n>`: die rechnet jeder
-    /// Browser aus der mittleren Zeichenbreite, nicht aus der Breite der
-    /// Null — gemessen ueber fuenf Stuetzstellen von `size=1` bis `size=40`.
+    /// Average and maximum character advance of the font, in em. Read here
+    /// because the raw tables are already open (fontdue reads neither `OS/2`
+    /// nor `head`). Used for the intrinsic width of `<input size=n>` and
+    /// `<textarea cols=n>`, which browsers derive from the average advance.
     avg_char: f32,
     max_char: f32,
 }
 
 struct Lig {
-    /// The components AFTER the first one.
+    /// The components after the first one.
     rest: Vec<u16>,
     glyph: u16,
 }
@@ -77,28 +66,25 @@ impl Ligatures {
         best
     }
 
-    /// Read the ligature substitutions out of a font's GSUB table. A font with
-    /// none — every subsetted face we ship — yields an empty table, and an
-    /// empty table is what makes the fast path in `measure` legal.
-    /// Die mittlere Zeichenbreite in Em (`OS/2.xAvgCharWidth`), oder 0.
+    /// Average character advance in em (`OS/2.xAvgCharWidth`), or 0.
     pub fn avg_char(&self) -> f32 { self.avg_char }
-    /// Die groesste Zeichenbreite in Em (`hhea.advanceWidthMax`), oder 0.
+    /// Maximum character width in em (`head` bounding box), or 0.
     pub fn max_char(&self) -> f32 { self.max_char }
 
+    /// Read the ligature substitutions out of a font's GSUB table. A font with
+    /// none (every subsetted face we ship) yields an empty table, and an
+    /// empty table is what makes the fast path in `measure` legal.
     pub fn read(bytes: &[u8], index: u32) -> Ligatures {
         let mut out = Ligatures::default();
         let Ok(face) = ttf_parser::Face::parse(bytes, index) else { return out };
-        // **Zuerst die zwei Breiten** — sie haengen nicht am GSUB, und eine
-        // Schrift ohne Ligaturen (jede, die wir mitliefern) verlaesst die
-        // Funktion gleich darunter.
+        // The two widths first: they do not depend on GSUB, and a font without
+        // ligatures returns right below.
         let upem = face.units_per_em() as f32;
         if upem > 0.0 {
             let raw = face.raw_face();
-            // `OS/2` Feld 2 (Offset 2, i16) und `hhea` Feld `advanceWidthMax`
-            // (Offset 34, u16). `ttf-parser` 0.21 gibt beide nicht als
-            // Methode heraus, die Tabellen selbst aber schon — gelesen wird
-            // mit Laengenpruefung, eine kurze Tabelle gibt 0 und der Rufer
-            // faellt auf die Breite der Null zurueck.
+            // `OS/2` xAvgCharWidth (offset 2, i16). `ttf-parser` exposes the raw
+            // table but no accessor; reads are length-checked, a short table gives 0
+            // and the caller falls back to the width of "0".
             let be16 = |t: &[u8], at: usize| -> Option<u16> {
                 t.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
             };
@@ -108,12 +94,8 @@ impl Ligatures {
                     if signed > 0 { out.avg_char = signed as f32 / upem; }
                 }
             }
-            // **Die groesste Zeichenbreite ist die des UMRISSKASTENS der
-            // ganzen Schrift**, nicht `hhea.advanceWidthMax`. Mit dem Vorschub
-            // blieb ein konstanter Versatz von 37 px ueber ALLE
-            // Stuetzstellen — und ein Fehler, der sich mit der Groesse nicht
-            // aendert, sitzt im konstanten Glied. Blink nimmt an dieser Stelle
-            // `xMax - xMin` aus `head`, und damit geht die Rechnung auf.
+            // The maximum width is that of the font's global bounding box
+            // (`head` xMax - xMin), as Blink computes it, not `hhea.advanceWidthMax`.
             let bb = face.global_bounding_box();
             let w = (bb.x_max as f32 - bb.x_min as f32).max(0.0);
             if w > 0.0 { out.max_char = w / upem; }
@@ -145,7 +127,7 @@ impl Ligatures {
             }
             for table in lookup.subtables.into_iter::<ttf_parser::gsub::SubstitutionSubtable>() {
                 let ttf_parser::gsub::SubstitutionSubtable::Ligature(ls) = table else { continue };
-                // The coverage index of the FIRST component picks the set.
+                // The coverage index of the first component picks the set.
                 for (set_index, set) in ls.ligature_sets.into_iter().enumerate() {
                     let Some(first) = coverage_glyph(&ls.coverage, set_index as u16) else { continue };
                     for lig in set {
@@ -171,12 +153,12 @@ impl Ligatures {
 }
 
 /// The glyph at coverage index `i` — the inverse of `Coverage::get`, which the
-/// table does not offer because a ligature set is addressed BY that index.
+/// table does not offer because a ligature set is addressed by that index.
 fn coverage_glyph(cov: &ttf_parser::opentype_layout::Coverage, i: u16) -> Option<u16> {
     use ttf_parser::opentype_layout::Coverage;
     match cov {
         Coverage::Format1 { glyphs } => glyphs.get(i).map(|g| g.0),
-        // In a range record `value` IS the coverage index of `start`
+        // In a range record `value` is the coverage index of `start`
         // (OpenType: startCoverageIndex).
         Coverage::Format2 { records } => {
             for r in *records {
@@ -210,7 +192,7 @@ mod tests {
         out
     }
 
-    /// `ffi` and `ff` both start at `f`; the LONGER one has to win, or `ffi`
+    /// `ffi` and `ff` both start at `f`; the longer one has to win, or `ffi`
     /// can never fire.
     #[test]
     fn the_longest_ligature_wins() {

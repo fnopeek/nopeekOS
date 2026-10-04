@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 //! beak-engine — portable browser engine core (nopeekOS `beak`).
 //!
-//! Pure `no_std` + `alloc`, **no host-fn dependencies** → the whole engine
+//! Pure `no_std` + `alloc`, no host-fn dependencies, so the whole engine
 //! builds and unit-tests on any target with no OS in the loop (docs/spec/BROWSER.md
 //! §10). The pipeline is the real browser shape, grown incrementally:
 //!
@@ -36,13 +36,11 @@ pub mod picture;
 pub mod raster;
 pub mod select;
 pub mod site;
-/// **Die Reichweitenregel des KERNELS, hier nur zum Fahren.**
+/// The kernel's network reach rule, included here only to run its tests.
 ///
-/// Der Kernel hat keine Testinfrastruktur, und eine Sicherheitsregel, die
-/// niemand fahren kann, ist eine Behauptung. Die Datei wird deshalb von dort
-/// EINGEHAENGT statt kopiert: es gibt genau eine Fassung, und ihre Tabelle
-/// laeuft bei jedem `cargo test` dieses Crates mit.
-/// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
+/// The kernel has no test infrastructure, so the file is included rather
+/// than copied: there is exactly one version, and its table runs with every
+/// `cargo test` of this crate. See `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
 #[cfg(test)]
 #[path = "../../../../kernel/src/intent/reach.rs"]
 pub mod kernel_reach;
@@ -63,15 +61,13 @@ pub fn stylesheet_links(html: &str) -> alloc::vec::Vec<alloc::string::String> {
     css::stylesheet_links(&dom::parse(html))
 }
 
-/// The `@import` targets of ONE stylesheet, in source order. They resolve
+/// The `@import` targets of one stylesheet, in source order. They resolve
 /// against that sheet's own URL, not the document's, so the shell has to ask
 /// per sheet rather than over the concatenated buffer.
 pub fn import_urls(css: &str) -> alloc::vec::Vec<alloc::string::String> {
     css::import_urls(css)
 }
 
-/// `src` of every `<img>` in an HTML document (as written), for the shell to
-/// fetch + hand back via `Engine::set_images`.
 /// Every `<img src>` in the document, in document order — the shell's fetch
 /// list. `width` is the viewport: `<picture>`/`srcset` is resolved first, so
 /// this returns exactly the URLs layout will ask for at that width.
@@ -103,17 +99,16 @@ pub fn image_srcs(html: &str, width: u32) -> alloc::vec::Vec<alloc::string::Stri
     out
 }
 
-/// Die `src` aller `<img>` unter `el` — dieselbe Regel wie in `image_srcs`,
-/// als eigene Funktion, weil zwei Baeume sie brauchen.
+/// The `src` of every `<img>` under `el`; the same rule as `image_srcs`,
+/// separate because two trees need it.
 pub(crate) fn collect_img_srcs(el: &Element, out: &mut alloc::vec::Vec<alloc::string::String>) {
     for c in &el.children {
         if let Node::Element(e) = c {
             if e.tag == "img" {
                 if let Some(s) = e.attr("src") {
                     let s = s.trim();
-                    // Ein `data:` traegt seine Bytes selbst — es dem Wirt zu
-                    // melden hiesse, die ganze Nutzlast als Adresse ins Netz
-                    // zu schicken.
+                    // A `data:` src carries its own bytes; reporting it to the host would
+                    // send the whole payload to the network as a URL.
                     let inline = s.starts_with("data:") || s.starts_with("DATA:");
                     if !s.is_empty() && !inline {
                         out.push(alloc::string::ToString::to_string(s));
@@ -300,8 +295,8 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
     }
 
     // ── real icon-set contact sheet (eyeball icons_sheet.bmp) ──────────────
-    // Renders every *.svg in ICONS_DIR into a tiled sheet + reports how many
-    // painted (stroke-only icons paint 0 px in v1 → the stroke gap, measured).
+    // Renders every *.svg in ICONS_DIR into a tiled sheet and reports how many
+    // painted.
     // Run: `ICONS_DIR=../../../icons/phosphor cargo test --release
     //       render_icons_sheet -- --nocapture`
     #[test]
@@ -384,15 +379,12 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
     }
 
     // ── Bootstrap fidelity oracle ──────────────────────────────────────────
-    // Renders a representative Bootstrap 5 page with the REAL bootstrap.min.css
-    // (assets/) so we can measure "does it look as the author intended".
+    // Renders a representative Bootstrap 5 page with the real bootstrap.min.css
+    // (assets/) to check it looks as the author intended.
     // Run: `cargo test --release render_bootstrap_to_bmp -- --nocapture`
     // → writes `tools/wasm/beak-engine/bootstrap.bmp`.
-    // Die Vorlage liegt als DATEI da, nicht als Zeichenkette hier: derselbe
-    // Byte-fuer-Byte gleiche Text geht host-seitig durch diesen Test und
-    // ueber `tools/pageserver.py` ans Geraet. Eine Pruefseite, die in zwei
-    // Fassungen existiert, vergleicht zwei Dinge und nicht eins
-    // ([[project_beak_selftest_page]] macht es genauso).
+    // The template is a file, not a string here, so the host test and
+    // `tools/pageserver.py` serve byte-identical input.
     const BOOTSTRAP_SAMPLE: &str = include_str!("../../../fixtures/components.html");
 
     #[test]
@@ -410,14 +402,12 @@ dieselbe Rechnerei läuft auf dem Desktop.</p>\
             rule: Rgb(222, 226, 230),
         });
         let css = include_str!("../assets/bootstrap.min.css");
-        // Die Breite, die das Geraet fährt (`layout @1902px` im Log). Eine
-        // andere Breite waehlt andere Bootstrap-Haltepunkte, und dann
-        // vergleicht man zwei Layouts statt zweier Maschinen
-        // ([[feedback_host_profile_is_not_the_device]]).
+        // The width the shell lays out at; another width selects other Bootstrap
+        // breakpoints and compares two different layouts.
         let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
         let lay = eng.layout_ext(BOOTSTRAP_SAMPLE, css, width);
-        // Der Deckel stand auf 4000 — die Komponentenseite ist hoeher, und ein
-        // abgeschnittenes Bild sagt ueber die letzten Bloecke nichts.
+        // Tall enough for the whole component page; a cut-off image says nothing
+        // about the last blocks.
         let height = lay.height.clamp(1, 20000);
         let mut buf = alloc::vec![0u8; (width * height * 4) as usize];
         eng.paint(&lay, width, height, 0, &mut buf);

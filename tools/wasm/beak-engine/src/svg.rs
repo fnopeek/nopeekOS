@@ -28,7 +28,7 @@ const SS: usize = 4; // vertical supersampling for anti-aliasing
 // ── foreign-content name adjustment (HTML tree construction) ───────────────
 //
 // The HTML tokenizer lowercases every tag and attribute name. SVG is
-// case-SENSITIVE, so the spec puts the camel case back when it inserts a
+// case-sensitive, so the spec puts the camel case back when it inserts a
 // foreign element ("adjust SVG tag names" / "adjust SVG attributes"). Without
 // it `viewBox` arrives as `viewbox` and an inline icon has no coordinate
 // system at all. The tables are the spec's, verbatim.
@@ -148,8 +148,7 @@ pub fn adjust_attr_name(lower: &str) -> &str {
 fn lookup<'a>(table: &[(&'static str, &'static str)], lower: &'a str) -> &'a str {
     match table.binary_search_by(|(k, _)| (*k).cmp(lower)) {
         Ok(i) => {
-            // SAFETY of the cast-free kind: the table value is 'static, which
-            // outlives 'a.
+            // No cast needed: the table value is 'static, which outlives 'a.
             table[i].1
         }
         Err(_) => lower,
@@ -181,7 +180,7 @@ pub fn render(bytes: &[u8]) -> Option<Image> {
     render_tree(&root, Rgb(0, 0, 0), None)
 }
 
-/// Render an INLINE `<svg>` straight out of the HTML DOM.
+/// Render an inline `<svg>` straight out of the HTML DOM.
 ///
 /// `current` is the element's computed `color` — `currentColor` is what icon
 /// sets paint with, so without it every icon comes out black. `box_px` is the
@@ -373,7 +372,7 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(St
         }
         "defs" | "clipPath" | "mask" | "title" | "desc" | "metadata" | "style" | "use"
         | "linearGradient" | "radialGradient" | "filter" | "pattern" => {
-            // v1: not rendered (defs/gradients/use handled in a later iteration).
+            // Not rendered (gradients are collected by a separate pass).
         }
         _ => {
             let subs = shape_subpaths(el, tag, &ctm);
@@ -407,10 +406,9 @@ fn walk(el: &XmlEl, ctm: &Mat, parent: &Paint, out: &mut Vec<Fill>, grads: &[(St
 
 /// Average colour of every gradient in the document, by id.
 ///
-/// v1 paints a gradient as ONE flat colour: the mean of its stops. A real
-/// gradient needs per-pixel interpolation in the rasteriser; the flat stand-in
-/// is what turns Wikipedia's logo from a black disc into a light sphere, and at
-/// icon size the difference from the real thing is small.
+/// A gradient is painted as one flat colour, the mean of its stops; real
+/// per-pixel interpolation is not implemented. At icon size the difference
+/// is small, and far closer than painting it black.
 ///
 /// Walks the tree — `walk` skips `<defs>`, but this pass visits everything, so
 /// a gradient is found wherever it is declared. An inline `<svg>` has no source
@@ -489,8 +487,8 @@ fn url_ref(v: &str) -> Option<&str> {
 
 fn resolve_paint(el: &XmlEl, parent: &Paint, grads: &[(String, Rgb)], current: Rgb) -> Paint {
     let mut p = *parent;
-    p.opacity = parent.opacity; // opacity does NOT inherit; applied multiplicatively
-    // opacity is a property of THIS element only (reset), fill/fill-* inherit.
+    p.opacity = parent.opacity; // opacity does not inherit; applied multiplicatively
+    // opacity is a property of this element only (reset), fill/fill-* inherit.
     let mut own_opacity = 1.0;
 
     let mut apply = |name: &str, val: &str| {
@@ -940,7 +938,7 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 // Each contour is widened to a set of convex pieces (segment rectangles, plus a
 // disc at every join and round cap) — all wound the same way so a nonzero fill
 // unions them cleanly, no outline-intersection maths. Joins/round-caps are
-// exact; miter/bevel are approximated as round for v1 (the common icon style).
+// exact; miter/bevel are approximated as round (the common icon style).
 
 fn stroke_polys(subs: &[SubPath], r: f32, cap: Cap) -> Vec<Vec<(f32, f32)>> {
     let mut pieces: Vec<Vec<(f32, f32)>> = Vec::new();
@@ -1192,7 +1190,7 @@ fn local_name(name: &str) -> &str {
     }
 }
 
-/// Parse a length: leading number, ignore a `px` unit; `%` → None (v1).
+/// Parse a length: leading number, ignore a `px` unit; `%` → None (not supported).
 fn parse_len(v: &str) -> Option<f32> {
     let v = v.trim();
     if v.ends_with('%') {

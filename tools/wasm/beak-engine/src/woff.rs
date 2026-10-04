@@ -1,30 +1,24 @@
-//! WOFF 1.0 → sfnt. Der Vorgaenger von WOFF2, und er ist NICHT ausgestorben.
+//! WOFF 1.0 → sfnt.
 //!
-//! Hier stand ein `return false` mit der Begruendung, die Fassung sei
-//! „praktisch ausgestorben". Gemessen: arcade.ch liefert alle vier Gesichter
-//! seiner Hausschrift als WOFF1, und ohne sie faellt die ganze Seite auf die
-//! eingebaute Schrift zurueck — also stimmt darunter keine einzige Breite und
-//! keine einzige Hoehe mehr ([[feedback_a_comment_that_names_its_condition_expires]]).
-//! Jeder Baukasten, der noch `.woff` neben `.woff2` ausliefert, trifft uns
-//! genauso, sobald `@font-face` beide Formate anbietet und wir das zweite
-//! nicht koennen.
+//! Still in use: sites ship their house fonts as `.woff` only, and without
+//! them every width and height on the page is computed with the fallback
+//! font.
 //!
-//! **Warum das kurz ist.** WOFF2 muss `glyf`/`loca` zurueckbauen und bringt
-//! Brotli mit; WOFF1 tut nichts dergleichen. Es ist das sfnt selbst, Tabelle
-//! fuer Tabelle mit zlib gepackt (RFC 1950) — und `miniz_oxide` liegt fuer PNG
-//! ohnehin im Baum. Es bleibt: Kopf lesen, Verzeichnis lesen, entpacken,
-//! sfnt wieder zusammensetzen.
+//! Short because WOFF1, unlike WOFF2, needs no `glyf`/`loca` reconstruction
+//! and no Brotli: it is the sfnt itself, each table zlib-compressed
+//! (RFC 1950, via `miniz_oxide`). Read header, read directory, inflate,
+//! reassemble the sfnt.
 //!
-//! W3C WOFF File Format 1.0, §3 (header) und §4 (table directory).
+//! W3C WOFF File Format 1.0, §3 (header) and §4 (table directory).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Derselbe Deckel wie in `woff2` — eine Schrift, die entpackt groesser ist,
-/// wird abgelehnt, statt den Speicher zu fuellen.
+/// Same cap as in `woff2`: a font larger than this when unpacked is
+/// rejected rather than filling memory.
 const MAX_SFNT: usize = 32 * 1024 * 1024;
 
-/// Kopf (44 B) + je 20 B Verzeichniseintrag.
+/// Header (44 B) + 20 B per directory entry.
 const HDR: usize = 44;
 const DIR_ENTRY: usize = 20;
 
@@ -39,8 +33,8 @@ pub fn looks_like_woff(b: &[u8]) -> bool {
     b.starts_with(b"wOFF")
 }
 
-/// `wOFF` → sfnt, oder `None`, wenn der Container nicht haelt, was sein Kopf
-/// sagt.
+/// `wOFF` → sfnt, or `None` if the container does not hold what its header
+/// claims.
 pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
     if !looks_like_woff(d) {
         return None;
@@ -51,9 +45,8 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
     if num == 0 || total > MAX_SFNT {
         return None;
     }
-    // `totalSfntSize` ist eine ANGABE der Datei, keine Messung. Sie wird
-    // benutzt, um EINMAL zu reservieren, und danach nicht mehr geglaubt: die
-    // Groesse, die zaehlt, ist die aufaddierte der Tabellen.
+    // `totalSfntSize` is a claim of the file, not a measurement: used once to
+    // reserve, then not trusted. The size that counts is the sum of the tables.
     let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut sum = 0usize;
     for i in 0..num {
@@ -71,9 +64,8 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let src = &d[off..end];
-        // §4: `compLength == origLength` heisst UNGEPACKT. Alles andere ist
-        // zlib. Ein Entpacker auf rohe Tabellenbytes losgelassen scheitert
-        // sonst an `head`, das fast immer unkomprimiert daliegt.
+        // §4: `compLength == origLength` means stored uncompressed; anything else
+        // is zlib. `head` is almost always stored raw.
         let raw = if comp >= orig {
             src[..orig.min(src.len())].to_vec()
         } else {
@@ -88,8 +80,8 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
         }
         tables.push((tag, raw));
     }
-    // Das sfnt-Verzeichnis ist nach Marke SORTIERT — die Spezifikation
-    // verlangt das auch von der WOFF-Datei, aber eine Datei ist keine Zusage.
+    // The sfnt directory must be sorted by tag. The spec requires that of the
+    // WOFF file too, but a file is no promise.
     tables.sort_by_key(|(t, _)| *t);
 
     let dir_len = 12 + num * 16;
@@ -97,8 +89,8 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
     out.try_reserve(dir_len + sum).ok()?;
     out.extend_from_slice(&flavor.to_be_bytes());
     out.extend_from_slice(&(num as u16).to_be_bytes());
-    // searchRange / entrySelector / rangeShift — die drei Suchhilfen aus dem
-    // sfnt-Kopf. fontdue liest sie nicht, ein anderer Leser schon.
+    // searchRange / entrySelector / rangeShift, the sfnt header's search
+    // hints. fontdue does not read them, other readers do.
     let mut sel = 0u16;
     while (1usize << (sel + 1)) <= num {
         sel += 1;
@@ -123,11 +115,11 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// sfnt-Pruefsumme: die u32 der Tabelle aufaddiert, mit Nullen aufgefuellt.
+/// sfnt checksum: the table's u32s summed, zero-padded.
 ///
-/// Neu gerechnet und nicht aus der WOFF-Datei uebernommen — dort steht die
-/// des ORIGINALS, und wenn die Datei sich irrt, faellt der Fehler sonst
-/// einem Leser vor die Fuesse, der die Summe prueft.
+/// Recomputed rather than copied from the WOFF file, which stores the
+/// original's checksum; a wrong value there would otherwise reach a reader
+/// that verifies it.
 fn checksum(d: &[u8]) -> u32 {
     let mut sum = 0u32;
     let mut i = 0;

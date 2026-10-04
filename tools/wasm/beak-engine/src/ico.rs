@@ -1,14 +1,13 @@
 //! ico.rs — Windows ICO/CUR decode.
 //!
-//! Every search result carries one: `favicon.ico` is still what sites ship and
-//! what aggregators (DuckDuckGo's `/ip3/<host>.ico`) hand back, so without this
-//! a result list is a column of empty boxes.
+//! `favicon.ico` is still what sites ship and what favicon services hand back,
+//! so search results and tabs need it.
 //!
 //! A `.ico` is a directory of images. Each entry is either a whole PNG (Vista+)
 //! — handed straight back to the PNG decoder — or a "DIB": a BITMAPINFOHEADER
-//! whose height counts DOUBLE, because a colour bitmap is followed by a 1-bit
+//! whose height counts double, because a colour bitmap is followed by a 1-bit
 //! AND mask. That mask is the transparency for every depth below 32, and the
-//! rescue for the many 32-bit icons that ship an all-zero alpha channel.
+//! fallback for the many 32-bit icons that ship an all-zero alpha channel.
 //!
 //! Rows are bottom-up and padded to a 4-byte boundary — both are properties of
 //! the DIB format, not of the icon.

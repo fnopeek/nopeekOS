@@ -6,7 +6,7 @@
 //!
 // Upstream's `fill_rgb`/`fill_rgba` are unreachable here (we paint BGRA), and
 // a few upstream helpers are only used by its lossless path. They stay so the
-// file keeps diffing cleanly against 0.1.3.
+// file keeps diffing cleanly against upstream image-webp 0.1.3.
 #![allow(dead_code)]
 //! An implementation of the VP8 Video Codec
 //!
@@ -954,10 +954,9 @@ impl Frame {
 
     /// Fill a BGRA buffer — beak's paint order — with an opaque alpha.
     ///
-    /// Added for this port. Upstream has `fill_rgb`/`fill_rgba`; going through
-    /// either and swizzling afterwards would walk every pixel a second time,
-    /// and under wasmi a per-pixel pass is the expensive kind
-    /// (`memory/feedback_wasmi_hot_loops.md`).
+    /// Added for this port. Going through upstream's `fill_rgb`/`fill_rgba` and
+    /// swizzling afterwards would walk every pixel a second time, which is
+    /// expensive in an interpreted WASM runtime.
     pub(crate) fn fill_bgra(&self, buf: &mut [u8]) {
         let mut index = 0_usize;
         for (y, row) in buf.chunks_exact_mut(usize::from(self.width) * 4).enumerate() {

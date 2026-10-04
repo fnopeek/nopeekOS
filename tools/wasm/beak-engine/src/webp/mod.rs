@@ -1,24 +1,21 @@
 //! WebP: the RIFF container plus a `no_std` port of the lossy VP8 decoder.
 //!
-//! **Why this and not a crate:** `image-webp` is pure Rust and would be the
-//! obvious dependency, but it is `std`-only (its decoder is built on
-//! `std::io::Read`). Its VP8 core, however, touches `std` in exactly four
-//! lines, and `loop_filter.rs`/`transform.rs` have no imports at all — so the
-//! honest move is to port it rather than to reimplement it.
+//! `image-webp` is `std`-only (its decoder is built on `std::io::Read`), but
+//! its VP8 core touches `std` in only four lines and `loop_filter.rs` /
+//! `transform.rs` have no imports at all, so it is ported rather than
+//! reimplemented.
 //!
 //! `vp8.rs`, `loop_filter.rs` and `transform.rs` are taken from
-//! **image-webp 0.1.3** (<https://github.com/image-rs/image-webp>, MIT OR
+//! image-webp 0.1.3 (<https://github.com/image-rs/image-webp>, MIT OR
 //! Apache-2.0, © the image-rs developers) and changed only where `std` had to
 //! go: the two readers below replace `std::io::Read`/`Cursor` + `byteorder`,
 //! `DecodingError` replaces the crate's, and `fill_bgra` was added because
 //! beak paints BGRA. The decoding logic itself is untouched, so a fix upstream
 //! stays diffable against ours.
 //!
-//! **Why only lossy:** measured over the page corpus — 12 of 12 sampled images
-//! on srf.ch and tagesschau.de are `VP8 ` in the plain container, with no
-//! `VP8X`, `ALPH` or `ANIM` chunk. Lossless (`VP8L`) is a second decoder and
-//! waits until a real page asks for it; until then it is REJECTED, not
-//! half-decoded (see `docs/plan/HTML_GAP_2026_08.md`).
+//! Only lossy `VP8 ` in the plain container is supported. Lossless (`VP8L`)
+//! and extended (`VP8X`, `ALPH`, `ANIM`) files are rejected, not
+//! half-decoded.
 
 mod loop_filter;
 mod transform;
@@ -202,10 +199,10 @@ mod tests {
         assert!(img.bgra.chunks_exact(4).all(|p| p[3] == 255));
     }
 
-    /// Lossless is a SECOND decoder we have not ported. Declining is the whole
-    /// point: `<picture>` then falls back to the JPEG the page also offers,
-    /// while a half-decode would replace a picture that renders with one that
-    /// does not (`picture::decodable_type` makes the same call).
+    /// Lossless needs a second decoder that is not ported. Declining lets
+    /// `<picture>` fall back to the JPEG the page also offers, instead of a
+    /// half-decode replacing a picture that renders (`picture::decodable_type`
+    /// makes the same call).
     #[test]
     fn a_lossless_webp_is_declined_not_half_decoded() {
         let bytes = include_bytes!("../../assets/test-lossless.webp");
@@ -214,7 +211,7 @@ mod tests {
     }
 
     /// Truncation and garbage must come back as `None`, never as a panic — a
-    /// panic in the engine is a kernel panic (CLAUDE.md).
+    /// panic in the engine is a kernel panic.
     #[test]
     fn damaged_input_is_refused_without_panicking() {
         let full = include_bytes!("../../assets/test-quadrants.webp");
@@ -230,9 +227,7 @@ mod tests {
         assert!(decode(&[0u8; 0]).is_none());
     }
 
-    /// The dispatch in `image::decode` has to route these bytes here — a
-    /// decoder nothing calls is the failure mode from
-    /// `memory/feedback_verify_the_call_path.md`.
+    /// The dispatch in `image::decode` has to route these bytes here.
     #[test]
     fn image_decode_routes_webp_here() {
         let img = crate::image::decode(include_bytes!("../../assets/test-quadrants.webp"))

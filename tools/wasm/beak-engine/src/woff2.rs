@@ -1,31 +1,21 @@
-//! WOFF2 → sfnt (TrueType). Der Container, den moderne Seiten fuer ihre
-//! Schriften benutzen.
+//! WOFF2 → sfnt (TrueType), the container modern pages use for their fonts.
 //!
-//! **Warum das sein muss.** `@font-face` steht praktisch auf jeder modernen
-//! Seite, und die Datei dahinter ist fast immer WOFF2. Ohne diesen Schritt
-//! faellt jeder Text auf die eingebaute Schrift zurueck — mit zwei Folgen,
-//! die beide nach einem Layoutfehler aussehen und keiner sind: eine
-//! Symbolschrift malt ihren Ligaturtext (`eye` statt eines Auges), und JEDE
-//! Textbreite weicht ab, also stimmt darunter keine einzige Hoehe mehr.
+//! Without it every `@font-face` text falls back to the embedded font: an
+//! icon font paints its ligature text (`eye` instead of an eye), and every
+//! text width, and with it every height below, is off.
 //!
-//! **Was hier NICHT gebaut wurde: Brotli.** Der Entpacker ist
-//! `brotli-decompressor` mit `default-features = false` — dieselbe
-//! Entscheidung wie bei WebP (`super::webp`): die Kiste ist ohne `std`
-//! baubar, und RFC 7932 samt seinem 122-KB-Woerterbuch nachzubauen waere
-//! mehr Arbeit als der ganze Rest dieser Datei.
+//! Brotli (RFC 7932) comes from `brotli-decompressor` with
+//! `default-features = false`, which builds without `std`.
 //!
-//! **Umfang.** Der `glyf`/`loca`-Rueckbau ist vollstaendig (das ist der
-//! eigentliche Gewinn von WOFF2 und in echten Schriften immer aktiv), ebenso
-//! die `hmtx`-Rueckwandlung. Schriftsammlungen (`ttcf`) und die
-//! Metadatenbloecke werden uebergangen — beide kommen als `@font-face` nicht
-//! vor.
+//! Scope: the `glyf`/`loca` reconstruction is complete (always used by real
+//! fonts), as is the `hmtx` transform. Collections (`ttcf`) and metadata
+//! blocks are skipped; neither occurs via `@font-face`.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Die 63 Tabellennamen, die WOFF2 als Index statt als Marke schreibt.
-/// **Reihenfolge ist Vertrag** — ein einziger Eintrag zu viel verschiebt
-/// alles danach, und der Datenstrom laeuft danach aus dem Tritt.
+/// The 63 table tags WOFF2 encodes as an index instead of a tag.
+/// The order is the contract: one extra entry shifts everything after it.
 const KNOWN_TAGS: [&[u8; 4]; 63] = [
     b"cmap", b"head", b"hhea", b"hmtx", b"maxp", b"name", b"OS/2", b"post",
     b"cvt ", b"fpgm", b"glyf", b"loca", b"prep", b"CFF ", b"VORG", b"EBDT",
@@ -37,9 +27,8 @@ const KNOWN_TAGS: [&[u8; 4]; 63] = [
     b"trak", b"Zapf", b"Silf", b"Glat", b"Gloc", b"Feat", b"Sill",
 ];
 
-/// Deckel: eine Schrift, die entpackt groesser ist, wird abgelehnt statt den
-/// Speicher zu fuellen. 32 MB ist weit ueber jeder echten Schrift (die
-/// groesste hier: 285 KB).
+/// Cap: a font larger than this when unpacked is rejected instead of
+/// filling memory. Far above any real font.
 const MAX_SFNT: usize = 32 * 1024 * 1024;
 
 struct Reader<'a> { d: &'a [u8], p: usize }
@@ -62,12 +51,12 @@ impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let s = self.d.get(self.p..self.p + n)?; self.p += n; Some(s)
     }
-    /// `UIntBase128` — 1 bis 5 Bytes, sieben Bit je Byte, hohes Bit = weiter.
+    /// `UIntBase128`: 1 to 5 bytes, seven bits each, high bit = continue.
     fn base128(&mut self) -> Option<u32> {
         let mut v: u32 = 0;
         for i in 0..5 {
             let b = self.u8()?;
-            // Fuehrende Null ist verboten, und mehr als 32 Bit auch.
+            // A leading zero is forbidden, as is more than 32 bits.
             if i == 0 && b == 0x80 { return None }
             if v & 0xfe00_0000 != 0 { return None }
             v = (v << 7) | (b & 0x7f) as u32;
@@ -75,7 +64,7 @@ impl<'a> Reader<'a> {
         }
         None
     }
-    /// `255UInt16` — der Kurzcode fuer kleine Zahlen.
+    /// `255UInt16`, the short code for small numbers.
     fn u255(&mut self) -> Option<u16> {
         match self.u8()? {
             253 => self.u16(),
@@ -88,18 +77,14 @@ impl<'a> Reader<'a> {
 
 struct Entry {
     tag: [u8; 4],
-    /// Laenge im Datenstrom (transformiert, wenn transformiert).
+    /// Length in the stream (transformed, if transformed).
     stored: usize,
     orig: usize,
     transformed: bool,
 }
 
-/// Eine WOFF2-Datei in eine sfnt-Datei verwandeln, die fontdue lesen kann.
-/// Wo ein Rueckbau stehengeblieben ist.
-///
-/// Ein Entpacker, der nur `None` liefert, kostet auf einer 90-KB-Schrift eine
-/// Stunde. `step` sagt die STELLE, `glyph` die Glyphe — beides wird im
-/// Vorbeigehen gesetzt, nicht nachtraeglich rekonstruiert.
+/// Where a reconstruction stopped, for diagnostics. `step` names the stage,
+/// `glyph` the glyph; both are set along the way.
 #[derive(Clone, Copy)]
 pub struct Trace { pub step: &'static str, pub glyph: usize }
 
@@ -107,6 +92,7 @@ impl Default for Trace {
     fn default() -> Self { Trace { step: "Kopf", glyph: usize::MAX } }
 }
 
+/// Turn a WOFF2 file into an sfnt that fontdue can read.
 pub fn to_sfnt(src: &[u8]) -> Option<Vec<u8>> {
     to_sfnt_traced(src, &mut Trace::default())
 }
@@ -137,7 +123,7 @@ pub fn to_sfnt_traced(src: &[u8], tr: &mut Trace) -> Option<Vec<u8>> {
             **KNOWN_TAGS.get(idx)?
         };
         let orig = r.base128()? as usize;
-        // Bei `glyf`/`loca` ist Fassung 3 die Null-Umwandlung, sonst Fassung 0.
+        // For `glyf`/`loca` transform version 3 is the null transform, otherwise 0.
         let transformed = if &tag == b"glyf" || &tag == b"loca" { tv != 3 } else { tv != 0 };
         let stored = if transformed { r.base128()? as usize } else { orig };
         if orig > MAX_SFNT || stored > MAX_SFNT { return None }
@@ -151,7 +137,7 @@ pub fn to_sfnt_traced(src: &[u8], tr: &mut Trace) -> Option<Vec<u8>> {
     if data.len() < want { return None }
 
     tr.step = "Tabellen schneiden";
-    // Die Tabellen in Verzeichnisreihenfolge aus dem Strom schneiden.
+    // Cut the tables out of the stream in directory order.
     let mut raw: Vec<&[u8]> = Vec::with_capacity(dir.len());
     let mut off = 0usize;
     for e in &dir {
@@ -159,12 +145,12 @@ pub fn to_sfnt_traced(src: &[u8], tr: &mut Trace) -> Option<Vec<u8>> {
         off += e.stored;
     }
 
-    // Rueckbau. `glyf` und `loca` gehoeren zusammen: der Rueckbau des einen
-    // erzeugt das andere.
+    // Reconstruction. `glyf` and `loca` belong together: rebuilding one
+    // produces the other.
     let mut out: Vec<(([u8; 4]), Vec<u8>)> = Vec::with_capacity(dir.len());
     let mut glyf_loca: Option<(Vec<u8>, Vec<u8>)> = None;
     for (i, e) in dir.iter().enumerate() {
-        if &e.tag == b"loca" { continue }          // faellt mit `glyf` an
+        if &e.tag == b"loca" { continue }          // produced with `glyf`
         if &e.tag == b"glyf" && e.transformed {
             tr.step = "glyf-Rueckbau";
             let (g, l) = reconstruct_glyf(raw[i], tr)?;
@@ -179,7 +165,7 @@ pub fn to_sfnt_traced(src: &[u8], tr: &mut Trace) -> Option<Vec<u8>> {
             out.push((e.tag, reconstruct_hmtx(raw[i], hhea, head, g)?));
             continue;
         }
-        if e.transformed { return None }           // unbekannte Umwandlung
+        if e.transformed { return None }           // unknown transform
         out.push((e.tag, raw[i].to_vec()));
     }
     if let Some((g, l)) = glyf_loca {
@@ -197,8 +183,8 @@ fn find<'a>(dir: &[Entry], raw: &[&'a [u8]], tag: &[u8; 4]) -> Option<&'a [u8]> 
     dir.iter().position(|e| &e.tag == tag).map(|i| raw[i])
 }
 
-/// Die sfnt-Datei zusammensetzen: Kopf, Tabellenverzeichnis (nach Marke
-/// sortiert, so will es das Format), dann die Daten auf 4 Byte ausgerichtet.
+/// Assemble the sfnt: header, table directory (sorted by tag, as the format
+/// requires), then the data aligned to 4 bytes.
 fn build_sfnt(flavor: u32, mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
     tables.sort_by(|a, b| a.0.cmp(&b.0));
     let n = tables.len() as u16;
@@ -243,16 +229,15 @@ fn checksum(d: &[u8]) -> u32 {
     s
 }
 
-/// `hmtx`-Umwandlung 1: die linken Seitenlager stehen nicht in der Datei,
-/// weil sie gleich `xMin` der Glyphe sind.
+/// `hmtx` transform 1: left side bearings are omitted from the file because
+/// they equal the glyph's `xMin`.
 fn reconstruct_hmtx(t: &[u8], hhea: &[u8], head: &[u8], _glyf: Option<&[u8]>) -> Option<Vec<u8>> {
     let num_h = u16::from_be_bytes(hhea.get(34..36)?.try_into().ok()?) as usize;
     let _ = head;
     let mut r = Reader::new(t);
     let flags = r.u8()?;
-    // Bit 0: lsb fehlt, Bit 1: leftSideBearing der Nicht-Metrik-Glyphen fehlt.
-    // Ohne `glyf` koennen wir sie nicht ausrechnen — dann lieber absagen als
-    // Nullen erfinden.
+    // Bit 0: lsb omitted, bit 1: leftSideBearing of non-metric glyphs omitted.
+    // Without `glyf` we cannot compute them; decline rather than invent zeros.
     if flags & 0x03 == 0 { return Some(t[1..].to_vec()) }
     let mut adv = Vec::with_capacity(num_h);
     for _ in 0..num_h { adv.push(r.u16()?); }
@@ -261,7 +246,7 @@ fn reconstruct_hmtx(t: &[u8], hhea: &[u8], head: &[u8], _glyf: Option<&[u8]>) ->
     Some(o)
 }
 
-/// Der `glyf`-Rueckbau (WOFF2 §5.1). Liefert `(glyf, loca)`.
+/// The `glyf` reconstruction (WOFF2 §5.1). Returns `(glyf, loca)`.
 fn reconstruct_glyf(t: &[u8], tr: &mut Trace) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut h = Reader::new(t);
     let _version = h.u16()?;
@@ -283,13 +268,13 @@ fn reconstruct_glyf(t: &[u8], tr: &mut Trace) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut composite = Reader::new(h.take(composite_sz)?);
     let bbox_all = h.take(bbox_sz)?;
     let mut instr = Reader::new(h.take(instr_sz)?);
-    // Der bbox-Strom beginnt mit einer Bitmaske: ein Bit je Glyphe, „hat eine
-    // eigene Umgrenzung".
+    // The bbox stream starts with a bitmap: one bit per glyph, "has an
+    // explicit bounding box".
     let bitmap_len = (num_glyphs + 7) / 8;
     let bitmap = bbox_all.get(..bitmap_len)?;
     let mut bbox = Reader::new(bbox_all.get(bitmap_len..)?);
-    // Die Fahne fuer ueberlappende Konturen ist eine spaetere Zutat und steht
-    // GANZ hinten, nicht in einem der sieben Stroeme.
+    // The overlap-contours flag was added later and sits at the very end, not
+    // in one of the seven streams.
     let overlap = if option_flags & 1 != 0 {
         Some(h.take(bitmap_len)?)
     } else { None };
@@ -303,14 +288,14 @@ fn reconstruct_glyf(t: &[u8], tr: &mut Trace) -> Option<(Vec<u8>, Vec<u8>)> {
         let nc = n_contour.i16()?;
         let start = glyf.len();
         if nc == 0 {
-            // Leere Glyphe: kein Eintrag, nur derselbe Versatz noch einmal.
+            // Empty glyph: no entry, only the same offset again.
             offsets.push(start as u32);
             continue;
         }
         let has_bbox = bitmap.get(gid >> 3).is_some_and(|b| b & (0x80 >> (gid & 7)) != 0);
         if nc < 0 {
-            // Zusammengesetzt: die Rohform steht schon im Verbundstrom, sie
-            // muss nur abgegrenzt werden.
+            // Composite: the raw form is already in the composite stream; it only
+            // needs delimiting.
             tr.step = "zusammengesetzte Glyphe";
             if !has_bbox { tr.step = "zusammengesetzt ohne bbox"; return None }
             let (x0, y0, x1, y1) = (bbox.i16()?, bbox.i16()?, bbox.i16()?, bbox.i16()?);
@@ -363,8 +348,8 @@ fn reconstruct_glyf(t: &[u8], tr: &mut Trace) -> Option<(Vec<u8>, Vec<u8>)> {
             emit_points(&mut glyf, &fl, &xs, &ys,
                         overlap.is_some_and(|o| o[gid >> 3] & (0x80 >> (gid & 7)) != 0));
         }
-        // Jede Glyphe endet auf einer geraden Adresse — `loca` im kurzen
-        // Format kann nur gerade Versaetze ausdruecken.
+        // Every glyph ends on an even offset; short-format `loca` can only
+        // express even offsets.
         while glyf.len() % 2 != 0 { glyf.push(0); }
         offsets.push(glyf.len() as u32);
     }
@@ -391,8 +376,8 @@ fn bounds(xs: &[i16], ys: &[i16]) -> (i16, i16, i16, i16) {
     if xs.is_empty() { (0, 0, 0, 0) } else { b }
 }
 
-/// Die Punkte einer einfachen Glyphe aus der Dreiergruppen-Kodierung
-/// (WOFF2 §5.2). Liefert (Auf-der-Kurve-Fahnen, x, y) in ABSOLUTEN Koordinaten.
+/// The points of a simple glyph from the triplet encoding (WOFF2 §5.2).
+/// Returns (on-curve flags, x, y) in absolute coordinates.
 fn triplets(flags: &mut Reader, glyph: &mut Reader, n: usize)
     -> Option<(Vec<bool>, Vec<i16>, Vec<i16>)> {
     let sign = |f: u8, v: i32| if f & 1 != 0 { v } else { -v };
@@ -440,20 +425,15 @@ fn triplets(flags: &mut Reader, glyph: &mut Reader, n: usize)
     Some((on, xs, ys))
 }
 
-/// Die Punkte als TrueType schreiben — in der KOMPAKTEN Form.
-///
-/// Der erste Entwurf schrieb jede Fahne einzeln und jede Differenz als 16
-/// Bit. Derselbe Umriss, aber ein Drittel groesser — und genau daran ist die
-/// Symbolschrift gescheitert: ihr `loca` steht im KURZEN Format, das nur
-/// gerade Versaetze bis 128 KB ausdruecken kann, und die aufgeblaehte Tabelle
-/// lief darueber. Eine Abkuerzung im Format ist eben keine Abkuerzung
-/// ([[feedback_a_workaround_is_the_wrong_answer_to_a_missing_capability]]).
+/// Write the points as TrueType, in the compact form (repeated flags, short
+/// deltas). A naive encoding is about a third larger, which can push a
+/// short-format `loca` past its 128 KB limit.
 fn emit_points(out: &mut Vec<u8>, on: &[bool], xs: &[i16], ys: &[i16], overlap: bool) {
     const ON_CURVE: u8 = 0x01;
     const X_SHORT: u8 = 0x02;
     const Y_SHORT: u8 = 0x04;
     const REPEAT: u8 = 0x08;
-    const X_SAME: u8 = 0x10;   // bei X_SHORT: Vorzeichen, sonst „unveraendert"
+    const X_SAME: u8 = 0x10;   // with X_SHORT: sign, otherwise "unchanged"
     const Y_SAME: u8 = 0x20;
     const OVERLAP: u8 = 0x40;
 
@@ -468,7 +448,7 @@ fn emit_points(out: &mut Vec<u8>, on: &[bool], xs: &[i16], ys: &[i16], overlap: 
         px = xs[i] as i32;
         py = ys[i] as i32;
         let mut f = if on[i] { ON_CURVE } else { 0 };
-        // OVERLAP_SIMPLE gehoert laut Spezifikation auf den ERSTEN Punkt.
+        // Per the spec OVERLAP_SIMPLE belongs on the first point.
         if i == 0 && overlap { f |= OVERLAP; }
         if dx == 0 {
             f |= X_SAME;
@@ -490,8 +470,7 @@ fn emit_points(out: &mut Vec<u8>, on: &[bool], xs: &[i16], ys: &[i16], overlap: 
         }
         flags.push(f);
     }
-    // Gleiche Fahnen zusammenfassen. Der Zaehler ist ein Byte, also hoechstens
-    // 255 Wiederholungen je Lauf.
+    // Merge equal flags. The repeat count is one byte, so at most 255 per run.
     let mut i = 0;
     while i < flags.len() {
         let f = flags[i];

@@ -1,26 +1,22 @@
-//! Die benannten Zeichenverweise von HTML (WHATWG §13.5) — ALLE.
+//! HTML's named character references (WHATWG §13.5), all of them.
 //!
-//! **Erzeugt, nicht getippt**, aus `https://html.spec.whatwg.org/entities.json`.
-//! Die Liste ist abgeschlossen und normiert; eine handverlesene Auswahl waere
-//! eine Schaetzung darueber, was eine Seite schreiben darf
-//! ([[feedback_invented_limits]]). Vorher kannte beak fuenfzehn Namen, und
-//! jeder andere stand als Text auf der Seite: DuckDuckGos Vorlage fuer
-//! „Searches related to" schreibt `&ZeroWidthSpace;`, und das erschien zehnmal
-//! woertlich in der Randspalte.
+//! Generated, not hand-written, from `https://html.spec.whatwg.org/entities.json`.
+//! The list is closed and standardized; a hand-picked subset would be a guess
+//! at what a page may write.
 //!
-//! Zwei Tabellen, weil die Spezifikation zwei Faelle kennt:
-//! * `NAMED` — mit `;`, 2125 Eintraege. Der Normalfall.
-//! * `LEGACY` — die 106 Namen, die AUCH ohne `;` gelten (`&copy 2026`).
-//!   Nach Laenge absteigend sortiert: es gilt die LAENGSTE Uebereinstimmung.
+//! Two tables, because the spec has two cases:
+//! * `NAMED` — with `;`, 2125 entries. The normal case.
+//! * `LEGACY` — the 106 names that also apply without `;` (`&copy 2026`).
+//!   Sorted by length descending: the longest match wins.
 //!
-//! Ein Ersatz kann ZWEI Codepunkte haben (93 Namen, z. B. `&NotEqualTilde;`
-//! = `\u{2242}\u{338}`), deshalb steht rechts eine Zeichenkette und kein `char`.
+//! A replacement can have two code points (e.g. `&NotEqualTilde;` =
+//! `\u{2242}\u{338}`), so the value is a string, not a `char`.
 
-/// Der laengste Name in `NAMED` (31 Zeichen) — die Abbruchgrenze des
-/// Lesers. Ohne sie liest er bei einem `&` ohne `;` beliebig weit.
+/// The longest name in `NAMED` (31 characters), the reader's stop limit.
+/// Without it a `&` without `;` would be read arbitrarily far.
 pub const MAX_NAME: usize = 31;
 
-/// Nach Namen sortiert; `lookup` sucht binaer.
+/// Sorted by name; `lookup` searches binary.
 static NAMED: &[(&str, &str)] = &[
     ("AElig", "\u{c6}"), ("AMP", "&"), ("Aacute", "\u{c1}"), ("Abreve", "\u{102}"),
     ("Acirc", "\u{c2}"), ("Acy", "\u{410}"), ("Afr", "\u{1d504}"), ("Agrave", "\u{c0}"),
@@ -556,8 +552,8 @@ static NAMED: &[(&str, &str)] = &[
     ("zwnj", "\u{200c}"),
 ];
 
-/// Die Altlast: gueltig auch OHNE `;`. Nach Laenge absteigend, damit die
-/// erste Uebereinstimmung die laengste ist.
+/// Legacy names, valid also without `;`. Sorted by length descending, so
+/// the first match is the longest.
 static LEGACY: &[(&str, &str)] = &[
     ("Aacute", "\u{c1}"), ("Agrave", "\u{c0}"), ("Atilde", "\u{c3}"), ("Ccedil", "\u{c7}"),
     ("Eacute", "\u{c9}"), ("Egrave", "\u{c8}"), ("Iacute", "\u{cd}"), ("Igrave", "\u{cc}"),
@@ -588,14 +584,14 @@ static LEGACY: &[(&str, &str)] = &[
     ("gt", ">"), ("lt", "<"),
 ];
 
-/// Der Ersatz fuer `&name;`. Gross- und Kleinschreibung zaehlt: `&Beta;` und
-/// `&beta;` sind zwei verschiedene Zeichen.
+/// The replacement for `&name;`. Case matters: `&Beta;` and `&beta;` are
+/// two different characters.
 pub fn lookup(name: &str) -> Option<&'static str> {
     NAMED.binary_search_by(|(n, _)| n.cmp(&name)).ok().map(|k| NAMED[k].1)
 }
 
-/// Die laengste Altlast-Uebereinstimmung am Anfang von `s` (ohne `&`).
-/// Liefert `(Ersatz, wieviele Bytes der Name lang war)`.
+/// The longest legacy match at the start of `s` (without the `&`).
+/// Returns `(replacement, length of the name in bytes)`.
 pub fn longest_legacy(s: &str) -> Option<(&'static str, usize)> {
     LEGACY.iter().find(|(n, _)| s.starts_with(*n)).map(|(n, c)| (*c, n.len()))
 }
@@ -606,20 +602,20 @@ mod tests {
     fn die_tabelle_ist_sortiert_und_vollstaendig() {
         assert_eq!(super::NAMED.len(), 2125);
         assert!(super::NAMED.windows(2).all(|w| w[0].0 < w[1].0), "nicht sortiert");
-        // Die eine, an der DuckDuckGos Randspalte haengt.
+        // A name outside the common handful.
         assert_eq!(super::lookup("ZeroWidthSpace"), Some("\u{200b}"));
         assert_eq!(super::lookup("times"), Some("\u{d7}"));
         assert_eq!(super::lookup("nbsp"), Some("\u{a0}"));
-        // Zwei Codepunkte auf der rechten Seite.
+        // Two code points on the right-hand side.
         assert_eq!(super::lookup("NotEqualTilde"), Some("\u{2242}\u{338}"));
-        // Gross/klein sind zwei Zeichen, kein Schreibfehler.
+        // Upper and lower case are two characters, not a typo.
         assert_ne!(super::lookup("Beta"), super::lookup("beta"));
         assert_eq!(super::lookup("gibtesnicht"), None);
     }
 
     #[test]
     fn die_altlast_nimmt_die_laengste() {
-        // `&notin` waere `\u{ac}in`, wenn `not` zuerst traefe.
+        // `&notin` would be `\u{ac}in` if `not` matched first.
         assert_eq!(super::longest_legacy("not;"), Some(("\u{ac}", 3)));
         assert_eq!(super::longest_legacy("copy 2026"), Some(("\u{a9}", 4)));
         assert_eq!(super::longest_legacy("xyz"), None);
