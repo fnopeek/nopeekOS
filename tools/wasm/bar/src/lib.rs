@@ -1,4 +1,4 @@
-//! bar — top status status bar, a strut panel rendered via the widget ABI.
+//! bar — top status bar, a strut panel rendered via the widget ABI.
 //!
 //! Declares itself a top-edge strut panel (`npk_window_set_panel`); the
 //! compositor positions it into the bar band and draws it with the same
@@ -67,71 +67,58 @@ const VOL_OPEN: u32 = 90_002;
 /// from it, so text and icons are capped to what fits inside: turning
 /// them up must never push the bar taller.
 const BAND_H: u16 = 24;
-/// Text px in the bar. Bigger than `TextStyle::Body` (13) — at bar
-/// distance 13 reads small, and 15 still leaves 6 px of band.
+/// Text px in the bar. Bigger than `TextStyle::Body` (13), which reads
+/// small at bar distance; 15 still leaves 6 px of band.
 const FONT_DEFAULT: u16 = 15;
 const FONT_MIN: u16 = 9;
 const FONT_MAX: u16 = 18;      // line height at 18 ≈ 22 px < BAND_H
-/// Icon px in the bar. **Der Atlas fuehrt 16, 24, 32, 48, 64 — sonst
-/// nichts** (aus `release/assets/phosphor.atlas` gelesen, nicht geraten).
-/// Jede andere Zahl holt die naechstgroessere und laesst sie vom Kasten-
-/// filter verkleinern: 18 kam aus dem 24er auf **0,75x**, und eine
-/// Flaechenmittelung eines 1,5 px breiten Phosphor-Strichs auf 0,75 IST
-/// unscharf. Der Kommentar hier nannte den Weg vorher und zog den Schluss
-/// nicht. **16 ist unter 24 das einzige Mass mit 1:1-Blit**, und es macht
-/// den Lautsprecher zugleich kleiner (gemessen 17 px Tinte bei 18, die
-/// anderen Symbole 15 — das Sprechersymbol ist schlicht breiter gebaut).
+/// Icon px in the bar. The icon atlas holds 16, 24, 32, 48 and 64 px; any
+/// other size is downscaled from the next larger one, and area-averaging a
+/// 1.5 px Phosphor stroke to 0.75x blurs it. 16 is the only size below 24
+/// with a 1:1 blit.
 const ICON_DEFAULT: u16 = 16;
-const ICON_MIN: u16 = 12;      // nicht im Atlas → wird verkleinert
+const ICON_MIN: u16 = 12;      // not in the atlas → downscaled
 const ICON_MAX: u16 = 20;      // 20 + the readout's 4 px padding = BAND_H
-/// Minimum width of a trailing icon cell. Sie steht NUR in `tray_cell`,
-/// darum weitet sie die Symbole rechts, ohne das 40-px-Raster der
-/// Desktops (`WS_W` + Zonenabstand) anzufassen.
+/// Minimum width of a trailing icon cell. Used only in `tray_cell`, so it
+/// widens the right-hand icons without touching the 40 px grid of the
+/// workspaces (`WS_W` + zone spacing).
 const CELL_W: u16 = 30;
-/// Breite der Trennstrich-Zelle. Genau die 16 px, die vorher der leere
-/// Platz hatte: der Abstand, der einen Fehlklick verhindert, bleibt
-/// derselbe — nur steht jetzt ein Strich in seiner MITTE, statt dass er
-/// leer ist. Mit `CELL_W` waere Kamera↔Ausschalter von 28 auf 48 px
-/// gegangen, und das war nicht gefragt.
+/// Width of the separator cell: wide enough to keep a misclick off the
+/// neighbouring button, with the hairline centred in it.
 const SEP_W: u16 = 16;
-/// Corner radius of those cells. Bleibt klein: ein Tray-Icon ist
-/// quadratisch, und `Pill` machte daraus einen KREIS.
+/// Corner radius of those cells. Kept small: a tray icon is square, and
+/// `Pill` would turn it into a circle.
 const CELL_RADIUS: u8 = 6;
-/// Breite einer Desktop-Zelle. Sie ist groesser als `CELL_W`, und das ist
-/// der ganze Unterschied zwischen einer Pille und einem Kreis: der
-/// Rasterer klemmt `Pill` auf `min(w/2, h/2)`, bei 24 px Bandhoehe also
-/// auf 12. Was davon als GERADE Strecke uebrigbleibt, macht die Form —
-/// 26 px lassen 2 px (ein Kreis), 38 px lassen 14 px (eine Pille).
+/// Width of a workspace cell. Larger than `CELL_W`, and that is the whole
+/// difference between a pill and a circle: the rasterizer clamps `Pill` to
+/// `min(w/2, h/2)`, i.e. 12 at a 24 px band. What remains as a straight
+/// run makes the shape — 26 px leave 2 px (a circle), 38 px leave 14 px
+/// (a pill).
 const WS_W: u16 = 38;
-// KEIN eigener Rand hier. Der Compositor setzt die Bar selbst als
-// schwebende Pille: `set_bar_panel` schreibt `win.x = margin`,
-// `win.width = screen_w - 2*margin` mit `shade.bar_margin` (Vorgabe 6) —
-// DERSELBE Rand, mit dem die Kacheln liegen. Wer hier noch einmal
-// polstert, macht die Bar schmaler als die Fenster; genau das ist in
-// 0.9.0 passiert.
+// No margin of our own here. The compositor places the bar as a floating
+// pill itself: `set_bar_panel` sets `win.x = margin` and
+// `win.width = screen_w - 2*margin` with `shade.bar_margin`, the same
+// margin the tiles use. Padding again here would make the bar narrower
+// than the windows.
 
-/// Einzug VOR der ersten Desktop-Zelle, als unsichtbare Marke.
+/// Indent before the first workspace cell, as an invisible mark.
 ///
-/// Gerechnet, nicht gesetzt: die Karte polstert 4, die Zeile setzt
-/// zwischen Marke und erster Zelle ihre eigenen `Spacing::Xxs` = 2, also
-/// 4 + 6 + 2 = **12 px** bis zur „1" — dieselben 12, die die Ablage im
-/// Dock innen laesst, damit die zwei Pillen gleich aussehen.
-///
-/// Eine unsichtbare Marke und nicht `PaddingXY`, weil das links UND
-/// rechts polstert; hier soll nur links etwas passieren.
+/// Computed, not chosen: the card pads 4 and the row adds its own
+/// `Spacing::Xxs` = 2 between mark and first cell, so 4 + 6 + 2 = 12 px
+/// to the "1" — the same 12 the dock's shelf leaves inside, so the two
+/// pills look alike. A mark rather than `PaddingXY`, which would pad both
+/// sides.
 const WS_INDENT: u16 = 6;
-/// Hoehe des Trennstrichs. Seine BREITE ist keine eigene Zahl: er sitzt
-/// in einer Zelle, die genau so breit ist wie eine Arbeitsflaeche —
-/// siehe das Segment „title".
+/// Height of the separator. Its width is not a number of its own: it sits
+/// in a cell exactly as wide as a workspace — see the "title" segment.
 const SEP_H: u16 = 14;
-/// Eckradius der Desktop-Zellen: ganz rund.
+/// Corner radius of the workspace cells: fully round.
 ///
-/// Sie sitzen in der Karte, die selbst eine Pille ist (36 px hoch →
-/// Radius 18), mit 4 px Polsterung dazwischen. Konzentrisch waeren
-/// 18 − 4 = 14; eine 38x24-Zelle bekommt 12, ist also zwei Pixel ENGER
-/// als der Bogen ueber ihr. Das ist die sichere Richtung — zu weit waere
-/// der Fall, in dem die Ecke schneidet. Deshalb braucht die Bar keinen
-/// waagrechten Zuschlag, anders als die Ablage im Dock.
+/// They sit inside the card, itself a pill (36 px tall → radius 18), with
+/// 4 px padding between. Concentric would be 18 − 4 = 14; a 38x24 cell gets
+/// 12, two pixels tighter than the arc above it. That is the safe direction
+/// — too wide is the case where the corner cuts — so the bar needs no
+/// horizontal allowance, unlike the dock's shelf.
 const WS_RADIUS: u8 = Radius::Pill as u8;
 
 // ── Bump allocator with a reset mark ─────────────────────────────────
@@ -185,10 +172,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         log(loc.file());
         log(u32_str(loc.line()));
     }
-    // Trap — do NOT `loop {}`. A wasm `unreachable` makes `_start`'s host call
+    // Trap — do not `loop {}`. A wasm `unreachable` makes `_start`'s host call
     // return Err, so the kernel tears this instance down and frees its worker
-    // core. A busy loop pins the cooperative fiber forever → the whole core
-    // pegs at 100% (the "core spins, never halts" bug). Clean death > spin.
+    // core. A busy loop pins the cooperative fiber forever and pegs the whole
+    // core at 100%. Clean death beats a spin.
     core::arch::wasm32::unreachable()
 }
 
@@ -256,7 +243,7 @@ fn read_segments() -> Segments {
 
 // ── Config: sizing ───────────────────────────────────────────────────
 // Same file, two more lines: "font: 15", "icon: 18". Kept in statics and
-// re-read every few seconds, so tuning them is edit-and-look — no heap
+// re-read on config change, so tuning them is edit-and-look — no heap
 // involved, which is what lets this run above the bump-allocator mark.
 static mut FONT_PX: u16 = FONT_DEFAULT;
 static mut ICON_PX: u16 = ICON_DEFAULT;
@@ -470,8 +457,8 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     if !workspace_occupied(i) {
                         mods.push(Modifier::Tint(Token::OnSurfaceFaint));
                     }
-                    // Dieselbe Form wie die Zelle: ein Hover-Rechteck mit
-                    // anderem Radius ist der Fall, der auffaellt.
+                    // Same shape as the cell: a hover rectangle with a different radius
+                    // is the kind of thing that stands out.
                     mods.push(Modifier::Hover(alloc::vec![
                         Modifier::Background(Token::SurfaceHover),
                         Modifier::Rounded(WS_RADIUS),
@@ -494,29 +481,14 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         "title" => {
             if st.title.is_empty() { Vec::new() }
             else {
-                // `1 2 3 4 (5) | (6) Appname` — und das RASTER ist das
-                // Mittel, nicht ein ausbalanciertes Paar Abstaende.
+                // `1 2 3 4 (5) | (6) Appname` — the grid does the spacing, not a
+                // balanced pair of gaps.
                 //
-                // Zuerst stand hier eine Polsterung von einer Zellbreite.
-                // Die stimmte im Abstand und nicht in der Lage: sie setzt
-                // den Strich ans ENDE des Platzes (5) statt in seine
-                // Mitte, gemessen 19,5 px zu weit rechts — eine halbe
-                // Zelle.
-                //
-                // Jetzt bekommt er die Zelle wirklich: ein Kasten von
-                // `WS_W`, der Strich darin zwischen zwei Spreizern, also
-                // mittig. Damit liegt alles auf demselben 40er-Raster wie
-                // die Ziffern (`WS_W` + Zonenabstand), und keine Zahl
-                // davon ist von Hand abgestimmt.
-                //
-                // Und **weil** der Strich in SEINER Zelle mittig sitzt,
-                // ist der Abstand nach beiden Seiten von selbst gleich:
-                // bis zur „4" ist es eine halbe Zelle plus Zonenabstand,
-                // bis zur Anwendung dasselbe — 21,5 px und 21,5 px. Der
-                // leere Platz (6) aus Florians erster Skizze stand
-                // zwischendrin und machte daraus 21,5 gegen 61,5; er ist
-                // deshalb weg. Symmetrie ist hier eine Eigenschaft der
-                // Konstruktion und nicht eine abgestimmte Zahl.
+                // The separator gets a real cell: a box of `WS_W` with the
+                // hairline between two spacers, so it is centred. Everything then
+                // sits on the same 40 px grid as the digits (`WS_W` + zone
+                // spacing), and because the hairline is centred in its cell the
+                // gap to either side is equal by construction, not by tuning.
                 alloc::vec![
                     Widget::Row {
                         children: alloc::vec![
@@ -534,29 +506,16 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     },
                     Widget::Row {
                         children: alloc::vec![
-                            // Das Symbol steht MITTIG in seiner Zelle, wie
-                            // eine Ziffer in ihrer.
+                            // Centre the icon in its cell, like a digit in its own.
                             //
-                            // Ohne das klebt es am Trennstrich, und zwar
-                            // sichtbar: die Kaesten sind zwar symmetrisch
-                            // (21,5 px links wie rechts), aber die „4" ist
-                            // eine 6-px-Ziffer in der MITTE einer 38-px-
-                            // Zelle — rechts von ihr stehen 17 px leere
-                            // Zelle. Das Symbol dagegen faengt sofort an
-                            // seiner Kastenkante an. Gemessen: 38,5 px
-                            // Tinte-zu-Tinte auf der einen Seite, 21,5 auf
-                            // der anderen.
+                            // Without this it sticks to the separator: a digit is a narrow
+                            // glyph in the middle of a 38 px cell, while the icon starts at
+                            // its box edge. With the lead-in its centre lands on the centre
+                            // of cell 6, keeping everything on the same 40 px rhythm.
                             //
-                            // Mit dem Vorlauf sitzt sein Mittelpunkt auf
-                            // dem Mittelpunkt von Zelle 6, und damit
-                            // stehen alle im selben 40er-Takt:
-                            // 36,5 · 76,5 · 116,5 · 156,5 · 196,5 · 236,5.
-                            //
-                            // Die Breite ist gerechnet, nicht gesetzt: die
-                            // halbe Restzelle minus den Abstand, den die
-                            // Zeile ohnehin zwischen Marke und Symbol
-                            // setzt. Sie folgt damit `icon_px()`, das aus
-                            // der Konfiguration kommt.
+                            // The width is computed: half the remaining cell minus the gap
+                            // the row already sets between mark and icon. It follows
+                            // `icon_px()`, which comes from the config.
                             prefab::mark(
                                 (WS_W.saturating_sub(icon_px()) / 2)
                                     .saturating_sub(Spacing::Sm.as_u16()),
@@ -606,13 +565,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
         "screenshot" => alloc::vec![
             tray_cell(IconId::Camera, Some(ActionId(SHOT)), Token::OnSurfaceMuted)
         ],
-        // Trennstrich vor dem Ausschalter, in SEINER eigenen Zelle —
-        // dieselbe Bauweise wie der Strich zwischen Desktops und Anwendung
-        // (0.9.3). Weil er in der Zelle mittig sitzt, ist der Abstand zur
-        // Kamera und zum Ausschalter von selbst gleich; keine der Zahlen
-        // ist von Hand abgestimmt. Die Zelle haelt zugleich den Abstand,
-        // den vorher der leere Platz hielt: ein Klick auf die Kamera darf
-        // nicht auf dem Ausschalter landen.
+        // Separator before the power button, in its own cell — built like
+        // the one between workspaces and app. Centred in the cell, so the
+        // gap to the camera and to the power button is equal by
+        // construction. The cell also keeps a click on the camera from
+        // landing on the power button.
         "sep" => alloc::vec![Widget::Row {
             children: alloc::vec![
                 Widget::Spacer { flex: 1 },
@@ -627,9 +584,9 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 Modifier::MaxHeight(BAND_H),
             ],
         }],
-        // Leerer Platz fester Breite. Steht nicht mehr in der Vorgabe —
-        // "sep" hat ihn abgeloest —, bleibt aber, damit eine bestehende
-        // `sys/config/bar` ihn weiter nennen darf.
+        // Fixed-width empty space. No longer in the default ("sep"
+        // replaced it), kept so an existing `sys/config/bar` may still
+        // name it.
         "gap" => alloc::vec![Widget::Text {
             content: String::new(),
             style: TextStyle::Body,
@@ -653,10 +610,10 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
     }
 }
 
-/// A zone → a plain Row of its segments. The chrome is no longer per
-/// zone: the design has ONE bar card holding all three (docs/spec/UI_REFRESH.md
-/// §4). Empty zones collapse to a zero spacer so the left/center/right
-/// structure stays intact.
+/// A zone → a plain Row of its segments. The chrome is not per zone:
+/// one bar card holds all three (docs/spec/UI_REFRESH.md §4). Empty
+/// zones collapse to a zero spacer so the left/center/right structure
+/// stays intact.
 fn zone(names: &[String], st: &BarState) -> Widget {
     let mut kids = Vec::new();
     for n in names { kids.extend(segment_widgets(n, st)); }
@@ -679,7 +636,7 @@ fn zone(names: &[String], st: &BarState) -> Widget {
 }
 
 fn build_tree(seg: &Segments, st: &BarState) -> Widget {
-    // Two overlaid full-width layers so the clock is centred on the SCREEN,
+    // Two overlaid full-width layers so the clock is centred on the screen,
     // not between the (asymmetric) side groups: the sides layer pins left to
     // the start + right to the end; the centre layer centres the clock with
     // equal flex spacers.
@@ -711,13 +668,13 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
         children: alloc::vec![sides, center],
         modifiers: alloc::vec![
             Modifier::Background(Token::SurfaceElevated),
-            // Ganz rund. Der Rasterer klemmt `Pill` auf `min(w/2, h/2)`.
-            // Die Karte fuellt das Fenster, und dessen Hoehe setzt der
-            // Compositor auf `pill_h` = das `h` aus `set_panel`, also 36
-            // → Radius 18, echte Halbkreise an beiden Enden.
+            // Fully round. The rasterizer clamps `Pill` to `min(w/2, h/2)`.
+            // The card fills the window, whose height the compositor sets to
+            // `pill_h` = the `h` from `set_panel`, i.e. 36 → radius 18, true
+            // semicircles at both ends.
             //
-            // Rahmen und Fuellung tragen DENSELBEN Wert. Stuenden dort
-            // zwei, liefe der 1-px-Strich neben seiner eigenen Flaeche.
+            // Border and fill share the same value; two values would leave
+            // the 1 px stroke beside its own area.
             Modifier::Border { token: Token::Border, width: 1, radius: Radius::Pill.as_u8() },
             Modifier::Rounded(Radius::Pill.as_u8()),
             Modifier::Padding(Padding::Xs.as_u16()),
@@ -732,12 +689,10 @@ fn state_changed() -> Option<usize> {
     let n = unsafe { npk_bar_state(p as i32, STATE_MAX as i32) };
     if n <= 0 { return None; }
     let n = n as usize;
-    // Poll battery too — it changes slowly, so throttle the SMBus reads to
-    // roughly every 5 s (loop tick is 300 ms) and fold the result into the
-    // same change-gate (a % or charge-state flip forces a re-commit).
-    // The bar only wakes when something changed (or the minute turned), so
-    // no throttle: on a machine with the AML driver this is a cached value,
-    // and the kernel wakes us when it moves.
+    // Battery and volume fold into the same change gate. The bar only
+    // wakes when something changed (or the minute turned), so no
+    // throttle: with the AML driver the battery is a cached value, and
+    // the kernel wakes us when it moves.
     let bat = unsafe { npk_battery() };
     let vol = unsafe { npk_audio_get_volume() };
     let cur = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
@@ -749,7 +704,7 @@ fn state_changed() -> Option<usize> {
     let bat_same = bat == unsafe { LAST_BAT };
     let vol_same = vol == unsafe { LAST_VOL };
     // The window list feeds the occupied-workspace hints, and a window
-    // opening on ANOTHER workspace leaves bar_state untouched — so it
+    // opening on another workspace leaves bar_state untouched — so it
     // needs its own vote in the change gate.
     let wins_changed = refresh_windows();
     if last == Some(cur) && bat_same && vol_same && !wins_changed { return None; }
@@ -791,8 +746,8 @@ fn launch(app: &str, arg: &str) {
 
 fn handle(ev: Event) {
     match ev {
-        // Left-click. Screenshot icon → region select (slice ③; falls
-        // back to full for now). Power → off. Otherwise a workspace pill.
+        // Left-click. Screenshot icon → region select. Power → off.
+        // Otherwise a workspace pill.
         Event::Action(ActionId(id)) => {
             if id == SHOT {
                 launch("snap", "region");
@@ -839,13 +794,10 @@ pub extern "C" fn _start() {
         rebuild_and_commit(&seg, len);
     }
 
-    // **Wait for a change, don't poll for one.** Until 0.10.0 the bar woke
-    // every 300 ms and asked whether the clock, the window list, the battery
-    // or the volume had moved — 200 times a minute for one minute change.
-    // Now the kernel wakes it: WAIT_INPUT for a click, WAIT_STATE when a
-    // watched topic changes (windows, battery, volume, a config file), and
-    // the deadline is the next full minute for the clock.
-    // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+    // Wait for a change, don't poll for one. The kernel wakes the bar:
+    // WAIT_INPUT for a click, WAIT_STATE when a watched topic changes
+    // (windows, battery, volume, a config file), and the deadline is the
+    // next full minute for the clock. docs/plan/CORES_AND_EVENTS.md.
     const WAIT_INPUT: i32 = 1;
     const WAIT_STATE: i32 = 32;
     let mut fired = 0;
