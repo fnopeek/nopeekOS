@@ -154,71 +154,86 @@ pub enum Token {
 
 // ── Icons ─────────────────────────────────────────────────────────────
 
-/// Curated icon identifier. Atlas rasterized at build time (P10.9).
-/// `#[repr(u16)]` — values frozen. Adding new icons appends.
+/// Icon identifier — an index into the Phosphor atlas (P10.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct IconId(pub u16);
+
+/// The named icons. `IconId` is a NUMBER, not a closed enum: a module that
+/// only passes an icon on (the dock showing an app's icon) must not have to
+/// know every icon there is — with an enum, one new icon meant rebuilding
+/// dock, drun and bar, or they showed a blank file instead. The atlas is
+/// looked up by number, and a number it lacks draws nothing.
 ///
-/// P10.0 scaffolding: only `None` placeholder + a few core variants from
-/// the file-browser example. Real atlas populated in P10.9.
-#[repr(u16)]
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum IconId {
-    None                = 0,
-    Folder              = 1,
-    File                = 2,
-    ArrowLeft           = 3,
-    ArrowRight          = 4,
-    ArrowUp             = 5,
-    ArrowDown           = 6,
-    Home                = 7,
-    Download            = 8,
-    // P10.9 additions — Phosphor Regular subset
-    MagnifyingGlass     = 9,
-    X                   = 10,
-    Check               = 11,
-    Gear                = 12,
-    Power               = 13,
-    Lock                = 14,
-    Terminal            = 15,
-    Trash               = 16,
-    DotsThreeVertical   = 17,
-    List                = 18,
-    // P10.11 file-browser additions (loft)
-    Monitor             = 19,
-    FileText            = 20,
-    FolderOpen          = 21,
-    Image               = 22,
-    HardDrives          = 23,
-    Code                = 24,
-    Folders             = 25,
-    CaretRight          = 26,
-    ArrowClockwise      = 27,
-    Globe               = 28,
-    Camera              = 29,
-    // Battery states (bar plugin) — Phosphor horizontal set.
-    BatteryEmpty        = 30,
-    BatteryLow          = 31,
-    BatteryMedium       = 32,
-    BatteryHigh         = 33,
-    BatteryFull         = 34,
-    BatteryCharging     = 35,
-    BatteryWarning      = 36,
-    Plug                = 37,
-    SpeakerHigh         = 38,
-    SpeakerLow          = 39,
-    SpeakerX            = 40,
-    Minus               = 41,
-    Plus                = 42,
-    Bird                = 43,
-    MusicNotes          = 44,
-    Play                = 45,
-    Pause               = 46,
-    SkipBack            = 47,
-    SkipForward         = 48,
-    FileAudio           = 49,
+/// Wire-identical to the enum this replaced: postcard writes a variant
+/// index and a `u16` as the same varint, and the numbers are the old
+/// discriminants. Values frozen; append only — and the atlas
+/// (`tools/regen-icons`) must carry every number named here.
+macro_rules! icon_ids {
+    ($($name:ident = $n:expr,)*) => {
+        #[allow(non_upper_case_globals)]
+        impl IconId {
+            $(pub const $name: IconId = IconId($n);)*
+            /// Every named icon, for tests and tooling.
+            pub const ALL: &'static [(&'static str, IconId)] =
+                &[$((stringify!($name), IconId($n)),)*];
+        }
+    };
+}
+
+icon_ids! {
+    None                  = 0,
+    Folder                = 1,
+    File                  = 2,
+    ArrowLeft             = 3,
+    ArrowRight            = 4,
+    ArrowUp               = 5,
+    ArrowDown             = 6,
+    Home                  = 7,
+    Download              = 8,
+    MagnifyingGlass       = 9,
+    X                     = 10,
+    Check                 = 11,
+    Gear                  = 12,
+    Power                 = 13,
+    Lock                  = 14,
+    Terminal              = 15,
+    Trash                 = 16,
+    DotsThreeVertical     = 17,
+    List                  = 18,
+    Monitor               = 19,
+    FileText              = 20,
+    FolderOpen            = 21,
+    Image                 = 22,
+    HardDrives            = 23,
+    Code                  = 24,
+    Folders               = 25,
+    CaretRight            = 26,
+    ArrowClockwise        = 27,
+    Globe                 = 28,
+    Camera                = 29,
+    BatteryEmpty          = 30,
+    BatteryLow            = 31,
+    BatteryMedium         = 32,
+    BatteryHigh           = 33,
+    BatteryFull           = 34,
+    BatteryCharging       = 35,
+    BatteryWarning        = 36,
+    Plug                  = 37,
+    SpeakerHigh           = 38,
+    SpeakerLow            = 39,
+    SpeakerX              = 40,
+    Minus                 = 41,
+    Plus                  = 42,
+    Bird                  = 43,
+    MusicNotes            = 44,
+    Play                  = 45,
+    Pause                 = 46,
+    SkipBack              = 47,
+    SkipForward           = 48,
+    FileAudio             = 49,
     ArrowCounterClockwise = 50,
-    PlayCircle          = 51,
-    // Appended only.
+    PlayCircle            = 51,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

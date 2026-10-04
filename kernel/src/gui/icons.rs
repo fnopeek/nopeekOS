@@ -96,12 +96,12 @@ pub fn init() {
 /// Returns None if atlas not loaded, icon not present, or requested
 /// size unreasonable.
 pub fn alpha_for(icon: IconId, size_px: u16) -> Option<(u16, Vec<u8>)> {
-    if icon as u16 == 0 { return None; }
+    if icon == IconId::None { return None; }
     let guard = ATLAS.lock();
     let atlas = guard.as_ref()?;
 
     // Find entry by id.
-    let entry = atlas.entries.iter().find(|e| e.id == icon as u16)?;
+    let entry = atlas.entries.iter().find(|e| e.id == icon.0)?;
 
     // Pick smallest atlas size >= requested, else largest available.
     let (idx, size) = best_size(&atlas.sizes, size_px)?;

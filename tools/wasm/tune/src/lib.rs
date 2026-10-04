@@ -873,12 +873,7 @@ fn empty_state(t: &Tune) -> Widget {
     if let Some(e) = t.error.as_ref() {
         children.push(Widget::Text { content: e.clone(), style: TextStyle::Muted, modifiers: Vec::new() });
     }
-    children.push(Widget::Button {
-        label: "Open file…".to_string(),
-        icon: IconId::FolderOpen,
-        on_click: ActionId(A_OPEN),
-        modifiers: alloc::vec![Modifier::Margin(Padding::Sm.as_u16())],
-    });
+    children.push(prefab::button("Open file…", prefab::ButtonStyle::Primary, ActionId(A_OPEN)));
     children.push(Widget::Spacer { flex: 1 });
     Widget::Column {
         children,

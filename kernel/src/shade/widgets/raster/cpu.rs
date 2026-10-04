@@ -118,7 +118,7 @@ impl Rasterizer for CpuRasterizer {
 
     fn icon(&mut self, t: &mut RasterTarget, id: IconId, size: u16, color: Token, p: Point) {
         // Skip None sentinel — caller asked for no icon.
-        if id as u16 == 0 { return; }
+        if id == IconId::None { return; }
         let (x, y) = window_to_target(t, p.x, p.y);
         let bgra = t.palette.colors[color as usize];
 

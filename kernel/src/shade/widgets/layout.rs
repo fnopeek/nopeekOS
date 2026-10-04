@@ -427,7 +427,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
                 ceil_u32(crate::gui::text::measure(label, TextStyle::Body))
             };
             let label_h = ceil_u32(crate::gui::text::line_height(TextStyle::Body));
-            let icon_slot = if !matches!(icon, IconId::None) { 16 + 4 } else { 0 };
+            let icon_slot = if *icon != IconId::None { 16 + 4 } else { 0 };
             Size {
                 w: icon_slot + label_w + 16,  // 8 px pad × 2
                 h: label_h.max(16) + 8,       // 4 px vertical pad × 2

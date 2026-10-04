@@ -592,7 +592,7 @@ fn paint_node_eff(
             let pad_y = 4i32;
             let mut x = rect.x + pad_x;
             use super::abi::IconId;
-            if !matches!(icon, IconId::None) {
+            if *icon != IconId::None {
                 rast.icon(target, *icon, 16, color, Point { x, y: rect.y + pad_y });
                 x += 20;
             }
