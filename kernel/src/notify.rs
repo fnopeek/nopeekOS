@@ -1,11 +1,9 @@
 //! Topics a module can watch instead of polling.
 //!
-//! The panels used to ask every few hundred milliseconds whether anything
-//! changed — the clock, the window list, the battery, the volume — and
-//! almost always nothing had. Here the SOURCE reports a change: whoever
-//! changes a topic calls `notify(topic)`, and every fiber that waits on it
-//! (`npk_wait` with `WAIT_STATE`) is signalled. `docs/plan/CORES_AND_EVENTS.md`
-//! §3.4 "Panels abonnieren statt abfragen".
+//! The source reports a change instead of panels polling for it: whoever
+//! changes a topic (window list, battery, volume, config) calls
+//! `notify(topic)`, and every fiber that waits on it (`npk_wait` with
+//! `WAIT_STATE`) is signalled.
 //!
 //! A subscription is a (waker, pending topics) slot. It is taken the first
 //! time a fiber waits and dropped when the fiber ends (`fiber::free_waker`

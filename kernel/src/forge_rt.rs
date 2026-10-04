@@ -1,17 +1,13 @@
 //! Address space and mappings for compiled modules.
 //!
-//! Two kinds of memory, and both are decisions rather than plumbing:
+//! Linear memory gets a reservation of 8 GiB plus a page, of which only the
+//! pages that exist are mapped. A wasm address is a u32 and a memory offset is
+//! a u32, so no access can reach past that range, which is why the generator
+//! emits no bounds check. The spare page is needed: the highest reachable
+//! address is `2^33-2`, and an eight-byte access there reaches `2^33+5`.
 //!
-//! **Linear memory** gets a reservation of 8 GiB plus a page, of which only
-//! the pages that exist are mapped. A wasm address is a u32 and a memory
-//! offset is a u32, so no access can reach past that range — which is why the
-//! generator emits no bounds check at all. The spare page is not slack: the
-//! highest reachable address is `2^33-2`, and an eight-byte access THERE
-//! reaches `2^33+5`.
-//!
-//! **Code** is mapped W^X — writable while it is being filled, executable
-//! afterwards, never both. A kernel that carries a code generator has to be
-//! able to say that much.
+//! Code is mapped W^X: writable while it is being filled, executable
+//! afterwards, never both.
 //!
 //! Everything lives above the identity-mapped first 64 GB, where nothing else
 //! claims addresses.
@@ -31,51 +27,34 @@ const INSTANCE_STRIDE: u64 = 16 * 1024 * 1024 * 1024;
 /// an eight-byte access at the very top needs.
 pub const MAX_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024 + 0x1000;
 
-/// Wieviel Arbeitsspeicher EIN Modul wirklich belegen darf.
+/// How much RAM one module may actually occupy.
 ///
-/// **`MAX_MEMORY_BYTES` ist die Adressreservierung, kein Deckel** — sie sagt,
-/// wie weit ein Platz reicht, nicht wieviel RAM er nehmen darf. Dazwischen
-/// stand bis hierher nichts: ein Modul wuchs, bis die MASCHINE leer war, und
-/// dann starb der Kernel an seiner eigenen naechsten Allokation. Gemessen am
-/// 2026-09-13 an DuckDuckGos Ergebnisseite — beak hielt dort 2 GB, weil `Rc`
-/// keine Ringe einsammelt und Reacts Fiberbaum einer ist. Im Log: Seitenfehler
-/// auf `0xfffffffffffffffd` (das ist `null - 3`, eine benutzte
-/// Fehlallokation), danach „capacity overflow" im Kernel, Halt.
-///
-/// **Ein Modul, das zuviel will, muss sterben; die Maschine nicht.** Das ist
-/// dieselbe Grenze wie jede andere in diesem System: die Sandbox darf nicht
-/// nach draussen wirken, und der Arbeitsspeicher der ganzen Maschine ist
-/// draussen.
-///
-/// Die Zahl steht ueber dem gemessenen Normalfall, nicht darunter
-/// ([[feedback_a_cap_set_from_a_guess_is_below_the_normal_case]]): eine
-/// gewoehnliche Seite haelt in beak 44 bis 90 MiB, und beak ist das
-/// hungrigste Modul, das es gibt. Ein Gigabyte ist das Zehnfache davon.
+/// `MAX_MEMORY_BYTES` is the address reservation, not a cap on RAM. Without
+/// this limit a module could grow until the machine is empty and the kernel
+/// fails its own next allocation. A module that wants too much must fail, not
+/// the machine: the machine's memory is outside the sandbox. The value is set
+/// well above the normal working set of the hungriest module.
 pub const MAX_INSTANCE_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Was der Kernel fuer sich behaelt. Ohne diese Reserve gibt er den letzten
-/// Rahmen an ein Modul und kann danach nicht einmal mehr die Absage
-/// aufschreiben — genau das ist am 2026-09-13 passiert.
+/// RAM the kernel keeps for itself. Without it, the last frame could go to a
+/// module and the kernel could not even log the refusal.
 pub const KERNEL_RESERVE_MB: usize = 96;
 
 const PAGE: u64 = 4096;
 
-/// Wieviele Plaetze es GIBT. Ein Platz ist `INSTANCE_STRIDE` breit, und
-/// darueber faengt der Code an — Platz 1024 laege GENAU auf `CODE_BASE`.
-/// Bis 0.117.0 stand hier kein Deckel: der 1025. Modullauf eines Bootes haette
-/// sein lineares Gedaechtnis ueber den Maschinencode gelegt.
+/// Number of instance slots. A slot is `INSTANCE_STRIDE` wide and code starts
+/// above them; slot 1024 would land exactly on `CODE_BASE`.
 const MAX_SLOTS: u64 = 1024;
 
-/// Hoechster je vergebener Platz. Die Marke, unter der `SLOT_FREE` gilt.
+/// High-water mark of handed-out slots; `SLOT_FREE` applies below it.
 static NEXT_SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Zurueckgegebene Plaetze, ein Bit je Platz (gesetzt = frei). Ein Feld statt
-/// einer Liste: die Rueckgabe passiert in `Drop`, und dort darf nichts
-/// allozieren.
+/// Returned slots, one bit per slot (set = free). A bitmap rather than a list
+/// because slots are returned in `Drop`, which must not allocate.
 static SLOT_FREE: [core::sync::atomic::AtomicU64; (MAX_SLOTS / 64) as usize] =
     [const { core::sync::atomic::AtomicU64::new(0) }; (MAX_SLOTS / 64) as usize];
 
-/// Einen Platz nehmen — erst einen zurueckgegebenen, sonst den naechsten.
+/// Take a slot: a returned one first, otherwise the next fresh one.
 fn take_slot() -> Option<u64> {
     use core::sync::atomic::Ordering::{AcqRel, Relaxed};
     for (w, cell) in SLOT_FREE.iter().enumerate() {
@@ -96,7 +75,7 @@ fn take_slot() -> Option<u64> {
     Some(s)
 }
 
-/// Einen Platz zurueckgeben.
+/// Return a slot.
 fn give_slot(s: u64) {
     if s >= MAX_SLOTS { return; }
     SLOT_FREE[(s / 64) as usize]
@@ -108,7 +87,7 @@ const CODE_BASE: u64 = REGION_BASE + 1024 * INSTANCE_STRIDE;
 static NEXT_CODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(CODE_BASE);
 
 pub struct Memory {
-    /// Der Platz in der Region — gehoert zurueckgegeben, wenn die Instanz geht.
+    /// Slot in the region; returned when the instance goes away.
     slot: u64,
     pub base: u64,
     /// Bytes currently readable.
@@ -120,8 +99,8 @@ fn map_range(at: u64, bytes: u64, flags: PageFlags) -> bool {
     let mut off = 0;
     while off < bytes {
         let Some(frame) = memory::allocate_frame() else {
-            // Die Haelfte, die schon steht, geht zurueck. Sonst kostet gerade
-            // der Fall „kein Speicher mehr" noch einmal Speicher.
+            // Release the part already mapped, so running out of memory
+            // does not leak memory too.
             unmap_range(at, off);
             return false;
         };
@@ -138,13 +117,7 @@ fn map_range(at: u64, bytes: u64, flags: PageFlags) -> bool {
     true
 }
 
-/// Abbildung loesen und die Rahmen zurueckgeben.
-///
-/// **Das Gegenstueck zu `map_range`, und bis 0.117.0 gab es keins.** Jeder
-/// Modullauf behielt sein lineares Gedaechtnis und seinen Maschinencode bis
-/// zum Neustart — bei beak 20 MB beim Start plus alles, was seine Halde
-/// waehrend eines Laufes dazunahm. Ein zweiter Start fand danach keine Rahmen
-/// mehr, und das Log sagte nur „Instanz liess sich nicht bauen".
+/// Unmap a range and return its frames. Counterpart of `map_range`.
 fn unmap_range(at: u64, bytes: u64) {
     let mut off = 0;
     while off < bytes {
@@ -159,7 +132,7 @@ impl Memory {
     /// Reserve an instance's address space and map its initial pages.
     ///
     /// Only the mapping is done here — the rest of the 8 GiB stays absent, and
-    /// that absence IS the bounds check.
+    /// that absence is the bounds check.
     pub fn new(initial_pages: u64) -> Option<Memory> {
         let slot = take_slot()?;
         let base = REGION_BASE + slot * INSTANCE_STRIDE;
@@ -176,11 +149,8 @@ impl Memory {
         Some(Memory { base, size, slot })
     }
 
-    // **Hier stand ein zweites `grow`.** Es hielt `self.size` richtig und
-    // wurde von NIEMANDEM gerufen; gewachsen ist die Instanz ueber
-    // `forge_rt::grow`, das nur den vmctx schreibt. Zwei Wege fuer dieselbe
-    // Groesse, und gepflegt hat sie der tote — deshalb gibt es jetzt nur noch
-    // einen, und `Drop for Instance` holt die Groesse dort ab, wo sie steht.
+    // Growth happens only through `forge_rt::grow`, which writes the vmctx;
+    // `Drop for Instance` copies the current size back before this drops.
 
     /// Does `addr` fall inside this instance's reservation? What a page-fault
     /// handler asks to tell a module's mistake from a kernel's.
@@ -190,12 +160,8 @@ impl Memory {
 }
 
 impl Drop for Memory {
-    /// **Die Seiten gehen zurueck — so viele, wie `self.size` sagt.**
-    ///
-    /// Und `self.size` ist NICHT von selbst der Stand von jetzt: `memory.grow`
-    /// laeuft im generierten Code und schreibt die neue Groesse in den vmctx,
-    /// nicht hierher. Wer sie aktuell haelt, ist `Drop for Instance` — dort
-    /// steht auch, was es gekostet hat, dass es die Zeile nicht gab.
+    /// Returns as many pages as `self.size` says. `memory.grow` writes the new
+    /// size to the vmctx, not here; `Drop for Instance` brings it up to date.
     fn drop(&mut self) {
         unmap_range(self.base, self.size);
         give_slot(self.slot);
@@ -247,14 +213,13 @@ impl Code {
         addr >= self.base && addr < self.base + self.len as u64
     }
 
-    /// So viele Bytes stehen wirklich — `map` rundet auf ganze Seiten auf.
+    /// Bytes actually mapped; `map` rounds up to whole pages.
     fn span(&self) -> u64 { ((self.len as u64) + PAGE - 1) & !(PAGE - 1) }
 }
 
 impl Drop for Code {
-    /// Auch der Maschinencode ist geliehen. Der Adressraum darueber wird
-    /// NICHT zurueckgedreht (`NEXT_CODE` laeuft weiter) — er ist 48 Bit breit
-    /// und kostet nichts; die Rahmen kosten.
+    /// Frees the frames. The address range is not reused (`NEXT_CODE` only
+    /// moves forward); address space is plentiful, frames are not.
     fn drop(&mut self) {
         unmap_range(self.base, self.span());
     }
@@ -346,20 +311,13 @@ unsafe extern "C" {
     pub fn forge_de_stub();
 }
 
-// ── ein Trap aus einer Host-Funktion heraus ───────────────────────────
+// ── trap from inside a host function ──────────────────────────────────
 //
-// Eine wasi-Funktion wie `proc_exit` DARF nicht zurueckkehren — auch bei
-// sauberem Ende nicht. Der Interpreter macht daraus ein `Err` und rollt ab;
-// erzeugter Code braucht denselben Weg, und den gibt es: die Trap-Routine des
-// Moduls stellt `rsp`/`rbp` wieder her und springt zum Eintritt zurueck,
-// wodurch jede Tiefe von wasm-Rahmen in vier Befehlen verschwindet.
-//
-// Sie braucht dafuer nur den vmctx-Zeiger — und den hat jede Host-Funktion in
-// `rdi`. Deshalb genuegt hier dieselbe Sequenz, statt r14 anzufassen.
-//
-// Der Host-Zwilling in `forge/harness` kann das NICHT: dort ist jeder Lauf ein
-// eigener Prozess, und `proc_exit` beendet ihn einfach. Im Kernel gibt es
-// nichts zu beenden, also muss abgerollt werden.
+// A wasi function like `proc_exit` must not return, even on a clean exit.
+// Generated code unwinds the same way its own traps do: restore `rsp`/`rbp`
+// from the vmctx and jump back to the entry, dropping any depth of wasm
+// frames. Only the vmctx pointer is needed, and every host function has it in
+// `rdi`, so r14 is not touched.
 core::arch::global_asm!(
     r#"
 .globl forge_host_trap
@@ -376,22 +334,21 @@ forge_host_trap:
 );
 
 unsafe extern "C" {
-    /// Verlaesst das Modul mit `code` als Trap-Grund. Kehrt nie zurueck.
+    /// Leaves the module with `code` as trap reason. Never returns.
     fn forge_host_trap(vm: *const u64, code: u64) -> !;
 }
 
-/// Aus einer Host-Funktion heraus den Lauf beenden.
+/// End the module run from inside a host function.
 ///
 /// # Safety
-/// `vm` muss der vmctx der GERADE laufenden Instanz sein — der Zeiger, den der
-/// Adapter als erstes Argument bekommen hat. Mit einem fremden vmctx springt
-/// das in einen Rahmen, den es nicht mehr gibt.
+/// `vm` must be the vmctx of the instance currently running, i.e. the pointer
+/// the adapter received as its first argument; any other vmctx jumps into a
+/// frame that no longer exists.
 ///
-/// Der Aufrufer darf nichts halten, was aufgeraeumt werden muss: hier wird
-/// kein Rust-Rahmen abgewickelt, kein `Drop` laeuft. Das ist dieselbe
-/// Zusicherung, unter der auch der `#PF`-Vorschalter arbeitet.
+/// The caller must hold nothing that needs cleanup: no Rust frame is unwound
+/// and no `Drop` runs. The `#PF` stub relies on the same guarantee.
 pub unsafe fn host_trap(vm: *const u64, code: u32) -> ! {
-    // SAFETY: an den Aufrufer weitergereicht, siehe oben.
+    // SAFETY: forwarded to the caller, see above.
     unsafe { forge_host_trap(vm, code as u64) }
 }
 
@@ -423,8 +380,8 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
                 new_pages, max_pages);
             return u32::MAX;
         }
-        // Der Deckel des MODULS, und darunter die Reserve der MASCHINE.
-        // Beides ist eine Absage an das Modul, keine Panik im Kernel.
+        // The per-module cap, then the machine-wide reserve. Both refuse the
+        // module rather than panic the kernel.
         if new_pages * 65536 > MAX_INSTANCE_BYTES {
             crate::kprintln!(
                 "[npk] forge: memory.grow abgelehnt — Modul-Deckel erreicht ({} MB von hoechstens {} MB)",
@@ -442,10 +399,9 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
         if delta > 0 {
             let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
             if !map_range(base + size, delta as u64 * 65536, flags) {
-                // **Ein „nein" ohne Grund kostet eine Stunde.** Das Modul
-                // meldet nur, dass `memory.grow` abgelehnt hat; ob die
-                // MASCHINE leer ist oder die Abbildung an dieser Adresse
-                // scheiterte, sieht man nur von hier aus.
+                // The module only sees that `memory.grow` failed; whether the
+                // machine is out of frames or the mapping failed is only
+                // visible here, so log it.
                 let (frames, mb) = crate::memory::stats();
                 crate::kprintln!(
                     "[npk] forge: memory.grow abgelehnt — {} Seiten gefragt, {} MB frei ({} Rahmen)",
@@ -611,8 +567,8 @@ impl Instance {
         self.unresolved
     }
 
-    /// Groesse der linearen Speichers in Bytes, wie sie gerade im vmctx steht.
-    /// Waechst mit `memory.grow`, also nach dem Lauf ein anderer Wert als davor.
+    /// Current linear memory size in bytes, as held in the vmctx. Changes with
+    /// `memory.grow`.
     pub fn memory_size(&self) -> u64 {
         self.ctx[vmctx::MEM_SIZE as usize / 8]
     }
@@ -646,37 +602,18 @@ impl Instance {
 }
 
 impl Drop for Instance {
-    /// **Was `memory.grow` dazugelegt hat, gehoert mit zurueck.**
-    ///
-    /// Der Wachstumspfad ist der GENERIERTE Code: er ruft `forge_rt::grow`,
-    /// und die schreibt die neue Groesse in den vmctx — nicht in das
-    /// `Memory`, das die Seiten spaeter wieder freigibt. `Memory::drop`
-    /// loeste deshalb genau die Abbildung, die beim START stand, und alles,
-    /// was die Halde des Moduls waehrend des Laufs dazunahm, blieb bis zum
-    /// Neustart liegen.
-    ///
-    /// Bei beak sind das je Sitzung schnell hundert Megabyte. Nach ein paar
-    /// besuchten Seiten fand das naechste `memory.grow` keine Rahmen mehr —
-    /// und beak starb an seiner ERSTEN Erweiterung, mit einer Halde, die noch
-    /// auf ihrer Startgroesse von 318 Seiten stand. Genau diese Zahl im Log
-    /// war der Hinweis: sie ist die Startgroesse aus dem Binaerbild, also war
-    /// nicht diese Sitzung zu gross, sondern die vorigen waren nicht weg.
-    ///
-    /// **Zwei Wege fuer dieselbe Groesse, und gepflegt hat sie der TOTE.**
-    /// `Memory::grow` hielt `self.size` richtig und wurde von niemandem
-    /// gerufen; er ist deshalb weg. Jetzt gibt es einen Weg zu wachsen und
-    /// eine Stelle, die die Groesse zurueckholt.
+    /// Pages added by `memory.grow` must be freed too. Generated code grows
+    /// through `forge_rt::grow`, which updates only the vmctx, so the current
+    /// size is copied into `Memory` before it drops.
     fn drop(&mut self) {
         if let Some(m) = &mut self.memory {
-            // Nie kleiner als beim Start und nie ueber die Reservierung
-            // hinaus: `unmap_range` laeuft Seite fuer Seite, und ein zu
-            // grosser Wert griffe in den Platz der naechsten Instanz.
+            // Never below the initial size and never past the reservation:
+            // `unmap_range` walks page by page, and too large a value would
+            // reach into the next instance's slot.
             let now = self.ctx[vmctx::MEM_SIZE as usize / 8];
             let start = m.size;
             m.size = now.clamp(start, MAX_MEMORY_BYTES);
-            // Gewachsen ist der seltene Fall — und der, der frueher liegen
-            // blieb. Er gehoert EINMAL ins Log, mit Zahlen: ohne das ist
-            // „die Rahmen kommen zurueck" eine Behauptung.
+            // Log the rare grown case once, with sizes.
             if m.size > start {
                 crate::kprintln!("[npk] forge: Instanz gibt {} MB zurueck ({} MB davon gewachsen)",
                                  m.size / (1024 * 1024), (m.size - start) / (1024 * 1024));

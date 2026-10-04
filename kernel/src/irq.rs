@@ -1,46 +1,41 @@
 //! Device-interrupt subsystem: MSI-X routing → LAPIC vector → fiber wake.
 //!
-//! The host kernel has no IOAPIC and the legacy 8259 PIC is fully masked
-//! (re-init traps via SMI on HP/Insyde firmware — see `interrupts::init`).
-//! So real-hardware device interrupts are routed via **MSI-X**: we program
-//! a device's MSI-X table entry to deliver to a chosen LAPIC vector with a
-//! chosen destination APIC ID. MSI-X writes go straight to the LAPIC
-//! (message address `0xFEE0_0000 | apic<<12`), bypassing the PIC/IOAPIC
-//! entirely, so the HP firmware quirk never bites.
+//! The legacy 8259 PIC is fully masked (re-init traps via SMI on HP/Insyde
+//! firmware — see `interrupts::init`). Device interrupts are routed via
+//! MSI-X (or plain MSI): a device's table entry delivers a chosen LAPIC
+//! vector to a chosen destination APIC ID. MSI writes go straight to the
+//! LAPIC (message address `0xFEE0_0000 | apic<<12`), bypassing the PIC.
+//! Level lines that only exist on an I/O APIC go through `register_gsi`.
 //!
 //! The ISR (in `interrupts.rs`) does the minimum: bump a per-vector atomic
 //! fired-count + LAPIC EOI. A driver fiber parks via `wait()` until the
-//! count advances (or a timeout). Crucially we target the device's MSI-X at
-//! the APIC of the core running the driver fiber, so the interrupt itself
-//! wakes that core out of HLT → the worker loop re-runs the scheduler →
-//! the parked fiber resumes. No polling, no IPI: the IRQ is the wake.
-//!
-//! This closes the fiber scheduler's open "event-wake" hole and is the
-//! foundation every poll-based HW driver (NVMe/NIC/audio_hda/xHCI) migrates
-//! onto. First beneficiary: NVMe completion (HW-validated on the Intel H10).
+//! count advances (or a timeout). The device's MSI-X targets the APIC of
+//! the core running the driver fiber, so the interrupt itself wakes that
+//! core out of HLT, the worker loop re-runs the scheduler and the parked
+//! fiber resumes. No polling, no IPI: the IRQ is the wake.
 //!
 //! ## Driver contract (host + WASM)
 //!
-//! Run the driver as a **resident fiber** (pinned to its core). Once, after
+//! Run the driver as a resident fiber (pinned to its core). Once, after
 //! binding the device:
 //! ```text
 //!   let vec = irq::register(dev, entry);   // host  — or npk_irq_register(entry) in WASM
 //! ```
-//! Then loop, servicing on the SAME fiber:
+//! Then loop, servicing on the same fiber:
 //! ```text
 //!   loop {
-//!       let since = irq::arm(vec);         // snapshot + route the IRQ to THIS core
+//!       let since = irq::arm(vec);         // snapshot + route the IRQ to this core
 //!       // enable / submit the device work that will raise the IRQ
 //!       irq::wait(vec, since, timeout_ms); // park until it fires (or timeout)
 //!       // service (drain the ring / read the completion)
 //!   }
 //! ```
-//! **Rules that keep it correct + general:**
-//! - `arm()` BEFORE the device submit closes the lost-wakeup window (an IRQ that
+//! Rules:
+//! - `arm()` before the device submit closes the lost-wakeup window (an IRQ that
 //!   races the park still advances the count past the snapshot).
 //! - `arm()` re-routes the MSI-X dest to the calling core, so the driver may run
 //!   on any core / migrate; the IRQ always wakes the core that's about to wait.
-//! - **Never hold a lock across `wait()`** — a same-core fiber spinning on it
+//! - Never hold a lock across `wait()`: a same-core fiber spinning on it
 //!   would deadlock the parked waiter. Snapshot/submit under the lock, drop it,
 //!   then `arm`/`wait`, then re-acquire to service.
 //!
@@ -83,7 +78,7 @@ fn set_dest(r: &IrqReg, apic: u32, vector: u8) {
 /// GSI of a vector routed through an I/O APIC.
 static GSI_OF: [core::sync::atomic::AtomicU32; 256] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 256];
-/// The vector's line is LEVEL-triggered: the ISR masks it, `arm` unmasks it.
+/// The vector's line is level-triggered: the ISR masks it, `arm` unmasks it.
 ///
 /// Linux' `IRQF_ONESHOT` for a threaded handler: the device keeps its line
 /// asserted until the driver has serviced it, and unmasked it would fire
@@ -92,7 +87,7 @@ static GSI_OF: [core::sync::atomic::AtomicU32; 256] =
 static LEVEL: [core::sync::atomic::AtomicBool; 256] =
     [const { core::sync::atomic::AtomicBool::new(false) }; 256];
 
-/// Route I/O APIC input `gsi` to a fresh vector on the CURRENT core,
+/// Route I/O APIC input `gsi` to a fresh vector on the current core,
 /// masked. The driver unmasks it by `arm`ing it before its first `wait`.
 /// None if the pool is exhausted or no I/O APIC serves the GSI.
 pub fn register_gsi(gsi: u32, level: bool, active_low: bool) -> Option<u8> {
@@ -132,7 +127,7 @@ static IRQ_REG: Mutex<[Option<IrqReg>; 256]> = Mutex::new([None; 256]);
 /// count before submitting a command, then waits for it to advance.
 static IRQ_FIRED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
-/// Bump the fired count for `vector`. Called ONLY from the device ISR.
+/// Bump the fired count for `vector`. Called only from the device ISR.
 /// Release so a parked fiber observing the advance also sees the device
 /// data the IRQ signalled.
 #[inline]
@@ -176,14 +171,14 @@ pub fn alloc_vector() -> Option<u8> {
     }
 }
 
-/// Snapshot the fired count for `vector` BEFORE submitting the device
+/// Snapshot the fired count for `vector` before submitting the device
 /// command (ringing the doorbell). Pass the returned token to `wait`. This
 /// closes the lost-wakeup window: an IRQ that fires between submit and park
 /// still advances the count past the snapshot, so `wait` returns at once.
 ///
-/// Also routes the IRQ to the CURRENT core (where the caller will `wait`), so
-/// the device's interrupt wakes this core out of HLT → its scheduler resumes
-/// the parked fiber with ~no latency. Reprograms the MSI-X dest only when the
+/// Also routes the IRQ to the current core (where the caller will `wait`), so
+/// the device's interrupt wakes this core out of HLT and its scheduler resumes
+/// the parked fiber. Reprograms the MSI-X dest only when the
 /// waiting core changed — a no-op for a driver that always services on its own
 /// pinned fiber; cheap (one MMIO write) for one that moves between cores.
 pub fn arm(vector: u8) -> u64 {
@@ -201,7 +196,7 @@ pub fn arm(vector: u8) -> u64 {
     since
 }
 
-/// Route an already-registered device IRQ to the CURRENT core. For the
+/// Route an already-registered device IRQ to the current core. For the
 /// "wake this core" usage where no fiber calls `arm`/`wait` — e.g. the host
 /// NIC RX-IRQ, which targets the vCPU core so RX arrival wakes the vCPU to
 /// pump. No-op if `vector` isn't registered or already targets this core.
@@ -221,14 +216,14 @@ pub fn route_to_current(vector: u8) {
 
 /// Park the current fiber until `vector` fires (its count moves past `since`)
 /// or `timeout_ms` elapses. Returns true if the IRQ fired, false on timeout.
-/// MUST be called from inside a fiber (returns false otherwise — the caller
+/// Must be called from inside a fiber (returns false otherwise — the caller
 /// should fall back to polling).
 pub fn wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
     crate::smp::fiber::irq_wait(vector, since, timeout_ms)
 }
 
 /// Allocate a vector and program `dev`'s MSI-X table `entry` to deliver it to
-/// the CURRENT core's LAPIC. Call this from the driver fiber so the IRQ wakes
+/// the current core's LAPIC. Call this from the driver fiber so the IRQ wakes
 /// exactly the core that will service it. Returns the vector, or None if the
 /// device has no usable MSI-X capability or the vector pool is exhausted.
 /// One-shot guard for the VT-d interrupt-remapping check below.
@@ -237,14 +232,11 @@ static IR_HANDLED: AtomicBool = AtomicBool::new(false);
 /// Make compatibility-format MSIs (our `0xFEE0_0000` messages) deliverable.
 ///
 /// Intel VT-d interrupt remapping, when the platform/firmware enables it (e.g.
-/// HP "Kernel DMA Protection"), BLOCKS compatibility-format interrupt requests
-/// — it expects remappable-format requests indexing the IR table. That silently
-/// drops every device MSI we emit (table programmed perfectly, zero IRQs). We
-/// don't use IR anywhere (the LAPIC timer is a *local* interrupt; every device
-/// polls today), so we disable it once → compatibility MSIs reach the LAPIC.
-/// Linux works on the same HW by emitting remappable-format MSIs; we take the
-/// simpler route. No DMAR (no VT-d) or IR already off → no-op. Safe: nothing in
-/// this OS relies on a remapped I/O interrupt.
+/// HP "Kernel DMA Protection"), blocks compatibility-format interrupt requests
+/// — it expects remappable-format requests indexing the IR table — and silently
+/// drops every MSI we emit. We don't use IR, so we disable it once and
+/// compatibility MSIs reach the LAPIC. Linux instead emits remappable-format
+/// MSIs. No DMAR (no VT-d) or IR already off: no-op.
 fn ensure_msi_deliverable() {
     if IR_HANDLED.swap(true, Ordering::Relaxed) {
         return;
@@ -299,7 +291,7 @@ fn ensure_msi_deliverable() {
     );
     if ires == 1 {
         // Disable IR (Linux pattern): re-assert the persistent enables we want
-        // to KEEP (TE bit31, QIE bit26, CFI bit23) with IRE (bit25) cleared,
+        // to keep (TE bit31, QIE bit26, CFI bit23) with IRE (bit25) cleared,
         // then wait for IRES to drop. Preserving TE keeps any active DMA
         // translation intact; we only turn off interrupt remapping.
         let keep = gsts & ((1 << 31) | (1 << 26) | (1 << 23));

@@ -1,7 +1,6 @@
 //! VGA Text Mode
 //!
 //! Visual boot status indicator for QEMU/VirtualBox window.
-//! Will be replaced by framebuffer canvas in Phase 8.
 
 const VGA_BUFFER: *mut u8 = 0xB8000 as *mut u8;
 const VGA_WIDTH: usize = 80;

@@ -1,13 +1,10 @@
-//! Interrupt Descriptor Table + PIC 8259
-//!
-//! Exception handlers + timer IRQ for hlt wakeup.
-//! Phase 2+: keyboard IRQ, serial IRQ, TSS with IST for double fault
+//! Interrupt Descriptor Table, exception handlers, timer and device IRQs.
 
 use crate::serial::outb;
 use crate::kprintln;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-/// Timer interrupts taken on Core 0. NOT a clock: only used to tell
+/// Timer interrupts taken on Core 0. Not a clock: only used to tell
 /// whether the PIT is running (`init_apic_timer`) and to pace the once-a-
 /// second statistics in the tick handler.
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -22,11 +19,9 @@ pub fn init_tsc_ticks() {
 
 /// 100 Hz ticks since boot, derived from the TSC.
 ///
-/// **The clock is the TSC, on every machine.** This used to return the PIT
-/// interrupt count whenever the PIT was running: a clock that only advances
-/// when Core 0 takes an interrupt stops while Core 0 runs with IF=0, and
-/// could not survive the tick going away (`docs/plan/CORES_AND_EVENTS.md`
-/// §3.2). The unit stays 10 ms so the 223 callers read the same numbers.
+/// The clock is the TSC on every machine. An interrupt count would stop while
+/// Core 0 runs with IF=0 and could not survive the tick going away
+/// (`docs/plan/CORES_AND_EVENTS.md` §3.2). The unit is 10 ms.
 pub fn ticks() -> u64 {
     let freq = TSC_FREQ.load(Ordering::Relaxed);
     let period = freq / 100; // TSC cycles per 10ms tick
@@ -42,11 +37,9 @@ pub fn uptime_secs() -> u64 {
 
 /// Microseconds since boot, from the TSC.
 ///
-/// **`ticks()` is 100 Hz, and that is too coarse for a receive-side RTT.**
-/// On this link an RTT of 5 ms measures as "0 ticks" and one of 20 ms as
-/// one or two — so any window derived from it is a step function with
-/// 10 ms steps. Linux' DRS (`tcp_rcv_space_adjust`) compares an elapsed
-/// time against `rcv_rtt_est.rtt_us`, in microseconds; this is that clock.
+/// `ticks()` is 100 Hz, too coarse for a receive-side RTT. Linux' DRS
+/// (`tcp_rcv_space_adjust`) compares an elapsed time against
+/// `rcv_rtt_est.rtt_us`, in microseconds; this is that clock.
 pub fn uptime_us() -> u64 {
     let freq = TSC_FREQ.load(Ordering::Relaxed);
     let per_us = (freq / 1_000_000).max(1);
@@ -54,8 +47,7 @@ pub fn uptime_us() -> u64 {
     rdtsc().saturating_sub(boot) / per_us
 }
 
-/// TSC-Takte in Nanosekunden. Fuer Messungen, die kleiner sind als eine
-/// Mikrosekunde — die Kosten EINES TCP-Segments zum Beispiel.
+/// TSC cycles converted to nanoseconds, for measurements below a microsecond.
 pub fn tsc_to_ns(cycles: u64) -> u64 {
     let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);
     cycles.saturating_mul(1_000_000_000) / freq
@@ -123,13 +115,10 @@ pub fn calibrate_tsc() {
             return;
         }
     }
-    // CPUID 0x15 absent (always on AMD — Intel-only leaf). Calibrate
-    // against PIT channel 2 (vendor-independent; Linux's
-    // quick_pit_calibrate approach). MUST work or every TSC-derived
-    // time is wrong: host `top` per-app time, delay_ms, run_slice's
-    // SLICE_MS, AND the guest's `tsc_early_khz=` cmdline (→ guest
-    // clock 2-2.3× fast → librewolf timed-wait crash). The old
-    // hardcoded 2 GHz was that bug.
+    // CPUID 0x15 absent (always on AMD, it is an Intel-only leaf). Calibrate
+    // against PIT channel 2 (vendor-independent; Linux's quick_pit_calibrate
+    // approach). Every TSC-derived time depends on this, including delay_ms,
+    // run_slice's SLICE_MS and the guest's `tsc_early_khz=` cmdline.
     if let Some(freq) = pit_calibrate_tsc() {
         TSC_FREQ.store(freq, Ordering::Relaxed);
         kprintln!("[npk] TSC: {} MHz (PIT ch2 calibration)", freq / 1_000_000);
@@ -220,7 +209,7 @@ pub fn delay_ms(ms: u64) {
 }
 
 // Kept next to the ports we do drive: a register map with holes in it is
-// worse than one unused constant (see feedback_verify_reg_addrs).
+// worse than one unused constant.
 #[allow(dead_code)]
 const PIT_CHANNEL0: u16 = 0x40;
 #[allow(dead_code)]
@@ -320,7 +309,7 @@ pub fn init() {
         // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
         IDT[VCPU_KICK_VECTOR as usize]
             .set_handler(vcpu_kick_handler as *const () as u64);
-        // Input by interrupt (stage 3b): the i8042 through the I/O APIC,
+        // Input by interrupt: the i8042 through the I/O APIC,
         // the xHCI controllers through MSI-X — both to Core 0.
         IDT[PS2_VECTOR as usize].set_handler(ps2_irq_handler as *const () as u64);
         IDT[XHCI_VECTOR as usize].set_handler(xhci_irq_handler as *const () as u64);
@@ -335,16 +324,14 @@ pub fn init() {
         // SAFETY: IDT is fully initialized above
         core::arch::asm!("lidt [{}]", in(reg) &idt_reg);
 
-        // Do NOT re-initialize the legacy 8259 PIC. Writing ICW1 (0x11)
-        // to its command port (0x20/0xA0) traps via SMI on some UEFI
-        // firmware (HP/Insyde virtualize the legacy PIC in SMM under APIC
-        // mode) and resets the machine post-ExitBootServices — confirmed
-        // by colour-bisecting a serial-less HP notebook. UEFI hands control
-        // over in APIC mode, so we just MASK the PIC fully via its data
-        // ports (plain mask registers — safe) and drive ticks from the
-        // Local APIC timer (interrupts::init_apic_timer). A masked,
-        // un-remapped PIC delivers no IRQs, so the default 0x08-0x0F vector
-        // collision with CPU exceptions never happens.
+        // Do not re-initialize the legacy 8259 PIC. Writing ICW1 (0x11) to
+        // its command port (0x20/0xA0) traps via SMI on some UEFI firmware
+        // (HP/Insyde virtualize the legacy PIC in SMM under APIC mode) and
+        // resets the machine after ExitBootServices. UEFI hands over in APIC
+        // mode, so the PIC is only masked via its data ports and ticks come
+        // from the Local APIC timer (`init_apic_timer`). A masked, un-remapped
+        // PIC delivers no IRQs, so the default 0x08-0x0F vectors never
+        // collide with CPU exceptions.
         outb(PIC1_DATA, 0xFF);
         outb(PIC2_DATA, 0xFF);
 
@@ -427,8 +414,8 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
     kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
 
     // Best-effort backtrace: scan the stack for words that look like return
-    // addresses into kernel code (link base 0x1000_0000 .. ~+8 MB). On this HW
-    // the PIE kernel runs at its link base, so these map directly via
+    // addresses into kernel code (link base 0x1000_0000 .. ~+8 MB). The PIE
+    // kernel runs at its link base, so these map directly via
     // `addr2line -e target/.../nopeekos-kernel <addr>`. Only scanned when RSP
     // is inside the identity-mapped range so the scan itself can't fault.
     let rsp = frame.stack_pointer;
@@ -464,15 +451,8 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     // mouse is up) — same model as the USB drain → smooth cursor regardless
     // of the run loop's HLT/spin.
     crate::keyboard::poll_ps2_irq();
-    // NO busy-TSC fabrication here.
-    //
-    // This used to add `freq / 100` — one whole tick of cycles — to Core 0
-    // on every tick, with the note "Core 0 runs event loop". That is the
-    // wall clock itself, so Core 0's usage was pinned at 99-100 % by
-    // construction and said nothing about the machine. The shell loop has
-    // executed `hlt` when idle for a long time; the accounting never
-    // followed. Usage now comes from `record_halt` at the HLT sites, like
-    // every other core (`update_core_freq`).
+    // No busy time is accounted here: Core 0's usage comes from
+    // `record_halt` at the HLT sites, like every other core.
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
@@ -487,7 +467,7 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     unsafe { pic_eoi(1); }
 }
 
-/// APIC timer handler — fires on hardware without PIT (NUC, UEFI-only).
+/// APIC timer handler, for hardware without a PIT (UEFI-only machines).
 /// Same function as PIT timer: tick counter + USB event drain.
 extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     let tick = TICKS.fetch_add(1, Ordering::Relaxed);
@@ -495,15 +475,8 @@ extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     crate::xhci::poll_events_irq();
     crate::keyboard::poll_ps2_irq();
-    // NO busy-TSC fabrication here.
-    //
-    // This used to add `freq / 100` — one whole tick of cycles — to Core 0
-    // on every tick, with the note "Core 0 runs event loop". That is the
-    // wall clock itself, so Core 0's usage was pinned at 99-100 % by
-    // construction and said nothing about the machine. The shell loop has
-    // executed `hlt` when idle for a long time; the accounting never
-    // followed. Usage now comes from `record_halt` at the HLT sites, like
-    // every other core (`update_core_freq`).
+    // No busy time is accounted here: Core 0's usage comes from
+    // `record_halt` at the HLT sites, like every other core.
     // Update BSP frequency once per second (for top display)
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
@@ -535,12 +508,10 @@ pub fn apic_base_any() -> u64 {
 
 // ── Per-core worker timer: one-shot to the next deadline ────────────
 //
-// Stage 1 of `docs/plan/CORES_AND_EVENTS.md`. A worker used to arm a
-// PERIODIC 100 Hz LAPIC timer and wake on every tick to look for work: 100
-// wakes a second per idle core, and every sleep under 10 ms needed the
-// period shortened (`arm_worker_wake_in`). Now the timer is one-shot —
-// armed to the exact TSC deadline the core waits for, or not at all — and
-// new work wakes an idle core with an IPI (`WORKER_WAKE_VECTOR`), not a tick.
+// See `docs/plan/CORES_AND_EVENTS.md`. The timer is one-shot, armed to the
+// exact TSC deadline the core waits for or not at all, so an idle core does
+// not wake periodically. New work wakes an idle core with an IPI
+// (`WORKER_WAKE_VECTOR`).
 //
 // TSC-deadline mode (CPUID.1:ECX[24]) when the CPU has it: the LAPIC
 // compares against the TSC itself, no conversion. Otherwise one-shot count
@@ -551,7 +522,7 @@ pub fn apic_base_any() -> u64 {
 // hrtimer on the vCPU's core — so the guest's clock events land on time and
 // not on a host tick.
 //
-// Both vectors are pure EOI: the interrupt returning the core from HLT IS
+// Both vectors are pure EOI: the interrupt returning the core from HLT is
 // the effect.
 const WORKER_TIMER_VECTOR: u8 = 50;
 /// IPI to an idle worker: new work is in the inbox.
@@ -559,15 +530,15 @@ pub const WORKER_WAKE_VECTOR: u8 = 52;
 static WORKER_APIC_BASE: AtomicU64 = AtomicU64::new(0);
 /// LAPIC counts per 10 ms at divide 16 — for one-shot count mode.
 static WORKER_TIMER_INITIAL: AtomicU32 = AtomicU32::new(0);
+/// Does this CPU have the LAPIC TSC-deadline mode (CPUID.1:ECX[24])?
 static HAS_TSC_DEADLINE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 const MSR_TSC_DEADLINE: u32 = 0x6E0;
 
-/// Does this CPU have the LAPIC TSC-deadline mode (CPUID.1:ECX[24])?
 /// Deep idle via an ACPI SystemIO C-state port; 0 = off (plain `hlt`, C1).
-/// Set by `set_deep_idle` (today: the `power cstate` experiment).
+/// Set by `set_deep_idle` (`power cstate`).
 static DEEP_IDLE_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
-/// A halt shorter than this stays in C1 — the exit latency of a deep state
+/// A halt shorter than this stays in C1: the exit latency of a deep state
 /// would cost more than it saves (Linux's menu governor makes the same cut
 /// against the state's target residency).
 static DEEP_IDLE_MIN_TSC: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -620,16 +591,15 @@ pub fn has_tsc_deadline() -> bool {
     }
     ecx & (1 << 24) != 0
 }
-/// Core 0 runs on the one-shot timer too (stage 3e, `make_core0_tickless`).
+/// Core 0 runs on the one-shot timer too (`make_core0_tickless`).
 static CORE0_TICKLESS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Give Core 0 the worker's one-shot timer and stop its periodic 100 Hz
 /// tick (the LVT is rewritten from periodic vector 48 to one-shot vector
 /// 50). From here Core 0 wakes only when something is due or something
-/// happens — and the tick's work is done elsewhere: the wall clock is the
-/// TSC (0.411), input comes by interrupt (0.416) or is drained by the shell
-/// when no interrupt exists, and the frequency statistics run in
-/// `core0_loop`.
+/// happens. The tick's work is done elsewhere: the wall clock is the TSC,
+/// input comes by interrupt or is drained by the shell when no interrupt
+/// exists, and the frequency statistics run in `core0_loop`.
 pub fn make_core0_tickless() {
     init_worker_timer();
     CORE0_TICKLESS.store(true, Ordering::Release);
@@ -676,11 +646,10 @@ extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
 
 /// Cross-vCPU kick IPI (guest SMP). When a guest vCPU sends an inter-processor
 /// interrupt to another vCPU (reschedule / call-function / TLB-shootdown), the
-/// sender's host core fires this vector at the TARGET vCPU's host core, forcing
+/// sender's host core fires this vector at the target vCPU's host core, forcing
 /// its VMRUN to #VMEXIT(INTR) so it injects the guest IPI within microseconds
-/// instead of waiting up to a host-timer tick (~10 ms). That ~10 ms latency is
-/// what made `smp_call_function`'s `csd_lock_wait` spin burn ~50% of guest CPU
-/// across all vCPUs (measured via rip_sample). Pure EOI — receipt IS the effect.
+/// instead of waiting up to a host-timer tick; otherwise `smp_call_function`'s
+/// `csd_lock_wait` spins in the guest. Pure EOI: receipt is the effect.
 pub const VCPU_KICK_VECTOR: u8 = 51;
 
 extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
@@ -810,7 +779,7 @@ pub fn arm_vcpu_timer(deadline: u64) {
     arm_at(deadline);
 }
 
-/// THE idle primitive of a worker: halt until an interrupt, and — if
+/// The idle primitive of a worker: halt until an interrupt, and, if
 /// `deadline` is given — no later than that TSC value. IF is restored as
 /// found. `cause` is the wake-attribution slot for `cores`.
 ///
@@ -885,7 +854,7 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
 
 /// How often `worker_idle_hlt` wakes on the calling worker: `hz` per second.
 /// A native network loop (download) raises it to poll its NIC ring without a
-/// device IRQ; pass 100 to go back to 10 ms. Goes away with NAPI (stage 2).
+/// device IRQ; pass 100 to go back to 10 ms.
 pub fn set_worker_poll_hz(hz: u32) {
     let cid = crate::smp::per_core::current_core_id();
     if cid == 0 || cid >= 256 { return; }
@@ -909,13 +878,11 @@ pub fn worker_idle_hlt() {
     halt_until(Some(rdtsc() + p), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
-// ── Input interrupts (stage 3b) ─────────────────────────────────────
+// ── Input interrupts ────────────────────────────────────────────────
 //
-// Keyboard and mouse used to be drained ONLY from the Core-0 timer tick —
-// up to 10 ms late, and never while the tick is gone (stage 3e). Now the
-// i8042 raises ISA IRQ 1 (and 12 for the aux port) through the I/O APIC,
-// and each xHCI controller raises MSI-X; both land on Core 0 and drain
-// right away. The tick keeps draining as a fallback until 3e: both paths
+// The i8042 raises ISA IRQ 1 (and 12 for the aux port) through the I/O
+// APIC, and each xHCI controller raises MSI-X; both land on Core 0 and
+// drain right away. The timer tick also drains as a fallback: both paths
 // run in interrupt context on Core 0, so they never interleave, and the
 // xHCI path takes its controller lock with `try_lock`.
 
@@ -945,9 +912,9 @@ extern "x86-interrupt" fn xhci_irq_handler(_frame: InterruptStackFrame) {
 
 /// Run `f` with this core's interrupts masked, restoring the previous IF.
 ///
-/// For a spin lock that an ISR on the SAME core may also take: held with
+/// For a spin lock that an ISR on the same core may also take: held with
 /// IF=1, the timer IRQ lands inside the critical section and spins on the
-/// lock its own core holds — the core is gone. Cheap (pushfq/cli/popfq), so
+/// lock its own core holds, deadlocking the core. Cheap (pushfq/cli/popfq), so
 /// keep `f` short; it cannot be interrupted.
 pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     let rflags: u64;
@@ -955,7 +922,7 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
     unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
     let r = f();
     if rflags & (1 << 9) != 0 {
-        // SAFETY: IF was set on entry — set it again.
+        // SAFETY: IF was set on entry; set it again.
         unsafe { core::arch::asm!("sti") };
     }
     r

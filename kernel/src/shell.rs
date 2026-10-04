@@ -1,5 +1,4 @@
-//! npk-shell: placeholder for future SSH-compatible remote access.
-//! The old custom protocol was removed — will be replaced with SSH compatibility.
+//! npk-shell: placeholder for SSH-compatible remote access. Not implemented.
 
 /// Start listener — no-op (shell removed, SSH planned).
 pub fn start_listener() {}

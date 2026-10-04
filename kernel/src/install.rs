@@ -26,7 +26,7 @@ pub fn has_installer() -> bool {
 }
 
 /// Run the NVMe installation.
-/// Partitions the NVMe, creates ESP with GRUB+kernel, sets blkdev offset for npkFS.
+/// Partitions the NVMe, creates the ESP with the kernel, sets blkdev offset for npkFS.
 #[cfg(feature = "installer")]
 pub fn install_to_nvme() -> Result<(), &'static str> {
     if !nvme::is_available() {
@@ -89,12 +89,10 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     npkfs::mount().map_err(|_| "npkFS mount failed")?;
     kprintln!(" done.");
 
-    // NOTE: Seeding of bundled assets happens LATER, after
-    // setup::run_fresh_install has derived + installed the master key
-    // (see main.rs). If we wrote them here, npkfs::store would take the
-    // "no master key" path and write plaintext; subsequent fetches on
-    // normal boots (with master key set) would then fail AEAD decrypt
-    // with "crypt key fail". See seed_bundled_assets() below.
+    // Bundled assets are seeded later, after setup::run_fresh_install has
+    // installed the master key (see main.rs). Written here they would be
+    // stored as plaintext and fail AEAD decryption on every later boot.
+    // See seed_bundled_assets() below.
 
     kprintln!("[npk] Installation complete.");
     kprintln!();
@@ -103,7 +101,7 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
 }
 
 /// Write the bundled font + WASM modules into npkFS, encrypting each
-/// with the active master key (ChaCha20-Poly1305 AEAD). Must be called
+/// with the active master key (AEAD). Must be called
 /// after setup::run_fresh_install has called crypto::set_master_key.
 #[cfg(feature = "installer")]
 pub fn seed_bundled_assets() {

@@ -16,7 +16,7 @@ pub struct KeyEvent {
 /// Logical key codes — hardware-independent.
 ///
 /// Wire-stable: variant order and field shape are part of the widget ABI
-/// (Phase 10, `shade::widgets::abi::Event::Key`). Append-only; never
+/// (`shade::widgets::abi::Event::Key`). Append-only; never
 /// reorder. Mirrored in the SDK at `nopeek_widgets::abi::KeyCode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyCode {
@@ -51,23 +51,16 @@ pub struct Modifiers {
 
 /// Empty event for array initialization.
 #[allow(dead_code)]
-/// Der Rest einer UTF-8-Folge, die byteweise durch die Tastaturleitung muss.
+/// The tail of a UTF-8 sequence that has to pass the key path byte by byte.
 ///
-/// **Ein Tastendruck traegt ein BYTE, und `ü` sind zwei.** Die ganze Kette
-/// (`push_key` → `KeyCode::Char(u8)` → jede App) auf Zeichen umzustellen
-/// hiesse, das ABI zu aendern und jede ausgelieferte App zu einem
-/// Bindefehler zu machen. Also bleibt sie byteweise: das erste Byte geht
-/// sofort, der Rest liegt hier und wird VOR dem naechsten Tastendruck
-/// abgeholt. Fuer ASCII ist der Puffer immer leer und der Weg genau der von
-/// vorher.
+/// A key event carries one byte (`KeyCode::Char(u8)` is ABI), and a Latin-1
+/// letter such as U+00FC is two. The first byte goes out at once; the rest
+/// waits here and is drained before the next key press. For ASCII the buffer
+/// is always empty.
 ///
-/// **Ein TYP mit zwei Instanzen, keine zwei Kopien.** Es gibt zwei
-/// Tastaturtreiber — PS/2 (`drivers::keyboard`) und USB-HID
-/// (`drivers::xhci`) —, und genau daran ist die Umlaut-Umstellung beim ersten
-/// Anlauf gescheitert: die PS/2-Tabelle war repariert, die Maschine hing an
-/// USB, und die Zeichen kamen weiter als `;` `[` `'`. Zwei Instanzen, weil
-/// die beiden unabhaengige Erzeuger sind; eine Rechnung, damit sie nicht
-/// auseinanderlaufen ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+/// One type with two instances, one per keyboard driver (PS/2 in
+/// `drivers::keyboard`, USB-HID in `drivers::xhci`), so both producers share
+/// the same logic.
 pub struct Utf8Tail {
     buf: [u8; 3],
     len: u8,
@@ -76,11 +69,11 @@ pub struct Utf8Tail {
 impl Utf8Tail {
     pub const fn new() -> Utf8Tail { Utf8Tail { buf: [0; 3], len: 0 } }
 
-    /// Ein Zeichen einreichen und sein ERSTES Byte bekommen; der Rest wartet.
+    /// Submit a character and get its first byte; the rest waits.
     pub fn split(&mut self, c: char) -> u8 {
         if (c as u32) < 0x80 {
             self.len = 0;
-            return c as u8;      // ASCII: genau der Weg von frueher
+            return c as u8;      // ASCII: single byte
         }
         let mut b = [0u8; 4];
         let enc = c.encode_utf8(&mut b).as_bytes();
@@ -90,9 +83,8 @@ impl Utf8Tail {
         enc[0]
     }
 
-    /// Das naechste wartende Byte. **Muss vor dem naechsten Tastendruck
-    /// gerufen werden** — sonst geht die zweite Haelfte eines Zeichens
-    /// dahinter verloren.
+    /// The next pending byte. Must be called before the next key press,
+    /// otherwise the rest of a character is lost behind it.
     pub fn take(&mut self) -> Option<u8> {
         if self.len == 0 { return None }
         let b = self.buf[0];
@@ -131,8 +123,8 @@ impl KeyEvent {
 
     /// True if this is a printable character (not a special key).
     pub fn is_printable(&self) -> bool {
-        // Ab 0x80 ist es ein Stueck einer UTF-8-Folge — also Text, auch
-        // wenn es allein kein Zeichen ist. 0x7F (DEL) ist keiner.
+        // From 0x80 on it is part of a UTF-8 sequence, so text even if not a
+        // character on its own. 0x7F (DEL) is not.
         matches!(self.key, KeyCode::Char(c) if c >= 0x20 && c != 0x7F)
     }
 

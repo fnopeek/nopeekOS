@@ -11,10 +11,10 @@ use spin::Mutex;
 
 const MAX_ENTRIES: usize = 32;
 
-/// Path of the encrypted config blob (was `.npk-config` in v1).
+/// Path of the encrypted config blob.
 pub const CONFIG_OBJECT: &str = ".system/config";
 
-/// Path of the passphrase verifier blob (was `.npk-keycheck` in v1).
+/// Path of the passphrase verifier blob.
 pub const KEYCHECK_PATH: &str = ".system/keycheck";
 
 /// Magic bytes written into KEYCHECK_PATH at install time. Decryption

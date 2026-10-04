@@ -4,7 +4,7 @@
 //! talks to UEFI Boot Services. Once `ExitBootServices` succeeds we
 //! own the machine and the SystemTable's BootServices pointer becomes
 //! invalid — at that point we synthesize a [`BootInfo`] and hand off
-//! to `kernel_main` (Phase 3; Phase 2 just collects + halts).
+//! to `kernel_main`.
 //!
 //! Reference: UEFI Specification 2.10 §4 (System Table), §7 (Services
 //! — Boot Services), §11 (Protocols — Graphics Output Protocol), §12
@@ -137,7 +137,7 @@ pub struct EfiBootServices {
         map_key: Uintn,
     ) -> EfiStatus,
 
-    // Miscellaneous Services (partial — we don't use these in Phase 2)
+    // Miscellaneous Services (partial — unused)
     pub get_next_monotonic_count: usize,
     pub stall: usize,
     pub set_watchdog_timer: usize,
@@ -258,7 +258,7 @@ use crate::boot_info::{BootInfo, MemoryRegion, MAX_MEMORY_REGIONS};
 unsafe fn com1_putc(b: u8) {
     unsafe {
         // COM2 (0x2F8) → -serial file:target/serial.log. Unbuffered.
-        // Write FIRST so the byte hits disk even if COM1 stalls.
+        // Write first so the byte hits disk even if COM1 stalls.
         core::arch::asm!(
             "out dx, al", in("dx") 0x2F8u16, in("al") b,
             options(nomem, nostack)
@@ -526,7 +526,7 @@ pub unsafe extern "efiapi" fn efi_main(
         com1_print(b"[uefi] ExitBootServices OK\n");
     }
 
-    // Install our own GDT now. Doing this BEFORE ExitBootServices hangs
+    // Install our own GDT now. Doing this before ExitBootServices hangs
     // the firmware mid-call — Boot Services internally relies on
     // UEFI's selector layout (TR/LDT/code segs). After ExitBootServices
     // the firmware is dismantled and we're free to install ours.

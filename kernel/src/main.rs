@@ -84,11 +84,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     kprintln!("/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ");
     kprintln!("           /_/");
     kprintln!();
-    // Die ECHTE Version, nicht eine hartkodierte. Hier stand seit je
-    // "v0.1.0", und eine falsche Zahl ist schlechter als keine: einen
-    // Geraetelauf, der das alte Bild gebootet hat, erkennt man sonst nur am
-    // WORTLAUT einer Logzeile — und das nur, wenn man sie gerade geaendert
-    // hat. [[feedback_log_the_version_in_the_trace]]
+    // The real crate version, so a boot log identifies the image it came from.
     kprintln!("[npk] AI-native Operating System v{}", env!("CARGO_PKG_VERSION"));
     kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
@@ -136,11 +132,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     if xhci::init() {
         vga::show_status(b"USB keyboard online");
     }
-    // Die Maus NICHT geschachtelt: sie haengt am Controller, nicht an der
-    // Tastatur. Steht die Tastatur am i8042 und die Maus an USB, gab die
-    // alte Schachtelung gar keinen Zeiger — `init()` meldet false, weil es
-    // nach einer TASTATUR sucht. `init_mouse` faellt ohne laufenden
-    // Controller von selbst durch.
+    // Not nested under the keyboard check: the mouse depends on the
+    // controller, not on a USB keyboard (the keyboard may be on the i8042).
+    // `init_mouse` returns false by itself when no controller runs.
     if xhci::init_mouse() {
         vga::show_status(b"USB mouse online");
     }
@@ -151,19 +145,18 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         vga::show_status(b"PS/2 pointer online");
     }
 
-    // APIC timer: if PIT doesn't work (NUC/UEFI-only), use Local APIC for 100Hz ticks.
+    // APIC timer: if the PIT doesn't work (UEFI-only boards), use the Local APIC for 100 Hz ticks.
     // Must be after xhci::init so poll_events_irq can drain USB events.
     interrupts::init_apic_timer();
     // I/O APIC: found and every non-firmware pin masked; nothing is routed
-    // through it until a driver asks (docs/plan/CORES_AND_EVENTS.md, 3a).
+    // through it until a driver asks.
     ioapic::init();
 
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
 
-    // Fiber scheduler Stage 1: validate the context-switch primitive on
-    // Core 0 (see docs/plan/SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
-    // Isolated — nothing in the live app path uses fibers yet.
+    // Validate the fiber context-switch primitive on Core 0
+    // (docs/plan/SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
     smp::fiber::self_test();
 
     // TSS install (BSP). Replaces the boot GDT with a clone that has
@@ -172,7 +165,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // must run before microvm::init.
     tss::init();
 
-    // MicroVM (Phase 12): vendor-detect (Intel VMX / AMD SVM), probe
+    // MicroVM: vendor-detect (Intel VMX / AMD SVM), probe
     // capabilities. Host-state setup reads TR via `str` and walks the
     // GDT for the TSS base — both covered by tss::init() above.
     microvm::init();
@@ -204,28 +197,20 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     //
     // The USB dongle is NOT free to probe: nic_attach halts and RESETS an xHCI
     // controller, which drops every device already addressed on it. So it is only
-    // worth that price when no PCI NIC came up (the HP notebook, which has no
-    // wired port).
-    //
-    // Seit Kernel 0.366.0 ist der Preis kleiner: `nic_attach` probiert den
-    // Controller, auf dem Tastatur/Maus stehen, ZULETZT — und wenn der Dongle
-    // auch dort nicht ist, zaehlt es sie wieder auf. Auf einer Maschine mit
-    // zwei Controllern (IdeaPad) ueberlebt die USB-Maus den Scan damit ganz.
-    // Haengt der Dongle am SELBEN Controller, gewinnt weiterhin er; das loest
-    // erst ein gemeinsamer Controller-Zustand (docs/plan/INPUT_I2C_HID.md).
+    // worth that price when no PCI NIC came up (machines without a wired port).
+    // `nic_attach` tries the controller holding keyboard/mouse last and
+    // re-enumerates it if the dongle is not there either.
     let net_up = virtio_net::init() | intel_nic::init();
     if !net_up {
         rtl8153::init();
-        // Der Dongle-Scan hat jeden angefassten Controller zurueckgesetzt,
-        // also auch eine USB-Maus darauf. Jetzt ist der PS/2-Zeiger wieder
-        // frei: oben stieg `init_mouse` vor seiner eigenen Diagnose aus,
-        // weil die USB-Maus da noch lebte — und danach wusste niemand, ob
-        // am Aux-Port ueberhaupt etwas haengt.
+        // The dongle scan reset every controller it touched, including any
+        // USB mouse on it. The earlier PS/2 probe was skipped while that
+        // mouse was alive, so probe the aux port now.
         if !xhci::mouse_available() && keyboard::init_mouse() {
             vga::show_status(b"PS/2 pointer online");
         }
     }
-    // The i8042 by interrupt (stage 3b) — only now: `init_mouse` above reads
+    // The i8042 by interrupt — only now: `init_mouse` above reads
     // the controller's answers itself, and an active IRQ would take them.
     // The tick still drains as fallback.
     keyboard::enable_irq();
@@ -304,9 +289,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             // Set BOTH offset AND size — without the size, block_count()
             // overshoots into the backup-GPT region and the bitmap can
             // hand out blocks that fail to write with OutOfRange.
-            // A GPT we cannot read is not the same as a disk without one.
-            // Collapsing both into "offset stays 0" pointed the superblock
-            // ring at the GPT and the ESP — and the format below at them too.
+            // A GPT we cannot read is not the same as a disk without one:
+            // treating both as "offset 0" would point the superblock ring
+            // (and the format below) at the GPT and the ESP.
             let partition_found = if nvme::is_available() {
                 match gpt::detect_npkfs_partition() {
                     Some((offset, size)) => {
@@ -330,10 +315,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
                 }
                 Err(e) if blkdev::is_available() => {
                     // "mount failed" and "there is no filesystem here" are
-                    // different facts. This branch used to format on either,
-                    // so a single unreadable superblock destroyed the
-                    // installation it was meant to open — and looked, from
-                    // the outside, like the filesystem had broken by itself.
+                    // different facts; formatting on the former would destroy
+                    // an installation over one unreadable superblock.
                     kprintln!("[npk] npkfs: mount failed: {}", e);
                     let probe = match npkfs::probe_disk() {
                         Ok(p) => p,
@@ -400,7 +383,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     } else {
         // === Subsequent boot: Verify passphrase ===
         if framebuffer::is_available() {
-            // Activate native GPU + 4K before login screen — ONLY for
+            // Activate native GPU + 4K before login screen, only for
             // validated generations (ADL-N). Other detected Gen12 (Tiger
             // Lake) stay on GOP at boot (visible) and are activated manually
             // via `gpu init` for bring-up, so an unproven BCS scanout can't
@@ -445,9 +428,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Load system config (after identity — config is encrypted at rest)
     config::load();
-    // Welcher Motor die Module faehrt, steht in der Konfiguration und
-    // uebersteht damit einen Neustart — nur so laesst sich pruefen, was ueber
-    // Autostart und den Treiberweg hochkommt.
+    // The module engine is a config setting so it persists across reboots
+    // and also applies to autostart and driver modules.
     wasm::load_engine_default();
     xhci::cache_keyboard_layout();
     if let Some(v) = config::get("mouse_speed") {
@@ -474,8 +456,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     tls::certstore::load_store();
 
     // GGTT slab allocator — bookkeeping for tile / comp-layer / glyph
-    // slots in the GGTT slab region. Pure in-RAM tracker; actual GGTT
-    // writes land once the rasterizer (P10.5) is wired up.
+    // slots in the GGTT slab region. Pure in-RAM tracker; it writes no
+    // GGTT entries itself.
     gpu::ggtt_slab::init();
 
     // Create home directory and set as working directory
@@ -538,9 +520,8 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Everything above is now in the log; file it before the loop takes over.
     intent::system::persist_boot_log();
 
-    // The shell runs as a fiber on Core 0 (docs/plan/CORES_AND_EVENTS.md,
-    // 3c-1): Core 0 gets the same scheduler as a worker, so the compositor
-    // can become a fiber beside it (3c-2). 2 MiB like the boot stack —
+    // The shell runs as a fiber on Core 0, which gets the same scheduler as
+    // a worker so other fibers can run beside it. 2 MiB like the boot stack —
     // Core-0 intents run deep chains (TLS, HTTP) inline, and a fiber stack
     // has no guard page.
     *SHELL_ARGS.lock() = Some((vault_ref, session_id));

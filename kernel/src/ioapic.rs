@@ -1,24 +1,22 @@
 //! I/O APIC — the router for interrupts that are not MSI.
 //!
-//! Everything so far came in as MSI/MSI-X, which goes straight to a LAPIC.
-//! What does not — the PS/2 keyboard (ISA IRQ 1), the ACPI SCI (EC and
-//! battery events), a GPIO controller's line (the IdeaPad touchpads) — goes
-//! through an I/O APIC: one redirection entry per input pin ("GSI") says
-//! which vector, which core, edge or level, high or low.
-//! `docs/plan/CORES_AND_EVENTS.md`, Stufe 3a.
+//! MSI/MSI-X goes straight to a LAPIC. What does not — the PS/2 keyboard
+//! (ISA IRQ 1), the ACPI SCI (EC and battery events), a GPIO controller's
+//! line (e.g. I2C-HID touchpads) — goes through an I/O APIC: one redirection
+//! entry per input pin ("GSI") says which vector, which core, edge or level,
+//! high or low.
 //!
 //! Ported from Linux `arch/x86/kernel/apic/io_apic.c` (register access,
 //! entry layout, `clear_IO_APIC_pin`, `__eoi_ioapic_pin`) and
 //! `arch/x86/kernel/acpi/boot.c` (MADT I/O APIC and Interrupt Source
 //! Override entries, `mp_override_legacy_irq`).
 //!
-//! **One deliberate difference from Linux at boot:** Linux masks every pin
+//! One deliberate difference from Linux at boot: Linux masks every pin
 //! (`clear_IO_APIC`). We leave pins with SMI or ExtINT delivery as the
 //! firmware set them, like Linux leaves SMI pins: the PIT still reaches
 //! Core 0 through the legacy PIC on some machines, and that path may run
-//! through an ExtINT pin ("virtual wire"). Stage 3e removes the PIT tick;
-//! then this exception can go. Every other pin is masked until a driver
-//! routes it.
+//! through an ExtINT pin ("virtual wire"). This exception can go once the
+//! PIT tick is gone. Every other pin is masked until a driver routes it.
 //!
 //! Locking: the index/data register pair must not be interleaved, and the
 //! device-IRQ ISR masks level lines — so every access takes `LOCK` with
@@ -247,7 +245,7 @@ fn with_pin<R>(gsi: u32, f: impl FnOnce(&IoApic, u32) -> R) -> Option<R> {
 }
 
 /// Route `gsi` to `vector` on the LAPIC `dest_apic` (fixed delivery,
-/// physical destination), left MASKED — `unmask` when the driver is ready.
+/// physical destination), left masked — `unmask` when the driver is ready.
 /// False if no I/O APIC serves this GSI.
 pub fn route(gsi: u32, vector: u8, dest_apic: u32, level: bool, active_low: bool) -> bool {
     crate::interrupts::without_interrupts(|| {

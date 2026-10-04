@@ -2,9 +2,9 @@
 //!
 //! Apps push S16LE / 48 kHz / stereo PCM into per-slot ring buffers; the HDA
 //! driver (audio_hda.wasm) pulls a mixed, master-volume-scaled stream via
-//! [`poll_mix`] and feeds it to the controller. The kernel holds NO hardware
-//! knowledge — this is a dumb byte shuttle + sum-mix, equally usable by a
-//! future virtio-snd or USB-audio driver. See `memory/project_audio_hda.md`.
+//! [`poll_mix`] and feeds it to the controller. The kernel holds no hardware
+//! knowledge — this is a dumb byte shuttle + sum-mix, equally usable by
+//! virtio-snd or a USB-audio driver.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 use spin::Mutex;
@@ -13,12 +13,10 @@ pub const CHANNELS: usize = 2;
 pub const BYTES_PER_FRAME: usize = CHANNELS * 2; // S16
 
 const NUM_SLOTS: usize = 4;
-// ~1.36 s ring per slot. The old 32 KiB (~170 ms) was too small to absorb the
-// clock drift between virtio-snd's wall-clock-paced fill (100 Hz ticks) and
-// audio_hda's HDA-crystal-paced drain, plus the resident-driver poll jitter
-// under heavy browser load — `mbox-free` pegged at 0 the whole session, so
-// `submit` dropped real PCM (the "choppy / cuts out" symptom). Zero-init →
-// .bss, so 4 × 256 KiB = 1 MiB costs no binary size.
+// ~1.36 s ring per slot: it must absorb the clock drift between virtio-snd's
+// wall-clock-paced fill (100 Hz ticks) and audio_hda's HDA-crystal-paced
+// drain, plus driver poll jitter under load; a full ring makes `submit` drop
+// PCM. Zero-init → .bss, so 4 × 256 KiB = 1 MiB costs no binary size.
 const SLOT_BYTES: usize = 262144;
 
 struct Slot {

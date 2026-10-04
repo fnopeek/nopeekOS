@@ -99,10 +99,9 @@ pub fn run_first_boot(salt: &[u8; 16]) -> bool {
             }
         }
     } else {
-        // Hier endet die Installation, und danach haelt die Maschine an —
-        // kein Prompt, also kein `dmesg`, und `dmesg prev` braeuchte npkFS,
-        // also genau die Platte, die fehlt. Was der Bildschirm JETZT zeigt,
-        // ist alles, was es gibt. Also zeigen, was da war.
+        // Setup ends here and the machine halts with no prompt and no npkFS
+        // for `dmesg`, so the screen is the only diagnostic: show what PCI
+        // storage was found.
         kprintln!();
         kprintln!("[npk] No block device found. Cannot continue setup.");
         kprintln!("[npk] PCI mass-storage controllers seen:");
@@ -227,11 +226,10 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
     let lang = read_line_default("en");
     config::set("lang", &lang);
 
-    // Default autostart: the app dock + the top bar. Resident apps no
-    // longer pin their worker core — npk_sleep now runs pending scheduler
-    // work while it waits, so multiple looping panels coexist without
-    // starving intents. A config seed, not a kernel hardcode; `set
-    // autostart ...` overrides it.
+    // Default autostart: the app dock + the top bar. npk_sleep runs pending
+    // scheduler work while it waits, so several looping panels coexist
+    // without starving intents. A config seed; `set autostart ...`
+    // overrides it.
     config::set("autostart", "dock bar");
 
     // Theme follows the wallpaper: `auto` picks light/dark from the

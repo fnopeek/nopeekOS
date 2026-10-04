@@ -1,12 +1,12 @@
-//! Task State Segment install — Phase 12.1.0d-2a prerequisite for VMLAUNCH.
+//! Task State Segment install — prerequisite for VMLAUNCH.
 //!
 //! The boot GDT (`boot.s :: gdt64`) is three entries — null, 64-bit
 //! code, 64-bit data — and the kernel never executed `ltr`, so TR=0.
 //! VMX host-state validation rejects HOST_TR_SELECTOR=0 at VMLAUNCH
 //! (SDM Vol. 3C §26.2.3). This module clones the boot GDT into BSS,
 //! appends a 16-byte long-mode TSS descriptor, `lgdt`s the new GDT,
-//! and `ltr`s the new TSS selector. Single-CPU (BSP-only) — APs keep
-//! the boot GDT, which is fine since VMX runs only on Core 0.
+//! and `ltr`s the new TSS selector. BSP only; worker cores that run a
+//! VMX guest get their own via `ensure_core`.
 //!
 //! Reference: Intel SDM Vol. 3A §3.4.5.1 (Code- and Data-Segment
 //! Descriptor Types), §7.7 (Task Management in 64-bit Mode);
@@ -15,10 +15,9 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Maximum cores we install a per-core TSS for (`ensure_core`). The test
-/// boxes are ≤8 logical CPUs; 16 leaves headroom without bloating .data.
-/// A core id ≥ this is a no-op (it just won't run a VMX guest — only the
-/// fiber-mode worker cores need their own TR).
+/// Maximum cores we install a per-core TSS for (`ensure_core`). A core id
+/// ≥ this is a no-op (it just can't run a VMX guest — only the fiber-mode
+/// worker cores need their own TR).
 pub const MAX_CORES: usize = 16;
 
 /// Long-mode TSS layout (104 bytes minimum, no I/O bitmap). RSP0/1/2
@@ -90,13 +89,11 @@ const GDTR_INIT: GdtPointer = GdtPointer { limit: 0, base: 0 };
 //
 // VMX rejects HOST_TR_SELECTOR=0 at VM-entry (SDM §26.2.3). The BSP gets
 // its TR from `init()` at boot; AP/worker cores keep the boot GDT with
-// TR=0. That was fine while VMX ran only on Core 0, but fiber-mode runs
-// the guest's VMRESUME loop on a worker core — so that worker needs its
-// OWN valid TSS + TR before `write_host_state`. Each core gets a private
-// TSS + 5-slot GDT (the busy bit `ltr` sets means cores cannot share one
-// TSS descriptor). SVM (vmsave) has no such host-state check, so the AMD
-// path never needed this — and never calls `ensure_core` (it opens via
-// `svm::vm_open`, not `vmx::vm_open`).
+// TR=0. Fiber mode runs the guest's VMRESUME loop on a worker core, so that
+// worker needs its own valid TSS + TR before `write_host_state`. Each core
+// gets a private TSS + 5-slot GDT (the busy bit `ltr` sets means cores
+// cannot share one TSS descriptor). SVM has no such host-state check and
+// never calls `ensure_core`.
 #[unsafe(link_section = ".data")]
 static mut AP_GDT: [[u64; 5]; MAX_CORES] = [GDT_INIT; MAX_CORES];
 #[unsafe(link_section = ".data")]
@@ -107,7 +104,7 @@ static AP_TSS_INSTALLED: [AtomicBool; MAX_CORES] = {
     [F; MAX_CORES]
 };
 
-/// Install a private TSS + GDT on the CURRENT core and `ltr` it, so VMX
+/// Install a private TSS + GDT on the current core and `ltr` it, so VMX
 /// host-state has a valid HOST_TR when the guest runs as a fiber on this
 /// worker core. Idempotent per core. No-op for core 0 (the BSP already
 /// `ltr`'d via `init()` at boot — must not clobber its GDT) and for ids

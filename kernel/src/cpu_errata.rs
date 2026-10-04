@@ -1,8 +1,7 @@
 //! Per-core CPU mitigations the host must set itself — Linux `init_amd_zen2`.
 //!
-//! A microvm guest used to set these on the host core through pass-through
-//! MSRs. Now that its MSR writes stay in the guest, the host does it, on
-//! every core, before any guest can run there.
+//! A microvm guest's MSR writes stay in the guest, so the host sets these
+//! itself on every core before any guest can run there.
 
 const MSR_DE_CFG: u32 = 0xC001_1029;
 const DE_CFG_ZEN2_FP_BACKUP_FIX: u64 = 1 << 9;
