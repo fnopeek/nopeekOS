@@ -148,11 +148,9 @@ pub fn document(url: &str, kind: &str, message: &str) -> String {
     s.push_str(body);
     s.push_str("</p>");
 
-    // **Der Geraetefall bekommt seinen eigenen Hinweis, mit der Adresse
-    // darin.** Ein Router im Heimnetz KANN kein oeffentlich vertrautes
-    // Zertifikat haben — keine CA stellt eines fuer eine private Adresse
-    // aus. Ohne diesen Absatz endet der Weg hier, und der Nutzer haelt es
-    // fuer einen Fehler in beak. Mit ihm steht der naechste Schritt da.
+    // A device on a private address gets its own hint naming the address:
+    // no CA issues a publicly trusted certificate for a private IP, so
+    // without it the user has no next step.
     let device_hint = matches!(kind, "cert.hostname" | "cert.untrusted")
         .then(|| private_host_of(url))
         .flatten();
@@ -183,12 +181,10 @@ pub fn document(url: &str, kind: &str, message: &str) -> String {
     s
 }
 
-/// Die Adresse aus einer URL, WENN sie eine literale private ist.
+/// The host of a URL, if it is a literal private address.
 ///
-/// Nur dann ist der Geraetehinweis wahr — und nur dann nimmt der Kernel den
-/// Schalter ueberhaupt an (`net.lan_devices` gilt ausschliesslich fuer
-/// literale private Adressen). Ein Hinweis, der auf einen Weg zeigt, den
-/// der Kernel gleich wieder verwirft, waere schlimmer als keiner.
+/// Only then is the device hint true, and only then does the kernel accept
+/// the switch (`net.lan_devices` applies to literal private addresses only).
 fn private_host_of(url: &str) -> Option<String> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);

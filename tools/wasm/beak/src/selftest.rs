@@ -1,28 +1,23 @@
-//! Die eingebaute Pruefseite: `beak:selftest`.
+//! The built-in test page: `beak:selftest`.
 //!
-//! Ein Browser, der nur an fremden Seiten gemessen wird, misst jedes Mal
-//! etwas anderes: Wikipedia meldete `keine Behandler`, also lief der ganze
-//! Zustellpfad im Geraetelauf nie. Diese Seite antwortet immer gleich, holt
-//! nichts aus dem Netz und sagt ihr Ergebnis ZWEIMAL — auf dem Schirm zum
-//! Anschauen und im Log zum Weiterreichen.
+//! Unlike external sites it answers the same way every time, fetches
+//! nothing, and reports its result twice: on screen and in the log.
 //!
-//! Sie ist absichtlich altmodisch geschrieben: der Rahmen kommt mit `var`
-//! und `function` aus, und jede moderne Schreibweise wird ueber `Function()`
-//! einzeln geprueft. Sonst nimmt EIN nicht lesbares Sprachmittel die ganze
-//! Seite mit, und statt einer Liste mit einer roten Zeile steht da nichts.
+//! The scaffold is deliberately old-fashioned (`var`, `function`); every
+//! modern construct is checked individually through `Function()`, so one
+//! unsupported feature produces one failing line instead of a blank page.
 
-/// Das Dokument. Kein Link, kein Bild, kein externes Skript.
+/// The document. No link, no image, no external script.
 ///
-/// Als eigene Datei, damit derselbe Text auch host-seitig durch die Engine
-/// laufen kann (`beak-engine/examples/selftest.rs`) — eine Pruefseite, die
-/// nur auf dem Geraet pruefbar ist, wird nicht gepflegt.
+/// Kept as a separate file so the same text also runs through the engine
+/// on the host (`beak-engine/examples/selftest.rs`).
 pub const HTML: &str = include_str!("selftest.html");
 
-/// Die Adresse, unter der die Seite steht.
+/// The address the page lives at.
 pub const URL: &str = "beak:selftest";
 
-/// Ist das die Pruefseite? `about:` wird mitgenommen, weil jeder Browser sie
-/// dort hat und der Tippfehler sonst als Websuche endet.
+/// Is this the test page? `about:` is accepted too, because other browsers
+/// keep such pages there and the typo would otherwise end as a web search.
 pub fn matches(url: &str) -> bool {
     let u = url.trim();
     u.eq_ignore_ascii_case(URL)

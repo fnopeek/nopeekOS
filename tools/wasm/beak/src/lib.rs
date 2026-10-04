@@ -1,11 +1,11 @@
 //! beak — native, sandboxed web browser for nopeekOS (docs/spec/BROWSER.md).
 //!
-//! Stage 0.1: the page is rendered by the portable `beak-engine` (own block
-//! layout + fontdue rasterisation) into a `Widget::Canvas`; the chrome
-//! (toolbar, address bar, footer) is loft-styled widgets. Scroll comes via
-//! `Event::Wheel`, link clicks via a Canvas hit-test against the engine's
-//! link rects. The engine is host-agnostic (§10); this shell is the thin
-//! nopeek adapter (queries the canvas rect, paints, forwards input).
+//! The page is rendered by the portable `beak-engine` (own layout + fontdue
+//! rasterisation) into a `Widget::Canvas`; the chrome (toolbar, address bar,
+//! footer) is loft-styled widgets. Scroll comes via `Event::Wheel`, link
+//! clicks via a Canvas hit-test against the engine's link rects. The engine
+//! is host-agnostic (§10); this shell is the thin nopeek adapter (queries
+//! the canvas rect, paints, forwards input).
 
 #![no_std]
 
@@ -130,25 +130,25 @@ unsafe extern "C" {
     /// The last collected response's header block, minus the status
     /// line. `Set-Cookie` repeats, so it can only be handed over raw.
     fn npk_http_response_headers(buf_ptr: i32, buf_max: i32) -> i32;
-    /// Der Statuscode der zuletzt eingesammelten Antwort. Fuer eine
-    /// Navigation ist er gleichgueltig — eine 404-Seite ist ein Dokument —,
-    /// fuer `fetch` ist er die halbe Auskunft: `response.ok` haengt daran.
+    /// Status code of the last collected response. Irrelevant for a
+    /// navigation (a 404 page is a document), essential for `fetch`:
+    /// `response.ok` depends on it.
     fn npk_http_status() -> i32;
     /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
     /// at every boot and a cookie's `Expires` is an absolute date.
     fn npk_unix_time() -> i64;
-    /// Zufall aus dem CSPRNG des Kernels (ChaCha20, aus RDRAND geseedet).
-    /// Liefert die geschriebenen Bytes, oder -1. Hoechstens 64 KiB je Aufruf.
+    /// Random bytes from the kernel CSPRNG (ChaCha20, seeded from RDRAND).
+    /// Returns the number of bytes written, or -1. At most 64 KiB per call.
     fn npk_random_bytes(ptr: i32, len: i32) -> i32;
     fn npk_http_final_url(buf_ptr: i32, buf_max: i32) -> i32;
     /// Why the last request failed: `kind\tmessage`. Cleared on success.
     fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
     /// The last response's Content-Type, verbatim. -1 if the server sent none.
     fn npk_http_content_type(buf_ptr: i32, buf_max: i32) -> i32;
-    /// Sagt dem Kernel, WELCHES Dokument gerade angezeigt wird. Er loest die
-    /// Adresse selbst auf und merkt sich nur die Netzklasse; daran haengt,
-    /// ob eine Unterressource ins private Netz darf.
-    /// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
+    /// Tell the kernel which document is shown. It resolves the address
+    /// itself and keeps only the network class, which decides whether a
+    /// subresource may reach the private network.
+    /// See `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
     fn npk_net_context(url_ptr: i32, url_len: i32) -> i32;
     /// Start a newline-separated list of URLs in one call, multiplexed over
     /// HTTP/2 where the host offers it. Same handle discipline as
@@ -156,19 +156,18 @@ unsafe extern "C" {
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    /// Ein TLS-STROM, im Gegensatz zu `npk_http_*`: keine Anfrage mit Ende,
-    /// sondern eine Leitung, die offen bleibt. Gebraucht fuer `wss://`.
-    /// `connect` blockiert fuer den Handschlag (~60 ms, einmal je
-    /// Verbindung); `recv` kommt SOFORT zurueck — 0 heisst „noch nichts",
-    /// -1 heisst zu.
+    /// A TLS stream, unlike `npk_http_*`: not a request with an end but a
+    /// connection that stays open. Used for `wss://`. `connect` blocks for
+    /// the handshake; `recv` returns immediately — 0 means nothing yet,
+    /// -1 means closed.
     fn npk_tls_connect(host_ptr: i32, host_len: i32, port: i32) -> i32;
     fn npk_tls_send(handle: i32, buf_ptr: i32, buf_len: i32) -> i32;
     fn npk_tls_recv(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_tls_close(handle: i32) -> i32;
 
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
-    /// Wie oben, aber mit einer Keks-Zeile JE ADRESSE (durch `\n` getrennt,
-    /// leere Zeilen zaehlen mit). Seit Kernel 0.333.0.
+    /// Like above, but with one cookie line per URL (separated by `\n`,
+    /// empty lines count).
     fn npk_http_begin_many_hdr(urls_ptr: i32, urls_len: i32,
                                hdrs_ptr: i32, hdrs_len: i32, out_max: i32) -> i32;
     /// Collect a finished batch: the bodies back-to-back in `out`, one
@@ -197,9 +196,8 @@ fn now_ms() -> i64 {
 }
 
 /// Log "<label>: <ms> ms". Phase timings are permanent, not scaffolding:
-/// on this hardware the engine runs under a WASM interpreter, so knowing
-/// which phase a page load actually spends its time in is the difference
-/// between fixing the slow thing and rewriting the fast one.
+/// the engine runs under a WASM interpreter, and knowing which phase a page
+/// load spends its time in decides what is worth optimising.
 fn log_ms(label: &str, ms: i64) {
     let mut b = String::new();
     b.push_str("[beak] ");
@@ -230,21 +228,14 @@ fn log(m: &str) {
 /// The page palette: the canvas a document is painted on when it paints none
 /// of its own, and the colours it inherits.
 ///
-/// **This is deliberately NOT the desktop theme.** It used to be, and that
-/// made every page built for a white canvas unreadable on a dark desktop:
-/// the page sets only its text colour — near-black, because it expects white
-/// behind it — and we put dark grey behind that. Google's consent page is the
-/// exact case, measured 2026-08-09: 19 KB of CSS, zero `color-scheme`, zero
-/// `prefers-color-scheme`, zero `light-dark()`, and a `body` rule that sets
-/// no background at all. A browser paints that white. So do we now.
+/// Deliberately not the desktop theme: a page built for a white canvas sets
+/// only a near-black text colour, and a dark canvas behind it makes it
+/// unreadable. Browsers paint such a page white.
 ///
-/// The two halves of "dark mode" were one value here and they are not one
-/// thing: what the USER prefers (a media query) and what the CANVAS is (the
-/// used `color-scheme` of the root, which is light until a page opts in).
-/// Reporting a preference we cannot honour without making pages unreadable is
-/// the worse half to keep, so both are light until `color-scheme` is parsed —
-/// then a page that opts in gets a dark canvas AND a dark preference, which
-/// is the whole rule rather than half of it.
+/// "Dark mode" is two things: what the user prefers (a media query) and what
+/// the canvas is (the used `color-scheme` of the root, light until a page
+/// opts in). Both stay light until `color-scheme` is parsed; then a page that
+/// opts in gets a dark canvas and a dark preference together.
 fn query_theme() -> beak_engine::Theme {
     beak_engine::Theme {
         bg: beak_engine::Rgb(255, 255, 255),
@@ -264,8 +255,7 @@ const ACT_BACK: u32 = 2;
 const ACT_FORWARD: u32 = 3;
 const ACT_RELOAD: u32 = 4;
 /// Give up on the page being loaded. The reload button becomes this while a
-/// navigation is in the air — which is only possible now that one IS in the
-/// air rather than in a host call nobody can interrupt.
+/// navigation is in flight.
 const ACT_STOP: u32 = 5;
 
 // Menu-bar labels (toggle a dropdown)
@@ -282,8 +272,8 @@ const ACT_VIEW_TOGGLE_CSS: u32 = 6_021;
 const ACT_VIEW_INSPECT: u32 = 6_022;
 const ACT_HELP_ABOUT: u32 = 6_100;
 
-// Der Tabstreifen. Zwei Baender statt zwei Zahlen je Tab: der Streifen wird
-// bei jeder Aenderung neu gebaut, und ein Index IST der Tab.
+// The tab strip. Two id bands instead of two numbers per tab: the strip is
+// rebuilt on every change, so an index is the tab.
 const ACT_TAB_NEW: u32 = 7_000;
 const ACT_TAB_SEL: u32 = 7_100;     // + Index
 const ACT_TAB_CLOSE: u32 = 7_200;   // + Index
@@ -311,108 +301,74 @@ fn toggle_menu(which: u8) {
 
 const URL_CAP: usize = 4096;
 
-/// **Was DIESEM Dokument gehoert — und nicht dem Programm.**
+/// Everything that belongs to one document rather than to the program
+/// (`docs/plan/BROWSER_TABS.md` §A2). Two fields in one struct cannot be the
+/// same buffer, which keeps e.g. the document URL and the address-bar text
+/// apart.
 ///
-/// Der erste Schritt zu Tabs, und er zahlt sich schon bei einem aus
-/// (`docs/plan/BROWSER_TABS.md` §A2). beak hielt seinen Zustand in
-/// siebenundsiebzig `static mut`, und die grosse Mehrheit davon beschreibt
-/// das eine geladene Dokument. Solange das so ist, gibt es keinen zweiten
-/// Ort, an dem eine zweite Seite stehen koennte — ein Tabstrip waere nur
-/// Fassade.
+/// Rule: nothing that belongs to a document may be added as a `static mut`.
+/// The statics that remain each belong to something there is only one of:
 ///
-/// Der Gewinn ist aber nicht erst der zweite Tab: **0.147.0 war genau diese
-/// Klasse Fehler.** `URL_BUF` war die Adresse des DOKUMENTS *und* der Inhalt
-/// des Textfelds, und daraus wurde ein Datenschutzfehler (jedes Praefix
-/// einer Eingabe ging an den DNS) plus ein Loch in der Reichweiten-Grenze.
-/// Zwei Felder in einer Struktur koennen nicht derselbe Puffer sein.
-///
-/// Gewandert wird gruppenweise, und nach jeder Gruppe muessen
-/// `beak:selftest` und WPT unveraendert sein.
-///
-/// **Der Zaehler:**
-///
-///     grep -c '^static mut ' tools/wasm/beak/src/lib.rs
-///     0.151.0:  77          <- vorher
-///     0.152.0:  46          <- Adresse, Verlauf, Navigation, Ladevorgang
-///     0.153.0:  47          <- +COOKIE_BUF, ein ABHOLpuffer
-///     0.163.0:  23          <- Ansicht, Nebenabrufe, Skriptrunde
-///     0.163.0:  24          <- und die Tabs legen EINE zurueck:
-///                              aus `DOC` wurden `TABS` + `ACTIVE`
-///
-/// **Die Regel ist nicht „die Zahl faellt", sondern „nichts, was dem
-/// DOKUMENT gehoert, kommt dazu".** 0.153.0 hat einen Puffer bekommen, in
-/// den die gespeicherten Kekse geholt werden — der gehoert dem Abruf, nicht
-/// der Seite, und vervielfacht sich mit Tabs nicht. Wer die Zahl allein
-/// bewacht, verbietet das Richtige und uebersieht das Falsche.
-///
-/// **Die 23, die stehen bleiben, sind keine Reste — sie gehoeren woanders
-/// hin**, und jede Gruppe hat einen Grund, der eine zweite Seite ueberlebt:
-///
-/// | 13 | Abholpuffer (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …, ~47 MB `.bss`) | gehoeren dem Abruf, der gerade laeuft — es laeuft einer |
-/// | 3 | `LAST_W`/`LAST_H`/`LAST_SY` | beschreiben den BILDPUFFER, und der ist einer |
-/// | 3 | `SCRIPT_DEADLINE`, `BUDGET_T0`, `BUDGET_SAID` | beschreiben den LAUF auf dem Stapel, und der ist einer |
-/// | 3 | `OPEN_MENU`, `USE_SITE_CSS`, `INSPECT_MODE` | Fenster und Werkzeug, nicht Seite |
-/// | 2 | `TABS`, `ACTIVE` | die Dokumente selbst, und welches lebt |
+/// | Fetch buffers (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …) | belong to the running fetch |
+/// | `LAST_W`/`LAST_H`/`LAST_SY` | describe the frame buffer |
+/// | `SCRIPT_DEADLINE`, `BUDGET_T0`, `BUDGET_SAID` | describe the run on the stack |
+/// | `OPEN_MENU`, `USE_SITE_CSS`, `INSPECT_MODE` | window and tools, not page |
+/// | `TABS`, `ACTIVE` | the documents themselves, and which one is live |
 struct Doc {
-    /// Woher das Dokument KAM (nach Weiterleitungen). Basis fuer jede
-    /// relative Adresse der Seite und der Netzkontext, den der Kernel fuehrt.
+    /// Where the document came from (after redirects). Base for every
+    /// relative URL of the page and the network context the kernel keeps.
     url: String,
-    /// Was in der Adresszeile STEHT. Nur Text — kein Netzkontext, kein DNS.
+    /// What the address bar shows. Text only — no network context, no DNS.
     edit: String,
-    /// Zurueck/Vorwaerts. War ein festes Feld aus 64 × 4 KB (256 KB `.bss`),
-    /// das je Tab noch einmal dagestanden haette.
+    /// Back/forward history.
     hist: Vec<String>,
     hist_pos: usize,
 
-    // ── Der Ladevorgang dieses Dokuments ────────────────────────────────
-    /// Der laufende Abruf, oder -1.
+    // ── Loading this document ───────────────────────────────────────────
+    /// The running fetch, or -1.
     nav_job: i32,
-    /// Welche Stufe der Kette gerade laeuft.
+    /// Which stage of the chain is running.
     nav_stage: NavStage,
-    /// Die Adresse, die der laufende Abruf VERLANGT hat — nicht die, aus der
-    /// er am Ende kam.
+    /// The URL the running fetch asked for — not the one it ended at.
     nav_url: Option<String>,
     nav_push_hist: bool,
-    /// Beginn der laufenden Stufe, fuer die Zeitzeilen im Log.
+    /// Start of the running stage, for the timing lines in the log.
     nav_stage_ms: i64,
-    /// Zaehlt jede Navigation. Woran haengende Rueckrufe erkennen, dass sie
-    /// zu einer Seite gehoeren, die es nicht mehr gibt.
+    /// Counts every navigation. Lets pending callbacks recognise that they
+    /// belong to a page that no longer exists.
     nav_gen: u32,
     nav_start_ms: i64,
     nav_reported: bool,
-    /// Zaehlt jede Aenderung am Inhalt — die Zahl, an der das Layout haengt.
+    /// Counts every content change — the number the layout depends on.
     content_gen: u32,
-    /// Wie weit die Seite gerollt ist.
+    /// How far the page is scrolled.
     scroll_y: i32,
-    /// Wo eine Textmarkierung begonnen hat, solange die Taste unten ist.
+    /// Where a text selection started, while the button is down.
     sel_anchor: Option<beak_engine::select::TextPos>,
-    /// Der Link unter dem Druck, bis das Loslassen entscheidet — mit dem
-    /// Punkt, an dem gedrueckt wurde.
+    /// The link under the press, until the release decides — with the point
+    /// where it was pressed.
     pending_link: Option<(String, i32, i32)>,
-    /// Die Markierung auf der SEITE — nicht in der Adresszeile, die gehoert
-    /// dem Compositor.
+    /// The selection on the page — not in the address bar, which belongs to
+    /// the compositor.
     sel: Option<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
-    /// Die Suchleiste: `None` heisst zu. Der Text gehoert BEAK, nicht einem
-    /// `Widget::Input` — `Event::InputChange` traegt keine Knotenkennung,
-    /// zwei Eingabefelder im Fenster waeren also nicht auseinanderzuhalten.
-    /// Ein selbst gefuehrter Puffer ist die kleinere Antwort als eine
-    /// ABI-Erweiterung.
+    /// The find bar: `None` means closed. The text is owned by beak, not by
+    /// a `Widget::Input`: `Event::InputChange` carries no node id, so two
+    /// inputs in one window could not be told apart.
     find: Option<String>,
-    /// Fundstellen der laufenden Suche und die, auf der man gerade steht.
+    /// Matches of the running search and the one currently selected.
     found: Vec<(beak_engine::select::TextPos, beak_engine::select::TextPos)>,
     find_at: usize,
-    /// Sammelpuffer fuer ein Zeichen in der Suchleiste.
+    /// Accumulates the bytes of one character typed into the find bar.
     find_pending: [u8; 4],
     find_pending_len: u8,
 
-    // ── Die Teilabrufe des Ladevorgangs ─────────────────────────────────
-    // Blaetter, Skripte, Module: jede Stufe fuehrt Buch darueber, was sie
-    // verlangt hat und in welcher Runde sie steht. Das gehoert zum LADEN
-    // EINES Dokuments — zwei Tabs, die gleichzeitig laden, brauchen zwei
-    // davon, und mit einer Static waeren es zwei Seiten auf einem Zettel.
+    // ── Subresource fetches of the load ─────────────────────────────────
+    // Sheets, scripts, modules: each stage records what it requested and
+    // which round it is in. Per document, so two tabs loading at once do
+    // not share bookkeeping.
     nav_css_count: usize,
     nav_scripts: Option<Vec<PendingScript>>,
-    /// Die JS-Sitzung DIESER Seite.
+    /// The JS session of this page.
     js: Option<beak_engine::js::Session>,
     nav_js_count: usize,
     nav_mod_entries: Option<Vec<String>>,
@@ -427,116 +383,104 @@ struct Doc {
     nav_dynjs_nodes: Option<Vec<u32>>,
     nav_dynjs_rounds: usize,
 
-    // ── Die Ansicht DIESES Dokuments ────────────────────────────────────
-    // Nicht zu verwechseln mit dem, was der BILDPUFFER haelt (`LAST_W/H/SY`
-    // unten): der Puffer ist einer, die Seiten sind viele.
-    /// Das Bild ist nicht mehr das, was die Seite sagt.
+    // ── The view of this document ───────────────────────────────────────
+    // Not the same as what the frame buffer holds (`LAST_W/H/SY` below):
+    // there is one buffer and many pages.
+    /// The picture no longer matches what the page says.
     dirty: bool,
-    /// Und zwar aus einem anderen Grund als Rollen — also ganz neu malen.
+    /// For a reason other than scrolling — repaint everything.
     need_full: bool,
-    /// Ein Bild ist angekommen, die Bildliste muss neu durchgesehen werden.
+    /// An image arrived; the image list must be re-scanned.
     images_dirty: bool,
-    /// Die Kaesten des letzten Layouts, fuer `getBoundingClientRect` & Co.
+    /// The boxes of the last layout, for `getBoundingClientRect` & co.
     ///
-    /// Als `Rc` gehalten, damit das Weiterreichen an die JS-Maschine nichts
-    /// kostet: der Rollstand aendert sich bei JEDEM Bild, die Kaesten nur bei
-    /// einem neuen Layout — ohne das waere jede Rollbewegung eine Kopie von
-    /// ~180 KB.
+    /// Held as `Rc` so handing them to the JS engine is free: the scroll
+    /// position changes every frame, the boxes only on a new layout.
     geom: Option<alloc::rc::Rc<alloc::vec::Vec<beak_engine::layout::ElemRect>>>,
-    /// Das Sichtfeld, das die JS-Sitzung dieses Dokuments zuletzt gehoert hat.
+    /// The viewport the JS session of this document last heard.
     last_vp: (i32, i32),
-    /// Rollstand und Fenstermass, wie sie der SEITE zuletzt gemeldet wurden.
+    /// Scroll position and viewport as last reported to the page.
     ///
-    /// Getrennt von `scroll_y`/`last_vp`: die sagen, was gemalt wird, diese
-    /// sagen, was die Seite WEISS. Ohne den Unterschied faellt `scroll` bei
-    /// jedem Bild oder gar nicht.
+    /// Separate from `scroll_y`/`last_vp`: those say what is painted, these
+    /// say what the page knows. Without the difference `scroll` would fire
+    /// every frame or never.
     told_scroll: i32,
     told_vp: (i32, i32),
-    /// In welcher Haelfte des Blinktakts der Zeiger zuletzt gemalt wurde.
-    /// `None` heisst: es blinkt gerade keiner.
+    /// Which half of the blink cycle the caret was last painted in.
+    /// `None`: no caret is blinking.
     caret_phase: Option<bool>,
-    /// Wann der Takt zuletzt zurueckgesetzt wurde. Ein Browser zeigt den
-    /// Zeiger direkt nach einem Tastendruck SOLIDE — wer tippt, will sehen,
-    /// wo er steht, und nicht auf die naechste Halbsekunde warten.
+    /// When the cycle was last reset. The caret stays solid right after a
+    /// key press, as in other browsers, so a typist can see where it is.
     caret_since: i64,
 
-    // ── Die Nebenabrufe DIESES Dokuments ────────────────────────────────
-    // Bilder, Hintergruende, Schriften, `fetch`: alles, was NEBEN dem
-    // Dokument laeuft und mit ihm endet. Eine zweite Seite hat ihre eigenen —
-    // und `subresources_cancel` bricht genau die einer Seite ab, nicht die
-    // aller.
-    /// Der laufende `<img>`-Stapel und wonach er gefragt hat, damit ein
-    /// ankommender Rumpf unter der Quelle abgelegt wird, unter der die Seite
-    /// ihn genannt hat. -1 / None, wenn nichts unterwegs ist.
+    // ── Subresources of this document ───────────────────────────────────
+    // Images, backgrounds, fonts, `fetch`: everything that runs beside the
+    // document and ends with it. `subresources_cancel` cancels exactly those
+    // of one page.
+    /// The running `<img>` batch and what it asked for, so an arriving body
+    /// is stored under the source the page named it by. -1 / None when
+    /// nothing is in flight.
     img_job: i32,
     img_job_srcs: Option<Vec<(String, String)>>,
-    /// Adressen, zu denen schon eine Fehlanzeige im Log steht — die Meldung
-    /// gehoert EINMAL hin, nicht in jedes Bild.
+    /// URLs a failure has already been logged for — once, not every frame.
     img_missed: Vec<String>,
-    /// Dasselbe fuer Hintergruende, benannt wie das Layout sie fuehrt.
+    /// The same for backgrounds, keyed the way the layout keys them.
     cssimg_job: i32,
     cssimg_job_keys: Option<Vec<(u64, String)>>,
-    /// Die laufende Schriftrunde.
+    /// The running font round.
     font_job: i32,
     font_want: Option<Vec<(String, u32, u16, bool)>>,
-    /// Welche `fetch`-Anfrage der Engine auf welchem Griff des Wirts liegt.
+    /// Which engine `fetch` request sits on which host handle.
     fetch_jobs: Vec<(u32, i32)>,
-    /// Die Bilder DIESER Seite, die noch nicht gefragt wurden — der Rest der
-    /// Schlange hinter dem Stapel, der gerade laeuft.
-    ///
-    /// Standen bis 0.163.0 als Locals in der Schleife, und damit gehoerten
-    /// sie niemandem: bei einem Tabwechsel haette der neue Tab die Bilder des
-    /// alten weitergeholt, mit `resolve` gegen die NEUE Basis.
+    /// Images of this page not yet requested — the rest of the queue behind
+    /// the running batch. Per document, so a tab switch does not keep
+    /// fetching the old tab's images against the new base.
     pending_imgs: Vec<String>,
     pending_css_imgs: Vec<(u64, String)>,
-    /// Jeder Hintergrund, nach dem diese Seite schon gefragt hat — auch die
-    /// gescheiterten. Ein Fehlschlag darf nicht ewig wiederholt werden.
+    /// Every background this page has asked for, including failed ones. A
+    /// failure must not be retried forever.
     css_asked: Vec<u64>,
 
-    // ── Die Skriptrunde DIESES Dokuments ────────────────────────────────
-    /// Wie viele Navigationen die Seite HINTEREINANDER selbst ausgeloest hat.
+    // ── The script round of this document ───────────────────────────────
+    /// How many navigations in a row the page has triggered itself.
     script_nav_chain: u32,
-    /// Setzt `sync_nav` unmittelbar vor `nav_begin` — daran erkennt
-    /// `nav_begin`, dass die Kette WEITERgeht statt neu anzufangen.
+    /// Set by `sync_nav` right before `nav_begin`, so `nav_begin` knows the
+    /// chain continues rather than starts over.
     nav_from_script: bool,
-    /// Was die gewoehnlichen Skripte ergeben haben (gelaufen, gescheitert,
-    /// Bytes) — muss die Modulrunden ueberleben, weil der Bericht erst danach
-    /// geschrieben wird.
+    /// What the classic scripts amounted to (ran, failed, bytes). Must
+    /// survive the module rounds because the report is written after them.
     script_tally: (usize, usize, usize),
-    /// Wann die Skriptrunde begann. NICHT `nav_stage_ms`: das steht nach einer
-    /// Modulrunde auf deren Beginn, und die gemeldete Zeit waere zu klein.
+    /// When the script round started. Not `nav_stage_ms`: after a module
+    /// round that points at the round's start and the reported time is short.
     script_t0: i64,
-    /// Steht `load` noch aus? Es faellt erst, wenn die Geometrie steht.
+    /// Is `load` still pending? It fires only once geometry exists.
     load_pending: bool,
-    /// Wie viele Bilder hintereinander ein Beobachter-Rueckruf schon den Baum
-    /// geaendert hat — der Riegel gegen die „ResizeObserver loop".
+    /// How many frames in a row an observer callback changed the tree — the
+    /// guard against the "ResizeObserver loop".
     obs_rounds: u32,
 
-    // ── Was diese Seite gekostet hat, und was darueber EINMAL gesagt wird ─
-    // Alle fuenf setzt `set_url` zurueck: eine neue Seite bekommt ihr eigenes
-    // Urteil und ihre eigene Gelegenheit, es zu sagen. Ohne das brachte eine
-    // schwere Seite den Zeiger fuer jede spaetere zum Schweigen.
-    /// Was das letzte volle Layout gekostet hat, ms — die Zahl, die
-    /// entscheidet, ob diese Seite sich `:hover` leisten kann.
+    // ── What this page cost, and what is said about it once ─────────────
+    // `set_url` resets all five: a new page gets its own verdict and its own
+    // chance to report it.
+    /// What the last full layout cost, in ms — decides whether this page can
+    /// afford `:hover`.
     last_layout_ms: i64,
     hover_refused: bool,
     hover_said_fast: bool,
     hover_said_slow: bool,
     ctl_bail_said: bool,
-    /// Der im Inspektor gewaehlte Kasten: `(x, y, w, h)` im Dokumentraum, mit
-    /// seiner Beschriftung. Die Koordinaten gelten in DIESEM Dokument.
+    /// The box picked in the inspector: `(x, y, w, h)` in document space,
+    /// with its label. Coordinates are valid in this document.
     sel_box: Option<(i32, i32, i32, i32, String)>,
 
-    // ── Was einen eingefrorenen Tab wiederherstellt ─────────────────────
-    // Diese Felder und die vier ganz oben (`url`, `edit`, `hist`, `hist_pos`)
-    // sind ALLES, was ein Tab im Hintergrund behaelt — Kilobytes statt der
-    // 44 MiB, die eine lebende Seite haelt. Siehe `tab_freeze`.
-    /// Der `<title>` der Seite, fuer den Streifen. Wird beim Auslegen
-    /// nachgezogen (frueher weiss es niemand) und ueberlebt das Einfrieren.
+    // ── What restores a frozen tab ──────────────────────────────────────
+    // These fields and the four at the top (`url`, `edit`, `hist`,
+    // `hist_pos`) are all a background tab keeps. See `tab_freeze`.
+    /// The page's `<title>`, for the tab strip. Updated on layout and kept
+    /// across freezing.
     title: String,
-    /// Wohin nach dem Laden gerollt werden soll. 0 fuer eine neue Seite, der
-    /// gemerkte Stand fuer einen Tab, der zurueckkommt — die Seite wird beim
-    /// Zurueckwechseln neu geholt, und ohne diese Zahl stuende sie oben.
+    /// Where to scroll after loading. 0 for a new page, the remembered
+    /// position for a returning tab (which is refetched on switch).
     scroll_want: i32,
 }
 
@@ -565,66 +509,50 @@ impl Doc {
     }
 }
 
-/// **Die Tabs.** `docs/plan/BROWSER_TABS.md` §A3 (b): EIN lebendiger Motor,
-/// der Rest eingefroren.
+/// The tabs. `docs/plan/BROWSER_TABS.md` §A3 (b): one live engine, the rest
+/// frozen.
 ///
-/// Der Motor haelt einen Baum, ein Stilblatt und die Bilder EINER Seite;
-/// `HTML_BUF`/`CSS_BUF` sind je ein Puffer. Zwei lebende Seiten waeren also
-/// zwei Motoren — 44 MiB gehaltene Halde je Stueck, gemessen auf srf.ch. Ein
-/// Tab im Hintergrund ist deshalb nur das, was ihn wiederherstellt (Adresse,
-/// Verlauf, Rollstand, Titel), und beim Zurueckwechseln wird die Seite neu
-/// geholt. Was das billig macht, ist schon gebaut: `DOC_SLOTS = 3` im Motor
-/// haelt die letzten drei geparsten Baeume, und der Bildspeicher ueberlebt
-/// die Navigation.
+/// The engine holds the tree, style sheet and images of one page, and
+/// `HTML_BUF`/`CSS_BUF` are single buffers. A background tab is therefore
+/// only what restores it (URL, history, scroll position, title), and the page
+/// is refetched on switching back; `DOC_SLOTS` in the engine and the image
+/// cache keep that cheap. Cost: script state does not survive a tab switch.
 ///
-/// Der Preis, und er gehoert benannt: **Skriptzustand geht verloren.** Ein
-/// halb ausgefuelltes Formular, ein offenes Menue, ein Warenkorb per Skript
-/// sind nach einem Tabwechsel weg. Das ist der Eintausch fuer „zwanzig Tabs
-/// kosten wie einer"; die Gegenrichtung (2-3 lebendige nach LRU) steht in
-/// §A3 und braucht mehrere Motoren.
-///
-/// **`Box`, und das ist keine Zierde.** `js_session()` und `fetch_jobs()`
-/// geben `&'static mut` INS Dokument heraus. Ein `Vec<Doc>`, der beim
-/// Oeffnen eines Tabs umzieht, liesse sie auf den alten Speicher zeigen —
-/// ein Fehler, den man erst Wochen spaeter als Datenmuell sieht. Ein `Box`
-/// steht fest, was der Vec auch tut.
+/// `Box` is required: `js_session()` and `fetch_jobs()` hand out
+/// `&'static mut` into the document, and a `Vec<Doc>` that reallocates when
+/// a tab opens would leave them pointing at freed memory.
 static mut TABS: Vec<alloc::boxed::Box<Doc>> = Vec::new();
-/// Welcher Tab gemalt wird und lebt. Immer gueltig — `active` klemmt.
+/// The tab that is painted and live. Always valid — `active` clamps.
 static mut ACTIVE: usize = 0;
 
-/// **Die Layout-Engine als Globale, nicht als Variable der Bildschleife.**
+/// The layout engine, as a global rather than a variable of the frame loop:
+/// `Interp::relayout` is a `fn` pointer and captures nothing, so the hook a
+/// page uses to request a fresh layout mid-script cannot reach a local.
 ///
-/// Sie lag bis 0.184.0 in `main`, und das ging, solange nur die Schleife sie
-/// brauchte. `Interp::relayout` ist aber ein `fn`-Zeiger und faengt nichts
-/// ein: der Haken, mit dem eine Seite mitten im Skript ein frisches Layout
-/// verlangt, kommt an eine lokale Variable nicht heran.
-///
-/// Die Entleihung endet wie bei `tabs()` in der rufenden Anweisung — wer ein
-/// `&mut` ueber einen Skriptlauf festhielte, haette zwei davon.
+/// As with `tabs()`, the borrow ends in the calling statement; holding a
+/// `&mut` across a script run would create two.
 static mut ENGINE: Option<Engine> = None;
 
 fn engine() -> &'static Engine {
-    // SAFETY: ein Faden; `main` legt sie vor dem ersten Gebrauch an, und die
-    // Entleihung endet in der rufenden Anweisung.
+    // SAFETY: single thread; `main` creates it before first use, and the
+    // borrow ends in the calling statement.
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).get_or_insert_with(Engine::new) }
 }
 fn engine_mut() -> &'static mut Engine {
-    // SAFETY: wie `engine()`.
+    // SAFETY: as in `engine()`.
     unsafe { (*core::ptr::addr_of_mut!(ENGINE)).get_or_insert_with(Engine::new) }
 }
 
-/// Wieviele Tabs.
+/// Maximum number of tabs.
 ///
-/// **Der Speicher ist es nicht** — ein eingefrorener Tab ist Kilobytes. Es
-/// ist der Streifen: 160 px je Tab, zehn davon sind 1600 px, und darueber
-/// schoebe der elfte das `+` aus dem Fenster. Was diesen Deckel hebt, ist
-/// ein rollender Streifen (`Widget::Scroll`, `Axis::Horizontal`) — der
-/// einzige Kasten, der im Compositor wirklich abschneidet.
+/// The limit is the strip, not memory (a frozen tab is kilobytes): beyond
+/// ten tabs the `+` would be pushed out of the window. A horizontally
+/// scrolling strip (`Widget::Scroll`, `Axis::Horizontal`) would lift it.
 const MAX_TABS: usize = 10;
 
 fn tabs() -> &'static mut Vec<alloc::boxed::Box<Doc>> {
-    // SAFETY: ein Faden; die Entleihung endet in der rufenden Anweisung.
-    // Der leere Fall trifft genau einmal, beim allerersten Zugriff.
+    // SAFETY: single thread; the borrow ends in the calling statement.
+    // The empty case happens exactly once, on the very first access.
     unsafe {
         let p = core::ptr::addr_of_mut!(TABS);
         if (*p).is_empty() {
@@ -634,9 +562,8 @@ fn tabs() -> &'static mut Vec<alloc::boxed::Box<Doc>> {
     }
 }
 
-/// Der laufende Tab. **Geklemmt, nicht geprueft:** ein `ACTIVE`, das auf
-/// einen geschlossenen Tab zeigt, waere sonst eine Panik an einer Stelle, an
-/// der niemand sie erwartet.
+/// The current tab. Clamped rather than checked: an `ACTIVE` pointing at a
+/// closed tab would otherwise panic where nobody expects it.
 fn active() -> usize {
     let n = tabs().len();
     let a = unsafe { core::ptr::addr_of!(ACTIVE).read() };
@@ -646,18 +573,16 @@ fn set_active(i: usize) {
     unsafe { core::ptr::addr_of_mut!(ACTIVE).write(i) };
 }
 
-/// **Die Regel fuer beide: eine Entleihung je Anweisung.**
+/// Rule for both: one borrow per statement.
 ///
-/// beak ist ein einziger Faden, es gibt also keinen zweiten Zugriff — aber
-/// „einfaedig" ist nicht dasselbe wie „aliasfrei". Diese Referenzen kommen
-/// aus einem `unsafe`-Deref und fallen damit aus der Buchhaltung des
-/// Rechners: er wuerde `let d = doc_mut(); … doc().x …` durchgehen lassen,
-/// und das sind zwei gleichzeitige Entleihungen auf dasselbe Objekt. Auf
-/// `&mut` ist das undefiniert, nicht bloss unschoen.
+/// beak is single-threaded, but single-threaded is not alias-free. These
+/// references come from an `unsafe` deref and escape the borrow checker: it
+/// would accept `let d = doc_mut(); … doc().x …`, which is two simultaneous
+/// borrows of one object — undefined behaviour on `&mut`.
 ///
-/// Praktisch heisst das: `doc().feld` und `doc_mut().feld = …` als GANZE
-/// Anweisung sind immer richtig; ein festgehaltenes `let d = doc_mut()` nur
-/// dann, wenn darin kein weiterer Aufruf steckt.
+/// In practice: `doc().field` and `doc_mut().field = …` as a whole statement
+/// are always correct; a held `let d = doc_mut()` only if nothing in between
+/// calls back into these.
 fn doc() -> &'static Doc {
     let a = active();
     &tabs()[a]
@@ -667,11 +592,8 @@ fn doc_mut() -> &'static mut Doc {
     &mut tabs()[a]
 }
 
-/// Auf `cap` Bytes kuerzen, aber an einer ZEICHENgrenze.
-///
-/// Der Vorgaenger kopierte `min(len, cap)` rohe Bytes in einen festen Puffer;
-/// traf das mitten in ein Zeichen, war der Inhalt kein gueltiges UTF-8 mehr
-/// und `from_utf8(...).unwrap_or("")` machte daraus eine LEERE Adresse.
+/// Truncate to `cap` bytes, at a character boundary (a cut mid-character
+/// would make the text invalid UTF-8).
 fn clip(s: &str, cap: usize) -> &str {
     if s.len() <= cap { return s }
     let mut n = cap;
@@ -684,45 +606,32 @@ static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
 static mut HTML_LEN: usize = 0;
 
 // Concatenated bytes of the page's external <link rel=stylesheet> files.
-// Both numbers are measured against real pages, not guessed: GitHub links 37
-// sheets totalling 4.4 MiB, MDN links 17 that come to 71 KiB, SRF 5 / 367 KiB,
-// Wikipedia 3 / 273 KiB. The old 16-link cap therefore broke MDN at 3 % of the
-// byte budget — the count was the wrong unit, the same mistake MAX_IMAGES made.
-// A dropped stylesheet is not a missing icon, it is a broken page, so the
-// headroom is deliberate. The buffer is `.bss`: it costs runtime memory only,
-// nothing in the shipped .wasm.
+// Large pages link dozens of sheets totalling several MiB; the link count is
+// the wrong unit to cap. A dropped stylesheet is a broken page, not a missing
+// icon, so the headroom is deliberate. The buffer is `.bss`: it costs runtime
+// memory only, nothing in the shipped .wasm.
 const CSS_CAP: usize = 8 * 1024 * 1024;
 const MAX_CSS_LINKS: usize = 64;
 static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
 static mut CSS_LEN: usize = 0;
 
-// Scratch buffer a whole BATCH of <img> bytes arrives in before decoding.
+// Scratch buffer a whole batch of <img> bytes arrives in before decoding.
 //
-// It is shared by `IMG_BATCH` images at once, so it was never "6 MB per
-// picture" — it was 1.5. A single press photograph is bigger than that, and it
-// would have failed with `n == 0`, which used to say nothing at all. The
-// kernel bounds what all pending answers may reserve together
-// (`MAX_RESERVED_BYTES`, 64 MB); 24 MB here leaves room for a document (3) +
+// Shared by `IMG_BATCH` images at once; a single large photograph must fit.
+// The kernel bounds what all pending answers may reserve together
+// (`MAX_RESERVED_BYTES`, 64 MB); 24 MB leaves room for a document (3) +
 // stylesheets (8) + scripts (8) in flight beside it.
 const IMG_FETCH_CAP: usize = 24 * 1024 * 1024;
-/// A REQUEST backstop, not a memory bound. Memory is bounded one layer down,
-/// where it can be measured: the engine keeps a per-page budget of decoded
-/// BGRA and refuses anything over it, plus a per-image pixel cap. Counting
-/// images here as well was the cruder of the two caps and the one that bit —
-/// de.wikipedia/Stansstad has 20 distinct sources whose pixels come to a
-/// couple of MB, so the byte budget never came near, and #17/#19/#20 (a navbox
-/// coat of arms and both footer icons) silently kept their placeholders.
-// A fetch-queue bound, NOT a memory bound — the pixel budget in the engine is
-// what stops a page from eating the machine, and the heap grows now. This only
-// keeps one absurd document from queueing thousands of round-trips, and it says
-// so when it bites.
+/// A request backstop, not a memory bound. Memory is bounded in the engine:
+/// a per-page budget of decoded BGRA plus a per-image pixel cap. This only
+/// keeps one absurd document from queueing thousands of round-trips, and it
+/// says so when it bites.
 const MAX_IMAGES: usize = 512;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 
-/// How many images one batch asks for. Small on purpose: the batch is a
-/// blocking call, so a whole page in one go would freeze the window again —
-/// the very thing progressive loading fixed. Four is enough to overlap the
-/// round-trips while a turn of the loop stays short.
+/// How many images one batch asks for. Small on purpose: a large batch
+/// would make a turn of the loop long; four is enough to overlap the
+/// round-trips.
 const IMG_BATCH: usize = 4;
 
 /// Receives the per-URL length table from `npk_http_take_many`. Sized for
@@ -745,14 +654,11 @@ fn url_lines(urls: &[String]) -> String {
 /// may take together.
 fn begin_batch(urls: &[String], cap: usize) -> i32 {
     let blob = url_lines(urls);
-    // **Jede Unterressource bekommt ihren Keks.** Vorher trug nur die
-    // Anfrage nach dem DOKUMENT eine `Cookie`-Zeile; Bilder, Blaetter und
-    // Skripte gingen anonym raus. Hinter einer Anmeldung kam so der Text an
-    // und die Bilder nicht, und es sah aus wie ein Bildfehler.
+    // Every subresource gets its cookies, not only the document request.
     //
-    // Eine Zeile je Adresse, in derselben Reihenfolge, LEERE ZEILEN
-    // EINGESCHLOSSEN — die Zuordnung ist die Position, und wer leere Zeilen
-    // wegwirft, schickt den Keks der einen Adresse an eine andere.
+    // One line per URL, in the same order, empty lines included: the mapping
+    // is by position, and dropping empty lines would send one URL's cookies
+    // to another.
     let now = unsafe { npk_unix_time() };
     let mut ck = String::new();
     let mut any = false;
@@ -761,8 +667,8 @@ fn begin_batch(urls: &[String], cap: usize) -> i32 {
         let v = cookies::header_for(u, now);
         if !v.is_empty() { any = true; ck.push_str(&v); }
     }
-    // Kein Keks im Spiel? Dann der alte Weg — eine Zeile weniger ueber die
-    // Grenze, und der Kernel muss nichts pruefen.
+    // No cookies involved: use the plain call; nothing for the kernel to
+    // check.
     if !any {
         return unsafe { npk_http_begin_many(blob.as_ptr() as i32, blob.len() as i32, cap as i32) };
     }
@@ -818,51 +724,45 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 static mut RECT_BUF: [u8; 16] = [0; 16];
 
-/// **Was der BILDPUFFER haelt — nicht, was die Seite sagt.**
+/// What the frame buffer holds — not what the page says.
 ///
-/// Der Puffer ist einer, auch wenn es spaeter mehrere Dokumente gibt: diese
-/// drei Zahlen beschreiben das Bild, das gerade im Puffer steht, und gehoeren
-/// deshalb dem Fenster. Die Frage „muss neu gemalt werden?" gehoert dagegen
-/// dem Dokument (`Doc::dirty`, `Doc::need_full`) — ein Bild, das im
-/// Hintergrund ankommt, macht SEINE Seite alt, nicht das Bild auf dem Schirm.
+/// There is one buffer, so these three numbers belong to the window. Whether
+/// a repaint is needed belongs to the document (`Doc::dirty`,
+/// `Doc::need_full`): an image arriving in the background makes its own page
+/// stale, not the picture on screen.
 static mut LAST_W: i32 = -1;
 static mut LAST_H: i32 = -1;
-/// The scroll offset the buffer currently HOLDS, so the next frame knows how
+/// The scroll offset the buffer currently holds, so the next frame knows how
 /// far the picture has to move.
 static mut LAST_SY: i32 = 0;
 
-/// Dem Kernel sagen, aus welchem Dokument die naechsten Anfragen kommen.
+/// Tell the kernel which document the next requests come from.
 ///
-/// **Der Kernel glaubt uns die Adresse, aber nicht die Klasse** — er loest
-/// selbst auf. Was das garantiert: Seitencode kann den Kontext nie
-/// erweitern, weil Seitencode keinen Weg zu einer Host-Funktion hat. Was es
-/// NICHT garantiert: dass beak selbst sich nicht vertut. Dafuer gibt es nur
-/// diese eine Stelle und `set_url` — beide unten.
+/// The kernel trusts the URL but not the class — it resolves it itself.
+/// Page code can never widen the context, because it has no path to a host
+/// function. beak itself can still get it wrong; this function and
+/// `set_url` are the only callers.
 fn tell_net_context(url: &str) {
     unsafe { npk_net_context(url.as_ptr() as i32, url.len() as i32) };
 }
 
 fn set_url(s: &str) {
-    // Nach dem Laden noch einmal, mit der Adresse, aus der das Dokument
-    // WIRKLICH kam (nach Weiterleitungen). `nav_begin` hat vorher schon die
-    // des Ziels gemeldet; hier wird sie richtiggestellt.
+    // Again after loading, with the URL the document really came from
+    // (after redirects); `nav_begin` already reported the target's.
     tell_net_context(s);
     let d = doc_mut();
     d.url.clear();
     d.url.push_str(clip(s, URL_CAP));
-    // Eine Markierung gehoert dem Text, den sie markiert. Die neue Seite hat
-    // andere Textbefehle an denselben Stellen — die alten Orte zeigten dort
-    // auf irgendetwas.
+    // A selection belongs to the text it marks; the new page has other text
+    // ops at the same places.
     d.sel = None;
     d.sel_anchor = None;
-    // Ein Link, dessen Loslassen nie kam, darf die naechste Seite nicht
-    // umleiten.
+    // A link whose release never came must not redirect the next page.
     d.pending_link = None;
-    // Die Zeile zeigt, wo man IST — bis jemand hineintippt.
+    // The bar shows where we are — until someone types into it.
     set_edit(s);
-    // A new page gets its own verdict on whether it can afford `:hover` —
-    // and its own chance to say so once. Without this, one heavy page
-    // silences the pointer for every page after it.
+    // A new page gets its own verdict on whether it can afford `:hover`, and
+    // its own chance to say so once.
     let d = doc_mut();
     d.hover_refused = false;
     d.hover_said_fast = false;
@@ -872,14 +772,10 @@ fn set_url(s: &str) {
 }
 fn url_str() -> &'static str { &doc().url }
 
-/// Nur das Textfeld — kein Netzkontext, keine neue Basis, kein DNS.
+/// The text field only — no network context, no new base, no DNS.
 ///
-/// **Ein Tastendruck ist keine Navigation.** Bis 0.146.0 rief jeder
-/// Tastendruck `set_url`, und der meldet dem Kernel den Netzkontext; der
-/// loest dafuer AUF. Am Geraet stand das als sechzehn DNS-Abfragen im Log —
-/// `sandbox.nopeek.c`, `sandbox.nopeek.`, `sandbox.nopeek`, … bis zur leeren
-/// Zeichenkette —, weil der Benutzer die Adresse rueckwaerts geloescht hat.
-/// Jedes Praefix dessen, was jemand tippt, ging an den Aufloeser.
+/// A key press is not a navigation: reporting every prefix of what the user
+/// types as network context would send each one to the resolver.
 fn set_edit(s: &str) {
     let d = doc_mut();
     d.edit.clear();
@@ -903,27 +799,23 @@ fn css_str() -> &'static str {
 }
 
 /// The current page's forms + the user's live edits to them. Rebuilt on every
-/// navigation (keyed on `Doc::nav_gen`, NOT the layout's content generation — a theme
+/// navigation (keyed on `Doc::nav_gen`, not the layout's content generation — a theme
 /// switch or an image arriving must not wipe what the user has typed).
 struct Page {
     forms: Forms,
     state: FormState,
     nav: u32,
-    /// Stand des Baums, aus dem `forms` gebaut wurde.
+    /// Tree generation `forms` was built from.
     scripted: u64,
-    /// Der Wert des fokussierten Feldes, als es den Fokus BEKAM.
+    /// The focused field's value when it gained focus.
     ///
-    /// `change` faellt bei einem Textfeld nicht je Zeichen, sondern beim
-    /// Verlassen — und nur, wenn sich wirklich etwas geaendert hat (HTML
-    /// §4.10.5.5). Ohne diesen Wert waere „geaendert" nicht zu beantworten.
+    /// `change` on a text field fires on leaving, not per character, and only
+    /// if something actually changed (HTML §4.10.5.5).
     focus_value: Option<String>,
-    /// Fingerabdruck des zuletzt GEMELDETEN Bestands.
+    /// Fingerprint of the last reported inventory.
     ///
-    /// `sync` laeuft nach jedem Skriptlauf und nach jedem Beobachter-Rueckruf,
-    /// nicht nur nach einer Navigation — der Kommentar unten sagte „once per
-    /// navigation", und am Geraet standen dieselben acht Zeilen achtmal
-    /// untereinander. Ein Bestand, der sich nicht geaendert hat, ist keine
-    /// Nachricht.
+    /// `sync` runs after every script run and observer callback, not only
+    /// after a navigation; an unchanged inventory is not worth a log line.
     logged: u64,
 }
 
@@ -933,17 +825,14 @@ impl Page {
                state: FormState::default(), nav: 0, scripted: 0, logged: 0,
                focus_value: None }
     }
-    /// Das Formularmodell nachziehen — nach einer Navigation ODER nachdem
-    /// Skripte den Baum ersetzt haben.
+    /// Refresh the form model — after a navigation or after scripts replaced
+    /// the tree.
     ///
-    /// **Aus dem LEBENDEN Baum, nicht aus dem Quelltext.** Eine Seite, die
-    /// ihre Maske erst per Skript baut, hatte hier vorher gar keine
-    /// Steuerelemente: das Bild zeigte ein Anmeldeformular, `submit` sagte
-    /// „kein zugehoeriges Formular". Das ist kein Sonderfall einer Seite,
-    /// sondern die Regel bei allem, was seine Oberflaeche zur Laufzeit baut.
+    /// Collected from the live tree, not the source: a page that builds its
+    /// form by script would otherwise have no controls here.
     ///
-    /// Liefert true, wenn wirklich neu eingesammelt wurde — nur dann darf der
-    /// Rufer die Werte aus dem Baum uebernehmen.
+    /// Returns true if it really re-collected — only then may the caller
+    /// take the values from the tree.
     fn sync(&mut self, engine: &Engine) -> bool {
         let g = nav_gen();
         let sg = engine.scripted_gen();
@@ -957,20 +846,14 @@ impl Page {
             Some(f) => f,
             None => forms::collect(&beak_engine::parse(html_str())),
         };
-        // Eine NAVIGATION wirft die Eingaben weg, ein Skriptlauf nicht — was
-        // der Benutzer getippt hat, gehoert ihm, auch wenn die Seite daneben
-        // etwas umbaut.
+        // A navigation discards the input, a script run does not: what the
+        // user typed is theirs, even if the page rebuilds around it.
         //
-        // **Und „gehoert ihm" heisst: es muss die Nummerierung ueberleben.**
-        // `Doc::to_dom` vergibt die `seq` bei JEDEM Zurueckschreiben neu, von
-        // eins an in Dokumentreihenfolge — ein einziger Knoten mehr am
-        // Anfang, und jedes Steuerelement dahinter heisst anders. `FormState`
-        // ist nach genau dieser Zahl geschluesselt. Auf DuckDuckGos
-        // Startseite wanderten die Knoepfe zwischen 156 und 157 hin und her,
-        // und die Sucheingabe war nach jedem Lauf verwaist: abgeschickt wurde
-        // ein leeres `q`. Der BAUM traegt den Wert (dorthin schreibt jeder
-        // Tastendruck), also wird er von dort zurueckgeholt — unter den neuen
-        // Nummern.
+        // It must also survive renumbering: `Doc::to_dom` reassigns `seq` on
+        // every write-back, in document order, so one extra node near the
+        // top renames every control after it, and `FormState` is keyed by
+        // that number. The tree carries the value (every key press writes it
+        // there), so it is pulled back from there under the new numbers.
         if navigated {
             self.state.reset();
         } else if let Some(s) = js_session() {
@@ -1024,11 +907,9 @@ impl Page {
             }
             s.push_str(" name=");
             s.push_str(if c.name.is_empty() { "-" } else { &c.name });
-            // **Was auf dem Knopf STEHT.** Googles Einwilligungsseite hat vier
-            // Formulare auf dieselbe Adresse; ohne die Beschriftung sind
-            // „Alle ablehnen" und „Alle akzeptieren" im Log nicht zu
-            // unterscheiden, und wer hier blind das erste nimmt, wirft eine
-            // Muenze ueber eine Entscheidung des Benutzers.
+            // The label on the button: several forms may post to the same
+            // URL, and only the label tells e.g. "reject all" from "accept
+            // all" in the log.
             if !c.label.is_empty() {
                 s.push_str("  \"");
                 s.push_str(&c.label);
@@ -1045,7 +926,7 @@ impl Page {
     }
 }
 
-// Navigation generation — bumped ONLY by a real page load.
+// Navigation generation — bumped only by a real page load.
 fn nav_gen() -> u32 {
     doc().nav_gen
 }
@@ -1066,8 +947,8 @@ fn toggle_site_css() {
 
 // Inspect dev tool: when on, the engine records an element box per node and a
 // canvas click selects the deepest box under the cursor (outline + a label in
-// the status bar) instead of following a link — so a mis-rendered element can
-// be named on the device.
+// the status bar) instead of following a link, so a mis-rendered element can
+// be named.
 static mut INSPECT_MODE: bool = false;
 fn inspect_mode() -> bool {
     unsafe { core::ptr::addr_of!(INSPECT_MODE).read() }
@@ -1103,19 +984,16 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
         engine.layout_ua_forms(html_str(), w, state)
     };
     let ms = now_ms() - t0;
-    // The width belongs IN the number. A device timing without it cannot be
-    // compared with anything -- 1000 px against 1880 px is a factor of 1.75 --
-    // and reading it off the screen means opening a window, which changes the
-    // very width being measured.
+    // The width belongs in the logged number: a timing without it cannot be
+    // compared, and reading it off the screen means opening a window, which
+    // changes the width being measured.
     let mut label = String::from("layout @");
     push_i64(&mut label, w as i64);
     label.push_str("px (parse+cascade+layout)");
     log_ms(&label, ms);
     doc_mut().last_layout_ms = ms;
-    // ...and WHICH of the three it was. The host profile says the box layout
-    // dominates, but the host is not a WASM interpreter and the phases do not
-    // scale alike under one: beak 0.18.0 halved the box layout on the host and
-    // moved the device number by nothing at all. One number cannot say why.
+    // ...and which of the three phases it was. Under a WASM interpreter the
+    // phases do not scale like on the host, so one total cannot say why.
     let p = lay.phase;
     if p[0] + p[1] + p[2] > 0 {
         log_ms("  dom::parse", p[0] as i64);
@@ -1133,12 +1011,11 @@ fn payload_str(len: usize) -> &'static str {
 fn scroll_y() -> i32 {
     doc().scroll_y
 }
-/// Wohin die Seite nach dem Laden rollt.
+/// Where the page scrolls after loading.
 ///
-/// **Null fuer eine neue Seite** — sie faengt oben an. Der gemerkte Stand
-/// fuer einen Tab, der zurueckkommt: er wird beim Wechsel neu GEHOLT
-/// (`docs/plan/BROWSER_TABS.md` §A3 b), und ohne diese Zahl staende der Leser
-/// nach jedem Wechsel wieder ganz oben.
+/// Zero for a new page. For a returning tab, the remembered position: the
+/// page is refetched on switch (`docs/plan/BROWSER_TABS.md` §A3 b), and
+/// without it the reader would land at the top.
 fn scroll_after_load() {
     let y = doc().scroll_want;
     doc_mut().scroll_want = 0;
@@ -1150,7 +1027,7 @@ fn set_scroll(y: i32) {
 /// Something other than scrolling wants a repaint.
 ///
 /// Scrolling does not change the page, it moves it — so a frame that is dirty
-/// for scrolling ALONE can be blitted and have one band redrawn. Anything else
+/// for scrolling alone can be blitted and have one band redrawn. Anything else
 /// (a hover, a form key, a new layout) sets `need_full` and gets the whole
 /// viewport. It is set, never cleared, until a frame is actually painted: a
 /// hover followed by a scroll must still repaint everything.
@@ -1160,20 +1037,17 @@ fn mark_dirty() {
     d.need_full = true;
 }
 
-/// Dirty because the viewport MOVED — the display list is untouched.
+/// Dirty because the viewport moved — the display list is untouched.
 fn mark_dirty_scrolled() {
     doc_mut().dirty = true;
 }
 
 // Content generation — bumped on every fetch so the layout cache knows to
 // re-lay-out (vs. reusing it for scroll, which keeps scrolling smooth).
-/// When the current navigation started, so the first paint after it can
-/// report the ONE number a user actually feels: click → something on screen.
-/// Cleared once that number has been reported for this navigation.
 
 /// Invalidate the layout cache. `why` is logged because a full re-layout is
-/// the single most expensive thing this app does (~4.7 s on device), so an
-/// unexpected one has to be attributable at a glance.
+/// the single most expensive thing this app does, so an unexpected one has
+/// to be attributable at a glance.
 fn bump_content_gen(why: &str) {
     let d = doc_mut();
     d.content_gen = d.content_gen.wrapping_add(1);
@@ -1188,16 +1062,14 @@ fn content_gen() -> u32 {
 
 /// A pointer that costs more than this to follow makes the page feel broken —
 /// the window stops answering while it re-lays-out. Below it, hover is free
-/// enough to be worth having. Only the FALLBACK is measured against it: a
+/// enough to be worth having. Only the fallback is measured against it: a
 /// pointer change the engine can answer by repainting costs a fraction of a
 /// millisecond and is never refused.
 const HOVER_BUDGET_MS: i64 = 250;
-/// Say ONCE per page how the pointer is being answered here.
+/// Say once per page how the pointer is being answered here.
 ///
-/// Once each, for the reason in `Doc`: without them a pointer answered by
-/// repainting is INVISIBLE in the log, so a device run cannot tell "it works"
-/// from "it never happened" — which is exactly what the first 0.28.0 log could
-/// not say ([[feedback-log-the-version-in-the-trace]]).
+/// Without these lines a pointer answered by repainting is invisible in the
+/// log, so a run cannot tell "it works" from "it never happened".
 fn say_hover_once(fast: bool, ms: i64, why: &str) {
     let said = if fast { doc().hover_said_fast } else { doc().hover_said_slow };
     if said {
@@ -1232,8 +1104,7 @@ fn hover_affordable() -> bool {
 }
 
 /// Why the last fetch failed, as `(kind, message)`. `None` if the kernel
-/// reported nothing — which includes an older kernel without the host fn,
-/// so the caller must have a fallback rather than assume this is present.
+/// reported nothing, so the caller must have a fallback.
 fn last_error() -> Option<(String, String)> {
     const ERR_CAP: usize = 512;
     static mut ERR_BUF: [u8; ERR_CAP] = [0; ERR_CAP];
@@ -1271,9 +1142,8 @@ fn show_error_page(url: &str) {
     }
 }
 
-/// The last response's Content-Type. `None` if the server sent none — or if
-/// the kernel is older than the host fn, which is why every caller has to
-/// cope with not knowing rather than assume UTF-8.
+/// The last response's Content-Type. `None` if the server sent none, which
+/// is why every caller has to cope with not knowing rather than assume UTF-8.
 fn content_type() -> Option<String> {
     const CT_CAP: usize = 256;
     static mut CT_BUF: [u8; CT_CAP] = [0; CT_CAP];
@@ -1288,7 +1158,7 @@ fn content_type() -> Option<String> {
 
 /// Bring the freshly fetched document to valid UTF-8, in place.
 ///
-/// Must run before ANYTHING reads `html_str()` — the stylesheet scan does,
+/// Must run before anything reads `html_str()` — the stylesheet scan does,
 /// and a document still holding raw Latin-1 reads back as the empty string.
 fn decode_document() {
     let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
@@ -1308,7 +1178,7 @@ fn decode_document() {
 
 /// Same for the concatenated stylesheets. No Content-Type here — they arrive
 /// through the batch fetch, which reports one status per URL and no headers —
-/// so this is sniff-only. One bad byte used to cost the page ALL its CSS.
+/// so this is sniff-only; one bad byte must not cost the page all its CSS.
 fn decode_css() {
     let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
     if len == 0 {
@@ -1325,7 +1195,7 @@ fn decode_css() {
 }
 
 /// The URL the last fetch's body actually came from, after redirects.
-/// `None` if the kernel reported none (request failed, or an older kernel).
+/// `None` if the kernel reported none (e.g. the request failed).
 fn fetched_from() -> Option<String> {
     let dst = core::ptr::addr_of_mut!(FINAL_URL_BUF) as *mut u8;
     let n = unsafe { npk_http_final_url(dst as i32, URL_CAP as i32) };
@@ -1348,43 +1218,33 @@ static mut HDR_BUF: [u8; HDR_CAP] = [0; HDR_CAP];
 // `nav_pump` on a later turn of the loop, so between them beak paints,
 // scrolls and answers keys exactly as it does when idle.
 //
-// The two stages stay strictly ordered, and NOTHING is painted between them:
+// The two stages stay strictly ordered, and nothing is painted between them:
 // stylesheets are render-blocking, and drawing the bare document first would
-// cost a full layout (1,7 s on the device) that the arriving CSS throws away
-// on the very next turn.
+// cost a full layout that the arriving CSS throws away on the next turn.
 
 #[derive(Clone, Copy, PartialEq)]
 enum NavStage {
     Doc,
     Css,
-    /// Die externen Skripte der Seite. Eine dritte Rundreise, und sie kommt
-    /// NACH den Stilblaettern: ein Skript liest Klassen und Groessen.
+    /// The page's external scripts. A third round trip, after the
+    /// stylesheets: a script reads classes and sizes.
     Js,
-    /// Der Modulgraph. Anders als die drei davor ist das KEINE einzelne
-    /// Rundreise: ein Modul nennt seine Abhaengigkeiten erst, wenn es da ist,
-    /// also geht es rundenweise, bis der Graph geschlossen ist.
+    /// The module graph. Not a single round trip: a module names its
+    /// dependencies only once it has arrived, so it goes round by round
+    /// until the graph is closed.
     Mod,
-    /// Stilblaetter, die ein SKRIPT eingehaengt hat. Auch rundenweise: ein
-    /// Blatt, das ankommt, laesst eine Komponente fertig bauen, und die haengt
-    /// ihrerseits eins ein.
+    /// Stylesheets inserted by a script. Also round-based: an arriving sheet
+    /// lets a component finish building, which may insert another.
     Sheet,
-    /// Die `@import`-Blaetter der verlinkten Blaetter. Rundenweise wie `Mod`:
-    /// ein Blatt nennt seine eigenen Importe erst, wenn es da ist.
+    /// The `@import` sheets of the linked sheets. Round-based like `Mod`: a
+    /// sheet names its own imports only once it has arrived.
     CssImport,
-    /// `<script src=…>`, die ein SKRIPT eingehaengt hat. Rundenweise wie
-    /// `Sheet`: ein Stueck, das ankommt, haengt das naechste ein — genau so
-    /// laedt ein geteiltes Buendel seinen Baum nach.
+    /// `<script src=…>` inserted by a script. Round-based like `Sheet`: an
+    /// arriving chunk inserts the next, which is how a split bundle loads.
     DynJs,
 }
 
 /// Handle of the navigation in flight, or -1.
-/// The address that was ASKED for. The diagnostic page names it, and it
-/// stands in for the base URL if the response never said where it came from.
-/// Record the landing address in the history once the document is here.
-/// Where we LANDED, not where we aimed — otherwise every trip back through
-/// history replays the redirect.
-/// When the stage in flight started, so each round trip reports its own span
-/// instead of the navigation's total.
 
 fn nav_job() -> i32 {
     doc().nav_job
@@ -1424,37 +1284,35 @@ fn nav_asked() -> String {
 /// Start a navigation and return at once. `push_hist` records the address we
 /// land on once the document is here.
 fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
-    // Eine Navigation, die nicht aus einem Skript kam — ein Klick, die
-    // Adresszeile, der Verlauf — bricht die Skriptkette. Sonst zaehlte der
-    // Deckel ueber Seiten hinweg weiter und wuerde irgendwann eine
-    // vollkommen harmlose Weiterleitung abwuergen.
+    // A navigation that did not come from a script (a click, the address
+    // bar, history) breaks the script chain; otherwise the cap would keep
+    // counting across pages and eventually stop a harmless redirect.
     if doc().nav_from_script {
         doc_mut().nav_from_script = false;
     } else {
         doc_mut().script_nav_chain = 0;
     }
-    // **Vor dem ersten Byte.** Eine Navigation darf ueberallhin — auch auf
-    // den eigenen Router —, denn das neue Dokument ist eine andere Herkunft
-    // und die alte Seite kann es nicht lesen. Gemeldet wird deshalb die
-    // Klasse des ZIELS, nicht die der Seite, die wir verlassen; sonst waere
-    // `https://192.168.1.1` von einer oeffentlichen Seite aus gesperrt.
+    // Before the first byte. A navigation may go anywhere, including the
+    // local router, because the new document is another origin the old page
+    // cannot read. So the target's class is reported, not the class of the
+    // page being left.
     tell_net_context(url);
     // A new navigation replaces the old one, and takes the page it was
     // loading for with it — a browser that keeps fetching the pictures of the
     // page you just left is spending the network on nothing.
     nav_cancel();
     subresources_cancel();
-    // Und den vom Skript veraenderten Baum, sonst zeigt die naechste Seite den
-    // der vorigen — der Zwischenspeicher haengt am HTML, nicht am Baum.
+    // And the script-modified tree, or the next page would show the previous
+    // one's — the cache is keyed by the HTML, not the tree.
     engine.set_scripted_dom(None);
     engine.set_hit_all(false);
-    // Die Sitzung gehoert der Seite, die gerade verlassen wird: ihre
-    // Behandler zeigen auf Knoten, die es gleich nicht mehr gibt.
+    // The session belongs to the page being left: its handlers point at
+    // nodes that are about to disappear.
     { doc_mut().js = None };
 
-    // Die eingebaute Pruefseite kommt aus dem Binaerbild, nicht aus dem Netz.
-    // Sie durchlaeuft ab hier denselben Weg wie ein geholtes Dokument — nur
-    // ohne die erste Rundreise.
+    // The built-in test page comes from the binary, not the network. From
+    // here it takes the same path as a fetched document, minus the first
+    // round trip.
     if selftest::matches(url) {
         deliver_builtin(engine, selftest::URL, selftest::HTML, push_hist);
         return;
@@ -1467,10 +1325,8 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         hdrs.push_str("Cookie: ");
         hdrs.push_str(&jar);
     }
-    // **Welche Kekse mitgehen, nach NAMEN.** Der Wert ist ein Geheimnis, der
-    // Name nicht — und ohne ihn ist „5 held" keine Auskunft. Googles
-    // Einwilligung schickte im Kreis, und aus dem Log war nicht zu sehen, ob
-    // `SOCS` ueberhaupt dabei war.
+    // Log which cookies are sent, by name. The value is a secret, the name
+    // is not, and without it "5 held" says nothing.
     {
         let mit = cookies::names_for(url, now);
         let da = cookies::names_held(url);
@@ -1523,11 +1379,11 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
 
 /// The document did not arrive. Put a diagnostic page where it should have
 /// been: a blank canvas is indistinguishable from a hung browser, and the
-/// address bar keeps the URL that was ASKED for rather than one derived from
+/// address bar keeps the URL that was asked for rather than one derived from
 /// a response we never got.
 fn nav_fail(url: &str) {
-    // Ein gemerkter Rollstand gehoert der Seite, die nicht kam — nicht der
-    // Fehlermeldung, die an ihrer Stelle steht.
+    // A remembered scroll position belongs to the page that did not come,
+    // not to the error page in its place.
     doc_mut().scroll_want = 0;
     set_scroll(0);
     bump_content_gen("navigation");
@@ -1537,22 +1393,18 @@ fn nav_fail(url: &str) {
     nav_clear();
 }
 
-/// File whatever `Set-Cookie` the response carried.
+/// Where the persistent cookies live.
 ///
-/// Wo die dauerhaften Kekse liegen.
-///
-/// **Im PRIVATEN Bereich, nicht in `sys/config/beak`.** Ein Keks ist keine
-/// Einstellung, er IST die Anmeldung — und `npk_fetch` prueft die
-/// Kapabilitaet und danach jeden Pfad, also haette jede App mit READ alle
-/// Sitzungen der Maschine lesen koennen. `priv/<modul>/…` ist der einzige
-/// Ort, den eine Kapabilitaet nicht aufmacht: der Name entscheidet, und den
-/// vergibt der Kernel. beak behaelt dadurch `RENDER | CANVAS | NET` und
-/// braucht fuer den eigenen Zustand kein Recht am Speicher der Maschine.
+/// In the private area, not `sys/config/beak`: a cookie is not a setting, it
+/// is the login, and any app with READ could read config paths.
+/// `priv/<module>/…` is the one place no capability opens — the name decides,
+/// and the kernel assigns it. So beak keeps `RENDER | CANVAS | NET` and needs
+/// no right to system-wide storage for its own state.
 const COOKIE_FILE: &str = "priv/beak/cookies";
-const COOKIE_CAP: usize = 96 * 1024;   // 256 Kekse passen weit darunter
+const COOKIE_CAP: usize = 96 * 1024;   // 256 cookies fit well below
 static mut COOKIE_BUF: [u8; COOKIE_CAP] = [0; COOKIE_CAP];
 
-/// Die gespeicherten Kekse ins Glas — einmal beim Start.
+/// Load the stored cookies into the jar — once at startup.
 fn cookies_restore() {
     let now = unsafe { npk_unix_time() };
     let p = core::ptr::addr_of_mut!(COOKIE_BUF) as *mut u8;
@@ -1560,7 +1412,7 @@ fn cookies_restore() {
         npk_fetch(COOKIE_FILE.as_ptr() as i32, COOKIE_FILE.len() as i32,
                   p as i32, COOKIE_CAP as i32)
     };
-    // Keine Datei ist der Normalfall beim ersten Start, kein Fehler.
+    // No file is the normal case on first start, not an error.
     if n <= 0 { return }
     let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
     let Ok(text) = core::str::from_utf8(bytes) else {
@@ -1573,8 +1425,8 @@ fn cookies_restore() {
     }
 }
 
-/// Die dauerhaften Kekse auf die Platte. Sitzungskekse bleiben draussen —
-/// `Jar::serialize` entscheidet das, nicht diese Stelle.
+/// Write the persistent cookies to disk. Session cookies stay out —
+/// `Jar::serialize` decides that, not this function.
 fn cookies_persist() {
     let now = unsafe { npk_unix_time() };
     let text = cookies::serialize(now);
@@ -1587,7 +1439,9 @@ fn cookies_persist() {
     }
 }
 
-/// Cookies are scoped to where the response CAME from, after redirects —
+/// File whatever `Set-Cookie` the response carried.
+///
+/// Cookies are scoped to where the response came from, after redirects —
 /// filing them against the URL we asked for would scope a login cookie to the
 /// wrong host.
 fn file_cookies(asked: &str) {
@@ -1604,14 +1458,14 @@ fn file_cookies(asked: &str) {
     cookies::store(&from, h, now);
     let after = cookies::count();
     if after != before || h.to_ascii_lowercase().contains("set-cookie") {
-        // Nur wenn sich wirklich etwas geaendert hat — sonst schriebe jede
-        // Antwort dieselbe Datei neu.
+        // Only when something really changed — otherwise every response
+        // would rewrite the same file.
         cookies_persist();
         let mut m = String::from("[beak] cookies: ");
         push_i64(&mut m, after as i64);
         m.push_str(" held");
-        // Und WELCHE der Host jetzt hat. Eine Zahl sagt nicht, ob der eine
-        // Keks dabei ist, an dem die Sitzung haengt.
+        // And which ones the host now has: a count does not say whether the
+        // cookie the session depends on is among them.
         let da = cookies::names_held(&from);
         if !da.is_empty() {
             m.push_str(" — hier: ");
@@ -1621,23 +1475,20 @@ fn file_cookies(asked: &str) {
     }
 }
 
-/// Collect whichever half of the navigation has finished. Returns true if the
-/// chrome needs redrawing — the address changed, or the stop button goes back
-/// to being a reload button.
-/// Ein Dokument aus dem eigenen Binaerbild an die Stelle setzen, an der sonst
-/// die Antwort des Servers steht — und ab da nichts anders machen.
+/// Put a document from our own binary where the server's answer would go,
+/// and from then on do nothing differently.
 ///
-/// Der Rest der Kette (Skripte, Zeichnen, Verlauf) darf nicht wissen, woher
-/// die Bytes kamen; sonst haette die Pruefseite einen eigenen Pfad und
-/// pruefte am Ende diesen statt den echten.
+/// The rest of the chain (scripts, painting, history) must not know where
+/// the bytes came from; otherwise the test page would test its own path
+/// instead of the real one.
 fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
     let len = html.len().min(HTML_CAP);
     unsafe {
         let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
         core::ptr::copy_nonoverlapping(html.as_ptr(), dst, len);
         core::ptr::addr_of_mut!(HTML_LEN).write(len);
-        // Die Seite bringt ihr eigenes `<style>` mit und verlinkt nichts —
-        // das CSS der vorigen Seite muss weg, sonst stylt es diese hier.
+        // The page brings its own `<style>` and links nothing; the previous
+        // page's CSS must go or it would style this one.
         core::ptr::addr_of_mut!(CSS_LEN).write(0);
         doc_mut().nav_start_ms = now_ms();
         doc_mut().nav_reported = false;
@@ -1652,6 +1503,9 @@ fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
     nav_finish(engine);
 }
 
+/// Collect whichever half of the navigation has finished. Returns true if the
+/// chrome needs redrawing — the address changed, or the stop button goes back
+/// to being a reload button.
 fn nav_pump(engine: &Engine) -> bool {
     let h = nav_job();
     if h < 0 {
@@ -1684,7 +1538,7 @@ fn nav_document_arrived(engine: &Engine) {
         nav_fail(&asked);
         return;
     }
-    // Before anything downstream: the cookies belong to THIS response, and
+    // Before anything downstream: the cookies belong to this response, and
     // the getters that carry them are overwritten by the next `take`.
     file_cookies(&asked);
     unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(n as usize) };
@@ -1701,9 +1555,9 @@ fn nav_document_arrived(engine: &Engine) {
     scroll_after_load();
     bump_content_gen("navigation");
     bump_nav_gen();
-    // Relative sub-resources resolve against the URL the document came FROM,
-    // not the one we asked for (RFC 3986 §5.1.3). Getting this wrong made
-    // every stylesheet and image repeat the document's own redirect.
+    // Relative sub-resources resolve against the URL the document came from,
+    // not the one we asked for (RFC 3986 §5.1.3); otherwise every stylesheet
+    // and image would repeat the document's own redirect.
     let base = fetched_from().unwrap_or(asked);
     set_url(&base);
     if doc().nav_push_hist {
@@ -1713,12 +1567,11 @@ fn nav_document_arrived(engine: &Engine) {
 }
 
 /// Start the second round trip: every `<link rel=stylesheet>` of the document
-/// that just landed, in ONE batch. They are render-blocking, so this is where
+/// that just landed, in one batch. They are render-blocking, so this is where
 /// overlapping the round trips is worth the most. Bounded by CSS_CAP +
 /// MAX_CSS_LINKS.
 fn nav_begin_stylesheets(engine: &Engine, base: &str) {
-    // Eine abgebrochene Navigation darf der naechsten keine Blaetter
-    // hinterlassen ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+    // An abandoned navigation must not leave sheets to the next one.
     {
         doc_mut().nav_css_parts = None;
         doc_mut().nav_css_want = None;
@@ -1761,80 +1614,54 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
         doc_mut().nav_job = h;
         doc_mut().nav_css_count = urls.len();
         doc_mut().nav_stage_ms = now_ms();
-        // An `@import` resolves against ITS OWN sheet's address, not the
+        // An `@import` resolves against its own sheet's address, not the
         // document's, so the addresses have to survive the round trip.
         doc_mut().nav_css_urls = Some(urls);
         doc_mut().nav_css_rounds = 0;
     }
 }
 
-/// How many sheets the batch in flight asked for.
-/// Die Skripte der Seite in Dokumentreihenfolge, waehrend die externen noch
-/// unterwegs sind. `None` heisst: keine offene Skriptrunde.
-/// Die JS-Sitzung DIESER Seite.
+/// The JS session of this page.
 ///
-/// Sie muss die Skriptrunde ueberleben: die Behandler, die ein Skript
-/// anmeldet, leben in ihr, und ohne sie waere jeder `addEventListener` beim
-/// Verlassen der Funktion wieder weg. Eine Navigation wirft sie weg.
-
+/// Survives the script round: the handlers a script registers live in it.
+/// A navigation drops it.
 fn js_session() -> Option<&'static mut beak_engine::js::Session> {
     doc_mut().js.as_mut()
 }
-/// Wie viele externe Adressen das Buendel angefordert hat.
-/// Die Modul-Einstiege der Seite, in Dokumentreihenfolge — das sind die
-/// Adressen, die am Ende ausgewertet werden.
-/// Die Adressen, die in DIESER Runde unterwegs sind, in Bestellreihenfolge.
-/// Wie viele Runden schon liefen — der Deckel gegen einen Graphen, der sich
-/// selbst nachlaedt.
-/// Die Knoten der Stilblaetter, die in DIESER Runde unterwegs sind — in
-/// Bestellreihenfolge, damit die Antwort dem `<link>` zugeordnet werden kann.
-/// Die Blaetter der Seite in KASKADENREIHENFOLGE, waehrend die `@import`-Runden
-/// laufen: `(Adresse, Rumpf, schon nach Importen durchsucht)`. Ein Import wird
-/// VOR seinem Blatt eingefuegt — dort steht er in der Kaskade, weil ein
-/// `@import` wirkt, als staende sein Inhalt an seiner Stelle, und das ist vor
-/// allem, was danach im Blatt folgt.
-/// Welches Blatt jede Adresse der Runde in Arbeit angefordert hat.
-/// Ein Blatt darf importieren, was importiert, was importiert — aber nicht
-/// endlos, und ein Ring darf die Navigation nicht anhalten.
+/// An `@import` chain may nest, but not endlessly, and a cycle must not stall
+/// the navigation.
 const MAX_IMPORT_ROUNDS: usize = 4;
 const MAX_IMPORT_SHEETS: usize = 64;
 
 
-/// Ein Skript, das auf seinen Text wartet — oder ihn schon hat.
+/// A script waiting for its text — or already holding it.
 enum PendingScript {
-    /// Quelltext, die Kennung (fuer ein Modul: seine Adresse), ob es ein
-    /// Modul ist, und der KNOTEN des `<script>` — er ist
-    /// `document.currentScript`.
+    /// Source, id (for a module: its URL), whether it is a module, and the
+    /// node of the `<script>` — it is `document.currentScript`.
     Ready(String, String, bool, u32),
-    /// Der Index in der Bestellung, in der Reihenfolge der Anforderung,
-    /// plus die Adresse — ein Fehler ohne Kennung ist keine Auskunft.
+    /// Index in the batch, in request order, plus the URL — an error
+    /// without an id says nothing.
     Fetching(usize, String, bool, u32),
 }
 
-/// Wie viele externe Skripte eine Seite holen darf.
+/// How many external scripts one page may fetch.
 ///
-/// Nach Anzahl gedeckelt UND nach Bytes (`SCRIPT_CAP`): eine Seite mit 200
-/// Bundles soll nicht 200 Rundreisen ausloesen, und eines mit 50 MB soll den
-/// Puffer nicht sprengen. Der Zensus sagt, echte Seiten laden 1 bis 11
-/// externe (github am meisten).
+/// Capped by count and by bytes (`SCRIPT_CAP`): 200 bundles must not cause
+/// 200 round trips, and a 50 MB one must not overflow the buffer.
 const MAX_SCRIPT_URLS: usize = 32;
 const SCRIPT_CAP: usize = 8 * 1024 * 1024;
-/// Wie gross ein Modulgraph werden darf, und in wie vielen Runden.
+/// How large a module graph may grow, and in how many rounds.
 ///
-/// Nach Anzahl UND Runden, weil beide Enden ausufern koennen: eine Seite mit
-/// tausend kleinen Modulen und eine Kette, die sich in jeder Runde ein
-/// weiteres Glied holt. Gemessen: die Fritzbox-Anmeldeseite braucht 56
-/// Adressen in 6 Runden.
+/// Both ends can run away: a thousand small modules, and a chain that
+/// fetches one more link every round.
 const MAX_MODULE_URLS: usize = 256;
 const MAX_MODULE_ROUNDS: usize = 24;
-/// Wie oft eine Seite nachgeladene Stilblaetter nachlegen darf. Jede Runde
-/// ist eine Rundreise; eine Seite, die in jeder Runde ein weiteres anmeldet,
-/// haelt den Aufbau sonst offen.
+/// How often a page may add script-inserted stylesheets. Each round is a
+/// round trip; a page that adds one every round would keep the load open.
 const MAX_SHEET_ROUNDS: usize = 8;
-/// Wie oft eine Seite per Skript Skripte nachlegen darf. Ein geteiltes
-/// Buendel laedt seinen Baum in Ketten nach — gemessen an DuckDuckGos
-/// Startseite sind es sechs Glieder —, und ohne Deckel haelt eine Seite, die
-/// in jeder Runde ein weiteres anmeldet, den Aufbau offen.
+/// How often a page may insert scripts from script. A split bundle loads its
+/// tree in chains; without a cap, a page that adds one every round keeps the
+/// load open.
 const MAX_DYNJS_ROUNDS: usize = 12;
 
 fn nav_stylesheets_arrived(engine: &Engine) {
@@ -1848,7 +1675,7 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
 
-    // The bodies are kept as PARTS rather than written straight into
+    // The bodies are kept as parts rather than written straight into
     // `CSS_BUF`: an `@import` cascades ahead of the sheet that imported it, so
     // the buffer can only be assembled once every round of imports is in.
     let urls = doc_mut().nav_css_urls.take().unwrap_or_default();
@@ -1871,10 +1698,9 @@ fn nav_stylesheets_arrived(engine: &Engine) {
 /// Start one round of `@import` fetches, if any sheet still has unexamined
 /// bytes. `true` when a round is in flight.
 ///
-/// Round-based like the module graph: a sheet only names its own imports once
-/// it has arrived. `sandbox.nopeek.ch` is the shape this exists for — one
-/// `<link>` to a `main.css` that holds nothing but fifteen `@import`s, and
-/// every one of them is the actual design.
+/// Round-based like the module graph: a sheet only names its own imports
+/// once it has arrived. A `main.css` holding nothing but `@import`s is the
+/// shape this exists for.
 fn css_import_pump() -> bool {
     let rounds = doc().nav_css_rounds;
     let parts = doc_mut().nav_css_parts.as_mut();
@@ -1935,8 +1761,8 @@ fn nav_css_imports_arrived(engine: &Engine) {
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(parts) = doc_mut().nav_css_parts.as_mut() {
-        // **Von hinten einfuegen.** Jedes Einfuegen verschiebt alles dahinter;
-        // absteigend bleiben die noch offenen, kleineren Stellen gueltig.
+        // Insert from the back: each insertion shifts everything after it;
+        // in descending order the remaining, smaller positions stay valid.
         for k in (0..want.len()).rev() {
             let (owner, url) = &want[k];
             let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
@@ -1975,24 +1801,24 @@ fn css_assemble() {
 fn nav_finish(engine: &Engine) {
     decode_css();
     log_font_faces(css_str());
-    // Erst die Skripte einsammeln. Sind externe dabei, geht die Navigation in
-    // eine dritte Stufe und endet erst danach — sonst waere die Seite fertig,
-    // bevor ihre Skripte sie gebaut haben.
+    // Collect the scripts first. If external ones exist, the navigation goes
+    // into a third stage and ends only after it — otherwise the page would
+    // be finished before its scripts built it.
     if nav_begin_scripts(engine) { return; }
     nav_done();
 }
 
-/// Die Seite ist fertig: zeichnen und Bilder holen.
+/// The page is finished: paint and fetch images.
 fn nav_done() {
     doc_mut().images_dirty = true;
     mark_dirty();
     nav_clear();
 }
 
-/// Die Skripte der Seite einsammeln und die externen anfordern.
+/// Collect the page's scripts and request the external ones.
 ///
-/// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
-/// weiter. Sonst sind die Skripte schon gelaufen.
+/// Returns true if a round trip is running — it continues in `nav_pump`.
+/// Otherwise the scripts have already run.
 fn nav_begin_scripts(engine: &Engine) -> bool {
     use beak_engine::js::dombind::ScriptRef;
     let dom = beak_engine::parse(html_str());
@@ -2010,9 +1836,9 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
         match r {
             ScriptRef::Inline(t, m, node) => {
                 inline_n += 1;
-                // Ein eingebettetes Modul bekommt eine eigene Adresse: sie
-                // ist der Schluessel im Lader UND was `import.meta.url`
-                // sagt, und relative Angaben loesen sich dagegen auf.
+                // An inline module gets its own URL: it is the loader key
+                // and what `import.meta.url` says, and relative specifiers
+                // resolve against it.
                 let label = if m { alloc::format!("{base}#inline{inline_n}") }
                             else { alloc::format!("inline #{inline_n}") };
                 list.push(PendingScript::Ready(t, label, m, node));
@@ -2033,8 +1859,8 @@ fn nav_begin_scripts(engine: &Engine) -> bool {
     }
     let h = begin_batch(&urls, SCRIPT_CAP);
     if h < 0 {
-        // Nicht anforderbar: die eingebetteten laufen trotzdem. Eine Seite
-        // ohne ihre Bundles ist weniger als eine ganze, aber mehr als keine.
+        // Not fetchable: the inline ones still run. A page without its
+        // bundles is less than whole, but more than nothing.
         log("[beak] external scripts could not be fetched — running inline only");
         return run_scripts(engine, list);
     }
@@ -2062,8 +1888,8 @@ fn nav_scripts_arrived(engine: &Engine) {
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
         let text = if n == 0 { String::new() } else {
             let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
-            // Nicht dekodierbar heisst hier: nicht ausfuehren. Ein Skript
-            // halb zu lesen ist schlimmer als es zu lassen.
+            // Not decodable means not executed. Running half a script is
+            // worse than skipping it.
             match core::str::from_utf8(bytes) {
                 Ok(t) => String::from(t),
                 Err(e) => {
@@ -2080,11 +1906,10 @@ fn nav_scripts_arrived(engine: &Engine) {
     if !run_scripts(engine, list) { nav_done(); }
 }
 
-/// Ein Byte-Offset als `Zeile:Spalte` plus die Umgebung im Quelltext.
+/// A byte offset as `line:column` plus the surrounding source.
 ///
-/// Ein Fehler, der nur `@41822` sagt, kostet auf minifiziertem Fremdcode eine
-/// Stunde. Die Zeile selbst wird NICHT ganz gezeigt — minifizierter Code hat
-/// Zeilen von 200 KB.
+/// An error that only says `@41822` is useless on minified code. The line
+/// itself is not shown whole — minified code has very long lines.
 fn src_pos(src: &str, at: usize) -> String {
     let mut at = at.min(src.len());
     while at > 0 && !src.is_char_boundary(at) { at -= 1; }
@@ -2100,22 +1925,10 @@ fn src_pos(src: &str, at: usize) -> String {
     alloc::format!("{line}:{col} ...{}<<HIER>>{}...", &src[from..at], &src[at..to])
 }
 
-/// Die eingebetteten Skripte der Seite ausfuehren und den veraenderten Baum
-/// ans Layout weiterreichen.
+/// Copy what the page wrote to `console` to the serial log.
 ///
-/// Erst HIER, nach den Stilblaettern: ein Skript liest Klassen und Groessen,
-/// und ein halb aufgebautes Dokument haette beides falsch. Es laeuft EINMAL je
-/// Navigation — nicht bei jedem Bild, das nachkommt.
-///
-/// Was ein Skript anstellt, bleibt im Sandkasten: die Maschine hat einen
-/// Schrittdeckel, eine Aufruftiefe und keinen Zugang zu Host-Funktionen. Sie
-/// kann diese Seite verunstalten und sonst nichts.
-/// Was die Seite auf `console` geschrieben hat, auf die Serienleitung geben.
-///
-/// Eine Seite, deren eigene Diagnose ins Leere laeuft, kann man aus der Ferne
-/// nicht befragen — und ein Geraetelauf ist immer eine Ferndiagnose. Mit
-/// Praefix, damit im Log sichtbar bleibt, wer geredet hat: das sind fremde
-/// Bytes, nicht beaks Stimme.
+/// Prefixed, so the log shows who spoke: these are foreign bytes, not
+/// beak's voice.
 fn drain_console(sess: &mut beak_engine::js::Session) {
     for line in sess.interp.take_console() {
         let mut m = String::from("[seite] ");
@@ -2124,13 +1937,12 @@ fn drain_console(sess: &mut beak_engine::js::Session) {
     }
 }
 
-/// Was die Seite mit `document.cookie = …` gesetzt hat, in den Behaelter —
-/// und die Sicht danach neu einreichen.
+/// Move what the page set with `document.cookie = …` into the jar, and hand
+/// the resulting view back.
 ///
-/// Nach JEDEM Einstiegspunkt der Maschine, nicht nur nach dem Laden: ein
-/// Klick setzt Kekse genauso wie ein Startskript, und wer nur einmal
-/// abholt, verliert alles danach. Die Engine haelt keinen Behaelter — was
-/// gilt, entscheidet `cookies`, samt Domain, Pfad und `HttpOnly`.
+/// After every entry point into the engine, not only after loading: a click
+/// sets cookies just like a startup script. The engine holds no jar — what
+/// applies is decided by `cookies`, including domain, path and `HttpOnly`.
 fn sync_cookies(sess: &mut beak_engine::js::Session) {
     let url = url_str();
     if url.is_empty() {
@@ -2142,8 +1954,8 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
         cookies::store_from_script(url, decl, now);
     }
     if !sets.is_empty() {
-        // Ein Keks per Skript ist so dauerhaft wie einer per Kopfzeile —
-        // `document.cookie = "…; expires=…"` ist genau derselbe Vertrag.
+        // A cookie set by script is as persistent as one set by header —
+        // `document.cookie = "…; expires=…"` is the same contract.
         cookies_persist();
         let mut m = String::from("[beak] cookies: Seite setzte ");
         push_i64(&mut m, sets.len() as i64);
@@ -2155,22 +1967,11 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
     sess.interp.set_cookies(cookies::script_header_for(url, now));
 }
 
-/// Was die Seite am Verlauf verlangt hat — abholen und tun.
+/// Perform the scroll the page requested.
 ///
-/// **Die Engine sammelt nur Absichten**, weil sie keinen Verlauf hat und
-/// keinen erfinden soll. Hier ist der Ort, an dem daraus etwas wird; und
-/// hier wird ihr auch gesagt, wie lang der Verlauf inzwischen ist, damit
-/// `history.length` nicht ewig 1 behauptet.
-///
-/// Gerufen an denselben Stellen wie `sync_cookies` — nach JEDEM
-/// Einstiegspunkt, nicht nur nach dem Laden. Ein Klick schreibt Verlauf
-/// genauso wie ein Skript beim Start.
-/// Was die Seite an Rollen verlangt hat, ausfuehren.
-///
-/// **Die Engine rollt nicht** — sie hat kein Fenster; sie merkt sich den
-/// Wunsch, und hier steht der Rollstand. Waagerecht rollt beak nicht, also
-/// wird der x-Wunsch bewusst verworfen statt so getan, als waere er
-/// angekommen.
+/// The engine has no window, so it only records the wish; the scroll
+/// position lives here. beak does not scroll horizontally, so the x request
+/// is dropped deliberately.
 fn sync_scroll(sess: &mut beak_engine::js::Session) {
     let Some((_x, y)) = sess.interp.take_scroll() else { return };
     let Some(y) = y else { return };
@@ -2181,22 +1982,27 @@ fn sync_scroll(sess: &mut beak_engine::js::Session) {
     mark_dirty();
 }
 
+/// Collect and perform what the page asked of the history.
+///
+/// The engine only records intents, because it has no history and must not
+/// invent one. This is where they take effect, and where the engine learns
+/// the current length so `history.length` is not stuck at 1.
+///
+/// Called at the same places as `sync_cookies`: after every entry point.
 fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
     use beak_engine::js::interp::HistoryOp;
     for op in sess.interp.take_history_ops() {
         match op {
-            // `pushState`/`replaceState` NAVIGIEREN NICHT — sie schreiben nur
-            // die Adresse um. Genau das ist ihr Sinn: eine Anwendung, die
-            // ihre Ansicht wechselt, ohne ein Dokument zu holen.
+            // `pushState`/`replaceState` do not navigate — they only rewrite
+            // the URL, so an application can switch views without fetching.
             HistoryOp::Push { ref url } | HistoryOp::Replace { ref url } => {
                 let replace = matches!(op, HistoryOp::Replace { .. });
                 if url.is_empty() {
                     continue;
                 }
                 let abs = resolve(url_str(), url);
-                // Nur die eigene Herkunft. Eine Seite darf ihre Adresszeile
-                // umschreiben, aber nicht auf eine fremde Herkunft — das
-                // waere eine Faelschung, die der Nutzer nicht sieht.
+                // Same origin only. A page may rewrite its address bar, but
+                // not to a foreign origin — that would be an invisible forgery.
                 if origin_of(&abs) != origin_of(url_str()) {
                     log("[beak] history: Adresse fremder Herkunft abgelehnt");
                     continue;
@@ -2206,12 +2012,11 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
                     hist_push(&abs);
                 }
             }
-            // `go(n)` springt WIRKLICH. Ein Zaehler, der die Absicht
-            // notiert und nichts tut, waere schlimmer als kein `history`:
-            // die Seite glaubt dann, sie sei zurueckgegangen.
+            // `go(n)` really navigates; recording the intent and doing
+            // nothing would let the page believe it went back.
             //
-            // Mehr als einen Schritt kann beaks Verlauf nicht am Stueck —
-            // also so oft, wie verlangt, und wer am Ende ist, hoert auf.
+            // beak's history moves one step at a time, so step as often as
+            // requested and stop at the end.
             HistoryOp::Go(n) => {
                 let mut target: Option<String> = None;
                 for _ in 0..n.unsigned_abs().min(HIST_MAX as u32) {
@@ -2221,8 +2026,8 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
                     }
                 }
                 if let Some(u) = target {
-                    // `push_hist` ist hier FALSCH: sonst waechst der Verlauf
-                    // beim Zurueckgehen, und man kaeme nie heraus.
+                    // `push_hist` must be false here, or going back would
+                    // grow the history and never get out.
                     nav_begin(engine, "GET", &u, &[], "", false);
                     return;
                 }
@@ -2233,33 +2038,27 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
     sess.interp.set_history(count.max(1) as f64, beak_engine::js::value::Value::Null);
 }
 
-/// Wie viele Navigationen eine Seite HINTEREINANDER selbst ausloesen darf.
+/// How many navigations a page may trigger itself in a row.
 ///
-/// Nicht gegen langsame Seiten, sondern gegen `location.href = "/a"` AUF
-/// `/a` — das ist eine Endlosschleife, die je Runde eine Rundreise kostet
-/// und von aussen wie ein haengender Browser aussieht. Eine Kette von
-/// wenigen ist dagegen normal: Googles Sperrseite braucht zwei.
+/// Not against slow pages but against `location.href = "/a"` on `/a`: an
+/// endless loop costing a round trip per turn that looks like a hung
+/// browser. Short chains are normal.
 const SCRIPT_NAV_MAX: u32 = 8;
 
-/// Was die Seite per `location` verlangt hat — abholen und wirklich fahren.
+/// Collect what the page requested via `location` and actually navigate.
 ///
-/// **Der Unterschied zu `sync_history` ist der ganze Punkt.**
-/// `pushState` schreibt die Adresse um und laesst das Dokument stehen;
-/// `location.replace` wirft es weg und holt ein neues. Bis hierher war der
-/// zweite Fall gar nicht da: `location` war ein Datenobjekt, `replace` ein
-/// `TypeError`, und `location.href = u` schrieb still eine Eigenschaft um.
-/// Eine Seite, die sich selbst weiterschickt, kam nie an.
+/// Unlike `sync_history`: `pushState` rewrites the URL and keeps the
+/// document, `location.replace` discards it and fetches a new one.
 ///
-/// Liefert true, wenn navigiert wurde — dann ist das Dokument von eben weg
-/// und der Rufer muss aufhoeren, daran zu arbeiten.
+/// Returns true if it navigated — the current document is gone and the
+/// caller must stop working on it.
 fn sync_nav(engine: &Engine) -> bool {
     let Some(sess) = js_session() else { return false };
     let Some(n) = sess.interp.take_nav() else { return false };
-    // **Nur, was ein Dokument liefern kann.** Die Engine hat `javascript:`
-    // und `data:` schon abgelehnt; hier faellt der Rest (`mailto:`, `file:`,
-    // `blob:`) — nicht weil er gefaehrlich waere, sondern weil `nav_begin`
-    // ihn ins Netz reichen wuerde und die Antwort eine leere Seite ist, die
-    // aussieht wie ein Fehler der Gegenstelle.
+    // Only what can yield a document. The engine already rejected
+    // `javascript:` and `data:`; the rest (`mailto:`, `file:`, `blob:`) is
+    // dropped here because `nav_begin` would send it to the network and the
+    // answer would be a blank page that looks like a server error.
     let ok = n.url.starts_with("https://") || n.url.starts_with("http://")
              || selftest::matches(&n.url);
     if !ok {
@@ -2279,44 +2078,48 @@ fn sync_nav(engine: &Engine) -> bool {
     if chain > 1 { m.push_str(" ("); push_i64(&mut m, chain as i64); m.push_str(". in Folge)"); }
     log(&m);
     doc_mut().nav_from_script = true;
-    // `replace` und `reload` haengen KEINEN Eintrag an: sonst kaeme man mit
-    // „zurueck" nie aus einer Seite heraus, die sich selbst ersetzt.
+    // `replace` and `reload` add no entry: otherwise "back" could never
+    // leave a page that replaces itself.
     nav_begin(engine, "GET", &n.url, &[], "", !n.replace && !n.reload);
     true
 }
 
-/// Liefert true, wenn eine Modulrunde laeuft — dann ist die Navigation
-/// NOCH nicht fertig.
+/// Run the page's scripts and hand the modified tree to the layout.
+///
+/// Only here, after the stylesheets: a script reads classes and sizes, and a
+/// half-built document would have both wrong. Runs once per navigation, not
+/// per arriving image.
+///
+/// What a script does stays in the sandbox: the engine has a step cap, a
+/// call depth limit and no access to host functions.
+///
+/// Returns true if a module round is running — then the navigation is not
+/// finished yet.
 fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     doc_mut().script_t0 = now_ms();
     let dom = beak_engine::parse(html_str());
     let doc = beak_engine::js::dombind::Doc::from_dom(&dom);
     let mut sess = beak_engine::js::Session::new(SCRIPT_STEPS);
     sess.interp.deadline = Some(script_time_left);
-    // **Neu auslegen auf Verlangen.** Ohne diese Zeile antwortet jede
-    // Kastenfrage aus dem letzten BILD, und ein Element, das ein Skript eben
-    // eingehaengt hat, meldet 0 — bei einer Seite, die nur EINMAL misst, fuer
-    // immer. Siehe `docs/plan/BROWSER_RELAYOUT_ON_DEMAND.md`.
+    // Lay out on demand. Without it every box query answers from the last
+    // frame, and an element a script just inserted reports 0 — forever, on a
+    // page that measures only once. See `docs/plan/BROWSER_RELAYOUT_ON_DEMAND.md`.
     sess.interp.relayout = Some(host_relayout);
     arm_script_budget();
     sess.interp.set_document(doc);
-    // Die Adresse gehoert dem Wirt — und zwar die, aus der das Dokument KAM,
-    // nicht die erfragte: eine Weiterleitung aendert Herkunft und damit die
-    // Kekse. Ohne diese Zeile stand in `location` `about:blank`, und ein
-    // Skript, das seinen Pfad prueft, nahm still den falschen Zweig.
+    // The location belongs to the host — the URL the document came from,
+    // not the requested one: a redirect changes the origin and with it the
+    // cookies.
     sess.interp.set_location(url_str());
-    // Die Kekse, die dieses Dokument sehen DARF. `HttpOnly` bleibt draussen:
-    // die Fahne ist die Gegenmassnahme gegen fremden Code auf der Seite, und
-    // seit die Maschine Seitenskripte faehrt, gibt es fremden Code.
+    // The cookies this document may see. `HttpOnly` stays out: that flag is
+    // the defence against foreign code on the page.
     if !url_str().is_empty() {
         let now = unsafe { npk_unix_time() };
         sess.interp.set_cookies(cookies::script_header_for(url_str(), now));
     }
-    // Der Kaskadenkontext fuer `getComputedStyle`. Ohne ihn antwortet es aus
-    // dem Inline-Stil — eine Teilantwort, die eine Seite laufen laesst, aber
-    // die falsche Auskunft gibt. Mit ihm rechnet die Maschine dieselbe
-    // Kaskade, die das Layout rechnet, auf demselben Baum und demselben
-    // Blatt.
+    // The cascade context for `getComputedStyle`. Without it the answer
+    // comes from the inline style only; with it the engine computes the same
+    // cascade the layout does, on the same tree and sheet.
     if let Some((_, _, w, _)) = canvas_rect() {
         let media = beak_engine::css::Media::new(w as f32, query_theme().is_dark());
         let sheet = beak_engine::css::collect_all(&dom, css_str(), media);
@@ -2326,27 +2129,22 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
             viewport_w: w as f32,
         });
     }
-    // Die Fenstergroesse gehoert dem Wirt. Ohne sie gibt es `innerWidth`
-    // nicht, und eine Seite, die ihre schmale Fassung danach waehlt, faellt
-    // mit ReferenceError aus, statt sie zu nehmen.
+    // The window size belongs to the host. Without it there is no
+    // `innerWidth`, and a page choosing its narrow variant by it fails.
     if let Some((_, _, w, h)) = canvas_rect() {
-        // Farbschema MIT einreichen, nicht nur die Groesse: `matchMedia`
-        // muss dieselbe Antwort geben wie der Kaskadenlauf, sonst waehlt das
-        // Skript eine Fassung, die das Layout nicht malt.
+        // Pass the colour scheme too: `matchMedia` must agree with the
+        // cascade, or the script picks a variant the layout does not paint.
         sess.interp.set_media(w as f64, h as f64, query_theme().is_dark());
     }
-    // `Math.random` bekommt eine echte Saat. Ohne sie liefert jede Seite
-    // dieselbe Folge — und die Engine erfindet sich absichtlich keine.
+    // `Math.random` gets a real seed. Without it every page gets the same
+    // sequence, and the engine deliberately invents none.
     sess.interp.seed_random(now_ms() as u64 ^ 0x9E37_79B9_7F4A_7C15);
-    // Und eine echte Uhr. Die Engine hat keine — ohne diese Zeile steht
-    // `Date.now()` bei 1970, und jede Seite, die ein Datum ausrechnet,
-    // rechnet falsch.
+    // And a real clock. The engine has none; without this `Date.now()` is in
+    // 1970.
     sess.interp.epoch_ms = unsafe { npk_unix_time() } as f64 * 1000.0;
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
-    // Die Modul-Einstiege, in Dokumentreihenfolge. Sie laufen NACH allen
-    // gewoehnlichen Skripten — `type="module"` ist per Spezifikation
-    // aufgeschoben, und die Fritzbox verlaesst sich darauf: ihr Modulcode
-    // liest `gNbc`, das ein eingebettetes Skript davor setzt.
+    // Module entries, in document order. They run after all classic scripts:
+    // `type="module"` is deferred by spec.
     let mut entries: Vec<String> = Vec::new();
     for p in &list {
         let (src, label, is_mod, node) = match p {
@@ -2375,8 +2173,8 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
         }
         let prog = match beak_engine::js::parse(src, false) {
             Ok(p) => p,
-            // Ein Modul ist auch ein Skript — die Datei sagt es nicht, also
-            // beides versuchen.
+            // A module is also a script — the file does not say which, so try
+            // both.
             Err(e) => match beak_engine::js::parse(src, true) {
                 Ok(p) => p,
                 Err(em) => {
@@ -2390,11 +2188,10 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
                 }
             },
         };
-        // Ein Skript, das scheitert, darf die naechsten nicht mitnehmen — so
-        // macht es ein Browser auch.
-        // `document.currentScript` zeigt auf DIESEN Knoten, solange er
-        // laeuft. Ein Modul kommt hier nicht vorbei — dort ist die Antwort
-        // laut HTML §4.12.1 `null`.
+        // A failing script must not take the next ones down, as in other
+        // browsers.
+        // `document.currentScript` points at this node while it runs. A
+        // module never gets here; for it the answer is `null` (HTML §4.12.1).
         sess.interp.current_script = Some(node);
         let r = sess.run(&prog);
         sess.interp.current_script = None;
@@ -2414,19 +2211,16 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
 }
 
 
-/// Die Schriftrunde. Eigener Auftrag, nicht der der Navigation: welche
-/// Schriften eine Seite braucht, weiss die Engine erst nach dem ersten
-/// Auslegen — genau wie bei Bildern.
-/// Wie viele Schriften eine Seite in einer Runde holen darf, und wie viele
-/// Bytes zusammen. Gemessen: eine Seite bringt 3 bis 6 mit, je 30-90 KB.
+/// How many fonts a page may fetch in one round, and how many bytes
+/// together. The font round is its own job, not the navigation's: which
+/// fonts a page needs is known only after the first layout, as with images.
 const MAX_FONT_URLS: usize = 12;
 const FONT_CAP: usize = 4 * 1024 * 1024;
 
-/// Wieviele `fetch`-Anfragen gleichzeitig unterwegs sein duerfen.
+/// How many `fetch` requests may be in flight at once.
 ///
-/// Nicht erfunden, sondern die Grenze des Wirts: er haelt je Anfrage einen
-/// Antwortpuffer, und eine Seite, die zwanzig auf einmal stellt, band damit
-/// vierzig Megabyte. Was nicht drankommt, wartet auf die naechste Runde.
+/// The host holds a response buffer per request; what does not fit waits
+/// for the next round.
 const MAX_FETCH_INFLIGHT: usize = 6;
 const FETCH_CAP: usize = 2 * 1024 * 1024;
 
@@ -2434,7 +2228,7 @@ fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
     &mut doc_mut().fetch_jobs
 }
 
-/// Der Kopfblock der zuletzt eingesammelten Antwort.
+/// The header block of the last collected response.
 fn response_headers() -> String {
     let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
     let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
@@ -2443,48 +2237,34 @@ fn response_headers() -> String {
     core::str::from_utf8(bytes).unwrap_or("").to_string()
 }
 
-/// Eine Runde an den `fetch`-Anfragen der Seite.
-///
-/// **Die Engine holt nichts** — sie legt die Anfrage hin, das hier holt sie.
-/// Derselbe Weg wie `pending_sheets`/`sheet_done`, nur mit einem Griff JE
-/// ANFRAGE statt einem je Runde: `fetch` ist nebenlaeufig, eine Seite stellt
-/// mehrere und wartet auf alle.
-///
-/// Ein Abbruch ist hier ECHT: `controller.abort()` legt die id ab, und die
-/// Verbindung wird beendet. Nur die Fahne zu setzen hiesse, dass die Seite
-/// weiterlaedt, was niemand mehr liest.
-///
-/// Liefert true, wenn etwas ankam — dann lief Seitencode, und der Baum kann
-/// sich geaendert haben.
-/// Der Lesepuffer der WebSockets — einer fuer alle, nacheinander benutzt.
+/// The read buffer of the WebSockets — one for all, used in turn.
 fn ws_buf() -> &'static mut [u8; 16 * 1024] {
     static mut BUF: [u8; 16 * 1024] = [0; 16 * 1024];
-    // SAFETY: beak ist einfaedig; dieselbe Regel wie bei `fetch_jobs`.
+    // SAFETY: beak is single-threaded; same rule as for `fetch_jobs`.
     unsafe { &mut *core::ptr::addr_of_mut!(BUF) }
 }
 
-/// Die offenen WebSockets: `(Engine-Id, TLS-Griff)`.
+/// The open WebSockets: `(engine id, TLS handle)`.
 fn ws_jobs() -> &'static mut Vec<(u32, i32)> {
     static mut JOBS: Vec<(u32, i32)> = Vec::new();
-    // SAFETY: beak ist einfaedig; dieselbe Regel wie bei `fetch_jobs`.
+    // SAFETY: beak is single-threaded; same rule as for `fetch_jobs`.
     unsafe { &mut *core::ptr::addr_of_mut!(JOBS) }
 }
 
-/// **Die Leitung fahren.** Aufbauen, was ansteht; abholen, was ankam;
-/// wegschicken, was die Engine hingelegt hat.
+/// Drive the connections: open what is pending, collect what arrived, send
+/// what the engine queued.
 ///
-/// `true`, wenn etwas passiert ist — dann lohnt eine Runde Microtasks.
+/// `true` if something happened — then a round of microtasks is worthwhile.
 fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
     let mut moved = false;
-    // 1. Neue Verbindungen. Der Handschlag kostet ~60 ms und blockiert; das
-    //    ist derselbe Preis, den `open_tls` im HTTP-Weg ohnehin zahlt, und er
-    //    faellt einmal je Verbindung an.
+    // 1. New connections. The handshake blocks; it is the same price the
+    //    HTTP path pays in `open_tls`, once per connection.
     let want: Vec<_> = core::mem::take(&mut sess.interp.pending_sockets);
     for w in want {
         if !w.secure {
-            // `ws://` ohne TLS gibt es hier nicht: die Engine laesst es nur
-            // aus einer unverschluesselten Seite zu, und dafuer fehlt der
-            // Klartext-Strom. Benannt statt still.
+            // `ws://` without TLS is not driven: the engine allows it only
+            // from an unencrypted page, and there is no plaintext stream.
+            // Said in the log, not silently.
             log("[beak] WebSocket: ws:// ohne TLS wird nicht gefahren");
             beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
             continue;
@@ -2507,33 +2287,28 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
             moved = true;
             continue;
         }
-        // **Ein gelungener Aufbau muss sich melden.** Schweigt er, sieht ein
-        // Log genauso aus wie eines, in dem gar nichts versucht wurde — und
-        // dann ist die erste Frage nach einem Fehlschlag unbeantwortbar.
+        // A successful open must log itself; otherwise a log looks the same
+        // as one where nothing was attempted.
         log(&alloc::format!("[beak] WebSocket: {}:{} verbunden, Handschlag raus ({} B)",
                             w.host, w.port, w.hello.len()));
         ws_jobs().push((w.id, h));
         moved = true;
     }
-    // 2. Lesen und schreiben. Ein Puffer je Runde reicht: was nicht
-    //    hineinpasst, liegt im Kernel und kommt beim naechsten Bild.
-    // **Nicht auf dem Stapel.** 16 KB je Aufruf hiessen 16 KB nullen, 62-mal
-    // in der Sekunde, fuer eine Leitung, die meistens schweigt — und es waere
-    // der einzige Puffer dieser Groesse auf beaks Stapel, direkt unter dem
-    // rekursiven Auslegen.
+    // 2. Read and write. One buffer per round suffices: what does not fit
+    //    stays in the kernel and arrives next frame.
+    // Not on the stack: 16 KB zeroed per call, every frame, right under the
+    // recursive layout.
     let buf = ws_buf();
     let mut tot: Vec<(u32, i32)> = Vec::new();
     for (id, h) in ws_jobs().clone() {
-        // **Leerholen, nicht anlesen.** `npk_tls_recv` gibt 0 genau dann, wenn
-        // nichts Vollstaendiges mehr dasteht; wer nach dem ersten Satz
-        // aufhoert, holt einen je Bild ab (60/s) und laesst den Rest im
-        // Kernel liegen, bis dessen Puffer zumacht. Der Deckel ist gegen die
-        // andere Richtung: eine Gegenstelle, die nicht aufhoert, darf dieses
-        // Bild nicht ganz auffressen.
+        // Drain, not peek. `npk_tls_recv` returns 0 exactly when nothing
+        // complete is left; stopping after the first record would leave the
+        // rest in the kernel until its buffer fills. The cap guards the other
+        // direction: a peer that never stops must not eat the whole frame.
         for _ in 0..64 {
             let n = unsafe { npk_tls_recv(h, buf.as_mut_ptr() as i32, buf.len() as i32) };
             if n < 0 {
-                // Zu oder kaputt — die Engine macht daraus 1006.
+                // Closed or broken — the engine turns this into 1006.
                 log("[beak] WebSocket: Leitung zu");
                 beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
                 unsafe { npk_tls_close(h) };
@@ -2559,6 +2334,17 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
     moved
 }
 
+/// One round over the page's `fetch` requests.
+///
+/// The engine fetches nothing — it queues the request and this fetches it.
+/// Same path as `pending_sheets`/`sheet_done`, but with one handle per
+/// request instead of per round: `fetch` is concurrent.
+///
+/// An abort is real: `controller.abort()` records the id and the connection
+/// is cancelled, so the page does not keep loading what nobody reads.
+///
+/// Returns true if something arrived — page code ran and the tree may have
+/// changed.
 fn pump_fetches() -> bool {
     let Some(sess) = js_session() else { return false };
     let mut landed = false;
@@ -2585,8 +2371,8 @@ fn pump_fetches() -> bool {
             continue;
         }
         unsafe { buf.set_len((n as usize).min(FETCH_CAP)) };
-        // Die Kekse gehoeren zu DIESER Antwort, und die Getter, die sie
-        // tragen, ueberschreibt das naechste `take`.
+        // The cookies belong to this response, and the getters carrying them
+        // are overwritten by the next `take`.
         let from = fetched_from().unwrap_or_default();
         file_cookies(&from);
         let status = unsafe { npk_http_status() }.max(0) as u16;
@@ -2601,14 +2387,13 @@ fn pump_fetches() -> bool {
     for f in queued.drain(..) {
         if fetch_jobs().len() >= MAX_FETCH_INFLIGHT { rest.push(f); continue }
         let url = resolve(&base, &f.url);
-        // Der Wirt trennt Kopfzeilen mit `\n`; die Engine haelt den rohen
-        // Block, wie er ueber die Leitung geht, also mit `\r\n`.
+        // The host separates headers with `\n`; the engine holds the raw
+        // block as it goes over the wire, with `\r\n`.
         let mut hdrs = f.headers.replace("\r\n", "\n").trim_end_matches('\n').to_string();
-        // **Kekse fahren mit — bei GLEICHER Herkunft.** Regel K3 des Papiers,
-        // und die Engine laesst nur gleiche Herkunft ueberhaupt durch. Ohne
-        // sie kann keine angemeldete API-Schicht antworten; mit ihnen ueber
-        // eine Herkunftsgrenze waere es die mitreisende Vollmacht, vor der
-        // `BROWSER_FETCH_ORIGIN.md` §3.1 warnt.
+        // Cookies go along for the same origin only (rule K3), and the
+        // engine lets only same-origin requests through. Across an origin
+        // boundary they would be the ambient authority
+        // `BROWSER_FETCH_ORIGIN.md` §3.1 warns about.
         let jar = cookies::header_for(&url, unsafe { npk_unix_time() });
         if !jar.is_empty() {
             if !hdrs.is_empty() { hdrs.push('\n'); }
@@ -2636,8 +2421,8 @@ fn pump_fetches() -> bool {
     landed
 }
 
-/// Eine Runde an den Schriften der Seite. Liefert true, wenn etwas ankam —
-/// dann muss neu ausgelegt werden, denn jede Breite aendert sich.
+/// One round over the page's fonts. Returns true if something arrived — then
+/// a re-layout is needed, because every width changes.
 fn pump_fonts(engine: &Engine) -> bool {
     let h = doc().font_job;
     let mut loaded = false;
@@ -2661,8 +2446,8 @@ fn pump_fonts(engine: &Engine) -> bool {
                 ok += 1;
                 loaded = true;
             } else {
-                // Kein stilles Weiterlaufen: eine Schrift, die beak nicht
-                // lesen kann, ist der Grund, warum die Seite anders aussieht.
+                // Not silent: a font beak cannot read is why the page looks
+                // different.
                 log(&alloc::format!("[beak]   Schrift NICHT LESBAR {url} ({n} B)"));
                 bad += 1;
             }
@@ -2671,8 +2456,8 @@ fn pump_fonts(engine: &Engine) -> bool {
                             now_ms() - doc().nav_stage_ms));
     }
     if doc().font_job >= 0 { return loaded }
-    // Erst die Gesichter, deren Bytes schon im Blatt stehen — sie gehen nicht
-    // ins Netz und kosten keine Runde.
+    // Inline faces first: their bytes are already in the sheet, so they cost
+    // no round trip.
     if engine.load_inline_fonts() { loaded = true; }
     let mut want = engine.take_pending_fonts();
     if want.is_empty() { return loaded }
@@ -2690,14 +2475,14 @@ fn pump_fonts(engine: &Engine) -> bool {
     loaded
 }
 
-/// `load` zustellen — nach dem ersten Malen, wenn die Kaesten stehen.
+/// Dispatch `load` — after the first paint, when the boxes exist.
 ///
-/// Liefert true, wenn dabei etwas am Baum passiert ist.
+/// Returns true if the tree changed.
 fn fire_load(engine: &Engine, page: &Page) -> bool {
     if !doc().load_pending { return false }
     doc_mut().load_pending = false;
-    // Was der Benutzer schon getippt hat, muss der Behandler sehen — sonst
-    // liest er den Vorgabewert und schreibt ihn womoeglich zurueck.
+    // The handler must see what the user already typed; otherwise it reads
+    // the default value and may write it back.
     push_control_values(page);
     let Some(sess) = js_session() else { return false };
     let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) else { return false };
@@ -2723,17 +2508,17 @@ fn fire_load(engine: &Engine, page: &Page) -> bool {
     changed
 }
 
-/// Was `ResizeObserver`/`IntersectionObserver` gemessen haben, zustellen.
+/// Deliver what `ResizeObserver`/`IntersectionObserver` measured.
 ///
-/// Nur wenn wirklich etwas in der Schlange liegt: auf einer Seite ohne
-/// Beobachter sind das zwei leere Listen und sonst nichts.
+/// Only when something is queued: on a page without observers this is two
+/// empty lists and nothing else.
 fn pump_box_observers(engine: &Engine) {
     let Some(sess) = js_session() else { return };
     if !sess.interp.box_observations_pending() { return }
     arm_script_budget();
-    // `run_timers` faengt mit den Microtasks an, und die Zustellung sitzt
-    // dort — ein Rueckruf darf also selbst ein `setTimeout` anlegen und wird
-    // in derselben Runde bedient.
+    // `run_timers` starts with the microtasks, and delivery sits there — a
+    // callback may itself schedule a `setTimeout` and is served in the same
+    // round.
     let timers = sess.interp.run_timers();
     let _ = timers;
     sync_cookies(sess);
@@ -2745,16 +2530,12 @@ fn pump_box_observers(engine: &Engine) {
             engine.set_scripted_dom(Some(d.to_dom()));
         }
         bump_content_gen("observer");
-        // **Der Riegel gegen die Schleife.** Ein Rueckruf, der die Groesse
-        // seines eigenen Ziels aendert, misst beim naechsten Bild wieder
-        // etwas Neues — das ist der haeufigste Konsolenfehler des Webs
-        // ueberhaupt („ResizeObserver loop"). Ohne Riegel liefe hier ein
-        // Layout je Bild, und auf dem Geraet sind das fuenf Sekunden je
-        // Runde: eine Seite, die haengt.
+        // Guard against the loop: a callback that changes the size of its
+        // own target measures something new next frame ("ResizeObserver
+        // loop"). Without the guard that would be a layout every frame.
         //
-        // Der Baum wird trotzdem uebernommen — nur das sofortige Neumalen
-        // faellt weg. Damit kommt der Kreis zur Ruhe, und die naechste
-        // Eingabe zeigt den Stand.
+        // The tree is still taken; only the immediate repaint is skipped, so
+        // the cycle settles and the next input shows the state.
         let n = doc().obs_rounds + 1;
         doc_mut().obs_rounds = n;
         if n <= OBS_ROUNDS_MAX {
@@ -2767,22 +2548,22 @@ fn pump_box_observers(engine: &Engine) {
     }
 }
 
-/// Wieviele Bilder hintereinander ein Beobachter-Rueckruf den Baum aendern
-/// darf, bevor das Neumalen aussetzt.
+/// How many frames in a row an observer callback may change the tree before
+/// repainting is suspended.
 const OBS_ROUNDS_MAX: u32 = 8;
 
-/// Eine Runde am Modulgraphen: was fehlt noch?
+/// One round over the module graph: what is still missing?
 ///
-/// Liefert true, wenn eine Rundreise laeuft — dann geht es in `nav_pump`
-/// weiter. Sonst ist der Graph geschlossen und alles ist ausgewertet.
+/// Returns true if a round trip is running — it continues in `nav_pump`.
+/// Otherwise the graph is closed and everything is evaluated.
 fn module_pump(engine: &Engine) -> bool {
     let entries = match doc().nav_mod_entries.clone() {
         Some(e) => e,
         None => { finish_scripts(engine); return false }
     };
     let Some(sess) = js_session() else { finish_scripts(engine); return false };
-    // Vom Einstieg aus laufen und dabei JEDE Angabe aufloesen — der Lader
-    // kennt nur absolute Adressen, das Aufloesen gehoert dem Wirt.
+    // Walk from the entries and resolve every specifier — the loader knows
+    // only absolute URLs, resolving belongs to the host.
     let mut seen: Vec<String> = Vec::new();
     let mut queue = entries;
     let mut missing: Vec<String> = Vec::new();
@@ -2800,9 +2581,8 @@ fn module_pump(engine: &Engine) -> bool {
         }
     }
     let rounds = doc().nav_mod_rounds;
-    // WELCHER Deckel gerissen ist, gehoert in die Meldung: „nach 5 Runden"
-    // klang nach der Rundengrenze, obwohl die bei 24 liegt — gerissen war die
-    // Adressgrenze, und das ist eine ganz andere Diagnose.
+    // Which cap was hit belongs in the message; the round cap and the URL cap
+    // are different diagnoses.
     let cap = if rounds >= MAX_MODULE_ROUNDS { Some("Runden") }
               else if seen.len() > MAX_MODULE_URLS { Some("Adressen") }
               else { None };
@@ -2821,8 +2601,8 @@ fn module_pump(engine: &Engine) -> bool {
         }
         log("[beak] module graph could not be fetched");
     }
-    // Zu gross, zu tief oder fertig: auswerten, was da ist. Ein Modul, das
-    // fehlt, meldet sich beim Verknuepfen mit Namen.
+    // Too large, too deep or done: evaluate what is there. A missing module
+    // reports itself by name when linking.
     if !missing.is_empty() {
         let why = cap.unwrap_or("nicht holbar");
         log(&alloc::format!(
@@ -2836,19 +2616,18 @@ fn module_pump(engine: &Engine) -> bool {
     sheet_pump(engine)
 }
 
-/// Eine Runde an den Stilblaettern, die ein Skript eingehaengt hat.
+/// One round over stylesheets a script inserted.
 ///
-/// Liefert true, wenn eine Rundreise laeuft. Wie beim Modulgraphen
-/// rundenweise: ein Blatt, das ankommt, laesst eine Komponente fertig bauen,
-/// und die haengt ihrerseits eins ein.
+/// Returns true if a round trip is running. Round-based like the module
+/// graph: an arriving sheet lets a component finish, which may insert
+/// another.
 fn sheet_pump(engine: &Engine) -> bool {
     let Some(sess) = js_session() else { finish_scripts(engine); return false };
-    // Erst die Microtasks und Zeitgeber laufen lassen: was gerade fertig
-    // geworden ist, meldet seine Blaetter JETZT an.
+    // Run microtasks and timers first: whatever just finished registers its
+    // sheets now.
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     let want = sess.interp.take_pending_sheets();
-    // Nichts mehr an Blaettern heisst nicht „fertig": danach kommen die
-    // Skripte, die ein Skript eingehaengt hat.
+    // No more sheets does not mean done: script-inserted scripts come next.
     if want.is_empty() { return script_pump(engine) }
     let rounds = doc().nav_sheet_rounds;
     if rounds >= MAX_SHEET_ROUNDS {
@@ -2901,25 +2680,21 @@ fn nav_sheets_arrived(engine: &Engine) {
                         now_ms() - doc().nav_stage_ms));
     if ok > 0 {
         decode_css();
-        // Die Kaskade muss neu laufen — sonst haengt das Blatt im Puffer und
-        // wirkt nicht.
+        // The cascade must run again, or the sheet sits in the buffer without
+        // effect.
         bump_content_gen("sheet");
         mark_dirty();
     }
     if !sheet_pump(engine) { nav_done(); }
 }
 
-/// Eine Runde an den Skripten, die ein SKRIPT eingehaengt hat.
+/// One round over scripts that a script inserted.
 ///
-/// **Der Weg, auf dem jedes geteilte Buendel seine Stuecke nachlaedt.**
-/// webpack baut ein `<script>`, haengt es an den Kopf und wartet auf dessen
-/// `onload`; Next.js gibt React erst dann etwas zu rendern. Ohne Antwort
-/// blieb das Versprechen offen — DuckDuckGos Startseite raeumte ihr
-/// servergerendertes HTML weg und stand danach leer da, ohne eine einzige
-/// Fehlerzeile.
+/// This is how split bundles load their chunks: webpack creates a
+/// `<script>`, appends it to the head and waits for its `onload`. Without an
+/// answer the promise stays pending and the app never renders.
 ///
-/// Rundenweise wie die Blaetter: ein Stueck, das ankommt, haengt das
-/// naechste ein.
+/// Round-based like the sheets: an arriving chunk inserts the next.
 fn script_pump(engine: &Engine) -> bool {
     let Some(sess) = js_session() else { finish_scripts(engine); return false };
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
@@ -2962,14 +2737,14 @@ fn nav_dynjs_arrived(engine: &Engine) {
     let nodes = doc_mut().nav_dynjs_nodes.take().unwrap_or_default();
     let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
     let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), nodes.len());
-    // **Erst ALLES abschreiben, dann laufen lassen.** Ein Skript, das laeuft,
-    // kann das naechste einhaengen — und das holt sich denselben Puffer.
+    // Copy everything out first, then run: a running script may insert the
+    // next one, which reuses the same buffer.
     let mut texts: Vec<Option<String>> = Vec::with_capacity(nodes.len());
     for k in 0..nodes.len() {
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
         if n == 0 { texts.push(None); continue }
-        // SAFETY: `take_batch` hat genau diese Spanne in `IMG_FETCH_BUF`
-        // gefuellt und `off + n` liegt im Deckel, den wir ihm gegeben haben.
+        // SAFETY: `take_batch` filled exactly this span of `IMG_FETCH_BUF`,
+        // and `off + n` lies within the cap we gave it.
         let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
         texts.push(core::str::from_utf8(bytes).ok().map(String::from));
     }
@@ -2986,19 +2761,11 @@ fn nav_dynjs_arrived(engine: &Engine) {
     if !sheet_pump(engine) { nav_done(); }
 }
 
-/// Welche Schriften die Seite ueber `@font-face` mitbringt.
+/// Log which fonts the page brings via `@font-face`.
 ///
-/// **Die Zeile stand hier aus der Zeit VOR `@font-face`** und sagte
-/// unbedingt „nicht geladen" — auch nachdem 0.104.0 WOFF2 samt Brotli
-/// gebaut hatte. Am Geraet las sich das als Fehler, waehrend zehn Zeilen
-/// spaeter `Schriften: 5 geladen, 0 gescheitert` stand: dieselben drei
-/// Familien, alle da. Eine Diagnose von damals ist keine Messung von heute
-/// ([[feedback_the_named_gap_may_not_be_the_gap]]).
-///
-/// Sie laeuft VOR dem Holen, also kann sie ueber Erfolg gar nichts wissen.
-/// Was sie sagen darf, ist was die Seite VERLANGT; das Urteil kommt aus
-/// `pump_fonts` — dort steht je Datei `FEHLT` oder `NICHT LESBAR`, und
-/// darunter die Summe.
+/// Runs before fetching, so it can only say what the page requests; the
+/// verdict comes from `pump_fonts`, which logs `FEHLT` or `NICHT LESBAR` per
+/// file and the total.
 fn log_font_faces(css: &str) {
     let mut names: Vec<&str> = Vec::new();
     let mut rest = css;
@@ -3020,8 +2787,8 @@ fn log_font_faces(css: &str) {
                         names.len(), names.join(", ")));
 }
 
-/// Ein Stilblatt ANHAENGEN. Spaeter geholt heisst spaeter in der Kaskade, und
-/// das ist genau die Reihenfolge, in der es der Browser auch anwendet.
+/// Append a stylesheet. Fetched later means later in the cascade, which is
+/// the order a browser applies it in.
 fn css_append(bytes: &[u8]) -> bool {
     let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
     if len + bytes.len() + 1 >= CSS_CAP {
@@ -3061,7 +2828,7 @@ fn nav_modules_arrived(engine: &Engine) {
     if !module_pump(engine) { nav_done(); }
 }
 
-/// Die Einstiege auswerten — in Dokumentreihenfolge, jeder genau einmal.
+/// Evaluate the entries — in document order, each exactly once.
 fn eval_modules() {
     let entries = match doc().nav_mod_entries.clone() {
         Some(e) => e, None => return,
@@ -3093,40 +2860,27 @@ fn eval_modules() {
     doc_mut().script_tally = (r + ok, f + bad, b);
 }
 
-/// Zeitgeber, Kekse, Baum und der Bericht — nach ALLEM, was die Seite an
-/// Code hat: gewoehnliche Skripte wie Module.
+/// Timers, cookies, tree and the report — after all of the page's code,
+/// classic scripts and modules alike.
 fn finish_scripts(engine: &Engine) {
     let (ran, failed, bytes) = doc().script_tally;
     let t0 = doc().script_t0;
     let Some(sess) = js_session() else { return };
-    // **`DOMContentLoaded` und `load`.**
-    //
-    // Beide wurden NIE zugestellt. Die Eigenschaften gab es seit langem
-    // (`window.onload`, `document.ondomcontentloaded`), das Ereignis nicht —
-    // und `document.readyState` sagte trotzdem „complete". Eine Seite, die
-    // ihre Oberflaeche in `window.addEventListener("load", …)` baut, wartete
-    // damit fuer immer, ohne Fehler und ohne Meldung. Das ist kein
-    // Randmerkmal: es ist eine der beiden ueblichen Arten, ueberhaupt
-    // anzufangen.
-    //
-    // Die Reihenfolge ist die der Spezifikation: erst `DOMContentLoaded`
-    // (Dokument steht, aufgeschobene Skripte und Module sind gelaufen), dann
-    // `load` (auch die nachgeladenen Blaetter sind da). Beide gehen an den
-    // DOKUMENTknoten — `window.addEventListener` landet dort
-    // (`target_node`), und ein Behandler am `document` bekommt sie durch das
-    // Blubbern ebenfalls.
-    // `load` selbst faellt aber NICHT hier, sondern nach dem ersten Malen:
-    // die Kaestchengeometrie reicht der Wirt erst dort ein
-    // (`Interp::set_geometry`), und ein Behandler, der misst, bekaeme sonst
-    // ueberall Nullen — eine Zahl, die aussieht wie eine Messung.
+    // `DOMContentLoaded`, then `load`, in spec order: first the document
+    // (deferred scripts and modules have run), then `load` (late sheets are
+    // in too). Both target the document node — `window.addEventListener`
+    // lands there (`target_node`), and a handler on `document` gets them by
+    // bubbling.
+    // `load` itself fires after the first paint, not here: the host passes
+    // box geometry only then (`Interp::set_geometry`), and a measuring
+    // handler would otherwise read zeros that look like measurements.
     let doc_node = sess.interp.doc.as_ref().map(|d| d.doc);
     if let Some(dn) = doc_node {
         let _ = beak_engine::js::dombind::dispatch(&mut sess.interp, "DOMContentLoaded", &[dn]);
     }
     doc_mut().load_pending = true;
-    // Die Zeitgeber, die waehrend des Ladens angemeldet wurden, einmal
-    // laufen lassen — viele Seiten stellen ihre Oberflaeche in einem
-    // `setTimeout(…, 0)` fertig.
+    // Run timers registered during loading once — many pages finish their
+    // UI in a `setTimeout(…, 0)`.
     let timers = sess.interp.run_timers();
     sync_cookies(sess);
     sync_history(engine, sess);
@@ -3135,9 +2889,8 @@ fn finish_scripts(engine: &Engine) {
     let mut listeners = false;
     if let Some(d) = sess.interp.doc.as_mut() {
         listeners = d.has_listeners;
-        // Die Kaesten werden nicht nur fuer Klicks gebraucht, sondern auch
-        // fuer `getBoundingClientRect`. Eine Seite, die Skripte FAEHRT, kann
-        // danach fragen, auch wenn sie keinen Behandler angemeldet hat.
+        // The boxes are needed for `getBoundingClientRect` too, not only for
+        // clicks; a page that runs scripts may ask even without handlers.
         engine.set_hit_all(listeners || ran > 0);
         engine.set_scripted_dom(Some(d.to_dom()));
     }
@@ -3153,17 +2906,15 @@ fn finish_scripts(engine: &Engine) {
     m.push_str(" ms");
     if timers > 0 { m.push_str(", "); push_i64(&mut m, timers as i64); m.push_str(" Zeitgeber"); }
     if now_ms() - t0 > SCRIPT_SLOW_MS { m.push_str(", RECHNET LANGE"); }
-    // Ob die Zustellung ueberhaupt scharf ist, gehoert EINMAL je Seite ins
-    // Log. Ohne diese Zeile ist "kein Klick kam an" nicht von "die Seite hat
-    // keine Behandler" zu unterscheiden — und das ist genau der Unterschied,
-    // den man sucht ([[feedback_the_fast_path_must_say_it_ran]]).
+    // Whether dispatch is armed belongs in the log once per page; otherwise
+    // "no click arrived" cannot be told from "the page has no handlers".
     m.push_str(if listeners { ", Ereignisse SCHARF" } else { ", keine Behandler" });
     log(&m);
 }
 
-/// Die zwei Richtungen der Formular-Bruecke. Die REGEL steht in der Engine
-/// (`dombind::push_control_values` / `pull_control_values`) — hier stehen nur
-/// die Ausleihen, damit es die Regel nicht zweimal gibt.
+/// The two directions of the form bridge. The rule lives in the engine
+/// (`dombind::push_control_values` / `pull_control_values`); here are only
+/// the borrows, so the rule exists once.
 fn push_control_values(page: &Page) {
     let Some(sess) = js_session() else { return };
     let Some(doc) = sess.interp.doc.as_mut() else { return };
@@ -3175,37 +2926,35 @@ fn pull_control_values(page: &mut Page, sess: &beak_engine::js::Session) {
     beak_engine::js::dombind::pull_control_values(doc, &page.forms, &mut page.state);
 }
 
-/// Einen Klick an die Seite zustellen. Liefert true, wenn ein Behandler
-/// `preventDefault` gerufen hat — dann unterbleibt, was beak sonst getan
-/// haette (einem Link folgen, ein Steuerelement bedienen).
+/// Dispatch a click to the page. Returns true if a handler called
+/// `preventDefault` — then what beak would otherwise do (follow a link,
+/// operate a control) is skipped.
 fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i32) -> bool {
-    // Jeder Behandler bekommt sein eigenes Zeitbudget — sonst zahlt der
-    // zwanzigste Klick fuer die neunzehn davor.
+    // Each handler gets its own time budget, so the twentieth click does not
+    // pay for the nineteen before.
     arm_script_budget();
-    // Was der Benutzer getippt hat, muss der Behandler sehen.
+    // The handler must see what the user typed.
     push_control_values(page);
     let Some(sess) = js_session() else { return false };
-    // Die seq-Kette unter dem Zeiger, vom aeussersten zum innersten. Das
-    // Layout gibt sie schon aus — dieselbe Liste, aus der `:hover` lebt.
+    // The seq chain under the pointer, outermost to innermost — the same
+    // list `:hover` uses.
     let chain = lay.element_chain(cx, cy);
     if chain.is_empty() { return false; }
     let Some(doc) = sess.interp.doc.as_ref() else { return false };
     let nodes: Vec<u32> = chain.iter().filter_map(|s| doc.by_seq(*s)).collect();
     if nodes.is_empty() { return false; }
-    // **Ein Schild aktiviert sein Kaestchen auch OHNE Skript.** Der Schnellweg
-    // hier springt ab, wenn die Seite keinen Behandler hat — richtig fuer
-    // Ereignisse, falsch fuer eingebautes Verhalten: die Klickflaeche eines
-    // Kaestchens ist der Text daneben, und eine Seite ganz ohne JS hat ihn
-    // genauso.
+    // A label activates its control even without script. The fast path
+    // returns when the page has no handlers, which is right for events but
+    // wrong for built-in behaviour.
     let on_label = nodes.last().is_some_and(|n| {
         beak_engine::js::dombind::label_target(&sess.interp, *n).is_some()
     });
     if !doc.has_listeners && !on_label { return false; }
     let t0 = now_ms();
-    // **Mit dem ORT.** `cx`/`cy` kommen als Fenster-x und Dokument-y herein
-    // (`cy` hat den Rollstand schon drin); `client*` will beides
-    // fensterbezogen, `page*` beides dokumentbezogen. Waagrecht rollt beak
-    // nicht, also sind die zwei x gleich.
+    // With the position. `cx`/`cy` arrive as window x and document y (`cy`
+    // includes the scroll offset); `client*` wants both window-relative,
+    // `page*` both document-relative. beak does not scroll horizontally, so
+    // the two x are equal.
     let sy = scroll_y() as f64;
     let prevented = matches!(
         beak_engine::js::dombind::dispatch_at(&mut sess.interp, "click", &nodes,
@@ -3214,8 +2963,8 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     sync_cookies(sess);
     sync_history(engine, sess);
     sync_scroll(sess);
-    // NUR wenn sich etwas geaendert hat. Ein Behandler, der bloss zaehlt,
-    // darf keine 130 ms Layout kosten.
+    // Only if something changed: a handler that merely counts must not cost
+    // a layout.
     let changed = sess.interp.doc.as_ref().is_some_and(|d| d.dirty);
     if changed {
         if let Some(d) = sess.interp.doc.as_mut() {
@@ -3224,9 +2973,9 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
         bump_content_gen("script");
         mark_dirty();
     }
-    // Das Formularmodell und die Werte nachziehen, BEVOR ein Absende-Auftrag
-    // ausgefuehrt wird — sonst schickt er den Stand von vorher.
-    // Nach einem Behandler: der Baum weiss jetzt mehr als der Wirt.
+    // Refresh the form model and values before running a submit request,
+    // or it sends the previous state. After a handler the tree knows more
+    // than the host.
     page.sync(engine);
     pull_control_values(page, sess);
     let submits = sess.interp.take_submits();
@@ -3235,10 +2984,9 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
         log(&alloc::format!("[beak] script submit: form seq={seq}"));
         if submit_form_seq(engine, page, seq) { return true }
     }
-    // Ein Behandler, der `location.href` setzt, hat damit gesagt, wohin es
-    // geht. Danach auch noch dem angeklickten Link zu folgen hiesse, zwei
-    // Navigationen aus einem Klick zu machen — also gilt der Klick als
-    // behandelt.
+    // A handler that sets `location.href` has said where to go. Following
+    // the clicked link too would make two navigations from one click, so the
+    // click counts as handled.
     if sync_nav(engine) { return true }
     if changed || prevented || timers > 0 {
         let mut m = String::from("[beak] click -> js: ");
@@ -3255,94 +3003,65 @@ fn dispatch_click(engine: &Engine, page: &mut Page, lay: &Layout, cx: i32, cy: i
     prevented
 }
 
-/// Zufall aus dem Kernel in einen Puffer. `false`, wenn der Kernel abgelehnt
-/// hat — der Rufer wirft dann, statt schwachen Zufall zu liefern.
+/// Kernel randomness into a buffer. `false` if the kernel refused — the
+/// caller then throws rather than return weak randomness.
 ///
-/// In Stuecken, weil der Kernel 64 KiB je Aufruf deckelt (er haelt dabei den
-/// RNG-Mutex). Der Motor deckelt ohnehin bei derselben Zahl; die Schleife
-/// steht hier, damit dieselbe Funktion auch einen groesseren Puffer bedienen
-/// koennte, ohne still die Haelfte ungefuellt zu lassen.
+/// Chunked because the kernel caps a call at 64 KiB (it holds the RNG mutex
+/// meanwhile), so a larger buffer is never left half unfilled.
 fn random_bytes(out: &mut [u8]) -> bool {
     for teil in out.chunks_mut(64 * 1024) {
-        // SAFETY: der Kernel schreibt hoechstens `len` Bytes ab `ptr`, und
-        // beides beschreibt genau dieses Stueck.
+        // SAFETY: the kernel writes at most `len` bytes from `ptr`, and both
+        // describe exactly this chunk.
         let n = unsafe { npk_random_bytes(teil.as_mut_ptr() as i32, teil.len() as i32) };
         if n < 0 || n as usize != teil.len() { return false }
     }
     true
 }
 
-/// Was ein Seitenskript an Schritten bekommt.
+/// Step budget for a page script.
 ///
-/// Es laeuft im Fenster des Anwenders, nicht in einem Testlaeufer: reisst der
-/// Deckel, steht die Seite so da, wie das Skript sie bis dahin gebaut hat —
-/// und beak antwortet weiter. Grosszuegiger als im Test (200 000), weil eine
-/// echte Startroutine mehr tut als ein Einzeltest.
-/// Der Schrittdeckel ist nur noch das Sicherungsnetz gegen einen Lauf, der
-/// gar nichts mehr tut. Was eine Seite wirklich begrenzt, ist die ZEIT
-/// (`SCRIPT_BUDGET_MS`) — ein Schrittdeckel trifft sonst genauso eine Seite,
-/// die viel rechnet, und „viel rechnen" ist kein Fehler.
+/// Only a safety net against a run that makes no progress. What really
+/// bounds a page is time (`SCRIPT_BUDGET_MS`); a step cap would equally hit
+/// a page that just computes a lot, which is not an error.
 const SCRIPT_STEPS: u64 = 20_000_000_000;
 
-/// Wie lange ein Skriptlauf oder ein Behandler rechnen darf.
+/// How long a script run or handler may compute.
 ///
-/// **Grosszuegig, und mit Grund.** Eine Anmeldung, die ihren Kennwort-Hash
-/// selbst rechnet (PBKDF2, zehntausende Runden), braucht in beak Minuten. Das
-/// ist keine Endlosschleife, das ist der Preis eines Interpreters, und ihn
-/// abzuwuergen hiesse „die Seite ist kaputt" zu melden, wo sie es nicht ist.
-/// Der Deckel ist gegen das ANDERE da: `while(true)`.
-///
-/// **Die Zahl kommt vom GERAET, nicht vom Host.** Host-seitig gemessen
-/// kostet die Fritzbox-Anmeldung 65 s — aber das ist NATIVER Code. Am Geraet
-/// laeuft beak durch forge, und `tools/beaknative` hat das Verhaeltnis
-/// ausgezaehlt: nativ 17,0 ms, forge 66,6 ms, wasmi 350,4 ms, also **3,9x**.
-/// Mit einem 120-s-Deckel haette dieselbe Anmeldung, die host-seitig
-/// durchlaeuft, am Geraet abgebrochen — und der Bericht haette „script ran
-/// too long" gesagt, wo in Wahrheit die Messung am falschen Ziel stand
-/// ([[feedback_host_profile_is_not_the_device]]).
-/// **Erhoeht von 360 auf 900 s.** Die Fritzbox-Anmeldung misst am Geraet
-/// ~270 s — bei 360 s waren das 33 % Luft, und eine Maschine unter Last oder
-/// mit kaltem Zwischenspeicher fiel darueber. Ein Abbruch sieht dann aus wie
-/// „falsches Kennwort", obwohl nur die Uhr abgelaufen war. Gegen eine echte
-/// Endlosschleife hilft jetzt der HERZSCHLAG: er sagt jede Sekunde, dass noch
-/// gerechnet wird, statt den Benutzer raten zu lassen.
+/// Generous on purpose: a login page that hashes its password itself
+/// (PBKDF2, tens of thousands of rounds) takes minutes under an interpreter.
+/// That is not an endless loop, and aborting it would report a broken page
+/// where there is none. The cap is against `while(true)`; meanwhile the
+/// heartbeat reports every few seconds that the script is still running.
 const SCRIPT_BUDGET_MS: i64 = 900_000;
 
-/// Ab wann ein Lauf im Log auffaellt. Ein Skript, das Minuten rechnet, ist
-/// kein Fehler — aber es ist der Grund, warum nichts passiert, und das
-/// gehoert gesagt, statt es aus einem Zeitstempel raten zu lassen.
+/// When a run gets noticed in the log. A script computing for minutes is not
+/// an error, but it is why nothing happens, and that should be said.
 const SCRIPT_SLOW_MS: i64 = 3_000;
 
-/// Wie oft ein langer Lauf von sich hoeren laesst.
+/// How often a long run reports in.
 const SCRIPT_HEARTBEAT_MS: i64 = 5_000;
 
-/// **Der Deckel gehoert dem LAUF, nicht dem Dokument.**
+/// The budget belongs to the run, not the document.
 ///
-/// Es laeuft immer genau ein Stueck Seitencode — die Pumpe ist einfaedig, und
-/// daran aendern auch mehrere Tabs nichts. Diese drei beschreiben den Lauf,
-/// der gerade auf dem Stapel liegt, und `arm_script_budget` stellt sie vor
-/// jedem neu. In `Doc` waeren sie ein Feld, das je Seite dasselbe sagt.
+/// Exactly one piece of page code runs at a time, tabs or not; these three
+/// describe the run on the stack, and `arm_script_budget` resets them before
+/// each one.
 ///
-/// Der zweite Grund ist handfester: `script_time_left` ruft die Engine aus
-/// dem laufenden Interpreter heraus, und der ist ueber `js_session()` bereits
-/// eine `&mut`-Entleihung aus dem Dokument. Ein `doc()` daneben waere genau
-/// das Aliasing, vor dem der Kommentar an `doc`/`doc_mut` warnt.
+/// Also: the engine calls `script_time_left` from inside the running
+/// interpreter, which already holds a `&mut` borrow from the document via
+/// `js_session()`. A `doc()` there would be the aliasing `doc`/`doc_mut`
+/// warns about.
 static mut SCRIPT_DEADLINE: i64 = 0;
-/// Wann der laufende Behandler begann — fuer den Herzschlag. Eigener Name
-/// neben `Doc::script_t0`: das ist der Beginn der SEITENrunde, nicht des Laufs.
+/// When the running handler started, for the heartbeat. Distinct from
+/// `Doc::script_t0`, which is the start of the page's script round.
 static mut BUDGET_T0: i64 = 0;
 static mut BUDGET_SAID: i64 = 0;
 
-/// Die Uhr, die die Engine alle 65 536 Schritte fragt — und der HERZSCHLAG.
+/// The clock the engine asks every 65 536 steps — and the heartbeat.
 ///
-/// **Ein Bildschirm, der Minuten stillsteht, ohne dass irgendwo etwas steht,
-/// ist ein Fehler, auch wenn das Rechnen keiner ist.** Florians Befund:
-/// „beim Absenden wird nichts geloggt, es bleibt einfach stehen." Die
-/// Meldung kam erst NACH dem Behandler, also nach vier Minuten — blind fuer
-/// genau das, was lange dauert ([[feedback_report_before_not_after]]).
-///
-/// Die Stelle ist die richtige: die Engine fragt hier ohnehin schon, und
-/// oefter als jede Sekunde kommt sie nicht vorbei.
+/// A screen frozen for minutes with nothing in the log is an error even if
+/// the computation is not, so a long run reports itself while running, not
+/// afterwards. The engine asks here anyway, often enough for once a second.
 fn script_time_left() -> bool {
     let now = now_ms();
     let t0 = unsafe { core::ptr::addr_of!(BUDGET_T0).read() };
@@ -3360,7 +3079,7 @@ fn script_time_left() -> bool {
     now < unsafe { core::ptr::addr_of!(SCRIPT_DEADLINE).read() }
 }
 
-/// Die Uhr neu stellen — vor jedem Lauf von Seitencode.
+/// Reset the clock — before every run of page code.
 fn arm_script_budget() {
     let now = now_ms();
     unsafe {
@@ -3371,7 +3090,7 @@ fn arm_script_budget() {
 }
 
 /// Start a page's image load: drop the old pixels and return the list of
-/// sources still to fetch. Touches the network NOT AT ALL, so the first paint
+/// sources still to fetch. Touches the network not at all, so the first paint
 /// can happen right after it.
 ///
 /// The same src repeats all over a real page (icons, bullets, a logo in header
@@ -3380,31 +3099,26 @@ fn arm_script_budget() {
 /// server's rate limit, and wasted MAX_IMAGES slots that real images needed.
 fn begin_images(engine: &mut Engine) -> Vec<String> {
     doc_mut().images_dirty = false;
-    // Der Motor haelt die Hervorhebungen; eine neue Seite hat keine.
-    // `set_url` raeumt sie im Dokument weg, hier faellt der Anstrich nach.
+    // The engine holds the highlights; a new page has none. `set_url` clears
+    // them in the document, this drops the paint.
     engine.set_marks(None, Vec::new());
     engine.images_begin();
-    // **Eine eingebaute Seite holt nichts aus dem Netz.** Ihre Bilder stehen
-    // relativ zu `beak:selftest`, und daraus wird beim Aufloesen ein
-    // RECHNERname `beak` — im Geraetelauf vom 2026-09-17 stand woertlich
-    // `dns: beak: gibt es nicht`. Ein erfundener Name, der an den Aufloeser
-    // geht, ist kein Schoenheitsfehler: er verlaesst das Geraet.
+    // A built-in page fetches nothing. Its images are relative to
+    // `beak:selftest`, which would resolve to a host name `beak` — and an
+    // invented name sent to the resolver leaves the machine.
     if selftest::matches(url_str()) {
         return Vec::new();
     }
     let mut pending: Vec<String> = Vec::new();
-    // The SAME viewport width layout uses: `<picture>`/`srcset` picks its
+    // The same viewport width layout uses: `<picture>`/`srcset` picks its
     // candidate per media query, so fetching at a different width would fetch
     // a URL the page never asks for and leave the real one blank.
     let vw = canvas_rect().map(|(_, _, w, _)| w as u32).unwrap_or(1280);
-    // **Aus dem Baum, den das LAYOUT benutzt**, nicht aus dem urspruenglichen
-    // HTML. Eine Seite, die ihren Inhalt per Skript baut, hat dort keine
-    // Bilder stehen — DDGs Ergebnisseite ist eine Huelle, und ihre Karte wie
-    // ihre Seitensymbole kamen deshalb nie zur Anfrage.
+    // From the tree the layout uses, not the original HTML: a page that
+    // builds its content by script has no images in its source.
     let all = engine.image_srcs_now(html_str(), vw);
-    // **Die Sammelstelle sagte bis hierher nicht, was sie gesammelt hat.**
-    // Damit sah „auf der Seite steht kein Bild" genauso aus wie „ich habe im
-    // falschen Baum nachgesehen" — und genau das war es einmal.
+    // Log what was collected, so "no images on the page" can be told from
+    // "looked in the wrong tree".
     if !all.is_empty() {
         log(&alloc::format!("[beak] Bilder gesammelt: {} (z.B. {})",
             all.len(), all.first().map(|s| &s[..s.len().min(72)]).unwrap_or("")));
@@ -3418,10 +3132,9 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
             pending.push(src.clone());
         }
     }
-    // Serve what the last pages already decoded, BEFORE the first layout.
-    // That is where it pays twice: no request, no decode — and the box is
-    // DEFINITE on the very first layout instead of being guessed and moving
-    // the page a second later.
+    // Serve what the last pages already decoded, before the first layout.
+    // That pays twice: no request, no decode — and the box is definite on the
+    // very first layout instead of being guessed and moving the page later.
     //
     // Keyed by the resolved url, because the `src` attribute alone is
     // ambiguous across sites (`/logo.png`).
@@ -3441,20 +3154,17 @@ fn begin_images(engine: &mut Engine) -> Vec<String> {
 
 /// Ask for the next few images, and take delivery of the last few.
 ///
-/// One batch in flight at a time, NOT a whole page: a batch is answered in one
+/// One batch in flight at a time, not a whole page: a batch is answered in one
 /// go, so asking for everything at once would put the page's whole image
 /// traffic between two repaints. Small batches let the reader scroll through a
 /// loading page.
 ///
 /// The last layout's `guessed_image_srcs` lists the `src`s whose box it had to
-/// guess. Only if one of THOSE arrives does the page move and a re-layout pay
-/// for itself; everything else is a repaint. That is ~15 ms instead of ~145 ms
-/// of engine work per batch on a real article — and on the device, the
-/// difference between a page that scrolls while it loads and one that freezes
-/// for seconds at a time.
+/// guess. Only if one of those arrives does the page move and a re-layout pay
+/// for itself; everything else is a repaint, which is far cheaper.
 ///
 /// `band` is the visible document band `(scroll_y, scroll_y + viewport_h)`.
-/// A repaint is the WHOLE viewport, so an image below the fold is paid for in
+/// A repaint is the whole viewport, so an image below the fold is paid for in
 /// full and shows nothing — see `Layout::images_in_band`.
 fn pump_images(
     engine: &mut Engine,
@@ -3476,14 +3186,10 @@ fn images_start(pending: &mut Vec<String>, layout: Option<&Layout>) {
     if pending.is_empty() {
         return;
     }
-    // Layout-affecting first. An image whose box was GUESSED moves the page
-    // when it lands, and that costs a FULL re-layout wherever it sits —
-    // measured on the device: 1110-1710 ms on an article, against ~540 ms for
-    // the whole page's image traffic. Fetching it in the FIRST batch pays that
-    // once, immediately, instead of after two repaints the re-layout then
-    // throws away. On de.wikipedia/Stansstad exactly ONE `<img>` of 17 is such
-    // a box (a MediaWiki timeline, no width/height); the Hauptseite has none,
-    // which is why only the article ever showed the jump.
+    // Layout-affecting first. An image whose box was guessed moves the page
+    // when it lands, and that costs a full re-layout wherever it sits.
+    // Fetching it in the first batch pays that once, immediately, instead of
+    // after repaints the re-layout then throws away.
     if let Some(l) = layout {
         if !l.guessed_image_srcs.is_empty() {
             // Stable, so document order survives inside each group.
@@ -3518,9 +3224,8 @@ fn images_arrived(
     let mut moved = false;
     for ((src, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
-            // Nicht stillschweigend: eine Anfrage, die scheiterte, und eine,
-            // deren Antwort nicht in den Puffer passte, sehen hier gleich aus
-            // — und die zweite ist ein Deckel von UNS.
+            // Not silent: a failed request and an answer too large for the
+            // buffer look the same here, and the second is our own cap.
             log(&alloc::format!("[beak] image not delivered (request failed or over {} KiB buffer) — {}",
                 IMG_FETCH_CAP / 1024, src));
             continue;
@@ -3529,9 +3234,8 @@ fn images_arrived(
         // Decode now, drop the compressed bytes — and keep the pixels under
         // their url so the next navigation to this page needs neither.
         if let Err(why) = engine.add_image_cached(src, url, bytes) {
-            // Der Grund gehoert IN die Meldung. „nicht dekodierbar oder ueber
-            // dem Budget" schickte eine ganze Sitzung hinter einen
-            // JPEG-Dekoder her, der nie schuld war — es war das Budget.
+            // The reason belongs in the message: a decode failure and the
+            // budget refusing the image are different problems.
             log(&alloc::format!("[beak] image dropped ({n} B): {why} — {src}"));
             continue;
         }
@@ -3540,12 +3244,8 @@ fn images_arrived(
             moved = true;
         }
     }
-    // **Ein geglueckter Lauf war stumm**, und damit sah eine Runde, in der
-    // sieben Bilder ankamen, im Log genauso aus wie eine, in der keines
-    // angefragt wurde. Genau das hat einen ganzen Geraetelauf gekostet: die
-    // Frage „werden sie geholt?" liess sich nur an den `h2`-Zeilen des Wirts
-    // ablesen, und ob sie DEKODIERT wurden, gar nicht
-    // ([[feedback_the_fast_path_must_say_it_ran]]).
+    // Log a successful round too; otherwise a round where seven images
+    // arrived looks the same as one where none was requested.
     log(&alloc::format!("[beak] Bilder: {} von {} dekodiert{}",
         arrived.len(), want.len(),
         if moved { ", ein geratener Kasten wurde bestimmt" } else { "" }));
@@ -3560,24 +3260,20 @@ fn images_arrived(
         mark_dirty();
         return;
     }
-    // Pure repaint. Ask first whether it would show anything: measured on the
-    // Hauptseite, ONE navigation paid eight full-viewport repaints (~50 ms
-    // each) for image batches, and the page is 3421 px tall against a ~1000 px
-    // viewport — most of those pictures were below the fold and could not
-    // change a pixel. Scrolling marks the page dirty on its own, so nothing
-    // is lost; it is drawn the moment it can be seen.
+    // Pure repaint. Ask first whether it would show anything: images below
+    // the fold cannot change a pixel. Scrolling marks the page dirty on its
+    // own, so nothing is lost; it is drawn the moment it can be seen.
     match layout {
         Some(l) if !l.images_in_band(&arrived, band.0, band.1) => {}
         _ => mark_dirty(),
     }
 }
 
-/// Wonach das letzte Malen vergeblich suchte — EINMAL je Adresse.
+/// Log what the last paint looked for in vain — once per URL.
 ///
-/// Der Platzhalter ist stumm, und damit sieht „nie angefragt" genauso aus wie
-/// „geholt, dekodiert, und beim Malen unter einem anderen Schluessel gesucht".
-/// Die Zeile nennt beide Haelften: die gesuchte Zeichenkette und wie viele
-/// Bilder der Speicher ueberhaupt haelt.
+/// The placeholder is silent, so "never requested" looks the same as
+/// "fetched, decoded, and looked up under another key". The line names both
+/// halves: the key searched for and how many images the cache holds.
 fn log_image_miss(engine: &Engine) {
     let Some((src, held)) = engine.image_miss() else { return };
     if doc().img_missed.iter().any(|s| *s == src) { return }
@@ -3595,11 +3291,11 @@ fn images_dirty() -> bool {
 /// `<img>`.
 ///
 /// Kept apart from `pump_images` for one reason that matters: a CSS image can
-/// never move a box, so an arriving one is ALWAYS just a repaint — there is no
+/// never move a box, so an arriving one is always just a repaint — there is no
 /// `guessed` case and no `bump_content_gen`. The engine already resolved every
 /// `data:` URI itself, so this list is only what genuinely needs the network.
 ///
-/// The URL is resolved against the DOCUMENT, not the stylesheet that declared
+/// The URL is resolved against the document, not the stylesheet that declared
 /// it. Those differ only for a relative url() in a linked sheet; the shell
 /// concatenates the sheets into one buffer, so the per-sheet base is gone by
 /// here. Absolute and root-relative urls — which is what real sheets ship —
@@ -3674,7 +3370,7 @@ fn css_images_arrived(
 
 // ── Sub-resource batches in flight ────────────────────────────────────────
 
-/// The `<img>` batch on the wire and the `(src, resolved url)` pairs it was
+/// The `<img>` batch on the wire, or -1.
 fn img_job() -> i32 {
     doc().img_job
 }
@@ -3700,17 +3396,16 @@ fn subresources_cancel() {
         doc_mut().cssimg_job = -1;
     }
     doc_mut().cssimg_job_keys = None;
-    // Und was noch gar nicht gefragt wurde. **Die Schlange gehoert der Seite,
-    // die ersetzt wird**: sie stehen zu lassen hiesse, dass der neue Abruf
-    // sich die eine Kernel-Schlange mit den Bildern der alten Seite teilt —
-    // und ihre relativen Adressen wuerden gegen die NEUE Basis aufgeloest.
+    // And what was not yet requested. The queue belongs to the page being
+    // replaced: keeping it would share the kernel queue with the old page's
+    // images and resolve their relative URLs against the new base.
     let d = doc_mut();
     d.pending_imgs.clear();
     d.pending_css_imgs.clear();
     d.css_asked.clear();
 }
 
-/// Set the address + start fetching, WITHOUT touching history (reload,
+/// Set the address + start fetching, without touching history (reload,
 /// back/forward — those addresses are already in it).
 ///
 /// A failure is not silent: `nav_fail` puts a diagnostic page in the document
@@ -3720,7 +3415,7 @@ fn fetch_url(engine: &Engine, url: &str) {
     nav_begin(engine, "GET", url, &[], "", false);
 }
 
-/// The same, but the address we LAND on joins the history — a click, a typed
+/// The same, but the address we land on joins the history — a click, a typed
 /// address, a form. Recorded when the document arrives, not now: recording
 /// where we aimed would make every trip back replay the redirect.
 fn nav_goto(engine: &Engine, url: &str) {
@@ -3745,8 +3440,8 @@ fn go(engine: &Engine, typed: &str) {
     }
 }
 
-/// Was die Adresszeile MEINT: eine Adresse, oder eine Suche daraus.
-/// `None` heisst „nichts eingegeben".
+/// What the address bar means: a URL, or a search for the text.
+/// `None` means nothing was entered.
 fn typed_to_url(typed: &str) -> Option<String> {
     let t = typed.trim();
     if t.is_empty() {
@@ -3773,12 +3468,10 @@ fn typed_to_url(typed: &str) -> Option<String> {
 
 // ── Tabs ───────────────────────────────────────────────────────────────
 
-/// Womit ein Tab beschriftet wird: der Titel, sonst der WIRT der Adresse,
-/// sonst „Neuer Tab".
+/// A tab's label: the title, else the host of the URL, else "Neuer Tab".
 ///
-/// Der Wirt und nicht die ganze Adresse. Ein Etikett wird hinten
-/// abgeschnitten, und bei Adressen ist vorne alles gleich — fuenf Tabs auf
-/// Wikipedia waeren fuenfmal `https://de.wikipedia.org/wi…`.
+/// The host, not the whole URL: a label is cut at the end, and URLs all
+/// start alike.
 fn tab_label(d: &Doc) -> String {
     let full: &str = if !d.title.is_empty() {
         &d.title
@@ -3788,10 +3481,9 @@ fn tab_label(d: &Doc) -> String {
         let after = d.url.split_once("://").map(|(_, r)| r).unwrap_or(&d.url);
         after.split('/').next().unwrap_or(after)
     };
-    // **Selbst kuerzen, denn sonst tut es niemand.** Der Compositor malt
-    // Text vom linken Rand seines Kastens aus und klemmt ihn nicht:
-    // `MaxWidth` begrenzt die Kiste, nicht die Glyphen. Was nicht
-    // hineinpasst, steht im NACHBARtab.
+    // Truncate here, because nobody else does: the compositor draws text
+    // from the left edge of its box and does not clip it (`MaxWidth` bounds
+    // the box, not the glyphs). Overflow would land in the neighbouring tab.
     if full.chars().count() <= TAB_CHARS {
         return full.to_string();
     }
@@ -3800,21 +3492,16 @@ fn tab_label(d: &Doc) -> String {
     out
 }
 
-/// Einen Tab einfrieren: die Griffe zurueckgeben, den Rest fallen lassen.
+/// Freeze a tab: release the handles, drop the rest.
 ///
-/// **Ein eingefrorener Tab IST seine Wiederherstellungsbeschreibung.** Statt
-/// aufzuzaehlen, was alles weg muss — und beim naechsten neuen Feld eines zu
-/// vergessen —, wird das Dokument auf ein frisches gesetzt und nur
-/// zurueckgeschrieben, was ihn wiederherstellt. Genau die Klasse Fehler, die
-/// `Doc` abgeschafft hat („navigate() muss an zwanzig Statics denken"), waere
-/// hier sonst zurueck.
-///
-/// Der grosse Posten dabei ist der JS-Realm: ~973 KB je Sitzung, plus ihr
-/// Baum. Was bleibt, sind Kilobytes.
+/// A frozen tab is its restore description. Instead of listing everything
+/// that must go — and forgetting the next new field — the document is reset
+/// to a fresh one and only what restores it is written back. The large item
+/// is the JS realm and its tree; what remains is kilobytes.
 fn tab_freeze() {
-    // Zuerst die Griffe: sie gehoeren dem Wirt, nicht dem Speicher, den wir
-    // gleich fallen lassen. Ein Stapel, der weiterlaeuft, nimmt der Seite,
-    // auf die gewechselt wird, die eine Abrufschlange weg.
+    // Handles first: they belong to the host, not to the memory about to be
+    // dropped. A batch that keeps running would take the one fetch queue
+    // from the tab being switched to.
     nav_cancel();
     subresources_cancel();
     {
@@ -3837,16 +3524,16 @@ fn tab_freeze() {
     d.hist = hist;
     d.hist_pos = hist_pos;
     d.title = title;
-    // Wo der Leser stand. `scroll_y` waere die falsche Stelle: das Laden
-    // setzt sie auf 0, und zwar zu Recht — eine neue Seite faengt oben an.
+    // Where the reader was. Not `scroll_y`: loading resets it to 0, rightly,
+    // since a new page starts at the top.
     d.scroll_want = y;
 }
 
-/// Ein leerer Tab.
+/// An empty tab.
 ///
-/// **Die Puffer muessen wirklich leer werden.** `HTML_BUF`/`CSS_BUF` gehoeren
-/// dem Programm, nicht der Seite; ein neuer Tab, der den Text des alten
-/// zeigt, waere genau die Verwechslung, gegen die `Doc` gebaut wurde.
+/// The buffers must really be emptied: `HTML_BUF`/`CSS_BUF` belong to the
+/// program, not the page, and a new tab showing the old one's text would be
+/// exactly the mix-up `Doc` exists to prevent.
 fn blank_document(engine: &Engine) {
     unsafe {
         core::ptr::addr_of_mut!(HTML_LEN).write(0);
@@ -3858,14 +3545,14 @@ fn blank_document(engine: &Engine) {
     mark_dirty();
 }
 
-/// Die Seite des laufenden Tabs holen — der Weg zurueck aus dem Einfrieren.
+/// Load the current tab's page — the way back from freezing.
 ///
-/// Ein Tab ohne Verlauf legt seinen ersten Eintrag an; ein zurueckkehrender
-/// nicht, denn er steht schon darin.
+/// A tab without history creates its first entry; a returning one does not,
+/// since it is already there.
 fn tab_load(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) {
-    // Der Zwischenspeicher haelt das Layout der vorigen Seite, das
-    // Formularmodell ihre Steuerelemente. Beide haengen an Zaehlern, die JE
-    // DOKUMENT laufen — nach einem Wechsel sagt ein Vergleich nichts mehr.
+    // The cache holds the previous page's layout, the form model its
+    // controls. Both depend on per-document counters, so after a switch a
+    // comparison means nothing.
     *cache = None;
     *page = Page::new();
     let u = doc().url.to_string();
@@ -3880,7 +3567,7 @@ fn tab_load(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, page: 
     }
 }
 
-/// Auf einen anderen Tab umschalten.
+/// Switch to another tab.
 fn tab_activate(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u32)>,
                 page: &mut Page) {
     if i >= tabs().len() || i == active() {
@@ -3892,12 +3579,11 @@ fn tab_activate(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32,
     mark_dirty();
 }
 
-/// Einen Tab oeffnen. `background` legt ihn nur AN.
+/// Open a tab. `background` only creates it.
 ///
-/// Ein Hintergrundtab holt nichts: geholt wird, wenn ihn jemand ansieht. Der
-/// Grund steht im Kernel — `WORKER_COUNT = 1`, es laeuft ein Abruf zur Zeit,
-/// und ein Tab, den niemand liest, nimmt der Seite vor den Augen des Lesers
-/// die Leitung weg.
+/// A background tab fetches nothing until someone looks at it: the kernel
+/// runs one fetch at a time, and an unseen tab would take the connection
+/// from the page in front of the reader.
 fn tab_open(engine: &Engine, url: &str, background: bool,
             cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) {
     if tabs().len() >= MAX_TABS {
@@ -3918,16 +3604,15 @@ fn tab_open(engine: &Engine, url: &str, background: bool,
     mark_dirty();
 }
 
-/// Einen Tab schliessen.
+/// Close a tab.
 fn tab_close(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u32)>,
              page: &mut Page) {
     let n = tabs().len();
     if i >= n {
         return;
     }
-    // **Der letzte Tab IST das Fenster.** So macht es jeder Browser, und die
-    // Gegenrichtung waere ein Strg+W, das nichts tut — also ein Fenster, das
-    // sich mit der Tastatur nicht schliessen laesst.
+    // The last tab is the window, as in other browsers; otherwise Ctrl+W
+    // would do nothing and the window could not be closed by keyboard.
     if n == 1 {
         unsafe {
             let _ = npk_close_widget();
@@ -3936,7 +3621,7 @@ fn tab_close(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u3
     }
     let a = active();
     if i == a {
-        // Die Griffe zurueck, bevor das Dokument faellt.
+        // Release the handles before the document goes.
         tab_freeze();
     }
     tabs().remove(i);
@@ -3948,9 +3633,9 @@ fn tab_close(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u3
     }
 }
 
-/// A typed address that is not a URL becomes a web search. Marginalia is the
-/// one engine that serves real results to a no-JS client (the others gate on
-/// browser fingerprinting — see the 2026-07-20 recon).
+/// A typed address that is not a URL becomes a web search. Marginalia serves
+/// real results to a no-JS client; other engines gate on browser
+/// fingerprinting.
 const SEARCH_URL: &str = "https://marginalia-search.com/search?query=";
 
 /// Does this look like an address rather than a search phrase?
@@ -3966,9 +3651,7 @@ fn looks_like_url(t: &str) -> bool {
     host == "localhost" || (host.contains('.') && !host.ends_with('.'))
 }
 
-/// Submit a form. GET puts the data in the query string, POST in the request
-/// body — the same encoding either way (HTML §4.10.21.3).
-/// Ein Formular, das die SEITE abschicken will (`form.submit()`).
+/// A form the page itself submits (`form.submit()`).
 fn submit_form_seq(engine: &Engine, page: &Page, form_seq: u32) -> bool {
     match forms::submit_form(&page.forms, &page.state, form_seq) {
         Some(s) => { send_submission(engine, s); true }
@@ -3979,24 +3662,21 @@ fn submit_form_seq(engine: &Engine, page: &Page, form_seq: u32) -> bool {
     }
 }
 
+/// Submit a form. GET puts the data in the query string, POST in the request
+/// body — the same encoding either way (HTML §4.10.21.3).
 fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool {
-    // **Erst das `submit`-Ereignis.** Eine Seite rechnet in ihrem Behandler
-    // aus, was sie mitschickt — ein Kennwort-Hash, ein Zeitstempel, ein
-    // Token — und darf abbrechen. Ohne diesen Schritt schickte beak das
-    // Formular so ab, wie es im Baum stand: die berechneten Felder leer, und
-    // die Gegenseite antwortet mit „falsches Kennwort".
+    // The `submit` event first. A page computes in its handler what it sends
+    // (a password hash, a timestamp, a token) and may cancel; without it the
+    // computed fields would go out empty.
     //
-    // Nur auf dem BENUTZERweg. `form.submit()` aus einem Skript feuert laut
-    // Spezifikation kein `submit` — sonst liefe der Behandler der Seite ein
-    // zweites Mal.
+    // Only on the user path: `form.submit()` from script fires no `submit`
+    // event per spec, or the page's handler would run twice.
     let form_seq = activated.or(page.state.focus)
         .and_then(|s| page.forms.get(s)?.form)
         .and_then(|f| page.forms.forms.get(f).map(|d| d.seq));
-    // Die Steuerelemente, um die es geht, ueber ihre BAUMknoten festhalten:
-    // der Behandler der Seite darf umbauen, und dann heissen sie anders
-    // (`to_dom` nummeriert neu). Ohne das zeigte `activated` nach dem
-    // Behandler auf ein anderes Element — oder auf keines, und dann wurde
-    // gar nichts abgeschickt.
+    // Hold the relevant controls by their tree nodes: the page's handler may
+    // rebuild, and `to_dom` renumbers. Otherwise `activated` could point at
+    // another element after the handler — or at none.
     let node_of = |s: Option<u32>| -> Option<u32> {
         let s = s?;
         js_session().and_then(|x| x.interp.doc.as_ref()).and_then(|d| d.by_seq(s))
@@ -4005,16 +3685,14 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
     let focus_node = node_of(page.state.focus);
     if let Some(fs) = form_seq {
         arm_script_budget();
-        // VOR dem Behandler. Er kann Minuten rechnen (eine Anmeldung, die
-        // ihren Hash selbst macht), und bis dahin sah der Benutzer nichts —
-        // weder dass die Eingabe angekommen ist noch dass etwas laeuft.
+        // Before the handler. It may compute for minutes (a login hashing
+        // itself), and until then the user would see nothing.
         let ts0 = now_ms();
         log("[beak] submit: Behandler der Seite laeuft…");
         if let Some(sess) = js_session() {
             if beak_engine::js::dombind::dispatch_seq(&mut sess.interp, "submit", fs) {
-                // Abgebrochen. Der Behandler hat oft trotzdem etwas vor —
-                // ein `setTimeout`, ein Versprechen — also laufen lassen und
-                // den Baum nachziehen.
+                // Cancelled. The handler often still has work queued (a
+                // `setTimeout`, a promise), so run it and refresh the tree.
                 let n = sess.interp.run_timers();
                 drain_console(sess);
                 if sess.interp.doc.as_ref().is_some_and(|d| d.dirty) {
@@ -4027,8 +3705,8 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
                 log(&alloc::format!("[beak] submit: von der Seite abgefangen ({n} Zeitgeber)"));
                 return true;
             }
-            // Nicht abgefangen — aber der Behandler kann Felder gefuellt
-            // haben, und die gehoeren in die Eingabe.
+            // Not cancelled — but the handler may have filled fields, and
+            // those belong in the submission.
             let n = sess.interp.run_timers();
             let _ = n;
             drain_console(sess);
@@ -4046,7 +3724,7 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         m.push_str(" ms");
         log(&m);
     }
-    // Und zurueck: derselbe Knoten, seine JETZIGE Nummer.
+    // And back: the same node, its current number.
     let seq_of = |n: Option<u32>| -> Option<u32> {
         let n = n?;
         js_session().and_then(|x| x.interp.doc.as_ref())
@@ -4063,10 +3741,8 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
         // it, or owned by a `form=` attribute we do not read) versus a form
         // that submitted and came back wrong.
         //
-        // **Ein Absendeknopf OHNE Formular tut laut HTML §4.10.6 nichts** —
-        // das ist die Regel, kein Fehler. Auf einer Anwendungsseite ist jeder
-        // `<button>` ohne `type` ein solcher Knopf, und die Meldung stand dort
-        // bei JEDEM Klick, als waere etwas kaputt.
+        // A submit button without a form does nothing per HTML §4.10.6 —
+        // that is the rule, not an error, so it is not logged.
         None => {
             let owned = activated
                 .and_then(|s| page.forms.get(s))
@@ -4081,11 +3757,11 @@ fn submit_form(engine: &Engine, page: &mut Page, activated: Option<u32>) -> bool
     true
 }
 
-/// Eine fertige Eingabe abschicken — GET haengt sie an die Adresse, POST in
-/// den Rumpf. Eine Fassung fuer beide Wege dorthin (Knopf und `submit()`).
+/// Send a finished submission — GET appends it to the URL, POST puts it in
+/// the body. One version for both ways there (button and `submit()`).
 fn send_submission(engine: &Engine, sub: forms::Submission) {
     // An empty action targets the current document; either way the form data
-    // REPLACES the action's query string (HTML §4.10.21.3 "mutate action URL").
+    // replaces the action's query string (HTML §4.10.21.3 "mutate action URL").
     let base = url_str().to_string();
     let action = if sub.action.is_empty() { base.clone() } else { resolve(&base, &sub.action) };
     let mut url = action.split(['?', '#']).next().unwrap_or(&action).to_string();
@@ -4109,7 +3785,7 @@ fn follow(engine: &Engine, href: &str) {
     nav_goto(engine, &abs);
 }
 
-// ── Back/forward history (fixed-size static ring of URLs) ──────────────────
+// ── Back/forward history (bounded list of URLs) ─────────────────────────────
 
 const HIST_MAX: usize = 64;
 
@@ -4118,11 +3794,7 @@ fn hist_get(i: usize) -> &'static str {
 }
 /// Record a new navigation: truncate forward entries, append (caps at HIST_MAX).
 ///
-/// **Verhalten unveraendert uebernommen**, auch die Ecke am Deckel: ist die
-/// Liste voll, wird der LETZTE Eintrag ueberschrieben und die Stelle bleibt
-/// stehen. Ein Umbau ist der falsche Ort, um nebenbei eine Regel zu aendern
-/// — was hier steht, muss sich genauso verhalten wie vorher, sonst misst
-/// kein Test mehr den Umbau.
+/// At the cap the last entry is overwritten and the position stays.
 fn hist_push(url: &str) {
     let d = doc_mut();
     if !d.hist.is_empty() && d.hist.get(d.hist_pos).map(|s| s.as_str()) == Some(url) {
@@ -4136,19 +3808,14 @@ fn hist_push(url: &str) {
         }
         return;
     }
-    // Vorwaerts-Eintraege fallen weg — dasselbe, was das feste Feld tat,
-    // indem es `HIST_COUNT` auf `new_pos + 1` zurueckschrieb.
+    // Forward entries are dropped.
     d.hist.truncate(new_pos);
     d.hist.push(String::from(clip(url, URL_CAP)));
     d.hist_pos = new_pos;
 }
-// **Jede Entleihung endet in ihrer eigenen Anweisung.** `doc_mut` gibt ein
-// `&'static mut` heraus; zwei davon gleichzeitig — oder eines neben einem
-// `doc()` — sind Aliasing, und Aliasing auf `&mut` ist kein Stilfehler,
-// sondern undefiniert. Deshalb steht hier `doc().hist_pos` lesen, DANN
-// schreiben, DANN `hist_get` rufen, statt eine Referenz ueber alles drei zu
-// halten. Der Rechner merkt es nicht — die Referenz kommt aus einem
-// `unsafe`-Deref und faellt aus seiner Buchhaltung.
+// Each borrow ends in its own statement: read `doc().hist_pos`, then write,
+// then call `hist_get`, rather than holding one reference across all three
+// (see `doc`/`doc_mut`).
 fn hist_back() -> Option<&'static str> {
     let pos = doc().hist_pos;
     if pos == 0 { return None }
@@ -4171,25 +3838,17 @@ fn origin_of(url: &str) -> String {
         alloc::format!("https://{}", url.split('/').next().unwrap_or(""))
     }
 }
-/// Eine Adresse gegen die der Seite aufloesen.
+/// Resolve a URL against the page's.
 ///
-/// **Die Aufloesung der ENGINE, nicht eine zweite.** Der Wirt hatte seine
-/// eigene, und sie hat `.` und `..` stehen lassen (RFC 3986 §5.2.4 fehlte
-/// ganz). Solange nur Bilder und Links daran hingen, fiel das nicht auf: die
-/// Server liefern `/js/../js/x.css` klaglos aus. Beim Modulgraphen ist eine
-/// Adresse aber ein SCHLUESSEL — `./jsl.js` aus `/js/./jsl.js` wurde
-/// `/js/././jsl.js`, jede Ebene hing ein weiteres Segment an, und derselbe
-/// Modul lag am Ende unter sechs Namen im Graphen. Am Geraet: 106 geladen,
-/// 179 offen, Deckel gerissen, nichts gelaufen.
-///
-/// `js::url::resolve` konnte das die ganze Zeit ([[url::norm]]). Zwei
-/// Umsetzungen derselben Regel sind eine wartende zweite Semantik, und diese
-/// hier ist die falsche gewesen — also gibt es sie nicht mehr.
+/// Uses the engine's resolution (`js::url::resolve`, including RFC 3986
+/// §5.2.4 dot-segment removal) rather than a second implementation. For the
+/// module graph a URL is a key, so unnormalised `./` and `../` would load the
+/// same module under several names.
 fn resolve(base: &str, href: &str) -> String {
     use beak_engine::js::url;
     let href = href.trim();
     let Some(b) = url::parse_abs(base) else {
-        // Ohne brauchbare Grundlage bleibt nur die Angabe selbst.
+        // Without a usable base only the reference itself remains.
         return href.to_string();
     };
     url::resolve(href, &b).href()
@@ -4207,9 +3866,6 @@ fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
     Some((rd(0), rd(4), rd(8), rd(12)))
 }
 
-/// Re-layout + paint the visible slice into the canvas if it's dirty or the
-/// viewport resized. Paints only the viewport (bounded memory, any page
-/// length — long one-pagers just scroll).
 /// Set one BGRA pixel (bounds-checked).
 fn px_set(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, bgr: [u8; 3]) {
     if x < 0 || x >= w || y < 0 || y >= h {
@@ -4244,34 +3900,30 @@ fn stroke_rect_bgra(buf: &mut [u8], w: i32, h: i32, x: i32, y: i32, rw: i32, rh:
     }
 }
 
-/// **Ein frisches Layout, mitten im Skript.**
+/// A fresh layout, in the middle of a script.
 ///
-/// Gerufen aus `Interp`, wenn eine Seite den Kasten eines Elements liest, das
-/// sie im selben Schritt eingehaengt hat. Derselbe Weg, den die Bildschleife
-/// je Bild faehrt — Baum zurueckschreiben, auslegen, Kaesten einreichen —
-/// nur jetzt auf Verlangen.
+/// Called from `Interp` when a page reads the box of an element it inserted
+/// in the same step. The same path the frame loop runs per frame — write
+/// back the tree, lay out, hand in the boxes — only on demand.
 ///
-/// **Was er NICHT tut: den Zwischenspeicher der Schleife fuellen.** Der liegt
-/// in `main`, und ein `fn`-Zeiger kommt nicht daran. Das naechste Bild legt
-/// also noch einmal aus — aber das haette es ohnehin getan, denn der Baum hat
-/// sich geaendert und `content_gen` steht schon weiter. Der Preis ist genau
-/// dieses eine erzwungene Layout, nicht zwei.
+/// It does not fill the loop's layout cache (it lives in `main`, out of reach
+/// of a `fn` pointer). The next frame lays out again, but it would anyway,
+/// since the tree changed and `content_gen` moved on.
 ///
-/// Den Deckel gegen Layout-Thrashing haelt die Maschine (`FORCED_LAYOUT_CAP`);
-/// hier steht nur die Arbeit.
+/// The engine holds the cap against layout thrashing (`FORCED_LAYOUT_CAP`);
+/// this is only the work.
 fn host_relayout(ip: &mut beak_engine::js::interp::Interp) {
     let Some((_x, _y, w, h)) = canvas_rect() else { return };
     if w <= 0 || h <= 0 { return }
     if let Some(d) = ip.doc.as_mut() {
         engine().set_scripted_dom(Some(d.to_dom()));
     }
-    // Der Schleife sagen, dass ihr Zwischenspeicher alt ist. Ohne das haelt
-    // sie ihn fuer gueltig, weil `to_dom` eine Zeile weiter oben `dirty`
-    // geloescht hat.
+    // Tell the loop its cache is stale. Otherwise it would consider it valid,
+    // because `to_dom` just cleared `dirty`.
     bump_content_gen("relayout");
-    // Die getippten Werte des Benutzers, wie beim letzten Auslegen. Mit
-    // `FormState::default()` waere ein Feld mit Text schmaler, und genau
-    // diese falsche Zahl ginge an die Seite zurueck.
+    // The user's typed values, as in the last layout. With
+    // `FormState::default()` a field with text would be narrower, and that
+    // wrong number would go back to the page.
     let forms = engine().last_forms();
     let lay = do_layout(engine(), w as u32, &forms);
     let boxes = alloc::rc::Rc::new(lay.element_rects());
@@ -4298,15 +3950,14 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         return;
     }
 
-    // (Re)lay out only when the content or the viewport changed — NOT on every
+    // (Re)lay out only when the content or the viewport changed — not on every
     // scroll. Reusing the cached layout for scroll is what keeps scrolling
-    // smooth. The HEIGHT counts only when the page's geometry actually depends
+    // smooth. The height counts only when the page's geometry actually depends
     // on it — a `vh` length that won the cascade, a cap that really clamps, an
     // out-of-flow box anchored to the viewport's bottom edge. `html, body
     // { height: 100% }` is on nearly every site and moves nothing, so it must
-    // not count: the dock sliding this window up a few pixels was costing a
-    // full re-layout (~6.4 s on a big article) for a picture that could not
-    // change.
+    // not count: a window resized by a few pixels would otherwise cost a full
+    // re-layout for a picture that cannot change.
     let cur_gen = content_gen();
     let need_layout = match cache.as_ref() {
         None => true,
@@ -4316,32 +3967,27 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     };
     if need_layout {
         *cache = Some((do_layout(engine, w as u32, state), w, h, cur_gen));
-        // Der Titel fuer den Streifen. **Hier und nicht beim Ankommen des
-        // Dokuments:** der Motor parst beim AUSLEGEN, also haelt er bis
-        // hierher noch den Baum der vorigen Seite — ein Tab haette den Namen
-        // der Seite getragen, von der man kam.
+        // The title for the tab strip. Here, not when the document arrives:
+        // the engine parses at layout, so until now it still holds the
+        // previous page's tree.
         let t = engine.title().unwrap_or_default();
         if t != doc().title {
             doc_mut().title = t;
             render_chrome();
         }
-        // Die Kaesten neu einsammeln — nur hier, nicht je Bild.
+        // Collect the boxes again — only here, not per frame.
         let boxes = cache.as_ref().unwrap().0.element_rects();
-        // Zuweisung, nicht `ptr::write`: die ueberschreibt OHNE den alten Wert
-        // fallen zu lassen, und das waren ~180 KB Kaesten je Neuauslegung, die
-        // nie zurueckkamen.
+        // Assignment, not `ptr::write`: that overwrites without dropping the
+        // old value and would leak the previous boxes.
         doc_mut().geom = Some(alloc::rc::Rc::new(boxes));
 
-        // **Eine Markierung zeigt auf BEFEHLSINDIZES, und die verschieben
-        // sich beim Neuauslegen.** Ein nachgeladenes Bild reicht: aus der
-        // markierten Zeile wird eine andere, und der Schleier liegt ueber
-        // fremdem Text. Also faellt die Auswahl weg — das ist ehrlicher, als
-        // etwas Falsches hervorzuheben.
+        // A selection points at op indices, which shift on re-layout (a late
+        // image is enough), so the selection is dropped rather than
+        // highlighting the wrong text.
         //
-        // Die SUCHE dagegen wird neu gerechnet statt weggeworfen: sie hat
-        // eine Frage, die noch gilt (die Zeichenkette), waehrend eine
-        // Auswahl nur einen Ort hatte. Ohne Sprung — sonst reisst ein
-        // nachgeladenes Bild die Seite unter dem Leser weg.
+        // Find is recomputed instead: its query (the string) still holds,
+        // while a selection only had a position. Without jumping, or a late
+        // image would yank the page from under the reader.
         if doc().sel.is_some() {
             doc_mut().sel = None;
             doc_mut().sel_anchor = None;
@@ -4356,17 +4002,15 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     let max_scroll = (layout.height as i32 - h).max(0);
     let sy = scroll_y().clamp(0, max_scroll);
     set_scroll(sy);
-    // Geometrie und Rollstand an die Maschine reichen. Der Rollstand geht bei
-    // jedem Bild mit, weil er sich ohne Layout aendert; die Kaesten sind ein
-    // `Rc` und kosten dabei nichts.
+    // Hand geometry and scroll position to the engine. The scroll position
+    // goes every frame because it changes without a layout; the boxes are an
+    // `Rc` and cost nothing.
     let geom = doc().geom.clone();
     if let (Some(sess), Some(g)) = (js_session(), geom) {
-        // Das Sichtfeld nachziehen, wenn es sich bewegt hat. Der Ausschnitt
-        // eines `IntersectionObserver` ohne eigene Wurzel IST das Sichtfeld —
-        // und `set_media` laeuft nur einmal beim Skriptstart, also stand hier
-        // nach jeder Fensteraenderung die Zahl von damals. Nur bei
-        // Aenderung, weil `set_viewport` ein frisches `screen` baut und das
-        // je Bild Muell waere.
+        // Update the viewport when it moved. The root of an
+        // `IntersectionObserver` without its own root is the viewport, and
+        // `set_media` runs only once at script start. Only on change, because
+        // `set_viewport` builds a fresh `screen`.
         let vp = (w, h);
         if doc().last_vp != vp {
             doc_mut().last_vp = vp;
@@ -4374,19 +4018,17 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         }
         sess.interp.set_geometry(beak_engine::js::interp::Geometry {
             boxes: g, scroll: (0, sy),
-            // Die Rollflaeche, wie das Layout sie ausgerechnet hat — dieselbe
-            // Zahl, gegen die der Wirt zwei Zeilen weiter oben `max_scroll`
-            // klemmt. `document.documentElement.scrollHeight` MUSS dieselbe
-            // sagen, sonst rechnet eine Seite mit einer Hoehe, an die sie nie
-            // rollen kann.
+            // The scroll area as the layout computed it — the same number
+            // `max_scroll` is clamped against above.
+            // `document.documentElement.scrollHeight` must agree, or a page
+            // computes with a height it can never scroll to.
             content: (w, layout.height as i32),
         });
     }
 
     // Reuse a persistent paint buffer across frames — `engine.paint` fills every
-    // pixel (background first), so no re-zeroing is needed. A fresh
-    // `vec![0; w*h*4]` per frame was a ~5 MB alloc+zero+free on EVERY scroll
-    // repaint (heap churn + latency).
+    // pixel (background first), so no re-zeroing is needed, and a scroll repaint
+    // does not allocate and zero a full frame.
     let need = (w as usize) * (h as usize) * 4;
     let resized = buf.len() != need;
     if resized {
@@ -4395,10 +4037,10 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
 
     // Scrolling does not change the page; it moves it. When nothing else asked
     // for a repaint, shift the pixels that merely moved and draw only the band
-    // that came into view — 1902x1000 is 7,6 MB of fill, ~60-80 ms on the
-    // device, and a scroll exposes a few dozen rows of it.
+    // that came into view; a full fill is far more expensive than a scroll's
+    // few dozen new rows.
     //
-    // The inspect overlay is drawn OVER the frame rather than being part of the
+    // The inspect overlay is drawn over the frame rather than being part of the
     // display list, so a blit would smear it; that mode takes the full path.
     let dy = sy - unsafe { core::ptr::addr_of!(LAST_SY).read() };
     let full = doc().need_full
@@ -4408,8 +4050,6 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         || dy.abs() >= h;
     // A scroll that the clamp swallowed — at the top or the bottom of the page
     // the offset does not move, so the buffer already holds this exact frame.
-    // Repainting it was 60-80 ms for a picture that cannot differ, and holding
-    // the wheel at the foot of an article does it every turn.
     if dy == 0 && !full {
         doc_mut().dirty = false;
         return;
@@ -4420,19 +4060,19 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         let rows = h as usize;
         let moved = dy.unsigned_abs() as usize;
         if dy > 0 {
-            // Scrolled down: the picture moves UP, the new band is at the foot.
+            // Scrolled down: the picture moves up, the new band is at the foot.
             buf.copy_within(moved * stride..rows * stride, 0);
             engine.paint_band(layout, w as u32, h as u32, sy, buf,
                               (rows - moved) as u32, rows as u32);
         } else {
-            // Scrolled up: the picture moves DOWN, the new band is at the head.
+            // Scrolled up: the picture moves down, the new band is at the head.
             buf.copy_within(0..(rows - moved) * stride, moved * stride);
             engine.paint_band(layout, w as u32, h as u32, sy, buf, 0, moved as u32);
         }
     } else {
         engine.paint(layout, w as u32, h as u32, sy, buf);
     }
-    // Was das Malen nicht gefunden hat — einmal je Adresse.
+    // What painting did not find — once per URL.
     log_image_miss(engine);
     // Inspect overlay: outline the selected element box (document → screen).
     if inspect_mode() {
@@ -4442,7 +4082,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     }
     let t_commit = now_ms();
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
-    // Say WHICH path ran. A fast path that never says so looks exactly like one
+    // Say which path ran. A fast path that never says so looks exactly like one
     // that never happened, and the whole point of this one is a number.
     if full {
         log_ms("paint", t_commit - t_paint);
@@ -4453,17 +4093,15 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     log_ms("canvas commit", now_ms() - t_commit);
     // The number that matters: navigation → first pixels.
     //
-    // Not while one is still in the air: the OLD page keeps repainting for
-    // scrolls and hovers during a load now, and reporting one of those would
+    // Not while one is still in flight: the old page keeps repainting for
+    // scrolls and hovers during a load, and reporting one of those would
     // credit the new navigation with a picture of the previous page.
     {
         if !doc().nav_reported && !nav_busy() {
             doc_mut().nav_reported = true;
             log_ms("=== navigation -> first paint", now_ms() - doc().nav_start_ms);
-            // Wieviele der sechs eingebauten Gesichter diese Seite wirklich
-            // gebraucht hat. Sie werden faul geladen, und ohne diese Zahl ist
-            // „faul" eine Behauptung: eine Seite, die doch alle sechs
-            // anfasst, spart nichts, und man saehe es nicht.
+            // How many of the six built-in faces this page actually needed.
+            // They load lazily; without this number "lazy" is only a claim.
             let mut m = String::from("[beak] Schriften: ");
             push_i64(&mut m, engine.loaded_faces() as i64);
             m.push_str(" von 6 Gesichtern geparst");
@@ -4480,45 +4118,41 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     doc_mut().dirty = false;
 }
 
-/// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
-/// Die Farb-Laeufe der Adresszeile: die registrierbare Domain in voller
-/// Staerke, alles andere abgeblendet.
+/// The colour runs of the address bar: the registrable domain at full
+/// strength, everything else muted.
 ///
-/// **Das ist keine Zierde, sondern die Anti-Phishing-Anzeige.** In
-/// `https://paypal.com.betrug.ru/login` heisst die Domain `betrug.ru`, und
-/// das Auge liest das erste, was wie ein Name aussieht. Jeder Browser hebt
-/// deshalb genau diesen Teil hervor.
+/// This is the anti-phishing display: in `https://paypal.com.example.ru/login`
+/// the domain is `example.ru`, and the eye reads the first thing that looks
+/// like a name.
 ///
-/// Gerechnet wird mit `site::registrable_domain`, also mit der echten Public
-/// Suffix List — NICHT mit „die letzten zwei Bestandteile". Der Unterschied
-/// ist der ganze Punkt: bei `a.github.io` waeren das `github.io`, und dann
-/// haette die Anzeige zwei fremde Nutzerseiten als dieselbe ausgewiesen.
+/// Computed with `site::registrable_domain`, i.e. the real Public Suffix
+/// List — not "the last two labels": for `a.github.io` that would be
+/// `github.io`, showing two unrelated user sites as the same.
 ///
-/// **Nur wenn das Feld die geladene Adresse ZEIGT.** Weicht es ab, tippt
-/// gerade jemand, und dann ist jede Hervorhebung eine Aussage ueber einen
-/// halben Satz: `arcade.c` waere `arcade.c`, eine Zehntelsekunde spaeter
-/// `arcade.ch`. Waehrend des Tippens bleibt der Text einfarbig.
+/// Only when the field shows the loaded URL. If it differs, someone is
+/// typing, and highlighting half a host would be wrong a keystroke later.
+/// While typing the text stays one colour.
 fn address_spans(field: &str, url: &str) -> Vec<Span> {
     if field.is_empty() || field != url {
         return Vec::new();
     }
-    // Der Host: hinter `schema://`, bis zum ersten `/?#`, ohne `benutzer@`
-    // und ohne `:port`.
+    // The host: after `scheme://`, up to the first `/?#`, without `user@`
+    // and without `:port`.
     let after_scheme = match field.find("://") { Some(i) => i + 3, None => 0 };
     let rest = &field[after_scheme..];
     let host_len = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..host_len];
     let host_at = after_scheme + authority.rfind('@').map(|i| i + 1).unwrap_or(0);
     let host_raw = &field[host_at..after_scheme + host_len];
-    // Ein Doppelpunkt trennt den Port — aber in `[::1]` gehoert er zur
-    // Adresse, und eine IP hat ohnehin keine registrierbare Domain.
+    // A colon separates the port — but in `[::1]` it belongs to the address,
+    // and an IP has no registrable domain anyway.
     let host = match host_raw.rfind(':') {
         Some(i) if !host_raw.contains(']') => &host_raw[..i],
         _ => host_raw,
     };
     let Some(dom) = beak_engine::site::registrable_domain(host) else { return Vec::new() };
-    // `registrable_domain` gibt kleingeschrieben zurueck; gesucht wird im
-    // ORIGINAL, und sie ist immer ein Endstueck des Hosts.
+    // `registrable_domain` returns lowercase; we search in the original, and
+    // it is always a suffix of the host.
     if host.len() < dom.len() { return Vec::new() }
     let start = host_at + (host.len() - dom.len());
     let end = start + dom.len();
@@ -4532,6 +4166,7 @@ fn address_spans(field: &str, url: &str) -> Vec<Span> {
     out
 }
 
+/// Commit the loft-styled chrome: menu bar · toolbar (back/forward/reload +
 /// framed address bar) · canvas body · the open dropdown as a Popover.
 fn render_chrome() {
     let menu = prefab::menu_bar_with_icon(
@@ -4552,9 +4187,8 @@ fn render_chrome() {
 
     // A lock in Success for https, the bird for anything else — the
     // scheme belongs in the field, not in the URL text (docs/spec/UI_REFRESH.md §5).
-    // Das Schloss gehoert dem GELADENEN Dokument, der Text dem Feld: waehrend
-    // jemand tippt, sagt das Schloss weiter die Wahrheit ueber die Seite, die
-    // dasteht.
+    // The lock belongs to the loaded document, the text to the field: while
+    // someone types, the lock still tells the truth about the page shown.
     let url = url_str();
     let field = edit_str();
     let spans = address_spans(field, url);
@@ -4636,15 +4270,13 @@ fn render_chrome() {
         },
     ];
 
-    // Die Suchleiste. **Kein `Widget::Input`, sondern Text** — der Puffer
-    // gehoert beak, siehe `Doc::find`. Sie steht UNTER der Leinwand wie in
-    // jedem Browser: oben waere sie ein Werkzeug, unten ist sie eine
-    // Randnotiz, und genau das ist sie.
+    // The find bar. Not a `Widget::Input` but text — the buffer belongs to
+    // beak, see `Doc::find`. It sits below the canvas as in other browsers.
     if let Some(q) = doc().find.clone() {
         let (at, n) = (doc().find_at, doc().found.len());
         let mut label = String::from("Suchen: ");
         label.push_str(&q);
-        label.push('\u{2502}');           // ein stehender Strich als Schreibmarke
+        label.push('\u{2502}');           // a vertical bar as caret
         if !q.is_empty() {
             label.push_str("    ");
             if n == 0 {
@@ -4719,32 +4351,29 @@ const FIELD_H: u16 = 30;
 const NAV_BTN: u16 = 28;
 const NAV_BTN_RADIUS: u8 = 7;
 
-/// Der Streifen: 36 px, `SurfaceElevated`, Tabs unten buendig
-/// (`docs/spec/UI_REFRESH.md` §5.2 und §3 `tab`).
+/// The tab strip: 36 px, `SurfaceElevated`, tabs bottom-aligned
+/// (`docs/spec/UI_REFRESH.md` §5.2 and §3 `tab`).
 const TABSTRIP_H: u16 = 36;
-/// Der Akzentstreifen oben auf dem aktiven Tab.
+/// The accent bar on top of the active tab.
 const TAB_ACCENT: u16 = 2;
 const TAB_H: u16 = 30;
-/// **Feste Breite, nicht mitwachsend** (§3 `tab`). Ein Tab, der sich der
-/// Anzahl anpasst, braucht ein Etikett, das mitgeht — und die Schrift gehoert
-/// dem Compositor, eine App kann sie nicht messen.
+/// Fixed width, not adaptive (§3 `tab`). An adaptive tab needs a label that
+/// adapts with it, and the font belongs to the compositor — an app cannot
+/// measure it.
 const TAB_W: u16 = 160;
-/// **22, damit ein 16-px-Zeichen hineinpasst.** Der Atlas fuehrt 16, 24, 32,
-/// 48 und 64 — eine Anfrage auf 12 bekam das 16er und wurde auf 4:3
-/// verkleinert. Das Verkleinern mittelt korrekt ueber Flaechen, und genau
-/// deshalb wird ein 1,5 px breiter Strich dabei weich: Florian am Geraet,
-/// „das x symbol malt bisschen unscharf". Eine Atlasgroesse zu verlangen ist
-/// ein 1:1-Blit und damit scharf.
+/// 22, so a 16 px icon fits. The atlas holds 16, 24, 32, 48 and 64; any
+/// other size is downscaled with area averaging, which blurs thin strokes.
+/// Requesting an atlas size is a 1:1 blit and stays sharp.
 const TAB_BTN: u16 = 22;
-/// Wieviel Text in einen Tab passt, in Zeichen.
+/// How much text fits into a tab, in characters.
 ///
-/// Gerechnet mit 7 px je Zeichen gegen `TextStyle::Body` (13 px). Das ist
-/// eine SCHAETZUNG und absichtlich zu hoch: ein zu kurzes Etikett ist ein
-/// Etikett, ein zu langes ist ein Fehler — der Compositor schneidet Text
-/// nicht ab, er malt ihn ueber den Nachbarn.
+/// Assumes 7 px per character for `TextStyle::Body` (13 px) — an estimate,
+/// deliberately high: a short label is still a label, a long one is a bug,
+/// because the compositor does not clip text but paints it over the
+/// neighbour.
 const TAB_CHARS: usize = ((TAB_W - 16 - TAB_BTN - 4) / 7) as usize;
 
-/// Ein kleiner Knopf im Streifen: das `\u{d7}` eines Tabs, das `+` dahinter.
+/// A small button in the strip: a tab's `\u{d7}`, the `+` after them.
 fn tab_btn(icon: IconId, action: ActionId) -> Widget {
     prefab::center_box(
         Widget::Icon { id: icon, size: 16, modifiers: vec![Modifier::Tint(Token::OnSurfaceMuted)] },
@@ -4762,11 +4391,10 @@ fn tab_btn(icon: IconId, action: ActionId) -> Widget {
     )
 }
 
-/// Der Tabstreifen.
+/// The tab strip.
 ///
-/// **Er steht immer da, auch bei einem Tab** — das `+` ist der einzige Ort,
-/// an dem ein zweiter entsteht, wenn man die Tastenfolge nicht kennt. 36 px
-/// dafuer sind der Preis, den jeder Browser zahlt.
+/// Always shown, even for a single tab — the `+` is the only place a second
+/// one can be opened without knowing the shortcut.
 fn tab_strip() -> Widget {
     let a = active();
     let n = tabs().len();
@@ -4781,8 +4409,8 @@ fn tab_strip() -> Widget {
             Modifier::MinHeight(TAB_H),
             Modifier::Rounded(Radius::Md.as_u8()),
         ];
-        // **Der aktive Tab traegt die Farbe des Inhalts darunter** (§3
-        // `tab`): er IST die Seite, der Streifen ist der Rahmen.
+        // The active tab carries the colour of the content below (§3
+        // `tab`): it is the page, the strip is the frame.
         if sel {
             m.push(Modifier::Background(Token::Surface));
         } else {
@@ -4791,13 +4419,9 @@ fn tab_strip() -> Widget {
                 Modifier::Rounded(Radius::Md.as_u8()),
             ]));
         }
-        // **Ein Akzentstreifen OBEN auf dem aktiven Tab.** Bis hierher war der
-        // Unterschied zwischen aktiv und ruhend `Surface` gegen
-        // `SurfaceElevated` plus eine Textfarbe — richtig, aber am Geraet zu
-        // leise (Florian: „tabs optisch noch bisschen mehr hervorheben").
-        // Der Streifen ist das uebliche Zeichen und das einzige, das auch aus
-        // zwei Metern liest. Er liegt IM Tab, nicht darueber: sonst
-        // verschoebe er die Beschriftung des aktiven gegen die der anderen.
+        // An accent bar on top of the active tab, the usual marker. It sits
+        // inside the tab, not above it, or it would shift the active tab's
+        // label against the others.
         let bar = Widget::Row {
             children: Vec::new(),
             spacing: 0,
@@ -4827,10 +4451,9 @@ fn tab_strip() -> Widget {
                 Modifier::PaddingXY { x: 8, y: 0 },
             ],
         };
-        // **`Stretch`, nicht `Start`.** In einer Spalte ist `align` die
-        // QUERachse, also die Breite: mit `Start` haette der Akzentstreifen
-        // seine natuerliche Breite bekommen — und die ist bei einer Zeile
-        // ohne Kinder null.
+        // `Stretch`, not `Start`: in a column `align` is the cross axis, the
+        // width. With `Start` the accent bar would get its natural width,
+        // which for a row without children is zero.
         kids.push(Widget::Column {
             children: vec![bar, inner],
             spacing: 0,
@@ -4843,7 +4466,7 @@ fn tab_strip() -> Widget {
     Widget::Row {
         children: kids,
         spacing: Spacing::Xxs.as_u16(),
-        align: Align::End,          // unten buendig
+        align: Align::End,          // bottom-aligned
         modifiers: vec![
             Modifier::MinHeight(TABSTRIP_H),
             Modifier::Background(Token::SurfaceElevated),
@@ -4922,13 +4545,13 @@ fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].chars().next().map(|c| i + c.len_utf8()).unwrap_or(i)
 }
 
-// ── Suchen in der Seite ───────────────────────────────────────────────────
+// ── Find in page ──────────────────────────────────────────────────────────
 
-/// Die Suche neu rechnen und die Fundstellen hervorheben.
+/// Recompute the search and highlight the matches.
 ///
-/// `jump` springt zur aktuellen Fundstelle. Beim Tippen ist das erwuenscht
-/// (man will sehen, ob es sie gibt), beim blossen Neuauslegen nicht — sonst
-/// reisst ein nachgeladenes Bild die Seite unter dem Leser weg.
+/// `jump` scrolls to the current match. Wanted while typing (to see whether
+/// it exists), not on a mere re-layout — or a late image would yank the page
+/// from under the reader.
 fn find_run(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, jump: bool) {
     let Some(q) = doc().find.clone() else { return };
     let Some((lay, _, _, _)) = cache.as_ref() else { return };
@@ -4939,8 +4562,8 @@ fn find_run(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, jump: bool
     let (at, n) = (d.find_at, d.found.len());
     let cur = d.found.get(at).copied();
     engine.set_marks(d.sel, d.found.clone());
-    // Hinscrollen, damit die Fundstelle im Blick ist — ein Drittel von oben,
-    // nicht am Rand: eine Fundstelle in der letzten Zeile liest sich nicht.
+    // Scroll the match into view — a third from the top, not at the edge,
+    // where a match on the last line is hard to read.
     if jump && n > 0 {
         if let Some((a, b)) = cur {
             if let Some((_, _, _, ch)) = canvas_rect() {
@@ -4955,7 +4578,7 @@ fn find_run(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, jump: bool
     mark_dirty();
 }
 
-/// Eine Fundstelle weiter (oder zurueck), rundherum.
+/// One match forward (or back), wrapping around.
 fn find_step(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, back: bool) {
     let n = doc().found.len();
     if n == 0 { return }
@@ -4964,7 +4587,7 @@ fn find_step(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>, back: boo
     find_run(engine, cache, true);
 }
 
-/// Die Leiste schliessen und alles aufraeumen.
+/// Close the bar and clean up.
 fn find_close(engine: &Engine) {
     let d = doc_mut();
     d.find = None;
@@ -4976,23 +4599,20 @@ fn find_close(engine: &Engine) {
     render_chrome();
 }
 
-/// Ein Tastenbyte zu einem ZEICHEN sammeln.
+/// Accumulate a key byte into a character.
 ///
-/// **Ein Tastendruck traegt ein Byte, und `ä` sind zwei.** Alles ab 0x80 ist
-/// ein Stueck einer UTF-8-Folge; `b as char` waere dort LATIN-1 und machte
-/// aus dem Fuehrungsbyte 0xC3 ein `Ã`. `None` heisst „die Folge ist noch
-/// nicht vollstaendig" — dann passiert nichts, auch kein Neumalen.
+/// A key press carries one byte, and U+00E4 is two. Everything from 0x80 is
+/// part of a UTF-8 sequence; `b as char` would read it as Latin-1 and turn
+/// the lead byte 0xC3 into U+00C3. `None` means the sequence is not complete yet — then
+/// nothing happens, not even a repaint.
 ///
-/// Eine Stelle, nicht drei: die Adresszeile bedient der Compositor, aber
-/// beak hat zwei eigene Eingaben (Seitenformulare und die Suchleiste), und
-/// zwei Kopien derselben Rechnung sind eine wartende zweite Semantik
-/// ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+/// One place for both of beak's own inputs (page forms and the find bar).
 fn utf8_feed(pending: &mut [u8; 4], len: &mut u8, b: u8) -> Option<char> {
     if b < 0x80 {
         *len = 0;
         return Some(b as char);
     }
-    if b >= 0xC0 { *len = 0; }              // neue Folge
+    if b >= 0xC0 { *len = 0; }              // new sequence
     let n = *len as usize;
     if n < 4 { pending[n] = b; *len = n as u8 + 1; } else { *len = 0; }
     let take = *len as usize;
@@ -5002,21 +4622,17 @@ fn utf8_feed(pending: &mut [u8; 4], len: &mut u8, b: u8) -> Option<char> {
     }
 }
 
-/// Apply one key to the focused control. Returns true if the page must be
-/// re-laid-out (the control's painted text or caret changed).
-
-/// Wie eine Taste in der Sprache der Seite heisst: `key` (der WERT), `code`
-/// (der ORT auf der Tastatur) und die Altlast `keyCode`.
+/// What a key is called in the page's language: `key` (the value), `code`
+/// (the position on the keyboard) and the legacy `keyCode`.
 ///
-/// Drei Namen und nicht einer, weil Seiten alle drei lesen: React und
-/// modernes JS `key`, Tastaturkuerzel `code` (der ueberlebt ein anderes
-/// Layout), und der ganze Altbestand `keyCode`/`which`. Wer nur `key`
-/// liefert, laesst die Haelfte der Behandler ins Leere greifen.
+/// Three names, because pages read all three: modern JS reads `key`,
+/// shortcuts read `code` (it survives another layout), and legacy code reads
+/// `keyCode`/`which`.
 fn key_names(key: KeyCode, pending: bool) -> Option<(String, String, u32, bool)> {
     let s = |a: &str| String::from(a);
     Some(match key {
-        // Ein halbes UTF-8-Zeichen ist noch keine Taste — es wird gemeldet,
-        // wenn es vollstaendig ist.
+        // Half a UTF-8 character is not a key yet — it is reported once
+        // complete.
         KeyCode::Char(_) if pending => return None,
         KeyCode::Char(b' ') => (s(" "), s("Space"), 32, false),
         KeyCode::Char(b) if b >= 0x20 && b != 0x7F && b < 0x80 => {
@@ -5026,13 +4642,13 @@ fn key_names(key: KeyCode, pending: bool) -> Option<(String, String, u32, bool)>
             } else if c.is_ascii_digit() {
                 alloc::format!("Digit{c}")
             } else { s("") };
-            // `keyCode` ist der GROSSBUCHSTABE, auch wenn klein getippt wird —
-            // die Altlast kennt keine Schreibweise, nur die Taste.
+            // `keyCode` is the upper-case letter even when typed lower case —
+            // the legacy value knows only the key, not the case.
             (alloc::format!("{c}"), code, c.to_ascii_uppercase() as u32,
              c.is_ascii_uppercase())
         }
-        // Alles ab 0x80 ist ein fertiges Zeichen aus `utf8_feed`; sein `code`
-        // haengt am Layout, das wir nicht kennen, also bleibt er leer.
+        // Everything from 0x80 is a complete character from `utf8_feed`; its
+        // `code` depends on a layout we do not know, so it stays empty.
         KeyCode::Char(_) => (s(""), s(""), 0, false),
         KeyCode::Backspace => (s("Backspace"), s("Backspace"), 8, false),
         KeyCode::Delete => (s("Delete"), s("Delete"), 46, false),
@@ -5051,13 +4667,12 @@ fn key_names(key: KeyCode, pending: bool) -> Option<(String, String, u32, bool)>
     })
 }
 
-/// Ein Ereignis der Bedienung an die Seite geben und die Runde zu Ende
-/// fahren.
+/// Dispatch a UI event to the page and finish the round.
 ///
-/// **Die Runde gehoert dazu.** Ein Behandler, der `fetch` anstoesst oder ein
-/// `setTimeout` legt — und das tut jede Vorschlagsliste —, braucht die
-/// Microtasks und die Zeitgeber, sonst liegt seine Arbeit bis zum naechsten
-/// Ereignis still. Der Rueckgabewert sagt, ob die Seite ABGEBROCHEN hat.
+/// The round is part of it: a handler that starts a `fetch` or sets a
+/// `setTimeout` (every suggestion list does) needs the microtasks and timers,
+/// or its work sits idle until the next event. Returns whether the page
+/// cancelled.
 fn fire_ui(engine: &Engine, f: impl FnOnce(&mut beak_engine::js::interp::Interp) -> bool) -> bool {
     let Some(sess) = js_session() else { return false };
     arm_script_budget();
@@ -5077,15 +4692,16 @@ fn fire_ui(engine: &Engine, f: impl FnOnce(&mut beak_engine::js::interp::Interp)
     prevented
 }
 
+/// Apply one key to the focused control. Returns true if the page must be
+/// re-laid-out (the control's painted text or caret changed).
 fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     let (seq, kind, mut value) = match page.focused() {
         Some((c, v)) => (c.seq, c.kind, v.to_string()),
         None => return false,
     };
-    // **`keydown` ZUERST, und sein Abbruch gilt.** So filtert jedes
-    // Eingabefeld der Welt Zeichen (UI Events §5.4). Ohne diese Zeile glaubt
-    // eine Seite, sie haette verhindert, und der Tastendruck kommt trotzdem
-    // an — das waere schlimmer als gar keine Zustellung.
+    // `keydown` first, and its cancellation counts: that is how input fields
+    // filter characters (UI Events §5.4). Otherwise a page would believe it
+    // prevented a key that still arrives.
     if let Some((k, code, kc, shift)) = key_names(key, page.state.pending_len > 0) {
         if fire_ui(engine, |ip| {
             beak_engine::js::dombind::dispatch_key(ip, "keydown", seq, &k, &code, kc, shift)
@@ -5108,15 +4724,12 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
         };
     }
     let mut caret = page.state.caret.min(value.len());
-    // Was eingefuegt wurde — `InputEvent.data`. Bei einer Loeschung `None`,
-    // und das ist kein Platzhalter: die Spezifikation sagt dort `null`.
+    // What was inserted — `InputEvent.data`. `None` on deletion, which is
+    // the spec's `null`, not a placeholder.
     let mut typed: Option<String> = None;
     match key {
-        // **Nicht mehr nur ASCII.** `0x20..0x7F` hiess woertlich: auf einer
-        // Deutschschweizer Tastatur laesst sich kein `ä` in ein Formular
-        // tippen — nicht in ein Suchfeld, nicht in ein Anmeldefeld. Alles ab
-        // 0x80 ist ein Stueck einer UTF-8-Folge; `b as char` waere dort
-        // LATIN-1 und machte aus dem Fuehrungsbyte 0xC3 ein `Ã`.
+        // Not only ASCII: bytes from 0x80 are parts of a UTF-8 sequence,
+        // collected by `utf8_feed`.
         KeyCode::Char(b) if b >= 0x20 && b != 0x7F => {
             match utf8_feed(&mut page.state.pending, &mut page.state.pending_len, b) {
                 Some(ch) => {
@@ -5124,7 +4737,7 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
                     caret += ch.len_utf8();
                     typed = Some(alloc::format!("{ch}"));
                 }
-                // Folge noch nicht vollstaendig: nichts tun, nichts malen.
+                // Sequence not complete yet: do nothing, paint nothing.
                 None => return false,
             }
         }
@@ -5170,19 +4783,17 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     }
     page.state.set_value(seq, value);
     page.state.caret = caret;
-    // Der Blinktakt faengt von vorn an: direkt nach einem Tastendruck steht
-    // der Zeiger solide, sonst blinkt er einem beim Tippen weg.
+    // Restart the blink cycle: right after a key press the caret is solid.
     doc_mut().caret_since = now_ms();
     doc_mut().caret_phase = None;
-    // **In den BAUM, bei jedem Tastendruck.** Die `seq`, unter der der Wert
-    // in `FormState` liegt, gilt nur bis zum naechsten `to_dom` — der
-    // Baumknoten gilt weiter. Er ist die Bruecke, ueber die `sync` den Wert
-    // zurueckholt, und nebenbei das, was ein Behandler der Seite liest.
+    // Into the tree, on every key press. The `seq` the value is stored under
+    // in `FormState` is valid only until the next `to_dom`; the tree node
+    // stays valid. It is the bridge `sync` pulls the value back over, and
+    // what a page handler reads.
     push_control_values(page);
-    // **Und jetzt sagen, dass sich etwas geaendert hat.** Der Wert steht
-    // schon im Knoten — ein Behandler, der `e.target.value` liest, bekommt
-    // ihn also. `input` blast und ist NICHT abbrechbar; daran haengt jede
-    // Vorschlagsliste, jeder Live-Filter, jeder Zeichenzaehler des Webs.
+    // Now announce the change. The value is already in the node, so a
+    // handler reading `e.target.value` gets it. `input` bubbles and is not
+    // cancelable; suggestion lists, live filters and counters depend on it.
     let (itype, data) = match key {
         KeyCode::Backspace => ("deleteContentBackward", None),
         KeyCode::Delete => ("deleteContentForward", None),
@@ -5199,13 +4810,13 @@ fn edit_key(engine: &Engine, page: &mut Page, key: KeyCode) -> bool {
     true
 }
 
-/// Den Fokus wechseln — und es der Seite sagen.
+/// Change focus — and tell the page.
 ///
-/// **Ein Weg, nicht sieben Zuweisungen.** `focus`/`blur` blasen NICHT,
-/// `focusin`/`focusout` schon (UI Events §5.2), und Seiten benutzen beide:
-/// wer am Formular lauscht statt am Feld, hoert nur das zweite. Dazu faellt
-/// hier `change` — bei einem Textfeld beim VERLASSEN und nur, wenn sich der
-/// Wert seit dem Fokussieren geaendert hat (HTML §4.10.5.5), nicht je Zeichen.
+/// One path for all callers. `focus`/`blur` do not bubble,
+/// `focusin`/`focusout` do (UI Events §5.2), and pages use both: a listener
+/// on the form instead of the field hears only the latter. `change` fires
+/// here too — for a text field on leaving, and only if the value changed
+/// since it gained focus (HTML §4.10.5.5), not per character.
 fn set_focus(engine: &Engine, page: &mut Page, next: Option<u32>) {
     let prev = page.state.focus;
     if prev == next { return }
@@ -5240,11 +4851,10 @@ fn set_focus(engine: &Engine, page: &mut Page, next: Option<u32>) {
     }
 }
 
-/// `mousedown`/`mouseup` am Ort des Zeigers.
+/// `mousedown`/`mouseup` at the pointer position.
 ///
-/// Gemessen melden acht von zwoelf Korpusseiten `mousedown` an — mehr als
-/// `input`. Ein `click` allein reicht ihnen nicht: wer ein Menue beim
-/// Druecken oeffnet und beim Loslassen waehlt, sieht sonst nur die Mitte.
+/// A `click` alone is not enough for pages that open a menu on press and
+/// select on release.
 fn dispatch_mouse_edge(engine: &Engine, lay: &Layout, kind: &'static str, cx: i32, cy: i32) {
     let Some(sess) = js_session() else { return };
     if !sess.interp.doc.as_ref().is_some_and(|d| d.has_listeners) { return }
@@ -5260,15 +4870,13 @@ fn dispatch_mouse_edge(engine: &Engine, lay: &Layout, kind: &'static str, cx: i3
     });
 }
 
-/// **Der Schreibzeiger blinkt.** Etwa zweimal je Sekunde, und nur der
-/// Streifen, in dem er steht, wird neu gemalt.
+/// The text caret blinks, and only the band it sits in is repainted.
 ///
-/// Die 530 ms sind die Halbperiode, die Browser benutzen. Nach einem
-/// Tastendruck faengt der Takt von vorn an und der Zeiger steht SOLIDE — wer
-/// tippt, will sehen, wo er ist.
+/// 530 ms is the half period browsers use. After a key press the cycle
+/// restarts and the caret stays solid, so a typist can see where it is.
 ///
-/// Kostet nur etwas, solange ein Textfeld den Fokus hat: sonst faellt die
-/// erste Zeile heraus und es bleibt bei einem Vergleich je Runde.
+/// Costs something only while a text field has focus; otherwise the first
+/// check returns and it is one comparison per round.
 fn blink_caret(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>,
                buf: &mut [u8], page: &Page) {
     let focused_text = page.state.focus
@@ -5285,7 +4893,7 @@ fn blink_caret(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>,
     let on = ((now_ms() - doc().caret_since) / 530) % 2 == 0;
     if doc().caret_phase == Some(on) { return }
     doc_mut().caret_phase = Some(on);
-    // Nur die Zeilen des Zeigers, in FENSTERkoordinaten und geklemmt.
+    // Only the caret's rows, in window coordinates and clamped.
     let sy = scroll_y();
     let (y0, y1) = ((cy - sy).max(0), (cy - sy + chh).min(h));
     if y1 <= y0 { return }
@@ -5295,15 +4903,11 @@ fn blink_caret(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>,
     unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
 }
 
-/// `scroll` und `resize` an die Seite melden — nach dem Bild, nicht waehrend.
+/// Report `scroll` and `resize` to the page — after the frame, not during.
 ///
-/// **Nur bei Aenderung, und deshalb mit eigenem Gedaechtnis.** `scroll_y`
-/// sagt, wohin gemalt wird; `told_scroll`, was die Seite zuletzt gehoert hat.
-/// Ohne den Unterschied faellt das Ereignis je Bild (60/s, und jede Seite mit
-/// einem Sticky-Kopf rechnet dann dauernd) oder nie.
-///
-/// Gemessen ueber die zwoelf Korpusseiten: `resize` meldet auf 10 von 12 an,
-/// `scroll` auf 9 (`docs/plan/BROWSER_INPUT_EVENTS.md`).
+/// Only on change, hence its own memory: `scroll_y` says where we paint,
+/// `told_scroll` what the page last heard. Without the difference the event
+/// would fire every frame or never.
 fn fire_viewport_events(engine: &Engine) {
     let sy = scroll_y();
     let vp = canvas_rect().map(|(_, _, w, h)| (w, h)).unwrap_or((0, 0));
@@ -5312,8 +4916,8 @@ fn fire_viewport_events(engine: &Engine) {
     if !scrolled && !resized { doc_mut().told_vp = vp; return }
     doc_mut().told_scroll = sy;
     doc_mut().told_vp = vp;
-    // Nur wenn ueberhaupt jemand zuhoert — sonst kostet jedes Rollen einen
-    // Durchlauf durch die Maschine, fuer nichts.
+    // Only if anyone listens — otherwise every scroll costs a pass through
+    // the engine for nothing.
     if !js_session().is_some_and(|s| s.interp.doc.as_ref().is_some_and(|d| d.has_listeners)) {
         return;
     }
@@ -5351,8 +4955,8 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
             set_focus(engine, page, Some(seq));
             let f = &page.forms;
             page.state.toggle(f, seq);
-            // Derselbe Grund wie beim Tippen: der Haken gehoert in den Baum,
-            // sonst ueberlebt er das naechste `to_dom` nicht.
+            // Same reason as for typing: the check belongs in the tree, or it
+            // does not survive the next `to_dom`.
             push_control_values(page);
         }
         ControlKind::Select => {
@@ -5369,35 +4973,18 @@ fn activate(engine: &Engine, page: &mut Page, seq: u32) {
     }
 }
 
-/// Handle one event. Returns true if the chrome (address bar / title) should
-/// be re-committed.
+/// An event that changes only the state of one control: try a repaint first,
+/// and lay out the page only if that is not possible.
 ///
-/// A navigation started INSIDE the page — submitting a form, following a
-/// link — changes the address without anyone touching the address bar, and
-/// every one of those paths used to return `false` here. The result was a
-/// browser that had loaded the new page but still displayed the old URL.
-/// Rather than remember to flag each path, compare the navigation counter
-/// that a real page load bumps: a path added later cannot forget it.
-///
-/// A navigation no longer COMPLETES in here — it is started and picked up by
-/// `nav_pump`, which reports its own redraw — so this guard now only catches
-/// a path that bumps the counter without waiting for a network.
-/// Ein Ereignis, das nur den Zustand EINES Steuerelements aendert: erst neu
-/// malen versuchen, und nur wenn das nicht geht, die Seite auslegen.
-///
-/// Der Unterschied ist nicht klein. Ein volles Auslegen kostet auf Wikipedia
-/// 280 ms, ein Neumalen einen Bruchteil einer Millisekunde — und bis 0.71.0
-/// ging JEDER Tastendruck in einem Feld den teuren Weg. Wer hier eine neue
-/// Ursache einhaengt, prueft zuerst, ob sie wirklich nur einen Kasten
-/// betrifft; `repaint_controls` sagt selbst nein, wenn nicht.
+/// The difference is large: a full layout costs orders of magnitude more than
+/// a repaint. Before adding a new cause here, check that it really affects
+/// only one box; `repaint_controls` itself says no if not.
 fn restate_control(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>,
                    state: &FormState, why: &str) {
     let done = cache.as_mut().is_some_and(|(lay, ..)| engine.repaint_controls(lay, state));
     if !done {
-        // EINMAL je Seite sagen, WARUM ausgelegt wird. Ohne diese Zeile sieht
-        // ein Schnellweg, der nie laeuft, genauso aus wie einer, der nie
-        // gebraucht wurde — und genau so ist er drei Versionen lang tot
-        // gewesen ([[feedback_the_fast_path_must_say_it_ran]]).
+        // Say once per page why a layout is needed. Without it a fast path
+        // that never runs looks the same as one never needed.
         say_ctl_bail_once(engine.repaint_bail());
         bump_content_gen(why);
     }
@@ -5412,6 +4999,14 @@ fn say_ctl_bail_once(why: &str) {
     log(&alloc::format!("[beak] Steuerelement neu malen geht nicht: {why}"));
 }
 
+/// Handle one event. Returns true if the chrome (address bar / title) should
+/// be re-committed.
+///
+/// A navigation started inside the page — submitting a form, following a
+/// link — changes the address without anyone touching the address bar.
+/// Rather than flag each path, compare the navigation counter that a real
+/// page load bumps: a path added later cannot forget it. Navigations
+/// themselves complete in `nav_pump`, which reports its own redraw.
 fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     let nav = nav_gen();
     let chrome = handle_event(engine, ev, cache, page);
@@ -5420,9 +5015,9 @@ fn handle(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)
 
 fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32, u32)>, page: &mut Page) -> bool {
     match ev {
-        // Nur das Textfeld. NICHT `set_url`: das meldet dem Kernel den
-        // Netzkontext, und der loest dafuer auf — ein Tastendruck ist keine
-        // Navigation ([[feedback_a_keystroke_is_not_a_navigation]]).
+        // The text field only. Not `set_url`: that reports the network
+        // context to the kernel, which resolves it — a key press is not a
+        // navigation.
         Event::InputChange { value } => {
             set_edit(&value);
             // Typing in the address bar means the compositor moved keyboard
@@ -5433,9 +5028,8 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             }
             false
         }
-        // **Strg+F.** Kommt als Chord, weil `Event::Key` keine Umschalter
-        // traegt — sonst waere Strg+F von einem getippten „f" nicht zu
-        // unterscheiden.
+        // Ctrl+F. Arrives as a chord because `Event::Key` carries no
+        // modifiers; otherwise Ctrl+F could not be told from a typed "f".
         Event::Chord { letter: b'f', .. } => {
             if doc().find.is_none() { doc_mut().find = Some(String::new()); }
             doc_mut().find_pending_len = 0;
@@ -5443,11 +5037,10 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             mark_dirty();
             true
         }
-        // **Strg+T / Strg+W / Strg+1..9.** Strg+Tab gibt es NICHT, und das ist
-        // keine Nachlaessigkeit: `Event::Chord` traegt einen Buchstaben, und
-        // der Kernel baut ihn aus `KeyCode::Char` — `KeyCode::Tab` ist kein
-        // `Char` und kommt gar nicht erst an. Ziffern schon (jede druckbare
-        // Taste), also sind die Zahlen der Weg zu einem bestimmten Tab.
+        // Ctrl+T / Ctrl+W / Ctrl+1..9. There is no Ctrl+Tab: `Event::Chord`
+        // carries a letter the kernel builds from `KeyCode::Char`, and
+        // `KeyCode::Tab` is not a `Char`. Digits are, so numbers are the way
+        // to a specific tab.
         Event::Chord { letter: b't', .. } => {
             tab_open(engine, "", false, cache, page);
             true
@@ -5456,9 +5049,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             tab_close(engine, active(), cache, page);
             true
         }
-        // `9` ist der LETZTE, nicht der neunte — so macht es jeder Browser,
-        // und bei zwanzig Tabs ist „der letzte" die einzige Zahl, die man
-        // ohne Zaehlen trifft.
+        // `9` is the last tab, not the ninth, as in other browsers.
         Event::Chord { letter: b'9', .. } => {
             tab_activate(engine, tabs().len() - 1, cache, page);
             true
@@ -5467,9 +5058,9 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             tab_activate(engine, (d - b'1') as usize, cache, page);
             true
         }
-        // Die Suchleiste ist offen: die Tasten gehoeren IHR. Sie kommen nur
-        // hierher, wenn kein Textfeld des Compositors den Fokus hat — wer in
-        // die Adresszeile klickt, tippt dort weiter, und das ist richtig so.
+        // The find bar is open: the keys belong to it. They only arrive when
+        // no compositor text field has focus — someone who clicks into the
+        // address bar keeps typing there, which is right.
         Event::Key(k) if doc().find.is_some() => {
             match k {
                 KeyCode::Escape => { find_close(engine); return true }
@@ -5487,7 +5078,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     let d = doc_mut();
                     d.find_pending = pend;
                     d.find_pending_len = len;
-                    let Some(ch) = ch else { return true };   // Folge unvollstaendig
+                    let Some(ch) = ch else { return true };   // sequence incomplete
                     if let Some(q) = d.find.as_mut() { q.push(ch); }
                     d.find_at = 0;
                 }
@@ -5522,7 +5113,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         }
         Event::Action(ActionId(id)) => match id {
             ACT_GO => {
-                // Was in der Zeile STEHT, nicht wo wir sind.
+                // What the bar shows, not where we are.
                 let t = edit_str().to_string();
                 go(engine, &t);
                 set_open_menu(0);
@@ -5604,8 +5195,8 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 set_open_menu(0);
                 true
             }
-            // Zwei Baender, kein Feld je Tab: der Streifen wird bei jeder
-            // Aenderung neu gebaut, also IST der Index der Tab.
+            // Two id bands, no field per tab: the strip is rebuilt on every
+            // change, so the index is the tab.
             id if (ACT_TAB_SEL..ACT_TAB_SEL + MAX_TABS as u32).contains(&id) => {
                 tab_activate(engine, (id - ACT_TAB_SEL) as usize, cache, page);
                 set_open_menu(0);
@@ -5619,11 +5210,11 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             _ => false,
         },
         // Link clicks land in the canvas → hit-test the engine's link rects.
-        // IMPORTANT: only clicks INSIDE the canvas are ours. Menu-bar/toolbar
-        // clicks are delivered here too (as a MouseButton alongside their
-        // Action); touching the open menu on those would close the dropdown the
-        // very same click just opened (it "flashed open then shut"). Those are
-        // handled entirely by their Action / the Popover's on_dismiss.
+        // Only clicks inside the canvas are ours. Menu-bar/toolbar clicks
+        // are delivered here too (as a MouseButton alongside their Action);
+        // touching the open menu on those would close the dropdown the same
+        // click just opened. Those are handled entirely by their Action / the
+        // Popover's on_dismiss.
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
             if let Some((rx, ry, w, h)) = canvas_rect() {
                 if x >= rx && x < rx + w && y >= ry && y < ry + h {
@@ -5634,40 +5225,32 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     }
                     let cx = x - rx;
                     let cy = y - ry + scroll_y();
-                    // Der Zwischenspeicher muss zum aktuellen Stand passen —
-                    // und wenn nicht, wird das Layout EINGELEGT statt
-                    // weggeworfen.
-                    //
-                    // Vorher stand hier eine Rechnung fuer genau einen
-                    // Treffertest, die der naechste Anstrich sofort noch einmal
-                    // machte. Der Kommentar nannte das „rare — only if a click
-                    // races a resize", aber die Bedingung ist `content_gen`,
-                    // und das steigt bei JEDEM Hover. Wer den Zeiger auf etwas
-                    // bewegt, um es anzuklicken, loest also erst ein
-                    // Neuauslegen aus und klickt dann in den veralteten Stand:
-                    // im Geraetelog zwei volle Layouts hintereinander, ohne
-                    // eine Zeile dazwischen.
+                    // The cache must match the current state; if it does not,
+                    // the new layout is stored rather than thrown away.
+                    // `content_gen` rises on every hover, so moving the pointer
+                    // onto a target and clicking it would otherwise lay out
+                    // twice.
                     let stale = !matches!(cache.as_ref(),
                         Some((_, cw, ch, cg)) if *cw == w && *ch == h && *cg == content_gen());
                     if stale {
                         *cache = Some((do_layout(engine, w as u32, &page.state), w, h, content_gen()));
                     }
-                    // Alles, was das Layout beantworten kann, VOR der ersten
-                    // Aenderung am Zwischenspeicher holen — danach ist er
-                    // veraenderlich geliehen und `lay` gaebe es nicht mehr.
+                    // Fetch everything the layout can answer before the first
+                    // change to the cache — afterwards it is mutably borrowed
+                    // and `lay` is gone.
                     let (dispatched, inspect_sel, ctl_seq, href, toggle) = {
                         let lay = &cache.as_ref().unwrap().0;
-                        // Die Seite bekommt den Klick ZUERST. Ruft ein Behandler
-                        // `preventDefault`, ist der Klick verbraucht — sonst
-                        // wuerde beak zusaetzlich dem Link folgen, den die Seite
-                        // gerade abgefangen hat.
+                        // The page gets the click first. If a handler calls
+                        // `preventDefault`, the click is consumed — otherwise
+                        // beak would also follow the link the page just
+                        // intercepted.
                         dispatch_mouse_edge(engine, lay, "mousedown", cx, cy);
                         let dispatched = dispatch_click(engine, page, lay, cx, cy);
                         (
                             dispatched,
-                            // Nur im Inspect-Modus: der Test laeuft ueber ALLE
-                            // Kaesten, und ein Klick auf einer grossen Seite
-                            // soll dafuer nicht zahlen, wenn niemand hinschaut.
+                            // Inspect mode only: the test runs over all boxes,
+                            // and a click on a large page should not pay for it
+                            // when nobody is looking.
                             inspect_mode()
                                 .then(|| lay.hit_inspect(cx, cy).map(|b| (b.x, b.y, b.w, b.h, b.label.clone())))
                                 .flatten(),
@@ -5703,21 +5286,15 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                     if page.state.focus.take().is_some() {
                         restate_control(engine, cache, &page.state, "control-blur");
                     }
-                    // **Ein Link wird beim LOSLASSEN gefolgt, nicht beim
-                    // Druecken.** So macht es jeder Browser, und es ist die
-                    // Bedingung dafuer, dass sich Text markieren laesst, der
-                    // auf einem Link ANFAENGT — bis hierher navigierte der
-                    // Druck, bevor das Ziehen ueberhaupt begann.
+                    // A link is followed on release, not on press, as in
+                    // other browsers; that is what allows selecting text that
+                    // starts on a link.
                     //
-                    // Nur der Link wandert; Skript, Steuerelemente und
-                    // `<summary>` bleiben beim Druecken. Den ganzen Klickweg
-                    // umzustellen ist ein eigener Schritt, und dieser hier
-                    // soll das Markieren fertig machen, nicht die
-                    // Ereignisreihenfolge neu erfinden.
+                    // Only links move to release; script, controls and
+                    // `<summary>` still act on press.
                     if let Some(href) = href {
                         doc_mut().pending_link = Some((href, x, y));
-                        // Ein Anker fuer die Markierung wird trotzdem gesetzt
-                        // — genau darum geht es.
+                        // A selection anchor is still set — that is the point.
                         let lay = &cache.as_ref().unwrap().0;
                         let had = doc_mut().sel.take();
                         doc_mut().sel_anchor = engine.text_pos_at(lay, cx, cy);
@@ -5727,7 +5304,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         }
                         return true;
                     }
-                    // A `<summary>` opens/closes its section. It comes AFTER
+                    // A `<summary>` opens/closes its section. It comes after
                     // the control and the link: a link inside a summary
                     // navigates, which is what a browser does too.
                     if let Some(seq) = toggle {
@@ -5737,17 +5314,9 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         }
                         return true;
                     }
-                    // **Nichts anderes wollte diesen Klick — also faengt hier
-                    // eine Markierung an.** Sie kommt ZULETZT, damit sie
-                    // keinem Link, keinem Steuerelement und keinem
-                    // Seitenskript in die Quere kommt.
-                    //
-                    // Der Preis, und er ist benannt: eine Markierung, die AUF
-                    // einem Link beginnt, gibt es nicht — der Klick
-                    // navigiert vorher. Ein Browser folgt dem Link erst beim
-                    // LOSLASSEN und kann deshalb beides; das umzustellen ist
-                    // ein Eingriff in den Klickweg und gehoert nicht in
-                    // denselben Schritt wie das Markieren selbst.
+                    // Nothing else wanted this click, so a selection starts
+                    // here. It comes last so it gets in the way of no link,
+                    // control or page script.
                     let lay = &cache.as_ref().unwrap().0;
                     let d = doc_mut();
                     let was = d.sel.take();
@@ -5759,31 +5328,29 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             }
             false
         }
-        // Loslassen: die Markierung steht, das Ziehen ist vorbei — und HIER
-        // entscheidet sich, ob der Druck ein Klick war oder der Anfang einer
-        // Markierung.
+        // Release: the selection is fixed, dragging is over — and here it is
+        // decided whether the press was a click or the start of a selection.
         Event::MouseButton { button: MouseButton::Left, down: false, x, y } => {
             doc_mut().sel_anchor = None;
-            // **VOR der Linklogik, und unabhaengig davon.** Ein `mouseup`
-            // faellt auch dort, wo kein Link haengt — ein Schieberegler, der
-            // beim Loslassen einrastet, liegt auf keinem `<a>`.
+            // Before the link logic and independent of it: `mouseup` fires
+            // where no link is, too (a slider that snaps on release).
             if let Some((rx, ry, _, _)) = canvas_rect() {
                 if let Some((lay, _, _, _)) = cache.as_ref() {
                     dispatch_mouse_edge(engine, lay, "mouseup", x - rx, y - ry + scroll_y());
                 }
             }
             let Some((href, px, py)) = doc_mut().pending_link.take() else { return false };
-            // Gezogen? Dann war es keine Navigation. Vier Pixel Toleranz,
-            // damit eine zitternde Hand noch klickt.
+            // Dragged? Then it was no navigation. Four pixels of tolerance
+            // so a shaky hand still clicks.
             if doc().sel.is_some() || (x - px).abs() > 4 || (y - py).abs() > 4 {
                 return false;
             }
             follow(engine, &href);
             true
         }
-        // **Strg+C auf der Seite.** Der Compositor faengt die Tastenfolge nur
-        // ab, wenn eines SEINER Textfelder den Fokus hat (`handle_input_key`
-        // steigt sonst sofort aus) — auf der Leinwand kommt sie hier an.
+        // Ctrl+C on the page. The compositor intercepts the chord only when
+        // one of its own text fields has focus (`handle_input_key` returns
+        // early otherwise); on the canvas it arrives here.
         Event::Clipboard(ClipKind::Copy) => {
             let Some((a, b)) = doc().sel else { return false };
             let Some((lay, _, _, _)) = cache.as_ref() else { return false };
@@ -5796,14 +5363,12 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
         // `:hover`. A series of ever-cheaper ways to answer "nothing to do":
         // no hover rules on the page at all, then no usable cached layout,
         // then the same element as last time. What is left is answered by
-        // repainting the display list in place where that is provably enough
-        // — measured on Wikipedia at 0.16 ms against 24 ms for a layout — and
-        // only otherwise by laying the page out again.
+        // repainting the display list in place where that is provably enough,
+        // and only otherwise by laying the page out again.
         Event::MouseMove { x, y } => {
-            // **Ziehen kommt VOR dem Hover.** Wer markiert, will keine
-            // `:hover`-Rechnung dazwischen — und die frueheste Absage dieses
-            // Zweigs („die Seite hat gar keine Hover-Regeln") wuerde die
-            // Markierung sonst auf jeder gewoehnlichen Seite verschlucken.
+            // Dragging comes before hover. Someone selecting wants no
+            // `:hover` work in between, and the earliest exit of this arm
+            // ("the page has no hover rules") would swallow the selection.
             if doc().sel_anchor.is_some() {
                 if let Some((rx, ry, w, h)) = canvas_rect() {
                     let (cx, cy) = (x - rx, y - ry + scroll_y());
@@ -5813,8 +5378,8 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                         let lay = &cache.as_ref().unwrap().0;
                         let a = doc().sel_anchor.unwrap();
                         if let Some(b) = engine.text_pos_at(lay, cx, cy) {
-                            // Ein Punkt ist keine Markierung — sonst blinkt
-                            // bei jedem Klick ein Schleier von einem Pixel auf.
+                            // A point is not a selection — otherwise every
+                            // click would flash a one-pixel highlight.
                             let sel = (a != b).then_some((a, b));
                             if doc().sel != sel {
                                 doc_mut().sel = sel;
@@ -5832,7 +5397,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             let Some((rx, ry, w, h)) = canvas_rect() else {
                 return false;
             };
-            // Leaving the canvas has to CLEAR the hover, or whatever the pointer
+            // Leaving the canvas has to clear the hover, or whatever the pointer
             // left behind stays lit for good.
             let inside = x >= rx && x < rx + w && y >= ry && y < ry + h;
             let hovered = if inside {
@@ -5881,12 +5446,11 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             mark_dirty_scrolled();
             false
         }
-        // **Mittelklick auf einen Link: neuer Tab im Hintergrund.**
+        // Middle click on a link: new tab in the background.
         //
-        // Die Seite bekommt ihn NICHT. Ein Mittelklick ist `auxclick`, nicht
-        // `click`; ihn als `click` zuzustellen waere falscher, als ihn
-        // wegzulassen, denn ein Behandler, der `preventDefault` ruft, meint
-        // damit die linke Taste.
+        // The page does not get it. A middle click is `auxclick`, not
+        // `click`; dispatching it as `click` would be worse than omitting it,
+        // since a handler calling `preventDefault` means the left button.
         Event::MouseButton { button: MouseButton::Middle, down: true, x, y } => {
             let Some((rx, ry, w, h)) = canvas_rect() else { return false };
             if x < rx || x >= rx + w || y < ry || y >= ry + h {
@@ -5902,9 +5466,8 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             tab_open(engine, &abs, true, cache, page);
             true
         }
-        // **`npk_open` auf eine laufende Instanz.** Der Kernel nennt es
-        // „Singleton + tabs" — und genau das ist es jetzt: ein zweites
-        // Oeffnen ist ein Tab, kein Ersetzen dessen, was gerade dasteht.
+        // `npk_open` on a running instance: a second open is a new tab, not
+        // a replacement of what is shown.
         Event::Open(s) => {
             let Some(abs) = typed_to_url(&s) else { return false };
             tab_open(engine, &abs, false, cache, page);
@@ -5939,11 +5502,8 @@ fn poll_event() -> PollResult {
 // ── Heap: a real free-list allocator. The six font faces (persistent) + each
 //    frame's layout + paint buffer are freed on drop, unlike a bump heap. ───
 //
-// Die wachsende Halde selbst steht seit widgets 0.28.0 in der SDK
-// (`nopeek_widgets::heap`), weil tune sie fuer dekodierte Videobilder
-// genauso braucht. Sie stand bis beak 0.188.0 hier; die zwei Zahlen darin
-// — der Verdopplungsschritt und sein Deckel — sind je einmal bezahlt
-// worden, und eine zweite Kopie haette sie nochmal bezahlen muessen.
+// The growing heap itself lives in the SDK (`nopeek_widgets::heap`), shared
+// with tune.
 #[global_allocator]
 static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
@@ -5958,20 +5518,20 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     } else {
         log("[beak] no location (likely alloc failure)");
     }
-    // Trap — do NOT `loop {}`. A wasm `unreachable` makes `_start`'s host call
+    // Trap — do not `loop {}`. A wasm `unreachable` makes `_start`'s host call
     // return Err, so the kernel tears this instance down and frees its worker
     // core. A busy loop would instead pin the core forever (fibers are
-    // cooperative → a spinning fiber never yields) = the "app panic freezes the
-    // machine" bug. Cleanly dying is the whole point of the per-tab sandbox.
+    // cooperative → a spinning fiber never yields) and freeze the machine.
+    // Cleanly dying is the whole point of the per-tab sandbox.
     core::arch::wasm32::unreachable()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // No heap init here — talc claims `HEAP` lazily on the first allocation.
+    // No heap init here — the allocator claims the heap lazily on first use.
 
     // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
-    // now; the actual fetch waits until the font is parsed (below).
+    // now; the actual fetch waits until the engine is set up (below).
     let arg_len = {
         let p = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
         let n = unsafe { npk_launch_arg(p as i32, PAYLOAD_CAP as i32) };
@@ -5981,10 +5541,8 @@ pub extern "C" fn _start() {
         set_url(payload_str(arg_len));
     }
 
-    // Commit the chrome IMMEDIATELY so the window is an opaque browser from the
-    // first frame. Parsing the 880 KB font (below) is slow enough to otherwise
-    // leave the window empty/transparent for a beat (the "loop window" look)
-    // and makes beak feel slower to start than font-free apps (spell/loft).
+    // Commit the chrome immediately so the window is an opaque browser from
+    // the first frame, before any slow startup work.
     render_chrome();
 
     // Which build is actually running. Without this a serial trace cannot say
@@ -5992,24 +5550,19 @@ pub extern "C" fn _start() {
     // and a perf number from the wrong build is worse than no number.
     log(concat!("[beak] version ", env!("CARGO_PKG_VERSION")));
 
-    // **Dem Motor den Zufall des Kernels leihen.** Die Engine hat keine
-    // Hostfunktionen; sie bekommt eine gereicht, genau wie die Uhr. Ohne
-    // diese Zeile gibt es in einer Seite kein `crypto` — und das ist die
-    // richtige Antwort, solange keine echte Quelle da ist, statt `Math.random`
-    // als sichere auszugeben.
+    // Lend the engine the kernel's randomness. The engine has no host
+    // functions; it is handed one, like the clock. Without it a page has no
+    // `crypto` — the right answer when there is no real source, rather than
+    // passing off `Math.random` as secure.
     beak_engine::js::random::set_source(random_bytes);
 
-    // **Hier wurde frueher die Schrift geparst — alle sechs Gesichter, 435 ms
-    // und 40 MB Halde, gemessen mit `beakbench`.** Jetzt wird ein Gesicht
-    // gebaut, wenn es zum ersten Mal gebraucht wird; eine gewoehnliche Seite
-    // fasst zwei bis vier an. Wieviele es wirklich waren, sagt die Zeile nach
-    // dem ersten Malen.
+    // Font faces are built lazily on first use; the log line after the first
+    // paint says how many a page needed.
     engine_mut().set_theme(query_theme());
     // Lend the engine our tick source so it can report the per-phase split.
     engine().set_clock(|| unsafe { npk_ticks() } as u64);
-    // Die Kekse der letzten Sitzungen zurueck ins Glas, BEVOR die erste
-    // Anfrage rausgeht — sonst laedt die Startseite abgemeldet und meldet
-    // sich erst beim zweiten Klick wieder an.
+    // Restore stored cookies before the first request goes out, or the start
+    // page would load logged out.
     cookies_restore();
     log("[beak] engine ready");
 
@@ -6019,28 +5572,17 @@ pub extern "C" fn _start() {
         go(engine(), &u);
     }
 
-    // Cached layout: (Layout, width it was laid out at, content generation).
+    // Cached layout: (Layout, width, height, content generation).
     let mut cache: Option<(Layout, i32, i32, u32)> = None;
     // The page's forms + the user's edits, rebuilt on every navigation.
     let mut page = Page::new();
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
-    // Image sources of the current page still to fetch, one per loop turn.
-
-    // CSS images still to fetch, as (url_key, url). Filled from the layout.
-
-    // Every CSS image this page has already been asked for — including the
-    // ones that failed. A miss must not be retried forever; the box simply
-    // stays undecorated until the next navigation.
 
     loop {
-        // Drain the ENTIRE event queue this tick, THEN repaint once. Wheel
-        // events used to be handled one-per-loop with a full repaint (and a
-        // ~5 MB buffer alloc) each — a burst of scroll notches backed up so the
-        // page scrolled slowly and "kept going" after the wheel stopped, AND
-        // the loop never reached the idle sleep, so the worker core span at
-        // 100% (never halting). Coalescing collapses the burst into one scroll
-        // step + one repaint.
+        // Drain the entire event queue this tick, then repaint once.
+        // Coalescing collapses a burst of wheel notches into one scroll step
+        // + one repaint, and lets the loop reach the idle sleep.
         let mut chrome = false;
         let mut had_event = false;
         loop {
@@ -6061,59 +5603,51 @@ pub extern "C" fn _start() {
             }
         }
         // Take delivery of whatever the kernel finished while we were
-        // painting: the document, or its stylesheets. THIS is where a
-        // navigation completes now — no path through `handle` waits for one.
+        // painting: the document, or its stylesheets. This is where a
+        // navigation completes — no path through `handle` waits for one.
         if nav_pump(engine()) {
             chrome = true;
         }
         // …and only then re-parse the document's forms, so the page that just
-        // arrived is laid out against its OWN controls rather than the
+        // arrived is laid out against its own controls rather than the
         // previous page's. Cheap when nothing navigated.
-        // **NUR wenn wirklich neu eingesammelt wurde.**
         //
-        // Der Wert im Baum ist der, den SEITENCODE gesetzt hat. Ihn in jeder
-        // Runde zu uebernehmen hiess: was der Benutzer tippt, wird im
-        // naechsten Durchlauf wieder ueberschrieben — das Feld zeigte erst
-        // nach dem Abschicken, was darin steht. Ein Umbau des Baums ist das
-        // einzige Ereignis, nach dem der Baum mehr weiss als der Wirt.
+        // Pull values from the tree only if it was really re-collected: the
+        // tree holds what page code set, and taking it every round would
+        // overwrite what the user types. A tree rebuild is the only event
+        // after which the tree knows more than the host.
         //
-        // Die Sitzung wird DURCHGEREICHT, nicht neu geholt — zweimal
-        // `js_session` waeren zwei veraenderliche Ausleihen auf dasselbe Feld.
+        // The session is passed in, not fetched again — two `js_session`
+        // calls would be two mutable borrows of the same field.
         if page.sync(engine()) {
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
-        // Ein Formular, das die Seite schon beim Laden abschicken will, darf
-        // nicht bis zum naechsten Klick liegenbleiben.
+        // A form the page wants to submit while loading must not wait for
+        // the next click.
         let pending = js_session().map(|s| s.interp.take_submits()).unwrap_or_default();
         for seq in pending {
             log(&alloc::format!("[beak] script submit: form seq={seq}"));
             if submit_form_seq(engine(), &page, seq) { break }
         }
-        // Und eine Navigation, die die Seite selbst verlangt hat. **Hier
-        // zentral und nicht an jedem Einstiegspunkt:** ein Skript beim
-        // Laden, ein Zeitgeber, ein `load`-Behandler und ein Klick landen
-        // alle in derselben Runde — sechs Aufrufstellen waeren sechs
-        // Gelegenheiten, eine zu vergessen.
+        // And a navigation the page requested. Handled centrally here, not
+        // at each entry point: load scripts, timers, `load` handlers and
+        // clicks all end up in the same round.
         sync_nav(engine());
         if chrome {
             render_chrome();
         }
         if !had_event {
-            // No theme watch here any more: the PAGE palette no longer
-            // follows the desktop (see `query_theme`), so a light/dark switch
-            // changes the chrome and nothing about the document. Re-laying the
-            // page out for it would cost a full layout — over five seconds on
-            // the device — for a picture that cannot change.
+            // No theme watch: the page palette does not follow the desktop
+            // (see `query_theme`), so a light/dark switch changes only the
+            // chrome and needs no re-layout.
         }
         // A fresh page: drop the old page's decoded images and note which ones
         // it wants (fetching them happens after the repaint, one batch a turn).
         //
-        // This has to sit AFTER `nav_pump` and BEFORE the repaint. A page is
+        // This has to sit after `nav_pump` and before the repaint. A page is
         // completed by `nav_pump`, so from the top of the loop this would
-        // always be one turn late: the page was laid out once against the
-        // PREVIOUS page's images, and clearing them a turn later invalidated
-        // that layout and laid it out again. Two full layouts per navigation,
-        // and on the device a layout is over five seconds.
+        // always be one turn late: the page would be laid out once against
+        // the previous page's images and then again.
         if images_dirty() {
             let q = begin_images(engine_mut());
             engine().css_images_begin();
@@ -6123,40 +5657,33 @@ pub extern "C" fn _start() {
             d.css_asked.clear();
         }
         maybe_repaint(engine(), &mut cache, &mut paint_buf, &page.state);
-        // NACH dem Bild: die Seite hoert, was sich bewegt hat. Waehrend
-        // `maybe_repaint` ginge es nicht — dort ist der Zwischenspeicher
-        // veraenderlich geliehen, und ein Behandler, der den Baum aendert,
-        // haette ihn unter dem laufenden Bild weg.
+        // After the frame: the page hears what moved. Not during
+        // `maybe_repaint` — the cache is mutably borrowed there, and a
+        // handler changing the tree would pull it from under the frame.
         fire_viewport_events(engine());
         blink_caret(engine(), &cache, &mut paint_buf, &page);
-        // Die Schriften, die die Seite mitbringt. NACH dem ersten Auslegen:
-        // vorher weiss niemand, welche sie ueberhaupt verlangt.
+        // The page's own fonts. After the first layout: before it nobody
+        // knows which ones it requests.
         if pump_fonts(engine()) {
             bump_content_gen("font");
             mark_dirty();
         }
-        // Die offenen WebSockets. Sie laufen VOR den Antworten von `fetch`,
-        // weil eine Nachricht ohne Anlass kommt: niemand hat sie bestellt,
-        // und wer nicht in jedem Bild nachsieht, sieht sie gar nicht.
-        // Ereignisse daraus sind Einstiegspunkte wie jeder andere, also
-        // laeuft danach dieselbe Nacharbeit — deshalb steht die Zeile in
-        // DERSELBEN Bedingung.
+        // The open WebSockets. A message arrives unprompted, so they are
+        // polled every frame. Events from them are entry points like any
+        // other, so the same follow-up work runs, under the same condition.
         let ws_moved = match js_session() {
             Some(s) => pump_websockets(s),
             None => false,
         };
-        // Was `fetch()` bestellt hat. Kommt eine Antwort an, lief danach
-        // Seitencode — und der darf den Baum umgebaut haben.
+        // What `fetch()` requested. When an answer arrives page code ran,
+        // and it may have rebuilt the tree.
         if pump_fetches() | ws_moved {
             if let Some(s) = js_session() {
                 let n = s.interp.run_timers();
                 let _ = n;
-                // Ein `fetch`-Rueckruf ist ein Einstiegspunkt wie jeder
-                // andere: er darf einen Keks setzen und die Adresse
-                // umschreiben. Ohne diese zwei Zeilen fiel beides still
-                // unter den Tisch — und „still" heisst hier: die naechste
-                // Anfrage geht ohne den Keks hinaus, den die Seite gerade
-                // gesetzt hat.
+                // A `fetch` callback is an entry point like any other: it may
+                // set a cookie and rewrite the URL, and the next request must
+                // carry that cookie.
                 sync_cookies(s);
                 sync_history(engine(), s);
                 sync_scroll(s);
@@ -6170,20 +5697,16 @@ pub extern "C" fn _start() {
                 }
             }
         }
-        // Die Kasten-Beobachter. `set_geometry` hat waehrend des Malens
-        // GEMESSEN; zugestellt wird hier, weil ein Rueckruf ein
-        // Einstiegspunkt ist und mitten im Malen nichts zu suchen hat.
+        // The box observers. `set_geometry` measured during painting;
+        // delivery happens here, because a callback is an entry point and
+        // does not belong in the middle of painting.
         //
-        // **Und es MUSS hier stehen.** Ohne diese Zeilen haette eine Seite
-        // ohne Zeitgeber und ohne Ereignisse ihre Beobachter angemeldet und
-        // nie einen Rueckruf gesehen — die Meldung laege in der Schlange und
-        // wartete auf einen Einstiegspunkt, den es nicht gibt.
+        // It must be here: a page without timers or events would otherwise
+        // register its observers and never see a callback.
         pump_box_observers(engine());
-        // JETZT steht die Geometrie — `load` darf fallen.
-        // `pageshow` faellt NACH `load`, einmal je Navigation (HTML §7.11.4).
-        // Eine Seite, die ihren Zustand beim Zurueckkommen aus dem Verlauf
-        // wiederherstellt, haengt daran — und `persisted` ist bei uns immer
-        // `false`, weil beak keinen Seitenzwischenspeicher hat.
+        // Now geometry exists — `load` may fire.
+        // `pageshow` fires after `load`, once per navigation (HTML §7.11.4).
+        // `persisted` is always `false`: beak has no page cache.
         if fire_load(engine(), &page) {
             if let Some(sess) = js_session() {
                 if let Some(dn) = sess.interp.doc.as_ref().map(|d| d.doc) {
@@ -6193,7 +5716,7 @@ pub extern "C" fn _start() {
             page.sync(engine());
             if let Some(s) = js_session() { pull_control_values(&mut page, s); }
         }
-        // The visible document band, read AFTER the repaint clamped the scroll
+        // The visible document band, read after the repaint clamped the scroll
         // offset. Without a canvas the band is everything, so an arriving
         // image always repaints — the conservative direction.
         let band = match canvas_rect() {
@@ -6205,28 +5728,25 @@ pub extern "C" fn _start() {
         };
         // Text and layout are on screen now — pull in the next few images,
         // then come back round and paint them. Scrolling keeps working in
-        // between, because a batch is small. The layout goes in whole rather
-        // than a cloned `guessed_image_srcs`: it answers both questions this
-        // needs (did a guessed box land, and is the picture even on screen),
-        // and the clone happened every turn of the loop.
+        // between, because a batch is small. The layout is passed whole: it
+        // answers both questions needed (did a guessed box land, and is the
+        // picture even on screen).
         let layout = cache.as_ref().map(|(l, _, _, _): &(Layout, i32, i32, u32)| l);
-        // Die Schlange wird HERAUSgenommen und zurueckgelegt, statt sie
-        // liegend zu leihen: `pump_images` ruft selbst `doc()`, und eine
-        // gehaltene Referenz daneben waere die zweite Entleihung, vor der der
-        // Kommentar an `doc`/`doc_mut` warnt.
+        // The queue is taken out and put back rather than borrowed in place:
+        // `pump_images` calls `doc()` itself, and a reference held alongside
+        // would be the second borrow `doc`/`doc_mut` warns about.
         let mut q = core::mem::take(&mut doc_mut().pending_imgs);
         pump_images(engine_mut(), &mut q, layout, band);
         doc_mut().pending_imgs = q;
         // The layout reports which CSS images it needs, so this queue can only
-        // be filled AFTER a layout — unlike `<img>`, whose srcs are in the HTML
+        // be filled after a layout — unlike `<img>`, whose srcs are in the HTML
         // and are queued once by `begin_images`.
         //
-        // That difference is a trap: the cached layout keeps listing the SAME
-        // srcs every turn (nothing re-lays-out when a background arrives — it
-        // is a repaint), so the guard has to be "already asked for this page",
-        // NOT "already in the queue". The queue empties on every fetch, so
-        // checking it re-requested all of them once a turn, for as long as the
-        // page stayed open. Cleared on navigation, with the engine's cache.
+        // The cached layout keeps listing the same srcs every turn (a
+        // background arriving is a repaint, not a re-layout), so the guard
+        // must be "already asked for this page", not "already in the queue":
+        // the queue empties on every fetch. Cleared on navigation, with the
+        // engine's cache.
         let mut css_adopted: Vec<u64> = Vec::new();
         let mut css_asked = core::mem::take(&mut doc_mut().css_asked);
         let mut pending_css_imgs = core::mem::take(&mut doc_mut().pending_css_imgs);
@@ -6237,7 +5757,7 @@ pub extern "C" fn _start() {
                 }
                 css_asked.push(*k);
                 // Same question as for `<img>`, one layer later: the layout
-                // only names its background images AFTER it has run, so this
+                // only names its background images after it has run, so this
                 // cannot happen in `begin_images`. The url is resolved exactly
                 // as `pump_css_images` resolves it, or put and get would
                 // use different keys for one picture.
@@ -6260,16 +5780,13 @@ pub extern "C" fn _start() {
         pump_css_images(engine(), &mut pending_css_imgs, layout, band);
         doc_mut().css_asked = css_asked;
         doc_mut().pending_css_imgs = pending_css_imgs;
-        // ALWAYS yield so this worker core can halt — a cooperative fiber that
+        // Always yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
         unsafe {
             // Anything on the wire keeps the short nap: that is how often we
-            // ask the kernel whether the answer is here, and it is the whole
-            // latency the split costs. 4 ms against a round trip is nothing.
-            // Eine laufende Schriftrunde gehoert dazu: sonst schlaeft die
-            // Schleife 16 ms je Frage, und eine Seite steht eine Sekunde
-            // laenger ungestylt da.
+            // ask the kernel whether the answer is here. A running font round
+            // counts too, or the page would stay unstyled longer.
             let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
                 || font_job() >= 0;
             let busy = had_event
