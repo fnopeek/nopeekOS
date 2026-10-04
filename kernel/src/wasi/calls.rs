@@ -1,15 +1,13 @@
-//! wasi preview1, motorneutral.
+//! wasi preview1, engine-neutral.
 //!
-//! Jede Funktion hier arbeitet auf `(&mut [u8], &mut HS)` und sonst nichts —
-//! genau das Paar, das das `state!`-Makro im Interpreterpfad schon lieferte.
-//! Deshalb sind die Rumpfe unveraendert herueber gekommen; was sich je Motor
-//! unterscheidet, ist nur, WIE die beiden beschafft werden.
+//! Every function here works on `(&mut [u8], &mut HS)` and nothing else; the
+//! engines differ only in how they obtain that pair.
 //!
-//! `proc_exit` steht bewusst NICHT hier: es darf nicht zurueckkehren, und wie
-//! man ein Modul verlaesst, ist das eine, was die Motoren wirklich
-//! unterscheidet. Siehe `wasi.rs`.
+//! `proc_exit` is deliberately not here: it must not return, and how a
+//! module is left is the one thing that really differs between engines.
+//! See `wasi.rs`.
 //!
-//! DIESE DATEI IST ERZEUGT.
+//! This file is generated.
 #![allow(clippy::too_many_arguments)]
 
 use super::*;

@@ -1,6 +1,6 @@
 // Path resolution for the wasi grant — the whole security boundary, in
 // one file with no dependencies beyond String/Vec/format so the kernel
-// and a host test can both use THESE bytes. A copy in a test crate would
+// and a host test can both use these bytes. A copy in a test crate would
 // prove nothing about what actually runs.
 //
 // Included by `kernel/src/wasi.rs`; see `tools/wasi-path-test/` for the

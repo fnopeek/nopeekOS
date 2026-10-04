@@ -1,17 +1,15 @@
 //! `wasi_snapshot_preview1` — the second ABI.
 //!
-//! Everything else in this kernel talks `npk_*`: 123 functions that were
-//! designed here, for a system with capabilities instead of permissions
-//! and content addresses instead of a path tree. This module is the one
-//! place that speaks somebody else's language, and it exists because the
-//! programs worth borrowing — CPython, lua, sqlite — were all written
+//! Everything else in this kernel talks `npk_*`, designed for capabilities
+//! instead of permissions and content addresses instead of a path tree.
+//! This module is the one place that speaks somebody else's language,
+//! because programs worth borrowing (CPython, lua, sqlite) are written
 //! against POSIX and compiled through wasi-libc.
 //!
-//! It is deliberately NOT a Python feature. A guest that gets this
-//! namespace gets a filesystem-shaped view of ONE npkFS subtree it was
-//! handed, and nothing else. That framing is what makes the POSIX dent
-//! in the architecture worth its price: every wasi binary lands the same
-//! way, under the same grant, with the same ceiling.
+//! It is deliberately not a Python feature. A guest that gets this
+//! namespace gets a filesystem-shaped view of one npkFS subtree it was
+//! handed, and nothing else. Every wasi binary lands the same way, under
+//! the same grant, with the same ceiling.
 //!
 //! ## The shape of the grant
 //!
@@ -109,9 +107,8 @@ pub struct WasiCtx {
     next_fd: i32,
     args: Vec<String>,
     env: Vec<String>,
-    /// Womit sich das Programm verabschiedet hat. Der Trap-Code sagt nur DASS
-    /// es sich beendet hat; der Status gehoert hierher, weil ihn beide Motoren
-    /// auf demselben Weg hinterlegen.
+    /// The program's exit status. The trap path only says that it exited;
+    /// the status lives here because both engines record it the same way.
     exit_status: Option<i32>,
 }
 
@@ -214,9 +211,7 @@ fn r32(m: &[u8], at: i32) -> Result<u32, i32> {
 /// Copy `len` bytes out of guest memory at `ptr`.
 ///
 /// `try_from` on every offset, not `as usize`: a negative i32 from a
-/// buggy or hostile guest becomes a huge usize under `as`, and that is
-/// the shape of the overflow already logged against ~25 `npk_*`
-/// functions. Not repeating it here.
+/// buggy or hostile guest becomes a huge usize under `as`.
 fn bytes_at(m: &[u8], ptr: i32, len: i32) -> Result<&[u8], i32> {
     let a = usize::try_from(ptr).map_err(|_| EFAULT)?;
     let l = usize::try_from(len).map_err(|_| EFAULT)?;
@@ -270,15 +265,15 @@ type HS = crate::wasm::HostState;
 pub(crate) mod calls;
 pub(crate) mod forge_glue;
 
-/// Was `proc_exit` hinterlaesst — von beiden Motoren gleich geschrieben.
+/// What `proc_exit` leaves behind; written the same way by both engines.
 pub(crate) fn record_exit(st: &mut HS, code: i32) {
     if let Some(w) = st.wasi.as_mut() {
         w.exit_status = Some(code);
     }
 }
 
-/// Und wieder heraus. `None` heisst: das Programm ist normal aus `_start`
-/// zurueckgekehrt, ohne sich zu verabschieden.
+/// And read back. `None` means the program returned from `_start` without
+/// calling `proc_exit`.
 pub fn exit_status(st: &HS) -> Option<i32> {
     st.wasi.as_ref().and_then(|w| w.exit_status)
 }
@@ -287,10 +282,10 @@ pub fn link(linker: &mut Linker<HS>) -> Result<(), wasmi::Error> {
     const NS: &str = "wasi_snapshot_preview1";
 
     // ── process ───────────────────────────────────────────────────────
-    // Das EINZIGE, was die Motoren wirklich unterscheidet. Der Effekt ist
-    // gemeinsam — den Status hinterlegen —, das Verlassen nicht: der
-    // Interpreter macht daraus ein `Err` und rollt ab, erzeugter Code nimmt
-    // `forge_rt::host_trap`. Beides endet im selben Zustand.
+    // The one thing that really differs between engines. Recording the
+    // status is shared; leaving is not: the interpreter returns an `Err` and
+    // unwinds, generated code takes `forge_rt::host_trap`. Both end in the
+    // same state.
     linker.func_wrap(NS, "proc_exit",
         |mut c: Caller<'_, HS>, code: i32| -> Result<(), wasmi::Error> {
             record_exit(c.data_mut(), code);
