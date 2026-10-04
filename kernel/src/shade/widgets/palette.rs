@@ -6,7 +6,6 @@
 //! `theme` config key (`dark` | `light` | `auto`). `auto` uses the
 //! wallpaper's background luminance to decide.
 
-#![allow(dead_code)]
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -328,10 +327,6 @@ pub fn accent_raw() -> u32 {
     }
 }
 
-/// Names a `set accent …` value can take, for the shell's completion/help.
-pub fn accent_preset_names() -> [&'static str; 4] {
-    [ACCENT_PRESETS[0].0, ACCENT_PRESETS[1].0, ACCENT_PRESETS[2].0, ACCENT_PRESETS[3].0]
-}
 
 /// Accent adjusted for minimum contrast against the active surface.
 /// Extracted wallpaper accents can be close in luminance to the chosen
@@ -455,12 +450,4 @@ fn token_at(idx: usize) -> Token {
     token_from_id(idx).unwrap_or(Token::Surface)
 }
 
-pub fn scale_alpha(alpha: u8, opacity: u8) -> u8 {
-    ((alpha as u16 * opacity as u16) / 255) as u8
-}
 
-pub fn with_opacity(color: u32, opacity: u8) -> u32 {
-    let a = (color >> 24) as u8;
-    let new_a = scale_alpha(a, opacity);
-    (color & 0x00FF_FFFF) | ((new_a as u32) << 24)
-}

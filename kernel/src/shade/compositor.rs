@@ -188,10 +188,9 @@ fn chrome_cache_store(key: u64, x: u32, y: u32, w: u32, h: u32, shadow: *const u
     *CHROME_CACHE.lock() = Some(ChromeCache { key, w, h, px });
 }
 
-/// Drop the cached terminal-glass blit. The cache key covers colour/geometry
-/// but NOT the wallpaper pixels behind the translucent surface, so a same-theme
-/// wallpaper swap would otherwise keep compositing the old backdrop. Called on
-/// every full redraw (theme OR wallpaper change) to force a fresh composite.
+/// Drop the cached terminal-glass blit. Called on every full redraw: the key
+/// covers geometry, colours and the wallpaper generation, but not every glass
+/// setting (`shade glass`), and a full redraw is when those change.
 pub fn clear_chrome_cache() {
     *CHROME_CACHE.lock() = None;
 }

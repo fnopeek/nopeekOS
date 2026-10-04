@@ -267,7 +267,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     csprng::init();
 
     // Select random color scheme for login screen aurora background
-    gui::background::init();
 
     // Debug shell disabled — enable when needed:
     // if netdev::is_available() { shell::start_debug_listener(); }

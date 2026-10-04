@@ -159,17 +159,9 @@ fn apply_wallpaper_data(name: &str, data: &[u8]) {
 
     if is_png {
         // Try WASM PNG decoder module
+        // The module sets the wallpaper through npk_set_wallpaper, which
+        // redraws (on Core 0, see `shade::force_redraw`).
         if decode_with_wasm(name) {
-            // The module already set the wallpaper + palette via
-            // npk_set_wallpaper (which force_redraws), but that ran INSIDE the
-            // wasm execution context mid-decode — it repaints the desktop but
-            // not the window glass reliably, so loops kept the old backdrop
-            // until an unrelated theme change forced a redraw. Re-run the
-            // invalidation HERE, after the module has fully returned, exactly
-            // like intent_theme does, so the loop windows re-composite their
-            // translucent glass over the new wallpaper.
-            crate::shade::widgets::refresh_all_scenes();
-            crate::shade::force_redraw();
             return;
         }
         // decode_with_wasm prints its own diagnostic on the WASM

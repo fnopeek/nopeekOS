@@ -51,8 +51,6 @@ pub fn wallpaper_generation() -> u32 {
     WALLPAPER_GEN.load(Ordering::Acquire)
 }
 
-pub fn init() {}
-
 pub fn accent_color() -> u32 {
     let color = if crate::theme::is_active() {
         crate::theme::accent()
@@ -115,11 +113,8 @@ pub fn has_wallpaper() -> bool {
     WALLPAPER_SET.load(Ordering::Acquire)
 }
 
-/// Raw wallpaper buffer (framebuffer-pitch layout, BGRX u32) + a value that
-/// changes whenever the wallpaper is replaced. For the glass-tint precompute
-/// in `render` — it caches `blend(bg, wallpaper)` so the translucent terminal
-/// chrome is a memcpy instead of a per-pixel blend at any window size.
-pub fn wallpaper_ptr() -> *const u8 {
+/// Raw wallpaper buffer (framebuffer-pitch layout, BGRX u32), or null.
+fn wallpaper_ptr() -> *const u8 {
     if WALLPAPER_SET.load(Ordering::Acquire) { unsafe { WALLPAPER } } else { core::ptr::null() }
 }
 

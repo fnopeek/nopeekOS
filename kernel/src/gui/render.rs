@@ -37,7 +37,6 @@ impl DamageTracker {
         }
     }
 
-    #[allow(dead_code)]
     pub fn mark(&mut self, x: u32, y: u32, w: u32, h: u32) {
         if self.count >= 16 {
             self.merge_all();
@@ -124,15 +123,6 @@ pub fn fill_rect(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, w: u32, h: u32,
     }
 }
 
-/// Draw a border (outline) of given thickness.
-#[allow(dead_code)]
-pub fn draw_border(shadow: *mut u8, info: &FbInfo,
-                   x: u32, y: u32, w: u32, h: u32, color: u32, thickness: u32) {
-    fill_rect(shadow, info, x, y, w, thickness, color);
-    fill_rect(shadow, info, x, y + h - thickness, w, thickness, color);
-    fill_rect(shadow, info, x, y + thickness, thickness, h - 2 * thickness, color);
-    fill_rect(shadow, info, x + w - thickness, y + thickness, thickness, h - 2 * thickness, color);
-}
 
 /// Read a pixel from the shadow buffer.
 pub fn read_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32) -> u32 {
@@ -355,13 +345,6 @@ pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
 
 // ── Public rounded-rect helpers ────────────────────────────────────────
 
-/// Fill a rounded rectangle (filled body + AA quarter-circle corners).
-#[allow(dead_code)]
-pub fn fill_rounded_rect(shadow: *mut u8, info: &FbInfo,
-                         x: u32, y: u32, w: u32, h: u32,
-                         color: u32, radius: u32) {
-    fill_rounded_rect_aa(shadow, info, x, y, w, h, color, radius);
-}
 
 /// Fill a rounded rectangle with anti-aliased corners (SDF).
 /// Body + side strips drawn with `fill_rect`; only the four corner
