@@ -1,18 +1,17 @@
 //! layout.rs — hand-rolled block + inline flow over the styled DOM.
 //!
 //! Walks the DOM (dom.rs) resolving each element's `ComputedStyle` (style.rs)
-//! and turns it into a positioned **display list** (`DrawOp`s) + link hit-rects
-//! + a total height. Two formatting contexts, per CSS2.1 §9:
+//! and turns it into a positioned display list (`DrawOp`s) + link hit-rects
+//! + a total height. The base formatting contexts, per CSS2.1 §9:
 //!
-//! * **Block** — block-level children stack vertically; adjacent vertical
-//!   margins collapse (the common case).
-//! * **Inline** — runs of text + inline elements (`<a>`, `<b>`, `<code>`, …)
-//!   flow into **line boxes**: greedy word-wrap to the content width, mixed
-//!   sizes/colours/weights on one line sharing a baseline. This is what puts
-//!   nav links *inline* with their text instead of each on its own line.
+//! * Block — block-level children stack vertically; adjacent vertical
+//!   margins collapse.
+//! * Inline — runs of text + inline elements (`<a>`, `<b>`, `<code>`, …)
+//!   flow into line boxes: greedy word-wrap to the content width, mixed
+//!   sizes/colours/weights on one line sharing a baseline.
 //!
 //! Scroll-independent: computed once per (content, width); `raster::paint`
-//! draws the visible slice at any offset. Flex/Grid/floats/position come next.
+//! draws the visible slice at any offset.
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -34,21 +33,18 @@ use crate::style::{
 };
 
 
-/// The deferred recipe for a positioned box's containing-block HEIGHT.
+/// The deferred recipe for a positioned box's containing-block height.
 ///
 /// §10.1 makes a positioned box the containing block for its absolutely
-/// positioned descendants, and that block's height is a USED height — known
-/// only once the box has been laid out. Computing it eagerly means a full
-/// speculative layout of the whole box, and almost nothing ever reads the
-/// answer: only a descendant with `bottom`, or a percentage `top`/`height`,
-/// resolves against it. On a large article 266 boxes paid for that and it was
-/// over half of the layout.
+/// positioned descendants, and that block's height is a used height, known
+/// only once the box has been laid out. Computing it eagerly costs a full
+/// speculative layout of the box, while only a descendant with `bottom`, or a
+/// percentage `top`/`height`, ever reads it.
 ///
-/// So the recipe is kept instead, and run on the first read — in the context
-/// the eager measurement would have seen, which is what the saved `path_len`,
-/// `cb`, `cb_h` and `floats` restore. Everything here is either `Copy` or, in
-/// the case of `floats`, empty in the common case (an empty `Vec` clone does
-/// not allocate).
+/// So the recipe is kept and run on the first read, in the context the eager
+/// measurement would have seen (restored from `path_len`, `cb`, `cb_h` and
+/// `floats`). Everything here is `Copy` or, for `floats`, usually empty (an
+/// empty `Vec` clone does not allocate).
 struct PendingCbH<'a> {
     el: &'a Element,
     st: ComputedStyle,
@@ -68,17 +64,15 @@ struct PendingCbH<'a> {
 
 /// The positioned containing block: `(x, y, width, height)` plus, when the
 /// height is not yet known, the index of the recipe that computes it.
-/// Deliberately still `Copy` and still a tuple-ish value — the extra slot
-/// makes the compiler visit every site that installs or restores a containing
-/// block, which is the point: a pending recipe that outlives its `cb` would
-/// hand some unrelated descendant the wrong height.
+/// Deliberately a `Copy` tuple: a pending recipe that outlives its `cb` would
+/// hand some unrelated descendant the wrong height, so every site that
+/// installs or restores a containing block must handle the extra slot.
 type PosCb = (i32, i32, i32, Option<i32>, Option<u32>);
 
-/// Where everything a layout RECORDS stood before a speculative run — see
-/// `Ctx::spec_mark`. One list, deliberately: a recorded vector that is not
-/// rolled back leaks trial-run entries into the real page, and that has now
-/// happened twice (`stack_ops`/`floats`, then `hover_boxes`). A new side table
-/// is added here and is then rolled back by every speculative site at once.
+/// Where everything a layout records stood before a speculative run — see
+/// `Ctx::spec_mark`. One list on purpose: a recorded vector that is not rolled
+/// back leaks trial-run entries into the real page. A new side table is added
+/// here and is then rolled back by every speculative site at once.
 #[derive(Clone, Copy)]
 struct SpecMark {
     ops: usize,
@@ -103,7 +97,7 @@ struct FlexMark {
 /// Sites that ask for a speculative height. A distinct key per site in the
 /// `measured` memo, because the same element asked about by two of them is two
 /// different questions with two different derived styles. Only the column axis
-/// still measures speculatively — a flex ROW lays its items out for real and
+/// still measures speculatively — a flex row lays its items out for real and
 /// keeps the result (see `flex_row`).
 const MEAS_FLEX_COL: u8 = 1;
 
@@ -112,7 +106,7 @@ const MEAS_FLEX_COL: u8 = 1;
 /// `site` separates the call sites, because the same element can be measured
 /// by two of them with different styles — a `position: relative` flex item is
 /// measured once as a flex item (with `flex_item_style` applied) and once as
-/// its own containing block. The style itself is NOT hashed: at every site it
+/// its own containing block. The style itself is not hashed: at every site it
 /// is derived from the element's resolved style (which `styled` already keys
 /// by identity) plus `arg`, so the pair identifies it exactly.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -193,15 +187,12 @@ impl Collapse {
     fn value(self) -> f32 {
         self.pos + self.neg
     }
-    /// Derselbe Wert in ganzen Pixeln, GERUNDET.
+    /// The same value in whole pixels, rounded.
     ///
-    /// `as i32` schneidet ab, und ein Rand wird selten ganzzahlig: `h5` hat
-    /// nach der Spezifikation 22,1776 px. Abgeschnitten verliert jeder Kasten
-    /// bis zu einem Pixel, und weil der naechste auf der Unterkante des
-    /// vorigen aufsetzt, addiert sich das die Seite hinunter — auf einer
-    /// nackten Vorlage waren es 8 px bis zum letzten `<div>`. Chromium rechnet
-    /// in 1/64 px und rundet erst beim Malen; runden ist die naechste
-    /// Naeherung, die eine ganzzahlige Auslegung erlaubt.
+    /// Margins are rarely integral (`h5` has 22.1776 px by spec), and
+    /// truncation would accumulate down the page because each box sits on
+    /// the previous one's bottom edge. Chromium works in 1/64 px and rounds
+    /// when painting; rounding is the closest integer approximation.
     fn px(self) -> i32 {
         libm::roundf(self.value()) as i32
     }
@@ -217,15 +208,14 @@ struct Flow {
     first_top: i32,
     /// Whether any content was committed (vs. everything collapsing through).
     committed: bool,
-    /// Darf der offene Schlussrand noch mit dem Unterrand des Elters
-    /// verschmelzen?
+    /// Whether the open trailing margin may still collapse with the parent's
+    /// bottom margin.
     ///
-    /// **Nein, wenn er von einem geraeumten Element kommt, dessen eigene
-    /// Raender aneinanderstossen** (CSS 2.1 §8.3.1, letzter Absatz): dessen
-    /// Rand verschmilzt zwar mit denen der FOLGEGESCHWISTER, aber das
-    /// Ergebnis nicht mehr mit dem Unterrand des Elters. Genau daran haengt,
-    /// dass ein Kasten aus `float` + leerem `clear` + `margin-top` seine
-    /// Hoehe bekommt statt null.
+    /// Not when it comes from a cleared element whose own margins adjoin
+    /// (CSS 2.1 §8.3.1, last paragraph): that margin collapses with those of
+    /// the following siblings, but the result does not collapse with the
+    /// parent's bottom margin. This is what gives a box made of `float` +
+    /// empty `clear` + `margin-top` its height instead of zero.
     open_sealed: bool,
 }
 
@@ -241,10 +231,9 @@ struct BoxOut {
     /// The box has no content, border, padding or height: its top and bottom
     /// margins are adjoining and it occupies no vertical space.
     through: bool,
-    /// The box's OWN used border-box left edge and width. Not the containing
+    /// The box's own used border-box left edge and width. Not the containing
     /// block's — `max-width`, `margin: 0 auto`, an explicit `width` or plain
-    /// margins all make the two differ, and the inspect tool reported the
-    /// parent's numbers for years because they coincide on a plain
+    /// margins all make the two differ; they only coincide on a plain
     /// `width: auto` block.
     box_x: i32,
     box_w: i32,
@@ -305,7 +294,7 @@ struct Row<'a> {
 }
 
 /// Where a table row / row group box began in the output. Everything emitted
-/// from here on belongs to it, which is what lets its background go BEHIND its
+/// from here on belongs to it, which is what lets its background go behind its
 /// cells and `position: relative` move the whole thing afterwards.
 #[derive(Clone, Copy)]
 
@@ -345,20 +334,6 @@ fn band_of(floats: &[FloatRect], top: i32, bot: i32, cl: i32, cr: i32) -> (i32, 
     (l, r.max(l))
 }
 
-/// Resolve a block box's horizontal geometry within a containing block of
-/// content width `avail`: CSS2.1 §10.3.3 (used width + margins) plus the
-/// §10.4 min/max-width redo. Returns (content-width, content-left-offset =
-/// margin-left + padding-left).
-/// A replaced element whose content we do not lay out — an `<iframe>`'s
-/// document, a `<video>`'s frames, a `<canvas>`'s bitmap, an `<object>`'s
-/// plugin. What it has is a BOX, and CSS2.1 §10.3.2 / §10.6.2 give a replaced
-/// element with no intrinsic size **300 × 150**; HTML maps the presentational
-/// `width`/`height` attributes onto it, which is how a video embed states its
-/// size. Returns the intrinsic content size, or `None` for anything else.
-///
-/// `<img>` is deliberately not here: it has real intrinsic dimensions once its
-/// pixels land, and its own path (`img_box`) tracks whether the box was guessed.
-
 /// The image-store key of an inline `<svg>`. `seq` is the document-order index
 /// the parser assigns, so the key is stable across re-layouts of the same
 /// document and cannot collide with a page's own `src` (no URL has this shape).
@@ -378,15 +353,23 @@ fn svg_alt(el: &Element, is_svg: bool) -> alloc::string::String {
         .unwrap_or_default()
 }
 
+/// A replaced element whose content we do not lay out — an `<iframe>`'s
+/// document, a `<video>`'s frames, a `<canvas>`'s bitmap, an `<object>`'s
+/// plugin. CSS2.1 §10.3.2 / §10.6.2 give a replaced element with no intrinsic
+/// size 300 × 150; HTML maps the presentational `width`/`height` attributes
+/// onto it. Returns the intrinsic content size, or `None` for anything else.
+///
+/// `<img>` is deliberately not here: it has real intrinsic dimensions once its
+/// pixels land, and its own path (`img_box`) tracks whether the box was guessed.
 fn replaced_intrinsic(el: &Element) -> Option<(f32, f32)> {
     if !matches!(el.tag.as_str(), "iframe" | "video" | "canvas" | "object" | "embed") {
         return None;
     }
     // `<object>` is the exception: when its resource cannot be obtained it
-    // represents its FALLBACK content and is not replaced at all (HTML §4.8.7).
-    // We never load a plugin, so a fallback is exactly what a browser shows —
-    // `flexbox_object` measures precisely that. Without a fallback it is still
-    // an empty replaced box. `<param>` is metadata, not content.
+    // represents its fallback content and is not replaced at all (HTML §4.8.7).
+    // We never load a plugin, so a fallback is exactly what a browser shows.
+    // Without a fallback it is still an empty replaced box. `<param>` is
+    // metadata, not content.
     if el.tag == "object" {
         let renders = el.children.iter().any(|n| match n {
             Node::Element(c) => c.tag != "param",
@@ -404,6 +387,10 @@ fn replaced_intrinsic(el: &Element) -> Option<(f32, f32)> {
     Some((attr("width").unwrap_or(300.0), attr("height").unwrap_or(150.0)))
 }
 
+/// Resolve a block box's horizontal geometry within a containing block of
+/// content width `avail`: CSS2.1 §10.3.3 (used width + margins) plus the
+/// §10.4 min/max-width redo. Returns (content-width, content-left-offset =
+/// margin-left + padding-left).
 fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
     // Horizontal padding + border both sit between the content box and the
     // margin edge (border-box `width` includes them; content-box adds them).
@@ -427,15 +414,12 @@ fn resolve_block_h(st: &ComputedStyle, avail: f32) -> (f32, f32) {
     (cw.max(1.0), ml + st.pad_left + st.border_left.width)
 }
 
-/// Der EIGENE Randkasten eines Blocks in einem verfuegbaren Streifen.
+/// The block's own border box within an available strip.
 ///
-/// `layout_flex` und `layout_grid` rechnen ihn intern genau so aus — hier steht
-/// er noch einmal fuer den AUFZEICHNENDEN Pfad. Ohne ihn meldete jeder Flex-
-/// und Rasterkasten die Breite seines Streifens statt seiner selbst: ein
-/// `display:flex; width:400px` stand mit 1902 px in `getBoundingClientRect`,
-/// obwohl es 400 malt. Genau derselbe Fehler war im Flusspfad schon einmal
-/// gefixt (MediaWikis `.mw-page-container`) — die BFC-Abzweigung daneben hat
-/// ihn behalten.
+/// `layout_flex` and `layout_grid` compute it internally the same way; this is
+/// the copy for the recording path. Without it every flex and grid box would
+/// report the width of its strip instead of its own (`display:flex;
+/// width:400px` must report 400 in `getBoundingClientRect`).
 fn used_border_box(st: &ComputedStyle, x: i32, avail: i32) -> (i32, i32) {
     let (cw, off_left) = resolve_block_h(st, avail as f32);
     let ml = off_left - st.pad_left - st.border_left.width;
@@ -443,13 +427,12 @@ fn used_border_box(st: &ComputedStyle, x: i32, avail: i32) -> (i32, i32) {
     (x + ml as i32, bw as i32)
 }
 
-/// Eine CSS-Laenge in ganzen Pixeln, GERUNDET.
+/// A CSS length in whole pixels, rounded.
 ///
-/// beak legt in ganzen Zahlen aus, CSS rechnet in Bruechen — jede Umrechnung
-/// ist eine Entscheidung, und sie muss ueberall dieselbe sein. `as i32`
-/// schneidet ab: `padding: 1.1in` wurde 105, `margin: 1.1in` (gerundet) 106,
-/// und ein Reftest, der beides gegeneinander stellt, scheitert an der
-/// Umrechnung statt an der Regel (`CSS2/floats-019`).
+/// Layout is integral while CSS lengths are fractional, so every conversion
+/// must round the same way: truncating one value and rounding another breaks
+/// reftests that compare them (`padding: 1.1in` against `margin: 1.1in`,
+/// `CSS2/floats-019`).
 fn px_of(v: f32) -> i32 {
     libm::roundf(v) as i32
 }
@@ -468,13 +451,9 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
                 *x += dx;
                 *y += dy;
             }
-            // **Der Ausschnitt eines Textlaufs wandert MIT**, aus demselben
-            // Grund wie der des Hintergrunds darunter: er steht in
-            // Dokumentkoordinaten. Blieb er stehen, wurde der Lauf an seiner
-            // NEUEN Stelle gegen ein Rechteck an der ALTEN geschnitten — und
-            // uebrig blieb, wo sich beide um ein Pixel ueberlappten, eine
-            // senkrechte Linie von einem Pixel Breite. Auf DuckDuckGos
-            // Trefferliste standen die quer durch die Seite.
+            // A text run's clip moves with it, like the background's below:
+            // it is in document coordinates. Left behind, the run would be
+            // cut at its new position against a rect at the old one.
             DrawOp::Text { x, y, clip, .. } => {
                 *x += dx;
                 *y += dy;
@@ -483,9 +462,8 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
                     c.1 += dy;
                 }
             }
-            // Der Malbereich steht in Dokumentkoordinaten wie der Kasten
-            // selbst — bleibt er stehen, schneidet er den Hintergrund an der
-            // alten Stelle ab.
+            // The paint area is in document coordinates like the box itself;
+            // left behind, it would clip the background at the old position.
             DrawOp::BgImage { x, y, clip, .. } | DrawOp::Gradient { x, y, clip, .. } => {
                 *x += dx;
                 *y += dy;
@@ -496,27 +474,24 @@ fn translate_op_list(ops: &mut [DrawOp], dx: i32, dy: i32) {
     }
 }
 
-/// The box's `box-shadow`, painted behind its background. Only the zero-blur
-/// case — which on real pages is a hairline separator, not a drop shadow.
-/// MediaWiki draws the rule under the article tabs with
-/// `box-shadow: 0 1px #c8ccd1`, and without this the page simply lacks it.
+/// The box's `box-shadow`, painted behind its background. A zero-blur shadow
+/// is typically a hairline separator (e.g. `box-shadow: 0 1px #c8ccd1` under
+/// MediaWiki's article tabs).
 ///
 /// A free function, not a method, because `repaint_hover` has to produce the
 /// very same ops from the very same style — a second copy of the rule there
-/// would drift, and one that merely FORGOT the shadow silently left the tab
-/// underline behind while recolouring the text above it.
+/// would drift.
 fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
-    // **Die Schattenform ist der Rahmenkasten, um den Spread GEWACHSEN** —
-    // und mit ihm die Ecken (CSS Backgrounds 3 §7.1.1). Ein Schatten mit
-    // Spread unter einer Pille ist also runder als sie, nicht gleich rund.
+    // The shadow shape is the border box grown by the spread, and the corner
+    // radii grow with it (CSS Backgrounds 3 §7.1.1): a spread shadow under a
+    // pill is rounder than the pill.
     let base = radii_px(st, w);
     let grown = |sp: f32| -> [f32; 4] {
         let g = |v: f32| if v > 0.0 { (v + sp).max(0.0) } else { 0.0 };
         [g(base[0]), g(base[1]), g(base[2]), g(base[3])]
     };
-    // Der WEICHE zuerst: er liegt hinter dem scharfen. Das ist die Form, in
-    // der Bootstrap seine Schatten schreibt (`0 .5rem 1rem rgba(0,0,0,.15)`),
-    // und bis 0.61.0 fiel sie ganz weg — nur `blur == 0` wurde gemalt.
+    // The blurred shadow first: it lies behind the sharp one. This is the
+    // form frameworks write (`0 .5rem 1rem rgba(0,0,0,.15)`).
     if let Some(sh) = st.shadow_soft {
         let sx = x + sh.dx as i32 - sh.spread as i32;
         let sy = y + sh.dy as i32 - sh.spread as i32;
@@ -540,23 +515,19 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
     if sw <= 0 || shh <= 0 {
         return;
     }
-    // An OUTER shadow is not painted inside the border box (CSS Backgrounds
-    // 3 §7.1.1) — the box is cut out of it. Without that the shadow is a
-    // full-size copy of the box, and since these boxes are usually
-    // transparent it floods the whole row instead of leaving the 1px strip
-    // the author wanted. Subtracting one rect from another gives at most
-    // four pieces: a band above, a band below, and the left/right slivers
-    // of the rows in between.
+    // An outer shadow is not painted inside the border box (CSS Backgrounds
+    // 3 §7.1.1) — the box is cut out of it. Otherwise a transparent box gets
+    // flooded instead of showing the strip the author wanted. Subtracting one
+    // rect from another gives at most four pieces: a band above, a band
+    // below, and the left/right slivers of the rows in between.
     let color = sh.color.unwrap_or(st.color);
-    // **Ein `0 0 0 Npx` auf einem runden Kasten ist ein RING, kein Rahmen aus
-    // vier Rechtecken.** So schreibt das halbe Web seine Umrandungen — DDGs
-    // Suchfeld hat gar keinen `border`, sein sichtbarer Strich ist der dritte
-    // Schatten seiner Liste (`0 0 0 1px rgba(0,0,0,.08)`). Als vier Rechtecke
-    // gemalt bekam die Kapsel eckige Ecken, und das war der ganze Unterschied
-    // zwischen „sieht aus wie ein Browser" und „sieht aus wie ein Kasten".
+    // A `0 0 0 Npx` shadow on a rounded box is a ring, not four rects. Many
+    // pages draw their outlines this way instead of with `border` (e.g. a
+    // search field's `0 0 0 1px rgba(0,0,0,.08)`), and four rects would give
+    // the capsule square corners.
     //
-    // Nur ohne Versatz: mit `dx`/`dy` ist die Differenz der beiden Kaesten
-    // kein Ring mehr, und dafuer bleibt der Weg darunter.
+    // Only without offset: with `dx`/`dy` the difference of the two boxes is
+    // no longer a ring, and the path below handles it.
     let r_sharp = grown(sh.spread);
     if sh.dx == 0.0 && sh.dy == 0.0 && sh.spread > 0.0 && r_sharp.iter().any(|&v| v > 0.0) {
         out.push(DrawOp::RoundRect { x: sx, y: sy, w: sw, h: shh, r: r_sharp,
@@ -579,16 +550,15 @@ fn shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<
     }
 }
 
-/// Der INNERE Schatten, gemalt ueber den Hintergrund und unter den Rahmen.
+/// The inset shadow, painted over the background and under the border.
 ///
-/// Ohne Weichzeichnung ist er ein Rechteck mit einem Loch: der Kasten minus
-/// dem, was der Schatten freilaesst. Bootstrap streift damit seine Tabellen
-/// (`inset 0 0 0 9999px`) — bei so einer Ausdehnung ist das Loch leer und der
-/// Schatten fuellt die ganze Zelle.
+/// Without blur it is a rect with a hole: the box minus what the shadow
+/// leaves free. Bootstrap stripes its tables with `inset 0 0 0 9999px`; at
+/// such a spread the hole is empty and the shadow fills the whole cell.
 fn inset_shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
     let Some(sh) = st.shadow_inset else { return };
     let color = sh.color.unwrap_or(st.color);
-    // Das Loch: der Kasten, verschoben und nach innen geschrumpft.
+    // The hole: the box, offset and shrunk inward.
     let (hx, hy) = (x + sh.dx as i32 + sh.spread as i32, y + sh.dy as i32 + sh.spread as i32);
     let (hw, hh) = (w - 2 * sh.spread as i32, h - 2 * sh.spread as i32);
     let (hx1, hy1) = (hx + hw, hy + hh);
@@ -613,14 +583,14 @@ fn inset_shadow_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, out: &mu
 
 
 /// Clip the display-list ops in `ops[start..]` to the document-space rectangle
-/// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact); text and
-/// images are kept whole if their box overlaps the rect, dropped otherwise (a
-/// flat display list can't clip glyph runs mid-way). An empty rect removes the
-/// whole range — the CSS 2.1 `clip` case where nothing of the box is painted.
+/// `[cl, ct) .. [cr, cb)`. Filled rects are intersected (pixel-exact), text
+/// runs carry the clip into the rasterizer, and images are kept whole if their
+/// box overlaps the rect, dropped otherwise. An empty rect removes the whole
+/// range — the CSS 2.1 `clip` case where nothing of the box is painted.
 /// Returns, for every op that was at `start + i`, where it ended up — `None`
 /// if the clip dropped it. Side tables that point into the display list (the
 /// z-index ranges, the float ranges, a control's own span) have to be
-/// rewritten with it: this function REBUILDS the tail, so every index past
+/// rewritten with it: this function rebuilds the tail, so every index past
 /// `start` moves.
 fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: i32) -> Vec<Option<usize>> {
     if start >= ops.len() {
@@ -636,8 +606,8 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
     for op in tail {
         let before = ops.len();
         match op {
-            // Der Zeiger wird wie ein Rechteck geschnitten — er sitzt IM
-            // Steuerelement, also darf er dessen Ausschnitt nicht verlassen.
+            // The caret is clipped like a rect: it sits inside the control
+            // and must not leave its clip.
             DrawOp::Caret { x, y, w, h, color } => {
                 let (nx, ny) = (x.max(cl), y.max(ct));
                 let (nr, nb) = ((x + w).min(cr), (y + h).min(cb));
@@ -654,9 +624,8 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     ops.push(DrawOp::Rect { x: nx, y: ny, w: nx1 - nx, h: ny1 - ny, color });
                 }
             }
-            // Ein weicher Schatten wird nur ganz oder gar nicht behalten:
-            // ihn zuzuschneiden hiesse, seine Deckung neu zu rechnen, und die
-            // entsteht erst beim Malen.
+            // A blurred shadow is kept whole or dropped: cropping it would
+            // mean recomputing its coverage, which only exists at paint time.
             DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread, r } => {
                 if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
                     ops.push(DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, spread, r });
@@ -676,17 +645,17 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     }
                 }
             }
-            // Ganz oder gar nicht, wie der weiche Schatten: die Deckung des
-            // Hakens entsteht beim Malen, und ein halber Haken waere ein
-            // anderes Zeichen. Ein Kaestchen ist 13 px gross — ein Abschnitt,
-            // der es zerschneidet, verdeckt es ohnehin fast ganz.
+            // Whole or nothing, like the blurred shadow: the check mark's
+            // coverage is computed at paint time, and half a check mark would
+            // be a different glyph. A checkbox is small enough that a clip
+            // cutting through it hides it almost entirely anyway.
             DrawOp::Check { x, y, w, h, .. } => {
                 if x >= cl && y >= ct && x + w <= cr && y + h <= cb {
                     ops.push(op);
                 }
             }
             // Kept whole when it overlaps, like `Image`: the layer's origin
-            // is its box, so shrinking the rect would MOVE the background
+            // is its box, so shrinking the rect would move the background
             // rather than crop it. Over-paints only when a clip cuts through a
             // box that has one.
             DrawOp::Image { x, y, w, h, .. } | DrawOp::BgImage { x, y, w, h, .. } => {
@@ -694,9 +663,9 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
                     ops.push(op);
                 }
             }
-            // Ein Verlauf traegt seinen Malbereich selbst: der Schnitt geht
-            // in `clip`, waehrend `x,y,w,h` (die Verlaufsachse) stehen
-            // bleibt — sonst wanderten die Farbstopps mit dem Schnitt.
+            // A gradient carries its own paint area: the cut goes into
+            // `clip`, while `x,y,w,h` (the gradient axis) stay — otherwise the
+            // color stops would move with the cut.
             DrawOp::Gradient { x, y, w, h, clip, repeat, pos, size, r, g } => {
                 let (nx, ny) = (clip.0.max(cl), clip.1.max(ct));
                 let (nx1, ny1) = ((clip.0 + clip.2).min(cr), (clip.1 + clip.3).min(cb));
@@ -718,9 +687,9 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
             DrawOp::Text { x, y, size, color, bold, italic, mono, family, sp, text, clip } => {
                 let bottom = y + size as i32 + 4;
                 if x < cr && y < cb && bottom > ct {
-                    // Der neue Ausschnitt wird mit dem alten GESCHNITTEN:
-                    // zwei ineinander liegende `overflow:hidden` begrenzen
-                    // beide, und der innere gewinnt nur, wo er enger ist.
+                    // The new clip is intersected with the old one: two
+                    // nested `overflow:hidden` boxes both limit, and the
+                    // inner one wins only where it is narrower.
                     let (nl, nt) = (cl, ct);
                     let (nr, nb) = (cr, cb);
                     let c2 = match clip {
@@ -745,7 +714,7 @@ fn clip_ops(ops: &mut Vec<DrawOp>, start: usize, cl: i32, ct: i32, cr: i32, cb: 
 
 /// Rewrite one `[s, e)` span of the display list through a `clip_ops` map.
 /// `None` when nothing of it survived — the span is gone and its entry with it.
-/// A span that the clip TORE (some ops kept, some dropped) still yields the
+/// A span that the clip tore (some ops kept, some dropped) still yields the
 /// range that encloses what is left: a stacking range only has to cover its
 /// subtree, and covering a dropped neighbour's slot is impossible here because
 /// the clip never reorders.
@@ -768,11 +737,10 @@ fn remap_clip(map: &[Option<usize>], start: usize, s: usize, e: usize) -> Option
 /// an alpha factor, because `filter: opacity()` needs one — so opacity costs
 /// no second pass over the ops.
 ///
-/// It is an APPROXIMATION of what the spec asks for. Real `opacity` composites
-/// the element and its subtree as one group: two overlapping descendants are
-/// flattened first, then faded together. Scaling each op's alpha instead lets
-/// them show through each other. Getting that exactly right needs an offscreen
-/// buffer per stacking context; this is the version that costs nothing.
+/// An approximation: real `opacity` composites the element and its subtree
+/// as one group, so overlapping descendants are flattened first, then faded
+/// together. Scaling each op's alpha lets them show through each other; the
+/// exact version needs an offscreen buffer per stacking context.
 fn effective_filter(st: &ComputedStyle) -> Option<crate::color::ColorFilter> {
     let fade = st.opacity < 0.999;
     match (st.filter, fade) {
@@ -784,8 +752,8 @@ fn effective_filter(st: &ComputedStyle) -> Option<crate::color::ColorFilter> {
     }
 }
 
-/// Eine Farbe mit der aufgesammelten Inline-Deckung vormultiplizieren.
-/// `k == 1.0` (der Normalfall) laesst sie unangetastet — auch in den Bits.
+/// Premultiply a colour by the accumulated inline opacity. `k == 1.0` (the
+/// common case) leaves it untouched, bit for bit.
 fn faded(c: Rgba, k: f32) -> Rgba {
     if k >= 0.999 {
         return c;
@@ -793,14 +761,12 @@ fn faded(c: Rgba, k: f32) -> Rgba {
     Rgba { c: c.c, a: (c.a as f32 * k.clamp(0.0, 1.0)) as u8 }
 }
 
-/// Derselbe Stil, mit der Inline-Deckung schon in den Farben. Fuer den
-/// SCHMUCK eines Inline-Kastens — Hintergrund, Rahmen, Umriss —, der wie sein
-/// Text keinen eigenen Befehlsbereich hat.
+/// The same style with the inline opacity already applied to its colours.
+/// For the decoration of an inline box — background, border, outline — which,
+/// like its text, has no op range of its own.
 ///
-/// Bewusst nur die Farben, nicht die Bilder: ein Hintergrundbild wird ueber
-/// seinen Schluessel erst beim Malen aufgeloest, und ein halbdurchsichtiges
-/// Bild braucht einen Filterindex am Befehl. Das ist eine eigene Runde; hier
-/// stuende sonst eine Halbheit.
+/// Colours only, not images: a background image is resolved by key at paint
+/// time, and a translucent image would need a filter index on the op.
 fn fade_style(st: &ComputedStyle) -> ComputedStyle {
     let k = st.inline_fade;
     if k >= 0.999 {
@@ -825,10 +791,8 @@ fn filter_key(table: &mut Vec<crate::color::ColorFilter>, f: crate::color::Color
     (i + 1).min(u16::MAX as usize) as u16
 }
 
-/// `position:relative` paint offset (dx, dy): `left`/`top` win over `right`/
-/// `bottom`; `%` resolves against the containing block's content width.
 /// `transform: translate(...)` as whole pixels. Percentages are of the box's
-/// OWN border box (CSS Transforms 1 §8) — which is what makes
+/// own border box (CSS Transforms 1 §8) — which is what makes
 /// `translate(-50%, -50%)` centre a box on the point it is positioned at, and
 /// why this cannot reuse `rel_offset`'s containing-block basis.
 fn translate_offset(st: &ComputedStyle, box_w: i32, box_h: i32) -> (i32, i32) {
@@ -850,12 +814,10 @@ fn rel_offset(st: &ComputedStyle, cb_w: f32, cb_h: Option<f32>) -> (i32, i32) {
         .map(|l| l as i32)
         .or_else(|| st.right.px(cb_w).map(|r| -(r as i32)))
         .unwrap_or(0);
-    // `top`/`bottom` are of the containing block's HEIGHT (CSS 2.1 §9.3.2), not
-    // its width. Both axes read `cb_w` here, so `top: 100%` on a 100px-tall box
-    // in an 800px-wide page moved it 800px down — off the bottom of everything.
-    // A containing block with no definite height leaves the percentage
-    // unresolvable and every engine takes it as zero.
-    // [[feedback_a_percentage_needs_its_own_axis]]
+    // `top`/`bottom` percentages are of the containing block's height
+    // (CSS 2.1 §9.3.2), not its width. A containing block with no definite
+    // height leaves the percentage unresolvable and every engine takes it
+    // as zero.
     let vert = |l: Len| l.px(cb_h.unwrap_or(0.0));
     let dy = vert(st.top)
         .map(|t| t as i32)
@@ -914,7 +876,7 @@ impl Rgba {
 
 impl Rgba {
     /// This colour composited over an opaque one. The canvas is the only place
-    /// that must flatten early: it IS the ground, so there is nothing left to
+    /// that must flatten early: it is the ground, so there is nothing left to
     /// blend against at paint time.
     pub fn over(self, dst: Rgb) -> Rgb {
         if self.is_opaque() {
@@ -927,9 +889,9 @@ impl Rgba {
 }
 
 /// Unit tests state colours as opaque `Rgb` literals; comparing the two
-/// directly keeps those assertions about the CHANNELS rather than restating the
-/// wrapper on every line. Deliberately test-only — production code that means
-/// "opaque and this colour" should say so.
+/// directly keeps those assertions about the channels rather than restating
+/// the wrapper on every line. Deliberately test-only — production code that
+/// means "opaque and this colour" should say so.
 #[cfg(test)]
 impl PartialEq<Rgb> for Rgba {
     fn eq(&self, other: &Rgb) -> bool {
@@ -966,7 +928,7 @@ impl Theme {
     };
 
     /// Is this a dark palette? Answers `prefers-color-scheme` — the page theme
-    /// IS the user's colour-scheme preference here, since the shell resolves it
+    /// is the user's colour-scheme preference here, since the shell resolves it
     /// from the compositor palette. Rec. 601 luma on the page background.
     pub fn is_dark(&self) -> bool {
         let Rgb(r, g, b) = self.bg;
@@ -988,49 +950,35 @@ pub enum DrawOp {
         bold: bool,
         italic: bool,
         mono: bool,
-        /// Streuwert der `font-family` — ohne ihn malte der Rasterer eine
-        /// andere Schrift als das Layout gemessen hat.
+        /// Hash of the `font-family`, so the rasterizer paints with the same
+        /// font the layout measured.
         family: u32,
         sp: (f32, f32),
         text: String,
-        /// Der Ausschnitt, in dem dieser Lauf malen darf — in Dokument-
-        /// koordinaten, `None` heisst unbeschnitten.
+        /// The clip this run may paint in, in document coordinates; `None`
+        /// means unclipped.
         ///
-        /// **Ein Textbefehl wurde vorher GANZ behalten, sobald er den
-        /// Ausschnitt irgendwo beruehrte.** Das ist bei einem grossen Kasten
-        /// harmlos und bei einem kleinen das Gegenteil: die
-        /// `visually-hidden`-Technik des ganzen Webs ist ein Kasten von 1x1
-        /// mit `overflow:hidden` und einem langen Text darin, und der stand
-        /// damit LESBAR ueber dem, was daneben liegt — auf DuckDuckGos
-        /// Kopfzeile „Search Settings" quer ueber dem Zahnrad.
-        ///
-        /// Der Rasterer klemmt jede Glyphe ohnehin gegen die Leinwand; der
-        /// Ausschnitt sind dieselben vier Zeilen mit anderen Grenzen, also
-        /// kostet er kein Pixel mehr.
+        /// Keeping a whole run when it merely touches the clip breaks the
+        /// visually-hidden pattern (a 1x1 `overflow:hidden` box with long
+        /// text inside), which would then paint readable text over its
+        /// neighbours. The rasterizer clamps every glyph to the canvas
+        /// anyway, so the clip costs nothing extra.
         clip: Option<(i32, i32, i32, i32)>,
     },
     /// A filled rectangle (divider, list bullet).
     Rect { x: i32, y: i32, w: i32, h: i32, color: Rgba },
-    /// Ein WEICHER Schlagschatten: der Kasten, unter dem er liegt, plus der
-    /// Weichzeichnungsradius. Der Maler rechnet die Deckung selbst aus.
+    /// A blurred outer box shadow. The painter computes the coverage itself:
+    /// a soft shadow has a different coverage at every pixel, known only at
+    /// paint time. A sharp one (`blur == 0`) stays a set of rects.
     ///
-    /// Eigener Befehl und kein Haufen `Rect`: ein weicher Schatten hat an
-    /// jedem Pixel eine andere Deckung, und die entsteht erst beim Malen.
-    /// Ein scharfer (`blur == 0`) bleibt, was er war — vier Rechtecke, weil
-    /// er auf echten Seiten meist ein Haarstrich statt eines Schattens ist.
     /// `x,y,w,h` is the shadow's own rect — the border box moved by
     /// `dx,dy` and grown by `spread`. The three CSS numbers ride along
-    /// because the painter needs the BORDER BOX back: an outer shadow is not
+    /// because the painter needs the border box back: an outer shadow is not
     /// painted inside it (css-backgrounds-3 §7.1.1), and that cut-out is a
     /// different rectangle as soon as there is an offset or a spread. Keeping
     /// them (rather than the border box itself) is what makes the op survive
-    /// a translation untouched.
-    /// Ein aeusserer Kastenschatten. `r` sind die Eckradien der SCHATTENform
-    /// — der Radius des Rahmenkastens, um den Spread gewachsen (CSS
-    /// Backgrounds 3 §7.1.1). Ohne sie malt ein Schatten unter einer Pille
-    /// eckige Ecken, und genau daran sah DuckDuckGos Suchfeld aus wie ein
-    /// Kasten statt wie eine Kapsel: der sichtbare Ring dort ist ein
-    /// `box-shadow`, kein Rahmen.
+    /// a translation untouched. `r` are the corner radii of the shadow shape:
+    /// the border box radii grown by the spread (CSS Backgrounds 3 §7.1.1).
     Shadow { x: i32, y: i32, w: i32, h: i32, blur: f32, color: Rgba, dx: i32, dy: i32,
              spread: i32, r: [f32; 4] },
     /// A `border-radius` box. `r` is `[tl, tr, br, bl]` in px; `ring` is 0 for
@@ -1038,29 +986,20 @@ pub enum DrawOp {
     /// Kept apart from `Rect` so the plain case stays one `memory.copy` per
     /// row — the rounded one has to walk its corner rows.
     RoundRect { x: i32, y: i32, w: i32, h: i32, r: [f32; 4], color: Rgba, ring: f32 },
-    /// Der Schreibzeiger in einem Textfeld — ein eigener Befehl, damit er
-    /// BLINKEN kann.
-    ///
-    /// Als gewoehnliches Rechteck kostete jeder Takt ein Neuauslegen (am
-    /// Geraet 10-40 ms, zweimal je Sekunde); als eigene Art laesst der
-    /// Rasterer ihn einfach aus, und der Wirt malt nur seinen Streifen neu.
+    /// The text caret in a text field — its own op so it can blink: the
+    /// rasterizer simply skips it in the off phase, and the host repaints only
+    /// its rows instead of laying the page out again.
     Caret { x: i32, y: i32, w: i32, h: i32, color: Rgba },
-    /// Der Haken eines angekreuzten Kaestchens: zwei Striche im Kasten
-    /// `x,y,w,h`.
+    /// The check mark of a checked checkbox: two strokes in the box `x,y,w,h`.
     ///
-    /// Eigener Befehl aus demselben Grund wie `Shadow` — seine Deckung
-    /// entsteht erst beim Malen. Ein Haken aus Rechtecken ist eine Treppe,
-    /// und bei 13 px sieht man jede Stufe. Vorher stand hier ein gefuelltes
-    /// QUADRAT, und das ist nicht bloss haesslich: ein Haken und ein Punkt
-    /// sind die zwei Zeichen, an denen man ein Kaestchen von einem
-    /// Radioknopf unterscheidet.
+    /// Its own op for the same reason as `Shadow`: its coverage only exists at
+    /// paint time, and a check mark built from rects is a visible staircase
+    /// at checkbox size.
     Check { x: i32, y: i32, w: i32, h: i32, color: Rgba },
-    /// A decoded image, scaled to `w`×`h` at blit time.
-    /// An `<img>` box. Carries the `src` KEY, not the decoded pixels: the
-    /// rasteriser looks the image up when it paints, and draws a placeholder
-    /// on a miss. That way an image arriving after layout costs a repaint
-    /// instead of a full re-layout — which on a real article is the
-    /// difference between ~15 ms and ~145 ms, per image batch.
+    /// An `<img>` box, scaled to `w`×`h` at blit time. Carries the `src` key,
+    /// not the decoded pixels: the rasteriser looks the image up when it
+    /// paints and draws a placeholder on a miss, so an image arriving after
+    /// layout costs a repaint instead of a re-layout.
     /// `fit` is `object-fit`: the box is `w`×`h` either way, the picture
     /// inside it is placed by the rasteriser, which is the only place the
     /// intrinsic size is known (the pixels are looked up at paint time).
@@ -1081,7 +1020,7 @@ pub enum DrawOp {
         w: i32,
         h: i32,
         /// The painting area (`background-clip`) as `(x, y, w, h)`. `x..h` above
-        /// are the POSITIONING area (`background-origin`); the two are the same
+        /// are the positioning area (`background-origin`); the two are the same
         /// rectangle only when neither property is set and the box has no
         /// border.
         clip: (i32, i32, i32, i32),
@@ -1090,27 +1029,22 @@ pub enum DrawOp {
         pos: (BgPos, BgPos),
         size: BgSize,
         tint: Option<Rgba>,
-        /// Same 1-based index as `Image::filter`. A MASK never uses it: it
+        /// Same 1-based index as `Image::filter`. A mask never uses it: it
         /// paints `tint` through the image's alpha, so the transform lands on
         /// that colour at layout time instead.
         filter: u16,
     },
-    /// Ein Farbverlauf als Hintergrund.
-    ///
-    /// Eigener Befehl und keine Kette aus Rechtecken: ein Verlauf hat an jedem
-    /// Pixel eine andere Farbe, und tausend 1-px-Streifen je Kasten waeren
-    /// eine Anzeigeliste, die niemand mehr lesen kann.
+    /// A gradient background. Its own op rather than a chain of rects: a
+    /// gradient has a different colour at every pixel.
     Gradient {
         x: i32, y: i32, w: i32, h: i32,
         clip: (i32, i32, i32, i32),
-        /// Eckenradien der Kastenform, damit ein Verlauf unter einer runden
-        /// Ecke nicht darueber hinauslaeuft.
+        /// Corner radii of the box shape, so a gradient under a rounded
+        /// corner does not run past it.
         r: [f32; 4],
-        /// Dieselben drei wie bei `BgImage`, und aus demselben Grund: ein
-        /// Verlauf IST ein Hintergrundbild. Tailwinds Punkt- und Gittermuster
-        /// sind ein 10x10 grosser Verlauf, der sich kachelt — ohne
-        /// `background-size` waere es eine einzige Kachel ueber die ganze
-        /// Seite, und das Muster verschwaende.
+        /// The same three as on `BgImage`, for the same reason: a gradient is
+        /// a background image. Repeating patterns are small tiled gradients;
+        /// without `background-size` they would be one tile over the box.
         repeat: (bool, bool),
         pos: (BgPos, BgPos),
         size: BgSize,
@@ -1118,12 +1052,12 @@ pub enum DrawOp {
     },
 }
 
-/// Ein Flex-Kind: ein Element, oder ein ANONYMER Kasten um einen nackten
-/// Textlauf (css-flexbox-1 §4).
+/// A flex child: an element, or an anonymous box around a bare text run
+/// (css-flexbox-1 §4).
 ///
-/// Der anonyme traegt seinen fertigen Kasten mit sich — er hat kein Element,
-/// also auch keinen Weg durch `layout_box`, und `AtomicBox` ist genau die
-/// Form, die das Layout dafuer schon hat (ein `::before` ist derselbe Fall).
+/// The anonymous one carries its finished box: it has no element and so no
+/// path through `layout_box`, and `AtomicBox` is the form the layout already
+/// has for that (a `::before` is the same case).
 enum Kid<'a> {
     El(&'a Element),
     Anon(AtomicBox),
@@ -1148,8 +1082,8 @@ fn op_bottom(op: &DrawOp) -> i32 {
         | DrawOp::Image { y, h, .. }
         | DrawOp::Gradient { y, h, .. }
         | DrawOp::BgImage { y, h, .. } => y + h,
-        // Der weiche Rand reicht ueber den Kasten hinaus, aber er ist
-        // durchsichtig und soll die Seite nicht laenger machen.
+        // The blurred edge reaches past the box, but it is transparent and
+        // must not make the page longer.
         DrawOp::Shadow { y, h, .. } => y + h,
     }
 }
@@ -1180,14 +1114,14 @@ fn uniform_border(st: &ComputedStyle) -> Option<(f32, Rgba)> {
 }
 
 /// One box's background layer, bottom-up: colour (or a mask stencilling it),
-/// then the image. Shared by block boxes, which insert it UNDER content they
+/// then the image. Shared by block boxes, which insert it under content they
 /// have already emitted, and by inline-box fragments, which push it ahead of
 /// their line's text. The keys are resolved by the caller — only it knows
 /// where to register the image the layout still needs.
 fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<DrawOp>) {
     // Three rectangles, two of them used here: `background-clip` says where the
     // paint may land, `background-origin` where the image is anchored and what
-    // a percentage size resolves against. They default DIFFERENTLY — border box
+    // a percentage size resolves against. They default differently — border box
     // and padding box — so a bordered box with a centred image centres it
     // inside the border while its colour still runs under it.
     let (cx, cy, cw, ch) = st.bg_clip.shrink(st, x, y, w, h);
@@ -1246,12 +1180,12 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
             filter: 0,
         });
     }
-    // Ein Verlauf ist dieselbe Schicht wie ein `url()` — `background-image`
-    // ist eines von beidem, nie beides. Er wird ueber die Positionierflaeche
-    // gespannt und am Malbereich beschnitten, wie das Bild auch.
+    // A gradient is the same layer as a `url()` — `background-image` is one
+    // or the other. It is stretched over the positioning area and clipped to
+    // the paint area, like the image.
     if st.bg_layer.gradient.is_some() && cw > 0 && ch > 0 {
-        // Wie bei der Farbe: der Radius wird am Rahmenkasten gemessen, und
-        // ein nach innen gezogener Malbereich zieht die Rundung mit.
+        // As with the colour: the radius is measured on the border box, and
+        // a paint area pulled inwards pulls the curve with it.
         let r = radii_px(st, w);
         let inset = (cx - x).max(cy - y) as f32;
         out.push(DrawOp::Gradient {
@@ -1275,7 +1209,7 @@ fn bg_ops(st: &ComputedStyle, bg: Option<u64>, mask: Option<u64>, x: i32, y: i32
 }
 
 /// One box's four border edges. `sides` says whether the box's left and right
-/// edges belong to THIS rectangle — a fragment of an inline box that continues
+/// edges belong to this rectangle — a fragment of an inline box that continues
 /// on from the previous line, or breaks onto the next one, carries neither
 /// (the `box-decoration-break: slice` default).
 fn border_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, bool), out: &mut Vec<DrawOp>) {
@@ -1316,17 +1250,16 @@ fn border_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, 
     outline_ops(st, x, y, w, h, sides, out);
 }
 
-/// The `outline` ring (css-ui-4 §3). Unlike a border it takes NO space — it is
+/// The `outline` ring (css-ui-4 §3). Unlike a border it takes no space — it is
 /// drawn outside the border box, offset outwards by `outline-offset`, and the
-/// layout never sees it. That is the whole reason it exists: a focus ring has
-/// to be able to appear without moving the page under the reader.
+/// layout never sees it, so a focus ring can appear without moving the page.
 fn outline_ops(st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, sides: (bool, bool), out: &mut Vec<DrawOp>) {
     let o = &st.outline;
     let (Some(color), true) = (o.color, o.width > 0.0) else {
         return;
     };
     let (ow, off) = (px_of(o.width), px_of(st.outline_offset));
-    // Grow the border box by the offset, then lay the ring OUTSIDE that.
+    // Grow the border box by the offset, then lay the ring outside that.
     let (rx, ry) = (x - off - ow, y - off - ow);
     let (rw, rh) = (w + 2 * (off + ow), h + 2 * (off + ow));
     if rw <= 0 || rh <= 0 {
@@ -1370,7 +1303,7 @@ pub struct LinkRect {
 /// A laid-out element's document-space box plus a human label — the data behind
 /// beak's "inspect" dev tool. Recorded only when inspection is enabled (see
 /// `Ctx::inspect`); the shell hit-tests these and shows the deepest box under
-/// the cursor so a mis-placed element can be named on the device.
+/// the cursor so a mis-placed element can be named.
 pub struct InspectBox {
     pub x: i32,
     pub y: i32,
@@ -1397,8 +1330,7 @@ pub struct ControlRect {
     /// Where this control's ops sit in `Layout::ops`, and the box they were
     /// painted from. A control's own state — focus, checked, the typed value,
     /// the caret — changes far more often than the page does, and repainting
-    /// that range beats laying the document out again by three orders of
-    /// magnitude ([[project-beak-pointer-and-repaint]]).
+    /// that range is far cheaper than laying the document out again.
     at: usize,
     len: usize,
     paint: CtlBox,
@@ -1414,35 +1346,28 @@ pub struct Layout {
     pub controls: Vec<ControlRect>,
     /// Total document height (px). May exceed the viewport → scroll.
     pub height: u32,
-    /// Did this layout actually depend on the viewport HEIGHT? When false, a
+    /// Did this layout actually depend on the viewport height? When false, a
     /// purely vertical resize cannot move a single box, so the shell may reuse
-    /// this layout and just re-clip — the difference between a repaint and a
-    /// full re-layout (~6.4 s on device for a big article).
+    /// this layout and just re-clip instead of laying out again.
     ///
     /// Sound in the direction that matters: it over-reports (value-equality on
     /// the containing block, any matched `vh` rule), never under-reports.
     pub viewport_h_used: bool,
-    /// What the three pipeline phases cost, in whatever unit the caller's
-    /// clock counts (see `Engine::set_clock`). Zero when no clock is set.
-    ///
-    /// The device reports parse+cascade+layout as ONE number, which is exactly
-    /// the number we cannot act on: a host profile says the box layout
-    /// dominates, but the host is not an interpreter and the phases do not
-    /// scale alike under one. Splitting it needs a clock, and the engine has
-    /// no host functions by design — so the caller lends it one.
+    /// What the three pipeline phases (parse, cascade, layout) cost, in
+    /// whatever unit the caller's clock counts (see `Engine::set_clock`).
+    /// Zero when no clock is set; the engine has no host functions by design,
+    /// so the caller lends it one.
     pub phase: [u64; 3],
     /// Canvas background — the `<body>` background propagated to the whole
     /// viewport (CSS backgrounds §3.11.2), else the theme background.
     pub bg: Rgb,
-    /// `src`s whose `<img>` box was GUESSED (no pixels yet, and no
+    /// `src`s whose `<img>` box was guessed (no pixels yet, and no
     /// `width`/`height` pair to size it definitely).
     ///
     /// The shell uses this to decide what an arriving image costs: a `src`
-    /// that is NOT in here has a definite box, so its pixels only need a
-    /// REPAINT; one that is in here can still move the page when it decodes,
-    /// which warrants a re-layout. On a real article that is the difference
-    /// between ~15 ms and ~145 ms — and under the device's WASM interpreter,
-    /// between a page that scrolls while it loads and one that freezes.
+    /// that is not in here has a definite box, so its pixels only need a
+    /// repaint; one that is in here can still move the page when it decodes,
+    /// which warrants a re-layout.
     pub guessed_image_srcs: Vec<String>,
     /// `url_key`s of the CSS images (`background-image`/`mask-image`) this
     /// layout actually needs — i.e. the ones that won the cascade on a box we
@@ -1457,7 +1382,7 @@ pub struct Layout {
     ///
     /// An inline SVG is a replaced element with no `src`, and it cannot be
     /// rasterised before the cascade runs: `currentColor` — what practically
-    /// every icon set paints with — IS the element's computed `color`, and the
+    /// every icon set paints with — is the element's computed `color`, and the
     /// box is decided by CSS, not by the SVG's own attributes. So layout states
     /// what it needs and `Engine::resolve_inline_svgs` renders it afterwards,
     /// the same split `css_image_srcs` already uses.
@@ -1469,24 +1394,17 @@ pub struct Layout {
     pub hover_boxes: Vec<HoverBox>,
     /// The `filter` colour transforms this layout used, referenced by the
     /// 1-based index an image op carries. A side table rather than a field on
-    /// the op: a `ColorFilter` is 52 bytes and `filter` is rare, so carrying
-    /// one per op would roughly double the display list on every page that has
-    /// no filter at all.
+    /// the op: a `ColorFilter` is large and `filter` is rare, so carrying one
+    /// per op would bloat the display list of every page without a filter.
     pub filters: Vec<crate::color::ColorFilter>,
 }
 
-/// An element's box, for deciding what the pointer is inside.
+/// One element's box as script queries it.
 ///
-/// Deliberately not `InspectBox`: that one carries a formatted label, and this
-/// list exists on every page with a hover rule, not only while a developer is
-/// inspecting.
-/// Der Kasten EINES Elements, so wie ein Skript ihn erfragt.
-///
-/// Eigene Form statt `HoverBox` durchzureichen: die traegt Anker, Pseudo-Art
-/// und Nachmal-Fahnen mit, von denen hier nichts gebraucht wird — und sie
-/// deckt Steuerelemente nicht ab. Ein `<button>` wird von `paint_control`
-/// gemalt und steht in `controls`; genau auf solche Kaesten fragen Seiten
-/// aber am haeufigsten.
+/// Its own type rather than `HoverBox`: that one carries anchor, pseudo kind
+/// and repaint flags that are not needed here, and it does not cover form
+/// controls — which `paint_control` paints into `controls`, and which pages
+/// query most often.
 #[derive(Clone, Copy)]
 pub struct ElemRect {
     pub seq: u32,
@@ -1494,24 +1412,25 @@ pub struct ElemRect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    /// Rahmenbreiten, waagerecht und senkrecht summiert — `clientWidth` ist
-    /// der Rahmenkasten OHNE sie.
+    /// Border widths, summed horizontally and vertically — `clientWidth` is
+    /// the border box without them.
     pub bx: i16,
     pub by: i16,
-    /// Polsterung, ebenso summiert. `ResizeObserver` meldet den INHALTSkasten,
-    /// und der ist der Rahmenkasten ohne beides — ohne diese zwei Zahlen waere
-    /// die gemeldete Groesse um die Polsterung zu gross, und ein Diagramm, das
-    /// sein Zeichenfeld daraus baut, waere in einem gepolsterten Kasten jedes
-    /// Mal zu breit.
+    /// Padding, summed the same way. `ResizeObserver` reports the content box,
+    /// which is the border box without both.
     pub px: i16,
     pub py: i16,
-    /// `position` ist nicht `static`. Das ist die ganze Frage, die
-    /// `offsetParent` stellt (CSSOM View §5): der naechste positionierte
-    /// Vorfahr. Ohne diese Ecke muesste die Bindung fuer JEDEN Vorfahren die
-    /// Kaskade neu aufloesen — dieselbe Antwort, hundertmal teurer.
+    /// `position` is not `static`. That is the whole question `offsetParent`
+    /// asks (CSSOM View §5): the nearest positioned ancestor. Without it the
+    /// binding would have to re-resolve the cascade for every ancestor.
     pub positioned: bool,
 }
 
+/// An element's box, for deciding what the pointer is inside.
+///
+/// Deliberately not `InspectBox`: that one carries a formatted label, and this
+/// list exists on every page with a hover rule, not only while a developer is
+/// inspecting.
 #[derive(Clone, Copy)]
 pub struct HoverBox {
     pub x: i32,
@@ -1519,7 +1438,7 @@ pub struct HoverBox {
     pub w: i32,
     pub h: i32,
     pub seq: u32,
-    /// Where this element's box decoration BELONGS in the display list, named
+    /// Where this element's box decoration belongs in the display list, named
     /// by the op that sits there rather than by an index.
     ///
     /// A background that only exists while the pointer is inside has nothing
@@ -1532,7 +1451,7 @@ pub struct HoverBox {
     /// `None` when the box painted nothing at all — then there is no "ahead of"
     /// to speak of, and a repaint hands the page to a layout.
     pub anchor: Option<OpKey>,
-    /// Where this fragment's own decoration is painted, which is NOT the hit
+    /// Where this fragment's own decoration is painted, which is not the hit
     /// rect: an inline box's background covers its font's ascent + descent plus
     /// padding, not the line box (CSS 2.1 §10.6.1).
     pub paint: (i32, i32, i32, i32),
@@ -1542,16 +1461,15 @@ pub struct HoverBox {
     /// A block box paints its `box-shadow`; an inline fragment does not.
     pub shadow: bool,
     /// Which pseudo-element this box belongs to. `None` is the element itself;
-    /// a `::before`/`::after` gets its own box because a hover rule reaches it
-    /// — MediaWiki underlines the article tabs with `a:hover::after`, and a
-    /// repaint that had no rectangle for it could only give up.
+    /// a `::before`/`::after` gets its own box because a hover rule can reach
+    /// it (e.g. tab underlines drawn with `a:hover::after`).
     pub pseudo: crate::css::PseudoElem,
-    /// The anchor names the op the decoration goes AFTER, not before it. An
+    /// The anchor names the op the decoration goes after, not before it. An
     /// absolutely positioned pseudo is appended at the end of what its
     /// originating element painted, so what it can name is its predecessor.
     pub anchor_after: bool,
     /// Does this box paint text of its own? A pseudo's `content` string is not
-    /// part of what the element SAYS, so a colour change on one cannot be
+    /// part of the element's own text, so a colour change on one cannot be
     /// repainted from the display list alone.
     pub has_text: bool,
     /// Does this box take part in `:hover`? False for one recorded only so a
@@ -1559,28 +1477,25 @@ pub struct HoverBox {
     /// cascade event, and reporting it would repaint on every page that has a
     /// `<details>` and no hover rule at all.
     pub hoverable: bool,
-    /// Rahmenbreiten, waagerecht und senkrecht SUMMIERT.
-    ///
-    /// Nur dafuer da, dass `clientWidth`/`clientHeight` den Polsterkasten
-    /// nennen koennen statt des Rahmenkastens. Zwei Zahlen statt vier, weil
-    /// `clientLeft`/`clientTop` im Aufrufzensus gar nicht vorkommen — und eine
-    /// Zahl, die niemand liest, ist Ballast auf einem heissen Pfad.
+    /// Border widths, summed horizontally and vertically, so that
+    /// `clientWidth`/`clientHeight` can report the padding box instead of the
+    /// border box. Two numbers rather than four: `clientLeft`/`clientTop` are
+    /// rarely read, and this is a hot path.
     pub bx: i16,
     pub by: i16,
-    /// Polsterung, waagerecht und senkrecht summiert — fuer den
-    /// INHALTSkasten, den ein `ResizeObserver` meldet.
+    /// Padding, summed horizontally and vertically — for the content box a
+    /// `ResizeObserver` reports.
     pub px: i16,
     pub py: i16,
-    /// `position` ist nicht `static` — die Frage, die `offsetParent` stellt.
+    /// `position` is not `static` — the question `offsetParent` asks.
     pub positioned: bool,
     /// Clicking this box opens/closes its `<details>`.
     ///
     /// It rides in `hover_boxes` rather than in a list of its own because this
-    /// list is ALREADY carried through everything a hit rect has to survive:
+    /// list is already carried through everything a hit rect has to survive:
     /// the rollback mark, the relative-offset shift, and the drain into an
-    /// `AtomicBox`. A fourth parallel list would have to repeat all three, and
-    /// the one time that was done by hand it shipped with a missing shift
-    /// (0.25.0, see `shift_since`).
+    /// `AtomicBox`. A separate list would have to repeat all three (see
+    /// `shift_since`).
     pub toggle: bool,
 }
 
@@ -1614,34 +1529,15 @@ fn op_key(op: &DrawOp) -> OpKey {
 }
 
 impl Layout {
-    /// Wo die Befehle eines Steuerelements liegen — `(seq, at, len)`.
-    ///
-    /// Nur fuer Proben: `repaint_controls` ersetzt genau diese Spanne, und
-    /// wenn sie nicht stimmt, frisst die Ersetzung den Nachbarn. Von aussen
-    /// war das bisher nicht nachzusehen.
+    /// Where a control's ops sit — `(seq, at, len)`. For probes only:
+    /// `repaint_controls` replaces exactly this span, and a wrong span eats
+    /// the neighbouring ops.
     pub fn control_spans(&self) -> Vec<(u32, usize, usize)> {
         self.controls.iter().map(|c| (c.seq, c.at, c.len)).collect()
     }
 
-    /// Does any box this layout painted for one of `srcs` reach into the
-    /// vertical band `[top, bottom)` of the document?
-    ///
-    /// The shell asks this before repainting for an arriving `<img>`. A
-    /// repaint is the WHOLE viewport — 1902x1000x4 = 7,6 MB of fill, ~50 ms
-    /// on the device — and an image that landed below the fold cannot change
-    /// a single visible pixel. Painting for it is all of the cost and none of
-    /// the picture. Nothing is lost: scrolling marks the page dirty anyway,
-    /// so the image is drawn the moment it can be seen.
-    ///
-    /// Answered from the display list rather than from a side table, because
-    /// the display list is where an image's PLACED box lives — `img_box` only
-    /// measures, and the y a repaint cares about is decided when the box is
-    /// flowed. One pass per arriving batch, not per image.
-    /// Der Kasten des Schreibzeigers in DOKUMENTkoordinaten, wenn die Seite
-    /// gerade einen malt.
-    ///
-    /// Der Wirt braucht ihn, um im Takt nur DIESEN Streifen neu zu malen —
-    /// ein blinkender Zeiger, der die ganze Seite kostet, blinkt nicht lange.
+    /// The caret's box in document coordinates, if the page currently paints
+    /// one. The host repaints only this band while the caret blinks.
     pub fn caret_rect(&self) -> Option<(i32, i32, i32, i32)> {
         self.ops.iter().rev().find_map(|o| match o {
             DrawOp::Caret { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
@@ -1649,6 +1545,18 @@ impl Layout {
         })
     }
 
+    /// Does any box this layout painted for one of `srcs` reach into the
+    /// vertical band `[top, bottom)` of the document?
+    ///
+    /// The shell asks this before repainting for an arriving `<img>`. A
+    /// repaint covers the whole viewport, and an image that landed below the
+    /// fold cannot change a visible pixel; scrolling marks the page dirty
+    /// anyway, so the image is drawn the moment it can be seen.
+    ///
+    /// Answered from the display list rather than from a side table, because
+    /// the display list is where an image's placed box lives — `img_box` only
+    /// measures, and the y a repaint cares about is decided when the box is
+    /// flowed. One pass per arriving batch, not per image.
     pub fn images_in_band(&self, srcs: &[&str], top: i32, bottom: i32) -> bool {
         self.ops.iter().any(|op| match op {
             DrawOp::Image { y, h, src, .. } => {
@@ -1660,7 +1568,7 @@ impl Layout {
 
     /// As [`Self::images_in_band`], for `background-image`/`mask-image` layers.
     ///
-    /// Tested against the op's CLIP rectangle, not its positioning area: the
+    /// Tested against the op's clip rectangle, not its positioning area: the
     /// clip is what actually gets painted, and with `background-origin` or a
     /// border the two are different rectangles.
     pub fn css_images_in_band(&self, keys: &[u64], top: i32, bottom: i32) -> bool {
@@ -1672,26 +1580,21 @@ impl Layout {
         })
     }
 
-    /// The deepest (most specific) inspect box containing a document-space
-    /// point, for the inspect dev tool. Ties break toward the one recorded
-    /// later (painted on top).
-    /// Die Kaesten aller Elemente, die einer gemalt hat — Elementkaesten UND
-    /// Steuerelemente, in einer Liste.
+    /// The boxes of every element that painted one — element boxes and form
+    /// controls, in one list.
     ///
-    /// Ein Kasten kann mehrfach vorkommen: ein Inline-Kasten hat ein Fragment
-    /// je Zeile. Das ist gewollt — `getClientRects` nennt sie einzeln,
-    /// `getBoundingClientRect` ihre Vereinigung.
+    /// A box can appear more than once: an inline box has one fragment per
+    /// line. `getClientRects` reports them individually,
+    /// `getBoundingClientRect` their union.
     pub fn element_rects(&self) -> Vec<ElemRect> {
         let mut out = Vec::with_capacity(self.hover_boxes.len() + self.controls.len());
         for c in &self.controls {
             out.push(ElemRect { seq: c.seq, x: c.x, y: c.y, w: c.w, h: c.h,
                                 bx: 0, by: 0, px: 0, py: 0, positioned: false });
         }
-        // **Der Kasten eines Steuerelements ist das Steuerelement.** Ein
-        // blockweiter Knopf bekommt vom Blockpfad AUSSERDEM einen Kasten in
-        // voller Spaltenbreite aufgezeichnet — und der stand vorher zuerst in
-        // der Liste. `getBoundingClientRect` gab dann 620 px statt der 296,
-        // die gemalt werden, und `margin:auto` sah aus, als wirke es nicht.
+        // A control's box is the control. A block-level button also gets a
+        // full-column-width box from the block path; the control's own box
+        // must come first so `getBoundingClientRect` reports what is painted.
         for b in &self.hover_boxes {
             if self.controls.iter().any(|c| c.seq == b.seq) {
                 continue;
@@ -1703,6 +1606,9 @@ impl Layout {
         out
     }
 
+    /// The deepest (most specific) inspect box containing a document-space
+    /// point, for the inspect dev tool. Ties break toward the one recorded
+    /// later (painted on top).
     pub fn hit_inspect(&self, x: i32, y: i32) -> Option<&InspectBox> {
         self.inspect
             .iter()
@@ -1731,16 +1637,9 @@ impl Layout {
             .map(|l| l.href.as_str())
     }
 
-    /// Every element the pointer is inside, at a document-space point —
-    /// ascending `seq`, which is document order.
-    ///
-    /// It is a LIST, not the innermost element: CSS hovers an element and all
-    /// its ancestors, which is what `nav:hover a` and every dropdown menu on
-    /// the web relies on. Containment does that for free — an ancestor's box
-    /// encloses its descendant's — without keeping a parent pointer per box.
-    /// Die `seq`-Kette unter dem Punkt — ALLE Elemente, nicht nur die
-    /// `:hover`-faehigen. Der Weg vom Klickpunkt zum Knoten fuer die
-    /// Ereigniszustellung; braucht `Engine::set_hit_all`.
+    /// The `seq` chain under the point — all elements, not only the
+    /// `:hover`-capable ones. The path from a click point to the node for
+    /// event dispatch; needs `Engine::set_hit_all`.
     pub fn element_chain(&self, x: i32, y: i32) -> Vec<u32> {
         let mut v: Vec<u32> = self
             .hover_boxes
@@ -1749,23 +1648,13 @@ impl Layout {
             .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
             .map(|b| b.seq)
             .collect();
-        // Ein Steuerelement hat KEINEN `hover_box`: es ist ein atomarer
-        // Inline-Kasten, seine Kinder laufen nie durchs Layout, und damit
-        // kommt es nie an `record_inspect` vorbei. Ohne diese Zeile endet die
-        // Kette beim ELTERNTEIL — der Behandler eines `<button>` feuert nie,
-        // sein `onclick`-Attribut auch nicht, und `e.target` ist der falsche
-        // Knoten.
+        // A form control has no `hover_box`: it is an atomic inline box whose
+        // children never go through layout, so it never reaches
+        // `record_inspect`. Without this the chain would end at the parent and
+        // the control's own handlers would never see the event.
         //
-        // Am Geraet sah das aus wie „der Klick kommt gar nicht an": vier
-        // `control-activate` und keine einzige Zeile von der Seite. Der
-        // host-seitige Selftest hatte es nicht gefunden, weil er die Kette
-        // aus dem BAUM baute statt aus dem Layout — `examples/hitchk.rs`
-        // schliesst genau diese Luecke.
-        //
-        // Bewusst hier und nicht in `record_inspect`: „darf der Zeiger diesen
-        // Kasten treffen" ist nicht „reagiert dieses Element auf `:hover`".
-        // Die zwei Fragen zusammenzulegen hat schon einmal sechs volle
-        // Layouts je Mausbewegung gekostet ([[feedback_hitting_is_not_hovering]]).
+        // Deliberately here and not in `record_inspect`: "may the pointer hit
+        // this box" is not "does this element react to `:hover`".
         v.extend(self.controls.iter()
             .filter(|c| x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)
             .map(|c| c.seq));
@@ -1774,6 +1663,13 @@ impl Layout {
         v
     }
 
+    /// Every element the pointer is inside, at a document-space point —
+    /// ascending `seq`, which is document order.
+    ///
+    /// It is a list, not the innermost element: CSS hovers an element and all
+    /// its ancestors, which is what `nav:hover a` and every dropdown menu on
+    /// the web relies on. Containment does that for free — an ancestor's box
+    /// encloses its descendant's — without keeping a parent pointer per box.
     pub fn hover_at(&self, x: i32, y: i32) -> Vec<u32> {
         let mut v: Vec<u32> = self
             .hover_boxes
@@ -1790,7 +1686,7 @@ impl Layout {
         v
     }
 
-    /// Form control at a document-space point. Checked BEFORE `hit_test` by the
+    /// Form control at a document-space point. Checked before `hit_test` by the
     /// shell: a control nested in a link (a search button inside an `<a>`) must
     /// take the click itself.
     pub fn hit_control(&self, x: i32, y: i32) -> Option<&ControlRect> {
@@ -1805,7 +1701,7 @@ impl Layout {
 
 /// Half the x-height that `vertical-align: middle` measures against (CSS2.1
 /// §10.8.1 says the parent's, which is not threaded this far down). The line
-/// SIZING and the PLACEMENT must use the identical value — with two different
+/// sizing and the placement must use the identical value — with two different
 /// approximations a middle-aligned box is sized into one line and painted
 /// against another, and lands outside its own line box.
 const MIDDLE_HALF_X: f32 = crate::style::BASE_FONT_PX * 0.25;
@@ -1817,14 +1713,14 @@ fn ceil_i32(x: f32) -> i32 {
 /// The characters CSS collapses (css-text-3 §4.1.1: the "white space"
 /// characters are space, tab and the newlines). Rust's `char::is_whitespace`
 /// is the Unicode `White_Space` property, which also covers U+00A0 and U+3000 —
-/// and both of those exist precisely so they do NOT collapse or offer a break.
+/// and both of those exist precisely so they do not collapse or offer a break.
 fn is_css_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
 }
 
-/// A character that HANGS at the end of a line: it is painted, but it does not
+/// A character that hangs at the end of a line: it is painted, but it does not
 /// count towards the line's width (css-text-3 §4.1.3 phase II removes a
-/// trailing sequence of collapsible spaces AND other space separators). These
+/// trailing sequence of collapsible spaces and other space separators). These
 /// are the space separators that do not collapse — U+00A0 is deliberately not
 /// among them, since a no-break space is content.
 fn is_hangable_space(c: char) -> bool {
@@ -1841,7 +1737,7 @@ fn is_zero_width_format(c: char) -> bool {
         | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{00AD}')
 }
 
-/// `is_zero_width_format` fuer den Rasterer — dieselbe Liste, nicht eine zweite.
+/// `is_zero_width_format` for the rasterizer — the same list, not a second one.
 pub fn is_zero_width_format_pub(c: char) -> bool { is_zero_width_format(c) }
 
 /// The extra advance `sp` adds after `c`.
@@ -1850,33 +1746,27 @@ pub(crate) fn char_spacing(c: char, sp: (f32, f32)) -> f32 {
         return 0.0;
     }
     // Word-spacing lands on the word separators css-text-3 §8.1 names —
-    // notably NOT U+3000 IDEOGRAPHIC SPACE.
+    // notably not U+3000 IDEOGRAPHIC SPACE.
     let ws = matches!(c, ' ' | '\u{00A0}' | '\u{1361}' | '\u{10100}' | '\u{10101}' | '\u{1039F}' | '\u{1091F}');
     sp.0 + if ws { sp.1 } else { 0.0 }
 }
 
-/// `measure_sp` fuer `select.rs` — dieselbe Rechnung, nicht eine zweite.
+/// `measure_sp` for `select.rs` — the same computation, not a second one.
 ///
-/// Die Textauswahl misst Praefixe, um vom Pixel aufs Byte zu kommen; ein
-/// eigener Messweg dort waere garantiert um Bruchteile daneben, und genau
-/// diese Bruchteile sind der Unterschied zwischen „das Zeichen unter dem
-/// Zeiger" und dem daneben ([[feedback_intrinsic_shared_path]]).
+/// Text selection measures prefixes to map a pixel to a byte; a separate
+/// measuring path there would be off by fractions, which is the difference
+/// between the character under the pointer and its neighbour.
 pub fn measure_sp_pub(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
     measure_sp(font, s, size, sp)
 }
 
-/// `line_gap` fuer `select.rs` — aus demselben Grund.
+/// `line_gap` for `select.rs`, for the same reason.
 pub fn line_gap_pub(font: Face, size: f32) -> f32 { line_gap(font, size) }
 
 fn measure(font: Face, s: &str, size: f32) -> f32 {
-    // **Ein Formatierungszeichen hat KEINE Laufweite.** `is_zero_width_format`
-    // sagt seit je, welche das sind, wurde aber nur fuer `letter-spacing`
-    // gefragt — die Schrift wurde trotzdem nach einer Glyphe gefragt, und fuer
-    // ein Zeichen ohne Glyphe gibt sie die Breite von `.notdef` zurueck.
-    // Gemessen: zwanzig U+200C kamen auf 184 px statt 0, und zwanzig U+200B
-    // auf 1 px (je ein Bruchteil, der sich aufaddierte). DuckDuckGos Vorlage
-    // fuer „Searches related to" haengt ein `&ZeroWidthSpace;` hinter jeden
-    // Eintrag, und dieses eine Pixel brach den Text auf zwei Zeilen.
+    // A formatting character has no advance. The font would return the
+    // `.notdef` width for a character it has no glyph for, so these are
+    // skipped explicitly; zero-width spaces between items must not add width.
     // The fast path is the one that runs: every embedded face is subsetted and
     // carries no GSUB, so a page in the body font never allocates here.
     if font.ligatures().is_none() {
@@ -1889,14 +1779,14 @@ fn measure(font: Face, s: &str, size: f32) -> f32 {
 }
 
 /// `measure` plus `(letter-spacing, word-spacing)`. Letter-spacing lands after
-/// EVERY character including the last — that is what an inline box measures as
+/// every character including the last — that is what an inline box measures as
 /// in every engine, and the reftests are written against it. Word-spacing lands
 /// on the word separator itself (css-text-3 §8.1: U+0020 and U+00A0).
 fn measure_sp(font: Face, s: &str, size: f32, sp: (f32, f32)) -> f32 {
     if sp == (0.0, 0.0) {
         return measure(font, s, size);
     }
-    // **Letter-spacing suppresses ligatures**, and that is the spec, not a
+    // Letter-spacing suppresses ligatures, and that is the spec, not a
     // shortcut: `letter-spacing` separates typographic character units, and a
     // ligature spanning several of them must be broken to make room
     // (css-text-3 §8.2). Word-spacing does not — it lands on a separator that
@@ -1927,7 +1817,7 @@ fn fit_prefix(font: Face, s: &str, size: f32, avail: f32, sp: (f32, f32)) -> usi
     let mut used = 0.0;
     let mut end = s.len();
     if sp.0 == 0.0 && font.ligatures().is_some() {
-        // The byte ranges are why `shape` reports them: this walks OFFSETS
+        // The byte ranges are why `shape` reports them: this walks offsets
         // into the original string, and a ligature is indivisible — a break
         // inside one would ask for half a glyph.
         for (g, at, _) in font.shape(s) {
@@ -1952,7 +1842,7 @@ fn fit_prefix(font: Face, s: &str, size: f32, avail: f32, sp: (f32, f32)) -> usi
     cluster_boundary(s, end)
 }
 
-/// Does `c` bind to the character BEFORE it? Zero-width joiner sequences,
+/// Does `c` bind to the character before it? Zero-width joiner sequences,
 /// variation selectors, skin-tone modifiers, keycaps, combining marks,
 /// regional-indicator pairs and tag sequences (the Wales/Scotland/England
 /// flags) are all one user-perceived character, and
@@ -1997,7 +1887,7 @@ fn first_cluster(s: &str) -> usize {
     n
 }
 
-/// The advance of the space BETWEEN two words. `sp` is the run's
+/// The advance of the space between two words. `sp` is the run's
 /// `(letter-spacing, word-spacing)`: both apply to a word separator.
 fn space_width(font: Face, size: f32, sp: (f32, f32)) -> f32 {
     font.metrics(' ', size).advance_width + sp.0 + sp.1
@@ -2011,11 +1901,10 @@ fn line_gap(font: Face, size: f32) -> f32 {
 
 /// One inline run's contribution to its line box: `(ascent above the shared
 /// baseline, box height)`. With `line-height: normal` these are the face's own
-/// metrics — unchanged from before line-height existed. An explicit
-/// line-height distributes its difference from the content height as
-/// half-leading above and below the baseline (CSS 2.1 §10.8.1), so a value
-/// under the content height legitimately yields a negative half and lets
-/// consecutive lines overlap.
+/// metrics. An explicit line-height distributes its difference from the
+/// content height as half-leading above and below the baseline (CSS 2.1
+/// §10.8.1), so a value under the content height legitimately yields a
+/// negative half and lets consecutive lines overlap.
 fn run_metrics(font: Face, size: f32, lh: f32) -> (f32, f32) {
     let m = font.horizontal_line_metrics(size);
     let asc = m.map(|m| m.ascent).unwrap_or(size);
@@ -2028,7 +1917,7 @@ fn run_metrics(font: Face, size: f32, lh: f32) -> (f32, f32) {
 
 // ── CSS counters (css-lists-3 §4) ───────────────────────────────────────────
 
-/// One counter instance on the scope stack: its value, plus the tree DEPTH
+/// One counter instance on the scope stack: its value, plus the tree depth
 /// (`path.len()`) of the element whose `counter-reset` created it — used to tell
 /// an ancestor's counter (nest a new instance) from a sibling's (overwrite the
 /// existing one).
@@ -2098,23 +1987,20 @@ struct Ctx<'a> {
     theme: &'a Theme,
     sheet: &'a Stylesheet,
     images: &'a ImageMap,
-    /// Fuer JEDES Element einen Treffer-Kasten aufzeichnen. Ohne das gibt es
-    /// keinen Weg vom Klickpunkt zum Knoten — und nur Elemente mit einer
-    /// `:hover`-Regel haetten einen.
+    /// Record a hit box for every element. Without it there is no path from
+    /// a click point to the node, and only elements with a `:hover` rule would
+    /// have one.
     hit_all: bool,
-    /// `src`s whose `<img>` box had to be GUESSED — no decoded pixels and no
+    /// `src`s whose `<img>` box had to be guessed — no decoded pixels and no
     /// `width`/`height` pair. Only for these does a later decode move the
-    /// page, so only their arrival justifies a re-layout.
-    ///
-    /// A plain bool here was wrong: one image that never arrives (a 403, an
-    /// undecodable format) kept it true forever, so every later batch forced
-    /// a full re-layout even when all of ITS images had definite boxes. On a
-    /// real article that was 5.7 s of frozen UI per batch.
+    /// page, so only their arrival justifies a re-layout. A list, not a bool:
+    /// one image that never arrives must not force a re-layout for every
+    /// later batch.
     guessed: core::cell::RefCell<Vec<String>>,
     /// Inline `<svg>` render requests — see `Layout::inline_svgs`.
     inline_svgs: core::cell::RefCell<Vec<(u32, Rgb, u32, u32)>>,
     /// `url_key`s of the CSS images this layout referenced. Deliberately a
-    /// SET (deduped on insert), not an append-only log: a throwaway
+    /// set (deduped on insert), not an append-only log: a throwaway
     /// measurement layout paints boxes too, and its entries must be
     /// indistinguishable from the real pass's rather than something the
     /// measure helpers have to remember to roll back.
@@ -2146,15 +2032,12 @@ struct Ctx<'a> {
     /// Active floats in the current block formatting context — line boxes and
     /// later blocks flow around them. Saved/restored when entering a new BFC.
     floats: Vec<FloatRect>,
-    /// Recorded `(z_index, op_start, op_end)` / `(z_index, link_start,
-    /// link_end)` ranges for the **outermost** positioned boxes with an
-    /// explicit (non-`auto`) `z-index` — one contiguous slice of `ops`/`links`
-    /// per box (CSS2.1 §9.9). `layout()` stable-sorts by `z_index` at the end
-    /// so negative levels paint behind, positive ones in front, and everything
-    /// else (`auto`/untracked) keeps its in-order position.
-    /// `(z-index, paint layer, op_start, op_end)`. The layer separates the
-    /// sub-orders CSS2.1 Appendix E puts INSIDE one z-index: in-flow block
-    /// boxes paint below floats, and floats below positioned boxes.
+    /// Recorded `(z-index, paint layer, op_start, op_end)` ranges (and the
+    /// matching link ranges in `stack_links`) for positioned boxes with an
+    /// explicit z-index — one contiguous slice of `ops`/`links` per box
+    /// (CSS2.1 §9.9). The layer separates the sub-orders CSS2.1 Appendix E
+    /// puts inside one z-index: in-flow block boxes paint below floats, and
+    /// floats below positioned boxes. `layout()` sorts by these at the end.
     stack_ops: Vec<(i32, i32, usize, usize)>,
     stack_links: Vec<(i32, i32, usize, usize)>,
     /// Op / link ranges emitted by non-positioned floats. Kept apart from
@@ -2169,14 +2052,13 @@ struct Ctx<'a> {
     /// jurisdiction (CSS2.1 §11.1.1) — see `clip_overflow`.
     abs_count: u32,
     fixed_count: u32,
-    /// Die Raeumung, die der Rufer gerade angewandt hat, fuer den EINEN
-    /// Kasten, der als naechstes ausgelegt wird: `(Anker davor, offener Rand
-    /// davor, geraeumte Oberkante)`. Nur der zweite Durchgang in
-    /// `flow_block_impl` braucht sie — eine Raeumung SETZT die Oberkante, also
-    /// muss ein spaeter gefundener Rand in die hypothetische Lage, nicht
-    /// obendrauf. Wird beim Eintritt genommen, damit kein Kind sie sieht.
+    /// The clearance the caller just applied, for the one box laid out next:
+    /// `(anchor before, open margin before, cleared top edge)`. Only the second
+    /// pass of `flow_block_impl` needs it — clearance sets the top edge, so a
+    /// margin found later goes into the hypothetical position, not on top.
+    /// Taken on entry so that no child sees it.
     clear_floor: Option<(i32, Collapse, i32)>,
-    /// The containing block's CONTENT height, when it is definite — what a
+    /// The containing block's content height, when it is definite — what a
     /// percentage `height`/`min-`/`max-height` resolves against (CSS2.1 §10.5).
     /// `None` means the containing block's height depends on its content, and
     /// then a percentage computes to `auto`. That fallback is the whole reason
@@ -2184,7 +2066,7 @@ struct Ctx<'a> {
     /// guessing a height for it truncates pages.
     cb_h: Option<f32>,
     /// Document y of the last line box's baseline emitted so far. An
-    /// `inline-block` aligns on the baseline of ITS last line box (CSS2.1
+    /// `inline-block` aligns on the baseline of its last line box (CSS2.1
     /// §10.8.1), which is only known once its content has been laid out.
     last_baseline: Option<i32>,
     /// Depth of currently-open *tracked* (recorded) stacking ranges. Only a
@@ -2194,7 +2076,7 @@ struct Ctx<'a> {
     /// another explicit `z-index`, are out of scope — sibling ordering is
     /// the common case these reftests need).
     stack_depth: u32,
-    /// Set for the duration of ONE `layout_abs` call: an out-of-flow box was
+    /// Set for the duration of one `layout_abs` call: an out-of-flow box was
     /// reached while a line box was still open. It has to sort above that
     /// line's ops even though it was emitted first — see `LAYER_POSITIONED`.
     abs_over_open_line: bool,
@@ -2213,14 +2095,14 @@ struct Ctx<'a> {
     inspect: bool,
     inspects: Vec<InspectBox>,
     /// `seq`s of the elements the pointer is currently inside, ascending.
-    /// Usually EMPTY, which is why every `ElemInfo` can afford to consult it:
-    /// the check is one `is_empty()` on a path walked ~30 000× per layout.
+    /// Usually empty, which is why every `ElemInfo` can afford to consult it:
+    /// the check is one `is_empty()` on a very hot path.
     hover: &'a [u32],
     /// Element boxes the shell hit-tests on pointer movement. Only collected
     /// when the sheet has `:hover` rules at all — a page without them must not
     /// pay for a list nobody reads.
     hover_boxes: Vec<HoverBox>,
-    /// Did anything in this layout actually consume the viewport HEIGHT — a
+    /// Did anything in this layout actually consume the viewport height — a
     /// `vh`/`vmin`/`vmax` length that won the cascade, or a box resolved
     /// against the initial containing block? `Cell` because the style walk
     /// runs behind `&self`.
@@ -2230,9 +2112,8 @@ struct Ctx<'a> {
     /// which knows whether anything follows it to be pushed around.
     vp_height_box: core::cell::Cell<bool>,
     /// Memoised `intrinsic_width` results, keyed by element `seq`. Measuring a
-    /// subtree now cascades every descendant, and the same element is asked
-    /// repeatedly (a table sizes its columns over several passes) — without
-    /// this the cascade work would multiply.
+    /// subtree cascades every descendant, and the same element is asked
+    /// repeatedly (a table sizes its columns over several passes).
     intrinsic: BTreeMap<u32, (f32, f32)>,
     /// Set while `measure_box_height` is resolving a positioned box's own
     /// containing-block height. That measurement re-enters the same box, which
@@ -2242,45 +2123,37 @@ struct Ctx<'a> {
     /// measurement lays a whole subtree out and throws the result away, and
     /// nested ones repeat: measuring a flex item that is itself a flex
     /// container re-measures its items, and the enclosing box is measured
-    /// again for every level above it. On a real article that made the same
-    /// element's box run through layout 34 times on average and 256 times at
-    /// worst — powers of two, the signature of a doubling per nesting level.
-    /// This collapses that back to once per distinct question.
+    /// again for every level above it — a doubling per nesting level. This
+    /// collapses that back to once per distinct question.
     measured: core::cell::RefCell<BTreeMap<MeasureKey, i32>>,
-    /// Memoised `style::resolve_pseudo` results — the SAME cascade work as
-    /// `styles`, for the `::before`/`::after` box, and it had no cache at all.
-    /// Measured under the interpreter it was 51 % of a whole layout: 62 340
-    /// calls for 2 316 elements, almost all of them searching the entire sheet
-    /// only to answer "this element generates nothing".
+    /// Memoised `style::resolve_pseudo` results — the same cascade work as
+    /// `styles`, for the `::before`/`::after` box. Most calls only find that
+    /// the element generates nothing, after searching the whole sheet.
     ///
-    /// Only the CASCADE result is cached. The content template is rendered
+    /// Only the cascade result is cached. The content template is rendered
     /// fresh on every hit, because `content: counter(x)` depends on the counter
     /// state at that point in the walk, not on the element.
     pseudos: core::cell::RefCell<BTreeMap<u64, Option<(Vec<crate::style::ContentPiece>, ComputedStyle)>>>,
     /// Memoised `segment_table_runs` results. The measure walk
     /// (`intrinsic_walk`) and the layout walk (`flow_children`) segment the
-    /// SAME child lists independently, and each classification cascades the
-    /// child to read its `display` — measured, 82 % of the calls repeat a list
-    /// already segmented, and the classification is 25 % of a whole layout.
+    /// same child lists independently, and each classification cascades the
+    /// child to read its `display`.
     ///
-    /// Keyed by the node slice's identity AND the ancestor chain, because the
+    /// Keyed by the node slice's identity and the ancestor chain, because the
     /// cascade that decides a role reads the chain: the same `<div>` can be a
     /// table row in one context and not in another.
     segs: core::cell::RefCell<BTreeMap<u64, Vec<(u32, u32, bool)>>>,
     /// Memoised `style::resolve` results, keyed by a hash of everything the
     /// cascade reads (see `style_key`) — so this is a pure cache, not a policy.
-    /// A real article cascades the SAME element about twelve times: every
-    /// throwaway measurement re-walks its subtree, and selector matching is
-    /// ~90 % of layout, so that multiplier is most of the cost of a page.
+    /// Every throwaway measurement re-walks its subtree, so the same element
+    /// is cascaded many times per layout.
     styles: core::cell::RefCell<BTreeMap<u64, ComputedStyle>>,
-    /// Die Custom Properties je Element, nach `seq`.
+    /// Custom properties per element, by `seq`.
     ///
-    /// Sie stehen NICHT in `ComputedStyle`: der ist `Copy` und wird je
-    /// Element kopiert; eine `Rc` darin haette die ganze Layoutschicht
-    /// umgeworfen. Also laufen sie daneben — und weil eine Custom Property
-    /// eine geerbte Eigenschaft ist, braucht jedes Element den Eintrag seines
-    /// Elternteils. Wer selbst keine setzt, TEILT dessen Karte (`Rc`), sonst
-    /// koestete Bootstraps 200-Namen-Palette je Element eine Kopie.
+    /// They are not in `ComputedStyle`, which is `Copy` and copied per
+    /// element, so they run alongside it. A custom property is inherited, so
+    /// every element needs its parent's entry; one that sets none shares the
+    /// parent's map (`Rc`) instead of copying it.
     varmaps: core::cell::RefCell<BTreeMap<u32, alloc::rc::Rc<crate::vars::VarMap>>>,
 }
 
@@ -2290,7 +2163,7 @@ struct Ctx<'a> {
 ///
 /// `parent` is not hashed in full — only the inherited values a cascade can
 /// read back (font size, colour, weight, direction). The chain of ancestor
-/// `seq`s already determines which element the parent IS; the fingerprint is
+/// `seq`s already determines which element the parent is; the fingerprint is
 /// there for the call sites that hand a cell the table's style rather than the
 /// row's, so those cannot collide with each other.
 fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev: &[ElemInfo], sib_count: u32) -> u64 {
@@ -2320,8 +2193,7 @@ fn style_key(el: &Element, parent: &ComputedStyle, ancestors: &[ElemInfo], prev:
 impl<'a> Ctx<'a> {
     /// An `ElemInfo` that knows whether the pointer is inside this element.
     /// Every construction inside the layout goes through here — a bare
-    /// `ElemInfo::of` would silently report "not hovered" and the page would
-    /// stay frozen under the pointer for exactly the elements it forgot.
+    /// `ElemInfo::of` would silently report "not hovered" for those elements.
     fn info(&self, el: &'a Element) -> ElemInfo<'a> {
         ElemInfo::of_hovered(el, self.hover)
     }
@@ -2331,7 +2203,7 @@ impl<'a> Ctx<'a> {
     /// building, and putting them anywhere else splits a line the reference
     /// keeps whole (`P<fieldset style=display:contents>A…` is one word).
     ///
-    /// If ANY child is block-level the parent's flow has to break for it
+    /// If any child is block-level the parent's flow has to break for it
     /// regardless, and a transparent block — which is what `resolve` has
     /// already made of this style, zero margins and all — lands the same
     /// pixels while keeping the block/anonymous-block split intact.
@@ -2364,11 +2236,8 @@ impl<'a> Ctx<'a> {
         inline_only
     }
 
-    /// `style::resolve` through the memo. Every cascade inside the layout goes
-    /// through here so a re-measured subtree costs a map lookup, not a full
-    /// selector match against the page's stylesheet.
-    /// Record a viewport-HEIGHT dependency that is unconditional. A `vh` cap
-    /// (`max-`/`min-height`) is NOT one: it only moves geometry when it
+    /// Record a viewport-height dependency that is unconditional. A `vh` cap
+    /// (`max-`/`min-height`) is not one: it only moves geometry when it
     /// actually clamps, which `clamp_vh` decides once the content height is
     /// known.
     fn note_vh(&self, s: &ComputedStyle) {
@@ -2378,7 +2247,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// A `vh`-derived `max-height`/`min-height` that actually changed the used
-    /// height IS a viewport-height dependency; one that never binds is not.
+    /// height is a viewport-height dependency; one that never binds is not.
     fn note_vh_clamp(&self, st: &ComputedStyle, before: i32, after: i32) {
         if before == after {
             return;
@@ -2389,11 +2258,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Die Custom Properties, die ein Kind von `seq` erbt.
+    /// The custom properties a child of `seq` inherits.
     fn vars_of(&self, seq: u32) -> alloc::rc::Rc<crate::vars::VarMap> {
         self.varmaps.borrow().get(&seq).cloned().unwrap_or_default()
     }
 
+    /// `style::resolve` through the memo. Every cascade inside the layout goes
+    /// through here so a re-measured subtree costs a map lookup, not a full
+    /// selector match against the page's stylesheet.
     fn styled(&self, el: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> ComputedStyle {
         let key = style_key(el, parent, &self.path, prev, sib_count);
         if let Some(s) = self.styles.borrow().get(&key) {
@@ -2407,9 +2279,9 @@ impl<'a> Ctx<'a> {
         let mut own = None;
         let s = style::resolve_in(&self.info(el), parent, self.theme, self.sheet, &self.path,
             prev, sib_count, self.viewport_w, &inherited, &mut own);
-        // Wer selbst nichts setzt, teilt die Karte des Elternteils — dieselbe
-        // `Rc`, kein Kopieren. Der Eintrag muss trotzdem da sein, sonst faende
-        // ein Kind nichts und die Vererbung risse an dieser Stelle ab.
+        // An element that sets nothing shares its parent's map (same `Rc`, no
+        // copy). The entry must still exist, or a child would find nothing and
+        // inheritance would break here.
         self.varmaps.borrow_mut().insert(el.seq, match own {
             Some(m) => alloc::rc::Rc::new(m),
             None => inherited,
@@ -2423,12 +2295,10 @@ impl<'a> Ctx<'a> {
     /// positioned, has an explicit `z-index`, and isn't already nested inside
     /// another tracked range.
     ///
-    /// **Every positioned box, at every depth.** Appendix E paints them in step
+    /// Every positioned box, at every depth: Appendix E paints them in step
     /// 8, after all the in-flow content of steps 3–7, and their own `z-index`
-    /// orders them against their SIBLINGS — which is why the ranges have to
-    /// nest (`z_order`). The older rule tracked only an explicit `z-index` at
-    /// the top level, because a flat list made a `position: relative` wrapper
-    /// swallow its children; nesting removes that reason.
+    /// orders them against their siblings — which is why the ranges have to
+    /// nest (`z_order`).
     fn should_track_stack(&self, st: &ComputedStyle) -> bool {
         st.position != Position::Static
     }
@@ -2444,23 +2314,20 @@ impl<'a> Ctx<'a> {
     }
 
     /// Resolve percentage `padding` and vertical `margin` against the containing
-    /// block's **width**, once, at the entry to laying the box out — the same
+    /// block's width, once, at the entry to laying the box out — the same
     /// shape as `resolve_pct_heights`, so everything downstream keeps reading
     /// plain pixels. Both axes take the width (CSS 2.1 §8.1, §8.3): a
-    /// percentage top padding is a fraction of the INLINE size, which is what
+    /// percentage top padding is a fraction of the inline size, which is what
     /// makes `padding-top: 56.25%` reserve a 16:9 box.
     ///
-    /// Before this the vertical ones fell to zero and the horizontal ones too —
-    /// `pad_*` is a resolved `f32`, and the cascade that fills it cannot see a
-    /// containing block. Only the `margin`s on the inline axis were `Len` and
-    /// so survived to layout, which is why `margin-left: 50%` worked and
-    /// `padding-left: 50%` did not.
+    /// Needed here because `pad_*` is a resolved `f32`, and the cascade that
+    /// fills it cannot see a containing block.
     fn resolve_pct_box(st: &ComputedStyle, cb_w: f32) -> Option<ComputedStyle> {
         if st.pct_pad == [0.0; 4] && st.pct_margin_tb == [0.0; 2] {
             return None;
         }
         let mut out = *st;
-        // The stored px is the CONSTANT half of the value (`calc(10% + 5px)`
+        // The stored px is the constant half of the value (`calc(10% + 5px)`
         // keeps its 5px), so the percentage is added to it, not put in its
         // place.
         let at = |p: f32| p / 100.0 * cb_w;
@@ -2480,28 +2347,26 @@ impl<'a> Ctx<'a> {
     }
 
     /// Resolve percentage `height`/`min-`/`max-height` against the containing
-    /// block ONCE, at the entry to laying the box out. Everything downstream
-    /// then matches on `Len::Px` exactly as before — which is the point: the
-    /// two earlier attempts at percentage heights each taught one code path to
-    /// resolve them and measured WORSE, because the other paths still read the
-    /// same box as `auto` and the two answers disagreed.
+    /// block once, at the entry to laying the box out. Everything downstream
+    /// then matches on `Len::Px` — so no code path can read the same box as
+    /// `auto` and disagree with another that resolved it.
     ///
     /// Returns `None` when nothing needs resolving, so the common case does not
-    /// copy a 1 kB `ComputedStyle`.
+    /// copy a large `ComputedStyle`.
     fn resolve_pct_heights(&self, st: &ComputedStyle) -> Option<ComputedStyle> {
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         if !(pct(st.height) || pct(st.min_height) || pct(st.max_height)) {
             return None;
         }
         let cbh = self.cb_h;
-        // A percentage height resolving against the viewport does NOT by itself
-        // move anything: `html, body { height: 100% }` is on nearly every site
-        // and only fixes those boxes' own bottom edge, with nothing after them.
-        // What moves content is a box like that having FOLLOWING content — so
+        // A percentage height resolving against the viewport does not by itself
+        // move anything: `html, body { height: 100% }` is common and only
+        // fixes those boxes' own bottom edge, with nothing after them.
+        // What moves content is a box like that having following content — so
         // the box is only marked here, and `flow_children` raises the flag if
         // something actually comes after it. Compared by value, not identity:
         // an ancestor that happens to be exactly one viewport tall
-        // over-reports, which only costs us today's re-layout.
+        // over-reports, which only costs a re-layout.
         if cbh == Some(self.viewport_h as f32) {
             self.vp_height_box.set(true);
         }
@@ -2540,11 +2405,9 @@ impl<'a> Ctx<'a> {
         // Same call site, own switch: the pointer needs these boxes on any page
         // with a `:hover` rule, whether or not anyone is inspecting — and a
         // `<summary>` needs one whether or not the page hovers anything.
-        // ZWEI Fragen, und sie zusammenzulegen war ein Fehler mit Messwert:
-        // „darf der Zeiger diesen Kasten TREFFEN" ist nicht „reagiert dieses
-        // Element auf `:hover`". Mit `hit_all` bekam jedes Element
-        // `hoverable = true`, also galt jede Mausbewegung als Stilwechsel —
-        // auf Wikipedia sechs volle Layouts a 130 ms fuer nichts.
+        // Two separate questions: "may the pointer hit this box" is not "does
+        // this element react to `:hover`". Marking every hit box hoverable
+        // would make every pointer move a style change.
         let hoverable = self.sheet.hover_set.may_match(el);
         if w > 0 && h > 0 && (hoverable || st.is_summary || self.hit_all) {
             let anchor = self.ops.get(op0).map(op_key);
@@ -2623,34 +2486,29 @@ pub(crate) fn display_name(d: Display) -> &'static str {
     }
 }
 
-/// Stable-reorder `items` so the tracked `(z_index, start, end)` ranges sort
-/// by `z_index` (negative before, positive after), while every byte NOT
-/// covered by a range — and any range at `z_index == 0` — keeps its original
-/// relative position (a plain stable sort with untracked spans implicitly
-/// keyed `0`). Ranges must be non-overlapping (guaranteed by `stack_depth`
-/// gating at collection time).
-/// Paint layers WITHIN one z-index (CSS2.1 Appendix E, steps 3 and 4): in-flow
-/// block boxes, then non-positioned floats. Untracked spans of the display list
-/// are in-flow content and take layer 0, which is what lifts a float above the
-/// block backgrounds and borders emitted after it.
-/// Non-positioned floats: above the in-flow block boxes around them.
+/// Paint layers within one z-index (CSS2.1 Appendix E, steps 3 and 4).
+/// Untracked spans of the display list are in-flow content and take layer 0;
+/// non-positioned floats sit above the in-flow block boxes around them, which
+/// lifts a float above block backgrounds and borders emitted after it.
 const LAYER_FLOAT: i32 = 1;
 /// An out-of-flow box that was emitted while a line box was still open.
 ///
 /// Appendix E paints positioned boxes in step 8, after the in-flow inline
 /// content of step 7 — but the display list is built in visit order, and a line
-/// is not written until it BREAKS. So an abspos box reached mid-line lands in
+/// is not written until it breaks. So an abspos box reached mid-line lands in
 /// the list ahead of text that precedes it in the document, and paints under it.
 ///
 /// Flushing the line instead would be wrong: `foo<div style=position:absolute>
 /// </div>bar` is one line, and breaking it early moves `bar`. So the box is
 /// lifted over exactly that line and nothing else. Lifting positioned boxes
-/// wholesale was measured twice and is worse both times: out-of-flow only gives
-/// +25/-21 (`border-005` — an absolute box FIRST, a `position: relative` box
-/// after it, both step 8, so document order must decide and lifting one of them
-/// hands it to the loser), and every positioned box gives +16/-46.
+/// wholesale is wrong too: an absolute box followed by a `position: relative`
+/// one are both step 8, so document order must decide between them.
 const LAYER_POSITIONED: i32 = 2;
 
+/// Stable-reorder `items` so the tracked `(z_index, start, end)` ranges sort
+/// by `z_index` (negative before, positive after), while every item not
+/// covered by a range — and any range at `z_index == 0` — keeps its original
+/// relative position. See `z_order`.
 fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T> {
     if ranges.is_empty() {
         return items;
@@ -2664,19 +2522,17 @@ fn reorder_by_z<T>(items: Vec<T>, ranges: &[(i32, i32, usize, usize)]) -> Vec<T>
 /// the z-ordering, expressed once so `reorder_by_z` and `z_permutation` cannot
 /// drift apart.
 ///
-/// **The ranges NEST**, and that is the point of this shape. A stacking context
-/// is a tree: `z-index` orders a box against its SIBLINGS inside its parent's
-/// context, not against the whole page. A flat list cannot say that — the two
-/// earlier attempts at painting positioned boxes in Appendix E order both had
-/// a `position: relative` parent swallow its children's ranges, and both
-/// measured worse (+21/−30 and +21/−57) for exactly that reason.
+/// The ranges nest, and that is the point of this shape. A stacking context
+/// is a tree: `z-index` orders a box against its siblings inside its parent's
+/// context, not against the whole page. A flat list cannot say that — a
+/// `position: relative` parent would swallow its children's ranges.
 ///
 /// Ranges over one array are properly nested by construction: each is a
 /// subtree's span, and two subtrees are either disjoint or contained. One that
 /// straddles a sibling is dropped rather than trusted — a scrambled display
 /// list is far worse than one box in the wrong layer.
 fn z_order(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> {
-    // Parents first: by start ascending, then by end DESCENDING, so a range
+    // Parents first: by start ascending, then by end descending, so a range
     // that contains another is seen before it.
     let mut sorted: Vec<(i32, i32, usize, usize)> =
         ranges.iter().copied().filter(|r| r.3 > r.2 && r.3 <= len).collect();
@@ -2743,10 +2599,10 @@ fn z_order(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> {
     out
 }
 
-/// Wohin `reorder_by_z` jeden Befehl legt: `perm[alt] == neu`.
+/// Where `reorder_by_z` puts each op: `perm[old] == new`.
 ///
-/// Dieselbe Blockbildung wie dort, nur mit Indizes statt Werten — damit
-/// koennen Nebentabellen, die auf Befehle zeigen, mitgezogen werden.
+/// The same grouping as there, with indices instead of values, so side tables
+/// that point at ops can be remapped along with them.
 fn z_permutation(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> {
     let mut perm: Vec<usize> = (0..len).collect();
     if ranges.is_empty() {
@@ -2758,11 +2614,10 @@ fn z_permutation(len: usize, ranges: &[(i32, i32, usize, usize)]) -> Vec<usize> 
     perm
 }
 
-/// Die neue Startstelle einer Spanne — oder `None`, wenn die Umsortierung sie
-/// ZERRISSEN hat.
+/// The new start of a span, or `None` if the reordering tore it apart.
 ///
-/// Ein zerrissener Bereich ist nicht am Stueck ersetzbar; der Schnellweg muss
-/// ihn dann ablehnen, statt fremde Befehle zu ueberschreiben.
+/// A torn span cannot be replaced as one piece; the fast path must then
+/// refuse it rather than overwrite unrelated ops.
 fn remap_span(perm: &[usize], at: usize, len: usize) -> Option<usize> {
     if len == 0 {
         return perm.get(at).copied().or(Some(perm.len()));
@@ -2819,7 +2674,7 @@ pub fn layout(
         filters: Vec::new(),
         forms,
         path: Vec::new(),
-        // Initial containing block: the viewport, anchored at the CANVAS
+        // Initial containing block: the viewport, anchored at the canvas
         // origin (CSS2.1 §10.1) — not at the page's content box. `left: 100px`
         // on a box with no positioned ancestor means 100px from the window
         // edge, whatever inset the page content sits at. Its height is
@@ -2859,8 +2714,8 @@ pub fn layout(
         styles: core::cell::RefCell::new(BTreeMap::new()),
         varmaps: core::cell::RefCell::new(BTreeMap::new()),
     };
-    // Die Wurzelpalette. `:root{--bs-…}` ist die Karte, aus der alles andere
-    // liest — ohne diesen Eintrag erbt niemand etwas.
+    // The root palette. `:root{--…}` is the map everything else reads from;
+    // without this entry nothing inherits.
     ctx.varmaps.borrow_mut().insert(html_el.seq, alloc::rc::Rc::new(root_vars));
 
     // Resolve <body> for the canvas-background rule below; layout reaches it
@@ -2868,8 +2723,8 @@ pub fn layout(
     let body = dom.body();
     let html_info = [ctx.info(html_el)];
     let anc: &[ElemInfo] = if core::ptr::eq(html_el, body) { &[] } else { &html_info };
-    // Auch der Rumpf erbt die Wurzelpalette — er wird hier fuer die
-    // Leinwandfarbe aufgeloest, also ausserhalb des Baumlaufs.
+    // The body also inherits the root palette — it is resolved here for the
+    // canvas colour, outside the tree walk.
     let body_inherited = ctx.vars_of(html_el.seq);
     let mut body_own = None;
     let body_style = style::resolve_in(&ctx.info(body), &root, theme, sheet, anc, &[], 0,
@@ -2879,19 +2734,12 @@ pub fn layout(
         None => body_inherited,
     });
 
-    // The ROOT ELEMENT IS A BOX. It used to be skipped — layout started at
-    // `<body>`'s children, inside a hardcoded 20px page inset — so `html
+    // The root element is a box, laid out like any other block, so `html
     // { position: absolute }`, its border, its width and `<body>`'s own margin
-    // all meant nothing. Laying it out like any other block is what makes the
-    // whole `abspos-containing-block-initial` family measurable, and it is
-    // where the page inset now comes from: `<body>`'s UA margin.
-    // NOTE: 0.3.13 resolved a percentage `height` on the root against the
-    // viewport here — the ICB's height IS definite, so it looked right. It was
-    // measured OUT again in 0.3.14: it fixed none of the two tests it was
-    // added for, cost `abspos-containing-block-006`, and truncated every page
-    // that writes the everyday `html { height: 100% }` to one viewport, which
-    // stopped scrolling dead. Percentage heights belong with general
-    // percentage-height support, not as a special case for the root.
+    // all take effect. The page inset comes from `<body>`'s UA margin.
+    // A percentage `height` on the root is deliberately not resolved against
+    // the viewport here: the everyday `html { height: 100% }` would truncate
+    // the page to one viewport.
     let mut y;
     if root.display == Display::None {
         // `html { display: none }` — the root generates no box, so the document
@@ -2917,20 +2765,16 @@ pub fn layout(
     // A float can extend below the last in-flow line — grow the page to contain it.
     let float_bottom = ctx.floats.iter().map(|f| f.bottom).max().unwrap_or(0);
     y = y.max(float_bottom);
-    // The page's scrollable height is how far the PAINTED content reaches, not
-    // where the root box ends. `html { height: 100% }` is an everyday idiom and
-    // it makes the root box exactly one viewport tall — everything below it
-    // still scrolls in every browser. Taking the root's border-box bottom alone
-    // truncated such a page to the window and killed scrolling outright.
+    // The page's scrollable height is how far the painted content reaches, not
+    // where the root box ends. `html { height: 100% }` makes the root box
+    // exactly one viewport tall, and everything below it still scrolls in
+    // every browser.
     let painted_bottom = ctx.ops.iter().map(op_bottom).max().unwrap_or(0);
     y = y.max(painted_bottom);
 
-    // The body's background propagates to the whole canvas (a bare `<body
-    // background>` fills the viewport, not just the body box).
-    // Canvas background (CSS 2.1 §14.2): the ROOT element's background is
+    // Canvas background (CSS 2.1 §14.2): the root element's background is
     // propagated to the canvas; `<body>`'s is used only when the root's is
-    // transparent. Honouring `html { color }` without this paints white text
-    // on a white canvas for every "this page should be green" reftest.
+    // transparent.
     // The canvas is the ground: a translucent body background has nothing
     // under it but the theme, so it is flattened here rather than at paint.
     let canvas_bg = root.bg.or(body_style.bg).map_or(theme.bg, |c| c.over(theme.bg));
@@ -2942,13 +2786,11 @@ pub fn layout(
         extern crate std;
         std::eprintln!("[stack] ops={} ranges={:?} floats={:?}", ctx.ops.len(), ctx.stack_ops, ctx.float_ops);
     }
-    // Floats are ordinary nodes in the stacking tree now: a float inside a
+    // Floats are ordinary nodes in the stacking tree: a float inside a
     // positioned box is simply its child, and `(0, LAYER_FLOAT)` sorts it after
-    // that box's own in-flow content (Appendix E step 4 after step 3).
-    // `split_float_ranges` used to CUT the enclosing range around each float,
-    // which the flat list needed and the tree actively breaks: the cut pieces
-    // become SIBLINGS, so the float sorted ahead of the very background it sits
-    // on and a red container painted over its own green children.
+    // that box's own in-flow content (Appendix E step 4 after step 3). Cutting
+    // the enclosing range around each float would make the pieces siblings and
+    // sort the float ahead of the background it sits on.
     let float_range = |v: &Vec<(usize, usize)>| -> Vec<(i32, i32, usize, usize)> {
         v.iter().map(|&(s, e)| (0, LAYER_FLOAT, s, e)).collect()
     };
@@ -2956,9 +2798,9 @@ pub fn layout(
     op_ranges.extend(float_range(&ctx.float_ops));
     let mut link_ranges = ctx.stack_links.clone();
     link_ranges.extend(float_range(&ctx.float_links));
-    // Die Umsortierung nach z verschiebt ganze Bloecke — und damit auch die
-    // Spanne, die ein Steuerelement fuer sich notiert hat. Erst die Abbildung
-    // alt -> neu, dann die Befehle UND die Spannen damit umschreiben.
+    // Reordering by z moves whole blocks, and with them the span each form
+    // control recorded for itself. Build the old -> new map first, then rewrite
+    // the ops and the spans with it.
     let perm = z_permutation(ctx.ops.len(), &op_ranges);
     let mut controls = ctx.controls;
     for c in &mut controls {
@@ -2998,7 +2840,7 @@ impl<'a> Ctx<'a> {
     /// beside. Returns the adjusted (margin-box left, available width, top).
     fn avoid_floats_bfc(
         &mut self,
-        // `None` for an ANONYMOUS box: there is no element to lay out twice,
+        // `None` for an anonymous box: there is no element to lay out twice,
         // so it keeps the first-row placement.
         el: Option<&'a Element>,
         st: &ComputedStyle,
@@ -3014,12 +2856,10 @@ impl<'a> Ctx<'a> {
         // Outer (margin-box) width the box demands.
         let frame = st.pad_left + st.pad_right + st.border_x();
         let need = match st.width {
-            // `auto` shrinks into the band — but the MARGINS and the frame do
+            // `auto` shrinks into the band — but the margins and the frame do
             // not shrink with it. If they alone do not fit, the border box
             // would sit inside the float, which §9.5 forbids a BFC root, so
-            // the box goes below instead. Treating auto as "always fits" put
-            // a `margin-left` wide enough to clear the float straight on top
-            // of it.
+            // the box goes below instead.
             Len::Auto | Len::Intrinsic(_) => Some(ceil_i32(ml + mr + frame)),
             other => other.px(w as f32).map(|v| {
                 let border = if st.box_border { v } else { v + frame };
@@ -3043,8 +2883,8 @@ impl<'a> Ctx<'a> {
                 _ => break,
             }
         }
-        // The whole BORDER BOX has to clear the floats, not just its first row
-        // (CSS2.1 §9.5): a float whose top is BELOW this box's top still
+        // The whole border box has to clear the floats, not just its first row
+        // (CSS2.1 §9.5): a float whose top is below this box's top still
         // overlaps it, and the box has no way to narrow partway down. Its
         // height is only known by laying it out, so the candidate position is
         // measured and the box dropped past whatever cuts into it. Bounded,
@@ -3094,15 +2934,10 @@ impl<'a> Ctx<'a> {
     /// normal flow. `x`/`w` are the BFC content box; `y` the static flow top.
     fn place_float(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) {
         let is_left = st.float == FloatKind::Left;
-        // **Ein Rand darf negativ sein, auch an einem Float** (CSS 2.1 §9.5 —
-        // §8.3 nimmt Floats von nichts aus). Hier stand `.max(0.0)`, und weil
-        // `layout_box` unten denselben Rand UNGEKUERZT wieder abzieht, wuchs
-        // der Kasten um genau den Betrag: Bootstraps `.form-check-input`
-        // (`float:left; margin-left:-1.5em` in einem `padding-left:1.5em`) kam
-        // 60 statt 20 px breit heraus, und mit einem eigenen
-        // Formatierungskontext daneben rutschte der ELTER um dieselben 40 px.
-        // Das ist die Bauweise jeder Checkbox und jedes Radioknopfes in
-        // Bootstrap.
+        // A margin may be negative, on a float too (CSS 2.1 §9.5; §8.3
+        // exempts nothing). Clamping it here while `layout_box` subtracts the
+        // unclamped margin would grow the box by that amount — the
+        // `float:left; margin-left:-1.5em` checkbox pattern relies on this.
         let ml = st.margin_left.px(w as f32).unwrap_or(0.0);
         let mr = st.margin_right.px(w as f32).unwrap_or(0.0);
         let pad_border = st.pad_left + st.pad_right + st.border_x();
@@ -3126,21 +2961,16 @@ impl<'a> Ctx<'a> {
         };
         // Margin-box outer width (never the whole CB for a shrink-to-fit float,
         // but a definite width may exceed the CB). Negative margins can pull it
-        // below zero — `layout_box` and `record_inspect` need that true value,
-        // while the float BAND keeps the old floor of 1px so that a float never
-        // reserves nothing at all.
+        // below zero — `layout_box` and `record_inspect` need that true value.
         let fw = ceil_i32(content_w + pad_border + ml + mr);
-        // Ein Randkasten, den negative Raender auf null oder darunter ziehen,
-        // belegt NICHTS — Chromium laesst den naechsten eigenen
-        // Formatierungskontext daneben bei x = 0 stehen, nicht einen Pixel
-        // weiter rechts.
+        // A margin box pulled to zero or below by negative margins occupies
+        // nothing: Chromium places the next BFC beside it at x = 0.
         let band_w = fw.max(0);
-        // **A percentage width would resolve a SECOND time below.** `layout_box`
-        // is handed `fw` — the float's OWN margin-box width — as its containing
+        // A percentage width would resolve a second time below. `layout_box`
+        // is handed `fw` — the float's own margin-box width — as its containing
         // block, which is the contract for a shrink-to-fit float and a trap for
-        // `width: 50%`: it came out half of half. A 300px container gave a 75px
-        // float where every browser gives 150, and the two-column `float:left;
-        // width:50%` idiom is as old as CSS. Same for the two bounds.
+        // `width: 50%` (it would come out half of half). Same for the two
+        // bounds.
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
@@ -3162,10 +2992,9 @@ impl<'a> Ctx<'a> {
         };
         // Float margins never collapse: the margin box top is the static flow
         // position `y`. `clear` applies to floats as well (CSS2.1 §9.5.2), so
-        // first drop below every earlier float on the cleared side — without
-        // it Wikipedia's `clear:right` article thumbnails wedge in beside the
-        // infobox instead of below it, squeezing the text to a few characters
-        // per line. Then drop further until the margin box actually fits.
+        // first drop below every earlier float on the cleared side (otherwise
+        // `clear:right` thumbnails wedge in beside an infobox instead of
+        // below it). Then drop further until the margin box actually fits.
         let mut fy = self.clear_below(st.clear, y).max(y);
         loop {
             let (bl, br) = self.float_band(fy, fy + 1, x, x + w);
@@ -3200,13 +3029,11 @@ impl<'a> Ctx<'a> {
         // `layout_box` re-adds margin-left + padding from `mbox_left`; passing the
         // margin-box width lets an `auto`-width child fill the shrink-to-fit box.
         let op0 = self.ops.len();
-        // Dieselbe Vorabaufloesung wie im Blockweg: ein Steuerelement nimmt in
-        // `layout_box_inner` die uebergebene Breite als GEGEBEN und legt seine
-        // eigenen Raender NICHT wieder drauf. Der Float-Vertrag ist aber
-        // „Randkasten hier, Rand legt `layout_box` an" — also den Rand hier
-        // anlegen und den RANDkasten uebergeben. Ohne das sass Bootstraps
-        // `.form-check-input` (`float:left; margin-left:-1.5em`) auf der
-        // Polsterkante statt am linken Rand, und die Beschriftung daneben.
+        // The same pre-resolution as on the block path: a form control in
+        // `layout_box_inner` takes the given width as final and does not add
+        // its own margins again. The float contract is "margin box here,
+        // `layout_box` applies the margin", so apply the margin here and pass
+        // the margin box.
         let ctl_st;
         let (lx, lw, st) = if crate::forms::kind_of(el).is_some() {
             let mut s = *st;
@@ -3370,12 +3197,12 @@ impl<'a> Ctx<'a> {
             // `<a>`/`<span>` flows with the text). Nested imgs are handled in
             // `collect_inline`; this catches direct children of any display.
             if el.tag == "img" || el.tag == "svg" {
-                // Out of flow FIRST, exactly as the control branch below does.
-                // This branch matches on the TAG, so the blockification in
+                // Out of flow first, exactly as the control branch below does.
+                // This branch matches on the tag, so the blockification in
                 // `styled` does not route an abspos image past it the way it
-                // does every other replaced element — it landed on the line and
-                // grew the page by its own height. Found via Wikipedia's 1×1
-                // autologin pixel; a 40×40 overlay image cost 40px.
+                // does every other replaced element; without this it would land
+                // on the line and grow the page by its own height (e.g. a 1×1
+                // tracking pixel).
                 if matches!(st.position, Position::Absolute | Position::Fixed) {
                     self.path.push(self.info(el));
                     self.abs_over_open_line = !inline.is_empty();
@@ -3415,7 +3242,7 @@ impl<'a> Ctx<'a> {
                 // An absolutely-positioned control is out of flow, like any
                 // other abspos box — the checkbox-hack toggle overlay
                 // (`position:absolute; width:100%; height:100%; opacity:0`)
-                // must NOT advance the line, or its full-size box inflates
+                // must not advance the line, or its full-size box inflates
                 // the container by the whole page height.
                 if matches!(st.position, Position::Absolute | Position::Fixed) {
                     self.path.push(self.info(el));
@@ -3423,41 +3250,31 @@ impl<'a> Ctx<'a> {
                     self.path.pop();
                     continue;
                 }
-                // A control the page made BLOCK-LEVEL falls through to the
+                // A control the page made block-level falls through to the
                 // block path below, which paints it without a line box.
                 //
                 // An atomic inline sits on the baseline, so its parent comes out
-                // the control's height PLUS the descender — 2px on a 32px field.
-                // That is what doubles the bottom rule of a search box whose
-                // wrapper is pulled onto the group's border with `margin: -1px`:
-                // ours drew the field's edge 2px above the group's, where every
-                // browser has them coincide.
+                // the control's height plus the descender. That would misalign
+                // e.g. a search field whose wrapper is pulled onto the group's
+                // border with `margin: -1px`.
                 //
                 // Gated on a definite width, because this path takes the
                 // caller's width: `display:block` on a control means full width
                 // only when the page also asked for it, which the `display:block;
-                // width:100%` idiom (Codex, Bootstrap) always does. A bare
-                // block-level control keeps its intrinsic width as an inline.
+                // width:100%` idiom always does. A bare block-level control
+                // keeps its intrinsic width as an inline.
                 //
-                // Die AUSNAHME ist `margin: auto`. Ein Kasten, der links und
-                // rechts `auto` sagt, will mittig stehen — und das kann nur
-                // ein Block, kein Inline (an einem Inline rechnet `auto` zu
-                // null). Die Fritzbox setzt ihren Anmeldeknopf genau so:
-                // `display:block; margin:auto; min-width:18.5rem`, und bei uns
-                // klebte er 162 px zu weit links.
+                // The exception is `margin: auto` on both sides: such a box
+                // wants to be centred, which only a block can be (on an inline
+                // `auto` computes to zero), e.g. `display:block; margin:auto;
+                // min-width:18.5rem` on a login button.
                 let centred = matches!(st.margin_left, Len::Auto)
                     && matches!(st.margin_right, Len::Auto);
                 let block_level = matches!(st.display, Display::Block | Display::Flex | Display::Grid)
                     && (!matches!(st.width, Len::Auto) || centred);
-                // **Ein GEFLOTETES Steuerelement ist aus dem Fluss**, genau wie
-                // das absolut positionierte zwei Zweige weiter oben — es
-                // gehoert in den Float-Zweig unten, nicht auf die Zeile. Ohne
-                // diese Bedingung verschluckte der Steuerelement-Zweig den
-                // Float, und zwar nur bei AUTOMATISCHER Breite: mit einer
-                // erklaerten fiel es durch `block_level` hindurch und floss.
-                // Deshalb sah es wie ein Breitenfehler aus. Auf DDGs
-                // Wissenskasten klebte so der „Directions"-Knopf links vor dem
-                // Titel, statt rechts neben ihm zu stehen.
+                // A floated control is out of flow, just like the absolutely
+                // positioned one two branches up — it belongs in the float
+                // branch below, not on the line.
                 if !block_level && st.float == FloatKind::None {
                     self.path.push(self.info(el));
                     let ctl = self.control_box(el, &st, kind, w as f32);
@@ -3479,23 +3296,20 @@ impl<'a> Ctx<'a> {
             // `float:left|right` — out of normal flow, placed at the current
             // flow edge; following inline + blocks flow around it.
             if st.float != FloatKind::None {
-                // The float's margin-box top is its STATIC position, which is
+                // The float's margin-box top is its static position, which is
                 // below the margin still open from the preceding block — a
                 // float doesn't collapse with it, but it doesn't ignore it
                 // either. `open` stays untouched: the float is out of flow, so
                 // the next in-flow block still collapses through it.
-                // A float paints ABOVE the in-flow block boxes around it
+                // A float paints above the in-flow block boxes around it
                 // (Appendix E steps 3/4). Recording its range is what stops a
-                // later sibling's border — MediaWiki's `div.mw-heading` rule,
-                // say — from being drawn across it. `stack_depth` bounds the
-                // NESTING (a float inside a float is covered by the outer one),
-                // not whether we record at all: the enclosing z-index range, if
-                // any, gets cut around this one at the end.
-                // A float that is ALSO positioned is a POSITIONED box — Appendix
+                // later sibling's border from being drawn across it.
+                // `stack_depth` bounds the nesting (a float inside a float is
+                // covered by the outer one), not whether we record at all.
+                // A float that is also positioned is a positioned box — Appendix
                 // E step 8, not the float step 4. `float:left;
                 // position:relative` beside an absolutely positioned sibling
-                // must win on document order; recorded as a float it lost to
-                // one that precedes it (`anonymous-boxes-001`).
+                // must win on document order (`anonymous-boxes-001`).
                 let positioned = st.position != Position::Static;
                 let track = positioned || self.float_depth == 0;
                 let (fop0, flink0) = (self.ops.len(), self.links.len());
@@ -3544,11 +3358,10 @@ impl<'a> Ctx<'a> {
             }
             // `clear` introduces clearance, dropping the block below the floats
             // and separating margins. §9.5.2 measures against the box's
-            // HYPOTHETICAL position — where its border top edge would sit with
+            // hypothetical position — where its border top edge would sit with
             // `clear: none`, so with its own top margin already collapsed in —
-            // and then clearance SETS that edge: the margin is consumed, not
-            // added on top of it. Clearing against the bare anchor instead put
-            // every cleared box one whole top margin too low.
+            // and then clearance sets that edge: the margin is consumed, not
+            // added on top of it.
             let mut had_clearance = false;
             let mut clear_floor = None;
             if st.clear != ClearKind::None {
@@ -3562,15 +3375,11 @@ impl<'a> Ctx<'a> {
                 if cleared > base {
                     // Clearance stops the top margin collapsing through, so the
                     // container's border box stays where the flow put it — the
-                    // cleared box adds HEIGHT below, it does not drag the whole
-                    // container down. **Dieselbe Regel, die acht Zeilen
-                    // weiter unten fuer ein `::after` mit `clear` schon
-                    // steht** — sie fehlte hier, und damit war der
-                    // gewoehnliche Clearfix
-                    // (`<div style="clear:both"></div>` als letztes Kind)
-                    // wirkungslos: der Kasten bekam die Hoehe des geraeumten
-                    // Kindes statt der des Floats, weil sein eigener Rand
-                    // mit heruntergezogen wurde.
+                    // cleared box adds height below, it does not drag the whole
+                    // container down. The same rule as for a clearing `::after`
+                    // below; this is what makes the classic clearfix
+                    // (`<div style="clear:both"></div>` as last child) give the
+                    // container the float's height.
                     if !committed {
                         first_top = anchor + open.px();
                         committed = true;
@@ -3598,24 +3407,20 @@ impl<'a> Ctx<'a> {
             // collapse its margins with its children; its top margin still
             // collapses with the preceding flow, its bottom margin stays open.
             // A form control is atomic: it takes the box-making path so
-            // `layout_box` paints it as a CONTROL. Without this a block-level
-            // control fell into `flow_block_impl` and was laid out as an
-            // ordinary block — CSS border, no face, no value, no placeholder.
+            // `layout_box` paints it as a control rather than as an ordinary
+            // block.
             let out = if establishes_bfc(&st) || crate::forms::kind_of(el).is_some() {
                 let mut t = open;
                 t.add(st.margin_top);
                 let by = anchor + t.px();
                 let (mut bx, mut bw, byy) = self.avoid_floats_bfc(Some(el), &st, x, w, by);
-                // **Ein blockweites Steuerelement ist ein ersetzter Blockkasten**
-                // (CSS 2.1 §10.3.4): seine eigene Breite und seine eigenen
-                // Raender entscheiden. `layout_box_inner` nimmt die uebergebene
-                // Breite fuer ein Steuerelement als GEGEBEN — das ist der
-                // Vertrag der Flex-, Raster- und Zellenwege, wo der Rufer den
-                // Kasten schon aufgeloest hat. HIER ist `bw` die Breite des
-                // Umgebungskastens, und ohne diesen Schritt malte
-                // `display:block; width:100px; margin-left:50px` ueber die
-                // ganze Zeile und auf x = 0. Beide `auto`-Raender bleiben
-                // stehen: die mittige Lage loest `layout_box_inner` selbst auf.
+                // A block-level control is a replaced block box (CSS 2.1
+                // §10.3.4): its own width and margins decide. `layout_box_inner`
+                // takes the given width as final for a control — the contract of
+                // the flex, grid and cell paths, where the caller has resolved
+                // the box. Here `bw` is the containing block's width, so the
+                // margins are applied first. Both `auto` margins are left alone:
+                // `layout_box_inner` resolves centring itself.
                 let mut cst = st;
                 if crate::forms::kind_of(el).is_some() {
                     let auto_l = matches!(st.margin_left, Len::Auto);
@@ -3641,13 +3446,11 @@ impl<'a> Ctx<'a> {
                 let st = cst;
                 let saved = core::mem::take(&mut self.floats);
                 let op0 = self.ops.len();
-                // **Hier NICHT aufzeichnen.** `layout_box` tut es selbst, und
-                // zwar mit dem eigenen Randkasten des Elements. Zwei Eintraege
-                // zu derselben `seq` sind kein Fehler (ein Inline-Kasten hat
-                // ein Fragment je Zeile), aber `getBoundingClientRect` gibt
-                // ihre VEREINIGUNG — und die aus 256 und 1902 ist 1902. Genau
-                // so las sich jedes `overflow:hidden` mit fester Breite: ein
-                // Tailwind-`w-64` meldete die Fensterbreite.
+                // Do not record here. `layout_box` does it itself, with the
+                // element's own border box. Two entries for one `seq` are legal
+                // (an inline box has one fragment per line), but
+                // `getBoundingClientRect` returns their union, so the
+                // containing block's width would leak into it.
                 let _ = op0;
                 let bottom = self.layout_box(el, &st, bx, bw, byy);
                 self.floats = saved;
@@ -3658,12 +3461,9 @@ impl<'a> Ctx<'a> {
                 let o = self.flow_block_impl(el, &st, x, w, anchor, open, false);
                 self.clear_floor = None;
                 if !o.through {
-                    // The box's OWN border box. Reporting the containing
-                    // block's `x`/`w` here made every device report about a
-                    // centred or max-width container wrong: MediaWiki's
-                    // `.mw-page-container` (max-width 99.75rem, margin 0 auto)
-                    // paints 1596 px wide at x=162 and was reported as
-                    // 1920 wide at x=0.
+                    // The box's own border box, not the containing block's
+                    // `x`/`w`: they differ for any centred or max-width
+                    // container.
                     self.record_inspect(el, &st, o.box_x, o.top_y, o.box_w, o.bottom - o.top_y, op0);
                 }
                 o
@@ -3671,7 +3471,7 @@ impl<'a> Ctx<'a> {
             if track {
                 self.stack_depth -= 1;
             }
-            // This child's height came from the viewport. That only MOVES
+            // This child's height came from the viewport. That only moves
             // anything if content follows it in this flow — `html, body
             // { height: 100% }` has nothing after it, a mid-page `height: 50vh`
             // banner has everything after it.
@@ -3691,7 +3491,7 @@ impl<'a> Ctx<'a> {
                 }
             }
             // `transform: translate(...)` — the same paint-time shift, but its
-            // percentages are of the BOX, not the containing block.
+            // percentages are of the box, not the containing block.
             let (tdx, tdy) = translate_offset(&st, out.box_w, out.bottom - out.top_y);
             if tdx != 0 || tdy != 0 {
                 self.shift_ops(&m0, tdx, tdy);
@@ -3704,8 +3504,8 @@ impl<'a> Ctx<'a> {
             if out.through {
                 // Nothing committed: the box's margins stay adjoining.
                 open = out.open;
-                // Aber wenn DIESER Kasten geraeumt wurde, endet die
-                // Verschmelzung am Elter (§8.3.1).
+                // But if this box was cleared, the collapsing ends at the
+                // parent (§8.3.1).
                 if had_clearance { open_sealed = true; }
             } else {
                 if !committed {
@@ -3714,19 +3514,18 @@ impl<'a> Ctx<'a> {
                 }
                 anchor = out.bottom;
                 open = out.open;
-                // Ein festgeschriebener Kasten faengt einen neuen
-                // Schlussrand an — das Siegel gilt nur fuer den, der von
-                // dem geraeumten Element kam.
+                // A committed box starts a new trailing margin — the seal only
+                // applies to the one that came from the cleared element.
                 open_sealed = false;
             }
         }
-        // A generated `::after` carrying `clear` is BLOCK-level: the open line
+        // A generated `::after` carrying `clear` is block-level: the open line
         // closes before it and it takes clearance like any other block. This is
         // the clearfix idiom — `.cw::after { content: ""; display: block;
-        // clear: both }` — how a very large part of the real web makes a
-        // container contain its floats. The box is zero-sized by definition, so
-        // `pseudo_box` below drops it; what matters is that the content edge
-        // follows it down past the floats. On a line box `clear` means nothing.
+        // clear: both }` — the common way a container is made to contain its
+        // floats. The box is zero-sized by definition, so `pseudo_box` below
+        // drops it; what matters is that the content edge follows it down past
+        // the floats. On a line box `clear` means nothing.
         if let Some(clear) = owner.and_then(|o| self.pseudo_clear(o, parent, PseudoElem::After)) {
             if !inline.is_empty() {
                 let ly = anchor + open.px();
@@ -3742,7 +3541,7 @@ impl<'a> Ctx<'a> {
             let base = anchor + open.px();
             // Clearance stops the top margin collapsing through, so the
             // container's border box stays where the flow put it — the cleared
-            // box adds HEIGHT below, it does not drag the whole container down.
+            // box adds height below, it does not drag the whole container down.
             if !committed {
                 first_top = base;
                 committed = true;
@@ -3819,15 +3618,15 @@ impl<'a> Ctx<'a> {
     }
 
     /// Place an out-of-flow `::before`/`::after` now that its originating box's
-    /// geometry is known. Its containing block is that box's PADDING box, so
+    /// geometry is known. Its containing block is that box's padding box, so
     /// this can only run once the box is finished — which is why it hangs off
     /// the end of the block and flex paths rather than the child walk. Only for
-    /// a POSITIONED owner: for a static one the containing block is some
+    /// a positioned owner: for a static one the containing block is some
     /// ancestor, and this box is not it.
     ///
     /// This is how a page underlines its active tab —
     /// `a::after { position: absolute; bottom: 0; left: 0; width: 100%;
-    /// height: 2px }` — and how MediaWiki hangs the magnify icon off a thumb.
+    /// height: 2px }` — or hangs an icon off a thumbnail.
     fn place_abs_pseudos(&mut self, el: &Element, st: &ComputedStyle, bx: i32, by: i32, bw: i32, bh: i32) {
         if st.position == Position::Static {
             return;
@@ -3877,11 +3676,11 @@ impl<'a> Ctx<'a> {
                 (None, Some(b)) => py + ph - h - b as i32,
                 _ => py,
             };
-            // A pointer rule can reach this box (`a:hover::after` is how
-            // MediaWiki underlines the article tabs), and repainting it needs
-            // a rectangle. It goes in AFTER whatever the element has painted
-            // so far — which, when the box paints nothing at rest, is the only
-            // thing there is to name it by.
+            // A pointer rule can reach this box (e.g. `a:hover::after` tab
+            // underlines), and repainting it needs a rectangle. It goes in
+            // after whatever the element has painted so far — which, when the
+            // box paints nothing at rest, is the only thing there is to name
+            // it by.
             if self.sheet.hover_set.may_match(el) {
                 let anchor = self.ops.last().map(op_key);
                 self.hover_boxes.push(HoverBox {
@@ -3928,17 +3727,8 @@ family: ps.family,
         }
     }
 
-    /// The finished rectangle of a `::before`/`::after` that carries a box of
-    /// its own — the CSS-icon idiom, `content: ""` plus a size plus a
-    /// `background-image`. Every layout path can place one of these: an inline
-    /// run puts it on a line like an `inline-block`, a flex container reserves
-    /// it at the start (or end) of its main axis.
-    ///
-    /// `width`/`height` come from the style when definite; otherwise the text
-    /// decides, as for any shrink-to-fit box. Percentages resolve against
-    /// `avail_w`.
-    /// Die eigenen Breiten eines Flex-Kindes. Ein anonymer Kasten hat sie
-    /// schon — er wurde beim Sammeln gemessen.
+    /// The intrinsic widths of a flex child. An anonymous box already has
+    /// them — it was measured when collected.
     fn kid_intrinsic(&mut self, kid: &Kid<'a>, s: &ComputedStyle) -> (f32, f32) {
         match kid {
             Kid::El(e) => self.intrinsic_width(e, s),
@@ -3946,27 +3736,23 @@ family: ps.family,
         }
     }
 
-    /// Einen fertigen Kasten an seinen Platz legen.
+    /// Place a finished box at its position.
     fn place_atomic(&mut self, b: &AtomicBox, x: i32, y: i32) {
         let mut ops = b.ops.clone();
         translate_op_list(&mut ops, x, y);
         self.ops.extend(ops);
     }
 
-    /// Der anonyme Kasten um einen nackten Textlauf in einem Flex-Container.
+    /// The anonymous box around a bare text run in a flex container.
     ///
-    /// Einzeilig, wie der Kasten eines `::before` auch: die Breite ist die
-    /// gemessene Textbreite, die Hoehe eine Zeile. Ein anonymer Kasten, der
-    /// UMBRICHT, braeuchte die volle Inline-Maschinerie und damit ein
-    /// Element, das es hier nicht gibt — benannt statt still.
+    /// Single-line, like the box of a `::before`: the width is the measured
+    /// text width, the height one line. Not implemented: an anonymous box
+    /// that wraps, which would need the full inline machinery and an element.
     fn anon_text_box(&mut self, text: &str, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
         let t = text.trim();
-        // **Ein Lauf aus lauter Formatierungszeichen ist KEIN Inhalt.** Er
-        // erzeugt keinen Kasten — und erst recht keinen von einem Pixel, das
-        // dem Nachbarn fehlt. DuckDuckGos Vorlage haengt ein
-        // `&ZeroWidthSpace;` hinter jeden Eintrag von „Searches related to";
-        // daraus wurde ein eigenes Flex-Element, dessen eine Pixel den Text
-        // daneben auf zwei Zeilen brach.
+        // A run made only of formatting characters is not content and
+        // generates no box (e.g. a trailing `&ZeroWidthSpace;` must not become
+        // a flex item that pushes its neighbour onto two lines).
         if t.is_empty() || t.chars().all(is_zero_width_format) {
             return None;
         }
@@ -3974,17 +3760,13 @@ family: ps.family,
         let sp = (st.letter_spacing, st.word_spacing);
         let w = measure_sp(font, t, st.font_px, sp).min(avail_w as f32).max(0.0);
         let h = line_gap(font, st.font_px).max(1.0);
-        // Der Text sitzt an der Oberkante des Kastens, ohne eigenen
-        // Durchschuss.
+        // The text sits at the top of the box, without its own leading.
         //
-        // Benannt, weil es nicht ganz stimmt: ein Nachbar-Element setzt seine
-        // erste Zeile mit halbem Durchschuss, und in einer Schrift, deren
-        // Zeilenabstand groesser ist als ihre Groesse, steht der anonyme Lauf
-        // dadurch bis zu zwei Pixel hoeher. Ein fester Ausgleich waere
-        // geraten: er stimmte in einer Schrift und waere in der naechsten
-        // wieder daneben. Richtig ist, die erste Zeile durch dieselbe
-        // Inline-Maschinerie zu legen wie ein Element — und die braucht ein
-        // Element, das es hier nicht gibt.
+        // Not exact: a sibling element sets its first line with half-leading,
+        // so in a font whose line gap exceeds its size the anonymous run sits
+        // up to two pixels higher. A fixed correction would fit one font only;
+        // the right fix is laying the line through the inline machinery, which
+        // needs an element.
         let lead = 0.0f32;
         let ops = alloc::vec![DrawOp::Text {
             clip: None,
@@ -4012,17 +3794,25 @@ family: st.family,
         })
     }
 
+    /// The finished rectangle of a `::before`/`::after` that carries a box of
+    /// its own — the CSS-icon idiom, `content: ""` plus a size plus a
+    /// `background-image`. Every layout path can place one of these: an inline
+    /// run puts it on a line like an `inline-block`, a flex container reserves
+    /// it at the start (or end) of its main axis.
+    ///
+    /// `width`/`height` come from the style when definite; otherwise the text
+    /// decides, as for any shrink-to-fit box. Percentages resolve against
+    /// `avail_w`.
     fn pseudo_box(&mut self, owner: &Element, own: &ComputedStyle, kind: PseudoElem, avail_w: i32) -> Option<AtomicBox> {
         let (text, ps) = self.pseudo_content(owner, own, kind)?;
         if !ps.is_generated_box() || ps.hidden || ps.transparent {
             return None;
         }
-        // An out-of-flow generated box needs a containing block and offsets we
-        // do not resolve for pseudo-elements yet. Placing it IN the flow puts
-        // it somewhere it never belongs — MediaWiki underlines the active tab
-        // with `a::after { position: absolute; bottom: 0; height: 2px }`, and
-        // in-flow that draws a line straight through the tab's text. Produce
-        // nothing rather than render it wrong.
+        // An out-of-flow generated box needs a containing block and offsets
+        // this path does not resolve (see `place_abs_pseudos`). Placing it in
+        // the flow would put it where it never belongs — an
+        // `a::after { position: absolute; bottom: 0; height: 2px }` underline
+        // would cross the tab's text. Produce nothing here instead.
         if matches!(ps.position, Position::Absolute | Position::Fixed) {
             return None;
         }
@@ -4118,7 +3908,7 @@ family: ps.family,
     /// horizontal box (margins incl. `auto`-centering, width, min/max-width,
     /// padding) within the containing block's content width `w`, add vertical
     /// padding, then lay the content. This is what makes `max-width` + `margin:
-    /// 0 auto` **centered containers** work.
+    /// 0 auto` centered containers work.
     fn layout_block(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // `isolated`: `y0` is the border-box top (the caller — a float, cell,
         // flex item, abs box — already positioned it and owns its margins), so
@@ -4134,32 +3924,27 @@ family: ps.family,
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
-        // Der Stil, wie er hereinkam — der Durchfall-Fall unten faehrt diesen
-        // Kasten ein zweites Mal, und zwar genau so, wie der Rufer ihn wollte.
+        // The style as it came in — the collapse-through case below lays this
+        // box out a second time, exactly as the caller asked for it.
         let st_in = st;
-        // Gehoert diesem Kasten allein — genommen, bevor ein Kind sie sieht.
+        // Belongs to this box alone — taken before any child sees it.
         let clear_floor = self.clear_floor.take();
         let boxed = Self::resolve_pct_box(st, w as f32);
         let st = boxed.as_ref().unwrap_or(st);
         let resolved = self.resolve_pct_heights(st);
         let st = resolved.as_ref().unwrap_or(st);
         let (mut cw, off_left) = resolve_block_h(st, w as f32);
-        // §10.3.4: a replaced element with `width: auto` takes its INTRINSIC
+        // §10.3.4: a replaced element with `width: auto` takes its intrinsic
         // width. It does not fill its container the way a block box does, so
         // `resolve_block_h`'s auto-solve is the wrong answer for it.
         if let (Some((iw, _)), Len::Auto) = (replaced_intrinsic(el), st.width) {
             let frame = st.pad_left + st.pad_right + st.border_x();
             cw = clamp_len(iw + frame, st.min_width, st.max_width, st.box_border, frame) - frame;
         }
-        // An intrinsic keyword on an IN-FLOW block's `width` (`min-content`,
-        // `max-content`, `fit-content`). The first attempt at this was
-        // MEASURED at +12/−12 and reverted: `intrinsic_width` walked every
-        // child as block content, so on a grid, flex or table box it answered
-        // about the wrong formatting context — and `width: fit-content` on a
-        // `display:grid` wrapper is how several grid REFERENCES frame
-        // themselves. Now that the measurement dispatches on `display`
-        // (`intrinsic_flex`/`intrinsic_grid`/`intrinsic_table`), the keyword
-        // is honoured here too.
+        // An intrinsic keyword on an in-flow block's `width` (`min-content`,
+        // `max-content`, `fit-content`). The measurement dispatches on
+        // `display` (`intrinsic_flex`/`intrinsic_grid`/`intrinsic_table`), so
+        // it answers for the box's own formatting context.
         if let Len::Intrinsic(k) = st.width {
             let (pref, min) = self.intrinsic_width(el, st);
             let frame = st.pad_left + st.pad_right + st.border_x();
@@ -4179,9 +3964,8 @@ family: ps.family,
         let box_w = content_w + (st.pad_left + st.pad_right) as i32 + st.border_x() as i32;
         let bg_idx = self.ops.len();
         let clip_marks = (bg_idx, self.abs_count, self.fixed_count);
-        // Alles, was dieser Kasten aufzeichnet, faengt hier an. Zehn
-        // `len()`-Abfragen, keine Allokation — es kostet nichts, den Punkt
-        // immer zu kennen.
+        // Everything this box records starts here. A few `len()` reads, no
+        // allocation — knowing the point always costs nothing.
         let spec0 = self.spec_mark();
 
         let bt = px_of(st.border_top.width);
@@ -4206,14 +3990,13 @@ family: ps.family,
                 _ => None,
             }
         };
-        // **Kann dieser Kasten einen zweiten Durchgang brauchen?** Nur, wenn
-        // sein Oberrand mit denen der Kinder zusammenfaellt UND etwas ihn
-        // daran hindert, selbst durchzufallen — dann bleiben durchgefallene
-        // Kinderraender an SEINEM Oberrand haengen (unten, nach dem Fluss).
-        // Die Frage haengt allein am Stil, also wird sie hier gestellt: bei
-        // fast jedem Kasten ist die Antwort nein und der Schnappschuss
-        // entfaellt. Zaehler und Listenzahl gehoeren dazu — ein zweiter
-        // Durchgang darf `counter-increment` nicht doppelt anwenden.
+        // Might this box need a second pass? Only if its top margin collapses
+        // with its children's and something stops it from collapsing through
+        // itself — then collapsed-through child margins stick to its own top
+        // margin (below, after the flow). The question depends on the style
+        // alone, so it is asked here: for almost every box the answer is no
+        // and no snapshot is taken. Counters and the list ordinal are part of
+        // it — a second pass must not apply `counter-increment` twice.
         let retry_state = (collapse_top
             && (bb != 0
                 || pb != 0
@@ -4232,13 +4015,9 @@ family: ps.family,
             (prov_top_y + bt + pt, Collapse::default())
         };
 
-        // `<hr>` renders a rule at the content top.
-        //
-        // ZWEI Pixel hoch, nicht drei: §15.3.3 gibt der Linie `height: 0` und
-        // einen 1-px-`inset`-Rahmen, also liegen Ober- und Unterkante direkt
-        // aneinander. Wir hatten einen 3-px-Kasten mit der Linie in der Mitte
-        // — jede ungestaltete Seite war unter jedem `<hr>` um 1 px verschoben,
-        // und die Linie selbst stand einen Pixel zu tief.
+        // `<hr>` renders a rule at the content top: two pixels tall, since
+        // HTML §15.3.3 gives it `height: 0` and a 1px `inset` border, so the
+        // top and bottom edges touch.
         if st.is_rule {
             let y = prov_top_y + bt + pt;
             if !st.hidden && !st.transparent {
@@ -4247,8 +4026,7 @@ family: ps.family,
             return BoxOut { bottom: y + 2 + pb, top_y: prov_top_y, open: Collapse::one(if isolated { 0.0 } else { st.margin_bottom }), through: false, box_x: box_left, box_w };
         }
         // The `display:list-item` marker box, outside the content edge.
-        // `list-style-type:none` generates none at all — Wikipedia's nav/TOC
-        // lists rely on that, and a bullet there is pure noise.
+        // `list-style-type:none` generates none at all.
         if st.display == Display::ListItem && st.list_style != ListStyle::None && !st.hidden && !st.transparent {
             let top = prov_top_y + bt + pt;
             if st.list_style.is_disclosure() {
@@ -4278,15 +4056,12 @@ family: ps.family,
                     self.ops.push(DrawOp::Rect { x, y, w, h, color: c });
                 }
             } else if st.list_style.is_bullet() {
-                // Die FORM ist der Wert dieser Eigenschaft: `disc` ist eine
-                // gefuellte Scheibe, `circle` ein Ring, `square` ein Quadrat.
-                // Alle drei als Quadrat zu malen macht sie ununterscheidbar —
-                // und eine verschachtelte Liste, die ihre Ebenen genau darueber
-                // auseinanderhaelt, sieht dann auf jeder Ebene gleich aus.
+                // The shape is the property's value: `disc` is a filled disc,
+                // `circle` a ring, `square` a square. Nested lists tell their
+                // levels apart by it.
                 //
-                // Die Groesse folgt der Schrift (Browser nehmen rund ein
-                // Drittel der Schriftgroesse), damit der Punkt in einer kleinen
-                // Liste nicht klobig und in einer grossen nicht verloren wirkt.
+                // The size follows the font (browsers use roughly a third of
+                // the font size).
                 let s = ((st.font_px * 0.33) as i32).clamp(4, 9);
                 let (x, y) = (content_x - 12, top + (st.font_px * 0.5) as i32);
                 let color = self.theme.muted.into();
@@ -4294,7 +4069,7 @@ family: ps.family,
                     ListStyle::Square => {
                         self.ops.push(DrawOp::Rect { x, y, w: s, h: s, color });
                     }
-                    // `circle` ist hohl — ein Ring von einem Pixel.
+                    // `circle` is hollow — a one-pixel ring.
                     ListStyle::Circle => {
                         self.ops.push(DrawOp::RoundRect {
                             x, y, w: s, h: s, r: [s as f32 / 2.0; 4], color, ring: 1.0,
@@ -4328,7 +4103,7 @@ family: st.family,
         }
 
         // A positioned block becomes the containing block for `absolute`
-        // descendants — its PADDING box (§10.1). `prov_top_y` is the border-box
+        // descendants — its padding box (§10.1). `prov_top_y` is the border-box
         // top, so the padding edge is one border down.
         let prev_cb = self.cb;
         let prev_pend = self.cb_pend.len();
@@ -4336,16 +4111,12 @@ family: st.family,
             let pad_top_y = prov_top_y + px_of(st.border_top.width) + px_of(st.pad_top);
             let mut cb = padding_cb(st, content_x, pad_top_y, content_w);
             // §10.1: the containing block for an absolutely positioned
-            // descendant is this box's PADDING box — a USED height, definite
+            // descendant is this box's padding box — a used height, definite
             // once laid out even when `height` is `auto`. That is a different
             // question from `cb_h` below, where §10.5 rightly leaves an auto
-            // height indefinite for IN-FLOW children.
-            //
-            // Treating both as indefinite made `top: 50%` on an abspos child
-            // unresolvable, so it fell back to its static position. With the
-            // `top:50%` + `translate(-50%)` centring idiom that puts the box a
-            // full box-height too low — which is where Wikipedia's search
-            // magnifier ended up, half outside its `overflow:hidden` field.
+            // height indefinite for in-flow children. Without it `top: 50%` on
+            // an abspos child (the `top:50%` + `translate(-50%)` centring
+            // idiom) would fall back to its static position.
             if cb.3.is_none() && !self.measuring_cb_h.get() {
                 cb.4 = Some(self.cb_pend.len() as u32);
                 self.cb_pend.push(PendingCbH {
@@ -4364,7 +4135,7 @@ family: st.family,
             }
             self.cb = cb;
         }
-        // This box's own content height is what a percentage height on a CHILD
+        // This box's own content height is what a percentage height on a child
         // resolves against — and only when it is definite. An `auto` height
         // depends on those very children, so it stays indefinite and their
         // percentages fall back to `auto` (§10.5).
@@ -4393,24 +4164,20 @@ family: st.family,
         // `cb` that referred to one has been restored past it.
         self.cb_pend.truncate(prev_pend);
 
-        // **Faellt der Rand ALLER Kinder durch, gehoert er an den OBERRAND
-        // dieses Kastens** (CSS 2.1 §8.3.1). Legt sich kein Kind fest, stossen
-        // seine Raender oben wie unten an die des Elters; hat der Elter aber
-        // eine Hoehe (hier: `min-height`), erreichen sie dessen UNTERrand nicht
-        // mehr — also bleibt nur der obere, und der Kasten rueckt nach unten.
+        // If every child's margin collapses through, it belongs to this box's
+        // top margin (CSS 2.1 §8.3.1). With no child committing, the margins
+        // adjoin the parent's top and bottom; but if the parent has a height
+        // (here: `min-height`), they no longer reach its bottom margin — only
+        // the top one remains and the box moves down
+        // (`margin-collapse-min-height-001.xht`).
         //
-        // `margin-collapse-min-height-001.xht`: `min-height: 2em`, drei leere
-        // Kinder, das letzte mit `margin-bottom: 5em`. Chromium setzt den Elter
-        // auf y = 5em; wir setzten ihn auf 1em und liessen die 5em ganz fallen.
-        //
-        // Der Rand ist erst BEKANNT, wenn die Kinder gelaufen sind, und er
-        // bestimmt, wo sie stehen — ein Kind, das durchfaellt, kann einen Float
-        // enthalten, und der wird gemalt. Deshalb ein zweiter Durchgang mit dem
-        // gefundenen Rand als Eingang statt einer Verschiebung der Befehle
-        // hinterher: eine Nebentabelle aus Befehlsindizes mitzuziehen ist die
-        // Sorte Buchhaltung, die spaeter auseinanderlaeuft. Ein DRITTER
-        // Durchgang kann nicht kommen — `Collapse::merge` ist idempotent, also
-        // findet der zweite genau den Rand wieder, mit dem er gestartet ist.
+        // The margin is only known once the children have run, and it decides
+        // where they stand — a collapsing-through child can contain a float,
+        // which gets painted. Hence a second pass with the found margin as
+        // input, rather than shifting the ops afterwards (and every side table
+        // of op indices with them). A third pass cannot happen:
+        // `Collapse::merge` is idempotent, so the second pass finds exactly the
+        // margin it started with.
         if let Some((ctrs, ord)) = retry_state {
             if !flow.committed {
                 let mut merged = top;
@@ -4419,12 +4186,11 @@ family: st.family,
                     self.spec_rollback(&spec0);
                     self.counters.stack = ctrs;
                     self.marker_ord = ord;
-                    // §9.5.2: eine Raeumung SETZT die Oberkante, sie addiert
-                    // nicht. Der eben gefundene Rand gehoert deshalb in die
-                    // HYPOTHETISCHE Lage — wo der Kasten ohne `clear` staende
-                    // —, und die Raeumung nimmt davon das Maximum. Ohne das
-                    // rutschte ein geraeumter Kasten um genau diesen Rand unter
-                    // seinen Float (`CSS2/margin-collapse-157`).
+                    // §9.5.2: clearance sets the top edge, it does not add to
+                    // it. The margin just found therefore goes into the
+                    // hypothetical position — where the box would stand
+                    // without `clear` — and clearance takes the maximum of
+                    // that (`CSS2/margin-collapse-157`).
                     let base2 = match clear_floor {
                         Some((a0, o0, cleared)) => {
                             let mut hypo = o0;
@@ -4444,7 +4210,7 @@ family: st.family,
         let content_top = border_top_y + bt + pt;
 
         // §10.6.7: a box that establishes a block formatting context and has an
-        // auto height grows to contain its own floats. A box that does NOT
+        // auto height grows to contain its own floats. A box that does not
         // establish one never does — its floats escape to the enclosing
         // context, which is exactly why a bare `<div>` around a float measures
         // zero and an `overflow:hidden` wrapper must not. `isolated` marks the
@@ -4458,7 +4224,7 @@ family: st.family,
         let out_bottom_margin = Collapse::one(if isolated { 0.0 } else { st.margin_bottom });
 
         // Size containment takes this branch even with content in it: under
-        // `contain: size` the content contributes NO size (css-contain-2 §3.1),
+        // `contain: size` the content contributes no size (css-contain-2 §3.1),
         // so the box is measured exactly as if it were empty — the content
         // still paints, it just overflows.
         if !flow.committed || st.contain_size {
@@ -4475,7 +4241,7 @@ family: st.family,
                 // intrinsic height, not the zero its (unrendered) content says.
                 ch = ih as i32;
             }
-            // A container whose ONLY content is a float: no line box ever
+            // A container whose only content is a float: no line box ever
             // committed, so the float alone decides the height. A contained
             // box takes nothing from its floats either.
             if let (Some(fb), false) = (float_bottom, st.contain_size) {
@@ -4515,30 +4281,23 @@ family: st.family,
         }
         let out_open;
         if collapse_bottom {
-            // **`min-height` ueber dem Inhalt VERSCHLUCKT den Schlussrand.**
-            // Er entkommt nicht (die Fusszeile darunter rueckt nicht weg) —
-            // und er wird auch nicht mitgerechnet.
+            // A `min-height` above the content swallows the trailing margin:
+            // it neither escapes (the footer below does not move) nor counts
+            // towards the height.
             //
-            // Das Zweite stand hier falsch: `ch` bekam `flow.open` dazu, also
-            // wuchs der Kasten um den Rand, den er gerade eingesperrt hatte.
-            // In `margin-collapse-min-height-001` sind das 550 px, und der
-            // gruene Kasten lief statt 100 px hoch aus dem Bild.
+            // Matching Chromium, the boundary is exactly this condition:
             //
-            // Gemessen an Chromium ueber fuenf Faelle, und die Grenze ist
-            // genau diese Bedingung:
+            //     min-h  child  margin  parent  footer         the margin
+            //      100    30    550      100    right after    swallowed
+            //      100   200    550      200    +550           escapes
+            //      100    30     20      100    right after    swallowed
+            //        0    30    550       30    +550           escapes
+            //      100   120    550      120    +550           escapes
             //
-            //     min-h  Kind  Rand    Elter  Fusszeile      der Rand
-            //      100    30   550      100   direkt danach  verschluckt
-            //      100   200   550      200   +550           entkommt
-            //      100    30    20      100   direkt danach  verschluckt
-            //        0    30   550       30   +550           entkommt
-            //      100   120   550      120   +550           entkommt
-            //
-            // Er verschwindet also GENAU dann, wenn `min-height` die Hoehe
-            // ueber den Inhalt hebt — dann liegt zwischen Inhaltsunterkante
-            // und Rahmenunterkante Platz, die beiden Raender stossen nicht
-            // mehr aneinander, und ein nicht aneinanderstossender Rand in
-            // diesem Zwischenraum wird aufgesogen.
+            // It vanishes exactly when `min-height` lifts the height above the
+            // content: then there is room between the content bottom and the
+            // border bottom, the two margins no longer adjoin, and a
+            // non-adjoining margin in that gap is absorbed.
             let mn = px_h(st.min_height).unwrap_or(0);
             if mn > ch {
                 ch = mn;
@@ -4579,22 +4338,12 @@ family: st.family,
         BoxOut { bottom: box_bottom, top_y: border_top_y, open: out_open, through: false, box_x: box_left, box_w }
     }
 
-    /// The decoded image (if any) + natural box size for an `<img>`: from the
-    /// `width`/`height` attributes, else the decoded intrinsic size, else a
-    /// fallback. Not clamped to the line width — `flow` fits it when placing.
-    /// Size an `<img>` box.
-    ///
-    /// Also records, via `guessed`, whether this box had to guess:
-    /// with both `width` and `height` given the geometry is definite and the
-    /// pixels arriving later change nothing, so the shell can repaint instead
-    /// of re-laying-out. Without them the box depends on the decoded size, and
-    /// a later decode really does move the page.
     /// The box of an inline `<svg>`, and the render request that fills it.
     ///
     /// Unlike an `<img>` this never has to be guessed: the intrinsic size is in
     /// the markup (`width`/`height`, else the `viewBox`, else CSS's 300×150
     /// default for a replaced element with no intrinsic size), so the box is
-    /// definite on the FIRST layout and arriving pixels only need a repaint.
+    /// definite on the first layout and arriving pixels only need a repaint.
     fn svg_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
         let (w, h) = self.svg_size(el, st);
         if w > 0 && h > 0 {
@@ -4605,7 +4354,7 @@ family: st.family,
         (w, h)
     }
 
-    /// The same box WITHOUT registering a raster — what a measurement needs.
+    /// The same box without registering a raster — what a measurement needs.
     /// `svg_box` enqueues the element for rasterising, and an intrinsic pass
     /// that called it would queue an icon that is never painted (and queue the
     /// painted one twice).
@@ -4634,6 +4383,15 @@ family: st.family,
         (w.max(0.0) as i32, h.max(0.0) as i32)
     }
 
+    /// Size an `<img>` box: from CSS or the `width`/`height` attributes, else
+    /// the decoded intrinsic size, else a fallback. Not clamped to the line
+    /// width — `flow` fits it when placing.
+    ///
+    /// Also records, via `guessed`, whether this box had to guess:
+    /// with both `width` and `height` given the geometry is definite and the
+    /// pixels arriving later change nothing, so the shell can repaint instead
+    /// of re-laying-out. Without them the box depends on the decoded size, and
+    /// a later decode really does move the page.
     fn img_box(&self, el: &Element, st: &ComputedStyle) -> (i32, i32) {
         let img = el.attr("src").and_then(|s| self.images.get(s));
         let (iw, ih) = img.map(|i| (i.w as f32, i.h as f32)).unwrap_or((0.0, 0.0));
@@ -4641,10 +4399,9 @@ family: st.family,
         // A definite CSS length beats the presentational attribute (HTML
         // §15.3). Only px counts: a percentage needs the containing block,
         // which a replaced element's own box measurement does not have here, so
-        // it stays as indefinite as `auto`. Wikipedia sizes its footer wordmark
-        // this way (`style="width:7.5em;height:1.125em"`) — without this the
-        // box is not just the wrong size, it also counts as GUESSED, and every
-        // guess costs a full re-layout the moment the pixels land.
+        // it stays as indefinite as `auto`. Without this a box sized in CSS
+        // (`style="width:7.5em;height:1.125em"`) would also count as guessed
+        // and cost a re-layout when its pixels land.
         let css = |l: Len| match l {
             Len::Px(v) if v >= 0.0 => Some(v),
             _ => None,
@@ -4686,22 +4443,17 @@ family: st.family,
         let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
         let size = st.font_px;
         let ch_w = measure(font, "0", size).max(1.0);
-        // **Die Eigenbreite rechnet mit der MITTLEREN Zeichenbreite**, nicht
-        // mit der Breite der Null, und ein `<input>` legt einmal den
-        // Unterschied zur BREITESTEN drauf — Platz, damit ein getipptes breites
-        // Zeichen das Feld nicht sofort rollen laesst. Chromium tut genau das;
-        // nachgemessen ueber fuenf Stuetzstellen (`size` 1, 5, 10, 20, 40), und
-        // erst die dritte sagt, ob die Gerade stimmt: zwei Punkte passen auf
-        // jede. Ohne das war ein nacktes Feld 217 statt 256 px breit.
+        // The intrinsic width uses the average character width, not the width
+        // of "0", and an `<input>` adds the difference to the widest character
+        // once — room so that a typed wide character does not scroll the field
+        // at once. This matches Chromium.
         let (avg_w, extra_w) = match font.char_widths(size) {
             Some((a, m)) => (a.max(1.0), (m - a).max(0.0)),
             None => (ch_w, 0.0),
         };
-        // Die Zeilenhoehe, die die SEITE gesetzt hat, sonst die der Schrift.
-        // Ohne das war jedes Feld so hoch wie sein Schriftbild: Bootstrap gibt
-        // `.form-control` `line-height: 1.5`, und ein Feld, das 24 statt 14 px
-        // Zeile bekommt, ist am Ende 38 statt 28 px hoch — der Unterschied
-        // zwischen „sieht komisch aus" und „sieht aus wie im Browser".
+        // The line height the page set, else the font's. Frameworks give
+        // fields e.g. `line-height: 1.5`, which makes them taller than the
+        // glyphs alone.
         let line = st.line_height.px(size).filter(|v| *v > 0.0).unwrap_or_else(|| line_gap(font, size));
         let default = default_value(el, kind);
         let raw = self.forms.value_or(el.seq, &default).to_string();
@@ -4730,48 +4482,37 @@ family: st.family,
 
         // Intrinsic size, then let a definite CSS width/height win (real pages
         // size their search fields in CSS, not with `size=`).
-        // **Eine Polsterung, zwei Benutzer.** Die Breite wurde mit
-        // `CTL_PAD_X + 4` gerechnet, gemalt wurde mit `max(CSS, CTL_PAD_X)` —
-        // und sobald eine Seite ihre Knoepfe selbst polstert (Bootstrap gibt
-        // `.btn` 16 px), war der Kasten zu schmal fuer seine eigene
-        // Beschriftung. `Gross` wurde als `ross` gemalt, weil der Maler die zu
-        // lange Zeichenkette vorne abschnitt. Beide Seiten lesen jetzt
-        // dieselben zwei Zahlen ([[feedback_intrinsic_shared_path]]).
+        // One padding, two users: measuring and painting must read the same
+        // two numbers, or a page that pads its buttons itself gets a box too
+        // narrow for its own label.
         //
-        // Die UA-Untergrenze bleibt: ein Knopf ohne eigene Polsterung soll
-        // nicht am Text kleben, und `+ 4` ist, was er dafuer immer hatte.
+        // The UA minimum stays: a button without padding of its own should not
+        // stick to its text.
         let ua_min = match kind {
             ControlKind::Checkbox | ControlKind::Radio => 0,
-            // Der Pfeilstreifen traegt den Abstand nach rechts, und links
-            // sitzt die Beschriftung am Rahmen — gegen Chromium gemessen.
+            // The arrow strip carries the right-hand spacing, and on the left
+            // the label sits at the border, as in Chromium.
             ControlKind::Select => 0,
             ControlKind::File => CTL_PAD_X + 4,
-            // **Ein TEXTfeld polstert waagrecht zwei Pixel, ein Knopf sechs.**
-            // Beide ueber einen Kamm zu scheren machte jedes nackte Feld acht
-            // Pixel zu breit — und weil ein Rahmenwerk seinen Feldern immer
-            // eigene Polsterung gibt, sagte darueber weder Bootstrap noch
-            // Tailwind etwas.
+            // A text field pads two pixels horizontally, a button six.
             ControlKind::Text | ControlKind::Password | ControlKind::TextArea => 2,
             _ => CTL_PAD_X,
         };
         let pad_l = (px_of(st.pad_left)).max(ua_min);
         let pad_r = (px_of(st.pad_right)).max(ua_min);
-        // Senkrecht dasselbe: `.form-control` bringt `padding: .375rem .75rem`
-        // mit, und ohne sie steht ein Feld 6 px zu flach in seiner Zeile.
-        // Ein Kaestchen und ein Radioknopf haben KEINE Polsterung — die
-        // UA-Untergrenze ist fuer Felder und Knoepfe da, damit der Text nicht
-        // am Rahmen klebt, und hier gibt es keinen Text. Mit ihr kam ein
-        // `height: 200px` grosses Kaestchen 206 px hoch heraus.
+            // The same vertically: a page's own padding counts. A checkbox and
+            // a radio button have no padding — the UA minimum is there for
+            // fields and buttons so text does not touch the border, and here
+            // there is no text.
         let box_like = matches!(kind, ControlKind::Checkbox | ControlKind::Radio);
-        // Ein `<select>` hat KEINE senkrechte UA-Polsterung — seine zwei
-        // zusaetzlichen Pixel stecken im Widget selbst (unten in der
-        // Kastenrechnung). Mit einer Untergrenze hier waeren sie doppelt da,
-        // sobald die Seite selbst polstert: 34 statt 36.
+        // A `<select>` has no vertical UA padding — its two extra pixels live
+        // in the widget itself (below, in the box computation). A minimum here
+        // would count them twice as soon as the page pads it.
         let ua_pad_y = match kind {
             ControlKind::Checkbox | ControlKind::Radio => 0,
-            // Sein Abstand steckt im Widget, nicht in der Polsterung.
+            // Its spacing lives in the widget, not the padding.
             ControlKind::Select => 0,
-            // Ein `<textarea>` polstert zwei Pixel, ein Feld einen.
+            // A `<textarea>` pads two pixels, a field one.
             ControlKind::TextArea => 2,
             _ => CTL_PAD_Y,
         };
@@ -4794,39 +4535,32 @@ family: st.family,
         let content = self.control_content(el, st, kind, avail, pad_l + pad_r + bx, def_ch);
         let (mut w, mut h) = match kind {
             ControlKind::Checkbox | ControlKind::Radio => {
-                // **13 px, fest.** Das Zeichen waechst NICHT mit der Schrift —
-                // Chromium skaliert es mit dem Zoom, nicht mit `font-size`,
-                // und eine Seite, die ihre Kaestchen gross will, schreibt eine
-                // Breite hin (`width: 24px`). Die alte Formel `font-size *
-                // 0.9` gab bei 16 px ein 14er Kaestchen.
+                // 13 px, fixed. The widget does not grow with the font —
+                // Chromium scales it with zoom, not with `font-size`, and a
+                // page that wants bigger checkboxes sets a width.
                 let _ = size;
                 (13, 13)
             }
             ControlKind::TextArea => {
-                // **Die Vorgaben stehen in HTML §4.10.11 und lauten 20 und 2**,
-                // nicht 30 und 3 — ein nacktes `<textarea>` kam damit 90 px zu
-                // breit und 20 px zu hoch heraus. Dazu der Streifen fuer die
-                // Rollleiste: er ist da, auch wenn nichts zu rollen ist, und
-                // geht in die Eigenbreite ein (Chromium ebenso).
+                // The defaults are in HTML §4.10.11: 20 columns and 2 rows.
+                // Plus the scrollbar strip: it is there even with nothing to
+                // scroll and counts towards the intrinsic width (as in
+                // Chromium).
                 let cols = el.attr("cols").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
                 let rows = el.attr("rows").and_then(|r| r.trim().parse::<f32>().ok()).unwrap_or(2.0);
                 (
                     (cols * avg_w) as i32 + pad_l + pad_r + bx + CTL_SCROLLBAR,
-                    // **Jede Zeile wird fuer sich ganzzahlig.** `rows * line`
-                    // erst am Ende abzuschneiden verlor bei vier Zeilen drei
-                    // Pixel: eine Zeilenhoehe von 19,36 ist im Kasten 20, und
-                    // zwar viermal.
+                    // Each line is rounded up on its own: truncating
+                    // `rows * line` only at the end would lose pixels.
                     rows as i32 * ceil_i32(line) + pad_t + pad_b + by,
                 )
             }
             ControlKind::Text | ControlKind::Password => {
                 let cols = el.attr("size").and_then(|c| c.trim().parse::<f32>().ok()).unwrap_or(20.0);
                 (
-                    // Aufgerundet, nicht abgeschnitten: die Vorgabe `size=20`
-                    // fiel sonst genau einen Pixel zu schmal aus. Was bleibt,
-                    // ist ein Pixel bei sehr kleinem `size` — Chromium rundet
-                    // dort in einer eigenen Gleitkommakette, und die
-                    // nachzubauen hiesse Rundung anzupassen statt ein Modell.
+                    // Rounded up, not truncated, or the default `size=20`
+                    // comes out one pixel narrow. Very small `size` values can
+                    // still be a pixel off Chromium's own rounding.
                     ceil_i32(cols * avg_w + extra_w) + pad_l + pad_r + bx,
                     ceil_i32(line) + pad_t + pad_b + by,
                 )
@@ -4834,10 +4568,10 @@ family: st.family,
             ControlKind::Select => (
                 ceil_i32(measure(font, &text, size)) + pad_l + pad_r
                     + if st.appearance_none { 0 } else { CTL_ARROW } + bx,
-                // Ein `<select>` haelt ueber und unter seiner Beschriftung je
-                // einen Pixel frei — Teil des Widgets, INNEN, also auch dann
-                // da, wenn die Seite selbst polstert. `appearance: none` nimmt
-                // ihn mit dem Rest des Widgets weg.
+                // A `<select>` keeps one pixel free above and below its label —
+                // part of the widget, inside, so present even when the page
+                // pads it. `appearance: none` removes it with the rest of the
+                // widget.
                 ceil_i32(line) + if st.appearance_none { 0 } else { 2 }
                     + pad_t + pad_b + by,
             ),
@@ -4847,7 +4581,7 @@ family: st.family,
             ),
         };
         if let Some(c) = &content {
-            // The contents ARE the label — painting `text` on top of them would
+            // The contents are the label — painting `text` on top of them would
             // write the button's own text twice.
             text.clear();
             w = c.w + pad_l + pad_r + bx;
@@ -4857,11 +4591,12 @@ family: st.family,
             // A CSS width is a content width unless `box-sizing: border-box`.
             w = if st.box_border { cw as i32 } else { cw as i32 + pad_l + pad_r + bx };
         }
-        // A percentage height resolves against the containing block's HEIGHT
+        // A percentage height resolves against the containing block's height
         // (§10.5), never `avail` (its width) — the checkbox-hack overlay is
         // `width:100%; height:100%`, and measuring its height off the width
-        // made it as tall as its container is wide. An indefinite CB height
-        // leaves the percentage unresolvable, so the intrinsic height stands.
+        // would make it as tall as its container is wide. An indefinite CB
+        // height leaves the percentage unresolvable, so the intrinsic height
+        // stands.
         if let Some(chh) = vert_len(st.height, cbh) {
             h = if st.box_border { chh as i32 } else { chh as i32 + pad_t + pad_b + by };
         }
@@ -4872,13 +4607,11 @@ family: st.family,
             w = w.max(mn as i32);
         }
         // `min-height` on a control is how real pages give a search field its
-        // height (Codex: `min-height: 32px`). Without it the control keeps its
+        // height (e.g. `min-height: 32px`). Without it the control keeps its
         // intrinsic line height and sits short inside its own flex row.
         if let Some(mn) = vert_len(st.min_height, cbh) {
-            // Ohne `border-box` ist `min-height` eine INHALTShoehe, und
-            // darauf kommt die WIRKLICHE Polsterung — nicht die
-            // UA-Untergrenze. Mit ihr kam ein `min-height: 44px` hohes Feld
-            // 48 statt 58 px heraus, sobald die Seite selbst polsterte.
+            // Without `border-box`, `min-height` is a content height, and the
+            // actual padding goes on top of it — not the UA minimum.
             h = h.max(if st.box_border { mn as i32 } else { mn as i32 + pad_t + pad_b + by });
         }
         if let Some(mx) = vert_len(st.max_height, cbh) {
@@ -4891,11 +4624,9 @@ family: st.family,
         } else {
             None
         };
-        // Die Untergrenze von 8 px ist dafuer da, dass ein Steuerelement OHNE
-        // eigene Groesse nicht verschwindet. Wo die Seite eine Groesse nennt —
-        // auch die Null — ist sie die Antwort: ein `height: 0` Feld in einer
-        // Flex-Spalte der Hoehe 0 soll null sein, nicht acht
-        // ([[feedback_invented_limits]]).
+        // The 8 px minimum keeps a control without a size of its own from
+        // vanishing. Where the page states a size — including zero — that is
+        // the answer: a `height: 0` field in a zero-height flex column is zero.
         let said_w = st.width.px(avail).is_some();
         let said_h = vert_len(st.height, cbh).is_some();
         CtlBox {
@@ -4910,8 +4641,8 @@ family: st.family,
             disabled: el.attr("disabled").is_some(),
             focused,
             focus_ring: if st.outline_set {
-                // Die Seite hat es in die Hand genommen: ihr Wort gilt, und
-                // `outline: none` heisst NICHTS malen.
+                // The page took over: its word applies, and `outline: none`
+                // means paint nothing.
                 (st.outline.styled && st.outline.width > 0.0).then(|| (
                     px_of(st.outline.width).max(1),
                     Some(st.outline.color.unwrap_or(st.color)),
@@ -4922,9 +4653,9 @@ family: st.family,
             caret,
             bg: st.bg,
             accent: st.accent,
-            // Eine Seite, die dem Steuerelement einen Hintergrund gibt — auch
-            // `transparent` —, malt seine Flaeche selbst. So macht es jeder
-            // Browser, und Bootstraps `.btn-outline-*` verlaesst sich darauf.
+            // A page that gives the control a background — even
+            // `transparent` — paints its face itself. Every browser does this,
+            // and outline button styles rely on it.
             no_face: st.appearance_none || (st.bg_set && st.bg.is_none()),
             appearance_none: st.appearance_none,
             bg_img: self.bg_key(st.bg_layer.image).map(|k| (k, st.bg_layer)),
@@ -4944,13 +4675,8 @@ family: st.family,
     /// `<input>` is void, and a text-only button is exactly its label, which
     /// the one-op path already draws.
     ///
-    /// This is what made the three `centering-00x` reftests fail, and NOT on
-    /// the side the name suggests: our render of the TEST was right all along,
-    /// and it was the REFERENCE — which frames its expectation as a
-    /// `display: table-cell` inside a `<button>` — that came out shrink-wrapped
-    /// to the word inside it. The same gap eats every icon button on the web:
-    /// `<button><svg …/> Speichern</button>` lost its icon and shrank to the
-    /// text.
+    /// Without this an icon button (`<button><svg …/> Save</button>`) would
+    /// lose its icon and shrink to the text.
     fn control_content(
         &mut self,
         el: &'a Element,
@@ -4996,18 +4722,15 @@ family: st.family,
             Some(v) if st.box_border => (v as i32 - chrome_x).max(0),
             Some(v) => v as i32,
             None => {
-                // Measured in the SAME formatting context the contents will be
+                // Measured in the same formatting context the contents will be
                 // laid out in — a flex row's items sit side by side, so its
-                // max-content width is their SUM, not the widest of them.
-                // Measured as block content, `<button class=flex><svg/><span>Mit
-                // Text</span></button>` came out one item wide and broke its
-                // own label onto two lines.
+                // max-content width is their sum, not the widest of them.
                 let (mut pref, mut min) = match st.display {
                     Display::Flex | Display::InlineFlex => self.intrinsic_flex(el, st),
                     Display::Grid => self.intrinsic_grid(el, st),
                     _ => self.intrinsic_width_nodes(&el.children, st),
                 };
-                // A generated box starts its own line, so it is the WIDEST
+                // A generated box starts its own line, so it is the widest
                 // contribution, not one added to the others.
                 for p in [before, after].into_iter().flatten() {
                     pref = pref.max(p);
@@ -5019,24 +4742,18 @@ family: st.family,
         };
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
         let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
-        // **Die Stapelbereiche gehoeren dazu, und ihr Fehlen war sichtbar.**
-        // Was hier gleich ausgelegt wird, wird danach wieder HERAUSGEZOGEN —
-        // ein Bereich, den ein Kind dabei notiert, zeigt hinterher auf
-        // Befehle, die es nie gemalt hat, naemlich auf die naechsten. Auf
-        // Wikipedia sortierte so ein Bereich aus dem SUCHknopf die Flaeche
-        // eines spaeteren Knopfes HINTER dessen eigene Beschriftung: der
-        // Knopf neben „Appearance" war eine graue Kiste ohne Text, und jeder
-        // Klick darauf kostete ein volles Auslegen, weil seine Spanne
-        // zerrissen war. `spec_rollback` nennt genau diese Regel — sie galt
-        // hier nur nicht.
+        // The stacking ranges count too. What is laid out here gets drained
+        // out again afterwards, so a range a child records would then point at
+        // ops it never painted (the next ones). `spec_rollback` states the
+        // same rule.
         let (s0, sl0, f0, fl0) = (self.stack_ops.len(), self.stack_links.len(),
                                   self.float_ops.len(), self.float_links.len());
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
-        // The contents lay out in the formatting context the BUTTON declares.
-        // Tailwind writes `flex`/`inline-grid` on nearly every icon button, and
-        // laying those children out as blocks stacks an icon above its label
-        // instead of beside it. The style handed down has the chrome zeroed:
+        // The contents lay out in the formatting context the button declares.
+        // Icon buttons commonly use `flex`/`inline-grid`, and laying those
+        // children out as blocks stacks an icon above its label instead of
+        // beside it. The style handed down has the chrome zeroed:
         // `paint_control` owns the face, the frame and the padding, and a
         // second copy here would paint the box twice and inset it twice.
         let mut inner = *st;
@@ -5080,9 +4797,8 @@ family: st.family,
         self.controls.truncate(c0);
         self.inspects.truncate(i0);
         self.hover_boxes.truncate(h0);
-        // Und die Bereiche, die in `ops` zeigen — siehe oben. Die innere
-        // Stapelordnung eines Knopfes geht damit verloren; sie war vorher
-        // nicht etwa da, sondern wurde auf FREMDE Befehle angewandt.
+        // And the ranges that point into `ops` — see above. A button's inner
+        // stacking order is lost with them.
         self.stack_ops.truncate(s0);
         self.stack_links.truncate(sl0);
         self.float_ops.truncate(f0);
@@ -5098,11 +4814,9 @@ family: st.family,
         if ps.display == Display::None || matches!(ps.position, Position::Absolute | Position::Fixed) {
             return None;
         }
-        // Der RANDkasten zaehlt, nicht der Rahmenkasten: DDGs Lupe traegt
-        // ihre 4 px Abstand als `margin-right`, und ohne die kam der Kasten
-        // um genau diese 4 px zu schmal heraus. Ein Prozentrand loest sich
-        // gegen eine Breite auf, die es hier noch nicht gibt — er zaehlt
-        // deshalb null, wie in `child_outer` auch.
+        // The margin box counts, not the border box (e.g. an icon spaced by
+        // `margin-right`). A percentage margin would resolve against a width
+        // that does not exist yet, so it counts as zero, as in `child_outer`.
         let margins = ps.margin_left.px(0.0).unwrap_or(0.0) + ps.margin_right.px(0.0).unwrap_or(0.0);
         let frame = ps.pad_left + ps.pad_right + ps.border_x() + margins;
         if let Len::Px(w) = ps.width {
@@ -5117,7 +4831,7 @@ family: st.family,
     /// from the containing block (`self.cb`) + `top`/`right`/`bottom`/`left`.
     /// The element is `el`, already pushed onto `self.path` by the caller.
     fn layout_abs(&mut self, el: &'a Element, st: &ComputedStyle, static_x: i32, static_y: i32) {
-        // Read FIRST. Resolving the containing block below can lay this very
+        // Read first. Resolving the containing block below can lay this very
         // box out speculatively and roll it back, and that pass would otherwise
         // consume the flag and leave the real pass with nothing.
         let over_line = core::mem::take(&mut self.abs_over_open_line);
@@ -5130,7 +4844,7 @@ family: st.family,
         // for it before anything reads it (§10.1).
         let cbh = self.cb_height();
         let (cbx, cby, cbw, ..) = self.cb;
-        // An out-of-flow box against the INITIAL containing block moves with
+        // An out-of-flow box against the initial containing block moves with
         // the viewport height only if it actually reads that height: `bottom`
         // anchors it to the far edge, and a percentage `top`/`height` scales
         // with it. A box placed by `top`/`left` alone does not care how tall
@@ -5154,12 +4868,11 @@ family: st.family,
             (Some(wd), _, _) => wd,
             (None, Some(l), Some(r)) => (avail - l - r).max(0.0),
             _ => {
-                // Shrink-to-fit (§10.3.7). `intrinsic_width` returns a CONTENT
+                // Shrink-to-fit (§10.3.7). `intrinsic_width` returns a content
                 // width, but what goes to `layout_box` is read as a containing
-                // block and has margin/padding/border taken off it AGAIN — so
-                // the box lost its own frame twice and its content overflowed
-                // by exactly that much. Floats and inline-blocks hand over the
-                // MARGIN-box width for this reason; this path did not.
+                // block and has margin/padding/border taken off it again — so
+                // the frame is added back here, as floats and inline-blocks
+                // hand over their margin-box width.
                 let frame = st.margin_left.px(avail).unwrap_or(0.0)
                     + st.margin_right.px(avail).unwrap_or(0.0)
                     + st.pad_left
@@ -5169,14 +4882,12 @@ family: st.family,
             }
         };
         // `min-width`/`max-width` apply to an out-of-flow box like any other
-        // (CSS2.1 §10.4) — the height path already went through them, the width
-        // did not. A shrink-to-fit box with no content is the case that shows
-        // it: MediaWiki's search magnifier is an empty absolutely positioned
-        // span sized only by `min-width`, and without the clamp it came out
-        // ONE pixel wide.
+        // (CSS2.1 §10.4). A shrink-to-fit box with no content shows it: an
+        // empty absolutely positioned span sized only by `min-width` must not
+        // come out one pixel wide.
         let width = clamp_len(width, st.min_width, st.max_width, st.box_border, st.pad_left + st.pad_right + st.border_x());
         // Horizontal: an offset pins to the CB edge; with both `left`/`right`
-        // auto the box keeps its **static position** (CSS2.1 §10.3.7).
+        // auto the box keeps its static position (CSS2.1 §10.3.7).
         let px = if let Some(l) = left {
             cbx as f32 + l
         } else if let Some(r) = right {
@@ -5184,7 +4895,7 @@ family: st.family,
         } else {
             static_x as f32
         };
-        // Vertical offsets resolve against the CB **height**, never its width
+        // Vertical offsets resolve against the CB height, never its width
         // (§9.3.2) — getting that wrong stretches every percentage-positioned
         // layout by the CB's aspect ratio. An indefinite CB height leaves a
         // percentage unresolvable here (the parent's content height doesn't
@@ -5196,11 +4907,9 @@ family: st.family,
         // gap between them. Over-constrained (all three given) → `bottom` is
         // the one that gets ignored, which is what the `top` arm below does.
         let mut st_owned = *st;
-        // NOTE: a percentage `height` here would also resolve against `cbh`
-        // (§10.5), but doing it in the abspos path ALONE measured worse: an
-        // in-flow `height:100%` parent still collapses to auto, and the
-        // mismatch between the two paths breaks more than it fixes. It belongs
-        // with general percentage-height support, not here.
+        // A percentage `height` is not resolved against `cbh` here (§10.5)
+        // even though it could be: doing it in the abspos path alone would
+        // disagree with the in-flow path.
         let mut overridden = false;
         if let (Some(t), Some(b), Some(h), Len::Auto) = (top, bottom, cbh, st.height) {
             st_owned.height = Len::Px((h as f32 - t - b).max(0.0));
@@ -5213,12 +4922,10 @@ family: st.family,
         // at the static position and slide the finished box (and everything it
         // emitted) into place. With neither offset the static position is the
         // answer already (§10.6.4).
-        // `layout_box` is handed the BORDER-box top, so the vertical margins
+        // `layout_box` is handed the border-box top, so the vertical margins
         // belong here: §10.6.4 puts the box at `top + margin-top` below the
-        // containing block's edge, and the static position is where its MARGIN
-        // box would have sat. Leaving them out placed an absolutely positioned
-        // box its own `margin-top` too high — visible the moment a page uses
-        // `margin` instead of `top` to nudge an overlay.
+        // containing block's edge, and the static position is where its margin
+        // box would have sat.
         let mt = st.margin_top;
         let mb = st.margin_bottom;
         let (py, shift_to_bottom) = match (top, bottom, cbh) {
@@ -5234,19 +4941,17 @@ family: st.family,
         // stacking range for it (CSS2.1 §9.9) — unless it's already nested
         // inside another tracked range, which absorbs it instead. A box
         // reached mid-line opens one too, to climb over that line.
-        // An out-of-flow box is positioned by definition, so `over_line` — the
-        // old stand-in for "this one at least must be lifted over its line" —
-        // has nothing left to add.
+        // An out-of-flow box is positioned by definition, so `over_line` has
+        // nothing left to add.
         let _ = over_line;
         let track = self.should_track_stack(st);
         if track {
             self.stack_depth += 1;
         }
         // The same second resolution `place_float` guards against: `layout_box`
-        // reads `w_i` as the containing-block width, and `w_i` IS this box's
-        // own used width — so a `width: 18%` box came out 18 % of 18 %. The
-        // reference of `floats-wrap-bfc-outside-001` is exactly that box, which
-        // is why fixing only the float side made a correct test fail.
+        // reads `w_i` as the containing-block width, and `w_i` is this box's
+        // own used width — so a `width: 18%` box would come out 18 % of 18 %
+        // (`floats-wrap-bfc-outside-001`).
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let abs_resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
@@ -5266,22 +4971,20 @@ family: st.family,
             st
         };
         let box_bottom = self.layout_box(el, st, px as i32, w_i, py as i32);
-        // A replaced element out of flow still has to be PAINTED. `layout_box`
+        // A replaced element out of flow still has to be painted. `layout_box`
         // gives it a rectangle — borders, background, the space it occupies —
         // but the picture itself is only ever emitted by the inline path, so
-        // routing an abspos `<img>` here left an empty box behind. The render
-        // gate is what said so: `tailwind` lost seven draw ops at unchanged
-        // height the moment images stopped riding on the line.
+        // it is emitted here.
         //
         // The size comes from `img_box`, not from `w_i`: a positioned replaced
-        // element with `width: auto` takes its INTRINSIC width (§10.3.7), while
+        // element with `width: auto` takes its intrinsic width (§10.3.7), while
         // `w_i` is what a non-replaced block would have stretched to.
         if el.tag == "img" || el.tag == "svg" {
             let svg = el.tag == "svg";
             let (iw, ih) = if svg { self.svg_box(el, st) } else { self.img_box(el, st) };
             // No `hidden`/`transparent` guard: the inline path emits the op
-            // either way and lets paint decide, and dropping it here made the
-            // op counts disagree between the two paths for the same picture.
+            // either way and lets paint decide, and both paths must agree for
+            // the same picture.
             if iw > 0 && ih > 0 {
                 let src = if svg { svg_key(el) } else { el.attr("src").unwrap_or("").to_string() };
                 let (alt, fit, filter) = (svg_alt(el, svg), st.object_fit, self.filter_index(st));
@@ -5333,9 +5036,7 @@ family: st.family,
             clip_ops(&mut self.ops, start, cl, ct, cr, cb);
         }
         // `transform: translate(...)`, same paint-time shift as in flow. This is
-        // where the `top:50%` + `translate(-50%)` centring idiom lands, so an
-        // out-of-flow box that skipped it sat half a box too low — far enough
-        // to be clipped away by an `overflow:hidden` parent.
+        // where the `top:50%` + `translate(-50%)` centring idiom lands.
         let (tdx, tdy) = translate_offset(st, w_i, bottom - py as i32);
         if tdx != 0 || tdy != 0 {
             self.shift_ops(&m0, tdx, tdy);
@@ -5350,30 +5051,17 @@ family: st.family,
         self.cb_h = prev_cb_h;
     }
 
-    /// Insert the block's `background-color` behind its content (at `bg_idx`)
-    /// and stroke its `border` on the border-box edges.
-    /// Insert a box's `background-color` behind the content it already emitted
-    /// (at `bg_idx`). Split out from `paint_box_decoration` because a table can
-    /// paint its background — an opaque infobox must not let the article text
-    /// it floats over show through — while its BORDER still can't be drawn from
-    /// here: the table box has no resolved border box yet, and guessing one
-    /// puts the stroke in the wrong place (measured: 5 reftests).
     /// `overflow: hidden` — drop whatever the box's content painted outside its
     /// padding box. `marks` is `(first op index, abs_count, fixed_count)` taken
-    /// BEFORE the content was laid out. Call BEFORE `paint_box_decoration`, so
+    /// before the content was laid out. Call before `paint_box_decoration`, so
     /// the box's own background and border are not clipped by it.
-    ///
-    /// Skipped when a descendant recorded a z-index stacking range inside the
-    /// span: `clip_ops` rebuilds the tail and can drop ops, which would leave
-    /// those ranges pointing at the wrong slots — and a scrambled display list
-    /// is a far worse defect than an unclipped overflow.
     fn clip_overflow(&mut self, st: &ComputedStyle, marks: (usize, u32, u32), box_left: i32, box_top: i32, box_w: i32, box_h: i32) {
         let (start, abs0, fixed0) = marks;
         if (!st.overflow_x.clips() && !st.overflow_y.clips()) || start >= self.ops.len() {
             return;
         }
         // An out-of-flow descendant is clipped only by an ancestor in its
-        // CONTAINING-BLOCK chain (CSS2.1 §11.1.1). A `position: static` box is
+        // containing-block chain (CSS2.1 §11.1.1). A `position: static` box is
         // not the containing block of an absolutely positioned descendant, and
         // nothing but the viewport is for a fixed one — so a box that let one
         // escape cannot clip its span at all. The display list is flat, so the
@@ -5400,13 +5088,9 @@ family: st.family,
         if map.is_empty() {
             return;
         }
-        // Every side table that points into the display list moves with it.
-        // This used to be a BAIL — "a descendant recorded a stacking range in
-        // here, so do not clip at all" — which was tolerable while only an
-        // explicit `z-index` opened one. Now every positioned box does, and the
-        // bail meant an `overflow: hidden` box with any positioned child
-        // stopped clipping: 467 draw ops escaped their boxes on one vendored
-        // page.
+        // Every side table that points into the display list moves with it;
+        // since every positioned box records a range, skipping the clip when
+        // one exists would leave most `overflow: hidden` boxes unclipped.
         self.stack_ops.retain_mut(|(_, _, s, e)| match remap_clip(&map, start, *s, *e) {
             Some((ns, ne)) if ne > ns => {
                 (*s, *e) = (ns, ne);
@@ -5421,7 +5105,7 @@ family: st.family,
             }
             _ => false,
         });
-        // A control's span must stay EXACT — `repaint_controls` overwrites it
+        // A control's span must stay exact — `repaint_controls` overwrites it
         // in place — so a torn or dropped one is marked unusable instead.
         for c in &mut self.controls {
             if c.at == CTL_UNUSABLE || c.at + c.len <= start {
@@ -5448,11 +5132,7 @@ family: st.family,
     /// Done here, on the finished display list, rather than during line
     /// breaking: the property does not change layout at all — the line is
     /// measured, broken and positioned as if it were `clip`, and only what
-    /// gets PAINTED differs. Doing it any earlier would move the box.
-    ///
-    /// `clip_ops` keeps a text run whole when it merely overlaps the clip
-    /// (glyphs are not clipped per pixel), so without this a `.text-truncate`
-    /// box does not just lack the `…` — its text runs on out of the box.
+    /// gets painted differs. Doing it any earlier would move the box.
     fn ellipsize(&mut self, start: usize, cr: i32) {
         for op in &mut self.ops[start..] {
             let DrawOp::Text { x, size, bold, italic, mono, family, sp, text, .. } = op else { continue };
@@ -5477,14 +5157,14 @@ family: st.family,
     /// `filter` — recolour everything the box painted, itself and its subtree.
     ///
     /// The property applies to the whole subtree and cannot be cancelled from
-    /// inside it, which in a FLAT display list is exactly the op range the box
+    /// inside it, which in a flat display list is exactly the op range the box
     /// produced. Called after `paint_box_decoration`, so the box's own
     /// background and border — spliced in at the head of that range — are in it.
     ///
     /// Colours are transformed here rather than at paint, because here they are
     /// known. An image's pixels are not: it travels as a key and is looked up
     /// when it is drawn, so those ops get an index into `filters` instead.
-    /// Applying the matrix twice IS the composition of two filters, which is
+    /// Applying the matrix twice is the composition of two filters, which is
     /// what a filtered box inside a filtered box means — the image index is
     /// composed by hand for the same reason.
     fn apply_filter(&mut self, st: &ComputedStyle, start: usize) {
@@ -5505,14 +5185,14 @@ family: st.family,
                     let inner = (*filter as usize).checked_sub(1).map(|i| table[i]);
                     *filter = filter_key(&mut table, inner.map_or(f, |i| i.then(f)));
                 }
-                // Die Farben eines Verlaufs stehen schon hier fest, also
-                // wird jeder Stopp gefiltert — kein Eintrag in `filters`.
+                // A gradient's colours are known here, so each stop is
+                // filtered — no entry in `filters`.
                 DrawOp::Gradient { g, .. } => {
                     for st in g.stops.iter_mut().take(g.n as usize) {
                         st.color = f.apply(st.color);
                     }
                 }
-                // A mask paints `tint` THROUGH the image's alpha, so the
+                // A mask paints `tint` through the image's alpha, so the
                 // filter belongs on that colour, not on the stencil's pixels.
                 DrawOp::BgImage { tint: Some(c), .. } => *c = f.apply(*c),
                 DrawOp::BgImage { filter, .. } => {
@@ -5525,7 +5205,7 @@ family: st.family,
     }
 
     /// Register a `filter` and hand back the 1-based index an image op carries.
-    /// An `<img>` with a filter of its OWN needs this before its op exists:
+    /// An `<img>` with a filter of its own needs this before its op exists:
     /// the op is emitted from the line box, which has no `Ctx` to ask.
     fn filter_index(&mut self, st: &ComputedStyle) -> u16 {
         match effective_filter(st) {
@@ -5539,6 +5219,10 @@ family: st.family,
         }
     }
 
+    /// Insert a box's `background-color` behind the content it already emitted
+    /// (at `bg_idx`). Split out from `paint_box_decoration` because a table
+    /// paints its background from here while its border cannot be: the table
+    /// box has no resolved border box yet.
     fn insert_bg(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
         if w <= 0 || h <= 0 || st.hidden || st.transparent {
             return;
@@ -5569,12 +5253,10 @@ family: st.family,
         for (i, op) in ops.into_iter().enumerate() {
             self.ops.insert(at + i, op);
         }
-        // Die Steuerelemente sind die DRITTE Tabelle mit Befehlsindizes, und
-        // sie wurde hier jahrelang vergessen. Der Hintergrund eines Kastens
-        // wird UNTER seinen schon gemalten Inhalt geschoben — also vor jedes
-        // Feld darin. Blieb `at` stehen, ersetzte der Schnellweg beim naechsten
-        // Tastendruck fremde Befehle, und das Feld malte sich unter den alten
-        // Kasten: getippter Text unsichtbar, der Text daneben verschoben.
+        // Form controls are the third table of op indices. A box's background
+        // is inserted under its already painted content, so before every
+        // field in it; a stale `at` would make the fast repaint path
+        // overwrite unrelated ops.
         for c in &mut self.controls {
             if c.at != CTL_UNUSABLE && c.at >= at {
                 c.at += n;
@@ -5618,6 +5300,8 @@ family: st.family,
         }
     }
 
+    /// Insert the block's `background-color` behind its content (at `bg_idx`)
+    /// and stroke its `border` on the border-box edges.
     fn paint_box_decoration(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
         // `visibility:hidden` suppresses this box's own background and border.
         // Bailing before the `bg_idx` insert is what keeps the recorded
@@ -5637,21 +5321,16 @@ family: st.family,
             std::println!("[box] {who}: x={x} y={y} w={w} h={h}");
         }
         // CSS 2.1 Appendix E paints a box as shadow, background, border — and
-        // ALL of it before any descendant. All three splice in at `bg_idx`, so
+        // all of it before any descendant. All three splice in at `bg_idx`, so
         // whatever is inserted last ends up underneath: border, background,
-        // shadow, in that order.
-        //
-        // The border used to be APPENDED instead, which put it on top of the
-        // box's own descendants. That is invisible while a child stays inside
-        // its parent's content box — and wrong the moment one does not, which
-        // is exactly what a negative margin is for: the child's border landed
-        // UNDER the parent's instead of over it.
+        // shadow, in that order. Appending the border instead would paint it
+        // over the box's own descendants, which shows as soon as a child
+        // overlaps it with a negative margin.
         let mut border: Vec<DrawOp> = Vec::new();
         border_ops(st, x, y, w, h, (true, true), &mut border);
         self.insert_ops_at(bg_idx, border);
-        // Der INNERE Schatten liegt ueber dem Hintergrund; er wird also vor
-        // ihm eingefuegt, damit er nach der Verschiebung durch `insert_bg`
-        // darueber steht.
+        // The inset shadow lies above the background; it is inserted before
+        // it, so that after the shift by `insert_bg` it ends up on top.
         let mut inset = Vec::new();
         inset_shadow_ops(st, x, y, w, h, &mut inset);
         self.insert_ops_at(bg_idx, inset);
@@ -5659,12 +5338,9 @@ family: st.family,
         self.insert_shadow(st, x, y, w, h, bg_idx);
     }
 
-    /// Paint the box's `box-shadow` behind its background. Only the zero-blur
-    /// case — which on real pages is a hairline separator, not a drop shadow.
-    /// MediaWiki draws the rule under the article tabs with
-    /// `box-shadow: 0 1px #c8ccd1`, and without this the page simply lacks it.
+    /// Paint the box's `box-shadow` behind its background (see `shadow_ops`).
     ///
-    /// Inserted at `bg_idx` BEFORE the background, so it ends up underneath;
+    /// Inserted at `bg_idx` before the background, so it ends up underneath;
     /// `insert_bg` then shifts the recorded stacking ranges for its own ops the
     /// same way, and both insertions are accounted for.
     fn insert_shadow(&mut self, st: &ComputedStyle, x: i32, y: i32, w: i32, h: i32, bg_idx: usize) {
@@ -5683,19 +5359,17 @@ family: st.family,
     fn layout_table(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> (i32, i32, i32) {
         // <caption> renders as a block on the table's top or bottom edge
         // (CSS2.1 §17.4.1), per its own `caption-side` — aligned with the
-        // TABLE box, so the table's horizontal margins have to come off first.
+        // table box, so the table's horizontal margins have to come off first.
         // `layout_table_body` applies them to the grid; without the same shift
-        // here a floated table with a left margin puts its caption a margin's
-        // width further left than the rows above it, which is exactly what
-        // MediaWiki's image thumbs (`margin-left: 1.4em`) show.
+        // here a table with a left margin would put its caption a margin's
+        // width further left than its rows.
         let cbw = w as f32;
         let ml = st.margin_left.px(cbw).unwrap_or(0.0) as i32;
         let mr = st.margin_right.px(cbw).unwrap_or(0.0) as i32;
         let (cx, cw) = (x + ml, (w - ml - mr).max(0));
-        // Eine OBERE Ueberschrift steht vor dem Gitter und ist doch so breit
-        // wie es — also einmal die Spalten ausrechnen, bevor irgendetwas
-        // gemalt wird. Das kostet ein zusaetzliches Auszaehlen der Zeilen, und
-        // nur fuer Tabellen, die ueberhaupt eine obere Ueberschrift haben.
+        // A top caption stands before the grid yet is as wide as it — so the
+        // columns are computed once before anything is painted. Costs an extra
+        // pass over the rows, only for tables with a top caption.
         let (mut top_x, mut top_w) = (cx, cw);
         if self.has_top_caption(el, st) {
             let mut rows = self.collect_table_rows(&el.children, st);
@@ -5712,8 +5386,8 @@ family: st.family,
         (y, bx, bw)
     }
 
-    /// Hat die Tabelle eine Ueberschrift AN IHREM OBEREN Rand? Nur dann lohnt
-    /// der Vorablauf ueber die Spalten.
+    /// Does the table have a caption on its top edge? Only then is the
+    /// column pre-pass worth it.
     fn has_top_caption(&mut self, el: &'a Element, st: &ComputedStyle) -> bool {
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         let mut siblings: Vec<ElemInfo> = Vec::new();
@@ -5735,10 +5409,9 @@ family: st.family,
     /// Lay out the caption children whose `caption-side` puts them on the
     /// requested edge, stacked at `y0`. Returns the y below them. A caption is
     /// recognised by `display: table-caption` as well as by the `<caption>`
-    /// tag — MediaWiki's image thumbs are a `figure{display:table}` with a
-    /// `figcaption{display:table-caption}`, and reading only the tag turns the
-    /// caption into stray content that widens the table instead of wrapping to
-    /// it.
+    /// tag (e.g. `figure{display:table}` with `figcaption{display:table-caption}`);
+    /// reading only the tag turns the caption into stray content that widens
+    /// the table instead of wrapping to it.
     fn layout_captions(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32, bottom: bool) -> i32 {
         let mut y = y0;
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
@@ -5782,21 +5455,17 @@ family: st.family,
     /// can't have a `<caption>` child (nothing selects an anonymous box), so
     /// only the row-collection step is shared.
     ///
-    /// Gibt `(Unterkante, linke Kante, Breite)` des TABELLENKASTENS zurueck —
-    /// nicht des Streifens. Eine Tabelle mit `width: auto` schrumpft auf ihren
-    /// Inhalt (§17.5.2), und wer nur die Unterkante zurueckgibt, laesst jeden
-    /// Rufer raten: `getBoundingClientRect` meldete jahrelang die Streifen-
-    /// breite (1886 statt 157 px auf einer nackten Seite).
+    /// Returns `(bottom, left edge, width)` of the table box, not of the
+    /// strip: a table with `width: auto` shrinks to its content (§17.5.2), and
+    /// callers such as `getBoundingClientRect` need the actual box.
     fn layout_table_body(&mut self, nodes: &'a [Node], st: &ComputedStyle, x: i32, w: i32, y0: i32) -> (i32, i32, i32) {
         let mut rows = self.collect_table_rows(nodes, st);
         rows.retain(|r| !r.cells.is_empty());
         let ncols = rows.iter().map(|r| row_columns(&r.cells).1).max().unwrap_or(0).min(64);
         if ncols == 0 {
-            // A table with no rows is still a BOX. `width`/`height` on it are
+            // A table with no rows is still a box. `width`/`height` on it are
             // content-box dimensions like anywhere else, so a bordered empty
-            // table paints a frame of exactly that size — dropping out here
-            // painted nothing at all, which is what an empty `<table>` with a
-            // background looked like.
+            // table paints a frame of exactly that size.
             let bg_idx = self.ops.len();
             let cbw = w as f32;
             let frame_x = st.pad_left + st.pad_right + st.border_x();
@@ -5822,9 +5491,8 @@ family: st.family,
         let (sx, sy) = spacing_of(st);
         let collapse = st.border_collapse;
         // The table's own border box: border, then padding, then the row grid.
-        // Getting the border edge in here is what lets the table paint its own
-        // decoration at all — laying the grid at `x + pad_left` (no border
-        // offset) put every stroke a border-width off.
+        // The grid starts past the border edge so the table's own decoration
+        // and the grid line up.
         let (btl, btt) = (px_of(st.border_left.width), px_of(st.border_top.width));
         let x = x + off;
         let (inner_x, content_top) = if collapse {
@@ -5835,11 +5503,11 @@ family: st.family,
         let bg_idx = self.ops.len();
         let bottom = self.lay_table_rows(&rows, ncols, &colw, st, inner_x, content_top);
         let mut table_bottom = if collapse { bottom } else { bottom + sy + px_of(st.pad_bottom) + px_of(st.border_bottom.width) };
-        // `height` on a table is a MINIMUM for its box, never a maximum
+        // `height` on a table is a minimum for its box, never a maximum
         // (CSS2.1 §17.5.3) — rows keep the height their content needs, and a
-        // table shorter than its `height` grows to it. The rows themselves are
-        // not stretched into the extra space; that is the "distribute over
-        // rows" part of §17.5.3 and needs per-row percentage heights first.
+        // table shorter than its `height` grows to it. Not implemented: the
+        // "distribute over rows" part of §17.5.3, which needs per-row
+        // percentage heights first.
         let frame_y = if collapse { 0.0 } else { st.pad_top + st.pad_bottom + st.border_y() };
         let min_h = |len: Len| match len {
             Len::Px(h) if st.box_border => Some(h),
@@ -5851,9 +5519,9 @@ family: st.family,
         }
         // A table box paints its own background and border like any other box;
         // only per-cell decoration is left to the boxes inside (see above).
-        // Without this a floated infobox is transparent and the article text it
-        // overlaps shows straight through it. Its used width comes from the
-        // columns it actually produced, not from the space it was offered.
+        // Without this a floated table is transparent and the text it
+        // overlaps shows through. Its used width comes from the columns it
+        // actually produced, not from the space it was offered.
         if collapse {
             self.insert_bg(st, x, y0, table_w, table_bottom - y0, bg_idx);
         } else {
@@ -5879,29 +5547,25 @@ family: st.family,
             if dx != 0 || dy != 0 {
                 self.shift_ops(&part, dx, dy);
             }
-            // A positioned table part is a positioned BOX (Appendix E step 8)
-            // like any other. Table parts are painted on their own path, so
-            // they were the one family of positioned boxes that never reached
-            // `record_stack_entry` — and an absolutely positioned sibling that
-            // PRECEDES one in the document then painted over it, where document
-            // order among two step-8 boxes says the later one wins.
+            // A positioned table part is a positioned box (Appendix E step 8)
+            // like any other, so it is recorded too: document order among two
+            // step-8 boxes says the later one wins, even against a preceding
+            // absolutely positioned sibling.
             let (z, layer) = Self::stack_key(cs);
             self.record_stack_entry(z, layer, part.ops, self.ops.len(), part.links, self.links.len());
         }
     }
 
-    /// Die Spaltenbreiten, die gebrauchte Breite der Tabelle und ihr Versatz
-    /// im Streifen.
+    /// The column widths, the table's used width and its offset in the strip.
     ///
-    /// Steht fuer sich, weil die Antwort ZWEIMAL gebraucht wird: einmal beim
-    /// Auslegen und einmal vorher, weil eine `<caption>` so breit ist wie die
-    /// TABELLE (§17.4.1) und nicht wie der Streifen, in dem sie steht — und
-    /// wie breit die Tabelle ist, weiss erst das Gitter. Sie haengt allein an
-    /// den Zeilen und am Stil, nicht an `y`.
+    /// Separate because the answer is needed twice: for layout, and before
+    /// that because a `<caption>` is as wide as the table (§17.4.1), not the
+    /// strip it stands in — and only the grid knows the table's width. It
+    /// depends on the rows and the style alone, not on `y`.
     fn table_columns(&mut self, rows: &[Row<'a>], ncols: usize, st: &ComputedStyle, w: i32)
         -> (Vec<i32>, i32, i32)
     {
-        // The columns share the table's CONTENT box, so the space they may use
+        // The columns share the table's content box, so the space they may use
         // is what is left of `w` after the table's own border and padding —
         // otherwise the grid overflows the border box by exactly that much.
         // Horizontal margins apply to a table box like any other block-level
@@ -5912,12 +5576,12 @@ family: st.family,
         let (ml, mr) = (ml_len.px(w as f32).unwrap_or(0.0) as i32, mr_len.px(w as f32).unwrap_or(0.0) as i32);
         let avail = (w - ml - mr).max(0);
         // In the collapsed model the table has neither padding nor a border box
-        // of its own (CSS2.1 §17.6.2) — the outermost cell borders ARE the
+        // of its own (CSS2.1 §17.6.2) — the outermost cell borders are the
         // table's frame, so the grid starts flush at the table's edge and the
         // cells draw every grid line, outer ones included.
         let frame = if st.border_collapse { 0 } else { (st.pad_left + st.pad_right + st.border_x()) as i32 };
         // Separated border model: `border-spacing` runs between every pair of
-        // columns AND once along each outer edge, so `ncols + 1` gaps come out
+        // columns and once along each outer edge, so `ncols + 1` gaps come out
         // of the content box before the columns share what is left.
         let (sx, _) = spacing_of(st);
         let gaps = sx * (ncols as i32 + 1);
@@ -5936,10 +5600,8 @@ family: st.family,
             (Len::Auto, Len::Auto) => ml + slack / 2,
             (Len::Auto, _) => ml + slack,
             // Inside `<center>` a table is centred even with zero margins —
-            // that is what `-moz-center` does, and it is the whole reason the
-            // `<center><table>` idiom worked. Google's home page centres its
-            // search box that way, so without it a correctly sized table still
-            // sits hard against the left edge.
+            // that is what `-moz-center` does, and what the `<center><table>`
+            // idiom relies on.
             _ if st.center_blocks => ml + slack / 2,
             _ => ml,
         };
@@ -5953,7 +5615,7 @@ family: st.family,
     /// they overflow the available width; an explicit table `width` wider than
     /// the content spreads the slack across columns.
     fn auto_columns(&mut self, rows: &[Row<'a>], ncols: usize, st: &ComputedStyle, w: i32) -> Vec<i32> {
-        // A cell percentage is a fraction of the TABLE, not of whatever space
+        // A cell percentage is a fraction of the table, not of whatever space
         // the table was offered — resolving it against the available width
         // makes `width="25%"` mean a quarter of the viewport in a narrower
         // table.
@@ -5961,10 +5623,10 @@ family: st.family,
         let mut pref = vec![0.0f32; ncols];
         let mut minw = vec![0.0f32; ncols];
         // Columns a cell pinned with an explicit `width`. Slack belongs to
-        // the OTHERS — see the distribution below.
+        // the others — see the distribution below.
         let mut sized = vec![false; ncols];
         // Single-column cells define their column outright; cells spanning
-        // several only have to fit ACROSS them, so they run in a second pass
+        // several only have to fit across them, so they run in a second pass
         // once the single-span widths are known.
         for pass_span in [false, true] {
             for row in rows {
@@ -6023,29 +5685,15 @@ family: st.family,
         let total: f32 = pref.iter().sum();
         let mut colw = pref.clone();
         if total > cap && total > 0.0 {
-            // **Erst jeder Spalte ihr Minimum, dann der Rest nach SPIELRAUM.**
-            //
-            // Vorher stand hier `(cap * pref[c] / total).max(minw[c])`, und
-            // das `.max` legte die Differenz OBEN DRAUF, statt sie der Spalte
-            // wegzunehmen, die noch schrumpfen kann. Eine Spalte, die nicht
-            // unter ihr Minimum kann — ein Bild —, machte den Tisch damit
-            // breiter als den Platz, den er hat.
-            //
-            // Gemessen auf Wikipedias „Today's featured picture": Bildspalte
-            // 404, Textspalte mit einer Vorzugsbreite von ~3040 in einem
-            // 1296er Kasten. Die anteilige Rechnung gab dem Bild 152, das
-            // `.max` hob es auf 404 — und der Tisch kam auf **1548 statt
-            // 1296**. Der Text lief 252 px aus seinem Kasten heraus, und weil
-            // die Vorlage der Seite taeglich wechselt (Bild oben ODER
-            // daneben), sah es aus, als passiere es „manchmal".
-            //
-            // Chromium verteilt in derselben Lage 404 | 892 — genau das, was
-            // unten herauskommt: Minimum sichern, den Rest im Verhaeltnis von
-            // `pref - minw`. Passen nicht einmal die Minima, laeuft der Tisch
-            // ueber; das ist dann unvermeidbar und tut jeder Browser.
+            // First give every column its minimum, then share the rest by
+            // headroom (`pref - minw`). Scaling by preference and clamping to
+            // the minimum afterwards would add the clamped difference on top
+            // instead of taking it from columns that can still shrink, making
+            // the table wider than its space. This matches Chromium. If not
+            // even the minima fit, the table overflows, as in every browser.
             let min_total: f32 = minw.iter().sum();
             if min_total >= cap {
-                // Nicht einmal die Minima passen — dann laeuft der Tisch ueber.
+                // Not even the minima fit — the table overflows.
                 colw = minw.clone();
             } else {
                 let room = cap - min_total;
@@ -6066,21 +5714,16 @@ family: st.family,
             // to its border alone, which is what a `display: table` root with
             // an empty `<body>` does.
             //
-            // The slack goes to the columns that did NOT ask for a width
+            // The slack goes to the columns that did not ask for a width
             // (CSS2.1 §17.5.2.2). Spreading it over all of them widened the
-            // sized ones past what they asked for: `25% | auto | 25%` came out
-            // 41% | 18% | 41%, so the middle cell — the one holding the
-            // content — ended up the narrowest of the three. Only when every
-            // column is pinned does the slack spread across all of them,
-            // because then there is nowhere else for it to go.
+            // sized ones past what they asked for: `25% | auto | 25%` would come
+            // out 41% | 18% | 41%. Only when every column is pinned does the
+            // slack spread across all of them, because then there is nowhere
+            // else for it to go.
             //
-            // **Verteilt wird im VERHAELTNIS der Inhaltsbreiten**, nicht zu
-            // gleichen Teilen. Nachgemessen an Chromium: eine zweispaltige
-            // Tabelle mit `width:100%`, Koepfe „Eng" und „Mit Rahmen", kommt
-            // dort auf 518 | 1359 — genau `content_w * pref[c] / total`. Zu
-            // gleichen Teilen ergab 908 | 971, und damit steht die schmale
-            // Spalte fast so breit wie die, die den Text traegt. Das ist die
-            // Aufteilung, die jede `width:100%`-Tabelle des Webs betrifft.
+            // It is shared in proportion to the content widths, not equally:
+            // `content_w * pref[c] / total`, as Chromium does for every
+            // `width:100%` table.
             let slack = content_w - total;
             let free: Vec<usize> = (0..ncols).filter(|c| !sized[*c]).collect();
             let free_pref: f32 = free.iter().map(|c| pref[*c]).sum();
@@ -6089,8 +5732,8 @@ family: st.family,
                     colw[*c] += slack * pref[*c] / free_pref;
                 }
             } else if !free.is_empty() {
-                // Alle freien Spalten messen null: dann gibt es kein
-                // Verhaeltnis, und zu gleichen Teilen ist die einzige Antwort.
+                // All free columns measure zero: then there is no ratio, and
+                // equal shares are the only answer.
                 let extra = slack / free.len() as f32;
                 for c in &free {
                     colw[*c] += extra;
@@ -6134,8 +5777,7 @@ family: st.family,
         let auto_count = fixed.iter().filter(|o| o.is_none()).count();
         // A table is a shrink-to-fit box: with `width: auto` and every column
         // pinned by the first row, the table is exactly those columns wide. It
-        // does NOT fill its container the way a block does — which is what put
-        // a 200px cell's border across the whole page.
+        // does not fill its container the way a block does.
         let content_w = if st.width == Len::Auto && auto_count == 0 {
             sum_fixed.min(content_w)
         } else {
@@ -6157,7 +5799,7 @@ family: st.family,
 
     /// Put a row's own ancestors on the path for the duration of the work its
     /// cells do, and return the depth to truncate back to. Measurement and
-    /// layout BOTH go through this — a cell's descendants must resolve against
+    /// layout both go through this — a cell's descendants must resolve against
     /// the same ancestor chain in either, or the widths drift apart.
     fn push_row_path(&mut self, row: &Row<'a>) -> usize {
         let depth = self.path.len();
@@ -6175,7 +5817,7 @@ family: st.family,
     /// its own background/border, with content placed inside its padding.
     fn lay_table_rows(&mut self, rows: &[Row<'a>], ncols: usize, colw: &[i32], st: &ComputedStyle, x: i32, y0: i32) -> i32 {
         // The gaps around the outside are added by the caller, which owns the
-        // table's padding edge; these are the ones BETWEEN cells and rows.
+        // table's padding edge; these are the ones between cells and rows.
         let (sx, sy) = spacing_of(st);
         let col_x = |c: usize| colw[..c].iter().sum::<i32>() + sx * c as i32;
         let collapse = st.border_collapse;
@@ -6263,7 +5905,7 @@ family: st.family,
                 self.cb = (x, y, grid_w, Some(row_h), None);
             } else if let Some((_, gst, _, top)) = group {
                 if gst.position != Position::Static {
-                    // A row GROUP's height is not known yet, and unlike a
+                    // A row group's height is not known yet, and unlike a
                     // positioned block there is no box to measure for it.
                     self.cb = (x, top, grid_w, None, None);
                 }
@@ -6279,11 +5921,11 @@ family: st.family,
                 if cs.position != Position::Static {
                     self.cb = (*content_x, y, *content_w, Some(row_h), None);
                 }
-                // A cell IS a definite containing block for its children by the
+                // A cell is a definite containing block for its children by the
                 // time it is painted: the row height is resolved. Without this
-                // a `height: 100%` child of a `height: 100px` cell measured
-                // nothing at all and painted NOTHING — the commonest way a page
-                // fills a table cell with a coloured block.
+                // a `height: 100%` child of a `height: 100px` cell would paint
+                // nothing — the commonest way a page fills a table cell with a
+                // coloured block.
                 let cell_cb_h = self.cb_h;
                 let (_, _, cbt, cbb) = cell_borders(cs, collapse);
                 self.cb_h = Some(
@@ -6341,14 +5983,10 @@ family: st.family,
                     if let Some((_, prst)) = prev_row_el {
                         top = collapsed_edge(&top, &prst.border_bottom);
                     }
-                    // Auch im zusammengefassten Modell malt eine Zelle ihre
-                    // Schatten. Hier stand nur `insert_bg`, und damit fielen
-                    // sie weg — was genau die gestreifte Tabelle traf:
-                    // Bootstrap streift mit `box-shadow: inset`, und sein
-                    // Reboot setzt `border-collapse: collapse` auf JEDE
-                    // Tabelle. Beide Wege muessen dasselbe malen, sonst
-                    // haengt das Aussehen einer Zelle daran, welches
-                    // Randmodell die Seite gewaehlt hat.
+                    // In the collapsed model a cell paints its shadows too
+                    // (e.g. table stripes drawn with `box-shadow: inset`).
+                    // Both border models must paint the same, or a cell's look
+                    // would depend on the model the page chose.
                     let mut inset = Vec::new();
                     inset_shadow_ops(cs, *cell_x, y, *cell_w, row_h, &mut inset);
                     self.insert_ops_at(bg_idx, inset);
@@ -6391,11 +6029,9 @@ family: st.family,
                     let (z, layer) = Self::stack_key(cs);
                     self.record_stack_entry(z, layer, m0.ops, self.ops.len(), m0.links, self.links.len());
                 }
-                // **Der Kasten der ZELLE.** Die Tabellenteile laufen auf einem
-                // eigenen Pfad, der nie an `record_inspect` vorbeikam:
-                // `getBoundingClientRect` gab an jedem `td`, `th`, `tr`,
-                // `thead`, `tbody` und `tfoot` GAR NICHTS zurueck — 37 der 38
-                // fehlenden Kaesten der Bootstrap-Galerie waren das.
+                // The cell's own box, recorded so that `getBoundingClientRect`
+                // works on table parts: they run on their own path, which
+                // never passes `record_inspect` otherwise.
                 if let Cell::Real(e) = row.cells[c].cell {
                     self.record_inspect(e, cs, *cell_x + sdx, y + sdy, *cell_w, row_h, m0.ops);
                 }
@@ -6415,7 +6051,7 @@ family: st.family,
             self.finish_table_part(&gst, x, top, grid_w, last_bottom - top, part, grid_w as f32, Some((last_bottom - top) as f32));
             self.record_inspect(gel, &gst, x, top, grid_w, last_bottom - top, part.ops);
         }
-        // The trailing gap belongs BETWEEN rows, not after the last one — the
+        // The trailing gap belongs between rows, not after the last one — the
         // caller adds the outer one.
         y - if rows.is_empty() { 0 } else { sy }
     }
@@ -6496,7 +6132,7 @@ family: st.family,
     /// `-footer-group` is a proper table child and recurses/becomes a row
     /// directly; any other maximal run of consecutive siblings (stray cells,
     /// stray text, stray elements — anything that isn't a proper table child)
-    /// is wrapped in ONE anonymous row (whitespace-only text neither starts
+    /// is wrapped in one anonymous row (whitespace-only text neither starts
     /// nor breaks a run, and is dropped if it's all a run ever contained).
     fn collect_rows_into(
         &mut self,
@@ -6590,9 +6226,9 @@ family: st.family,
     /// Partition a row's children into cells (CSS2 §17.2.1): a proper
     /// `table-cell` child stays its own (real) cell; any other maximal run of
     /// consecutive siblings (stray text, stray non-cell elements) is wrapped in
-    /// ONE anonymous cell. Shared by a real `<tr>`'s children and an anonymous
+    /// one anonymous cell. Shared by a real `<tr>`'s children and an anonymous
     /// row's coalesced node run.
-    /// `parent` is the ROW's style: a cell inherits from its row, and an
+    /// `parent` is the row's style: a cell inherits from its row, and an
     /// anonymous cell takes the §17.2.1 anonymous-box style from it. The
     /// caller must have the row on `self.path` — the cells' selectors are
     /// resolved here, and measurement and layout have to agree on that path.
@@ -6620,13 +6256,12 @@ family: st.family,
                     let st = self.styled(e, parent, &siblings, sib_count);
                     cells.push(StyledCell { cell: Cell::Real(e), st });
                 }
-                // A caption/`<col>` is a PROPER table child, so it ends the run
+                // A caption/`<col>` is a proper table child, so it ends the run
                 // of consecutive stray siblings rather than sitting inside it
                 // (CSS2.1 §17.2.1 wraps consecutive non-table children only).
                 // The anonymous cell is a contiguous slice, so leaving the run
                 // open here would swallow the caption's text and size the
-                // column to it — which is how a MediaWiki image thumb came out
-                // as wide as its caption instead of as wide as its image.
+                // column to it.
                 Some(TableRole::Skip) => {
                     if let Some(s) = run_start.take() {
                         if run_has_content {
@@ -6660,24 +6295,23 @@ family: st.family,
 
     /// (max-content, min-content) width of a box's contents: max-content = the
     /// widest line when nothing wraps, min-content = the widest unbreakable
-    /// word. `st` is the box's OWN resolved style — using a fixed reference
-    /// size here regressed nested anonymous tables (CSS2.1 §17.2.1): a cell
-    /// whose font differs would get a column sized at the wrong scale.
+    /// word. `st` is the box's own resolved style, so a cell whose font differs
+    /// gets its column sized at the right scale.
     ///
-    /// Two things the flat "concatenate every descendant's text" shortcut got
-    /// wrong, both of which real pages lean on:
+    /// Two rules a flat "concatenate every descendant's text" shortcut would
+    /// get wrong:
     ///
     /// * Out-of-flow (`absolute`/`fixed`) and `display:none` descendants
     ///   contribute nothing (css-sizing-3 §4). A CSS-only dropdown hangs its
-    ///   panel off the button as an abspos child; counting it made the button
-    ///   as wide as all 62 language names laid end to end (~4150 px).
+    ///   panel off the button as an abspos child, which must not widen the
+    ///   button.
     /// * A block-level child starts its own line, so a block container's
-    ///   max-content is its WIDEST child, not the sum of every descendant.
+    ///   max-content is its widest child, not the sum of every descendant.
     fn intrinsic_width(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
         if let Some(hit) = self.intrinsic.get(&el.seq) {
             return *hit;
         }
-        // Size containment: the content contributes NOTHING to the box's own
+        // Size containment: the content contributes nothing to the box's own
         // size (css-contain-2 §3.1), so both intrinsic widths come from
         // `contain-intrinsic-size` — or are zero when it says nothing. This
         // has to sit ahead of every content-measuring branch below, including
@@ -6687,29 +6321,17 @@ family: st.family,
             let w = st.contain_intrinsic.map_or(0.0, |(iw, _)| iw);
             (w, w)
         } else if el.tag == "svg" {
-            // `replaced_intrinsic` reads the width ATTRIBUTE; an `<svg>` also
+            // `replaced_intrinsic` reads the width attribute; an `<svg>` also
             // has a `viewBox` and a CSS width, and `svg_size` is the one place
             // that resolves all three the way the paint does.
             let iw = self.svg_size(el, st).0 as f32;
             (iw, iw)
         } else if el.tag == "img" {
-            // **Ein `<img>` stand in KEINEM der Zweige** — `replaced_intrinsic`
-            // fuehrt es nicht, und ein Bild hat keine Kinder. Also fiel es
-            // durch bis zum Textzweig und meldete NULL, bei beiden Breiten.
-            //
-            // Wo das zuschlaegt: die Eigenbreite ist die Untergrenze, unter die
-            // ein Flex-Element nicht schrumpft (css-flexbox-1 §4.5). Mit null
-            // schrumpft jedes Bild in einer engen Flexzeile auf null und wird
-            // von `img_box` auf EINEN Pixel geklemmt — ein 90 px hoher Strich
-            // von einem Pixel Breite, und daneben die Favicons als 1x16. Auf
-            // DuckDuckGos Ergebnisseite traf es JEDES Bild.
-            //
-            // Gemessen wird durch `img_box`, also durch genau die Funktion, die
-            // den Kasten danach auch legt ([[feedback_intrinsic_shared_path]]);
-            // `intrinsic_walk` tut es fuer ein Bild INNERHALB eines Behaelters
-            // seit je so, nur der Weg auf das Bild SELBST kannte die Regel
-            // nicht ([[feedback_the_rule_may_already_be_written_eight_lines_below]]).
-            // Ein Bild bricht nicht um: Min- und Max-Inhaltsbreite sind gleich.
+            // An `<img>` is measured through `img_box`, the same function that
+            // lays out its box. The intrinsic width is the floor a flex item
+            // does not shrink below (css-flexbox-1 §4.5); reporting zero would
+            // shrink every image in a tight flex row to a single pixel.
+            // An image does not wrap: min- and max-content widths are equal.
             let iw = self.img_box(el, st).0 as f32;
             (iw, iw)
         } else if let Some((iw, _)) = replaced_intrinsic(el) {
@@ -6720,12 +6342,9 @@ family: st.family,
             if kind == ControlKind::Hidden {
                 (0.0, 0.0)
             } else {
-                // Measure it with ITS OWN style, the way it will be painted. A
-                // root style here read the label at the root font size and lost
-                // every declared size and the page's frame, so a shrink-to-fit
-                // wrapper reserved 9px more than the control paints — Google's
-                // search button sat in a box wider than itself.
-                // [[feedback-intrinsic-shared-path]]
+                // Measure it with its own style, the way it will be painted, so
+                // the declared sizes and the page's frame apply; a root style
+                // would read the label at the root font size.
                 let mut mst = *st;
                 // Percentages have no basis while measuring, so they behave as
                 // `auto` (css-sizing-3 §4.1) rather than resolving against 0.
@@ -6734,29 +6353,17 @@ family: st.family,
                         *len = Len::Auto;
                     }
                 }
-                // **Diese Funktion gibt eine INHALTSbreite** — jeder Aufrufer
-                // legt Polsterung und Rahmen selbst wieder drauf
-                // (`child_outer`, `flex_metrics`, `flex_column`). `control_box`
-                // liefert den fertigen RANDkasten, und ihn hier ungekuerzt
-                // zurueckzugeben zaehlte den Rahmen zweimal: eine
-                // `inline-flex`-Knopfgruppe mit drei Bootstrap-Knoepfen kam
-                // 285 statt 205 px breit heraus, je Knopf genau seine eigenen
-                // 26 px Polsterung und Rahmen zu viel.
-                // **Diese Funktion gibt eine INHALTSbreite** — jeder Aufrufer
-                // legt Polsterung und Rahmen selbst wieder drauf
-                // (`child_outer`, `flex_metrics`, `flex_column`). `control_box`
-                // liefert den fertigen RANDkasten; ihn ungekuerzt
-                // zurueckzugeben zaehlte den Rahmen zweimal, und eine
-                // `inline-flex`-Knopfgruppe mit drei Bootstrap-Knoepfen kam
-                // 285 statt 205 px breit heraus.
+                // This function returns a content width — every caller adds
+                // padding and border back itself (`child_outer`,
+                // `flex_metrics`, `flex_column`). `control_box` returns the
+                // finished border box, so returning it unreduced would count
+                // the frame twice.
                 //
-                // Abgezogen wird GENAU der Rahmen, den der Aufrufer wieder
-                // addiert — der aus dem Stil, nicht der wirksame aus
-                // `control_box`. Die UA-Mindestpolsterung eines Knopfes ohne
-                // eigene Polsterung kennt der Aufrufer nicht; sie hier
-                // mitabzuziehen machte jedes Wikipedia-Steuerelement 12 px zu
-                // schmal (163 Kaesten schlechter, 54 besser — gemessen, bevor
-                // es stehen blieb).
+                // Subtracted is exactly the frame the caller adds back — the
+                // one from the style, not the effective one from
+                // `control_box`. The caller does not know the UA minimum
+                // padding of a button without its own padding, so it must not
+                // be subtracted here.
                 let bw = self.control_box(el, &mst, kind, 0.0).w as f32;
                 let css_frame = mst.pad_left + mst.pad_right + mst.border_x();
                 let w = (bw - css_frame).max(0.0);
@@ -6774,10 +6381,9 @@ family: st.family,
             }
             let got = match st.display {
                 Display::Table => self.intrinsic_table(&el.children, st),
-                // Ein Flex- oder Rasterkasten ist KEIN Blockcontainer: seine
-                // Kinder liegen nach einer anderen Regel nebeneinander, und
-                // sie als Blockinhalt zu messen beantwortet den falschen
-                // Formatierungskontext.
+                // A flex or grid box is not a block container: its children
+                // are placed by a different rule, and measuring them as block
+                // content answers for the wrong formatting context.
                 Display::Flex | Display::InlineFlex => self.intrinsic_flex(el, st),
                 Display::Grid => self.intrinsic_grid(el, st),
                 _ => self.intrinsic_width_nodes(&el.children, st),
@@ -6785,28 +6391,19 @@ family: st.family,
             if push {
                 self.path.pop();
             }
-            // **`::before` und `::after` stehen AUF der Zeile, also zaehlen
-            // sie mit.** Das Layout malt sie seit je (`pseudo_box`), die
-            // Messung daneben kannte sie nur am Steuerelement — und damit
-            // liefen die beiden Wege auseinander
-            // ([[feedback_intrinsic_shared_path]]). DuckDuckGos „Searches
-            // related to" haengt seine Lupe als `::before` an: der Kasten kam
-            // um deren 20 px zu schmal heraus, und der Text brach auf zwei
-            // Zeilen.
+            // `::before` and `::after` sit on the line, so they count. Layout
+            // paints them (`pseudo_box`), and the measurement must agree.
             //
-            // Bei max-content addieren sie sich zum Inhalt; bei min-content
-            // konkurrieren sie, denn zwischen Pseudo und erstem Wort darf die
-            // Zeile brechen — dieselbe Regel wie fuer einen atomaren Inline.
+            // At max-content they add to the content; at min-content they
+            // compete, since the line may break between the pseudo and the
+            // first word — the same rule as for an atomic inline.
             let ps = self.pseudo_intrinsic(el, st, PseudoElem::Before).unwrap_or(0.0)
                 + self.pseudo_intrinsic(el, st, PseudoElem::After).unwrap_or(0.0);
             (got.0 + ps, got.1.max(ps))
         };
-        // Whole pixels, rounded UP. A max-content width is a REQUIREMENT — the
+        // Whole pixels, rounded up. A max-content width is a requirement — the
         // width at which the content does not wrap — so a consumer that turns
         // 678.4 into a used width of 678 loses the last word to a second line.
-        // Floats and inline-blocks learned this and ceil themselves; flex items
-        // and shrink-to-fit out-of-flow boxes truncated, which is why a root
-        // `display:flex` wrapped text its `display:block` reference did not.
         let out = (ceil_i32(out.0) as f32, ceil_i32(out.1) as f32);
         self.intrinsic.insert(el.seq, out);
         out
@@ -6867,15 +6464,10 @@ family: st.family,
     /// `self.path` must already end at their parent.
     fn intrinsic_walk(&mut self, nodes: &'a [Node], st: &ComputedStyle, run: &mut Run, pref: &mut f32, min: &mut f32) {
         let horiz = side_by_side(st);
-        // The measure walk resolves styles the same way the LAYOUT walk does —
-        // with the preceding siblings and the sibling count. Passing `&[]`/`0`
-        // made every sibling-combinator rule (`+`, `~`) invisible to width
-        // measurement while layout applied it, so the two disagreed about the
-        // same box. Codex hides an icon-only button's label with
-        // `.cdx-button--icon-only span + span { position: absolute }`: layout
-        // took it out of flow, the measurement still counted its text, and
-        // Wikipedia's hamburger came out ~80px too wide — pushing the logo and
-        // the search box right across the whole header.
+        // The measure walk resolves styles the same way the layout walk does —
+        // with the preceding siblings and the sibling count — so that
+        // sibling-combinator rules (`+`, `~`), e.g. one taking an icon
+        // button's label out of flow, apply to the measurement too.
         let mut siblings: Vec<ElemInfo> = Vec::new();
         let sib_count = nodes.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         // A stray run of table parts (rows/cells with no table ancestor) is one
@@ -6916,9 +6508,8 @@ family: st.family,
             Node::Element(e) => e,
         };
         // A forced break ends the line even at max-content, so the text on
-        // either side of it never adds up. Wikipedia's infoboxes label their
-        // cells across two or three `<br>` lines; measuring those as one line
-        // made the label column ~2x too wide and squeezed the article text.
+        // either side of it never adds up (e.g. a table label split across
+        // `<br>` lines).
         if el.tag == "br" {
             flush_run(self.fonts, st, run, pref, min, horiz);
             return;
@@ -6951,30 +6542,24 @@ family: st.family,
         } else {
             self.child_outer(el, &cs)
         };
-        // An atomic inline sits ON the current line — it does not end it.
+        // An atomic inline sits on the current line — it does not end it.
         // `inline-block`, an image, a form control: all of them are
-        // inline-LEVEL, so their widths add to the line's the same way a word
+        // inline-level, so their widths add to the line's the same way a word
         // does. Treating them as block-level children (which is what falling
-        // through to `pref.max(p)` below does) measures a container of two
-        // inline-blocks as ONE of them wide, and they then have no room beside
-        // each other and stack — Google's header bar is exactly this shape.
+        // through to `pref.max(p)` below does) would measure a container of
+        // two inline-blocks as one of them wide, and they would then stack.
         // (Reaching here with `display:inline` means an image, a form control
         // or another replaced box — the plain-inline branch above already
-        // returned. A FLOATED box leaves the line, so it is not one of these.)
+        // returned. A floated box leaves the line, so it is not one of these.)
         let atomic_inline = matches!(cs.display,
             Display::InlineBlock | Display::InlineFlex | Display::Inline);
-        // **Ein Float steht NEBEN der Zeile, nicht darunter** — also zaehlt er
-        // bei max-content zu ihr dazu, genau wie ein atomarer Inline. Vorher
-        // wurde er dagegen GEMAXT, und damit fiel seine Breite aus der
-        // Eigenbreite heraus: DuckDuckGos Kopfleiste ist ein
-        // schrumpfender Kasten mit einem langen Text und einem
-        // `float: right`-Knopf daneben, und der Kasten kam 32 px — die Breite
-        // des Knopfes — zu schmal heraus. Dann passte der Float nicht mehr
-        // und rutschte eine Zeile tiefer, unter den Text.
+        // A float stands beside the line, not below it — so at max-content it
+        // adds to it, just like an atomic inline. Otherwise a shrink-to-fit
+        // box holding text and a `float: right` button would come out the
+        // button's width too narrow, and the float would drop below the text.
         //
-        // Dass geflossene GESCHWISTER sich aufsummieren, bleibt damit richtig:
-        // `run.atomic` summiert. Und bei MIN-content bekommt jeder Float seine
-        // eigene Zeile, also konkurrieren sie dort — das tut `atomic_min`.
+        // Floated siblings still sum up (`run.atomic`); at min-content every
+        // float gets its own line, so there they compete (`atomic_min`).
         if cs.float != FloatKind::None || (atomic_inline && cs.float == FloatKind::None) {
             run.atomic += p;
             run.atomic_min = run.atomic_min.max(m);
@@ -6990,10 +6575,9 @@ family: st.family,
         *min = min.max(m);
     }
 
-    /// Was ein KIND zur schrumpfenden Breite seines Elternteils beitraegt:
-    /// sein MARGIN-Kasten. Herausgezogen, weil Block-, Flex- und Rasterkinder
-    /// dieselbe Rechnung brauchen — und eine zweite Fassung waere eine zweite
-    /// Semantik.
+    /// What a child contributes to its parent's shrink-to-fit width: its
+    /// margin box. Shared by block, flex and grid children, so there is one
+    /// rule rather than three copies.
     fn child_outer(&mut self, el: &'a Element, cs: &ComputedStyle) -> (f32, f32) {
         let (p, m) = self.intrinsic_width(el, cs);
         // A percentage margin resolves against a width that does not exist
@@ -7012,9 +6596,9 @@ family: st.family,
         }
     }
 
-    /// Die in-flow-KINDER eines Kastens mit ihren Stilen — so gesammelt, wie
-    /// `layout_flex` und `layout_grid` es tun (Reihenfolge, Geschwisterzahl,
-    /// `display:none` und ausser Fluss fallen weg).
+    /// A box's in-flow children with their styles — collected the way
+    /// `layout_flex` and `layout_grid` do (order, sibling count; `display:none`
+    /// and out-of-flow children are dropped).
     fn flow_kids(&mut self, el: &'a Element, st: &ComputedStyle)
         -> Vec<(&'a Element, ComputedStyle)> {
         let mut out = Vec::new();
@@ -7031,23 +6615,18 @@ family: st.family,
         out
     }
 
-    /// Die inneren Breiten eines FLEX-Kastens. Seine Kinder sind ITEMS, kein
-    /// Blockinhalt: in einer Zeile stehen sie nebeneinander, also ist die
-    /// max-content-Breite ihre SUMME; in einer Spalte stapeln sie, also die
-    /// breiteste. Ohne diese Unterscheidung antwortet die Messung ueber den
-    /// falschen Formatierungskontext — und genau daran ist der erste Versuch
-    /// gescheitert, `width: fit-content` an einem Block zu ehren.
+    /// The intrinsic widths of a flex box. Its children are items, not block
+    /// content: in a row they sit side by side, so the max-content width is
+    /// their sum; in a column they stack, so it is the widest.
     fn intrinsic_flex(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
         let kids = self.flow_kids(el, st);
         let (mut pref, mut min) = (0.0f32, 0.0f32);
         // css-flexbox-1 §4: a bare text run between the children is an
-        // ANONYMOUS flex item. `flow_kids` reports elements only, so it counted
-        // for nothing here — the same gap `layout_flex` already closed on the
-        // LAYOUT side, and the two then disagreed about the same box:
-        // `<button class=flex><svg/>Speichern</button>` measured one icon wide
-        // and painted an `S`. `anon_text_box` lays such a run on ONE line, so
-        // its min-content is its max-content — keeping the two in step matters
-        // more than the wrap it does not do ([[feedback_intrinsic_shared_path]]).
+        // anonymous flex item. `flow_kids` reports elements only, so it is
+        // counted here, as `layout_flex` does on the layout side.
+        // `anon_text_box` lays such a run on one line, so its min-content is
+        // its max-content — keeping measurement and layout in step matters
+        // more than the wrap it does not do.
         let mut anon = 0usize;
         for n in &el.children {
             let Node::Text(t) = n else { continue };
@@ -7070,8 +6649,8 @@ family: st.family,
             let (p, m) = self.child_outer(ce, cs);
             if st.flex_row {
                 pref += p;
-                // Umbrechend darf jede Zeile fuer sich schmal werden; ohne
-                // Umbruch muessen alle Items nebeneinander passen.
+                // When wrapping, every line may become narrow on its own;
+                // without wrapping all items must fit side by side.
                 if st.flex_wrap { min = min.max(m) } else { min += m }
             } else {
                 pref = pref.max(p);
@@ -7087,21 +6666,20 @@ family: st.family,
         (pref, min)
     }
 
-    /// Die inneren Breiten eines RASTER-Kastens: die Summe seiner Spalten.
+    /// The intrinsic widths of a grid box: the sum of its columns.
     ///
-    /// Genau, solange jede Spur eine feste Groesse hat — und das ist die Form,
-    /// in der die WPT-Referenzen ein Raster rahmen. Fuer `auto`/`fr` steht
-    /// hier der groesste Beitrag EINES Kindes je Spur; die Zuordnung Kind →
-    /// Spalte braeuchte die ganze Platzierung, und die laeuft erst im Layout.
-    /// Benannt statt verschwiegen.
+    /// Exact as long as every track has a fixed size. Not implemented: for
+    /// `auto`/`fr` tracks this takes the largest contribution of a single
+    /// child per track, since the child → column assignment needs the full
+    /// placement, which only runs in layout.
     fn intrinsic_grid(&mut self, el: &'a Element, st: &ComputedStyle) -> (f32, f32) {
         let ncols = st.grid_ncols as usize;
         if ncols == 0 { return self.intrinsic_width_nodes(&el.children, st) }
         let kids = self.flow_kids(el, st);
-        // Die Kinder den SPALTEN zuordnen — zeilenweise, wie die Platzierung
-        // im Layout, und mit `grid-column-start`, wo eines steht. Ohne diese
-        // Zuordnung waere die max-content-Breite „Spurenzahl mal breitestes
-        // Kind" und damit fuer jedes ungleiche Raster zu gross.
+        // Assign the children to columns — row by row, as layout's placement
+        // does, and with `grid-column-start` where one is set. Without it the
+        // max-content width would be "track count times widest child", too
+        // large for any uneven grid.
         let (mut col_p, mut col_m) = (alloc::vec![0.0f32; ncols], alloc::vec![0.0f32; ncols]);
         let mut next = 0usize;
         for (ce, cs) in &kids {
@@ -7114,8 +6692,8 @@ family: st.family,
                 next += span;
                 c
             };
-            // Ein Kind ueber mehrere Spuren sagt ueber eine einzelne nichts —
-            // dieselbe Vereinfachung wie in der Spaltenrechnung des Layouts.
+            // A child spanning several tracks says nothing about a single one —
+            // the same simplification as in layout's column sizing.
             if span != 1 { continue }
             let (p, m) = self.child_outer(ce, cs);
             col_p[c] = col_p[c].max(p);
@@ -7125,8 +6703,8 @@ family: st.family,
         for c in 0..ncols {
             match st.grid_tracks[c] {
                 GridTrack::Fixed(px) => { pref += px; min += px; }
-                // Ein Prozentsatz hat hier keine Bezugsgroesse (css-sizing-3
-                // §4.1) und traegt darum nichts bei.
+                // A percentage has no basis here (css-sizing-3 §4.1) and so
+                // contributes nothing.
                 GridTrack::Pct(_) => {}
                 GridTrack::Auto | GridTrack::Fr(_) => { pref += col_p[c]; min += col_m[c]; }
             }
@@ -7143,7 +6721,7 @@ family: st.family,
         }
     }
 
-    /// A cell's (max-content, min-content) BORDER-BOX width, honouring an
+    /// A cell's (max-content, min-content) border-box width, honouring an
     /// explicit `width` on the cell itself (CSS2.1 §17.5.2.2). `avail` is the
     /// basis a percentage width resolves against, or `None` while the table's
     /// own width is still being measured — a percentage is indefinite then and
@@ -7180,10 +6758,9 @@ family: st.family,
         }
         // The sibling context every `table_role` here must see. Built once:
         // `elems` is every element child in order, `before[i]` how many of them
-        // precede node `i`. Passing `&[], 0` instead (as this used to) is not
-        // just wrong for `:nth-child` — it also gives the cascade cache a
-        // second, incompatible key for the same element, and those repeat
-        // misses were 90 % of all repeat misses on a real page.
+        // precede node `i`. Passing `&[], 0` instead would be wrong for
+        // `:nth-child`, and would also give the cascade cache a second,
+        // incompatible key for the same element.
         // Identity of this question: which node list, in which ancestor chain.
         let key = {
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -7259,40 +6836,32 @@ family: st.family,
         segs
     }
 
-    /// Dispatch a block-level box to the right formatting context.
-    /// Every box-making path funnels through here — a flex item, a grid item, a
-    /// table cell's own box, an out-of-flow box, a float. A POSITIONED one gets
-    /// its stacking range recorded here rather than at each of those five call
-    /// sites; a caller that records one too (the flow loop, `layout_abs`,
-    /// `place_float`) produces a range that either equals this one or contains
-    /// it, and an identical nested pair orders exactly as the single range
-    /// does. A `position: sticky` flex item was the case that named this: it
-    /// reached no other recording site at all and painted under its sibling.
-    /// Ein Flex- oder Rasterkind auslegen.
+    /// Lay out a flex or grid child.
     ///
-    /// **Ein Item hat seinen EIGENEN Formatierungskontext** (css-flexbox-1 §4,
-    /// css-grid-2 §6), und das ist keine Feinheit: ein Float im einen Item
-    /// reicht nicht in das daneben, und ein `clear` im zweiten sieht den Float
-    /// des ersten nicht.
-    ///
-    /// Der Behaelter isoliert schon (`establishes_bfc` ist fuer `flex`/`grid`
-    /// wahr) — aber nur nach AUSSEN. Zwischen den Geschwistern lief die Liste
-    /// weiter, und auf Wikipedias Hauptseite raeumte deshalb der Float der
-    /// LINKEN Spalte den Clearfix der RECHTEN: „In the news" wurde 342 px zu
-    /// hoch (566x696 statt 531x351 in Chromium) und schob alles darunter weg.
+    /// An item establishes its own formatting context (css-flexbox-1 §4,
+    /// css-grid-2 §6): a float in one item does not reach into the next, and a
+    /// `clear` in the second does not see the float of the first. The
+    /// container already isolates towards the outside (`establishes_bfc`), so
+    /// the float list is isolated here between siblings.
     fn layout_item(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
-        // Dieselbe Frage steht noch an zwei Stellen offen und ist dort NICHT
-        // gemessen: ein absolut gesetzter Kasten (`layout_abs`) und eine
-        // Tabellenzelle bekommen die Float-Liste ihres Rufers ebenfalls zu
-        // sehen. Beide legen laut Spezifikation auch einen eigenen Kontext an;
-        // wer das anfasst, misst es erst — hier steht die Zahl, die es
-        // rechtfertigt, nur fuer Flex und Raster.
+        // Not implemented: an absolutely positioned box (`layout_abs`) and a
+        // table cell also establish their own context by spec, but still see
+        // their caller's float list.
         let saved = core::mem::take(&mut self.floats);
         let out = self.layout_box(el, st, x, w, y);
         self.floats = saved;
         out
     }
 
+    /// Dispatch a block-level box to the right formatting context.
+    /// Every box-making path funnels through here — a flex item, a grid item, a
+    /// table cell's own box, an out-of-flow box, a float. A positioned one gets
+    /// its stacking range recorded here rather than at each of those call
+    /// sites; a caller that records one too (the flow loop, `layout_abs`,
+    /// `place_float`) produces a range that either equals this one or contains
+    /// it, and an identical nested pair orders exactly as the single range
+    /// does. Some boxes (e.g. a `position: sticky` flex item) reach no other
+    /// recording site.
     fn layout_box(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         if !self.should_track_stack(st) {
             return self.layout_box_inner(el, st, x, w, y);
@@ -7308,22 +6877,21 @@ family: st.family,
         // A form control is atomic wherever it lands. `flow_children` and
         // `collect_inline` catch the in-flow cases (so a field flows with the
         // text beside it); this catches every other box-making path — flex and
-        // grid items, table cells, absolutely positioned controls. Real search
-        // boxes sit in `display:flex` rows, so missing this rendered NOTHING.
+        // grid items, table cells, absolutely positioned controls.
         if let Some(kind) = crate::forms::kind_of(el) {
             if kind == ControlKind::Hidden {
                 return y;
             }
             let mut ctl = self.control_box(el, st, kind, w as f32);
-            // Here the CALLER already resolved this box: `w` is the flex item's
+            // Here the caller already resolved this box: `w` is the flex item's
             // main size / the grid column / the table cell, and a definite
             // height is the stretched cross size. Painting the control's own
             // intrinsic size instead would overlap the next item and ignore the
             // stretch every grid/flex item gets by default.
-            // `width: auto` plus zwei `auto`-Raender: ein blockweiter Kasten
-            // mit EIGENER Breite, mittig gesetzt. CSS 2.1 §10.3.4 behandelt
-            // ein Steuerelement dabei wie einen ersetzten Kasten — die Breite
-            // kommt aus ihm selbst, der Rest wird gleichmaessig verteilt.
+            // `width: auto` plus two `auto` margins: a block-level box with its
+            // own width, centred. CSS 2.1 §10.3.4 treats a control like a
+            // replaced box here — the width comes from itself, the rest is
+            // split evenly.
             let mut dx = 0;
             let centred = matches!(st.width, Len::Auto)
                 && matches!(st.margin_left, Len::Auto)
@@ -7333,30 +6901,19 @@ family: st.family,
                 dx = (w - ctl.w) / 2;
             } else if !matches!(kind, ControlKind::Checkbox | ControlKind::Radio) {
                 ctl.w = w.max(8);
-                // **Die Hoehe wird hier NICHT mehr angefasst.** Sie stand
-                // zuletzt als `ctl.h = st.height` da, „und sie zaehlt, wie sie
-                // dasteht" — nur zaehlt eine `Len::Px` an einem Steuerelement
-                // ohne `box-sizing: border-box` als INHALTShoehe, und
-                // `control_box` hat genau das schon aufgeloest. Der zweite
-                // Durchgang legte Polsterung und Rahmen also wieder ab: ein
-                // Flex-Item bekommt von `flex_item_style` die gestreckte Hoehe
-                // minus seinem Rahmenwerk eingetragen, und daraus wurde hier
-                // die ganze Hoehe. Ein `<input>` mit `padding: 6px 12px;
-                // border: 1px` kam in einer Flex-Zeile 20 statt 34 px hoch
-                // heraus — die Quer-Achse desselben Fehlers, den 0.166 auf der
-                // Hauptachse geschlossen hat.
+                // The height is not touched here: `control_box` already
+                // resolved it, including box-sizing. Overwriting it with
+                // `st.height` would treat a content-box height as the border
+                // box and drop padding and border.
             }
             let h_i = ctl.h;
             paint_control(self.fonts, self.theme, &ctl, x + dx, y, &mut self.ops, &mut self.controls);
             return y + h_i;
         }
-        // A replaced element reached through a BOX-making path: a flex or grid
+        // A replaced element reached through a box-making path: a flex or grid
         // item, a table cell's own box. `flow_children` puts an `<img>`/`<svg>`
-        // on the line it is building — there is no line here, so nothing put
-        // the picture anywhere and a flex row of icons painted NOTHING at all.
-        // The measurement was right the whole time (the neighbours sat the
-        // correct distance apart, around a hole), which is exactly why it read
-        // as an image-decoding problem and not as a missing branch.
+        // on the line it is building — there is no line here, so the picture
+        // is emitted here.
         if el.tag == "img" || el.tag == "svg" {
             let svg = el.tag == "svg";
             self.path.push(self.info(el));
@@ -7398,24 +6955,19 @@ family: st.family,
             Display::Grid => self.layout_grid(el, st, x, w, y),
             _ => {
                 let b = self.layout_block(el, st, x, w, y);
-                // Auch hier der EIGENE Randkasten: ein Flex-Item bekommt seine
-                // Inhaltsbreite hereingereicht, und die aufzuzeichnen hiesse,
-                // `getBoundingClientRect` um die Polsterung zu belügen.
+                // The own border box here too: a flex item is handed its
+                // content width, and recording that would misreport
+                // `getBoundingClientRect` by the padding.
                 let (rx, rw) = used_border_box(st, x, w);
                 self.record_inspect(el, st, rx, y, rw, b - y, f0);
                 return b;
             }
         };
-        // **Auch hier den Kasten aufzeichnen.** Bisher taten das nur der
-        // Flusspfad, Floats und absolut gesetzte Kaesten — alles, was ueber
-        // `layout_box` kommt (Flex- und Rasterkinder, Tabellenzellen), hatte
-        // gar keinen. `getBoundingClientRect` gab dort NULL zurueck, und eine
-        // Null sieht aus wie eine Messung.
-        // **Der Kasten einer Tabelle ist die Tabelle, nicht ihr Streifen.**
-        // Hier stand `(x, w)` — die Breite, die ANGEBOTEN wurde. Eine Tabelle
-        // mit `width: auto` schrumpft auf ihren Inhalt, malt auch so, und
-        // meldete sich trotzdem 1886 px breit, wo sie 157 malt. Derselbe
-        // Fehler wie bei den Flexkaesten in 0.145.0, nur eine Zeile weiter.
+        // Record the box here too, for everything that comes through
+        // `layout_box` (flex and grid children, table cells), so that
+        // `getBoundingClientRect` reports it.
+        // A table's box is the table, not its strip: a `width: auto` table
+        // shrinks to its content.
         let (rx, rw) = match table_box {
             Some((bx, bw)) => (bx, bw),
             None => used_border_box(st, x, w),
@@ -7427,13 +6979,14 @@ family: st.family,
 
     /// Grid layout (css-grid-2 subset). Handles the container box model (width/
     /// margins/padding/background/border/explicit height), explicit
-    /// `grid-template-columns`/`-rows` (px/%/fr/auto/`repeat`), `grid-auto-rows`,
-    /// the `grid`/`grid-template` `<rows> / <cols>` shorthand, row-major
+    /// `grid-template-columns`/`-rows` (px/%/fr/auto/`repeat`, including
+    /// `auto-fill`/`auto-fit`), `grid-auto-rows`, the `grid`/`grid-template`
+    /// `<rows> / <cols>` shorthand, named `grid-area` placement, row-major
     /// auto-placement with explicit line placement (`grid-column`/`grid-row`,
     /// start line + span), separate `row-gap`/`column-gap`, and item alignment
     /// (`justify-items`/`align-items`/`justify-self`/`align-self`, incl. the
-    /// default `stretch`). Not yet: named lines/areas, `repeat(auto-fill)`,
-    /// dense packing, subgrid, or `align-content`/`justify-content`.
+    /// default `stretch`). Not yet: named lines, dense packing, subgrid, or
+    /// `align-content`/`justify-content`.
     fn layout_grid(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // No template at all → a grid degenerates to a block box.
         if st.grid_ncols == 0 && st.grid_nrows == 0 {
@@ -7441,7 +6994,7 @@ family: st.family,
         }
 
         // Container horizontal box (mirrors `layout_block`) — border included,
-        // same as the flex container: `width` is the CONTENT box, the border
+        // same as the flex container: `width` is the content box, the border
         // box is that plus padding and border.
         let (cw, off_left) = resolve_block_h(st, w as f32);
         let aspect = with_aspect_height(st, cw);
@@ -7533,7 +7086,7 @@ family: st.family,
             }
         }
         if tracks.is_empty() {
-            // Rows-only grid → one IMPLICIT column, which `grid-auto-columns`
+            // Rows-only grid → one implicit column, which `grid-auto-columns`
             // sizes exactly as `grid-auto-rows` sizes an implicit row.
             tracks.push(st.grid_auto_cols);
         }
@@ -7556,7 +7109,7 @@ family: st.family,
                 }
                 if matches!(cs.position, Position::Absolute | Position::Fixed) {
                     // Deferred: a positioned child that names a grid line has
-                    // that GRID AREA as its containing block (css-grid §9), and
+                    // that grid area as its containing block (css-grid §9), and
                     // no track has a size yet. One that names none keeps the
                     // container's padding box.
                     abs_items.push((ce, cs));
@@ -7853,16 +7406,12 @@ family: st.family,
             }
             let m0 = self.spec_mark();
             self.path.push(self.info(el_i));
-            // NOTE: css-grid-2 §6.6 says a grid item's percentage height
-            // resolves against its GRID AREA, and the row tracks are sized by
-            // now, so it could be answered right here — `self.cb_h =
-            // Some(cell_h)` guarded on the spanned rows being definite. It
-            // MEASURES WORSE: 4052 against 4056 for keeping the container's
-            // content height. Guarding on definite tracks changed nothing, so
-            // the difference is not the circularity — something downstream
-            // (the `align-self: stretch` branch above already gives an
-            // auto-height item the row's height) compensates for the coarser
-            // answer. Parked with the number rather than taken on faith.
+            // css-grid-2 §6.6 says a grid item's percentage height resolves
+            // against its grid area, and the row tracks are sized by now. This
+            // deliberately keeps the container's content height instead:
+            // resolving against the area tested worse, as the `align-self:
+            // stretch` branch above already gives an auto-height item the
+            // row's height.
             let bottom = self.layout_item(el_i, &s2, ix as i32, (iw as i32).max(1), cell_y);
             self.path.pop();
             let laid_h = bottom - cell_y;
@@ -7879,7 +7428,7 @@ family: st.family,
         // — positioned children, now that every track has a size —
         //
         // css-grid §9: an absolutely positioned child whose `grid-row`/
-        // `grid-column` names lines is contained by that GRID AREA; on an axis
+        // `grid-column` names lines is contained by that grid area; on an axis
         // where it names none, the containing block stays the grid container's
         // padding box. The two axes are decided separately, which is why this
         // is not one `if`.
@@ -7919,8 +7468,6 @@ family: st.family,
         yy - y0
     }
 
-    /// Lay a box just to measure its natural height, discarding the emitted ops
-    /// (used for grid auto-row sizing before the real placement pass).
     /// The positioned containing block's height, running the deferred recipe
     /// (`PendingCbH`) on first read and caching the answer into `cb.3`.
     ///
@@ -7936,8 +7483,8 @@ family: st.family,
             self.cb.3 = Some(h);
             return Some(h);
         }
-        // The same guard the eager version had: measuring the box re-enters it
-        // and asks for its own height again. One level is all the answer needs.
+        // Measuring the box re-enters it and asks for its own height again.
+        // One level is all the answer needs.
         if self.measuring_cb_h.get() {
             return None;
         }
@@ -7960,8 +7507,8 @@ family: st.family,
         self.cb = save_cb;
         self.path.extend(tail);
         self.measuring_cb_h.set(false);
-        // `measure_box_height` returns the BORDER-box height; the containing
-        // block is the PADDING box, so the two borders come off.
+        // `measure_box_height` returns the border-box height; the containing
+        // block is the padding box, so the two borders come off.
         let used = Some((h - border_y).max(0));
         self.cb_pend[idx].resolved = used;
         self.cb.3 = used;
@@ -8035,8 +7582,8 @@ family: st.family,
     /// exclusion rects into the real layout: the next float finds a BFC that
     /// looks full and drops below phantom neighbours. And `hover_boxes` /
     /// `inspects` are hit-test geometry — a trial run records them at trial
-    /// COORDINATES, so the pointer lights up an element the page never painted
-    /// there.
+    /// coordinates, so the pointer would light up an element the page never
+    /// painted there.
     fn spec_rollback(&mut self, m: &SpecMark) {
         self.ops.truncate(m.ops);
         self.links.truncate(m.links);
@@ -8050,6 +7597,8 @@ family: st.family,
         self.hover_boxes.truncate(m.hover_boxes);
     }
 
+    /// Lay a box just to measure its natural height, discarding the emitted ops
+    /// (used for grid auto-row sizing before the real placement pass).
     fn measure_box_height(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y: i32) -> i32 {
         let m = self.spec_mark();
         let prev_cb = self.cb;
@@ -8066,24 +7615,21 @@ family: st.family,
     /// establishing the containing block), `flex-grow`/`-shrink`/`-basis` with
     /// the automatic content minimum size, per-item margins (incl. `margin:auto`
     /// on the main axis), `gap`, `justify-content`, `align-items`/`align-self`
-    /// (start/center/end/stretch), and `flex-wrap` (multi-line). Not yet:
-    /// reverse directions, `align-content`, baseline alignment.
+    /// (start/center/end/stretch), `align-content`, and `flex-wrap`
+    /// (multi-line). Not yet: reverse directions, baseline alignment.
     fn layout_flex(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
-        // Ein nackter Textlauf zwischen den Kindern ist laut css-flexbox-1 §4
-        // ein ANONYMER Flex-Kasten — er verschwand hier bisher spurlos, weil
-        // die Schleife unten nur Elemente aufsammelte. `<div class="flex">Label
-        // <span>x</span></div>` verlor sein „Label".
-
         // Flex items = in-flow child elements; abspos children are out of flow.
-        // Structural selectors count EVERY element sibling, so the position is
-        // tracked independently of which children become items.
+        // A bare text run between the children is an anonymous flex item
+        // (css-flexbox-1 §4). Structural selectors count every element
+        // sibling, so the position is tracked independently of which children
+        // become items.
         let mut items: Vec<(Kid<'a>, ComputedStyle)> = Vec::new();
         let sib_count = el.children.iter().filter(|n| matches!(n, Node::Element(_))).count() as u32;
         let mut siblings: Vec<ElemInfo> = Vec::new();
         for c in &el.children {
             if let Node::Text(t) = c {
-                // Nur Laeufe mit sichtbarem Inhalt: reiner Leerraum zwischen
-                // zwei Kaesten erzeugt keinen Kasten (§4).
+                // Only runs with visible content: plain whitespace between two
+                // boxes generates no box (§4).
                 if t.trim().is_empty() {
                     continue;
                 }
@@ -8114,15 +7660,13 @@ family: st.family,
         }
         // A `::before`/`::after` with a box of its own is a flex item like any
         // other child (CSS Display 3 §2.2). It is a fixed rectangle and never a
-        // flexible length, so instead of threading a second item KIND through
+        // flexible length, so instead of threading a second item kind through
         // the whole §9.7 machinery it is reserved off the main axis here and
         // the real items share what is left. Exact for the idiom this serves —
         // a `content: ""` box with a definite width.
-        // Only the LEADING one: a trailing box would have to sit right behind
-        // the last item, and reserving it off the axis puts it at the
-        // container's far edge instead (`flexbox_generated` measures exactly
-        // that gap). The icon-before-content idiom this serves needs the lead;
-        // the tail waits until generated content is a real flex item.
+        // Not implemented: a trailing box would have to sit right behind the
+        // last item, but reserving it off the axis puts it at the container's
+        // far edge instead.
         let lead_box = self.pseudo_box(el, st, PseudoElem::Before, w);
         let tail_box: Option<AtomicBox> = None;
         // Empty flex box: fall back to block so its own box decoration still paints.
@@ -8133,8 +7677,7 @@ family: st.family,
 
         // Container horizontal box (mirrors `layout_block`/`layout_grid`). The
         // border counts: a flex container with `width: 40em; border: 1px` has a
-        // 642px border box like any other block, and leaving it out made every
-        // bordered flex container two pixels narrow AND shifted its content.
+        // 642px border box like any other block.
         let (cw, off_left) = resolve_block_h(st, w as f32);
         let aspect = with_aspect_height(st, cw);
         let st = aspect.as_ref().unwrap_or(st);
@@ -8161,21 +7704,17 @@ family: st.family,
 
         // Definite container content height (for cross-stretch / main-axis flex).
         let def_h: Option<f32> = content_height_of(st, st.height);
-        // **`min-height` bestimmt die Quer-Groesse genauso.** Ein Behaelter mit
-        // `min-height: 100vh` und `align-items: center` hat 993 px Platz, in
-        // denen er mittig setzen kann — bisher sah das Layout nur `height`,
-        // fand nichts, und der Kasten klebte oben. Dasselbe Loch liess
-        // `min-height: 100%` an einem Kind gegen NICHTS rechnen: zwei
-        // WPT-Tests und die Fritzbox-Anmeldung, ein Fehler.
+        // `min-height` determines the cross size as well: a container with
+        // `min-height: 100vh` and `align-items: center` centres within that
+        // space, and a child's `min-height: 100%` resolves against it.
         //
-        // Es ist ein BODEN, kein Ersatz: ist der natuerliche Inhalt hoeher,
-        // gilt der. Deshalb reicht ein Durchgang — der Boden steht vorher
-        // fest, und die Zeile nimmt das Maximum.
+        // It is a floor, not a replacement: if the natural content is taller,
+        // that wins. So one pass suffices — the floor is known beforehand,
+        // and the line takes the maximum.
         let min_h: Option<f32> = content_height_of(st, st.min_height);
-        // Und `max-height` ist derselbe Satz von der anderen Seite: eine
-        // DECKE. Ohne sie lief ein Kind auf 9999 px, obwohl der Behaelter auf
-        // 100 gedeckelt war — der Deckel griff erst ganz am Ende an der
-        // Kastenhoehe, nicht an dem, was die Zeile ihren Kindern gibt.
+        // And `max-height` is the same from the other side: a ceiling, applied
+        // to what the line gives its children, not only to the box height at
+        // the end.
         let max_h: Option<f32> = content_height_of(st, st.max_height);
 
         let prev_cb_h = self.cb_h;
@@ -8243,29 +7782,27 @@ family: st.family,
         w: i32,
         y0: i32,
         def_cross: Option<f32>,
-        // Der Boden aus `min-height` — bestimmt wie `def_cross`, aber er
-        // ERSETZT die natuerliche Groesse nicht, er hebt sie nur an.
+        // The floor from `min-height` — determined like `def_cross`, but it
+        // does not replace the natural size, it only raises it.
         min_cross: Option<f32>,
-        // Und die Decke aus `max-height`.
+        // And the ceiling from `max-height`.
         max_cross: Option<f32>,
     ) -> i32 {
         let avail = w as f32;
-        // Row flex: the MAIN axis is horizontal, so the gap between items is
-        // `column-gap` and the gap between wrapped lines is `row-gap`. Reading
-        // one value for both made `gap: 10px 20px` put the row gap between the
-        // items instead of between the lines.
+        // Row flex: the main axis is horizontal, so the gap between items is
+        // `column-gap` and the gap between wrapped lines is `row-gap`.
         let main_gap = st.grid_col_gap.px(avail).unwrap_or(0.0);
         let line_gap = st.grid_row_gap.px(def_cross.unwrap_or(0.0)).unwrap_or(0.0);
 
         // — per-item metrics (content-box main size = width) —
-        // Die Prozentbasis der Kinder ist die BENUTZTE Quer-Groesse — und die
-        // steht auch fest, wenn sie aus `min-height` kommt.
+        // The children's percentage basis is the used cross size — which is
+        // also definite when it comes from `min-height`.
         let m = self.flex_metrics(items, avail, true, def_cross.or(min_cross));
 
         // — line breaking (flex-wrap) —
         let lines = flex_break_lines(&m, avail, main_gap, st.flex_wrap, st.flex_balance);
 
-        // `align-content` packs the LINES in whatever cross space the container
+        // `align-content` packs the lines in whatever cross space the container
         // has left over, so every line's cross size must be known before the
         // first line is placed. A multi-line container therefore lays its lines
         // out once to measure them, throws that placement away, and does it
@@ -8287,7 +7824,7 @@ family: st.family,
             }
             self.flex_rollback(&mark);
             let gaps = line_gap * (n_lines as f32 - 1.0);
-            // NOT clamped at zero: the default overflow behaviour is `unsafe`
+            // Not clamped at zero: the default overflow behaviour is `unsafe`
             // (css-align-3 §5.3), so `center` on lines that do not fit spills
             // equally out of both ends rather than piling up at the start.
             // Only the distributions have a spec'd fallback, below.
@@ -8295,7 +7832,7 @@ family: st.family,
             let nf = n_lines as f32;
             match st.align_content {
                 // Every line grows by an equal share. The share is taken
-                // CUMULATIVELY so the integer rounding cannot drift: the last
+                // cumulatively so the integer rounding cannot drift: the last
                 // line still ends exactly on the container's content edge.
                 ContentAlign::Stretch if free > 0.0 => {
                     for (i, h) in nat.iter().enumerate() {
@@ -8345,7 +7882,7 @@ family: st.family,
     }
 
     /// Lay one flex line out at `cross_y` and return the cross size it used.
-    /// `forced_cross` is the size the line was GIVEN (a single line filling a
+    /// `forced_cross` is the size the line was given (a single line filling a
     /// definite container, or a share handed out by `align-content: stretch`);
     /// `None` means it sizes to its tallest item, which is also what the
     /// measuring pass asks for.
@@ -8361,9 +7898,9 @@ family: st.family,
         line: (usize, usize),
         cross_y: i32,
         forced_cross: Option<i32>,
-        // `min-height` des Behaelters, wenn diese Zeile die einzige ist.
+        // The container's `min-height`, if this line is the only one.
         min_cross: Option<f32>,
-        // dito `max-height`.
+        // Likewise `max-height`.
         max_cross: Option<f32>,
     ) -> i32 {
         let (idx0, idx1) = (line.0, line.1);
@@ -8411,26 +7948,21 @@ family: st.family,
         }
 
         // Natural cross size (height) at the resolved width, to size the
-        // line — laid out AT the spot the item will most likely keep, and
-        // the ops KEPT instead of discarded.
+        // line — laid out at the spot the item will most likely keep, and
+        // the ops kept instead of discarded.
         //
-        // Measuring a flex item already lays its whole subtree out; the old
-        // code threw that away and then laid the identical thing again, so
-        // every nesting level doubled the work (2^5 on MediaWiki's header).
-        // Counted on real pages, 93–96 % of items end up at exactly
-        // `(item_x[k], cross_y)` with their natural height, so the second
-        // pass was almost always a byte-for-byte repeat of the first.
+        // Measuring a flex item already lays its whole subtree out; throwing
+        // that away and laying it out again would double the work at every
+        // nesting level. Most items end up at exactly `(item_x[k], cross_y)`
+        // with their natural height, so the first pass usually stands.
         let mut h_nat = alloc::vec![0i32; ln];
         let mut marks: Vec<FlexMark> = Vec::with_capacity(ln);
         for k in 0..ln {
             let (kid, s) = (&items[idx0 + k].0, items[idx0 + k].1);
             let s_meas = flex_item_style(&s, Some(size[k]), None, true);
-            // **Kein Mindestpixel.** Ein Flexkasten darf leer sein, und die
-            // Eigenbreite daneben rechnet auch mit 0 — eine 1 hier laesst die
-            // beiden Wege auseinanderlaufen. Auf DDGs „Searches related to"
-            // war das ein `&ZeroWidthSpace;` als anonymes Element: es nahm
-            // dem Text neben sich genau ein Pixel weg, und der brach damit
-            // auf zwei Zeilen ([[feedback_intrinsic_shared_path]]).
+            // No minimum pixel. A flex item may be empty, and the intrinsic
+            // width computes with 0 as well — a 1 here would let the two paths
+            // disagree.
             let box_main = (size[k] + li[k].main_pad).max(0.0) as i32;
             let mark = self.flex_mark();
             let bottom = match kid {
@@ -8440,19 +7972,19 @@ family: st.family,
                     self.path.pop();
                     b
                 }
-                // Ein anonymer Kasten ist schon fertig — er wird nur gelegt.
+                // An anonymous box is already finished — it is only placed.
                 Kid::Anon(b) => {
                     self.place_atomic(b, item_x[k] as i32, cross_y);
                     cross_y + b.h
                 }
             };
             h_nat[k] = bottom - cross_y;
-            // Keep the ops, but NOT the ambient state a discarded
-            // measurement used to drop: a flex item is its own block
+            // Keep the ops, but not the ambient state a discarded
+            // measurement would drop: a flex item is its own block
             // formatting context, so its floats must not reach its
             // siblings, and the containing block it installed is gone with
-            // it. Leaving those standing made every later item on the line
-            // flow around phantom exclusions.
+            // it. Otherwise every later item on the line would flow around
+            // phantom exclusions.
             self.floats.truncate(mark.spec.floats);
             self.cb = mark.cb;
             marks.push(mark);
@@ -8461,12 +7993,10 @@ family: st.family,
         // Line cross size: a single unwrapped line fills a definite container
         // height; otherwise it's the tallest item margin box.
         //
-        // The line is sized from each item's HYPOTHETICAL cross size
+        // The line is sized from each item's hypothetical cross size
         // (Flexbox §9.4 step 7) — the natural one clamped by its own
-        // `min-`/`max-height`. Using the raw natural height left the line
-        // short of any item held open by a `min-height`, and that item then
-        // hung out past the container: Wikipedia's search button is
-        // `min-height: 32px` inside a 30px-tall line.
+        // `min-`/`max-height` — so an item held open by a `min-height` does
+        // not hang out past the container.
         let nat_line = (0..ln)
             .map(|k| {
                 let hypo = clamp_cross(h_nat[k] as f32, li[k].min_cross, li[k].max_cross);
@@ -8474,9 +8004,9 @@ family: st.family,
             })
             .max()
             .unwrap_or(0);
-        // `height` SETZT die Zeile (ein zu kleiner Wert laesst die Inhalte
-        // ueberlaufen), `min-height` HEBT sie nur an — die Reihenfolge, die
-        // css-sizing-3 §5 fuer die Klammerung vorschreibt.
+        // `height` sets the line (too small a value lets the contents
+        // overflow), `min-height` only raises it — the clamping order
+        // css-sizing-3 §5 prescribes.
         let line_cross = clamp_cross(
             forced_cross.unwrap_or(nat_line) as f32,
             min_cross.unwrap_or(0.0),
@@ -8484,7 +8014,7 @@ family: st.family,
         ) as i32;
 
         // Now that the line's cross size is known, work out where each item
-        // really goes, and find the FIRST one the speculative pass got
+        // really goes, and find the first one the speculative pass got
         // wrong. A forced height counts as wrong even when the number
         // matches: it changes the derived style, so the subtree below can
         // resolve differently.
@@ -8525,7 +8055,7 @@ family: st.family,
 
         // `ops` is one sequential list, so redoing item k means dropping
         // everything emitted from k onward — hence the first mismatch, not
-        // each one. Worst case this is exactly the two passes it replaced.
+        // each one. Worst case this is two full passes.
         if first_redo < ln {
             self.flex_rollback(&marks[first_redo]);
             for k in first_redo..ln {
@@ -8533,14 +8063,14 @@ family: st.family,
                 let (forced_h, y) = plan[k];
                 let s2 = flex_item_style(&s, Some(size[k]), forced_h, true);
                 let Kid::El(el) = kid else {
-                    // Der anonyme Kasten aendert sich durch die zweite Runde
-                    // nicht — er hat keine Kinder, die anders fielen.
+                    // The anonymous box does not change in the second pass —
+                    // it has no children that could fall differently.
                     if let Kid::Anon(b) = kid { self.place_atomic(b, item_x[k] as i32, y); }
                     continue;
                 };
                 self.path.push(self.info(el));
                 // `layout_box` takes the box the caller resolved — the
-                // item's BORDER box. `size[k]` is its content size, so the
+                // item's border box. `size[k]` is its content size, so the
                 // item's own padding and border have to go back on, or a
                 // control (which paints exactly this width) loses them and
                 // clips its label.
@@ -8580,11 +8110,9 @@ family: st.family,
         let mut ma_trail = alloc::vec![false; n];
         let mut h_nat = alloc::vec![0i32; n];
         for (i, (el, s)) in items.iter().enumerate() {
-            // Polsterung UND Rahmen: `flex_item_style` legt beide wieder auf
-            // eine Inhaltsbreite drauf, also muss der Weg hierher beide
-            // abziehen. Nur die Polsterung abzuziehen machte jedes gerahmte
-            // Item um seinen Rahmen zu breit — dieselbe Zwillingsrechnung, die
-            // `flex_metrics` daneben schon richtig hat.
+            // Padding and border: `flex_item_style` adds both back onto a
+            // content width, so this path must subtract both, as
+            // `flex_metrics` does.
             let pad_h = s.pad_left + s.pad_right + s.border_x();
             let to_content = |px: f32| if s.box_border { (px - pad_h).max(0.0) } else { px };
             let ml = s.margin_left.px(avail).unwrap_or(0.0);
@@ -8593,19 +8121,14 @@ family: st.family,
             let width_auto = matches!(s.width, Len::Auto);
             // Cross axis of a column = horizontal. An `auto` margin there takes
             // the free width and cancels the stretch (css-flexbox-1 §9.4 step
-            // 11) — without that, `mx-auto` on a stretched item has nothing
-            // left to centre and reads as ignored.
+            // 11), so `mx-auto` on a stretched item centres it.
             let ml_auto = matches!(s.margin_left, Len::Auto);
             let mr_auto = matches!(s.margin_right, Len::Auto);
             let stretch = align == CrossAlign::Stretch && width_auto && !(ml_auto || mr_auto);
             let mut wd = if stretch {
-                // **Gestreckt wird der AUSSENkasten** (css-flexbox-1 §9.4
-                // Schritt 11): der Randkasten des Items fuellt die Querachse,
-                // seine Inhaltsbreite ist um Polsterung und Rahmen kleiner.
-                // Ohne `to_content` bekam JEDES Kind eines gepolsterten
-                // Flex-Items die Breite des Elternrandkastens — auf der
-                // Bootstrap-Galerie 32 px zu viel an jedem Kartenrumpf, jedem
-                // Dialogrumpf und jedem Listeneintrag.
+                // The outer box is stretched (css-flexbox-1 §9.4 step 11): the
+                // item's border box fills the cross axis, and its content width
+                // is smaller by padding and border.
                 to_content((avail - ml - mr).max(1.0)).max(1.0)
             } else if let Len::Intrinsic(k) = s.width {
                 let (pref, min) = self.kid_intrinsic(el, s);
@@ -8621,9 +8144,9 @@ family: st.family,
             }
             wd = wd.clamp(1.0, avail.max(1.0));
             cross_w[i] = wd;
-            // Ausgerichtet wird der RANDkasten, nicht der Inhalt: `wd` ist
-            // eine Inhaltsbreite, also gehoert die Polsterung fuer jede
-            // Rechnung mit freiem Platz wieder drauf.
+            // The border box is aligned, not the content: `wd` is a content
+            // width, so the padding goes back on for every free-space
+            // computation.
             let bw = wd + pad_h;
             ix[i] = if ml_auto || mr_auto {
                 let free = (avail - ml - mr - bw).max(0.0);
@@ -8656,19 +8179,13 @@ family: st.family,
         // Total intrinsic main size (heights + vertical margins + gaps).
         let gaps_total = gap * (n as f32 - 1.0).max(0.0);
 
-        // **Die Hauptachse einer Spalte ist die HOEHE, und sie flext.**
+        // The main axis of a column is the height, and it flexes:
+        // `flex-direction: column` with a `flex: 1` child is the common app
+        // layout, and the child must grow to fill the container.
         //
-        // Bisher tat sie das nicht: diese Funktion mass die natuerlichen Hoehen
-        // und verteilte den Rest nur ueber `justify-content` und Auto-Raender.
-        // `flex-grow` hatte auf der Hauptachse einer Spalte KEINE Wirkung — und
-        // `display:flex; flex-direction:column` mit einem `flex:1`-Kind ist das
-        // haeufigste App-Layout des Webs. Auf sandbox.nopeek.ch bekam die
-        // Inhaltsflaeche dadurch ihre Inhaltshoehe statt der Fensterhoehe, und
-        // alles darunter sass 224 px zu hoch.
-        //
-        // Nur bei DEFINITER Hauptgroesse: ohne sie waechst der Behaelter selbst
-        // mit dem Inhalt, es gibt keinen freien Platz, und `grow` ist per
-        // Spezifikation wirkungslos.
+        // Only with a definite main size: without one the container grows
+        // with its content, there is no free space, and `grow` has no effect
+        // by spec.
         let main_size: Option<Vec<f32>> = def_cross.map(|avail| {
             let li: Vec<FlexItem> = items
                 .iter()
@@ -8676,26 +8193,25 @@ family: st.family,
                 .map(|(i, (_, s))| {
                     let main_pad = s.pad_top + s.pad_bottom + s.border_y();
                     let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
-                    // Die Grundgroesse: `flex-basis`, sonst eine definite
-                    // `height`, sonst die gemessene Inhaltshoehe.
+                    // The base size: `flex-basis`, else a definite `height`,
+                    // else the measured content height.
                     let base = match s.flex_basis {
                         FlexBasis::Px(p) => to_content(p),
                         FlexBasis::Pct(p) => to_content(p / 100.0 * avail),
                         FlexBasis::Auto => content_height_of(s, s.height)
                             .unwrap_or_else(|| (h_nat[i] as f32 - main_pad).max(0.0)),
                     };
-                    // **Die automatische Mindestgroesse** (css-flexbox-1 §4.5):
-                    // `min-height: auto` an einem Flex-Item ist seine
-                    // INHALTSgroesse, nicht null — deshalb schrumpft ein
-                    // `<select>` in einer 0 px hohen Spalte nicht weg. Nur
-                    // solange der Inhalt sichtbar ueberlaeuft: ein Rollkasten
-                    // ist dafuer gemacht, geklemmt zu werden, und hat keine.
+                    // The automatic minimum size (css-flexbox-1 §4.5):
+                    // `min-height: auto` on a flex item is its content size,
+                    // not zero, so e.g. a `<select>` in a zero-height column
+                    // does not vanish. Only while the content overflows
+                    // visibly: a scroll container is meant to be clamped and
+                    // has none.
                     let floor = match vert_len(s.min_height, Some(avail as i32)) {
                         Some(v) => to_content(v),
-                        // Das MINIMUM aus Inhalts- und angegebener Groesse,
-                        // wie `flex_metrics` es fuer die Zeile schon rechnet:
-                        // wer eine Hoehe nennt, die kleiner ist als sein
-                        // Inhalt, hat sie so gemeint.
+                        // The minimum of content and specified size, as
+                        // `flex_metrics` computes it for a row: a height
+                        // smaller than the content was meant that way.
                         None if !s.overflow_y.scrolls() => {
                             let content = (h_nat[i] as f32 - main_pad).max(0.0);
                             match content_height_of(s, s.height) {
@@ -8723,8 +8239,8 @@ family: st.family,
             resolve_flex_line(&li, avail, gaps_total)
         });
 
-        // Was die Zeilen unten wirklich belegen — geflext, wo es eine
-        // Hauptgroesse gibt, sonst wie gemessen.
+        // What the items below actually occupy — flexed where there is a main
+        // size, otherwise as measured.
         let outer = |i: usize| -> f32 {
             match &main_size {
                 Some(v) => v[i] + items[i].1.pad_top + items[i].1.pad_bottom + items[i].1.border_y(),
@@ -8735,7 +8251,7 @@ family: st.family,
         let intrinsic = sum_h + gaps_total;
         // A definite container height gives free main space → justify-content.
         let free = def_cross.map(|c| c - intrinsic).unwrap_or(0.0).max(0.0);
-        // Main-axis auto margins take the free space FIRST; `justify-content`
+        // Main-axis auto margins take the free space first; `justify-content`
         // only ever sees what they leave (css-flexbox-1 §8.1). This is what
         // makes `mt-auto` on the last child of a fixed-height column pin it to
         // the bottom — the card-footer pattern.
@@ -8757,17 +8273,17 @@ family: st.family,
         let mut y = y0 as f32 + offset;
         for (i, (el, s)) in items.iter().enumerate() {
             y += mm_lead[i] + if ma_lead[i] { auto_each } else { 0.0 };
-            // Die Hauptgroesse wird ERZWUNGEN, wo der Behaelter eine hat;
-            // die Quergroesse ist die gestreckte Breite von oben.
+            // The main size is forced where the container has one; the cross
+            // size is the stretched width from above.
             let s2 = flex_item_style(s, main_size.as_ref().map(|v| v[i]), Some(cross_w[i]), false);
             let bottom = match el {
                 Kid::El(e) => {
                     self.path.push(self.info(e));
                     let b = self.layout_item(e, &s2, ix[i], cross_w[i].max(1.0) as i32, y as i32);
                     self.path.pop();
-                    // Ein Kasten mit erzwungener Hauptgroesse belegt genau sie,
-                    // auch wenn sein Inhalt kuerzer ist — sonst wandert alles
-                    // darunter nach oben.
+                    // A box with a forced main size occupies exactly that, even
+                    // if its content is shorter — otherwise everything below
+                    // moves up.
                     b.max(y as i32 + outer(i) as i32)
                 }
                 Kid::Anon(b) => {
@@ -8790,15 +8306,15 @@ family: st.family,
     /// Per-item flex metrics on the main axis (row: width; column: width used as
     /// cross). `row` selects which margins/paddings are the main vs cross axis.
     ///
-    /// `def_cross` ist die DEFINITE Quer-Groesse des Behaelters, oder `None`,
-    /// wenn sie sich erst aus dem Inhalt ergibt. Sie ist die einzige zulaessige
-    /// Grundlage fuer ein Prozent auf der Quer-Achse — siehe unten.
+    /// `def_cross` is the container's definite cross size, or `None` when it
+    /// only follows from the content. It is the only valid basis for a
+    /// percentage on the cross axis — see below.
     fn flex_metrics(&mut self, items: &[(Kid<'a>, ComputedStyle)], avail: f32, row: bool,
                     def_cross: Option<f32>) -> Vec<FlexItem> {
         let mut out = Vec::with_capacity(items.len());
         for (el, s) in items {
-            // Padding AND border on each axis: every consumer below adds
-            // `main_pad` to a CONTENT size to get a border box, so leaving the
+            // Padding and border on each axis: every consumer below adds
+            // `main_pad` to a content size to get a border box, so leaving the
             // border out makes each of them short by it.
             let (main_pad, cross_pad) = if row {
                 (s.pad_left + s.pad_right + s.border_x(), s.pad_top + s.pad_bottom + s.border_y())
@@ -8811,7 +8327,7 @@ family: st.family,
             } else {
                 (Len::Px(s.margin_top), Len::Px(s.margin_bottom))
             };
-            // An `auto` margin is free space on ITS axis, so which of the four
+            // An `auto` margin is free space on its axis, so which of the four
             // counts as main and which as cross flips with the direction. The
             // vertical pair carries its keyword beside the number, because in
             // normal flow it is used as zero.
@@ -8843,20 +8359,12 @@ family: st.family,
             };
             let to_content = |px: f32| if s.box_border { (px - main_pad).max(0.0) } else { px };
             let spec = main_size.px(avail).map(to_content);
-            // `intrinsic_width` reports the element's CONTENT width — its own
+            // `intrinsic_width` reports the element's content width — its own
             // padding and border are added by whoever lays it out, and that
-            // holds for a CONTROL too: `control_box` hands back the finished
+            // holds for a control too: `control_box` hands back the finished
             // border box, and `intrinsic_width` already takes the CSS frame
-            // back off (0.145.0, the `inline-flex` button group).
-            //
-            // **Hier stand dieselbe Subtraktion ein zweites Mal.** Sie war
-            // richtig, solange `intrinsic_width` den Randkasten ungekuerzt
-            // durchreichte (0.66.0); seit 0.145.0 zieht sie denselben Betrag
-            // ein zweites Mal ab, und `resolve_flex_line` legt ihn nur EINmal
-            // wieder drauf. Jedes Steuerelement in einem Flex-Container kam so
-            // um genau seine Polsterung plus Rahmen zu schmal heraus — ein
-            // Bootstrap-Knopf 48 statt 74 px, jede `.input-group`, jede
-            // `.modal-footer`, jede `.navbar`-Suchzeile.
+            // back off. So the frame must not be subtracted again here;
+            // `resolve_flex_line` adds it back only once.
             let (pref, minc) = self.kid_intrinsic(el, s);
             let base = match s.flex_basis {
                 FlexBasis::Px(p) => to_content(p),
@@ -8880,17 +8388,12 @@ family: st.family,
             } else {
                 matches!(s.width, Len::Auto)
             };
-            // **Die Quer-Achse hat eine EIGENE Grundlage.** Hier stand `avail`
-            // — und das ist die HAUPT-Achse, bei einer Zeile also die Breite.
-            // `min-height: 100%` an einem Flex-Element wurde damit zu 100 %
-            // der BREITE des Behaelters: ein 328 px breites Eingabefeld war
-            // 330 px hoch statt 40.
-            //
-            // Richtig ist die definite Quer-Groesse des Behaelters, und wenn
-            // es keine gibt, gilt das Prozent als nicht aufloesbar: `min-`
-            // faellt auf 0, `max-` auf „keins" (CSS 2.1 §10.7 — genau die
-            // Regel, die `resolve_pct_heights` fuer den Flussfall schon
-            // anwendet).
+            // The cross axis has its own basis — not `avail`, which is the
+            // main axis (the width, for a row). A percentage `min-height` on a
+            // row item must resolve against the container's definite cross
+            // size; without one the percentage is unresolvable: `min-` falls
+            // back to 0, `max-` to none (CSS 2.1 §10.7, the same rule
+            // `resolve_pct_heights` applies in flow).
             let (min_cross, max_cross) = if row {
                 let basis = def_cross.map(|h| h as i32);
                 (
@@ -8931,8 +8434,7 @@ family: st.family,
     ///
     /// It takes the whole mark rather than a few explicit indices so that a
     /// side table added later cannot be forgotten here: hit rects that do not
-    /// follow their painted box put the pointer where the box used to be, and
-    /// `hover_boxes` shipped in 0.25.0 with exactly that defect.
+    /// follow their painted box put the pointer where the box used to be.
     fn shift_ops(&mut self, m: &SpecMark, dx: i32, dy: i32) {
         for op in &mut self.ops[m.ops..] {
             match op {
@@ -8946,8 +8448,8 @@ family: st.family,
                     *x += dx;
                     *y += dy;
                 }
-                // Wie in `translate_op_list`: `clip` ist absolut, nicht
-                // relativ zum Kasten.
+                // As in `translate_op_list`: `clip` is absolute, not relative
+                // to the box.
                 DrawOp::BgImage { x, y, clip, .. } | DrawOp::Gradient { x, y, clip, .. } => {
                     *x += dx;
                     *y += dy;
