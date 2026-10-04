@@ -158,8 +158,8 @@ pub extern "C" fn _start() {
             pad(usage, 3);
             print("%");
 
-            // 0 = the core did not run in the window (kernel 0.423+): no
-            // frequency to show, it slept.
+            // 0 = the core did not run in the window: no frequency to
+            // show, it slept.
             let mhz = sys(12 | ((i as i32) << 8) as i32);
             print("  ");
             if mhz == 0 { print("    -"); } else { pad(mhz, 5); }

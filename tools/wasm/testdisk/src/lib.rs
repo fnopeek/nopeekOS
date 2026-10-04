@@ -36,8 +36,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 //
 // 256 MB as bss adds nothing to the binary on disk (zero-init), but
 // the wasmi runtime has to back it with real pages on instantiate, so
-// startup gets slower — measured ~50 ms extra on N100. Acceptable for
-// a one-shot bench.
+// startup gets slower. Acceptable for a one-shot bench.
 const HEAP_SIZE: usize = 256 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
@@ -102,7 +101,7 @@ fn fmt_size(bytes: usize) -> String {
 
 /// (size_bytes, count_per_phase, label_prefix) — kept small so a slow
 /// WASM interpreter doesn't spend forever on the unmeasured loop overhead.
-/// We're measuring kernel FS perf, not Rust→Wasm code-gen.
+/// We're measuring kernel FS performance, not Rust→Wasm code-gen.
 ///
 /// `xhuge` (16 MB × 1) probes the data-bandwidth ceiling: at this size
 /// the indirect-extent chain has thousands of entries, and AEAD +
@@ -268,8 +267,8 @@ pub extern "C" fn _start() {
     let t_alloc0 = host::tsc_now();
 
     // 100 MB buffers (sized for the 100M bucket). Rust's `vec![0; N]`
-    // memsets which on N100 = ~30 ms × 2 buffers; wasmi's
-    // `memory.fill` lowers to host memset so it's near-DRAM-bandwidth.
+    // memsets; wasmi's `memory.fill` lowers to host memset, so it runs
+    // near DRAM bandwidth.
     let max_size = 100 * 1024 * 1024 + 32;
     let mut write_buf: Vec<u8> = vec![0u8; max_size];
     let mut read_buf: Vec<u8> = vec![0u8; max_size];
@@ -330,8 +329,8 @@ pub extern "C" fn _start() {
     print_dec(host::bench_raw_read_mbs());
     host::print(" MB/s  (1 MB extent, no FS, no crypto)\n");
 
-    // ── Integrity self-check (SAME run — a corrupt FS only shows up here;
-    // after a reboot the mount fails and we never get to run again) ────────
+    // ── Integrity self-check, in the same run: a corrupt FS only shows up
+    // here; after a reboot the mount fails and we never get to run again ──
     host::print("\n  Self-check: ");
     let problems = host::fs_selfcheck();
     if problems == 0 {

@@ -3,8 +3,7 @@
 //! One-shot, no window (full-screen mode). Launched by the bar's camera
 //! button via `npk_launch("snap", "full" | "region")`:
 //!   - "full"   → capture the whole composited screen, save as PNG.
-//!   - "region" → (slice ③) freeze + rubber-band select; for now falls
-//!                back to a full capture.
+//!   - "region" → not implemented yet; falls back to a full capture.
 //!
 //! The kernel only hands over raw BGRA pixels (`npk_capture_screen`,
 //! CAPTURE-gated); snap does the PNG encode + save itself. Files land in
@@ -26,8 +25,8 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
 // Read (home dir + list) + write (save PNG) + capture (read the screen).
-// No RENDER/CANVAS yet — full-screen mode shows no window. Region mode
-// (slice ③) will add CANVAS|RENDER for the frozen overlay.
+// No RENDER/CANVAS: full-screen mode shows no window. A region mode
+// with a frozen overlay would need CANVAS|RENDER.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [nopeek_widgets::caps::READ | nopeek_widgets::caps::WRITE | nopeek_widgets::caps::CAPTURE];
@@ -116,7 +115,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[snap] panic!"); loop {} }
 // ── Entry ─────────────────────────────────────────────────────────────
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // Mode (unused for now — region falls back to full until slice ③).
+    // Mode (unused — region falls back to full).
     let mut argbuf = [0u8; 32];
     let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
     let _mode = if n > 0 { core::str::from_utf8(&argbuf[..n as usize]).unwrap_or("full") } else { "full" };
@@ -138,8 +137,8 @@ pub extern "C" fn _start() {
     let t_captured = now_ms();
     log_ms("capture", t_captured - t_start);
 
-    // Shutter blink — AFTER the capture, so the white is never in the
-    // shot, and BEFORE the encode, so the acknowledgement is immediate
+    // Shutter blink — after the capture, so the white is never in the
+    // shot, and before the encode, so the acknowledgement is immediate
     // rather than a second later when the file lands.
     unsafe { let _ = npk_screen_flash(); }
 
@@ -200,8 +199,8 @@ fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
     // Filter 0 for every row is deliberate on both ends: it costs the
     // encoder nothing, and it lets iris un-filter a whole row with one
     // `copy_from_slice` (a wasm `memory.copy`) instead of a per-byte
-    // add. A cleverer filter would shrink the file and make BOTH sides
-    // walk 25 MB byte by byte under the interpreter.
+    // add. A cleverer filter would shrink the file and make both sides
+    // walk the image byte by byte under the interpreter.
     //
     // Pre-zeroed + indexed writes rather than `push`: three pushes per
     // pixel is ~25 M capacity checks at 4K. `chunks_exact` drops the
@@ -224,11 +223,10 @@ fn encode_png_rgb(bgra: &[u8], w: u32, h: u32) -> Vec<u8> {
 
     // zlib-wrapped deflate (header + deflate + adler32).
     //
-    // Level 1, not 6. Measured on a 4K screen under the interpreter:
-    // level 6 spent 4240 ms of a 4970 ms save inside deflate — 85 % of
-    // the wait for a file that is only somewhat smaller. A screenshot is
-    // a transient artefact; seconds of the user's time cost more than
-    // the megabyte.
+    // Level 1, not 6: under the interpreter, level 6 makes deflate the
+    // bulk of the save time for a file that is only somewhat smaller. A
+    // screenshot is a transient artefact; seconds of the user's time cost
+    // more than the megabyte.
     let idat = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 1);
     let t_deflate = now_ms();
     log_ms("deflate", t_deflate - t_repack);
@@ -264,10 +262,10 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc.finalize().to_be_bytes());
 }
 
-// CRC-32 (IEEE, PNG), table-driven. The chunk COUNT is small but the
-// IDAT chunk is the whole image: bitwise cost 8 iterations per byte and
-// measured 200 ms of a 4K save. The table is built at compile time, so
-// it costs 1 KB of module data and no startup work.
+// CRC-32 (IEEE, PNG), table-driven. The chunk count is small but the
+// IDAT chunk is the whole image, and the bitwise form costs 8 iterations
+// per byte. The table is built at compile time, so it costs 1 KB of
+// module data and no startup work.
 const CRC_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i = 0usize;

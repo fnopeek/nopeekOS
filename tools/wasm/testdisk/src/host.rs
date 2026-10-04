@@ -38,7 +38,7 @@ pub fn bench_raw_write_mbs() -> u64 { unsafe { npk_sys_info(33) as u64 } }
 pub fn bench_raw_read_mbs() -> u64  { unsafe { npk_sys_info(34) as u64 } }
 
 /// Read-only FS integrity self-check (key 40). Runs the kernel's btree
-/// refcount scan NOW (not cached) and returns the total problem count
+/// refcount scan now (not cached) and returns the total problem count
 /// (0 = clean, -1 = scan error). The detailed report is logged to serial
 /// by the kernel. Called at the end of a run so corruption surfaces before
 /// a reboot bricks the mount.
@@ -81,7 +81,7 @@ pub fn fs_list(prefix: &str, buf: &mut [u8], recursive: bool) -> i32 {
 }
 
 /// 17 → wrote (size_u64 + is_dir_u8 + mtime_u64); 0 → not found;
-/// -1 → error. Kernel ≥ v0.146 returns 17; older kernels returned 9.
+/// -1 → error.
 pub fn fs_stat(name: &str, out: &mut [u8; 17]) -> i32 {
     unsafe {
         npk_fs_stat(name.as_ptr() as i32, name.len() as i32, out.as_mut_ptr() as i32)
