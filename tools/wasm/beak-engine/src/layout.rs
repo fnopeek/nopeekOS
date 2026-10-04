@@ -9072,8 +9072,7 @@ fn flex_break_lines(m: &[FlexItem], avail: f32, gap: f32, wrap: bool, balance: b
 fn resolve_flex_line(li: &[FlexItem], avail: f32, gaps_total: f32) -> Vec<f32> {
     let n = li.len();
     // Margins, padding and borders do not flex: take them out once, and let the
-    // content boxes share what is left. Leaving them in handed the line every
-    // item's padding as extra free space.
+    // content boxes share what is left.
     let fixed: f32 = li.iter().map(|it| it.m_lead + it.m_trail + it.main_pad).sum::<f32>() + gaps_total;
     let inner = avail - fixed;
     let clamp = |it: &FlexItem, v: f32| v.clamp(it.floor.min(it.ceil), it.ceil);
@@ -9102,9 +9101,8 @@ fn resolve_flex_line(li: &[FlexItem], avail: f32, gaps_total: f32) -> Vec<f32> {
     let initial_free = free_of(&target, &frozen);
 
     // §9.7.4 — the loop. Every round freezes at least one item, so `n` rounds
-    // always finish. This is the part a single pass cannot do: space clamped
-    // away from one item has to come back round to the items that can still
-    // take it, which is exactly what the `flex-0/1/N-*` family measures.
+    // always finish. Space clamped away from one item has to come back round to
+    // the items that can still take it, which a single pass cannot do.
     for _ in 0..n {
         if frozen.iter().all(|f| *f) {
             break;
@@ -9112,7 +9110,7 @@ fn resolve_flex_line(li: &[FlexItem], avail: f32, gaps_total: f32) -> Vec<f32> {
         let mut remaining = free_of(&target, &frozen);
         let fsum: f32 = (0..n).filter(|&i| !frozen[i]).map(|i| factor(&li[i])).sum();
         // Flex factors totalling less than one only claim that fraction of the
-        // ORIGINAL free space; the remainder stays with the container.
+        // original free space; the remainder stays with the container.
         if fsum < 1.0 {
             let capped = initial_free * fsum;
             if capped.abs() < remaining.abs() {
@@ -9168,39 +9166,25 @@ fn flex_item_style(s: &ComputedStyle, main: Option<f32>, forced_cross: Option<f3
             s2.width = main_px(m, main_chrome);
         }
         if let Some(c) = forced_cross {
-            // `c` is the stretched BORDER-box cross size. `Len::Px` means a
-            // border-box value under `box-sizing:border-box` and a content-box
-            // one otherwise (see `content_height_of`), so the content-box case
-            // has to give back padding AND border. Leaving the border out made
-            // a bordered flex item exactly `border_y()` taller than the line it
-            // was stretched into — the same box-model twin that bucket item 31
-            // removed from `layout_flex` and `layout_grid`; this was the third
-            // copy.
+            // `c` is the stretched border-box cross size. `Len::Px` means a border-box
+            // value under `box-sizing:border-box` and a content-box one otherwise (see
+            // `content_height_of`), so the content-box case has to give back padding
+            // and border.
             let inner_v = s.pad_top + s.pad_bottom + s.border_y();
             s2.height = Len::Px(if s.box_border { c } else { (c - inner_v).max(0.0) });
         }
     } else {
-        // Column: main axis is vertical (HEIGHT), cross is horizontal (width).
-        //
-        // Es stand anders hier — der Zweig setzte `width` aus `main` und liess
-        // die Hoehe unberuehrt, und der Kommentar darueber sagte trotzdem
-        // „main axis is vertical". Der Aufrufer reichte folgerichtig die
-        // QUER-Groesse als `main` durch, und `flex-grow` hatte auf der
-        // Hauptachse einer Spalte nie eine Wirkung.
-        // `main: None` heisst „nicht erzwingen" — das braucht die MESSUNG, die
-        // ja gerade die natuerliche Hoehe sucht. Ohne diesen Fall reichte sie
-        // die Querbreite als Hauptgroesse durch und mass jedes Item so hoch,
-        // wie es breit ist.
+        // Column: main axis is vertical (height), cross is horizontal (width).
+        // `main: None` means "do not force": the measurement pass needs it, since it
+        // is looking for the natural height.
         if let Some(m) = main {
             let main_v = s.pad_top + s.pad_bottom + s.border_y();
             s2.height = Len::Px(if s.box_border { m + main_v } else { m });
         }
-        // **Achtung, zwei Bedeutungen.** In der ZEILE ist `forced_cross` eine
-        // RANDkastenhoehe (die gestreckte Zeilenhoehe); in der SPALTE ist es
-        // die INHALTSbreite, die `flex_column` oben ausgerechnet hat. Sie
-        // gleich zu behandeln zog jedem gepolsterten Item seine Polsterung von
-        // der Breite ab — `flex-aspect-ratio-content-box-padding` misst genau
-        // das.
+        // `forced_cross` means two things: in a row it is a border-box height (the
+        // stretched line height); in a column it is the content width `flex_column`
+        // computed. Treating them alike would subtract a padded item's padding from
+        // its width twice.
         if let Some(c) = forced_cross {
             s2.width = main_px(c, main_chrome);
         }
@@ -9262,13 +9246,11 @@ struct Run {
     text: String,
     frame: f32,
     /// Sum of the outer widths of the atomic inline boxes on this line —
-    /// `inline-block`, images, form controls. They sit ON the line next to the
-    /// text, so at max-content they add to it. Measuring them as block-level
-    /// children instead took the WIDEST of them, which is why a shrink-to-fit
-    /// box around two inline-blocks came out one-child wide and stacked them.
+    /// `inline-block`, images, form controls. They sit on the line next to the
+    /// text, so at max-content they add to it rather than compete.
     atomic: f32,
-    /// The widest min-content among those boxes. A line CAN break between two
-    /// of them, so at MIN-content they compete rather than add.
+    /// The widest min-content among those boxes. A line can break between two
+    /// of them, so at min-content they compete rather than add.
     atomic_min: f32,
 }
 
@@ -9306,7 +9288,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
         let mut widest = 0.0f32;
         for line in run.text.lines() {
             // Trailing spaces hang past the line box, so they never widen it
-            // (css-text-3 §8). Leading ones DO count under `pre`.
+            // (css-text-3 §8). Leading ones do count under `pre`.
             widest = widest.max(measure_sp(font, line.trim_end_matches(is_hangable_space), st.font_px, sp));
         }
         let widest = widest + frame + atomic;
@@ -9323,7 +9305,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
     }
     let collapsed = collapse_whitespace(&run.text);
     run.text.clear();
-    // The run's OWN font, not `regular()`: monospace advances wider than the
+    // The run's own font, not `regular()`: monospace advances wider than the
     // proportional face, so measuring mono content with it under-sizes every
     // auto table column that holds code.
     let font = fonts.pick(st.bold, st.italic, st.mono, st.family);
@@ -9353,7 +9335,7 @@ fn flush_run(fonts: &crate::fonts::Fonts, st: &ComputedStyle, run: &mut Run, pre
         words.max(atomic_min)
     };
     // Inside a row (or any inline-axis container) a run of stray inline content
-    // is one anonymous cell sitting BESIDE its siblings, so it adds to the
+    // is one anonymous cell sitting beside its siblings, so it adds to the
     // row's width instead of competing with it (CSS2.1 §17.2.1).
     if horiz {
         *pref += p;
@@ -9394,17 +9376,13 @@ fn collapse_whitespace(s: &str) -> String {
 }
 
 impl<'a> Ctx<'a> {
-    /// Collect an inline element's subtree into the current inline run
-    /// (recursing through nested inline elements, carrying each one's style +
-    /// link href). `el` is already on `self.path` when this is called.
     /// Lay an `inline-block` out at the origin and capture everything it
     /// painted, so the line box can place a finished rectangle. Width is
     /// shrink-to-fit for `auto` (CSS2.1 §10.3.9, the same formula floats use).
     ///
     /// The box establishes its own block formatting context, so the parent's
-    /// floats must not reach into it — and its own must not leak out
-    /// ([[feedback-speculative-layout-state]]: every throwaway context has to
-    /// put back what it took).
+    /// floats must not reach into it and its own must not leak out: every
+    /// throwaway context has to put back what it took.
     fn inline_block_box(&mut self, el: &'a Element, st: &ComputedStyle, avail_w: i32) -> Option<AtomicBox> {
         if st.hidden || st.transparent {
             return None;
@@ -9429,21 +9407,15 @@ impl<'a> Ctx<'a> {
                 if st.box_border { (v - pad_border).max(0.0) } else { v }
             }
         };
-        // **Ein leerer atomarer Inline ist NULL breit, nicht eins.** Der
-        // Mindestpixel hier war der Grund, warum DDGs Pillen auf zwei Zeilen
-        // brachen: ihre Vorlage haengt ein `&ZeroWidthSpace;` hinter den Text,
-        // das wird zu einem eigenen Kasten, und dessen eine Pixel nahm der
-        // Text daneben genau am Umbruch fehlte. Chromium misst dort 0.
+        // An empty atomic inline is zero wide, not one pixel (as in Chromium); a
+        // stray pixel from e.g. a trailing zero-width space can push the text next
+        // to it onto the next line.
         let outer_w = ceil_i32(content_w + pad_border + ml + mr).max(0);
 
-        // **Ein Prozent loeste sich ein ZWEITES Mal auf** — derselbe Fall, den
-        // `place_float` schon kennt und benennt: `layout_box` bekommt unten
-        // `outer_w`, den EIGENEN Randkasten dieses Elements, als
-        // Umgebungsbreite. Fuer `width: auto` ist das der Vertrag; fuer
-        // `width: 50%` ist es eine Falle — die Haelfte der Haelfte. Bootstraps
-        // `.placeholder.col-6` kam 469 statt 939 px heraus, und `col-*` auf
-        // einem `inline-block` ist ein Alltagsmuster. Gleiches fuer die beiden
-        // Grenzen.
+        // Percentages resolve against the containing block here, once. `layout_box`
+        // below gets `outer_w`, this element's own margin box, as its containing
+        // width — correct for `width: auto`, but a percentage would resolve a second
+        // time against itself (the trap `place_float` names too). Same for min/max.
         let pct = |l: Len| matches!(l, Len::Pct(_) | Len::Calc { .. });
         let resolved;
         let st = if pct(st.width) || pct(st.min_width) || pct(st.max_width) {
@@ -9464,17 +9436,15 @@ impl<'a> Ctx<'a> {
 
         let (o0, l0, c0) = (self.ops.len(), self.links.len(), self.controls.len());
         let (i0, h0) = (self.inspects.len(), self.hover_boxes.len());
-        // Dieselbe Regel wie beim Knopfinhalt: die Befehle wandern gleich aus
-        // `self.ops` heraus, also duerfen keine Bereiche zurueckbleiben, die
-        // in sie zeigen. Ein `inline-block` mit einem positionierten Kind
-        // liess sonst einen Bereich stehen, der die naechsten Befehle der
-        // SEITE umsortierte.
+        // Same rule as for button content: the ops move out of `self.ops` right
+        // away, so no stacking ranges may be left pointing into them, or an
+        // `inline-block` with a positioned child would reorder the page's next ops.
         let (s0, sl0, f0, fl0) = (self.stack_ops.len(), self.stack_links.len(),
                                   self.float_ops.len(), self.float_links.len());
         let saved_floats = core::mem::take(&mut self.floats);
         let saved_baseline = self.last_baseline.take();
         self.path.push(self.info(el));
-        // `layout_box` re-adds margin-left + padding, so it gets the MARGIN-box
+        // `layout_box` re-adds margin-left + padding, so it gets the margin-box
         // width — the same contract `place_float` uses.
         let border_bottom = self.layout_box(el, st, 0, outer_w, st.margin_top as i32);
         self.path.pop();
@@ -9492,7 +9462,7 @@ impl<'a> Ctx<'a> {
         self.float_ops.truncate(f0);
         self.float_links.truncate(fl0);
         let h = (border_bottom + st.margin_bottom as i32).max(0);
-        // The box aligns on its LAST line box's baseline; with no in-flow line
+        // The box aligns on its last line box's baseline; with no in-flow line
         // box, or when it clips its overflow, it aligns on its bottom margin
         // edge instead (CSS2.1 §10.8.1).
         let baseline = match inner_baseline {
@@ -9525,13 +9495,12 @@ impl<'a> Ctx<'a> {
             || edge(&st.border_bottom)
             || edge(&st.border_left);
         // A box that paints nothing and reserves no space normally has no
-        // reason to exist — but a hover rule needs its RECTANGLE even when it
-        // is invisible at rest, and a bare `<a href>` is exactly that box. Miss
-        // this and the pointer finds every element except the ones it aims at.
-        // Mit `hit_all` braucht JEDES Inline-Element seinen Kasten, nicht nur
-        // die hoverbaren: `getBoundingClientRect` fragt danach, und ein
-        // `<label>` oder `<strong>` ohne Kasten antwortet mit NULL — eine
-        // Zahl, die aussieht wie eine Messung.
+        // reason to exist — but a hover rule needs its rectangle even when it
+        // is invisible at rest, and a bare `<a href>` is exactly that box.
+        // With `hit_all` every inline element needs its box, not only the
+        // hoverable ones: `getBoundingClientRect` asks for it, and a `<label>`
+        // or `<strong>` without one would answer zero, which looks like a
+        // measurement.
         let hoverable = self.sheet.hover_set.may_match(el);
         let hover_seq = (self.hit_all || hoverable).then_some(el.seq);
         if !paints && lead == 0.0 && trail == 0.0 && hover_seq.is_none() {
@@ -9581,6 +9550,9 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// Collect an inline element's subtree into the current inline run
+    /// (recursing through nested inline elements, carrying each one's style +
+    /// link href). `el` is already on `self.path` when this is called.
     fn collect_inline(&mut self, el: &'a Element, st: &ComputedStyle, href: Option<&str>, inline: &mut Inline, bx: i32, bw: i32, by: i32) {
         if st.is_break {
             inline.brk();
@@ -9649,12 +9621,9 @@ impl<'a> Ctx<'a> {
                         continue;
                     }
                     self.counters.enter(&cs, self.path.len());
-                    // `position:absolute`/`fixed` leaves the inline flow the same
-                    // way it leaves the block flow — `flow_children` has had this
-                    // branch all along and this one did not, so an out-of-flow box
-                    // that happened to be INLINE-level stayed on the line and grew
-                    // the page with it. Wikipedia's 1×1 autologin pixel is exactly
-                    // that shape, and a 40×40 abspos `<img>` added its full height.
+                    // `position:absolute`/`fixed` leaves the inline flow the same way it
+                    // leaves the block flow (as in `flow_children`); an inline-level
+                    // out-of-flow box must not stay on the line and grow the page.
                     // Ahead of the float test because `float` computes to `none` on
                     // a positioned box (css-display-3 §2.7).
                     if matches!(cs.position, Position::Absolute | Position::Fixed) {
@@ -9709,7 +9678,7 @@ struct RunStyle {
     bold: bool,
     italic: bool,
     mono: bool,
-    /// Streuwert der `font-family` — siehe `ComputedStyle::family`.
+    /// Hash of the `font-family` — see `ComputedStyle::family`.
     family: u32,
     valign: crate::style::VAlign,
     /// `text-decoration-line` bits (`style::DECO_*`).
@@ -9736,10 +9705,8 @@ struct AtomicBox {
     links: Vec<LinkRect>,
     controls: Vec<ControlRect>,
     /// Hit rects recorded while laying this box out at the origin. They move
-    /// with it — without that every box inside an `inline-block` is reported at
-    /// the page's top-left corner, which reads as a layout bug that is not
-    /// there. It was one for `:hover`: the pointer lit up links it was nowhere
-    /// near, and the real link answered to nothing.
+    /// with it, or every box inside an `inline-block` (and its `:hover` target)
+    /// would be reported at the page's top-left corner.
     inspects: Vec<InspectBox>,
     hover_boxes: Vec<HoverBox>,
     /// Margin-box size — what the line reserves.
@@ -9747,10 +9714,9 @@ struct AtomicBox {
     h: i32,
     /// Distance from the margin-box top to the baseline the line aligns on.
     baseline: i32,
-    /// How the box sits on the line (CSS2.1 §10.8.1). Ignoring this put every
-    /// atomic inline on the baseline, so a row of `inline-block`s of differing
-    /// heights came out as a STAIRCASE — MediaWiki galleries, icon rows and
-    /// badges all set `vertical-align: top` for exactly that reason.
+    /// How the box sits on the line (CSS2.1 §10.8.1). Galleries, icon rows and
+    /// badges set `vertical-align: top` so that `inline-block`s of differing
+    /// heights do not form a staircase on the baseline.
     valign: crate::style::VAlign,
 }
 
@@ -9763,16 +9729,15 @@ struct AtomicBox {
 struct InlineBox {
     st: ComputedStyle,
     /// `seq` of the element this box came from, when its rectangle is worth
-    /// keeping: a `:hover` rule could react to it, or die Seite faehrt
-    /// Skripte und fragt nach Geometrie (`hit_all`).
+    /// keeping: a `:hover` rule could react to it, or the page runs scripts
+    /// and asks for geometry (`hit_all`).
     hover_seq: Option<u32>,
-    /// Kann eine `:hover`-Regel dieses Element wirklich treffen?
+    /// Whether a `:hover` rule can actually match this element.
     ///
-    /// **Getrennt von `hover_seq`, und das ist keine Feinheit.** Mit `hit_all`
-    /// bekommt JEDES Inline-Element einen Kasten — waeren die alle „hoverbar",
-    /// gaelte jede Mausbewegung als Stilwechsel, und das kostete auf Wikipedia
-    /// sechs volle Layouts fuer nichts. Dieselbe Falle, die `record_inspect`
-    /// im Kommentar nennt.
+    /// Kept separate from `hover_seq`: with `hit_all` every inline element gets
+    /// a box, and if all of them counted as hoverable every pointer move would
+    /// look like a style change and force a relayout. Same trap as in
+    /// `record_inspect`.
     hoverable: bool,
     /// Image keys, already registered with the layout that needs them — `flow`
     /// paints without a `Ctx` to ask.
@@ -9792,7 +9757,7 @@ enum Item {
     /// An inline box opens / closes around the items between them. Both index
     /// `Inline::boxes`; they nest, so a box always closes the innermost open one.
     /// The opening marker carries any collapsed space that precedes the box —
-    /// that space belongs to the text around it, so it advances the pen OUTSIDE
+    /// that space belongs to the text around it, so it advances the pen outside
     /// the box's background.
     BoxStart { bx: usize, space_before: bool },
     BoxEnd(usize),
@@ -9804,38 +9769,27 @@ enum Item {
     Image { src: String, w: i32, h: i32, href: Option<String>, alt: String, space_before: bool, hidden: bool, transparent: bool, fit: ObjectFit, filter: u16, deco: Option<alloc::boxed::Box<InlineBox>> },
     Control { ctl: CtlBox, space_before: bool },
     /// `display: inline-block` — laid out already, waiting for its position.
-    /// The finished display list is MOVED out when the line box places it;
+    /// The finished display list is moved out when the line box places it;
     /// `flow` only has a shared borrow of the item list (`Placed::Control`
     /// borrows from it), hence the cell. Each `Inline` is flowed exactly once.
     Atomic { box_: RefCell<Option<AtomicBox>>, space_before: bool },
     Break,
 }
 
-// Form-control chrome metrics (px).
-//
-// **Ausgerechnet, nicht geschaetzt.** `tools/fixtures/controls.html` stellt
-// jedes Steuerelement viermal hin — nackt, nur gepolstert, nur gerahmt,
-// beides — und aus den vier Hoehen faellt jede dieser Zahlen einzeln heraus.
-// Vorher stand hier `PAD_Y = 3` und ein 1-px-Rahmen fuer alles; damit war ein
-// nacktes Feld 28 statt 26 px hoch, mit eigener Polsterung 34 statt 36, und
-// beide Fehler zeigten in verschiedene Richtungen — die Sorte, die sich in
-// einem Rahmenwerk gegenseitig zudeckt.
-/// „Dieses Steuerelement ist nicht mehr auffindbar." Gesetzt, wenn seine
-/// Befehlsspanne beim Umbau zerriss — `repaint_controls` ueberschreibt die
-/// Spanne an Ort und Stelle, eine geratene waere fremder Inhalt.
-///
-/// **Ein Wachwert muss ueberall angehalten werden, wo gerechnet wird.** Drei
-/// Stellen zaehlten ungeprueft darauf weiter (`c.at + c.len`, zweimal
-/// `c.at += …`); im Prueflauf ist das ein Ueberlauf-Panik, im ausgelieferten
-/// Bild laeuft es still um null herum und zeigt auf einen echten Befehl.
+/// Marks a control that can no longer be located: its op span was torn
+/// apart by a rebuild. `repaint_controls` overwrites the span in place, so a
+/// guessed one would overwrite foreign content. Every place that does
+/// arithmetic on `at`/`len` must check for this sentinel first.
 const CTL_UNUSABLE: usize = usize::MAX;
 
+// Form-control chrome metrics (px), derived per control from
+// `tools/fixtures/controls.html` (bare, padded, bordered, both).
 const CTL_PAD_X: i32 = 6;
 const CTL_PAD_Y: i32 = 1;
-/// Der Streifen, den ein `<select>` fuer seinen Pfeil frei haelt.
+/// The strip a `<select>` keeps free for its arrow.
 const CTL_ARROW: i32 = 20;
-/// Was ein `<textarea>` fuer seine Rollleiste reserviert — sie ist da, auch
-/// wenn nichts zu rollen ist, und geht in die Eigenbreite ein.
+/// What a `<textarea>` reserves for its scrollbar — it is there even when
+/// nothing scrolls, and counts toward the intrinsic width.
 const CTL_SCROLLBAR: i32 = 16;
 
 /// A measured form control, ready to place on a line and paint.
@@ -9853,73 +9807,62 @@ struct CtlBox {
     /// bring it back, and the repaint has no element to ask.
     placeholder: String,
     checked: bool,
-    /// `disabled` — und das ist eine ANZEIGE, nicht bloss ein Zustand. Ein
-    /// gesperrter Knopf, der aussieht wie ein bedienbarer, ist eine falsche
-    /// Auskunft: der Benutzer klickt und nichts passiert. Jeder Browser
-    /// blasst ihn ab; beak malte ihn bis hierher unveraendert.
+    /// `disabled` — a display state too: a disabled control is painted faded,
+    /// as every browser does, so it does not look operable.
     disabled: bool,
     focused: bool,
-    /// Der Fokusring, wenn dieses Steuerelement die Tastatur hat: Breite,
-    /// Farbe (`None` = die des Themas) und Abstand vom Rahmenkasten.
+    /// The focus ring, when this control has the keyboard: width, colour
+    /// (`None` = the theme's) and offset from the border box.
     ///
-    /// **Ein Browser malt hier eine `outline`, keinen umgefaerbten Rahmen.**
-    /// beak faerbte bis 0.175.0 den Rahmen der SEITE blau um — auf
-    /// DuckDuckGos rundem Suchfeld sah das aus wie ein Fehler, und es war
-    /// einer: die Seite hatte ihre Farbe gesagt, und wir haben sie
-    /// ueberschrieben. Ein Umriss liegt AUSSERHALB des Kastens und nimmt
-    /// nichts weg. Hat die Seite selbst etwas ueber `outline` gesagt, gilt
-    /// ihr Wort — auch das Nein.
+    /// Painted as an `outline` outside the box, never by recolouring the
+    /// page's border. If the page said anything about `outline`, its word
+    /// stands, including `none`.
     focus_ring: Option<(i32, Option<Rgba>, i32)>,
     /// Caret position in characters, when this control has keyboard focus.
     caret: Option<usize>,
     /// The control's own `background-color`, if the page styled it.
     bg: Option<Rgba>,
-    /// `accent-color` (css-ui-4 §5.1), `None` = `auto` (das Thema entscheidet).
-    ///
-    /// **Am STEUERELEMENT, nicht am Textlauf.** Der erste Versuch legte sie an
-    /// `RunStyle` — den Stil eines Textlaufs, von dem eine Seite tausende hat,
-    /// und von denen keiner ein Kaestchen malt.
+    /// `accent-color` (css-ui-4 §5.1), `None` = `auto` (the theme decides).
+    /// Carried on the control, not on `RunStyle`: text runs never paint a
+    /// checkbox.
     accent: Option<Rgba>,
-    /// The page paints this control's FACE itself — either it said
+    /// The page paints this control's face itself — either it said
     /// `appearance: none`, or it gave the control a background of its own
     /// (`transparent` included). Only the face; the widget still shows.
     no_face: bool,
-    /// `appearance: none` (css-ui-4 §4) — the page opted out of the WIDGET, not
+    /// `appearance: none` (css-ui-4 §4) — the page opted out of the widget, not
     /// just its face. No UA frame, no tick, no dot, no chevron: what remains is
     /// an ordinary box the page styles itself, which is how every custom
-    /// checkbox on the web is built. The heuristic above must NOT reach this
+    /// checkbox on the web is built. The heuristic above must not reach this
     /// far — a page that merely writes `background: transparent` on a checkbox
     /// still wants the tick.
     appearance_none: bool,
     /// The page's own `background-image` (resolved key + placement). A control
-    /// that opted out of the UA look carries its icon this way — DDG's search
-    /// button is a bare box with a magnifier here and nothing else.
+    /// that opted out of the UA look carries its icon this way (e.g. a search
+    /// button that is a bare box with a magnifier image).
     bg_img: Option<(u64, BgLayer)>,
-    /// A `<button>`'s laid-out CONTENTS (HTML §button-layout). A button is not
+    /// A `<button>`'s laid-out contents (HTML §button-layout). A button is not
     /// a label: its children are page content, and an icon + markup inside one
     /// is the commonest button on the web. Present only when the element has
     /// element children — a text-only button stays the cheap one-op label.
     content: Option<CtlContent>,
     /// Leading text inset. Controls are atomic — we paint them with our own
     /// metrics — but a page that reserves room for an icon does it with
-    /// `padding-left`, and ignoring that puts the text on top of the icon
-    /// (Wikipedia's search field asks for 36px to clear its magnifier). CSS
-    /// only ever WIDENS the inset; it cannot squeeze the text below `CTL_PAD_X`.
+    /// `padding-left`, and ignoring that puts the text on top of the icon.
+    /// CSS only ever widens the inset; it cannot squeeze the text below
+    /// `CTL_PAD_X`.
     pad_l: i32,
-    /// Die rechte Polsterung — dieselbe Zahl, mit der die Breite gerechnet
-    /// wurde. Der Maler nahm frueher `CTL_PAD_X`, und die Differenz zur
-    /// gemessenen Breite schnitt die Beschriftung ab.
+    /// The right padding — the same number the width was computed with, so the
+    /// painter does not clip the label against the measured width.
     pad_r: i32,
-    /// Senkrecht dasselbe Paar — nur der Inhaltskasten braucht sie, um mittig
-    /// zu stehen.
+    /// The same pair vertically — only the content box needs them, to centre.
     pad_t: i32,
     pad_b: i32,
     /// The frame, in paint order top/right/bottom/left.
     border: [CtlSide; 4],
     /// `border-radius` in px, top-left clockwise. A control is painted with our
-    /// own metrics, so the page's radius has to be CARRIED here — it is not a
-    /// detail: every button on a Bootstrap or Tailwind page is rounded, and
-    /// square corners are the first thing that reads as „not a browser".
+    /// own metrics, so the page's radius has to be carried here; rounded buttons
+    /// are the norm on framework-styled pages.
     radius: [f32; 4],
     style: RunStyle,
 }
@@ -9933,10 +9876,9 @@ struct CtlContent {
     ops: Vec<DrawOp>,
     w: i32,
     h: i32,
-    /// Button layout centres its contents VERTICALLY in the content box. A
+    /// Button layout centres its contents vertically in the content box. A
     /// checkbox or radio that opted out of the widget does not — it is an
     /// ordinary box, and its generated content starts at the top-left corner.
-    /// That distinction is the whole of `input-{checkbox,radio}-no-centering`.
     centred: bool,
 }
 
@@ -9953,30 +9895,26 @@ struct CtlSide {
 }
 
 /// A control's frame: the author's four sides once the page touched any of
-/// them, else the UA's 1px. Google wraps its search button in a bordered
-/// `<span>` and writes `border: none` on the `<input>`; painting our own frame
-/// anyway put a second rectangle 1px down and right of the first.
+/// them, else the UA's. A page that writes `border: none` on an `<input>`
+/// (and borders a wrapper instead) must not get a second frame from us.
 fn ctl_border(st: &ComputedStyle, kind: ControlKind) -> [CtlSide; 4] {
     let sides = [&st.border_top, &st.border_right, &st.border_bottom, &st.border_left];
     let owned = sides.iter().any(|s| s.specified);
-    // The UA frame IS part of the widget: `appearance: none` takes it with the
-    // rest of it. Without this a custom checkbox came out inside a 1px box the
-    // page never asked for, on top of the border it drew itself.
+    // The UA frame is part of the widget: `appearance: none` takes it with the
+    // rest of it, or a custom checkbox would sit inside a frame the page never
+    // asked for.
     //
-    // **Und er ist nicht fuer jedes Steuerelement gleich breit** (HTML §15.5,
-    // „Form controls"): ein Feld, ein `<textarea>` und ein Knopf tragen 2 px
-    // je Seite, ein `<select>` eines. Ein Kaestchen und ein Radioknopf tragen
-    // GAR keinen — ihr Rahmen ist Teil des gemalten Zeichens und liegt INNEN;
-    // ihn zum Kasten zu addieren machte ein `width: 24px` grosses Kaestchen
-    // 26 px breit.
+    // Its width depends on the control (HTML §15.5): text fields, textareas and
+    // buttons carry 2px per side, a `<select>` one. Checkboxes and radios carry
+    // none — their frame is part of the painted glyph and lies inside, so a
+    // `width: 24px` checkbox stays 24px wide.
     let ua_w = if st.appearance_none {
         0
     } else {
         match kind {
             ControlKind::Checkbox | ControlKind::Radio => 0,
-            // Ein `<select>` und ein `<textarea>` tragen EINEN Pixel je Seite,
-            // ein Feld und ein Knopf zwei — aus den vier Hoehen der Vorlage
-            // einzeln herausgerechnet, nicht ueber einen Kamm geschoren.
+            // A `<select>` and a `<textarea>` carry one pixel per side, a field
+            // and a button two (see `tools/fixtures/controls.html`).
             ControlKind::Select | ControlKind::TextArea => 1,
             _ => 2,
         }
@@ -10035,10 +9973,9 @@ fn button_label(el: &Element, kind: ControlKind, value: &str) -> String {
     if !value.is_empty() {
         return value.to_string();
     }
-    // HTML §4.10.5.1.20: on an `<input>`, `value=""` is an explicit EMPTY
-    // label — only a MISSING attribute gets the UA default. Pages put their
-    // own icon on the button by CSS and rely on it staying empty; DDG's search
-    // button is a magnifier that way, and "Absenden" painted straight over it.
+    // HTML §4.10.5.1.20: on an `<input>`, `value=""` is an explicit empty
+    // label — only a missing attribute gets the UA default. Pages put their
+    // own icon on the button by CSS and rely on it staying empty.
     if el.tag == "input" && el.attr("value").is_some() {
         return String::new();
     }
@@ -10055,13 +9992,11 @@ fn mix(a: Rgb, b: Rgb, t: u32) -> Rgb {
     Rgb(f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
-/// Ein abgeblendetes Thema: alles, was Farbe traegt, zur Flaeche hin gemischt.
+/// A dimmed theme: everything that carries colour mixed toward the surface.
 ///
-/// **Ein Regler, nicht acht Sonderfaelle.** `disabled` blasst Rahmen,
-/// Beschriftung, Haken und Punkt gemeinsam ab; wer das an jeder Malstelle
-/// einzeln entscheidet, laesst eine davon kraeftig stehen und merkt es erst
-/// auf einer echten Seite. Chromium malt seine gesperrten Steuerelemente mit
-/// 30 % Deckung ueber der Flaeche — das ist dieser Wert.
+/// One knob rather than per-paint-site decisions, so `disabled` fades frame,
+/// label, tick and dot together. Chromium paints disabled controls at about
+/// 30 % opacity over the surface; this matches that.
 fn dimmed(t: &Theme) -> Theme {
     const D: u32 = 165;
     Theme {
@@ -10074,7 +10009,6 @@ fn dimmed(t: &Theme) -> Theme {
     }
 }
 
-/// Paint one control's chrome + text at (x, top) and record its hit rect.
 /// The UA palette to draw a form control's chrome from, given the colour its
 /// text inherited. `theme` is used as-is when the two agree, so a page that
 /// says nothing keeps following the device; only a page that paints against
@@ -10104,6 +10038,7 @@ fn luma(c: Rgb) -> u32 {
     (c.0 as u32 * 299 + c.1 as u32 * 587 + c.2 as u32 * 114) / 1000
 }
 
+/// Paint one control's chrome + text at (x, top) and record its hit rect.
 fn paint_control(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
@@ -10114,8 +10049,8 @@ fn paint_control(
     controls: &mut Vec<ControlRect>,
 ) {
     let at = ops.len();
-    // Jede Rueckkehr aus dieser Funktion meldet ihren Bereich — sonst zeigt
-    // ein Eintrag auf Befehle, die ein anderes Element gemalt hat.
+    // Every return from this function records its range, or an entry would
+    // point at ops another element painted.
     let rect = |ops: &Vec<DrawOp>, ctl: &CtlBox| ControlRect {
         x, y: top, w: ctl.w, h: ctl.h, seq: ctl.seq, kind: ctl.kind,
         at, len: ops.len() - at, paint: ctl.clone(),
@@ -10133,34 +10068,26 @@ fn paint_control(
         return;
     }
     let font = fonts.pick(ctl.style.bold, ctl.style.italic, ctl.style.mono, ctl.style.family);
-    // A control's chrome follows the SURFACE IT SITS ON, not the device theme.
-    // Wikipedia paints itself light whatever the desktop is set to (its dark
-    // mode is opt-in, gated on a class), so a face mixed from a dark theme is a
-    // black box on a white page. The signal that is actually to hand is the
-    // control's own inherited text colour: light text means a dark surface
-    // behind it, and dark text a light one.
+    // A control's chrome follows the surface it sits on, not the device theme:
+    // many pages paint themselves light whatever the desktop is set to. The
+    // signal to hand is the control's own inherited text colour: light text
+    // means a dark surface behind it, and dark text a light one.
     let theme = &surface_palette(theme, ctl.style.color.c);
     let theme = &if ctl.disabled { dimmed(theme) } else { theme.clone() };
-    // Die Beschriftung traegt die Farbe des ELEMENTS, nicht die des Themas —
-    // sie geht am Regler oben vorbei und muss einzeln mit.
+    // The label carries the element's colour, not the theme's — it bypasses
+    // the dimmed palette above and has to be faded separately.
     let ink: Rgba = if ctl.disabled {
         Rgba { c: mix(ctl.style.color.c, theme.bg, 165), a: ctl.style.color.a }
     } else { ctl.style.color };
-    // **Der Rahmen ist das, woran man ein Steuerelement erkennt.** Er kam aus
-    // `theme.rule` (der Linienfarbe einer Tabelle, #dee2e6) und war damit auf
-    // Weiss fast unsichtbar — jedes Feld und jeder Knopf sah aus wie ein
-    // hellgrauer Fleck. Ein Browser malt hier `ButtonBorder`, ein sattes
-    // #767676, und der Wert steht nicht als Konstante da, weil beak ein
-    // dunkles Thema hat: 150/255 zwischen Flaeche und Textfarbe ergibt auf
-    // Weiss #7c7c7c und auf Dunkel dasselbe Mittelgrau von der anderen Seite
-    // ([[feedback_dark_mode_is_two_things]]).
+    // The frame is what identifies a control. Browsers paint `ButtonBorder`
+    // (#767676); mixing 150/255 between surface and text gives about that grey
+    // on white and the matching mid-grey on a dark theme.
     let border = Rgba::opaque(mix(theme.bg, theme.text, 150));
     let round = ctl.radius.iter().any(|r| *r > 0.5);
-    // Eine gerundete Ecke kann nicht aus vier Rechtecken bestehen. Solange alle
-    // vier Seiten dieselbe Breite und Farbe haben — bei Knoepfen und Feldern
-    // immer —, ist der Rahmen EIN Ring; sonst bleibt es beim eckigen Rahmen,
-    // und das ist die ehrlichere Naeherung als eine Ecke, die nur auf einer
-    // Seite rund waere.
+    // A rounded corner cannot be built from four rectangles. As long as all
+    // four sides share width and colour (always true for buttons and fields)
+    // the frame is one ring; otherwise it stays a square frame, which is the
+    // more honest approximation than a corner rounded on one side only.
     let ring: Option<(f32, Rgba)> = {
         let [t, r, b, l] = ctl.border;
         let same = [r, b, l].iter().all(|s| s.w == t.w && s.transparent == t.transparent
@@ -10174,9 +10101,9 @@ fn paint_control(
         }),
         None => stroke_frame(ops, x, top, w, h, &ctl.border, border),
     };
-    // **Der Fokus liegt AUSSERHALB.** Ein Browser zeichnet hier eine
-    // `outline`: sie nimmt dem Kasten nichts weg und faerbt nichts um. Was
-    // die Seite selbst ueber `outline` gesagt hat, gilt — auch ihr Nein.
+    // Focus lies outside: browsers draw an `outline` here, which takes nothing
+    // from the box and recolours nothing. Whatever the page said about
+    // `outline` stands, including `none`.
     let focus_op = |ops: &mut Vec<DrawOp>| {
         let Some((rw, rc, off)) = ctl.focus_ring else { return };
         if !ctl.focused || rw <= 0 { return }
@@ -10196,7 +10123,7 @@ fn paint_control(
             }
         }
     };
-    // Die Flaeche — gerundet, wenn die Seite es sagt.
+    // The face — rounded if the page says so.
     let face_op = |ops: &mut Vec<DrawOp>, color: Rgba| {
         if round {
             ops.push(DrawOp::RoundRect { x, y: top, w, h, r: ctl.radius, color, ring: 0.0 });
@@ -10207,20 +10134,14 @@ fn paint_control(
     // A page that styles its own button (`background-color`) wins; otherwise
     // the UA face is derived from the theme so it reads on light and dark.
     // `appearance: none` (css-ui-4 §4) removes the question: the page opted
-    // out of the UA widget, so there is NO default face — only what the page
-    // paints itself. Our chrome otherwise filled in a box over a control the
-    // page wanted bare, and `surface_palette` guessed that shade from the
-    // control's own text colour, so a white icon glyph turned it black on a
-    // white page.
+    // out of the UA widget, so there is no default face — only what the page
+    // paints itself.
     let face: Option<Rgba> = match ctl.bg {
         Some(c) => Some(c),
         None if ctl.no_face => None,
         None => Some(match ctl.kind {
-            // Ein Knopf hat eine erhabene Flaeche (`ButtonFace`, #efefef);
-            // ein Feld und ein Kaestchen sind WEISS (`Field`), nicht
-            // hellgrau. Der alte Wert mischte auch in ein Textfeld einen
-            // Grauschleier, und eine Maske aus zwanzig Feldern sah dadurch
-            // aus wie eine gesperrte.
+            // A button has a raised face (`ButtonFace`, #efefef); a field and a
+            // checkbox are white (`Field`), not light grey.
             ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File
             | ControlKind::Select => mix(theme.bg, theme.text, 18).into(),
             _ => theme.bg.into(),
@@ -10242,32 +10163,25 @@ fn paint_control(
         }
     };
     match ctl.kind {
-        // Ein Radioknopf ist RUND, ein Kaestchen eckig. Das ist keine
-        // Geschmacksfrage: die Form IST die Bedeutung — rund heisst „eine aus
-        // dieser Gruppe", eckig heisst „unabhaengig an oder aus". Beide als
-        // Quadrat zu malen nimmt dem Benutzer die Auskunft, ob seine Wahl die
-        // anderen ausschliesst.
+        // A radio button is round, a checkbox square: the shape carries the
+        // meaning ("one of this group" versus "independently on or off").
         ControlKind::Radio if !ctl.appearance_none => {
             let r = [(w.min(h) as f32) / 2.0; 4];
-            // Angekreuzt bleibt die Flaeche HELL — der Ring und der Punkt
-            // darin nehmen die Farbe an. Nebeneinander gestellt malt
-            // Chromium genau das (Ring, weisser Zwischenraum, Punkt), und
-            // nicht die gefuellte Scheibe, die man dabei vor Augen hat.
+            // Checked, the face stays light — ring and dot take the colour
+            // (ring, light gap, dot), as Chromium paints it.
             if let Some(f) = face {
                 ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: f, ring: 0.0 });
             }
             bg_img(ops);
             let bw = ctl.border[0].w.max(1) as f32;
-            // **Der Ring war grau, auch wenn der Knopf gewaehlt war.** Das
-            // war der eigentliche Fehler: der Unterschied zwischen „gewaehlt"
-            // und „nicht gewaehlt" lag allein am Punkt in der Mitte.
+            // The ring takes the accent when checked, so the difference is not
+            // carried by the dot alone.
             let akzent = ctl.accent.unwrap_or_else(|| Rgba::from(theme.link));
             let ring_color = if ctl.checked { akzent } else { border };
             ops.push(DrawOp::RoundRect { x, y: top, w, h, r, color: ring_color, ring: bw });
             if ctl.checked {
-                // Chromium malt in einen 13-px-Knopf einen Punkt von 6 px —
-                // etwas mehr als ein Viertel Einzug, mit sichtbarer heller
-                // Luft zum Ring.
+                // Chromium paints a 6px dot in a 13px radio — a little more than
+                // a quarter inset, with visible light space to the ring.
                 let i = (w / 4).max(3);
                 let (iw, ih) = (w - 2 * i, h - 2 * i);
                 ops.push(DrawOp::RoundRect {
@@ -10278,15 +10192,9 @@ fn paint_control(
             }
         }
         ControlKind::Checkbox if !ctl.appearance_none => {
-            // Angekreuzt: das Kaestchen wird die Farbe, und darauf steht ein
-            // HAKEN. Vorher stand hier ein gefuelltes Quadrat auf heller
-            // Flaeche — dasselbe Zeichen wie beim Radioknopf, nur eckig, und
-            // damit war die Form nicht mehr die Auskunft.
+            // Checked: the box takes the colour and carries a tick.
             if ctl.checked && ctl.bg.is_none() && !ctl.no_face {
-                // **`accent-color` schlaegt das Thema** (css-ui-4 §5.1). Ohne
-                // sie bekam eine Seite, die ihre Kaestchen in ihrer eigenen
-                // Akzentfarbe will, unsere — `sandbox.nopeek.ch` schreibt
-                // genau das, dreimal.
+                // `accent-color` beats the theme (css-ui-4 §5.1).
                 face_op(ops, ctl.accent.unwrap_or_else(|| theme.link.into()));
                 bg_img(ops);
                 ops.push(DrawOp::Check { x, y: top, w, h, color: theme.bg.into() });
@@ -10296,8 +10204,8 @@ fn paint_control(
                 }
                 bg_img(ops);
                 frame(ops);
-                // Die Seite hat die Flaeche selbst gesetzt — dann bleibt der
-                // Haken die Vordergrundfarbe, nicht die des Themas.
+                // The page set the face itself — then the tick stays the foreground
+                // colour, not the theme's.
                 if ctl.checked {
                     ops.push(DrawOp::Check { x, y: top, w, h, color: ctl.style.color });
                 }
@@ -10310,7 +10218,7 @@ fn paint_control(
             bg_img(ops);
             frame(ops);
             // A button's laid-out contents sit in its content box, centred
-            // VERTICALLY (HTML §button-layout). Horizontally they are not
+            // vertically (HTML §button-layout). Horizontally they are not
             // centred as a box — `text-align: center` from the UA sheet is
             // what centres the text inside them, which is why a 100px block
             // child stays at the left edge with its own text in the middle.
@@ -10353,11 +10261,9 @@ family: ctl.style.family,
                 return;
             }
             if !ctl.text.is_empty() {
-                // Clip an over-long value to the box. WHICH END is dropped is
-                // not a detail: a field being typed into must keep its tail,
-                // where the caret is — but a LABEL must keep its head, because
-                // it is a name, and a name clipped at the front is a different
-                // word. Google's consent buttons read "lle ablehnen".
+                // Clip an over-long value to the box. A field being typed into keeps
+                // its tail, where the caret is; a label keeps its head, because a name
+                // clipped at the front reads as a different word.
                 let inner = (w - ctl.pad_l - ctl.pad_r).max(0) as f32;
                 let text = if ctl.kind.is_submit() || ctl.kind == ControlKind::File {
                     clip_text_head(font, &ctl.text, ctl.style.size, inner)
@@ -10417,8 +10323,7 @@ family: ctl.style.family,
             }
         }
     }
-    // Zuletzt, also OBEN: der Ring liegt ueber allem, was das Steuerelement
-    // selbst gemalt hat.
+    // Last, so on top: the ring lies over everything the control painted.
     focus_op(ops);
     controls.push(rect(ops, ctl));
 }
@@ -10429,7 +10334,7 @@ family: ctl.style.family,
 ///
 /// Focus is the one thing the page cannot take away: a control with no frame
 /// left still gets a 1px ring while it has the keyboard, because that ring is
-/// an OUTLINE — it says where typing goes, and a page hiding its border never
+/// an outline — it says where typing goes, and a page hiding its border never
 /// meant to hide that.
 fn stroke_frame(ops: &mut Vec<DrawOp>, x: i32, y: i32, w: i32, h: i32, sides: &[CtlSide; 4], ua: Rgba) {
     let visible = |s: &CtlSide| s.w > 0 && !s.transparent;
@@ -10489,11 +10394,8 @@ fn wrap_lines(font: Face, text: &str, size: f32, max_w: f32, max_rows: usize) ->
     out
 }
 
-/// Trim `text` from the LEFT until it fits `max_w` (the caret sits at the end
-/// of a field the user is typing into, so the tail is what matters).
-/// Trim from the END until it fits — for a label, which is read from the
-/// front. The counterpart of `clip_text_tail`, which trims from the front for
-/// a field whose caret is at the back.
+/// Trim `text` from the end until it fits `max_w` — for a label, which is
+/// read from the front. The counterpart of `clip_text_tail`.
 fn clip_text_head(font: Face, text: &str, size: f32, max_w: f32) -> String {
     if measure(font, text, size) <= max_w {
         return text.to_string();
@@ -10510,6 +10412,8 @@ fn clip_text_head(font: Face, text: &str, size: f32, max_w: f32) -> String {
     String::new()
 }
 
+/// Trim `text` from the front until it fits `max_w` (the caret sits at the
+/// end of a field the user is typing into, so the tail is what matters).
 fn clip_text_tail(font: Face, text: &str, size: f32, max_w: f32) -> String {
     if measure(font, text, size) <= max_w {
         return text.to_string();
@@ -10547,12 +10451,10 @@ impl Inline {
 
     /// Add collapsed text from one text node under style `st`.
     fn text(&mut self, raw: &str, st: &ComputedStyle, href: Option<&str>) {
-        // Die Deckung der Inline-Vorfahren steckt HIER in der Farbe: ein
-        // Inline-Kasten hat keinen Befehlsbereich, ueber den sie spaeter
-        // gelegt werden koennte (siehe `ComputedStyle::inline_fade`). Zwei
-        // Laeufe verschmelzen nur bei gleicher `RunStyle` — die verschiedene
-        // Alpha trennt sie also von selbst, ohne dass der Verschmelzer davon
-        // wissen muss.
+        // The opacity of inline ancestors is folded into the colour here: an inline
+        // box has no op range it could be applied over later (see
+        // `ComputedStyle::inline_fade`). Runs merge only with equal `RunStyle`, so a
+        // different alpha keeps them apart without the merger knowing about it.
         let rs = RunStyle { hidden: st.hidden, transparent: st.transparent, size: st.font_px, family: st.family,
             color: faded(st.color, st.inline_fade),
             deco_color: st.deco_color.map(|c| faded(c, st.inline_fade)), bold: st.bold, italic: st.italic, mono: st.mono, valign: st.valign, deco: st.deco, break_word: st.break_word, nowrap: st.nowrap, lh: st.line_height.px(st.font_px).unwrap_or(0.0), sp: (st.letter_spacing, st.word_spacing) };
@@ -10665,7 +10567,7 @@ impl Inline {
         align: TextAlign,
         align_last: Option<TextAlign>,
         rtl: bool,
-        // `text-indent` in px: only the FIRST line box starts in from the
+        // `text-indent` in px: only the first line box starts in from the
         // content edge — every later one resets the pen to the float band.
         indent: f32,
         strut: f32,
@@ -10690,7 +10592,7 @@ impl Inline {
         let (l0, r0) = band_of(floats, y, y + lh, x, x + w);
         let mut pen = l0 as f32 + indent;
         let mut line_ascent = 0.0f32;
-        // How far the deepest item on the line reaches BELOW the baseline. Only
+        // How far the deepest item on the line reaches below the baseline. Only
         // needed to size a line around a `vertical-align: middle` box; text
         // carries its descent inside its own line-box height already.
         let mut line_below = 0.0f32;
@@ -10859,12 +10761,10 @@ impl Inline {
                     pen += lead + b.w as f32;
                     // How far this box reaches above and below the baseline
                     // decides how tall the line box has to be. A `middle` box
-                    // straddles the baseline, so half of it hangs ABOVE — the
+                    // straddles the baseline, so half of it hangs above — the
                     // line has to grow for that half or the box paints outside
-                    // its own line, which is what pushed MediaWiki's gallery
-                    // thumbnails up out of their frames. `top`/`bottom` are
-                    // measured against the line box itself and so contribute
-                    // only their height.
+                    // its own line. `top`/`bottom` are measured against the
+                    // line box itself and so contribute only their height.
                     let half_x = MIDDLE_HALF_X;
                     let (above, below) = match b.valign {
                         crate::style::VAlign::Top
@@ -10937,7 +10837,7 @@ impl Inline {
                     }
                     let lead = if line.is_empty() { 0.0 } else { sw };
                     let sx = (pen + lead) as i32;
-                    // The control's box sits ON the text baseline like an
+                    // The control's box sits on the text baseline like an
                     // inline-block, minus its bottom padding so a field and the
                     // label beside it look aligned.
                     line.push(Placed::Control { x: sx, ctl });
@@ -10987,10 +10887,6 @@ struct Frag {
     right: bool,
 }
 
-/// The line is about to be emitted: close every open inline-box fragment at
-/// the current pen. The boxes stay open — their next fragment begins on the
-/// next line, no longer carrying the left edge and starting wherever that
-/// line's content does.
 /// Does this line box exist at all? It does if it holds content — or if an
 /// inline box on it reserves horizontal space: margins, borders and padding on
 /// an inline box keep an otherwise empty line alive (CSS 2.1 §9.4.2), which is
@@ -10999,6 +10895,10 @@ fn line_exists(line: &[Placed<'_>], frags: &[Frag]) -> bool {
     !line.is_empty() || frags.iter().any(|f| f.x1 > f.x0.unwrap_or(f.x1))
 }
 
+/// The line is about to be emitted: close every open inline-box fragment at
+/// the current pen. The boxes stay open — their next fragment begins on the
+/// next line, no longer carrying the left edge and starting wherever that
+/// line's content does.
 fn break_frags(open: &mut [OpenFrag], frags: &mut Vec<Frag>, pen: f32) {
     for o in open.iter_mut() {
         frags.push(Frag { bx: o.bx, x0: o.x0, x1: pen as i32, left: o.left, right: false });
@@ -11081,7 +10981,7 @@ fn format_counter(style: ListStyle, n: i32) -> String {
     }
 }
 
-/// `lower-greek`: bijective base-24 over α..ω with FINAL SIGMA left out
+/// `lower-greek`: bijective base-24 over α..ω with final sigma left out
 /// (css-counter-styles-3 §6.1) — 24 letters, not the 25 the block holds.
 fn greek_counter(n: i32) -> String {
     const G: [char; 24] = [
@@ -11211,7 +11111,7 @@ fn align_dx(align: TextAlign, rtl: bool, pen: f32, right: f32) -> i32 {
 /// Underline / line-through / overline for one text run, in the run's own
 /// colour. Positions are metric-free approximations of the font's decoration
 /// metrics: below the baseline, at roughly half the x-height, and at the cap
-/// top. Emitted BEFORE the glyphs so a thick line never eats a descender.
+/// top. Emitted before the glyphs so a thick line never eats a descender.
 fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut Vec<DrawOp>) {
     if w <= 0 {
         return;
@@ -11233,20 +11133,18 @@ fn push_decorations(style: &RunStyle, x: i32, w: i32, baseline: i32, ops: &mut V
     }
 }
 
-/// Resolve ONE element's computed style outside a layout, with a given pointer
+/// Resolve one element's computed style outside a layout, with a given pointer
 /// state — by descending from the root exactly the way `layout` does, through
 /// the same `style::resolve`.
 ///
 /// `subtree` also resolves the element's descendants, up to that many. A hover
-/// rule does not only restyle what the pointer is IN — `nav:hover a`, every
-/// dropdown on the web, styles a DESCENDANT from a state that lives on the
-/// ancestor. Resolving only the carrier left those runs painted in the resting
-/// colour with nothing to say that anything had been missed.
+/// rule does not only restyle what the pointer is in: `nav:hover a` styles a
+/// descendant from a state that lives on the ancestor.
 ///
 /// The descent is the price of not keeping a computed style per element alive
-/// between layouts: it is one `resolve` per ancestor plus one per preceding
-/// sibling at each level, against ~8300 for a page. It is not a second copy of
-/// the cascade; the function it calls is the one layout calls.
+/// between layouts: one `resolve` per ancestor plus one per preceding sibling
+/// at each level. It is not a second copy of the cascade; the function it
+/// calls is the one layout calls.
 pub fn resolve_out_of_band(
     dom: &Dom,
     sheet: &Stylesheet,
@@ -11283,10 +11181,8 @@ pub fn resolve_out_of_band(
 
 /// One element's computed style, plus the pseudo-elements that hang off it.
 ///
-/// `::before`/`::after` are here because a hover rule reaches them —
-/// MediaWiki underlines the article tabs with `a:hover::after{background}`,
-/// so a pass that looked only at real elements saw a colour change on the
-/// text and quietly missed the line under it. Their boxes are generated
+/// `::before`/`::after` are here because a hover rule reaches them (e.g.
+/// `a:hover::after{background}` underlining a tab). Their boxes are generated
 /// during layout and never recorded, so a changed one gives up.
 #[derive(Clone, Copy)]
 pub struct StyleProbe {
@@ -11446,10 +11342,9 @@ fn descend<'a>(
         if seq > e.seq && seq < next {
             anc.push(ElemInfo::of_hovered(e, hover));
             let r = descend(e, &st, anc, seq, next, sheet, theme, vw, hover);
-            // On success the chain STAYS — the caller resolves the element's
-            // descendants next, and they need their real ancestors. Popping it
-            // here left `.tabs li:hover a` unable to match anything, so a rule
-            // that styles a descendant quietly did nothing.
+            // On success the chain stays — the caller resolves the element's
+            // descendants next, and they need their real ancestors to match rules
+            // like `.tabs li:hover a`.
             if r.is_none() {
                 anc.pop();
             }
@@ -11460,35 +11355,17 @@ fn descend<'a>(
     None
 }
 
-/// Repaint one element in a finished display list, for a pointer change that
-/// cannot move anything (`css::Class::Paint`).
+/// Repaint a form control without laying out the page again, e.g. after a
+/// keystroke: only one box's paint range changes.
 ///
-/// The point is what it does NOT do: no parse, no cascade over the page, no
-/// box arithmetic. A pointer entering a link on Wikipedia's Main_Page changes
-/// 1 op of 723 and adds 1 more — measured — and used to cost a full layout,
-/// 25 ms on the dev box and ~1950 ms on the device, for 0.06 % of the viewport.
+/// Allowed because `:focus`, `:focus-within` and `:active` are in
+/// `never_matches`: keyboard ownership cannot restyle anything through the
+/// cascade. `:checked` can (the checkbox hack is
+/// `input:checked ~ .menu{display:block}`), so there `may_restyle` decides,
+/// and when in doubt the caller lays out.
 ///
-/// Correctness is CHECKED, not argued. Everything this touches is regenerated
-/// through the very functions layout used (`bg_ops`, `border_ops`,
-/// `push_decorations`), and the old state is regenerated too and has to be
-/// found in the list exactly where it is replaced. Anything ambiguous returns
-/// `false` and the caller lays out, which is what it did before.
-/// Ein Steuerelement neu malen, ohne die Seite neu auszulegen.
-///
-/// **Warum das die groesste einzelne Zahl in beak ist:** jeder Tastendruck in
-/// einem Feld war bisher ein `bump_content_gen("form-key")`, also ein volles
-/// Auslegen des Dokuments. Auf Wikipedia sind das 280 ms — je Zeichen. Was
-/// sich dabei wirklich aendert, ist der Malbereich EINES Kastens.
-///
-/// Erlaubt ist das, weil `:focus`, `:focus-within` und `:active` bei uns in
-/// `never_matches` stehen: Tastaturbesitz kann durch die Kaskade gar nichts
-/// umstylen. `:checked` kann es sehr wohl — der Kaestchen-Trick ist
-/// `input:checked ~ .menu{display:block}` —, also entscheidet dort
-/// `may_restyle`, und im Zweifel wird ausgelegt.
-///
-/// Die Geometrie wird NICHT neu gerechnet: der Kasten behaelt seine Masse. Ein
-/// Wert, der breiter ist als sein Feld, wird beschnitten (wie vorher) statt
-/// mitzuwandern — das ist die benannte Grenze dieses Weges.
+/// Geometry is not recomputed: the box keeps its size. A value wider than
+/// its field is clipped instead of growing it — the stated limit of this path.
 pub fn repaint_controls(
     lay: &mut Layout,
     fonts: &crate::fonts::Fonts,
@@ -11496,14 +11373,14 @@ pub fn repaint_controls(
     state: &crate::forms::FormState,
     may_restyle: &dyn Fn(u32) -> bool,
 ) -> Result<(), &'static str> {
-    // Erst planen, dann anwenden — ein Lauf, der auf halbem Weg aufgibt, liesse
-    // eine halb neu gemalte Seite stehen ([[repaint_hover]] macht es genauso).
+    // Plan first, then apply — a pass that gives up halfway would leave a
+    // half-repainted page behind (`repaint_hover` does the same).
     let mut plan: Vec<(usize, Vec<DrawOp>, CtlBox)> = Vec::new();
     for (i, c) in lay.controls.iter().enumerate() {
         let old = &c.paint;
         let focused = state.focus == Some(old.seq);
         let checked = state.checked_or(old.seq, old.checked);
-        // Der angezeigte Text: nur wer getippt hat, aendert ihn.
+        // The displayed text: only typing changes it.
         let (text, ghost, raw) = match state.value_set(old.seq) {
             None => (old.text.clone(), old.ghost, None),
             Some(v) => match old.kind {
@@ -11511,8 +11388,8 @@ pub fn repaint_controls(
                 ControlKind::Text | ControlKind::TextArea if v.is_empty() => {
                     (old.placeholder.clone(), true, Some(v))
                 }
-                // Ein `<select>` zeigt die Beschriftung seiner gewaehlten
-                // Option, und die steht im Baum, nicht im Zustand. Auslegen.
+                // A `<select>` shows the label of its selected option, which lives
+                // in the tree, not in the form state. Lay out.
                 ControlKind::Select => return Err("select label comes from the tree"),
                 _ => (v.to_string(), false, Some(v)),
             },
@@ -11537,28 +11414,20 @@ pub fn repaint_controls(
         next.text = text;
         next.ghost = ghost;
         next.caret = caret;
-        // **Die Spanne beweisen, bevor sie ersetzt wird.**
-        //
-        // `at`/`len` zeigen auf Befehle, die WOANDERS entstanden sind, und
-        // zwischen dem Notieren und hier liegen drei Stellen, die die Liste
-        // umbauen: ein eingeschobener Hintergrund, ein angehaengter
-        // Inline-Kasten, die Umsortierung nach z. Jede hat die Spanne schon
-        // einmal verschoben, ohne es zu sagen — und eine falsche Spanne
-        // ersetzt fremde Befehle, was am Geraet aussieht wie „der Text daneben
-        // verschwindet". Also nachrechnen: was da steht, MUSS das sein, was
-        // der alte Zustand gemalt haette. Kostet `len` Vergleiche (~6) und
-        // macht aus einem stillen Schaden ein ehrliches Auslegen.
+        // Prove the span before replacing it. `at`/`len` point at ops produced
+        // elsewhere, and several passes rebuild the list in between (an inserted
+        // background, an appended inline box, the z-order sort). A wrong span would
+        // replace foreign ops, so check that what is there is exactly what the old
+        // state would have painted; a mismatch becomes an honest relayout.
         let mut was = Vec::new();
         let mut throwaway = Vec::new();
         paint_control(fonts, theme, old, c.x, c.y, &mut was, &mut throwaway);
-        // Eine LEERE Spanne sagt nicht, wo neue Befehle hingehoeren. Ein Feld
-        // ohne Rahmen, ohne eigene Flaeche und ohne Text malt nichts — die
-        // Fritzbox baut ihres genau so —, und `at` liegt dann auf einer
-        // Stelle, an der zwei Kaesten aneinandergrenzen. Ob die neuen Befehle
-        // VOR oder HINTER den Hintergrund des naechsten gehoeren, steht im
-        // Baum und nicht im Index. Also einmal auslegen: danach hat das Feld
-        // einen Cursor, die Spanne ist nicht mehr leer, und jeder weitere
-        // Tastendruck geht wieder den Schnellweg.
+        // An empty span does not say where new ops belong: a field with no frame,
+        // no face and no text paints nothing, and `at` then sits where two boxes
+        // meet. Whether the new ops go before or after the next box's background is
+        // in the tree, not the index. Lay out once; afterwards the field has a
+        // caret, the span is no longer empty, and later keystrokes take the fast
+        // path again.
         if c.len == 0 {
             return Err("das Steuerelement hat bisher nichts gemalt");
         }
@@ -11576,8 +11445,8 @@ pub fn repaint_controls(
     if plan.is_empty() {
         return Ok(());
     }
-    // Von hinten nach vorn: eine Ersetzung verschiebt nur, was DAHINTER liegt,
-    // und die Eintraege davor bleiben gueltig.
+    // Back to front: a replacement only shifts what lies behind it, so the
+    // entries before it stay valid.
     plan.sort_by_key(|(i, ..)| core::cmp::Reverse(lay.controls[*i].at));
     for (i, ops, next) in plan {
         let (at, len) = (lay.controls[i].at, lay.controls[i].len);
@@ -11596,14 +11465,22 @@ pub fn repaint_controls(
     Ok(())
 }
 
+/// Repaint one element in a finished display list, for a pointer change that
+/// cannot move anything (`css::Class::Paint`): no parse, no cascade over the
+/// page, no box arithmetic.
+///
+/// Correctness is checked, not argued. Everything this touches is regenerated
+/// through the very functions layout used (`bg_ops`, `border_ops`,
+/// `push_decorations`), and the old state is regenerated too and has to be
+/// found in the list exactly where it is replaced. Anything ambiguous returns
+/// an error and the caller lays out.
 pub fn repaint_hover(
     lay: &mut Layout,
     fonts: &crate::fonts::Fonts,
     groups: &[HoverRepaint],
 ) -> Result<(), &'static str> {
     // Plan every edit first and apply nothing until all of them are known to
-    // be possible: a pass that patched as it went left a half-repainted page
-    // behind whenever it gave up in the middle.
+    // be possible, so giving up never leaves a half-repainted page.
     let mut edits: Vec<Edit> = Vec::new();
     for g in groups {
         if g.boxes.is_empty() {
@@ -11611,16 +11488,14 @@ pub fn repaint_hover(
         }
         plan_one(lay, fonts, g, &mut edits)?;
     }
-    // Nothing to do is a RESULT, not a failure — and the common one. Most of a
-    // page sits inside something a `:hover` rule COULD match without any rule
-    // actually applying, and `border-color` on a side with no width is a style
-    // that changes and paints nothing. Each of those pointer moves used to cost
-    // a full layout that produced a byte-identical display list.
+    // Nothing to do is a result, not a failure, and the common one: most of a
+    // page sits inside something a `:hover` rule could match without any rule
+    // actually applying, and `border-color` on a side with no width changes
+    // nothing visible.
     //
     // What must not pass silently is a change this pass did not account for —
     // and that is decided per element in `plan_one`, by comparing the ops the
-    // two styles PRODUCE rather than the fields they differ in.
-    // Two elements laying claim to the same op cannot both be right.
+    // two styles produce rather than the fields they differ in.
     edits.sort_by_key(|e| e.at);
     // Two elements laying claim to the same slot cannot both be right, and two
     // insertions at the same index have no order between them.
@@ -11647,19 +11522,18 @@ pub struct HoverRepaint {
     /// with the anchor that says where its decoration belongs.
     pub boxes: Vec<HoverBox>,
     /// The element itself, then every descendant, before and after. The
-    /// unchanged ones are here too: a run painted in a colour some OTHER
+    /// unchanged ones are here too: a run painted in a colour some other
     /// element also uses cannot be told apart, and this pass has to know that
     /// rather than recolour the wrong text.
     pub pairs: Vec<(StyleProbe, StyleProbe)>,
     /// Everything this element's subtree says, whitespace collapsed.
     ///
     /// A rectangle is not proof of ownership: an element's border box can
-    /// enclose text that belongs to something else entirely — a table cell's
-    /// box contains the footnote marker of a link that is not inside it — and
-    /// two links on a page share a colour. Requiring the run to be part of what
-    /// this element actually SAYS is what tells them apart. A run that is not
-    /// found is left alone, and if that leaves nothing to do the page is laid
-    /// out instead.
+    /// enclose text that belongs to something else entirely (a table cell's box
+    /// containing the footnote marker of a link outside it), and two links on a
+    /// page share a colour. Requiring the run to be part of what this element
+    /// actually says tells them apart. A run that is not found is left alone,
+    /// and if that leaves nothing to do the page is laid out instead.
     pub text: String,
 }
 
@@ -11670,7 +11544,7 @@ fn in_boxes(boxes: &[HoverBox], x: i32, y: i32) -> bool {
 
 /// The box decoration this style paints at `rect`, in display-list order.
 ///
-/// A background IMAGE is deliberately not resolved: its key belongs to the
+/// A background image is deliberately not resolved: its key belongs to the
 /// layout, and a repaint that guessed one would paint the wrong picture. A
 /// style that wants one gives up instead.
 fn deco_ops(st: &ComputedStyle, b: &HoverBox) -> Option<Vec<DrawOp>> {
@@ -11691,7 +11565,7 @@ fn deco_ops(st: &ComputedStyle, b: &HoverBox) -> Option<Vec<DrawOp>> {
     Some(v)
 }
 
-/// Do these two styles paint the element's own BOX differently? Text aside,
+/// Do these two styles paint the element's own box differently? Text aside,
 /// this is everything a box draws for itself.
 fn box_differs(a: &ComputedStyle, b: &ComputedStyle) -> bool {
     a.bg != b.bg
@@ -11790,15 +11664,14 @@ struct Sub {
 
 
 /// `Err` = cannot be done with certainty, lay out instead. The reason is
-/// carried out so a page that keeps taking the slow path can say WHY once,
-/// rather than looking like the feature simply does not work.
+/// carried out so a page that keeps taking the slow path can say why.
 fn plan_one(
     lay: &Layout,
     fonts: &crate::fonts::Fonts,
     g: &HoverRepaint,
     edits: &mut Vec<Edit>,
 ) -> Result<(), &'static str> {
-    // A DESCENDANT's pseudo-element has no recorded rect — only the carrier's
+    // A descendant's pseudo-element has no recorded rect — only the carrier's
     // do — so one that repaints is out of reach.
     if g.pairs[1..].iter().any(|(a, b)| pseudos_differ(a, b)) {
         return Err("a descendant's pseudo-element repaints");
@@ -11823,7 +11696,7 @@ fn plan_one(
         if !box_differs(off, on) {
             continue;
         }
-        // A pseudo's `content` string is not part of what the element SAYS, so
+        // A pseudo's `content` string is not part of what the element says, so
         // its own run cannot be identified the way the element's runs are.
         if b.has_text && (off.color != on.color || off.deco != on.deco) {
             return Err("a pseudo-element's own text would have to be repainted");
@@ -11844,8 +11717,8 @@ fn plan_one(
             edits.push(Edit { at, len: was.len(), ops: now });
         } else {
             // Nothing to replace — a background that only exists under the
-            // pointer. A box puts its decoration in AHEAD of everything it
-            // paints; an absolutely positioned pseudo goes in AFTER everything
+            // pointer. A box puts its decoration in ahead of everything it
+            // paints; an absolutely positioned pseudo goes in after everything
             // its element painted. The anchor says by what, and which side.
             let Some(key) = b.anchor else {
                 return Err("the box painted nothing to anchor to");
@@ -11875,7 +11748,7 @@ fn plan_one(
         }
     }
 
-    // A DESCENDANT that repaints its own box is out of reach: its rect was
+    // A descendant that repaints its own box is out of reach: its rect was
     // never recorded, only the carrier's.
     if g.pairs[1..].iter().any(|(a, b)| box_differs(&a.own, &b.own)) {
         return Err("a descendant repaints its own box");
@@ -11902,7 +11775,7 @@ fn plan_one(
         }
         subs.push(Sub { off: *off, on: *on });
     }
-    // A run painted in a colour that some UNCHANGED element also uses would be
+    // A run painted in a colour that some unchanged element also uses would be
     // recoloured by mistake.
     if g.pairs.iter().map(|(a, b)| (&a.own, &b.own)).any(|(off, on)| {
         off.color == on.color && off.deco == on.deco && subs.iter().any(|s| s.off.color == off.color)
@@ -11920,14 +11793,14 @@ fn plan_one(
         subs.iter().find(|s| s.off.color == *color)
     };
 
-    // Recolouring can MERGE two runs. The line builder joins neighbouring
-    // segments that share a face, so two runs the page painted apart —
-    // `46° 58′ 50″ N, 8° 20′ 20″ O` split across three links — become ONE op
-    // the moment they agree on a colour, with a single underline across the
-    // whole thing instead of three. A patch cannot produce that.
+    // Recolouring can merge two runs. The line builder joins neighbouring
+    // segments that share a face, so runs the page painted apart (e.g. a
+    // coordinate split across three links) become one op the moment they agree
+    // on a colour, with a single underline across the whole. A patch cannot
+    // produce that.
     //
     // The test is deliberately blunt: give up whenever a repainted run ends up
-    // looking like the run it TOUCHES. Whether they really merge also depends
+    // looking like the run it touches. Whether they really merge also depends
     // on the `href` behind them, which the display list no longer carries — so
     // the only honest answer from here is "maybe", and maybe means lay out.
     let face = |op: &DrawOp| -> Option<(i32, Rgba, u32, bool, bool, bool)> {
@@ -11958,7 +11831,7 @@ fn plan_one(
         let DrawOp::Text { x, y, size, bold, italic, mono, family, sp, text, .. } = op else { continue };
         // Everything `push_decorations` was given, recovered from the op it was
         // emitted next to — the run's own width and baseline, measured with the
-        // same face at the same size AND the same spacing. No second copy of
+        // same face at the same size and the same spacing. No second copy of
         // the rule.
         let (x, y, size) = (*x, *y, *size);
         let font = fonts.pick(*bold, *italic, *mono, *family);
@@ -12014,10 +11887,10 @@ fn plan_one(
     }
     // A colour changed and not one run carried it. That is the ordinary case
     // for a container whose text belongs to a link with a colour of its own —
-    // the link keeps its colour, so there is genuinely nothing to repaint, and
-    // a full layout produces a byte-identical list. What must not be mistaken
-    // for it is a run this pass SKIPPED: one that carries the colour but could
-    // not be shown to be part of what the element says.
+    // the link keeps its colour, so there is genuinely nothing to repaint.
+    // What must not be mistaken for it is a run this pass skipped: one that
+    // carries the colour but could not be shown to be part of what the
+    // element says.
     if touched == 0 {
         let skipped = lay.ops.iter().any(|op| match op {
             DrawOp::Text { x, y, color, text, .. } => {
@@ -12044,7 +11917,7 @@ fn placed_x(p: &Placed<'_>) -> i32 {
 }
 
 /// Paint one fragment of an inline box. The rectangle is the box's own content
-/// area — its font's ascent + descent, NOT the line box (CSS 2.1 §10.6.1) —
+/// area — its font's ascent + descent, not the line box (CSS 2.1 §10.6.1) —
 /// grown by its padding and border. Vertical padding therefore spills over the
 /// neighbouring lines instead of pushing them apart, which is what CSS asks for.
 fn paint_frag(
@@ -12068,12 +11941,11 @@ fn paint_frag(
     border_ops(st, x, y, w, h, sides, ops);
 }
 
-/// The rectangle one fragment of an inline box decorates — NOT its line box.
+/// The rectangle one fragment of an inline box decorates — not its line box,
+/// and not its hit rect.
 ///
 /// One source, because the pointer repaint has to regenerate exactly what
-/// `paint_frag` produced. Handing it the hit rect instead made every inline
-/// background one pixel too tall, which is the difference between a patch that
-/// matches a layout and one that does not.
+/// `paint_frag` produced.
 fn frag_rect(
     fonts: &crate::fonts::Fonts,
     b: &InlineBox,
@@ -12113,7 +11985,7 @@ fn emit_line(
     // An inline box's decoration goes in where the fragment begins — but that
     // op does not exist yet when the hit rect is recorded, so the index is
     // parked and turned into a content key once the line is done. Within this
-    // function `ops` is only ever APPENDED to, so an index taken here still
+    // function `ops` is only ever appended to, so an index taken here still
     // means the same slot at the end of it.
     let mut pending_anchor: Vec<(usize, usize)> = Vec::new();
     // Inline-box decoration goes down before anything on the line, so text sits
@@ -12131,10 +12003,9 @@ fn emit_line(
             if let Some(seq) = b.hover_seq {
                 if x1 > x0 {
                     pending_anchor.push((hover_boxes.len(), ops.len()));
-                    // Die EIGENE Hoehe des Inline-Kastens, nicht die der
-                    // Zeile: eine Zeile mit einem hohen Steuerelement darin
-                    // machte sonst jedes `<label>` daneben genauso hoch, und
-                    // `getBoundingClientRect` meldete 68 statt 21.
+                    // The inline box's own height, not the line's: a line holding a
+                    // tall control must not make every `<label>` beside it as tall
+                    // in `getBoundingClientRect`.
                     let (_, fy, _, fh) = frag_rect(fonts, b, x0, x1, baseline);
                     hover_boxes.push(HoverBox {
                         x: x0,
@@ -12205,9 +12076,9 @@ family: seg.style.family,
                 // CSS2.1 §10.8.1. `baseline` puts the box's own baseline on the
                 // line's — with the approximation `baseline == h` that is its
                 // bottom margin edge, which is what a block-ish inline-block
-                // does. `top`/`bottom` measure against the LINE BOX instead,
-                // and that is the case real pages lean on: without it a row of
-                // differently tall `inline-block`s descends like a staircase.
+                // does. `top`/`bottom` measure against the line box instead,
+                // so a row of differently tall `inline-block`s does not
+                // descend like a staircase.
                 use crate::style::VAlign;
                 let dy = match box_.valign {
                     VAlign::Top | VAlign::TextTop => line_top,
@@ -12243,8 +12114,8 @@ family: seg.style.family,
                         a.y += dy;
                     }
                 }
-                // Die Befehle des Kastens landen HINTER den bisherigen — die
-                // Indizes seiner Steuerelemente zaehlen aber ab null.
+                // The box's ops land behind the existing ones, but its controls'
+                // indices count from zero.
                 let base = ops.len();
                 for c in &mut box_.controls {
                     if c.at != CTL_UNUSABLE { c.at += base; }
@@ -12346,14 +12217,8 @@ mod tests {
         layout(&fonts(), &dom, &sheet, &crate::image::ImageMap::new(), w, 600, &Theme::DARK, &FormState::default(), false, hover, false)
     }
 
-    /// **Der Clearfix.** Ein Kasten, dessen letztes Kind `clear` traegt, muss
-    /// so hoch werden wie sein Float — die Raeumung ist Platz IM Kasten, kein
-    /// Schub AUF ihn.
-    ///
-    /// Vorher kam der Kasten mit der Hoehe des geraeumten Kindes heraus (also
-    /// 0 bei einem leeren), weil sein eigener Rand mit heruntergezogen wurde.
-    /// Das ist das Muster, mit dem ein sehr grosser Teil des echten Webs seine
-    /// Floats einschliesst.
+    /// The clearfix: a box whose last child has `clear` must grow as tall as
+    /// its float — the clearance is space inside the box, not a push on it.
     #[test]
     fn ein_geraeumtes_kind_macht_den_kasten_so_hoch_wie_den_float() {
         let hoehe = |inner: &str| {
@@ -12365,27 +12230,25 @@ mod tests {
                 .map(|b| (b.y, b.h))
                 .unwrap_or((-1, -1))
         };
-        // Der klassische Clearfix: leeres `clear`-Kind.
+        // The classic clearfix: an empty `clear` child.
         assert_eq!(hoehe("<div style=\"clear:both\"></div>"), (0, 50),
             "Kasten muss oben stehenbleiben und so hoch werden wie der Float");
-        // Mit eigener Hoehe kommt sie unten dazu.
+        // With a height of its own, that height is added below.
         assert_eq!(hoehe("<div style=\"clear:both;height:10px\"></div>"), (0, 60));
-        // Ohne `clear` schliesst ein Kasten seinen Float NICHT ein (§10.6.3) —
-        // die Gegenprobe, damit der Riegel nicht zu weit greift.
+        // Without `clear` a box does not enclose its float (§10.6.3) — the
+        // counter-check that the rule does not reach too far.
         assert_eq!(hoehe("<div style=\"height:5px\"></div>"), (0, 5));
-        // Und der Rand eines geraeumten, durchkollabierenden Kindes
-        // verschmilzt nicht mit dem Unterrand des Elters (§8.3.1):
-        // 50 px Raeumung + 99 px Rand des Folgegeschwisters.
+        // The margin of a cleared, collapsing-through child does not collapse
+        // with the parent's bottom margin (§8.3.1): 50px clearance + 99px margin
+        // of the following sibling.
         assert_eq!(hoehe("<div style=\"clear:both\"></div><div style=\"margin-top:99px\"></div>"),
                    (0, 149));
     }
 
     /// Only the elements a `:hover` rule can actually react to get a box —
-    /// the invalidation set. On Wikipedia's Main_Page that is the difference
-    /// between 8327 boxes and a handful, and it is what makes 98.7 % of
-    /// pointer movement cost nothing at all.
+    /// the invalidation set — so most pointer movement costs nothing.
     ///
-    /// The carrier of the `:hover` is what must be hit-testable, NOT the
+    /// The carrier of the `:hover` is what must be hit-testable, not the
     /// selector's subject: in `nav:hover a` the pointer is inside the `<nav>`.
     #[test]
     fn only_hover_carriers_get_a_box() {
@@ -12403,7 +12266,7 @@ mod tests {
         let only_a = page("a:hover{background:#f00}");
         assert_eq!(only_a.len(), 1, "just the link: {only_a:?}");
 
-        // `nav:hover a` — now the NAV is the carrier, and it is the one the
+        // `nav:hover a` — now the nav is the carrier, and it is the one the
         // pointer has to be found inside.
         let only_nav = page("nav:hover a{color:#0f0}");
         assert_eq!(only_nav.len(), 1, "just the nav: {only_nav:?}");
@@ -12414,11 +12277,11 @@ mod tests {
         assert!(page("*:hover{color:#f00}").len() > 2);
     }
 
-    /// The pointer hovers the element it is inside AND every ancestor that
-    /// contains it — `nav:hover a` (every dropdown on the web) styles a
-    /// descendant from a state that lives on the parent.
+    /// The pointer hovers the element it is inside and every ancestor that
+    /// contains it — `nav:hover a` styles a descendant from a state that lives
+    /// on the parent.
     ///
-    /// This is the geometry half; that the restyle reaches a PIXEL is
+    /// This is the geometry half; that the restyle reaches a pixel is
     /// `raster::tests::hover_repaints_the_element_under_the_pointer`.
     #[test]
     fn the_pointer_hovers_an_element_and_every_ancestor_containing_it() {
@@ -12437,15 +12300,9 @@ mod tests {
         assert!(l.hover_at(-5, -5).is_empty());
     }
 
-    /// CSS 2.1 Appendix E: a box paints its background AND its border before
-    /// any descendant. The background already did; the border was appended
-    /// after the content, so it landed on top of the box's own children.
-    ///
-    /// Invisible while a child stays inside its parent's content box — and
-    /// wrong the moment one does not, which is what a negative margin is FOR.
-    /// The CSS2.1 suite tests exactly that idiom: pull a child left by the
-    /// parent's border width so its own border covers it, and check no red
-    /// shows. 62 of those went from fail to pass.
+    /// CSS 2.1 Appendix E: a box paints its background and its border before
+    /// any descendant, so a child pulled over its parent's border by a negative
+    /// margin covers that border.
     #[test]
     fn a_box_paints_its_border_under_its_descendants() {
         // The child's black border is pulled onto the parent's red one.
@@ -12466,7 +12323,7 @@ mod tests {
             "parent's border first, child's over it",
         );
 
-        // And the background still goes under the border of the SAME box.
+        // And the background still goes under the border of the same box.
         let l = lay(
             "<body style=\"margin:0\"><div style=\"background:#00f;border:10px solid #0f0;\
              width:100px;height:50px\"></div></body>",
@@ -12478,16 +12335,10 @@ mod tests {
         assert!(bg < bd, "background under its own border: {order:?}");
     }
 
-    /// A hit rect has to sit where the box is PAINTED, on every path that
-    /// moves a box after laying it out.
-    ///
-    /// An `inline-block` is laid out at the ORIGIN and translated onto its
-    /// line; a `position:relative` box is laid in flow and then offset; a
-    /// `vertical-align`ed table cell slides its content down. Every one of
-    /// those moved the ops and left the hit rects behind — so the pointer lit
-    /// up elements it was nowhere near (Wikipedia's whole sister-project row
-    /// answered to the top-left corner) and the link actually under the
-    /// pointer answered to nothing.
+    /// A hit rect has to sit where the box is painted, on every path that
+    /// moves a box after laying it out: an `inline-block` laid out at the
+    /// origin and translated onto its line, a `position:relative` box offset
+    /// after flow, a `vertical-align`ed table cell sliding its content down.
     #[test]
     fn a_hit_rect_follows_its_box_when_the_box_moves() {
         let check = |inner: &str, what: &str| {
@@ -12519,10 +12370,9 @@ mod tests {
     }
 
     /// A discarded trial layout must not leave its hit rects behind. It
-    /// records them at TRIAL coordinates, so a leak points the pointer at a
-    /// rectangle the page never painted — and records the same element once
-    /// per trial, which is how Wikipedia's Main_Page came to carry 5131 hit
-    /// rects for 656 real ones.
+    /// records them at trial coordinates, so a leak points the pointer at a
+    /// rectangle the page never painted, and records the same element once
+    /// per trial.
     #[test]
     fn a_speculative_layout_leaves_no_hit_rects_behind() {
         let html = "<body style=\"margin:0\"><style>a:hover{color:#0f0}</style>\
@@ -12546,11 +12396,9 @@ mod tests {
 
     #[test]
     fn inspect_reports_the_box_not_its_containing_block() {
-        // The device debugging tool has to agree with the pixels. It used to
-        // report the CONTAINING BLOCK's x/width, which coincides with the box
-        // only for a plain `width: auto` block — so every report about a
-        // centred or max-width container (MediaWiki's `.mw-page-container`)
-        // carried the viewport's numbers instead of the box's.
+        // The inspect record has to agree with the pixels: the box's own x/width,
+        // not the containing block's, which coincide only for a plain
+        // `width: auto` block.
         let l = lay_inspect(
             "<body style=\"margin:0\"><div id=c style=\"max-width:600px;margin:0 auto;background:#f00\">x</div></body>",
             1000,
@@ -12574,22 +12422,20 @@ mod tests {
             );
             rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).map(|(_, _, _, h, _)| h).unwrap_or(0)
         };
-        // Definite parent → half of its CONTENT height.
+        // Definite parent → half of its content height.
         assert_eq!(inner_h("height:200px"), 100);
         // `box-sizing: border-box` — the content box is what a % measures.
         assert_eq!(inner_h("height:220px;padding:10px;box-sizing:border-box"), 100);
         // Indefinite parent → the percentage behaves as `auto` (CSS2.1 §10.5),
-        // which for an empty box is zero. Guessing a height here is what
-        // truncated pages the two earlier attempts at this.
+        // which for an empty box is zero.
         assert_eq!(inner_h("background:#eee"), 0);
     }
 
     #[test]
     fn html_height_100_percent_does_not_truncate_the_page() {
-        // The 0.3.13 regression, nailed down: `html { height: 100% }` makes the
-        // root box exactly one viewport tall, and the page still has to scroll.
-        // `Layout::height` is the painted extent, not the root box's bottom —
-        // that fix (0.3.14) is what made general percentage heights safe to add.
+        // `html { height: 100% }` makes the root box exactly one viewport tall,
+        // and the page still has to scroll: `Layout::height` is the painted
+        // extent, not the root box's bottom.
         let body: String = (0..60)
             .map(|i| alloc::format!("<p>Absatz {i} mit genug Text fuer mehrere Zeilen.</p>"))
             .collect();
@@ -12602,10 +12448,8 @@ mod tests {
 
     #[test]
     fn vertical_align_places_atomic_inlines_against_the_line_box() {
-        // Every atomic inline used to sit on the baseline, so a row of
-        // `inline-block`s of differing heights descended like a staircase —
-        // MediaWiki galleries, icon rows and badges all set `vertical-align`
-        // for exactly this.
+        // Atomic inlines honour `vertical-align`, so a row of `inline-block`s of
+        // differing heights does not descend like a staircase.
         let tops = |va: &str| {
             let l = lay(
                 &format!(
@@ -12624,8 +12468,7 @@ mod tests {
         let ((ry, rh), (by, bh)) = tops("bottom");
         assert_eq!(ry + rh, by + bh, "bottom-aligned boxes share its bottom");
         // A `middle` box straddles the baseline, so the line has to grow around
-        // it — otherwise it paints above its own line (the gallery thumbnails
-        // hung out of their frames).
+        // it — otherwise it paints above its own line.
         let ((ry, _), (by, _)) = tops("middle");
         assert!(ry > by, "the short box sits lower: {ry} vs {by}");
         assert!(by >= 0, "the tall box stays inside the line box, got {by}");
@@ -12634,9 +12477,8 @@ mod tests {
     #[test]
     fn floated_siblings_add_up_at_max_content() {
         // Floats sit side by side, so a shrink-to-fit box around a row of them
-        // is as wide as their SUM. Taking the widest sized Wikipedia's
-        // `float: right` footer <ul> to one icon, and its floated <li> children
-        // then stacked vertically instead of sitting in a row.
+        // is as wide as their sum, not the widest; otherwise floated `<li>`
+        // children stack vertically instead of sitting in a row.
         let l = lay(
             "<body style=\"margin:0\"><ul style=\"float:right;margin:0;padding:0;list-style:none\">\
              <li style=\"float:left\"><div style=\"width:40px;height:20px;background:#f00\"></div></li>\
@@ -12650,15 +12492,11 @@ mod tests {
         assert_eq!(blue.0 - red.0, 40, "and sit directly beside each other");
     }
 
-    /// **Ein Float steht NEBEN der Zeile, also zaehlt seine Breite dazu.**
-    /// Vorher wurde er gegen die Zeile GEMAXT, und der schrumpfende Kasten kam
-    /// genau um die Float-Breite zu schmal heraus — dann passte der Float
-    /// nicht mehr hinein und rutschte eine Zeile tiefer. Auf DuckDuckGos
-    /// Kopfleiste war das der Hamburger-Knopf unter „Protection. Privacy."
+    /// A float stands beside the line, so its width adds to the line's
+    /// intrinsic width; maxing it against the line would leave the
+    /// shrink-to-fit box too narrow and push the float a line down.
     ///
-    /// Geprueft wird die BREITE des schrumpfenden Kastens: 200 + 32. Sie ist
-    /// die Ursache; wo der Float dann landet, ist die Folge. Chromium misst
-    /// auf derselben Vorlage dieselben 232.
+    /// Checks the width of the shrink-to-fit box: 200 + 32, as in Chromium.
     #[test]
     fn ein_float_zaehlt_zur_eigenbreite_seiner_zeile() {
         let l = lay(
@@ -12677,13 +12515,9 @@ mod tests {
         assert_eq!(red.1, 0, "und er steht auf der ERSTEN Zeile, nicht darunter");
     }
 
-    /// **Was schwebt, ist block-artig** (css-display-3 §2.7), und ein
-    /// geflotetes STEUERELEMENT ist aus dem Fluss wie jedes andere. Beides
-    /// fehlte: ein `display:inline-flex` mit `float:right` blieb ein atomarer
-    /// Inline auf der Zeile, und der Steuerelement-Zweig in `flow_children`
-    /// verschluckte den Float — aber nur bei automatischer Breite, weshalb es
-    /// wie ein Breitenfehler aussah. Auf DDGs Wissenskasten klebte so der
-    /// „Directions"-Knopf links vor dem Titel.
+    /// A float is block-level (css-display-3 §2.7), and a floated form control
+    /// leaves the flow like any other float — including an
+    /// `display:inline-flex` with `float:right` and automatic width.
     #[test]
     fn ein_geflotetes_steuerelement_fliesst() {
         let l = lay(
@@ -12697,25 +12531,24 @@ mod tests {
         assert_eq!(c.y, 0, "und auf der ersten Zeile");
     }
 
-    /// **Ein Formatierungszeichen hat keine Laufweite, und `::before` zaehlt
-    /// mit.** Beides traf DDGs „Searches related to": die Vorlage haengt ein
-    /// `&ZeroWidthSpace;` hinter jeden Eintrag und eine Lupe davor, und der
-    /// Kasten kam um beides zu schmal heraus — der Text brach auf zwei Zeilen.
+    /// A format character has no advance, and `::before` counts toward the
+    /// intrinsic width; otherwise a shrink-to-fit box around a list entry with a
+    /// trailing zero-width space and a leading icon comes out too narrow and
+    /// its text wraps.
     #[test]
     fn ein_nullbreites_zeichen_und_ein_pseudo_messen_richtig() {
-        // Zwanzig U+200C: null breit, nicht zwanzig Glyphen.
+        // Twenty U+200C: zero wide, not twenty glyphs.
         let zwnj: String = core::iter::repeat('\u{200c}').take(20).collect();
         let l = lay(&alloc::format!(
             "<body style=\"margin:0\"><span id=a style=\"display:inline-block;background:#00ff00\">{zwnj}</span></body>"), 600);
-        // Vorher waren das 184 px — je ein `.notdef` aus der Schrift. Das eine
-        // Pixel, das bleibt, ist der Boden des gemalten Kastens, nicht die
-        // Laufweite; er steht hier als Zahl statt als Behauptung.
+        // The one remaining pixel is the bottom of the painted box, not an
+        // advance; it is stated here as a number rather than a claim.
         let g = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0, 0xff, 0));
         assert!(g.is_none_or(|r| r.2 <= 1),
                 "zwanzig Formatierungszeichen tragen keine Breite, gemessen {:?}", g);
 
-        // Und das `::before` steht AUF der Zeile, also zaehlt seine Breite
-        // samt Rand in die Eigenbreite des schrumpfenden Kastens.
+        // The `::before` stands on the line, so its width including margin
+        // counts toward the intrinsic width of the shrink-to-fit box.
         let l2 = lay(
             "<style>.p::before{content:\"\";display:inline-block;width:16px;height:16px;margin-right:4px}</style>\
              <body style=\"margin:0\"><div style=\"display:inline-block;background:#0000ff\">\
@@ -12781,18 +12614,8 @@ mod tests {
         }
     }
 
-    /// **Ein `0 0 0 Npx`-Schatten auf einem runden Kasten ist ein RING.**
-    ///
-    /// So schreibt das halbe Web seine Umrandungen, und DuckDuckGos Suchfeld
-    /// hat gar keinen `border` — sein sichtbarer Strich ist der dritte
-    /// Schatten seiner Liste. Als vier Rechtecke gemalt bekam die Kapsel
-    /// eckige Ecken; gemessen gegen Chromium wanderte beaks Kante bei jedem
-    /// `y` auf derselben Spalte, waehrend Chromiums sich nach aussen bog.
-    /// **Der Schreibzeiger ist ein eigener Befehl, damit er blinken kann.**
-    ///
-    /// Als gewoehnliches Rechteck haette jeder Takt ein Neuauslegen gekostet
-    /// (am Geraet 10-40 ms, zweimal je Sekunde). So bleibt das Layout stehen,
-    /// und der Rasterer laesst ihn in der dunklen Haelfte einfach aus.
+    /// The text caret is its own op so it can blink: the rasteriser leaves it
+    /// out in the dark half of the period while the layout stays as it is.
     #[test]
     fn the_caret_is_its_own_op_and_the_engine_can_hide_it() {
         let mut st = crate::forms::FormState::default();
@@ -12808,8 +12631,8 @@ mod tests {
         let (cx, cy, cw, chh) = l.caret_rect().expect("caret_rect findet ihn");
         assert_eq!(cw, 1, "ein Pixel breit");
         assert!(chh > 4, "und so hoch wie die Zeile, nicht {chh}");
-        // Dieselben Kaesten, zwei Anstriche: hell und dunkel muessen sich
-        // GENAU an dieser Stelle unterscheiden und sonst nirgends.
+        // Same boxes, two paints: on and off must differ exactly inside the
+        // caret's rect and nowhere else.
         let (w, h) = (400u32, 60u32);
         let mut on = alloc::vec![0u8; (w * h * 4) as usize];
         let mut off = alloc::vec![0u8; (w * h * 4) as usize];
@@ -12829,6 +12652,8 @@ mod tests {
         }
     }
 
+    /// A `0 0 0 Npx` shadow on a rounded box is a ring, not four rectangles —
+    /// a common way to draw an outline (e.g. on a pill-shaped search field).
     #[test]
     fn a_spread_only_shadow_on_a_round_box_is_a_ring() {
         let ring = |css: &str| {
@@ -12839,35 +12664,32 @@ mod tests {
                 _ => None,
             })
         };
-        // Der Fall der echten Seite: Kapsel, kein Rahmen, Ring als Schatten.
+        // The real-world case: a pill, no border, the ring drawn as a shadow.
         let (r, thick, w, h) = ring("border-radius:20px;box-shadow:0 0 0 1px #000")
             .expect("ein Ring, keine vier Rechtecke");
         assert_eq!(thick, 1.0);
-        // Der Kasten des Schattens ist um den Spread GEWACHSEN, und die Ecken
-        // mit ihm (CSS Backgrounds 3 §7.1.1): 20 + 1.
+        // The shadow's box grows by the spread, and its corners with it
+        // (CSS Backgrounds 3 §7.1.1): 20 + 1.
         assert_eq!((w, h), (202, 42));
         assert!((r[0] - 21.0).abs() < 0.01, "Eckradius {} statt 21", r[0]);
-        // Ohne Radius bleibt es beim alten Weg — vier Rechtecke, kein Ring.
+        // Without a radius it stays four rectangles, no ring.
         assert!(ring("box-shadow:0 0 0 1px #000").is_none());
-        // Mit Versatz ist die Differenz kein Ring mehr.
+        // With an offset the difference of two boxes is no longer a ring.
         assert!(ring("border-radius:20px;box-shadow:2px 0 0 1px #000").is_none());
     }
 
-    /// Der WEICHE Schatten folgt den Ecken ebenfalls — gemessen in PIXELN,
-    /// nicht an Befehlen ([[feedback_paint_test_not_parse_test]]): ein Punkt
-    /// weit ausserhalb der Eckrundung muss frei bleiben, die Mitte derselben
-    /// Kante gedeckt sein.
+    /// The soft shadow follows the corners as well — checked in pixels, not
+    /// ops: a point well outside the corner rounding must stay clear, the
+    /// middle of the same edge covered.
     #[test]
     fn a_soft_shadow_follows_the_corner_radius() {
-        // **Mit SPREAD, und das ist keine Zierde.** Ohne ihn liegt die ganze
-        // Eckrundung INNERHALB des Rahmenkastens, und der wird aus einem
-        // aeusseren Schatten ohnehin ausgespart (CSS Backgrounds 3 §7.1.1) —
-        // eckig und rund sehen dort gleich aus, und der Test waere gruen,
-        // ohne etwas zu pruefen. Erst der Spread schiebt die Ecke nach
-        // draussen, wo sie zu sehen ist.
+        // With spread, deliberately: without it the whole corner rounding lies
+        // inside the border box, which an outer shadow cuts out anyway (CSS
+        // Backgrounds 3 §7.1.1), so square and round would look the same there
+        // and the test would check nothing.
         //
-        // Ein LEERER Kasten (ein Buchstabe traefe die Messpunkte) und ein
-        // WEISSER Schatten (der Vorgabegrund dieser Probe ist dunkel).
+        // An empty box (a glyph would hit the probe points) and a white shadow
+        // (this probe's default background is dark).
         let l = lay("<body style=\"margin:0\"><div style=\"width:120px;height:60px;\
 margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400);
         let eng = crate::Engine::new();
@@ -12875,12 +12697,11 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
         let mut buf = alloc::vec![0u8; (w * h * 4) as usize];
         eng.paint(&l, w, h, 0, &mut buf);
         let at = |x: u32, y: u32| buf[((y * w + x) * 4) as usize] as i32;
-        // Rahmenkasten 40,40 120x60; Schattenform um 8 gewachsen, also
-        // 32,32 136x76 mit Radius 38 — Mittelpunkt der oberen linken Ecke
-        // wieder (70,70). (38,38) liegt 7 px AUSSERHALB dieses Kreises und
-        // zugleich AUSSERHALB des ausgesparten Rahmenkastens: genau dort
-        // malte der eckige Schatten voll durch. (100,36) ist die Mitte der
-        // Oberkante im Schatten, (10,10) der freie Grund.
+        // Border box 40,40 120x60; shadow shape grown by 8, so 32,32 136x76
+        // with radius 38 — top-left corner centre again at (70,70). (38,38) lies
+        // 7px outside that circle and also outside the cut-out border box,
+        // exactly where a square shadow would paint. (100,36) is the middle of
+        // the top edge in the shadow, (10,10) the clear background.
         let frei = at(10, 10);
         assert!((at(38, 38) - frei).abs() <= 6,
             "Ecke {} gegen freien Grund {} — der Schatten ist eckig", at(38, 38), frei);
@@ -12945,10 +12766,10 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
             );
             rects(&l).into_iter().find(|(.., c)| *c == red).map(|(_, _, w, h, _)| (w, h)).unwrap()
         };
-        // Empty cells used to collapse the table onto its border: the columns
-        // measure zero, so nothing ever claimed the specified width.
+        // Empty cells must not collapse the table onto its border: the columns
+        // measure zero, so the specified width has to be claimed anyway.
         assert_eq!(box_of("width:100px;height:60px"), (100, 60));
-        // `height` is a MINIMUM (CSS2.1 §17.5.3) — taller content wins.
+        // `height` is a minimum (CSS2.1 §17.5.3) — taller content wins.
         let (_, h) = box_of("width:100px;height:1px");
         assert!(h > 1, "content keeps its height, got {h}");
         // `min-height` does the same job.
@@ -12963,10 +12784,8 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
     #[test]
     fn a_shrink_to_fit_box_wraps_its_content_margin_box() {
         let blue = Rgb(0, 0, 0xff);
-        // An out-of-flow box with `width: auto` shrink-wraps. Its own frame was
-        // subtracted twice (once here, once by the block path that reads the
-        // handed-over width as a containing block), and a child's margins never
-        // reached the measurement at all.
+        // An out-of-flow box with `width: auto` shrink-wraps: its own frame is
+        // subtracted once, and a child's margins reach the measurement.
         let outer = |inner: &str| {
             let l = lay(
                 &format!(
@@ -12983,11 +12802,9 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
         assert_eq!(outer("border:10px solid #f00;width:200px;height:60px;margin:0 50px"), 340);
     }
 
-    /// Inline-blocks sit side by side ON a line, so a shrink-to-fit container
-    /// has to be wide enough for their SUM. Measuring them as block-level
-    /// children takes the widest instead, and they then have no room beside
-    /// each other and stack — which is how Google's `float:right` header bar
-    /// came out one word wide with "Gmail" and "Bilder" on separate lines.
+    /// Inline-blocks sit side by side on a line, so a shrink-to-fit container
+    /// has to be wide enough for their sum. Taking the widest instead leaves
+    /// them no room beside each other and they stack.
     #[test]
     fn a_shrink_to_fit_box_fits_its_inline_blocks_side_by_side() {
         let blue = Rgb(0, 0, 0xff);
@@ -13014,9 +12831,8 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
 
     /// `<td width="25%">` is a presentational hint, not CSS — it carries no
     /// unit, so the CSS length parser rejects it. Table-built pages centre
-    /// with exactly this (Google's home page puts the search box between two
-    /// 25% spacer cells); ignoring it collapses the spacer and slams the
-    /// content to the left edge.
+    /// with exactly this (a search box between two 25% spacer cells);
+    /// ignoring it collapses the spacer and slams the content to the left edge.
     #[test]
     fn a_width_attribute_on_a_cell_is_a_presentational_hint() {
         let red = Rgb(0xff, 0, 0);
@@ -13039,9 +12855,8 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
     }
 
     /// The other half of table-built centring: `<td width="25%">` spacers put
-    /// the CELL in the middle, `align="center"` puts the content in the middle
-    /// of the cell. With only the first, Google's search box sat at the left
-    /// edge of a correctly-placed cell.
+    /// the cell in the middle, `align="center"` puts the content in the middle
+    /// of the cell.
     #[test]
     fn an_align_attribute_is_a_presentational_hint_for_text_align() {
         let red = Rgb(0xff, 0, 0);
@@ -13065,10 +12880,8 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
     }
 
     /// A table wider than its content hands the slack to the columns that did
-    /// NOT ask for a width. Spreading it over all of them widened the sized
-    /// ones past what they asked for: `25% | auto | 25%` came out 41/18/41,
-    /// so the middle column — the one with the content in it — ended up the
-    /// narrowest of the three.
+    /// not ask for a width. Spreading it over all of them would widen the sized
+    /// ones past what they asked for and leave the content column narrowest.
     #[test]
     fn table_slack_goes_to_the_columns_without_a_width() {
         let green = Rgb(0, 0x80, 0);
@@ -13080,13 +12893,13 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
                      <td {mid} style=\"background:#008000\">x</td>\
                      <td width=\"25%\">&nbsp;</td></tr></table></body>"
                 ),
-                // Deliberately WIDER than the table: a cell percentage is a
+                // Deliberately wider than the table: a cell percentage is a
                 // fraction of the table, not of the space it was offered.
                 900,
             );
             rects(&l).into_iter().find(|(.., c)| *c == green).map(|(x, _, w, ..)| (x, w)).unwrap()
         };
-        // The auto column takes ALL of it: 800 - 200 - 200 = 400.
+        // The auto column takes all of it: 800 - 200 - 200 = 400.
         assert_eq!(middle(""), (200, 400));
         // Spelling the same thing out explicitly must agree.
         assert_eq!(middle("width=\"50%\""), (200, 400));
@@ -13094,7 +12907,7 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
 
     /// `<center>` centres block-level children, not only inline content —
     /// browsers spell it `text-align: -moz-center`, and the `<center><table>`
-    /// idiom is built on it. Plain CSS `text-align: center` must NOT do this,
+    /// idiom is built on it. Plain CSS `text-align: center` must not do this,
     /// or every centred paragraph would drag its block children along.
     #[test]
     fn center_centres_a_table_but_plain_text_align_does_not() {
@@ -13122,11 +12935,9 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
 
     #[test]
     fn a_max_content_width_is_rounded_up_not_truncated() {
-        // A max-content width is the width at which the content does NOT wrap.
-        // Truncating a fractional one to whole pixels loses the last word —
-        // and the shrink-to-fit paths disagreed about it: a float ceiled, a
-        // flex item truncated, so the same text wrapped in one and not in the
-        // other.
+        // A max-content width is the width at which the content does not wrap.
+        // Truncating a fractional one to whole pixels loses the last word, and
+        // all shrink-to-fit paths (float, flex item) must round the same way.
         let lines = |display: &str| {
             let l = lay(
                 &format!(
@@ -13159,7 +12970,7 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
         let l = table("#a{background:#f00}");
         let (_, ry, rw, rh, _) = reds(&l)[0];
         assert_eq!((rw, rh), (100, 20), "row box spans both columns");
-        // … and it sits BEHIND its cells: the text is emitted after the fill.
+        // … and it sits behind its cells: the text is emitted after the fill.
         let text_a = texts(&l).into_iter().find(|(.., t)| *t == "A").unwrap();
         assert_eq!(text_a.1 >= ry, true, "row background covers its cell text");
         assert!(
@@ -13190,11 +13001,10 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
 
     #[test]
     fn a_float_paints_above_later_block_borders() {
-        // MediaWiki's shape: a right-floated infobox, then headings whose
-        // `border-bottom` rule runs the full content width. The rule is a later
-        // in-flow block box, so it must paint UNDER the float (CSS2.1 Appendix
-        // E: in-flow blocks, then floats) — otherwise it is drawn straight
-        // across the table.
+        // A right-floated infobox, then headings whose `border-bottom` rule runs
+        // the full content width. The rule is a later in-flow block box, so it
+        // must paint under the float (CSS2.1 Appendix E: in-flow blocks, then
+        // floats) — otherwise it is drawn straight across the table.
         let l = lay(
             "<body><style>\
              .box{float:right;width:100px;height:200px;background:#00f}\
@@ -13223,10 +13033,9 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
         assert!(over("1"), "z-index:1 paints above a float");
         // … and a negative one still loses to it.
         assert!(!over("-1"), "z-index:-1 paints below a float");
-        // The float layer has to work INSIDE a tracked z-index range too:
-        // MediaWiki wraps a whole article in one positioned container, which is
-        // why the first attempt (float ranges only at depth 0) fixed nothing on
-        // the real page. The enclosing range gets cut around the float instead.
+        // The float layer has to work inside a tracked z-index range too (e.g. a
+        // whole article wrapped in one positioned container): the enclosing range
+        // gets cut around the float.
         let l = lay(
             "<body><style>\
              .wrap{position:relative;z-index:0}\
@@ -13245,7 +13054,7 @@ margin:40px;border-radius:30px;box-shadow:0 0 6px 8px #fff\"></div></body>", 400
 #[test]
 fn dbg_wiki_shape() {
     extern crate std;
-    // Wikipedia's shape: floated TABLE (not a div), then a heading with a rule.
+    // A floated table (not a div), then a heading with a rule.
     let l = lay(
         "<body><style>\
          table.infobox{float:right;width:100px;background:#00f;border-collapse:collapse}\
@@ -13327,9 +13136,8 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn a_fully_transparent_border_takes_space_but_paints_nothing() {
-        // DuckDuckGo reserves the hover frame around every search result with
-        // `border: 1px solid rgba(0,0,0,0)`. Painting the carrier colour put a
-        // black box around each result.
+        // Pages reserve a hover frame with `border: 1px solid rgba(0,0,0,0)`;
+        // a transparent border must paint nothing, not the carrier colour.
         let boxes = |css: &str| {
             let html = alloc::format!("<body><style>div{{{css}}}</style><div>hi</div></body>");
             let l = lay(&html, 400);
@@ -13386,9 +13194,7 @@ fn dbg_wiki_shape() {
 
     // ── <details>/<summary> (HTML §4.11.1) ─────────────────────────────────
 
-    /// The whole point: a CLOSED `<details>` shows its summary and nothing
-    /// else. Measured on MDN, 117 of 119 sections are closed — rendered open
-    /// they turn the page into one endless scroll.
+    /// A closed `<details>` shows its summary and nothing else.
     #[test]
     fn a_closed_details_renders_only_its_summary() {
         let html = "<body><details><summary>head</summary><p>body text</p></details></body>";
@@ -13419,7 +13225,7 @@ fn dbg_wiki_shape() {
         assert!(!t.iter().any(|s| s.contains("body text")), "{t:?}");
     }
 
-    /// Only the FIRST `<summary>` is the control; a second one is ordinary
+    /// Only the first `<summary>` is the control; a second one is ordinary
     /// content and is skipped with the rest.
     #[test]
     fn only_the_first_summary_is_the_control() {
@@ -13494,12 +13300,12 @@ fn dbg_wiki_shape() {
         assert_eq!(l.hit_toggle(b.x + b.w / 2, b.y + b.h + 40), None, "below the summary");
     }
 
-    /// `display: contents` does NOT reparent: a `<summary>` under an unboxed
+    /// `display: contents` does not reparent: a `<summary>` under an unboxed
     /// `<div>` is still not the `<details>`' control, and the whole `<div>` is
     /// skipped with everything in it (css-display-3, and the wpt reftest
-    /// `display-contents-details-001`). The mirror risk is the one that would
-    /// hurt: if the ancestor chain dropped unboxed elements, every grandchild
-    /// of a closed `<details>` would look like a child and vanish.
+    /// `display-contents-details-001`). The mirror risk: if the ancestor chain
+    /// dropped unboxed elements, every grandchild of a closed `<details>` would
+    /// look like a child and vanish.
     #[test]
     fn display_contents_does_not_reparent_a_summary() {
         let l = lay(
@@ -13512,7 +13318,7 @@ fn dbg_wiki_shape() {
         assert!(!t.contains(&"inner"), "a nested summary is not the control: {t:?}");
         assert!(!t.iter().any(|s| s.contains("deep")), "{t:?}");
 
-        // The mirror: an OPEN details must still show what is nested under an
+        // The mirror: an open details must still show what is nested under an
         // unboxed child.
         let o = lay(
             "<body><details open><summary>head</summary>\
@@ -13525,8 +13331,7 @@ fn dbg_wiki_shape() {
 
     /// A grandchild is not a child: only the `<details>`' own element children
     /// are skipped, and they take their subtrees with them because they are
-    /// `display:none`. If the ancestor chain were ever flattened this test
-    /// would keep the page from silently losing everything one level down.
+    /// `display:none`.
     #[test]
     fn only_direct_children_of_a_details_are_skipped() {
         let l = lay(
@@ -13553,7 +13358,7 @@ fn dbg_wiki_shape() {
         let t2: Vec<&str> = texts(&open).iter().map(|(_, _, s)| *s).collect();
         assert!(t2.contains(&"modal"), "{t2:?}");
 
-        // Unlike a closed `<details>`, this one IS an ordinary UA rule: a page
+        // Unlike a closed `<details>`, this one is an ordinary UA rule: a page
         // that shows its dialog with CSS still can.
         let forced = lay(
             "<body><style>dialog { display: block }</style>\
@@ -13563,18 +13368,10 @@ fn dbg_wiki_shape() {
         assert!(texts(&forced).iter().any(|(_, _, s)| *s == "modal"));
     }
 
-    /// **`<noscript>` ist inert, weil beak Skripte faehrt.**
-    ///
-    /// Dieser Test stand einmal umgekehrt da, und er hatte recht: solange
-    /// beak kein JavaScript hatte, war der Inhalt eines `<noscript>`
-    /// gewoehnliches Markup und gehoerte gerendert (HTML §15.3.1). Seit
-    /// Stage 1 stimmt die Voraussetzung nicht mehr.
-    ///
-    /// Was daran haengt, zeigt Googles Ergebnisseite: sie legt in ihr
-    /// `<noscript>` ein `<style>table,div,span,p{display:none}</style>` und
-    /// ein `<meta http-equiv="refresh">` auf ihre „bitte aktiviere
-    /// JavaScript"-Seite. Als Markup gelesen versteckt das jede Tabelle,
-    /// jeden Kasten und jeden Absatz — und navigiert dann weg.
+    /// `<noscript>` is inert because beak runs scripts (HTML §15.3.1 renders
+    /// it only when scripting is disabled). Read as markup, a page's
+    /// `<noscript><style>table,div,span,p{display:none}</style>` would hide
+    /// everything, and its `<meta http-equiv="refresh">` would navigate away.
     #[test]
     fn noscript_ist_inert_weil_beak_skripte_faehrt() {
         let l = lay("<body><p>a</p><noscript><p>fallback</p></noscript></body>", 800);
@@ -13582,8 +13379,8 @@ fn dbg_wiki_shape() {
         assert!(t.contains(&"a"), "{t:?}");
         assert!(!t.contains(&"fallback"), "der Inhalt darf nicht rendern: {t:?}");
 
-        // Ein `<img>` darin darf NICHT geholt werden — sonst laedt die Seite
-        // Bilder, die nur fuer den skriptlosen Fall gedacht sind.
+        // An `<img>` inside must not be fetched — it is meant only for the
+        // script-less case.
         let l2 = lay(
             "<body><noscript><img src=\'/late.png\' width=\'40\' height=\'20\'></noscript></body>",
             800,
@@ -13593,13 +13390,13 @@ fn dbg_wiki_shape() {
             "das Rueckfallbild gehoert nicht ins Layout"
         );
 
-        // Der Rohtext darf auch nicht als TEXT auf der Seite landen.
+        // The raw text must not land on the page as text either.
         let l3 = lay("<body><noscript><style>p{display:none}</style></noscript>danach</body>", 800);
         let t3: Vec<&str> = texts(&l3).iter().map(|(_, _, s)| *s).collect();
         assert!(!t3.iter().any(|s| s.contains("display:none")), "{t3:?}");
         assert!(t3.iter().any(|s| s.contains("danach")), "{t3:?}");
 
-        // `<script>`/`<style>` bleiben wie bisher versteckt.
+        // `<script>`/`<style>` stay hidden.
         let l4 = lay("<body><script>var x = 1</script><style>p{}</style>after</body>", 800);
         let t4: Vec<&str> = texts(&l4).iter().map(|(_, _, s)| *s).collect();
         assert!(!t4.iter().any(|s| s.contains("var x")), "{t4:?}");
@@ -13618,7 +13415,7 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn links_flow_inline_with_surrounding_text() {
-        // "Hello <a>Wikipedia</a> and <a>Phosphor</a> here" must lay onto ONE
+        // "Hello <a>Wikipedia</a> and <a>Phosphor</a> here" must lay onto one
         // line (wide viewport) — the whole point of inline flow.
         let l = lay(
             "<body><p>Hello <a href=\"/w\">Wikipedia</a> and <a href=\"/p\">Phosphor</a> here</p></body>",
@@ -13649,7 +13446,7 @@ fn dbg_wiki_shape() {
     }
 
     /// `attr()` in generated content reads the originating element's
-    /// attribute. A missing one is the EMPTY STRING, not a dropped declaration
+    /// attribute. A missing one is the empty string, not a dropped declaration
     /// — the box is still generated, so the brackets around it still show.
     #[test]
     fn generated_content_reads_an_attribute() {
@@ -13659,15 +13456,15 @@ fn dbg_wiki_shape() {
         };
         assert!(text("attr(data-x)", "<p data-x=\"HELLO\">y</p>").contains("HELLO"));
         assert!(text("'[' attr(data-gone) ']'", "<p>y</p>").contains("[]"), "absent → empty string");
-        // The attribute NAME is case-insensitive (the parser lowercases it);
-        // the VALUE keeps its case.
+        // The attribute name is case-insensitive (the parser lowercases it);
+        // the value keeps its case.
         assert!(text("attr(DATA-X)", "<p data-x=\"MiXeD\">y</p>").contains("MiXeD"));
         // A type/fallback argument is css-values-5 — out of scope, so the whole
         // declaration is dropped rather than half-applied.
         assert!(!text("attr(data-x px)", "<p data-x=\"5\">y</p>").contains('5'));
     }
 
-    /// `text-indent` moves the FIRST line box only — every later line starts at
+    /// `text-indent` moves the first line box only — every later line starts at
     /// the content edge again.
     #[test]
     fn text_indent_moves_only_the_first_line() {
@@ -13778,12 +13575,10 @@ fn dbg_wiki_shape() {
         assert_eq!(by(&rel), by(&base), "following block keeps its flow position");
     }
 
-    /// **Ein Prozent an einem `inline-block` loeste sich ZWEIMAL auf.**
-    /// `inline_block_box` reicht `layout_box` den EIGENEN Randkasten als
-    /// Umgebungsbreite — der Vertrag fuer `width: auto` und eine Falle fuer
-    /// `width: 50%`: die Haelfte der Haelfte. `place_float` kennt und benennt
-    /// denselben Fall seit 0.138.0; der Inline-Weg war der letzte, der ihn
-    /// noch hatte. Bootstraps `.placeholder.col-6` kam 469 statt 939 px.
+    /// A percentage on an `inline-block` resolves once. `inline_block_box`
+    /// hands `layout_box` the box's own margin box as containing width — right
+    /// for `width: auto`, a trap for `width: 50%` (half of the half), the same
+    /// case `place_float` names.
     #[test]
     fn a_percentage_width_on_an_inline_block_resolves_once() {
         let l = lay(
@@ -13795,12 +13590,9 @@ fn dbg_wiki_shape() {
         assert_eq!(green.2, 400, "50 % of 800 is 400, not 200");
     }
 
-    /// **Ein negativer Rand verschiebt einen Float, er verbreitert ihn nicht.**
-    /// `place_float` klemmte `margin-left` mit `.max(0.0)` ab, `layout_box`
-    /// zog ihn unten ungekuerzt wieder ab — der Kasten wuchs um genau den
-    /// Betrag (60 statt 20 px). Floats sind von CSS 2.1 §8.3 nicht
-    /// ausgenommen, und `float:left; margin-left:-1.5em` ist die Bauweise
-    /// jeder Bootstrap-Checkbox.
+    /// A negative margin moves a float, it does not widen it. Floats are not
+    /// exempt from CSS 2.1 §8.3, and `float:left; margin-left:-1.5em` is how
+    /// framework checkboxes are built.
     #[test]
     fn a_negative_margin_shifts_a_float_instead_of_widening_it() {
         let l = lay(
@@ -13854,10 +13646,8 @@ fn dbg_wiki_shape() {
     #[test]
     fn the_page_is_as_tall_as_what_it_paints() {
         // `Layout::height` is the scrollable extent, and the shell scrolls by
-        // it — so a root box SHORTER than its content must not shorten the
-        // page. `html { height: 100% }` is an everyday idiom; taking the root's
-        // border-box bottom for the page height truncated such a page to one
-        // viewport and stopped scrolling outright (0.3.13 → fixed in 0.3.14).
+        // it — so a root box shorter than its content must not shorten the
+        // page. `html { height: 100% }` is an everyday idiom.
         let long: String = (0..60).map(|i| alloc::format!("<p>Zeile {i} mit etwas Text</p>")).collect();
         let plain = lay(&alloc::format!("<body>{long}</body>"), 800).height;
         assert!(plain > 2000, "60 paragraphs are a long page, got {plain}");
@@ -13867,12 +13657,10 @@ fn dbg_wiki_shape() {
         }
     }
 
-    /// Flexbox §9.4 step 7: a line is as tall as its items' HYPOTHETICAL cross
-    /// sizes — the natural size clamped by the item's own `min-`/`max-height`.
-    /// Sizing the line from the raw natural height left it short of any item
-    /// held open by a `min-height`, and that item then hung out below the
-    /// container. This is Wikipedia's search bar: a `min-height: 32px` button
-    /// beside a shorter field, and the button's border sat 2px past the group's.
+    /// Flexbox §9.4 step 7: a line is as tall as its items' hypothetical cross
+    /// sizes — the natural size clamped by the item's own `min-`/`max-height`,
+    /// so an item held open by `min-height` does not hang out below the
+    /// container (e.g. a `min-height: 32px` button beside a shorter field).
     #[test]
     fn a_flex_line_is_as_tall_as_its_tallest_items_minimum() {
         let l = lay(
@@ -13898,10 +13686,8 @@ fn dbg_wiki_shape() {
     }
 
     /// A bordered flex item stretched to the line must end up exactly as tall
-    /// as the line — not `border_y()` taller. `flex_item_style` handed the
-    /// stretched BORDER-box size back as a content height with only the padding
-    /// removed, which is the same box-model twin bucket item 31 removed from
-    /// two other places.
+    /// as the line — not `border_y()` taller: the stretched border-box size
+    /// gives back padding and border when converted to a content height.
     #[test]
     fn stretching_a_bordered_flex_item_does_not_add_its_border() {
         let l = lay(
@@ -13916,11 +13702,10 @@ fn dbg_wiki_shape() {
         assert_eq!(blue.3, 50, "border box matches the 50px line, borders included");
     }
 
-    /// An OUTER `box-shadow` is cut out of its own border box (CSS Backgrounds 3
+    /// An outer `box-shadow` is cut out of its own border box (CSS Backgrounds 3
     /// §7.1.1), so `0 1px <color>` leaves exactly a 1px strip below the box.
     /// Real pages use that as a hairline separator far more often than as a drop
-    /// shadow — MediaWiki rules off its article tabs with it, and painting the
-    /// shadow as an unclipped copy floods the whole row instead.
+    /// shadow; painting it unclipped would flood the whole row.
     #[test]
     fn a_zero_blur_box_shadow_is_a_hairline_outside_the_box() {
         let shadow_rects = |css: &str| -> Vec<(i32, i32, i32, i32, Rgb)> {
@@ -13928,7 +13713,7 @@ fn dbg_wiki_shape() {
             rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect()
         };
         // A rule under the box: one strip, its height the y-offset, and it sits
-        // BELOW the border box rather than over it.
+        // below the border box rather than over it.
         let r = shadow_rects("height:20px;box-shadow:0 1px rgb(1,2,3)");
         assert_eq!(r.len(), 1, "one strip, got {r:?}");
         assert_eq!(r[0].3, 1, "1px tall");
@@ -13937,37 +13722,29 @@ fn dbg_wiki_shape() {
         assert_eq!(shadow_rects("height:20px;box-shadow:0 0 0 3px rgb(1,2,3)").len(), 4);
         // Fully covered by its own box → nothing to paint.
         assert!(shadow_rects("height:20px;box-shadow:0 0 rgb(1,2,3)").is_empty());
-        // A BLURRED shadow is skipped rather than drawn as a hard slab, and an
+        // A blurred shadow is skipped rather than drawn as a hard slab, and an
         // inner one is a different paint entirely.
         assert!(shadow_rects("height:20px;box-shadow:0 2px 8px rgb(1,2,3)").is_empty());
-        // Ein INNERER Schatten malt seit 0.62.0 — und zwar INNEN: die Fuellung
-        // minus dem Loch, das er freilaesst. `inset 0 1px` verschiebt das Loch
-        // um eins nach unten, uebrig bleibt ein Streifen oben IM Kasten.
-        // Bootstrap streift damit seine Tabellen.
+        // An inset shadow paints inside: the fill minus the hole it leaves.
+        // `inset 0 1px` moves the hole down by one, leaving a strip at the top
+        // inside the box (a common table-striping idiom).
         let ins = shadow_rects("height:20px;box-shadow:inset 0 1px rgb(1,2,3)");
         assert_eq!(ins.len(), 1, "ein Streifen, got {ins:?}");
         assert_eq!(ins[0].3, 1, "einen Pixel hoch");
-        // `currentColor` is the LAST colour, not whatever was cascaded when the
+        // `currentColor` is the last colour, not whatever was cascaded when the
         // shadow was parsed — same rule the border sides follow.
         let l = lay("<body><div style=\"height:20px;box-shadow:0 1px;color:rgb(1,2,3)\">x</div></body>", 400);
         assert!(rects(&l).iter().any(|(_, _, _, h, c)| *h == 1 && *c == Rgb(1, 2, 3)));
     }
 
-    /// A `box-shadow` list is painted from the first layer we HAVE a paint for,
-    /// not from layer one. DuckDuckGo's searchbox ring is the third layer of
-    /// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)`; taking layer one
-    /// picked a blurred shadow, which paint then skipped, so the box lost its
-    /// outline entirely. Measured over duckduckgo.com and two Wikipedia
-    /// articles: 7 declarations hide their only sharp layer behind a blurred
-    /// one, and none has two paintable layers.
+    /// A `box-shadow` list is painted from the first layer we have a paint for,
+    /// not from layer one: a ring is often the third layer of
+    /// `0 10px 20px …, 0 2px 6px …, 0 0 0 1px rgba(0,0,0,.08)`, behind blurred
+    /// ones that paint skips.
     #[test]
-    /// Ein nackter Textlauf in einem Flex-Container ist ein ANONYMER Kasten
-    /// (css-flexbox-1 §4) — und verschwand bis 0.66.0 spurlos.
-    ///
-    /// `<div class="flex">Label<span>x</span></div>` verlor sein „Label".
-    /// Das ist die schlimmste Sorte Layoutfehler: er LOESCHT Text, statt ihn
-    /// falsch zu setzen, und auf dem Schirm fehlt nur etwas, von dem niemand
-    /// weiss, dass es da sein sollte.
+    /// A bare text run in a flex container is an anonymous item
+    /// (css-flexbox-1 §4): `<div class="flex">Label<span>x</span></div>` must
+    /// keep its "Label".
     #[test]
     fn a_bare_text_run_in_a_flex_container_is_an_anonymous_item() {
         let l = lay("<body><div style=\"display:flex\">Label<span>zweites</span></div></body>", 400);
@@ -13977,22 +13754,15 @@ fn dbg_wiki_shape() {
         }).collect();
         assert_eq!(texts.len(), 2, "beide Laeufe, got {texts:?}");
         assert_eq!(texts[0].2, "Label");
-        // Nebeneinander, nicht untereinander — und auf derselben Zeile.
+        // Side by side, not stacked — and on the same line.
         assert!(texts[1].0 > texts[0].0, "das zweite Kind steht rechts: {texts:?}");
         assert_eq!(texts[0].1, texts[1].1, "gleiche Grundlinie: {texts:?}");
     }
 
-    /// **Eine Spalte, die nicht schrumpfen kann, macht den Tisch nicht
-    /// breiter** (CSS2.1 §17.5.2.2).
-    ///
-    /// Beim Verteilen bekam jede Spalte ihren Anteil und danach `.max(minw)` —
-    /// und was das `.max` dazulegte, wurde niemandem weggenommen. Eine
-    /// Bildspalte (Minimum = ihre Breite) machte den Tisch damit breiter als
-    /// den Platz, den er hat: auf Wikipedias „Today's featured picture" 1548
-    /// statt 1296, und der Text lief 252 px aus seinem Kasten.
-    ///
-    /// An Chromium gemessen: 404 | 892 in einem 1296er Kasten — Minimum
-    /// sichern, den Rest im Verhaeltnis von `pref - minw`.
+    /// A column that cannot shrink does not make the table wider
+    /// (CSS2.1 §17.5.2.2): secure every column's minimum first, then share the
+    /// rest in proportion to `pref - minw`. Chromium gives 404 | 892 in a 1296
+    /// box.
     #[test]
     fn a_column_that_cannot_shrink_does_not_widen_the_table() {
         let l = lay_inspect(
@@ -14008,20 +13778,13 @@ fn dbg_wiki_shape() {
             .map(|b| b.w).unwrap_or_else(|| panic!("kein {tag}"));
         assert!(w("table") <= 600,
                 "der Tisch bleibt in seinem Kasten: {} von 600", w("table"));
-        // Und er faellt auch nicht in sich zusammen — `width:100%` gilt.
+        // Nor does it collapse — `width:100%` applies.
         assert!(w("table") >= 590, "…und fuellt ihn: {}", w("table"));
     }
 
-    /// **Ein Flex-Item hat seinen eigenen Formatierungskontext** — ein Float
-    /// darin reicht nicht zum Nachbarn (css-flexbox-1 §4).
-    ///
-    /// Der Behaelter isolierte schon nach aussen; zwischen den GESCHWISTERN
-    /// lief die Float-Liste weiter. Auf Wikipedias Hauptseite raeumte deshalb
-    /// der Float der linken Spalte den Clearfix der rechten: „In the news"
-    /// mass 566x696 statt 531x351 und schob alles darunter weg.
-    ///
-    /// An Chromium gemessen (`<tools>/gallery/run.py`): der zweite Kasten ist
-    /// 20 px hoch, nicht 400.
+    /// A flex item has its own formatting context — a float inside it does not
+    /// reach its sibling (css-flexbox-1 §4). Chromium makes the second box
+    /// 20px tall, not 400.
     #[test]
     fn a_float_in_one_flex_item_does_not_reach_its_sibling() {
         let v: Vec<(String, i32)> = lay_inspect(
@@ -14041,19 +13804,13 @@ fn dbg_wiki_shape() {
         assert!(h("div#rechts") < 40, "die Spalte daneben sieht ihn nicht: {}", h("div#rechts"));
     }
 
-    /// **Ein Kasten, dessen Befehle wieder herausgezogen werden, darf keinen
-    /// Stapelbereich zuruecklassen.**
+    /// A box whose ops are drained out again must not leave a stacking range
+    /// behind. A `<button>`'s content is laid out and then drained from `ops`;
+    /// a range a child recorded would afterwards point at the page's next ops
+    /// and reorder them.
     ///
-    /// Der Inhalt eines `<button>` wird ausgelegt und dann aus `ops` gedraint;
-    /// notiert ein Kind dabei einen Bereich, zeigt der hinterher auf die
-    /// NAECHSTEN Befehle der Seite. Auf Wikipedia sortierte ein Bereich aus
-    /// dem Suchknopf die Flaeche eines spaeteren Knopfes hinter dessen eigene
-    /// Beschriftung — der Knopf neben „Appearance" war eine graue Kiste ohne
-    /// Text, und jeder Klick darauf kostete ein volles Auslegen, weil seine
-    /// Spanne zerrissen war.
-    ///
-    /// Geprueft wird die REIHENFOLGE, nicht die Lage: die Flaeche eines
-    /// Knopfes gehoert vor seine Beschriftung.
+    /// Checks the order, not the position: a button's face goes before its
+    /// label.
     #[test]
     fn a_drained_sub_layout_leaves_no_stacking_range_behind() {
         let l = lay("<body>\
@@ -14061,8 +13818,7 @@ fn dbg_wiki_shape() {
                 <span style=\"display:block;position:relative\">ikone</span></button></div>\
             <div><button style=\"background:#eee\">zwei</button></div>\
             </body>", 400);
-        // Der erste Befehl der Seite ist die Flaeche des ERSTEN Knopfes —
-        // vorher stand sie ganz am Ende, hinter allem anderen.
+        // The page's first op is the face of the first button.
         let first_text = l.ops.iter().position(|o| matches!(o, DrawOp::Text { .. }));
         let first_fill = l.ops.iter().position(|o| matches!(o,
             DrawOp::Rect { color, .. } | DrawOp::RoundRect { color, .. }
@@ -14071,8 +13827,8 @@ fn dbg_wiki_shape() {
                 "die Flaeche des Knopfes gehoert VOR seinen Text: {first_fill:?} / {first_text:?}");
     }
 
-    /// Dasselbe fuer einen atomaren Inline-Kasten: auch seine Befehle wandern
-    /// aus `ops` heraus, und auch er liess Bereiche stehen.
+    /// The same for an atomic inline box: its ops move out of `ops` too, and
+    /// it must not leave ranges behind either.
     #[test]
     fn an_atomic_inline_leaves_no_stacking_range_behind() {
         let l = lay("<body>\
@@ -14083,16 +13839,16 @@ fn dbg_wiki_shape() {
             </body>", 400);
         let pos = |want: &str| l.ops.iter().position(|o| matches!(o,
             DrawOp::Text { text, .. } if text == want));
-        // Ohne die Ruecknahme wanderte „ikone" ans ENDE der Seite: der
-        // Bereich, den das positionierte Kind im Inline-Block notiert hatte,
-        // zeigte hinterher auf dessen eigene, wieder eingesetzte Befehle.
+        // Without the rollback "ikone" would move to the end of the page: the
+        // range the positioned child recorded inside the inline-block would point
+        // at its own reinserted ops.
         assert!(pos("ikone") < pos("zwei") && pos("zwei") < pos("danach"),
                 "Dokumentreihenfolge: {:?} {:?} {:?}",
                 pos("ikone"), pos("zwei"), pos("danach"));
     }
 
-    /// Reiner Leerraum zwischen zwei Kaesten erzeugt KEINEN Kasten (§4) —
-    /// sonst bekaeme jede eingerueckte Quelle unsichtbare Flex-Kinder.
+    /// Pure whitespace between two boxes generates no item (§4) — otherwise
+    /// every indented source would get invisible flex children.
     #[test]
     fn whitespace_between_flex_items_makes_no_box() {
         let l = lay("<body><div style=\"display:flex\">\n  <span>a</span>\n  <span>b</span>\n</div></body>", 400);
@@ -14100,9 +13856,9 @@ fn dbg_wiki_shape() {
         assert_eq!(n, 2, "nur die beiden Kinder");
     }
 
-    /// css-flexbox-1 §8.1: eine `auto`-Marge frisst den freien Platz auf IHRER
-    /// Achse. In der Spalte ist das die Hauptachse — `margin-top:auto` auf dem
-    /// letzten Kind heftet es an den Boden (das Karten-Fussmuster).
+    /// css-flexbox-1 §8.1: an `auto` margin absorbs the free space on its own
+    /// axis. In a column that is the main axis — `margin-top:auto` on the last
+    /// child pins it to the bottom (the card-footer pattern).
     #[test]
     fn an_auto_top_margin_pins_the_last_column_item_to_the_bottom() {
         let l = lay(
@@ -14118,8 +13874,8 @@ fn dbg_wiki_shape() {
         assert!(ys[1] >= 175, "das zweite steht unten, nicht direkt darunter: {ys:?}");
     }
 
-    /// Auf der Querachse ueberstimmt sie `align-items` — und den Stretch.
-    /// `mt-auto` in einer ZEILE heisst unten, `my-auto` heisst Mitte.
+    /// On the cross axis it overrides `align-items` and the stretch:
+    /// `mt-auto` in a row means bottom, `my-auto` means centre.
     #[test]
     fn auto_cross_margins_beat_align_items_in_a_row() {
         let l = lay(
@@ -14136,9 +13892,9 @@ fn dbg_wiki_shape() {
         assert!((ys[2] - 90).abs() <= 3, "my-auto = Mitte: {ys:?}");
     }
 
-    /// In der Spalte ist links/rechts die QUERachse: `mx-auto` zentriert, und
-    /// dazu muss der Stretch weichen — sonst ist der Kasten schon so breit wie
-    /// die Zeile und es bleibt nichts zu verteilen.
+    /// In a column left/right is the cross axis: `mx-auto` centres, and for that
+    /// the stretch has to yield — otherwise the box is already as wide as the
+    /// line and nothing is left to distribute.
     #[test]
     fn mx_auto_centres_a_column_item_instead_of_stretching_it() {
         let l = lay(
@@ -14152,8 +13908,8 @@ fn dbg_wiki_shape() {
         assert!(x > 100 && x < 200, "zentriert in 300px, nicht bei 0: x={x}");
     }
 
-    /// `opacity` unter 1 verblasst den Kasten UND seinen Teilbaum. Gemessen
-    /// wird die Alpha der Befehle, nicht die Farbe — die bleibt.
+    /// `opacity` below 1 fades the box and its subtree. The ops' alpha is
+    /// checked, not the colour — that stays.
     #[test]
     fn opacity_fades_the_box_and_its_subtree() {
         let l = lay(
@@ -14174,9 +13930,9 @@ fn dbg_wiki_shape() {
         assert!((text.expect("Text").a as i32 - 128).abs() <= 2, "der Teilbaum auch");
     }
 
-    /// Eine Schatten-Schicht mit Alpha 0 malt nichts — und darf deshalb den
-    /// einen scharfen Platz nicht belegen. Tailwind stellt genau so eine als
-    /// Platzhalter VOR den echten Ring.
+    /// A shadow layer with alpha 0 paints nothing and so must not take the one
+    /// sharp slot; frameworks put such a placeholder layer ahead of the real
+    /// ring.
     #[test]
     fn a_transparent_shadow_layer_does_not_take_the_slot() {
         let l = lay(
@@ -14188,8 +13944,8 @@ fn dbg_wiki_shape() {
         assert_eq!(blue, 4, "vier Balken um den Kasten, got {blue}");
     }
 
-    /// `currentcolor` ist die Vorgabe von `box-shadow` — ausgeschrieben muss
-    /// sie dasselbe heissen wie weggelassen, sonst ist die Schicht ungueltig.
+    /// `currentcolor` is the default of `box-shadow` — spelled out it must mean
+    /// the same as omitted, or the layer is invalid.
     #[test]
     fn box_shadow_accepts_a_written_out_currentcolor() {
         let l = lay(
@@ -14201,10 +13957,8 @@ fn dbg_wiki_shape() {
         assert_eq!(green, 4, "der Ring traegt die Textfarbe, got {green}");
     }
 
-    /// Ein Steuerelement wird mit UNSEREN Massen gemalt, also muss die Seite
-    /// ihren `border-radius` mitgeben koennen. Ohne ihn hatte JEDER Knopf auf
-    /// einer Bootstrap- oder Tailwind-Seite scharfe Ecken — das erste, was
-    /// nach „kein Browser" aussieht.
+    /// A control is painted with our own metrics, so the page must be able to
+    /// pass its `border-radius` along.
     #[test]
     fn a_control_keeps_the_page_border_radius() {
         let l = lay(
@@ -14218,7 +13972,7 @@ fn dbg_wiki_shape() {
         }).collect();
         assert!(rounded.len() >= 2, "Flaeche UND Rahmen gerundet, got {rounded:?}");
         assert!(rounded.iter().all(|r| (*r - 6.0).abs() < 0.01), "{rounded:?}");
-        // Und ohne Radius bleibt es beim Rechteck — kein Ring, wo keiner hin soll.
+        // And without a radius it stays a rectangle — no ring where none belongs.
         let sq = lay(
             "<body style=\"margin:0\"><button style=\"background:#0d6efd\">Knopf</button></body>",
             400,
@@ -14226,18 +13980,14 @@ fn dbg_wiki_shape() {
         assert!(!sq.ops.iter().any(|o| matches!(o, DrawOp::RoundRect { .. })), "eckig bleibt eckig");
     }
 
-    /// Ein WEICHER Schatten wird gemalt — und zwar weich.
-    ///
-    /// Bis 0.61.0 fiel er ganz weg (nur `blur == 0` wurde gemalt), und das
-    /// betraf jede Bootstrap-Karte, jeden Dialog und jedes Menue: sie lagen
-    /// flach auf der Seite statt darueber.
+    /// A blurred shadow is painted, and painted soft.
     #[test]
     fn a_blurred_shadow_is_painted_and_fades() {
         let l = lay("<body><div style=\"height:20px;box-shadow:0 4px 12px rgb(0,0,0)\">x</div></body>", 400);
         let n = l.ops.iter().filter(|o| matches!(o, DrawOp::Shadow { .. })).count();
         assert_eq!(n, 1, "genau ein weicher Schatten");
-        // Und er ist wirklich weich: die Deckung faellt nach aussen ab. Ohne
-        // die Pruefung koennte er ein harter Klotz sein und der Test gruen.
+        // It really is soft: the coverage falls off outward. Without this check
+        // it could be a hard slab and the test still pass.
         let mut buf = alloc::vec![0u8; 400 * 120 * 4];
         let eng = crate::Engine::new();
         eng.paint(&l, 400, 120, 0, &mut buf);
@@ -14246,16 +13996,12 @@ fn dbg_wiki_shape() {
         assert!(nah < fern, "unter dem Kasten muss es nach aussen heller werden: {nah} vs {fern}");
     }
 
-    /// **Eine CSS-Laenge wird ueberall auf dieselbe Art ganzzahlig: gerundet.**
+    /// A CSS length becomes an integer the same way everywhere: rounded.
     ///
-    /// `CSS2/floats-019` stellt `padding-top: 1.1in` gegen `margin: 1.1in`
-    /// — 105,6 px, zweimal dieselbe Zahl. Wer den Rand rundet und die
-    /// Polsterung abschneidet, bekommt 106 gegen 105, und der Test scheitert
-    /// an der Umrechnung statt an der Regel.
-    ///
-    /// Gerundet statt abgeschnitten, weil sich Abschneiden ADDIERT: jeder
-    /// Kasten setzt auf der Unterkante des vorigen auf, und auf einer nackten
-    /// Seite mit sechs Ueberschriften waren das 8 px bis zum letzten `<div>`.
+    /// `CSS2/floats-019` sets `padding-top: 1.1in` against `margin: 1.1in` —
+    /// 105.6px twice. Rounding one and truncating the other gives 106 against
+    /// 105. Rounding rather than truncating, because truncation accumulates:
+    /// every box sits on the bottom edge of the previous one.
     #[test]
     fn a_length_becomes_an_integer_the_same_way_everywhere() {
         let y_of = |css: &str| {
@@ -14263,21 +14009,17 @@ fn dbg_wiki_shape() {
                 "<body style='margin:0'>{css}<div id=t>x</div></body>"), 800);
             l.inspect.iter().find(|b| b.label.starts_with("div#t")).expect("kein #t").y
         };
-        // 1.1in = 105.6 px. Als Polsterung des Elters und als eigener Rand
-        // muss dieselbe Zahl herauskommen.
+        // 1.1in = 105.6px. As the parent's padding and as the own margin the
+        // same number must come out.
         let a = y_of("<div style='padding-top:1.1in'></div>");
         let b = y_of("<div style='margin-top:1.1in'></div>");
         assert_eq!(a, b, "Polsterung {a} vs. Rand {b} — dieselbe Laenge");
         assert_eq!(a, 106, "und beide GERUNDET, nicht abgeschnitten");
     }
 
-    /// **Der Kasten einer Tabelle ist die Tabelle, nicht ihr Streifen** — und
-    /// die `<caption>` ist so breit wie die Tabelle, nicht wie der Streifen.
-    ///
-    /// Eine Tabelle mit `width: auto` schrumpft auf ihren Inhalt (§17.5.2) und
-    /// MALT auch so; gemeldet wurde trotzdem die angebotene Breite. Auf einer
-    /// nackten Seite waren das 1886 statt 157 px, und eine Ueberschrift stand
-    /// ueber der ganzen Fensterbreite statt ueber ihrer Tabelle.
+    /// A table's box is the table, not the strip it was offered, and the
+    /// `<caption>` is as wide as the table. A `width: auto` table shrinks to
+    /// its content (§17.5.2) and must report that width too.
     #[test]
     fn a_tables_box_is_the_table_not_the_strip_it_was_offered() {
         let l = lay_inspect(
@@ -14291,32 +14033,32 @@ fn dbg_wiki_shape() {
         assert_eq!(c.w, t.w, "die Ueberschrift ist so breit wie die Tabelle");
         assert_eq!(c.x, t.x, "und liegt an ihrer linken Kante");
         assert_eq!(c.y, t.y, "und ueber ihr");
-        // Die Gegenprobe: eine Tabelle mit `width: 100%` FUELLT den Streifen.
+        // The counter-check: a table with `width: 100%` fills the strip.
         let l = lay_inspect(
             "<body style='margin:0'><table style='width:100%'><tr><td>ab</td></tr></table></body>", 800);
         let t = l.inspect.iter().find(|b| b.label.starts_with("table")).expect("keine Tabelle");
         assert_eq!(t.w, 800);
     }
 
-    /// **Fallen die Raender aller Kinder durch, gehoeren sie an den OBERRAND
-    /// des Elters** — und eine Raeumung SETZT die Oberkante, statt den Rand
-    /// obendrauf zu legen.
+    /// When the margins of all children collapse through, they belong to the
+    /// parent's top margin — and clearance sets the top edge instead of adding
+    /// the margin on top.
     ///
-    /// An Chromium gemessen (`getBoundingClientRect`), sieben Faelle:
+    /// Measured in Chromium (`getBoundingClientRect`), seven cases:
     ///
-    ///     leeres Kind 50px Unterrand, Elter frei      Elter y=50 h=0
-    ///     dasselbe mit min-height:20px                Elter y=50 h=20
-    ///     dasselbe mit height:20px                    Elter y=50 h=20
-    ///     zwei leere Kinder, letztes 50px             Elter y=50 h=20
-    ///     Kind enthaelt nur einen Float               Elter y=50 h=20, Float y=50
-    ///     Kind mit Hoehe 30 (faellt NICHT durch)      Elter y=10 h=30
-    ///     Elter mit Rahmen oben (kein Zusammenfall)   Elter y=10 h=21
+    ///     empty child 50px bottom margin, parent free   parent y=50 h=0
+    ///     same with min-height:20px                     parent y=50 h=20
+    ///     same with height:20px                         parent y=50 h=20
+    ///     two empty children, last 50px                 parent y=50 h=20
+    ///     child holds only a float                      parent y=50 h=20, float y=50
+    ///     child with height 30 (does not collapse)      parent y=10 h=30
+    ///     parent with top border (no collapse)          parent y=10 h=21
     #[test]
     fn margins_that_fall_through_every_child_belong_to_the_parents_top() {
         let page = |css: &str, body: &str| alloc::format!(
             "<body style='margin:0'><style>{css}</style>{body}</body>");
-        // Ein Etikett -> (Oberkante, Hoehe). Die Liste wird mitgegeben, weil
-        // ein Fehlschlag ohne sie nur „kein Kasten" sagt.
+        // A label -> (top, height). The list is passed along because a failure
+        // without it only says "no box".
         let boxes = |css: &str, body: &str| -> Vec<(String, i32, i32)> {
             lay_inspect(&page(css, body), 800).inspect.iter()
                 .map(|b| (b.label.clone(), b.y, b.h)).collect()
@@ -14333,30 +14075,30 @@ fn dbg_wiki_shape() {
         let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px}",
                       "<div class=p><div></div><div class=c></div></div>");
         assert_eq!(at(&v, "div.p"), (50, 20), "der Rand faellt durch ZWEI leere Kinder");
-        // Ein Kind, das durchfaellt, kann trotzdem etwas malen: sein Float
-        // wandert mit. Genau daran haengt `margin-collapse-min-height-001.xht`.
+        // A child that collapses through can still paint something: its float
+        // moves with it (`margin-collapse-min-height-001.xht`).
         let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px}.f{float:left}",
                       "<div class=p><div class=c><div class=f>x</div></div></div>");
         assert_eq!(at(&v, "div.p"), (50, 20));
         assert_eq!(at(&v, "div.f").0, 50, "der Float im durchgefallenen Kind steht am Oberrand");
-        // Die Gegenprobe: ein Kind mit Hoehe faellt nicht durch, sein
-        // Unterrand entkommt nach unten und der Elter bleibt oben stehen.
+        // The counter-check: a child with a height does not collapse through,
+        // its bottom margin escapes downward and the parent stays at the top.
         let v = boxes(".p{margin-top:10px;min-height:20px}.c{margin-bottom:50px;height:30px}", kind);
         assert_eq!(at(&v, "div.p"), (10, 30));
-        // Und ohne Zusammenfall am Oberrand (Rahmen dazwischen) bleibt alles,
-        // wie es war: der Rand des Kindes wird verschluckt.
+        // And without top-margin collapsing (a border in between) nothing
+        // changes: the child's margin is absorbed.
         let v = boxes(".p{margin-top:10px;min-height:20px;border-top:1px solid #000}.c{margin-bottom:50px}", kind);
         assert_eq!(at(&v, "div.p"), (10, 21));
     }
 
-    /// Eine Raeumung SETZT die Oberkante des Kastens; ein Rand, der erst beim
-    /// Auslegen der Kinder gefunden wird, geht in die HYPOTHETISCHE Lage ein
-    /// und wird von der Raeumung geschluckt, sobald der Float tiefer reicht.
+    /// Clearance sets the box's top edge; a margin found only while laying out
+    /// the children goes into the hypothetical position and is absorbed by the
+    /// clearance once the float reaches further down.
     ///
-    /// `CSS2/margin-collapse-157` prueft genau das mit sechs Quadraten, die
-    /// gleich aussehen muessen: der leere Kasten mit `margin: 1em` darin darf
-    /// den geraeumten Kasten NICHT unter den Float schieben. Chromium setzt
-    /// alle drei Formen auf dieselbe Oberkante.
+    /// `CSS2/margin-collapse-157` checks this with six squares that must look
+    /// alike: the empty box with `margin: 1em` inside must not push the
+    /// cleared box below the float. Chromium puts all three forms at the same
+    /// top edge.
     #[test]
     fn clearance_sets_the_top_edge_a_late_margin_does_not_push_past_it() {
         let css = "<style>.float{float:left;height:64px;width:64px}\
@@ -14376,38 +14118,30 @@ fn dbg_wiki_shape() {
                    "und mit eigenem `margin-top` genauso");
     }
 
-    /// Eine Schattenliste hat DREI Plaetze — den ersten SCHARFEN, den ersten
-    /// WEICHEN und den ersten INNEREN Anteil —, und eine Schicht, die nichts
-    /// malt, belegt keinen davon.
-    ///
-    /// Der Test hiess bis hierher „malt die erste MALBARE Schicht, nicht die
-    /// erste" und beschrieb damit den Stand vor 0.61.0: weiche Schichten
-    /// fielen weg, `inset` gab es nicht. **Er stand seit 0.61.0 ohne `#[test]`
-    /// da** — die Zeile wurde beim Einfuegen des Nachbartests darueber
-    /// verbraucht —, und genau deshalb ist niemandem aufgefallen, dass seine
-    /// Behauptung im selben Commit falsch wurde.
+    /// A shadow list has three slots — the first sharp, the first blurred and
+    /// the first inset part — and a layer that paints nothing takes none of
+    /// them.
     #[test]
     fn a_shadow_list_fills_three_slots_sharp_soft_and_inset() {
-        // Alle Rechtecke einer Farbe, dazu die Zahl der weichen Schatten.
+        // All rectangles of one colour, plus the number of blurred shadows.
         let shadow = |css: &str| -> (Vec<(i32, i32, i32, i32, Rgb)>, usize) {
             let l = lay(&alloc::format!("<body><div style=\"{css}\">x</div></body>"), 400);
             let soft = l.ops.iter().filter(|o| matches!(o, DrawOp::Shadow { .. })).count();
             (rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(1, 2, 3)).collect(), soft)
         };
-        // Der Kasten: `body` hat 8 px Rand, das `div` ist 384x20 bei (8,8).
-        // Die DDG-Form: zwei weiche Schichten, dann der 1-px-Ring, der zu
-        // sehen ist. Vier Seiten, weil eine reine Ausdehnung den Kasten
-        // umrandet — und **ein** weicher Schatten, nicht zwei: die zweite
-        // weiche Schicht findet ihren Platz besetzt.
+        // The box: `body` has an 8px margin, the `div` is 384x20 at (8,8). Two
+        // blurred layers, then the visible 1px ring. Four sides, because a pure
+        // spread rings the box — and one blurred shadow, not two: the second
+        // blurred layer finds its slot taken.
         let (r, soft) = shadow(
             "height:20px;box-shadow:0 10px 20px rgb(9,9,9),0 2px 6px rgb(9,9,9),\
              0 0 0 1px rgb(1,2,3)",
         );
         assert_eq!(r.len(), 4, "die scharfe dritte Schicht umrandet den Kasten");
         assert_eq!(soft, 1, "nur die ERSTE weiche Schicht bekommt den Platz");
-        // Ein `inset` belegt den scharfen Platz NICHT — der Streifen darunter
-        // gehoert der zweiten Schicht —, und gemalt wird er trotzdem: vier
-        // Seiten nach innen, in seiner eigenen Farbe.
+        // An `inset` does not take the sharp slot — the strip below belongs to
+        // the second layer — and it is painted anyway: four sides inward, in its
+        // own colour.
         let (r, _) = shadow("height:20px;box-shadow:inset 0 0 0 2px rgb(9,9,9),0 1px rgb(1,2,3)");
         assert_eq!(r.len(), 1, "ein Streifen darunter, war {r:?}");
         assert_eq!(r[0].1, 8 + 20);
@@ -14417,32 +14151,29 @@ fn dbg_wiki_shape() {
         );
         let inner = rects(&l).into_iter().filter(|(_, _, _, _, c)| *c == Rgb(9, 9, 9)).count();
         assert_eq!(inner, 4, "der innere Schatten umrandet den Kasten von innen");
-        // Ohne scharfen Anteil bleibt der Kasten ohne Ring: was malt, ist der
-        // weiche Schatten und der innere Streifen IM Kasten (y = 8), nicht
-        // darunter.
+        // Without a sharp part the box gets no ring: what paints is the blurred
+        // shadow and the inset strip inside the box (y = 8), not below it.
         let (r, soft) = shadow("height:20px;box-shadow:0 2px 8px rgb(1,2,3),inset 0 1px rgb(1,2,3)");
         assert_eq!(soft, 1);
         assert_eq!(r.len(), 1, "nur der innere Streifen, war {r:?}");
         assert_eq!(r[0].1, 8, "er liegt IM Kasten, nicht darunter");
-        // `inset` ist gueltiges CSS — die zweite Deklaration ERSETZT die erste,
-        // statt als schlechter Wert zu verfallen. Der Streifen wandert damit
-        // von unter dem Kasten (y = 28) in ihn hinein (y = 8).
+        // `inset` is valid CSS — the second declaration replaces the first
+        // instead of being dropped as a bad value. The strip moves from below
+        // the box (y = 28) into it (y = 8).
         let (r, _) = shadow("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:inset 0 1px rgb(1,2,3)");
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, 8, "die `inset`-Deklaration gewinnt die Kaskade");
-        // Eine Schicht, die wir nicht LESEN koennen, verwirft dagegen die ganze
-        // Deklaration — der Kasten behaelt den Schatten, den er schon hatte.
+        // A layer we cannot parse drops the whole declaration — the box keeps
+        // the shadow it already had.
         let (r, _) = shadow("height:20px;box-shadow:0 1px rgb(1,2,3);box-shadow:0 1px wobble(3)");
         assert_eq!(r.len(), 1, "ein unlesbarer Wert verwirft die Deklaration, nicht den Vorgaenger");
         assert_eq!(r[0].1, 8 + 20);
     }
 
-    /// A control the page made block-level is a BLOCK box, not an atomic inline.
-    /// An atomic inline sits on the baseline, so its parent came out the
-    /// control's height plus the descender — which drew a second rule 2px under
-    /// a search field whose wrapper is pulled onto the group border with
-    /// `margin: -1px`. It must still paint as a CONTROL (face, value,
-    /// placeholder), not as an ordinary block with a CSS border.
+    /// A control the page made block-level is a block box, not an atomic inline.
+    /// An atomic inline sits on the baseline, so its parent would come out the
+    /// control's height plus the descender. It must still paint as a control
+    /// (face, value, placeholder), not as an ordinary block with a CSS border.
     #[test]
     fn a_block_level_control_is_a_block_box_and_still_paints_as_a_control() {
         let l = lay(
@@ -14470,12 +14201,10 @@ fn dbg_wiki_shape() {
     }
 
     /// `transform: translate(...)` shifts the paint, and its percentages are of
-    /// the BOX — that is what makes `translate(-50%,-50%)` centre. Together with
-    /// `top: 50%` against a positioned ancestor of AUTO height (§10.1: the
+    /// the box — that is what makes `translate(-50%,-50%)` centre. Together with
+    /// `top: 50%` against a positioned ancestor of auto height (§10.1: the
     /// containing block is its used padding box, definite once laid out) this is
-    /// the icon-centring idiom every component library uses. Taking the
-    /// containing block from the SPECIFIED height left `top:50%` unresolvable,
-    /// so the box fell back to its static position — a full box-height too low.
+    /// the common icon-centring idiom.
     #[test]
     fn an_icon_centres_with_top_50_percent_and_a_translate() {
         let l = lay(
@@ -14509,15 +14238,13 @@ fn dbg_wiki_shape() {
         assert_eq!((c.0, c.1), (8, 8), "a rotation must not move the box instead");
     }
 
-    /// The width MEASUREMENT must resolve styles with the same sibling context
+    /// The width measurement must resolve styles with the same sibling context
     /// the layout walk uses, or a sibling-combinator rule is applied by one and
     /// ignored by the other — and the two then disagree about the same box.
     ///
-    /// Every component library hides an icon-only button's label with the
-    /// visually-hidden idiom on `span + span`. Measuring without the siblings
-    /// left the label in flow for sizing purposes, so the button came out as
-    /// wide as its hidden text: Wikipedia's hamburger was ~80px too wide and
-    /// shoved the logo and the search field right across the whole header.
+    /// Component libraries hide an icon-only button's label with the
+    /// visually-hidden idiom on `span + span`; measured without siblings the
+    /// button would come out as wide as its hidden text.
     #[test]
     fn shrink_to_fit_sees_sibling_combinator_rules() {
         let l = lay(
@@ -14533,12 +14260,10 @@ fn dbg_wiki_shape() {
         assert!(btn.2 < 30, "only the icon counts, got {}px wide", btn.2);
     }
 
-    /// The presentational half of the old web: `<center>` is a BLOCK
+    /// The presentational half of the old web: `<center>` is a block
     /// (HTML rendering §15.3.2) and `bgcolor` is a background hint (§15.3.3).
     /// Left as the initial `inline`, `<center>` swallows what it wraps into a
     /// line box — and a `<table>` inside it collapses into running text.
-    /// Hacker News wraps its whole page in one and paints its masthead with
-    /// `bgcolor`, so it rendered as a single grey paragraph.
     #[test]
     fn center_is_a_block_and_bgcolor_paints() {
         let l = lay(
@@ -14562,22 +14287,22 @@ fn dbg_wiki_shape() {
             .contains(&Rgb(0, 255, 0)), "author CSS wins over the attribute");
     }
 
-    /// A line box is not written until it BREAKS, so an out-of-flow box reached
+    /// A line box is not written until it breaks, so an out-of-flow box reached
     /// mid-line lands in the display list ahead of text that precedes it in the
     /// document — and paints under it. CSS 2.1 Appendix E puts positioned boxes
     /// in step 8, after that inline content in step 7.
     ///
     /// The box is lifted over exactly that one line. Flushing the line instead
     /// would break `foo<div style=position:absolute></div>bar` onto two lines,
-    /// and lifting positioned boxes wholesale is worse: out-of-flow-only
-    /// measured +25/−21 against the reftests, every positioned box +16/−46.
+    /// and lifting positioned boxes wholesale breaks document order among
+    /// step-8 boxes.
     #[test]
     fn an_abspos_box_reached_mid_line_paints_over_that_line() {
         let order = |html: &str| -> Vec<Rgb> {
             rects(&lay(html, 800)).into_iter().map(|(_, _, _, _, c)| c).collect()
         };
         // The green box covers the red one exactly; only paint order decides
-        // whether any red is left, and the green one comes LATER in the source.
+        // whether any red is left, and the green one comes later in the source.
         let ops = order(
             "<body><div style=\"position:relative\">\
              <iframe style=\"display:inline;border:3px solid rgb(255,0,0)\"></iframe>\
@@ -14588,10 +14313,9 @@ fn dbg_wiki_shape() {
         let green = ops.iter().rposition(|c| *c == Rgb(0, 128, 0));
         assert!(red.is_some() && green.is_some(), "both boxes painted: {ops:?}");
         assert!(green > red, "the abspos box paints last: {ops:?}");
-        // …and it is lifted over the line only, not over a box that FOLLOWS it.
+        // …and it is lifted over the line only, not over a box that follows it.
         // Both of these are step 8, so document order decides and the blue one
-        // wins — this is the shape (`CSS2/border-005`) that a blanket hoist got
-        // wrong.
+        // wins (`CSS2/border-005`).
         let ops = order(
             "<body><div style=\"position:relative\">\
              <div style=\"position:absolute;top:0;width:99px;height:99px;\
@@ -14607,8 +14331,7 @@ fn dbg_wiki_shape() {
     #[test]
     fn a_replaced_element_with_no_intrinsic_size_is_300_by_150() {
         // CSS2.1 §10.3.2 + §10.6.2. We never load a frame, a video or a canvas
-        // bitmap — but the BOX is still there, and on the real web that box is
-        // every video embed and every embedded map.
+        // bitmap — but the box is still there (video embeds, embedded maps).
         let box_of = |html: &str| {
             let l = lay(html, 800);
             rects(&l)
@@ -14647,10 +14370,10 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn img_box_is_emitted_and_sized_before_its_pixels_arrive() {
-        // With both dimensions given, the box is definite: layout emits ONE
-        // image op carrying the src, at the authored size, and does NOT need
-        // the pixels. Drawing the placeholder is the rasteriser's job now, so
-        // the arriving image is a repaint rather than a re-layout.
+        // With both dimensions given, the box is definite: layout emits one
+        // image op carrying the src, at the authored size, and does not need
+        // the pixels. Drawing the placeholder is the rasteriser's job, so the
+        // arriving image is a repaint rather than a re-layout.
         let l = lay("<body><img src=\"/x.png\" alt=\"Foto\" width=\"200\" height=\"100\"></body>", 800);
         let img: Vec<_> = l.ops.iter().filter_map(|o| match o {
             DrawOp::Image { w, h, src, alt, .. } => Some((*w, *h, src.as_str(), alt.as_str())),
@@ -14663,12 +14386,9 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn ein_bild_schrumpft_in_einer_engen_flexzeile_nicht_auf_einen_pixel() {
-        // Die Eigenbreite eines Bildes ist die Untergrenze, unter die ein
-        // Flex-Element nicht schrumpft (css-flexbox-1 §4.5). `intrinsic_width`
-        // meldete fuer ein `<img>` NULL — es stand in keinem Zweig —, also
-        // schrumpfte jedes Bild in einer engen Zeile bis auf den einen Pixel,
-        // auf den `img_box` klemmt. Auf DuckDuckGos Ergebnisseite war das der
-        // 90 px hohe Strich von einem Pixel Breite und jedes Favicon daneben.
+        // An image's intrinsic width is the floor a flex item does not shrink
+        // below (css-flexbox-1 §4.5); without it every image in a tight row
+        // would shrink to the one pixel `img_box` clamps to.
         let l = lay(
             "<body><div style=\"width:300px\"><div style=\"display:flex\">\
              <div>Ein ziemlich langer Text der die Zeile fuellt und den Rest \
@@ -14685,9 +14405,9 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn ein_bild_ohne_masse_meldet_die_breite_die_es_bekommt() {
-        // Messung und Auslegung teilen sich `img_box`, also meldet die
-        // Eigenbreite genau den Kasten, der danach gelegt wird — auch fuer ein
-        // Bild, dessen Pixel noch nicht da sind ([[feedback_intrinsic_shared_path]]).
+        // Measurement and layout share `img_box`, so the intrinsic width reports
+        // exactly the box laid out afterwards — also for an image whose pixels
+        // have not arrived yet.
         let l = lay(
             "<body><div style=\"width:120px\"><div style=\"display:flex\">\
              <div>Text Text Text Text</div>\
@@ -14704,10 +14424,10 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn die_masse_eines_bildes_stehen_in_der_kaskade_nicht_erst_im_kasten() {
-        // `width`/`height` am `<img>` sind Praesentationshinweise (HTML
-        // Rendering §15.3.5-6), also GEHOEREN sie in die Kaskade. Solange sie
-        // nur `img_box` kannte, sah jeder, der vorher fragt, `auto`: in einer
-        // streckenden Flexzeile wurde aus 30x30 ein 30x60 (Chromium: 30x30).
+        // `width`/`height` on `<img>` are presentational hints (HTML Rendering
+        // §15.3.5-6), so they belong in the cascade: anyone asking before
+        // `img_box` runs must see them, not `auto`. In a stretching flex row
+        // 30x30 stays 30x30 (as in Chromium).
         let l = lay(
             "<body><div style=\"display:flex;width:120px\">\
              <div>Text Text Text Text Text Text</div>\
@@ -14744,7 +14464,7 @@ fn dbg_wiki_shape() {
         // Scrolled down to it, the same image is worth a repaint — which is why
         // skipping one loses nothing: scrolling marks the page dirty anyway.
         assert!(l.images_in_band(&["/low.png"], 1800, 2800), "scrolled to → repaint");
-        // A batch repaints if ANY of its images is visible.
+        // A batch repaints if any of its images is visible.
         assert!(l.images_in_band(&["/low.png", "/top.png"], 0, 500), "one visible is enough");
         // A src this layout never placed cannot be visible.
         assert!(!l.images_in_band(&["/nowhere.png"], 0, 100_000), "not painted → not visible");
@@ -14802,7 +14522,7 @@ fn dbg_wiki_shape() {
     #[test]
     fn controls_render_once_in_flex_grid_and_table_contexts() {
         // Real search boxes sit in a `display:flex` row, which reaches children
-        // through `layout_box` — NOT the in-flow walk. And table/grid sizing
+        // through `layout_box` — not the in-flow walk. And table/grid sizing
         // lays boxes out speculatively to measure them, discarding the ops; the
         // control hit rects must be discarded with them or every control is
         // recorded several times (at stale positions → clicks miss).
@@ -14828,13 +14548,8 @@ fn dbg_wiki_shape() {
         assert!(l.controls[4].y > l.controls[2].y);
     }
 
-    /// **`accent-color` schlaegt das Thema** (css-ui-4 §5.1).
-    ///
-    /// Eine Seite, die ihre Kaestchen in ihrer eigenen Akzentfarbe will,
-    /// schreibt genau eine Zeile — `sandbox.nopeek.ch` dreimal
-    /// (`.network-checkbox input { accent-color: var(--accent) }`). Ohne die
-    /// Eigenschaft bekam sie unsere Themenfarbe, und Florian sah es am Geraet:
-    /// „die checkboxen … sehen anders aus".
+    /// `accent-color` beats the theme (css-ui-4 §5.1), e.g.
+    /// `.network-checkbox input { accent-color: var(--accent) }`.
     #[test]
     fn accent_color_faerbt_kaestchen_und_radioknopf() {
         let first_rect = |css: &str, tag: &str| -> Rgb {
@@ -14843,17 +14558,16 @@ fn dbg_wiki_shape() {
             let l = lay(&html, 400);
             rects(&l).first().map(|r| r.4).expect("kein Kasten gemalt")
         };
-        // Eine eigene Farbe gilt — auch aus einer CSS-Variablen.
+        // A colour of its own applies — also from a CSS variable.
         let eigen = first_rect(":root{--a:#e11d48} input{accent-color:var(--a)}",
                                "<input type=checkbox checked>");
         assert_eq!(eigen, Rgb(225, 29, 72), "das Kaestchen nimmt accent-color");
         let name = first_rect("input{accent-color:rebeccapurple}",
                               "<input type=checkbox checked>");
         assert_eq!(name, Rgb(102, 51, 153), "auch ein Farbname");
-        // Ein Radioknopf ist RUND — seine Flaeche, sein Ring und sein Punkt
-        // sind `RoundRect`, und `rects` sammelt nur `Rect`. Erst diese
-        // Unterscheidung macht den Test zu einem Test: die erste Fassung sah
-        // eine leere Liste und haette jede Farbe durchgehen lassen.
+        // A radio button is round — its face, ring and dot are `RoundRect`, and
+        // `rects` only collects `Rect`, so this checks the round ops explicitly
+        // rather than passing on an empty list.
         let l = lay("<body><style>input{accent-color:#e11d48}</style>\
                      <input type=radio checked></body>", 400);
         let farben: alloc::vec::Vec<Rgb> = l.ops.iter().filter_map(|o| match o {
@@ -14863,40 +14577,37 @@ fn dbg_wiki_shape() {
         assert!(!farben.is_empty(), "ein Radioknopf malt RoundRects");
         assert!(farben.contains(&Rgb(225, 29, 72)),
             "der Ring eines gewaehlten Radioknopfes nimmt accent-color: {farben:?}");
-        // `auto` ist der Anfangswert und laesst das Thema entscheiden.
+        // `auto` is the initial value and lets the theme decide.
         let thema = first_rect("input{accent-color:auto}", "<input type=checkbox checked>");
         assert_ne!(thema, Rgb(225, 29, 72), "auto faellt aufs Thema zurueck");
     }
 
-    /// **Die UA-Masse eines Steuerelements, gegen Chromium ausgerechnet.**
-    ///
-    /// Sie standen bis 0.168 als eine Zahl fuer alle da (`PAD_Y = 3`, ein
-    /// 1-px-Rahmen), und `tools/fixtures/controls.html` hat jede einzeln
-    /// herausgerechnet: dieselben vier Faelle je Steuerelement — nackt, nur
-    /// gepolstert, nur gerahmt, beides — ergeben ein Gleichungssystem, das
-    /// genau eine Loesung hat. Was hier steht, ist diese Loesung.
+    /// A control's UA metrics, as derived against Chromium by
+    /// `tools/fixtures/controls.html`: the same four cases per control (bare,
+    /// padded only, bordered only, both) form a system of equations with
+    /// exactly one solution. This is that solution.
     #[test]
     fn die_ua_masse_eines_steuerelements_stehen_fest() {
-        // Ein Kasten je Fall, in der Reihenfolge der Vorlage.
+        // One box per case, in the fixture's order.
         let h = |tag: &str, css: &str| -> i32 {
             let l = lay(&alloc::format!("<body>{tag}</body>").replace("@", css), 1000);
             l.controls.first().map(|c| c.h).unwrap_or(-1)
         };
-        // Ein Feld: UA-Polsterung 1 px, UA-Rahmen 2 px je Seite. Die
-        // Zeilenhoehe ist dieselbe in allen vier Faellen, also ist die
-        // DIFFERENZ die Aussage — sie haengt nicht an der Schrift.
+        // A field: UA padding 1px, UA border 2px per side. The line height is the
+        // same in all four cases, so the difference is the statement — it does
+        // not depend on the font.
         let f = |css: &str| h("<input style=\"@\">", css);
         let (bare, pad, bord, both) = (f(""), f("padding:6px"), f("border:1px solid #000"),
                                        f("padding:6px;border:1px solid #000"));
         assert_eq!(pad - bare, 10, "12 px eigene Polsterung statt 2 px UA");
         assert_eq!(bord - bare, -2, "2 px eigener Rahmen statt 4 px UA");
         assert_eq!(both - bare, 8, "beides zusammen");
-        // Ein Kaestchen ist 13 px und waechst NICHT mit der Schrift.
+        // A checkbox is 13px and does not grow with the font.
         let cb = |css: &str| h("<input type=checkbox style=\"@\">", css);
         assert_eq!(cb(""), 13, "ein Kaestchen ist 13 px hoch");
         assert_eq!(cb("font-size:32px"), 13, "und bleibt es bei jeder Schrift");
         assert_eq!(cb("width:24px;height:24px"), 24, "eine eigene Groesse gilt GANZ");
-        // Ein `<textarea>` nimmt `rows` — Vorgabe 2, nicht 3 (HTML §4.10.11).
+        // A `<textarea>` takes `rows` — default 2, not 3 (HTML §4.10.11).
         let ta = |a: &str| -> i32 {
             let l = lay(&alloc::format!("<body><textarea {a}></textarea></body>"), 1000);
             l.controls.first().map(|c| c.h).unwrap_or(-1)
@@ -14905,12 +14616,9 @@ fn dbg_wiki_shape() {
             "vier Zeilen sind zwei mehr als die Vorgabe von zwei");
     }
 
-    /// **Ein Steuerelement im Flex behaelt seine Polsterung.** `flex_metrics`
-    /// zog Polsterung + Rahmen ein ZWEITES Mal ab (`intrinsic_width` tut es
-    /// seit 0.145.0 selbst), und `resolve_flex_line` legte sie nur einmal
-    /// wieder drauf. Gemessen wird gegen denselben Knopf AUSSERHALB eines
-    /// Flex-Containers: derselbe Text, dieselbe Polsterung, also dieselbe
-    /// Breite. Chromium sagt zu beiden 74 px; wir sagten 48 im Flex.
+    /// A control inside a flex container keeps its padding: padding + border
+    /// are subtracted once, so a button measures the same width inside and
+    /// outside a flex container (74px in Chromium).
     #[test]
     fn a_control_in_a_flex_row_keeps_its_padding() {
         let btn = "<button style=\"padding:6px 12px; border:1px solid #000\">Los</button>";
@@ -14921,12 +14629,10 @@ fn dbg_wiki_shape() {
         assert_eq!(a.w, b.w, "a flex item is not narrower than the same control in flow");
     }
 
-    /// **Ein blockweites Steuerelement ist ein ersetzter Blockkasten**
-    /// (CSS 2.1 §10.3.4): seine eigene Breite und sein eigener Rand
-    /// entscheiden. `layout_box_inner` nimmt die uebergebene Breite als
-    /// GEGEBEN — der Vertrag der Flex-/Raster-/Zellenwege — und `flow_children`
-    /// uebergab die Breite des UMGEBUNGSkastens: 1000 px breit auf x = 0
-    /// statt 100 px auf x = 58.
+    /// A block-level control is a replaced block box (CSS 2.1 §10.3.4): its own
+    /// width and margin decide. `layout_box_inner` takes the width it is handed
+    /// as given (the flex/grid/cell contract), so `flow_children` must hand it
+    /// the control's own width, not the containing block's.
     #[test]
     fn a_block_level_control_uses_its_own_width_and_margin() {
         let l = lay(
@@ -14938,12 +14644,11 @@ fn dbg_wiki_shape() {
         assert_eq!(c.x, 8 + 50, "margin-left moves it (8px is the body's UA margin)");
     }
 
-    /// **Ein geflotetes Steuerelement legt seinen Rand an.** `place_float`
-    /// uebergibt den RANDkasten und verlaesst sich darauf, dass `layout_box`
-    /// den Rand anlegt — fuer ein Steuerelement tut es das nicht. Bootstraps
-    /// `.form-check-input` (`float:left; margin-left:-1.5em` in einem
-    /// `padding-left:1.5em`) sass deshalb auf der Polsterkante: jede Checkbox,
-    /// jeder Radioknopf, jeder Schalter.
+    /// A floated control applies its margin. `place_float` hands over the
+    /// margin box and relies on `layout_box` to apply the margin, which it does
+    /// not for a control — so `float:left; margin-left:-1.5em` inside
+    /// `padding-left:1.5em` (the usual checkbox layout) must still land left of
+    /// the padding edge.
     #[test]
     fn a_floated_control_gets_its_own_margin() {
         let l = lay(
@@ -14957,9 +14662,9 @@ fn dbg_wiki_shape() {
     }
 
     /// A form control's chrome follows the surface it sits on. The engine runs
-    /// on a DARK theme here, so a page that says nothing keeps dark controls —
-    /// but a page that paints itself light (Wikipedia does, whatever the
-    /// desktop is set to) must not get a black box on its white background.
+    /// on a dark theme here, so a page that says nothing keeps dark controls —
+    /// but a page that paints itself light must not get a black box on its
+    /// white background.
     #[test]
     fn control_chrome_follows_the_page_not_the_device_theme() {
         // The control's face is the first rect painted for it.
@@ -14990,14 +14695,11 @@ fn dbg_wiki_shape() {
         let l2 = lay_forms(html, 800, &st);
         assert!(l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "nopeek")));
         assert!(!l2.ops.iter().any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Suchbegriff")));
-        // Der Fokus bringt zweierlei mit: den Caret und den Ring, den ein
-        // Browser als `outline` AUSSERHALB des Kastens malt (vier Kanten).
-        // Bis 0.175.0 faerbte beak stattdessen den Rahmen der Seite um — das
-        // sah auf einem Feld, das seine Farbe selbst gesagt hat, falsch aus,
-        // und es war falsch.
+        // Focus brings two things: the caret and the ring a browser paints as an
+        // `outline` outside the box (four edges), never a recoloured border.
         assert_eq!(rects(&l2).len(), plain_rects + 4, "der Ring, vier Kanten");
-        // Der Zeiger ist seit 0.188.0 ein eigener Befehl — er zaehlt bei den
-        // Rechtecken nicht mehr mit, steht aber da.
+        // The caret is its own op — it does not count among the rects, but it
+        // is there.
         assert_eq!(l2.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count(), 1,
                    "und der Schreibzeiger");
     }
@@ -15020,10 +14722,8 @@ fn dbg_wiki_shape() {
         assert!(t.iter().any(|(_, _, s)| *s == "Senden"));
     }
 
-    /// Google wraps its search button in a bordered `<span>` and writes
-    /// `border: none` on the `<input>`. Painting our own frame regardless put a
-    /// second rectangle a pixel down and right of the wrapper's — the "shadow"
-    /// on both home-page buttons.
+    /// A page that wraps its button in a bordered `<span>` and writes
+    /// `border: none` on the `<input>` must not get a second frame from us.
     #[test]
     fn a_page_that_styles_a_controls_border_owns_it() {
         let plain = lay("<body><input type=submit value=OK></body>", 400);
@@ -15056,10 +14756,9 @@ fn dbg_wiki_shape() {
         assert_eq!(rects(&clear).len(), 1, "only the face is painted");
     }
 
-    /// A control measured with a ROOT style read its label at the root font
-    /// size and lost every declared size, so a shrink-to-fit wrapper reserved
-    /// more width than the control paints — the button sat in a box wider than
-    /// itself, with a strip of the wrapper showing on the right.
+    /// A control measured with a root style would read its label at the root
+    /// font size and lose every declared size, so a shrink-to-fit wrapper would
+    /// reserve more width than the control paints.
     #[test]
     fn a_control_measures_with_its_own_style_not_a_root_one() {
         let l = lay(
@@ -15075,9 +14774,9 @@ fn dbg_wiki_shape() {
     }
 
     /// A button-like control is border-box in the UA sheet (HTML rendering
-    /// §15.5.1); a text field is not. Read as content-box, Google's
-    /// `height:30px` button came out 8px taller than the `height:30px` wrapper
-    /// it was built to fit and hung out the bottom.
+    /// §15.5.1); a text field is not. Read as content-box, a `height:30px`
+    /// button would come out taller than a `height:30px` wrapper built to fit
+    /// it.
     #[test]
     fn a_button_is_border_box_and_a_text_field_is_not() {
         let face_h = |html: &str| rects(&lay(html, 400))[0].3;
@@ -15108,21 +14807,16 @@ fn dbg_wiki_shape() {
         let mut st = FormState::default();
         st.focus = Some(seq);
         let focused = lay_forms(html, 400, &st);
-        // Vier Rechtecke fuer den Ring. Der Zeiger zaehlt seit 0.188.0 NICHT
-        // mehr mit: er ist ein eigener Befehl, damit er blinken kann, ohne
-        // dass ein Takt ein Neuauslegen kostet.
+        // Four rects for the ring. The caret does not count: it is its own op so
+        // it can blink without a relayout per tick.
         assert_eq!(rects(&focused).len(), rects(&l).len() + 4, "der Ring, vier Rechtecke");
         let carets = focused.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count();
         assert_eq!(carets, 1, "und genau ein Schreibzeiger");
     }
 
-    /// **Sagt die Seite `outline: none`, gibt es keinen Ring — und ihr
-    /// Rahmen behaelt seine Farbe.**
-    ///
-    /// So macht es jeder Browser: der Fokus ist eine `outline`, und eine
-    /// Seite darf sie abschalten. beak faerbte bis 0.175.0 stattdessen den
-    /// RAHMEN der Seite um; auf DuckDuckGos Suchfeld, das seine Farbe selbst
-    /// nennt, wurde daraus ein blauer Kasten, den niemand bestellt hatte.
+    /// If the page says `outline: none` there is no ring, and its border keeps
+    /// its colour. Focus is an `outline` in every browser, and a page may turn
+    /// it off.
     #[test]
     fn a_page_that_says_outline_none_gets_no_focus_ring() {
         let html = "<body><form action=/s>\
@@ -15132,34 +14826,27 @@ fn dbg_wiki_shape() {
         let mut st = FormState::default();
         st.focus = Some(seq);
         let focused = lay_forms(html, 400, &st);
-        // Kein Ring — und der Zeiger ist seit 0.188.0 kein Rechteck mehr,
-        // also kommt bei den Rechtecken GAR nichts dazu.
+        // No ring — and the caret is not a rect, so nothing at all is added.
         assert_eq!(rects(&focused).len(), rects(&l).len(), "kein Ring");
         assert_eq!(focused.ops.iter().filter(|o| matches!(o, DrawOp::Caret { .. })).count(), 1,
                    "der Schreibzeiger steht trotzdem");
-        // Und der Rahmen ist noch der der Seite.
+        // And the border is still the page's.
         let red = rects(&focused).iter()
             .filter(|r| r.4 == Rgb(0xff, 0x00, 0x00)).count();
         assert!(red > 0, "der Rahmen der Seite behaelt seine Farbe");
     }
 
-    /// **Das Zeichen ist ein HAKEN, kein Quadrat.** Bis 0.149.0 stand hier
-    /// „the tick is one filled rect" und der Test hatte recht — gemalt wurde
-    /// ein gefuelltes Quadrat, also dasselbe Zeichen wie beim Radioknopf,
-    /// nur eckig. Chromium daneben gestellt zeigte den Unterschied. Der Test
-    /// prueft jetzt, was die Form BEDEUTET, statt wie viele Rechtecke sie
-    /// kostet: ohne Haken kein `Check`, mit Haken genau einer.
-    /// **`min-height` ueber dem Inhalt verschluckt den Schlussrand.**
+    /// `min-height` above the content swallows the trailing margin.
     ///
-    /// Die fuenf Faelle sind die, mit denen die Regel an Chromium
-    /// charakterisiert wurde (siehe den Kommentar an der Stelle): der Rand
-    /// verschwindet GENAU dann, wenn `min-height` die Hoehe ueber den Inhalt
-    /// hebt — sonst entkommt er wie immer und schiebt, was darunter steht.
+    /// The five cases characterise the rule against Chromium (see the comment
+    /// at the code): the margin vanishes exactly when `min-height` lifts the
+    /// height above the content — otherwise it escapes as usual and pushes
+    /// what follows.
     #[test]
     fn min_height_over_the_content_swallows_the_trailing_margin() {
         let page = |mh: i32, chh: i32, mb: i32| alloc::format!(
             "<body style='margin:0'><div style='width:100px'>             <div id=p style='min-height:{mh}px'>             <div style='height:{chh}px;margin-bottom:{mb}px'></div></div>             <div id=f style='height:50px'></div></div></body>");
-        // (min-height, Kindhoehe, Rand) -> (Elterhoehe, Fusszeilen-Oberkante)
+        // (min-height, child height, margin) -> (parent height, footer top)
         for (mh, chh, mb, want_h, want_f) in [
             (100, 30, 550, 100, 100),
             (100, 200, 550, 200, 750),
@@ -15180,6 +14867,8 @@ fn dbg_wiki_shape() {
         }
     }
 
+    /// The checked mark is a tick, not a filled square: no `Check` op when
+    /// unchecked, exactly one when checked.
     #[test]
     fn checkbox_paints_its_mark_only_when_checked() {
         let checks = |l: &Layout| {
@@ -15199,8 +14888,8 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn img_in_a_link_flows_inline_and_is_clickable() {
-        // Wikipedia's pattern: <a><img></a> among text. The image must flow on
-        // the same line as the surrounding words AND be a clickable link.
+        // A link around an image among text (<a><img></a>): the image must flow on
+        // the same line as the surrounding words and be a clickable link.
         let l = lay(
             "<body><p>vor <a href=\"/x\"><img src=\"/i.png\" alt=\"pic\" width=\"40\" height=\"30\"></a> nach</p></body>",
             2000,
@@ -15224,7 +14913,7 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn flex_row_places_items_side_by_side() {
-        // Two flex:1 items in a row → side by side, splitting the width, NOT
+        // Two flex:1 items in a row → side by side, splitting the width, not
         // stacked. Without flex they'd be one-below-the-other.
         let l = lay(
             "<body><div style=\"display:flex; gap:10px\">\
@@ -15320,7 +15009,7 @@ fn dbg_wiki_shape() {
 
     #[test]
     fn nbsp_is_not_a_break_opportunity_and_has_a_width() {
-        // `&nbsp;` exists so a line does NOT break there. It is also not
+        // `&nbsp;` exists so a line does not break there. It is also not
         // collapsible, so four of them are four characters wide, not one space.
         let one = lay("<body><div style=\"width:400px\">a\u{00A0}b</div></body>", 800);
         let four = lay("<body><div style=\"width:400px\">a\u{00A0}\u{00A0}\u{00A0}\u{00A0}b</div></body>", 800);
@@ -15509,9 +15198,9 @@ fn dbg_wiki_shape() {
     #[test]
     fn list_items_get_bullets_and_indent() {
         let l = lay("<body><ul><li>one</li><li>two</li></ul></body>", 800);
-        // `disc` ist eine SCHEIBE, kein Quadrat — die Form IST der Wert der
-        // Eigenschaft, sonst sind `disc`, `circle` und `square` auf dem Schirm
-        // dasselbe Zeichen und eine verschachtelte Liste verliert ihre Ebenen.
+        // `disc` is a disc, not a square — the shape is the property's value;
+        // otherwise `disc`, `circle` and `square` look the same and a nested
+        // list loses its levels.
         let discs: alloc::vec::Vec<f32> = l.ops.iter().filter_map(|o| match o {
             DrawOp::RoundRect { r, w, h, ring, .. } if w == h && *ring == 0.0 => Some(r[0] / *w as f32),
             _ => None,
@@ -15522,10 +15211,9 @@ fn dbg_wiki_shape() {
         assert!(texts(&l).iter().all(|(x, _, _)| *x > 8));
     }
 
-    /// Ein `opacity` auf einem INLINE-Element verblasst seinen Text und seinen
-    /// Schmuck. Ein Inline-Kasten bekommt keinen eigenen Befehlsbereich, ueber
-    /// den es nachtraeglich gelegt werden koennte — die Deckung faehrt deshalb
-    /// im Stil mit, und Vorfahren multiplizieren sich auf.
+    /// `opacity` on an inline element fades its text and decoration. An inline
+    /// box gets no op range of its own to fade afterwards, so the opacity rides
+    /// in the style, and ancestors multiply.
     #[test]
     fn opacity_on_an_inline_element_fades_its_run() {
         let l = lay(
@@ -15540,7 +15228,7 @@ fn dbg_wiki_shape() {
         assert!((half.0 as i32 - 127).abs() <= 2, "halb durchsichtig: {alphas:?}");
         assert!(alphas.iter().filter(|(_, t)| *t != "halb").all(|(a, _)| *a == 255),
                 "die Nachbarn nicht: {alphas:?}");
-        // Und der Hintergrund des Inline-Kastens genauso.
+        // And the inline box's background likewise.
         let bg = l.ops.iter().find_map(|o| match o {
             DrawOp::Rect { color, .. } if (color.c.0, color.c.1, color.c.2) == (255, 0, 0) => Some(color.a),
             _ => None,
@@ -15548,8 +15236,8 @@ fn dbg_wiki_shape() {
         assert!((bg as i32 - 127).abs() <= 2, "auch der Schmuck, a={bg}");
     }
 
-    /// Und sie multipliziert sich mit der des BLOCKS darueber, statt sie zu
-    /// ersetzen: der Block legt seine ueber den ganzen Befehlsbereich.
+    /// And it multiplies with the opacity of the block above instead of
+    /// replacing it: the block applies its own over its whole op range.
     #[test]
     fn inline_and_block_opacity_multiply() {
         let l = lay(
@@ -15566,11 +15254,6 @@ fn dbg_wiki_shape() {
         assert!((inner as i32 - 64).abs() <= 2, "innen viertel: {a:?}");
     }
 }
-
-/// The definite **padding-box** height of a positioned box — what `top`/`bottom`
-/// percentages on its absolutely-positioned descendants resolve against
-/// (CSS 2.1 §9.3.2). Only an explicit `height` counts: abspos children are laid
-/// out during the parent's child walk, before its content height exists.
 
 /// `colspan` (HTML §4.9.11): how many columns a cell occupies. `0` means "to
 /// the end of the row group" in old HTML and was dropped from the spec, so it
@@ -15597,9 +15280,7 @@ fn row_columns(row: &[StyledCell]) -> (Vec<usize>, usize) {
 
 /// Widen `track[c .. c+span]` just enough that it totals `want`, sharing the
 /// shortfall equally. CSS2 §17.5.2.2 leaves the distribution up to the UA; a
-/// spanning cell must never dictate a single column's width, which is what
-/// made a `<td colspan="2" style="width:290px">` infobox header blow column 0
-/// up to the width meant for the whole table.
+/// spanning cell must never dictate a single column's width.
 fn spread_span(track: &mut [f32], c: usize, span: usize, want: f32) {
     let end = (c + span).min(track.len());
     if end <= c {
@@ -15617,7 +15298,7 @@ fn spread_span(track: &mut [f32], c: usize, span: usize, want: f32) {
 
 /// A cell's used border widths (left, right, top, bottom). In the collapsed
 /// model a border is shared with the neighbouring cell and sits centred on the
-/// grid line, so only HALF of it lies inside this cell (CSS2.1 §17.6.2) — that
+/// grid line, so only half of it lies inside this cell (CSS2.1 §17.6.2) — that
 /// half is what the column widths and the content box have to account for.
 fn cell_borders(cs: &ComputedStyle, collapse: bool) -> (f32, f32, f32, f32) {
     let (l, r, t, b) = (cs.border_left.width, cs.border_right.width, cs.border_top.width, cs.border_bottom.width);
@@ -15702,7 +15383,7 @@ fn intrinsic_size(k: Intrinsic, max_c: f32, min_c: f32, avail: f32) -> f32 {
 /// it unresolvable, which behaves as `auto`.
 fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
     match len {
-        // An intrinsic keyword on the block axis is the CONTENT height, which
+        // An intrinsic keyword on the block axis is the content height, which
         // no containing block can supply — unresolvable here, like `auto`.
         Len::Auto | Len::Intrinsic(_) => None,
         Len::Px(p) => Some(p),
@@ -15712,11 +15393,6 @@ fn vert_len(len: Len, cbh: Option<i32>) -> Option<f32> {
     }
 }
 
-/// The CONTENT-box height a definite `height`/`min-`/`max-height` asks for.
-/// Under `box-sizing: border-box` the used height spans padding AND border;
-/// flex and grid each subtracted only the padding, so every bordered container
-/// with a definite height came out two border-widths too tall — and a root
-/// `display:flex` stretched between `top`/`bottom` overshot the viewport.
 /// Resolve `aspect-ratio` into a used height, once the box's content width is
 /// known. Only the width→height direction: that is the one pages use (a card,
 /// a video embed, an image placeholder holding its shape while it loads), and
@@ -15736,6 +15412,9 @@ fn with_aspect_height(st: &ComputedStyle, cw: f32) -> Option<ComputedStyle> {
     Some(s)
 }
 
+/// The content-box height a definite `height`/`min-`/`max-height` asks for.
+/// Under `box-sizing: border-box` the used height spans padding and border,
+/// and both have to come off.
 fn content_height_of(st: &ComputedStyle, len: Len) -> Option<f32> {
     match len {
         Len::Px(h) if st.box_border => Some((h - st.pad_top - st.pad_bottom - st.border_y()).max(0.0)),
@@ -15744,10 +15423,14 @@ fn content_height_of(st: &ComputedStyle, len: Len) -> Option<f32> {
     }
 }
 
+/// The definite padding-box height of a positioned box — what `top`/`bottom`
+/// percentages on its absolutely-positioned descendants resolve against
+/// (CSS 2.1 §9.3.2). Only an explicit `height` counts: abspos children are laid
+/// out during the parent's child walk, before its content height exists.
 fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
     let pad_v = px_of(st.pad_top) + px_of(st.pad_bottom);
     match st.height {
-        // `box-sizing:border-box` → the used height already spans padding AND
+        // `box-sizing:border-box` → the used height already spans padding and
         // border, so the padding box is that minus the border.
         Len::Px(h) if st.box_border => Some((h as i32 - st.border_y() as i32).max(0)),
         Len::Px(h) => Some(h as i32 + pad_v),
@@ -15756,7 +15439,7 @@ fn definite_cb_height(st: &ComputedStyle) -> Option<i32> {
 }
 
 /// The containing block a positioned box establishes for its absolutely
-/// positioned descendants: its **padding** box, not its content box (CSS2.1
+/// positioned descendants: its padding box, not its content box (CSS2.1
 /// §10.1). Given the box's content origin and width, back out to the padding
 /// edges — `top: 0` sits just inside the border, and `left: 0` at the padding
 /// edge, so a padded container does not push its abspos children inwards.
