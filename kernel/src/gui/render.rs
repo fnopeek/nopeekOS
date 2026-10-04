@@ -499,6 +499,10 @@ pub fn fill_rounded_chrome_aa(
     } else {
         None
     };
+    // The per-pixel paths (corners, fringe, no-tint fallback) must lift by
+    // the same floor as the tint, or the straight middle sits on the glass
+    // like a pasted-on rectangle.
+    let floor = if paint_content { crate::shade::widgets::palette::glass_floor() } else { 0 };
     let pitch = info.pitch as usize;
 
     // Per-pixel SDF path — used for the border ring + the four rounded corners
@@ -536,12 +540,12 @@ pub fn fill_rounded_chrome_aa(
             // (glass over wallpaper, NO border tint), else the corner bands
             // show a border-coloured bar where the per-pixel path used to add
             // the tint but the straight middle no longer does.
-            put_pixel(shadow, info, px, py, blend(bg_color, bg_pixel, go));
+            put_pixel(shadow, info, px, py, glass_blend(bg_color, bg_pixel, go, floor));
         } else {
             // Inner fringe: AA transition from border to glass over ~1 px.
             let after_border = blend(border_color, bg_pixel, bo);
             let bg_alpha = (go * inner / 256).min(255);
-            put_pixel(shadow, info, px, py, blend(bg_color, after_border, bg_alpha));
+            put_pixel(shadow, info, px, py, glass_blend(bg_color, after_border, bg_alpha, floor));
         }
     };
 
@@ -583,7 +587,7 @@ pub fn fill_rounded_chrome_aa(
                         crate::theme::lerp_color(border_a, border_b, t.min(1000))
                     };
                     let after_border = blend(bc, read_pixel(shadow, info, px, py), bo);
-                    put_pixel(shadow, info, px, py, blend(bg_color, after_border, go));
+                    put_pixel(shadow, info, px, py, glass_blend(bg_color, after_border, go, floor));
                 }
             }
         }
