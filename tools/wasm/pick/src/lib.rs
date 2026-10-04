@@ -1,4 +1,4 @@
-//! pick 0.1 — the file dialog, as a portal.
+//! pick — the file dialog, as a portal.
 //!
 //! The kernel starts this module on `npk_pick` and hands it the request
 //! as a launch argument (`"<open|save>\0<start-dir>\0<suggested-name>"`).
@@ -8,9 +8,9 @@
 //!
 //! Two properties are the whole point of doing it this way:
 //!
-//!   - **We hold READ, the requester doesn't.** An app can offer Open
+//!   - We hold READ, the requester doesn't. An app can offer Open
 //!     and Save without the right to walk the filesystem itself.
-//!   - **We never write.** Save mode returns a *path*; the requester
+//!   - We never write. Save mode returns a path; the requester
 //!     does the writing. So this module needs no WRITE, and a bug here
 //!     cannot damage a file.
 
@@ -168,8 +168,7 @@ const NAME_CAP: usize = 128;
 static mut NAME_BUF: [u8; NAME_CAP] = [0; NAME_CAP];
 
 // InputChange hands us a heap String that `alloc_reset` frees before
-// `handle` runs — copy it out first (the same use-after-free that bit
-// spell and loft).
+// `handle` runs — copy it out first, or it is a use-after-free.
 const PAYLOAD_CAP: usize = 1024;
 static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
 
@@ -525,7 +524,7 @@ fn count_children(dir: &str) -> usize {
         .count()
 }
 
-/// Truncate to at most `max` BYTES without splitting a character. Slicing
+/// Truncate to at most `max` bytes without splitting a character. Slicing
 /// a `&str` mid-codepoint panics, and a panicking widget app freezes the
 /// machine — so every cap on a user-supplied name goes through here.
 fn clamp_str(s: &str, max: usize) -> &str {
@@ -567,7 +566,7 @@ fn render(p: &Pick) -> Widget {
 
     let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
 
-    // Flat in the panel's own Column, with Flex(1) on the Scroll ITSELF.
+    // Flat in the panel's own Column, with Flex(1) on the Scroll itself.
     // `measure` reports only a 24 px floor for a scroll container on its
     // axis (that's what lets a flex parent size it), so a Flex wrapper
     // around an unflexed Scroll hands the list 24 px and squashes the
@@ -720,7 +719,7 @@ fn render_list(p: &Pick) -> Widget {
 /// One listing row: icon + name, then a mono column with the item count
 /// (folders) or size (files). A chevron marks the selected row.
 ///
-/// In save mode files are shown but NOT selectable — you can see what
+/// In save mode files are shown but not selectable — you can see what
 /// you would overwrite without the list fighting the name field over
 /// what "chosen" means.
 fn entry_row(p: &Pick, e: &Entry, i: usize) -> Widget {
@@ -828,13 +827,10 @@ fn chevron(show: bool) -> Widget {
 /// extension trails the caret dimmed, so it reads as a suffix, not as
 /// part of the name you are typing.
 fn render_name_field(p: &Pick) -> Widget {
-    // One field, whole filename. The extension used to sit beside the
-    // Input as its own dimmed Text, but `measure` floors an Input at
-    // 120 px so empty fields don't collapse — so on a short name the
-    // suffix drifted off to the right of that floor ("test|      .py")
-    // and crept back as you typed. Spans on an Input would fix it
-    // properly; that needs ABI the widget doesn't have. A single field
-    // also lets the user change the extension, which "save as" wants.
+    // One field, whole filename. `measure` floors an Input at 120 px so
+    // empty fields don't collapse, so a separate dimmed extension beside
+    // it would drift away from a short name. A single field also lets the
+    // user change the extension, which "save as" wants.
     let field: Vec<Widget> = alloc::vec![
         Widget::Input {
             value:       p.name.clone(),
@@ -917,9 +913,8 @@ fn render_new_folder(p: &Pick) -> Widget {
         Widget::Column {
             children: alloc::vec![
                 // Plain `input`, not the autofocus variant: the compositor
-                // only auto-focuses on a window's FIRST commit, and this
-                // sheet appears later. Claiming autofocus here would just
-                // be a lie in the tree — hence the hint below.
+                // only auto-focuses on a window's first commit, and this
+                // sheet appears later — hence the hint below.
                 prefab::input(&p.folder_name, s().folder_hint, prefab::InputKind::Text,
                               ActionId(ACT_FOLDER_CREATE), None),
                 Widget::Row {
