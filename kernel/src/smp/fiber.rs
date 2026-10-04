@@ -1,18 +1,14 @@
 //! Stackful fibers (green threads) for WASM apps.
 //!
-//! See `docs/plan/SCHEDULER_FIBERS.md`. A fiber is "a stack + a saved context that
-//! runs until it yields". wasmi cannot be paused mid-`_start`, so we give
-//! each app its own stack and switch the whole CPU context at the yield
-//! point (`npk_sleep`). The same primitive will later host guest-vCPU
-//! run-loops (multicore microvm) — it only swaps `rsp` + the callee-saved
-//! registers, so it is agnostic to what runs on the stack.
+//! See `docs/plan/SCHEDULER_FIBERS.md`. A fiber is a stack plus a saved
+//! context that runs until it yields. wasmi cannot be paused mid-`_start`,
+//! so each app gets its own stack and the whole CPU context is switched at
+//! the yield point (`npk_sleep`). Only `rsp` and the callee-saved registers
+//! are swapped, so the primitive is agnostic to what runs on the stack (apps,
+//! guest vCPU run-loops, kernel workers).
 //!
-//! - **Stage 1:** the context-switch primitive + a boot self-test.
-//! - **Stage 2a:** `wasm_worker_task` runs on a fiber (own stack).
-//! - **Stage 2b:** `npk_sleep` PARKS the fiber + switches back to a per-core
-//!   scheduler that round-robins the core's other fibers → many apps
-//!   multiplex over few workers (no more core-pinning / helper-nesting).
-//!
+//! `npk_sleep` parks the fiber and switches back to a per-core scheduler
+//! that round-robins the core's other fibers, so many apps share few cores.
 //! A fiber is pinned to the core that admitted it (its wasm `HostState`
 //! caches `core_id`), so each core owns its queue — no cross-core hot path.
 
@@ -44,8 +40,8 @@ impl Context {
 //   trampoline: where a *fresh* fiber's first `ret` lands. The initial
 //           frame put the entry fn in r12 and its arg in r13 (they were
 //           just popped by `switch`), so move the arg into rdi and call
-//           the entry. If the entry ever returns, fall into `fiber_on_exit`
-//           (Stage 2 hooks the switch-back-to-scheduler there).
+//           the entry. If the entry ever returns, fall into `fiber_on_exit`,
+//           which switches back to the scheduler.
 core::arch::global_asm!(
     r#"
 .global fiber_context_switch
@@ -104,21 +100,18 @@ pub extern "C" fn fiber_on_exit() {
     // own hlt loop.)
 }
 
-/// Default per-fiber stack size. 128 KiB — comfortable headroom over the
-/// 64 KiB AP stacks apps already run wasmi on today (and the old nesting
-/// stacked two wasmi instances on those 64 KiB). The WASM linear memory is
-/// separate (on the heap), so this only holds the interpreter + host-fn
-/// call frames. No guard page yet (heap-backed); overflow = corruption.
+/// Default per-fiber stack size. The WASM linear memory is separate (on the
+/// heap), so this only holds the interpreter and host-fn call frames. No
+/// guard page (heap-backed): overflow corrupts memory.
 pub const DEFAULT_STACK_BYTES: usize = 128 * 1024;
 
-// ── Per-core fiber scheduler (Stage 2b) ────────────────────────────────
+// ── Per-core fiber scheduler ───────────────────────────────────────────
 //
 // Each app is a fiber pinned to the core that admitted it. `npk_sleep`
 // parks the running fiber (Waiting + a TSC wake-deadline) and switches
-// back to the core's scheduler context, FREEING the core to run its other
-// ready fibers. So dock+bar+loft+spell multiplex over a couple of workers
-// instead of pinning a core each or nesting. No fiber migrates between
-// cores, so each core owns its queue with no cross-core hot path.
+// back to the core's scheduler context, freeing the core to run its other
+// ready fibers. No fiber migrates between cores, so each core owns its
+// queue with no cross-core hot path.
 
 const MAX_CORES: usize = 256;
 
@@ -126,7 +119,7 @@ const MAX_CORES: usize = 256;
 enum FiberState {
     Ready,
     /// Parked until one of `mask`'s signal bits is set on the fiber's waker
-    /// (`signal`), or TSC `deadline` passes (`NO_DEADLINE` = never). The ONE
+    /// (`signal`), or TSC `deadline` passes (`NO_DEADLINE` = never). The only
     /// wait state: a sleep is a wait with an empty mask, an IRQ wait is
     /// `SIG_IRQ` (the ISR signals the waiter), a net kick is `SIG_KICK`.
     Waiting { mask: u32, deadline: u64 },
@@ -138,11 +131,10 @@ pub const NO_DEADLINE: u64 = u64::MAX;
 // ── Wakers: how anything reaches a parked fiber ────────────────────────
 //
 // A fiber lives in its core's queue; nobody else can touch it. What another
-// core, an ISR or Core 0 CAN touch is its waker — a slot with signal bits
+// core, an ISR or Core 0 can touch is its waker — a slot with signal bits
 // and the core the fiber lives on. `signal` sets bits and wakes that core
 // (IPI if it is halted); the core's scheduler sees the bits and resumes the
-// fiber. Before this, every such wake was a poll: a deadline the fiber
-// set itself, re-checked on a tick.
+// fiber.
 
 /// A window event or a terminal key is waiting for the app.
 pub const SIG_EVENT: u32 = 1 << 0;
@@ -259,7 +251,7 @@ pub fn wait(mask: u32, deadline: u64) -> Option<u32> {
     Some(take(w))
 }
 
-/// Per-core scheduler-loop context: saved on `switch` INTO a fiber,
+/// Per-core scheduler-loop context: saved on `switch` into a fiber,
 /// restored when the fiber yields (`npk_sleep`) or finishes
 /// (`fiber_on_exit`). Indexed by core id; only that core touches it.
 static mut SCHED_CTX: [Context; MAX_CORES] = [Context::empty(); MAX_CORES];
@@ -271,8 +263,7 @@ static mut CURRENT_FIBER: [*mut Fiber; MAX_CORES] =
     [core::ptr::null_mut(); MAX_CORES];
 
 /// Per-core run queue (Ready + Waiting fibers). Only the owning core
-/// touches it; the lock guards a possible Stage-5 ISR-driven wakeup and is
-/// NEVER held across a `switch`.
+/// touches it; the lock is never held across a `switch`.
 static FIBER_QUEUES: [Mutex<VecDeque<Box<Fiber>>>; MAX_CORES] =
     [const { Mutex::new(VecDeque::new()) }; MAX_CORES];
 
@@ -299,15 +290,15 @@ pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize)
     fiber.waker = alloc_waker(cid);
     FIBER_COUNT[cid].fetch_add(1, Ordering::Relaxed);
     FIBER_QUEUES[cid].lock().push_back(fiber);
-    // A fiber placed on ANOTHER core (the microVM's AP vCPUs, the fetch /
+    // A fiber placed on another core (the microVM's AP vCPUs, the fetch /
     // GPU / 9p / net workers) must wake that core: an idle worker has no
-    // tick any more and would not look at its queue. It sees the new Ready
+    // tick and would not look at its queue. It sees the new Ready
     // fiber in its idle re-check (`earliest_deadline`) or gets the IPI.
     core::sync::atomic::fence(Ordering::SeqCst);
     crate::smp::per_core::wake_core(cid);
 }
 
-/// Resident fibers per core, readable from ANY core. The queue length is not:
+/// Resident fibers per core, readable from any core. The queue length is not:
 /// while a core runs a fiber, that fiber is checked out of the queue.
 static FIBER_COUNT: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
 
@@ -317,33 +308,22 @@ pub fn fiber_count(cid: usize) -> u64 {
     FIBER_COUNT[cid].load(Ordering::Relaxed)
 }
 
-/// Run this core's runnable fibers round-robin until none are runnable,
-/// waking any whose sleep deadline has passed. Returns when every fiber is
-/// sleeping (future deadline) or the queue is empty — the caller then idles
-/// on the worker timer and re-enters next tick.
 /// Let this core's fibers run from inside a native task.
 ///
 /// Fibers are cooperative and only ever run from `run_core_fibers`, which is
 /// the core's scheduler loop. A native task — every intent is one — stands in
 /// front of that loop for its whole duration, so a WASM driver whose fiber
-/// lives on the same core stops polling its device until the command returns.
-///
-/// Measured, and it explains a day of ghosts: `ping` reported 100 % loss and
-/// then printed all four replies AFTER the command finished; a DNS lookup saw
-/// zero datagrams in 5.5 s and the same name resolved instantly on the next
-/// try. The frames were in the card's ring the whole time (rx drain-peak 55 of
-/// 64 buffers on an idle link) with nobody scheduled to fetch them.
+/// lives on the same core would stop polling its device (and e.g. received
+/// frames would sit in the ring) until the command returns.
 ///
 /// Safe to call from a native task: the scheduler context for this core is
 /// free precisely because no fiber is running on it. A no-op inside a fiber
 /// (that would recurse) and on Core 0, which has its own loop.
 pub fn pump_peers() {
-    // Throttled, because the check itself is not free: current_core_id reads the
-    // LAPIC over MMIO, and `poll_rx_only` spins about a million times a second.
-    // The comment above that function already warns about exactly this cost — a
-    // per-iteration core gate was once 30 % of its runtime — and the first
-    // version of this pump walked straight back into it. Yielding every 256th
-    // pass is just as good: it is a courtesy, not a deadline.
+    // Throttled, because the check itself is not free: current_core_id reads
+    // the LAPIC over MMIO, and `poll_rx_only` spins about a million times a
+    // second. Yielding every 256th pass is enough: it is a courtesy, not a
+    // deadline.
     const EVERY: u32 = 256;
     if PUMP_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % EVERY != 0 {
         return;
@@ -361,6 +341,9 @@ pub fn pump_peers() {
 
 static PUMP_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Run this core's runnable fibers round-robin until none are runnable,
+/// waking any whose deadline has passed or that were signalled. Returns when
+/// every fiber is waiting or the queue is empty; the caller then idles.
 pub fn run_core_fibers(cid: usize) {
     if cid >= MAX_CORES {
         return;
@@ -408,11 +391,9 @@ pub fn run_core_fibers(cid: usize) {
 /// The earliest TSC deadline any fiber on this core is waiting for — 0 for
 /// one that is Ready — or None if nothing is waiting on time.
 ///
-/// The idle path needs this. A fiber that asks for a 1 ms sleep is otherwise
-/// resumed only by the next 100 Hz worker tick, because `run_core_fibers`
-/// returns and the core HLTs — so every sub-10 ms sleep silently becomes 10 ms.
-/// For a polling driver that turns its poll period, and with it its throughput
-/// ceiling, into a property of the timer rate rather than of the device.
+/// The idle path programs its timer from this; otherwise a short sleep would
+/// only end at the next periodic tick, and a polling driver's period would
+/// follow the timer rate rather than the hardware it polls.
 pub fn earliest_deadline(cid: usize) -> Option<u64> {
     if cid >= MAX_CORES {
         return None;
@@ -467,14 +448,14 @@ pub fn yield_ready() -> bool {
 /// Park the running fiber until device-IRQ `vector` fires (its fired-count
 /// moves past `since`) or `timeout_ms` elapses. Returns true if the IRQ
 /// fired, false on timeout (or if not running inside a fiber). The caller
-/// snapshots `since` via `irq::arm(vector)` BEFORE submitting the device
+/// snapshots `since` via `irq::arm(vector)` before submitting the device
 /// command. The MSI-X targets this core; the ISR signals the registered
 /// waiter (`irq::set_waiter`), which ends the park.
 pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
     let Some(w) = current_waker() else { return false };
     let freq = crate::interrupts::tsc_freq();
     let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
-    // Register BEFORE looking at the count: an IRQ after the look then
+    // Register before looking at the count: an IRQ after the look then
     // signals us, and `wait` returns at once.
     crate::irq::set_waiter(vector, w);
     loop {
@@ -495,7 +476,7 @@ pub fn irq_wait(vector: u8, since: u64, timeout_ms: u64) -> bool {
 /// its VCPU_KICK IPI, so a consumer fiber parked in `kick_wait` on that core is
 /// resumed event-driven (the IPI wakes the core out of HLT → the scheduler
 /// re-runs → the bumped generation marks the fiber runnable) instead of
-/// waiting on the next ~1–10 ms timer tick. This is the cold-start fix.
+/// waiting on the next timer tick.
 static NET_KICK_GEN: [AtomicU64; MAX_CORES] = {
     const Z: AtomicU64 = AtomicU64::new(0);
     [Z; MAX_CORES]
@@ -507,7 +488,7 @@ static NET_KICK_GEN: [AtomicU64; MAX_CORES] = {
 pub fn net_kick_bump(cid: usize) {
     if cid < MAX_CORES {
         NET_KICK_GEN[cid].fetch_add(1, Ordering::Release);
-        // probe: stamp the FIRST kick after a park began (CAS 0→now); cleared at
+        // probe: stamp the first kick after a park began (CAS 0→now); cleared at
         // park start in kick_wait_until, read on resume → kick→resume latency.
         let _ = KICK_SENT_TSC[cid].compare_exchange(
             0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
@@ -518,10 +499,9 @@ pub fn net_kick_bump(cid: usize) {
     }
 }
 
-/// The fiber that waits in `kick_wait_until` on each core. ONE per core —
-/// in practice there is one (a vCPU fiber, or the net worker on its reserved
-/// core). A second one would only be resumed by its deadline, and every
-/// kick wait has one of a few milliseconds.
+/// The fiber that waits in `kick_wait_until` on each core. One per core
+/// (a vCPU fiber, or the net worker on its reserved core); a second one
+/// would only be resumed by its deadline, which every kick wait has.
 static KICK_WAITER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
 
 /// Core `cid`'s kick generation — a cheap "was I kicked since" test.
@@ -538,12 +518,10 @@ pub fn kick_wait_snapshot() -> (u64, u64) {
     (KICK_WOKE.load(Ordering::Relaxed), KICK_TIMEOUT.load(Ordering::Relaxed))
 }
 
-/// kick→resume LATENCY probe (the irqfd-gap measurement): per-core TSC of the
-/// first net-kick that lands AFTER a fiber begins parking (cleared at park start,
-/// CAS-set in `net_kick_bump`). On resume the parked fiber reads it → delta = how
-/// long the kick took to actually reschedule this core. µs ⇒ the IPI woke it
-/// promptly (the ~3 ms RTT is elsewhere); ms ⇒ the kicked-but-HLTed core waited
-/// for the host scheduler / nested-IPI delivery — exactly what KVM's irqfd avoids.
+/// Kick-to-resume latency probe: per-core TSC of the first net-kick that
+/// lands after a fiber begins parking (cleared at park start, CAS-set in
+/// `net_kick_bump`). On resume the parked fiber reads it; the delta is how
+/// long the kick took to reschedule this core (compare KVM's irqfd).
 static KICK_SENT_TSC: [AtomicU64; MAX_CORES] = {
     const Z: AtomicU64 = AtomicU64::new(0);
     [Z; MAX_CORES]
@@ -560,7 +538,7 @@ pub fn kick_latency_snapshot() -> (u64, u64, u64) {
 
 /// Park the running fiber until this core's net-kick generation advances (an
 /// off-vCPU producer injected + kicked) or `timeout_ms` elapses. The snapshot
-/// is taken HERE, after the caller has drained its inbound queue, so a kick
+/// is taken here, after the caller has drained its inbound queue, so a kick
 /// racing the park is never lost (it advances the gen past the snapshot →
 /// resumes at once). Returns true if kicked, false on timeout / not-in-fiber.
 pub fn kick_wait(timeout_ms: u64) -> bool {
@@ -624,6 +602,7 @@ extern "C" fn fiber_app_entry(_unused: u64) {
     if f.is_null() {
         return;
     }
+    // SAFETY: f is the running fiber.
     let (func, arg) = unsafe { ((*f).app_func, (*f).app_arg) };
     if let Some(func) = func {
         func(arg);
@@ -692,12 +671,12 @@ pub unsafe fn switch(from: *mut Context, to: *const Context) {
     unsafe { fiber_context_switch(from, to) }
 }
 
-// ── Boot self-test (Stage 1 validation) ───────────────────────────────
+// ── Boot self-test ────────────────────────────────────────────────────
 //
 // Runs once on Core 0 at boot. Switches into a fiber, which switches back,
 // twice — proving bidirectional resume, stack setup, and argument passing.
 // Prints `[fiber] self-test OK` on success. A broken switch triple-faults
-// here (loud + early), exactly where we want it during bring-up.
+// here, early and loudly.
 
 static ST_STEP: AtomicU64 = AtomicU64::new(0);
 static mut ST_MAIN: Context = Context::empty();
@@ -714,7 +693,7 @@ extern "C" fn st_fiber_entry(arg: u64) {
     unsafe { switch(ST_FIBER, &raw const ST_MAIN) };
 }
 
-/// Stage-1 boot validation. Safe to call once on Core 0 after serial is up.
+/// Boot validation. Safe to call once on Core 0 after serial is up.
 pub fn self_test() {
     let mut fiber = Fiber::new(DEFAULT_STACK_BYTES, st_fiber_entry, 0xF1B0);
     let fiber_ctx: *mut Context = &mut fiber.ctx;

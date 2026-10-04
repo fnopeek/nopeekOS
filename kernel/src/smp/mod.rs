@@ -17,21 +17,14 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const TRAMPOLINE_BASE: usize = 0x8000;
-// 2 MB per AP — matches the BSP boot stack (linker.ld). Native intents
-// dispatched from the GUI run on a worker core's AP stack via
-// `scheduler::spawn` (NOT a fiber), and an `update` drives the full OTA chain
-// there: https_get_once alone keeps a 17 KB record buffer live for the whole
-// body stream, on top of a deep TLS → StreamingWriter → storage::put →
-// btree::insert chain whose split path nests several 4 KB node buffers plus
-// BLAKE3. The first B-tree split (~16 MiB into a large asset, once the tree
-// fills) tipped the old 64 KB stack over → silent overflow smashed return
-// addresses → wild RIP page fault. There's no guard page, so the size is the
-// only safety margin — the BSP learned this exact lesson (256 KB → 2 MB).
+// 2 MB per AP, matching the BSP boot stack (linker.ld). Native intents run
+// on the AP stack, not a fiber, and `update` runs the deep OTA chain there
+// (TLS record buffer, storage::put, B-tree splits with 4 KB node buffers).
+// There is no guard page, so the size is the only safety margin.
 const AP_STACK_SIZE: usize = 2 * 1024 * 1024;
 
 // Data area offsets within trampoline (must match trampoline.s).
-// All shifted up by 0x10 in v0.85.5 to give the AVX bring-up
-// (XSETBV) room before the GDT block.
+// The AVX bring-up (XSETBV) sits before the GDT block.
 const OFF_GDT64: usize = 0xF0;
 const OFF_CR3: usize = 0x100;
 const OFF_STACK: usize = 0x108;
@@ -120,8 +113,8 @@ pub fn init() {
 }
 
 /// Deep idle by default where the CPU offers it (AMD Zen on bare metal,
-/// with ARAT): CStateBaseAddr+2. The deepest port belongs to ACPI `_CST`
-/// (Linux `acpi_idle`); until aml passes it through, +2 is the usual C3.
+/// with ARAT): CStateBaseAddr+2, the usual C3. The deepest port belongs to
+/// ACPI `_CST` (Linux `acpi_idle`). Not implemented: reading `_CST` via aml.
 fn enable_deep_idle() {
     let Some(base) = per_core::amd_cstate_base() else { return };
     match crate::interrupts::set_deep_idle(base + 2, 200) {
@@ -317,14 +310,14 @@ fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
 }
 
 /// Force the host core with sequential id `core_id` out of VMRUN by sending it
-/// the vCPU-kick IPI from the CALLING core's LAPIC. Used by guest-SMP IPI
+/// the vCPU-kick IPI from the calling core's LAPIC. Used by guest-SMP IPI
 /// delivery so a target vCPU takes a cross-vCPU interrupt within microseconds
 /// (its VMRUN #VMEXIT(INTR)s on receipt) instead of at its next natural exit
 /// (~10 ms host-timer tick). No-op if the core id is unknown. The kick vector's
 /// host ISR is a pure EOI — the receipt itself is the wakeup.
 pub fn kick_host_core(core_id: usize) {
     // Event-wake a consumer fiber parked in `kick_wait` on the target core
-    // BEFORE the IPI, so the wake is never lost. Harmless for non-net kicks
+    // before the IPI, so the wake is never lost. Harmless for non-net kicks
     // (only `kick_wait` fibers observe the generation).
     crate::smp::fiber::net_kick_bump(core_id);
     let apic_id = {
