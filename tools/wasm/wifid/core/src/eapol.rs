@@ -39,13 +39,13 @@ const KI_MIC: u16 = 1 << 8;
 const KI_SECURE: u16 = 1 << 9;
 const KI_ENCRYPTED: u16 = 1 << 12;
 /// Key Descriptor Version, bits 0-2 (`WPA_KEY_INFO_TYPE_MASK`, wpa_common.h:217).
-/// wpa_supplicant echoes the REQUEST's version into every reply instead of
+/// wpa_supplicant echoes the request's version into every reply instead of
 /// asserting one of its own.
 const KI_TYPE_MASK: u16 = 0x0007;
 /// Key Index, bits 4-5 (`WPA_KEY_INFO_KEY_INDEX_MASK`, wpa_common.h:224).
-/// `wpa_supplicant_send_2_of_2` keeps these from the request; we dropped them.
+/// `wpa_supplicant_send_2_of_2` keeps these from the request.
 const KI_KEY_INDEX_MASK: u16 = 0x0030;
-/// Key Length offset (__be16). For RSN every reply carries ZERO here —
+/// Key Length offset (__be16). For RSN every reply carries zero here —
 /// wpa_supplicant mirrors the request's value only for legacy WPA.
 const O_KEY_LENGTH: usize = 7;
 
@@ -76,7 +76,7 @@ pub enum Step {
     Done(usize),
     /// A frame failed verification (bad MIC / unwrap) — abort the handshake.
     Fail,
-    /// Group-key handshake done: the AP handed us a NEW GTK. Reply `out[..len]`
+    /// Group-key handshake done: the AP handed us a new GTK. Reply `out[..len]`
     /// and install the group key from `gtk()`; the pairwise key is untouched.
     Rekey(usize),
 }
@@ -97,7 +97,7 @@ pub struct Supplicant {
     /// accepted from the Authenticator.
     rx_replay: [u8; 8],
     rx_replay_set: bool,
-    /// Frames dropped as replays, and frames seen with the SAME counter
+    /// Frames dropped as replays, and frames seen with the same counter
     /// as the last one.
     pub replays_dropped: u32,
     pub replays_repeated: u32,
@@ -143,14 +143,12 @@ impl Supplicant {
 
     /// 802.11-2020 §12.7.2 — the Key Replay Counter.
     ///
-    /// **We drop a frame whose counter is STRICTLY LOWER than the last
-    /// one we accepted, and only count one that repeats it.** The strict
-    /// reading ("already used → discard") would also drop a legitimate
-    /// retransmission, and a handshake that cannot be retried is worse
-    /// than a replay window on a network we already trust with the PSK.
-    /// `replays_repeated` says whether tightening it would be safe here;
-    /// until that number has been seen on the device, guessing would put
-    /// a working path at risk.
+    /// We drop a frame whose counter is strictly lower than the last one we
+    /// accepted, and only count one that repeats it. The strict reading
+    /// ("already used → discard") would also drop a legitimate retransmission,
+    /// and a handshake that cannot be retried is worse than a replay window on
+    /// a network we already trust with the PSK. `replays_repeated` tells
+    /// whether tightening it would be safe.
     fn replay_ok(&mut self, frame: &[u8]) -> bool {
         let got = &frame[O_REPLAY..O_REPLAY + 8];
         if !self.rx_replay_set {
@@ -208,10 +206,8 @@ impl Supplicant {
             //
             // The AP renews the group key on its own schedule and expects an
             // answer. Ignoring it is not neutral: the AP retries a few times and
-            // then DEAUTHENTICATES the station. That is the "connection dies
-            // after a while, and the interval makes no sense" fault — measured
-            // on the device as eapol in 10 / out 6 with deauth 3, all four
-            // unanswered frames being this message.
+            // then deauthenticates the station, so the link dies at intervals
+            // that look random.
             if !self.have_ptk {
                 return Step::Ignore; // no KCK yet — nothing we could verify with
             }
@@ -355,10 +351,8 @@ impl Supplicant {
         //     key_info |= ver | WPA_KEY_INFO_SECURE | WPA_KEY_INFO_MIC;
         //     if (proto == RSN) WPA_PUT_BE16(reply->key_length, 0);
         //
-        // We dropped the Key Index bits AND mirrored key_length. Measured on
-        // the device: the AP repeated the same rekey four times over, always
-        // `key id 1`, never alternating — that is a RETRY, not a schedule. It
-        // was rejecting our answer, and afterwards it stops talking to us.
+        // An AP that rejects the answer (wrong Key Index or key_length) retries
+        // the same rekey and then stops talking to us.
         let ki_req = be16(req, O_KEY_INFO);
         put_be16(out, O_KEY_INFO,
             (ki_req & KI_KEY_INDEX_MASK) | (ki_req & KI_TYPE_MASK) | KI_MIC | KI_SECURE);
@@ -380,8 +374,7 @@ impl Supplicant {
         put_be16(out, O_BODY_LEN, (total - 4) as u16);
         out[4] = msg3[4];
         // `wpa_supplicant_send_4_of_4`: Secure carried over from msg3, version
-        // echoed, key_length zero for RSN. This path already worked — the
-        // change is conformance, not a fix.
+        // echoed, key_length zero for RSN.
         let ki_req = be16(msg3, O_KEY_INFO);
         put_be16(out, O_KEY_INFO,
             (ki_req & KI_SECURE) | (ki_req & KI_TYPE_MASK) | KI_PAIRWISE | KI_MIC);

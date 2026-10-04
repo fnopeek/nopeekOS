@@ -5,10 +5,9 @@
 //! owns the credentials and the WPA2 4-way handshake; the vendor driver only
 //! transports frames and installs the keys the supplicant computes.
 //!
-//! This first slice establishes the foundation: declare the NETCTL capability,
-//! load the PSK from npkFS, derive the PMK (the std-tested [`wifid_core`]
-//! crypto), and exercise the control channel. The EAPOL 4-way state machine
-//! follows once the driver's EAPOL transport is wired.
+//! It declares the NETCTL capability, loads the PSK from npkFS, derives the
+//! PMK (the std-tested [`wifid_core`] crypto), and runs the EAPOL 4-way and
+//! group-key handshakes over the control channel.
 
 #![no_std]
 
@@ -16,9 +15,8 @@ use wifid_core::eapol::{Step, Supplicant};
 use wifid_core::wpa2_pmk;
 
 // Capabilities: NETCTL (0x80, the control channel) + READ (0x01, fetch the
-// credential) + WRITE (0x02, write the debug log). The kernel grants EXACTLY
-// these from the caps byte — so NETCTL alone (0x80) would have no READ and the
-// autostart instance couldn't even load the PSK.
+// credential) + WRITE (0x02, write the debug log). The kernel grants exactly
+// these from the caps byte — NETCTL alone would leave no READ to load the PSK.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [0x83];
@@ -39,12 +37,12 @@ unsafe extern "C" {
     fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
     fn npk_sleep(ms: i32) -> i32;
     fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-    // Terminal/framebuffer output (like the driver) — visible on serial-less HW;
-    // npk_log_serial is invisible on machines without a COM port (the HP).
+    // Terminal/framebuffer output (like the driver) — visible on machines
+    // without a serial port, where npk_log_serial shows nothing.
     fn npk_print(ptr: i32, len: i32);
     fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    /// Kernel 0.329.0, `security::csprng`. Braucht KEINE Kapabilitaet —
-    /// wie `npk_unix_time`. Gibt die Zahl der geschriebenen Bytes oder -1.
+    /// `security::csprng`. Needs no capability, like `npk_unix_time`. Returns
+    /// the number of bytes written or -1.
     fn npk_random_bytes(buf_ptr: i32, len: i32) -> i32;
 }
 
@@ -52,23 +50,11 @@ const LOG_CAP: usize = 8192;
 static mut LOG_BUF: [u8; LOG_CAP] = [0; LOG_CAP];
 static mut LOG_LEN: usize = 0;
 
-/// Bytes already persisted. `log` only APPENDS to the buffer; `log_flush`
+/// Bytes already persisted. `log` only appends to the buffer; `log_flush`
 /// writes it out, and the main loop calls that once per poll round.
 static mut LOG_FLUSHED: usize = 0;
 
-// Log to the terminal AND persist to npkFS `sys/log/wifid` — wifid runs in an
-// invisible autostart window, so its log is read back with `fetch /sys/log/wifid`.
-//
-// The store used to happen on EVERY line, and `log_hex` calls this once per
-// BYTE PAIR — a 32-byte key dump was 32 stores. Each store is an `fs::write`,
-// which is N puts plus a full four-phase `commit_root`. Over WiFi, where this
-// module talks constantly (rekeys, link changes, reconnects), those commits
-// land in the middle of an OTA streaming download — and npkFS's `put`
-// deliberately DEFERS its commit on the documented assumption of "N puts then
-// exactly one commit_root". Over a cable this module is silent and the
-// assumption holds; over WiFi it does not. Suspected in the repeated npkFS
-// damage after OTA over WiFi, not proven.
-/// Eine Dezimalzahl in den Log — ohne alloc, wie alles hier.
+// A decimal number into the log, without allocating.
 fn log_num(mut v: u32) {
     let mut b = [0u8; 10];
     let mut i = 10;
@@ -84,6 +70,11 @@ fn log_num(mut v: u32) {
     log(unsafe { core::str::from_utf8_unchecked(&b[i..]) });
 }
 
+// Log to the terminal and buffer for npkFS `sys/log/wifid` — wifid runs in an
+// invisible autostart window, so its log is read back with `fetch /sys/log/wifid`.
+// Persisting happens in `log_flush`, once per poll round: one store per line
+// (and `log_hex` logs per byte pair) would be one full npkFS commit each,
+// breaking npkFS's "N puts then one commit_root" assumption mid-download.
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
     unsafe {
@@ -140,13 +131,12 @@ const EV_EAPOL_RX: u8 = 0x84;
 const EV_LINK_UP: u8 = 0x85;
 const EV_LINK_DOWN: u8 = 0x86;
 
-// Our RSN element (WPA2-PSK-CCMP) — MUST match the one the driver put in the
+// Our RSN element (WPA2-PSK-CCMP) — must match the one the driver put in the
 // assoc request, since it is echoed in 4-way msg2's key_data and the AP
 // compares the two.
 //
-// **This is a second definition of the same thing**: the driver carries it as
-// `RSN_IE_WPA2_CCMP_PSK` (wifi_rtl8822ce/src/lib.rs). Two places for one
-// value drift, so `framecheck.py` holds them against each other byte for
+// The driver carries the same value as `RSN_IE_WPA2_CCMP_PSK`
+// (wifi_rtl8822ce/src/lib.rs); `framecheck.py` checks the two byte for
 // byte. Do not edit one without the other.
 const RSN_IE: [u8; 22] = [
     0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,
@@ -166,13 +156,12 @@ pub extern "C" fn _start() {
     // object, because nothing but this module has business holding it:
     //   store /sys/config/wifi     ssid: My Network
     //   store /sys/config/wifi_psk my secret pass
-    // This plaintext-in-an-(at-rest-encrypted)-object is a bring-up provisional;
-    // a capability-gated keystore replaces it later (see project_keystore).
-    // Wait for the credential rather than exiting without one. On autostart this
-    // races the rest of boot, and a single failed read used to end the process
-    // for good — after which the driver associates, sends READY into the void,
-    // the AP gets no answer to msg1 and deauthenticates us. That presents as
-    // "connected but no DHCP lease", pointing at the wrong layer entirely.
+    // Plaintext in an at-rest-encrypted object; a capability-gated keystore
+    // is meant to replace it.
+    // Wait for the credential rather than exiting without one: on autostart
+    // this races the rest of boot. Without a supplicant the driver associates,
+    // sends READY into the void, and the AP deauthenticates us after an
+    // unanswered msg1 — which looks like "connected but no DHCP lease".
     let (ssid, pass) = loop {
         let ssid = read_cfg(b"sys/config/wifi", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 512)
             .and_then(|c| cfg_get(c, b"ssid"))
@@ -211,14 +200,11 @@ pub extern "C" fn _start() {
         }
         // One store per round, not one per line.
         log_flush();
-        // **Wait for the driver's next event instead of polling for it.**
-        // Until 0.13.0 this slept 4 ms while a handshake was in flight and
-        // 50 ms otherwise — 250 wakes a second on a connected link, where
-        // nothing happens for minutes. The kernel now wakes us when the
-        // driver queues an event (`WAIT_WIFI_EVENT`), so a 4-way message is
-        // answered at once, not one poll interval later. The supplicant has
-        // no timers of its own: no deadline.
-        // docs/plan/CORES_AND_EVENTS.md, Stufe 2d.
+        // Wait for the driver's next event instead of polling for it. The
+        // kernel wakes us when the driver queues an event
+        // (`WAIT_WIFI_EVENT`), so a 4-way message is answered at once. The
+        // supplicant has no timers of its own: no deadline.
+        // docs/plan/CORES_AND_EVENTS.md.
         const WAIT_WIFI_EVENT: i32 = 16;
         unsafe { npk_wait(WAIT_WIFI_EVENT, -1) };
     }
@@ -232,22 +218,17 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
             let mut sa = [0u8; 6];
             aa.copy_from_slice(&ev[1..7]);
             sa.copy_from_slice(&ev[7..13]);
-            // SNonce: 32 REAL random bytes (802.11i §12.7.6.2).
+            // SNonce: 32 real random bytes (802.11i §12.7.6.2).
             //
-            // This used to be a fixed value derived from our own MAC, with
-            // the note "no npk_random host-fn yet". That reason expired in
-            // kernel 0.329.0: `npk_random_bytes` sits on `security::csprng`
-            // and needs no capability. A constant SNonce makes the PTK
-            // depend on the ANonce alone — an AP that repeats an ANonce
-            // (some do after a reboot) hands back the SAME PTK while our
-            // packet number restarts at 1, and it then drops our frames as
-            // replays. A standing link that carries nothing.
+            // A constant SNonce makes the PTK depend on the ANonce alone —
+            // an AP that repeats an ANonce (some do after a reboot) gets the
+            // same PTK while our packet number restarts at 1, and then drops
+            // our frames as replays.
             let mut snonce = [0u8; 32];
             let got = unsafe { npk_random_bytes(snonce.as_mut_ptr() as i32, 32) };
             if got != 32 {
-                // **Kein Rueckfall auf einen erfundenen Wert.** Ein
-                // vorhersagbarer Nonce ist schlechter als kein Handschlag:
-                // er sieht aus wie einer.
+                // No fallback to a made-up value. A predictable nonce is worse
+                // than no handshake: it looks like one.
                 log("[wifid] no entropy for the SNonce — refusing the handshake\n");
                 *sup = None;
                 return;
@@ -296,11 +277,9 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
                     }
                 }
                 Step::Fail => log("[wifid] 4-way FAILED (bad MIC / unwrap)\n"),
-                // **Ein `Ignore` ist seit 0.12.0 nicht mehr immer
-                // harmlos.** Drei Haerteregeln enden hier, und jede
-                // einzelne wuerde sonst als „nichts passiert" aussehen —
-                // genau die Form, die uns schon zweimal einen Lauf
-                // gekostet hat.
+                // `Ignore` is not always harmless: three hardening rules
+                // (replay, key version, length) end here, and each would
+                // otherwise look like "nothing happened". Log the counters.
                 Step::Ignore => {
                     if s.replays_dropped > 0 || s.bad_key_version > 0
                         || s.too_long > 0
@@ -321,7 +300,7 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
         Some(EV_LINK_UP) => log("[wifid] link up — connected\n"),
         // LINK_DOWN: [op][reason] — the cell dropped us.
         //
-        // **Throw the supplicant away.** It holds a PTK for a session
+        // Throw the supplicant away. It holds a PTK for a session
         // that no longer exists, and its SNonce has been used. The
         // driver reconnects and sends a fresh READY, which builds a new
         // one with new entropy — keeping the old one around would mean

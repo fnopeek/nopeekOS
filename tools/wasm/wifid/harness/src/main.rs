@@ -91,7 +91,7 @@ fn main() {
     // right PTK, accepts the MICs, and unwraps the exact GTK we wrapped.
     all &= four_way_roundtrip();
 
-    // ── Die Haerteregeln aus 0.12.0 ───────────────────────────────────────
+    // ── Hardening rules ──────────────────────────────────────────────
     all &= hardening();
 
     println!("\n{}", if all { "ALL VECTORS PASS" } else { "SOME VECTORS FAILED" });
@@ -173,9 +173,8 @@ fn four_way_roundtrip() -> bool {
     // ── Group-key handshake (802.11-2020 §12.7.7) ──
     //
     // The AP renews the group key on its own schedule. Ignoring the message is
-    // not neutral — the AP retries and then deauthenticates — which is what a
-    // link that "dies after a while, at no sensible interval" looks like from
-    // the outside. Same shape as msg3 but with the pairwise bit CLEAR.
+    // not neutral — the AP retries and then deauthenticates. Same shape as msg3
+    // but with the pairwise bit clear.
     let mut gok = true;
     let gtk2 = hexn("f0e1d2c3b4a596870123456789abcdef");
     let mut kde2 = vec![0xdd, (6 + gtk2.len()) as u8, 0x00, 0x0f, 0xac, 0x01, 0x02, 0x00];
@@ -187,7 +186,7 @@ fn four_way_roundtrip() -> bool {
     grp[1] = 0x03;
     put_be16(&mut grp, 2, (95 + wrapped2.len()) as u16);
     grp[4] = 0x02;
-    // Ack | MIC | Secure | Encrypted — and NO Pairwise bit.
+    // Ack | MIC | Secure | Encrypted — and no Pairwise bit.
     put_be16(&mut grp, 5, 0x0002 | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 12));
     grp[8] = 16;
     grp[9 + 7] = 3; // replay counter = 3
@@ -217,12 +216,11 @@ fn four_way_roundtrip() -> bool {
     ok && gok
 }
 
-/// Die Haerteregeln aus wifid 0.12.0, jede gegen ihren eigenen Rahmen.
+/// The hardening rules, each against its own frame.
 ///
-/// **Der Handschlag laeuft dabei ganz durch** — eine Regel, die das
-/// Funktionierende bricht, ist keine Haertung, und genau das ist hier
-/// das Risiko: ein zu strenger Wiedereinspielzaehler wirft eine
-/// legitime Wiederholung weg und die Verbindung kommt nie zustande.
+/// The handshake must still complete: a rule that breaks the working path
+/// is no hardening — an over-strict replay counter would drop a legitimate
+/// retransmission and the connection would never come up.
 fn hardening() -> bool {
     use wifid_core::aes::aes_wrap;
     use wifid_core::eapol::{Step, Supplicant};
@@ -239,7 +237,7 @@ fn hardening() -> bool {
     let kek: [u8; 16] = ptk[16..32].try_into().unwrap();
     let gtk = hexn("000102030405060708090a0b0c0d0e0f");
 
-    // Einen Supplicant bis nach msg3 fahren.
+    // Drive a supplicant past msg3.
     let mut sup = Supplicant::new(pmk, aa, sa, snonce, &rsn);
     let mut out = [0u8; 512];
     let mut msg1 = vec![0u8; 99];
@@ -280,14 +278,14 @@ fn hardening() -> bool {
 
     let mut ok = true;
 
-    // (1) Das echte msg3 mit Zaehler 2 geht durch.
+    // (1) The real msg3 with counter 2 passes.
     let m3 = build_msg3(2, 0x0002);
     ok &= matches!(sup.on_eapol(&m3, &mut out), Step::Done(_));
     println!("[{}] hardening: msg3 (Zaehler 2) wird angenommen",
              if ok { "PASS" } else { "FAIL" });
 
-    // (2) DASSELBE msg3 noch einmal — eine Wiederholung, und sie MUSS
-    //     durchgehen, sonst haben wir einen Handschlag ohne Wiederholung.
+    // (2) The same msg3 again — a retransmission, and it must pass,
+    //     otherwise the handshake cannot be retried.
     let rep_before = sup.replays_repeated;
     let a = matches!(sup.on_eapol(&m3, &mut out), Step::Done(_));
     let b = sup.replays_repeated == rep_before + 1;
@@ -295,7 +293,7 @@ fn hardening() -> bool {
     println!("[{}] hardening: Wiederholung mit GLEICHEM Zaehler geht durch (und wird gezaehlt)",
              if a && b { "PASS" } else { "FAIL" });
 
-    // (3) Ein ALTES msg3 (Zaehler 1) wird verworfen.
+    // (3) An old msg3 (counter 1) is dropped.
     let m3_old = build_msg3(1, 0x0002);
     let drop_before = sup.replays_dropped;
     let a = matches!(sup.on_eapol(&m3_old, &mut out), Step::Ignore);
@@ -304,7 +302,7 @@ fn hardening() -> bool {
     println!("[{}] hardening: alter Zaehler wird als Wiedereinspielung verworfen",
              if a && b { "PASS" } else { "FAIL" });
 
-    // (4) Key Descriptor Version 3 (AES-CMAC) koennen wir nicht rechnen.
+    // (4) Key Descriptor Version 3 (AES-CMAC) we cannot compute.
     let m3_v3 = build_msg3(9, 0x0003);
     let a = matches!(sup.on_eapol(&m3_v3, &mut out), Step::Ignore);
     let b = sup.bad_key_version == 1;
@@ -312,8 +310,8 @@ fn hardening() -> bool {
     println!("[{}] hardening: unbekannte Key-Descriptor-Version wird gemeldet, nicht als MIC-Fehler",
              if a && b { "PASS" } else { "FAIL" });
 
-    // (5) Ein Rahmen laenger als der MIC-Puffer wird abgewiesen, nicht
-    //     abgeschnitten.
+    // (5) A frame longer than the MIC buffer is rejected, not
+    //     truncated.
     let mut huge = vec![0u8; 600];
     huge[1] = 0x03;
     let a = matches!(sup.on_eapol(&huge, &mut out), Step::Ignore);

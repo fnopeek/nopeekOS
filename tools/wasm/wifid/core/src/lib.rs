@@ -1,15 +1,14 @@
 //! wifid_core — vendor-independent WPA2 supplicant logic.
 //!
 //! `no_std` (+`alloc` not needed here) so the same code runs in `wifid.wasm`
-//! and in the std dev-harness against published test vectors. This first slice
-//! is the crypto foundation of WPA2-PSK:
+//! and in the std dev-harness against published test vectors. The crypto
+//! foundation of WPA2-PSK:
 //!
 //! - SHA-1 + HMAC-SHA1 (FIPS 180/198)
 //! - PBKDF2-HMAC-SHA1 → the 256-bit PMK from passphrase + SSID (IEEE 802.11i)
 //! - PRF-SHA1 → the PTK from the PMK + nonces + MACs (the 4-way handshake KDF)
 //!
-//! The EAPOL 4-way state machine (MIC verify, GTK unwrap, key install) builds
-//! on these and lands in the next slice.
+//! The EAPOL 4-way state machine (MIC verify, GTK unwrap) lives in `eapol`.
 
 #![no_std]
 
