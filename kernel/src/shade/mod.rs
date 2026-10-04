@@ -385,8 +385,22 @@ static LAST_ABS: core::sync::atomic::AtomicU64 =
 static LAST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
+/// A full redraw asked for from another core, waiting for Core 0.
+static FORCE_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// Force a full redraw (e.g. after wallpaper change).
+///
+/// Only Core 0 composes. The wallpaper module runs on a worker core, and
+/// composing from there raced Core 0 into the same back buffer: the
+/// terminal-glass cache could capture a half-mixed frame under the NEW key
+/// and keep showing it until the key changed again — which only a
+/// light/dark switch did. From any other core this just leaves a note.
 pub fn force_redraw() {
+    if crate::smp::per_core::current_core_id() != 0 {
+        FORCE_REDRAW_PENDING.store(true, Ordering::Release);
+        request_render();
+        return;
+    }
     // Invalidate input line cache — will be rebuilt by render_window
     terminal::invalidate_input_cache();
 
@@ -1344,6 +1358,10 @@ pub fn render_input_line() {
 pub fn poll_render() {
     if !is_active() { return; }
     if crate::smp::per_core::current_core_id() != 0 { return; }
+
+    if FORCE_REDRAW_PENDING.swap(false, Ordering::AcqRel) {
+        force_redraw();
+    }
 
     // Tick swap animation (smooth window transition)
     let animating = with_compositor(|comp| comp.tick_animation()).unwrap_or(false);

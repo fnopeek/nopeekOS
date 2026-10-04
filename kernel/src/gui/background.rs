@@ -21,6 +21,24 @@ static mut WALLPAPER_W: u32 = 0;
 static mut WALLPAPER_H: u32 = 0;
 static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
 
+/// The wallpaper, heavily blurred, same size and pitch. Glass surfaces
+/// (loop, dock, bar) blend over THIS instead of the sharp image: a
+/// translucent light panel over sharp texture leaves the texture
+/// competing with the text on it, and blur is what makes glass readable.
+/// Computed once per wallpaper — the wallpaper is static, so reading it
+/// costs a frame exactly what reading the sharp one did.
+static mut BLURRED: *mut u8 = core::ptr::null_mut();
+static mut BLURRED_W: u32 = 0;
+static mut BLURRED_H: u32 = 0;
+static BLURRED_SET: AtomicBool = AtomicBool::new(false);
+
+/// Downscale factor for the blur. Blur keeps no detail, so it is computed
+/// on a small image and scaled back up.
+const BLUR_DOWN: u32 = 8;
+/// Box radius on the small image; three passes approximate a Gaussian.
+const BLUR_RADIUS: usize = 3;
+const BLUR_PASSES: usize = 3;
+
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
 /// translucent-glass cache key so a same-theme wallpaper swap invalidates it
 /// (the key otherwise tracks colour/geometry only, not the backdrop pixels —
@@ -96,6 +114,7 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         WALLPAPER_W = target_w;
         WALLPAPER_H = target_h;
     }
+    compute_blur(buf, info, pages);
     WALLPAPER_SET.store(true, Ordering::Release);
     // After the pixels are fully written: invalidate the glass cache by moving
     // the generation forward (Release pairs with the Acquire in the cache key).
@@ -123,6 +142,7 @@ pub fn wallpaper_ptr() -> *const u8 {
 
 pub fn clear_wallpaper() {
     WALLPAPER_SET.store(false, Ordering::Release);
+    BLURRED_SET.store(false, Ordering::Release);
     crate::theme::clear();
     crate::shade::widgets::refresh_all_scenes();
 }
@@ -205,4 +225,150 @@ fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u
         let off = y as usize * pitch + x0 * 4;
         unsafe { core::ptr::copy_nonoverlapping(wp.add(off), shadow.add(off), bytes); }
     }
+}
+
+// ── Glass backdrop ────────────────────────────────────────────────────
+
+fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
+    BLURRED_SET.store(false, Ordering::Release);
+    let (w, h, pitch) = (info.width, info.height, info.pitch as usize);
+    let dst = if unsafe { !BLURRED.is_null() && BLURRED_W == w && BLURRED_H == h } {
+        unsafe { BLURRED }
+    } else {
+        match crate::memory::allocate_contiguous(pages) {
+            Some(addr) => addr as *mut u8,
+            None => return,
+        }
+    };
+
+    // 1. Average BLUR_DOWN² blocks into a small image, one channel per plane.
+    let sw = ((w + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
+    let sh = ((h + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
+    let mut planes = [alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh]];
+    for sy in 0..sh {
+        if sy % 32 == 0 { crate::xhci::poll_events(); }
+        for sx in 0..sw {
+            let (x0, y0) = (sx as u32 * BLUR_DOWN, sy as u32 * BLUR_DOWN);
+            let (x1, y1) = ((x0 + BLUR_DOWN).min(w), (y0 + BLUR_DOWN).min(h));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    // SAFETY: x < width, y < height; the wallpaper is
+                    // screen-sized with the framebuffer pitch (set_wallpaper).
+                    let px = unsafe { *(wp.add(y as usize * pitch + x as usize * 4) as *const u32) };
+                    r += (px >> 16) & 0xFF; g += (px >> 8) & 0xFF; b += px & 0xFF; n += 1;
+                }
+            }
+            let i = sy * sw + sx;
+            planes[0][i] = r / n.max(1);
+            planes[1][i] = g / n.max(1);
+            planes[2][i] = b / n.max(1);
+        }
+    }
+
+    // 2. Separable box blur, a few passes.
+    let mut tmp = alloc::vec![0u32; sw * sh];
+    for plane in planes.iter_mut() {
+        for _ in 0..BLUR_PASSES {
+            box_pass(plane, &mut tmp, sw, sh, 1, sw);   // columns
+            box_pass(&tmp, plane, sh, sw, sw, 1);       // rows
+        }
+    }
+
+    // 3. Bilinear back up to screen size (sample centres of the blocks).
+    let half = (BLUR_DOWN / 2) as i32;
+    for y in 0..h {
+        if y % 256 == 0 { crate::xhci::poll_events(); }
+        let fy = ((y as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
+        let (y0, wy) = ((fy >> 8).min(sh - 1), (fy & 0xFF) as u32);
+        let y1 = (y0 + 1).min(sh - 1);
+        for x in 0..w {
+            let fx = ((x as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
+            let (x0, wx) = ((fx >> 8).min(sw - 1), (fx & 0xFF) as u32);
+            let x1 = (x0 + 1).min(sw - 1);
+            let mut px = 0u32;
+            for (c, plane) in planes.iter().enumerate() {
+                let top = plane[y0 * sw + x0] * (256 - wx) + plane[y0 * sw + x1] * wx;
+                let bot = plane[y1 * sw + x0] * (256 - wx) + plane[y1 * sw + x1] * wx;
+                let v = (top * (256 - wy) + bot * wy) >> 16;
+                px |= v.min(255) << (16 - 8 * c as u32);
+            }
+            // SAFETY: same bounds and layout as the wallpaper buffer above.
+            unsafe { *(dst.add(y as usize * pitch + x as usize * 4) as *mut u32) = px; }
+        }
+    }
+
+    unsafe {
+        BLURRED = dst;
+        BLURRED_W = w;
+        BLURRED_H = h;
+    }
+    BLURRED_SET.store(true, Ordering::Release);
+}
+
+/// One box-blur pass along a line direction. `lines` × `len` samples,
+/// `step` between samples of a line, `stride` between lines. Edges clamp.
+fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usize, step: usize) {
+    let r = BLUR_RADIUS as isize;
+    let n = (2 * r + 1) as u32;
+    let last = len as isize - 1;
+    for l in 0..lines {
+        let base = l * stride;
+        let at = |i: isize| src[base + (i.clamp(0, last) as usize) * step];
+        let mut sum: u32 = (-r..=r).map(at).sum();
+        for i in 0..len as isize {
+            dst[base + i as usize * step] = sum / n;
+            sum = sum + at(i + r + 1) - at(i - r);
+        }
+    }
+}
+
+fn blurred_ready() -> bool {
+    WALLPAPER_SET.load(Ordering::Acquire) && BLURRED_SET.load(Ordering::Acquire)
+}
+
+/// Put the blurred wallpaper under a glass window: inside the rounded rect
+/// only, so the corners outside it keep the sharp wallpaper the gap shows.
+/// Call after the sharp restore. No wallpaper → nothing to blur, no-op.
+pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
+                           rx: u32, ry: u32, rw: u32, rh: u32, radius: u32) {
+    if !blurred_ready() { return; }
+    let bl = unsafe { BLURRED };
+    let pitch = info.pitch as usize;
+    let r = radius.min(rw / 2).min(rh / 2);
+    let y1 = (ry + rh).min(info.height);
+    for y in ry..y1 {
+        let ly = y - ry;
+        let from_edge = if ly < r { r - ly } else if ly >= rh - r { ly + 1 - (rh - r) } else { 0 };
+        let inset = if from_edge == 0 { 0 } else { r - isqrt(r * r - (from_edge * from_edge).min(r * r)) };
+        let x0 = rx + inset;
+        let x1 = (rx + rw).saturating_sub(inset).min(info.width);
+        if x1 <= x0 { continue; }
+        let off = y as usize * pitch + x0 as usize * 4;
+        // SAFETY: x0..x1 and y lie inside the screen; both buffers are
+        // screen-sized with the framebuffer pitch.
+        unsafe { core::ptr::copy_nonoverlapping(bl.add(off), shadow.add(off), (x1 - x0) as usize * 4); }
+    }
+}
+
+/// What a glass pixel at (x,y) should blend over. Where the shadow still
+/// holds exactly the wallpaper, nothing else is underneath, and the blurred
+/// copy takes its place; over a window the window stays (the dock can
+/// slide over a tile).
+pub fn glass_base_at(info: &FbInfo, x: u32, y: u32, current: u32) -> u32 {
+    if !blurred_ready() { return current; }
+    let off = y as usize * info.pitch as usize + x as usize * 4;
+    // SAFETY: caller passes on-screen coordinates; both buffers are
+    // screen-sized with the framebuffer pitch.
+    unsafe {
+        let sharp = *(WALLPAPER.add(off) as *const u32);
+        if (sharp ^ current) & 0x00FF_FFFF == 0 { *(BLURRED.add(off) as *const u32) } else { current }
+    }
+}
+
+fn isqrt(v: u32) -> u32 {
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x { x = y; y = (x + v / x) / 2; }
+    x
 }

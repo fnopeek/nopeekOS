@@ -1969,6 +1969,11 @@ impl Compositor {
                 opacity
             };
             if paint_content {
+                // Glass blends over the blurred wallpaper, not the sharp one
+                // (see `background::draw_glass_backdrop`). Inside the cached
+                // region, so a cache hit carries it.
+                background::draw_glass_backdrop(shadow, info,
+                    win.x, win.y, win.width, win.height, rounding);
                 // Terminal glass bg is static + expensive — cache it.
                 let key = chrome_key(win.x, win.y, win.width, win.height, win.focused,
                     ba, bb, b_op, content_bg, content_opacity, rounding, border);
@@ -2097,6 +2102,13 @@ impl Compositor {
                                     * (scene.width as usize) + (dx - cx) as usize];
                                 let a = (px >> 24) & 0xFF;
                                 if a == 0 { continue; }  // transparent → wallpaper
+                                // Translucent fill: blend over the blurred
+                                // wallpaper where nothing else is beneath.
+                                if a < 255 {
+                                    let cur = render::read_pixel(shadow, info, dx, dy);
+                                    let base = background::glass_base_at(info, dx, dy, cur);
+                                    if base != cur { render::put_pixel(shadow, info, dx, dy, base); }
+                                }
                                 render::blend_pixel(shadow, info, dx, dy,
                                     px & 0x00FF_FFFF, a);
                             }

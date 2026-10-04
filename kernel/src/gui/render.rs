@@ -135,7 +135,7 @@ pub fn draw_border(shadow: *mut u8, info: &FbInfo,
 }
 
 /// Read a pixel from the shadow buffer.
-fn read_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32) -> u32 {
+pub fn read_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32) -> u32 {
     if x >= info.width || y >= info.height { return 0; }
     if info.bpp == 32 {
         let offset = (y * info.pitch + x * 4) as usize;
