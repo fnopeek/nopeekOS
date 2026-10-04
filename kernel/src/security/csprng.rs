@@ -1,6 +1,6 @@
 //! Cryptographically Secure PRNG (ChaCha20-based)
 //!
-//! Replaces xorshift128+ for capability tokens and all security-sensitive randomness.
+//! Source for capability tokens and all security-sensitive randomness.
 //! Seeded from RDRAND (hardware RNG) if available, TSC fallback.
 //! Re-keys every 64 blocks for forward secrecy.
 
@@ -54,12 +54,9 @@ impl ChaChaRng {
         (hi << 64) | lo
     }
 
-    /// Beliebig viele Bytes am Stueck — der Strom, nicht acht Bytes davon.
-    ///
-    /// Blockweise aus demselben Puffer wie `next_u64`, ohne den Umweg ueber
-    /// 64-Bit-Worte: `crypto.getRandomValues` darf bis 65 536 Bytes auf
-    /// einmal verlangen, und die Wortschleife waere dafuer achtmal so viele
-    /// Grenzpruefungen.
+    /// Fill `out` from the keystream, block-wise from the same buffer as
+    /// `next_u64`. `crypto.getRandomValues` may ask for up to 65536 bytes,
+    /// so this avoids going through 64-bit words.
     fn fill(&mut self, out: &mut [u8]) {
         let mut done = 0;
         while done < out.len() {
@@ -187,7 +184,7 @@ fn build_seed() -> [u8; 32] {
             }
         }
     } else {
-        // Fallback: TSC + constants (NOT ideal but better than nothing)
+        // Fallback: TSC + constants (weak, but better than nothing)
         let t1 = rdtsc();
         let t2 = rdtsc();
         let t3 = rdtsc();
@@ -234,14 +231,10 @@ pub fn random_256() -> [u8; 32] {
     }
 }
 
-/// Einen Puffer mit Zufall fuellen — die Quelle hinter
-/// `crypto.getRandomValues` einer Seite.
-///
-/// **Derselbe ChaCha20-Strom wie fuer Kapabilitaetsmarken**, aus RDRAND
-/// geseedet und alle 64 Bloecke neu verschluesselt. Eine zweite, schwaechere
-/// Quelle daneben waere genau die Falle: eine Seite baut daraus
-/// Sitzungsmarken, und „reicht schon" ist dort keine Aussage, die jemand
-/// nachpruefen kann.
+/// Fill a buffer with random bytes; the source behind a page's
+/// `crypto.getRandomValues`. Deliberately the same ChaCha20 stream as the
+/// capability tokens: pages build session tokens from it, so a second,
+/// weaker source would be a trap.
 pub fn fill(out: &mut [u8]) {
     let mut rng = RNG.lock();
     let rng = rng.as_mut().expect("CSPRNG not initialized");

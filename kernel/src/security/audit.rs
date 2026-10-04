@@ -3,13 +3,10 @@
 //! Ring buffer of the capability operations worth keeping: create, revoke,
 //! deny, expire. Oldest entries are overwritten when full.
 //!
-//! A capability check that PASSES is deliberately not an entry, only a
-//! counter. It is the expected outcome of every gated host call, so recording
-//! it wrapped the 1024-entry ring roughly a thousand times per hour — the
-//! denials and grants the log exists for were gone within seconds, buried
-//! under routine successes. It also put one global lock in front of every
-//! host call on a six-core scheduler. Counting keeps the number and gives the
-//! ring back to the events that carry information.
+//! A capability check that passes is only counted, not recorded. It is the
+//! expected outcome of every gated host call; logging it would flush the
+//! denials and grants out of the ring within seconds and put a global lock
+//! in front of every host call.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

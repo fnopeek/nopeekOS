@@ -29,10 +29,10 @@ bitflags! {
         const DELEGATE  = 0b0000_1000;
         const REVOKE    = 0b0001_0000;
         const AUDIT     = 0b0010_0000;
-        /// Phase 10: `npk_scene_commit` — widget-tree rendering.
+        /// `npk_scene_commit` — widget-tree rendering.
         const RENDER    = 0b0100_0000;
-        /// P10.10: `npk_canvas_commit` — upload a raw BGRA bitmap into a
-        /// `Widget::Canvas` (image viewer, future paint app).
+        /// `npk_canvas_commit` — upload a raw BGRA bitmap into a
+        /// `Widget::Canvas`.
         const CANVAS    = 0b1000_0000;
         /// `npk_capture_screen` — read the composited framebuffer
         /// (screenshot tool). Highly privileged: screen-scrape.
@@ -294,7 +294,7 @@ pub fn revoke_path_grants(cap: &CapId) {
 //
 // A widget app self-declares the rights it needs in a 1-byte custom
 // section. The spawn path (npk_spawn_module / launch_app / spawn_launcher)
-// reads it and grants EXACTLY those rights — no blanket WRITE. The bit
+// reads it and grants exactly those rights — no blanket WRITE. The bit
 // layout mirrors `nopeek_widgets::caps` in the SDK. An absent or
 // malformed section falls back to a safe default that never includes
 // WRITE, so a future app cannot silently gain write access.
@@ -333,8 +333,7 @@ fn rights_from_caps_byte2(b: u8) -> Rights {
 }
 
 /// Rights granted to a widget app that ships no `.npk.caps` section:
-/// read + execute + render, but NOT write. Matches the pre-per-app
-/// behavior minus the blanket WRITE.
+/// read + execute + render, but not write.
 fn default_widget_rights() -> Rights {
     Rights::READ | Rights::EXECUTE | Rights::RENDER
 }
