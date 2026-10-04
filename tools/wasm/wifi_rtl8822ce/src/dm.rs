@@ -1,20 +1,15 @@
-//! `struct rtw_dm_info` (main.h:1687-1780) — der Zustand, den die
-//! PHY-Schicht zwischen ihren Funktionen traegt.
+//! `struct rtw_dm_info` (main.h:1687-1780): the state the PHY layer
+//! carries between its functions.
 //!
-//! Hier stehen nur die Felder, die Stufe 3 wirklich liest oder schreibt.
-//! Ein Feld, das kein portierter Code anfasst, waere eine Behauptung ueber
-//! den naechsten Posten und keine Portierung.
+//! Only fields that ported code reads or writes are present.
 #![allow(dead_code)]
 
 use crate::regs::*;
 
-/// `DECLARE_EWMA(name, precision, weight_rcp)` aus
+/// `DECLARE_EWMA(name, precision, weight_rcp)` from
 /// `include/linux/average.h`.
 ///
-/// **Die einzige Stelle dieses Treibers, deren Linux-Quelle NICHT in
-/// unserem Teilbaum liegt** (`include/linux/average.h` fehlt in
-/// `~/.cache/nopeekos/linux-src`). Deshalb steht die Rechnung hier
-/// ausgeschrieben, damit sie nachschlagbar ist statt geglaubt:
+/// The arithmetic is spelled out here so it can be checked:
 ///
 /// ```text
 /// add:  internal = internal
@@ -23,7 +18,7 @@ use crate::regs::*;
 /// read: internal >> p            w = ilog2(weight_rcp)
 /// ```
 ///
-/// `DECLARE_EWMA(thermal, 10, 4)` heisst also p = 10, w = 2.
+/// `DECLARE_EWMA(thermal, 10, 4)` thus means p = 10, w = 2.
 #[derive(Clone, Copy, Default)]
 pub struct Ewma {
     internal: u32,
@@ -34,10 +29,10 @@ impl Ewma {
         Ewma { internal: 0 }
     }
 
-    /// `ewma_*_add`. `precision` und `weight_rcp` kommen von der
-    /// Deklarationsstelle — beim Thermometer 10 und 4.
+    /// `ewma_*_add`. `precision` and `weight_rcp` come from the declaration
+    /// site; for the thermal meter 10 and 4.
     pub fn add(&mut self, val: u32, precision: u32, weight_rcp: u32) {
-        let w = weight_rcp.trailing_zeros(); // ilog2, weight_rcp ist 2^n
+        let w = weight_rcp.trailing_zeros(); // ilog2, weight_rcp is 2^n
         self.internal = if self.internal != 0 {
             (((self.internal << w) - self.internal) + (val << precision)) >> w
         } else {
@@ -63,10 +58,9 @@ pub const EWMA_RSSI_WEIGHT_RCP: u32 = 16;
 
 /// main.h:1650-1657 `struct rtw_cfo_track`.
 ///
-/// **Der Akkumulator, nicht die Momentaufnahme.** `DmInfo::cfo_tail`
-/// daneben ist der letzte Empfangsstatus „for debug"; hier laufen die
-/// Summen, aus denen `rtw8822c_cfo_track` alle zwei Sekunden den Quarz
-/// nachdreht.
+/// The accumulator, not the snapshot. `DmInfo::cfo_tail` holds the last RX
+/// status "for debug"; this holds the sums from which `rtw8822c_cfo_track`
+/// adjusts the crystal every two seconds.
 #[derive(Clone, Copy)]
 pub struct CfoTrack {
     pub is_adjust: bool,
@@ -90,9 +84,9 @@ impl CfoTrack {
     }
 }
 
-/// main.h:1633-1636 `struct rtw_pkt_count` — was in einem Watchdog-Takt
-/// hereinkam, nach Rate aufgeschluesselt. `rtw_phy_stat_rate_cnt`
-/// schiebt es nach `last_pkt_count` und faengt von vorn an.
+/// main.h:1633-1636 `struct rtw_pkt_count`: what arrived in one watchdog
+/// period, by rate. `rtw_phy_stat_rate_cnt` moves it to `last_pkt_count`
+/// and starts over.
 #[derive(Clone, Copy)]
 pub struct PktCount {
     pub num_bcn_pkt: u16,
@@ -105,23 +99,23 @@ impl PktCount {
     }
 }
 
-/// main.h:1621-1631 `struct rtw_dack_info` — der Teil, der die DAC-
-/// Kalibrierung ueber einen zweiten Lauf rettet.
+/// main.h:1621-1631 `struct rtw_dack_info`: the part that carries the DAC
+/// calibration over to a second run.
 #[derive(Clone, Copy)]
 pub struct DmInfo {
-    /// `dack_adck[path]` — von `dac_cal_adc` gerechnet, von `dac_cal_step1`
-    /// wieder eingesetzt.
+    /// `dack_adck[path]`: computed by `dac_cal_adc`, restored by
+    /// `dac_cal_step1`.
     pub dack_adck: [u32; DACK_PATH_8822C],
     /// `dack_msbk[path][vec][i]` · vec 0 = I, vec 1 = Q
     pub dack_msbk: [[[u16; DACK_MSBK_BACKUP_NUM]; 2]; DACK_PATH_8822C],
     /// `dack_dck[path][vec][i]`
     pub dack_dck: [[[u8; DACK_DCK_BACKUP_NUM]; 2]; DACK_PATH_8822C],
 
-    /// aus `rtw8822c_phy_set_param`, gelesen von `query_phy_status_page0`
+    /// From `rtw8822c_phy_set_param`, read by `query_phy_status_page0`.
     pub cck_gi_u_bnd: u8,
     pub cck_gi_l_bnd: u8,
 
-    // main.h:1766-1770 — was der EMPFANGSweg zurueckschreibt (Stufe 5a).
+    // main.h:1766-1770: written back by the RX path.
     pub rx_snr: [i8; 4],
     pub rx_evm_dbm: [u8; 4],
     pub cfo_tail: [i16; 4],
@@ -129,14 +123,13 @@ pub struct DmInfo {
     pub curr_rx_rate: u8,
 
     // rtw_phy_init
-    /// **u16 wie in Linux** (main.h `u16 fa_history[4]`) — die Breite ist
-    /// Semantik: `rtw_phy_dig_recorder` schreibt einen u32-Zaehler hinein
-    /// und schneidet ihn dabei ab, und `dig_check_damping` vergleicht
-    /// GEGEN diesen abgeschnittenen Wert.
+    /// u16 as in Linux (main.h `u16 fa_history[4]`); the width matters:
+    /// `rtw_phy_dig_recorder` stores a truncated u32 counter and
+    /// `dig_check_damping` compares against the truncated value.
     pub fa_history: [u16; 4],
     pub igi_history: [u8; 4],
     pub igi_bitmap: u8,
-    /// `cck_pd_lv[bw][path]`, bw laeuft bis `RTW_CHANNEL_WIDTH_40` = 1.
+    /// `cck_pd_lv[bw][path]`, bw up to `RTW_CHANNEL_WIDTH_40` = 1.
     pub cck_pd_lv: [[u8; 4]; 2],
     pub cck_fa_avg: u32,
     pub iqk_done: bool,
@@ -180,7 +173,7 @@ pub struct DmInfo {
     // rtw_phy_cck_pd
     pub cck_pd_default: u8,
     pub dm_flags: u32,
-    /// main.h:1780 `u8 scan_density` — Eingabe von `rtw_fw_adaptivity`.
+    /// main.h:1780 `u8 scan_density`, input to `rtw_fw_adaptivity`.
     pub scan_density: u8,
 
     // rtw8822c_false_alarm_statistics

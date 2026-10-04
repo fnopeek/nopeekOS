@@ -1,33 +1,29 @@
-//! `pci.c` aus Linux 6.18.26 rtw88 — Stufe 2a: die Ringe.
+//! `pci.c` from Linux 6.18.26 rtw88: TX/RX rings, reserved page and H2C
+//! queues, interrupts, RX/TX paths and PCIe link configuration.
 //!
-//! Portiert: `rtw_pci_init_tx_ring` · `rtw_pci_init_rx_ring` ·
+//! Ring setup: `rtw_pci_init_tx_ring` · `rtw_pci_init_rx_ring` ·
 //! `rtw_pci_reset_rx_desc` · `rtw_pci_init_trx_ring` ·
 //! `rtw_pci_reset_buf_desc` · `rtw_pci_reset_trx_ring` ·
 //! `rtw_pci_dma_reset` · `rtw_pci_setup`.
 //!
-//! **`rtw_hci_setup` ist `rtw_pci_setup`, und das sind ZWEI Aufrufe.** In
-//! 0.4.0 stand hier nur `reset_buf_desc`; `rtw_pci_dma_reset` fehlte, und
-//! damit lief die TRX-DMA-Schnittstelle nie an — die erste Reserved Page
-//! blieb liegen und `BIT_BCN_VALID_V1` wurde nie 1. Deshalb gibt es `setup()`
-//! als EINE Funktion: wer sie ruft, kann die zweite Haelfte nicht vergessen.
+//! `rtw_hci_setup` is `rtw_pci_setup`, which is two calls: without
+//! `rtw_pci_dma_reset` the TRX DMA interface never starts and the first
+//! reserved page is never fetched. `setup()` is one function so the second
+//! half cannot be forgotten.
 //!
-//! **Zwei benannte Abweichungen, beide begruendet:**
+//! Two deliberate deviations:
 //!
-//! 1. **Nur der MPDU-Empfangsring.** Linux legt `RTK_MAX_RX_QUEUE_NUM = 2`
-//!    an (MPDU und C2H), aber `rtw_pci_reset_buf_desc` schreibt NUR
-//!    `RXBD_DESA_MPDUQ` in die Hardware — fuer C2H gibt es auf PCIe gar kein
-//!    Adressregister. Die Firmwareantworten kommen durch den MPDU-Ring und
-//!    werden an `pkt_stat.is_c2h` getrennt. Der zweite Ring ist auf diesem
-//!    Bus tote Last: 5,9 MB, die das Geraet nie sieht.
-//! 2. **Die Empfangspuffer kommen aus wenigen grossen Stuecken** statt aus
-//!    512 einzelnen Allokationen. Die Hardware sieht je Deskriptor nur eine
-//!    physische Adresse; ob die aus einem grossen oder einem kleinen Stueck
-//!    stammt, ist fuer sie derselbe Vorgang. `npk_dma_alloc` gibt
-//!    zusammenhaengende Seiten unter 4 GB, also gilt das auch bei uns.
+//! 1. Only the MPDU RX ring. Linux allocates `RTK_MAX_RX_QUEUE_NUM = 2`
+//!    (MPDU and C2H), but `rtw_pci_reset_buf_desc` writes only
+//!    `RXBD_DESA_MPDUQ` to the hardware; PCIe has no address register for
+//!    C2H. Firmware messages arrive through the MPDU ring and are separated
+//!    by `pkt_stat.is_c2h`.
+//! 2. RX buffers come from a few large chunks instead of 512 separate
+//!    allocations. The hardware sees one physical address per descriptor
+//!    either way; `npk_dma_alloc` returns contiguous pages below 4 GB.
 
-// `idx`/`handle` gehoeren zu `struct rtw_pci_ring` und werden in 2b/2c
-// gebraucht (Kick-off, Nachfuellen). Sie stehen hier, weil sie zum Ring
-// gehoeren — nicht, weil Stufe 2a sie liest.
+// `idx`/`handle` belong to `struct rtw_pci_ring` and are used for kick-off
+// and refill.
 #![allow(dead_code)]
 
 use crate::host;
@@ -42,13 +38,12 @@ pub const RTK_PCI_RX_BUF_SIZE: u32 = 11454 + 24;
 const TX_BUF_DESC_SZ: u32 = 16;
 const RX_BUF_DESC_SZ: u32 = 8;
 
-/// Seitenraster unserer DMA-Vergabe. Der Puffer ist 11478 Bytes gross; der
-/// Schritt wird auf die naechste Seite aufgerundet, damit jede Adresse
-/// seitenbuendig liegt.
+/// Page granularity of our DMA allocation. The buffer is 11478 bytes; the
+/// stride is rounded up to the next page so every address is page-aligned.
 const RX_BUF_STRIDE: u32 = 12288; // ceil(11478 / 4096) * 4096
 const PAGE: u32 = 4096;
 
-/// main.h:202-215 — die Reihenfolge ist Vertrag, `RTW_TX_QUEUE_BK` ist 0.
+/// main.h:202-215: the order is a contract, `RTW_TX_QUEUE_BK` is 0.
 pub const Q_BK: usize = 0;
 pub const Q_BE: usize = 1;
 pub const Q_VI: usize = 2;
@@ -68,9 +63,9 @@ fn max_num_of_tx_queue(q: usize) -> u32 {
     }
 }
 
-/// Die Adress-, Anzahl- und Indexregister je Queue (pci.h:44-73).
-/// `num` ist `None` fuer BCNQ — der Kommentar in pci.h sagt warum:
-/// „BCNQ is specialized for rsvd page, does not need to specify a number".
+/// The address, count and index registers per queue (pci.h:44-73).
+/// `num` is `None` for BCNQ; pci.h says why: "BCNQ is specialized for rsvd
+/// page, does not need to specify a number".
 struct QueueRegs {
     desa: u32,
     num: Option<u32>,
@@ -111,32 +106,28 @@ pub struct TxRing {
 }
 
 pub struct RxRing {
-    /// Deskriptorring (512 x 8 Byte)
+    /// Descriptor ring (512 x 8 bytes)
     pub dma: u32,
     pub len: u32,
     pub handle: i32,
     pub wp: u32,
     pub rp: u32,
-    /// Bis zu zwei zusammenhaengende Stuecke, aus denen die Puffer stammen.
+    /// Up to two contiguous chunks the buffers come from.
     chunk_phys: [u32; 2],
-    /// **Und ihre DMA-Handles.** Bis 2a wurden die weggeworfen — der Chip
-    /// braucht nur die physische Adresse, aber WIR muessen die Puffer auch
-    /// LESEN koennen, und dafuer gibt es nur den Handle. Ein Empfangsring,
-    /// dessen Inhalt niemand lesen kann, faellt erst auf, wenn das erste
-    /// Paket da ist.
+    /// And their DMA handles: the chip only needs the physical address, but
+    /// the driver needs the handle to read the buffers.
     chunk_handle: [i32; 2],
     per_chunk: u32,
 }
 
 impl RxRing {
-    /// Physische Adresse des i-ten Empfangspuffers — das, was der Chip
-    /// bekommt.
+    /// Physical address of the i-th RX buffer, as given to the chip.
     pub fn buf_phys(&self, i: u32) -> u32 {
         let c = (i / self.per_chunk) as usize;
         self.chunk_phys[c] + (i % self.per_chunk) * RX_BUF_STRIDE
     }
 
-    /// Handle und Versatz desselben Puffers — das, womit WIR ihn lesen.
+    /// Handle and offset of the same buffer, used to read it.
     pub fn buf_loc(&self, i: u32) -> (i32, u32) {
         let c = (i / self.per_chunk) as usize;
         (self.chunk_handle[c], (i % self.per_chunk) * RX_BUF_STRIDE)
@@ -148,25 +139,21 @@ pub struct Trx {
     pub rx: RxRing,
     pub dma_pages: u32,
     pub dma_allocs: u32,
-    /// `rtwpci->rx_tag` — von `rtw_pci_dma_reset` auf 0 gesetzt, gelesen von
-    /// `rtw_pci_dma_check` in Stufe 2d.
+    /// `rtwpci->rx_tag`: set to 0 by `rtw_pci_dma_reset`, read by
+    /// `rtw_pci_dma_check`.
     pub rx_tag: u16,
 }
 
 const EMPTY_TX: TxRing = TxRing { dma: 0, len: 0, handle: -1, wp: 0, rp: 0 };
 
-/// Obergrenze fuer JEDES DMA-Stueck dieses Treibers.
+/// Upper limit for every DMA chunk of this driver.
 ///
-/// Zwei Gruende, und nur der erste steht in Linux: die DESA-Register sind
-/// 32 Bit breit, also muss alles unter 4 GB liegen. Der zweite kommt vom
-/// Geraetelauf — mit der 4-GB-Grenze sucht `allocate_contiguous_below` von
-/// oben und landet direkt unter dem PCI-MMIO-Loch (0xcdffa000 abwaerts).
-/// Von dort holte der Chip nichts ab und quittierte mit **Received Master
-/// Abort**, waehrend die CPU dieselben Bytes ungestoert las und schrieb.
-/// Auf AMD-Blech ist das die Gegend von TSEG/DPR.
-///
-/// 1 GB ist bewusst deutlich darunter und immer noch weit ueber allem,
-/// was ein PCIe-Geraet an Ausrichtung verlangt.
+/// The DESA registers are 32 bits wide, so everything must be below 4 GB.
+/// Additionally, `allocate_contiguous_below` searches from the top and
+/// with a 4 GB limit lands just below the PCI MMIO hole; on some AMD
+/// platforms (TSEG/DPR region) the chip's DMA there ends in a received
+/// master abort while the CPU accesses the same memory fine. 1 GB stays
+/// well clear of that.
 const DMA_LIMIT_MB: u32 = 1024;
 
 fn alloc_pages(pages: u32) -> Option<(i32, u32)> {
@@ -175,8 +162,8 @@ fn alloc_pages(pages: u32) -> Option<(i32, u32)> {
         return None;
     }
     let phys = host::dma_phys(h);
-    // Der TX-/RX-Deskriptor hat ein 32-Bit-Adressfeld. Der Kernel vergibt
-    // unter 4 GB, aber geprueft wird es hier, nicht geglaubt.
+    // The TX/RX descriptor has a 32-bit address field. The kernel allocates
+    // below 4 GB, but it is checked here rather than assumed.
     if phys == 0 || phys >= 0x1_0000_0000 {
         return None;
     }
@@ -209,8 +196,8 @@ pub fn init_trx_ring() -> Option<Trx> {
     pages += desc_sz.div_ceil(PAGE);
     allocs += 1;
 
-    // Die Puffer in zwei Stuecken. 512 x 12288 = 6 MiB = 1536 Seiten, und
-    // MAX_DMA_PAGES_PER_CALL ist 1024 — ein Stueck reicht also nicht.
+    // The buffers in two chunks: 512 x 12288 = 6 MiB = 1536 pages, and
+    // MAX_DMA_PAGES_PER_CALL is 1024, so one chunk is not enough.
     let per_chunk = RTK_MAX_RX_DESC_NUM / 2;
     let chunk_pages = per_chunk * RX_BUF_STRIDE / PAGE;
     let mut chunk_phys = [0u32; 2];
@@ -234,9 +221,9 @@ pub fn init_trx_ring() -> Option<Trx> {
         per_chunk,
     };
 
-    // pci.c `rtw_pci_reset_rx_desc` fuer jeden Eintrag: buf_size + dma.
-    // `struct rtw_pci_rx_buffer_desc` (pci.h:193) ist
-    // { __le16 buf_size; __le16 total_pkt_size; __le32 dma; } = 8 Byte.
+    // pci.c `rtw_pci_reset_rx_desc` for each entry: buf_size + dma.
+    // `struct rtw_pci_rx_buffer_desc` (pci.h:193) is
+    // { __le16 buf_size; __le16 total_pkt_size; __le32 dma; } = 8 bytes.
     for i in 0..RTK_MAX_RX_DESC_NUM {
         let off = i * RX_BUF_DESC_SZ;
         host::dma_w32(desc_h, off, RTK_PCI_RX_BUF_SIZE & 0xFFFF);
@@ -246,38 +233,36 @@ pub fn init_trx_ring() -> Option<Trx> {
     Some(Trx { tx, rx, dma_pages: pages, dma_allocs: allocs, rx_tag: 0 })
 }
 
-/// pci.c `rtw_pci_dma_reset` — „reset dma and rx tag".
+/// pci.c `rtw_pci_dma_reset`: "reset dma and rx tag".
 ///
-/// Ohne diese eine Zeile faehrt die TRX-DMA-Schnittstelle nicht an. Die
-/// Ringadressen stehen dann korrekt in den Registern (und lesen sich auch
-/// zurueck), nur holt der Chip die Deskriptoren nie ab.
+/// Without this the TRX DMA interface does not start: the ring addresses
+/// are in the registers (and read back correctly), but the chip never
+/// fetches the descriptors.
 fn dma_reset(h: i32, trx: &mut Trx) {
     host::set32(h, RTK_PCI_CTRL, BIT_RST_TRXDMA_INTF | BIT_RX_TAG_EN);
     trx.rx_tag = 0;
 }
 
-/// pci.c `rtw_pci_setup` — was `rtw_hci_setup` fuer PCIe bedeutet.
-/// Beide Haelften, immer zusammen.
+/// pci.c `rtw_pci_setup`, what `rtw_hci_setup` means for PCIe. Both halves,
+/// always together.
 pub fn setup(h: i32, trx: &mut Trx, verbose: bool) {
     reset_buf_desc(h, trx, verbose); // = rtw_pci_reset_trx_ring
     dma_reset(h, trx);
 }
 
-/// Die OBERE Haelfte eines DESA-Registers auf null setzen.
+/// Clear the upper half of a DESA register.
 ///
-/// Die DESA-Register liegen **acht** Byte auseinander (0x308, 0x310, 0x318,
-/// …) — jedes ist ein 64-Bit-Adressregister, und `rtw_pci_reset_buf_desc`
-/// schreibt mit `rtw_write32` nur die unteren 32 Bit. Linux kommt damit
-/// durch, weil `pci_enable_device` auf einem frisch zurueckgesetzten Gerdt
-/// laeuft und die obere Haelfte dann null ist; eine DMA-Maske setzt
-/// `rtw_pci_claim` ausdruecklich nicht, die Vorgabe sind 32 Bit.
+/// The DESA registers are eight bytes apart (0x308, 0x310, 0x318, …):
+/// each is a 64-bit address register, and `rtw_pci_reset_buf_desc` writes
+/// only the low 32 bits with `rtw_write32`. Linux gets away with that
+/// because `pci_enable_device` runs on a freshly reset device whose upper
+/// halves are zero; `rtw_pci_claim` sets no DMA mask, so the default is 32
+/// bits.
 ///
-/// Wir setzen kein PCIe-Geraet zurueck. Bleibt oben ein Rest stehen, baut
-/// der Chip eine 64-Bit-Adresse, auf die niemand antwortet — und genau das
-/// sagte der Geraetelauf: Busmaster an, Anfrage abgeschickt, Received
-/// Master Abort, OWN-Bit unberuehrt. Deshalb wird die obere Haelfte
-/// AUSDRUECKLICH genullt, und zwar VOR der unteren, damit die Adresse in
-/// dem Moment vollstaendig ist, in dem der Chip sie uebernimmt.
+/// This driver does not reset the PCIe device. A leftover upper half makes
+/// the chip build a 64-bit address nobody answers (received master abort,
+/// OWN bit untouched). So the upper half is cleared explicitly, before the
+/// lower half, so the address is complete when the chip latches it.
 fn desa_hi_clear(h: i32, desa: u32, name: &str, verbose: bool) {
     let hi = host::r32(h, desa + 4);
     if verbose {
@@ -301,11 +286,11 @@ pub fn reset_buf_desc(h: i32, trx: &mut Trx, verbose: bool) {
         host::print("  [dump] obere Haelfte der DESA-Register vor dem Nullen:\n");
     }
 
-    // BCNQ: nur die Adresse, keine Anzahl.
+    // BCNQ: address only, no count.
     desa_hi_clear(h, TXQ[Q_BCN].desa, TXQ[Q_BCN].name, verbose);
     host::w32(h, TXQ[Q_BCN].desa, trx.tx[Q_BCN].dma);
 
-    // Reihenfolge wie in Linux: H2C, BK, BE, VO, VI, MGMT, HI0.
+    // Order as in Linux: H2C, BK, BE, VO, VI, MGMT, HI0.
     for &q in &[Q_H2C, Q_BK, Q_BE, Q_VO, Q_VI, Q_MGMT, Q_HI0] {
         let r = &mut trx.tx[q];
         r.rp = 0;
@@ -326,15 +311,14 @@ pub fn reset_buf_desc(h: i32, trx: &mut Trx, verbose: bool) {
     // reset read/write point
     host::w32(h, RTK_PCI_TXBD_RWPTR_CLR, 0xffff_ffff);
 
-    // reset H2C Queue index in a single write (nur 3081)
+    // reset H2C Queue index in a single write (3081 only)
     host::set32(h, RTK_PCI_TXBD_H2CQ_CSR,
                 BIT_CLR_H2CQ_HOST_IDX | BIT_CLR_H2CQ_HW_IDX);
 }
 
-/// Das Gate der Stufe: jedes Adress- und Anzahlregister muss zurueckgeben,
-/// was wir hineingeschrieben haben. Ein Ring, dessen Adresse der Chip nicht
-/// behaelt, ist kein Ring — und das faellt hier auf, nicht erst, wenn die
-/// Firmware durch die BCN-Queue geschoben wird.
+/// Every address and count register must read back what was written. A
+/// ring whose address the chip does not keep shows up here rather than
+/// when the firmware is pushed through the BCN queue.
 pub fn verify_rings(h: i32, trx: &Trx) -> bool {
     let mut ok = true;
 
@@ -358,9 +342,8 @@ pub fn verify_rings(h: i32, trx: &Trx) -> bool {
                 host::print_dec(want);
                 host::print(")");
             }
-            // pci.h:57 — "BCNQ is specialized for rsvd page, does not need to
-            // specify a number". Eine Null hier waere keine Abweichung,
-            // sondern eine Frage, die es gar nicht gibt.
+            // pci.h:57: "BCNQ is specialized for rsvd page, does not need to specify
+            // a number".
             None => host::print("— (BCNQ hat kein NUM-Register)"),
         }
         host::print("\n");
@@ -385,58 +368,55 @@ pub fn verify_rings(h: i32, trx: &Trx) -> bool {
     ok
 }
 
-// ── Stufe 2b: eine Reserved Page ueber die BCN-Queue ─────────────
+// ── A reserved page through the BCN queue ────────────────────────
 // pci.h:162-163
 pub const RTK_PCI_TXBD_OWN_OFFSET: u32 = 15;
 pub const RTK_PCI_TXBD_BCN_WORK: u32 = 0x383;
 pub const BIT_PCI_BCNQ_FLAG: u8 = 1 << 4; // pci.h:36
 
-/// Groesstes Stueck, das `download_firmware_to_mem` am Stueck schiebt
-/// (mac.c: `max_size = 0x1000`), plus der Deskriptor davor.
+/// Largest chunk `download_firmware_to_mem` pushes at once
+/// (mac.c: `max_size = 0x1000`), plus the descriptor in front.
 pub const RSVD_STAGE_BYTES: u32 = 0x1000 + crate::tx::TX_PKT_DESC_SZ as u32;
 
-/// pci.c `rtw_pci_write_data_rsvd_page` + `rtw_pci_tx_write_data` fuer
+/// pci.c `rtw_pci_write_data_rsvd_page` + `rtw_pci_tx_write_data` for
 /// `RTW_TX_QUEUE_BCN`.
 ///
-/// Der BCN-Weg ist der Sonderfall im Sonderfall: kein `avail_desc`, kein
-/// Vorruecken von `wp`, dafuer das OWN-Bit in `psb_len` und ein Anstoss ueber
-/// `RTK_PCI_TXBD_BCN_WORK`. `rtw_pci_release_rsvd_page` gibt in Linux das
-/// vorige skb frei — bei uns ist der Staging-Puffer fest, es gibt nichts
-/// freizugeben.
+/// The BCN path is the special case: no `avail_desc`, no advancing of
+/// `wp`, instead the OWN bit in `psb_len` and a kick via
+/// `RTK_PCI_TXBD_BCN_WORK`. `rtw_pci_release_rsvd_page` frees the previous
+/// skb in Linux; here the staging buffer is fixed and nothing is freed.
 pub fn write_data_rsvd_page(
     h: i32, trx: &Trx, stage: i32, payload: &[u8], current_band_type: u8,
     verbose: bool,
 ) -> bool {
-    // tx.c `rtw_tx_write_data_rsvd_page_get` baut in Linux ein skb mit 48
-    // Byte Vorlauf und ruft dann `rtw_tx_rsvd_page_pkt_info_update`. Bei uns
-    // ist der Vorlauf der feste Staging-Puffer, das skb faellt weg.
+    // tx.c `rtw_tx_write_data_rsvd_page_get` builds an skb with 48 bytes of
+    // headroom in Linux and then calls `rtw_tx_rsvd_page_pkt_info_update`.
+    // Here the headroom is the fixed staging buffer.
     let desc_sz = crate::tx::TX_PKT_DESC_SZ;
     let mut info = crate::tx::rsvd_page_pkt_info_update(payload, current_band_type);
-    // pci.c: `pkt_info->qsel = rtw_pci_get_tx_qsel(skb, queue)` — fuer die
-    // BCN-Queue also BEACON, und erst DANACH wird der Deskriptor gefuellt.
+    // pci.c: `pkt_info->qsel = rtw_pci_get_tx_qsel(skb, queue)`, i.e. BEACON
+    // for the BCN queue, and only then is the descriptor filled.
     info.qsel = crate::tx::TX_DESC_QSEL_BEACON;
 
     let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
     crate::tx::fill_tx_desc(&info, &mut desc);
 
-    // Deskriptor und Nutzdaten liegen zusammenhaengend, wie das skb in Linux
-    // nach `skb_push`: der zweite Buffer-Deskriptor zeigt auf dma + 48.
+    // Descriptor and payload are contiguous, like the skb in Linux after
+    // `skb_push`: the second buffer descriptor points to dma + 48.
     host::dma_write_buf(stage, 0, &desc);
     host::dma_write_buf(stage, desc_sz as u32, payload);
 
     let dma = host::dma_phys(stage) as u32;
-    let total = desc_sz + payload.len(); // = skb->len nach dem Push
+    let total = desc_sz + payload.len(); // = skb->len after the push
     let mut psb_len = ((total as u32 - 1) / 128) + 1;
     psb_len |= 1 << RTK_PCI_TXBD_OWN_OFFSET;
 
-    // `get_tx_buffer_desc(ring, 16)` mit wp = 0 -> Offset 0.
+    // `get_tx_buffer_desc(ring, 16)` with wp = 0 -> offset 0.
     //
-    // ZWEI Deskriptoren in EINEN Ringplatz, und das passt genau:
-    // `struct rtw_pci_tx_buffer_desc` (pci.h:165) ist
-    // { __le16 buf_size; __le16 psb_len; __le32 dma; } = 8 Bytes, waehrend
-    // `tx_buf_desc_sz` 16 ist. Ein Platz fasst also Kopf- UND Nutzdaten-
-    // Deskriptor. Der erste zeigt auf die 48 Deskriptorbytes, der zweite auf
-    // die Nutzdaten dahinter.
+    // Two descriptors fit in one ring slot: `struct rtw_pci_tx_buffer_desc`
+    // (pci.h:165) is { __le16 buf_size; __le16 psb_len; __le32 dma; } =
+    // 8 bytes, while `tx_buf_desc_sz` is 16. The first points to the 48
+    // descriptor bytes, the second to the payload behind them.
     let ring = trx.tx[Q_BCN].handle;
     // buf_desc[0] = { buf_size: 48, psb_len, dma }
     host::dma_w32(ring, 0, (desc_sz as u32 & 0xFFFF) | (psb_len << 16));
@@ -448,9 +428,8 @@ pub fn write_data_rsvd_page(
     host::fence();
 
     if verbose {
-        // Zurueckgelesen, nicht geglaubt: liegen Deskriptor und Nutzdaten
-        // wirklich im DMA-Puffer, und steht der Ringeintrag so da, wie wir
-        // ihn geschrieben haben?
+        // Read back: are descriptor and payload really in the DMA buffer, and is
+        // the ring entry as written?
         host::print("    stage @0x");
         host::print_hex32(dma);
         host::print("  desc[0..8] =");
@@ -496,13 +475,12 @@ pub fn write_data_rsvd_page(
     true
 }
 
-// ── Stufe 3a: rtw_hci_interface_cfg ──────────────────────────────
+// ── rtw_hci_interface_cfg ────────────────────────────────────────
 
 /// pci.c:1437-1450 `rtw_pci_interface_cfg`.
 ///
-/// Der einzige Chip mit einem Zweig ist der 8822C, und der gilt ab
-/// **cut D**. Unser Geraet meldet cut 3 = `RTW_CHIP_VER_CUT_D`, also gilt er.
-/// Die Zeile schaltet den PCIe-EMAC im Aux-Takt auf den schnellen Takt um.
+/// The only chip with a branch is the 8822C, from cut D on. It switches
+/// the PCIe EMAC from the aux clock to the fast clock.
 pub fn interface_cfg(h: i32, cut_version: u8) {
     if cut_version >= crate::regs::RTW_CHIP_VER_CUT_D {
         host::w32_mask(h, crate::regs::REG_HCI_MIX_CFG,
@@ -510,14 +488,14 @@ pub fn interface_cfg(h: i32, cut_version: u8) {
     }
 }
 
-// ── Stufe 4a: die H2C-Queue ──────────────────────────────────────
+// ── H2C queue ────────────────────────────────────────────────────
 
-/// pci.h:62-73 — der Schreibzeiger der H2C-Queue.
+/// pci.h:62-73: the H2C queue write pointer.
 pub const RTK_PCI_TXBD_IDX_H2CQ: u32 = 0x132C; // pci.h:66
 
-// Der DBI-Weg: die PCIe-Konfigurationsregister des Chips, erreicht ueber
-// MMIO statt ueber den Konfigurationsraum des Busses. Realtek legt seine
-// eigenen Link-Schalter dorthin.
+// The DBI path: the chip's PCIe configuration registers, reached via MMIO
+// instead of the bus configuration space. Realtek places its own link
+// switches there.
 pub const REG_DBI_WDATA_V1: u32 = 0x03E8; // pci.h:20
 pub const REG_DBI_RDATA_V1: u32 = 0x03EC; // pci.h:21
 pub const REG_DBI_FLAG_V1: u32 = 0x03F0; // pci.h:22
@@ -531,17 +509,14 @@ pub const BIT_CLKREQ_SW_EN: u8 = 1 << 4; // pci.h:38
 pub const BIT_L1_SW_EN: u8 = 1 << 3; // pci.h:39
 pub const RTK_PCIE_CLKDLY_CTRL: u16 = 0x0725; // pci.h:41
 
-/// Ein Platz je Ringeintrag fuer den H2C-Zwischenpuffer. Linux legt je
-/// Paket ein skb an; solange der Chip einen Deskriptor nicht abgeholt hat,
-/// darf sein Inhalt nicht ueberschrieben werden. Ein Platz je Index ist die
-/// gleiche Zusage ohne Allokator.
-pub const H2C_SLOT_BYTES: u32 = 128; // 48 Deskriptor + 32 Nutzdaten, aufgerundet
+/// One slot per ring entry for the H2C staging buffer. Linux allocates an
+/// skb per packet; its contents must not be overwritten until the chip has
+/// fetched the descriptor. One slot per index gives the same guarantee
+/// without an allocator.
+pub const H2C_SLOT_BYTES: u32 = 128; // 48 descriptor + 32 payload, rounded up
 
-/// Der H2C-Zwischenpuffer braucht einen Platz je RINGeintrag, nicht je
-/// gesendetem Paket: `wp` laeuft ueber die ganze Ringlaenge und faengt
-/// dann von vorn an. Beim Anlauf gehen zwei Pakete raus, danach viele —
-/// und ein Puffer, der nur fuer den Anlauf reicht, faellt genau dann um,
-/// wenn schon alles zu laufen scheint.
+/// The H2C staging buffer needs one slot per ring entry, not per sent
+/// packet: `wp` runs over the whole ring length and then wraps.
 pub const H2C_STAGE_BYTES: u32 = RTK_DEFAULT_TX_DESC_NUM * H2C_SLOT_BYTES;
 
 /// pci.h:154-160 `avail_desc`
@@ -550,24 +525,24 @@ pub fn avail_desc(wp: u32, rp: u32, len: u32) -> u32 {
     if rp > wp { rp - wp - 1 } else { len - wp + rp - 1 }
 }
 
-/// pci.c:34-52 `rtw_pci_get_tx_qsel` — nur die Queues, die wir fahren.
+/// pci.c:34-52 `rtw_pci_get_tx_qsel`, only the queues in use.
 pub fn tx_qsel(queue: usize) -> u8 {
     match queue {
         Q_BCN => crate::tx::TX_DESC_QSEL_BEACON,
         Q_H2C => crate::tx::TX_DESC_QSEL_H2C,
         Q_MGMT => crate::tx::TX_DESC_QSEL_MGMT,
         Q_HI0 => crate::tx::TX_DESC_QSEL_HIGH,
-        // Linux: `default: return skb->priority;` — die Datenqueues tragen
-        // die Priorität des Pakets. Kein Weg, den Stufe 4a benutzt.
+        // Linux: `default: return skb->priority;`, the data queues carry the
+        // packet's priority.
         _ => 0,
     }
 }
 
 /// pci.c:914-926 `rtw_pci_tx_kick_off_queue`.
 ///
-/// `rtw_pci_deep_ps_leave` davor gilt nur ohne `FW_FEATURE_TX_WAKE` — unsere
-/// Firmware (9.9.15, feature 0x1e7) fuehrt das Bit, und Deep-PS ist ohnehin
-/// nicht gebaut.
+/// The preceding `rtw_pci_deep_ps_leave` only applies without
+/// `FW_FEATURE_TX_WAKE`; the firmware has that bit, and deep PS is not
+/// implemented.
 pub fn tx_kick_off_queue(h: i32, trx: &Trx, queue: usize) {
     let idx = match TXQ[queue].idx {
         Some(reg) => reg,
@@ -576,11 +551,11 @@ pub fn tx_kick_off_queue(h: i32, trx: &Trx, queue: usize) {
     host::w16(h, idx, (trx.tx[queue].wp & TRX_BD_IDX_MASK) as u16);
 }
 
-/// pci.c:806-895 `rtw_pci_tx_write_data`, fuer eine Queue MIT Schreibzeiger.
+/// pci.c:806-895 `rtw_pci_tx_write_data`, for a queue with a write pointer.
 ///
-/// Der Unterschied zum Reserved-Page-Weg: hier gibt es `avail_desc`, der
-/// Ringplatz richtet sich nach `wp`, das OWN-Bit wird NICHT gesetzt (das ist
-/// der BCN-Sonderfall), und `wp` rueckt danach vor.
+/// Unlike the reserved page path there is `avail_desc`, the ring slot
+/// follows `wp`, the OWN bit is not set (that is the BCN special case), and
+/// `wp` advances afterwards.
 pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
                      info: &mut crate::tx::TxPktInfo, payload: &[u8]) -> bool {
     let desc_sz = crate::tx::TX_PKT_DESC_SZ;
@@ -599,21 +574,17 @@ pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
     let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
     crate::tx::fill_tx_desc(info, &mut desc);
 
-    // Ein Platz je Ringindex, damit ein noch nicht abgeholtes Paket nicht
-    // unter dem Chip weggeschrieben wird. Der H2C-Weg hat sein eigenes,
-    // engeres Raster — dort sind die Nutzdaten immer 32 Bytes.
+    // One slot per ring index, so a packet not yet fetched is not overwritten
+    // under the chip. The H2C path has its own smaller stride; its payload is
+    // always 32 bytes.
     let stride = if queue == Q_H2C { H2C_SLOT_BYTES } else { TX_SLOT_BYTES };
     let slot = wp * stride;
-    // **Beide Schreibzugriffe werden GEPRUEFT.** `npk_dma_write` lehnt
-    // einen Versatz hinter dem Puffer ab und gibt -1; wer das wegwirft,
-    // traegt gleich darauf eine Adresse in den Buffer-Deskriptor ein, die
-    // dem Chip nicht gehoert — und der sendet dann, was dort liegt. Ein
-    // abgelehnter DMA-Schreibzugriff ist keine Nebensache, er ist die
-    // Meldung, dass der Zwischenpuffer nicht zum Ring passt.
-    // Und der Platz muss den Rahmen ueberhaupt fassen. Heute reicht er
-    // (48 + 1540 bei MTU 1500), aber ein Ueberlauf HIER liefe in den
-    // NACHBARplatz und nicht aus dem Puffer heraus — der Kernel saehe
-    // nichts davon.
+    // Both writes are checked: `npk_dma_write` rejects an offset beyond the
+    // buffer with -1, and ignoring that would put an address the driver does
+    // not own into the buffer descriptor, so the chip would transmit whatever
+    // lies there.
+    // The slot must also hold the frame (48 + 1540 at MTU 1500): an overflow
+    // here would run into the neighbouring slot, invisible to the kernel.
     if desc_sz + payload.len() > stride as usize {
         host::loud_begin();
         host::print("[rtl8822ce] Rahmen passt nicht in einen Platz: ");
@@ -645,7 +616,7 @@ pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
     let total = desc_sz + payload.len();
     let psb_len = ((total as u32 - 1) / 128) + 1;
 
-    // `get_tx_buffer_desc(ring, tx_buf_desc_sz)` — der Platz nach `wp`.
+    // `get_tx_buffer_desc(ring, tx_buf_desc_sz)`: the slot at `wp`.
     let ring = trx.tx[queue].handle;
     let off = wp * TX_BUF_DESC_SZ;
     host::dma_w32(ring, off, (desc_sz as u32 & 0xFFFF) | (psb_len << 16));
@@ -673,16 +644,13 @@ pub fn write_data_h2c(h: i32, trx: &mut Trx, stage: i32, buf: &[u8]) -> bool {
     true
 }
 
-/// Wartet, bis die Firmware die H2C-Queue leergeraeumt hat.
+/// Wait until the firmware has drained the H2C queue.
 ///
-/// **Kein Linux-Gegenstueck** — dort holt der Treiber den Lesezeiger gar
-/// nicht ab, er schreibt und geht weiter. Hier ist es eine MESSUNG: in
-/// 0.11.0 stand der HW-Zeiger auf 1, als unserer schon auf 2 stand, und
-/// eine Stichprobe einen Befehl nach dem Anstoss sagt nichts darueber, ob
-/// der Chip nicht will oder nur noch nicht fertig ist
-/// ([[feedback_a_test_of_a_state_must_say_when]]).
+/// No Linux counterpart: there the driver never reads back the read
+/// pointer. A single sample right after the kick says nothing, so this
+/// waits up to a deadline.
 ///
-/// Gibt zurueck, ob er aufgeholt hat, und wie lange es gedauert hat.
+/// Returns whether it caught up and how long it took.
 pub fn h2c_wait_consumed(h: i32, trx: &Trx, frist_us: u64) -> (bool, u64, u32) {
     let want = trx.tx[Q_H2C].wp & TRX_BD_IDX_MASK;
     let start = host::now_us();
@@ -700,24 +668,19 @@ pub fn h2c_wait_consumed(h: i32, trx: &Trx, frist_us: u64) -> (bool, u64, u32) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 5a: der Empfangsweg
+// RX path
 // ════════════════════════════════════════════════════════════════
 
 /// pci.h:204 `RX_TAG_MAX`
 pub const RX_TAG_MAX: u16 = 8192;
 
-/// pci.c:1023-1039 `rtw_pci_get_hw_rx_ring_nr`.
-///
-/// Der Chip schreibt seinen Stand in die oberen zwoelf Bit desselben
-/// Registers, aus dem wir unseren lesen. Die Differenz ist die Zahl der
-/// Puffer, die er gefuellt hat.
 // ── Interrupts: `pci.c` 374-387, 480-513, 1119-1141; `pci.h` 81-145 ──
 //
-// Der 8822C ist `RTW_WCPU_3081` (rtw8822c.c:5337), also gehoert HIMR3/HISR3
-// dazu. Linux fordert EINEN MSI-Vektor an (`rtw_pci_request_irq`); die
-// Behandlung ist zweigeteilt: der harte Teil schaltet HIMR ab, der Faden
-// quittiert HISR, arbeitet und schaltet HIMR wieder an. Bei uns zaehlt der
-// Kernel-ISR nur und weckt den Treiber-Fiber — beide Haelften laufen dort.
+// The 8822C is `RTW_WCPU_3081` (rtw8822c.c:5337), so HIMR3/HISR3 apply.
+// Linux requests one MSI vector (`rtw_pci_request_irq`) and splits
+// handling: the hard part masks HIMR, the thread acks HISR, works and
+// unmasks HIMR. Here the kernel ISR only counts and wakes the driver
+// fiber, where both halves run.
 pub const RTK_PCI_HIMR0: u32 = 0x0B0;
 pub const RTK_PCI_HISR0: u32 = 0x0B4;
 pub const RTK_PCI_HIMR1: u32 = 0x0B8;
@@ -761,10 +724,10 @@ pub fn disable_interrupt(h: i32) {
     host::w32(h, RTK_PCI_HIMR3, 0);
 }
 
-/// `rtw_pci_irq_recognized`: HISR lesen, auf die Maske beschraenken und
-/// genau das Gelesene wieder loeschen (write-1-to-clear). Bleibt ein Bit
-/// stehen, erzeugt der Chip beim naechsten Ereignis KEINE neue MSI-Flanke
-/// (Kommentar in `rtw_pci_interrupt_handler`).
+/// `rtw_pci_irq_recognized`: read HISR, restrict to the mask and clear
+/// exactly what was read (write-1-to-clear). If a bit stays set, the chip
+/// produces no new MSI edge on the next event (comment in
+/// `rtw_pci_interrupt_handler`).
 pub fn irq_recognized(h: i32) -> [u32; 4] {
     let mut st = [
         host::r32(h, RTK_PCI_HISR0),
@@ -781,6 +744,11 @@ pub fn irq_recognized(h: i32) -> [u32; 4] {
     st
 }
 
+/// pci.c:1023-1039 `rtw_pci_get_hw_rx_ring_nr`.
+///
+/// The chip writes its position into the upper twelve bits of the same
+/// register we read ours from; the difference is the number of buffers it
+/// has filled.
 pub fn get_hw_rx_ring_nr(h: i32, trx: &Trx) -> u32 {
     let tmp = host::r32(h, RTK_PCI_RXBD_IDX_MPDUQ);
     let cur_wp = (tmp & TRX_BD_HW_IDX_MASK) >> 16;
@@ -793,10 +761,9 @@ pub fn get_hw_rx_ring_nr(h: i32, trx: &Trx) -> u32 {
 
 /// pci.c:683-702 `rtw_pci_dma_check`.
 ///
-/// **Hier bekommt `rx_tag` aus Stufe 2a seinen ersten Leser.** Der Chip
-/// schreibt in `total_pkt_size` des Pufferdeskriptors eine fortlaufende
-/// Marke; stimmt sie nicht mit unserer, hat der Bus etwas verschluckt.
-/// Linux warnt und rechnet weiter — genau so steht es hier.
+/// The chip writes a running tag into `total_pkt_size` of the buffer
+/// descriptor; if it does not match ours, the bus lost something. Linux
+/// warns and continues, as does this.
 pub fn dma_check(trx: &mut Trx, idx: u32) -> bool {
     let off = idx * RX_BUF_DESC_SZ;
     // `struct rtw_pci_rx_buffer_desc` (pci.h:193):
@@ -815,26 +782,25 @@ pub fn dma_check(trx: &mut Trx, idx: u32) -> bool {
     ok
 }
 
-/// pci.c:235-250 `rtw_pci_sync_rx_desc_device` — den Platz wieder
-/// freigeben, damit der Chip ihn erneut fuellt.
+/// pci.c:235-250 `rtw_pci_sync_rx_desc_device`: hand the slot back so the
+/// chip fills it again.
 fn sync_rx_desc_device(trx: &Trx, idx: u32) {
     let off = idx * RX_BUF_DESC_SZ;
-    // `memset(buf_desc, 0, sizeof(*buf_desc))`, dann buf_size und dma.
+    // `memset(buf_desc, 0, sizeof(*buf_desc))`, then buf_size and dma.
     host::dma_w32(trx.rx.handle, off, RTK_PCI_RX_BUF_SIZE & 0xFFFF);
     host::dma_w32(trx.rx.handle, off + 4, trx.rx.buf_phys(idx));
 }
 
-/// pci.c:1041-1117 `rtw_pci_rx_napi`, als ABFRAGEweg.
+/// pci.c:1041-1117 `rtw_pci_rx_napi`.
 ///
-/// **Benannte Abweichung:** Linux wird vom Interrupt geweckt und gibt das
-/// Paket an `ieee80211_rx_napi`. Wir fragen ab und rufen `deliver` je
-/// Paket; alles dazwischen — Deskriptor lesen, `rx_tag` pruefen, Platz
-/// wieder freigeben, Zeiger fortschreiben — ist dieselbe Folge.
+/// Linux passes each packet to `ieee80211_rx_napi`; here `deliver` is
+/// called per packet. Everything in between (read the descriptor, check
+/// `rx_tag`, release the slot, advance the pointer) is the same sequence.
 ///
-/// Der `skb`-Tausch aus Linux entfaellt: dort wird ein NEUER Puffer
-/// angelegt und der alte sofort wieder an die DMA gehaengt, damit der
-/// Empfang nicht stockt. Bei uns wird der Inhalt in den Linearspeicher
-/// gelesen, und danach ist der Puffer genauso wieder frei.
+/// Linux's skb swap is omitted: it allocates a new buffer and hands the
+/// old one straight back to DMA so reception does not stall. Here the
+/// contents are copied into linear memory, after which the buffer is free
+/// again just the same.
 #[allow(clippy::too_many_arguments)]
 pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
                dm: &mut crate::dm::DmInfo, path_div: &mut crate::dm::PathDiv,
@@ -849,7 +815,7 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
         dma_check(trx, cur_rp);
 
         let (bh, boff) = trx.rx.buf_loc(cur_rp);
-        // Erst den Deskriptorkopf, dann so viel, wie er ansagt.
+        // First the descriptor header, then as much as it announces.
         let head = crate::tx::TX_PKT_DESC_SZ.min(buf.len());
         host::dma_read_buf(bh, boff, &mut buf[..head]);
         let stat = crate::rx::query_rx_desc(&buf[..head]);
@@ -861,12 +827,12 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
             host::dma_read_buf(bh, boff, &mut buf[..total]);
         }
 
-        // `query_phy_status` braucht den Block HINTER dem Deskriptor.
+        // `query_phy_status` needs the block behind the descriptor.
         let mut stat = crate::rx::query_rx_desc_full(&buf[..total], dm,
                                                      path_div, rf_path_num,
                                                      current_band_width);
-        // `rtw_pci_rx_napi` tut das nach dem Abziehen des Deskriptors.
-        // Ohne Suche ist `scanning` falsch, siehe dort.
+        // `rtw_pci_rx_napi` does this after stripping the descriptor. Without
+        // scanning, `scanning` is false; see there.
         crate::rx::update_rx_freq_for_invalid(&mut stat, current_channel,
                                               false);
         deliver(&stat, &buf[..total]);
@@ -891,58 +857,43 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 5b: der Sendeweg
+// TX path
 // ════════════════════════════════════════════════════════════════
 
-/// Der Ring, aus dem ein gewoehnlicher Rahmen gesendet wird.
+/// The ring an ordinary frame is sent from.
 ///
-/// Linux gibt `dma_map_single` auf dem skb selbst — jeder Rahmen liegt
-/// dort, wo der Netzstapel ihn hingelegt hat. Wir haben keinen Allokator,
-/// also gibt es einen festen Platz je Ringindex, genau wie beim H2C-Weg.
+/// Linux uses `dma_map_single` on the skb itself. There is no allocator
+/// here, so there is a fixed slot per ring index, as on the H2C path.
 pub const TX_SLOT_BYTES: u32 = 2048;
 
-/// So gross muss der Zwischenpuffer sein: ein Platz je Ringindex — und
-/// zwar des GROESSTEN Rings, der ihn benutzt.
+/// Size of the staging buffer: one slot per ring index of the largest ring
+/// using it.
 ///
-/// **Hier stand bis 0.25.1 `RTK_DEFAULT_TX_DESC_NUM` (128), waehrend der
-/// Datenring `Q_BE` 256 Eintraege hat.** Ab dem 128. gesendeten Rahmen
-/// lag `wp * TX_SLOT_BYTES` hinter dem Puffer. Der Kernel lehnte den
-/// Schreibzugriff ab (`npk_dma_write` prueft `off + len > pages * 4096`
-/// und gibt -1), der Rueckgabewert wurde weggeworfen — und in den
-/// Buffer-Deskriptor ging trotzdem `dma_phys(stage) + slot`, also eine
-/// Adresse AUSSERHALB unserer Belegung. Der Chip holte sich von dort
-/// fremden Speicher und sendete ihn.
-///
-/// Das ergibt genau die beobachtete Form: **im Leerlauf haelt die
-/// Verbindung lange, unter Verkehr stirbt sie** — die Schwelle ist keine
-/// Zeit, sondern eine ANZAHL gesendeter Rahmen. Und danach ist jeder
-/// zweite Ringumlauf kaputt (Plaetze 128-255), was von aussen aussieht
-/// wie eine Leitung, auf der manchmal etwas durchkommt.
+/// If it were smaller than `Q_BE`'s 256 entries, `wp * TX_SLOT_BYTES` would
+/// run past the buffer; `npk_dma_write` would reject the write, but the
+/// buffer descriptor would still point outside our allocation and the chip
+/// would transmit foreign memory.
 pub const MGMT_STAGE_SLOTS: u32 = RTK_BEQ_TX_DESC_NUM;
 pub const MGMT_STAGE_BYTES: u32 = MGMT_STAGE_SLOTS * TX_SLOT_BYTES;
 
-// **Ein Deckel, der nicht wegdriften kann.** Waechst ein Ring, faellt
-// der Bau um — statt dass ab einem bestimmten Rahmen still daneben
-// geschrieben wird. Genau diese Zusicherung hat bis 0.25.1 gefehlt.
+// A limit that cannot drift: if a ring grows, the build fails instead of
+// silently writing out of bounds from a certain frame on.
 const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_BEQ_TX_DESC_NUM);
 const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_DEFAULT_TX_DESC_NUM);
 const _: () = assert!(H2C_STAGE_BYTES / H2C_SLOT_BYTES >= RTK_DEFAULT_TX_DESC_NUM);
 
 /// pci.c:897-913 `rtw_pci_tx_write`.
 ///
-/// Der Zweig `avail_desc < 2` haelt in Linux die mac80211-Queue an. Ohne
-/// obere Haelfte gibt es nichts anzuhalten; gemeldet wird es trotzdem,
-/// denn ein voller Ring ist Gegendruck und kein Fehler.
+/// The `avail_desc < 2` branch stops the mac80211 queue in Linux. There is
+/// nothing to stop here, but it is reported: a full ring is backpressure,
+/// not an error.
 pub fn tx_write(h: i32, trx: &mut Trx, stage: i32, queue: usize,
                 info: &mut crate::tx::TxPktInfo, frame: &[u8]) -> bool {
     if !tx_write_data(h, trx, stage, queue, info, frame) {
         return false;
     }
-    // **`rp` steht bei uns still.** In Linux zieht `rtw_pci_tx_isr` ihn
-    // nach, wenn der Chip einen Deskriptor abgearbeitet hat; ohne
-    // Interrupt und ohne Sendequittung gibt es dafuer noch keinen Weg.
-    // Bei drei Rahmen in einem Ring von 128 ist das folgenlos — bei einem
-    // LAUFENDEN Sender ist es der naechste Posten (Stufe 5c).
+    // `rp` is only advanced by `tx_isr`; in Linux `rtw_pci_tx_isr` does that
+    // once the chip has processed a descriptor.
     let r = &trx.tx[queue];
     if avail_desc(r.wp, r.rp, r.len) < 2 {
         host::print("[rtl8822ce] Sendering fast voll (Gegendruck)\n");
@@ -950,11 +901,10 @@ pub fn tx_write(h: i32, trx: &mut Trx, stage: i32, queue: usize,
     true
 }
 
-/// Wie `h2c_wait_consumed`, aber fuer eine beliebige Sendequeue.
+/// Like `h2c_wait_consumed`, but for any TX queue.
 ///
-/// **Das ist eine DEADLINE, keine Stichprobe.** Ein Blick gleich nach dem
-/// Anstossen sagt nichts: der Chip hat den Deskriptor dann noch nicht
-/// gelesen, und ein `hw != wp` waere kein Befund.
+/// Waits up to a deadline: right after the kick the chip has not read the
+/// descriptor yet, so `hw != wp` alone means nothing.
 pub fn tx_wait_consumed(h: i32, trx: &Trx, queue: usize, frist_us: u64)
     -> (bool, u64, u32)
 {
@@ -976,27 +926,14 @@ pub fn tx_wait_consumed(h: i32, trx: &Trx, queue: usize, frist_us: u64)
     }
 }
 
-/// pci.c:915-1021 `rtw_pci_tx_isr`, der Teil, der den LESEzeiger nachzieht.
+/// How many descriptors the hardware still has ahead of it in this queue.
 ///
-/// **Ohne ihn steht `r.rp` still** und `avail_desc` zaehlt den Ring
-/// langsam voll, obwohl der Chip laengst alles abgeholt hat. Bei drei
-/// Rahmen ist das folgenlos, bei einem laufenden Sender nach 127.
+/// This decides aggregation: the chip aggregates what is in the ring when
+/// it wins the medium, not what the driver queued in one pass. The two
+/// differ when the medium is busy and descriptors pile up.
 ///
-/// Der Rest von Linux' Funktion ist Pufferverwaltung (`skb_dequeue`,
-/// `dma_unmap_single`, `ieee80211_tx_status_irqsafe`) — wir haben feste
-/// Plaetze je Ringindex und keinen Netzstapel, der eine Quittung erwartet.
-/// Gibt zurueck, wie viele Deskriptoren seit dem letzten Mal fertig wurden.
-/// Wieviele Deskriptoren die Hardware in dieser Queue noch VOR SICH hat.
-///
-/// **Das ist die Zahl, die ueber Aggregation entscheidet.** Der Chip
-/// fasst zusammen, was beim Griff nach der Sendegelegenheit im Ring
-/// liegt — nicht, was der Treiber in einem Durchlauf eingelegt hat. Die
-/// zwei sind verschieden, sobald das Medium belegt ist: dann stapeln
-/// sich die Deskriptoren im Ring, waehrend der Treiber sie einzeln
-/// nachlegt.
-///
-/// Gelesen wird derselbe Registerwert wie in `tx_isr`: der Lesezeiger
-/// der HARDWARE steht in den oberen sechzehn Bit.
+/// Reads the same register as `tx_isr`: the hardware read pointer is in
+/// the upper sixteen bits.
 pub fn tx_pending(h: i32, trx: &Trx, queue: usize) -> u32 {
     let idx_reg = match TXQ[queue].idx {
         Some(reg) => reg,
@@ -1011,6 +948,13 @@ pub fn tx_pending(h: i32, trx: &Trx, queue: usize) -> u32 {
     }
 }
 
+/// pci.c:915-1021 `rtw_pci_tx_isr`, the part that advances the read
+/// pointer. Without it `r.rp` stands still and `avail_desc` slowly counts
+/// the ring full although the chip has fetched everything.
+///
+/// The rest of Linux's function is buffer management (`skb_dequeue`,
+/// `dma_unmap_single`, `ieee80211_tx_status_irqsafe`); here slots are fixed
+/// per ring index. Returns how many descriptors completed since last time.
 pub fn tx_isr(h: i32, trx: &mut Trx, queue: usize) -> u32 {
     let idx_reg = match TXQ[queue].idx {
         Some(reg) => reg,
@@ -1028,78 +972,64 @@ pub fn tx_isr(h: i32, trx: &mut Trx, queue: usize) -> u32 {
     count
 }
 
-/// Der Zustand der PCIe-Strecke: ausgehandelte Geschwindigkeit und Breite,
-/// und vor allem **ob ASPM L1 an ist**.
+/// The PCIe link state: negotiated speed and width, and whether ASPM L1 is
+/// enabled.
 ///
-/// Warum das hier steht und nicht in einem Papier: rtw88 verteidigt sich
-/// aktiv dagegen. `rtw_pci_link_ps` (pci.c:1373) wird beim Betreten und
-/// Verlassen JEDES Abholtakts gerufen, und der Kommentar darueber ist eine
-/// Warnung, keine Fussnote:
+/// rtw88 defends against L1 actively: `rtw_pci_link_ps` (pci.c:1373) is
+/// called on entering and leaving every NAPI poll, and its comment warns:
 ///
 /// > we've experienced some inter-operability issues that the link tends to
 /// > enter L1 state on the fly even when driver is having high throughput
 ///
-/// Wir portieren diese Verteidigung nicht. Ob uns das etwas kostet, haengt
-/// an genau einem Bit im Link-Control-Register der Karte — und das ist eine
-/// MESSUNG, keine Vermutung. Deshalb zuerst die Zeile und dann, falls sie
-/// „L1 an" sagt, der Umbau.
+/// That defence is not ported; this reports whether it would matter.
 ///
-/// Gibt `None`, wenn das Geraet gar keine PCIe-Capability fuehrt (dann ist
-/// es kein PCIe-Geraet, und die Frage stellt sich nicht).
+/// Returns `None` if the device has no PCIe capability.
 pub struct LinkState {
-    /// LNKCTL Bit 1:0 — 0 aus · 1 L0s · 2 L1 · 3 beide
+    /// LNKCTL bits 1:0: 0 off · 1 L0s · 2 L1 · 3 both
     pub aspm: u8,
-    /// LNKCTL Bit 8
+    /// LNKCTL bit 8
     pub clkreq: bool,
-    /// LNKSTA Bit 3:0 — 1 = 2,5 GT/s · 2 = 5 GT/s · 3 = 8 GT/s
+    /// LNKSTA bits 3:0: 1 = 2.5 GT/s · 2 = 5 GT/s · 3 = 8 GT/s
     pub speed: u8,
-    /// LNKSTA Bit 9:4
+    /// LNKSTA bits 9:4
     pub width: u8,
-    /// LNKCAP Bit 17:15 — die L1-Austrittszeit, die der Chip ANSAGT.
-    /// 0..6 = 1/2/4/8/16/32/64 us, 7 = mehr als 64.
+    /// LNKCAP bits 17:15: the L1 exit latency the chip advertises.
+    /// 0..6 = 1/2/4/8/16/32/64 us, 7 = more than 64.
     pub l1_exit: u8,
 }
 
-/// PCI Power Management Capability (ID 0x01) — das Geraet nach **D0**
-/// holen, bevor jemand ein Register liest.
+/// PCI power management capability (ID 0x01): bring the device to D0
+/// before any register is read.
 ///
-/// **Linux tut das im PCI-Kern, nicht im Treiber** (`pci_enable_device`
-/// -> `pci_power_up` -> `pci_raw_set_power_state`), und deshalb steht in
-/// rtw88 keine Zeile davon. Unser Kernel kennt Power States gar nicht:
-/// `kernel/src/drivers/pci.rs` hat keinen PM-Capability-Gang, kein D0 und
-/// keine Wartezeit. Dieselbe Klasse wie
-/// [[feedback_the_layer_above_the_driver_fills_in_what_it_never_sets]] —
-/// nur liegt die Schicht diesmal unter uns statt darueber.
+/// Linux does this in the PCI core, not the driver (`pci_enable_device` ->
+/// `pci_power_up` -> `pci_raw_set_power_state`), so rtw88 has no line of
+/// it. The nopeekOS kernel does not handle PCI power states.
 ///
-/// **Was das kostet:** ein Geraet in D3hot antwortet auf JEDE
-/// MMIO-Lesung mit lauter Einsen. Stufe 0 las die Chipkennung genau
-/// einmal, nannte sie tot und der Treiber war zu Ende — mal so, mal so,
-/// je nachdem in welchem Zustand die Firmware oder der vorige Lauf die
-/// Karte hinterlassen hat. Der Konfigurationsraum antwortet dabei
-/// normal, was den Fall so verwirrend macht.
+/// A device in D3hot answers every MMIO read with all ones while config
+/// space answers normally, so the chip ID would read as dead depending on
+/// the state the firmware or a previous run left it in.
 ///
-/// D3hot -> D0 braucht **10 ms** (PCI PM 1.2 §5.6.1; Linux
-/// `PCI_PM_D3HOT_WAIT`), und vorher darf nichts gelesen werden.
+/// D3hot -> D0 takes 10 ms (PCI PM 1.2 §5.6.1; Linux `PCI_PM_D3HOT_WAIT`),
+/// and nothing may be read before that.
 ///
-/// Gibt den Zustand ZURUECK, in dem das Geraet vorgefunden wurde, oder
-/// `None`, wenn es keine PM-Capability hat.
+/// Returns the state the device was found in, or `None` if it has no PM
+/// capability.
 pub fn power_up_d0(_h: i32) -> Option<u8> {
-    // Capability-Liste wie in `link_state`: 0x34 zeigt auf den ersten
-    // Eintrag, Byte 0 ist die Art, Byte 1 der naechste Zeiger. Der
-    // Zaehler deckelt eine ringfoermige Liste.
+    // Capability list as in `link_state`: 0x34 points to the first entry,
+    // byte 0 is the ID, byte 1 the next pointer. The counter bounds a cyclic
+    // list.
     let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
     let mut schritte = 0;
     while ptr >= 0x40 && ptr != 0xff && schritte < 48 {
         let hdr = host::pci_read_config(ptr);
         if hdr & 0xff == 0x01 {
-            // PMCSR liegt bei cap+4, Bit 1:0 ist der Zustand.
+            // PMCSR is at cap+4, bits 1:0 are the state.
             let pmcsr = host::pci_read_config(ptr + 4);
             let state = (pmcsr & 0x3) as u8;
             if state != 0 {
-                // Wie Linux: NUR die zwei Zustandsbits ersetzen und den
-                // Rest zurueckschreiben. Bit 15 ist PME_Status und
-                // loescht sich beim Zurueckschreiben einer gelesenen
-                // Eins — das tut `pci_raw_set_power_state` genauso.
+                // As in Linux: replace only the two state bits and write the rest back.
+                // Bit 15 is PME_Status, which clears when a read one is written back;
+                // `pci_raw_set_power_state` does the same.
                 host::pci_write_config(ptr + 4, (pmcsr & !0x3u32) | 0);
                 host::sleep_ms(10);
             }
@@ -1112,22 +1042,21 @@ pub fn power_up_d0(_h: i32) -> Option<u8> {
 }
 
 pub fn link_state() -> Option<LinkState> {
-    // Standard-Capability-Liste: 0x34 zeigt auf den ersten Eintrag, jeder
-    // traegt seine Art in Byte 0 und den naechsten Zeiger in Byte 1.
-    // Ein Zaehler deckelt den Gang — eine ringfoermige Liste gibt es in
-    // kaputter Firmware wirklich, und ohne Deckel steht der Treiber.
+    // Standard capability list: 0x34 points to the first entry, each carries
+    // its ID in byte 0 and the next pointer in byte 1. A counter bounds the
+    // walk, since broken firmware can produce a cyclic list.
     let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
     let mut schritte = 0;
     while ptr >= 0x40 && ptr != 0xff && schritte < 48 {
         let base = ptr & 0xfc;
         let w = host::pci_read_config(base);
-        // Der Eintrag muss nicht auf vier ausgerichtet liegen.
+        // The entry need not be 4-byte aligned.
         let shift = ((ptr & 0x3) * 8) as u32;
         let id = ((w >> shift) & 0xff) as u8;
         let next = ((w >> (shift + 8)) & 0xff) as u8;
         if id == 0x10 {
-            // PCI_CAP_ID_EXP. LNKCAP bei +0x0C, LNKCTL bei +0x10,
-            // LNKSTA bei +0x12 — LNKCTL und LNKSTA teilen sich ein Wort.
+            // PCI_CAP_ID_EXP. LNKCAP at +0x0C, LNKCTL at +0x10, LNKSTA at +0x12;
+            // LNKCTL and LNKSTA share a dword.
             let lnkcap = host::pci_read_config(ptr + 0x0c);
             let ctlsta = host::pci_read_config(ptr + 0x10);
             return Some(LinkState {
@@ -1146,11 +1075,10 @@ pub fn link_state() -> Option<LinkState> {
 
 /// pci.c:1236-1258 `rtw_dbi_write8`.
 ///
-/// **Die Adresse wandert in ZWEI Teile.** Die unteren zwei Bit waehlen das
-/// Byte im Datenwort (`REG_DBI_WDATA_V1 + remainder`), die Bits 11:2 die
-/// Wortadresse — und das Byte wird ein zweites Mal gebraucht, als
-/// Freigabemaske `BIT(remainder)` in den Bits 15:12. Wer nur die Wortadresse
-/// schreibt, schreibt nichts: ohne gesetztes WREN-Bit passiert nichts.
+/// The address is split in two: the low two bits select the byte in the
+/// data word (`REG_DBI_WDATA_V1 + remainder`), bits 11:2 the word address,
+/// and the byte position is used again as the enable mask `BIT(remainder)`
+/// in bits 15:12. Without a WREN bit set, nothing is written.
 pub fn dbi_write8(h: i32, addr: u16, data: u8) {
     let remainder = (addr as u32) & !(BITS_DBI_WREN | BITS_DBI_ADDR_MASK);
     let write_addr = ((addr as u32) & BITS_DBI_ADDR_MASK)
@@ -1183,44 +1111,38 @@ pub fn dbi_read8(h: i32, addr: u16) -> Option<u8> {
     None
 }
 
-/// pci.c:1298-1334 `rtw_pci_link_cfg`, der Zweig fuer 8822C — und EINE
-/// benannte Abweichung.
+/// pci.c:1298-1334 `rtw_pci_link_cfg`, the 8822C branch, with one
+/// deliberate deviation.
 ///
-/// Linux tut hier zwei Dinge: `RTK_PCIE_CLKDLY_CTRL = 0` (der 8822C
-/// kalibriert seinen Referenztakt selbst und braucht keine Verzoegerung),
-/// und, wenn der Wirt CLKREQ fuehrt, `rtw_pci_clkreq_set(true)` — es
-/// SCHALTET Realteks eigenes Stromsparmodul EIN.
+/// Linux does two things here: `RTK_PCIE_CLKDLY_CTRL = 0` (the 8822C
+/// calibrates its reference clock itself), and, if the host supports
+/// CLKREQ, `rtw_pci_clkreq_set(true)`, which enables Realtek's own power
+/// saving module.
 ///
-/// **Das tun wir nicht, und der Grund ist die Haelfte, die wir nicht
-/// haben.** rtw88 schaltet das Modul ein und nimmt es danach in JEDEM
-/// Abholtakt wieder heraus (`rtw_pci_link_ps`, pci.c:1373), weil es sonst
-/// unter Last in L1 faellt — der Kommentar dort sagt es woertlich. Wir
-/// haben keinen solchen Takt und keinen Schlaf ueberhaupt. Das Modul
-/// einzuschalten, ohne es zu verwalten, waere die schlechte Haelfte von
-/// beidem.
-///
-/// Ab Werk ist es aus. Wir lassen es aus und sagen es.
+/// The latter is not done: rtw88 enables the module and then takes it out
+/// again on every NAPI poll (`rtw_pci_link_ps`, pci.c:1373) because it
+/// otherwise drops into L1 under load. This driver has no such poll hook,
+/// and enabling the module without managing it would be worse than
+/// leaving it off, which is the factory default.
 pub fn link_cfg(h: i32) {
     dbi_write8(h, RTK_PCIE_CLKDLY_CTRL, 0);
 }
 
-/// Der Zustand von Realteks eigenem Link-Schalter, zum Nachsehen.
+/// The state of Realtek's own link switch, for inspection.
 pub fn link_cfg_state(h: i32) -> Option<(bool, bool)> {
     dbi_read8(h, RTK_PCIE_LINK_CFG)
         .map(|v| (v & BIT_L1_SW_EN != 0, v & BIT_CLKREQ_SW_EN != 0))
 }
 
-/// Das STANDARD-ASPM der Karte im Konfigurationsraum ab- oder anschalten —
-/// dasselbe, was Linux' `pci_disable_link_state(PCIE_LINK_STATE_L1)` tut.
+/// Enable or disable the card's standard ASPM in config space, the same as
+/// Linux's `pci_disable_link_state(PCIE_LINK_STATE_L1)`.
 ///
-/// **Das ist nicht Realteks Schalter**, sondern das Bit, mit dem die Karte
-/// dem Bus gegenueber erklaert, dass sie L1 betreten darf. Es steht auf
-/// diesem Geraet AN, und die Karte sagt selbst, dass sie 64 us braucht, um
-/// wieder herauszukommen (LNKCAP Bit 17:15). Wer alle 700 us ein Paket
-/// bekommt, zahlt das womoeglich jedes Mal.
+/// This is not Realtek's switch but the bit by which the card tells the
+/// bus it may enter L1. The card advertises up to 64 us to exit L1 again
+/// (LNKCAP bits 17:15), which may be paid on every packet.
 ///
-/// Gibt den vorherigen Wert der zwei Bits zurueck, damit der Bericht sagen
-/// kann, was er VORGEFUNDEN hat — nicht nur, was er eingestellt hat.
+/// Returns the previous value of the two bits so the caller can report
+/// what it found, not only what it set.
 pub fn aspm_host_set(enable: bool) -> Option<u8> {
     let mut ptr = (host::pci_read_config(0x34) & 0xff) as u8;
     let mut schritte = 0;
@@ -1231,9 +1153,8 @@ pub fn aspm_host_set(enable: bool) -> Option<u8> {
             let off = ptr + 0x10;
             let cur = host::pci_read_config(off);
             let vorher = (cur & 0x3) as u8;
-            // LNKCTL und LNKSTA teilen sich das Wort. LNKSTA ist rein
-            // lesend, also darf das ganze Wort zurueckgeschrieben werden —
-            // aber NUR die zwei ASPM-Bits werden veraendert.
+            // LNKCTL and LNKSTA share the dword. LNKSTA is read-only, so the whole
+            // dword may be written back, but only the two ASPM bits change.
             let neu = if enable { cur | 0x2 } else { cur & !0x3 };
             if neu != cur {
                 host::pci_write_config(off, neu);

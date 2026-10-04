@@ -1,9 +1,8 @@
-//! `bf.c` aus Linux 6.18.26 rtw88 — nur `rtw_bf_phy_init`.
+//! `bf.c` from Linux 6.18.26 rtw88, only `rtw_bf_phy_init`.
 //!
-//! Der Rest von bf.c (Beamformer/Beamformee anmelden, CSI-Raten, die
-//! Gruppentabelle) haengt an einer VERBINDUNG und gehoert zu der Stufe, die
-//! eine aufbaut. Hier steht die Grundeinstellung, die `phy_set_param` zum
-//! Schluss setzt.
+//! The rest of bf.c (beamformer/beamformee registration, CSI rates, the
+//! group table) belongs to association. This is the baseline setup that
+//! `phy_set_param` applies last.
 #![allow(dead_code)]
 
 use crate::host;

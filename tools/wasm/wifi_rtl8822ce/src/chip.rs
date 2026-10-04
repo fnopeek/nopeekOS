@@ -1,19 +1,20 @@
-//! `rtw8822c.c` aus Linux 6.18.26 — was NUR dieser Chip tut.
+//! `rtw8822c.c` from Linux 6.18.26: what only this chip does.
 //!
-//! Der Schnitt ist derselbe wie in Linux: `mac.c` ist fuer alle rtw88-Chips
-//! gleich und ruft an genau zwei Stellen in den Chip hinein
-//! (`chip->ops->mac_init`, `chip->page_table`/`rqpn_table`). Was hier steht,
-//! ist diese Hinein-Haelfte fuer den 8822C.
+//! The split matches Linux: `mac.c`, `phy.c` and `coex.c` are common to all
+//! rtw88 chips and call into the chip through `chip->ops` and the chip
+//! tables (`chip->page_table`/`rqpn_table`). This module is that chip half
+//! for the 8822C.
 //!
-//! Portiert: `page_table_8822c` · `rqpn_table_8822c` · `rtw8822c_mac_init`.
+//! Ported: `page_table_8822c` · `rqpn_table_8822c` · `rtw8822c_mac_init`,
+//! plus the PHY, coex and watchdog ops below.
 
 use crate::host;
 use crate::regs::*;
 
-/// main.h:1038-1044 `struct rtw_page_table`. **Die Reihenfolge der Felder
-/// ist nicht die der Namen im Initialisierer** — `{64, 64, 64, 64, 1}` ist
-/// hq, nq, lq, exq, gapq, und `__priority_queue_cfg` schreibt sie in einer
-/// ANDEREN Reihenfolge in die Register (hq, lq, nq, exq).
+/// main.h:1038-1044 `struct rtw_page_table`. The field order is not the
+/// order of the names in the initialiser: `{64, 64, 64, 64, 1}` is hq, nq,
+/// lq, exq, gapq, and `__priority_queue_cfg` writes them to the registers
+/// in a different order (hq, lq, nq, exq).
 pub struct PageTable {
     pub hq_num: u16,
     pub nq_num: u16,
@@ -31,8 +32,8 @@ pub const PAGE_TABLE: [PageTable; 5] = [
     PageTable { hq_num: 64, nq_num: 64, lq_num: 64, exq_num: 64, gapq_num: 1 },
 ];
 
-/// main.h:1019-1026 `struct rtw_rqpn` — wohin jede der sechs Sendequeues
-/// im DMA-Prioritaetsraum zeigt.
+/// main.h:1019-1026 `struct rtw_rqpn`: where each of the six TX queues
+/// points in the DMA priority space.
 pub struct Rqpn {
     pub dma_map_vo: u8,
     pub dma_map_vi: u8,
@@ -44,10 +45,8 @@ pub struct Rqpn {
 
 /// rtw8822c.c:4925-4938 `rqpn_table_8822c[]`. Index 1 = PCIe.
 ///
-/// Gebaut sind nur die beiden Eintraege, die es auf PCIe geben kann: Linux
-/// waehlt [1] fuer PCIe, [0] fuer SDIO und [2..4] nach der Zahl der
-/// USB-Bulkout-Endpunkte. Ein Bus, den dieser Treiber nicht hat, braucht
-/// keine Zeile — und eine Zeile, die niemand liest, ist eine Behauptung.
+/// Only the PCIe entry is ported: Linux picks [1] for PCIe, [0] for SDIO
+/// and [2..4] by the number of USB bulk-out endpoints.
 pub const RQPN_PCIE: Rqpn = Rqpn {
     dma_map_vo: RTW_DMA_MAPPING_NORMAL,
     dma_map_vi: RTW_DMA_MAPPING_NORMAL,
@@ -59,17 +58,15 @@ pub const RQPN_PCIE: Rqpn = Rqpn {
 
 /// rtw8822c.c:2004-2130 `rtw8822c_mac_init`.
 ///
-/// Eine gerade Liste von Schreibzugriffen — SIFS, Ratenrueckfall, EDCA,
-/// Beacon, WMAC, Empfangsfilter. Sie steht hier Zeile fuer Zeile in Linux'
-/// Reihenfolge und mit Linux' Schreibbreiten; jede Umgruppierung waere eine
-/// Abweichung ohne Gewinn.
+/// A straight list of writes: SIFS, rate fallback, EDCA, beacon, WMAC, RX
+/// filter. Kept line by line in Linux's order and with Linux's access
+/// widths.
 pub fn mac_init(h: i32) -> bool {
     // txq control
     let mut value8 = host::r8(h, REG_FWHW_TXQ_CTRL);
-    // Linux schreibt `BIT(7) & ~BIT(1) & ~BIT(2)`. Das ist 0x80 — die zwei
-    // Ausmaskierungen treffen ein Bit, das gar nicht gesetzt ist. Der
-    // Ausdruck bleibt stehen, damit sichtbar ist, dass hier NICHTS
-    // geloescht wird, obwohl es so aussieht.
+    // Linux writes `BIT(7) & ~BIT(1) & ~BIT(2)`, which is 0x80: the two masks
+    // clear bits that are not set. Kept to show that nothing is cleared here
+    // even though it looks like it.
     value8 |= (1 << 7) & !(1 << 1) & !(1u8 << 2);
     host::w8(h, REG_FWHW_TXQ_CTRL, value8);
     host::w8(h, REG_FWHW_TXQ_CTRL + 1, WLAN_TXQ_RPT_EN);
@@ -193,7 +190,7 @@ pub fn mac_init(h: i32) -> bool {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 3c: rtw8822c_phy_set_param (rtw8822c.c:1862-1913)
+// rtw8822c_phy_set_param (rtw8822c.c:1862-1913)
 // ════════════════════════════════════════════════════════════════
 
 use crate::dm::{DmInfo, PathDiv};
@@ -217,8 +214,8 @@ fn header_file_init(h: i32, pre: bool) {
     }
 }
 
-/// rtw8822c.c:101-106 `rtw8822c_bb_reset` — aus, an, aus? Nein: AN, aus, AN.
-/// Der mittlere Schritt ist der Reset, die zwei aeusseren halten ihn.
+/// rtw8822c.c:101-106 `rtw8822c_bb_reset`: on, off, on. The middle step is
+/// the reset.
 fn bb_reset(h: i32) {
     host::set16(h, REG_SYS_FUNC_EN, BIT_FEN_BB_RSTB as u16);
     host::clr16(h, REG_SYS_FUNC_EN, BIT_FEN_BB_RSTB as u16);
@@ -299,13 +296,13 @@ fn config_ofdm_tx_path(h: i32, tx_path: u8, tx_path_sel_1ss: u8) {
     bb_reset(h);
 }
 
-/// rtw8822c.c:2436-2442 `rtw8822c_toggle_igi` — den IGI zwei Schritte
-/// herunter und wieder zurueck. Das stoesst die Verstaerkungsregelung an.
+/// rtw8822c.c:2436-2442 `rtw8822c_toggle_igi`: lower the IGI by two steps
+/// and restore it, which kicks the gain control.
 fn toggle_igi(h: i32) {
     let igi = host::r32_mask(h, REG_RXIGI, 0x7f);
-    // `igi - 2` laeuft in C um, wenn igi unter 2 liegt, und die Maske
-    // schneidet das Ergebnis danach ohnehin auf sieben Bit. In Rust waere
-    // dasselbe je nach Bauart eine PANIK — also ausdruecklich umlaufend.
+    // `igi - 2` wraps in C when igi is below 2, and the mask truncates the
+    // result to seven bits anyway. In Rust that could panic depending on the
+    // build, so wrap explicitly.
     let lower = igi.wrapping_sub(2);
     host::w32_mask(h, REG_RXIGI, 0x7f, lower);
     host::w32_mask(h, REG_RXIGI, 0x7f00, lower);
@@ -352,10 +349,9 @@ fn rf_x2_check(h: i32) {
 
 /// rtw8822c.c:1024-1053 `rtw8822c_set_power_trim`.
 ///
-/// Die fuenfzehn Zeilen des Makros `RF_SET_POWER_TRIM(path, seq, idx)` — die
-/// Reihenfolge der Indizes ist NICHT fortlaufend (2 kommt zweimal, dann 3-7,
-/// dann noch einmal 3-7 und 7): sie bildet die Sendekanalgruppen auf die
-/// acht gemessenen Verstaerkungen ab.
+/// The fifteen lines of the `RF_SET_POWER_TRIM(path, seq, idx)` macro. The
+/// index order is not sequential (2 twice, then 3-7, then 3-7 again and 7):
+/// it maps the TX channel groups onto the eight measured gains.
 const POWER_TRIM_SEQ: [(u32, usize); 15] = [
     (0x0, 0), (0x1, 1), (0x2, 2), (0x3, 2), (0x4, 3),
     (0x5, 4), (0x6, 5), (0x7, 6), (0x8, 7), (0x9, 3),
@@ -367,10 +363,9 @@ fn set_power_trim(h: i32, rf_path_num: u8, bb_gain: &[[i8; 8]; 2]) {
         phy::write_rf_reg_mix(h, path, 0xee, 1 << 19, 1);
         for &(seq, idx) in POWER_TRIM_SEQ.iter() {
             phy::write_rf_reg_mix(h, path, 0x33, RFREG_MASK, seq);
-            // `bb_gain` ist in C `s8`; der Wert geht als Rohbitmuster in ein
-            // 20-Bit-RF-Register, also wird vorzeichenerhaltend erweitert
-            // und dann geklemmt — genau das tut die implizite Umwandlung
-            // `s8 -> u32` in C.
+            // `bb_gain` is `s8` in C; the value goes as a raw bit pattern into a
+            // 20-bit RF register, so it is sign-extended and then masked, which is
+            // what the implicit `s8 -> u32` conversion does in C.
             phy::write_rf_reg_mix(h, path, 0x3f, RFREG_MASK,
                                   bb_gain[path][idx] as i32 as u32);
         }
@@ -418,8 +413,8 @@ fn power_trim(h: i32, rf_path_num: u8) {
 
 /// rtw8822c.c:1093-1109 `rtw8822c_thermal_trim`.
 ///
-/// Der Kommentar in Linux erklaert die schraege Umsortierung: Bit 0 der
-/// efuse wandert auf Bit 3, und die Bits 1-3 ruecken eines nach unten.
+/// The Linux comment explains the odd reordering: efuse bit 0 moves to bit
+/// 3, and bits 1-3 shift down by one.
 fn thermal_trim(h: i32, rf_path_num: u8) {
     let rf_efuse = [PPG_THERMAL_A, PPG_THERMAL_B];
     for path in 0..rf_path_num as usize {
@@ -435,9 +430,9 @@ fn thermal_trim(h: i32, rf_path_num: u8) {
 
 /// rtw8822c.c:1111-1132 `rtw8822c_pa_bias`.
 ///
-/// **Die zweite Schleife prueft `EFUSE_READ_FAIL` NICHT** — sie schreibt
-/// auch einen Fehlwert weiter. Das steht so in Linux; ein 0xff wird von
-/// `PPG_PABIAS_MASK` ohnehin auf 0xf beschnitten.
+/// The second loop does not check `EFUSE_READ_FAIL` and writes a failed
+/// value through, as in Linux; `PPG_PABIAS_MASK` truncates 0xff to 0xf
+/// anyway.
 fn pa_bias(h: i32, rf_path_num: u8) {
     let rf_efuse_2g = [PPG_PABIAS_2GA, PPG_PABIAS_2GB];
     let rf_efuse_5g = [PPG_PABIAS_5GA, PPG_PABIAS_5GB];
@@ -472,12 +467,10 @@ fn rf_init(h: i32, dm: &mut DmInfo, rf_path_num: u8) -> bool {
     dack_ok
 }
 
-/// rtw8822c.c:1847-1860 `rtw8822c_pwrtrack_init`. Reiner Treiberzustand.
+/// rtw8822c.c:1847-1860 `rtw8822c_pwrtrack_init`. Driver state only.
 ///
-/// `ewma_thermal_init` legt einen gleitenden Mittelwert an — bei uns ist das
-/// die 0 in `thermal_avg`, die `rtw_phy_pwrtrack_avg` beim ersten Wert
-/// ersetzt. Die Mittelung selbst gehoert zum Nachfuehren der Sendeleistung
-/// und damit zur Stufe, die sendet.
+/// `ewma_thermal_init` initialises a moving average; here that is the 0 in
+/// `thermal_avg`, which `rtw_phy_pwrtrack_avg` replaces on the first value.
 fn pwrtrack_init(dm: &mut DmInfo, thermal_meter_k: u8) {
     for path in 0..4usize {
         dm.delta_power_index[path] = 0;
@@ -489,11 +482,11 @@ fn pwrtrack_init(dm: &mut DmInfo, thermal_meter_k: u8) {
 }
 
 /// rtw8822c.c:1961-1968, ein Stueck aus `rtw8822c_phy_set_param`.
+/// (The German phrase is the marker `seqdiff.py` and `datapath.py` parse.)
 ///
-/// Herausgeloest, weil der EMPFANGSweg (`query_phy_status_page0`) dieselben
-/// zwei Zahlen braucht: sie sind der Massstab, an dem ein CCK-Paket seine
-/// RSSI bekommt. In Linux stehen sie in `dm_info` und werden genau hier
-/// einmal gefuellt; sie gehoeren dem TREIBER, nicht dem Paket.
+/// Split out because the RX path (`query_phy_status_page0`) needs the same
+/// two values: they are the scale a CCK packet's RSSI is derived from. In
+/// Linux they live in `dm_info` and are filled exactly here, once.
 pub fn read_cck_gi_bnd(h: i32, dm: &mut crate::dm::DmInfo) {
     let cck_gi_u_bnd_msb = host::r32_mask(h, 0x1a98, 0xc000) as u8;
     let cck_gi_u_bnd_lsb = host::r32_mask(h, 0x1aa8, 0xf0000) as u8;
@@ -507,11 +500,10 @@ pub fn read_cck_gi_bnd(h: i32, dm: &mut crate::dm::DmInfo) {
 
 /// rtw8822c.c:1862-1913 `rtw8822c_phy_set_param`.
 ///
-/// `hal->antenna_tx`/`antenna_rx` kommen aus `rtw_chip_parameter_setup`:
-/// bei 2T2R beide `BB_PATH_AB`. `is_tx2_path` ist dort fest `false`.
+/// `hal->antenna_tx`/`antenna_rx` come from `rtw_chip_parameter_setup`:
+/// both `BB_PATH_AB` for 2T2R. `is_tx2_path` is fixed `false` there.
 ///
-/// Gibt zurueck: (Tabellen wie gerechnet, DAC-Kalibrierung konvergiert) —
-/// die Gates der Stufen 3b und 3c.
+/// Returns (tables loaded as precomputed, DAC calibration converged).
 #[allow(clippy::too_many_arguments)]
 pub fn phy_set_param(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
                      e: &Efuse, cut_version: u8, rf_path_num: u8,
@@ -569,9 +561,9 @@ pub fn phy_set_param(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
 
 /// rtw8822c.c:2004 `rtw8822c_false_alarm_statistics`.
 ///
-/// Sie ist hier nicht, weil Stufe 3 sie braeuchte, sondern weil sie das
-/// GATE ist: zaehlt der Empfaenger Falschalarme und CCA-Ereignisse, hoert
-/// er. Ein stiller Zaehler heisst, dass die PHY nicht laeuft.
+/// Also serves as a liveness check: if the receiver counts false alarms
+/// and CCA events, it is listening. A silent counter means the PHY is not
+/// running.
 pub fn false_alarm_statistics(h: i32, dm: &mut DmInfo) {
     let cck_enable = host::r32(h, REG_ENCCK) & BIT_CCK_BLK_EN;
     let cck_fa_cnt = host::r16(h, REG_CCK_FACNT) as u32;
@@ -635,12 +627,12 @@ pub fn false_alarm_statistics(h: i32, dm: &mut DmInfo) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4a: die Koexistenz-Ops des Chips (rtw8822c.c)
+// The chip's coexistence ops (rtw8822c.c)
 // ════════════════════════════════════════════════════════════════
 
 use crate::coex::Coex;
 
-/// rtw8822c.c `rtw8822c_coex_cfg_init` — `chip->ops->coex_set_init`.
+/// rtw8822c.c `rtw8822c_coex_cfg_init`, i.e. `chip->ops->coex_set_init`.
 pub fn coex_cfg_init(h: i32) {
     // enable TBTT interrupt
     host::set8(h, REG_BCN_CTRL, BIT_EN_BCN_FUNCTION);
@@ -679,10 +671,9 @@ pub fn coex_cfg_gnt_debug(h: i32) {
 
 /// rtw8822c.c `rtw8822c_coex_cfg_rfe_type`.
 ///
-/// Setzt den Beschreibungssatz des Antennen-Frontends — und schaltet dabei
-/// die LTE-Koexistenz auf der WLAN-Seite AB. **`ant_switch_exist` bleibt
-/// `false`**, und das ist der Grund, warum `rtw_coex_set_ant_switch` auf
-/// diesem Chip nie etwas tut.
+/// Sets the antenna front-end description and disables LTE coexistence on
+/// the WLAN side. `ant_switch_exist` stays `false`, which is why
+/// `rtw_coex_set_ant_switch` never does anything on this chip.
 pub fn coex_cfg_rfe_type(h: i32, c: &mut Coex, share_ant: bool, rfe_option: u8) {
     c.rfe_module_type = rfe_option;
     c.ant_switch_polarity = 0;
@@ -699,10 +690,8 @@ pub fn coex_cfg_rfe_type(h: i32, c: &mut Coex, share_ant: bool, rfe_option: u8) 
 
 /// rtw8822c.c `rtw8822c_coex_cfg_gnt_fix`.
 ///
-/// Nicht im Anlaufweg — Linux ruft es aus `rtw_coex_run_coex`, also im
-/// laufenden Betrieb. Es steht hier, weil es zu den Coex-Ops des Chips
-/// gehoert und weil der naechste Posten es braucht; wer es erst dann
-/// schreibt, schreibt es unter Zeitdruck.
+/// Not on the bring-up path: Linux calls it from `rtw_coex_run_coex` at
+/// runtime. It belongs to the chip's coex ops.
 #[allow(dead_code)]
 pub fn coex_cfg_gnt_fix(h: i32, c: &mut Coex, share_ant: bool) {
     const COEX_WLINK_2GFREE: u8 = 0x7; // coex.h:176
@@ -754,11 +743,11 @@ pub fn coex_cfg_gnt_fix(h: i32, c: &mut Coex, share_ant: bool) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4c: rtw8822c_set_channel (rtw8822c.c:2529)
+// rtw8822c_set_channel (rtw8822c.c:2529)
 // ════════════════════════════════════════════════════════════════
 
-/// main.h:73-79 — die Bandpruefungen, die `set_channel_bb` und
-/// `set_channel_rf` ueberall benutzen.
+/// main.h:73-79: the band checks `set_channel_bb` and `set_channel_rf` use
+/// throughout.
 #[inline] fn is_ch_2g(ch: u8) -> bool { ch <= 14 }
 #[inline] fn is_ch_5g(ch: u8) -> bool { ch >= 36 && ch <= 177 }
 #[inline] fn is_ch_5g_band_1(ch: u8) -> bool { (36..=48).contains(&ch) }
@@ -779,8 +768,8 @@ fn rstb_3wire(h: i32, enable: bool) {
 
 /// rtw8822c.c:2241-2397 `rtw8822c_set_channel_bb`.
 ///
-/// **Hier stehen AGC und CCA-Maske** — und das ist der Grund, warum die
-/// Falschalarmzaehler vor dieser Funktion nichts zaehlen koennen.
+/// This sets AGC and the CCA mask, which is why the false alarm counters
+/// count nothing before it runs.
 fn set_channel_bb(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
     if is_ch_2g(channel) {
         host::clr32(h, REG_BGCTRL, BITS_RX_IQ_WEIGHT);
@@ -928,8 +917,8 @@ fn set_channel_bb(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
 
 /// rtw8822c.c:2399-2434 `rtw8822c_set_channel_rf`.
 ///
-/// Eine einzige Zahl — RF-Register 0x18 — traegt Band, Kanal, RFSI und
-/// Bandbreite; sie wird gelesen, feldweise geloescht und neu gesetzt.
+/// A single value, RF register 0x18, carries band, channel, RFSI and
+/// bandwidth; it is read, cleared field by field and set again.
 fn set_channel_rf(h: i32, channel: u8, bw: usize) {
     const RF18_BAND_MASK: u32 = (1 << 16) | (1 << 9) | (1 << 8);
     const RF18_BAND_2G: u32 = 0;
@@ -956,7 +945,7 @@ fn set_channel_rf(h: i32, channel: u8, bw: usize) {
     let rf_rxbb: u32 = match bw {
         1 => { rf_reg18 |= RF18_BW_40M; 0x10 }
         2 => { rf_reg18 |= RF18_BW_80M; 0x8 }
-        // RTW_CHANNEL_WIDTH_5/10/20 und Linux' `default:`
+        // RTW_CHANNEL_WIDTH_5/10/20 and Linux's `default:`
         _ => { rf_reg18 |= RF18_BW_20M; 0x18 }
     };
 
@@ -985,9 +974,8 @@ pub fn set_channel(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
 
 /// rtw8822c.c:2693-2713 `rtw8822c_set_write_tx_power_ref`.
 ///
-/// Zwei Bezugswerte je Pfad — CCK und OFDM — in vier festen Registern.
-/// Vor JEDEM Schreibzugriff wird `0x1c90` Bit 15 geloescht; das ist kein
-/// Versehen und keine Schleifeninvariante, es steht so da.
+/// Two reference values per path (CCK and OFDM) in four fixed registers.
+/// `0x1c90` bit 15 is cleared before every write, as in Linux.
 fn set_write_tx_power_ref(h: i32, rf_path_num: u8,
                           tx_pwr_ref_cck: [u8; 2], tx_pwr_ref_ofdm: [u8; 2]) {
     const TXREF_CCK: [u32; 2] = [0x18a0, 0x41a0];
@@ -1014,16 +1002,16 @@ fn set_tx_power_diff(h: i32, rate: u8, diff_idx: &[i8; 4]) {
     let phy_pwr_idx = pwr_idx[0] | (pwr_idx[1] << 8) | (pwr_idx[2] << 16)
         | (pwr_idx[3] << 24);
 
-    // rtw8822c.c:2578 — `0x1c90` ist REG_RSTB, Bit 15.
+    // rtw8822c.c:2578: `0x1c90` is REG_RSTB, bit 15.
     host::w32_mask(h, 0x1c90, 1 << 15, 0x0);
     host::w32_mask(h, OFFSET_TXAGC + rate_idx, MASKDWORD, phy_pwr_idx);
 }
 
 /// rtw8822c.c:2588-2620 `rtw8822c_set_tx_power_index`.
 ///
-/// Schreibt nicht die Indizes selbst, sondern zwei BEZUGSwerte (CCK und
-/// MCS7) und je Vierergruppe von Raten die ABWEICHUNG davon — und zwar das
-/// Minimum beider Pfade.
+/// Writes not the indices themselves but two reference values (CCK and
+/// MCS7) and, per group of four rates, the offset from them, using the
+/// minimum of both paths.
 pub fn set_tx_power_index(h: i32, rf_path_num: u8,
                           tbl: &[[u8; crate::txpower::DESC_RATE_MAX];
                                  crate::txpower::RTW_RF_PATH_MAX]) {
@@ -1057,8 +1045,8 @@ pub fn set_tx_power_index(h: i32, rf_path_num: u8,
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Was `rtw_watch_dog_work` alle zwei Sekunden an DIESEM Chip tut.
-// rtw8822c.c — Quarz, Sendeleistung, CCK-Schwelle, Sendepfad.
+// What `rtw_watch_dog_work` does on this chip every two seconds.
+// rtw8822c.c: crystal, TX power, CCK threshold, TX path.
 // ═══════════════════════════════════════════════════════════════════
 
 /// rtw8822c.c:2523-2527 `rtw8822c_config_tx_path`
@@ -1081,7 +1069,7 @@ const CCK_PD_REG: [[(u32, u32, u32, u32); 2]; 2] = [
 /// rtw8822c.c:4359-4390 `rtw8822c_phy_cck_pd_set_reg`
 fn phy_cck_pd_set_reg(h: i32, pd_diff: i8, cs_diff: i8, bw: usize, nrx: usize) {
     if bw > 1 || nrx >= 2 {
-        return; // Linux: WARN_ON und zurueck
+        return; // Linux: WARN_ON and return
     }
     let (reg_pd, mask_pd, reg_cs, mask_cs) = CCK_PD_REG[bw][nrx];
 
@@ -1127,13 +1115,12 @@ pub fn phy_cck_pd_set(h: i32, dm: &mut DmInfo, new_lvl: u8) {
     dm.cck_pd_lv[bw][nrx] = new_lvl;
 }
 
-// ── Der Quarz: rtw8822c_cfo_track und seine vier Helfer ──────────
+// ── Crystal: rtw8822c_cfo_track and its four helpers ─────────────
 //
-// **Das ist die Sendeseite der Temperatur.** Ein Empfaenger rastet sich
-// an jeder Praeambel neu auf die Frequenz des Gegenuebers ein; ein
-// Sender laeuft auf dem eigenen Quarz. Waermt der Chip ueber Minuten
-// auf, wandert der — und die Leitung wird einseitig, ohne dass
-// irgendwo ein Fehler steht.
+// This is the TX side of temperature drift. A receiver re-locks to the
+// peer's frequency on every preamble; a transmitter runs on its own
+// crystal. As the chip warms up the crystal drifts, and the link degrades
+// in one direction without any error being reported.
 
 /// rtw8822c.c:4220 `#define XCAP_EXTEND(val) (val | val << 7)`
 fn xcap_extend(v: u8) -> u32 {
@@ -1174,8 +1161,8 @@ fn report_to_khz(v: i32) -> i32 {
     (v << 1) + (v >> 1)
 }
 
-/// rtw8822c.c:4267-4289 `rtw8822c_cfo_calc_avg` — und sie LEERT die
-/// Summen, ist also nicht wiederholbar.
+/// rtw8822c.c:4267-4289 `rtw8822c_cfo_calc_avg`. Clears the sums, so it is
+/// not idempotent.
 fn cfo_calc_avg(dm: &mut DmInfo, path_num: u8) -> i32 {
     let mut cfo_path_sum = 0i32;
 
@@ -1199,11 +1186,9 @@ fn cfo_calc_avg(dm: &mut DmInfo, path_num: u8) -> i32 {
 
 /// rtw8822c.c:4291-4308 `rtw8822c_cfo_need_adjust`.
 ///
-/// **Der Riegel am Ende ist kein Detail:** laeuft Bluetooth im selben
-/// Chip (`!rtw_coex_disabled`), stellt Linux die Nachfuehrung AB und
-/// setzt den Quarz auf den Wert der efuse zurueck. Wer nur diese
-/// Funktion portiert und die Koexistenz nicht, baut den Riegel mit —
-/// und `bt_disabled` kommt aus dem Zustand, den der Watchdog pflegt.
+/// The lock at the end matters: while Bluetooth runs on the same chip
+/// (`!rtw_coex_disabled`), Linux stops tracking and resets the crystal to
+/// the efuse value. `bt_disabled` comes from state the watchdog maintains.
 fn cfo_need_adjust(h: i32, dm: &mut DmInfo, cfo_avg: i32,
                    efuse_crystal_cap: u8, bt_disabled: bool) {
     if !dm.cfo_track.is_adjust {
@@ -1222,9 +1207,9 @@ fn cfo_need_adjust(h: i32, dm: &mut DmInfo, cfo_avg: i32,
 
 /// rtw8822c.c:4310-4336 `rtw8822c_cfo_track`.
 ///
-/// `sta_cnt != 1` heisst bei uns: keine Verbindung. Ohne genau EINE
-/// Gegenstelle ist ein gemittelter Frequenzversatz sinnlos, und Linux
-/// faehrt dann die Nachfuehrung schrittweise auf die efuse zurueck.
+/// `sta_cnt != 1` means no connection here. Without exactly one peer an
+/// averaged frequency offset is meaningless, and Linux then steps the
+/// tracking back to the efuse value.
 pub fn cfo_track(h: i32, dm: &mut DmInfo, path_num: u8,
                  efuse_crystal_cap: u8, linked: bool, bt_disabled: bool) {
     if !linked {
@@ -1252,7 +1237,7 @@ pub fn cfo_track(h: i32, dm: &mut DmInfo, path_num: u8,
     }
 }
 
-// ── Die Sendeleistung ueber die Temperatur ───────────────────────
+// ── TX power over temperature ────────────────────────────────────
 
 /// rtw8822c.c:4405-4420 `rtw8822c_pwrtrack_set`
 fn pwrtrack_set(h: i32, dm: &DmInfo, rf_path: usize) {
@@ -1267,9 +1252,9 @@ fn pwrtrack_set(h: i32, dm: &DmInfo, rf_path: usize) {
 
 /// rtw8822c.c:4422-4431 `rtw8822c_pwr_track_stats`.
 ///
-/// `0xff` in der efuse heisst „kein Thermometer fuer diesen Pfad" — dann
-/// gibt es nichts zu mitteln, und ein Mittelwert aus 0xff waere eine
-/// erfundene Temperatur.
+/// `0xff` in the efuse means no thermal meter for this path; there is
+/// nothing to average, and an average over 0xff would be a made-up
+/// temperature.
 fn pwr_track_stats(h: i32, dm: &mut DmInfo, thermal_meter: &[u8],
                    path: usize) {
     if thermal_meter[path] == 0xff {
@@ -1306,9 +1291,9 @@ fn pwr_track_inner(h: i32, dm: &mut DmInfo, thermal_meter: &[u8],
 
 /// rtw8822c.c:4461-4481 `rtw8822c_pwr_track`.
 ///
-/// **Zwei Takte, nicht einer.** Im ersten wird das Thermometer nur
-/// ANGESTOSSEN, im zweiten gelesen — die Wandlung braucht Zeit, und ein
-/// Wert, der im selben Takt gelesen wird, ist der alte.
+/// Two ticks, not one: the first only triggers the thermal meter, the
+/// second reads it. The conversion takes time, and a value read in the
+/// same tick is the old one.
 pub fn pwr_track(h: i32, dm: &mut DmInfo, power_track_type: u8,
                  thermal_meter: &[u8], rf_path_num: u8, channel: u8) {
     if power_track_type != 0 {
@@ -1332,16 +1317,16 @@ pub fn pwr_track(h: i32, dm: &mut DmInfo, power_track_type: u8,
     dm.pwr_trk_triggered = false;
 }
 
-/// rtw8822c.c:2136-2153 `rtw8822c_do_lck` — den Synthesizer neu
-/// einrasten lassen, wenn die Temperatur weit genug gewandert ist.
+/// rtw8822c.c:2136-2153 `rtw8822c_do_lck`: re-lock the synthesizer once
+/// the temperature has drifted far enough.
 fn do_lck(h: i32) {
     phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_CTRL, RFREG_MASK, 0x80010);
     phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_PFD, RFREG_MASK, 0x1F0FA);
     host::delay_us(1);
     phy::write_rf_reg_mix(h, RF_PATH_A, RF_AAC_CTRL, RFREG_MASK, 0x80000);
     phy::write_rf_reg_mix(h, RF_PATH_A, RF_SYN_AAC, RFREG_MASK, 0x80001);
-    // read_poll_timeout(…, val != 0x1, 1000, 100000, …): 100 ms Frist,
-    // alle 1000 us nachsehen.
+    // read_poll_timeout(…, val != 0x1, 1000, 100000, …): 100 ms deadline,
+    // checked every 1000 us.
     let t0 = host::now_us();
     while host::now_us() - t0 < 100_000 {
         if phy::read_rf(h, RF_PATH_A, RF_AAC_CTRL, 0x1000) != 0x1 {

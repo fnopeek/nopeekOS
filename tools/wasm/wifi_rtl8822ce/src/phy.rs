@@ -1,16 +1,15 @@
-//! `phy.c` aus Linux 6.18.26 rtw88 — Stufe 3b: die Parametertabellen.
+//! `phy.c` from Linux 6.18.26 rtw88: parameter tables, RF access,
+//! `rtw_phy_init` and the watchdog's dynamic mechanisms.
 //!
-//! Portiert: `rtw_phy_setup_phy_cond` · `check_positive` ·
+//! Table loading: `rtw_phy_setup_phy_cond` · `check_positive` ·
 //! `rtw_parse_tbl_phy_cond` · `rtw_phy_cfg_mac` · `rtw_phy_cfg_agc` ·
 //! `rtw_phy_cfg_bb` · `rtw_phy_cfg_rf` · `rtw_load_rfk_table` ·
 //! `rtw_phy_load_tables` · `rtw_phy_read_rf` · `rtw_phy_write_rf_reg` ·
 //! `rtw_phy_write_rf_reg_sipi` · `rtw_phy_write_rf_reg_mix`.
 //!
-//! **`rtw_phy_read_rf_sipi` ist NICHT portiert, und das ist keine Luecke:**
-//! es liest `chip->rf_sipi_read_addr`, und der 8822C setzt das Feld nicht.
-//! In Linux endet die Funktion fuer diesen Chip in `rf_sipi_read_addr isn't
-//! defined` und gibt `INV_RF_DATA` zurueck. Eine Portierung waere Code fuer
-//! einen Zweig, den dieser Chip nicht hat.
+//! `rtw_phy_read_rf_sipi` is not ported: it reads
+//! `chip->rf_sipi_read_addr`, which the 8822C does not set, so in Linux it
+//! ends in "rf_sipi_read_addr isn't defined" and returns `INV_RF_DATA`.
 #![allow(dead_code)]
 
 use crate::host;
@@ -27,23 +26,23 @@ pub const LSSI_READ_DATA_MASK: u32 = 0xfffff; // phy.h:197
 pub const RF_PATH_A: usize = 0; // main.h:135
 pub const RF_PATH_B: usize = 1; // main.h:136
 
-/// rtw8822c.c:5375 `.rf_base_addr` — der direkte Fensterzugang je Pfad.
+/// rtw8822c.c:5375 `.rf_base_addr`: the direct window per path.
 const RF_BASE_ADDR: [u32; 2] = [0x3c00, 0x4c00];
-/// rtw8822c.c:5376 `.rf_sipi_addr` — der serielle Weg, nur fuer Register 0.
+/// rtw8822c.c:5376 `.rf_sipi_addr`: the serial path, register 0 only.
 const RF_SIPI_ADDR: [u32; 2] = [0x1808, 0x4108];
 
-// main.h:1862-1869 — die Felder von `struct rtw_phy_cond`.
+// main.h:1862-1869: the fields of `struct rtw_phy_cond`.
 const INTF_PCIE: u32 = 1 << 0;
 const BRANCH_IF: u32 = 0;
 const BRANCH_ELIF: u32 = 1;
 const BRANCH_ELSE: u32 = 2;
 const BRANCH_ENDIF: u32 = 3;
 
-/// main.h:1839-1860 `struct rtw_phy_cond`, als das Wort, das es ist.
+/// main.h:1839-1860 `struct rtw_phy_cond`, as the word it is.
 ///
-/// In C ist es ein Bitfeld ueber `u32`; hier steht es als Zahl da, weil die
-/// Tabelle genau diese Zahl enthaelt. Die Zerlegung ist Little-Endian —
-/// `rfe` liegt unten, `pos` ganz oben.
+/// In C it is a bitfield over `u32`; here it is a number because the table
+/// contains exactly that number. The layout is little-endian: `rfe` at the
+/// bottom, `pos` at the top.
 #[derive(Clone, Copy, Default)]
 pub struct PhyCond(pub u32);
 
@@ -58,30 +57,28 @@ impl PhyCond {
     pub fn pos(self) -> bool { self.0 & (1 << 31) != 0 }
 }
 
-/// phy.c:1083-1128 `rtw_phy_setup_phy_cond`, PCIe-Zweig.
+/// phy.c:1083-1128 `rtw_phy_setup_phy_cond`, PCIe branch.
 ///
-/// `pkg` kommt in Linux aus `hal->pkg_type` — und **dieses Feld wird
-/// nirgends beschrieben**, im ganzen Treiber nicht. Es ist also immer 0, und
-/// damit greift `pkg ? pkg : 15` und die Bedingung lautet 15. Das steht hier,
-/// weil es sonst wie ein vergessener Wert aussieht.
+/// `pkg` comes from `hal->pkg_type` in Linux, and that field is never
+/// written anywhere in the driver. It is always 0, so `pkg ? pkg : 15`
+/// yields 15.
 ///
-/// Der 8812A/8821A-Zweig (rfe aus ext_lna/ext_pa/btcoex zusammengesetzt,
-/// cond2 aus den LNA/PA-Typen) gilt fuer andere Chips.
+/// The 8812A/8821A branch (rfe composed from ext_lna/ext_pa/btcoex, cond2
+/// from the LNA/PA types) applies to other chips.
 pub fn setup_phy_cond(cut_version: u8, rfe_option: u8) -> PhyCond {
     let cut = if cut_version != 0 { cut_version as u32 } else { 15 };
-    let pkg = 15u32; // hal->pkg_type ist 0, siehe oben
+    let pkg = 15u32; // hal->pkg_type is 0, see above
     let plat = 0x04u32;
     let rfe = rfe_option as u32;
     let intf = INTF_PCIE;
     PhyCond(rfe | (intf << 8) | (pkg << 12) | (plat << 16) | (cut << 24))
 }
 
-/// phy.c:1130-1171 `check_positive`, Zweig fuer alles ausser 8812A/8821A.
+/// phy.c:1130-1171 `check_positive`, branch for everything but 8812A/8821A.
 ///
-/// `cut`, `pkg` und `intf` gelten nur, wenn die Tabelle sie NENNT (0 heisst
-/// „egal"). `rfe` wird dagegen IMMER verglichen — auch auf 0. Das ist keine
-/// Unachtsamkeit in Linux, sondern die Regel, mit der `rfe_option 0` von
-/// `rfe_option 1` getrennt wird.
+/// `cut`, `pkg` and `intf` only apply if the table names them (0 means
+/// "any"). `rfe` is always compared, even against 0; that is how
+/// `rfe_option 0` is distinguished from `rfe_option 1`.
 fn check_positive(cond: PhyCond, drv: PhyCond) -> bool {
     if cond.cut() != 0 && cond.cut() != drv.cut() {
         return false;
@@ -95,9 +92,9 @@ fn check_positive(cond: PhyCond, drv: PhyCond) -> bool {
     cond.rfe() == drv.rfe()
 }
 
-/// Welche der vier `do_cfg`-Funktionen eine Tabelle benutzt.
-/// In Linux ein Funktionszeiger in `struct rtw_table`; hier eine Art, weil
-/// `rtw_phy_cfg_rf` zusaetzlich den Pfad der Tabelle braucht.
+/// Which of the four `do_cfg` functions a table uses. In Linux a function
+/// pointer in `struct rtw_table`; an enum here because `rtw_phy_cfg_rf`
+/// also needs the table's path.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Cfg {
     Mac,
@@ -108,9 +105,9 @@ pub enum Cfg {
 
 /// phy.c:1169-1220 `rtw_parse_tbl_phy_cond`.
 ///
-/// Die Tabelle ist eine Folge von Kacheln zu zwei Woertern. Ein Wort mit
-/// Bit 31 ist der KOPF eines Bedingungsblocks (`#if`/`#elif`/`#else`/
-/// `#endif`), eines mit Bit 30 sein Ende, alles andere ist Adresse und Wert.
+/// The table is a sequence of two-word pairs. A word with bit 31 is the
+/// head of a conditional block (`#if`/`#elif`/`#else`/`#endif`), one with
+/// bit 30 its end, anything else is address and value.
 pub fn parse_tbl_phy_cond(h: i32, data: &[u32], cfg: Cfg, drv: PhyCond) -> u32 {
     let mut pos_cond = PhyCond::default();
     let mut is_matched = true;
@@ -132,11 +129,10 @@ pub fn parse_tbl_phy_cond(h: i32, data: &[u32], cfg: Cfg, drv: PhyCond) -> u32 {
                 BRANCH_ELSE => {
                     is_matched = !is_skipped;
                 }
-                // BRANCH_IF, BRANCH_ELIF und alles andere
+                // BRANCH_IF, BRANCH_ELIF and everything else
                 _ => {
-                    // `cond2` (das zweite Wort) traegt nur fuer 8812A/8821A
-                    // Inhalt — die LNA/PA-Typen. Hier ist es ungenutzt, und
-                    // das ist der Grund, warum es hier nicht mitgefuehrt wird.
+                    // `cond2` (the second word) only carries content for 8812A/8821A (the
+                    // LNA/PA types), so it is not tracked here.
                     let _ = BRANCH_IF;
                     let _ = BRANCH_ELIF;
                     pos_cond = c;
@@ -162,15 +158,15 @@ pub fn parse_tbl_phy_cond(h: i32, data: &[u32], cfg: Cfg, drv: PhyCond) -> u32 {
     written
 }
 
-/// phy.c:1782-1830 — die vier `rtw_phy_cfg_*`, hinter EINER Verzweigung.
+/// phy.c:1782-1830: the four `rtw_phy_cfg_*` behind one match.
 fn do_cfg(h: i32, cfg: Cfg, addr: u32, data: u32) {
     match cfg {
         // phy.c:1782 `rtw_phy_cfg_mac`
         Cfg::Mac => host::w8(h, addr, data as u8),
         // phy.c:1789 `rtw_phy_cfg_agc`
         Cfg::Agc => host::w32(h, addr, data),
-        // phy.c:1796 `rtw_phy_cfg_bb` — sechs Adressen sind Pausen, keine
-        // Register. Unter einer Millisekunde wird gedreht statt geschlafen.
+        // phy.c:1796 `rtw_phy_cfg_bb`: six addresses are delays, not registers.
+        // Below a millisecond this spins instead of sleeping.
         Cfg::Bb => match addr {
             0xfe => host::sleep_ms(50),
             0xfd => host::sleep_ms(5),
@@ -192,10 +188,10 @@ fn do_cfg(h: i32, cfg: Cfg, addr: u32, data: u32) {
     }
 }
 
-// ── RF-Zugriff (phy.c:937-1081) ──────────────────────────────────
+// ── RF access (phy.c:937-1081) ───────────────────────────────────
 
-/// phy.c:937-987 `rtw_phy_read_rf` — der 8822C liest DIREKT, ueber ein
-/// Fenster je Pfad (`chip->ops->read_rf = rtw_phy_read_rf`).
+/// phy.c:937-987 `rtw_phy_read_rf`: the 8822C reads directly through a
+/// window per path (`chip->ops->read_rf = rtw_phy_read_rf`).
 pub fn read_rf(h: i32, rf_path: usize, addr: u32, mask: u32) -> u32 {
     if rf_path >= RF_BASE_ADDR.len() {
         return INV_RF_DATA;
@@ -219,9 +215,9 @@ fn write_rf_reg(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) -> bool
 
 /// phy.c:1009-1046 `rtw_phy_write_rf_reg_sipi`.
 ///
-/// Beim 8822C nur fuer Register 0 erreichbar (siehe `write_rf_reg_mix`).
-/// `mask != RFREG_MASK` fuehrt vorher einen Lesezugriff — der geht ueber
-/// `chip->ops->read_rf`, also ueber den DIREKTEN Weg, nicht ueber SIPI.
+/// On the 8822C reachable only for register 0 (see `write_rf_reg_mix`).
+/// With `mask != RFREG_MASK` it first reads, through `chip->ops->read_rf`,
+/// i.e. the direct path, not SIPI.
 fn write_rf_reg_sipi(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) -> bool {
     if rf_path >= RF_SIPI_ADDR.len() {
         return false;
@@ -246,7 +242,7 @@ fn write_rf_reg_sipi(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) ->
     true
 }
 
-/// phy.c:1072-1081 `rtw_phy_write_rf_reg_mix` — der Schreibweg des 8822C.
+/// phy.c:1072-1081 `rtw_phy_write_rf_reg_mix`: the 8822C write path.
 pub fn write_rf_reg_mix(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) -> bool {
     if addr != 0x00 {
         return write_rf_reg(h, rf_path, addr, mask, data);
@@ -254,12 +250,12 @@ pub fn write_rf_reg_mix(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32)
     write_rf_reg_sipi(h, rf_path, addr, mask, data)
 }
 
-// ── Die Tabellen laden (phy.c:1832-1871) ─────────────────────────
+// ── Loading the tables (phy.c:1832-1871) ─────────────────────────
 
 /// phy.c:1832-1848 `rtw_load_rfk_table`.
 ///
-/// Die fuenf Schreibzugriffe davor stehen ohne Kommentar in Linux; sie
-/// schalten den DPK-Block an, bevor seine Initialtabelle laeuft.
+/// The five writes before it are uncommented in Linux; they enable the DPK
+/// block before its init table runs.
 fn load_rfk_table(h: i32, drv: PhyCond) -> u32 {
     host::w32_mask(h, 0x1e24, 1 << 17, 0x1);
     host::w32_mask(h, 0x1cd0, 1 << 28, 0x1);
@@ -267,26 +263,25 @@ fn load_rfk_table(h: i32, drv: PhyCond) -> u32 {
     host::w32_mask(h, 0x1cd0, 1 << 30, 0x1);
     host::w32_mask(h, 0x1cd0, 1 << 31, 0x0);
 
-    // `dpk_info->is_dpk_pwr_on = true` ist reiner Treiberzustand und wird
-    // erst von der DPK-Kalibrierung gelesen — ein Posten der Stufe 4.
+    // `dpk_info->is_dpk_pwr_on = true` is driver state, read only by the DPK
+    // calibration.
     parse_tbl_phy_cond(h, &tables::RFK_INIT, Cfg::Bb, drv)
 }
 
 /// phy.c:1850-1871 `rtw_phy_load_tables`.
 ///
-/// **Die Reihenfolge der RF-Tabellen ist umgekehrt zu ihrem Namen** und das
-/// ist kein Tippfehler: `rtw8822c_hw_spec` sagt
+/// The RF tables load in the reverse order of their names:
+/// `rtw8822c_hw_spec` has
 /// `.rf_tbl = {&rtw8822c_rf_b_tbl, &rtw8822c_rf_a_tbl}` (rtw8822c.c:5382),
-/// die Schleife laeuft ueber den Index, und jede Tabelle traegt ihren Pfad
-/// selbst. Geladen wird also erst B, dann A.
+/// the loop runs by index and each table carries its own path. So B loads
+/// first, then A.
 ///
-/// Gibt zurueck, ob jede Tabelle so viele Schreibzugriffe abgegeben hat, wie
-/// `gen_tables.py` fuer DIESEN Chipzustand vorausgerechnet hat.
+/// Returns whether every table produced as many writes as `gen_tables.py`
+/// precomputed for this chip configuration.
 pub fn load_tables(h: i32, rf_path_num: u8, drv: PhyCond) -> bool {
-    // Die Vorausrechnung gilt fuer cut D und rfe_option 1 — das Geraet, an
-    // dem gemessen wurde. Steht dort etwas anderes, wird nur gezaehlt und
-    // nicht verglichen; eine Zahl gegen die falsche Erwartung zu halten
-    // waere schlimmer als gar keine.
+    // The precomputed counts are for cut D and rfe_option 1. For any other
+    // configuration writes are only counted, not compared; checking against
+    // the wrong expectation would be worse than not checking.
     let reference = setup_phy_cond(crate::regs::RTW_CHIP_VER_CUT_D, 1);
     let comparable = drv.0 == reference.0;
     let mut all_ok = true;
@@ -324,13 +319,12 @@ pub fn load_tables(h: i32, rf_path_num: u8, drv: PhyCond) -> bool {
     check("bb", parse_tbl_phy_cond(h, &tables::BB, Cfg::Bb, drv));
     check("agc", parse_tbl_phy_cond(h, &tables::AGC, Cfg::Agc, drv));
 
-    // `rfe_def->agc_btg_tbl` — der 8822C benutzt `RTW_DEF_RFE` ohne btg
-    // (rtw8822c.c:5277-5285), das Feld ist also NULL und Linux ueberspringt
-    // den Aufruf. Es gibt hier nichts zu laden.
+    // `rfe_def->agc_btg_tbl`: the 8822C uses `RTW_DEF_RFE` without btg
+    // (rtw8822c.c:5277-5285), so the field is NULL and Linux skips the call.
 
     check("rfk_init", load_rfk_table(h, drv));
 
-    // rf_tbl[0] = rf_b, rf_tbl[1] = rf_a — siehe oben.
+    // rf_tbl[0] = rf_b, rf_tbl[1] = rf_a, see above.
     let rf_tbl: [(&[u32], usize, &str); 2] = [
         (&tables::RF_B, RF_PATH_B, "rf_b"),
         (&tables::RF_A, RF_PATH_A, "rf_a"),
@@ -342,17 +336,17 @@ pub fn load_tables(h: i32, rf_path_num: u8, drv: PhyCond) -> bool {
     all_ok
 }
 
-// ── Stufe 3c: rtw_phy_init (phy.c:236-261) ───────────────────────
+// ── rtw_phy_init (phy.c:236-261) ─────────────────────────────────
 
 use crate::dm::{DmInfo, PathDiv, EWMA_THERMAL_PRECISION, EWMA_THERMAL_WEIGHT_RCP};
 
-/// phy.c:1673-1674 · rtw8822c.c:4906-4909 `rtw8822c_dig` — Adresse und
-/// Maske des IGI-Felds je Pfad. Beide liegen in DEMSELBEN Register.
+/// phy.c:1673-1674 · rtw8822c.c:4906-4909 `rtw8822c_dig`: address and mask
+/// of the IGI field per path. Both are in the same register.
 const DIG: [(u32, u32); 2] = [(0x1d70, 0x7f), (0x1d70, 0x7f00)];
 
-/// phy.c:1600-1611 `rtw_phy_cck_pd_init`. Reiner Treiberzustand.
+/// phy.c:1600-1611 `rtw_phy_cck_pd_init`. Driver state only.
 fn cck_pd_init(dm: &mut DmInfo) {
-    // `i <= RTW_CHANNEL_WIDTH_40` sind die Breiten 20 und 40, also zwei.
+    // `i <= RTW_CHANNEL_WIDTH_40` covers widths 20 and 40, i.e. two.
     for i in 0..=1usize {
         for j in 0..4usize {
             dm.cck_pd_lv[i][j] = 0; // CCK_PD_LV0 (phy.h:164)
@@ -364,11 +358,11 @@ fn cck_pd_init(dm: &mut DmInfo) {
 
 /// phy.c:175-200 `rtw_phy_adaptivity_set_mode`.
 ///
-/// `rtwdev->regd.dfs_region` steht vor der ersten Kanalwahl auf
-/// `NL80211_DFS_UNSET`, und der `default`-Zweig setzt dann `RTW_EDCCA_NORMAL`
-/// ohne `l2h_th_ini`. Die zwei Sonderfaelle (ETSI, Japan) brauchen eine
-/// Regulierungszone, die es hier noch nicht gibt — sie kommen mit
-/// `rtw_regd_init`, und das ist die Stufe, die einen Kanal setzt.
+/// `rtwdev->regd.dfs_region` is `NL80211_DFS_UNSET` before the first
+/// channel is chosen, and the `default` branch then sets
+/// `RTW_EDCCA_NORMAL` without `l2h_th_ini`. The two special cases (ETSI,
+/// Japan) need a regulatory domain from `rtw_regd_init`, which is not
+/// ported.
 fn adaptivity_set_mode(dm: &mut DmInfo) {
     dm.edcca_mode = 0; // RTW_EDCCA_NORMAL (main.h:1683)
 }
@@ -381,13 +375,13 @@ pub fn set_edcca_th(h: i32, l2h: u8, h2l: u8) {
     host::w32_mask(h, addr, mask, (h2l + off) as u32);
 }
 
-/// rtw8822c.c:2178-2196 `rtw8822c_adaptivity` — der Chip-Zweig von
-/// `rtw_phy_adaptivity`, alle zwei Sekunden.
+/// rtw8822c.c:2178-2196 `rtw8822c_adaptivity`: the chip branch of
+/// `rtw_phy_adaptivity`, every two seconds.
 ///
-/// `set_edcca_th` nimmt vorzeichenlose Werte, Linux rechnet in `s8`.
-/// Beide Schwellen sind nach der Rechnung positiv (`EDCCA_TH_L2H_LB` = 48
-/// ist die Untergrenze, `h2l` liegt sieben bis acht darunter), also ist
-/// die Umdeutung hier ein Wechsel der Darstellung und keine Klemmung.
+/// `set_edcca_th` takes unsigned values while Linux computes in `s8`. Both
+/// thresholds are positive after the computation (`EDCCA_TH_L2H_LB` = 48
+/// is the floor, `h2l` is seven to eight below), so the conversion only
+/// changes representation and does not clamp.
 pub fn adaptivity(h: i32, dm: &DmInfo) {
     let igi = dm.igi_history[0] as i8;
     let (l2h, h2l);
@@ -421,8 +415,8 @@ fn adaptivity_init(h: i32, dm: &mut DmInfo) {
 
 /// phy.c:236-261 `rtw_phy_init`.
 ///
-/// Die Verzweigungen ueber `chip->ops` sind hier ausgeschrieben: der 8822C
-/// fuehrt `adaptivity_init` und `cfo_init`, also gelten beide.
+/// The `chip->ops` branches are spelled out: the 8822C has
+/// `adaptivity_init` and `cfo_init`, so both apply.
 pub fn phy_init(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
                 crystal_cap: u8, default_1ss_tx_path: u8) {
     dm.fa_history = [0; 4];
@@ -451,13 +445,11 @@ pub fn phy_init(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// rtw_watch_dog_work — die LAUFENDE Haelfte (main.c:224-310)
+// rtw_watch_dog_work: the runtime half (main.c:224-310)
 //
-// Linux fuehrt sie alle zwei Sekunden, das ganze Leben einer Verbindung
-// lang. Bis 0.26.0 gab es sie hier nicht: gebaut war der Aufbau, und der
-// Chip blieb danach sich selbst ueberlassen. Drei ihrer Posten sind
-// SENDEseite und haengen an der Temperatur — und ein Empfaenger rastet
-// sich an jeder Praeambel neu ein, ein Sender nicht.
+// Linux runs it every two seconds for the lifetime of a connection.
+// Several of its items are on the TX side and depend on temperature: a
+// receiver re-locks on every preamble, a transmitter does not.
 // ═══════════════════════════════════════════════════════════════════
 
 /// phy.c:292-309 `rtw_phy_get_rssi_level`
@@ -489,9 +481,8 @@ pub fn stat_rate_cnt(dm: &mut DmInfo) {
 
 /// phy.c:335-371 `rtw_phy_dig_check_damping`.
 ///
-/// **Die Daempfungsbremse.** Sie erkennt, dass die Verstaerkungsregelung
-/// zwischen zwei Werten hin und her springt, und laesst sie dann in Ruhe
-/// — `igi_bitmap` traegt die Richtung der letzten vier Schritte als Bits.
+/// Detects the gain control oscillating between two values and then leaves
+/// it alone; `igi_bitmap` holds the direction of the last four steps.
 fn dig_check_damping(dm: &mut DmInfo) -> bool {
     let fa_lo = DIG_PERF_FA_TH_LOW as u16;
     let fa_hi = DIG_PERF_FA_TH_HIGH as u16;
@@ -505,8 +496,8 @@ fn dig_check_damping(dm: &mut DmInfo) -> bool {
         } else {
             damping_rssi - min_rssi
         };
-        // Linux: `dm_info->damping_cnt++ > 20` — NACHzaehlend, der
-        // Vergleich sieht also den Wert VOR dem Erhoehen.
+        // Linux: `dm_info->damping_cnt++ > 20` is a post-increment, so the
+        // comparison sees the value before incrementing.
         let cnt = dm.damping_cnt;
         dm.damping_cnt = dm.damping_cnt.wrapping_add(1);
         if diff > 3 || cnt > 20 {
@@ -519,7 +510,7 @@ fn dig_check_damping(dm: &mut DmInfo) -> bool {
     let igi = dm.igi_history;
     let fa = dm.fa_history;
     match dm.igi_bitmap & 0xf {
-        // runter -> rauf -> runter -> rauf
+        // down -> up -> down -> up
         5 => {
             if igi[0] > igi[1] && igi[2] > igi[3]
                 && igi[0] - igi[1] >= 2 && igi[2] - igi[3] >= 2
@@ -529,7 +520,7 @@ fn dig_check_damping(dm: &mut DmInfo) -> bool {
                 damping = true;
             }
         }
-        // rauf -> runter -> runter -> rauf
+        // up -> down -> down -> up
         9 => {
             if igi[0] > igi[1] && igi[3] > igi[2]
                 && igi[0] - igi[1] >= 4 && igi[3] - igi[2] >= 2
@@ -551,7 +542,7 @@ fn dig_check_damping(dm: &mut DmInfo) -> bool {
     damping
 }
 
-/// phy.c:373-395 `rtw_phy_dig_get_boundary` — gibt `(upper, lower)`.
+/// phy.c:373-395 `rtw_phy_dig_get_boundary`; returns `(upper, lower)`.
 fn dig_get_boundary(dm: &DmInfo, linked: bool) -> (u8, u8) {
     let (mut dig_max, dig_mid, dig_min, min_rssi);
     if linked {
@@ -575,7 +566,7 @@ fn dig_get_boundary(dm: &DmInfo, linked: bool) -> (u8, u8) {
     (upper, lower)
 }
 
-/// phy.c:397-417 `rtw_phy_dig_get_threshold` — gibt `(fa_th, step)`.
+/// phy.c:397-417 `rtw_phy_dig_get_threshold`; returns `(fa_th, step)`.
 fn dig_get_threshold(dm: &DmInfo, linked: bool) -> ([u16; 3], [u8; 3]) {
     let mut step = [4u8, 3, 2];
     let fa_th;
@@ -617,9 +608,8 @@ fn dig_recorder(dm: &mut DmInfo, igi: u8, fa: u16) {
 
 /// phy.c:443-459 `rtw_phy_dig_write`.
 ///
-/// `rtw8822c` fuehrt `.dig_cck = NULL` (rtw8822c.c:5374), der CCK-Zweig
-/// entfaellt also — er steht hier als Kommentar und nicht als Code, weil
-/// ein toter Zweig sonst wie eine Auslassung aussieht.
+/// The 8822C has `.dig_cck = NULL` (rtw8822c.c:5374), so the CCK branch is
+/// omitted.
 pub fn dig_write(h: i32, rf_path_num: u8, igi: u8) {
     for path in 0..rf_path_num as usize {
         let (addr, mask) = DIG[path.min(1)];
@@ -629,10 +619,10 @@ pub fn dig_write(h: i32, rf_path_num: u8, igi: u8) {
 
 /// phy.c:461-518 `rtw_phy_dig`.
 ///
-/// `linked` ist Linux' `!!rtwdev->sta_cnt`. Der 8812A-Sonderfall am Ende
-/// gilt fuer einen anderen Chip und steht deshalb nicht hier.
+/// `linked` is Linux's `!!rtwdev->sta_cnt`. The 8812A special case at the
+/// end applies to another chip and is omitted.
 pub fn dig(h: i32, dm: &mut DmInfo, rf_path_num: u8, linked: bool) {
-    // `RTW_FLAG_DIG_DISABLE` setzt bei uns niemand — der Test entfaellt.
+    // Nothing sets `RTW_FLAG_DIG_DISABLE` here, so that test is omitted.
     if dig_check_damping(dm) {
         return;
     }
@@ -709,8 +699,8 @@ fn cck_pd_lv(dm: &DmInfo, linked: bool) -> u8 {
 
 /// phy.c:745-772 `rtw_phy_cck_pd`.
 ///
-/// Nur auf 2,4 GHz — auf 5 GHz gibt es kein CCK, und der Zweig steht in
-/// Linux genauso weit oben.
+/// 2.4 GHz only; there is no CCK on 5 GHz, and Linux checks this at the
+/// same early point.
 pub fn cck_pd(h: i32, dm: &mut DmInfo, band_2g: bool, linked: bool) {
     if !band_2g {
         return;
@@ -768,7 +758,7 @@ pub fn get_rrsr_mask(rate_idx: u8) -> u32 {
 
 /// phy.c:1062-1069 `rtw_phy_rrsr_update`.
 ///
-/// Mit EINER Station ist der Iterator ein Aufruf; `rate` ist ihr
+/// With a single station the iterator is one call; `rate` is its
 /// `ra_report.desc_rate`.
 pub fn rrsr_update(h: i32, dm: &mut DmInfo, sta_rate: Option<u8>) {
     dm.rrsr_mask_min = RRSR_RATE_ORDER_MAX;
@@ -788,8 +778,8 @@ fn set_tx_path_by_reg(h: i32, path_div: &mut PathDiv, antenna_tx: u8,
         return;
     }
     path_div.current_tx_path = tx_path_sel_1ss;
-    // `chip->ops->config_tx_path(…, tx_path_sel_1ss, tx_path_sel_cck, false)`
-    // — beide Auswahlen sind derselbe Wert (phy.c:1921).
+    // `chip->ops->config_tx_path(…, tx_path_sel_1ss, tx_path_sel_cck, false)`;
+    // both selections are the same value (phy.c:1921).
     crate::chip::config_tx_path(h, antenna_tx, tx_path_sel_1ss,
                                 tx_path_sel_1ss, false);
 }
@@ -838,7 +828,7 @@ pub fn tx_path_diversity(h: i32, path_div: &mut PathDiv, antenna_tx: u8,
     tx_path_div_select(h, path_div, antenna_tx);
 }
 
-// ── rtw_phy_pwr_track und seine Helfer ───────────────────────────
+// ── rtw_phy_pwr_track and its helpers ────────────────────────────
 
 /// phy.c `rtw_phy_pwrtrack_avg`
 pub fn pwrtrack_avg(dm: &mut DmInfo, thermal: u8, path: usize) {
@@ -853,8 +843,8 @@ pub fn pwrtrack_thermal_changed(dm: &DmInfo, thermal: u8, path: usize) -> bool {
     dm.avg_thermal[path].read(EWMA_THERMAL_PRECISION) as u8 != thermal
 }
 
-/// phy.c `rtw_phy_pwrtrack_get_delta` — der Abstand zur efuse, gedeckelt
-/// auf die Tabellenlaenge.
+/// phy.c `rtw_phy_pwrtrack_get_delta`: the distance from the efuse value,
+/// capped at the table length.
 pub fn pwrtrack_get_delta(dm: &DmInfo, thermal_meter: &[u8],
                           path: usize) -> u8 {
     let therm_avg = dm.thermal_avg[path];
@@ -891,9 +881,8 @@ pub fn pwrtrack_need_iqk(dm: &mut DmInfo) -> bool {
     false
 }
 
-/// Die vier Kurvenpaare, die `rtw_phy_config_swing_table` fuer den
-/// aktuellen Kanal und die aktuelle Rate auswaehlt: je Pfad ein `p` und
-/// ein `n`.
+/// The four curve pairs `rtw_phy_config_swing_table` selects for the
+/// current channel and rate: one `p` and one `n` per path.
 pub struct SwingTable {
     pub p: [&'static [u8; RTW_PWR_TRK_TBL_SZ]; 2],
     pub n: [&'static [u8; RTW_PWR_TRK_TBL_SZ]; 2],
@@ -901,11 +890,10 @@ pub struct SwingTable {
 
 /// phy.c `rtw_phy_config_swing_table`.
 ///
-/// **Fuer den 8822C gibt es genau EINE Tabelle**: alle sieben
-/// RFE-Varianten zeigen auf `type0` (rtw8822c.c:5277-5285). Eine Auswahl
-/// nach RFE waere hier eine erfundene Verzweigung.
+/// The 8822C has exactly one table: all seven RFE variants point to
+/// `type0` (rtw8822c.c:5277-5285).
 pub fn config_swing_table(channel: u8, tx_rate: u8) -> SwingTable {
-    // IS_CH_2G_BAND(channel) — Kanal 1..14
+    // IS_CH_2G_BAND(channel): channels 1..14
     if channel <= 14 {
         if tx_rate <= DESC_RATE11M as u8 {
             SwingTable {
@@ -919,7 +907,7 @@ pub fn config_swing_table(channel: u8, tx_rate: u8) -> SwingTable {
             }
         }
     } else {
-        // IS_CH_5G_BAND_1/2 -> Index 0, BAND_3 -> 1, BAND_4 -> 2.
+        // IS_CH_5G_BAND_1/2 -> index 0, BAND_3 -> 1, BAND_4 -> 2.
         let i = if channel <= 64 { 0 } else if channel <= 144 { 1 } else { 2 };
         SwingTable {
             p: [&tables::PWRTRK_5GA_P[i], &tables::PWRTRK_5GB_P[i]],
@@ -928,8 +916,8 @@ pub fn config_swing_table(channel: u8, tx_rate: u8) -> SwingTable {
     }
 }
 
-/// phy.c `rtw_phy_pwrtrack_get_pwridx` — waermer als die efuse heisst
-/// nach oben, kaelter nach unten.
+/// phy.c `rtw_phy_pwrtrack_get_pwridx`: warmer than the efuse value means
+/// up, colder means down.
 pub fn pwrtrack_get_pwridx(dm: &DmInfo, swing: &SwingTable,
                            thermal_meter: &[u8], tbl_path: usize,
                            therm_path: usize, delta: u8) -> i8 {
@@ -945,9 +933,8 @@ pub fn pwrtrack_get_pwridx(dm: &DmInfo, swing: &SwingTable,
 
 /// phy.c:311-316 `rtw_phy_statistics`.
 ///
-/// Der `rssi`-Zweig ist bei Linux ein Stationen-Iterator; wir fahren
-/// EINE Gegenstelle, also ist er ein `Option`. Ohne Verbindung bleibt
-/// `min_rssi` auf `U8_MAX` stehen — genau wie dort.
+/// The `rssi` branch is a station iterator in Linux; with one peer it is an
+/// `Option`. Without a connection `min_rssi` stays at `U8_MAX`, as there.
 pub fn statistics(h: i32, dm: &mut DmInfo, st: &mut crate::fw::H2cState,
                   si: Option<&mut crate::sta::StaInfo>) {
     // rtw_phy_stat_rssi
@@ -968,8 +955,8 @@ pub fn statistics(h: i32, dm: &mut DmInfo, st: &mut crate::fw::H2cState,
     stat_rate_cnt(dm);
 }
 
-/// phy.c:1051-1060 `rtw_phy_ra_info_update` — **nur jeden VIERTEN Takt**
-/// (`watch_dog_cnt & 0x3`), also alle acht Sekunden.
+/// phy.c:1051-1060 `rtw_phy_ra_info_update`: only every fourth tick
+/// (`watch_dog_cnt & 0x3`), i.e. every eight seconds.
 fn ra_info_update(h: i32, st: &mut crate::fw::H2cState, watch_dog_cnt: u32,
                   si: Option<(&mut crate::sta::StaInfo,
                               &crate::sta::PeerCaps, u8, bool)>) {
@@ -991,8 +978,8 @@ pub fn ra_track(h: i32, dm: &mut DmInfo, st: &mut crate::fw::H2cState,
                             &crate::sta::PeerCaps, u8, bool)>,
                 sta_rate: Option<u8>) {
     crate::fw::update_wl_phy_info(h, st, dm, tx_tp, rx_tp);
-    // main.c:1266/1286 — der Teil von `rtw_update_sta_info`, der `dm`
-    // schreibt: die Grundmenge der Antwortraten je Band.
+    // main.c:1266/1286: the part of `rtw_update_sta_info` that writes `dm`,
+    // the base set of response rates per band.
     if let Some((_, _, _, band_2g)) = &si {
         dm.rrsr_val_init = if *band_2g { RRSR_INIT_2G } else { RRSR_INIT_5G };
     }
@@ -1000,12 +987,12 @@ pub fn ra_track(h: i32, dm: &mut DmInfo, st: &mut crate::fw::H2cState,
     rrsr_update(h, dm, sta_rate);
 }
 
-/// phy.c:791-806 `rtw_phy_dynamic_mechanism` — die neun Posten in
-/// Linux' Reihenfolge.
+/// phy.c:791-806 `rtw_phy_dynamic_mechanism`: the nine items in Linux's
+/// order.
 ///
-/// Alles, was hier `dm` liest, hat der Empfangsweg zwischen zwei Takten
-/// gefuellt (`rx::watchdog_feed`). Laeuft der nicht, rechnet der ganze
-/// Block auf Nullen und meldet nichts.
+/// Everything read from `dm` here was filled by the RX path between two
+/// ticks (`rx::watchdog_feed`); without it the whole block computes on
+/// zeros.
 #[allow(clippy::too_many_arguments)]
 pub fn dynamic_mechanism(h: i32, dm: &mut DmInfo, path_div: &mut PathDiv,
                          dpk: &mut crate::dpk::DpkInfo,

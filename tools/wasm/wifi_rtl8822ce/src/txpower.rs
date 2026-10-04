@@ -1,12 +1,11 @@
-//! `phy.c` aus Linux 6.18.26 rtw88 — die Sendeleistung.
+//! `phy.c` from Linux 6.18.26 rtw88: TX power.
 //!
-//! **Warum das VOR Stufe 3 steht:** in Linux laeuft `rtw_chip_board_info_setup`
-//! (main.c:2064) zur Probe-Zeit, direkt nach `rtw_chip_efuse_info_setup` und
-//! LANGE vor `rtw_power_on`. Es schreibt kein einziges Register — es fuellt
-//! nur die Tabellen in `hal`, aus denen `rtw_set_channel` spaeter die
-//! Sendeleistung je Kanal, Rate und Pfad ausrechnet.
+//! In Linux `rtw_chip_board_info_setup` (main.c:2064) runs at probe time,
+//! right after `rtw_chip_efuse_info_setup` and well before `rtw_power_on`.
+//! It writes no register; it only fills the tables in `hal` from which
+//! `rtw_set_channel` later computes TX power per channel, rate and path.
 //!
-//! Portiert: `rtw_phy_init_tx_power` · `rtw_phy_init_tx_power_limit` ·
+//! Ported: `rtw_phy_init_tx_power` · `rtw_phy_init_tx_power_limit` ·
 //! `bcd_to_dec_pwr_by_rate` · `tbl_to_dec_pwr_by_rate` ·
 //! `rtw_phy_get_rate_values_of_txpwr_by_rate` · `rtw_phy_store_tx_power_by_rate` ·
 //! `rtw_parse_tbl_bb_pg` · `rtw_channel_to_idx` · `rtw_phy_set_tx_power_limit` ·
@@ -22,11 +21,11 @@ use crate::host;
 use crate::regs::*;
 use crate::tables;
 
-// ── Masse aus main.h ─────────────────────────────────────────────
+// ── Sizes from main.h ────────────────────────────────────────────
 pub const RTW_RF_PATH_MAX: usize = 4; // main.h:38
-pub const DESC_RATE_MAX: usize = 0x54; // main.h:341, folgt auf 0x53
+pub const DESC_RATE_MAX: usize = 0x54; // main.h:341, follows 0x53
 pub const RTW_RATE_SECTION_NUM: usize = 10; // main.h:176
-pub const RTW_REGD_MAX: usize = 13; // main.h:359, folgt auf RTW_REGD_WW
+pub const RTW_REGD_MAX: usize = 13; // main.h:359, follows RTW_REGD_WW
 pub const RTW_REGD_WW: usize = 12; // main.h:358
 pub const RTW_CHANNEL_WIDTH_MAX: usize = 3; // main.h:37
 pub const RTW_MAX_CHANNEL_NUM_2G: usize = 14; // main.h:49
@@ -37,9 +36,9 @@ pub const PHY_BAND_5G: u8 = 1;
 /// rtw8822c.c:5351 `.max_power_index = 0x7f`
 pub const MAX_POWER_INDEX: i8 = 0x7f;
 
-/// regd.c:522-533 `rtw_regd_alt[]` — welche Regulierungszone von welcher
-/// abschreibt, wenn die Tabelle fuer sie nichts sagt. `None` heisst
-/// „keine Ersatzzone", und dann gilt WW.
+/// regd.c:522-533 `rtw_regd_alt[]`: which regulatory domain copies from
+/// which when the table has nothing for it. `None` means no alternative,
+/// and WW applies.
 const REGD_ALT: [Option<usize>; RTW_REGD_MAX] = [
     None,       // FCC
     None,       // MKK
@@ -56,10 +55,10 @@ const REGD_ALT: [Option<usize>; RTW_REGD_MAX] = [
     None,       // WW
 ];
 
-/// main.h:1993-2011 `struct rtw_hal`, der Sendeleistungsteil.
+/// main.h:1993-2011 `struct rtw_hal`, the TX power part.
 ///
-/// Rund 25 KiB. Das ist kein Versehen: `tx_pwr_limit_5g` allein ist
-/// 13 Zonen x 3 Bandbreiten x 10 Ratenabschnitte x 49 Kanaele.
+/// About 25 KiB: `tx_pwr_limit_5g` alone is 13 domains x 3 bandwidths x
+/// 10 rate sections x 49 channels.
 pub struct TxPower {
     pub by_rate_offset_2g: [[i8; DESC_RATE_MAX]; RTW_RF_PATH_MAX],
     pub by_rate_offset_5g: [[i8; DESC_RATE_MAX]; RTW_RF_PATH_MAX],
@@ -73,9 +72,9 @@ pub struct TxPower {
 }
 
 impl TxPower {
-    /// phy.c:2427-2446 `rtw_phy_init_tx_power` — samt
-    /// `rtw_phy_init_tx_power_limit`, das nichts tut, als jede Zelle auf
-    /// `max_power_index` zu setzen. Die Null davor kommt vom Anlegen.
+    /// phy.c:2427-2446 `rtw_phy_init_tx_power`, including
+    /// `rtw_phy_init_tx_power_limit`, which only sets every cell to
+    /// `max_power_index`. The zeroing before it comes from construction.
     pub fn new() -> Self {
         let mut t = TxPower {
             by_rate_offset_2g: [[0; DESC_RATE_MAX]; RTW_RF_PATH_MAX],
@@ -105,12 +104,12 @@ impl TxPower {
     }
 }
 
-// ── Die Leistung JE RATE (bb_pg) ─────────────────────────────────
+// ── Power per rate (bb_pg) ───────────────────────────────────────
 
 /// phy.c:1219 `#define bcd_to_dec_pwr_by_rate(val, i) bcd2bin(val >> (i * 8))`
 ///
-/// `bcd2bin(x)` ist `(x & 0x0f) + (x >> 4) * 10` — eine Zahl, deren zwei
-/// Nibbles DEZIMALziffern sind.
+/// `bcd2bin(x)` is `(x & 0x0f) + (x >> 4) * 10`: a number whose two
+/// nibbles are decimal digits.
 fn bcd_to_dec_pwr_by_rate(val: u32, i: u32) -> i8 {
     let b = ((val >> (i * 8)) & 0xff) as u8;
     ((b & 0x0f) + (b >> 4) * 10) as i8
@@ -118,34 +117,32 @@ fn bcd_to_dec_pwr_by_rate(val: u32, i: u32) -> i8 {
 
 /// phy.c:1221-1227 `tbl_to_dec_pwr_by_rate`.
 ///
-/// `chip->is_pwr_by_rate_dec` ist beim 8822C **false** (rtw8822c.c:5350),
-/// also gilt der einfache Zweig: das Byte, wie es dasteht.
+/// `chip->is_pwr_by_rate_dec` is false on the 8822C (rtw8822c.c:5350), so
+/// the simple branch applies: the byte as is.
 fn tbl_to_dec_pwr_by_rate(hex: u32, i: u32) -> i8 {
     ((hex >> (i * 8)) & 0xff) as i8
 }
 
 /// phy.c:1229-1532 `rtw_phy_get_rate_values_of_txpwr_by_rate`.
 ///
-/// Die ZUORDNUNG steht in `tables::TXPWR_BY_RATE_MAP`, erzeugt aus genau
-/// diesem `switch`. Hier stehen nur die zwei Faelle, die RECHNEN statt
-/// zuzuordnen — und dass sie hier stehen, ist der Grund, warum sie nicht
-/// in der Tabelle sind.
+/// The mapping lives in `tables::TXPWR_BY_RATE_MAP`, generated from this
+/// `switch`. Only the two cases that compute rather than map are here.
 ///
-/// Gibt `(raten, werte, anzahl)` zurueck.
+/// Returns `(rates, values, count)`.
 fn rate_values_of_txpwr_by_rate(addr: u32, mask: u32, val: u32)
     -> ([u8; 4], [i8; 4], usize)
 {
     let mut rate = [0u8; 4];
     let mut pwr = [0i8; 4];
 
-    // phy.c:1259 `case 0xE08:` — EIN Wert, und er kommt aus BCD, Byte 1.
+    // phy.c:1259 `case 0xE08:`: one value, from BCD, byte 1.
     if addr == 0xE08 {
         rate[0] = 0x00; // DESC_RATE1M
         pwr[0] = bcd_to_dec_pwr_by_rate(val, 1);
         return (rate, pwr, 1);
     }
 
-    // phy.c:1264-1277 `case 0x86C:` — haengt an der MASKE.
+    // phy.c:1264-1277 `case 0x86C:`: depends on the mask.
     if addr == 0x86C {
         if mask == 0xffffff00 {
             rate[0] = 0x01; // DESC_RATE2M
@@ -160,7 +157,7 @@ fn rate_values_of_txpwr_by_rate(addr: u32, mask: u32, val: u32)
             pwr[0] = bcd_to_dec_pwr_by_rate(val, 0);
             return (rate, pwr, 1);
         }
-        // Linux faellt hier ohne `rate_num` heraus, also mit 0.
+        // Linux exits here without setting `rate_num`, so it is 0.
         return (rate, pwr, 0);
     }
 
@@ -174,7 +171,7 @@ fn rate_values_of_txpwr_by_rate(addr: u32, mask: u32, val: u32)
         }
         return (rate, pwr, rs.len());
     }
-    // `default:` in Linux: nur eine Fehlermeldung, `rate_num` bleibt 0.
+    // `default:` in Linux: only an error message, `rate_num` stays 0.
     (rate, pwr, 0)
 }
 
@@ -216,7 +213,7 @@ pub fn parse_tbl_bb_pg(t: &mut TxPower) {
     }
 }
 
-// ── Die GRENZE je Zone, Bandbreite, Ratenabschnitt und Kanal ─────
+// ── Limit per domain, bandwidth, rate section and channel ────────
 
 /// phy.c:1590-1611 `rtw_channel_to_idx`
 fn channel_to_idx(band: u8, channel: u8) -> Option<usize> {
@@ -235,10 +232,9 @@ fn channel_to_idx(band: u8, channel: u8) -> Option<usize> {
 
 /// phy.c:1613-1645 `rtw_phy_set_tx_power_limit`.
 ///
-/// **Jeder Wert geht zweimal hinein:** einmal in seine Zone und einmal als
-/// MINIMUM in die Welt-Zone `RTW_REGD_WW`. Die ist damit am Ende die
-/// strengste aller Zonen — und der Rueckfall fuer alles, was die Tabelle
-/// gar nicht nennt.
+/// Every value is stored twice: once in its domain and once as a minimum
+/// in the world domain `RTW_REGD_WW`, which thus ends up the strictest of
+/// all and is the fallback for anything the table does not name.
 fn set_tx_power_limit(t: &mut TxPower, regd: usize, band: u8, bw: usize,
                       rs: usize, ch: u8, pwr_limit: i8) {
     let pwr_limit = pwr_limit.clamp(-MAX_POWER_INDEX, MAX_POWER_INDEX);
@@ -283,7 +279,7 @@ fn cfg_txpwr_lmt_by_alt(t: &mut TxPower, regd: usize, regd_alt: usize) {
     }
 }
 
-// phy.c:1662-1666 — die Paare, ueber die quergeglichen wird.
+// phy.c:1662-1666: the pairs that are cross-referenced.
 const RS_HT_1S: usize = 2;
 const RS_HT_2S: usize = 3;
 const RS_VHT_1S: usize = 4;
@@ -295,9 +291,9 @@ const RS_VHT_4S: usize = 9;
 
 /// phy.c:1647-1664 `rtw_xref_5g_txpwr_lmt`.
 ///
-/// Sagt die Tabelle fuer HT etwas und fuer VHT nichts (oder umgekehrt),
-/// bekommt der stumme den Wert des anderen. „Nichts gesagt" heisst hier
-/// `max_power_index` — der Wert, mit dem `init_tx_power_limit` gefuellt hat.
+/// If the table has a value for HT but not for VHT (or vice versa), the
+/// missing one gets the other's value. "No value" means `max_power_index`,
+/// the value `init_tx_power_limit` filled in.
 fn xref_5g_txpwr_lmt(t: &mut TxPower, regd: usize, bw: usize, ch_idx: usize,
                      rs_ht: usize, rs_vht: usize) {
     let lmt_ht = t.limit_5g[regd][bw][rs_ht][ch_idx];
@@ -333,7 +329,7 @@ fn xref_5g_txpwr_lmt_by_ch(t: &mut TxPower, regd: usize, bw: usize) {
     }
 }
 
-/// phy.c:1696-1704 `rtw_xref_txpwr_lmt_by_bw` — nur 20 und 40 MHz.
+/// phy.c:1696-1704 `rtw_xref_txpwr_lmt_by_bw`, 20 and 40 MHz only.
 fn xref_txpwr_lmt_by_bw(t: &mut TxPower, regd: usize) {
     for bw in 0..=1usize {
         xref_5g_txpwr_lmt_by_ch(t, regd, bw);
@@ -349,9 +345,9 @@ fn xref_txpwr_lmt(t: &mut TxPower) {
 
 /// phy.c:1740-1780 `rtw_parse_tbl_txpwr_lmt`.
 ///
-/// Danach die zwei Aufraeumschritte, die Linux gleich mitmacht: eine Zone,
-/// die in der Tabelle gar nicht vorkommt, schreibt von ihrer Ersatzzone ab
-/// (`rtw_regd_has_alt`) — und wenn es keine gibt, von der Welt-Zone.
+/// Followed by the two cleanup steps Linux does along with it: a domain
+/// absent from the table copies from its alternative (`rtw_regd_has_alt`),
+/// or from the world domain if it has none.
 pub fn parse_tbl_txpwr_lmt(t: &mut TxPower, tbl: &[(u8, u8, u8, u8, u8, i8)]) {
     let mut regd_cfg_flag: u32 = 0;
 
@@ -380,13 +376,13 @@ pub fn parse_tbl_txpwr_lmt(t: &mut TxPower, tbl: &[(u8, u8, u8, u8, u8, i8)]) {
     xref_txpwr_lmt(t);
 }
 
-// ── Aus absoluten Werten werden Abweichungen ─────────────────────
+// ── Absolute values become offsets ───────────────────────────────
 
 /// phy.c:2348-2369 `rtw_phy_tx_power_by_rate_config_by_path`.
 ///
-/// **Die Basisrate ist bei VHT die DRITTLETZTE**, sonst die letzte — bei
-/// zehn VHT-Raten also MCS7 und nicht MCS9. Alles wird danach relativ zu
-/// ihr ausgedrueckt.
+/// The base rate is the third from last for VHT and the last otherwise;
+/// with ten VHT rates that is MCS7, not MCS9. Everything is then expressed
+/// relative to it.
 fn tx_power_by_rate_config_by_path(t: &mut TxPower, path: usize, rs: usize,
                                    rates: &[u8]) {
     let size = rates.len();
@@ -418,7 +414,7 @@ pub fn tx_power_by_rate_config(t: &mut TxPower) {
 
 /// phy.c:2382-2396 `__rtw_phy_tx_power_limit_config`
 fn tx_power_limit_config_one(t: &mut TxPower, regd: usize, bw: usize, rs: usize) {
-    // **Pfad 0**, auch fuer Pfad 1 — so steht es in Linux.
+    // Path 0, also for path 1, as in Linux.
     let base_2g = t.by_rate_base_2g[0][rs];
     for ch in 0..RTW_MAX_CHANNEL_NUM_2G {
         t.limit_2g[regd][bw][rs][ch] -= base_2g;
@@ -443,12 +439,11 @@ pub fn tx_power_limit_config(t: &mut TxPower) {
     }
 }
 
-/// phy.h:119-136 `rtw_get_rfe_def` — welcher RFE-Satz fuer dieses Board.
+/// phy.h:119-136 `rtw_get_rfe_def`: which RFE set applies to this board.
 ///
-/// rtw8822c.c:5277-5285: sieben Eintraege, und nur `[5]` weicht ab (er
-/// nimmt `txpwr_lmt_type5`). `rfe_option` ausserhalb 0..6 hat keinen
-/// Eintrag; Linux gibt dann NULL und `rtw_chip_board_info_setup`
-/// scheitert.
+/// rtw8822c.c:5277-5285: seven entries, only `[5]` differs (it uses
+/// `txpwr_lmt_type5`). An `rfe_option` outside 0..6 has no entry; Linux
+/// then returns NULL and `rtw_chip_board_info_setup` fails.
 pub fn txpwr_lmt_tbl(rfe_option: u8) -> Option<&'static [(u8, u8, u8, u8, u8, i8)]> {
     match rfe_option {
         5 => Some(&tables::TXPWR_LMT_TYPE5),
@@ -457,14 +452,12 @@ pub fn txpwr_lmt_tbl(rfe_option: u8) -> Option<&'static [(u8, u8, u8, u8, u8, i8
     }
 }
 
-/// main.c:2064-2081 `rtw_chip_board_info_setup`, ohne
-/// `rtw_phy_setup_phy_cond` — das steht in `phy.rs`, weil es die
-/// Bedingung fuer die PARAMETERTABELLEN rechnet und nicht fuer die
-/// Sendeleistung.
+/// main.c:2064-2081 `rtw_chip_board_info_setup`, without
+/// `rtw_phy_setup_phy_cond`, which lives in `phy.rs` because it computes
+/// the condition for the parameter tables, not for TX power.
 ///
-/// **Kein einziger Registerzugriff.** Diese Stufe fuellt nur die Tabellen,
-/// aus denen `rtw_set_channel` spaeter rechnet — und genau deshalb laeuft
-/// sie in Linux zur Probe-Zeit und nicht im Anlaufweg.
+/// No register access at all: this only fills the tables `rtw_set_channel`
+/// computes from, which is why Linux runs it at probe time.
 pub fn board_info_setup(rfe_option: u8) -> Option<TxPower> {
     let lmt = txpwr_lmt_tbl(rfe_option)?;
     let mut t = TxPower::new();
@@ -475,9 +468,8 @@ pub fn board_info_setup(rfe_option: u8) -> Option<TxPower> {
     Some(t)
 }
 
-/// Die eigenen Summen, in derselben Reihenfolge wie
-/// `tables::EXPECTED_TXPWR_SUMS`. Byteweise, ohne Vorzeichen — genau wie
-/// die Nachrechnung im Erzeuger.
+/// Our own sums, in the same order as `tables::EXPECTED_TXPWR_SUMS`.
+/// Bytewise and unsigned, as the generator computes them.
 pub fn checksums(t: &TxPower) -> [u32; 6] {
     fn s2(a: &[[i8; DESC_RATE_MAX]; RTW_RF_PATH_MAX]) -> u32 {
         let mut n = 0u32;
@@ -522,11 +514,11 @@ pub fn checksums(t: &TxPower) -> [u32; 6] {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4c: aus den Tabellen wird ein Leistungsindex je Rate
+// From the tables to a power index per rate
 // ════════════════════════════════════════════════════════════════
 
-/// main.h:438-531 `struct rtw_txpwr_idx`, wie er in der efuse liegt:
-/// 42 Byte je Pfad, gepackt, mit 4-Bit-Feldern.
+/// main.h:438-531 `struct rtw_txpwr_idx` as stored in the efuse: 42 bytes
+/// per path, packed, with 4-bit fields.
 ///
 ///     2G: cck_base[6] · bw40_base[5] · ht_1s_diff · ht_2s/3s/4s_diff
 ///     5G: bw40_base[14] · ht_1s · ht_2s/3s/4s · ofdm · vht_1s..4s
@@ -534,8 +526,8 @@ pub struct TxPwrIdx<'a>(pub &'a [u8; 42]);
 
 impl<'a> TxPwrIdx<'a> {
     fn n4(b: u8, hi: bool) -> i8 {
-        // Ein 4-Bit-Bitfeld mit Vorzeichen, little-endian: das UNTERE
-        // Nibble ist das erste Feld.
+        // A signed 4-bit bitfield, little-endian: the low nibble is the first
+        // field.
         let v = if hi { b >> 4 } else { b & 0x0f };
         if v & 0x8 != 0 { (v as i8) - 16 } else { v as i8 }
     }
@@ -544,39 +536,33 @@ impl<'a> TxPwrIdx<'a> {
     // 2G ht_1s_diff @11: ofdm (unten), bw20 (oben)
     pub fn g2_ht1s_ofdm(&self) -> i8 { Self::n4(self.0[11], false) }
     pub fn g2_ht1s_bw20(&self) -> i8 { Self::n4(self.0[11], true) }
-    // 2G ht_2s/3s/4s_diff @12,13,14: bw20 (unten), bw40 (oben) im ersten
-    // Byte — `rtw_2g_ns_pwr_idx_diff` ist ZWEI Byte: bw20,bw40 | cck,ofdm
+    // 2G ht_2s/3s/4s_diff @12,13,14: bw20 (low), bw40 (high) in the first
+    // byte; `rtw_2g_ns_pwr_idx_diff` is two bytes: bw20,bw40 | cck,ofdm
     pub fn g2_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[12 + (n - 2) * 2], false) }
     pub fn g2_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[12 + (n - 2) * 2], true) }
-    // 5G beginnt bei 18: bw40_base[14]
+    // 5G starts at 18: bw40_base[14]
     pub fn bw40_base_5g(&self, g: usize) -> u8 { self.0[18 + g] }
     pub fn g5_ht1s_ofdm(&self) -> i8 { Self::n4(self.0[32], false) }
     pub fn g5_ht1s_bw20(&self) -> i8 { Self::n4(self.0[32], true) }
-    // **`rtw_5g_ht_ns_pwr_idx_diff` ist EIN Byte** (bw20:4, bw40:4) — das
-    // 2G-Gegenstueck daneben ist zwei, und genau dieser Schritt stand hier
-    // zuerst. @33,34,35 fuer 2s/3s/4s.
+    // `rtw_5g_ht_ns_pwr_idx_diff` is one byte (bw20:4, bw40:4), unlike its
+    // two-byte 2G counterpart. @33,34,35 for 2s/3s/4s.
     pub fn g5_ns_bw20(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2)], false) }
     pub fn g5_ns_bw40(&self, n: usize) -> i8 { Self::n4(self.0[33 + (n - 2)], true) }
-    // ofdm_diff @36,37 (zwei Byte) liest `rtw_phy_get_5g_tx_power_index`
-    // nicht — dahinter kommen vht_1s..4s @38,39,40,41, und in
-    // `rtw_5g_vht_ns_pwr_idx_diff` steht bw160 UNTEN, bw80 OBEN.
+    // ofdm_diff @36,37 (two bytes) is not read by
+    // `rtw_phy_get_5g_tx_power_index`; vht_1s..4s follow at @38,39,40,41, and
+    // in `rtw_5g_vht_ns_pwr_idx_diff` bw160 is the low nibble, bw80 the high.
     pub fn g5_vht_bw80(&self, n: usize) -> i8 { Self::n4(self.0[38 + (n - 1)], true) }
 }
 
-// Ratengrenzen aus main.h:249-340, gebraucht fuer die Abschnitts- und
-// Streamzuordnung.
+// Rate boundaries from main.h:249-340, used for section and stream
+// mapping.
 //
-// **Sie werden aus `regs.rs` ABGELEITET und nicht daneben geschrieben.**
-// Hier stand eine zweite Liste von Hand, und ab `DESC_RATEMCS31` war sie
-// ganz um eins zu hoch — MCS31 als 0x2c statt 0x2b, und damit jeder
-// VHT-Anfang eine Stelle daneben. Der Fehler kippt genau den ERSTEN
-// Eintrag jedes Abschnitts, deshalb ist er nie aufgefallen:
-// `rate_to_rate_section(0x2c)` gab 7 (HT 4SS) statt 4 (VHT 1SS), und
-// `above_2ss(0x36)` sagte NEIN zur ersten 2SS-Rate. VHT-MCS0 ist die
-// Rate, die man nur am Rand der Zelle sieht.
+// They are derived from `regs.rs` rather than written out separately: an
+// off-by-one here shifts the first entry of each section, e.g. VHT MCS0
+// would land in the HT 4SS section.
 //
-// Die Enden (`_MCS7/9/15/23/31`) stehen als Rechnung da, weil die Reihen
-// in `main.h` lueckenlos sind: acht MCS je HT-Abschnitt, zehn je VHT.
+// The ends (`_MCS7/9/15/23/31`) are computed because the rows in `main.h`
+// are contiguous: eight MCS per HT section, ten per VHT section.
 const DESC_RATE11M: u8 = crate::regs::DESC_RATE11M as u8;
 const DESC_RATE6M: u8 = crate::regs::DESC_RATE6M as u8;
 const DESC_RATE54M: u8 = crate::regs::DESC_RATE54M as u8;
@@ -598,7 +584,7 @@ const DESC_RATEVHT4SS_MCS0: u8 = crate::regs::DESC_RATEVHT4SS_MCS0 as u8;
 const DESC_RATEVHT4SS_MCS9: u8 = DESC_RATEVHT4SS_MCS0 + 9;
 
 /// phy.c:1962-1990 `rtw_phy_rate_to_rate_section`.
-/// `RTW_RATE_SECTION_NUM` heisst „Rate ungueltig".
+/// `RTW_RATE_SECTION_NUM` means invalid rate.
 pub fn rate_to_rate_section(rate: u8) -> usize {
     match rate {
         0x00..=DESC_RATE11M => 0,
@@ -615,8 +601,8 @@ pub fn rate_to_rate_section(rate: u8) -> usize {
     }
 }
 
-/// phy.c:1872-1960 `rtw_get_channel_group` — die Zuordnung ist erzeugt,
-/// der rechnende Fall (Kanal 14) steht hier.
+/// phy.c:1872-1960 `rtw_get_channel_group`: the mapping is generated, the
+/// computed case (channel 14) is handled here.
 fn channel_group(channel: u8, rate: u8) -> u8 {
     for &(ch, cck, other) in tables::CHANNEL_GROUP_CCK.iter() {
         if ch == channel {
@@ -627,7 +613,7 @@ fn channel_group(channel: u8, rate: u8) -> u8 {
     if i < tables::CHANNEL_GROUP.len() && tables::CHANNEL_GROUP[i] != 0xff {
         tables::CHANNEL_GROUP[i]
     } else {
-        // Linux: `default: WARN_ON(1); fallthrough;` -> Gruppe 0
+        // Linux: `default: WARN_ON(1); fallthrough;` -> group 0
         0
     }
 }
@@ -664,13 +650,13 @@ fn get_2g_tx_power_index(p: &TxPwrIdx, bw: usize, rate: u8, group: u8) -> u8 {
     }
     match bw {
         1 => {
-            // bw40 ist die Basis
+            // bw40 is the base
             if above_2ss(rate) { tx += p.g2_ns_bw40(2) as i16 * f; }
             if above_3ss(rate) { tx += p.g2_ns_bw40(3) as i16 * f; }
             if above_4ss(rate) { tx += p.g2_ns_bw40(4) as i16 * f; }
         }
         _ => {
-            // RTW_CHANNEL_WIDTH_20 und Linux' `default: WARN_ON(1)`
+            // RTW_CHANNEL_WIDTH_20 and Linux's `default: WARN_ON(1)`
             tx += p.g2_ht1s_bw20() as i16 * f;
             if above_2ss(rate) { tx += p.g2_ns_bw20(2) as i16 * f; }
             if above_3ss(rate) { tx += p.g2_ns_bw20(3) as i16 * f; }
@@ -697,7 +683,7 @@ fn get_5g_tx_power_index(p: &TxPwrIdx, bw: usize, rate: u8, group: u8) -> u8 {
             if above_4ss(rate) { tx += p.g5_ns_bw40(4) as i16 * f; }
         }
         2 => {
-            // die Basis von 80 MHz ist der Mittelwert aus bw40+ und bw40-
+            // the 80 MHz base is the mean of bw40+ and bw40-
             let lower = p.bw40_base_5g(g) as i16;
             let upper = p.bw40_base_5g(g + 1) as i16;
             tx = (lower + upper) / 2;
@@ -718,9 +704,8 @@ fn get_5g_tx_power_index(p: &TxPwrIdx, bw: usize, rate: u8, group: u8) -> u8 {
 
 /// phy.c:2149-2196 `rtw_phy_get_tx_power_limit`.
 ///
-/// **Es wird das MINIMUM ueber alle Bandbreiten von 20 MHz bis zur
-/// aktuellen genommen** — nicht nur die aktuelle. Und CCK/OFDM kennen nur
-/// 20 MHz, HT hoechstens 40.
+/// Takes the minimum over all bandwidths from 20 MHz up to the current
+/// one, not only the current one. CCK/OFDM know only 20 MHz, HT at most 40.
 fn get_tx_power_limit(t: &TxPower, band: u8, bw: usize, rate: u8,
                       regd: usize) -> i8 {
     let mut power_limit = MAX_POWER_INDEX;
@@ -734,10 +719,10 @@ fn get_tx_power_limit(t: &TxPower, band: u8, bw: usize, rate: u8,
 
     let mut bw = bw;
     if rs == 0 || rs == 1 {
-        bw = 0; // nur 20 MHz bei CCK und OFDM
+        bw = 0; // only 20 MHz for CCK and OFDM
     }
     if (DESC_RATEMCS0..=DESC_RATEMCS31).contains(&rate) {
-        bw = bw.min(1); // HT hoechstens 40 MHz
+        bw = bw.min(1); // HT at most 40 MHz
     }
 
     for cur_bw in 0..=bw {
@@ -757,7 +742,7 @@ fn get_tx_power_limit(t: &TxPower, band: u8, bw: usize, rate: u8,
 }
 
 /// phy.c:2122-2147 `rtw_phy_get_dis_dpd_by_rate_diff`.
-/// `en_dis_dpd` ist beim 8822C true, `dpd_ratemask` ist `DIS_DPD_RATEALL`.
+/// `en_dis_dpd` is true on the 8822C, `dpd_ratemask` is `DIS_DPD_RATEALL`.
 fn dis_dpd_by_rate_diff(rate: u8) -> i16 {
     if !EN_DIS_DPD {
         return 0;
@@ -779,12 +764,12 @@ fn dis_dpd_by_rate_diff(rate: u8) -> i16 {
 }
 
 /// phy.c:2219-2256 `rtw_get_tx_power_params` + phy.c:2258-2283
-/// `rtw_phy_get_tx_power_index`, zusammengezogen.
+/// `rtw_phy_get_tx_power_index`, merged.
 ///
-/// **`pwr_sar` ist `max_power_index`**: `hal->sar.src` ist
-/// `RTW_SAR_SOURCE_NONE`, solange kein ACPI-SAR-Block da ist, und
-/// `rtw_query_sar` gibt dann genau das zurueck. **`pwr_remnant` ist 0**:
-/// `txagc_remnant_*` setzt die Leistungsnachfuehrung im laufenden Betrieb.
+/// `pwr_sar` is `max_power_index`: `hal->sar.src` is `RTW_SAR_SOURCE_NONE`
+/// without an ACPI SAR block, and `rtw_query_sar` then returns exactly
+/// that. `pwr_remnant` is 0: `txagc_remnant_*` is set by runtime power
+/// tracking.
 #[allow(clippy::too_many_arguments)]
 pub fn get_tx_power_index(t: &TxPower, p: &TxPwrIdx, path: usize, rate: u8,
                           bw: usize, ch: u8, regd: usize, band: u8) -> u8 {
@@ -809,8 +794,8 @@ pub fn get_tx_power_index(t: &TxPower, p: &TxPwrIdx, path: usize, rate: u8,
     if tx_power > MAX_POWER_INDEX as i16 {
         MAX_POWER_INDEX as u8
     } else if tx_power < 0 {
-        // Linux rechnet in u8 und laesst es umlaufen; der Wert wird danach
-        // ohnehin auf sieben Bit beschnitten.
+        // Linux computes in u8 and lets it wrap; the value is truncated to seven
+        // bits afterwards anyway.
         (tx_power as i32 as u32 & 0xff) as u8
     } else {
         tx_power as u8
@@ -818,15 +803,15 @@ pub fn get_tx_power_index(t: &TxPower, p: &TxPwrIdx, path: usize, rate: u8,
 }
 
 /// phy.c:2285-2330 `rtw_phy_set_tx_power_index_by_rs` +
-/// `rtw_phy_set_tx_power_level_by_path`. Fuellt `tx_pwr_tbl`.
+/// `rtw_phy_set_tx_power_level_by_path`. Fills `tx_pwr_tbl`.
 ///
-/// `regd` kommt in Linux aus `rtw_regd_get` — der Regulierungszone, die
-/// `rtw_regd_init` aus dem Laenderkuerzel setzt. Solange die nicht steht,
-/// ist es die efuse-Zone.
+/// In Linux `regd` comes from `rtw_regd_get`, the regulatory domain
+/// `rtw_regd_init` derives from the country code. Until that is set it is
+/// the efuse domain.
 pub fn set_tx_power_level(t: &TxPower, p: &[TxPwrIdx], tbl: &mut [[u8; DESC_RATE_MAX]; RTW_RF_PATH_MAX],
                           rf_path_num: u8, ch: u8, bw: usize, band: u8, regd: usize) {
     for path in 0..rf_path_num as usize {
-        // Ohne 2,4 GHz keine CCK-Raten.
+        // No CCK rates without 2.4 GHz.
         let start = if band == PHY_BAND_2G { 0 } else { 1 };
         for rs in start..RTW_RATE_SECTION_NUM {
             for &rate in tables::RATE_SECTION[rs].iter() {

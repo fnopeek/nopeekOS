@@ -1,13 +1,11 @@
-//! Die RF-Kalibrierung des 8822C — `rtw8822c_phy_calibration` und was sie
-//! umgibt (Stufe 5d).
+//! 8822C RF calibration: `rtw8822c_phy_calibration` and its helpers.
 //!
-//! **Wann sie laeuft, entscheidet Linux und nicht wir:** `rtw_set_channel`
-//! setzt nur `need_rfk = true`, und `rtw_chip_prepare_tx` fuehrt sie aus,
-//! wenn mac80211 `mgd_prepare_tx` ruft — also VOR dem Anmelden. Auf jedem
-//! Kanal eines Suchlaufs zu kalibrieren dauert zu lange; der Kommentar in
-//! `main.c` sagt genau das.
+//! When it runs is decided as in Linux: `rtw_set_channel` only sets
+//! `need_rfk = true`, and `rtw_chip_prepare_tx` runs it when mac80211 calls
+//! `mgd_prepare_tx`, i.e. before authentication. Calibrating on every scan
+//! channel would take too long (see the comment in `main.c`).
 //!
-//! Portiert: `rtw8822c_rfk_power_save` · `rtw8822c_rfk_handshake` ·
+//! Ported: `rtw8822c_rfk_power_save` · `rtw8822c_rfk_handshake` ·
 //! `rtw8822c_do_iqk` · `rtw8822c_phy_calibration`.
 #![allow(dead_code)]
 
@@ -24,9 +22,9 @@ pub fn power_save(h: i32, rf_path_num: u8, is_power_save: bool) {
     }
 }
 
-/// Was der Handschlag gemeldet hat. Drei Wartezeiten, drei Ausgaenge —
-/// Linux schreibt sie in die Debugausgabe, wir behalten sie, weil sie die
-/// einzige Auskunft darueber sind, ob die Firmware mitspielt.
+/// What the handshake reported: three waits, three outcomes. Linux only
+/// logs them; they are kept because they are the only indication whether
+/// the firmware cooperates.
 #[derive(Default, Clone, Copy)]
 pub struct HandshakeRpt {
     pub bt_iqk_waited_us: u64,
@@ -39,10 +37,9 @@ pub struct HandshakeRpt {
 
 /// rtw8822c.c:1134-1178 `rtw8822c_rfk_handshake`.
 ///
-/// **`is_bt_iqk_timeout` merkt sich einen Fehlschlag fuer immer** — nach
-/// einer Zeitueberschreitung wird auf die BT-IQK nie wieder gewartet. Das
-/// ist Absicht: eine BT-Seite, die einmal nicht antwortet, kostet sonst bei
-/// JEDER Kalibrierung 600 ms.
+/// `is_bt_iqk_timeout` latches a failure: after one timeout the BT IQK is
+/// never waited for again, so an unresponsive BT side does not cost 600 ms
+/// on every calibration.
 pub fn handshake(h: i32, is_before_k: bool, is_bt_iqk_timeout: &mut bool,
                  st: &mut crate::fw::H2cState) -> HandshakeRpt {
     let mut r = HandshakeRpt::default();
@@ -79,8 +76,7 @@ pub fn handshake(h: i32, is_before_k: bool, is_bt_iqk_timeout: &mut bool,
 }
 
 /// `read_poll_timeout(rtw_read8_mask, u1b_tmp, u1b_tmp == 1, 20, 100000, …,
-/// REG_ARFR4, BIT_WL_RFK)` — beide Zweige des Handschlags warten damit auf
-/// dieselbe Quittung.
+/// REG_ARFR4, BIT_WL_RFK)`: both handshake branches wait for the same ack.
 fn wait_rfk_ack(h: i32) -> (bool, u64) {
     let t0 = host::now_us();
     loop {
@@ -96,14 +92,13 @@ fn wait_rfk_ack(h: i32) -> (bool, u64) {
 
 /// rtw8822c.c:1836-1851 `rtw8822c_do_iqk`.
 ///
-/// **Die IQK rechnet die Firmware.** Der Treiber schickt ein H2C-Paket und
-/// wartet bis zu 300 ms darauf, dass `REG_RPT_CIP` den Wert `0xaa` traegt.
-/// Danach wird `REG_IQKSTAT` geloescht — auch dann, wenn die Wartezeit
-/// abgelaufen ist; Linux macht dazwischen keinen Unterschied.
+/// The firmware computes the IQK. The driver sends an H2C packet and waits
+/// up to 300 ms for `REG_RPT_CIP` to read `0xaa`. `REG_IQKSTAT` is cleared
+/// afterwards even on timeout; Linux does not distinguish the two.
 pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut crate::fw::H2cState)
     -> (bool, u64, u8)
 {
-    // `para.clear = 1`, `segment_iqk` bleibt 0 (`{0}`-Initialisierung).
+    // `para.clear = 1`, `segment_iqk` stays 0 (`{0}` initialisation).
     crate::fw::do_iqk(h, trx, stage, st, true, false);
 
     let t0 = host::now_us();
@@ -125,10 +120,9 @@ pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut crate::fw::H2cState)
 
 /// rtw8822c.c:1825-1834 `rtw8822c_do_gapk`.
 ///
-/// **Die Pruefung ist umgekehrt, als der Name vermuten laesst:** ist das
-/// Bit GESETZT, ist TXGAPK ABGESCHALTET. `dm_flags` wird in Linux nur aus
-/// debugfs beschrieben und ist beim Start null — TXGAPK laeuft also im
-/// Normalfall mit.
+/// The check is inverted relative to the name: a set bit disables TXGAPK.
+/// Linux writes `dm_flags` only from debugfs and it starts at zero, so
+/// TXGAPK normally runs.
 pub fn do_gapk(h: i32, g: &mut crate::txgapk::GapkInfo, rf_path_num: u8,
                dm_flags: u32, power_track_type: u8,
                is_bt_iqk_timeout: &mut bool, st: &mut crate::fw::H2cState)

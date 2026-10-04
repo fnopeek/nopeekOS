@@ -1,14 +1,12 @@
-//! `rtw8822c_txgapk` — die Sendeverstaerkungs-Kalibrierung (Stufe 5d),
-//! rtw8822c.c:1191-1823.
+//! `rtw8822c_txgapk`, TX gain calibration, rtw8822c.c:1191-1823.
 //!
-//! Sie misst je Verstaerkungsstufe den Abstand zwischen dem, was die
-//! Verstaerkungstabelle des RF verspricht, und dem, was herauskommt, und
-//! schreibt die Tabelle danach korrigiert zurueck.
+//! For each gain step it measures the gap between what the RF gain table
+//! promises and what comes out, and writes the corrected table back.
 //!
-//! **Zwei Ausstiege stehen ganz vorn**, und beide gehoeren zur Funktion:
-//! ohne gelesene Verstaerkungstabelle (`read_txgain == 0`) gibt es nichts
-//! zu korrigieren, und bei `power_track_type` 4..7 regelt der Chip seine
-//! Sendeleistung ueber TSSI — dann waere die Korrektur doppelt.
+//! Two early exits belong to the function: without a read gain table
+//! (`read_txgain == 0`) there is nothing to correct, and with
+//! `power_track_type` 4..7 the chip regulates TX power via TSSI, so the
+//! correction would be applied twice.
 #![allow(dead_code)]
 
 use crate::host;
@@ -20,9 +18,8 @@ pub const RF_GAIN_NUM_U: usize = RF_GAIN_NUM as usize;
 pub const RF_HW_OFFSET_NUM_U: usize = RF_HW_OFFSET_NUM as usize;
 const PATHS: usize = 4; // RTW_RF_PATH_MAX
 
-/// main.h:1663-1671 `struct rtw_gapk_info`. Der Tippfehler `fianl_offset`
-/// steht in Linux so da und bleibt hier stehen — wer danach sucht, sucht
-/// mit dem Namen, den die Quelle traegt.
+/// main.h:1663-1671 `struct rtw_gapk_info`. The typo `fianl_offset` is
+/// Linux's and is kept so the name matches the source.
 pub struct GapkInfo {
     pub rf3f_bp: [[[u32; PATHS]; RF_GAIN_NUM_U]; RF_BAND_MAX_U],
     pub rf3f_fs: [[i8; RF_GAIN_NUM_U]; PATHS],
@@ -74,8 +71,8 @@ fn reload_bb_reg(h: i32, reg: &[u32], backup: &[u32]) {
 
 /// rtw8822c.c:1217-1229 `check_rf_status`.
 ///
-/// Wahr, wenn KEIN Pfad mehr im gefragten Zustand steht — der Name klingt
-/// nach dem Gegenteil, und so steht er in Linux.
+/// True when no path is in the given state any more; the name suggests the
+/// opposite, as in Linux.
 fn check_rf_status(h: i32, status: u32) -> bool {
     let a = phy::read_rf(h, phy::RF_PATH_A, RF_MODE_TRXAGC, BIT_RF_MODE);
     let b = phy::read_rf(h, phy::RF_PATH_B, RF_MODE_TRXAGC, BIT_RF_MODE);
@@ -126,8 +123,8 @@ fn bb_dpk(h: i32, path: usize) {
 
 /// rtw8822c.c:1280-1314 `rtw8822c_txgapk_afe_dpk`.
 ///
-/// Achtzehn Schreibzugriffe, und der erste Wert steht ZWEIMAL da. Das ist
-/// kein Kopierfehler von mir — es steht in Linux so, und der letzte ebenso.
+/// Eighteen writes, and the first value appears twice, as does the last;
+/// that is how Linux has it.
 fn afe_dpk(h: i32, path: usize) {
     let reg = match path {
         p if p == phy::RF_PATH_A => REG_ANAPAR_A,
@@ -221,8 +218,8 @@ fn write_gain_bb_table_one(h: i32, g: &GapkInfo, band: usize, path: usize) {
 
     host::w32_mask(h, REG_TX_GAIN_SET, MASKBYTE0, 0x88);
 
-    // `tmp_3f` wird NICHT je Durchlauf zurueckgesetzt: ist eine Stufe
-    // gueltig, behaelt sie den Wert der letzten ungueltigen. So steht es da.
+    // `tmp_3f` is not reset per iteration: a valid step keeps the value of
+    // the last invalid one, as in Linux.
     let mut tmp_3f = 0u32;
     let mut check_txgain = false;
     for gain in 0..RF_GAIN_NUM_U {
@@ -288,8 +285,8 @@ fn read_offset(h: i32, g: &mut GapkInfo, path: usize) {
     host::w32_mask(h, REG_NCTL0, MASKDWORD, CFG1_1B00[path]);
     host::w32_mask(h, REG_NCTL0, MASKDWORD, CFG2_1B00[path]);
 
-    // `read_poll_timeout(…, val == 0x55, 1000, 100000, …)` — Linux prueft
-    // den Rueckgabewert NICHT; die Zeit ist der ganze Zweck.
+    // `read_poll_timeout(…, val == 0x55, 1000, 100000, …)`: Linux ignores the
+    // result; the delay is the whole point.
     let t0 = host::now_us();
     while host::r32_mask(h, REG_RPT_CIP, BIT_RPT_CIP_STATUS) != 0x55 {
         if host::now_us() - t0 >= 100_000 {
@@ -320,7 +317,7 @@ fn read_offset(h: i32, g: &mut GapkInfo, path: usize) {
     g.offset[8][path] = fget(val, BIT_GAPK_RPT0) as i8;
     g.offset[9][path] = fget(val, BIT_GAPK_RPT1) as i8;
 
-    // Vorzeichen aus vier Bit: Bit 3 gesetzt heisst negativ.
+    // Sign from four bits: bit 3 set means negative.
     for i in 0..RF_HW_OFFSET_NUM_U {
         if g.offset[i][path] & (1 << 3) != 0 {
             g.offset[i][path] |= 0xf0u8 as i8;
@@ -402,8 +399,8 @@ fn cal_gain(gain: u32, offset: i8) -> u32 {
     if gain_valid(gain) {
         return gain;
     }
-    // `(gain << 1) + offset` in u32-Arithmetik, wie in C: ein negatives
-    // `offset` wird zur grossen Zahl und zieht beim Addieren ab.
+    // `(gain << 1) + offset` in u32 arithmetic as in C: a negative `offset`
+    // wraps to a large number and subtracts on addition.
     let gain_x2 = (gain << 1).wrapping_add(offset as i32 as u32);
     (gain_x2 >> 1) | if gain_x2 & (1 << 0) != 0 { BIT_GAIN_EXT } else { 0 }
 }
@@ -460,8 +457,8 @@ fn save_all_tx_gain_table(h: i32, g: &mut GapkInfo, rf_path_num: u8,
     const BAND_NUM: [u32; RF_BAND_MAX_U] = [0x0, 0x0, 0x1, 0x3, 0x5];
     const CCK: [u32; RF_BAND_MAX_U] = [0x1, 0x0, 0x0, 0x0, 0x0];
 
-    // `BIT(RTW_DM_CAP_TXGAPK)` GESETZT heisst ABGESCHALTET — die Pruefung
-    // ist umgekehrt, als der Name vermuten laesst.
+    // `BIT(RTW_DM_CAP_TXGAPK)` set means disabled; the check is inverted
+    // relative to the name.
     if dm_flags & (1 << RTW_DM_CAP_TXGAPK) != 0 {
         return;
     }
@@ -500,7 +497,7 @@ fn save_all_tx_gain_table(h: i32, g: &mut GapkInfo, rf_path_num: u8,
     g.read_txgain = 1;
 }
 
-/// Warum TXGAPK nicht gelaufen ist — oder dass es lief.
+/// Why TXGAPK did not run, or that it ran.
 #[derive(Clone, Copy, PartialEq)]
 pub enum TxgapkRpt {
     Ran,
@@ -525,8 +522,8 @@ pub fn txgapk(h: i32, g: &mut GapkInfo, rf_path_num: u8, dm_flags: u32,
         };
     }
 
-    // „Normal Mode in TSSI mode. return!!!" — der Chip regelt seine
-    // Sendeleistung dann selbst, eine zweite Korrektur waere doppelt.
+    // "Normal Mode in TSSI mode. return!!!": the chip regulates its TX power
+    // itself, a second correction would be applied twice.
     if (4..=7).contains(&power_track_type) {
         return TxgapkRpt::TssiMode(power_track_type);
     }

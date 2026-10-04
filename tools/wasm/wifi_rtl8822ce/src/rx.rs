@@ -1,24 +1,21 @@
-//! `rx.c` aus Linux 6.18.26 rtw88, plus `query_phy_status_page0/1` und die
-//! dB-Umrechnung aus `phy.c` — Stufe 5a.
+//! `rx.c` from Linux 6.18.26 rtw88, plus `query_phy_status_page0/1` and
+//! the dB conversion from `phy.c`.
 //!
-//! Portiert: `rtw_rx_query_rx_desc` · `query_phy_status` ·
+//! Ported: `rtw_rx_query_rx_desc` · `query_phy_status` ·
 //! `query_phy_status_page0` · `query_phy_status_page1` ·
 //! `rtw_phy_power_2_db` · `rtw_phy_db_2_linear` · `rtw_phy_linear_2_db` ·
 //! `rtw_phy_rf_power_2_rssi`.
 //!
-//! **Nicht portiert und benannt:** `rtw_rx_fill_rx_status` fuellt eine
-//! `ieee80211_rx_status` fuer mac80211 — die gibt es hier nicht. Was daraus
-//! gebraucht wird (Rate, Bandbreite, Signalstaerke, Kanal), steht in
-//! `RxPktStat` und geht von dort an den Netzweg. Ebenso
-//! `rtw_phy_parsing_cfo` und die Pfaddiversitaet: beide fuettern die
-//! laufende Regelung, die es ohne Verbindung nicht gibt.
+//! Not ported: `rtw_rx_fill_rx_status` fills an `ieee80211_rx_status` for
+//! mac80211, which does not exist here; what is needed from it (rate,
+//! bandwidth, signal strength, channel) is in `RxPktStat`. Likewise
+//! `rtw_phy_parsing_cfo` and path diversity.
 #![allow(dead_code)]
 
 use crate::regs::*;
 use crate::tables;
 
-/// main.h:640-670 `struct rtw_rx_pkt_stat` — die Felder, die der
-/// Empfangsweg fuellt.
+/// main.h:640-670 `struct rtw_rx_pkt_stat`: the fields the RX path fills.
 #[derive(Default, Clone, Copy)]
 pub struct RxPktStat {
     pub pkt_len: u16,
@@ -34,20 +31,20 @@ pub struct RxPktStat {
     pub rate: u8,
     pub bw: u8,
     pub tsf_low: u32,
-    // aus query_phy_status
+    // from query_phy_status
     pub channel_invalid: bool,
     pub rssi: u8,
     pub signal_power: i8,
     pub rx_power: [i8; 4],
     pub rx_snr: [i8; 4],
-    /// main.h:657 — in Linux `u8`, und in `query_phy_status_page1` wird es
-    /// nach `s8` genommen. Beides steht hier so.
+    /// main.h:657: `u8` in Linux, taken as `s8` in `query_phy_status_page1`.
+    /// Both are kept that way.
     pub rx_evm: [u8; 4],
     pub cfo_tail: [i8; 4],
     pub freq: u16,
     pub band: u8,
-    /// Nicht aus Linux: `rtw_rx_pkt_stat` fuehrt nur `freq`/`band`. Fuer
-    /// den Bericht ist die Kanalnummer die Zahl, die man lesen will.
+    /// Not from Linux: `rtw_rx_pkt_stat` only has `freq`/`band`. For reporting,
+    /// the channel number is the useful value.
     pub channel: u8,
 }
 
@@ -100,7 +97,7 @@ fn bits(v: u32, mask: u32) -> u32 {
     (v & mask) >> mask.trailing_zeros()
 }
 
-// rx.h:26-44 — die Felder des Empfangsdeskriptors.
+// rx.h:26-44: the RX descriptor fields.
 const W0_PKT_LEN: u32 = 0x3fff; // GENMASK(13, 0)
 const W0_CRC32: u32 = 1 << 14;
 const W0_ICV_ERR: u32 = 1 << 15;
@@ -117,10 +114,10 @@ const W4_BW: u32 = 0x30; // GENMASK(5, 4)
 /// rx.h:9 `RX_DESC_ENC_NONE = 0`
 const RX_DESC_ENC_NONE: u32 = 0;
 
-/// rx.c:264-313 `rtw_rx_query_rx_desc`, nur der Deskriptorteil.
+/// rx.c:264-313 `rtw_rx_query_rx_desc`, descriptor part only.
 ///
-/// Reicht, um zu wissen, WIE VIEL zu lesen ist — der PHY-Status liegt
-/// dahinter und wird erst in `query_rx_desc_full` ausgewertet.
+/// Enough to know how much to read; the PHY status follows and is parsed
+/// only in `query_rx_desc_full`.
 pub fn query_rx_desc(d: &[u8]) -> RxPktStat {
     let w0 = le32(d, 0);
     let enc_type = bits(w0, W0_ENC_TYPE);
@@ -145,9 +142,9 @@ pub fn query_rx_desc(d: &[u8]) -> RxPktStat {
     }
 }
 
-/// rx.c:120-170, der Rest: PHY-Status auswerten, wenn er da ist.
+/// rx.c:120-170, the rest: parse the PHY status if present.
 ///
-/// `d` muss den ganzen Puffer ab dem Deskriptor enthalten.
+/// `d` must contain the whole buffer from the descriptor on.
 pub fn query_rx_desc_full(d: &[u8], dm: &mut crate::dm::DmInfo,
                           path_div: &mut crate::dm::PathDiv,
                           rf_path_num: u8, current_band_width: u8)
@@ -184,15 +181,15 @@ fn query_phy_status(p: &[u8], s: &mut RxPktStat, dm: &mut crate::dm::DmInfo,
     }
 }
 
-// rtw8822c.h:143-154 — Seite 0. Die Zahl hinter `+` ist ein WORTindex,
-// kein Byteversatz: `*((__le32 *)(phy_stat) + 0x04)`.
+// rtw8822c.h:143-154, page 0. The number after `+` is a word index, not a
+// byte offset: `*((__le32 *)(phy_stat) + 0x04)`.
 const P0_PWDB_A: (usize, u32) = (0x00, 0x0000_ff00); // GENMASK(15, 8)
 const P0_PWDB_B: (usize, u32) = (0x04, 0x0000_00ff); // GENMASK(7, 0)
 const P0_GAIN_A: (usize, u32) = (0x00, 0x003f_0000); // GENMASK(21, 16)
 const P0_CHANNEL: (usize, u32) = (0x01, 0x00ff_0000); // GENMASK(23, 16)
 const P0_GAIN_B: (usize, u32) = (0x04, 0x3f00_0000); // GENMASK(29, 24)
 
-// rtw8822c.h:156-178 — Seite 1.
+// rtw8822c.h:156-178, page 1.
 const P1_PWDB_A: (usize, u32) = (0x00, 0x0000_ff00); // GENMASK(15, 8)
 const P1_PWDB_B: (usize, u32) = (0x00, 0x00ff_0000); // GENMASK(23, 16)
 const P1_L_RXSC: (usize, u32) = (0x01, 0x0000_0f00); // GENMASK(11, 8)
@@ -213,7 +210,7 @@ fn stat(p: &[u8], f: (usize, u32)) -> u32 {
 const DESC_RATE11M: u8 = 0x03;
 const DESC_RATEMCS0: u8 = 0x0c;
 
-/// rtw8822c.c:2548-2596 `query_phy_status_page0` — CCK.
+/// rtw8822c.c:2548-2596 `query_phy_status_page0`: CCK.
 fn query_phy_status_page0(p: &[u8], s: &mut RxPktStat,
                           dm: &mut crate::dm::DmInfo, rf_path_num: u8) {
     let min_rx_power: i8 = -120;
@@ -221,9 +218,8 @@ fn query_phy_status_page0(p: &[u8], s: &mut RxPktStat,
 
     rx_power[RF_PATH_A] = stat(p, P0_PWDB_A) as i8;
     rx_power[RF_PATH_B] = stat(p, P0_PWDB_B) as i8;
-    // Die beiden Grenzen gehoeren dem TREIBER: `rtw8822c_phy_set_param`
-    // liest sie einmal aus der Hardware (Stufe 3c), hier werden sie nur
-    // angewandt. Am Geraet l/u = 16/63.
+    // Both bounds belong to the driver: `rtw8822c_phy_set_param` reads them
+    // once from the hardware, here they are only applied.
     let l_bnd = dm.cck_gi_l_bnd;
     let u_bnd = dm.cck_gi_u_bnd;
     let gain_a = stat(p, P0_GAIN_A) as u8;
@@ -257,10 +253,9 @@ fn query_phy_status_page0(p: &[u8], s: &mut RxPktStat,
     s.rx_power[RF_PATH_A] = rx_power[RF_PATH_A];
     s.rx_power[RF_PATH_B] = rx_power[RF_PATH_B];
 
-    // `path <= rf_path_num` steht so in Linux — bei zwei Pfaden laeuft die
-    // Schleife DREIMAL und schreibt `rssi[2]`. Das Feld hat vier Plaetze,
-    // also ist es folgenlos; abgeschrieben wird es trotzdem, weil eine
-    // stillschweigend korrigierte Schleife kein 1:1-Port mehr ist.
+    // `path <= rf_path_num` as in Linux: with two paths the loop runs three
+    // times and writes `rssi[2]`. The array has four slots, so it is
+    // harmless; it is kept to stay a 1:1 port.
     for path in 0..=rf_path_num as usize {
         dm.rssi[path] = rf_power_2_rssi(&s.rx_power[path..path + 1], 1);
     }
@@ -270,7 +265,7 @@ fn query_phy_status_page0(p: &[u8], s: &mut RxPktStat,
     s.signal_power = s.rx_power[RF_PATH_A].max(min_rx_power);
 }
 
-/// rtw8822c.c:2598-2671 `query_phy_status_page1` — OFDM/HT/VHT.
+/// rtw8822c.c:2598-2671 `query_phy_status_page1`: OFDM/HT/VHT.
 fn query_phy_status_page1(p: &[u8], s: &mut RxPktStat,
                           dm: &mut crate::dm::DmInfo,
                           path_div: &mut crate::dm::PathDiv,
@@ -294,9 +289,8 @@ fn query_phy_status_page1(p: &[u8], s: &mut RxPktStat,
         RTW_CHANNEL_WIDTH_80
     };
 
-    // Ohne `if channel != 0` — Linux prueft das auf Seite 1 nicht, und
-    // `set_rx_freq_band` kehrt bei einer Zahl ausserhalb beider Baender
-    // von selbst um.
+    // No `if channel != 0`: Linux does not check this on page 1, and
+    // `set_rx_freq_band` returns by itself for a number outside both bands.
     let channel = stat(p, P1_CHANNEL) as u8;
     set_rx_freq_band(s, channel);
 
@@ -319,7 +313,7 @@ fn query_phy_status_page1(p: &[u8], s: &mut RxPktStat,
     s.cfo_tail[RF_PATH_A] = stat(p, P1_CFO_TAIL_A) as i8;
     s.cfo_tail[RF_PATH_B] = stat(p, P1_CFO_TAIL_B) as i8;
 
-    // Dieselbe `<=`-Schleife wie auf Seite 0.
+    // The same `<=` loop as on page 0.
     for path in 0..=rf_path_num as usize {
         let rssi = rf_power_2_rssi(&s.rx_power[path..path + 1], 1);
         dm.rssi[path] = rssi;
@@ -343,9 +337,8 @@ fn query_phy_status_page1(p: &[u8], s: &mut RxPktStat,
         }
         dm.rx_evm_dbm[path] = evm_dbm;
     }
-    // `rtw_phy_parsing_cfo` braucht die angemeldeten Schnittstellen einer
-    // Verbindung (`rtw_iterate_vifs_atomic`). Ohne Verbindung gibt es
-    // keine, der Aufruf waere in Linux hier ein Leerlauf.
+    // `rtw_phy_parsing_cfo` needs the interfaces of a connection
+    // (`rtw_iterate_vifs_atomic`); not ported.
 }
 
 const RF_PATH_A: usize = 0;
@@ -354,7 +347,7 @@ const RTW_CHANNEL_WIDTH_20: u8 = 0;
 const RTW_CHANNEL_WIDTH_40: u8 = 1;
 const RTW_CHANNEL_WIDTH_80: u8 = 2;
 
-// ── Die dB-Umrechnung (phy.c:128-235) ────────────────────────────
+// ── dB conversion (phy.c:128-235) ────────────────────────────────
 
 /// phy.c `FRAC_BITS`
 const FRAC_BITS: u32 = 3;
@@ -445,41 +438,36 @@ pub fn rf_power_2_rssi(rf_power: &[i8], path_num: u8) -> u8 {
 /// rx.h:56-62 `rtw_update_rx_freq_for_invalid` +
 /// rx.c:155-193 `rtw_update_rx_freq_from_ie`.
 ///
-/// Ein CCK-Rahmen kann mit Kanal 0 kommen (`query_phy_status_page0` setzt
-/// dann `channel_invalid`). Linux nimmt dann den LAUFENDEN Kanal — und
-/// liest die Kanalnummer nur dann aus dem Beacon, wenn gerade GESUCHT
-/// wird, weil nur beim Suchen ein Rahmen von einem anderen Kanal
-/// hereinkommen kann. Ohne Suche ist der Zweig von `RTW_FLAG_SCANNING`
-/// tot, und deshalb steht hier nur seine Wirkung.
+/// A CCK frame can arrive with channel 0 (`query_phy_status_page0` then
+/// sets `channel_invalid`). Linux then uses the current channel, and reads
+/// the channel number from the beacon only while scanning, because only
+/// then can a frame from another channel arrive. Only the non-scanning
+/// effect is implemented here.
 pub fn update_rx_freq_for_invalid(s: &mut RxPktStat, current_channel: u8,
                                   scanning: bool) {
     if !s.channel_invalid {
         return;
     }
     if scanning {
-        // `cfg80211_get_ies_channel_number` auf dem DS-Parameter-Set des
-        // Beacons. BENANNT UND NICHT GEBAUT: es gibt noch keine Suche
-        // (Stufe 5c). Bis dahin waere ein Parser fuer Informationselemente
-        // Code ohne Rufer.
+        // Not implemented: `cfg80211_get_ies_channel_number` on the beacon's DS
+        // parameter set, which only matters while scanning.
     }
     set_rx_freq_band(s, current_channel);
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Was der Empfangsweg dem Watchdog zutraegt (rx.c:42-133, phy.c:678-704)
+// What the RX path feeds the watchdog (rx.c:42-133, phy.c:678-704)
 //
-// Ohne diese vier Zeilen rechnet `rtw_watch_dog_work` auf Nullen: der
-// Frequenzversatz wird NICHT aufsummiert, die Ratenzaehler bleiben leer,
-// und `min_rssi` ist 255. Die Nachfuehrung tut dann nichts und meldet
-// auch nichts — der schlimmste Zustand von allen.
+// Without it `rtw_watch_dog_work` computes on zeros: the frequency offset
+// is not accumulated, the rate counters stay empty and `min_rssi` is 255.
+// Tracking then silently does nothing.
 // ═══════════════════════════════════════════════════════════════════
 
-/// Was EIN Ringdurchlauf dem Watchdog zutraegt.
+/// What one ring pass contributes to the watchdog.
 ///
-/// **Im Rueckruf gesammelt, danach eingetragen.** Waehrend `rx_poll`
-/// laeuft, haelt es `DmInfo` selbst (es schreibt den PHY-Status hinein);
-/// zwei Schreiber auf denselben Zustand gibt es nicht, und ein roher
-/// Zeiger waere hier eine Umgehung des Ausleihers statt einer Loesung.
+/// Collected in the callback, merged afterwards: while `rx_poll` runs it
+/// holds `DmInfo` itself (it writes the PHY status into it), so there is
+/// only ever one writer to that state.
 #[derive(Clone, Copy)]
 pub struct WdAcc {
     pub cfo_tail: [i32; 4],
@@ -489,60 +477,51 @@ pub struct WdAcc {
     pub num_qry_pkt: [u16; DESC_RATE_MAX],
     pub curr_rx_rate: u8,
     pub avg_rssi: crate::dm::Ewma,
-    /// Der Ratenbericht der Firmware: `(rate, mac_id)`.
+    /// The firmware's rate report: `(rate, mac_id)`.
     pub ra_rpt: Option<(u8, u8)>,
-    /// Die Sendequittungen dieses Durchlaufs: `(Folgenummer, quittiert)`.
+    /// TX status reports of this pass: `(sequence number, acked)`.
     pub tx_rpt: [(u8, bool); 8],
     pub n_tx_rpt: usize,
-    /// Die Kennungen der C2H, die wir NICHT behandeln — gezaehlt statt
-    /// verworfen.
+    /// IDs of the C2H events not handled, counted rather than dropped.
     pub c2h_seen: [u8; 8],
     pub n_c2h_seen: usize,
-    /// Verwaltungsrahmen dieses Durchlaufs: `(Subtyp, (Kategorie,
-    /// Aktion))`, `0xff` wo es keine Aktion gibt.
+    /// Management frames of this pass: `(subtype, (category, action))`,
+    /// `0xff` where there is no action.
     pub mgmt: [(u8, (u8, u8)); 8],
     pub n_mgmt: usize,
-    /// Die ADDBA Requests dieses Durchlaufs — beantwortet werden sie
-    /// draussen, mit freiem `trx`.
+    /// The ADDBA requests of this pass, answered outside with `trx` free.
     ///
-    /// **Es war EINER, und das war zu wenig.** Am Geraet stand
-    /// `ADDBA 14 erbeten, 8 angenommen`: ein Ringdurchlauf bringt
-    /// mehrere Rahmen auf einmal, und alles nach dem ersten fiel weg.
-    /// Der AP wiederholt zwar, aber jede Wiederholung ist eine
-    /// Sendegelegenheit, in der er NICHT aggregiert — und bis zur
-    /// Antwort bleibt seine Sitzung zu.
+    /// One ring pass can bring several of them. Each dropped request costs a
+    /// retry, and the AP does not aggregate until it gets an answer.
     pub addba: [crate::sta::AddbaReq; 4],
     pub n_addba: usize,
-    /// **Haben wir in diesem Durchlauf ueberhaupt etwas vom AP
-    /// gehoert?** mlme.c:131-145 `ieee80211_sta_reset_conn_monitor`:
-    /// jeder Rahmen von ihm setzt die Wache zurueck, nicht nur eine
-    /// Bake. Ein Download ohne Baken ist eine lebende Verbindung.
+    /// Did we hear anything from the AP in this pass? mlme.c:131-145
+    /// `ieee80211_sta_reset_conn_monitor`: any frame from it resets the
+    /// monitor, not only a beacon. A download without beacons is a live link.
     pub heard_ap: bool,
-    /// Der Pegel der letzten Bake DIESER Zelle, in dBm. Er fuettert den
-    /// geglaetteten Wert, an dem das Roaming haengt
-    /// (`ieee80211_handle_beacon_sig`).
+    /// Signal level of the last beacon of this BSS, in dBm. Feeds the smoothed
+    /// value roaming depends on (`ieee80211_handle_beacon_sig`).
     pub beacon_dbm: Option<i8>,
-    /// Kam in diesem Durchlauf eine Bake DIESER Zelle OHNE Ansage?
-    /// **Das bricht einen angekuendigten Wechsel ab** (mlme.c:2822).
+    /// Did a beacon of this BSS without a switch announcement arrive in this
+    /// pass? That aborts an announced switch (mlme.c:2822).
     pub beacon_ohne_csa: bool,
-    /// Die Wechselansage aus einer Bake dieser Zelle, wenn eine da war.
-    /// Sie faehrt heraus, weil der Kanalwechsel `trx` braucht und der
-    /// Rueckruf es nicht halten darf.
+    /// The channel switch announcement from a beacon of this BSS, if any.
+    /// Passed out because the channel switch needs `trx`, which the callback
+    /// must not hold.
     pub csa: Option<crate::Csa>,
-    /// Und was auch in vier Plaetze nicht passte. Eine Zahl, damit ein
-    /// zu kleiner Puffer nicht wieder still kuerzt.
+    /// ADDBA requests that did not fit into the four slots, counted so a too
+    /// small buffer cannot silently truncate.
     pub addba_drop: u32,
-    /// Und die Antwort auf UNSERE Frage. Sie faehrt denselben Weg, aus
-    /// demselben Grund: der Zustandswechsel gehoert nach dem Ringleeren
-    /// hin, wo `link` veraenderlich ist.
+    /// The response to our own ADDBA request. Passed out for the same reason:
+    /// the state change belongs after draining the ring, where `link` is
+    /// mutable.
     pub addba_resp: Option<crate::sta::AddbaResp>,
-    /// rx.c:14-32 `rtw_rx_stats` — Bytes und Rahmen, nur Unicast.
+    /// rx.c:14-32 `rtw_rx_stats`: bytes and frames, unicast only.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
-    /// Die BREITE, in der die Rahmen dieses Durchlaufs hereinkamen:
-    /// 20/40/80 und ein vierter Platz fuer alles andere. Sie kommt aus
-    /// dem Empfangsstatus des Chips, ist also eine Messung und keine
-    /// Einstellung.
+    /// The bandwidth the frames of this pass arrived in: 20/40/80 and a fourth
+    /// slot for anything else. Taken from the chip's RX status, so it is a
+    /// measurement, not a setting.
     pub bw_cnt: [u32; 4],
 }
 
@@ -563,7 +542,7 @@ impl WdAcc {
         }
     }
 
-    /// Nach dem Ringdurchlauf in den langlebigen Zustand eintragen.
+    /// Merge into the long-lived state after the ring pass.
     pub fn merge(&self, dm: &mut crate::dm::DmInfo,
                  si: &mut crate::sta::StaInfo) {
         for i in 0..4 {
@@ -586,8 +565,8 @@ impl WdAcc {
     }
 }
 
-/// util.h:28-41 `get_hdr_bssid` — welche der drei Adressen die BSSID ist,
-/// haengt an den zwei DS-Bits.
+/// util.h:28-41 `get_hdr_bssid`: which of the three addresses is the BSSID
+/// depends on the two DS bits.
 pub fn hdr_bssid(f: &[u8]) -> Option<[u8; 6]> {
     if f.len() < 22 {
         return None;
@@ -600,22 +579,21 @@ pub fn hdr_bssid(f: &[u8]) -> Option<[u8; 6]> {
     Some(b)
 }
 
-/// `ieee80211_is_ctl` — Typ 01 im ersten Byte.
+/// `ieee80211_is_ctl`: type 01 in the first byte.
 fn is_ctl(f: &[u8]) -> bool {
     f[0] & 0x0c == 0x04
 }
 
-/// `ieee80211_is_beacon` — Verwaltung, Subtyp 8.
+/// `ieee80211_is_beacon`: management, subtype 8.
 fn is_beacon(f: &[u8]) -> bool {
     f[0] == 0x80
 }
 
-/// rx.c:100-133 `rtw_rx_addr_match` + `_iter`, und phy.c:690-704 in
-/// EINEM Gang: beide laufen in Linux ueber dieselbe Adressprobe, nur aus
-/// zwei Rufstellen.
+/// rx.c:100-133 `rtw_rx_addr_match` + `_iter`, and phy.c:690-704 in one
+/// pass: in Linux both run the same address check, from two call sites.
 ///
-/// `our_mac`/`bssid` ersetzen den vif-Iterator — wir fahren genau eine
-/// Schnittstelle, und mehr als eine waere hier eine Erfindung.
+/// `our_mac`/`bssid` replace the vif iterator; there is exactly one
+/// interface.
 pub fn watchdog_feed(a: &mut WdAcc, st: &RxPktStat, f: &[u8],
                      our_mac: &[u8; 6], bssid: &[u8; 6], path_num: u8) {
     if f.len() < 24 || st.crc_err || st.icv_err || !st.phy_status || is_ctl(f) {
@@ -626,15 +604,15 @@ pub fn watchdog_feed(a: &mut WdAcc, st: &RxPktStat, f: &[u8],
         return;
     }
 
-    // phy.c: der CFO-Zweig prueft NUR die BSSID.
+    // phy.c: the CFO branch checks only the BSSID.
     for i in 0..path_num as usize {
         a.cfo_tail[i] += st.cfo_tail[i] as i32;
         a.cfo_cnt[i] += 1;
     }
     a.packet_count = a.packet_count.wrapping_add(1);
 
-    // rx.c: der Statistikzweig verlangt zusaetzlich, dass der Rahmen an
-    // UNS gerichtet ist — oder ein Beacon.
+    // rx.c: the statistics branch additionally requires the frame to be
+    // addressed to us, or to be a beacon.
     if &f[4..10] != our_mac && !is_beacon(f) {
         return;
     }
@@ -648,26 +626,21 @@ pub fn watchdog_feed(a: &mut WdAcc, st: &RxPktStat, f: &[u8],
         *c = c.saturating_add(1);
     }
 
-    // `ewma_rssi_add(&si->avg_rssi, pkt_stat->rssi)` — nur, wenn der
-    // Sender die bekannte Station ist.
+    // `ewma_rssi_add(&si->avg_rssi, pkt_stat->rssi)`, only if the sender is
+    // the known station.
     if f[10..16] == bssid[..] {
         a.avg_rssi.add(st.rssi as u32, crate::dm::EWMA_RSSI_PRECISION,
                        crate::dm::EWMA_RSSI_WEIGHT_RCP);
     }
 }
 
-/// **Der Zensus der Verwaltungsrahmen: zaehlen, was wir verwerfen.**
+/// Census of management frames: count what would otherwise be dropped.
 ///
-/// Dieselbe Regel, die der C2H-Zensus gerade bewiesen hat. Die Frage
-/// dahinter ist konkret: **versucht der AP ueberhaupt, eine Aggregation
-/// aufzubauen?** Er tut das mit einem Action-Rahmen (Kategorie 3,
-/// Aktion 0 = ADDBA Request), und wir verwerfen bis heute jeden
-/// Verwaltungsrahmen ausser Deauth und Disassoc. Kommt keiner, ist der
-/// Durchsatzdeckel woanders; kommt einer, ist die Antwort darauf der
-/// naechste Posten.
+/// Answers whether the AP tries to set up aggregation at all (an action
+/// frame, category 3, action 0 = ADDBA request).
 ///
-/// Gibt den Subtyp zurueck (0..15), und bei einem Action-Rahmen
-/// zusaetzlich `(Kategorie, Aktion)`.
+/// Returns the subtype (0..15), and for an action frame additionally
+/// `(category, action)`.
 pub fn mgmt_census(f: &[u8], bssid: &[u8; 6]) -> Option<(u8, Option<(u8, u8)>)> {
     if f.len() < 24 || f[0] & DOT11_FC_TYPE_MASK != DOT11_FC_TYPE_MGMT {
         return None;
@@ -676,8 +649,7 @@ pub fn mgmt_census(f: &[u8], bssid: &[u8; 6]) -> Option<(u8, Option<(u8, u8)>)> 
         return None;
     }
     let subtype = f[0] >> 4;
-    // Action = Subtyp 13; Kategorie und Aktion stehen gleich hinter dem
-    // 24 Byte langen Kopf.
+    // Action = subtype 13; category and action follow the 24-byte header.
     let act = if subtype == 13 && f.len() >= 26 {
         Some((f[24], f[25]))
     } else {

@@ -1,15 +1,13 @@
-//! `rtw8822c_do_dpk` — die digitale Vorverzerrung (Stufe 5d),
-//! rtw8822c.c:3171-4186.
+//! `rtw8822c_do_dpk`, digital predistortion, rtw8822c.c:3171-4186.
 //!
-//! DPK misst die Kennlinie des Leistungsverstaerkers und legt eine
-//! Umkehrfunktion davor. Ohne sie sendet der Chip linear nur bis zu einem
-//! Pegel sauber; darueber verzerrt er, und die hohen Modulationen fallen
-//! als erstes aus.
+//! DPK measures the power amplifier's transfer curve and applies its
+//! inverse in front of it. Without it the chip transmits cleanly only up to
+//! a certain level; above that it distorts, and high-order modulations
+//! fail first.
 //!
-//! **Der Einstieg haengt an `is_dpk_pwr_on`**, und das setzt
-//! `rtw_load_rfk_table` (phy.c:1847) am Ende des RFK-Tabellenladens. Ohne
-//! geladene RFK-Tabelle gibt es keine DPK — das ist kein Sonderfall,
-//! sondern die Reihenfolge.
+//! The entry depends on `is_dpk_pwr_on`, which `rtw_load_rfk_table`
+//! (phy.c:1847) sets at the end of loading the RFK table: no RFK table,
+//! no DPK.
 #![allow(dead_code)]
 
 use crate::host;
@@ -24,8 +22,8 @@ const PATHS: usize = 4; // RTW_RF_PATH_MAX
 
 /// main.h:1591-1614 `struct rtw_dpk_info`.
 ///
-/// `avg_thermal` ist der gleitende Mittelwert fuer `rtw8822c_dpk_track`
-/// — seit 0.26.0 hat er einen Leser (der Watchdog alle zwei Sekunden).
+/// `avg_thermal` is the moving average for `rtw8822c_dpk_track`, read by
+/// the watchdog every two seconds.
 pub struct DpkInfo {
     pub is_dpk_pwr_on: bool,
     pub is_reload: bool,
@@ -89,7 +87,7 @@ fn fget(v: u32, mask: u32) -> u32 {
     (v & mask) >> mask.trailing_zeros()
 }
 
-/// util.c `rtw_backup_info` — Adresse und Wert, alle vier Byte breit.
+/// util.c `rtw_backup_info`: address and value, all four bytes wide.
 #[derive(Clone, Copy, Default)]
 pub struct Backup {
     reg: u32,
@@ -98,9 +96,9 @@ pub struct Backup {
 
 /// rtw8822c.c:3171-3185 `rtw8822c_dpk_set_gnt_wl`.
 ///
-/// Waehrend der Kalibrierung gehoert die Antenne dem WLAN allein. Der
-/// vorige Zustand wird gemerkt und hinterher zurueckgegeben — sonst nimmt
-/// die naechste Koexistenz-Entscheidung eine Stellung an, die nicht steht.
+/// During calibration the antenna belongs to WLAN alone. The previous
+/// state is saved and restored afterwards, otherwise the next coexistence
+/// decision would assume a setting that is not in place.
 fn set_gnt_wl(h: i32, d: &mut DpkInfo, is_before_k: bool) {
     if is_before_k {
         d.gnt_control = host::r32(h, 0x70);
@@ -185,8 +183,8 @@ fn dc_corr_check(h: i32, _path: usize) -> u8 {
 
     host::w32(h, REG_RXSRAM_CTL, 0x000000f0);
     let corr_idx = host::r32_mask(h, REG_STAT_RPT, 0xff) as u8;
-    // Der zweite Lesezugriff steht in Linux ohne Empfaenger da. Er bleibt,
-    // weil ein Lesezugriff auf diesem Bus eine WIRKUNG haben kann.
+    // Linux performs this second read without using the result. It is kept
+    // because a read on this bus can have side effects.
     let _ = host::r32_mask(h, REG_STAT_RPT, 0xff00);
 
     u8::from(dc_i > 200 || dc_q > 200 || corr_idx < 40 || corr_idx > 65)
@@ -209,7 +207,7 @@ fn tx_pause(h: i32) {
     }
 }
 
-/// `rtw8822c_parse_tbl_dpk` — Tripel aus Adresse, Maske und Wert.
+/// `rtw8822c_parse_tbl_dpk`: triples of address, mask and value.
 fn load_dpk_table(h: i32, tbl: &[u32]) {
     for t in tbl.chunks_exact(3) {
         host::w32_mask(h, t[0], t[1], t[2]);
@@ -300,7 +298,7 @@ fn get_cmd(d: &DpkInfo, action: u32, path: usize) -> u32 {
     (cmd << 8) | 0x48
 }
 
-/// mac.c `check_hw_ready` — lesen, maskieren, gegen einen Wert, 20 ms.
+/// mac.c `check_hw_ready`: read, mask, compare against a value, 20 ms.
 fn check_hw_ready(h: i32, addr: u32, mask: u32, target: u32) -> bool {
     for _ in 0..20 {
         if host::r32_mask(h, addr, mask) == target {
@@ -395,7 +393,7 @@ fn psd_log2base(val: u32) -> u32 {
     if val == 0 {
         return 0;
     }
-    // `__fls(val) + 1` — Stelle des hoechsten gesetzten Bits, von eins an.
+    // `__fls(val) + 1`: position of the highest set bit, counted from one.
     let val_integerd_b = 32 - val.leading_zeros();
     let tmp = (val * 100) / (1 << val_integerd_b);
     let mut tindex = (tmp / 5) as usize;
@@ -435,8 +433,8 @@ fn agc_loss_chk(h: i32, path: usize) -> u32 {
     if loss < 0x4000000 {
         return RTW_DPK_GL_LESS;
     }
-    // `3 * log2base(loss >> 13) - 3870` in VORZEICHENLOSER Arithmetik, wie
-    // in C: wird es negativ, laeuft es um und ist damit gross.
+    // `3 * log2base(loss >> 13) - 3870` in unsigned arithmetic as in C: a
+    // negative result wraps and becomes large.
     let loss_db = (3u32.wrapping_mul(psd_log2base(loss >> 13)))
         .wrapping_sub(3870);
 
@@ -536,10 +534,9 @@ fn loss_check_state(h: i32, d: &mut DpkInfo, s: &mut DpkData) -> u32 {
 
 /// rtw8822c.c:3677-3696 `rtw8822c_dpk_pas_agc`.
 ///
-/// In Linux ist das eine Tabelle von Funktionszeigern (`dpk_state[]`), die
-/// sich gegenseitig den naechsten Zustand nennen. Hier steht dieselbe
-/// Maschine als `match` — ein Zeigerfeld ueber Funktionen mit Wirkung auf
-/// Hardware waere in Rust nur Umstand, und die REIHENFOLGE ist dieselbe.
+/// Linux uses a table of function pointers (`dpk_state[]`) that name the
+/// next state to each other. Here the same state machine is a `match`,
+/// with the same order of operations.
 fn pas_agc(h: i32, d: &mut DpkInfo, path: usize, gain_only: bool,
            loss_only: bool) -> u8 {
     let mut s = DpkData { loss_only, gain_only, path, ..Default::default() };
@@ -568,8 +565,8 @@ fn coef_iq_check(coef_i: u16, coef_q: u16) -> bool {
 
 /// rtw8822c.c:3708-3723 `rtw8822c_dpk_coef_transfer`
 fn coef_transfer(h: i32) -> u32 {
-    // Linux liest erst das ganze Wort und verwirft es wieder; der Zugriff
-    // bleibt, weil er auf diesem Bus eine Wirkung haben kann.
+    // Linux reads the whole word first and discards it; the access is kept
+    // because it can have side effects on this bus.
     let _reg = host::r32(h, REG_STAT_RPT);
 
     let coef_i = host::r32_mask(h, REG_STAT_RPT, MASKHWORD) as u16 & 0x1fff;
@@ -790,9 +787,9 @@ fn cal_coef1(h: i32, d: &DpkInfo, rf_path_num: u8) -> bool {
     host::w32_mask(h, REG_NCTL0, BIT_SUBPAGE, 0x0000000c);
 
     for path in 0..rf_path_num as usize {
-        // Linux teilt hier ohne Pruefung; `dpk_gs` ist nach `cal_gs` nie
-        // null, und wenn doch, waere eine Division durch null bei uns ein
-        // Trap statt eines Unsinnswerts.
+        // Linux divides without a check; `dpk_gs` is never zero after `cal_gs`,
+        // and if it were, a division by zero here would trap rather than produce
+        // garbage.
         let gs = d.dpk_gs[path];
         let i_scaling = if gs == 0 { 0 } else { 0x16c00 / gs as u32 };
 
@@ -927,7 +924,7 @@ fn reload(h: i32, d: &mut DpkInfo, rf_path_num: u8) -> bool {
     d.is_reload
 }
 
-/// Warum DPK nicht gelaufen ist — oder wie es ausging.
+/// Why DPK did not run, or how it ended.
 #[derive(Clone, Copy, PartialEq)]
 pub enum DpkRpt {
     Ran { path_ok: u8, gs: [u16; 2], txagc: [u8; 2], coef1_ready: bool },
@@ -951,8 +948,7 @@ pub fn do_dpk(h: i32, d: &mut DpkInfo, rf_path_num: u8) -> DpkRpt {
         return DpkRpt::Reloaded;
     }
 
-    // `ewma_thermal_init` fuellt den gleitenden Mittelwert fuer
-    // `rtw8822c_dpk_track`; die Nachfuehrung gibt es noch nicht.
+    // `ewma_thermal_init` seeds the moving average for `rtw8822c_dpk_track`.
 
     information(h, d);
 
@@ -985,10 +981,9 @@ pub fn do_dpk(h: i32, d: &mut DpkInfo, rf_path_num: u8) -> DpkRpt {
 
 /// rtw8822c.c:3629-3660 `rtw8822c_dpk_track`.
 ///
-/// **Die Nachfuehrung der Vorverzerrung ueber die Temperatur.** Sie
-/// laeuft nur, wenn eine DPK-Kalibrierung ueberhaupt stattgefunden hat
-/// (`thermal_dpk` beider Pfade null heisst: es gibt nichts
-/// nachzufuehren).
+/// Tracks the predistortion over temperature. Runs only if a DPK
+/// calibration took place (`thermal_dpk` zero on both paths means there is
+/// nothing to track).
 pub fn track(h: i32, d: &mut DpkInfo) {
     if d.thermal_dpk[0] == 0 && d.thermal_dpk[1] == 0 {
         return;
@@ -1000,8 +995,8 @@ pub fn track(h: i32, d: &mut DpkInfo) {
                                 crate::dm::EWMA_THERMAL_WEIGHT_RCP);
         let thermal_value =
             d.avg_thermal[path].read(crate::dm::EWMA_THERMAL_PRECISION) as u8;
-        // Linux rechnet beides in `s8`, und der Umlauf ist gewollt: die
-        // Maske 0x7f darunter schneidet ohnehin auf sieben Bit.
+        // Linux computes both in `s8` and the wraparound is intended: the 0x7f
+        // mask below truncates to seven bits anyway.
         let delta_dpk = (d.thermal_dpk[path] as i8)
             .wrapping_sub(thermal_value as i8);
         let offset = delta_dpk

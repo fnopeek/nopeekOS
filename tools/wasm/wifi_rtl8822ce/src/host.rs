@@ -1,9 +1,8 @@
-//! nopeekOS WASM Driver ABI — Bindings fuer den RTL8822CE-Treiber.
+//! nopeekOS WASM driver ABI: bindings for the RTL8822CE driver.
 //!
-//! Dieselbe ABI, die `wifi_ax200` und `wifi` (RTL8852BE) fahren, plus die
-//! zwei 8-Bit-Zugriffe, die es fuer rtw88 geben MUSS: der
-//! Power-Sequenz-Interpreter in `mac.c` besteht aus nichts anderem als
-//! `rtw_read8`/`rtw_write8`, und ein 32-Bit-RMW ist dafuer kein Ersatz.
+//! The same ABI as `wifi_ax200` and `wifi` (RTL8852BE), plus the two 8-bit
+//! accessors rtw88 needs: the power sequence interpreter in `mac.c` is
+//! nothing but `rtw_read8`/`rtw_write8`, and a 32-bit RMW is no substitute.
 
 #![allow(dead_code)]
 
@@ -41,9 +40,9 @@ unsafe extern "C" {
     fn npk_now_us() -> i64;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
-    // ── Stufe 6a: der Steuerkanal und der Datenweg ───────────────
-    // docs/spec/WIFI_CLASS_ABI.md §3. Die Treiberseite ist an den
-    // gebundenen Treiber gegated; `wifid` sitzt am anderen Ende.
+    // ── Control channel and data path ────────────────────────────────
+    // docs/spec/WIFI_CLASS_ABI.md §3. The driver side is gated to the bound
+    // driver; `wifid` sits at the other end.
     fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_wifi_poll_cmd(buf_ptr: i32, max: i32) -> i32;
     fn npk_wifi_send_event(buf_ptr: i32, len: i32) -> i32;
@@ -52,34 +51,34 @@ unsafe extern "C" {
     fn npk_netdev_poll_tx(buf_ptr: i32, max: i32) -> i32;
     fn npk_netdev_set_link(up: i32) -> i32;
 
-    // ── Interrupt statt Abfrage (docs/plan/CORES_AND_EVENTS.md, Stufe 2c)
+    // ── Interrupts instead of polling (docs/plan/CORES_AND_EVENTS.md)
     fn npk_irq_register(entry: i32) -> i32;
     fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
 }
 
-// ── Warten auf Ereignisse ────────────────────────────────────────
+// ── Waiting for events ───────────────────────────────────────────
 
 /// `npk_wait`-Bits (Kernel `host_core::npk_wait`).
 pub const WAIT_IRQ: i32 = 2;
 pub const WAIT_NET_TX: i32 = 4;
 pub const WAIT_WIFI_CMD: i32 = 8;
 
-/// Den MSI des gebundenen Geraets anmelden. Der Vektor, oder `-1`, wenn
-/// es keinen gibt — dann bleibt der Treiber im Abfragebetrieb.
+/// Register the MSI of the bound device. Returns the vector, or `-1` if
+/// there is none; the driver then stays in polling mode.
 pub fn irq_register() -> i32 {
     unsafe { npk_irq_register(0) }
 }
 
-/// Parken, bis eines der Ereignisse in `mask` eintritt oder `timeout_ms`
-/// vergeht. Die eingetretenen Bits, 0 bei Fristablauf.
+/// Park until one of the events in `mask` occurs or `timeout_ms` passes.
+/// Returns the bits that occurred, 0 on timeout.
 pub fn wait(mask: i32, timeout_ms: u32) -> i32 {
     unsafe { npk_wait(mask, timeout_ms as i32) }
 }
 
-// ── Stufe 6a: Steuerkanal, npkFS und Datenweg ────────────────────
+// ── Control channel, npkFS and data path ─────────────────────────
 
-/// Ein Objekt aus npkFS holen. Gibt die Laenge zurueck, `-1` wenn es
-/// nicht da ist — und das ist ein gewoehnlicher Fall, kein Fehler.
+/// Fetch an object from npkFS. Returns its length, or `-1` if it does not
+/// exist, which is an ordinary case and not an error.
 pub fn fetch(name: &str, buf: &mut [u8]) -> i32 {
     unsafe {
         npk_fetch(name.as_ptr() as i32, name.len() as i32,
@@ -87,12 +86,12 @@ pub fn fetch(name: &str, buf: &mut [u8]) -> i32 {
     }
 }
 
-/// Naechstes Kommando von `wifid`, `-1` = keins.
+/// Next command from `wifid`, `-1` = none.
 pub fn wifi_poll_cmd(buf: &mut [u8]) -> i32 {
     unsafe { npk_wifi_poll_cmd(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-/// Ereignis an `wifid`.
+/// Event to `wifid`.
 pub fn wifi_send_event(msg: &[u8]) -> i32 {
     unsafe { npk_wifi_send_event(msg.as_ptr() as i32, msg.len() as i32) }
 }
@@ -101,12 +100,12 @@ pub fn netdev_register(mac: &[u8; 6]) -> i32 {
     unsafe { npk_netdev_register(mac.as_ptr() as i32) }
 }
 
-/// Ein empfangenes Ethernet-Rahmen an den IP-Stapel.
+/// Hand a received Ethernet frame to the IP stack.
 pub fn netdev_submit_rx(frame: &[u8]) -> i32 {
     unsafe { npk_netdev_submit_rx(frame.as_ptr() as i32, frame.len() as i32) }
 }
 
-/// Ein zu sendendes Ethernet-Rahmen holen, `-1` = keins.
+/// Fetch an Ethernet frame to send, `-1` = none.
 pub fn netdev_poll_tx(buf: &mut [u8]) -> i32 {
     unsafe { npk_netdev_poll_tx(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
@@ -115,18 +114,16 @@ pub fn netdev_set_link(up: bool) {
     unsafe { npk_netdev_set_link(up as i32) };
 }
 
-// ── Ausgabe: laut oder leise ─────────────────────────────────────
+// ── Output: verbose or quiet ─────────────────────────────────────
 //
-// **Im Autostart ist Stille die Vorgabe.** Der Treiber druckt sechs
-// Stufen mit ihren Toren — das ist der Grund, warum sie entstanden sind,
-// ohne im Dunkeln zu suchen, und es macht die Konsole fuer alles andere
-// unbrauchbar. `debug: 1` in `sys/config/wifi` schaltet sie wieder an.
+// Quiet is the default at autostart; the bring-up stages print a lot and
+// would make the console useless for everything else. `debug: 1` in
+// `sys/config/wifi` turns them back on.
 //
-// **Still heisst nicht stumm.** Was nicht stimmt, geht immer hinaus:
-// `say` fuer eine Zeichenkette, `loud_begin`/`loud_end` als Klammer um
-// eine zusammengesetzte Zeile. Die Klammer ist der Grund, warum es keine
-// zweite Garnitur Zahlenformatierer braucht — `print_dec` und die
-// anderen rufen `print`, und das sieht die Klammer.
+// Quiet does not mean mute: anything wrong always goes out, via `say` for
+// a string or `loud_begin`/`loud_end` around a composed line. Because
+// `print_dec` and friends call `print`, which honours the bracket, no
+// second set of number formatters is needed.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 static LOUD: AtomicU32 = AtomicU32::new(0);
 
@@ -138,15 +135,15 @@ pub fn verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
-/// Alles bis `loud_end` geht auch ohne `debug: 1` hinaus. Gezaehlt und
-/// nicht geschaltet, damit ein Rufer den anderen nicht abstellt.
+/// Everything up to `loud_end` goes out even without `debug: 1`. Counted,
+/// not toggled, so one caller cannot turn off another.
 pub fn loud_begin() {
     LOUD.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn loud_end() {
-    // Saettigend: eine Klammer, die ohne Anfang schliesst, darf nicht
-    // unter null laufen und damit jede Ausgabe anschalten.
+    // Saturating: an unmatched close must not underflow and thereby enable
+    // all output.
     let v = LOUD.load(Ordering::Relaxed);
     LOUD.store(v.saturating_sub(1), Ordering::Relaxed);
 }
@@ -155,14 +152,14 @@ fn emit(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 
-/// Die Stufenausgabe — nur mit `debug: 1` oder innerhalb von `loud_*`.
+/// Stage output: only with `debug: 1` or inside `loud_*`.
 pub fn print(s: &str) {
     if verbose() || LOUD.load(Ordering::Relaxed) > 0 {
         emit(s);
     }
 }
 
-/// Was immer hinausgeht: Fehler, gefallene Tore, der Zustand der Leitung.
+/// Always printed: errors, failed gates, link state.
 pub fn say(s: &str) {
     emit(s);
 }
@@ -195,13 +192,13 @@ pub fn mmio_map_bar(bar: u8, pages: u16) -> i32 {
     unsafe { npk_mmio_map_bar(bar as i32, pages as i32) }
 }
 
-/// `rtw_read8`. Echter 8-Bit-Buszugriff, kein RMW.
+/// `rtw_read8`. A real 8-bit bus access, not an RMW.
 pub fn r8(h: i32, off: u32) -> u8 {
     unsafe { npk_mmio_read8(h, off as i32) as u8 }
 }
 
-/// `rtw_write8`. Echter 8-Bit-Buszugriff — die drei Nachbarbytes bleiben
-/// unberuehrt, und genau das ist der Unterschied zu einem 32-Bit-RMW.
+/// `rtw_write8`. A real 8-bit bus access: the three neighbouring bytes are
+/// untouched, which is the difference to a 32-bit RMW.
 pub fn w8(h: i32, off: u32, val: u8) {
     unsafe { npk_mmio_write8(h, off as i32, val as i32) };
 }
@@ -222,7 +219,7 @@ pub fn w32(h: i32, off: u32, val: u32) {
     unsafe { npk_mmio_write32(h, off as i32, val as i32) };
 }
 
-/// `rtw_write8_set` — Bits im BYTE setzen, gelesen und geschrieben in 8 Bit.
+/// `rtw_write8_set`: set bits in the byte, read and written as 8 bits.
 pub fn set8(h: i32, off: u32, bits: u8) {
     w8(h, off, r8(h, off) | bits);
 }
@@ -244,14 +241,14 @@ pub fn clr32(h: i32, off: u32, bits: u32) {
 
 // ── DMA ──────────────────────────────────────────────────────────
 
-/// Zusammenhaengende Seiten unter 4 GB (der Kernel garantiert beides; der
-/// TX-/RX-Deskriptor hat nur ein 32-Bit-Adressfeld).
+/// Contiguous pages below 4 GB (the kernel guarantees both; the TX/RX
+/// descriptor has only a 32-bit address field).
 pub fn dma_alloc(pages: u16) -> i32 {
     unsafe { npk_dma_alloc(pages as i32) }
 }
 
-/// Wie `dma_alloc`, aber unter einer selbst genannten Obergrenze.
-/// `limit_mb = 0` heisst 4 GB, also dasselbe wie `dma_alloc`.
+/// Like `dma_alloc`, but below a caller-given limit. `limit_mb = 0` means
+/// 4 GB, the same as `dma_alloc`.
 pub fn dma_alloc_below(pages: u16, limit_mb: u32) -> i32 {
     unsafe { npk_dma_alloc_below(pages as i32, limit_mb as i32) }
 }
@@ -261,8 +258,8 @@ pub fn dma_phys(handle: i32) -> u64 {
     if v < 0 { 0 } else { v as u64 }
 }
 
-/// Bytes aus dem Linearspeicher in den DMA-Puffer. 4096 Bytes ueber 1024
-/// Einzelschreibungen waeren dieselbe Wirkung zum vielfachen Preis.
+/// Copy bytes from linear memory into the DMA buffer in one call instead
+/// of one host call per word.
 pub fn dma_write_buf(handle: i32, offset: u32, data: &[u8]) -> i32 {
     unsafe { npk_dma_write(handle, offset as i32, data.as_ptr() as i32, data.len() as i32) }
 }
@@ -279,7 +276,7 @@ pub fn dma_w32(handle: i32, offset: u32, val: u32) {
     unsafe { npk_dma_write32(handle, offset as i32, val as i32) };
 }
 
-// ── Zeit und Bericht ─────────────────────────────────────────────
+// ── Time and reporting ───────────────────────────────────────────
 
 pub fn fence() {
     unsafe { npk_memory_fence() };
@@ -303,7 +300,7 @@ pub fn driver_report(text: &[u8]) {
     unsafe { npk_driver_report(text.as_ptr() as i32, text.len() as i32) };
 }
 
-// ── Hex/Dez ohne alloc ───────────────────────────────────────────
+// ── Hex/decimal without alloc ────────────────────────────────────
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -343,8 +340,7 @@ pub fn print_dec(mut v: u32) {
     print(unsafe { core::str::from_utf8_unchecked(&b[i..]) });
 }
 
-/// Ein Register mit Namen und Wert — die Zeile, aus der spaeter jede
-/// Diagnose kommt.
+/// Print a register with name and value.
 pub fn log_reg32(name: &str, val: u32) {
     print("  ");
     print(name);
@@ -353,8 +349,8 @@ pub fn log_reg32(name: &str, val: u32) {
     print("\n");
 }
 
-/// hci.h:241-253 `rtw_write32_mask` — Feld an seiner Schiebestelle setzen.
-/// `data` ist der Wert des FELDES, nicht das fertige Bitmuster.
+/// hci.h:241-253 `rtw_write32_mask`: set a field at its shift position.
+/// `data` is the field value, not the shifted bit pattern.
 pub fn w32_mask(h: i32, off: u32, mask: u32, data: u32) {
     let shift = mask.trailing_zeros();
     let orig = r32(h, off);
@@ -366,11 +362,10 @@ pub fn r32_mask(h: i32, off: u32, mask: u32) -> u32 {
     (r32(h, off) & mask) >> mask.trailing_zeros()
 }
 
-/// `udelay(n)`. Unter einer Millisekunde kann `npk_sleep` nichts, also wird
-/// auf der Uhr gedreht. Der Preis ist ehrlich: ein `npk_now_us` kostet selbst
-/// etwa so viel wie die kuerzeste Pause, die hier verlangt wird (1 us nach
-/// jedem RF-Schreibzugriff), und laenger zu warten als noetig ist harmlos —
-/// kuerzer waere es nicht.
+/// `udelay(n)`. `npk_sleep` cannot wait less than a millisecond, so this
+/// spins on the clock. A `npk_now_us` call itself costs about as much as
+/// the shortest delay requested (1 us after each RF write); waiting longer
+/// than needed is harmless, shorter would not be.
 pub fn delay_us(us: u64) {
     let t0 = now_us();
     while now_us() - t0 < us {}
@@ -386,8 +381,8 @@ pub fn clr16(h: i32, off: u32, bits: u16) {
     w16(h, off, r16(h, off) & !bits);
 }
 
-/// hci.h:255-266 `rtw_write8_mask` — Feld im BYTE setzen.
-/// `mask` wird vorher auf acht Bit beschnitten, wie in Linux.
+/// hci.h:255-266 `rtw_write8_mask`: set a field in the byte. `mask` is
+/// truncated to eight bits first, as in Linux.
 pub fn w8_mask(h: i32, off: u32, mask: u32, data: u8) {
     let mask = (mask & 0xff) as u8;
     let shift = mask.trailing_zeros();
@@ -395,8 +390,8 @@ pub fn w8_mask(h: i32, off: u32, mask: u32, data: u8) {
     w8(h, off, (orig & !mask) | ((data << shift) & mask));
 }
 
-/// `rtw_write16_set` fuer ein Feld — es gibt in Linux kein
-/// `rtw_write16_mask`, aber `rtw_write16_set` mit einer Maske.
+/// `rtw_write16_set` for a field: Linux has no `rtw_write16_mask`, but
+/// `rtw_write16_set` with a mask.
 pub fn r16_mask(h: i32, off: u32, mask: u16) -> u16 {
     (r16(h, off) & mask) >> mask.trailing_zeros()
 }

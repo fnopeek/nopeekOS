@@ -1,14 +1,14 @@
-//! `coex.c` aus Linux 6.18.26 rtw88 — der Teil, den `rtw_power_on` faehrt.
+//! `coex.c` from Linux 6.18.26 rtw88: the part `rtw_power_on` runs, plus
+//! the watchdog's monitoring.
 //!
-//! **Warum das ueberhaupt hier steht:** unsere efuse meldet `btcoex JA` und
-//! `share_ant JA`. Auf diesem Board teilen WLAN und Bluetooth EINE Antenne,
-//! und wer sie bekommt, entscheidet dieser Block. Linux' allererste
-//! Coex-Handlung nach dem Einschalten ist woertlich „set antenna path to BT"
-//! (`rtw_coex_power_on_setting`), und erst `rtw_coex_init_hw_config` holt sie
-//! zurueck. Ohne diese Kette steht der Schalter dort, wo ihn das BIOS
-//! gelassen hat — und der Empfaenger hoert nichts.
+//! With `btcoex` and `share_ant` set in the efuse, WLAN and Bluetooth share
+//! one antenna, and this code decides who gets it. Linux's first coex
+//! action after power-on is "set antenna path to BT"
+//! (`rtw_coex_power_on_setting`); only `rtw_coex_init_hw_config` takes it
+//! back. Without this chain the switch stays where the firmware left it
+//! and the receiver hears nothing.
 //!
-//! Portiert, in Aufrufreihenfolge: `rtw_coex_power_on_setting` ·
+//! Ported, in call order: `rtw_coex_power_on_setting` ·
 //! `rtw_coex_read_scbd` · `rtw_coex_write_scbd` · `rtw_coex_monitor_bt_enable` ·
 //! `rtw_coex_check_rfk` · `rtw_coex_coex_ctrl_owner` · `rtw_coex_set_gnt_bt` ·
 //! `rtw_coex_set_gnt_wl` · `rtw_coex_set_ant_path` · `rtw_coex_set_table` ·
@@ -26,10 +26,9 @@ use crate::mac;
 use crate::regs::*;
 use crate::tables;
 
-/// main.h:1587-1620 `struct rtw_coex_stat` und `rtw_coex_dm` — die Felder,
-/// die der Anlaufweg liest oder schreibt. Alles andere gehoert zum
-/// LAUFENDEN Betrieb (Verkehrsmessung, BT-Profile, RSSI-Zustaende) und
-/// kommt mit der Stufe, die einen Kanal hat.
+/// main.h:1587-1620 `struct rtw_coex_stat` and `rtw_coex_dm`: the fields
+/// the bring-up path reads or writes. Runtime state (traffic statistics,
+/// BT profiles, RSSI states) is not ported.
 #[derive(Clone, Copy)]
 pub struct Coex {
     // rtw_coex
@@ -41,16 +40,16 @@ pub struct Coex {
     pub freerun: bool,
     // rtw_coex_stat
     pub bt_disabled: bool,
-    /// coex.c:454-475 `rtw_coex_monitor_bt_ctr` — die vier Zaehler, die
-    /// der Watchdog alle zwei Sekunden abholt. Sie sind der einzige
-    /// Hinweis auf BT-Verkehr, wenn das Scoreboard nichts sagt.
+    /// coex.c:454-475 `rtw_coex_monitor_bt_ctr`: the four counters the
+    /// watchdog collects every two seconds. They are the only sign of BT
+    /// traffic when the scoreboard says nothing.
     pub hi_pri_tx: u16,
     pub hi_pri_rx: u16,
     pub lo_pri_tx: u16,
     pub lo_pri_rx: u16,
     pub bt_disable_cnt: u32,
-    /// `wl_under_ips` / `wl_under_lps` — bei uns immer falsch: wir fahren
-    /// weder IPS noch LPS (der Plan fuehrt beides als offenen Posten).
+    /// `wl_under_ips` / `wl_under_lps`: always false, since this driver runs
+    /// neither IPS nor LPS.
     pub wl_under_ips: bool,
     pub wl_under_lps: bool,
     pub bt_ble_scan_type: u8,
@@ -85,9 +84,9 @@ pub struct Coex {
     pub wlg_at_btg: bool,
 }
 
-/// coex.h:173-178 `enum coex_wl_link_mode` — die letzte Marke folgt auf
-/// 0x7, ist also **8**. `rtw_coex_init_coex_var` setzt sie als „noch kein
-/// Modus" ein, und `rtw8822c_coex_cfg_gnt_fix` vergleicht dagegen.
+/// coex.h:173-178 `enum coex_wl_link_mode`: the last marker follows 0x7,
+/// so it is 8. `rtw_coex_init_coex_var` uses it as "no mode yet", and
+/// `rtw8822c_coex_cfg_gnt_fix` compares against it.
 const COEX_WLINK_MAX: u8 = 8; // coex.h:177
 /// coex.h:101 `COEX_RSN_LPS = 13`
 const COEX_RSN_LPS: u8 = 13;
@@ -117,17 +116,16 @@ impl Coex {
 
     /// coex.c `rtw_coex_init_coex_var`.
     ///
-    /// Linux `memset`t `coex_dm` und `coex_stat` und setzt danach drei
-    /// Felder. Die RSSI-Zustaende auf `COEX_RSSI_STATE_LOW` = 0 fallen mit
-    /// dem Nullen zusammen, `wl_rx_rate`/`wl_rts_rx_rate` gehoeren zum
-    /// laufenden Betrieb.
+    /// Linux `memset`s `coex_dm` and `coex_stat` and then sets three fields.
+    /// The RSSI states `COEX_RSSI_STATE_LOW` = 0 coincide with the zeroing;
+    /// `wl_rx_rate`/`wl_rts_rx_rate` are runtime state.
     fn init_coex_var(&mut self) {
         let keep_rfe = (self.rfe_module_type, self.wlg_at_btg,
                         self.ant_switch_exist);
         let stop_dm = self.stop_dm;
         let wl_rf_off = self.wl_rf_off;
         *self = Coex::new();
-        // `coex` selbst wird NICHT genullt — nur `coex_dm` und `coex_stat`.
+        // `coex` itself is not zeroed, only `coex_dm` and `coex_stat`.
         self.stop_dm = stop_dm;
         self.wl_rf_off = wl_rf_off;
         self.rfe_module_type = keep_rfe.0;
@@ -137,23 +135,23 @@ impl Coex {
     }
 }
 
-// ── Score-Board: das Zwei-Byte-Gespraech mit dem BT-Kern ─────────
+// ── Scoreboard: the two-byte channel to the BT core ──────────────
 
-/// coex.c `rtw_coex_read_scbd`. `chip->scbd_support` ist beim 8822C `true`.
+/// coex.c `rtw_coex_read_scbd`. `chip->scbd_support` is `true` on the 8822C.
 pub fn read_scbd(h: i32) -> u16 {
     host::r16(h, REG_WIFI_BT_INFO) & !BIT_BT_INT_EN
 }
 
 /// coex.c `rtw_coex_write_scbd`.
 ///
-/// **`new_scbd10_def` ist beim 8822C `true`** (rtw8822c.c:5407), also gilt
-/// der EINFACHE Zweig: `FIX2M` wird wie jedes andere Bit gesetzt. Beim
-/// 8822B ist es umgekehrt herum, und genau dafuer steht das Feld.
+/// `new_scbd10_def` is `true` on the 8822C (rtw8822c.c:5407), so the
+/// simple branch applies: `FIX2M` is set like any other bit. The 8822B is
+/// the other way round, which is what the field is for.
 pub fn write_scbd(h: i32, c: &mut Coex, bitpos: u16, set: bool) {
     let mut val: u16 = 0x2;
     val |= c.score_board;
 
-    // new_scbd10_def == true -> der else-Zweig
+    // new_scbd10_def == true -> the else branch
     if set {
         val |= bitpos;
     } else {
@@ -166,15 +164,12 @@ pub fn write_scbd(h: i32, c: &mut Coex, bitpos: u16, set: bool) {
     }
 }
 
-/// coex.c `rtw_coex_monitor_bt_enable`, Zweig mit `scbd_support`.
+/// coex.c `rtw_coex_monitor_bt_enable`, branch with `scbd_support`.
 ///
-/// Der `bt_reenable_work`-Zeitgeber (15 s) haengt an mac80211's Arbeitswarte-
-/// schlange; wir merken nur die Fahne, die er dort setzt.
-/// **Das ist die Zahl, an der die Quarznachfuehrung haengt.**
-/// `rtw8822c_cfo_need_adjust` stellt sie ab, solange Bluetooth NICHT
-/// abgeschaltet ist — wer den Riegel portiert und diese Funktion nicht
-/// laufen laesst, bekommt einen Riegel, der nie aufgeht. Bis 0.26.0 rief
-/// sie nur die Initialisierung.
+/// The `bt_reenable_work` timer (15 s) lives on mac80211's work queue;
+/// only the flag it sets is kept here. `rtw8822c_cfo_need_adjust` holds
+/// off crystal tracking while Bluetooth is not disabled, so this must run
+/// periodically or that lock never opens.
 pub fn monitor_bt_enable(h: i32, c: &mut Coex) {
     let score_board = read_scbd(h);
     let bt_disabled = score_board & COEX_SCBD_ONOFF == 0;
@@ -193,7 +188,7 @@ pub fn monitor_bt_enable(h: i32, c: &mut Coex) {
     }
 }
 
-// ── Der indirekte LTE-Registerraum ───────────────────────────────
+// ── Indirect LTE register space ──────────────────────────────────
 
 /// coex.c `rtw_coex_read_indirect_reg`
 pub fn read_indirect_reg(h: i32, addr: u16) -> u32 {
@@ -216,7 +211,7 @@ pub fn write_indirect_reg(h: i32, addr: u16, mask: u32, val: u32) {
     }
 }
 
-// ── Wer bekommt die Antenne ──────────────────────────────────────
+// ── Who gets the antenna ─────────────────────────────────────────
 
 /// coex.c `rtw_coex_set_gnt_bt`
 fn set_gnt_bt(h: i32, state: u32) {
@@ -232,8 +227,8 @@ fn set_gnt_wl(h: i32, state: u32) {
 
 /// coex.c `rtw_coex_coex_ctrl_owner`.
 ///
-/// `chip->btg_reg` ist beim 8822C NICHT gesetzt (kein Treffer in
-/// rtw8822c.c), der zweite Schreibzugriff entfaellt also.
+/// `chip->btg_reg` is not set on the 8822C (no match in rtw8822c.c), so
+/// the second write is omitted.
 fn coex_ctrl_owner(h: i32, wifi_control: bool) {
     if wifi_control {
         host::set8(h, REG_SYS_SDIO_CTRL + 3, (BIT_LTE_MUX_CTRL_PATH >> 24) as u8);
@@ -244,9 +239,9 @@ fn coex_ctrl_owner(h: i32, wifi_control: bool) {
 
 /// coex.c `rtw_coex_check_rfk`.
 ///
-/// Wartet, bis weder BT noch WLAN kalibrieren, bevor der Besitzer des
-/// Antennenpfads wechselt. `wlg_at_btg` ist bei gemeinsamer Antenne wahr,
-/// `scbd_support` ist es immer — der Zweig gilt also bei uns.
+/// Waits until neither BT nor WLAN is calibrating before the antenna path
+/// owner changes. `wlg_at_btg` is true with a shared antenna and
+/// `scbd_support` always is, so the branch applies.
 fn check_rfk(h: i32, c: &mut Coex) {
     if !(c.wlg_at_btg && c.bt_iqk_state != 0xff) {
         return;
@@ -270,11 +265,10 @@ fn check_rfk(h: i32, c: &mut Coex) {
 
 /// coex.c `rtw_coex_set_ant_path`.
 ///
-/// **Der Aufruf, um den es geht.** `ant_switch_exist` ist beim 8822C
-/// `false` (rtw8822c_coex_cfg_rfe_type) und `coex_set_ant_switch` ist
-/// ohnehin `NULL` — der Schalter haengt also allein an GNT_BT/GNT_WL und
-/// am Besitzer des Pfads. `ctrl_type`/`pos_type` werden trotzdem gesetzt,
-/// weil sie in Linux gesetzt werden.
+/// `ant_switch_exist` is `false` on the 8822C (rtw8822c_coex_cfg_rfe_type)
+/// and `coex_set_ant_switch` is `NULL`, so the switch depends only on
+/// GNT_BT/GNT_WL and the path owner. `ctrl_type`/`pos_type` are still set
+/// because Linux sets them.
 pub fn set_ant_path(h: i32, c: &mut Coex, force: bool, phase: u8) {
     if !force && c.cur_ant_pos_type == phase {
         return;
@@ -351,13 +345,13 @@ pub fn set_ant_path(h: i32, c: &mut Coex, force: bool, phase: u8) {
         }
     }
 
-    // `rtw_coex_set_ant_switch` — `chip->ops->coex_set_ant_switch` ist beim
-    // 8822C NULL (rtw8822c.c:4993) und `ant_switch_exist` ist false. Beide
-    // Gruende einzeln reichen; der Aufruf kann nie stattfinden.
+    // `rtw_coex_set_ant_switch`: `chip->ops->coex_set_ant_switch` is NULL on
+    // the 8822C (rtw8822c.c:4993) and `ant_switch_exist` is false. Either
+    // reason alone means the call never happens.
     let _ = (ctrl_type, pos_type, COEX_SWITCH_CTRL_MAX, COEX_SWITCH_TO_MAX);
 }
 
-// ── Die Koexistenz-Tabelle ───────────────────────────────────────
+// ── Coexistence table ────────────────────────────────────────────
 
 /// coex.c `rtw_coex_set_table`
 fn set_table(h: i32, c: &Coex, force: bool, table0: u32, table1: u32) {
@@ -384,7 +378,7 @@ fn wltoggle_table_a(h: i32, st: &mut H2cState, share_ant: bool, table_case: u8) 
         table_wl = tables::COEX_TABLE_NSANT[table_case as usize][1];
     }
 
-    // h2c_para[1] = 0x1 ("no definition"), dann die vier Bytes von table_wl
+    // h2c_para[1] = 0x1 ("no definition"), then the four bytes of table_wl
     let data = [
         0x1u8,
         (table_wl & 0xff) as u8,
@@ -397,9 +391,8 @@ fn wltoggle_table_a(h: i32, st: &mut H2cState, share_ant: bool, table_case: u8) 
 
 /// coex.c `rtw_coex_table`.
 ///
-/// **Die Tabellen sind ERZEUGT** (`gen_tables.py` aus rtw8822c.c), und die
-/// Zahl der Faelle ist `ARRAY_SIZE` — also genau die Laenge des erzeugten
-/// Feldes, nicht eine hingeschriebene Konstante.
+/// The tables are generated (`gen_tables.py` from rtw8822c.c), and the
+/// case count is `ARRAY_SIZE`, i.e. the length of the generated array.
 pub fn table(h: i32, c: &mut Coex, st: &mut H2cState, share_ant: bool,
              force: bool, mut ty: u8) {
     c.cur_table = ty;
@@ -438,10 +431,9 @@ fn wl_slot_extend(h: i32, c: &mut Coex, st: &mut H2cState, enable: bool) {
 
 /// coex.c `rtw_coex_wl_ccklock_action`.
 ///
-/// Erreichbar nur aus `tdma_timer_base` und nur bei Basis 3 — beim Anlauf
-/// ist die Basis 0. Sie steht hier vollstaendig, weil sie im Aufrufbaum
-/// steht; `wl_fw_dbg_info` kommt aus einem C2H-Bericht, den erst der
-/// laufende Betrieb holt, und ist hier 0.
+/// Reachable only from `tdma_timer_base` with base 3; at bring-up the base
+/// is 0. Ported in full because it is in the call tree. `wl_fw_dbg_info`
+/// comes from a C2H report not collected here and is 0.
 fn wl_ccklock_action(h: i32, c: &mut Coex, st: &mut H2cState) {
     if c.manual_control || c.stop_dm {
         return;
@@ -450,13 +442,13 @@ fn wl_ccklock_action(h: i32, c: &mut Coex, st: &mut H2cState) {
         wl_slot_extend(h, c, st, false);
         return;
     }
-    // `wl_cck_lock` und `wl_cck_lock_ever` kommen aus der Verkehrsmessung
-    // des laufenden Betriebs und sind beim Anlauf beide false, der zweite
-    // Zweig faellt damit ins Leere.
+    // `wl_cck_lock` and `wl_cck_lock_ever` come from runtime traffic
+    // statistics and are both false at bring-up, so the second branch does
+    // nothing.
     let wl_cck_lock = false;
     let wl_cck_lock_ever = false;
     if c.wl_slot_extend && c.wl_force_lps_ctrl && !wl_cck_lock_ever {
-        // wl_fw_dbg_info[7] ist hier 0, also <= 5
+        // wl_fw_dbg_info[7] is 0 here, so <= 5
         c.cnt_wl_5ms_noextend += 1;
         if c.cnt_wl_5ms_noextend == 7 {
             wl_slot_extend(h, c, st, false);
@@ -468,11 +460,9 @@ fn wl_ccklock_action(h: i32, c: &mut Coex, st: &mut H2cState) {
 
 /// ps.c `rtw_leave_lps`.
 ///
-/// `__rtw_leave_lps_deep` und `__rtw_leave_lps` pruefen beide
-/// `RTW_FLAG_LEISURE_PS*` und kehren zurueck, wenn die Fahne nicht steht.
-/// Wir schalten Leisure-PS nie ein, also ist das hier ein echter Nullweg —
-/// und kein weggelassener, sondern einer, den Linux an dieser Stelle
-/// genauso nimmt.
+/// `__rtw_leave_lps_deep` and `__rtw_leave_lps` both check
+/// `RTW_FLAG_LEISURE_PS*` and return if it is not set. Leisure PS is never
+/// enabled here, so this is a genuine no-op, the same path Linux takes.
 fn leave_lps(_h: i32) {}
 
 /// coex.c `rtw_coex_power_save_state`
@@ -486,7 +476,7 @@ fn power_save_state(h: i32, c: &mut Coex, ps_type: u8) {
         }
         COEX_PS_LPS_OFF => {
             c.wl_force_lps_ctrl = true;
-            // `lps_conf.mode` ist 0, solange kein LPS laeuft.
+            // `lps_conf.mode` is 0 while no LPS is active.
             leave_lps(h);
         }
         _ => {}
@@ -495,8 +485,8 @@ fn power_save_state(h: i32, c: &mut Coex, ps_type: u8) {
 
 /// coex.c `rtw_coex_set_tdma`.
 ///
-/// `ap_enable` ist in Linux eine lokale `false` — der AP-Zweig ist tot.
-/// `chip->pstdma_type` ist `COEX_PSTDMA_FORCE_LPSOFF` (rtw8822c.c:5410).
+/// `ap_enable` is a local `false` in Linux, so the AP branch is dead.
+/// `chip->pstdma_type` is `COEX_PSTDMA_FORCE_LPSOFF` (rtw8822c.c:5410).
 #[allow(clippy::too_many_arguments)]
 fn set_tdma(h: i32, c: &mut Coex, st: &mut H2cState,
             byte1: u8, byte2: u8, byte3: u8, byte4: u8, byte5: u8) {
@@ -506,7 +496,7 @@ fn set_tdma(h: i32, c: &mut Coex, st: &mut H2cState,
 
     let ap_enable = false;
     if ap_enable && (byte1 & (1 << 4) != 0 && byte1 & (1 << 5) == 0) {
-        // Unerreichbar: `ap_enable` ist in Linux eine lokale Konstante.
+        // Unreachable: `ap_enable` is a local constant in Linux.
         power_save_state(h, c, COEX_PS_WIFI_NATIVE);
     } else if (byte1 & (1 << 4) != 0 && byte1 & (1 << 5) == 0)
         || c.wl_coex_mode == COEX_WLINK_2GFREE
@@ -551,7 +541,7 @@ fn tdma_timer_base(h: i32, c: &mut Coex, st: &mut H2cState, ty: u8) {
         if tbtt_interval % 100 <= 80 {
             times -= 1;
         }
-        // dazu PARA1_H2C69_TBTT_DIV100 = BIT(7), coex.h:29
+        // plus PARA1_H2C69_TBTT_DIV100 = BIT(7), coex.h:29
         ((times as u8) & 0x3f) | (1 << 7)
     } else {
         PARA1_H2C69_TDMA_2SLOT
@@ -582,9 +572,8 @@ pub fn tdma(h: i32, c: &mut Coex, st: &mut H2cState, share_ant: bool,
         return;
     }
 
-    // `wl_busy` ist `RTW_FLAG_BUSY_TRAFFIC` und beim Anlauf false; der erste
-    // Zweig gilt also, und `bt_a2dp_exist` braucht gar nicht geprueft zu
-    // werden.
+    // `wl_busy` is `RTW_FLAG_BUSY_TRAFFIC` and false at bring-up, so the
+    // first branch applies and `bt_a2dp_exist` need not be checked.
     let wl_busy = false;
     let bt_a2dp_exist = false;
     let bt_inq_remain = false;
@@ -627,7 +616,7 @@ fn set_wl_pri_mask(h: i32, bitmap: u8, data: u8) {
     host::w8_mask(h, addr, 1 << bit, data);
 }
 
-// ── Die zwei Einstiege, die `rtw_power_on` ruft ──────────────────
+// ── The two entry points `rtw_power_on` calls ────────────────────
 
 /// coex.c `rtw_coex_power_on_setting`
 pub fn power_on_setting(h: i32, c: &mut Coex, st: &mut H2cState,
@@ -696,14 +685,13 @@ pub fn init_hw_config(h: i32, c: &mut Coex, st: &mut H2cState,
     query_bt_info(h, c, st);
 }
 
-// ── Zurueckgelesen: wo steht die Antenne wirklich? ───────────────
+// ── Read back: where is the antenna really? ──────────────────────
 
-/// Der Zustand, den `set_ant_path` in der Hardware hinterlaesst.
+/// The state `set_ant_path` leaves in the hardware.
 ///
-/// **Das ist die Sache selbst, nicht ihr Nebeneffekt.** GNT_WL und GNT_BT
-/// stehen im indirekten LTE-Registerraum, jedes zweimal (Bits 13:12 und 9:8
-/// bzw. 15:14 und 11:10) — `set_gnt_wl`/`set_gnt_bt` schreiben beide Paare.
-/// Der Besitzer des Pfads steht in `REG_SYS_SDIO_CTRL+3`.
+/// GNT_WL and GNT_BT live in the indirect LTE register space, each twice
+/// (bits 13:12 and 9:8, resp. 15:14 and 11:10); `set_gnt_wl`/`set_gnt_bt`
+/// write both pairs. The path owner is in `REG_SYS_SDIO_CTRL+3`.
 pub struct AntState {
     pub lte_coex_ctrl: u32,
     pub gnt_wl: u32,
@@ -722,22 +710,19 @@ pub fn read_ant_state(h: i32) -> AntState {
     }
 }
 
-/// Die ROHE Zahl im Postfach, ohne die Maske, die `read_scbd` anlegt.
-/// `read_scbd` schneidet `BIT_BT_INT_EN` weg — und wer nur das Ergebnis
-/// sieht, kann eine 0 nicht von „unser eigener Schreibzugriff kam nie an"
-/// unterscheiden.
+/// The raw mailbox value, without the mask `read_scbd` applies.
+/// `read_scbd` strips `BIT_BT_INT_EN`, so from its result alone a 0 cannot
+/// be told apart from "our own write never arrived".
 pub fn read_scbd_raw(h: i32) -> u16 {
     host::r16(h, REG_WIFI_BT_INFO)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Was `rtw_watch_dog_work` alle zwei Sekunden an der Koexistenz tut.
+// What `rtw_watch_dog_work` does for coexistence every two seconds.
 //
-// **Der Entscheidungsbaum von `rtw_coex_run_coex` gehoert NICHT hierher**
-// — er ist L6 des Plans (111 Funktionen, eigene Stufe) und entscheidet
-// Antenne und TDMA, WENN Bluetooth aktiv ist. Hier steht die
-// Beobachtung: die vier Verkehrszaehler und der eine Zustand, den die
-// Quarznachfuehrung braucht.
+// The decision tree of `rtw_coex_run_coex` (antenna and TDMA while
+// Bluetooth is active) is not ported. This is the monitoring part: the
+// four traffic counters and the one state crystal tracking needs.
 // ═══════════════════════════════════════════════════════════════════
 
 /// coex.c:454-475 `rtw_coex_monitor_bt_ctr`
@@ -764,9 +749,7 @@ pub fn wl_status_check(h: i32, c: &mut Coex) {
 
 /// coex.h:423-432 `rtw_coex_active_query_bt_info`.
 ///
-/// **Fuer DIESEN Chip ein Nichts, und das ist kein Weglassen:** die
-/// Funktion fragt nur beim RTL8821AU nach, dessen Firmware bei
-/// getrennten BT-Kopfhoerern kein `C2H_BT_INFO` von sich aus schickt.
-/// Der Zweig steht hier als Kommentar, damit niemand ihn fuer vergessen
-/// haelt.
+/// A no-op for this chip, as in Linux: the function only queries on the
+/// RTL8821AU, whose firmware does not send `C2H_BT_INFO` by itself when BT
+/// headphones disconnect.
 pub fn active_query_bt_info(_h: i32, _c: &mut Coex) {}

@@ -1,22 +1,20 @@
-//! `fw.c` aus Linux 6.18.26 rtw88 — der Teil, den der Download braucht.
-//!
-//! Portiert: `rtw_fw_write_data_rsvd_page` (der 3081-Zweig).
+//! `fw.c` from Linux 6.18.26 rtw88: reserved page download, the two H2C
+//! paths, C2H parsing and the watchdog's firmware updates.
 #![allow(dead_code)]
 
 use crate::host;
 use crate::pci::{self, Trx};
 use crate::regs::*;
 
-/// PCI-Konfigurationsraum: Kommando und Status.
+/// PCI configuration space: command and status.
 ///
-/// Das Kommandoregister sagt, ob der Chip ueberhaupt Busmaster ist — ohne
-/// das kann er keinen Deskriptor aus dem Hauptspeicher holen, und genau so
-/// sieht es aus: MMIO geht, DMA nicht.
+/// The command register tells whether the chip is bus master at all;
+/// without that it cannot fetch descriptors from memory, which shows up as
+/// working MMIO and failing DMA.
 ///
-/// Das STATUSregister ist die zweite Haelfte der Frage. Bit 13 (Received
-/// Master Abort) und Bit 12 (Received Target Abort) stehen, wenn der Chip
-/// es VERSUCHT hat und abgewiesen wurde. Bleiben sie leer und Busmaster ist
-/// an, hat er gar nicht erst hingesehen. Das sind zwei verschiedene Fehler.
+/// The status register is the other half: bit 13 (received master abort)
+/// and bit 12 (received target abort) are set when the chip tried and was
+/// rejected. If they stay clear with bus mastering on, it never tried.
 pub fn dump_pci_cmd(tag: &str) {
     let v = host::pci_read_config(0x04);
     let cmd = (v & 0xFFFF) as u16;
@@ -55,25 +53,21 @@ pub fn dump_reg32(h: i32, name: &str, off: u32) {
     host::print("\n");
 }
 
-/// util.c `check_hw_ready`: 1000 Runden, 10 us auseinander, und gelesen wird
-/// mit `rtw_read32_mask` — also 32 Bit, auch wenn das Register ein Byte ist.
+/// util.c `check_hw_ready`: 1000 rounds 10 us apart, read with
+/// `rtw_read32_mask`, i.e. 32 bits even if the register is a byte.
 pub fn check_hw_ready(h: i32, addr: u32, mask: u32, target: u32) -> bool {
     check_hw_ready_for(h, addr, mask, target, LINUX_FRIST_US).0
 }
 
-/// Linux: 1000 Runden mit je `udelay(10)` — die Frist ist also **10 ms**,
-/// und die Rundenzahl ist nur die Art, wie sie dort gezaehlt wird.
+/// Linux: 1000 rounds of `udelay(10)`, so the deadline is 10 ms; the
+/// round count is only how it is counted there.
 pub const LINUX_FRIST_US: u64 = 1000 * 10;
 
-/// util.c `check_hw_ready`, aber an der UHR statt an der Rundenzahl.
+/// util.c `check_hw_ready`, timed by the clock instead of a round count,
+/// since a tight loop of 1000 reads takes far less than Linux's 10 ms.
 ///
-/// Die erste Fassung hielt 1000 Runden ohne Pause — das sind hier eine bis
-/// zwei Millisekunden statt zehn, also ein Zehntel von Linux' Frist. Der
-/// Kommentar daneben behauptete schon die Uhr; der Code tat etwas anderes,
-/// und die Firmware bekam zu wenig Zeit, ihr FW_INIT_RDY zu setzen.
-///
-/// Gibt zurueck, ob es geklappt hat UND wie lange es gedauert hat — die
-/// zweite Zahl ist der Unterschied zwischen „zu knapp" und „kommt nie".
+/// Returns whether it succeeded and how long it took; the second value
+/// distinguishes "too tight" from "never comes".
 pub fn check_hw_ready_for(
     h: i32, addr: u32, mask: u32, target: u32, frist_us: u64,
 ) -> (bool, u64) {
@@ -87,20 +81,19 @@ pub fn check_hw_ready_for(
         if waited >= frist_us {
             return (false, waited);
         }
-        // 10 us liegen unter unserer Schlafaufloesung, also wird eng
-        // gelesen. Ab 10 ms wird zwischen den Lesungen abgegeben, damit
-        // eine lange Frist nicht den Kern blockiert.
+        // 10 us is below our sleep resolution, so read tightly. After 10 ms yield
+        // between reads so a long deadline does not block the core.
         if waited > 10_000 {
             host::sleep_ms(1);
         }
     }
 }
 
-/// fw.c `rtw_fw_write_data_rsvd_page`, 3081-Zweig, PCIe.
+/// fw.c `rtw_fw_write_data_rsvd_page`, 3081 branch, PCIe.
 ///
-/// `rsvd_boundary` ist beim Firmware-Download noch 0: es wird erst von
-/// `rtw_set_trx_fifo_info` gesetzt, und das laeuft in `rtw_mac_init` — also
-/// NACH dem Download. Linux schreibt hier also ebenfalls eine 0 zurueck.
+/// `rsvd_boundary` is still 0 during the firmware download: it is set by
+/// `rtw_set_trx_fifo_info` in `rtw_mac_init`, which runs after the
+/// download. Linux writes back 0 here as well.
 #[allow(clippy::too_many_arguments)]
 pub fn write_data_rsvd_page(
     h: i32, trx: &Trx, stage: i32, pg_addr: u16, payload: &[u8],
@@ -120,7 +113,7 @@ pub fn write_data_rsvd_page(
 
     host::w8(h, REG_BCN_CTRL, (bckp2 & !BIT_EN_BCN_FUNCTION) | BIT_DIS_TSF_UDT);
 
-    // PCIe: Beacon-Download der Queue abschalten, solange wir sie benutzen.
+    // PCIe: disable the queue's beacon download while we use it.
     let bckp1 = host::r8(h, REG_FWHW_TXQ_CTRL + 2);
     host::w8(h, REG_FWHW_TXQ_CTRL + 2, bckp1 & !((BIT_EN_BCNQ_DL >> 16) as u8));
 
@@ -152,9 +145,7 @@ pub fn write_data_rsvd_page(
             dump_reg32(h, "PCI_CTRL  ", pci::RTK_PCI_CTRL);
             dump_reg32(h, "CR        ", REG_CR);
             dump_reg32(h, "FWHW_TXQ  ", REG_FWHW_TXQ_CTRL);
-            // 0x382 ist NICHT vierfach ausgerichtet; der 32-Bit-Lesezugriff
-            // im letzten Lauf gab 0xffffffff und war damit mein eigener
-            // Messfehler, nicht die Antwort des Chips.
+            // 0x382 is not 4-byte aligned; a 32-bit read there returns 0xffffffff.
             host::print("    BCN_WORK  @0x383 = 0x");
             host::print_hex8(host::r8(h, pci::RTK_PCI_TXBD_BCN_WORK));
             host::print("   (noch gesetzt = nie abgeholt)\n");
@@ -185,45 +176,40 @@ pub fn write_data_rsvd_page(
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4a: die zwei H2C-Wege
+// The two H2C paths
 // ════════════════════════════════════════════════════════════════
 //
-// Sie sehen gleich aus und sind es nicht:
+// They look alike and are not:
 //
-//   `rtw_fw_send_h2c_command`  schreibt ACHT Byte in eines von vier
-//                              HMEBOX-Registern. Die Koexistenz redet so.
-//   `rtw_fw_send_h2c_packet`   schiebt ZWEIUNDDREISSIG Byte durch die
-//                              H2C-QUEUE, also durch den Ring, dessen
-//                              Adresse `init_h2c` gesetzt hat. General-
-//                              und PHYDM-Info gehen so.
+//   `rtw_fw_send_h2c_command`  writes eight bytes into one of four
+//                              HMEBOX registers. Coexistence uses this.
+//   `rtw_fw_send_h2c_packet`   pushes 32 bytes through the H2C queue, the
+//                              ring whose address `init_h2c` set. General
+//                              and PHYDM info use this.
 //
-// Wer den einen fuer den anderen haelt, schickt alles ins Leere — und
-// merkt es nicht, weil beide Wege stumm sind.
+// Mixing them up sends everything into the void, silently, since neither
+// path reports back.
 
-/// `struct rtw_h2c_cmd` (fw.h) — acht Byte, als zwei Woerter.
-/// Der Zustand zwischen zwei Kommandos: welches Postfach als naechstes
-/// drankommt und welche Folgenummer ein PAKET traegt.
+/// `struct rtw_h2c_cmd` (fw.h): eight bytes as two words.
+/// The state between two commands: which mailbox is next and which
+/// sequence number a packet carries.
 #[derive(Default, Clone, Copy)]
-/// `struct rtw_dev.h2c` (main.h) — **EINER fuer das ganze Geraet.**
+/// `struct rtw_dev.h2c` (main.h): one instance for the whole device.
 ///
-/// Bis 0.17.0 legte jede Stufe einen eigenen an. Damit fing Stufe 5d
-/// wieder bei Fach 0 an, obwohl 5c es zuletzt beschrieben hatte, und
-/// `seq` lief mehrfach von null los. In Linux gibt es genau ein
-/// `rtwdev->h2c`, und die Reihenfolge der Faecher ist der ganze Sinn:
-/// der Treiber reicht sie im Kreis weiter, damit die Firmware Zeit hat,
-/// das vorige zu leeren.
+/// The mailbox order is the point: the driver rotates through them so the
+/// firmware has time to drain the previous one, and `seq` must not restart.
 pub struct H2cState {
     pub last_box_num: u8,
     pub seq: u8,
 }
 
-/// Die vier Fachfahnen, wie der Chip sie gerade meldet.
+/// The four mailbox flags as the chip currently reports them.
 pub fn hmetfr(h: i32) -> u8 {
     host::r8(h, REG_HMETFR)
 }
 
-/// Feld an seine Schiebestelle, im Wort `word` des H2C-Puffers.
-/// Das ist `le32p_replace_bits((__le32 *)(h2c) + word, value, mask)`.
+/// Place a field at its shift position in word `word` of the H2C buffer.
+/// This is `le32p_replace_bits((__le32 *)(h2c) + word, value, mask)`.
 fn h2c_set(pkt: &mut [u8; H2C_PKT_SIZE], word: usize, mask: u32, value: u32) {
     let o = word * 4;
     let cur = u32::from_le_bytes([pkt[o], pkt[o + 1], pkt[o + 2], pkt[o + 3]]);
@@ -231,14 +217,13 @@ fn h2c_set(pkt: &mut [u8; H2C_PKT_SIZE], word: usize, mask: u32, value: u32) {
     pkt[o..o + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-// ── Weg 1: die MAILBOX (fw.c:76-127) ─────────────────────────────
+// ── Path 1: the mailbox (fw.c:76-127) ────────────────────────────
 
 /// fw.c `rtw_fw_send_h2c_command`.
 ///
-/// Linux pollt mit `read_poll_timeout_atomic(rtw_read8, ..., 100, 3000, ...)`
-/// — alle 100 us, Frist **3 ms**. Gehalten wird hier die Frist, nicht die
-/// Rundenzahl (derselbe Fehler wie in `check_hw_ready` soll sich nicht
-/// wiederholen).
+/// Linux polls with `read_poll_timeout_atomic(rtw_read8, ..., 100, 3000, ...)`,
+/// every 100 us with a 3 ms deadline. The deadline is enforced here, not
+/// the round count.
 pub fn send_h2c_command(h: i32, st: &mut H2cState, pkt: &[u8; H2C_PKT_SIZE]) -> bool {
     let box_num = st.last_box_num;
     let (box_reg, box_ex_reg) = match box_num {
@@ -259,9 +244,8 @@ pub fn send_h2c_command(h: i32, st: &mut H2cState, pkt: &[u8; H2C_PKT_SIZE]) -> 
             break;
         }
         if host::now_us() - start >= 3000 {
-            // Linux sagt nur „failed to send h2c command". Welches Fach und
-            // welche Fahnen — das ist der Unterschied zwischen einer
-            // Meldung und einer Diagnose.
+            // Linux only says "failed to send h2c command"; the mailbox and flags
+            // are added for diagnosis.
             host::print("[rtl8822ce] failed to send h2c command (Fach ");
             host::print_dec(box_num as u32);
             host::print(", HMETFR 0x");
@@ -272,8 +256,8 @@ pub fn send_h2c_command(h: i32, st: &mut H2cState, pkt: &[u8; H2C_PKT_SIZE]) -> 
         host::delay_us(100);
     }
 
-    // `h2c_cmd->msg` sind die Bytes 0..4, `msg_ext` die Bytes 4..8 —
-    // und das EX-Register wird ZUERST geschrieben.
+    // `h2c_cmd->msg` is bytes 0..4, `msg_ext` bytes 4..8, and the EX register
+    // is written first.
     let msg = u32::from_le_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]);
     let msg_ext = u32::from_le_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
     host::w32(h, box_ex_reg, msg_ext);
@@ -291,7 +275,7 @@ fn set_cmd_id_class(pkt: &mut [u8; H2C_PKT_SIZE], value: u32) {
     h2c_set(pkt, 0, 0xff, value);
 }
 
-/// fw.c `rtw_fw_bt_wifi_control` — fw.h:568-574, Kommando 0x69.
+/// fw.c `rtw_fw_bt_wifi_control`, fw.h:568-574, command 0x69.
 pub fn bt_wifi_control(h: i32, st: &mut H2cState, op_code: u8, data: &[u8; 5]) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
     set_cmd_id_class(&mut pkt, H2C_CMD_BT_WIFI_CONTROL);
@@ -304,7 +288,7 @@ pub fn bt_wifi_control(h: i32, st: &mut H2cState, op_code: u8, data: &[u8; 5]) -
     send_h2c_command(h, st, &pkt)
 }
 
-/// fw.c `rtw_fw_query_bt_info` — Kommando 0x61.
+/// fw.c `rtw_fw_query_bt_info`, command 0x61.
 pub fn query_bt_info(h: i32, st: &mut H2cState) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
     set_cmd_id_class(&mut pkt, H2C_CMD_QUERY_BT_INFO);
@@ -312,7 +296,7 @@ pub fn query_bt_info(h: i32, st: &mut H2cState) -> bool {
     send_h2c_command(h, st, &pkt)
 }
 
-// ── Weg 2: das PAKET durch die H2C-Queue (fw.c:495-565) ──────────
+// ── Path 2: the packet through the H2C queue (fw.c:495-565) ──────
 
 /// fw.c `rtw_h2c_pkt_set_header`
 fn h2c_pkt_set_header(pkt: &mut [u8; H2C_PKT_SIZE], sub_id: u32) {
@@ -329,15 +313,15 @@ fn send_h2c_packet(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
     if !ok {
         host::print("[rtl8822ce] failed to send h2c packet\n");
     }
-    // Linux erhoeht `seq` auch bei Fehlschlag.
+    // Linux increments `seq` even on failure.
     st.seq = st.seq.wrapping_add(1);
     ok
 }
 
 /// fw.c:517-535 `rtw_fw_send_general_info`.
 ///
-/// Sagt der Firmware, wieviele Seiten sie hinter `rsvd_boundary` fuer ihren
-/// eigenen Sendepuffer hat. Bei uns: 1994 − 1938 = **56**.
+/// Tells the firmware how many pages it has behind `rsvd_boundary` for its
+/// own TX buffer.
 pub fn send_general_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
                          fifo: &crate::mac::Fifo) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
@@ -353,8 +337,8 @@ pub fn send_general_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
 
 /// fw.c:538-565 `rtw_fw_send_phydm_info`.
 ///
-/// `rx_ant_status`/`tx_ant_status` kommen aus `hal->antenna_rx`/`antenna_tx`
-/// — bei 2T2R beide `BB_PATH_AB`.
+/// `rx_ant_status`/`tx_ant_status` come from `hal->antenna_rx`/`antenna_tx`,
+/// both `BB_PATH_AB` for 2T2R.
 #[allow(clippy::too_many_arguments)]
 pub fn send_phydm_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
                        rfe_option: u8, rf_2t2r: bool, cut_version: u8,
@@ -374,7 +358,7 @@ pub fn send_phydm_info(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
     send_h2c_packet(h, trx, stage, st, &mut pkt)
 }
 
-/// fw.c `rtw_fw_coex_tdma_type` — Mailbox-Kommando 0x60, fw.h:567.
+/// fw.c `rtw_fw_coex_tdma_type`, mailbox command 0x60, fw.h:567.
 #[allow(clippy::too_many_arguments)]
 pub fn coex_tdma_type(h: i32, st: &mut H2cState,
                       para1: u8, para2: u8, para3: u8, para4: u8, para5: u8) -> bool {
@@ -388,7 +372,7 @@ pub fn coex_tdma_type(h: i32, st: &mut H2cState,
     send_h2c_command(h, st, &pkt)
 }
 
-/// fw.c:1080-1088 `rtw_fw_scan_notify` — Kommando 0x59.
+/// fw.c:1080-1088 `rtw_fw_scan_notify`, command 0x59.
 pub fn scan_notify(h: i32, st: &mut H2cState, start: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
     set_cmd_id_class(&mut pkt, H2C_CMD_SCAN);
@@ -396,7 +380,7 @@ pub fn scan_notify(h: i32, st: &mut H2cState, start: bool) -> bool {
     send_h2c_command(h, st, &pkt)
 }
 
-/// fw.c:437-446 `rtw_fw_inform_rfk_status` — Kommando 0x6d, Postfach.
+/// fw.c:437-446 `rtw_fw_inform_rfk_status`, command 0x6d, mailbox.
 pub fn inform_rfk_status(h: i32, st: &mut H2cState, start: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
     set_cmd_id_class(&mut pkt, H2C_CMD_WIFI_CALIBRATION);
@@ -404,10 +388,10 @@ pub fn inform_rfk_status(h: i32, st: &mut H2cState, start: bool) -> bool {
     send_h2c_command(h, st, &pkt)
 }
 
-/// fw.c:448-459 `rtw_fw_do_iqk` — der QUEUE-Weg, nicht das Postfach.
+/// fw.c:448-459 `rtw_fw_do_iqk`, via the queue, not the mailbox.
 ///
-/// Die IQK rechnet die FIRMWARE; der Treiber stoesst sie nur an und wartet
-/// danach auf `REG_RPT_CIP`.
+/// The firmware computes the IQK; the driver only triggers it and then
+/// waits for `REG_RPT_CIP`.
 pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
               clear: bool, segment_iqk: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
@@ -419,10 +403,10 @@ pub fn do_iqk(h: i32, trx: &mut Trx, stage: i32, st: &mut H2cState,
     send_h2c_packet(h, trx, stage, st, &mut pkt)
 }
 
-/// fw.c:1123-1132 `rtw_fw_media_status_report` — Kommando 0x01, Postfach.
+/// fw.c:1123-1132 `rtw_fw_media_status_report`, command 0x01, mailbox.
 ///
-/// Sagt der Firmware, dass diese `mac_id` verbunden ist. Sie richtet
-/// daraufhin ihre eigene Buchfuehrung ein (Ratenanpassung, Stromsparen).
+/// Tells the firmware that this `mac_id` is connected; it then sets up its
+/// own bookkeeping (rate adaptation, power saving).
 pub fn media_status_report(h: i32, st: &mut H2cState, mac_id: u8,
                            connect: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
@@ -432,26 +416,22 @@ pub fn media_status_report(h: i32, st: &mut H2cState, mac_id: u8,
     send_h2c_command(h, st, &pkt)
 }
 
-/// fw.h:73-77 `struct rtw_c2h_cmd` — Kennung, Folgenummer, Nutzlast.
+/// fw.h:73-77 `struct rtw_c2h_cmd`: ID, sequence number, payload.
 pub struct C2hCmd<'a> {
     pub id: u8,
     pub seq: u8,
     pub payload: &'a [u8],
 }
 
-/// fw.c:334-380 `rtw_fw_c2h_cmd_handle`, der Verteiler.
+/// fw.c:334-380 `rtw_fw_c2h_cmd_handle`, the dispatcher.
 ///
-/// **Was hinter den Kennungen liegt, ist noch nicht gebaut** — und das
-/// steht hier namentlich statt als stiller `_ =>`. Jede dieser Zeilen ist
-/// ein eigener Posten: `rtw_tx_report_handle` braucht die Sendequittungen,
-/// `rtw_coex_bt_info_notify` die laufende Koexistenz,
-/// `rtw_fw_ra_report_handle` die Ratenanpassung. Gemeldet wird jede
-/// Nachricht trotzdem, denn eine Firmware, die etwas sagt, sagt es aus
-/// einem Grund.
+/// Names the C2H IDs so unhandled messages are reported by name instead of
+/// disappearing in a silent `_ =>`. The handlers behind them
+/// (`rtw_tx_report_handle`, `rtw_coex_bt_info_notify`,
+/// `rtw_fw_ra_report_handle`) are dispatched elsewhere or not ported.
 pub fn c2h_name(id: u8) -> &'static str {
-    // Eine Tabelle statt `match`: die Kennungen stehen in `regs.rs` teils
-    // als `u8` (weil jemand sie in ein Byteregister schreibt) und teils
-    // als `u32`, und ein Muster darf keine Umwandlung tragen.
+    // A table instead of `match`: the IDs in `regs.rs` are partly `u8` and
+    // partly `u32`, and a pattern cannot carry a conversion.
     const NAMES: &[(u32, &str)] = &[
         (C2H_CCX_TX_RPT, "CCX_TX_RPT (Sendequittung)"),
         (C2H_BT_INFO, "BT_INFO"),
@@ -475,8 +455,8 @@ pub fn c2h_name(id: u8) -> &'static str {
     "unbekannt"
 }
 
-/// Den C2H-Kopf aus einem Empfangspuffer ziehen. `pkt_offset` ist in Linux
-/// derselbe Versatz wie beim Funkrahmen: Deskriptor + drv_info + shift.
+/// Extract the C2H header from an RX buffer. `pkt_offset` is the same
+/// offset as for a radio frame in Linux: descriptor + drv_info + shift.
 pub fn c2h_parse(frame: &[u8]) -> Option<C2hCmd<'_>> {
     if frame.len() < 2 {
         return None;
@@ -484,15 +464,15 @@ pub fn c2h_parse(frame: &[u8]) -> Option<C2hCmd<'_>> {
     Some(C2hCmd { id: frame[0], seq: frame[1], payload: &frame[2..] })
 }
 
-/// fw.c:1023-1063 `rtw_fw_send_ra_info` — Kommando 0x40, Postfach.
+/// fw.c:1023-1063 `rtw_fw_send_ra_info`, command 0x40, mailbox.
 ///
-/// Der Treiber schickt eine MASKE, keine Rate: welche der 64 Raten dieses
-/// Gegenueber kann. Die Firmware waehlt daraus laufend und meldet ihre
-/// Wahl als `C2H_RA_RPT` zurueck.
+/// The driver sends a mask, not a rate: which of the 64 rates the peer
+/// supports. The firmware picks from it continuously and reports its choice
+/// as `C2H_RA_RPT`.
 ///
-/// Der `H2C_CMD_RA_INFO_HI`-Teil daneben gilt nur fuer den 8814A (vier
-/// Sendeketten, Maske breiter als 32 Bit); `chip->id` ist hier 8822C, und
-/// Linux kehrt an derselben Stelle um.
+/// The `H2C_CMD_RA_INFO_HI` part applies only to the 8814A (four TX
+/// chains, mask wider than 32 bits); Linux returns at the same point for
+/// the 8822C.
 pub fn send_ra_info(h: i32, st: &mut H2cState, si: &mut crate::sta::StaInfo,
                     reset_ra_mask: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
@@ -505,13 +485,11 @@ pub fn send_ra_info(h: i32, st: &mut H2cState, si: &mut crate::sta::StaInfo,
     h2c_set(&mut pkt, 0, 0x0300_0000, si.bw_mode as u32); // BW_MODE
     h2c_set(&mut pkt, 0, 1 << 26, (si.ldpc_en != 0) as u32); // LDPC
     h2c_set(&mut pkt, 0, 1 << 27, (!reset_ra_mask) as u32); // NO_UPDATE
-    // GENMASK(29, 28) — ZWEI Bit. Bei einem `bool` schreibt eine
-    // Einzelbitmaske denselben Wert, loescht aber Bit 29 nicht. Hier ist
-    // das folgenlos (der Puffer beginnt bei null), und trotzdem steht die
-    // Maske der Quelle da: wer spaeter einen Wert > 1 setzt, bekaeme mit
-    // der falschen Maske stillschweigend etwas anderes.
+    // GENMASK(29, 28), two bits. For a `bool` a single-bit mask writes the
+    // same value but would not clear bit 29; the source's mask is kept so a
+    // later value > 1 is not silently mangled.
     h2c_set(&mut pkt, 0, 0x3000_0000, si.vht_enable as u32); // VHT_EN
-    h2c_set(&mut pkt, 0, 1 << 30, 1); // DIS_PT — Linux: `disable_pt = true`
+    h2c_set(&mut pkt, 0, 1 << 30, 1); // DIS_PT; Linux: `disable_pt = true`
     h2c_set(&mut pkt, 1, 0x0000_00ff, (si.ra_mask & 0xff) as u32);
     h2c_set(&mut pkt, 1, 0x0000_ff00, ((si.ra_mask & 0xff00) >> 8) as u32);
     h2c_set(&mut pkt, 1, 0x00ff_0000, ((si.ra_mask & 0xff_0000) >> 16) as u32);
@@ -523,8 +501,8 @@ pub fn send_ra_info(h: i32, st: &mut H2cState, si: &mut crate::sta::StaInfo,
 
 /// fw.c:1065-1080 `rtw_fw_default_port`.
 ///
-/// Kehrt um, solange der Port nicht verbunden ist — das ist keine
-/// Abkuerzung, es steht so in der ersten Zeile.
+/// Returns early while the port is not connected, as the first line in
+/// Linux does.
 pub fn default_port(h: i32, st: &mut H2cState, port: u8, mac_id: u8,
                     net_type: u32) -> bool {
     if net_type != RTW_NET_MGD_LINKED {
@@ -538,14 +516,14 @@ pub fn default_port(h: i32, st: &mut H2cState, port: u8, mac_id: u8,
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Was `rtw_watch_dog_work` alle zwei Sekunden an die Firmware schickt.
+// What `rtw_watch_dog_work` sends to the firmware every two seconds.
 // ═══════════════════════════════════════════════════════════════════
 
 /// fw.c:713-727 `rtw_fw_send_rssi_info`.
 ///
-/// **Die Firmware waehlt die Rate, und das hier ist ihre Eingabe.** Ohne
-/// sie rechnet die Ratenwahl auf dem Wert, den sie beim Anmelden bekommen
-/// hat — auch noch, wenn die Leitung laengst schlechter ist.
+/// The firmware picks the rate and this is its input. Without it rate
+/// selection keeps using the value from association even after the link
+/// has degraded.
 pub fn send_rssi_info(h: i32, st: &mut H2cState,
                       si: &crate::sta::StaInfo) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
@@ -573,13 +551,13 @@ pub fn update_wl_phy_info(h: i32, st: &mut H2cState, dm: &crate::dm::DmInfo,
 
 /// fw.c:2465-2483 `rtw_fw_adaptivity`.
 ///
-/// Der `rtw_edcca_enabled`-Zweig ist ein debugfs-Schalter (Vorgabe an);
-/// debugfs bauen wir nicht, also gilt hier immer der eingeschaltete Fall.
+/// The `rtw_edcca_enabled` branch is a debugfs switch (default on); there
+/// is no debugfs here, so the enabled case always applies.
 pub fn adaptivity(h: i32, st: &mut H2cState, dm: &crate::dm::DmInfo) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];
     set_cmd_id_class(&mut pkt, H2C_CMD_ADAPTIVITY);
     h2c_set(&mut pkt, 0, 0x0000_0f00, dm.edcca_mode as u32); // MODE
-    h2c_set(&mut pkt, 0, 0x0000_f000, 1); // OPTION — Linux: fest 1
+    h2c_set(&mut pkt, 0, 0x0000_f000, 1); // OPTION, fixed to 1 in Linux
     h2c_set(&mut pkt, 0, 0x00ff_0000, dm.igi_history[0] as u32); // IGI
     h2c_set(&mut pkt, 0, 0xff00_0000, dm.l2h_th_ini as u32); // L2H
     h2c_set(&mut pkt, 1, 0x0000_00ff, dm.scan_density as u32); // DENSITY
@@ -588,14 +566,13 @@ pub fn adaptivity(h: i32, st: &mut H2cState, dm: &crate::dm::DmInfo) -> bool {
 
 /// fw.c:265-323 `rtw_fw_ra_report_handle` + `_iter`.
 ///
-/// **Die Rueckmeldung, welche Rate die FIRMWARE gerade fliegt.** Zwei
-/// Posten des Watchdogs haengen daran: `rtw_phy_config_swing_table`
-/// waehlt ueber `dm_info->tx_rate` zwischen CCK- und OFDM-Kurve, und
-/// `rtw_phy_rrsr_update` rechnet aus `si->ra_report.desc_rate` die
-/// Antwortraten. Ohne diesen Weg steht beides auf dem Anfangswert.
+/// Reports which rate the firmware is currently using. Two watchdog items
+/// depend on it: `rtw_phy_config_swing_table` chooses between the CCK and
+/// OFDM curve via `dm_info->tx_rate`, and `rtw_phy_rrsr_update` derives
+/// the response rates from `si->ra_report.desc_rate`.
 ///
-/// Der Rest von `_iter` (Flags, `bit_rate`, `max_rc_amsdu_len`) fuellt
-/// `struct rate_info` fuer `cfg80211` und hat bei uns keinen Leser.
+/// The rest of `_iter` (flags, `bit_rate`, `max_rc_amsdu_len`) fills
+/// `struct rate_info` for `cfg80211` and has no reader here.
 pub fn ra_report_handle(payload: &[u8], dm: &mut crate::dm::DmInfo,
                         si: Option<&mut crate::sta::StaInfo>) {
     if payload.len() < C2H_RA_REPORT_SIZE {
@@ -614,24 +591,21 @@ pub fn ra_report_handle(payload: &[u8], dm: &mut crate::dm::DmInfo,
     }
 }
 
-/// tx.c:229-256 `rtw_tx_report_handle`. Gibt `(Folgenummer, quittiert)`.
+/// tx.c:229-256 `rtw_tx_report_handle`. Returns `(sequence number, acked)`.
 ///
-/// **rtw88 hat ZWEI Wege fuer dieselbe Quittung**, und `src` entscheidet
-/// die Aufteilung:
+/// rtw88 has two paths for the same report, and `src` selects the layout:
 ///
-/// * `C2H_CCX_TX_RPT` (0x03) — ein eigenes C2H, Aufteilung **V0**:
-///   Nummer in `payload[6]`, Status in `payload[0]`.
-/// * `C2H_CCX_RPT` (0x0f) — ein UNTERkommando von `C2H_HALMAC`
-///   (fw.c:93-113), Aufteilung **V1**: Nummer in `payload[8]`, Status in
-///   `payload[9]`, und `payload[0]` ist die Unterkommandokennung.
+/// * `C2H_CCX_TX_RPT` (0x03), its own C2H, layout V0: number in
+///   `payload[6]`, status in `payload[0]`.
+/// * `C2H_CCX_RPT` (0x0f), a subcommand of `C2H_HALMAC` (fw.c:93-113),
+///   layout V1: number in `payload[8]`, status in `payload[9]`, and
+///   `payload[0]` is the subcommand ID.
 ///
-/// Welchen eine Firmware nimmt, steht in keinem Header. Der erste
-/// Geraetelauf mit 0.26.0 hat es beantwortet: `0 ok, 0 ohne ACK, 49 ohne
-/// bericht` — wir hoerten nur auf 0x03, und diese Firmware nimmt den
-/// anderen Weg.
+/// Which one a firmware uses is not stated in any header, so both are
+/// handled.
 ///
-/// `st == 0` heisst quittiert — die zwei Statusbits sind ein Code, und
-/// jeder von null verschiedene ist ein Misserfolg.
+/// `st == 0` means acked; the two status bits are a code and any non-zero
+/// value is a failure.
 pub fn tx_report_parse(payload: &[u8], v1: bool) -> Option<(u8, bool)> {
     let (sn_off, st_off) = if v1 {
         (CCX_REPORT_V1_SEQNUM_OFF, CCX_REPORT_V1_STATUS_OFF)
@@ -646,14 +620,11 @@ pub fn tx_report_parse(payload: &[u8], v1: bool) -> Option<(u8, bool)> {
     Some((sn, st == 0))
 }
 
-/// fw.c:383-390 `rtw_fw_c2h_cmd_isr` — die Firmware meldet ihren EIGENEN
-/// Absturz.
+/// fw.c:383-390 `rtw_fw_c2h_cmd_isr`: the firmware reports its own crash.
 ///
-/// **In Linux ist das eine Unterbrechung**; wir haben keine und sehen
-/// deshalb im Watchdog nach. Derselbe Test, dieselbe Stelle, anderer
-/// Takt: steht in `REG_MCU_TST_CFG` der Ausloeserwert, hat die Firmware
-/// sich selbst fuer tot erklaert. Bis hierher wurde daraus eine stille
-/// Leitung.
+/// In Linux this is checked in the interrupt path; here the watchdog polls
+/// it. Same test, same register: if `REG_MCU_TST_CFG` holds the trigger
+/// value, the firmware has declared itself dead.
 pub fn fw_crashed(h: i32) -> bool {
     host::r8(h, REG_MCU_TST_CFG) as u32 == VAL_FW_TRIGGER
 }

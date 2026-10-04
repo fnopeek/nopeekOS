@@ -1,6 +1,6 @@
-//! `rtw8822c.c`, Zeilen 108-1010 — die DAC-Kalibrierung (DACK).
+//! `rtw8822c.c` lines 108-1010: DAC calibration (DACK).
 //!
-//! Portiert, in Quellreihenfolge: `rtw8822c_dac_backup_reg` ·
+//! Ported, in source order: `rtw8822c_dac_backup_reg` ·
 //! `rtw8822c_dac_restore_reg` · `rtw8822c_rf_minmax_cmp` ·
 //! `__rtw8822c_dac_iq_sort` · `rtw8822c_dac_iq_sort` ·
 //! `rtw8822c_dac_iq_offset` · `rtw8822c_get_path_write_addr` ·
@@ -13,15 +13,13 @@
 //! `__rtw8822c_dac_cal_restore` · `rtw8822c_dac_cal_restore` ·
 //! `rtw8822c_rf_dac_cal`.
 //!
-//! **Was die Kalibrierung tut:** sie misst den Gleichspannungsversatz von
-//! ADC und DAC beider Pfade und traegt den Ausgleich in die Hardware ein.
-//! Ohne sie steht auf jedem Empfangspfad ein konstanter Fehler.
+//! The calibration measures the DC offset of ADC and DAC on both paths and
+//! programs the compensation; without it every RX path has a constant
+//! error.
 //!
-//! **`dac_cal_restore` greift bei uns nie.** Es rettet das Ergebnis eines
-//! FRUEHEREN Laufs ueber ein Aus- und Wiedereinschalten — `dack_msbk` ist
-//! beim ersten Lauf null, und die Funktion steigt genau daran aus. Portiert
-//! ist sie trotzdem vollstaendig: sobald der Treiber den Chip ein zweites
-//! Mal anwirft, spart sie die ganze Messung.
+//! `dac_cal_restore` only applies on a second bring-up: it restores the
+//! result of an earlier run, and `dack_msbk` is zero on the first run,
+//! which is where it bails out.
 #![allow(dead_code)]
 
 use crate::dm::DmInfo;
@@ -29,20 +27,20 @@ use crate::host;
 use crate::phy::{read_rf, write_rf_reg_mix, RFREG_MASK, RF_PATH_A, RF_PATH_B};
 use crate::regs::*;
 
-/// `rtw_write_rf(..., RFREG_MASK, v)` — die Form, in der die DACK schreibt.
+/// `rtw_write_rf(..., RFREG_MASK, v)`, the form DACK writes in.
 fn wrf(h: i32, path: usize, addr: u32, val: u32) {
     write_rf_reg_mix(h, path, addr, RFREG_MASK, val);
 }
 
-/// `struct rtw_backup_info` (main.h), wie in `mac.rs` — aber hier sind alle
-/// Eintraege 4 Byte breit, also braucht es kein `len`.
+/// `struct rtw_backup_info` (main.h), as in `mac.rs`, but all entries here
+/// are 4 bytes wide, so no `len` is needed.
 #[derive(Clone, Copy, Default)]
 struct Backup {
     reg: u32,
     val: u32,
 }
 
-/// rtw8822c.c:115-120 — die sechzehn BB-Register, die die DACK verstellt.
+/// rtw8822c.c:115-120: the sixteen BB registers DACK changes.
 const DACK_ADDRS: [u32; DACK_REG_8822C] = [
     0x180c, 0x1810, 0x410c, 0x4110,
     0x1c3c, 0x1c24, 0x1d70, 0x9b4,
@@ -55,13 +53,11 @@ const DACK_RF_ADDRS: [u32; DACK_RF_8822C] = [0x8f];
 
 /// rtw8822c.c:108-135 `rtw8822c_dac_backup_reg`.
 ///
-/// **Der Index `backup_rf[path * i + i]` ist Linux' eigener und er ist
-/// schraeg** — mit `DACK_RF_8822C == 1` laeuft `i` nur ueber 0, also ist
-/// `path * 0 + 0` fuer BEIDE Pfade die 0. Der zweite Pfad ueberschreibt den
-/// ersten, und `restore_reg` liest mit demselben Ausdruck zurueck. Der
-/// Ausdruck steht hier unveraendert: er ist harmlos, solange
-/// `DACK_RF_8822C` 1 ist, und ihn stillschweigend zu „reparieren" hiesse,
-/// eine andere Reihenfolge zu schreiben als Linux fuehrt.
+/// The index `backup_rf[path * i + i]` is Linux's own and is odd: with
+/// `DACK_RF_8822C == 1`, `i` is only 0, so both paths use slot 0 and path
+/// B overwrites path A; `restore_reg` reads back with the same expression.
+/// It is kept unchanged because it is harmless while `DACK_RF_8822C` is 1,
+/// and fixing it would change the write order relative to Linux.
 fn dac_backup_reg(h: i32) -> ([Backup; DACK_REG_8822C],
                               [Backup; DACK_RF_8822C * DACK_PATH_8822C]) {
     let mut backup = [Backup::default(); DACK_REG_8822C];
@@ -86,7 +82,7 @@ fn dac_backup_reg(h: i32) -> ([Backup; DACK_REG_8822C],
 /// rtw8822c.c:137-152 `rtw8822c_dac_restore_reg`
 fn dac_restore_reg(h: i32, backup: &[Backup; DACK_REG_8822C],
                    backup_rf: &[Backup; DACK_RF_8822C * DACK_PATH_8822C]) {
-    // util.c `rtw_restore_reg`, hier durchgehend 4 Byte.
+    // util.c `rtw_restore_reg`, all 4 bytes here.
     for b in backup.iter() {
         host::w32(h, b.reg, b.val);
     }
@@ -101,9 +97,8 @@ fn dac_restore_reg(h: i32, backup: &[Backup; DACK_REG_8822C],
 
 /// rtw8822c.c:154-183 `rtw8822c_rf_minmax_cmp`.
 ///
-/// Die Werte sind Zehn-Bit-Zweierkomplement: alles ab 0x200 ist negativ.
-/// Deshalb ist „kleiner" hier nicht die Zahlenordnung, und deshalb sieht
-/// diese Funktion so aus, wie sie aussieht.
+/// The values are 10-bit two's complement: anything from 0x200 up is
+/// negative, so "smaller" is not numeric order.
 fn rf_minmax_cmp(value: u32, min: &mut u32, max: &mut u32) {
     if value >= 0x200 {
         if *min >= 0x200 {
@@ -139,7 +134,7 @@ fn dac_iq_sort_pair(v1: &mut u32, v2: &mut u32) {
     }
 }
 
-/// rtw8822c.c:198-209 `rtw8822c_dac_iq_sort` — Bubblesort ueber beide Felder.
+/// rtw8822c.c:198-209 `rtw8822c_dac_iq_sort`: bubble sort over both arrays.
 fn dac_iq_sort(iv: &mut [u32; DACK_SN_8822C], qv: &mut [u32; DACK_SN_8822C]) {
     for i in 0..DACK_SN_8822C - 1 {
         for j in 0..DACK_SN_8822C - 1 - i {
@@ -151,8 +146,8 @@ fn dac_iq_sort(iv: &mut [u32; DACK_SN_8822C], qv: &mut [u32; DACK_SN_8822C]) {
     }
 }
 
-/// rtw8822c.c:211-234 `rtw8822c_dac_iq_offset` — der Mittelwert der
-/// mittleren 80 von 100 Proben, wieder im Zehn-Bit-Zweierkomplement.
+/// rtw8822c.c:211-234 `rtw8822c_dac_iq_offset`: the mean of the middle 80
+/// of 100 samples, again in 10-bit two's complement.
 fn dac_iq_offset(vec: &[u32; DACK_SN_8822C]) -> u32 {
     let mut m = 0u32;
     let mut p = 0u32;
@@ -190,16 +185,16 @@ fn path_read_addr(path: usize) -> u32 {
     }
 }
 
-/// rtw8822c.c:274-285 `rtw8822c_dac_iq_check` — eine Probe, deren Betrag
-/// ueber 0x64 liegt, ist ein Ueberlauf und wird verworfen.
+/// rtw8822c.c:274-285 `rtw8822c_dac_iq_check`: a sample whose magnitude
+/// exceeds 0x64 is an overflow and is discarded.
 fn dac_iq_check(value: u32) -> bool {
     !((value >= 0x200 && (0x400 - value) > 0x64) || (value < 0x200 && value > 0x64))
 }
 
 /// rtw8822c.c:287-302 `rtw8822c_dac_cal_iq_sample`.
 ///
-/// Der Deckel von 10000 ist Linux'; ohne ihn haengt die Schleife, wenn die
-/// Hardware nur Ueberlaeufe liefert.
+/// The cap of 10000 is Linux's; without it the loop hangs if the hardware
+/// returns only overflows.
 fn dac_cal_iq_sample(h: i32, iv: &mut [u32; DACK_SN_8822C],
                      qv: &mut [u32; DACK_SN_8822C], verbose: bool) {
     let mut i = 0usize;
@@ -214,9 +209,8 @@ fn dac_cal_iq_sample(h: i32, iv: &mut [u32; DACK_SN_8822C],
         }
     }
     if verbose {
-        // Die ROHEN Proben, bevor irgendetwas daraus gerechnet wird. Ein
-        // Feld aus 100 gleichen Zahlen ist eine eingefrorene Messung; eine
-        // echte streut ([[feedback_dump_the_raw_input_before_debugging_the_interpretation]]).
+        // Report the raw samples before anything is computed from them: 100
+        // identical values indicate a frozen measurement, a real one scatters.
         let (mut imin, mut imax, mut qmin, mut qmax) = (iv[0], iv[0], qv[0], qv[0]);
         for k in 0..DACK_SN_8822C {
             if iv[k] < imin { imin = iv[k]; }
@@ -280,7 +274,7 @@ fn dac_cal_iq_search(h: i32, iv: &mut [u32; DACK_SN_8822C],
             break;
         }
 
-        // `while (cnt++ < 100)` — nachgestellte Erhoehung, also 101 Runden.
+        // `while (cnt++ < 100)`: post-increment, so 101 iterations.
         if cnt >= 100 {
             break;
         }
@@ -292,9 +286,9 @@ fn dac_cal_iq_search(h: i32, iv: &mut [u32; DACK_SN_8822C],
 
 /// rtw8822c.c:362-376 `rtw8822c_dac_cal_rf_mode`.
 ///
-/// Die zwei `rtw_read_rf` am Anfang stehen in Linux nur fuer die Debugzeile
-/// dahinter — aber ein Lesezugriff auf ein RF-Register ist bei diesem Chip
-/// ein echter Buszugriff, und weglassen hiesse, die Reihenfolge zu aendern.
+/// The two `rtw_read_rf` at the start exist in Linux only for the debug
+/// line after them, but an RF register read is a real bus access on this
+/// chip, so dropping them would change the access order.
 fn dac_cal_rf_mode(h: i32, verbose: bool) -> (u32, u32) {
     let _rf_a = read_rf(h, RF_PATH_A, 0x0, RFREG_MASK);
     let _rf_b = read_rf(h, RF_PATH_B, 0x0, RFREG_MASK);
@@ -473,13 +467,11 @@ fn dac_cal_step2(h: i32, path: usize) -> (u32, u32) {
     if qc != 0x0 {
         qc = 0x400 - qc;
     }
-    // `0x7f - ic` LAEUFT UM, sobald der gemessene Versatz gross genug ist:
-    // `(0x400 - ic) * 12 / 5` kann bis 614 werden, und 0x7f ist 127. In C
-    // ist das ein u32-Umlauf, der danach von `& 0xf` und `check_hw_ready`
-    // ohnehin als „passt nicht" endet. Hier steht es ausdruecklich als
-    // Umlauf, weil ein Rust-Bau mit Ueberlaufpruefung sonst PANISCH endet —
-    // und ein Treiber, der an einer Messung stirbt, ist schlimmer als einer,
-    // der dieselbe Fehlermeldung wie Linux ausgibt.
+    // `0x7f - ic` wraps once the measured offset is large enough:
+    // `(0x400 - ic) * 12 / 5` can reach 614, and 0x7f is 127. In C this is a
+    // u32 wraparound that later ends as a mismatch via `& 0xf` and
+    // `check_hw_ready`. It is written as an explicit wrap so an
+    // overflow-checked build does not panic on a bad measurement.
     if ic < 0x300 {
         ic = ic * 2 * 6 / 5;
         ic += 0x80;
@@ -500,8 +492,8 @@ fn dac_cal_step2(h: i32, path: usize) -> (u32, u32) {
 
 /// rtw8822c.c:566-641 `rtw8822c_dac_cal_step3`.
 ///
-/// Gibt zurueck: die zwei Werte fuer die Abbruchpruefung (`ic`, `qc` als
-/// BETRAG) und die zwei Rohwerte fuer die Debugzeile (`i_out`, `q_out`).
+/// Returns the two values for the termination check (`ic`, `qc` as
+/// magnitudes) and the two raw values for the debug line (`i_out`, `q_out`).
 fn dac_cal_step3(h: i32, path: usize, adc_ic: u32, adc_qc: u32,
                  ic_in: u32, qc_in: u32) -> (u32, u32, u32, u32) {
     let base_addr = path_write_addr(path);
@@ -607,10 +599,9 @@ fn dac_cal_backup_path(h: i32, dm: &mut DmInfo, path: usize) {
 
 /// rtw8822c.c:690-712 `rtw8822c_dac_cal_backup_dck`.
 ///
-/// **Die Indizes von Pfad B sind vertauscht gegenueber Pfad A** — bei A
-/// steht `[0][0] [0][1] [1][0] [1][1]`, bei B `[0][0] [1][0] [0][1] [1][1]`.
-/// Das steht so in Linux, und `restore_dck` liest in DERSELBEN Verdrehung
-/// zurueck, also hebt es sich auf. Geradegezogen waere es eine Abweichung.
+/// Path B's indices are swapped relative to path A: A uses
+/// `[0][0] [0][1] [1][0] [1][1]`, B `[0][0] [1][0] [0][1] [1][1]`. That is
+/// Linux, and `restore_dck` reads back with the same swap, so it cancels.
 fn dac_cal_backup_dck(h: i32, dm: &mut DmInfo) {
     dm.dack_dck[RF_PATH_A][0][0] = host::r32_mask(h, REG_DCKA_I_0, 0xf000_0000) as u8;
     dm.dack_dck[RF_PATH_A][0][1] = host::r32_mask(h, REG_DCKA_I_1, 0xf) as u8;
@@ -826,11 +817,10 @@ fn dac_cal_restore(h: i32, dm: &DmInfo) -> bool {
 
 /// rtw8822c.c:943-1008 `rtw8822c_rf_dac_cal`
 pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) -> bool {
-    // Die Tabellen schreiben auf RF 0x3e als EINZIGES Register, das danach
-    // niemand mehr anfasst, verschiedene Werte je Pfad: A=0x3, B=0x20
-    // (rtw8822c_table.c, gegen den Bedingungslaeufer nachgerechnet). Lesen
-    // beide Pfade dasselbe, ist der Pfadzugriff selbst falsch — und dann
-    // ist jede Aussage ueber "Pfad B" wertlos.
+    // The tables write different values per path to RF 0x3e, a register
+    // nothing touches afterwards: A=0x3, B=0x20 (rtw8822c_table.c, checked
+    // against the condition walker). If both paths read the same, path
+    // addressing itself is broken.
     host::print("    RF 0x3e (Tabelle: A=0x3, B=0x20):  A=0x");
     host::print_hex32(read_rf(h, RF_PATH_A, 0x3e, RFREG_MASK));
     host::print("  B=0x");
@@ -878,9 +868,9 @@ pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) -> bool {
     // backup results to restore, saving a lot of time
     dac_cal_backup(h, dm);
 
-    // Linux gibt diese vier Zahlen als Debugzeilen aus. Sie sind die einzige
-    // Auskunft darueber, ob die Kalibrierung konvergiert ist — ein `ic`/`qc`
-    // unter 5 heisst ja.
+    // Linux prints these four numbers as debug lines. They are the only
+    // indication whether the calibration converged; `ic`/`qc` below 5 means
+    // yes.
     host::print("    DACK A: ic=0x");
     host::print_hex32(ic_a);
     host::print(" qc=0x");
@@ -902,15 +892,12 @@ pub fn rf_dac_cal(h: i32, dm: &mut DmInfo) -> bool {
     conv_a && conv_b
 }
 
-/// Die zehn Runden aus `rtw8822c_rf_dac_cal`, fuer EINEN Pfad.
+/// The ten iterations from `rtw8822c_rf_dac_cal` for one path.
 ///
-/// In Linux steht diese Schleife zweimal ausgeschrieben da und sagt NICHTS
-/// darueber, wie sie ausgegangen ist — sie laeuft zehnmal und geht weiter.
-/// Hier meldet sie jede Runde, und zwar den Wert, an dem der Abbruch haengt
-/// (`ic`/`qc` aus step3, der BETRAG des restlichen Versatzes). Der erste
-/// Geraetelauf sagte fuer Pfad B 36/40 statt unter 5 — und aus einer
-/// Endzahl allein ist nicht zu sehen, ob es schwingt, feststeht oder
-/// langsam faellt ([[feedback_dump_the_raw_input_before_debugging_the_interpretation]]).
+/// Linux writes this loop out twice and reports nothing about its outcome.
+/// Here every iteration reports the value the termination depends on
+/// (`ic`/`qc` from step3, the magnitude of the residual offset), so it is
+/// visible whether it oscillates, is stuck, or converges slowly.
 #[allow(clippy::too_many_arguments)]
 fn dac_cal_loop(h: i32, dm: &DmInfo, path: usize, adc_ic: u32, adc_qc: u32,
                 ic_out: &mut u32, qc_out: &mut u32,

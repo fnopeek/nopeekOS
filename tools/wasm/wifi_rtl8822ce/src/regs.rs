@@ -1,25 +1,24 @@
-//! Register und Bits, 1:1 aus Linux 6.18.26
-//! `drivers/net/wireless/realtek/rtw88/reg.h` (und `pci.h`, `main.h`).
+//! Registers and bits, 1:1 from Linux 6.18.26
+//! `drivers/net/wireless/realtek/rtw88/reg.h` (and `pci.h`, `main.h`).
 //!
-//! Jede Zeile traegt ihre Quelle. Wer hier einen Wert aendert, ohne die
-//! genannte Zeile gelesen zu haben, hat geraten — und genau das ist die
-//! Regel, die bei diesem Chip nicht verhandelbar ist.
+//! Every line names its source. Change a value only after reading the
+//! cited line.
 #![allow(dead_code)]
 
-// ── PCI-Identitaet ───────────────────────────────────────────────
-// rtw8822ce.c: PCI_DEVICE(PCI_VENDOR_ID_REALTEK, 0xC822) und 0xC82F.
+// ── PCI identity ─────────────────────────────────────────────────
+// rtw8822ce.c: PCI_DEVICE(PCI_VENDOR_ID_REALTEK, 0xC822) and 0xC82F.
 pub const RTL_VENDOR: u16 = 0x10ec;
 pub const RTL8822CE_DEVICE: u16 = 0xc822;
 pub const RTL8822CE_DEVICE_ALT: u16 = 0xc82f;
 
-/// pci.c `rtw_pci_io_mapping`: `u8 bar_id = 2` — NICHT BAR0.
+/// pci.c `rtw_pci_io_mapping`: `u8 bar_id = 2`, not BAR0.
 pub const BAR_REG: u8 = 2;
-/// 16 Seiten = 64 KiB. Die hoechste PCIe-Registeradresse, die rtw88 anfasst,
-/// ist `RTK_PCI_TXBD_H2CQ_CSR` 0x1330; BB/RF liegen direkt im Fenster bis
-/// ~0x5000. Der Kernel klemmt ohnehin auf die echte BAR-Groesse.
+/// 16 pages = 64 KiB. The highest PCIe register rtw88 touches is
+/// `RTK_PCI_TXBD_H2CQ_CSR` 0x1330; BB/RF sit directly in the window up to
+/// ~0x5000. The kernel clamps to the real BAR size anyway.
 pub const BAR_PAGES: u16 = 16;
 
-// ── Systemregister (reg.h) ───────────────────────────────────────
+// ── System registers (reg.h) ─────────────────────────────────────
 pub const REG_SYS_FUNC_EN: u32 = 0x0002; // reg.h:8
 pub const REG_SYS_PW_CTRL: u32 = 0x0004; // reg.h:18
 pub const REG_RSV_CTRL: u32 = 0x001C; // reg.h:33
@@ -29,7 +28,7 @@ pub const REG_SYS_STATUS1: u32 = 0x00F4; // reg.h:202
 pub const REG_SYS_CFG2: u32 = 0x00FC; // reg.h:204
 pub const REG_CR: u32 = 0x0100; // reg.h:207
 
-// REG_SYS_CFG1-Felder, reg.h:187-201
+// REG_SYS_CFG1 fields, reg.h:187-201
 pub const BIT_RTL_ID: u32 = 1 << 23;
 pub const BIT_LDO: u32 = 1 << 24;
 pub const BIT_RF_TYPE_ID: u32 = 1 << 27;
@@ -38,28 +37,27 @@ pub const BIT_MASK_VENDOR_ID: u32 = 0xf;
 pub const BIT_SHIFT_CHIP_VER: u32 = 12;
 pub const BIT_MASK_CHIP_VER: u32 = 0xf;
 
-/// reg.h:201 — `BIT_GET_CHIP_VER(x)`
+/// reg.h:201 `BIT_GET_CHIP_VER(x)`
 #[inline]
 pub fn bit_get_chip_ver(x: u32) -> u8 {
     ((x >> BIT_SHIFT_CHIP_VER) & BIT_MASK_CHIP_VER) as u8
 }
 
-/// reg.h:195 — `BIT_GET_VENDOR_ID(x)`
+/// reg.h:195 `BIT_GET_VENDOR_ID(x)`
 #[inline]
 pub fn bit_get_vendor_id(x: u32) -> u8 {
     ((x >> BIT_SHIFT_VENDOR_ID) & BIT_MASK_VENDOR_ID) as u8
 }
 
-/// mac.h:9 — `cut_version_to_mask(cut)`. Waehlt in der Power-Sequenz aus,
-/// welche Kommandos fuer DIESEN Chipschnitt gelten.
-/// In C ist das ein int-Shift, der erst bei der Zuweisung auf 8 Bit
-/// verkuerzt wird — `1u8 << n` waere ab cut 7 etwas anderes.
+/// mac.h:9 `cut_version_to_mask(cut)`. Selects which power sequence
+/// commands apply to this chip cut. In C this is an int shift truncated to
+/// 8 bits only on assignment; `1u8 << n` would differ from cut 7 on.
 #[inline]
 pub fn cut_version_to_mask(cut: u8) -> u8 {
     (1u32 << (cut as u32 + 1)) as u8
 }
 
-// ── Stufe 1: Power-Sequenz (reg.h, Zeilen wie angegeben) ─────────
+// ── Power sequence (reg.h, lines as given) ───────────────────────
 pub const REG_SYS_CLKR: u32 = 0x0008; // reg.h:28
 pub const BIT_ANA8M: u32 = 1 << 1;
 pub const BIT_WAKEPAD_EN: u32 = 1 << 3;
@@ -97,18 +95,18 @@ pub const BIT_DDMA_EN: u32 = 1 << 8; // reg.h:796
 
 pub const REG_CR_EXT: u32 = 0x1100; // reg.h:806
 
-// REG_SYS_PW_CTRL / REG_APS_FSMCO teilen sich 0x0004 (reg.h:18-24).
+// REG_SYS_PW_CTRL / REG_APS_FSMCO share 0x0004 (reg.h:18-24).
 pub const BIT_PFM_WOWL: u8 = 1 << 3;
 pub const APS_FSMCO_MAC_ENABLE: u32 = 1 << 8;
 pub const APS_FSMCO_MAC_OFF: u32 = 1 << 9;
 pub const APS_FSMCO_HW_POWERDOWN: u32 = 1 << 15;
 
-// REG_MCUFW_CTRL-Felder (reg.h:131-158)
+// REG_MCUFW_CTRL fields (reg.h:131-158)
 pub const BIT_BOOT_FSPI_EN: u32 = 1 << 20;
 pub const BIT_RPWM_TOGGLE: u8 = 1 << 7;
 pub const BIT_MCUFWDL_EN: u8 = 1 << 0;
 
-// ── Stufe 2b: Firmware-Download (reg.h/mac.h, Zeilen wie angegeben) ──
+// ── Firmware download (reg.h/mac.h, lines as given) ──────────────
 pub const REG_SYS_CLK_CTRL: u32 = 0x0008; // reg.h:25
 pub const BIT_CPU_CLK_EN: u32 = 1 << 14;
 pub const BIT_WLMCU_IOIF: u8 = 1 << 0; // reg.h:37
@@ -119,7 +117,7 @@ pub const RTW_DMA_MAPPING_HIGH: u8 = 3; // main.h:1013
 
 pub const BIT_TXDMA_EN: u8 = 1 << 2; // reg.h:216
 pub const BIT_HCI_TXDMA_EN: u8 = 1 << 0; // reg.h:218
-pub const BIT_ENSWBCN: u32 = 1 << 8; // reg.h:210 (im 16-Bit-CR)
+pub const BIT_ENSWBCN: u32 = 1 << 8; // reg.h:210 (in the 16-bit CR)
 
 pub const REG_FIFOPAGE_CTRL_2: u32 = 0x0204; // reg.h:322
 pub const BIT_BCN_VALID_V1: u32 = 1 << 15;
@@ -160,7 +158,7 @@ pub const BIT_H2CQ_FULL: u32 = 1 << 31;
 pub const OCPBASE_TXBUF_88XX: u32 = 0x18780000;
 pub const OCPBASE_DMEM_88XX: u32 = 0x00200000;
 
-// reg.h:135-153 — die Statusbits des Downloads
+// reg.h:135-153: the download status bits
 pub const BIT_FW_INIT_RDY: u32 = 1 << 15;
 pub const BIT_FW_DW_RDY: u32 = 1 << 14;
 pub const BIT_CPU_CLK_SEL: u32 = (1 << 12) | (1 << 13);
@@ -174,7 +172,7 @@ pub const FW_READY: u32 = BIT_FW_INIT_RDY | BIT_FW_DW_RDY
     | BIT_IMEM_DW_OK | BIT_DMEM_DW_OK | BIT_CHECK_SUM_OK;
 pub const FW_READY_MASK: u32 = 0xffff & !BIT_CPU_CLK_SEL;
 
-// reg.h:897-903 — LTE-Koexistenz, indirekter Zugriff
+// reg.h:897-903: LTE coexistence, indirect access
 pub const LTECOEX_ACCESS_CTRL: u32 = 0x1700;
 pub const LTECOEX_WRITE_DATA: u32 = 0x1704;
 pub const LTECOEX_READ_DATA: u32 = 0x1708;
@@ -184,7 +182,7 @@ pub const LTECOEX_READY: u32 = 1 << 29;
 pub const FW_HDR_SIZE: usize = 64;
 pub const FW_HDR_CHKSUM_SIZE: u32 = 8;
 
-// ── Stufe 2c: efuse und hw_feature ───────────────────────────────
+// ── efuse and hw_feature ─────────────────────────────────────────
 pub const REG_EFUSE_CTRL: u32 = 0x0030; // reg.h:48
 pub const BIT_EF_FLAG: u32 = 1 << 31;
 pub const BIT_SHIFT_EF_ADDR: u32 = 8;
@@ -196,9 +194,9 @@ pub const REG_LDO_EFUSE_CTRL: u32 = 0x0034; // reg.h:62
 pub const BIT_MASK_EFUSE_BANK_SEL: u32 = (1 << 8) | (1 << 9);
 
 pub const REG_C2HEVT: u32 = 0x01A0; // reg.h:287
-/// fw.h:63 — der Ausloeser, VOR dem Firmware-Download geschrieben.
+/// fw.h:63: the trigger, written before the firmware download.
 pub const C2H_HW_FEATURE_DUMP: u8 = 0xfd;
-/// fw.h:57 — die Antwort der Firmware.
+/// fw.h:57: the firmware's answer.
 pub const C2H_HW_FEATURE_REPORT: u8 = 0x19;
 /// main.h:39
 pub const HW_FEATURE_LEN: usize = 13;
@@ -214,22 +212,22 @@ pub const EFUSE_HW_CAP_SUPP_BW40: u8 = 6;
 /// rtw8822c.c `rtw8822c_hw_spec.sys_func_en`
 pub const SYS_FUNC_EN_8822C: u8 = 0xD8;
 
-/// main.h:967-973 — unser Geraet meldet 3.
+/// main.h:967-973
 pub const RTW_CHIP_VER_CUT_D: u8 = 0x03;
 
-// ── Zustaende, die Linux als Klartextvergleich liest ─────────────
+// ── States Linux checks by literal comparison ────────────────────
 /// mac.c `rtw_mac_power_switch`: `rtw_read8(rtwdev, REG_CR) == 0xea`
-/// heisst „MAC ist AUS". Ein 8-Bit-Lesezugriff, ausdruecklich.
+/// means the MAC is off. Explicitly an 8-bit read.
 pub const CR_POWER_OFF: u8 = 0xea;
 /// mac.c `rtw_mac_power_switch`: `rtw_read16(rtwdev, REG_MCUFW_CTRL) == 0xC078`
-/// heisst „die Firmware laeuft noch".
+/// means the firmware is still running.
 pub const MCUFW_CTRL_FW_ALIVE: u16 = 0xc078;
 
-// ── HCI-Parameter, main.c `rtw_chip_parameter_setup` ─────────────
+// ── HCI parameters, main.c `rtw_chip_parameter_setup` ────────────
 pub const PCIE_RPWM_ADDR: u32 = 0x03d9;
 pub const PCIE_CPWM_ADDR: u32 = 0x03da;
 
-// ── Erwartung fuer den 8822C (rtw8822c.c `rtw8822c_hw_spec`) ─────
+// ── Expected values for the 8822C (rtw8822c.c `rtw8822c_hw_spec`) ──
 pub const TX_PKT_DESC_SZ: u32 = 48;
 pub const TX_BUF_DESC_SZ: u32 = 16;
 pub const RX_PKT_DESC_SZ: u32 = 24;
@@ -239,7 +237,7 @@ pub const LOG_EFUSE_SIZE: u32 = 768;
 pub const PTCT_EFUSE_SIZE: u32 = 124;
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 3a: rtw_mac_init
+// rtw_mac_init
 // ════════════════════════════════════════════════════════════════
 
 // ── mac.c `txdma_queue_mapping` (reg.h:207-260) ──────────────────
@@ -249,22 +247,22 @@ pub const BIT_PROTOCOL_EN: u8 = 1 << 4; // reg.h:214
 pub const BIT_SCHEDULE_EN: u8 = 1 << 5; // reg.h:213
 pub const BIT_MACTXEN: u8 = 1 << 6; // reg.h:212
 pub const BIT_MACRXEN: u8 = 1 << 7; // reg.h:211
-/// reg.h:219 — alle acht Bits, also 0xff. Der Name steht hier, weil Linux
-/// ihn schreibt; die Zahl daneben ist kein Kommentar, sondern das Ergebnis.
+/// reg.h:219: all eight bits, i.e. 0xff. The name is kept because Linux
+/// writes it.
 pub const MAC_TRX_ENABLE: u8 = BIT_HCI_TXDMA_EN | BIT_HCI_RXDMA_EN | BIT_TXDMA_EN
     | BIT_RXDMA_EN | BIT_PROTOCOL_EN | BIT_SCHEDULE_EN | BIT_MACTXEN | BIT_MACRXEN;
 
-// Die sechs Queue-Abbildungen sind Feldmakros: zwei Bit je Queue im
-// 16-Bit-Wort REG_TXDMA_PQ_MAP (reg.h:233-258).
+// The six queue mappings are field macros: two bits per queue in the
+// 16-bit word REG_TXDMA_PQ_MAP (reg.h:233-258).
 pub const BIT_SHIFT_TXDMA_VOQ_MAP: u32 = 4; // reg.h:231
 pub const BIT_SHIFT_TXDMA_VIQ_MAP: u32 = 6; // reg.h:235
 pub const BIT_SHIFT_TXDMA_BEQ_MAP: u32 = 8; // reg.h:243
 pub const BIT_SHIFT_TXDMA_BKQ_MAP: u32 = 10; // reg.h:247
 pub const BIT_SHIFT_TXDMA_MGQ_MAP: u32 = 12; // reg.h:251
 pub const BIT_SHIFT_TXDMA_HIQ_MAP: u32 = 14; // reg.h:255
-pub const BIT_MASK_TXDMA_QUEUE_MAP: u16 = 0x3; // reg.h:232 u.a., fuer alle sechs
+pub const BIT_MASK_TXDMA_QUEUE_MAP: u16 = 0x3; // reg.h:232 et al., for all six
 
-/// main.h:1010-1013 — die vier Zielprioritaeten.
+/// main.h:1010-1013: the four target priorities.
 pub const RTW_DMA_MAPPING_EXTRA: u8 = 0; // main.h:1010
 pub const RTW_DMA_MAPPING_LOW: u8 = 1; // main.h:1011
 pub const RTW_DMA_MAPPING_NORMAL: u8 = 2; // main.h:1012
@@ -281,8 +279,8 @@ pub const RSVD_PG_FW_TXBUF_NUM: u16 = 4; // mac.h:29
 pub const C2H_PKT_BUF: u32 = 256; // mac.h:11
 pub const PHY_STATUS_SIZE: u8 = 4; // mac.h:13
 
-/// rtw8822c.c `rtw8822c_hw_spec` — die drei Zahlen, aus denen der Seitenplan
-/// faellt. `page_size` ist `TX_PAGE_SIZE`.
+/// rtw8822c.c `rtw8822c_hw_spec`: the three values the page plan is derived
+/// from. `page_size` is `TX_PAGE_SIZE`.
 pub const TXFF_SIZE_8822C: u32 = 262144; // rtw8822c.c:5345
 pub const RXFF_SIZE_8822C: u32 = 24576; // rtw8822c.c:5346
 pub const RSVD_DRV_PG_NUM_8822C: u16 = 16; // rtw8822c.c:5348
@@ -320,7 +318,7 @@ pub const REG_WMAC_OPTION_FUNCTION: u32 = 0x07D0; // reg.h:595
 pub const REG_HCI_MIX_CFG: u32 = 0x03FC; // reg.h:381
 pub const BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK: u32 = 1 << 26; // reg.h:382
 
-// ── rtw8822c.c `rtw8822c_mac_init` — Register ────────────────────
+// ── rtw8822c.c `rtw8822c_mac_init`: registers ────────────────────
 pub const REG_SPEC_SIFS: u32 = 0x0428; // reg.h:397
 pub const REG_SIFS: u32 = 0x0514; // reg.h:457
 pub const REG_RESP_SIFS_CCK: u32 = 0x063C; // reg.h:542
@@ -395,8 +393,8 @@ pub const REG_WMAC_OPTION_FUNCTION_1: u32 = 0x07D4; // reg.h:596
 pub const REG_RXPSF_CTRL: u32 = 0x1610; // reg.h:828
 pub const REG_RXPSF_TYPE_CTRL: u32 = 0x1614; // reg.h:893
 pub const REG_INT_MIG: u32 = 0x0304; // reg.h:380
-/// `REG_SND_PTCL_CTRL` und sein Bit stehen in **bf.h**, nicht in reg.h —
-/// Beamforming hat dort seinen eigenen Registerblock.
+/// `REG_SND_PTCL_CTRL` and its bit are in bf.h, not reg.h; beamforming has
+/// its own register block there.
 pub const REG_SND_PTCL_CTRL: u32 = 0x0718; // bf.h:15
 pub const BIT_DIS_CHK_VHTSIGB_CRC: u8 = 1 << 6; // bf.h:16
 
@@ -419,7 +417,7 @@ pub const BIT_RXPSF_CONT_ERRCHKEN: u16 = 1 << 4; // reg.h:879
 pub const BIT_SHIFT_RXPSF_ERRTHR: u32 = 0; // reg.h:882
 pub const BIT_MASK_RXPSF_ERRTHR: u16 = 0x7; // reg.h:883
 
-// ── rtw8822c.c `rtw8822c_mac_init` — Werte ───────────────────────
+// ── rtw8822c.c `rtw8822c_mac_init`: values ───────────────────────
 pub const WLAN_TXQ_RPT_EN: u8 = 0x1F; // rtw8822c.c:1915
 pub const WLAN_SLOT_TIME: u8 = 0x09; // rtw8822c.c:1916
 pub const WLAN_PIFS_TIME: u8 = 0x1C; // rtw8822c.c:1917
@@ -474,23 +472,22 @@ pub const WLAN_TX_FUNC_CFG2: u8 = 0x30; // rtw8822c.c:1981
 pub const WLAN_MAC_OPT_NORM_FUNC1: u8 = 0x98; // rtw8822c.c:1982
 pub const WLAN_MAC_OPT_FUNC2: u32 = 0xb081_0041; // rtw8822c.c:1984
 pub const WLAN_MAC_INT_MIG_CFG: u32 = 0x3333_0000; // rtw8822c.c:1985
-/// rtw8822c.c:1987 — zusammengesetzt aus CCK_CONT_TX 0x0A, OFDM_CONT_TX 0x0E,
-/// CCK_TRX 0x0A und OFDM_TRX 0x10 an ihren Schiebestellen: 0x100A0E0A.
+/// rtw8822c.c:1987: composed of CCK_CONT_TX 0x0A, OFDM_CONT_TX 0x0E,
+/// CCK_TRX 0x0A and OFDM_TRX 0x10 at their shift positions: 0x100A0E0A.
 pub const WLAN_SIFS_CFG: u32 = 0x100A_0E0A; // rtw8822c.c:1987
-/// rtw8822c.c:1992 — CCK_DUR_TUNE 0x0A | OFDM_DUR_TUNE 0x10 << 8.
+/// rtw8822c.c:1992: CCK_DUR_TUNE 0x0A | OFDM_DUR_TUNE 0x10 << 8.
 pub const WLAN_SIFS_DUR_TUNE: u16 = 0x100A; // rtw8822c.c:1992
-/// rtw8822c.c:1995 — TBTT_PROHIBIT 0x04 | TBTT_HOLD_TIME 0x64 << 8.
+/// rtw8822c.c:1995: TBTT_PROHIBIT 0x04 | TBTT_HOLD_TIME 0x64 << 8.
 pub const WLAN_TBTT_TIME: u32 = 0x0000_6404; // rtw8822c.c:1995
 pub const WLAN_NAV_CFG: u32 = 0x001B_0005; // rtw8822c.c:1998
 pub const WLAN_RX_TSF_CFG: u16 = 0x3030; // rtw8822c.c:1999
 pub const MAC_CLK_SPEED: u8 = 80; // rtw8822c.c:2001
 
-// ── Feldmakros aus reg.h, als Funktionen ─────────────────────────
-// In C sind das `#define NAME(x) (((x) & MASK) << SHIFT)`. Als Funktion
-// bleibt die Maske stehen, wo sie in Linux steht — ein direkt geschriebener
-// Zahlenwert waere die Rechnung von HEUTE und nicht die Regel.
+// ── Field macros from reg.h, as functions ────────────────────────
+// In C these are `#define NAME(x) (((x) & MASK) << SHIFT)`. As functions
+// the mask stays where Linux has it, rather than a precomputed value.
 
-/// reg.h:233-258 — dieselbe Form fuer alle sechs Sendequeues.
+/// reg.h:233-258: the same form for all six TX queues.
 #[inline]
 pub fn bit_txdma_queue_map(x: u8, shift: u32) -> u16 {
     ((x as u16) & BIT_MASK_TXDMA_QUEUE_MAP) << shift
@@ -517,7 +514,7 @@ pub fn bit_rxgck_cck_fifothr(x: u32) -> u32 {
     (x & 0x3) << BIT_SHIFT_RXGCK_CCK_FIFOTHR
 }
 
-/// reg.h:869 `BIT_SET_RXPSF_PKTLENTHR(x, v)` — Feld loeschen, dann setzen.
+/// reg.h:869 `BIT_SET_RXPSF_PKTLENTHR(x, v)`: clear the field, then set it.
 #[inline]
 pub fn bit_set_rxpsf_pktlenthr(x: u16, v: u16) -> u16 {
     (x & !(BIT_MASK_RXPSF_PKTLENTHR << BIT_SHIFT_RXPSF_PKTLENTHR))
@@ -532,7 +529,7 @@ pub fn bit_set_rxpsf_errthr(x: u16, v: u16) -> u16 {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 3c: rtw8822c_phy_set_param
+// rtw8822c_phy_set_param
 // ════════════════════════════════════════════════════════════════
 
 // ── rtw8822c_header_file_init (rtw8822c.h:214-219, 312-314) ──────
@@ -545,7 +542,7 @@ pub const REG_ENCCK: u32 = 0x1C3C; // rtw8822c.h:312
 pub const BIT_CCK_BLK_EN: u32 = 1 << 1; // rtw8822c.h:313
 pub const BIT_CCK_OFDM_BLK_EN: u32 = 0x3; // rtw8822c.h:314  GENMASK(1, 0)
 
-// ── Sende-/Empfangspfade (rtw8822c.h, main.h:141-147) ────────────
+// ── TX/RX paths (rtw8822c.h, main.h:141-147) ─────────────────────
 pub const BB_PATH_A: u8 = 1 << 0; // main.h:142
 pub const BB_PATH_B: u8 = 1 << 1; // main.h:143
 pub const BB_PATH_AB: u8 = BB_PATH_A | BB_PATH_B; // main.h:147
@@ -562,7 +559,7 @@ pub const REG_ANTMAP0: u32 = 0x0820; // rtw8822c.h:190
 pub const REG_TXLGMAP: u32 = 0x1E2C; // rtw8822c.h:335
 pub const REG_RXIGI: u32 = 0x1D70; // rtw8822c.h:329
 
-// ── DPD, Quarz (reg.h) ───────────────────────────────────────────
+// ── DPD, crystal (reg.h) ─────────────────────────────────────────
 pub const REG_DIS_DPD: u32 = 0x0A70; // reg.h:657
 pub const DIS_DPD_MASK: u32 = 0x3ff; // reg.h:658  GENMASK(9, 0)
 pub const DIS_DPD_RATEALL: u32 = 0x3ff; // reg.h:669
@@ -585,13 +582,13 @@ pub const REG_DCKB_I_1: u32 = 0x41C0; // rtw8822c.h:360
 pub const REG_DCKB_Q_0: u32 = 0x41D8; // rtw8822c.h:361
 pub const REG_DCKB_Q_1: u32 = 0x41DC; // rtw8822c.h:362
 
-// ── RF-Register und ihre Felder (rtw8822c.h:384-406) ─────────────
+// ── RF registers and their fields (rtw8822c.h:384-406) ───────────
 pub const RF_PA: u32 = 0x60; // rtw8822c.h:384
 pub const RF_PABIAS_2G_MASK: u32 = 0xf000; // rtw8822c.h:385  GENMASK(15, 12)
 pub const RF_PABIAS_5G_MASK: u32 = 0xf0000; // rtw8822c.h:386  GENMASK(19, 16)
 pub const RF_THEMAL_MASK: u32 = 0xf0000; // rtw8822c.h:406  GENMASK(19, 16)
 
-// ── Werkskalibrierung in der PHYSISCHEN efuse (rtw8822c.h:405-428) ──
+// ── Factory calibration in the physical efuse (rtw8822c.h:405-428) ──
 pub const PPG_THERMAL_B: u16 = 0x1B0; // rtw8822c.h:405
 pub const PPG_2GH_TXAB: u16 = 0x1D2; // rtw8822c.h:407
 pub const PPG_2G_A_MASK: u8 = 0x0f; // rtw8822c.h:408  GENMASK(3, 0)
@@ -615,7 +612,7 @@ pub const PPG_5GL1_TXB: u16 = 0x1EB; // rtw8822c.h:425
 pub const PPG_5GL1_TXA: u16 = 0x1EC; // rtw8822c.h:426
 pub const PPG_2GM_TXAB: u16 = 0x1EE; // rtw8822c.h:427
 pub const PPG_THERMAL_A: u16 = 0x1EF; // rtw8822c.h:428
-/// efuse.h:13 — und zugleich der Wert, den ein LEERES efuse-Byte hat.
+/// efuse.h:13; also the value of an unprogrammed efuse byte.
 pub const EFUSE_READ_FAIL: u8 = 0xff;
 
 // ── Adaptivity / EDCCA ───────────────────────────────────────────
@@ -624,12 +621,12 @@ pub const BIT_DIS_EDCCA: u32 = 1 << 15; // reg.h:464
 pub const BIT_EDCCA_MSK_CNTDOWN_EN: u32 = 1 << 11; // reg.h:470
 pub const REG_EDCCA_DECISION: u32 = 0x0844; // rtw8822c.h:193
 pub const BIT_EDCCA_OPTION: u32 = 0x6000_0000; // rtw8822c.h:194  GENMASK(30, 29)
-/// rtw8822c.c:5287-5294 `rtw8822c_edcca_th` — Adresse, Maske und der
-/// Versatz, der auf den Schwellwert addiert wird.
+/// rtw8822c.c:5287-5294 `rtw8822c_edcca_th`: address, mask and the offset
+/// added to the threshold.
 pub const EDCCA_TH_L2H: (u32, u32, u8) = (0x84c, 0x00ff_0000, 0x80);
 pub const EDCCA_TH_H2L: (u32, u32, u8) = (0x84c, 0xff00_0000, 0x80);
 
-// ── Beamforming-Grundeinstellung (bf.h) ──────────────────────────
+// ── Beamforming baseline (bf.h) ──────────────────────────────────
 pub const REG_TXBF_CTRL: u32 = 0x042C; // bf.h:8
 pub const REG_NDPA_OPT_CTRL: u32 = 0x045F; // bf.h:10
 pub const REG_MU_TX_CTL: u32 = 0x14C0; // bf.h:19
@@ -646,7 +643,7 @@ pub const BIT_MASK_R_MU_TABLE_VALID: u32 = 0x3f; // bf.h:38  GENMASK(5, 0)
 pub const BIT_MASK_CSI_RATE: u32 = 0x3f00_0000; // bf.h:40  GENMASK(29, 24)
 pub const DESC_RATE6M: u32 = 0x04; // main.h:255
 
-// ── Falschalarm-Zaehler (rtw8822c.h:243-347) ─────────────────────
+// ── False alarm counters (rtw8822c.h:243-347) ────────────────────
 pub const REG_CCK_FACNT: u32 = 0x1A5C; // rtw8822c.h:245
 pub const REG_OFDM_FACNT1: u32 = 0x2D04; // rtw8822c.h:343
 pub const REG_OFDM_FACNT2: u32 = 0x2D08; // rtw8822c.h:344
@@ -661,12 +658,12 @@ pub const REG_CNT_CTRL: u32 = 0x1EB4; // rtw8822c.h:339
 pub const BIT_ALL_CNT_RST: u32 = 1 << 25; // rtw8822c.h:340
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4a: der Rest von rtw_power_on und rtw_core_start
+// The rest of rtw_power_on and rtw_core_start
 // ════════════════════════════════════════════════════════════════
 
-// ── H2C-MAILBOX (reg.h:291-307) ──────────────────────────────────
-// Der eine von ZWEI H2C-Wegen: acht Byte je Kommando, vier Postfaecher
-// im Umlauf. Die Koexistenz redet hierueber mit der Firmware.
+// ── H2C mailbox (reg.h:291-307) ──────────────────────────────────
+// One of the two H2C paths: eight bytes per command, four mailboxes in
+// rotation. Coexistence talks to the firmware this way.
 pub const REG_HMETFR: u32 = 0x01CC; // reg.h:291
 pub const REG_HMEBOX0: u32 = 0x01D0; // reg.h:298
 pub const REG_HMEBOX1: u32 = 0x01D4; // reg.h:299
@@ -677,10 +674,9 @@ pub const REG_HMEBOX1_EX: u32 = 0x01F4; // reg.h:305
 pub const REG_HMEBOX2_EX: u32 = 0x01F8; // reg.h:306
 pub const REG_HMEBOX3_EX: u32 = 0x01FC; // reg.h:307
 
-// ── H2C-PAKET (fw.h) ─────────────────────────────────────────────
-// Der ANDERE Weg: 32 Byte durch die H2C-Queue, also durch den Ring,
-// dessen Adresse `init_h2c` in Stufe 3a gesetzt hat. General- und
-// PHYDM-Info gehen hier durch.
+// ── H2C packet (fw.h) ────────────────────────────────────────────
+// The other path: 32 bytes through the H2C queue, the ring whose address
+// `init_h2c` set. General and PHYDM info go this way.
 pub const H2C_PKT_SIZE: usize = 32; // fw.h:8
 pub const H2C_PKT_HDR_SIZE: u16 = 8; // fw.h:9
 pub const H2C_PKT_CMD_ID: u32 = 0xFF; // fw.h:386
@@ -690,7 +686,7 @@ pub const H2C_PKT_PHYDM_INFO: u32 = 0x11; // fw.h:390
 pub const FW_RF_2T2R: u8 = 0x2; // fw.h:134
 pub const FW_RF_1T1R: u8 = 0x4; // fw.h:136
 
-// ── Sicherheits-Engine (sec.h) ───────────────────────────────────
+// ── Security engine (sec.h) ──────────────────────────────────────
 pub const RTW_SEC_CONFIG: u32 = 0x0680; // sec.h:11
 pub const RTW_SEC_TX_UNI_USE_DK: u16 = 1 << 0; // sec.h:19
 pub const RTW_SEC_RX_UNI_USE_DK: u16 = 1 << 1; // sec.h:20
@@ -700,11 +696,10 @@ pub const RTW_SEC_TX_BC_USE_DK: u16 = 1 << 6; // sec.h:23
 pub const RTW_SEC_RX_BC_USE_DK: u16 = 1 << 7; // sec.h:24
 pub const RTW_SEC_ENGINE_EN: u16 = 1 << 9; // sec.h:26
 
-// ── Empfangsfilter (reg.h:502-533) ───────────────────────────────
-// `hal->rcr` wird in main.c:2183 gesetzt und in `rtw_core_start`
-// (main.c:1526) NOCH EINMAL ins Register geschrieben — nach allem, was
-// `rtw8822c_mac_init` und `rtw_drv_info_cfg` dort hinterlassen haben.
-// Der Kommentar dort lautet „rcr reset after powered on".
+// ── RX filter (reg.h:502-533) ────────────────────────────────────
+// `hal->rcr` is set in main.c:2183 and written to the register again in
+// `rtw_core_start` (main.c:1526), after `rtw8822c_mac_init` and
+// `rtw_drv_info_cfg`. The comment there reads "rcr reset after powered on".
 pub const BIT_APP_FCS: u32 = 1 << 31; // reg.h:503
 pub const BIT_APP_MIC: u32 = 1 << 30; // reg.h:504
 pub const BIT_APP_ICV: u32 = 1 << 29; // reg.h:505
@@ -715,17 +710,16 @@ pub const BIT_AB: u32 = 1 << 3; // reg.h:531
 pub const BIT_AM: u32 = 1 << 2; // reg.h:532
 pub const BIT_APM: u32 = 1 << 1; // reg.h:533
 
-// ── Koexistenz (reg.h) ───────────────────────────────────────────
+// ── Coexistence (reg.h) ──────────────────────────────────────────
 pub const REG_WIFI_BT_INFO: u32 = 0x00AA; // reg.h:184
 pub const BIT_BT_INT_EN: u16 = 1 << 15; // reg.h:185
 pub const REG_BT_COEX_TABLE_H: u32 = 0x06CC; // reg.h:573
 pub const H2C_CMD_QUERY_BT_INFO: u32 = 0x61; // fw.h:568
 pub const H2C_CMD_BT_WIFI_CONTROL: u32 = 0x69; // fw.h:573
 
-// ── Koexistenz: Zustaende (coex.h, Aufzaehlungen ohne Zahlen) ────
-// Sie stehen in `enum` ohne Wert, also zaehlt die POSITION. Abgezaehlt
-// aus coex.h:74-85 bzw. 129-138 — und darum ist die Quellzeile hier
-// wichtiger als sonst.
+// ── Coexistence: states (coex.h, enums without values) ───────────
+// These are enum entries without explicit values, so the position counts.
+// Counted from coex.h:74-85 and 129-138.
 pub const COEX_SET_ANT_INIT: u8 = 0; // coex.h:75
 pub const COEX_SET_ANT_WONLY: u8 = 1; // coex.h:76
 pub const COEX_SET_ANT_WOFF: u8 = 2; // coex.h:77
@@ -738,7 +732,7 @@ pub const COEX_SWITCH_CTRL_BY_BBSW: u8 = 0; // coex.h:130
 pub const COEX_SWITCH_CTRL_BY_PTA: u8 = 1; // coex.h:131
 pub const COEX_SWITCH_CTRL_BY_BT: u8 = 4; // coex.h:134
 pub const COEX_SWITCH_CTRL_MAX: u8 = 6; // coex.h:137
-pub const COEX_SWITCH_TO_MAX: u8 = 5; // coex.h:126 — fuenf Eintraege, nicht sieben
+pub const COEX_SWITCH_TO_MAX: u8 = 5; // coex.h:126, five entries, not seven
 
 pub const COEX_GNT_SET_HW_PTA: u32 = 0x0; // coex.h:114
 pub const COEX_GNT_SET_SW_LOW: u32 = 0x1; // coex.h:115
@@ -768,7 +762,7 @@ pub const COEX_WLPRI_TX_RSP: u8 = 3; // coex.h:265
 pub const COEX_WLPRI_TX_BEACON: u8 = 4; // coex.h:266
 pub const COEX_WLPRI_TX_BEACONQ: u8 = 27; // coex.h:269
 
-// ── Koexistenz: Register ─────────────────────────────────────────
+// ── Coexistence: registers ───────────────────────────────────────
 pub const REG_BT_COEX_TABLE0: u32 = 0x06C0; // reg.h:570
 pub const REG_BT_COEX_TABLE1: u32 = 0x06C4; // reg.h:571
 pub const REG_BT_COEX_BRK_TABLE: u32 = 0x06C8; // reg.h:572
@@ -810,7 +804,7 @@ pub const REG_IGN_GNTBT4: u32 = 0x4160; // reg.h:940
 pub const COEX_WLINK_5G: u8 = 0x3; // coex.h:175
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 4c: rtw_set_channel
+// rtw_set_channel
 // ════════════════════════════════════════════════════════════════
 
 // ── rtw8822c_set_channel_bb ──────────────────────────────────────
@@ -866,7 +860,7 @@ pub const BIT_RFMOD_40M: u32 = 1 << 7; // reg.h:550
 pub const MAC_CLK_HW_DEF_80M: u32 = 0; // reg.h:269
 pub const BIT_SHIFT_MAC_CLK_SEL: u32 = 20; // reg.h:268
 
-// ── Unterkanallage (main.h:106-112) ──────────────────────────────
+// ── Subchannel position (main.h:106-112) ─────────────────────────
 pub const RTW_SC_DONT_CARE: u8 = 0; // main.h:106
 pub const RTW_SC_20_UPPER: u8 = 1; // main.h:107
 pub const RTW_SC_20_LOWER: u8 = 2; // main.h:108
@@ -879,7 +873,7 @@ pub const MASKBYTE0: u32 = 0xff; // phy.h:172
 pub const MASKHWORD: u32 = 0xffff0000; // phy.h:176
 pub const MASKDWORD: u32 = 0xffffffff; // phy.h:178
 
-// ── DPD-Abzug je Rate (reg.h:659-668) ────────────────────────────
+// ── DPD disable per rate (reg.h:659-668) ─────────────────────────
 pub const DIS_DPD_RATE6M: u16 = 1 << 0; // reg.h:659
 pub const DIS_DPD_RATE9M: u16 = 1 << 1; // reg.h:660
 pub const DIS_DPD_RATEMCS0: u16 = 1 << 2; // reg.h:661
@@ -901,9 +895,9 @@ pub const BIT_MASK_TXSC_40M: u8 = 0xf; // reg.h:261
 pub const BIT_SHIFT_TXSC_20M: u32 = 0; // reg.h:264
 pub const BIT_MASK_TXSC_20M: u8 = 0xf; // reg.h:265
 
-// ── Stufe 5b: der Sendeweg ───────────────────────────────────────
-// mac80211.c:108-115 `rtw_vif_port[0]`. Wir fahren nur Port 0 — Linux
-// vergibt den ersten freien, und bei EINER Schnittstelle ist das die Null.
+// ── TX path ──────────────────────────────────────────────────────
+// mac80211.c:108-115 `rtw_vif_port[0]`. Only port 0 is used; Linux
+// assigns the first free one, which is 0 for a single interface.
 pub const PORT0_MAC_ADDR: u32 = 0x0610;
 pub const PORT0_BSSID: u32 = 0x0618;
 pub const PORT0_NET_TYPE: u32 = 0x0100; // = REG_CR
@@ -926,15 +920,15 @@ pub const RTW_NET_AD_HOC: u32 = 1;
 pub const RTW_NET_MGD_LINKED: u32 = 2;
 pub const RTW_NET_AP_MODE: u32 = 3;
 
-// reg.h:478-480 stehen schon oben (REG_BCN_CTRL, BIT_DIS_TSF_UDT,
-// BIT_EN_BCN_FUNCTION) — dort als u8, weil `rtw_write8_mask` sie schreibt.
+// reg.h:478-480 are defined above (REG_BCN_CTRL, BIT_DIS_TSF_UDT,
+// BIT_EN_BCN_FUNCTION) as u8, because `rtw_write8_mask` writes them.
 
 /// fw.h:564 `H2C_CMD_SCAN`
 pub const H2C_CMD_SCAN: u32 = 0x59;
 /// fw.h:151 `FW_FEATURE_NOTIFY_SCAN`
 pub const FW_FEATURE_NOTIFY_SCAN: u32 = 1 << 6;
 
-// ── Stufe 5d: die RF-Kalibrierung ────────────────────────────────
+// ── RF calibration ───────────────────────────────────────────────
 /// rtw8822c.h:21 `IQK_DONE_8822C`
 pub const IQK_DONE_8822C: u8 = 0xaa;
 /// rtw8822c.h:256-264
@@ -954,16 +948,14 @@ pub const BIT_RPT_CIP_STATUS: u32 = 0xff; // GENMASK(7, 0)
 /// reg.h:163-164
 pub const REG_PMC_DBG_CTRL1: u32 = 0xa8;
 pub const BITS_PMC_BT_IQK_STS: u32 = 0x0060_0000; // GENMASK(22, 21)
-// reg.h:425-426 REG_ARFR4/BIT_WL_RFK stehen schon oben.
+// reg.h:425-426 REG_ARFR4/BIT_WL_RFK are defined above.
 /// fw.h:574 `H2C_CMD_WIFI_CALIBRATION`
 pub const H2C_CMD_WIFI_CALIBRATION: u32 = 0x6d;
 /// fw.h:391 `H2C_PKT_IQK`
 pub const H2C_PKT_IQK: u8 = 0x0E;
 
-// ── Stufe 5d: TXGAPK (rtw8822c.c:1191-1823) ─────────────────────
+// ── TXGAPK (rtw8822c.c:1191-1823) ────────────────────────────────
 
-// NICHT GEFUNDEN — von Hand nachsehen:
-//   BITS_RFC_DIRECT (Ausdruck: (BIT(31) | BIT(30)))
 pub const REG_RFTXEN_GCK_A: u32 = 0x1864; // rtw8822c.h:201
 pub const REG_RFTXEN_GCK_B: u32 = 0x4164; // rtw8822c.h:334
 pub const BIT_RFTXEN_GCK_FORCE_ON: u32 = 1 << 31; // rtw8822c.h:202
@@ -1064,7 +1056,7 @@ pub const REG_CCA_OFF: u32 = 0x1d58; // rtw8822c.h:306
 pub const BIT_CCA_ON_BY_PW: u32 = 0x00000ff8; // rtw8822c.h:307  GENMASK(11, 3)
 pub const BITS_RFC_DIRECT: u32 = 0xc0000000; // reg.h:36  (BIT(31) | BIT(30))
 
-// ── Stufe 5d: DPK (rtw8822c.c:3171-4186) ────────────────────────
+// ── DPK (rtw8822c.c:3171-4186) ───────────────────────────────────
 pub const BIT_DPD_CLK: u32 = 0x000000f0; // rtw8822c.h:273  GENMASK(7, 4)
 pub const DPK_RF_REG_NUM: u32 = 7; // main.h:1575
 pub const DPK_BB_REG_NUM: u32 = 18; // main.h:1577
@@ -1106,12 +1098,12 @@ pub const MASKBYTE3: u32 = 0xff000000; // phy.h:156
 pub const BIT_RPT_DGAIN: u32 = 0x0fff0000; // rtw8822c.h:279  GENMASK(27, 16)
 pub const MASKBYTE1: u32 = 0xff00; // phy.h:154
 
-/// main.h:99 `RTW_BAND_2G = BIT(NL80211_BAND_2GHZ)` — `NL80211_BAND_2GHZ`
-/// ist 0, also BIT(0). Der Name steht in einem anderen Baum (cfg80211),
-/// deshalb hier ausgerechnet statt erzeugt.
+/// main.h:99 `RTW_BAND_2G = BIT(NL80211_BAND_2GHZ)`; `NL80211_BAND_2GHZ`
+/// is 0, so BIT(0). The name lives in another tree (cfg80211), hence
+/// computed here rather than generated.
 pub const RTW_BAND_2G_MASK: u32 = 1 << 0;
 
-// ── Stufe 5e: Verbinden ─────────────────────────────────────────
+// ── Association ──────────────────────────────────────────────────
 pub const H2C_CMD_MEDIA_STATUS_RPT: u32 = 0x01; // fw.h:484
 pub const C2H_CCX_TX_RPT: u32 = 0x03; // fw.h:51
 pub const C2H_BT_INFO: u32 = 0x09; // fw.h:51
@@ -1125,7 +1117,7 @@ pub const C2H_ADAPTIVITY: u32 = 0x37; // fw.h:51
 pub const C2H_SCAN_RESULT: u32 = 0x38; // fw.h:51
 pub const C2H_HALMAC: u32 = 0xff; // fw.h:51
 
-// ── Stufe 5f: Ratenanpassung (main.c:1117-1240) ─────────────────
+// ── Rate adaptation (main.c:1117-1240) ───────────────────────────
 pub const IEEE80211_HT_CAP_SGI_20: u32 = 0x0020; // ../../../../../include/linux/ieee80211.h:1917
 pub const IEEE80211_HT_CAP_SGI_40: u32 = 0x0040; // ../../../../../include/linux/ieee80211.h:1918
 pub const IEEE80211_HT_CAP_RX_STBC: u32 = 0x0300; // ../../../../../include/linux/ieee80211.h:1920
@@ -1191,7 +1183,7 @@ pub const H2C_CMD_DEFAULT_PORT: u32 = 0x2c; // fw.h:487
 pub const RTW_H2C_DEFAULT_PORT_W0_PORTID: u32 = 0x0000ff00; // fw.h:109  GENMASK(15, 8)
 pub const RTW_H2C_DEFAULT_PORT_W0_MACID: u32 = 0x00ff0000; // fw.h:110  GENMASK(23, 16)
 
-// ── Stufe 5f.1: unsere EIGENEN Faehigkeiten (main.c:1580-1640) ──
+// ── Our own capabilities (main.c:1580-1640) ──────────────────────
 pub const IEEE80211_HT_CAP_MAX_AMSDU: u32 = 0x0800; // ../../../../../include/linux/ieee80211.h:1923
 pub const IEEE80211_HT_CAP_RX_STBC_SHIFT: u32 = 8; // ../../../../../include/linux/ieee80211.h:1921
 pub const IEEE80211_HT_CAP_TX_STBC: u32 = 0x0080; // ../../../../../include/linux/ieee80211.h:1919
@@ -1214,8 +1206,8 @@ pub const IEEE80211_VHT_MCS_SUPPORT_0_9: u32 = 2; // ../../../../../include/linu
 pub const IEEE80211_VHT_MCS_NOT_SUPPORTED: u32 = 3; // ../../../../../include/linux/ieee80211.h:2107
 pub const EFUSE_HW_CAP_PTCL_VHT: u32 = 3; // efuse.h:9
 
-// ── Stufe 6a: der Steuerkanal (docs/spec/WIFI_CLASS_ABI.md §4) ───
-// Abwaerts (Manager -> Treiber)
+// ── Control channel (docs/spec/WIFI_CLASS_ABI.md §4) ─────────────
+// Downstream (manager -> driver)
 pub const CMD_SCAN: u8 = 0x01;
 pub const CMD_CONNECT: u8 = 0x02;
 pub const CMD_DISCONNECT: u8 = 0x03;
@@ -1224,7 +1216,7 @@ pub const CMD_TX_EAPOL: u8 = 0x05;
 pub const CMD_TX_MGMT: u8 = 0x06;
 pub const CMD_ASSOCIATED: u8 = 0x07;
 pub const CMD_AUTHORIZED: u8 = 0x08;
-// Aufwaerts (Treiber -> Manager)
+// Upstream (driver -> manager)
 pub const EV_SCAN_AP: u8 = 0x81;
 pub const EV_SCAN_DONE: u8 = 0x82;
 pub const EV_READY: u8 = 0x83;
@@ -1234,26 +1226,25 @@ pub const EV_LINK_DOWN: u8 = 0x86;
 pub const EV_CONNECT_FAILED: u8 = 0x87;
 pub const EV_RX_MGMT: u8 = 0x88;
 
-/// 802.2 LLC/SNAP-Kopf vor jedem 802.11-Datenrahmen (RFC 1042).
+/// 802.2 LLC/SNAP header in front of every 802.11 data frame (RFC 1042).
 pub const LLC_SNAP_HDR: [u8; 6] = [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00];
 pub const ETHERTYPE_EAPOL: u16 = 0x888e;
-/// `fc[0] & 0x0c == 0x08` — Datenrahmen.
+/// `fc[0] & 0x0c == 0x08`: data frame.
 pub const DOT11_FC_TYPE_DATA: u8 = 0x08;
-/// `fc[1]` — die Nutzlast ist verschluesselt.
+/// `fc[1]`: the payload is encrypted.
 pub const DOT11_FC_PROTECTED: u8 = 0x40;
-/// Subtyp-Bit: QoS-Daten, zwei Byte QoS-Control hinter dem Kopf.
+/// Subtype bit: QoS data, two bytes of QoS control after the header.
 pub const DOT11_STYPE_QOS: u8 = 0x08;
-/// Subtyp-Bit: Null und QoS-Null tragen KEINEN Rumpf.
+/// Subtype bit: null and QoS null carry no body.
 pub const DOT11_STYPE_NODATA: u8 = 0x04;
-/// 802.11 §9.2.4.1 — das ganze erste Byte: Protokollfassung 0, Typ
-/// VERWALTUNG (00), Subtyp 12 bzw. 10. Ein Deauth ist deshalb GENAU
-/// `0xc0` und nicht eine Maske: `rx_to_8023` filtert in seiner ersten
-/// Zeile auf Daten, und ohne diese zwei Werte faellt ein Rauswurf
-/// lautlos durch.
+/// 802.11 §9.2.4.1: the whole first byte, protocol version 0, type
+/// management (00), subtype 12 resp. 10. A deauth is therefore exactly
+/// `0xc0`, not a mask; `rx_to_8023` filters for data on its first line,
+/// so without these two values a deauth would pass unnoticed.
 pub const DOT11_FC_DEAUTH: u8 = 0xc0;
 pub const DOT11_FC_DISASSOC: u8 = 0xa0;
-/// docs/spec/WIFI_CLASS_ABI.md §4b — `EV_LINK_DOWN` traegt einen Grund:
-/// 0 = angefordert, 1 = Deauth, 2 = verloren.
+/// docs/spec/WIFI_CLASS_ABI.md §4b: `EV_LINK_DOWN` carries a reason:
+/// 0 = requested, 1 = deauth, 2 = lost.
 pub const LINK_DOWN_REQUESTED: u8 = 0;
 pub const LINK_DOWN_DEAUTH: u8 = 1;
 pub const LINK_DOWN_LOST: u8 = 2;
@@ -1272,10 +1263,8 @@ pub const DESC_RATE54M: u32 = 0x0b; // main.h:246
 pub const DESC_RATEMCS7: u32 = 0x13; // main.h:246
 pub const DESC_RATEMCS15: u32 = 0x1b; // main.h:246
 
-// ── rtw_watch_dog_work: die laufende Haelfte (main.c:224-310) ────
-// Linux fuehrt sie ALLE 2 SEKUNDEN, das ganze Leben einer Verbindung
-// lang. Bis 0.26.0 gab es sie bei uns nicht — und drei ihrer Posten
-// sind Sendeseite und haengen an der Temperatur.
+// ── rtw_watch_dog_work: the runtime half (main.c:224-310) ────────
+// Linux runs it every two seconds for the lifetime of a connection.
 pub const RTW_WATCH_DOG_DELAY_MS: u64 = 2000; // main.h:30  HZ * 2
 pub const RTW_TP_SHIFT: u32 = 18; // main.h:41  bytes/2s --> Mbps
 pub const RTW_LPS_THRESHOLD: u32 = 50; // ps.h:8
@@ -1294,7 +1283,7 @@ pub const DIG_CVRG_MAX: u32 = 0x2a; // phy.c:368
 pub const DIG_CVRG_MID: u32 = 0x26; // phy.c:369
 pub const DIG_CVRG_MIN: u32 = 0x1c; // phy.c:370
 pub const DIG_RSSI_GAIN_OFFSET: u32 = 15; // phy.c:371
-/// rtw8822c.c:5355 `.dig_min` — die Untergrenze DIESES Chips.
+/// rtw8822c.c:5355 `.dig_min`: this chip's lower bound.
 pub const RTW8822C_DIG_MIN: u8 = 0x20; // rtw8822c.c:5355
 
 // ── rtw_phy_get_rssi_level (phy.c:292-309) ───────────────────────
@@ -1335,7 +1324,7 @@ pub const CFO_TRK_ADJ_TH: i32 = 10; // rtw8822c.h:165
 pub const RTW_PWR_TRK_TBL_SZ: usize = 30; // main.h:1127
 pub const RTW_PWR_TRK_5G_NUM: usize = 3; // main.h:1125
 pub const PWR_TRACK_MASK: u32 = 0x7f; // rtw8822c.c:4413
-/// rtw8822c.c:5387-5388 — beide 8.
+/// rtw8822c.c:5387-5388: both 8.
 pub const RTW8822C_IQK_THRESHOLD: u8 = 8; // rtw8822c.c:5387
 pub const RTW8822C_LCK_THRESHOLD: u8 = 8; // rtw8822c.c:5388
 /// rtw8822c.c:5362 `.path_div_supported = true`
@@ -1386,7 +1375,7 @@ pub const FW_FEATURE_ADAPTIVITY: u32 = 1 << 7; // fw.h:144
 /// rtw8822c.c:5359 `.c2h_ra_report_size = 7`
 pub const C2H_RA_REPORT_SIZE: usize = 7; // rtw8822c.c:5359
 
-// ── TX-Report (tx.c:166-260) und Firmware-Absturz (fw.c:383-390) ──
+// ── TX report (tx.c:166-260) and firmware crash (fw.c:383-390) ───
 /// tx.h:10 `RTW_TX_PROBE_TIMEOUT msecs_to_jiffies(500)`
 pub const RTW_TX_PROBE_TIMEOUT_MS: u64 = 500; // tx.h:10
 /// tx.h:37 `RTW_TX_DESC_W2_SPE_RPT BIT(19)`
@@ -1401,21 +1390,20 @@ pub const CCX_REPORT_V0_STATUS_MASK: u8 = 0xc0; // fw.h:371
 pub const REG_MCU_TST_CFG: u32 = 0x84; // reg.h:157
 pub const VAL_FW_TRIGGER: u32 = 0x1; // reg.h:158
 
-/// fw.h:67 `C2H_CCX_RPT` — die Sendequittung als UNTERkommando von
-/// `C2H_HALMAC`, mit der V1-Aufteilung. rtw88 hat ZWEI Wege dafuer, und
-/// welchen eine Firmware nimmt, sagt nur der Geraetelauf.
+/// fw.h:67 `C2H_CCX_RPT`: the TX report as a subcommand of `C2H_HALMAC`,
+/// with the V1 layout. rtw88 has two paths for it, and which one a
+/// firmware uses is not documented.
 pub const C2H_CCX_RPT: u32 = 0x0f; // fw.h:67
 pub const CCX_REPORT_V1_SEQNUM_OFF: usize = 8; // fw.h:372
 pub const CCX_REPORT_V1_STATUS_OFF: usize = 9; // fw.h:373
 
-// ── Der Zensus der Verwaltungsrahmen ─────────────────────────────
-// 802.11 §9.2.4.1: Typ 00 = Verwaltung, der Subtyp steht in Bit 7:4.
+// ── Management frame census ──────────────────────────────────────
+// 802.11 §9.2.4.1: type 00 = management, the subtype is in bits 7:4.
 pub const DOT11_FC_TYPE_MGMT: u8 = 0x00;
 pub const DOT11_FC_TYPE_MASK: u8 = 0x0c;
-/// §9.4.1.11 Kategorie 3 = Block Ack, Aktion 0 = ADDBA Request.
-/// **Das ist der Rahmen, mit dem ein AP eine Aggregation ERBITTET** —
-/// und in rtw88 beantwortet ihn mac80211, nicht der Treiber
-/// (`IEEE80211_AMPDU_RX_START` ist dort ein leeres `break`).
+/// §9.4.1.11 category 3 = block ack, action 0 = ADDBA request: the frame
+/// an AP uses to request aggregation. In rtw88 mac80211 answers it, not
+/// the driver (`IEEE80211_AMPDU_RX_START` is an empty `break` there).
 pub const DOT11_ACTION_CAT_BA: u8 = 3;
 pub const DOT11_ACTION_ADDBA_REQ: u8 = 0;
 pub const DOT11_ACTION_ADDBA_RESP: u8 = 1;
@@ -1429,6 +1417,6 @@ pub const ADDBA_PARAM_TID_MASK: u16 = 0x003C; // ieee80211.h:2034
 pub const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0; // ieee80211.h:2035
 /// `WLAN_STATUS_SUCCESS`, ieee80211.h:3536
 pub const WLAN_STATUS_SUCCESS: u16 = 0; // ieee80211.h:3536
-/// Der Verwaltungsrahmen-Subtyp 13 (Action) im ersten Byte:
-/// Protokollfassung 0, Typ 00, Subtyp 1101.
+/// Management subtype 13 (action) in the first byte: protocol version 0,
+/// type 00, subtype 1101.
 pub const DOT11_FC_ACTION: u8 = 0xd0;

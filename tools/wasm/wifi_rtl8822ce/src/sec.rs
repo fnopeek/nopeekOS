@@ -1,8 +1,7 @@
-//! `sec.c` aus Linux 6.18.26 rtw88 — nur `rtw_sec_enable_sec_engine`.
+//! `sec.c` from Linux 6.18.26 rtw88: the security engine and the key CAM.
 //!
-//! Der Rest von sec.c (Schluessel in die CAM schreiben, `rtw_sec_write_cam`,
-//! `rtw_sec_clear_cam`) haengt an einer VERBINDUNG und gehoert zu der Stufe,
-//! die eine aufbaut. Hier steht, was `rtw_core_start` beim Anlaufen tut.
+//! `enable_sec_engine` is what `rtw_core_start` does at bring-up; the CAM
+//! functions are used once a connection installs keys.
 #![allow(dead_code)]
 
 use crate::host;
@@ -10,8 +9,8 @@ use crate::regs::*;
 
 /// sec.c `rtw_sec_enable_sec_engine`.
 ///
-/// `sec->default_key_search` wird in derselben Funktion auf `true` gesetzt
-/// („default use default key search for now"), also gilt der Zweig immer.
+/// The same function sets `sec->default_key_search = true` ("default use
+/// default key search for now"), so the branch always applies.
 pub fn enable_sec_engine(h: i32) {
     let ctrl_reg = host::r16(h, REG_CR) | RTW_SEC_ENGINE_EN;
     host::w16(h, REG_CR, ctrl_reg);
@@ -25,10 +24,10 @@ pub fn enable_sec_engine(h: i32) {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Stufe 6a: der Schluesselspeicher (sec.c:24-100)
+// Key CAM (sec.c:24-100)
 // ════════════════════════════════════════════════════════════════
 
-/// sec.h:20-27 `struct rtw_cam_entry` — ein Platz im Schluesselspeicher.
+/// sec.h:20-27 `struct rtw_cam_entry`: one key CAM slot.
 #[derive(Clone, Copy)]
 pub struct CamEntry {
     pub valid: bool,
@@ -48,10 +47,9 @@ impl Default for CamEntry {
 
 /// sec.c:24-84 `rtw_sec_write_cam`.
 ///
-/// Acht Worte je Platz, RUECKWAERTS geschrieben (`for i = 7; i >= 0`) —
-/// Wort 0 traegt das Gueltig-Bit und geht damit zuletzt hinaus. Wer
-/// vorwaerts schriebe, machte den Platz gueltig, bevor der Schluessel
-/// drin steht.
+/// Eight words per slot, written backwards (`for i = 7; i >= 0`): word 0
+/// carries the valid bit and must go out last, otherwise the slot becomes
+/// valid before the key is in place.
 pub fn write_cam(h: i32, cam: &mut CamEntry, hw_key_idx: u8,
                  hw_key_type: u8, keyidx: u8, group: bool,
                  addr: &[u8; 6], key: &[u8]) {

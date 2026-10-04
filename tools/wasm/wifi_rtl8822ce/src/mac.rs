@@ -1,15 +1,15 @@
-//! `mac.c` aus Linux 6.18.26 rtw88 — Stufe 1: der Strom.
+//! `mac.c` from Linux 6.18.26 rtw88: power sequencing, firmware download,
+//! MAC init and queue flushing.
 //!
-//! Portiert sind, in Aufrufreihenfolge und vollstaendig:
+//! Power path, ported completely and in call order:
 //! `rtw_mac_pre_system_cfg` · `do_pwr_poll_cmd` · `rtw_pwr_cmd_polling` ·
 //! `rtw_sub_pwr_seq_parser` · `rtw_pwr_seq_parser` · `rtw_mac_power_switch` ·
 //! `__rtw_mac_init_system_cfg` · `rtw_mac_init_system_cfg` ·
 //! `rtw_mac_power_on` · `rtw_mac_power_off`.
 //!
-//! **Der 8822C ist WCPU_3081, nicht 8051.** Jede `rtw_chip_wcpu_8051()`-Abzweigung
-//! ist damit statisch falsch — sie steht trotzdem als Konstante da, damit beim
-//! Lesen sichtbar bleibt, dass Linux dort einen zweiten Weg hat und welcher
-//! Zweig hier gilt.
+//! The 8822C is WCPU_3081, not 8051, so every `rtw_chip_wcpu_8051()` branch
+//! is statically false. It is kept as a constant so it stays visible that
+//! Linux has a second path there and which one applies.
 
 use crate::host;
 use crate::pwrseq::*;
@@ -18,13 +18,13 @@ use crate::regs::*;
 /// rtw8822c.c `rtw8822c_hw_spec.wlan_cpu = RTW_WCPU_3081`.
 const WCPU_8051: bool = false;
 
-/// Wir sind PCIe. `rtw_hci_type()` ist bei uns eine Konstante.
+/// PCIe only; `rtw_hci_type()` is a constant here.
 const INTF_MASK: u8 = RTW_PWR_INTF_PCI_MSK;
 
 pub enum PwrErr {
-    /// Linux: `-EALREADY` — der Chip ist schon in dem Zustand, den wir wollen.
+    /// Linux: `-EALREADY`, the chip is already in the requested state.
     Already,
-    /// Linux: `-EBUSY` — ein Polling-Kommando ist ausgelaufen.
+    /// Linux: `-EBUSY`, a polling command timed out.
     Busy,
 }
 
@@ -33,9 +33,9 @@ pub fn pre_system_cfg(h: i32) {
     host::w8(h, REG_RSV_CTRL, 0);
 
     if WCPU_8051 {
-        // Linux setzt hier REG_LDO_SWR_CTRL nach BIT_LDO und kehrt SOFORT
-        // zurueck — der ganze Rest dieser Funktion gilt nur fuer die
-        // 3081-Familie. Fuer den 8822C unerreichbar.
+        // Linux sets REG_LDO_SWR_CTRL from BIT_LDO here and returns at once; the
+        // rest of this function applies only to the 3081 family. Unreachable for
+        // the 8822C.
         return;
     }
 
@@ -69,23 +69,20 @@ pub fn pre_system_cfg(h: i32) {
     host::w32(h, REG_WLRF1, v);
 }
 
-/// mac.c `do_pwr_poll_cmd`. Linux pollt alle 50 us bis
-/// `50 * RTW_PWR_POLLING_CNT` us = **1 s**.
+/// mac.c `do_pwr_poll_cmd`. Linux polls every 50 us for up to
+/// `50 * RTW_PWR_POLLING_CNT` us = 1 s.
 ///
-/// Wir haben keinen 50-us-Schlaf — `npk_sleep` rastert in Millisekunden.
-/// Also wird eng gelesen und die FRIST an `now_us()` gehalten: dieselbe
-/// Gesamtfrist wie Linux, nur ohne den Takt dazwischen. Ein Deckel auf die
-/// Runden gibt es bewusst nicht; die Frist ist die Frist
-/// ([[feedback_a_cap_set_from_a_guess_is_below_the_normal_case]]).
+/// `npk_sleep` has millisecond granularity, so this reads in a tight loop
+/// and enforces the deadline against `now_us()`: the same total deadline
+/// as Linux without the interval. There is deliberately no iteration cap.
 fn do_pwr_poll_cmd(h: i32, addr: u32, mask: u8, target: u8) -> bool {
     let target = target & mask;
     let start = host::now_us();
     let deadline = start + 50 * RTW_PWR_POLLING_CNT as u64;
-    // Eng lesen, solange der Normalfall dauert (Linux pollt alle 50 us und
-    // ist meist nach wenigen Runden durch). Danach wird zwischen den Lesungen
-    // abgegeben: drei Polling-Kommandos gelten auf PCIe, und drei Fristen
-    // zu je einer Sekunde sind sechs Sekunden, in denen sonst niemand auf
-    // diesem Kern drankaeme.
+    // Spin tightly for the normal case (Linux polls every 50 us and is
+    // usually done after a few rounds). After that, yield between reads:
+    // three polling commands apply on PCIe, and three one-second deadlines
+    // would otherwise block this core for seconds.
     const TIGHT_US: u64 = 2000;
     loop {
         if host::r8(h, addr) & mask == target {
@@ -101,21 +98,20 @@ fn do_pwr_poll_cmd(h: i32, addr: u32, mask: u8, target: u8) -> bool {
     }
 }
 
-/// mac.c `rtw_pwr_cmd_polling` — samt dem PCIe-Sonderweg: laeuft das Polling
-/// aus, wird `BIT_PFM_WOWL` getoggelt und EINMAL neu gepollt. Ohne diesen
-/// zweiten Versuch schlaegt die Sequenz auf manchen Boards beim ersten
-/// Kaltstart fehl.
+/// mac.c `rtw_pwr_cmd_polling`, including the PCIe special case: on
+/// timeout, `BIT_PFM_WOWL` is toggled and polled once more. Without this
+/// retry the sequence fails on some boards on the first cold boot.
 fn pwr_cmd_polling(h: i32, cmd: &PwrCmd) -> Result<(), PwrErr> {
-    // `base == RTW_PWR_ADDR_SDIO` haengt in Linux SDIO_LOCAL_OFFSET an. Jede
-    // solche Zeile traegt intf_mask SDIO und wird eine Ebene hoeher schon
-    // aussortiert — auf PCIe ist der Fall unerreichbar.
+    // `base == RTW_PWR_ADDR_SDIO` adds SDIO_LOCAL_OFFSET in Linux. Every such
+    // entry has intf_mask SDIO and is filtered out one level up; unreachable
+    // on PCIe.
     let offset = cmd.offset as u32;
 
     if do_pwr_poll_cmd(h, offset, cmd.mask, cmd.value) {
         return Ok(());
     }
 
-    // PCIe: BIT_PFM_WOWL toggeln und noch einmal.
+    // PCIe: toggle BIT_PFM_WOWL and retry.
     let value = host::r8(h, REG_SYS_PW_CTRL);
     host::w8(h, REG_SYS_PW_CTRL, value | BIT_PFM_WOWL);
     host::w8(h, REG_SYS_PW_CTRL, value & !BIT_PFM_WOWL);
@@ -153,12 +149,10 @@ fn sub_pwr_seq_parser(h: i32, cut_mask: u8, seq: &[PwrCmd]) -> Result<(), PwrErr
             }
             RTW_PWR_CMD_POLLING => pwr_cmd_polling(h, cmd)?,
             RTW_PWR_CMD_DELAY => {
-                // Die vier 8822C-Sequenzen enthalten KEIN DELAY (ausgezaehlt:
-                // 46 WRITE, 4 POLLING, 4 END). Der Zweig steht trotzdem hier,
-                // weil er in `rtw_sub_pwr_seq_parser` steht.
+                // The four 8822C sequences contain no DELAY (46 WRITE, 4 POLLING, 4 END).
+                // The branch is kept because `rtw_sub_pwr_seq_parser` has it.
                 if cmd.value == RTW_PWR_DELAY_US {
-                    // Unter unserer Aufloesung; eine Millisekunde ist die
-                    // kleinste Pause, die wir ehrlich machen koennen.
+                    // Below our resolution; one millisecond is the shortest delay available.
                     host::sleep_ms(1);
                 } else {
                     host::sleep_ms(cmd.offset as u32);
@@ -182,11 +176,11 @@ pub fn pwr_seq_parser(h: i32, cut_version: u8, flow: &[&[PwrCmd]]) -> Result<(),
 
 /// mac.c `rtw_mac_power_switch`
 pub fn mac_power_switch(h: i32, cut_version: u8, pwr_on: bool) -> Result<(), PwrErr> {
-    // rtw_chip_wcpu_3081 gilt fuer den 8822C.
+    // rtw_chip_wcpu_3081 applies to the 8822C.
     if !WCPU_8051 {
         let rpwm = host::r8(h, PCIE_RPWM_ADDR);
-        // Laeuft noch Firmware? Dann den RPWM-Umschalter kippen, damit sie
-        // den Wechsel mitbekommt.
+        // Firmware still running? Then flip the RPWM toggle so it notices the
+        // transition.
         if host::r16(h, REG_MCUFW_CTRL) == MCUFW_CTRL_FW_ALIVE {
             let rpwm = (rpwm ^ BIT_RPWM_TOGGLE) & BIT_RPWM_TOGGLE;
             host::w8(h, PCIE_RPWM_ADDR, rpwm);
@@ -207,10 +201,10 @@ pub fn mac_power_switch(h: i32, cut_version: u8, pwr_on: bool) -> Result<(), Pwr
     pwr_seq_parser(h, cut_version, flow)
 }
 
-/// mac.c `__rtw_mac_init_system_cfg` (der 3081-Weg).
+/// mac.c `__rtw_mac_init_system_cfg` (the 3081 path).
 fn init_system_cfg(h: i32) {
     if WCPU_8051 {
-        return; // `__rtw_mac_init_system_cfg_legacy`, hier unerreichbar
+        return; // `__rtw_mac_init_system_cfg_legacy`, unreachable here
     }
 
     let mut value = host::r32(h, REG_CPU_DMEM_CON);
@@ -232,8 +226,8 @@ fn init_system_cfg(h: i32) {
 
 /// mac.c `rtw_mac_power_on`.
 ///
-/// Der `-EALREADY`-Rueckfall ist kein Sonderfall: nach einem Warmstart steht
-/// der Chip noch an, und dann ist AUS-dann-AN der normale Weg.
+/// The `-EALREADY` fallback is not a special case: after a warm reboot the
+/// chip is still on, and off-then-on is the normal path.
 pub fn mac_power_on(h: i32, cut_version: u8) -> Result<(), PwrErr> {
     pre_system_cfg(h);
 
@@ -257,7 +251,7 @@ pub fn mac_power_off(h: i32, cut_version: u8) {
     let _ = mac_power_switch(h, cut_version, false);
 }
 
-// ── Stufe 2b: der Firmware-Download (mac.c) ──────────────────────
+// ── Firmware download (mac.c) ────────────────────────────────────
 
 use crate::fw::{check_hw_ready, write_data_rsvd_page};
 use crate::pci::Trx;
@@ -273,8 +267,8 @@ struct Backup {
 /// mac.c `DLFW_RESTORE_REG_NUM`
 const DLFW_RESTORE_REG_NUM: usize = 6;
 
-/// util.c `rtw_restore_reg`. mac.c `download_firmware_reg_restore` ist ein
-/// Einzeiler darum herum und faellt deshalb hier mit hinein.
+/// util.c `rtw_restore_reg`. mac.c `download_firmware_reg_restore` is a
+/// one-line wrapper around it and is folded in here.
 fn restore_reg(h: i32, bckp: &[Backup]) {
     for b in bckp {
         match b.len {
@@ -316,9 +310,8 @@ fn wlan_cpu_enable(h: i32, enable: bool) {
     }
 }
 
-/// Felder aus `struct rtw_fw_hdr` (fw.h:20-40), alle little-endian.
-/// `h2c_fmt_ver` liest heute niemand — es entscheidet ab 2c, welches
-/// H2C-Format gilt, und gehoert deshalb schon hier hin.
+/// Fields of `struct rtw_fw_hdr` (fw.h:20-40), all little-endian.
+/// `h2c_fmt_ver` selects the H2C format.
 #[allow(dead_code)]
 pub struct FwHdr {
     pub version: u16,
@@ -492,12 +485,10 @@ fn download_firmware_to_mem(
         }
 
         // mac.c `send_firmware_pkt` -> `send_firmware_pkt_rsvd_page`:
-        // pg_addr = src >> 7. Der USB-Sonderfall (+1 Byte, wenn
-        // (size + TX_DESC_SIZE) auf 512 aufgeht) gilt nur dort, und
-        // `kmemdup` daneben ist Linux-Speicherverwaltung.
-        // Nur das allererste Stueck des ganzen Downloads wird ausgeschuettet
-        // — fuenfzig Stuecke mal zwoelf Register waeren keine Diagnose mehr,
-        // sondern eine Wand.
+        // pg_addr = src >> 7. The USB special case (+1 byte when
+        // (size + TX_DESC_SIZE) is a multiple of 512) applies only there, and the
+        // `kmemdup` is Linux memory management.
+        // Only the very first chunk of the whole download is dumped.
         let verbose = dump_first && first_part && mem_offset == 0;
         if !write_data_rsvd_page(h, trx, stage, (src >> 7) as u16,
                                  &data[from..to], rsvd_boundary, band, verbose) {
@@ -583,12 +574,10 @@ fn download_firmware_end_flow(h: i32) {
 
 /// mac.c `download_firmware_validate`
 ///
-/// Hier wartet nicht die Hardware auf ein Register, sondern WIR auf eine
-/// Firmware, die gerade anlaeuft: `BIT_FW_INIT_RDY` setzt sie selbst,
-/// nachdem `wlan_cpu_enable` ihren Kern gestartet hat. Linux gibt dafuer
-/// 10 ms. Schafft sie das nicht, wird hier NICHT einfach aufgegeben,
-/// sondern weitergemessen — die Zahl sagt, ob die Frist zu knapp ist oder
-/// ob das Bit nie kommt, und das sind zwei verschiedene Fehler.
+/// This waits for firmware that is starting up: it sets `BIT_FW_INIT_RDY`
+/// itself after `wlan_cpu_enable` started its core. Linux allows 10 ms. If
+/// that passes, measuring continues instead of giving up, so the log tells
+/// a too-short deadline apart from a bit that never comes.
 const VALIDATE_DIAG_US: u64 = 500_000;
 
 fn download_firmware_validate(h: i32) -> bool {
@@ -628,7 +617,7 @@ fn download_firmware_validate(h: i32) -> bool {
     false
 }
 
-/// mac.c `__rtw_download_firmware`, alle dreizehn Schritte in Reihenfolge.
+/// mac.c `__rtw_download_firmware`, all thirteen steps in order.
 pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
                          rsvd_boundary: u16) -> bool {
     if !check_firmware_size(fw) {
@@ -644,16 +633,15 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
         }
     };
 
-    // rtw_chip_efuse_enable: DAS steht zwischen mac_power_on und dem
-    // Download, und ohne es liefert die Firmware spaeter keinen
-    // hw-feature-Bericht.
+    // rtw_chip_efuse_enable: this sits between mac_power_on and the download;
+    // without it the firmware later sends no hw-feature report.
     host::w8(h, REG_C2HEVT, C2H_HW_FEATURE_DUMP);
 
-    // Was die Power-Sequenz hinterlassen hat, BEVOR das Backup es umschreibt.
-    // REG_RQPN_CTRL_2 ist der interessante: das Backup ODERt nur BIT_LD_RQPN
-    // darauf, es SETZT die Seitenzahlen nicht — die kommen erst in
-    // __priority_queue_cfg, also nach dem Download. Steht hier eine 0, hat
-    // die HIQ null Seiten, und dann kann keine Reserved Page landen.
+    // What the power sequence left behind, before the backup rewrites it.
+    // REG_RQPN_CTRL_2 is the interesting one: the backup only ORs in
+    // BIT_LD_RQPN and does not set the page counts, which come in
+    // __priority_queue_cfg after the download. A 0 here means the HIQ has no
+    // pages and no reserved page can land.
     host::print("  [dump] nach power_on, vor dem Backup:\n");
     crate::fw::dump_reg32(h, "RQPN_CTRL2", REG_RQPN_CTRL_2);
     crate::fw::dump_reg32(h, "FIFOPG_I1 ", REG_FIFOPAGE_INFO_1);
@@ -676,8 +664,8 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
             return false;
         }
         if download_firmware_validate(h) {
-            // "reset desc and index" — rtw_hci_setup nach dem Download,
-            // also wieder BEIDE Haelften.
+            // "reset desc and index": rtw_hci_setup after the download, so both
+            // halves again.
             crate::pci::setup(h, trx, false);
             return true;
         }
@@ -689,9 +677,9 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
     false
 }
 
-// ── Stufe 3a: rtw_mac_init (mac.c:1391) ──────────────────────────
+// ── rtw_mac_init (mac.c:1391) ────────────────────────────────────
 //
-// Reihenfolge wie in Linux:
+// Order as in Linux:
 //   rtw_mac_init
 //    ├─ rtw_init_trx_cfg
 //    │   ├─ txdma_queue_mapping
@@ -703,14 +691,13 @@ pub fn download_firmware(h: i32, trx: &mut Trx, stage: i32, fw: &[u8], band: u8,
 
 use crate::chip;
 
-/// main.h:1886-1900 `struct rtw_fifo_conf`, ohne den Zeiger auf `rqpn` —
-/// der ist bei uns eine Konstante, weil wir genau einen Bus haben.
+/// main.h:1886-1900 `struct rtw_fifo_conf`, without the pointer to `rqpn`,
+/// which is a constant here because there is only one bus type.
 ///
-/// **Der Vorgabewert ist NICHT Kosmetik.** `rtw_fw_write_data_rsvd_page`
-/// schreibt `rsvd_boundary` beim Aufraeumen zurueck, und solange
-/// `rtw_mac_init` nicht gelaufen ist, steht dort in Linux eine 0. Der
-/// Firmware-Download passiert VOR `rtw_mac_init` — also mit 0, und das ist
-/// richtig so.
+/// The default matters: `rtw_fw_write_data_rsvd_page` writes
+/// `rsvd_boundary` back during cleanup, and before `rtw_mac_init` has run
+/// Linux has 0 there. The firmware download happens before
+/// `rtw_mac_init`, so 0 is correct.
 #[derive(Default, Clone, Copy)]
 pub struct Fifo {
     pub rsvd_boundary: u16,
@@ -728,12 +715,12 @@ pub struct Fifo {
 }
 
 pub enum MacErr {
-    /// Linux: `-ENOMEM` — der Seitenplan passt nicht in den TX-FIFO.
+    /// Linux: `-ENOMEM`, the page plan does not fit into the TX FIFO.
     NoMem,
-    /// Linux: `-EINVAL` — rsvd_boundary und rsvd_drv_addr laufen auseinander,
-    /// oder der H2C-Ring meldet eine andere Fuellung als seine Groesse.
+    /// Linux: `-EINVAL`, rsvd_boundary and rsvd_drv_addr disagree, or the H2C
+    /// ring reports a fill level other than its size.
     Inval,
-    /// Linux: `-EBUSY` — die Hardware hat die Link-List-Tabelle nicht gebaut.
+    /// Linux: `-EBUSY`, the hardware did not build the link list table.
     Busy,
 }
 
@@ -750,13 +737,12 @@ fn txdma_queue_mapping(h: i32) -> &'static chip::Rqpn {
     txdma_pq_map |= bit_txdma_queue_map(rqpn.dma_map_vo, BIT_SHIFT_TXDMA_VOQ_MAP);
     host::w16(h, REG_TXDMA_PQ_MAP, txdma_pq_map);
 
-    // Erst AUS, dann alle acht TRX-Bits an. Das ist kein Vorsichtsschritt,
-    // sondern steht so in Linux — und ein `write8` auf REG_CR laesst die
-    // oberen Bytes des 32-Bit-Registers in Ruhe.
+    // First off, then all eight TRX bits on, as in Linux; a `write8` on
+    // REG_CR leaves the upper bytes of the 32-bit register alone.
     host::w8(h, REG_CR, 0);
     host::w8(h, REG_CR, MAC_TRX_ENABLE);
 
-    // rtw_chip_wcpu_3081 — gilt fuer den 8822C.
+    // rtw_chip_wcpu_3081, applies to the 8822C.
     if !WCPU_8051 {
         host::w32(h, REG_H2CQ_CSR, BIT_H2CQ_FULL);
     }
@@ -764,14 +750,13 @@ fn txdma_queue_mapping(h: i32) -> &'static chip::Rqpn {
     rqpn
 }
 
-/// mac.c:1138-1186 `rtw_set_trx_fifo_info`, 3081-Zweig.
+/// mac.c:1138-1186 `rtw_set_trx_fifo_info`, 3081 branch.
 ///
-/// Rechnet den ganzen Seitenplan des Sende-FIFOs, von oben nach unten: was
-/// die Firmware fuer sich behaelt, liegt AM ENDE des FIFOs, und
-/// `rsvd_boundary` ist die Grenze, unter der die Sendequeues arbeiten.
-/// Die Schlusspruefung (`rsvd_boundary == rsvd_drv_addr`) ist Linux' eigene
-/// Gegenrechnung: die Grenze wird zweimal auf verschiedenen Wegen bestimmt,
-/// und wenn beide nicht dasselbe sagen, stimmt der Plan nicht.
+/// Computes the TX FIFO page plan top-down: what the firmware reserves sits
+/// at the end of the FIFO, and `rsvd_boundary` is the limit below which
+/// the TX queues operate. The final check (`rsvd_boundary ==
+/// rsvd_drv_addr`) is Linux's own cross-check: the boundary is computed
+/// two ways, and if they disagree the plan is wrong.
 pub fn set_trx_fifo_info() -> Result<Fifo, MacErr> {
     let mut f = Fifo {
         rsvd_drv_pg_num: RSVD_DRV_PG_NUM_8822C,
@@ -844,14 +829,13 @@ fn priority_queue_cfg_3081(h: i32, f: &Fifo, pg: &chip::PageTable, pubq_num: u16
     host::w16(h, REG_BCNQ1_BDNY_V1, f.rsvd_boundary);
     host::w32(h, REG_RXFF_BNDY, RXFF_SIZE_8822C - C2H_PKT_BUF - 1);
 
-    // Der USB-Zweig (BIT_MASK_BLK_DESC_NUM, TXDMA_OFFSET_CHK+1) steht in
-    // Linux dazwischen und gilt fuer uns nicht.
+    // The USB branch (BIT_MASK_BLK_DESC_NUM, TXDMA_OFFSET_CHK+1) sits here in
+    // Linux and does not apply.
 
     host::set8(h, REG_AUTO_LLT_V1, BIT_AUTO_INIT_LLT_V1 as u8);
 
-    // Die Hardware baut jetzt ihre Link-List-Tabelle und LOESCHT das Bit,
-    // wenn sie fertig ist. Das ist die einzige Quittung, die es fuer den
-    // Seitenplan gibt.
+    // The hardware now builds its link list table and clears the bit when
+    // done. That is the only acknowledgement of the page plan.
     if !check_hw_ready(h, REG_AUTO_LLT_V1, BIT_AUTO_INIT_LLT_V1, 0) {
         host::print("[rtl8822ce] AUTO_INIT_LLT bleibt stehen — LLT nicht gebaut\n");
         return Err(MacErr::Busy);
@@ -870,7 +854,7 @@ fn priority_queue_cfg(h: i32) -> Result<Fifo, MacErr> {
         - pg.exq_num - pg.gapq_num;
 
     if WCPU_8051 {
-        // `__priority_queue_cfg_legacy`, fuer den 8822C unerreichbar.
+        // `__priority_queue_cfg_legacy`, unreachable for the 8822C.
         return Err(MacErr::Inval);
     }
     priority_queue_cfg_3081(h, &f, pg, pubq_num)?;
@@ -879,11 +863,11 @@ fn priority_queue_cfg(h: i32) -> Result<Fifo, MacErr> {
 
 /// mac.c:1301-1352 `init_h2c` (3081).
 ///
-/// Der H2C-Ring liegt IM Sende-FIFO, auf den Seiten, die `set_trx_fifo_info`
-/// dafuer reserviert hat. Geschrieben werden Kopf, Schwanz und Lesezeiger als
-/// BYTE-Adressen (`seite << 7`), und die Schlusspruefung fragt die Hardware,
-/// wie voll sie den Ring sieht: ein frischer Ring ist leer, also muss
-/// `h2cq_free` genau `h2cq_size` sein.
+/// The H2C ring lives inside the TX FIFO, on the pages `set_trx_fifo_info`
+/// reserved for it. Head, tail and read pointer are written as byte
+/// addresses (`page << 7`), and the final check asks the hardware how full
+/// it sees the ring: a fresh ring is empty, so `h2cq_free` must equal
+/// `h2cq_size`.
 fn init_h2c(h: i32, f: &Fifo) -> Result<(), MacErr> {
     if WCPU_8051 {
         return Ok(());
@@ -959,9 +943,8 @@ fn drv_info_cfg(h: i32) {
 
 /// mac.c:1391-1411 `rtw_mac_init`.
 ///
-/// Gibt den Seitenplan zurueck, weil er ab hier gebraucht wird: jede
-/// Reserved Page, die spaeter geschrieben wird, liegt relativ zu
-/// `rsvd_boundary`.
+/// Returns the page plan because it is needed from here on: every reserved
+/// page written later is relative to `rsvd_boundary`.
 pub fn mac_init(h: i32, cut_version: u8) -> Result<Fifo, MacErr> {
     let f = init_trx_cfg(h)?;
 
@@ -978,11 +961,11 @@ pub fn mac_init(h: i32, cut_version: u8) -> Result<Fifo, MacErr> {
     Ok(f)
 }
 
-/// mac.c:1029-1076 `rtw_set_channel_mac`, 3081-Zweig.
+/// mac.c:1029-1076 `rtw_set_channel_mac`, 3081 branch.
 ///
-/// Die MAC-Haelfte des Kanalwechsels: Unterkanallage, Bandbreite im
-/// Sendeprotokoll, MAC-Takt und die CCK-Pruefung, die auf 5 GHz AN ist —
-/// dort darf gar keine CCK-Rate ankommen.
+/// The MAC half of a channel switch: subchannel position, bandwidth in the
+/// TX protocol, MAC clock and the CCK check, which is on for 5 GHz where no
+/// CCK rate may arrive.
 pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
     let txsc20 = primary_ch_idx;
     let mut txsc40 = 0u8;
@@ -994,7 +977,7 @@ pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
             RTW_SC_40_LOWER
         };
     }
-    // reg.h:260-267 `BIT_TXSC_20M(x)` und `BIT_TXSC_40M(x)`
+    // reg.h:260-267 `BIT_TXSC_20M(x)` and `BIT_TXSC_40M(x)`
     host::w8(h, REG_DATA_SC,
              ((txsc20 & BIT_MASK_TXSC_20M) << BIT_SHIFT_TXSC_20M)
              | ((txsc40 & BIT_MASK_TXSC_40M) << BIT_SHIFT_TXSC_40M));
@@ -1003,7 +986,7 @@ pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
     match bw {
         2 => value32 |= BIT_RFMOD_80M,
         1 => value32 |= BIT_RFMOD_40M,
-        // RTW_CHANNEL_WIDTH_20 und Linux' `default:` — nichts dazu.
+        // RTW_CHANNEL_WIDTH_20 and Linux's `default:`: nothing to do.
         _ => {}
     }
     host::w32(h, REG_WMAC_TRXPTCL_CTL, value32);
@@ -1027,16 +1010,15 @@ pub fn set_channel_mac(h: i32, channel: u8, bw: usize, primary_ch_idx: u8) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// rtw_mac_flush_queues (mac.c:1020-1080) — die Sendeschlangen leeren
+// rtw_mac_flush_queues (mac.c:1020-1080): drain the TX queues
 //
-// Linux tut das vor einem Kanalwechsel und vor dem Trennen. Ohne das
-// gehen nach einem Wechsel noch Rahmen auf dem ALTEN Kanal hinaus — und
-// genau dieser Fall liegt beim Wiederverbinden vor uns.
+// Linux does this before a channel switch and before disconnecting;
+// otherwise frames still go out on the old channel after a switch.
 // ═══════════════════════════════════════════════════════════════════
 
-/// rtw8822c.c:4943-4957 `prioq_addrs_8822c` — je Prioritaetsschlange
-/// `(rsvd, avail)`, in der Reihenfolge von `enum rtw_dma_mapping`
-/// (EXTRA, LOW, NORMAL, HIGH). `.wsize = true`, also 16-Bit-Zugriffe.
+/// rtw8822c.c:4943-4957 `prioq_addrs_8822c`: `(rsvd, avail)` per priority
+/// queue, in the order of `enum rtw_dma_mapping` (EXTRA, LOW, NORMAL,
+/// HIGH). `.wsize = true`, so 16-bit accesses.
 const PRIOQ_ADDRS: [(u32, u32); 4] = [
     (REG_FIFOPAGE_INFO_4, REG_FIFOPAGE_INFO_4 + 2), // EXTRA
     (REG_FIFOPAGE_INFO_2, REG_FIFOPAGE_INFO_2 + 2), // LOW
@@ -1046,11 +1028,10 @@ const PRIOQ_ADDRS: [(u32, u32); 4] = [
 
 /// mac.c:1024-1060 `__rtw_mac_flush_prio_queue`.
 ///
-/// **Die Schlange ist leer, wenn alle reservierten Seiten wieder
-/// verfuegbar sind.** Fuenf Runden zu 20 ms — Linux' eigener Kommentar
-/// sagt, dass eine volle Schlange bei 100 Mbit/s bis zu zwei Sekunden
-/// braucht und dabei Rahmen fallen koennen; die Frist hier ist also
-/// absichtlich kurz.
+/// The queue is empty when all reserved pages are available again. Five
+/// rounds of 20 ms; Linux's own comment notes that a full queue can take
+/// up to two seconds at 100 Mbit/s and frames may be dropped, so the
+/// deadline is short on purpose.
 fn flush_prio_queue(h: i32, prio: usize) -> bool {
     let (rsvd_reg, avail_reg) = PRIOQ_ADDRS[prio];
     for _ in 0..5 {
@@ -1067,11 +1048,10 @@ fn flush_prio_queue(h: i32, prio: usize) -> bool {
 /// mac.c:1062-1069 `rtw_mac_flush_prio_queues` + mac.c:1071-1080
 /// `rtw_mac_flush_queues`.
 ///
-/// Wir leeren immer ALLE vier — das ist Linux' Zweig „alle Schlangen
-/// angefordert oder die Zuordnung steht noch nicht", und einen Rufer,
-/// der einzelne Zugangsklassen leeren will, gibt es hier nicht.
+/// Always drains all four, Linux's "all queues requested or mapping not
+/// yet set" branch; no caller drains individual access categories.
 ///
-/// Gibt zurueck, wie viele Schlangen in der Frist leer wurden.
+/// Returns how many queues became empty within the deadline.
 pub fn flush_queues(h: i32) -> u32 {
     let mut done = 0;
     for prio in 0..PRIOQ_ADDRS.len() {
