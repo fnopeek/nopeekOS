@@ -445,24 +445,16 @@ pub unsafe extern "efiapi" fn efi_main(
 ) -> ! {
     unsafe {
         com1_print(b"\n=== nopeekOS UEFI entry ===\n");
-        com1_print(b"Phase 2: collecting BootInfo from firmware\n");
     }
 
     let bs = unsafe { (*system_table).boot_services };
 
     // 1. ACPI RSDP via ConfigurationTable walk.
     let rsdp = unsafe { find_acpi_rsdp(system_table) };
-    unsafe {
-        BOOT_INFO.acpi_rsdp = rsdp;
-        com1_print(b"[uefi] ACPI RSDP @ 0x");
-        com1_hex64(rsdp);
-        com1_print(b"\n");
-    }
+    unsafe { BOOT_INFO.acpi_rsdp = rsdp; }
 
-    unsafe { com1_print(b"[uefi] >> locate_gop\n"); }
     // 2. Graphics Output Protocol → framebuffer.
     if let Some(gop) = unsafe { locate_gop(bs) } {
-        unsafe { com1_print(b"[uefi] gop OK, reading mode...\n"); }
         let mode = unsafe { &*gop.mode };
         let info = unsafe { &*mode.info };
         unsafe {
@@ -492,7 +484,6 @@ pub unsafe extern "efiapi" fn efi_main(
     let map_key = unsafe { collect_memory_map(bs) };
     unsafe { print_mem_summary() };
 
-    unsafe { com1_print(b"[uefi] >> ExitBootServices\n"); }
     // 4. ExitBootServices. After this call UEFI Boot Services are
     // gone — no more LocateProtocol, no more printk through ConOut.
     // We're on our own from here.
@@ -531,10 +522,6 @@ pub unsafe extern "efiapi" fn efi_main(
     // UEFI's selector layout (TR/LDT/code segs). After ExitBootServices
     // the firmware is dismantled and we're free to install ours.
     unsafe { install_kernel_gdt() };
-
-    unsafe {
-        com1_print(b"[uefi] GDT installed -- calling kernel_main\n");
-    }
 
     // Hand off to the kernel proper. BOOT_INFO lives in .bss (the
     // kernel image), so the &'static reference outlives anything

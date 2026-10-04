@@ -161,7 +161,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
 
     kprintln!("[npk] Physical memory: {} MB free ({} frames), {} MB detected",
         free_mb, free, total_mb);
-    kprintln!("[npk] UEFI regions: {} ({} usable)",
+    crate::kdebug!("[npk] UEFI regions: {} ({} usable)",
         boot_info.region_count, boot_info.usable_regions().count());
 }
 

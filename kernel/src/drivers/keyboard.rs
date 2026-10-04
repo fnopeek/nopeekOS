@@ -86,7 +86,7 @@ pub fn init() {
         outb(STATUS_PORT, 0x20);
         match ps2_read() {
             Some(cfg) => {
-                kprintln!("[npk] ps2: i8042 status {:#04x} config {:#04x}{}",
+                crate::kdebug!("[npk] ps2: i8042 status {:#04x} config {:#04x}{}",
                     status, cfg,
                     if cfg & 0x40 == 0 { " — translation OFF, turning it on" } else { "" });
                 if cfg & 0x40 == 0 {
@@ -103,7 +103,7 @@ pub fn init() {
         wait_write();
         outb(DATA_PORT, 0xF4);
         match ps2_read() {
-            Some(0xFA) => kprintln!("[npk] ps2: keyboard scanning enabled"),
+            Some(0xFA) => crate::kdebug!("[npk] ps2: keyboard scanning enabled"),
             Some(b)    => kprintln!("[npk] ps2: enable scanning answered {:#04x}", b),
             None       => kprintln!("[npk] ps2: enable scanning got no answer — no keyboard on the i8042"),
         }
@@ -450,7 +450,7 @@ pub fn enable_irq() {
             crate::ioapic::unmask(g);
         }
     });
-    kprintln!("[npk] ps2: IRQ 1 -> GSI {} ({}) on vector {}{} — keyboard by interrupt",
+    crate::kdebug!("[npk] ps2: IRQ 1 -> GSI {} ({}) on vector {}{} — keyboard by interrupt",
         gsi, if level { "level" } else { "edge" }, crate::interrupts::PS2_VECTOR,
         if aux_gsi.is_some() { ", IRQ 12 (aux) too" } else { "" });
 }

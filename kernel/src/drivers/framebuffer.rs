@@ -213,9 +213,6 @@ pub fn init_from_gpu() {
                     | crate::paging::PageFlags::WRITE_COMBINE,
             );
         }
-        // Diagnose the effective memory type of the FB: a firmware UC MTRR
-        // over this region overrides our PAT WC (UC always wins). Read-only.
-        diagnose_fb_memory_type(addr);
     }
 
     let info = FbInfo { addr, pitch, width, height, bpp };
@@ -258,7 +255,7 @@ pub fn init_from_gpu() {
         return;
     }
 
-    crate::kprintln!("[npk] Framebuffer: double-buffer {}KB x2", shadow_size / 1024);
+    crate::kdebug!("[npk] Framebuffer: double-buffer {}KB x2", shadow_size / 1024);
 
     // Clear MMIO framebuffer
     clear_screen(&info);
@@ -529,7 +526,7 @@ fn diagnose_fb_memory_type(fb_addr: u64) {
         "[mtrr] => FB effective MTRR type = {} {}",
         type_name(eff_type),
         if eff_type == 1 { "(WC already — blit should be fast)" }
-        else { "(NOT WC → overrides our PAT WC → slow UC blit, this is the wall)" },
+        else { "(not WC: overrides the PAT WC request, blits run uncached)" },
     );
 
     // Read back the FB PTE and decode its PAT index to confirm we asked for WC.

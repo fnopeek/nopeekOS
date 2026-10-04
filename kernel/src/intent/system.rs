@@ -1488,7 +1488,7 @@ pub fn persist_boot_log() {
     {
         // One line, so it is self-evident from the log itself that the log
         // was filed — and where.
-        Ok(_)  => kprintln!("[npk] boot log: {} ({} bytes)", BOOT_LOG_PATH, log.len()),
+        Ok(_)  => crate::kdebug!("[npk] boot log: {} ({} bytes)", BOOT_LOG_PATH, log.len()),
         Err(e) => kprintln!("[npk] boot log: store failed: {:?}", e),
     }
 }

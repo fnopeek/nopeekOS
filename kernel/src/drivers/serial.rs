@@ -47,6 +47,27 @@ pub fn capture_snapshot() -> String {
     }
 }
 
+/// Whether `kdebug!` lines also go to the screen and serial (config
+/// `bootlog verbose`). Without it they only reach the capture buffer, so
+/// `dmesg` and `sys/log/boot` keep them.
+static VERBOSE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
+/// Capture-only output for `kdebug!`.
+pub fn capture_fmt(args: fmt::Arguments) {
+    use fmt::Write;
+    if let Some(ref mut buf) = *CAPTURE.lock() {
+        let _ = buf.write_fmt(args);
+    }
+}
+
 /// Append to capture buffer if active (called from write_str).
 fn capture_bytes(s: &str) {
     if let Some(ref mut buf) = *CAPTURE.lock() {
@@ -230,6 +251,19 @@ macro_rules! kprint {
 macro_rules! kprintln {
     () => ($crate::kprint!("\n"));
     ($($arg:tt)*) => ($crate::kprint!("{}\n", format_args!($($arg)*)));
+}
+
+/// A detail line: printed only with `bootlog verbose`, always kept in the
+/// capture buffer (`dmesg`, `sys/log/boot`).
+#[macro_export]
+macro_rules! kdebug {
+    ($($arg:tt)*) => ({
+        if $crate::serial::verbose() {
+            $crate::kprintln!($($arg)*);
+        } else {
+            $crate::serial::capture_fmt(format_args!("{}\n", format_args!($($arg)*)));
+        }
+    });
 }
 
 #[inline(always)]

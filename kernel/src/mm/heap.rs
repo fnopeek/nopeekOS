@@ -15,7 +15,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use spin::Mutex;
-use crate::kprintln;
 
 const INITIAL_HEAP: usize = 64 * 1024 * 1024;       // 64MB initial
 const GROW_CHUNK: usize = 64 * 1024 * 1024;          // 64MB growth increments
@@ -403,7 +402,7 @@ pub fn init() {
     let heap_start = unsafe { &__heap_start as *const u8 as usize };
     crate::memory::reserve_region(heap_start as u64, INITIAL_HEAP as u64);
     HEAP.inner.lock().init(heap_start, INITIAL_HEAP);
-    kprintln!("[npk] Heap: {} MB (Groessenklassen + Grenzmarken, max {} MB)",
+    crate::kdebug!("[npk] Heap: {} MB (max {} MB)",
         INITIAL_HEAP / (1024 * 1024), MAX_HEAP / (1024 * 1024));
 }
 

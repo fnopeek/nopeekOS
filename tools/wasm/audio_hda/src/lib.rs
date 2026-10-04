@@ -375,7 +375,7 @@ fn reset_stream(mmio: i32, base: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     host::log_init();
-    log("[audio_hda] v0.3.3 — generic HDA driver (mailbox streaming) starting\n");
+    log(concat!("[audio_hda] ", env!("CARGO_PKG_VERSION"), " — generic HDA driver\n"));
 
     // Bind the HDA controller by PCI class — no vendor:device hardcode.
     // Intel cAVS controllers report subclass 0x01 ("Audio controller")

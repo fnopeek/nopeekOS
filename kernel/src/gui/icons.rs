@@ -80,7 +80,7 @@ pub fn init() {
         }
     };
 
-    crate::kprintln!(
+    crate::kdebug!(
         "[npk] icons: atlas loaded — {} icons × {} sizes ({} bytes)",
         atlas.entries.len(), atlas.sizes.len(), atlas.bytes.len(),
     );

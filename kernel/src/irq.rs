@@ -242,7 +242,7 @@ fn ensure_msi_deliverable() {
         return;
     }
     let Some(dmar) = crate::drivers::acpi::find_table(b"DMAR") else {
-        crate::kprintln!("[npk] irq: no DMAR table — no VT-d, compatibility MSIs OK");
+        crate::kdebug!("[npk] irq: no DMAR table — no VT-d, compatibility MSIs OK");
         return;
     };
     crate::drivers::acpi::ensure_mapped_pub(dmar, 4096);
@@ -331,7 +331,7 @@ pub fn register(dev: PciAddr, entry: u16) -> Option<u8> {
         if !pci::program_msi(dev, vector, dest) {
             return None;
         }
-        crate::kprintln!("[npk] irq: {:02x}:{:02x}.{} plain MSI on vector {:#x}",
+        crate::kdebug!("[npk] irq: {:02x}:{:02x}.{} plain MSI on vector {:#x}",
             dev.bus, dev.device, dev.function, vector);
         (vector, MSI)
     };

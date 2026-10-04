@@ -498,7 +498,7 @@ pub fn init() -> bool {
 /// caps how many device slots the HC will accept (Address Device).
 fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciState> {
 
-    kprintln!("[npk] xhci: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
+    crate::kdebug!("[npk] xhci: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         dev.addr.bus, dev.addr.device, dev.addr.function,
         dev.vendor_id, dev.device_id);
 
@@ -573,7 +573,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     let rt = mmio + rtsoff as u64;
     let db = mmio + dboff as u64;
 
-    kprintln!("[npk] xhci: ports={} slots={} ctx={}B", max_ports, max_slots, ctx_size);
+    crate::kdebug!("[npk] xhci: ports={} slots={} ctx={}B", max_ports, max_slots, ctx_size);
 
     // BIOS/OS handoff via extended capabilities
     let xecp_off = ((hccparams1 >> 16) & 0xFFFF) as u32 * 4;
@@ -659,7 +659,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         // DCBAA[0] = scratchpad array pointer
         // SAFETY: writing to DMA array
         unsafe { core::ptr::write_volatile(dcbaa as *mut u64, sp_array); }
-        kprintln!("[npk] xhci: {} scratchpad buffers", num_scratchpad);
+        crate::kdebug!("[npk] xhci: {} scratchpad buffers", num_scratchpad);
     }
 
     // Program controller
@@ -681,7 +681,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         kprintln!("[npk] xhci: start failed");
         return None;
     }
-    kprintln!("[npk] xhci: controller running");
+    crate::kdebug!("[npk] xhci: controller running");
 
     // Interrupter 0 by MSI-X to core 0. Without MSI-X the timer tick drains
     // the event ring.
@@ -689,7 +689,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
                          crate::interrupts::current_apic_id()) {
         w32(oper, OP_USBSTS, STS_EINT);
         w32(oper, OP_USBCMD, r32(oper, OP_USBCMD) | CMD_INTE);
-        kprintln!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
+        crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
     } else {
         NEEDS_POLL.store(true, Ordering::Relaxed);
     }
@@ -759,7 +759,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         let sc = r32(oper, portsc_off(p));
         if sc & PORTSC_CCS != 0 {
             let speed = (sc >> 10) & 0xF;
-            kprintln!("[npk] xhci: port {} connected (speed={}, portsc={:#010x})", p + 1, speed, sc);
+            crate::kdebug!("[npk] xhci: port {} connected (speed={}, portsc={:#010x})", p + 1, speed, sc);
         }
     }
 
@@ -778,7 +778,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // leftover slot cannot make a later Address Device on that port fail.
     for p in 0..state.max_ports {
         if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
-        kprintln!("[npk] xhci: trying port {}", p + 1);
+        crate::kdebug!("[npk] xhci: trying port {}", p + 1);
 
         // Start clean: the set may hold leftovers from the previous port.
         // SAFETY: our own DMA memory; no device points at it anymore.
@@ -792,22 +792,22 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         state.ep0_enqueue = 0;
 
         // Reset port
-        kprintln!("[npk] xhci: resetting port {}...", p + 1);
+        crate::kdebug!("[npk] xhci: resetting port {}...", p + 1);
         if !reset_port(&state, p) {
             kprintln!("[npk] xhci: port reset failed");
             continue;   // no slot allocated yet
         }
         state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
-        kprintln!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
+        crate::kdebug!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
 
         // Enable Slot
-        kprintln!("[npk] xhci: enable slot...");
+        crate::kdebug!("[npk] xhci: enable slot...");
         let slot_id = match cmd_enable_slot(&mut state) {
             Some(s) => s,
             None => { kprintln!("[npk] xhci: enable slot failed"); continue; }
         };
         state.slot_id = slot_id;
-        kprintln!("[npk] xhci: slot {} assigned", slot_id);
+        crate::kdebug!("[npk] xhci: slot {} assigned", slot_id);
 
         // Set DCBAA entry for this slot
         // SAFETY: writing to DMA array
@@ -826,16 +826,16 @@ fn init_controller(dev: pci::PciDevice) -> bool {
             SPEED_SUPER => 512,
             _ => 64,
         };
-        kprintln!("[npk] xhci: addressing device (maxpkt={})...", max_packet);
+        crate::kdebug!("[npk] xhci: addressing device (maxpkt={})...", max_packet);
         if !cmd_address_device(&mut state, p, max_packet) {
             kprintln!("[npk] xhci: address device failed");
             cmd_disable_slot(&mut state, slot_id);
             continue;
         }
-        kprintln!("[npk] xhci: device addressed");
+        crate::kdebug!("[npk] xhci: device addressed");
 
         // Get Configuration Descriptor (9 bytes first to get total length)
-        kprintln!("[npk] xhci: getting config descriptor...");
+        crate::kdebug!("[npk] xhci: getting config descriptor...");
         if !usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
             kprintln!("[npk] xhci: get config desc failed");
             cmd_disable_slot(&mut state, slot_id);
@@ -848,7 +848,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
 
         // Get full Configuration Descriptor
         let fetch_len = total_len.min(512) as u16;
-        kprintln!("[npk] xhci: getting full config desc ({} bytes)...", fetch_len);
+        crate::kdebug!("[npk] xhci: getting full config desc ({} bytes)...", fetch_len);
         if !usb_get_descriptor(&mut state, DESC_CONFIG, fetch_len) {
             kprintln!("[npk] xhci: get full config desc failed");
             cmd_disable_slot(&mut state, slot_id);
@@ -862,12 +862,12 @@ fn init_controller(dev: pci::PciDevice) -> bool {
                 None => {
                     // Not a keyboard: release the slot. A leftover slot makes
                     // a later Address Device on the same port fail.
-                    kprintln!("[npk] xhci: port {} not a keyboard, releasing slot {}", p + 1, slot_id);
+                    crate::kdebug!("[npk] xhci: port {} not a keyboard, releasing slot {}", p + 1, slot_id);
                     cmd_disable_slot(&mut state, slot_id);
                     continue;
                 }
             };
-        kprintln!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
+        crate::kdebug!("[npk] xhci: keyboard iface={} ep={:#04x} maxpkt={} interval={}",
             kbd_iface, intr_ep, intr_max_pkt, intr_interval);
 
         // Keyboard found. It keeps the set it was enumerated with; the
@@ -907,7 +907,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     let connected = (0..state.max_ports)
         .filter(|&p| r32(state.oper, portsc_off(p)) & PORTSC_CCS != 0)
         .count();
-    kprintln!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
+    crate::kdebug!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
 
     // Keep the running controller even without a keyboard or any device:
     // `init_mouse` and the NIC scan look for devices on it later (e.g. a USB
@@ -931,7 +931,7 @@ pub fn init_mouse() -> bool {
             return true;
         }
     }
-    kprintln!("[npk] xhci: no mouse found on any controller");
+    crate::kdebug!("[npk] xhci: no mouse found on any controller");
     false
 }
 
@@ -950,7 +950,7 @@ fn probe_mouse(state: &mut XhciState) -> bool {
         let portsc = r32(state.oper, portsc_off(p));
         if portsc & PORTSC_CCS == 0 { continue; }
 
-        kprintln!("[npk] xhci: device on port {} (mouse candidate)", p + 1);
+        crate::kdebug!("[npk] xhci: device on port {} (mouse candidate)", p + 1);
 
         if try_init_mouse_on_port(state, p) {
             kprintln!("[npk] xhci: USB mouse (HID boot protocol) on {:02x}:{:02x}.{} port {}",
@@ -964,13 +964,13 @@ fn probe_mouse(state: &mut XhciState) -> bool {
 
 fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
     // Reset port
-    kprintln!("[npk] xhci: mouse: resetting port {}...", port + 1);
+    crate::kdebug!("[npk] xhci: mouse: resetting port {}...", port + 1);
     if !reset_port(state, port) {
         kprintln!("[npk] xhci: mouse port reset failed");
         return false;
     }
     let port_speed = (r32(state.oper, portsc_off(port)) >> 10) & 0xF;
-    kprintln!("[npk] xhci: mouse: port {} reset ok, speed={}", port + 1, port_speed);
+    crate::kdebug!("[npk] xhci: mouse: port {} reset ok, speed={}", port + 1, port_speed);
     state.mouse_port_speed = port_speed;
     state.mouse_port_num = port;
 
@@ -1017,14 +1017,14 @@ fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
 
 fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
     // Enable Slot for mouse
-    kprintln!("[npk] xhci: mouse: enable slot...");
+    crate::kdebug!("[npk] xhci: mouse: enable slot...");
     let slot_id = match cmd_enable_slot(state) {
         Some(s) => s,
         None => { kprintln!("[npk] xhci: mouse enable slot failed"); return false; }
     };
     state.slot_id = slot_id;
     state.mouse_slot_id = slot_id;
-    kprintln!("[npk] xhci: mouse: slot {} assigned", slot_id);
+    crate::kdebug!("[npk] xhci: mouse: slot {} assigned", slot_id);
 
     // Set DCBAA entry for mouse slot
     // SAFETY: writing to DMA array
@@ -1043,15 +1043,15 @@ fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
         SPEED_SUPER => 512,
         _ => 64,
     };
-    kprintln!("[npk] xhci: mouse: addressing device (maxpkt={})...", max_packet);
+    crate::kdebug!("[npk] xhci: mouse: addressing device (maxpkt={})...", max_packet);
     if !cmd_address_device(state, port, max_packet) {
         kprintln!("[npk] xhci: mouse address device failed");
         return false;
     }
-    kprintln!("[npk] xhci: mouse: device addressed");
+    crate::kdebug!("[npk] xhci: mouse: device addressed");
 
     // Get Configuration Descriptor (9 bytes first)
-    kprintln!("[npk] xhci: mouse: getting config descriptor...");
+    crate::kdebug!("[npk] xhci: mouse: getting config descriptor...");
     if !usb_get_descriptor(state, DESC_CONFIG, 9) {
         kprintln!("[npk] xhci: mouse get config desc failed");
         return false;
@@ -1074,7 +1074,7 @@ fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
             Some(v) => v,
             None => { kprintln!("[npk] xhci: no mouse interface found"); return false; }
         };
-    kprintln!("[npk] xhci: mouse iface={} ep={:#04x} maxpkt={} interval={}",
+    crate::kdebug!("[npk] xhci: mouse iface={} ep={:#04x} maxpkt={} interval={}",
         mouse_iface, intr_ep, intr_max_pkt, intr_interval);
 
     // Set Configuration

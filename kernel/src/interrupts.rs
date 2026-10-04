@@ -110,7 +110,7 @@ pub fn calibrate_tsc() {
         let freq = (ecx as u64 * ebx as u64) / eax as u64;
         if freq > 100_000_000 {
             TSC_FREQ.store(freq, Ordering::Relaxed);
-            kprintln!("[npk] TSC: {} MHz (CPUID 0x15: crystal={}Hz ratio={}/{})",
+            crate::kdebug!("[npk] TSC: {} MHz (CPUID 0x15: crystal={}Hz ratio={}/{})",
                 freq / 1_000_000, ecx, ebx, eax);
             return;
         }
@@ -121,7 +121,7 @@ pub fn calibrate_tsc() {
     // run_slice's SLICE_MS and the guest's `tsc_early_khz=` cmdline.
     if let Some(freq) = pit_calibrate_tsc() {
         TSC_FREQ.store(freq, Ordering::Relaxed);
-        kprintln!("[npk] TSC: {} MHz (PIT ch2 calibration)", freq / 1_000_000);
+        crate::kdebug!("[npk] TSC: {} MHz (PIT ch2 calibration)", freq / 1_000_000);
         return;
     }
 
@@ -603,7 +603,7 @@ static CORE0_TICKLESS: core::sync::atomic::AtomicBool = core::sync::atomic::Atom
 pub fn make_core0_tickless() {
     init_worker_timer();
     CORE0_TICKLESS.store(true, Ordering::Release);
-    kprintln!("[npk] core 0: periodic tick off — deadline timer from here ({})",
+    crate::kdebug!("[npk] core 0: periodic tick off — deadline timer from here ({})",
         if HAS_TSC_DEADLINE.load(Ordering::Relaxed) { "TSC-deadline" } else { "one-shot" });
 }
 
@@ -1058,7 +1058,7 @@ pub fn init_apic_timer() {
         // Set initial count (ticks per 10ms = 100Hz)
         core::ptr::write_volatile(base.add(0x380) as *mut u32, elapsed);
 
-        kprintln!("[npk] APIC timer: {}Hz (base={:#x}, ticks/10ms={})",
+        crate::kdebug!("[npk] APIC timer: {}Hz (base={:#x}, ticks/10ms={})",
             TARGET_FREQ, apic_base, elapsed);
     }
 }

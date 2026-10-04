@@ -102,7 +102,7 @@ pub fn init(width: u32, height: u32, pitch: u32) {
 
     // Growable heap handles allocation — just log the size
     let total_needed = buf_size * LAYER_COUNT;
-    crate::kprintln!("[npk] layers: allocating {} MB for {} buffers",
+    crate::kdebug!("[npk] layers: allocating {} MB for {} buffers",
         total_needed / (1024 * 1024), LAYER_COUNT);
 
     let layout = alloc::alloc::Layout::from_size_align(buf_size, 16)
@@ -135,7 +135,7 @@ pub fn init(width: u32, height: u32, pitch: u32) {
     stack.pitch = pitch;
     stack.initialized = true;
 
-    crate::kprintln!("[npk] Layer compositor: {}x{}, {}MB per layer, {} layers",
+    crate::kdebug!("[npk] Layer compositor: {}x{}, {}MB per layer, {} layers",
         width, height, buf_size / (1024 * 1024), LAYER_COUNT);
 }
 

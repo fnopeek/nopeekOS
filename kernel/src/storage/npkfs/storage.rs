@@ -179,7 +179,7 @@ pub fn mount() -> Result<(), FsError> {
     )?;
 
     if !frees.is_empty() {
-        kprintln!("[npk] npkfs: journal replay: {} free ops", frees.len());
+        crate::kdebug!("[npk] npkfs: journal replay: {} free ops", frees.len());
         for (start, count) in &frees {
             bmap.free(*start, *count);
         }

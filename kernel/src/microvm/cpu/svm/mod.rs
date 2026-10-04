@@ -46,7 +46,18 @@ pub fn init() {
         None => ProbeState::Unavailable("AMD-V not supported or BIOS-locked"),
     };
     *PROBE.lock() = state;
-    report();
+    summary();
+}
+
+/// One boot line; `report` has the details.
+fn summary() {
+    use crate::kprintln;
+    match *PROBE.lock() {
+        ProbeState::Available(c) => kprintln!("[svm] AMD-V available{}",
+            if c.nested_paging { " (nested paging)" } else { "" }),
+        ProbeState::Unavailable(reason) => kprintln!("[svm] AMD-V not available: {}", reason),
+        ProbeState::NotProbed => {}
+    }
 }
 
 pub fn report() {
@@ -60,8 +71,8 @@ pub fn report() {
             kprintln!("[svm]   nrip_save       = {}", c.nrip_save);
             kprintln!("[svm]   decode_assists  = {}", c.decode_assists);
             kprintln!("[svm]   vmsave_vmload   = {}", c.vmsave_vmload);
-            kprintln!("[svm]   avic            = {}  (nested-AVIC gate: Y ⇒ csd-fix buildable in QEMU)", c.avic);
-            kprintln!("[svm]   substrate-test  = run 'microvm test' to exercise (12.1.0b)");
+            kprintln!("[svm]   avic            = {}", c.avic);
+            kprintln!("[svm]   substrate-test  = run 'microvm test' to exercise");
         }
         ProbeState::Unavailable(reason) => {
             kprintln!("[svm] AMD-V NOT available — MicroVM disabled");

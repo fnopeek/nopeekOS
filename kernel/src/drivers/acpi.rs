@@ -31,7 +31,7 @@ pub fn init() {
 
     if let Some(port) = find_pm1a_cnt() {
         PM1A_CNT_PORT.store(port, Ordering::Release);
-        crate::kprintln!("[npk] ACPI: PM1a_CNT at {:#x}", port);
+        crate::kdebug!("[npk] ACPI: PM1a_CNT at {:#x}", port);
     } else {
         crate::kprintln!("[npk] ACPI: PM1a_CNT not found");
     }

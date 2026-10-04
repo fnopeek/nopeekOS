@@ -31,7 +31,7 @@ static FORGE_DEFAULT: AtomicBool = AtomicBool::new(false);
 pub fn load_engine_default() {
     let on = crate::config::get("wasm.engine").as_deref() != Some("wasmi");
     FORGE_DEFAULT.store(on, AtOrd::Release);
-    kprintln!("[npk] WASM: {}", if on { "forge" } else { "wasmi (per Konfiguration)" });
+    kprintln!("[npk] WASM: {}", if on { "forge" } else { "wasmi (configured)" });
 }
 
 /// The engine used when the caller does not say otherwise.
@@ -653,7 +653,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         kprintln!("[npk] forge: {} — {} Importe unaufgeloest, das Modul wird stehenbleiben",
             name_str, open);
     }
-    kprintln!("[npk] forge: {} uebersetzt in {} ms ({} B x86)", name_str, compile_ms, m.code.len());
+    crate::kdebug!("[npk] forge: {} compiled in {} ms ({} B x86)", name_str, compile_ms, m.code.len());
 
     inst.set_fuel(INTERACTIVE_FUEL as i64);
     crate::process::set_memory(pid, inst.memory_size() as u32);
@@ -675,7 +675,7 @@ pub fn init() {
     config.consume_fuel(true);
     let engine = Engine::new(&config);
     *ENGINE.lock() = Some(engine);
-    kprintln!("[npk] WASM runtime: wasmi v1.0 (fuel-metered)");
+    crate::kdebug!("[npk] WASM runtime: wasmi v1.0 (fuel-metered)");
 }
 
 /// Execute a WASM module with an explicit fuel budget. Use for trusted

@@ -208,7 +208,7 @@ pub fn init() -> bool {
         let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
         let legacy_gso = features & (F_CSUM | F_GSO) == (F_CSUM | F_GSO);
         let offload = modern || legacy_gso;
-        kprintln!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
+        crate::kdebug!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
                   features, features & F_CSUM != 0, legacy_gso, features & F_HOST_TSO4 != 0, offload);
         if modern {
             accepted |= F_CSUM | F_HOST_TSO4;
@@ -353,7 +353,7 @@ pub fn init() -> bool {
             outw(io + REG_QUEUE_MSIX_VEC, 0);
             if inw(io + REG_QUEUE_MSIX_VEC) == 0 {
                 rx_msix_vector = rx_vec;
-                kprintln!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
+                crate::kdebug!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
             } else {
                 kprintln!("[npk] virtio-net: RX MSI-X vector rejected — polling");
             }

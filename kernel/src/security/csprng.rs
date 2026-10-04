@@ -5,7 +5,6 @@
 //! Re-keys every 64 blocks for forward secrecy.
 
 use spin::Mutex;
-use crate::kprintln;
 
 static RNG: Mutex<Option<ChaChaRng>> = Mutex::new(None);
 
@@ -205,9 +204,9 @@ pub fn init() {
     *RNG.lock() = Some(ChaChaRng::new(&seed));
 
     if has_rdrand() {
-        kprintln!("[npk] CSPRNG: ready (RDRAND-seeded)");
+        crate::kdebug!("[npk] CSPRNG: ready (RDRAND-seeded)");
     } else {
-        kprintln!("[npk] CSPRNG: ready (TSC-seeded, no RDRAND)");
+        crate::kdebug!("[npk] CSPRNG: ready (TSC-seeded, no RDRAND)");
     }
 }
 

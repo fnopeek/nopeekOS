@@ -37,11 +37,21 @@ pub fn init() {
         None => ProbeState::Unavailable("VT-x not supported or BIOS-locked"),
     };
     *PROBE.lock() = state;
-    report();
+    summary();
 }
 
-/// Print VMX capability snapshot. Used by `init()` once at boot and
-/// the `vmx` shell-intent on demand.
+/// One boot line; `report` has the details.
+fn summary() {
+    use crate::kprintln;
+    match *PROBE.lock() {
+        ProbeState::Available(c) => kprintln!("[vmx] VT-x available{}",
+            if c.ept_supported { " (EPT)" } else { "" }),
+        ProbeState::Unavailable(reason) => kprintln!("[vmx] VT-x not available: {}", reason),
+        ProbeState::NotProbed => {}
+    }
+}
+
+/// Print the VMX capability snapshot (`vmx` intent).
 pub fn report() {
     use crate::kprintln;
     match *PROBE.lock() {

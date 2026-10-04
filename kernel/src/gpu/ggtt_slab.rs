@@ -194,7 +194,7 @@ pub fn init() {
 
     let total_mb: u64 = BUCKET_REGION_BYTES.iter().sum::<usize>() as u64 / (1024 * 1024);
     let total_slots: u32 = BUCKET_SLOT_COUNTS.iter().sum();
-    crate::kprintln!(
+    crate::kdebug!(
         "[npk] GGTT slab: {} slots across 7 buckets, {} MB carved",
         total_slots, total_mb,
     );

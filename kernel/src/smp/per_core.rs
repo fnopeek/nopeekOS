@@ -478,7 +478,7 @@ pub fn init_dedicated_vm_core(worker_count: usize) {
         && (is_amd || (is_intel && crate::microvm::cpu::VMX_VCPU_AS_FIBER));
     crate::microvm::cpu::set_vm_fiber_mode(fiber_mode);
     if fiber_mode {
-        crate::kprintln!(
+        crate::kdebug!(
             "[npk] smp: microvm runs as a pool fiber on a dynamic core ({} cores, no carve-out)",
             total
         );

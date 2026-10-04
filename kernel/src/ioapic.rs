@@ -201,13 +201,13 @@ pub fn init() {
             }
             clear_pin(a, pin);
         }
-        kprintln!("[npk] ioapic: id {} @ {:#x}, GSI {}-{}, version {:#x}{}",
+        crate::kdebug!("[npk] ioapic: id {} @ {:#x}, GSI {}-{}, version {:#x}{}",
             a.id, a.base, a.gsi_base, a.gsi_base + a.pins - 1, a.version,
             if kept > 0 { alloc::format!(", {} SMI/ExtINT pin(s) left to firmware", kept) }
             else { alloc::string::String::new() });
     }
     for o in &overrides {
-        kprintln!("[npk] ioapic: ISA IRQ {} -> GSI {} (flags {:#x})", o.bus_irq, o.gsi, o.flags);
+        crate::kdebug!("[npk] ioapic: ISA IRQ {} -> GSI {} (flags {:#x})", o.bus_irq, o.gsi, o.flags);
     }
     crate::interrupts::without_interrupts(|| {
         let mut st = LOCK.lock();

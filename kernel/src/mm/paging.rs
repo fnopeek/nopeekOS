@@ -7,7 +7,6 @@
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::memory;
-use crate::kprintln;
 
 const ENTRY_COUNT: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -239,7 +238,7 @@ pub fn init() {
         core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
     }
 
-    kprintln!("[npk] Paging: 64 GB identity-mapped, NX enabled (own PML4 @ {:#x})", pml4_phys);
+    crate::kdebug!("[npk] Paging: 64 GB identity-mapped, NX enabled (own PML4 @ {:#x})", pml4_phys);
 }
 
 /// End of the identity mapping (see `init`: 64 GB).

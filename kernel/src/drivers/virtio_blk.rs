@@ -83,7 +83,7 @@ pub fn init() -> bool {
     let dev = match pci::find_device(VIRTIO_VENDOR, VIRTIO_BLK_DEV) {
         Some(d) => d,
         None => {
-            kprintln!("[npk] virtio-blk: no device found");
+            crate::kdebug!("[npk] virtio-blk: no device found");
             return false;
         }
     };

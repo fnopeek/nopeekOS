@@ -1430,7 +1430,7 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     }
     let handle = hw.mmio_maps.len();
     hw.mmio_maps.push((bar_base, page_count));
-    kprintln!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
+    crate::kdebug!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
         bar_idx, bar_base, bar_size, requested, page_count);
     handle as i32
 }
@@ -1513,7 +1513,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
     }
     let handle = hw.mmio_maps.len();
     hw.mmio_maps.push((base, n));
-    kprintln!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
+    crate::kdebug!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
         base, n * 4096, handle);
     handle as i32
 }
@@ -2785,7 +2785,7 @@ pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
 
     // Force compositor full redraw
     crate::shade::force_redraw();
-    kprintln!("[npk] Wallpaper set ({}x{}, theme extracted)", width, height);
+    kprintln!("[npk] Wallpaper set ({}x{})", width, height);
     0
 }
 

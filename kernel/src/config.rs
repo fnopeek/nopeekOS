@@ -122,13 +122,21 @@ pub fn get(key: &str) -> Option<String> {
 pub fn set(key: &str, value: &str) {
     CONFIG.lock().set(key, value);
     save();
+    if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
 }
 
 /// Remove a config value and persist.
 pub fn unset(key: &str) -> bool {
     let removed = CONFIG.lock().remove(key);
     if removed { save(); }
+    if key == "bootlog" { crate::serial::set_verbose(false); }
     removed
+}
+
+/// `set bootlog verbose` shows `kdebug!` detail lines on screen and serial;
+/// otherwise they only reach `dmesg` and `sys/log/boot`.
+pub fn bootlog_verbose() -> bool {
+    get("bootlog").as_deref() == Some("verbose")
 }
 
 /// Get timezone offset in minutes (e.g. +120 for UTC+2).

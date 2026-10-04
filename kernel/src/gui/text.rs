@@ -185,13 +185,13 @@ pub fn init() {
     // 4. Sanity-log a few metrics so we know the load worked end-to-end.
     let body = style_desc(TextStyle::Body);
     if let Some(lm) = font.horizontal_line_metrics(body.size_px as f32) {
-        crate::kprintln!(
+        crate::kdebug!(
             "[npk] Inter Variable loaded: {} glyphs, {} bytes, UPEM {}",
             font.glyph_count(),
             font_len,
             font.units_per_em() as u32,
         );
-        crate::kprintln!(
+        crate::kdebug!(
             "[npk] Inter metrics (Body 14px): ascent {:.1}, descent {:.1}, line {:.1}",
             lm.ascent, lm.descent, lm.new_line_size,
         );
@@ -219,7 +219,7 @@ pub fn init() {
                 };
                 match Font::from_bytes(bytes, settings) {
                     Ok(m) => {
-                        crate::kprintln!("[npk] IBM Plex Mono loaded: {} glyphs", m.glyph_count());
+                        crate::kdebug!("[npk] IBM Plex Mono loaded: {} glyphs", m.glyph_count());
                         *MONO.lock() = Some(m);
                     }
                     Err(e) => crate::kprintln!("[npk] text::init: mono parse failed: {}", e),

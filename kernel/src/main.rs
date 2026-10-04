@@ -85,29 +85,23 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     kprintln!();
     // The real crate version, so a boot log identifies the image it came from.
     kprintln!("[npk] nopeekOS v{}", env!("CARGO_PKG_VERSION"));
-    kprintln!("[npk] Booting (UEFI)...");
     kprintln!();
 
-    kprintln!("[npk] Initializing IDT + PIC...");
     interrupts::init();
 
-    kprintln!("[npk] Interrupts enabled.");
     interrupts::calibrate_tsc();
     interrupts::init_tsc_ticks();
     kprintln!("[npk] TSC: {} MHz", interrupts::tsc_freq() / 1_000_000);
     keyboard::init();
 
-    kprintln!("[npk] Initializing Physical Memory Manager...");
     memory::init(boot_info);
 
 
-    kprintln!("[npk] Initializing Heap Allocator...");
     heap::init();
 
     // Start capturing boot log for debug shell (needs heap)
     serial::start_capture();
 
-    kprintln!("[npk] Initializing Virtual Memory Manager...");
     paging::init();
 
     // Framebuffer init (needs memory + paging for MMIO mapping)
@@ -118,7 +112,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     acpi::set_rsdp(boot_info.acpi_rsdp);
     acpi::init();
 
-    kprintln!("[npk] Scanning PCI bus...");
     let pci_count = pci::scan();
     kprintln!("[npk] PCI: {} devices", pci_count);
     vga::show_status(b"PCI bus scanned");
@@ -169,7 +162,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // GDT for the TSS base — both covered by tss::init() above.
     microvm::init();
 
-    kprintln!("[npk] Probing block devices...");
     if virtio_blk::init() {
         vga::show_status(b"virtio-blk online");
     }
@@ -183,13 +175,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // RTC: immediate wall clock (no network needed)
     if let Some(t) = rtc::read_unix_time() {
         net::ntp::set_time(t);
-        kprintln!("[npk] RTC: {}", net::ntp::format_time(t));
+        crate::kdebug!("[npk] RTC: {}", net::ntp::format_time(t));
         vga::show_status(b"RTC clock set");
     } else {
         kprintln!("[npk] RTC: read failed");
     }
 
-    kprintln!("[npk] Probing network...");
     // Both PCI NICs unconditionally (`|`, not `||`): a short circuit left the
     // second one uninitialised on a machine with two, and the survivor then held
     // the whole data path — including traffic that belonged elsewhere.
@@ -222,7 +213,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // long after boot DHCP has already given up.
         netdev::refresh_link_state();
 
-        kprintln!("[npk] Running DHCP...");
         // Boot is the one place where waiting is right: nothing else runs yet,
         // there is no prompt to take away, and NTP below wants an address.
         if net::dhcp::run_blocking(5000) {
@@ -232,7 +222,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // re-configures on a real change (cable pulled, WiFi associated).
         net::seed_active();
 
-        kprintln!("[npk] Syncing time (NTP)...");
         if net::ntp::sync_via_dns("pool.ntp.org") {
             if let Some(t) = net::ntp::unix_time() {
                 kprintln!("[npk] NTP: {}", net::ntp::format_time(t));
@@ -255,7 +244,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Debug shell disabled — enable when needed:
     // if netdev::is_available() { shell::start_debug_listener(); }
 
-    kprintln!("[npk] Initializing WASM Runtime...");
     wasm::init();
     vga::show_status(b"WASM runtime online (wasmi)");
 
@@ -427,6 +415,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     // Load system config (after identity — config is encrypted at rest)
     config::load();
+    serial::set_verbose(config::bootlog_verbose());
     // The module engine is a config setting so it persists across reboots
     // and also applies to autostart and driver modules.
     wasm::load_engine_default();
@@ -462,9 +451,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // Create home directory and set as working directory
     intent::setup_home();
 
-    kprintln!("[npk] Initializing Capability Vault...");
     let (vault_ref, root_id) = capability::Vault::init();
-    kprintln!("[npk] Vault online. Root cap: {:08x}", capability::short_id(&root_id));
     vga::show_status(b"Capability Vault online");
 
     // Delegate a console session from root (no DELEGATE/REVOKE rights)
@@ -478,14 +465,12 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             None,
         ).expect("failed to create session capability")
     };
-    kprintln!("[npk] Console session: {:08x}", capability::short_id(&session_id));
     vga::show_status(b"Console session issued");
 
     // Start npk-shell listener (encrypted remote access, port 4444)
     shell::start_listener();
 
-    kprintln!("[npk] Starting Intent Loop...");
-    kprintln!("[npk] System ready. Express your intent.");
+    kprintln!("[npk] System ready.");
 
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {
@@ -619,6 +604,7 @@ fn text_mode_auth(salt: &[u8; 16]) {
         match npkfs::fetch(crate::config::KEYCHECK_PATH) {
             Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
                 config::load();
+                serial::set_verbose(config::bootlog_verbose());
                 if let Some(name) = config::get("name") {
                     kprintln!("[npk] Welcome back, {}.", name);
                 } else {

@@ -291,7 +291,7 @@ fn nvme_msix_confirm(vector: u8) {
         let n = crate::irq::fired_count(vector);
         if n > 0 {
             MSIX_CONFIRMED.store(true, Ordering::Relaxed);
-            kprintln!("[npk] nvme: MSI-X completion IRQ CONFIRMED (vector {:#04x}, {} fires) — host-device-irq works",
+            crate::kdebug!("[npk] nvme: MSI-X completion IRQ CONFIRMED (vector {:#04x}, {} fires) — host-device-irq works",
                 vector, n);
         }
     }
@@ -309,7 +309,7 @@ pub fn init() -> bool {
         }
     };
 
-    kprintln!("[npk] nvme: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] IRQ {}",
+    crate::kdebug!("[npk] nvme: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}] IRQ {}",
         dev.addr.bus, dev.addr.device, dev.addr.function,
         dev.vendor_id, dev.device_id, dev.irq_line);
 
@@ -351,7 +351,7 @@ pub fn init() -> bool {
 
     // Log raw CAP too: a computed 0 could come from an overflow or from a
     // register that does not answer.
-    kprintln!("[npk] nvme: version {}.{}.{}, CAP={:#018x}, max queue {}",
+    crate::kdebug!("[npk] nvme: version {}.{}.{}, CAP={:#018x}, max queue {}",
         version >> 16, (version >> 8) & 0xFF, version & 0xFF,
         cap, max_queue_entries);
 
@@ -535,7 +535,7 @@ pub fn init() -> bool {
     state.msix_vector = crate::irq::register(dev.addr, 0).unwrap_or(0);
     let ien = if state.msix_vector != 0 { 1u32 << 1 } else { 0 }; // cdw11 bit1 = IEN
     if state.msix_vector != 0 {
-        kprintln!("[npk] nvme: MSI-X I/O-completion IRQ → LAPIC vector {:#04x} (IV=0)",
+        crate::kdebug!("[npk] nvme: MSI-X I/O-completion IRQ → LAPIC vector {:#04x} (IV=0)",
             state.msix_vector);
     } else {
         kprintln!("[npk] nvme: no usable MSI-X — polling completions");
@@ -583,7 +583,7 @@ pub fn init() -> bool {
         cmd.cdw11 = 0; // aggregation threshold = 0, time = 0 → no coalescing
         match admin_command(&mut state, cmd) {
             Ok(_) => kprintln!("[npk] nvme: interrupt coalescing disabled"),
-            Err(_) => kprintln!("[npk] nvme: set-features (coalescing) not supported"),
+            Err(_) => crate::kdebug!("[npk] nvme: set-features (coalescing) not supported"),
         }
         // INTMS was set to 0xFFFFFFFF above ("mask all, we poll"). The spec
         // says MSI-X uses the per-vector table mask and ignores INTMS, but
@@ -591,7 +591,7 @@ pub fn init() -> bool {
         // (INTMC) now that MSI-X is configured + unmasked. Harmless on a
         // spec-compliant controller (write ignored under MSI-X).
         mmio_write32(bar0_virt, REG_INTMC, 0xFFFF_FFFF);
-        kprintln!("[npk] nvme: INTMS cleared (INTMC) for MSI-X");
+        crate::kdebug!("[npk] nvme: INTMS cleared (INTMC) for MSI-X");
     }
 
     state.io_sq = io_sq;

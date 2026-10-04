@@ -337,7 +337,7 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
         BLURRED_H = h;
     }
     BLURRED_SET.store(true, Ordering::Release);
-    crate::kprintln!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
+    crate::kdebug!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
         (crate::interrupts::ticks() - t0) * 10, detail, radius);
 }
 

@@ -710,7 +710,7 @@ pub fn self_test() {
         let s2 = ST_STEP.load(Ordering::SeqCst);
 
         if s1 == 2 && s2 == 22 {
-            crate::kprintln!("[fiber] self-test OK (2x round-trip, arg + resume verified)");
+            crate::kdebug!("[fiber] self-test OK (2x round-trip, arg + resume verified)");
         } else {
             crate::kprintln!("[fiber] self-test FAIL: s1={} (want 2) s2={} (want 22)", s1, s2);
         }

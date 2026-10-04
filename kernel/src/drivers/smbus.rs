@@ -49,7 +49,7 @@ static SMBA: Mutex<Option<u16>> = Mutex::new(None);
 /// Logs + returns silently if absent — SMBus is a nice-to-have (battery).
 pub fn init() {
     let Some(dev) = pci::find_by_class(0x0C, 0x05) else {
-        crate::kprintln!("[npk] smbus: no SMBus controller (class 0C05)");
+        crate::kdebug!("[npk] smbus: no SMBus controller (class 0C05)");
         return;
     };
     let addr = dev.addr;

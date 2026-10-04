@@ -407,9 +407,8 @@ fn run_decode(filename: &str) {
         None => { log("[wallpaper] PNG decode failed"); return; }
     };
 
-    if set_wallpaper(&pixels, width, height) {
-        log("[wallpaper] OK");
-    } else {
+    // Success is reported by the kernel ("Wallpaper set").
+    if !set_wallpaper(&pixels, width, height) {
         log("[wallpaper] npk_set_wallpaper failed");
     }
 }

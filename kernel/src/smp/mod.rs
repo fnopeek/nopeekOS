@@ -76,7 +76,7 @@ pub fn init() {
         return;
     }
 
-    kprintln!("[npk] smp: {} cores detected (BSP + {} APs)",
+    crate::kdebug!("[npk] smp: {} cores detected (BSP + {} APs)",
         ap_ids.len() + 1, ap_ids.len());
 
     // Prepare trampoline at 0x8000
@@ -105,7 +105,7 @@ pub fn init() {
         per_core::init_dedicated_vm_core(online as usize);
         per_core::start_scheduler();
 
-        kprintln!("[npk] smp: scheduler ready (shared inbox, tickless workers: {} timer + wake IPI)",
+        crate::kdebug!("[npk] smp: scheduler ready (shared inbox, tickless workers: {} timer + wake IPI)",
             if crate::interrupts::has_tsc_deadline() { "TSC-deadline" } else { "one-shot" });
         log_tsc_sync(online as usize);
         enable_deep_idle();
@@ -141,7 +141,7 @@ fn log_tsc_sync(online: usize) {
         kprintln!("[npk] tsc: sync not measured (no AP answered)");
         return;
     }
-    kprintln!("[npk] tsc: {} APs vs core 0: min {:+} us, max {:+} us",
+    crate::kdebug!("[npk] tsc: {} APs vs core 0: min {:+} us, max {:+} us",
         n, lo / per_us, hi / per_us);
 
     // Correct only a real, uniform offset: the APs must agree with each

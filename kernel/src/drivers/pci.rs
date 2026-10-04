@@ -682,7 +682,7 @@ pub fn scan() -> u16 {
             let cls = ((class >> 24) & 0xFF) as u8;
             let sub = ((class >> 16) & 0xFF) as u8;
 
-            kprintln!("[npk]   {:02x}:{:02x}.0  {:04x}:{:04x}  class {:02x}.{:02x}",
+            crate::kdebug!("[npk]   {:02x}:{:02x}.0  {:04x}:{:04x}  class {:02x}.{:02x}",
                 bus, dev, vid, did, cls, sub);
             count += 1;
         }

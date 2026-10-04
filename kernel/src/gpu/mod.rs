@@ -143,7 +143,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // Always start with GOP (safe, UEFI-provided framebuffer)
     match gop::GopDriver::from_boot_info(boot_info) {
         Some(drv) => {
-            crate::kprintln!("[npk] GPU: GOP {}x{} (bootloader)",
+            crate::kdebug!("[npk] GPU: GOP {}x{} (bootloader)",
                 drv.framebuffer().width, drv.framebuffer().height);
             *GPU.lock() = Some(Box::new(drv) as Box<dyn GpuHal>);
         }
