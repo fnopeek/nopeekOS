@@ -270,7 +270,7 @@ pub fn rect_coverage_sdf(px: u32, py: u32,
 }
 
 /// Signed distance (Q24.8) from the outline of the rounded rect to the
-/// CENTRE of pixel `(px, py)`. Negative inside, positive outside.
+/// centre of pixel `(px, py)`. Negative inside, positive outside.
 ///
 /// The arc centres are the ones `rect_coverage_sdf` places — `(rx+r, ry+r)`
 /// and its three mirrors — so the halo and the chrome can never disagree
@@ -288,7 +288,7 @@ pub fn rrect_distance_sdf(px: u32, py: u32,
     isqrt_u64((qx * qx + qy * qy) as u64) as i32 - r as i32 * 256
 }
 
-/// Soft halo just OUTSIDE a rounded rect, alpha falling off with distance.
+/// Soft halo just outside a rounded rect, alpha falling off with distance.
 ///
 /// The focus border is a hairline in a wallpaper-derived colour, so on a busy
 /// or similarly-coloured wallpaper it disappears. A halo does not depend on
@@ -311,16 +311,14 @@ pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
     let band_q8 = width as i32 * 256;
     let paint = |px: u32, py: u32| {
         if rect_coverage_sdf(px, py, x, y, w, h, r) > 0 { return; }
-        // One distance, not a ring search. Counting whole rings and then
-        // scaling by THAT ring's edge coverage looks right on a straight
-        // edge (coverage is always 256 there) and falls apart on the arcs,
-        // where every pixel lands in some ring's ~1.17 px fringe: the halo
-        // came out as a fan of steps with black gaps in it. Measured on the
-        // corner diagonal: 55 55 10 53 17 17 0 17 17 1.
+        // One distance per pixel rather than a search over whole rings:
+        // scaling by a ring's edge coverage is fine on straight edges but
+        // on the arcs every pixel lands in some ring's fringe, which gives
+        // a stepped halo with gaps.
         let d = rrect_distance_sdf(px, py, x, y, w, h, r).max(0);
         if d >= band_q8 { return; }
-        // Same profile the ring search had on a straight edge: column `i`
-        // out has its centre at d = i - 0.5 and got (width + 1 - i) / width.
+        // Straight-edge profile: column `i` out has its centre at
+        // d = i - 0.5 and gets (width + 1 - i) / width.
         let f = (((band_q8 + 128 - d) as i64 * 256) / band_q8 as i64).min(256) as u32;
         let a = alpha * f / 256;
         if a > 0 {
@@ -391,40 +389,20 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
     }
 }
 
-/// Single-pass chrome painter. Outer SDF curve at radius `rounding`,
-/// inner SDF curve at radius `rounding - border`, concentric — so the
-/// radial border is uniform `border` everywhere along the curve. One
-/// distance + smoothstep per curve, no supersampling.
-///
-/// `paint_content == true` (terminal windows): full layered chrome —
-/// border ring with outer-fringe AA, inner area filled with `bg_color`,
-/// inner-fringe blends content ↔ border. The terminal renderer paints
-/// text on top of the bg_color.
-///
-/// `paint_content == false` (widget windows): the chrome paints solid
-/// border in the entire (border-ring + inner-fringe) band and leaves
-/// the inner-full area untouched. The widget blit then fills the inner
-/// area with its own SDF AA against the border. This keeps the widget's
-/// own background (cards, panes) from being undercut by `bg_color`
-/// bleeding through the inner-fringe.
-///
-/// `border_a == border_b` paints solid; different values give a 45°
-/// gradient (top-left → bottom-right).
 // Precomputed "glass" tint: blend(bg_color, wallpaper, opacity) for the whole
 // screen, cached and recomputed only when bg/opacity/wallpaper change. The
 // translucent terminal chrome interior memcpys a row from this instead of
-// blending per pixel, so it's ~2ms at ANY window size — which is what makes
-// the dock glide (it resizes the terminal every frame, so the chrome cache
-// can't catch it) smooth. (Recompute is ~one-off on a theme/wallpaper change.)
+// blending per pixel, so its cost does not grow with window size. This
+// matters while the dock resizes the terminal every frame, which the chrome
+// cache cannot catch.
 static GLASS_TINT: spin::Mutex<Option<(u64, u32, alloc::vec::Vec<u32>)>> =
     spin::Mutex::new(None);
 
 fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*const u32, usize)> {
     // The blurred wallpaper when there is one — glass is readable because
     // of the blur. The generation is in the key, not just the pointer:
-    // `set_wallpaper` overwrites the SAME buffer in place, so a pointer key
-    // kept the old wallpaper inside every terminal until bg_color changed
-    // (a light/dark switch).
+    // `set_wallpaper` overwrites the same buffer in place, so a pointer key
+    // would keep the old wallpaper until bg_color changed.
     let wp = crate::gui::background::glass_source_ptr();
     if wp.is_null() { return None; }
     let generation = crate::gui::background::wallpaper_generation();
@@ -459,6 +437,25 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
     Some((buf.as_ptr(), *pp as usize))
 }
 
+/// Single-pass chrome painter. Outer SDF curve at radius `rounding`,
+/// inner SDF curve at radius `rounding - border`, concentric — so the
+/// radial border is uniform `border` everywhere along the curve. One
+/// distance + smoothstep per curve, no supersampling.
+///
+/// `paint_content == true` (terminal windows): full layered chrome —
+/// border ring with outer-fringe AA, inner area filled with `bg_color`,
+/// inner-fringe blends content ↔ border. The terminal renderer paints
+/// text on top of the bg_color.
+///
+/// `paint_content == false` (widget windows): the chrome paints solid
+/// border in the entire (border-ring + inner-fringe) band and leaves
+/// the inner-full area untouched. The widget blit then fills the inner
+/// area with its own SDF AA against the border. This keeps the widget's
+/// own background (cards, panes) from being undercut by `bg_color`
+/// bleeding through the inner-fringe.
+///
+/// `border_a == border_b` paints solid; different values give a 45°
+/// gradient (top-left → bottom-right).
 pub fn fill_rounded_chrome_aa(
     shadow: *mut u8, info: &FbInfo,
     x: u32, y: u32, w: u32, h: u32,
@@ -483,10 +480,9 @@ pub fn fill_rounded_chrome_aa(
     let go = bg_opacity.min(255);
 
     // The inner-full area (outer==inner==256) is the bulk of a window's
-    // pixels; at 4K that's millions, and computing rect_coverage_sdf TWICE per
-    // pixel for all of them was comp.render's entire cost (~96ms for a widget,
-    // ~40ms even for one terminal). On the vertically-straight rows that span
-    // is the known rectangle [skip_lo, skip_hi) — short-circuit the SDF there
+    // pixels, and computing rect_coverage_sdf twice per pixel there would
+    // dominate the cost. On the vertically-straight rows that span is the
+    // known rectangle [skip_lo, skip_hi), so the SDF is skipped there
     // (outer=inner=256): widget mode `continue`s it (the widget blit paints
     // it); an opaque content fill becomes a plain store; a translucent one
     // still blends over the wallpaper but without the SDF. The border ring +
@@ -497,8 +493,8 @@ pub fn fill_rounded_chrome_aa(
     let skip_hi = (inner_x + inner_w).saturating_sub(2).max(skip_lo);
     let opaque_fill = paint_content && go >= 255;
     // Translucent terminal interior → memcpy a row from the precomputed glass
-    // tint (any size, ~2ms) instead of per-pixel blend. Border ring + corners
-    // keep the per-pixel SDF path below.
+    // tint instead of per-pixel blend. Border ring + corners keep the
+    // per-pixel SDF path below.
     let tint = if paint_content && !opaque_fill {
         ensure_glass_tint(bg_color, go, info)
     } else {
@@ -512,7 +508,7 @@ pub fn fill_rounded_chrome_aa(
     let pitch = info.pitch as usize;
 
     // Per-pixel SDF path — used for the border ring + the four rounded corners
-    // (everything that is NOT the known-interior straight span).
+    // (everything that is not the known-interior straight span).
     let paint_px = |px: u32, py: u32| {
         let outer = rect_coverage_sdf(px, py, x, y, w, h, r_out);
         if outer == 0 { return; }
@@ -542,10 +538,9 @@ pub fn fill_rounded_chrome_aa(
             // Border ring (outside the inner rect): solid border over wallpaper.
             put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
         } else if inner == 256 {
-            // Deep interior — MUST match the straight-row glass tint exactly
-            // (glass over wallpaper, NO border tint), else the corner bands
-            // show a border-coloured bar where the per-pixel path used to add
-            // the tint but the straight middle no longer does.
+            // Deep interior: must match the straight-row glass tint exactly
+            // (glass over wallpaper, no border tint), else the corner bands
+            // show a border-coloured bar next to the straight middle.
             put_pixel(shadow, info, px, py, glass_blend(glass_fill, bg_pixel, go, ink));
         } else {
             // Inner fringe: AA transition from border to glass over ~1 px.
@@ -617,7 +612,7 @@ pub fn blend_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, src: u32, alp
 // ── Layer-aware rendering (writes alpha channel for compositing) ───────
 
 /// Fill a rounded rectangle with color + alpha byte for layer compositing.
-/// Unlike fill_rounded_rect_blend, this does NOT read existing pixels —
+/// Unlike fill_rounded_rect_blend, this does not read existing pixels —
 /// it writes color with the alpha byte set in the high byte.
 /// The layer compositor handles blending with lower layers.
 pub fn fill_rounded_rect_alpha(buf: *mut u8, info: &FbInfo,
@@ -722,11 +717,9 @@ mod glow_tests {
     }
 
     /// The halo must never get brighter as it gets further from the tile.
-    /// The ring search this replaced broke that on the four arcs — it took
-    /// the first whole ring reaching a pixel and scaled by THAT ring's edge
-    /// coverage, so a pixel could land in a fringe worth almost nothing
-    /// while its outer neighbour sat fully inside the next ring. Measured
-    /// over the same cases below: up to 79 of 100 brighter outwards.
+    /// A ring search breaks this on the four arcs: a pixel can land in a
+    /// fringe worth almost nothing while its outer neighbour sits fully
+    /// inside the next ring.
     #[test]
     fn halo_never_brightens_outwards() {
         let (x, y, w, h) = (60u32, 60u32, 120u32, 100u32);
@@ -751,8 +744,7 @@ mod glow_tests {
         }
     }
 
-    /// The straight edges are what the ring search already got right, and
-    /// the profile there must not move: column `i` out is
+    /// The straight-edge profile must stay: column `i` out is
     /// `(band + 1 - i) / band` of the full strength.
     #[test]
     fn straight_edge_profile_is_unchanged() {

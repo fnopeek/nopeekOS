@@ -100,7 +100,7 @@ pub fn extract_palette(pixels: &[u8], pixel_count: usize) -> [u32; 16] {
     // Sample pixels (skip transparent, near-black, near-white)
     let mut samples = alloc::vec::Vec::new();
     let step = (pixel_count / 8192).max(1); // Sample ~8k pixels max
-    // Overall brightness = mean luminance over ALL sampled pixels, including
+    // Overall brightness = mean luminance over all sampled pixels, including
     // the near-black / near-white ones the theming pass skips — that is the
     // wallpaper's true perceived brightness, which the glass tint scales on.
     for i in (0..pixel_count).step_by(step) {

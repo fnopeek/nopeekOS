@@ -221,7 +221,7 @@ fn draw_status(shadow: *mut u8, info: &FbInfo, l: &Layout, msg: &str, color: u32
 /// reads as full load (`smp::per_core`).
 fn idle_halt() {
     // One frame at most. Before boot finishes the periodic tick ends it;
-    // after `lock`, Core 0 has no tick any more (stage 3e) — a bare `hlt`
+    // after `lock`, Core 0 has no tick any more — a bare `hlt`
     // would sleep until the next key and freeze the screen meanwhile.
     let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
     crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
@@ -329,7 +329,7 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             layout.screen_w, 24 * layout.scale);
                     });
 
-                    // Derive key (OUTSIDE fb lock)
+                    // Derive key (outside fb lock)
                     let key = crate::crypto::derive_master_key(&passphrase[..pos], salt);
                     for b in passphrase.iter_mut() { *b = 0; }
                     pos = 0;

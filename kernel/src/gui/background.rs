@@ -22,7 +22,7 @@ static mut WALLPAPER_H: u32 = 0;
 static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
 
 /// The wallpaper, heavily blurred, same size and pitch. Glass surfaces
-/// (loop, dock, bar) blend over THIS instead of the sharp image: a
+/// (loop, dock, bar) blend over this instead of the sharp image: a
 /// translucent light panel over sharp texture leaves the texture
 /// competing with the text on it, and blur is what makes glass readable.
 /// Computed once per wallpaper — the wallpaper is static, so reading it
@@ -40,8 +40,8 @@ const BLUR_PASSES: usize = 3;
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
 /// translucent-glass cache key so a same-theme wallpaper swap invalidates it
 /// (the key otherwise tracks colour/geometry only, not the backdrop pixels —
-/// and set_wallpaper overwrites the buffer IN PLACE, so clearing the cache
-/// alone races a cross-core re-store under the unchanged key). Bump AFTER the
+/// and set_wallpaper overwrites the buffer in place, so clearing the cache
+/// alone races a cross-core re-store under the unchanged key). Bump after the
 /// pixel write with Release: a core that Acquire-observes the new generation
 /// also observes the finished new pixels.
 static WALLPAPER_GEN: AtomicU32 = AtomicU32::new(0);
@@ -163,7 +163,7 @@ fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
 
 /// Restore the background in a rect, but only where `want` says so.
 ///
-/// The focus halo wraps the ROUNDED corner of a tile, so it also paints the
+/// The focus halo wraps the rounded corner of a tile, so it also paints the
 /// four corner notches — inside the tile's bounding box, outside its
 /// outline. A plain rect restore there would wipe the window's own arc, so
 /// the caller masks it down to the pixels the halo can reach.

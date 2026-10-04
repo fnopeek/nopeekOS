@@ -13,7 +13,7 @@
 //! ....  data       : alpha bytes; icon at size S contributes S*S bytes.
 //! ```
 //!
-//! Parsing lives here; the ATLAS bytes themselves arrive via
+//! Parsing lives here; the atlas bytes themselves arrive via
 //! `npkfs::fetch("sys/icons/phosphor")`, BLAKE3-verified at a higher
 //! layer if a hash is frozen for a specific release.
 //!

@@ -231,7 +231,7 @@ pub fn buffer(layer_idx: usize) -> Option<(*mut u8, u32, u32, u32)> {
 }
 
 /// Check if layer dimensions match the current framebuffer.
-/// If not, the BG layer should NOT be used (resolution changed after init).
+/// If not, the BG layer should not be used (resolution changed after init).
 pub fn matches_resolution(width: u32, height: u32, pitch: u32) -> bool {
     let stack = LAYERS.lock();
     stack.initialized && stack.width == width && stack.height == height && stack.pitch == pitch

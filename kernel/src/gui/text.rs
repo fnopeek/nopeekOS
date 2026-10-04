@@ -1,4 +1,4 @@
-//! Inter Variable text rendering + metrics (Phase 10).
+//! Inter Variable text rendering + metrics.
 //!
 //! Owns the system UI font — `Inter Variable` — loaded at boot, BLAKE3-
 //! verified against a frozen hash, parsed via `fontdue`. Provides real
@@ -7,16 +7,13 @@
 //! rasterizing glyphs.
 //!
 //! Inter Variable ships weights 100–900 in one file. fontdue v0.9 reads
-//! the default instance (weight 400); weight-axis switching per
-//! TextStyle is a v2 task (needs ttf-parser + custom outline extraction
-//! or rustybuzz). All metrics returned here reflect the default weight
-//! but use the real font's `hhea` / `OS/2` tables — no hardcoded values.
+//! the default instance (weight 400); per-TextStyle weight-axis switching
+//! is not implemented (needs ttf-parser + custom outline extraction or
+//! rustybuzz). All metrics returned here reflect the default weight but
+//! use the real font's `hhea` / `OS/2` tables — no hardcoded values.
 //!
-//! Glyph atlas is heap-backed in P10.1 (HashMap); P10.4 migrates it into
-//! the GGTT glyph region (see `gpu/ggtt_layout.rs`).
-//!
-//! P10.1 scope: loader + metrics + scaffold cache. P10.5 wires it into
-//! `CpuRasterizer`.
+//! The glyph cache is heap-backed; each glyph also reserves a slot in the
+//! GGTT glyph region (see `gpu/ggtt_layout.rs`).
 
 #![allow(dead_code)]
 
@@ -36,7 +33,7 @@ use crate::shade::widgets::abi::TextStyle;
 ///
 /// Seeded on fresh install by `install::bundled_assets::bootstrap_into_npkfs`,
 /// thereafter updatable via the OTA path (`intent::install`). The kernel
-/// binary itself does **not** embed the font — this keeps normal kernel
+/// binary itself does not embed the font — this keeps normal kernel
 /// releases small and makes font updates free of kernel rebuilds.
 const FONT_FS_PATH: &str = "sys/fonts/inter-variable";
 
@@ -49,12 +46,11 @@ const FONT_FS_PATH: &str = "sys/fonts/inter-variable";
 const INTER_VARIABLE_BLAKE3: &str =
     "273f86e03d009a0ba65d109cf6ed8931560e98289ce1da5bede6c27f36758bf9";
 
-/// IBM Plex Mono Regular — the face behind `TextStyle::Mono`. Inter is
-/// proportional, so before this landed every "mono" run (clock digits,
-/// file-size columns, source code) was drawn with variable advances and
-/// nothing lined up. Shipped UNMODIFIED: the OFL reserves the font name
-/// "Plex" for unmodified versions, and subsetting would count as a
-/// modification, forcing a rename. See sys/fonts/LICENSE-IBM-Plex.txt.
+/// IBM Plex Mono Regular — the face behind `TextStyle::Mono` (clock
+/// digits, file-size columns, source code), since Inter is proportional.
+/// Shipped unmodified: the OFL reserves the font name "Plex" for
+/// unmodified versions, and subsetting would count as a modification,
+/// forcing a rename. See sys/fonts/LICENSE-IBM-Plex.txt.
 const MONO_FS_PATH: &str = "sys/fonts/ibm-plex-mono";
 const IBM_PLEX_MONO_BLAKE3: &str =
     "51ac7ac25d0fdec160d6d810dd2a58a6b2eaa241c89e1224befcce187a99b5f4";
@@ -69,10 +65,9 @@ pub const fn is_mono(style: TextStyle) -> bool {
 /// Logical pixel size + OpenType weight for a TextStyle. Frozen per
 /// docs/archive/PHASE10_WIDGETS.md "Typography" table.
 ///
-/// NOTE: fontdue v0.9 renders the default weight (~400) regardless of
-/// the `weight` field — variable-axis switching is deferred to v2.
-/// Returned metrics still use the real font (Inter), so layout is
-/// correct; only visual weight differentiation is temporarily missing.
+/// Note: fontdue v0.9 renders the default weight (~400) regardless of
+/// the `weight` field. Returned metrics still use the real font (Inter),
+/// so layout is correct; only visual weight differentiation is missing.
 #[derive(Clone, Copy, Debug)]
 pub struct StyleDesc {
     pub size_px: u16,
@@ -95,14 +90,14 @@ pub const fn style_desc(style: TextStyle) -> StyleDesc {
 
 static FONT: Mutex<Option<Font>> = Mutex::new(None);
 /// The monospace face. `None` until `init` loads it; metrics then fall
-/// back to the proportional font so a missing mono file degrades to the
-/// pre-0.231 look instead of blank text.
+/// back to the proportional font so a missing mono file degrades to
+/// unaligned columns instead of blank text.
 static MONO: Mutex<Option<Font>> = Mutex::new(None);
 static READY: AtomicBool = AtomicBool::new(false);
 
 /// Glyph cache key: (glyph index, pixel size, weight).
-/// `weight` is stored for the v2 variable-axis path; v1 ignores it
-/// (fontdue renders default weight) but the key shape is stable.
+/// `weight` is kept for a future variable-axis path; it is currently
+/// ignored (fontdue renders default weight) but the key shape is stable.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub glyph:   u16,
@@ -116,12 +111,12 @@ pub struct GlyphKey {
 
 /// Rasterized glyph — alpha bitmap + metrics.
 ///
-/// P10.4: each cached glyph reserves a slot in the GGTT CompSmall4K
-/// bucket via the slab allocator. `ggtt_offset` is the slot's address;
-/// the alpha bitmap stays heap-resident for now (the CPU rasterizer in
-/// P10.5 reads from the heap copy). The GGTT slot is an address
-/// reservation so later phases can upload bytes there without
-/// re-keying the cache. LRU eviction happens on the slab side.
+/// Each cached glyph reserves a slot in the GGTT CompSmall4K bucket via
+/// the slab allocator. `ggtt_offset` is the slot's address; the alpha
+/// bitmap stays heap-resident (the CPU rasterizer reads from the heap
+/// copy). The GGTT slot is an address reservation so bytes can be
+/// uploaded there later without re-keying the cache. LRU eviction
+/// happens on the slab side.
 pub struct CachedGlyph {
     pub alpha:       Vec<u8>,
     pub width:       u16,
@@ -339,7 +334,7 @@ pub fn x_height(style: TextStyle) -> f32 {
         .unwrap_or(d.size_px as f32 * 0.5)
 }
 
-// ── Rasterization (used by CpuRasterizer in P10.5) ────────────────────
+// ── Rasterization (used by CpuRasterizer) ─────────────────────────────
 
 /// Rasterize a glyph. Returns (metrics, alpha bitmap — 1 byte/px).
 /// Falls back to zero-size bitmap if font not loaded.
@@ -350,8 +345,7 @@ pub fn rasterize(ch: char, style: TextStyle) -> (Metrics, Vec<u8>) {
     })
 }
 
-/// Cached variant of `rasterize`. P10.4 replaces the heap Vec with a
-/// GGTT offset; the API stays stable.
+/// Cached variant of `rasterize`.
 pub fn rasterize_cached<F, R>(ch: char, style: TextStyle, f: F) -> Option<R>
 where
     F: FnOnce(&CachedGlyph) -> R,
@@ -423,7 +417,7 @@ where
     cache.get(&key).map(f)
 }
 
-/// Current glyph-cache occupancy (for debug + eviction planning in P10.4).
+/// Current glyph-cache occupancy (for debug + eviction planning).
 pub fn cache_len() -> usize {
     GLYPH_CACHE.lock().as_ref().map(|c| c.len()).unwrap_or(0)
 }
