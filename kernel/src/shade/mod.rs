@@ -1380,6 +1380,7 @@ pub fn poll_render() {
     while let Some(evt) = crate::xhci::poll_mouse() {
         handle_mouse(&evt);
     }
+    widgets::slide_flush();
 
     // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {

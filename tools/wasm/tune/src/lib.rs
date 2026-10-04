@@ -182,6 +182,9 @@ struct Tune {
     scrub:   Option<u16>,
     /// Was playing when the seek drag started — resume after the seek.
     scrub_resume: bool,
+    /// Last scene committed for a drag step (ms). The compositor moves the
+    /// thumb itself; what the app redraws mid-drag is only the readout.
+    slide_drawn_at: i64,
     /// Last pointer movement over the window (ms), for hiding the bar.
     motion_at: i64,
     /// The last movement was over the bar itself: keep it up.
@@ -232,6 +235,8 @@ const A_MOTION:     u32 = 8;
 const A_MOTION_BAR: u32 = 9;
 /// How long the bar stays over a playing video after the pointer stops.
 const CONTROLS_HIDE_MS: i64 = 2500;
+/// At most this often a new scene while a slider is being dragged.
+const SLIDE_REDRAW_MS: i64 = 100;
 const TRACK_BASE:   u32 = 1000;
 /// What the two jump buttons move, in ms.
 const JUMP_MS:      u64 = 10_000;
@@ -264,6 +269,7 @@ impl Tune {
             vol_open: false,
             scrub: None,
             scrub_resume: false,
+            slide_drawn_at: 0,
             motion_at: 0,
             over_bar: false,
             controls_shown: true,
@@ -603,6 +609,9 @@ impl Tune {
     fn toggle(&mut self) {
         if self.src.is_none() && self.video.is_none() { self.load(true); return; }
         self.playing = !self.playing;
+        // Die Leiste bleibt nach jedem Wechsel noch kurz stehen, sonst
+        // verschwindet sie unter dem Finger, der gerade Play gedrueckt hat.
+        self.motion_at = host::ticks();
         if self.playing {
             // Am Ende stehen geblieben: Play heisst von vorn.
             if self.drained { self.seek_to_ms(0); }
@@ -787,15 +796,23 @@ fn render(t: &Tune) -> Widget {
         // Die Leiste liegt UEBER dem Bild, damit es beim Ein- und
         // Ausblenden nicht die Groesse wechselt.
         Some(_) => {
-            let mut layers = alloc::vec![body];
-            if t.controls_shown {
-                layers.push(Widget::Column {
-                    children: alloc::vec![Widget::Spacer { flex: 1 }, controls],
-                    spacing: 0,
-                    align: Align::Stretch,
-                    modifiers: Vec::new(),
-                });
-            }
+            // Ein Klick aufs Bild ist Play/Pause. Die Klickflaeche liegt in
+            // der oberen Ebene UEBER der Leiste und nicht am Bild selbst:
+            // der Treffertest nimmt das erste Kind, das trifft, und das Bild
+            // deckt die ganze Flaeche — die Knoepfe waeren darunter tot.
+            let mut over = alloc::vec![Widget::Column {
+                children: Vec::new(),
+                spacing: 0,
+                align: Align::Stretch,
+                modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnClick(ActionId(A_PLAY_PAUSE))],
+            }];
+            if t.controls_shown { over.push(controls); }
+            let layers = alloc::vec![body, Widget::Column {
+                children: over,
+                spacing: 0,
+                align: Align::Stretch,
+                modifiers: Vec::new(),
+            }];
             alloc::vec![Widget::Stack {
                 children: layers,
                 modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnMotion(ActionId(A_MOTION))],
@@ -897,6 +914,15 @@ fn commit_scene(t: &mut Tune) {
     }
 }
 
+/// A mid-drag redraw, throttled: every scene is a full layout and raster
+/// in the compositor, and a drag sends a step with every mouse packet.
+fn slide_redraw(t: &mut Tune) -> Outcome {
+    let now = host::ticks();
+    if now - t.slide_drawn_at < SLIDE_REDRAW_MS { return Outcome::Idle; }
+    t.slide_drawn_at = now;
+    Outcome::Render
+}
+
 // ── Events ────────────────────────────────────────────────────────────
 
 enum Outcome { Idle, Render, Exit }
@@ -934,16 +960,17 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
                 let dur = t.duration_ms();
                 if dur > 0 { t.seek_to_ms(dur * value as u64 / SLIDER_MAX as u64); }
                 if core::mem::take(&mut t.scrub_resume) && !t.playing { t.toggle(); }
+                Outcome::Render
             } else {
                 t.scrub = Some(value);
+                slide_redraw(t)
             }
-            Outcome::Render
         }
         // Volume follows the hand: a level is cheap to set and the ear is
         // the feedback.
-        Event::Slide { action: ActionId(A_VOL), value, .. } => {
+        Event::Slide { action: ActionId(A_VOL), value, done } => {
             t.set_volume((value as u32 * 100 / SLIDER_MAX as u32) as u8);
-            Outcome::Render
+            if done { Outcome::Render } else { slide_redraw(t) }
         }
         Event::Action(ActionId(id)) => {
             if id == A_PLAY_PAUSE { t.toggle(); return Outcome::Render; }

@@ -868,6 +868,10 @@ fn set_input_value_at(tree: &mut abi::Widget, path: &[u32], value: &str) -> bool
 }
 
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
+    // First: every step below may return early when the hover target did
+    // not change — and an unchanged target is exactly when motion matters.
+    motion_pulse(window_id, x, y);
+
     // Step 1 — recompute the hover path against the cached layout tree.
     // Cheap (one descent), avoids re-rendering on hover moves that
     // don't actually cross node boundaries.
@@ -926,8 +930,6 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
     if let Some(id) = new_id {
         push_event(window_id, abi::Event::Action(id));
     }
-
-    motion_pulse(window_id, x, y);
 }
 
 // Last `OnMotion` pulse per window: (target, position, tick).
@@ -2068,10 +2070,33 @@ fn set_slider_value(tree: &mut abi::Widget, action: abi::ActionId, value: u16) -
     changed
 }
 
+/// Window (+1) whose slider moved since the last frame; 0 = none.
+static SLIDE_DIRTY: AtomicU32 = AtomicU32::new(0);
+
+/// The value lives in the tree AND in the popover copies the pixel-only
+/// repaint draws from, so both are set.
+fn set_scene_slider(scene: &mut WidgetScene, action: abi::ActionId, value: u16) -> bool {
+    let mut changed = set_slider_value(&mut scene.tree, action, value);
+    for p in scene.popovers.iter_mut() {
+        changed |= set_slider_value(&mut p.child, action, value);
+    }
+    changed
+}
+
+/// Not drawn here: a drag step arrives with every mouse packet, and a
+/// raster of the whole window (a scaled video frame included) in the input
+/// path makes the pointer stutter. `slide_flush` draws once per frame,
+/// after the queued mouse events are through.
 fn slide_repaint(window_id: u32) {
-    rerender_state_only(window_id);
-    mark_dirty(window_id);
+    SLIDE_DIRTY.store(window_id + 1, Ordering::Release);
     crate::shade::request_render();
+}
+
+/// Draw the slider that moved since the last frame, if any. Value changes
+/// leave the layout as it is, so the pixel-only path is enough.
+pub fn slide_flush() {
+    let w = SLIDE_DIRTY.swap(0, Ordering::AcqRel);
+    if w != 0 { rerender_window_pixels(w - 1); }
 }
 
 /// A left press at (x,y): start dragging the slider under it, if any.
@@ -2086,7 +2111,7 @@ pub fn slide_begin(window_id: u32, x: i32, y: i32) -> bool {
             .unwrap_or_else(|| find_slider(&scene.tree, &scene.layout_tree, x, y));
         let (action, track) = match hit { Some(h) => h, None => return false };
         let value = slider_value_at(track, x);
-        set_slider_value(&mut scene.tree, action, value);
+        set_scene_slider(scene, action, value);
         (action, track, value)
     };
     *SLIDE.lock() = Some(SlideDrag { window: window_id, action, track, value });
@@ -2106,7 +2131,7 @@ pub fn slide_move(x: i32) {
         (d.window, d.action, v)
     };
     let changed = SCENES.lock().get_mut(&window)
-        .map(|s| set_slider_value(&mut s.tree, action, value))
+        .map(|s| set_scene_slider(s, action, value))
         .unwrap_or(false);
     if changed { slide_repaint(window); }
     push_event(window, abi::Event::Slide { action, value, done: false });
@@ -2142,7 +2167,7 @@ fn reapply_slide_after_commit(window_id: u32, applied: Option<u16>) {
         _ => return,
     };
     let changed = SCENES.lock().get_mut(&window_id)
-        .map(|s| set_slider_value(&mut s.tree, action, value))
+        .map(|s| set_scene_slider(s, action, value))
         .unwrap_or(false);
     if changed { slide_repaint(window_id); }
 }
