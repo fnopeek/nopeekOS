@@ -1,15 +1,12 @@
-//! Generatoren — das Anhalten, wegen dem die Befehlsmaschine ueberhaupt
-//! gebaut wurde.
+//! Generators: the suspension the bytecode machine exists for.
 //!
-//! **Die Antwort auf die Entwurfsfrage von Stufe 4** steht im Kopf von
-//! `vm.rs` und heisst: ein Generator ist eine EIGENE Maschine, kein Rahmen in
-//! fremder. Deshalb steht hier so wenig — der Zustand ist eine `Vm`, und die
-//! drei Methoden sind drei Arten, sie wieder anzuwerfen.
+//! A generator is its own machine, not a frame inside another (see the head
+//! of `vm.rs`). The state is a `Vm`, and the three methods are three ways to
+//! resume it.
 //!
-//! **Keine zweite Semantik.** Gebaut wird ein Generatorobjekt an genau EINER
-//! Stelle (`make`, gerufen aus `Interp::call_inner`), und zwar auch dann,
-//! wenn der Aufruf aus der Befehlsmaschine kam: die schickt einen Generator
-//! bewusst ueber `Interp::call`, statt ihm einen Rahmen zu geben.
+//! A generator object is built in exactly one place (`make`, called from
+//! `Interp::call_inner`), also when the call came from the bytecode machine:
+//! it routes generator calls through `Interp::call` instead of pushing a frame.
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -19,57 +16,48 @@ use super::interp::{Interp, C};
 use super::value::{Gc, ObjKind, Prop, Value, new_kind};
 use super::vm::{Step, Vm};
 
-/// Der Lebenslauf eines Generators.
+/// A generator's lifecycle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// Gebaut, aber noch keinen Befehl gefahren. Ein `next(v)` wirft `v` weg —
-    /// es gibt noch kein `yield`, das ihn entgegennehmen koennte.
+    /// Built, no instruction run yet. `next(v)` discards `v`; there is no
+    /// `yield` yet to receive it.
     Start,
-    /// Steht auf einem `yield`.
+    /// Suspended at a `yield`.
     Suspended,
-    /// Laeuft gerade. Ein `next()` von innen ist ein Fehler, kein Neustart.
+    /// Currently running. A `next()` from inside is an error, not a restart.
     Running,
     Done,
 }
 
-/// Was ein Generatorobjekt festhaelt.
+/// What a generator object holds.
 ///
-/// `Cell`/`RefCell` und die Maschine als `Option`, damit waehrend des Laufens
-/// KEINE Ausleihe offen steht: ein Generator, der sich selbst `next()` ruft,
-/// kaeme sonst an einem `borrow_mut` vorbei und liesse den Kernel anhalten.
-/// Herausnehmen, fahren, zurueckstellen.
+/// `Cell`/`RefCell` and the machine as an `Option`, so that no borrow is held
+/// while it runs: a generator calling its own `next()` would otherwise hit a
+/// `borrow_mut` and halt the kernel. Take it out, run, put it back.
 pub struct GenState {
     vm: RefCell<Option<Vm>>,
     status: Cell<Status>,
-    /// Das Versprechen, das eine ASYNC-Funktion am Ende erledigt. `None` bei
-    /// einem gewoehnlichen Generator UND bei einem async-Generator — der hat
-    /// nicht EIN Versprechen, sondern eins je Anfrage (`queue`).
+    /// The promise an async function settles at the end. `None` for a plain
+    /// generator and for an async generator, which has one promise per request
+    /// (`queue`) instead.
     ///
-    /// Dass alle drei sich denselben Zustand teilen, ist kein Sparen: eine
-    /// wartende async-Funktion IST ein angehaltener Rumpf, und der Bauplan
-    /// sagte es so — „derselbe Mechanismus mit einem Promise davor". Der
-    /// Unterschied ist allein, WER sie wieder anwirft: ein `next()` oder die
-    /// Microtask-Schlange.
+    /// All three share this state because a waiting async function is a
+    /// suspended body; the only difference is who resumes it: `next()` or the
+    /// microtask queue.
     promise: Option<Gc>,
-    /// Die offenen Anfragen eines ASYNC-Generators, in der Reihenfolge, in der
-    /// sie kamen.
+    /// Pending requests of an async generator, in arrival order.
     ///
-    /// **Ein async-Generator braucht sie, ein gewoehnlicher nicht** — und das
-    /// ist der ganze Unterschied zwischen beiden. `agen.next()` gibt SOFORT
-    /// ein Versprechen zurueck, auch wenn der Rumpf noch an einem `await`
-    /// haengt; drei `next()` hintereinander duerfen die Maschine nicht
-    /// dreimal anwerfen, sondern muessen sich anstellen (ES 27.6.3.6). Ohne
-    /// die Schlange waere der zweite Aufruf entweder ein Fehler („already
-    /// running") oder ein zweiter Stapel auf demselben Rumpf.
+    /// `agen.next()` returns a promise immediately, even while the body waits at
+    /// an `await`; three `next()` calls in a row must queue rather than resume
+    /// the machine three times (ES 27.6.3.6). Plain generators do not need it.
     queue: RefCell<VecDeque<Req>>,
 }
 
-/// Eine offene Anfrage an einen async-Generator.
+/// A pending request to an async generator.
 struct Req {
     kind: ReqKind,
     value: Value,
-    /// Das Versprechen, das `next()`/`throw()`/`return()` schon
-    /// zurueckgegeben hat und das hier erledigt wird.
+    /// The promise `next()`/`throw()`/`return()` already returned, settled here.
     promise: Gc,
 }
 
@@ -77,15 +65,14 @@ struct Req {
 enum ReqKind { Next, Throw, Return }
 
 impl GenState {
-    /// Was die angehaltene Maschine festhaelt — siehe `Vm::roots`.
+    /// What the suspended machine holds; see `Vm::roots`.
     pub fn roots(&self, objs: &mut alloc::vec::Vec<Gc>,
                  envs: &mut alloc::vec::Vec<Rc<RefCell<super::interp::Env>>>) {
         if let Some(vm) = self.vm.borrow().as_ref() {
             vm.roots(objs, envs);
         }
-        // Die Schlange haelt je Anfrage ein Versprechen und einen Wert fest.
-        // Sie hier auszulassen liesse einen Rc-Ring stehen, sobald ein
-        // Rueckruf auf das Versprechen den Generator selbst festhaelt.
+        // The queue holds a promise and a value per request. Skipping it here would
+        // leave an Rc cycle once a callback on the promise holds the generator.
         for r in self.queue.borrow().iter() {
             objs.push(r.promise.clone());
             if let Value::Obj(o) = &r.value { objs.push(o.clone()); }
@@ -93,15 +80,15 @@ impl GenState {
     }
 }
 
-/// Ein Aufruf einer Generatorfunktion: er baut das Objekt und faehrt NICHTS.
+/// A call to a generator function: builds the object and runs nothing.
 ///
-/// `None` heisst, dass der Uebersetzer den Rumpf nicht kann — dann bleibt es
-/// beim alten Weg (der Baumlaeufer laeuft in sein „generators are not
-/// supported"), statt hier einen halben Generator zu bauen.
+/// `None` means the compiler cannot handle the body; the old path (the tree
+/// walker reporting "generators are not supported") stays instead of
+/// building half a generator.
 ///
-/// Die Reihenfolge ist die der Spec: erst die Umgebung mit Parametern,
-/// `this` und `arguments` (`call_env`), dann das Hochziehen, dann
-/// `Get(f, "prototype")` fuer den Prototyp des Objekts.
+/// Spec order: first the environment with parameters, `this` and
+/// `arguments` (`call_env`), then hoisting, then `Get(f, "prototype")` for
+/// the object's prototype.
 pub fn make(i: &mut Interp, func: &Gc, d: &Rc<super::value::FuncData>,
             this_val: Value, args: &[Value]) -> C<Option<Value>> {
     let Some(chunk) = i.func_chunk(&d.node) else { return Ok(None) };
@@ -122,27 +109,22 @@ pub fn make(i: &mut Interp, func: &Gc, d: &Rc<super::value::FuncData>,
 
 // ── async/await ──────────────────────────────────────────────────────────
 //
-// Derselbe angehaltene Rumpf, nur wirft ihn die Microtask-Schlange wieder an
-// statt eines `next()`. Der Zustand haengt an einem Objekt, das kein Skript je
-// sieht — es ist bloss der Traeger, ueber den `promise::bind1` den beiden
-// Behandlern ihren Generator mitgibt (ein `NativeFn` ist ein Zeiger und
-// bekommt keinen Abschluss).
+// The same suspended body, resumed by the microtask queue instead of
+// `next()`. The state hangs on an object no script ever sees; it only
+// carries the generator to the two handlers via `promise::bind1` (a
+// `NativeFn` is a pointer and has no closure).
 
-/// Ein Aufruf einer async-Funktion: er gibt ein VERSPRECHEN zurueck und
-/// laeuft den Rumpf bis zum ersten `await` sofort — synchron, wie die Spec es
-/// verlangt.
+/// A call to an async function: returns a promise and runs the body up to
+/// the first `await` synchronously, as the spec requires.
 ///
-/// Auch ein Fehler beim Binden der Parameter wird zur ABLEHNUNG, nicht zu
-/// einem Wurf: eine async-Funktion wirft nie, sie lehnt ab.
+/// An error while binding parameters also becomes a rejection: an async
+/// function never throws, it rejects.
 pub fn make_async(i: &mut Interp, d: &Rc<super::value::FuncData>,
                   this_val: Value, args: &[Value]) -> C<Option<Value>> {
     let Some(chunk) = i.func_chunk(&d.node) else {
-        // **Auch ein unuebersetzbarer Rumpf gibt ein Versprechen zurueck.**
-        // Der Baumlaeufer faehrt ihn (und laeuft an einem `await` in seinen
-        // TypeError), aber der Aufrufvertrag bleibt derselbe: eine
-        // async-Funktion wirft nie und gibt nie einen nackten Wert. Zwei
-        // Aufrufvertraege fuer dasselbe Schluesselwort waeren genau die
-        // zweite Semantik, die dieser Umbau vermeidet.
+        // An uncompilable body still returns a promise. The tree walker runs it (and
+        // fails with a TypeError at an `await`), but the call contract stays the
+        // same: an async function never throws and never returns a bare value.
         let outer = super::promise::new_promise(i);
         match i.run_js_body(d, this_val, args) {
             Ok(v) => super::promise::resolve_promise(i, &outer, v),
@@ -173,19 +155,19 @@ pub fn make_async(i: &mut Interp, d: &Rc<super::value::FuncData>,
     Ok(Some(Value::Obj(outer)))
 }
 
-/// Womit die Maschine wieder anlaeuft.
+/// What the machine is resumed with.
 enum Seed {
-    /// Zum ersten Mal — es gibt noch kein `await`, das einen Wert naehme.
+    /// First run; there is no `await` yet to take a value.
     Start,
     Value(Value),
     Throw(Value),
-    /// Ein `return(v)` an einem `yield*`: es geht als WERT an den inneren
-    /// Iterator, statt den aeusseren Generator aufzugeben.
+    /// A `return(v)` at a `yield*`: passed as a value to the inner iterator
+    /// instead of abandoning the outer generator.
     Delegate(Value),
 }
 
-/// Die Maschine einer async-Funktion fahren, bis sie wartet oder fertig ist —
-/// und danach ihr Versprechen erledigen.
+/// Run an async function's machine until it waits or finishes, then settle
+/// its promise.
 fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
     let Some(outer) = st.promise.clone() else { return };
     let Some(mut vm) = st.vm.borrow_mut().take() else { return };
@@ -193,8 +175,8 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
     let r = match seed {
         Seed::Start => vm.drive(i),
         Seed::Value(v) => { vm.send(v); vm.drive(i) }
-        // Faengt den Wurf im Rumpf niemand, ist die Funktion damit fertig —
-        // und ihr Versprechen abgelehnt.
+        // If nobody in the body catches the throw, the function is done and its
+        // promise rejected.
         Seed::Throw(e) => {
             if vm.at_delegate() { vm.send_throw(e); vm.drive(i) }
             else if vm.inject_throw(i, e.clone()) { vm.drive(i) }
@@ -217,8 +199,8 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
             st.status.set(Status::Done);
             super::promise::resolve_promise(i, &outer, v);
         }
-        // Kann nicht vorkommen: ein async-Generator ist beim Uebersetzen
-        // abgelehnt, ein `yield` steht also in keinem async-Rumpf.
+        // Cannot happen: async generators are served by `serve`, so no `yield`
+        // reaches this path.
         Ok(Step::Yield(..)) => {
             st.status.set(Status::Done);
             vm.close(i);
@@ -235,8 +217,8 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
     }
 }
 
-/// Der Behandler, den `await` am Versprechen anhaengt: `a[0]` ist der
-/// gebundene Traeger, `a[1]` die Aufloesung.
+/// The handler `await` attaches to the promise: `a[0]` is the bound carrier,
+/// `a[1]` the resolution.
 fn wake(i: &mut Interp, a: &[Value], rejected: bool) {
     let Some(holder) = a.first().cloned() else { return };
     let v = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -250,24 +232,21 @@ fn wake(i: &mut Interp, a: &[Value], rejected: bool) {
     pump(i, &st, if rejected { Seed::Throw(v) } else { Seed::Value(v) }, holder);
 }
 
-// ── async-Generatoren ────────────────────────────────────────────────────
+// ── async generators ─────────────────────────────────────────────────────
 //
-// **Sie sind nicht die Summe der beiden, sondern ihre Verschraenkung.** Ein
-// async-Generator haelt an ZWEI Gruenden an: an `await` (die Microtask-
-// Schlange wirft ihn wieder an) und an `yield` (ein `next()` tut es). Beide
-// Gruende kommen aus derselben `Vm`, und `Step` kennt sie laengst — was
-// fehlte, war der Vertrag darum herum:
+// Not the sum of both but their interleaving. An async generator suspends
+// for two reasons: at `await` (the microtask queue resumes it) and at `yield`
+// (`next()` resumes it). Both come from the same `Vm` and `Step`; the
+// contract around them is:
 //
-//   * `next()` gibt SOFORT ein Versprechen zurueck, auch mitten im `await`.
-//     Also eine Schlange, keine Antwort (`Req`).
-//   * `yield x` ist `AsyncGeneratorYield(? Await(x))` (ES 15.5.5 / 27.6.3.8) —
-//     der Wert wird ERST abgewartet. Das steht nicht hier, sondern im
-//     Uebersetzer: er legt in einem async-Generator vor jedes `Op::Yield` ein
-//     `Op::Await`. So bleibt die Maschine dumm und es gibt keine zweite
-//     Semantik fuer `yield`.
+//   * `next()` returns a promise immediately, even mid-`await`, so requests
+//     queue (`Req`).
+//   * `yield x` is `AsyncGeneratorYield(? Await(x))` (ES 15.5.5 / 27.6.3.8),
+//     the value is awaited first. The compiler emits an `Op::Await` before
+//     every `Op::Yield` in an async generator, so the machine stays simple.
 
-/// Ein Aufruf einer async-Generatorfunktion: er baut das Objekt und faehrt
-/// NICHTS — wie beim gewoehnlichen Generator, nur mit leerer Anfrage-Schlange.
+/// A call to an async generator function: builds the object and runs
+/// nothing, like a plain generator but with an empty request queue.
 pub fn make_async_gen(i: &mut Interp, func: &Gc, d: &Rc<super::value::FuncData>,
                       this_val: Value, args: &[Value]) -> C<Option<Value>> {
     let Some(chunk) = i.func_chunk(&d.node) else { return Ok(None) };
@@ -286,13 +265,12 @@ pub fn make_async_gen(i: &mut Interp, func: &Gc, d: &Rc<super::value::FuncData>,
     Ok(Some(Value::Obj(new_kind(Some(proto), ObjKind::Generator(Rc::new(st))))))
 }
 
-/// Eine Anfrage anstellen und das Versprechen zurueckgeben, das sie erledigen
-/// wird (ES 27.6.3.6 AsyncGeneratorEnqueue).
+/// Queue a request and return the promise that will settle it
+/// (ES 27.6.3.6 AsyncGeneratorEnqueue).
 ///
-/// **Der Rueckgabewert ist IMMER ein Versprechen, auch im Fehlerfall** — ein
-/// `next()` auf etwas, das kein async-Generator ist, lehnt ab und wirft
-/// nicht. Ein Wurf hier wuerde das rufende Skript beenden, statt eine
-/// Ablehnung zuzustellen, die es behandeln kann.
+/// The result is always a promise, also on error: `next()` on something
+/// that is not an async generator rejects instead of throwing, so the caller
+/// gets a rejection it can handle.
 fn enqueue(i: &mut Interp, t: &Value, kind: ReqKind, v: Value) -> Value {
     let p = super::promise::new_promise(i);
     let st = match t {
@@ -311,8 +289,8 @@ fn enqueue(i: &mut Interp, t: &Value, kind: ReqKind, v: Value) -> Value {
         return Value::Obj(p);
     };
     st.queue.borrow_mut().push_back(Req { kind, value: v, promise: p.clone() });
-    // Laeuft die Maschine gerade (oder wartet sie an einem `await`), nimmt sie
-    // die Anfrage von selbst auf, sobald sie dort fertig ist.
+    // If the machine is running (or waiting at an `await`), it picks up the
+    // request by itself once it is done there.
     if st.status.get() != Status::Running {
         let holder = t.clone();
         serve(i, &st, holder, None);
@@ -320,15 +298,15 @@ fn enqueue(i: &mut Interp, t: &Value, kind: ReqKind, v: Value) -> Value {
     Value::Obj(p)
 }
 
-/// Die vorderste Anfrage erledigen und die naechste nehmen, bis die Schlange
-/// leer ist oder die Maschine wartet (ES 27.6.3.5 AsyncGeneratorResumeNext).
+/// Settle the front request and take the next, until the queue is empty or
+/// the machine waits (ES 27.6.3.5 AsyncGeneratorResumeNext).
 ///
-/// `seed` ist gesetzt, wenn wir aus einem `await` zurueckkommen — dann laeuft
-/// die Maschine weiter, statt eine neue Anfrage zu beginnen.
+/// `seed` is set when returning from an `await`; the machine then continues
+/// instead of starting a new request.
 fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed>) {
     loop {
-        // Ein fertiger Generator beantwortet alles aus der Schlange, ohne die
-        // Maschine anzufassen.
+        // A finished generator answers everything in the queue without touching the
+        // machine.
         if st.status.get() == Status::Done {
             let Some(r) = st.queue.borrow_mut().pop_front() else { return };
             match r.kind {
@@ -344,7 +322,7 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
             }
             continue;
         }
-        // Kein `seed` heisst: eine NEUE Anfrage beginnt.
+        // No `seed` means a new request begins.
         let cur = match seed.take() {
             Some(s) => s,
             None => {
@@ -355,22 +333,19 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
                 };
                 match kind {
                     ReqKind::Next => {
-                        // Beim allerersten `next` gibt es kein `yield`, das
-                        // den Wert naehme — dieselbe Regel wie im
-                        // gewoehnlichen Generator.
+                        // On the very first `next` there is no `yield` to take the value; same rule
+                        // as in a plain generator.
                         if st.status.get() == Status::Start { Seed::Start } else { Seed::Value(value) }
                     }
                     ReqKind::Throw => Seed::Throw(value),
-                    // An einem `yield*` geht auch hier beides an den INNEREN
-                    // Iterator, statt den aeusseren abzuwickeln bzw. aufzugeben.
+                    // At a `yield*` both go to the inner iterator instead of unwinding or
+                    // abandoning the outer one.
                     ReqKind::Return if st.vm.borrow().as_ref()
                         .is_some_and(|vm| vm.at_delegate()) => Seed::Delegate(value),
-                    // **`return` fuehrt den Rumpf nicht zu Ende.** Ein
-                    // `finally` mit `yield` darin ist beim Uebersetzen
-                    // abgelehnt, es kann also keinen geben, der noch laufen
-                    // muesste; offene `for…of`-Iterationen schliesst
-                    // `Vm::close`. Benannt fehlt: die Spezifikation WARTET den
-                    // Wert vorher ab (AsyncGeneratorAwaitReturn), wir nicht.
+                    // `return` does not run the body to completion. A `finally` containing
+                    // `yield` is rejected by the compiler, so none can be pending; open
+                    // `for…of` iterations are closed by `Vm::close`. Not implemented: the spec
+                    // awaits the value first (AsyncGeneratorAwaitReturn).
                     ReqKind::Return => {
                         if let Some(mut vm) = st.vm.borrow_mut().take() { vm.close(i); }
                         st.status.set(Status::Done);
@@ -395,9 +370,9 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
             Seed::Delegate(v) => { vm.send_return(v); vm.drive(i) }
         };
         match r {
-            // **Ein `await` beendet die Runde, aber nicht die Anfrage.** Die
-            // vorderste bleibt stehen; die Maschine bleibt „Running", damit
-            // ein `next()` daneben sich anstellt statt sie anzuwerfen.
+            // An `await` ends the round but not the request. The front request stays;
+            // the machine stays `Running` so a concurrent `next()` queues instead of
+            // resuming it.
             Ok(Step::Await(v)) => {
                 *st.vm.borrow_mut() = Some(vm);
                 let p = super::promise::to_promise(i, &v);
@@ -411,8 +386,8 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
             Ok(Step::Yield(v, _)) => {
                 st.status.set(Status::Suspended);
                 *st.vm.borrow_mut() = Some(vm);
-                // Ein async-Generator gibt immer den WERT heraus, auch beim
-                // `yield*`: `AsyncGeneratorYield(? IteratorValue(…))`.
+                // An async generator always yields the value, also for `yield*`:
+                // `AsyncGeneratorYield(? IteratorValue(…))`.
                 let out = i.iter_result(v, false);
                 if let Some(r) = st.queue.borrow_mut().pop_front() {
                     super::promise::resolve_promise(i, &r.promise, out);
@@ -441,7 +416,7 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
     }
 }
 
-/// Der Behandler, den ein `await` IM async-Generator anhaengt.
+/// The handler an `await` inside an async generator attaches.
 fn wake_gen(i: &mut Interp, a: &[Value], rejected: bool) {
     let Some(holder) = a.first().cloned() else { return };
     let v = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -456,11 +431,11 @@ fn wake_gen(i: &mut Interp, a: &[Value], rejected: bool) {
     serve(i, &st, holder, Some(seed));
 }
 
-/// `%AsyncIteratorPrototype%`, `%AsyncGeneratorPrototype%` und
+/// `%AsyncIteratorPrototype%`, `%AsyncGeneratorPrototype%` and
 /// `%AsyncGeneratorFunction.prototype%`.
 ///
-/// Der erste traegt nur `[Symbol.asyncIterator]() { return this }` — daran
-/// haengt, dass `for await (x of agen())` ueberhaupt einen Iterator findet.
+/// The first carries only `[Symbol.asyncIterator]() { return this }`, which
+/// is what lets `for await (x of agen())` find an iterator.
 pub fn install_async(f_proto: &Gc) -> (Gc, Gc, Gc) {
     let async_iter = super::value::new_obj(None);
     let proto = super::value::new_obj(Some(async_iter.clone()));
@@ -490,8 +465,8 @@ pub fn install_async(f_proto: &Gc) -> (Gc, Gc, Gc) {
     (async_iter, proto, fn_proto)
 }
 
-/// Der Zustand hinter `this` — oder ein TypeError, wenn `this` keiner ist.
-/// Die Ausleihe endet HIER, vor allem, was danach laeuft.
+/// The state behind `this`, or a TypeError if there is none. The borrow ends
+/// here, before anything that runs afterwards.
 fn state(i: &mut Interp, t: &Value) -> C<Rc<GenState>> {
     if let Value::Obj(o) = t {
         if let ObjKind::Generator(g) = &o.borrow().kind {
@@ -501,26 +476,24 @@ fn state(i: &mut Interp, t: &Value) -> C<Rc<GenState>> {
     i.type_err("not a generator")
 }
 
-/// Was `drive` ergeben hat, in ein `{value, done}` umsetzen — und den Zustand
-/// dabei richtig stellen. Ein Wurf beendet den Generator endgueltig.
+/// Turn the result of `drive` into `{value, done}` and update the state. A
+/// throw finishes the generator for good.
 fn finish(i: &mut Interp, st: &Rc<GenState>, mut vm: Vm, r: C<Step>) -> C<Value> {
     match r {
         Ok(Step::Yield(v, raw)) => {
             st.status.set(Status::Suspended);
             *st.vm.borrow_mut() = Some(vm);
-            // **ROH heisst: schon ein Ergebnisobjekt.** `yield*` reicht das
-            // des INNEREN Iterators unveraendert durch (ES 15.5.5,
-            // `GeneratorYield`) — es noch einmal einzupacken gaebe
-            // `{value: {value: 1, done: false}, done: false}`.
+            // Raw means already a result object: `yield*` passes the inner iterator's
+            // result through unchanged (ES 15.5.5, `GeneratorYield`). Wrapping it again
+            // would give `{value: {value: 1, done: false}, done: false}`.
             Ok(if raw { v } else { i.iter_result(v, false) })
         }
         Ok(Step::Done(v)) => {
             st.status.set(Status::Done);
             Ok(i.iter_result(v, true))
         }
-        // Kann nicht vorkommen: ein `await` steht nur im Rumpf einer
-        // async-Funktion, und ein async-Generator ist beim Uebersetzen
-        // abgelehnt. Steht hier, weil ein `_ =>` den Fall verschweigen wuerde.
+        // Cannot happen: `await` only appears in async bodies, which never reach
+        // this path. Listed so that a `_ =>` does not hide the case.
         Ok(Step::Await(_)) => {
             st.status.set(Status::Done);
             vm.close(i);
@@ -534,11 +507,10 @@ fn finish(i: &mut Interp, st: &Rc<GenState>, mut vm: Vm, r: C<Step>) -> C<Value>
     }
 }
 
-/// Die Maschine herausnehmen, wenn der Zustand es erlaubt.
+/// Take the machine out if the state allows it.
 ///
-/// `Ok(None)` heisst „fertig, nichts mehr zu tun"; ein laufender Generator
-/// gibt einen TypeError, weil ihn wieder anzuwerfen seinen Stapel
-/// verdoppeln wuerde.
+/// `Ok(None)` means done, nothing left to do; a running generator gives a
+/// TypeError because resuming it would double its stack.
 fn take(i: &mut Interp, st: &Rc<GenState>) -> C<Option<Vm>> {
     match st.status.get() {
         Status::Running => i.type_err("generator is already running"),
@@ -555,24 +527,24 @@ pub fn next(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
     let started = st.status.get() == Status::Suspended;
     let Some(mut vm) = take(i, &st)? else { return Ok(i.iter_result(Value::Undefined, true)) };
-    // Beim ALLERERSTEN `next` gibt es kein `yield`, das den Wert nehmen
-    // koennte — er faellt weg. Genau das sagt die Spec.
+    // On the very first `next` there is no `yield` to take the value; the spec
+    // discards it.
     if started { vm.send(v); }
     st.status.set(Status::Running);
     let r = vm.drive(i);
     finish(i, &st, vm, r)
 }
 
-/// `gen.throw(v)`: den Wurf an der Anhaltestelle einwerfen. Faengt ihn dort
-/// niemand, ist der Generator fertig und der Wurf gehoert dem Rufer — auch
-/// dann, wenn noch gar nichts gelaufen war.
+/// `gen.throw(v)`: inject the throw at the suspension point. If nothing
+/// catches it there, the generator is done and the throw goes to the caller,
+/// also when nothing has run yet.
 pub fn throw(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
     let Some(mut vm) = take(i, &st)? else { return Err(super::interp::Abrupt::Throw(v)) };
     st.status.set(Status::Running);
-    // **An einem `yield*` wickelt ein Wurf NICHT ab.** Dort ist er ein Wert,
-    // der an den inneren Iterator weitergereicht wird (ES 15.5.5, 6.b) — hat
-    // der kein `throw`, entscheidet das die Maschine, nicht diese Stelle.
+    // At a `yield*` a throw does not unwind: it is passed to the inner iterator
+    // (ES 15.5.5, 6.b). If that has no `throw`, the machine decides, not this
+    // code.
     if vm.at_delegate() {
         vm.send_throw(v);
         let r = vm.drive(i);
@@ -587,16 +559,15 @@ pub fn throw(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     finish(i, &st, vm, r)
 }
 
-/// `gen.return(v)`: aufgeben. Offene `for…of`-Iterationen werden geschlossen
-/// (`Vm::close`); ein anhaengiger `finally` kann es nicht geben, weil ein
-/// `yield` darunter schon beim Uebersetzen abgelehnt wird.
+/// `gen.return(v)`: abandon. Open `for…of` iterations are closed
+/// (`Vm::close`); no `finally` can be pending, because a `yield` inside one
+/// is rejected by the compiler.
 pub fn ret(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
     let Some(mut vm) = take(i, &st)? else { return Ok(i.iter_result(v, true)) };
-    // **An einem `yield*` bekommt der INNERE Iterator sein `return` zuerst.**
-    // Er darf seinen eigenen Aufraeumer fahren, und er darf die Aufgabe sogar
-    // abfangen (indem sein `return()` `done: false` gibt) — dann laeuft der
-    // aeussere Generator weiter, und `finish` sieht ein gewoehnliches `yield`.
+    // At a `yield*` the inner iterator gets its `return` first. It may run its
+    // own cleanup and even refuse (its `return()` gives `done: false`); then the
+    // outer generator continues and `finish` sees an ordinary `yield`.
     if vm.at_delegate() {
         st.status.set(Status::Running);
         vm.send_return(v);
@@ -608,12 +579,11 @@ pub fn ret(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     Ok(i.iter_result(v, true))
 }
 
-/// Die zwei Prototypen des Generatorvertrags.
+/// The two prototypes of the generator protocol.
 ///
-/// `%GeneratorPrototype%` haengt unter `%IteratorPrototype%` — daher kommt
-/// `[Symbol.iterator]() { return this }`, und genau daran haengt, dass
-/// `for (x of gen())` und `[...gen()]` gehen, ohne dass hier etwas dafuer
-/// steht.
+/// `%GeneratorPrototype%` sits under `%IteratorPrototype%`, which supplies
+/// `[Symbol.iterator]() { return this }`; that is what makes `for (x of gen())`
+/// and `[...gen()]` work.
 pub fn install(i_proto: &Gc, f_proto: &Gc) -> (Gc, Gc) {
     let proto = super::value::new_obj(Some(i_proto.clone()));
     let fn_proto = super::value::new_obj(Some(f_proto.clone()));

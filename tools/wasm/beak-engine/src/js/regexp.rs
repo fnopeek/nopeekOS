@@ -1,20 +1,13 @@
-//! Regulaere Ausdruecke: Muster-Parser und Rueckverfolgung.
+//! Regular expressions: pattern parser and backtracking matcher.
 //!
-//! **Rueckverfolgung, nicht Automat.** Ein DFA waere schneller und koennte
-//! nicht katastrophal werden — aber er kann keine Rueckwaertsverweise und
-//! keine Umschau, und die Spezifikation ist selbst in Rueckverfolgung
-//! formuliert (ES 22.2.2). Ein Motor, der `(a+)+b` in Sekunden statt in
-//! Jahrtausenden beantwortet, aber `\1` nicht kennt, waere fuer eine echte
-//! Seite der schlechtere Tausch.
+//! Backtracking, not an automaton: a DFA cannot do backreferences or
+//! lookaround, and the spec itself is written as backtracking (ES 22.2.2).
 //!
-//! **Deshalb ein Schrittdeckel, von Anfang an.** Katastrophales
-//! Backtracking ist dieselbe Falle wie die vier nativen Schleifen, die in
-//! dieser Sitzung ohne Deckel gelaufen sind — nur dass hier die FREMDE SEITE
-//! das Muster stellt. `(a+)+$` auf dreissig `a` sind ohne Deckel 2^30 Wege.
+//! Hence a step cap: the pattern comes from the page, and catastrophic
+//! backtracking (`(a+)+$` on thirty `a` is 2^30 paths) must not hang us.
 //!
-//! **Zeichen, nicht UTF-16-Einheiten.** JS zaehlt in UTF-16; hier wird in
-//! `char` gezaehlt. Fuer alles ausserhalb der Basisebene (Emoji) weichen die
-//! Indizes ab. Bewusst und benannt, statt still falsch.
+//! Indices count `char`s, not UTF-16 units. They differ from JS outside the
+//! Basic Multilingual Plane (emoji). Known limit.
 
 use alloc::boxed::Box;
 use super::builtins::this_string;
@@ -56,7 +49,7 @@ impl Flags {
                         (self.multiline, 'm'), (self.unicode, 'u'), (self.sticky, 'y')] {
             if on { s.push(c); }
         }
-        // Die Reihenfolge ist festgelegt: d g i m s u v y.
+        // Fixed order: d g i m s u v y.
         let mut out = String::new();
         for c in ['g', 'i', 'm', 's', 'u', 'y'] { if s.contains(c) { out.push(c); } }
         out
@@ -131,8 +124,8 @@ impl<'a> P<'a> {
             Some('+') => { self.i += 1; (1, u32::MAX) }
             Some('?') => { self.i += 1; (0, 1) }
             Some('{') => {
-                // `{` ist nur dann ein Zaehler, wenn es auch einer ist —
-                // sonst ein gewoehnliches Zeichen (`a{b}` ist gueltig).
+                // `{` is a quantifier only if it parses as one; otherwise a literal
+                // (`a{b}` is valid).
                 let save = self.i;
                 self.i += 1;
                 let lo = self.number();
@@ -186,7 +179,7 @@ impl<'a> P<'a> {
                                 Some('=') => { self.i += 1; slot = None; look = Some((true, false)); }
                                 Some('!') => { self.i += 1; slot = None; look = Some((true, true)); }
                                 _ => {
-                                    // Benannte Gruppe `(?<name>…)`.
+                                    // Named group `(?<name>…)`.
                                     let mut name = String::new();
                                     while let Some(c) = self.at() {
                                         if c == '>' { break; }
@@ -229,7 +222,7 @@ impl<'a> P<'a> {
             let lo = if c == '\\' { 
                 match self.class_escape()? { Ok(ch) => ch, Err(item) => { items.push(item); continue } }
             } else { c };
-            // Ein `-` gefolgt von etwas anderem als `]` macht einen Bereich.
+            // A `-` followed by anything other than `]` makes a range.
             if self.at() == Some('-') && self.c.get(self.i + 1).copied() != Some(']') && self.c.get(self.i + 1).is_some() {
                 self.i += 1;
                 let hc = self.at().unwrap();
@@ -246,8 +239,8 @@ impl<'a> P<'a> {
         Ok(Node::Class { neg, items })
     }
 
-    /// In einer Klasse: entweder ein Zeichen (`Ok`) oder eine ganze Gruppe
-    /// wie `\d` (`Err`, was hier kein Fehler ist sondern der andere Fall).
+    /// Inside a class: either a character (`Ok`) or a whole set such as `\d`
+    /// (`Err`, which here is not an error but the other case).
     fn class_escape(&mut self) -> Result<Result<char, ClassItem>, &'static str> {
         let Some(c) = self.at() else { return Err("trailing backslash") };
         self.i += 1;
@@ -309,7 +302,7 @@ impl<'a> P<'a> {
             'b' => Node::WordBoundary(false),
             'B' => Node::WordBoundary(true),
             'k' => {
-                // Benannter Rueckverweis `\k<name>`.
+                // Named backreference `\k<name>`.
                 if !self.eat('<') { return Ok(Node::Char('k')); }
                 let mut name = String::new();
                 while let Some(x) = self.at() { if x == '>' { break; } name.push(x); self.i += 1; }
@@ -325,11 +318,9 @@ impl<'a> P<'a> {
                 Node::BackRef(n)
             }
             'p' | 'P' if self.unicode => {
-                // Unicode-Eigenschaften: die Tabelle dafuer kostet Zehntausende
-                // Zeichen und keine Seite des Zielkorpus benutzt sie. Als
-                // FEHLER melden, nicht still als Zeichen lesen — ein Muster,
-                // das etwas anderes tut als es sagt, ist schlimmer als eins,
-                // das gar nicht laeuft.
+                // Unicode property escapes are not implemented. Report an error rather than
+                // read them as literals: a pattern that silently does something else is
+                // worse than one that fails.
                 return Err("unicode property escapes are not supported");
             }
             other => Node::Char(self.simple_escape(other)?),
@@ -349,7 +340,7 @@ impl Regex {
     }
 }
 
-/// Ein Treffer: Zeichenspannen je Gruppe, 0 = das Ganze.
+/// A match: character spans per group, 0 = the whole match.
 pub struct Match {
     pub caps: Vec<Option<(usize, usize)>>,
 }
@@ -362,24 +353,18 @@ struct St<'a> {
     budget: u32,
 }
 
-/// Wie viele Rueckverfolgungsschritte ein Treffer kosten darf.
+/// Base number of backtracking steps a search may cost.
 ///
-/// Kein Zierrat: `(a+)+$` auf dreissig `a` sind 2^30 Wege, und das MUSTER
-/// stellt die fremde Seite. Reisst der Deckel, gilt „kein Treffer" — falsch,
-/// aber begrenzt falsch, und ein haengender Browser waere schlimmer.
+/// The pattern comes from the page; `(a+)+$` on thirty `a` is 2^30 paths.
+/// When the cap is hit the result is "no match": wrong, but bounded, and
+/// better than a hung browser.
 const MAX_STEPS: u32 = 400_000;
-/// Was jedes weitere Zeichen der Eingabe dem Deckel zulegt.
+/// Steps added to the cap per input character.
 ///
-/// **Der Deckel galt bis 0.174.0 je STARTSTELLE, und damit gar nicht.** Ein
-/// Muster ohne Anker wird an jeder Stelle neu versucht; bei 300 000 Zeichen
-/// Stilblatt waren das 300 000 × 400 000 Schritte, also kein Deckel, sondern
-/// ein haengender Browser. Gefunden an DuckDuckGos Ergebnisseite: sie laedt
-/// `css-vars-ponyfill` nach und laesst es ihre eigenen Blaetter mit
-/// verschachtelten Mustern zerlegen.
-///
-/// Jetzt gilt er fuer den GANZEN Lauf, waechst aber mit der Eingabe: eine
-/// ehrliche Suche kostet ungefaehr einen Schritt je Zeichen, und ein Muster,
-/// das viel mehr braucht, sucht nicht mehr, sondern zaehlt Wege ab.
+/// The cap applies to the whole search, across all start positions, so an
+/// unanchored pattern on a large input stays bounded. An honest search costs
+/// roughly one step per character; a pattern needing far more is enumerating
+/// paths, not searching.
 const STEPS_PER_CHAR: u32 = 64;
 
 fn is_word(c: char) -> bool { c.is_ascii_alphanumeric() || c == '_' }
@@ -449,9 +434,8 @@ fn m(n: &Node, st: &mut St, pos: usize, k: K) -> Option<usize> {
         Node::Seq(items) => seq(items, 0, st, pos, k),
         Node::Alt(alts) => {
             for a in alts {
-                // Die Erfassungen der gescheiterten Alternative muessen weg,
-                // sonst traegt der Treffer Spuren eines Weges, den er nicht
-                // gegangen ist.
+                // Drop the captures of the failed alternative, or the match would carry
+                // traces of a path it did not take.
                 let save = st.caps.clone();
                 if let Some(e) = m(a, st, pos, k) { return Some(e); }
                 st.caps = save;
@@ -480,9 +464,8 @@ fn m(n: &Node, st: &mut St, pos: usize, k: K) -> Option<usize> {
                 if *neg || !hit { st.caps = save; }
                 hit
             } else {
-                // Rueckschau: jede Startstelle davor probieren, die genau hier
-                // endet. Naiv, aber richtig — und Rueckschau ist selten genug,
-                // dass die Naivitaet nicht auffaellt.
+                // Lookbehind: try every earlier start that ends exactly here. Naive but
+                // correct, and lookbehind is rare.
                 let save = st.caps.clone();
                 let mut hit = false;
                 for start in (0..=pos).rev() {
@@ -524,9 +507,8 @@ fn repeat(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
     let more = |st: &mut St| -> Option<usize> {
         if !can_more { return None; }
         let again = move |st: &mut St, p: usize| -> Option<usize> {
-            // Ein Durchgang, der NICHTS verbraucht hat, wuerde ewig laufen —
-            // `(a?)*` ist gueltiges JavaScript. Abbrechen, sobald die
-            // Mindestzahl erreicht ist.
+            // An iteration that consumed nothing would loop forever (`(a?)*` is valid
+            // JavaScript). Stop once the minimum count is reached.
             if p == pos { return if done + 1 >= min { k(st, p) } else { None }; }
             repeat(node, min, max, greedy, st, p, done + 1, k)
         };
@@ -545,19 +527,14 @@ fn repeat(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
 }
 
 impl Regex {
-    /// Sucht ab `start`. `sticky` erzwingt einen Treffer GENAU dort.
-    /// Faengt JEDER Weg durch das Muster mit `^` an?
+    /// Does every path through the pattern begin with `^`?
     ///
-    /// **Dann gibt es genau eine Startstelle, und das ist keine Feinheit.**
-    /// Ohne diese Frage probiert `exec` ein verankertes Muster an jeder
-    /// Stelle der Eingabe — jede davon scheitert sofort, aber sie kostet.
-    /// Ein handgeschriebener Parser ruft sein `^…` einmal je Wortmarke auf
-    /// dem RESTTEXT auf, und aus linear wird quadratisch: bei DuckDuckGos
-    /// 300-KB-Blatt und dem `css-vars-ponyfill` davor lief der Lauf in
-    /// 25 Minuten nicht zu Ende.
+    /// Then there is exactly one start position. Without this check `exec` tries
+    /// an anchored pattern at every position, which turns a parser calling `^…`
+    /// on the remaining text into quadratic time.
     ///
-    /// Mit `m` gilt die Verankerung je ZEILE, dann stimmt die Abkuerzung
-    /// nicht mehr — deshalb steht die Flagge in der Bedingung.
+    /// With `m` anchoring is per line and the shortcut no longer holds, hence the
+    /// flag in the condition at the call site.
     fn anchored(n: &Node) -> bool {
         match n {
             Node::Start => true,
@@ -568,13 +545,13 @@ impl Regex {
         }
     }
 
+    /// Search from `start`. `sticky` forces a match exactly there.
     pub fn exec(&self, s: &[char], start: usize) -> Option<Match> {
         let last = if self.flags.sticky || (!self.flags.multiline && Self::anchored(&self.root)) {
             start
         } else { s.len() };
         let budget = MAX_STEPS.saturating_add((s.len() as u32).saturating_mul(STEPS_PER_CHAR));
-        // Die Fanggruppen EINMAL, nicht je Startstelle: eine Allokation je
-        // Zeichen der Eingabe ist auf einem Stilblatt teurer als das Suchen.
+        // Allocate the capture slots once, not per start position.
         let mut st = St { s, f: self.flags, caps: alloc::vec![None; self.group_count + 1],
                           steps: 0, budget };
         for at in start..=last {
@@ -591,7 +568,7 @@ impl Regex {
     }
 }
 
-// ── Die JS-Seite ────────────────────────────────────────────────────────────
+// ── The JS side ─────────────────────────────────────────────────────────────
 
 use super::interp::{C, Interp, Realm};
 use super::value::*;
@@ -602,7 +579,7 @@ pub fn compiled(v: &Value) -> Option<Rc<Regex>> {
         ObjKind::Regex(r) => Some(r.clone()), _ => None }, _ => None }
 }
 
-/// Ein RegExp-Objekt aus Muster und Flaggen.
+/// A RegExp object from pattern and flags.
 pub fn make(i: &mut Interp, pattern: &str, flags: &str) -> C<Value> {
     let re = match Regex::new(pattern, flags) {
         Ok(r) => Rc::new(r),
@@ -612,21 +589,20 @@ pub fn make(i: &mut Interp, pattern: &str, flags: &str) -> C<Value> {
     let g = new_kind(Some(i.realm.regexp_proto.clone()), ObjKind::Regex(re.clone()));
     {
         let mut o = g.borrow_mut();
-        // `lastIndex` ist SCHREIBBAR und gehoert dem Objekt, nicht dem
-        // Prototyp — daran haengt, dass `g`-Suchen weiterlaufen.
+        // `lastIndex` is writable and belongs to the object, not the prototype;
+        // global searches depend on it.
         o.define("lastIndex", Prop { value: Some(Value::Num(0.0)), get: None, set: None,
             writable: true, enumerable: false, configurable: false });
-        // `source`, `flags` und die acht Flaggen stehen NICHT hier: sie sind
-        // Leser auf `RegExp.prototype` (ES 22.2.6). Am Ausdruck selbst waeren
-        // sie eigene Eigenschaften — `Object.defineProperty(re, "flags", …)`
-        // schluege dann fehl statt zu greifen, und `Object.keys(re)` faende
-        // neun Namen statt keinen.
+        // `source`, `flags` and the eight flag accessors are not here: they are
+        // getters on `RegExp.prototype` (ES 22.2.6). As own properties,
+        // `Object.defineProperty(re, "flags", …)` would fail and `Object.keys(re)`
+        // would list nine names instead of none.
     }
     Ok(Value::Obj(g))
 }
 
-/// Ein Treffer als JS-Array — mit `index`, `input` und `groups` daran, so wie
-/// `exec` es liefert.
+/// A match as a JS array with `index`, `input` and `groups`, as `exec`
+/// returns it.
 fn match_result(i: &mut Interp, re: &Regex, chars: &[char], m: &Match, input: &str) -> Value {
     let mut items = Vec::new();
     for c in &m.caps {
@@ -656,7 +632,7 @@ fn match_result(i: &mut Interp, re: &Regex, chars: &[char], m: &Match, input: &s
     arr
 }
 
-/// `exec` mit der `lastIndex`-Buchhaltung, die `g`/`y` verlangen.
+/// `exec` with the `lastIndex` bookkeeping that `g`/`y` require.
 fn do_exec(i: &mut Interp, this: &Value, s: &str) -> C<Value> {
     let Some(re) = compiled(this) else { return i.type_err("not a RegExp") };
     let chars: Vec<char> = s.chars().collect();
@@ -686,7 +662,7 @@ fn do_exec(i: &mut Interp, this: &Value, s: &str) -> C<Value> {
     }
 }
 
-/// `$1`, `$&`, `$\`` und `$'` in einer Ersetzung auffuellen.
+/// Fill in `$1`, `$&`, `$\`` and `$'` in a replacement.
 fn expand(rep: &str, chars: &[char], m: &Match) -> String {
     let mut out = String::new();
     let b: Vec<char> = rep.chars().collect();
@@ -716,12 +692,8 @@ fn expand(rep: &str, chars: &[char], m: &Match) -> String {
     out
 }
 
-/// Alle Treffer einer Suche — die Grundlage von `match`, `replace` und
-/// `split`. Ein LEERER Treffer muss die Stelle weiterschieben, sonst laeuft
-/// die Schleife ewig (`"abc".replace(/x*/g, "-")`).
-/// Den Treffer fuer die annexB-Statiken festhalten. Eine Stelle, damit
-/// `exec`, `match`, `replace` und `split` nicht drei verschiedene Wahrheiten
-/// hinterlassen.
+/// Record the match for the Annex B statics. One place, so that `exec`,
+/// `match`, `replace` and `split` leave the same state.
 fn record(i: &mut Interp, chars: &[char], m: &Match) {
     let (a, b) = match m.caps[0] { Some(x) => x, None => return };
     let text = |r: core::ops::Range<usize>| -> String { chars[r].iter().collect() };
@@ -739,9 +711,8 @@ fn record(i: &mut Interp, chars: &[char], m: &Match) {
         left: text(0..a), right: text(b..chars.len()), caps, last_paren });
 }
 
-/// Wie `all_matches`, aber ohne Ruecksicht auf die `g`-Flagge — `matchAll`
-/// hat sie schon geprueft, und ein aus einer Zeichenkette gebautes Muster
-/// traegt sie nicht.
+/// Like `all_matches`, but ignoring the `g` flag: `matchAll` has already
+/// checked it, and a pattern built from a string does not carry it.
 fn all_matches_global(re: &Regex, chars: &[char]) -> Vec<Match> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -754,6 +725,9 @@ fn all_matches_global(re: &Regex, chars: &[char]) -> Vec<Match> {
     out
 }
 
+/// All matches of a search; the basis of `match`, `replace` and `split`. An
+/// empty match must advance the position, or the loop never ends
+/// (`"abc".replace(/x*/g, "-")`).
 fn all_matches(re: &Regex, chars: &[char]) -> Vec<Match> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -784,11 +758,11 @@ pub fn install(realm: &mut Realm) {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Bool(!matches!(do_exec(i, &t, &s)?, Value::Null)))
     }, 1);
-    // ── Die Leser (ES 22.2.6) ────────────────────────────────────────────
+    // ── The accessors (ES 22.2.6) ─────────────────────────────────────────
     //
-    // Auf `RegExp.prototype` selbst geben sie `undefined` (bzw. `"(?:)"`)
-    // statt zu werfen — die Ausnahme steht so in der Spezifikation, weil der
-    // Prototyp selbst kein Ausdruck ist.
+    // On `RegExp.prototype` itself they return `undefined` (or `"(?:)"`) instead
+    // of throwing; the spec makes this exception because the prototype is not a
+    // regular expression.
     macro_rules! flag_get {
         ($($n:literal => $sel:expr),* $(,)?) => { $(
             {
@@ -814,8 +788,8 @@ pub fn install(realm: &mut Realm) {
         "dotAll" => |f| f.dot_all,
         "sticky" => |f| f.sticky,
         "unicode" => |f| f.unicode,
-        // Weder `d` noch `v` sind gebaut; sie sind trotzdem da und sagen
-        // ehrlich `false`, statt zu fehlen.
+        // Neither `d` nor `v` is implemented; the accessors still exist and report
+        // `false`.
         "hasIndices" => |_| false,
         "unicodeSets" => |_| false,
     }
@@ -831,9 +805,9 @@ pub fn install(realm: &mut Realm) {
         }, "get source", 0, false);
         proto.borrow_mut().define("source", Prop { value: None, get: Some(Value::Obj(g)),
             set: None, writable: false, enumerable: false, configurable: true });
-        // `flags` ist KEIN eigener Zustand, sondern die Zusammenfassung der
-        // acht Leser — und liest sie einzeln, damit ein ueberschriebener
-        // Leser durchschlaegt. Genau das prueft test262.
+        // `flags` is not its own state but the concatenation of the eight accessors,
+        // read one by one so that an overridden accessor shows through (tested by
+        // test262).
         let g = native(Some(fp.clone()), |i, t, _| {
             if matches!(t, Value::Undefined | Value::Null) {
                 return i.type_err("RegExp.prototype.flags on undefined or null");
@@ -850,14 +824,13 @@ pub fn install(realm: &mut Realm) {
             set: None, writable: false, enumerable: false, configurable: true });
     }
 
-    // annexB: `compile` baut den Ausdruck IM SELBEN Objekt neu. Moeglich,
-    // weil die Art des Objekts veraenderlich ist — der Ausdruck liegt in
-    // `ObjKind::Regex`, nicht in einer eingefrorenen Eigenschaft.
+    // Annex B: `compile` rebuilds the expression in the same object. Possible
+    // because the object's kind is mutable; the expression lives in
+    // `ObjKind::Regex`, not in a frozen property.
     def(&proto, "compile", |i, t, a| {
         if compiled(&t).is_none() { return i.type_err("RegExp.prototype.compile on a non-RegExp"); }
-        // Nur ein Ausdruck, den `%RegExp%` SELBST gebaut hat, darf neu
-        // uebersetzt werden (`[[LegacyFeaturesEnabled]]`). Eine Unterklasse
-        // erkennt man am Prototyp.
+        // Only an expression built by `%RegExp%` itself may be recompiled
+        // (`[[LegacyFeaturesEnabled]]`). A subclass is recognised by its prototype.
         let own_proto = matches!(&t, Value::Obj(o)
             if matches!(&o.borrow().proto, Some(p) if Rc::ptr_eq(p, &i.realm.regexp_proto)));
         if !own_proto { return i.type_err("compile: not a plain RegExp instance"); }
@@ -915,16 +888,15 @@ pub fn install(realm: &mut Realm) {
     }, "RegExp", 2, true);
     ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
     proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
-    // ── `RegExp.escape` (ES 2025) ────────────────────────────────────────
+    // ── `RegExp.escape` (ES2025) ─────────────────────────────────────────
     def(&ctor, "escape", |i, _, a| {
         let Some(Value::Str(s)) = a.first() else {
             return i.type_err("RegExp.escape requires a string");
         };
         let mut out = String::new();
         for (k, c) in s.chars().enumerate() {
-            // Die ERSTE Stelle wird auch dann geschuetzt, wenn sie harmlos
-            // aussieht: sonst waere `escape("ab")` in `\1ab` einlesbar als
-            // Rueckverweis.
+            // The first character is escaped even if harmless; otherwise `escape("ab")`
+            // after `\1` would read as a backreference.
             if k == 0 && c.is_ascii_alphanumeric() {
                 out.push_str(&alloc::format!("\\x{:02x}", c as u32));
                 continue;
@@ -937,9 +909,8 @@ pub fn install(realm: &mut Realm) {
                 '\u{b}' => out.push_str("\\v"),
                 '\u{c}' => out.push_str("\\f"),
                 '\r' => out.push_str("\\r"),
-                // Die Liste steht in der Spezifikation (`otherPunctuators`),
-                // dazu Leerraum und Zeilenenden. Bis 0xFF als `\xHH`, darueber
-                // als `\uXXXX` — nicht umgekehrt.
+                // The list is in the spec (`otherPunctuators`), plus whitespace and line
+                // terminators. Up to 0xFF as `\xHH`, above as `\uXXXX`.
                 c if ",-=<>#&!%:;@~'`\"".contains(c) || c.is_whitespace()
                      || (c as u32) < 0x20 || c as u32 == 0xfeff => {
                     let n = c as u32;
@@ -953,11 +924,11 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::string(out))
     }, 1);
 
-    // ── Die annexB-Statiken ──────────────────────────────────────────────
+    // ── The Annex B statics ──────────────────────────────────────────────
     //
-    // Sie liegen am KONSTRUKTOR, nicht am Ausdruck, und lesen den letzten
-    // erfolgreichen Treffer aus `Interp::last_match`. Ein Leser auf einem
-    // anderen `this` wirft — genau das prueft test262.
+    // They live on the constructor, not on the expression, and read the last
+    // successful match from `Interp::last_match`. An accessor on any other
+    // `this` throws (tested by test262).
     {
         let legacy = |name: &str, alias: &str, f: NativeFn| {
             let g = native(Some(fp.clone()), f, &alloc::format!("get {name}"), 0, false);
@@ -979,7 +950,7 @@ pub fn install(realm: &mut Realm) {
         }
         dollar! { "$1" => 0, "$2" => 1, "$3" => 2, "$4" => 3, "$5" => 4,
                   "$6" => 5, "$7" => 6, "$8" => 7, "$9" => 8 }
-        // `input` ist als einziges auch SCHREIBBAR.
+        // `input` is the only one that is also writable.
         let set = native(Some(fp.clone()), |i, t, a| {
             legacy_this(i, &t)?;
             let v = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -1003,7 +974,7 @@ pub fn install(realm: &mut Realm) {
     realm.global.borrow_mut().define("RegExp", Prop::builtin(Value::Obj(ctor)));
     realm.regexp_proto = proto;
 
-    // ── Die String-Methoden, die ein Muster nehmen ───────────────────────
+    // ── String methods that take a pattern ───────────────────────────────
     let sp = realm.string_proto.clone();
     def(&sp, "match", |i, t, a| {
         let s = this_string(i, &t)?;
@@ -1022,17 +993,16 @@ pub fn install(realm: &mut Realm) {
         }).collect();
         Ok(i.new_array(items))
     }, 1);
-    // `matchAll` sammelt EIFRIG ein und gibt einen Feld-Iterator darueber.
-    // Ein echter Motor laeuft faul und sieht Aenderungen an `lastIndex`
-    // waehrenddessen; benannt statt verschwiegen — die Schleife
-    // `for (const m of s.matchAll(re))` sieht keinen Unterschied.
+    // `matchAll` collects eagerly and returns an array iterator over the result.
+    // A real engine runs lazily and sees changes to `lastIndex` meanwhile; a
+    // plain `for (const m of s.matchAll(re))` cannot tell the difference.
     def(&sp, "matchAll", |i, t, a| {
         if matches!(t, Value::Undefined | Value::Null) {
             return i.type_err("matchAll on undefined or null");
         }
         let arg = a.first().cloned().unwrap_or(Value::Undefined);
-        // Ein musteraehnliches Objekt zaehlt auch: `IsRegExp` fragt
-        // `Symbol.match`, und dann MUSS `flags` da sein.
+        // A regexp-like object counts too: `IsRegExp` asks `Symbol.match`, and then
+        // `flags` must be present.
         if !matches!(arg, Value::Undefined | Value::Null) {
             let is_re = compiled(&arg).is_some() || {
                 let m = i.get(&arg, SYM_MATCH)?;
@@ -1078,7 +1048,7 @@ pub fn install(realm: &mut Realm) {
         let chars: Vec<char> = s.chars().collect();
         let sep = a.first().cloned().unwrap_or(Value::Undefined);
         if compiled(&sep).is_none() {
-            // Zeichenkettenteilung — wie bisher.
+            // Split by string.
             let parts: Vec<Value> = match &sep {
                 Value::Undefined => alloc::vec![Value::Str(s.clone())],
                 v => {
@@ -1100,8 +1070,8 @@ pub fn install(realm: &mut Realm) {
             if b == a2 && a2 >= chars.len() { break; }
             if b == 0 && a2 == 0 { at = 1; continue; }
             out.push(Value::string(chars[last..a2].iter().collect::<String>()));
-            // Erfasste Gruppen landen MIT in der Liste — das ist die Regel,
-            // an der `"a1b".split(/(\d)/)` haengt.
+            // Captured groups are included in the result; `"a1b".split(/(\d)/)` relies
+            // on it.
             for c in m.caps.iter().skip(1) {
                 out.push(match c { Some((x, y)) => Value::string(chars[*x..*y].iter().collect::<String>()),
                                    None => Value::Undefined });
@@ -1114,7 +1084,7 @@ pub fn install(realm: &mut Realm) {
     }, 2);
 }
 
-/// Ein Argument als RegExp — eine Zeichenkette wird zu einem Muster.
+/// An argument as a RegExp; a string becomes a pattern.
 fn as_regex(i: &mut Interp, v: Option<&Value>) -> C<Value> {
     match v {
         Some(x) if compiled(x).is_some() => Ok(x.clone()),
@@ -1123,7 +1093,7 @@ fn as_regex(i: &mut Interp, v: Option<&Value>) -> C<Value> {
     }
 }
 
-/// Eine Zeichenkette, die als Muster genau sich selbst treffen soll.
+/// A string escaped so that, as a pattern, it matches exactly itself.
 fn escape_literal(s: &str) -> String {
     let mut o = String::new();
     for c in s.chars() {
@@ -1139,7 +1109,7 @@ fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
     let pat = a.first().cloned().unwrap_or(Value::Undefined);
     let rep = a.get(1).cloned().unwrap_or(Value::Undefined);
 
-    // Zeichenkette als Muster: der einfache Fall, ohne Motor.
+    // String as pattern: the simple case, without the matcher.
     if compiled(&pat).is_none() {
         let p = i.to_string(&pat)?;
         let mut out = String::new();
@@ -1173,7 +1143,7 @@ fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
         let (a2, b) = m.caps[0].unwrap_or((at, at));
         out.extend(&chars[last..a2]);
         if i.is_callable(&rep) {
-            // Der Ersetzer bekommt Treffer, Gruppen, Stelle und Text.
+            // The replacer gets match, groups, position and input.
             let mut args: Vec<Value> = m.caps.iter().map(|c| match c {
                 Some((x, y)) => Value::string(chars[*x..*y].iter().collect::<String>()),
                 None => Value::Undefined,
@@ -1195,13 +1165,13 @@ fn do_replace(i: &mut Interp, t: Value, a: &[Value], all: bool) -> C<Value> {
     Ok(Value::string(out))
 }
 
-/// Welches Stueck des letzten Treffers eine annexB-Statik liest.
+/// Which piece of the last match an Annex B static reads.
 #[derive(Clone, Copy)]
 enum LegacyPart { Input, Matched, Left, Right, LastParen, Cap(usize) }
 
-/// Die Statiken gehoeren dem KONSTRUKTOR. Auf einem anderen `this` werfen sie
-/// — sonst waere `RegExp.__lookupGetter__("$1").call({})` ein stiller Leser
-/// auf fremdem Zustand.
+/// The statics belong to the constructor. On another `this` they throw;
+/// otherwise `RegExp.__lookupGetter__("$1").call({})` would silently read
+/// foreign state.
 fn legacy_this(i: &mut Interp, t: &Value) -> C<()> {
     let want = i.get(&Value::Obj(i.realm.global.clone()), "RegExp")?;
     match (t, &want) {
@@ -1223,8 +1193,8 @@ fn legacy_get(i: &mut Interp, t: Value, part: LegacyPart) -> C<Value> {
     }))
 }
 
-/// Ist das GENAU `RegExp.prototype`? Die Leser geben dort `undefined` statt
-/// zu werfen.
+/// Is this exactly `RegExp.prototype`? The accessors return `undefined`
+/// there instead of throwing.
 fn is_regexp_proto(i: &Interp, t: &Value) -> bool {
     matches!(t, Value::Obj(o) if Rc::ptr_eq(o, &i.realm.regexp_proto))
 }

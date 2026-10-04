@@ -1,16 +1,8 @@
-//! Die Auswertung: ein Baumlaeufer.
+//! Evaluation: the tree walker, and the interpreter state it shares with
+//! the bytecode machine (`vm.rs`).
 //!
-//! **Warum ein Baumlaeufer und kein Bytecode.** Das Gedaechtnis notiert zu
-//! Recht, dass die Form der Verteilerschleife eine Entwurfsentscheidung ist
-//! und dass wasms `return_call` dort der moderne Hebel waere. Der Hebel bleibt
-//! richtig — er wird nur nicht als erstes gezogen: heute gibt es keine Zahl,
-//! gegen die er sich messen liesse, und was zuerst gebraucht wird, ist
-//! Richtigkeit. Der test262-Lauf ist danach das Netz, mit dem eine Umstellung
-//! auf Bytecode ueberhaupt erst verantwortbar ist.
-//!
-//! Was hier bewusst NICHT steht: Generatoren, async/await, Proxy, Symbole,
-//! BigInt. Jedes davon faellt im Lauf als eigene Zeile auf und ist damit
-//! gezaehlt statt vergessen.
+//! The tree walker runs whatever the compiler declines; both must keep the
+//! same semantics.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -23,7 +15,7 @@ use super::ast::*;
 use super::value::*;
 pub use super::value::Value;
 
-/// Ein Abbruch: alles, was nicht „der naechste Ausdruck" ist.
+/// An abrupt completion: anything that is not "the next expression".
 pub enum Abrupt {
     Throw(Value),
     Return(Value),
@@ -35,57 +27,51 @@ pub type C<T> = Result<T, Abrupt>;
 pub struct Binding {
     pub value: Value,
     pub mutable: bool,
-    /// `let`/`const` vor ihrer Deklaration: der Zugriff wirft. Ohne das ist
-    /// die zeitliche Totzone unsichtbar und `let` verhaelt sich wie `var`.
+    /// `let`/`const` before their declaration: access throws. This is the
+    /// temporal dead zone; without it `let` behaves like `var`.
     pub initialized: bool,
 }
 
 pub struct Env {
     pub vars: HashMap<Rc<str>, Binding>,
     pub parent: Option<Rc<RefCell<Env>>>,
-    /// Nur Funktionsumgebungen tragen `this`; ein Block erbt es. Genau daran
-    /// haengt, dass ein Pfeil das `this` seiner Umgebung sieht.
+    /// Only function environments carry `this`; a block inherits it. That is
+    /// how an arrow sees the `this` of its surroundings.
     pub this_val: Option<Value>,
-    /// Ist das die Umgebung einer Funktion (Ziel fuer `var`-Hochziehen)?
+    /// Is this a function environment (target for `var` hoisting)?
     pub is_func_scope: bool,
-    /// Das „Heimatobjekt" der Methode, in der wir stehen — bei einer Klasse
-    /// ihr `prototype`. `super.f` sucht auf DESSEN Prototyp, nicht auf dem
-    /// von `this`: sonst faende eine Methode, die `super.f()` ruft, sich
-    /// selbst wieder und liefe endlos. Ein Pfeil setzt es nicht und erbt es
-    /// dadurch ueber die Kette, genau wie `this`.
+    /// The home object of the enclosing method; for a class its `prototype`.
+    /// `super.f` looks up on its prototype, not on `this`'s, or a method calling
+    /// `super.f()` would find itself and recurse forever. An arrow does not set
+    /// it and inherits it through the chain, like `this`.
     pub home: Option<Gc>,
-    /// Streng? Die Strenge steht am CODE (siehe [[ast::Func::strict]]), aber
-    /// gelesen wird sie zur Laufzeit — an jeder Zuweisung, jedem `delete`,
-    /// jedem `this`. Deshalb faellt sie beim Anlegen der Umgebung hier
-    /// hinein und wird VERERBT: ein Block in einer strengen Funktion ist
-    /// streng, ohne dass jemand die Kette hochlaufen muss.
+    /// Strict? Strictness belongs to the code (see `ast::Func::strict`) but is
+    /// read at runtime on every assignment, `delete` and `this`. It is copied in
+    /// when the environment is created and inherited, so a block in a strict
+    /// function is strict without walking the chain.
     pub strict: bool,
-    /// Namen, die aus einem ANDEREN Modul kommen (`import`).
+    /// Names imported from another module.
     ///
-    /// **Ein Verweis, keine Kopie.** Ein Modulgraph mit Zyklen — und der der
-    /// Fritzbox-Oberflaeche hat welche (`main` <-> `oldpage` <-> `html2`) —
-    /// braucht LEBENDE Bindungen: wer im Kreis frueher laeuft, sieht den
-    /// Wert, den der andere spaeter hineinschreibt. Eine Kopie beim Verbinden
-    /// saehe dort `undefined`, und zwar still.
+    /// A reference, not a copy: a module graph with cycles needs live bindings,
+    /// so a module that runs earlier sees the value the other writes later. A
+    /// copy taken when linking would silently show `undefined`.
     ///
-    /// Nur Modulumgebungen tragen die Tabelle; jede andere ein `None`, und
-    /// das ist eine Nullpruefung im Kettenlauf.
+    /// Only module environments carry the table; all others hold `None`, which
+    /// costs a null check in the chain walk.
     pub imports: Option<Box<HashMap<Rc<str>, (Rc<RefCell<Env>>, Rc<str>)>>>,
-    /// Das Objekt eines `with (o) { … }`.
+    /// The object of a `with (o) { … }`.
     ///
-    /// **Eine Umgebung, deren Namen aus einem OBJEKT kommen** — die einzige
-    /// Sorte, deren Bindungen sich waehrend des Laufs aendern koennen. Sie
-    /// ist deshalb auch der Grund, warum die Wegweiser (`Chunk::hints`)
-    /// abgeschaltet werden, sobald eine entsteht: ein Hinweis auf eine Tiefe
-    /// zeigt an einer Eigenschaft vorbei, die es beim letzten Mal noch nicht
-    /// gab.
+    /// An environment whose names come from an object, the only kind whose
+    /// bindings can change while running. That is why the lookup hints
+    /// (`Chunk::hints`) are switched off once one exists: a depth hint could
+    /// skip a property that did not exist last time.
     pub with_obj: Option<Gc>,
 }
 
 impl Env {
-    /// Erbt die Strenge vom Elter. Ein Funktionsaufruf ueberschreibt sie
-    /// gleich danach mit der seines eigenen Rumpfes — nur DORT darf sie sich
-    /// aendern, und nur nach oben.
+    /// Inherits strictness from the parent. A function call overrides it right
+    /// after with that of its own body; only there may it change, and only
+    /// towards strict.
     pub fn new(parent: Option<Rc<RefCell<Env>>>, func_scope: bool) -> Rc<RefCell<Env>> {
         let strict = parent.as_ref().is_some_and(|p| p.borrow().strict);
         Rc::new(RefCell::new(Env {
@@ -95,15 +81,15 @@ impl Env {
     }
 }
 
-/// Ist der Code, der gerade laeuft, streng? Ein Feld, kein Kettenlauf — die
-/// Vererbung ist beim Anlegen passiert.
+/// Is the running code strict? A field, not a chain walk; inheritance
+/// happened at creation.
 pub fn env_strict(env: &Rc<RefCell<Env>>) -> bool { env.borrow().strict }
 
 pub fn env_lookup(env: &Rc<RefCell<Env>>, name: &str) -> Option<Rc<RefCell<Env>>> {
     env_lookup_depth(env, name).map(|(e, _)| e)
 }
 
-/// Wie `env_lookup`, sagt aber MIT, wieviele Spruenge es gekostet hat.
+/// Like `env_lookup`, but also returns how many hops it took.
 pub fn env_lookup_depth(env: &Rc<RefCell<Env>>, name: &str)
     -> Option<(Rc<RefCell<Env>>, usize)> {
     let mut depth = 0usize;
@@ -121,21 +107,20 @@ pub fn env_lookup_depth(env: &Rc<RefCell<Env>>, name: &str)
     }
 }
 
-/// Einem `import` folgen, bis eine echte Bindung dasteht.
+/// Follow an `import` until a real binding is found.
 ///
-/// Eine Kette ist moeglich (`export { x } from …` reicht durch), ein KREIS
-/// auch — ein Modul, das seinen eigenen Namen wieder einfuehrt. Der Deckel
-/// ist deshalb kein Vorsichtsmass, sondern die Abbruchbedingung.
+/// A chain is possible (`export { x } from …` passes through), and so is a
+/// cycle (a module re-importing its own name). The cap is therefore the
+/// termination condition, not a precaution.
 pub fn env_deref(env: &Rc<RefCell<Env>>, name: &str) -> Option<(Rc<RefCell<Env>>, Rc<str>)> {
     env_deref_from(env.clone(), Rc::from(name))
 }
 
-/// Wie `env_deref`, nur mit einem Namen, den der Rufer schon BESITZT.
+/// Like `env_deref`, but with a name the caller already owns.
 ///
-/// Der gewoehnliche Lesepfad geht hierueber und alloziert damit nichts:
-/// `Rc::from(name)` kopiert die Zeichenkette auf den Haufen, und das je
-/// Variablenzugriff — fuer eine Kette, die in aller Regel gar nicht
-/// betreten wird.
+/// The ordinary read path uses this and so allocates nothing; `Rc::from(name)`
+/// would copy the string to the heap per variable access, for a chain that
+/// is almost never entered.
 pub fn env_deref_from(mut e: Rc<RefCell<Env>>, mut n: Rc<str>)
     -> Option<(Rc<RefCell<Env>>, Rc<str>)> {
     for _ in 0..64 {
@@ -152,39 +137,36 @@ pub fn env_deref_from(mut e: Rc<RefCell<Env>>, mut n: Rc<str>)
     None
 }
 
-/// Was EIN Blick in EINE Umgebung ergeben hat.
+/// The result of one look into one environment.
 pub enum Hit {
-    /// Der Name steht hier, mit diesem Wert.
+    /// The name is here, with this value.
     Val(Value),
-    /// Er steht hier, ist aber noch nicht initialisiert (zeitliche Totzone).
+    /// It is here but not yet initialised (temporal dead zone).
     Dead,
-    /// Er kommt aus einem anderen Modul.
+    /// It comes from another module.
     Import(Rc<RefCell<Env>>, Rc<str>),
-    /// Nicht hier — weiter beim Elter (`None` = die Kette ist zu Ende).
+    /// Not here; continue with the parent (`None` = end of chain).
     Up(Option<Rc<RefCell<Env>>>),
 }
 
-/// Eine Umgebung EINMAL fragen.
+/// Query an environment once.
 ///
-/// **Der Punkt ist, dass es einmal ist.** Der Lesepfad lief bis 0.117.0 als
-/// `env_lookup` + `env_deref` + zwei `vars.get` — derselbe Name bis zu
-/// viermal gehasht und mit `memcmp` verglichen, dazu ein `Rc<str>` auf dem
-/// Haufen. Im Profil der Fritzbox-Anmeldung waren das 6,1 % memcmp und
-/// 6,3 % hashbrown.
+/// The point is that it is once: one hash and compare per name and
+/// environment on the hot read path, no allocation.
 pub fn env_peek(env: &Rc<RefCell<Env>>, n: &str) -> Hit {
     let b = env.borrow();
     if let Some(bd) = b.vars.get(n) {
         return if bd.initialized { Hit::Val(bd.value.clone()) } else { Hit::Dead };
     }
-    // Die Tabelle gibt es nur in Modulumgebungen; sonst ist das hier eine
-    // Nullpruefung.
+    // The table exists only in module environments; otherwise this is a null
+    // check.
     if let Some(t) = b.imports.as_ref().and_then(|m| m.get(n)) {
         return Hit::Import(t.0.clone(), t.1.clone());
     }
     Hit::Up(b.parent.clone())
 }
 
-/// Das Heimatobjekt der naechsten umschliessenden Methode.
+/// The home object of the nearest enclosing method.
 pub fn env_home(env: &Rc<RefCell<Env>>) -> Option<Gc> {
     let mut cur = env.clone();
     loop {
@@ -194,11 +176,11 @@ pub fn env_home(env: &Rc<RefCell<Env>>) -> Option<Gc> {
     }
 }
 
-/// `this`, PLUS die Frage, ob der Modus daran etwas aendern wuerde.
+/// `this`, as the program observes it given the mode.
 ///
-/// Beide Maschinen rufen sie, damit die Sonde nicht in zwei Fassungen
-/// auseinanderlaeuft. `undefined`/`null` waere im lockeren Modus `globalThis`,
-/// ein Primitiv waere dort eingepackt — beides sieht das Programm.
+/// Both machines call it so the two cannot diverge. In sloppy mode
+/// `undefined`/`null` would be `globalThis` and a primitive would be boxed;
+/// the program sees both.
 pub fn this_observed(i: &mut Interp, env: &Rc<RefCell<Env>>) -> Value {
     let v = env_this(env);
     match &v {
@@ -209,11 +191,10 @@ pub fn this_observed(i: &mut Interp, env: &Rc<RefCell<Env>>) -> Value {
     v
 }
 
-/// `this` NEU binden — in genau der Umgebung, die es traegt.
+/// Rebind `this` in exactly the environment that carries it.
 ///
-/// Nur `super()` braucht das: bis dahin ist `this` in einer abgeleiteten
-/// Klasse noch nicht endgueltig, und ein Elternkonstruktor, der ein Objekt
-/// zurueckgibt, entscheidet es.
+/// Only `super()` needs this: until then `this` in a derived class is not
+/// final, and a parent constructor returning an object decides it.
 pub fn set_env_this(env: &Rc<RefCell<Env>>, v: Value) {
     let mut cur = env.clone();
     loop {
@@ -232,7 +213,7 @@ pub fn env_this(env: &Rc<RefCell<Env>>) -> Value {
     }
 }
 
-/// Die eingebauten Objekte einer Ausfuehrungseinheit.
+/// The built-in objects of one execution unit.
 pub struct Realm {
     pub global: Gc,
     pub global_env: Rc<RefCell<Env>>,
@@ -243,46 +224,43 @@ pub struct Realm {
     pub number_proto: Gc,
     pub boolean_proto: Gc,
     pub error_proto: Gc,
-    /// Name -> Prototyp der Fehlerarten, fuer `throw_type` & Co.
+    /// Name -> prototype of the error kinds, for `throw_type` and friends.
     pub error_ctors: HashMap<&'static str, Gc>,
     pub node_proto: Gc,
     pub element_proto: Gc,
     pub text_proto: Gc,
     pub document_proto: Gc,
-    /// `Event.prototype`. Liegt im Realm, weil die Zustellung Ereignisse
-    /// BAUT und die eingebauten Funktionen Zeiger sind, keine Abschluesse —
-    /// sie koennen den Prototyp nicht einfangen.
+    /// `Event.prototype`. Lives in the realm because dispatch builds events, and
+    /// built-in functions are pointers, not closures; they cannot capture it.
     pub event_proto: Gc,
-    /// Das EINE `location`-Objekt. Es liegt aus demselben Grund im Realm wie
-    /// `event_proto`: `window.location = "…"` und `document.location = "…"`
-    /// sind Setzer, die auf `href` weiterreichen ([PutForwards=href]), und
-    /// ein eingebauter Setzer ist ein Zeiger — er kann das Objekt nicht
-    /// einfangen, er muss es nachschlagen koennen.
+    /// The one `location` object. In the realm for the same reason as
+    /// `event_proto`: `window.location = "…"` and `document.location = "…"` are
+    /// setters forwarding to `href` ([PutForwards=href]), and a built-in setter
+    /// is a pointer that must be able to look the object up.
     pub location: Gc,
     pub token_list_proto: Gc,
     pub comment_proto: Gc,
     pub style_proto: Gc,
     pub regexp_proto: Gc,
     pub symbol_proto: Gc,
-    /// `%IteratorPrototype%` — der gemeinsame Vorfahr aller eingebauten
-    /// Iteratoren. Er traegt `[Symbol.iterator]() { return this }`, und genau
-    /// daran haengt, dass ein Iterator selbst wieder iterierbar ist.
+    /// `%IteratorPrototype%`, the common ancestor of all built-in iterators. It
+    /// carries `[Symbol.iterator]() { return this }`, which makes an iterator
+    /// itself iterable.
     pub iterator_proto: Gc,
-    /// `%GeneratorPrototype%` (`next`/`return`/`throw`) und
-    /// `%GeneratorFunction.prototype%`. Sie liegen im Realm, weil eingebaute
-    /// Funktionen Zeiger sind und keine Abschluesse — sie koennen den
-    /// Prototyp nicht einfangen.
+    /// `%GeneratorPrototype%` (`next`/`return`/`throw`) and
+    /// `%GeneratorFunction.prototype%`. In the realm because built-in functions
+    /// are pointers, not closures, and cannot capture the prototype.
     pub generator_proto: Gc,
     pub generator_func_proto: Gc,
-    /// `%AsyncIteratorPrototype%`, `%AsyncGeneratorPrototype%` und
-    /// `%AsyncGeneratorFunction.prototype%`. Der erste steht getrennt, weil
-    /// `for await` ihn auch an einem selbstgebauten async-Iterator findet.
+    /// `%AsyncIteratorPrototype%`, `%AsyncGeneratorPrototype%` and
+    /// `%AsyncGeneratorFunction.prototype%`. The first is separate because
+    /// `for await` also finds it on a hand-written async iterator.
     pub async_iterator_proto: Gc,
     pub async_gen_proto: Gc,
     pub async_gen_func_proto: Gc,
-    /// `WebSocket.prototype`. Steht im Realm, weil ein `instanceof` gegen
-    /// einen fehlenden Namen wirft statt `false` zu ergeben — daran ist
-    /// htmx in 0.140.0 gestorben.
+    /// `WebSocket.prototype`. In the realm even when the interface is absent,
+    /// because `instanceof` against a missing name throws instead of giving
+    /// `false`.
     pub websocket_proto: Gc,
     pub array_iter_proto: Gc,
     pub string_iter_proto: Gc,
@@ -291,32 +269,30 @@ pub struct Realm {
     pub bigint_proto: Gc,
     pub iter_helper_proto: Gc,
     pub iter_wrap_proto: Gc,
-    /// Die eingebaute `eval`. Gemerkt, weil ein Aufruf nur dann ein DIREKTER
-    /// ist, wenn er GENAU sie trifft.
+    /// The built-in `eval`. Remembered because a call is direct only if it hits
+    /// exactly this function.
     pub eval_fn: Option<Gc>,
-    /// Die Schnittstellen-Prototypen der DOM-Bindung. `tag_protos` bildet den
-    /// Elementnamen auf seine Schnittstelle ab; was nicht darinsteht, ist
-    /// `HTMLElement`.
+    /// The interface prototypes of the DOM binding. `tag_protos` maps an element
+    /// name to its interface; anything not listed is `HTMLElement`.
     pub html_element_proto: Gc,
     pub svg_element_proto: Gc,
     pub fragment_proto: Gc,
-    /// `EventTarget.prototype` — gebraucht, weil `new EventTarget()` einen
-    /// LOSGELOESTEN Knoten baut und `wrap` ihm den richtigen Prototyp geben
-    /// muss. Ueber den globalen Namen zu gehen waere falsch: den darf die
-    /// Seite ueberschreiben.
+    /// `EventTarget.prototype`, needed because `new EventTarget()` builds a
+    /// detached node and `wrap` must give it the right prototype. Going through
+    /// the global name would be wrong: the page may overwrite it.
     pub event_target_proto: Gc,
     pub tag_protos: HashMap<&'static str, Gc>,
     pub url_proto: Gc,
     pub url_params_proto: Gc,
-    /// `fetch` und was daran haengt — siehe `fetch.rs`.
+    /// `fetch` and what belongs to it; see `fetch.rs`.
     pub response_proto: Gc,
     pub headers_proto: Gc,
     pub abort_signal_proto: Gc,
     pub abort_ctrl_proto: Gc,
     pub xhr_proto: Gc,
-    /// `MutationObserver.prototype` — im Realm, weil der Konstruktor ein
-    /// Zeiger ist und den Prototyp nicht einfangen kann. Dasselbe gilt fuer
-    /// die beiden Kasten-Beobachter.
+    /// `MutationObserver.prototype`, in the realm because the constructor is a
+    /// pointer and cannot capture the prototype. Same for the two box
+    /// observers.
     pub mo_proto: Gc,
     pub ro_proto: Gc,
     pub formdata_proto: Gc,
@@ -326,41 +302,40 @@ pub struct Realm {
     pub xpath_expr_proto: Gc,
     pub xpath_eval_proto: Gc,
     pub io_proto: Gc,
-    /// `Attr` und `NamedNodeMap` — `el.attributes` haengt beide aneinander.
+    /// `Attr` and `NamedNodeMap`; `el.attributes` links both.
     pub attr_proto: Gc,
     pub nnm_proto: Gc,
     pub prej_proto: Gc,
     pub text_encoder_proto: Gc,
     pub text_decoder_proto: Gc,
-    /// Die Prototypen der neun Sichten, nach ihrem Namen — `new_typed` haengt
-    /// eine frische Sicht daran, und eingebaute Funktionen sind Zeiger, die
-    /// nichts einfangen koennen.
+    /// The prototypes of the nine typed array views, by name. `new_typed` hangs
+    /// a fresh view on them; built-in functions are pointers that capture
+    /// nothing.
     pub ta_protos: HashMap<&'static str, Gc>,
     pub typed_proto: Gc,
     pub buffer_proto: Gc,
     pub dataview_proto: Gc,
 }
 
-/// Was ein Zensus der Halde gefunden hat.
+/// What a heap census found.
 #[cfg(feature = "heap-census")]
 pub struct Census {
-    /// Objekte, die von den Wurzeln aus zu erreichen sind.
+    /// Objects reachable from the roots.
     pub reachable: usize,
-    /// Umgebungen darin — eine Schliessung haelt ihre, und die haelt wieder
-    /// Schliessungen.
+    /// Environments among them; a closure holds its environment, which holds
+    /// closures again.
     pub envs: usize,
-    /// Eigenschaften in den erreichbaren Objekten. Sie sind der Preis: beak
-    /// legt jede einzeln ab, Schluessel als Zeichenkette.
+    /// Properties in the reachable objects; each is stored individually, keyed
+    /// by string.
     pub props: usize,
-    /// Objekte, die insgesamt LEBEN. Nur mit `--features heap-census`, sonst
-    /// null — und ohne diese Zahl sagt `reachable` nichts.
+    /// Objects alive in total. Only with `--features heap-census`, otherwise
+    /// zero; without it `reachable` means nothing.
     pub live: usize,
 }
 
 impl Realm {
-    /// Alles, was der Realm selbst festhaelt. Eine Liste und keine
-    /// Aufzaehlung von Hand an jeder Stelle: wer ein Feld hinzufuegt, sieht
-    /// hier, dass es auch abgebaut werden muss.
+    /// Everything the realm itself holds. One list rather than enumerating by
+    /// hand at each use: adding a field here shows it must be torn down too.
     fn roots(&self) -> Vec<Gc> {
         alloc::vec![
             self.global.clone(), self.object_proto.clone(), self.function_proto.clone(),
@@ -390,46 +365,40 @@ impl Drop for Interp {
     fn drop(&mut self) { self.teardown(); }
 }
 
-/// Der Kaskadenkontext, den der Wirt einreicht.
-/// Die Kaesten des LETZTEN Layouts — was `getBoundingClientRect` und die
-/// `offset*`/`client*`-Felder beantworten.
+/// The boxes of the last layout, answering `getBoundingClientRect` and the
+/// `offset*`/`client*` properties.
 ///
-/// **Warum das der Wirt einreicht und die Maschine es nicht selbst rechnet:**
-/// Geometrie entsteht im Layout, und das Layout ist beaks Sache. Dieselbe
-/// Bauart wie `StyleCtx` und `set_media`.
+/// Supplied by the host because geometry comes from layout, which belongs to
+/// beak; same design as `StyleCtx` and `set_media`.
 ///
-/// **Und warum es die Kaesten von VORHIN sind:** ein Skript, das den Baum
-/// aendert und sofort misst, bekommt hier den Stand vor seiner Aenderung. Ein
-/// Browser legt an dieser Stelle synchron neu aus — auf Wikipedia gemessene
-/// 70 ms je Abfrage. Das waere hier machbar und ist bewusst nicht gebaut:
-/// erst soll jemand eine Seite zeigen, der es weh tut. Bis dahin ist die
-/// letzte echte Geometrie ungleich besser als die Null, die vorher dastand.
+/// They are the boxes of the last frame: a script that mutates the tree and
+/// measures at once sees the previous state. Boxes that do not exist yet are
+/// laid out on demand via `relayout`.
 pub struct Geometry {
-    /// Ein Eintrag je FRAGMENT — ein Inline-Kasten ueber drei Zeilen hat drei,
-    /// und das ist richtig: `getClientRects` nennt sie einzeln,
-    /// `getBoundingClientRect` ihre Vereinigung.
+    /// One entry per fragment: an inline box across three lines has three.
+    /// `getClientRects` lists them, `getBoundingClientRect` returns their union.
     pub boxes: alloc::rc::Rc<alloc::vec::Vec<crate::layout::ElemRect>>,
-    /// Der Rollstand des Fensters. Die Kaesten stehen in Dokumentkoordinaten,
-    /// `getBoundingClientRect` antwortet in Fensterkoordinaten.
+    /// The window's scroll position. Boxes are in document coordinates,
+    /// `getBoundingClientRect` answers in viewport coordinates.
     pub scroll: (i32, i32),
-    /// Die ROLLFLAECHE des Dokuments: so weit, wie der gemalte Inhalt reicht.
+    /// The scrollable area of the document: as far as painted content reaches.
     ///
-    /// Sie ist nicht die Vereinigung der Kaesten. Ein Hintergrundbild, ein
-    /// Schatten, ein Text, der aus seinem Kasten laeuft — all das haelt die
-    /// Seite rollbar, und das Layout rechnet es ohnehin aus
-    /// (`Layout::height`). Sie hier zu erraten waere eine zweite Wahrheit
-    /// ueber dieselbe Zahl.
+    /// Not the union of the boxes: a background image, a shadow or overflowing
+    /// text keep the page scrollable too. Layout computes it anyway
+    /// (`Layout::height`); guessing it here would be a second answer for the same
+    /// number.
     pub content: (i32, i32),
 }
 
+/// The cascade context the host supplies.
 pub struct StyleCtx {
     pub sheet: alloc::rc::Rc<crate::css::Stylesheet>,
     pub theme: crate::layout::Theme,
     pub viewport_w: f32,
 }
 
-/// Die Stellen, an denen der strenge Modus abweicht — in der Reihenfolge des
-/// Zaehlfeldes. Nur Diagnose (`--features strict-probe`).
+/// The places where strict mode differs, in counter order. Diagnostics only
+/// (`--features strict-probe`).
 pub const STRICT_SITE_NAMES: [&str; STRICT_SITES] = [
     "set: Empfaenger ist ein echtes Primitiv (Text/Zahl/Bool/Symbol)",
     "set: eigene Eigenschaft nicht schreibbar",
@@ -442,16 +411,14 @@ pub const STRICT_SITE_NAMES: [&str; STRICT_SITES] = [
     "this ist undefined in einem einfachen Aufruf (locker: globalThis)",
     "this bleibt ein Primitiv (locker: eingepackt)",
     "eval legt sein var im Bereich des Aufrufers ab",
-    // Getrennt vom echten Primitiv, und das ist keine Feinheit: fast jeder
-    // Treffer hier heisst „das Objekt gibt es in beak gar nicht", also
-    // `undefined.foo = 1` aus `propertyHelper.js`. Zusammengezaehlt haetten
-    // die beiden Faelle die Rangliste angefuehrt und dabei eine ganz andere
-    // Luecke gemessen als die, die sie zu messen vorgeben.
+    // Kept separate from a real primitive: almost every hit here means the
+    // object does not exist in beak at all (`undefined.foo = 1`). Counting both
+    // together would measure a different gap.
     "set: Empfaenger ist undefined/null (meist: das Objekt fehlt ganz)",
 ];
 pub const STRICT_SITES: usize = 12;
 
-/// Eine Stelle melden. Ohne die Fahne ist es nichts — kein Feld, kein Befehl.
+/// Record a site. Without the feature this compiles to nothing.
 #[cfg(feature = "strict-probe")]
 macro_rules! strict_site {
     ($me:expr, $i:expr) => {{ $me.strict_probe[$i] += 1; }};
@@ -462,42 +429,39 @@ macro_rules! strict_site {
 }
 pub(crate) use strict_site;
 
-/// Was eine Seite am Verlauf verlangt hat. **Eine Absicht, keine Tat** —
-/// ausgefuehrt wird sie vom Wirt, der als einziger einen Verlauf hat.
+/// What a page requested of the history. An intent, not an action; the host,
+/// which owns the history, carries it out.
 #[derive(Debug, Clone)]
 pub enum HistoryOp {
-    /// `pushState(state, title, url)` — `url` ist bereits aufgeloest oder
-    /// leer, wenn die Seite keine angab.
+    /// `pushState(state, title, url)`; `url` is resolved or empty if the page
+    /// gave none.
     Push { url: String },
-    /// `replaceState(...)` — derselbe Eintrag, neue Adresse.
+    /// `replaceState(...)`: same entry, new address.
     Replace { url: String },
     /// `go(n)`, `back()` (= `go(-1)`), `forward()` (= `go(1)`).
     Go(i32),
 }
 
-/// Was die Seite per `location` verlangt hat: eine ECHTE Navigation.
+/// A real navigation requested via `location`.
 ///
-/// **Der Unterschied zu `HistoryOp` ist der ganze Punkt.** `pushState`
-/// schreibt nur die Adresse um und laesst das Dokument stehen;
-/// `location.replace` wirft es weg und holt ein neues. Beides in einem Enum
-/// zu fuehren hiesse, dass ein Leser sie verwechseln kann — und der
-/// teurere der beiden Fehler ist still.
+/// Kept apart from `HistoryOp` on purpose: `pushState` only rewrites the
+/// address and keeps the document, `location.replace` discards it and loads
+/// a new one. One enum for both would invite confusing them.
 #[derive(Debug, Clone)]
 pub struct NavRequest {
-    /// Schon gegen die aktuelle Adresse aufgeloest, also absolut.
+    /// Already resolved against the current address, i.e. absolute.
     pub url: String,
-    /// `replace()` ersetzt den Verlaufseintrag, `assign()`/`href=` haengt an.
+    /// `replace()` replaces the history entry, `assign()`/`href=` appends.
     pub replace: bool,
-    /// `reload()` — dieselbe Adresse noch einmal.
+    /// `reload()`: the same address again.
     pub reload: bool,
 }
 
-/// Ein angemeldeter Zeitgeber.
+/// A registered timer.
 ///
-/// `interval` unterscheidet `setInterval` von `setTimeout`: nur ein Intervall
-/// meldet sich nach dem Lauf wieder an. `args` sind die Werte HINTER der
-/// Verzoegerung — `setTimeout(f, 0, a, b)` ruft `f(a, b)`, und Bibliotheken
-/// schreiben das.
+/// `interval` separates `setInterval` from `setTimeout`: only an interval
+/// re-registers after running. `args` are the values after the delay;
+/// `setTimeout(f, 0, a, b)` calls `f(a, b)`.
 pub struct Timer {
     pub(crate) id: u32,
     pub(crate) cb: Value,
@@ -508,446 +472,362 @@ pub struct Timer {
 
 pub struct Interp {
     pub realm: Realm,
-    /// Die geholten ES-Module, nach AUFGELOESTER Adresse. Siehe `modules.rs`
-    /// — die Engine holt nichts, sie verwaltet nur.
+    /// The fetched ES modules, by resolved address. See `modules.rs`; the engine
+    /// fetches nothing, it only manages.
     pub modules: HashMap<Rc<str>, Rc<RefCell<super::modules::Module>>>,
-    /// Welches Modul zuerst geworfen hat. Ein Fehler aus einem Graphen von
-    /// sechsundfuenfzig Adressen nennt sonst nur den EINSTIEG, und das ist
-    /// die eine Auskunft, die man nicht braucht.
+    /// Which module threw first. An error from a large graph would otherwise
+    /// only name the entry point.
     pub module_fail: Option<Rc<str>>,
-    /// Stilblaetter, die ein SKRIPT eingehaengt hat und die noch geholt
-    /// werden muessen: `(Knoten, Adresse wie im Attribut)`.
+    /// Stylesheets inserted by script that still need fetching:
+    /// `(node, address as in the attribute)`.
     ///
-    /// Der Wirt holt sie mit `take_pending_sheets` ab, loest auf, laedt, und
-    /// meldet den Ausgang mit `sheet_done` zurueck — dann erst faellt `load`
-    /// oder `error` am `<link>`. Ohne diesen Weg wartet jede Seite, die ihr
-    /// Blatt per Skript nachlaedt, fuer immer auf ein Ereignis, das nie kommt.
+    /// The host takes them with `take_pending_sheets`, resolves, loads and
+    /// reports back with `sheet_done`; only then does `load` or `error` fire on
+    /// the `<link>`. Without it a page loading its sheet by script waits forever.
     pub pending_sheets: Vec<(u32, String)>,
-    /// Skripte, die ein SKRIPT eingehaengt hat und die noch geholt werden
-    /// muessen: `(Knoten, Adresse wie im Attribut)`.
+    /// Scripts inserted by script that still need fetching:
+    /// `(node, address as in the attribute)`.
     ///
-    /// **Derselbe Weg wie `pending_sheets`, und aus demselben Grund.** Ein
-    /// `<script src=…>`, das per `appendChild` in die Seite kommt, ist keine
-    /// Randerscheinung: so laedt jeder code-geteilte Bundler seine Stuecke
-    /// nach (webpacks `__webpack_require__.l`), und so wartet Next.js auf
-    /// seine Route, BEVOR es ueberhaupt etwas rendert. Ohne Antwort steht
-    /// die Seite fuer immer — bei DuckDuckGo raeumte React das
-    /// servergerenderte HTML weg und rendert dann nichts mehr.
+    /// Same path as `pending_sheets`, for the same reason. A `<script src=…>`
+    /// added via `appendChild` is how code-splitting bundlers load their chunks
+    /// (webpack's `__webpack_require__.l`), and frameworks wait on them before
+    /// rendering anything.
     pub pending_scripts: Vec<(u32, String)>,
-    /// Der `<script>`-Knoten, dessen Code GERADE laeuft — `document.currentScript`.
+    /// The `<script>` node whose code is running: `document.currentScript`.
     ///
-    /// **Ohne ihn faellt jedes Turbopack-Buendel aus.** Ein von Next.js
-    /// erzeugtes Stueck meldet sich mit
-    /// `TURBOPACK.push([document.currentScript, …])` an und wirft sonst
-    /// „chunk path empty but not in a worker"; DDGs Startseite verlor so
-    /// sieben Stuecke und ein Inline-Skript auf einmal.
+    /// Bundlers use it to locate their chunks (e.g.
+    /// `TURBOPACK.push([document.currentScript, …])`).
     ///
-    /// Ein MODUL hat keinen: dort ist die Antwort laut HTML §4.12.1 `null`,
-    /// und `import.meta.url` ist der Weg. Wer `None` setzt, sagt genau das.
+    /// A module has none: per HTML §4.12.1 the answer is `null`, and
+    /// `import.meta.url` is the way. Setting `None` says exactly that.
     pub current_script: Option<u32>,
-    /// Der NAME des gerade gebauten Konstruktors, fuer die Fehlermeldung.
-    /// `construct_named` stellt ihn und raeumt ihn wieder weg.
+    /// The name of the constructor being called, for the error message.
+    /// `construct_named` sets and clears it.
     pub(crate) new_name: Option<String>,
-    /// Wo das naechste `document.write` desselben Skripts hinschreibt:
-    /// `(Skriptknoten, zuletzt geschriebener Knoten)`.
+    /// Where the next `document.write` of the same script writes:
+    /// `(script node, last written node)`.
     ///
-    /// Das Paar trennt sich selbst von einem alten Lauf: passt der erste Wert
-    /// nicht mehr zu `current_script`, gilt es nicht. Ohne die Stelle landete
-    /// ein zweites `write` VOR dem ersten.
+    /// The pair invalidates itself: if the first value no longer matches
+    /// `current_script`, it does not apply. Without it a second `write` would
+    /// land before the first.
     pub(crate) write_point: Option<(u32, u32)>,
-    /// Welche Skriptknoten schon gelaufen sind. Die Spezifikation nennt es
-    /// das „already started"-Kennzeichen: ein Skript, das man noch einmal
-    /// einhaengt, laeuft NICHT noch einmal.
+    /// Script nodes that have already run: the spec's "already started" flag.
+    /// A script inserted again does not run again.
     pub(crate) ran_scripts: Vec<u32>,
-    /// Anfragen aus `fetch()`, deren Antwort noch aussteht. **Dasselbe Muster
-    /// wie `pending_sheets`:** die Engine holt nichts, sie legt die Anfrage
-    /// hin; der Wirt nimmt sie mit `take_pending_fetches`, laedt, und meldet
-    /// mit `fetch_done`/`fetch_failed` zurueck.
+    /// Requests from `fetch()` whose response is pending. Same pattern as
+    /// `pending_sheets`: the engine fetches nothing, it queues the request; the
+    /// host takes it with `take_pending_fetches`, loads and reports back with
+    /// `fetch_done`/`fetch_failed`.
     pub pending_fetches: Vec<super::fetch::PendingFetch>,
-    /// Wer auf welche Antwort wartet. **Zwei Sorten Warter, eine Leitung:**
-    /// `fetch` haelt ein Versprechen, ein `XMLHttpRequest` sein eigenes
-    /// Objekt. Der Wirt kennt den Unterschied nicht — er meldet eine id
-    /// zurueck, und `fetch_done` entscheidet hier.
+    /// Who waits for which response. Two kinds of waiter, one channel: `fetch`
+    /// holds a promise, `XMLHttpRequest` its own object. The host only reports
+    /// an id back; `fetch_done` decides here.
     pub(crate) fetch_waiting: Vec<(u32, super::fetch::Waiter)>,
-    /// Anfragen, die der Wirt ABBRECHEN soll. `controller.abort()` legt die
-    /// id hier ab — sonst waere der Abbruch nur eine Fahne im Baum und die
-    /// Verbindung liefe weiter.
+    /// Requests the host should abort. `controller.abort()` puts the id here;
+    /// otherwise the abort would only be a flag and the connection would go on.
     pub aborted_fetches: Vec<u32>,
     pub(crate) next_fetch_id: u32,
-    /// Formulare, die die SEITE abschicken will (`form.submit()`), als
-    /// `seq` des `<form>`. Der Wirt holt sie mit `take_submits` ab und
-    /// navigiert — die Engine kann das nicht, sie kennt weder Adresse noch
-    /// Netz. Dasselbe Muster wie `history_ops`.
+    /// Forms the page wants to submit (`form.submit()`), as the `<form>`'s `seq`.
+    /// The host takes them with `take_submits` and navigates; the engine knows
+    /// neither address nor network. Same pattern as `history_ops`.
     pub submits: Vec<u32>,
-    /// Abgelehnte Versprechen, an denen (noch) nichts haengt.
+    /// Rejected promises with nothing attached (yet).
     pub pending_rejections: Vec<Gc>,
-    /// `customElements`: Marke -> Konstruktor, in Reihenfolge der Anmeldung.
+    /// `customElements`: tag -> constructor, in registration order.
     ///
-    /// Eine LISTE und keine Tabelle: sie wird bei jedem `new` einmal
-    /// durchlaufen, um aus dem Prototyp die Marke zu finden, und vierzehn
-    /// Eintraege sind kein Fall fuer eine Hashtabelle.
+    /// A list, not a table: it is scanned once per `new` to find the tag from
+    /// the prototype, and a handful of entries do not warrant a hash table.
     pub custom: Vec<(Rc<str>, Value)>,
-    /// Aufruftiefe. Ein Baumlaeufer benutzt den RUST-Stapel, also wird ein
-    /// zu tiefes JS-Programm zum Stapelueberlauf des Wirts — und das ist im
-    /// Kernel ein Absturz, kein Fehler. Die Grenze ist deshalb Pflicht, nicht
-    /// Komfort.
+    /// Call depth. The tree walker uses the Rust stack, so a too-deep JS program
+    /// would overflow the host stack, which in the kernel is a crash, not an
+    /// error. The limit is mandatory.
     pub depth: usize,
     pub max_depth: usize,
-    /// Ausgefuehrte Anweisungen. Ohne Deckel haengt ein `while(true)` den
-    /// ganzen Lauf auf — und ein Testlaeufer, der an EINEM Programm stehen
-    /// bleibt, misst gar nichts mehr.
+    /// Executed statements. Without a cap a `while(true)` hangs the whole run,
+    /// and a test runner stuck on one program measures nothing.
     pub steps: u64,
     pub max_steps: u64,
-    /// „Darf noch weitergerechnet werden?" — der Wirt setzt sie, die Engine
-    /// fragt sie alle 65 536 Schritte.
+    /// "May computation continue?" Set by the host, queried by the engine every
+    /// 65 536 steps.
     ///
-    /// **Ein Schrittdeckel misst das Falsche.** Er sollte eine Seite stoppen,
-    /// die sich aufhaengt, aber er trifft genauso eine, die viel RECHNET: die
-    /// Anmeldung einer Fritzbox rechnet 66 000 PBKDF2-Runden, und die sind
-    /// keine Endlosschleife. Ein Browser misst deshalb ZEIT, nicht Schritte.
-    /// Die Engine hat keine Uhr — also fragt sie den Wirt.
+    /// A step cap measures the wrong thing: it stops a page that hangs, but also
+    /// one that legitimately computes a lot (e.g. many PBKDF2 rounds). Browsers
+    /// measure time, not steps; the engine has no clock, so it asks the host.
     ///
-    /// Alle 65 536 Schritte, nicht bei jedem: der Aufruf selbst darf den
-    /// heissesten Pfad der Maschine nicht kosten.
+    /// Every 65 536 steps, not each one: the call must not cost the hottest path.
     pub deadline: Option<fn() -> bool>,
-    /// Eine Uhr, die nur steigt. Ersatz, bis beak die echte einreicht —
-    /// `beak-engine` ist hostfrei und hat keine.
+    /// A monotonic counter, used as the clock when the host supplies none
+    /// (`beak-engine` is host-free and has no clock).
     pub fake_now: f64,
-    /// Die ECHTE Uhr des Wirts, in Millisekunden seit dem Seitenanfang.
+    /// The host's real clock, in milliseconds since page start.
     ///
-    /// **Ohne sie ist `performance.now()` ein Aufrufzaehler**, und das ist
-    /// nicht bloss ungenau: Reacts Ablaufplaner fragt `now() - start >= 5`,
-    /// um zu entscheiden, ob er das Bild abgeben soll. Bei einem Zaehler
-    /// gibt er nach FUENF Fragen ab — er rechnet in Krumen weiter, statt in
-    /// Scheiben, und eine grosse Seite wird darueber nie fertig.
+    /// Without it `performance.now()` is a call counter, which breaks
+    /// schedulers that yield after a time slice (React checks
+    /// `now() - start >= 5`).
     ///
-    /// Wie `deadline` ein Funktionszeiger: die Engine hat keine Uhr, der
-    /// Wirt hat eine. Fehlt sie, bleibt der steigende Zaehler — besser als
-    /// eine stehende Zahl, an der jede Zeitmessung null ergibt.
+    /// A function pointer like `deadline`. When absent, the rising counter
+    /// remains; better than a constant at which every measurement is zero.
     pub clock: Option<fn() -> f64>,
-    /// Millisekunden seit der Epoche, wie sie der Wirt beim Sitzungsbeginn
-    /// gesetzt hat. Die Engine selbst hat keine Uhr; ohne diesen Wert steht
-    /// `Date.now()` bei 1970 — richtig, aber nutzlos.
+    /// Milliseconds since the epoch, as set by the host at session start. The
+    /// engine has no clock; without this `Date.now()` is stuck at 1970.
     pub epoch_ms: f64,
-    /// Das Dokument, auf dem `document` arbeitet. `None`, solange keins
-    /// eingereicht wurde — dann gibt es `document` gar nicht erst, statt eins
-    /// vorzutaeuschen, das nichts enthaelt.
+    /// The document `document` operates on. `None` until one is supplied; then
+    /// `document` does not exist at all rather than faking an empty one.
     pub doc: Option<super::dombind::Doc>,
-    /// Der Zustand von `Math.random`.
+    /// The state of `Math.random`.
     ///
-    /// **Der Wirt saet, nicht die Engine.** `beak-engine` ist hostfrei und hat
-    /// keine Entropiequelle; sich eine auszudenken waere schlimmer als keine
-    /// zu haben. Also steht hier eine feste Saat, und wer eine echte hat,
-    /// reicht sie mit `seed_random` ein. Der Testlaeufer bekommt dadurch
-    /// nebenbei, was er ohnehin braucht: reproduzierbare Laeufe.
+    /// The host seeds it, not the engine: `beak-engine` is host-free and has no
+    /// entropy source. A fixed seed stands here until `seed_random` supplies a
+    /// real one, which also gives the test runner reproducible runs.
     rng: u64,
-    /// Die Medienlage fuer `matchMedia` — Breite und Farbschema-Wunsch. Wie
-    /// `innerWidth` gehoert sie dem Wirt; ohne `set_viewport` gibt es
-    /// `matchMedia` gar nicht erst.
+    /// The media state for `matchMedia`: width and colour scheme preference.
+    /// Like `innerWidth` it belongs to the host; without `set_viewport` there is
+    /// no `matchMedia`.
     pub media: Option<(f64, bool)>,
-    /// Was `getComputedStyle` braucht: das Blatt, der Baum, aus dem das
-    /// Dokument gebaut wurde, das Farbschema und die Fensterbreite.
+    /// What `getComputedStyle` needs: the stylesheet, the tree the document was
+    /// built from, the colour scheme and the viewport width.
     ///
-    /// **Der Wirt reicht es ein**, wie die Fenstergroesse und die Kekse. Die
-    /// Maschine hat kein Stilblatt und soll keins holen; sie bekommt eins,
-    /// wenn jemand eins hat. Ohne diesen Kontext antwortet
-    /// `getComputedStyle` weiter aus dem Inline-Stil — eine Teilantwort, die
-    /// die Seite laufen laesst, statt sie mit einem TypeError zu beenden.
+    /// Supplied by the host, like the window size and the cookies. Without it
+    /// `getComputedStyle` answers from the inline style only: a partial answer
+    /// that keeps the page running instead of a TypeError.
     pub style_ctx: Option<StyleCtx>,
-    /// Wieviele Programme die BEFEHLSMASCHINE gefahren hat und wieviele der
-    /// Baumlaeufer — die Zahl, an der die Umstellung gemessen wird. Sie soll
-    /// steigen, waehrend die test262-Zahl STEHEN BLEIBT: das eine ist der
-    /// Fortschritt, das andere das Netz.
+    /// How many programs the bytecode machine ran, as opposed to the tree
+    /// walker.
     pub vm_ran: u64,
     pub vm_declined: u64,
-    /// Warum der Uebersetzer beim letzten Mal abgesagt hat. Ein Name, kein
-    /// Satz — er wird gezaehlt, und eine Zaehlung braucht einen Schluessel.
+    /// Why the compiler declined last time. A name, not a sentence: it is
+    /// counted, and counting needs a key.
     pub vm_decline: Option<&'static str>,
-    /// Aus. Nur fuer die Gegenprobe: derselbe Lauf einmal MIT und einmal OHNE
-    /// die Befehlsmaschine sagt in einem Diff, welche Tests sie verliert. Ohne
-    /// diesen Schalter muesste man den Unterschied erraten, und beim ersten
-    /// Lauf waren es 62 Tests von 69 194 — die findet man nicht durch Lesen.
+    /// Off switch for the bytecode machine. Only for cross-checking: the same
+    /// run with and without it shows in a diff which tests it loses.
     pub vm_off: bool,
-    /// Uebersetzte Funktionsrumpfe, nach der Adresse ihres AST-Knotens.
+    /// Compiled function bodies, by the address of their AST node.
     ///
-    /// Ein `Rc<Func>` ist die Identitaet einer Funktion im Quelltext; derselbe
-    /// Rumpf wird bei jedem Aufruf gebraucht und darf nur EINMAL uebersetzt
-    /// werden. `None` heisst „schon versucht, geht nicht" — auch das gehoert
-    /// gemerkt, sonst uebersetzt eine Schleife bei jedem Umlauf vergeblich.
+    /// An `Rc<Func>` is a function's identity in the source; the same body is
+    /// needed on every call and must be compiled once. `None` means "tried,
+    /// cannot", which is also remembered so a loop does not retry each time.
     ///
-    /// **Der `Weak` ist nicht Zierde, er ist der Schluessel.** Eine Adresse
-    /// ist nur solange eine Identitaet, wie sie belegt ist: gibt der letzte
-    /// `Rc` den Knoten frei, kann die naechste Funktion GENAU DORT liegen —
-    /// und bekam dann den Rumpf ihrer Vorgaengerin. Am Geraet heisst das:
-    /// die Seite ruft ihre Funktion, und es laeuft der Code einer fremden
-    /// Bibliothek. Ein `Weak` haelt die Zelle belegt, ohne den Baum
-    /// festzuhalten — die Adresse bleibt damit unverwechselbar, und der AST
-    /// darf trotzdem sterben.
+    /// The `Weak` is what makes the key sound. An address is an identity only
+    /// while occupied: once the last `Rc` frees the node, the next function can
+    /// land exactly there and would get its predecessor's body. A `Weak` keeps
+    /// the allocation occupied without keeping the tree alive.
     pub func_chunks: HashMap<usize, (alloc::rc::Weak<Func>, Option<Rc<super::code::Chunk>>)>,
-    /// Die Vorlagen-Gegenstaende getaggter Templates (ES 13.2.8.4).
+    /// The template objects of tagged templates (ES 13.2.8.4).
     ///
-    /// **Dieselbe Stelle im Quelltext muss bei JEDER Auswertung denselben
-    /// Gegenstand bekommen** — das ist beobachtbar, und lit-html und
-    /// styled-components bauen ihren ganzen Zwischenspeicher darauf: sie
-    /// schluesseln eine `WeakMap` mit dem `strings`-Feld. Ohne stabile
-    /// Identitaet baut lit bei JEDEM Rendern das DOM neu.
+    /// The same source location must get the same object on every evaluation.
+    /// This is observable, and libraries such as lit-html key a `WeakMap` with
+    /// the `strings` array.
     ///
-    /// Geschluesselt wird mit der ADRESSE des Knotens — und weil eine Adresse
-    /// nur belegt eine Identitaet ist ([[feedback_an_address_is_only_an_identity_while_it_is_occupied]]),
-    /// liegen die ROHEN Zeichenketten daneben und werden beim Treffer
-    /// verglichen. Faellt ein Baum weg und legt der naechste eine andere
-    /// Vorlage auf dieselbe Zelle, gehen die Zeichenketten auseinander und der
-    /// Gegenstand wird neu gebaut. Sind sie GLEICH, ist das Teilen
-    /// unbeobachtbar.
+    /// Keyed by the node's address. Because an address is only an identity
+    /// while occupied, the raw strings are stored alongside and compared on a
+    /// hit: if a tree is dropped and another template lands at the same address,
+    /// the strings differ and the object is rebuilt. If they are equal, sharing
+    /// is unobservable.
     pub templates: HashMap<usize, (Vec<Rc<str>>, Value)>,
-    /// Die offenen `WebSocket`s. **Die Engine oeffnet keine Verbindung** —
-    /// hier liegt ihr halber Zustand (Handschlag, Rahmen, Puffer), der Wirt
-    /// fuehrt die Leitung. Dasselbe Muster wie `pending_fetches`.
+    /// The open `WebSocket`s. The engine opens no connection; this holds its
+    /// half of the state (handshake, frames, buffers), the host drives the wire.
+    /// Same pattern as `pending_fetches`.
     pub sockets: Vec<super::websocket::Socket>,
-    /// Der JS-Gegenstand je Verbindung, fuer die Zustellung der Ereignisse.
+    /// The JS object per connection, for event dispatch.
     pub socket_objs: HashMap<u32, Gc>,
-    /// Was der Wirt noch aufbauen soll.
+    /// What the host still has to set up.
     pub pending_sockets: Vec<super::websocket::PendingSocket>,
     pub next_socket_id: u32,
-    /// Woran der Uebersetzer bei einem FUNKTIONSRUMPF absagt, je Grund.
+    /// Why the compiler declines a function body, per reason.
     ///
-    /// Die Programm-Absagen (`vm_decline`) waren bis Stufe 4 die ganze
-    /// Rangliste — und sind es seitdem nicht mehr: ein Generator- oder
-    /// async-Rumpf sagt ab, ohne dass das Programm darum absagt, und die
-    /// Absage war damit UNSICHTBAR. Eine Rangfolge, die den halben Korpus
-    /// nicht sieht, ist keine.
+    /// Program-level declines (`vm_decline`) do not see these: a generator or
+    /// async body can decline without the program declining.
     pub func_declines: HashMap<&'static str, u64>,
-    /// Die Marken, die zur naechsten Schleife gehoeren.
+    /// Labels belonging to the next loop.
     ///
-    /// `outer: for (…)` ist im Baum eine Marke UM eine Schleife; ein
-    /// `continue outer` gehoert aber der SCHLEIFE — nur sie hat einen
-    /// Fortsetzungspunkt. Also legt die Marke den Namen hier ab und die
-    /// Schleife holt ihn beim Betreten. Ohne das lief ein `continue lbl` dem
-    /// Baumlaeufer durch bis nach oben und beendete das Programm STILL.
+    /// `outer: for (…)` is a label around a loop in the tree, but `continue outer`
+    /// belongs to the loop, which alone has a continuation point. The label puts
+    /// its name here and the loop takes it on entry. Without it a `continue lbl`
+    /// would propagate to the top and silently end the program.
     pub pending_labels: Vec<String>,
-    /// Aufrufe, die als RAHMEN liefen, und solche, die ueber den Rust-Stapel
-    /// mussten. Die zweite Zahl ist das, was Stufe 4 (Anhalten) noch im Weg
-    /// steht: was ueber Rust laeuft, kann nicht stehenbleiben.
-    /// Nur zum MESSEN: wie viele Befehle die Maschine wirklich gefahren hat.
-    /// Der Schrittzaehler zaehlt Anweisungen, nicht Befehle, und aus ihm laesst
-    /// sich keine ns-je-Befehl-Zahl bilden.
+    /// Instructions the machine actually executed, for measurement. The step
+    /// counter counts statements, not instructions.
     pub vm_ops: u64,
-    /// Duerfen die Wegweiser in `Chunk::hints` benutzt werden?
+    /// May the lookup hints in `Chunk::hints` be used?
     ///
-    /// **Ein direktes `eval` schaltet sie ab, fuer die ganze Sitzung.** Es
-    /// ist das Einzige, was eine Bindung in eine INNERE Umgebung legen kann,
-    /// nachdem eine Befehlsstelle schon gelaufen ist — und dann zeigt der
-    /// Hinweis an der Verschattung vorbei. Eine Pruefung dagegen waere der
-    /// volle Kettenlauf, also genau das, was der Hinweis spart.
+    /// A direct `eval` disables them for the whole session. It is the only thing
+    /// that can add a binding to an inner environment after an instruction has
+    /// run, and then a hint would skip the shadowing binding. Checking for that
+    /// would cost the full chain walk the hint saves.
     pub hints_ok: bool,
     pub vm_calls: u64,
-    /// Eingebaute, gebundene, Getter — die haben keinen Rumpf aus Befehlen
-    /// und werden nie einen haben. Sie gehoeren NICHT in denselben Nenner wie
-    /// eine JS-Funktion, die der Uebersetzer bloss noch nicht kann.
+    /// Native, bound and getter calls: they have no bytecode body and never
+    /// will, so they are not counted with JS functions the compiler cannot
+    /// handle yet.
     pub vm_calls_native: u64,
     pub vm_calls_slow: u64,
-    /// Siehe `Geometry`. `None` heisst: der Wirt hat keine eingereicht, und
-    /// dann antwortet die Geometrie mit Nullen wie eh und je.
+    /// See `Geometry`. `None` means the host supplied none; geometry then
+    /// answers with zeros.
     pub geometry: Option<Geometry>,
-    /// **Neu auslegen auf Verlangen.** Der Wirt haengt hier ein, wie er es
-    /// bei `clock` tut; ohne Haken bleibt alles wie vorher.
+    /// Lay out on demand. The host installs this, like `clock`; without a hook
+    /// nothing changes.
     ///
-    /// Warum es den Haken braucht: `geometry` ist das letzte BILD. Ein
-    /// Element, das ein Skript im selben Schritt eingehaengt hat, steht nicht
-    /// darin und meldet 0 — und eine Seite, die EINMAL misst, bleibt damit
-    /// fuer immer falsch. Ein Browser rechnet an dieser Stelle synchron neu.
+    /// `geometry` is the last frame. An element the script inserted in the same
+    /// step is not in it and reports 0, and a page that measures only once (e.g.
+    /// in a mount effect) stays wrong forever. Browsers relayout synchronously
+    /// here.
     pub relayout: Option<fn(&mut Interp)>,
-    /// Wie oft seit dem letzten Bild des Wirts erzwungen ausgelegt wurde.
-    /// `set_geometry` setzt es zurueck — aber nur, wenn der Wirt ruft und
-    /// nicht der Haken selbst.
+    /// How often layout was forced since the host's last frame. `set_geometry`
+    /// resets it, but only when called by the host, not by the hook itself.
     pub forced_layouts: u32,
-    /// Laeuft gerade ein erzwungenes Auslegen? Sperre gegen Rekursion (der
-    /// Haken ruft `set_geometry`, und darin fragen die Kastenbeobachter
-    /// wieder nach Kaesten) und gegen das Zuruecksetzen des Deckels.
+    /// Is a forced layout running? Guards against recursion (the hook calls
+    /// `set_geometry`, where box observers ask for boxes again) and against
+    /// resetting the cap.
     pub in_forced_layout: bool,
-    /// Der lebende Baum in der Form, die die Kaskade lesen kann — gebaut aus
-    /// `doc`, und nur neu gebaut, wenn `doc.version` sich bewegt hat.
-    ///
-    /// Frueher hielt `StyleCtx` einen SCHNAPPSCHUSS vom Skriptstart, und
-    /// `getComputedStyle` antwortete daraus. Ein Skript, das eine Klasse setzt
-    /// und dann misst, bekam den Stand von vorher — zwei Antworten auf
-    /// dieselbe Frage. Jetzt gibt es nur noch einen Baum.
+    /// The live tree in the form the cascade can read, built from `doc` and
+    /// rebuilt only when `doc.version` changes. There is a single tree, so a
+    /// script that sets a class and then measures sees its own change.
     pub live_dom: core::cell::RefCell<Option<(u32, alloc::rc::Rc<crate::dom::Dom>)>>,
-    /// Die Kekse dieser Seite, so wie `document.cookie` sie zeigt.
+    /// Only with `--features strict-probe`. Counts, per site, the places where
+    /// strict mode would do something different from sloppy mode.
     ///
-    /// **Der Wirt reicht sie ein, die Engine hat keinen Behaelter.** Der
-    /// Behaelter kennt Domain, Pfad, `Secure` und `HttpOnly`; welche davon
-    /// dieses Dokument sehen darf, ist eine Frage an ihn und nicht an die
-    /// Maschine. `None` heisst „niemand hat gefragt" — dann gibt es
-    /// `document.cookie` trotzdem, als leere Zeichenkette, weil ein Skript
-    /// darauf `.match` ruft und ein `undefined` es toetet. Das ist keine
-    /// erfundene Antwort: keine Kekse IST eine Antwort.
-    /// **Nur mit `--features strict-probe`.** Zaehlt die Stellen, an denen der
-    /// strenge Modus etwas anderes taete als der lockere — jede fuer sich.
-    ///
-    /// Die Fahnen der Tests (`onlyStrict`) beantworten die Frage NICHT: sie
-    /// sagen, wie ein Test GESTARTET wird, nicht, ob er an einer dieser
-    /// Stellen vorbeikommt. Ein Test ohne Fahne, der in seinem Rumpf
-    /// `"use strict"` schreibt, haengt genauso daran.
+    /// Test flags (`onlyStrict`) do not answer this: they say how a test starts,
+    /// not whether it passes one of these sites. A test without the flag that
+    /// writes `"use strict"` in its body hits them just the same.
     #[cfg(feature = "strict-probe")]
     pub strict_probe: [u32; STRICT_SITES],
-    pub cookies: String,
-    /// Was die Seite mit `document.cookie = "…"` gesetzt hat, roh und in der
-    /// Reihenfolge. Der Wirt holt es sich mit `take_cookie_sets` und legt es
-    /// in seinen Behaelter — die Engine entscheidet nicht, was gilt.
-    pub cookie_sets: Vec<String>,
-    /// Was die Seite mit `history.pushState`/`replaceState`/`go` verlangt hat
-    /// — roh und in der Reihenfolge. **Die Engine navigiert nicht**, sie hat
-    /// keinen Verlauf und soll keinen erfinden; sie sammelt, und der Wirt
-    /// holt es mit `take_history_ops` ab und entscheidet. Dasselbe Muster
-    /// wie bei den Keksen.
-    /// Die angemeldeten `MutationObserver`. Sie liegen hier und nicht im
-    /// Dokument, weil sie einen JS-Rueckruf halten: das Dokument wird bei
-    /// jeder Navigation neu gebaut, der Realm nicht.
-    pub observers: Vec<super::dombind::MutObs>,
-    /// Die angemeldeten `ResizeObserver` und `IntersectionObserver`.
-    /// Beide werden in `set_geometry` ausgewertet — dort, wo der Wirt sagt,
-    /// wie die Seite JETZT steht.
-    /// Der zuletzt geparste XPath-Ausdruck, gemerkt unter seinem Quelltext.
+    /// This page's cookies as `document.cookie` shows them.
     ///
-    /// `createExpression` gibt es genau deshalb: eine Seite parst EINEN
-    /// Ausdruck beim Laden und wertet ihn danach oft aus (htmx tut es bei
-    /// jedem `process`). Ein Eintrag reicht dafuer vollstaendig, und mehr
-    /// waere eine Tabelle, die niemand raeumt.
+    /// The host supplies them; the engine has no jar. The jar knows domain,
+    /// path, `Secure` and `HttpOnly`, and which of them this document may see is
+    /// its decision. Empty if nobody supplied any: `document.cookie` still exists
+    /// as an empty string, because scripts call `.match` on it. No cookies is a
+    /// real answer.
+    pub cookies: String,
+    /// What the page set with `document.cookie = "…"`, raw and in order. The host
+    /// takes it with `take_cookie_sets` and stores it in its jar; the engine does
+    /// not decide what applies.
+    pub cookie_sets: Vec<String>,
+    /// The registered `MutationObserver`s. They live here, not in the document,
+    /// because they hold a JS callback: the document is rebuilt on every
+    /// navigation, the realm is not.
+    pub observers: Vec<super::dombind::MutObs>,
+    /// The last parsed XPath expression, keyed by its source.
+    ///
+    /// `createExpression` exists because a page parses one expression at load
+    /// and evaluates it often (htmx does on every `process`). One entry suffices;
+    /// more would be a table nobody cleans.
     pub xpath_memo: Option<(alloc::string::String, alloc::rc::Rc<super::xpath::XPath>)>,
+    /// The registered `ResizeObserver`s and `IntersectionObserver`s. Both are
+    /// evaluated in `set_geometry`, where the host says how the page stands now.
     pub resize_obs: Vec<super::dombind::ResizeObs>,
     pub inter_obs: Vec<super::dombind::InterObs>,
-    /// Breite und Hoehe des Sichtfelds, wie `set_viewport` sie kennt — der
-    /// Ausschnitt eines `IntersectionObserver` ohne eigene Wurzel.
+    /// Width and height of the viewport as `set_viewport` knows them; the root
+    /// of an `IntersectionObserver` without its own root.
     pub viewport: (f64, f64),
+    /// What the page requested via `history.pushState`/`replaceState`/`go`, raw
+    /// and in order. The engine does not navigate and keeps no history; it
+    /// collects, and the host takes it with `take_history_ops` and decides. Same
+    /// pattern as the cookies.
     pub history_ops: Vec<HistoryOp>,
-    /// Wohin die Seite rollen will (`scrollTo`, `scrollIntoView`,
-    /// `scrollTop =`). **Die Engine rollt nicht** — sie hat kein Fenster; der
-    /// Wirt holt es mit `take_scroll` ab. Je Achse getrennt, weil
-    /// `scrollTo({ top: 0 })` die andere in Ruhe lassen muss.
+    /// Where the page wants to scroll (`scrollTo`, `scrollIntoView`,
+    /// `scrollTop =`). The engine has no window and does not scroll; the host
+    /// takes it with `take_scroll`. Per axis, because `scrollTo({ top: 0 })`
+    /// must leave the other alone.
     pub scroll_want: Option<(Option<f64>, Option<f64>)>,
-    /// Die Navigation, die die Seite zuletzt verlangt hat (`location.assign`,
-    /// `.replace`, `.reload`, `href = …`). **Genau eine, und die LETZTE
-    /// gewinnt** — im Browser bricht eine zweite Navigation die erste ab,
-    /// also darf hier keine Warteschlange stehen, die beide faehrt.
+    /// The navigation the page requested last (`location.assign`, `.replace`,
+    /// `.reload`, `href = …`). Exactly one, and the last wins: in a browser a
+    /// second navigation aborts the first, so no queue may run both.
     ///
-    /// Die Engine navigiert nicht; der Wirt holt es mit `take_nav` ab.
+    /// The engine does not navigate; the host takes it with `take_nav`.
     pub nav: Option<NavRequest>,
-    /// Die Adresse des Dokuments — die EINE Quelle hinter `location`.
+    /// The document address, the single source behind `location`.
     ///
-    /// `location` ist deshalb ganz aus Zugriffsfunktionen gebaut und nicht
-    /// aus Datenfeldern: eine Seite, die `location.pathname` setzt, aendert
-    /// damit `href` mit, und zwei Kopien liefen sofort auseinander.
+    /// `location` is built entirely from accessors for this reason: a page
+    /// setting `location.pathname` also changes `href`, and two copies would
+    /// diverge immediately.
     pub loc_href: String,
-    /// `history.state` — der Zustand, den die Seite zuletzt gesetzt hat.
-    /// Er gehoert dem DOKUMENT, nicht dem Verlauf des Wirts, und lebt
-    /// deshalb hier.
+    /// `history.state`, the state the page set last. It belongs to the document,
+    /// not to the host's history, and therefore lives here.
     pub history_state: Value,
-    /// `history.length`, vom Wirt eingereicht. Ohne ihn steht 1 da — ein
-    /// frisch geladenes Dokument ist immer mindestens ein Eintrag.
+    /// `history.length`, supplied by the host. Defaults to 1: a freshly loaded
+    /// document is always at least one entry.
     pub history_len: f64,
-    /// Laufende Nummer fuer `Symbol()`.
+    /// Running number for `Symbol()`.
     pub next_sym: u32,
-    /// Die globale Symbolregistrierung hinter `Symbol.for`/`Symbol.keyFor`.
+    /// The global symbol registry behind `Symbol.for`/`Symbol.keyFor`.
     pub sym_registry: HashMap<Rc<str>, Value>,
-    /// Die Microtask-Schlange. Sie steht NEBEN `timers`, nicht darin: eine
-    /// Microtask laeuft vor dem naechsten Zeitgeber, nicht danach — das ist
-    /// der ganze Unterschied zwischen `Promise.resolve().then(f)` und
-    /// `setTimeout(f, 0)`.
+    /// The microtask queue. It sits beside `timers`, not inside: a microtask
+    /// runs before the next timer, which is the whole difference between
+    /// `Promise.resolve().then(f)` and `setTimeout(f, 0)`.
     pub jobs: alloc::collections::VecDeque<super::promise::Job>,
-    /// Angemeldete Zeitgeber. Noch laeuft niemand sie; sie zu HALTEN kostet
-    /// nichts und ist die Stelle, an der beaks Schleife ansetzt.
+    /// Registered timers, run by `run_timers` in due order.
     ///
-    /// **Die Verzoegerung ist keine Zierde.** Bis 0.174.0 stand hier ein
-    /// `Vec<Value>`: jeder Rueckruf lief in der Runde nach seiner Anmeldung,
-    /// in ANMELDEreihenfolge, und `clearTimeout` war ein Nichts. Damit lief
-    /// ein `setTimeout(f, 120000)` VOR einem `setTimeout(g, 0)` daneben —
-    /// und genau darauf steht webpacks Nachlader: er meldet einen Zeitgeber
-    /// als Zeitueberschreitung an und loescht ihn im `onload` des Stuecks.
-    /// Beides ging schief, also meldete jedes nachgeladene Stueck
-    /// „ChunkLoadError: timeout", obwohl es angekommen war.
+    /// The delay matters: order is by due time, not registration, and
+    /// `clearTimeout` must really remove the entry. Chunk loaders register a long
+    /// timeout and clear it in `onload`.
     pub timers: Vec<Timer>,
-    /// Die Uhr, an der die Zeitgeber haengen. Sie laeuft nicht von selbst:
-    /// ist nichts faellig und liegt noch etwas an, springt sie auf den
-    /// naechsten Termin. Damit stimmt die REIHENFOLGE immer, auch wenn der
-    /// Wirt keine Uhr einreicht — und die Reihenfolge ist das, woran echter
-    /// Code haengt.
+    /// The clock the timers run on. It does not advance by itself: when nothing
+    /// is due and something is pending, it jumps to the next deadline. The order
+    /// is always right even without a host clock, and order is what real code
+    /// depends on.
     pub(crate) vnow: f64,
-    /// Die naechste Kennung. Sie faengt bei 1 an, weil 0 in JavaScript
-    /// falsch ist und Seiten `if (id)` schreiben.
+    /// The next id. Starts at 1 because 0 is falsy and pages write `if (id)`.
     pub(crate) next_timer: u32,
-    /// Was die Seite auf `console` geschrieben hat.
-    ///
-    /// Gesammelt statt weggeworfen: `beak-engine` hat keine Serienleitung,
-    /// aber der Wirt hat eine, und eine Seite, die ihren eigenen Zustand
-    /// meldet, ist bei einer Ferndiagnose oft das einzige Fenster hinein.
-    /// Gedeckelt, weil eine fremde Seite sonst den Speicher damit fuellt —
-    /// und der Verlust wird gemeldet, nicht verschwiegen.
-    /// Der letzte erfolgreiche Treffer — allein fuer die annexB-Statiken
-    /// `RegExp.$1`, `RegExp.lastMatch` & Co. Sie stehen NICHT am
-    /// Ausdrucksobjekt, sondern am Konstruktor, also muss der Zustand hier
-    /// liegen und nicht dort.
-    /// Laeuft gerade ein `new` auf einem eingebauten Konstruktor? Ein
-    /// natives `this` ist bei Aufruf und Bau dasselbe (`undefined`), also
-    /// braucht es diese Fahne — `Symbol` HAT ein `[[Construct]]`, es wirft
-    /// nur darin.
+    /// Is a `new` on a built-in constructor running? A native `this` is the same
+    /// (`undefined`) for call and construct, so this flag is needed: `Symbol`
+    /// has a `[[Construct]]`, it just throws inside it.
     pub native_new: bool,
+    /// The last successful match, only for the Annex B statics `RegExp.$1`,
+    /// `RegExp.lastMatch` and friends. They live on the constructor, not on the
+    /// expression object, so the state lives here.
     pub last_match: Option<LastMatch>,
+    /// What the page wrote to `console`.
+    ///
+    /// Collected rather than discarded: `beak-engine` has no serial line, but the
+    /// host does, and a page reporting its own state is often the only window
+    /// into it. Capped so a page cannot fill memory with it; the loss is
+    /// reported.
     pub console: Vec<String>,
-    /// Wie viele Zeilen der Deckel verworfen hat. OEFFENTLICH, weil ein
-    /// stiller Deckel jede Fehlersuche zur Messung des Deckels macht.
+    /// How many lines the cap discarded. Public, because a silent cap turns
+    /// every investigation into measuring the cap.
     pub console_dropped: usize,
 }
 
-/// Wie viele Zeilen `console` haelt, und wie lang eine werden darf.
-/// Was die neun `RegExp.$n` und ihre vier Nachbarn brauchen. Fertige
-/// Zeichenketten statt Bereiche: die Quelle darf danach verschwinden.
+/// What the nine `RegExp.$n` and their four neighbours need. Finished
+/// strings rather than ranges, so the source may go away.
 pub struct LastMatch {
     pub input: String,
     pub matched: String,
     pub left: String,
     pub right: String,
-    /// `$1` bis `$9`; eine Gruppe ohne Treffer ist die leere Zeichenkette.
+    /// `$1` to `$9`; a group without a match is the empty string.
     pub caps: Vec<String>,
     pub last_paren: String,
 }
 
+/// How many lines `console` keeps, and how long one may be.
 pub const MAX_CONSOLE_LINES: usize = 200;
 pub const MAX_CONSOLE_LEN: usize = 512;
 
 pub const MAX_DEPTH: usize = 400;
 
-/// Wie weit eine Prototypkette laufen darf.
+/// How far a prototype chain may be walked.
 ///
-/// **Ein Sicherungsnetz, keine Regel der Sprache.** Eine Kette kann einen
-/// Zyklus enthalten (`Object.setPrototypeOf` muss ihn zwar ablehnen, aber
-/// darauf allein soll sich hier nichts verlassen), und dann laeuft jeder
-/// Eigenschaftszugriff fuer immer — in NATIVEM Code, an der Schrittgrenze
-/// vorbei. Eine fremde Seite haette damit drei Zeilen gebraucht, um beak
-/// aufzuhaengen. Echte Ketten sind ein Dutzend Glieder tief.
+/// A safety net, not a language rule. A chain could contain a cycle
+/// (`Object.setPrototypeOf` must refuse it, but nothing here relies on that
+/// alone), and then every property access would loop forever in native code,
+/// past the step limit. Real chains are a dozen links deep.
 pub const MAX_PROTO_CHAIN: usize = 1000;
 
-/// Wieviele Bytes ein einzelner `ArrayBuffer` haben darf.
+/// Maximum size of a single `ArrayBuffer`.
 ///
-/// Keine erfundene Grenze, sondern die Antwort auf eine echte: der Lauf ist
-/// an `new ArrayBuffer(2**53)` gestorben, und in einem Kernel gibt es keinen
-/// Prozess, der dabei alleine stirbt. 64 MB sind mehr, als jede Seite im
-/// Zielkorpus je in einem Stueck belegt, und der Fehlschlag ist ein
-/// `RangeError` — genau der, den ein echter Motor bei gescheiterter Zuteilung
-/// gibt.
+/// In a kernel there is no process that dies alone on `new ArrayBuffer(2**53)`.
+/// Exceeding the limit is a `RangeError`, as a real engine gives when
+/// allocation fails.
 pub const MAX_BUFFER_BYTES: usize = 64 << 20;
 
-/// Was ein Testlaeufer setzt.
+/// Step budget a test runner sets.
 ///
-/// Gegen eine Messung gesetzt, nicht gegen ein Gefuehl: ein gewoehnlicher
-/// test262-Test kostet **1,9 µs**, also grob hundert Schritte. 2 Mio. waren
-/// das Zwanzigtausendfache — und weil diese Maschine rund 11 Mio. Schritte je
-/// Sekunde schafft, kostete JEDER Test, der absichtlich mit einer absurden
-/// Array-Laenge arbeitet, 180 ms. Davon gibt es in `built-ins/Array` Tausende.
-///
-/// 200 000 sind immer noch hundertfache Reserve und decken hoechstens 18 ms.
-/// Was darueber faellt, verschwindet nicht still: „step budget exhausted"
-/// steht als eigene Zeile in der Fehlerkarte.
+/// An ordinary test262 test needs on the order of a hundred steps; this
+/// leaves large headroom while keeping tests that deliberately use huge
+/// array lengths cheap. Anything exceeding it shows up as "step budget
+/// exhausted" in the error map.
 pub const TEST_STEPS: u64 = 200_000;
 
 impl Interp {
@@ -966,11 +846,10 @@ impl Interp {
         super::url::install(&mut realm);
         super::fetch::install(&mut realm);
         let mut me = Interp::with_realm(realm);
-        // **`WebSocket` erscheint nur, wenn es echten Zufall gibt** — es
-        // braucht eine Maske je Rahmen (RFC 6455 §5.3), und eine
-        // vorhersagbare waere schlechter als eine fehlende Schnittstelle.
-        // Dieselbe Regel wie bei `crypto`, und sie steht hier, weil `install`
-        // den fertigen Interp braucht und nicht nur den Realm.
+        // `WebSocket` only appears with real randomness: each frame needs a mask
+        // (RFC 6455 §5.3), and a predictable one would be worse than a missing
+        // interface. Same rule as `crypto`; it is here because `install` needs the
+        // finished interpreter, not just the realm.
         super::websocket::install(&mut me);
         me
     }
@@ -1011,41 +890,36 @@ impl Interp {
                  timers: Vec::new(), vnow: 0.0, next_timer: 1, native_new: false, last_match: None, console: Vec::new(), console_dropped: 0 }
     }
 
-    /// Die angemeldeten Zeitgeber EINMAL durchlaufen.
+    /// Is an observation waiting for its callback?
     ///
-    /// Einmal, nicht bis die Schlange leer ist: ein `setTimeout`, das sich
-    /// selbst neu anmeldet, ist ein voellig normales Muster (Abfrageschleifen,
-    /// Animationen) und wuerde die Schleife sonst nie verlassen. Was waehrend
-    /// des Laufs dazukommt, ist beim naechsten Mal dran.
-    /// Wartet eine Beobachtung auf ihren Rueckruf?
-    ///
-    /// **Der Wirt fragt das nach jedem Bild.** `set_geometry` MISST, aber
-    /// zustellen darf nur ein Einstiegspunkt — und ohne diese Frage haette
-    /// eine Seite, die weder Zeitgeber noch Ereignisse hat, ihre Beobachter
-    /// angemeldet und nie etwas gehoert. Billig, wenn niemand beobachtet:
-    /// zwei leere Listen.
+    /// The host asks after every frame. `set_geometry` measures, but only an
+    /// entry point may deliver; without this a page with neither timers nor
+    /// events would register observers and never hear back. Cheap when nobody
+    /// observes: two empty lists.
     pub fn box_observations_pending(&self) -> bool {
         self.resize_obs.iter().any(|o| !o.queue.is_empty())
             || self.inter_obs.iter().any(|o| !o.queue.is_empty())
     }
 
+    /// Run the registered timers once.
+    ///
+    /// Once, not until the queue is empty: a `setTimeout` that re-registers
+    /// itself is a normal pattern (polling, animation) and would never leave
+    /// the loop. Whatever is added during the run is due next time.
     pub fn run_timers(&mut self) -> usize {
-        // Erst die Microtasks, dann die Zeitgeber — das IST die Rangfolge.
-        // Und ohne diese Zeile bliebe ein `Promise.resolve().then(f)` aus
-        // einem Ereignisbehandler liegen, bis zufaellig ein Zeitgeber faellig
-        // wird: `run_timers` kaeme bei leerer Zeitgeberliste gar nicht dazu.
+        // Microtasks first, then timers; that is the priority. Without this a
+        // `Promise.resolve().then(f)` from an event handler would wait until some
+        // timer happened to be due: `run_timers` would not get there with an empty
+        // timer list.
         super::promise::run_jobs(self);
         if self.timers.is_empty() { return 0 }
-        // Ist nichts faellig, springt die Uhr auf den naechsten Termin. Das
-        // ist keine echte Zeit — aber es ist die richtige REIHENFOLGE, und
-        // ein Rueckruf, den niemand mehr abbestellt, muss auch laufen.
+        // If nothing is due, the clock jumps to the next deadline. Not real time,
+        // but the right order, and a callback nobody cancels must still run.
         //
-        // **Nicht, solange etwas unterwegs ist.** Wer auf eine Antwort
-        // wartet, darf die Uhr nicht vorstellen: webpack meldet neben jedem
-        // nachgeladenen Stueck einen Zeitgeber auf 120 SEKUNDEN an und
-        // loescht ihn im `onload`. Springt die Uhr, waehrend das Stueck noch
-        // geholt wird, faellt die Zeitueberschreitung VOR der Zustellung —
-        // und die Seite meldet einen Fehler fuer etwas, das ankommt.
+        // Not while something is in flight: a waiter must not advance the clock.
+        // Chunk loaders register a long timeout next to each fetch and clear it in
+        // `onload`; jumping the clock while the chunk is still loading would fire the
+        // timeout before delivery.
         let waiting = !self.pending_scripts.is_empty()
             || !self.pending_sheets.is_empty()
             || !self.pending_fetches.is_empty();
@@ -1059,73 +933,43 @@ impl Interp {
             if t.due <= now { due.push(t) } else { keep.push(t) }
         }
         self.timers = keep;
-        // Gleicher Termin heisst: in der Reihenfolge der Anmeldung.
+        // Equal due time means registration order.
         due.sort_by(|a, b| a.due.partial_cmp(&b.due).unwrap_or(core::cmp::Ordering::Equal)
                             .then(a.id.cmp(&b.id)));
         let n = due.len();
         for t in due {
-            // Ein `setInterval` meldet sich selbst wieder an — VOR dem Lauf,
-            // damit ein `clearInterval` im Rueckruf ihn auch erwischt.
+            // A `setInterval` re-registers itself before running, so a `clearInterval`
+            // in the callback catches it.
             if let Some(iv) = t.interval {
                 self.timers.push(Timer { id: t.id, cb: t.cb.clone(), due: now + iv.max(1.0),
                                          interval: Some(iv), args: t.args.clone() });
             }
             let f = t.cb;
             let args = t.args;
-            // Ein Zeitgeber, der wirft, muss es SAGEN. Der Ausgang wurde hier
-            // weggeworfen: ein Fehler in einem `setTimeout`-Rueckruf war
-            // unsichtbar, und was danach nicht passierte, sah aus wie ein
-            // fehlendes Merkmal — dieselbe Falle wie beim Ereignisbehandler.
+            // A timer that throws must report it; otherwise a failure in a callback
+            // looks like a missing feature.
             if let Err(e) = self.call(&f, Value::Undefined, &args) {
                 let msg = super::modules::describe(self, e);
                 self.console_push(alloc::format!("Fehler im Zeitgeber: {msg}"));
             }
-            // Nach JEDEM Zeitgeber, nicht erst nach allen: Microtasks laufen
-            // zwischen den Aufgaben, und ein `then`, das der erste Zeitgeber
-            // anlegt, gehoert vor den zweiten.
+            // After every timer, not after all: microtasks run between tasks, and a
+            // `then` created by the first timer belongs before the second.
             super::promise::run_jobs(self);
         }
         n
     }
 
-    /// Ein Dokument einreichen und `document` global sichtbar machen.
+    /// Count what is reachable from the roots.
     ///
-    /// Den Realm abbauen und dabei die Ringe brechen.
+    /// The same walk `teardown` does, counting instead of tearing down. `Rc`
+    /// does not collect cycles (see the head of `value.rs`), and framework data
+    /// structures such as React's fiber tree are cycles. The question before any
+    /// collector is how much the page still holds, and how much only holds
+    /// itself.
     ///
-    /// **Gemessen 2026-09-04: ein Realm kostet 973 KB und wurde NIE frei.**
-    /// Zweihundert erzeugte und wieder fallengelassene Maschinen liessen
-    /// 191 MB liegen. Der Grund ist kein Fehler in einer Zeile, sondern die
-    /// Bauart: `Rc` zaehlt, und die Form eines JS-Realms ist ringfoermig —
-    /// `proto.constructor` zeigt auf den Konstruktor, `ctor.prototype`
-    /// zurueck auf den Prototyp; `globalThis` zeigt auf sich selbst; jede
-    /// Schliessung haelt ihre Umgebung, und die globale Umgebung haelt die
-    /// Schliessung. Ein Zaehler kommt aus einem Ring nie auf null.
-    ///
-    /// Der test262-Lauf hat es aufgedeckt: 69 194 Tests x 973 KB = 67 GB, und
-    /// der OOM-Killer hat den Lauf erschossen. Bei 519 KB (0.56.0) passte es
-    /// gerade noch — die Luecke war also schon lange da, nur nicht sichtbar.
-    ///
-    /// Kein Sammler, sondern ein ABBAU an den Wurzeln: alles, was vom
-    /// globalen Gegenstand und den Prototypen aus erreichbar ist, wird
-    /// einmal besucht und geleert. Danach zeigt kein Ring mehr auf sich
-    /// selbst, und `Rc` raeumt den Rest.
-    ///
-    /// ⚠ Wer nach dem Fallenlassen noch einen `Value` aus dieser Maschine
-    /// haelt, haelt danach ein LEERES Objekt. Das ist sicher (der Speicher
-    /// lebt, solange der `Rc` lebt), aber es ist nicht mehr dasselbe Objekt.
-    /// Von den Wurzeln aus zaehlen, was erreichbar ist.
-    ///
-    /// **Der Gang, den `teardown` schon laeuft — nur zaehlend statt
-    /// abbauend.** `Rc` sammelt keine Ringe ein (`value.rs` sagt es im Kopf),
-    /// und Reacts Fiberbaum IST einer: `return`, `child`, `sibling`,
-    /// `alternate` zeigen aufeinander. Die Frage, die vor jedem Sammler
-    /// steht, ist deshalb nicht „wieviel haelt die Seite", sondern „wieviel
-    /// davon haelt SIE noch, und wieviel haelt nur sich selbst".
-    ///
-    /// Die Wurzeln sind ALLE, die der Interpreter hat — nicht nur die des
-    /// Realms: ein Zeitgeber, ein Beobachter, ein offener `fetch` und jeder
-    /// Behandler am Baum halten genauso. Wer eine auslaesst, zaehlt
-    /// lebendigen Bestand als Muell.
+    /// The roots are all of the interpreter's, not just the realm's: a timer, an
+    /// observer, a pending `fetch` and every handler on the tree hold objects
+    /// too. Omitting one counts live data as garbage.
     #[cfg(feature = "heap-census")]
     pub fn heap_census(&self) -> Census {
         let (seen, envs, props) = self.walk_roots();
@@ -1142,16 +986,14 @@ impl Interp {
         }
     }
 
-    /// Nur die Markierung — was `collect_cycles` behalten muss.
+    /// Mark only: what `collect_cycles` must keep.
     #[cfg(feature = "heap-census")]
     fn mark_reachable(&self) -> HashSet<usize> { self.walk_roots().0 }
 
-    /// Der Gang selbst: von allen Wurzeln aus, ohne etwas anzufassen.
+    /// The walk itself: from all roots, touching nothing.
     ///
-    /// **Bleibt aus dem ausgelieferten Modul heraus**, solange es keinen
-    /// Sammler gibt, der ihn braucht: Diagnose darf nicht stoeren, und 279
-    /// Bytes im Bild sind 279 Bytes fuer niemanden
-    /// ([[feedback_diagnostics_must_not_disturb]]).
+    /// Stays out of the shipped module until a collector needs it: diagnostics
+    /// must not affect the product.
     #[cfg(feature = "heap-census")]
     fn walk_roots(&self) -> (HashSet<usize>, usize, usize) {
         fn add(v: &Value, objs: &mut Vec<Gc>) {
@@ -1194,9 +1036,8 @@ impl Interp {
             }
         }
         for m in self.modules.values() { env_stack.push(m.borrow().env.clone()); }
-        // **Der Baum haelt mit.** Jede Huelle, jeder Behandler und jeder
-        // `on…`-Wert ist eine Wurzel — und genau daran haengt bei einer
-        // Anwendung der groesste Teil.
+        // The tree holds too: every wrapper, handler and `on…` value is a root, and
+        // in an application most data hangs there.
         if let Some(d) = &self.doc {
             for n in &d.nodes {
                 if let Some(g) = &n.js { objs.push(g.clone()); }
@@ -1231,9 +1072,8 @@ impl Interp {
                     add(this_val, &mut objs);
                     for a in args { add(a, &mut objs); }
                 }
-                // **Ein Versprechen haelt seine Behandler.** `teardown` laesst
-                // sie aus; fuer den Zensus waeren sie sonst Muell, obwohl sie
-                // gebraucht werden.
+                // A promise holds its handlers. `teardown` skips them; for the census they
+                // would otherwise count as garbage though they are needed.
                 ObjKind::Promise(d) => {
                     let d = d.borrow();
                     for r in d.on_ok.iter().chain(d.on_err.iter()) {
@@ -1259,8 +1099,8 @@ impl Interp {
                     if seen.insert(Rc::as_ptr(x) as usize) { objs.push(x.clone()); }
                 }
             }
-            // Was ueber die Bindungen dazukam, muss noch durch den
-            // Objektgang — sonst fehlen dessen Umgebungen.
+            // What the bindings added must still go through the object walk, or its
+            // environments would be missing.
             while let Some(o) = objs.pop() {
                 let b2 = o.borrow();
                 for k in b2.own_keys() {
@@ -1281,21 +1121,20 @@ impl Interp {
         (seen, envs.len(), props)
     }
 
-    /// Die Ringe brechen, die von keiner Wurzel aus zu erreichen sind.
+    /// Break the cycles not reachable from any root.
     ///
-    /// **Markieren und kehren, mit `Rc` als Kehrblech.** Der Gang ist derselbe
-    /// wie in `heap_census`; was er nicht gefunden hat, wird geleert — Werte
-    /// weg, Prototyp weg, Art auf `Plain`. Damit zeigt kein Ring mehr auf sich
-    /// selbst, und der Zaehler kommt von allein auf null.
+    /// Mark and sweep, with `Rc` doing the freeing. The walk is the one in
+    /// `heap_census`; whatever it did not find is cleared (values, prototype,
+    /// kind set to `Plain`). Then no cycle refers to itself and the counts reach
+    /// zero on their own.
     ///
-    /// Gekehrt wird ueber `value::ALL_OBJECTS`: **ohne Verzeichnis kann
-    /// niemand kehren** — ein Sammler muss aufzaehlen koennen, was es gibt.
+    /// The sweep goes over `value::ALL_OBJECTS`: a collector must be able to
+    /// enumerate what exists.
     ///
-    /// Liefert `(geleert, uebrig)`.
+    /// Returns `(cleared, remaining)`.
     ///
-    /// ⚠ Noch eine MESSUNG, kein Sammler im Betrieb: wer danach noch einen
-    /// `Value` aus einem geleerten Objekt haelt, haelt ein leeres. Dieselbe
-    /// Warnung wie bei `teardown`, und derselbe Grund, sie ernst zu nehmen.
+    /// Measurement only, not a collector in use: anyone still holding a `Value`
+    /// of a cleared object holds an empty one. Same warning as `teardown`.
     #[cfg(feature = "heap-census")]
     pub fn collect_cycles(&mut self) -> (usize, usize) {
         let keep = self.mark_reachable();
@@ -1320,13 +1159,27 @@ impl Interp {
         }
     }
 
+    /// Tear down the realm and break its cycles.
+    ///
+    /// `Rc` counts references, and a JS realm is full of cycles:
+    /// `proto.constructor` points to the constructor, `ctor.prototype` back;
+    /// `globalThis` points to itself; every closure holds its environment,
+    /// and the global environment holds the closure. A count never reaches
+    /// zero inside a cycle.
+    ///
+    /// Not a collector but a teardown from the roots: everything reachable
+    /// from the global object and the prototypes is visited once and cleared.
+    /// Then no cycle refers to itself, and `Rc` frees the rest.
+    ///
+    /// Anyone still holding a `Value` from this machine after the drop holds
+    /// an empty object. That is memory-safe (the allocation lives as long as
+    /// the `Rc`), but it is no longer the same object.
     fn teardown(&mut self) {
-        // Die Vorlagen-Gegenstaende haengen an keiner Wurzel — der Gang unten
-        // findet sie nicht. Sie zeigen nur auf Zeichenketten und auf
-        // `array_proto`, also reicht Loslassen.
+        // Template objects hang on no root, so the walk below does not find them.
+        // They only refer to strings and `array_proto`; dropping them suffices.
         self.templates.clear();
-        // Eine offene Verbindung haelt ihren JS-Gegenstand, und der haelt
-        // seine Behandler — das ist ein Ring, den der Gang unten nicht findet.
+        // An open connection holds its JS object, which holds its handlers; a cycle
+        // the walk below does not find.
         self.sockets.clear();
         self.socket_objs.clear();
         self.pending_sockets.clear();
@@ -1334,9 +1187,9 @@ impl Interp {
         let mut envs: HashSet<usize> = HashSet::new();
         let mut objs: Vec<Gc> = alloc::vec![self.realm.global.clone()];
         let mut env_stack: Vec<Rc<RefCell<Env>>> = alloc::vec![self.realm.global_env.clone()];
-        // Die Prototypen stehen im Realm und sind nicht immer vom globalen
-        // Gegenstand aus erreichbar (`event_proto` etwa haengt am
-        // Konstruktor, aber der Umweg ist nicht garantiert).
+        // The prototypes live in the realm and are not always reachable from the
+        // global object (`event_proto` hangs on its constructor, but that path is
+        // not guaranteed).
         objs.extend(self.realm.roots());
         let mut all: Vec<Gc> = Vec::new();
         while let Some(o) = objs.pop() {
@@ -1356,10 +1209,9 @@ impl Interp {
                         if let Some(Value::Obj(x)) = &d.this_val { objs.push(x.clone()); }
                         if let Some(h) = &d.home_object { objs.push(h.clone()); }
                     }
-                    // Ein angehaltener Generator haelt seine Umgebungen und
-                    // halbfertige Werte in seiner Maschine fest. Sie stehen
-                    // sonst in keiner Eigenschaft und in keiner Bindung — wer
-                    // sie hier auslaesst, laesst einen Rc-Ring stehen.
+                    // A suspended generator holds environments and half-finished values in its
+                    // machine. They are in no property and no binding; skipping them here
+                    // leaves an Rc cycle.
                     ObjKind::Generator(g) => {
                         g.roots(&mut objs, &mut env_stack);
                     }
@@ -1373,8 +1225,8 @@ impl Interp {
             }
             all.push(o);
         }
-        // Die Umgebungen dazu: eine Schliessung haelt ihre, und die haelt
-        // ueber ihre Bindungen wieder Schliessungen.
+        // The environments too: a closure holds its own, which holds closures again
+        // through its bindings.
         let mut all_envs: Vec<Rc<RefCell<Env>>> = Vec::new();
         while let Some(e) = env_stack.pop() {
             if !envs.insert(Rc::as_ptr(&e) as usize) { continue }
@@ -1384,8 +1236,8 @@ impl Interp {
                 for v in b.vars.values() {
                     if let Value::Obj(x) = &v.value {
                         if seen.insert(Rc::as_ptr(x) as usize) { all.push(x.clone()); }
-                        // Objekte aus Umgebungen koennen selbst Umgebungen
-                        // halten — deshalb dieselbe Behandlung.
+                        // Objects from environments can hold environments themselves; same
+                        // treatment.
                         if let ObjKind::Function(d) = &x.borrow().kind { env_stack.push(d.env.clone()); }
                     }
                 }
@@ -1407,8 +1259,10 @@ impl Interp {
         }
     }
 
-    /// Erst hier entsteht `document` — vorher gibt es den Namen nicht, und ein
-    /// Skript, das ihn prueft, bekommt die Wahrheit statt eine leere Huelle.
+    /// Supply a document and make `document` globally visible.
+    ///
+    /// `document` only appears here; before that the name does not exist, and a
+    /// script checking for it gets the truth rather than an empty shell.
     pub fn set_document(&mut self, doc: super::dombind::Doc) {
         let root = doc.doc;
         self.doc = Some(doc);
@@ -1416,7 +1270,7 @@ impl Interp {
         self.realm.global.borrow_mut().define("document", Prop::builtin(v));
     }
 
-    /// Eine Zeile von der Seite entgegennehmen.
+    /// Accept a line from the page.
     pub fn console_push(&mut self, line: String) {
         if self.console.len() >= MAX_CONSOLE_LINES {
             self.console_dropped += 1;
@@ -1430,9 +1284,8 @@ impl Interp {
         self.console.push(l);
     }
 
-    /// Die gesammelten Zeilen herausnehmen. Wurde etwas verworfen, sagt die
-    /// letzte Zeile es — sonst laese sich eine gedeckelte Ausgabe wie eine
-    /// vollstaendige.
+    /// Take the collected lines. If anything was discarded, the last line says
+    /// so; otherwise capped output would read as complete.
     pub fn take_console(&mut self) -> Vec<String> {
         let mut out = core::mem::take(&mut self.console);
         if self.console_dropped > 0 {
@@ -1442,60 +1295,51 @@ impl Interp {
         out
     }
 
-    /// Die Fenstergroesse einreichen.
-    ///
-    /// `beak-engine` hat keine — sie gehoert dem Wirt. Vorher gab es
-    /// `innerWidth` deshalb GAR NICHT, und eine Seite, die ihr Layout danach
-    /// waehlt, fiel mit `ReferenceError` aus, statt die schmale Fassung zu
-    /// nehmen. Eine erfundene Zahl waere schlimmer gewesen: sie haette
-    /// ausgesehen wie eine Messung ([[feedback_invented_fallback_hides_the_fault]]).
-    /// Eine echte Saat vom Wirt. Ohne sie liefert `Math.random` jedes Mal
-    /// dieselbe Folge — sichtbar deterministisch statt unsichtbar schlecht.
+    /// A real seed from the host. Without it `Math.random` yields the same
+    /// sequence every time: visibly deterministic rather than invisibly bad.
     pub fn seed_random(&mut self, seed: u64) {
         self.rng = seed | 1;
     }
 
-    /// xorshift64*. Eine Zahl in [0,1), wie die Spezifikation sie verlangt.
-    /// Kein Kryptozufall und nicht als solcher gedacht — `crypto.getRandomValues`
-    /// waere eine eigene Frage und haengt am Wirt.
+    /// xorshift64*. A number in [0,1), as the spec requires. Not cryptographic
+    /// randomness and not meant as such; `crypto.getRandomValues` is separate
+    /// and depends on the host.
     pub fn next_random(&mut self) -> f64 {
         let mut x = self.rng;
         x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
         self.rng = x;
-        // Die oberen 53 Bits: genau die Genauigkeit eines f64-Bruchs.
+        // The top 53 bits: exactly the precision of an f64 fraction.
         ((x.wrapping_mul(0x2545_F491_4F6C_DD1D)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// Die Kekse dieser Seite einreichen — was `document.cookie` LIEST.
+    /// Supply this page's cookies: what `document.cookie` reads.
     ///
-    /// Der Wirt gibt die Skript-Sicht (`cookies::script_header_for`), nicht
-    /// den `Cookie:`-Kopf: ein `HttpOnly`-Keks reist auf der Anfrage mit und
-    /// darf trotzdem nie in einem Skript stehen.
+    /// The host passes the script view (`cookies::script_header_for`), not the
+    /// `Cookie:` header: an `HttpOnly` cookie travels with requests but must
+    /// never appear in a script.
     pub fn set_cookies(&mut self, jar: String) {
         self.cookies = jar;
     }
 
-    /// Was die Seite gesetzt hat, herausnehmen. Rohe Erklaerungen
-    /// (`name=wert; Path=/; Max-Age=…`) — die Regeln kennt der Behaelter.
-    /// Was die Seite am Verlauf tun WOLLTE. Der Wirt holt es ab und
-    /// entscheidet; die Liste ist danach leer.
+    /// Stylesheets inserted by script that the host should fetch; the list is
+    /// empty afterwards.
     pub fn take_pending_sheets(&mut self) -> Vec<(u32, String)> {
         core::mem::take(&mut self.pending_sheets)
     }
 
-    /// Was an eingehaengten Skripten geholt werden will. Der Wirt holt es ab
-    /// und meldet mit `dombind::script_done` zurueck.
+    /// Inserted scripts waiting to be fetched. The host takes them and reports
+    /// back with `dombind::script_done`.
     pub fn take_pending_scripts(&mut self) -> Vec<(u32, String)> {
         core::mem::take(&mut self.pending_scripts)
     }
 
-    /// Was `fetch()` losschicken will. Der Wirt holt es ab; die Liste ist
-    /// danach leer.
+    /// What `fetch()` wants to send. The host takes it; the list is empty
+    /// afterwards.
     pub fn take_pending_fetches(&mut self) -> Vec<super::fetch::PendingFetch> {
         core::mem::take(&mut self.pending_fetches)
     }
 
-    /// Welche Anfragen abgebrochen gehoeren.
+    /// Which requests should be aborted.
     pub fn take_aborted_fetches(&mut self) -> Vec<u32> {
         core::mem::take(&mut self.aborted_fetches)
     }
@@ -1504,77 +1348,72 @@ impl Interp {
         core::mem::take(&mut self.submits)
     }
 
+    /// What the page wanted to do with the history. The host takes it and
+    /// decides; the list is empty afterwards.
     pub fn take_history_ops(&mut self) -> Vec<HistoryOp> {
         core::mem::take(&mut self.history_ops)
     }
 
-    /// Die verlangte Navigation abholen. Der Wirt ist der einzige, der sie
-    /// ausfuehren kann — er hat Netz und Verlauf.
+    /// Take the requested navigation. Only the host can carry it out; it has
+    /// network and history.
     pub fn take_nav(&mut self) -> Option<NavRequest> {
         self.nav.take()
     }
 
-    /// Der Wirt reicht ein, wie lang sein Verlauf ist und welchen Zustand
-    /// der aktuelle Eintrag traegt — beim Laden und nach jedem Sprung.
+    /// The host supplies how long its history is and which state the current
+    /// entry carries, on load and after every traversal.
     pub fn set_history(&mut self, len: f64, state: Value) {
         self.history_len = len;
         self.history_state = state;
     }
 
-    /// Einen Rollwunsch merken. Der LETZTE gewinnt, so wie bei der
-    /// Navigation: im Browser bricht ein zweiter Sprung den ersten ab. Eine
-    /// Achse ohne Wunsch behaelt den Wunsch von vorhin.
+    /// Remember a scroll request. The last one wins, as with navigation: in a
+    /// browser a second jump aborts the first. An axis without a request keeps
+    /// the earlier one.
     pub fn want_scroll(&mut self, x: Option<f64>, y: Option<f64>) {
         let (px, py) = self.scroll_want.unwrap_or((None, None));
         self.scroll_want = Some((x.or(px), y.or(py)));
     }
 
-    /// Was die Seite verlangt hat, und danach ist es weg.
+    /// What the page requested; consumed by the call.
     pub fn take_scroll(&mut self) -> Option<(Option<f64>, Option<f64>)> {
         self.scroll_want.take()
     }
 
+    /// Take what the page set. Raw declarations (`name=value; Path=/;
+    /// Max-Age=…`); the jar knows the rules.
     pub fn take_cookie_sets(&mut self) -> Vec<String> {
         core::mem::take(&mut self.cookie_sets)
     }
 
-    /// Den Kaskadenkontext einreichen — damit `getComputedStyle` echte Werte
-    /// liefern kann statt nur des Inline-Stils.
+    /// Supply the cascade context so `getComputedStyle` can return real values
+    /// instead of only the inline style.
     pub fn set_style_context(&mut self, ctx: StyleCtx) {
         self.style_ctx = Some(ctx);
     }
 
-    /// Die Kaesten des letzten Layouts einreichen — siehe `Geometry`.
-    /// Der Rollstand aendert sich ohne Layout, also gehoert er MIT hinein und
-    /// wird bei jedem Einreichen nachgezogen.
+    /// Supply the boxes of the last layout; see `Geometry`. The scroll position
+    /// changes without layout, so it is part of it and updated on every call.
     pub fn set_geometry(&mut self, g: Geometry) {
         self.geometry = Some(g);
-        // Ein Bild des Wirts gibt das Budget zurueck; ein erzwungenes
-        // Auslegen nicht — sonst waere der Deckel keiner.
+        // A host frame restores the budget; a forced layout does not, or the cap
+        // would be none.
         if !self.in_forced_layout { self.forced_layouts = 0; }
-        // **Hier und nirgends sonst.** `ResizeObserver` und
-        // `IntersectionObserver` fragen nicht nach der Zeit, sondern nach
-        // dem Kasten — und der steht genau jetzt fest. Ein Zeitgeber, der
-        // raet, wann sich etwas bewegt haben koennte, waere die falsche
-        // Frage und die teurere dazu.
+        // Here and nowhere else: `ResizeObserver` and `IntersectionObserver` depend
+        // on the box, not on time, and the box is final exactly now.
         super::dombind::eval_box_observers(self);
     }
 
-    /// Die Adresse der Seite einreichen. Fuellt `location` und `document.URL`.
-    ///
-    /// Vorher stand dort `about:blank` — eine Zahl, die aussieht wie eine
-    /// Messung: ein Skript, das seinen Pfad prueft, nahm den falschen Zweig
-    /// und meldete keinen Fehler dabei.
+    /// Supply the page address. Fills `location` and `document.URL`.
     pub fn set_location(&mut self, url: &str) {
         let p = super::url::parse_abs(url).unwrap_or_else(|| super::url::Parts {
             scheme: alloc::string::String::from("about"),
             path: alloc::string::String::from("blank"),
             ..Default::default()
         });
-        // **Nur eine Zeile schreibt die Adresse.** `location` ist ganz aus
-        // Zugriffsfunktionen gebaut, die alle aus `loc_href` lesen — wer die
-        // Teile hier als Datenfelder mitschreiben wuerde, haette eine zweite
-        // Wahrheit, die beim ersten `location.pathname = …` auseinanderlaeuft.
+        // Only one line writes the address. `location` is built entirely from
+        // accessors reading `loc_href`; writing the parts here as data fields would
+        // create a second copy that diverges at the first `location.pathname = …`.
         self.loc_href = p.href();
         let href = p.href();
         self.realm.global.borrow_mut().define("origin", Prop::builtin(Value::str(&p.origin())));
@@ -1584,9 +1423,9 @@ impl Interp {
         let mut d = d.borrow_mut();
         d.define("URL", Prop::builtin(Value::str(&href)));
         d.define("documentURI", Prop::builtin(Value::str(&href)));
-        // `document.location` ist DASSELBE Objekt wie `window.location`, und
-        // eine Zuweisung darauf navigiert, statt es zu ersetzen — dieselbe
-        // Regel wie am Fenster ([PutForwards=href]).
+        // `document.location` is the same object as `window.location`, and assigning
+        // to it navigates instead of replacing it; same rule as on the window
+        // ([PutForwards=href]).
         let g = super::value::native(Some(fp.clone()),
             |i, _, _| Ok(Value::Obj(i.realm.location.clone())), "location", 0, false);
         let st = super::value::native(Some(fp),
@@ -1595,14 +1434,17 @@ impl Interp {
             set: Some(Value::Obj(st)), writable: false, enumerable: true, configurable: false });
     }
 
-    /// Wie `set_viewport`, aber mit dem Farbschema dazu. `matchMedia` braucht
-    /// beides, und ein `prefers-color-scheme`, das immer hell sagt, waere eine
-    /// erfundene Antwort.
+    /// Like `set_viewport`, plus the colour scheme. `matchMedia` needs both, and a
+    /// `prefers-color-scheme` that always says light would be an invented answer.
     pub fn set_media(&mut self, w: f64, h: f64, dark: bool) {
         self.set_viewport(w, h);
         self.media = Some((w, dark));
     }
 
+    /// Supply the window size.
+    ///
+    /// `beak-engine` has none; it belongs to the host. An invented number
+    /// would be worse than none: it would look like a measurement.
     pub fn set_viewport(&mut self, w: f64, h: f64) {
         if self.media.is_none() { self.media = Some((w, false)); }
         self.viewport = (w, h);
@@ -1625,13 +1467,11 @@ impl Interp {
         o.define("screen", Prop::builtin(Value::Obj(screen)));
     }
 
-    /// Ein Arbeitsschritt in einer EINGEBAUTEN Schleife.
+    /// One unit of work in a built-in loop.
     ///
-    /// Der Deckel in `exec` zaehlt nur Anweisungen — die Schleifen in
-    /// `Array.prototype.*` und `iterate` laufen daran vorbei. `new
-    /// Array(2**32-1).join()` haengt damit unbegrenzt, und genau das hat den
-    /// ersten Ausfuehrungslauf ueber den Zeitdeckel getragen. Also zaehlen
-    /// diese Schleifen mit.
+    /// The cap in `exec` counts statements only; the loops in `Array.prototype.*`
+    /// and `iterate` bypass it, so `new Array(2**32-1).join()` would hang without
+    /// these loops counting too.
     pub fn tick(&mut self) -> C<()> {
         self.steps += 1;
         if self.steps > self.max_steps {
@@ -1641,21 +1481,14 @@ impl Interp {
         Ok(())
     }
 
-    /// Die UHR des Wirts — alle 65 536 Schritte.
+    /// The host's clock, every 65 536 steps.
     ///
-    /// **Sie stand bis 0.117.0 nur in `tick`, und `tick` ruft nur, wer in
-    /// einem EINGEBAUTEN schleift.** Reines JS kam nie vorbei: eine
-    /// Anmeldung, die ihren HMAC selbst rechnet, lief vier Minuten ohne
-    /// einen Herzschlag, und das Zeitbudget war fuer genau den Fall
-    /// unwirksam, fuer den es gedacht ist. Eine echte Endlosschleife hing
-    /// bis zum Schrittdeckel — bei 20 Mrd. Schritten anderthalb Stunden.
-    ///
-    /// Sie gehoert deshalb dorthin, wo BEIDE Maschinen ihre Schritte
-    /// zaehlen. Der heisse Pfad zahlt eine Maske und einen Sprung; der
-    /// Aufruf selbst kommt alle 65 536 Schritte, das sind rund 60 ms.
+    /// Called from where both machines count their steps, so pure JS loops are
+    /// covered too, not only loops inside built-ins. The hot path pays a mask and
+    /// a branch; the call itself comes every 65 536 steps.
     #[inline]
-    /// Millisekunden seit dem Seitenanfang — echt, wenn der Wirt eine Uhr
-    /// eingereicht hat, sonst der steigende Zaehler.
+    /// Milliseconds since page start: real if the host supplied a clock,
+    /// otherwise the rising counter.
     pub fn now_ms(&mut self) -> f64 {
         match self.clock {
             Some(f) => f(),
@@ -1672,7 +1505,7 @@ impl Interp {
         Ok(())
     }
 
-    // ── Fehler ───────────────────────────────────────────────────────────
+    // ── Errors ───────────────────────────────────────────────────────────
     pub fn throw_kind(&mut self, kind: &'static str, msg: &str) -> Abrupt {
         let proto = self.realm.error_ctors.get(kind).cloned()
             .unwrap_or_else(|| self.realm.error_proto.clone());
@@ -1682,29 +1515,14 @@ impl Interp {
     }
     pub fn type_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("TypeError", msg)) }
 
-    /// „x is not a function" — mit dem NAMEN, wo es einen gibt.
+    /// "x is not a constructor", naming the call site and the kind of value.
     ///
-    /// „value is not a function" war im Zielkorpus mit 46 Fehlschlaegen der
-    /// haeufigste Grund ueberhaupt und sagte ueber keinen einzigen, WAS fehlt
-    /// ([[feedback_print_the_identifier_not_just_the_event]]). Eigene
-    /// Funktion, weil beide Maschinen sie brauchen: als `switch` und `for..in`
-    /// uebersetzbar wurden, wanderten zwei Korpusskripte auf die Maschine —
-    /// und verloren dabei still ihren Namen in der Meldung. Die Prozentzahl
-    /// hat das nicht gesehen, der Wandvergleich schon.
-    /// `on` ist der EMPFAENGER, auf dem gesucht wurde. Der Name allein sagt
-    /// bei einem haeufigen Wort wie `render` nicht, WESSEN `render` fehlt —
-    /// und in einem minifizierten Buendel steht kein zweiter Hinweis
-    /// daneben ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
-    /// „value is not a constructor" sagte ueber den Wert GAR NICHTS — und in
-    /// einem minifizierten Buendel steht daneben kein zweiter Hinweis
-    /// ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
-    ///
-    /// Die drei Antworten, die den Fall entscheiden: ein `undefined` heisst
-    /// fehlender Name oder fehlender Import, ein Pfeil/eine Methode/ein
-    /// Generator heisst falsche Bauart, und ein eingebauter ohne `new` heisst
-    /// Absicht der Spezifikation.
+    /// Three answers decide the case: `undefined` means a missing name or import,
+    /// an arrow/method/generator means the wrong kind of function, and a built-in
+    /// without `[[Construct]]` is intended by the spec. A minified bundle offers
+    /// no other hint.
     pub fn not_a_constructor(&mut self, f: &Value) -> Abrupt {
-        // Die BAUART, kurz: sie sagt, warum es keiner ist.
+        // The kind, briefly: it says why it is not a constructor.
         let art = match f {
             Value::Obj(o) => match &o.borrow().kind {
                 ObjKind::Function(d) => {
@@ -1719,15 +1537,14 @@ impl Interp {
             },
             v => v.type_of(),
         };
-        // Der Name der RUFSTELLE entscheidet den Fall: „Intl.PluralRules is
-        // not a constructor (undefined)" nennt eine fehlende Schnittstelle,
-        // „undefined is not a constructor" nur einen Zustand.
+        // The call-site name decides the case: "Intl.PluralRules is not a
+        // constructor (undefined)" names a missing interface, "undefined is not a
+        // constructor" only a state.
         if let Some(n) = self.new_name.clone() {
             return self.throw_kind("TypeError",
                 &alloc::format!("{n} is not a constructor ({art})"));
         }
-        // Ohne Namen an der Rufstelle: der eigene Name des Werts, wenn er
-        // einen hat.
+        // Without a call-site name: the value's own name, if it has one.
         let own = match f {
             Value::Obj(_) => self.get(f, "name").ok()
                 .and_then(|n| self.to_string(&n).ok())
@@ -1743,12 +1560,17 @@ impl Interp {
         }
     }
 
+    /// "x is not a function", with the name where there is one.
+    ///
+    /// `on` is the receiver the lookup ran on. A common name such as `render`
+    /// alone does not say whose `render` is missing, and a minified bundle
+    /// offers no other hint. Shared by both machines so neither loses the
+    /// name in the message.
     pub fn not_a_function(&mut self, name: Option<&str>, on: Option<&Value>) -> Abrupt {
         let where_ = match on {
             Some(v @ Value::Obj(o)) => {
-                // Der Name der Bauart zuerst: „auf einer Instanz von Foo"
-                // sagt in einem minifizierten Buendel mehr als jede
-                // Eigenschaftsliste.
+                // The constructor's name first: "on an instance of Foo" says more in a
+                // minified bundle than any property list.
                 let ctor = self.get(v, "constructor").ok()
                     .and_then(|c| self.get(&c, "name").ok())
                     .and_then(|n| self.to_string(&n).ok())
@@ -1757,8 +1579,8 @@ impl Interp {
                 let b = o.borrow();
                 let mut keys: alloc::vec::Vec<alloc::string::String> = b.own_keys().into_iter()
                     .take(6).map(|k| alloc::string::String::from(&*k)).collect();
-                // Was die BAUART kann, sagt mehr als was die Instanz traegt:
-                // bei einer Komponente ohne `render` ist die Frage „welche".
+                // What the prototype offers says more than what the instance carries: for a
+                // component without `render` the question is which component.
                 if let Some(pr) = b.proto.clone() {
                     let pk: alloc::vec::Vec<alloc::string::String> = pr.borrow().own_keys()
                         .into_iter().take(6).map(|k| alloc::string::String::from(&*k)).collect();
@@ -1784,22 +1606,20 @@ impl Interp {
     pub fn range_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("RangeError", msg)) }
     pub fn ref_err<T>(&mut self, msg: &str) -> C<T> { Err(self.throw_kind("ReferenceError", msg)) }
 
-    // ── Umwandlungen ─────────────────────────────────────────────────────
-    /// `ToPrimitive`. `hint_string` waehlt die Reihenfolge von `toString` und
-    /// `valueOf` — das ist der ganze Unterschied zwischen `"" + obj` und
-    /// `1 * obj`.
+    // ── Conversions ──────────────────────────────────────────────────────
+    /// `ToPrimitive`. `hint_string` chooses the order of `toString` and `valueOf`;
+    /// that is the whole difference between `"" + obj` and `1 * obj`.
     pub fn to_primitive(&mut self, v: &Value, hint_string: bool) -> C<Value> {
         self.to_primitive_hint(v, if hint_string { "string" } else { "number" })
     }
 
-    /// Mit dem DRITTEN Wunsch: `"default"`. Er unterscheidet sich fuer
-    /// gewoehnliche Objekte in nichts von `"number"` — aber `Symbol.
-    /// toPrimitive` bekommt ihn zu sehen, und ein `Date` macht daraus Text.
-    /// Ohne ihn waere `date + ""` eine Zahl.
+    /// With the third hint, `"default"`. For ordinary objects it is the same as
+    /// `"number"`, but `Symbol.toPrimitive` sees it, and a `Date` turns it into
+    /// text. Without it `date + ""` would be a number.
     pub fn to_primitive_hint(&mut self, v: &Value, hint: &str) -> C<Value> {
         let Value::Obj(o) = v else { return Ok(v.clone()) };
-        // `Symbol.toPrimitive` geht VOR `valueOf`/`toString` — es ist der
-        // einzige Weg, auf dem ein Objekt beide ueberstimmen kann.
+        // `Symbol.toPrimitive` comes before `valueOf`/`toString`; it is the only way
+        // an object can override both.
         let exotic = self.get(v, SYM_TO_PRIMITIVE)?;
         if self.is_callable(&exotic) {
             let r = self.call(&exotic, v.clone(), &[Value::str(hint)])?;
@@ -1810,10 +1630,8 @@ impl Interp {
         self.ordinary_to_primitive(v, hint == "string")
     }
 
-    /// `OrdinaryToPrimitive` — `valueOf` und `toString` in der Reihenfolge,
-    /// die der Wunsch vorgibt. Herausgezogen, weil `Date.prototype[Symbol.
-    /// toPrimitive]` sie ruft: sonst waere sie dort ein zweites Mal
-    /// geschrieben.
+    /// `OrdinaryToPrimitive`: `valueOf` and `toString` in the order the hint
+    /// dictates. Separate because `Date.prototype[Symbol.toPrimitive]` calls it.
     pub fn ordinary_to_primitive(&mut self, v: &Value, hint_string: bool) -> C<Value> {
         let Value::Obj(o) = v else { return Ok(v.clone()) };
         let order: [&str; 2] = if hint_string { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
@@ -1835,16 +1653,14 @@ impl Interp {
             Value::Num(n) => *n,
             Value::Str(s) => string_to_num(s),
             Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a number"),
-            // Eine grosse Zahl wird NICHT still zu einer kleinen. Das ist der
-            // ganze Sinn des Typs: `1n + 1` ist ein Fehler, keine 2.
+            // A BigInt never silently becomes a Number: `1n + 1` is an error, not 2.
             Value::BigInt(_) => return self.type_err("cannot convert a BigInt value to a number"),
             Value::Obj(_) => { let p = self.to_primitive(v, false)?; self.to_number(&p)? }
         })
     }
 
-    /// `ToBigInt` — die Umwandlung, die eine 64-Bit-Sicht beim Schreiben
-    /// verlangt. Eine gewoehnliche Zahl wirft: der Uebergang muss im
-    /// Quelltext stehen.
+    /// `ToBigInt`, the conversion a 64-bit view requires on write. A Number
+    /// throws: the transition must be explicit in the source.
     pub fn to_bigint(&mut self, v: &Value) -> C<super::bigint::Big> {
         let p = self.to_primitive(v, false)?;
         Ok(match &p {
@@ -1858,16 +1674,15 @@ impl Interp {
         })
     }
 
-    /// `ToNumeric` — eine grosse Zahl bleibt gross, alles andere wird eine
-    /// gewoehnliche. Der Unterschied zu `to_number` ist genau der Grund,
-    /// warum `x++` auf einem BigInt nicht `+x` sein darf.
+    /// `ToNumeric`: a BigInt stays a BigInt, anything else becomes a Number. This
+    /// difference from `to_number` is why `x++` on a BigInt must not be `+x`.
     pub fn to_numeric(&mut self, v: &Value) -> C<Value> {
         let p = self.to_primitive(v, false)?;
         if matches!(p, Value::BigInt(_)) { return Ok(p); }
         Ok(Value::Num(self.to_number(&p)?))
     }
 
-    /// Eins dazu oder eins weg, im TYP des Wertes.
+    /// Add or subtract one, in the value's own type.
     pub fn step_numeric(&mut self, v: &Value, up: bool) -> C<Value> {
         Ok(match v {
             Value::BigInt(b) => {
@@ -1885,19 +1700,18 @@ impl Interp {
             Value::Bool(b) => Rc::from(if *b { "true" } else { "false" }),
             Value::Num(n) => Rc::from(num_to_string(*n).as_str()),
             Value::Str(s) => s.clone(),
-            // Absichtlich ein Fehler, kein Text. `"" + sym` ist fast immer ein
-            // Versehen; `String(sym)` und `sym.toString()` gehen weiterhin,
-            // die rufen `sym_to_display` statt hier durch.
+            // Deliberately an error, not text: `"" + sym` is almost always a mistake.
+            // `String(sym)` and `sym.toString()` still work; they call
+            // `sym_to_display` instead.
             Value::Sym(_) => return self.type_err("cannot convert a Symbol value to a string"),
             Value::BigInt(b) => Rc::from(b.to_string_radix(10).as_str()),
             Value::Obj(_) => { let p = self.to_primitive(v, true)?; self.to_string(&p)? }
         })
     }
 
-    /// `ToPropertyKey`. Der EINE Punkt, an dem ein Symbol zum
-    /// Eigenschaftsnamen wird — jeder berechnete Zugriff (`o[k]`,
-    /// Objektliteral, Klassenglied, `in`, `defineProperty`) laeuft hier
-    /// durch, und nur hier.
+    /// `ToPropertyKey`. The one place where a symbol becomes a property name;
+    /// every computed access (`o[k]`, object literal, class member, `in`,
+    /// `defineProperty`) goes through here.
     pub fn to_prop_key(&mut self, v: &Value) -> C<Rc<str>> {
         match v {
             Value::Sym(sd) => Ok(sd.key.clone()),
@@ -1905,8 +1719,8 @@ impl Interp {
         }
     }
 
-    /// Wie ein Symbol GESCHRIEBEN aussieht: `Symbol(desc)`. Nicht `to_string`
-    /// — das wirft mit Absicht.
+    /// How a symbol looks when written: `Symbol(desc)`. Not `to_string`, which
+    /// throws on purpose.
     pub fn sym_to_display(sd: &SymData) -> Rc<str> {
         match &sd.desc {
             Some(d) => Rc::from(alloc::format!("Symbol({d})").as_str()),
@@ -1914,13 +1728,10 @@ impl Interp {
         }
     }
 
-    /// Ein frisches Symbol. Die laufende Nummer macht den Schluessel einmalig
-    /// — zwei `Symbol("x")` sind damit verschieden, wie die Spezifikation es
-    /// verlangt.
-    /// Die Beschreibung steht MIT im Schluessel — `Object.getOwnPropertySymbols`
-    /// bekommt nur ihn zu sehen und muss das Symbol daraus wieder aufbauen
-    /// koennen ([[sym_from_key]]). Die laufende Nummer davor haelt ihn
-    /// einmalig, damit zwei `Symbol("x")` verschieden bleiben.
+    /// A fresh symbol. The description is part of the key, because
+    /// `Object.getOwnPropertySymbols` only sees the key and must rebuild the
+    /// symbol from it (`sym_from_key`). The running number in front keeps the key
+    /// unique, so two `Symbol("x")` stay distinct as the spec requires.
     pub fn new_symbol(&mut self, desc: Option<Rc<str>>) -> Value {
         self.next_sym += 1;
         let n = self.next_sym;
@@ -1931,8 +1742,8 @@ impl Interp {
         Value::Sym(Rc::new(SymData { desc, key, registered: None }))
     }
 
-    /// `ToObject`: Primitive bekommen ihre Huelle. Das ist der Weg, ueber den
-    /// `"abc".length` funktioniert.
+    /// `ToObject`: primitives get their wrapper. This is how `"abc".length`
+    /// works.
     pub fn to_object(&mut self, v: &Value) -> C<Gc> {
         match v {
             Value::Obj(o) => Ok(o.clone()),
@@ -1964,8 +1775,8 @@ impl Interp {
         let kind = &o.borrow().kind;
         match kind {
             ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound { .. } => true,
-            // Ein Stellvertreter ist aufrufbar, wenn sein ZIEL es ist —
-            // `typeof new Proxy(f, {})` ist "function".
+            // A proxy is callable if its target is: `typeof new Proxy(f, {})` is
+            // "function".
             ObjKind::Proxy(c) => match c.borrow().clone() {
                 Some((t, _)) => self.is_callable(&Value::Obj(t)),
                 None => false,
@@ -1974,14 +1785,12 @@ impl Interp {
         }
     }
 
-    /// Darf `new` darauf? Ein Pfeil, eine Methode, eine async-Funktion und
-    /// ein Generator sind KEINE Konstruktoren — und `Reflect.construct` mit
-    /// einem solchen als `newTarget` muss werfen. Genau daran haengt der
-    /// `isConstructor`-Helfer von test262, den ein paar hundert Tests rufen.
+    /// May `new` be used on it? Arrows, methods, async functions and generators
+    /// are not constructors, and `Reflect.construct` with one as `newTarget` must
+    /// throw (test262's `isConstructor` helper relies on it).
     ///
-    /// Benannt statt verschwiegen: eine Methodenkurzform (`{ m(){} }`) sieht
-    /// in unserem Baum aus wie eine gewoehnliche Funktion und gilt hier
-    /// deshalb faelschlich als Konstruktor.
+    /// Not implemented: a method shorthand (`{ m(){} }`) looks like an ordinary
+    /// function in our tree and is wrongly treated as a constructor.
     pub fn is_constructor(&self, v: &Value) -> bool {
         let Value::Obj(o) = v else { return false };
         let kind = &o.borrow().kind;
@@ -1998,13 +1807,12 @@ impl Interp {
         }
     }
 
-    // ── Eigenschaften ────────────────────────────────────────────────────
+    // ── Properties ───────────────────────────────────────────────────────
     pub fn get(&mut self, base: &Value, key: &str) -> C<Value> {
         self.private_brand(base, key)?;
-        // Primitive bekommen KEINE Huelle fuer einen blossen Lesezugriff —
-        // ausser bei Zeichenketten, wo Laenge und Index direkt beantwortet
-        // werden. Eine Huelle je Zugriff waere sonst der teuerste Weg zu
-        // `s.length`.
+        // Primitives get no wrapper for a plain read, except strings, where length
+        // and index are answered directly. A wrapper per access would be the most
+        // expensive way to `s.length`.
         if let Value::Str(s) = base {
             if key == "length" { return Ok(Value::Num(s.chars().count() as f64)); }
             if let Some(i) = array_index(key) {
@@ -2014,22 +1822,11 @@ impl Interp {
                 });
             }
         }
-        // **Ein Primitiv bekommt KEINE Huelle fuers Lesen** — der Kommentar
-        // oben sagte das schon, der Code tat es nicht: er rief `to_object`.
-        //
-        // Und das ist bei einer Zeichenkette kein kleiner Umweg.
-        // `to_object` legt dort JEDES ZEICHEN als eigene Eigenschaft an —
-        // ein `String` je Zeichen, ein `num_to_string` je Index, ein
-        // Hashtabellen-Eintrag je Zeichen. Bei 89 KB sind das 89 000
-        // Eintraege, gebaut fuer EINEN Aufruf von `s.indexOf(...)`, dessen
-        // Antwort auf dem PROTOTYP liegt. In einer Schleife ueber eine lange
-        // Zeichenkette ist das quadratisch.
-        //
-        // Gemessen auf einer Google-Suchseite: `to_object` war **22 % der
-        // Laufzeit**, und die wachsende Hashtabelle darunter noch einmal
-        // 6,6 %. Eigene Eigenschaften hat ein Primitiv hier keine — `length`
-        // und die Indizes beantwortet der Schnellweg darueber —, also faengt
-        // die Kette gleich beim Prototyp an.
+        // A primitive gets no wrapper for reading. For a string, `to_object` would
+        // create a property per character just to find a method that lives on the
+        // prototype, making loops over long strings quadratic. A primitive has no
+        // own properties here (`length` and indices are handled by the fast path
+        // above), so the chain starts at the prototype.
         let start = match base {
             Value::Obj(o) => o.clone(),
             Value::Undefined | Value::Null =>
@@ -2041,27 +1838,23 @@ impl Interp {
             Value::BigInt(_) => self.realm.bigint_proto.clone(),
             Value::Sym(_) => self.realm.symbol_proto.clone(),
         };
-        // **Eine SICHT beantwortet ihre Indizes selbst, und zwar ENDGUELTIG.**
-        // Die Prototypenkette wird dabei NICHT gelaufen: `ta[99]` gibt
-        // `undefined`, auch wenn `Object.prototype[99]` existiert. Das ist
-        // kein Detail — es ist der Unterschied zwischen einer Sicht und einem
-        // gewoehnlichen Objekt mit Zahlen als Schluesseln.
+        // A typed array view answers its indices itself, and finally: the prototype
+        // chain is not walked, so `ta[99]` is `undefined` even if
+        // `Object.prototype[99]` exists. That is the difference between a view and
+        // an ordinary object with numeric keys.
         if let Some(v) = ta_read(&start, key) { return Ok(v) }
-        // **Ein Modul-Namensraum liest die BINDUNG, nicht ihren Wert von
-        // damals.** `export let x` plus ein Setter heisst, dass `ns.x` sich
-        // aendert, ohne dass jemand `ns` anfasst; eine Momentaufnahme in der
-        // Eigenschaftstabelle zeigt fuer immer den Anfangswert. Genau daran
-        // starb sandbox.nopeek.chs `init()`: `state.canvas` blieb `null`,
-        // `getContext` warf, und die Zeile darunter — die alle Behandler
-        // anmeldet — lief nie.
+        // A module namespace reads the binding, not its value at link time:
+        // `export let x` plus a setter means `ns.x` changes without anyone touching
+        // `ns`; a snapshot in the property table would show the initial value
+        // forever.
         if let super::value::ObjKind::ModuleNs(url) = &start.borrow().kind {
             let url = url.clone();
             if let Some(v) = self.ns_live(&url, key) {
                 return Ok(v);
             }
         }
-        // Ein Stellvertreter beantwortet JEDEN Zugriff selbst — die
-        // Prototypenkette darunter wird nicht gelaufen.
+        // A proxy answers every access itself; the prototype chain underneath is not
+        // walked.
         if super::proxy::parts(&start).is_some() {
             return match super::proxy::trap(self, &start, "get")? {
                 Some((f, h, t)) => {
@@ -2071,8 +1864,8 @@ impl Interp {
                 None => { let t = super::proxy::target(self, &start)?; self.get(&Value::Obj(t), key) }
             };
         }
-        // Array-`length` lebt in der Eigenschaftstabelle wie alles andere;
-        // nur die Kette darunter wird hier gelaufen.
+        // Array `length` lives in the property table like everything else; only the
+        // chain underneath is walked here.
         let mut cur = Some(start);
         let mut hops = 0;
         while let Some(o) = cur {
@@ -2094,28 +1887,11 @@ impl Interp {
         Ok(Value::Undefined)
     }
 
-    /// `Set(O, P, V, Throw)` (ES §7.3.4).
+    /// `#x in obj`: the brand check as an expression (ES §13.10.1).
     ///
-    /// **Die Wurf-Fahne ist ein ARGUMENT, kein Modus.** Das ist der Punkt, den
-    /// beak bis 0.98.0 nicht hatte: nicht nur strenger Code will einen Fehler,
-    /// wenn ein Schreiben scheitert, sondern auch fast jede eingebaute
-    /// Funktion — `[].push` auf einem eingefrorenen Feld muss in BEIDEN Modi
-    /// werfen. Deshalb steht die Fahne hier und wird an jeder Rufstelle
-    /// entschieden; ein Vorgabewert haette genau die Haelfte still falsch
-    /// gelassen.
-    /// **Die Markenpruefung** (ES §7.3.28 `PrivateGet`/`PrivateSet`).
-    ///
-    /// Ein privates Feld ist keine Eigenschaft, die man anlegen kann: es
-    /// entsteht im Konstruktor und nirgends sonst. Ein Zugriff auf ein
-    /// Objekt, das es nicht hat, ist ein TypeError — nicht `undefined`, und
-    /// erst recht kein stilles Anlegen. Ohne diese Pruefung war
-    /// `fremdesObjekt.#f` schlicht `undefined`, und Schreiben legte das Feld
-    /// an: die Kapselung war eine Verabredung, keine Grenze.
-    /// `#x in obj` — die Markenpruefung als AUSDRUCK (ES §13.10.1).
-    ///
-    /// Sie WIRFT nicht, sie antwortet mit ja/nein; das ist ihr ganzer Zweck.
-    /// Der Parser macht daraus einen Bezeichner `#x` — ein echter Name kann
-    /// nie mit `#` anfangen, also ist das eindeutig.
+    /// It does not throw; it answers yes or no. The parser turns it into an
+    /// identifier `#x`; a real name can never start with `#`, so this is
+    /// unambiguous.
     pub fn private_in(&mut self, name: &str, base: &Value) -> C<Value> {
         let Value::Obj(o) = base else {
             return self.type_err("the right side of 'in' must be an object");
@@ -2125,6 +1901,11 @@ impl Interp {
         Ok(Value::Bool(self.has_property(&o, &key)))
     }
 
+    /// The brand check (ES §7.3.28 `PrivateGet`/`PrivateSet`).
+    ///
+    /// A private field is not a property one can create: it comes into being
+    /// in the constructor and nowhere else. Access on an object that lacks it
+    /// is a TypeError, not `undefined` and certainly not a silent creation.
     fn private_brand(&mut self, base: &Value, key: &str) -> C<()> {
         if !key.starts_with(super::value::PRIVATE_PREFIX) { return Ok(()); }
         let ok = matches!(base, Value::Obj(o) if self.has_property(o, key));
@@ -2134,28 +1915,32 @@ impl Interp {
             super::value::private_name(key)))
     }
 
+    /// `Set(O, P, V, Throw)` (ES §7.3.4).
+    ///
+    /// The throw flag is an argument, not a mode: not only strict code wants
+    /// an error when a write fails, but almost every built-in too
+    /// (`[].push` on a frozen array must throw in both modes). Each call site
+    /// decides; a default would leave half of them silently wrong.
     pub fn set(&mut self, base: &Value, key: &str, val: Value, throw: bool) -> C<()> {
         self.private_brand(base, key)?;
         let Value::Obj(o) = base else {
-            // Zuweisung an eine Eigenschaft eines Primitivs verpufft still
-            // (im lockeren Modus). Der strenge Modus wuerde werfen — das
-            // gehoert zu den Dingen, die der Lauf als offen ausweist.
+            // Assigning a property on a primitive does nothing in sloppy mode; with
+            // `throw` it is a TypeError.
             if matches!(base, Value::Undefined | Value::Null) { strict_site!(self, 11); }
             else { strict_site!(self, 0); }
             if throw {
-                // `undefined.x = 1` wirft ohnehin schon beim Lesen der Basis;
-                // hier geht es um `"abc".x = 1` im strengen Modus.
+                // `undefined.x = 1` already throws when reading the base; this is about
+                // `"abc".x = 1` in strict mode.
                 return self.type_err(&alloc::format!(
                     "cannot create property '{key}' on a primitive value"));
             }
             return Ok(());
         };
-        // Dieselbe Endgueltigkeit beim Schreiben: ausserhalb der Sicht
-        // verpufft es, und ein Setzer in der Kette bekommt es nie zu sehen.
+        // Same finality on write: outside the view the write is dropped, and a
+        // setter in the chain never sees it.
         if let Some(t) = ta_of(o) {
             if let Some(k) = array_index(key) {
-                // Die Umwandlung laeuft AUCH, wenn der Index draussen liegt —
-                // sie ist beobachtbar.
+                // The conversion runs even if the index is out of range; it is observable.
                 if t.kind.is_big() {
                     let big = self.to_bigint(&val)?;
                     let live = t.live_len();
@@ -2176,16 +1961,15 @@ impl Interp {
                 return Ok(());
             }
         }
-        // `el.dataset.x = v` schreibt das ATTRIBUT — sonst ist es eine
-        // Zuweisung an eine Kopie, und die Seite wundert sich.
+        // `el.dataset.x = v` writes the attribute; otherwise it would assign to a
+        // copy.
         let ds = match &o.borrow().kind { ObjKind::Dataset(id) => Some(*id), _ => None };
         if let Some(id) = ds {
             let text = self.to_string(&val)?;
             let attr = super::dombind::camel_to_data_attr(key);
             if let Some(d) = &mut self.doc { d.set_attr_at(id, &attr, &text); }
-            // Und dieselbe Momentaufnahme mitfuehren: wer sich das Objekt in
-            // einer Variablen haelt, soll seinen eigenen Schreibvorgang lesen
-            // koennen.
+            // Keep the snapshot in step as well, so code holding the object in a
+            // variable reads its own write.
             o.borrow_mut().define(key, Prop::data(Value::Str(text)));
             return Ok(());
         }
@@ -2206,7 +1990,7 @@ impl Interp {
                 None => { let t = super::proxy::target(self, o)?; self.set(&Value::Obj(t), key, val, throw) }
             };
         }
-        // Ein Setzer irgendwo in der Kette gewinnt vor dem eigenen Feld.
+        // A setter anywhere in the chain wins over the own field.
         let mut cur = Some(o.clone());
         let mut hops = 0;
         while let Some(c) = cur {
@@ -2220,7 +2004,7 @@ impl Interp {
                         return Ok(());
                     }
                 }
-                // Nur ein Getter, kein Setzer: das Schreiben scheitert.
+                // A getter without a setter: the write fails.
                 if p.is_accessor() {
                     strict_site!(self, 3);
                     if throw { return self.type_err(&alloc::format!(
@@ -2261,9 +2045,8 @@ impl Interp {
         Ok(())
     }
 
-    /// Ein Array haelt `length` selbst nach: eine Zuweisung an einen Index
-    /// jenseits der Laenge schiebt sie nach. Ohne das ist `push` gebaut, aber
-    /// `a[0]=1; a.length` bleibt 0.
+    /// An array keeps `length` in step: assigning an index beyond the length
+    /// extends it, so `a[0]=1; a.length` is 1.
     fn fix_array_length(&mut self, o: &Gc, key: &str) {
         if !matches!(o.borrow().kind, ObjKind::Array) { return; }
         if let Some(i) = array_index(key) {
@@ -2278,9 +2061,9 @@ impl Interp {
     }
 
     pub fn has_property(&mut self, o: &Gc, key: &str) -> bool {
-        // Ein Stellvertreter kann hier WERFEN; `has_property` gibt aber nur
-        // ein Ja/Nein. Der geworfene Wert geht dabei verloren — benannt statt
-        // verschwiegen, `has_prop` daneben reicht ihn durch, und `in` ruft die.
+        // A proxy can throw here, but `has_property` only returns yes/no, so the
+        // thrown value is lost. Known limit; `has_prop` passes it through, and `in`
+        // calls that.
         if super::proxy::parts(o).is_some() {
             return self.has_prop(o, key).unwrap_or(false);
         }
@@ -2301,7 +2084,7 @@ impl Interp {
         false
     }
 
-    // ── Aufrufen ─────────────────────────────────────────────────────────
+    // ── Calling ──────────────────────────────────────────────────────────
     pub fn call(&mut self, callee: &Value, this_val: Value, args: &[Value]) -> C<Value> {
         let Value::Obj(f) = callee else {
             return self.type_err("value is not a function");
@@ -2317,8 +2100,8 @@ impl Interp {
     }
 
     fn call_inner(&mut self, f: &Gc, this_val: Value, args: &[Value]) -> C<Value> {
-        // Die `apply`-Falle. Ohne sie liefe ein Aufruf auf einen
-        // Stellvertreter am Behandler vorbei ans Ziel.
+        // The `apply` trap. Without it a call on a proxy would bypass the handler
+        // and reach the target.
         if super::proxy::parts(f).is_some() {
             return match super::proxy::trap(self, f, "apply")? {
                 Some((fn_, hv, t)) => {
@@ -2344,28 +2127,24 @@ impl Interp {
                 self.call(&Value::Obj(t), bt, &ba)
             }
             Which::Js(d) => {
-                // **Ein Generator laeuft seinen Rumpf hier NICHT.** Der Aufruf
-                // baut ein Objekt, und der Rumpf faengt erst beim ersten
-                // `next()` an — auf einer eigenen Maschine. Das ist die
-                // einzige Stelle, an der ein Generatorobjekt entsteht; die
-                // Befehlsmaschine schickt ihre Aufrufe absichtlich hierher.
+                // A generator does not run its body here. The call builds an object, and the
+                // body starts at the first `next()`, on its own machine. This is the only
+                // place a generator object is created; the bytecode machine routes its calls
+                // here on purpose.
                 if d.node.is_generator && !d.node.is_async {
                     if let Some(v) = super::generator::make(self, f, &d, this_val.clone(), args)? {
                         return Ok(v);
                     }
                 }
-                // Und eine async-Funktion gibt ein VERSPRECHEN zurueck. Ihr
-                // Rumpf laeuft bis zum ersten `await` sofort weiter, dann
-                // haelt er an — dieselbe Maschine, nur wirft ihn die
-                // Microtask-Schlange wieder an.
+                // An async function returns a promise. Its body runs synchronously up to the
+                // first `await`, then suspends; the microtask queue resumes it.
                 if d.node.is_async && !d.node.is_generator {
                     if let Some(v) = super::generator::make_async(self, &d, this_val.clone(), args)? {
                         return Ok(v);
                     }
                 }
-                // Und ein async-Generator ist beides: er gibt ein Objekt
-                // zurueck wie ein Generator, und jedes `next()` daran gibt ein
-                // Versprechen wie eine async-Funktion.
+                // An async generator is both: it returns an object like a generator, and
+                // each `next()` returns a promise like an async function.
                 if d.node.is_async && d.node.is_generator {
                     if let Some(v) = super::generator::make_async_gen(self, f, &d, this_val.clone(), args)? {
                         return Ok(v);
@@ -2376,25 +2155,20 @@ impl Interp {
         }
     }
 
-    /// Die Umgebung, in der ein Aufruf laeuft — alles, was VOR dem ersten
-    /// Schritt des Rumpfes passiert: `this`, `arguments`, das Heimatobjekt,
-    /// die Parameter.
+    /// The environment a call runs in: everything before the body's first step
+    /// (`this`, `arguments`, home object, parameters).
     ///
-    /// Eigene Funktion, weil die Befehlsmaschine sie braucht: sie legt danach
-    /// einen RAHMEN an, statt den Rumpf ueber den Rust-Stapel zu fahren. Zwei
-    /// Umsetzungen dieses Vorspanns waeren zwei verschiedene Aufrufsemantiken,
-    /// und das ist die teuerste Sorte Unterschied.
+    /// Separate because the bytecode machine needs it before pushing a frame;
+    /// two implementations of this prologue would be two call semantics.
     pub fn call_env(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value])
         -> C<Rc<RefCell<Env>>> {
         let env = Env::new(Some(d.env.clone()), true);
-        // Ein Pfeil bekommt KEIN eigenes `this` — dadurch findet `this_of`
-        // das der umgebenden Funktion.
+        // An arrow gets no `this` of its own, so `this_of` finds the enclosing one.
         env.borrow_mut().home = d.home_object.clone();
-        // Die Strenge des RUMPFES, nicht die des Rufers: eine strenge
-        // Funktion bleibt streng, egal wer sie ruft, und eine lockere bleibt
-        // locker, auch wenn strenger Code sie aufruft. `Env::new` hat gerade
-        // die des Definitionsortes geerbt; ein `"use strict"` im Rumpf legt
-        // hier drauf.
+        // The strictness of the body, not of the caller: a strict function stays
+        // strict whoever calls it, and a sloppy one stays sloppy even when called
+        // from strict code. `Env::new` inherited the definition site's mode; a
+        // `"use strict"` in the body adds to it here.
         if d.node.strict { env.borrow_mut().strict = true; }
         if !d.node.is_arrow {
             let t = d.this_val.clone().unwrap_or(this_val);
@@ -2405,10 +2179,9 @@ impl Interp {
                 Binding { value: ao, mutable: true, initialized: true });
         }
         self.bind_params(&d.node.params, args, &env)?;
-        // **Instanzfelder einer BASISklasse stehen, bevor der Rumpf laeuft.**
-        // Eine abgeleitete legt sie erst nach `super()` an: vorher hat sie
-        // zwar schon ein Objekt, aber ein Initialisierer darf ein Feld der
-        // Elternklasse sehen, und das gibt es erst danach.
+        // Instance fields of a base class exist before the body runs. A derived
+        // class adds them only after `super()`: an initializer may see a parent
+        // field, which exists only from then on.
         if let Some(c) = &d.class {
             if c.super_class.is_none() {
                 let t = super::interp::env_this(&env);
@@ -2418,14 +2191,11 @@ impl Interp {
         Ok(env)
     }
 
-    /// `OrdinaryCallBindThis` (ES §10.2.1.2) — was `this` im Rumpf WIRKLICH ist.
+    /// `OrdinaryCallBindThis` (ES §10.2.1.2): what `this` really is in the body.
     ///
-    /// **Der Unterschied ist der Modus, und beide Seiten waren falsch.** Eine
-    /// strenge Funktion bekommt den Wert unveraendert: `f()` sieht `undefined`.
-    /// Eine lockere sieht dort `globalThis`, und ein Primitiv wird ihr
-    /// EINGEPACKT — `(7).f()` sieht ein `Number`-Objekt, kein `7`. beak gab
-    /// bis 0.98.0 immer den strengen Wert, in beiden Modi; das war der
-    /// groesste einzelne Posten der Messung (257 Varianten, 191 davon locker).
+    /// A strict function gets the value unchanged: `f()` sees `undefined`. A
+    /// sloppy one sees `globalThis` there, and a primitive is boxed: `(7).f()`
+    /// sees a `Number` object, not `7`.
     fn bind_this(&mut self, t: Value, strict: bool) -> C<Value> {
         if strict { return Ok(t); }
         match t {
@@ -2435,12 +2205,12 @@ impl Interp {
         }
     }
 
-    /// Die Instanzfelder einer Klasse auf ein frisches `this` legen.
+    /// Put a class's instance fields on a fresh `this`.
     ///
-    /// Jeder Initialisierer ist ein eigener kleiner Funktionsbereich mit
-    /// `this` auf der Instanz und `home` der Klasse — ein Pfeil darin faengt
-    /// die INSTANZ ein, und `super.x` darin trifft die Elternklasse. Der
-    /// Bereich darum ist der der KLASSE (`d.env`), nicht der des Aufrufers.
+    /// Each initializer is its own small function scope with `this` on the
+    /// instance and the class as `home`: an arrow inside captures the instance,
+    /// and `super.x` hits the parent class. The surrounding scope is the class's
+    /// (`d.env`), not the caller's.
     pub fn init_fields(&mut self, d: &Rc<FuncData>, this_val: &Value) -> C<()> {
         let Some(c) = d.class.clone() else { return Ok(()) };
         let Value::Obj(o) = this_val else { return Ok(()) };
@@ -2456,8 +2226,8 @@ impl Interp {
             let v = match value {
                 Some(e) => {
                     let val = self.eval(e, &fenv)?;
-                    // `x = function(){}` gibt der Funktion den Feldnamen —
-                    // dieselbe Regel wie bei `var f = function(){}`.
+                    // `x = function(){}` gives the function the field name; same rule as
+                    // `var f = function(){}`.
                     self.name_function(&val, &k);
                     val
                 }
@@ -2468,40 +2238,35 @@ impl Interp {
         Ok(())
     }
 
-    /// Einen Funktionsrumpf mit dem BAUMLAEUFER fahren — der Weg, den ein
-    /// Aufruf nimmt, wenn der Uebersetzer den Rumpf nicht kann.
+    /// Run a function body with the tree walker: the path a call takes when the
+    /// compiler cannot handle the body.
     ///
-    /// Eigene Funktion, weil `generator.rs` sie fuer denselben Fall braucht:
-    /// eine async-Funktion mit unuebersetzbarem Rumpf muss trotzdem ein
-    /// VERSPRECHEN zurueckgeben, und dafuer muss jemand den Rumpf fahren und
-    /// den Ausgang einsammeln.
+    /// Separate because `generator.rs` needs it for the same case: an async
+    /// function with an uncompilable body must still return a promise, so
+    /// someone has to run the body and collect the outcome.
     pub fn run_js_body(&mut self, d: &Rc<FuncData>, this_val: Value, args: &[Value]) -> C<Value> {
         let env = self.call_env(d, this_val, args)?;
-        // **Der Rumpf gehoert auf die Maschine, auch wenn der Ruf nicht von
-        // ihr kommt.** Ein Aufruf aus einem eingebauten Rueckruf, aus der
-        // Microtask-Schlange oder aus einem Generator landete hier — und weil
-        // der Baumlaeufer seine eigenen Aufrufe wieder hierher schickt, blieb
-        // ALLES darunter bei ihm. Gemessen an der Fritzbox-Anmeldung: 320 721
-        // Schritte, davon 4 286 auf der Maschine.
+        // The body belongs on the bytecode machine even when the call does not come
+        // from it (a built-in callback, the microtask queue, a generator); otherwise
+        // everything below such a call would stay on the tree walker.
         //
-        // Generator und async bleiben aussen vor: ihre Rumpfe halten an, und
-        // dafuer gibt es `generator.rs` mit einer eigenen Maschine je Aufruf.
+        // Generators and async functions are excluded: their bodies suspend, and
+        // `generator.rs` gives each call its own machine.
         if !d.node.is_generator && !d.node.is_async {
             if let Some(chunk) = self.func_chunk(&d.node) {
                 self.hoist_body(&d.node.body, &env)?;
                 let implicit = if d.class.is_some() { env_this(&env) } else { Value::Undefined };
                 return match super::vm::Vm::run_function(self, chunk, &env) {
-                    // Ein Konstruktor ohne `return` liefert sein `this`.
+                    // A constructor without `return` yields its `this`.
                     Ok(Value::Undefined) => Ok(implicit),
                     Ok(v) => Ok(v),
                     Err(e) => Err(e),
                 };
             }
         }
-        // Ein KONSTRUKTOR ohne `return` liefert sein `this` — und das kann
-        // `super()` inzwischen umgehaengt haben. Bei einer Basisklasse ist es
-        // dasselbe Objekt, das `construct` ohnehin nimmt; bei einer
-        // abgeleiteten ist es der Unterschied.
+        // A constructor without `return` yields its `this`, which `super()` may
+        // have replaced. For a base class it is the object `construct` uses anyway;
+        // for a derived class it is the difference.
         let implicit = || if d.class.is_some() { env_this(&env) } else { Value::Undefined };
         match self.run_body(&d.node.body, &env) {
             Ok(()) | Err(Abrupt::Return(Value::Undefined)) => Ok(implicit()),
@@ -2510,14 +2275,14 @@ impl Interp {
         }
     }
 
-    /// Das Hochziehen eines Funktionsrumpfes — `var` und Funktionen nach vorn.
-    /// Fuer die Maschine, die den Rumpf danach als Befehle faehrt.
+    /// Hoisting for a function body (`var` and functions to the front), for the
+    /// machine that then runs the body as bytecode.
     pub fn hoist_body(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {
         self.hoist(body, env, env)
     }
 
-    /// Der uebersetzte Rumpf dieser Funktion, oder `None`, wenn der
-    /// Uebersetzer absagt. Einmal je Funktion, dann gemerkt.
+    /// The compiled body of this function, or `None` if the compiler declines.
+    /// Once per function, then remembered.
     pub fn func_chunk(&mut self, f: &Rc<Func>) -> Option<Rc<super::code::Chunk>> {
         if self.vm_off {
             return None;
@@ -2537,13 +2302,12 @@ impl Interp {
         c
     }
 
-    /// `GetTemplateObject` (ES 13.2.8.4) — der Gegenstand, den ein getaggtes
-    /// Template seiner Marke als erstes Argument reicht.
+    /// `GetTemplateObject` (ES 13.2.8.4): the object a tagged template passes to
+    /// its tag as the first argument.
     ///
-    /// Ein eingefrorenes Feld der GEKOCHTEN Zeichenketten (`undefined`, wo die
-    /// Fluchtfolge ungueltig war — genau dafuer ist `cooked` ein `Option`),
-    /// mit einem ebenfalls eingefrorenen `raw` daneben. Beides nicht
-    /// schreibbar, nicht aufzaehlbar, nicht loeschbar.
+    /// A frozen array of the cooked strings (`undefined` where the escape was
+    /// invalid, which is why `cooked` is an `Option`), with a frozen `raw`
+    /// beside it. Neither writable, enumerable nor configurable.
     pub fn template_object(&mut self, quasis: &[super::ast::TemplateElement]) -> Value {
         let key = quasis.as_ptr() as usize;
         let raws: Vec<Rc<str>> = quasis.iter().map(|q| Rc::from(q.raw.as_str())).collect();
@@ -2552,15 +2316,13 @@ impl Interp {
                 return v.clone();
             }
         }
-        // Einfrieren wie `Object.freeze` — und mit derselben Vorsicht: die
-        // Ausleihe muss VOR dem Schreiben enden, sonst paniked das
-        // `borrow_mut` darin.
+        // Freeze like `Object.freeze`, with the same care: the borrow must end
+        // before the write, or the inner `borrow_mut` panics.
         let frozen = |o: &Gc| {
             o.borrow_mut().extensible = false;
-            // Die Schluessel ZUERST in eine eigene Liste — als
-            // `for k in o.borrow().own_keys()` geschrieben lebt die Leihgabe
-            // bis zum Ende des Rumpfes, und das `borrow_mut` darin paniked.
-            // Wortgleich mit `Object.freeze`, und aus demselben Grund.
+            // Collect the keys into a list first: written as
+            // `for k in o.borrow().own_keys()`, the borrow lives to the end of the body
+            // and the inner `borrow_mut` panics. Same as in `Object.freeze`.
             let keys = o.borrow().own_keys();
             for k in keys {
                 let existing = o.borrow().get_own(&k).cloned();
@@ -2590,9 +2352,8 @@ impl Interp {
 
     fn make_arguments(&mut self, args: &[Value]) -> Value {
         let g = new_kind(Some(self.realm.object_proto.clone()), ObjKind::Arguments);
-        // `arguments` ist iterierbar — `[...arguments]` und `for (a of
-        // arguments)` sind gewoehnliche Schreibweisen, und beide gehen ueber
-        // dieselbe Funktion wie `Array.prototype.values`.
+        // `arguments` is iterable: `[...arguments]` and `for (a of arguments)` use
+        // the same function as `Array.prototype.values`.
         {
             let vals = self.get(&Value::Obj(self.realm.array_proto.clone()), "values");
             if let Ok(v) = vals { g.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
@@ -2608,19 +2369,15 @@ impl Interp {
     }
 
     fn bind_params(&mut self, params: &[Pat], args: &[Value], env: &Rc<RefCell<Env>>) -> C<()> {
-        // **Erst ALLE Parameternamen HIER anlegen, dann binden.**
+        // Create all parameter names here first, then bind.
         //
-        // `bind_pattern(…, true)` bindet ueber `init_binding`, und das laeuft
-        // die Umgebungskette HOCH: ein Parameter, der so heisst wie eine
-        // Variable weiter aussen, schrieb in DIESE. Minifizierter Code
-        // benutzt ueberall dieselben kurzen Namen, also traf das jedes
-        // Bundle — auf der Fritzbox-Anmeldeseite hat `o=(o,a)=>{…}` beim
-        // ersten Aufruf das aeussere `o` mit einer 0 ueberschrieben, und der
-        // naechste Zugriff darauf war „bind is not a function".
+        // `bind_pattern(…, true)` binds via `init_binding`, which walks up the
+        // chain: a parameter named like an outer variable would write to the outer
+        // one. Minified code reuses short names everywhere, so this matters.
         //
-        // Vor dem Binden, nicht je Parameter: `function f(a = b, b)` ist ein
-        // ReferenceError und darf nicht das aeussere `b` finden
-        // (`FunctionDeclarationInstantiation`, ES §10.2.11 Schritt 21).
+        // Before binding, not per parameter: `function f(a = b, b)` is a
+        // ReferenceError and must not find an outer `b`
+        // (`FunctionDeclarationInstantiation`, ES §10.2.11 step 21).
         for p in params {
             let mut names = Vec::new();
             super::eval::names_of(p, &mut names);
@@ -2644,21 +2401,19 @@ impl Interp {
         Ok(())
     }
 
-    // ── Programm ─────────────────────────────────────────────────────────
+    // ── Program ──────────────────────────────────────────────────────────
     pub fn run_program(&mut self, prog: &Program) -> C<Value> {
         let env = self.realm.global_env.clone();
-        // Die globale Umgebung gehoert der EINHEIT, die gerade laeuft: ein
-        // Skript mit `"use strict"` faerbt sie streng, das naechste ohne
-        // wieder locker. Beide Faelle kommen im test262-Lauf vor — Vorspann
-        // locker, Testkoerper streng.
+        // The global environment belongs to the unit currently running: a script
+        // with `"use strict"` makes it strict, the next one without makes it sloppy
+        // again (e.g. a sloppy test262 prelude followed by a strict test body).
         env.borrow_mut().strict = prog.strict;
-        // Hochziehen ist fuer BEIDE Maschinen dasselbe: es arbeitet auf der
-        // Umgebung, nicht auf dem Code.
+        // Hoisting is the same for both machines: it works on the environment, not
+        // on the code.
         self.hoist(&prog.body, &env, &env)?;
-        // **Ganz oder gar nicht.** Was der Uebersetzer kann, faehrt die
-        // Befehlsmaschine; sagt er irgendwo nein, faehrt der Baumlaeufer das
-        // GANZE Programm. Eine Mischung waere ein zweiter Semantikpfad im
-        // selben Lauf, und solche laufen still auseinander.
+        // All or nothing: what the compiler can handle runs on the bytecode
+        // machine; if it declines anywhere, the tree walker runs the whole program.
+        // Mixing would be a second semantic path in the same run.
         let r = match if self.vm_off { Err(super::code::Unsupported("off")) }
                       else { super::compile::program(prog) } {
             Ok(chunk) => {
@@ -2679,26 +2434,21 @@ impl Interp {
                 })()
             }
         };
-        // Auch wenn das Programm geworfen hat: die Schlange gehoert geleert.
-        // Ein `.then`, das vor dem Fehler angelegt wurde, ist angemeldet.
+        // Even if the program threw, the queue must be drained: a `.then` attached
+        // before the error is registered.
         super::promise::run_jobs(self);
         r
     }
 
-    /// `eval`. Der Unterschied zwischen DIREKT und indirekt ist der Bereich:
-    /// `eval(s)` als blosser Aufruf laeuft im Bereich des Rufers und sieht
-    /// dessen Namen, `(0,eval)(s)` laeuft global.
-    ///
-    /// **Kein strenger Modus.** Die Engine kennt ihn zur Laufzeit nicht
-    /// (siehe [[project-beak-js-language-gap]]), also legt auch ein
-    /// `"use strict"` im Quelltext keinen eigenen Bereich fuer `var` an.
+    /// `eval`. Direct and indirect differ in scope: `eval(s)` as a plain call
+    /// runs in the caller's scope and sees its names, `(0,eval)(s)` runs global.
     pub fn perform_eval(&mut self, code: &Value, caller: Option<Rc<RefCell<Env>>>) -> C<Value> {
-        // Alles, was keine Zeichenkette ist, kommt unveraendert zurueck —
-        // `eval(42)` ist 42, kein Programm.
+        // Anything that is not a string comes back unchanged: `eval(42)` is 42, not
+        // a program.
         let Value::Str(src) = code else { return Ok(code.clone()) };
-        // Ein `eval` legt einen RUST-Rahmen an (Parser + eigene Maschine) und
-        // laeuft sonst ohne Grenze im Kreis: `eval("eval('…')")`. Also zaehlt
-        // er wie ein Aufruf mit.
+        // An `eval` creates a Rust frame (parser + its own machine) and could
+        // otherwise recurse without bound (`eval("eval('…')")`), so it counts as a
+        // call.
         self.depth += 1;
         if self.depth > self.max_depth {
             self.depth -= 1;
@@ -2714,20 +2464,18 @@ impl Interp {
             Ok(p) => p,
             Err(e) => return Err(self.throw_kind("SyntaxError", &e.msg)),
         };
-        // Ein DIREKTES eval erbt die Strenge seines Rufers; die eigene
-        // Direktive legt drauf. Ein indirektes faengt locker an.
+        // A direct eval inherits its caller's strictness; its own directive adds to
+        // it. An indirect one starts sloppy.
         let inherited = caller.as_ref().is_some_and(|e| e.borrow().strict);
         let strict = prog.strict || inherited;
         let base = caller.unwrap_or_else(|| self.realm.global_env.clone());
-        // `let`/`const` bekommen einen EIGENEN Bereich, `var` und
-        // Funktionsdeklarationen steigen bis zur naechsten Funktionsgrenze
-        // des RUFERS — genau deshalb ist der Bereich hier kein Funktionsbereich.
+        // `let`/`const` get their own scope; `var` and function declarations rise
+        // to the caller's next function boundary, which is why this scope is not a
+        // function scope.
         let scope = Env::new(Some(base.clone()), false);
         scope.borrow_mut().strict = strict;
-        // **Strenger eval behaelt sein `var` bei sich.** Sonst steigt es bis
-        // zur Funktionsgrenze des Rufers und legt dort einen Namen an, den
-        // der Rufer nie geschrieben hat — genau der Unterschied, an dem
-        // `eval` in 0.92.0 fuenf Tests gekostet hat.
+        // A strict eval keeps its `var` to itself; otherwise it would rise to the
+        // caller's function boundary and create a name the caller never wrote.
         let var_env = if strict {
             scope.borrow_mut().is_func_scope = true;
             scope.clone()
@@ -2742,8 +2490,8 @@ impl Interp {
             ve
         };
         self.hoist(&prog.body, &scope, &var_env)?;
-        // Dieselbe Wahl wie beim Programm: kann der Uebersetzer alles, faehrt
-        // die Maschine; sonst der Baumlaeufer. Nie eine Mischung.
+        // Same choice as for programs: if the compiler can handle everything, the
+        // machine runs it; otherwise the tree walker. Never a mix.
         match if self.vm_off { Err(super::code::Unsupported("off")) }
               else { super::compile::program(&prog) } {
             Ok(chunk) => {
@@ -2763,9 +2511,8 @@ impl Interp {
         }
     }
 
-    /// Ist dieser Wert die eingebaute `eval`? Nur dann ist ein Aufruf
-    /// `eval(...)` ein DIREKTER — jede andere Funktion unter dem Namen ist
-    /// ein gewoehnlicher Aufruf.
+    /// Is this value the built-in `eval`? Only then is `eval(...)` a direct call;
+    /// any other function under that name is an ordinary call.
     pub fn is_eval_fn(&self, v: &Value) -> bool {
         let Some(want) = self.realm.eval_fn.as_ref() else { return false };
         matches!(v, Value::Obj(o) if Rc::ptr_eq(o, want))
@@ -2777,28 +2524,24 @@ impl Interp {
         Ok(())
     }
 
-    /// `var` und Funktionsdeklarationen nach vorn ziehen.
+    /// Hoist `var` and function declarations.
     ///
-    /// `var` steigt bis zur naechsten FUNKTIONSGRENZE, `let`/`const`/`class`
-    /// bleiben im Block und stehen bis zur Deklaration auf „nicht bereit" —
-    /// das ist die zeitliche Totzone, und ohne sie ist `let` nur ein `var`
-    /// mit anderem Namen.
+    /// `var` rises to the next function boundary; `let`/`const`/`class` stay in
+    /// the block and are "not ready" until their declaration. That is the
+    /// temporal dead zone; without it `let` is just `var` by another name.
     fn hoist(&mut self, body: &[Stmt], block: &Rc<RefCell<Env>>, func: &Rc<RefCell<Env>>) -> C<()> {
         for st in body { self.hoist_vars(st, func); }
         for st in body {
-            // `export function f(){}` ist eine Deklaration mit einem Wort
-            // davor — sie wird genauso hochgezogen. Ohne diese Zeile stuende
-            // eine exportierte Funktion erst da, wenn ihre Zeile lief, und
-            // ein Zyklus im Modulgraphen saehe sie nie.
+            // `export function f(){}` is a declaration with a keyword in front and is
+            // hoisted the same way. Otherwise an exported function would only exist once
+            // its line ran, and a cycle in the module graph would never see it.
             let st = super::modules::unexport(st).unwrap_or(st);
             match st {
                 Stmt::Func(f) => {
                     if let Some(n) = &f.name {
                         let v = self.make_closure(f.clone(), block, None);
-                        // Dieselbe Regel wie fuer `var`: eine
-                        // Funktionsdeklaration auf oberster Ebene eines
-                        // Skripts IST eine Eigenschaft des globalen Objekts.
-                        // In einem Block oder einer Funktion nicht.
+                        // Same rule as for `var`: a top-level function declaration in a script is a
+                        // property of the global object. In a block or function it is not.
                         if Rc::ptr_eq(block, &self.realm.global_env) {
                             self.realm.global.borrow_mut().define(n.as_str(), Prop {
                                 value: Some(v), get: None, set: None,
@@ -2820,11 +2563,10 @@ impl Interp {
                         });
                     }
                 }
-                // `export default` legt seinen Wert unter einem Namen ab,
-                // den kein Skript schreiben kann. Er wird HIER angelegt,
-                // damit ein Zyklus, der ihn zu frueh liest, „nicht bereit"
-                // sagt statt „gibt es nicht" — und damit eine
-                // Funktionsdeklaration auch dahinter hochgezogen wird.
+                // `export default` stores its value under a name no script can write. It is
+                // created here so that a cycle reading it too early gets "not ready" rather
+                // than "does not exist", and so that a function declaration behind it is
+                // hoisted.
                 Stmt::ExportDefault(d) => {
                     let (v, init, own) = match &**d {
                         ExportDefault::Func(f) =>
@@ -2851,36 +2593,30 @@ impl Interp {
         Ok(())
     }
 
-    /// `var` durch Bloecke und Schleifen hindurch einsammeln — aber NICHT
-    /// durch Funktionen: dort faengt ein neuer Bereich an.
+    /// Collect `var` through blocks and loops, but not through functions: a new
+    /// scope starts there.
     fn hoist_vars(&mut self, st: &Stmt, func: &Rc<RefCell<Env>>) {
         let st = super::modules::unexport(st).unwrap_or(st);
-        // **Ein `var` auf oberster Ebene eines SKRIPTS ist eine Eigenschaft
-        // des globalen Objekts** (ES §CreateGlobalVarBinding) — und zwar die
-        // einzige Ablage dafuer, nicht eine zweite neben der Bindungskette
-        // ([[feedback_a_copy_is_a_second_semantics_waiting]]). Lesen und
-        // Schreiben finden sie: `assign_ident_depth` und die Namensaufloesung
-        // fallen beide auf das globale Objekt zurueck, wenn die Kette den
-        // Namen nicht hat.
+        // A top-level `var` in a script is a property of the global object
+        // (ES CreateGlobalVarBinding), and that is its only storage, not a second
+        // copy beside the binding chain. Reads and writes find it:
+        // `assign_ident_depth` and name resolution both fall back to the global
+        // object when the chain lacks the name. UMD bundles expose themselves this
+        // way (`window.X` for `var X`).
         //
-        // Ohne diese Zeile ist `window.X` fuer ein `var X` **undefined** — und
-        // genau so exponiert JEDES UMD-Buendel sich selbst. Auf arcade.ch
-        // starb daran der Einwilligungsbanner: `window.cookieconsent
-        // .openPreferencesCenter = …` auf einem Wert, den es nicht gab.
-        // `let`/`const` gehoeren NICHT dorthin (sie stehen im deklarativen
-        // Teil), und ein MODUL hat seine eigene Umgebung — beides faellt hier
-        // schon dadurch heraus, dass nur `var` und nur die globale Umgebung
-        // diesen Weg nehmen.
+        // `let`/`const` do not belong there (they live in the declarative part), and
+        // a module has its own environment; both are excluded because only `var` and
+        // only the global environment take this path.
         let gobj = Rc::ptr_eq(func, &self.realm.global_env)
             .then(|| self.realm.global.clone());
         let mut put = |names: Vec<String>| {
             for n in names {
                 if let Some(g) = &gobj {
-                    // Schon da? Dann steht dort ein Wert, den ein frueheres
-                    // `var` oder das Wirtsobjekt gesetzt hat — nicht ueberschreiben.
+                    // Already there? Then an earlier `var` or the host object set a value; do
+                    // not overwrite it.
                     if g.borrow().get_own(n.as_str()).is_none() {
-                        // Nicht loeschbar (ES: D = false fuer ein Skript-`var`),
-                        // aber aufzaehlbar und schreibbar wie jede Seiteneigenschaft.
+                        // Not deletable (ES: D = false for a script `var`), but enumerable and
+                        // writable like any page property.
                         g.borrow_mut().define(n.as_str(), Prop {
                             value: Some(Value::Undefined), get: None, set: None,
                             writable: true, enumerable: true, configurable: false });
@@ -2941,24 +2677,20 @@ impl Interp {
         }
     }
 
-    // ── Der Iteratorvertrag ──────────────────────────────────────────────
+    // ── The iterator protocol ────────────────────────────────────────────
 
-    /// `{ value, done }` — das Ergebnis eines `next()`.
-    /// Ein Eigenschaftsbeschreiber (`{value, writable, …}`) → `Prop`.
+    /// `ToPropertyDescriptor` (ES §6.2.6.5): a descriptor object to `Desc`.
     ///
-    /// Eigene Funktion, weil sie fuenf Rufer hat: `Object.defineProperty`,
-    /// `Object.defineProperties`, `Object.create` mit zweitem Argument und
-    /// `Reflect.defineProperty`. Fuenf Kopien dieser Regeln waeren fuenf
-    /// Gelegenheiten, sie auseinanderlaufen zu lassen.
-    /// `ToPropertyDescriptor` (ES §6.2.6.5).
+    /// Checks presence, not truthiness: a missing field must stay absent, which
+    /// is the point of a partial descriptor (correct for redefining, not only
+    /// for creating).
     ///
-    /// **Gefragt wird nach ANWESENHEIT, nicht nach Wahrheit.** Die alte
-    /// Fassung las `writable` mit `.truthy()`, und ein fehlendes Feld wurde
-    /// damit zu `false` — beim ANLEGEN richtig, beim AENDERN falsch. Der
-    /// Unterschied ist der ganze Sinn eines partiellen Beschreibers.
+    /// Presence is checked through the prototype chain (`HasProperty`, not
+    /// `has_own`): a descriptor that inherits `writable` counts.
     ///
-    /// Gefragt wird ueber die PROTOTYPKETTE (`HasProperty`, nicht `has_own`):
-    /// ein Beschreiber, der `writable` erbt, zaehlt.
+    /// One function for all callers (`Object.defineProperty`,
+    /// `Object.defineProperties`, `Object.create` with a second argument,
+    /// `Reflect.defineProperty`) so their rules cannot diverge.
     pub fn to_prop_desc(&mut self, d: &Value) -> C<Desc> {
         let Value::Obj(dd) = d else {
             return self.type_err("property descriptor must be an object");
@@ -2996,7 +2728,7 @@ impl Interp {
         Ok(out)
     }
 
-    /// Und zurueck: `Prop` → Beschreiberobjekt.
+    /// And back: `Prop` -> descriptor object.
     pub fn from_prop_desc(&mut self, p: &Prop) -> Value {
         let d = new_obj(Some(self.realm.object_proto.clone()));
         {
@@ -3014,8 +2746,8 @@ impl Interp {
         Value::Obj(d)
     }
 
-    /// Die Eigenschaften aus einem `{k: beschreiber, …}` auf ein Objekt
-    /// legen — `Object.defineProperties` und `Object.create(p, props)`.
+    /// Put the properties of a `{k: descriptor, …}` on an object, for
+    /// `Object.defineProperties` and `Object.create(p, props)`.
     pub fn define_props_from(&mut self, target: &Gc, props: &Value) -> C<()> {
         let Value::Obj(src) = props else {
             return self.type_err("properties must be an object");
@@ -3023,9 +2755,9 @@ impl Interp {
         let keys: Vec<Rc<str>> = src.borrow().own_keys().into_iter()
             .filter(|k| src.borrow().is_enumerable(k))
             .collect();
-        // ERST alle Beschreiber lesen, DANN alle anwenden (ES §20.1.2.3.1).
-        // Die Reihenfolge ist beobachtbar: wirft der dritte Beschreiber,
-        // duerfen die ersten beiden nicht schon gelegt sein.
+        // Read all descriptors first, then apply all (ES §20.1.2.3.1). The order is
+        // observable: if the third descriptor throws, the first two must not have
+        // been applied.
         let mut pending = Vec::new();
         for k in keys {
             let d = self.get(props, &k)?;
@@ -3037,14 +2769,12 @@ impl Interp {
         Ok(())
     }
 
-    /// Ein frischer `ArrayBuffer` mit `n` Nullbytes.
+    /// A fresh `ArrayBuffer` of `n` zero bytes.
     ///
-    /// **Ueber `MAX_BUFFER_BYTES` gibt es einen leeren Puffer** — die Rufer
-    /// pruefen vorher und werfen einen `RangeError`, so wie ein echter Motor
-    /// es tut, wenn die Zuteilung scheitert. Ohne die Schranke hat ein
-    /// test262-Fall 7 Petabyte angefordert und den Lauf mit SIGABRT beendet;
-    /// in einem Kernel waere das kein Absturz des Testlaeufers, sondern der
-    /// des Systems.
+    /// Above `MAX_BUFFER_BYTES` the buffer is empty; callers check beforehand and
+    /// throw a `RangeError`, as a real engine does when allocation fails. In a
+    /// kernel an unchecked huge allocation would take down the system, not just
+    /// the script.
     pub fn new_buffer(&mut self, n: usize) -> Value {
         if n > MAX_BUFFER_BYTES { return self.new_buffer(0) }
         Value::Obj(new_kind(Some(self.realm.buffer_proto.clone()),
@@ -3054,7 +2784,7 @@ impl Interp {
             }))))
     }
 
-    /// Eine SICHT auf einen bestehenden Puffer — kein neuer Speicher.
+    /// A view on an existing buffer; no new memory.
     pub fn new_view(&mut self, kind: ElemKind, buf: Gc, offset: usize, len: usize) -> Value {
         let proto = self.realm.ta_protos.get(kind.name()).cloned()
             .unwrap_or_else(|| self.realm.typed_proto.clone());
@@ -3062,7 +2792,7 @@ impl Interp {
             ObjKind::TypedArray(Rc::new(TaData { buf, kind, offset, len }))))
     }
 
-    /// Eine Sicht MIT eigenem Puffer — der gewoehnliche `new Uint8Array(n)`.
+    /// A view with its own buffer: the ordinary `new Uint8Array(n)`.
     pub fn new_typed(&mut self, kind: ElemKind, len: usize) -> Value {
         let Some(bytes) = len.checked_mul(kind.size()) else { return Value::Undefined };
         let b = self.new_buffer(bytes);
@@ -3070,6 +2800,7 @@ impl Interp {
         self.new_view(kind, bo, 0, len)
     }
 
+    /// `{ value, done }`, the result of a `next()`.
     pub fn iter_result(&mut self, value: Value, done: bool) -> Value {
         let g = new_obj(Some(self.realm.object_proto.clone()));
         {
@@ -3080,10 +2811,9 @@ impl Interp {
         Value::Obj(g)
     }
 
-    /// Ein Array-Iterator ueber `target`. `kind`: 0 Werte, 1 Schluessel,
-    /// 2 Paare.
+    /// An array iterator over `target`. `kind`: 0 values, 1 keys, 2 pairs.
     pub fn array_iter(&mut self, target: Value, kind: u8) -> C<Value> {
-        // `ToObject` zuerst: `Array.prototype.values.call("ab")` muss gehen.
+        // `ToObject` first: `Array.prototype.values.call("ab")` must work.
         let t = self.to_object(&target)?;
         let g = new_obj(Some(self.realm.array_iter_proto.clone()));
         {
@@ -3095,8 +2825,8 @@ impl Interp {
         Ok(Value::Obj(g))
     }
 
-    /// `GetIterator`. Wirft, wenn der Wert keinen `Symbol.iterator` hat —
-    /// genau das verlangt `for..of`, und der Fehlertext nennt den Grund.
+    /// `GetIterator`. Throws if the value has no `Symbol.iterator`, as `for..of`
+    /// requires; the message names the reason.
     pub fn get_iterator(&mut self, v: &Value) -> C<Value> {
         if matches!(v, Value::Undefined | Value::Null) {
             return self.type_err("value is not iterable");
@@ -3110,8 +2840,8 @@ impl Interp {
         Ok(it)
     }
 
-    /// Wie `has_property`, aber ein Wurf aus einer Stellvertreterfalle kommt
-    /// durch. `in` und `Reflect.has` rufen diese.
+    /// Like `has_property`, but a throw from a proxy trap propagates. `in` and
+    /// `Reflect.has` call this.
     pub fn has_prop(&mut self, o: &Gc, key: &str) -> C<bool> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "has")? {
@@ -3126,7 +2856,7 @@ impl Interp {
         Ok(self.has_property(o, key))
     }
 
-    /// Die EIGENEN Schluessel — durch einen Stellvertreter hindurch.
+    /// The own keys, through a proxy.
     pub fn own_keys_of(&mut self, o: &Gc) -> C<Vec<PropName>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "ownKeys")? {
@@ -3143,7 +2873,7 @@ impl Interp {
         Ok(o.borrow().own_keys())
     }
 
-    /// Der EIGENE Beschreiber — durch einen Stellvertreter hindurch.
+    /// The own descriptor, through a proxy.
     pub fn get_own_desc(&mut self, o: &Gc, key: &str) -> C<Option<Prop>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "getOwnPropertyDescriptor")? {
@@ -3154,9 +2884,8 @@ impl Interp {
                     if !matches!(r, Value::Obj(_)) {
                         return self.type_err("getOwnPropertyDescriptor trap did not return an object");
                     }
-                    // Die Falle liefert einen partiellen Beschreiber; eine
-                    // ABGELEGTE Eigenschaft ist immer vollstaendig, also
-                    // bekommen die fehlenden Felder hier ihre Vorgabewerte.
+                    // The trap returns a partial descriptor; a stored property is always
+                    // complete, so the missing fields get their defaults here.
                     Ok(Some(self.to_prop_desc(&r)?.into_new_prop()))
                 }
                 None => { let t = super::proxy::target(self, o)?; self.get_own_desc(&t, key) }
@@ -3165,13 +2894,10 @@ impl Interp {
         Ok(o.borrow().get_own(key).cloned())
     }
 
-    /// Eine Eigenschaft festlegen — durch einen Stellvertreter hindurch.
-    /// `[[DefineOwnProperty]]` — MIT der Pruefung (ES §10.1.6).
+    /// `[[DefineOwnProperty]]` with validation (ES §10.1.6), through a proxy.
     ///
-    /// Bis 0.99.0 legte diese Funktion einfach ab, was man ihr gab. Eine
-    /// nicht konfigurierbare Eigenschaft liess sich damit umdefinieren,
-    /// `Object.freeze` war eine Bitte, und `Object.defineProperty` gab immer
-    /// `true`. 368 test262-Varianten haengen daran.
+    /// Non-configurable properties cannot be redefined, `Object.freeze` holds,
+    /// and the result reports whether the definition was allowed.
     pub fn define_own(&mut self, o: &Gc, key: &str, d: Desc) -> C<bool> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "defineProperty")? {
@@ -3187,8 +2913,8 @@ impl Interp {
         let cur = o.borrow().get_own(key).cloned();
         let extensible = o.borrow().extensible;
         let Some(cur) = cur else {
-            // Neu. Nur die Erweiterbarkeit steht dem im Weg; die fehlenden
-            // Felder bekommen HIER ihre Vorgabewerte.
+            // New. Only extensibility stands in the way; the missing fields get their
+            // defaults here.
             if !extensible { return Ok(false); }
             let np = d.into_new_prop();
             o.borrow_mut().define(key, np);
@@ -3196,8 +2922,8 @@ impl Interp {
             return Ok(true);
         };
         if d.is_empty() { return Ok(true); }
-        // `ValidateAndApplyPropertyDescriptor`, Schritt 4: was eine nicht
-        // konfigurierbare Eigenschaft NICHT erlaubt.
+        // `ValidateAndApplyPropertyDescriptor`, step 4: what a non-configurable
+        // property does not allow.
         if !cur.configurable {
             if d.configurable == Some(true) { return Ok(false); }
             if let Some(e) = d.enumerable { if e != cur.enumerable { return Ok(false); } }
@@ -3218,11 +2944,11 @@ impl Interp {
                 }
             }
         }
-        // Angewendet wird FELDWEISE: was der Beschreiber nicht nennt, bleibt.
+        // Applied field by field: what the descriptor does not name stays.
         let mut np = cur.clone();
         if !d.is_generic() && d.is_accessor() != cur.is_accessor() {
-            // Art gewechselt — die Felder der alten Art fallen auf ihre
-            // Vorgabewerte zurueck, `enumerable`/`configurable` bleiben.
+            // Kind changed: the fields of the old kind fall back to their defaults,
+            // `enumerable`/`configurable` stay.
             np = Prop { value: None, get: None, set: None, writable: false,
                         enumerable: cur.enumerable, configurable: cur.configurable };
         }
@@ -3237,8 +2963,8 @@ impl Interp {
         Ok(true)
     }
 
-    /// `FromPropertyDescriptor` fuer einen PARTIELLEN Beschreiber — was die
-    /// Stellvertreter-Falle zu sehen bekommt. Nur die Felder, die dastehen.
+    /// `FromPropertyDescriptor` for a partial descriptor, as a proxy trap sees
+    /// it. Only the fields that are present.
     pub fn desc_to_object(&mut self, d: &Desc) -> Value {
         let o = new_obj(Some(self.realm.object_proto.clone()));
         {
@@ -3253,13 +2979,13 @@ impl Interp {
         Value::Obj(o)
     }
 
-    /// `DefinePropertyOrThrow` (ES §7.3.8) — was die Eingebauten benutzen.
+    /// `DefinePropertyOrThrow` (ES §7.3.8), used by the built-ins.
     pub fn define_or_throw(&mut self, o: &Gc, key: &str, d: Desc) -> C<()> {
         if self.define_own(o, key, d)? { return Ok(()); }
         self.type_err(&alloc::format!("cannot redefine property: {key}"))
     }
 
-    /// Der Prototyp — durch einen Stellvertreter hindurch.
+    /// The prototype, through a proxy.
     pub fn proto_of(&mut self, o: &Gc) -> C<Option<Gc>> {
         if super::proxy::parts(o).is_some() {
             return match super::proxy::trap(self, o, "getPrototypeOf")? {
@@ -3273,17 +2999,13 @@ impl Interp {
         Ok(o.borrow().proto.clone())
     }
 
-    /// Ein Schritt. `None` heisst fertig.
-    /// `GetIterator(obj, async)` (ES 7.4.2). Gibt den Iterator und die
-    /// Auskunft, ob er ein ECHTER async-Iterator ist.
+    /// `GetIterator(obj, async)` (ES 7.4.2). Returns the iterator and whether it
+    /// is a real async iterator.
     ///
-    /// **Ohne `Symbol.asyncIterator` wird der synchrone genommen.** Die
-    /// Spezifikation huellt ihn dafuer in einen `%AsyncFromSyncIterator%`; wir
-    /// merken uns stattdessen `is_async = false` am Iterator und warten in
-    /// `Op::IterStepAsync` nur seinen `value` ab. Das ist dieselbe
-    /// beobachtbare Semantik ohne ein Objekt, das kein Skript je zu sehen
-    /// bekommt — was fehlt, ist allein `%AsyncFromSyncIteratorPrototype%` als
-    /// benannte Schnittstelle, und die zaehlt der Zensus nicht.
+    /// Without `Symbol.asyncIterator` the sync iterator is used. The spec wraps
+    /// it in a `%AsyncFromSyncIterator%`; instead we record `is_async = false`
+    /// and `Op::IterStepAsync` awaits only its `value`. Same observable
+    /// semantics without an object no script ever sees.
     pub fn get_async_iterator(&mut self, v: &Value) -> C<(Value, bool)> {
         if matches!(v, Value::Undefined | Value::Null) {
             return self.type_err("value is not async iterable");
@@ -3302,6 +3024,7 @@ impl Interp {
         Ok((self.get_iterator(v)?, false))
     }
 
+    /// One step. `None` means done.
     pub fn iter_next(&mut self, it: &Value) -> C<Option<Value>> {
         self.tick()?;
         let f = self.get(it, "next")?;
@@ -3315,25 +3038,24 @@ impl Interp {
         Ok(Some(self.get(&r, "value")?))
     }
 
-    /// `IteratorClose` — beim vorzeitigen Verlassen (`break`, `return`, ein
-    /// Fehler im Rumpf). Ein Generator raeumt hier auf; wer das auslaesst,
-    /// laesst `finally`-Bloecke in fremdem Code liegen.
+    /// `IteratorClose`, on early exit (`break`, `return`, an error in the body).
+    /// A generator cleans up here; skipping it would leave `finally` blocks in
+    /// foreign code unrun.
     ///
-    /// Ein Fehler AUS `return()` wird geschluckt: der Grund fuers Verlassen
-    /// steht schon fest, und ihn zu ueberschreiben verbirgt ihn.
+    /// An error from `return()` is swallowed: the reason for leaving is already
+    /// set, and overwriting it would hide it.
     pub fn iter_close(&mut self, it: &Value) {
         let Ok(f) = self.get(it, "return") else { return };
         if !self.is_callable(&f) { return; }
         let _ = self.call(&f, it.clone(), &[]);
     }
 
-    /// Alles auf einmal — fuer Streuung, `Array.from`, `new Map(…)`.
+    /// Everything at once, for spread, `Array.from`, `new Map(…)`.
     ///
-    /// Eifrig, und das ist hier richtig: alle drei Aufrufer BRAUCHEN die
-    /// vollstaendige Liste. `for..of` laeuft nicht hier durch, sondern
-    /// schrittweise ([[exec_for_of]]) — sonst haenge ein unendlicher
-    /// Iterator die Seite auf, obwohl der Rumpf im ersten Durchlauf
-    /// abbricht.
+    /// Eager, which is right here: all callers need the full list. `for..of`
+    /// does not go through here but steps lazily (`exec_for_of`); otherwise an
+    /// infinite iterator would hang the page even if the body breaks on the
+    /// first round.
     pub fn iterate(&mut self, v: &Value) -> C<Vec<Value>> {
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
@@ -3347,20 +3069,18 @@ impl Interp {
         Ok(out)
     }
 
-    /// Die Schluessel, ueber die ein `for..in` laeuft: aufzaehlbar, die ganze
-    /// Prototypenkette hoch, ohne Doppelte.
+    /// The keys a `for..in` iterates: enumerable, up the whole prototype chain,
+    /// without duplicates.
     ///
-    /// **Die Liste wird VORHER gebaut.** Eine Aenderung am Objekt waehrend der
-    /// Schleife darf sie nicht ins Rutschen bringen — das ist der Unterschied
-    /// zu `for..of`, das faul sein MUSS. Ein Schluessel, der zwischendurch
-    /// verschwindet, wird trotzdem uebersprungen: das macht `get` von selbst.
+    /// The list is built up front, so changes to the object during the loop do
+    /// not shift it (unlike `for..of`, which must be lazy). A key that disappears
+    /// meanwhile is still skipped; `get` handles that.
     ///
-    /// `undefined`/`null` geben eine LEERE Liste, keinen Fehler: `for (k in
-    /// null)` laeuft null Mal, statt zu werfen.
+    /// `undefined`/`null` give an empty list, not an error: `for (k in null)`
+    /// runs zero times.
     ///
-    /// Eigene Funktion, weil die Befehlsmaschine sie braucht. Sie dort
-    /// nachzubauen waere eine zweite Aufzaehlungsreihenfolge, und die faellt
-    /// erst auf, wenn ein Skript sich darauf verlaesst.
+    /// Separate because the bytecode machine needs it; a second implementation
+    /// would be a second enumeration order.
     pub fn for_in_keys(&mut self, v: &Value) -> C<Vec<Rc<str>>> {
         if matches!(v, Value::Undefined | Value::Null) { return Ok(Vec::new()) }
         let o = self.to_object(v)?;
@@ -3384,14 +3104,12 @@ impl Interp {
         Ok(keys)
     }
 
-    /// `CreateListFromArrayLike`: `length` und Indizes, OHNE den
-    /// Iteratorvertrag.
+    /// `CreateListFromArrayLike`: `length` and indices, without the iterator
+    /// protocol.
     ///
-    /// Das ist kein Rueckfall, sondern eine eigene Spezifikationsoperation.
-    /// `Function.prototype.apply` und die Array-Methoden benutzen sie —
-    /// `apply` mit einem Objekt ohne `Symbol.iterator` muss gehen, `for..of`
-    /// damit muss werfen. Wer beides in eine Funktion legt, verliert genau
-    /// diesen Unterschied.
+    /// Its own spec operation, not a fallback. `Function.prototype.apply` and
+    /// the array methods use it: `apply` with an object lacking
+    /// `Symbol.iterator` must work, `for..of` on it must throw.
     pub fn elems(&mut self, v: &Value) -> C<Vec<Value>> {
         match v {
             Value::Str(s) => Ok(s.chars().map(|c| {
@@ -3412,23 +3130,12 @@ impl Interp {
         }
     }
 
-    /// Ein Feld MIT LOECHERN: nur die genannten Plaetze werden belegt, die
-    /// Laenge steht trotzdem fest.
+    /// `{ __proto__: v }` in an object literal sets the prototype (ES 13.2.5.5,
+    /// PropertyDefinitionEvaluation); it creates no property. Read as a property,
+    /// `__proto__` would show up among the own keys.
     ///
-    /// Ein Loch ist nicht `undefined`. `new Array(3).concat("x").map(f)` ruft
-    /// `f` genau EINMAL — d3 baut damit seine Farbtabellen, und ein Loch, das
-    /// als Wert durchgereicht wird, kommt dort als `undefined.length` an.
-    /// `{ __proto__: v }` im Objektliteral SETZT den Prototyp (ES 13.2.5.5,
-    /// PropertyDefinitionEvaluation) — es legt KEINE Eigenschaft an.
-    ///
-    /// Der Unterschied ist nicht akademisch: chart.js beginnt mit
-    /// `Object.freeze({__proto__:null, get Colors(){…}, …})` und laeuft
-    /// danach ueber die eigenen Schluessel dieses Namensraums. Als
-    /// Eigenschaft gelesen steht `__proto__` mit dem Wert `null` mit in der
-    /// Liste — und der naechste Zugriff ist `null.prototype`.
-    ///
-    /// Nur ein Objekt oder `null` wirken; alles andere wird still verworfen,
-    /// so wie es die Spezifikation sagt.
+    /// Only an object or `null` has an effect; anything else is silently
+    /// ignored, as the spec says.
     pub fn set_literal_proto(&mut self, o: &Gc, v: &Value) {
         match v {
             Value::Obj(p) => o.borrow_mut().proto = Some(p.clone()),
@@ -3437,6 +3144,11 @@ impl Interp {
         }
     }
 
+    /// An array with holes: only the given slots are filled, the length is
+    /// fixed regardless.
+    ///
+    /// A hole is not `undefined`: `new Array(3).concat("x").map(f)` calls `f`
+    /// exactly once.
     pub fn new_sparse_array(&mut self, len: usize, items: Vec<(usize, Value)>) -> Value {
         let g = new_kind(Some(self.realm.array_proto.clone()), ObjKind::Array);
         {
@@ -3470,13 +3182,12 @@ impl Interp {
         self.make_method(f, env, this_val, None)
     }
 
-    /// Dasselbe, aber mit Heimatobjekt — das ist der einzige Unterschied
-    /// zwischen einer Funktion und einer Methode, und `super` haengt daran.
+    /// The same, but with a home object; that is the only difference between a
+    /// function and a method, and `super` depends on it.
     pub fn make_method(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>, this_val: Option<Value>,
                        home: Option<Gc>) -> Value {
-        // Eine Generatorfunktion haengt unter `%GeneratorFunction.prototype%`,
-        // nicht unter `Function.prototype` — daran haengen `f.constructor` und
-        // der `toStringTag`, und beides wird gemessen.
+        // A generator function hangs under `%GeneratorFunction.prototype%`, not
+        // `Function.prototype`; `f.constructor` and the `toStringTag` depend on it.
         let fproto = if f.is_generator {
             if f.is_async { self.realm.async_gen_func_proto.clone() }
             else { self.realm.generator_func_proto.clone() }
@@ -3496,18 +3207,14 @@ impl Interp {
             o.define("name", Prop { value: Some(Value::str(f.name.as_deref().unwrap_or(""))),
                 get: None, set: None, writable: false, enumerable: false, configurable: true });
         }
-        // Ein Pfeil hat kein `prototype` — er kann nicht als Konstruktor
-        // dienen, und ein vorhandenes `prototype` waere ein sichtbarer
-        // Unterschied zu jedem echten Motor.
-        // Eine async-Funktion hat KEIN `prototype` — sie ist kein Konstruktor,
-        // und ein vorhandenes waere ein sichtbarer Unterschied zu jedem echten
-        // Motor. Ein async-GENERATOR hat eins, obwohl auch er keiner ist: von
-        // dort erbt sein Objekt `next`/`return`/`throw`.
+        // Arrows and async functions have no `prototype`: they are not constructors,
+        // and having one would be a visible difference from every engine. An async
+        // generator has one although it is not a constructor either: its objects
+        // inherit `next`/`return`/`throw` from there.
         if !f.is_arrow && !(f.is_async && !f.is_generator) {
-            // Das `prototype` einer Generatorfunktion haengt unter
-            // `%GeneratorPrototype%` und traegt KEIN `constructor` — von dort
-            // erbt das Generatorobjekt `next`/`return`/`throw`. Eine
-            // gewoehnliche Funktion bekommt das gewohnte Paar.
+            // The `prototype` of a generator function hangs under `%GeneratorPrototype%`
+            // and has no `constructor`; the generator object inherits
+            // `next`/`return`/`throw` from it. An ordinary function gets the usual pair.
             let is_gen = f.is_generator;
             let proto = new_obj(Some(if !is_gen {
                 self.realm.object_proto.clone()
@@ -3529,7 +3236,7 @@ impl Interp {
 
 
 
-/// Die Sicht hinter einem Objekt, wenn es eine ist.
+/// The typed array view behind an object, if it is one.
 pub fn ta_of(o: &Gc) -> Option<Rc<TaData>> {
     match &o.borrow().kind {
         ObjKind::TypedArray(t) => Some(t.clone()),
@@ -3537,9 +3244,9 @@ pub fn ta_of(o: &Gc) -> Option<Rc<TaData>> {
     }
 }
 
-/// Ein Element einer Sicht lesen. `None` heisst „das ist keine Sicht oder
-/// kein Index" — dann laeuft der gewoehnliche Weg weiter. `Some(Undefined)`
-/// heisst „Sicht, aber ausserhalb", und das ist eine ANTWORT, kein Durchfall.
+/// Read an element of a view. `None` means "not a view or not an index",
+/// and the ordinary path continues. `Some(Undefined)` means "view, but out of
+/// range", which is an answer, not a fall-through.
 pub fn ta_read(o: &Gc, key: &str) -> Option<Value> {
     let t = ta_of(o)?;
     let k = array_index(key)? as usize;

@@ -1,17 +1,11 @@
-//! `Promise` und die Microtask-Schlange.
+//! `Promise` and the microtask queue.
 //!
-//! **Ohne Aufhaengen der Maschine.** Ein Versprechen braucht keine
-//! Unterbrechung des Auswerters — nur eine Schlange, die zwischen den Aufgaben
-//! abgearbeitet wird. Das ist der Grund, warum es VOR Generatoren und
-//! `await` kommt: die brauchen einen anhaltbaren Auswerter, ein
-//! `.then()`-Gespann nicht.
+//! Promises need no suspendable evaluator, only a queue drained between
+//! tasks; generators and `await` are what need suspension.
 //!
-//! **Kein Abschluss, sondern gebundene Argumente.** `NativeFn` ist ein
-//! Funktionszeiger und bekommt das Funktionsobjekt nicht zu sehen — ein
-//! `resolve`, das „sein" Versprechen kennt, ginge damit nicht. Also traegt es
-//! den Zustand als GEBUNDENES erstes Argument (`ObjKind::Bound`), und das ist
-//! zugleich der Ort fuer die Sperre „schon erledigt": `resolve` und `reject`
-//! teilen sich einen Kasten, und wer zuerst kommt, schliesst ihn.
+//! `NativeFn` is a plain function pointer and cannot see its own function
+//! object, so `resolve`/`reject` carry their state as a bound first argument
+//! (`ObjKind::Bound`). Both share one box; whichever runs first closes it.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -21,10 +15,10 @@ use core::cell::RefCell;
 use super::interp::*;
 use super::value::*;
 
-/// Der Kasten, den `resolve` und `reject` sich teilen.
+/// The box shared by `resolve` and `reject`.
 const CAP_PROMISE: &str = "\0!cap.p";
 const CAP_DONE: &str = "\0!cap.done";
-/// Zaehlerkasten fuer `all`/`allSettled`/`any`.
+/// Counter box for `all`/`allSettled`/`any`.
 const AGG_LEFT: &str = "\0!agg.left";
 const AGG_VALUES: &str = "\0!agg.values";
 const AGG_CAP: &str = "\0!agg.cap";
@@ -33,14 +27,12 @@ const AGG_MODE: &str = "\0!agg.mode";
 
 pub enum PState { Pending, Fulfilled(Value), Rejected(Value) }
 
-/// Ein angehaengter Behandler: die Funktion (oder keine — dann wird
-/// durchgereicht) und das abgeleitete Versprechen, das er erledigt.
+/// An attached handler: the function (or none, meaning pass-through) and the
+/// derived promise it settles.
 ///
-/// `cap` ist der FREMDE Fall: `then` darf sein Ergebnis ueber
-/// `constructor[Symbol.species]` bauen lassen, und dann ist das Ergebnis kein
-/// `ObjKind::Promise`, sondern irgendein Objekt mit einem eigenen
-/// `resolve`/`reject`-Paar. `derived` bleibt trotzdem gesetzt (als
-/// Platzhalter), damit der Rest des Codes unveraendert bleibt.
+/// `cap` is the foreign case: `then` may build its result via
+/// `constructor[Symbol.species]`, and then the result is an arbitrary object
+/// with its own `resolve`/`reject` pair. `derived` stays set as a placeholder.
 pub struct Reaction {
     pub handler: Option<Value>,
     pub derived: Gc,
@@ -51,17 +43,17 @@ pub struct PData {
     pub state: PState,
     pub on_ok: Vec<Reaction>,
     pub on_err: Vec<Reaction>,
-    /// Hat jemals jemand `then` daran gehaengt? `PerformPromiseThen` setzt es,
-    /// egal ob ein Ablehnungsbehandler dabei war — das abgeleitete
-    /// Versprechen uebernimmt die Verantwortung.
+    /// Has anyone ever attached `then`? Set by `PerformPromiseThen` whether or
+    /// not a rejection handler was given; the derived promise takes over
+    /// responsibility.
     pub handled: bool,
 }
 
-/// Eine Microtask.
+/// A microtask.
 pub enum Job {
-    /// Einen Behandler auf einen erledigten Zustand loslassen.
+    /// Run a handler against a settled state.
     React { r: Reaction, arg: Value, rejected: bool },
-    /// Ein fremdes Thenable uebernehmen: `then.call(thenable, res, rej)`.
+    /// Adopt a foreign thenable: `then.call(thenable, res, rej)`.
     Adopt { thenable: Value, then: Value, target: Gc },
 }
 
@@ -74,7 +66,7 @@ pub fn new_promise(i: &Interp) -> Gc {
         PData { state: PState::Pending, on_ok: Vec::new(), on_err: Vec::new(), handled: false }))))
 }
 
-/// Erledigen. Nur EINMAL — wer schon erledigt ist, aendert sich nicht mehr.
+/// Settle. Only once; a settled promise never changes again.
 pub fn settle(i: &mut Interp, p: &Gc, v: Value, rejected: bool) {
     let Some(d) = pdata(p) else { return };
     let (ok, err) = {
@@ -87,14 +79,13 @@ pub fn settle(i: &mut Interp, p: &Gc, v: Value, rejected: bool) {
     for r in if rejected { err } else { ok } {
         i.jobs.push_back(Job::React { r, arg: v.clone(), rejected });
     }
-    // Eine Ablehnung, an der nichts haengt, ist die stillste Art, eine Seite
-    // scheitern zu lassen: kein Fehler, keine Meldung, nur etwas, das nie
-    // passiert. Sie wird gemerkt und am Ende der Schlange gemeldet — bis
-    // dahin darf noch jemand ein `catch` anhaengen, und das ist der Normalfall.
+    // An unhandled rejection fails silently. Remember it and report it when the
+    // queue is drained; until then a `catch` may still be attached, which is the
+    // normal case.
     if rejected && !handled { i.pending_rejections.push(p.clone()); }
 }
 
-/// `ResolvePromise`: ein Thenable wird UEBERNOMMEN, alles andere erfuellt.
+/// `ResolvePromise`: a thenable is adopted, anything else fulfils.
 pub fn resolve_promise(i: &mut Interp, p: &Gc, v: Value) {
     if let Value::Obj(o) = &v {
         if Rc::ptr_eq(o, p) {
@@ -102,8 +93,7 @@ pub fn resolve_promise(i: &mut Interp, p: &Gc, v: Value) {
             if let Abrupt::Throw(ev) = e { settle(i, p, ev, true); }
             return;
         }
-        // `then` LESEN kann werfen (ein Getter) — dann ist das der Grund
-        // fuer die Ablehnung, nicht ein spaeterer Aufruf.
+        // Reading `then` may throw (a getter); that error is the rejection reason.
         let then = match i.get(&v, "then") {
             Ok(t) => t,
             Err(Abrupt::Throw(ev)) => { settle(i, p, ev, true); return }
@@ -117,8 +107,8 @@ pub fn resolve_promise(i: &mut Interp, p: &Gc, v: Value) {
     settle(i, p, v, false);
 }
 
-/// Das Paar `(resolve, reject)` fuer ein Versprechen. Beide teilen sich einen
-/// Kasten; der erste Aufruf schliesst ihn fuer den anderen mit.
+/// The `(resolve, reject)` pair for a promise. Both share one box; the first
+/// call closes it for the other.
 pub fn resolving_functions(i: &mut Interp, p: &Gc) -> (Value, Value) {
     let cap = new_obj(None);
     {
@@ -143,12 +133,12 @@ fn cap_settle(i: &mut Interp, a: &[Value], rejected: bool) {
     if rejected { settle(i, &p, v, true) } else { resolve_promise(i, &p, v) }
 }
 
-/// `PerformPromiseThen` — haengt an und gibt das abgeleitete Versprechen.
+/// `PerformPromiseThen`: attach and return the derived promise.
 pub fn perform_then(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value) -> Gc {
     perform_then_cap(i, p, on_ok, on_err, None)
 }
 
-/// Wie `perform_then`, aber mit einem FREMDEN Erledigungspaar.
+/// Like `perform_then`, but with a foreign resolving pair.
 pub fn perform_then_cap(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value,
                         cap: Option<(Value, Value)>) -> Gc {
     if let Some(d) = pdata(p) { d.borrow_mut().handled = true; }
@@ -178,31 +168,23 @@ pub fn perform_then_cap(i: &mut Interp, p: &Gc, on_ok: Value, on_err: Value,
     derived
 }
 
-/// Die Schlange leeren.
+/// Drain the queue.
 ///
-/// Mit Deckel: eine Kette, die sich selbst nachlegt (`p.then(f)` in `f`), ist
-/// ein voellig gewoehnliches Muster und wuerde sonst nie enden. Der Deckel ist
-/// dieselbe Entscheidung wie bei `run_timers` — EINMAL durchlaufen ist zu
-/// wenig (eine Kette braucht ihre Sprossen), unbegrenzt zu viel.
+/// Capped: a chain that re-enqueues itself (`p.then(f)` inside `f`) is a
+/// common pattern and would otherwise never end. Running once is too little
+/// (a chain needs its steps), unbounded is too much; same choice as
+/// `run_timers`.
 pub fn run_jobs(i: &mut Interp) -> usize {
     let mut n = 0;
-    // **Der Kontrollpunkt der Beobachter.** Er gehoert hierher und nicht in
-    // `run_timers`: `run_jobs` laeuft nach JEDEM Einstiegspunkt — nach einem
-    // Skript, nach einem Ereignis, nach jedem Zeitgeber. Ein Beobachter, der
-    // erst beim naechsten Zeitgeber benachrichtigt wuerde, bekaeme auf einer
-    // Seite ohne Zeitgeber nie etwas zu sehen.
+    // Observer checkpoint. It belongs here, not in `run_timers`: `run_jobs` runs
+    // after every entry point (script, event, timer), so a page without timers
+    // still gets its observer callbacks.
     //
-    // In einer Schleife, weil ein Rueckruf den Baum aendern darf: das ist
-    // das uebliche Muster (eine Bibliothek erweckt frisch eingehaengtes
-    // Markup und haengt dabei selbst etwas ein). Begrenzt wird sie nicht
-    // hier, sondern von Schritt- und Zeitdeckel — die gelten auch fuer eine
-    // Endlosschleife, die aus lauter gewoehnlichen Runden besteht.
+    // Looped because a callback may mutate the tree again. The loop is bounded by
+    // the step and time caps, not here.
     loop {
-        // **Zuerst zustellen, dann die Schlange fahren.** Die Meldung wird
-        // angemeldet, wenn die Aenderung passiert — also waehrend das Skript
-        // lief und damit VOR jedem `.then`, das danach kam. Andersherum
-        // gerufen liefe der Beobachter als Letzter, und eine Seite, die im
-        // `.then` das Ergebnis erwartet, saehe nichts.
+        // Deliver mutation records before running the queue: they were queued while
+        // the script ran, i.e. before any `.then` registered afterwards.
         let zugestellt = super::dombind::deliver_mutations(i)
             | super::dombind::deliver_box_observers(i);
         let gefahren = run_queue(i);
@@ -214,8 +196,8 @@ pub fn run_jobs(i: &mut Interp) -> usize {
     n
 }
 
-/// Was am Ende der Schlange noch unbehandelt abgelehnt ist, wird GEMELDET —
-/// als `unhandledrejection` am Fenster und auf der Konsole.
+/// Rejections still unhandled at the end of the queue are reported as
+/// `unhandledrejection` on the window and on the console.
 fn report_rejections(i: &mut Interp) {
     if i.pending_rejections.is_empty() { return }
     let list = core::mem::take(&mut i.pending_rejections);
@@ -224,8 +206,8 @@ fn report_rejections(i: &mut Interp) {
         if d.borrow().handled { continue }
         let PState::Rejected(v) = &d.borrow().state else { continue };
         let reason = v.clone();
-        // Der Behandler darf noch antworten — `preventDefault` unterdrueckt
-        // die Meldung, genau wie im Browser.
+        // The handler may still answer: `preventDefault` suppresses the report, as in
+        // browsers.
         let prevented = super::dombind::dispatch_rejection(i, reason.clone(), Value::Obj(p.clone()))
             .unwrap_or(false);
         if prevented { continue }
@@ -247,8 +229,7 @@ fn run_queue(i: &mut Interp) -> usize {
         if i.tick().is_err() { break; }
         match j {
             Job::React { r, arg, rejected } => {
-                // Ein FREMDES Erledigungspaar bekommt den Ausgang als Aufruf,
-                // nicht als Zustandswechsel — es gehoert nicht uns.
+                // A foreign resolving pair gets the outcome as a call, not as a state change.
                 let finish = |i: &mut Interp, r: &Reaction, v: Value, rejected: bool| {
                     match &r.cap {
                         Some((res, rej)) => {
@@ -281,22 +262,19 @@ fn run_queue(i: &mut Interp) -> usize {
     n
 }
 
-/// Eine native Funktion mit EINEM festgebundenen ersten Argument.
+/// A native function with one bound first argument.
 ///
-/// Der Ersatz fuer einen Abschluss: `NativeFn` ist ein Funktionszeiger und
-/// sieht sein eigenes Funktionsobjekt nicht, `ObjKind::Bound` stellt die
-/// gebundenen Argumente aber vorn an.
-/// Ein natives mit einem GEBUNDENEN ersten Argument — der einzige Weg, einem
-/// Funktionszeiger Zustand mitzugeben. `generator.rs` braucht ihn fuer die
-/// zwei Behandler, mit denen ein `await` wieder anlaeuft.
+/// Stands in for a closure: `NativeFn` is a function pointer and cannot see
+/// its own function object, but `ObjKind::Bound` prepends bound arguments.
+/// `generator.rs` uses it for the two handlers that resume an `await`.
 pub fn bind1(i: &mut Interp, f: NativeFn, arg: Value) -> Value {
     let target = native(Some(i.realm.function_proto.clone()), f, "", 1, false);
     Value::Obj(new_kind(Some(i.realm.function_proto.clone()), ObjKind::Bound {
         target, this_val: Value::Undefined, args: vec![arg] }))
 }
 
-/// Der Behandler von `finally`: rufen, auf sein Ergebnis warten, DANN den
-/// urspruenglichen Ausgang unveraendert weitergeben.
+/// The `finally` handler: call, wait for its result, then pass on the
+/// original outcome unchanged.
 fn finally_step(i: &mut Interp, a: &[Value], rejected: bool) -> C<Value> {
     let h = a.first().cloned().unwrap_or(Value::Undefined);
     let outcome = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -311,8 +289,7 @@ fn finally_step(i: &mut Interp, a: &[Value], rejected: bool) -> C<Value> {
     Ok(Value::Obj(perform_then(i, &waited, thunk, Value::Undefined)))
 }
 
-/// Ein Wert als Versprechen: ist er schon eines, bleibt er es.
-/// `PromiseResolve`: ein Versprechen bleibt es, alles andere wird eins.
+/// `PromiseResolve`: a promise stays one, anything else becomes one.
 pub fn to_promise(i: &mut Interp, v: &Value) -> Gc {
     if let Value::Obj(o) = v {
         if pdata(o).is_some() { return o.clone(); }
@@ -332,8 +309,8 @@ pub fn install(realm: &mut Realm) {
         if !i.is_callable(&ex) { return i.type_err("Promise resolver is not a function"); }
         let p = new_promise(i);
         let (res, rej) = resolving_functions(i, &p);
-        // Der Ausfuehrer laeuft SOFORT, nicht als Microtask — und wirft er,
-        // wird das Versprechen abgelehnt statt der Fehler weiterzureichen.
+        // The executor runs synchronously, not as a microtask; if it throws, the
+        // promise is rejected instead of propagating the error.
         if let Err(Abrupt::Throw(e)) = i.call(&ex, Value::Undefined, &[res, rej]) {
             settle(i, &p, e, true);
         }
@@ -354,16 +331,10 @@ pub fn install(realm: &mut Realm) {
         let ok = a.first().cloned().unwrap_or(Value::Undefined);
         let err = a.get(1).cloned().unwrap_or(Value::Undefined);
         let p = p.clone();
-        // **`SpeciesConstructor`** (ES §27.2.5.4 Schritt 3). Wer
-        // `p.constructor[Symbol.species]` setzt, bestimmt, WAS `then`
-        // zurueckgibt — auch wenn das gar kein Versprechen ist.
-        //
-        // Das ist nicht Feinschliff: core-js prueft mit genau diesem
-        // Ausdruck, ob die eingebaute `Promise` taugt. Fiel die Pruefung
-        // durch, ERSETZTE es sie durch seine eigene — und die kennt in der
-        // Fassung, die die Fritzbox ausliefert, kein `allSettled`. Die
-        // Komponenten warten in `connectedCallback` darauf und blieben fuer
-        // immer leer.
+        // `SpeciesConstructor` (ES §27.2.5.4 step 3): whoever sets
+        // `p.constructor[Symbol.species]` decides what `then` returns, even if it is
+        // not a promise. Polyfills such as core-js test exactly this expression and
+        // replace the built-in `Promise` if it fails.
         let c = match species_of(i, &t)? {
             Some(c) => c,
             None => { let der = perform_then(i, &p, ok, err); return Ok(Value::Obj(der)) }
@@ -377,13 +348,9 @@ pub fn install(realm: &mut Realm) {
         let h = a.first().cloned().unwrap_or(Value::Undefined);
         i.call(&f, t.clone(), &[Value::Undefined, h])
     }, 1, &fp);
-    // `finally` reicht Wert UND Fehler unveraendert weiter — es sieht sie nur.
-    //
-    // Und es WARTET auf das, was der Behandler zurueckgibt: `.finally(() =>
-    // aufraeumen())` mit einem Versprechen darin muss das Ergebnis
-    // zurueckhalten, bis das Aufraeumen fertig ist. Deshalb der Umweg ueber
-    // ein eigenes Versprechen statt den Wert direkt zurueckzugeben — der
-    // kostet genau die Sprosse, die die Spezifikation dort vorsieht.
+    // `finally` passes value and error through unchanged; it only observes them.
+    // It also waits for what the handler returns, hence the extra promise, which
+    // costs exactly the tick the spec prescribes.
     d(&proto, "finally", |i, t, a| {
         let h = a.first().cloned().unwrap_or(Value::Undefined);
         let f = i.get(&t, "then")?;
@@ -405,9 +372,8 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(p))
     }, 1, &fp);
 
-    // `all` = 0, `allSettled` = 1, `any` = 2. Eine Umsetzung fuer drei: sie
-    // unterscheiden sich nur darin, was ein einzelnes Ergebnis mit dem
-    // Zaehler macht.
+    // `all` = 0, `allSettled` = 1, `any` = 2. One implementation; they differ only
+    // in what a single result does to the counter.
     d(&ctor, "all", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 0) }, 1, &fp);
     d(&ctor, "allSettled", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 1) }, 1, &fp);
     d(&ctor, "any", |i, t, a| { agg_this(i, &t)?; aggregate(i, a, 2) }, 1, &fp);
@@ -427,12 +393,11 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(p))
     }, 1, &fp);
 
-    // `withResolvers` gibt genau die drei Stuecke heraus, die der
-    // Konstruktor sonst im Ausfuehrer versteckt.
+    // `withResolvers` exposes the three pieces the constructor hides in the
+    // executor.
     d(&ctor, "withResolvers", |i, t, _| {
-        // Sie bauen ueber `NewPromiseCapability(this)` — also muss `this` ein
-        // Konstruktor sein, auch wenn wir immer unser eigenes Versprechen
-        // liefern.
+        // Built via `NewPromiseCapability(this)`, so `this` must be a constructor even
+        // though we always return our own promise.
         if !i.is_constructor(&t) { return i.type_err("withResolvers on a non-constructor"); }
         let p = new_promise(i);
         let (res, rej) = resolving_functions(i, &p);
@@ -442,8 +407,7 @@ pub fn install(realm: &mut Realm) {
         o.borrow_mut().define("reject", Prop::data(rej));
         Ok(Value::Obj(o))
     }, 0, &fp);
-    // `Promise.try` faengt einen SYNCHRONEN Wurf ein und macht ihn zur
-    // Ablehnung — das ist ihr ganzer Zweck.
+    // `Promise.try` turns a synchronous throw into a rejection.
     d(&ctor, "try", |i, t, a| {
         if !i.is_constructor(&t) { return i.type_err("Promise.try on a non-constructor"); }
         let f = a.first().cloned().unwrap_or(Value::Undefined);
@@ -498,7 +462,7 @@ fn aggregate(i: &mut Interp, a: &[Value], mode: u8) -> C<Value> {
     Ok(Value::Obj(p))
 }
 
-/// Ein einzelnes Ergebnis auf den Zaehler buchen.
+/// Book a single result onto the counter.
 fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
     let Some(Value::Obj(so)) = a.first().cloned() else { return };
     let slot = Value::Obj(so.clone());
@@ -510,8 +474,8 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
     let Ok(idx) = i.get(&slot, AGG_INDEX) else { return };
     let idx = i.to_number(&idx).unwrap_or(0.0);
 
-    // `all` faellt beim ersten Fehler; `any` beim ersten Erfolg. Beide sind
-    // damit sofort fertig — der Zaehler zaehlt nur die andere Richtung.
+    // `all` settles on the first rejection, `any` on the first fulfilment; the
+    // counter only counts the other direction.
     if (mode == 0 && rejected) || (mode == 2 && !rejected) {
         settle(i, &cap, v, mode == 0);
         return;
@@ -532,8 +496,8 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
     } else { v };
     let _ = i.set(&vals, &num_to_string(idx), entry, false);
 
-    // Der Zaehler liegt auf dem GEMEINSAMEN Vorfahren der Schlitze, nicht auf
-    // dem Schlitz — sonst zaehlte jeder fuer sich.
+    // The counter lives on the shared prototype of the slots, not on the slot;
+    // otherwise each would count alone.
     let Some(agg) = so.borrow().proto.clone() else { return };
     let left = agg.borrow().get_own(AGG_LEFT).and_then(|p| p.value.clone())
         .and_then(|v| match v { Value::Num(n) => Some(n), _ => None }).unwrap_or(0.0) - 1.0;
@@ -550,27 +514,26 @@ fn agg_step(i: &mut Interp, a: &[Value], rejected: bool) {
     }
 }
 
-/// Deckel fuer `run_jobs` — dieselbe Begruendung wie die Schrittgrenze.
+/// Cap for `run_jobs`; same rationale as the step limit.
 pub const MAX_JOBS: usize = 100_000;
 
 
-/// Die Sammelstatiken bauen ihr Ergebnis ueber `NewPromiseCapability(this)`
-/// — auf einem Nicht-Konstruktor werfen sie, bevor sie den Iterator
-/// anfassen.
+/// The aggregate statics build their result via `NewPromiseCapability(this)`;
+/// on a non-constructor they throw before touching the iterator.
 fn agg_this(i: &mut Interp, t: &Value) -> C<()> {
     if i.is_constructor(t) { Ok(()) } else { i.type_err("Promise static on a non-constructor") }
 }
 
-/// `SpeciesConstructor(p, %Promise%)` — aber nur, wenn es NICHT die eigene
-/// ist. `None` heisst „der gewoehnliche Weg".
+/// `SpeciesConstructor(p, %Promise%)`, but only when it is not our own.
+/// `None` means the ordinary path.
 fn species_of(i: &mut Interp, t: &Value) -> C<Option<Value>> {
     let ctor = i.get(t, "constructor")?;
     if matches!(ctor, Value::Undefined) { return Ok(None) }
     if !matches!(ctor, Value::Obj(_)) { return i.type_err("constructor is not an object") }
     let sp = i.get(&ctor, SYM_SPECIES)?;
     if matches!(sp, Value::Undefined | Value::Null) { return Ok(None) }
-    // Die eigene `Promise` (oder ihr eigenes `species`, das auf sie zeigt)
-    // nimmt den kurzen Weg — sonst kostete JEDES `then` einen Konstruktoraufruf.
+    // Our own `Promise` (or a `species` pointing to it) takes the short path;
+    // otherwise every `then` would cost a constructor call.
     let own = i.realm.global.borrow().get_own("Promise").and_then(|p| p.value.clone());
     if matches!((&sp, &own), (Value::Obj(a), Some(Value::Obj(b))) if Rc::ptr_eq(a, b)) {
         return Ok(None);
@@ -579,12 +542,11 @@ fn species_of(i: &mut Interp, t: &Value) -> C<Option<Value>> {
     Ok(Some(sp))
 }
 
-/// `NewPromiseCapability(C)` — `new C(executor)` und die zwei Funktionen, die
-/// der Ausfuehrer bekommen hat.
+/// `NewPromiseCapability(C)`: `new C(executor)` and the two functions the
+/// executor received.
 ///
-/// Der Ausfuehrer ist ein NATIVER Sammler: er schreibt die beiden Argumente
-/// in einen Kasten, den wir danach auslesen. Ein fremder Konstruktor darf sie
-/// aufheben, sofort rufen oder wegwerfen — alle drei Faelle stehen so.
+/// The executor is a native collector that writes both arguments into a box
+/// read afterwards. A foreign constructor may keep, call or discard them.
 fn new_capability(i: &mut Interp, c: &Value) -> C<(Value, Value, Value)> {
     let box_ = new_obj(None);
     let ex = bind1(i, |i, _, a| {

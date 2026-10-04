@@ -1,11 +1,9 @@
-//! Das globale Objekt und die eingebauten Prototypen.
+//! The global object and the built-in prototypes.
 //!
-//! Das MINDESTMASS ist nicht geraten: es ist das, was test262s eigener
-//! Vorspann (`assert.js` + `sta.js`) verlangt, nachgelesen statt vermutet —
-//! `Object.prototype.toString.call`, `Function.prototype.call`, `String()`,
-//! `Error` mit `name`/`message`, `Array.prototype` fuer `compareArray`.
-//! Laeuft der Vorspann nicht, besteht kein einziger Test, egal wie gut der
-//! Rest ist.
+//! The minimum is what test262's own prelude (`assert.js` + `sta.js`)
+//! requires: `Object.prototype.toString.call`, `Function.prototype.call`,
+//! `String()`, `Error` with `name`/`message`, `Array.prototype` for
+//! `compareArray`. Without the prelude no test can pass.
 
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -22,35 +20,31 @@ fn def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
 }
 
-/// Wie `def`, aber unter einem SYMBOL. Der Anzeigename ist ein anderer als der
-/// Schluessel — `f.name` ist `"[Symbol.iterator]"`, nicht das NUL-Byte.
+/// Like `def`, but under a symbol. The display name differs from the key:
+/// `f.name` is `"[Symbol.iterator]"`, not the NUL-prefixed key.
 fn def_sym(o: &Gc, key: &str, show: &str, f: NativeFn, len: usize, proto: &Gc) {
     let g = native(Some(proto.clone()), f, show, len, false);
     o.borrow_mut().define(key, Prop::builtin(Value::Obj(g)));
 }
 
-/// Die Adresse des Dokuments, zerlegt. **Bei jedem Zugriff frisch** — das
-/// kostet eine Zerlegung und spart die zweite Wahrheit; `location` wird
-/// gelesen, nicht in einer Schleife gezaehlt.
+/// The document address, parsed on every access. Costs one parse and avoids
+/// a second copy of the address.
 fn loc_parts(i: &Interp) -> super::url::Parts {
     super::url::parse_abs(&i.loc_href).unwrap_or_else(|| super::url::Parts {
         scheme: String::from("about"), path: String::from("blank"), ..Default::default()
     })
 }
 
-/// Eine Navigation ANMELDEN. Die Engine faehrt sie nicht — sie hat kein Netz.
+/// Request a navigation. The engine does not perform it; it has no network.
 ///
-/// **Zwei Schemata kommen hier nicht durch, und beide mit Grund:**
-/// `javascript:` waere ein zweiter Weg, Code einzuspeisen, an der
-/// Skript-Zustellung vorbei; `data:` erbte die Herkunft der Seite, die es
-/// oeffnet, und waere damit eine fremde Seite unter unserem Namen. Beide
-/// sind in echten Browsern fuer die Navigation der obersten Ebene gesperrt.
+/// Two schemes are refused: `javascript:` would be a second path to inject
+/// code past script delivery, and `data:` would inherit the opener's origin.
+/// Browsers block both for top-level navigation.
 fn loc_go(i: &mut Interp, url: String, replace: bool) -> C<Value> {
     let low = url.trim_start().to_ascii_lowercase();
     if low.starts_with("javascript:") || low.starts_with("data:") {
-        // Kein Wurf: der Browser lehnt still ab. Eine Ausnahme hier wuerde
-        // das Skript beenden, das sie ausloest — und das ist mehr Schaden,
-        // als die Absage anrichtet ([[feedback_a_host_call_that_throws_ends_the_script]]).
+        // No throw: browsers refuse silently. An exception here would end the script
+        // that triggered it, which does more harm than the refusal.
         i.console_push(alloc::format!("warn: Navigation auf {low:.32} abgelehnt"));
         return Ok(Value::Undefined);
     }
@@ -58,9 +52,9 @@ fn loc_go(i: &mut Interp, url: String, replace: bool) -> C<Value> {
     Ok(Value::Undefined)
 }
 
-/// `assign(u)` / `replace(u)`: aufloesen gegen die AKTUELLE Adresse, dann
-/// anmelden. Ohne Argument ist es `undefined` — und das ist eine Adresse,
-/// die es nicht gibt, also passiert nichts.
+/// `assign(u)` / `replace(u)`: resolve against the current address, then
+/// request. Without an argument it is `undefined`, an address that does not
+/// exist, so nothing happens.
 fn loc_navigate(i: &mut Interp, arg: Option<&Value>, replace: bool, _reload: bool) -> C<Value> {
     let Some(v) = arg else { return Ok(Value::Undefined) };
     let raw = i.to_string(v)?;
@@ -69,18 +63,18 @@ fn loc_navigate(i: &mut Interp, arg: Option<&Value>, replace: bool, _reload: boo
     loc_go(i, abs, replace)
 }
 
-/// `[PutForwards=href]`: `window.location = u` und `document.location = u`
-/// sind eine Navigation, keine Zuweisung. Oeffentlich, weil `set_location`
-/// den Setzer am Dokument baut.
+/// `[PutForwards=href]`: `window.location = u` and `document.location = u`
+/// navigate rather than assign. Public because `set_location` builds the
+/// setter on the document.
 pub(crate) fn loc_put_forwards(i: &mut Interp, arg: Option<&Value>) -> C<Value> {
     loc_navigate(i, arg, false, false)
 }
 
-/// Ein Teil von `location`: lesen aus `loc_href`, schreiben heisst navigieren.
+/// One part of `location`: read from `loc_href`, writing navigates.
 ///
-/// Ein Makro und keine Funktion, weil `native` einen reinen Funktionszeiger
-/// nimmt: ein Getter, der ein uebergebenes Stueck Verhalten FAENGT, ginge
-/// nicht durch. So steht jedes Paar als eigener, fangfreier Rumpf da.
+/// A macro, not a function, because `native` takes a plain function pointer;
+/// a getter capturing a behaviour would not fit. Each pair becomes its own
+/// non-capturing body.
 macro_rules! loc_part {
     ($loc:expr, $fp:expr, $name:literal, $get:expr, $set:expr) => {{
         let g = native(Some($fp.clone()), |i, _, _| {
@@ -118,8 +112,8 @@ pub fn make_realm() -> Realm {
 
     // ── Object.prototype ─────────────────────────────────────────────────
     def(&object_proto, "toString", |i, this, _| {
-        // Ein Stellvertreter traegt die Marke seines ZIELS: `[object Array]`
-        // fuer einen Stellvertreter auf ein Feld.
+        // A proxy carries its target's tag: `[object Array]` for a proxy over an
+        // array.
         if let Value::Obj(o) = &this {
             if super::proxy::parts(o).is_some() {
                 let t = super::proxy::target(i, o)?;
@@ -131,8 +125,8 @@ pub fn make_realm() -> Realm {
             Value::Undefined => "[object Undefined]".to_string(),
             Value::Null => "[object Null]".to_string(),
             Value::Obj(o) => {
-                // `Symbol.toStringTag` gewinnt vor der eingebauten Art —
-                // aber nur, wenn es eine Zeichenkette ist.
+                // `Symbol.toStringTag` wins over the built-in kind, but only if it is a
+                // string.
                 if let Ok(Value::Str(t)) = i.get(&this, SYM_TO_STRING_TAG) {
                     return Ok(Value::string(alloc::format!("[object {t}]")));
                 }
@@ -146,47 +140,37 @@ pub fn make_realm() -> Realm {
                     ObjKind::NumWrap(_) => "Number",
                     ObjKind::BoolWrap(_) => "Boolean",
                     ObjKind::Arguments => "Arguments",
-                    // `Object.prototype.toString.call(el.dataset)` sagt in
-                    // jedem Browser `[object DOMStringMap]`.
+                    // `Object.prototype.toString.call(el.dataset)` is `[object DOMStringMap]` in
+                    // every browser.
                     ObjKind::Dataset(_) => "DOMStringMap",
                     ObjKind::Regex(_) => "RegExp",
                     ObjKind::Promise(_) => "Promise",
                     ObjKind::Date(_) => "Date",
-                    // Oben abgefangen; hier nur, damit der Uebersetzer die
-                    // Vollstaendigkeit prueft statt sie zu erlauben.
+                    // Handled above; listed so the compiler checks exhaustiveness.
                     ObjKind::Proxy(_) => "Object",
-                    // Ein Namensraum traegt sein Etikett als Eigenschaft und
-                    // ist oben schon beantwortet.
+                    // A module namespace carries its tag as a property and is answered above.
                     ObjKind::ModuleNs(_) => "Module",
                     ObjKind::Buffer(_) => "ArrayBuffer",
-                    // Eine Sicht traegt ihren Namen ueber `Symbol.toStringTag`
-                    // auf `%TypedArray%.prototype`; hier kommt sie nur an,
-                    // wenn den jemand geloescht hat.
+                    // Views carry their name via `Symbol.toStringTag` on
+                    // `%TypedArray%.prototype`; they only get here if it was deleted.
                     ObjKind::TypedArray(_) | ObjKind::DataView(_) => "Object",
-                    // Ein Generator traegt seinen Namen ueber
-                    // `Symbol.toStringTag` und kommt hier nur an, wenn den
-                    // jemand geloescht hat — dann ist er ein gewoehnliches
-                    // Objekt, genau wie in jedem echten Motor.
+                    // A generator carries its name via `Symbol.toStringTag` and only gets here
+                    // if it was deleted; then it is an ordinary object, as in any engine.
                     ObjKind::Generator(_) => "Object",
-                    // Wie der Generator: `Map` und `Set` tragen ihren Namen
-                    // ueber `Symbol.toStringTag` auf ihrem Prototyp.
+                    // Like generators: `Map` and `Set` carry their name via
+                    // `Symbol.toStringTag` on their prototype.
                     ObjKind::Collection(_) => "Object",
                     ObjKind::Plain => "Object",
                 };
                 alloc::format!("[object {tag}]")
             }
-            // **Ein Primitiv wird EINGEPACKT, bevor die Marke gelesen wird**
-            // (§20.1.3.6 Schritt 3) — vorher fielen `true`, `1`, `"s"` und
-            // `10n` alle auf `[object Object]`. Das ist die Zeile, mit der
-            // jede Bibliothek ihre Typen unterscheidet: Bootstrap lehnte
-            // deshalb sein eigenes `backdrop: true` als „object" ab.
+            // A primitive is boxed before the tag is read (§20.1.3.6 step 3), so `true`,
+            // `1`, `"s"` and `10n` get their own tags; libraries use this to tell types
+            // apart.
             //
-            // Eingepackt wird trotzdem NICHT wirklich. Eine Huelle waere hier
-            // reine Verschwendung, und bei einer Zeichenkette eine teure:
-            // sie legt eine Eigenschaft je Zeichen an
-            // ([[feedback_the_wrapper_built_the_whole_string]]). Beobachtbar
-            // ist an ihr ohnehin nur der Weg zu `Symbol.toStringTag` — und
-            // den geht `get` auf dem Primitiv genauso.
+            // No wrapper is actually built: for a string it would create a property per
+            // character. The only observable part is the lookup of
+            // `Symbol.toStringTag`, and `get` on the primitive does the same.
             v => {
                 if let Ok(Value::Str(t)) = i.get(&this, SYM_TO_STRING_TAG) {
                     return Ok(Value::string(alloc::format!("[object {t}]")));
@@ -208,11 +192,9 @@ pub fn make_realm() -> Realm {
     def(&object_proto, "hasOwnProperty", |i, this, a| {
         let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
         let o = i.to_object(&this)?;
-        // **Durch den Stellvertreter, nicht an ihm vorbei.** `has_own` liest
-        // die eigene Tabelle — die eines Proxys ist LEER, und damit war
-        // `hasOwnProperty.call(proxy, k)` immer `false`. Vue fragt seinen
-        // reaktiven Zustand genau so ab: `hasOwn(data, key)`, und die Antwort
-        // entschied, ob `this.n` in einer Komponente den Wert findet.
+        // Go through the proxy, not around it: `has_own` reads the own table, which
+        // is empty for a proxy. Reactive frameworks (e.g. Vue's `hasOwn(data, key)`)
+        // depend on this.
         Ok(Value::Bool(i.get_own_desc(&o, &k)?.is_some()))
     }, 1, fp);
     def(&object_proto, "isPrototypeOf", |_, this, a| {
@@ -239,8 +221,8 @@ pub fn make_realm() -> Realm {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
         let args = match a.get(1) {
             None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
-            // `apply` liest ARRAY-AEHNLICH, nicht ueber den Iterator —
-            // `f.apply(null, {length:2, 0:'a', 1:'b'})` muss gehen.
+            // `apply` reads array-like, not via the iterator:
+            // `f.apply(null, {length:2, 0:'a', 1:'b'})` must work.
             Some(v) => i.elems(v)?,
         };
         i.call(&this, t, &args)
@@ -272,8 +254,8 @@ pub fn make_realm() -> Realm {
     let mut error_ctors: HashMap<&'static str, Gc> = HashMap::new();
     error_ctors.insert("Error", error_proto.clone());
 
-    // Ein Konstruktor je Fehlerart. Er baut sein Objekt selbst — deshalb
-    // `ctor: true` und `this` unbenutzt.
+    // One constructor per error kind. It builds its object itself, hence
+    // `ctor: true` and `this` unused.
     macro_rules! err_ctor {
         ($name:literal, $f:expr) => {{
             let proto = if $name == "Error" { error_proto.clone() }
@@ -290,8 +272,8 @@ pub fn make_realm() -> Realm {
         }};
     }
     err_ctor!("Error", |i, _, a| make_error(i, "Error", a));
-    // `Error.isError` fragt die ART, nicht die Prototypenkette — ein
-    // `Object.create(Error.prototype)` ist KEIN Fehler.
+    // `Error.isError` checks the kind, not the prototype chain:
+    // `Object.create(Error.prototype)` is not an error.
     if let Some(Value::Obj(ec)) = global.borrow().get_own("Error").and_then(|p| p.value.clone()) {
         def(&ec, "isError", |_, _, a| {
             Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o))
@@ -303,8 +285,8 @@ pub fn make_realm() -> Realm {
     err_ctor!("SyntaxError", |i, _, a| make_error(i, "SyntaxError", a));
     err_ctor!("ReferenceError", |i, _, a| make_error(i, "ReferenceError", a));
     err_ctor!("EvalError", |i, _, a| make_error(i, "EvalError", a));
-    // `AggregateError` nimmt die Fehlerliste ZUERST, die Meldung danach —
-    // als einziger Fehlerkonstruktor. `Promise.any` braucht ihn.
+    // `AggregateError` takes the error list first and the message second, the
+    // only error constructor to do so. `Promise.any` needs it.
     err_ctor!("AggregateError", |i, _, a| {
         let e = make_error(i, "AggregateError", a.get(1..).unwrap_or(&[]))?;
         let errs = match a.first() {
@@ -320,11 +302,8 @@ pub fn make_realm() -> Realm {
     array_proto.borrow_mut().define("length", Prop {
         value: Some(Value::Num(0.0)), get: None, set: None,
         writable: true, enumerable: false, configurable: false });
-    // **`ToObject(this)` ZUERST** (ES §23.1.3.x, Schritt 1 in jeder dieser
-    // Funktionen). Solange ein Schreiben auf ein Primitiv still verpuffte,
-    // fiel das Fehlen nicht auf: `[].pop.call(true)` schrieb ins Leere und
-    // gab dasselbe zurueck. Mit der Wurf-Fahne wird daraus ein TypeError,
-    // und der Test sagt endlich, was schon immer falsch war.
+    // `ToObject(this)` first (ES §23.1.3.x, step 1 in each of these functions),
+    // so `[].pop.call(true)` and friends throw a TypeError where the spec says.
     def(&array_proto, "push", |i, this, a| {
         let this = Value::Obj(i.to_object(&this)?);
         let mut n = array_len(i, &this)?;
@@ -368,8 +347,8 @@ pub fn make_realm() -> Realm {
         for k in start..n {
             i.tick()?;
             let key = num_to_string(k as f64);
-            // Ein LOCH ist kein `undefined`: `new Array(3).indexOf(undefined)`
-            // ist -1, nicht 0 (ES 23.1.3.17 Schritt 9a).
+            // A hole is not `undefined`: `new Array(3).indexOf(undefined)` is -1, not 0
+            // (ES 23.1.3.17 step 9a).
             if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
             let v = i.get(&this, &key)?;
             if v.strict_eq(&target) { return Ok(Value::Num(k as f64)); }
@@ -385,9 +364,7 @@ pub fn make_realm() -> Realm {
         };
         let s = idx(a.first(), 0, i)?;
         let e = idx(a.get(1), n, i)?;
-        // **Loecher bleiben Loecher.** `slice` kopiert nur, was DA ist
-        // (ES 23.1.3.28 Schritt 9b); ein aufgefuelltes Loch waere ein Wert,
-        // den niemand geschrieben hat.
+        // Holes stay holes: `slice` copies only what exists (ES 23.1.3.28 step 9b).
         let mut out = Vec::new();
         let mut m = 0usize;
         for k in s..e {
@@ -418,19 +395,15 @@ pub fn make_realm() -> Realm {
         if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
         let n = array_len(i, &this)? as usize;
         let t = a.get(1).cloned().unwrap_or(Value::Undefined);
-        // Die Kapazitaet NIE aus einer gastkontrollierten Laenge: `new
-        // Array(2**32-1).map(f)` hat hier 96 GiB angefordert, und eine
-        // gescheiterte Allokation ist ein ABBRUCH, den `catch_unwind` nicht
-        // faengt — sie hat den ganzen Lauf mitgenommen. Wachsen lassen kostet
-        // nichts, was die Schrittgrenze nicht ohnehin vorher stoppt.
+        // Never size the capacity from a guest-controlled length:
+        // `new Array(2**32-1).map(f)` would request gigabytes, and a failed
+        // allocation is an abort that `catch_unwind` cannot catch. Growing costs
+        // nothing the step limit would not stop first.
         let mut out = Vec::with_capacity(n.min(1 << 16));
         for k in 0..n {
             i.tick()?;
             let key = num_to_string(k as f64);
-            // Ein Loch wird UEBERSPRUNGEN und bleibt im Ergebnis eines
-            // (ES 23.1.3.20 Schritt 6c). d3 baut seine Farbtabellen als
-            // `new Array(3).concat(…).map(colors)` — jedes durchgereichte
-            // Loch kommt dort als `undefined.length` an.
+            // A hole is skipped and stays a hole in the result (ES 23.1.3.20 step 6c).
             if let Value::Obj(o) = &this { if !i.has_property(o, &key) { continue } }
             let v = i.get(&this, &key)?;
             let r = i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?;
@@ -455,8 +428,7 @@ pub fn make_realm() -> Realm {
         }
         Ok(i.new_array(out))
     }, 1, fp);
-    // Der Rest der Array-Werkzeugkiste. Gemessen als naechste Wand: `some`
-    // allein hat 19 Skripte des Zielkorpus gestoppt.
+    // The rest of the array toolbox.
     def(&array_proto, "some", |i, this, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
@@ -519,9 +491,8 @@ pub fn make_realm() -> Realm {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
         let n = array_len(i, &this)? as usize;
-        // LOECHER zaehlen nicht mit. Unsere Felder haben zwar keine, aber
-        // `new Array(10)` legt auch keine Indizes an — und genau daran haengt,
-        // ob der Aufruf ohne Startwert wirft.
+        // Holes do not count. `new Array(10)` creates no indices, and that decides
+        // whether a call without an initial value throws.
         let (mut acc, mut k) = match a.get(1) {
             Some(v) => (v.clone(), 0usize),
             None => {
@@ -572,8 +543,8 @@ pub fn make_realm() -> Realm {
         }
         Ok(acc)
     }, 1, fp);
-    // Ohne Sprachumgebung ist `toLocaleString` die Verkettung der einzelnen
-    // `toLocaleString` — das ist keine Vereinfachung, das ist der Algorithmus.
+    // Without a locale, `toLocaleString` is the join of the elements'
+    // `toLocaleString`; that is the algorithm, not a simplification.
     def(&array_proto, "toLocaleString", |i, this, _| {
         let n = array_len(i, &this)? as usize;
         let mut out = String::new();
@@ -603,8 +574,8 @@ pub fn make_realm() -> Realm {
     def(&array_proto, "lastIndexOf", |i, this, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
         let n = array_len(i, &this)? as usize;
-        // Ohne Stelle ist es das letzte Element; eine negative zaehlt vom
-        // Ende, und was davor liegt, gibt es nicht (ES 23.1.3.20).
+        // Without a position it is the last element; a negative one counts from the
+        // end, and anything before the start does not exist (ES 23.1.3.20).
         let last = match a.get(1) {
             None | Some(Value::Undefined) => n as i64 - 1,
             Some(v) => {
@@ -637,13 +608,11 @@ pub fn make_realm() -> Realm {
         rebuild(i, &this, items)?;
         Ok(Value::Num(n as f64))
     }, 1, fp);
-    // **`reverse` TAUSCHT, es baut nicht neu** (ES §23.1.3.26). Der
-    // Unterschied ist beobachtbar und hat drei Familien gekostet: `rebuild`
-    // schrieb `length` und alle Indizes, also warf ein eingefrorenes `[1]`
-    // (die Spezifikation tauscht dort NICHTS) und eine typisierte Sicht
-    // verlor ihre nicht-numerischen Eigenschaften. Getauscht wird ueber
-    // `Set(…, true)` — auf einem eingefrorenen Feld mit zwei Eintraegen
-    // wirft das, und genau so haelt es node.
+    // `reverse` swaps, it does not rebuild (ES §23.1.3.26). The difference is
+    // observable: rebuilding writes `length` and every index, so a frozen `[1]`
+    // would throw (the spec swaps nothing there) and a typed view would lose its
+    // non-numeric properties. Swaps use `Set(…, true)`, which throws on a frozen
+    // two-element array, as node does.
     def(&array_proto, "reverse", |i, this, _| {
         let this = Value::Obj(i.to_object(&this)?);
         let len = array_len(i, &this)? as i64;
@@ -685,10 +654,9 @@ pub fn make_realm() -> Realm {
         let mut items = i.elems(&this)?;
         if items.len() < 2 { return Ok(this); }
         let f = a.first().cloned().unwrap_or(Value::Undefined);
-        // Einfuegesortierung: sie ruft den Vergleicher genauso oft wie noetig
-        // und braucht keinen Ausleih-Trick, um waehrend des Sortierens in die
-        // Maschine zurueckzurufen — ein `sort_by` mit `?` im Vergleicher geht
-        // in Rust nicht ohne Verrenkung.
+        // Insertion sort: it calls the comparator only as often as needed and needs
+        // no borrow tricks to call back into the machine while sorting; `sort_by`
+        // with `?` in the comparator does not work in Rust.
         for k in 1..items.len() {
             let mut j = k;
             while j > 0 {
@@ -705,9 +673,9 @@ pub fn make_realm() -> Realm {
                 j -= 1;
             }
         }
-        // Zurueckgeschrieben wird ELEMENTWEISE, ohne `length` anzufassen —
-        // sonst verliert eine typisierte Sicht ihre Laenge (die ist dort ein
-        // Getter) und ihre nicht-numerischen Eigenschaften.
+        // Written back element by element without touching `length`; otherwise a
+        // typed view would lose its length (a getter there) and its non-numeric
+        // properties.
         for (k, v) in items.into_iter().enumerate() {
             i.tick()?;
             i.set(&this, &num_to_string(k as f64), v, true)?;
@@ -715,10 +683,9 @@ pub fn make_realm() -> Realm {
         Ok(this)
     }, 1, fp);
     def(&array_proto, "concat", |i, this, a| {
-        // **Loecher bleiben Loecher** (ES 23.1.3.1, `CreateDataProperty` nur
-        // bei `HasProperty`). `new Array(3).concat("a","b")` hat die Laenge 5
-        // und drei LOECHER — genau so baut d3 seine Farbtabellen, und das
-        // folgende `.map(colors)` darf sie nicht sehen.
+        // Holes stay holes (ES 23.1.3.1, `CreateDataProperty` only when
+        // `HasProperty`). `new Array(3).concat("a","b")` has length 5 and three
+        // holes, which a following `.map` must not visit.
         let mut out: Vec<(usize, Value)> = Vec::new();
         let mut n = 0usize;
         let mut nimm = |i: &mut Interp, v: &Value, spreizen: bool,
@@ -783,16 +750,16 @@ pub fn make_realm() -> Realm {
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?) as usize;
         Ok(match s.chars().nth(n) { Some(c) => Value::Num(c as u32 as f64), None => Value::Num(f64::NAN) })
     }, 1, fp);
-    /// Eine Zeichenposition, geklemmt auf `[0, len]`.
+    /// A character position clamped to `[0, len]`.
     fn clamp_chars(n: f64, len: usize) -> usize {
         if n.is_nan() || n < 0.0 { 0 } else if n >= len as f64 { len } else { n as usize }
     }
-    /// Der BYTE-Versatz der `n`-ten Zeichenstelle. beak rechnet in Zeichen,
-    /// Rust schneidet in Bytes — dazwischen gehoert genau eine Umrechnung.
+    /// Byte offset of the `n`-th character. JS positions here are counted in
+    /// chars, Rust slices in bytes; exactly one conversion belongs in between.
     fn byte_of(s: &str, n: usize) -> usize {
         s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len())
     }
-    /// Der Byte-Versatz, ab dem eine Zeichenkettensuche anfangen soll.
+    /// Byte offset at which a string search starts.
     fn str_start(i: &mut Interp, s: &str, v: Option<&Value>) -> C<usize> {
         let len = s.chars().count();
         let n = match v {
@@ -801,8 +768,8 @@ pub fn make_realm() -> Realm {
         };
         Ok(byte_of(s, clamp_chars(n, len)))
     }
-    /// Der Startindex einer Feldsuche: eine negative Stelle zaehlt vom Ende
-    /// (ES 23.1.3.17), und was davor liegt, ist die Null.
+    /// Start index of an array search: a negative position counts from the end
+    /// (ES 23.1.3.17), and anything before the start is zero.
     fn arr_from(i: &mut Interp, v: Option<&Value>, n: usize, dflt: f64) -> C<usize> {
         let x = match v {
             None | Some(Value::Undefined) => dflt,
@@ -814,14 +781,9 @@ pub fn make_realm() -> Realm {
            else { x as usize })
     }
 
-    // **Die Startstelle ist kein Beiwerk — sie ist die Schleife.**
-    // `while ((i = s.indexOf(x, i + 1)) >= 0)` ist die Art, wie jeder
-    // Zeichenketten-Laeufer im Web ein zweites Vorkommen sucht. Wer den
-    // zweiten Parameter verwirft, gibt IMMER das erste zurueck, und die
-    // Schleife laeuft fuer immer. Gefunden 2026-09-13 an DuckDuckGos
-    // Ergebnisseite: `balanced-match` sucht so seine Klammerpaare, haengte
-    // 27,6 Millionen Eintraege in ein Array und riss beak mit einer
-    // Allokator-Panik ins Aus.
+    // The start position is the loop: `while ((i = s.indexOf(x, i + 1)) >= 0)`
+    // is how string scanners find the next occurrence. Ignoring the second
+    // argument would always return the first hit and loop forever.
     def(&string_proto, "indexOf", |i, this, a| {
         let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -888,8 +850,8 @@ pub fn make_realm() -> Realm {
         let s = this_string(i, &this)?;
         let n = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
         if n < 0.0 || !n.is_finite() { return i.range_err("invalid count value"); }
-        // Ein Deckel, weil `"x".repeat(2**31)` sonst den Speicher frisst und
-        // eine gescheiterte Allokation ein ABBRUCH ist, kein Fehler.
+        // Capped because `"x".repeat(2**31)` would exhaust memory, and a failed
+        // allocation is an abort, not an error.
         if (n as usize).saturating_mul(s.len()) > (1 << 24) {
             return i.range_err("resulting string too large");
         }
@@ -898,8 +860,8 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(out))
     }, 1, fp);
     def(&string_proto, "replace", |i, this, a| {
-        // Ohne RegExp: nur der Fall "Zeichenkette durch Zeichenkette, einmal".
-        // Ein Muster als erstes Argument wirft, statt still nichts zu tun.
+        // No RegExp here: only "string by string, once". A pattern as the first
+        // argument throws instead of silently doing nothing.
         let s = this_string(i, &this)?;
         let pat = match a.first() {
             Some(Value::Str(p)) => p.clone(),
@@ -915,9 +877,8 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "lastIndexOf", |i, t, a| {
         let s = this_string(i, &t)?;
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        // Ohne Stelle — und bei `NaN` — gilt das ENDE (ES 22.1.3.10): der
-        // Treffer darf ueber die Stelle hinausragen, nur ANFANGEN muss er
-        // davor.
+        // Without a position (or with `NaN`) the end applies (ES 22.1.3.10): the
+        // match may extend past the position, it only has to start at or before it.
         let len = s.chars().count();
         let end = match a.get(1) {
             None | Some(Value::Undefined) => len,
@@ -963,25 +924,21 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "trim", |i, this, _| {
         let s = this_string(i, &this)?; Ok(Value::str(s.trim()))
     }, 0, fp);
-    // Ohne Sprachumgebung IST die landessprachliche Umwandlung die
-    // gewoehnliche. Eine erfundene tuerkische Sonderregel waere schlechter
-    // als keine.
+    // Without a locale, locale-aware case mapping is the ordinary one. An
+    // invented Turkish special case would be worse than none.
     def(&string_proto, "toLocaleUpperCase", |i, this, _| {
         let s = this_string(i, &this)?; Ok(Value::string(s.to_uppercase()))
     }, 0, fp);
     def(&string_proto, "toLocaleLowerCase", |i, this, _| {
         let s = this_string(i, &this)?; Ok(Value::string(s.to_lowercase()))
     }, 0, fp);
-    // Unsere Zeichenketten sind UTF-8 — eine einzelne Ersatzhaelfte kann
-    // darin gar nicht stehen. Also ist jede wohlgeformt, und `toWellFormed`
-    // gibt sie unveraendert zurueck. Benannt statt verschwiegen: eine Seite,
-    // die eine kaputte UTF-16-Folge baut, bekommt hier `true` statt `false`.
-    // `normalize` OHNE die Unicode-Zerlegungstabellen: sie prueft die Form
-    // und gibt die Zeichenkette unveraendert zurueck. Fuer bereits
-    // normalisierten Text — praktisch jeden Text im Netz — ist das die
-    // richtige Antwort; fuer zerlegten ist es die falsche. Benannt statt
-    // verschwiegen, und trotzdem besser als "normalize is not a function",
-    // woran eine Seite ganz stirbt.
+    // Our strings are UTF-8 and cannot hold a lone surrogate, so every string is
+    // well-formed and `toWellFormed` returns it unchanged. Known limit: a page
+    // that builds a broken UTF-16 sequence gets `true` instead of `false`.
+    // `normalize` without Unicode decomposition tables: it validates the form
+    // and returns the string unchanged. Correct for already normalized text (most
+    // text on the web), wrong for decomposed text; still better than a missing
+    // function.
     def(&string_proto, "normalize", |i, this, a| {
         let s = this_string(i, &this)?;
         match a.first() {
@@ -1001,8 +958,8 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "toWellFormed", |i, this, _| {
         let s = this_string(i, &this)?; Ok(Value::Str(s))
     }, 0, fp);
-    // Die dreizehn annexB-Auszeichner. Sie stehen in der Spezifikation, weil
-    // alter Code sie ruft — und der Anfuehrungszeichen-Ersatz gehoert dazu.
+    // The thirteen Annex B HTML methods. They are in the spec because old code
+    // calls them; the quote escaping is part of it.
     macro_rules! html_wrap {
         ($($m:literal => $tag:literal, $attr:literal, $len:literal),* $(,)?) => { $(
             def(&string_proto, $m, |i, t, a| {
@@ -1076,11 +1033,9 @@ pub fn make_realm() -> Realm {
         Ok(Value::str(if b { "true" } else { "false" }))
     }, 0, fp);
 
-    // `toFixed` ist die einzige Zahlenformatierung, die echter Code wirklich
-    // ruft — und sie rundet KAUFMAENNISCH auf die Stelle, nicht ueber
-    // `format!("{:.n}")`, das zur geraden Ziffer rundet. `(1.005).toFixed(2)`
-    // ist in JS "1.00" (weil 1.005 als f64 knapp darunter liegt), und wer
-    // hier eine eigene Rundung erfindet, weicht genau dort ab.
+    // `toFixed` rounds half away from zero on the magnitude, not via
+    // `format!("{:.n}")`, which rounds half to even. `(1.005).toFixed(2)` is
+    // "1.00" in JS because 1.005 as f64 is slightly below; see `fixed`.
     def(&number_proto, "toFixed", |i, t, a| {
         let n = this_number(i, &t)?;
         let d = to_integer(i.to_number(a.first().unwrap_or(&Value::Num(0.0)))?);
@@ -1097,9 +1052,8 @@ pub fn make_realm() -> Realm {
         if !(1.0..=100.0).contains(&p) { return i.range_err("toPrecision: out of range"); }
         if !n.is_finite() { return Ok(Value::string(num_to_string(n))); }
         if n == 0.0 { return Ok(Value::string(fixed(0.0, p as u32 - 1))); }
-        // Die Spezifikation waehlt zwischen fester und Exponentialform nach
-        // DEM Exponenten, nicht nach Geschmack: unter -6 oder ab p Stellen
-        // wird exponentiell geschrieben, sonst fest.
+        // The spec chooses fixed or exponential notation by the exponent: below -6
+        // or at p digits and above it is exponential, otherwise fixed.
         let e = libm::floor(libm::log10(libm::fabs(n))) as i32;
         if e < -6 || e >= p as i32 {
             let mant = n / libm::pow(10.0, e as f64);
@@ -1112,8 +1066,8 @@ pub fn make_realm() -> Realm {
     def(&number_proto, "toExponential", |i, t, a| {
         let n = this_number(i, &t)?;
         let arg = a.first().cloned().unwrap_or(Value::Undefined);
-        // Die Umwandlung des Arguments laeuft VOR der Endlichkeitspruefung —
-        // sie ist beobachtbar (ES 21.1.3.2).
+        // Converting the argument happens before the finiteness check; it is
+        // observable (ES 21.1.3.2).
         let dv = i.to_number(&arg)?;
         if !n.is_finite() { return Ok(Value::string(num_to_string(n))); }
         let auto = matches!(arg, Value::Undefined);
@@ -1127,34 +1081,32 @@ pub fn make_realm() -> Realm {
         let a2 = libm::fabs(n);
         let mut e = libm::floor(libm::log10(a2)) as i32;
         let f = if auto {
-            // Ohne Stellenangabe: so viele, wie die kuerzeste Darstellung
-            // braucht. `num_to_string` liefert genau die.
+            // Without a digit count: as many as the shortest representation needs,
+            // which is what `num_to_string` returns.
             let s = num_to_string(a2);
             let digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
             (digits.saturating_sub(1)).min(100) as u32
         } else { d as u32 };
         let mut mant = a2 / libm::pow(10.0, e as f64);
-        // Das Runden der Mantisse kann sie auf 10 heben — dann traegt der
-        // Exponent die Stelle.
+        // Rounding the mantissa can lift it to 10; then the exponent carries.
         let r = libm::pow(10.0, f as f64);
         if libm::floor(mant * r + 0.5) >= 10.0 * r { mant /= 10.0; e += 1; }
         let sign = if e < 0 { '-' } else { '+' };
         let body = alloc::format!("{}e{}{}", fixed(mant, f), sign, e.abs());
         Ok(Value::string(if n < 0.0 { alloc::format!("-{body}") } else { body }))
     }, 1, fp);
-    // Ohne Landeseinstellungen: dieselbe Ausgabe wie `toString`. Eine
-    // erfundene Tausendertrennung waere schlimmer — sie saehe aus wie eine
-    // Lokalisierung und waere die falsche.
+    // Without locale settings: the same output as `toString`. An invented
+    // thousands separator would look like localisation and be wrong.
     def(&number_proto, "toLocaleString", |i, t, _| {
         let n = this_number(i, &t)?; Ok(Value::string(num_to_string(n)))
     }, 0, fp);
 
-    // ── Konstruktoren + globale Funktionen ───────────────────────────────
-    // ── `Object.prototype.__proto__` und die vier annexB-Helfer ─────────
+    // ── Constructors + global functions ──────────────────────────────────
+    // ── `Object.prototype.__proto__` and the four Annex B helpers ───────
     //
-    // `__proto__` ist ein ZUGRIFF auf `Object.prototype`, keine Eigenschaft
-    // je Objekt — sonst waere `({}).__proto__` ein eigener Schluessel und
-    // taeuchte in `Object.keys` auf.
+    // `__proto__` is an accessor on `Object.prototype`, not a property per
+    // object; otherwise `({}).__proto__` would be an own key and appear in
+    // `Object.keys`.
     {
         let get = native(Some(function_proto.clone()), |i, t, _| {
             let o = i.to_object(&t)?;
@@ -1169,7 +1121,7 @@ pub fn make_realm() -> Realm {
             let np = match a.first() {
                 Some(Value::Obj(p)) => Some(p.clone()),
                 Some(Value::Null) => None,
-                // Ein Primitiv ist KEIN Fehler, es wird still uebergangen.
+                // A primitive is not an error; it is silently ignored.
                 _ => return Ok(Value::Undefined),
             };
             let mut cur = np.clone();
@@ -1247,9 +1199,8 @@ pub fn make_realm() -> Realm {
     def(&object_ctor, "getOwnPropertySymbols", |i, _, a| {
         let o = i.to_object(a.first().unwrap_or(&Value::Undefined))?;
         let keys = o.borrow().own_sym_keys();
-        // Aus dem Schluessel zurueck auf das Symbol: er traegt Beschreibung
-        // und Registrierung, und er IST die Identitaet — ein hier gebautes
-        // `SymData` ist damit `===` zum urspruenglichen.
+        // From the key back to the symbol: it carries description and registration
+        // and is the identity, so the `SymData` built here is `===` to the original.
         let out: Vec<Value> = keys.into_iter()
             .map(|k| Value::Sym(Rc::new(sym_from_key(&k)))).collect();
         Ok(i.new_array(out))
@@ -1266,8 +1217,8 @@ pub fn make_realm() -> Realm {
             _ => return i.type_err("Object.create needs an object or null"),
         };
         let g = new_obj(proto);
-        // Das ZWEITE Argument ist dieselbe Tabelle wie bei
-        // `defineProperties` — dieselbe Funktion, nicht dieselbe Idee.
+        // The second argument is the same table as for `defineProperties`, handled
+        // by the same function.
         if let Some(p) = a.get(1) {
             if !matches!(p, Value::Undefined) { i.define_props_from(&g, p)?; }
         }
@@ -1280,8 +1231,8 @@ pub fn make_realm() -> Realm {
         let Value::Obj(_) = &d else { return i.type_err("property descriptor must be an object") };
         let p = i.to_prop_desc(&d)?;
         let o = o.clone();
-        // `Object.defineProperty` WIRFT, wo `Reflect.defineProperty` `false`
-        // gibt (ES §20.1.2.4 -> DefinePropertyOrThrow).
+        // `Object.defineProperty` throws where `Reflect.defineProperty` returns
+        // `false` (ES §20.1.2.4 -> DefinePropertyOrThrow).
         i.define_or_throw(&o, &k, p)?;
         Ok(a[0].clone())
     }, 3, fp);
@@ -1312,13 +1263,12 @@ pub fn make_realm() -> Realm {
     }, 2, fp);
     def(&object_ctor, "assign", |i, _, a| {
         let target = a.first().cloned().unwrap_or(Value::Undefined);
-        // `ToObject(target)` steht VOR allem anderen — auf `undefined` wirft
-        // es, statt still nichts zu tun.
+        // `ToObject(target)` comes first; it throws on `undefined`.
         let target = Value::Obj(i.to_object(&target)?);
         for src in a.get(1..).unwrap_or(&[]) {
             let Value::Obj(o) = src else { continue };
-            // Zeichenketten UND Symbole: `assign` kopiert jede eigene
-            // aufzaehlbare Eigenschaft, und ein Symbol ist eine.
+            // Strings and symbols: `assign` copies every own enumerable property, and a
+            // symbol key is one.
             let o = o.clone();
             let mut keys = i.own_keys_of(&o)?;
             if super::proxy::parts(&o).is_none() { keys.extend(o.borrow().own_sym_keys()); }
@@ -1370,17 +1320,16 @@ pub fn make_realm() -> Realm {
         if matches!(first, Value::Undefined | Value::Null) {
             return i.type_err("Object.setPrototypeOf on undefined or null");
         }
-        // Das zweite Argument wird auch dann geprueft, wenn das erste ein
-        // Primitiv ist — die Reihenfolge steht in der Spezifikation.
+        // The second argument is checked even when the first is a primitive; the
+        // order is in the spec.
         if !matches!(a.get(1), Some(Value::Obj(_)) | Some(Value::Null)) {
             return i.type_err("Object.setPrototypeOf: prototype must be an object or null");
         }
         let Some(Value::Obj(o)) = a.first() else { return Ok(first) };
         let new_proto = match a.get(1) { Some(Value::Obj(p)) => Some(p.clone()), _ => None };
-        // Ein ZYKLUS ist zu verweigern, nicht zu bauen (ES 10.4.7.1). Ohne
-        // diese Pruefung legt `Object.setPrototypeOf(Object.prototype, {})`
-        // die Maschine still lahm: jeder Eigenschaftszugriff laeuft danach im
-        // Kreis, in nativem Code, an der Schrittgrenze vorbei.
+        // A cycle must be refused, not built (ES 10.4.7.1). Otherwise
+        // `Object.setPrototypeOf(Object.prototype, {})` would make every property
+        // lookup loop forever in native code, past the step limit.
         let mut cur = new_proto.clone();
         let mut hops = 0;
         while let Some(c) = cur {
@@ -1409,9 +1358,8 @@ pub fn make_realm() -> Realm {
             for k in keys {
                 let existing = o.borrow().get_own(&k).cloned();
                 if let Some(mut p) = existing {
-                    // Versiegeln nimmt nur die KONFIGURIERBARKEIT — der Wert
-                    // bleibt schreibbar. Das ist der ganze Unterschied zu
-                    // `freeze`, und er wird geprueft.
+                    // Sealing only removes configurability; the value stays writable. That is
+                    // the whole difference from `freeze`.
                     p.configurable = false;
                     o.borrow_mut().set_prop(k, p);
                 }
@@ -1447,9 +1395,8 @@ pub fn make_realm() -> Realm {
             o.borrow_mut().extensible = false;
             let keys = o.borrow().own_keys();
             for k in keys {
-                // Die Ausleihe MUSS vor dem Schreiben enden. Als `if let`
-                // geschrieben lebt die Leihgabe bis zum Ende des Rumpfes und
-                // das `borrow_mut` darin paniked — 94 Abstuerze im Lauf.
+                // The borrow must end before the write. Written as `if let`, the borrow
+                // would live to the end of the body and the inner `borrow_mut` would panic.
                 let existing = o.borrow().get_own(&k).cloned();
                 if let Some(mut p) = existing {
                     p.writable = false; p.configurable = false;
@@ -1496,10 +1443,9 @@ pub fn make_realm() -> Realm {
         Ok(Value::Bool(matches!(a.first(), Some(Value::Obj(o)) if matches!(o.borrow().kind, ObjKind::Array))))
     }, 1, fp);
     def(&array_ctor, "of", |i, _, a| Ok(i.new_array(a.to_vec())), 0, fp);
-    // `from` nimmt BEIDES: den Iterator, wenn es einen gibt, sonst
-    // `length`+Indizes. Das ist keine Nachsicht, das steht so in der
-    // Spezifikation — und ein `NodeList` ohne `Symbol.iterator` haengt genau
-    // daran.
+    // `from` accepts both: the iterator if there is one, otherwise
+    // `length`+indices. This is the spec, and a `NodeList` without
+    // `Symbol.iterator` relies on it.
     def(&array_ctor, "from", |i, _, a| {
         let src = a.first().cloned().unwrap_or(Value::Undefined);
         let f = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1522,18 +1468,12 @@ pub fn make_realm() -> Realm {
     let string_ctor = native(Some(function_proto.clone()), |i, _, a| {
         let prim = match a.first() {
             None => Value::str(""),
-            // `String(sym)` ist die AUSNAHME: sie darf, wo `"" + sym` wirft.
-            // Genau so steht es in der Spezifikation, und es ist der einzige
-            // Weg, ein Symbol absichtlich zu Text zu machen.
+            // `String(sym)` is the exception: it is allowed where `"" + sym` throws, as
+            // the spec says. It is the one deliberate way to turn a symbol into text.
             Some(Value::Sym(sd)) => Value::Str(Interp::sym_to_display(sd)),
             Some(v) => Value::Str(i.to_string(v)?),
         };
-        // **`new String(x)` ist ein OBJEKT, `String(x)` ist Text.** Bis 0.98.0
-        // gab beak beide Male das Primitiv, und `typeof new String()` sagte
-        // "string". Aufgefallen ist es erst, als `this` im lockeren Modus
-        // richtig eingepackt wurde: der Test verglich das eingepackte `this`
-        // mit dem NICHT eingepackten `new String()` — vorher waren beide
-        // Primitive und die zwei Fehler hoben sich auf.
+        // `new String(x)` is an object, `String(x)` is a primitive.
         if i.native_new { return Ok(Value::Obj(i.to_object(&prim)?)); }
         Ok(prim)
     }, "String", 1, true);
@@ -1553,17 +1493,16 @@ pub fn make_realm() -> Realm {
             }
             match char::from_u32(n as u32) {
                 Some(c) => s.push(c),
-                // Eine einzelne Ersatzhaelfte ist ein gueltiger Codepunkt
-                // fuer diese Funktion, aber kein `char`. Sie geht als
-                // Ersatzzeichen durch — unsere Zeichenketten sind UTF-8.
+                // A lone surrogate is a valid code point for this function but not a
+                // `char`. It becomes the replacement character; our strings are UTF-8.
                 None => s.push('\u{FFFD}'),
             }
         }
         Ok(Value::string(s))
     }, 1, fp);
-    // `String.raw` liest die ROHEN Teile eines Vorlagenobjekts. Sie ist auch
-    // ohne markierte Vorlagen erreichbar — mit einem selbstgebauten Objekt,
-    // und genau so prueft test262 sie.
+    // `String.raw` reads the raw parts of a template object. It is reachable
+    // without tagged templates, with a hand-built object, which is how test262
+    // tests it.
     def(&string_ctor, "raw", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
         let raw = i.get(&t, "raw")?;
@@ -1596,8 +1535,8 @@ pub fn make_realm() -> Realm {
                    ("NaN", f64::NAN)] {
         number_ctor.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
     }
-    // Die vier Praedikate sind KEINE Umwandlung: `Number.isNaN("NaN")` ist
-    // falsch, `isNaN("NaN")` wahr. Genau darin liegt ihr Zweck.
+    // The four predicates do not convert: `Number.isNaN("NaN")` is false,
+    // `isNaN("NaN")` true. That is their purpose.
     def(&number_ctor, "isNaN", |_, _, a| {
         Ok(Value::Bool(matches!(a.first(), Some(Value::Num(n)) if n.is_nan())))
     }, 1, fp);
@@ -1693,8 +1632,7 @@ pub fn make_realm() -> Realm {
         for v in a { let n = i.to_number(v)?; if n.is_nan() { return Ok(Value::Num(f64::NAN)); } if n < m { m = n; } }
         Ok(Value::Num(m))
     }, 2, fp);
-    // Eine Stelle je Funktion mit EINEM Argument — die Liste ist die
-    // Spezifikation, nicht die Umsetzung.
+    // One line per single-argument function; the list follows the spec.
     macro_rules! m1 {
         ($($n:literal => $f:expr),* $(,)?) => { $(
             def(&math, $n, |i, _, a| {
@@ -1742,15 +1680,15 @@ pub fn make_realm() -> Realm {
     math.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Math")));
     global.borrow_mut().define("Math", Prop::builtin(Value::Obj(math)));
 
-    // ── Globale Werte + Funktionen ───────────────────────────────────────
+    // ── Global values + functions ────────────────────────────────────────
     global.borrow_mut().define("undefined", Prop::frozen(Value::Undefined));
     global.borrow_mut().define("NaN", Prop::frozen(Value::Num(f64::NAN)));
     global.borrow_mut().define("Infinity", Prop::frozen(Value::Num(f64::INFINITY)));
     global.borrow_mut().define("globalThis", Prop::builtin(Value::Obj(global.clone())));
     def(&global, "isNaN", |i, _, a| Ok(Value::Bool(i.to_number(a.first().unwrap_or(&Value::Undefined))?.is_nan())), 1, fp);
     def(&global, "isFinite", |i, _, a| Ok(Value::Bool(i.to_number(a.first().unwrap_or(&Value::Undefined))?.is_finite())), 1, fp);
-    // `eval` als globale Funktion ist die INDIREKTE Form: sie laeuft im
-    // globalen Bereich. Die direkte erkennt der Aufruf selbst (siehe
+    // `eval` as a global function is the indirect form and runs in global scope.
+    // The direct form is recognised by the call itself (see
     // `Interp::is_eval_fn`).
     def(&global, "eval", |i, _, a| {
         let c = a.first().cloned().unwrap_or(Value::Undefined);
@@ -1759,8 +1697,8 @@ pub fn make_realm() -> Realm {
     def(&global, "parseInt", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let t = s.trim();
-        // `to_digit` paniked bei einer Basis ueber 36 — in `core`, also ohne
-        // Netz. Ausserhalb von 2..=36 ist das Ergebnis NaN (ES 19.2.5).
+        // `to_digit` panics for a radix above 36 (in `core`, so no safety net).
+        // Outside 2..=36 the result is NaN (ES 19.2.5).
         let radix = match a.get(1) { None | Some(Value::Undefined) => 10,
             Some(v) => {
                 let r = to_integer(i.to_number(v)?);
@@ -1786,20 +1724,17 @@ pub fn make_realm() -> Realm {
             .map(|(k, c)| k + c.len_utf8()).last().unwrap_or(0);
         Ok(Value::Num(t[..end].parse::<f64>().unwrap_or(f64::NAN)))
     }, 1, fp);
-    // `Number.parseInt === parseInt` steht so in der Spezifikation — also
-    // DASSELBE Objekt weiterreichen und nicht ein zweites bauen.
+    // The spec says `Number.parseInt === parseInt`, so pass on the same object
+    // instead of building a second one.
     for n in ["parseInt", "parseFloat"] {
         let v = global.borrow().get_own(n).and_then(|p| p.value.clone());
         if let Some(v) = v { number_ctor.borrow_mut().define(n, Prop::builtin(v)); }
     }
 
-    // ── Die URI-Funktionen ───────────────────────────────────────────────
+    // ── The URI functions ────────────────────────────────────────────────
     //
-    // Nicht Zierde: `encodeURIComponent is not defined` ist auf beiden
-    // Wikipedias die ZWEITE Wand, gleich hinter `document.cookie`
-    // (`wallcheck WCPAGE=*`). Vier Funktionen mit einer gemeinsamen Tabelle;
-    // der Unterschied zwischen ihnen ist genau, welche Zeichen roh
-    // durchgehen (ES 19.2.6).
+    // Four functions sharing one table; they differ only in which characters
+    // pass through unencoded (ES 19.2.6).
     def(&global, "encodeURIComponent", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         uri_encode(i, &s, "-_.!~*'()")
@@ -1812,28 +1747,18 @@ pub fn make_realm() -> Realm {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         uri_decode(i, &s, "")
     }, 1, fp);
-    // `decodeURI` laesst die reservierten Zeichen KODIERT stehen — sonst
-    // aenderte das Dekodieren die Struktur der Adresse, und ein `%2F` wuerde
-    // zu einem Pfadtrenner, der vorher keiner war.
+    // `decodeURI` leaves reserved characters encoded; otherwise decoding would
+    // change the structure of the address (a `%2F` would become a path separator).
     def(&global, "decodeURI", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         uri_decode(i, &s, ";/?:@&=+$,#")
     }, 1, fp);
 
-    // ── Map und Set ──────────────────────────────────────────────────────
+    // ── Map and Set ──────────────────────────────────────────────────────
     //
-    // Auf einem gewoehnlichen Objekt aufgesetzt: die Eintraege liegen unter
-    // einem Praefix, das kein Skript sieht. Der Preis ist ehrlich zu nennen —
-    // ein `Map`-Schluessel ist damit seine ZEICHENKETTE, nicht seine
-    // Identitaet. `m.set({}, 1); m.set({}, 2)` hat bei uns EINEN Eintrag, in
-    // einem Browser zwei. Fuer Konfigurationskarten (und genau dafuer
-    // benutzen die Zielseiten es) stimmt es; fuer Objektschluessel nicht.
-    // `native` nimmt einen Funktionszeiger, keinen Abschluss — deshalb kommt
-    // der Konstruktor von aussen herein statt hier eingefangen zu werden.
-    // Vier Sammlungen, EIN Rumpf — als Makro und nicht als Abschluss, weil
-    // die Methoden ihren eigenen Namen brauchen: `Map.prototype.has.call(
-    // new Set())` muss werfen, und ein Funktionszeiger sieht keine
-    // eingefangene Variable.
+    // Four collections, one body: a macro rather than a closure, because the
+    // methods need their own name (`Map.prototype.has.call(new Set())` must
+    // throw) and a function pointer cannot see a captured variable.
     macro_rules! collection {
         ($name:literal, $is_map:literal, $ctor:expr) => {{
         let proto = new_obj(Some(object_proto.clone()));
@@ -1881,10 +1806,9 @@ pub fn make_realm() -> Realm {
             let f = a.first().cloned().unwrap_or(Value::Undefined);
             if !i.is_callable(&f) { return i.type_err("callback is not a function"); }
             let this_arg = a.get(1).cloned().unwrap_or(Value::Undefined);
-            // Ueber den INDEX, nicht ueber eine Kopie: ein Behandler darf
-            // waehrend des Laufs einfuegen, und die Spezifikation sagt, dass
-            // das Neue noch besucht wird. Deshalb bleibt ein geloeschter
-            // Platz auch als Luecke stehen, statt die Liste zu verschieben.
+            // By index, not over a copy: a callback may insert during the loop and the
+            // spec says new entries are still visited. A deleted slot therefore stays as
+            // a gap instead of shifting the list.
             let mut n = 0usize;
             loop {
                 i.tick()?;
@@ -1895,14 +1819,11 @@ pub fn make_realm() -> Realm {
             }
             Ok(Value::Undefined)
         }, 1);
-        // Die drei Sichten. Eine Umsetzung fuer Map UND Set: bei einem Set
-        // IST der Wert der Schluessel, `entries` liefert dort also `[v, v]` —
-        // und genau das schreibt die Spezifikation vor.
+        // The three views, one implementation for Map and Set: in a Set the value is
+        // the key, so `entries` yields `[v, v]` as the spec requires.
         //
-        // Der Iterator laeuft ueber eine MOMENTAUFNAHME. Ein echter
-        // Map-Iterator sieht spaeter Eingefuegtes noch; das ist der eine
-        // Punkt, an dem diese Umsetzung noch von der Spezifikation abweicht,
-        // und er ist bewusst getrennt von der Frage der Schluesselidentitaet.
+        // Not implemented: the iterator runs over a snapshot. A real Map iterator
+        // still sees entries inserted later.
         d(&proto, "keys", |i, t, _| {
             this_coll(i, &t, $name)?; let v = coll_view(i, &t, 0)?; i.array_iter(v, 0) }, 0);
         d(&proto, "values", |i, t, _| {
@@ -1936,11 +1857,10 @@ pub fn make_realm() -> Realm {
     collection!("WeakMap", true, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakMap", true, a)) as NativeFn);
     collection!("WeakSet", false, (|i: &mut Interp, _: Value, a: &[Value]| coll_new(i, "WeakSet", false, a)) as NativeFn);
 
-    // ── Die sieben Mengenoperationen (ES 2025) ───────────────────────────
+    // ── The seven set operations (ES2025) ────────────────────────────────
     //
-    // Sie lesen das Argument ueber `size`/`has`/`keys` — es muss KEIN Set
-    // sein, nur mengenaehnlich. Genau das prueft test262, und genau das
-    // brauchen Seiten, die eine eigene Menge herumreichen.
+    // They read the argument via `size`/`has`/`keys`; it need not be a Set, only
+    // set-like.
     {
         let set_proto = match global.borrow().get_own("Set").and_then(|p| p.value.clone()) {
             Some(v) => match v { Value::Obj(c) => c.borrow().get_own("prototype")
@@ -1969,11 +1889,10 @@ pub fn make_realm() -> Realm {
 
     // ── Symbol ───────────────────────────────────────────────────────────
     //
-    // Ein Symbol ist ein PRIMITIV (`Value::Sym`), kein Objekt. Sein
-    // Eigenschaftsname liegt als NUL-praefigierte Zeichenkette in derselben
-    // Tabelle wie jeder andere — die Begruendung steht bei `PropName`.
-    // `Symbol` IST ein Konstruktor — `new Symbol()` wirft im Rumpf, nicht
-    // davor. Der Unterschied ist ueber `isConstructor` beobachtbar.
+    // A symbol is a primitive (`Value::Sym`), not an object. Its property name is
+    // a NUL-prefixed string in the same table as every other key; the reason is
+    // at `PropName`. `Symbol` is a constructor: `new Symbol()` throws inside the
+    // body, not before, which is observable via `isConstructor`.
     let symbol_ctor = native(Some(function_proto.clone()), |i, _, a| {
         if i.native_new { return i.type_err("Symbol is not a constructor"); }
         let desc = match a.first() {
@@ -1990,10 +1909,9 @@ pub fn make_realm() -> Realm {
             key: Rc::from(*key), registered: None }));
         symbol_ctor.borrow_mut().define(name, Prop::frozen(v));
     }
-    // `Symbol.for` teilt sich EINE Registrierung ueber alle Aufrufe. Der
-    // Schluessel wird aus dem Text abgeleitet und nicht durchgezaehlt —
-    // damit ist `Symbol.for("x") === Symbol.for("x")` schon durch die
-    // Gleichheit auf `key` wahr, ohne dass die Tabelle befragt werden muss.
+    // `Symbol.for` shares one registry across all calls. The key is derived
+    // from the text, not numbered, so `Symbol.for("x") === Symbol.for("x")`
+    // holds by equality on `key` without consulting the table.
     def(&symbol_ctor, "for", |i, _, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         if let Some(v) = i.sym_registry.get(&k) { return Ok(v.clone()); }
@@ -2031,12 +1949,11 @@ pub fn make_realm() -> Realm {
 
     // ── `Reflect` ────────────────────────────────────────────────────────
     //
-    // Kein Konstruktor und keine Funktion, sondern ein Namensraum: jede
-    // Methode ist die nackte Spec-Operation, die die entsprechende Syntax
-    // sonst versteckt. Deshalb steht hier fast nichts eigenes — jede Zeile
-    // ruft dieselbe Hilfe, die auch `o.k`, `o.k = v`, `k in o`, `delete o.k`
-    // und `new f(…)` benutzen. Der Unterschied ist allein die Antwort: wo die
-    // Syntax wirft oder schweigt, gibt `Reflect` ein `true`/`false` zurueck.
+    // A namespace, neither constructor nor function: each method is the bare
+    // spec operation that the corresponding syntax hides. Every line calls the
+    // same helper as `o.k`, `o.k = v`, `k in o`, `delete o.k` and `new f(…)`; the
+    // only difference is the answer: where syntax throws or stays silent,
+    // `Reflect` returns `true`/`false`.
     let reflect = new_obj(Some(object_proto.clone()));
     def(&reflect, "get", |i, _, a| {
         let t = a.first().cloned().unwrap_or(Value::Undefined);
@@ -2071,8 +1988,7 @@ pub fn make_realm() -> Realm {
         let is_px = super::proxy::parts(&o).is_some();
         let mut out: Vec<Value> = all.iter().filter(|k| !is_sym_key(k))
             .map(|k| Value::Str(k.clone())).collect();
-        // Erst die Zeichenketten, dann die Symbole — die Reihenfolge steht in
-        // der Spec und wird geprueft.
+        // Strings first, then symbols; the order is in the spec.
         if is_px {
             out.extend(all.iter().filter(|k| is_sym_key(k))
                 .map(|k| Value::Sym(Rc::new(sym_from_key(k)))));
@@ -2107,9 +2023,8 @@ pub fn make_realm() -> Realm {
         let k = i.to_prop_key(a.get(1).unwrap_or(&Value::Undefined))?;
         let d = a.get(2).cloned().unwrap_or(Value::Undefined);
         let p = i.to_prop_desc(&d)?;
-        // Der Unterschied zu `Object.defineProperty`: hier ist ein
-        // Fehlschlag ein `false`, kein Wurf. Die PRUEFUNG ist dieselbe —
-        // sie steht in `define_own` und nicht zweimal daneben.
+        // Unlike `Object.defineProperty`, a failure here is `false`, not a throw.
+        // The validation itself lives once, in `define_own`.
         Ok(Value::Bool(i.define_own(&o, &k, p)?))
     }, 3, fp);
     def(&reflect, "getOwnPropertyDescriptor", |i, _, a| {
@@ -2146,10 +2061,9 @@ pub fn make_realm() -> Realm {
     def(&reflect, "construct", |i, _, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_constructor(&f) { return i.type_err("Reflect.construct target is not a constructor"); }
-        // FEHLT das dritte Argument, ist das Ziel selbst das Neuziel; steht
-        // dort `undefined`, ist es eines und wirft. Der Unterschied ist
-        // beobachtbar, und `isConstructor` aus dem test262-Vorspann baut
-        // genau darauf.
+        // If the third argument is missing, the target is the new target; if it is
+        // `undefined`, that is a value and throws. The difference is observable, and
+        // `isConstructor` in the test262 prelude relies on it.
         let nt = match a.get(2) {
             Some(nt) => {
                 if !i.is_constructor(nt) { return i.type_err("Reflect.construct newTarget is not a constructor"); }
@@ -2167,9 +2081,8 @@ pub fn make_realm() -> Realm {
     reflect.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Reflect")));
     global.borrow_mut().define("Reflect", Prop::builtin(Value::Obj(reflect)));
 
-    // `this` ist entweder das Primitiv oder seine Huelle — beides muss gehen,
-    // weil `sym.toString()` das Primitiv durchreicht, `Object(sym).toString()`
-    // aber die Huelle.
+    // `this` is either the primitive or its wrapper: `sym.toString()` passes the
+    // primitive, `Object(sym).toString()` the wrapper.
     fn this_sym(i: &mut Interp, t: &Value) -> C<Rc<SymData>> {
         match t {
             Value::Sym(sd) => Ok(sd.clone()),
@@ -2196,37 +2109,36 @@ pub fn make_realm() -> Realm {
         value: None, get: Some(Value::Obj(desc_get)), set: None,
         writable: false, enumerable: false, configurable: true });
     symbol_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Symbol")));
-    // `"" + sym` wirft (siehe `to_string`); ohne diese Sperre wuerde
-    // `ToPrimitive` erst `valueOf` finden und das Symbol still weiterreichen,
-    // statt an der Umwandlung zu scheitern, wo der Fehler hingehoert.
+    // `"" + sym` throws (see `to_string`). Without this guard `ToPrimitive`
+    // would find `valueOf` and pass the symbol on silently instead of failing at
+    // the conversion.
     let sym_prim = native(Some(function_proto.clone()), |i, t, _| {
         let sd = this_sym(i, &t)?;
         Ok(Value::Sym(sd))
     }, "[Symbol.toPrimitive]", 1, false);
     symbol_proto.borrow_mut().define(SYM_TO_PRIMITIVE, Prop::tag(Value::Obj(sym_prim)));
 
-    // ── Der Iteratorvertrag ──────────────────────────────────────────────
+    // ── The iterator protocol ────────────────────────────────────────────
     //
-    // `%IteratorPrototype%` traegt nur EINES: sich selbst zurueckzugeben.
-    // Genau daran haengt, dass `for (x of arr.entries())` geht — der
-    // Iterator muss selbst iterierbar sein.
+    // `%IteratorPrototype%` carries one thing: returning itself. That is what
+    // makes `for (x of arr.entries())` work; an iterator must be iterable.
     let self_iter = native(Some(function_proto.clone()), |_, t, _| Ok(t),
                            "[Symbol.iterator]", 0, false);
     iterator_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(Value::Obj(self_iter)));
 
-    // Der Generatorvertrag haengt darunter — deshalb ist ein Generator selbst
-    // iterierbar, ohne dass `generator.rs` ein `Symbol.iterator` setzt.
+    // The generator protocol hangs below it, so a generator is iterable without
+    // `generator.rs` setting `Symbol.iterator`.
     let (generator_proto, generator_func_proto) =
         super::generator::install(&iterator_proto, &function_proto);
-    // Dasselbe fuer den ASYNC-Vertrag. `%AsyncIteratorPrototype%` haengt NICHT
-    // unter `%IteratorPrototype%` — es ist eine eigene Wurzel mit nur einem
-    // Eintrag, `[Symbol.asyncIterator]() { return this }`.
+    // The same for the async protocol. `%AsyncIteratorPrototype%` does not hang
+    // under `%IteratorPrototype%`; it is its own root with one entry,
+    // `[Symbol.asyncIterator]() { return this }`.
     let (async_iterator_proto, async_gen_proto, async_gen_func_proto) =
         super::generator::install_async(&function_proto);
 
-    // Der Zustand eines eingebauten Iterators liegt als NUL-praefigierte
-    // Eigenschaft auf ihm selbst. Kein Skript sieht sie (sie faellt aus
-    // `own_keys`), und `native` nimmt ohnehin keinen Abschluss.
+    // A built-in iterator's state is a NUL-prefixed property on itself. No
+    // script sees it (it is excluded from `own_keys`), and `native` takes no
+    // closure anyway.
     def(&array_iter_proto, "next", |i, t, _| {
         let target = i.get(&t, IT_TARGET)?;
         if matches!(target, Value::Undefined) { return Ok(i.iter_result(Value::Undefined, true)); }
@@ -2252,9 +2164,8 @@ pub fn make_realm() -> Realm {
     array_iter_proto.borrow_mut().define(SYM_TO_STRING_TAG,
         Prop::tag(Value::str("Array Iterator")));
 
-    // Zeichen fuer Zeichen — nach CODEPOINT, nicht nach Byte. Unsere Texte
-    // sind Rust-`str`, ein `char` ist also genau ein Codepunkt; das trifft
-    // die Spezifikation auch fuer alles ausserhalb der BMP.
+    // By code point, not by byte. Our strings are Rust `str`, so a `char` is one
+    // code point; this matches the spec also outside the BMP.
     def(&string_iter_proto, "next", |i, t, _| {
         let s = i.get(&t, IT_TARGET)?;
         let Value::Str(s) = s else { return Ok(i.iter_result(Value::Undefined, true)) };
@@ -2286,21 +2197,20 @@ pub fn make_realm() -> Realm {
     def(&array_proto, "values", |i, t, _| i.array_iter(t, 0), 0, fp);
     def(&array_proto, "keys",   |i, t, _| i.array_iter(t, 1), 0, fp);
     def(&array_proto, "entries",|i, t, _| i.array_iter(t, 2), 0, fp);
-    // `[Symbol.iterator]` IST `values` — dieselbe Funktion, nicht eine zweite
-    // mit gleichem Inhalt: `arr[Symbol.iterator] === arr.values` ist wahr.
+    // `[Symbol.iterator]` is `values`, the same function:
+    // `arr[Symbol.iterator] === arr.values` is true.
     let av = array_proto.borrow().get_own("values").and_then(|p| p.value.clone());
     if let Some(v) = av { array_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
 
-    // ── Zeitgeber ────────────────────────────────────────────────────────
+    // ── Timers ───────────────────────────────────────────────────────────
     //
-    // Angemeldet, nicht ausgefuehrt. Sofort zu rufen waere falsch (eine
-    // Abfrageschleife wuerde endlos rekursieren), und gar nicht zu haben ist
-    // ein Fehler, der das Skript beendet. Die Warteschlange ist die Stelle,
-    // an der beaks Ereignisschleife spaeter ansetzt — dieselbe Form wie bei
-    // `addEventListener`.
-    // Die Frist, die `requestIdleCallback` seinem Rueckruf mitgibt. Der
-    // uebliche Rumpf ist `while (d.timeRemaining() > 0) …` — ohne das Objekt
-    // ist das ein TypeError mitten in der Schleife einer Bibliothek.
+    // Registered, not executed. Calling immediately would be wrong (a polling
+    // loop would recurse forever), and not having them is an error that ends
+    // the script. The host's event loop drains the queue.
+    //
+    // The deadline `requestIdleCallback` passes to its callback. The usual body
+    // is `while (d.timeRemaining() > 0) …`; without the object that is a
+    // TypeError mid-loop.
     fn idle_deadline(i: &mut Interp) -> Value {
         let o = super::value::new_obj(Some(i.realm.object_proto.clone()));
         let fp = i.realm.function_proto.clone();
@@ -2310,15 +2220,14 @@ pub fn make_realm() -> Realm {
         Value::Obj(o)
     }
 
-    // `setTimeout(f, ms, …args)` und `setInterval` — mit der Verzoegerung,
-    // mit den Argumenten dahinter und mit einer Kennung, die `clearTimeout`
-    // auch wirklich findet.
+    // `setTimeout(f, ms, …args)` and `setInterval`: with the delay, the trailing
+    // arguments and an id that `clearTimeout` can find.
     fn arm(i: &mut Interp, a: &[Value], repeat: bool) -> Result<Value, super::interp::Abrupt> {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return Ok(Value::Num(0.0)) }
         let ms = match a.get(1) { Some(v) => i.to_number(v)?, None => 0.0 };
-        // Was keine Zahl ist, ist null (HTML §8.6). Ein negatives Wartestueck
-        // gibt es nicht.
+        // Anything that is not a number is zero (HTML §8.6). There is no negative
+        // delay.
         let ms = if ms.is_nan() || ms < 0.0 { 0.0 } else { ms };
         let id = i.next_timer;
         i.next_timer = i.next_timer.wrapping_add(1).max(1);
@@ -2333,11 +2242,10 @@ pub fn make_realm() -> Realm {
     let g = native(Some(function_proto.clone()), |i, _, a| arm(i, a, true), "setInterval", 2, false);
     global.borrow_mut().define("setInterval", Prop::builtin(Value::Obj(g)));
 
-    // `requestAnimationFrame` und `requestIdleCallback` haengen am BILD, nicht
-    // an einer Wartezeit: sie sind sofort faellig. Ihr Rueckruf bekommt das,
-    // was die Spezifikation ihm zusagt — einen Zeitstempel bzw. eine Frist —,
-    // denn eine Animationsschleife rechnet mit `ts - last`, und ohne den
-    // Stempel kommt `NaN` heraus.
+    // `requestAnimationFrame` and `requestIdleCallback` are tied to the frame,
+    // not a delay: they are due immediately. The callback gets what the spec
+    // promises (a timestamp or a deadline); an animation loop computes
+    // `ts - last`, which would be `NaN` without it.
     fn arm_frame(i: &mut Interp, a: &[Value], idle: bool) -> Result<Value, super::interp::Abrupt> {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return Ok(Value::Num(0.0)) }
@@ -2367,10 +2275,8 @@ pub fn make_realm() -> Realm {
         global.borrow_mut().define(n, Prop::builtin(Value::Obj(g)));
     }
 
-    // `queueMicrotask` steht bewusst NICHT in der Liste darueber: es ist kein
-    // Zeitgeber, sondern haengt an DERSELBEN Schlange wie `.then`. Genau
-    // dafuer benutzen Seiten es — „nach dem laufenden Skript, aber vor dem
-    // naechsten Zeitgeber".
+    // `queueMicrotask` is not a timer: it uses the same queue as `.then`, i.e.
+    // after the current script but before the next timer.
     def(&global, "queueMicrotask", |i, _, a| {
         let f = a.first().cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&f) { return i.type_err("queueMicrotask needs a function"); }
@@ -2380,15 +2286,11 @@ pub fn make_realm() -> Realm {
         Ok(Value::Undefined)
     }, 1, fp);
 
-    // `matchMedia` beantwortet die Frage mit DEM Medienzustand, den die
-    // Engine wirklich fuer die Darstellung benutzt (`css::media_matches`) —
-    // nicht mit einem festen `false`. Eine Seite, die ihr Layout danach
-    // waehlt, bekommt so dieselbe Antwort wie der Kaskadenlauf, und Layout
-    // und Skript koennen nicht auseinanderlaufen.
+    // `matchMedia` answers with the media state the engine actually uses for
+    // rendering (`css::media_matches`), so layout and script cannot disagree.
     //
-    // Ohne `set_viewport`/`set_media` gibt es die Funktion GAR NICHT: die
-    // Medienlage gehoert dem Wirt, und geraten waere sie eine Messung, die
-    // keine ist.
+    // Without `set_viewport`/`set_media` the function does not exist at all: the
+    // media state belongs to the host, and a guess would be a fake measurement.
     def(&global, "matchMedia", |i, _, a| {
         let q = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let Some((w, dark)) = i.media else {
@@ -2402,10 +2304,9 @@ pub fn make_realm() -> Realm {
             o.define("matches", Prop::data(Value::Bool(hit)));
             o.define("media", Prop::data(Value::Str(q)));
         }
-        // Die Lage aendert sich in beak waehrend eines Laufs nicht — ein
-        // angemeldeter Behandler wuerde also nie gerufen. Ihn anzunehmen und
-        // zu verwerfen ist trotzdem richtig: die Seite verlaesst sich darauf,
-        // dass die Anmeldung nicht wirft.
+        // The media state does not change during a run, so a registered listener
+        // would never fire. Accepting and discarding it is still right: pages rely
+        // on registration not throwing.
         for n in ["addListener", "removeListener", "addEventListener", "removeEventListener"] {
             let f = native(Some(i.realm.function_proto.clone()),
                            |_, _, _| Ok(Value::Undefined), n, 2, false);
@@ -2416,17 +2317,13 @@ pub fn make_realm() -> Realm {
 
     // ── Storage ──────────────────────────────────────────────────────────
     //
-    // Im Speicher, nicht auf der Platte. Ein Skript, das `localStorage`
-    // ABFRAGT (und das tun sie, als Vertraeglichkeitspruefung), bekommt eine
-    // Antwort; was es hineinlegt, ueberlebt die Seite nicht. Das ist eine
-    // benannte Luecke — beak muesste es an npkFS haengen, und dann waere die
-    // Frage, wem der Speicher gehoert.
+    // In memory, not on disk. A script that probes `localStorage` gets an
+    // answer; what it stores does not outlive the page. Not implemented:
+    // persistence (it would need npkFS and an answer to who owns the storage).
     //
-    // **Ein Prototyp, zwei Behaelter.** `Storage` ist im Zensus 1179 Aufrufe
-    // wert, und die Zeile, die fehlte, war nicht `getItem` — die gab es —
-    // sondern der NAME: `x instanceof Storage` und
-    // `Storage.prototype.getItem.call(…)` scheitern an einer flachen Huelle,
-    // deren Methoden auf ihr selbst sitzen.
+    // One prototype, two containers, so that `x instanceof Storage` and
+    // `Storage.prototype.getItem.call(…)` work; a flat object with methods on
+    // itself would fail both.
     let make_storage_proto = |object_proto: &Gc, function_proto: &Gc| -> Gc {
         let st = new_obj(Some(object_proto.clone()));
         let d = |o: &Gc, n: &str, f: NativeFn, l: usize| {
@@ -2490,10 +2387,8 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("sessionStorage", Prop::builtin(Value::Obj(ss)));
 
     // ── Function ─────────────────────────────────────────────────────────
-    // 9261 Tests scheiterten allein an `Function is not defined` — mehr als
-    // an jeder anderen einzelnen Ursache. Die meisten greifen nur auf
-    // `Function.prototype`; `new Function(args, body)` kostet nochmal zehn
-    // Zeilen und ist der Weg, auf dem test262 dynamisch erzeugten Code prueft.
+    // `new Function(args, body)` is how test262 checks dynamically created code,
+    // and many tests touch `Function.prototype`.
     let function_ctor = native(Some(function_proto.clone()), |i, _, a| {
         let mut params = String::new();
         for (k, v) in a.iter().take(a.len().saturating_sub(1)).enumerate() {
@@ -2506,7 +2401,7 @@ pub fn make_realm() -> Realm {
             Ok(p) => p,
             Err(e) => return Err(i.throw_kind("SyntaxError", &e.msg)),
         };
-        // Genau EIN Ausdruck, und er ist der Funktionsausdruck oben.
+        // Exactly one expression: the function expression above.
         match prog.body.first() {
             Some(super::ast::Stmt::Expr(e)) => {
                 let env = i.realm.global_env.clone();
@@ -2519,21 +2414,15 @@ pub fn make_realm() -> Realm {
     function_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(function_ctor.clone())));
     global.borrow_mut().define("Function", Prop::builtin(Value::Obj(function_ctor)));
 
-    // ── Die Wirtsumgebung ────────────────────────────────────────────────
+    // ── The host environment ─────────────────────────────────────────────
     //
-    // Gemessen, nicht geraten (`examples/wallcheck.rs`): auf Wikipedia stirbt
-    // das ERSTE Skript an `performance`, und weil es `mw` haette setzen sollen,
-    // sterben die 107 danach an `mw`. EIN fehlender Global kostet eine ganze
-    // Seite. Deshalb kommen diese hier zuerst und nicht `Symbol` (2 Skripte).
+    // One missing global can cost a whole page: if an early script dies on it,
+    // every later script that depends on what it set dies too. What these
+    // provide is the shape; the host supplies clock, address and identity.
     //
-    // Was sie liefern, ist die FORM, nicht der Inhalt: beak muss Uhr, Adresse
-    // und Kennung noch einreichen. Ein Stumpf, der die richtige Form hat, ist
-    // trotzdem das, worauf ein Skript prueft.
-    // `atob`/`btoa` — 10 426 Aufrufe im Zensus, die zweitgroesste Einzelluecke
-    // nach `addEventListener`. Beide arbeiten auf LATIN-1, nicht auf UTF-8:
-    // `btoa("ä")` wirft im Browser, weil `ä` ausserhalb von 0..255 liegt.
-    // Das ist kein Detail — wer hier UTF-8 kodiert, gibt fuer jedes Umlaut
-    // eine andere Zeichenkette zurueck als jeder Browser.
+    // `atob`/`btoa` work on Latin-1, not UTF-8: each character up to U+00FF is
+    // one byte, and a character above it throws. Encoding UTF-8 here would
+    // return different strings than every browser for any non-ASCII text.
     const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     def(&global, "btoa", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -2571,8 +2460,8 @@ pub fn make_realm() -> Realm {
             bits += 6;
             if bits >= 8 {
                 bits -= 8;
-                // Ein Byte wird ein ZEICHEN, nicht ein UTF-8-Byte: `atob`
-                // gibt eine Latin-1-Zeichenkette zurueck.
+                // A byte becomes a character, not a UTF-8 byte: `atob` returns a Latin-1
+                // string.
                 out.push(((acc >> bits) & 0xff) as u8 as char);
             }
         }
@@ -2584,8 +2473,7 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("parent", Prop::builtin(Value::Obj(global.clone())));
 
     let perf = new_obj(Some(object_proto.clone()));
-    // Eine Uhr, die nur steigt. beak reicht die echte nach; bis dahin ist
-    // Monotonie das Einzige, worauf sich ein Skript wirklich verlaesst.
+    // A monotonic clock from the host; monotonicity is what scripts rely on.
     def(&perf, "now", |i, _, _| Ok(Value::Num(i.now_ms())), 0, fp);
     for m in ["mark", "measure", "clearMarks", "clearMeasures"] {
         let g = native(Some(function_proto.clone()), |_, _, _| Ok(Value::Undefined), m, 1, false);
@@ -2600,10 +2488,8 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("performance", Prop::builtin(Value::Obj(perf)));
 
     let console = new_obj(Some(object_proto.clone()));
-    // Nicht mehr still. `beak-engine` hat keine Serienleitung, aber der Wirt
-    // hat eine: die Zeilen werden gesammelt, und beak holt sie ab. Eine
-    // Seite, deren eigene Diagnose ins Leere geht, kann man aus der Ferne
-    // nicht befragen — und genau das ist die Lage am Geraet.
+    // The engine has no serial line, but the host does: lines are collected and
+    // the host fetches them. A page's own diagnostics should not vanish.
     for (m, tag) in [("log", ""), ("info", ""), ("debug", ""), ("dir", ""),
                      ("group", ""), ("groupEnd", ""), ("warn", "warn: "),
                      ("error", "error: "), ("trace", "trace: ")] {
@@ -2621,12 +2507,10 @@ pub fn make_realm() -> Realm {
 
     // ── crypto ───────────────────────────────────────────────────────────
     //
-    // **Es erscheint nur, wenn der Wirt wirklich eine Quelle eingereicht
-    // hat.** Eine Seite prueft `if (window.crypto)` und richtet sich danach;
-    // ein `crypto`, das schwachen Zufall liefert, beantwortet diese Frage
-    // falsch — und aus `getRandomValues` baut Seitencode Sitzungsmarken.
-    // Lieber die Luecke, die man sieht, als die Zusage, die nicht haelt
-    // (siehe `js::random`).
+    // Present only if the host supplied a real randomness source. Pages check
+    // `if (window.crypto)` and build session tokens from `getRandomValues`; a
+    // `crypto` with weak randomness would answer that check wrongly (see
+    // `js::random`).
     if super::random::available() {
         let crypto = new_obj(Some(object_proto.clone()));
         def(&crypto, "getRandomValues", |i, _, a| {
@@ -2637,10 +2521,9 @@ pub fn make_realm() -> Realm {
             let Some(t) = ta_of(o) else {
                 return i.type_err("crypto.getRandomValues: argument is not an integer TypedArray");
             };
-            // Fliesskomma-Sichten sind ausgeschlossen (WebCrypto 10.1.1):
-            // zufaellige Bitmuster sind dort teilweise NaN, und eine Seite,
-            // die daraus einen Schluessel baut, verliert Entropie ohne es zu
-            // merken.
+            // Float views are excluded (WebCrypto 10.1.1): random bit patterns are
+            // partly NaN there, and a page deriving a key from them would silently lose
+            // entropy.
             if matches!(t.kind, ElemKind::F32 | ElemKind::F64) {
                 let e = i.throw_kind("Error", "crypto.getRandomValues: float views are not allowed");
                 if let super::interp::Abrupt::Throw(Value::Obj(x)) = &e {
@@ -2649,7 +2532,7 @@ pub fn make_realm() -> Realm {
                 return Err(e);
             }
             let n = t.live_len() * t.kind.size();
-            // Derselbe Deckel wie in der Spezifikation und im Kernel.
+            // The same cap as the spec and the kernel.
             if n > 65_536 {
                 let e = i.throw_kind("Error", "crypto.getRandomValues: more than 65536 bytes");
                 if let super::interp::Abrupt::Throw(Value::Obj(x)) = &e {
@@ -2668,8 +2551,7 @@ pub fn make_realm() -> Realm {
                     match start.checked_add(n) {
                         Some(end) if end <= bytes.len() =>
                             super::random::fill(&mut bytes[start..end]),
-                        // Der Puffer ist unter der Sicht geschrumpft. Kein
-                        // Schreiben, kein Halt.
+                        // The buffer shrank under the view. No write, no halt.
                         _ => false,
                     }
                 };
@@ -2677,13 +2559,12 @@ pub fn make_realm() -> Realm {
                     return i.type_err("crypto.getRandomValues: no entropy source");
                 }
             }
-            // Die Sicht SELBST kommt zurueck, nicht eine Kopie — Seitencode
-            // schreibt `const a = crypto.getRandomValues(new Uint8Array(16))`.
+            // The view itself is returned, not a copy:
+            // `const a = crypto.getRandomValues(new Uint8Array(16))`.
             Ok(arg)
         }, 1, fp);
-        // `randomUUID` aus derselben Quelle. Version 4, Variante 1, so wie
-        // RFC 9562 es verlangt — die sechs festen Bits werden gesetzt, nicht
-        // gewuerfelt.
+        // `randomUUID` from the same source. Version 4, variant 1 per RFC 9562; the
+        // six fixed bits are set, not randomised.
         def(&crypto, "randomUUID", |i, _, _| {
             let mut b = [0u8; 16];
             if !super::random::fill(&mut b) {
@@ -2706,20 +2587,17 @@ pub fn make_realm() -> Realm {
 
     // ── $262 ─────────────────────────────────────────────────────────────
     //
-    // **Das Wirtsobjekt des Konformanzlaeufers, und es erscheint nur, wenn
-    // der Wirt es bestellt hat** (`js::test262::enable`) — genau wie `crypto`
-    // nur erscheint, wenn es eine echte Zufallsquelle gibt. Eine SEITE darf
-    // `$262` nie sehen: `evalScript` waere ein zweiter Weg, Code an der
-    // Skript-Zustellung vorbei laufen zu lassen, und `detachArrayBuffer` zieht
-    // fremden Sichten den Speicher weg. Was fehlt und warum, steht im Kopf von
-    // `js/test262.rs`.
+    // The conformance runner's host object. Present only when the host enabled
+    // it (`js::test262::enable`), like `crypto` only appears with a real
+    // randomness source. A page must never see `$262`: `evalScript` would be a
+    // second path for code past script delivery, and `detachArrayBuffer` pulls
+    // memory out from under foreign views. What is missing and why is in the
+    // head of `js/test262.rs`.
     if super::test262::enabled() {
         let h = new_obj(Some(object_proto.clone()));
         h.borrow_mut().define("global", Prop::builtin(Value::Obj(global.clone())));
-        // Den Puffer abtrennen. Der Motor kennt den Zustand laengst
-        // (`BufData::detached`, mit einem Kommentar, der genau diesen Haken
-        // nennt) — es fehlte nur, wer ihn setzt. Die Bytes fallen MIT weg:
-        // ein abgetrennter Puffer haelt keinen Speicher mehr fest.
+        // Detach the buffer (`BufData::detached`). The bytes go with it: a detached
+        // buffer holds no memory.
         def(&h, "detachArrayBuffer", |i, _, a| {
             let Some(Value::Obj(o)) = a.first() else {
                 return i.type_err("$262.detachArrayBuffer: not an ArrayBuffer");
@@ -2731,11 +2609,10 @@ pub fn make_realm() -> Realm {
             b.bytes.borrow_mut().clear();
             Ok(Value::Undefined)
         }, 1, fp);
-        // `evalScript` ist SKRIPT-Code im globalen Bereich, nicht `eval`:
-        // `var` und Funktionsdeklarationen werden zu Eigenschaften des
-        // globalen Objekts, `let`/`const` landen im globalen lexikalischen
-        // Bereich und ueberleben das Skript. Genau das tut `run_program` —
-        // es ist derselbe Weg, den der Laeufer fuer den Test selbst faehrt.
+        // `evalScript` is script code in global scope, not `eval`: `var` and
+        // function declarations become properties of the global object, `let`/`const`
+        // land in the global lexical scope and outlive the script. That is what
+        // `run_program` does, the same path the runner uses for the test itself.
         def(&h, "evalScript", |i, _, a| {
             let src = match a.first() {
                 Some(Value::Str(s)) => s.clone(),
@@ -2748,10 +2625,8 @@ pub fn make_realm() -> Realm {
             };
             i.run_program(&prog)
         }, 1, fp);
-        // **Ein ehrliches Nichts.** Die Engine zaehlt Referenzen, sie sammelt
-        // nicht; `gc()` hat nichts zu tun. test262 verlangt allein, dass der
-        // Aufruf nicht wirft — ein Test, der danach eine Freigabe PRUEFT,
-        // prueft `FinalizationRegistry`, und das steht nicht an.
+        // The engine counts references and does not collect; `gc()` has nothing to
+        // do. test262 only requires that the call does not throw.
         def(&h, "gc", |_, _, _| Ok(Value::Undefined), 0, fp);
         global.borrow_mut().define("$262", Prop::builtin(Value::Obj(h)));
     }
@@ -2760,38 +2635,31 @@ pub fn make_realm() -> Realm {
     nav.borrow_mut().define("userAgent", Prop::builtin(Value::str("Mozilla/5.0 (nopeekOS) beak")));
     nav.borrow_mut().define("language", Prop::builtin(Value::str("de")));
     nav.borrow_mut().define("onLine", Prop::builtin(Value::Bool(true)));
-    // ── Die Felder, die JEDE Seite liest ──────────────────────────────────
+    // ── Fields every page reads ───────────────────────────────────────────
     //
-    // **`appName`, `appCodeName`, `product` und `productSub` sind
-    // KONSTANTEN der Spezifikation** (HTML 8.9.1.1), keine Auskunft ueber
-    // uns: sie MUESSEN „Netscape", „Mozilla", „Gecko" und „20030107"
-    // lauten, in jedem Browser. Sie wegzulassen ist kein Stueck Ehrlichkeit,
-    // sondern eine Luecke — Seitencode liest sie und faellt auf `undefined`
-    // in einen Zweig, den niemand getestet hat. Was uns wirklich benennt,
-    // ist `userAgent`, und der sagt weiterhin, was wir sind
-    // ([[feedback_no_ua_impersonation]]).
+    // `appName`, `appCodeName`, `product` and `productSub` are constants of the
+    // spec (HTML 8.9.1.1), not information about us: they must be "Netscape",
+    // "Mozilla", "Gecko" and "20030107" in every browser. Omitting them sends
+    // page code down an untested `undefined` branch. What identifies us is
+    // `userAgent`, which says what we are.
     for (k, v) in [("appName", "Netscape"), ("appCodeName", "Mozilla"),
                    ("product", "Gecko"), ("productSub", "20030107"),
-                   // Die Spezifikation verlangt, dass `appVersion` mit
-                   // „5.0 (" beginnt; dahinter steht, wer wir sind.
+                   // The spec requires `appVersion` to start with "5.0 ("; after that we say
+                   // who we are.
                    ("appVersion", "5.0 (nopeekOS)"),
                    ("platform", "nopeekOS"),
-                   // Chrome sagt hier „Google Inc.", Firefox die leere
-                   // Zeichenkette. Wir sind keins von beiden.
+                   // Chrome says "Google Inc." here, Firefox the empty string. We are neither.
                    ("vendor", ""), ("vendorSub", "")] {
         nav.borrow_mut().define(k, Prop::builtin(Value::str(v)));
     }
-    // Kekse nimmt beak an (`cookies.rs`) — die Antwort ist wahr, nicht
-    // hoeflich.
+    // beak accepts cookies (`cookies.rs`), so this is true.
     nav.borrow_mut().define("cookieEnabled", Prop::builtin(Value::Bool(true)));
-    // **`webdriver` ist `false`, und das ist die WAHRHEIT**: beak wird nicht
-    // ferngesteuert. Ein fehlendes Feld liest sich fuer eine Seite wie
-    // „weiss nicht", und das ist schlechter als eine richtige Antwort.
+    // `webdriver` is `false` because beak is not remotely controlled. A missing
+    // field reads as "unknown" to a page, which is worse than a correct answer.
     nav.borrow_mut().define("webdriver", Prop::builtin(Value::Bool(false)));
     nav.borrow_mut().define("maxTouchPoints", Prop::builtin(Value::Num(0.0)));
-    // `languages` folgt `language` — eine Liste mit einem Eintrag, kein
-    // erfundener Zweitwunsch. Ein Leser, damit sie beim Aendern von
-    // `language` mitgeht.
+    // `languages` follows `language`: a one-entry list, no invented second
+    // choice. A getter, so it follows changes to `language`.
     {
         let g = native(Some(function_proto.clone()), |i, _, _| {
             let g = Value::Obj(i.realm.global.clone());
@@ -2808,19 +2676,15 @@ pub fn make_realm() -> Realm {
 
     // ── location ─────────────────────────────────────────────────────────
     //
-    // **Ein Objekt, das navigiert.** Vorher standen hier sieben Datenfelder;
-    // `location.replace(u)` war damit ein `TypeError` und `location.href = u`
-    // schrieb still eine Eigenschaft um und ging nirgendwohin. Eine Seite,
-    // die sich per Skript weiterschickt — jede Anmeldung, jede Weiterleitung
-    // nach einem POST, Googles Sperrseite — kam so nie an.
+    // An object that navigates: `location.replace(u)` and `location.href = u`
+    // must send the page somewhere.
     //
-    // Alle Teile sind Zugriffsfunktionen ueber `interp.loc_href`, damit es
-    // die Adresse nur EINMAL gibt: `location.pathname = "/x"` muss `href`
-    // mitziehen, und zwei Kopien laufen beim ersten Setzer auseinander.
+    // All parts are accessors over `interp.loc_href`, so the address exists
+    // once: `location.pathname = "/x"` must update `href`, and two copies would
+    // diverge at the first setter.
     //
-    // **Die Engine navigiert nicht.** Sie legt die Absicht in `interp.nav`;
-    // der Wirt holt sie ab. Dasselbe Muster wie `history_ops` und
-    // `pending_fetches`.
+    // The engine does not navigate. It puts the intent in `interp.nav` and the
+    // host fetches it; same pattern as `history_ops` and `pending_fetches`.
     let loc = new_obj(Some(object_proto.clone()));
     loc_part!(loc, function_proto, "href",
         |p| p.href(),
@@ -2852,8 +2716,7 @@ pub fn make_realm() -> Realm {
     loc_part!(loc, function_proto, "hash",
         |p| if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) },
         |p, v| { p.hash = v.trim_start_matches('#').to_string(); true });
-    // `origin` ist NUR lesbar — das ist keine Bequemlichkeit, sondern die
-    // Spezifikation: eine Seite kann ihre Herkunft nicht umschreiben.
+    // `origin` is read-only per spec: a page cannot rewrite its origin.
     {
         let g = native(Some(function_proto.clone()),
             |i, _, _| Ok(Value::str(&loc_parts(i).origin())), "origin", 0, false);
@@ -2862,32 +2725,27 @@ pub fn make_realm() -> Realm {
     }
     def(&loc, "assign", |i, _, a| { loc_navigate(i, a.first(), false, false) }, 1, fp);
     def(&loc, "replace", |i, _, a| { loc_navigate(i, a.first(), true, false) }, 1, fp);
-    // `reload()` nimmt kein Argument: dieselbe Adresse, neuer Abruf. Der
-    // Verlauf waechst dabei NICHT — sonst kaeme man mit „zurueck" nie
-    // heraus.
+    // `reload()` takes no argument: same address, new fetch. History does not
+    // grow, or "back" would never get out.
     def(&loc, "reload", |i, _, _| {
         let url = i.loc_href.clone();
         i.nav = Some(super::interp::NavRequest { url, replace: true, reload: true });
         Ok(Value::Undefined)
     }, 0, fp);
-    // `String(location)` ist die ADRESSE, nicht `[object Object]`
-    // (HTML §7.2.4). `"" + location` und `location == "…"` sind
-    // verbreitete Idiome; ohne das vergleicht eine Seite gegen einen Text,
-    // den sie nie geschrieben hat.
+    // `String(location)` is the address, not `[object Object]` (HTML §7.2.4).
+    // `"" + location` and `location == "…"` are common idioms.
     def(&loc, "toString", |i, _, _| Ok(Value::str(&i.loc_href)), 0, fp);
     loc.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Location")));
-    // `window.location = "…"` navigiert, es ERSETZT das Objekt nicht
-    // (HTML §7.2.4, [PutForwards=href]). Als Datenfeld haette eine Seite
-    // hier still ihr `location` gegen eine Zeichenkette getauscht und waere
-    // danach an jedem `location.href` gestorben.
+    // `window.location = "…"` navigates; it does not replace the object
+    // (HTML §7.2.4, [PutForwards=href]). As a data property a page would swap
+    // its `location` for a string and then fail on every `location.href`.
     {
         let g = native(Some(function_proto.clone()),
             |i, _, _| Ok(Value::Obj(i.realm.location.clone())), "location", 0, false);
         let st = native(Some(function_proto.clone()),
             |i, _, a| loc_navigate(i, a.first(), false, false), "location", 1, false);
-        // `isSecureContext` folgt dem Schema der Adresse — gelesen, nicht
-    // behauptet. Seiten schalten daran Merkmale frei, die ohne sicheren
-    // Kanal nicht laufen duerfen.
+        // `isSecureContext` follows the scheme of the address. Pages gate features
+        // that require a secure channel on it.
     {
         let g = native(Some(function_proto.clone()), |i, _, _| {
             let h = &i.loc_href;
@@ -2905,21 +2763,15 @@ pub fn make_realm() -> Realm {
 
     // ── history ──────────────────────────────────────────────────────────
     //
-    // **Die Engine navigiert nicht.** Sie hat keinen Verlauf und soll keinen
-    // erfinden; `state` gehoert dem Dokument, `length` und das Springen
-    // gehoeren dem Wirt. Also: lesen aus dem, was der Wirt eingereicht hat,
-    // schreiben in eine Liste, die er abholt — dasselbe Muster wie bei den
-    // Keksen (`take_cookie_sets`).
-    //
-    // Rangfolge am Zielkorpus gemessen, nicht geraten: `replaceState` 42,
-    // `pushState` 29, `state` 21, `scrollRestoration` 12, `back` 11, `go` 5.
-    // Auf der Fritz!Box ist es `history.state?.sid` — verschleiert, aber es
-    // ist `state`, und ohne `history` stirbt ihr erstes Skript sofort.
+    // The engine does not navigate and keeps no history of its own; `state`
+    // belongs to the document, `length` and traversal belong to the host. Read
+    // from what the host supplied, write into a list it fetches (same pattern as
+    // `take_cookie_sets`).
     let hist = new_obj(Some(object_proto.clone()));
     {
         let mut h = hist.borrow_mut();
-        // `state` und `length` sind Leser: sie muessen den Wert von JETZT
-        // liefern, nicht den vom Aufbau der Umgebung.
+        // `state` and `length` are getters: they must return the current value, not
+        // the one from when the environment was built.
         let g_state = native(Some(function_proto.clone()),
             |i, _, _| Ok(i.history_state.clone()), "state", 0, false);
         h.define("state", Prop { value: None, get: Some(Value::Obj(g_state)), set: None,
@@ -2928,10 +2780,9 @@ pub fn make_realm() -> Realm {
             |i, _, _| Ok(Value::Num(i.history_len)), "length", 0, false);
         h.define("length", Prop { value: None, get: Some(Value::Obj(g_len)), set: None,
                                   writable: false, enumerable: true, configurable: true });
-        // `scrollRestoration` ist ein reiner Merkposten: wir stellen keine
-        // Bildlaufstellung wieder her, also ist "manual" die ehrliche
-        // Antwort. Schreibbar, damit eine Seite es setzen kann, ohne zu
-        // sterben — der Wert wird gelesen, nicht befolgt.
+        // `scrollRestoration` is only remembered: we do not restore scroll
+        // positions, so "manual" is the honest answer. Writable so a page can set
+        // it without failing; the value is read, not obeyed.
         h.define("scrollRestoration", Prop::builtin(Value::str("manual")));
     }
     def(&hist, "pushState", |i, _, a| {
@@ -2951,8 +2802,8 @@ pub fn make_realm() -> Realm {
             None | Some(Value::Undefined) => 0,
             Some(v) => to_integer(i.to_number(v)?) as i32,
         };
-        // `go(0)` laedt neu. Das ist etwas anderes als „nichts tun", und der
-        // Wirt darf es unterscheiden — also geht es genauso raus.
+        // `go(0)` reloads, which is different from doing nothing, and the host may
+        // tell them apart; so it goes out the same way.
         i.history_ops.push(super::interp::HistoryOp::Go(n));
         Ok(Value::Undefined)
     }, 1, fp);
@@ -2967,12 +2818,9 @@ pub fn make_realm() -> Realm {
     hist.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("History")));
     global.borrow_mut().define("history", Prop::builtin(Value::Obj(hist)));
 
-    // ── Date, klein aber vorhanden ───────────────────────────────────────
-    // ── Nachzuegler ──────────────────────────────────────────────────────
+    // ── Stragglers ───────────────────────────────────────────────────────
     //
-    // Kein Thema, sondern eine LISTE: Eingebaute, die schlicht fehlten.
-    // Gefunden mit einer Probe, die `typeof` ueber alles laufen laesst, was
-    // die Spec nennt — nicht geraten, ausgezaehlt.
+    // Not a theme but a list: built-ins that were missing.
     def(&array_proto, "at", |i, this, a| {
         let n = array_len(i, &this)? as i64;
         let mut k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?) as i64;
@@ -2998,8 +2846,8 @@ pub fn make_realm() -> Realm {
         if t < 0 { t += n; }
         let t = t.clamp(0, n);
         let (s, e) = range_args(i, a.get(1), a.get(2), n)?;
-        // Ueber eine KOPIE, sonst ueberschreibt der Lauf seine eigene Quelle,
-        // wenn sich Ziel und Bereich ueberlappen.
+        // Through a copy; otherwise the copy overwrites its own source when target
+        // and range overlap.
         let mut buf = Vec::new();
         for k in s..e {
             i.tick()?;
@@ -3032,9 +2880,8 @@ pub fn make_realm() -> Realm {
             let key = num_to_string(k as f64);
             let v = i.get(&this, &key)?;
             let r = i.call(&f, t.clone(), &[v, Value::Num(k as f64), this.clone()])?;
-            // Nur EINE Ebene, und nur echte Felder: was kein Feld ist, wird
-            // als WERT genommen. `[1,2].flatMap(x => x)` gab sonst `[]` —
-            // `flatten` las die `length` einer Zahl.
+            // One level only, and only real arrays: anything else is taken as a value
+            // (`[1,2].flatMap(x => x)` is `[1,2]`).
             let is_arr = matches!(&r, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Array));
             if is_arr { flatten(i, &r, 0.0, &mut out)?; } else { out.push(r); }
         }
@@ -3048,9 +2895,8 @@ pub fn make_realm() -> Realm {
         Ok(i.new_array(items))
     }, 0, fp);
     def(&array_proto, "toSorted", |i, this, a| {
-        // Ueber dieselbe `sort` wie in-place — eine zweite Sortierordnung
-        // waere genau die Sorte Unterschied, die niemand bemerkt, bis sie
-        // zaehlt.
+        // Through the same `sort` as the in-place version; a second ordering would
+        // be a difference nobody notices until it matters.
         let items = i.elems(&this)?;
         let arr = i.new_array(items);
         let ap = i.realm.array_proto.clone();
@@ -3109,8 +2955,8 @@ pub fn make_realm() -> Realm {
         let s = this_string(i, &this)?;
         let k = to_integer(i.to_number(a.first().unwrap_or(&Value::Undefined))?);
         if k < 0.0 { return Ok(Value::Undefined) }
-        // Nach UTF-16-Einheiten gezaehlt, wie die Spec — unsere Texte sind
-        // aber `str`. Die Umrechnung ist dieselbe wie in `charCodeAt`.
+        // Counted in UTF-16 units, as the spec says, though our strings are `str`.
+        // Same conversion as in `charCodeAt`.
         let units: Vec<u16> = s.encode_utf16().collect();
         let k = k as usize;
         if k >= units.len() { return Ok(Value::Undefined) }
@@ -3140,8 +2986,8 @@ pub fn make_realm() -> Realm {
     def(&string_proto, "localeCompare", |i, this, a| {
         let s = this_string(i, &this)?;
         let t = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        // Ohne Gebietsschema: der Vergleich ist der gewoehnliche. Das ist
-        // erlaubt und ehrlicher als eine erfundene Sortierordnung.
+        // Without a locale: the ordinary comparison. Allowed, and more honest than
+        // an invented collation.
         Ok(Value::Num(if *s < *t { -1.0 } else if *s > *t { 1.0 } else { 0.0 }))
     }, 1, fp);
 
@@ -3178,16 +3024,15 @@ pub fn make_realm() -> Realm {
         Ok(Value::string(String::from_utf16_lossy(&units)))
     }, 1, fp);
 
-    // ── ArrayBuffer, %TypedArray% und DataView ───────────────────────────
+    // ── ArrayBuffer, %TypedArray% and DataView ───────────────────────────
     //
-    // **Der Puffer ist der Speicher, die Sicht nur eine Sicht darauf.** Zwei
-    // Sichten auf denselben Puffer sehen einander; das ist der Sinn der
-    // Familie und der Grund, warum die Bytes im `ArrayBuffer` liegen und
-    // nicht in der Sicht.
+    // The buffer is the memory, a view only a view onto it. Two views on the
+    // same buffer see each other; that is why the bytes live in the
+    // `ArrayBuffer` and not in the view.
     //
-    // `%TypedArray%` selbst ist nicht rufbar und hat keinen Namen im globalen
-    // Objekt — es ist der gemeinsame Vorfahr, an dem alle Methoden haengen.
-    // Die neun Konstruktoren erben von ihm, ihre Prototypen von seinem.
+    // `%TypedArray%` itself is not callable and has no global name; it is the
+    // common ancestor holding all methods. The nine constructors inherit from
+    // it, their prototypes from its prototype.
     let mut ta_protos: HashMap<&'static str, Gc> = HashMap::new();
     let ab_proto = new_obj(Some(object_proto.clone()));
     let ab_ctor = native(Some(function_proto.clone()), |i, _, a| {
@@ -3233,9 +3078,9 @@ pub fn make_realm() -> Realm {
     }, "TypedArray", 0, true);
     ta_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ta_proto.clone())));
     ta_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ta_ctor.clone())));
-    // Die vier Auskuenfte sind LESER auf dem gemeinsamen Prototyp, keine
-    // Eigenschaften der Sicht — sonst muesste jede Sicht sie mitschleppen und
-    // ein abgetrennter Puffer koennte sie nicht mehr aendern.
+    // The accessors are getters on the shared prototype, not properties of the
+    // view; otherwise every view would carry them and a detached buffer could
+    // not change them.
     for (name, which) in [("length", 0u8), ("byteLength", 1), ("byteOffset", 2)] {
         let g = native(Some(function_proto.clone()), match which {
             0 => |i: &mut Interp, t: Value, _: &[Value]| {
@@ -3292,7 +3137,7 @@ pub fn make_realm() -> Realm {
         let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
         let n = x.live_len() as i64;
         let (s, e) = range_args(i, a.first(), a.get(1), n)?;
-        // Eine Untersicht teilt den PUFFER — sie kopiert nicht.
+        // A subarray shares the buffer; it does not copy.
         Ok(i.new_view(x.kind, x.buf.clone(), x.offset + s as usize * x.kind.size(),
                       (e - s) as usize))
     }, 2, fp);
@@ -3300,8 +3145,7 @@ pub fn make_realm() -> Realm {
         let Some(x) = this_ta(i, &t) else { return i.type_err("not a TypedArray") };
         let n = x.live_len() as i64;
         let (s, e) = range_args(i, a.first(), a.get(1), n)?;
-        // `slice` KOPIERT, `subarray` nicht — der einzige Unterschied, und er
-        // ist der ganze Grund, dass es beide gibt.
+        // `slice` copies, `subarray` does not; that is the only difference.
         let out = i.new_typed(x.kind, (e - s) as usize);
         if let Value::Obj(o) = out.clone() {
             if let Some(y) = ta_of(&o) {
@@ -3313,19 +3157,18 @@ pub fn make_realm() -> Realm {
         }
         Ok(out)
     }, 2, fp);
-    // Eine Sicht ist iterierbar ueber DIESELBE Funktion wie ein Feld — sie
-    // laeuft ueber `length` und Indizes, und beides beantwortet die Sicht.
+    // A view iterates via the same function as an array: it runs over `length`
+    // and indices, both of which the view answers.
     if let Some(v) = array_proto.borrow().get_own("values").and_then(|p| p.value.clone()) {
         ta_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v));
     }
-    // Und die gewoehnlichen Feldmethoden gelten auch hier, solange sie nur
-    // lesen und rechnen. Was ein FELD zurueckgibt statt einer Sicht (`map`,
-    // `filter`), bleibt vorerst weg — lieber gar nicht als mit falschem Typ.
+    // The ordinary array methods apply here too, as long as they only read and
+    // compute. Those returning an array rather than a view (`map`, `filter`)
+    // are left out for now rather than returning the wrong type.
     //
-    // Sie werden NICHT weitergereicht, sondern umhuellt: `%TypedArray%.
-    // prototype.reduceRight.call(undefined)` muss werfen, und das taete die
-    // Feldfassung nicht. Der Mantel prueft die Sicht und ruft dann dieselbe
-    // Funktion — keine zweite Semantik, nur die fehlende Vorpruefung.
+    // They are wrapped, not shared: `%TypedArray%.prototype.reduceRight
+    // .call(undefined)` must throw, and the array version would not. The wrapper
+    // checks the view, then calls the same function.
     macro_rules! ta_borrow {
         ($($m:literal),* $(,)?) => { $(
             {
@@ -3354,8 +3197,8 @@ pub fn make_realm() -> Realm {
         if let Some(v) = v { ta_proto.borrow_mut().define(SYM_ITERATOR, Prop::builtin(v)); }
     }
 
-    // Die neun Konstruktoren. Ihr Rumpf ist derselbe; nur die Elementart
-    // unterscheidet sie, und die steht im Zeiger.
+    // The nine constructors. Their body is the same; only the element kind
+    // differs, carried in the pointer.
     for (kind, f) in [
         (ElemKind::I8,  (|i: &mut Interp, _: Value, a: &[Value]| ta_new(i, ElemKind::I8, a)) as NativeFn),
         (ElemKind::U8,  |i, _, a| ta_new(i, ElemKind::U8, a)),
@@ -3429,9 +3272,9 @@ pub fn make_realm() -> Realm {
     dv_proto.borrow_mut().define("buffer", Prop {
         value: None, get: Some(Value::Obj(dv_buf)), set: None,
         writable: false, enumerable: false, configurable: true });
-    // Je Art ein Leser und ein Schreiber. **Die Bytefolge ist hier eine
-    // ANGABE, nicht die der Maschine** — das ist der ganze Unterschied zur
-    // getypten Sicht, und deshalb steht `little` in jedem Aufruf.
+    // One getter and one setter per kind. The byte order here is an argument,
+    // not the machine's; that is the whole difference to a typed view, hence
+    // `little` in every call.
     for (name, kind) in [("Int8", ElemKind::I8), ("Uint8", ElemKind::U8),
                          ("Int16", ElemKind::I16), ("Uint16", ElemKind::U16),
                          ("Int32", ElemKind::I32), ("Uint32", ElemKind::U32),
@@ -3470,9 +3313,9 @@ pub fn make_realm() -> Realm {
     global.borrow_mut().define("DataView", Prop::builtin(Value::Obj(dv_ctor)));
 
 
-    // Platzhalter — `dombind::install` ersetzt sie sofort. Sie stehen hier,
-    // weil ein Realm ohne sie nicht baubar waere und `install` den fertigen
-    // Realm braucht, um die Prototypen daranzuhaengen.
+    // Placeholders, replaced at once by `dombind::install`. A realm cannot be
+    // built without them, and `install` needs the finished realm to hang the
+    // prototypes on.
     let ph = || new_obj(Some(object_proto.clone()));
     let _ = &ta_protos;
     Realm { formdata_proto: object_proto.clone(), intl_dtf_proto: object_proto.clone(), intl_nf_proto: object_proto.clone(), xpath_result_proto: object_proto.clone(), xpath_expr_proto: object_proto.clone(), xpath_eval_proto: object_proto.clone(),
@@ -3483,8 +3326,8 @@ pub fn make_realm() -> Realm {
             regexp_proto: ph(), symbol_proto, iterator_proto,
             generator_proto, generator_func_proto,
             async_iterator_proto, async_gen_proto, async_gen_func_proto,
-            // Wird von `websocket::install` ersetzt, sobald es die Schnittstelle
-            // gibt; ohne echten Zufall bleibt es dieser leere Platzhalter.
+            // Replaced by `websocket::install` when the interface is available; without
+            // real randomness it stays this empty placeholder.
             websocket_proto: new_obj(Some(object_proto.clone())),
             array_iter_proto,
             string_iter_proto, promise_proto: ph(), date_proto: ph(), bigint_proto,
@@ -3504,22 +3347,18 @@ pub fn make_realm() -> Realm {
             dataview_proto: dv_proto }
 }
 
-/// `this.length` als Zahl. Eigene Funktion, weil `i.to_number(&i.get(...))`
-/// zwei gleichzeitige Ausleihen waeren — und das Aufteilen an jeder Stelle
-/// haette den Code nur laenger gemacht.
-/// Ein Array in-place durch eine neue Elementfolge ersetzen. Die Grundlage
-/// fuer alles, was die Laenge aendert (`shift`, `splice`, `sort`, `reverse`).
-/// Ein internes FACH schreiben.
+/// Write an internal slot.
 ///
-/// Diese Namen (` !target`, ` !index`) sind keine Eigenschaften des Objekts —
-/// die Objektdarstellung hat nur keinen anderen Ort dafuer. Sie gehen deshalb
-/// an der Eigenschaftsmaschinerie vorbei: `Set` mit Wurf-Fahne wuerde am
-/// eingefrorenen ` !target` scheitern, und das waere ein Fehler ueber etwas,
-/// das ein Skript gar nicht sehen kann.
+/// These names (` !target`, ` !index`) are not properties of the object; the
+/// object representation just has no other place for them. They bypass the
+/// property machinery: a throwing `Set` would fail on a frozen ` !target`,
+/// an error about something no script can see.
 fn slot_set(t: &Value, key: &str, v: Value) {
     if let Value::Obj(o) = t { o.borrow_mut().define(key, Prop::data(v)); }
 }
 
+/// Replace an array's elements in place with a new sequence; the basis for
+/// everything that changes the length.
 fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
     let Value::Obj(o) = this else { return Ok(()) };
     o.borrow_mut().clear_indices();
@@ -3530,13 +3369,13 @@ fn rebuild(i: &mut Interp, this: &Value, items: Vec<Value>) -> C<()> {
     i.set(this, "length", Value::Num(n as f64), true)
 }
 
-/// Das dritte Argument von `pushState`/`replaceState`: eine Adresse, oder
-/// nichts. `null`/`undefined` heisst „dieselbe Adresse behalten" und kommt
-/// als leerer Text heraus — der Wirt unterscheidet das.
+/// The third argument of `pushState`/`replaceState`: an address, or nothing.
+/// `null`/`undefined` means "keep the same address" and comes out as empty
+/// text; the host distinguishes that.
 ///
-/// **Aufgeloest wird hier NICHT.** Die Engine kennt die Adresse des
-/// Dokuments nicht besser als der Wirt, und eine halb aufgeloeste Adresse
-/// waere schlimmer als die rohe: sie saehe richtig aus.
+/// Not resolved here: the engine does not know the document address better
+/// than the host, and a half-resolved address would be worse than the raw
+/// one because it would look right.
 fn hist_url(i: &mut Interp, v: Option<&Value>) -> C<String> {
     Ok(match v {
         None | Some(Value::Null) | Some(Value::Undefined) => String::new(),
@@ -3544,9 +3383,7 @@ fn hist_url(i: &mut Interp, v: Option<&Value>) -> C<String> {
     })
 }
 
-/// Der gemeinsame Rumpf der vier Sammlungs-Konstruktoren.
-/// Die Eintraege einer Map/eines Sets als Array. `kind`: 0 Schluessel,
-/// 1 Werte, 2 Paare.
+/// The entries of a Map/Set as an array. `kind`: 0 keys, 1 values, 2 pairs.
 fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
     let Some(c) = coll_of(t) else { return i.type_err("not a collection") };
     let pairs = c.borrow().pairs();
@@ -3558,6 +3395,7 @@ fn coll_view(i: &mut Interp, t: &Value, kind: u8) -> C<Value> {
     Ok(i.new_array(out))
 }
 
+/// The shared body of the four collection constructors.
 fn coll_new(i: &mut Interp, name: &str, is_map: bool, a: &[Value]) -> C<Value> {
     let pv = i.get(&Value::Obj(i.realm.global.clone()), name)?;
     let proto = match i.get(&pv, "prototype")? { Value::Obj(p) => Some(p), _ => None };
@@ -3590,7 +3428,7 @@ fn pad(i: &mut Interp, t: Value, a: &[Value], start: bool) -> C<Value> {
     Ok(Value::string(if start { p + &s } else { s.to_string() + &p }))
 }
 
-/// `start`/`end` einer Bereichsangabe, negativ vom Ende gezaehlt.
+/// `start`/`end` of a range argument, negative counts from the end.
 fn range_args(i: &mut Interp, s: Option<&Value>, e: Option<&Value>, n: i64) -> C<(i64, i64)> {
     let conv = |i: &mut Interp, v: Option<&Value>, d: i64| -> C<i64> {
         Ok(match v {
@@ -3606,8 +3444,8 @@ fn range_args(i: &mut Interp, s: Option<&Value>, e: Option<&Value>, n: i64) -> C
     Ok((a, b.max(a)))
 }
 
-/// `flat`: Felder bis zur Tiefe `d` ausschuetten. Nur ECHTE Felder werden
-/// aufgeloest — ein feldaehnliches Objekt bleibt ein Wert.
+/// `flat`: spread arrays down to depth `d`. Only real arrays are flattened;
+/// an array-like object stays a value.
 fn flatten(i: &mut Interp, v: &Value, d: f64, out: &mut Vec<Value>) -> C<()> {
     let n = array_len(i, v)? as usize;
     for k in 0..n {
@@ -3645,7 +3483,7 @@ fn find_last(i: &mut Interp, this: Value, a: &[Value], want_index: bool) -> C<Va
     Ok(if want_index { Value::Num(-1.0) } else { Value::Undefined })
 }
 
-// ── Hilfen fuer Puffer und Sichten ───────────────────────────────────────
+// ── Helpers for buffers and views ────────────────────────────────────────
 
 fn buf_of(v: &Value) -> Option<Rc<BufData>> {
     let Value::Obj(o) = v else { return None };
@@ -3662,14 +3500,14 @@ fn this_ta(_i: &mut Interp, v: &Value) -> Option<Rc<TaData>> {
     ta_of(o)
 }
 
-/// Ein Element aus einer Sicht — ausserhalb ist es `NaN`, nicht ein Fehler.
+/// An element of a view; out of range is `NaN`, not an error.
 fn ta_get(t: &Rc<TaData>, k: usize) -> f64 {
     if k >= t.live_len() { return f64::NAN }
     let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return f64::NAN };
     t.kind.read(&b.bytes.borrow(), t.offset + k * t.kind.size())
 }
 
-/// Ein Element einer 64-Bit-Sicht schreiben.
+/// Write an element of a 64-bit view.
 fn ta_write_big(t: &Rc<TaData>, k: usize, v: &super::bigint::Big) {
     if k >= t.live_len() { return }
     let ObjKind::Buffer(b) = &t.buf.borrow().kind else { return };
@@ -3677,7 +3515,7 @@ fn ta_write_big(t: &Rc<TaData>, k: usize, v: &super::bigint::Big) {
     t.kind.write_big(&mut b.bytes.borrow_mut(), at, v);
 }
 
-/// Ein Element von einer 64-Bit-Sicht in eine andere.
+/// Copy an element from one 64-bit view to another.
 fn ta_copy_big(dst: &Rc<TaData>, k: usize, src: &Rc<TaData>) { ta_copy_big_at(dst, k, src, k) }
 
 fn ta_copy_big_at(dst: &Rc<TaData>, dk: usize, src: &Rc<TaData>, sk: usize) {
@@ -3697,13 +3535,12 @@ fn ta_write(t: &Rc<TaData>, k: usize, v: f64) {
     t.kind.write(&mut b.bytes.borrow_mut(), at, v);
 }
 
-/// Der gemeinsame Rumpf aller neun Konstruktoren. Vier Formen, und sie sind
-/// nicht dasselbe:
+/// The shared body of all nine constructors. Four forms, and they differ:
 ///
-/// * `new TA(n)` — ein frischer Puffer fuer n Elemente
-/// * `new TA(sicht)` — KOPIE, Element fuer Element umgerechnet
-/// * `new TA(puffer, versatz, laenge)` — eine SICHT, kein neuer Speicher
-/// * `new TA(iterierbares|feldaehnliches)` — Kopie der Werte
+/// * `new TA(n)`: a fresh buffer for n elements
+/// * `new TA(view)`: a copy, converted element by element
+/// * `new TA(buffer, offset, length)`: a view, no new memory
+/// * `new TA(iterable|array-like)`: a copy of the values
 fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
     match a.first() {
         None | Some(Value::Undefined) => Ok(i.new_typed(kind, 0)),
@@ -3758,7 +3595,7 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
         }
         Some(Value::Obj(_)) => {
             let src = a[0].clone();
-            // Iterierbar geht vor feldaehnlich — genau wie in der Spec.
+            // Iterable before array-like, as in the spec.
             let items = match i.get_iterator(&src) {
                 Ok(_) => i.iterate(&src)?,
                 Err(_) => i.elems(&src)?,
@@ -3790,8 +3627,8 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
 }
 
 fn dv_get(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
-    // Bei `getFloat*` steht die Bytefolge an Stelle 1, bei den Ganzzahlen
-    // ebenso — nur `set*` schiebt sie um eins nach hinten.
+    // For `getFloat*` and the integer getters the byte order is argument 1;
+    // only `set*` shifts it one place back.
     let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
     let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
     if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
@@ -3811,7 +3648,7 @@ fn dv_set(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
     let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
     if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
     let off = off as usize;
-    // Die Umwandlung laeuft VOR der Bereichspruefung — sie ist beobachtbar.
+    // The conversion happens before the range check; it is observable.
     let big = if kind.is_big() { Some(i.to_bigint(a.get(1).unwrap_or(&Value::Undefined))?) } else { None };
     let v = match &big { Some(_) => 0.0, None => i.to_number(a.get(1).unwrap_or(&Value::Undefined))? };
     if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
@@ -3844,17 +3681,16 @@ fn make_error(i: &mut Interp, kind: &'static str, a: &[Value]) -> C<Value> {
 }
 
 
-/// Die Argumente eines `console`-Aufrufs zu einer Zeile machen.
+/// Join the arguments of a `console` call into one line.
 ///
-/// Ein `toString`, das selbst wirft, darf den Aufruf nicht zum Ausnahmefall
-/// machen: eine Ausgabe, die das Programm anhaelt, ist schlimmer als eine
-/// unvollstaendige.
+/// A `toString` that throws must not turn the call into an exception: output
+/// that halts the program is worse than incomplete output.
 fn console_join(i: &mut Interp, args: &[Value], prefix: &str) -> String {
     let mut out = String::from(prefix);
     for (n, a) in args.iter().enumerate() {
         if n > 0 { out.push(' '); }
-        // Ein Symbol wirft bei `ToString` — auf der Konsole waere das der
-        // falsche Ort dafuer: die Zeile soll berichten, nicht abbrechen.
+        // A symbol throws on `ToString`; the console is the wrong place for that.
+        // The line should report, not abort.
         if let Value::Sym(sd) = a { out.push_str(&Interp::sym_to_display(sd)); continue; }
         match i.to_string(a) {
             Ok(s) => out.push_str(&s),
@@ -3864,19 +3700,18 @@ fn console_join(i: &mut Interp, args: &[Value], prefix: &str) -> String {
     out
 }
 
-/// `toFixed`, mit der Rundung, die JS vorschreibt: auf den BETRAG, und bei
-/// genau der Haelfte zur groesseren Zahl — also von der Null WEG.
+/// `toFixed` with the rounding JS prescribes: on the magnitude, and exactly
+/// halfway rounds to the larger number, i.e. away from zero.
 ///
-/// Rusts `{:.n}` rundet zur geraden Ziffer, und `(-2.5).toFixed(0)` ist
-/// damit `-2` statt `-3`. Der Unterschied faellt nur im Vergleich mit einem
-/// echten Motor auf; gefunden hat ihn genau der.
+/// Rust's `{:.n}` rounds half to even, which makes `(-2.5).toFixed(0)` `-2`
+/// instead of `-3`.
 fn fixed(n: f64, d: u32) -> String {
     let neg = n < 0.0 || (n == 0.0 && n.is_sign_negative() && d == 0 && n != 0.0);
     let x = libm::fabs(n);
     let p = libm::pow(10.0, d as f64);
-    // `x * p + 0.5` und dann abrunden: der Gleitkommafehler von `x * p`
-    // gehoert dazu. `(1.005).toFixed(2)` ist "1.00", WEIL 1.005 als f64
-    // knapp darunter liegt — wer das wegrechnet, weicht von jedem Browser ab.
+    // `x * p + 0.5`, then floor: the floating-point error of `x * p` is part of
+    // the result. `(1.005).toFixed(2)` is "1.00" because 1.005 as f64 is
+    // slightly below; correcting for it would differ from every browser.
     let scaled = libm::floor(x * p + 0.5);
     let digits = num_to_string(scaled);
     let mut out = String::new();
@@ -3895,19 +3730,17 @@ fn fixed(n: f64, d: u32) -> String {
     out
 }
 
-/// Der gemeinsame Rumpf von `encodeURI` und `encodeURIComponent`.
+/// The shared body of `encodeURI` and `encodeURIComponent`.
 ///
-/// `keep` sind die Sonderzeichen, die roh durchgehen; Buchstaben und Ziffern
-/// gehen immer durch. Kodiert wird UTF-8, Byte fuer Byte — genau so steht es
-/// in der Spezifikation, und genau so erwartet es jeder Server.
+/// `keep` lists the special characters passed through raw; letters and
+/// digits always pass. Encoding is UTF-8, byte by byte, as the spec says.
 fn uri_encode(i: &mut Interp, s: &str, keep: &str) -> C<Value> {
     let mut out = String::with_capacity(s.len());
     let mut buf = [0u8; 4];
     for c in s.chars() {
         if c.is_ascii_alphanumeric() || keep.contains(c) { out.push(c); continue }
-        // Eine einzelne Haelfte eines Ersatzpaares ist kein Zeichen und laesst
-        // sich nicht als UTF-8 schreiben. Der Lexer laesst sie nicht entstehen,
-        // aber `String.fromCharCode` schon.
+        // A lone surrogate is not a character and cannot be written as UTF-8. The
+        // lexer never produces one, but `String.fromCharCode` can.
         if (0xD800..0xE000).contains(&(c as u32)) { return Err(i.throw_kind("URIError", "URI malformed")) }
         for b in c.encode_utf8(&mut buf).as_bytes() {
             out.push('%');
@@ -3918,11 +3751,11 @@ fn uri_encode(i: &mut Interp, s: &str, keep: &str) -> C<Value> {
     Ok(Value::str(&out))
 }
 
-/// Der gemeinsame Rumpf von `decodeURI` und `decodeURIComponent`.
+/// The shared body of `decodeURI` and `decodeURIComponent`.
 ///
-/// `reserved` sind die Zeichen, deren Kodierung STEHEN bleibt. Ein `%` ohne
-/// zwei Hexziffern dahinter ist ein URIError — nicht ein stilles `%`: eine
-/// halb dekodierte Adresse sieht aus wie eine ganze.
+/// `reserved` lists characters whose encoding stays. A `%` without two hex
+/// digits is a URIError, not a literal `%`: a half-decoded address looks like
+/// a whole one.
 fn uri_decode(i: &mut Interp, s: &str, reserved: &str) -> C<Value> {
     let b = s.as_bytes();
     let mut bytes: Vec<u8> = Vec::with_capacity(b.len());
@@ -3949,9 +3782,9 @@ fn uri_decode(i: &mut Interp, s: &str, reserved: &str) -> C<Value> {
     }
 }
 
-/// `__lookupGetter__` / `__lookupSetter__`: die KETTE hoch, bis eine eigene
-/// Eigenschaft dieses Namens da ist — und nur wenn die ein Zugriff ist, gibt
-/// es etwas zurueck.
+/// `__lookupGetter__` / `__lookupSetter__`: walk up the chain until an own
+/// property of that name exists, and return something only if it is an
+/// accessor.
 fn lookup_accessor(i: &mut Interp, t: Value, a: &[Value], want_set: bool) -> C<Value> {
     let o = i.to_object(&t)?;
     let k = i.to_prop_key(a.first().unwrap_or(&Value::Undefined))?;
@@ -3971,12 +3804,11 @@ fn lookup_accessor(i: &mut Interp, t: Value, a: &[Value], want_set: bool) -> C<V
     Ok(Value::Undefined)
 }
 
-/// Der gemeinsame Rumpf von `Object.groupBy` und `Map.groupBy`.
+/// The shared body of `Object.groupBy` and `Map.groupBy`.
 ///
-/// Der Unterschied ist allein der SCHLUESSEL: dort ein Eigenschaftsname (also
-/// immer eine Zeichenkette oder ein Symbol), hier ein Karteneintrag mit
-/// eigener Identitaet — `Map.groupBy` darf nach einem OBJEKT gruppieren, und
-/// genau das ist der Grund, warum es die Variante ueberhaupt gibt.
+/// The only difference is the key: a property name (string or symbol) for
+/// the former, a map entry with its own identity for the latter.
+/// `Map.groupBy` may group by an object, which is why the variant exists.
 fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
     let f = a.get(1).cloned().unwrap_or(Value::Undefined);
     if !i.is_callable(&f) { i.type_err::<()>("callback is not a function")?; }
@@ -4007,13 +3839,12 @@ fn group_into(i: &mut Interp, a: &[Value], out: &Gc, as_map: bool) -> C<()> {
     Ok(())
 }
 
-/// Welche der sieben Mengenoperationen. Eine Umsetzung fuer alle, weil sie
-/// sich nur darin unterscheiden, was mit einem Schluessel passiert, der auf
-/// beiden Seiten (oder nur auf einer) steht.
+/// Which of the seven set operations. One implementation, because they only
+/// differ in what happens to a key present on both sides (or only one).
 #[derive(Clone, Copy, PartialEq)]
 enum SetOp { Union, Intersection, Difference, Symmetric, Subset, Superset, Disjoint }
 
-/// Die eigenen Schluessel der Menge, als WERTE.
+/// The set's own keys, as values.
 fn set_keys(t: &Value) -> Vec<Value> {
     match coll_of(t) { Some(c) => c.borrow().pairs().into_iter().map(|(k, _)| k).collect(),
                        None => Vec::new() }
@@ -4028,9 +3859,8 @@ fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
     if matches!(other, Value::Undefined | Value::Null) {
         return i.type_err("argument is not set-like");
     }
-    // Das MENGENPROTOKOLL: `size` als Zahl, `has` und `keys` als Funktionen.
-    // Die Reihenfolge der Pruefungen steht in der Spezifikation und ist
-    // beobachtbar.
+    // The set protocol: `size` as a number, `has` and `keys` as functions. The
+    // order of the checks is in the spec and observable.
     let sz = i.get(&other, "size")?;
     let szn = i.to_number(&sz)?;
     if szn.is_nan() { return i.type_err("set-like object has no numeric size"); }
@@ -4040,7 +3870,7 @@ fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
     if !i.is_callable(&keys_fn) { return i.type_err("set-like object has no callable keys"); }
 
     let mine = set_keys(&t);
-    // Nur holen, wer sie braucht — `isSubsetOf` fragt sonst umsonst.
+    // Only fetch them when needed; otherwise `isSubsetOf` would ask for nothing.
     let theirs: Vec<Value> = if matches!(op, SetOp::Union | SetOp::Intersection
         | SetOp::Symmetric | SetOp::Superset) {
         let it = i.call(&keys_fn, other.clone(), &[])?;
@@ -4120,22 +3950,21 @@ fn set_op(i: &mut Interp, t: Value, a: &[Value], op: SetOp) -> C<Value> {
     }
 }
 
-/// Auf die naechste `binary16`-Zahl runden. Rust hat `f16` in `core` nicht
-/// stabil, also von Hand: Vorzeichen, 5 Bit Exponent, 10 Bit Mantisse — mit
-/// den beiden Randfaellen, an denen so eine Funktion sonst falsch wird
-/// (subnormal und Ueberlauf nach Unendlich).
+/// Round to the nearest `binary16`. `f16` is not stable in `core`, so by
+/// hand: sign, 5-bit exponent, 10-bit mantissa, including the two edge cases
+/// such a function usually gets wrong (subnormal and overflow to infinity).
 fn f16round(x: f64) -> f64 {
     if x.is_nan() || x == 0.0 || x.is_infinite() { return x; }
     let neg = x < 0.0;
     let a = libm::fabs(x);
     if a >= 65520.0 { return if neg { f64::NEG_INFINITY } else { f64::INFINITY }; }
-    // 2^-24 ist die kleinste subnormale binary16; darunter bleibt die Null.
+    // 2^-24 is the smallest subnormal binary16; below it the result is zero.
     if a < 1.0 / 33554432.0 { return if neg { -0.0 } else { 0.0 }; }
     let e = libm::floor(libm::log2(a));
     let e = if e < -14.0 { -14.0 } else { e };
     let step = libm::pow(2.0, e - 10.0);
     let mut r = libm::floor(a / step + 0.5) * step;
-    // Zur GERADEN runden, wo es genau in der Mitte liegt.
+    // Round to even exactly at the midpoint.
     if libm::fabs(a / step - (libm::floor(a / step) + 0.5)) < 1e-9 {
         let lo = libm::floor(a / step);
         if (lo as i64) % 2 == 0 { r = lo * step; }
@@ -4144,8 +3973,8 @@ fn f16round(x: f64) -> f64 {
     if neg { -r } else { r }
 }
 
-/// Eine geborgte Feldmethode auf einer Sicht: erst pruefen, dass `this`
-/// wirklich eine ist, dann DIESELBE Funktion rufen.
+/// An array method borrowed for a view: first check that `this` really is
+/// one, then call the same function.
 fn ta_forward(i: &mut Interp, t: Value, a: &[Value], name: &str) -> C<Value> {
     if !matches!(&t, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::TypedArray(_))) {
         return i.type_err("TypedArray method on a non-TypedArray receiver");
@@ -4158,9 +3987,8 @@ fn ta_forward(i: &mut Interp, t: Value, a: &[Value], name: &str) -> C<Value> {
     i.call(&f, t, a)
 }
 
-/// `thisNumberValue` — eine Zahl oder ihre Huelle, alles andere wirft. Das
-/// ist KEINE Umwandlung: `Number.prototype.toFixed.call("1")` ist ein
-/// TypeError, kein "1.0".
+/// `thisNumberValue`: a number or its wrapper, anything else throws. Not a
+/// conversion: `Number.prototype.toFixed.call("1")` is a TypeError.
 fn this_number(i: &mut Interp, t: &Value) -> C<f64> {
     match t {
         Value::Num(n) => Ok(*n),
@@ -4172,8 +4000,8 @@ fn this_number(i: &mut Interp, t: &Value) -> C<f64> {
     }
 }
 
-/// Gibt es den Index ueberhaupt? Fuer eine Sicht immer, fuer ein Feld nur,
-/// wenn die Eigenschaft (oder eine geerbte) da ist.
+/// Does the index exist? Always for a view; for an array only if the
+/// property (own or inherited) exists.
 fn has_index(i: &mut Interp, this: &Value, k: usize) -> bool {
     match this {
         Value::Obj(o) => {
@@ -4186,9 +4014,9 @@ fn has_index(i: &mut Interp, this: &Value, k: usize) -> bool {
     }
 }
 
-/// `RequireObjectCoercible` + `ToString` — der Kopf jeder
-/// String.prototype-Methode. `String.prototype.trim.call(null)` ist ein
-/// TypeError, nicht `"null"`.
+/// `RequireObjectCoercible` + `ToString`, the head of every
+/// String.prototype method. `String.prototype.trim.call(null)` is a
+/// TypeError, not `"null"`.
 pub fn this_string(i: &mut Interp, t: &Value) -> C<Rc<str>> {
     if matches!(t, Value::Undefined | Value::Null) {
         return i.type_err("String.prototype method called on null or undefined");
@@ -4196,10 +4024,9 @@ pub fn this_string(i: &mut Interp, t: &Value) -> C<Rc<str>> {
     i.to_string(t)
 }
 
-/// Ist `this` GENAU diese Sammlung? Der Vermerk `COLL_KIND` steht fuer das
-/// interne Feld, das die Spezifikation verlangt — ohne ihn liefe
-/// `Map.prototype.has.call({})` still durch und `…call(null)` gaebe `false`
-/// statt zu werfen.
+/// Is `this` exactly this collection? `COLL_KIND` stands for the internal
+/// slot the spec requires; without it `Map.prototype.has.call({})` would
+/// pass silently and `…call(null)` would return `false` instead of throwing.
 fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<Rc<RefCell<CollData>>> {
     let ok = matches!(t, Value::Obj(o)
         if matches!(o.borrow().get_own(COLL_KIND).and_then(|p| p.value.clone()),
@@ -4211,23 +4038,22 @@ fn this_coll(i: &mut Interp, t: &Value, name: &str) -> C<Rc<RefCell<CollData>>> 
               _ => i.type_err(&alloc::format!("{name} without its data")) }
 }
 
-/// `-0` als Schluessel wird zu `+0` — das verlangt die Spezifikation
-/// ausdruecklich (`Map.prototype.set`, Schritt 6), und zwar fuer den
-/// GESPEICHERTEN Wert, nicht nur fuer den Vergleich.
+/// `-0` as a key becomes `+0`, as the spec requires (`Map.prototype.set`,
+/// step 6), for the stored value, not only for comparison.
 fn norm_key(v: Value) -> Value {
     match v { Value::Num(n) if n == 0.0 => Value::Num(0.0), other => other }
 }
 
-/// Der Speicher einer Sammlung, ohne Pruefung auf die Art — fuer die
-/// Mengenoperationen, die schon wissen, dass sie ein `Set` in der Hand haben.
+/// A collection's storage without a kind check, for the set operations that
+/// already know they hold a `Set`.
 fn coll_of(t: &Value) -> Option<Rc<RefCell<CollData>>> {
     match t { Value::Obj(o) => match &o.borrow().kind {
                   ObjKind::Collection(c) => Some(c.clone()), _ => None },
               _ => None }
 }
 
-/// Ist die eigene Eigenschaft aufzaehlbar? Fuer einen Stellvertreter fragt
-/// das seine `getOwnPropertyDescriptor`-Falle, nicht die Tabelle darunter.
+/// Is the own property enumerable? For a proxy this asks its
+/// `getOwnPropertyDescriptor` trap, not the table underneath.
 fn enum_own(i: &mut Interp, o: &Gc, k: &str) -> C<bool> {
     if super::proxy::parts(o).is_some() {
         return Ok(matches!(i.get_own_desc(o, k)?, Some(p) if p.enumerable));
@@ -4235,7 +4061,7 @@ fn enum_own(i: &mut Interp, o: &Gc, k: &str) -> C<bool> {
     Ok(o.borrow().is_enumerable(k))
 }
 
-/// `thisBigIntValue` — eine grosse Zahl oder ihre Huelle.
+/// `thisBigIntValue`: a BigInt or its wrapper.
 fn this_bigint(i: &mut Interp, t: &Value) -> C<super::bigint::Big> {
     match t {
         Value::BigInt(b) => Ok((**b).clone()),
@@ -4247,8 +4073,8 @@ fn this_bigint(i: &mut Interp, t: &Value) -> C<super::bigint::Big> {
     }
 }
 
-/// `BigInt.asIntN` / `asUintN`: auf `bits` Stellen zuschneiden, mit oder ohne
-/// Vorzeichen.
+/// `BigInt.asIntN` / `asUintN`: truncate to `bits` digits, signed or
+/// unsigned.
 fn as_n(i: &mut Interp, a: &[Value], signed: bool) -> C<Value> {
     let bits = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
     let bits = to_integer(bits);
