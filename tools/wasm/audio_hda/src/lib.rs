@@ -1,16 +1,13 @@
 //! audio_hda — generic Intel HD Audio (HDA) controller driver (WASM module).
 //!
-//! Hardware-independent by construction: binds the HDA controller by PCI *class*
+//! Hardware-independent by construction: binds the HDA controller by PCI class
 //! (0x04/0x03), not vendor:device, so it drives any HDA-spec controller (Intel,
 //! AMD, NVIDIA, QEMU's intel-hda). The codec is enumerated generically by walking
 //! the widget graph (like `snd-hda-codec-generic`) to find a DAC -> output-pin path.
 //!
 //! Codec verbs use the spec's Immediate Command Interface (IC/IR/IRS) — what Linux
 //! uses as `single_cmd` on Intel — so the only DMA is the audio ring + BDL.
-//!
-//! M1: bring the controller + codec + one output stream up and play a built-in
-//! sine tone. Proves the whole path before the kernel audio mailbox (M2) exists.
-//! Test target: bare metal (audible yes/no). Verbose stage banners over serial.
+//! The ring is fed from the kernel audio mailbox.
 
 #![no_std]
 
@@ -32,10 +29,9 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 static NPK_CAPS: [u8; 1] = [0x04];
 
 // ── audio buffer geometry ───────────────────────────────────────────────
-// 480 Hz tone @ 48 kHz = exactly 100 samples/period -> a clean cyclic loop.
-// HDA playback ring: two ping-pong halves fed from the kernel audio mailbox.
-// The DMA cycles the ring; each tick we keep the half it is NOT currently
-// playing filled with freshly mixed PCM (silence when no app is playing).
+// HDA playback ring: two halves fed from the kernel audio mailbox. The DMA
+// cycles the ring; the loop refills what it has played with freshly mixed
+// PCM (silence when no app is playing).
 const HALF_FRAMES: usize = 2048; // ~43 ms per half @ 48 kHz
 const HALF_BYTES: usize = HALF_FRAMES * 4; // S16 stereo
 const RING_BYTES: usize = HALF_BYTES * 2;
@@ -56,11 +52,9 @@ fn loghex(prefix: &str, v: u32) {
     log(unsafe { core::str::from_utf8_unchecked(&buf) });
 }
 
-/// Eine GANZE Diagnosezeile (Praefix, Hexwert, Zeilenende), nur mit
-/// `set log.drivers 1`.
-///
-/// Bewusst inklusive Zeilenende: ein gegateter Anfang mit ungegatetem
-/// `log("\n")` dahinter haette Leerzeilen gedruckt.
+/// One whole diagnostic line (prefix, hex value, newline), only with
+/// `set log.drivers 1`. The newline is included so a gated line never
+/// leaves an ungated empty line behind.
 fn dbghexln(prefix: &str, v: u32) {
     if host::verbose() { loghex(prefix, v); log("\n"); }
 }
@@ -99,38 +93,21 @@ fn widget_type(mmio: i32, cad: u32, nid: u32) -> u32 {
     (get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) >> 20) & 0xF
 }
 
-/// Unmute the output amp of a widget at (near) max gain — **if it has one.**
+/// Unmute the output amp of a widget at (near) max gain — if it has one.
 ///
-/// Ein Verstaerker-Verb an ein Widget OHNE Verstaerker ist nach Spezifikation
-/// undefiniert, und die beiden Pruefungen hier sind nicht Vorsicht, sondern
-/// der Unterschied zwischen Ton und Stille:
+/// An amp verb sent to a widget without an amp is undefined by the spec, and
+/// QEMU's line-out pin (`AMP_OUT_CAP = 0`, no `stindex`) shares the DAC's
+/// stream, so a gain-0 verb there silences the DAC that was just set up.
 ///
-/// QEMUs Line-Out-Pin meldet `AMP_OUT_CAP = 0` und traegt in seiner
-/// Knotenbeschreibung kein `stindex` — der faellt damit auf 0 zurueck, also
-/// auf DENSELBEN Strom wie der DAC. Ohne die Pruefung rechnet der Code
-/// `steps = 0` -> `gain = 0`, schreibt das Verb trotzdem, und QEMU setzt
-/// damit die Verstaerkung des DAC-Stroms auf null: `left = 0 * 255 / 74`.
-/// Der Treiber stellt den DAC also korrekt ein und loescht ihn eine Zeile
-/// spaeter selbst.
+/// Zero steps does not mean "no amp" either: it can be a pure mute switch
+/// (e.g. on Realtek speaker pins), whose mute bit must be cleared. The spec
+/// separates the two by bit 31 of `AMP_*_CAP` ("can mute"):
 ///
-/// Der Satz „auf echter Hardware hat der Pin Stufen > 0" stimmte nicht.
-/// Auf dem Realtek eines Lenovo IdeaPad meldet der LAUTSPRECHERpin
-/// `steps = 0` — und ist trotzdem stumm, weil null Stufen NICHT „kein
-/// Verstaerker" heisst, sondern „reiner Stummschalter". Der hat ein
-/// Mute-Bit, und das blieb unangetastet: Strom lief, Pin stimmte, kein Ton.
-///
-/// Die Spezifikation trennt die beiden Faelle in Bit31 von `AMP_*_CAP`
-/// („kann stummschalten"):
-///
-/// * Stufen 0 **und** Bit31 gesetzt → Stummschalter, MUSS aufgemacht werden
-/// * Stufen 0 **und** Bit31 frei    → kann nichts, Verb schadet nur (QEMU,
-///   dessen Pin `AMP_OUT_CAP = 0` meldet — Bit31 also ebenfalls frei)
-///
-/// Damit bleibt der QEMU-Fall oben Wort fuer Wort gueltig, und der Pin, der
-/// nur stummschalten kann, geht trotzdem auf.
+/// * 0 steps and bit 31 set   → mute switch, must be opened
+/// * 0 steps and bit 31 clear → nothing there, the verb only does harm (QEMU)
 fn unmute_out(mmio: i32, cad: u32, nid: u32) {
-    // Beides fragen, weil beides unabhaengig „nein" sagen kann: das
-    // Faehigkeitsbit des Widgets und die Stufenzahl seines Verstaerkers.
+    // Ask both, because each can say no independently: the widget's
+    // capability bit and the step count of its amp.
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 {
         return;
     }
@@ -138,22 +115,20 @@ fn unmute_out(mmio: i32, cad: u32, nid: u32) {
     let steps = (cap >> 8) & 0x7F;
     if steps == 0 {
         if cap & AMP_CAP_MUTE == 0 { return; }
-        // Verstaerkung 0, Mute-Bit (Bit7) frei: aufgemacht.
+        // Gain 0, mute bit (bit 7) clear: open.
         codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH));
         return;
     }
-    // ~3/4 of max gain — audible but not blasting (real volume control = M4).
+    // ~3/4 of max gain — audible but not blasting.
     let gain = ((steps * 3 / 4) & 0x7F) as u16;
     codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_OUT_BOTH | gain));
 }
 
-/// Entmutet den EINGANGSverstaerker `index` eines Knotens.
+/// Unmute input amp `index` of a node.
 ///
-/// Ein Mixer hat je Eingang einen eigenen Verstaerker, und die stehen auf
-/// vielen Codecs ab Werk auf stumm. `unmute_out` oeffnet nur den Ausgang —
-/// damit ist Mixer → Pin frei und DAC → Mixer weiter zu. Das sieht aus wie
-/// ein laufender Strom ohne Ton: LPIB laeuft, der Pin stimmt, es kommt
-/// nichts.
+/// A mixer has one amp per input, and on many codecs they default to muted.
+/// `unmute_out` opens only the output, leaving mixer → pin open and DAC →
+/// mixer closed: LPIB runs, the pin is right, and nothing is heard.
 fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_IN_AMP == 0 {
         return;
@@ -162,8 +137,8 @@ fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
     let steps = (cap >> 8) & 0x7F;
     let idx = (index as u16 & 0xF) << 8;
     if steps == 0 {
-        // Dieselbe Trennung wie beim Ausgang: Stummschalter aufmachen,
-        // einen Verstaerker ohne jede Faehigkeit in Ruhe lassen.
+        // Same split as for the output: open a mute switch, leave an amp
+        // without any capability alone.
         if cap & AMP_CAP_MUTE == 0 { return; }
         codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx));
         return;
@@ -172,13 +147,12 @@ fn unmute_in(mmio: i32, cad: u32, nid: u32, index: u32) {
     codec_cmd(mmio, cad, nid, vset_amp(AMP_SET_IN_BOTH | idx | gain));
 }
 
-/// Die ROHE Verstaerkerfaehigkeit eines Knotens — fuer den Log.
+/// The raw amp capability of a node, for the log.
 ///
-/// Die Stufenzahl allein reicht nicht: `steps = 0` kann „kein Verstaerker",
-/// „reiner Stummschalter" oder „Widget hat gar keinen Ausgangsverstaerker"
-/// heissen, und die drei verlangen Verschiedenes. Bit31 = kann
-/// stummschalten, [14:8] = Stufen, [6:0] = Offset. `0` heisst hier: das
-/// Widget fuehrt gar keinen Ausgangsverstaerker.
+/// The step count alone is ambiguous: `steps = 0` can mean "no amp", "pure
+/// mute switch" or "no output amp at all", and each needs something
+/// different. Bit 31 = can mute, [14:8] = steps, [6:0] = offset. `0` means
+/// the widget has no output amp.
 fn amp_cap(mmio: i32, cad: u32, nid: u32) -> u32 {
     if get_param(mmio, cad, nid, PARAM_AUDIO_WIDGET_CAP) & WCAP_OUT_AMP == 0 { return 0; }
     get_param(mmio, cad, nid, PARAM_AMP_OUT_CAP)
@@ -193,9 +167,8 @@ fn conn_entry0(mmio: i32, cad: u32, nid: u32) -> u32 {
 // Walk from an output pin back to its feeding DAC (up to 2 hops through a
 // mixer/selector), unmuting each node in the path.
 fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
-    // Der Weg wird GEMELDET, nicht vermutet. Ohne ihn steht im Log nur
-    // "pin 0x14" und "DAC 0x02", und ob ein Mixer dazwischenliegt — also
-    // ob ueberhaupt ein Eingangsverstaerker im Spiel ist — bleibt offen.
+    // Log the path, so it shows whether a mixer — and thus an input amp —
+    // sits between pin and DAC.
     if host::verbose() {
         loghex("[audio_hda] path: pin 0x", pin);
         loghex(" (out-amp cap=0x", amp_cap(mmio, cad, pin));
@@ -211,7 +184,7 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
         log(")\n");
         return first;
     }
-    // mixer or selector: select input 0, unmute BOTH directions, descend
+    // mixer or selector: select input 0, unmute both directions, descend
     if widget_type(mmio, cad, first) == WTYPE_SELECTOR {
         codec_cmd(mmio, cad, first, vset_conn_select(0));
     }
@@ -233,12 +206,10 @@ fn trace_to_dac(mmio: i32, cad: u32, pin: u32) -> u32 {
 }
 
 // Generic codec setup: find an output pin + its DAC, configure format/stream,
-// enable the pin, unmute the path. Returns the DAC NID or 0 on failure.
-/// Richtet den Codec ein. Zweiter Rueckgabewert: **ist der gewaehlte
-/// Ausgang ANALOG?** (Lautsprecher, Kopfhoerer oder Line-Out). Daran
-/// entscheidet `_start`, ob dieser Controller der richtige ist — eine
-/// HDMI-Audioeinheit hat nur `dev=0x05`, und ein Ton dorthin ist auf
-/// Lautsprechern nicht zu hoeren.
+// enable the pin, unmute the path. Returns the DAC NID or 0 on failure, and
+// whether the chosen output is analog (speaker, headphone or line-out).
+// `_start` uses that to pick the controller: an HDMI audio unit has only
+// `dev=0x05` pins, and a tone sent there is not heard on the speakers.
 fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
     // Function groups under the root node.
     let root = get_param(mmio, cad, 0, PARAM_SUB_NODE_COUNT);
@@ -332,12 +303,12 @@ fn setup_codec(mmio: i32, cad: u32) -> (u32, bool) {
 
 // ── controller bring-up ───────────────────────────────────────────────────
 
-/// Hoechste Zahl an HD-Audio-Controllern, die durchprobiert wird.
+/// Upper bound on HD Audio controllers probed.
 const MAX_HDA: u32 = 4;
 
-/// Die Bindung steht bereits: Controller hochfahren und den Codec
-/// einrichten. Gibt `(mmio, iss, analog)` oder `None`, wenn dieser
-/// Controller nichts taugt — der Rufer geht dann zum naechsten.
+/// The binding is in place: bring the controller up and set up the codec.
+/// Returns `(mmio, iss, analog)`, or `None` if this controller is unusable
+/// and the caller should try the next one.
 fn bring_up() -> Option<(i32, u32, bool)> {
     pci_enable_bus_master();
     // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
@@ -406,25 +377,18 @@ pub extern "C" fn _start() {
     host::log_init();
     log("[audio_hda] v0.3.3 — generic HDA driver (mailbox streaming) starting\n");
 
-    // Bind the HDA controller by PCI class — hardware-independent, no
-    // vendor:device hardcode. Intel cAVS controllers report subclass 0x01
-    // ("Audio controller") instead of the canonical 0x03 ("HD Audio"); both
-    // expose the same HDA register interface, so accept either.
-    // Den richtigen Controller SUCHEN, nicht den ersten nehmen.
+    // Bind the HDA controller by PCI class — no vendor:device hardcode.
+    // Intel cAVS controllers report subclass 0x01 ("Audio controller")
+    // instead of the canonical 0x03 ("HD Audio"); both expose the same
+    // register interface, so both lists are walked.
     //
-    // Fast jede Maschine hat zwei HD-Audio-Controller: den der GPU (HDMI/DP)
-    // und den der Southbridge (Lautsprecher, Kopfhoerer). Welcher in der
-    // PCI-Reihenfolge zuerst steht, ist Zufall — auf einem Lenovo IdeaPad
-    // stand die HDMI-Einheit vorn, und der Ton lief korrekt erzeugt in einen
-    // DisplayPort, an dem nichts haengt. Sechs Ausgangspins, alle dev=0x05
-    // ("Digital Other Out"), kein einziger analoger.
-    //
-    // Das Urteil gehoert hierher und nicht in den Kernel: der reicht den
-    // n-ten Controller der Klasse heraus, was ein brauchbarer Ausgang ist,
-    // weiss nur dieser Treiber. Intel cAVS meldet Unterklasse 0x01 statt
-    // 0x03 — beide Listen werden durchgegangen.
+    // Search for the right controller rather than taking the first: most
+    // machines have two (the GPU's for HDMI/DP and the chipset's for
+    // speakers and headphones), and PCI order between them is arbitrary.
+    // Only this driver knows what a usable output is, so the choice lives
+    // here, not in the kernel.
     let mut chosen: Option<(i32, u32)> = None;   // (mmio, iss)
-    let mut fb: Option<(u8, u32)> = None;        // erster brauchbarer, aber digital
+    let mut fb: Option<(u8, u32)> = None;        // first usable one, but digital
     'outer: for &sub in [0x03u8, 0x01u8].iter() {
         for i in 0..MAX_HDA {
             if pci_bind_class_n(0x04, sub, i) != 0 { break; }
@@ -436,9 +400,8 @@ pub extern "C" fn _start() {
         }
     }
     if chosen.is_none() {
-        // Keiner hat einen analogen Ausgang — dann der erste, der ueberhaupt
-        // lief. Eine Maschine, die nur ueber HDMI ausgibt, soll nicht
-        // schlechter dastehen als vorher.
+        // None has an analog output — take the first that came up, so an
+        // HDMI-only machine still gets sound.
         if let Some((sub, i)) = fb {
             log("[audio_hda] no analog output anywhere — using the first controller that worked\n");
             if pci_bind_class_n(0x04, sub, i) == 0 {
@@ -505,36 +468,27 @@ pub extern "C" fn _start() {
         "[audio_hda] streaming from audio mailbox (polling)\n"
     });
 
-    // Streaming loop: a TRUE ring-buffer copy. Each poll we refill exactly the
+    // Streaming loop: a true ring-buffer copy. Each poll refills exactly the
     // region the DMA has played since last time — [write_pos, LPIB) — pulling
     // that many bytes from the kernel mixer. This locks the drain rate to the
-    // DMA's real 48 kHz REGARDLESS of how often this loop is scheduled.
-    //
-    // The old ping-pong refilled one whole half only when it *detected* a buffer
-    // crossing, so coarse/jittery wakeups (npk_sleep is bounded by the worker
-    // timer → ~10-30 ms effective under load) missed crossings → the mailbox
-    // drained at only ~74 % of 48 kHz → the whole pipeline (which back-pressures
-    // on mailbox room) ran slow + delayed (HW-confirmed: mailbox pinned full,
-    // completion throttled to 74 %). write_pos chases LPIB; the ring stays ~one
-    // lap ahead of the play head (~85 ms latency, reported to the guest as the
-    // HDA-ring latency). poll_mix yields silence when no app is playing.
+    // DMA's real 48 kHz regardless of how often this loop is scheduled; a
+    // refill-on-crossing scheme misses crossings under coarse wakeups and
+    // drains the mailbox too slowly. write_pos chases LPIB; the ring stays
+    // about one lap ahead of the play head (~85 ms latency, reported to the
+    // guest as the HDA-ring latency). poll_mix yields silence when no app is
+    // playing.
     let mut write_pos: usize = 0;
-    // Erste fuenf Sekunden: sagen, ob die DMA ueberhaupt laeuft.
+    // First five seconds: report whether the DMA runs at all.
     //
-    // Der Loop unten fuellt nur, was die DMA SCHON GESPIELT hat
-    // (`avail = LPIB - write_pos`). Steht LPIB still, wird nie etwas
-    // geschrieben — und das sieht im Log aus wie ein sauberer Start ohne
-    // Ton. Genau dieser Fall trat unter QEMU auf, und er war von „Senke
-    // stumm" nicht zu unterscheiden, weil niemand LPIB gemeldet hat.
-    //
-    // Selbstbegrenzt: nach fuenf Berichten still, damit ein Treiber, der
-    // immer laeuft, das Log nicht flutet.
+    // The loop below only fills what the DMA has already played
+    // (`avail = LPIB - write_pos`). If LPIB stands still nothing is ever
+    // written, which in the log looks like a clean start without sound.
+    // Self-limiting: silent after five reports.
     let mut reports = 5u32;
     let mut pulled: u64 = 0;
     let mut ticks: u32 = 0;
-    // Berichte, die NUR feuern, wenn wirklich Ton durchlief. Die fuenf
-    // Sekundenberichte oben treffen die Stille am Anfang; ein Beep kommt
-    // spaeter und waere sonst nie im Log.
+    // Reports that fire only when sound actually passed. The five
+    // reports above hit the silence at start; a beep comes later.
     let mut loud_reports = 6u32;
     let mut peak: i32 = 0;
     let mut wrote: u32 = 0;
@@ -546,8 +500,8 @@ pub extern "C" fn _start() {
             reports -= 1;
             loghex("[audio_hda] LPIB=0x", lpib as u32);
             loghex(" wpos=0x", write_pos as u32);
-            // SD_CTL als u32 gelesen traegt STS im obersten Byte (Offset
-            // 0x03) — Lauf-Bit, Stream-Tag und Status in einer Zahl.
+            // SD_CTL read as u32 carries STS in its top byte (offset 0x03) —
+            // run bit, stream tag and status in one number.
             loghex(" SDCTL=0x", mmio_r32(mmio, base + SD_CTL));
             loghex(" gemischt=0x", pulled as u32);
             log("\n");
@@ -569,9 +523,8 @@ pub extern "C" fn _start() {
             let n = avail.min(RING_BYTES - write_pos).min(HALF_BYTES);
             let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
             audio_poll_mix(&mut mix[..n]);
-            // Lautstaerke des gemischten Blocks: sagt, ob aus der Mailbox
-            // ueberhaupt etwas kommt. Nur jedes achte Sample, das reicht fuer
-            // eine Spitze und kostet ein Achtel.
+            // Peak of the mixed block: shows whether the mailbox delivers
+            // anything. Every eighth sample is enough for a peak.
             let mut i = 0usize;
             while i + 1 < n {
                 let v = i16::from_le_bytes([mix[i], mix[i + 1]]) as i32;
@@ -580,9 +533,8 @@ pub extern "C" fn _start() {
                 i += 16;
             }
             dma_write(audio, write_pos as u32, &mix[..n]);
-            // Und zurueckholen, was eben geschrieben wurde. Stimmt das nicht
-            // ueberein, landet `dma_write` nicht dort, wo das Geraet liest —
-            // und dann ist jede Zeile darueber eine Behauptung.
+            // Read back what was just written. If it does not match,
+            // `dma_write` does not land where the device reads.
             if n >= 4 {
                 wrote = u32::from_le_bytes([mix[0], mix[1], mix[2], mix[3]]);
                 readback = dma_read32(audio, write_pos as u32);
@@ -593,20 +545,16 @@ pub extern "C" fn _start() {
         if irq {
             // `azx_interrupt` → `snd_hdac_bus_handle_stream_irq`: the
             // stream's bit in INTSTS, then SD_STS cleared with SD_INT_MASK
-            // (write-1-to-clear) — as a BYTE, like Linux' `writeb`.
-            //
-            // 0.4.0 wrote it as the top byte of a 32-bit write to SD_CTL.
-            // QEMU's intel-hda models SD_CTL (3 bytes) and SD_STS (1 byte)
-            // as separate registers, so the status never cleared and every
-            // register update sent another MSI: 21 330 wakes a second, the
-            // sound still playing.
+            // (write-1-to-clear) — as a byte, like Linux' `writeb`. QEMU's
+            // intel-hda models SD_CTL (3 bytes) and SD_STS (1 byte) as separate
+            // registers, so a 32-bit write to SD_CTL never clears the status and
+            // every register update raises another MSI.
             if mmio_r32(mmio, INTSTS) & (1 << iss) != 0 {
                 mmio_w8(mmio, base + SD_STS, SD_INT_MASK as u8);
             }
-            // **Sleep until the DMA finishes a half.** The poll was every
-            // 4 ms — 250 wakes a second, silence included. One half is
-            // HALF_FRAMES at 48 kHz; if the interrupt never came we would
-            // still refill a half-period late, with the other half queued.
+            // Sleep until the DMA finishes a half. One half is HALF_FRAMES at
+            // 48 kHz; if the interrupt never came we would still refill a
+            // half-period late, with the other half queued.
             wait_irq(HALF_MS + 10);
         } else {
             sleep_ms(4);

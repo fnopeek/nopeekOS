@@ -48,24 +48,23 @@ pub fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 
-// ── Diagnosezeilen: gebaut, aber im Normalbetrieb still ──────────────
+// ── Diagnostic lines: built in, silent in normal operation ───────────
 //
-// Die Codec-Topologie und die Sekundenberichte (LPIB/wpos/SDCTL) sind das
-// Werkzeug, mit dem dieser Treiber gebaut wurde — sie sagen, ob die DMA
-// ueberhaupt laeuft. Im Normalbetrieb sagt das niemandem etwas.
-// EINMAL beim Start gefragt; `set log.drivers 1` holt sie zurueck.
+// The codec topology and the per-second reports (LPIB/wpos/SDCTL) say
+// whether the DMA runs at all. Queried once at start;
+// `set log.drivers 1` turns them on.
 static mut VERBOSE: bool = false;
 
-/// Einmal beim Start: will der Nutzer den Mitschrieb sehen?
+/// Once at start: does the user want the diagnostic log?
 pub fn log_init() {
-    // SAFETY: ein Faden, ein Lauf — einmal gesetzt, danach nur gelesen.
+    // SAFETY: single thread; written once at start, only read afterwards.
     unsafe {
         core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
     }
 }
 
 pub fn verbose() -> bool {
-    // SAFETY: siehe `log_init`.
+    // SAFETY: see `log_init`.
     unsafe { core::ptr::addr_of!(VERBOSE).read() }
 }
 
@@ -73,9 +72,8 @@ pub fn verbose() -> bool {
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
     unsafe { npk_pci_bind_class(class as i32, subclass as i32) }
 }
-/// Den `index`-ten Controller dieser Klasse binden. Eine Maschine hat fast
-/// immer ZWEI HD-Audio-Controller (GPU-HDMI und Southbridge), und welcher
-/// zuerst kommt, ist Zufall der PCI-Reihenfolge.
+/// Bind the `index`-th controller of this class. A machine usually has two
+/// HD Audio controllers (GPU HDMI and chipset), in arbitrary PCI order.
 pub fn pci_bind_class_n(class: u8, subclass: u8, index: u32) -> i32 {
     unsafe { npk_pci_bind_class_n(class as i32, subclass as i32, index as i32) }
 }
@@ -125,24 +123,23 @@ pub fn sleep_ms(ms: u32) {
     unsafe { npk_sleep(ms as i32) };
 }
 
-/// `npk_wait`-Bit: der IRQ des gebundenen Geraets hat gefeuert.
+/// `npk_wait` bit: the bound device's IRQ fired.
 pub const WAIT_IRQ: i32 = 2;
 
-/// Den MSI des gebundenen Controllers anmelden; der Vektor oder -1.
+/// Register the bound controller's MSI; returns the vector or -1.
 pub fn irq_register() -> i32 {
     unsafe { npk_irq_register(0) }
 }
 
-/// Parken, bis der IRQ feuert oder `timeout_ms` vergeht.
+/// Park until the IRQ fires or `timeout_ms` passes.
 pub fn wait_irq(timeout_ms: u32) -> i32 {
     unsafe { npk_wait(WAIT_IRQ, timeout_ms as i32) }
 }
 
-/// Ein Doppelwort aus dem DMA-Puffer zurueckholen.
+/// Read a dword back from the DMA buffer.
 ///
-/// Diagnose: ob `dma_write` wirklich in dem Speicher landet, den das Geraet
-/// liest. Ohne Rueckweg ist „geschrieben" eine Behauptung — und unter QEMU
-/// sah genau das aus wie ein gesunder Stream ohne Ton.
+/// Diagnostic: checks that `dma_write` lands in the memory the device
+/// reads.
 pub fn dma_read32(h: i32, off: u32) -> u32 {
     unsafe { npk_dma_read32(h, off as i32) as u32 }
 }
