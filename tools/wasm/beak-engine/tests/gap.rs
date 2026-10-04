@@ -71,10 +71,10 @@ fn walk<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemInfo<'a>>) {
     let sib_count = kids.len() as u32;
 
     let mut m = ctx.ss.matched(&ei, ancestors, &[], sib_count, css::Media::new(ctx.w, false));
-    m.sort_by_key(|(layer, spec, ord, _, _)| (*layer, *spec, *ord));
+    m.sort_by_key(|(layer, spec, ord, _, _, _, _)| (*layer, *spec, *ord));
     // last writer per property wins
     let mut winner: HashMap<&str, &str> = HashMap::new();
-    for (_, _, _, decls, imp) in &m {
+    for (_, _, _, decls, imp, _, _) in &m {
         // `!important` declarations come last, so they win.
         let decls = decls.iter().chain(imp.iter());
         for (p, v) in decls {
@@ -127,9 +127,9 @@ fn walk_with_prev<'a>(ctx: &mut Ctx, el: &'a Element, ancestors: &mut Vec<ElemIn
         .collect();
 
     let mut m = ctx.ss.matched(&ei, ancestors, prev, prev.len() as u32 + 1, css::Media::new(ctx.w, false));
-    m.sort_by_key(|(layer, spec, ord, _, _)| (*layer, *spec, *ord));
+    m.sort_by_key(|(layer, spec, ord, _, _, _, _)| (*layer, *spec, *ord));
     let mut winner: HashMap<&str, &str> = HashMap::new();
-    for (_, _, _, decls, imp) in &m {
+    for (_, _, _, decls, imp, _, _) in &m {
         // `!important` declarations come last, so they win.
         let decls = decls.iter().chain(imp.iter());
         for (p, v) in decls {

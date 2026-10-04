@@ -27,6 +27,10 @@ fn dump(label: &str, html: &str) {
             DrawOp::BgImage { x, y, w, h, key, tint, .. } =>
                 eprintln!("  BGIMG x={x} y={y} w={w} h={h} key={key:016x} {}",
                           if tint.is_some() {"MASK"} else {"bg"}),
+            DrawOp::Shadow { x, y, w, h, .. } => eprintln!("  SHADOW x={x} y={y} w={w} h={h}"),
+            DrawOp::Caret { x, y, w, h, .. } => eprintln!("  CARET x={x} y={y} w={w} h={h}"),
+            DrawOp::Check { x, y, w, h, .. } => eprintln!("  CHECK x={x} y={y} w={w} h={h}"),
+            DrawOp::Gradient { x, y, w, h, .. } => eprintln!("  GRAD x={x} y={y} w={w} h={h}"),
         }
     }
 }
@@ -155,7 +159,7 @@ fn diag() {
         let m = ss.matched(&el, &ancestors, &prev, 3, beak_engine::css::Media::new(w, false));
         for prop in ["position", "height", "display", "visibility", "opacity", "overflow"] {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (_layer, spec, order, decls, _imp) in &m {
+            for (_layer, spec, order, decls, _imp, _, _) in &m {
                 for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == prop { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
@@ -190,6 +194,14 @@ fn diag() {
                 DrawOp::BgImage { x, y, w, h, key, tint, .. } =>
                     eprintln!("{i:>3} BGIMG  x={x:>5} y={y:>5} w={w:>5} h={h:>4} key={key:016x} {}",
                               if tint.is_some() {"MASK"} else {"bg"}),
+                DrawOp::Shadow { x, y, w, h, .. } =>
+                    eprintln!("{i:>3} SHADOW x={x:>5} y={y:>5} w={w:>5} h={h:>4}"),
+                DrawOp::Caret { x, y, w, h, .. } =>
+                    eprintln!("{i:>3} CARET  x={x:>5} y={y:>5} w={w:>5} h={h:>4}"),
+                DrawOp::Check { x, y, w, h, .. } =>
+                    eprintln!("{i:>3} CHECK  x={x:>5} y={y:>5} w={w:>5} h={h:>4}"),
+                DrawOp::Gradient { x, y, w, h, .. } =>
+                    eprintln!("{i:>3} GRAD   x={x:>5} y={y:>5} w={w:>5} h={h:>4}"),
             }
         }
         return;
@@ -227,7 +239,9 @@ fn diag() {
             match op {
                 DrawOp::RoundRect { x, y, w, .. } | DrawOp::Rect { x, y, w, .. } => { max_right = max_right.max(x + w); rects.push((*x, *w, *y)); }
                 DrawOp::Text { x, .. } => { max_right = max_right.max(*x); }
-                DrawOp::Image { x, y: _, w, .. } | DrawOp::BgImage { x, y: _, w, .. } => { max_right = max_right.max(x + w); }
+                DrawOp::Image { x, w, .. } | DrawOp::BgImage { x, w, .. }
+                | DrawOp::Shadow { x, w, .. } | DrawOp::Caret { x, w, .. }
+                | DrawOp::Check { x, w, .. } | DrawOp::Gradient { x, w, .. } => { max_right = max_right.max(x + w); }
             }
         }
         eprintln!("viewport={w}  max_right_edge={max_right}  OVERFLOW={}", max_right - w as i32);
@@ -240,27 +254,6 @@ fn diag() {
     }
     // Parse a CSS file and report whether a given class's declarations survive.
     // DGRID=<css> [DCLASS=mw-page-container-inner] [DW=1200] cargo test --test diag
-    if let Ok(cp) = std::env::var("DVARS") {
-        let css = fs::read_to_string(&cp).expect("css");
-        let out = beak_engine::vars::resolve_vars(&css, beak_engine::css::Media::new(std::env::var("DW").ok().and_then(|s| s.parse().ok()).unwrap_or(1200.0), false), &[]);
-        fs::write("resolved.css", &out).expect("write");
-        eprintln!("resolved {} -> {} bytes (resolved.css)", css.len(), out.len());
-        // report the biggest bare numbers in the output
-        let mut nums: Vec<f64> = Vec::new();
-        let b = out.as_bytes();
-        let mut i = 0;
-        while i < b.len() {
-            if b[i].is_ascii_digit() {
-                let s = i;
-                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') { i += 1; }
-                if let Ok(n) = out[s..i].parse::<f64>() { if n > 5000.0 { nums.push(n); } }
-            } else { i += 1; }
-        }
-        nums.sort_by(|a, c| c.partial_cmp(a).unwrap());
-        nums.dedup();
-        eprintln!("big numbers (>5000) in resolved css: {:?}", &nums[..nums.len().min(15)]);
-        return;
-    }
     if let Ok(cp) = std::env::var("DGRID") {
         use beak_engine::css::{self, ElemInfo};
         let css = fs::read_to_string(&cp).expect("css");
@@ -284,7 +277,7 @@ fn diag() {
         let m = ss.matched(&el, &[], &[], 1, beak_engine::css::Media::new(w, false));
         if let Some(pr) = &prop {
             let mut all: Vec<(u32,u32,String)> = Vec::new();
-            for (_layer, spec, order, decls, _imp) in &m {
+            for (_layer, spec, order, decls, _imp, _, _) in &m {
                 for (p,v) in decls.iter() { if beak_engine::css::prop_name(*p) == pr.as_str() { all.push((*spec,*order,v.clone())); } }
             }
             all.sort_by_key(|(s,o,_)| (*s,*o));
@@ -294,7 +287,7 @@ fn diag() {
         }
         eprintln!("=== matched rules for .{class} @ vw={w}: {} ===", m.len());
         let mut saw_grid = false;
-        for (_layer, spec, order, decls, _imp) in &m {
+        for (_layer, spec, order, decls, _imp, _, _) in &m {
             let has = decls.iter().any(|(p, _)| { let n = beak_engine::css::prop_name(*p); n == "display" || n.starts_with("grid") });
             if has {
                 eprintln!("  spec={spec} order={order}:");
@@ -521,6 +514,8 @@ fn diag() {
                 DrawOp::Rect { .. } | DrawOp::RoundRect { .. } => nr += 1,
                 DrawOp::Text { text, .. } => { nt += 1; glyphs += text.chars().count() as u64 }
                 DrawOp::Image { .. } | DrawOp::BgImage { .. } => ni += 1,
+                DrawOp::Shadow { .. } | DrawOp::Gradient { .. } | DrawOp::Check { .. } => nr += 1,
+                DrawOp::Caret { .. } => {}
             }
         }
         println!("ops {} (rect {nr}, text {nt} / {glyphs} glyphs, img {ni})   page height {}   viewport {w}x{vh}",
@@ -835,6 +830,11 @@ fn op_full(op: &DrawOp) -> String {
         DrawOp::BgImage { x, y, w, h, key, repeat, pos, size, tint, .. } => format!(
             "B x={x} y={y} w={w} h={h} k={key} rep={repeat:?} p={pos:?} sz={size:?} t={tint:?}"
         ),
+        DrawOp::Shadow { x, y, w, h, blur, color, dx, dy, .. } =>
+            format!("S x={x} y={y} w={w} h={h} b={blur:.2} c={color:?} d={dx},{dy}"),
+        DrawOp::Caret { x, y, w, h, color } => format!("K x={x} y={y} w={w} h={h} c={color:?}"),
+        DrawOp::Check { x, y, w, h, color } => format!("C x={x} y={y} w={w} h={h} c={color:?}"),
+        DrawOp::Gradient { x, y, w, h, .. } => format!("G x={x} y={y} w={w} h={h}"),
     }
 }
 
@@ -847,6 +847,10 @@ fn op_shape(op: &DrawOp) -> String {
         DrawOp::RoundRect { x, y, w, h, .. } => format!("Q x={x} y={y} w={w} h={h}"),
         DrawOp::Image { x, y, w, h, .. } => format!("I x={x} y={y} w={w} h={h}"),
         DrawOp::BgImage { x, y, w, h, .. } => format!("B x={x} y={y} w={w} h={h}"),
+        DrawOp::Shadow { x, y, w, h, .. } => format!("S x={x} y={y} w={w} h={h}"),
+        DrawOp::Caret { x, y, w, h, .. } => format!("K x={x} y={y} w={w} h={h}"),
+        DrawOp::Check { x, y, w, h, .. } => format!("C x={x} y={y} w={w} h={h}"),
+        DrawOp::Gradient { x, y, w, h, .. } => format!("G x={x} y={y} w={w} h={h}"),
     }
 }
 

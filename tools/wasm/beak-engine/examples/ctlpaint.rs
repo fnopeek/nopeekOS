@@ -344,6 +344,7 @@ fn dump_ops(l: &beak_engine::layout::Layout) -> Vec<String> {
             DrawOp::BgImage { x, y, w, h, key, .. } => { let _ = write!(s, "B {x},{y} {w}x{h} {key}"); }
             DrawOp::Gradient { x, y, w, h, .. } => { let _ = write!(s, "G {x},{y} {w}x{h}"); }
             DrawOp::Check { x, y, w, h, color } => { let _ = write!(s, "C {x},{y} {w}x{h} {color:?}"); }
+            DrawOp::Caret { x, y, w, h, color } => { let _ = write!(s, "K {x},{y} {w}x{h} {color:?}"); }
         }
         v.push(s);
     }
