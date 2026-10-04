@@ -162,6 +162,9 @@ build() {
 
     check_host_abi
 
+    # Comment rules (docs/spec/COMMENTS.md) on uncommitted changes; warn only.
+    python3 tools/comments.py lint --rev HEAD --warn || true
+
     # Refresh the embedded initramfs before cargo so include_bytes!
     # picks up any microvm/linux/init/ source change.
     build_microvm_initramfs

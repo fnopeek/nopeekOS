@@ -27,7 +27,8 @@ See README.md for the full vision and phase planning.
 - Panic = Kernel Panic = Halt (no recovery in Phase 1)
 - All `unsafe` blocks MUST have a SAFETY comment
 - Serial is primary I/O, not VGA
-- Comments in English, minimal
+- Comments: English, minimal, no history — rules in `docs/spec/COMMENTS.md`,
+  enforced by `tools/comments.py` (pre-commit hook: `tools/hooks/pre-commit`)
 - Hardware drivers: follow Linux source 1:1 (see memory/feedback_linux_strict.md)
 
 ## Build & Run

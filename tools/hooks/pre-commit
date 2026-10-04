@@ -1,0 +1,3 @@
+#!/bin/sh
+# Comment rules: docs/spec/COMMENTS.md. Bypass once with `git commit --no-verify`.
+exec python3 "$(git rev-parse --show-toplevel)/tools/comments.py" lint --staged
