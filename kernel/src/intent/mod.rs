@@ -2301,6 +2301,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_set(args);
             }
         }
+        "unset" => {
+            if require_cap(vault, &session, Rights::WRITE, "unset") {
+                system::intent_unset(args);
+            }
+        }
         "get" => {
             if require_cap(vault, &session, Rights::READ, "get") {
                 system::intent_get(args);

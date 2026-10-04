@@ -161,22 +161,49 @@ fn luma(c: u32) -> u32 {
     (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + (c & 0xFF) * 114) / 1000
 }
 
-/// Blend a glass fill over what lies beneath, with a readability floor.
+/// How a glass fill meets what lies beneath it (see `shade::glass`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct GlassInk {
+    /// Least luma under dark text (light glass); 0 = none.
+    pub floor: u32,
+    /// Most luma under light text (dark glass); 255 = none.
+    pub ceil: u32,
+    /// Wallpaper colour mixed into the fill, and how much (×256).
+    pub tint: u32,
+    pub tint_w: u32,
+}
+
+impl GlassInk {
+    pub const PLAIN: GlassInk = GlassInk { floor: 0, ceil: 255, tint: 0, tint_w: 0 };
+
+    /// The fill colour with the wallpaper's tint mixed in.
+    pub fn fill(&self, fg: u32) -> u32 {
+        if self.tint_w == 0 { fg } else { blend(self.tint, fg, self.tint_w) }
+    }
+
+    pub fn key(&self) -> u64 {
+        (self.floor as u64) | (self.ceil as u64) << 8 | (self.tint_w as u64) << 16 | (self.tint as u64) << 32
+    }
+}
+
+/// Blend a glass fill over what lies beneath, holding the contrast bound.
 ///
-/// `alpha` (0..256) is how see-through the glass is where the backdrop is
-/// bright. Where it is darker than `floor`, the fill gets just as much more
-/// weight as it takes to lift the result to `floor` — dark ink stays
-/// legible over a dark patch while a bright one shows through at `alpha`.
-/// Over a blurred backdrop this varies smoothly. `floor == 0` is a plain
-/// blend (dark theme: light ink needs no floor).
-pub fn glass_blend(fg: u32, bg: u32, alpha: u32, floor: u32) -> u32 {
+/// `alpha` (0..256) is the fill weight where the backdrop allows it. Where
+/// the backdrop is darker than `floor` (light glass) or brighter than
+/// `ceil` (dark glass), the fill gets just as much more weight as it takes
+/// to reach the bound — text stays legible over any patch while the rest
+/// shows through at `alpha`. Over a blurred backdrop this varies smoothly.
+/// `fg` must already carry the tint (`GlassInk::fill`).
+pub fn glass_blend(fg: u32, bg: u32, alpha: u32, ink: GlassInk) -> u32 {
     let mut a = alpha.min(256);
-    if floor > 0 {
-        let (lf, lb) = (luma(fg), luma(bg));
-        if lb < floor && lf > floor {
-            let need = ((floor - lb) * 256).div_ceil(lf - lb);
-            a = a.max(need.min(256));
-        }
+    let (lf, lb) = (luma(fg), luma(bg));
+    if ink.floor > 0 && lb < ink.floor && lf > ink.floor {
+        let need = ((ink.floor - lb) * 256).div_ceil(lf - lb);
+        a = a.max(need.min(256));
+    }
+    if ink.ceil < 255 && lb > ink.ceil && lf < ink.ceil {
+        let need = ((lb - ink.ceil) * 256).div_ceil(lb - lf);
+        a = a.max(need.min(256));
     }
     blend(fg, bg, a)
 }
@@ -424,11 +451,12 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
     let wp = crate::gui::background::glass_source_ptr();
     if wp.is_null() { return None; }
     let generation = crate::gui::background::wallpaper_generation();
-    let floor = crate::shade::widgets::palette::glass_floor();
+    let ink = crate::shade::glass::ink();
+    let fill = ink.fill(bg_color);
     let pitch_px = info.pitch as usize / 4;
     let (width, height) = (info.width as usize, info.height as usize);
     let mut k = 0xcbf29ce484222325u64;
-    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64, floor as u64,
+    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64, ink.key(),
               info.width as u64, info.height as u64] {
         k ^= v;
         k = k.wrapping_mul(0x0000_0100_0000_01b3);
@@ -442,7 +470,7 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
             let base = py * pitch_px;
             for px in 0..width {
                 let wpx = unsafe { *wprow.add(px) };
-                buf[base + px] = glass_blend(bg_color, wpx, opacity, floor);
+                buf[base + px] = glass_blend(fill, wpx, opacity, ink);
             }
         }
         *g = Some((k, pitch_px as u32, buf));
@@ -499,10 +527,11 @@ pub fn fill_rounded_chrome_aa(
     } else {
         None
     };
-    // The per-pixel paths (corners, fringe, no-tint fallback) must lift by
-    // the same floor as the tint, or the straight middle sits on the glass
-    // like a pasted-on rectangle.
-    let floor = if paint_content { crate::shade::widgets::palette::glass_floor() } else { 0 };
+    // The per-pixel paths (corners, fringe, no-tint fallback) must use the
+    // same ink as the tint, or the straight middle sits on the glass like a
+    // pasted-on rectangle.
+    let ink = if paint_content { crate::shade::glass::ink() } else { GlassInk::PLAIN };
+    let glass_fill = ink.fill(bg_color);
     let pitch = info.pitch as usize;
 
     // Per-pixel SDF path — used for the border ring + the four rounded corners
@@ -540,12 +569,12 @@ pub fn fill_rounded_chrome_aa(
             // (glass over wallpaper, NO border tint), else the corner bands
             // show a border-coloured bar where the per-pixel path used to add
             // the tint but the straight middle no longer does.
-            put_pixel(shadow, info, px, py, glass_blend(bg_color, bg_pixel, go, floor));
+            put_pixel(shadow, info, px, py, glass_blend(glass_fill, bg_pixel, go, ink));
         } else {
             // Inner fringe: AA transition from border to glass over ~1 px.
             let after_border = blend(border_color, bg_pixel, bo);
             let bg_alpha = (go * inner / 256).min(255);
-            put_pixel(shadow, info, px, py, glass_blend(bg_color, after_border, bg_alpha, floor));
+            put_pixel(shadow, info, px, py, glass_blend(glass_fill, after_border, bg_alpha, ink));
         }
     };
 
@@ -587,7 +616,7 @@ pub fn fill_rounded_chrome_aa(
                         crate::theme::lerp_color(border_a, border_b, t.min(1000))
                     };
                     let after_border = blend(bc, read_pixel(shadow, info, px, py), bo);
-                    put_pixel(shadow, info, px, py, glass_blend(bg_color, after_border, go, floor));
+                    put_pixel(shadow, info, px, py, glass_blend(glass_fill, after_border, go, ink));
                 }
             }
         }

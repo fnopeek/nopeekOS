@@ -1374,6 +1374,11 @@ pub fn intent_shade(args: &str) {
                 }
             }
         }
+        "glass" => {
+            kprintln!();
+            crate::shade::glass::report();
+            kprintln!();
+        }
         "config" => {
             kprintln!();
             kprintln!("  Shade Compositor");
@@ -1702,7 +1707,7 @@ pub fn intent_help_topic(topic: &str) {
             help_note("      Mod+Ctrl+arrow resize  Mod+1-4 workspace  Mod+Shift+1-4 send");
             kprintln!("[npk]");
             help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
-            help_note("        shade.opacity, shade.mod, shade.light_tint");
+            help_note("        shade.opacity, shade.mod, shade.blur  (`shade glass` shows them)");
             help_note("panels: shade.chrome_opacity sets bar + dock (0-255) and");
             help_note("        clears the per-panel keys; shade.bar_opacity /");
             help_note("        shade.dock_opacity then override one of them again.");
@@ -1876,32 +1881,41 @@ pub fn intent_set(args: &str) {
         {
             kprintln!("[npk] cleared shade.bar_opacity / shade.dock_opacity");
         }
-        // Live-apply rendering keys read fresh each frame (e.g.
-        // shade.light_tint) so tuning shows at once, not on the next
-        // incidental redraw. Struct-cached keys (opacity) still need a
-        // compositor rebuild — unchanged.
-        if key.starts_with("shade.") || key.starts_with("code.")
-            || key == "theme" || key == "accent" {
-            // Panel translucency is baked into the panel's pixel buffer at
-            // rasterize time, so a recomposite alone would show the old
-            // value until the app next commits (up to a minute for the
-            // bar). Re-rasterize the cached scenes first — same step the
-            // `theme` intent takes.
-            if key == "shade.blur" { crate::gui::background::reblur(); }
-            // The loop opacity lives in the compositor, read once at start;
-            // move it along so the knob is live like the others.
-            if key == "shade.opacity" {
-                if let Ok(v) = value.trim().parse::<u32>() {
-                    crate::shade::with_compositor(|c| c.opacity = v.min(256));
-                }
-            }
-            crate::shade::widgets::refresh_all_scenes();
-            crate::shade::force_redraw();
-        }
+        apply_config_change(key);
     } else {
         kprintln!("[npk] Usage: set <key> <value>");
         kprintln!("[npk] Keys: timezone, keyboard, lang");
         kprintln!("[npk] Example: set timezone +2");
+    }
+}
+
+/// `unset <key>`: forget a setting. For the glass keys that means "back to
+/// automatic" (`shade glass` shows what automatic chose).
+pub fn intent_unset(args: &str) {
+    let key = args.trim();
+    if key.is_empty() {
+        kprintln!("[npk] Usage: unset <key>");
+        return;
+    }
+    if crate::config::unset(key) {
+        kprintln!("[npk] {} unset", key);
+        apply_config_change(key);
+    } else {
+        kprintln!("[npk] '{}' was not set", key);
+    }
+}
+
+/// Make a changed rendering key visible at once, not on the next incidental
+/// redraw. Panel translucency is baked into the panel's pixel buffer at
+/// rasterize time, so a recomposite alone would show the old value until the
+/// app next commits (up to a minute for the bar) — the cached scenes are
+/// re-rasterized first, the same step the `theme` intent takes.
+fn apply_config_change(key: &str) {
+    if key.starts_with("shade.") || key.starts_with("code.")
+        || key == "theme" || key == "accent" {
+        if key == "shade.blur" { crate::gui::background::reblur(); }
+        crate::shade::widgets::refresh_all_scenes();
+        crate::shade::force_redraw();
     }
 }
 

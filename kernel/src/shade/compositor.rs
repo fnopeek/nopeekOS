@@ -28,12 +28,6 @@ const DOCK_HANDLE_H: u32 = 5;
 /// detached from the bottom edge the way the bar's pills do.
 const DOCK_BOTTOM_GAP: u32 = 12;
 
-/// How much more see-through the terminal is in light mode (0..256). The
-/// same white share that frosts a dark wallpaper turns a light one into a
-/// sheet of paper: at 200 (dark's default) light glass hid the wallpaper,
-/// at 220 it was a white page. Light runs at ~40 % and relies on the
-/// readability floor (`palette::glass_floor`) over dark patches.
-const LIGHT_TERMINAL_OPACITY_DROP: u32 = 100;
 
 
 /// Focus halo. The focused tile bleeds a little accent into the gap around
@@ -352,8 +346,6 @@ pub struct Compositor {
     pub border_inactive: Option<u32>,
     /// Corner radius (in pixels, scaled).
     pub rounding: u32,
-    /// Window background opacity (0=transparent, 256=opaque).
-    pub opacity: u32,
     /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
     /// Background has been drawn (skip on partial updates).
@@ -400,9 +392,6 @@ impl Compositor {
         let rounding = crate::config::get("shade.rounding")
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(10) * scale;
-        let opacity = crate::config::get("shade.opacity")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(200);
 
         Compositor {
             screen_w,
@@ -419,7 +408,6 @@ impl Compositor {
             border_active,
             border_inactive,
             rounding,
-            opacity,
             needs_full_redraw: true,
             aurora_drawn: false,
             mouse: {
@@ -1794,7 +1782,7 @@ impl Compositor {
         // Render windows (back to front)
         let border = self.border;
         let rounding = self.rounding;
-        let opacity = self.opacity;
+        let opacity = crate::shade::glass::params().loop_opacity;
         let scale = self.scale;
         let mut wc = [0u32; 4]; // terminal, widget, surface, other(panel)
         for &wid in self.z_order.iter().rev() {
@@ -1959,13 +1947,7 @@ impl Compositor {
             } else {
                 win.bg_color
             };
-            let content_opacity = if paint_content
-                && crate::shade::widgets::palette::is_light_theme()
-            {
-                opacity.saturating_sub(LIGHT_TERMINAL_OPACITY_DROP)
-            } else {
-                opacity
-            };
+            let content_opacity = opacity;
             if paint_content {
                 // Glass blends over the blurred wallpaper, not the sharp one
                 // (see `background::draw_glass_backdrop`). Inside the cached
@@ -2093,7 +2075,7 @@ impl Compositor {
                     // crisp glyphs, AA corners from the rasteriser, wallpaper in
                     // the gaps — no halo, no per-pill detection.
                     if win.is_dock || win.is_bar {
-                        let floor = crate::shade::widgets::palette::glass_floor();
+                        let ink = crate::shade::glass::ink();
                         for dy in cy..y1 {
                             let local_y = dy - cy;
                             for dx in cx..x1 {
@@ -2107,7 +2089,7 @@ impl Compositor {
                                     let cur = render::read_pixel(shadow, info, dx, dy);
                                     let base = background::glass_base_at(info, dx, dy, cur);
                                     render::put_pixel(shadow, info, dx, dy,
-                                        render::glass_blend(px & 0x00FF_FFFF, base, a, floor));
+                                        render::glass_blend(ink.fill(px & 0x00FF_FFFF), base, a, ink));
                                     continue;
                                 }
                                 render::blend_pixel(shadow, info, dx, dy,
@@ -2306,7 +2288,7 @@ impl Compositor {
         let mut regions = Vec::new();
         let border = self.border;
         let rounding = self.rounding;
-        let opacity = self.opacity;
+        let opacity = crate::shade::glass::params().loop_opacity;
         let scale = self.scale;
 
         for wid_idx in (0..self.z_order.len()).rev() {
@@ -3237,7 +3219,7 @@ impl Compositor {
 
         let border = self.border;
         let rounding = self.rounding;
-        let opacity = self.opacity;
+        let opacity = crate::shade::glass::params().loop_opacity;
         let _scale = self.scale;
 
         // Render windows back to front
@@ -3269,7 +3251,7 @@ impl Compositor {
 
         let border = self.border;
         let rounding = self.rounding;
-        let opacity = self.opacity;
+        let opacity = crate::shade::glass::params().loop_opacity;
 
         for wid_idx in (0..self.z_order.len()).rev() {
             let wid = self.z_order[wid_idx];

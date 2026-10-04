@@ -7,6 +7,7 @@
 //!   Keyboard → Input (Super keybinds) → Compositor → Framebuffer
 //!   kprintln → Terminal buffer → Window content rendering
 
+pub mod glass;
 pub mod window;
 pub mod compositor;
 pub mod terminal;
@@ -1536,7 +1537,7 @@ pub fn poll_render() {
                 if Some(win.id) != focused_id { others_repainted = true; }
                 let border_color = if win.focused { active_border } else { inactive_border };
                 compositor::Compositor::render_window(shadow, info, win,
-                    comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                    comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
                     glow);
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
@@ -1608,7 +1609,7 @@ fn poll_render_layered() {
                     // Re-render window chrome + text on clean background
                     let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                        comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
                         comp.glow_for(win));
                     cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
@@ -1628,7 +1629,7 @@ fn poll_render_legacy() {
                 if let Some(win) = comp.windows.iter().find(|w| w.id == fid && w.workspace == comp.active_workspace) {
                     let border_color = if win.focused { comp.border_active() } else { comp.border_inactive() };
                     compositor::Compositor::render_window(shadow, info, win,
-                        comp.border, comp.rounding, comp.opacity, comp.scale, border_color,
+                        comp.border, comp.rounding, crate::shade::glass::params().loop_opacity, comp.scale, border_color,
                         comp.glow_for(win));
                     cursor::draw_cursor_on_shadow(shadow, info);
                     framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
@@ -1992,11 +1993,12 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.border_inactive", "", "Inactive window border color (hex; empty = palette Border)"),
         ("shade.bar_margin", "6", "Bar strut gap to screen edge (px); bar.wasm reports its own height"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
-        ("shade.opacity", "200", "loop glass opacity (0-256, lower=more transparent; light mode uses 100 less)"),
-        ("shade.blur", "2", "Blur behind glass surfaces (0 = off, 1-8; 2 is about 10 px)"),
-        ("shade.light_floor", "170", "Light glass: least brightness under dark text (0-255, 0 = off)"),
-        ("shade.light_tint", "25", "Darken glass on bright wallpapers (0-100, light mode; higher=darker)"),
-        ("shade.chrome_opacity", "", "Bar/dock panel opacity (0-255; empty = 235 dark / 150 light)"),
+        ("shade.opacity", "auto", "loop glass fill (0-256; auto from wallpaper + theme, see `shade glass`)"),
+        ("shade.blur", "auto", "Blur behind glass (0 = off, 1-8; auto from wallpaper detail)"),
+        ("shade.light_floor", "auto", "Light glass: least brightness under text (0-255; auto from text contrast)"),
+        ("shade.dark_ceil", "auto", "Dark glass: most brightness under text (0-255; auto from text contrast)"),
+        ("shade.glass_tint", "auto", "Wallpaper colour in the glass (0-40 %; auto 10)"),
+        ("shade.chrome_opacity", "", "Bar/dock panel opacity (0-255; auto from wallpaper + theme)"),
         ("shade.bar_opacity", "", "Top-bar opacity (0-255; empty = shade.chrome_opacity)"),
         ("shade.dock_opacity", "", "Dock opacity (0-255; empty = shade.chrome_opacity)"),
         ("shade.flash_opacity", "", "Screenshot dim strength (0-255, 0 = off; empty = 110)"),

@@ -175,30 +175,11 @@ pub fn current() -> Palette {
 }
 
 /// Opacity (0..255) of floating chrome — the bar card and the dock tray.
-///
-/// The design paints panels as a FLAT colour and gets its glass look from
-/// a backdrop blur, which we don't have. Rendering them see-through
-/// instead lets a busy wallpaper's texture read straight through the
-/// panel and destroys exactly that flat-chrome impression — on the
-/// design's smooth gradient the same value looks fine, on marble it does
-/// not. Hence a high default plus a live knob: `set shade.chrome_opacity
-/// <0..255>` (255 = flat, ~180 = clearly see-through). Light mode stays
-/// lower because a near-white panel washes out faster.
+/// Derived from the wallpaper (`shade::glass`), `shade.chrome_opacity`
+/// overrides it.
 pub fn chrome_opacity() -> u32 {
-    let dflt = if is_light_theme() { 150 } else { 235 };
-    opacity_key("shade.chrome_opacity").unwrap_or(dflt)
+    crate::shade::glass::params().chrome_opacity
 }
-
-/// Least luma (0..255) light glass lets through beneath dark ink — see
-/// `render::glass_blend`. The glass is see-through over bright parts of the
-/// wallpaper and lifts only the dark ones. `set shade.light_floor <0..255>`
-/// (0 = off). Dark mode: 0, its light ink needs no floor.
-pub fn glass_floor() -> u32 {
-    if !is_light_theme() { return 0; }
-    opacity_key("shade.light_floor").unwrap_or(LIGHT_GLASS_FLOOR)
-}
-
-const LIGHT_GLASS_FLOOR: u32 = 170;
 
 fn opacity_key(key: &str) -> Option<u32> {
     crate::config::get(key)
@@ -251,11 +232,11 @@ pub fn resolve(token: Token) -> u32 {
     let t = if is_light { &LIGHT } else { &DARK };
 
     match token {
-        Token::Page            => glass(t.page, is_light),
-        Token::Surface         => glass(t.surface, is_light),
-        Token::SurfaceElevated => glass(t.surface_elevated, is_light),
-        Token::SurfaceMuted    => glass(t.surface_muted, is_light),
-        Token::SurfaceHover    => glass(t.surface_hover, is_light),
+        Token::Page            => t.page,
+        Token::Surface         => t.surface,
+        Token::SurfaceElevated => t.surface_elevated,
+        Token::SurfaceMuted    => t.surface_muted,
+        Token::SurfaceHover    => t.surface_hover,
         Token::Border          => t.border,
         Token::OnSurface       => t.on_surface,
         Token::OnSurfaceMuted  => t.on_surface_muted,
@@ -283,32 +264,11 @@ pub fn resolve(token: Token) -> u32 {
     }
 }
 
-/// A translucent glass-fill surface (Surface / SurfaceElevated / SurfaceMuted).
-/// In light mode these are near-white and, blended over a bright wallpaper,
-/// wash out / glare. Darken them proportionally to the wallpaper's overall
-/// luminance so every glass surface (loop, dock, bar, widget apps) keeps a
-/// steady readable tone regardless of how bright the background is. Dark mode
-/// (dark wallpapers) never had the problem, so it's left untouched.
-fn glass(color: u32, is_light: bool) -> u32 {
-    if !is_light { return color; }
-    let shift = light_glass_shift();
-    if shift == 0 { return color; }
-    darken(color, shift.min(255) as u8)
-}
-
-/// How many 0..255 steps to darken a light glass surface, driven by the
-/// wallpaper's overall luminance. Only bright wallpapers (from ~140 up) darken,
-/// ramping to full strength at pure white. Strength is tunable live via
-/// `set shade.light_tint <0..100>` (0 = off, 100 = maximum) without a rebuild.
-fn light_glass_shift() -> u32 {
-    let strength = crate::config::get("shade.light_tint")
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(25)
-        .min(100);
-    if strength == 0 { return 0; }
-    let l = crate::theme::avg_luminance() as u32; // 0..255
-    let over = l.saturating_sub(140); // 0..115; only bright wallpapers darken
-    (over * strength) / 100
+/// Text and surface colour of a theme, whichever is active — glass sizes
+/// its fill for both so light and dark glass stay alike.
+pub fn theme_text_and_surface(light: bool) -> (u32, u32) {
+    let t = if light { &LIGHT } else { &DARK };
+    (t.on_surface, t.surface)
 }
 
 pub fn is_light_theme() -> bool {

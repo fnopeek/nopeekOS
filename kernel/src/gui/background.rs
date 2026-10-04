@@ -35,19 +35,6 @@ static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 /// Downscale factor for the blur. Blur keeps no detail, so it is computed
 /// on a small image and scaled back up.
 const BLUR_DOWN: u32 = 4;
-/// Default box radius on the small image (`shade.blur`, 0 = off). Three
-/// passes of radius r approximate a Gaussian of sigma ≈ sqrt(r(r+1)) small
-/// pixels — at r = 2 about 10 px on screen: the edges of the wallpaper go,
-/// its shapes stay. (8x / r3, ~30 px, read as a white sheet.)
-const BLUR_RADIUS_DEFAULT: usize = 2;
-const BLUR_RADIUS_MAX: usize = 8;
-
-fn blur_radius() -> usize {
-    crate::config::get("shade.blur")
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(BLUR_RADIUS_DEFAULT)
-        .min(BLUR_RADIUS_MAX)
-}
 const BLUR_PASSES: usize = 3;
 
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
@@ -139,6 +126,7 @@ pub fn wallpaper_ptr() -> *const u8 {
 pub fn clear_wallpaper() {
     WALLPAPER_SET.store(false, Ordering::Release);
     BLURRED_SET.store(false, Ordering::Release);
+    crate::shade::glass::set_stats(None);
     crate::theme::clear();
     crate::shade::widgets::refresh_all_scenes();
 }
@@ -237,8 +225,6 @@ pub fn reblur() {
 
 fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
     BLURRED_SET.store(false, Ordering::Release);
-    let radius = blur_radius();
-    if radius == 0 { return; }  // off: glass blends over the sharp wallpaper
     let (w, h, pitch) = (info.width, info.height, info.pitch as usize);
     let dst = if unsafe { !BLURRED.is_null() && BLURRED_W == w && BLURRED_H == h } {
         unsafe { BLURRED }
@@ -257,20 +243,30 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
     let sw = ((w + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
     let sh = ((h + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
     let mut planes = [alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh]];
+    // Detail: mean luma standard deviation inside the blocks — the texture
+    // that the averaging removes, i.e. what would compete with text.
+    let mut detail_sum: u64 = 0;
     for sy in 0..sh {
         if sy % 32 == 0 { crate::xhci::poll_events(); }
         for sx in 0..sw {
             let (x0, y0) = (sx as u32 * BLUR_DOWN, sy as u32 * BLUR_DOWN);
             let (x1, y1) = ((x0 + BLUR_DOWN).min(w), (y0 + BLUR_DOWN).min(h));
             let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            let (mut ls, mut lq) = (0u32, 0u32);
             for y in y0..y1 {
                 for x in x0..x1 {
                     // SAFETY: x < width, y < height; the wallpaper is
                     // screen-sized with the framebuffer pitch (set_wallpaper).
                     let px = unsafe { *(wp.add(y as usize * pitch + x as usize * 4) as *const u32) };
-                    r += (px >> 16) & 0xFF; g += (px >> 8) & 0xFF; b += px & 0xFF; n += 1;
+                    let (pr, pg, pb) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+                    r += pr; g += pg; b += pb; n += 1;
+                    let l = (pr * 77 + pg * 150 + pb * 29) >> 8;
+                    ls += l; lq += l * l;
                 }
             }
+            let n1 = n.max(1);
+            let mean = ls / n1;
+            detail_sum += isqrt((lq / n1).saturating_sub(mean * mean)) as u64;
             let i = sy * sw + sx;
             planes[0][i] = r / n.max(1);
             planes[1][i] = g / n.max(1);
@@ -278,13 +274,43 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
         }
     }
 
-    // 2. Separable box blur, a few passes.
+    let detail = (detail_sum / (sw * sh).max(1) as u64) as u32;
+    let radius = crate::shade::glass::blur_radius(detail);
+
+    // 2. Separable box blur, a few passes (none at radius 0).
     let mut tmp = alloc::vec![0u32; sw * sh];
     for plane in planes.iter_mut() {
-        for _ in 0..BLUR_PASSES {
+        for _ in 0..if radius == 0 { 0 } else { BLUR_PASSES } {
             box_pass(plane, &mut tmp, sw, sh, 1, sw, radius);   // columns
             box_pass(&tmp, plane, sh, sw, sw, 1, radius);       // rows
         }
+    }
+
+    // What the glass will sit on: luma percentiles and mean colour of the
+    // blurred image. `shade::glass` derives its values from these.
+    {
+        let mut hist = [0u32; 256];
+        let (mut rs, mut gs, mut bs) = (0u64, 0u64, 0u64);
+        for i in 0..sw * sh {
+            let (r, g, b) = (planes[0][i], planes[1][i], planes[2][i]);
+            hist[((r * 77 + g * 150 + b * 29) >> 8).min(255) as usize] += 1;
+            rs += r as u64; gs += g as u64; bs += b as u64;
+        }
+        let total = (sw * sh) as u32;
+        let pct = |p: u32| {
+            let want = total * p / 100;
+            let mut acc = 0u32;
+            for (v, &c) in hist.iter().enumerate() {
+                acc += c;
+                if acc > want { return v as u32; }
+            }
+            255
+        };
+        let n = (sw * sh).max(1) as u64;
+        crate::shade::glass::set_stats(Some(crate::shade::glass::Stats {
+            p10: pct(10), p50: pct(50), p90: pct(90), detail,
+            mean_rgb: ((rs / n) as u32) << 16 | ((gs / n) as u32) << 8 | (bs / n) as u32,
+        }));
     }
 
     // 3. Bilinear back up to screen size (sample centres of the blocks).
@@ -316,7 +342,8 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
         BLURRED_H = h;
     }
     BLURRED_SET.store(true, Ordering::Release);
-    crate::kprintln!("[npk] glass: wallpaper blurred in {} ms", (crate::interrupts::ticks() - t0) * 10);
+    crate::kprintln!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
+        (crate::interrupts::ticks() - t0) * 10, detail, radius);
 }
 
 /// One box-blur pass along a line direction. `lines` × `len` samples,
