@@ -22,8 +22,8 @@ const KNOWN_DEVICE_IDS: &[(u16, &str)] = &[
     // Tiger Lake-LP GT2 (Iris Xe, Gen12.1) — same display register layout as
     // ADL-N (Gen12.2). Activated blit-only (no PLL modeset, see `init`): we
     // keep the firmware's live mode and only attach the BCS engine, so the
-    // CPU stops blitting to the slow UC framebuffer. Validated path; the 4K
-    // modeset stays ADL-N-only until tested on TGL.
+    // CPU stops blitting to the slow UC framebuffer. The 4K modeset stays
+    // ADL-N-only until validated on TGL.
     (0x9A78, "Tiger Lake-LP GT2 (blit-only)"),
 ];
 
@@ -44,7 +44,7 @@ const SFUSE_STRAP: u32         = 0xC2014;
 const CDCLK_CTL: u32           = 0x46000;
 const DBUF_CTL_S1: u32         = 0x45008;
 
-// DPLL (Display PLL) — TGL/ADL offsets (NOT ICL!)
+// DPLL (Display PLL) — TGL/ADL offsets (not ICL)
 const DPLL_ENABLE_0: u32       = 0x46010;
 const DPLL_ENABLE_1: u32       = 0x46014;
 const DPLL_CFGCR0_0: u32      = 0x164284;  // TGL/ADL DPLL0
@@ -83,7 +83,7 @@ const PLANE_SURF_1_A: u32     = 0x7019C;
 const DDI_BUF_CTL_A: u32      = 0x64000;
 const DDI_BUF_CTL_B: u32      = 0x64100;
 
-// DDI Clock routing (ICL+) — routes DPLL to DDI/PHY (separate from TRANS_CLK_SEL!)
+// DDI Clock routing (ICL+) — routes DPLL to DDI/PHY (separate from TRANS_CLK_SEL)
 const ICL_DPCLKA_CFGCR0: u32  = 0x164280;
 
 // Combo PHY TX registers (for voltage swing / signal integrity)
@@ -155,7 +155,7 @@ const GEN12_BLT_TLB_INV_CR: u32 = 0xCEE4;  // Gen 12 BCS per-engine TLB invalida
 
 // ── BCS (Blitter Command Streamer) — Gen 12 ExecList (ELSQ) ─────────
 //
-// Gen 12 does NOT support legacy ring mode. All engine submission goes
+// Gen 12 does not support legacy ring mode. All engine submission goes
 // through Enhanced ExecList Submission Queue (ELSQ):
 //   1. Build Logical Ring Context (LRC) image in memory
 //   2. Write context descriptor to ELSQ port
@@ -205,7 +205,7 @@ const RING_HEAD_MASK: u32       = 0x001FFFFC;
 // RING_MODE bits
 const GFX_RUN_LIST_ENABLE: u32  = 1 << 15;  // Gen 8-10 ExecList enable (readback indicator on Gen11+)
 const GEN11_GFX_DISABLE_LEGACY_MODE: u32 = 1 << 3;  // Gen 11+: replaces GFX_RUN_LIST_ENABLE
-const GFX_PREFETCH_DISABLE: u32 = 1 << 10;  // Gen 12: MUST be set!
+const GFX_PREFETCH_DISABLE: u32 = 1 << 10;  // Gen 12: must be set
 const STOP_RING: u32            = 1 << 8;   // MI_MODE bit 8 (REG_BIT(8) in i915)
 
 // RESET_CTL bits
@@ -219,14 +219,14 @@ const MI_LRI_FORCE_POSTED: u32  = 1 << 12;     // Posted write (no ack wait)
 const MI_BB_END: u32            = 0x0A << 23;   // MI_BATCH_BUFFER_END
 
 // XY_FAST_COPY_BLT (Gen 9+, 10 DWORDs)
-// Bits 21:20 = Source Tiling (NOT GGTT flag! 00=linear, correct for us)
+// Bits 21:20 = Source Tiling (not a GGTT flag; 00=linear, correct for us)
 // Bits 14:13 = Dest Tiling (00=linear)
 const XY_FAST_COPY_BLT_CMD: u32 = (2 << 29) | (0x42 << 22);
 const XY_FAST_COPY_BLT_DEPTH_32: u32 = 3 << 24;
 
 // Context descriptor flags (Gen 12)
 // Addressing mode: bits [4:3]. i915 uses INTEL_LEGACY_32B_CONTEXT = 1 << 3
-// on ALL Gen 12 hardware. "Legacy" means 32-bit VA, not legacy ring mode.
+// on all Gen 12 hardware. "Legacy" means 32-bit VA, not legacy ring mode.
 // "Advanced" (bit 4) requires 4-level PPGTT page tables we don't have.
 const CTX_VALID: u32            = 1 << 0;
 const CTX_FORCE_RESTORE: u32    = 1 << 2;   // Bit 2 = Force Context Restore
@@ -362,7 +362,7 @@ fn pll_for_clock(pixel_clock_khz: u32) -> Option<PllParams> {
 }
 
 /// Encode PLL params into DPLL_CFGCR0/CFGCR1 register values (TGL/ADL format).
-/// Bit layout verified against NUC firmware values.
+/// Bit layout verified against firmware-programmed values.
 fn encode_cfgcr(params: &PllParams) -> (u32, u32) {
     // CFGCR0: dco_fraction[24:9] | dco_integer[8:0]
     let cfgcr0 = ((params.dco_fraction as u32) << 9) | (params.dco_integer as u32 & 0x1FF);
@@ -434,7 +434,7 @@ pub struct IntelXeDriver {
     fb_pages: u32,        // Number of 4KB pages allocated
     active_timing: Option<&'static DisplayTiming>,
     measured_hz: u8,      // Refresh measured from the vblank frame counter
-                          // (0 = not measured; firmware mode is only ASSUMED
+                          // (0 = not measured; firmware mode is only assumed
                           // from resolution, so measure it instead of guessing)
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
@@ -443,8 +443,8 @@ pub struct IntelXeDriver {
     bcs_lrc_phys: u64,    // Physical address of LRC (8KB: HWSP + context)
     bcs_initialized: bool,
     // True only after a readback self-test proved the BCS blit actually
-    // PAINTS (ring advancing is not enough — on Tiger Lake the ring caught
-    // up but no pixels landed → black screen). Gates the display-blit path.
+    // paints (ring advancing is not enough: on Tiger Lake the ring catches
+    // up but no pixels land). Gates the display-blit path.
     bcs_verified: bool,
     bcs_readback_got: u32, // last verify_blit_readback dst[0] (diagnostic)
     // Shadow buffer GGTT state
@@ -628,11 +628,11 @@ impl IntelXeDriver {
     /// user never has to run `gpu init` + `gpu blit init` by hand. The set is
     /// the GPUs validated end-to-end on real hardware:
     ///   - ADL-N (modeset + BCS paints + scanout),
-    ///   - Tiger Lake-LP GT2 0x9A78 (blit-only takeover, BCS paints @ ~4ms).
+    ///   - Tiger Lake-LP GT2 0x9A78 (blit-only takeover, BCS paints).
     /// Safe regardless: init() for non-ADL-N is blit-only (no modeset glitch),
     /// and the BCS display path is readback-gated — a GPU that detects but
     /// doesn't paint falls back to the visible CPU/GOP blit, never black.
-    /// A newly-added (untested) device ID should be left OUT of this set until
+    /// A newly-added (untested) device ID should be left out of this set until
     /// validated, so it detects + can be brought up manually first.
     pub fn auto_activate_ok(&self) -> bool {
         is_adln(self.device_id) || matches!(self.device_id, 0x9A78)
@@ -699,7 +699,7 @@ impl IntelXeDriver {
     }
 
     /// Test PLL locking by reading firmware values, disabling, re-writing, re-enabling.
-    /// Does NOT touch the display pipeline — only the PLL.
+    /// Does not touch the display pipeline, only the PLL.
     pub fn test_pll(&self) {
         let (enable_reg, cfgcr0_reg, cfgcr1_reg) = self.dpll_regs();
 
@@ -745,7 +745,7 @@ impl IntelXeDriver {
         let after_disable = mmio_read32(self.bar0, enable_reg);
         kprintln!("[npk]   After disable: ENABLE={:#010x}", after_disable);
 
-        // Step 3: Write back the SAME CFGCR values
+        // Step 3: Write back the same CFGCR values
         kprintln!("[npk]   Step 3: Writing CFGCR0={:#010x} CFGCR1={:#010x}",
             orig_cfgcr0, orig_cfgcr1);
         mmio_write32(self.bar0, cfgcr0_reg, orig_cfgcr0);
@@ -862,7 +862,7 @@ impl IntelXeDriver {
         kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x}",
             fw_plane_ctl, fw_plane_stride, fw_plane_surf);
 
-        // Diagnostic: read GGTT entry to see physical address (LOG ONLY, no writes)
+        // Diagnostic: read GGTT entry to see physical address (log only, no writes)
         let ggtt_entry_idx = fw_plane_surf / 4096;
         let ggtt_entry_off = ggtt_entry_idx * 8;
         let ggtt_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off);
@@ -870,10 +870,10 @@ impl IntelXeDriver {
         kprintln!("[npk]   FW GGTT[{}]: {:#010x}_{:08x}",
             ggtt_entry_idx, ggtt_hi, ggtt_lo);
 
-        // Use the GOP framebuffer address — it's the same memory the display
-        // is already scanning, and it's known-good (text is rendering on it).
-        // The GGTT entry might point to stolen memory (not CPU-accessible),
-        // but the GOP address from Multiboot2 is always safe.
+        // Use the GOP framebuffer address: it's the same memory the display
+        // is already scanning, and it's known-good. The GGTT entry might
+        // point to stolen memory (not CPU-accessible), but the GOP address
+        // is always safe.
         let gop_addr = crate::framebuffer::with_fb(|fb| {
             let info = fb.info();
             (info.addr, info.pitch, info.width, info.height, info.bpp)
@@ -899,7 +899,7 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // The firmware mode's hz above is ASSUMED from resolution. Measure the
+        // The firmware mode's hz above is assumed from resolution. Measure the
         // real refresh from the vblank counter so status + current_hz() report
         // the truth (and we know whether a 60Hz modeset is even worth pursuing).
         self.measured_hz = self.measure_refresh_hz();
@@ -943,7 +943,7 @@ impl IntelXeDriver {
         Ok(fb)
     }
 
-    /// Set a new display mode. Reprogrms DPLL + transcoder timings,
+    /// Set a new display mode. Reprograms DPLL + transcoder timings,
     /// allocates new framebuffer via GGTT, returns aperture address.
     /// DDI/PHY stay running — only pipe+plane are cycled.
     pub fn set_mode(&mut self, width: u32, height: u32, hz: u8) -> Result<FramebufferInfo, GpuError> {
@@ -983,7 +983,7 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
         kprintln!("[npk]   Plane disabled");
 
-        // Step 2: Disable pipe — try BOTH possible config registers
+        // Step 2: Disable pipe — try both possible config registers
         // ADL-N: PIPE_CONF may be at 0x70008 or 0xF0008 depending on stepping
         let pipe_val = mmio_read32(self.bar0, PIPE_CONF_A);
         kprintln!("[npk]   PIPE_CONF(0x70008): {:#010x}", pipe_val);
@@ -1078,7 +1078,7 @@ impl IntelXeDriver {
         kprintln!("[npk]   Plane: {}x{} stride={} surf={:#x}",
             timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
 
-        // Update fb info NOW (before pipe re-enable which might timeout).
+        // Update fb info now (before pipe re-enable which might timeout).
         // The framebuffer, GGTT, and aperture are all valid at this point.
         let fb = FramebufferInfo {
             addr: aperture_addr,
@@ -1090,7 +1090,7 @@ impl IntelXeDriver {
         self.fb = Some(fb);
         self.active_timing = Some(timing);
 
-        // Step 11: Enable HDMI 2.0 scrambling BEFORE pipe enable (i915 sequence)
+        // Step 11: Enable HDMI 2.0 scrambling before pipe enable (i915 sequence)
         if needs_scrambling {
             if !self.enable_scrambling() {
                 kprintln!("[npk]   WARNING: scrambling failed, display may not sync");
@@ -1275,7 +1275,7 @@ impl IntelXeDriver {
         // Enable PW2 (Power Group 2): bit 3 = request, bit 2 = state
         self.enable_power_well(1, "PW2")?;
 
-        // Note: Combo PHY DDI ports (HDMI on ADL-N) do NOT need separate
+        // Note: Combo PHY DDI ports (HDMI on ADL-N) do not need separate
         // DDI power wells. Those are for TypeC/TBT ports only.
         // PW1 + PW2 cover all combo PHY display functionality.
 
@@ -1324,8 +1324,7 @@ impl IntelXeDriver {
         //
         // For 4K@60Hz (594 MHz pixel clock), CDCLK must be >= 312 MHz.
         // Firmware typically sets 312 or higher for HDMI output.
-        // Log current value for diagnostics but don't reprogram yet —
-        // if 4K@60 fails, CDCLK will be a suspect to investigate.
+        // Only logged for diagnostics; CDCLK is not reprogrammed here.
 
         // Enable DBUF (Display Buffer)
         let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);
@@ -1725,7 +1724,7 @@ impl IntelXeDriver {
         self.map_pages_ggtt_at(ring_phys, 1, BCS_RING_GGTT);
         self.map_pages_ggtt_at(lrc_phys, 5, BCS_LRC_GGTT);
         // Gen 12 GGTT TLB invalidation (i915 guc_ggtt_invalidate):
-        // GFX_FLSH_CNTL_GEN6 alone is NOT sufficient on Gen 12!
+        // GFX_FLSH_CNTL_GEN6 alone is not sufficient on Gen 12;
         // Must also write GEN12_GUC_TLB_INV_CR + BLT engine TLB.
         mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
         let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
@@ -1734,7 +1733,7 @@ impl IntelXeDriver {
         mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
         let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
 
-        // ── Step 3: Acquire ALL forcewake domains ────────────────────
+        // ── Step 3: Acquire all forcewake domains ────────────────────
         // Request GT + Render + Media (masked bit write: bit 16 = mask, bit 0 = value)
         // Posted reads after each write flush the PCIe bus (writes are async/posted).
         mmio_write32(self.bar0, FORCEWAKE_GT, (1 << 16) | 1);
@@ -1761,7 +1760,7 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: probe RING_MODE={:#010x} RESET_CTL={:#010x}",
             mode_readback, reset_readback);
 
-        // Re-invalidate GGTT TLB NOW that forcewake is held!
+        // Re-invalidate GGTT TLB now that forcewake is held:
         // TLB regs at 0xCExx are in FORCEWAKE_GT range — writes without
         // forcewake are silently dropped by hardware.
         mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
@@ -1780,7 +1779,7 @@ impl IntelXeDriver {
         } else {
             kprintln!("[npk]   BCS: reset ready");
         }
-        // 4b: Trigger BCS domain reset — GEN6_GDRST is a MASKED register on Gen 11+!
+        // 4b: Trigger BCS domain reset — GEN6_GDRST is a masked register on Gen 11+.
         // Must set mask bit (bit 18 = GEN11_GRDOM_BLT << 16) for write to take effect.
         mmio_write32(self.bar0, GEN6_GDRST,
             (GEN11_GRDOM_BLT << 16) | GEN11_GRDOM_BLT);
@@ -1790,8 +1789,8 @@ impl IntelXeDriver {
             kprintln!("[npk]   BCS: GDRST timeout (reg={:#010x})",
                 mmio_read32(self.bar0, GEN6_GDRST));
         }
-        // 4c: Clear reset request AND CAT_ERROR (bits 0 + 2, masked write)
-        // CAT_ERROR left set could prevent engine from accepting new contexts!
+        // 4c: Clear reset request and CAT_ERROR (bits 0 + 2, masked write).
+        // CAT_ERROR left set could prevent the engine from accepting new contexts.
         mmio_write32(self.bar0, BCS_RESET_CTL, (0x05 << 16) | 0); // mask bits 0+2, clear both
         let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
         for _ in 0..100_000u32 { core::hint::spin_loop(); }
@@ -1802,13 +1801,13 @@ impl IntelXeDriver {
         // 5a: HWSTAM — mask all HW status interrupts (we poll, don't use IRQs)
         mmio_write32(self.bar0, BCS_HWSTAM, 0xFFFF_FFFF);
 
-        // 5b: RING_MODE — set both GEN11_GFX_DISABLE_LEGACY_MODE (bit 3) AND
+        // 5b: RING_MODE — set both GEN11_GFX_DISABLE_LEGACY_MODE (bit 3) and
         //     GFX_RUN_LIST_ENABLE (bit 15) for ADL-N compatibility.
         //     Also set PREFETCH_DISABLE (bit 10) — Gen 12 requirement.
         let mode_bits = GFX_RUN_LIST_ENABLE | GEN11_GFX_DISABLE_LEGACY_MODE | GFX_PREFETCH_DISABLE;
         mmio_write32(self.bar0, BCS_RING_MODE, (mode_bits << 16) | mode_bits);
 
-        // 5c: MI_MODE — clear STOP_RING! After reset, command streamer is stopped.
+        // 5c: MI_MODE — clear STOP_RING. After reset, command streamer is stopped.
         //     Without this, GPU accepts context via ELSQ but never executes ring.
         //     i915: ENGINE_WRITE(RING_MI_MODE, _MASKED_BIT_DISABLE(STOP_RING))
         mmio_write32(self.bar0, BCS_MI_MODE, (STOP_RING << 16) | 0);
@@ -1843,14 +1842,14 @@ impl IntelXeDriver {
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        // Set TAIL=8 in LRC BEFORE submit (single submit, no double-submit race)
+        // Set TAIL=8 in LRC before submit (single submit, no double-submit race)
         self.update_lrc_tail(8);
 
         // ── Step 7: Single ELSQ submit with FORCE_RESTORE ───────────
         self.elsq_submit(true);
 
         // ── Step 8: Probe — check LRC + HWSP in RAM ────────────────
-        // Gen 12 ExecList does NOT update RING_HEAD MMIO live.
+        // Gen 12 ExecList does not update RING_HEAD MMIO live.
         // After context runs + saves, GPU writes HEAD back to LRC in RAM.
         // We check: (a) LRC HEAD value, (b) HWSP modifications, (c) MMIO as fallback.
         let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32; // ctx[5] = HEAD val
@@ -1899,7 +1898,7 @@ impl IntelXeDriver {
 
     /// Populate BCS Logical Ring Context (LRC) image.
     ///
-    /// Gen 12 hardcoded layout: the GPU does NOT execute MI_LRI dynamically.
+    /// Gen 12 hardcoded layout: the GPU does not execute MI_LRI dynamically.
     /// The hardware has a fixed mapping: DWORD N always goes to register X.
     /// The register addresses in the LRC are just markers — positions are fixed.
     ///
@@ -1916,23 +1915,23 @@ impl IntelXeDriver {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32; // page 1 = context state
 
         // SAFETY: lrc_phys is identity-mapped, page 1 is within our 5-page allocation
-        // ALL writes MUST be write_volatile — GPU reads from RAM but the Rust
-        // compiler doesn't see the consumer. Non-volatile writes get eliminated.
+        // All writes must be write_volatile: the GPU reads from RAM but the
+        // compiler doesn't see the consumer, so plain writes get eliminated.
         unsafe {
             // Zero entire context page first
             core::ptr::write_bytes(ctx as *mut u8, 0, 4096);
 
-            // Gen 12 hardcoded context layout (order is critical!)
+            // Gen 12 hardcoded context layout (order is critical)
             ctx.add(0).write_volatile(MI_NOOP);
 
             // MI_LRI: 13 register/value pairs, posted
             ctx.add(1).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
-            // Pair 1: CTX_CONTEXT_CONTROL (must be first!)
+            // Pair 1: CTX_CONTEXT_CONTROL (must be first)
             // i915 init_common_regs(inhibit=true):
             //   _MASKED_BIT_ENABLE(RESTORE_INHIBIT)       → bit 0: set (no saved state)
             //   _MASKED_BIT_ENABLE(INHIBIT_SYN_CTX_SWITCH) → bit 3: set
-            //   _MASKED_BIT_DISABLE(SAVE_INHIBIT)          → bit 2: clear (allow save!)
+            //   _MASKED_BIT_DISABLE(SAVE_INHIBIT)          → bit 2: clear (allow save)
             // mask=0x000D (bits 0,2,3), value=0x0009 (bits 0,3 set, bit 2 clear)
             ctx.add(2).write_volatile(0x22244);
             ctx.add(3).write_volatile(0x000D_0009);
@@ -1971,7 +1970,7 @@ impl IntelXeDriver {
             ctx.add(26).write_volatile(0x222B4); // semaphore
             ctx.add(27).write_volatile(0);
 
-            // ── Second LRI section (gen12_xcs_offsets requires both!) ────
+            // ── Second LRI section (gen12_xcs_offsets requires both) ─────
             // NOP(5): DWords 28-32
             ctx.add(28).write_volatile(MI_NOOP);
             ctx.add(29).write_volatile(MI_NOOP);
@@ -2005,9 +2004,9 @@ impl IntelXeDriver {
 
     /// Update RING_TAIL in LRC and reset HEAD to 0 (stateless ring hack).
     ///
-    /// MUST use write_volatile — the GPU reads this from RAM, but the
-    /// Rust compiler doesn't know that. Non-volatile writes get eliminated
-    /// as "dead stores" in release builds.
+    /// Must use write_volatile: the GPU reads this from RAM, but the
+    /// compiler doesn't know that, so plain writes get eliminated as dead
+    /// stores in release builds.
     fn update_lrc_tail(&self, tail_bytes: u32) {
         let ctx = (self.bcs_lrc_phys + 4096) as *mut u32;
         // SAFETY: within our allocated LRC page
@@ -2021,12 +2020,12 @@ impl IntelXeDriver {
     /// Submit BCS context via ELSQ. Always uses FORCE_RESTORE for
     /// stateless ring operation (HEAD/TAIL reset from LRC each time).
     fn elsq_submit(&self, _force_restore: bool) {
-        // LRCA = page 0 of LRC (HWSP). GPU adds +4096 for context state.
-        // Bug was: we pointed at page 1, GPU read uninitialized memory as context.
+        // LRCA = page 0 of LRC (HWSP). GPU adds +4096 for context state, so
+        // pointing at page 1 would make it read uninitialized memory.
         let lrca_ggtt = BCS_LRC_GGTT; // page 0!
 
         // i915 lrc_descriptor(): LRCA | LEGACY_32B | CTX_VALID = LRCA | 0x9
-        // Bit 8 is NOT privilege on Gen 12 — it's GEN12_CTX_CTRL_OAR_CONTEXT_ENABLE
+        // Bit 8 is not privilege on Gen 12 — it's GEN12_CTX_CTRL_OAR_CONTEXT_ENABLE
         // FORCE_RESTORE only needed when TAIL unchanged on re-submit (i915 fallback)
         let desc_lo: u32 = lrca_ggtt
             | CTX_LEGACY_32B         // bit 3 (i915 default on Gen 12)
@@ -2078,15 +2077,13 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: shadow buffers mapped");
     }
 
-    /// Submit XY_FAST_COPY_BLT via ELSQ context re-submission.
-    /// Prove the BCS engine actually PAINTS: blit a known pattern between two
-    /// scratch GGTT buffers (NOT the live scanout — invisible, safe), then
+    /// Prove the BCS engine actually paints: blit a known pattern between two
+    /// scratch GGTT buffers (not the live scanout — invisible, safe), then
     /// CPU-read the destination. Returns true only if the bytes arrived. On
     /// Tiger Lake the ring advances but no pixels land, so the ring-head
     /// check in `submit_blit` is not enough; this readback is the real proof.
-    /// Also a bring-up oracle: FAIL here = the copy itself is broken (command
-    /// / context / GGTT); PASS-but-screen-black = a scanout/flip targeting
-    /// problem instead.
+    /// A failure here means the copy itself is broken (command / context /
+    /// GGTT); a pass with a black screen means a scanout/flip problem.
     fn verify_blit_readback(&mut self) -> bool {
         if !self.bcs_initialized || self.bar0 == 0 {
             return false;
@@ -2133,6 +2130,7 @@ impl IntelXeDriver {
         ok
     }
 
+    /// Submit XY_FAST_COPY_BLT via ELSQ context re-submission.
     pub fn submit_blit(
         &mut self,
         src_ggtt: u32, src_pitch: u32,
@@ -2267,12 +2265,12 @@ impl IntelXeDriver {
     // ── HDMI 2.0 Scrambling ─────────────────────────────────────────
 
     /// Enable HDMI 2.0 scrambling for TMDS >340 MHz (required for 4K@60).
-    /// Follows i915 sequence: configure sink (SCDC) FIRST, then source (transcoder).
+    /// Follows i915 sequence: configure sink (SCDC) first, then source (transcoder).
     /// Retries SCDC writes if monitor isn't connected yet (HDMI input switching).
     fn enable_scrambling(&self) -> bool {
         kprintln!("[npk]   Enabling HDMI 2.0 scrambling...");
 
-        // Step 1: Tell the monitor to enable scrambling via SCDC I2C (BEFORE source).
+        // Step 1: Tell the monitor to enable scrambling via SCDC I2C (before source).
         // i915 does this in intel_hdmi_handle_sink_scrambling() before DDI enable.
         // Retry up to 10 times with ~500ms pause — monitor may not be
         // connected yet (e.g. HDMI input auto-switching during reboot).

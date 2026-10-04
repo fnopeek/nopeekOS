@@ -1,7 +1,7 @@
 //! GOP (Graphics Output Protocol) Fallback Driver
 //!
-//! Uses the framebuffer provided by the bootloader via Multiboot2.
-//! No modesetting — resolution is fixed at boot by GRUB/UEFI.
+//! Uses the framebuffer the UEFI Graphics Output Protocol set up before
+//! boot. No modesetting: the resolution is fixed by the firmware.
 
 use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
 use alloc::vec::Vec;

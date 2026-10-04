@@ -16,9 +16,8 @@
 //!     list.
 //!   - `touch` moves a slot to the LRU back (marks it recently used).
 //!
-//! This file does **not** read or write GGTT memory — it's a pure
-//! bookkeeping allocator. Actual glyph/tile bytes land in GGTT when
-//! the rasterizer is wired up (P10.5).
+//! This file does not read or write GGTT memory; it is a pure
+//! bookkeeping allocator.
 
 #![allow(dead_code)]
 

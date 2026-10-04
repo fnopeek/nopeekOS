@@ -1,4 +1,4 @@
-//! GGTT partition map — frozen at P10.0.
+//! GGTT partition map.
 //!
 //! The Global Graphics Translation Table is divided into named regions.
 //! These numerical addresses are part of the ABI: every cached GGTT
@@ -10,38 +10,37 @@
 //! offset and forces a full cache rebuild. Do not do this without a
 //! wire-version bump.
 //!
-//! P10.0 scope: constants only. Slab allocator (P10.4) reads from here.
+//! Constants only; the slab allocator (`ggtt_slab`) reads from here.
 
 #![allow(dead_code)]
 
 // ── Partition boundaries (GGTT byte offsets) ──────────────────────────
 
-/// Reserved scratch region at GGTT start. Unused in v1.
+/// Reserved scratch region at GGTT start. Currently unused.
 pub const GGTT_SCRATCH_BASE: u32 = 0x0000_0000;
 pub const GGTT_SCRATCH_END:  u32 = 0x0100_0000;  // 16 MB
 
-/// Framebuffer region (existing — set up by gpu::intel_xe during modeset).
+/// Framebuffer region (set up by gpu::intel_xe during modeset).
 /// 48 MB covers a 4K × 32bpp framebuffer + shadow pair.
 pub const GGTT_FB_BASE: u32 = 0x0100_0000;
 pub const GGTT_FB_END:  u32 = 0x0400_0000;  // 48 MB window
 
-/// BCS infrastructure (existing — ring buffer, LRC, HWSP, test pages).
+/// BCS infrastructure (ring buffer, LRC, HWSP, test pages).
 pub const GGTT_BCS_BASE: u32 = 0x0400_0000;
 pub const GGTT_BCS_END:  u32 = 0x0500_0000;  // 16 MB
 
 /// Glyph atlas region. Inter Variable rendered glyphs keyed by
-/// (glyph_id, size, weight). Populated by `gui/text.rs` (P10.1) and
-/// migrated into GGTT in P10.4.
+/// (glyph_id, size, weight), produced by `gui/text.rs`.
 pub const GGTT_GLYPH_BASE: u32 = 0x0500_0000;
 pub const GGTT_GLYPH_END:  u32 = 0x0600_0000;  // 16 MB
 
 /// Icon atlas region. Phosphor subset, pre-rasterized at build time,
-/// uploaded at boot (P10.9). Alpha-only, 5 size variants.
+/// uploaded at boot. Alpha-only, 5 size variants.
 pub const GGTT_ICON_BASE: u32 = 0x0600_0000;
 pub const GGTT_ICON_END:  u32 = 0x0700_0000;  // 16 MB
 
 /// Tile + composition-layer slab. Primary consumer of GGTT space.
-/// ~916 MB upper bound; the allocator (P10.4) carves this into fixed
+/// ~916 MB upper bound; the slab allocator carves this into fixed
 /// buckets with LRU eviction.
 pub const GGTT_SLAB_BASE: u32 = 0x0700_0000;
 pub const GGTT_SLAB_END:  u32 = 0x4000_0000;  // 1 GB — conservative ceiling
@@ -49,7 +48,7 @@ pub const GGTT_SLAB_END:  u32 = 0x4000_0000;  // 1 GB — conservative ceiling
 // ── Slab bucket sizes ─────────────────────────────────────────────────
 
 /// Slab bucket sizes (bytes), indexed by `BucketKind as usize`.
-/// **Primary bucket is 1 MB (tiles).**
+/// The primary bucket is 1 MB (tiles).
 ///
 /// Off-screen tiles evict first; composition layers evict last. Eviction
 /// kicks in when slab residency exceeds 80 %.
@@ -59,7 +58,7 @@ pub const BUCKET_SIZES: [usize; 7] = [
     16 * 1024,          //  2: 16 KB — mid comp layers (tooltip, small popover)
     64 * 1024,          //  3: 64 KB — larger comp layers (dropdown menu)
     256 * 1024,         //  4: 256 KB — small Canvas, large popover/menu
-    1 * 1024 * 1024,    //  5: 1 MB  — **PRIMARY** tiles + small Canvas
+    1 * 1024 * 1024,    //  5: 1 MB  — primary: tiles + small Canvas
     4 * 1024 * 1024,    //  6: 4 MB  — large Canvas (up to 1024×1024 logical)
 ];
 
@@ -101,9 +100,9 @@ pub const EVICT_WATERMARK_PCT: u32 = 80;
 // some consumer (glyph atlas, tile cache), LRU eviction may re-use
 // the slot but the address never moves.
 //
-// Ordering matches `BucketKind`. The 1 KB bucket is the legacy
-// placeholder from P10.0; it gets zero bytes here so allocs for it
-// fail fast and the tile model stays unambiguous.
+// Ordering matches `BucketKind`. The 1 KB bucket is a legacy
+// placeholder; it gets zero bytes here so allocs for it fail fast and
+// the tile model stays unambiguous.
 
 pub const BUCKET_REGION_BYTES: [usize; 7] = [
     0,                    // 0: Reserved1K   — not used
@@ -111,7 +110,7 @@ pub const BUCKET_REGION_BYTES: [usize; 7] = [
     8 * 1024 * 1024,      // 2: CompMid16K   — 8 MB / 512 slots
     16 * 1024 * 1024,     // 3: CompLarge64K — 16 MB / 256 slots
     32 * 1024 * 1024,     // 4: Small256K    — 32 MB / 128 slots
-    768 * 1024 * 1024,    // 5: Tile1M       — **768 MB / 768 slots (primary)**
+    768 * 1024 * 1024,    // 5: Tile1M       — 768 MB / 768 slots (primary)
     64 * 1024 * 1024,     // 6: Canvas4M     — 64 MB / 16 slots
 ];
 

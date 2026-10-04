@@ -216,7 +216,7 @@ pub fn native_gpu_name() -> Option<&'static str> {
     DETECTED_XE.lock().as_ref().map(|d| d.name())
 }
 
-/// Whether the detected GPU may be AUTO-activated at boot. Only validated
+/// Whether the detected GPU may be auto-activated at boot. Only validated
 /// generations (ADL-N) qualify; others (Tiger Lake) are manual-only for
 /// bring-up so a non-painting BCS blit can't black the desktop at every boot.
 pub fn native_auto_activate_ok() -> bool {
