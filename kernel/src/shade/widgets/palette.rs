@@ -50,8 +50,10 @@ const LIGHT: ThemePalette = ThemePalette {
     surface_hover:    0xFFE4E3DE,
     border:           0xFFDEDCD6,
     on_surface:       0xFF1B1D1F,
-    on_surface_muted: 0xFF5C6166,
-    on_surface_faint: 0xFF8A9096,
+    // Darker than they would need to be on the bare surface: text sits on
+    // glass over the wallpaper, which is darker than `surface` says.
+    on_surface_muted: 0xFF4E5358,
+    on_surface_faint: 0xFF6E747A,
     success:          0xFF4D8A63,
     warning:          0xFFB07A28,
     danger:           0xFFC04C4C,
@@ -350,9 +352,24 @@ fn accent_adjusted(surface: u32) -> u32 {
     let raw = accent_raw();
     let raw_lum = luminance(raw) as i32;
     let surf_lum = luminance(surface) as i32;
+    // Light: the accent is also INK (the loop prompt, links), and it stands
+    // on glass over the wallpaper, not on the near-white `surface` — one
+    // fixed step left a pastel accent barely visible. Darken until it reads
+    // as text.
+    if surf_lum > 128 {
+        let mut c = raw;
+        for _ in 0..16 {
+            if luminance(c) <= LIGHT_ACCENT_MAX_LUM { break; }
+            c = darken(c, 0x10);
+        }
+        return c;
+    }
     if (raw_lum - surf_lum).abs() >= 80 { return raw; }
-    if surf_lum > 128 { darken(raw, 0x60) } else { lighten(raw, 0x60) }
+    lighten(raw, 0x60)
 }
+
+/// Brightest the accent may be in light mode, so it still works as text.
+const LIGHT_ACCENT_MAX_LUM: u32 = 95;
 
 /// Accent pre-mixed over the surface at `weight`/255. The design writes
 /// these as `rgba(accent, .15/.22/.45)`; the rasterizer ignores a token's
