@@ -1,47 +1,29 @@
-//! `fetch`, `Response`, `Headers` — und `AbortController`/`AbortSignal`.
+//! `fetch`, `Response`, `Headers`, `AbortController`/`AbortSignal` and
+//! `XMLHttpRequest`.
 //!
-//! **Warum das eine Runde wert ist.** Der Aufrufzensus stellt
-//! `AbortController` mit 319 Aufrufen auf Platz 4 der Luecke, und die
-//! Fritzbox-Oberflaeche zeigt, was das heisst: ihr `rest-helper.js` baut im
-//! Modulkopf ein `new AbortController()`. Das MODUL scheitert daran, nicht
-//! erst der Aufruf — die ganze API-Schicht der Seite ist damit weg, ohne
-//! dass etwas kaputt aussieht.
+//! Same origin only (`docs/plan/BROWSER_FETCH_ORIGIN.md`). A foreign origin
+//! is rejected with a reason. Without a CORS response check there must be
+//! no foreign response to read, otherwise a public page could read
+//! `https://192.168.178.1/`. `<img src>` and `<script src>` may load cross
+//! origin, but they never hand the bytes to the page; `fetch` would.
 //!
-//! **NUR GLEICHE HERKUNFT.** `docs/plan/BROWSER_FETCH_ORIGIN.md` hat das
-//! Modell entschieden, und §3.5 staffelt es: A Herkunft/Site + `SameSite`,
-//! B Reichweitenriegel im Kernel, C `fetch` gleiche Herkunft, D CORS ganz.
-//! Gebaut ist hier **C ohne seine fremde Haelfte**. Eine fremde Herkunft wird
-//! abgelehnt und sagt warum.
+//! The engine fetches nothing. It queues the request in `pending_fetches`;
+//! the host picks it up, loads it and reports back via
+//! `fetch_done`/`fetch_failed`, the same path as `pending_sheets`. `abort()`
+//! is real: the id moves to `aborted_fetches` and the host calls
+//! `npk_http_cancel`.
 //!
-//! Das ist keine Bequemlichkeit, sondern die Regel des Papiers: *„Eine halbe
-//! CORS ist gefaehrlicher als keine."* Ohne Antwortpruefung darf es keine
-//! fremde Antwort zu lesen geben — sonst liest eine oeffentliche Seite
-//! `https://192.168.178.1/` aus, und §1.4 stellt fest, dass genau davor heute
-//! nichts schuetzt. `<img src>` und `<script src>` gehen zwar auch fremd, aber
-//! sie geben die BYTES nicht an die Seite zurueck; `fetch` taete es.
+//! Not implemented:
 //!
-//! **Die Engine holt nichts.** Sie legt die Anfrage in `pending_fetches`; der
-//! Wirt holt sie ab, laedt und meldet mit `fetch_done`/`fetch_failed` zurueck.
-//! Genau der Weg, den `pending_sheets`/`sheet_done` schon geht — kein zweiter
-//! daneben. Und `abort()` ist deshalb ECHT und nicht nur eine Fahne: die id
-//! wandert nach `aborted_fetches`, der Wirt ruft `npk_http_cancel`.
+//! * `Request` objects. Input is a string (or converts to one);
+//!   `fetch(new Request(u))` throws.
+//! * Bodies other than text: no `FormData`, `Blob`, `ArrayBuffer`.
+//! * `response.body` as a stream, `arrayBuffer()`, `blob()`. `text()` and
+//!   `json()` return the whole response at once.
+//! * `AbortSignal.timeout(ms)`.
 //!
-//! **Was hier NICHT gebaut ist, und woran man es merkt:**
-//!
-//! * `Request`-Objekte. Eingabe ist eine Zeichenkette (oder etwas, das sich
-//!   in eine verwandeln laesst). `fetch(new Request(u))` wirft.
-//! * Ruempfe ausser Text — kein `FormData`, kein `Blob`, kein
-//!   `ArrayBuffer`. `JSON.stringify(...)` als Rumpf ist der gemessene Fall.
-//! * `response.body` als Strom, und `arrayBuffer()`/`blob()`. Es gibt
-//!   `text()` und `json()`, und die geben die ganze Antwort auf einmal.
-//! * `AbortSignal.timeout(ms)`. Die Zeitgeberliste der Engine ist eine
-//!   `Vec<Value>` OHNE Verzoegerung — ein `timeout(5000)` feuerte beim
-//!   naechsten Ablauf, also sofort. Lieber nicht da als falsch da
-//!   ([[feedback_invented_fallback_hides_the_fault]]).
-//!
-//! `Headers` haelt den **rohen Kopfblock als Text**, nicht eine Liste. Das
-//! ist genau, was der Wirt liefert und was er erwartet — an der Grenze wird
-//! damit nichts uebersetzt, und `Set-Cookie` darf sich wiederholen.
+//! `Headers` holds the raw header block as text, not a list: that is what
+//! the host delivers and expects, and `Set-Cookie` may repeat.
 
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -51,27 +33,27 @@ use super::interp::*;
 use super::promise;
 use super::value::*;
 
-/// Wer auf eine Antwort wartet.
+/// Who is waiting for a response.
 pub enum Waiter {
-    /// `fetch()` — das Versprechen wird erfuellt oder abgelehnt.
+    /// `fetch()`: the promise is resolved or rejected.
     Promise(Gc),
-    /// `XMLHttpRequest` — das Objekt selbst nimmt die Antwort auf und ruft
-    /// seine Behandler.
+    /// `XMLHttpRequest`: the object takes the response and calls its
+    /// handlers.
     Xhr(Gc),
 }
 
-/// Eine Anfrage, solange der Wirt sie holt.
+/// A request while the host is fetching it.
 pub struct PendingFetch {
     pub id: u32,
     pub url: String,
     pub method: String,
-    /// Roher Kopfblock, Zeilen mit `\r\n` getrennt.
+    /// Raw header block, lines separated by `\r\n`.
     pub headers: String,
     pub body: Option<String>,
 }
 
-// ── Verborgene Felder ───────────────────────────────────────────────────
-// Dasselbe `\0!`-Muster wie in `url.rs`: kein Name, den JS schreiben kann.
+// ── Hidden fields ───────────────────────────────────────────────────────
+// Same `\0!` pattern as in `url.rs`: not a name JS can write.
 const R_STATUS: &str = "\0!res.status";
 const R_TEXT: &str = "\0!res.text";
 const R_URL: &str = "\0!res.url";
@@ -94,9 +76,8 @@ fn slot(i: &mut Interp, t: &Value, k: &str) -> Value {
     i.get(t, k).unwrap_or(Value::Undefined)
 }
 
-/// Ein Feld, das ein JS-Array haelt, als Rust-Liste. Ein Array legt seine
-/// Elemente als Eigenschaften ab, nicht in einem Rust-Vec — gelesen wird es
-/// deshalb ueber den gewoehnlichen Weg.
+/// A field holding a JS array, as a Rust list. Arrays store their elements
+/// as properties, not in a Rust `Vec`, so it is read the ordinary way.
 fn list_of(i: &mut Interp, t: &Value, k: &str) -> Vec<Value> {
     let a = slot(i, t, k);
     if !matches!(a, Value::Obj(_)) { return Vec::new() }
@@ -116,11 +97,10 @@ fn getter(o: &Gc, name: &str, f: NativeFn, fp: &Gc) {
         writable: false, enumerable: true, configurable: true });
 }
 
-// ── Kopfblock: Text rein, Text raus ─────────────────────────────────────
+// ── Header block: text in, text out ─────────────────────────────────────
 
-/// Einen Namen im rohen Block suchen. Kopfnamen sind ohne Ruecksicht auf
-/// Gross- und Kleinschreibung gleich — das ist keine Bequemlichkeit, es steht
-/// so in RFC 9110, und Server liefern `Content-Type` wie `content-type`.
+/// Find a name in the raw block. Header names are case-insensitive
+/// (RFC 9110).
 fn raw_get(raw: &str, name: &str) -> Option<String> {
     let mut hits: Vec<&str> = Vec::new();
     for line in raw.split("\r\n").flat_map(|l| l.split('\n')) {
@@ -128,7 +108,7 @@ fn raw_get(raw: &str, name: &str) -> Option<String> {
         if k.trim().eq_ignore_ascii_case(name.trim()) { hits.push(v.trim()); }
     }
     if hits.is_empty() { return None }
-    // Mehrfach gesetzte Koepfe kommen als EINE Zeile mit `, ` zurueck.
+    // Repeated headers come back as one line joined with `, `.
     Some(hits.join(", "))
 }
 
@@ -165,11 +145,10 @@ fn raw_of(i: &mut Interp, t: &Value) -> String {
 
 // ── AbortSignal ─────────────────────────────────────────────────────────
 
-/// Der Grund, mit dem ein Abbruch ohne eigenen Grund ablehnt.
+/// The reason an abort without its own reason rejects with.
 ///
-/// Ein `DOMException` gibt es in dieser Engine nicht; gebaut wird deshalb ein
-/// `Error` mit dem NAMEN, auf den Seitencode prueft. Ueber `throw_kind`, damit
-/// die Fehlerobjekte hier nicht ein zweites Mal entstehen.
+/// There is no `DOMException` in this engine, so this builds an `Error`
+/// with the name page code checks, via `throw_kind`.
 fn abort_error(i: &mut Interp) -> Value {
     let Abrupt::Throw(v) = i.throw_kind("Error", "signal is aborted without reason")
         else { return Value::Undefined };
@@ -195,15 +174,15 @@ fn signal_aborted(i: &mut Interp, sig: &Value) -> bool {
     matches!(slot(i, sig, S_ABORTED), Value::Bool(true))
 }
 
-/// Ein Signal auf „abgebrochen" setzen und alles benachrichtigen, was daran
-/// haengt: die angemeldeten Behandler, `onabort`, und die laufende Anfrage.
+/// Set a signal to aborted and notify everything attached: listeners,
+/// `onabort`, and the running request.
 fn do_abort(i: &mut Interp, sig: &Value, reason: Value) -> C<()> {
     if signal_aborted(i, sig) { return Ok(()) }
     let r = if matches!(reason, Value::Undefined) { abort_error(i) } else { reason };
     i.set(sig, S_ABORTED, Value::Bool(true), false)?;
     i.set(sig, S_REASON, r.clone(), false)?;
 
-    // Die laufende Anfrage wirklich abbrechen — nicht nur die Fahne setzen.
+    // Actually cancel the running request, not just set the flag.
     if let Value::Num(id) = slot(i, sig, S_FETCH) {
         let id = id as u32;
         i.aborted_fetches.push(id);
@@ -228,10 +207,8 @@ fn do_abort(i: &mut Interp, sig: &Value, reason: Value) -> C<()> {
 
 // ── fetch ───────────────────────────────────────────────────────────────
 
-/// Die Kopfzeilen aus dem `headers`-Feld der Init lesen.
-///
-/// Zwei Formen kommen vor: ein gewoehnliches Objekt und ein `Headers`. Beide
-/// enden im selben rohen Block.
+/// Read the header lines from the init's `headers` field: a plain object
+/// or a `Headers`. Both end up as the same raw block.
 fn init_headers(i: &mut Interp, init: &Value) -> C<String> {
     let h = i.get(init, "headers")?;
     let Value::Obj(o) = &h else { return Ok(String::new()) };
@@ -249,10 +226,8 @@ fn init_headers(i: &mut Interp, init: &Value) -> C<String> {
     Ok(raw)
 }
 
-/// **`fetch` LEHNT AB, es wirft nicht.** Ein Netz- oder Herkunftsfehler
-/// gehoert ins `catch` des Rufers; wer hier wirft, beendet stattdessen das
-/// rufende Skript — und alles danach laeuft nicht mehr. Die eigene Probe ist
-/// genau darueber gestolpert, zum zweiten Mal in dieser Datei.
+/// `fetch` rejects, it does not throw. A network or origin error belongs
+/// in the caller's `catch`; throwing would abort the calling script.
 fn do_fetch(i: &mut Interp, t: Value, a: &[Value]) -> C<Value> {
     match do_fetch_inner(i, t, a) {
         Ok(v) => Ok(v),
@@ -268,8 +243,8 @@ fn do_fetch(i: &mut Interp, t: Value, a: &[Value]) -> C<Value> {
 fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     let input = a.first().cloned().unwrap_or(Value::Undefined);
     if let Value::Obj(o) = &input {
-        // Ein `Request` gibt es nicht. Das zu sagen ist besser, als seine
-        // Felder zu erraten und die Anfrage still falsch zu stellen.
+        // There is no `Request`. Saying so beats guessing its fields and silently
+        // sending the wrong request.
         if o.borrow().get_own("url").is_some() && o.borrow().get_own("method").is_some() {
             return i.type_err("fetch: Request objects are not supported, pass a URL string");
         }
@@ -301,7 +276,7 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
 
     let p = promise::new_promise(i);
 
-    // Schon abgebrochen, bevor es losging: dann geht gar nichts los.
+    // Already aborted before it started: nothing starts.
     if matches!(signal, Value::Obj(_)) && signal_aborted(i, &signal) {
         let r = slot(i, &signal, S_REASON);
         promise::settle(i, &p, r, true);
@@ -318,7 +293,7 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     Ok(Value::Obj(p))
 }
 
-/// Die Herkunft des Dokuments, als Text.
+/// The document's origin, as text.
 fn document_origin(i: &mut Interp) -> Option<String> {
     let g = Value::Obj(i.realm.global.clone());
     let loc = i.get(&g, "location").ok()?;
@@ -327,13 +302,11 @@ fn document_origin(i: &mut Interp) -> Option<String> {
     super::url::parse_abs(&h).map(|p| p.origin())
 }
 
-/// Eine Adresse aufloesen und auf gleiche Herkunft pruefen. `None` heisst
-/// fremd — was der Rufer daraus macht, ist bei `fetch` eine Ablehnung und
-/// bei `XMLHttpRequest` ein Fehlerereignis.
+/// Resolve a URL and check same origin. `None` means foreign: `fetch`
+/// rejects, `XMLHttpRequest` fires an error event.
 ///
-/// **Hier wird aufgeloest, und nur hier.** Zwei Aufloeser waeren zwei
-/// Meinungen darueber, was `../` bedeutet, und die eine davon entschiede dann
-/// ueber die Herkunft ([[feedback_the_probe_must_use_the_targets_resolver]]).
+/// Resolution happens here and only here, so that the origin check and
+/// the request agree on what `../` means.
 fn same_origin_url(i: &mut Interp, raw: &str) -> C<Option<String>> {
     let g = Value::Obj(i.realm.global.clone());
     let loc = i.get(&g, "location")?;
@@ -349,14 +322,15 @@ fn same_origin_url(i: &mut Interp, raw: &str) -> C<Option<String>> {
     Ok(Some(target.href()))
 }
 
-// ── Was der Wirt zurueckmeldet ──────────────────────────────────────────
+// ── Host callbacks ──────────────────────────────────────────────────────
 
 fn take_waiting(i: &mut Interp, id: u32) -> Option<Waiter> {
     let k = i.fetch_waiting.iter().position(|(n, _)| *n == id)?;
     Some(i.fetch_waiting.remove(k).1)
 }
 
-/// Eine Antwort ist da. `raw_headers` ist der Kopfblock ohne die Statuszeile.
+/// A response arrived. `raw_headers` is the header block without the
+/// status line.
 pub fn fetch_done(i: &mut Interp, id: u32, status: u16, final_url: &str,
                   raw_headers: &str, body: String) {
     let Some(w) = take_waiting(i, id) else { return };
@@ -378,9 +352,8 @@ pub fn fetch_done(i: &mut Interp, id: u32, status: u16, final_url: &str,
     promise::settle(i, &p, Value::Obj(r), false);
 }
 
-/// Die Anfrage ist gescheitert. **Ein `fetch` lehnt mit `TypeError` ab** —
-/// nicht mit dem Status. Ein 404 ist eine ANTWORT und wird erfuellt; nur ein
-/// Netzfehler ist eine Ablehnung, und Seitencode unterscheidet danach.
+/// The request failed. `fetch` rejects with `TypeError`, not with a
+/// status: a 404 is a response and resolves, only a network error rejects.
 pub fn fetch_failed(i: &mut Interp, id: u32, why: &str) {
     let Abrupt::Throw(v) = i.throw_kind("TypeError", &alloc::format!("Failed to fetch: {why}"))
         else { return };
@@ -395,7 +368,7 @@ fn fetch_failed_with(i: &mut Interp, id: u32, reason: Value) {
     }
 }
 
-// ── Einbau ──────────────────────────────────────────────────────────────
+// ── Installation ────────────────────────────────────────────────────────
 
 pub fn install(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
@@ -421,8 +394,8 @@ pub fn install(realm: &mut Realm) {
     meth(&h_proto, "get", |i, t, a| {
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
         let raw = raw_of(i, &t);
-        // `null`, nicht `undefined` — daran unterscheidet Seitencode
-        // „nicht gesetzt" von „leer gesetzt".
+        // `null`, not `undefined`: page code uses it to tell "not set" from
+        // "set to empty".
         Ok(raw_get(&raw, &n).map(Value::string).unwrap_or(Value::Null))
     }, 1, &fp);
     meth(&h_proto, "has", |i, t, a| {
@@ -515,10 +488,8 @@ pub fn install(realm: &mut Realm) {
     getter(&r_proto, "type", |_, _, _| Ok(Value::str("basic")), &fp);
     getter(&r_proto, "bodyUsed", |i, t, _| Ok(slot(i, &t, R_USED)), &fp);
 
-    // **Beide LEHNEN AB, sie werfen nicht.** Ein zweites `text()` auf
-    // derselben Antwort ist ein Fehler — aber ein Fehler im Versprechen. Wer
-    // hier wirft, beendet das rufende Skript, statt in dessen `catch` zu
-    // landen; die eigene Probe ist genau darueber gestolpert.
+    // Both reject, they do not throw. A second `text()` on the same response
+    // is an error, but one delivered through the promise.
     meth(&r_proto, "text", |i, t, _| {
         let p = promise::new_promise(i);
         match body_once(i, &t) {
@@ -530,8 +501,7 @@ pub fn install(realm: &mut Realm) {
     }, 0, &fp);
     meth(&r_proto, "json", |i, t, _| {
         let p = promise::new_promise(i);
-        // **Derselbe Leser wie `JSON.parse`.** Ein eigener waere eine zweite
-        // Semantik, und die laeuft still auseinander.
+        // The same parser as `JSON.parse`, so the two cannot diverge.
         let r = body_once(i, &t).and_then(|v| super::json::parse_value(i, &v));
         match r {
             Ok(x) => promise::settle(i, &p, x, false),
@@ -555,7 +525,7 @@ pub fn install(realm: &mut Realm) {
     realm.abort_signal_proto = s_proto.clone();
     s_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("AbortSignal")));
     let s_ctor = native(Some(fp.clone()), |i, _, _| {
-        // Wie im Browser: ein Signal entsteht am Controller, nicht mit `new`.
+        // As in browsers, a signal is created by its controller, not with `new`.
         i.type_err("Illegal constructor")
     }, "AbortSignal", 0, true);
     s_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(s_proto.clone())));
@@ -574,10 +544,9 @@ pub fn install(realm: &mut Realm) {
         if signal_aborted(i, &t) { return Err(Abrupt::Throw(slot(i, &t, S_REASON))) }
         Ok(Value::Undefined)
     }, 0, &fp);
-    // Ein `AbortSignal` ist kein Knoten, also kann es die Anmeldung des
-    // Dokuments nicht mitbenutzen — `addEventListener` dort verlangt eine
-    // Knoten-id. Es gibt hier genau EINE Art Ereignis, und die Liste dafuer
-    // haengt am Signal selbst.
+    // An `AbortSignal` is not a node, so it cannot use the document's
+    // listener registry (which needs a node id). It has a single event type,
+    // and its listener list hangs off the signal itself.
     meth(&s_proto, "addEventListener", |i, t, a| {
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
         let f = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -626,19 +595,10 @@ pub fn install(realm: &mut Realm) {
 
     // ── navigator.sendBeacon ────────────────────────────────────────────
     //
-    // **Fire and forget: die Antwort interessiert niemanden.** Deshalb steht
-    // kein Warter in `fetch_waiting` — `fetch_done` findet keinen und legt
-    // die Antwort weg. Genau das ist die Semantik.
-    //
-    // Gefunden an Googles Startseite: sie meldet die gemessene Fenstergroesse
-    // mit `navigator.sendBeacon("/client_204?…&biw=…&bih=…")`, und der Aufruf
-    // steht in einem `try{}catch{}`. Ohne die Funktion scheitert er STILL —
-    // im Log stand nichts, und die Seite verhielt sich, als haette sie nie
-    // gemessen.
-    //
-    // Gleiche Herkunft, wie bei `fetch` und `XMLHttpRequest`. Ein Beacon an
-    // eine fremde Herkunft ist der Ausleitungskanal in Reinform; `false`
-    // sagt dem Rufer, dass nichts abging.
+    // Fire and forget: no waiter is registered in `fetch_waiting`, so
+    // `fetch_done` finds none and drops the response. Same origin only, as
+    // for `fetch`; a beacon to a foreign origin would be a pure exfiltration
+    // channel, and `false` tells the caller nothing was sent.
     if let Some(Value::Obj(nav)) = realm.global.borrow().get_own("navigator")
         .and_then(|p| p.value.clone()) {
         let f = native(Some(fp.clone()), |i, _, a| {
@@ -650,7 +610,7 @@ pub fn install(realm: &mut Realm) {
             let Some(url) = same_origin_url(i, &raw)? else { return Ok(Value::Bool(false)) };
             let id = i.next_fetch_id;
             i.next_fetch_id += 1;
-            // POST, wenn etwas mitfaehrt — sonst GET, so wie ein Zaehlpixel.
+            // POST when there is a body, otherwise GET, like a tracking pixel.
             let method = if body.is_some() { "POST" } else { "GET" };
             i.pending_fetches.push(PendingFetch {
                 id, url, method: String::from(method), headers: String::new(), body });
@@ -660,9 +620,8 @@ pub fn install(realm: &mut Realm) {
     }
 }
 
-/// Den Rumpf EINMAL hergeben. `bodyUsed` ist kein Schmuck: eine Antwort
-/// zweimal zu lesen ist ein Fehler, und Seitencode baut darauf, dass er ihn
-/// bekommt statt einer leeren Zeichenkette.
+/// Hand out the body once. Reading a response twice is an error, and page
+/// code relies on getting the error rather than an empty string.
 fn body_once(i: &mut Interp, t: &Value) -> C<Value> {
     if matches!(slot(i, t, R_USED), Value::Bool(true)) {
         return i.type_err("body stream already read");
@@ -671,9 +630,8 @@ fn body_once(i: &mut Interp, t: &Value) -> C<Value> {
     Ok(slot(i, t, R_TEXT))
 }
 
-/// Die Statuszeilen, die vorkommen. Kein vollstaendiger Katalog — was fehlt,
-/// bekommt eine leere Zeichenkette, und das ist auch, was ein Browser fuer
-/// einen unbekannten Code liefert.
+/// Common status texts. An unknown code gets an empty string, which is
+/// also what browsers return.
 fn status_text(s: u16) -> &'static str {
     match s {
         200 => "OK", 201 => "Created", 202 => "Accepted", 204 => "No Content",
@@ -691,30 +649,12 @@ fn status_text(s: u16) -> &'static str {
 
 // ── XMLHttpRequest ──────────────────────────────────────────────────────
 //
-// **Warum das gebaut ist, obwohl es `fetch` gibt.** Googles Startseite
-// entscheidet mit EINER Zeile, ob sie eine Seite mit oder ohne JavaScript
-// ausliefert:
+// Pages feature-test `typeof XMLHttpRequest` and then use it, so it has to
+// be real, not a stub. Same pipeline and same-origin rule as `fetch`.
 //
-//     if (typeof XMLHttpRequest != "undefined") b = "2";
-//     …
-//     if (a == "2" && …) g.value = a;      // <input id="gbv" value="1">
-//
-// Ohne `XMLHttpRequest` bleibt `gbv=1`, und Google schickt die Seite „bitte
-// aktiviere JavaScript". Host-seitig nachgestellt: `GBV=1 xhr=undefined`
-// gegen `GBV=2 xhr=function` — alles andere an beak tat schon, was es soll.
-//
-// **Und deshalb darf es kein Stummel sein.** Ein `function(){}` haette
-// gereicht, damit Google `gbv=2` setzt — und dann BENUTZT die Seite es. Ein
-// Merkmal vorzutaeuschen ist schlimmer, als es nicht zu haben
-// ([[feedback_a_workaround_is_the_wrong_answer_to_a_missing_capability]]).
-//
-// Dieselbe Leitung wie `fetch`, dieselbe Herkunftsregel: nur gleiche
-// Herkunft, siehe `docs/plan/BROWSER_FETCH_ORIGIN.md`.
-//
-// NICHT gebaut: der SYNCHRONE Modus (`open(…, false)`). Die Engine kann
-// nicht blockieren — sie gibt die Kontrolle an den Wirt zurueck, und der
-// holt. Ein synchrones `send` wirft deshalb und sagt warum, statt still
-// etwas Leeres zu liefern.
+// Not implemented: synchronous mode (`open(…, false)`). The engine cannot
+// block; it returns control to the host, which does the fetching. A
+// synchronous `send` throws and says why.
 
 const X_METHOD: &str = "\0!xhr.method";
 const X_URL: &str = "\0!xhr.url";
@@ -731,7 +671,7 @@ fn xhr_state(i: &mut Interp, x: &Value, n: f64) -> C<()> {
     xhr_fire(i, x, "readystatechange")
 }
 
-/// Einen Behandler rufen: `onX` und die ueber `addEventListener` angemeldeten.
+/// Call a handler: `onX` and those registered via `addEventListener`.
 fn xhr_fire(i: &mut Interp, x: &Value, kind: &str) -> C<()> {
     let ev = new_obj(Some(i.realm.object_proto.clone()));
     ev.borrow_mut().define("type", Prop::builtin(Value::str(kind)));
@@ -757,8 +697,8 @@ fn xhr_done(i: &mut Interp, x: &Gc, status: u16, url: &str, raw: &str, body: Str
     let _ = i.set(&xv, X_RESHDRS, Value::str(raw), false);
     let _ = i.set(&xv, X_URL, Value::str(url), false);
     let _ = i.set(&xv, X_FETCH, Value::Undefined, false);
-    // 2, 3, 4 der Reihe nach — Seitencode prueft beides, `readyState` UND
-    // die Ereignisse, und manche warten auf die Zwischenstufen.
+    // 2, 3, 4 in order: page code checks both `readyState` and the events,
+    // and some wait for the intermediate states.
     let _ = xhr_state(i, &xv, 2.0);
     let _ = xhr_state(i, &xv, 3.0);
     let _ = xhr_state(i, &xv, 4.0);
@@ -768,8 +708,8 @@ fn xhr_done(i: &mut Interp, x: &Gc, status: u16, url: &str, raw: &str, body: Str
 
 fn xhr_failed(i: &mut Interp, x: &Gc) {
     let xv = Value::Obj(x.clone());
-    // **Status 0, nicht ein erfundener Fehlercode.** So unterscheidet
-    // Seitencode einen Netzfehler von einer Antwort mit 500.
+    // Status 0, not an invented error code: that is how page code tells a
+    // network error from a 500 response.
     let _ = i.set(&xv, X_STATUS, Value::Num(0.0), false);
     let _ = i.set(&xv, X_TEXT, Value::str(""), false);
     let _ = i.set(&xv, X_FETCH, Value::Undefined, false);
@@ -854,8 +794,8 @@ pub(crate) fn install_xhr(realm: &mut Realm) {
             Some(v) => Some(i.to_string(v)?.to_string()),
         };
         let Some(url) = same_origin_url(i, &raw)? else {
-            // Fremde Herkunft: kein Wurf, ein FEHLEREREIGNIS — so wie im
-            // Browser ohne CORS. Siehe Kopf dieser Datei.
+            // Foreign origin: no throw but an error event, as in browsers without
+            // CORS. See the module header.
             if let Value::Obj(x) = &t { xhr_failed(i, x); }
             return Ok(Value::Undefined);
         };
@@ -938,13 +878,8 @@ mod tests {
         }
     }
 
-    /// **Der ganze Weg eines `XMLHttpRequest`, ohne Wirt.**
-    ///
-    /// Google entscheidet mit `typeof XMLHttpRequest != "undefined"`, ob es
-    /// eine Seite mit JavaScript ausliefert. Ein Stummel haette dafuer
-    /// gereicht — und die Seite haette ihn dann BENUTZT. Der Test faehrt
-    /// deshalb die Anfrage bis zur Antwort durch: anlegen, oeffnen,
-    /// abschicken, den Wirt antworten lassen, Zustaende und Text pruefen.
+    /// The full path of an `XMLHttpRequest` without a host: create, open,
+    /// send, let the host answer, check states and text.
     #[test]
     fn xhr_faehrt_eine_anfrage_zu_ende() {
         let mut i = Interp::new();
@@ -957,14 +892,14 @@ mod tests {
             x.onreadystatechange = function(){ log.push(x.readyState) }; \
             x.onload = function(){ log.push('load:' + x.status) }; \
             String(x.readyState)"), "0");
-        // `open` relativ — die Adresse muss gegen das Dokument aufgeloest werden.
+        // Relative `open`: the URL must be resolved against the document.
         assert_eq!(ausdruck(&mut i, "x.open('GET','../b/d.json'); String(x.readyState)"), "1");
         let _ = ausdruck(&mut i, "x.setRequestHeader('X-A','1'); x.send()");
         let offen = i.take_pending_fetches();
         assert_eq!(offen.len(), 1, "die Anfrage muss beim Wirt liegen");
         assert_eq!(&offen[0].url, "http://beispiel.test/b/d.json", "gegen das Dokument aufgeloest");
         assert!(offen[0].headers.contains("X-A"), "gesetzte Kopfzeile faehrt mit");
-        // Jetzt antwortet der Wirt.
+        // Now the host answers.
         super::fetch_done(&mut i, offen[0].id, 200, &offen[0].url,
                           "content-type: application/json\r\n",
                           alloc::string::String::from("{\"a\":1}"));
@@ -974,8 +909,8 @@ mod tests {
         assert_eq!(ausdruck(&mut i, "x.responseType='json'; String(x.response.a)"), "1");
     }
 
-    /// Fremde Herkunft ist ein FEHLEREREIGNIS, kein Wurf — so wie im Browser
-    /// ohne CORS. Und sie darf gar nicht erst beim Wirt landen.
+    /// Foreign origin is an error event, not a throw, and must never reach the
+    /// host.
     #[test]
     fn xhr_fremde_herkunft_meldet_fehler_und_faehrt_nicht() {
         let mut i = Interp::new();
@@ -989,12 +924,8 @@ mod tests {
         assert!(i.take_pending_fetches().is_empty(), "nichts darf beim Wirt liegen");
     }
 
-    /// **`sendBeacon` ist fire-and-forget** — es meldet nur, ob etwas abging.
-    ///
-    /// Googles Startseite meldet damit die gemessene Fenstergroesse, und der
-    /// Aufruf steht in einem `try{}catch{}`: fehlt die Funktion, scheitert er
-    /// STILL. Fremde Herkunft gibt `false` statt eines Wurfs — ein Beacon
-    /// dorthin waere der Ausleitungskanal in Reinform.
+    /// `sendBeacon` is fire-and-forget and only reports whether something was
+    /// sent. A foreign origin returns `false` instead of throwing.
     #[test]
     fn sendbeacon_schickt_und_meldet_nur_ob() {
         let mut i = Interp::new();
@@ -1005,18 +936,18 @@ mod tests {
         assert_eq!(q.len(), 1);
         assert_eq!(&q[0].url, "http://beispiel.test/client_204?x=1");
         assert_eq!(&q[0].method, "GET", "ohne Rumpf ein GET, wie ein Zaehlpixel");
-        // Mit Rumpf ein POST.
+        // With a body it is a POST.
         assert_eq!(ausdruck(&mut i, "String(navigator.sendBeacon('/p', 'daten'))"), "true");
         let q = i.take_pending_fetches();
         assert_eq!(&q[0].method, "POST");
         assert_eq!(q[0].body.as_deref(), Some("daten"));
-        // Fremd: false, und nichts geht ab.
+        // Foreign: false, and nothing is sent.
         assert_eq!(ausdruck(&mut i, "String(navigator.sendBeacon('https://fremd.test/x'))"), "false");
         assert!(i.take_pending_fetches().is_empty());
     }
 
-    /// Synchron kann die Engine nicht — sie gibt die Kontrolle an den Wirt
-    /// zurueck, und der holt. Das gehoert gesagt, nicht still umgangen.
+    /// The engine cannot do synchronous requests; that is reported, not
+    /// silently worked around.
     #[test]
     fn xhr_synchron_sagt_dass_es_nicht_geht() {
         let mut i = Interp::new();

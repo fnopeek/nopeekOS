@@ -1,22 +1,13 @@
-//! XPath 1.0 over the scripting DOM arena — lexer, parser, evaluator.
+//! XPath 1.0 over the scripting DOM arena: lexer, parser, evaluator.
 //!
-//! Built because htmx finds its `hx-on:` attributes with one, and it is the
-//! last of the thirteen library probes still red. Measured first, as the rule
-//! says: the Chromium census over twelve real target pages records **zero**
-//! XPath calls, so this is not a web requirement by call count — it is a
-//! LIBRARY requirement, and htmx is a library a real page loads.
+//! Covers the language pages and libraries write (htmx finds its `hx-on:`
+//! attributes with it): the abbreviated syntax, the axes that address a
+//! document tree, predicates with the full expression grammar, and the core
+//! function library.
 //!
-//! That measurement decides the SHAPE, not whether to build it. A special case
-//! for htmx's one expression would be a workaround where a capability is
-//! missing; a full XPath 1.0 with namespaces, `following`/`preceding` and the
-//! whole axis set would be gold plate nobody asks for. What is here is the
-//! language a page actually writes: the abbreviated syntax, the axes that
-//! address a document tree, predicates with the real expression grammar, and
-//! the core function library.
-//!
-//! Not implemented, and named rather than faked: namespaces (`namespace::`,
-//! prefixed names resolve as literal names), the `following`/`preceding` axes,
-//! and variables (`$x`) — no caller can bind one through the DOM API anyway.
+//! Not implemented: namespaces (`namespace::`, prefixed names resolve as
+//! literal names), the `following`/`preceding` axes, and variables (`$x`),
+//! which no caller can bind through the DOM API anyway.
 
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -26,8 +17,7 @@ use super::dombind::{Doc, DomNode, ELEMENT_NODE};
 
 /// A node in an XPath node-set. Attributes are not arena nodes, so they are
 /// addressed as (owner element, index into its `attrs`) rather than given a
-/// synthetic arena slot — which would have to be kept in step with every
-/// mutation for the sake of one axis.
+/// synthetic arena slot that would have to track every mutation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum XNode {
     Node(u32),
@@ -73,11 +63,11 @@ fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
 }
 
-/// **The one context rule of the XPath grammar** (§3.7): `*` and a bare name
-/// like `and`, `or`, `div`, `mod` are OPERATORS unless the preceding token is
-/// `@`, `::`, `(`, `[`, `,` or another operator — in which case they are a
+/// The one context rule of the XPath grammar (§3.7): `*` and a bare name
+/// like `and`, `or`, `div`, `mod` are operators unless the preceding token is
+/// `@`, `::`, `(`, `[`, `,` or another operator, in which case they are a
 /// wildcard or a node test. Without it, `.//*[@*[...]]` lexes its second `*`
-/// as a multiplication and the whole expression is a parse error.
+/// as a multiplication.
 fn lex(src: &str) -> Result<Vec<Tok>, String> {
     let b: Vec<char> = src.chars().collect();
     let mut out: Vec<Tok> = Vec::new();
@@ -158,9 +148,8 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             }
             _ if is_name_start(c) => {
                 let start = i;
-                // `:` belongs to a name (`svg:rect`) but `::` does NOT — it is
-                // the axis separator, and letting the name scan swallow it made
-                // `child::p` one long name and every axis silently a tag.
+                // `:` belongs to a name (`svg:rect`) but `::` does not: it is the axis
+                // separator, and swallowing it would turn `child::p` into one name.
                 while i < b.len() && is_name_char(b[i]) {
                     if b[i] == ':' && i + 1 < b.len() && b[i + 1] == ':' {
                         break;
@@ -477,9 +466,8 @@ impl P {
     }
 }
 
-/// A parsed expression, reusable against many context nodes — which is the
-/// point of `createExpression`: htmx parses its one selector once at load and
-/// evaluates it on every node it processes.
+/// A parsed expression, reusable against many context nodes; that is the
+/// point of `createExpression` (parse once, evaluate on every node).
 #[derive(Clone, Debug)]
 pub struct XPath {
     root: Expr,
@@ -504,7 +492,7 @@ struct Ctx<'a> {
 }
 
 impl XPath {
-    /// Evaluate against `context`. Node-sets come back in DOCUMENT ORDER,
+    /// Evaluate against `context`. Node-sets come back in document order,
     /// which is what an iterator result promises and what makes
     /// `iterateNext()` walk a subtree top-down.
     pub fn eval(&self, doc: &Doc, context: XNode) -> XVal {
@@ -560,7 +548,7 @@ fn axis_nodes(doc: &Doc, n: XNode, axis: Axis) -> Vec<XNode> {
                 chain.push(XNode::Node(c));
                 cur = node_ok(doc, c).and_then(|e| e.parent);
             }
-            // Ancestors are a REVERSE axis; document order puts the root first.
+            // Ancestors are a reverse axis; document order puts the root first.
             chain.reverse();
             let mut merged = chain;
             merged.extend(out.drain(..));
@@ -603,7 +591,7 @@ fn descend(doc: &Doc, id: u32, out: &mut Vec<XNode>) {
 }
 
 /// The principal node type of an axis decides what `*` matches (§2.3):
-/// `attribute::*` is every attribute, every other axis is every ELEMENT.
+/// `attribute::*` is every attribute, every other axis is every element.
 fn matches(doc: &Doc, n: XNode, axis: Axis, test: &Test) -> bool {
     let kind = match n {
         XNode::Attr(..) => f64::NAN, // attributes have no arena kind
@@ -684,7 +672,7 @@ pub fn to_str(doc: &Doc, v: &XVal) -> String {
         XVal::Str(s) => s.clone(),
         XVal::Bool(b) => if *b { "true".to_string() } else { "false".to_string() },
         XVal::Num(n) => fmt_num(*n),
-        // A node-set's string-value is that of its FIRST node in document order.
+        // A node-set's string-value is that of its first node in document order.
         XVal::Nodes(ns) => ns.first().map(|n| node_string(doc, *n)).unwrap_or_default(),
     }
 }
@@ -751,7 +739,7 @@ fn root_of(doc: &Doc, mut id: u32) -> u32 {
 }
 
 /// Apply `steps` to a starting node-set, keeping document order and dropping
-/// duplicates — a node reached by two paths appears once (§3.3).
+/// duplicates: a node reached by two paths appears once (§3.3).
 fn walk(doc: &Doc, start: Vec<XNode>, steps: &[Step]) -> Vec<XNode> {
     let mut cur = start;
     for st in steps {
@@ -771,7 +759,7 @@ fn walk(doc: &Doc, start: Vec<XNode>, steps: &[Step]) -> Vec<XNode> {
     cur
 }
 
-/// A predicate keeps a node when the expression is true for it — and a NUMBER
+/// A predicate keeps a node when the expression is true for it, and a number
 /// means "the node at this position" (§3.3), which is why `foo[1]` works.
 fn filter(doc: &Doc, nodes: Vec<XNode>, pred: &Expr) -> Vec<XNode> {
     let size = nodes.len();
@@ -831,7 +819,7 @@ fn binary(op: &str, l: &Expr, r: &Expr, c: &Ctx) -> XVal {
     }
 }
 
-/// `=` against a node-set is EXISTENTIAL (§3.4): true when ANY node compares
+/// `=` against a node-set is existential (§3.4): true when any node compares
 /// equal, which is why `@class = "x"` is not the same question as
 /// `not(@class != "x")`.
 fn compare_eq(doc: &Doc, a: &XVal, b: &XVal, negate: bool) -> bool {
@@ -864,7 +852,7 @@ fn call(name: &str, args: &[Expr], c: &Ctx) -> XVal {
     let s = |i: usize| -> String {
         match args.get(i) {
             Some(a) => to_str(c.doc, &eval(a, c)),
-            // A missing argument defaults to the CONTEXT node's string-value.
+            // A missing argument defaults to the context node's string-value.
             None => node_string(c.doc, c.node),
         }
     };
@@ -902,7 +890,7 @@ fn call(name: &str, args: &[Expr], c: &Ctx) -> XVal {
             XVal::Str(h.find(&nd).map(|i| h[i + nd.len()..].to_string()).unwrap_or_default())
         }
         "substring" => {
-            // 1-based, and rounded — `substring("12345", 1.5, 2.6)` is "234".
+            // 1-based, and rounded: `substring("12345", 1.5, 2.6)` is "234".
             let src: Vec<char> = s(0).chars().collect();
             let start = libm::round(n(1));
             let end = if args.len() > 2 { start + libm::round(n(2)) } else { f64::INFINITY };
@@ -1009,9 +997,8 @@ mod tests {
         to_str(d, &eval_str(d, XNode::Node(0), expr).expect("parse"))
     }
 
-    /// **The expression htmx actually ships.** It is the reason this module
-    /// exists, so it is the first test: every element carrying any attribute
-    /// whose name starts with one of four prefixes.
+    /// The expression htmx ships: every element carrying any attribute whose
+    /// name starts with one of four prefixes.
     #[test]
     fn the_htmx_expression() {
         let d = doc(
@@ -1073,8 +1060,8 @@ mod tests {
         assert_eq!(s(&d, "count(//div/@*)"), "1");
     }
 
-    /// `=` against a node-set is existential, so it is NOT the negation of
-    /// `!=` — the distinction decides what a predicate selects.
+    /// `=` against a node-set is existential, so it is not the negation of
+    /// `!=`; the distinction decides what a predicate selects.
     #[test]
     fn equality_against_a_node_set_is_existential() {
         let d = doc("<body><ul><li>a</li><li>b</li></ul></body>");

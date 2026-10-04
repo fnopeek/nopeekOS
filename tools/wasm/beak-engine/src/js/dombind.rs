@@ -1,20 +1,13 @@
-//! Das DOM fuer JavaScript.
+//! The DOM for JavaScript.
 //!
-//! **Wem gehoert der Baum.** `beak_engine::dom` haelt einen BESITZENDEN Baum
-//! (`Element` haelt seine Kinder), und darin kann JavaScript keine Referenz
-//! halten: ein Handle muesste einen Knoten ueberleben, den ein Nachbar
-//! besitzt. Also wird der Baum in eine **Arena** geflacht — ein `Vec` von
-//! Knoten, und ein Handle ist ein Index.
+//! `beak_engine::dom` is an owning tree (`Element` owns its children), in
+//! which JavaScript cannot hold references. So the tree is flattened into an
+//! arena: a `Vec` of nodes, and a handle is an index. Layout still reads
+//! `dom::Dom`; `Doc::to_dom` writes the arena back so changes become
+//! visible.
 //!
-//! Das ist eine ZWEITE Darstellung desselben Dokuments, und das ist eine
-//! Schuld, keine Loesung: solange beaks Layout den alten Baum liest und JS die
-//! Arena schreibt, wirkt eine DOM-Aenderung NICHT auf das Bild. Die Arena ist
-//! aber genau die Form, zu der der alte Baum vereinheitlicht werden muss —
-//! Indizes statt Besitz — und dieser Schritt macht sie erst messbar.
-//!
-//! **Knotenidentitaet ist beobachtbar.** `document.body === document.body`
-//! muss wahr sein, also wird das JS-Huellobjekt je Knoten EINMAL gebaut und
-//! behalten.
+//! Node identity is observable: `document.body === document.body` must be
+//! true, so each node's JS wrapper is built once and kept.
 
 use alloc::rc::Rc;
 use hashbrown::HashMap;
@@ -24,7 +17,7 @@ use alloc::vec::Vec;
 use super::interp::*;
 use super::value::*;
 
-/// Elemente ohne Schlusstag.
+/// Void elements (no end tag).
 fn is_void(tag: &str) -> bool {
     matches!(tag, "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
         | "link" | "meta" | "source" | "track" | "wbr")
@@ -54,46 +47,39 @@ pub struct DomNode {
     pub text: Rc<str>,
     pub parent: Option<u32>,
     pub children: Vec<u32>,
-    /// Einmal gebaut, dann behalten — sonst waere `el === el` falsch.
+    /// Built once and kept, otherwise `el === el` would be false.
     pub js: Option<Gc>,
-    /// Angemeldete Behandler, je Ereignisart.
+    /// Registered listeners, per event type.
     pub listeners: Vec<(Rc<str>, Value)>,
-    /// Behandler, die als EIGENSCHAFT gesetzt wurden (`el.onclick = f`).
+    /// Handlers set as a property (`el.onclick = f`).
     ///
-    /// Getrennt von `listeners`, weil sie sich anders verhalten: eine zweite
-    /// Zuweisung ERSETZT die erste, waehrend `addEventListener` anhaengt. Und
-    /// sie verdraengt das gleichnamige Attribut — im Browser ist es derselbe
-    /// Platz, nicht zwei.
+    /// Separate from `listeners` because a second assignment replaces the
+    /// first, while `addEventListener` appends. The property and the
+    /// same-named attribute share one slot, as in browsers.
     pub handlers: Vec<(Rc<str>, Value)>,
-    /// Der „schmutzige" Wert eines Steuerelements (HTML §4.10.5.5): was der
-    /// Benutzer getippt oder ein Skript gesetzt hat.
+    /// The dirty value of a control (HTML §4.10.5.5): what the user typed or a
+    /// script set.
     ///
-    /// **Getrennt vom Attribut, und das ist keine Feinheit.** `el.value = x`
-    /// aendert im Browser das `value`-ATTRIBUT NICHT — das bleibt der
-    /// Vorgabewert (`defaultValue`), auf den `form.reset()` zurueckstellt.
-    /// Wer beides zusammenlegt, hat eine Seite, die nach dem Zuruecksetzen
-    /// das Getippte wieder hinschreibt, und `getAttribute("value")` luegt.
+    /// Kept separate from the attribute: `el.value = x` does not change the
+    /// `value` attribute, which stays the default value (`defaultValue`) that
+    /// `form.reset()` restores.
     pub value: Option<Rc<str>>,
-    /// Dasselbe fuer `checked`: `defaultChecked` ist das Attribut.
+    /// The same for `checked`; `defaultChecked` is the attribute.
     pub checked: Option<bool>,
-    /// Nur `<template>`: der Bruchstueck-Knoten, in dem sein Inhalt haengt.
-    /// Entsteht beim ersten `.content` — siehe dort, warum nicht frueher.
+    /// `<template>` only: the fragment node holding its content. Created on
+    /// the first `.content` access.
     pub content: Option<u32>,
-    /// Die `seq` desselben Elements in beaks Baum — die Bruecke zwischen
-    /// Klickpunkt und Knoten. `to_dom` vergibt sie und schreibt sie HIER
-    /// zurueck; das Layout gibt sie beim Treffer aus. Ohne diese Brueckenzahl
-    /// gibt es keinen Weg von „hier wurde geklickt" zu „dieser Knoten".
+    /// The `seq` of the same element in beak's tree: the bridge from a hit
+    /// point to a node. `to_dom` assigns it and writes it back here; layout
+    /// reports it on a hit.
     pub seq: u32,
-    /// Die `seq` des Elements im BAUM, aus dem dieses Dokument gebaut wurde.
+    /// The `seq` of the element in the tree this document was built from.
     ///
-    /// Die Bruecke fuer `getComputedStyle`: die Kaskade laeuft auf beaks Baum
-    /// (`crate::dom`), die Maschine arbeitet auf ihrer eigenen Arena. Ohne
-    /// diesen Verweis gibt es keinen Weg von „dieses JS-Objekt" zu „dieses
-    /// Element, fuer das die Kaskade gerechnet hat".
+    /// The bridge for `getComputedStyle`: the cascade runs on beak's tree
+    /// (`crate::dom`), script works on the arena.
     ///
-    /// `0` heisst „kein Quellknoten" — ein Element, das ein Skript erst
-    /// erzeugt hat. Fuer das kann `getComputedStyle` nur den Inline-Stil
-    /// beantworten, und das ist ehrlicher als eine Zahl aus dem Nichts.
+    /// `0` means no source node: an element created by script. For those
+    /// `getComputedStyle` can only answer from the inline style.
     pub src_seq: u32,
 }
 
@@ -115,21 +101,18 @@ impl DomNode {
     }
 }
 
-/// Was sich am Baum geaendert hat — die Rohaufzeichnung fuer
-/// `MutationObserver`.
+/// A change to the tree: the raw record for `MutationObserver`.
 ///
-/// **Aufgezeichnet wird im BAUM, nicht in der Bindung.** Ein Beobachter, der
-/// sich seine Meldungen aus einem Vergleich zweier Momentaufnahmen rechnet,
-/// meldet „geaendert" und weiss nicht, was; und er kann nicht sehen, dass ein
-/// Knoten weg war und wieder da ist. Die Stellen, an denen sich ein Baum
-/// aendert, sind gezaehlt — also sagen sie es selbst.
+/// Recorded at the tree mutation sites, not derived by diffing snapshots:
+/// a diff cannot say what changed, nor see that a node was removed and
+/// reinserted.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MutKind { ChildList, Attributes, CharacterData }
 
 #[derive(Clone)]
 pub struct Mutation {
     pub kind: MutKind,
-    /// Bei `ChildList` der ELTER, bei den anderen beiden der Knoten selbst.
+    /// For `ChildList` the parent, for the other two the node itself.
     pub target: u32,
     pub added: Vec<u32>,
     pub removed: Vec<u32>,
@@ -137,23 +120,19 @@ pub struct Mutation {
     pub next: Option<u32>,
     pub attr: Option<Rc<str>>,
     pub old: Option<Rc<str>>,
-    /// **Welche beobachteten Knoten diese Aenderung ZUM ZEITPUNKT DER
-    /// AENDERUNG umschlossen haben**, als Bitmaske ueber `Doc::observed`.
+    /// Which observed nodes enclosed this change at the time it happened, as a
+    /// bitmask over `Doc::observed`.
     ///
-    /// Das ist der ganze Grund, warum es diese Maske gibt: die Zugehoerigkeit
-    /// spaeter zu pruefen liest den Baum von SPAETER. Ein Knoten, der erst
-    /// gesetzt und dann eingehaengt wird, waere faelschlich dabei; einer, der
-    /// geaendert und dann entfernt wird, fiele heraus. Beides ist mir genau
-    /// so passiert, und beides sieht aus wie ein Fehler der Bibliothek.
+    /// Checking membership later would read the later tree: a node modified
+    /// and then inserted would wrongly match, one modified and then removed
+    /// would wrongly drop out.
     pub hits: u64,
 }
 
-/// Deckel fuer die Rohaufzeichnung.
+/// Cap on the raw record.
 ///
-/// Ein Skript, das hunderttausend Knoten baut, waehrend ein Beobachter
-/// angemeldet ist, darf den Speicher nicht auffressen. Ueberlaeuft es, wird
-/// das GEMELDET und nicht still verschluckt — ein Beobachter, dem Meldungen
-/// fehlen, ohne dass es jemand sagt, ist schlimmer als gar keiner.
+/// A script building huge numbers of nodes while an observer is attached
+/// must not exhaust memory. Overflow is reported, not swallowed silently.
 pub const MAX_MUTATIONS: usize = 20_000;
 
 pub struct Doc {
@@ -162,41 +141,30 @@ pub struct Doc {
     pub html: Option<u32>,
     pub body: Option<u32>,
     pub head: Option<u32>,
-    /// Hat sich seit dem letzten Zurueckschreiben etwas geaendert?
-    ///
-    /// Ohne diese Fahne muesste JEDER Klick den Baum neu aufbauen und die
-    /// Seite neu auslegen — 130 ms auf dem Geraet, fuer nichts, wenn der
-    /// Behandler nur etwas gezaehlt hat.
+    /// Has anything changed since the last write-back? Without it every click
+    /// would rebuild the tree and relayout the page.
     pub dirty: bool,
-    /// Hat die Seite ueberhaupt Behandler? Solange nicht, braucht das Layout
-    /// keine Treffer-Kaesten aufzuzeichnen.
+    /// Does the page have any handlers? Until it does, layout need not record
+    /// hit boxes.
     pub has_listeners: bool,
-    /// Welches Element den Tastaturfokus hat — gesetzt von `focus()`.
-    ///
-    /// Der Wirt liest es und stellt seinen eigenen Fokus danach
-    /// (`forms.rs::FormState::focus`); ohne diese Zeile war `el.focus()`
-    /// „focus is not a function", und die Fritzbox-Anmeldemaske ist genau
-    /// daran am Ende ihres Aufbaus gescheitert.
+    /// The element with keyboard focus, set by `focus()`. The host reads it and
+    /// sets its own focus accordingly (`forms.rs::FormState::focus`).
     pub focused: Option<u32>,
-    /// Zaehlt jede Aenderung am Baum — und wird NIE zurueckgesetzt.
+    /// Counts every change to the tree and is never reset.
     ///
-    /// `dirty` beantwortet „muss ich zurueckschreiben?" und wird beim
-    /// Zurueckschreiben geloescht. Fuer einen Zwischenspeicher taugt es
-    /// deshalb nicht: nach dem Loeschen ist „unveraendert seit meinem Stand"
-    /// von „seither zweimal geaendert" nicht mehr zu unterscheiden. Ein
-    /// Zaehler, der nur steigt, kann beides.
+    /// `dirty` answers "must I write back?" and is cleared on write-back, so it
+    /// cannot serve a cache: after clearing, "unchanged since my state" and
+    /// "changed twice since" look the same. A monotonic counter can tell.
     pub version: u32,
-    /// Die Rohaufzeichnung fuer `MutationObserver` — leer, solange niemand
-    /// zusieht.
+    /// The raw record for `MutationObserver`; empty while nobody observes.
     pub mutations: Vec<Mutation>,
-    /// Sieht ueberhaupt jemand zu? Ohne diese Fahne zahlte JEDE Seite fuer
-    /// eine Aufzeichnung, die keiner abholt.
+    /// Is anybody observing? Without it every page would pay for a record
+    /// nobody collects.
     pub observing: bool,
-    /// Ist die Aufzeichnung uebergelaufen? Wird beim Zustellen gemeldet.
+    /// Has the record overflowed? Reported on delivery.
     pub mut_overflow: bool,
-    /// Die beobachteten Knoten als `(Knoten, mit Nachkommen)`, in der
-    /// Reihenfolge der Bits in `Mutation::hits`. Der Baum muss NICHT wissen,
-    /// wer zusieht — nur, wo.
+    /// The observed nodes as `(node, subtree)`, in the bit order of
+    /// `Mutation::hits`. The tree need not know who observes, only where.
     pub observed: Vec<(u32, bool)>,
 }
 
@@ -210,9 +178,8 @@ impl Doc {
               observed: Vec::new() }
     }
 
-    /// Aus beaks geparstem Baum. Der `seq` des Originals wird NICHT
-    /// uebernommen — die Arena vergibt eigene Indizes, und die Zuordnung
-    /// zurueck ist die Aufgabe des Schritts, der beide vereinheitlicht.
+    /// From beak's parsed tree. The original `seq` is not taken over; the
+    /// arena assigns its own indices.
     pub fn from_dom(src: &crate::dom::Dom) -> Doc {
         let mut d = Doc::empty();
         let doc = d.doc;
@@ -220,7 +187,7 @@ impl Doc {
         d.html = d.find_tag(d.doc, "html");
         d.body = d.find_tag(d.doc, "body");
         d.head = d.find_tag(d.doc, "head");
-        // Der Aufbau selbst ist keine Aenderung.
+        // Building is not a mutation.
         d.dirty = false;
         d
     }
@@ -238,9 +205,8 @@ impl Doc {
                     let mut n = DomNode::new(ELEMENT_NODE, &el.tag);
                     n.src_seq = el.seq;
                     for (k, v) in &el.attrs {
-                        // Ein Attribut-Behandler ist genauso ein Behandler wie
-                        // ein angemeldeter: ohne diese Zeile bekaeme die Seite
-                        // keine Treffer-Kaesten, und der Klick fiele ins Leere.
+                        // An attribute handler is a handler like a registered one; without
+                        // this the page would get no hit boxes and clicks would go nowhere.
                         if is_handler_attr(k) { self.has_listeners = true; }
                         n.attrs.push((Rc::from(k.as_str()), Rc::from(v.as_str())));
                     }
@@ -260,7 +226,7 @@ impl Doc {
         id
     }
 
-    /// Frei stehender Knoten, noch ohne Elternteil (`createElement`).
+    /// A detached node without a parent (`createElement`).
     pub fn create(&mut self, kind: f64, tag: &str) -> u32 {
         self.touch();
         let id = self.nodes.len() as u32;
@@ -276,11 +242,8 @@ impl Doc {
         None
     }
 
-    /// Welche beobachteten Knoten `node` JETZT umschliessen.
-    ///
-    /// Ein Gang die Elternkette hinauf, genau wie ihn ein echter Motor an
-    /// dieser Stelle macht — die Kosten sind die Tiefe, nicht die Zahl der
-    /// Knoten.
+    /// Which observed nodes enclose `node` now. Walks up the parent chain;
+    /// the cost is the depth, not the node count.
     pub fn hits_for(&self, node: u32) -> u64 {
         let mut bits = 0u64;
         let mut cur = Some(node);
@@ -296,8 +259,7 @@ impl Doc {
         bits
     }
 
-    /// Eine Aenderung notieren — nur, wenn jemand zusieht, und nur, wenn sie
-    /// ueberhaupt jemanden betrifft.
+    /// Record a change, only if somebody observes and it concerns them.
     pub fn record(&mut self, mut m: Mutation) {
         if !self.observing { return }
         m.hits = self.hits_for(m.target);
@@ -306,16 +268,15 @@ impl Doc {
         self.mutations.push(m);
     }
 
-    /// Die Geschwister eines Knotens, wie sie JETZT stehen. Ein Datensatz
-    /// nennt sie so, wie sie zum Zeitpunkt der Aenderung waren — danach
-    /// stimmen sie nicht mehr.
+    /// The siblings of a node as they stand now. A record names them as they
+    /// were at the time of the change; afterwards they are stale.
     fn siblings(&self, parent: u32, at: usize) -> (Option<u32>, Option<u32>) {
         let k = &self.nodes[parent as usize].children;
         (if at > 0 { k.get(at - 1).copied() } else { None }, k.get(at + 1).copied())
     }
 
-    /// Aus dem alten Elternteil aushaengen. Muss VOR jedem Einhaengen laufen,
-    /// sonst steht ein Knoten in zwei Kinderlisten und der Baum ist keiner mehr.
+    /// Detach from the old parent. Must run before every insert, otherwise a
+    /// node sits in two child lists.
     pub fn detach(&mut self, id: u32) {
         self.touch();
         if let Some(p) = self.nodes[id as usize].parent {
@@ -335,10 +296,9 @@ impl Doc {
 
     pub fn append(&mut self, parent: u32, child: u32) {
         self.touch();
-        // **Ein Umhaengen ist ein Entfernen UND ein Einfuegen**, und beides
-        // gehoert gemeldet — die Spezifikation sagt es so, und ein
-        // Beobachter, der nur das Einfuegen saehe, haette den Knoten
-        // zweimal im Baum.
+        // Moving a node is a removal and an insertion, and both are reported
+        // (DOM §4.2.3); an observer that saw only the insertion would have the
+        // node in the tree twice.
         self.detach(child);
         self.nodes[child as usize].parent = Some(parent);
         self.nodes[parent as usize].children.push(child);
@@ -351,13 +311,9 @@ impl Doc {
         }
     }
 
-    /// Einhaengen — und ein BRUCHSTUECK gibt dabei seine Kinder ab.
-    ///
-    /// Das ist keine Feinheit, sondern der Sinn der Sache: `ul.appendChild(
-    /// tpl.content.cloneNode(true))` ist die uebliche Schreibweise, und wer
-    /// das Bruchstueck selbst einhaengt, bekommt ein `<#fragment>`-Element in
-    /// den Baum — ein Element, das es im HTML nicht gibt und das jede
-    /// Formatierung darunter verschiebt.
+    /// Insert; a fragment hands over its children instead of being inserted
+    /// itself (DOM §4.2.3). `ul.appendChild(tpl.content.cloneNode(true))`
+    /// must not put a `#fragment` element into the tree.
     pub fn insert_maybe_fragment(&mut self, parent: u32, child: u32, before: Option<u32>) {
         if &*self.nodes[child as usize].tag == "#fragment" {
             for k in self.nodes[child as usize].children.clone() {
@@ -386,8 +342,7 @@ impl Doc {
         }
     }
 
-    /// Ein Attribut setzen — **der eine Weg**, damit die Aenderung EINMAL
-    /// notiert wird und nicht an zwoelf Stellen vergessen.
+    /// Set an attribute. The single path, so the change is recorded once.
     pub fn set_attr_at(&mut self, id: u32, k: &str, v: &str) {
         self.touch();
         if self.observing {
@@ -399,8 +354,8 @@ impl Doc {
         self.nodes[id as usize].set_attr(k, v);
     }
 
-    /// Ein Attribut entfernen. Ist es gar nicht da, ist es KEINE Aenderung —
-    /// ein Datensatz dafuer waere eine erfundene Meldung.
+    /// Remove an attribute. If it is absent, that is not a change and nothing
+    /// is recorded.
     pub fn remove_attr_at(&mut self, id: u32, k: &str) {
         self.touch();
         let old = self.nodes[id as usize].attr(k).cloned();
@@ -413,9 +368,8 @@ impl Doc {
         self.nodes[id as usize].attrs.retain(|(n, _)| &**n != k);
     }
 
-    /// Den Text eines Text-/Kommentarknotens setzen (`data`, `nodeValue`).
-    /// NICHT fuer frisch gebaute Knoten: dort gibt es keinen alten Wert und
-    /// niemanden, der zusieht.
+    /// Set the text of a text/comment node (`data`, `nodeValue`). Not for
+    /// freshly built nodes: those have no old value and no observer.
     pub fn set_text(&mut self, id: u32, v: Rc<str>) {
         self.touch();
         if self.observing {
@@ -427,7 +381,7 @@ impl Doc {
         self.nodes[id as usize].text = v;
     }
 
-    /// Der Text eines Teilbaums, aneinandergehaengt.
+    /// The concatenated text of a subtree.
     pub fn text_of(&self, id: u32) -> String {
         let n = &self.nodes[id as usize];
         if n.kind == TEXT_NODE { return n.text.to_string(); }
@@ -443,7 +397,7 @@ impl Doc {
         }
     }
 
-    /// Alle Elemente in Dokumentreihenfolge ab `from`.
+    /// All elements in document order from `from`.
     pub fn descendants(&self, from: u32, out: &mut Vec<u32>) {
         for &c in &self.nodes[from as usize].children {
             if self.nodes[c as usize].kind == ELEMENT_NODE { out.push(c); }
@@ -453,20 +407,12 @@ impl Doc {
 }
 
 impl Doc {
-    /// Ein HTML-Bruchstueck parsen und unter `parent` einhaengen.
+    /// Parse HTML as a fragment and insert it under `parent`; the path of
+    /// `innerHTML =` and `insertAdjacentHTML`. Uses beak's own parser.
     ///
-    /// Das ist der Weg von `innerHTML =` und `insertAdjacentHTML`. Es geht
-    /// ueber beaks eigenen Parser — ein zweiter, laxerer waere eine zweite
-    /// Wahrheit darueber, was das Web bedeutet.
-    /// HTML in einen Knoten parsen — als BRUCHSTUECK, nicht als Dokument.
-    ///
-    /// `dom::parse` baut immer ein ganzes Dokument: `<li>x</li>` wird zu
-    /// `<html><body><li>x`. Wer das ungefiltert einhaengt, schiebt bei JEDEM
-    /// `innerHTML` ein `<html><body>` unter das Element — gefunden beim
-    /// Bauen von `append`, und es betraf jede Seite, die `innerHTML` setzt.
-    /// Sichtbar war es nicht, weil `<html>` und `<body>` keinen eigenen
-    /// Kasten malen; kaputt war es trotzdem: `el.children[0]` war nicht das
-    /// erste Element des Textes, sondern der Rahmen darum.
+    /// `dom::parse` always builds a whole document (`<li>x</li>` becomes
+    /// `<html><body><li>x`), so the `<html>`/`<body>` wrapper is stripped;
+    /// otherwise `el.children[0]` would be the wrapper, not the first element.
     pub fn parse_into(&mut self, parent: u32, html: &str, at: Option<usize>) -> Vec<u32> {
         let frag = crate::dom::parse(html);
         let mut made = Vec::new();
@@ -482,19 +428,18 @@ impl Doc {
         made
     }
 
-    /// Ein GANZES Dokument parsen — der Weg von
-    /// `DOMParser.parseFromString`. Anders als `parse_into` bleibt der
-    /// `<html>`/`<head>`/`<body>`-Rahmen STEHEN: hier ist er nicht der
-    /// Rahmen um ein Bruchstueck, sondern das Ergebnis.
+    /// Parse a whole document; the path of `DOMParser.parseFromString`.
+    /// Unlike `parse_into` the `<html>`/`<head>`/`<body>` frame stays: here it
+    /// is the result.
     ///
-    /// Losgeloest wie `createHTMLDocument`: derselbe Knotenspeicher, aber
-    /// kein Elternteil, also sieht ihn weder das Layout noch der Wirt.
+    /// Detached like `createHTMLDocument`: same node store, but no parent, so
+    /// neither layout nor host sees it.
     pub fn parse_document(&mut self, src: &str, html_kind: bool) -> u32 {
         let parsed = crate::dom::parse(src);
         let doc = self.create(DOCUMENT_NODE, "#document");
         if !html_kind {
-            // XML und SVG kennen keinen `<body>`-Rahmen: die Wurzel des
-            // Textes IST die Wurzel des Dokuments.
+            // XML and SVG have no `<body>` frame: the root of the text is the root
+            // of the document.
             for c in fragment_nodes(&parsed.root) {
                 if let Some(id) = self.from_src_node(c) { self.append(doc, id); }
             }
@@ -509,10 +454,8 @@ impl Doc {
             None => self.create(ELEMENT_NODE, "html"),
         };
         self.append(doc, html);
-        // **Der Parser laesst einen leeren `<head>` weg, die Spezifikation
-        // nicht.** Das Bruchstueck-Parsen baut immer beide Kinder, und eine
-        // Seite, die `doc.head` liest, bekaeme sonst `null` fuer ein
-        // Dokument, in dem der Kopf nur leer ist.
+        // The parser omits an empty `<head>`, the spec does not; without this
+        // `doc.head` would be `null` for a document whose head is merely empty.
         for (k, tag) in ["head", "body"].iter().enumerate() {
             if !self.nodes[html as usize].children.iter()
                 .any(|&c| &*self.nodes[c as usize].tag == *tag) {
@@ -525,7 +468,7 @@ impl Doc {
         doc
     }
 
-    /// Einen geparsten Teilbaum in die Arena legen, noch ohne Elternteil.
+    /// Put a parsed subtree into the arena, still without a parent.
     fn from_src_node(&mut self, n: &crate::dom::Node) -> Option<u32> {
         match n {
             crate::dom::Node::Text(t) => {
@@ -550,9 +493,8 @@ impl Doc {
         }
     }
 
-    /// Ein Knoten als HTML. Fuer `innerHTML`/`outerHTML` — und die
-    /// Maskierung ist Pflicht, nicht Kosmetik: ein `<` im Text, das
-    /// unmaskiert herauskommt, macht aus Inhalt Auszeichnung.
+    /// A node as HTML, for `innerHTML`/`outerHTML`. Escaping is required: an
+    /// unescaped `<` in text turns content into markup.
     pub fn serialize(&self, id: u32, inner_only: bool) -> String {
         let n = &self.nodes[id as usize];
         let mut s = String::new();
@@ -573,16 +515,15 @@ impl Doc {
         s
     }
 
-    /// Alle Kinder eines Knotens loesen (fuer `innerHTML =`).
+    /// Detach all children of a node (for `innerHTML =`).
     pub fn clear_children(&mut self, id: u32) {
         self.touch();
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
         for c in &old { self.nodes[*c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
-        // `innerHTML = "…"` raeumt hier ab, bevor es neu baut. Ohne diese
-        // Meldung saehe ein Beobachter nur das Neue und nie, dass das Alte
-        // weg ist — und genau daran haengen die Aufraeumroutinen jeder
-        // Komponentenbibliothek.
+        // `innerHTML = "…"` clears before rebuilding. Without this record an
+        // observer would see only the new nodes, never that the old ones left,
+        // and component libraries clean up on exactly that.
         if self.observing && !old.is_empty() {
             self.record(Mutation { kind: MutKind::ChildList, target: id,
                 added: Vec::new(), removed: old, prev: None, next: None,
@@ -590,7 +531,7 @@ impl Doc {
         }
     }
 
-    /// Einen Teilbaum kopieren (`cloneNode`).
+    /// Copy a subtree (`cloneNode`).
     pub fn clone_node(&mut self, id: u32, deep: bool) -> u32 {
         let (kind, tag, attrs, text, kids) = {
             let n = &self.nodes[id as usize];
@@ -609,38 +550,20 @@ impl Doc {
         new
     }
 
-    /// Zurueck in beaks Baum — der Schritt, der eine DOM-Aenderung UEBERHAUPT
-    /// ERST sichtbar macht.
-    ///
-    /// Solange nur die Arena veraendert wird, bleibt das Bild stehen: Layout,
-    /// Kaskade und Formulare lesen `dom::Dom`. Statt das Layout auf die Arena
-    /// umzubauen — was jede gemessene Zahl dieser Engine aufs Spiel setzen
-    /// wuerde — wird hier zurueckgeschrieben. Der Preis ist ein voller
-    /// Neuaufbau des Baums je Skriptlauf, nicht je Aenderung; gegen ein
-    /// Layout von 150 ms faellt das nicht auf.
-    ///
-    /// `seq` wird NEU vergeben, in Dokumentreihenfolge — genau wie der Parser
-    /// es tut. Damit stimmt die Identitaet, an der die Formularzustaende
-    /// haengen, fuer alles, was der Skriptlauf nicht angefasst hat.
-    /// Eine Aenderung am Baum vermerken. `dirty` fuer „zurueckschreiben",
-    /// `version` fuer jeden, der einen Zwischenspeicher darauf haelt.
+    /// Mark a change to the tree: `dirty` for write-back, `version` for
+    /// anyone caching on it.
     pub fn touch(&mut self) {
         self.dirty = true;
         self.version = self.version.wrapping_add(1);
     }
 
-    /// Der LEBENDE Baum, so wie die Kaskade ihn braucht — ohne etwas zu
-    /// aendern.
+    /// The live tree as the cascade needs it, without changing anything.
     ///
-    /// Unterschied zu `to_dom`: das hier vergibt keine neuen `seq`. `to_dom`
-    /// tut das, weil es die Bruecke zum Layout neu spannt; wer es zwischendurch
-    /// riefe, um nur EINE Frage zu beantworten, wuerde jedem Kasten im
-    /// fertigen Layout die Nummer unter dem Stuhl wegziehen.
-    ///
-    /// Die Kennung ist stattdessen der ARENA-INDEX, der sich nie aendert. Sie
-    /// steht als `seq` im gebauten Element, also findet `find_path` das
-    /// Element mit derselben Zahl wieder, mit der der Rufer sein JS-Objekt
-    /// haelt.
+    /// Unlike `to_dom` this assigns no new `seq`: `to_dom` re-links layout,
+    /// and calling it to answer one question would invalidate every box of
+    /// the current layout. The id is the arena index instead, which never
+    /// changes; `find_path` finds the element by the same number the caller
+    /// holds.
     pub fn live_dom(&self) -> crate::dom::Dom {
         let mut root = crate::dom::Element::bare("#root".into(), 0);
         for c in &self.nodes[self.doc as usize].children {
@@ -656,7 +579,7 @@ impl Doc {
         if n.kind != ELEMENT_NODE { return None; }
         let mut e = crate::dom::Element::bare(n.tag.to_string(), id);
         for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
-        // MUSS nach den Attributen laufen — siehe `to_node`.
+        // Must run after the attributes; see `to_node`.
         e.index_attrs();
         for c in &n.children {
             if let Some(x) = self.live_node(*c) { e.children.push(x); }
@@ -664,6 +587,12 @@ impl Doc {
         Some(crate::dom::Node::Element(e))
     }
 
+    /// Write the arena back into beak's tree; layout, cascade and forms read
+    /// `dom::Dom`, so DOM changes become visible only through this. A full
+    /// rebuild per script run, not per change.
+    ///
+    /// `seq` is reassigned in document order, as the parser does, so the
+    /// identity form state hangs on stays stable for untouched nodes.
     pub fn to_dom(&mut self) -> crate::dom::Dom {
         let mut seq = 0u32;
         let mut root = crate::dom::Element::bare("#root".into(), seq);
@@ -675,7 +604,7 @@ impl Doc {
         crate::dom::Dom { root }
     }
 
-    /// Der Arena-Knoten zu einer `seq` aus dem Layout.
+    /// The arena node for a `seq` from layout.
     pub fn by_seq(&self, seq: u32) -> Option<u32> {
         self.nodes.iter().position(|n| n.kind == ELEMENT_NODE && n.seq == seq).map(|i| i as u32)
     }
@@ -688,12 +617,12 @@ impl Doc {
         if kind == TEXT_NODE { return Some(crate::dom::Node::Text(text.to_string())); }
         if kind != ELEMENT_NODE { return None; }
         *seq += 1;
-        // Die Bruecke: dieselbe Zahl steht jetzt hier und im Layout.
+        // The bridge: the same number now stands here and in layout.
         self.nodes[id as usize].seq = *seq;
         let mut e = crate::dom::Element::bare(tag.to_string(), *seq);
         for (k, v) in &attrs { e.attrs.push((k.to_string(), v.to_string())); }
-        // MUSS nach den Attributen laufen — sonst sind Klassen, id und der
-        // Bloom-Filter leer und kein Selektor trifft mehr.
+        // Must run after the attributes, otherwise classes, id and the bloom
+        // filter are empty and no selector matches.
         e.index_attrs();
         for c in kids {
             if let Some(x) = self.to_node(c, seq) { e.children.push(x); }
@@ -702,62 +631,45 @@ impl Doc {
     }
 }
 
-/// Ein Skript der Seite: entweder sein Text oder die Adresse, unter der er
-/// steht.
+/// A page script: either its text or the URL it lives at.
 pub enum ScriptRef {
-    /// Quelltext und ob `type="module"` daransteht. Die Fahne gehoert
-    /// HIERHER und wird nicht spaeter geraten: ein Modul ohne `import` parst
-    /// auch als Skript, haette dann aber den falschen Bereich und das falsche
-    /// `this` — und zwar still.
-    /// Der dritte Wert ist der KNOTEN des `<script>`. Er ist
-    /// `document.currentScript`, und ohne ihn findet ein Turbopack-Buendel
-    /// seinen eigenen Pfad nicht.
+    /// Source or URL, whether `type="module"` is set, and the `<script>` node.
+    /// The module flag is recorded here, not guessed later: a module without
+    /// `import` also parses as a script, but would get the wrong scope and
+    /// `this`. The node is `document.currentScript`.
     Inline(String, bool, u32),
     External(String, bool, u32),
 }
 
-/// ALLE Skripte der Seite, in Dokumentreihenfolge — eingebettete wie externe.
-///
-/// Die Reihenfolge ist die des Quelltextes, und beak fuehrt sie auch so aus.
-/// Das ist die Bedeutung von `defer` und NICHT die eines blockierenden
-/// `<script>` mitten im Koerper: ein Browser wuerde ein klassisches Skript
-/// ausfuehren, BEVOR er weiterparst, und `document.write` haengt davon ab.
-/// beak hat das Dokument schon fertig, wenn es hier ankommt — also verhaelt
-/// sich alles wie `defer`. Bewusst, und es deckt alles ausser `document.write`.
-/// Ist `t` das Wurzelelement (`<html>`)?
+/// Is `t` the root element (`<html>`)?
 fn is_root_element(i: &mut Interp, t: &Value) -> bool {
     let Ok(id) = node_of(i, t) else { return false };
     i.doc.as_ref().and_then(|d| d.html) == Some(id)
 }
 
-/// Rollt DIESES Element die Seite? Das Wurzelelement und der `<body>` tun
-/// es; jedes andere hat in beak keinen eigenen Rollkasten.
+/// Does this element scroll the page? The root element and `<body>` do;
+/// no other element has its own scroll box in beak.
 ///
-/// `document.scrollingElement` nennt dasselbe Element, und beide Antworten
-/// muessen dieselbe sein: eine Seite liest `scrollingElement` und schreibt
-/// dann dessen `scrollTop`.
+/// `document.scrollingElement` names the same element; pages read it and
+/// then write its `scrollTop`.
 fn is_scrolling_root(i: &mut Interp, t: &Value) -> bool {
     let Ok(id) = node_of(i, t) else { return false };
     let Some(d) = &i.doc else { return false };
     d.html == Some(id) || d.body == Some(id)
 }
 
-/// Die ROLLFLAECHE eines gewoehnlichen Elements: sein Polsterkasten,
-/// vereinigt mit den Rahmenkaesten aller Nachfahren.
-///
-/// Genau das fragt eine Seite, wenn sie `scrollHeight` liest — „passt der
-/// Inhalt in den Kasten?". Ohne die Nachfahren waere die Antwort immer ja.
+/// The scrollable overflow of an ordinary element: its padding box united
+/// with the border boxes of all descendants. That is what `scrollHeight`
+/// asks: does the content fit the box?
 fn scroll_area(i: &Interp, t: &Value) -> Option<(f64, f64)> {
     let id = node_of_ref(i, t).ok()?;
     let g = i.geometry.as_ref()?;
     let d = i.doc.as_ref()?;
     let (own, borders, _) = node_box(i, id)?;
-    // Der Polsterkasten ist der Boden: `scrollHeight` ist nie kleiner als
-    // `clientHeight`. Gemessen wird von der POLSTERkante aus, also nur den
-    // Rahmen hinein — und wir fuehren je Achse nur die SUMME, also ist die
-    // halbe die Schaetzung fuer die eine Seite. Bei gleichen Rahmen ist sie
-    // exakt; ein Rahmen, der links und rechts verschieden ist, verschiebt sie
-    // um wenige Pixel. Gegen die 0, die vorher dastand, ist das keine Frage.
+    // The padding box is the floor: `scrollHeight` is never smaller than
+    // `clientHeight`. Measured from the padding edge, so only the border is
+    // subtracted; only per-axis sums are stored, so half is the estimate for
+    // one side. Exact for symmetric borders.
     let (bl, bt) = (borders.0 / 2.0, borders.1 / 2.0);
     let mut w = (own.2 - borders.0).max(0.0);
     let mut h = (own.3 - borders.1).max(0.0);
@@ -776,9 +688,9 @@ fn scroll_area(i: &Interp, t: &Value) -> Option<(f64, f64)> {
     Some((w, h))
 }
 
-/// Die Argumente von `scrollTo`/`scrollBy`: entweder zwei Zahlen oder ein
-/// Gegenstand mit `left`/`top`. Was fehlt, bleibt `None` und laesst die
-/// Achse in Ruhe — `scrollTo({ top: 0 })` darf nicht waagerecht springen.
+/// The arguments of `scrollTo`/`scrollBy`: two numbers or an object with
+/// `left`/`top`. A missing axis is `None` and left alone:
+/// `scrollTo({ top: 0 })` must not jump horizontally.
 fn scroll_args(i: &mut Interp, a: &[Value]) -> C<(Option<f64>, Option<f64>)> {
     match a.first() {
         Some(o @ Value::Obj(_)) => {
@@ -796,17 +708,22 @@ fn scroll_args(i: &mut Interp, a: &[Value]) -> C<(Option<f64>, Option<f64>)> {
     }
 }
 
-/// Ein Fenstermass, so wie `set_viewport` es abgelegt hat.
+/// A viewport dimension as `set_viewport` stored it.
 fn viewport_num(i: &mut Interp, key: &str) -> Value {
     let g = Value::Obj(i.realm.global.clone());
     match i.get(&g, key) { Ok(v @ Value::Num(_)) => v, _ => Value::Num(0.0) }
 }
 
-/// Dasselbe als Zahl.
+/// The same as a number.
 fn viewport_f(i: &mut Interp, key: &str) -> f64 {
     match viewport_num(i, key) { Value::Num(n) => n, _ => 0.0 }
 }
 
+/// All page scripts, inline and external, in document order.
+///
+/// beak runs them in source order after the document is complete, so all
+/// scripts behave like `defer`; a parser-blocking script mid-body is not
+/// modelled (see `doc_write` for the one place it matters).
 pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
     let mut all = Vec::new();
     d.descendants(d.doc, &mut all);
@@ -816,16 +733,11 @@ pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
         if &*n.tag != "script" { continue; }
         if !script_type_is_js(n) { continue; }
         let module = n.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"));
-        // `nomodule` heisst „nur fuer einen Browser OHNE Module" (HTML
-        // §4.12.1). beak hat Module, also gehoert dieser Zweig UEBERSPRUNGEN
-        // — und das ist keine Ersparnis, sondern Richtigkeit: eine Seite
-        // liefert beide Zweige aus, und wer beide faehrt, laesst zwei
-        // Fassungen derselben Bibliothek um denselben globalen Namen
-        // streiten. Auf der DDG-Ergebnisseite sind das 2 MB, auf der
-        // Startseite ein core-js-Bundle, das beaks eingebaute Zusagen
-        // ERSETZT ([[feedback_a_polyfill_replaces_what_it_judges_broken]]).
-        // Auf einem Modulskript wird das Attribut laut Spezifikation
-        // ignoriert.
+        // `nomodule` means "only for a browser without modules" (HTML §4.12.1).
+        // beak has modules, so this branch is skipped; running both would let two
+        // versions of one library fight over the same global name, and a
+        // polyfill bundle may replace built-ins. On a module script the
+        // attribute is ignored, per spec.
         if !module && n.attr("nomodule").is_some() { continue; }
         match n.attr("src") {
             Some(src) if !src.trim().is_empty() =>
@@ -839,8 +751,8 @@ pub fn page_scripts(d: &Doc) -> Vec<ScriptRef> {
     out
 }
 
-/// Ein `type`, das nicht JavaScript meint (`application/json`,
-/// `text/template`), ist Nutzlast und kein Programm.
+/// A `type` that does not mean JavaScript (`application/json`,
+/// `text/template`) is payload, not a program.
 fn script_type_is_js(n: &DomNode) -> bool {
     match n.attr("type") {
         None => true,
@@ -851,12 +763,7 @@ fn script_type_is_js(n: &DomNode) -> bool {
     }
 }
 
-/// Die Inhalte aller `<script>`-Elemente OHNE `src`, in Dokumentreihenfolge.
-///
-/// Nur die eingebetteten: ein `src` muesste geholt werden, und die Reihenfolge
-/// zwischen geholten und eingebetteten Skripten ist eine eigene Frage
-/// (`defer`, `async`, und was ein `document.write` dazwischen anrichtet).
-/// Bewusst der kleinere, ehrliche Anfang.
+/// The text of all `<script>` elements without `src`, in document order.
 pub fn inline_scripts(d: &Doc) -> Vec<String> {
     let mut all = Vec::new();
     d.descendants(d.doc, &mut all);
@@ -871,21 +778,20 @@ pub fn inline_scripts(d: &Doc) -> Vec<String> {
     out
 }
 
-// ── Selektoren ──────────────────────────────────────────────────────────────
+// ── Selectors ───────────────────────────────────────────────────────────────
 //
-// Eine EIGENE, kleine Auswertung — nicht die aus `css.rs`. Die passt auf
-// beaks `Element` und nicht auf die Arena, und sie hierher zu ziehen waere der
-// zweite Umbau in einem Schritt. Abgedeckt ist, was echter Code fast immer
-// benutzt: `tag`, `#id`, `.class`, `[attr]`, `[attr=wert]`, beliebig
-// kombiniert, dazu Nachfahren (Leerzeichen), Kind (`>`) und Listen (`,`).
-// Was fehlt, faellt als NICHT GETROFFEN auf, nicht als falscher Treffer.
+// A small matcher of its own, not the one in `css.rs`, which works on
+// beak's `Element` rather than the arena. Covers `tag`, `#id`, `.class`,
+// `[attr]`, `[attr=value]` in any combination, descendant (space), child
+// (`>`) and lists (`,`). Anything unsupported does not match, rather than
+// matching wrongly.
 
 fn matches_simple(d: &Doc, id: u32, sel: &str) -> bool {
     let n = &d.nodes[id as usize];
     if n.kind != ELEMENT_NODE { return false; }
     let mut rest = sel.trim();
     if rest == "*" { return true; }
-    // Fuehrender Typselektor.
+    // Leading type selector.
     let tag_end = rest.find(['.', '#', '[']).unwrap_or(rest.len());
     if tag_end > 0 {
         if !n.tag.eq_ignore_ascii_case(&rest[..tag_end]) { return false; }
@@ -917,8 +823,8 @@ fn matches_simple(d: &Doc, id: u32, sel: &str) -> bool {
     true
 }
 
-/// Ein zusammengesetzter Selektor, von rechts nach links geprueft — so herum,
-/// weil der rechte Teil den Kandidaten schon festlegt.
+/// A compound selector, checked right to left, because the rightmost part
+/// already fixes the candidate.
 fn matches_compound(d: &Doc, id: u32, sel: &str) -> bool {
     let mut parts: Vec<(&str, char)> = Vec::new();
     let mut comb = ' ';
@@ -965,13 +871,12 @@ pub fn query(d: &Doc, from: u32, sel: &str, all: bool) -> Vec<u32> {
     out
 }
 
-// ── Die JS-Seite ────────────────────────────────────────────────────────────
+// ── The JS side ─────────────────────────────────────────────────────────────
 
 use super::interp::C;
 
-/// Der Index im Huellobjekt. Nicht aufzaehlbar und nicht konfigurierbar — ein
-/// Skript, das ueber die Eigenschaften eines Elements laeuft, darf ihn nicht
-/// sehen.
+/// The index in the wrapper object. Non-enumerable and non-configurable, so
+/// a script iterating an element's properties does not see it.
 const SLOT: &str = "__node";
 
 pub fn node_of(i: &mut Interp, v: &Value) -> C<u32> {
@@ -981,27 +886,17 @@ pub fn node_of(i: &mut Interp, v: &Value) -> C<u32> {
     }
 }
 
-/// Wie `node_of`, aber `window` zaehlt als das DOKUMENT.
-///
-/// `window.addEventListener("click", …)` ist die haeufigste Anmeldung
-/// ueberhaupt, und im Browser bekommt das Fenster blasende Ereignisse als
-/// LETZTES. Der Wurzelknoten steht in jeder Zustellkette genau dort — also
-/// ist er die richtige Adresse, nicht eine Naeherung.
+/// Like `node_of`, but `window` counts as the document. The window receives
+/// bubbling events last, and the root node sits exactly there in every
+/// propagation path, so it is the right target, not an approximation.
 fn target_node(i: &mut Interp, v: &Value) -> C<u32> {
-    // **Kein `this` heisst das GLOBALE Objekt, nicht „kein Ziel".** WebIDL
-    // §3.7.4 sagt es woertlich: ist der `this`-Wert null oder undefined,
-    // tritt das globale Objekt an seine Stelle — und erst danach wird
-    // geprueft, ob das die Schnittstelle ueberhaupt erfuellt. Fuer
-    // `EventTarget` erfuellt `window` sie, also traegt genau diese Regel das
-    // haeufigste Idiom im Web: `addEventListener("resize", f)` OHNE Empfaenger.
-    // Ein blanker Aufruf uebergibt laut Sprachkern `undefined` (der globale
-    // Bereich ist ein Umgebungssatz, kein Eigenschaftsbezug), und beak machte
-    // daraus einen TypeError — auf DuckDuckGos Ergebnisseite starb daran der
-    // Zeitgeber, der React einhaengt, und die Seite blieb leer.
+    // A missing `this` means the global object, not "no target" (WebIDL
+    // §3.7.4): if `this` is null or undefined the global object takes its
+    // place, and only then is the interface checked. `window` satisfies
+    // `EventTarget`, which makes a bare `addEventListener("resize", f)` work.
     //
-    // `node_of` bekommt die Regel NICHT: `window` ist kein `Node`, ein
-    // blankes `appendChild(x)` muss weiter werfen — auch das steht so in
-    // derselben Vorschrift.
+    // `node_of` does not get this rule: `window` is not a `Node`, so a bare
+    // `appendChild(x)` must still throw.
     if matches!(v, Value::Undefined | Value::Null) {
         return match &i.doc { Some(d) => Ok(d.doc), None => i.type_err("no document") };
     }
@@ -1013,24 +908,22 @@ fn target_node(i: &mut Interp, v: &Value) -> C<u32> {
     node_of(i, v)
 }
 
-/// Welches Stueck eines Dokuments gesucht ist.
+/// Which part of a document is wanted.
 #[derive(Clone, Copy, PartialEq)]
 enum DocPart { Root, Head, Body }
 
-/// `documentElement` / `head` / `body` — von DIESEM Dokumentknoten aus.
+/// `documentElement` / `head` / `body`, relative to this document node.
 ///
-/// Fuer das Hauptdokument steht die Antwort gemerkt in `Doc`; fuer jedes
-/// andere (`implementation.createHTMLDocument`) wird gelaufen. Zwei Wege und
-/// nicht einer, weil der gemerkte auch dann noch stimmt, wenn eine Seite
-/// ihren Rumpf umbaut — und weil ein Umbau des Hauptwegs hier nichts
-/// gewinnen und alles riskieren wuerde.
+/// For the main document the answer is cached in `Doc`; for any other
+/// (`implementation.createHTMLDocument`) the tree is walked. The cached
+/// path stays correct when a page rebuilds its body.
 fn doc_part(i: &mut Interp, this: &Value, part: DocPart) -> C<Option<u32>> {
     let id = node_of(i, this)?;
     let Some(d) = &i.doc else { return Ok(None) };
     if id == d.doc {
         return Ok(match part { DocPart::Root => d.html, DocPart::Head => d.head, DocPart::Body => d.body });
     }
-    // Die Wurzel ist das erste Element unter dem Dokumentknoten.
+    // The root is the first element under the document node.
     let root = d.nodes.get(id as usize)
         .and_then(|n| n.children.iter().copied()
             .find(|c| d.nodes[*c as usize].kind == ELEMENT_NODE));
@@ -1043,45 +936,37 @@ fn doc_part(i: &mut Interp, this: &Value, part: DocPart) -> C<Option<u32>> {
 
 // ── ResizeObserver + IntersectionObserver ───────────────────────────────
 //
-// **Beide haengen an derselben Sache: der Geometrie nach dem Layout.** Der
-// Wirt reicht sie mit `Interp::set_geometry` ein, und genau dort werden die
-// Beobachter ausgewertet — nicht in einem Zeitgeber, der raet, wann sich
-// etwas bewegt haben koennte.
+// Both depend on geometry after layout. The host provides it via
+// `Interp::set_geometry`, and that is where the observers are evaluated,
+// not in a timer guessing when something might have moved.
 //
-// Im Aufrufzensus stehen sie mit 429 (`IntersectionObserver`) und 353
-// (`ResizeObserver`) Aufrufen als P4 und P5. Was sie tragen, ist der halbe
-// moderne Web-Werkzeugkasten: verzoegert geladene Bilder, unendliche Listen,
-// klebende Kopfzeilen, Diagramme, die sich an ihren Kasten anpassen.
-//
-// **Gemessen wird beim Beobachten, gemeldet spaeter.** Ein Eintrag haelt die
-// Kaesten, wie sie ZUM ZEITPUNKT der Beobachtung standen; ihn beim Zustellen
-// neu zu rechnen hiesse, dem Rueckruf Zahlen aus einer anderen Runde zu
-// geben — und zwischen Beobachtung und Zustellung liegt ein Rueckruf eines
-// anderen Beobachters, der den Baum aendern darf.
+// Measured at observation time, delivered later. An entry holds the boxes
+// as they were when observed; recomputing at delivery would hand the
+// callback numbers from another round, and another observer's callback,
+// which may change the tree, runs in between.
 
-/// Welchen Kasten ein `ResizeObserver` meldet.
+/// Which box a `ResizeObserver` reports.
 #[derive(Clone, Copy, PartialEq)]
 pub enum BoxKind { Content, Border }
 
-/// Eine Anmeldung eines `ResizeObserver`.
+/// One `ResizeObserver` registration.
 pub struct ResizeReg {
-    /// Der KNOTEN, nicht sein Layout-`seq`: das Layout vergibt `seq` bei
-    /// jedem Lauf neu, und eine Anmeldung ueberlebt jedes Layout.
+    /// The node, not its layout `seq`: layout reassigns `seq` on every run, a
+    /// registration outlives every layout.
     pub target: u32,
     pub kind: BoxKind,
-    /// Zuletzt GEMELDETE Groesse. `None` heisst „noch nie" — und der erste
-    /// Lauf meldet immer, so wie die Spezifikation es verlangt: wer
-    /// `observe` ruft, bekommt die aktuelle Groesse, nicht erst die naechste
-    /// Aenderung.
+    /// Last reported size. `None` means never; the first run always reports,
+    /// as the spec requires: `observe` delivers the current size, not only
+    /// the next change.
     pub last: Option<(f64, f64)>,
 }
 
-/// Was ein `ResizeObserverEntry` sagt — beim Beobachten gerechnet.
+/// What a `ResizeObserverEntry` says, computed at observation time.
 pub struct ResizeEntry {
     pub target: u32,
-    /// Inhaltskasten: Breite, Hoehe.
+    /// Content box: width, height.
     pub content: (f64, f64),
-    /// Rahmenkasten: Breite, Hoehe.
+    /// Border box: width, height.
     pub border: (f64, f64),
 }
 
@@ -1092,17 +977,16 @@ pub struct ResizeObs {
     pub queue: Vec<ResizeEntry>,
 }
 
-/// Eine Anmeldung eines `IntersectionObserver`.
+/// One `IntersectionObserver` registration.
 pub struct InterReg {
     pub target: u32,
-    /// Der Schwellenindex von letztem Mal: wieviele Schwellen das Verhaeltnis
-    /// erreicht hat. Gemeldet wird, wenn sich DIESE Zahl aendert — nicht
-    /// jedes Pixel, sonst waere jeder Bildlauf ein Rueckrufgewitter.
-    /// `-1` heisst „noch nie gemeldet".
+    /// Threshold index from last time: how many thresholds the ratio reached.
+    /// Reported when this number changes, not on every pixel, so scrolling is
+    /// not a storm of callbacks. `-1` means never reported.
     pub band: i32,
 }
 
-/// Was ein `IntersectionObserverEntry` sagt.
+/// What an `IntersectionObserverEntry` says.
 pub struct InterEntry {
     pub target: u32,
     pub ratio: f64,
@@ -1116,41 +1000,35 @@ pub struct InterEntry {
 pub struct InterObs {
     pub js: Gc,
     pub cb: Value,
-    /// `None` heisst: das Sichtfeld. Ein anderes Element als Wurzel ist
-    /// erlaubt und wird hier genauso behandelt — sein Kasten ist dann der
-    /// Ausschnitt.
+    /// `None` means the viewport. Another element as root is allowed and
+    /// handled the same way; its box is then the clip.
     pub root: Option<u32>,
-    /// Der ungelesene `rootMargin`-Text, damit der Getter ihn zurueckgeben
-    /// kann, ohne aus vier Zahlen wieder Text zu raten.
+    /// The unparsed `rootMargin` text, so the getter can return it without
+    /// reconstructing text from four numbers.
     pub margin_src: Rc<str>,
-    /// `rootMargin` in Pixeln, oben/rechts/unten/links. Prozente werden beim
-    /// Anmelden aufgeloest; die Spezifikation erlaubt beides.
+    /// `rootMargin` in pixels, top/right/bottom/left. Percentages are resolved
+    /// at registration; the spec allows both.
     pub margin: (f64, f64, f64, f64),
     pub thresholds: Vec<f64>,
     pub regs: Vec<InterReg>,
     pub queue: Vec<InterEntry>,
 }
 
-/// Der Layout-`seq` eines Knotens — dieselbe Auskunft wie `layout_seq`, nur
-/// von der id aus. Die Beobachter kennen ihre Ziele als Knoten.
+/// The layout `seq` of a node, like `layout_seq` but from the id. Observers
+/// know their targets as nodes.
 fn node_seq(i: &Interp, id: u32) -> Option<u32> {
     let n = i.doc.as_ref()?.nodes.get(id as usize)?;
     Some(if n.seq != 0 { n.seq } else { n.src_seq }).filter(|s| *s != 0)
 }
 
-/// Der Rahmenkasten eines Knotens in FENSTERkoordinaten — die Vereinigung
-/// seiner Fragmente, genau wie `getBoundingClientRect`, dazu die Rahmen- und
-/// Polstersummen des ersten Fragments, GETRENNT.
+/// The border box of a node in viewport coordinates (the union of its
+/// fragments, as `getBoundingClientRect`), plus the border and padding sums
+/// of the first fragment, kept separate.
 ///
-/// Getrennt, weil zwei Fragen daran haengen und sie verschiedene Kanten
-/// meinen: `contentRect` will beide abziehen, `scrollHeight` misst ab der
-/// POLSTERkante und zieht nur den Rahmen ab. Zusammengefasst waren sie
-/// einmal, und der Unterschied war 5 px, die kein Test bemerkt haette, wenn
-/// er nicht beides in demselben Kasten gehabt haette.
+/// Separate because `contentRect` subtracts both, while `scrollHeight`
+/// measures from the padding edge and subtracts only the border.
 ///
-/// Dieselbe Rechnung wie `elem_rect`, nur ohne den Umweg ueber einen
-/// JS-Wert. Zwei Rechenwege waeren zwei Wahrheiten ueber denselben Kasten
-/// ([[feedback_intrinsic_shared_path]]).
+/// Same computation as `elem_rect`, without going through a JS value.
 fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64), (f64, f64))> {
     let g = i.geometry.as_ref()?;
     let seq = node_seq(i, id)?;
@@ -1173,9 +1051,9 @@ fn node_box(i: &Interp, id: u32) -> Option<((f64, f64, f64, f64), (f64, f64), (f
            (x1 - x0) as f64, (y1 - y0) as f64), borders, pads))
 }
 
-/// `rootMargin`: ein bis vier CSS-Laengen, oben/rechts/unten/links wie bei
-/// `margin`. Prozente stehen zur AUSSCHNITTgroesse — waagerecht zur Breite,
-/// senkrecht zur Hoehe, so wie bei jedem anderen Rand auch.
+/// `rootMargin`: one to four CSS lengths, top/right/bottom/left as for
+/// `margin`. Percentages refer to the clip size: horizontal to the width,
+/// vertical to the height.
 fn parse_root_margin(s: &str, vw: f64, vh: f64) -> (f64, f64, f64, f64) {
     let one = |t: &str, basis: f64| -> f64 {
         let t = t.trim();
@@ -1184,9 +1062,8 @@ fn parse_root_margin(s: &str, vw: f64, vh: f64) -> (f64, f64, f64, f64) {
         } else if let Some(n) = t.strip_suffix("px") {
             n.trim().parse::<f64>().unwrap_or(0.0)
         } else {
-            // Eine blanke Zahl ist KEINE Laenge (nur `0` waere eine), und eine
-            // Einheit, die wir nicht kennen, auch nicht. Beides wird 0 statt
-            // geraten.
+            // A bare number is not a length (only `0` would be), nor is an unknown
+            // unit. Both become 0 rather than guessed.
             t.parse::<f64>().ok().filter(|v| *v == 0.0).unwrap_or(0.0)
         }
     };
@@ -1200,8 +1077,8 @@ fn parse_root_margin(s: &str, vw: f64, vh: f64) -> (f64, f64, f64, f64) {
     }
 }
 
-/// Beide Beobachter auswerten. Gerufen aus `Interp::set_geometry` — dem
-/// einen Moment, in dem der Wirt sagt „so steht die Seite jetzt".
+/// Evaluate both observer kinds. Called from `Interp::set_geometry`, the
+/// moment the host reports the current layout.
 pub fn eval_box_observers(i: &mut Interp) {
     // ── ResizeObserver ───────────────────────────────────────────────────
     for n in 0..i.resize_obs.len() {
@@ -1214,8 +1091,7 @@ pub fn eval_box_observers(i: &mut Interp) {
             let content = ((w - bx - px).max(0.0), (h - by - py).max(0.0));
             let border = (w, h);
             let seen = match kind { BoxKind::Border => border, BoxKind::Content => content };
-            // Ein Beobachter meldet AENDERUNGEN — und beim ersten Mal die
-            // Lage, wie sie ist.
+            // An observer reports changes, and the first time the current state.
             if last != Some(seen) {
                 i.resize_obs[n].regs[r].last = Some(seen);
                 i.resize_obs[n].queue.retain(|e| e.target != id);
@@ -1228,8 +1104,8 @@ pub fn eval_box_observers(i: &mut Interp) {
     let (vw, vh) = i.viewport;
     let now = i.now_ms();
     for n in 0..i.inter_obs.len() {
-        // Der Ausschnitt: das Sichtfeld oder der Kasten der Wurzel, in
-        // beiden Faellen um `rootMargin` gedehnt.
+        // The clip: the viewport or the root's box, in both cases grown by
+        // `rootMargin`.
         let root = match i.inter_obs[n].root {
             None => (0.0, 0.0, vw, vh),
             Some(id) => match node_box(i, id) { Some((r, _, _)) => r, None => continue },
@@ -1254,18 +1130,18 @@ pub fn eval_box_observers(i: &mut Interp) {
             let ih = (iy1 - iy0).max(0.0);
             let area = tw * th;
             let overlap = iw > 0.0 && ih > 0.0;
-            // Ein Kasten ohne Flaeche (eine leere Zeile, ein umbrochener
-            // Inline-Kasten ohne Breite) hat kein Verhaeltnis — er schneidet,
-            // wenn er im Ausschnitt LIEGT. Sonst waere 0/0 die Antwort.
+            // A box without area (an empty line, a wrapped zero-width inline box)
+            // has no ratio; it intersects when it lies inside the clip. Otherwise
+            // the answer would be 0/0.
             let inside = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
             let (hit, ratio) = if area > 0.0 {
                 (overlap, if overlap { iw * ih / area } else { 0.0 })
             } else {
                 (inside, if inside { 1.0 } else { 0.0 })
             };
-            // Wieviele Schwellen erreicht sind. Die Schwelle 0 gilt erst als
-            // erreicht, wenn ueberhaupt geschnitten wird — sonst waere jedes
-            // Element von Anfang an „ueber 0".
+            // How many thresholds are reached. Threshold 0 only counts as reached
+            // when there is any intersection at all, otherwise every element would
+            // start "above 0".
             let hits = i.inter_obs[n].thresholds.iter()
                 .filter(|t| if **t <= 0.0 { hit } else { ratio >= **t - 1e-9 })
                 .count() as i32;
@@ -1284,22 +1160,19 @@ pub fn eval_box_observers(i: &mut Interp) {
     }
 }
 
-/// Aus einem `ResizeEntry` das JS-Objekt bauen.
+/// Build the JS object from a `ResizeEntry`.
 fn build_resize_entry(i: &mut Interp, e: &ResizeEntry) -> Value {
     let o = new_obj(Some(i.realm.object_proto.clone()));
     let target = wrap(i, e.target);
-    // `contentRect` steht im Polsterkasten: x/y sind die Polsterung links
-    // und oben. Wir fuehren nur die SUMMEN, also die halbe — richtig fuer
-    // gleichmaessige Polsterung und nie schlechter als die 0, die vorher
-    // dagestanden haette.
+    // `contentRect` is in the padding box: x/y are the left and top padding.
+    // Only sums are stored, so half is used; exact for symmetric padding.
     let rect = rect_obj(i, Some((0.0, 0.0, e.content.0, e.content.1)));
     let size = |i: &mut Interp, (w, h): (f64, f64)| -> Value {
         let s = new_obj(Some(i.realm.object_proto.clone()));
         s.borrow_mut().define("inlineSize", Prop::data(Value::Num(w)));
         s.borrow_mut().define("blockSize", Prop::data(Value::Num(h)));
-        // Eine Liste, weil ein Element in einem fragmentierten Kasten
-        // mehrere Groessen haette. Wir haben immer genau eine — die Liste
-        // ist trotzdem die richtige Form, denn Seitencode schreibt
+        // A list, because a fragmented box could have several sizes. There is
+        // always exactly one here, but page code writes
         // `entry.contentBoxSize[0].inlineSize`.
         i.new_array(alloc::vec![Value::Obj(s)])
     };
@@ -1311,8 +1184,8 @@ fn build_resize_entry(i: &mut Interp, e: &ResizeEntry) -> Value {
         b.define("contentRect", Prop::data(Value::Obj(rect)));
         b.define("contentBoxSize", Prop::data(content_size));
         b.define("borderBoxSize", Prop::data(border_size));
-        // Wir kennen kein Geraetepixel-Raster, also ist die Liste leer statt
-        // erfunden.
+        // No device-pixel grid is known, so the list is empty rather than
+        // invented.
         b.define(SYM_TO_STRING_TAG, Prop::tag(Value::str("ResizeObserverEntry")));
     }
     let empty = i.new_array(Vec::new());
@@ -1320,7 +1193,7 @@ fn build_resize_entry(i: &mut Interp, e: &ResizeEntry) -> Value {
     Value::Obj(o)
 }
 
-/// Aus einem `InterEntry` das JS-Objekt bauen.
+/// Build the JS object from an `InterEntry`.
 fn build_inter_entry(i: &mut Interp, e: &InterEntry) -> Value {
     let o = new_obj(Some(i.realm.object_proto.clone()));
     let target = wrap(i, e.target);
@@ -1340,11 +1213,11 @@ fn build_inter_entry(i: &mut Interp, e: &InterEntry) -> Value {
     Value::Obj(o)
 }
 
-/// Der Kontrollpunkt: wer etwas in der Schlange hat, wird gerufen. Neben
-/// `deliver_mutations` und aus demselben Grund dort — nach jedem
-/// Einstiegspunkt, nicht in einem Zeitgeber.
+/// The checkpoint: observers with queued entries are called. Runs next to
+/// `deliver_mutations` and for the same reason: after every entry point,
+/// not in a timer.
 ///
-/// Liefert true, wenn ein Rueckruf gelaufen ist.
+/// Returns true if a callback ran.
 pub fn deliver_box_observers(i: &mut Interp) -> bool {
     let mut ran = false;
     for n in 0..i.resize_obs.len() {
@@ -1376,12 +1249,12 @@ pub fn deliver_box_observers(i: &mut Interp) -> bool {
     ran
 }
 
-/// Eine Anmeldung eines `MutationObserver`: WAS er an WELCHEM Knoten sehen
-/// will (DOM §4.3.1 „registered observer").
+/// One `MutationObserver` registration: what it wants to see on which node
+/// (DOM §4.3.1 "registered observer").
 pub struct MutReg {
     pub target: u32,
-    /// Der Platz dieser Anmeldung in `Doc::observed` — das Bit, das eine
-    /// Aenderung gesetzt hat, wenn sie diesen Knoten betraf.
+    /// This registration's slot in `Doc::observed`: the bit a mutation sets
+    /// when it concerned this node.
     pub slot: usize,
     pub subtree: bool,
     pub child_list: bool,
@@ -1389,27 +1262,26 @@ pub struct MutReg {
     pub attr_old: bool,
     pub char_data: bool,
     pub char_old: bool,
-    /// `attributeFilter` — nur diese Attribute. `None` heisst „alle".
+    /// `attributeFilter`: only these attributes. `None` means all.
     pub filter: Option<Vec<Rc<str>>>,
 }
 
-/// Ein angemeldeter `MutationObserver`.
+/// A registered `MutationObserver`.
 ///
-/// Er liegt im `Interp` und nicht im `Doc`, weil er einen JS-Rueckruf haelt:
-/// das Dokument wird bei jeder Navigation neu gebaut, der Realm nicht.
+/// Lives in `Interp`, not in `Doc`, because it holds a JS callback: the
+/// document is rebuilt on every navigation, the realm is not.
 pub struct MutObs {
-    /// Das JS-Objekt — die IDENTITAET. Ueber sie findet `observe` den
-    /// richtigen Eintrag wieder.
+    /// The JS object, i.e. the identity `observe` uses to find the entry.
     pub js: Gc,
     pub cb: Value,
     pub regs: Vec<MutReg>,
     pub queue: Vec<Mutation>,
 }
 
-/// Sieht noch jemand zu? Wenn nicht, hoert der Baum auf aufzuzeichnen.
+/// Is anyone still observing? If not, the tree stops recording.
 fn sync_observing(i: &mut Interp) {
-    // Die Anmeldungen bekommen ihre Plaetze — und der Baum die Liste, die er
-    // beim Aufzeichnen braucht.
+    // Registrations get their slots, and the tree the list it needs while
+    // recording.
     let mut obs: Vec<(u32, bool)> = Vec::new();
     let mut voll = false;
     for o in i.observers.iter_mut() {
@@ -1417,9 +1289,8 @@ fn sync_observing(i: &mut Interp) {
             match obs.iter().position(|(t, s)| *t == r.target && *s == r.subtree) {
                 Some(k) => r.slot = k,
                 None if obs.len() < 64 => { r.slot = obs.len(); obs.push((r.target, r.subtree)); }
-                // **Mehr als 64 verschiedene beobachtete Knoten.** Gesagt
-                // statt verschluckt: die Maske ist ein `u64`, und eine
-                // Anmeldung ohne Platz meldet nichts.
+                // More than 64 distinct observed nodes: the mask is a `u64`, and a
+                // registration without a slot reports nothing. Said, not swallowed.
                 None => { r.slot = usize::MAX; voll = true; }
             }
         }
@@ -1436,11 +1307,10 @@ fn sync_observing(i: &mut Interp) {
     }
 }
 
-/// Passt diese Aenderung zu dieser Anmeldung?
+/// Does this mutation match this registration?
 ///
-/// Die ZUGEHOERIGKEIT steht schon fest — sie wurde beim Aendern gerechnet
-/// (`Mutation::hits`). Hier faellt nur noch, was diese Anmeldung inhaltlich
-/// nicht sehen will.
+/// Membership is already decided at mutation time (`Mutation::hits`);
+/// here only the content filters of the registration apply.
 fn matches_reg(m: &Mutation, r: &MutReg) -> bool {
     if r.slot >= 64 || m.hits & (1u64 << r.slot) == 0 { return false }
     match m.kind {
@@ -1457,11 +1327,10 @@ fn matches_reg(m: &Mutation, r: &MutReg) -> bool {
     }
 }
 
-/// Die Rohaufzeichnung des Baums auf die Beobachter verteilen.
+/// Distribute the tree's raw record to the observers.
 ///
-/// **Erst hier wird gefiltert, nicht beim Aufzeichnen.** Der Baum weiss
-/// nicht, wer zusieht, und soll es nicht wissen muessen; und dieselbe
-/// Aenderung kann an mehrere Beobachter gehen.
+/// Filtering happens here, not while recording: the tree does not need to
+/// know who observes, and one mutation can go to several observers.
 pub fn collect_mutations(i: &mut Interp) {
     let raw = match &mut i.doc {
         Some(d) if !d.mutations.is_empty() => core::mem::take(&mut d.mutations),
@@ -1475,13 +1344,11 @@ pub fn collect_mutations(i: &mut Interp) {
     let mut per: Vec<Vec<Mutation>> = alloc::vec![Vec::new(); i.observers.len()];
     for m in &raw {
         for (n, o) in i.observers.iter().enumerate() {
-            // Der Beobachter bekommt die Aenderung EINMAL, auch wenn zwei
-            // seiner Anmeldungen passen — sonst saehe eine Seite, die
-            // Elter und Kind beobachtet, alles doppelt.
+            // An observer gets each mutation once, even if two of its registrations
+            // match; otherwise observing parent and child would duplicate everything.
             if o.regs.iter().any(|r| matches_reg(m, r)) {
-                // `oldValue` gibt es nur, wenn die Anmeldung danach
-                // gefragt hat. Ihn immer mitzuliefern waere bequem und
-                // falsch: Seiten unterscheiden `null` von `""`.
+                // `oldValue` only if the registration asked for it; pages distinguish
+                // `null` from `""`.
                 let want_old = o.regs.iter().any(|r| matches_reg(m, r) && match m.kind {
                     MutKind::Attributes => r.attr_old,
                     MutKind::CharacterData => r.char_old,
@@ -1499,7 +1366,7 @@ pub fn collect_mutations(i: &mut Interp) {
     }
 }
 
-/// Aus einer Aenderung ein `MutationRecord` bauen.
+/// Build a `MutationRecord` from a mutation.
 fn build_record(i: &mut Interp, m: &Mutation) -> C<Value> {
     let o = new_obj(Some(i.realm.object_proto.clone()));
     let kind = match m.kind {
@@ -1524,8 +1391,7 @@ fn build_record(i: &mut Interp, m: &Mutation) -> C<Value> {
         b.define("nextSibling", Prop::data(next));
         b.define("attributeName", Prop::data(match &m.attr {
             Some(a) => Value::str(a), None => Value::Null }));
-        // Ein Namensraum, den wir nicht fuehren, ist `null` — und `null` ist
-        // hier die richtige Antwort, nicht eine fehlende.
+        // Namespaces are not tracked, so the answer is `null`.
         b.define("attributeNamespace", Prop::data(Value::Null));
         b.define("oldValue", Prop::data(match &m.old {
             Some(v) => Value::str(v), None => Value::Null }));
@@ -1534,10 +1400,10 @@ fn build_record(i: &mut Interp, m: &Mutation) -> C<Value> {
     Ok(Value::Obj(o))
 }
 
-/// Der Kontrollpunkt: einsammeln, und wer etwas hat, wird gerufen.
+/// The checkpoint: collect, and call every observer that has records.
 ///
-/// Liefert true, wenn ein Rueckruf gelaufen ist — der Rufer muss dann noch
-/// einmal vorbeikommen, weil ein Beobachter im Rueckruf den Baum aendern darf.
+/// Returns true if a callback ran; the caller must come back, because an
+/// observer may change the tree in its callback.
 pub fn deliver_mutations(i: &mut Interp) -> bool {
     collect_mutations(i);
     let mut ran = false;
@@ -1552,9 +1418,8 @@ pub fn deliver_mutations(i: &mut Interp) -> bool {
         }
         let arr = i.new_array(vals);
         ran = true;
-        // Wirft der Rueckruf, ist das SEIN Fehler und nicht das Ende der
-        // Zustellung: die anderen Beobachter bekommen ihre Meldungen
-        // trotzdem, so wie im Browser.
+        // A throwing callback is its own error, not the end of delivery: the
+        // other observers still get their records, as in browsers.
         if let Err(e) = i.call(&cb, this.clone(), &[arr, this]) {
             let msg = super::modules::describe(i, e);
             i.console_push(alloc::format!("error: MutationObserver-Rueckruf: {msg}"));
@@ -1563,7 +1428,7 @@ pub fn deliver_mutations(i: &mut Interp) -> bool {
     ran
 }
 
-/// Das Huellobjekt eines Knotens — einmal gebaut, dann behalten.
+/// The wrapper object of a node, built once and then kept.
 pub fn wrap(i: &mut Interp, id: u32) -> Value {
     if let Some(doc) = &i.doc {
         if let Some(js) = doc.nodes.get(id as usize).and_then(|n| n.js.clone()) {
@@ -1597,9 +1462,9 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
     Value::Obj(g)
 }
 
-/// Die vier Stellen von `insertAdjacent*` als `(Elter, davor)`. `None`, wenn
-/// die Stellenangabe keine der vier ist — oder wenn `beforebegin`/`afterend`
-/// an einem Knoten ohne Elter verlangt wird, wo es nichts einzusetzen gibt.
+/// The four positions of `insertAdjacent*` as `(parent, before)`. `None` if
+/// the position is none of the four, or if `beforebegin`/`afterend` is asked
+/// on a node without a parent.
 fn adjacent_spot(i: &Interp, id: u32, pos: &str) -> Option<(u32, Option<u32>)> {
     let d = i.doc.as_ref()?;
     match pos {
@@ -1616,8 +1481,8 @@ fn adjacent_spot(i: &Interp, id: u32, pos: &str) -> Option<(u32, Option<u32>)> {
     }
 }
 
-/// `isEqualNode`, rekursiv. Attribute werden als MENGE verglichen: die
-/// Spezifikation sagt ausdruecklich, dass ihre Reihenfolge nichts bedeutet.
+/// `isEqualNode`, recursive. Attributes are compared as a set; the spec says
+/// their order is irrelevant.
 fn nodes_equal(d: &Doc, x: u32, y: u32) -> bool {
     if x == y {
         return true;
@@ -1648,8 +1513,8 @@ fn nodes_array(i: &mut Interp, ids: Vec<u32>) -> Value {
     i.new_array(vals)
 }
 
-/// Lesender Zugriff auf einen Knoten, ohne die Ausleihe ueber einen Aufruf
-/// hinweg zu halten — jede Abfrage kopiert, was sie braucht.
+/// Read access to a node without holding the borrow across a call; each
+/// query copies what it needs.
 macro_rules! with_node {
     ($i:expr, $this:expr, |$n:ident| $body:expr) => {{
         let id = node_of($i, &$this)?;
@@ -1659,9 +1524,9 @@ macro_rules! with_node {
     }};
 }
 
-/// Die Schlitze eines Ereignisses. Nicht aufzaehlbar und mit `__` davor:
-/// ein `for (k in e)` einer Seite darf sie nicht sehen, und `e.type` kommt
-/// vom Prototyp, nicht von der Instanz.
+/// The event's slots. Non-enumerable and prefixed with `__`: a page's
+/// `for (k in e)` must not see them, and `e.type` comes from the prototype,
+/// not the instance.
 const EV_TYPE: &str = "__evtype";
 const EV_TARGET: &str = "__evtarget";
 const EV_CUR: &str = "__evcur";
@@ -1675,9 +1540,9 @@ const EV_STOP: &str = "__evstop";
 const EV_STOPIMM: &str = "__evstopimm";
 const EV_DETAIL: &str = "__evdetail";
 
-/// Ein Getter, das einen festen Schlitz liest. Als Makro, weil ein
-/// eingebautes Getter ein FUNKTIONSZEIGER ist: er faengt nichts ein, also
-/// muss der Schlitzname im Rumpf stehen und nicht in einer Variablen.
+/// A getter reading a fixed slot. A macro because a builtin getter is a
+/// function pointer that captures nothing, so the slot name must be in the
+/// body, not in a variable.
 macro_rules! ev_getter {
     ($proto:expr, $fp:expr, $name:literal, $slot:expr) => {{
         let g = native(Some($fp.clone()), |i, t, _| i.get(&t, $slot),
@@ -1687,13 +1552,12 @@ macro_rules! ev_getter {
     }};
 }
 
-/// Ein Ereignis einer ART bauen, wie `new KeyboardEvent("keydown", {...})` es
-/// tut: Prototyp aus dem globalen Namen, Basisfelder aus dem Wörterbuch, und
-/// danach die Felder, die genau diese Art fuehrt.
+/// Build an event of a given kind as `new KeyboardEvent("keydown", {...})`
+/// does: prototype from the global name, base fields from the dictionary,
+/// then the fields of this kind.
 ///
-/// Ein Woerterbuchfeld, das fehlt, bekommt den Vorgabewert der Spezifikation
-/// — nicht `undefined`. Eine Seite, die `e.clientX + 1` rechnet, bekaeme sonst
-/// `NaN`, und das sieht aus wie ein Rechenfehler der Seite.
+/// A missing dictionary field gets the spec default, not `undefined`;
+/// otherwise `e.clientX + 1` would be `NaN`.
 fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
     let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
     let init = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1708,7 +1572,7 @@ fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
         ev.borrow_mut().define(slot, Prop { value: Some(v), get: None, set: None,
             writable: true, enumerable: false, configurable: true });
     };
-    // Die vier Umschalter und `detail`/`view` hat jede Art unter `UIEvent`.
+    // Every kind under `UIEvent` has the four modifiers and `detail`/`view`.
     for (k, slot) in [("altKey", "__evalt"), ("ctrlKey", "__evctrl"),
                       ("shiftKey", "__evshift"), ("metaKey", "__evmeta")] {
         let v = if has { i.get(&init, k)?.truthy() } else { false };
@@ -1769,9 +1633,8 @@ fn event_of_kind(i: &mut Interp, iface: &str, a: &[Value]) -> C<Gc> {
     Ok(ev)
 }
 
-/// Ein Ereignisobjekt mit gesetzten Schlitzen. `trusted` unterscheidet, was
-/// beak selbst zustellt, von dem, was die Seite mit `dispatchEvent` schickt —
-/// Seiten fragen es ab, und ein festes `true` waere gelogen.
+/// An event object with its slots set. `trusted` distinguishes what beak
+/// itself dispatches from what the page sends with `dispatchEvent`.
 fn build_event(i: &mut Interp, proto: Gc, kind: &str, trusted: bool) -> Gc {
     let ev = new_obj(Some(proto));
     let stamp = i.now_ms();
@@ -1793,12 +1656,11 @@ fn build_event(i: &mut Interp, proto: Gc, kind: &str, trusted: bool) -> Gc {
     ev
 }
 
-/// Die Felder, die `initEvent` setzt — als Rust-Funktion, damit
-/// `initCustomEvent` sie NICHT ein zweites Mal aufschreibt
-/// ([[feedback_a_copy_is_a_second_semantics_waiting]]).
+/// The fields `initEvent` sets, as a Rust function so `initCustomEvent`
+/// does not write them out a second time.
 ///
-/// DOM §initEvent setzt die Abbruch-Fahnen ausdruecklich ZURUECK: dasselbe
-/// Objekt darf ein zweites Mal zugestellt werden.
+/// DOM §initEvent explicitly resets the cancel flags: the same object may
+/// be dispatched again.
 fn init_event_fields(ev: &Gc, kind: &str, bubbles: bool, cancelable: bool) {
     let hidden = |v: Value| Prop { value: Some(v), get: None, set: None,
         writable: true, enumerable: false, configurable: true };
@@ -1813,7 +1675,7 @@ fn init_event_fields(ev: &Gc, kind: &str, bubbles: bool, cancelable: bool) {
     b.define(EV_TRUSTED, hidden(Value::Bool(false)));
 }
 
-/// `new Event(art, {bubbles, cancelable})` — das zweite Argument.
+/// `new Event(type, {bubbles, cancelable})`: the second argument.
 fn apply_event_init(i: &mut Interp, ev: &Gc, init: &Value) -> C<()> {
     if !matches!(init, Value::Obj(_)) { return Ok(()) }
     for (key, slot) in [("bubbles", EV_BUBBLES), ("cancelable", EV_CANCELABLE),
@@ -1826,16 +1688,16 @@ fn apply_event_init(i: &mut Interp, ev: &Gc, init: &Value) -> C<()> {
     Ok(())
 }
 
-/// Sind das dieselbe Funktion? Identitaet, nicht Gleichheit — genau das
-/// fragt `removeEventListener`.
+/// Are these the same function? Identity, not equality; that is what
+/// `removeEventListener` asks.
 fn same_fn(a: &Value, b: &Value) -> bool {
     match (a, b) { (Value::Obj(x), Value::Obj(y)) => Rc::ptr_eq(x, y), _ => false }
 }
 
-/// Die Zustellkette fuer einen Knoten: von der Wurzel bis zu ihm.
+/// The propagation path for a node: from the root to it.
 ///
-/// Dieselbe Reihenfolge, in der beak sie aus dem LAYOUT baut — aussen zuerst,
-/// Ziel zuletzt. Wer das dreht, dreht die Blasenrichtung.
+/// Same order in which beak builds it from layout: outermost first, target
+/// last. Reversing it reverses bubbling.
 fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
     let Some(d) = &i.doc else { return alloc::vec![id] };
     let mut out = alloc::vec![id];
@@ -1848,12 +1710,11 @@ fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
     out
 }
 
-/// Die Erklaerungen eines `style`-Attributs, in der Reihenfolge des Textes.
+/// The declarations of a `style` attribute, in source order.
 ///
-/// Ein eigener kleiner Leser und nicht der aus `css`: der hier bekommt genau
-/// das zurueckzugeben, was ein Skript hineingeschrieben hat — der Kaskadenleser
-/// wirft ungueltige Erklaerungen weg, und dann laese `el.style.foo` etwas
-/// anderes als das eben Geschriebene.
+/// A small parser of its own, not the one from `css`: this one must return
+/// exactly what a script wrote, while the cascade parser drops invalid
+/// declarations, and `el.style.foo` would then read something else.
 fn style_decls(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for decl in text.split(';') {
@@ -1874,12 +1735,12 @@ fn style_join(decls: &[(String, String)]) -> String {
     out
 }
 
-/// Der Schnappschuss, den `getComputedStyle` hinterlegt. Ist er da, liest die
-/// Sicht IHN statt des `style`-Attributs — dieselben Zugriffsfunktionen, zwei
-/// Quellen, und keine zweite Maschinerie.
+/// The snapshot `getComputedStyle` stores. If present, the declaration
+/// reads it instead of the `style` attribute: the same accessors, two
+/// sources.
 const COMPUTED: &str = "__computed";
 
-/// Der Deklarationstext hinter einer `CSSStyleDeclaration`.
+/// The declaration text behind a `CSSStyleDeclaration`.
 fn style_text(i: &Interp, this: &Value) -> String {
     if let Value::Obj(o) = this {
         if let Some(Value::Str(t)) = o.borrow().get_own(COMPUTED).and_then(|p| p.value.clone()) {
@@ -1892,7 +1753,7 @@ fn style_text(i: &Interp, this: &Value) -> String {
         .unwrap_or_default()
 }
 
-/// Wie `node_of`, aber ohne zu werfen — ein Schnappschuss hat keinen Knoten.
+/// Like `node_of`, but without throwing; a snapshot has no node.
 fn node_of_ref(_i: &Interp, v: &Value) -> Result<u32, ()> {
     let Value::Obj(o) = v else { return Err(()) };
     match o.borrow().get_own(SLOT).and_then(|p| p.value.clone()) {
@@ -1906,18 +1767,17 @@ fn style_get(i: &Interp, id: u32, css: &str) -> Value {
     let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
     match style_decls(&text).into_iter().rev().find(|(k, _)| k == css) {
         Some((_, v)) => Value::string(v),
-        // Nicht gesetzt ist die LEERE Zeichenkette, nicht `undefined` — so
-        // steht es in der Spezifikation, und Seiten pruefen darauf.
+        // Unset is the empty string, not `undefined`, as the spec says; pages
+        // check for it.
         None => Value::str(""),
     }
 }
 
-/// Eine Erklaerung setzen oder (bei leerem Wert) entfernen.
+/// Set a declaration, or remove it when the value is empty.
 ///
-/// Das Ergebnis landet im `style`-ATTRIBUT, nicht in einer Nebenablage: die
-/// Kaskade liest das Attribut, also wirkt `el.style.display = "none"` damit
-/// wirklich — vorher lief die Zuweisung ins Leere und die Seite blieb stehen,
-/// wie sie war.
+/// The result goes into the `style` attribute, not a side store: the
+/// cascade reads the attribute, so `el.style.display = "none"` takes
+/// effect.
 fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
     let Some(d) = &mut i.doc else { return };
     let text = d.nodes[id as usize].attr("style").map(|s| s.to_string()).unwrap_or_default();
@@ -1930,9 +1790,9 @@ fn style_set(i: &mut Interp, id: u32, css: &str, val: &str) {
     d.touch();
 }
 
-/// Ein Eigenschaftspaar auf `CSSStyleDeclaration.prototype`. Als Makro aus
-/// demselben Grund wie `ev_getter`: ein eingebautes Getter ist ein
-/// Funktionszeiger und faengt nichts ein.
+/// A property pair on `CSSStyleDeclaration.prototype`. A macro for the same
+/// reason as `ev_getter`: a builtin getter is a function pointer and
+/// captures nothing.
 macro_rules! style_prop {
     ($proto:expr, $fp:expr, $js:literal, $css:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
@@ -1953,17 +1813,16 @@ macro_rules! style_prop {
     }};
 }
 
-/// Ein Behandler als Eigenschaft: `el.onclick`. Als Makro, weil das Getter
-/// ein Funktionszeiger ist und die Ereignisart im Rumpf stehen muss.
+/// A handler as a property: `el.onclick`. A macro because the getter is a
+/// function pointer and the event type must be in the body.
 macro_rules! handler_prop {
     ($proto:expr, $fp:expr, $js:literal, $kind:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
             let id = target_node(i, &t)?;
             if let Some(f) = i.doc.as_ref().and_then(|d| d.nodes[id as usize].handlers.iter()
                 .find(|(k, _)| &**k == $kind).map(|(_, f)| f.clone())) { return Ok(f) }
-            // Steht nur das Attribut da, gibt der Browser trotzdem eine
-            // FUNKTION zurueck — also uebersetzen wir es hier, wie beim
-            // Ausloesen auch.
+            // With only the attribute present, browsers still return a function, so
+            // it is compiled here, as on dispatch.
             Ok(inline_handler(i, id, $kind)?.unwrap_or(Value::Null))
         }, concat!("get ", $js), 0, false);
         let s = native(Some($fp.clone()), |i, t, a| {
@@ -1974,9 +1833,8 @@ macro_rules! handler_prop {
                 d.nodes[id as usize].handlers.retain(|(k, _)| &**k != $kind);
                 if callable {
                     d.nodes[id as usize].handlers.push((Rc::from($kind), f));
-                    // Ohne diese Zeile zeichnet das Layout keine
-                    // Treffer-Kaesten auf, und der Klick findet nichts —
-                    // dieselbe Falle wie bei `addEventListener`.
+                    // Without this, layout records no hit boxes and the click finds
+                    // nothing; the same trap as with `addEventListener`.
                     d.has_listeners = true;
                 }
             }
@@ -1987,9 +1845,9 @@ macro_rules! handler_prop {
     }};
 }
 
-/// Ein Feld, das auf einem ATTRIBUT sitzt: `a.href`, `img.src`, `el.title`.
-/// Lesen gibt die leere Zeichenkette, wenn es das Attribut nicht gibt —
-/// nicht `undefined`, denn darauf ruft Seitencode `.indexOf`.
+/// A field backed by an attribute: `a.href`, `img.src`, `el.title`.
+/// Reads the empty string if the attribute is missing, not `undefined`,
+/// because page code calls `.indexOf` on it.
 macro_rules! attr_prop {
     ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
@@ -2007,10 +1865,9 @@ macro_rules! attr_prop {
     }};
 }
 
-/// Wie `attr_prop!`, aber `null` statt der leeren Zeichenkette, wenn das
-/// Attribut fehlt. So spiegeln die ARIA-Felder (ARIA 1.2 §9): sie sind
-/// `DOMString?`, und `el.ariaHidden === null` ist die Frage „steht da
-/// ueberhaupt etwas".
+/// Like `attr_prop!`, but `null` instead of the empty string when the
+/// attribute is missing. That is how ARIA reflection works (ARIA 1.2 §9):
+/// the fields are `DOMString?`.
 macro_rules! attr_prop_null {
     ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
@@ -2020,10 +1877,9 @@ macro_rules! attr_prop_null {
         let s = native(Some($fp.clone()), |i, t, a| {
             let id = node_of(i, &t)?;
             match a.first() {
-                // `el.ariaHidden = null` NIMMT das Attribut weg. Es auf die
-                // Zeichenkette "null" zu setzen waere die naheliegende
-                // Bequemlichkeit und ein sichtbarer Fehler: `aria-hidden="null"`
-                // ist wahr, weil jeder Wert ausser "false" wahr ist.
+                // `el.ariaHidden = null` removes the attribute. Setting it to the string
+                // "null" would be wrong: `aria-hidden="null"` is true, since every value
+                // except "false" is.
                 None | Some(Value::Null) | Some(Value::Undefined) => {
                     if let Some(d) = &mut i.doc { d.remove_attr_at(id, $attr); }
                 }
@@ -2040,9 +1896,9 @@ macro_rules! attr_prop_null {
     }};
 }
 
-/// Ein Feld, das eine ZAHL auf einem Attribut ist: `el.tabIndex`. Fehlt das
-/// Attribut oder ist es keine Zahl, gilt `default` — bei `tabIndex` ist das
-/// nicht 0, sondern -1 fuer alles, was nicht von sich aus anspringbar ist.
+/// A field that is a number on an attribute: `el.tabIndex`. If the
+/// attribute is missing or not a number, `default` applies; for `tabIndex`
+/// that is -1 for anything not focusable by default.
 macro_rules! num_attr_prop {
     ($proto:expr, $fp:expr, $js:literal, $attr:literal, $default:expr) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
@@ -2062,9 +1918,8 @@ macro_rules! num_attr_prop {
     }};
 }
 
-/// Ein Feld, das die ANWESENHEIT eines Attributs ist: `el.hidden`,
-/// `script.async`. Der Wert des Attributs zaehlt nicht — `hidden="false"`
-/// versteckt trotzdem, so steht es im HTML.
+/// A field that is the presence of an attribute: `el.hidden`,
+/// `script.async`. The value does not matter: `hidden="false"` still hides.
 macro_rules! bool_attr_prop {
     ($proto:expr, $fp:expr, $js:literal, $attr:literal) => {{
         let g = native(Some($fp.clone()), |i, t, _| {
@@ -2085,8 +1940,8 @@ macro_rules! bool_attr_prop {
     }};
 }
 
-/// Die Knoten eines geparsten BRUCHSTUECKS: der `<html>`/`<head>`/`<body>`-
-/// Rahmen, den der Dokumentparser immer baut, faellt weg.
+/// The nodes of a parsed fragment: the `<html>`/`<head>`/`<body>` frame the
+/// document parser always builds is dropped.
 fn fragment_nodes(root: &crate::dom::Element) -> Vec<&crate::dom::Node> {
     let mut out = Vec::new();
     for c in &root.children {
@@ -2106,52 +1961,45 @@ fn fragment_nodes(root: &crate::dom::Element) -> Vec<&crate::dom::Node> {
     out
 }
 
-/// Die Nummer, unter der das LAYOUT dieses Element kennt.
+/// The number under which layout knows this element.
 ///
-/// Zwei Zahlen kommen in Frage, und welche gilt, haengt am Zeitpunkt:
-/// `to_dom` vergibt beim Zurueckschreiben frische `seq`, davor sind sie 0 und
-/// das Layout stammt noch aus dem geparsten Baum — dessen Nummern stehen in
-/// `src_seq`. „Nicht-null gewinnt" ist damit keine Heuristik, sondern die
-/// Frage „hat schon einmal jemand zurueckgeschrieben?".
+/// `to_dom` assigns fresh `seq` on write-back; before that they are 0 and
+/// layout still comes from the parsed tree, whose numbers are in
+/// `src_seq`. "Non-zero wins" therefore means "has anyone written back
+/// yet?".
 fn layout_seq(i: &Interp, this: &Value) -> Option<u32> {
     let id = node_of_ref(i, this).ok()?;
     let n = &i.doc.as_ref()?.nodes[id as usize];
     Some(if n.seq != 0 { n.seq } else { n.src_seq }).filter(|s| *s != 0)
 }
 
-/// Der Deckel gegen Layout-Thrashing: so oft darf zwischen zwei Bildern des
-/// Wirts erzwungen ausgelegt werden. Eine Seite, die in einer Schleife
-/// schreibt und liest, erzwingt sonst je Durchlauf ein volles Layout — auf
-/// DDGs Ergebnisseite sind das 51 ms.
+/// Cap against layout thrashing: how often layout may be forced between two
+/// host frames. A page that writes and reads in a loop would otherwise
+/// force a full layout per iteration.
 const FORCED_LAYOUT_CAP: u32 = 4;
 
-/// **Vor jeder Kastenfrage: hat dieses Element schon einen Kasten?**
+/// Before any box query: does this element have a box yet?
 ///
-/// Wenn nicht, der Baum sich seit dem letzten Bild bewegt hat und das Element
-/// AM Dokument haengt, dann ist die Null keine Antwort, sondern ein fehlendes
-/// Bild — also wird jetzt ausgelegt.
+/// If not, and the tree changed since the last frame and the element is
+/// connected, the zero is a missing frame, not an answer, so layout runs
+/// now.
 ///
-/// **Die enge Fassung, und das ist Absicht.** Ein Browser rechnet bei JEDER
-/// Lesung auf einem schmutzigen Baum neu. Hier wird nur nachgelegt, wenn gar
-/// kein Kasten da ist. Gemessen auf DDGs Ergebnisseite und
-/// `sandbox.nopeek.ch` deckt das alle Faelle ab, die heute falsch antworten
-/// (4 von 219 bzw. 3 von 77 Lesungen, alle auf Elementen ohne Kasten);
-/// Leseschleifen ueber bestehende Elemente kosten damit nichts. Der
-/// Unterschied ist benannt, nicht versteckt: ein Element, das sich seit dem
-/// letzten Bild BEWEGT hat, meldet weiter den alten Ort.
+/// Deliberately narrow: browsers recompute on every read of a dirty tree;
+/// here layout only runs when there is no box at all, so read loops over
+/// existing elements cost nothing. Not handled: an element that moved since
+/// the last frame still reports its old position.
 fn ensure_box(i: &mut Interp, this: &Value) {
     if i.relayout.is_none() || i.in_forced_layout { return }
-    // Schon ein Kasten da? Dann ist nichts zu tun — der haeufigste Fall, und
-    // er muss billig bleiben.
+    // Already has a box: nothing to do. The common case, and it must stay
+    // cheap.
     if let Some(seq) = layout_seq(i, this) {
         if i.geometry.as_ref().is_some_and(|g| g.boxes.iter().any(|b| b.seq == seq)) { return }
     }
-    // Nur wenn der Baum sich bewegt hat. Ist er sauber, ist die Null die
-    // Wahrheit (`display:none`, ein leeres Inline) und ein Layout aendert
-    // daran nichts.
+    // Only if the tree changed. On a clean tree the zero is the truth
+    // (`display:none`, an empty inline) and layout would not change it.
     if !i.doc.as_ref().is_some_and(|d| d.dirty) { return }
-    // Und nur fuer einen Knoten AM Dokument. Ein losgeloester bekaeme auch
-    // nach dem Auslegen keinen Kasten — wir wuerden je Lesung neu rechnen.
+    // And only for a connected node. A detached one gets no box from layout
+    // either, and every read would relayout.
     let Ok(id) = node_of_ref(i, this) else { return };
     if !is_in_document(i, id) { return }
     force_layout(i);
@@ -2167,9 +2015,8 @@ fn is_in_document(i: &Interp, id: u32) -> bool {
     false
 }
 
-/// Den Haken des Wirts rufen — einmal, unter dem Deckel, und mit einer Zeile
-/// auf der Konsole, wenn der Deckel greift. Ein Deckel, der stillschweigend
-/// eine falsche Zahl liefert, ist schlimmer als keiner.
+/// Call the host hook: once, under the cap, with a console line when the
+/// cap hits. A cap that silently returns a wrong number is worse than none.
 fn force_layout(i: &mut Interp) {
     if i.forced_layouts >= FORCED_LAYOUT_CAP {
         if i.forced_layouts == FORCED_LAYOUT_CAP {
@@ -2186,11 +2033,10 @@ fn force_layout(i: &mut Interp) {
     i.forced_layouts += 1;
 }
 
-/// Der Rahmenkasten in FENSTERkoordinaten: `(x, y, w, h)`.
+/// The border box in viewport coordinates: `(x, y, w, h)`.
 ///
-/// Ein Kasten kann in mehrere Fragmente zerfallen (ein Inline-Kasten je
-/// Zeile) — `getBoundingClientRect` nennt deren Vereinigung, und das ist
-/// genau das, was ein Browser dort auch liefert.
+/// A box may break into several fragments (an inline box per line);
+/// `getBoundingClientRect` returns their union, as browsers do.
 fn elem_rect(i: &Interp, this: &Value) -> Option<(f64, f64, f64, f64)> {
     let g = i.geometry.as_ref()?;
     let seq = layout_seq(i, this)?;
@@ -2206,20 +2052,19 @@ fn elem_rect(i: &Interp, this: &Value) -> Option<(f64, f64, f64, f64)> {
     Some(((x0 - g.scroll.0) as f64, (y0 - g.scroll.1) as f64, (x1 - x0) as f64, (y1 - y0) as f64))
 }
 
-/// Der POLSTERkasten: Breite und Hoehe ohne die Rahmen.
+/// The padding box: width and height without the borders.
 fn elem_inner(i: &Interp, this: &Value) -> Option<(f64, f64)> {
     let g = i.geometry.as_ref()?;
     let seq = layout_seq(i, this)?;
     let (_, _, w, h) = elem_rect(i, this)?;
-    // Die Rahmen des ERSTEN Fragments: ein ueber Zeilen gebrochener Kasten
-    // zeichnet sie nur an seinen aeusseren Enden, und dort steht ohnehin 0.
+    // The borders of the first fragment: a box broken across lines draws them
+    // only at its outer ends, where the value is 0 anyway.
     let b = g.boxes.iter().find(|b| b.seq == seq)?;
     Some(((w - b.bx as f64).max(0.0), (h - b.by as f64).max(0.0)))
 }
 
-/// Ein `DOMRect`-artiger Gegenstand. `None` heisst „kein Kasten" und wird zu
-/// lauter Nullen — dieselbe Antwort, die ein Browser fuer ein Element ohne
-/// Kasten (`display:none`) gibt.
+/// A `DOMRect`-like object. `None` means no box and yields all zeros, the
+/// same answer browsers give for an element without a box (`display:none`).
 fn rect_obj(i: &Interp, r: Option<(f64, f64, f64, f64)>) -> Gc {
     let (x, y, w, h) = r.unwrap_or((0.0, 0.0, 0.0, 0.0));
     let o = new_obj(Some(i.realm.object_proto.clone()));
@@ -2230,12 +2075,12 @@ fn rect_obj(i: &Interp, r: Option<(f64, f64, f64, f64)>) -> Gc {
     o
 }
 
-/// Wohin `append` & Co. einhaengen.
+/// Where `append` and friends insert.
 enum Where { First, Last, Before, After }
 
-/// Der gemeinsame Rumpf von `append`/`prepend`/`before`/`after`. Ein
-/// Argument, das kein Knoten ist, wird zum Textknoten — genau das
-/// unterscheidet diese Familie von `appendChild`.
+/// The shared body of `append`/`prepend`/`before`/`after`. An argument that
+/// is not a node becomes a text node; that distinguishes this family from
+/// `appendChild`.
 fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value> {
     let me = node_of(i, this)?;
     let (parent, anchor) = match w {
@@ -2265,33 +2110,18 @@ fn insert_all(i: &mut Interp, this: &Value, args: &[Value], w: Where) -> C<Value
                 t
             }
         };
-        // Der Anker bleibt derselbe: alles landet DAVOR, also stehen mehrere
-        // Argumente am Ende in der Reihenfolge, in der sie uebergeben wurden.
+        // The anchor stays the same: everything goes before it, so multiple
+        // arguments end up in the order they were passed.
         if let Some(d) = &mut i.doc { d.insert_maybe_fragment(parent, id, anchor); d.touch(); }
         fire_connected(i, id)?;
     }
     Ok(Value::Undefined)
 }
 
-/// Den KASKADIERTEN Stil eines Elements als Deklarationstext.
-///
-/// Die Kaskade laeuft auf beaks Baum, nicht auf der Arena der Maschine — also
-/// wird das Element ueber `src_seq` dort gesucht und die Kette von der Wurzel
-/// herunter aufgeloest. Das kostet einen Lauf je Ebene (auf einer echten
-/// Seite ein Dutzend), und zwar je Aufruf: `getComputedStyle` ist eine Frage
-/// an den JETZIGEN Zustand, und ein Zwischenspeicher muesste wissen, wann er
-/// falsch wird.
-///
-/// `None`, wenn kein Kontext eingereicht wurde oder das Element im Baum nicht
-/// vorkommt (ein Skript hat es erst erzeugt) — dann bleibt es beim
-/// Inline-Stil.
-/// Der Baum, auf dem die Kaskade rechnet: der LEBENDE, aus `doc` gebaut und
-/// nur dann neu gebaut, wenn `doc.version` sich bewegt hat.
-///
-/// Ein Skript, das eine Klasse setzt und dann misst, ist kein Randfall — und
-/// aus einem Schnappschuss beantwortet, waeren es zwei Antworten auf dieselbe
-/// Frage. Der Zwischenspeicher ist der Preis dafuer: EIN Aufbau je
-/// Aenderungsschub, nicht je Abfrage.
+/// The tree the cascade runs on: the live one, built from `doc` and rebuilt
+/// only when `doc.version` has moved. A script that sets a class and then
+/// measures must see the change; the cache means one build per batch of
+/// changes, not per query.
 fn style_tree(i: &Interp) -> Option<alloc::rc::Rc<crate::dom::Dom>> {
     let doc = i.doc.as_ref()?;
     let mut slot = i.live_dom.borrow_mut();
@@ -2301,14 +2131,13 @@ fn style_tree(i: &Interp) -> Option<alloc::rc::Rc<crate::dom::Dom>> {
     slot.as_ref().map(|(_, d)| d.clone())
 }
 
-/// `node` ist der ARENA-INDEX des Elements — dieselbe Zahl, die `live_dom`
-/// als `seq` in den Baum schreibt.
-/// Die block-artige Entsprechung eines Anzeigewerts (css-display-3 §2.7).
+/// The cascaded style of an element as declaration text.
 ///
-/// `list-item` bleibt stehen — es ist schon block-artig, und Chromium meldet
-/// an einem `<li>` in einer Flex-Leiste auch `list-item`. Nachgemessen, nicht
-/// vermutet: die erste Fassung machte `block` daraus und lag an neunzehn
-/// Kaesten der Bootstrap-Galerie falsch.
+/// `node` is the element's arena index, the same number `live_dom` writes
+/// as `seq` into the tree. The path from the root is resolved level by
+/// level on every call. `None` if no style context was provided or the
+/// element is not in the tree; the caller then falls back to the inline
+/// style.
 fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     let ctx = i.style_ctx.as_ref()?;
     let tree = style_tree(i)?;
@@ -2319,18 +2148,14 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     let mut parent = crate::style::ComputedStyle::root(&ctx.theme);
     parent.vw = ctx.viewport_w;
     let mut anc: Vec<crate::css::ElemInfo> = Vec::new();
-    // Die Variablenkarte faehrt MIT. Ohne sie erreicht `:root`s Palette das
-    // Element nie — und ein Rahmenwerk, das seine ganze Skala ueber
-    // Variablen fuehrt (Tailwind: `font-size: var(--text-xs)`), bekaeme
-    // ueberall die Vorgabewerte zurueck. `getComputedStyle` haette dann eine
-    // andere Antwort gegeben als das Layout gemalt hat, und das ist die
-    // schlimmste Sorte Fehler: zwei Wahrheiten.
+    // The variable map goes along; without it `:root`'s custom properties
+    // never reach the element and `getComputedStyle` would disagree with
+    // what layout painted.
     let mut vars = crate::vars::VarMap::new();
     let mut out = parent;
     for (k, el) in path.iter().enumerate() {
-        // Geschwister zaehlen, damit `:nth-*` und `:first-child` stimmen —
-        // sonst haette der gerechnete Stil eine andere Kaskade gesehen als
-        // das Layout.
+        // Count siblings so `:nth-*` and `:first-child` match the same way as in
+        // layout.
         let (prev, count) = match k {
             0 => (Vec::new(), 1),
             _ => {
@@ -2347,21 +2172,15 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         let mut own = None;
         out = crate::style::resolve_in(&info, &parent, &ctx.theme, &ctx.sheet,
                                        &anc, &prev, count, ctx.viewport_w, &vars, &mut own);
-        // **Ein Flex- oder Rasterkind ist block-artig** (css-display-3 §2.7),
-        // und `layout_flex` rechnet auch genau damit. Ohne diese Zeile sagte
-        // `getComputedStyle` `inline` fuer einen Knopf, den das Layout als
-        // Block gemalt hat — auf der Bootstrap-Galerie 80 Kaesten, und jedes
-        // Mal zwei Wahrheiten zu derselben Frage.
+        // A flex or grid item is blockified (css-display-3 §2.7), and
+        // `layout_flex` computes with exactly that.
         if matches!(parent.display, crate::style::Display::Flex
                     | crate::style::Display::InlineFlex | crate::style::Display::Grid) {
             out.display = crate::style::blockify(out.display);
         }
         if let Some(m) = own { vars = m; }
-        // `rem` rechnet gegen die WURZEL, und die steht erst fest, wenn sie
-        // aufgeloest ist. Das Layout setzt das direkt nach dem Wurzellauf;
-        // ohne die Zeile las `getComputedStyle` jedes `rem` gegen die
-        // Vorgabegroesse — `font-size: .75rem` kam als 16 px zurueck, waehrend
-        // das Layout 12 malte. Zwei Antworten auf dieselbe Frage.
+        // `rem` resolves against the root, which is only known once it is
+        // resolved. Layout sets it right after the root pass; this mirrors it.
         if k == 0 {
             out.rem_base = out.font_px;
         }
@@ -2371,7 +2190,7 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
     Some(crate::style::serialize_computed(&out))
 }
 
-/// Den Weg von der Wurzel zu `seq` sammeln.
+/// Collect the path from the root to `seq`.
 fn find_path<'a>(el: &'a crate::dom::Element, seq: u32,
                  out: &mut Vec<&'a crate::dom::Element>) -> bool {
     if el.seq == seq {
@@ -2389,8 +2208,8 @@ fn find_path<'a>(el: &'a crate::dom::Element, seq: u32,
     false
 }
 
-/// Eine Funktion auf dem Fenster. `meth` legt sie auf einen Prototyp, hier
-/// gehoert sie an den globalen Gegenstand selbst.
+/// A function on the window. `meth` puts it on a prototype; this one
+/// belongs on the global object itself.
 fn def_global(realm: &Realm, name: &str, f: NativeFn, len: usize, fp: &Gc) {
     let g = native(Some(fp.clone()), f, name, len, false);
     realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
@@ -2419,20 +2238,10 @@ fn meth(o: &Gc, name: &str, f: NativeFn, len: usize, fp: &Gc) {
 
 // ── XPath ───────────────────────────────────────────────────────────────────
 //
-// **Warum es das gibt, und warum in dieser Groesse.** htmx sucht seine
-// `hx-on:`-Attribute mit einem XPath-Ausdruck, und es war das letzte der
-// dreizehn Bibliotheksproben, das rot stand. Der Chromium-Zensus ueber zwoelf
-// echte Zielseiten zaehlt dagegen NULL XPath-Aufrufe: das hier ist keine
-// Web-Anforderung nach Aufrufzahl, sondern eine BIBLIOTHEKS-Anforderung.
-//
-// Diese Messung entscheidet die Form, nicht das Ob. Ein Sonderfall fuer htmx'
-// einen Ausdruck waere ein Notnagel an der Stelle eines fehlenden Merkmals
-// ([[feedback_a_workaround_is_the_wrong_answer_to_a_missing_capability]]);
-// volles XPath 1.0 mit Namensraeumen waere Gold, nach dem niemand fragt.
-// Gebaut ist die Sprache, die eine Seite wirklich schreibt — `js/xpath.rs`
-// sagt, was fehlt.
+// The language pages actually write (htmx finds its `hx-on:` attributes
+// with it); `js/xpath.rs` lists what is missing.
 
-/// Den Ausdruck holen — einmal geparst, unter seinem Quelltext gemerkt.
+/// Fetch the expression: parsed once, cached under its source text.
 fn xpath_compiled(i: &mut Interp, src: &str) -> C<Rc<super::xpath::XPath>> {
     if let Some((s, x)) = &i.xpath_memo {
         if s == src {
@@ -2445,14 +2254,14 @@ fn xpath_compiled(i: &mut Interp, src: &str) -> C<Rc<super::xpath::XPath>> {
             i.xpath_memo = Some((src.to_string(), x.clone()));
             Ok(x)
         }
-        // Ein unlesbarer Ausdruck ist ein FEHLER, keine leere Treffermenge:
-        // eine leere Menge sieht aus wie „nichts gefunden".
+        // An unparsable expression is an error, not an empty result: an empty set
+        // looks like "nothing found".
         Err(e) => Err(i.throw_kind("SyntaxError", &alloc::format!("XPath: {e}"))),
     }
 }
 
-/// Ein Attributknoten als `Attr`-Objekt — dieselbe Form, die
-/// `element.attributes` liefert.
+/// An attribute node as an `Attr` object, the same shape
+/// `element.attributes` returns.
 fn wrap_attr(i: &mut Interp, owner: u32, k: usize) -> Value {
     let pair = i.doc.as_ref()
         .and_then(|d| d.nodes.get(owner as usize))
@@ -2476,14 +2285,14 @@ fn wrap_xnode(i: &mut Interp, n: super::xpath::XNode) -> Value {
     }
 }
 
-/// `document.evaluate` / `XPathExpression.evaluate` — beide enden hier.
+/// `document.evaluate` / `XPathExpression.evaluate` both end here.
 fn xpath_run(i: &mut Interp, src: &str, ctx: &Value, want: f64) -> C<Value> {
     let id = node_of(i, ctx)?;
     let expr = xpath_compiled(i, src)?;
     let Some(doc) = i.doc.as_ref() else { return i.type_err("XPath: no document") };
     let val = expr.eval(doc, super::xpath::XNode::Node(id));
-    // Erst auswerten, dann huellen: die Auswertung leiht `i.doc` aus, das
-    // Huellen braucht `i` veraenderlich.
+    // Evaluate first, then wrap: evaluation borrows `i.doc`, wrapping needs
+    // `i` mutably.
     let (nodes, num, string, boolean) = {
         let doc = i.doc.as_ref().expect("checked");
         let num = super::xpath::to_number(doc, &val);
@@ -2494,8 +2303,8 @@ fn xpath_run(i: &mut Interp, src: &str, ctx: &Value, want: f64) -> C<Value> {
     let r = new_obj(Some(i.realm.xpath_result_proto.clone()));
     let hide = |v: Value| Prop { value: Some(v), get: None, set: None,
         writable: false, enumerable: false, configurable: false };
-    // `ANY_TYPE` (0) meldet den natuerlichen Typ des Ergebnisses; sonst
-    // gilt, was der Aufrufer verlangt hat.
+    // `ANY_TYPE` (0) reports the natural type of the result; otherwise the
+    // requested type applies.
     let ty = if want == 0.0 {
         if !nodes.is_empty() || string.is_empty() && num.is_nan() { 4.0 } else { 4.0 }
     } else {
@@ -2527,19 +2336,14 @@ fn xpath_nodes(i: &mut Interp, t: &Value) -> C<Vec<Value>> {
     Ok(out)
 }
 
-/// `FormData` — die Buendelung eines Formulars fuer `fetch`.
+/// `FormData`: a form's entry list for `fetch`.
 ///
-/// **Der Weg, auf dem eine moderne Seite ein Formular abschickt.** Sie faengt
-/// `submit` ab, baut `new FormData(form)` und schickt es selbst; ohne den
-/// Namen wirft schon die Zeile, und die Seite bleibt stumm stehen.
+/// The pairs are stored as a field on the object, in document order, with
+/// the same rules for successful controls as `forms::submit`: named, not
+/// disabled, and a checkbox only when checked.
 ///
-/// Die Paare liegen als Feld auf dem Objekt, in Dokumentreihenfolge — dieselbe
-/// Reihenfolge, die `forms::submit` fuer den eigenen Weg baut, und dieselben
-/// Regeln fuer den erfolgreichen Wert: benannt, nicht abgeschaltet, und ein
-/// Kaestchen nur, wenn es angehakt ist.
-///
-/// Dateien traegt es nicht: beak hat kein `multipart/form-data` (CONFORMANCE
-/// sagt es), und ein `File`, das nichts enthaelt, waere schlechter als keins.
+/// Not implemented: files. beak has no `multipart/form-data`, and an empty
+/// `File` would be worse than none.
 fn install_formdata(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
     let proto = new_obj(Some(realm.object_proto.clone()));
@@ -2560,8 +2364,8 @@ fn install_formdata(realm: &mut Realm) {
                         let tag = n.map(|n| n.tag.to_string()).unwrap_or_default();
                         let boxlike = tag == "input" && matches!(ty.as_str(), "checkbox" | "radio");
                         let on = !boxlike || checked_now(i, c);
-                        // Ein Knopf ist nur erfolgreich, wenn er der ist, der
-                        // abgeschickt hat — hier war das keiner.
+                        // A button is only successful if it is the submitter; here there is
+                        // none.
                         let button = tag == "button" || matches!(ty.as_str(), "submit" | "reset" | "button" | "image");
                         (name.clone(), !name.is_empty() && !dis && on && !button, tag == "textarea")
                     };
@@ -2656,7 +2460,7 @@ fn install_formdata(realm: &mut Realm) {
     }
 }
 
-/// Die Paare eines `FormData` als Rust-Werte.
+/// The pairs of a `FormData` as Rust values.
 fn fd_pairs(i: &mut Interp, t: &Value) -> C<Vec<(alloc::string::String, alloc::string::String)>> {
     let arr = i.get(t, "__pairs")?;
     let len = i.get(&arr, "length")?;
@@ -2685,9 +2489,8 @@ fn install_xpath(realm: &mut Realm) {
     res_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(res_proto.clone())));
     res_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(res_ctor.clone())));
     res_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("XPathResult")));
-    // Die zehn Typkonstanten stehen im Browser auf BEIDEN — der Konstruktor
-    // ist die uebliche Schreibweise (`XPathResult.FIRST_ORDERED_NODE_TYPE`),
-    // die Instanz die seltenere.
+    // The ten type constants are on both the constructor
+    // (`XPathResult.FIRST_ORDERED_NODE_TYPE`) and the instance.
     for (name, v) in [
         ("ANY_TYPE", 0.0), ("NUMBER_TYPE", 1.0), ("STRING_TYPE", 2.0),
         ("BOOLEAN_TYPE", 3.0), ("UNORDERED_NODE_ITERATOR_TYPE", 4.0),
@@ -2709,8 +2512,7 @@ fn install_xpath(realm: &mut Realm) {
                 i.set(&t, "__xi", Value::Num((at + 1) as f64), false)?;
                 Ok(v.clone())
             }
-            // Erschoepft: `null`, und darauf endet die `while`-Schleife, mit
-            // der jeder Aufrufer darueber laeuft.
+            // Exhausted: `null`, which ends the caller's `while` loop.
             None => Ok(Value::Null),
         }
     }, 0, &fp);
@@ -2760,9 +2562,8 @@ fn install_xpath(realm: &mut Realm) {
     realm.global.borrow_mut().define("XPathEvaluator", Prop::builtin(Value::Obj(ev_ctor)));
     meth(&ev_proto, "createExpression", |i, _, a| {
         let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
-        // JETZT parsen, nicht erst beim Auswerten: `createExpression` ist die
-        // Stelle, an der ein Browser einen Syntaxfehler meldet, und eine Seite
-        // die ihren Ausdruck beim Laden baut soll ihn beim Laden hoeren.
+        // Parse now, not at evaluation: `createExpression` is where browsers
+        // report a syntax error.
         xpath_compiled(i, &src)?;
         let o = new_obj(Some(i.realm.xpath_expr_proto.clone()));
         o.borrow_mut().define("__xsrc", Prop { value: Some(Value::string(src)),
@@ -2775,28 +2576,27 @@ fn install_xpath(realm: &mut Realm) {
         let want = match a.get(3) { Some(v) => i.to_number(v)?, None => 0.0 };
         xpath_run(i, &src, &ctx, want)
     }, 4, &fp);
-    // `createNSResolver` gibt es, damit der uebliche Vieraufruf nicht wirft;
-    // Namensraeume loest es nicht auf, und das steht in `js/xpath.rs`.
+    // `createNSResolver` exists so the usual call sequence does not throw; it
+    // does not resolve namespaces (see `js/xpath.rs`).
     meth(&ev_proto, "createNSResolver", |_, _, a| {
         Ok(a.first().cloned().unwrap_or(Value::Null))
     }, 1, &fp);
     realm.xpath_eval_proto = ev_proto;
 }
 
-/// Baut `Node`/`Element`/`Document`-Prototypen und das globale `document`.
+/// Builds the `Node`/`Element`/`Document` prototypes and the global
+/// `document`.
 pub fn install(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
-    // `EventTarget` steht UNTER `Node`: `addEventListener` gehoert dorthin,
-    // nicht auf den Knoten. Sonst hat `window` es nicht — und `window
-    // .addEventListener` ist mit 33 360 Aufrufen der haeufigste DOM-Aufruf
-    // des ganzen Zielkorpus (`tools/jsscope/out/apicensus.json`).
+    // `EventTarget` sits below `Node`: `addEventListener` belongs there, not
+    // on the node, otherwise `window` would not have it.
     let event_target_proto = new_obj(Some(realm.object_proto.clone()));
     let node_proto = new_obj(Some(event_target_proto.clone()));
     let element_proto = new_obj(Some(node_proto.clone()));
     let text_proto = new_obj(Some(node_proto.clone()));
     let document_proto = new_obj(Some(node_proto.clone()));
-    // `DocumentFragment` haengt an Node, nicht an Element — hier oben, weil
-    // die Suchfunktionen weiter unten auch auf ihm sitzen.
+    // `DocumentFragment` hangs off Node, not Element; set up here because the
+    // query functions further down also live on it.
     let fragment_proto = new_obj(Some(node_proto.clone()));
 
     // ── Node ─────────────────────────────────────────────────────────────
@@ -2841,9 +2641,9 @@ pub fn install(realm: &mut Realm) {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
             let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
-            // Alle Kinder weg, ein Textknoten hin. Die alten Knoten bleiben in
-            // der Arena liegen — sie sind nur nicht mehr verhaengt. Freigeben
-            // hiesse Indizes verschieben, und ein Handle darf nie verrutschen.
+            // All children out, one text node in. The old nodes stay in the arena,
+            // just detached: freeing them would shift indices, and a handle must
+            // never move.
             let old: Vec<u32> = d.nodes[id as usize].children.clone();
             for c in old { d.nodes[c as usize].parent = None; }
             d.nodes[id as usize].children.clear();
@@ -2854,12 +2654,7 @@ pub fn install(realm: &mut Realm) {
             }
             Ok(Value::Undefined)
         }, &fp);
-    // `normalize` — benachbarte Textknoten verschmelzen, leere entfernen.
-    //
-    // Die Fritzbox ruft es am Ende JEDES Anhaengens. Ohne die Methode wirft
-    // dort „normalize is not a function", und zwar nachdem die Kinder schon
-    // dranhaengen: der Baum ist dann halb gebaut und die Meldung zeigt auf
-    // die falsche Stelle.
+    // `normalize`: merge adjacent text nodes, remove empty ones.
     meth(&node_proto, "normalize", |i, t, _| {
         let id = node_of(i, &t)?;
         fn walk(d: &mut Doc, id: u32) {
@@ -2911,11 +2706,8 @@ pub fn install(realm: &mut Realm) {
         if let Some(d) = &mut i.doc { d.detach(c); }
         Ok(a[0].clone())
     }, 1, &fp);
-    // `replaceChild(neu, alt)` — im Zensus null Aufrufe, und trotzdem gebaut:
-    // die Ausfallart ist der Punkt. Eine FEHLENDE Methode wirft und beendet
-    // das ganze Skript, und **lucide ersetzt damit jedes `<i data-lucide>`
-    // durch sein `<svg>`**. Auf sandbox.nopeek.ch starb daran die komplette
-    // Symbolschicht — keine Reiter-Symbole, keine Lupe, kein Themenschalter.
+    // `replaceChild(new, old)`. Icon libraries such as lucide replace every
+    // placeholder element with its `<svg>` this way.
     meth(&node_proto, "replaceChild", |i, t, a| {
         let p = node_of(i, &t)?;
         let new = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
@@ -2924,17 +2716,17 @@ pub fn install(realm: &mut Realm) {
             if d.nodes[old as usize].parent != Some(p) {
                 return i.type_err("replaceChild: the node is not a child of this node");
             }
-            // Erst einsetzen, DANN entfernen: umgekehrt waere die Stelle weg,
-            // an der das Neue stehen soll, und es landete am Ende.
+            // Insert first, then remove: the other way round the position for the
+            // new node would be gone and it would end up last.
             d.insert_maybe_fragment(p, new, Some(old));
             d.detach(old);
         }
         fire_connected(i, new)?;
         Ok(a[1].clone())
     }, 2, &fp);
-    // Strukturvergleich (DOM §4.4): gleicher Knotentyp, gleicher Name, dieselben
-    // Attribute (Menge und Werte, Reihenfolge egal) und dieselben Kinder in
-    // derselben Reihenfolge. NICHT dieselbe Identitaet — dafuer gibt es `===`.
+    // Structural comparison (DOM §4.4): same node type, same name, same
+    // attributes (set and values, order irrelevant) and the same children in
+    // the same order. Not identity; that is `===`.
     meth(&node_proto, "isEqualNode", |i, t, a| {
         let x = node_of(i, &t)?;
         let Ok(y) = node_of(i, a.first().unwrap_or(&Value::Undefined)) else {
@@ -2943,7 +2735,7 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| nodes_equal(d, x, y))))
     }, 1, &fp);
     accessor(&node_proto, "nodeValue",
-        // Ein Element HAT keinen Wert — `null` ist die Antwort, nicht "".
+        // An element has no value: the answer is `null`, not "".
         |i, t, _| with_node!(i, t, |n| Ok(if n.kind == ELEMENT_NODE || n.kind == DOCUMENT_NODE {
             Value::Null } else { Value::Str(n.text.clone()) })),
         |i, t, a| {
@@ -2956,8 +2748,8 @@ pub fn install(realm: &mut Realm) {
             }
             Ok(Value::Undefined)
         }, &fp);
-    // Die Bitmaske aus der Spezifikation. Seiten benutzen sie fuer genau eine
-    // Frage — „liegt A vor B?" — und `& 4` ist die Art, sie zu stellen.
+    // The bitmask from the spec. Pages use it for one question, "is A before
+    // B?", asked as `& 4`.
     meth(&node_proto, "compareDocumentPosition", |i, t, a| {
         let x = node_of(i, &t)?;
         let y = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
@@ -2967,7 +2759,7 @@ pub fn install(realm: &mut Realm) {
             while let Some(p) = d.nodes[n as usize].parent { v.push(p); n = p; } v.reverse(); v };
         let (ax, ay) = (up(x), up(y));
         if ax[0] != ay[0] { return Ok(Value::Num(1.0 + 2.0 + 32.0)) }   // DISCONNECTED
-        // Der erste Punkt, an dem die Wege sich trennen, entscheidet.
+        // The first point where the paths diverge decides.
         let mut k = 0;
         while k < ax.len() && k < ay.len() && ax[k] == ay[k] { k += 1; }
         if k == ax.len() { return Ok(Value::Num(16.0 + 4.0)) }          // CONTAINED_BY
@@ -2988,23 +2780,21 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Bool(false))
     }, 1, &fp);
-    // Anmelden, aber noch nicht zustellen. Ein `addEventListener`, das WIRFT,
-    // beendet das Skript — eins, das die Anmeldung nur aufbewahrt, laesst es
-    // weiterlaufen. Die Zustellung setzt genau hier an.
+    // Register; dispatch happens elsewhere. Throwing here would end the
+    // calling script.
     meth(&event_target_proto, "addEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let f = a.get(1).cloned().unwrap_or(Value::Undefined);
         if let Some(d) = &mut i.doc {
             d.nodes[id as usize].listeners.push((ev, f));
-            // Sobald EIN Behandler da ist, braucht das Layout Treffer-Kaesten.
+            // As soon as one handler exists, layout needs hit boxes.
             d.has_listeners = true;
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    // `removeEventListener(art, f)` nimmt GENAU f weg, nicht alles dieser
-    // Art. Vorher fiel mit einem `resize`-Behandler jeder zweite mit ab —
-    // und eine Seite, die einen von dreien abmeldet, verlor alle drei.
+    // `removeEventListener(type, f)` removes exactly f, not every listener of
+    // that type.
     meth(&event_target_proto, "removeEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
         let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -3014,9 +2804,7 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    // Die Seite loest selbst aus: `el.dispatchEvent(new Event("change"))`.
-    // Vorher gab das ein festes `true` zurueck, ohne einen Behandler zu
-    // rufen — eine Antwort, die aussieht wie eine Zustellung.
+    // The page dispatches itself: `el.dispatchEvent(new Event("change"))`.
     meth(&event_target_proto, "dispatchEvent", |i, t, a| {
         let id = target_node(i, &t)?;
         let Some(Value::Obj(ev)) = a.first().cloned() else {
@@ -3027,8 +2815,8 @@ pub fn install(realm: &mut Realm) {
             v => i.to_string(&v)?,
         };
         let bubbles = matches!(i.get(&Value::Obj(ev.clone()), "bubbles")?, Value::Bool(true));
-        // Blast es nicht, ist die Kette genau ein Knoten lang — dann laeuft
-        // nur der Behandler am Ziel, und das ist der ganze Unterschied.
+        // If it does not bubble, the path is one node long and only the target's
+        // handler runs.
         let chain = if bubbles { ancestors(i, id) } else { alloc::vec![id] };
         let prevented = deliver(i, &ev, &kind, &chain)?;
         Ok(Value::Bool(!prevented))
@@ -3111,8 +2899,8 @@ pub fn install(realm: &mut Realm) {
         let pos = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
         let html = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
         let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
-        // Die vier Stellen der Spezifikation: vor/nach dem Element selbst,
-        // und ganz vorn/hinten in ihm.
+        // The four positions from the spec: before/after the element itself, and
+        // at the very start/end inside it.
         let (parent, at) = match pos.as_str() {
             "afterbegin" => (id, Some(0)),
             "beforeend" => (id, None),
@@ -3126,9 +2914,7 @@ pub fn install(realm: &mut Realm) {
         d.parse_into(parent, &html, at);
         Ok(Value::Undefined)
     }, 2, &fp);
-    // Dieselben vier Stellen, aber mit einem KNOTEN statt einer Zeichenkette.
-    // Wer `insertAdjacentHTML` hat und diese beiden nicht, hat die Familie
-    // halb — und die halbe Familie wirft dort, wo die andere Haelfte traegt.
+    // The same four positions, but with a node instead of a string.
     meth(&element_proto, "insertAdjacentElement", |i, t, a| {
         let id = node_of(i, &t)?;
         let pos = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
@@ -3164,25 +2950,18 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| !d.nodes[id as usize].children.is_empty())))
     }, 0, &fp);
-    // ── Geometrie ────────────────────────────────────────────────────────
+    // ── Geometry ─────────────────────────────────────────────────────────
     //
-    // Bis 0.75.0 stand hier ueberall eine 0, und der Kommentar begruendete das
-    // damit, dass beak erst NACH den Skripten auslegt. Der Grund war einmal
-    // richtig und ist es seit der Ereigniszustellung nicht mehr: ein
-    // Klickbehandler laeuft auf einer fertig ausgelegten Seite.
-    //
-    // **Eine 0 war dabei das teuerste, was hier stehen konnte.** Sie wirft
-    // nicht, sie steht in keinem Log, sie sieht aus wie eine Antwort — der
-    // Tooltip landet in der Ecke, die Sichtbarkeitspruefung haelt alles fuer
-    // sichtbar. Im Aufrufzensus ist `getBoundingClientRect` mit 1125 Aufrufen
-    // der GROESSTE einzelne Posten, und er stand als „gedeckt" in der Bilanz.
+    // Event handlers run on a laid-out page, so these answer from the layout
+    // boxes. A wrong 0 would not throw or log anything; it would just look
+    // like an answer.
     meth(&element_proto, "getBoundingClientRect", |i, t, _| {
         ensure_box(i, &t);
         let r = elem_rect(i, &t);
         Ok(Value::Obj(rect_obj(i, r)))
     }, 0, &fp);
-    // Die Fragmente einzeln — ein Inline-Kasten ueber drei Zeilen hat drei
-    // Rechtecke, und genau deshalb gibt es diese Funktion neben der oberen.
+    // The fragments individually: an inline box over three lines has three
+    // rectangles, which is why this exists next to the function above.
     meth(&element_proto, "getClientRects", |i, t, _| {
         ensure_box(i, &t);
         let (sx, sy) = i.geometry.as_ref().map_or((0, 0), |g| g.scroll);
@@ -3204,10 +2983,9 @@ pub fn install(realm: &mut Realm) {
         |i, t, _| { ensure_box(i, &t); Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.2))) }, &fp);
     getter(&element_proto, "offsetHeight",
         |i, t, _| { ensure_box(i, &t); Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.3))) }, &fp);
-    // `offsetTop`/`offsetLeft` gehen gegen den `offsetParent`, und den gibt es
-    // hier nicht. Gegen das DOKUMENT ist die naechstbeste Wahrheit und fuer
-    // die ueblichen Faelle (ein Element in einem nicht positionierten Rumpf)
-    // dieselbe Zahl. Benannt, damit niemand sie fuer exakt haelt.
+    // `offsetTop`/`offsetLeft` should be relative to the `offsetParent`; here
+    // they are relative to the document. For the usual case (an element in an
+    // unpositioned body) that is the same number. Not exact in general.
     getter(&element_proto, "offsetTop", |i, t, _| {
         ensure_box(i, &t);
         let sy = i.geometry.as_ref().map_or(0, |g| g.scroll.1);
@@ -3218,19 +2996,12 @@ pub fn install(realm: &mut Realm) {
         let sx = i.geometry.as_ref().map_or(0, |g| g.scroll.0);
         Ok(Value::Num(elem_rect(i, &t).map_or(0.0, |r| r.0 + sx as f64)))
     }, &fp);
-    // `clientWidth`/`clientHeight` sind der POLSTERkasten: der Rahmenkasten
-    // ohne die Rahmen. Die Summen faehrt `HoverBox` mit.
+    // `clientWidth`/`clientHeight` are the padding box: the border box minus
+    // the borders. `HoverBox` carries the sums.
     //
-    // **Ausser am WURZELELEMENT — dort sind sie die Sichtflaeche** (CSSOM
-    // View §4: „If the element is the root element … return the viewport
-    // width/height"). Das ist keine Feinheit: Googles Startseite misst damit
-    // das Fenster und laeuft nur weiter, wenn beide Werte wahr sind —
-    //
-    //     h = p.clientWidth; m = p.clientHeight;
-    //     if (h && m && …) { … "/client_204?…&biw=" + h + "&bih=" + m … }
-    //
-    // Mit 0 blieb der Block stehen, das Formular schickte `biw=&bih=`, und
-    // Google hielt uns fuer einen Browser ohne JavaScript.
+    // Except on the root element, where they are the viewport (CSSOM View §4:
+    // "If the element is the root element … return the viewport
+    // width/height"). Pages measure the window this way.
     getter(&element_proto, "clientWidth", |i, t, _| {
         ensure_box(i, &t);
         if is_root_element(i, &t) { return Ok(viewport_num(i, "innerWidth")) }
@@ -3241,30 +3012,19 @@ pub fn install(realm: &mut Realm) {
         if is_root_element(i, &t) { return Ok(viewport_num(i, "innerHeight")) }
         Ok(Value::Num(elem_inner(i, &t).map_or(0.0, |(_, h)| h)))
     }, &fp);
-    // ── Die Rollmasse ────────────────────────────────────────────────────
+    // ── Scroll metrics ───────────────────────────────────────────────────
     //
-    // **Sie waren da und antworteten 0** — 582 Aufrufe im Zensus, die
-    // groesste Position, die keine neue Schnittstelle braucht, sondern eine
-    // Leitung. Der Kommentar, der hier stand, war ehrlich: die Zahlen gab es
-    // im Layout nicht. Jetzt gibt es sie.
+    // beak clips nothing: `overflow: auto`/`scroll` does not create scroll
+    // containers per element. Therefore:
     //
-    // **beak klemmt nichts ab.** `overflow: auto`/`scroll` schneidet hier
-    // nicht, es gibt keine Rollkaesten je Element (`layout.rs`: „we have no
-    // scroll containers"). Das ist keine Ausrede, sondern die Antwort:
-    //
-    // * `scrollTop`/`scrollLeft` sind an jedem gewoehnlichen Element **0**,
-    //   und das ist WAHR, nicht geraten — nichts an ihm ist weggerollt. Am
-    //   Wurzelelement und am `<body>` sind sie der Rollstand der SEITE, denn
-    //   die rollt.
-    // * `scrollHeight`/`scrollWidth` sind die Rollflaeche: der Polsterkasten,
-    //   vereinigt mit den Rahmenkaesten aller Nachfahren. Ein Element mit
-    //   `height: 100px` und hoeherem Inhalt meldet den Inhalt — genau
-    //   deswegen fragt eine Seite ueberhaupt.
-    // * Am Wurzelelement ist es die Rollflaeche des DOKUMENTS, und die sagt
-    //   das Layout (`Geometry::content`). Sie aus den Kaesten zu raten waere
-    //   eine zweite Wahrheit ueber dieselbe Zahl: ein Hintergrund oder ein
-    //   ueberlaufender Text haelt eine Seite rollbar, ohne einen Kasten zu
-    //   haben.
+    // * `scrollTop`/`scrollLeft` are 0 on every ordinary element, and that is
+    //   true, since nothing in it is scrolled. On the root element and `<body>`
+    //   they are the page's scroll position.
+    // * `scrollHeight`/`scrollWidth` are the scrollable overflow: the padding
+    //   box united with the border boxes of all descendants.
+    // * On the root element it is the document's scrollable area as layout
+    //   reports it (`Geometry::content`); a background or overflowing text can
+    //   keep a page scrollable without having a box.
     getter(&element_proto, "scrollHeight", |i, t, _| {
         ensure_box(i, &t);
         if is_scrolling_root(i, &t) {
@@ -3303,14 +3063,12 @@ pub fn install(realm: &mut Realm) {
             i.want_scroll(Some(x), None);
             Ok(Value::Undefined)
         }, &fp);
-    // `offsetParent`: der naechste POSITIONIERTE Vorfahr, sonst der `<body>`
-    // (CSSOM View §5). Die Ecke „positioniert" faehrt seit dieser Runde im
-    // Layoutkasten mit — sie sonst zu beantworten hiesse, fuer jeden
-    // Vorfahren die Kaskade neu aufzuloesen.
+    // `offsetParent`: the nearest positioned ancestor, else `<body>` (CSSOM
+    // View §5). Whether a box is positioned travels with the layout box;
+    // otherwise each ancestor's cascade would have to be resolved.
     //
-    // `null` an einem Element ohne Kasten, am Wurzelelement und am `<body>`
-    // selbst. Das ist die Antwort, auf die eine Seite prueft, wenn sie
-    // fragt, ob ein Element ueberhaupt sichtbar ist.
+    // `null` on an element without a box, on the root element and on `<body>`
+    // itself. Pages check this to ask whether an element is visible at all.
     getter(&element_proto, "offsetParent", |i, t, _| {
         ensure_box(i, &t);
         let id = node_of(i, &t)?;
@@ -3319,8 +3077,7 @@ pub fn install(realm: &mut Realm) {
             None => return Ok(Value::Null),
         };
         if Some(id) == html || Some(id) == body { return Ok(Value::Null) }
-        // Ohne Kasten gibt es keinen Bezug — `display: none`, und genau das
-        // ist die uebliche Frage.
+        // No box, no reference: `display: none`, which is the usual question.
         if node_box(i, id).is_none() { return Ok(Value::Null) }
         let mut cur = i.doc.as_ref().and_then(|d| d.nodes[id as usize].parent);
         while let Some(p) = cur {
@@ -3333,10 +3090,9 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(match body { Some(b) => wrap(i, b), None => Value::Null })
     }, &fp);
-    // Rollen auf Verlangen. **Die Engine rollt NICHT** — sie merkt sich, was
-    // die Seite wollte, und der Wirt holt es mit `take_scroll` ab. Dasselbe
-    // Muster wie bei den Keksen und der Navigation: die Engine hat kein
-    // Fenster und soll sich keines erfinden.
+    // Programmatic scrolling. The engine does not scroll; it records what the
+    // page wanted and the host collects it with `take_scroll`. The engine has
+    // no window and must not invent one.
     meth(&element_proto, "scrollTo", |i, t, a| {
         if !is_scrolling_root(i, &t) { return Ok(Value::Undefined) }
         let (x, y) = scroll_args(i, a)?;
@@ -3351,9 +3107,9 @@ pub fn install(realm: &mut Realm) {
         i.want_scroll(dx.map(|v| sx + v), dy.map(|v| sy + v));
         Ok(Value::Undefined)
     }, 2, &fp);
-    // `scrollIntoView` rollt so weit, dass die OBERKANTE des Elements oben
-    // steht — die Vorgabe der Spezifikation (`block: "start"`). Ein Argument
-    // `false` oder `{ block: "end" }` stellt die Unterkante ans untere Ende.
+    // `scrollIntoView` scrolls so the element's top edge is at the top, the
+    // spec default (`block: "start"`). `false` or `{ block: "end" }` puts the
+    // bottom edge at the bottom.
     meth(&element_proto, "scrollIntoView", |i, t, a| {
         let Some((_, y, _, h)) = elem_rect(i, &t) else { return Ok(Value::Undefined) };
         let sy = i.geometry.as_ref().map_or(0.0, |g| g.scroll.1 as f64);
@@ -3368,10 +3124,10 @@ pub fn install(realm: &mut Realm) {
         i.want_scroll(None, Some(ziel.max(0.0)));
         Ok(Value::Undefined)
     }, 1, &fp);
-    // Die Liste selbst arbeitet auf dem Element: sie haelt keine Kopie der
-    // Klassen, sondern liest und schreibt das Attribut. Frisch je Zugriff —
-    // `el.classList === el.classList` ist damit falsch, waehrend ein Browser
-    // dasselbe Objekt liefert. Gemerkt, weil es eines Tages auffaellt.
+    // The list works on the element: it holds no copy of the classes but
+    // reads and writes the attribute. Built fresh per access, so
+    // `el.classList === el.classList` is false, while browsers return the
+    // same object.
     getter(&element_proto, "classList", |i, t, _| {
         let id = node_of(i, &t)?;
         let g = new_obj(Some(i.realm.token_list_proto.clone()));
@@ -3379,9 +3135,8 @@ pub fn install(realm: &mut Realm) {
             set: None, writable: false, enumerable: false, configurable: false });
         Ok(Value::Obj(g))
     }, &fp);
-    // `el.style` ist eine SICHT auf das `style`-Attribut dieses Elements —
-    // sie haelt keinen eigenen Zustand, also koennen Attribut und Sicht nicht
-    // auseinanderlaufen.
+    // `el.style` is a view on this element's `style` attribute; it holds no
+    // state of its own, so attribute and view cannot diverge.
     getter(&element_proto, "style", |i, t, _| {
         let id = node_of(i, &t)?;
         let g = new_obj(Some(i.realm.style_proto.clone()));
@@ -3390,10 +3145,10 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(g))
     }, &fp);
 
-    // querySelector & Co. auf Element wie auf Document.
-    // `append`, `prepend`, `before`, `after`, `replaceWith` — die moderne
-    // Einhaengfamilie. Sie nimmt beliebig viele Argumente, und ein Text wird
-    // dabei zum TEXTKNOTEN: `el.append("hallo")` haengt keinen String an.
+    // querySelector and friends, on Element as on Document.
+    // `append`, `prepend`, `before`, `after`, `replaceWith`: the modern
+    // insertion family. Takes any number of arguments, and a string becomes
+    // a text node.
     for target in [&element_proto, &fragment_proto] {
         meth(target, "append", |i, t, a| insert_all(i, &t, a, Where::Last), 1, &fp);
         meth(target, "prepend", |i, t, a| insert_all(i, &t, a, Where::First), 1, &fp);
@@ -3407,8 +3162,7 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Undefined)
     }, 1, &fp);
 
-    // Auch auf dem Bruchstueck: eine Schablone wird gefuellt, indem man in
-    // ihrem Inhalt sucht — ohne das ist `.content` nur halb gebaut.
+    // Also on the fragment: a template is filled by querying its content.
     for target in [&element_proto, &document_proto, &fragment_proto] {
         meth(target, "querySelector", |i, t, a| {
             let id = node_of(i, &t)?;
@@ -3448,12 +3202,10 @@ pub fn install(realm: &mut Realm) {
 
     // ── Document ─────────────────────────────────────────────────────────
     //
-    // **Die drei lesen `this`, nicht nur das Hauptdokument.** Seit
-    // `implementation.createHTMLDocument` gibt es einen ZWEITEN
-    // Dokumentknoten im selben Feld, und ein Getter, der stur
-    // `i.doc.body` zurueckgibt, haette dessen Rumpf ausgeliefert — jQuery
-    // haette sein Probestueck in die ECHTE Seite geschrieben. Fuer das
-    // Hauptdokument bleibt der gemerkte Weg; nur daneben wird gelaufen.
+    // These getters read `this`, not just the main document:
+    // `implementation.createHTMLDocument` puts a second document node in the
+    // same arena, and returning the main body would let a library write its
+    // probe into the real page. The main document keeps the cached path.
     getter(&document_proto, "documentElement", |i, this, _| {
         match doc_part(i, &this, DocPart::Root)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
@@ -3464,84 +3216,50 @@ pub fn install(realm: &mut Realm) {
         match doc_part(i, &this, DocPart::Head)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
     getter(&document_proto, "readyState", |_, _, _| Ok(Value::str("complete")), &fp);
-    // **`currentScript` ist der Weg, auf dem ein Buendel sich selbst findet.**
-    // Jedes von Turbopack erzeugte Stueck meldet sich mit
-    // `TURBOPACK.push([document.currentScript, …])` an und wirft ohne den
-    // Knoten „chunk path empty but not in a worker" — auf DDGs Startseite
-    // fielen daran sieben Skripte und ein Inline-Stueck aus. Dasselbe Feld
-    // sagt `document.write`, WOHIN geschrieben wird.
+    // `currentScript` is how a bundle finds itself (bundlers push
+    // `document.currentScript` with each chunk). It also tells
+    // `document.write` where to write.
     //
-    // Nur am Hauptdokument, und nur waehrend ein klassisches Skript laeuft:
-    // in einem Modul, in einem Rueckruf und in einem zweiten Dokument ist die
-    // Antwort `null` (HTML §4.12.1).
+    // Only on the main document and only while a classic script runs; in a
+    // module, a callback or another document it is `null` (HTML §4.12.1).
     getter(&document_proto, "currentScript", |i, this, _| {
         let root = node_of(i, &this)?;
         if i.doc.as_ref().map(|d| d.doc) != Some(root) { return Ok(Value::Null) }
         match i.current_script { Some(n) => Ok(wrap(i, n)), None => Ok(Value::Null) }
     }, &fp);
-    // `scrollingElement` — das Element, dessen `scrollTop` die SEITE rollt.
-    // Im Standardmodus ist das `documentElement`, und beak parst nichts
-    // anderes. Eine Seite liest es und schreibt dann darauf; beide Antworten
-    // muessen zueinander passen (`is_scrolling_root`).
+    // `scrollingElement`: the element whose `scrollTop` scrolls the page. In
+    // standards mode that is `documentElement`, and beak parses nothing else.
+    // Must agree with `is_scrolling_root`.
     getter(&document_proto, "scrollingElement", |i, this, _| {
         match doc_part(i, &this, DocPart::Root)? { Some(x) => Ok(wrap(i, x)), None => Ok(Value::Null) }
     }, &fp);
-    // **Vier Felder, die jede Seite liest — und die es bisher nicht gab.**
-    // Im Zensus stehen `visibilityState`/`hidden` mit 50 und `referrer` mit
-    // 45 Aufrufen (`docs/plan/WEB_PLATFORM_GAPS.md` P7). Ein FEHLENDES Feld
-    // ist schlechter als eine richtige Antwort: `document.referrer.indexOf(…)`
-    // stirbt auf `undefined`, und `if (document.hidden)` nimmt still den
-    // falschen Zweig.
+    // `document.write`: in browsers a classic script runs during parsing and
+    // writes into the stream; in beak the tree is complete before the first
+    // script runs. The result is the same if the text goes where the parser
+    // would be: right after the writing `<script>`.
     //
-    // beak malt genau ein Dokument, und es ist sichtbar, solange es laeuft —
-    // das ist keine Hoeflichkeit, sondern der Zustand.
+    // Per spec a `write` without an insertion point is a `document.open()`,
+    // which clears the document. beak does not do that, since no script here
+    // ever has a spec insertion point and an empty page is the worse answer.
+    // Without `currentScript` (from a timer or callback) it logs to the
+    // console and does nothing.
     //
-    // **Seit es Tabs gibt (beak 0.163.0) gilt der Satz weiter, aber aus einem
-    // anderen Grund**, und der gehoert dazu, weil er ablaufen kann: ein Tab im
-    // Hintergrund ist EINGEFROREN (`docs/plan/BROWSER_TABS.md` §A3 b) — er hat
-    // gar keine JS-Sitzung, also fragt dort auch niemand. Eine Sitzung, die
-    // diese drei Zeilen liest, ist die des sichtbaren Tabs.
-    //
-    // Zur Luege werden sie an dem Tag, an dem ein Hintergrundtab LEBENDIG
-    // bleibt (§A3, LRU 2-3). Dann ist „sichtbar" falsch, und zwar in der
-    // schlimmsten Richtung: eine Seite, der man sagt, sie sei sichtbar,
-    // pollt weiter. Wer das baut, baut diese drei Getter mit — und
-    // `visibilitychange`, das es noch gar nicht gibt.
-    // **`document.write` — die eine Stelle, an der beaks Modell nicht das des
-    // Browsers ist.** Dort laeuft ein klassisches Skript WAEHREND des Parsens
-    // und schreibt in den Strom; beak hat den Baum schon fertig, wenn das
-    // erste Skript laeuft (`page_scripts` sagt es woertlich). Das Ergebnis
-    // ist trotzdem dasselbe, wenn man dorthin schreibt, wo der Parser stuende:
-    // unmittelbar HINTER das schreibende `<script>`.
-    //
-    // Nach der Spezifikation waere ein `write` ohne Einfuegestelle ein
-    // `document.open()` — also das Dokument LEEREN. Das tut beak nicht: hier
-    // hat kein Skript je eine Einfuegestelle im Sinne der Spezifikation, und
-    // eine leere Seite waere die schlechtere von zwei falschen Antworten.
-    // Ohne `currentScript` (aus einem Zeitgeber, einem Rueckruf) steht es
-    // deshalb auf der Konsole und passiert nichts.
-    //
-    // DDGs Startseite laedt so ihren Intl-Polyfill nach; ohne die Funktion
-    // starb das Skript an `write is not a function`.
+    // `visibilityState`/`hidden`: beak paints one document per session, and
+    // background tabs are frozen without a JS session, so any page asking is
+    // visible. If background tabs ever stay live, these getters and
+    // `visibilitychange` must change with it.
     meth(&document_proto, "write", |i, this, a| doc_write(i, &this, a, false), 1, &fp);
     meth(&document_proto, "writeln", |i, this, a| doc_write(i, &this, a, true), 1, &fp);
     getter(&document_proto, "visibilityState", |_, _, _| Ok(Value::str("visible")), &fp);
     getter(&document_proto, "hidden", |_, _, _| Ok(Value::Bool(false)), &fp);
     meth(&document_proto, "hasFocus", |_, _, _| Ok(Value::Bool(true)), 0, &fp);
-    // `referrer` ist die LEERE Zeichenkette und keine erfundene Adresse: sie
-    // ist die richtige Antwort fuer eine Navigation ohne Verweis, und beak
-    // reicht bisher keinen weiter. Da statt fehlend — und wenn der Wirt ihn
-    // einmal einreicht, steht die Stelle schon.
+    // `referrer` is the empty string, the correct answer for a navigation
+    // without a referrer; beak does not pass one on yet.
     getter(&document_proto, "referrer", |_, _, _| Ok(Value::str("")), &fp);
-    // `document.cookie` — 1852 Aufrufe im Zensus, und auf BEIDEN Wikipedias
-    // die erste Wand ueberhaupt: das allererste Inline-Skript jeder Seite
-    // ruft `document.cookie.match(…)`, und auf `undefined` ist das das Ende
-    // des Skripts.
-    //
-    // Die Engine haelt keinen Behaelter. Was dieses Dokument sehen darf,
-    // haengt an Domain, Pfad, `Secure` und `HttpOnly` — das weiss der Wirt,
-    // und `Interp::set_cookies` reicht ihm genau die Skript-Sicht ein.
-    // Gesetztes geht denselben Weg zurueck (`take_cookie_sets`).
+    // `document.cookie`. The engine holds no cookie jar: what this document
+    // may see depends on domain, path, `Secure` and `HttpOnly`, which the host
+    // knows; `Interp::set_cookies` provides the script view. Writes go back
+    // the same way (`take_cookie_sets`).
     accessor(&document_proto, "cookie",
         |i, _, _| { let c = i.cookies.clone(); Ok(Value::str(&c)) },
         |i, _, a| {
@@ -3550,10 +3268,10 @@ pub fn install(realm: &mut Realm) {
             let name = name.trim().to_string();
             if name.is_empty() { return Ok(Value::Undefined) }
             let value = rest.split(';').next().unwrap_or("").trim().to_string();
-            // Loeschen erkennt die Engine nur an `Max-Age<=0` — das ist
-            // taktfrei. Ein `Expires` in der Vergangenheit braucht eine Uhr,
-            // die sie nicht hat; DER Fall wird erst sichtbar, wenn der Wirt
-            // die Sicht neu einreicht. Der Behaelter selbst hat beides.
+            // The engine recognises deletion only by `Max-Age<=0`, which needs no
+            // clock. An `Expires` in the past needs a clock the engine lacks; that
+            // case shows once the host provides the view again. The jar itself
+            // handles both.
             let deleting = decl.split(';').skip(1).any(|a| {
                 let (k, v) = a.split_once('=').unwrap_or((a, ""));
                 k.trim().eq_ignore_ascii_case("max-age")
@@ -3568,12 +3286,10 @@ pub fn install(realm: &mut Realm) {
             i.cookie_sets.push(decl.to_string());
             Ok(Value::Undefined)
         }, &fp);
-    // Der Titel steht im Baum, nicht daneben: ein Skript, das ihn setzt,
-    // aendert das `<title>`-Element, und wer ihn liest, liest denselben
-    // Knoten. Zwei Kopien waeren zwei Wahrheiten.
-    // `title` liest und schreibt am EIGENEN Dokumentknoten — sonst gaebe ein
-    // frisch gebautes `createHTMLDocument("Titel")` den Titel der echten
-    // Seite zurueck, und ein Setzer daran wuerde ihn ueberschreiben.
+    // The title lives in the tree: setting it changes the `<title>` element.
+    // It reads and writes this document node's own title, so a new
+    // `createHTMLDocument("Title")` does not return or overwrite the real
+    // page's title.
     accessor(&document_proto, "title",
         |i, this, _| {
             let root = node_of(i, &this)?;
@@ -3591,8 +3307,7 @@ pub fn install(realm: &mut Realm) {
             let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
             let t = match found {
                 Some(x) => x,
-                // Kein `<title>`: eins anlegen und in den Kopf haengen. Ein
-                // stiller Fehlschlag saehe aus wie ein kaputter Setzer.
+                // No `<title>`: create one and append it to the head.
                 None => {
                     let e = d.create(ELEMENT_NODE, "title");
                     d.append(head.unwrap_or(root), e);
@@ -3606,18 +3321,15 @@ pub fn install(realm: &mut Realm) {
             d.touch();
             Ok(Value::Undefined)
         }, &fp);
-    // Was der Aufrufzensus (`tools/jsscope/out/apicensus.json`, eine echte
-    // Chromium-Messung auf denselben zwoelf Seiten) als naechstes verlangt.
-    // Die Reihenfolge hier IST die Rangfolge dort — nicht die Reihenfolge,
-    // in der mir etwas eingefallen ist.
-    getter(&node_proto, "ownerDocument", |i, t, _| {          // 6081
+    // Commonly used Node/Element/Document members.
+    getter(&node_proto, "ownerDocument", |i, t, _| {
         let id = node_of(i, &t)?;
         let Some(d) = &i.doc else { return Ok(Value::Null) };
         let root = d.doc;
-        if id == root { return Ok(Value::Null) }              // das Dokument selbst: null
+        if id == root { return Ok(Value::Null) }              // the document itself: null
         Ok(wrap(i, root))
     }, &fp);
-    meth(&node_proto, "getRootNode", |i, t, _| {              // 421
+    meth(&node_proto, "getRootNode", |i, t, _| {
         let mut id = node_of(i, &t)?;
         loop {
             let Some(d) = &i.doc else { return Ok(Value::Null) };
@@ -3625,15 +3337,14 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(wrap(i, id))
     }, 0, &fp);
-    getter(&element_proto, "namespaceURI", |i, t, _| {        // 3777
-        // Nur die zwei, die vorkommen. Ein `foreignObject` in SVG bekaeme
-        // hier die falsche Antwort — es kommt im Zielkorpus nicht vor, und
-        // eine erfundene dritte waere schlimmer als eine ehrliche zweite.
+    getter(&element_proto, "namespaceURI", |i, t, _| {
+        // Only SVG and HTML are distinguished; `foreignObject` content would get
+        // the wrong answer.
         with_node!(i, t, |n| Ok(Value::str(
             if &*n.tag == "svg" || n.tag.starts_with("svg:") { "http://www.w3.org/2000/svg" }
             else { "http://www.w3.org/1999/xhtml" })))
     }, &fp);
-    meth(&element_proto, "closest", |i, t, a| {               // 6115
+    meth(&element_proto, "closest", |i, t, a| {
         let sel = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let mut id = Some(node_of(i, &t)?);
         while let Some(x) = id {
@@ -3644,27 +3355,22 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Null)
     }, 1, &fp);
-    meth(&element_proto, "getAttributeNames", |i, t, _| {     // 165
+    meth(&element_proto, "getAttributeNames", |i, t, _| {
         let names: Vec<Value> = with_node!(i, t, |n|
             n.attrs.iter().map(|(k, _)| Value::str(k)).collect::<Vec<_>>());
         Ok(i.new_array(names))
     }, 0, &fp);
-    meth(&element_proto, "hasAttributes", |i, t, _| {         // 159
+    meth(&element_proto, "hasAttributes", |i, t, _| {
         with_node!(i, t, |n| Ok(Value::Bool(!n.attrs.is_empty())))
     }, 0, &fp);
-    getter(&element_proto, "dataset", |i, t, _| {             // 3966
-        // **Lebendig beim Schreiben, Momentaufnahme beim Lesen.** Die Werte
-        // stehen als gewoehnliche Eigenschaften darauf (das Lesen ist der
-        // Alltagsfall und soll nichts kosten), und `ObjKind::Dataset` traegt
-        // den Knoten, damit `Interp::set` eine Zuweisung ins ATTRIBUT
-        // durchreicht. Vorher war es nur die Momentaufnahme, und
-        // `el.dataset.theme = 'light'` verpuffte — der Theme-Schalter von
-        // `sandbox.nopeek.ch` genau so.
+    getter(&element_proto, "dataset", |i, t, _| {
+        // Live on write, snapshot on read. The values are plain properties (reads
+        // are the common case and should cost nothing), and `ObjKind::Dataset`
+        // carries the node so `Interp::set` forwards an assignment to the
+        // attribute.
         //
-        // Offen und benannt: `delete el.dataset.x` entfernt das Attribut
-        // nicht, und ein Schluessel, den das Element noch nicht hat, wird
-        // angelegt — das ist richtig — aber das Objekt in der Hand des
-        // Rufers zeigt Aenderungen von AUSSEN nicht nach.
+        // Not implemented: `delete el.dataset.x` does not remove the attribute,
+        // and the object does not reflect attribute changes made elsewhere.
         let id = node_of(i, &t)?;
         let pairs: Vec<(String, String)> = with_node!(i, t, |n|
             n.attrs.iter().filter_map(|(k, v)| k.strip_prefix("data-")
@@ -3673,15 +3379,11 @@ pub fn install(realm: &mut Realm) {
         for (k, v) in pairs { g.borrow_mut().define(&k, Prop::data(Value::string(v))); }
         Ok(Value::Obj(g))
     }, &fp);
-    getter(&document_proto, "defaultView", |i, _, _| {        // 1580
+    getter(&document_proto, "defaultView", |i, _, _| {
         Ok(Value::Obj(i.realm.global.clone()))
     }, &fp);
-    // `document.forms` — die Sammlung, ueber die Seiten ihr Formular finden.
-    //
-    // Mit BENANNTEM Zugriff: `document.forms["loginForm"]` sucht ueber `id`
-    // UND `name`, und genau diese Form nehmen Seiten. Eine Liste ohne
-    // Namenszugriff waere die halbe Sache — sie gibt `undefined` und sagt
-    // nicht, warum.
+    // `document.forms`, with named access: `document.forms["loginForm"]`
+    // looks up by `id` and `name`.
     getter(&document_proto, "forms", |i, _, _| {
         let ids = match &i.doc { Some(d) => tags_of(d, d.doc, "form"), None => Vec::new() };
         let arr = nodes_array(i, ids.clone());
@@ -3703,38 +3405,28 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(arr)
     }, &fp);
-    getter(&document_proto, "activeElement", |i, _, _| {      // 1606
-        // Was `focus()` gesetzt hat — sonst `body`, die Antwort, die ein
-        // Browser ohne Fokus auch gibt.
+    getter(&document_proto, "activeElement", |i, _, _| {
+        // What `focus()` set, else `body`, the answer browsers give without
+        // focus.
         if let Some(f) = i.doc.as_ref().and_then(|d| d.focused) { return Ok(wrap(i, f)) }
         let b = i.doc.as_ref().and_then(|d| find_tag(d, "body"));
         Ok(match b { Some(x) => wrap(i, x), None => Value::Null })
     }, &fp);
-    meth(&document_proto, "createComment", |i, _, a| {        // 2398
+    meth(&document_proto, "createComment", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(COMMENT_NODE, "#comment");
         d.nodes[id as usize].text = s;
         Ok(wrap(i, id))
     }, 1, &fp);
-    // `document.createEvent` — die Fassung von DOM Level 2, und sie steht
-    // immer noch in ausgeliefertem Code: die Einwilligungsschicht auf
-    // arcade.ch baut damit JEDES ihrer Ereignisse (`registerEvent`), und der
-    // ganze `DOMContentLoaded`-Behandler der Seite starb an diesem EINEN
-    // fehlenden Aufruf — die Navigation blieb ungestaltet zurueck.
-    //
-    // Der Chromium-Zensus zaehlt drei Aufrufe auf zwoelf Zielseiten. Das
-    // entscheidet die GROESSE, nicht das Ob
-    // ([[feedback_a_call_count_is_not_a_site_count]]): gebaut wird die
-    // Namenstabelle der Spezifikation fuer die Schnittstellen, die es hier
-    // WIRKLICH gibt — und fuer jede andere die Absage, die DOM §createEvent
-    // dafuer vorsieht, statt einer Huelle, die beim naechsten `init…`-Aufruf
-    // ohnehin stirbt.
+    // `document.createEvent` (DOM Level 2), still used by shipped code. Builds
+    // the spec's name table for the interfaces that exist here, and throws as
+    // DOM §createEvent specifies for any other.
     meth(&document_proto, "createEvent", |i, _, a| {
         let want = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_lowercase();
         let custom = want == "customevent";
-        // Die Tabelle ist case-insensitiv, und die Namen im Plural sind die
-        // aelteren Schreibweisen desselben Eintrags.
+        // The table is case-insensitive; the plural names are older spellings of
+        // the same entry.
         if !custom && !matches!(&*want, "event" | "events" | "htmlevents" | "svgevents") {
             return i.type_err(&alloc::format!(
                 "createEvent: die Schnittstelle '{want}' gibt es in dieser Engine nicht"));
@@ -3747,11 +3439,11 @@ pub fn install(realm: &mut Realm) {
         } else {
             i.realm.event_proto.clone()
         };
-        // So gebaut ist es NICHT initialisiert: die Art bleibt leer, bis
-        // `initEvent` sie setzt. Genau dafuer gibt es die zwei Aufrufe.
+        // Created this way it is not initialized: the type stays empty until
+        // `initEvent` sets it.
         Ok(Value::Obj(build_event(i, proto, "", false)))
     }, 1, &fp);
-    meth(&document_proto, "createElementNS", |i, _, a| {      // 180
+    meth(&document_proto, "createElementNS", |i, _, a| {
         let s = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
         let lower = s.to_lowercase();
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
@@ -3775,20 +3467,17 @@ pub fn install(realm: &mut Realm) {
         let id = d.create(ELEMENT_NODE, &lower);
         Ok(wrap(i, id))
     }, 1, &fp);
-    // **`new Image()` ist `document.createElement("img")`** — dieselbe
-    // Sache, ein anderer Name. Ohne den Konstruktor bricht der Zeitgeber der
-    // Google-Ergebnisseite mit `Image is not defined` ab; ein Zaehlpixel ist
-    // der haeufigste Gebrauch, und der besteht genau aus `new Image().src =
-    // …`. Gebaut wird deshalb ein ECHTES `img`-Element und kein Attrappe:
-    // was die Seite danach daran tut, tut sie an einem Knoten im Baum.
+    // `new Image()` is `document.createElement("img")` under another name, so
+    // it builds a real `img` element (the usual use is a tracking pixel via
+    // `new Image().src = …`).
     let img_ctor = native(Some(fp.clone()), |i, _, a| {
         let node = {
             let Some(d) = &mut i.doc else { return i.type_err("no document") };
             d.create(ELEMENT_NODE, "img")
         };
         let el = wrap(i, node);
-        // `new Image(w, h)` setzt Breite und Hoehe als ATTRIBUTE, so wie im
-        // Browser — nicht als Stil.
+        // `new Image(w, h)` sets width and height as attributes, as in browsers,
+        // not as style.
         for (k, n) in [("width", 0usize), ("height", 1usize)] {
             if let Some(v) = a.get(n) {
                 if !matches!(v, Value::Undefined) {
@@ -3810,11 +3499,9 @@ pub fn install(realm: &mut Realm) {
         d.nodes[id as usize].text = s;
         Ok(wrap(i, id))
     }, 1, &fp);
-    // `importNode` (2134 Aufrufe) und `adoptNode`: beide holen einen Knoten
-    // in DIESES Dokument. beak hat genau eins — es gibt keinen zweiten Baum,
-    // aus dem etwas kaeme —, also ist `importNode` eine Kopie und `adoptNode`
-    // der Knoten selbst. Das ist keine Abkuerzung, sondern was die
-    // Spezifikation fuer den Ein-Dokument-Fall sagt.
+    // `importNode` and `adoptNode` both bring a node into this document. beak
+    // has one node store, so `importNode` is a copy and `adoptNode` the node
+    // itself, which is what the spec gives for that case.
     meth(&document_proto, "importNode", |i, _, a| {
         let id = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
         let deep = a.get(1).map(|v| v.truthy()).unwrap_or(false);
@@ -3828,16 +3515,12 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
     // ── MutationObserver ─────────────────────────────────────────────────
     //
-    // **Warum es das braucht.** Alpine, htmx und jede Bibliothek, die
-    // nachgeladenes HTML von selbst zum Leben erweckt, meldet sich beim BAUM
-    // an statt bei einem Ereignis. Ohne `MutationObserver` stirbt Alpine
-    // schon beim Laden — `ReferenceError`, ausserhalb jedes `try`.
+    // Libraries that bring loaded HTML to life (Alpine, htmx) observe the
+    // tree rather than an event.
     //
-    // Aufgezeichnet wird im Baum (`Doc::record`), zugestellt am
-    // Microtask-Kontrollpunkt (`promise::run_jobs`). Die Meldungen werden
-    // erst beim Zustellen GEBAUT: ein fertiges Objekt je Aenderung, waehrend
-    // das Skript laeuft, waere Arbeit fuer einen Leser, den es vielleicht
-    // nie gibt.
+    // Recorded in the tree (`Doc::record`), delivered at the microtask
+    // checkpoint (`promise::run_jobs`). Records are built only on delivery,
+    // not per mutation while the script runs.
     let mo_proto = new_obj(Some(realm.object_proto.clone()));
     let mo_ctor = native(Some(fp.clone()), |i, _, a| {
         let cb = a.first().cloned().unwrap_or(Value::Undefined);
@@ -3868,9 +3551,8 @@ pub fn install(realm: &mut Realm) {
         let attr_old = flag(i, "attributeOldValue")?;
         let char_old = flag(i, "characterDataOldValue")?;
         let explicit_attrs = flag(i, "attributes")?;
-        // `attributeFilter` schaltet `attributes` MIT ein, auch wenn niemand
-        // es hingeschrieben hat — so steht es in der Spezifikation, und
-        // Bibliothekscode verlaesst sich darauf.
+        // `attributeFilter` implies `attributes` even if not written, as the spec
+        // says; library code relies on it.
         let filter = if !has_opts { None } else {
             match i.get(&opts, "attributeFilter")? {
                 Value::Obj(_) => {
@@ -3888,8 +3570,8 @@ pub fn install(realm: &mut Realm) {
             }
         };
         let attrs = explicit_attrs || attr_old || filter.is_some();
-        // Ohne eines der drei ist nichts zu beobachten — die Spezifikation
-        // wirft hier, statt still einen Beobachter anzulegen, der nie meldet.
+        // Without one of the three there is nothing to observe; the spec throws
+        // here rather than creating an observer that never reports.
         if !child_list && !attrs && !char_data {
             return i.type_err("MutationObserver.observe: childList, attributes or characterData required");
         }
@@ -3899,8 +3581,8 @@ pub fn install(realm: &mut Realm) {
         let mut found = false;
         for o in i.observers.iter_mut() {
             if Rc::ptr_eq(&o.js, this) {
-                // Ein zweites `observe` auf DENSELBEN Knoten ersetzt die
-                // Anmeldung, es haengt keine zweite an (DOM §4.3.1).
+                // A second `observe` on the same node replaces the registration rather
+                // than adding one (DOM §4.3.1).
                 o.regs.retain(|r| r.target != target);
                 o.regs.push(reg);
                 found = true;
@@ -3924,9 +3606,8 @@ pub fn install(realm: &mut Realm) {
     meth(&mo_proto, "takeRecords", |i, t, _| {
         let Value::Obj(this) = &t else { return Ok(i.new_array(Vec::new())) };
         let this = this.clone();
-        // Erst einsammeln, was der Baum seit dem letzten Mal notiert hat —
-        // sonst gaebe `takeRecords()` unmittelbar nach einer Aenderung eine
-        // leere Liste, und genau dafuer ruft man es.
+        // First collect what the tree recorded since last time, otherwise
+        // `takeRecords()` right after a change would return an empty list.
         collect_mutations(i);
         let mut recs = Vec::new();
         for o in i.observers.iter_mut() {
@@ -3940,10 +3621,8 @@ pub fn install(realm: &mut Realm) {
 
     // ── ResizeObserver ───────────────────────────────────────────────────
     //
-    // **Warum es das braucht.** Jedes Diagramm, jede Karte und jede
-    // Bibliothek, die sich an ihren Kasten anpasst, meldet sich hier an statt
-    // am `resize` des Fensters — der sagt nichts darueber, dass sich EIN
-    // Kasten geaendert hat, weil daneben etwas eingeklappt wurde.
+    // For components that adapt to their own box; the window's `resize` says
+    // nothing about one box changing because something next to it collapsed.
     let ro_proto = new_obj(Some(realm.object_proto.clone()));
     let ro_ctor = native(Some(fp.clone()), |i, _, a| {
         let cb = a.first().cloned().unwrap_or(Value::Undefined);
@@ -3962,7 +3641,7 @@ pub fn install(realm: &mut Realm) {
 
     meth(&ro_proto, "observe", |i, t, a| {
         let target = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
-        // `{ box: "border-box" }` — die Vorgabe ist der Inhaltskasten.
+        // `{ box: "border-box" }`; the default is the content box.
         let kind = match a.get(1) {
             Some(o @ Value::Obj(_)) => match i.get(o, "box")? {
                 Value::Str(s) if &*s == "border-box" => BoxKind::Border,
@@ -3977,10 +3656,9 @@ pub fn install(realm: &mut Realm) {
         let mut found = false;
         for o in i.resize_obs.iter_mut() {
             if Rc::ptr_eq(&o.js, &this) {
-                // Ein zweites `observe` auf DENSELBEN Knoten ersetzt die
-                // Anmeldung (Resize Observer 3.1) — und `last: None` sorgt
-                // dafuer, dass es DANACH einmal meldet, so wie beim ersten
-                // Mal.
+                // A second `observe` on the same node replaces the registration (Resize
+                // Observer 3.1), and `last: None` makes it report once afterwards, as
+                // the first time.
                 o.regs.retain(|r| r.target != target);
                 o.regs.push(ResizeReg { target, kind, last: None });
                 found = true;
@@ -3988,9 +3666,9 @@ pub fn install(realm: &mut Realm) {
             }
         }
         if !found { return i.type_err("ResizeObserver.observe: not an observer") }
-        // Sofort auswerten: `observe` liefert die aktuelle Groesse, nicht
-        // erst die naechste Aenderung. Wer bis zum naechsten Layout wartet,
-        // laesst eine Seite ohne Groesse dastehen, die sich nie mehr aendert.
+        // Evaluate now: `observe` delivers the current size, not only the next
+        // change. Waiting for the next layout could leave a page with no size
+        // that never changes again.
         eval_box_observers(i);
         Ok(Value::Undefined)
     }, 1, &fp);
@@ -4015,11 +3693,8 @@ pub fn install(realm: &mut Realm) {
 
     // ── IntersectionObserver ─────────────────────────────────────────────
     //
-    // **Warum es das braucht.** Verzoegert geladene Bilder, unendliche
-    // Listen, „im Blick"-Animationen und jede Statistik, die zaehlt, was
-    // gesehen wurde. Ohne ihn laedt eine Bildergalerie genau ein Bild und
-    // haelt dann an — nicht mit einem Fehler, sondern mit Ruhe, und das ist
-    // schlimmer.
+    // Lazy-loaded images, infinite lists, in-view animations and view
+    // counting depend on it.
     let io_proto = new_obj(Some(realm.object_proto.clone()));
     let io_ctor = native(Some(fp.clone()), |i, _, a| {
         let cb = a.first().cloned().unwrap_or(Value::Undefined);
@@ -4028,16 +3703,15 @@ pub fn install(realm: &mut Realm) {
         }
         let opts = a.get(1).cloned().unwrap_or(Value::Undefined);
         let has = matches!(opts, Value::Obj(_));
-        // Die Wurzel: ein Element, oder das Sichtfeld.
+        // The root: an element, or the viewport.
         let root = if !has { None } else {
             match i.get(&opts, "root")? {
                 v @ Value::Obj(_) => node_of(i, &v).ok(),
                 _ => None,
             }
         };
-        // `rootMargin` — die CSS-Kurzform mit ein bis vier Laengen. Prozente
-        // stehen zur AUSSCHNITTgroesse; ohne eigene Wurzel ist das das
-        // Sichtfeld.
+        // `rootMargin`: the CSS shorthand with one to four lengths. Percentages
+        // refer to the clip size; without an explicit root that is the viewport.
         let (vw, vh) = i.viewport;
         let margin_src: Rc<str> = if !has { Rc::from("0px") } else {
             match i.get(&opts, "rootMargin")? {
@@ -4047,8 +3721,8 @@ pub fn install(realm: &mut Realm) {
             }
         };
         let margin = parse_root_margin(&margin_src, vw, vh);
-        // `threshold` — eine Zahl oder eine Liste. Ohne Angabe: 0, also
-        // „sobald ein Pixel sichtbar wird".
+        // `threshold`: a number or a list. Default 0, i.e. as soon as one pixel
+        // becomes visible.
         let mut thresholds: Vec<f64> = Vec::new();
         if has {
             match i.get(&opts, "threshold")? {
@@ -4098,9 +3772,8 @@ pub fn install(realm: &mut Realm) {
             }
         }
         if !found { return i.type_err("IntersectionObserver.observe: not an observer") }
-        // Wie beim `ResizeObserver`: die erste Meldung kommt sofort, nicht
-        // erst beim naechsten Bildlauf. Genau darauf verlaesst sich jede
-        // Liste, die beim Laden schon halb sichtbar ist.
+        // As with `ResizeObserver`, the first report comes immediately, not on
+        // the next scroll; lists already half visible at load rely on it.
         eval_box_observers(i);
         Ok(Value::Undefined)
     }, 1, &fp);
@@ -4132,8 +3805,8 @@ pub fn install(realm: &mut Realm) {
         let vals: Vec<Value> = q.iter().map(|e| build_inter_entry(i, e)).collect();
         Ok(i.new_array(vals))
     }, 0, &fp);
-    // `root`, `rootMargin` und `thresholds` sind lesbar — Bibliothekscode
-    // liest sie zurueck, um einen Beobachter wiederzuverwenden.
+    // `root`, `rootMargin` and `thresholds` are readable; library code reads
+    // them back to reuse an observer.
     getter(&io_proto, "root", |i, t, _| {
         let Value::Obj(this) = &t else { return Ok(Value::Null) };
         let r = i.inter_obs.iter().find(|o| Rc::ptr_eq(&o.js, this)).and_then(|o| o.root);
@@ -4155,18 +3828,12 @@ pub fn install(realm: &mut Realm) {
 
     // ── document.implementation ──────────────────────────────────────────
     //
-    // **`createHTMLDocument` ist der Grund, warum es das hier gibt.** jQuery
-    // baut damit ein WEGWERF-Dokument, um fremdes HTML zu zerlegen, ohne
-    // dass dabei Bilder geladen oder Skripte gefahren werden — und es tut
-    // das schon beim Laden, ausserhalb jedes `try`. Ohne diese Zeile stirbt
-    // jQuery an seiner eigenen Merkmalspruefung, und mit ihm die halbe
-    // Bibliothek der Seite.
+    // `createHTMLDocument` gives libraries (jQuery) a throwaway document for
+    // parsing foreign HTML without loading images or running scripts.
     //
-    // Ein zweiter Dokumentknoten IM SELBEN Knotenfeld, nicht ein zweites
-    // Feld: die Knoten-ids sind Plaetze in genau einem `Vec`, und ein
-    // zweiter Baum daneben waere ein zweites Adressraum-Modell. Losgeloest
-    // ist er trotzdem — er haengt an keinem Elter, also sieht ihn weder das
-    // Layout noch der Wirt.
+    // A second document node in the same node store, not a second store: node
+    // ids are slots in exactly one `Vec`. It is detached, so neither layout
+    // nor the host sees it.
     let impl_obj = new_obj(Some(realm.object_proto.clone()));
     meth(&impl_obj, "createHTMLDocument", |i, _, a| {
         let title = match a.first() {
@@ -4181,8 +3848,8 @@ pub fn install(realm: &mut Realm) {
         d.append(doc, html);
         d.append(html, head);
         d.append(html, body);
-        // `createHTMLDocument()` OHNE Argument bekommt keinen Titel — das
-        // ist etwas anderes als der leere Titel, den `("")` verlangt.
+        // `createHTMLDocument()` without an argument gets no title, which differs
+        // from the empty title `("")` asks for.
         if let Some(t) = title {
             let el = d.create(ELEMENT_NODE, "title");
             let tx = d.create(TEXT_NODE, "#text");
@@ -4192,13 +3859,11 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(wrap(i, doc))
     }, 1, &fp);
-    // `hasFeature` sagt laut Spezifikation IMMER true — sie ist Altlast und
-    // ausdruecklich so festgeschrieben, damit niemand mehr danach fragt.
+    // `hasFeature` always returns true per spec.
     meth(&impl_obj, "hasFeature", |_, _, _| Ok(Value::Bool(true)), 0, &fp);
-    // `createDocument` ist der XML-Zwilling: ein Dokumentknoten mit genau
-    // einem Wurzelelement, kein `head`, kein `body`. Der Namensraum wird
-    // GELESEN und fallengelassen — beaks Baum kennt keine Namensraeume, und
-    // ein erfundener waere schlimmer als keiner.
+    // `createDocument` is the XML twin: a document node with exactly one root
+    // element, no `head`, no `body`. The namespace is read and dropped, since
+    // beak's tree has no namespaces.
     meth(&impl_obj, "createDocument", |i, _, a| {
         let qname = match a.get(1) {
             None | Some(Value::Undefined) | Some(Value::Null) => None,
@@ -4215,16 +3880,10 @@ pub fn install(realm: &mut Realm) {
     impl_obj.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMImplementation")));
     document_proto.borrow_mut().define("implementation", Prop::builtin(Value::Obj(impl_obj)));
 
-    // `reportError(e)` (HTML §8.1.3.9): einen Fehler so melden, wie es eine
-    // unabgefangene Ausnahme tut — ans Fenster, und danach auf die Konsole.
-    //
-    // **Es ist der Weg, auf dem eine Laufzeitumgebung ueberhaupt SAGT, dass
-    // etwas schiefging.** React 19 meldet jeden unabgefangenen Renderfehler
-    // zuerst hierueber; gibt es den Namen nicht, faellt es auf einen
-    // `ErrorEvent` zurueck, den es auch nicht gibt, und am Ende auf
-    // `console.error`. Wer die Kette nicht hat, bekommt eine Seite, die
-    // nichts rendert UND nichts sagt
-    // ([[feedback_a_silent_failure_hides_every_bug_upstream_of_it]]).
+    // `reportError(e)` (HTML §8.1.3.9): report an error as an uncaught
+    // exception would, to the window and then to the console. Frameworks
+    // (React) report uncaught render errors through it; without it a page
+    // renders nothing and says nothing.
     def_global(realm, "reportError", |i, _, a| {
         let err = a.first().cloned().unwrap_or(Value::Undefined);
         let msg = match i.get(&err, "message") {
@@ -4244,8 +3903,8 @@ pub fn install(realm: &mut Realm) {
             ev.borrow_mut().define("error", Prop::data(err));
             handled = deliver(i, &ev, "error", &[t]).unwrap_or(false);
         }
-        // `preventDefault` heisst „ich habe es behandelt" — dann schweigt die
-        // Konsole, genau wie im Browser.
+        // `preventDefault` means "handled": the console stays silent, as in
+        // browsers.
         if !handled {
             i.console_push(if name.is_empty() { alloc::format!("error: {msg}") }
                            else { alloc::format!("error: {name}: {msg}") });
@@ -4255,24 +3914,20 @@ pub fn install(realm: &mut Realm) {
 
     // ── CSS ──────────────────────────────────────────────────────────────
     //
-    // **Eine fehlende Merkmalspruefung ist keine neutrale Luecke — sie ist
-    // ein NEIN.** `CSS.supports` ist die Stelle, an der eine Seite fragt, ob
-    // sie den modernen Weg nehmen darf. Gibt es das Objekt nicht, nimmt sie
-    // den alten: DuckDuckGos Ergebnisseite laedt dann `css-vars-ponyfill`
-    // und laesst es ihre eigenen 1,1 MB Stilblaetter mit verschachtelten
-    // regulaeren Ausdruecken nachbauen — obwohl beak Custom Properties
-    // laengst selbst aufloest. Gemessen: der Lauf kam danach in zwanzig
-    // Minuten nicht zum Ende.
+    // A missing feature test is not neutral, it is a "no": pages ask
+    // `CSS.supports` whether they may take the modern path, and otherwise
+    // load polyfills (e.g. a CSS variables ponyfill that reparses every
+    // stylesheet).
     //
-    // Geantwortet wird aus DERSELBEN Funktion, die `@supports` im Blatt
-    // auswertet. Zwei Auskuenfte ueber dasselbe waeren zwei Wahrheiten.
+    // Answered by the same function that evaluates `@supports` in
+    // stylesheets.
     let css_obj = new_obj(Some(realm.object_proto.clone()));
     meth(&css_obj, "supports", |i, _, a| {
         let first = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         match a.get(1) {
-            // Die ZWEIstellige Form nimmt Name und Wert — und sagt fuer eine
-            // Custom Property ausdruecklich NEIN (css-conditional-3 §6): wer
-            // `--x` pruefen will, muss die Bedingungsform nehmen.
+            // The two-argument form takes name and value and returns false for a
+            // custom property (css-conditional-3 §6); testing `--x` needs the
+            // condition form.
             Some(v) => {
                 let val = i.to_string(v)?;
                 if first.trim().starts_with("--") { return Ok(Value::Bool(false)) }
@@ -4282,9 +3937,8 @@ pub fn install(realm: &mut Realm) {
             None => Ok(Value::Bool(crate::css::supports_cond(&first))),
         }
     }, 2, &fp);
-    // `CSS.escape` (cssom-1 §9): ein Bezeichner, der in einem Selektor stehen
-    // darf. Bibliotheken bauen damit `#\31 23`-Selektoren aus fremden ids;
-    // ohne die Funktion wirft der Aufruf und nimmt das ganze Skript mit.
+    // `CSS.escape` (cssom-1 §9): an identifier that may appear in a selector.
+    // Libraries build `#\31 23` selectors from foreign ids with it.
     meth(&css_obj, "escape", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let mut out = String::new();
@@ -4292,9 +3946,8 @@ pub fn install(realm: &mut Realm) {
             let code = c as u32;
             let ok = c == '-' || c == '_' || c.is_ascii_alphanumeric() || code >= 0x80;
             if code == 0 { out.push('\u{FFFD}'); continue }
-            // Eine Ziffer am Anfang — und nach einem fuehrenden `-` — muss
-            // als Codepunkt ausgeschrieben werden, sonst liest der Parser
-            // eine Zahl.
+            // A leading digit, also after a leading `-`, must be written as a code
+            // point, otherwise the parser reads a number.
             let lead_digit = c.is_ascii_digit()
                 && (k == 0 || (k == 1 && s.starts_with('-')));
             if (code < 0x20 || code == 0x7F) || lead_digit {
@@ -4313,35 +3966,26 @@ pub fn install(realm: &mut Realm) {
 
     // ── DOMParser ────────────────────────────────────────────────────────
     //
-    // **Der sichere Weg, fremdes HTML zu LESEN.** `innerHTML =` haengt es in
-    // die Seite; `new DOMParser().parseFromString(s, "text/html")` gibt ein
-    // Dokument NEBEN der Seite zurueck, aus dem man Text und Struktur holt,
-    // ohne dass etwas davon gemalt oder gefahren wird. Genau deshalb bauen
-    // Bibliotheken ihre Bereinigung damit — und genau daran fiel
-    // DuckDuckGos Ergebnisliste aus: ihre React-Schicht parst jeden
-    // Trefferauszug so, der `ReferenceError` loeste die Fehlergrenze aus,
-    // und die Seite blieb mit Kopfleiste und Filtern, aber OHNE Treffer
-    // stehen.
+    // The safe way to read foreign HTML: `parseFromString(s, "text/html")`
+    // returns a document beside the page, from which text and structure can be
+    // taken without anything being painted or run. Libraries build their
+    // sanitizers on it.
     //
-    // Ein Bruder von `createHTMLDocument`, kein zweiter Parser: derselbe
-    // Baum, dieselbe Arena, derselbe Rahmen — nur dass der Text hier
-    // mitkommt.
+    // A sibling of `createHTMLDocument`, not a second parser: same tree, same
+    // arena, same frame.
     let dp_proto = new_obj(Some(realm.object_proto.clone()));
     meth(&dp_proto, "parseFromString", |i, _, a| {
         let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
-        // Der zweite Parameter ist PFLICHT und eine Aufzaehlung: was nicht
-        // darin steht, ist ein TypeError (DOM §DOMParser). Parameter hinter
-        // einem `;` (`text/html;charset=utf-8`) gehoeren nicht zum Namen.
+        // The second parameter is required and an enumeration; anything else is
+        // a TypeError (DOM §DOMParser). Parameters after `;`
+        // (`text/html;charset=utf-8`) are not part of the name.
         let ty = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
         let ty = ty.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
         let html_kind = match &*ty {
             "text/html" => true,
-            // **XML faehrt durch denselben Parser, und das ist eine
-            // benannte Naeherung.** Ein echter XML-Lauf muesste bei jedem
-            // Wohlgeformtheitsfehler ein `parsererror`-Dokument liefern;
-            // beak hat einen Parser, und ein zweiter waere eine zweite
-            // Wahrheit darueber, was Auszeichnung bedeutet. Wer hier
-            // `parsererror` erwartet, bekommt es nicht.
+            // XML goes through the same HTML parser, an approximation: a real XML
+            // parse returns a `parsererror` document on any well-formedness error,
+            // which this never produces.
             "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => false,
             _ => return i.type_err(&alloc::format!(
                 "parseFromString: den Typ '{ty}' gibt es in dieser Aufzaehlung nicht")),
@@ -4362,9 +4006,9 @@ pub fn install(realm: &mut Realm) {
     dp_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMParser")));
     realm.global.borrow_mut().define("DOMParser", Prop::builtin(Value::Obj(dp_ctor)));
 
-    // Ein Dokument IST ein `XPathEvaluator` (DOM 4 §XPathEvaluatorBase), und
-    // `document.evaluate(...)` ist der Einstieg, den eine Seite schreibt —
-    // `new XPathEvaluator()` ist der von Bibliotheken.
+    // A document is an `XPathEvaluator` (DOM 4 §XPathEvaluatorBase);
+    // `document.evaluate(...)` is the entry pages use, `new XPathEvaluator()`
+    // the one libraries use.
     meth(&document_proto, "evaluate", |i, _, a| {
         let src = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
         let ctx = a.get(1).cloned().unwrap_or(Value::Undefined);
@@ -4389,66 +4033,52 @@ pub fn install(realm: &mut Realm) {
         Ok(wrap(i, id))
     }, 0, &fp);
 
-    // ── Die Schnittstellen als globale Konstruktoren ─────────────────────
+    // ── Interfaces as global constructors ────────────────────────────────
     //
-    // Nicht Zierde: `el instanceof HTMLLinkElement` und
-    // `class X extends HTMLElement` sind auf DREI der elf Zielseiten die
-    // ERSTE Wand — vor jeder Sprachluecke. Gezaehlt, nicht vermutet
-    // (`wallcheck WCPAGE=*`).
+    // Needed for `el instanceof HTMLLinkElement` and
+    // `class X extends HTMLElement`.
     //
-    // Die Kette ist die echte: EventTarget -> Node -> Element -> HTMLElement
-    // -> HTMLxyzElement. Eine flache Liste taete es fuer `instanceof
-    // HTMLElement` auch, aber dann waere `link instanceof Element` falsch —
-    // und genau solche Ketten fragt Bibliothekscode ab.
+    // The chain is the real one: EventTarget -> Node -> Element -> HTMLElement
+    // -> HTMLxyzElement. A flat list would satisfy `instanceof HTMLElement`
+    // but make `link instanceof Element` false.
     let html_element_proto = new_obj(Some(element_proto.clone()));
     let svg_element_proto = new_obj(Some(element_proto.clone()));
 
-    // `new HTMLElement()` wirft — so wie im Browser. Die KLASSENDEFINITION
-    // `class X extends HTMLElement {}` laeuft trotzdem durch: sie liest nur
-    // `HTMLElement.prototype`, gerufen wird der Konstruktor erst bei `new`.
+    // `new HTMLElement()` throws, as in browsers. The class definition
+    // `class X extends HTMLElement {}` still works: it only reads
+    // `HTMLElement.prototype`; the constructor runs only on `new`.
     fn iface(realm: &Realm, name: &str, proto: &Gc) -> Gc {
         iface_with(realm, name, proto, |i, _, _| i.type_err("Illegal constructor"))
     }
 
-    /// Dieselbe Verdrahtung, aber mit einem echten Konstruktor. **Die
-    /// meisten DOM-Schnittstellen haben keinen** — `new HTMLElement()` wirft
-    /// im Browser genauso. `EventTarget` HAT einen (DOM §2.7), und das ist
-    /// keine Feinheit: DuckDuckGo prueft damit, ob es Apples MapKit laden
-    /// darf (`no_event_target`), und ohne den Konstruktor wird die Karte im
-    /// Wissenskasten nie auch nur ANGEFORDERT.
+    /// The same wiring, but with a real constructor. Most DOM interfaces have
+    /// none (`new HTMLElement()` throws in browsers too); `EventTarget` has one
+    /// (DOM §2.7), and pages feature-test with `new EventTarget()`.
     fn iface_with(realm: &Realm, name: &str, proto: &Gc, ctor: NativeFn) -> Gc {
         let c = native(Some(realm.function_proto.clone()), ctor, name, 0, true);
         c.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
         proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(c.clone())));
-        // **`Symbol.toStringTag` traegt den Schnittstellennamen** (WebIDL
-        // 3.7.3). Ohne ihn meldete `Object.prototype.toString.call(el)`
-        // `[object Object]` — und genau daran erkennt Bibliothekscode ein
-        // GEWOEHNLICHES Objekt: jQuerys `isPlainObject` hielt jeden Knoten
-        // fuer eine Datenstruktur und stieg beim tiefen Kopieren ueber
-        // `parentNode` in einen Ring, aus dem es keinen Ausgang gibt.
+        // `Symbol.toStringTag` carries the interface name (WebIDL 3.7.3).
+        // Without it `Object.prototype.toString.call(el)` returns
+        // `[object Object]`, and library code (jQuery's `isPlainObject`) would
+        // treat every node as plain data, deep-copying into the `parentNode`
+        // cycle.
         //
-        // Hier und nicht an 60 Stellen: `iface` ist der EINE Weg, auf dem
-        // eine DOM-Schnittstelle entsteht.
+        // Set here because `iface` is the single way a DOM interface is created.
         proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str(name)));
         realm.global.borrow_mut().define(name, Prop::builtin(Value::Obj(c.clone())));
         c
     }
-    // **Ein eigenstaendiges `EventTarget` ist ein LOSGELOESTER Knoten.**
-    // Damit tragen `addEventListener`, `removeEventListener` und
-    // `dispatchEvent` unveraendert: die Zuhoererliste sitzt am Knoten, und
-    // ohne Elter ist die Blasenkette genau ein Glied lang — was fuer ein
-    // Ziel ohne Baum richtig ist. Die Alternative waere eine ZWEITE
-    // Zuhoererverwaltung neben der ersten
-    // ([[feedback_a_copy_is_a_second_semantics_waiting]]).
-    //
-    // Gesehen wird er von niemandem sonst: er haengt an keinem Elter, also
-    // erreicht ihn weder ein Selektor noch das Auslegen.
+    // A standalone `EventTarget` is a detached node, so `addEventListener`,
+    // `removeEventListener` and `dispatchEvent` work unchanged: the listener
+    // list sits on the node, and without a parent the propagation path is one
+    // node long, which is correct for a target without a tree. Nothing else
+    // can reach it, neither selectors nor layout.
     iface_with(realm, "EventTarget", &event_target_proto, |i, _, _| {
         if !i.native_new { return i.type_err("Constructor EventTarget requires 'new'") }
-        // Die Zuhoererliste sitzt im Dokument — ohne eines gibt es keine
-        // Stelle, an der sie stehen koennte. Auf einer Seite gibt es immer
-        // eins; nur das nackte `jsrun` hat keins, und dort steht es so da,
-        // statt still ein halbes Ziel zu liefern.
+        // The listener list lives in the document; without one there is nowhere
+        // to put it. Pages always have one; only bare `jsrun` does not, and there
+        // this says so instead of returning half a target.
         let Some(d) = &mut i.doc else {
             return i.type_err("EventTarget needs a document (the listener list lives there)")
         };
@@ -4456,22 +4086,19 @@ pub fn install(realm: &mut Realm) {
         Ok(wrap(i, id))
     });
     realm.event_target_proto = event_target_proto.clone();
-    // Das Fenster IST ein EventTarget — dadurch hat `window` dieselben drei
-    // Methoden wie jeder Knoten, ohne sie ein zweites Mal zu definieren.
+    // The window is an EventTarget, so `window` has the same three methods as
+    // every node without defining them twice.
     realm.global.borrow_mut().proto = Some(event_target_proto.clone());
-    // Und das Fenster heisst `Window`, nicht `EventTarget`. Ohne diese Zeile
-    // erbt es die Marke seines Prototyps, und `toString.call(window)` sagt
-    // etwas Falsches statt gar nichts. KEIN `iface`: das legte ein
-    // `constructor` auf das globale Objekt, und dort steht schon alles, was
-    // die Seite selbst definiert.
+    // The window is called `Window`, not `EventTarget`; otherwise it would
+    // inherit its prototype's tag. Not via `iface`: that would put a
+    // `constructor` on the global object, where the page's own definitions
+    // live.
     realm.global.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Window")));
     let node_ctor = iface(realm, "Node", &node_proto);
-    // **Die Knotentyp-Konstanten.** Sie stehen laut Spezifikation auf dem
-    // Konstruktor UND auf dem Prototyp. Ohne sie ist `Node.ELEMENT_NODE`
-    // `undefined`, und ein `switch(el.nodeType){case Node.ELEMENT_NODE: …}`
-    // faellt still in den `default`-Zweig: die Fritzbox-Oberflaeche hat
-    // damit ihre GANZE Anmeldemaske gebaut und dann nicht angehaengt — kein
-    // Fehler, keine Meldung, nur ein leeres `<body>`.
+    // The node type constants, on the constructor and on the prototype as the
+    // spec says. Without them `Node.ELEMENT_NODE` is `undefined`, and a
+    // `switch (el.nodeType) { case Node.ELEMENT_NODE: … }` silently falls into
+    // `default`.
     for (n, v) in [("ELEMENT_NODE", 1.0), ("ATTRIBUTE_NODE", 2.0), ("TEXT_NODE", 3.0),
                    ("CDATA_SECTION_NODE", 4.0), ("ENTITY_REFERENCE_NODE", 5.0),
                    ("ENTITY_NODE", 6.0), ("PROCESSING_INSTRUCTION_NODE", 7.0),
@@ -4482,19 +4109,18 @@ pub fn install(realm: &mut Realm) {
         node_proto.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
     }
     iface(realm, "Element", &element_proto);
-    // NACH `iface`: die legt einen „Illegal constructor" auf denselben
-    // Prototyp, und wer zuletzt schreibt, gewinnt.
+    // After `iface`: it puts an "Illegal constructor" on the same prototype,
+    // and the last write wins.
     iface(realm, "HTMLElement", &html_element_proto);
     install_custom_elements(realm, &html_element_proto);
     iface(realm, "SVGElement", &svg_element_proto);
-    // `CharacterData` sitzt zwischen Node und Text — 453 Aufrufe im Zensus
-    // fragen `.data`, und die Kette ist die, die Bibliothekscode abfragt.
+    // `CharacterData` sits between Node and Text; library code checks this
+    // chain.
     let char_data_proto = new_obj(Some(node_proto.clone()));
     iface(realm, "CharacterData", &char_data_proto);
     text_proto.borrow_mut().proto = Some(char_data_proto.clone());
     iface(realm, "Text", &text_proto);
-    // Ein Kommentar ist KEIN HTMLElement — vorher landete er dort, weil
-    // `wrap` ihn wie ein unbekanntes Tag behandelte.
+    // A comment is not an HTMLElement.
     let comment_proto = new_obj(Some(char_data_proto.clone()));
     iface(realm, "Comment", &comment_proto);
     accessor(&char_data_proto, "data",
@@ -4521,23 +4147,18 @@ pub fn install(realm: &mut Realm) {
 
     // ── Attr + NamedNodeMap ──────────────────────────────────────────────
     //
-    // `el.attributes` (40 Aufrufe), `NamedNodeMap.length` (35) und die drei
-    // `Attr`-Felder (72). Zusammen 147, und sie haengen aneinander: ohne
-    // `Attr` ist die Karte leer, ohne die Karte ist `attributes` nutzlos.
+    // `el.attributes`, `NamedNodeMap.length` and the `Attr` fields depend on
+    // each other: without `Attr` the map is empty, without the map
+    // `attributes` is useless.
     //
-    // Die Karte ist eine MOMENTAUFNAHME, keine lebende Sicht. Ein Browser
-    // gibt eine lebende; wer die Karte haelt und dazwischen ein Attribut
-    // setzt, saehe hier den alten Stand. Gemerkt, weil es eines Tages
-    // auffaellt — die 147 Aufrufe lesen alle sofort.
+    // The map is a snapshot, not a live view as in browsers: holding it while
+    // setting an attribute shows the old state.
     //
-    // Die Felder sitzen auf dem PROTOTYP, nicht auf jedem Gegenstand — so
-    // wie im Browser. Sie auf die Instanz zu legen waere kuerzer und fuer
-    // `attributes[0].name` nicht zu unterscheiden; es faellt erst auf, wenn
-    // jemand `Attr.prototype` befragt, und genau das tut die Lueckenprobe.
+    // The fields sit on the prototype, not on each object, as in browsers.
     let attr_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "Attr", &attr_proto);
-    /// Ein verdecktes Feld lesen. Eingebaute Funktionen sind Zeiger und
-    /// fangen nichts ein — also steht der Feldname im Rumpf.
+    /// Read a hidden field. Builtin functions are pointers and capture
+    /// nothing, so the field name is in the body.
     macro_rules! slot_getter {
         ($proto:expr, $js:literal, $slot:literal, $fallback:expr) => {
             getter($proto, $js, |i, t, _| {
@@ -4550,8 +4171,8 @@ pub fn install(realm: &mut Realm) {
     slot_getter!(&attr_proto, "name", "__attrname", Value::str(""));
     slot_getter!(&attr_proto, "localName", "__attrname", Value::str(""));
     slot_getter!(&attr_proto, "value", "__attrval", Value::str(""));
-    // Wir fuehren keine Namensraeume. `null` ist die richtige Antwort fuer
-    // HTML-Attribute, nicht eine fehlende.
+    // Namespaces are not tracked; `null` is the correct answer for HTML
+    // attributes.
     for k in ["namespaceURI", "prefix"] {
         getter(&attr_proto, k, |_, _, _| Ok(Value::Null), &fp);
     }
@@ -4592,8 +4213,7 @@ pub fn install(realm: &mut Realm) {
             }
             let mut m = map.borrow_mut();
             m.define(&alloc::format!("{n}"), Prop::data(Value::Obj(a.clone())));
-            // Auch unter dem NAMEN: `el.attributes.href` ist die uebliche
-            // Schreibweise, und die Spezifikation kennt sie (WebIDL
+            // Also by name: `el.attributes.href` is common and specified (WebIDL
             // `[LegacyUnenumerableNamedProperties]`).
             m.define(k, Prop::data(Value::Obj(a)));
         }
@@ -4601,9 +4221,9 @@ pub fn install(realm: &mut Realm) {
             get: None, set: None, writable: false, enumerable: false, configurable: false });
         Ok(Value::Obj(map))
     }, &fp);
-    // `toggleAttribute(name, force?)` — 56 Aufrufe. Es liefert, ob das
-    // Attribut DANACH da ist, und darauf verlaesst sich der uebliche Einzeiler
-    // `el.setAttribute("aria-expanded", el.toggleAttribute("open"))`.
+    // `toggleAttribute(name, force?)` returns whether the attribute is present
+    // afterwards; `el.setAttribute("aria-expanded", el.toggleAttribute("open"))`
+    // relies on it.
     meth(&element_proto, "toggleAttribute", |i, t, a| {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
@@ -4620,34 +4240,28 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Bool(soll))
     }, 1, &fp);
 
-    // ── Der Kleinkram aus P7 ─────────────────────────────────────────────
+    // ── Small members ────────────────────────────────────────────────────
     //
-    // Je Zeile fuenf Zeilen Arbeit, zusammen rund 400 Aufrufe im Zensus. Sie
-    // stehen hier zusammen, weil sie EINE Sache gemeinsam haben: jede war
-    // nicht falsch, sondern GAR NICHT da — und ein fehlendes Feld ist ein
-    // `TypeError` mitten in fremdem Code, kein falscher Wert, den man sieht.
+    // A missing member is a `TypeError` in foreign code, not a visible wrong
+    // value.
 
-    // `nextElementSibling`/`previousElementSibling` gehoeren zu
-    // `NonDocumentTypeChildNode` — also an Element UND an Text/Kommentar
-    // (112 + 54 Aufrufe). Der Zensus nennt beide getrennt, und beide gibt es.
+    // `nextElementSibling`/`previousElementSibling` belong to
+    // `NonDocumentTypeChildNode`, so on Element and on Text/Comment.
     for proto in [&element_proto, &char_data_proto] {
         getter(proto, "nextElementSibling",
                |i, t, _| element_sibling(i, &t, 1), &fp);
         getter(proto, "previousElementSibling",
                |i, t, _| element_sibling(i, &t, -1), &fp);
-        // `remove()` gehoert zu `ChildNode`, also an BEIDE — es sass nur auf
-        // Element, und `CharacterData.remove` steht mit 18 Aufrufen im
-        // Zensus. Ein Textknoten, den man nicht loswird, ist genau die Sorte
-        // Luecke, die man erst am fremden Code merkt.
+        // `remove()` belongs to `ChildNode`, so on both Element and
+        // `CharacterData`.
         meth(proto, "remove", |i, t, _| {
             let id = node_of(i, &t)?;
             if let Some(d) = &mut i.doc { d.detach(id); }
             Ok(Value::Undefined)
         }, 0, &fp);
     }
-    // `lastElementChild`/`childElementCount` — die Geschwister von
-    // `firstElementChild`, das es schon gab. Sie einzeln nachzureichen, wenn
-    // sie das naechste Mal fehlen, waere dreimal derselbe Weg.
+    // `lastElementChild`/`childElementCount`, the siblings of
+    // `firstElementChild`.
     for proto in [&element_proto, &document_proto, &fragment_proto] {
         getter(proto, "lastElementChild", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -4661,9 +4275,7 @@ pub fn install(realm: &mut Realm) {
                 .filter(|&&c| d.nodes[c as usize].kind == ELEMENT_NODE).count());
             Ok(Value::Num(n as f64))
         }, &fp);
-        // `replaceChildren(...)` — alles raus, das Neue rein. 52 Aufrufe, und
-        // es ist die moderne Schreibweise fuer `innerHTML = ""` plus
-        // anhaengen; wer sie nicht hat, bekommt eine halb geleerte Liste.
+        // `replaceChildren(...)`: everything out, the new nodes in.
         meth(proto, "replaceChildren", |i, t, a| {
             let id = node_of(i, &t)?;
             let alt: Vec<u32> = i.doc.as_ref()
@@ -4672,8 +4284,7 @@ pub fn install(realm: &mut Realm) {
             insert_all(i, &t, a, Where::Last)
         }, 0, &fp);
     }
-    // Auf `document` und `<html>` fehlten `firstElementChild`/`children`
-    // ebenfalls — sie sitzen bisher nur auf Element.
+    // `firstElementChild`/`children` on `document` and `<html>` as well.
     for proto in [&document_proto, &fragment_proto] {
         getter(proto, "firstElementChild", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -4689,10 +4300,9 @@ pub fn install(realm: &mut Realm) {
             Ok(nodes_array(i, cs))
         }, &fp);
     }
-    // `isConnected` (42): haengt dieser Knoten am Dokument? Genau diese Frage
-    // stellt jede Bibliothek, bevor sie an einem Knoten misst — ein Knoten
-    // ausserhalb des Baumes hat keinen Kasten, und ihn zu messen liefert
-    // Nullen, die aussehen wie eine Messung.
+    // `isConnected`: is this node attached to the document? Libraries ask
+    // before measuring; a node outside the tree has no box, and measuring it
+    // gives zeros that look like a measurement.
     getter(&node_proto, "isConnected", |i, t, _| {
         let id = node_of(i, &t)?;
         let Some(d) = &i.doc else { return Ok(Value::Bool(false)) };
@@ -4706,11 +4316,10 @@ pub fn install(realm: &mut Realm) {
 
     // ── DOMTokenList ─────────────────────────────────────────────────────
     //
-    // `classList` gab es; was fehlte, war der Name — 1381 Aufrufe, und die
-    // Methoden sassen auf JEDER Liste einzeln statt auf einem Prototyp.
+    // The methods live on one prototype, not on each list.
     let token_list_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "DOMTokenList", &token_list_proto);
-    /// Die Klassen eines Knotens schreiben — eine Stelle, ein Format.
+    /// Write a node's classes: one place, one format.
     fn set_classes(i: &mut Interp, id: u32, cs: &[Rc<str>]) {
         let joined = cs.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
         if let Some(d) = &mut i.doc { d.set_attr_at(id, "class", &joined); }
@@ -4745,8 +4354,8 @@ pub fn install(realm: &mut Realm) {
     meth(&token_list_proto, "toggle", |i, t, a| {
         let id = node_of(i, &t)?;
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        // `toggle(name, kraft)` — das zweite Argument entscheidet statt des
-        // Zustands, und Seiten benutzen es fuer „setze genau so".
+        // `toggle(name, force)`: the second argument decides instead of the
+        // current state.
         let forced = match a.get(1) { None | Some(Value::Undefined) => None, Some(v) => Some(v.truthy()) };
         let has = i.doc.as_ref().is_some_and(|d| d.classes(id).iter().any(|c| *c == k));
         let want = forced.unwrap_or(!has);
@@ -4802,14 +4411,9 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
     // ── CSSStyleDeclaration ──────────────────────────────────────────────
     //
-    // Vorher gab `el.style` bei JEDEM Zugriff ein frisches leeres Objekt:
-    // ein Schreibzugriff verschwand, und ein Lesen danach fand nichts. Das
-    // war als ehrlicher Stumpf gemeint, ist aber der haeufigste Eingriff
-    // ueberhaupt — `el.style.display = "none"` ist Zeigen und Verstecken.
-    //
-    // Jetzt ist es eine SICHT auf das `style`-Attribut. Damit wirkt die
-    // Zuweisung wirklich: die Kaskade liest dasselbe Attribut, und `dirty`
-    // sagt beak, dass neu ausgelegt werden muss.
+    // `el.style` is a view on the `style` attribute. Assignments take effect:
+    // the cascade reads the same attribute, and `dirty` tells beak to
+    // relayout.
     let style_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "CSSStyleDeclaration", &style_proto);
     meth(&style_proto, "getPropertyValue", |i, t, a| {
@@ -4852,10 +4456,9 @@ pub fn install(realm: &mut Realm) {
             if let Some(d) = &mut i.doc { d.set_attr_at(id, "style", &v); }
             Ok(Value::Undefined)
         }, &fp);
-    // Die benannten Eigenschaften. Die Liste ist bewusst endlich: ohne Proxy
-    // gibt es keinen Weg, JEDEN Namen abzufangen, und eine Liste, die die
-    // gebraeuchlichen deckt, ist besser als ein Stumpf, der keinen deckt.
-    // Was nicht daraufsteht, geht ueber `setProperty`/`getPropertyValue`.
+    // The named properties. The list is finite on purpose: without a Proxy
+    // there is no way to intercept every name. Anything not listed goes
+    // through `setProperty`/`getPropertyValue`.
     style_prop!(style_proto, fp, "display", "display");
     style_prop!(style_proto, fp, "visibility", "visibility");
     style_prop!(style_proto, fp, "opacity", "opacity");
@@ -4960,34 +4563,23 @@ pub fn install(realm: &mut Realm) {
     iface(realm, "Document", &document_proto);
     iface(realm, "HTMLDocument", &document_proto);
     iface(realm, "DocumentFragment", &fragment_proto);
-    // **`ShadowRoot` gibt es als SCHNITTSTELLE, auch ohne Shadow DOM.**
-    // htmx fragt `e.parentNode instanceof ShadowRoot`, um einen Elter durch
-    // eine Schattengrenze zu finden — und ein `instanceof` gegen einen
-    // fehlenden Namen ist ein `ReferenceError`, der die ganze Bibliothek
-    // umbringt, statt `false` zu ergeben.
-    //
-    // `false` IST hier die wahre Antwort: beak haengt nirgends einen
-    // Schattenbaum an, also ist der Elter eines Knotens nie einer. So sieht
-    // ein Browser auf jeder Seite aus, die `attachShadow` nie ruft — das
-    // Schnittstellenobjekt steht da, eine Instanz gibt es nicht. Shadow DOM
-    // selbst bleibt gemessen kein Ziel
-    // ([[feedback_a_call_count_is_not_a_site_count]]).
+    // `ShadowRoot` exists as an interface even without Shadow DOM, because an
+    // `instanceof` against a missing name throws instead of returning false
+    // (htmx checks `e.parentNode instanceof ShadowRoot`). `false` is the true
+    // answer: beak never attaches a shadow tree, which is how browsers look on
+    // any page that never calls `attachShadow`.
     let shadow_root_proto = new_obj(Some(fragment_proto.clone()));
     iface(realm, "ShadowRoot", &shadow_root_proto);
 
     // ── Event ────────────────────────────────────────────────────────────
     //
-    // Das Ereignisobjekt gab es schon — als flache Huelle mit Datenfeldern.
-    // Was fehlte, war der NAME: `e instanceof Event` scheitert daran, nicht
-    // an `e.target`, und im Zensus haengen 1320 Aufrufe daran.
-    //
-    // Die Felder liegen jetzt in Schlitzen und die Prototypen lesen sie —
-    // sonst stuende `target` auf der INSTANZ und `Event.prototype.target`
-    // waere trotzdem leer, also genau die Abfrage, die scheitert.
+    // The fields live in slots and the prototype getters read them, so that
+    // `e instanceof Event` works and `Event.prototype.target` is a real
+    // accessor rather than an instance property.
     let event_proto = new_obj(Some(realm.object_proto.clone()));
     let fp2 = realm.function_proto.clone();
-    // Ein eingebautes Getter je Feld. Ein Funktionszeiger faengt nichts ein,
-    // also traegt jedes seinen Schlitznamen im Rumpf — das Makro schreibt sie.
+    // One builtin getter per field. A function pointer captures nothing, so
+    // each carries its slot name in the body; the macro writes them.
     ev_getter!(event_proto, fp2, "type", EV_TYPE);
     ev_getter!(event_proto, fp2, "target", EV_TARGET);
     ev_getter!(event_proto, fp2, "srcElement", EV_TARGET);
@@ -4999,8 +4591,8 @@ pub fn install(realm: &mut Realm) {
     ev_getter!(event_proto, fp2, "eventPhase", EV_PHASE);
     ev_getter!(event_proto, fp2, "timeStamp", EV_STAMP);
     meth(&event_proto, "preventDefault", |i, t, _| {
-        // Nur ein abbrechbares Ereignis laesst sich abbrechen — sonst meldet
-        // `defaultPrevented` einen Halt, den niemand beachtet.
+        // Only a cancelable event can be canceled; otherwise `defaultPrevented`
+        // would report a stop nobody honours.
         if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true)) {
             if let Value::Obj(o) = &t { o.borrow_mut().define(EV_PREVENTED, Prop::data(Value::Bool(true))); }
         }
@@ -5017,17 +4609,14 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Undefined)
     }, 0, &fp2);
-    // `initEvent(art, blasen, abbrechbar)` — der Partner von `createEvent`.
+    // `initEvent(type, bubbles, cancelable)`, the partner of `createEvent`.
     //
-    // Zwei Dinge stehen ausdruecklich in DOM §initEvent und sind beide der
-    // Grund, warum es nicht bloss drei Zuweisungen sind: ein Ereignis, das
-    // gerade ZUGESTELLT wird, laesst sich nicht mehr umbenennen (sonst
-    // wechselt es mitten in der Kette die Art), und der Aufruf setzt die
-    // Abbruch-Fahnen ZURUECK — dasselbe Objekt darf ein zweites Mal benutzt
-    // werden.
+    // DOM §initEvent: an event being dispatched cannot be renamed (it would
+    // change type mid-path), and the call resets the cancel flags so the same
+    // object can be dispatched again.
     meth(&event_proto, "initEvent", |i, t, a| {
         let Value::Obj(o) = &t else { return i.type_err("initEvent: kein Ereignis") };
-        // `eventPhase != NONE` ist die Zustellfahne der Spezifikation.
+        // `eventPhase != NONE` is the spec's dispatch flag.
         if !matches!(i.get(&t, EV_PHASE)?, Value::Num(0.0)) {
             return Ok(Value::Undefined);
         }
@@ -5041,8 +4630,8 @@ pub fn install(realm: &mut Realm) {
         let tgt = i.get(&t, EV_TARGET)?;
         let Ok(id) = node_of(i, &tgt) else { return Ok(i.new_array(Vec::new())) };
         let chain = ancestors(i, id);
-        // Vom Ziel nach aussen — `ancestors` liefert die Zustellreihenfolge,
-        // also aussen zuerst.
+        // From the target outwards; `ancestors` returns dispatch order, outermost
+        // first.
         Ok(nodes_array(i, chain.into_iter().rev().collect()))
     }, 0, &fp2);
     let event_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
@@ -5061,8 +4650,8 @@ pub fn install(realm: &mut Realm) {
         event_proto.borrow_mut().define(k, Prop::frozen(Value::Num(v)));
     }
 
-    // `CustomEvent` ist ein `Event` mit einem Feld — und mit 412 Aufrufen die
-    // Art, in der Seiten untereinander reden.
+    // `CustomEvent` is an `Event` with one extra field; the way pages and
+    // components talk to each other.
     let custom_proto = new_obj(Some(event_proto.clone()));
     ev_getter!(custom_proto, fp2, "detail", EV_DETAIL);
     let custom_ctor = native(Some(realm.function_proto.clone()), |i, _, a| {
@@ -5078,8 +4667,8 @@ pub fn install(realm: &mut Realm) {
         ev.borrow_mut().define(EV_DETAIL, Prop::data(detail));
         Ok(Value::Obj(ev))
     }, "CustomEvent", 1, true);
-    // Der Partner von `createEvent("CustomEvent")` — ohne ihn haette der
-    // Zweig oben ein Objekt geliefert, das seine `detail` nie bekommt.
+    // The partner of `createEvent("CustomEvent")`; without it the branch above
+    // would return an object that never gets its `detail`.
     meth(&custom_proto, "initCustomEvent", |i, t, a| {
         let Value::Obj(o) = &t else { return i.type_err("initCustomEvent: kein Ereignis") };
         if !matches!(i.get(&t, EV_PHASE)?, Value::Num(0.0)) {
@@ -5099,19 +4688,11 @@ pub fn install(realm: &mut Realm) {
     custom_proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomEvent")));
     realm.global.borrow_mut().define("CustomEvent", Prop::builtin(Value::Obj(custom_ctor)));
 
-    // ── Die Ereignis-ARTEN der Bedienung ────────────────────────────────
+    // ── UI event kinds ──────────────────────────────────────────────────
     //
-    // **Bis 0.185.0 kannte beak nur die Basis `Event`.** Ein Behandler, der
-    // `e.key` oder `e.clientX` liest, bekam `undefined`, und ein
-    // `e instanceof KeyboardEvent` warf — der Name gab es nicht. Gemessen ueber
-    // die zwoelf Korpusseiten meldet `keydown` auf 11 von 12 an, `input` auf 8
-    // (`docs/plan/BROWSER_INPUT_EVENTS.md`); das ist die BEDIEN-Haelfte des
-    // Webs, und sie hing an diesen fuenf Namen.
-    //
-    // Die Kette ist die echte: Event -> UIEvent -> {Keyboard, Mouse, Focus,
-    // Input}Event. Die Felder stehen in Schlitzen und werden ueber
-    // Prototyp-Zugriffe gelesen, wie bei `Event` seit je — damit sind sie
-    // nicht aufzaehlbar, genau wie im Browser.
+    // The chain is the real one: Event -> UIEvent -> {Keyboard, Mouse, Focus,
+    // Input}Event. The fields sit in slots and are read through prototype
+    // accessors, as for `Event`, so they are not enumerable, as in browsers.
     let ui_proto = new_obj(Some(event_proto.clone()));
     ev_getter!(ui_proto, fp2, "detail", EV_DETAIL);
     ev_getter!(ui_proto, fp2, "view", "__evview");
@@ -5134,9 +4715,9 @@ pub fn install(realm: &mut Realm) {
     ev_getter!(kbd_proto, fp2, "ctrlKey", "__evctrl");
     ev_getter!(kbd_proto, fp2, "shiftKey", "__evshift");
     ev_getter!(kbd_proto, fp2, "metaKey", "__evmeta");
-    // `getModifierState` liest dieselben vier Schlitze. Seiten fragen damit
-    // nach Umschaltern, die wir gar nicht fuehren (`CapsLock`), und die
-    // richtige Antwort darauf ist `false`, nicht ein Wurf.
+    // `getModifierState` reads the same four slots. Pages also ask for
+    // modifiers we do not track (`CapsLock`); the correct answer there is
+    // `false`, not a throw.
     meth(&kbd_proto, "getModifierState", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let slot = match &*k {
@@ -5196,16 +4777,11 @@ pub fn install(realm: &mut Realm) {
         let ev = event_of_kind(i, "MouseEvent", a)?;
         Ok(Value::Obj(ev))
     });
-    // `PromiseRejectionEvent` — die Art, unter der eine unbehandelte
-    // Ablehnung ans Fenster kommt.
-    //
-    // Die Marke ist keine leere Zusage: beak meldet unbehandelte Ablehnungen
-    // wirklich (`promise::report_rejections` schickt genau dieses Ereignis
-    // ans Fenster und schreibt danach auf die Konsole). Sie zu HABEN ist
-    // zugleich das, woran core-js erkennt, ob die Umgebung Versprechen
-    // browsermaessig behandelt — fiel die Pruefung durch, ersetzte es die
-    // eingebaute `Promise` durch seine eigene, und die kennt in der Fassung,
-    // die die Fritzbox ausliefert, kein `allSettled`.
+    // `PromiseRejectionEvent`: the kind under which an unhandled rejection
+    // reaches the window. beak does report unhandled rejections
+    // (`promise::report_rejections` dispatches this event, then logs to the
+    // console). Polyfills such as core-js check for it to decide whether
+    // the native `Promise` is usable, and replace it otherwise.
     let prej_proto = new_obj(Some(event_proto.clone()));
     ev_getter!(prej_proto, fp2, "reason", EV_REASON);
     ev_getter!(prej_proto, fp2, "promise", EV_PROMISE);
@@ -5233,25 +4809,8 @@ pub fn install(realm: &mut Realm) {
     realm.prej_proto = prej_proto;
     realm.event_proto = event_proto;
 
-    // `getComputedStyle` — 443 Aufrufe im Zensus.
-    //
-    // Seit 0.64.0 antwortet es aus der KASKADE: der Wirt reicht mit
-    // `set_style_context` Blatt, Baum, Thema und Fensterbreite ein, und
-    // `computed_decls` rechnet damit dieselbe Kaskade wie das Layout — auf
-    // demselben Baum, mit demselben Blatt. Die Werte kommen in
-    // CSSOM-Schreibweise heraus (`rgb(0, 0, 0)`, nicht `#000`), also NICHT
-    // in der des Autors.
-    //
-    // Ohne Kontext bleibt es beim Inline-Stil. Das ist eine Teilantwort, aber
-    // die Funktion ganz wegzulassen hiesse TypeError, und ein TypeError
-    // beendet das Skript.
-    // Der Rollstand am Fenster. **Er stand fest auf 0** — `set_viewport` hat
-    // ihn als Zahl abgelegt, und danach hat ihn nie jemand nachgezogen. Eine
-    // Seite, die `window.scrollY` liest, um zu entscheiden, ob die Kopfzeile
-    // kleben soll, bekam ueberall die Antwort „ganz oben".
-    //
-    // Jetzt Zugriffsfunktionen auf die Geometrie: dieselbe Quelle, aus der
-    // `getBoundingClientRect` rechnet, und damit dieselbe Wahrheit.
+    // The window's scroll position: accessors on the geometry, the same source
+    // `getBoundingClientRect` uses.
     for k in ["scrollX", "pageXOffset"] {
         getter(&realm.global, k, |i, _, _| {
             Ok(Value::Num(i.geometry.as_ref().map_or(0.0, |g| g.scroll.0 as f64)))
@@ -5284,15 +4843,15 @@ pub fn install(realm: &mut Realm) {
         let g = new_obj(Some(i.realm.style_proto.clone()));
         g.borrow_mut().define(SLOT, Prop { value: Some(Value::Num(id as f64)), get: None,
             set: None, writable: false, enumerable: false, configurable: false });
-        // Der gerechnete Stil, wenn der Wirt einen Kaskadenkontext eingereicht
-        // hat. Ein SCHNAPPSCHUSS, kein lebender Verweis — genau das ist
-        // `getComputedStyle` auch im Browser: die Antwort auf die Frage von
-        // jetzt. Ohne Kontext bleibt es beim Inline-Stil, und das ist eine
-        // Teilantwort, die die Seite laufen laesst.
-        // Gerechnet wird auf dem LEBENDEN Baum, und die Kennung ist der
-        // Arena-Index — dieselbe Zahl, die das JS-Objekt haelt. Ein Element,
-        // das noch nirgends haengt, findet `find_path` nicht: dafuer gibt es
-        // keinen gerechneten Stil, und die leere Antwort ist die ehrliche.
+        // The computed style, if the host provided a cascade context: a
+        // snapshot, which is what `getComputedStyle` returns in browsers too.
+        // Values come out in CSSOM serialization (`rgb(0, 0, 0)`, not `#000`).
+        // Without a context it falls back to the inline style, a partial answer
+        // that keeps the page running.
+        //
+        // Computed on the live tree; the id is the arena index, the same number
+        // the JS object holds. An element not attached anywhere has no computed
+        // style, and the empty answer is the honest one.
         if let Some(text) = computed_decls(i, id) {
             g.borrow_mut().define(COMPUTED, Prop { value: Some(Value::str(&text)), get: None,
                 set: None, writable: false, enumerable: false, configurable: false });
@@ -5300,29 +4859,23 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Obj(g))
     }, 1, &fp);
 
-    // ── Behandler als Eigenschaft ────────────────────────────────────────
+    // ── Handlers as properties ───────────────────────────────────────────
     //
-    // `el.onclick = f` — 645 Aufrufe im Zensus, und bis hierher gab es davon
-    // NUR die Attributform. Eine Seite, die den Behandler zuweist statt ihn
-    // ins HTML zu schreiben, hatte gar keinen.
-    //
-    // Zugestellt wird trotzdem nur, was in `DISPATCHED` steht (heute:
-    // `click`). Die uebrigen Namen anzunehmen ist kein Vortaeuschen — die
-    // Anmeldung DARF nicht werfen, sonst stirbt die Seite an einer Zeile,
-    // die im Browser auch nichts tut, solange nichts passiert.
+    // `el.onclick = f`. Only events in `DISPATCHED` are actually dispatched
+    // by this path; the other names are accepted because the assignment must
+    // not throw, and in browsers it does nothing until the event happens.
     handler_prop!(html_element_proto, fp, "onclick", "click");
     handler_prop!(html_element_proto, fp, "onload", "load");
     handler_prop!(html_element_proto, fp, "onerror", "error");
     handler_prop!(html_element_proto, fp, "onchange", "change");
     handler_prop!(html_element_proto, fp, "oninput", "input");
     handler_prop!(html_element_proto, fp, "onsubmit", "submit");
-    // `focus()` / `blur()` — die Seite bestimmt, wo die Tastatur hinschreibt.
+    // `focus()` / `blur()`: the page decides where the keyboard writes.
     //
-    // Der Fokus steht im Dokument, nicht in einem Nebenzustand: `document
-    // .activeElement` liest dieselbe Stelle, und der Wirt uebernimmt sie in
-    // seinen eigenen (`forms.rs`). Die Ereignisse werden dabei WIRKLICH
-    // zugestellt — ein `focus()`, das nur einen Wert setzt, waere fuer eine
-    // Seite mit `onfocus` unsichtbar.
+    // Focus lives in the document: `document.activeElement` reads the same
+    // place, and the host adopts it into its own (`forms.rs`). The events are
+    // really dispatched; a `focus()` that only set a value would be invisible
+    // to a page with `onfocus`.
     meth(&html_element_proto, "focus", |i, t, _| {
         let id = node_of(i, &t)?;
         let old = i.doc.as_ref().and_then(|d| d.focused);
@@ -5353,11 +4906,9 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(html_element_proto, fp, "onresize", "resize");
     handler_prop!(html_element_proto, fp, "oncontextmenu", "contextmenu");
     handler_prop!(html_element_proto, fp, "ondblclick", "dblclick");
-    // Die Zeigerereignisse — 150 Aufrufe im Zensus. Zugestellt wird davon
-    // heute nichts (beak kennt `click`), aber die ANMELDUNG darf nicht
-    // werfen: eine Seite, die `el.onpointermove = f` schreibt, stirbt sonst
-    // an einer Zeile, die im Browser auch nichts tut, solange der Zeiger
-    // stillsteht.
+    // Pointer events. None are dispatched yet, but the assignment must not
+    // throw: in browsers `el.onpointermove = f` does nothing while the pointer
+    // stays still.
     handler_prop!(html_element_proto, fp, "onpointerenter", "pointerenter");
     handler_prop!(html_element_proto, fp, "onpointerleave", "pointerleave");
     handler_prop!(html_element_proto, fp, "onpointermove", "pointermove");
@@ -5370,8 +4921,7 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(html_element_proto, fp, "onunload", "unload");
     handler_prop!(html_element_proto, fp, "ondomcontentloaded", "DOMContentLoaded");
 
-    // Dieselben auf dem Fenster: `window.onload = …` ist die aelteste
-    // Schreibweise ueberhaupt und steht auf fast jeder alten Seite.
+    // The same on the window: `window.onload = …` is the oldest form of all.
     handler_prop!(realm.global, fp, "onclick", "click");
     handler_prop!(realm.global, fp, "onload", "load");
     handler_prop!(realm.global, fp, "onerror", "error");
@@ -5399,28 +4949,20 @@ pub fn install(realm: &mut Realm) {
     handler_prop!(realm.global, fp, "onunload", "unload");
     handler_prop!(realm.global, fp, "ondomcontentloaded", "DOMContentLoaded");
 
-    // ── Felder, die auf einem Attribut sitzen ────────────────────────────
-    //
-    // Alle aus dem Zensus, keins geraten. Sie sind billig, weil das Attribut
-    // schon da ist — was fehlte, war der NAME, unter dem Seiten es abfragen.
+    // ── Fields backed by an attribute ────────────────────────────────────
     attr_prop!(html_element_proto, fp, "title", "title");
     attr_prop!(html_element_proto, fp, "lang", "lang");
     attr_prop!(html_element_proto, fp, "dir", "dir");
     attr_prop!(html_element_proto, fp, "accessKey", "accesskey");
     attr_prop!(html_element_proto, fp, "contentEditable", "contenteditable");
     bool_attr_prop!(html_element_proto, fp, "hidden", "hidden");
-    // `tabIndex` ist -1, wenn nichts dasteht: „nicht mit der Tabtaste
-    // erreichbar". Eine 0 hiesse das Gegenteil.
+    // `tabIndex` is -1 when nothing is set: not reachable with the Tab key.
+    // 0 would mean the opposite.
     num_attr_prop!(html_element_proto, fp, "tabIndex", "tabindex", -1.0);
     attr_prop!(element_proto, fp, "slot", "slot");
-    // ── ARIA-Spiegelung ──────────────────────────────────────────────────
+    // ── ARIA reflection ──────────────────────────────────────────────────
     //
-    // `ariaHidden` steht mit 68 Aufrufen im Zensus — tagesschau.de liest es
-    // bei jedem Umschalten. Die Nachbarn kommen mit, weil sie dasselbe Muster
-    // haben und weil die naechste Seite eines davon liest: sie einzeln
-    // nachzureichen waere achtmal derselbe Weg.
-    //
-    // `role` ist die Ausnahme in der Liste: es heisst auch im Attribut so.
+    // `role` is the exception in the list: the attribute has the same name.
     attr_prop!(element_proto, fp, "role", "role");
     attr_prop_null!(element_proto, fp, "ariaHidden", "aria-hidden");
     attr_prop_null!(element_proto, fp, "ariaLabel", "aria-label");
@@ -5439,16 +4981,11 @@ pub fn install(realm: &mut Realm) {
         iface(realm, iname, &proto);
         for t in *tags { tag_protos.insert(t, proto.clone()); }
     }
-    // Je Schnittstelle das, was auf ihr wirklich abgefragt wird — aus dem
-    // Aufrufzensus, nicht aus der Spezifikation: `HTMLAnchorElement.href`
-    // steht dort mit 285 Aufrufen, `HTMLScriptElement.src` mit 144. Was
-    // niemand ruft, steht hier nicht.
+    // Per interface, the members pages actually query.
     //
-    // **`href` und `src` sind ROH**, so wie sie im Attribut stehen. Im
-    // Browser sind sie AUFGELOEST — `a.href` einer relativen Adresse ist die
-    // absolute. Das braucht die Adresse der Seite und ist eine eigene Zeile;
-    // bis dahin ist `.href` dasselbe wie `getAttribute("href")`, und das ist
-    // nachpruefbar falsch statt still falsch.
+    // `href` and `src` are raw, as in the attribute. In browsers they are
+    // resolved (`a.href` of a relative URL is absolute); not implemented, so
+    // `.href` equals `getAttribute("href")`.
     // HTMLAnchorElement
     if let Some(p) = tag_protos.get("a") {
         attr_prop!(p, fp, "href", "href");
@@ -5457,11 +4994,7 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "rel", "rel");
         attr_prop!(p, fp, "download", "download");
         attr_prop!(p, fp, "hreflang", "hreflang");
-        // `a.hash` — 20 Aufrufe, und es ist das Stueck, an dem eine Seite
-        // erkennt, ob ein Verweis auf denselben Abschnitt zeigt. Aus dem
-        // ROHEN `href`, wie die Nachbarn auch: `href` ist hier nicht
-        // aufgeloest, und `hash` daraus aufzuloesen waere die eine Zeile, die
-        // aus der Reihe tanzt.
+        // `a.hash`: derived from the raw `href`, like its neighbours.
         getter(p, "hash", |i, t, _| {
             with_node!(i, t, |n| Ok(match n.attr("href").and_then(|h| h.find('#').map(|k| h[k..].to_string())) {
                 Some(f) => Value::string(f), None => Value::str("") }))
@@ -5488,28 +5021,22 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "srcset", "srcset");
         attr_prop!(p, fp, "sizes", "sizes");
         attr_prop!(p, fp, "loading", "loading");
-        // `currentSrc` (28 Aufrufe): WELCHE Quelle wurde wirklich genommen.
-        // beak waehlt aus `srcset` im Layout (`picture.rs`), und die Engine
-        // kennt diese Wahl nicht — sie kennt nur das Dokument. Also `src`,
-        // und das ist die richtige Antwort fuer jedes Bild ohne `srcset`;
-        // fuer eines MIT ist es die Quelle, die im Markup steht, und nicht
-        // die leere Zeichenkette, an der Wikipedias Bildcode heute abbricht.
+        // `currentSrc`: the source actually used. beak picks from `srcset` in
+        // layout (`picture.rs`), which the engine does not see, so this returns
+        // `src`. Correct for images without `srcset`; for those with one it is
+        // the source in the markup.
         getter(p, "currentSrc", |i, t, _| {
             with_node!(i, t, |n| Ok(match n.attr("src") {
                 Some(v) => Value::Str(v.clone()), None => Value::str("") }))
         }, &fp);
     }
-    // **`el.click()`** — die uebliche Art, ein Steuerelement aus JS
-    // auszuloesen, und sie fehlte ganz. Ohne sie wirft schon der AUFRUF, und
-    // der Wurf beendet das Skript; eine Seite, die ihren eigenen Knopf
-    // programmatisch drueckt, stirbt daran.
+    // `el.click()`.
     //
-    // Die Reihenfolge ist die der Spezifikation (HTML §4.10.5, „synthetic
-    // click activation"): bei einem Kaestchen oder Radioknopf wird ZUERST
-    // umgeschaltet, dann `click` zugestellt, und erst wenn niemand abgebrochen
-    // hat, folgen `input` und `change`. Bricht jemand ab, wird der Haken
-    // wieder zurueckgenommen — genau das ist der Unterschied zwischen
-    // `preventDefault()` an einem Kaestchen und an einem Knopf.
+    // The order is the spec's (HTML §4.10.5, synthetic click activation): a
+    // checkbox or radio button toggles first, then `click` is dispatched, and
+    // only if nobody canceled do `input` and `change` follow. If canceled,
+    // the toggle is undone; that is the difference between `preventDefault()`
+    // on a checkbox and on a button.
     meth(&html_element_proto, "click", |i, t, _| {
         let id = node_of(i, &t)?;
         let (tag, kind) = {
@@ -5538,9 +5065,8 @@ pub fn install(realm: &mut Realm) {
 
     // HTMLCanvasElement
     if let Some(p) = tag_protos.get("canvas") {
-        // `width`/`height` sind ZAHLEN und liegen als Attribut, mit den
-        // Vorgaben 300x150 aus der Spezifikation. Eine Seite liest sie, um
-        // ihre Zeichenflaeche zu bemessen.
+        // `width`/`height` are numbers backed by attributes, with the spec
+        // defaults 300x150.
         accessor(p, "width",
             |i, t, _| with_node!(i, t, |n| Ok(Value::Num(
                 n.attr("width").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(300.0)))),
@@ -5559,19 +5085,10 @@ pub fn install(realm: &mut Realm) {
                 if let Some(d) = &mut i.doc { d.set_attr_at(id, "height", &alloc::format!("{}", v as i64)); }
                 Ok(Value::Undefined)
             }, &fp);
-        // **`getContext` antwortet `null`, und das ist die Wahrheit.**
-        //
-        // Die Spezifikation sagt fuer einen Kontexttyp, den die Maschine nicht
-        // anbietet, ausdruecklich `null` — und beak hat keinen 2D-Kontext. Das
-        // ist etwas anderes als die Methode WEGZULASSEN: eine fehlende Methode
-        // wirft, und der Wurf beendet das ganze Skript. Auf sandbox.nopeek.ch
-        // stand `state.setCtx(state.canvas.getContext('2d'))` in `init()`,
-        // eine Zeile ueber `initEventListeners()` — der Wurf kostete jeden
-        // Knopf der Seite. Mit `null` laeuft `init()` durch, und der uebliche
-        // `if (ctx)` davor tut, was er soll.
-        //
-        // Ein echter 2D-Kontext ist ein eigenes Stueck Arbeit und steht in
-        // CONFORMANCE als benannte Luecke, nicht als Attrappe hier.
+        // `getContext` returns `null`, which is what the spec prescribes for a
+        // context type the implementation does not offer; beak has no 2D context.
+        // Omitting the method would throw and end the script, while `null` lets
+        // the usual `if (ctx)` guard work. Not implemented: a real 2D context.
         meth(p, "getContext", |_, _, _| Ok(Value::Null), 1, &fp);
     }
     // HTMLInputElement
@@ -5580,13 +5097,10 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "name", "name");
         attr_prop!(p, fp, "placeholder", "placeholder");
     }
-    // ── Der WERT eines Steuerelements ────────────────────────────────────
+    // ── The value of a control ───────────────────────────────────────────
     //
-    // `value` ist der schmutzige Wert, `defaultValue` das Attribut — die
-    // Spezifikation trennt beide, und ein Browser aendert beim Setzen von
-    // `.value` das Attribut nicht. Bis hierher war `input.value` eine
-    // gewoehnliche Eigenschaft auf der HUELLE: sie las sich zurueck und
-    // erreichte weder Baum noch Layout noch das abgeschickte Formular.
+    // `value` is the dirty value, `defaultValue` the attribute; the spec keeps
+    // them separate, and setting `.value` does not change the attribute.
     for (tag, from_text) in [("input", false), ("textarea", true)] {
         let Some(p) = tag_protos.get(tag) else { continue };
         if from_text {
@@ -5621,11 +5135,9 @@ pub fn install(realm: &mut Realm) {
                             if let Some(d) = &mut i.doc { d.nodes[id as usize].checked = Some(on); d.touch(); }
                             Ok(Value::Undefined) }, &fp);
             bool_attr_prop!(p, fp, "defaultChecked", "checked");
-            // `indeterminate` ist KEIN Attribut — es lebt nur im Objekt (HTML
-            // §4.10.5.3), und deshalb liegt es auch hier im Objekt. beak malt
-            // den dritten Zustand nicht; die Eigenschaft ist trotzdem da, weil
-            // ein Skript sie setzt und danach LIEST, und ein `undefined` an
-            // dieser Stelle ist eine falsche Antwort.
+            // `indeterminate` is not an attribute; it lives only on the object (HTML
+            // §4.10.5.3). beak does not paint the third state, but scripts set it and
+            // read it back.
             accessor(p, "indeterminate",
                 |i, t, _| Ok(Value::Bool(matches!(i.get(&t, "__indet")?, Value::Bool(true)))),
                 |i, t, a| {
@@ -5639,10 +5151,8 @@ pub fn install(realm: &mut Realm) {
         }
     }
 
-    // Die Eigenschaften, die JEDES Steuerelement traegt. Sie fehlten alle vier:
-    // `disabled`, `readOnly` und `required` liest und schreibt jedes
-    // Formularskript, und `form`/`labels` sind der Weg vom Feld zu seinem
-    // Umfeld.
+    // The properties every control has: `disabled`, `readOnly`, `required`,
+    // plus `form`/`labels`, the way from a field to its context.
     for tag in ["input", "select", "textarea", "button"] {
         let Some(p) = tag_protos.get(tag) else { continue };
         bool_attr_prop!(p, fp, "disabled", "disabled");
@@ -5658,8 +5168,7 @@ pub fn install(realm: &mut Realm) {
             Ok(nodes_array(i, ls))
         }, &fp);
     }
-    // `<label>`: die zwei Eigenschaften, mit denen ein Skript vom Schild zum
-    // Feld kommt.
+    // `<label>`: the two properties that lead from the label to its control.
     if let Some(p) = tag_protos.get("label") {
         attr_prop!(p, fp, "htmlFor", "for");
         getter(p, "control", |i, t, _| {
@@ -5672,10 +5181,9 @@ pub fn install(realm: &mut Realm) {
             Ok(match owning_form(i, c) { Some(f) => wrap(i, f), None => Value::Null })
         }, &fp);
     }
-    // Textauswahl in einem Feld. beak fuehrt keine Auswahl (CONFORMANCE sagt
-    // das), also sind das die ehrlichen Antworten: `textLength` misst wirklich,
-    // `select`/`setSelectionRange` setzen den Fokus und melden keine Auswahl,
-    // die es nicht gibt.
+    // Text selection in a field. beak tracks no selection, so `textLength`
+    // measures for real, `select`/`setSelectionRange` set focus and report no
+    // selection that does not exist.
     for tag in ["input", "textarea"] {
         let Some(p) = tag_protos.get(tag) else { continue };
         getter(p, "textLength", |i, t, _| {
@@ -5699,9 +5207,9 @@ pub fn install(realm: &mut Realm) {
             let id = node_of(i, &t)?;
             Ok(Value::Num(form_controls(i, id).len() as f64))
         }, &fp);
-        // `submit()` schickt OHNE `submit`-Ereignis ab — das ist der
-        // Unterschied zu `requestSubmit()`, und Seiten verlassen sich darauf
-        // (ihr eigener `onsubmit` soll nicht ein zweites Mal laufen).
+        // `submit()` submits without a `submit` event; that is the difference to
+        // `requestSubmit()`, and pages rely on their own `onsubmit` not running
+        // again.
         meth(p, "submit", |i, t, _| {
             let id = node_of(i, &t)?;
             let seq = i.doc.as_ref().map(|d| d.nodes[id as usize].seq).unwrap_or(0);
@@ -5731,15 +5239,9 @@ pub fn install(realm: &mut Realm) {
 
     // ── HTMLSelectElement / HTMLOptionElement ────────────────────────────
     //
-    // Ein `<select>` hatte weder `value` noch `options` noch `selectedIndex`.
-    // Auf der Fritzbox-Anmeldeseite stirbt daran der Aufbau des
-    // Anmeldeformulars — `gUsernameElem.value.length` liest `.length` von
-    // `undefined`, und der Fehler nennt weder Element noch Zeile.
-    //
-    // Die Wahrheit ist der BAUM, nicht ein Nebenzustand: `selected` ist das
-    // Attribut, `value` faellt auf den Text zurueck. Genau so liest das
-    // Layout die Auswahl (`forms.rs::collect_options`), also koennen die
-    // beiden Seiten nicht auseinanderlaufen.
+    // The tree is the truth, not side state: `selected` is the attribute, and
+    // `value` falls back to the text. Layout reads the selection the same way
+    // (`forms.rs::collect_options`), so the two cannot diverge.
     if let Some(p) = tag_protos.get("option") {
         attr_prop!(p, fp, "label", "label");
         bool_attr_prop!(p, fp, "selected", "selected");
@@ -5856,15 +5358,12 @@ pub fn install(realm: &mut Realm) {
         attr_prop!(p, fp, "charset", "charset");
     }
 
-    // `<template>.content` — 2245 Aufrufe, die groesste einzelne Luecke im
-    // Zensus. Der Inhalt einer Schablone gehoert laut Spezifikation NICHT in
-    // den Baum, sondern in ein eigenes Bruchstueck.
+    // `<template>.content`. Per spec a template's content is not in the tree
+    // but in its own fragment.
     //
-    // Umgehaengt wird erst beim ersten Zugriff. Wer nie `.content` liest,
-    // behaelt die Kinder im Baum, und `to_dom` schreibt sie zurueck wie
-    // bisher — gemalt werden sie ohnehin nicht (`style.rs` gibt `<template>`
-    // kein Kaestchen). Das ist der billige Weg zu spec-treuem Verhalten,
-    // ohne den Weg zurueck ins Layout anzufassen.
+    // The children move there on first access. Without a `.content` read they
+    // stay in the tree and `to_dom` writes them back; they are not painted
+    // anyway (`style.rs` gives `<template>` no box).
     if let Some(tpl) = tag_protos.get("template") {
         getter(tpl, "content", |i, t, _| {
             let id = node_of(i, &t)?;
@@ -5878,7 +5377,7 @@ pub fn install(realm: &mut Realm) {
             Ok(wrap(i, f))
         }, &fp);
     }
-    // SVG kennt genau eine Unterscheidung, die Seiten wirklich abfragen.
+    // SVG has exactly one distinction pages actually query.
     {
         let p = new_obj(Some(svg_element_proto.clone()));
         iface(realm, "SVGSVGElement", &p);
@@ -5899,13 +5398,11 @@ pub fn install(realm: &mut Realm) {
     realm.tag_protos = tag_protos;
 }
 
-/// Welches Element welche Schnittstelle traegt.
+/// Which element carries which interface.
 ///
-/// Die Liste ist nicht vollstaendig und soll es nicht sein — sie deckt, was
-/// Seiten abfragen. Was nicht daraufsteht, ist `HTMLElement`, und das ist
-/// die richtige Antwort: ein unbekanntes Element IST eins, und `instanceof
-/// HTMLElement` ist die Abfrage, die wirklich vorkommt. `HTMLUnknownElement`
-/// waere formal genauer und praktisch nutzlos.
+/// Not complete by design: it covers what pages query. Anything else is
+/// `HTMLElement`, which is correct for `instanceof HTMLElement`;
+/// `HTMLUnknownElement` would be more precise and of no practical use.
 const HTML_IFACES: &[(&str, &[&str])] = &[
     ("HTMLAnchorElement",    &["a"]),
     ("HTMLLinkElement",      &["link"]),
@@ -5948,10 +5445,8 @@ const HTML_IFACES: &[(&str, &[&str])] = &[
     ("HTMLDialogElement",    &["dialog"]),
 ];
 
-/// Der naechste/vorige ELEMENT-Geschwisterknoten. Wie `sibling`, nur laeuft
-/// er weiter, bis ein Element kommt — Textknoten zwischen zwei `<li>` sind
-/// der Normalfall, nicht die Ausnahme, und genau deshalb fragt Seitencode
-/// nach `nextElementSibling` und nicht nach `nextSibling`.
+/// The next/previous element sibling. Like `sibling`, but keeps going
+/// until an element comes; text nodes between two `<li>` are the norm.
 fn element_sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
     let id = node_of(i, this)?;
     let Some(d) = &i.doc else { return Ok(Value::Null) };
@@ -5978,41 +5473,27 @@ fn sibling(i: &mut Interp, this: &Value, dir: i32) -> C<Value> {
 }
 
 
-// ── Ereigniszustellung ──────────────────────────────────────────────────────
+// ── Event dispatch ──────────────────────────────────────────────────────────
 
-/// Ein Ereignis an `target` zustellen und die Kette hinauf blasen.
+/// The events beak dispatches through the layout hit path.
 ///
-/// `chain` kommt aus dem Layout: die `seq`-Kette unter dem Zeiger, vom
-/// aeussersten zum innersten. Zugestellt wird UMGEKEHRT — vom Ziel nach
-/// aussen, so wie ein Browser blaest. Die Einfangphase gibt es nicht; sie
-/// braucht ein drittes Argument an `addEventListener`, das kaum eine Seite
-/// benutzt, und ohne sie stimmt die Reihenfolge fuer alles Uebrige.
-///
-/// Liefert true, wenn ein Behandler `preventDefault` gerufen hat — dann
-/// unterbleibt, was beak sonst getan haette (einem Link folgen).
-/// Welche Ereignisse beak ueberhaupt zustellt.
-///
-/// Die Liste ist absichtlich kurz und deckungsgleich mit dem, was der Wirt
-/// wirklich ausloest. Ein `onload` hier aufzunehmen wuerde jeder Seite
-/// Treffer-Kaesten aufzwingen, die nie jemand befragt — Aufwand fuer ein
-/// Ereignis, das nie kommt.
+/// Kept in line with what the host actually fires. Adding `onload` here
+/// would force hit boxes onto every page for an event that never comes
+/// this way.
 pub const DISPATCHED: &[&str] = &["click"];
 
-/// Ist `k` ein Attribut-Behandler fuer eins davon?
+/// Is `k` an attribute handler for one of these?
 fn is_handler_attr(k: &str) -> bool {
     k.len() > 2 && k.starts_with("on") && DISPATCHED.contains(&&k[2..])
 }
 
-/// Den Behandler aus `on<art>` uebersetzen, falls es einen gibt.
+/// Compile the handler from `on<type>`, if there is one.
 ///
-/// Ein Attribut ist Quelltext, keine Funktion — es wird erst beim Ausloesen
-/// uebersetzt. Das kostet je Klick eine Uebersetzung von ein paar Dutzend
-/// Zeichen und spart, die halbe Seite beim Laden zu uebersetzen: die meisten
-/// dieser Behandler werden nie ausgeloest.
+/// An attribute is source text, compiled only when fired: most of these
+/// handlers never fire, so compiling them at load would be wasted.
 ///
-/// Ein Attribut, das sich nicht uebersetzen laesst, ist KEIN Fehler der
-/// Seite: der Browser laesst es still fallen, sonst haette ein Tippfehler in
-/// einem Attribut die ganze Zustellung angehalten.
+/// An attribute that fails to compile is dropped silently, as browsers do;
+/// a typo in one attribute must not stop dispatch.
 fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
     let mut name = String::from("on");
     name.push_str(kind);
@@ -6021,8 +5502,8 @@ fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
         None => return Ok(None),
     };
     if src.trim().is_empty() { return Ok(None); }
-    // Der Koerper laeuft mit `event` als Namen und `this` am Element — genau
-    // so ist der Attribut-Behandler definiert.
+    // The body runs with `event` as a name and `this` bound to the element,
+    // which is how attribute handlers are defined.
     let mut wrapped = String::from("(function(event){");
     wrapped.push_str(&src);
     wrapped.push_str("\n})");
@@ -6033,24 +5514,18 @@ fn inline_handler(i: &mut Interp, node: u32, kind: &str) -> C<Option<Value>> {
     }
 }
 
-/// Ein Ereignis, das beak selbst ausloest, ueber die Kette zustellen.
+/// Dispatch an event beak itself fires along a propagation path.
 ///
-/// `chain` ist die Kette aus dem LAYOUT, aussen zuerst — nicht aus dem Baum.
-/// Das ist keine Feinheit: der Klickpunkt kennt nur Kaesten, und wer die
-/// Kette stattdessen aus dem Baum baut, prueft einen Weg, den beak nie geht
-/// ([[feedback_the_test_path_must_be_the_real_path]]).
+/// `chain` comes from layout, outermost first, not from the tree: the hit
+/// point only knows boxes. Dispatch runs in reverse, from the target
+/// outwards, as bubbling does.
 pub fn dispatch(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     dispatch_at(i, kind, chain, None)
 }
 
-/// Wie `dispatch`, aber mit dem ORT des Zeigers — dann wird daraus ein
-/// `MouseEvent`.
-///
-/// **Ein Klick ohne Koordinaten ist eine falsche Antwort, keine fehlende.**
-/// Bis 0.186.0 war jeder Klick eine nackte `Event`, und `e.clientX` war
-/// `undefined`: eine Seite, die ihr Menue an den Zeiger legt, rechnete mit
-/// `NaN`. `client*` ist FENSTERbezogen, `page*` dokumentbezogen — der Rufer
-/// gibt beides, weil nur er den Rollstand kennt.
+/// Like `dispatch`, but with the pointer position, which makes it a
+/// `MouseEvent`. `client*` is viewport-relative, `page*` document-relative;
+/// the caller passes both because only it knows the scroll position.
 pub fn dispatch_at(i: &mut Interp, kind: &str, chain: &[u32],
                    at: Option<(f64, f64, f64, f64)>) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
@@ -6072,28 +5547,25 @@ pub fn dispatch_at(i: &mut Interp, kind: &str, chain: &[u32],
                            ("__evoffsetx", 0.0), ("__evoffsety", 0.0)] {
                 put(k, Value::Num(v));
             }
-            // Die linke Taste: `button` zaehlt ab null, `buttons` ist eine
-            // Bitmaske und bei einem `click` schon wieder leer.
+            // The primary button: `button` counts from zero, `buttons` is a bitmask
+            // and already empty during `click`.
             put("__evbutton", Value::Num(0.0));
             put("__evbuttons", Value::Num(0.0));
             for k in ["__evalt", "__evctrl", "__evshift", "__evmeta"] {
                 put(k, Value::Bool(false));
             }
             put("__evrelated", Value::Null);
-            // `detail` ist bei einem einfachen Klick 1 (UI Events §5.3).
+            // `detail` is 1 for a single click (UI Events §5.3).
             put(EV_DETAIL, Value::Num(1.0));
         }
     }
     let prevented = deliver(i, &ev, kind, chain)?;
-    // **Ein Klick auf ein `<label>` aktiviert sein Steuerelement** (HTML
-    // §4.10.4). Das ist keine Feinheit, sondern die Art, wie ein Kaestchen
-    // bedient wird: die Klickflaeche ist der TEXT daneben, und ohne diesen
-    // Schritt tut ein Klick darauf gar nichts — genau das Symptom „Checkboxen
-    // sind nicht sauber".
+    // A click on a `<label>` activates its control (HTML §4.10.4); the text
+    // next to a checkbox is its click target.
     //
-    // Nicht, wenn jemand abgebrochen hat, und nicht, wenn das Steuerelement
-    // selbst schon in der Kette liegt (ein `<label><input></label>` bekaeme
-    // sonst zwei Klicks und schaltete zweimal um).
+    // Not if someone canceled, and not if the control itself is already in
+    // the path (`<label><input></label>` would otherwise get two clicks and
+    // toggle twice).
     if kind == "click" && !prevented {
         if let Some(target) = chain.last().copied() {
             if let Some((lab, ctl)) = label_target(i, target) {
@@ -6112,15 +5584,14 @@ pub fn dispatch_at(i: &mut Interp, kind: &str, chain: &[u32],
             }
         }
     }
-    // Ein Klick ist eine AUFGABE — danach laeuft die Microtask-Schlange, wie
-    // nach jeder anderen auch. Sonst bliebe ein `.then` aus dem Behandler bis
-    // zum naechsten Zeitgeber liegen, und auf einer Seite ohne Zeitgeber
-    // fuer immer.
+    // A click is a task: the microtask queue runs afterwards, as after any
+    // other. Otherwise a `.then` from the handler would wait for the next
+    // timer, and forever on a page without timers.
     super::promise::run_jobs(i);
     Ok(prevented)
 }
 
-/// Das `<label>` am oder ueber dem getroffenen Knoten und sein Steuerelement.
+/// The `<label>` at or above the hit node, and its control.
 pub fn label_target(i: &Interp, id: u32) -> Option<(u32, u32)> {
     let d = i.doc.as_ref()?;
     let mut cur = Some(id);
@@ -6159,11 +5630,9 @@ fn dispatch_plain(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
     deliver(i, &ev, kind, chain)
 }
 
-/// Der gemeinsame Kern: ein fertiges Ereignis ueber eine fertige Kette.
-///
-/// Zwei Wege enden hier — beaks eigener Klick und `el.dispatchEvent(…)` der
-/// Seite. Ein zweiter Rumpf waere ein zweiter Satz Regeln, und der eine wuerde
-/// gepflegt und der andere nicht.
+/// The shared core: a finished event over a finished path. beak's own
+/// clicks and the page's `el.dispatchEvent(…)` both end here, so there is
+/// one set of rules.
 fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
     let target = wrap(i, chain[chain.len() - 1]);
@@ -6176,14 +5645,12 @@ fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
 
     for (k, &node) in chain.iter().enumerate().rev() {
         let mut listeners: Vec<Value> = Vec::new();
-        // Der Behandler aus dem Attribut oder aus der Eigenschaft zuerst: im
-        // Quelltext steht er vor jedem `addEventListener`, das ein Skript
-        // spaeter anmeldet, und die Reihenfolge der Anmeldung ist die
-        // Reihenfolge des Aufrufs.
+        // The handler from the attribute or property runs first: it precedes any
+        // `addEventListener` a script registers later, and registration order is
+        // call order.
         //
-        // ENTWEDER-ODER: `el.onclick = f` ersetzt im Browser den Behandler
-        // aus dem Attribut, es ist derselbe Platz. Beide laufen zu lassen
-        // hiesse, dass eine Zuweisung den alten nicht loswird.
+        // Either-or: `el.onclick = f` replaces the attribute handler, as it is the
+        // same slot.
         let prop = i.doc.as_ref().and_then(|d| d.nodes[node as usize].handlers.iter()
             .find(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
         match prop {
@@ -6197,26 +5664,22 @@ fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
         if listeners.is_empty() { continue; }
         let this_node = wrap(i, node);
         set(ev, EV_CUR, this_node.clone());
-        // 2 = AT_TARGET, 3 = BUBBLING_PHASE. Eine Fangphase gibt es nicht:
-        // `addEventListener` nimmt das dritte Argument an und verwirft es.
+        // 2 = AT_TARGET, 3 = BUBBLING_PHASE. There is no capture phase:
+        // `addEventListener` accepts the third argument and ignores it.
         set(ev, EV_PHASE, Value::Num(if k + 1 == chain.len() { 2.0 } else { 3.0 }));
         for f in listeners {
-            // Ein Behandler, der wirft, darf die naechsten nicht mitnehmen —
-            // so macht es ein Browser auch.
+            // A throwing handler must not take the following ones with it, as in
+            // browsers.
             let r = i.call(&f, this_node.clone(), &[evv.clone()]);
-            // **Ein Behandler, der wirft, muss es SAGEN.** Der Ausgang wurde
-            // hier nur auf `false` geprueft und sonst weggeworfen: ein Fehler
-            // im `onsubmit` einer Seite verschwand spurlos, und was danach
-            // nicht passierte, sah aus wie ein fehlendes Merkmal.
+            // A throwing handler is reported to the console, not dropped.
             if let Err(e) = r {
                 let msg = super::modules::describe(i, e);
                 i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
                 continue;
             }
-            // `onclick="return false"` ist die alte Schreibweise fuer
-            // `preventDefault` und steht auf mehr Seiten als die neue. Sie
-            // gilt nur fuer den Attribut-Behandler; ein `addEventListener`
-            // wertet den Rueckgabewert nicht aus.
+            // `onclick="return false"` is the old form of `preventDefault`. It applies
+            // only to the attribute handler; `addEventListener` ignores the return
+            // value.
             if matches!(r, Ok(Value::Bool(false))) { set(ev, EV_PREVENTED, Value::Bool(true)); }
             let imm = matches!(ev.borrow().get_own(EV_STOPIMM).and_then(|p| p.value.clone()),
                                Some(Value::Bool(true)));
@@ -6232,9 +5695,8 @@ fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
                 Some(Value::Bool(true))))
 }
 
-/// `data-foo-bar` -> `fooBar`.
-/// `theme` -> `data-theme`, `myKey` -> `data-my-key`. Die Umkehr von
-/// `dash_to_camel`, und der Weg, den `el.dataset.x = v` nimmt.
+/// `theme` -> `data-theme`, `myKey` -> `data-my-key`. The inverse of
+/// `dash_to_camel`, used by `el.dataset.x = v`.
 pub fn camel_to_data_attr(s: &str) -> String {
     let mut out = String::from("data-");
     for c in s.chars() {
@@ -6244,6 +5706,7 @@ pub fn camel_to_data_attr(s: &str) -> String {
     out
 }
 
+/// `data-foo-bar` -> `fooBar`.
 fn dash_to_camel(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut up = false;
@@ -6264,19 +5727,17 @@ fn find_tag(d: &Doc, tag: &str) -> Option<u32> {
 mod beak_engine_layout_boxes {
     use crate::layout::ElemRect;
 
-    /// Ein Kasten, wie das Layout ihn aufzeichnet — kurz, weil eine Probe die
-    /// zwoelf Felder sonst dreimal ausschreibt und nur fuenf davon meint.
+    /// A box as layout records it, with only the fields the tests care about.
     pub fn boxed(seq: u32, x: i32, y: i32, w: i32, h: i32, bx: i16, by: i16) -> ElemRect {
         ElemRect { seq, x, y, w, h, bx, by, px: 0, py: 0, positioned: false }
     }
 
-    /// Derselbe Kasten mit Polsterung — nur die Proben der Beobachter
-    /// brauchen sie.
-    /// Und mit `position` — nur `offsetParent` fragt danach.
+    /// The same box, positioned; only `offsetParent` asks.
     pub fn placed(seq: u32, x: i32, y: i32, w: i32, h: i32) -> ElemRect {
         ElemRect { seq, x, y, w, h, bx: 0, by: 0, px: 0, py: 0, positioned: true }
     }
 
+    /// The same box with padding; only the observer tests need it.
     pub fn padded(seq: u32, x: i32, y: i32, w: i32, h: i32,
                   bx: i16, by: i16, px: i16, py: i16) -> ElemRect {
         ElemRect { seq, x, y, w, h, bx, by, px, py, positioned: false }
@@ -6293,13 +5754,8 @@ mod beak_engine_layout_boxes {
 
 #[cfg(test)]
 mod tests {
-    /// `getComputedStyle` antwortet aus der KASKADE, nicht aus dem
-    /// Inline-Stil.
-    ///
-    /// Der Unterschied ist der ganze Sinn: `.hide{display:none}` steht in
-    /// einem Blatt, nicht am Element. Bis 0.64.0 gab die Funktion darauf
-    /// „block" zurueck — eine Auskunft, auf die eine Seite ihren naechsten
-    /// Schritt baut.
+    /// `getComputedStyle` answers from the cascade, not the inline style:
+    /// `.hide{display:none}` lives in a stylesheet, not on the element.
     fn run(html: &str, js: &str) -> alloc::vec::Vec<alloc::string::String> {
         let dom = crate::dom::parse(html);
         let media = crate::css::Media::new(1024.0, false);
@@ -6335,13 +5791,8 @@ mod tests {
         assert_eq!(out, ["none", "rgb(13, 110, 253)", "20px"]);
     }
 
-    /// **`new Image()` ist ein echtes `img`-Element, keine Attrappe.**
-    ///
-    /// Die Google-Ergebnisseite bricht ihren Zeitgeber sonst mit
-    /// `Image is not defined` ab — ein Zaehlpixel besteht genau aus
-    /// `new Image().src = …`. Ein Stummel haette den Fehler weggenommen und
-    /// den Knoten schuldig geblieben; der Test prueft deshalb, dass das Ding
-    /// im Baum ankommt und sich wie ein Element verhaelt.
+    /// `new Image()` is a real `img` element that arrives in the tree and
+    /// behaves like one, not a stub.
     #[test]
     fn new_image_ist_ein_img_element_im_baum() {
         let out = run(
@@ -6358,14 +5809,11 @@ mod tests {
         assert_eq!(out, ["IMG 1 true", "/pixel.gif", "16x9", "1"]);
     }
 
-    /// **Am Wurzelelement ist `clientWidth` die SICHTFLAECHE** (CSSOM View
-    /// §4), nicht der Polsterkasten. Googles Startseite misst damit das
-    /// Fenster und laeuft nur weiter, wenn beide Werte wahr sind — mit 0
-    /// blieb ihr ganzer Messblock stehen und das Formular schickte
-    /// `biw=&bih=`.
+    /// On the root element `clientWidth` is the viewport (CSSOM View §4), not
+    /// the padding box.
     ///
-    /// Eigener Aufbau statt `run`: der Helfer setzt keine Sichtflaeche, und
-    /// genau die ist hier der Gegenstand.
+    /// Built by hand instead of `run`: that helper sets no viewport, which is
+    /// the subject here.
     #[test]
     fn clientwidth_am_wurzelelement_ist_die_sichtflaeche() {
         let dom = crate::dom::parse("<html><body><p id='p'>x</p></body></html>");
@@ -6382,9 +5830,8 @@ mod tests {
         assert_eq!(&*got, "1902,1000,true,false");
     }
 
-    /// Ein Element, das ein Skript erst erzeugt hat, kommt im Baum nicht vor.
-    /// Dafuer gibt es keinen gerechneten Stil — und die leere Zeichenkette ist
-    /// die ehrliche Antwort, keine erfundene Zahl.
+    /// An element created by script is not in the tree, so it has no computed
+    /// style; the empty string is the honest answer.
     #[test]
     fn an_element_the_script_made_has_no_cascade_yet() {
         let out = run(
@@ -6395,11 +5842,8 @@ mod tests {
         assert_eq!(out, ["\"\""]);
     }
 
-    /// Was das SKRIPT an den Inline-Stil schreibt, sieht der gerechnete Stil
-    /// auch — obwohl der Kaskadenkontext ein Schnappschuss vom Skriptstart
-    /// ist. Ohne diese Ueberlagerung antwortete `getComputedStyle` mit dem
-    /// Stand von vorgestern, und ein Skript, das setzt und dann misst, bekam
-    /// seinen eigenen Wert nicht zurueck.
+    /// What the script writes to the inline style is visible in the computed
+    /// style, so a script that sets and then measures gets its own value back.
     #[test]
     fn a_style_the_script_just_set_is_in_the_computed_answer() {
         let out = run(
@@ -6412,10 +5856,8 @@ mod tests {
         assert_eq!(out, ["rgb(0, 0, 0)", "rgb(29, 92, 29)"]);
     }
 
-    /// **Der Fall, wegen dem der Schnappschuss weg ist.** Ein Skript setzt
-    /// eine KLASSE und misst dann — die Klasse entscheidet, welche Regeln
-    /// ueberhaupt treffen, und aus einem Baum vom Skriptstart ist das nicht zu
-    /// beantworten. Bis 0.74.0 kam die Antwort von vorher.
+    /// A script sets a class and then measures: the class decides which rules
+    /// match, which a tree from script start cannot answer.
     #[test]
     fn a_class_the_script_just_added_decides_the_computed_style() {
         let out = run(
@@ -6431,8 +5873,8 @@ mod tests {
         assert_eq!(out, ["rgb(0, 0, 0) block", "rgb(255, 0, 0) none", "rgb(0, 0, 0) block"]);
     }
 
-    /// Und ein Knoten, den das Skript erst EINHAENGT, bekommt seine Kaskade —
-    /// samt allem, was ihm der Nachbar oder der Elternteil vererbt.
+    /// A node the script inserts gets its cascade, including what its parent
+    /// passes down.
     #[test]
     fn a_node_the_script_appends_gets_the_cascade_of_where_it_landed() {
         let out = run(
@@ -6446,10 +5888,8 @@ mod tests {
         assert_eq!(out, ["\"\"", "rgb(0, 128, 0)"]);
     }
 
-    /// Geometrie kommt aus dem LAYOUT, und der Wirt reicht sie ein. Ohne
-    /// eingereichte Kaesten bleibt es bei Nullen — das ist die Antwort eines
-    /// Browsers fuer ein Element ohne Kasten und die einzige ehrliche, solange
-    /// es kein Layout gibt.
+    /// Geometry comes from layout, provided by the host. Without boxes the
+    /// answer is zeros, as browsers give for an element without a box.
     #[test]
     fn geometry_answers_from_the_boxes_the_host_handed_in() {
         use super::beak_engine_layout_boxes::*;
@@ -6473,19 +5913,19 @@ mod tests {
              console.log(e.getClientRects().length);", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_console(), [
-            // y ist um den Rollstand verschoben: 100 - 40.
+            // y is shifted by the scroll position: 100 - 40.
             "10,60,200,50,210,110",
-            // offsetTop geht gegen das DOKUMENT, also OHNE den Rollstand.
+            // offsetTop is relative to the document, so without scrolling.
             "200,50,100",
-            // Polsterkasten = Rahmenkasten ohne die Rahmensummen.
+            // Padding box = border box minus the border sums.
             "196,44",
             "1",
         ]);
     }
 
-    /// Ein Kasten ueber mehrere Zeilen hat mehrere Fragmente. `getClientRects`
-    /// nennt sie einzeln, `getBoundingClientRect` ihre VEREINIGUNG — nicht das
-    /// erste, was man findet.
+    /// A box across several lines has several fragments. `getClientRects`
+    /// lists them, `getBoundingClientRect` returns their union, not the first
+    /// one found.
     #[test]
     fn a_box_broken_over_lines_reports_the_union() {
         use super::beak_engine_layout_boxes::*;
@@ -6511,12 +5951,8 @@ mod tests {
     }
 
 
-    /// `ResizeObserver` meldet den INHALTSkasten — Rahmen UND Polsterung ab.
-    ///
-    /// Das ist der Unterschied, der zaehlt: ein Diagramm baut sein Zeichenfeld
-    /// aus `entry.contentRect.width`, und in einem gepolsterten Kasten waere
-    /// jede andere Zahl zu gross. Vor dieser Runde fuehrte das Layout die
-    /// Polsterung gar nicht mit.
+    /// `ResizeObserver` reports the content box, with border and padding
+    /// subtracted; a chart sizes its canvas from `entry.contentRect.width`.
     #[test]
     fn resize_observer_reports_the_content_box_not_the_border_box() {
         use super::beak_engine_layout_boxes::*;
@@ -6536,27 +5972,26 @@ mod tests {
                }\
              });\
              ro.observe(document.getElementById('a'));", false).expect("parst");
-        // Erst die Kaesten, dann das Skript: `observe` misst SOFORT.
+        // Boxes first, then the script: `observe` measures immediately.
         i.set_geometry(super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![
-                // 200x50 Rahmenkasten, 4 px Rahmen und 20 px Polsterung
-                // waagerecht, 6 + 10 senkrecht.
+                // 200x50 border box, 4 px border and 20 px padding horizontally, 6 + 10
+                // vertically.
                 padded(seq, 10, 100, 200, 50, 4, 6, 20, 10),
             ]),
             scroll: (0, 0),
             content: (1024, 4000),
         });
         let _ = i.run_program(&prog);
-        // Zugestellt wird am Kontrollpunkt, nicht im `observe`.
+        // Delivered at the checkpoint, not inside `observe`.
         i.run_timers();
         let prog = super::super::parse("console.log(log.join(' | '));", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_console(), ["176x34 rand 200 inhalt 34"]);
     }
 
-    /// Und er meldet nur, was sich GEAENDERT hat. Ein zweites Layout mit
-    /// derselben Groesse ist kein Ereignis — sonst waere jeder Bildlauf ein
-    /// Rueckrufgewitter.
+    /// It reports only changes. A second layout with the same size is not an
+    /// event.
     #[test]
     fn resize_observer_stays_quiet_when_the_size_did_not_move() {
         use super::beak_engine_layout_boxes::*;
@@ -6577,9 +6012,9 @@ mod tests {
              ro.observe(document.getElementById('a'));", false).expect("parst");
         let _ = i.run_program(&prog);
         i.run_timers();
-        // Dasselbe noch dreimal — die Groesse steht.
+        // The same three more times: the size is stable.
         for _ in 0..3 { i.set_geometry(geom(200)); i.run_timers(); }
-        // Jetzt bewegt sie sich.
+        // Now it changes.
         i.set_geometry(geom(300));
         i.run_timers();
         let prog = super::super::parse("console.log(n);", false).expect("parst");
@@ -6587,9 +6022,8 @@ mod tests {
         assert_eq!(i.take_console(), ["2"]);
     }
 
-    /// `IntersectionObserver`: das Verhaeltnis ist die geschnittene Flaeche
-    /// geteilt durch die des Ziels, und gemeldet wird beim WECHSEL ueber eine
-    /// Schwelle.
+    /// `IntersectionObserver`: the ratio is the intersected area divided by
+    /// the target's, reported when crossing a threshold.
     #[test]
     fn intersection_observer_reports_when_a_threshold_is_crossed() {
         use super::beak_engine_layout_boxes::*;
@@ -6599,8 +6033,8 @@ mod tests {
         i.set_document(super::Doc::from_dom(&dom));
         i.set_viewport(1000.0, 1000.0);
         let seq = find_seq(&dom.root, "a").expect("das div");
-        // Ein 100 hoher Kasten, dessen Oberkante bei y liegt. Bei y = 950
-        // ragen 50 von 100 ins Sichtfeld: Verhaeltnis 0,5.
+        // A 100 px tall box with its top edge at y. At y = 950, 50 of 100 are in
+        // the viewport: ratio 0.5.
         let at = |y: i32| super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, y, 100, 100, 0, 0)]),
             scroll: (0, 0),
@@ -6617,13 +6051,13 @@ mod tests {
              io.observe(document.getElementById('a'));", false).expect("parst");
         let _ = i.run_program(&prog);
         i.run_timers();
-        // Ein Viertel herein: ueber 0, unter 0,5.
+        // A quarter in: above 0, below 0.5.
         i.set_geometry(at(975));
         i.run_timers();
-        // Die Haelfte: die zweite Schwelle faellt.
+        // Half: the second threshold is crossed.
         i.set_geometry(at(950));
         i.run_timers();
-        // Wieder hinaus.
+        // Out again.
         i.set_geometry(at(2000));
         i.run_timers();
         let prog = super::super::parse("console.log(log.join(' | '));", false).expect("parst");
@@ -6632,8 +6066,8 @@ mod tests {
                    ["false@0 | true@0.25 | true@0.5 | false@0"]);
     }
 
-    /// `rootMargin` dehnt den Ausschnitt — genau das macht „lade das Bild,
-    /// BEVOR es sichtbar wird" moeglich.
+    /// `rootMargin` grows the clip; that is what makes "load the image before
+    /// it becomes visible" possible.
     #[test]
     fn a_root_margin_stretches_the_clip() {
         use super::beak_engine_layout_boxes::*;
@@ -6643,7 +6077,7 @@ mod tests {
         i.set_document(super::Doc::from_dom(&dom));
         i.set_viewport(1000.0, 1000.0);
         let seq = find_seq(&dom.root, "a").expect("das div");
-        // 200 px UNTER dem Sichtfeld.
+        // 200 px below the viewport.
         i.set_geometry(super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![boxed(seq, 0, 1200, 100, 100, 0, 0)]),
             scroll: (0, 0),
@@ -6665,11 +6099,9 @@ mod tests {
     }
 
 
-    /// Die Rollmasse kommen aus den KAESTEN, nicht aus einer 0.
-    ///
-    /// `scrollHeight` ist der Polsterkasten, vereinigt mit den Nachfahren —
-    /// ein Kind, das aus seinem Elter laeuft, macht genau den Unterschied,
-    /// wegen dem eine Seite ueberhaupt fragt.
+    /// Scroll metrics come from the boxes. `scrollHeight` is the padding box
+    /// united with the descendants; a child overflowing its parent is exactly
+    /// what pages ask about.
     #[test]
     fn scroll_metrics_come_from_the_boxes_not_from_zero() {
         use super::beak_engine_layout_boxes::*;
@@ -6682,9 +6114,9 @@ mod tests {
         let b = find_seq(&dom.root, "b").expect("b");
         i.set_geometry(super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![
-                // 200x60 Rahmenkasten, 4 px Rahmen und 10 px Polsterung.
+                // 200x60 border box, 4 px border and 10 px padding.
                 padded(a, 0, 0, 200, 60, 4, 4, 10, 10),
-                // Das Kind ist 400 hoch und laeuft unten heraus.
+                // The child is 400 tall and overflows at the bottom.
                 boxed(b, 2, 2, 180, 400, 0, 0),
             ]),
             scroll: (0, 0),
@@ -6697,20 +6129,20 @@ mod tests {
              console.log([a.scrollTop, a.scrollLeft].join(','));", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_console(), [
-            // Polsterkasten: 200-4, 60-4.
+            // Padding box: 200-4, 60-4.
             "196,56",
-            // Rollflaeche: die Breite passt (das Kind endet bei 182, der
-            // Polsterkasten ist 196 breit), die Hoehe nicht — das Kind endet
-            // bei 402, die Polsterkante liegt bei 2.
+            // Scrollable area: the width fits (the child ends at 182, the padding box
+            // is 196 wide), the height does not: the child ends at 402, the padding
+            // edge is at 2.
             "196,400",
-            // beak klemmt nichts ab: an einem gewoehnlichen Element ist
-            // NICHTS weggerollt, und 0 ist hier wahr statt geraten.
+            // beak clips nothing: on an ordinary element nothing is scrolled, and 0
+            // is true here.
             "0,0",
         ]);
     }
 
-    /// Am Wurzelelement ist es die Rollflaeche des DOKUMENTS, und die sagt
-    /// das Layout — nicht die Vereinigung der Kaesten.
+    /// On the root element it is the document's scrollable area as layout
+    /// reports it, not the union of boxes.
     #[test]
     fn the_root_reports_the_documents_scrolling_area() {
         use super::beak_engine_layout_boxes::*;
@@ -6734,8 +6166,8 @@ mod tests {
         assert_eq!(i.take_console(), ["3000,1000", "250,250,250", "true"]);
     }
 
-    /// Rollen ist ein WUNSCH. Die Engine hat kein Fenster; sie merkt sich,
-    /// was die Seite wollte, und der Wirt holt es ab.
+    /// Scrolling is a request. The engine has no window; it records what the
+    /// page wanted and the host collects it.
     #[test]
     fn scrolling_is_a_request_the_host_picks_up() {
         use super::beak_engine_layout_boxes::*;
@@ -6753,19 +6185,18 @@ mod tests {
         let prog = super::super::parse("window.scrollTo({ top: 400 });", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_scroll(), Some((None, Some(400.0))));
-        // Und `scrollIntoView` rechnet die Dokumentlage aus, nicht die
-        // Fensterlage: der Kasten steht bei 1200, gerollt ist nichts.
+        // `scrollIntoView` computes the document position, not the viewport
+        // position: the box is at 1200, nothing is scrolled.
         let prog = super::super::parse(
             "document.getElementById('p').scrollIntoView();", false).expect("parst");
         let _ = i.run_program(&prog);
         assert_eq!(i.take_scroll(), Some((None, Some(1200.0))));
-        // Zweimal abholen gibt beim zweiten Mal nichts.
+        // Collecting twice yields nothing the second time.
         assert_eq!(i.take_scroll(), None);
     }
 
-    /// `offsetParent` ist der naechste POSITIONIERTE Vorfahr — und die Ecke
-    /// dafuer faehrt im Layoutkasten mit, statt fuer jeden Vorfahren die
-    /// Kaskade neu aufzuloesen.
+    /// `offsetParent` is the nearest positioned ancestor; the flag travels
+    /// with the layout box.
     #[test]
     fn offset_parent_finds_the_nearest_positioned_ancestor() {
         use super::beak_engine_layout_boxes::*;
@@ -6779,8 +6210,8 @@ mod tests {
                          find_seq(&dom.root, "innen").expect("n"));
         i.set_geometry(super::super::interp::Geometry {
             boxes: alloc::rc::Rc::new(alloc::vec![
-                placed(a, 0, 0, 300, 300),          // positioniert
-                boxed(m, 0, 0, 300, 200, 0, 0),     // nicht
+                placed(a, 0, 0, 300, 300),          // positioned
+                boxed(m, 0, 0, 300, 200, 0, 0),     // not positioned
                 boxed(n, 0, 0, 50, 20, 0, 0),
             ]),
             scroll: (0, 0),
@@ -6795,8 +6226,7 @@ mod tests {
         assert_eq!(i.take_console(), ["aussen", "BODY", "null", "null"]);
     }
 
-    /// Der Kleinkram, in EINEM Lauf: jede dieser Zeilen war vorher ein
-    /// `TypeError` mitten in fremdem Code.
+    /// Small members in one run; each was missing before.
     #[test]
     fn the_small_gaps_answer_instead_of_throwing() {
         let out = run("<html><body><a id=l href='/x#t' data-k=v>l</a><b id=b>b</b>\
@@ -6835,15 +6265,14 @@ mod tests {
             "null,false",
             "1,U",
             "[object NamedNodeMap],[object Attr]",
-            // Anmeldedaten faehrt beak nicht — und sagt das, statt zu
-            // schweigen oder sie in die Adresszeile zu schreiben.
+            // beak does not support credentials and says so, instead of staying
+            // silent or putting them in the address bar.
             "[][]http://example.com/p",
         ]);
     }
 
-    /// Der Inline-Stil bleibt eine LEBENDE Sicht — `el.style` ist etwas
-    /// anderes als `getComputedStyle(el)`, und beide gehen durch dieselben
-    /// Zugriffsfunktionen.
+    /// The inline style stays a live view; `el.style` differs from
+    /// `getComputedStyle(el)`, and both go through the same accessors.
     #[test]
     fn the_inline_view_still_writes_through() {
         let out = run(
@@ -6856,20 +6285,15 @@ mod tests {
     }
 }
 
-/// Das interne Feld eines `TextDecoder`: verwirft eine ungueltige Folge
-/// still, oder wirft? NUL-praefigiert, also fuer jedes Skript unsichtbar.
+/// Internal field of a `TextDecoder`: drop an invalid sequence silently,
+/// or throw? NUL-prefixed, so invisible to scripts.
 const TD_FATAL: &str = "\0!tdfatal";
 
-/// `TextEncoder` und `TextDecoder`.
+/// `TextEncoder` and `TextDecoder`.
 ///
-/// **Nur UTF-8, und das ist keine Luecke.** Die Spezifikation laesst dem
-/// Encoder gar keine andere Wahl (`new TextEncoder("latin1")` ist trotzdem
-/// UTF-8), und der Decoder nimmt zwar Beschriftungen entgegen, aber jede
-/// Seite, die eine andere als UTF-8 braucht, braucht auch eine Tabelle, die
-/// hier nicht liegt. Eine fremde Beschriftung wird also angenommen und wie
-/// UTF-8 behandelt, statt zu werfen — der Fritzbox-Anmeldecode ruft
-/// `new TextEncoder("utf-8")`, und ein Wurf dort waere ein Fehler ueber
-/// nichts.
+/// UTF-8 only. The spec gives the encoder no other choice, and the decoder
+/// accepts labels, but any other encoding needs tables not present here.
+/// A foreign label is accepted and treated as UTF-8 rather than throwing.
 fn install_text_codec(realm: &mut Realm) {
     let fp = realm.function_proto.clone();
     let op = realm.object_proto.clone();
@@ -6884,9 +6308,8 @@ fn install_text_codec(realm: &mut Realm) {
         };
         Ok(bytes_to_u8(i, s.as_bytes()))
     }, 1, &fp);
-    // `encodeInto` schreibt in eine bestehende Sicht und meldet, wie weit es
-    // gekommen ist. Abgeschnitten wird an einer ZEICHENgrenze — eine halbe
-    // Folge in den Puffer zu legen waere kaputtes UTF-8.
+    // `encodeInto` writes into an existing view and reports how far it got.
+    // It cuts at a character boundary; half a sequence would be broken UTF-8.
     meth(&enc_proto, "encodeInto", |i, _, a| {
         let s = match a.first() {
             None | Some(Value::Undefined) => Rc::from(""),
@@ -6935,8 +6358,8 @@ fn install_text_codec(realm: &mut Realm) {
                 if matches!(i.get(&t, TD_FATAL)?, Value::Bool(true)) {
                     return i.type_err("The encoded data was not valid utf-8");
                 }
-                // Ohne `fatal` ersetzt die Spezifikation jede ungueltige
-                // Folge durch U+FFFD, statt zu werfen.
+                // Without `fatal` the spec replaces each invalid sequence with U+FFFD
+                // instead of throwing.
                 Ok(Value::string(lossy_utf8(&bytes)))
             }
         }
@@ -6958,20 +6381,18 @@ fn install_text_codec(realm: &mut Realm) {
     realm.text_decoder_proto = dec_proto;
 }
 
-/// Eine frische `Uint8Array` mit diesen Bytes.
+/// A fresh `Uint8Array` with these bytes.
 fn bytes_to_u8(i: &mut Interp, b: &[u8]) -> Value {
     let v = i.new_typed(ElemKind::U8, b.len());
     write_view(&v, b);
     v
 }
 
-/// Die Bytes hinter einer Sicht ODER einem Puffer. Alles andere ist leer —
-/// `decode` bekommt in echtem Code nie etwas anderes.
+/// The bytes behind a view or a buffer. Anything else is empty.
 fn read_view(v: &Value) -> Vec<u8> {
     let Value::Obj(o) = v else { return Vec::new() };
-    // Erst die Angaben herausholen, dann die Ausleihe fallen lassen: eine
-    // Sicht auf SICH SELBST gibt es nicht, aber `slice_of` leiht den Puffer
-    // erneut, und bei `ObjKind::Buffer` waere das dasselbe Objekt.
+    // Extract the fields first, then drop the borrow: `slice_of` borrows the
+    // buffer again, and for `ObjKind::Buffer` that is the same object.
     let what = match &o.borrow().kind {
         ObjKind::Buffer(b) => return b.bytes.borrow().clone(),
         ObjKind::TypedArray(td) => (td.buf.clone(), td.offset, td.len * td.kind.size()),
@@ -6988,7 +6409,7 @@ fn slice_of(buf: &Gc, off: usize, len: usize) -> Vec<u8> {
     all[off..(off + len).min(all.len())].to_vec()
 }
 
-/// Wieviele BYTES in die Sicht passen.
+/// How many bytes fit into the view.
 fn view_len(v: &Value) -> usize {
     let Value::Obj(o) = v else { return 0 };
     match &o.borrow().kind {
@@ -7013,9 +6434,7 @@ fn write_view(v: &Value, src: &[u8]) {
     all[off..off + n].copy_from_slice(&src[..n]);
 }
 
-/// UTF-8 mit U+FFFD fuer jede ungueltige Folge. `String::from_utf8_lossy`
-/// gibt es in `alloc` — aber nur mit `Cow`, und die Grenze ist hier
-/// uninteressant.
+/// UTF-8 with U+FFFD for each invalid sequence.
 fn lossy_utf8(b: &[u8]) -> String {
     let mut out = String::with_capacity(b.len());
     let mut rest = b;
@@ -7035,24 +6454,18 @@ fn lossy_utf8(b: &[u8]) -> String {
     }
 }
 
-/// `customElements` — die Registratur der eigenen Elemente.
+/// `customElements`: the custom element registry.
 ///
-/// **Ohne Schattenbaum.** `attachShadow` fehlt weiter; gemessen an der
-/// Fritzbox-Oberflaeche benutzen vier von vierzehn Komponenten einen, und
-/// keine davon steht auf der Anmeldeseite. Die Trennung ist bewusst: ein
-/// halber Schattenbaum waere schlimmer als keiner, weil er das Layout
-/// betrifft und nicht nur die Bindung.
+/// Not implemented: shadow roots (`attachShadow`).
 ///
-/// **Was es kann:** anmelden, nachschlagen, und — der eigentliche Punkt —
-/// `class X extends HTMLElement` KONSTRUIERBAR machen. `new X()` legt einen
-/// echten Knoten mit der angemeldeten Marke an; welche Marke, sagt der
-/// Prototyp des gerade gebauten Objekts.
+/// Supports define, get, and making `class X extends HTMLElement`
+/// constructible: `new X()` creates a real node with the registered tag,
+/// determined by the prototype of the object being built.
 fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
     let fp = realm.function_proto.clone();
 
-    // `HTMLElement` ist ab hier ein echter Konstruktor. Ohne ihn wirft
-    // `super()` in jeder Komponente „Illegal constructor" — und das ist die
-    // erste Zeile, die eine Seite mit Web Components ausfuehrt.
+    // `HTMLElement` is a real constructor from here on; without it `super()`
+    // in every component throws "Illegal constructor".
     let he = native(Some(fp.clone()), |i, this, _| {
         if !i.native_new { return i.type_err("Illegal constructor"); }
         let Some(tag) = custom_tag_of(i, &this) else {
@@ -7071,23 +6484,21 @@ fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
         let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let ctor = a.get(1).cloned().unwrap_or(Value::Undefined);
         if !i.is_callable(&ctor) { return i.type_err("customElements.define: not a constructor"); }
-        // Eine Marke ohne Bindestrich ist keine eigene — die Spezifikation
-        // wirft dort, und eine Seite, die es doch versucht, will es wissen.
+        // A name without a hyphen is not a valid custom element name; the spec
+        // throws.
         if !name.contains('-') {
             return i.type_err(&alloc::format!("'{name}' is not a valid custom element name"));
         }
         if i.custom.iter().any(|(t, _)| **t == *name) {
             return i.type_err(&alloc::format!("'{name}' has already been defined"));
         }
-        // **`observedAttributes` wird HIER gelesen**, nicht erst beim ersten
-        // Attributwechsel. Die Spezifikation sagt es so, und Bibliotheken
-        // haengen ihre ganze Einrichtung an diesen Zugriff: der `static get`
-        // der Fritzbox-Komponenten ruft `finalize()`, und ohne den steht
-        // spaeter `_wcProperties` auf `undefined`.
+        // `observedAttributes` is read here, at definition, as the spec says.
+        // Libraries hook their setup into this getter (e.g. a `static get` that
+        // calls `finalize()`).
         let obs = i.get(&ctor, "observedAttributes")?;
         if !matches!(obs, Value::Undefined | Value::Null) {
-            // Nur LESEN. Die Liste selbst braucht beak noch nicht — sie wird
-            // gebraucht, wenn `attributeChangedCallback` kommt.
+            // Read only; the list itself is needed once `attributeChangedCallback`
+            // exists.
             let _ = i.iterate(&obs);
         }
         i.custom.push((name, ctor));
@@ -7103,8 +6514,8 @@ fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
         Ok(i.custom.iter().find(|(_, x)| x.strict_eq(&c))
             .map(|(t, _)| Value::Str(t.clone())).unwrap_or(Value::Null))
     }, 1, &fp);
-    // `whenDefined` wird nur abgewartet. Da alle Anmeldungen beim Laden
-    // passieren, ist die Antwort immer schon da.
+    // `whenDefined` resolves immediately: all definitions happen at load, so
+    // the answer is always already there.
     meth(&ce, "whenDefined", |i, _, a| {
         let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
@@ -7113,20 +6524,20 @@ fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
         super::promise::resolve_promise(i, &p, v);
         Ok(Value::Obj(p))
     }, 1, &fp);
-    // `upgrade` tut nichts: beak baut den Baum aus dem HTML, bevor ein
-    // Skript laeuft, und hebt vorhandene Knoten nicht nachtraeglich in eine
-    // Klasse. Es ist da, damit ein Aufruf nicht wirft.
+    // `upgrade` does nothing: beak builds the tree from HTML before any script
+    // runs and does not upgrade existing nodes later. It exists so the call
+    // does not throw.
     meth(&ce, "upgrade", |_, _, _| Ok(Value::Undefined), 1, &fp);
     ce.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomElementRegistry")));
     realm.global.borrow_mut().define("customElements", Prop::builtin(Value::Obj(ce)));
 }
 
-/// Welche angemeldete Marke gehoert zu diesem Objekt?
+/// Which registered tag belongs to this object?
 ///
-/// Ueber die PROTOTYPKETTE, von innen nach aussen — das gibt automatisch die
-/// abgeleitetste Klasse. `new.target` gaebe dieselbe Antwort, aber beak
-/// reicht es nicht durch, und die Kette weiss es ohnehin: `construct` hat den
-/// Prototyp der gebauten Klasse schon gesetzt, bevor `super()` lief.
+/// Walks the prototype chain from the inside out, which yields the most
+/// derived class. `new.target` would give the same answer but beak does
+/// not pass it through; `construct` has set the prototype before `super()`
+/// runs.
 fn custom_tag_of(i: &Interp, this: &Value) -> Option<Rc<str>> {
     let Value::Obj(o) = this else { return None };
     let mut cur = o.borrow().proto.clone();
@@ -7144,13 +6555,12 @@ fn custom_tag_of(i: &Interp, this: &Value) -> Option<Rc<str>> {
     None
 }
 
-/// Den DOM-Knoten von einem Huellenobjekt auf ein anderes umhaengen.
+/// Move the DOM node from one wrapper object to another.
 ///
-/// `super()` kopiert die Felder des eingebauten Ergebnisses in das `this` der
-/// abgeleiteten Klasse. Der Knoten zeigt danach aber noch auf die
-/// weggeworfene Huelle — und `wrap` gibt jedem, der ihn spaeter aus dem Baum
-/// holt, genau die. Diese Zeile ist der Unterschied zwischen „die Komponente
-/// IST das Element" und „es gibt sie zweimal".
+/// `super()` copies the fields of the builtin result into the derived
+/// class's `this`, but the node still points to the discarded wrapper, and
+/// `wrap` would hand that out later. This makes the component be the
+/// element rather than exist twice.
 pub fn readopt(i: &mut Interp, from: &Gc, to: &Gc) {
     let id = match from.borrow().get_own(SLOT).and_then(|p| p.value.clone()) {
         Some(Value::Num(n)) => n as u32,
@@ -7163,8 +6573,8 @@ pub fn readopt(i: &mut Interp, from: &Gc, to: &Gc) {
     }
 }
 
-/// Die `<option>`-Knoten eines `<select>`, in Dokumentreihenfolge und durch
-/// `<optgroup>` hindurch — genau wie `forms.rs::collect_options`.
+/// The `<option>` nodes of a `<select>`, in document order and through
+/// `<optgroup>`, exactly as `forms.rs::collect_options`.
 fn select_options(i: &Interp, sel: u32) -> Vec<u32> {
     fn walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
         for c in d.nodes[id as usize].children.clone() {
@@ -7177,8 +6587,8 @@ fn select_options(i: &Interp, sel: u32) -> Vec<u32> {
     out
 }
 
-/// Der Wert einer Option: das Attribut, sonst ihr Text. Dieselbe Regel wie im
-/// Layout — sonst zeigt die Auswahl etwas anderes an, als das Skript liest.
+/// An option's value: the attribute, else its text. Same rule as layout,
+/// so the display and script agree.
 fn option_value(i: &Interp, id: u32) -> String {
     let Some(d) = &i.doc else { return String::new() };
     match d.nodes[id as usize].attr("value") {
@@ -7187,7 +6597,7 @@ fn option_value(i: &Interp, id: u32) -> String {
     }
 }
 
-/// Zu welchem `<select>` gehoert diese Option?
+/// Which `<select>` does this option belong to?
 fn owning_select(i: &Interp, id: u32) -> Option<u32> {
     let d = i.doc.as_ref()?;
     let mut cur = d.nodes[id as usize].parent;
@@ -7198,11 +6608,10 @@ fn owning_select(i: &Interp, id: u32) -> Option<u32> {
     None
 }
 
-/// Welche Option ist ausgewaehlt?
+/// Which option is selected?
 ///
-/// Steht nirgends `selected`, ist es bei einer einfachen Auswahl die ERSTE —
-/// so zeigt ein Browser sie an, und ein Skript, das gleich danach `value`
-/// liest, bekaeme sonst die leere Zeichenkette.
+/// If none has `selected`, a single-select picks the first, as browsers
+/// display it.
 fn selected_index(i: &Interp, sel: u32) -> f64 {
     let opts = select_options(i, sel);
     let Some(d) = &i.doc else { return -1.0 };
@@ -7213,7 +6622,7 @@ fn selected_index(i: &Interp, sel: u32) -> f64 {
     if !multiple && !opts.is_empty() { 0.0 } else { -1.0 }
 }
 
-/// Die n-te Option auswaehlen und alle anderen abwaehlen. `-1` waehlt nichts.
+/// Select the n-th option and deselect all others. `-1` selects none.
 fn select_index(i: &mut Interp, sel: u32, n: i64) {
     let opts = select_options(i, sel);
     let Some(d) = &mut i.doc else { return };
@@ -7224,9 +6633,8 @@ fn select_index(i: &mut Interp, sel: u32, n: i64) {
     }
 }
 
-/// Den Inhalt eines Knotens durch EINEN Textknoten ersetzen — dieselbe
-/// Regel wie `textContent`, nur als Funktion, weil `option.text` sie auch
-/// braucht.
+/// Replace a node's content with one text node; the `textContent` rule,
+/// as a function because `option.text` needs it too.
 fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     let Some(d) = &mut i.doc else { return };
     d.touch();
@@ -7240,11 +6648,11 @@ fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     }
 }
 
-/// Vermerk auf der Huelle: `connectedCallback` ist gelaufen. NUL-praefigiert,
-/// also fuer jedes Skript unsichtbar.
+/// Marker on the wrapper: `connectedCallback` has run. NUL-prefixed, so
+/// invisible to scripts.
 const CE_CONNECTED: &str = "\0!ceconn";
 
-/// Haengt dieser Knoten wirklich am Dokument?
+/// Is this node really attached to the document?
 fn is_connected(d: &Doc, mut id: u32) -> bool {
     loop {
         if id == d.doc { return true }
@@ -7252,28 +6660,20 @@ fn is_connected(d: &Doc, mut id: u32) -> bool {
     }
 }
 
-/// Die eigenen Elemente eines Teilbaums, von aussen nach innen.
+/// The custom elements of a subtree, outside in.
 fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
     let n = &d.nodes[id as usize];
-    // Eine Marke OHNE Bindestrich kann kein eigenes Element sein — die
-    // Spezifikation verlangt ihn, und die Pruefung kostet ein Byte.
+    // A tag without a hyphen cannot be a custom element; the spec requires
+    // one.
     if n.kind == ELEMENT_NODE && n.tag.contains('-') { out.push(id); }
     for c in n.children.clone() { collect_custom(d, c, out); }
 }
 
-/// `connectedCallback` fuer alles, was gerade ins Dokument gekommen ist.
+/// `document.write`/`writeln`: insert the fragment after the writing
+/// `<script>` and connect everything in it.
 ///
-/// **Einmal je Element**, gemerkt auf der Huelle: die Fritzbox-Komponenten
-/// bauen darin ihren Inhalt, und ein zweiter Lauf wuerde ihn verdoppeln.
-/// Ein Wurf im Rueckruf beendet NICHT das Einhaengen — so macht es ein
-/// Browser auch —, landet aber sichtbar auf der Konsole statt still zu
-/// verschwinden.
-/// `document.write`/`writeln`: das Bruchstueck hinter das schreibende
-/// `<script>` haengen und alles darin anschliessen.
-///
-/// Angeschlossen heisst hier auch GEHOLT: ein geschriebenes `<script src>`
-/// laeuft, anders als eines aus `innerHTML`. Genau das ist der Unterschied
-/// zwischen den beiden Wegen, und der Grund, warum eine Seite `write` nimmt.
+/// Connecting also means fetching: a written `<script src>` runs, unlike
+/// one from `innerHTML`.
 fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> {
     let root = node_of(i, this)?;
     if i.doc.as_ref().map(|d| d.doc) != Some(root) { return Ok(Value::Undefined) }
@@ -7286,8 +6686,8 @@ fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> 
             "document.write ohne laufendes Skript — nichts geschrieben ({} B)", html.len()));
         return Ok(Value::Undefined);
     };
-    // Die Einfuegestelle: hinter dem zuletzt Geschriebenen DIESES Skripts,
-    // sonst hinter dem Skript selbst.
+    // The insertion point: after the last thing this script wrote, else after
+    // the script itself.
     let after = match i.write_point {
         Some((s, last)) if s == script => last,
         _ => script,
@@ -7297,8 +6697,8 @@ fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> 
     let at = d.nodes[parent as usize].children.iter().position(|&c| c == after).map(|k| k + 1);
     let made = d.parse_into(parent, &html, at);
     if let Some(&last) = made.last() { i.write_point = Some((script, last)); }
-    // Auch die TIEFER liegenden: `write` schreibt selten einen nackten
-    // Knoten, und ein `<script>` in einem `<div>` muss genauso laufen.
+    // Nested ones too: a `<script>` inside a written `<div>` must run as
+    // well.
     for n in made {
         let mut all = alloc::vec![n];
         if let Some(d) = &i.doc { d.descendants(n, &mut all); }
@@ -7307,6 +6707,12 @@ fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> 
     Ok(Value::Undefined)
 }
 
+/// Run `connectedCallback` for everything that just entered the document.
+///
+/// Once per element, marked on the wrapper: components build their content
+/// there, and a second run would duplicate it. An exception in the callback
+/// does not abort the insertion (as in browsers) but is logged to the
+/// console.
 fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     settle_stylesheet(i, id);
     settle_script(i, id);
@@ -7330,8 +6736,7 @@ fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     Ok(Value::Undefined)
 }
 
-/// Ein Codepunkt als Hexziffern, klein geschrieben — die Form, die
-/// `CSS.escape` verlangt.
+/// A code point as lowercase hex digits, the form `CSS.escape` requires.
 fn push_hex(out: &mut String, mut code: u32) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut buf = [0u8; 8];
@@ -7341,19 +6746,12 @@ fn push_hex(out: &mut String, mut code: u32) {
     for k in (0..n).rev() { out.push(buf[k] as char); }
 }
 
-/// Ein `<link rel="stylesheet">`, das ein SKRIPT einhaengt, wird zum HOLEN
-/// angemeldet.
+/// A `<link rel="stylesheet">` inserted by script is queued for fetching.
 ///
-/// Die Engine holt nichts — sie legt die Adresse in `pending_sheets`, der
-/// Wirt laedt sie und meldet mit `sheet_done` zurueck. Erst dann faellt
-/// `load` oder `error` am `<link>`.
-///
-/// **Warum das eine eigene Runde wert ist.** Eine Seite, die ihre
-/// Stilblaetter per Skript nachlaedt, wartet in aller Regel auf deren `load`,
-/// bevor sie weiterbaut. Ohne Antwort steht sie fuer immer; mit einer
-/// erfundenen `load`-Meldung baut sie weiter und sieht falsch aus, ohne dass
-/// es jemand sagt. Beides ist schlechter als die Wahrheit, und die Wahrheit
-/// heisst: holen.
+/// The engine fetches nothing: it puts the URL into `pending_sheets`, the
+/// host loads it and reports back with `sheet_done`. Only then does `load`
+/// or `error` fire on the `<link>`. Pages that load stylesheets from script
+/// usually wait for that `load`.
 fn settle_stylesheet(i: &mut Interp, id: u32) {
     let is_sheet = i.doc.as_ref().is_some_and(|d| {
         let n = &d.nodes[id as usize];
@@ -7363,36 +6761,28 @@ fn settle_stylesheet(i: &mut Interp, id: u32) {
             && is_connected(d, id)
     });
     if !is_sheet { return }
-    // Zweimal anmelden waere zweimal holen — und zweimal `load`.
+    // Queuing twice would fetch twice and fire `load` twice.
     if i.pending_sheets.iter().any(|(n, _)| *n == id) { return }
     let href = i.doc.as_ref().and_then(|d| d.nodes[id as usize].attr("href").cloned())
         .unwrap_or_else(|| Rc::from(""));
     i.pending_sheets.push((id, href.to_string()));
 }
 
-/// Der Wirt meldet, wie es einem angeforderten Blatt ergangen ist.
+/// The host reports how a requested stylesheet fared.
 pub fn sheet_done(i: &mut Interp, id: u32, ok: bool) {
     let _ = dispatch(i, if ok { "load" } else { "error" }, &[id]);
 }
 
-/// Ein `<script src>`, das ein SKRIPT einhaengt, wird zum Holen angemeldet.
+/// A `<script src>` inserted by script is queued for fetching. This is how
+/// bundlers load their chunks: insert a `<script>` and wait for `onload`.
 ///
-/// **Das ist die Art, in der ein geteiltes Buendel seine Stuecke nachlaedt.**
-/// webpack baut dafuer ein `<script>`, haengt es an den Kopf und wartet auf
-/// sein `onload`; Next.js wartet auf genau dieses Versprechen, BEVOR es
-/// React ueberhaupt etwas zu rendern gibt. Kam nie eine Antwort, blieb das
-/// Versprechen offen und die Seite leer — ohne eine einzige Fehlermeldung,
-/// weil formal nichts schiefgegangen war.
-///
-/// Drei Grenzen, jede mit Grund:
-/// * **Nur mit `src`.** Ein eingehaengtes Skript MIT Text laeuft laut
-///   Spezifikation sofort beim Einhaengen; das ist eine eigene Baustelle
-///   und hier bewusst nicht angefasst.
-/// * **Nur einmal.** Das „already started"-Kennzeichen der Spezifikation:
-///   ein Skript, das man wieder einhaengt, laeuft nicht noch einmal.
-/// * **Kein Modul.** Ein `type="module"` braucht den Graphen, und den loest
-///   der Wirt beim Laden der Seite auf. Es waere ein zweiter Lader — offen
-///   und hier benannt statt still falsch gemacht.
+/// Limits:
+/// * Only with `src`. An inserted script with inline text runs immediately
+///   per spec; not handled here.
+/// * Only once: the spec's "already started" flag; reinserting does not
+///   run it again.
+/// * No modules. `type="module"` needs the module graph, which the host
+///   resolves at page load; not implemented here.
 fn settle_script(i: &mut Interp, id: u32) {
     let src = i.doc.as_ref().and_then(|d| {
         let n = &d.nodes[id as usize];
@@ -7410,12 +6800,11 @@ fn settle_script(i: &mut Interp, id: u32) {
     i.pending_scripts.push((id, src.to_string()));
 }
 
-/// Der Wirt meldet, was aus einem angeforderten Skript geworden ist.
+/// The host reports what became of a requested script.
 ///
-/// `Some(quelle)` heisst geholt: der Text laeuft im Bereich der Seite, und
-/// DANACH faellt `load` — die Reihenfolge des Browsers, auf die jeder
-/// Nachlader baut. Ein Wurf im Skript beendet nur dieses Skript; `load`
-/// faellt trotzdem, denn geladen wurde es ja.
+/// `Some(source)` means fetched: the text runs in the page's scope, and
+/// then `load` fires, the browser order loaders rely on. An exception
+/// ends only this script; `load` still fires.
 pub fn script_done(i: &mut Interp, id: u32, source: Option<&str>) {
     let Some(src) = source else {
         let _ = dispatch(i, "error", &[id]);
@@ -7423,9 +6812,8 @@ pub fn script_done(i: &mut Interp, id: u32, source: Option<&str>) {
     };
     match super::parse(src, false) {
         Ok(prog) => {
-            // `document.currentScript` zeigt auf DIESEN Knoten, solange er
-            // laeuft — und danach auf den, in dem wir stehen: ein per Skript
-            // eingehaengtes `<script>` laeuft aus einem anderen heraus.
+            // `document.currentScript` points to this node while it runs, then back
+            // to the current one: an inserted `<script>` runs from inside another.
             let outer = i.current_script.replace(id);
             let r = i.run_program(&prog);
             i.current_script = outer;
@@ -7439,8 +6827,8 @@ pub fn script_done(i: &mut Interp, id: u32, source: Option<&str>) {
     let _ = dispatch(i, "load", &[id]);
 }
 
-/// Eine unbehandelte Ablehnung ans Fenster melden. Liefert true, wenn ein
-/// Behandler `preventDefault` gerufen hat — dann unterbleibt die Konsolenzeile.
+/// Report an unhandled rejection to the window. Returns true if a handler
+/// called `preventDefault`; then the console line is skipped.
 pub fn dispatch_rejection(i: &mut Interp, reason: Value, promise: Value) -> C<bool> {
     let Some(target) = i.doc.as_ref().map(|d| d.doc) else { return Ok(false) };
     let proto = i.realm.prej_proto.clone();
@@ -7450,18 +6838,17 @@ pub fn dispatch_rejection(i: &mut Interp, reason: Value, promise: Value) -> C<bo
     deliver(i, &ev, "unhandledrejection", &[target])
 }
 
-/// `focus`/`blur` zustellen. Sie BLUBBERN NICHT — die Kette ist das Element
-/// allein; `focusin`/`focusout` waeren die blubbernden Zwillinge.
+/// Dispatch `focus`/`blur`. They do not bubble: the path is the element
+/// alone; `focusin`/`focusout` are the bubbling twins.
 fn deliver_focus(i: &mut Interp, id: u32, kind: &str) -> C<()> {
     dispatch(i, kind, &[id])?;
     Ok(())
 }
 
-/// Der WERT eines Steuerelements: der schmutzige, sonst der Vorgabewert.
+/// The value of a control: the dirty one, else the default.
 ///
-/// Bei `<textarea>` ist der Vorgabewert der TEXTinhalt, bei `<input>` das
-/// `value`-Attribut. Beides steht so in der Spezifikation, und beides ist der
-/// Grund, warum es hier eine Funktion gibt statt zweier Makroaufrufe.
+/// For `<textarea>` the default is the text content, for `<input>` the
+/// `value` attribute.
 fn control_value(i: &Interp, id: u32, from_text: bool) -> String {
     let Some(d) = &i.doc else { return String::new() };
     if let Some(v) = &d.nodes[id as usize].value { return v.to_string() }
@@ -7476,12 +6863,8 @@ fn set_control_value(i: &mut Interp, id: u32, v: &str) {
     }
 }
 
-/// Die Steuerelemente eines `<form>`, in Dokumentreihenfolge.
-///
-/// Ueber den BAUM, nicht ueber `form=`: das Attribut, mit dem ein Element
-/// ausserhalb seines Formulars stehen kann, liest beak nirgends, und eine
-/// halbe Zuordnung waere schlimmer als eine ehrliche.
-/// Der Haken, wie er JETZT steht: der „schmutzige" Wert, sonst das Attribut.
+/// The checkbox state as it stands now: the dirty value, else the
+/// attribute.
 fn checked_now(i: &Interp, id: u32) -> bool {
     let Some(d) = i.doc.as_ref() else { return false };
     match d.nodes.get(id as usize).and_then(|n| n.checked) {
@@ -7499,10 +6882,8 @@ fn set_checked(i: &mut Interp, id: u32, on: bool) {
     }
 }
 
-/// Das Formular, dem ein Steuerelement gehoert: der naechste `<form>`-Vorfahr.
-/// Das `form=`-Attribut (ein Control ausserhalb seines Formulars) wird hier
-/// NICHT gelesen — dieselbe Grenze, die `forms::collect` hat, und benannt
-/// statt still.
+/// The form a control belongs to: the nearest `<form>` ancestor. Not
+/// implemented: the `form=` attribute (same limit as `forms::collect`).
 fn owning_form(i: &Interp, id: u32) -> Option<u32> {
     let d = i.doc.as_ref()?;
     let mut cur = d.nodes.get(id as usize)?.parent;
@@ -7515,8 +6896,8 @@ fn owning_form(i: &Interp, id: u32) -> Option<u32> {
     None
 }
 
-/// Die `<label>`, die zu einem Steuerelement gehoeren: die es einwickeln, und
-/// die per `for=` auf seine `id` zeigen.
+/// The `<label>`s of a control: those wrapping it and those pointing at
+/// its `id` via `for=`.
 fn labels_of(i: &Interp, id: u32) -> Vec<u32> {
     let Some(d) = i.doc.as_ref() else { return Vec::new() };
     let mut out = Vec::new();
@@ -7538,8 +6919,8 @@ fn labels_of(i: &Interp, id: u32) -> Vec<u32> {
     out
 }
 
-/// Das Steuerelement, das eine `<label>` benennt: `for=` zuerst, sonst das
-/// erste eingewickelte.
+/// The control a `<label>` names: `for=` first, else the first wrapped
+/// one.
 fn label_control(i: &Interp, id: u32) -> Option<u32> {
     let d = i.doc.as_ref()?;
     if let Some(want) = d.nodes.get(id as usize)?.attr("for").cloned() {
@@ -7567,6 +6948,8 @@ fn t_is_textarea(i: &Interp, id: u32) -> bool {
     i.doc.as_ref().is_some_and(|d| d.nodes.get(id as usize).is_some_and(|n| &*n.tag == "textarea"))
 }
 
+/// The controls of a `<form>`, in document order. Found through the tree;
+/// the `form=` attribute is not implemented.
 fn form_controls(i: &Interp, form: u32) -> Vec<u32> {
     fn walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
         for c in d.nodes[id as usize].children.clone() {
@@ -7575,8 +6958,8 @@ fn form_controls(i: &Interp, form: u32) -> Vec<u32> {
             if matches!(tag, "input" | "select" | "textarea" | "button" | "fieldset" | "output") {
                 out.push(c);
             }
-            // Ein verschachteltes `<form>` ist ungueltiges HTML; seine
-            // Elemente gehoeren ihm, nicht uns.
+            // A nested `<form>` is invalid HTML; its elements belong to it, not to
+            // us.
             if tag != "form" { walk(d, c, out); }
         }
     }
@@ -7585,7 +6968,7 @@ fn form_controls(i: &Interp, form: u32) -> Vec<u32> {
     out
 }
 
-/// Alle Elemente einer Marke im Teilbaum, in Dokumentreihenfolge.
+/// All elements with a tag in a subtree, in document order.
 fn tags_of(d: &Doc, from: u32, tag: &str) -> Vec<u32> {
     fn walk(d: &Doc, id: u32, tag: &str, out: &mut Vec<u32>) {
         for c in d.nodes[id as usize].children.clone() {
@@ -7599,14 +6982,7 @@ fn tags_of(d: &Doc, from: u32, tag: &str) -> Vec<u32> {
     out
 }
 
-/// Ein Ereignis an das Element mit dieser `seq` zustellen — mit der Kette bis
-/// zur Wurzel, also BLUBBERND.
-///
-/// Der Weg, auf dem der Wirt der Seite etwas meldet, das er selbst ausloest:
-/// ein Formular, das abgeschickt wird, ein Element, das den Fokus bekommt.
-/// Liefert true, wenn ein Behandler `preventDefault` gerufen hat (oder
-/// `false` zurueckgab).
-/// Der Prototyp einer Ereignisart, ueber ihren globalen Namen.
+/// The prototype of an event kind, via its global name.
 fn iface_proto(i: &mut Interp, iface: &str) -> Gc {
     match i.get(&Value::Obj(i.realm.global.clone()), iface)
            .and_then(|c| i.get(&c, "prototype")) {
@@ -7615,11 +6991,11 @@ fn iface_proto(i: &mut Interp, iface: &str) -> Gc {
     }
 }
 
-/// Ein Ereignis einer ART ueber den Baumknoten `seq` zustellen.
+/// Dispatch an event of a given kind at the tree node `seq`.
 ///
-/// **Der eine Weg fuer alles, was der Wirt schickt.** Gibt `true`, wenn die
-/// Seite abgebrochen hat (`preventDefault`) — und genau darauf muss der Rufer
-/// hoeren: ein `keydown`, das abgebrochen wurde, darf kein Zeichen einfuegen.
+/// The single path for everything the host sends. Returns `true` if the
+/// page canceled (`preventDefault`), and the caller must honour it: a
+/// canceled `keydown` must not insert a character.
 fn dispatch_typed(i: &mut Interp, iface: &str, kind: &str, seq: u32,
                   bubbles: bool, cancelable: bool,
                   fields: &[(&str, Value)]) -> bool {
@@ -7642,11 +7018,11 @@ fn dispatch_typed(i: &mut Interp, iface: &str, kind: &str, seq: u32,
     matches!(deliver(i, &ev, kind, &chain), Ok(true))
 }
 
-/// `keydown`/`keyup` an das Steuerelement mit dieser `seq`.
+/// `keydown`/`keyup` at the control with this `seq`.
 ///
-/// `key` ist der WERT der Taste (`"a"`, `"Enter"`, `"ArrowLeft"`), `code` ihr
-/// Ort auf der Tastatur (`"KeyA"`). `key_code` ist die Altlast, die trotzdem
-/// jeder liest. Gibt `true`, wenn die Seite abgebrochen hat.
+/// `key` is the key's value (`"a"`, `"Enter"`, `"ArrowLeft"`), `code` its
+/// location (`"KeyA"`). `key_code` is the legacy field everyone still
+/// reads. Returns `true` if the page canceled.
 pub fn dispatch_key(i: &mut Interp, kind: &str, seq: u32, key: &str, code: &str,
                     key_code: u32, shift: bool) -> bool {
     dispatch_typed(i, "KeyboardEvent", kind, seq, true, true, &[
@@ -7665,10 +7041,9 @@ pub fn dispatch_key(i: &mut Interp, kind: &str, seq: u32, key: &str, code: &str,
     ])
 }
 
-/// `beforeinput`/`input` an das Steuerelement mit dieser `seq`.
+/// `beforeinput`/`input` at the control with this `seq`.
 ///
-/// `beforeinput` ist abbrechbar, `input` nicht (UI Events §5.1) — deshalb
-/// sagt `cancelable` hier nicht immer dasselbe.
+/// `beforeinput` is cancelable, `input` is not (UI Events §5.1).
 pub fn dispatch_input_event(i: &mut Interp, kind: &str, seq: u32,
                             input_type: &str, data: Option<&str>) -> bool {
     let d = match data { Some(t) => Value::str(t), None => Value::Null };
@@ -7680,11 +7055,11 @@ pub fn dispatch_input_event(i: &mut Interp, kind: &str, seq: u32,
     ])
 }
 
-/// `focus`/`blur` (blasen NICHT) und `focusin`/`focusout` (blasen).
+/// `focus`/`blur` (do not bubble) and `focusin`/`focusout` (bubble).
 ///
-/// Beide Paare, weil Seiten beide benutzen und das eine das andere nicht
-/// ersetzt: `focus` erreicht nur das Element selbst, `focusin` den ganzen Weg
-/// nach oben — eine Seite, die am Formular lauscht, hoert nur das zweite.
+/// Both pairs, because `focus` reaches only the element itself while
+/// `focusin` travels up; a page listening on the form hears only the
+/// latter.
 pub fn dispatch_focus(i: &mut Interp, kind: &str, seq: u32, related: Option<u32>) -> bool {
     let rel = match related.and_then(|r| i.doc.as_ref().and_then(|d| d.by_seq(r))) {
         Some(id) => wrap(i, id),
@@ -7697,6 +7072,10 @@ pub fn dispatch_focus(i: &mut Interp, kind: &str, seq: u32, related: Option<u32>
     ])
 }
 
+/// Dispatch an event at the element with this `seq`, bubbling up to the
+/// root. The path for events the host itself fires (a form submission, an
+/// element gaining focus). Returns true if a handler called
+/// `preventDefault` (or returned `false`).
 pub fn dispatch_seq(i: &mut Interp, kind: &str, seq: u32) -> bool {
     let Some(doc) = i.doc.as_ref() else { return false };
     let Some(id) = doc.by_seq(seq) else { return false };
@@ -7710,19 +7089,17 @@ pub fn dispatch_seq(i: &mut Interp, kind: &str, seq: u32) -> bool {
     matches!(dispatch(i, kind, &chain), Ok(true))
 }
 
-// ── Die Bruecke zwischen den Eingaben des Benutzers und dem Baum ─────────
+// ── Bridge between user input and the tree ───────────────────────────────
 //
-// Zwei Speicher, EINE Regel. Die Eingaben leben im Wirt (`FormState`, nach
-// `seq`), weil eine Seite ohne Skripte gar keinen Baum der Maschine hat; der
-// schmutzige Wert lebt am Knoten, weil `el.value` ihn dort erwartet. Die
-// beiden muessen vor und nach jedem Lauf von Seitencode abgeglichen werden —
-// und dafuer gibt es genau diese zwei Funktionen, damit nicht jeder Rufer
-// seine eigene Regel bekommt.
+// Two stores, one rule. User input lives in the host (`FormState`, keyed
+// by `seq`), because a page without scripts has no engine tree; the dirty
+// value lives on the node, because `el.value` expects it there. They are
+// synced before and after every run of page code, through these two
+// functions only.
 
-/// Die Eingaben des Benutzers in den Baum schreiben — VOR jedem Lauf von
-/// Seitencode. Uebertragen wird nur, was wirklich bearbeitet wurde: sonst
-/// traegt hinterher jedes Feld einen schmutzigen Wert und `form.reset()`
-/// haette nichts mehr zurueckzustellen.
+/// Write user input into the tree before any page code runs. Only edited
+/// fields are transferred; otherwise every field would carry a dirty value
+/// and `form.reset()` would have nothing to restore.
 pub fn push_control_values(doc: &mut Doc, forms: &crate::forms::Forms,
                            state: &crate::forms::FormState) {
     use crate::forms::ControlKind;
@@ -7741,7 +7118,7 @@ pub fn push_control_values(doc: &mut Doc, forms: &crate::forms::Forms,
     }
 }
 
-/// Und zurueck: was Seitencode gesetzt hat, gilt fuer Anzeige und Absenden.
+/// And back: what page code set applies to display and submission.
 pub fn pull_control_values(doc: &Doc, forms: &crate::forms::Forms,
                            state: &mut crate::forms::FormState) {
     let mut set: Vec<(u32, Option<Rc<str>>, Option<bool>)> = Vec::new();

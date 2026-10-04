@@ -1,16 +1,11 @@
-//! `URL` und `URLSearchParams`.
+//! `URL` and `URLSearchParams`.
 //!
-//! **Der gemessene Ausschnitt, nicht die ganze Norm.** Die WHATWG-URL ist ein
-//! Zustandsautomat mit vierzig Zustaenden; gebraucht wird auf dem Zielkorpus
-//! davon ein Bruchteil, und der ist gezaehlt statt geschaetzt:
-//! `href` 909x, `pathname` 401x, `hash` 257x, `origin` 248x,
-//! `searchParams` 219x, `protocol` 142x, `hostname` 89x. Alles Uebrige —
-//! Zeichenkodierung, IDN, IPv6-Klammern, `file:`-Sonderwege — kommt gar nicht
-//! vor und waere Arbeit fuer eine Zeile, die niemand liest.
+//! A subset of the WHATWG URL standard: absolute and relative parsing, the
+//! component accessors and search params. Not implemented: encodings other
+//! than UTF-8, IDN, IPv6 brackets, `file:` special cases.
 //!
-//! Was hier NICHT geraten wird: eine relative Adresse ohne Grundlage. `new
-//! URL("/a")` ohne zweites Argument WIRFT, so wie im Browser. Eine erfundene
-//! Grundlage saehe aus wie eine Antwort ([[feedback_invented_fallback_hides_the_fault]]).
+//! A relative URL without a base is not guessed: `new URL("/a")` throws, as
+//! in browsers.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -19,7 +14,7 @@ use alloc::vec;
 use super::interp::*;
 use super::value::*;
 
-/// Die zerlegte Adresse. Alles Text — eine URL IST Text mit Grenzen darin.
+/// The parsed URL. All components are text.
 #[derive(Clone, Default)]
 pub struct Parts {
     pub scheme: String,
@@ -52,8 +47,8 @@ impl Parts {
     }
 }
 
-/// Eine absolute Adresse zerlegen. `None`, wenn kein Schema davorsteht —
-/// dann ist sie relativ und braucht eine Grundlage.
+/// Parse an absolute URL. `None` if there is no scheme, i.e. the URL is
+/// relative and needs a base.
 pub fn parse_abs(input: &str) -> Option<Parts> {
     let t = input.trim();
     let colon = t.find(':')?;
@@ -68,15 +63,10 @@ pub fn parse_abs(input: &str) -> Option<Parts> {
         let end = r.find(['/', '?', '#']).unwrap_or(r.len());
         let auth = &r[..end];
         rest = &r[end..];
-        // Anmeldedaten in der Adresse werden verworfen, nicht als Host
-        // gelesen — `http://user@host/` hat den Host HINTER dem `@`.
-        //
-        // **Und sie kommen auch nicht zurueck.** Ein `URL`-Gegenstand haelt
-        // nur seinen `href`, und was nicht in `href()` steht, ueberlebt keinen
-        // Zugriff. Das ist hier die richtige Richtung: `location.href =
-        // "http://google.com@boese.example/"` wuerde in der Adresszeile
-        // aussehen wie Google. Was `URL.username` dazu sagt, steht bei den
-        // Zugriffsfunktionen.
+        // Credentials are dropped, not read as the host: `http://user@host/` has
+        // its host after the `@`. They are not kept anywhere either, so
+        // `http://google.com@evil.example/` can never be shown looking like
+        // google.com.
         let hostport = auth.rsplit('@').next().unwrap_or(auth);
         match hostport.rfind(':') {
             Some(i) if hostport[i + 1..].bytes().all(|b| b.is_ascii_digit())
@@ -86,8 +76,8 @@ pub fn parse_abs(input: &str) -> Option<Parts> {
             }
             _ => p.host = hostport.to_ascii_lowercase(),
         }
-        // Der Vorgabeport steht nicht im `href` — `https://x:443/` und
-        // `https://x/` sind dieselbe Adresse.
+        // The default port is not part of `href`: `https://x:443/` and
+        // `https://x/` are the same URL.
         if (p.scheme == "https" && p.port == "443") || (p.scheme == "http" && p.port == "80") {
             p.port.clear();
         }
@@ -111,7 +101,7 @@ fn split_tail(p: &mut Parts, rest: &str) {
     p.hash = hash;
 }
 
-/// Eine relative Adresse gegen eine Grundlage aufloesen.
+/// Resolve a relative URL against a base.
 pub fn resolve(input: &str, base: &Parts) -> Parts {
     let t = input.trim();
     if let Some(p) = parse_abs(t) { return p }
@@ -119,7 +109,7 @@ pub fn resolve(input: &str, base: &Parts) -> Parts {
     p.query.clear();
     p.hash.clear();
     if let Some(r) = t.strip_prefix("//") {
-        // Schemarelativ: Host neu, Schema von der Grundlage.
+        // Scheme-relative: new host, scheme from the base.
         let mut s = String::from(&p.scheme);
         s.push(':'); s.push_str("//"); s.push_str(r);
         return parse_abs(&s).unwrap_or(p);
@@ -128,7 +118,7 @@ pub fn resolve(input: &str, base: &Parts) -> Parts {
     if let Some(r) = t.strip_prefix('#') { p.query = base.query.clone(); p.hash = r.to_string(); return p }
     if t.starts_with('?') { split_tail(&mut p, t); p.path = base.path.clone(); return p }
     if t.starts_with('/') { split_tail(&mut p, t); p.path = norm(&p.path); return p }
-    // Wirklich relativ: ab dem letzten `/` der Grundlage.
+    // Path-relative: from the last `/` of the base.
     let dir = match base.path.rfind('/') { Some(i) => &base.path[..=i], None => "/" };
     let joined = alloc::format!("{dir}{t}");
     split_tail(&mut p, &joined);
@@ -136,8 +126,7 @@ pub fn resolve(input: &str, base: &Parts) -> Parts {
     p
 }
 
-/// `.` und `..` aufloesen. Ohne das ist `new URL("../x", base)` eine Adresse,
-/// die es nicht gibt.
+/// Resolve `.` and `..` segments.
 fn norm(path: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     let abs = path.starts_with('/');
@@ -157,7 +146,7 @@ fn norm(path: &str) -> String {
     s
 }
 
-// ── Prozentkodierung ────────────────────────────────────────────────────
+// ── Percent encoding ────────────────────────────────────────────────────
 
 fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -200,7 +189,7 @@ fn pct_encode_form(s: &str) -> String {
 
 fn hexdig(v: u8) -> char { if v < 10 { (b'0' + v) as char } else { (b'A' + v - 10) as char } }
 
-/// `a=1&b=2` in Paare. Ein Feld ohne `=` hat den leeren Wert.
+/// Split `a=1&b=2` into pairs. A field without `=` has an empty value.
 pub fn parse_query(q: &str) -> Vec<(String, String)> {
     q.split('&').filter(|s| !s.is_empty()).map(|kv| match kv.find('=') {
         Some(i) => (pct_decode(&kv[..i]), pct_decode(&kv[i + 1..])),
@@ -219,14 +208,13 @@ pub fn build_query(pairs: &[(String, String)]) -> String {
     out
 }
 
-// ── Die Anbindung an die Maschine ───────────────────────────────────────
+// ── Engine bindings ─────────────────────────────────────────────────────
 
-/// Die zerlegte Adresse liegt als Text auf dem Objekt, nicht als Rust-Wert:
-/// eine Seite darf `u.hash = "#x"` schreiben, und dann muss `u.href` sich
-/// mitaendern. Ein eingefrorener Rust-Wert koennte das nicht.
+/// The parsed URL is stored as text on the object, not as a Rust value:
+/// a page may write `u.hash = "#x"`, and `u.href` must follow.
 const U_HREF: &str = "\0!url";
-/// Rueckverweis eines `URLSearchParams` auf sein `URL` — `p.set(…)` muss die
-/// Adresse aendern, nicht nur die Kopie.
+/// Back reference from a `URLSearchParams` to its `URL`: `p.set(…)` must
+/// change the URL, not a copy.
 const U_OWNER: &str = "\0!url.owner";
 const U_QUERY: &str = "\0!url.q";
 
@@ -262,7 +250,7 @@ pub fn install(realm: &mut Realm) {
         let parts = match a.get(1) {
             None | Some(Value::Undefined) => match parse_abs(&raw) {
                 Some(p) => p,
-                // Kein Schema und keine Grundlage: das ist keine Adresse.
+                // No scheme and no base: not a URL.
                 None => return i.type_err(&alloc::format!("invalid URL: {raw}")),
             },
             Some(b) => {
@@ -315,19 +303,10 @@ pub fn install(realm: &mut Realm) {
           |p, v| p.query = v.trim_start_matches('?').to_string());
     part!("hash", |p| if p.hash.is_empty() { String::new() } else { alloc::format!("#{}", p.hash) },
           |p, v| p.hash = v.trim_start_matches('#').to_string());
-    // `username`/`password` — 94 Aufrufe im Zensus, und was sie fragen, ist
-    // „steht da etwas?".
-    //
-    // **Sie sind IMMER leer, und das ist keine Luecke, sondern die Wahrheit
-    // ueber beaks Adressen:** `parse_abs` verwirft Anmeldedaten, weil
-    // `http://google.com@boese.example/` in einer Adresszeile aussieht wie
-    // Google. Eine Adresse in beak hat keine, also melden sie keine.
-    //
-    // Das Zuweisen wird ANGENOMMEN und tut nichts. Die Spezifikation kennt
-    // genau das (URL §6.2: „cannot have a username/password/port" — dort fuer
-    // `file:`); hier gilt es fuer jedes Schema. Zu werfen waere schlechter:
-    // eine Seite, die einen Benutzernamen setzt und ihn nie wieder liest,
-    // stuerbe an einer Zeile, die nichts bedeutet.
+    // `username`/`password` are always empty because `parse_abs` drops
+    // credentials. Assignment is accepted and ignored, as URL §6.2 specifies
+    // for URLs that cannot have credentials; throwing would break pages that
+    // set one and never read it back.
     for k in ["username", "password"] {
         part_accessor(&proto, k,
             |_, _, _| Ok(Value::str("")),
@@ -342,10 +321,8 @@ pub fn install(realm: &mut Realm) {
         writable: false, enumerable: true, configurable: true });
 
     let spg = native(Some(fp.clone()), |i, t, _| {
-        // Das Objekt haelt seinen Eigentuemer, damit `set`/`append` in die
-        // Adresse zurueckschreiben. Ohne den Rueckverweis waere
-        // `u.searchParams.set(…)` eine stille Nulloperation — der haeufigste
-        // Weg, `URLSearchParams` falsch zu bauen.
+        // The object holds its owner so that `set`/`append` write back into the
+        // URL; without it `u.searchParams.set(…)` would be a silent no-op.
         let g = new_obj(Some(i.realm.url_params_proto.clone()));
         g.borrow_mut().define(U_OWNER, Prop {
             value: Some(t.clone()), get: None, set: None,
@@ -401,8 +378,8 @@ pub fn install(realm: &mut Realm) {
     d(&sp_proto, "set", |i, t, a| {
         let k = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?.to_string();
-        // `set` ersetzt das ERSTE Vorkommen und wirft alle weiteren weg —
-        // `append` ist das, was mehrfach anhaengt.
+        // `set` replaces the first occurrence and removes all others; `append`
+        // is the one that adds duplicates.
         let mut pairs = sp_read(i, &t)?;
         match pairs.iter().position(|(n, _)| *n == k) {
             Some(at) => {
@@ -465,8 +442,8 @@ fn sp_entries(i: &mut Interp, t: &Value) -> C<Value> {
     Ok(i.new_array(out))
 }
 
-/// Die Paare lesen — entweder aus der eigenen Zeichenkette oder, wenn das
-/// Objekt zu einem `URL` gehoert, aus DESSEN Suchteil.
+/// Read the pairs, either from the object's own string or, if it belongs
+/// to a `URL`, from that URL's query.
 fn sp_read(i: &mut Interp, t: &Value) -> C<Vec<(String, String)>> {
     let owner = i.get(t, U_OWNER)?;
     if !matches!(owner, Value::Undefined) {

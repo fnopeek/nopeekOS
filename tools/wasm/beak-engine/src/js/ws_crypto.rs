@@ -1,16 +1,14 @@
-//! SHA-1 und base64 — die zwei Bausteine des WebSocket-Handschlags.
+//! SHA-1 and base64, the two building blocks of the WebSocket handshake.
 //!
-//! **SHA-1 steht hier und nicht im Kryptomodul des Kernels, und das ist
-//! Absicht.** Es ist gebrochen und darf nie wieder etwas sichern; RFC 6455
-//! §4.1 benutzt es auch nicht dafuer, sondern als festen Rechenschritt gegen
-//! einen Zwischenspeicher, der eine Aufruest-Anfrage fuer eine gewoehnliche
-//! haelt. Wer es im Kernel neben AES und ECDSA ablegte, laedt den naechsten
-//! Leser ein, es fuer eine Sicherheitsfunktion zu halten.
+//! SHA-1 lives here and not in the kernel crypto module on purpose: it is
+//! broken and must never secure anything. RFC 6455 §4.1 uses it only as a
+//! fixed computation that keeps caches from mistaking an upgrade request for
+//! an ordinary one.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// SHA-1 (FIPS 180-4) — 20 Bytes.
+/// SHA-1 (FIPS 180-4), 20 bytes.
 pub fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let bits = (data.len() as u64).wrapping_mul(8);
@@ -53,7 +51,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// base64 mit Fuellzeichen, wie RFC 6455 es verlangt.
+/// base64 with padding, as RFC 6455 requires.
 pub fn base64(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
@@ -71,9 +69,8 @@ pub fn base64(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// Die drei Proben aus FIPS 180-4 und RFC 4648 — und die EINE aus
-    /// RFC 6455 §1.3, die zaehlt: sie prueft die ganze Kette, wie der Server
-    /// sie rechnet.
+    /// The test vectors from FIPS 180-4 and RFC 4648, plus the one from
+    /// RFC 6455 §1.3, which checks the whole chain as the server computes it.
     #[test]
     fn sha1_und_base64_treffen_die_bekannten_werte() {
         let hex = |d: [u8; 20]| {
@@ -83,7 +80,7 @@ mod tests {
         };
         assert_eq!(hex(sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
         assert_eq!(hex(sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
-        // Ueber eine Blockgrenze hinaus (56 Bytes = genau die Fuellgrenze).
+        // Across a block boundary (56 bytes is exactly the padding limit).
         assert_eq!(hex(sha1(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
                    "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
         assert_eq!(base64(b""), "");
@@ -91,7 +88,7 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-        // **RFC 6455 §1.3, das Beispiel des Standards selbst.**
+        // RFC 6455 §1.3, the example from the standard itself.
         let key = "dGhlIHNhbXBsZSBub25jZQ==";
         let mut buf = String::from(key);
         buf.push_str("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");

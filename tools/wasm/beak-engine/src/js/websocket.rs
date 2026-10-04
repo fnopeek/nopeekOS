@@ -1,17 +1,14 @@
-//! `WebSocket` (RFC 6455) — Handschlag, Rahmen und die JS-Flaeche.
+//! `WebSocket` (RFC 6455): handshake, framing and the JS surface.
 //!
-//! **Die Engine oeffnet keine Verbindung.** Wie bei `fetch` legt sie einen
-//! Auftrag hin (`pending_sockets`), der Wirt fuehrt ihn aus und reicht die
-//! Bytes zurueck — hier ueber `npk_tls_*`. Alles in dieser Datei rechnet auf
-//! Byte-Puffern und laesst sich damit host-seitig pruefen.
+//! The engine opens no connection. As with `fetch`, it queues a request
+//! (`pending_sockets`), the host executes it and hands the bytes back via
+//! `npk_tls_*`. Everything here works on byte buffers and is testable on
+//! the host.
 //!
-//! **Gleiche Herkunft, und das ist keine Bequemlichkeit** (S3 aus
-//! `docs/plan/WEB_PLATFORM_GAPS.md`): einen WebSocket schuetzt KEINE
-//! CORS-Antwortpruefung. Im Web entscheidet allein der Server im Handschlag,
-//! ob er eine fremde Herkunft annimmt — wer ihm den `Origin` schickt und die
-//! Antwort trotzdem durchlaesst, baut ein Loch. Also bis auf Weiteres: nur
-//! dieselbe Herkunft, und der `Origin` faehrt mit, damit ein Server, der
-//! spaeter zustimmen darf, es auch kann.
+//! Same origin only. A WebSocket is not protected by any CORS response
+//! check; only the server decides in the handshake whether to accept a
+//! foreign origin. `Origin` is still sent so a server that may accept one
+//! later can decide.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,30 +16,28 @@ use alloc::vec;
 
 use super::ws_crypto::{base64, sha1};
 
-/// RFC 6455 §4.2.2 — die feste Zeichenkette, die der Server anhaengt.
+/// RFC 6455 §4.2.2: the fixed GUID the server appends.
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// Deckel je Nachricht. Ohne ihn haelt eine schwatzhafte Gegenstelle den
-/// Halde des Moduls, und ein Browser hat dafuer keinen zweiten Speicher.
+/// Per-message limit, so a chatty peer cannot fill the module heap.
 const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State { Connecting = 0, Open = 1, Closing = 2, Closed = 3 }
 
-/// Was aus dem Strom herauskam, fuer den Rufer.
+/// What came out of the stream, for the caller.
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Open,
     Text(String),
     Binary(Vec<u8>),
-    /// Code und Grund. `1006` heisst „ohne Close-Rahmen abgerissen" — den
-    /// darf NIE jemand senden, er ist die Auskunft der Gegenseite ueber ein
-    /// Ende, das keiner angesagt hat (§7.1.5).
+    /// Code and reason. `1006` means closed without a Close frame; it must
+    /// never be sent, it only reports an end nobody announced (§7.1.5).
     Closed(u16, String),
     Error(String),
 }
 
-/// Ein Steckplatz: der halbe Zustand einer Verbindung, ohne den Wirt.
+/// One slot: the connection state without the host side.
 pub struct Socket {
     pub id: u32,
     pub url: String,
@@ -51,26 +46,25 @@ pub struct Socket {
     pub path: String,
     pub origin: String,
     pub state: State,
-    /// Der geschickte Schluessel, base64. Gegen ihn wird die Antwort geprueft.
+    /// The key we sent, base64. The response is checked against it.
     key: String,
-    /// Noch nicht abgeholte Bytes fuer die Leitung.
+    /// Bytes not yet taken by the wire.
     out: Vec<u8>,
-    /// Angekommene Bytes, noch nicht zerlegt.
+    /// Received bytes, not yet parsed.
     inbox: Vec<u8>,
-    /// Der Kopfblock der Antwort, solange er noch nicht vollstaendig ist.
+    /// The response header block while it is incomplete.
     handshake_done: bool,
-    /// Halbfertige Nachricht aus Fortsetzungsrahmen (§5.4).
+    /// Partial message from continuation frames (§5.4).
     frag: Vec<u8>,
     frag_text: bool,
-    /// Haben WIR den Close-Rahmen geschickt?
+    /// Whether we sent the Close frame.
     close_sent: bool,
 }
 
 impl Socket {
-    /// **`wss://` oder `ws://` zerlegen.** Ein fehlender Port ist 443 bzw. 80,
-    /// wie bei HTTP — und `ws://` ist nur erlaubt, wenn die Seite selbst
-    /// unverschluesselt kam: ein `ws://` aus einer `https`-Seite ist
-    /// gemischter Inhalt, und den laesst kein Browser durch.
+    /// Parse `wss://` or `ws://`. A missing port is 443 or 80, as for HTTP.
+    /// `ws://` is only allowed from an unencrypted page; from an `https` page
+    /// it is mixed content, which browsers block.
     pub fn new(id: u32, url: &str, page_origin: &str, page_secure: bool,
                nonce: [u8; 16]) -> Result<Socket, String> {
         let (secure, rest) = if let Some(r) = url.strip_prefix("wss://") { (true, r) }
@@ -109,9 +103,8 @@ impl Socket {
         })
     }
 
-    /// Der Aufrueststoss (§4.1). Der `Host`-Kopf traegt den Port mit, wenn er
-    /// nicht der vorgegebene ist — sonst weist ein Server mit mehreren Namen
-    /// die Verbindung ab.
+    /// The upgrade request (§4.1). `Host` carries the port when it is not the
+    /// default, otherwise a server with several names may reject it.
     pub fn handshake(&self) -> Vec<u8> {
         let hostline = if (self.port == 443) || (self.port == 80) {
             self.host.clone()
@@ -126,21 +119,21 @@ impl Socket {
         req.into_bytes()
     }
 
-    /// Was der Server antworten MUSS (§4.1, Punkt 4).
+    /// The `Sec-WebSocket-Accept` value the server must return (§4.1, item 4).
     fn expected_accept(&self) -> String {
         let mut s = self.key.clone();
         s.push_str(GUID);
         base64(&sha1(s.as_bytes()))
     }
 
-    /// Bytes von der Leitung hereingeben. Gibt zurueck, was daraus wurde.
+    /// Feed bytes from the wire. Returns what they produced.
     pub fn feed(&mut self, bytes: &[u8], rnd: &mut dyn FnMut() -> [u8; 4]) -> Vec<Event> {
         let mut out = Vec::new();
         if self.state == State::Closed { return out }
         self.inbox.extend_from_slice(bytes);
         if !self.handshake_done {
             match self.try_handshake() {
-                Ok(false) => return out,          // Kopf noch nicht vollstaendig
+                Ok(false) => return out,          // header not complete yet
                 Ok(true) => { self.state = State::Open; out.push(Event::Open); }
                 Err(e) => {
                     self.state = State::Closed;
@@ -168,10 +161,10 @@ impl Socket {
         out
     }
 
-    /// Den Antwortkopf lesen. `Ok(false)` = noch nicht ganz da.
+    /// Parse the response header. `Ok(false)` = not complete yet.
     fn try_handshake(&mut self) -> Result<bool, String> {
         let Some(end) = find(&self.inbox, b"\r\n\r\n") else {
-            // Ein Kopf, der nicht enden will, ist kein Kopf.
+            // A header that never ends is not a header.
             if self.inbox.len() > 16 * 1024 {
                 return Err(String::from("WebSocket: the handshake reply has no end"));
             }
@@ -181,8 +174,8 @@ impl Socket {
         self.inbox.drain(..end + 4);
         let mut lines = head.split("\r\n");
         let status = lines.next().unwrap_or("");
-        // „HTTP/1.1 101 …" — alles andere ist eine Absage, und der Grund
-        // gehoert in die Meldung: eine 403 sagt etwas anderes als eine 404.
+        // "HTTP/1.1 101 …"; anything else is a refusal, and the status goes into
+        // the message.
         if !status.contains(" 101") {
             return Err(alloc::format!("WebSocket: the server answered {status:.64} instead of 101"));
         }
@@ -200,10 +193,9 @@ impl Socket {
         if !upgrade || !connection {
             return Err(String::from("WebSocket: the reply is not an upgrade"));
         }
-        // **Die Pruefung ist der ganze Sinn des Schluessels.** Sie sagt nicht,
-        // dass die Gegenstelle vertrauenswuerdig ist — das sagt TLS. Sie sagt,
-        // dass wirklich ein WebSocket-Server geantwortet hat und nicht ein
-        // Zwischenspeicher, der eine alte Antwort wiederholt (§1.3).
+        // This check is the point of the key. It does not prove the peer is
+        // trustworthy (TLS does that); it proves a WebSocket server answered and
+        // not a cache replaying an old response (§1.3).
         if accept != self.expected_accept() {
             return Err(String::from("WebSocket: Sec-WebSocket-Accept does not match the key"));
         }
@@ -211,7 +203,7 @@ impl Socket {
         Ok(true)
     }
 
-    /// Einen Rahmen abheben (§5.2). `Ok(None)` = noch nicht vollstaendig.
+    /// Take one frame (§5.2). `Ok(None)` = not complete yet.
     #[allow(clippy::type_complexity)]
     fn next_frame(&mut self) -> Result<Option<(bool, u8, Vec<u8>)>, String> {
         let b = &self.inbox;
@@ -220,9 +212,8 @@ impl Socket {
         if b[0] & 0x70 != 0 { return Err(String::from("WebSocket: reserved bits are set")) }
         let op = b[0] & 0x0F;
         let masked = b[1] & 0x80 != 0;
-        // **Ein Server maskiert NIE** (§5.1). Tut er es doch, ist die
-        // Verbindung nach der Spezifikation zu beenden — und nicht etwa
-        // freundlich zu entmaskieren.
+        // A server never masks (§5.1). If it does, the connection must be
+        // failed, not unmasked.
         if masked { return Err(String::from("WebSocket: the server masked a frame")) }
         let len7 = (b[1] & 0x7F) as usize;
         let (len, hdr) = match len7 {
@@ -251,7 +242,7 @@ impl Socket {
     fn handle_frame(&mut self, fin: bool, op: u8, payload: Vec<u8>,
                     rnd: &mut dyn FnMut() -> [u8; 4]) -> Option<Event> {
         match op {
-            // Fortsetzung
+            // Continuation
             0x0 => {
                 if self.frag.is_empty() && !self.frag_text {
                     return Some(Event::Error(String::from("WebSocket: a continuation without a start")));
@@ -268,7 +259,7 @@ impl Socket {
                 Some(if text { Event::Text(String::from_utf8_lossy(&done).into_owned()) }
                      else { Event::Binary(done) })
             }
-            // Text / binaer
+            // Text / binary
             0x1 | 0x2 => {
                 let text = op == 0x1;
                 if !fin { self.frag = payload; self.frag_text = text; return None }
@@ -283,7 +274,7 @@ impl Socket {
                 let reason = if payload.len() > 2 {
                     String::from_utf8_lossy(&payload[2..]).into_owned()
                 } else { String::new() };
-                // Die Antwort ist derselbe Rahmen zurueck — einmal.
+                // The reply is the same frame echoed back, once.
                 if !self.close_sent {
                     self.close_sent = true;
                     let echo = if payload.len() >= 2 { payload[..2].to_vec() } else { Vec::new() };
@@ -292,9 +283,9 @@ impl Socket {
                 self.state = State::Closed;
                 Some(Event::Closed(code, reason))
             }
-            // Ping -> Pong mit DERSELBEN Nutzlast (§5.5.2)
+            // Ping -> Pong with the same payload (§5.5.2)
             0x9 => { self.push_frame(0xA, &payload, rnd); None }
-            // Pong: nichts zu tun, aber kein Fehler.
+            // Pong: nothing to do, but not an error.
             0xA => None,
             other => {
                 self.state = State::Closed;
@@ -303,9 +294,9 @@ impl Socket {
         }
     }
 
-    /// **Jeder Rahmen des Clients wird maskiert** (§5.3) — mit vier Bytes aus
-    /// dem echten Zufall des Wirts. Das schuetzt nicht den Inhalt (TLS tut
-    /// das), sondern Zwischenstellen davor, den Strom als HTTP zu lesen.
+    /// Every client frame is masked (§5.3) with four bytes of real randomness
+    /// from the host. This protects intermediaries from reading the stream as
+    /// HTTP, not the content (TLS does that).
     fn push_frame(&mut self, op: u8, payload: &[u8], rnd: &mut dyn FnMut() -> [u8; 4]) {
         let mut f = Vec::with_capacity(payload.len() + 14);
         f.push(0x80 | op);
@@ -325,7 +316,7 @@ impl Socket {
         self.out.extend_from_slice(&f);
     }
 
-    /// `ws.send(text)` — `false`, wenn die Verbindung nicht offen ist.
+    /// `ws.send(text)`; `false` if the connection is not open.
     pub fn send_text(&mut self, s: &str, rnd: &mut dyn FnMut() -> [u8; 4]) -> bool {
         if self.state != State::Open { return false }
         self.push_frame(0x1, s.as_bytes(), rnd);
@@ -338,9 +329,9 @@ impl Socket {
         true
     }
 
-    /// `ws.close(code, reason)`. Der Close-Rahmen geht raus, die Verbindung
-    /// bleibt bis zur Antwort der Gegenseite in `Closing` — erst dann ist sie
-    /// sauber zu (§7.1.2).
+    /// `ws.close(code, reason)`. The Close frame goes out and the connection
+    /// stays `Closing` until the peer answers; only then is it cleanly closed
+    /// (§7.1.2).
     pub fn close(&mut self, code: u16, reason: &str, rnd: &mut dyn FnMut() -> [u8; 4]) {
         if self.close_sent || matches!(self.state, State::Closed) { return }
         self.close_sent = true;
@@ -351,15 +342,15 @@ impl Socket {
         self.state = State::Closing;
     }
 
-    /// Was auf die Leitung soll. Der Rufer nimmt es MIT — zweimal senden
-    /// waere ein zweiter Rahmen.
+    /// Bytes to put on the wire. The caller takes them; sending twice would
+    /// be a second frame.
     pub fn take_out(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.out)
     }
 
     pub fn has_out(&self) -> bool { !self.out.is_empty() }
 
-    /// Die Gegenstelle ist weg, ohne Close-Rahmen. `1006` ist genau dafuer da.
+    /// The peer is gone without a Close frame; `1006` exists for exactly this.
     pub fn hung_up(&mut self) -> Option<Event> {
         if self.state == State::Closed { return None }
         self.state = State::Closed;
@@ -367,28 +358,27 @@ impl Socket {
     }
 }
 
-// ── Die Auftraege an den Wirt ────────────────────────────────────────────
+// ── Requests to the host ─────────────────────────────────────────────────
 //
-// Dasselbe Muster wie `fetch`: die Engine legt hin, der Wirt fuehrt aus.
+// Same pattern as `fetch`: the engine queues, the host executes.
 
-/// Eine Verbindung, die der Wirt noch aufbauen soll.
+/// A connection the host still has to open.
 pub struct PendingSocket {
     pub id: u32,
     pub host: String,
     pub port: u16,
-    /// Der Aufrueststoss, fertig — der Wirt schickt ihn, sobald TLS steht.
+    /// The complete upgrade request; the host sends it once TLS is up.
     pub hello: Vec<u8>,
-    /// `false` bei `ws://`: dann ohne TLS. Heute lehnt der Wirt das ab, weil
-    /// es ihn nur fuer eine unverschluesselte Seite gaebe; die Zeile steht
-    /// hier, damit der Auftrag vollstaendig ist und nicht der Wirt raet.
+    /// `false` for `ws://`: no TLS. The host currently refuses it; the field
+    /// keeps the request complete so the host does not have to guess.
     pub secure: bool,
 }
 
 use super::interp::{Interp, C};
 use super::value::{Gc, Prop, Value, new_obj};
 
-/// Verborgene Felder am JS-Gegenstand, wie bei XHR (`\0!` — kein Name, den
-/// ein Skript schreiben kann).
+/// Hidden fields on the JS object, as for XHR (`\0!` is not a name script
+/// can write).
 const W_ID: &str = "\0!ws.id";
 const W_LISTEN: &str = "\0!ws.listen";
 
@@ -401,32 +391,24 @@ fn find_sock(i: &mut Interp, id: u32) -> Option<usize> {
     i.sockets.iter().position(|s| s.id == id)
 }
 
-/// Vier Bytes aus der Quelle des Wirts. **Ohne echten Zufall keine Maske** —
-/// und ohne Maske kein Rahmen: RFC 6455 §5.3 laesst dem Client keine Wahl,
-/// und eine vorhersagbare Maske waere schlechter als keine Verbindung.
+/// Four bytes from the host's random source. RFC 6455 §5.3 requires a
+/// mask, and a predictable one would be worse than no connection.
 fn mask_source() -> impl FnMut() -> [u8; 4] {
     || {
         let mut b = [0u8; 4];
         if !super::random::fill(&mut b) {
-            // Die Maske ist kein Geheimnis, sie ist ein Streuwert gegen
-            // Zwischenspeicher, die den Strom als HTTP lesen. Ohne Quelle
-            // bleibt sie null — und der Aufruf schlaegt eine Zeile hoeher
-            // ohnehin fehl, weil `WebSocket` dann gar nicht erscheint.
+            // The mask is not a secret but a scrambler against caches reading the
+            // stream as HTTP. Without a source it stays zero, but then `WebSocket`
+            // is not exposed at all.
             b = [0; 4];
         }
         b
     }
 }
 
-/// Ein Ereignis an den JS-Gegenstand zustellen — `onX` und `addEventListener`.
-/// Einen Behandler der Seite rufen — und einen Fehler daraus MELDEN.
-///
-/// **Stille war hier der eigentliche Fehler.** Die Antwort auf ein
-/// CDP-Kommando kam an, `onmessage` warf unterwegs, und die Seite sah nichts
-/// als einen Timeout ohne Grund — die Zustellung hatte funktioniert, die
-/// Auskunft darueber fehlte. Ein Browser schreibt so etwas in die Konsole,
-/// also steht es jetzt auch hier. Und die Zustellung laeuft weiter: jeder
-/// Behandler steht fuer sich, einer, der wirft, nimmt den naechsten nicht mit.
+/// Call a page handler (`onX` or a listener) and report an exception from
+/// it to the console, as browsers do. Delivery continues: each handler
+/// stands alone, one that throws does not stop the next.
 fn run_handler(i: &mut Interp, f: &Value, obj: &Value, ev: &Value, kind: &str) {
     if !i.is_callable(f) { return }
     if let Err(super::interp::Abrupt::Throw(v)) = i.call(f, obj.clone(), &[ev.clone()]) {
@@ -466,7 +448,7 @@ fn fire(i: &mut Interp, obj: &Value, kind: &str, fill: &dyn Fn(&mut Interp, &Gc)
     Ok(())
 }
 
-/// Der Wirt reicht an, was auf der Leitung ankam. `None` heisst „abgerissen".
+/// The host hands over what arrived on the wire. `None` means disconnected.
 pub fn host_bytes(i: &mut Interp, id: u32, bytes: Option<&[u8]>) {
     let Some(idx) = find_sock(i, id) else { return };
     let mut rnd = mask_source();
@@ -489,9 +471,8 @@ pub fn host_bytes(i: &mut Interp, id: u32, bytes: Option<&[u8]>) {
                 });
             }
             Event::Binary(d) => {
-                // **Ohne `ArrayBuffer` waere es eine halbe Schnittstelle.**
-                // Seitencode prueft `typeof e.data`, und eine Zeichenkette
-                // dort ist eine falsche Antwort, keine fehlende.
+                // Binary messages arrive as `ArrayBuffer`; page code checks
+                // `typeof e.data`, and a string there would be a wrong answer.
                 let len = d.len();
                 let buf = i.new_buffer(d.len());
                 if let Value::Obj(o) = &buf {
@@ -509,8 +490,7 @@ pub fn host_bytes(i: &mut Interp, id: u32, bytes: Option<&[u8]>) {
                 let _ = fire(i, &obj, "close", &move |_, e| {
                     e.borrow_mut().define("code", Prop::builtin(Value::Num(code as f64)));
                     e.borrow_mut().define("reason", Prop::builtin(Value::str(&reason)));
-                    // `wasClean` ist falsch bei 1006 — genau dafuer ist der
-                    // Code da.
+                    // `wasClean` is false for 1006; that is what the code is for.
                     e.borrow_mut().define("wasClean", Prop::builtin(Value::Bool(code != 1006)));
                 });
             }
@@ -520,8 +500,8 @@ pub fn host_bytes(i: &mut Interp, id: u32, bytes: Option<&[u8]>) {
             }
         }
     }
-    // Fertig heisst weg — sonst haelt die Tabelle jede je geoeffnete
-    // Verbindung bis zur Navigation fest.
+    // Closed means removed; otherwise the table keeps every connection
+    // ever opened until navigation.
     if let Some(idx) = find_sock(i, id) {
         if i.sockets[idx].state == State::Closed {
             i.sockets.remove(idx);
@@ -530,20 +510,19 @@ pub fn host_bytes(i: &mut Interp, id: u32, bytes: Option<&[u8]>) {
     }
 }
 
-/// Was fuer diese Verbindung auf die Leitung soll.
+/// What has to go on the wire for this connection.
 pub fn take_out_for(i: &mut Interp, id: u32) -> Option<Vec<u8>> {
     let idx = find_sock(i, id)?;
     if !i.sockets[idx].has_out() { return None }
     Some(i.sockets[idx].take_out())
 }
 
-/// `WebSocket` im globalen Objekt.
+/// `WebSocket` on the global object.
 ///
-/// **Es erscheint nur, wenn es echten Zufall gibt** — dieselbe Regel wie bei
-/// `crypto`. Ohne ihn gibt es keine Maske, und RFC 6455 §5.3 laesst dem
-/// Client keine Wahl: eine vorhersagbare Maske waere schlechter als eine
-/// fehlende Schnittstelle, denn eine Seite prueft `if (window.WebSocket)` und
-/// richtet sich danach.
+/// Exposed only when real randomness exists, the same rule as `crypto`:
+/// without it there is no mask (RFC 6455 §5.3), and since pages test
+/// `if (window.WebSocket)`, a missing interface is better than a
+/// predictable mask.
 pub fn install(i: &mut Interp) {
     if !super::random::available() { return }
     let fp = i.realm.function_proto.clone();
@@ -560,9 +539,8 @@ pub fn install(i: &mut Interp) {
         };
         let arg = a.first().cloned().unwrap_or(Value::Undefined);
         let mut rnd = mask_source();
-        // Ein `ArrayBuffer` oder eine Sicht darauf geht als BINAERER Rahmen
-        // raus, alles andere als Text — so steht es im Vertrag, und
-        // Seitencode verlaesst sich darauf.
+        // An `ArrayBuffer` or a view on one goes out as a binary frame,
+        // everything else as text.
         let bytes = bytes_of(i, &arg);
         let ok = match bytes {
             Some(b) => i.sockets[idx].send_binary(&b, &mut rnd),
@@ -603,7 +581,7 @@ pub fn install(i: &mut Interp) {
     }, 2);
     meth(&proto, "removeEventListener", |_, _, _| Ok(Value::Undefined), 2);
 
-    // Die vier Konstanten des Vertrags, am Prototyp UND am Konstruktor.
+    // The four constants, on the prototype and on the constructor.
     for (n, v) in [("CONNECTING", 0.0), ("OPEN", 1.0), ("CLOSING", 2.0), ("CLOSED", 3.0)] {
         proto.borrow_mut().define(n, Prop::frozen(Value::Num(v)));
     }
@@ -623,24 +601,17 @@ pub fn install(i: &mut Interp) {
         i.next_socket_id += 1;
         let sock = match Socket::new(id, &url, &origin, secure, nonce) {
             Ok(s) => s,
-            // `SyntaxError` ist hier die richtige Art der SPRACHE — die
-            // Spezifikation nennt fuer eine kaputte Adresse genau sie.
+            // The spec names `SyntaxError` for an invalid URL.
             Err(e) => return Err(i.throw_kind("SyntaxError", &e)),
         };
-        // **S3: gleiche Herkunft, und der Grund steht im Kopf dieser Datei.**
-        // Ein WebSocket hat keine Antwortpruefung, die ihn schuetzt — wer
-        // eine fremde Herkunft durchlaesst, verlaesst sich darauf, dass der
-        // Server Nein sagt. Der `Origin` faehrt trotzdem mit, damit ein
-        // Server, der spaeter zustimmen darf, es auch kann.
-        // Verglichen wird der WIRT, nicht das Schema: `wss://` gehoert zu
-        // `https://` wie `ws://` zu `http://`, und die Schemata stehen
-        // deshalb nie beide gleich da.
+        // Same origin only (see the module header); `Origin` is sent anyway.
+        // The host is compared, not the scheme: `wss://` pairs with `https://`
+        // as `ws://` with `http://`.
         let same = page.as_ref().is_some_and(|p| p.host.eq_ignore_ascii_case(&sock.host));
         if !same {
-            // **Der NAME zaehlt.** Seitencode prueft `e.name === 'SecurityError'`
-            // (so steht es in der Spezifikation), nicht den Text. `throw_kind`
-            // kennt nur die Fehlerarten der Sprache, also wird der Name hier
-            // gesetzt — dieselbe Stelle wie bei `crypto.getRandomValues`.
+            // Page code checks `e.name === 'SecurityError'`, not the message.
+            // `throw_kind` only knows the language error types, so the name is set
+            // here, as in `crypto.getRandomValues`.
             let e = i.throw_kind("Error", &alloc::format!(
                 "WebSocket: {} is a different origin — only the page's own origin is allowed",
                 sock.host));
@@ -711,7 +682,7 @@ mod tests {
         assert_eq!((s.host.as_str(), s.port), ("a.test", 8443));
         let s = sock("wss://a.test");
         assert_eq!(s.path, "/", "ohne Pfad ist es die Wurzel");
-        // **Ein `ws://` aus einer sicheren Seite ist gemischter Inhalt.**
+        // `ws://` from a secure page is mixed content.
         assert!(Socket::new(1, "ws://a.test/", "https://e.test", true, [0; 16]).is_err());
         assert!(Socket::new(1, "ws://a.test/", "http://e.test", false, [0; 16]).is_ok());
         assert!(Socket::new(1, "https://a.test/", "https://e.test", true, [0; 16]).is_err());
@@ -724,11 +695,11 @@ mod tests {
         assert!(req.starts_with("GET /ws HTTP/1.1\r\n"));
         assert!(req.contains("\r\nUpgrade: websocket\r\n"));
         assert!(req.contains("\r\nSec-WebSocket-Version: 13\r\n"));
-        // **Der `Origin` faehrt mit** — S3: ein Server, der eine fremde
-        // Herkunft annehmen darf, kann es nur, wenn er sie sieht.
+        // `Origin` is sent: a server allowed to accept a foreign origin can
+        // only do so if it sees it.
         assert!(req.contains("\r\nOrigin: https://example.test\r\n"));
         assert!(req.contains("\r\nHost: a.test\r\n"), "ohne Port bei 443");
-        // Eine Antwort mit FALSCHEM Accept wird abgelehnt.
+        // A response with the wrong Accept is rejected.
         let bad = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
                    Connection: Upgrade\r\nSec-WebSocket-Accept: falsch\r\n\r\n";
         let ev = s.feed(bad.as_bytes(), &mut feste_maske());
@@ -743,7 +714,7 @@ mod tests {
         assert!(req.contains("\r\nHost: a.test:8443\r\n"), "{req}");
     }
 
-    /// Einen Motor mit `WebSocket` und einer Seite als Herkunft.
+    /// An engine with `WebSocket` and a page as origin.
     fn motor(js: &str) -> Interp {
         fn zufall(out: &mut [u8]) -> bool { out.fill(7); true }
         crate::js::random::set_source(zufall);
@@ -754,8 +725,8 @@ mod tests {
         i
     }
 
-    /// Den Handschlag beantworten und einen Textrahmen nachschieben — so,
-    /// wie der echte Server es tut.
+    /// Answer the handshake and follow with a text frame, as a real server
+    /// does.
     fn server_spricht(i: &mut Interp, text: &str) {
         let id = i.sockets[0].id;
         let accept = i.sockets[0].expected_accept();
@@ -777,12 +748,8 @@ mod tests {
         }
     }
 
-    /// **Die halbe Strecke war ungeprueft.** Alles darueber misst die
-    /// LEITUNG — Rahmen hinein, Rahmen hinaus. Was eine SEITE davon sieht,
-    /// stand in keinem Test: dass `onopen` faellt, dass `e.data` eine
-    /// Zeichenkette ist und `JSON.parse` sie frisst. Genau diese Strecke
-    /// liegt zwischen „der Server hat geantwortet" und „die Seite hat es
-    /// gemerkt", und genau dort lief ein CDP-Kommando in einen Timeout.
+    /// What the page sees: `onopen` fires, `e.data` is a string and
+    /// `JSON.parse` accepts it.
     #[test]
     fn die_seite_bekommt_die_nachricht_als_zeichenkette() {
         let mut i = motor(
@@ -799,10 +766,7 @@ mod tests {
         assert_eq!(global(&mut i, "zustand"), "1", "waehrend der Nachricht ist der Stand OFFEN");
     }
 
-    /// **Ein Behandler, der wirft, darf nicht still sein.** Vorher verschluckte
-    /// `fire` den Wurf: die Zustellung hatte funktioniert, die Seite sah nur
-    /// einen Timeout ohne Grund. Und der zweite Behandler muss trotzdem laufen
-    /// — im Browser steht jeder fuer sich.
+    /// A throwing handler is reported, and the second handler still runs.
     #[test]
     fn ein_werfender_behandler_wird_gemeldet_und_haelt_den_naechsten_nicht_auf() {
         let mut i = motor(
@@ -821,7 +785,7 @@ mod tests {
     fn rahmen_kommen_auch_in_stuecken_an() {
         let mut s = sock("wss://a.test/ws");
         offen(&mut s);
-        // Ein unmaskierter Textrahmen „hi", in DREI Haeppchen.
+        // An unmasked text frame "hi", in three pieces.
         let frame = [0x81u8, 0x02, b'h', b'i'];
         assert!(s.feed(&frame[..1], &mut feste_maske()).is_empty());
         assert!(s.feed(&frame[1..3], &mut feste_maske()).is_empty());
@@ -833,9 +797,9 @@ mod tests {
     fn fortsetzungsrahmen_werden_zusammengesetzt() {
         let mut s = sock("wss://a.test/ws");
         offen(&mut s);
-        let mut b = vec![0x01u8, 0x02, b'a', b'b'];   // Text, FIN aus
-        b.extend_from_slice(&[0x00, 0x01, b'c']);      // Fortsetzung
-        b.extend_from_slice(&[0x80, 0x01, b'd']);      // Fortsetzung, FIN an
+        let mut b = vec![0x01u8, 0x02, b'a', b'b'];   // text, FIN clear
+        b.extend_from_slice(&[0x00, 0x01, b'c']);      // continuation
+        b.extend_from_slice(&[0x80, 0x01, b'd']);      // continuation, FIN set
         assert_eq!(s.feed(&b, &mut feste_maske()), vec![Event::Text(String::from("abcd"))]);
     }
 
@@ -864,14 +828,14 @@ mod tests {
         assert_eq!(&out[..2], &[0x81, 0x82], "Text, FIN, maskiert, Laenge 2");
         assert_eq!(&out[2..6], &[0x11, 0x22, 0x33, 0x44]);
         assert_eq!(&out[6..], &[b'h' ^ 0x11, b'i' ^ 0x22]);
-        // 126 Bytes -> die 16-Bit-Form.
+        // 126 bytes -> the 16-bit form.
         let mittel = alloc::vec![b'x'; 200];
         s.send_binary(&mittel, &mut r);
         let out = s.take_out();
         assert_eq!(out[0], 0x82);
         assert_eq!(out[1], 0x80 | 126);
         assert_eq!(u16::from_be_bytes([out[2], out[3]]), 200);
-        // Und ueber 65535 die 64-Bit-Form.
+        // Above 65535 the 64-bit form.
         let gross = alloc::vec![b'y'; 70_000];
         s.send_binary(&gross, &mut r);
         let out = s.take_out();
@@ -883,7 +847,7 @@ mod tests {
     fn ein_maskierter_server_rahmen_beendet_die_verbindung() {
         let mut s = sock("wss://a.test/ws");
         offen(&mut s);
-        // §5.1: ein Server maskiert NIE.
+        // §5.1: a server never masks.
         let ev = s.feed(&[0x81, 0x82, 1, 2, 3, 4, b'h', b'i'], &mut feste_maske());
         assert!(matches!(ev.first(), Some(Event::Error(_))), "{ev:?}");
         assert_eq!(s.state, State::Closed);
@@ -896,7 +860,7 @@ mod tests {
         let ev = s.feed(&[0x88, 0x02, 0x03, 0xE8], &mut feste_maske());  // 1000
         assert_eq!(ev, vec![Event::Closed(1000, String::new())]);
         assert!(!s.take_out().is_empty(), "der Close wird zurueckgeschickt");
-        // Ein Abriss OHNE Close-Rahmen ist 1006 — und den sendet nie jemand.
+        // A drop without a Close frame is 1006, which nobody ever sends.
         let mut s2 = sock("wss://a.test/ws");
         offen(&mut s2);
         assert_eq!(s2.hung_up(), Some(Event::Closed(1006, String::new())));
@@ -904,13 +868,13 @@ mod tests {
     }
 }
 
-/// Eine versteckte Eigenschaft — dasselbe Muster wie in `fetch.rs`.
+/// A hidden property, same pattern as in `fetch.rs`.
 fn hidden(v: Value) -> Prop {
     Prop { value: Some(v), get: None, set: None,
            writable: true, enumerable: false, configurable: false }
 }
 
-/// Die Bytes hinter einem `ArrayBuffer` oder einer Sicht darauf, sonst `None`.
+/// The bytes behind an `ArrayBuffer` or a view on one, else `None`.
 fn bytes_of(i: &mut Interp, v: &Value) -> Option<Vec<u8>> {
     let Value::Obj(o) = v else { return None };
     if let super::value::ObjKind::Buffer(b) = &o.borrow().kind {
