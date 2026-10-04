@@ -1,14 +1,13 @@
-//! Die Iterator-Hilfen (ES 2025) — `Iterator`, `Iterator.from` und die zwoelf
-//! Methoden auf `%IteratorPrototype%`.
+//! Iterator helpers (ES2025): `Iterator`, `Iterator.from` and the methods
+//! on `%IteratorPrototype%`.
 //!
-//! **Faul, wo die Spezifikation faul ist.** `map`, `filter`, `take`, `drop`
-//! und `flatMap` geben ein Hilfsobjekt zurueck, das erst beim `next()`
-//! rechnet — eine eifrige Fassung wuerde an einer unendlichen Quelle haengen,
-//! und genau dafuer gibt es `take`.
+//! Lazy where the spec is lazy: `map`, `filter`, `take`, `drop` and
+//! `flatMap` return a helper object that computes on `next()`; an eager
+//! version would hang on an infinite source.
 //!
-//! Eine native Funktion nimmt keinen Abschluss, also liegt der Zustand am
-//! Objekt: NUL-praefigierte Schluessel, unsichtbar fuer jedes Skript — genau
-//! wie bei den Feld-Iteratoren (`IT_TARGET` & Co.).
+//! A native function cannot capture, so the state lives on the object under
+//! NUL-prefixed keys invisible to script, as with the array iterators
+//! (`IT_TARGET` and friends).
 
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -18,19 +17,19 @@ use alloc::vec;
 use super::interp::*;
 use super::value::*;
 
-/// Die Quelle des Hilfsobjekts (der darunterliegende Iterator).
+/// The helper's source (the underlying iterator).
 const H_SRC: &str = "\0!hsrc";
-/// Der Rueckruf (`map`/`filter`/`flatMap`) bzw. die Zahl (`take`/`drop`).
+/// The callback (`map`/`filter`/`flatMap`) or the count (`take`/`drop`).
 const H_FN: &str = "\0!hfn";
-/// Wieviele noch (`take`/`drop`).
+/// How many remain (`take`/`drop`).
 const H_N: &str = "\0!hn";
-/// Der laufende Zaehler, den der Rueckruf als zweites Argument bekommt.
+/// Running counter passed to the callback as its second argument.
 const H_I: &str = "\0!hi";
-/// Welche Hilfe: 0 map, 1 filter, 2 take, 3 drop, 4 flatMap.
+/// Which helper: 0 map, 1 filter, 2 take, 3 drop, 4 flatMap.
 const H_KIND: &str = "\0!hkind";
-/// Beim `flatMap`: der gerade offene innere Iterator.
+/// For `flatMap`: the currently open inner iterator.
 const H_INNER: &str = "\0!hinner";
-/// Ist das Hilfsobjekt schon fertig? Danach gibt `next` nur noch `done`.
+/// Is the helper done? After that `next` only returns `done`.
 const H_DONE: &str = "\0!hdone";
 
 fn hidden(v: Value) -> Prop {
@@ -73,8 +72,8 @@ fn put(t: &Value, k: &str, v: Value) {
     if let Value::Obj(o) = t { o.borrow_mut().define(k, hidden(v)); }
 }
 
-/// Ein Schritt des Hilfsobjekts. Die fünf Formen unterscheiden sich nur
-/// darin, was sie mit dem Wert von unten machen.
+/// One step of the helper. The five forms differ only in what they do with
+/// the value from below.
 fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
     if slot(i, &t, H_DONE)?.truthy() { return Ok(iter_result(i, Value::Undefined, true)); }
     let src = slot(i, &t, H_SRC)?;
@@ -83,7 +82,7 @@ fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
     let f = slot(i, &t, H_FN)?;
     loop {
         i.tick()?;
-        // `flatMap` liest erst den offenen inneren Iterator leer.
+        // `flatMap` first drains the open inner iterator.
         if kind == 4 {
             let inner = slot(i, &t, H_INNER).unwrap_or(Value::Undefined);
             if !matches!(inner, Value::Undefined) {
@@ -95,7 +94,7 @@ fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
             }
         }
         if kind == 3 {
-            // `drop`: die ersten n wegwerfen, EINMAL.
+        // `drop`: discard the first n, once.
             let nv = slot(i, &t, H_N)?;
             let n = i.to_number(&nv)?;
             if n > 0.0 {
@@ -142,8 +141,8 @@ fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
             2 | 3 => return Ok(iter_result(i, v, false)),
             _ => {
                 let r = call_or_close(i, &t, &f, &[v, Value::Num(idx)], &src)?;
-                // Eine Zeichenkette ist hier ausdruecklich NICHT iterierbar:
-                // `flatMap` soll nicht in ihre Zeichen zerfallen.
+                // A string is explicitly not iterable here, so `flatMap`
+                // does not split it into characters.
                 if matches!(r, Value::Str(_)) {
                     put(&t, H_DONE, Value::Bool(true));
                     i.iter_close(&src);
@@ -159,8 +158,8 @@ fn helper_next(i: &mut Interp, t: Value, _a: &[Value]) -> C<Value> {
     }
 }
 
-/// Wirft der Rueckruf, wird die Quelle geschlossen — sonst bliebe ein
-/// `finally` im fremden Generator liegen.
+/// If the callback throws, the source is closed; otherwise a `finally` in
+/// the source generator would never run.
 fn call_or_close(i: &mut Interp, t: &Value, f: &Value, args: &[Value], src: &Value) -> C<Value> {
     match i.call(f, Value::Undefined, args) {
         Ok(v) => Ok(v),
@@ -168,8 +167,8 @@ fn call_or_close(i: &mut Interp, t: &Value, f: &Value, args: &[Value], src: &Val
     }
 }
 
-/// `GetIteratorDirect` — die Hilfen nehmen den Empfaenger, wie er ist, und
-/// fragen NICHT nach `Symbol.iterator`.
+/// `GetIteratorDirect`: the helpers take the receiver as is and do not ask
+/// for `Symbol.iterator`.
 fn this_iter(i: &mut Interp, t: &Value) -> C<Value> {
     if !matches!(t, Value::Obj(_)) { return i.type_err("Iterator method on a non-object"); }
     Ok(t.clone())
@@ -181,8 +180,8 @@ fn need_fn(i: &mut Interp, a: &[Value]) -> C<Value> {
     Ok(f)
 }
 
-/// `ToIntegerOrInfinity` mit der Ablehnung, die die Hilfen verlangen: NaN
-/// und negative Zahlen sind ein RangeError, nicht stillschweigend 0.
+/// `ToIntegerOrInfinity` with the rejection the helpers require: NaN and
+/// negative numbers are a RangeError, not silently 0.
 fn need_count(i: &mut Interp, a: &[Value]) -> C<f64> {
     let v = a.first().cloned().unwrap_or(Value::Undefined);
     let n = i.to_number(&v)?;
@@ -201,13 +200,13 @@ pub fn install(realm: &mut Realm) {
         o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
     };
 
-    // %IteratorHelperPrototype% — erbt von %IteratorPrototype%, damit ein
-    // Hilfsobjekt selbst wieder `map`/`filter`/… kann.
+    // %IteratorHelperPrototype% inherits from %IteratorPrototype% so a
+    // helper can itself `map`/`filter`/...
     let hproto = new_obj(Some(iproto.clone()));
     realm.iter_helper_proto = hproto.clone();
     def(&hproto, "next", |i, t, a| helper_next(i, t, a), 0);
     def(&hproto, "return", |i, t, _| {
-        // Aufgeben heisst: die Quelle schliessen und fertig melden.
+        // Returning means: close the source and report done.
         let src = slot(i, &t, H_SRC)?;
         put(&t, H_DONE, Value::Bool(true));
         i.iter_close(&src);
@@ -217,7 +216,7 @@ pub fn install(realm: &mut Realm) {
         value: Some(Value::str("Iterator Helper")), get: None, set: None,
         writable: false, enumerable: false, configurable: true });
 
-    // ── Die fuenf faulen Hilfen ──────────────────────────────────────────
+    // ── The five lazy helpers ────────────────────────────────────────────
     def(&iproto, "map", |i, t, a| {
         let s = this_iter(i, &t)?; let f = need_fn(i, a)?;
         Ok(make_helper(i, s, 0, f, 0.0))
@@ -239,7 +238,7 @@ pub fn install(realm: &mut Realm) {
         Ok(make_helper(i, s, 4, f, 0.0))
     }, 1);
 
-    // ── Die sieben, die bis zum Ende laufen ──────────────────────────────
+    // ── The seven that run to the end ────────────────────────────────────
     def(&iproto, "toArray", |i, t, _| {
         let s = this_iter(i, &t)?;
         let mut out = Vec::new();
@@ -278,8 +277,8 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(acc)
     }, 1);
-    // `some`, `every` und `find` unterscheiden sich nur im Abbruch — aber
-    // jede braucht ihren eigenen Zeiger, also ein Makro.
+    // `some`, `every` and `find` differ only in when they stop, but each
+    // needs its own fn pointer, hence a macro.
     macro_rules! short {
         ($($n:literal => $mode:literal),* $(,)?) => { $(
             def(&iproto, $n, |i, t, a| {
@@ -305,10 +304,10 @@ pub fn install(realm: &mut Realm) {
     }
     short! { "some" => 0u8, "every" => 1u8, "find" => 2u8 }
 
-    // ── Der Konstruktor ──────────────────────────────────────────────────
+    // ── The constructor ──────────────────────────────────────────────────
     //
-    // Abstrakt: `new Iterator()` wirft, `Iterator()` auch. Er ist nur da,
-    // damit `Iterator.prototype` und `Iterator.from` eine Heimat haben.
+    // Abstract: `new Iterator()` throws, as does `Iterator()`. It exists to
+    // give `Iterator.prototype` and `Iterator.from` a home.
     let ctor = native(Some(fp.clone()), |i, _, _| {
         i.type_err("Iterator is an abstract class")
     }, "Iterator", 0, true);
@@ -320,8 +319,8 @@ pub fn install(realm: &mut Realm) {
         value: Some(Value::str("Iterator")), get: None, set: None,
         writable: true, enumerable: false, configurable: true });
 
-    // %WrapForValidIteratorPrototype% — was `Iterator.from` um einen fremden
-    // Iterator legt, damit die Hilfen darauf laufen.
+    // %WrapForValidIteratorPrototype%: what `Iterator.from` wraps around a
+    // foreign iterator so the helpers run on it.
     let wproto = new_obj(Some(iproto.clone()));
     realm.iter_wrap_proto = wproto.clone();
     def(&wproto, "next", |i, t, _| {
@@ -338,8 +337,8 @@ pub fn install(realm: &mut Realm) {
 
     def(&ctor, "from", |i, _, a| {
         let v = a.first().cloned().unwrap_or(Value::Undefined);
-        // Eine Zeichenkette wird ueber ihren `Symbol.iterator` genommen,
-        // alles andere direkt, wenn es schon ein Iterator ist.
+        // A string is taken through its `Symbol.iterator`, anything else
+        // directly if it already is an iterator.
         let it = if matches!(v, Value::Str(_)) { i.get_iterator(&v)? }
                  else {
                      let m = if matches!(v, Value::Undefined | Value::Null) { Value::Undefined }
@@ -348,7 +347,7 @@ pub fn install(realm: &mut Realm) {
                      else if matches!(v, Value::Obj(_)) { v.clone() }
                      else { return i.type_err("Iterator.from: not an iterator") }
                  };
-        // Haengt es schon an `%IteratorPrototype%`, braucht es keinen Mantel.
+        // Already inheriting from `%IteratorPrototype%`: no wrapper needed.
         if let Value::Obj(o) = &it {
             let mut cur = o.borrow().proto.clone();
             let mut hops = 0;
@@ -364,8 +363,8 @@ pub fn install(realm: &mut Realm) {
         g.borrow_mut().define(H_SRC, hidden(it));
         Ok(Value::Obj(g))
     }, 1);
-    // `Iterator.concat` reiht mehrere hintereinander. Eifrig eingesammelt —
-    // benannt statt verschwiegen: an einer unendlichen Quelle haengt sie.
+    // `Iterator.concat` chains several iterators. Not implemented lazily:
+    // the sources are collected eagerly, so an infinite one hangs.
     def(&ctor, "concat", |i, _, a| {
         let mut out = Vec::new();
         for v in a {

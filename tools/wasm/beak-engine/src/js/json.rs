@@ -1,15 +1,8 @@
-//! `JSON.parse` und `JSON.stringify`.
+//! `JSON.parse` and `JSON.stringify`.
 //!
-//! Kein Zusatz, sondern Grundausstattung: der Selbsttest fiel darueber, und
-//! auf echten Seiten steht die Konfiguration einer Komponente fast immer als
-//! JSON in einem `<script type="application/json">` oder in einem
-//! `data-`-Attribut. Ohne `JSON` bricht der Startpfad solcher Seiten in der
-//! ersten Zeile ab.
-//!
-//! Eigener Erzeuger und eigener Leser statt „irgendwie ueber die Sprache":
-//! JSON ist NICHT die JS-Literalsyntax (keine einfachen Anfuehrungszeichen,
-//! kein Komma am Ende, keine Bezeichner als Schluessel), und der Leser haette
-//! sonst mehr angenommen als er darf.
+//! Own writer and reader rather than going through the JS parser: JSON is
+//! not the JS literal syntax (no single quotes, no trailing comma, no
+//! identifier keys), and reusing it would accept more than JSON allows.
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -19,9 +12,9 @@ use alloc::vec::Vec;
 use super::interp::*;
 use super::value::*;
 
-/// Wie tief `stringify` und `parse` gehen duerfen. Beide laufen rekursiv auf
-/// dem WIRTS-Stapel, und ein zu tiefes Dokument ist im Kernel kein Fehler,
-/// sondern ein Absturz — dieselbe Ueberlegung wie bei `MAX_DEPTH`.
+/// How deep `stringify` and `parse` may go. Both recurse on the host stack,
+/// and a stack overflow in the kernel is a crash rather than an error; same
+/// reasoning as `MAX_DEPTH`.
 const MAX_JSON_DEPTH: usize = 200;
 
 pub fn install(realm: &mut Realm) {
@@ -39,11 +32,9 @@ pub fn install(realm: &mut Realm) {
 
 fn stringify(i: &mut Interp, _t: Value, args: &[Value]) -> C<Value> {
     let v = args.first().cloned().unwrap_or(Value::Undefined);
-    // Der dritte Parameter ist der Einzug. Eine Zahl heisst „so viele
-    // Leerzeichen", ein Text heisst „dieser Text" — beide gedeckelt auf 10,
-    // wie die Spezifikation es vorschreibt.
-    // Ein Number- oder String-OBJEKT zaehlt wie sein Wert (ES §25.5.2.1, 5).
-    // Seit `new Number(5)` wirklich ein Objekt ist, kommt der Fall auch vor.
+    // The third parameter is the indent: a number means that many spaces,
+    // a string means that string; both capped at 10 as the spec requires.
+    // A Number or String object counts as its value (ES 25.5.2.1 step 5).
     let space = match args.get(2) {
         Some(Value::Obj(o)) => match &o.borrow().kind {
             ObjKind::NumWrap(n) => Some(Value::Num(*n)),
@@ -61,23 +52,23 @@ fn stringify(i: &mut Interp, _t: Value, args: &[Value]) -> C<Value> {
     let mut out = String::new();
     match write_value(i, &v, &indent, "", &mut seen, &mut out, 0)? {
         true => Ok(Value::Str(Rc::from(out.as_str()))),
-        // `undefined`, eine Funktion — die haben keine Entsprechung, und die
-        // Antwort ist `undefined`, nicht der Text "undefined".
+        // `undefined` or a function has no JSON form; the result is
+        // `undefined`, not the string "undefined".
         false => Ok(Value::Undefined),
     }
 }
 
-/// Schreibt `v` nach `out`. `false` heisst „hat keine Entsprechung" — der
-/// Aufrufer entscheidet dann, ob das ein `null` (im Array) oder ein
-/// weggelassenes Feld (im Objekt) wird.
+/// Writes `v` to `out`. `false` means "no JSON form"; the caller decides
+/// whether that becomes `null` (in an array) or an omitted field (in an
+/// object).
 fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Vec<Gc>,
                 out: &mut String, depth: usize) -> C<bool> {
     i.tick()?;
     if depth > MAX_JSON_DEPTH {
         return Err(i.throw_kind("TypeError", "JSON.stringify: structure too deep"));
     }
-    // `toJSON` gewinnt ueber alles andere — daran haengt, dass ein Datum als
-    // Zeichenkette herauskommt statt als leeres Objekt.
+    // `toJSON` wins over everything else; it is what makes a Date come out
+    // as a string rather than an empty object.
     let v = match v {
         Value::Obj(o) => {
             let f = i.get(&Value::Obj(o.clone()), "toJSON")?;
@@ -85,9 +76,9 @@ fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Ve
         }
         _ => v.clone(),
     };
-    // Die HUELLE eines Primitivs zaehlt wie das Primitiv: `JSON.stringify(
-    // Object(0n))` muss werfen, `Object(1)` wird zu `1`. Ohne diesen Schritt
-    // faellt eine Huelle in den Objektzweig und wird `{}`.
+    // A primitive wrapper counts as its primitive: `JSON.stringify(Object(0n))`
+    // must throw and `Object(1)` becomes `1`, instead of falling into the
+    // object branch as `{}`.
     let v = match &v {
         Value::Obj(o) => match &o.borrow().kind {
             ObjKind::BigWrap(b) => Value::BigInt(b.clone()),
@@ -99,22 +90,22 @@ fn write_value(i: &mut Interp, v: &Value, indent: &str, cur: &str, seen: &mut Ve
         Value::Null => { out.push_str("null"); Ok(true) }
         Value::Bool(b) => { out.push_str(if *b { "true" } else { "false" }); Ok(true) }
         Value::Num(n) => {
-            // NaN und Unendlich sind kein JSON. `null` ist die vorgeschriebene
-            // Ersatzform, nicht ein Fehler.
+            // NaN and infinities are not JSON; `null` is the prescribed
+            // replacement, not an error.
             if n.is_finite() { out.push_str(&num_to_string(*n)); } else { out.push_str("null"); }
             Ok(true)
         }
         Value::Str(s) => { write_string(s, out); Ok(true) }
-        // JSON kennt keine grossen Zahlen, und stillschweigend zu kuerzen
-        // waere Datenverlust — die Spezifikation schreibt hier einen Fehler vor.
+        // JSON has no big integers and truncating would lose data; the
+        // spec prescribes a TypeError here.
         Value::BigInt(_) => Err(i.throw_kind("TypeError", "Do not know how to serialize a BigInt")),
-        // Wie `undefined`: faellt aus dem Objekt heraus, ist im Array `null`.
-        // Ein Fehler waere falsch — JSON kennt Symbole schlicht nicht.
+        // Like `undefined`: omitted from objects, `null` in arrays. JSON has
+        // no symbols, so throwing would be wrong.
         Value::Undefined | Value::Sym(_) => Ok(false),
         Value::Obj(o) => {
             if i.is_callable(&v) { return Ok(false); }
-            // Ein Zyklus ist der eine Fall, in dem `stringify` werfen MUSS.
-            // Ohne die Pruefung laeuft er, bis der Stapel reisst.
+            // A cycle is the one case where `stringify` must throw; without
+            // the check it runs until the stack overflows.
             if seen.iter().any(|s| Rc::ptr_eq(s, o)) {
                 return Err(i.throw_kind("TypeError", "Converting circular structure to JSON"));
             }
@@ -146,16 +137,16 @@ fn write_obj(i: &mut Interp, o: &Gc, indent: &str, cur: &str, seen: &mut Vec<Gc>
             if n > 0 { out.push(','); }
             out.push_str(&nl);
             let e = i.get(&Value::Obj(o.clone()), &idx.to_string())?;
-            // Im Array wird eine Luecke zu `null` — weglassen wuerde die
-            // Laenge aendern, und die traegt hier Bedeutung.
+            // In an array a hole becomes `null`; omitting it would change
+            // the length, which is significant here.
             if !write_value(i, &e, indent, &inner, seen, out, depth + 1)? {
                 out.push_str("null");
             }
             n += 1;
         }
     } else {
-        // Schluessel und Aufzaehlbarkeit durch einen Stellvertreter hindurch —
-        // `JSON.stringify(new Proxy({a:1},{}))` war sonst `{}`.
+        // Keys and enumerability go through a proxy's traps, so
+        // `JSON.stringify(new Proxy({a:1},{}))` is not `{}`.
         let keys = i.own_keys_of(o)?;
         for k in keys {
             i.tick()?;
@@ -199,11 +190,10 @@ fn write_string(s: &str, out: &mut String) {
 
 struct P<'a> { b: &'a [u8], p: usize }
 
-/// `JSON.parse` fuer einen Wert, den der Rufer schon HAT.
+/// `JSON.parse` for a value the caller already has.
 ///
-/// `Response.json()` geht hierueber. Ein eigener Leser dort waere eine
-/// zweite Semantik — und die faellt zuerst bei etwas Kleinem auseinander,
-/// etwa was ein nacktes `NaN` im Text bedeutet.
+/// `Response.json()` uses this; a separate reader there would be a second
+/// semantics that drifts on details such as a bare `NaN` in the text.
 pub(crate) fn parse_value(i: &mut Interp, v: &Value) -> C<Value> {
     parse(i, Value::Undefined, core::slice::from_ref(v))
 }
@@ -221,9 +211,8 @@ fn parse(i: &mut Interp, _t: Value, args: &[Value]) -> C<Value> {
         return Err(i.throw_kind("SyntaxError",
             &format!("Unexpected token in JSON at position {}", p.p)));
     }
-    // Der Wiederhersteller laeuft ueber das FERTIGE Ergebnis, von innen nach
-    // aussen. Er darf Werte ersetzen und weglassen; das ist der Grund, warum
-    // er nicht schon beim Lesen greifen kann.
+    // The reviver runs over the finished result, innermost first. It may
+    // replace and drop values, which is why it cannot act during reading.
     match args.get(1) {
         Some(f) if i.is_callable(f) => {
             let holder = new_obj(Some(i.realm.object_proto.clone()));
@@ -343,8 +332,8 @@ fn read_str(i: &mut Interp, p: &mut P) -> C<String> {
         p.p += 1;
         match c {
             b'"' => return Ok(s),
-            // Ein rohes Steuerzeichen ist in JSON verboten — anders als in
-            // einem JS-Literal. Wer das durchlaesst, nimmt mehr an als er darf.
+            // A raw control character is forbidden in JSON, unlike in a JS
+            // string literal.
             0..=0x1f => return Err(i.throw_kind("SyntaxError",
                 "Bad control character in JSON string")),
             b'\\' => {
@@ -358,9 +347,9 @@ fn read_str(i: &mut Interp, p: &mut P) -> C<String> {
                     b'n' => s.push('\n'), b'r' => s.push('\r'), b't' => s.push('\t'),
                     b'u' => {
                         let cp = hex4(i, p)?;
-                        // Ein hohes Ersatzzeichen sucht sein Gegenstueck; ein
-                        // einzelnes bleibt als Ersatzzeichen stehen, statt den
-                        // Lauf abzubrechen — genau so macht es ein Browser.
+                        // A high surrogate looks for its pair; a lone one
+                        // stays as a surrogate instead of aborting, as
+                        // browsers do.
                         let ch = if (0xd800..0xdc00).contains(&cp)
                             && p.b.get(p.p) == Some(&b'\\') && p.b.get(p.p + 1) == Some(&b'u') {
                             p.p += 2;
@@ -374,8 +363,8 @@ fn read_str(i: &mut Interp, p: &mut P) -> C<String> {
                     _ => return Err(i.throw_kind("SyntaxError", "Bad escape in JSON string")),
                 }
             }
-            // Mehrbytefolgen wandern unveraendert durch; die Quelle war ein
-            // gueltiger Rust-`str`, also ist jede davon gueltiges UTF-8.
+            // Multi-byte sequences pass through unchanged; the source was a
+            // valid Rust `str`, so each is valid UTF-8.
             c if c < 0x80 => s.push(c as char),
             _ => {
                 let start = p.p - 1;

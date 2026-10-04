@@ -1,4 +1,4 @@
-//! Anweisungen und Ausdruecke auswerten.
+//! Tree-walking evaluation of statements and expressions.
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -10,22 +10,22 @@ use super::interp::*;
 use super::value::*;
 
 impl Interp {
-    // ── Anweisungen ──────────────────────────────────────────────────────
-    /// Liefert den Abschlusswert, wo es einen gibt (der Wert eines Programms
-    /// ist der letzte Ausdruckswert — `eval` und die Konsole leben davon).
+    // ── Statements ───────────────────────────────────────────────────────
+    /// Returns the completion value where there is one (a program's value
+    /// is its last expression value; `eval` and the console rely on it).
     pub fn exec(&mut self, st: &Stmt, env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
         self.steps += 1;
         if self.steps > self.max_steps {
             return Err(self.throw_kind("RangeError", "step budget exhausted"));
         }
-        // Und die Uhr. Sie stand nur in `tick`, und dort kommt reines JS nie
-        // vorbei — siehe `Interp::check_deadline`.
+        // Also check the deadline here: pure JS never passes through `tick`.
+        // See `Interp::check_deadline`.
         if self.steps & 0xFFFF == 0 { self.check_deadline()?; }
         match st {
             Stmt::Expr(e) => Ok(Some(self.eval(e, env)?)),
             Stmt::Empty | Stmt::Debugger => Ok(None),
             Stmt::VarDecl(d) => { self.exec_var(d, env)?; Ok(None) }
-            Stmt::Func(_) => Ok(None), // beim Hochziehen erledigt
+            Stmt::Func(_) => Ok(None), // handled by hoisting
             Stmt::Class(c) => {
                 let v = self.eval_class(c, env)?;
                 if let Some(n) = &c.name { self.init_binding(n, v, env); }
@@ -48,15 +48,15 @@ impl Interp {
             Stmt::Break(l) => Err(Abrupt::Break(l.clone())),
             Stmt::Continue(l) => Err(Abrupt::Continue(l.clone())),
             Stmt::Labeled { label, body } => {
-                // Den Namen fuer die Schleife darunter ablegen — sie holt ihn
-                // beim Betreten ab (`Interp::pending_labels`). War der Rumpf
-                // keine Schleife, holt ihn niemand, und er gehoert wieder weg.
+                // Leave the label for the loop below, which picks it up on
+                // entry (`Interp::pending_labels`). If the body was not a
+                // loop nobody picks it up, so it is removed again.
                 self.pending_labels.push(label.clone());
                 let r = self.exec(body, env);
                 self.pending_labels.retain(|x| x != label);
                 match r {
-                    // Ein `break lbl` endet GENAU hier; ein `continue lbl`
-                    // gehoert der Schleife darunter und wird dort gefangen.
+                    // A `break lbl` ends exactly here; a `continue lbl`
+                    // belongs to the loop below and is caught there.
                     Err(Abrupt::Break(Some(l))) if l == *label => Ok(None),
                     other => other,
                 }
@@ -95,33 +95,28 @@ impl Interp {
             Stmt::ForOf { left, right, body, .. } => self.exec_for_of(left, right, body, env),
             Stmt::Switch { disc, cases } => self.exec_switch(disc, cases, env),
             Stmt::Try { block, handler, finalizer } => self.exec_try(block, handler, finalizer, env),
-            // `with (o) { … }` — eine Umgebung, deren Namen aus einem OBJEKT
-            // kommen. Im strengen Modus verboten; das hat schon der Parser
-            // abgelehnt, hier steht nur der lockere Fall.
-            //
-            // Vue braucht es: sein Vorlagen-Uebersetzer erzeugt
-            // `with (_ctx) { … }`, und ohne das rendert eine Vue-Seite nichts
-            // — sie meldet den Fehler in ihrem eigenen Behandler und laesst
-            // den Kasten leer.
+            // `with (o) { … }`: an environment whose names come from an
+            // object. Forbidden in strict mode (rejected by the parser), so
+            // only the sloppy case reaches here. Vue's template compiler
+            // emits `with (_ctx) { … }`.
             Stmt::With { obj, body } => {
                 let v = self.eval(obj, env)?;
                 let o = self.to_object(&v)?;
                 let inner = Env::new(Some(env.clone()), false);
                 inner.borrow_mut().with_obj = Some(o);
-                // **Die Wegweiser gehen aus, fuer die ganze Sitzung.** Eine
-                // Objektumgebung kann Bindungen bekommen und verlieren,
-                // waehrend eine Befehlsstelle schon gelaufen ist — dieselbe
-                // Ueberlegung wie beim direkten `eval` (`Interp::hints_ok`).
+                // Lookup hints are switched off for the whole session: an
+                // object environment can gain and lose bindings after an
+                // instruction has already run. Same reasoning as for direct
+                // `eval` (`Interp::hints_ok`).
                 self.hints_ok = false;
                 self.exec(body, &inner)
             }
-            // `import` und die reinen Weiterreichungen tun zur LAUFZEIT
-            // nichts — sie sind beim Verknuepfen erledigt (`modules.rs`).
+            // `import` and pure re-exports do nothing at run time; they are
+            // resolved at link time (`modules.rs`).
             Stmt::Import(_) | Stmt::ExportAll { .. } => Ok(None),
-            // Aber `export function f(){}` ist eine DEKLARATION mit einem
-            // `export` davor. Sie zu ueberspringen hiess: `f` gibt es im
-            // eigenen Modul nicht — und das fiel niemandem auf, weil auch
-            // der Import still war.
+            // `export function f(){}` is a declaration with `export` in
+            // front and must still be evaluated, or `f` would not exist in
+            // its own module.
             Stmt::ExportNamed { decl, .. } => match decl {
                 Some(d) => self.exec(d, env),
                 None => Ok(None),
@@ -132,8 +127,8 @@ impl Interp {
                     ExportDefault::Func(f) => self.make_closure(f.clone(), env, None),
                     ExportDefault::Class(c) => self.eval_class(c, env)?,
                 };
-                // Eine benannte Deklaration hinter `export default` fuehrt
-                // AUCH ihren eigenen Namen ein.
+                // A named declaration after `export default` also introduces
+                // its own name.
                 let own = match &**d {
                     ExportDefault::Func(f) => f.name.clone(),
                     ExportDefault::Class(c) => c.name.clone(),
@@ -167,14 +162,13 @@ impl Interp {
                 None => Value::Undefined,
             };
             if d.kind == VarKind::Var && dec.init.is_none() { continue; }
-            // **`var` LEGT hier nichts mehr an — das Hochziehen hat das
-            // getan.** Die Zeile fuehrt nur noch eine Zuweisung aus (ES
-            // §VariableStatement: PutValue, nicht InitializeBinding), und der
-            // Unterschied ist sichtbar, sobald die Bindung nicht in der Kette
-            // steht, sondern auf dem globalen Objekt: `init_binding` legte
-            // daneben eine zweite an, und `window.X` blieb `undefined`.
-            // `let`/`const` initialisieren dagegen wirklich — ihre Bindung
-            // steht in der Kette und wartet in der TDZ.
+            // `var` creates nothing here; hoisting already did. The
+            // statement only performs an assignment (ES VariableStatement:
+            // PutValue, not InitializeBinding). This matters when the binding
+            // lives on the global object: initialising would create a second
+            // binding beside it and `window.X` would stay `undefined`.
+            // `let`/`const` do initialise: their binding is in the chain,
+            // waiting in the TDZ.
             self.bind_pattern(&dec.id, v, env, d.kind != VarKind::Var)?;
         }
         Ok(())
@@ -182,10 +176,9 @@ impl Interp {
 
     fn exec_for(&mut self, init: &Option<alloc::boxed::Box<ForInit>>, test: &Option<Expr>,
                 update: &Option<Expr>, body: &Stmt, env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
-        // Eigene Umgebung fuer den Kopf: `for (let i=0;;)` bindet `i` je
-        // Durchlauf neu, damit eine Closure im Rumpf den Wert DIESES Durchlaufs
-        // festhaelt. Ohne das teilen sich alle Closures dieselbe Zelle — der
-        // Klassiker, an dem `for (var i…)` scheitert.
+        // Own environment for the head: `for (let i=0;;)` rebinds `i` per
+        // iteration so a closure in the body captures that iteration's
+        // value (CreatePerIterationEnvironment).
         let mine = core::mem::take(&mut self.pending_labels);
         let head = Env::new(Some(env.clone()), false);
         let mut per_iter: Vec<Rc<str>> = Vec::new();
@@ -236,13 +229,12 @@ impl Interp {
         Ok(None)
     }
 
-    /// Den Kopf einer `for..of`/`for..in`-Schleife an einen Wert binden.
+    /// Binds the head of a `for..of`/`for..in` loop to a value.
     ///
-    /// Drei Faelle in einer Funktion, und beide Maschinen rufen sie: ein
-    /// `let`/`const` legt seinen Namen je Durchlauf NEU an (deshalb
-    /// `declare_pattern`), ein `var` findet den hochgezogenen weiter aussen,
-    /// und ein blosses Ziel (`for (x of …)`, `for ([a,b] of …)`) ist eine
-    /// ZUWEISUNG und legt gar nichts an.
+    /// Three cases, used by both engines: `let`/`const` creates its name
+    /// anew per iteration (hence `declare_pattern`), `var` finds the hoisted
+    /// binding further out, and a bare target (`for (x of …)`,
+    /// `for ([a,b] of …)`) is an assignment and creates nothing.
     pub fn for_head_bind(&mut self, left: &ForHead, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         match left {
             ForHead::VarDecl(d) => {
@@ -260,7 +252,7 @@ impl Interp {
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
         let mine = core::mem::take(&mut self.pending_labels);
         let obj = self.eval(right, env)?;
-        // Dieselbe Hilfe wie die Befehlsmaschine — siehe `Interp::for_in_keys`.
+        // Same helper as the bytecode VM; see `Interp::for_in_keys`.
         let keys = self.for_in_keys(&obj)?;
         for k in keys {
             let inner = Env::new(Some(env.clone()), false);
@@ -277,15 +269,11 @@ impl Interp {
         Ok(None)
     }
 
-    /// `for..of` — SCHRITTWEISE, nicht erst einsammeln.
+    /// `for..of`, stepping the iterator rather than collecting first.
     ///
-    /// Der Unterschied ist nicht Tempo, sondern Machbarkeit: ein Iterator
-    /// ohne Ende (ein Generator, ein Strom) ist voellig gewoehnlich, und ein
-    /// Rumpf, der im ersten Durchlauf `break` sagt, muss damit umgehen. Wer
-    /// vorher einsammelt, haengt an genau dieser Stelle.
-    ///
-    /// Und jedes vorzeitige Verlassen ruft `return()` auf dem Iterator —
-    /// sonst bleiben fremde `finally`-Bloecke liegen.
+    /// Collecting first would hang on an endless iterator (a generator, a
+    /// stream) even when the body breaks in the first iteration. Every early
+    /// exit calls `return()` on the iterator so its `finally` blocks run.
     fn exec_for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt,
                    env: &Rc<RefCell<Env>>) -> C<Option<Value>> {
         let mine = core::mem::take(&mut self.pending_labels);
@@ -318,8 +306,8 @@ impl Interp {
         let inner = Env::new(Some(env.clone()), false);
         let all: Vec<Stmt> = cases.iter().flat_map(|c| c.body.iter().cloned()).collect();
         self.hoist_block(&all, &inner)?;
-        // Erst den passenden Fall suchen, dann AB DORT alles laufen lassen —
-        // das Durchfallen ist die Regel, nicht die Ausnahme.
+        // Find the matching case, then run everything from there on;
+        // fall-through is the rule.
         let mut start = None;
         for (i, c) in cases.iter().enumerate() {
             if let Some(t) = &c.test {
@@ -355,8 +343,8 @@ impl Interp {
         }
         if let Some(f) = finalizer {
             let fenv = Env::new(Some(env.clone()), false);
-            // Ein Abbruch im `finally` UEBERSCHREIBT den aus dem Rumpf — auch
-            // einen geworfenen Fehler. Das ist die Regel und die Falle.
+            // An abrupt completion in `finally` overrides the one from the
+            // body, including a thrown error.
             match self.exec_block(f, &fenv) {
                 Err(e) => return Err(e),
                 Ok(_) => {}
@@ -365,8 +353,8 @@ impl Interp {
         result
     }
 
-    /// `let`/`const`/`class` eines Blocks anlegen (Totzone) und
-    /// Funktionsdeklarationen binden.
+    /// Creates a block's `let`/`const`/`class` bindings (TDZ) and binds its
+    /// function declarations.
     pub fn hoist_block(&mut self, body: &[Stmt], env: &Rc<RefCell<Env>>) -> C<()> {
         for st in body {
             match st {
@@ -397,23 +385,8 @@ impl Interp {
         Ok(())
     }
 
-    /// Eine eben angelegte Bindung auf `const` stellen. Getrennt von
-    /// `init_binding`, weil der Baumlaeufer die Veraenderlichkeit schon beim
-    /// Hochziehen setzt und die Maschine erst beim Ausfuehren dort ankommt.
-    /// Eine Bindung anlegen, die es GIBT, aber noch nicht bereit ist — die
-    /// zeitliche Totzone von `let`/`const`/`class`. Dieselbe Zeile, die
-    /// `hoist` schreibt; hier oeffentlich, weil die Befehlsmaschine sie beim
-    /// Betreten eines Blocks braucht.
-    /// Eine fertige Bindung GENAU HIER anlegen — ohne die Kette hochzugehen.
-    ///
-    /// Der Unterschied zu `init_binding` ist der ganze Punkt: das sucht erst
-    /// nach einer vorhandenen Bindung und schreibt DIE. Fuer eine
-    /// Funktionsdeklaration in einem Block ist das falsch, und zwar
-    /// beobachtbar: `let f = 1; { function f(){} }` darf das aeussere `f`
-    /// nicht anfassen (annexB B.3.3 nimmt die var-Bindung genau dann zurueck,
-    /// wenn sie einen frueheren Fehler ausloeste). Sieben Tests.
-    /// Einer eben gebauten anonymen Funktion den Namen geben, unter dem sie
-    /// gerade gebunden wird. Sichtbar in Stapelspuren und in `f.name`.
+    /// Gives a freshly created anonymous function the name it is being bound
+    /// to. Visible in stack traces and `f.name`.
     pub fn name_function(&mut self, v: &Value, name: &str) {
         let Value::Obj(o) = v else { return };
         let empty = matches!(o.borrow().get_own("name").and_then(|p| p.value.clone()),
@@ -451,14 +424,13 @@ impl Interp {
             Binding { value: v, mutable: true, initialized: true });
     }
 
-    // ── Muster binden ────────────────────────────────────────────────────
-    /// Die Namen eines Musters HIER anlegen und dann binden.
+    // ── Binding patterns ─────────────────────────────────────────────────
+    /// Creates a pattern's names in this environment, then binds them.
     ///
-    /// Der Unterschied zu `bind_pattern(…, true)` ist der Ort: `init_binding`
-    /// laeuft die Umgebungskette HOCH und faende eine gleichnamige Bindung
-    /// weiter aussen. Der Kopf eines `catch` und der einer `for`-Schleife
-    /// legen ihre Namen aber GENAU HIER an, je Durchlauf neu. Eigene
-    /// Funktion, weil beide Maschinen sie brauchen.
+    /// Unlike `bind_pattern(…, true)`, which goes through `init_binding` and
+    /// walks up the chain to a same-named outer binding, the head of a
+    /// `catch` or a `for` loop creates its names exactly here, anew per
+    /// iteration. Used by both engines.
     pub fn declare_pattern(&mut self, p: &Pat, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         let mut names = Vec::new();
         names_of(p, &mut names);
@@ -482,8 +454,8 @@ impl Interp {
             Pat::Assign { left, right } => {
                 let v = if matches!(v, Value::Undefined) {
                     let d = self.eval(right, env)?;
-                    // `var [a = () => {}] = []` nennt den Pfeil `a` — dieselbe
-                    // Regel wie `var f = function(){}`, nur eine Ebene tiefer.
+                    // `var [a = () => {}] = []` names the arrow `a`, the same
+                    // rule as `var f = function(){}` one level deeper.
                     if let Pat::Ident(n) = &**left {
                         let n = n.clone();
                         self.name_function(&d, &n);
@@ -535,25 +507,22 @@ impl Interp {
                 Ok(())
             }
             Pat::Expr(e) => {
-                // `[a.b] = x` — Ziel ist eine Eigenschaft, keine Bindung.
+                // `[a.b] = x`: the target is a property, not a binding.
                 self.assign_to_expr(e, v, env)
             }
         }
     }
 
-    /// `PutValue` auf einen Bezeichner (ES §6.2.5.6).
-    ///
-    /// **Die einzige Fassung.** Bis 0.98.0 stand dieselbe Regel ein zweites
-    /// Mal in `expr.rs::store`, und die zweite hat beim strengen Modus sofort
-    /// anders entschieden — [[feedback-a-copy-is-a-second-semantics-waiting]].
+    /// `PutValue` on an identifier (ES 6.2.5.6). The single implementation
+    /// of this rule; keep it that way.
     pub fn assign_ident(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         self.assign_ident_depth(n, v, env).map(|_| ())
     }
 
-    /// Das `with`-Objekt, das diesen Namen traegt — oder `None`.
+    /// The `with` object that carries this name, or `None`.
     ///
-    /// Die Kette wird nur bis zur ersten gewoehnlichen Bindung desselben
-    /// Namens abgelaufen: eine INNERE `var` verschattet ein aeusseres `with`.
+    /// The chain is walked only up to the first ordinary binding of the same
+    /// name: an inner `var` shadows an outer `with`.
     pub fn with_target(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Option<Gc>> {
         let mut cur = env.clone();
         loop {
@@ -569,21 +538,20 @@ impl Interp {
         }
     }
 
-    /// Wie `assign_ident`, sagt aber MIT, in welcher Tiefe der Name stand.
-    /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
+    /// Like `assign_ident`, but also reports the depth where the name was
+    /// found. Only the lookup hint needs this; see `Chunk::hints`.
     pub fn assign_ident_depth(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>)
         -> C<Option<usize>> {
-        // Ein `with` kann den Namen tragen, und dann wird in das OBJEKT
-        // geschrieben. Die Kette wird dafuer einmal abgelaufen — nur, wenn
-        // ueberhaupt eine Objektumgebung darin steht.
+        // A `with` may carry the name, in which case the write goes to the
+        // object. The chain is walked for this only if it contains an object
+        // environment at all.
         if let Some(o) = self.with_target(n, env)? {
             let strict = super::interp::env_strict(env);
             return self.set(&Value::Obj(o), n, v, strict).map(|_| None);
         }
         if let Some((e, depth)) = env_lookup_depth(env, n) {
-            // Auf einen importierten Namen zu schreiben ist ein Fehler, kein
-            // Schreiben ins Herkunftsmodul: die Bindung dort gehoert dem
-            // Modul, das sie ausfuehrt.
+            // Writing to an imported name is an error, not a write into the
+            // source module: that binding belongs to the module that runs it.
             if e.borrow().imports.as_ref().is_some_and(|m| m.contains_key(n)) {
                 return self.type_err(&alloc::format!("assignment to import '{n}'"));
             }
@@ -597,17 +565,16 @@ impl Interp {
             e.borrow_mut().vars.get_mut(n).unwrap().value = v;
             return Ok(Some(depth));
         }
-        // Nicht in der Bindungskette — aber das GLOBALE OBJEKT ist auch ein
-        // Bindungsort: `Object = 12` schreibt dort und ist auch im strengen
-        // Modus erlaubt. Unaufloesbar ist ein Name erst, wenn ihn auch das
-        // globale Objekt nicht kennt.
+        // Not in the binding chain, but the global object is a binding
+        // location too: `Object = 12` writes there, even in strict mode. A
+        // name is unresolvable only if the global object lacks it as well.
         let g = self.realm.global.clone();
         if self.has_property(&g, n) {
             let strict = super::interp::env_strict(env);
             return self.set(&Value::Obj(g), n, v, strict).map(|_| None);
         }
-        // Jetzt ist er wirklich unbekannt: im lockeren Modus wird eine globale
-        // Eigenschaft daraus, im strengen wirft es.
+        // Truly unknown: sloppy mode creates a global property, strict mode
+        // throws.
         super::interp::strict_site!(self, 6);
         if super::interp::env_strict(env) {
             return self.ref_err(&alloc::format!("{n} is not defined"));
@@ -638,8 +605,8 @@ impl Interp {
     }
 }
 
-/// Namen eines Musters — dieselbe Liste wie beim Hochziehen, hier fuer die
-/// Totzone eines Blocks.
+/// Names of a pattern; the same list as for hoisting, used here for a
+/// block's TDZ.
 pub fn names_of(p: &Pat, out: &mut Vec<String>) {
     match p {
         Pat::Ident(n) => out.push(n.clone()),

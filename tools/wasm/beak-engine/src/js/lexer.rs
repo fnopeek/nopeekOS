@@ -1,20 +1,17 @@
-//! Der Tokenizer.
+//! The tokenizer.
 //!
-//! Auf Abruf, nicht im Voraus — und das ist keine Stilfrage: ob `/` eine
-//! Division oder der Anfang eines regulaeren Ausdrucks ist, kann der Lexer
-//! nicht allein entscheiden (`a /b/ g` gegen `return /b/g`). Nur der Parser
-//! weiss, ob an dieser Stelle ein Operand oder ein Operator erwartet wird, also
-//! sagt er es beim Holen (`next(regex_ok)`). Ein Lexer, der vorher durchlaeuft,
-//! muesste diese Frage raten.
+//! Tokens are produced on demand, not up front: whether `/` is a division or
+//! starts a regular expression (`a /b/ g` vs `return /b/g`) depends on whether
+//! the parser expects an operand, so the parser says so on each fetch
+//! (`next(regex_ok)`).
 //!
-//! Zwei weitere Dinge, die hier und nicht im Parser sitzen:
+//! Two more things live here rather than in the parser:
 //!
-//! - **`newline_before`** an jedem Token. Die automatische Semikolon-Einfuegung
-//!   haengt daran, und der Parser kann den Zeilenumbruch nicht mehr sehen,
-//!   wenn die Leerzeichen erst weg sind.
-//! - **Template-Fortsetzung.** `` `a${x}b` `` ist EIN Literal mit einem Loch;
-//!   nach dem `}` muss weiter im Template gelesen werden, was nur geht, wenn
-//!   der Parser es anfordert (`next_template_part`).
+//! - `newline_before` on every token, which automatic semicolon insertion
+//!   needs and which is lost once whitespace is skipped.
+//! - Template continuation: `` `a${x}b` `` is one literal with a hole; after
+//!   the `}` the parser asks to continue reading the template
+//!   (`next_template_part`).
 
 use alloc::string::String;
 
@@ -22,24 +19,18 @@ use alloc::string::String;
 pub enum Tok {
     Eof,
     Ident(String),
-    /// Ein reserviertes Wort. Getrennt von `Ident`, weil `class` und `x` an
-    /// derselben Stelle voellig Verschiedenes bedeuten — und zusammengelegt
-    /// haette jede Pruefung einen Stringvergleich statt eines Sprungs.
+    /// A reserved word, kept apart from `Ident` so checks are an enum match
+    /// rather than a string comparison.
     Keyword(Kw),
     Num(f64),
     BigInt(String),
     Str(String),
-    /// Rohtext + Flags. Der Inhalt wird NICHT geprueft: das ist die Aufgabe
-    /// der RegExp-Maschine, und ein Parser, der es doch tut, lehnt Muster ab,
-    /// die er nur nicht kennt.
+    /// Body text and flags. The body is not validated here; that is the
+    /// RegExp engine's job.
     Regex(String, String),
-    /// Ein Stueck Template: der entschluesselte Text, der Rohtext, und ob nach
-    /// ihm eine Einsetzung `${` folgt (sonst endet das Literal hier).
-    ///
-    /// Das Feld hiess `tail` und das war eine Falle: in ESTree bedeutet `tail`
-    /// GENAU DAS GEGENTEIL (das letzte Stueck). Der Name hat drei Skripte des
-    /// Zielkorpus gekostet — nach `${` ist `/` ein Regex, und die Pruefung
-    /// unten hatte die Bedingung falsch herum gelesen.
+    /// A template chunk: cooked text, raw text, and whether a substitution
+    /// `${` follows (otherwise the literal ends here). Note: the opposite of
+    /// ESTree's `tail`.
     Template { cooked: Option<String>, raw: String, has_sub: bool },
     Punct(P),
 }
@@ -50,15 +41,14 @@ pub enum Kw {
     Do, Else, Enum, Export, Extends, False, Finally, For, Function, If, Import,
     In, Instanceof, New, Null, Return, Super, Switch, This, Throw, True, Try,
     Typeof, Var, Void, While, With, Yield,
-    // Kontextabhaengig: nur an bestimmten Stellen reserviert. Sie kommen hier
-    // als Keyword an und der Parser darf sie als Bezeichner zurueckbiegen.
+    // Contextual: reserved only in some positions. They arrive as keywords
+    // and the parser may turn them back into identifiers.
     Let, Static, Async, Get, Set, Of, As, From, Target, Meta,
 }
 
 impl Kw {
-    /// Ist das Wort ueberall reserviert? `let`/`static`/`async`/`of` sind es
-    /// NICHT — `var of = 1` ist gueltiges JavaScript, und ein Parser, der das
-    /// ablehnt, scheitert an echtem Code, nicht an schlechtem.
+    /// Whether the word is reserved everywhere. Contextual words such as
+    /// `let`/`static`/`async`/`of` are not: `var of = 1` is valid.
     pub fn is_reserved(self) -> bool {
         !matches!(self, Kw::Let | Kw::Static | Kw::Async | Kw::Get | Kw::Set
             | Kw::Of | Kw::As | Kw::From | Kw::Target | Kw::Meta)
@@ -112,7 +102,7 @@ pub enum P {
     Eq, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, StarStarEq,
     ShlEq, ShrEq, UShrEq, AmpEq, PipeEq, CaretEq,
     AmpAmpEq, PipePipeEq, QuestionQuestionEq,
-    /// `#name` — der private Name in einer Klasse.
+    /// `#name`: a private name in a class.
     Hash,
 }
 
@@ -121,8 +111,7 @@ pub struct Token {
     pub tok: Tok,
     pub start: usize,
     pub end: usize,
-    /// Stand vor diesem Token ein Zeilenumbruch? Die Semikolon-Einfuegung
-    /// haengt allein daran.
+    /// A line terminator preceded this token; drives semicolon insertion.
     pub newline_before: bool,
 }
 
@@ -135,28 +124,24 @@ pub struct LexError {
 pub struct Lexer<'a> {
     src: &'a [u8],
     pub pos: usize,
-    /// Der Quelltext als `str`, fuer Ausschnitte mit Mehrbyte-Zeichen.
+    /// The source as `str`, for slices containing multi-byte characters.
     text: &'a str,
-    /// War die zuletzt gelesene Zahl ein Alt-Oktal (`0755`) oder eine
-    /// Nicht-Oktal-Ziffernfolge mit fuehrender Null (`089`)? Im strengen Modus
-    /// beides ein Fruehfehler — und ob der gilt, weiss nur der Parser.
+    /// The last number was a legacy octal (`0755`) or a non-octal decimal
+    /// with a leading zero (`089`). Both are early errors in strict mode,
+    /// which only the parser knows.
     pub legacy_octal: bool,
 }
 
-/// Ist `c` ein Zeichen, mit dem ein Bezeichner anfangen darf?
+/// Whether `c` may start an identifier.
 ///
-/// Nicht die volle Unicode-Tabelle: ASCII exakt, und ab 0x80 wird alles
-/// zugelassen. Das ist bewusst zu grosszuegig statt zu streng — ein Parser,
-/// der einen gueltigen Bezeichner ablehnt, verliert die ganze Datei, waehrend
-/// ein zu weit gefasster Bezeichner nur ein Programm annimmt, das ohnehin
-/// niemand ausliefert. Die Tabelle (ID_Start/ID_Continue) kostet ~40 KB und
-/// wandert erst herein, wenn eine gemessene Seite sie braucht.
+/// Not the full Unicode ID_Start table: ASCII is exact, and above 0x80
+/// everything is accepted. Deliberately too permissive: rejecting a valid
+/// identifier loses the whole file, accepting too much only admits programs
+/// nobody ships.
 fn id_start(c: char) -> bool {
     if c.is_ascii() { return c.is_ascii_alphabetic() || c == '$' || c == '_'; }
-    // Ab 0x80 alles ZULASSEN, ausser dem, was nachweislich Leerraum oder
-    // Zeilentrenner ist. Ohne diese Ausnahme wird U+2028 zum Bezeichner und
-    // `1\u{2028}2` liest sich als eine Zahl mit Buchstaben dahinter — genau
-    // so ist es aufgefallen (test262 `line-terminators/between-tokens-ls`).
+    // Above 0x80 accept everything except whitespace and line terminators;
+    // otherwise `1\u{2028}2` would read as a number followed by letters.
     !matches!(c, '\u{2028}' | '\u{2029}' | '\u{FEFF}' | '\u{00A0}' | '\u{1680}'
         | '\u{2000}'..='\u{200B}' | '\u{202F}' | '\u{205F}' | '\u{3000}')
 }
@@ -167,8 +152,8 @@ fn id_part(c: char) -> bool {
 impl<'a> Lexer<'a> {
     pub fn new(text: &'a str) -> Self {
         let mut pos = 0;
-        // `#!/usr/bin/env node` — nur in der allerersten Zeile, sonst ist `#`
-        // der private Name einer Klasse.
+        // Hashbang `#!...`: only on the very first line; elsewhere `#` starts
+        // a private name.
         if text.as_bytes().starts_with(b"#!") {
             pos = 2;
             let b = text.as_bytes();
@@ -184,14 +169,14 @@ impl<'a> Lexer<'a> {
 
     fn at(&self, i: usize) -> u8 { if i < self.src.len() { self.src[i] } else { 0 } }
 
-    /// Der Quelltext. Die Direktivenpruefung (`"use strict"`) muss den ROHEN
-    /// Ausschnitt sehen: `"use\u0020strict"` ist keine Direktive.
+    /// The source text. The directive check needs the raw slice:
+    /// `"use\u0020strict"` is not a directive.
     pub fn src_text(&self) -> &'a str { self.text }
 
-    /// Zeichen ab `pos`, mit seiner UTF-8-Laenge.
+    /// The character at `i`, with its UTF-8 length.
     fn char_at(&self, i: usize) -> (char, usize) {
-        // `self.text[i..]` PANIKT auf einer Nicht-Zeichengrenze. Ein Lexer
-        // darf an keiner Eingabe platzen — im Zweifel ein Byte weiter.
+        // `self.text[i..]` panics off a char boundary; the lexer must not
+        // panic on any input, so advance one byte instead.
         if i >= self.text.len() || !self.text.is_char_boundary(i) { return ('\0', 1); }
         match self.text[i..].chars().next() {
             Some(c) => (c, c.len_utf8()),
@@ -199,13 +184,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Leerraum und Kommentare ueberspringen; meldet, ob dabei eine neue Zeile
-    /// begann.
+    /// Skip whitespace and comments; returns whether a line terminator was
+    /// crossed.
     ///
-    /// Enthaelt die beiden Altlasten aus Annex B, und sie sind keine Kuriositaet:
-    /// `<!--` und `-->` sind 375 der 445 Dateien, die dieser Parser im ersten
-    /// test262-Lauf faelschlich ablehnte. Ein Browser, der sie nicht kennt,
-    /// verliert bei jedem alten Skript-Block die ganze Datei.
+    /// Includes the Annex B HTML-like comments `<!--` and `-->`, which old
+    /// script blocks still contain.
     fn skip_trivia(&mut self) -> Result<bool, LexError> {
         let mut nl = false;
         loop {
@@ -218,14 +201,14 @@ impl<'a> Lexer<'a> {
                     while self.pos < self.src.len()
                         && !matches!(self.src[self.pos], b'\n' | b'\r') { self.pos += 1; }
                 }
-                // `<!--` ist ein Zeilenkommentar (Annex B B.1.1).
+                // `<!--` is a single-line comment (Annex B B.1.1).
                 b'<' if self.at(self.pos + 1) == b'!' && self.at(self.pos + 2) == b'-'
                     && self.at(self.pos + 3) == b'-' => {
                     while self.pos < self.src.len()
                         && !matches!(self.src[self.pos], b'\n' | b'\r') { self.pos += 1; }
                 }
-                // `-->` ebenso, aber NUR am Zeilenanfang: sonst waere `a-->b`
-                // kein Dekrement mehr, und das ist gueltiges JavaScript.
+                // So is `-->`, but only at the start of a line; otherwise
+                // `a-->b` would stop being a decrement.
                 b'-' if (nl || self.pos == 0) && self.at(self.pos + 1) == b'-'
                     && self.at(self.pos + 2) == b'>' => {
                     while self.pos < self.src.len()
@@ -237,12 +220,10 @@ impl<'a> Lexer<'a> {
                         if self.pos >= self.src.len() {
                             return Err(LexError { msg: "unterminated comment", at: self.pos });
                         }
-                        // Ein Zeilenumbruch IM Blockkommentar zaehlt fuer die
-                        // Semikolon-Einfuegung — `return /*\n*/ x` gibt undefined.
+                        // A line break inside a block comment counts for
+                        // semicolon insertion: `return /*\n*/ x` returns undefined.
                         if matches!(self.src[self.pos], b'\n' | b'\r') { nl = true; }
-                        // U+2028/U+2029 sind ebenfalls Zeilenumbrueche, und
-                        // auch IM Blockkommentar zaehlen sie fuer die
-                        // Semikolon-Einfuegung.
+                        // U+2028/U+2029 are line terminators too.
                         else if self.src[self.pos] == 0xE2 && self.at(self.pos + 1) == 0x80
                             && matches!(self.at(self.pos + 2), 0xA8 | 0xA9) { nl = true; }
                         if self.src[self.pos] == b'*' && self.at(self.pos + 1) == b'/' {
@@ -254,8 +235,8 @@ impl<'a> Lexer<'a> {
                 _ if b >= 0x80 => {
                     let (c, n) = self.char_at(self.pos);
                     match c {
-                        // U+2028/U+2029 sind Zeilenumbrueche, \u{FEFF} und die
-                        // Unicode-Leerzeichen sind Leerraum.
+                        // U+2028/U+2029 are line terminators; U+FEFF and the
+                        // Unicode spaces are whitespace.
                         '\u{2028}' | '\u{2029}' => { nl = true; self.pos += n; }
                         '\u{FEFF}' | '\u{00A0}' | '\u{1680}'
                         | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => {
@@ -300,9 +281,8 @@ impl<'a> Lexer<'a> {
 
     fn ident(&mut self) -> Result<Tok, LexError> {
         let mut s = String::new();
-        // Ein Bezeichner darf `\u{...}`-Fluchten enthalten, und sie sind fuer
-        // die Bedeutung gleichwertig: `if` IST `if`. Das ist der Grund,
-        // warum hier zusammengebaut und erst danach nach Keywords gefragt wird.
+        // Identifiers may contain `\u{...}` escapes, so the name is assembled
+        // first and only then looked up as a keyword.
         let mut had_escape = false;
         loop {
             if self.pos >= self.src.len() { break; }
@@ -322,10 +302,9 @@ impl<'a> Lexer<'a> {
         }
         if s.is_empty() { return Err(LexError { msg: "expected identifier", at: self.pos }); }
         match keyword(&s) {
-            // Ein Schluesselwort, das ueber eine Flucht geschrieben wurde, ist
-            // KEIN Schluesselwort mehr (Early Error) — aber es ist auch kein
-            // gueltiger Bezeichner. Wir geben es als Bezeichner zurueck; die
-            // Regel gehoert in die spaetere Fruehfehlerpruefung, nicht hierher.
+            // A keyword spelled with an escape is neither a keyword nor a
+            // valid identifier (early error). It is returned as an identifier;
+            // the early-error check enforces the rule.
             Some(k) if !had_escape => Ok(Tok::Keyword(k)),
             _ => Ok(Tok::Ident(s)),
         }
@@ -345,9 +324,8 @@ impl<'a> Lexer<'a> {
             }
             if !any || self.at(self.pos) != b'}' { return Err(LexError { msg: "bad unicode escape", at: self.pos }); }
             self.pos += 1;
-            // Ein einzelnes Surrogat ist ein gueltiges JS-Zeichen, aber kein
-            // gueltiges `char`. Als Ersatzzeichen fuehren, statt die Datei zu
-            // verlieren.
+            // A lone surrogate is valid in JS but not a Rust `char`; map it to
+            // U+FFFD instead of failing.
             return Ok(char::from_u32(v).unwrap_or('\u{FFFD}'));
         }
         let mut v: u32 = 0;
@@ -379,7 +357,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Eine Flucht nach `\`. `None` = Zeilenfortsetzung (traegt nichts bei).
+    /// An escape after `\`. `None` means a line continuation (contributes nothing).
     fn escape(&mut self) -> Result<Option<char>, LexError> {
         if self.pos >= self.src.len() { return Err(LexError { msg: "unterminated escape", at: self.pos }); }
         let b = self.src[self.pos];
@@ -399,8 +377,8 @@ impl<'a> Lexer<'a> {
             b'u' => self.unicode_escape()?,
             b'\r' => { if self.at(self.pos) == b'\n' { self.pos += 1; } return Ok(None); }
             b'\n' => return Ok(None),
-            // Legacy-Oktal (`\101`). Im strengen Modus ein Fruehfehler; die
-            // Pruefung gehoert dorthin, nicht in den Lexer.
+            // Legacy octal escape (`\101`). An early error in strict mode,
+            // checked by the parser.
             b'0'..=b'7' => {
                 let mut v = (b - b'0') as u32;
                 let mut n = 1;
@@ -420,7 +398,7 @@ impl<'a> Lexer<'a> {
         }))
     }
 
-    /// Ein Stueck Template ab der aktuellen Stelle (nach `` ` `` oder `}`).
+    /// One template chunk from the current position (after `` ` `` or `}`).
     pub fn template_part(&mut self) -> Result<Tok, LexError> {
         let raw_start = self.pos;
         let mut cooked = String::new();
@@ -442,27 +420,20 @@ impl<'a> Lexer<'a> {
             }
             if b == b'\\' {
                 self.pos += 1;
-                // Ein getaggtes Template darf ungueltige Fluchten enthalten;
-                // dann ist `cooked` undefined und nur `raw` gilt (ES2018).
-                // Deshalb wird hier NICHT abgebrochen.
+                // A tagged template may contain invalid escapes; then `cooked`
+                // is undefined and only `raw` applies (ES2018), so no error here.
                 //
-                // **In einem Template sind die alten Zahlfluchten verboten**
-                // (ES 12.9.6, TemplateCharacter): `\1`–`\9` gar nicht, und
-                // `\0` nur, solange keine Ziffer folgt. `escape()` nimmt sie
-                // an, weil sie in einer gewoehnlichen Zeichenkette im lockeren
-                // Modus erlaubt sind — die Stelle, die den Unterschied kennt,
-                // ist diese hier.
+                // Legacy numeric escapes are invalid in templates (ES 12.9.6,
+                // TemplateCharacter): `\1`-`\9` never, `\0` only when no digit
+                // follows. `escape()` accepts them since sloppy strings allow them.
                 let nx = self.at(self.pos);
                 if matches!(nx, b'1'..=b'9')
                     || (nx == b'0' && (self.at(self.pos + 1) as char).is_ascii_digit()) {
                     bad = true;
                 }
-                // Die Stelle der FLUCHTKENNUNG merken. Nach einem Fehler steht
-                // `self.pos` irgendwo mitten in der halbgelesenen Folge —
-                // `+= 1` von dort aus frass bei `` `\u0` `` das schliessende
-                // Akzentzeichen und machte aus einer ungueltigen Flucht ein
-                // „unterminated template". Aufgesetzt wird direkt hinter der
-                // Kennung; der Rest ist gewoehnlicher Text.
+                // On error resume right after the escape letter, not from
+                // wherever `escape()` stopped; otherwise `` `\u0` `` would
+                // consume the closing backtick.
                 let after_slash = self.pos;
                 match self.escape() {
                     Ok(Some(c)) => cooked.push(c),
@@ -477,9 +448,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Ziffern zur Basis `radix` lesen, mit den Regeln fuer den Trenner:
-    /// `_` muss ZWISCHEN zwei Ziffern stehen. `1_0` ja, `1_`/`_1`/`1__0` nein.
-    /// Liefert die Anzahl gelesener Ziffern.
+    /// Read digits in base `radix`. A `_` separator must sit between two
+    /// digits: `1_0` yes, `1_`/`_1`/`1__0` no. Returns the digit count.
     fn digits(&mut self, radix: u32) -> Result<usize, LexError> {
         let mut n = 0;
         let mut prev_sep = false;
@@ -487,7 +457,7 @@ impl<'a> Lexer<'a> {
         while self.pos < self.src.len() {
             let c = self.src[self.pos];
             if c == b'_' {
-                // Kein Trenner am Anfang, keiner doppelt, keiner am Ende.
+                // No separator at the start, doubled, or at the end.
                 if !any || prev_sep { return Err(LexError { msg: "misplaced numeric separator", at: self.pos }); }
                 prev_sep = true; self.pos += 1; continue;
             }
@@ -525,9 +495,9 @@ impl<'a> Lexer<'a> {
             }
         }
         let _ = is_int_radix;
-        // Dezimal, inklusive Legacy-Oktal (`0755`) und der Nicht-Oktal-Form
-        // (`089`) — beides im strengen Modus ein Fruehfehler, aber kein
-        // Lexfehler. Beide duerfen keinen Trenner tragen, deshalb erst pruefen.
+        // Decimal, including legacy octal (`0755`) and the non-octal form
+        // (`089`): strict-mode early errors, not lex errors. Neither may
+        // contain a separator.
         let lead_zero = self.src[self.pos] == b'0';
         if lead_zero && self.at(self.pos + 1).is_ascii_digit() {
             self.legacy_octal = true;
@@ -551,21 +521,20 @@ impl<'a> Lexer<'a> {
             if matches!(self.at(self.pos), b'+' | b'-') { self.pos += 1; }
             if self.at(self.pos).is_ascii_digit() {
                 is_float = true;
-                // `_` gilt auch hier: `1e1_0` ist gueltig (ES2021).
+                // Separators are allowed in the exponent too: `1e1_0` (ES2021).
                 self.digits(10)?;
             } else { self.pos = save; }
         }
         if !is_float && self.at(self.pos) == b'n' {
-            // `01n` gibt es nicht — ein BigInt hat keine fuehrende Null.
+            // A BigInt literal has no leading zero: `01n` is invalid.
             if self.legacy_octal || (lead_zero && self.pos > start + 1) {
                 return Err(LexError { msg: "legacy octal bigint", at: self.pos });
             }
             self.pos += 1;
             return Ok(Tok::BigInt(self.text[start..self.pos - 1].replace('_', "")));
         }
-        // Eine Ziffer direkt hinter einer Zahl ist ein Fehler (`3in`), sonst
-        // liest der Parser `3` und `in` und baut daraus etwas Sinnvolles, das
-        // im Quelltext nicht stand.
+        // An identifier start or digit directly after a number is an error
+        // (`3in`); otherwise the parser would read `3` and `in`.
         let (c, _) = self.char_at(self.pos);
         if id_start(c) || c.is_ascii_digit() {
             return Err(LexError { msg: "identifier after number", at: self.pos });
@@ -585,9 +554,7 @@ impl<'a> Lexer<'a> {
             }
             let b = self.src[self.pos];
             match b {
-                // Ein `\\` schuetzt EIN ZEICHEN, nicht ein Byte: `/\\ä/` hat
-                // hinter dem Schraegstrich zwei Bytes, und `+= 2` landete
-                // mitten darin.
+                // A backslash escapes one character, not one byte.
                 b'\\' => {
                     self.pos += 1;
                     if self.pos < self.src.len() {
@@ -621,8 +588,8 @@ impl<'a> Lexer<'a> {
         let s = &self.src[self.pos..];
         let three = |a: u8, b: u8, c: u8| s.len() >= 3 && s[0] == a && s[1] == b && s[2] == c;
         let two = |a: u8, b: u8| s.len() >= 2 && s[0] == a && s[1] == b;
-        // Vier Zeichen zuerst, dann drei, dann zwei — sonst wird `>>>=` als
-        // `>>>` und `=` gelesen.
+        // Longest match first: four, three, then two characters, else `>>>=`
+        // would read as `>>>` and `=`.
         let (p, n): (P, usize) = if s.len() >= 4 && &s[..4] == b">>>=" { (UShrEq, 4) }
             else if three(b'.', b'.', b'.') { (Ellipsis, 3) }
             else if three(b'=', b'=', b'=') { (EqEqEq, 3) }
@@ -647,8 +614,8 @@ impl<'a> Lexer<'a> {
             else if two(b'&', b'&') { (AmpAmp, 2) }
             else if two(b'|', b'|') { (PipePipe, 2) }
             else if two(b'?', b'?') { (QuestionQuestion, 2) }
-            // `?.` NUR wenn keine Ziffer folgt: `a?.5:b` ist der Bedingungs-
-            // operator mit `.5`, nicht optionales Verketten.
+            // `?.` only when no digit follows: `a?.5:b` is a conditional with
+            // `.5`, not optional chaining.
             else if two(b'?', b'.') && !self.at(self.pos + 2).is_ascii_digit() { (QuestionDot, 2) }
             else if two(b'+', b'=') { (PlusEq, 2) }
             else if two(b'-', b'=') { (MinusEq, 2) }
@@ -666,10 +633,8 @@ impl<'a> Lexer<'a> {
                     b'-' => Minus, b'*' => Star, b'/' => Slash, b'%' => Percent,
                     b'<' => Lt, b'>' => Gt, b'&' => Amp, b'|' => Pipe, b'^' => Caret,
                     b'!' => Bang, b'~' => Tilde, b'=' => Eq,
-                    // `# x` gibt es nicht: zwischen dem Zeichen und dem Namen
-                    // darf nichts stehen (ES 12.6.1). Die Pruefung MUSS hier
-                    // sitzen — eine Zeile spaeter hat `skip_trivia` den
-                    // Leerraum schon geschluckt und der Unterschied ist weg.
+                    // No whitespace between `#` and the name (ES 12.6.1). Must
+                    // be checked here; the next fetch has already skipped it.
                     b'#' => {
                         let nxt = self.at(self.pos + 1);
                         let ok = nxt == b'\\' || {
@@ -688,12 +653,11 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Dezimalzahl nach f64. `core` hat `str::parse::<f64>()`, und das ist die
-/// korrekt gerundete Umwandlung — kein Grund, eine eigene zu schreiben.
+/// Decimal literal to f64 via `str::parse::<f64>()`, which rounds correctly.
 fn parse_f64(s: &str) -> f64 {
     if let Ok(v) = s.parse::<f64>() { return v; }
-    // Legacy-Oktal (`0755`) faellt hier herein: fuehrende Null + nur Ziffern
-    // 0-7 wird als Oktal gelesen, alles andere als Dezimal (`089` = 89).
+    // Legacy octal (`0755`) ends up here: a leading zero with only digits 0-7
+    // reads as octal, anything else as decimal (`089` = 89).
     if s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
         let mut v = 0f64;
         for b in s.bytes() { v = v * 8.0 + (b - b'0') as f64; }
@@ -703,8 +667,8 @@ fn parse_f64(s: &str) -> f64 {
     cleaned.parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// Alle Token einer Quelle, ohne Parser-Rueckmeldung (nur fuer Tests: der
-/// Parser holt selbst, weil nur er `regex_ok` kennt).
+/// All tokens of a source without parser feedback. Tests only: the parser
+/// fetches itself, since only it knows `regex_ok`.
 #[cfg(test)]
 pub fn tokenize_all(src: &str) -> Result<Vec<Token>, LexError> {
     let mut lx = Lexer::new(src);

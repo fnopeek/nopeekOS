@@ -1,20 +1,12 @@
-//! Rekursiver Abstieg mit Vorrangkletterung fuer die Ausdruecke.
+//! Recursive descent, with precedence climbing for expressions.
 //!
-//! Drei Entscheidungen, die den Rest erklaeren:
-//!
-//! 1. **Ein Token Vorausschau, mehr nicht.** Wo die Grammatik mehr verlangt —
-//!    `(a, b) => c` gegen `(a, b)` — wird NICHT vorausgeschaut, sondern erst
-//!    als Ausdruck gelesen und beim `=>` in ein Muster umgebogen
-//!    (`expr_to_pattern`). Das ist die Deckgrammatik, die die Spezifikation
-//!    selbst beschreibt, und sie kostet keine Ruecksetzpunkte.
-//! 2. **`regex_ok` folgt aus dem VORIGEN Token.** Der Lexer kann `/` nicht
-//!    allein einordnen; die Tabelle unten sagt, wann ein Operand erwartet wird.
-//!    Nach `}` wird Regex angenommen — das ist bei einem Blockende richtig und
-//!    bei einem Objektliteral falsch, und die erste Lage kommt in echtem Code
-//!    um Groessenordnungen haeufiger vor.
-//! 3. **Fruehfehler sind noch nicht vollstaendig.** Was gebaut ist, steht in
-//!    `strict_*`; was fehlt, faellt im test262-Lauf als „erwartete einen
-//!    Parse-Fehler" auf und ist damit gezaehlt statt vergessen.
+//! 1. One token of lookahead. Where the grammar needs more (`(a, b) => c` vs
+//!    `(a, b)`), the input is read as an expression and converted to a
+//!    pattern at `=>` (`expr_to_pattern`): the spec's cover grammar.
+//! 2. `regex_ok` follows from the previous token (`regex_allowed_after`).
+//!    After `}` a regex is assumed: right after a block, wrong after an
+//!    object literal, and the former is far more common.
+//! 3. Early errors are incomplete.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -31,26 +23,17 @@ pub struct ParseError {
     pub at: usize,
 }
 
-/// Erwartet die Grammatik hier einen Operanden? Dann ist `/` der Anfang eines
-/// regulaeren Ausdrucks, sonst eine Division.
+/// Whether an operand is expected after `t`: then `/` starts a regular
+/// expression, otherwise it is a division.
 fn regex_allowed_after(t: &Tok) -> bool {
     match t {
         Tok::Ident(_) | Tok::Num(_) | Tok::BigInt(_) | Tok::Str(_) | Tok::Regex(..) => false,
-        // Nach einem Template-Stueck MIT folgender Einsetzung kommt ein
-        // Ausdruck, also darf dort ein Regex stehen: `${/^a/.test(x)}`.
-        // Nach dem letzten Stueck ist `/` eine Division.
+        // A substitution follows a template chunk with `has_sub`, so a regex
+        // may start there: `${/^a/.test(x)}`. After the last chunk `/` divides.
         Tok::Template { has_sub, .. } => *has_sub,
-        // **Ein kontextuelles Schluesselwort ist meistens ein Bezeichner** —
-        // `var target = 8; target / 2` ist eine Division, keine Regex. Hier
-        // stand vorher „jedes Schluesselwort ausser fuenf erlaubt einen
-        // Regex", und damit brach jedes Skript, das eine Variable `get`,
-        // `set`, `of`, `as`, `from`, `async`, `target`, `meta` oder `let`
-        // teilt. Gefunden an d3: `tickIntervals[target / …]` — ab da las der
-        // Lexer den Rest der Zeile als Regex und die ganze Bibliothek fiel aus.
-        //
-        // `of` steht mit hier, obwohl `for (x of …)` ein Ausdruck folgt: ein
-        // Regex ist nicht iterierbar, `for (x of /re/)` ist also kein Code,
-        // den jemand schreibt.
+        // A contextual keyword is usually an identifier: `target / 2` is a
+        // division. `of` is included although an expression follows it in
+        // `for (x of …)`; a regex is not iterable, so nobody writes that.
         Tok::Keyword(k) if !k.is_reserved() => false,
         Tok::Keyword(k) => !matches!(k, Kw::This | Kw::Super | Kw::True | Kw::False | Kw::Null),
         Tok::Punct(p) => !matches!(p, P::RParen | P::RBracket | P::Inc | P::Dec),
@@ -61,8 +44,8 @@ fn regex_allowed_after(t: &Tok) -> bool {
 pub struct Parser<'a> {
     lx: Lexer<'a>,
     cur: Token,
-    /// Stand des Lexers VOR `cur` — fuer die Faelle, in denen dasselbe Zeichen
-    /// neu gelesen werden muss (Template-Fortsetzung nach `}`).
+    /// Lexer position before `cur`, for re-reading the same character
+    /// (template continuation after `}`).
     cur_start: usize,
     strict: bool,
     module: bool,
@@ -71,33 +54,30 @@ pub struct Parser<'a> {
     in_async: bool,
     in_loop: u32,
     in_switch: u32,
-    /// War der zuletzt gelesene Operand geklammert? `(a && b) ?? c` ist
-    /// erlaubt, `a && b ?? c` nicht — und im Baum sieht beides gleich aus.
+    /// The last operand was parenthesized. `(a && b) ?? c` is allowed,
+    /// `a && b ?? c` is not, and both look the same in the tree.
     just_paren: bool,
-    /// Stehen wir in einem Feld-Initialisierer einer Klasse? Dort ist
-    /// `arguments` verboten. Pfeile erben das (sie haben kein eigenes
-    /// `arguments`), gewoehnliche Funktionen setzen es zurueck.
+    /// Inside a class field initializer, where `arguments` is forbidden.
+    /// Arrows inherit this (no own `arguments`); ordinary functions reset it.
     in_class_field: bool,
-    /// Was `params()` zuletzt gelesen hat — `block_body_with_prologue` holt es
-    /// sich, weil die Regel „use strict neben nicht-einfachen Parametern" erst
-    /// beim Direktiven-Vorspann entscheidbar ist.
+    /// What `params()` last read. `block_body_with_prologue` consumes it,
+    /// since "use strict with non-simple parameters" is only decidable at the
+    /// directive prologue.
     pend_simple: bool,
     pend_names: Vec<String>,
-    /// War `cur` eine Zahl in Alt-Oktal-Form?
+    /// `cur` is a number in legacy octal form.
     num_legacy_octal: bool,
-    /// Fuer jede OFFENE Klammer: schliesst sie den KOPF einer Anweisung
-    /// (`if`, `for`, `while`, `with`)? Danach faengt eine Anweisung an, und
-    /// ein `/` dort ist ein Regex — waehrend dasselbe `)` am Ende eines
-    /// Ausdrucks eine Division einleitet. Das ist die eine Stelle, an der
-    /// `regex_allowed_after` mit dem Token allein nicht auskommt.
+    /// Per open parenthesis: does it close the head of `if`/`for`/`while`/
+    /// `with`? A statement follows such a `)`, so `/` there starts a regex,
+    /// while after an expression `)` it divides. The one case
+    /// `regex_allowed_after` cannot decide from the token alone.
     paren_hdr: Vec<bool>,
-    /// War das zuletzt verbrauchte Token eines dieser vier Woerter?
+    /// The last consumed token was one of those four keywords.
     prev_hdr: bool,
 }
 
-/// Ein Ruecksetzpunkt. Traegt die Klammerbuchfuehrung mit — eine Vorausschau,
-/// die eine Argumentliste durchliest, legt sonst Klammern ab, die niemand
-/// mehr abraeumt.
+/// A backtracking point. Includes the parenthesis bookkeeping, or a lookahead
+/// across an argument list would leave stale entries behind.
 struct Save {
     pos: usize,
     cur: Token,
@@ -127,14 +107,11 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> R<()> {
-        // `yield` und `await` sind nur DORT Schluesselwoerter, wo sie
-        // reserviert sind; sonst sind sie Bezeichner, und dann ist `/` eine
-        // Division. Das weiss nur der Parser — `regex_allowed_after` sieht
-        // bloss das Token.
-        // Klammerbuchfuehrung: beim `(` merken, WORAUF es folgte, und beim
-        // passenden `)` wieder herausholen. `for (const [k, v] of m) /re/.test(k)`
-        // ist echter Code — er stand in DuckDuckGos Hauptbuendel und liess den
-        // ganzen Chunk als SyntaxError ausfallen.
+        // `yield` and `await` are keywords only where reserved; elsewhere they
+        // are identifiers and `/` divides. Only the parser knows the context.
+        // Parenthesis bookkeeping: on `(` record what preceded it, on the
+        // matching `)` retrieve it, so `for (const [k, v] of m) /re/.test(k)`
+        // lexes a regex.
         let hdr = match &self.cur.tok {
             Tok::Punct(P::LParen) => { self.paren_hdr.push(self.prev_hdr); false }
             Tok::Punct(P::RParen) => self.paren_hdr.pop().unwrap_or(false),
@@ -151,8 +128,8 @@ impl<'a> Parser<'a> {
         self.cur_start = self.lx.pos;
         self.lx.legacy_octal = false;
         self.cur = self.lx.next(ok).map_err(|e| ParseError { msg: e.msg.to_string(), at: e.at })?;
-        // Gehoert zum GERADE GELESENEN Token, nicht zum Lexer — der naechste
-        // `bump` setzt es zurueck.
+        // Belongs to the token just read, not to the lexer; the next `bump`
+        // resets it.
         self.num_legacy_octal = self.lx.legacy_octal;
         Ok(())
     }
@@ -169,9 +146,8 @@ impl<'a> Parser<'a> {
         if self.eat_p(p)? { Ok(()) } else { self.err("unexpected token") }
     }
 
-    /// Der Name eines Bezeichners an dieser Stelle, mit den kontextabhaengigen
-    /// Schluesselwoertern als gueltigen Namen. `yield` und `await` haengen am
-    /// Kontext: in einem Generator bzw. einer async-Funktion sind sie reserviert.
+    /// An identifier name here, accepting contextual keywords. `yield` and
+    /// `await` are reserved inside generators and async functions respectively.
     fn ident_name(&mut self) -> R<String> {
         let name = match &self.cur.tok {
             Tok::Ident(s) => s.clone(),
@@ -185,9 +161,8 @@ impl<'a> Parser<'a> {
             Tok::Keyword(Kw::Await) if !self.in_async && !self.module => "await".to_string(),
             _ => return self.err("expected identifier"),
         };
-        // Am NAMEN geprueft, nicht am Token: `\u0061wait` kommt als Bezeichner
-        // herein (eine Flucht macht aus einem Schluesselwort keines mehr), und
-        // eine Pruefung auf `Tok::Keyword` sieht davon nichts. 294 Tests.
+        // Checked on the name, not the token: `\u0061wait` arrives as an
+        // identifier, which a `Tok::Keyword` check would miss.
         if name == "await" && (self.in_async || self.module) {
             return self.err("await is reserved here");
         }
@@ -198,16 +173,15 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    /// Ein Modulname: Bezeichner ODER Zeichenkette. `export { "a b" as c }`
-    /// ist ES2022 und der einzige Ort, an dem ein Name Leerzeichen tragen darf
-    /// — WebAssembly-Module exportieren solche Namen.
+    /// A module export name: identifier or string (`export { "a b" as c }`,
+    /// ES2022), since WebAssembly modules export arbitrary names.
     fn module_export_name(&mut self) -> R<String> {
         if let Tok::Str(s) = self.cur.tok.clone() { self.bump()?; return Ok(s); }
         self.property_name()
     }
 
-    /// Ein Eigenschaftsname nach `.` — dort sind ALLE reservierten Woerter
-    /// erlaubt (`a.class`, `a.if`). Seit ES5, und echter Code nutzt es.
+    /// A property name after `.`, where all reserved words are allowed
+    /// (`a.class`, `a.if`; ES5).
     fn property_name(&mut self) -> R<String> {
         let name = match &self.cur.tok {
             Tok::Ident(s) => s.clone(),
@@ -218,8 +192,8 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
-    /// Semikolon — oder die automatische Einfuegung. Sie greift vor `}`, am
-    /// Ende der Datei und wenn vor dem naechsten Token eine Zeile begann.
+    /// A semicolon, or automatic insertion: before `}`, at end of input, or
+    /// when a line terminator precedes the next token.
     fn semicolon(&mut self) -> R<()> {
         if self.eat_p(P::Semi)? { return Ok(()); }
         if self.is_p(P::RBrace) || self.cur.tok == Tok::Eof || self.cur.newline_before {
@@ -228,18 +202,17 @@ impl<'a> Parser<'a> {
         self.err("expected semicolon")
     }
 
-    // ── Programm ─────────────────────────────────────────────────────────
+    // ── Program ──────────────────────────────────────────────────────────
     pub fn parse_program(&mut self) -> R<Program> {
         let body = self.directive_prologue_and_body(true)?;
         if self.cur.tok != Tok::Eof { return self.err("unexpected token after program"); }
-        // Ein Modul ist immer streng, ein Skript nur mit Direktive.
+        // A module is always strict, a script only with the directive.
         Ok(Program { body, module: self.module, strict: self.strict || self.module })
     }
 
-    /// Der Direktiven-Vorspann: fuehrende Zeichenkettenausdruecke, unter denen
-    /// `"use strict"` den Rest der Einheit umschaltet. Er muss VOR dem
-    /// Weiterlesen ausgewertet werden — der strenge Modus aendert, was
-    /// ueberhaupt noch parst.
+    /// The directive prologue: leading string expression statements, of which
+    /// `"use strict"` switches the rest of the unit. Evaluated before reading
+    /// on, since strict mode changes what parses.
     fn directive_prologue_and_body(&mut self, top: bool) -> R<Vec<Stmt>> {
         let mut out = Vec::new();
         loop {
@@ -250,8 +223,8 @@ impl<'a> Parser<'a> {
             let st = self.statement()?;
             if is_str {
                 if let Stmt::Expr(Expr::Str(_)) = &st {
-                    // Auf den ROHTEXT geprueft, nicht auf den entschluesselten:
-                    // `"use strict"` ist KEINE Direktive (ES §11.2.1).
+                    // Checked on the raw text, not the cooked value:
+                    // `"use\u0020strict"` is not a directive (ES §11.2.1).
                     let raw = &self.lx_src()[raw_start..raw_end];
                     if raw == "\"use strict\"" || raw == "'use strict'" { self.strict = true; }
                     out.push(st);
@@ -272,7 +245,7 @@ impl<'a> Parser<'a> {
 
     fn lx_src(&self) -> &'a str { self.lx.src_text() }
 
-    // ── Anweisungen ──────────────────────────────────────────────────────
+    // ── Statements ───────────────────────────────────────────────────────
     fn statement(&mut self) -> R<Stmt> {
         match &self.cur.tok {
             Tok::Punct(P::LBrace) => {
@@ -291,8 +264,8 @@ impl<'a> Parser<'a> {
                 let k = *k;
                 match k {
                     Kw::Var | Kw::Const => self.var_statement(),
-                    // `let` ist nur dann eine Deklaration, wenn ein Bezeichner,
-                    // `[` oder `{` folgt — sonst ist es ein Bezeichner
+                    // `let` is a declaration only when an identifier, `[` or
+                    // `{` follows; otherwise it is an identifier
                     // (`let = 1`, `let.a`, `let(x)`).
                     Kw::Let if self.let_is_decl()? => self.var_statement(),
                     Kw::Function => { let f = self.function(false, true)?; Ok(Stmt::Func(Rc::new(f))) }
@@ -322,7 +295,7 @@ impl<'a> Parser<'a> {
                         self.expect_p(P::LParen)?;
                         let test = self.expression()?;
                         self.expect_p(P::RParen)?;
-                        // Nach `do {} while ()` darf das Semikolon immer fehlen.
+                        // The semicolon after `do {} while ()` is always optional.
                         let _ = self.eat_p(P::Semi)?;
                         Ok(Stmt::DoWhile { body: Box::new(body), test })
                     }
@@ -381,7 +354,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Folgt auf `let` etwas, das es zur Deklaration macht?
+    /// Whether what follows `let` makes it a declaration.
     fn let_is_decl(&mut self) -> R<bool> {
         let save = self.mark();
         self.bump()?;
@@ -393,7 +366,7 @@ impl<'a> Parser<'a> {
         Ok(yes)
     }
 
-    /// `async function` — aber nur ohne Zeilenumbruch dazwischen.
+    /// `async function`, only without a line terminator in between.
     fn async_function_ahead(&mut self) -> R<bool> {
         let save = self.mark();
         self.bump()?;
@@ -410,9 +383,8 @@ impl<'a> Parser<'a> {
         Ok(yes)
     }
 
-    /// Zuruecksetzen. Nur fuer die drei Stellen oben, an denen ein Token
-    /// Vorausschau nicht reicht — nicht als allgemeines Ruecksetzen: davon
-    /// leben Parser, die man nicht mehr versteht.
+    /// Backtracking point. Only for the few places where one token of
+    /// lookahead is not enough; not a general backtracking mechanism.
     fn mark(&self) -> Save {
         Save { pos: self.lx.pos, cur: self.cur.clone(), cur_start: self.cur_start,
                parens: self.paren_hdr.len(), prev_hdr: self.prev_hdr }
@@ -444,7 +416,7 @@ impl<'a> Parser<'a> {
         loop {
             let id = self.binding_pattern()?;
             let init = if self.eat_p(P::Eq)? { Some(self.assign_expr()?) } else { None };
-            // `const x;` hat keinen Wert, den es festhalten koennte.
+            // A destructuring declaration needs an initializer.
             if init.is_none() && kind == VarKind::Const && !matches!(id, Pat::Ident(_)) {
                 return self.err("destructuring declaration without initializer");
             }
@@ -479,7 +451,7 @@ impl<'a> Parser<'a> {
         let is_await = self.eat_kw(Kw::Await)?;
         self.expect_p(P::LParen)?;
 
-        // Leerer Kopf: `for (;;)`
+        // Empty head: `for (;;)`
         if self.is_p(P::Semi) {
             self.bump()?;
             return self.for_classic(None, is_await);
@@ -511,7 +483,7 @@ impl<'a> Parser<'a> {
                     Stmt::ForIn { left: Box::new(head), right, body: Box::new(body) }
                 });
             }
-            // Gewoehnliche Deklaration im Kopf — der Rest der Liste folgt.
+            // Ordinary declaration in the head; the rest of the list follows.
             let init = if self.eat_p(P::Eq)? { Some(self.assign_expr()?) } else { None };
             let mut decls = vec![Declarator { id, init }];
             while self.eat_p(P::Comma)? {
@@ -523,8 +495,8 @@ impl<'a> Parser<'a> {
             return self.for_classic(Some(ForInit::VarDecl(VarDecl { kind, decls })), is_await);
         }
 
-        // Ausdruckskopf. `in` muss hier ausgeschlossen bleiben, sonst frisst
-        // der Vergleichsoperator das `in` von `for (x in y)`.
+        // Expression head. `in` is excluded as an operator, or it would
+        // swallow the `in` of `for (x in y)`.
         let e = self.expression_no_in()?;
         if self.is_kw(Kw::In) || self.is_kw(Kw::Of) {
             let of = self.is_kw(Kw::Of);
@@ -562,7 +534,7 @@ impl<'a> Parser<'a> {
         let block = self.block_body()?;
         let mut handler = None;
         if self.eat_kw(Kw::Catch)? {
-            // `catch {}` ohne Bindung ist ES2019.
+            // `catch {}` without a binding (ES2019).
             let param = if self.eat_p(P::LParen)? {
                 let p = self.binding_pattern()?;
                 self.expect_p(P::RParen)?;
@@ -616,16 +588,16 @@ impl<'a> Parser<'a> {
         }
         self.in_switch -= 1;
         self.bump()?;
-        // Der ganze switch-Koerper ist EIN Bereich, ueber alle Faelle hinweg:
-        // `case 1: let x; case 2: let x;` ist ein Fehler.
+        // The whole switch body is one scope across all cases:
+        // `case 1: let x; case 2: let x;` is an error.
         let all: Vec<Stmt> = cases.iter().flat_map(|c| c.body.iter().cloned()).collect();
         self.check_scope(&all)?;
         Ok(Stmt::Switch { disc, cases })
     }
 
     fn expression_statement(&mut self) -> R<Stmt> {
-        // Ein Label ist ein Bezeichner mit `:` dahinter, und das sieht man
-        // erst nach dem Bezeichner.
+        // A label is an identifier followed by `:`, visible only after the
+        // identifier.
         if matches!(self.cur.tok, Tok::Ident(_)) {
             let save = self.mark();
             let name = self.ident_name()?;
@@ -721,7 +693,7 @@ impl<'a> Parser<'a> {
         Ok(Stmt::ExportNamed { decl: Some(Box::new(decl)), specifiers: Vec::new(), source: None })
     }
 
-    // ── Funktionen und Klassen ───────────────────────────────────────────
+    // ── Functions and classes ────────────────────────────────────────────
     fn function(&mut self, is_async: bool, need_name: bool) -> R<Func> {
         self.bump()?; // `function`
         let is_generator = self.eat_p(P::Star)?;
@@ -744,16 +716,13 @@ impl<'a> Parser<'a> {
                   expr_body: false, strict })
     }
 
-    /// Der Rumpf UND seine Strenge. Bis 0.98.0 gab er nur den Rumpf, und die
-    /// Strenge blieb im Parser stehen — zwei Aufrufer haben sie danach nicht
-    /// einmal zurueckgesetzt (`({ m(){ "use strict"; } })` faerbte alles
-    /// dahinter mit). Wer sie zurueckgibt, zwingt jeden Aufrufer, sich zu
-    /// entscheiden.
+    /// The body and its strictness. Returning the strictness forces each
+    /// caller to restore the outer mode afterwards, so a `"use strict"` in
+    /// one function does not leak into the code after it.
     fn block_body_with_prologue(&mut self) -> R<(Vec<Stmt>, bool)> {
-        // Die Parameter, die gerade gelesen wurden — der Vorspann braucht sie:
-        // `"use strict"` neben einer nicht-einfachen Parameterliste ist ein
-        // Fruehfehler, und dieselbe Direktive macht doppelte Namen nachtraeglich
-        // unzulaessig. Beides ist erst HIER entscheidbar.
+        // The parameters just read: `"use strict"` with a non-simple parameter
+        // list is an early error, and the directive retroactively forbids
+        // duplicate names. Both are decidable only here.
         let simple = core::mem::replace(&mut self.pend_simple, true);
         let names = core::mem::take(&mut self.pend_names);
         let was_strict = self.strict;
@@ -774,19 +743,15 @@ impl<'a> Parser<'a> {
         Ok((out, strict))
     }
 
-    /// Prueft EINE Anweisungsliste auf doppelte Deklarationen.
+    /// Checks one statement list for duplicate declarations.
     ///
-    /// Bewusst nur der gleiche Bereich, ohne die Hochwanderung von `var` durch
-    /// verschachtelte Bloecke: `{ let x; { var x; } }` faellt hier NICHT auf.
-    /// Das ist eine Teilmenge der Regel und keine falsche — was fehlt, steht
-    /// im test262-Lauf als „faelschlich angenommen" und ist damit gezaehlt
-    /// statt vergessen.
+    /// Same scope only; `var` hoisting through nested blocks is not tracked,
+    /// so `{ let x; { var x; } }` is not caught. A subset of the rule.
     ///
-    /// Die Richtung ist unsymmetrisch, und das ist die Regel selbst:
-    /// `var x; var x;` ist erlaubt, `let x; let x;` nicht, und `var x; let x;`
-    /// scheitert an der lexikalischen Seite.
+    /// The rule is asymmetric: `var x; var x;` is allowed, `let x; let x;` is
+    /// not, and `var x; let x;` fails on the lexical side.
     fn check_scope(&self, stmts: &[Stmt]) -> R<()> {
-        // (Name, ist_lexikalisch)
+        // (name, is_lexical)
         let mut seen: Vec<(String, bool)> = Vec::new();
         let mut add = |name: String, lexical: bool, p: &Parser| -> R<()> {
             if let Some((_, prev_lex)) = seen.iter().find(|(n, _)| *n == name) {
@@ -799,7 +764,7 @@ impl<'a> Parser<'a> {
             Ok(())
         };
         for st in stmts {
-            // Ein Label davor aendert nichts an der Deklaration dahinter.
+            // A label in front does not change the declaration behind it.
             let mut cur = st;
             while let Stmt::Labeled { body, .. } = cur { cur = body; }
             match cur {
@@ -819,8 +784,8 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Sammelt die gebundenen Namen eines Musters. Grundlage fuer „doppelter
-    /// Parameter" und spaeter fuer „doppelte lexikalische Deklaration".
+    /// Collects the bound names of a pattern (BoundNames), for duplicate
+    /// parameter and duplicate lexical declaration checks.
     fn bound_names(p: &Pat, out: &mut Vec<String>) {
         match p {
             Pat::Ident(n) => out.push(n.clone()),
@@ -835,13 +800,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Nach dem Lesen einer Parameterliste: Einfachheit und Namen festhalten,
-    /// und die Doppelung pruefen, wo sie schon jetzt entscheidbar ist.
+    /// After a parameter list: record simplicity and names, and check for
+    /// duplicates where already decidable.
     ///
-    /// `unique` = die Stelle verlangt Eindeutigkeit unabhaengig vom Modus
-    /// (Methoden, Pfeile, Setter). Sonst gilt sie im strengen Modus und bei
-    /// jeder nicht-einfachen Liste — und ausserdem noch einmal spaeter, wenn
-    /// eine `"use strict"`-Direktive im Koerper den Modus umlegt.
+    /// `unique`: uniqueness is required regardless of mode (methods, arrows,
+    /// setters). Otherwise it applies in strict mode and to every non-simple
+    /// list, and is rechecked if a `"use strict"` in the body switches mode.
     fn finish_params(&mut self, params: &[Pat], unique: bool) -> R<()> {
         let simple = params.iter().all(|p| matches!(p, Pat::Ident(_)));
         let mut names = Vec::new();
@@ -866,9 +830,8 @@ impl<'a> Parser<'a> {
         while !self.is_p(P::RParen) {
             if self.eat_p(P::Ellipsis)? {
                 let r = self.binding_pattern()?;
-                // Ein Rest-Parameter nimmt keinen Vorgabewert und duldet
-                // nichts hinter sich — auch kein Schlusskomma. Der alte Code
-                // brach hier einfach ab und liess beides durchgehen.
+                // A rest parameter takes no default and nothing may follow
+                // it, not even a trailing comma.
                 if self.is_p(P::Eq) { return self.err("rest parameter cannot have a default"); }
                 out.push(Pat::Rest(Box::new(r)));
                 if self.is_p(P::Comma) { return self.err("rest parameter must be last"); }
@@ -888,7 +851,7 @@ impl<'a> Parser<'a> {
 
     fn class(&mut self, need_name: bool) -> R<Class> {
         self.bump()?; // `class`
-        // Ein Klassenkoerper ist IMMER streng, auch in einer lockeren Datei.
+        // A class body is always strict, even in sloppy code.
         let outer_strict = self.strict;
         self.strict = true;
         let name = if self.is_p(P::LBrace) || self.is_kw(Kw::Extends) {
@@ -912,12 +875,12 @@ impl<'a> Parser<'a> {
         if self.is_kw(Kw::Static) {
             let save = self.mark();
             self.bump()?;
-            // `static` allein als Feldname (`static = 1`, `static;`) ist erlaubt.
+            // `static` alone as a field name (`static = 1`, `static;`) is allowed.
             if self.is_p(P::Eq) || self.is_p(P::Semi) || self.is_p(P::RBrace) || self.is_p(P::LParen) {
                 self.restore(save);
             } else if self.is_p(P::LBrace) {
-                // Statischer Initialisierungsblock (ES2022) — auch dort gibt
-                // es kein `arguments`.
+                // Static initialization block (ES2022); no `arguments` there
+                // either.
                 let ocf = core::mem::replace(&mut self.in_class_field, true);
                 let body = self.block_body()?;
                 self.in_class_field = ocf;
@@ -968,7 +931,7 @@ impl<'a> Parser<'a> {
                               expr_body: false, strict };
             return Ok(ClassMember::Method { key, func: Rc::new(func), kind, is_static, computed });
         }
-        // Feld.
+        // Field.
         let value = if self.eat_p(P::Eq)? {
             let ocf = core::mem::replace(&mut self.in_class_field, true);
             let v = self.assign_expr()?;
@@ -998,7 +961,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ── Ausdruecke ───────────────────────────────────────────────────────
+    // ── Expressions ──────────────────────────────────────────────────────
     fn expression(&mut self) -> R<Expr> {
         let first = self.assign_expr()?;
         if !self.is_p(P::Comma) { return Ok(first); }
@@ -1007,8 +970,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::Seq(list))
     }
 
-    /// Wie `expression`, aber `in` gilt nicht als Operator — nur fuer den
-    /// `for`-Kopf.
+    /// Like `expression`, but `in` is not an operator; for the `for` head.
     fn expression_no_in(&mut self) -> R<Expr> {
         let first = self.assign_expr_impl(true)?;
         if !self.is_p(P::Comma) { return Ok(first); }
@@ -1022,7 +984,7 @@ impl<'a> Parser<'a> {
     fn assign_expr_impl(&mut self, no_in: bool) -> R<Expr> {
         if self.in_gen && self.is_kw(Kw::Yield) { return self.yield_expr(); }
 
-        // Pfeil mit einem einzelnen Bezeichner: `x => …`, `async x => …`.
+        // Arrow with a single identifier: `x => …`, `async x => …`.
         if let Some(f) = self.try_simple_arrow()? { return Ok(f); }
 
         let left = self.conditional(no_in)?;
@@ -1046,14 +1008,14 @@ impl<'a> Parser<'a> {
             _ => return Ok(left),
         };
         self.bump()?;
-        // Nur bei `=` darf links ein Muster stehen; `[a] += 1` gibt es nicht.
+        // Only `=` takes a pattern on the left; `[a] += 1` is invalid.
         let pat = if op == AssignOp::Assign {
             self.expr_to_pattern(left, false)?
         } else {
             match &left {
                 Expr::Ident(_) | Expr::Member { .. } => Pat::Expr(Box::new(left)),
-                // Annex B B.3.5: im lockeren Modus ist ein Aufruf ein
-                // gueltiges Zuweisungsziel (es wirft dann zur Laufzeit).
+                // Annex B B.3.5: in sloppy mode a call is a valid assignment
+                // target (it throws at runtime).
                 Expr::Call { .. } if !self.strict => Pat::Expr(Box::new(left)),
                 _ => return self.err("invalid assignment target"),
             }
@@ -1068,9 +1030,7 @@ impl<'a> Parser<'a> {
         if !is_ident { return Ok(None); }
         let save = self.mark();
 
-        // `async x => …` und `async (…) => …`. Die geklammerte Form ist die
-        // haeufigere in echtem Code und war der zweite Grund, aus dem der erste
-        // Lauf gueltige Dateien ablehnte.
+        // `async x => …` and `async (…) => …`.
         if self.is_kw(Kw::Async) {
             self.bump()?;
             if !self.cur.newline_before {
@@ -1081,9 +1041,9 @@ impl<'a> Parser<'a> {
                         return Ok(Some(self.arrow_body(vec![p], true)?));
                     }
                 } else if self.is_p(P::LParen) {
-                    // Als Argumentliste lesen und beim `=>` umbiegen — dieselbe
-                    // Deckgrammatik wie beim gewoehnlichen Pfeil. Ohne `=>` ist
-                    // es ein Aufruf `async(…)`, und der Ruecksetzpunkt traegt.
+                    // Read as an argument list and convert at `=>` (cover
+                    // grammar). Without `=>` it is a call `async(…)` and we
+                    // backtrack.
                     if let Ok(args) = self.arguments() {
                         if self.is_p(P::Arrow) && !self.cur.newline_before {
                             self.bump()?;
@@ -1114,11 +1074,11 @@ impl<'a> Parser<'a> {
     }
 
     fn arrow_body(&mut self, params: Vec<Pat>, is_async: bool) -> R<Expr> {
-        // Ein Pfeil duldet doppelte Parameter NIE — auch im lockeren Modus.
+        // Arrows never allow duplicate parameters, even in sloppy mode.
         self.finish_params(&params, true)?;
         let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
-        // Ein Pfeil hat kein eigenes `yield`-Verhalten; `in_gen` bleibt aussen
-        // stehen, weil `yield` im Pfeilkoerper den umgebenden Generator meint.
+        // `in_gen` is left as is: arrows have no `yield` behaviour of their
+        // own.
         self.in_async = is_async; self.in_func = true;
         let (body, expr_body, strict) = if self.is_p(P::LBrace) {
             let outer_strict = self.strict;
@@ -1126,7 +1086,7 @@ impl<'a> Parser<'a> {
             self.strict = outer_strict;
             (b, false, st)
         } else {
-            // Ein Ausdruckskoerper hat keinen Vorspann — er erbt schlicht.
+            // An expression body has no prologue; it inherits strictness.
             let e = self.assign_expr()?;
             (vec![Stmt::Return(Some(e))], true, self.strict)
         };
@@ -1140,8 +1100,8 @@ impl<'a> Parser<'a> {
     fn yield_expr(&mut self) -> R<Expr> {
         self.bump()?;
         let delegate = self.eat_p(P::Star)?;
-        // Nach `yield*` MUSS ein Ausdruck folgen — auch ueber eine Zeile
-        // hinweg. Die Semikolon-Einfuegung greift nur beim nackten `yield`.
+        // `yield*` requires an operand, even across a line break; semicolon
+        // insertion applies only to bare `yield`.
         let arg = if (!delegate && self.cur.newline_before) || self.is_p(P::RParen) || self.is_p(P::RBracket)
             || self.is_p(P::RBrace) || self.is_p(P::Comma) || self.is_p(P::Semi)
             || self.is_p(P::Colon) || self.cur.tok == Tok::Eof {
@@ -1154,15 +1114,15 @@ impl<'a> Parser<'a> {
     fn conditional(&mut self, no_in: bool) -> R<Expr> {
         let test = self.binary(0, no_in)?;
         if !self.eat_p(P::Question)? { return Ok(test); }
-        // Die beiden Zweige sind AssignmentExpression — `in` gilt darin wieder.
+        // The middle branch is an AssignmentExpression with `in` allowed.
         let cons = self.assign_expr()?;
         self.expect_p(P::Colon)?;
         let alt = self.assign_expr_impl(no_in)?;
         Ok(Expr::Cond { test: Box::new(test), cons: Box::new(cons), alt: Box::new(alt) })
     }
 
-    /// Vorrangkletterung. Die Tabelle ist die aus der Spezifikation; `**` ist
-    /// rechtsassoziativ, alles andere links.
+    /// Precedence climbing over the spec's operator table. Exponentiation is
+    /// right associative, everything else left.
     fn binary(&mut self, min_prec: u8, no_in: bool) -> R<Expr> {
         let mut left = self.unary()?;
         let mut left_paren = self.just_paren;
@@ -1196,7 +1156,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             if prec < min_prec { break; }
-            // `??` darf sich nicht ungeklammert mit `&&`/`||` mischen.
+            // `??` may not mix with `&&`/`||` without parentheses.
             if let Some(LogicalOp::Nullish) = logical {
                 if !left_paren
                     && matches!(&left, Expr::Logical { op: LogicalOp::And | LogicalOp::Or, .. }) {
@@ -1238,19 +1198,17 @@ impl<'a> Parser<'a> {
         if let Some(op) = op {
             self.bump()?;
             let arg = self.unary()?;
-            // `delete x` auf einen blossen Bezeichner ist im strengen Modus
-            // ein Fruehfehler.
+            // `delete x` on a plain identifier is a strict-mode early error.
             if op == UnaryOp::Delete && self.strict && matches!(arg, Expr::Ident(_)) {
                 return self.err("delete of an unqualified identifier in strict mode");
             }
-            // `delete a.#x` ebenso — und ohne Modus-Frage, denn ein privater
-            // Name kann nur in einem Klassenkoerper stehen, und der ist immer
-            // streng. Klammern heben es nicht auf: der Baum hat sie nicht mehr,
-            // also greift die Pruefung ohnehin durch.
+            // So is `delete a.#x`, regardless of mode (private names only occur
+            // in class bodies, which are strict). Parentheses do not help;
+            // the tree no longer has them.
             if op == UnaryOp::Delete && deletes_private(&arg) {
                 return self.err("delete of a private member");
             }
-            // `-a ** b` ist mehrdeutig und deshalb verboten.
+            // `-a ** b` is ambiguous and therefore forbidden.
             if self.is_p(P::StarStar) { return self.err("unparenthesized unary before **"); }
             return Ok(Expr::Unary { op, arg: Box::new(arg) });
         }
@@ -1337,19 +1295,16 @@ impl<'a> Parser<'a> {
             if p != "target" { return self.err("expected new.target"); }
             return Ok(Expr::MetaProp { meta: "new".to_string(), prop: "target".to_string() });
         }
-        // `new import(…)` gibt es nicht — ImportCall ist eine CallExpression
-        // und kein Konstruktorziel. Zwei Nachbarn, die es SEHR WOHL gibt und
-        // die beide an einer zu breiten Fassung gescheitert sind:
-        // `new import.meta.Foo()` (MetaProperty) und `new (import(x))` (die
-        // Klammer macht daraus einen gewoehnlichen Operanden). Deshalb wird
-        // hier die DIREKTE Form gemerkt, bevor gelesen wird.
+        // `new import(…)` is invalid: ImportCall is a CallExpression, not a
+        // constructor target. `new import.meta.Foo()` and `new (import(x))`
+        // are valid, so only the direct form is rejected.
         let direct_import = self.is_kw(Kw::Import);
         let callee = if self.is_kw(Kw::New) { self.new_expr()? } else { self.primary()? };
         if direct_import && matches!(callee, Expr::ImportCall(_)) {
             return self.err("new import() is not allowed");
         }
-        // Die Glieder VOR den Argumenten gehoeren noch zum Konstruktor:
-        // `new a.b.C()` ruft `a.b.C`.
+        // Member accesses before the arguments belong to the constructor:
+        // `new a.b.C()` constructs `a.b.C`.
         let mut callee = callee;
         loop {
             if self.eat_p(P::Dot)? {
@@ -1389,9 +1344,8 @@ impl<'a> Parser<'a> {
             if !has_sub { self.bump()?; break; }
             self.bump()?;
             exprs.push(self.expression()?);
-            // Nach dem Ausdruck steht `}` — aber als Fortsetzung des Templates,
-            // nicht als Satzzeichen. Der Lexer muss ab DORT weiterlesen, also
-            // wird an der Stelle des `}` neu angesetzt.
+            // The `}` after the expression continues the template rather than
+            // being punctuation, so the lexer restarts right after it.
             if !self.is_p(P::RBrace) { return self.err("expected } in template"); }
             self.lx.pos = self.cur.start + 1;
             let t = self.lx.template_part().map_err(|e| ParseError { msg: e.msg.to_string(), at: e.at })?;
@@ -1404,9 +1358,8 @@ impl<'a> Parser<'a> {
     fn primary(&mut self) -> R<Expr> {
         match self.cur.tok.clone() {
             Tok::Num(n) => {
-                // `010` und `089` sind im strengen Modus Fruehfehler. Der Lexer
-                // merkt sich nur, DASS es die Form war — ob sie zaehlt, weiss
-                // erst der Parser, weil eine Direktive den Modus umlegt.
+                // `010` and `089` are strict-mode early errors. The lexer only
+                // records the form; a directive may change the mode.
                 if self.strict && self.num_legacy_octal {
                     return self.err("legacy octal literal in strict mode");
                 }
@@ -1418,11 +1371,9 @@ impl<'a> Parser<'a> {
             Tok::Regex(b, f) => { self.bump()?; Ok(Expr::Regex { body: b, flags: f }) }
             Tok::Template { .. } => {
                 let (quasis, exprs) = self.template_parts()?;
-                // **Nur ein GETAGGTES Template darf ungueltige Fluchten
-                // enthalten** (ES 12.9.6). Ohne Marke ist jede davon ein
-                // Fruehfehler — der Lexer merkt sie sich als `cooked: None`,
-                // weil er zur Lesezeit noch nicht weiss, ob eine Marke
-                // davorsteht; die Entscheidung faellt hier.
+                // Only a tagged template may contain invalid escapes
+                // (ES 12.9.6); untagged, each is an early error. The lexer
+                // records them as `cooked: None` because it cannot see the tag.
                 if quasis.iter().any(|q| q.cooked.is_none()) {
                     return self.err("invalid escape sequence in template");
                 }
@@ -1430,17 +1381,16 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident(_) => {
                 let n = self.ident_name()?;
-                // Ein Feld-Initialisierer laeuft ohne eigenes `arguments`, also
-                // ist der Name dort ein Fruehfehler. Ein PFEIL darin erbt das
-                // (auch er hat keins); eine gewoehnliche Funktion setzt es
-                // zurueck, deshalb steht das Sichern in `function`, nicht hier.
+                // `arguments` in a class field initializer is an early error.
+                // Arrows inherit the restriction; ordinary functions reset it
+                // (in `function`).
                 if self.in_class_field && n == "arguments" {
                     return self.err("arguments in a class field initializer");
                 }
                 Ok(Expr::Ident(n))
             }
             Tok::Punct(P::Hash) => {
-                // `#x in obj` — die Pruefung auf ein privates Feld.
+                // `#x in obj`: private field brand check.
                 self.bump()?;
                 let name = self.property_name()?;
                 Ok(Expr::Ident(alloc::format!("#{name}")))
@@ -1465,9 +1415,8 @@ impl<'a> Parser<'a> {
                 Kw::This => { self.bump()?; Ok(Expr::This) }
                 Kw::Super => {
                     self.bump()?;
-                    // `super()` ruft den Basiskonstruktor — in einem
-                    // Feld-Initialisierer oder statischen Block gibt es keinen
-                    // zu rufen. `super.x` bleibt dort erlaubt.
+                    // `super()` is not allowed in a field initializer or static
+                    // block; `super.x` is.
                     if self.in_class_field && self.is_p(P::LParen) {
                         return self.err("super() in a class field initializer");
                     }
@@ -1491,8 +1440,8 @@ impl<'a> Parser<'a> {
                         return Ok(Expr::MetaProp { meta: "import".to_string(), prop: "meta".to_string() });
                     }
                     let args = self.arguments()?;
-                    // `import()` ist keine gewoehnliche Funktion: kein Spread,
-                    // mindestens ein und hoechstens zwei Argumente (ES 13.3.10).
+                    // `import()` takes one or two arguments and no spread
+                    // (ES 13.3.10).
                     if args.is_empty() { return self.err("import() requires an argument"); }
                     if args.len() > 2 { return self.err("import() takes at most two arguments"); }
                     if args.iter().any(|a| matches!(a, Arg::Spread(_))) {
@@ -1509,11 +1458,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `(` — entweder eine Klammer, eine Sequenz, oder die Parameterliste
-    /// eines Pfeils. Welches, sagt erst das Zeichen NACH dem `)`.
+    /// `(`: a parenthesized expression, a sequence, or an arrow parameter
+    /// list. Only the token after `)` decides.
     fn paren_or_arrow(&mut self) -> R<Expr> {
         self.bump()?;
-        // `()` kann nur ein Pfeil sein.
+        // `()` can only be an arrow.
         if self.is_p(P::RParen) {
             self.bump()?;
             if !self.is_p(P::Arrow) { return self.err("empty parenthesized expression"); }
@@ -1529,7 +1478,7 @@ impl<'a> Parser<'a> {
             }
             items.push(self.assign_expr()?);
             if !self.eat_p(P::Comma)? { break; }
-            if self.is_p(P::RParen) { break; } // erlaubtes Schlusskomma
+            if self.is_p(P::RParen) { break; } // trailing comma
         }
         self.expect_p(P::RParen)?;
 
@@ -1586,11 +1535,8 @@ impl<'a> Parser<'a> {
             if kind != 0 {
                 let (og, oa, of) = (self.in_gen, self.in_async, self.in_func);
                 self.in_gen = false; self.in_async = false; self.in_func = true;
-                // Auch ein Getter im Objektliteral hat sein EIGENES
-                // `arguments` — steht das Literal in einem Feld-Initialisierer,
-                // gilt die Sperre darin nicht mehr. Genau daran ist
-                // `context={…,get(){…arguments…}}` aus dem Discourse-Bundle
-                // gescheitert.
+                // An accessor has its own `arguments`, so the class-field
+                // restriction does not apply inside it.
                 let ocf = core::mem::replace(&mut self.in_class_field, false);
                 let params = self.params_ex(true)?;
                 let outer_strict = self.strict;
@@ -1623,9 +1569,8 @@ impl<'a> Parser<'a> {
                 let v = self.assign_expr()?;
                 props.push(ObjProp { key, value: ObjPropValue::Init(v), computed, shorthand: false });
             } else {
-                // Kurzform — und `{a = 1}` ist NUR als Muster gueltig. Hier als
-                // Zuweisung aufgehoben, `expr_to_pattern` biegt es um; ein
-                // Objektliteral mit dieser Form scheitert dort.
+                // Shorthand. `{a = 1}` is valid only as a pattern: kept as an
+                // assignment here and converted by `expr_to_pattern`.
                 let name = match &key {
                     PropKey::Ident(n) => n.clone(),
                     _ => return self.err("invalid shorthand property"),
@@ -1645,10 +1590,10 @@ impl<'a> Parser<'a> {
         Ok(Expr::Object(props))
     }
 
-    // ── Deckgrammatik: Ausdruck zu Muster ────────────────────────────────
-    /// `binding` = die Stelle verlangt eine BINDUNG (Deklaration, Parameter).
-    /// Dort sind nur Bezeichner und Muster erlaubt; in einer Zuweisung darf
-    /// auch `a.b` oder `a[0]` links stehen.
+    // ── Cover grammar: expression to pattern ─────────────────────────────
+    /// `binding`: the position requires a binding (declaration, parameter),
+    /// where only identifiers and patterns are allowed; an assignment also
+    /// accepts `a.b` or `a[0]`.
     fn expr_to_pattern(&mut self, e: Expr, binding: bool) -> R<Pat> {
         Ok(match e {
             Expr::Ident(n) => {
@@ -1670,9 +1615,8 @@ impl<'a> Parser<'a> {
                         None => None,
                         Some(Expr::Spread(inner)) => {
                             if i + 1 != n { return self.err("rest element must be last"); }
-                            // `[...a = 1]` gibt es nicht, und `[...a,]` auch
-                            // nicht — ein Schlusskomma HINTER dem Rest ist ein
-                            // eigenes (leeres) Element und faellt oben durch.
+                            // `[...a = 1]` is invalid. `[...a,]` is too; the
+                            // trailing comma makes an empty element, caught above.
                             if matches!(*inner, Expr::Assign { .. }) {
                                 return self.err("rest element cannot have a default");
                             }
@@ -1694,8 +1638,7 @@ impl<'a> Parser<'a> {
                             if matches!(inner, Expr::Assign { .. }) {
                                 return self.err("rest property cannot have a default");
                             }
-                            // In einer BINDUNG muss der Rest ein blosser Name
-                            // sein: `{...{a}} = x` ist keine Bindung.
+                            // In a binding the rest must be a plain name.
                             let p = self.expr_to_pattern(inner, binding)?;
                             if binding && !matches!(p, Pat::Ident(_)) {
                                 return self.err("rest property must be an identifier");
@@ -1717,18 +1660,16 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Ein Programm parsen. `module` waehlt die Grammatik, nicht nur einen Schalter.
+/// Parse a program. `module` selects the goal symbol.
 pub fn parse(src: &str, module: bool) -> Result<Program, ParseError> {
     Parser::new(src, module)?.parse_program()
 }
 
 
-/// Loescht `delete e` einen privaten Namen?
+/// Whether `delete e` deletes a private name.
 ///
-/// Nur das AEUSSERSTE Glied zaehlt: `delete a.#x` ist verboten, `delete
-/// a.#x.y` erlaubt — dort faellt `y`, nicht `#x`. Die erste Fassung rekursierte
-/// in den Empfaenger und lehnte damit `delete this.#b.data[k]` ab, das auf
-/// srf.ch und im Discourse-Forum ausgeliefert wird. Gegen V8 geprueft.
+/// Only the outermost member counts: `delete a.#x` is forbidden,
+/// `delete a.#x.y` is allowed (it deletes `y`).
 fn deletes_private(e: &Expr) -> bool {
     match e {
         Expr::Chain(inner) => deletes_private(inner),

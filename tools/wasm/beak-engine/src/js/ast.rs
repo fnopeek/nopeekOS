@@ -1,13 +1,10 @@
-//! Der Syntaxbaum, in ESTree-Form.
+//! The syntax tree, in ESTree shape.
 //!
-//! ESTree, weil es die Form ist, die jedes Werkzeug der Welt spricht — acorn,
-//! esprima, babel. Das ist keine Bequemlichkeit: es macht den Baum gegen einen
-//! zweiten Parser vergleichbar, und ein Orakel, das man nicht selbst geschrieben
-//! hat, ist das einzige, das einen eigenen Fehler findet.
+//! ESTree is what acorn, esprima and babel produce, which makes the tree
+//! comparable against an independent parser.
 //!
-//! Kein Arena, keine Ids: `Box` und `Vec`. Der Baum wird einmal gebaut und dann
-//! gelesen; eine Arena spart Allokationen, die hier niemand zaehlt, und kostet
-//! Lesbarkeit an jeder Stelle.
+//! No arena, no ids: plain `Box` and `Vec`. The tree is built once and then
+//! only read.
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -17,13 +14,11 @@ use alloc::vec::Vec;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub body: Vec<Stmt>,
-    /// `module` heisst: `import`/`export` erlaubt, immer streng, `await` oben
-    /// erlaubt. Das ist kein Schalter am Parser, es ist eine andere Grammatik.
+    /// Module goal: `import`/`export` allowed, always strict, top-level
+    /// `await` allowed. A different grammar, not a parser switch.
     pub module: bool,
-    /// Ob dieses Programm STRENG ist. Der Parser wusste das immer und hat es
-    /// weggeworfen; die Laufzeit war dadurch blind, und der Modus entschied
-    /// nur noch ueber Fruehfehler. Die Strenge steht am CODE, nicht am
-    /// Zustand des Laufs — deshalb hier und nicht im Interpreter.
+    /// Whether the program is strict code. Strictness is a property of the
+    /// code, not of the run, so it lives here rather than in the interpreter.
     pub strict: bool,
 }
 
@@ -80,10 +75,9 @@ pub struct VarDecl { pub kind: VarKind, pub decls: Vec<Declarator> }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declarator { pub id: Pat, pub init: Option<Expr> }
 
-/// Ein Bindungsmuster. Dass Muster und Ausdruecke sich ueberlappen (`[a, b]`
-/// ist beides, bis das `=` kommt) ist die zentrale Schwierigkeit der Grammatik;
-/// der Parser liest deshalb erst einen Ausdruck und biegt ihn um
-/// (`expr_to_pattern`), statt vorauszuschauen.
+/// A binding pattern. Patterns and expressions overlap (`[a, b]` is either
+/// until the `=` arrives), so the parser reads an expression first and
+/// converts it (`expr_to_pattern`) instead of looking ahead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pat {
     Ident(String),
@@ -91,8 +85,8 @@ pub enum Pat {
     Object { props: Vec<ObjPatProp>, rest: Option<Box<Pat>> },
     Assign { left: Box<Pat>, right: Box<Expr> },
     Rest(Box<Pat>),
-    /// `[a.b] = c` — ein Ziel, das kein Bezeichner ist. In einer Deklaration
-    /// verboten, in einer Zuweisung erlaubt.
+    /// `[a.b] = c`: a target that is not an identifier. Allowed in an
+    /// assignment, forbidden in a declaration.
     Expr(Box<Expr>),
 }
 
@@ -109,13 +103,12 @@ pub struct Func {
     pub body: Vec<Stmt>,
     pub is_async: bool,
     pub is_generator: bool,
-    /// Ein Pfeil mit Ausdruckskoerper (`x => x*2`). Der Koerper steht dann als
-    /// einzelnes `Stmt::Return` in `body`, damit alles darunter EINEN Fall hat.
+    /// Arrow function. With `expr_body` (`x => x*2`) the expression is stored
+    /// as a single `Stmt::Return` in `body`, so later stages have one case.
     pub is_arrow: bool,
     pub expr_body: bool,
-    /// Streng? Entweder weil der Rumpf mit `"use strict"` beginnt, oder weil
-    /// die Funktion in strengem Code steht (auch: in einem Klassenkoerper,
-    /// der immer streng ist). Der Parser rechnet es ohnehin aus.
+    /// Strict if the body starts with `"use strict"` or the function sits in
+    /// strict code (a class body always is).
     pub strict: bool,
 }
 
@@ -175,8 +168,8 @@ pub enum Expr {
     Call { callee: Box<Expr>, args: Vec<Arg>, optional: bool },
     New { callee: Box<Expr>, args: Vec<Arg> },
     Member { obj: Box<Expr>, prop: Box<MemberProp>, optional: bool },
-    /// Die Kette um ein `?.`, damit ein Kurzschluss die GANZE Kette abbricht
-    /// und nicht nur das eine Glied.
+    /// The chain around a `?.`, so a short circuit aborts the whole chain,
+    /// not just one link.
     Chain(Box<Expr>),
     Seq(Vec<Expr>),
     Spread(Box<Expr>),

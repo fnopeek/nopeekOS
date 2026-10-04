@@ -1,14 +1,11 @@
-//! `Date` — die Zeitrechnung aus ES 21.4, nicht der Stumpf davor.
+//! `Date`, with the time arithmetic of ES 21.4.
 //!
-//! **Eine Zeitzone: UTC.** Es gibt keine Zonendatenbank im Bild und keinen
-//! Weg, an die des Wirts zu kommen; „lokal" IST hier UTC, und
-//! `getTimezoneOffset()` sagt ehrlich 0. Das ist eine benannte
-//! Vereinfachung, keine Luecke im Verborgenen: alle `getX`/`setX` fallen
-//! damit mit ihren `getUTCX`/`setUTCX` zusammen.
+//! One time zone: UTC. There is no zone database and no way to reach the
+//! host's, so local time is UTC and `getTimezoneOffset()` returns 0; every
+//! `getX`/`setX` coincides with its `getUTCX`/`setUTCX`.
 //!
-//! Der Zeitwert liegt in `ObjKind::Date` und nicht als Eigenschaft am
-//! Objekt — die Vorfassung trug ihn als `__t`, und der stand damit in
-//! `Object.getOwnPropertyNames(d)`.
+//! The time value lives in `ObjKind::Date`, not as a property, so it does
+//! not show up in `Object.getOwnPropertyNames(d)`.
 
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -22,13 +19,13 @@ const MS_DAY: f64 = 86400000.0;
 const MS_HOUR: f64 = 3600000.0;
 const MS_MIN: f64 = 60000.0;
 const MS_SEC: f64 = 1000.0;
-/// Der aeusserste darstellbare Zeitwert (ES 21.4.1.1).
+/// The largest representable time value (ES 21.4.1.1).
 const MAX_TIME: f64 = 8.64e15;
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-/// Kumulierte Tage vor jedem Monat, im Gemeinjahr.
+/// Cumulative days before each month, in a common year.
 const CUM: [f64; 13] = [0.0, 31.0, 59.0, 90.0, 120.0, 151.0,
                         181.0, 212.0, 243.0, 273.0, 304.0, 334.0, 365.0];
 
@@ -47,8 +44,8 @@ fn day_from_year(y: f64) -> f64 {
 fn time_from_year(y: f64) -> f64 { MS_DAY * day_from_year(y) }
 
 fn year_from_time(t: f64) -> f64 {
-    // Schaetzen und in hoechstens zwei Schritten korrigieren — die Schaetzung
-    // ueber die mittlere Jahreslaenge liegt nie weiter daneben.
+    // Estimate from the mean year length and correct in at most two steps;
+    // the estimate is never further off.
     let mut y = libm::floor(t / (MS_DAY * 365.2425)) + 1970.0;
     while time_from_year(y) > t { y -= 1.0; }
     while time_from_year(y + 1.0) <= t { y += 1.0; }
@@ -104,8 +101,8 @@ fn time_clip(t: f64) -> f64 {
     libm::trunc(t) + 0.0
 }
 
-/// Den Zeitwert eines `Date` holen. Alles andere wirft — `Date.prototype.
-/// getTime.call({})` ist ein TypeError, keine 0.
+/// The time value of a `Date`. Anything else throws:
+/// `Date.prototype.getTime.call({})` is a TypeError, not 0.
 fn this_time(i: &mut Interp, t: &Value) -> C<f64> {
     match t {
         Value::Obj(o) => match &o.borrow().kind {
@@ -134,8 +131,7 @@ fn pad(n: f64, w: usize) -> String {
     s
 }
 
-/// Das Jahr, wie `toString` es schreibt: vierstellig, mit Vorzeichen wenn
-/// negativ.
+/// The year as `toString` writes it: four digits, signed if negative.
 fn year_str(y: f64) -> String {
     if y < 0.0 { alloc::format!("-{}", pad(-y, 6)) } else { pad(y, 4) }
 }
@@ -173,9 +169,9 @@ fn iso_string(t: f64) -> String {
         pad(second(t), 2), pad(milli(t), 3))
 }
 
-/// `Date.parse`. Zwei Formate, und beide muessen sein: das ISO-Format der
-/// Spezifikation und die eigene Ausgabe von `toString`/`toUTCString` — die
-/// Spezifikation verlangt ausdruecklich, dass der Rueckweg klappt.
+/// `Date.parse`. Two formats: the spec's ISO format and our own
+/// `toString`/`toUTCString` output, since the spec requires that output to
+/// round-trip.
 pub fn parse_date(s: &str) -> f64 {
     let t = s.trim();
     if let Some(v) = parse_iso(t) { return v; }
@@ -189,7 +185,7 @@ fn num(s: &str) -> Option<f64> {
 
 fn parse_iso(s: &str) -> Option<f64> {
     let b = s.as_bytes();
-    // Jahr: vierstellig, oder mit Vorzeichen sechsstellig.
+    // Year: four digits, or six with a sign.
     let (year, neg, mut k) = if b.first() == Some(&b'+') || b.first() == Some(&b'-') {
         if b.len() < 7 { return None }
         (num(&s[1..7])?, b[0] == b'-', 7usize)
@@ -197,7 +193,7 @@ fn parse_iso(s: &str) -> Option<f64> {
         if b.len() < 4 { return None }
         (num(&s[0..4])?, false, 4usize)
     };
-    // `-000000` ist ausdruecklich ungueltig.
+    // `-000000` is explicitly invalid.
     if neg && year == 0.0 { return None; }
     let year = if neg { -year } else { year };
     let mut month = 1.0;
@@ -214,8 +210,8 @@ fn parse_iso(s: &str) -> Option<f64> {
     }
     if !(1.0..=12.0).contains(&month) || !(1.0..=31.0).contains(&dayv) { return None; }
     let (mut h, mut mi, mut sec, mut ms) = (0.0, 0.0, 0.0, 0.0);
-    // Ohne Zeitteil ist ein reines Datum UTC; MIT Zeitteil und ohne Zone
-    // waere es ortszeitlich — und die IST hier UTC.
+    // Date-only forms are UTC; date-time forms without a zone are local
+    // time, which is UTC here.
     let mut off = 0.0;
     if k < b.len() && (b[k] == b'T' || b[k] == b't') {
         if k + 6 > b.len() { return None }
@@ -232,7 +228,7 @@ fn parse_iso(s: &str) -> Option<f64> {
                 let mut e = start;
                 while e < b.len() && b[e].is_ascii_digit() { e += 1; }
                 if e == start { return None }
-                // Nur die ersten drei Stellen zaehlen, der Rest faellt weg.
+                // Only the first three digits count; the rest is dropped.
                 let frac = &s[start..e.min(start + 3)];
                 let mut v = num(frac)?;
                 for _ in frac.len()..3 { v *= 10.0; }
@@ -266,8 +262,8 @@ fn parse_iso(s: &str) -> Option<f64> {
     Some(time_clip(make_date(d, make_time(h, mi, sec, ms)) - off))
 }
 
-/// Die eigene Ausgabe wieder einlesen: `Www Mmm DD YYYY HH:MM:SS GMT+0000 …`
-/// und `Www, DD Mmm YYYY HH:MM:SS GMT`.
+/// Reads our own output back: `Www Mmm DD YYYY HH:MM:SS GMT+0000 …` and
+/// `Www, DD Mmm YYYY HH:MM:SS GMT`.
 fn parse_legacy(s: &str) -> Option<f64> {
     let cleaned = s.replace(',', " ");
     let toks: Vec<&str> = cleaned.split_whitespace().collect();
@@ -312,13 +308,13 @@ fn new_date(i: &mut Interp, t: f64) -> Value {
     Value::Obj(new_kind(Some(proto), ObjKind::Date(Rc::new(Cell::new(t)))))
 }
 
-/// Der gemeinsame Rumpf aller `setX`: die sieben Felder holen, die
-/// genannten ersetzen, wieder zusammensetzen. `first` ist das erste Feld,
-/// das das Argument ersetzt (0 = Jahr … 6 = Millisekunden).
+/// Shared body of every `setX`: take the seven fields, replace the given
+/// ones, recompose. `first` is the first field the arguments replace
+/// (0 = year … 6 = milliseconds).
 fn set_fields(i: &mut Interp, t: Value, a: &[Value], first: usize, count: usize) -> C<Value> {
     let cur = this_time(i, &t)?;
-    // Die Argumente werden IMMER umgewandelt, auch wenn der Zeitwert NaN ist
-    // — ihre Nebenwirkungen sind beobachtbar.
+    // Arguments are always converted, even when the time value is NaN;
+    // their side effects are observable.
     let mut args = Vec::with_capacity(count);
     for k in 0..count {
         match a.get(k) {
@@ -326,8 +322,8 @@ fn set_fields(i: &mut Interp, t: Value, a: &[Value], first: usize, count: usize)
             None => break,
         }
     }
-    // `setFullYear` auf einem ungueltigen Datum faengt bei der Epoche an;
-    // jedes andere `setX` bleibt ungueltig.
+    // `setFullYear` on an invalid date starts from the epoch; every other
+    // `setX` stays invalid.
     let base = if cur.is_nan() { if first == 0 { 0.0 } else { return set_time(i, &t, f64::NAN).map(Value::Num) } } else { cur };
     let mut f = [year_from_time(base), month_from_time(base), date_from_time(base),
                  hour(base), minute(base), second(base), milli(base)];
@@ -338,23 +334,15 @@ fn set_fields(i: &mut Interp, t: Value, a: &[Value], first: usize, count: usize)
     set_time(i, &t, v).map(Value::Num)
 }
 
-/// `Intl` — so viel davon, wie eine Seite braucht, um nicht zu STERBEN.
+/// `Intl`: the minimum a page needs to not fail on a ReferenceError.
 ///
-/// **Es gibt keine Gebietsdatenbank in beak**, und diese Funktion tut nicht so.
-/// Was sie liefert, ist wahr: `resolvedOptions()` nennt die Zeitzone, die die
-/// Maschine wirklich fuehrt (UTC — `npk_unix_time` gibt keine andere), den
-/// gregorianischen Kalender und lateinische Ziffern. `format` reicht an die
-/// `toLocale*`-Methoden von `Date` weiter, die es schon gibt.
+/// There is no locale database, and this does not pretend otherwise.
+/// `resolvedOptions()` reports what the engine actually does (UTC, since
+/// `npk_unix_time` provides nothing else; the Gregorian calendar; Latin
+/// digits). `format` delegates to the existing `Date` `toLocale*` methods.
 ///
-/// Gebaut, weil die Ausfallart ohne es toedlich ist. Der Zensus zaehlt ueber
-/// zwoelf Zielseiten NULL `Intl`-Aufrufe; sandbox.nopeek.ch hat genau einen —
-/// `Intl.DateTimeFormat().resolvedOptions().timeZone`, in `init()`, eine
-/// Zeile ueber `initEventListeners()`. Ein `ReferenceError` dort kostete
-/// jeden Knopf der Seite.
-///
-/// Was FEHLT und hier nicht vorgetaeuscht wird: Zahlengruppierung nach
-/// Gebiet, Waehrungen, Pluralregeln, Kollation, relative Zeiten. Steht in
-/// CONFORMANCE.
+/// Not implemented: locale-aware number grouping, currencies, plural rules,
+/// collation, relative time.
 fn intl_def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
     let g = native(Some(proto.clone()), f, name, len, false);
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
@@ -365,8 +353,8 @@ fn install_intl(realm: &mut Realm) {
     let intl = new_obj(Some(realm.object_proto.clone()));
     intl.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("Intl")));
 
-    // Ein gemeinsamer Prototyp fuer beide Formatierer: `resolvedOptions` sagt,
-    // was die Maschine wirklich kann, `format` reicht weiter.
+    // One shared prototype for both formatters: `resolvedOptions` reports
+    // what the engine can do, `format` delegates.
     let mk = |realm: &mut Realm, tag: &'static str, fmt: NativeFn| -> Gc {
         let proto = new_obj(Some(realm.object_proto.clone()));
         proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str(tag)));
@@ -379,7 +367,7 @@ fn install_intl(realm: &mut Realm) {
             b.define("locale", Prop::data(loc));
             b.define("calendar", Prop::data(Value::str("gregory")));
             b.define("numberingSystem", Prop::data(Value::str("latn")));
-            // Die Wahrheit ueber beak: die Uhr laeuft in UTC.
+            // The clock runs in UTC.
             b.define("timeZone", Prop::data(Value::str("UTC")));
             drop(b);
             Ok(Value::Obj(o))
@@ -401,8 +389,7 @@ fn install_intl(realm: &mut Realm) {
         Ok(Value::string(alloc::format!("{n}")))
     });
 
-    // Beide sind mit UND ohne `new` aufrufbar (ES2024 §11.1.2) — eine Seite
-    // schreibt `Intl.DateTimeFormat()` genauso oft wie `new`.
+    // Both are callable with and without `new` (ES2024 11.1.2).
     let dtf_p = dtf_proto.clone();
     let nf_p = nf_proto.clone();
     realm.intl_dtf_proto = dtf_p;
@@ -451,12 +438,12 @@ pub fn install(realm: &mut Realm) {
         o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
     };
 
-    // ── Der Konstruktor ──────────────────────────────────────────────────
+    // ── The constructor ──────────────────────────────────────────────────
     //
-    // Drei Formen, und die dritte ist die einzige, die rechnet: kein
-    // Argument = jetzt, ein Argument = Zahl oder Text, ab zwei = Felder.
+    // Three forms: no argument = now, one argument = number or string,
+    // two or more = fields.
     let ctor = native(Some(fp.clone()), |i, _, a| {
-        // `Date()` OHNE `new` gibt Text, nicht ein Objekt.
+        // `Date()` without `new` returns a string, not an object.
         if !i.native_new {
             let now = { let t = i.now_ms(); i.epoch_ms + t };
             return Ok(Value::string(full_string(libm::trunc(now))));
@@ -464,8 +451,8 @@ pub fn install(realm: &mut Realm) {
         let t = match a.len() {
             0 => { let t = i.now_ms(); libm::trunc(i.epoch_ms + t) }
             1 => {
-                // Ein `Date` als Argument gibt seinen Zeitwert direkt weiter,
-                // ohne den Umweg ueber den Text.
+                // A `Date` argument passes its time value directly, without
+                // the detour through text.
                 if let Value::Obj(o) = &a[0] {
                     if let ObjKind::Date(c) = &o.borrow().kind { let v = c.get(); return Ok(new_date(i, v)); }
                 }
@@ -481,8 +468,8 @@ pub fn install(realm: &mut Realm) {
                 for k in 0..7 {
                     f[k] = match a.get(k) { Some(v) => i.to_number(v)?, None => defaults[k] };
                 }
-                // Zwei Ziffern heissen 19xx — die annexB-Regel, und sie gilt
-                // auch hier, nicht nur in `setYear`.
+                // Two-digit years mean 19xx (Annex B); the rule applies here
+                // too, not only in `setYear`.
                 if !f[0].is_nan() {
                     let y = libm::trunc(f[0]);
                     if (0.0..=99.0).contains(&y) { f[0] = 1900.0 + y; }
@@ -496,8 +483,8 @@ pub fn install(realm: &mut Realm) {
     proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
 
     def(&ctor, "now", |i, _, _| {
-        // Eine steigende Uhr auf dem Zeitstempel des Wirts: zwei Aufrufe
-        // duerfen nicht denselben Wert geben, und der Wert muss heute sein.
+        // A monotonic clock on top of the host timestamp: two calls must not
+        // return the same value, and the value must be the current time.
         let t = i.now_ms();
         Ok(Value::Num(libm::trunc(i.epoch_ms + t)))
     }, 0);
@@ -520,10 +507,10 @@ pub fn install(realm: &mut Realm) {
                                           make_time(f[3], f[4], f[5], f[6])))))
     }, 7);
 
-    // ── Die Leser ────────────────────────────────────────────────────────
+    // ── Getters ──────────────────────────────────────────────────────────
     //
-    // Weil die Ortszeit UTC ist, ist jedes `getX` sein eigenes `getUTCX` —
-    // dieselbe Funktion, kein zweiter Rumpf.
+    // Since local time is UTC, each `getX` is its `getUTCX`: the same
+    // function, no second body.
     macro_rules! getter {
         ($($n:literal => $f:expr),* $(,)?) => { $(
             def(&proto, $n, |i, t, _| {
@@ -543,7 +530,7 @@ pub fn install(realm: &mut Realm) {
         "getMinutes" => minute, "getUTCMinutes" => minute,
         "getSeconds" => second, "getUTCSeconds" => second,
         "getMilliseconds" => milli, "getUTCMilliseconds" => milli,
-        // annexB: das Jahr minus 1900, mit allen Folgen.
+        // Annex B: the year minus 1900.
         "getYear" => |t| year_from_time(t) - 1900.0,
     }
     def(&proto, "getTime", |i, t, _| Ok(Value::Num(this_time(i, &t)?)), 0);
@@ -553,7 +540,7 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Num(if v.is_nan() { f64::NAN } else { 0.0 }))
     }, 0);
 
-    // ── Die Schreiber ────────────────────────────────────────────────────
+    // ── Setters ──────────────────────────────────────────────────────────
     macro_rules! setter {
         ($($n:literal => $first:literal, $cnt:literal),* $(,)?) => { $(
             def(&proto, $n, |i, t, a| set_fields(i, t, a, $first, $cnt), $cnt);
@@ -573,7 +560,7 @@ pub fn install(realm: &mut Realm) {
         let v = time_clip(i.to_number(a.first().unwrap_or(&Value::Undefined))?);
         set_time(i, &t, v).map(Value::Num)
     }, 1);
-    // annexB: zweistellige Jahre heissen 19xx.
+    // Annex B: two-digit years mean 19xx.
     def(&proto, "setYear", |i, t, a| {
         let cur = this_time(i, &t)?;
         let y = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
@@ -586,7 +573,7 @@ pub fn install(realm: &mut Realm) {
         set_time(i, &t, v).map(Value::Num)
     }, 1);
 
-    // ── Die Texte ────────────────────────────────────────────────────────
+    // ── String forms ─────────────────────────────────────────────────────
     macro_rules! stringer {
         ($($n:literal => $f:expr),* $(,)?) => { $(
             def(&proto, $n, |i, t, _| {
@@ -601,8 +588,8 @@ pub fn install(realm: &mut Realm) {
         "toDateString" => |t| if t.is_nan() { "Invalid Date".to_string() } else { date_string(t) },
         "toTimeString" => |t| if t.is_nan() { "Invalid Date".to_string() } else { time_string(t) },
         "toUTCString" => utc_string,
-        // Ohne Landeseinstellungen sind die drei ihre gewoehnlichen
-        // Geschwister. Eine erfundene Ortsschreibweise waere die falsche.
+        // Without locale data these three are their plain siblings; an
+        // invented locale format would be wrong.
         "toLocaleString" => full_string,
         "toLocaleDateString" => |t| if t.is_nan() { "Invalid Date".to_string() } else { date_string(t) },
         "toLocaleTimeString" => |t| if t.is_nan() { "Invalid Date".to_string() } else { time_string(t) },
@@ -612,8 +599,8 @@ pub fn install(realm: &mut Realm) {
         if !v.is_finite() { return i.range_err("Invalid time value"); }
         Ok(Value::string(iso_string(v)))
     }, 0);
-    // `toJSON` ist GENERISCH: es fragt `toISOString` am Objekt, nicht die
-    // eigene Rechnung. Ein Ersatz dort schlaegt durch.
+    // `toJSON` is generic: it calls `toISOString` on the object rather than
+    // computing itself, so an override takes effect.
     def(&proto, "toJSON", |i, t, _| {
         let o = i.to_object(&t)?;
         let ov = Value::Obj(o);
@@ -623,13 +610,13 @@ pub fn install(realm: &mut Realm) {
         if !i.is_callable(&f) { return i.type_err("toISOString is not a function"); }
         i.call(&f, ov, &[])
     }, 1);
-    // annexB: dieselbe Funktion wie `toUTCString`, nicht eine zweite.
+    // Annex B: the same function object as `toUTCString`.
     {
         let v = proto.borrow().get_own("toUTCString").and_then(|p| p.value.clone());
         if let Some(v) = v { proto.borrow_mut().define("toGMTString", Prop::builtin(v)); }
     }
-    // Der Wunsch „default" wird hier zu Text — daran haengt, dass
-    // `date + ""` das Datum schreibt statt die Millisekunden.
+    // The "default" hint becomes a string; that is what makes `date + ""`
+    // print the date rather than the milliseconds.
     {
         let g = native(Some(fp.clone()), |i, t, a| {
             if !matches!(t, Value::Obj(_)) { return i.type_err("Symbol.toPrimitive on a non-object"); }

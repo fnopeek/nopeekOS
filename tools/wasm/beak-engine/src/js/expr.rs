@@ -1,4 +1,4 @@
-//! Ausdruecke auswerten.
+//! Expression evaluation (tree walker).
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -60,9 +60,8 @@ impl Interp {
             Expr::Unary { op, arg } => self.eval_unary(*op, arg, env),
             Expr::Update { op, arg, prefix } => self.eval_update(*op, arg, *prefix, env),
             Expr::Binary { op, left, right } => {
-                // `#x in obj` fragt nach der MARKE, nicht nach einer
-                // Eigenschaft — und die linke Seite ist kein Wert, den man
-                // auswerten koennte.
+                // `#x in obj` checks the private brand, not a property; the
+                // left side is not a value to evaluate.
                 if *op == BinOp::In {
                     if let Expr::Ident(n) = &**left {
                         if let Some(name) = n.strip_prefix('#') {
@@ -107,18 +106,16 @@ impl Interp {
             Expr::New { callee, args } => {
                 let f = self.eval(callee, env)?;
                 let a = self.eval_args(args, env)?;
-                // Derselbe Name wie in der Befehlsmaschine — beide Maschinen
-                // muessen dieselbe Meldung geben, sonst sagt ein Wechsel des
-                // Weges etwas anderes ueber denselben Fehler.
+                // Same name as the bytecode VM passes, so both engines report
+                // the same error message.
                 let name = super::compile::dotted_name(callee);
                 self.construct_named(&f, &a, name.as_deref())
             }
             Expr::Spread(inner) => self.eval(inner, env),
             Expr::Super => Ok(Value::Undefined),
-            // `import.meta` liegt als Bindung in der Modulumgebung; die Kette
-            // gibt die richtige, auch aus einem Rueckruf heraus. Ausserhalb
-            // eines Moduls gibt es sie nicht — dann `undefined`, wie
-            // `new.target`.
+            // `import.meta` is a binding in the module environment; the scope
+            // chain finds the right one, even from a callback. Outside a
+            // module there is none, so `undefined`, like `new.target`.
             Expr::MetaProp { meta, prop } => {
                 if meta == "import" && prop == "meta" {
                     let n = super::modules::META_LOCAL;
@@ -129,11 +126,9 @@ impl Interp {
                 Ok(Value::Undefined)
             }
             Expr::ImportCall(_) => self.type_err("dynamic import is not supported"),
-            // `tag`a${x}b`` (ES 13.2.8.6): die Marke bekommt den
-            // Vorlagen-Gegenstand als erstes Argument und danach die
-            // Einsetzungen. **Der Empfaenger gehoert dazu** — `o.tag`x``
-            // ruft mit `o` als `this`, genau wie ein gewoehnlicher Aufruf;
-            // `String.raw` ist die eingebaute Marke, die das ausnutzt.
+            // `tag`a${x}b`` (ES 13.2.8.6): the tag receives the template
+            // object first, then the substitutions. The receiver counts:
+            // `o.tag`x`` calls with `o` as `this`, like an ordinary call.
             Expr::TaggedTemplate { tag, quasis, exprs } => {
                 let (this_val, f) = match &**tag {
                     Expr::Member { obj, prop, optional } => {
@@ -166,15 +161,10 @@ impl Interp {
         Ok(self.load_ident_depth(n, env)?.0)
     }
 
-    /// Wie `load_ident`, sagt aber MIT, in welcher Tiefe der Name stand —
-    /// `None` heisst „nicht in der Kette, das globale Objekt hat geantwortet".
-    /// Nur der Wegweiser braucht das; siehe `Chunk::hints`.
-    /// Hat die Objektumgebung eines `with` diesen Namen?
+    /// Does the object environment of a `with` have this name?
     ///
-    /// Nicht bloss `HasProperty`: `Symbol.unscopables` kann einen Namen
-    /// AUSBLENDEN, obwohl er da ist. Genau dafuer gibt es die Tabelle —
-    /// `with([]) { keys }` darf nicht `Array.prototype.keys` finden, sonst
-    /// bricht Code, der aelter ist als die Methode.
+    /// Not just `HasProperty`: `Symbol.unscopables` can hide a present name,
+    /// so `with([]) { keys }` does not find `Array.prototype.keys`.
     pub(crate) fn with_has_pub(&mut self, o: &Gc, n: &str) -> C<bool> { self.with_has(o, n) }
 
     fn with_has(&mut self, o: &Gc, n: &str) -> C<bool> {
@@ -186,24 +176,22 @@ impl Interp {
         Ok(true)
     }
 
+    /// Like `load_ident`, but also returns the depth at which the name was
+    /// found; `None` means "not in the chain" (global object or `with`
+    /// object). Only the lookup hints need it; see `Chunk::hints`.
     fn load_ident_depth(&mut self, n: &str, env: &Rc<RefCell<Env>>)
         -> C<(Value, Option<usize>)> {
-        // **EIN Durchgang durch die Kette.** Bis 0.117.0 liefen hier
-        // nacheinander `env_lookup`, `env_deref` und zwei `vars.get`: derselbe
-        // Name bis zu VIERMAL gehasht und verglichen, und `env_deref` baute
-        // dafuer jedes Mal ein `Rc<str>` auf dem Haufen — fuer eine
-        // Import-Kette, die fast nie betreten wird. `LoadVar` ist 24 % aller
-        // Befehle.
+        // One walk up the chain, hashing the name once per scope.
         let mut cur = env.clone();
         let mut depth = 0usize;
         loop {
-            // **Die Objektumgebung eines `with` zuerst.** Ein `None` ist eine
-            // Nullpruefung; nur wo wirklich ein `with` steht, kostet es etwas.
+            // The object environment of a `with` first. `None` is only a null
+            // check; it costs something only where a `with` exists.
             let wo = cur.borrow().with_obj.clone();
             if let Some(o) = wo {
                 if self.with_has(&o, n)? {
-                    // KEINE Tiefe zurueck: ein Wegweiser darf auf eine
-                    // Bindung, die aus einem Objekt kommt, nicht zeigen.
+                    // No depth: a lookup hint must not point at a binding
+                    // that comes from an object.
                     return Ok((self.get(&Value::Obj(o), n)?, None));
                 }
             }
@@ -212,23 +200,22 @@ impl Interp {
                 Hit::Dead =>
                     return self.ref_err(
                         &alloc::format!("cannot access '{n}' before initialization")),
-                // Ein importierter Name steht nicht HIER, sondern im Modul,
-                // aus dem er kommt — und er wird bei JEDEM Lesen dort geholt.
+                // An imported name lives in its source module and is read
+                // from there on every access (live binding).
                 Hit::Import(e, n2) => return Ok((self.load_import(e, n2, n)?, None)),
                 Hit::Up(Some(p)) => { cur = p; depth += 1; }
                 Hit::Up(None) => break,
             }
         }
-        // Nicht in der Kette: das globale Objekt fragen, sonst ReferenceError.
-        // Der Unterschied zu `undefined` ist der ganze Sinn der Sache.
+        // Not in the chain: ask the global object, else ReferenceError (not
+        // `undefined`).
         let g = self.realm.global.clone();
         if self.has_property(&g, n) { return Ok((self.get(&Value::Obj(g), n)?, None)); }
         self.ref_err(&alloc::format!("{n} is not defined"))
     }
 
-    /// Einem `import` bis zur echten Bindung folgen — der SELTENE Weg.
-    /// Hier darf ein `Rc<str>` entstehen; auf dem gewoehnlichen entsteht
-    /// keins mehr.
+    /// Follow an `import` to the actual binding. The rare path; it may
+    /// allocate an `Rc<str>`.
     fn load_import(&mut self, e: Rc<RefCell<Env>>, n2: Rc<str>, n: &str) -> C<Value> {
         let Some((e, n2)) = super::interp::env_deref_from(e, n2) else {
             return self.ref_err(&alloc::format!("circular import binding for '{n}'"));
@@ -245,13 +232,11 @@ impl Interp {
         Ok(bd.value.clone())
     }
 
-    /// Der Prototyp, auf dem `super` sucht: der des Heimatobjekts.
-    /// `super(...)` — den Elternkonstruktor auf DIESEM `this` fahren.
+    /// `super(...)`: run the parent constructor on this `this`.
     ///
-    /// Kein eigener Empfaenger, kein eigenes Objekt: das gibt es schon,
-    /// `construct` hat es angelegt, bevor der Koerper lief. Eigene Funktion,
-    /// weil die Befehlsmaschine sie ruft — und weil die Instanzfelder daran
-    /// haengen.
+    /// The object already exists; `construct` created it before the body
+    /// ran. Public because the bytecode VM calls it, and instance fields are
+    /// initialized here.
     pub fn super_call(&mut self, args: &[Value], env: &Rc<RefCell<Env>>) -> C<Value> {
         let this_val = env_this(env);
         let parent = self.super_parent(env)?;
@@ -259,19 +244,17 @@ impl Interp {
         if !self.is_callable(&ctor) {
             return self.type_err("super: the parent class has no constructor");
         }
-        // Ein EINGEBAUTER Elternkonstruktor baut sein eigenes Objekt und kann
-        // `this` gar nicht fuellen — `super()` in `class E extends Error {}`
-        // hat die Meldung bisher weggeworfen. Also wird das Gebaute
-        // UEBERNOMMEN: Art und eigene Eigenschaften wandern hinueber, der
-        // Prototyp der abgeleiteten Klasse bleibt.
+        // A builtin parent constructor builds its own object and cannot fill
+        // `this` (e.g. `class E extends Error {}`). So the built object is
+        // adopted: its kind and own properties move over, while the derived
+        // class's prototype stays.
         let native_parent = matches!(&ctor, Value::Obj(o)
             if matches!(o.borrow().kind, ObjKind::Native(_)));
         if native_parent {
-            // Der eingebaute Konstruktor bekommt das frisch angelegte `this`
-            // als EMPFAENGER. Er baut trotzdem sein eigenes Objekt, aber ohne
-            // diese Zeile wuesste er nicht, welche Klasse gerade gebaut wird
-            // — und `HTMLElement` braucht genau das, um die angemeldete
-            // Marke aus der Prototypkette zu lesen.
+            // The builtin receives the freshly created `this` as receiver.
+            // It still builds its own object, but this tells it which class
+            // is being constructed; `HTMLElement` reads the registered name
+            // from the prototype chain.
             let built = self.construct_on(&ctor, this_val.clone(), args)?;
             if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
                 let keys = src.borrow().raw_keys();
@@ -281,22 +264,16 @@ impl Interp {
                 }
                 let kind = core::mem::replace(&mut src.borrow_mut().kind, ObjKind::Plain);
                 dst.borrow_mut().kind = kind;
-                // **Und der Verweis zurueck.** Ein eingebauter Konstruktor
-                // kann sein Objekt anderswo eingetragen haben — `HTMLElement`
-                // haengt es an den DOM-Knoten. Wird die Kopie hier nicht
-                // nachgezogen, zeigen Baum und Instanz auf ZWEI Objekte: die
-                // Komponente traegt ihre Felder, der Knoten kennt sie nicht,
-                // und `document.querySelector` liefert die falsche Haelfte.
+                // Update back-references too: a builtin constructor may have
+                // registered its object elsewhere (`HTMLElement` attaches it
+                // to the DOM node). Otherwise tree and instance would refer to
+                // two different objects.
                 super::dombind::readopt(self, src, dst);
             }
         } else {
             let r = self.call(&ctor, this_val.clone(), args)?;
-            // **Gibt der Elternkonstruktor ein OBJEKT zurueck, ist DAS `this`.**
-            // `class Base { constructor(o) { return o } }` ist das Muster
-            // hinter jeder Klasse, die eine bestehende Instanz zurueckreicht.
-            // Bis 0.99.0 warf `super()` die Antwort weg und arbeitete auf dem
-            // frisch gebauten Objekt weiter — sichtbar wurde es erst, als die
-            // Markenpruefung ein privates Feld auf dem falschen Objekt suchte.
+            // If the parent constructor returns an object, that becomes
+            // `this` (`class Base { constructor(o) { return o } }`).
             if let Value::Obj(o) = &r {
                 if !matches!(&this_val, Value::Obj(t) if Rc::ptr_eq(t, o)) {
                     set_env_this(env, r.clone());
@@ -307,11 +284,9 @@ impl Interp {
         self.finish_super(env, this_val)
     }
 
-    /// **Jetzt erst die eigenen Instanzfelder.** Die Spec legt sie nach dem
-    /// Elternkonstruktor an, und der Unterschied ist sichtbar: ein
-    /// Initialisierer darf ein Feld der Elternklasse lesen. Welche Klasse
-    /// „eigene" ist, sagt das Heimatobjekt — sein `constructor` ist der
-    /// Konstruktor, in dem wir stehen.
+    /// Initialize the class's own instance fields, after the parent
+    /// constructor as the spec requires (an initializer may read a parent
+    /// field). The home object's `constructor` identifies the class.
     fn finish_super(&mut self, env: &Rc<RefCell<Env>>, this_val: Value) -> C<Value> {
         if let Some(home) = env_home(env) {
             let own = self.get(&Value::Obj(home), "constructor")?;
@@ -326,12 +301,13 @@ impl Interp {
         Ok(Value::Undefined)
     }
 
-    /// `super.k` — der Wert kommt von OBEN, `this` bleibt unten. Eigene
-    /// Funktion, weil beide Maschinen sie rufen.
+    /// `super.k`: the value comes from the parent, `this` stays the current
+    /// one. Public because both engines call it.
     pub fn super_get(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
         self.super_lookup(key, env)
     }
 
+    /// The prototype `super` looks up on: that of the home object.
     fn super_parent(&mut self, env: &Rc<RefCell<Env>>) -> C<Gc> {
         let Some(home) = env_home(env) else {
             return self.type_err("'super' outside of a method");
@@ -343,9 +319,8 @@ impl Interp {
         }
     }
 
-    /// `super.k` aufloesen: der Wert kommt von OBEN, `this` bleibt unten.
-    /// Genau diese Trennung ist der Sinn von `super` — der gefundene Wert
-    /// wird gleich mit dem eigenen Empfaenger gerufen.
+    /// Resolve `super.k`: the value comes from the parent prototype, `this`
+    /// stays the current receiver.
     fn super_lookup(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
         let parent = self.super_parent(env)?;
         let this_val = env_this(env);
@@ -353,14 +328,8 @@ impl Interp {
         Ok((f, this_val))
     }
 
-    /// Der Schluessel eines Elementzugriffs.
-    ///
-    /// **Es gab davon zwei**, eine hier und eine in `eval.rs` — Wort fuer Wort
-    /// dieselbe, bis ich das private Feld auf einen NUL-Schluessel umstellte
-    /// und nur eine davon anfasste. Danach schrieb `this.#p = v` unter `#p`
-    /// und `this.#p` las unter `\0#p`: das Feld war zugleich sichtbar und
-    /// leer. Eine Kopie ist kein Duplikat, sie ist eine zweite Semantik, die
-    /// auf ihren Tag wartet.
+    /// The key of a member access. Keep this the only implementation;
+    /// private names must map to the same key (`private_key`) everywhere.
     pub fn member_key2(&mut self, p: &MemberProp, env: &Rc<RefCell<Env>>) -> C<Rc<str>> {
         Ok(match p {
             MemberProp::Ident(n) => Rc::from(n.as_str()),
@@ -382,12 +351,9 @@ impl Interp {
 
     fn eval_call(&mut self, callee: &Expr, args: &[Arg], optional: bool,
                  env: &Rc<RefCell<Env>>) -> C<Value> {
-        // `a.b()` bindet `this` an `a` — deshalb wird der Empfaenger hier
-        // getrennt geholt und nicht ueber `eval(callee)`, das ihn verlieren
-        // wuerde.
-        // `super(...)` ruft den Konstruktor der Elternklasse auf DIESEM `this`.
-        // Kein eigener Empfaenger, kein eigenes Objekt: das Objekt gibt es
-        // schon, `construct` hat es angelegt, bevor der Koerper lief.
+        // `a.b()` binds `this` to `a`, so the receiver is fetched separately
+        // rather than via `eval(callee)`, which would lose it.
+        // `super(...)` calls the parent constructor on the existing `this`.
         if matches!(callee, Expr::Super) {
             let a = self.eval_args(args, env)?;
             return self.super_call(&a, env);
@@ -414,10 +380,8 @@ impl Interp {
                 }
                 (base, f)
             }
-            // **`with (o) { m() }` ruft `m` MIT `o` als Empfaenger**
-            // (ES 9.1.1.2.4, WithBaseObject). Ohne das sieht eine Methode,
-            // die aus dem `with`-Objekt kommt, `undefined` als `this` — und
-            // genau so ruft Vues uebersetzter Code seine Hilfen.
+            // `with (o) { m() }` calls `m` with `o` as receiver
+            // (ES 9.1.1.2.4, WithBaseObject).
             Expr::Ident(n) => match self.with_target(n, env)? {
                 Some(o) => (Value::Obj(o), self.eval(callee, env)?),
                 None => (Value::Undefined, self.eval(callee, env)?),
@@ -426,16 +390,16 @@ impl Interp {
         };
         if optional && matches!(f, Value::Undefined | Value::Null) { return Ok(Value::Undefined); }
         let a = self.eval_args(args, env)?;
-        // Der DIREKTE `eval`-Aufruf: am Namen UND an der Sache erkannt. Beide
-        // Maschinen tun hier dasselbe, siehe `Op::Call`.
+        // Direct `eval`: recognized by name and by identity. Both engines do
+        // the same, see `Op::Call`.
         if matches!(callee, Expr::Ident(n) if n == "eval") && self.is_eval_fn(&f) {
             self.hints_ok = false;
             let c = a.first().cloned().unwrap_or(Value::Undefined);
             return self.perform_eval(&c, Some(env.clone()));
         }
         if !self.is_callable(&f) {
-            // Den Namen nennen, nicht nur das Ereignis — dieselbe Hilfe wie
-            // die Befehlsmaschine, siehe `Interp::not_a_function`.
+            // Name the callee, same as the bytecode VM; see
+            // `Interp::not_a_function`.
             return Err(self.not_a_function(match callee {
                 Expr::Ident(n) => Some(n.as_str()),
                 _ => None,
@@ -444,8 +408,7 @@ impl Interp {
         self.call(&f, this_val, &a)
     }
 
-    /// Bauen und den NAMEN des Gerufenen mitgeben — er steht nur in der
-    /// Fehlermeldung, und dort entscheidet er den Fall.
+    /// Construct, passing the callee's name for the error message.
     pub fn construct_named(&mut self, f: &Value, args: &[Value], name: Option<&str>) -> C<Value> {
         let was = core::mem::replace(&mut self.new_name, name.map(alloc::string::String::from));
         let r = self.construct(f, args);
@@ -457,39 +420,31 @@ impl Interp {
         self.construct_on(f, Value::Undefined, args)
     }
 
-    /// `new` mit einem eigenen NEUZIEL — der Fall von
-    /// `Reflect.construct(ziel, args, neuziel)`.
+    /// `new` with a separate new target, as in
+    /// `Reflect.construct(target, args, newTarget)`.
     ///
-    /// **Das dritte Argument ist keine Feinheit, es ist die Vererbung.**
-    /// Jede von Babel oder SWC uebersetzte `class X extends Y` ruft im
-    /// Konstruktor `Reflect.construct(Y, args, X)` — nur so bekommt das
-    /// frische Objekt `X.prototype` statt `Y.prototype`. Wurde das Neuziel
-    /// verworfen, landete die Instanz an der OBERklasse: eine React-
-    /// Komponente hatte `setState`, aber kein `render`, und die ganze Seite
-    /// rendert daraufhin nichts — ohne eine einzige Fehlerzeile, weil formal
-    /// nichts schiefging. Die Uebersetzer pruefen vorher mit
-    /// `Reflect.construct(Boolean, [], function(){})`, ob es den Weg gibt;
-    /// beak sagte ja und tat es dann nicht.
+    /// The new target determines the prototype. Babel/SWC compile
+    /// `class X extends Y` to `Reflect.construct(Y, args, X)`, so the
+    /// instance gets `X.prototype` rather than `Y.prototype`.
     pub fn construct_target(&mut self, f: &Value, args: &[Value], nt: &Value) -> C<Value> {
         self.construct_full(f, Value::Undefined, args, Some(nt))
     }
 
-    /// Wie `construct`, aber mit einem Empfaenger fuer den EINGEBAUTEN Fall.
+    /// Like `construct`, with a receiver for the builtin case.
     ///
-    /// Nur `super()` reicht einen: das frisch angelegte `this` traegt schon
-    /// den Prototyp der abgeleiteten Klasse, und daran haengt die einzige
-    /// Auskunft darueber, WAS gerade gebaut wird. Ein gewoehnliches `new`
-    /// gibt `undefined` weiter, wie bisher.
+    /// Only `super()` passes one: the fresh `this` already carries the
+    /// derived class's prototype, the only hint of what is being built.
+    /// Plain `new` passes `undefined`.
     pub fn construct_on(&mut self, f: &Value, recv: Value, args: &[Value]) -> C<Value> {
         self.construct_full(f, recv, args, None)
     }
 
-    /// Der eine Weg, auf dem gebaut wird. `nt` ist das Neuziel, wenn es von
-    /// dem aufgerufenen Konstruktor abweicht (`Reflect.construct`).
+    /// The single construction path. `nt` is the new target when it differs
+    /// from the called constructor (`Reflect.construct`).
     fn construct_full(&mut self, f: &Value, recv: Value, args: &[Value], nt: Option<&Value>)
         -> C<Value> {
         let Value::Obj(fo) = f else { return Err(self.not_a_constructor(f)) };
-        // Die `construct`-Falle.
+        // The `construct` trap.
         if super::proxy::parts(fo).is_some() {
             return match super::proxy::trap(self, fo, "construct")? {
                 Some((fn_, hv, t)) => {
@@ -505,7 +460,7 @@ impl Interp {
                           self.construct_full(&Value::Obj(t), Value::Undefined, args, nt) }
             };
         }
-        // Ein nativer Konstruktor baut sein Objekt selbst; ein Pfeil ist keiner.
+        // A native constructor builds its own object; an arrow is none.
         if let ObjKind::Native(n) = &fo.borrow().kind {
             if !n.ctor { return Err(self.not_a_constructor(f)); }
             let nf = n.clone();
@@ -516,8 +471,8 @@ impl Interp {
             return r;
         }
         if !self.is_constructor(f) { return Err(self.not_a_constructor(f)); }
-        // Der Prototyp kommt vom NEUZIEL, nicht vom gerufenen Konstruktor.
-        // Ohne Neuziel sind beide dasselbe.
+        // The prototype comes from the new target, not the called
+        // constructor. Without a new target both are the same.
         let proto_from = nt.unwrap_or(f).clone();
         let proto = match self.get(&proto_from, "prototype")? {
             Value::Obj(p) => Some(p),
@@ -525,14 +480,13 @@ impl Interp {
         };
         let obj = new_obj(proto);
         let r = self.call(f, Value::Obj(obj.clone()), args)?;
-        // Gibt der Konstruktor ein OBJEKT zurueck, gewinnt es; alles andere
-        // wird verworfen und das frische Objekt gewinnt.
+        // If the constructor returns an object, it wins; otherwise the fresh
+        // object does.
         Ok(match r { Value::Obj(_) => r, _ => Value::Obj(obj) })
     }
 
-    /// Einen Leser oder Schreiber auf eine Eigenschaft legen — die beiden
-    /// muessen sich auf DERSELBEN treffen, sonst verdeckt der zweite den
-    /// ersten. Eigene Funktion, weil die Befehlsmaschine sie ruft.
+    /// Install a getter or setter on a property. Both must land on the same
+    /// property, or the second hides the first. Public for the bytecode VM.
     pub fn define_accessor(&mut self, g: &Gc, key: Rc<str>, f: Value, is_get: bool) {
         let mut existing = g.borrow().get_own(&key).cloned().unwrap_or(Prop {
             value: None, get: None, set: None,
@@ -542,11 +496,10 @@ impl Interp {
         g.borrow_mut().set_prop(key, existing);
     }
 
-    /// `{...src}` — die aufzaehlbaren EIGENEN Eigenschaften kopieren.
+    /// `{...src}`: copy the enumerable own properties.
     pub fn spread_into(&mut self, g: &Gc, src: &Value) -> C<()> {
         if let Value::Obj(o) = src {
-            // Schluessel UND Aufzaehlbarkeit durch den Stellvertreter —
-            // `{...proxy}` war sonst `{}`.
+            // Keys and enumerability go through proxy traps.
             for k in self.own_keys_of(o)? {
                 if !self.get_own_desc(o, &k)?.is_some_and(|p| p.enumerable) { continue }
                 let val = self.get(src, &k)?;
@@ -567,10 +520,9 @@ impl Interp {
                 ObjPropValue::Init(e) => {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.eval(e, env)?;
-                    // `__proto__: v` — nur ALS SCHLUESSEL geschrieben, nicht
-                    // berechnet und nicht abgekuerzt. `{[k]: v}` mit
-                    // `k = "__proto__"` und `{__proto__}` sind gewoehnliche
-                    // Eigenschaften, und die Spezifikation unterscheidet das.
+                    // `__proto__: v` sets the prototype only when written as a
+                    // literal key, neither computed nor shorthand; `{[k]: v}`
+                    // and `{__proto__}` are ordinary properties (Annex B).
                     if !p.computed && !p.shorthand && &*key == "__proto__" {
                         self.set_literal_proto(&g, &v);
                         continue;
@@ -588,8 +540,7 @@ impl Interp {
                     let key = self.prop_key(&p.key, env)?;
                     let v = self.make_closure(f.clone(), env, None);
                     let is_get = matches!(p.value, ObjPropValue::Get(_));
-                    // Ein Leser heisst `"get x"`, kein blosses `"x"` — sonst
-                    // waeren Leser und Schreiber ununterscheidbar.
+                    // An accessor is named `"get x"`/`"set x"`, not `"x"`.
                     let show = alloc::format!("{} {key}", if is_get { "get" } else { "set" });
                     self.name_function(&v, &show);
                     self.define_accessor(&g, key, v, is_get);
@@ -600,22 +551,17 @@ impl Interp {
     }
 
     pub fn eval_class(&mut self, c: &Rc<Class>, env: &Rc<RefCell<Env>>) -> C<Value> {
-        // Zwei Ketten, nicht eine: die Instanzen haengen unter
-        // `Eltern.prototype`, der KONSTRUKTOR unter der Elternklasse selbst.
+        // Two chains: instances inherit from `Parent.prototype`, the
+        // constructor itself from the parent class.
         let (parent_proto, parent_ctor) = match &c.super_class {
             Some(e) => {
                 let sv = self.eval(e, env)?;
                 match sv {
-                    // **`class X extends null` ist erlaubt** (ES 15.7.14
-                    // Schritt 8.d.i): der Prototyp der Instanzen hat KEINEN
-                    // Elter, der Konstruktor haengt an `%Function.prototype%`.
-                    // Vorher lief das in `get(null, "prototype")` und meldete
-                    // `cannot read 'prototype' of null` — eine Meldung, die
-                    // nicht sagt, WO.
+                    // `class X extends null` is allowed (ES 15.7.14 step
+                    // 8.d.i): the instance prototype has no parent, the
+                    // constructor inherits from `%Function.prototype%`.
                     Value::Null => (None, None),
-                    // Und was kein Konstruktor ist, sagt das mit dem NAMEN
-                    // der Klasse. Ein Laufzeitfehler ohne Stelle kostet eine
-                    // Stunde ([[feedback_a_runtime_error_without_a_position_costs_an_hour]]).
+                    // A non-constructor is reported with the class name.
                     _ if !self.is_constructor(&sv) => {
                         let n = c.name.clone().unwrap_or_else(|| String::from("(anonym)"));
                         let was = sv.type_of();
@@ -638,15 +584,12 @@ impl Interp {
             }
             None => (Some(self.realm.object_proto.clone()), None),
         };
-        // **Eine benannte Klasse steht in ihrem EIGENEN Rumpf** (ES 15.7.14):
-        // `class aa { … new aa(…) … }` sieht sich selbst, und zwar auch dann,
-        // wenn der aeussere Name nie vergeben wird oder spaeter umgehaengt
-        // wird. Derselbe Bereich wie bei einem benannten Funktionsausdruck
-        // (`func_value` daneben) — nur fehlte er hier, und der Intl-Polyfill
-        // von DuckDuckGo starb daran mit `aa is not defined`.
+        // A named class is bound in its own body (ES 15.7.14), so
+        // `class C { ... new C() ... }` works even if the outer name is
+        // reassigned. Same scope as for a named function expression.
         //
-        // Die Oberklasse wird noch im AEUSSEREN Bereich ausgewertet: dort ist
-        // die Bindung laut Spezifikation noch nicht angelegt.
+        // The superclass is evaluated in the outer scope, where this binding
+        // does not exist yet.
         let cenv = match &c.name {
             Some(_) => Env::new(Some(env.clone()), false),
             None => env.clone(),
@@ -654,19 +597,15 @@ impl Interp {
         let env = &cenv;
         let proto = new_obj(parent_proto);
 
-        // Der Konstruktor IST die Klasse. Fehlt er, wird ein leerer erzeugt —
-        // sonst haette die Klasse keinen aufrufbaren Koerper.
+        // The constructor is the class. If absent, a default one is created.
         let ctor_node = c.body.iter().find_map(|m| match m {
             ClassMember::Method { func, kind: MethodKind::Constructor, .. } => Some(func.clone()),
             _ => None,
         });
         let ctor_fn = match ctor_node {
             Some(f) => f,
-            // Ein FEHLENDER Konstruktor ist nicht dasselbe wie ein leerer:
-            // in einer abgeleiteten Klasse reicht er seine Argumente an die
-            // Elternklasse durch (`constructor(...a) { super(...a) }`). Ohne
-            // das liefe `class B extends A {}` nie durch A's Konstruktor und
-            // eine Instanz haette keins ihrer Felder.
+            // A missing constructor in a derived class is not empty: it
+            // forwards its arguments (`constructor(...a) { super(...a) }`).
             None if c.super_class.is_some() => Rc::new(Func {
                 name: c.name.clone(),
                 params: alloc::vec![Pat::Rest(Box::new(Pat::Ident(String::from("args"))))],
@@ -685,14 +624,10 @@ impl Interp {
             }),
         };
         let ctor = self.make_method(ctor_fn, env, None, Some(proto.clone()));
-        // Hat die Klasse Instanzfelder, traegt ihr Konstruktor sie mit —
-        // `call_env` bzw. der `super()`-Weg legen sie dann an. Ohne Felder
-        // bleibt der Zeiger leer, damit ein gewoehnlicher Aufruf nichts
-        // nachzuschlagen hat.
-        // **Jeder** Klassenkonstruktor traegt seine Klasse, nicht nur die mit
-        // Feldern: der Zeiger sagt jetzt auch „das hier ist ein Konstruktor",
-        // und daran haengt, dass ein Rumpf ohne `return` sein `this` liefert.
-        // Ohne Felder ist `init_fields` ohnehin ein Leerlauf.
+        // Every class constructor carries its class, not only those with
+        // instance fields: it also marks the function as a constructor, so a
+        // body without `return` yields `this`. Without fields `init_fields`
+        // is a no-op.
         {
             if let Value::Obj(co) = &ctor {
                 let d = match &co.borrow().kind {
@@ -716,17 +651,15 @@ impl Interp {
                 value: Some(Value::str(c.name.as_deref().unwrap_or(""))), get: None, set: None,
                 writable: false, enumerable: false, configurable: true });
         }
-        // Jetzt, nicht spaeter: ein STATISCHES Feld wird noch in dieser
-        // Funktion ausgewertet und darf die Klasse schon sehen.
+        // Bind now: a static field is evaluated within this function and may
+        // already refer to the class.
         if let Some(n) = &c.name {
             cenv.borrow_mut().vars.insert(Rc::from(n.as_str()),
                 Binding { value: ctor.clone(), mutable: false, initialized: true });
         }
-        // **Statische Vererbung.** Ohne sie findet `B.create()` das
-        // `static create` der Elternklasse nicht — und `Object.getPrototypeOf(B)`
-        // ist `Function.prototype` statt `A`. Fiel auf, als `class` auf die
-        // Befehlsmaschine kam und die Probe gegen node lief; die Luecke war
-        // vorher in BEIDEN Maschinen, weil beide dieselbe Funktion rufen.
+        // Static inheritance: the constructor's prototype is the parent
+        // class, so `B.create()` finds `static create` of `A` and
+        // `Object.getPrototypeOf(B) === A`.
         if let (Some(p), Value::Obj(co)) = (&parent_ctor, &ctor) {
             co.borrow_mut().proto = Some(p.clone());
         }
@@ -754,9 +687,8 @@ impl Interp {
                             if *kind == MethodKind::Get { p.get = Some(v); } else { p.set = Some(v); }
                             target.borrow_mut().set_prop(k, p);
                         }
-                        // Methoden einer Klasse sind NICHT aufzaehlbar — anders
-                        // als die eines Objektliterals. Ein `for..in` ueber eine
-                        // Instanz darf sie nicht sehen.
+                        // Class methods are not enumerable, unlike object
+                        // literal methods.
                         _ => { target.borrow_mut().set_prop(k, Prop::builtin(v)); }
                     }
                 }
@@ -765,8 +697,8 @@ impl Interp {
                     let v = match value { Some(e) => self.eval(e, env)?, None => Value::Undefined };
                     ctor.as_obj().unwrap().borrow_mut().set_prop(k, Prop::data(v));
                 }
-                // Felder je Instanz stehen im Konstruktor, nicht hier —
-                // siehe `Interp::init_fields`.
+                // Per-instance fields are initialized in the constructor; see
+                // `Interp::init_fields`.
                 _ => {}
             }
         }
@@ -774,14 +706,11 @@ impl Interp {
     }
 
     fn eval_unary(&mut self, op: UnaryOp, arg: &Expr, env: &Rc<RefCell<Env>>) -> C<Value> {
-        // `typeof x` auf einen UNBEKANNTEN Namen wirft nicht — das ist der
-        // klassische Weg, ein globales Objekt zu pruefen, und der Vorspann
-        // benutzt ihn (`typeof JSON !== "undefined"`).
+        // `typeof x` on an unknown name does not throw; it is the classic
+        // way to probe for a global.
         if op == UnaryOp::Typeof {
             if let Expr::Ident(n) = arg {
-                // Ein `with`-Objekt traegt den Namen genauso wie eine
-                // Bindung — sonst meldet `typeof a` im `with` „undefined"
-                // fuer etwas, das direkt daneben gelesen werden kann.
+                // A `with` object provides the name just like a binding.
                 if self.with_target(n, env)?.is_none() && env_lookup(env, n).is_none() {
                     let g = self.realm.global.clone();
                     if !self.has_property(&g, n) { return Ok(Value::str("undefined")); }
@@ -796,8 +725,8 @@ impl Interp {
                     let ok = self.delete_key(&base, &key)?;
                     if !ok {
                         super::interp::strict_site!(self, 7);
-                        // Strenger Code laesst ein gescheitertes `delete`
-                        // nicht als `false` durchgehen (ES §13.5.1.2).
+                        // Strict code throws on a failed `delete`
+                        // (ES §13.5.1.2).
                         if super::interp::env_strict(env) {
                             return self.type_err(&alloc::format!(
                                 "cannot delete property '{key}'"));
@@ -805,9 +734,9 @@ impl Interp {
                     }
                     Value::Bool(ok)
                 }
-                // `delete x` auf einen blossen Namen ist sonst `true` und
-                // tut nichts — INNERHALB eines `with` loescht es aber die
-                // Eigenschaft am Objekt (ES 13.5.1.2 Schritt 5).
+                // `delete x` on a plain name is `true` and a no-op, except
+                // inside a `with`, where it deletes the object's property
+                // (ES 13.5.1.2 step 5).
                 Expr::Ident(n) => match self.with_target(n, env)? {
                     Some(o) => {
                         let k: Rc<str> = Rc::from(&**n);
@@ -822,25 +751,14 @@ impl Interp {
         self.unary_val(op, v)
     }
 
-    /// Der WERTteil eines Praefixoperators — alles ausser `delete` und dem
-    /// `typeof` auf einem unbekannten Namen, die beide den Ausdruck selbst
-    /// brauchen und nicht nur sein Ergebnis.
+    /// The value of a function expression.
     ///
-    /// Eigene Funktion, weil die Befehlsmaschine (`js::vm`) sie ruft. Zwei
-    /// Umsetzungen desselben Operators nebeneinander laufen auseinander, und
-    /// die schwaechere gewinnt dann immer.
-    /// Der Wert eines Funktions-AUSDRUCKS.
+    /// A named function expression sees its own name in its body
+    /// (`(function e(){ ... e ... })`); minified code recurses that way. A
+    /// declaration does not get this inner binding: its name is already
+    /// bound outside, and an inner one would shadow reassignments.
     ///
-    /// Eine benannte Funktions-EXPRESSION sieht ihren eigenen Namen in ihrem
-    /// Rumpf — `(function e(){ … e … })`. Das ist der Weg, auf dem
-    /// minifizierter Code rekursiert, und ohne ihn stirbt er an einem
-    /// einbuchstabigen `ReferenceError`. Eine DEKLARATION bekommt diese
-    /// Bindung NICHT: dort steht der Name schon aussen, und eine innere wuerde
-    /// eine Neuzuweisung verdecken.
-    ///
-    /// Eigene Funktion, weil die Befehlsmaschine sie ruft. Sie dort
-    /// nachzubauen kostete beim ersten Versuch sechs Tests — genau die
-    /// Rekursion ueber den eigenen Namen.
+    /// Public because the bytecode VM calls it.
     pub fn func_value(&mut self, f: Rc<Func>, env: &Rc<RefCell<Env>>) -> Value {
         if !f.is_arrow {
             if let Some(n) = f.name.clone() {
@@ -855,8 +773,8 @@ impl Interp {
         self.make_closure(f, env, this_val)
     }
 
-    /// `delete obj[key]` — `false` nur, wenn die Eigenschaft da ist und sich
-    /// nicht entfernen laesst. Fehlt sie ganz, ist die Antwort `true`.
+    /// `delete obj[key]`: `false` only if the property exists and is not
+    /// configurable. A missing property gives `true`.
     pub fn delete_key(&mut self, base: &Value, key: &str) -> C<bool> {
         if let Value::Obj(o) = base {
             if super::proxy::parts(o).is_some() {
@@ -884,14 +802,16 @@ impl Interp {
         })
     }
 
-    /// `DeletePropertyOrThrow` (ES §7.3.9) — was die Eingebauten benutzen.
-    /// Der `delete`-OPERATOR gibt `false` zurueck (ausser im strengen Modus);
-    /// eine eingebaute Funktion darf das nie ignorieren.
+    /// `DeletePropertyOrThrow` (ES §7.3.9), for builtins. The `delete`
+    /// operator returns `false` (outside strict mode); a builtin must throw.
     pub fn delete_or_throw(&mut self, base: &Value, key: &str) -> C<()> {
         if self.delete_key(base, key)? { return Ok(()); }
         self.type_err(&alloc::format!("cannot delete property '{key}'"))
     }
 
+    /// The value part of a prefix operator: everything except `delete` and
+    /// `typeof` on an unknown name, which need the expression itself.
+    /// Shared with the bytecode VM so both use one implementation.
     pub fn unary_val(&mut self, op: UnaryOp, v: Value) -> C<Value> {
         Ok(match op {
             UnaryOp::Minus => {
@@ -899,8 +819,7 @@ impl Interp {
                 if let Value::BigInt(b) = &p { return Ok(Value::BigInt(Rc::new(b.negate()))); }
                 Value::Num(-self.to_number(&p)?)
             }
-            // `+x` ist die EINZIGE Stelle, an der eine grosse Zahl wirft statt
-            // sich umzuwandeln — es gaebe sonst einen stillen Weg nach `f64`.
+            // `+x` throws on a BigInt instead of converting to `f64`.
             UnaryOp::Plus => Value::Num(self.to_number(&v)?),
             UnaryOp::Bang => Value::Bool(!v.truthy()),
             UnaryOp::Tilde => {
@@ -914,10 +833,9 @@ impl Interp {
         })
     }
 
-    /// `typeof <name>` — wirft NICHT, wenn es den Namen nicht gibt. Der
-    /// klassische Weg, ein globales Objekt zu pruefen.
+    /// `typeof <name>`: does not throw for an unknown name.
     pub fn typeof_ident(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
-        // Ein `with`-Objekt kann den Namen tragen, und dann ist er DA.
+        // A `with` object may provide the name.
         if self.with_target(n, env)?.is_some() {
             let v = self.load_ident(n, env)?;
             return self.unary_val(UnaryOp::Typeof, v);
@@ -932,43 +850,39 @@ impl Interp {
         self.unary_val(UnaryOp::Typeof, v)
     }
 
-    /// Einen Namen lesen (`x`) bzw. zuweisen (`x = v`) — dieselben Funktionen,
-    /// die der Baumlaeufer benutzt, nur oeffentlich fuer die Maschine.
+    /// Read a name (`x`) for the bytecode VM.
     pub fn vm_load(&mut self, n: &str, env: &Rc<RefCell<Env>>) -> C<Value> {
         self.load_ident(n, env)
     }
 
-    /// `LoadVar` mit dem Weg von letztem Mal — siehe `Chunk::hints`.
+    /// `LoadVar` using the scope depth cached from the last run; see
+    /// `Chunk::hints`.
     ///
-    /// Trifft der Hinweis, kostet ein Zugriff EINEN Tabellenblick statt vier.
-    /// Trifft er nicht (oder ist keiner da), laeuft der volle Weg und der
-    /// Hinweis lernt dabei. Falsch werden kann er nur, wenn nachtraeglich
-    /// eine Bindung WEITER INNEN entsteht — und das kann allein ein direktes
-    /// `eval`, das die Wegweiser deshalb abschaltet.
+    /// On a hit the access is one table lookup. On a miss (or no hint) the
+    /// full path runs and updates the hint. A hint can only become wrong if
+    /// a binding appears further in after the fact, which only direct
+    /// `eval` can do; it therefore disables hints.
     pub fn vm_load_at(&mut self, n: &str, env: &Rc<RefCell<Env>>,
                       hint: &core::cell::Cell<u16>) -> C<Value> {
         let h = hint.get();
         if self.hints_ok && h != super::code::HINT_NONE {
-            // **Der Weg wird gelesen, nicht geliehen.** Ein `Rc::clone` je
-            // Sprung waeren drei Zaehlerpaare fuer einen Zeiger, den niemand
-            // behaelt — im Profil sind das die 2,3 % in `Cell<isize>::get`.
+            // Walk raw pointers instead of cloning `Rc`s per hop.
             //
-            // SAFETY: Die Kette haengt an `env`, und `env` lebt fuer die
-            // Dauer dieses Aufrufs; jede Umgebung haelt ihren Elter als
-            // `Rc`, also lebt die ganze Kette mit. Gelesen wird nur, und
-            // nichts davon verlaesst diese Schleife: zwischen Betreten und
-            // Verlassen laeuft kein fremder Code, der sie umhaengen koennte.
+            // SAFETY: the chain hangs off `env`, which lives for this call;
+            // each environment holds its parent as `Rc`, so the whole chain
+            // lives too. Access is read-only, and no foreign code runs inside
+            // this loop that could rewire it.
             let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
             let mut reached = true;
             for _ in 0..h {
                 let next = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
                 match next { Some(p) => cur = p, None => { reached = false; break } }
             }
-            // NUR ein Treffer zaehlt. „Steht hier, ist aber tot" und
-            // „kommt aus einem Modul" gehen den vollen Weg, damit die
-            // Fehlermeldung und die Import-Kette dieselben bleiben.
+            // Only a live hit counts. "Present but uninitialized" and imports
+            // take the full path, so error messages and import handling stay
+            // the same.
             if reached {
-                // SAFETY: `cur` ist der Zeiger aus derselben Kette, siehe oben.
+                // SAFETY: `cur` comes from the same chain; see above.
                 let b = unsafe { (*cur).borrow() };
                 if let Some(bd) = b.vars.get(n) {
                     if bd.initialized { return Ok(bd.value.clone()) }
@@ -983,28 +897,20 @@ impl Interp {
         Ok(v)
     }
 
-    /// **Direkt, nicht ueber einen gebauten AST-Knoten.** Bis 0.117.0 stand
-    /// hier `self.store(&Expr::Ident(String::from(n)), v, env)` — das
-    /// allozierte je ZUWEISUNG eine Zeichenkette auf dem Haufen und baute
-    /// einen Ausdrucksknoten, den `store` in der naechsten Zeile wieder
-    /// auseinandernahm. `StoreVar` sind 6 % aller Befehle: in einem
-    /// Anmeldelauf der Fritzbox 140 Millionen Allokationen fuer nichts.
+    /// Assign a name (`x = v`) for the bytecode VM, directly rather than via a
+    /// constructed AST node.
     pub fn vm_store(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         self.assign_ident(n, v, env)
     }
 
-    /// `StoreVar` mit dem Weg von letztem Mal — dieselbe Ueberlegung wie in
-    /// `vm_load_at`, und derselbe Vorbehalt: ein direktes `eval` schaltet ihn ab.
-    ///
-    /// `StoreVar` sind 6,2 % aller Befehle, und der volle Weg fragt bis zu
-    /// VIER Tabellen: `env_lookup` je Ebene, dann die Import-Tabelle, dann
-    /// `get`, dann `get_mut`.
+    /// `StoreVar` using the cached scope depth; same reasoning and same
+    /// caveat as `vm_load_at` (direct `eval` disables it).
     pub fn vm_store_at(&mut self, n: &str, v: Value, env: &Rc<RefCell<Env>>,
                        hint: &core::cell::Cell<u16>) -> C<()> {
         let h = hint.get();
         if self.hints_ok && h != super::code::HINT_NONE {
-            // SAFETY: wie in `vm_load_at` — die Kette haengt an `env`, sie
-            // wird nur gelesen, und zwischendrin laeuft kein fremder Code.
+            // SAFETY: as in `vm_load_at`: the chain hangs off `env`, is only
+            // walked, and no foreign code runs in between.
             let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
             let mut reached = true;
             for _ in 0..h {
@@ -1012,15 +918,13 @@ impl Interp {
                 match next { Some(p) => cur = p, None => { reached = false; break } }
             }
             if reached {
-                // SAFETY: `cur` ist der Zeiger aus derselben Kette, siehe oben.
-                // `borrow_mut` ist hier zulaessig, weil auf diesem Weg keine
-                // andere Leihe offen ist: die Schleife hat ihre wieder
-                // fallengelassen, und der Rufer haelt nur den `Rc`.
+                // SAFETY: `cur` comes from the same chain. `borrow_mut` is
+                // fine because no other borrow is open on this path: the loop
+                // dropped its borrows and the caller holds only the `Rc`.
                 let mut b = unsafe { (*cur).borrow_mut() };
-                // **Nur wo es GAR KEINE Import-Tabelle gibt.** Sonst muesste
-                // hier entschieden werden, ob der Name importiert ist — und
-                // auf einen Import zu schreiben ist ein Fehler, kein
-                // Schreiben. Das ist der volle Weg.
+                // Fast path only when there is no import table at all;
+                // otherwise we would have to decide whether the name is
+                // imported, and assigning to an import is an error.
                 if b.imports.is_none() {
                     if let Some(bd) = b.vars.get_mut(n) {
                         if bd.initialized && bd.mutable {
@@ -1049,8 +953,7 @@ impl Interp {
 
     fn store(&mut self, target: &Expr, v: Value, env: &Rc<RefCell<Env>>) -> C<()> {
         match target {
-            // EINE Fassung, in `eval.rs`. Zwei nebeneinander sind zwei
-            // Semantiken, die auf ihren ersten Unterschied warten.
+            // Single implementation, in `eval.rs`.
             Expr::Ident(n) => self.assign_ident(n, v, env),
             Expr::Member { obj, prop, .. } => {
                 let base = self.eval(obj, env)?;
@@ -1072,8 +975,8 @@ impl Interp {
         let Pat::Expr(target) = left else {
             return self.ref_err("invalid compound assignment target");
         };
-        // Die kurzschliessenden Formen werten die Rechte NUR aus, wenn sie
-        // gebraucht wird — `a ||= b` darf `b` nicht anfassen, wenn `a` wahr ist.
+        // The short-circuit forms evaluate the right side only when needed:
+        // `a ||= b` must not touch `b` if `a` is truthy.
         if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
             let cur = self.eval(target, env)?;
             let need = match op {
@@ -1102,38 +1005,29 @@ impl Interp {
         Ok(v)
     }
 
-    /// Das Ende jedes Zahlenarmes — hier steht der Operator fest und beide
-    /// Seiten sind umgewandelt.
+    /// The tail of every numeric arm: operator fixed, both sides converted.
     fn num_done(&mut self, op: BinOp, a: f64, b: f64) -> C<Value> {
         match num_bin(op, a, b) {
             Some(v) => Ok(v),
-            // `in`/`instanceof` haben eigene Arme und kommen hier nicht an.
+            // `in`/`instanceof` have their own arms and never get here.
             None => self.type_err("not a numeric operator"),
         }
     }
 
     pub fn binary(&mut self, op: BinOp, l: Value, r: Value) -> C<Value> {
         use BinOp::*;
-        // **Schnellweg: beide Seiten sind schon Zahlen.** Dann ist jede
-        // Umwandlung die Identitaet — `ToPrimitive` gibt die Zahl zurueck,
-        // `ToNumeric` auch, und keine davon kann etwas beobachten: kein
-        // `valueOf`, kein `Symbol.toPrimitive`, kein Wurf, keine Reihenfolge.
-        // Der lange Weg rechnet DASSELBE, nur durch vier Ergebnisrahmen
-        // hindurch — und `C<Value>` ist 40 Byte, die je Rahmen ueber den
-        // Stapel wandern.
-        //
-        // Gemessen an der Fritzbox-Anmeldung (SHA-256 von Hand in JS):
-        // `to_numeric` + `to_number` + `to_primitive_hint` sind 10,2 % der
-        // Laufzeit und die `?`-Weiterreichung noch einmal 12,1 %.
+        // Fast path: both sides are already numbers. Every conversion is then
+        // the identity and unobservable (no `valueOf`, no
+        // `Symbol.toPrimitive`, no throw, no ordering), so skip the result
+        // plumbing of the general path.
         if let (Value::Num(a), Value::Num(b)) = (&l, &r) {
             if let Some(v) = num_bin(op, *a, *b) { return Ok(v); }
         }
         Ok(match op {
             Add => {
-                // `+` ist der einzige Operator, der auch Text meint. Beide
-                // Seiten werden ZUERST primitiv gemacht, DANN entschieden —
-                // die Reihenfolge ist sichtbar, wenn `valueOf` Nebenwirkungen
-                // hat.
+                // `+` is the only operator that also means concatenation.
+                // Both sides are converted to primitives first, then the
+                // decision is made; the order is observable via `valueOf`.
                 let lp = self.to_primitive_hint(&l, "default")?;
                 let rp = self.to_primitive_hint(&r, "default")?;
                 if matches!(lp, Value::Str(_)) || matches!(rp, Value::Str(_)) {
@@ -1152,13 +1046,10 @@ impl Interp {
                 }
             }
             Sub | Mul | Div | Mod | Exp => {
-                // Beide Seiten ZUERST primitiv machen, dann entscheiden: zwei
-                // grosse Zahlen rechnen gross, zwei kleine klein, gemischt
-                // wirft. Die Reihenfolge ist sichtbar, wenn `valueOf`
-                // Nebenwirkungen hat.
-                // `ToNumeric(lhs)` GANZ, dann erst `ToNumeric(rhs)`. Die
-                // Reihenfolge ist beobachtbar: gibt `lhs.valueOf` ein Symbol
-                // zurueck, darf `rhs.valueOf` gar nicht mehr laufen.
+                // `ToNumeric(lhs)` completely, then `ToNumeric(rhs)`. The
+                // order is observable: if `lhs.valueOf` returns a symbol,
+                // `rhs.valueOf` must not run. Two BigInts compute as BigInt,
+                // two Numbers as Number, mixed throws.
                 let lp = self.to_numeric(&l)?;
                 let rp = self.to_numeric(&r)?;
                 if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
@@ -1180,8 +1071,8 @@ impl Interp {
                 if let (Value::Str(a), Value::Str(b)) = (&lp, &rp) {
                     Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b })
                 } else if matches!(lp, Value::BigInt(_)) || matches!(rp, Value::BigInt(_)) {
-                    // Gross gegen klein DARF verglichen werden — nur gerechnet
-                    // werden darf damit nicht.
+                    // BigInt and Number may be compared, just not mixed in
+                    // arithmetic.
                     match self.big_cmp(&lp, &rp)? {
                         None => Value::Bool(false),
                         Some(o) => Value::Bool(match op {
@@ -1196,8 +1087,8 @@ impl Interp {
                 let lp = self.to_numeric(&l)?;
                 let rp = self.to_numeric(&r)?;
                 if let (Value::BigInt(a), Value::BigInt(b)) = (&lp, &rp) {
-                    // `>>>` gibt es fuer grosse Zahlen NICHT: es setzt eine
-                    // feste Breite voraus, und die hat der Typ nicht.
+                    // `>>>` does not exist for BigInts: it presumes a fixed
+                    // width.
                     if matches!(op, UShr) {
                         return self.type_err("BigInts have no unsigned right shift");
                     }
@@ -1236,9 +1127,7 @@ impl Interp {
             }
             Instanceof => {
                 let Value::Obj(_) = &r else { return self.type_err("right side of 'instanceof' is not callable") };
-                // `Symbol.hasInstance` ueberstimmt die Prototypkette — das ist
-                // der Weg, auf dem eine Klasse selbst entscheidet, was sie als
-                // ihre Instanz gelten laesst.
+                // `Symbol.hasInstance` overrides the prototype chain walk.
                 let hi = self.get(&r, SYM_HAS_INSTANCE)?;
                 if self.is_callable(&hi) {
                     let res = self.call(&hi, r.clone(), &[l.clone()])?;
@@ -1259,7 +1148,7 @@ impl Interp {
         })
     }
 
-    /// `==`. Die Regel, die niemand mag, aber echter Code benutzt sie.
+    /// `==` (IsLooselyEqual).
     fn loose_eq(&mut self, l: &Value, r: &Value) -> C<bool> {
         use Value::*;
         Ok(match (l, r) {
@@ -1267,16 +1156,16 @@ impl Interp {
             (Undefined | Null, _) | (_, Undefined | Null) => false,
             (Num(_), Num(_)) | (Str(_), Str(_)) | (Bool(_), Bool(_)) | (Obj(_), Obj(_))
             | (Sym(_), Sym(_)) | (BigInt(_), BigInt(_)) => l.strict_eq(r),
-            // `1n == 1` ist WAHR, `1n === 1` falsch. Der Vergleich laeuft
-            // ueber den mathematischen Wert, nicht ueber eine Umwandlung.
+            // `1n == 1` is true, `1n === 1` false. Compared by mathematical
+            // value, not by conversion.
             (BigInt(a), Num(n)) | (Num(n), BigInt(a)) =>
                 n.is_finite() && libm::trunc(*n) == *n
                     && crate::js::bigint::Big::from_f64(*n).map(|b| b == **a).unwrap_or(false),
             (BigInt(a), Str(t)) | (Str(t), BigInt(a)) =>
                 crate::js::bigint::Big::parse(t).map(|b| b == **a).unwrap_or(false),
             (BigInt(_), Sym(_)) | (Sym(_), BigInt(_)) => false,
-            // Ein Symbol ist nur sich selbst gleich — `==` wandelt es NICHT
-            // um. Gegen ein Objekt entscheidet erst dessen `ToPrimitive`.
+            // A symbol only equals itself; `==` does not convert it. Against
+            // an object, the object's `ToPrimitive` decides.
             (Sym(_), Num(_) | Str(_) | Bool(_)) | (Num(_) | Str(_) | Bool(_), Sym(_)) => false,
             (Bool(b), _) => { let n = Num(if *b { 1.0 } else { 0.0 }); self.loose_eq(&n, r)? }
             (_, Bool(b)) => { let n = Num(if *b { 1.0 } else { 0.0 }); self.loose_eq(l, &n)? }
@@ -1289,7 +1178,7 @@ impl Interp {
 }
 
 impl Interp {
-    /// Die vier Rechenoperatoren auf zwei grossen Zahlen.
+    /// The arithmetic operators on two BigInts.
     fn big_arith(&mut self, op: BinOp, a: &Rc<crate::js::bigint::Big>,
                  b: &Rc<crate::js::bigint::Big>) -> C<Value> {
         use BinOp::*;
@@ -1311,8 +1200,8 @@ impl Interp {
         Ok(Value::BigInt(Rc::new(r)))
     }
 
-    /// Ein Vergleich, bei dem mindestens eine Seite gross ist. `None` heisst
-    /// „unvergleichbar" (NaN auf der anderen Seite).
+    /// A comparison where at least one side is a BigInt. `None` means
+    /// "unordered" (NaN on the other side).
     fn big_cmp(&mut self, l: &Value, r: &Value) -> C<Option<core::cmp::Ordering>> {
         use crate::js::bigint::Big;
         let to_big = |v: &Value| -> Option<Big> {
@@ -1322,11 +1211,9 @@ impl Interp {
                 _ => None,
             }
         };
-        // Zwei grosse, oder eine grosse gegen einen Text: exakt vergleichen.
+        // Two BigInts, or a BigInt against a string: compare exactly.
         if let (Some(a), Some(b)) = (to_big(l), to_big(r)) { return Ok(Some(a.cmp(&b))); }
-        // Gross gegen Zahl: ueber `f64`. Das ist auf sehr grossen Werten
-        // ungenau — benannt statt verschwiegen, und der Fall kommt in echtem
-        // Code nicht vor.
+        // BigInt against Number: via `f64`. Imprecise for very large values.
         let (a, b) = match (l, r) {
             (Value::BigInt(x), other) => (x.to_f64(), self.to_number(other)?),
             (other, Value::BigInt(y)) => (self.to_number(other)?, y.to_f64()),
@@ -1339,17 +1226,13 @@ impl Interp {
     }
 }
 
-/// Der Zahlenkern der zweistelligen Operatoren: beide Seiten sind schon
-/// gewoehnliche Zahlen, es ist nichts mehr umzuwandeln.
+/// The numeric core of the binary operators: both sides are plain numbers.
 ///
-/// **Er steht hier EINMAL und wird von beiden Seiten gerufen** — vom
-/// Schnellweg oben in `binary` und vom Ende jedes langsamen Armes, wenn der
-/// seine Umwandlungen hinter sich hat. Abgeschrieben liefe die Bedeutung
-/// zwischen den zwei Stellen still auseinander: `%` hat vier Sonderfaelle,
-/// `**` drei, und ein Vergleich mit NaN ist immer falsch, auch `>=`.
+/// Called from both the fast path in `binary` and the tail of every slow
+/// arm, so the semantics live in one place (`%` and `a ** b` have special
+/// cases, and any comparison with NaN is false, including `>=`).
 ///
-/// `None` gibt es nur fuer `in` und `instanceof` — die haben mit zwei Zahlen
-/// nichts zu tun und eigene Arme.
+/// `None` only for `in` and `instanceof`, which have their own arms.
 fn num_bin(op: BinOp, a: f64, b: f64) -> Option<Value> {
     use BinOp::*;
     Some(match op {
@@ -1370,15 +1253,14 @@ fn num_bin(op: BinOp, a: f64, b: f64) -> Option<Value> {
             if a.is_nan() || b.is_nan() { Value::Bool(false) }
             else { Value::Bool(match op { Lt => a < b, Gt => a > b, LtEq => a <= b, _ => a >= b }) }
         }
-        // Zwei Zahlen: `==` ist `===`, und beide sind der Vergleich selbst.
+        // Two numbers: `==` is `===`.
         EqEq | EqEqEq => Value::Bool(a == b),
         NotEq | NotEqEq => Value::Bool(a != b),
         In | Instanceof => return None,
     })
 }
 
-/// `**`. `libm` ist schon Abhaengigkeit der Engine (CSS Color 4), also wird
-/// hier nichts Neues hereingezogen.
+/// Exponentiation, `a ** b`.
 fn powf(a: f64, b: f64) -> f64 {
     if b == 0.0 { return 1.0; }
     if a.is_nan() || b.is_nan() { return f64::NAN; }

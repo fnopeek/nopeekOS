@@ -1,21 +1,11 @@
-//! JavaScript: Lexer, Syntaxbaum, Parser.
+//! JavaScript: lexer, syntax tree, parser, compiler, VM and runtime.
 //!
-//! **Warum selbst geschrieben und nicht portiert.** Bei WebP war die ehrliche
-//! Antwort die umgekehrte (`super::webp`): `image-webp` beruehrte `std` in vier
-//! Zeilen, also wurde portiert statt neu gebaut. Hier liegt der Fall anders —
-//! die guten JS-Parser (swc, oxc, boa) sind gross, `std`-gebunden und auf
-//! Arenen gebaut; sie nach `no_std` zu ziehen waere mehr Arbeit als diese
-//! Datei, und der Baum, den sie liefern, ist auf ihre eigenen Motoren
-//! zugeschnitten. Der Rest der Engine ist aus demselben Grund handgeschrieben.
-//!
-//! Gemessen wird gegen **test262** (`tools/test262/`), mit der V8-Grundlinie
-//! als Vergleich: ein Test, den wir reissen und V8 besteht, ist unsere Luecke.
-//!
-//! Was hier NICHT ist: eine Auswertung. Der Parser baut den Baum, mehr nicht.
+//! Hand-written rather than ported: the established JS parsers (swc, oxc,
+//! boa) are large, `std`-bound and arena-based, and their trees are shaped
+//! for their own engines. Conformance is checked against test262.
 
 pub mod ast;
-/// Der Befehlssatz und der Uebersetzer dorthin — siehe `code.rs` fuer die
-/// Begruendung des Umbaus.
+/// The instruction set; `compile` translates the AST into it.
 pub mod code;
 pub mod compile;
 pub mod vm;
@@ -49,13 +39,13 @@ pub use parser::{parse, ParseError};
 pub use interp::TEST_STEPS;
 pub use interp::{STRICT_SITES, STRICT_SITE_NAMES};
 
-/// Ein Programm laufen lassen. Fehler kommen als geworfener JS-Wert zurueck,
-/// nicht als Rust-Fehler — ein `throw` ist ein normaler Ausgang.
+/// Run a program. An uncaught `throw` comes back as the thrown value's
+/// `name: message`, not as a Rust error.
 pub fn run(src: &str, module: bool) -> Result<(), alloc::string::String> {
     run_capped(src, module, u64::MAX)
 }
 
-/// Wie `run`, aber mit einer Schrittgrenze — was ein Testlaeufer braucht.
+/// Like `run`, with a step limit for test runners.
 pub fn run_capped(src: &str, module: bool, max_steps: u64) -> Result<(), alloc::string::String> {
     use alloc::string::ToString;
     let prog = parse(src, module).map_err(|e| alloc::format!("SyntaxError: {} @{}", e.msg, e.at))?;
@@ -76,12 +66,10 @@ pub fn run_capped(src: &str, module: bool, max_steps: u64) -> Result<(), alloc::
     }
 }
 
-/// Eine Ausfuehrungseinheit, in der MEHRERE Programme nacheinander laufen.
+/// An execution context in which several programs run one after another.
 ///
-/// Der Testlaeufer braucht genau das: der Vorspann (`assert.js` + `sta.js`)
-/// wird EINMAL geparst und dann vor jedem Test nur noch ausgefuehrt. Ihn je
-/// Variante neu zu parsen war der erste Entwurf, und bei 78 000 Varianten sind
-/// das ein halbes Gigabyte Parsen fuer nichts.
+/// Lets a test runner parse its harness (`assert.js`, `sta.js`) once and
+/// only execute it before each test.
 pub struct Session {
     pub interp: interp::Interp,
 }
@@ -93,15 +81,15 @@ impl Session {
         Session { interp }
     }
 
-    /// Dieselbe Sitzung, aber ohne die Befehlsmaschine — fuer die Gegenprobe,
-    /// die sagt, WELCHE Tests die Umstellung kostet.
+    /// A session that runs on the tree-walker instead of the VM, for
+    /// cross-checking the two.
     pub fn new_without_vm(max_steps: u64) -> Session {
         let mut s = Session::new(max_steps);
         s.interp.vm_off = true;
         s
     }
 
-    /// Ein bereits geparstes Programm laufen lassen.
+    /// Run an already parsed program.
     pub fn run(&mut self, prog: &Program) -> Result<(), alloc::string::String> {
         match self.interp.run_program(prog) {
             Ok(_) => Ok(()),
@@ -123,10 +111,7 @@ impl Session {
     }
 }
 
-/// Nur pruefen, ob es parst — ohne den Baum zu behalten.
-///
-/// Das ist die Form, die der Konformanzlauf braucht: bei 50 000 Dateien ist
-/// die Frage „nimmt der Parser das an?" und nicht „wie sieht es aus".
+/// Check only whether the source parses, without keeping the tree.
 pub fn parses(src: &str, module: bool) -> Result<(), ParseError> {
     parse(src, module).map(|_| ())
 }

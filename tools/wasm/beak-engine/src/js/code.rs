@@ -1,25 +1,15 @@
-//! Der Befehlssatz, in den ein Programm uebersetzt wird — und die Einheit, in
-//! der er liegt (`Chunk`).
+//! The instruction set a program is compiled to, and the unit that holds it
+//! (`Chunk`).
 //!
-//! **Warum es das gibt.** Ein Baumlaeufer benutzt den RUST-Stapel als
-//! Zustandsspeicher, und ein Rust-Stapel laesst sich nicht anhalten. Damit
-//! sind Generatoren, `async`/`await` und alles, was spaeter einmal mitten in
-//! einem Ausdruck stehenbleiben soll, nicht bloss ungebaut, sondern
-//! unbaubar — man kaeme an den Zustand nicht heran. Die Befehlsliste dreht
-//! das um: der Zustand ist ein Feld, das man wegspeichern und weiterlaufen
-//! lassen kann.
+//! A tree walker keeps its state on the Rust stack, which cannot be
+//! suspended; generators and `async`/`await` need state that can be saved
+//! mid-expression. Here the state is a plain value stack that can be stored
+//! and resumed.
 //!
-//! Der Kopf von `interp.rs` hat diesen Umbau vorgesehen und eine Bedingung
-//! daran geknuepft: „der test262-Lauf ist danach das Netz, mit dem eine
-//! Umstellung auf Bytecode ueberhaupt erst verantwortbar ist." Das Netz gibt
-//! es (52,77 %, Fehlerkarte nach Familien, 45 s je Lauf), also wird sie
-//! eingeloest.
-//!
-//! **Was hier NICHT passiert: eine zweite Semantik.** Jeder Befehl unten ruft
-//! dieselben Hilfen wie der Baumlaeufer (`Interp::binary`, `Interp::call`,
-//! `Value::truthy`, `Env`). Die Maschine tauscht den VERTEILER, nicht die
-//! Bedeutung — und solange ein Programm entweder ganz uebersetzt oder ganz
-//! vom Baumlaeufer gefahren wird, kann auch keine Mischung entstehen.
+//! No second semantics: every op calls the same helpers as the tree walker
+//! (`Interp::binary`, `Interp::call`, `Value::truthy`, `Env`). Only the
+//! dispatch differs, and a program is run either fully compiled or fully by
+//! the tree walker, never mixed.
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -28,330 +18,295 @@ use alloc::vec::Vec;
 use super::ast::{BinOp, UnaryOp};
 use super::value::Value;
 
-/// Ein Befehl. Sprungziele sind absolute Indizes in `Chunk::ops` — relative
-/// waeren beim Zurueckflicken (`patch`) eine zweite Rechnung, und die erste
-/// ist schon fehleranfaellig genug.
+/// One instruction. Jump targets are absolute indices into `Chunk::ops`, so
+/// `patch` needs no offset arithmetic.
 #[derive(Debug, Clone)]
 pub enum Op {
-    /// `constants[i]` auf den Stapel.
+    /// Push `constants[i]`.
     Const(u32),
-    /// Den Wert des Namens `names[i]` auf den Stapel.
+    /// Push the value of `names[i]`.
     LoadVar(u32),
-    /// Oben zuweisen an `names[i]`; der Wert BLEIBT auf dem Stapel (eine
-    /// Zuweisung ist ein Ausdruck).
+    /// Assign the top to `names[i]`; the value stays on the stack (assignment
+    /// is an expression).
     StoreVar(u32),
-    /// `names[i]` binden. Nimmt den Wert vom Stapel.
+    /// Bind `names[i]`, popping the value.
     ///
-    /// `lexical` unterscheidet die beiden Faelle, und der Unterschied ist
-    /// beobachtbar: ein `let`/`const` gehoert GENAU HIER hin, ein `var` in die
-    /// naechste Funktionsumgebung — die das Hochziehen schon angelegt hat, und
-    /// die kann weiter oben liegen. `for (const x = 1; …)` hat den Fehler
-    /// gezeigt: die Zuweisung fand das aeussere `x`.
+    /// `lexical`: a `let`/`const` binds in exactly the current environment,
+    /// a `var` in the nearest function environment (already created by
+    /// hoisting, possibly further up). Matters e.g. for `for (const x = 1; …)`
+    /// with an outer `x`.
     DeclVar { name: u32, mutable: bool, lexical: bool },
-    /// Einer eben gebauten Funktion den Namen der Variablen geben, an die sie
-    /// gerade gebunden wird (`var f = function(){}` -> `f.name === "f"`).
-    /// Sichtbar in Stapelspuren und in `f.name`; sechs Tests.
+    /// Name a freshly built function after the variable it is bound to
+    /// (`var f = function(){}` -> `f.name === "f"`).
     NameFunc(u32),
-    /// Oben in einen Eigenschaftsschluessel wandeln — VOR der Auswertung des
-    /// Wertes, weil `ToPropertyKey` Nebenwirkungen haben kann und die Spec
-    /// ihre Reihenfolge festlegt.
+    /// Convert the top to a property key before the value is evaluated:
+    /// `ToPropertyKey` may have side effects and the spec fixes their order.
     ToKey,
     /// `this`.
     This,
     Pop,
     Dup,
-    /// Oben verwerfen und darunter liegenden Wert behalten (`a, b` → a weg).
+    /// Drop the top and keep the value below (`a, b` drops a).
     Swap,
     Un(UnaryOp),
-    /// `ToNumeric` — wie `Un(Plus)`, aber eine grosse Zahl bleibt gross.
-    /// `x++` auf einem BigInt darf nicht in `+x` laufen, das wirft.
+    /// `ToNumeric`: like `Un(Plus)`, but a BigInt stays a BigInt. `x++` on a
+    /// BigInt must not go through `+x`, which throws.
     ToNumeric,
-    /// Eins dazu oder eins weg, im TYP des Wertes (`true` = dazu).
+    /// Add or subtract one in the value's own type (`true` = add).
     Step(bool),
     Bin(BinOp),
-    /// `typeof x` auf einem NAMEN — muss ohne ReferenceError auskommen, wenn
-    /// es den Namen nicht gibt, und ist deshalb kein `LoadVar` + `Un`.
+    /// `typeof x` on a name: must not throw ReferenceError for an unbound
+    /// name, so it is not `LoadVar` + `Un`.
     TypeofVar(u32),
     Jump(u32),
-    /// Springt, wenn oben TRUTHY ist; nimmt den Wert immer vom Stapel.
+    /// Jump if the top is truthy; always pops.
     JumpTrue(u32),
-    /// Springt, wenn oben falsy ist; nimmt den Wert IMMER vom Stapel.
+    /// Jump if the top is falsy; always pops.
     JumpFalse(u32),
-    /// Fuer `&&`/`||`/`??`: springt bei falsy/truthy/nullish und LAESST den
-    /// Wert liegen — das ist der Wert des Ausdrucks.
+    /// For `&&`/`||`/`??`: jump on falsy/truthy/nullish and leave the value
+    /// on the stack as the result of the expression.
     JumpFalseKeep(u32),
     JumpTrueKeep(u32),
     JumpNullishKeep(u32),
-    /// `obj[names[i]]` — Stapel: obj → wert.
+    /// `obj[names[i]]`. Stack: obj -> value.
     GetProp(u32),
-    /// `obj[key]` — Stapel: obj, key → wert.
+    /// `obj[key]`. Stack: obj, key -> value.
     GetIndex,
-    /// Stapel: obj, wert → wert (die Zuweisung ist ein Ausdruck).
+    /// Stack: obj, value -> value (assignment is an expression).
     SetProp(u32),
-    /// Stapel: obj, key, wert → wert.
+    /// Stack: obj, key, value -> value.
     SetIndex,
-    /// Stapel: callee, this, arg0..argN → ergebnis.
+    /// Stack: callee, this, arg0..argN -> result.
     ///
-    /// `name` ist der NAME des Gerufenen, nur fuer die Fehlermeldung —
-    /// `u32::MAX` heisst „keiner". „value is not a function" sagt nicht, WAS
-    /// fehlt, und genau das ist im Zielkorpus der haeufigste Fehlschlag.
+    /// `name` is the callee's name, used only in the error message;
+    /// `u32::MAX` means none.
     Call { argc: u16, name: u32 },
-    /// Stapel: callee, arg0..argN → ergebnis.
-    /// Der Name des Gerufenen faehrt MIT — nicht fuer das Bauen, sondern fuer
-    /// den Fehlschlag: „Intl.PluralRules is not a constructor" sagt, was
-    /// fehlt, „undefined is not a constructor" nicht. `u32::MAX` heisst
-    /// namenlos (ein Ausdruck statt eines Namens).
+    /// Stack: callee, arg0..argN -> result.
+    /// `name` is only for the error message ("Intl.PluralRules is not a
+    /// constructor"); `u32::MAX` means the callee was an expression.
     New { argc: u16, name: u32 },
-    /// Feld aus den obersten `n` Werten. `true` an Stelle `k` heisst: dort
-    /// stand eine LUECKE (`[1, , 3]`), und die ist nicht dasselbe wie
-    /// `undefined` — `in` findet sie nicht.
+    /// Array from the top `n` values. A hole (`[1, , 3]`) is not the same as
+    /// `undefined`: `in` does not find it.
     MakeArray(u16),
-    /// Ein leerer Gegenstand mit `Object.prototype`.
+    /// An empty object with `Object.prototype`.
     NewObject,
-    /// Stapel: obj, wert → obj. Eine Dateneigenschaft unter `names[i]`.
+    /// Stack: obj, value -> obj. A data property under `names[i]`.
     DefineProp(u32),
-    /// `{ __proto__: v }` — setzt den PROTOTYP des Objekts auf dem Stapel,
-    /// statt eine Eigenschaft anzulegen.
+    /// `{ __proto__: v }`: sets the prototype of the object on the stack
+    /// instead of creating a property.
     SetLiteralProto,
-    /// Stapel: obj, schluessel, wert → obj.
+    /// Stack: obj, key, value -> obj.
     DefinePropComputed,
-    /// Stapel: obj, funktion → obj. `get` unterscheidet Leser von Schreiber;
-    /// beide muessen sich auf DERSELBEN Eigenschaft treffen koennen.
+    /// Stack: obj, function -> obj. `get` selects getter or setter; both must
+    /// be able to land on the same property.
     DefineAccessor { name: u32, get: bool },
     DefineAccessorComputed { get: bool },
-    /// Stapel: obj, quelle → obj. `{...src}` kopiert die aufzaehlbaren
-    /// EIGENEN Eigenschaften.
+    /// Stack: obj, source -> obj. `{...src}` copies the enumerable own
+    /// properties.
     SpreadInto,
-    /// Die obersten ZWEI verdoppeln — fuer `o[k]++`, wo Objekt und Schluessel
-    /// nur EINMAL ausgewertet werden duerfen.
+    /// Duplicate the top two, for `o[k]++` where object and key are evaluated
+    /// once.
     Dup2,
-    /// `[a, b, c]` → `[c, a, b]`. Fuer `o.p++`, wo der ALTE Wert das Ergebnis
-    /// ist und trotzdem unter dem Objekt hindurch nach unten muss.
+    /// `[a, b, c]` -> `[c, a, b]`. For `o.p++`, where the old value is the
+    /// result and must move below the object.
     Rot3,
-    /// `[a, b, c, d]` → `[d, a, b, c]`. Dasselbe fuer `o[k]++`: dort liegen
-    /// Objekt UND Schluessel darueber.
+    /// `[a, b, c, d]` -> `[d, a, b, c]`. The same for `o[k]++`, with object
+    /// and key above.
     Rot4,
-    /// Ein regulaerer Ausdruck aus `names[body]` und `names[flags]`.
+    /// A regular expression from `names[body]` and `names[flags]`.
     Regex { body: u32, flags: u32 },
-    /// Der Vorlagen-Gegenstand eines getaggten Templates (ES 13.2.8.4).
-    /// Gebaut wird er EINMAL je Befehlsstelle — `Interp::template_object`
-    /// haelt ihn unter der Adresse dieses Eintrags fest.
+    /// The template object of a tagged template (ES 13.2.8.4). Built once per
+    /// site: `Interp::template_object` caches it under the address of this
+    /// entry.
     TemplateObject(u32),
-    /// `for await (… of x)`: den ASYNCHRONEN Iterator holen (ES 7.4.2 mit
-    /// `hint: async`). Hat `x` kein `Symbol.asyncIterator`, wird sein
-    /// gewoehnlicher genommen und als synchron vermerkt.
+    /// `for await (… of x)`: get the async iterator (ES 7.4.2 with
+    /// `hint: async`). Without `Symbol.asyncIterator` the sync iterator is
+    /// used and marked as such.
     IterAllAsync,
-    /// `next()` rufen und das legen, worauf gewartet werden muss: bei einem
-    /// echten async-Iterator das ganze Ergebnis, bei einem umgehuellten
-    /// synchronen nur dessen `value` (sein `done` steht schon fest und wird
-    /// am Iterator vermerkt).
+    /// Call `next()` and push what must be awaited: the whole result for a
+    /// real async iterator, only its `value` for a wrapped sync one (whose
+    /// `done` is already known and recorded on the iterator).
     IterNextAsyncCall,
-    /// Nach dem `Op::Await`: das abgewartete Ergebnis auswerten und
-    /// entweder den Wert legen oder ans Schleifenende springen.
+    /// After `Op::Await`: inspect the awaited result and either push the
+    /// value or jump to the loop end.
     IterStepAsync(u32),
-    /// Die obersten `n` Werte zu einer Zeichenkette verketten (Vorlage).
+    /// Concatenate the top `n` values into a string (template literal).
     Concat(u16),
-    /// `delete obj[names[i]]` bzw. `delete obj[key]`.
+    /// `delete obj[names[i]]` or `delete obj[key]`.
     DeleteProp(u32),
-    /// `#x in obj` — die Markenpruefung. Der Name steht in der Namenstabelle,
-    /// das Objekt auf dem Stapel.
+    /// `#x in obj`, the brand check. The name is in the name table, the
+    /// object on the stack.
     PrivateIn(u32),
     DeleteIndex,
-    /// Ein Feld aus den obersten `n` EINTRAEGEN bauen, von denen jeder
-    /// entweder ein Wert oder ein zu spreizender ist (`spread[k]`).
+    /// Build an array from the top `n` entries, each either a value or one to
+    /// spread (`spread[k]`).
     MakeArraySpread { n: u16, spread: u32 },
-    /// Wie `Call`/`New`, aber die Argumente stehen als FELD auf dem Stapel —
-    /// so kann `f(...xs)` dieselbe Aufrufhilfe benutzen.
+    /// Like `Call`/`New`, but the arguments are one array on the stack, so
+    /// `f(...xs)` can use the same call helper.
     CallSpread(u32),
     NewSpread,
-    /// `super.k` lesen — Stapel: → wert. `Interp::super_get`.
+    /// Read `super.k`. Stack: -> value. `Interp::super_get`.
     SuperGet(u32),
-    /// `super.k` als Gerufenes — Stapel: → wert, this. Der Empfaenger ist das
-    /// EIGENE `this`, der Wert kommt von oben; genau diese Trennung ist der
-    /// Sinn von `super`.
+    /// `super.k` as callee. Stack: -> value, this. The receiver is the own
+    /// `this`, the value comes from the parent; that split is what `super`
+    /// means.
     SuperCallee(u32),
-    /// `super(...)` — Stapel: arg0..argN → undefined. `Interp::super_call`
-    /// macht alles: Elternkonstruktor suchen, auf DIESEM `this` fahren, und
-    /// danach die eigenen Instanzfelder anlegen.
+    /// `super(...)`. Stack: arg0..argN -> undefined. `Interp::super_call`
+    /// finds the parent constructor, runs it on this `this` and then creates
+    /// the own instance fields.
     SuperCall(u16),
-    /// Springt, wenn oben `null`/`undefined` ist, und laesst den Wert liegen.
-    /// Das Gegenstueck zu `JumpNullishKeep`, fuer die Optional-Kette.
+    /// Jump if the top is `null`/`undefined`, leaving the value. Counterpart
+    /// of `JumpNullishKeep` for optional chains.
     JumpNullishTo(u32),
-    /// Aus `names[i]` eine Funktion bauen — der Index zeigt in `funcs`.
+    /// Build a function; the index points into `funcs`.
     Closure(u32),
-    /// Ein MUSTER binden — Stapel: wert → (nichts). Der Index zeigt in `pats`.
+    /// Bind a pattern. Stack: value -> (nothing). The index points into
+    /// `pats`.
     ///
-    /// Wie `Op::Class` rechnet der Befehl nichts, er ruft `bind_pattern` bzw.
-    /// `declare_pattern` — dieselben Hilfen wie der Baumlaeufer. Ein Muster
-    /// ist eine Bauvorschrift mit Voreinstellungen, Restsammlern, geschachtelten
-    /// Mustern und Zielen, die gar keine Bindungen sind (`[a.b] = x`); ein
-    /// Nachbau davon waere eine zweite Zuweisungssemantik.
+    /// Like `Op::Class`, this delegates to `bind_pattern`/`declare_pattern`,
+    /// the tree walker's helpers. Patterns carry defaults, rest elements,
+    /// nesting and non-binding targets (`[a.b] = x`); reimplementing them
+    /// would be a second assignment semantics.
     BindPat { pat: u32, mode: BindMode },
-    /// Den Kopf einer `for..of`/`for..in`-Schleife binden — Stapel: wert →
-    /// (nichts). `Interp::for_head_bind` kennt die drei Faelle.
+    /// Bind the head of a `for..of`/`for..in` loop. Stack: value ->
+    /// (nothing). `Interp::for_head_bind` handles the three cases.
     BindHead(u32),
-    /// Eine Klasse bauen — der Index zeigt in `classes`.
+    /// Build a class; the index points into `classes`.
     ///
-    /// **Der Befehl rechnet nichts, er RUFT `Interp::eval_class`** — dieselbe
-    /// Funktion, die der Baumlaeufer ruft. Eine Klasse ist kein Ausdruck mit
-    /// Unterausdruecken, den man in Befehle zerlegen wollte: sie ist eine
-    /// Bauvorschrift mit einem Dutzend Sonderregeln (fehlender Konstruktor,
-    /// abgeleiteter Durchreicher, Methoden NICHT aufzaehlbar, Leser und
-    /// Schreiber auf DERSELBEN Eigenschaft). Sie ein zweites Mal zu schreiben
-    /// waere die teuerste Sorte zweiter Semantik.
+    /// Delegates to `Interp::eval_class`, the same function the tree walker
+    /// uses. Class semantics (implicit constructor, derived pass-through,
+    /// non-enumerable methods, getter and setter on one property) must exist
+    /// only once.
     ///
-    /// Ihre Unterausdruecke — `extends`, berechnete Schluessel, statische
-    /// Felder — laufen dadurch im Baumlaeufer, und zwar in BEIDEN Faellen.
-    /// Das ist kein Bruch der Regel „ganz oder gar nicht", sondern ihre
-    /// strengste Lesart: fuer einen Klassenrumpf gibt es genau EINEN Weg.
+    /// Its subexpressions (`extends`, computed keys, static fields) therefore
+    /// always run in the tree walker; a class body has exactly one path.
     Class(u32),
     Throw,
-    /// Den Wert oben werfen — der Rueckweg aus einem `finally`, das nicht
-    /// gefangen hat.
+    /// Throw the top value: the exit from a `finally` that did not catch.
     Rethrow,
-    /// Einen Behandler aufmachen. `catch`/`finally` sind Sprungziele,
-    /// `u32::MAX` heisst „gibt es nicht".
+    /// Open a handler. `catch`/`finally` are jump targets, `u32::MAX` means
+    /// absent.
     ///
-    /// Der Behandler merkt sich AUCH die Stapel- und Umgebungstiefe: ein Wurf
-    /// mitten in einem Ausdruck laesst halbe Werte liegen, und ohne das
-    /// Zurueckschneiden faende der `catch`-Block einen Stapel vor, den niemand
-    /// gebaut hat.
+    /// The handler also records stack and environment depth: a throw in the
+    /// middle of an expression leaves partial values behind, which must be
+    /// cut off before the `catch` block runs.
     TryStart { catch: u32, finally: u32 },
-    /// Den obersten Behandler wieder zumachen.
+    /// Close the innermost handler.
     TryEnd,
-    /// Die geworfene Sache in `names[i]` binden — der Kopf eines `catch`.
+    /// Bind the thrown value to `names[i]`: the head of a `catch`.
     BindCatch(u32),
-    /// Den Iterator des Wertes oben holen und im Rahmen ablegen.
+    /// Get the iterator of the top value and store it in the frame.
     ///
-    /// FAUL, ueber `get_iterator`/`iter_next`/`iter_close` — dieselben Hilfen
-    /// wie im Baumlaeufer. Die Werte vorher einzusammeln waere kuerzer und
-    /// falsch: ein Rumpf, der die Quelle veraendert, muss das sehen, und ein
-    /// vorzeitiger Ausstieg muss `return()` rufen. Fuenf Tests haben genau
-    /// das gesagt.
+    /// Lazy, via `get_iterator`/`iter_next`/`iter_close` like the tree
+    /// walker: a body that mutates the source must see it, and an early exit
+    /// must call `return()`.
     IterAll,
-    /// Den naechsten Wert auf den Stapel; ist der Iterator zu Ende, springen.
+    /// Push the next value; jump when the iterator is done.
     IterNext(u32),
-    /// Die Schluessel eines `for…in` holen und im Rahmen ablegen — Stapel:
-    /// obj → (nichts).
+    /// Collect the keys of a `for…in` and store them in the frame. Stack:
+    /// obj -> (nothing).
     ///
-    /// EIFRIG, ueber `Interp::for_in_keys`, dieselbe Hilfe wie im
-    /// Baumlaeufer. Anders als bei `for…of` ist das richtig: die Liste wird
-    /// vorher gebaut, damit eine Aenderung am Objekt die Schleife nicht ins
-    /// Rutschen bringt. `null`/`undefined` geben eine leere Liste, also
-    /// null Umlaeufe statt eines Fehlers.
+    /// Eager, via `Interp::for_in_keys`, so that mutating the object does not
+    /// derail the loop. `null`/`undefined` yield an empty list (zero
+    /// iterations, no error).
     ForInAll,
-    /// Den naechsten Schluessel auf den Stapel; ist die Liste leer, springen.
+    /// Push the next key; jump when the list is empty.
     ForInNext(u32),
-    /// Den Iterator vergessen — er ist zu Ende, `return()` waere falsch.
+    /// Forget the iterator: it is done, calling `return()` would be wrong.
     IterDrop,
-    /// Den Iterator SCHLIESSEN (`return()`) und vergessen — der Weg fuer
-    /// `break` und fuer jeden Abbruch.
+    /// Close the iterator (`return()`) and forget it: the path for `break`
+    /// and any abrupt exit.
     IterClose,
-    /// Aus dem Rahmen zurueck; oben liegt der Wert.
+    /// Return from the frame; the value is on top.
     Ret,
-    /// **Anhalten.** Oben liegt der Wert, den `next()` zurueckgibt; der Rahmen
-    /// bleibt stehen, wo er steht.
+    /// Suspend. The top is the value `next()` returns; the frame stays as is.
     ///
-    /// Beim Wiederaufnehmen legt `Vm::send` den Wert von `next(v)` an genau
-    /// dieselbe Stelle des Stapels — und der ist der Wert des
-    /// `yield`-Ausdrucks. Mehr ist ein `yield` nicht: der halbe Ausdruck
-    /// darunter (`a + (yield 1)` hat `a` liegen) steht im Wertestapel des
-    /// Rahmens und ueberlebt das Anhalten, weil er ein FELD ist und kein
-    /// Rust-Stapel. Das ist die ganze Begruendung des Umbaus, eingeloest.
+    /// On resume `Vm::send` puts the argument of `next(v)` in the same stack
+    /// slot, which is the value of the `yield` expression. A partial
+    /// expression below (`a` in `a + (yield 1)`) survives because it lives in
+    /// the frame's value stack, not on the Rust stack.
     Yield,
-    /// Der Anhaltepunkt eines `yield*` im gewoehnlichen Generator: gibt das
-    /// Ergebnisobjekt des INNEREN Iterators unveraendert heraus und ist die
-    /// Marke, an der `throw()`/`return()` weiterreichen statt abzuwickeln.
+    /// The suspension point of `yield*` in a sync generator: hands out the
+    /// inner iterator's result object unchanged, and marks the spot where
+    /// `throw()`/`return()` are forwarded instead of unwinding.
     YieldDelegate(bool),
-    /// `yield* x`: den inneren Iterator holen (synchron oder asynchron, je
-    /// nach Art des Generators) und den ersten „erhaltenen" Wert legen.
+    /// `yield* x`: get the inner iterator (sync or async, depending on the
+    /// generator kind) and push the first received value.
     DelegateStart(bool),
-    /// Den inneren Iterator anstossen — mit `next`, `throw` oder `return`, je
-    /// nachdem, womit der aeussere Generator wieder angeworfen wurde. Der
-    /// Sprung geht ans Schleifenende, wenn der innere Iterator kein `return`
-    /// hat und der aeussere aufgeben soll.
+    /// Drive the inner iterator with `next`, `throw` or `return`, matching
+    /// how the outer generator was resumed. Jumps to the loop end when the
+    /// inner iterator has no `return` and the outer one must give up.
     DelegateCall(u32),
-    /// Das (ggf. abgewartete) Ergebnis auswerten: fertig → ans Ziel springen,
-    /// sonst den Wert fuers `yield` legen.
+    /// Inspect the (possibly awaited) result: done -> jump to the target,
+    /// otherwise push the value for the `yield`.
     DelegateStep { end: u32, is_async: bool },
-    /// **Warten.** Oben liegt das Erwartete; die Maschine haelt an, und was
-    /// sie wieder anwirft, ist die Aufloesung des Versprechens.
+    /// Await. The top is the awaited value; the machine suspends and is
+    /// resumed with the promise's settlement.
     ///
-    /// Derselbe Mechanismus wie `Yield` — nur legt sich hier ein Versprechen
-    /// davor, und das Wiederaufnehmen kommt aus der Microtask-Schlange statt
-    /// von einem `next()`. Genau das meinte der Bauplan mit „`async`/`await`
-    /// ist derselbe Mechanismus mit einem Promise davor".
+    /// The same mechanism as `Yield`, except that a promise sits in front and
+    /// resumption comes from the microtask queue instead of `next()`.
     Await,
-    /// Eine Umgebung fuer einen Block oeffnen — mit den Bindungen, die dort
-    /// HOCHGEZOGEN gehoeren (`blocks[i]`). Ohne sie steht `let` erst ab seiner
-    /// Zeile, statt von Blockanfang an in der zeitlichen Totzone, und eine
-    /// Funktionsdeklaration im Block gaebe es vor ihrer Zeile gar nicht.
+    /// Open a block environment with the bindings hoisted to it
+    /// (`blocks[i]`). Without them `let` would not be in its temporal dead
+    /// zone from block start, and a block function declaration would not
+    /// exist before its line.
     PushEnv(u32),
     PopEnv,
-    /// Das Ergebnis des Programms merken (der Wert eines Programms ist sein
-    /// letzter Ausdruckswert — `eval` und die Konsole leben davon).
+    /// Record the program's completion value (its last expression value;
+    /// `eval` and the console use it).
     SetCompletion,
 }
 
-/// Wie ein Muster gebunden wird.
+/// How a pattern is bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindMode {
-    /// Eine Deklaration: die Bindung gibt es schon (das Hochziehen hat sie
-    /// angelegt), hier wird sie fertig.
+    /// A declaration: the binding already exists (created by hoisting) and
+    /// is initialized here.
     Init,
-    /// Eine Zuweisung an bestehende Ziele — auch an Eigenschaften.
+    /// Assignment to existing targets, including properties.
     Assign,
-    /// Der Kopf eines `catch`: die Namen entstehen GENAU HIER.
+    /// The head of a `catch`: the names are created here.
     Declare,
 }
 
-/// Was beim Betreten eines Blocks gebunden wird, bevor die erste Zeile laeuft.
+/// What a block binds on entry, before its first statement runs.
 ///
-/// Die Liste entsteht beim Uebersetzen aus denselben zwei Schleifen wie
-/// `Interp::hoist` — dieselbe Reihenfolge, dieselben Faelle. Sie hier
-/// nachzubauen statt den AST mitzuschleppen kostet zwei Zahlen je Bindung
-/// statt einer Kopie des ganzen Rumpfes.
+/// Built at compile time by the same two loops as `Interp::hoist`, in the
+/// same order and with the same cases. Two numbers per binding instead of
+/// carrying the AST of the whole body.
 #[derive(Debug, Clone)]
 pub enum BlockDecl {
-    /// `let`/`const`/`class`: gebunden, aber NICHT bereit — die zeitliche
-    /// Totzone. Ohne sie ist `let` nur ein `var` mit anderem Namen.
+    /// `let`/`const`/`class`: bound but uninitialized (temporal dead zone).
     Tdz { name: u32, mutable: bool },
-    /// Eine Funktionsdeklaration: sofort fertig, damit sie vor ihrer Zeile
-    /// aufrufbar ist.
+    /// A function declaration: initialized immediately so it is callable
+    /// before its line.
     Func { name: u32, func: u32 },
 }
 
-/// „Noch kein Hinweis." Kein `Option`, weil das je Befehlsstelle ein Byte
-/// mehr waere und die Stelle heiss ist.
+/// "No hint yet." Not an `Option`, which would cost a byte per op site on a
+/// hot path.
 pub const HINT_NONE: u16 = u16::MAX;
 
-/// Uebersetzter Code samt allem, worauf seine Befehle zeigen.
+/// Compiled code together with everything its ops refer to.
 pub struct Chunk {
     pub ops: Vec<Op>,
-    /// **Der Weg von letztem Mal, je Befehlsstelle.** Gemessen an der
-    /// Fritzbox-Anmeldung: 24,4 % aller Befehle sind `LoadVar`, und 85,4 %
-    /// davon finden ihren Namen DREI Umgebungen weiter oben. Der volle Weg
-    /// fragt dafuer vier Tabellen — drei davon nur, um „nicht hier" zu
-    /// hoeren.
-    ///
-    /// Der Hinweis ist die Tiefe, in der der Name beim letzten Mal stand.
-    /// Sie ist LEXIKALISCH festgelegt: dieselbe Befehlsstelle sieht dieselbe
-    /// Kettenform. Trifft er trotzdem nicht, laeuft der volle Weg — er ist
-    /// ein Hinweis, keine Auskunft.
+    /// Per op site, the environment depth at which the name was found last
+    /// time. Lexically fixed: the same site sees the same chain shape. A
+    /// miss falls back to the full lookup; it is a hint, not an answer.
     pub hints: Vec<core::cell::Cell<u16>>,
     pub constants: Vec<Value>,
-    /// Namen (Bezeichner und Eigenschaften), einmal abgelegt statt je Befehl.
+    /// Names (identifiers and properties), stored once instead of per op.
     pub names: Vec<Rc<str>>,
     pub funcs: Vec<Rc<super::ast::Func>>,
-    /// Die Stuecke jedes getaggten Templates. Sie liegen HIER und nicht im
-    /// Baum, weil ein `Chunk` den Baum ueberlebt — und die Adresse dieses
-    /// Eintrags ist der Schluessel, unter dem der Gegenstand gemerkt wird.
+    /// The parts of each tagged template. Stored here, not in the AST,
+    /// because a `Chunk` outlives the AST, and the address of the entry is
+    /// the key under which the template object is cached.
     pub templates: Vec<Vec<super::ast::TemplateElement>>,
     pub classes: Vec<Rc<super::ast::Class>>,
     pub pats: Vec<super::ast::Pat>,
     pub heads: Vec<super::ast::ForHead>,
     pub blocks: Vec<Vec<BlockDecl>>,
-    /// Je `MakeArraySpread` eine Maske: welcher Eintrag war ein `...x`?
+    /// One mask per `MakeArraySpread`: which entries were `...x`.
     pub blocks_spread: Vec<Vec<bool>>,
 }
 
@@ -364,18 +319,17 @@ impl Chunk {
 
     pub fn emit(&mut self, op: Op) -> usize {
         self.ops.push(op);
-        // Genau hier, damit die beiden Listen nicht auseinanderlaufen
-        // koennen — `ops` waechst nirgends sonst.
+        // Keeps `hints` in step with `ops`; `ops` grows nowhere else.
         self.hints.push(core::cell::Cell::new(HINT_NONE));
         self.ops.len() - 1
     }
 
-    /// Einen noch unbekannten Sprung eintragen und seine Stelle zurueckgeben.
+    /// Emit a jump with an unknown target and return its position.
     pub fn emit_jump(&mut self, make: fn(u32) -> Op) -> usize {
         self.emit(make(u32::MAX))
     }
 
-    /// Das Ziel eines vorgemerkten Sprungs auf HIER setzen.
+    /// Set the target of a pending jump to the current position.
     pub fn patch(&mut self, at: usize) {
         let here = self.ops.len() as u32;
         match &mut self.ops[at] {
@@ -392,8 +346,7 @@ impl Chunk {
         (self.constants.len() - 1) as u32
     }
 
-    /// Namen werden dedupliziert: eine Schleife, die `i` zwanzigmal liest,
-    /// legt ihn einmal ab.
+    /// Names are deduplicated.
     pub fn name(&mut self, s: &str) -> u32 {
         if let Some(i) = self.names.iter().position(|n| &**n == s) {
             return i as u32;
@@ -442,17 +395,17 @@ impl Chunk {
     }
 }
 
-/// Was der Uebersetzer noch nicht kann. **Kein Fehler, eine Absage** — der
-/// Rufer faehrt das Programm dann GANZ mit dem Baumlaeufer, nie halb.
+/// A construct the compiler does not support. Not an error but a decline:
+/// the caller then runs the whole program in the tree walker, never half.
 ///
-/// Der Text ist der Name der Form, nicht ein Satz: er wird gezaehlt, und eine
-/// Zaehlung braucht einen Schluessel, keine Prosa.
+/// The text is the construct's name, not a sentence, so it can serve as a
+/// key when declines are counted.
 #[derive(Debug)]
 pub struct Unsupported(pub &'static str);
 
 pub type CompileResult<T> = Result<T, Unsupported>;
 
-/// Damit ein Zaehler ueber viele Laeufe etwas sagt.
+/// Prints the bare key, for counting declines across runs.
 impl core::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.write_str(self.0)

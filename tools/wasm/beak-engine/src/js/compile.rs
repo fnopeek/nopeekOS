@@ -1,13 +1,12 @@
-//! AST → Befehlsliste.
+//! AST -> op list.
 //!
-//! **Der Uebersetzer sagt NEIN, wo er noch nicht kann** (`Unsupported`), und
-//! der Rufer faehrt das Programm dann ganz mit dem Baumlaeufer. Das ist die
-//! wichtigste Eigenschaft dieses Umbaus: es gibt zwei Maschinen, aber nie fuer
-//! DASSELBE Programm. Eine Mischung waere ein zweiter Semantikpfad, und die
-//! laufen erfahrungsgemaess still auseinander.
+//! The compiler declines what it cannot handle (`Unsupported`), and the
+//! caller then runs the whole program in the tree walker. There are two
+//! machines, but never for the same program; mixing them would be a second
+//! semantic path that silently drifts apart.
 //!
-//! Die Absage-Namen sind Schluessel, keine Saetze: `test262` zaehlt sie, und
-//! die Rangliste sagt, was als naechstes uebersetzbar werden muss.
+//! Decline names are keys, not sentences, so the test262 runner can count
+//! them.
 
 use alloc::string::String;
 use alloc::rc::Rc;
@@ -17,94 +16,78 @@ use super::ast::*;
 use super::code::*;
 use super::value::Value;
 
-/// Wohin `break`/`continue` springen. Ein Eintrag je offener Schleife.
+/// Where `break`/`continue` jump. One entry per open loop.
 struct Loop {
-    /// Stellen, die auf das Ende der Schleife gepatcht werden.
+    /// Sites patched to the loop end.
     breaks: Vec<usize>,
-    /// Stellen, die auf den Fortsetzungspunkt gepatcht werden.
+    /// Sites patched to the continue point.
     continues: Vec<usize>,
-    /// Wieviele Umgebungen beim Betreten offen waren.
+    /// Number of environments open on entry.
     ///
-    /// Ein `break` aus einem Block heraus springt an dessen `PopEnv` VORBEI.
-    /// Ohne diese Zahl bleibt die Umgebung offen, der naechste `PopEnv` nimmt
-    /// die falsche, und eine Bindung aus dem Block ist danach draussen noch
-    /// zu sehen — sechs annexB-Tests, die genau das pruefen.
+    /// A `break` out of a block jumps past its `PopEnv`; without this count
+    /// the environment stays open and block bindings leak outside.
     depth: usize,
-    /// Der Name, unter dem `break lbl` / `continue lbl` diesen Ausgang
-    /// findet. `None` heisst: nur ueber das unbenannte `break` erreichbar.
+    /// Labels under which `break lbl` / `continue lbl` find this exit. Empty
+    /// means reachable only by an unlabeled `break`.
     labels: Vec<String>,
-    /// Wieviele `for…of`/`for…in` beim Betreten offen waren.
+    /// Number of `for…of`/`for…in` iterators open on entry.
     ///
-    /// Dieselbe Buchhaltung wie `depth` fuer die Umgebungen, und aus demselben
-    /// Grund: ein `break lbl`/`continue lbl` springt an den `IterClose` der
-    /// INNEREN Schleife vorbei. Dann bleibt deren Iterator im Rahmen liegen —
-    /// ungeschlossen, und der naechste `IterNext` der aeusseren Schleife
-    /// findet den falschen. Ein test262-Fall hat genau das gesagt.
+    /// Same bookkeeping as `depth`: a `break lbl`/`continue lbl` jumps past
+    /// the inner loop's `IterClose`, and its iterator would otherwise stay in
+    /// the frame, unclosed, for the outer loop's `IterNext` to find.
     iters: usize,
-    /// Ein `switch` ist BRECHBAR, aber nicht fortsetzbar: `break` gehoert ihm,
-    /// `continue` der Schleife darunter. Ohne diese Unterscheidung liefe ein
-    /// `continue` in einem `switch` innerhalb einer Schleife an den Anfang des
-    /// `switch` — und das ist eine Endlosschleife, kein Fehler, den man sieht.
+    /// A `switch` (or labeled non-loop) is breakable but not continuable:
+    /// `break` belongs to it, `continue` to the loop below. Otherwise a
+    /// `continue` inside a `switch` would loop back to the `switch` forever.
     brk_only: bool,
 }
 
 pub struct Compiler {
     pub chunk: Chunk,
     loops: Vec<Loop>,
-    /// Wieviele `PushEnv` gerade offen sind.
+    /// Number of currently open `PushEnv`s.
     depth: usize,
-    /// Wieviele Schleifeniteratoren gerade offen sind.
+    /// Number of currently open loop iterators.
     iters: usize,
-    /// Uebersetzen wir gerade den Rumpf eines GENERATORS? Nur dort ist ein
-    /// `yield` ein `Op::Yield`; in einem Pfeil INNERHALB eines Generators
-    /// liest unser Parser `yield` ebenfalls als Yield-Ausdruck, und dessen
-    /// Rumpf ist ein eigener Chunk mit `in_gen == false` — der sagt hier nein
-    /// und faellt auf den Baumlaeufer zurueck, statt einen `Op::Yield` in
-    /// einen Rahmen zu legen, der ihn nicht anhalten kann.
+    /// Compiling a generator body. Only there is `yield` an `Op::Yield`; an
+    /// arrow inside a generator is its own chunk with `in_gen == false`,
+    /// which declines rather than emitting a `Yield` into a frame that cannot
+    /// suspend.
     in_gen: bool,
-    /// Uebersetzen wir gerade den Rumpf einer ASYNC-Funktion? Dieselbe
-    /// Ueberlegung wie bei `in_gen`: ein `await` im Rumpf eines gewoehnlichen
-    /// Pfeils darin ist ein eigener Chunk, der hier nein sagt.
+    /// Compiling an async function body. Same reasoning as `in_gen` for
+    /// `await` in a nested plain arrow.
     in_async: bool,
-    /// Offene Ausgaenge einer Optional-Kette (`a?.b.c`).
+    /// Open exits of optional chains (`a?.b.c`).
     ///
-    /// Der Kurzschluss gehoert der GANZEN Kette, nicht dem einen Glied:
-    /// `a?.b.c` gibt `undefined`, wenn `a` fehlt — es fasst `.c` gar nicht
-    /// erst an. `Expr::Chain` macht die Klammer auf, jedes `?.` darin traegt
-    /// hier seinen Sprung ein, und beim Zumachen zeigen alle auf dasselbe
-    /// Ende. Jeder Sprung raeumt VORHER seinen eigenen Stapel ab, damit das
-    /// Ende nicht wissen muss, wieviel darunter lag.
+    /// Short-circuiting applies to the whole chain: `a?.b.c` is `undefined`
+    /// when `a` is nullish and never touches `.c`. `Expr::Chain` opens an
+    /// entry, each `?.` registers its jump here, and on close all point to
+    /// the same end. Each jump pops its own stack first, so the end need not
+    /// know how much lay below.
     chains: Vec<Vec<usize>>,
-    /// Der Name, den die naechste Schleife bekommt.
+    /// Labels for the next loop.
     ///
-    /// `outer: for (…)` ist im Baum eine Marke UM eine Schleife, in der
-    /// Maschine aber gehoert der Name der SCHLEIFE — nur sie weiss, wohin ein
-    /// `continue outer` springt. Also legt die Marke ihn hier ab und die
-    /// Schleife nimmt ihn beim Anlegen mit.
+    /// In the AST `outer: for (…)` is a label around a loop, but only the
+    /// loop knows where `continue outer` goes. The label stores its names
+    /// here and the loop takes them when it is created.
     pending_labels: Vec<String>,
-    /// Wieviele `finally` gerade anhaengig sind.
+    /// Number of currently pending `finally` blocks.
     ///
-    /// Ein `yield` darunter ist ABGELEHNT, und zwar aus demselben Grund wie
-    /// `return` darunter: `gen.return()` an so einer Stelle muss den
-    /// Finalisierer noch fahren, und der Finalisierer wird hier KOPIERT statt
-    /// angesprungen — es gibt keine Stelle, an die ein zwischengespeicherter
-    /// Abschluss zurueckkaeme. Halb gebaut waere schlimmer als abgelehnt; im
-    /// Korpus kostet es 60 Dateien.
+    /// A `yield` inside is declined, for the same reason as `return`:
+    /// `gen.return()` there must still run the finalizer, but finalizers are
+    /// copied inline, so there is no place for a saved completion to resume.
     fin: usize,
 }
 
-/// Einen FUNKTIONSRUMPF uebersetzen.
+/// Compile a function body.
 ///
-/// Unterschied zum Programm: kein Abschlusswert (eine Funktion ohne `return`
-/// gibt `undefined`), und am Ende steht ein `Ret`, das genau das tut.
-/// Parameter und `this` liegen schon in der Umgebung, die `Interp::call_env`
-/// gebaut hat — der Rumpf faengt beim ersten Statement an.
+/// Unlike a program there is no completion value (a function without
+/// `return` yields `undefined`), and a final `Ret` does exactly that.
+/// Parameters and `this` already live in the environment built by
+/// `Interp::call_env`; the body starts at its first statement.
 pub fn function(f: &Func) -> CompileResult<Chunk> {
-    // Ein async-Generator ist BEIDES auf einmal: er haelt an `yield` UND an
-    // `await` an, und `next()` gibt ein Versprechen zurueck. `in_gen` und
-    // `in_async` stehen deshalb beide — die Maschine kennt beide Anhaltegruende
-    // laengst (`Step::Yield`, `Step::Await`), der Vertrag darum herum steht in
-    // `generator.rs`.
+    // An async generator suspends on both `yield` and `await`, so both flags
+    // may be set. The protocol around it lives in `generator.rs`.
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
                            in_gen: f.is_generator, in_async: f.is_async, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
     for st in &f.body {
@@ -116,13 +99,12 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
     Ok(c.chunk)
 }
 
-/// Ein ganzes Programm uebersetzen. `Err` heisst: der Baumlaeufer macht es.
+/// Compile a whole program. `Err` means the tree walker runs it.
 pub fn program(prog: &Program) -> CompileResult<Chunk> {
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
                            in_gen: false, in_async: false, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
-    // Hochziehen bleibt beim Baumlaeufer (`Interp::hoist`) — es arbeitet auf
-    // der Umgebung, nicht auf dem Code, und ist damit fuer beide Maschinen
-    // dasselbe. Hier nur der Rumpf.
+    // Hoisting stays in `Interp::hoist`: it works on the environment, so it
+    // is shared by both machines. Only the body is compiled here.
     for st in &prog.body {
         c.stmt(st)?;
     }
@@ -130,21 +112,16 @@ pub fn program(prog: &Program) -> CompileResult<Chunk> {
     Ok(c.chunk)
 }
 
-/// Der Name eines Gerufenen, wenn er eine Punktkette aus Bezeichnern ist:
-/// `Foo`, `Intl.PluralRules`, `window.Intl.ListFormat`.
-///
-/// **Die drei Stufen sind kein Luxus.** Ein Buendel schreibt
-/// `new window.Intl.ListFormat(…)`, und mit nur zwei Stufen blieb die
-/// Meldung namenlos — genau in dem Fall, fuer den sie da ist.
-/// Alles andere (`t[n]`, `(0, o.X)`) hat keinen Namen, und dann ist
-/// `u32::MAX` die ehrliche Antwort.
+/// The callee's name if it is a dotted chain of identifiers, up to three
+/// links: `Foo`, `Intl.PluralRules`, `window.Intl.ListFormat`. Anything else
+/// (`t[n]`, `(0, o.X)`) has no name.
 pub(crate) fn dotted_name(e: &Expr) -> Option<alloc::string::String> {
     match e {
         Expr::Ident(n) => Some(n.clone()),
         Expr::Member { obj, prop: p, optional: false } => match &**p {
             MemberProp::Ident(p) => {
                 let head = dotted_name(obj)?;
-                // Drei Glieder reichen; laenger sagt eine Meldung nichts mehr.
+                // Three links are enough for an error message.
                 if head.matches('.').count() >= 2 { return None }
                 Some(alloc::format!("{head}.{p}"))
             }
@@ -155,10 +132,9 @@ pub(crate) fn dotted_name(e: &Expr) -> Option<alloc::string::String> {
 }
 
 impl Compiler {
-    // ── Anweisungen ──────────────────────────────────────────────────────
-    /// Wie `stmt`, aber ohne Abschlusswert. In einer FUNKTION gibt es keinen —
-    /// ihr Wert ist ihr `return`, und ein `SetCompletion` je Anweisung waere
-    /// Arbeit fuer nichts.
+    // ── Statements ───────────────────────────────────────────────────────
+    /// Like `stmt`, but without a completion value: a function's value is its
+    /// `return`, so `SetCompletion` per statement would be wasted work.
     fn stmt_no_completion(&mut self, st: &Stmt) -> CompileResult<()> {
         match st {
             Stmt::Expr(e) => {
@@ -173,7 +149,7 @@ impl Compiler {
     fn stmt(&mut self, st: &Stmt) -> CompileResult<()> {
         match st {
             Stmt::Empty | Stmt::Debugger => Ok(()),
-            // Der Wert eines Programms ist sein letzter Ausdruckswert.
+            // A program's value is its last expression value.
             Stmt::Expr(e) => {
                 self.expr(e)?;
                 self.chunk.emit(Op::SetCompletion);
@@ -246,10 +222,9 @@ impl Compiler {
                 Ok(())
             }
             Stmt::For { init, test, update, body } => {
-                // Eine eigene Umgebung, damit `for (let i …)` seinen Zaehler
-                // nicht in den umgebenden Block schreibt. Dass jeder Umlauf
-                // eine FRISCHE Bindung bekaeme (die Schliessungsfalle), kann
-                // diese Fassung noch nicht — deshalb sagt sie unten nein.
+                // Own environment so `for (let i …)` does not bind into the
+                // enclosing block. A fresh binding per iteration is not
+                // implemented, so a body that captures it is declined below.
                 let empty = self.chunk.block(Vec::new());
                 self.chunk.emit(Op::PushEnv(empty));
                 self.depth += 1;
@@ -312,9 +287,8 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Continue(None) => {
-                // Ein `switch` faengt kein `continue` — das gehoert der
-                // Schleife darunter, und der Weg dorthin fuehrt durch die
-                // Umgebung des `switch` hindurch.
+                // A `switch` does not catch `continue`; it belongs to the
+                // loop below, through the `switch`'s environment.
                 let Some(k) = self.loops.iter().rposition(|l| !l.brk_only) else {
                     return Err(Unsupported("continue-outside-loop"));
                 };
@@ -340,17 +314,14 @@ impl Compiler {
                 self.chunk.emit(Op::Throw);
                 Ok(())
             }
-            // Funktionsdeklarationen erledigt das Hochziehen, genau wie beim
-            // Baumlaeufer — hier ist nichts zu tun.
+            // Function declarations are handled by hoisting.
             Stmt::Func(_) => Ok(()),
-            // Eine Marke vor einer SCHLEIFE gehoert der Schleife (nur sie hat
-            // einen Fortsetzungspunkt); vor allem anderen ist sie selbst ein
-            // Ausgang, den nur ein `break lbl` trifft.
+            // A label before a loop belongs to the loop (only it has a
+            // continue point); before anything else it is an exit that only
+            // `break lbl` reaches.
             Stmt::Labeled { label, body } => {
-                // **Eine KETTE von Marken gehoert ganz der Schleife darunter.**
-                // `a: b: for (…)` traegt beide, und `continue a` ist gueltig.
-                // Der erste Entwurf gab nur die innerste weiter und lehnte
-                // `continue a` ab — node sagte prompt etwas anderes.
+                // A chain of labels belongs entirely to the loop below:
+                // `a: b: for (…)` carries both, and `continue a` is valid.
                 let mut labels = alloc::vec![label.clone()];
                 let mut inner: &Stmt = body;
                 while let Stmt::Labeled { label: l2, body: b2 } = inner {
@@ -364,8 +335,8 @@ impl Compiler {
                     self.pending_labels.clear();
                     return r;
                 }
-                // Sonst ist die Marke selbst der Ausgang — nur ein `break lbl`
-                // trifft sie, ein `continue` braucht einen Fortsetzungspunkt.
+                // Otherwise the label itself is the exit, reachable only by
+                // `break lbl`.
                 self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
                                        depth: self.depth, brk_only: true, labels, iters: self.iters });
                 let r = self.stmt(inner);
@@ -384,8 +355,7 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Continue(Some(l)) => {
-                // Ein `continue` braucht einen Fortsetzungspunkt, den hat nur
-                // eine Schleife — eine Marke vor einem Block ist keiner.
+                // `continue` needs a continue point, which only a loop has.
                 let Some(k) = self.loops.iter().rposition(
                     |x| !x.brk_only && x.labels.iter().any(|n| n == l))
                 else { return Err(Unsupported("continue-unknown-label")) };
@@ -400,19 +370,17 @@ impl Compiler {
             Stmt::ForIn { left, right, body } => self.for_in(left, right, body),
             Stmt::ForOf { left, right, body, is_await } => {
                 if *is_await {
-                    // `for await` haelt MITTEN in der Schleife an — der
-                    // Parser laesst es nur im async-Kontext zu, aber ein
-                    // Pfeil darin ist ein eigener Chunk und muss hier nein
-                    // sagen, genau wie bei `await` selbst.
+                    // `for await` suspends mid-loop. The parser allows it only
+                    // in async context, but a nested arrow is its own chunk
+                    // and must decline, as for `await` itself.
                     if !self.in_async { return Err(Unsupported("for-await-outside-async")) }
                     return self.for_await(left, right, body);
                 }
                 self.for_of(left, right, body)
             }
             Stmt::With { .. } => Err(Unsupported("with")),
-            // Eine Klassen-DEKLARATION: bauen und an ihren Namen binden. Die
-            // Bindung selbst hat das Hochziehen schon angelegt (auf „nicht
-            // bereit", die zeitliche Totzone) — hier wird sie fertig.
+            // A class declaration: build and bind to its name. Hoisting
+            // already created the binding in its TDZ; it is initialized here.
             Stmt::Class(c) => {
                 let k = self.chunk.class(c.clone());
                 self.chunk.emit(Op::Class(k));
@@ -430,18 +398,16 @@ impl Compiler {
         }
     }
 
-    /// Was ein Block bindet, BEVOR seine erste Zeile laeuft — dieselben zwei
-    /// Faelle und dieselbe Reihenfolge wie `Interp::hoist`. `var` steht nicht
-    /// dabei: das steigt bis zur Funktionsgrenze und ist beim Programmstart
-    /// schon erledigt.
+    /// What a block binds before its first statement runs, with the same
+    /// cases and order as `Interp::hoist`. `var` is not included: it rises to
+    /// the function boundary and is already hoisted.
     fn block_decls(&mut self, body: &[Stmt]) -> CompileResult<u32> {
         self.block_decls_of(body.iter())
     }
 
-    /// Dasselbe ueber eine beliebige Folge — ein `switch` zieht ueber ALLE
-    /// Faelle zusammen hoch, so wie es der Baumlaeufer tut: sie teilen sich
-    /// EINE Umgebung, und eine Funktionsdeklaration im dritten Fall ist im
-    /// ersten schon sichtbar.
+    /// The same over any sequence. A `switch` hoists across all cases
+    /// together: they share one environment, and a function declared in the
+    /// third case is visible in the first.
     fn block_decls_of<'a>(&mut self, body: impl Iterator<Item = &'a Stmt>) -> CompileResult<u32> {
         let mut out = Vec::new();
         for st in body {
@@ -454,9 +420,8 @@ impl Compiler {
                     }
                 }
                 Stmt::VarDecl(d) if d.kind != VarKind::Var => {
-                    // Auch ein Muster steht mit ALLEN seinen Namen in der
-                    // Totzone — dieselbe Liste wie `Interp::hoist`, dieselbe
-                    // Funktion (`names_of`).
+                    // A pattern puts all its names in the TDZ, via the same
+                    // `names_of` as `Interp::hoist`.
                     let mut names = Vec::new();
                     for dec in &d.decls { super::eval::names_of(&dec.id, &mut names); }
                     for n in names {
@@ -464,8 +429,7 @@ impl Compiler {
                         out.push(BlockDecl::Tdz { name, mutable: d.kind != VarKind::Const });
                     }
                 }
-                // Eine Klasse steht wie ein `let` in der Totzone — dieselben
-                // zwei Schleifen wie `Interp::hoist`.
+                // A class is in the TDZ like a `let`, as in `Interp::hoist`.
                 Stmt::Class(c) => {
                     if let Some(n) = &c.name {
                         let name = self.chunk.name(n);
@@ -480,26 +444,22 @@ impl Compiler {
 
     /// `try` / `catch` / `finally`.
     ///
-    /// **Der Finalisierer wird KOPIERT, nicht angesprungen** — einmal fuer den
-    /// normalen Weg, einmal fuer den Wurf. Ein Unterprogramm waere kuerzer und
-    /// braeuchte eine Ruecksprungadresse auf dem Stapel; das ist die Stelle,
-    /// an der solche Maschinen historisch falsch werden (das alte `jsr`/`ret`
-    /// der JVM ist genau daran gestorben). Zwei Kopien eines meist kurzen
-    /// Blocks sind der ehrlichere Handel.
+    /// The finalizer is copied, not called: once for the normal path, once
+    /// for the throw path. A subroutine would need a return address on the
+    /// stack (the JVM's `jsr`/`ret` problem); two copies of a usually short
+    /// block are simpler.
     ///
-    /// **Nicht gebaut und deshalb abgelehnt:** ein `return`/`break`/`continue`
-    /// AUS einem `try` mit `finally` heraus. Das muss den Abschluss
-    /// zwischenspeichern, den Finalisierer fahren und ihn danach fortsetzen —
-    /// und wenn der Finalisierer selbst abbricht, gewinnt ER. Halb gebaut
-    /// waere das schlimmer als gar nicht.
+    /// Not implemented, so declined: `return`/`break`/`continue` out of a
+    /// `try` with `finally`. That needs a saved completion that resumes after
+    /// the finalizer, and an abrupt finalizer must override it.
     fn try_stmt(&mut self, block: &[Stmt], handler: &Option<CatchClause>,
                 finalizer: &Option<Vec<Stmt>>) -> CompileResult<()> {
         if finalizer.is_some() && (Self::jumps_out(block)
             || handler.as_ref().is_some_and(|h| Self::jumps_out(&h.body))) {
             return Err(Unsupported("finally-with-jump"));
         }
-        // Ein `yield` unter einem anhaengigen Finalisierer ist derselbe Fall
-        // wie ein `return` darunter — siehe `Compiler::fin`.
+        // A `yield` under a pending finalizer is declined like a `return`;
+        // see `Compiler::fin`.
         if finalizer.is_some() { self.fin += 1; }
         let r = self.try_inner(block, handler, finalizer);
         if finalizer.is_some() { self.fin -= 1; }
@@ -519,16 +479,13 @@ impl Compiler {
         self.chunk.emit(Op::TryEnd);
         let to_end = self.chunk.emit_jump(Op::Jump);
 
-        // Der Fangpfad. Der geworfene Wert liegt oben, wenn wir hier ankommen.
+        // The catch path. The thrown value is on top on arrival.
         let catch_at = self.chunk.here();
         let mut catch_guard = None;
         if let Some(h) = handler {
             self.depth = depth0;
-            // **Der `catch`-Block braucht seinen EIGENEN Behandler**, wenn es
-            // einen Finalisierer gibt: wirft er selbst, muss der Finalisierer
-            // trotzdem laufen. Ohne diese Zeile verschwand `finally` still,
-            // sobald `catch` warf — zwei test262-Faelle, und im Alltag genau
-            // das Muster „aufraeumen und weiterwerfen".
+            // With a finalizer the `catch` block needs its own handler: if it
+            // throws, the finalizer must still run.
             if finalizer.is_some() {
                 catch_guard = Some(self.chunk.emit(
                     Op::TryStart { catch: u32::MAX, finally: u32::MAX }));
@@ -554,7 +511,7 @@ impl Compiler {
         }
         let after_catch = self.chunk.emit_jump(Op::Jump);
 
-        // Der Wurfpfad OHNE `catch`: Finalisierer, dann weiterwerfen.
+        // The throw path without `catch`: finalizer, then rethrow.
         let rethrow_at = self.chunk.here();
         self.depth = depth0;
         if let Some(f) = finalizer {
@@ -562,20 +519,20 @@ impl Compiler {
         }
         self.chunk.emit(Op::Rethrow);
 
-        // Der normale Weg (und der Weg nach einem gefangenen Wurf).
+        // The normal path (also taken after a caught throw).
         self.chunk.patch(to_end);
         self.chunk.patch(after_catch);
         self.depth = depth0;
         if let Some(f) = finalizer {
             self.finalizer(f)?;
         }
-        // Erst jetzt steht fest, wohin der Behandler zeigt.
+        // Only now are the handler's targets known.
         match &mut self.chunk.ops[start] {
             Op::TryStart { catch, finally } => {
                 if handler.is_some() {
                     *catch = catch_at;
-                    // Ein gefangener Wurf laeuft ueber den Fangpfad, und der
-                    // endet im normalen Finalisierer.
+                    // A caught throw goes through the catch path, which ends
+                    // in the normal finalizer.
                     *finally = u32::MAX;
                 } else {
                     *catch = u32::MAX;
@@ -603,9 +560,8 @@ impl Compiler {
         Ok(())
     }
 
-    /// Springt aus diesem Rumpf etwas HERAUS? `return`, `break`, `continue`.
-    /// Ein `break` innerhalb einer eigenen Schleife zaehlt nicht — es
-    /// verlaesst den `try` nicht.
+    /// Does anything jump out of this body (`return`, `break`, `continue`)?
+    /// A `break` inside a nested loop does not leave the `try`.
     fn jumps_out(body: &[Stmt]) -> bool {
         fn walk(st: &Stmt, in_loop: bool, hit: &mut bool) {
             match st {
@@ -637,10 +593,8 @@ impl Compiler {
 
     /// `for (x of e) body`.
     ///
-    /// Die Werte werden EAGER geholt (`Interp::iterate`), genau wie im
-    /// Baumlaeufer. Ein Iterator, der erst beim Ziehen rechnet, braucht eine
-    /// Maschine, die anhalten kann — das ist Stufe 4, und bis dahin waeren
-    /// zwei verschiedene Iterationssemantiken das schlechtere Geschaeft.
+    /// Iterates lazily through `Op::IterAll`/`Op::IterNext`, using the same
+    /// iterator helpers as the tree walker.
     fn for_of(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
         self.expr(right)?;
         self.chunk.emit(Op::IterAll);
@@ -651,8 +605,8 @@ impl Compiler {
         let lbl = self.take_label();
         self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
                                depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
-        // Je Umlauf eine eigene Umgebung: eine Schliessung im Rumpf soll den
-        // Wert DIESES Umlaufs festhalten, nicht den letzten.
+        // One environment per iteration, so a closure in the body captures
+        // this iteration's value, not the last one.
         let empty = self.chunk.block(Vec::new());
         self.chunk.emit(Op::PushEnv(empty));
         self.depth += 1;
@@ -664,9 +618,8 @@ impl Compiler {
         let l = self.loops.pop().unwrap();
         for at in l.continues { self.patch_to(at, top); }
         self.chunk.emit(Op::Jump(top));
-        // Zwei Ausgaenge, und sie sind NICHT dasselbe: wer vorzeitig geht,
-        // schliesst den Iterator (`return()`); wer ihn leergelesen hat, darf
-        // das nicht mehr.
+        // Two different exits: an early exit closes the iterator
+        // (`return()`); an exhausted iterator must not be closed.
         for at in l.breaks { self.chunk.patch(at); }
         self.chunk.emit(Op::IterClose);
         let to_end = self.chunk.emit_jump(Op::Jump);
@@ -679,13 +632,10 @@ impl Compiler {
 
     /// `for await (x of y)` (ES 14.7.5.7, `iteratorKind: async`).
     ///
-    /// **Dieselbe Form wie `for_of`, mit einem Anhaltepunkt mittendrin.** Das
-    /// ist der ganze Unterschied und zugleich der Grund fuer die drei eigenen
-    /// Befehle: `Op::IterNext` ruft `next()` und liest sein Ergebnis in EINEM
-    /// Schritt, hier muss dazwischen gewartet werden. Also aufgeteilt —
-    /// rufen, `Op::Await`, auswerten. Das Warten laeuft ueber denselben
-    /// Anhaltemechanismus wie jedes andere `await`; die Maschine braucht
-    /// dafuer nichts Neues.
+    /// Same shape as `for_of` with a suspension point in the middle.
+    /// `Op::IterNext` calls `next()` and reads the result in one step; here
+    /// it is split into call, `Op::Await`, inspect. The await uses the normal
+    /// suspension mechanism.
     fn for_await(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
         self.expr(right)?;
         self.chunk.emit(Op::IterAllAsync);
@@ -709,8 +659,7 @@ impl Compiler {
         let l = self.loops.pop().unwrap();
         for at in l.continues { self.patch_to(at, top); }
         self.chunk.emit(Op::Jump(top));
-        // Zwei Ausgaenge, wie beim synchronen `for…of`: wer vorzeitig geht,
-        // schliesst den Iterator; wer ihn leergelesen hat, darf das nicht.
+        // Two exits as in `for…of`: early exit closes, exhaustion does not.
         for at in l.breaks { self.chunk.patch(at); }
         self.chunk.emit(Op::IterClose);
         let to_end = self.chunk.emit_jump(Op::Jump);
@@ -721,26 +670,22 @@ impl Compiler {
         Ok(())
     }
 
-    /// `yield* x` (ES 15.5.5) — die Delegation an einen inneren Iterator.
+    /// `yield* x` (ES 15.5.5): delegation to an inner iterator.
     ///
-    /// **Eine Schleife in Befehlen, kein einzelner Befehl**, und das ist der
-    /// Grund, warum es sie bis 0.169 gar nicht gab: an ihrem Anhaltepunkt muss
-    /// die Maschine WISSEN, womit sie wieder angeworfen wurde — mit einem
-    /// Wert, einem Wurf oder einem `return` —, um genau das an den inneren
-    /// Iterator weiterzureichen. `Vm::send` liefert nur einen Wert,
-    /// `inject_throw` wickelt sofort ab. Der dritte Weg hinein ist
-    /// `Vm::Resume`, und er wird hier gelesen.
+    /// A loop of ops, not a single op: at its suspension point the machine
+    /// must know how it was resumed (value, throw or `return`) to forward
+    /// exactly that to the inner iterator. That is what `Vm::Resume` carries.
     ///
     ///     <x>
-    ///     DelegateStart            ; inneren Iterator holen, `undefined` legen
+    ///     DelegateStart            ; get inner iterator, push `undefined`
     ///   top:
-    ///     DelegateCall(giveup)     ; next / throw / return, je nach Anwurf
-    ///     [Await]                  ; nur im async-Generator
-    ///     DelegateStep(end)        ; fertig -> ans Ende, sonst Wert legen
-    ///     Yield | YieldDelegate    ; hinausgeben und anhalten
+    ///     DelegateCall(giveup)     ; next / throw / return, per resumption
+    ///     [Await]                  ; async generator only
+    ///     DelegateStep(end)        ; done -> end, else push value
+    ///     Yield | YieldDelegate    ; hand out and suspend
     ///     Jump top
-    ///   giveup:                    ; innerer Iterator hat kein `return`
-    ///     Ret                      ; der AEUSSERE Generator gibt auf
+    ///   giveup:                    ; inner iterator has no `return`
+    ///     Ret                      ; the outer generator gives up
     ///   end:
     fn yield_delegate(&mut self, arg: &Expr) -> CompileResult<()> {
         self.expr(arg)?;
@@ -751,15 +696,13 @@ impl Compiler {
         if self.in_async { self.chunk.emit(Op::Await); }
         let is_async = self.in_async;
         let end = self.chunk.emit(Op::DelegateStep { end: u32::MAX, is_async });
-        // **Auch der async-Generator bekommt die MARKE**, nur ohne ROH: an
-        // ihr erkennt `Vm::at_delegate`, dass ein `throw()`/`return()` hier
-        // weiterzureichen ist statt abzuwickeln. Mit einem gewoehnlichen
-        // `Op::Yield` sah die Stelle aus wie jedes andere `yield`, und ein
-        // `agen.throw(e)` wickelte den aeusseren Rumpf ab.
+        // The async generator gets the marker too, just not raw: by it
+        // `Vm::at_delegate` knows that `throw()`/`return()` are forwarded
+        // here instead of unwinding the outer body.
         self.chunk.emit(Op::YieldDelegate(!is_async));
         self.chunk.emit(Op::Jump(top));
-        // Der innere Iterator hat kein `return`: der Wert von `gen.return(v)`
-        // liegt schon auf dem Stapel, und der aeussere Rumpf ist damit fertig.
+        // The inner iterator has no `return`: the value of `gen.return(v)` is
+        // already on the stack and the outer body is done.
         self.chunk.patch(giveup);
         self.chunk.emit(Op::Ret);
         self.chunk.patch(end);
@@ -769,10 +712,9 @@ impl Compiler {
 
     /// `for (k in obj)`.
     ///
-    /// Dieselbe Form wie `for_of` — nur ist die Schluesselliste EIFRIG
-    /// (`Interp::for_in_keys`, dieselbe Hilfe wie im Baumlaeufer), und es gibt
-    /// nichts zu schliessen: eine fertige Liste hat kein `return()`. Deshalb
-    /// nehmen beide Ausgaenge denselben `IterDrop`.
+    /// Same shape as `for_of`, but the key list is eager
+    /// (`Interp::for_in_keys`) and has no `return()`, so both exits share one
+    /// `IterDrop`.
     fn for_in(&mut self, left: &ForHead, right: &Expr, body: &Stmt) -> CompileResult<()> {
         self.expr(right)?;
         self.chunk.emit(Op::ForInAll);
@@ -783,9 +725,7 @@ impl Compiler {
         let lbl = self.take_label();
         self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
                                depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
-        // Je Umlauf eine eigene Umgebung — wie bei `for…of`, und aus
-        // demselben Grund: eine Schliessung im Rumpf haelt den Schluessel
-        // DIESES Umlaufs fest.
+        // One environment per iteration, as in `for…of`.
         let empty = self.chunk.block(Vec::new());
         self.chunk.emit(Op::PushEnv(empty));
         self.depth += 1;
@@ -806,23 +746,16 @@ impl Compiler {
 
     /// `switch`.
     ///
-    /// Drei Dinge machen ihn aus, und alle drei stehen im Code:
+    /// * One environment for all cases, with the bindings of all case bodies
+    ///   hoisted together.
+    /// * Fall-through: only the entry point is searched; from there all case
+    ///   bodies run in sequence until a `break`.
+    /// * Tests are evaluated in order until one matches, and no further.
+    ///   `default` is taken only if none matched, wherever it stands.
     ///
-    /// * **EINE Umgebung fuer alle Faelle**, mit den Bindungen aller
-    ///   Fallrumpfe zusammen hochgezogen — eine Funktionsdeklaration im
-    ///   dritten Fall ist im ersten schon da.
-    /// * **Durchfallen ist die Regel.** Gesucht wird nur der EINSTIEG; ab dort
-    ///   laufen alle Faelle hintereinander weg, bis ein `break` kommt.
-    /// * **Die Bedingungen werden der Reihe nach ausgewertet, bis eine
-    ///   passt** — und nicht weiter. `default` kommt erst dran, wenn keine
-    ///   passte, egal wo er steht. Genau das tut der Baumlaeufer auch; eine
-    ///   zweite Auswertungsreihenfolge waere hier der teuerste Unterschied.
-    ///
-    /// Der Wert des `switch` liegt waehrend der Bedingungskette auf dem
-    /// Stapel und wird in einer kleinen Weiche wieder heruntergenommen, BEVOR
-    /// ein Fallrumpf laeuft. Ihn dort liegen zu lassen waere kuerzer und
-    /// falsch: jeder `break`, jedes `continue` und jeder Sprung nach draussen
-    /// muesste ihn einzeln wegraeumen.
+    /// The discriminant stays on the stack during the test chain and is
+    /// popped in a small gate before any case body runs; otherwise every
+    /// `break`, `continue` and outward jump would have to pop it.
     fn switch(&mut self, disc: &Expr, cases: &[SwitchCase]) -> CompileResult<()> {
         self.expr(disc)?;
         let b = self.block_decls_of(cases.iter().flat_map(|c| c.body.iter()))?;
@@ -832,7 +765,7 @@ impl Compiler {
         self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
                                depth: self.depth, brk_only: true, labels: lbl, iters: self.iters });
 
-        // Die Bedingungskette. Jeder Treffer springt in seine Weiche.
+        // The test chain. Each match jumps to its gate.
         let mut hits = Vec::new();
         for (k, c) in cases.iter().enumerate() {
             let Some(t) = &c.test else { continue };
@@ -841,11 +774,11 @@ impl Compiler {
             self.chunk.emit(Op::Bin(BinOp::EqEqEq));
             hits.push((self.chunk.emit_jump(Op::JumpTrue), k));
         }
-        // Keine passte: den Wert weg und zu `default` (oder ans Ende).
+        // No match: pop the value and go to `default` (or the end).
         self.chunk.emit(Op::Pop);
         let to_default = self.chunk.emit_jump(Op::Jump);
 
-        // Die Weichen: Wert herunternehmen, dann in den Rumpf.
+        // The gates: pop the value, then enter the body.
         let mut gates = Vec::new();
         for (at, k) in hits {
             self.chunk.patch(at);
@@ -853,7 +786,7 @@ impl Compiler {
             gates.push((self.chunk.emit_jump(Op::Jump), k));
         }
 
-        // Die Rumpfe, hintereinander — das Durchfallen ergibt sich von selbst.
+        // The bodies in sequence; fall-through follows naturally.
         let mut starts: Vec<u32> = Vec::new();
         for c in cases {
             starts.push(self.chunk.here());
@@ -879,9 +812,9 @@ impl Compiler {
     fn var_decl(&mut self, d: &VarDecl) -> CompileResult<()> {
         for dec in &d.decls {
             let Pat::Ident(name) = &dec.id else {
-                // Ein MUSTER. Ohne Initialisierer gibt es das nicht (der
-                // Parser laesst `var {a};` nicht durch), also steht der Wert
-                // hier immer. Die Bindungen hat das Hochziehen schon angelegt.
+                // A pattern. The parser rejects `var {a};`, so the
+                // initializer is always present. Hoisting created the
+                // bindings.
                 let Some(e) = &dec.init else {
                     return Err(Unsupported("destructuring-no-init"));
                 };
@@ -890,9 +823,9 @@ impl Compiler {
                 self.chunk.emit(Op::BindPat { pat: p, mode: BindMode::Init });
                 continue;
             };
-            // `var x;` OHNE Initialisierer laesst eine vorhandene Bindung in
-            // Ruhe — sonst loescht `var f; function f(){}` die Funktion, die
-            // das Hochziehen gerade gebunden hat. Ein Test, und er hat recht.
+            // `var x;` without initializer leaves an existing binding alone,
+            // otherwise `var f; function f(){}` would erase the hoisted
+            // function.
             if d.kind == VarKind::Var && dec.init.is_none() {
                 continue;
             }
@@ -904,7 +837,7 @@ impl Compiler {
                 }
             }
             let n = self.chunk.name(name);
-            // `var f = function(){}` gibt der Funktion den Namen der Variablen.
+            // `var f = function(){}` names the function after the variable.
             if dec.init.is_some() {
                 self.chunk.emit(Op::NameFunc(n));
             }
@@ -917,7 +850,7 @@ impl Compiler {
         Ok(())
     }
 
-    // ── Ausdruecke ───────────────────────────────────────────────────────
+    // ── Expressions ──────────────────────────────────────────────────────
     fn expr(&mut self, e: &Expr) -> CompileResult<()> {
         match e {
             Expr::Num(n) => {
@@ -949,9 +882,7 @@ impl Compiler {
                 self.chunk.emit(Op::LoadVar(i));
                 Ok(())
             }
-            // `typeof x` darf auf einem unbekannten Namen NICHT werfen — das
-            // ist der Grund, warum es einen eigenen Befehl hat und nicht
-            // `LoadVar` + `Un` ist.
+            // `typeof x` must not throw on an unbound name, hence its own op.
             Expr::Unary { op: UnaryOp::Typeof, arg } => {
                 if let Expr::Ident(n) = &**arg {
                     let i = self.chunk.name(n);
@@ -977,9 +908,8 @@ impl Compiler {
                     }
                     Ok(())
                 }
-                // `delete x` auf allem anderen ist `true` — genau wie im
-                // Baumlaeufer. Der Ausdruck wird trotzdem NICHT ausgewertet,
-                // auch dort nicht.
+                // `delete x` on anything else is `true`, as in the tree
+                // walker; the operand is not evaluated there either.
                 _ => {
                     let k = self.chunk.konst(Value::Bool(true));
                     self.chunk.emit(Op::Const(k));
@@ -992,7 +922,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::Binary { op, left, right } => {
-                // `#x in obj`: die linke Seite ist ein NAME, kein Wert.
+                // `#x in obj`: the left side is a name, not a value.
                 if *op == BinOp::In {
                     if let Expr::Ident(n) = &**left {
                         if let Some(name) = n.strip_prefix('#') {
@@ -1015,8 +945,8 @@ impl Compiler {
                     LogicalOp::Or => self.chunk.emit_jump(Op::JumpTrueKeep),
                     LogicalOp::Nullish => self.chunk.emit_jump(Op::JumpNullishKeep),
                 };
-                // Der linke Wert war nur der Kurzschlusswert; wenn wir hier
-                // sind, gilt der rechte.
+                // The left value only served the short circuit; here the
+                // right one counts.
                 self.chunk.emit(Op::Pop);
                 self.expr(right)?;
                 self.chunk.patch(at);
@@ -1045,8 +975,7 @@ impl Compiler {
                 Pat::Ident(n) => {
                     self.expr(right)?;
                     let i = self.chunk.name(n);
-                    // `q = function(){}` gibt der Funktion den Namen der
-                    // Variablen — dieselbe Regel wie bei `var q = …`.
+                    // `q = function(){}` names the function, as `var q = …`.
                     self.chunk.emit(Op::NameFunc(i));
                     self.chunk.emit(Op::StoreVar(i));
                     Ok(())
@@ -1070,9 +999,8 @@ impl Compiler {
                     },
                     _ => Err(Unsupported("assign-target")),
                 },
-                // Ein Muster als Ziel: `[a,b] = x`, `({a} = x)`. Der WERT der
-                // Zuweisung ist die rechte Seite, nicht das Gebundene —
-                // deshalb bleibt eine Kopie liegen.
+                // A pattern target: `[a,b] = x`, `({a} = x)`. The value of the
+                // assignment is the right side, so a copy stays on the stack.
                 p => {
                     self.expr(right)?;
                     self.chunk.emit(Op::Dup);
@@ -1112,8 +1040,8 @@ impl Compiler {
                     }
                 }
             }
-            // Die Klammer um eine Optional-Kette: alle Kurzschluesse darin
-            // enden HIER, nicht am einzelnen Glied.
+            // The bracket around an optional chain: all short circuits inside
+            // end here, not at the individual link.
             Expr::Chain(inner) => {
                 self.chains.push(Vec::new());
                 let r = self.expr(inner);
@@ -1162,21 +1090,14 @@ impl Compiler {
                 }
                 Ok(())
             }
-            // `a?.b(…)` und `a?.b?.(…)`: der Empfaenger ist `a`, und er darf
-            // NICHT verlorengehen.
-            //
-            // Ohne diesen Zweig fiel BEIDES in den Fall „irgendein Ausdruck
-            // als Gerufener" und rief mit `undefined` als `this`.
-            // `o?.m?.forEach(f)` warf dann „Map method on the wrong
-            // receiver" — und zwar nur auf der Befehlsmaschine, der
-            // Baumlaeufer war die ganze Zeit richtig. test262 hat es nicht
-            // gesehen; gefunden hat es die Fritzbox-Oberflaeche.
+            // `a?.b(…)` and `a?.b?.(…)`: the receiver is `a` and must be kept;
+            // the generic callee path would call with `undefined` as `this`.
             Expr::Call { callee, args, optional }
                 if matches!(&**callee, Expr::Member { optional: true, .. }) => {
                 if self.chains.is_empty() { return Err(Unsupported("optional-outside-chain")) }
                 let Expr::Member { obj, prop, .. } = &**callee else { unreachable!() };
                 self.expr(obj)?;
-                // Erst `a` pruefen — das ist das `?.` VOR dem Namen.
+                // First check `a`: the `?.` before the name.
                 self.short_circuit(1)?;
                 self.chunk.emit(Op::Dup);
                 let mut named = u32::MAX;
@@ -1190,9 +1111,8 @@ impl Compiler {
                         self.chunk.emit(Op::GetProp(named));
                     }
                 }
-                // Und dann das `?.` VOR der Klammer, wenn eins dasteht: hier
-                // liegen Empfaenger UND Gerufener, der Kurzschluss raeumt
-                // beide ab.
+                // Then the `?.` before the parentheses, if present: receiver
+                // and callee are on the stack, the short circuit pops both.
                 if *optional { self.short_circuit(2)?; named = u32::MAX; }
                 self.chunk.emit(Op::Swap);
                 if Self::args_have_spread(args) {
@@ -1205,12 +1125,9 @@ impl Compiler {
                 Ok(())
             }
             Expr::Call { callee, args, optional: false } => {
-                // Der Empfaenger gehoert zum Aufruf: `o.f()` ruft mit `o` als
-                // `this`, `f()` mit undefined. Beides wird HIER entschieden,
-                // damit die Maschine unten nur noch abarbeitet.
-                // Der Name des Gerufenen wird MITGEGEBEN — nicht fuer den
-                // Aufruf, sondern fuer den Fehlschlag: „o is not a function"
-                // sagt, was fehlt, „value is not a function" nicht.
+                // The receiver is decided here: `o.f()` calls with `o` as
+                // `this`, `f()` with undefined. The callee's name is passed
+                // along for the "x is not a function" message only.
                 let mut named = u32::MAX;
                 match &**callee {
                     Expr::Member { obj, prop, optional: false } => match &**prop {
@@ -1223,12 +1140,10 @@ impl Compiler {
                             self.chunk.emit(Op::Swap);
                         }
                         MemberProp::Computed(k) => {
-                            // Ein LITERALER Schluessel ist zur Uebersetzungszeit
-                            // bekannt — `o[8362]()` kann seine 8362 nennen, und
-                            // genau so sieht ein minifiziertes Modulregister
-                            // aus. Ein wirklich berechneter Schluessel bleibt
-                            // namenlos; ihn mitzufuehren kostete zwei Befehle
-                            // an jedem Aufruf, und das ist der falsche Handel.
+                            // A literal key is known at compile time, so
+                            // `o[8362]()` (a minified module registry) can be
+                            // named. A truly computed key stays unnamed rather
+                            // than costing extra ops on every call.
                             match k {
                                 Expr::Num(n) => {
                                     let t = super::value::num_to_string(*n);
@@ -1260,8 +1175,8 @@ impl Compiler {
                 }
                 Ok(())
             }
-            // `f?.()` — hier liegen callee UND Empfaenger, also raeumt der
-            // Kurzschluss zwei Werte ab.
+            // `f?.()`: callee and receiver are on the stack, so the short
+            // circuit pops two values.
             Expr::Call { callee, args, optional: true } => {
                 if self.chains.is_empty() { return Err(Unsupported("optional-outside-chain")) }
                 match &**callee {
@@ -1296,7 +1211,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::New { callee, args } => {
-                // Wie beim Aufruf: der Name ist fuer die MELDUNG da.
+                // As for calls, the name is only for the error message.
                 let named = match dotted_name(callee) {
                     Some(n) => self.chunk.name(&n),
                     None => u32::MAX,
@@ -1317,10 +1232,8 @@ impl Compiler {
                 let mut any_spread = false;
                 for it in items {
                     match it {
-                        // Eine LUECKE ist nicht `undefined` — aber der
-                        // Baumlaeufer macht daraus ebenfalls `undefined`
-                        // (`Expr::Array`, `None => Value::Undefined`), und
-                        // dieselbe Naeherung ist besser als eine zweite.
+                        // A hole is not `undefined`, but the tree walker
+                        // makes the same approximation; keep them identical.
                         None => {
                             let k = self.chunk.konst(Value::Undefined);
                             self.chunk.emit(Op::Const(k));
@@ -1357,9 +1270,7 @@ impl Compiler {
                         ObjPropValue::Init(e) => {
                             let k = self.prop_key(&p.key, p.computed)?;
                             self.expr(e)?;
-                            // Siehe `Interp::set_literal_proto` — dieselbe
-                            // Regel, damit die beiden Maschinen nicht
-                            // auseinanderlaufen.
+                            // Same rule as `Interp::set_literal_proto`.
                             let ist_proto = !p.computed && !p.shorthand
                                 && matches!(&p.key, super::ast::PropKey::Ident(n)
                                                   | super::ast::PropKey::Str(n) if n == "__proto__");
@@ -1421,9 +1332,8 @@ impl Compiler {
                 self.chunk.emit(Op::Closure(i));
                 Ok(())
             }
-            // `tag`a${x}b`` — dieselbe Stapelform wie ein gewoehnlicher
-            // Aufruf (erst der Gerufene, dann der Empfaenger, dann die
-            // Argumente), nur dass Argument 0 der Vorlagen-Gegenstand ist.
+            // `tag`a${x}b``: same stack shape as a call (callee, receiver,
+            // arguments), with the template object as argument 0.
             Expr::TaggedTemplate { tag, quasis, exprs } => {
                 let mut named = u32::MAX;
                 match &**tag {
@@ -1443,9 +1353,9 @@ impl Compiler {
                             self.chunk.emit(Op::Swap);
                         }
                     },
-                    // `super.tag`x`` und `a?.tag`x`` haben je eigene Regeln
-                    // fuer den Empfaenger; benannt absagen ist ehrlicher, als
-                    // sie mit `undefined` zu rufen. Der Baumlaeufer kann beide.
+                    // `super.tag`x`` and `a?.tag`x`` have their own receiver
+                    // rules; decline (the tree walker handles both) rather
+                    // than call with `undefined`.
                     Expr::Super | Expr::Member { optional: true, .. } => {
                         return Err(Unsupported("tagged-template-callee"));
                     }
@@ -1478,13 +1388,12 @@ impl Compiler {
             }
             Expr::Super => Err(Unsupported("super")),
 
-            // Ein `...x` ausserhalb von Feld und Argumentliste hat der Parser
-            // schon abgelehnt; hier ist es der nackte Innenausdruck, genau wie
-            // im Baumlaeufer.
+            // The parser rejects `...x` outside arrays and argument lists;
+            // here it is the bare inner expression, as in the tree walker.
             Expr::Spread(inner) => self.expr(inner),
-            // **Anhalten.** Der Wert geht an `next()` heraus; was `next(v)`
-            // hereingibt, legt `Vm::send` an dieselbe Stelle des Stapels und
-            // ist damit der Wert dieses Ausdrucks.
+            // Suspend. The value goes out through `next()`; `Vm::send` puts
+            // the argument of `next(v)` in the same stack slot, making it the
+            // value of this expression.
             Expr::Yield { arg, delegate } => {
                 if !self.in_gen { return Err(Unsupported("yield-outside-generator")) }
                 if self.fin > 0 { return Err(Unsupported("yield-in-finally")) }
@@ -1501,21 +1410,17 @@ impl Compiler {
                         self.chunk.emit(Op::Const(k));
                     }
                 }
-                // **In einem async-Generator wird der Wert ERST abgewartet.**
-                // `yield x` ist dort `AsyncGeneratorYield(? Await(x))`
-                // (ES 15.5.5) — `yield Promise.resolve(1)` gibt also `1`
-                // heraus, nicht das Versprechen. Die Regel steht hier und
-                // nicht in `generator.rs`, damit `Op::Yield` EINE Bedeutung
-                // behaelt und die Maschine dumm bleibt.
+                // In an async generator the value is awaited first: `yield x`
+                // is `AsyncGeneratorYield(? Await(x))` (ES 15.5.5), so
+                // `yield Promise.resolve(1)` yields `1`. Emitted here so that
+                // `Op::Yield` keeps a single meaning.
                 if self.in_async { self.chunk.emit(Op::Await); }
                 self.chunk.emit(Op::Yield);
                 Ok(())
             }
-            // **Warten.** Kein `fin`-Verbot wie beim `yield`: eine wartende
-            // Funktion wird nur mit einem WERT oder einem WURF wieder
-            // angeworfen, und fuer beides gibt es den Weg schon (`send` und
-            // `unwind`). Ein `gen.return()`, das einen Finalisierer noch
-            // fahren muesste, gibt es hier nicht.
+            // Await. Unlike `yield`, allowed under `finally`: an awaiting
+            // function is resumed only with a value or a throw (`send` and
+            // `unwind`), never with a `return()` that must run a finalizer.
             Expr::Await(inner) => {
                 if !self.in_async { return Err(Unsupported("await-outside-async")) }
                 self.expr(inner)?;
@@ -1541,9 +1446,8 @@ impl Compiler {
         Ok(n)
     }
 
-    /// Hat diese Argumentliste ein `...x`? Dann werden ALLE Argumente in ein
-    /// Feld gebaut und der Aufruf nimmt dieses — sonst muesste der Befehl eine
-    /// Zahl tragen, die erst zur Laufzeit feststeht.
+    /// Does the argument list contain `...x`? Then all arguments are built
+    /// into one array, since the count is only known at run time.
     fn args_have_spread(args: &[Arg]) -> bool {
         args.iter().any(|a| matches!(a, Arg::Spread(_)))
     }
@@ -1562,15 +1466,14 @@ impl Compiler {
         Ok(())
     }
 
-    /// Ein statischer Eigenschaftsname wird zum Namensindex; ein berechneter
-    /// laesst seinen Schluessel auf dem Stapel und gibt `None`.
+    /// A static property name becomes a name index; a computed one leaves its
+    /// key on the stack and returns `None`.
     fn prop_key(&mut self, k: &PropKey, computed: bool) -> CompileResult<Option<u32>> {
         if computed {
             let PropKey::Computed(e) = k else { return Err(Unsupported("prop-key")) };
             self.expr(e)?;
-            // SOFORT umwandeln: `ToPropertyKey` darf Nebenwirkungen haben, und
-            // die Spec legt fest, dass sie VOR der Auswertung des Wertes
-            // passieren.
+            // Convert immediately: `ToPropertyKey` side effects must happen
+            // before the value is evaluated.
             self.chunk.emit(Op::ToKey);
             return Ok(None);
         }
@@ -1586,15 +1489,14 @@ impl Compiler {
         }))
     }
 
-    /// `x++` / `--o.p` — der Zielausdruck darf nur EINMAL ausgewertet werden.
+    /// `x++` / `--o.p`: the target expression is evaluated only once.
     fn update(&mut self, op: UpdateOp, arg: &Expr, prefix: bool) -> CompileResult<()> {
         let up = op == UpdateOp::Inc;
         match arg {
             Expr::Ident(n) => {
                 let i = self.chunk.name(n);
                 self.chunk.emit(Op::LoadVar(i));
-                // `to_number` VOR dem Rechnen: `x = "3"; x++` gibt 4, nicht
-                // "31". `Op::Un(Plus)` ist genau diese Umwandlung.
+                // Convert before stepping: `x = "3"; x++` gives 4, not "31".
                 self.chunk.emit(Op::ToNumeric);
                 if !prefix { self.chunk.emit(Op::Dup); }
                 self.chunk.emit(Op::Step(up));
@@ -1611,8 +1513,8 @@ impl Compiler {
                         self.chunk.emit(Op::GetProp(i));
                         self.chunk.emit(Op::ToNumeric);
                         if !prefix {
-                            // Den alten Wert unter das Objekt schieben: er ist
-                            // das Ergebnis, das Objekt braucht der Schreiber.
+                            // Move the old value below the object: it is the
+                            // result, the object is needed by the store.
                             self.chunk.emit(Op::Dup);
                             self.chunk.emit(Op::Rot3);
                         }
@@ -1621,9 +1523,8 @@ impl Compiler {
                         if !prefix { self.chunk.emit(Op::Pop); }
                         Ok(())
                     }
-                    // `o[k]++` — dieselbe Regel: Objekt und Schluessel nur
-                    // EINMAL. Der alte Wert ist das Ergebnis und muss unter
-                    // beiden hindurch nach unten.
+                    // `o[k]++`: object and key evaluated once; the old value
+                    // is the result and moves below both.
                     MemberProp::Computed(k) => {
                         self.expr(k)?;
                         self.chunk.emit(Op::ToKey);
@@ -1645,11 +1546,10 @@ impl Compiler {
         }
     }
 
-    /// `a += b`, `a ||= b`, und `a = b` als Sonderfall — der linke Ausdruck
-    /// wird EINMAL ausgewertet.
+    /// `a += b`, `a ||= b` etc.; the left expression is evaluated once.
     fn compound(&mut self, op: AssignOp, target: &Expr, right: &Expr) -> CompileResult<()> {
-        // Die kurzschliessenden Formen werten die Rechte NUR aus, wenn sie
-        // gebraucht wird: `a ||= b` darf `b` nicht anfassen, wenn `a` wahr ist.
+        // Short-circuiting forms evaluate the right side only when needed:
+        // `a ||= b` must not touch `b` if `a` is truthy.
         if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
             let jump = |c: &mut Compiler| match op {
                 AssignOp::And => c.chunk.emit_jump(Op::JumpFalseKeep),
@@ -1667,10 +1567,9 @@ impl Compiler {
                     self.chunk.patch(at);
                     return Ok(());
                 }
-                // `o.x ||= v` und `o[k] ||= v`. Objekt und Schluessel werden
-                // EINMAL ausgewertet und liegen unter dem gelesenen Wert; wird
-                // nicht geschrieben, muessen sie wieder weg — deshalb der
-                // Umweg ueber zwei Ausgaenge statt eines Sprungs.
+                // `o.x ||= v` and `o[k] ||= v`. Object and key are evaluated
+                // once and lie below the read value; if nothing is written
+                // they must be popped, hence two exits.
                 Expr::Member { obj, prop, optional: false } => {
                     let computed = matches!(&**prop, MemberProp::Computed(_));
                     let i = self.member_name(prop);
@@ -1690,8 +1589,8 @@ impl Compiler {
                     if computed { self.chunk.emit(Op::SetIndex); }
                     else { self.chunk.emit(Op::SetProp(i)); }
                     let done = self.chunk.emit_jump(Op::Jump);
-                    // Der Kurzschluss: der gelesene Wert ist das Ergebnis,
-                    // Objekt (und Schluessel) darunter gehoeren weggeraeumt.
+                    // Short circuit: the read value is the result; pop the
+                    // object (and key) below it.
                     self.chunk.patch(keep);
                     self.chunk.emit(Op::Swap);
                     self.chunk.emit(Op::Pop);
@@ -1735,8 +1634,8 @@ impl Compiler {
                     self.chunk.emit(Op::SetProp(i));
                     Ok(())
                 }
-                // `o[k] += v`: Objekt und Schluessel EINMAL auswerten, dann
-                // verdoppeln — `o[i++] += 1` darf `i` nicht zweimal zaehlen.
+                // `o[k] += v`: evaluate object and key once, then duplicate;
+                // `o[i++] += 1` must not increment `i` twice.
                 MemberProp::Computed(k) => {
                     self.expr(obj)?;
                     self.expr(k)?;
@@ -1753,32 +1652,29 @@ impl Compiler {
         }
     }
 
-    /// Alle Umgebungen schliessen, die zwischen HIER und `depth` offen sind.
-    /// Ein Sprung aus einem Block heraus laesst sie sonst stehen.
-    /// Alle Schleifeniteratoren schliessen, die zwischen HIER und `n` offen
-    /// sind. Der Iterator der ZIELschleife bleibt: bei `continue` laeuft sie
-    /// weiter, bei `break` schliesst ihn ihr eigener Nachspann.
+    /// Close all loop iterators opened since `n`. The target loop's own
+    /// iterator stays: `continue` keeps using it, and on `break` the loop's
+    /// epilogue closes it.
     fn unwind_iters(&mut self, n: usize) {
         for _ in n..self.iters {
             self.chunk.emit(Op::IterClose);
         }
     }
 
+    /// Close all environments opened since `depth`; a jump out of a block
+    /// would otherwise leave them open.
     fn unwind_to(&mut self, depth: usize) {
         for _ in depth..self.depth {
             self.chunk.emit(Op::PopEnv);
         }
     }
 
-    /// Der Schluessel eines Elementzugriffs, wo er zur Uebersetzungszeit
-    /// feststeht.
+    /// The key of a member access, where it is known at compile time.
     ///
-    /// **Ein privates Feld ist dabei nichts Besonderes** — nur ein anderer
-    /// Schluesseltext (`value::private_key`, NUL davor). Es faellt damit aus
-    /// `own_keys` heraus und ist fuer `Object.keys` und `JSON.stringify`
-    /// unsichtbar, verhaelt sich sonst aber wie jede Eigenschaft. Deshalb
-    /// steht `Private` ueberall in DEMSELBEN Zweig wie `Ident`: ein eigener
-    /// Weg waere eine zweite Semantik fuer denselben Zugriff.
+    /// A private field is just a different key text (`value::private_key`,
+    /// NUL-prefixed): excluded from `own_keys`, so invisible to `Object.keys`
+    /// and `JSON.stringify`, otherwise an ordinary property. That is why
+    /// `Private` shares the `Ident` branch everywhere.
     fn member_name(&mut self, p: &MemberProp) -> u32 {
         match p {
             MemberProp::Ident(n) => self.chunk.name(n),
@@ -1790,17 +1686,17 @@ impl Compiler {
         }
     }
 
-    /// Der Kurzschluss eines `?.`: ist der Wert oben nullish, raeumt er
-    /// `depth` Werte ab, legt `undefined` hin und springt ans Ende der Kette.
-    ///
-    /// Aufgeraeumt wird HIER und nicht am Ende, weil nur hier feststeht,
-    /// wieviel unter dem geprueften Wert liegt — bei `a?.b` ist es nichts,
-    /// bei `o.f?.()` liegt der Empfaenger darunter.
-    /// Den vorgemerkten Namen abholen — jede Schleife genau einmal.
+    /// Take the pending labels; each loop takes them exactly once.
     fn take_label(&mut self) -> Vec<String> {
         core::mem::take(&mut self.pending_labels)
     }
 
+    /// The short circuit of a `?.`: if the top is nullish, pop `depth`
+    /// values, push `undefined` and jump to the end of the chain.
+    ///
+    /// Popping happens here, not at the end, because only here is it known
+    /// how much lies below the tested value (nothing for `a?.b`, the receiver
+    /// for `o.f?.()`).
     fn short_circuit(&mut self, depth: usize) -> CompileResult<()> {
         let go_on = self.chunk.emit_jump(Op::JumpNullishKeep);
         for _ in 0..depth { self.chunk.emit(Op::Pop); }
@@ -1819,12 +1715,11 @@ impl Compiler {
         }
     }
 
-    /// Faengt in diesem Rumpf eine Funktion etwas ein?
+    /// Does a function in this body capture anything?
     ///
-    /// Nur dafuer da, `for (let i …)` abzulehnen, wenn es darauf ankommt: die
-    /// Spec gibt jedem Umlauf eine FRISCHE Bindung, und wer das nicht baut,
-    /// liefert einer Schliessung den Endwert. Ohne Schliessung im Rumpf ist der
-    /// Unterschied nicht beobachtbar — dann darf die Maschine mitfahren.
+    /// Used to decline `for (let i …)` only when it matters: the spec gives
+    /// each iteration a fresh binding, which is only observable through a
+    /// closure in the body.
     fn captures(&self, body: &Stmt) -> bool {
         let mut found = false;
         walk_stmt(body, &mut |e| {
@@ -1836,8 +1731,8 @@ impl Compiler {
     }
 }
 
-/// Jeden Ausdruck eines Statements besuchen. Bewusst grob: der einzige Rufer
-/// fragt „kommt hier IRGENDWO eine Funktion vor", und dafuer reicht es.
+/// Visit every expression of a statement. Deliberately coarse: the only
+/// caller asks whether a function occurs anywhere.
 fn walk_stmt(st: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match st {
         Stmt::Expr(x) | Stmt::Throw(x) => walk_expr(x, f),
@@ -1867,8 +1762,7 @@ fn walk_stmt(st: &Stmt, f: &mut dyn FnMut(&Expr)) {
             for x in d.decls.iter().filter_map(|x| x.init.as_ref()) { walk_expr(x, f) }
         }
         Stmt::Labeled { body, .. } => walk_stmt(body, f),
-        // Alles Uebrige lehnt der Uebersetzer ohnehin ab; ein `true` waere
-        // hier nur vorsichtiger, nicht richtiger.
+        // Other statements are not relevant to the caller.
         _ => {}
     }
 }
@@ -1906,14 +1800,13 @@ fn walk_expr(x: &Expr, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-/// Die Namen aller Absagen dieses Laufs — der Uebersetzer zaehlt sie nicht
-/// selbst, der Rufer tut es (siehe `Interp::run_program`).
+/// The key of a decline. The caller counts them (see `Interp::run_program`).
 pub fn unsupported_name(u: &Unsupported) -> &'static str {
     u.0
 }
 
-/// Nur damit `Vec<Rc<Func>>` im `Chunk` nicht als toter Code gilt, solange die
-/// Maschine Aufrufe noch ueber `Interp::call` faehrt.
+/// Keeps `Chunk::funcs` from counting as dead code while calls go through
+/// `Interp::call`.
 pub fn funcs_of(c: &Chunk) -> &[Rc<Func>] {
     &c.funcs
 }

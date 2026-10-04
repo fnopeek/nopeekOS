@@ -1,17 +1,14 @@
-//! Ganze Zahlen ohne Groessengrenze — der Zahlentyp hinter `BigInt`.
+//! Arbitrary-precision integers, the number type behind `BigInt`.
 //!
-//! **Selbst geschrieben, nicht geholt.** Die Engine ist `no_std` und liegt in
-//! einem WASM-Modul; eine Bignum-Kiste dafuer zu ziehen kostet mehr als diese
-//! Datei, und gebraucht wird nur, was die Sprache verlangt.
+//! Written here rather than pulled in: the engine is `no_std` inside a WASM
+//! module, and only what the language requires is needed.
 //!
-//! Betrag als `Vec<u32>` in aufsteigender Wertigkeit, Vorzeichen daneben.
-//! Null hat einen LEEREN Betrag und ist nie negativ — ohne diese Normalform
-//! gaebe es zwei Nullen, und `0n === -0n` waere falsch.
+//! Magnitude as `Vec<u32>`, least significant word first, sign alongside.
+//! Zero has an empty magnitude and is never negative; without this normal
+//! form there would be two zeros and `0n === -0n` would be false.
 //!
-//! Die Division ist binaer (schieben und abziehen) statt nach Knuth D. Sie
-//! ist damit um einen Faktor langsamer und um zwei Groessenordnungen kuerzer;
-//! fuer die Zahlen, die auf einer Seite vorkommen, ist das der richtige
-//! Handel.
+//! Division is binary shift-and-subtract rather than Knuth D: slower, much
+//! shorter, and adequate for the sizes pages use.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,7 +17,7 @@ use alloc::vec;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Big {
     pub neg: bool,
-    /// Aufsteigende Wertigkeit, ohne fuehrende Nullen. Leer = 0.
+    /// Least significant word first, no leading zeros. Empty = 0.
     pub mag: Vec<u32>,
 }
 
@@ -46,15 +43,15 @@ impl Big {
         Big { neg: neg && !m.is_zero(), mag: m.mag }
     }
 
-    /// Aus einem `f64`. Nur GANZE, endliche Zahlen — alles andere ist ein
-    /// RangeError beim Rufer.
+    /// From an `f64`. Integral, finite values only; anything else is a
+    /// RangeError at the caller.
     pub fn from_f64(v: f64) -> Option<Big> {
         if !v.is_finite() || libm::trunc(v) != v { return None; }
         if v == 0.0 { return Some(Big::zero()); }
         let neg = v < 0.0;
         let mut a = libm::fabs(v);
-        // In 32-Bit-Stuecken herunterbrechen. `a / 2^32` ist exakt, solange
-        // `a` ganz ist: der Exponent sinkt, die Mantisse bleibt.
+        // Split into 32-bit words. `a / 2^32` is exact while `a` is
+        // integral: the exponent drops, the mantissa stays.
         let mut mag = Vec::new();
         while a >= 1.0 {
             let rem = libm::fmod(a, 4294967296.0);
@@ -70,7 +67,7 @@ impl Big {
         if self.neg { -r } else { r }
     }
 
-    /// Passt sie in einen `u64`? Fuer die 64-Bit-Sichten.
+    /// Does it fit in a `u64`? For the 64-bit views.
     pub fn to_u64_wrap(&self) -> u64 {
         let lo = *self.mag.first().unwrap_or(&0) as u64;
         let hi = *self.mag.get(1).unwrap_or(&0) as u64;
@@ -78,7 +75,7 @@ impl Big {
         if self.neg { v.wrapping_neg() } else { v }
     }
 
-    // ── Vergleich ────────────────────────────────────────────────────────
+    // ── Comparison ───────────────────────────────────────────────────────
     fn cmp_mag(a: &[u32], b: &[u32]) -> core::cmp::Ordering {
         use core::cmp::Ordering::*;
         if a.len() != b.len() { return if a.len() < b.len() { Less } else { Greater }; }
@@ -98,7 +95,7 @@ impl Big {
         }
     }
 
-    // ── Betragsrechnung ──────────────────────────────────────────────────
+    // ── Magnitude arithmetic ─────────────────────────────────────────────
     fn add_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut out = Vec::with_capacity(a.len().max(b.len()) + 1);
         let mut carry = 0u64;
@@ -111,7 +108,7 @@ impl Big {
         out
     }
 
-    /// `a - b`, und `a >= b` wird vorausgesetzt.
+    /// `a - b`; requires `a >= b`.
     fn sub_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut out = Vec::with_capacity(a.len());
         let mut borrow = 0i64;
@@ -199,14 +196,14 @@ impl Big {
         out
     }
 
-    /// Ganzzahlige Division mit Rest, ABGESCHNITTEN zur Null hin — so, wie
-    /// die Spezifikation es fuer `/` und `%` verlangt.
+    /// Integer division with remainder, truncated toward zero, as the spec
+    /// requires for `/` and `%`.
     pub fn div_rem(&self, o: &Big) -> Option<(Big, Big)> {
         if o.is_zero() { return None; }
         if Big::cmp_mag(&self.mag, &o.mag) == core::cmp::Ordering::Less {
             return Some((Big::zero(), self.clone()));
         }
-        // Ein einwortiger Teiler ist der haeufige Fall und geht direkt.
+        // A single-word divisor is the common case and goes direct.
         if o.mag.len() == 1 {
             let d = o.mag[0] as u64;
             let mut q = vec![0u32; self.mag.len()];
@@ -220,7 +217,7 @@ impl Big {
             let r = Big { neg: self.neg, mag: if rem == 0 { Vec::new() } else { vec![rem as u32] } }.norm();
             return Some((quo, r));
         }
-        // Binaer: von oben nach unten ein Bit anhaengen und abziehen, wo es geht.
+        // Binary: append one bit at a time from the top, subtract where possible.
         let n = self.bits();
         let mut q = vec![0u32; self.mag.len()];
         let mut rem = Big::zero();
@@ -245,9 +242,8 @@ impl Big {
     pub fn pow(&self, e: &Big) -> Option<Big> {
         if e.neg { return None; }
         let mut n = e.to_f64();
-        // Ein Ergebnis jenseits von etwa einer Million Bit ist kein Rechnen
-        // mehr, sondern ein Aufhaenger. Die Spezifikation erlaubt hier
-        // ausdruecklich einen RangeError.
+        // A result beyond roughly a million bits would hang rather than
+        // compute; the spec explicitly permits a RangeError here.
         if self.bits() as f64 * n > 1_000_000.0 { return None; }
         let mut base = self.clone();
         let mut acc = Big::from_u64(1);
@@ -259,11 +255,11 @@ impl Big {
         Some(acc)
     }
 
-    // ── Bitweise: im ZWEIERKOMPLEMENT, unendlich fortgesetzt ─────────────
+    // ── Bitwise, in infinite two's complement ────────────────────────────
     //
-    // `-1n & 0xffn` ist 255n, nicht 0n — das geht nur, wenn die negative
-    // Zahl als unendlich viele Einsen nach oben gedacht wird. Also wird auf
-    // die gemeinsame Laenge plus ein Wort gerechnet.
+    // `-1n & 0xffn` is 255n, not 0n: a negative number is treated as
+    // infinitely many ones above, so the operation runs on the common
+    // length plus one word.
     fn twos(&self, words: usize) -> Vec<u32> {
         let mut v = vec![0u32; words];
         for k in 0..words.min(self.mag.len()) { v[k] = self.mag[k]; }
@@ -312,15 +308,15 @@ impl Big {
         Big { neg: self.neg, mag: Big::shl_words_bits(&self.mag, n as usize) }.norm()
     }
 
-    /// Arithmetisches Verschieben nach rechts: bei einer negativen Zahl wird
-    /// ABGERUNDET, nicht abgeschnitten (`-3n >> 1n` ist `-2n`).
+    /// Arithmetic right shift: negative numbers round down rather than
+    /// truncate (`-3n >> 1n` is `-2n`).
     pub fn shr(&self, n: u64) -> Big {
         let n = n as usize;
         let m = Big::shl_words_bits(&[], 0);
         let _ = m;
         let r = Big { neg: self.neg, mag: Big::shr_words_bits(&self.mag, n) }.norm();
         if !self.neg { return r; }
-        // Ging etwas verloren, eins abziehen.
+        // If bits were lost, subtract one.
         let mut lost = false;
         for k in 0..n.min(self.bits()) { if self.bit(k) { lost = true; break } }
         if lost { r.sub(&Big::from_u64(1)) } else { r }
@@ -332,18 +328,18 @@ impl Big {
         let words = ((bits + 31) / 32) as usize;
         let mut v = self.twos(words + 1);
         v.truncate(words);
-        // Die Bits ueber `bits` streichen.
+        // Drop the bits above `bits`.
         let extra = (words as u64 * 32 - bits) as u32;
         if extra > 0 {
             let last = v.len() - 1;
             v[last] &= u32::MAX >> extra;
         }
         if !signed { return Big { neg: false, mag: v }.norm(); }
-        // Das oberste behaltene Bit ist das Vorzeichen.
+        // The highest kept bit is the sign.
         let top = ((bits - 1) % 32) as u32;
         let widx = ((bits - 1) / 32) as usize;
         if (v[widx] >> top) & 1 == 1 {
-            // Nach oben mit Einsen auffuellen und als Zweierkomplement lesen.
+            // Fill upward with ones and read as two's complement.
             if extra > 0 { let last = v.len() - 1; v[last] |= !(u32::MAX >> extra); }
             v.push(u32::MAX);
             return Big::from_twos(v);
@@ -375,8 +371,8 @@ impl Big {
         s
     }
 
-    /// Aus dem Quelltext (`123n`) oder aus `BigInt("…")`. `None` heisst
-    /// SyntaxError beim Rufer.
+    /// From source text (`123n`) or `BigInt("…")`. `None` means SyntaxError
+    /// at the caller.
     pub fn parse(t: &str) -> Option<Big> {
         let t = t.trim();
         if t.is_empty() { return Some(Big::zero()); }
@@ -388,7 +384,7 @@ impl Big {
             else if let Some(r) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) { (8, r) }
             else if let Some(r) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) { (2, r) }
             else { (10, body) };
-        // Ein Vorzeichen vor einer Basis gibt es nicht.
+        // No sign before a radix prefix.
         if radix != 10 && neg { return None; }
         if digits.is_empty() { return None; }
         let mut acc = Big::zero();

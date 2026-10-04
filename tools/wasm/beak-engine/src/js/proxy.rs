@@ -1,19 +1,14 @@
-//! `Proxy` und `Reflect`s Gegenstueck dazu.
+//! `Proxy` and `Proxy.revocable`.
 //!
-//! Ein Stellvertreter ist ein Objekt mit einer eigenen Art
-//! (`ObjKind::Proxy`); jede Grundoperation des Objektmodells fragt ihn
-//! zuerst. Die Haken sitzen deshalb nicht hier, sondern dort, wo die
-//! Operation ohnehin steht — `Interp::get`, `set`, `has_property`,
-//! `delete_key`, `own_keys_of`, `get_own_desc`, `define_own`,
-//! `proto_of`/`set_proto_of`, `call` und `construct`. Diese Datei baut den
-//! Konstruktor und die gemeinsame Hilfe, die eine Falle holt.
+//! A proxy is an object of its own kind (`ObjKind::Proxy`) that every
+//! object-model operation consults first. The hooks therefore live where
+//! the operations are (`Interp::get`, `set`, `has_property`, `delete_key`,
+//! `own_keys_of`, `get_own_desc`, `define_own`, `proto_of`/`set_proto_of`,
+//! `call`, `construct`); this file builds the constructor and the shared
+//! trap lookup.
 //!
-//! **Benannt statt verschwiegen: die INVARIANTEN sind nicht geprueft.** Die
-//! Spezifikation verlangt nach jedem Fallenaufruf einen Abgleich mit dem
-//! Ziel (eine nicht konfigurierbare Eigenschaft darf nicht verschwinden, ein
-//! nicht erweiterbares Ziel keine neuen Schluessel melden, …). Wir rufen die
-//! Falle und glauben ihr. Das ist fuer eine Seite folgenlos — sie belaegt
-//! sich selbst —, aber es ist eine Luecke gegen die Spezifikation.
+//! Not implemented: the post-trap invariant checks against the target
+//! (ES 10.5). Trap results are trusted as returned.
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -22,20 +17,20 @@ use alloc::vec::Vec;
 use super::interp::*;
 use super::value::*;
 
-/// Ziel und Behandler eines Stellvertreters, oder `None` nach dem Widerruf.
+/// Target and handler of a proxy, or `None` once revoked.
 pub type ProxyCell = Rc<core::cell::RefCell<Option<(Gc, Gc)>>>;
 
 pub fn parts(o: &Gc) -> Option<ProxyCell> {
     match &o.borrow().kind { ObjKind::Proxy(c) => Some(c.clone()), _ => None }
 }
 
-/// Ist dieser Wert ein Stellvertreter?
+/// Is this value a proxy?
 pub fn is_proxy(v: &Value) -> bool {
     matches!(v, Value::Obj(o) if matches!(o.borrow().kind, ObjKind::Proxy(_)))
 }
 
-/// Ziel und Falle holen. `Ok(None)` heisst: keine Falle, die Operation geht
-/// unveraendert ans Ziel.
+/// Fetch target and trap. `Ok(None)` means no trap: the operation goes to
+/// the target unchanged.
 pub fn trap(i: &mut Interp, o: &Gc, name: &str) -> C<Option<(Value, Value, Value)>> {
     let Some(cell) = parts(o) else { return Ok(None) };
     let Some((t, h)) = cell.borrow().clone() else {
@@ -45,16 +40,12 @@ pub fn trap(i: &mut Interp, o: &Gc, name: &str) -> C<Option<(Value, Value, Value
     let f = i.get(&hv, name)?;
     if matches!(f, Value::Undefined | Value::Null) { return Ok(None); }
     if !i.is_callable(&f) { return i.type_err("proxy trap is not a function"); }
-    // **Der BEHANDLER ist der Empfaenger der Falle** (`Call(trap, handler,
-    // args)`, ES 10.5.x — in jeder einzelnen). Vorher lief jede Falle mit
-    // `this === undefined`: ein Behandler, der als KLASSE geschrieben ist,
-    // fand seine eigenen Felder nicht. Vues Reaktivitaet ist genau so
-    // gebaut (`class { constructor(){ this._isReadonly = … } get(t,k){ …
-    // this._isReadonly … } }`) — jedes `reactive()` starb daran.
+    // The handler is the trap's receiver (`Call(trap, handler, args)`,
+    // ES 10.5.x); class-based handlers read their own fields through `this`.
     Ok(Some((f, hv, Value::Obj(t))))
 }
 
-/// Das Ziel eines Stellvertreters — fuer die Faelle ohne Falle.
+/// The proxy's target, for operations without a trap.
 pub fn target(i: &mut Interp, o: &Gc) -> C<Gc> {
     let Some(cell) = parts(o) else { return i.type_err("not a proxy") };
     match cell.borrow().clone() {
@@ -63,9 +54,8 @@ pub fn target(i: &mut Interp, o: &Gc) -> C<Gc> {
     }
 }
 
-/// Einen Eigenschaftsnamen zurueck in einen JS-Wert — eine Falle bekommt den
-/// Schluessel, wie ein Skript ihn geschrieben haette, also ein Symbol als
-/// Symbol.
+/// A property key back as a JS value: a trap sees the key as script would
+/// have written it, so a symbol stays a symbol.
 pub fn key_value(key: &str) -> Value {
     if is_sym_key(key) {
         Value::Sym(Rc::new(sym_from_key(&PropName::from(key))))
@@ -79,9 +69,9 @@ fn make(i: &mut Interp, a: &[Value]) -> C<(Gc, ProxyCell)> {
         return i.type_err("Proxy: target and handler must be objects");
     };
     let cell: ProxyCell = Rc::new(core::cell::RefCell::new(Some((t.clone(), h.clone()))));
-    // Der Prototyp des Stellvertreters wird nie gelaufen — jeder Zugriff geht
-    // ueber die Fallen —, aber `new Proxy(f, {})` muss aufrufbar bleiben, und
-    // dafuer schaut `is_callable` auf das ZIEL.
+    // The proxy's own prototype is never walked (every access goes through
+    // the traps); `is_callable` looks at the target so `new Proxy(f, {})`
+    // stays callable.
     let g = new_kind(None, ObjKind::Proxy(cell.clone()));
     Ok((g, cell))
 }
@@ -98,9 +88,8 @@ pub fn install(realm: &mut Realm) {
         let (g, cell) = make(i, a)?;
         let o = new_obj(Some(i.realm.object_proto.clone()));
         o.borrow_mut().define("proxy", Prop::data(Value::Obj(g)));
-        // Der Widerruf haengt am Stellvertreter selbst: die Funktion findet
-        // ihn ueber ein NUL-praefigiertes Feld, weil ein Zeiger keinen
-        // Abschluss nimmt.
+        // The revoke function finds its proxy through a NUL-prefixed
+        // property, since a native fn pointer cannot capture.
         let f = native(Some(i.realm.function_proto.clone()), |i, t, _| {
             let Value::Obj(o) = &t else { return Ok(Value::Undefined) };
             let p = o.borrow().get_own(REVOKE_TARGET).and_then(|p| p.value.clone());
@@ -113,7 +102,7 @@ pub fn install(realm: &mut Realm) {
         f.borrow_mut().define(REVOKE_TARGET, Prop {
             value: o.borrow().get_own("proxy").and_then(|p| p.value.clone()),
             get: None, set: None, writable: false, enumerable: false, configurable: false });
-        // `revoke` ruft sich selbst als `this` — dafuer wird es gebunden.
+        // `revoke` is called with itself as `this`, hence the binding.
         let bound = new_kind(Some(i.realm.function_proto.clone()), ObjKind::Bound {
             target: f.clone(), this_val: Value::Obj(f), args: Vec::new() });
         o.borrow_mut().define("revoke", Prop::data(Value::Obj(bound)));
@@ -123,10 +112,10 @@ pub fn install(realm: &mut Realm) {
 
     realm.global.borrow_mut().define("Proxy", Prop::builtin(Value::Obj(ctor)));
 
-    // `Reflect.ownKeys` und die uebrigen Reflect-Funktionen laufen ueber
-    // dieselben Grundoperationen wie der Rest — sie brauchen hier nichts.
+    // The remaining Reflect functions go through the same object-model
+    // operations and need nothing here.
     let _ = String::new();
 }
 
-/// Wo `revoke` seinen Stellvertreter findet.
+/// Where `revoke` finds its proxy.
 pub const REVOKE_TARGET: &str = "\0!revoke";

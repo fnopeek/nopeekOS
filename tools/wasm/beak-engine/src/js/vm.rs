@@ -1,43 +1,28 @@
-//! Die Befehlsmaschine — eine Schleife statt eines Rust-Stapels.
+//! The bytecode VM: a loop instead of the Rust call stack.
 //!
-//! **Was hier anders ist als im Baumlaeufer, und nur DAS:** der Zustand einer
-//! laufenden Auswertung liegt in Feldern (`stack`, `frames`), nicht in
-//! Rust-Aufrufrahmen. Wegspeichern und weiterlaufen lassen ist damit
-//! moeglich — das ist die ganze Begruendung des Umbaus, und alles, was
-//! Generatoren und `async`/`await` brauchen.
+//! The state of a running evaluation lives in fields (`stack`, `frames`),
+//! not in Rust frames, so it can be suspended and resumed; that is what
+//! generators and `async`/`await` need.
 //!
-//! **Was hier NICHT anders ist: die Bedeutung.** Jeder Befehl ruft dieselbe
-//! Hilfe wie der Baumlaeufer — `binary`, `unary_val`, `vm_load`, `vm_store`,
-//! `get`, `set`, `call`, `construct`, `make_closure`. Wo diese Datei rechnet,
-//! statt zu rufen, waere eine zweite Semantik, und die laeuft still
-//! auseinander.
+//! The semantics are not reimplemented here. Every op calls the same helper
+//! as the tree-walker (`binary`, `unary_val`, `vm_load`, `vm_store`, `get`,
+//! `set`, `call`, `construct`, `make_closure`); computing locally would be a
+//! second semantics that silently drifts.
 //!
-//! **Stufe 4 und ihre Entwurfsfrage.** Sie lautete: ein Generator, der von
-//! einem EINGEBAUTEN gerufen wird (`[...gen]`, `Array.from(gen)`), sitzt unter
-//! einem Rust-Rahmen — dort kann er nicht anhalten. Die Antwort ist, die
-//! Voraussetzung der Frage zu streichen:
-//!
-//! **Ein Generator ist keine Rahmen in fremder Maschine, er ist eine EIGENE.**
-//! Jedes Generatorobjekt haelt seine `Vm` mit genau einem Wurzelrahmen. Ein
-//! `yield` muss deshalb nie ueber einen Rust-Rahmen zurueck — zwischen dem
-//! `yield` und dem `Vm::resume`, das darauf wartet, liegt keiner:
+//! Each generator object owns its own `Vm` with a single root frame, so a
+//! `yield` never has to unwind through a Rust frame, even when the generator
+//! is driven by a builtin such as `Array.from`:
 //!
 //!     Array.from                (Rust)
 //!       Interp::call(gen.next)  (Rust)
 //!         next                  (Rust)
-//!           Vm::resume          ← die EIGENE Maschine des Generators
-//!             Frame(rumpf) ip=17 … Op::Yield → zurueck mit „angehalten"
+//!           Vm::resume          <- the generator's own VM
+//!             Frame(body) ip=17 ... Op::Yield -> returns "suspended"
 //!
-//! Ein `next()` kostet damit EINEN Rust-Rahmen, nicht einen je `yield`. Und
-//! weil das so ist, ist es voellig gleichgueltig, wer ruft: der Baumlaeufer,
-//! ein Eingebautes, `Op::Call` einer anderen Maschine oder ein zweiter
-//! Generator. Niemand muss etwas dazulernen, es gibt keinen eifrigen
-//! Rueckfall und keine Falle mit unendlichen Generatoren.
-//!
-//! Ein `yield` steht immer im Rumpf des Generators SELBST (in einer inneren
-//! Funktion waere es deren eigenes), und ein Aufruf von dort muss
-//! zurueckkehren, bevor es weitergeht — beim `Op::Yield` ist der Wurzelrahmen
-//! also der einzige. Deshalb reicht ein Wurzelrahmen je Maschine.
+//! One `next()` costs one Rust frame regardless of the caller. A `yield`
+//! always belongs to the generator body itself, and any call made from there
+//! returns before it continues, so at `Op::Yield` the root frame is the only
+//! one; one root frame per VM is enough.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -47,59 +32,47 @@ use super::code::{Chunk, Op};
 use super::interp::{Abrupt, Env, Interp, C};
 use super::value::Value;
 
-/// Ein Aufrufrahmen. Heute gibt es genau einen (das Programm); die Form steht
-/// schon, weil sie der Punkt der Uebung ist.
+/// A call frame.
 struct Frame {
     chunk: Rc<Chunk>,
     ip: usize,
-    /// Die Umgebung, in der dieser Rahmen laeuft. `PushEnv`/`PopEnv` schieben
-    /// hier, nicht auf dem Rust-Stapel.
+    /// Environment chain of this frame; `PushEnv`/`PopEnv` operate here.
     envs: Vec<Rc<RefCell<Env>>>,
-    /// Der Stapelstand beim Betreten — beim Verlassen wird darauf zurueck-
-    /// geschnitten, damit ein `Ret` mitten im Ausdruck nichts liegenlaesst.
+    /// Stack height on entry; truncated back to on exit so a `Ret` in the
+    /// middle of an expression leaves nothing behind.
     base: usize,
-    /// Offene `try`-Behandler, innerster zuletzt.
+    /// Open `try` handlers, innermost last.
     handlers: Vec<Handler>,
-    /// Ist das der Rahmen eines PROGRAMMS? Dessen Wert ist sein letzter
-    /// Ausdruckswert, der einer Funktion ihr `return`.
+    /// Program frame: its value is the completion value, a function's is its
+    /// `return`.
     is_program: bool,
-    /// Der UNTERSTE Rahmen dieser Maschine. Ein Wurf sucht darueber hinaus
-    /// keinen Behandler mehr, ein `Ret` beendet den Lauf, und die Aufruftiefe
-    /// wird nicht mitgezaehlt — dieser Rahmen gehoert nicht dem Rufer.
+    /// Bottom frame of this VM. A throw looks for no handler beyond it, a
+    /// `Ret` ends the run, and it does not count toward call depth.
     ///
-    /// Getrennt von `is_program`, weil ein Generatorrumpf zwar Wurzel ist,
-    /// aber KEINEN Abschlusswert hat: ein `{ x = 1; }` in ihm setzt
-    /// `SetCompletion`, und das duerfte sein `return` nicht ueberschreiben.
+    /// Separate from `is_program`: a generator body is a root but has no
+    /// completion value, so `SetCompletion` in it must not override `return`.
     root: bool,
-    /// Offene Laufzustaende von `for…of` und `for…in`. Sie stehen HIER und
-    /// nicht auf dem Wertestapel: ein `break` oder ein Wurf mitten in der
-    /// Schleife muesste sie sonst einzeln wegraeumen, und das ist genau die
-    /// Buchhaltung, an der solche Maschinen scheitern.
-    ///
-    /// Beide in EINER Liste, weil die ganze Aufraeumerei — Behandlertiefe,
-    /// `Ret`, `unwind` — sie dann nur einmal kennen muss.
+    /// Open `for…of` / `for…in` iteration state. Kept here rather than on the
+    /// value stack so `break` or a throw need not clean it up item by item;
+    /// one list so handler depth, `Ret` and `unwind` handle both kinds alike.
     iters: Vec<Iter>,
 }
 
-/// Was eine laufende Schleife festhaelt.
+/// State held by a running loop.
 enum Iter {
-    /// Ein echter Iterator (`for…of`). Sein `return()` gehoert bei jedem
-    /// vorzeitigen Verlassen gerufen.
+    /// A `for…of` iterator; its `return()` must be called on every early exit.
     Obj(Value),
-    /// Ein Iterator eines `for await`. `async` sagt, ob er wirklich einer ist
-    /// (dann ist das abzuwartende Ding das ganze Ergebnisobjekt) oder ob wir
-    /// einen synchronen umhuellen (dann ist es nur sein `value`, und `done`
-    /// steht schon hier — ES 27.1.4.4, AsyncFromSyncIteratorContinuation).
+    /// A `for await` iterator. If `is_async`, the whole result object is
+    /// awaited; for a wrapped sync iterator only its `value` is, and `done` is
+    /// stored here (ES 27.1.4.4, AsyncFromSyncIteratorContinuation).
     Async { it: Value, is_async: bool, done: bool },
-    /// Die Schluesselliste eines `for…in`, RUECKWAERTS — dann ist `pop` der
-    /// naechste Schritt und es braucht keinen Index daneben. Es gibt hier
-    /// nichts zu schliessen: die Liste steht schon fest.
+    /// A `for…in` key list, reversed so `pop` yields the next key. Nothing to
+    /// close.
     Keys(Vec<Value>),
 }
 
-/// Ein offener `try`. Die drei Tiefen sind der Punkt: ein Wurf kann mitten in
-/// einem Ausdruck passieren, und dann liegen halbe Werte auf dem Stapel,
-/// offene Blockumgebungen im Rahmen und angefangene Iterationen daneben.
+/// An open `try`. The three depths restore the value stack, block
+/// environments and open iterations when a throw lands mid-expression.
 struct Handler {
     catch_ip: Option<u32>,
     finally_ip: Option<u32>,
@@ -108,53 +81,48 @@ struct Handler {
     iters: usize,
 }
 
-/// Wie ein Lauf geendet hat.
+/// How a run ended.
 pub enum Step {
-    /// Der Wurzelrahmen ist zurueck.
+    /// The root frame returned.
     Done(Value),
-    /// `yield` — die Maschine steht und laesst sich wieder aufnehmen.
+    /// `yield`: suspended, resumable.
     ///
-    /// Das `bool` heisst ROH: der Wert IST schon das `{value, done}`-Objekt
-    /// und darf nicht noch einmal eingepackt werden. Genau das verlangt
-    /// `yield*` im gewoehnlichen Generator — es reicht das Ergebnisobjekt des
-    /// INNEREN Iterators unveraendert durch (ES 15.5.5, `GeneratorYield`),
-    /// und Tests pruefen die Identitaet.
+    /// The `bool` means raw: the value already is the `{value, done}` object
+    /// and must not be wrapped again. `yield*` in a sync generator passes the
+    /// inner iterator's result object through unchanged (ES 15.5.5,
+    /// GeneratorYield), and its identity is observable.
     Yield(Value, bool),
-    /// `await` — dasselbe Anhalten, nur wartet hier ein Versprechen darauf,
-    /// sie wieder anzuwerfen, statt eines `next()`.
+    /// `await`: suspended until a promise settles instead of a `next()`.
     Await(Value),
 }
 
-/// Wie ein einzelner Befehl ausgegangen ist.
+/// Outcome of a single op.
 enum Flow {
-    /// Weiter zum naechsten.
+    /// Continue with the next op.
     Go,
     Done(Value),
     Yield(Value, bool),
     Await(Value),
 }
 
-/// Womit eine angehaltene Maschine wieder angeworfen wurde.
+/// How a suspended VM was resumed.
 ///
-/// **Der dritte Weg hinein.** `send` allein reicht fuer ein gewoehnliches
-/// `yield`: ein `next(v)` legt `v` an die Anhaltestelle, ein `throw(e)`
-/// wickelt sofort ab, ein `return(v)` gibt die Maschine auf. `yield*` braucht
-/// aber alle drei ALS WERT — es muss sie an den inneren Iterator
-/// weiterreichen, statt selbst darauf zu reagieren.
+/// A plain `yield` only needs `send`; `throw` unwinds and `return` closes.
+/// `yield*` needs all three as values, to forward them to the inner iterator
+/// instead of acting on them itself.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Resume { Normal, Throw, Return }
 
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
-    /// Der Abschlusswert des Programms (sein letzter Ausdruckswert).
+    /// Completion value of the program.
     completion: Value,
-    /// Womit zuletzt wieder angeworfen wurde — nur `yield*` liest es.
+    /// How the VM was last resumed; read only by `yield*`.
     resume: Resume,
-    /// Dasselbe, festgehalten ueber ein `await` hinweg: in einem
-    /// async-Generator liegt zwischen dem Aufruf am inneren Iterator und der
-    /// Auswertung seines Ergebnisses ein Anhaltepunkt, und der wirft mit
-    /// `send` wieder an — das setzt `resume` auf `Normal` zurueck.
+    /// `resume` preserved across an `await`: in an async generator there is
+    /// a suspension between calling the inner iterator and evaluating its
+    /// result, and resuming from it via `send` resets `resume` to `Normal`.
     deleg: Resume,
 }
 
@@ -164,36 +132,27 @@ impl Vm {
              resume: Resume::Normal, deleg: Resume::Normal }
     }
 
-    /// Ein uebersetztes Programm fahren. `env` ist die Umgebung, in die der
-    /// Rufer schon hochgezogen hat — das Hochziehen bleibt beim Baumlaeufer,
-    /// weil es auf der UMGEBUNG arbeitet und fuer beide Maschinen dasselbe ist.
+    /// Run a compiled program. The caller has already hoisted into `env`;
+    /// hoisting works on the environment and is shared by both engines.
     pub fn run(&mut self, i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
         self.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
                                  is_program: true, root: true,
                                  handlers: Vec::new(), iters: Vec::new() });
         match self.drive(i)? {
             Step::Done(v) => Ok(v),
-            // Ein Programmrumpf wird mit `in_gen == false` uebersetzt; ein
-            // `Op::Yield` kann darin nicht stehen. Kein `panic!`: ein Absturz
-            // der Maschine ist in einem Kernel keine Fehlermeldung.
+            // A program body is compiled with `in_gen == false`, so no
+            // `Op::Yield` can occur. No `panic!`: a panic halts the system.
             Step::Yield(..) => Err(i.throw_kind("TypeError", "yield outside a generator")),
             Step::Await(_) => Err(i.throw_kind("TypeError", "await outside an async function")),
         }
     }
 
-    /// Einen FUNKTIONSRUMPF auf der Maschine fahren, wenn der Ruf NICHT von
-    /// ihr kommt.
+    /// Run a function body on the VM when the call comes from outside it
+    /// (builtin callback, microtask, event handler).
     ///
-    /// `Op::Call` in der Maschine legt einen Rahmen an und laeuft weiter —
-    /// aber jeder Aufruf, der von aussen kommt (aus einem eingebauten
-    /// Rueckruf, aus der Microtask-Schlange, aus einem Ereignisbehandler, aus
-    /// einem Generator), ging ueber `Interp::run_js_body` und damit auf den
-    /// BAUMLAEUFER. Und weil dessen Aufrufe wieder dort landen, blieb alles
-    /// darunter beim Baumlaeufer: die Fritzbox-Anmeldung fuhr 320 721
-    /// Schritte, davon 4 286 auf der Maschine.
-    ///
-    /// Es ist derselbe Chunk, den `Op::Call` benutzt haette — kein zweiter
-    /// Semantikpfad, nur derselbe von einem anderen Rufer aus erreicht.
+    /// Without this, such calls would go to the tree-walker and everything
+    /// beneath them would stay there. It is the same chunk `Op::Call` would
+    /// use, reached from a different caller.
     pub fn run_function(i: &mut Interp, chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> C<Value> {
         let mut vm = Vm::new();
         vm.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
@@ -206,11 +165,10 @@ impl Vm {
         }
     }
 
-    /// Eine Maschine fuer einen GENERATOR- oder ASYNC-RUMPF: ein einziger
-    /// Wurzelrahmen,
-    /// noch nichts gelaufen. Die Umgebung hat `Interp::call_env` gebaut —
-    /// Parameter und `this` stehen beim AUFRUF fest, der Rumpf laeuft erst
-    /// beim ersten `next()`. Genau diese Reihenfolge verlangt die Spec.
+    /// A VM for a generator or async body: one root frame, nothing run yet.
+    /// `Interp::call_env` built the environment, so parameters and `this` are
+    /// bound at call time while the body runs only on the first `next()`, as
+    /// the spec requires.
     pub fn for_generator(chunk: Rc<Chunk>, env: &Rc<RefCell<Env>>) -> Vm {
         let mut vm = Vm::new();
         vm.frames.push(Frame { chunk, ip: 0, envs: alloc::vec![env.clone()], base: 0,
@@ -219,30 +177,29 @@ impl Vm {
         vm
     }
 
-    /// Den Wert von `next(v)` an die Stelle legen, an der `Op::Yield` seinen
-    /// abgegeben hat — er ist der Wert des `yield`-Ausdrucks.
+    /// Push the value of `next(v)` where `Op::Yield` left off; it becomes the
+    /// value of the `yield` expression.
     pub fn send(&mut self, v: Value) {
         self.resume = Resume::Normal;
         self.stack.push(v);
     }
 
-    /// Wieder anwerfen mit einem WURF — aber ohne abzuwickeln. Nur sinnvoll,
-    /// wenn die Maschine an einem `yield*` steht (`at_delegate`): dort ist der
-    /// Wurf ein WERT, der an den inneren Iterator geht.
+    /// Resume with a throw without unwinding. Only meaningful at a `yield*`
+    /// (`at_delegate`), where the throw is a value forwarded to the inner
+    /// iterator.
     pub fn send_throw(&mut self, v: Value) {
         self.resume = Resume::Throw;
         self.stack.push(v);
     }
 
-    /// Wieder anwerfen mit einem `return`. Dasselbe: an einem `yield*` bekommt
-    /// der innere Iterator sein `return()` zu sehen, bevor der aeussere
-    /// Generator aufgibt.
+    /// Resume with a `return`. At a `yield*` the inner iterator sees its
+    /// `return()` before the outer generator finishes.
     pub fn send_return(&mut self, v: Value) {
         self.resume = Resume::Return;
         self.stack.push(v);
     }
 
-    /// Der innere Iterator des laufenden `yield*`.
+    /// The inner iterator of the running `yield*`.
     fn delegate_iter(&self) -> Option<Value> {
         match self.frames.last()?.iters.last()? {
             Iter::Obj(v) | Iter::Async { it: v, .. } => Some(v.clone()),
@@ -250,13 +207,11 @@ impl Vm {
         }
     }
 
-    /// Den obersten Rahmen verlassen und seinen Wert zurueckgeben.
+    /// Leave the top frame and return its value.
     ///
-    /// Herausgeloest aus `Op::Ret`, weil `yield*` denselben Ausgang braucht:
-    /// **ein `return()` am Generator, das den inneren Iterator erschoepft
-    /// hat, IST ein `return` aus dem aeusseren Rumpf** — samt dem Schliessen
-    /// jeder offenen `for…of`-Iteration darin. Zwei Fassungen davon waeren
-    /// zwei Semantiken fuer denselben Ausgang.
+    /// Shared by `Op::Ret` and `yield*`: a `return()` that exhausted the inner
+    /// iterator is a `return` from the outer body, including closing every
+    /// open `for…of` in it.
     fn do_return(&mut self, i: &mut Interp) -> C<Flow> {
         let v = if self.stack.len() > self.frames.last().unwrap().base {
             self.pop()
@@ -264,18 +219,16 @@ impl Vm {
             Value::Undefined
         };
         let f = self.frames.pop().unwrap();
-        // Ein `return` aus einer `for…of`-Schleife heraus muss ihren Iterator
-        // SCHLIESSEN — sonst faehrt ein Generator seinen eigenen
-        // `finally`-Block nie. Von innen nach aussen.
+        // Returning out of a `for…of` must close its iterator (innermost
+        // first), or a generator never runs its `finally`.
         for it in f.iters.iter().rev() {
             match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
         }
         self.stack.truncate(f.base);
         if f.root {
             if f.is_program {
-                // Der Wert eines PROGRAMMS ist sein letzter Ausdruckswert,
-                // nicht das, was am Ende auf dem Stapel liegt. Ein Funktions-
-                // oder Generatorrumpf hat keinen.
+                // A program's value is its completion value, not what is left
+                // on the stack. Function and generator bodies have none.
                 let c = core::mem::replace(&mut self.completion, Value::Undefined);
                 return Ok(Flow::Done(if matches!(c, Value::Undefined) { v } else { c }));
             }
@@ -289,10 +242,10 @@ impl Vm {
         Ok(Flow::Go)
     }
 
-    /// Steht die angehaltene Maschine an einem `yield*`?
+    /// Whether the suspended VM is at a `yield*`.
     ///
-    /// `drive` zaehlt `ip` VOR dem Befehl hoch, also steht der Anhaltebefehl
-    /// bei `ip - 1`.
+    /// `drive` increments `ip` before executing, so the suspending op is at
+    /// `ip - 1`.
     pub fn at_delegate(&self) -> bool {
         let Some(f) = self.frames.last() else { return false };
         f.ip.checked_sub(1)
@@ -300,19 +253,17 @@ impl Vm {
             .is_some_and(|op| matches!(op, Op::YieldDelegate(_)))
     }
 
-    /// `gen.throw(v)`: den Wurf an der Anhaltestelle einwerfen. `false`
-    /// heisst, dass ihn hier keiner faengt — dann ist der Generator fertig
-    /// und der Wurf geht an den Rufer.
+    /// `gen.throw(v)`: throw at the suspension point. `false` means nothing
+    /// here catches it; the generator is done and the throw goes to the caller.
     pub fn inject_throw(&mut self, i: &mut Interp, v: Value) -> bool {
         self.unwind(i, v)
     }
 
-    /// `gen.return(v)`: die Maschine aufgeben. Offene `for…of`-Iterationen
-    /// werden GESCHLOSSEN (von innen nach aussen), nicht bloss vergessen —
-    /// sonst faehrt ein fremder Generator seinen `finally`-Block nie.
+    /// `gen.return(v)`: abandon the VM. Open `for…of` iterations are closed
+    /// (innermost first) so inner generators run their `finally`.
     ///
-    /// Ein anhaengiger `finally` KANN es hier nicht geben: ein `yield` unter
-    /// einem solchen ist schon beim Uebersetzen abgelehnt (`Compiler::fin`).
+    /// There can be no pending `finally` here: a `yield` under one is
+    /// rejected at compile time (`Compiler::fin`).
     pub fn close(&mut self, i: &mut Interp) {
         while let Some(f) = self.frames.pop() {
             for it in f.iters.iter().rev() {
@@ -323,12 +274,11 @@ impl Vm {
         self.stack.clear();
     }
 
-    /// Alles, was diese Maschine festhaelt — fuer den Abbau eines Realms.
+    /// Everything this VM holds, for realm teardown.
     ///
-    /// Ein angehaltener Generator ist der einzige Ort, an dem Umgebungen und
-    /// halbfertige Werte leben, ohne in einer Eigenschaft oder Bindung zu
-    /// stehen. `Interp::teardown` faende sie sonst nicht, und ein Rc-Ring
-    /// darin kaeme nie auf null.
+    /// A suspended generator is the only place environments and intermediate
+    /// values live outside any property or binding; without this,
+    /// `Interp::teardown` would miss them and an Rc cycle there would leak.
     pub fn roots(&self, objs: &mut Vec<super::value::Gc>,
                  envs: &mut Vec<Rc<RefCell<Env>>>) {
         for v in &self.stack {
@@ -343,14 +293,12 @@ impl Vm {
         }
     }
 
-    /// Die Schleife. Sie laeuft, bis der Wurzelrahmen zurueck ist oder ein
-    /// `yield` sie anhaelt — und beim naechsten Aufruf genau dort weiter.
+    /// The dispatch loop. Runs until the root frame returns or a `yield` /
+    /// `await` suspends it; the next call continues from there.
     pub fn drive(&mut self, i: &mut Interp) -> C<Step> {
-        // **Der Chunk wird GEHALTEN, nicht je Befehl neu geliehen.** Ein
-        // `Rc::clone` mit dem Freigeben danach sind zwei Zaehleroperationen —
-        // je BEFEHL, auf dem heissesten Pfad des Motors. Gewechselt wird er
-        // nur, wenn sich der Rahmen aendert, und das prueft ein
-        // Zeigervergleich.
+        // Hold the chunk instead of cloning the `Rc` per op (two refcount
+        // operations on the hottest path); switch only when the frame changes,
+        // checked by pointer comparison.
         let mut held: Option<(usize, Rc<Chunk>)> = None;
         loop {
             let flen = self.frames.len();
@@ -370,23 +318,16 @@ impl Vm {
                 return Ok(Step::Done(core::mem::replace(&mut self.completion, Value::Undefined)));
             }
             self.frames.last_mut().unwrap().ip += 1;
-            // Der Deckel gegen `while(true)` — aber mit derselben KOERNUNG wie
-            // im Baumlaeufer, sonst ist er ein anderer Deckel.
-            //
-            // Der zaehlt einen Schritt je ANWEISUNG. Je Befehl zu zaehlen
-            // waere feiner und damit strenger: derselbe Test, der dort
-            // durchlief, brach hier ab (`encodeURI` mit seiner langen
-            // Zeichentabelle). Gezaehlt wird deshalb, was eine Schleife
-            // wirklich vorantreibt — ein Rueckwaertssprung, ein Aufruf, eine
-            // Anweisungsgrenze. Das ist dieselbe Groessenordnung und bleibt
-            // eine echte Abbruchgarantie.
+            // Step budget against `while(true)`, with the same granularity as
+            // the tree-walker, which counts per statement. Counting per op
+            // would be a stricter limit; instead count what drives a loop
+            // forward: backward jumps, calls and statement boundaries.
             let counts = match &chunk.ops[ip] {
                 Op::Jump(t) => (*t as usize) <= ip,
                 Op::Call { .. } | Op::New { .. } | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
                 | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_)
-                // Ein `yield*` ruft je Umlauf am inneren Iterator — das treibt
-                // die Schleife voran und gehoert unter denselben Deckel.
+                // `yield*` calls the inner iterator once per round.
                 | Op::YieldDelegate(_) | Op::DelegateCall(_) => true,
                 _ => false,
             };
@@ -396,11 +337,9 @@ impl Vm {
                 if i.steps > i.max_steps {
                     return Err(i.throw_kind("RangeError", "step budget exhausted"));
                 }
-                // Und die Uhr — dieselbe Koernung wie im Baumlaeufer, sonst
-                // ist es eine andere Uhr. Siehe `Interp::check_deadline`:
-                // sie stand nur in `tick`, und der zaehlt nur eingebaute
-                // Schleifen. Genau die Rechnung, die Minuten dauert, kam
-                // deshalb nie an ihr vorbei.
+                // The host deadline, checked at the same granularity as the
+                // tree-walker (`Interp::check_deadline`); `tick` alone only
+                // covers loops inside builtins.
                 if i.steps & 0xFFFF == 0 { i.check_deadline()?; }
             }
             match self.step(i, chunk, ip) {
@@ -408,9 +347,8 @@ impl Vm {
                 Ok(Flow::Yield(v, raw)) => return Ok(Step::Yield(v, raw)),
                 Ok(Flow::Await(v)) => return Ok(Step::Await(v)),
                 Ok(Flow::Go) => {}
-                // Ein Wurf sucht sich seinen Behandler. Findet er keinen, geht
-                // er an den Rufer — dann faehrt ihn der Rust-Stapel hoch, und
-                // das ist richtig, solange Aufrufe noch so laufen.
+                // A throw looks for a handler; if none, it goes to the Rust
+                // caller.
                 Err(Abrupt::Throw(v)) => {
                     if !self.unwind(i, v.clone()) {
                         return Err(Abrupt::Throw(v));
@@ -422,13 +360,8 @@ impl Vm {
     }
 
     fn step(&mut self, i: &mut Interp, chunk: &Chunk, ip: usize) -> C<Flow> {
-        // **Hier und nicht je Arm.** Ein Versuch, sie erst beim Gebrauch zu
-        // holen, sparte ein `Rc`-Zaehlerpaar je Befehl — und war falsch:
-        // einige Befehle AENDERN die Umgebungskette, bevor sie sie benutzen,
-        // und bekamen dann die neue statt der alten
-        // (`cannot access 'dialog' before initialization`). Wer das noch
-        // einmal angeht, muss je Arm nachweisen, dass er vor jeder Aenderung
-        // liest — nicht es annehmen.
+        // Fetched once before dispatch, not lazily per arm: some ops change
+        // the environment chain before using it and must see the old one.
         let env = self.frames.last().unwrap().envs.last().unwrap().clone();
         match &chunk.ops[ip] {
             Op::Const(k) => self.push(chunk.constants[*k as usize].clone()),
@@ -450,18 +383,14 @@ impl Vm {
                 let v = self.pop();
                 let n = &chunk.names[*name as usize];
                 if *lexical {
-                    // GENAU HIER — `init_binding` liefe die Kette hoch und
-                    // schriebe eine gleichnamige Bindung weiter aussen.
+                    // Bind in this exact env; `init_binding` would walk up and
+                    // write a same-named outer binding.
                     i.bind_here(n, v, &env);
                 } else {
-                    // Ein `var` ist hier laengst hochgezogen; die Zeile
-                    // ZUWEIST nur noch (ES §VariableStatement: PutValue).
-                    // Dieselbe Regel wie im Baumlaeufer, und sie muss hier
-                    // ein zweites Mal stehen, weil die zweite Maschine ihren
-                    // eigenen Weg hat
-                    // ([[feedback_the_second_engine_only_runs_where_the_first_one_called]]):
-                    // `init_binding` legte eine zweite Bindung neben die auf
-                    // dem globalen Objekt, und `window.X` blieb undefined.
+                    // A `var` is already hoisted; this only assigns
+                    // (ES VariableStatement: PutValue). `init_binding` would
+                    // create a second binding beside the one on the global
+                    // object.
                     i.vm_store(n, v, &env)?;
                 }
                 if !*mutable {
@@ -488,8 +417,8 @@ impl Vm {
                 let v = self.top();
                 self.push(v);
             }
-            // `a b` → `b a`: der Aufruf braucht `callee` unter `this`, und der
-            // Uebersetzer legt sie in der anderen Reihenfolge ab.
+            // `a b` -> `b a`: a call needs `callee` below `this`, and the
+            // compiler pushes them the other way round.
             Op::Swap => {
                 let n = self.stack.len();
                 self.stack.swap(n - 1, n - 2);
@@ -547,24 +476,16 @@ impl Vm {
             Op::GetIndex => {
                 let key = self.pop();
                 let obj = self.pop();
-                // **Ein ganzzahliger Index geht ohne Haufen.** `a[i]` baute
-                // bisher aus `i` eine Zeichenkette AUF DEM HAUFEN (`Rc<str>`),
-                // gab sie an `get`, und `ta_read`/`array_index` lasen die Zahl
-                // sofort wieder heraus. Der Schluessel ist derselbe — er wird
-                // nur in einen Puffer auf dem Stapel geschrieben statt
-                // alloziert und wieder freigegeben. Auf einer Seite, die
-                // rechnet (SHA-256, Bildbearbeitung, ein Parser), ist das der
-                // haeufigste Befehl ueberhaupt.
+                // An integer index is formatted into a stack buffer instead of
+                // a heap `Rc<str>`; the key is identical. This is among the
+                // hottest ops in compute-heavy code.
                 if let Some(ix) = int_index(&key) {
                     let b = IdxBuf::new(ix);
                     let v = i.get(&obj, b.as_str())?;
                     self.push(v);
                 } else {
-                    // `to_prop_key`, NICHT `to_string`: ein Symbol ist ein
-                    // Schluessel und keine Zeichenkette, und es zu einer zu
-                    // machen hat `Symbol.iterator` & Co. ins Leere zeigen
-                    // lassen — 35 Tests, gefunden vom Diff gegen den
-                    // Baumlaeufer.
+                    // `to_prop_key`, not `to_string`: a symbol is a key, not a
+                    // string.
                     let k = i.to_prop_key(&key)?;
                     let v = i.get(&obj, &k)?;
                     self.push(v);
@@ -596,12 +517,11 @@ impl Vm {
                 let this = self.pop();
                 let callee = self.pop();
                 let n = chunk.names.get(*name as usize).map(|s| &**s);
-                // Ein DIREKTER `eval`-Aufruf ist kein gewoehnlicher: er sieht
-                // den Bereich des Rufers. Erkannt wird er am Namen UND an der
-                // Sache — eine eigene Funktion namens `eval` ist keiner.
+                // A direct `eval` sees the caller's scope. Recognized by name
+                // and by identity: a user function named `eval` is not one.
                 if n == Some("eval") && i.is_eval_fn(&callee) {
-                    // Ab jetzt kann eine Bindung weiter INNEN entstehen, als
-                    // ein Wegweiser zeigt. Siehe `Interp::hints_ok`.
+                    // From now on a binding may appear further in than a
+                    // scope hint points. See `Interp::hints_ok`.
                     i.hints_ok = false;
                     let env = self.frames.last().unwrap().envs.last().unwrap().clone();
                     let c = args.first().cloned().unwrap_or(Value::Undefined);
@@ -646,7 +566,7 @@ impl Vm {
                 let v = i.func_value(chunk.funcs[*f as usize].clone(), &env);
                 self.push(v);
             }
-            // Dieselben Hilfen wie der Baumlaeufer — siehe `Op::BindPat`.
+            // Same helpers as the tree-walker; see `Op::BindPat`.
             Op::BindPat { pat, mode } => {
                 let v = self.pop();
                 let p = &chunk.pats[*pat as usize];
@@ -660,7 +580,7 @@ impl Vm {
                 let v = self.pop();
                 i.for_head_bind(&chunk.heads[*h as usize], v, &env)?;
             }
-            // Dieselbe Funktion, die der Baumlaeufer ruft — siehe `Op::Class`.
+            // Same function the tree-walker calls; see `Op::Class`.
             Op::Class(c) => {
                 let v = i.eval_class(&chunk.classes[*c as usize], &env)?;
                 self.push(v);
@@ -676,8 +596,8 @@ impl Vm {
             Op::DefineProp(n) => {
                 let val = self.pop();
                 let key: Rc<str> = chunk.names[*n as usize].clone();
-                // `{ m(){} }` und `{ a: function(){} }` bekommen den
-                // Schluessel als Namen — dieselbe Regel wie `var f = …`.
+                // `{ m(){} }` and `{ a: function(){} }` take the key as name,
+                // like `var f = ...`.
                 i.name_function(&val, &key);
                 if let Value::Obj(g) = self.top() {
                     g.borrow_mut().set_prop(key, super::value::Prop::data(val));
@@ -846,13 +766,10 @@ impl Vm {
                     Ok(None) => {
                         self.jump(*done);
                     }
-                    // **Wirft `next()` SELBST, wird nicht geschlossen.** Der
-                    // Iterator ist dann in unbekanntem Zustand, und `return()`
-                    // darauf waere spec-widrig — anders als bei einem Wurf aus
-                    // dem RUMPF, der ihn sehr wohl schliessen muss. Deshalb
-                    // faellt er hier aus der Liste, bevor der Wurf geht: sonst
-                    // holt ihn der naechste Behandler oder das Verlassen des
-                    // Rahmens nach.
+                    // If `next()` itself throws, the iterator is not closed
+                    // (unlike a throw from the loop body): its state is unknown.
+                    // Drop it from the list first so no handler or frame exit
+                    // closes it later.
                     Err(e) => {
                         self.frames.last_mut().unwrap().iters.pop();
                         return Err(e);
@@ -862,7 +779,7 @@ impl Vm {
             Op::ForInAll => {
                 let v = self.pop();
                 let mut keys = i.for_in_keys(&v)?;
-                // Rueckwaerts, damit `pop` der naechste Schritt ist.
+                // Reversed so `pop` yields the next key.
                 keys.reverse();
                 let vals = keys.into_iter().map(Value::Str).collect();
                 self.frames.last_mut().unwrap().iters.push(Iter::Keys(vals));
@@ -883,11 +800,8 @@ impl Vm {
             Op::IterClose => {
                 match self.frames.last_mut().unwrap().iters.pop() {
                     Some(Iter::Obj(it)) => i.iter_close(&it),
-                    // **Benannt halb:** die Spezifikation WARTET das Ergebnis
-                    // von `return()` an einem async-Iterator ab
-                    // (AsyncIteratorClose). Wir rufen es und gehen weiter —
-                    // der Unterschied ist sichtbar, wenn ein `break` einen
-                    // Aufraeumer startet, auf den danach jemand zaehlt.
+                    // Not implemented: AsyncIteratorClose awaits the result of
+                    // `return()`; we call it and continue without awaiting.
                     Some(Iter::Async { it, .. }) => i.iter_close(&it),
                     _ => {}
                 }
@@ -909,8 +823,8 @@ impl Vm {
                     self.frames.last_mut().unwrap().iters.pop();
                     return Err(i.throw_kind("TypeError", "iterator has no next method"));
                 }
-                // Wie beim synchronen `IterNext`: wirft `next()` SELBST, wird
-                // nicht geschlossen — der Iterator faellt vorher aus der Liste.
+                // As in `IterNext`: if `next()` itself throws, drop the iterator
+                // without closing it.
                 let r = match i.call(&f, it.clone(), &[]) {
                     Ok(r) => r,
                     Err(e) => { self.frames.last_mut().unwrap().iters.pop(); return Err(e) }
@@ -950,9 +864,9 @@ impl Vm {
             }
             Op::PushEnv(b) => {
                 let child = Env::new(Some(env.clone()), false);
-                // Erst binden, dann laufen: `let` steht von Blockanfang an in
-                // der Totzone, eine Funktionsdeklaration ist von Blockanfang
-                // an fertig. Genau die zwei Schleifen aus `Interp::hoist`.
+                // Bind before running: `let` is in the TDZ from block start, a
+                // function declaration is initialized from block start. Mirrors
+                // `Interp::hoist`.
                 for d in &chunk.blocks[*b as usize] {
                     match d {
                         super::code::BlockDecl::Tdz { name, mutable } =>
@@ -972,15 +886,12 @@ impl Vm {
                 self.completion = self.pop();
             }
             Op::Ret => return self.do_return(i),
-            // Der Rahmen bleibt stehen, wo er steht — `ip` zeigt schon auf den
-            // naechsten Befehl, und `Vm::send` legt den Wert von `next(v)` an
-            // die Stelle, an der dieser hier seinen abgegeben hat.
             // ── yield* ───────────────────────────────────────────────────
             //
-            // Drei Befehle, weil zwischen dem Anstossen des inneren Iterators
-            // und dem Auswerten seines Ergebnisses in einem async-Generator
-            // ein `await` liegt — und ein Anhaltepunkt laesst sich nicht in
-            // einen Befehl hineinfalten. Derselbe Schnitt wie bei `for await`.
+            // Split into several ops because in an async generator an `await`
+            // sits between calling the inner iterator and evaluating its
+            // result, and a suspension cannot be folded into one op. Same cut
+            // as `for await`.
             Op::DelegateStart(is_async) => {
                 let v = self.pop();
                 let it = if *is_async {
@@ -990,9 +901,8 @@ impl Vm {
                     Iter::Obj(i.get_iterator(&v)?)
                 };
                 self.frames.last_mut().unwrap().iters.push(it);
-                // Der erste „erhaltene" Wert ist `undefined` (ES 15.5.5,
-                // Schritt 5) — und die Art ist `Normal`, egal womit der
-                // aeussere Generator gerade lief.
+                // The first received value is `undefined` with completion type
+                // normal (ES 15.5.5 step 5), whatever resumed the outer one.
                 self.resume = Resume::Normal;
                 self.push(Value::Undefined);
             }
@@ -1012,34 +922,29 @@ impl Vm {
                 if !i.is_callable(&m) {
                     self.frames.last_mut().unwrap().iters.pop();
                     return match kind {
-                        // **Ein Iterator ohne `throw` bekommt sein `return`**
-                        // (ES 15.5.5 6.b.iii) und der Wurf wird zum TypeError:
-                        // der innere darf nicht halb offen zurueckbleiben.
+                        // An iterator without `throw` is closed and the throw
+                        // becomes a TypeError (ES 15.5.5 6.b.iii).
                         Resume::Throw => {
                             i.iter_close(&it);
                             Err(i.throw_kind("TypeError",
                                 "the delegated iterator has no throw method"))
                         }
-                        // Ohne `return` gibt der aeussere Generator direkt auf,
-                        // mit dem Wert, den `gen.return(v)` mitgebracht hat.
+                        // Without `return`, the outer generator returns the
+                        // value passed to `gen.return(v)`.
                         Resume::Return => { self.push(received); self.jump(*giveup); Ok(Flow::Go) }
                         Resume::Normal => Err(i.throw_kind("TypeError",
                                 "the delegated value is not an iterator")),
                     };
                 }
-                // Wirft der Aufruf SELBST, bleibt der innere Iterator liegen —
-                // dieselbe Regel wie im gewoehnlichen `for…of`: sein Zustand
-                // ist dann unbekannt, und `return()` darauf waere spec-widrig.
+                // If the call itself throws, drop the inner iterator without
+                // closing it, as in `for…of`.
                 let r = match i.call(&m, it, &[received]) {
                     Ok(r) => r,
                     Err(e) => { self.frames.last_mut().unwrap().iters.pop(); return Err(e) }
                 };
-                // **Ein umgehuellter SYNCHRONER Iterator gibt sein Ergebnis
-                // schon fertig** — abzuwarten ist dort nur der WERT, und sein
-                // `done` steht jetzt fest (ES 27.1.4.4,
-                // AsyncFromSyncIteratorContinuation). Dieselbe Aufteilung wie
-                // bei `for await`; ohne sie kam aus `yield* [Promise…]` das
-                // Versprechen selbst heraus.
+                // For a wrapped sync iterator only the value is awaited and
+                // `done` is known now (ES 27.1.4.4,
+                // AsyncFromSyncIteratorContinuation), as in `for await`.
                 let wrapped_sync = matches!(self.frames.last().unwrap().iters.last(),
                                             Some(Iter::Async { is_async: false, .. }));
                 if wrapped_sync {
@@ -1059,8 +964,8 @@ impl Vm {
             }
             Op::DelegateStep { end, is_async } => {
                 let r = self.pop();
-                // Der umgehuellte synchrone Fall: `done` steht schon am
-                // Eintrag, und `r` IST der abgewartete Wert.
+                // Wrapped sync case: `done` is on the entry and `r` is the
+                // awaited value.
                 if let Some(Iter::Async { is_async: false, done, .. }) =
                     self.frames.last().unwrap().iters.last() {
                     let fertig = *done;
@@ -1083,33 +988,32 @@ impl Vm {
                     self.frames.last_mut().unwrap().iters.pop();
                     let v = i.get(&r, "value")?;
                     self.push(v);
-                    // **Womit angeworfen wurde, entscheidet den AUSGANG.** Ein
-                    // erschoepfter innerer Iterator nach einem `gen.return(v)`
-                    // beendet den aeusseren Rumpf; nach einem `next()` ist der
-                    // Wert bloss das Ergebnis des `yield*`-Ausdrucks.
+                    // The resume kind decides the exit: after `gen.return(v)` an
+                    // exhausted inner iterator returns from the outer body;
+                    // after `next()` the value is the result of `yield*`.
                     if self.deleg == Resume::Return {
                         return self.do_return(i);
                     }
                     self.jump(*end);
                 } else if *is_async {
-                    // Ein async-Generator gibt den WERT heraus und laesst ihn
-                    // einpacken; ein gewoehnlicher reicht das Ergebnisobjekt
-                    // unveraendert durch (`Op::YieldDelegate`).
+                    // An async generator yields the value to be wrapped; a sync
+                    // one passes the result object through (`Op::YieldDelegate`).
                     let v = i.get(&r, "value")?;
                     self.push(v);
                 } else {
                     self.push(r);
                 }
             }
+            // The frame stays put; `ip` already points at the next op, and
+            // `Vm::send` pushes the value of `next(v)` in place of this one's.
             Op::Yield => {
                 let v = self.pop();
                 return Ok(Flow::Yield(v, false));
             }
-            // Der Anhaltepunkt eines `yield*` im GEWOEHNLICHEN Generator: der
-            // Wert ist schon das Ergebnisobjekt des inneren Iterators und geht
-            // unveraendert hinaus. Er ist ausserdem die Marke, an der
-            // `at_delegate` erkennt, dass ein `throw()` oder `return()` hier
-            // NICHT abwickeln darf.
+            // Suspension point of a `yield*`. In a sync generator the value is
+            // the inner result object, passed through unchanged. It is also the
+            // marker `at_delegate` uses to forward `throw()` / `return()`
+            // instead of unwinding.
             Op::YieldDelegate(raw) => {
                 let v = self.pop();
                 return Ok(Flow::Yield(v, *raw));
@@ -1122,47 +1026,36 @@ impl Vm {
         Ok(Flow::Go)
     }
 
-    /// Den innersten Behandler suchen, der den Wurf nimmt. `false` heisst:
-    /// keiner da, der Wurf verlaesst diese Maschine.
+    /// Find the innermost handler for a throw. `false` means none; the throw
+    /// leaves this VM.
     ///
-    /// Zurueckgeschnitten wird auf die Tiefen, die der Behandler sich gemerkt
-    /// hat — Wertestapel, Umgebungen UND offene Iterationen. Wer eins davon
-    /// vergisst, bekommt einen `catch`-Block, der auf fremdem Zustand steht.
+    /// Value stack, environments and open iterations are all truncated to
+    /// the depths the handler recorded.
     fn unwind(&mut self, i: &mut Interp, v: Value) -> bool {
-        // **Ueber Rahmengrenzen hinweg.** Ein `throw` tief in einer Funktion
-        // sucht sein `try` beim RUFER, wenn es dort keins gibt — genau das
-        // macht ein Aufrufstapel aus. Ohne diese Schleife blieb ein Wurf im
-        // eigenen Rahmen haengen und kam als „UNCAUGHT" heraus, obwohl zwei
-        // Ebenen darueber ein `catch` stand.
+        // Search across frames: a throw without a local `try` goes to the
+        // caller's.
         let h = loop {
             let Some(f) = self.frames.last_mut() else { return false };
             if let Some(h) = f.handlers.pop() {
                 f.envs.truncate(h.envs);
                 break h;
             }
-            // Kein Behandler in diesem Rahmen: ihn verlassen und weitersuchen.
-            // Das PROGRAMM ist die Grenze — darueber gibt es nur den Rufer in
-            // Rust, und dorthin geht der Wurf als `Err`.
+            // No handler in this frame: leave it and keep searching. The root
+            // frame is the boundary; beyond it the throw goes to Rust as `Err`.
             if f.root {
                 return false;
             }
             let f = self.frames.pop().unwrap();
-            // **Auch beim Verlassen eines Rahmens gehoeren offene `for…of`
-            // geschlossen** — von innen nach aussen, genau wie im `Ret`. Ohne
-            // diese Schleife faehrt ein fremder Generator seinen
-            // `finally`-Block nie, wenn der Wurf aus dem Schleifenrumpf durch
-            // die Funktion nach draussen geht. Gefunden vom Diff, als
-            // `for ([x.attr] of it)` uebersetzbar wurde und ein werfender
-            // Schreiber im KOPF dasselbe ausloeste.
+            // Close open `for…of` iterators of the frame being left, innermost
+            // first, as in `Ret`.
             for it in f.iters.iter().rev() {
                 match it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
             }
             self.stack.truncate(f.base);
             i.depth -= 1;
         };
-        // Ein Wurf aus einer `for…of`-Schleife heraus muss ihren Iterator
-        // SCHLIESSEN, nicht nur vergessen — `return()` ist der Weg, auf dem
-        // ein Generator seinen `finally`-Block noch faehrt.
+        // A throw out of a `for…of` must close its iterator so a generator
+        // still runs its `finally`.
         loop {
             let it = {
                 let f = self.frames.last_mut().unwrap();
@@ -1178,18 +1071,14 @@ impl Vm {
         true
     }
 
-    /// Einen Aufruf ausfuehren.
+    /// Perform a call.
     ///
-    /// **Der Punkt der ganzen Stufe:** ist der Gerufene eine JS-Funktion,
-    /// deren Rumpf sich uebersetzen laesst, bekommt er einen RAHMEN — der
-    /// Rust-Stapel waechst nicht mit. Alles andere (eingebaute Funktionen,
-    /// gebundene, Generatoren) geht weiter durch `Interp::call`, und das ist
-    /// richtig so: die haben keinen Rumpf aus Befehlen.
+    /// A JS function with a compilable body gets a new frame, so the Rust
+    /// stack does not grow. Everything else (builtins, bound functions,
+    /// generators) goes through `Interp::call`.
     ///
-    /// Die Tiefe wird trotzdem gezaehlt. Ein Rahmenstapel kann nicht
-    /// ueberlaufen, aber eine endlose JS-Rekursion soll denselben
-    /// `RangeError` geben wie vorher — sonst haengt sie, bis der Speicher
-    /// ausgeht.
+    /// Depth is still counted so unbounded recursion throws a `RangeError`
+    /// instead of exhausting memory.
     fn invoke(&mut self, i: &mut Interp, callee: Value, this: Value, args: Vec<Value>,
               name: Option<&str>) -> C<()> {
         let d = match &callee {
@@ -1200,9 +1089,7 @@ impl Vm {
             _ => None,
         };
         let Some(d) = d else {
-            // Den NAMEN nennen, nicht nur das Ereignis — dieselbe Hilfe wie im
-            // Baumlaeufer. Ohne diese Zeile verlor jedes Skript, das auf die
-            // Maschine wanderte, still seine Fehlerdiagnose.
+            // Name the callee in the error, using the tree-walker's helper.
             if !i.is_callable(&callee) {
                 return Err(i.not_a_function(name, Some(&this)));
             }
@@ -1211,12 +1098,10 @@ impl Vm {
             self.push(v);
             return Ok(());
         };
-        // **Ein Generator und eine async-Funktion bekommen hier keinen
-        // Rahmen.** Ihr Aufruf baut ein Objekt bzw. ein Versprechen, und der
-        // Rumpf laeuft auf einer EIGENEN Maschine — beides tut `Interp::call`
-        // an einer Stelle, fuer beide Maschinen dieselbe. Die Pruefung steht
-        // vor `func_chunk`, weil dessen Chunk hier sonst als gewoehnlicher
-        // Funktionsrumpf losliefe.
+        // Generators and async functions get no frame here: the call creates
+        // an object or promise and the body runs on its own VM, which
+        // `Interp::call` sets up. Checked before `func_chunk`, which would
+        // otherwise run the body as a plain function.
         if d.node.is_generator || d.node.is_async {
             i.vm_calls_slow += 1;
             let v = i.call(&callee, this, &args)?;
@@ -1259,10 +1144,9 @@ impl Vm {
         self.stack.push(v);
     }
 
-    /// Der Uebersetzer erzeugt nur ausgeglichenen Code; ein leerer Stapel hier
-    /// waere ein Fehler IM UEBERSETZER, kein Programmfehler. `Undefined` statt
-    /// `panic!`, weil ein Absturz der Maschine in einem Kernel keine
-    /// Fehlermeldung ist, sondern ein Halt.
+    /// The compiler emits balanced code, so an empty stack here is a compiler
+    /// bug. Returns `Undefined` rather than panicking, since a panic halts the
+    /// system.
     fn pop(&mut self) -> Value {
         self.stack.pop().unwrap_or(Value::Undefined)
     }
@@ -1277,12 +1161,11 @@ impl Vm {
     }
 }
 
-/// Ein Feldindex als Zahl, wenn der Schluessel einer ist.
+/// The key as an array index, if it is one.
 ///
-/// Die Grenze ist die von `array_index`: `0 <= n < 2^32-1` und ganzzahlig.
-/// Genau in diesem Bereich ist die Zeichenkette einer Zahl in JS die schlichte
-/// Dezimaldarstellung, also derselbe Schluessel, den `to_string` gebaut haette.
-/// `-0` faellt mit hinein und wird zu `"0"` — was JS auch tut.
+/// Same range as `array_index`: integral, `0 <= n < 2^32-1`. In that range the
+/// JS string of a number is its plain decimal form, so the key matches what
+/// `to_string` would produce. `-0` maps to `"0"`, as in JS.
 #[inline]
 fn int_index(v: &Value) -> Option<u32> {
     match v {
@@ -1291,8 +1174,7 @@ fn int_index(v: &Value) -> Option<u32> {
     }
 }
 
-/// Zehn Ziffern auf dem STAPEL — die groesste Zahl in diesem Bereich hat
-/// zehn (`4294967294`).
+/// Decimal digits on the stack; the largest index (`4294967294`) has ten.
 struct IdxBuf {
     b: [u8; 10],
     at: usize,
@@ -1313,7 +1195,7 @@ impl IdxBuf {
     }
     #[inline]
     fn as_str(&self) -> &str {
-        // SAFETY: nur ASCII-Ziffern geschrieben, also gueltiges UTF-8.
+        // SAFETY: only ASCII digits are written, which is valid UTF-8.
         unsafe { core::str::from_utf8_unchecked(&self.b[self.at..]) }
     }
 }
@@ -1322,22 +1204,14 @@ impl IdxBuf {
 mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    /// **Die Uhr des Wirts muss BEIDE Maschinen erreichen.**
+    /// The host deadline must reach both engines.
     ///
-    /// Bis 0.117.0 stand sie nur in `Interp::tick`, und `tick` ruft nur, wer
-    /// in einem EINGEBAUTEN schleift (`Array.prototype.*`, `JSON`, die
-    /// Iterator-Hilfen). Eine reine JS-Schleife lief an ihr vorbei: kein
-    /// Herzschlag, und das Zeitbudget war fuer genau den Fall unwirksam, fuer
-    /// den es gedacht ist. Am Geraet waren das vier Minuten Stillstand ohne
-    /// eine Zeile im Log.
-    ///
-    /// Der Test schleift deshalb OHNE eingebauten Aufruf. Mit einem darin
-    /// haette er auch vorher bestanden — und genau das ist die Falle, die die
-    /// Luecke so lange offen gehalten hat.
+    /// The loop deliberately calls no builtin: `Interp::tick` only runs
+    /// inside builtins, so a builtin in the loop would hide a missing check.
     static CALLS: AtomicU32 = AtomicU32::new(0);
     fn clock() -> bool {
         CALLS.fetch_add(1, Ordering::Relaxed);
-        false // sofort abgelaufen: der Lauf muss hier enden
+        false // expired immediately: the run must stop
     }
 
     fn run(novm: bool) -> (bool, u32) {
@@ -1351,10 +1225,8 @@ mod tests {
         (err, CALLS.load(Ordering::Relaxed))
     }
 
-    /// **Eine benannte Klasse steht in ihrem EIGENEN Rumpf** (ES 15.7.14) —
-    /// und zwar in beiden Maschinen. DuckDuckGos Intl-Polyfill baut seine
-    /// `Locale` als `class aa { … new aa(…) … }` und starb sonst mit
-    /// `aa is not defined`; der Name darf dabei NICHT nach aussen dringen.
+    /// A named class expression is bound in its own body (ES 15.7.14), on
+    /// both engines, and the name does not leak outside.
     fn class_self(novm: bool) -> alloc::string::String {
         let mut i = super::Interp::new();
         i.vm_off = novm;
@@ -1388,15 +1260,11 @@ mod tests {
         assert!(abgebrochen, "der Lauf lief ueber die abgelaufene Uhr hinaus");
     }
 
-    /// **Ein Wegweiser darf die BEDEUTUNG nicht aendern.**
+    /// Scope hints must not change semantics.
     ///
-    /// `Chunk::hints` merkt sich, in welcher Tiefe ein Name beim letzten Mal
-    /// stand. Entstuende danach eine Bindung WEITER INNEN, zeigte er daran
-    /// vorbei — und das waere kein Absturz, sondern ein falscher Wert.
-    ///
-    /// Der Test faehrt dieselben Programme ZWEIMAL, einmal mit Wegweisern und
-    /// einmal ohne, und vergleicht. Ein Test, der nur „laeuft durch" prueft,
-    /// saehe genau den Fehler nicht, um den es geht.
+    /// `Chunk::hints` caches the depth at which a name was last found; a
+    /// binding created further in later would make it yield a wrong value.
+    /// Runs each program with and without hints and compares the results.
     fn zweimal(src: &str) -> (alloc::string::String, alloc::string::String) {
         let lauf = |hints: bool| {
             let mut i = super::Interp::new();
@@ -1423,20 +1291,19 @@ mod tests {
     #[test]
     fn wegweiser_aendert_die_bedeutung_nicht() {
         let faelle: &[&str] = &[
-            // Verschattung in einem Block, in einer Schleife: dieselbe
-            // Befehlsstelle, viele Durchlaeufe.
+            // Shadowing in a block inside a loop: one op site, many passes.
             "var o=[];var x='a';for(var k=0;k<3;k++){let x='b'+k;o.push(x);}o.push(x);o.join(',')",
-            // Ein Abschluss liest nach aussen, waehrend innen gleich heisst.
+            // A closure reads outward while an inner binding has the same name.
             "var x='aussen';function f(){return x}function g(){var x='innen';return f()+'|'+x}g()",
-            // Zeitliche Totzone: der Name STEHT hier, ist aber noch nichts.
+            // TDZ: the name exists but is not initialized yet.
             "function f(){ try { return y } catch(e) { return 'TDZ:'+e.name } finally { } } var r=f(); let y=1; r",
-            // `const` beschreiben — der Fehler muss derselbe bleiben.
+            // Assigning to `const` must throw the same error.
             "const c=1; try { c=2; return } catch(e) { e.name }",
-            // Ein direktes `eval`, das eine Bindung WEITER INNEN anlegt.
+            // A direct `eval` that creates a binding further in.
             "var x='aussen';function f(){function inner(){return x}var a=inner();eval(\"var x='innen'\");return a+'|'+inner()}f()",
-            // Tief geschachtelt, damit der Weg wirklich mehrere Spruenge hat.
+            // Deep nesting, so the lookup takes several hops.
             "var a=1;function f(){var b=2;return function(){var c=3;return function(){return a+b+c}}}f()()()",
-            // Derselbe Name auf mehreren Ebenen, gelesen von innen nach aussen.
+            // The same name on several levels, read inside out.
             "var n='g';function f(){var n='f';{let n='b';return n+f2()}}function f2(){return n}f()",
         ];
         for (k, src) in faelle.iter().enumerate() {
@@ -1445,8 +1312,7 @@ mod tests {
         }
     }
 
-    /// Dasselbe Programm auf BEIDEN Maschinen — die Befehlsmaschine und der
-    /// Baumlaeufer muessen Zeichen fuer Zeichen dasselbe sagen.
+    /// Runs a program on both engines; their output must match exactly.
     fn beide(src: &str) -> (alloc::string::String, alloc::string::String) {
         let lauf = |vm: bool| {
             let mut i = super::Interp::new();
@@ -1470,46 +1336,40 @@ mod tests {
         (lauf(true), lauf(false))
     }
 
-    /// **`yield*` — die Delegation, und sie hat NIE funktioniert.**
-    ///
-    /// Bis 0.169 sagte der Uebersetzer bei jedem `yield*` ab
-    /// (`yield-delegate`), und der Baumlaeufer dahinter warf „generators are
-    /// not supported" — auch im gewoehnlichen Generator. Der Grund, warum es
-    /// kein Anbau war: an der Anhaltestelle muss die Maschine WISSEN, womit
-    /// sie wieder angeworfen wurde (Wert · Wurf · `return`), um es an den
-    /// inneren Iterator weiterzureichen.
+    /// `yield*` forwards all three resume kinds (value, throw, `return`) to
+    /// the inner iterator.
     #[test]
     fn yield_star_reicht_alle_drei_anwuerfe_weiter() {
         let faelle: &[(&str, &str)] = &[
-            // Der Rueckgabewert des INNEREN ist der Wert des `yield*`.
+            // The inner generator's return value is the value of `yield*`.
             ("function* i(){ yield 1; yield 2; return 'fin' }\
               function* o(){ out.push(yield* i()) }\
               [...o()].forEach(x=>out.unshift(x))", "2|1|fin"),
-            // Ueber ein Feld, eine Zeichenkette, einen eingebauten Iterator.
+            // Over an array, a string and a builtin iterator.
             ("function* g(){ yield* [1,2]; yield* 'ab'; yield* new Map([['k',1]]).keys() }\
               out.push(...g())", "1|2|a|b|k"),
-            // `next(v)` erreicht das INNERE `yield`.
+            // `next(v)` reaches the inner `yield`.
             ("function* e(){ while(true){ const g = yield '?'; if(g==='stop') return 'E' } }\
               function* w(){ out.push('R:'+(yield* e())) }\
               var h=w(); h.next(); h.next('a'); h.next('stop')", "R:E"),
-            // `throw()` geht an den inneren Iterator, der ihn fangen darf.
+            // `throw()` goes to the inner iterator, which may catch it.
             ("function* c(){ try{ yield 'A' }catch(e){ yield 'f:'+e.message } yield 'B' }\
               function* o(){ yield* c(); yield 'z' }\
               var h=o(); out.push(h.next().value);\
               out.push(h.throw(new Error('bam')).value);\
               out.push(h.next().value); out.push(h.next().value)", "A|f:bam|B|z"),
-            // `return()` laesst den inneren aufraeumen, BEVOR der aeussere aufgibt.
+            // `return()` lets the inner one clean up before the outer finishes.
             ("var m={[Symbol.iterator](){return{next:()=>({value:'x',done:false}),\
               return:(v)=>{out.push('zu');return{value:v,done:true}}}}};\
               function* o(){ yield* m; out.push('nie') }\
               var h=o(); h.next(); out.push(h.return('ok').value)", "zu|ok"),
-            // **Das Ergebnisobjekt des INNEREN geht unveraendert hinaus.**
+            // The inner result object is passed through unchanged.
             ("var m={[Symbol.iterator](){var n=0;return{next:()=>n++?{value:9,done:true}\
               :{value:7,done:false,mine:true}}}};\
               function* o(){ yield* m }\
               out.push(o().next().mine)", "true"),
-            // Ein Iterator ohne `throw` bekommt sein `return` und dann einen
-            // TypeError (ES 15.5.5, 6.b.iii).
+            // An iterator without `throw` is closed, then a TypeError
+            // (ES 15.5.5, 6.b.iii).
             ("var m={[Symbol.iterator](){return{next:()=>({value:1,done:false}),\
               return:()=>{out.push('zu');return{done:true}}}}};\
               function* o(){ yield* m }\
@@ -1535,18 +1395,18 @@ mod tests {
         }
     }
 
-    /// `yield*` im ASYNC-Generator: derselbe Weg, nur wartet er zwischendurch.
+    /// `yield*` in an async generator: same path, with awaits in between.
     #[test]
     fn yield_star_im_async_generator() {
         let faelle: &[(&str, &str)] = &[
             ("async function* i(){ yield 1; await null; yield 2; return 'fin' }\
               async function* o(){ out.push('r='+(yield* i())) }\
               (async()=>{ for await (const x of o()) out.unshift(x) })()", "2|1|r=fin"),
-            // Ein async-Generator delegiert an einen SYNCHRONEN Iterator: die
-            // Werte darin werden abgewartet (AsyncFromSyncIteratorContinuation).
+            // Delegating to a sync iterator awaits its values
+            // (AsyncFromSyncIteratorContinuation).
             ("async function* g(){ yield* [Promise.resolve('p'),'q'] }\
               (async()=>{ for await (const x of g()) out.push(String(x)) })()", "p|q"),
-            // `throw()` erreicht auch hier den inneren Generator.
+            // `throw()` reaches the inner generator here too.
             ("async function* c(){ try{ yield 'A' }catch(e){ yield 'f:'+e.message } }\
               async function* o(){ yield* c(); yield 'z' }\
               (async()=>{ const h=o(); out.push((await h.next()).value);\
@@ -1558,18 +1418,11 @@ mod tests {
         }
     }
 
-    /// **Async-Generatoren und `for await`.**
+    /// Async generators and `for await`: `yield` suspends for `next()`,
+    /// `await` for the microtask queue, both in the same VM.
     ///
-    /// Beide Anhaltegruende aus DERSELBEN Maschine: `yield` haelt fuer ein
-    /// `next()` an, `await` fuer die Microtask-Schlange. Bis 0.167 sagte der
-    /// Uebersetzer bei jedem `async function*` ab — und zwar fuer den GANZEN
-    /// umgebenden Chunk, weshalb 2518 Programme komplett auf den Baumlaeufer
-    /// fielen, der kein `yield` kann.
-    ///
-    /// Gefahren wird ueber `jsrun`s Weg: Programm laufen lassen, dann die
-    /// Schlange leeren, dann das Ergebnis ablesen. Ohne das zweite steht in
-    /// `out` nichts — ein async-Generator liefert seinen ersten Wert
-    /// fruehestens im naechsten Microtask.
+    /// Runs the program, drains the job queue, then reads `out`; an async
+    /// generator delivers its first value no earlier than the next microtask.
     fn async_out(src: &str) -> alloc::string::String {
         let mut i = super::Interp::new();
         let full = alloc::format!("var out=[];{src};out.join('|')");
@@ -1594,24 +1447,24 @@ mod tests {
     #[test]
     fn async_generatoren_halten_an_yield_und_an_await() {
         let faelle: &[(&str, &str)] = &[
-            // `yield` im async-Generator WARTET seinen Wert ab (ES 15.5.5):
-            // `yield Promise.resolve(2)` gibt 2 heraus, nicht das Versprechen.
+            // `yield` in an async generator awaits its operand (ES 15.5.5):
+            // `yield Promise.resolve(2)` yields 2, not the promise.
             ("async function* g(){ yield 1; yield Promise.resolve(2); await null; yield 3 }              (async()=>{ for await (const x of g()) out.push(x) })()", "1|2|3"),
-            // Drei `next()` auf einmal stellen sich an, statt die Maschine
-            // dreimal anzuwerfen (ES 27.6.3.6).
+            // Three concurrent `next()` calls queue up instead of resuming the
+            // VM three times (ES 27.6.3.6).
             ("async function* g(){ yield 'a'; yield 'b'; yield 'c' }              (async()=>{ const h=g(); const r=await Promise.all([h.next(),h.next(),h.next()]);              r.forEach(x=>out.push(x.value)) })()", "a|b|c"),
-            // Ein fertiger Generator beantwortet jede weitere Anfrage.
+            // A finished generator answers every further request.
             ("async function* g(){ yield 1 }              (async()=>{ const h=g(); await h.next(); const e=await h.next();              out.push(e.done); out.push(String(e.value)) })()", "true|undefined"),
-            // Ein Wurf im Rumpf LEHNT AB, er wirft nicht.
+            // A throw in the body rejects; it does not throw synchronously.
             ("async function* g(){ yield 1; throw new Error('drin') }              (async()=>{ const h=g(); await h.next();              try { await h.next() } catch(e) { out.push('abgelehnt:'+e.message) } })()",
              "abgelehnt:drin"),
-            // `for await` ueber ein gewoehnliches Feld huellt den synchronen
-            // Iterator ein — und wartet dabei jeden WERT ab.
+            // `for await` over an array wraps the sync iterator and awaits each
+            // value.
             ("(async()=>{ for await (const x of [Promise.resolve('p'),'q']) out.push(x) })()", "p|q"),
-            // `break` schliesst den async-Iterator.
+            // `break` closes the async iterator.
             ("const it={[Symbol.asyncIterator](){let n=0;return{                next:()=>Promise.resolve({value:n++,done:n>9}),                return:()=>{out.push('zu');return Promise.resolve({done:true})}}}};              (async()=>{ for await (const x of it){ out.push(x); if(x===1) break } })()",
              "0|1|zu"),
-            // Der Tag und die Selbst-Iterierbarkeit stehen am Prototyp.
+            // The toStringTag and self-iteration live on the prototype.
             ("async function* g(){}              (async()=>{ const h=g();              out.push(Object.prototype.toString.call(h));              out.push(h[Symbol.asyncIterator]()===h) })()",
              "[object AsyncGenerator]|true"),
         ];
@@ -1620,10 +1473,8 @@ mod tests {
         }
     }
 
-    /// **Der Uebersetzer darf an einem async-Generator nicht mehr absagen** —
-    /// und zwar auch dann nicht, wenn er nur NEBEN dem Code steht. Vor 0.167
-    /// liess ein `async function*` irgendwo im Programm den ganzen Chunk
-    /// ablehnen, und damit fiel auch der Code daneben auf den Baumlaeufer.
+    /// The compiler must accept async generators, including when they only
+    /// appear beside other code in the same chunk.
     #[test]
     fn ein_async_generator_laesst_den_chunk_nicht_absagen() {
         for src in ["async function* g(){ yield 1 } 1 + 1",
@@ -1637,38 +1488,32 @@ mod tests {
         }
     }
 
-    /// **Getaggte Templates, auf beiden Maschinen.**
-    ///
-    /// Sie waren bis 0.166 in KEINER von beiden gebaut — der Uebersetzer sagte
-    /// `tagged-template` ab, und der Baumlaeufer dahinter warf. Damit starb
-    /// jede Seite mit lit-html, styled-components oder graphql-tag an der
-    /// ersten Zeile ihrer Bibliothek.
+    /// Tagged templates behave the same on both engines.
     #[test]
     fn getaggte_templates_sagen_auf_beiden_maschinen_dasselbe() {
         let faelle: &[(&str, &str)] = &[
-            // Gekochte und ROHE Stuecke, dazu die Einsetzungen.
+            // Cooked and raw strings plus substitutions.
             (r"function t(s,...v){return s.raw.join('|')+'#'+s.join('|')+'#'+v.join(',')+'#'+s.length}t`a${1}b\t${2}c`",
              "a|b\\t|c#a|b\t|c#1,2#3"),
-            // `String.raw` ist die eingebaute Marke und lebt genau davon.
+            // `String.raw` is the builtin tag.
             (r"String.raw`x\ny${5}z`", r"x\ny5z"),
-            // **Dieselbe Stelle gibt bei jeder Auswertung DENSELBEN
-            // Gegenstand** (ES 13.2.8.4) — lit-html schluesselt seinen
-            // Zwischenspeicher damit.
+            // The same site yields the same template object on every
+            // evaluation (ES 13.2.8.4); libraries key caches by it.
             ("var a=[];for(var k=0;k<3;k++){a.push((function(s){return s})`same`)} String(a[0]===a[1] && a[1]===a[2])", "true"),
-            // Zwei verschiedene Stellen mit demselben Text sind es NICHT.
+            // Two different sites with the same text do not.
             ("var f=function(s){return s};String(f`same` !== f`same`)", "true"),
-            // Eingefroren, und `raw` ist nicht aufzaehlbar.
+            // Frozen, and `raw` is not enumerable.
             ("function t(s){return [Object.isFrozen(s),Object.isFrozen(s.raw),Object.keys(s).join(',')].join('|')}t`q${1}r`", "true|true|0,1"),
-            // Der Empfaenger gehoert zum Aufruf: `o.t`x`` ruft mit `o`.
+            // The receiver belongs to the call: `o.t`x`` calls with `o`.
             ("var o={n:7,t(s){return this.n}};String(o.t`q`)", "7"),
-            // Eine ungueltige Flucht macht `cooked` undefined und laesst `raw`
-            // stehen — NUR mit Marke.
+            // An invalid escape makes the cooked string undefined and keeps
+            // `raw`, only when tagged.
             (r"function t(s){return String(s[0])+'/'+s.raw[0]}t`\xg`", r"undefined/\xg"),
             (r"function t(s){return String(s[0])}t`\1`", "undefined"),
-            // OHNE Marke ist dieselbe Flucht ein Fruehfehler.
+            // Untagged, the same escape is an early error.
             (r"`a\xgb`", "SyntaxError: invalid escape sequence in template"),
             (r"`a\1b`", "SyntaxError: invalid escape sequence in template"),
-            // `\0` ohne Ziffer dahinter bleibt erlaubt.
+            // `\0` not followed by a digit is allowed.
             (r"`a\0b`.length.toString()", "3"),
         ];
         for (k, (src, want)) in faelle.iter().enumerate() {
@@ -1678,25 +1523,14 @@ mod tests {
         }
     }
 
-    /// **Ein freigegebener Funktionsknoten darf seinen Rumpf nicht vererben.**
+    /// A freed function node must not pass its compiled body on.
     ///
-    /// `func_chunks` merkt sich den uebersetzten Rumpf unter der ADRESSE des
-    /// AST-Knotens. Eine Adresse ist aber nur solange eine Identitaet, wie
-    /// sie belegt ist: gibt das erste `<script>` seinen Baum frei, kann eine
-    /// Funktion des zweiten genau dort liegen — und bekommt dann den Rumpf
-    /// der ersten. Am Geraet heisst das: die Seite ruft ihre eigene Funktion,
-    /// und es laeuft der Code einer fremden Bibliothek.
+    /// `func_chunks` caches compiled bodies by AST node address. An address is
+    /// only an identity while it is allocated: a function in a later script
+    /// could land at a freed address and run the earlier function's body.
     ///
-    /// Gefunden an Alpine.js: nach `alpine.js` scheiterte JEDER Aufruf einer
-    /// eigenen Funktion mit `mt is not defined` — einem Namen aus Alpines
-    /// Innerem. Auf dem Baumlaeufer lief derselbe Code sauber, weil der
-    /// diesen Zwischenspeicher nicht hat.
-    ///
-    /// **Geprueft wird die Invariante, nicht ein Lauf.** Zwei Programme
-    /// hintereinander zu fahren und auf eine Kollision zu HOFFEN ist ein
-    /// Test, der beruhigt: ob der Allokator dieselbe Zelle zurueckgibt, ist
-    /// Zufall. Hier steht die Bedingung selbst: eine Adresse, unter der ein
-    /// Rumpf gemerkt ist, darf nicht neu vergeben werden.
+    /// Tests the invariant directly (a cached address is never reused)
+    /// rather than hoping for an allocator collision.
     #[test]
     fn eine_gemerkte_adresse_wird_nicht_neu_vergeben() {
         use crate::js::ast::Func;
@@ -1710,11 +1544,10 @@ mod tests {
         let mut i = super::Interp::new();
         let f = leer("erste");
         let adresse = Rc::as_ptr(&f) as usize;
-        // Uebersetzen und merken — ab jetzt haengt an dieser Adresse ein Rumpf.
+        // Compile and cache; a body is now keyed by this address.
         let _ = i.func_chunk(&f);
         drop(f);
-        // Der Allokator gibt eine gerade freigegebene Zelle bevorzugt sofort
-        // wieder aus. Genau das ist die Falle.
+        // Allocators tend to hand out a just-freed cell immediately.
         for k in 0..64 {
             let g = leer("zweite");
             assert_ne!(Rc::as_ptr(&g) as usize, adresse,
@@ -1723,8 +1556,8 @@ mod tests {
         }
     }
 
-    /// Ein direktes `eval` MUSS die Wegweiser abschalten — das ist der
-    /// einzige Weg, auf dem eine Bindung nachtraeglich weiter innen entsteht.
+    /// A direct `eval` must disable scope hints: it is the only way a binding
+    /// can appear further in after the fact.
     #[test]
     fn direktes_eval_schaltet_die_wegweiser_ab() {
         let mut i = super::Interp::new();
@@ -1734,15 +1567,9 @@ mod tests {
         assert!(!i.hints_ok, "nach einem direkten eval muessen sie aus sein");
     }
 
-    /// **Ein Primitiv bekommt keine Huelle fuers Lesen — aber alles muss
-    /// weiterhin dasselbe antworten.**
-    ///
-    /// `Interp::get` fing bis 0.120.0 mit `to_object(base)` an, und das legt
-    /// bei einer Zeichenkette JEDES ZEICHEN als eigene Eigenschaft an. Fuer
-    /// `s.indexOf(...)` wurden so bei 89 KB erst 89 000 Eintraege gebaut,
-    /// deren Antwort auf dem PROTOTYP liegt. Jetzt faengt die Kette beim
-    /// Prototyp an — und genau das prueft diese Liste: dass dabei nichts
-    /// verlorengeht, was ein Primitiv trotzdem koennen muss.
+    /// Property reads on primitives start at the prototype without creating a
+    /// wrapper object (which for a string would materialize every character);
+    /// results must be the same as with a wrapper.
     #[test]
     fn primitive_antworten_ohne_huelle_dasselbe() {
         let faelle: &[(&str, &str)] = &[
@@ -1752,18 +1579,17 @@ mod tests {
             ("\"abcb\".indexOf(\"b\")", "1"),
             ("\"abc\".toUpperCase()", "ABC"),
             ("\"abc\".charAt(2)", "c"),
-            // Eigene Eigenschaften hat ein Primitiv trotzdem: der Weg dorthin
-            // geht ueber `to_object`, und der bleibt.
+            // Own properties of a primitive still go through `to_object`.
             ("String(\"abc\".hasOwnProperty(\"0\"))", "true"),
             ("String(\"abc\".hasOwnProperty(\"length\"))", "true"),
             ("Object.keys(\"ab\").join(\",\")", "0,1"),
             ("(function(){var o=[];for(var k in \"ab\")o.push(k);return o.join(\",\")})()", "0,1"),
-            // Ein echtes String-OBJEKT bleibt, wie es war.
+            // A real String object is unaffected.
             ("Object.keys(new String(\"ab\")).join(\",\")", "0,1"),
             ("new String(\"ab\")[1]", "b"),
-            // Die Kette muss weiterlaufen, nicht beim Prototyp enden.
+            // The lookup continues up the chain past the prototype.
             ("(function(){Object.prototype.zz=\"Z\";var v=\"ab\".zz;delete Object.prototype.zz;return v})()", "Z"),
-            // Und die anderen Primitive.
+            // The other primitives.
             ("(255).toString(16)", "ff"),
             ("(1.5).toFixed(2)", "1.50"),
             ("true.toString()", "true"),

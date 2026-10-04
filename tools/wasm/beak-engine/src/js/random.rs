@@ -1,36 +1,34 @@
-//! Woher `crypto.getRandomValues` seine Bytes nimmt.
+//! Source of the bytes behind `crypto.getRandomValues`.
 //!
-//! **Die Engine hat keine Hostfunktionen — der Wirt leiht ihr eine**, genau
-//! wie bei der Uhr (`Interp::epoch_ms`). Hier ist es der CSPRNG des Kernels
-//! (ChaCha20, aus RDRAND geseedet, alle 64 Bloecke neu verschluesselt), den
-//! beak ueber `npk_random_bytes` hereinreicht.
+//! The engine has no host functions of its own; the host lends one, as with
+//! the clock (`Interp::epoch_ms`). In beak this is the kernel CSPRNG via
+//! `npk_random_bytes`.
 //!
-//! **Und wenn keine Quelle da ist, gibt es keinen Zufall.** `Math.random`
-//! einzusetzen waere die naheliegende Bequemlichkeit und der schlimmere
-//! Fehler: Seitencode baut aus `getRandomValues` Sitzungsmarken, und eine
-//! vorhersagbare Marke ist schlechter als eine fehlende Funktion — die
-//! fehlende sieht man.
+//! Without a source there is no randomness at all. Falling back to
+//! `Math.random` would be worse than a missing API: pages derive session
+//! tokens from `getRandomValues`, and a predictable token is invisible.
 
-/// Die Quelle, die der Wirt eingereicht hat. `None` heisst: es gibt keine,
-/// und `crypto` erscheint dann gar nicht erst.
+/// The host's source. `None` means there is none and `crypto` is not exposed.
 static mut SOURCE: Option<fn(&mut [u8]) -> bool> = None;
 
-/// Den Zufall des Wirts einreichen. Einmal beim Start; die Engine ruft ihn
-/// danach selbst.
+/// Install the host's source. Called once at startup.
 pub fn set_source(f: fn(&mut [u8]) -> bool) {
+    // SAFETY: the engine is single-threaded; SOURCE is written once at
+    // startup before any reader runs.
     unsafe { core::ptr::addr_of_mut!(SOURCE).write(Some(f)) };
 }
 
-/// Gibt es eine Quelle? Danach entscheidet sich, ob `crypto` im globalen
-/// Objekt steht — eine Seite prueft `if (window.crypto)`, und die Antwort
-/// muss der Wahrheit entsprechen.
+/// Whether a source exists; decides whether `crypto` is on the global
+/// object, so that `if (window.crypto)` tells the truth.
 pub fn available() -> bool {
+    // SAFETY: single-threaded engine; plain read of a `Copy` static.
     unsafe { core::ptr::addr_of!(SOURCE).read().is_some() }
 }
 
-/// Den Puffer fuellen. `false`, wenn keine Quelle da ist oder der Wirt
-/// abgelehnt hat — der Rufer wirft dann, statt schwachen Zufall zu liefern.
+/// Fill the buffer. `false` if there is no source or the host refused; the
+/// caller then throws instead of returning weak randomness.
 pub fn fill(out: &mut [u8]) -> bool {
+    // SAFETY: single-threaded engine; plain read of a `Copy` static.
     let Some(f) = (unsafe { core::ptr::addr_of!(SOURCE).read() }) else { return false };
     f(out)
 }
