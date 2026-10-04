@@ -10,10 +10,10 @@
 //! sorted by name. Launched with a file argument (loft double-click) or
 //! routed an `Event::Open` when already running (singleton).
 //!
-//! Display uses the P10.10 canvas escape hatch: iris decodes PNG → BGRA
-//! in WASM and uploads it with `npk_canvas_commit`; the compositor blits
-//! it contain-fit into the `Widget::Canvas` rect. iris never touches the
-//! framebuffer — it only holds the CANVAS capability.
+//! Display uses the canvas escape hatch: iris decodes PNG → BGRA in WASM
+//! and uploads it with `npk_canvas_commit`; the compositor blits it
+//! contain-fit into the `Widget::Canvas` rect. iris never touches the
+//! framebuffer — it only holds the canvas capability.
 
 #![no_std]
 
@@ -116,7 +116,7 @@ static mut HOME_BUF: [u8; HOME_CAP] = [0; HOME_CAP];
 
 // Event payloads (Open path) live on the bump heap above the persistent
 // mark; alloc_reset before handling frees them, so copy into this static
-// first (use-after-free lesson, see spell).
+// first (same as spell).
 const PAYLOAD_CAP: usize = 4 * 1024;
 static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
 
@@ -182,22 +182,20 @@ fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(po
 
 // ── Decoded-bitmap cache ──────────────────────────────────────────────
 //
-// Decoding is the whole cost of showing an image (~1.3 s for a 1080p
-// PNG under the interpreter), so a picture already decoded must never be
-// decoded twice. The cache lives OUTSIDE the bump heap — `alloc_reset`
+// Decoding is the whole cost of showing an image (seconds for a large PNG
+// under the interpreter), so a picture already decoded must never be
+// decoded twice. The cache lives outside the bump heap — `alloc_reset`
 // would otherwise pull it out from under us every event.
 //
-// **Budgeted in bytes, not in pictures.** A count that fits 1080p (8 MB
-// each) buys 300 MB at 4K (33 MB each); the same mistake a per-stylesheet
-// cap made in beak. With a byte budget the depth adapts by itself.
+// Budgeted in bytes, not in pictures: a count that fits 1080p (8 MB
+// each) buys 300 MB at 4K (33 MB each). With a byte budget the depth
+// adapts by itself.
 //
-// **And grown on demand, not reserved.** A `static` array would be part
-// of the module's linear memory and therefore allocated and zeroed at
-// launch — half a gigabyte for a folder holding three pictures. Instead
-// the arena is claimed with `memory.grow` as pictures actually arrive,
-// and only up to what this folder can use: nine images at the size the
-// first decode turned out to be. Three small pictures cost a few dozen
-// megabytes and never more.
+// Grown on demand, not reserved: a `static` array would be part of the
+// module's linear memory and therefore allocated and zeroed at launch.
+// Instead the arena is claimed with `memory.grow` as pictures actually
+// arrive, and only up to what this folder can use: nine images at the
+// size the first decode turned out to be.
 //
 // The growth is contiguous because we are the only caller of
 // `memory.grow` in this module — the bump allocator hands out slices of
@@ -419,12 +417,12 @@ struct Iris {
     dragged: bool,
     /// Last navigation direction — prefetch follows it first.
     forward: bool,
-    /// A decode is about to run. Committed as a scene BEFORE the decode
+    /// A decode is about to run. Committed as a scene before the decode
     /// starts, so the footer says what is happening during the seconds
     /// the picture takes — the window is otherwise silent.
     loading: bool,
     /// A widget consumed this click, so the raw press that follows it is
-    /// not ours. The compositor sends BOTH for one physical click: first
+    /// not ours. The compositor sends both for one physical click: first
     /// `Action(id)` for the button/menu that was hit, then the raw
     /// `MouseButton` for position-sensitive apps. Without this the
     /// toolbar's ◀ would page back on the Action and forward again on the
@@ -504,12 +502,10 @@ impl Iris {
         Some(alloc::format!("{}/{}", self.dir, f))
     }
 
-    /// Fetch + decode the current image and upload it to the canvas.
-    /// Mutates only Copy fields (w/h/failed) + the kernel canvas store —
-    /// nothing heap-persistent — so it's safe to run after the per-frame
-    /// alloc mark (its big decode buffers are transient, freed next reset).
     /// Show the current image. A cache hit is the whole point: the only
-    /// work left is handing the bitmap to the compositor.
+    /// work left is handing the bitmap to the compositor. Mutates only Copy
+    /// fields (w/h/failed) + the kernel canvas store, so it is safe to run
+    /// after the per-frame alloc mark (decode buffers are freed next reset).
     fn load(&mut self) {
         self.w = 0; self.h = 0; self.failed = false;
         if let Some((px, w, h)) = cache_get(self.idx) {
@@ -535,13 +531,11 @@ impl Iris {
         };
         let t_fetched = now_ms();
         log_ms("fetch", t_fetched - t_start);
-        // Nothing is shown until the picture is whole. Handing over each
-        // band as it landed did work — first pixels after a tenth of the
-        // time — but watching an image wipe in over two seconds reads
-        // worse than a moment of quiet, and while browsing it replaced a
-        // finished picture with a half-black one. The decoder stays
-        // resumable (it costs nothing and is checked bit-identical); it
-        // simply keeps its intermediate states to itself.
+        // Nothing is shown until the picture is whole: watching an image
+        // wipe in reads worse than a moment of quiet, and while browsing
+        // it would replace a finished picture with a half-black one. The
+        // decoder stays resumable; it simply keeps its intermediate
+        // states to itself.
         match decode_png(bytes) {
             Some((bgra, w, h)) => {
                 let t_decoded = now_ms();
@@ -590,7 +584,7 @@ impl Iris {
         None
     }
 
-    /// Decode ONE neighbour into the cache. Never touches the view, so a
+    /// Decode one neighbour into the cache. Never touches the view, so a
     /// half-finished round of prefetching leaves nothing behind.
     fn prefetch_one(&mut self, idx: usize) {
         let Some(name) = self.files.get(idx) else { skip_mark(idx); return };
@@ -689,10 +683,9 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
             iris.swallow_press = true;
             handle_action(iris, id)
         }
-        // Press just arms a possible drag — what it MEANT is decided on
-        // release, because the same button both pans and pages. That is
-        // how every image viewer resolves this: a drag moves the picture,
-        // a click without movement is still a click.
+        // Press just arms a possible drag — what it meant is decided on
+        // release, because the same button both pans and pages. A drag
+        // moves the picture, a click without movement is still a click.
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
             if iris.swallow_press {
                 iris.swallow_press = false;
@@ -711,7 +704,7 @@ fn handle(iris: &mut Iris, ev: Event, payload: &str) -> Outcome {
             if was_click { iris.next(); Outcome::Reload } else { Outcome::Idle }
         }
         // Motion only arrives while the button is held (the compositor
-        // forwards drags, never hover), so this IS the pan.
+        // forwards drags, never hover), so this is the pan.
         Event::MouseMove { x, y } => {
             let Some((px, py)) = iris.press else { return Outcome::Idle };
             let (dx, dy) = (x - px, y - py);
@@ -998,7 +991,7 @@ pub extern "C" fn _start() {
             }
             PollResult::Empty => {
                 // Decode a neighbour once the user has stopped for a
-                // moment — ONE per round, then straight back to polling,
+                // moment — one per round, then straight back to polling,
                 // so a click never waits behind more than a single image.
                 if quiet >= QUIET_POLLS {
                     if let Some(idx) = iris.prefetch_target() {
@@ -1088,16 +1081,14 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Decode with progress. `on_rows` is handed the (still incomplete) BGRA
-/// buffer every time another band of scanlines is finished, so a viewer
-/// can put pixels on screen long before the picture is done.
+/// buffer every time another band of scanlines is finished.
 ///
 /// Why bands and not a low-resolution preview: a PNG holds no smaller
 /// version of itself, and the pixels cannot be sampled — the whole file
-/// is ONE deflate stream, and every scanline's filter refers to the one
-/// above it. Row 500 is unreachable except through rows 0..499. What the
-/// format does give us is that the stream arrives in order, so the top of
-/// the picture is genuinely ready while the bottom is still compressed.
-/// We were simply throwing that away until the last byte arrived.
+/// is one deflate stream, and every scanline's filter refers to the one
+/// above it. What the format does give us is that the stream arrives in
+/// order, so the top of the picture is ready while the bottom is still
+/// compressed.
 fn decode_png_cb<F>(data: &[u8], mut on_rows: F) -> Option<(Vec<u8>, u32, u32)>
 where
     F: FnMut(&[u8], u32, u32),
@@ -1152,13 +1143,8 @@ where
 
     let mut decompressed = alloc::vec![0u8; rows * row_bytes];
     let mut unfiltered = alloc::vec![0u8; rows * stride];
-    // Opaque black underneath, so the part that has not arrived yet reads
-    // as a neutral band rather than as transparent garbage.
     // No alpha pre-fill: the conversion writes all four bytes of every
-    // pixel. Pre-filling was needed while half-decoded pictures went on
-    // screen; now that nothing partial is shown it was two million loop
-    // iterations of pure waste per image — and it sat inside the phase we
-    // have spent all afternoon trying to speed up.
+    // pixel.
     let mut bgra = alloc::vec![0u8; pixel_count * 4];
 
     use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
@@ -1172,10 +1158,9 @@ where
     let mut t_rest: i64 = 0;
 
     // Feed the compressed stream in slices so finished scanlines can be
-    // handed on while the rest is still packed. Twelve bands is a
-    // compromise: fine enough that the first pixels show up in about a
-    // tenth of the total time, coarse enough that the extra full-buffer
-    // uploads stay in the noise.
+    // handed on while the rest is still packed. Twelve bands: fine enough
+    // for early progress, coarse enough that the per-band overhead stays
+    // negligible.
     let bands = 12usize;
     let chunk = (idat_data.len() / bands).max(64 * 1024);
 
@@ -1278,9 +1263,7 @@ fn rows_to_bgra(unfiltered: &[u8], bgra: &mut [u8],
 // per-channel loop unrolls and the array indices become constants.
 //
 // This is the hot loop of the whole viewer: real PNGs use Paeth and
-// Average for nearly every row (measured on our own wallpapers: 886 of
-// 1080 rows Paeth, 166 Average, none unfiltered), so the naive version
-// spent ~1.5 s per image here.
+// Average for nearly every row.
 
 fn unfilter_row(filter: u8, cur: &mut [u8], src: &[u8], above: Option<&[u8]>, channels: usize) {
     // color_type is validated as 2 (RGB) or 6 (RGBA) before we get here.
