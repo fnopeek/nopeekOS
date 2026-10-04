@@ -34,9 +34,20 @@ static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 
 /// Downscale factor for the blur. Blur keeps no detail, so it is computed
 /// on a small image and scaled back up.
-const BLUR_DOWN: u32 = 8;
-/// Box radius on the small image; three passes approximate a Gaussian.
-const BLUR_RADIUS: usize = 3;
+const BLUR_DOWN: u32 = 4;
+/// Default box radius on the small image (`shade.blur`, 0 = off). Three
+/// passes of radius r approximate a Gaussian of sigma ≈ sqrt(r(r+1)) small
+/// pixels — at r = 2 about 10 px on screen: the edges of the wallpaper go,
+/// its shapes stay. (8x / r3, ~30 px, read as a white sheet.)
+const BLUR_RADIUS_DEFAULT: usize = 2;
+const BLUR_RADIUS_MAX: usize = 8;
+
+fn blur_radius() -> usize {
+    crate::config::get("shade.blur")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(BLUR_RADIUS_DEFAULT)
+        .min(BLUR_RADIUS_MAX)
+}
 const BLUR_PASSES: usize = 3;
 
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
@@ -229,8 +240,20 @@ fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u
 
 // ── Glass backdrop ────────────────────────────────────────────────────
 
+/// Blur the current wallpaper again — after `set shade.blur`.
+pub fn reblur() {
+    if !has_wallpaper() { return; }
+    let info = crate::framebuffer::get_info();
+    let pages = (info.height as usize * info.pitch as usize + 4095) / 4096;
+    compute_blur(unsafe { WALLPAPER }, &info, pages);
+    // Every glass cache keys on the generation.
+    WALLPAPER_GEN.fetch_add(1, Ordering::Release);
+}
+
 fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
     BLURRED_SET.store(false, Ordering::Release);
+    let radius = blur_radius();
+    if radius == 0 { return; }  // off: glass blends over the sharp wallpaper
     let (w, h, pitch) = (info.width, info.height, info.pitch as usize);
     let dst = if unsafe { !BLURRED.is_null() && BLURRED_W == w && BLURRED_H == h } {
         unsafe { BLURRED }
@@ -274,8 +297,8 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
     let mut tmp = alloc::vec![0u32; sw * sh];
     for plane in planes.iter_mut() {
         for _ in 0..BLUR_PASSES {
-            box_pass(plane, &mut tmp, sw, sh, 1, sw);   // columns
-            box_pass(&tmp, plane, sh, sw, sw, 1);       // rows
+            box_pass(plane, &mut tmp, sw, sh, 1, sw, radius);   // columns
+            box_pass(&tmp, plane, sh, sw, sw, 1, radius);       // rows
         }
     }
 
@@ -313,8 +336,9 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
 
 /// One box-blur pass along a line direction. `lines` × `len` samples,
 /// `step` between samples of a line, `stride` between lines. Edges clamp.
-fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usize, step: usize) {
-    let r = BLUR_RADIUS as isize;
+fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usize, step: usize,
+            radius: usize) {
+    let r = radius as isize;
     let n = (2 * r + 1) as u32;
     let last = len as isize - 1;
     for l in 0..lines {

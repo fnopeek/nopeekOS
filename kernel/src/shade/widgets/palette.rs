@@ -183,7 +183,7 @@ pub fn current() -> Palette {
 /// <0..255>` (255 = flat, ~180 = clearly see-through). Light mode stays
 /// lower because a near-white panel washes out faster.
 pub fn chrome_opacity() -> u32 {
-    let dflt = if is_light_theme() { 215 } else { 235 };
+    let dflt = if is_light_theme() { 200 } else { 235 };
     opacity_key("shade.chrome_opacity").unwrap_or(dflt)
 }
 

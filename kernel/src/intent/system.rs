@@ -1887,6 +1887,14 @@ pub fn intent_set(args: &str) {
             // value until the app next commits (up to a minute for the
             // bar). Re-rasterize the cached scenes first — same step the
             // `theme` intent takes.
+            if key == "shade.blur" { crate::gui::background::reblur(); }
+            // The loop opacity lives in the compositor, read once at start;
+            // move it along so the knob is live like the others.
+            if key == "shade.opacity" {
+                if let Ok(v) = value.trim().parse::<u32>() {
+                    crate::shade::with_compositor(|c| c.opacity = v.min(256));
+                }
+            }
             crate::shade::widgets::refresh_all_scenes();
             crate::shade::force_redraw();
         }

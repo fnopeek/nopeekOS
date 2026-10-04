@@ -28,14 +28,12 @@ const DOCK_HANDLE_H: u32 = 5;
 /// detached from the bottom edge the way the bar's pills do.
 const DOCK_BOTTOM_GAP: u32 = 12;
 
-/// How much MORE opaque the terminal is in light mode (0..256). Dark glass
-/// over a wallpaper raises the contrast to light text by itself; light glass
-/// does the opposite, and at the dark-mode value the wallpaper outweighed
-/// the text. Over the blurred backdrop a frosted ~80 % reads as glass and
-/// keeps dark text legible.
-const LIGHT_TERMINAL_OPACITY_RAISE: u32 = 48;
-/// Ceiling for that, so light glass never turns into a solid sheet.
-const LIGHT_TERMINAL_OPACITY_MAX: u32 = 220;
+/// How much more see-through the terminal is in light mode (0..256). The
+/// same white share that frosts a dark wallpaper turns a light one into a
+/// sheet of paper: at 200 (dark's default) light glass hid the wallpaper,
+/// at 220 it was a white page. Over the blurred backdrop ~62 % reads as glass.
+const LIGHT_TERMINAL_OPACITY_DROP: u32 = 40;
+
 
 /// Focus halo. The focused tile bleeds a little accent into the gap around
 /// it: a 1 px border in a wallpaper-derived colour is invisible on half the
@@ -1963,7 +1961,7 @@ impl Compositor {
             let content_opacity = if paint_content
                 && crate::shade::widgets::palette::is_light_theme()
             {
-                (opacity + LIGHT_TERMINAL_OPACITY_RAISE).min(LIGHT_TERMINAL_OPACITY_MAX.max(opacity))
+                opacity.saturating_sub(LIGHT_TERMINAL_OPACITY_DROP)
             } else {
                 opacity
             };
