@@ -1,10 +1,10 @@
-//! Emit the kernel's on-device test modules as Rust byte arrays.
+//! Emit the kernel's self-test modules as Rust byte arrays.
 //!
 //! They are built here rather than in the kernel because assembling wasm needs
-//! `wat`, which is a std crate — and because a module that is checked on the
-//! host first is one fewer unknown when the device says no.
+//! `wat`, which is a std crate — and a module checked on the host first is one
+//! unknown fewer in the kernel.
 
-/// Run a module here the same way the kernel will, and report what came out.
+/// Run a module here the same way the kernel does, and report what came out.
 fn forge_harness_run(wasm: &[u8], arg: u32, fuel: i64) -> (u32, u32) {
     let out = std::process::Command::new(std::env::current_exe().unwrap().parent().unwrap().join("forge_harness"))
         .arg("--oneshot")

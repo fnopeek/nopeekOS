@@ -8,10 +8,10 @@
 //!
 //! Catching them means pointing the interrupted context at the module's trap
 //! routine with the reason in `rax`. Everything after that is the routine's
-//! ordinary work. **The kernel's #PF and #DE handlers will do precisely this**,
-//! against the same trap routine and the same instance context — the only
-//! difference is that they read the interrupted registers out of a trap frame
-//! rather than a `ucontext`.
+//! ordinary work. The kernel's #PF and #DE handlers do the same, against the
+//! same trap routine and the same instance context — the only difference is
+//! that they read the interrupted registers out of a trap frame rather than a
+//! `ucontext`.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 

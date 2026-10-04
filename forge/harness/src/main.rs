@@ -1,4 +1,4 @@
-//! Host harness for forge. Runs the same `no_std` code the kernel will run,
+//! Host harness for forge. Runs the same `no_std` code the kernel runs,
 //! on the real modules, and reports what it found.
 //!
 //!   forge_harness <file.wasm>...              census per module
@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // Run one module and print "<result> <trap>". Used by `gentests` to
-    // produce the device check's expectations by measurement rather than by
+    // produce the kernel self-test's expectations by measurement rather than by
     // hand — and it runs in its own process, so a trap that is meant to fault
     // cannot take the generator down with it.
     if args.first().map(|a| a == "--oneshot").unwrap_or(false) {
@@ -131,13 +131,13 @@ fn census(files: &[String]) {
 }
 
 /// A function is translatable exactly when every opcode it uses is one the
-/// generator emits. Partial credit does not exist — so the honest question is
-/// not "how many opcodes are done" but "how many FUNCTIONS does the next
-/// opcode unlock". Greedy answers it, and the answer is the work order.
+/// generator emits. Partial credit does not exist — so the question is not
+/// "how many opcodes are done" but "how many functions does the next opcode
+/// unlock". Greedy answers it, and the answer is the work order.
 ///
 /// Kept incremental: each function carries a count of the opcodes it still
 /// misses, and an opcode's gain is the number of its functions sitting at
-/// exactly one. Otherwise python's 9939 x 147 turns into minutes.
+/// exactly one. Recomputing from scratch is too slow for large modules.
 fn report_roadmap(f: &str) {
     let name = std::path::Path::new(f)
         .file_stem()
@@ -228,9 +228,8 @@ fn report_roadmap(f: &str) {
         pct(done_fn as u64, funcs.len() as u64),
         pct(done_instr, total_instrs)
     );
-    // Code size is one of the paper's cost items, so it is worth reporting
-    // against the wasm the functions came from — not against the whole file,
-    // which is mostly data.
+    // Code size is a cost item, so it is reported against the wasm the
+    // functions came from — not against the whole file, which is mostly data.
     let wasm_code: u64 = m
         .funcs
         .iter()
@@ -246,8 +245,8 @@ fn report_roadmap(f: &str) {
         if wasm_code > 0 { m.code.len() as f64 / wasm_code as f64 } else { 0.0 }
     );
 
-    // Auszaehlung: wohin gehen die Bytes? Die Frage ist, ob der Abstand zu
-    // Cranelift an der Registerhaltung ueber Blockgrenzen haengt.
+    // Census: where do the bytes go? Shows how much of the output is
+    // spilling the operand stack at block boundaries and calls.
     {
         let (sb, sn, rb, rn, lb, ln, ab, an) = forge_core::codegen::census::read();
         let total = m.code.len() as u64;

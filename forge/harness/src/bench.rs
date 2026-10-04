@@ -1,8 +1,8 @@
 //! Run a real module under forge and under wasmi, and time both.
 //!
-//! Coverage is not speed. Everything up to here proved the generated code
-//! computes the same thing the interpreter does; this is where it says whether
-//! it does so faster, on the module whose slowness started the whole thing.
+//! Coverage is not speed: the self-test proves the generated code computes
+//! the same thing the interpreter does; this measures whether it does so
+//! faster.
 //!
 //! `beakbench.wasm` is the vehicle because it is beak's own engine with a
 //! single import, and because its warm layout has a known fuel count — if that

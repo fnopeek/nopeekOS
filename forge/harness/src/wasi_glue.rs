@@ -1,4 +1,4 @@
-//! Two adapters over ONE implementation. Everything the guest can observe
+//! Two adapters over one implementation. Everything the guest can observe
 //! lives in `wasi_core`; all that differs here is how each engine hands over
 //! guest memory and the context. Any other arrangement would compare host
 //! layers instead of compilers.

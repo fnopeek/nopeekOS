@@ -1,11 +1,11 @@
 //! Differential test: the same function under wasmi and under forge, same
 //! arguments, and the results must be identical. wasmi is the oracle because
-//! it is what the device runs today — a disagreement is a real disagreement,
-//! not a spec argument.
+//! it is the reference interpreter the kernel runs — a disagreement is a real
+//! disagreement, not a spec argument.
 //!
 //! The generated code is mapped W^X (write, then flip to execute) the way the
-//! kernel will have to map it. Doing it right here keeps the harness honest
-//! about what the real thing costs.
+//! kernel maps it, which keeps the harness honest about what the real thing
+//! costs.
 
 use std::ffi::c_void;
 
@@ -100,7 +100,7 @@ pub(crate) const DEFAULT_FUEL: i64 = i64::MAX / 4;
 ///
 /// A wasm address is a u32 and a memory offset is a u32, so the highest
 /// effective address is `2^32-1 + 2^32-1 = 2^33-2` — just under 8 GiB. But the
-/// ACCESS still has a width: an eight-byte load there reaches `2^33+5`. Eight
+/// access still has a width: an eight-byte load there reaches `2^33+5`. Eight
 /// gibibytes on the nose would therefore leave the last few bytes of the
 /// widest access hanging outside the reservation, which is precisely the hole
 /// an attacker would look for. One spare page covers every access width.
@@ -251,14 +251,14 @@ impl Inst {
         self.ctx.as_ptr()
     }
 
-    /// What is left of the budget. The generated code keeps the counter in a
-    /// register while it runs and writes it back on the way out, so this is
-    /// only meaningful after a call has returned.
     /// What stopped the last call — `trap::NONE` if it returned normally.
     pub(crate) fn trap_code(&self) -> u32 {
         self.ctx[forge_core::vmctx::TRAP_CODE as usize / 8] as u32
     }
 
+    /// What is left of the budget. The generated code keeps the counter in a
+    /// register while it runs and writes it back on the way out, so this is
+    /// only meaningful after a call has returned.
     pub(crate) fn fuel_left(&self) -> i64 {
         self.ctx[forge_core::vmctx::FUEL as usize / 8] as i64
     }
@@ -353,12 +353,8 @@ fn under_wasmi(wasm: &[u8], args: &[u32]) -> Option<u32> {
 }
 
 /// Run `src`'s exported `f` with one argument and report both what it returned
-/// and what stopped it.
-///
-/// Traps used to be checked in a forked child, by watching which signal killed
-/// it. They do not need a child any more, and that is the point of this whole
-/// round: a trap is a RESULT now. The test can look at the reason instead of a
-/// death certificate, and a wrong reason is as visible as a missing one.
+/// and what stopped it. A trap is a result, so the test can check the reason
+/// directly, and a wrong reason is as visible as a missing one.
 pub fn oneshot(wasm: &[u8], arg: u32, fuel: Option<i64>) -> Option<(u32, u32)> {
     let m = forge_core::compile(wasm).ok()?;
     let fidx = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i)?;
@@ -388,7 +384,7 @@ fn run_it(src: &str, arg: u32, fuel: Option<i64>) -> Option<(u32, u32)> {
     Some((r, inst.trap_code()))
 }
 
-/// Every trap the generator can raise, checked for the RIGHT reason.
+/// Every trap the generator can raise, checked for the right reason.
 fn traps_report_themselves() -> bool {
     use forge_core::trap::*;
     let mut ok = true;
@@ -466,7 +462,7 @@ fn traps_report_themselves() -> bool {
                  i32.const -2147483648 local.get 0 {op}))")
     };
     want(&minmax("i32.div_s"), 0xFFFF_FFFF, None, DIVIDE_ERROR, "INT_MIN/-1");
-    // …and the one that must NOT trap, because wasm wants an answer there.
+    // …and the one that must not trap, because wasm wants an answer there.
     want(&minmax("i32.rem_s"), 0xFFFF_FFFF, None, NONE, "INT_MIN%-1 darf NICHT trappen");
 
     // `unreachable` is a trap the generator raises itself.
@@ -689,7 +685,7 @@ const CASES: &[Case] = &[
            local.get 0 i32.eqz if (result i32) i32.const 1 else \
              local.get 0 local.get 0 i32.const 1 i32.sub call $r i32.mul end)",
         body: "local.get 0 i32.const 7 i32.and call $r", params: 1 },
-    // An operand sits BELOW the arguments: they must be read from the right
+    // An operand sits below the arguments: they must be read from the right
     // slots, not from the bottom of the stack.
     Case { name: "call_under", decl:
         "(func $g (param i32 i32) (result i32) local.get 0 local.get 1 i32.xor)",
@@ -735,7 +731,7 @@ const CASES: &[Case] = &[
          (table 2 funcref) (elem (i32.const 0) $a $b)",
         body: "local.get 0 i32.const 0 call_indirect (type $t1) \
                local.get 0 local.get 1 i32.const 1 call_indirect (type $t2) i32.add", params: 2 },
-    // Two DISTINCT type indices with the same shape. wasm compares types
+    // Two distinct type indices with the same shape. wasm compares types
     // structurally, so this must pass — comparing raw type indices would
     // reject it, and nothing else in the suite would notice.
     Case { name: "call_ind_same", decl:
@@ -779,7 +775,7 @@ const CASES: &[Case] = &[
              i32.const 100 local.set 1 br $done) \
              i32.const 200 local.set 1 br $done) \
          local.get 1", params: 1 },
-    // A br_table carrying a value, to labels at DIFFERENT depths.
+    // A br_table carrying a value, to labels at different depths.
     Case { name: "brt_value", decl: "", body:
         "(block $b1 (result i32) \
            (block $b0 (result i32) \
@@ -970,7 +966,7 @@ const CASES: &[Case] = &[
     Case { name: "i32_ctz_0", decl: "", body: "i32.const 0 i32.ctz", params: 0 },
     Case { name: "i32_popcnt", decl: "", body: "local.get 0 i32.popcnt", params: 1 },
     // Built from two i32 params like the i64 clz/ctz cases above, so the
-    // HIGH half is exercised too — a `popcnt` emitted without REX.W counts
+    // high half is exercised too — a `popcnt` emitted without REX.W counts
     // only the low 32 bits and would pass a test that never sets them.
     Case { name: "i64_popcnt", decl: "", body:
         "local.get 0 i64.extend_i32_u i64.const 32 i64.shl local.get 1 i64.extend_i32_u i64.or \
@@ -1110,7 +1106,7 @@ const CASES: &[Case] = &[
     // Destination below the source: copying upwards is safe.
     Case { name: "mem_cp_fwd", decl: "(memory 1) (data (i32.const 0) \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\")", body:
         "(local i32) (local i32) i32.const 0 local.get 0 i32.const 15 i32.and i32.const 24 memory.copy i32.const 0 local.set 2 i32.const 0 local.set 3 block loop local.get 2 i32.const 192 i32.ge_u br_if 1 local.get 3 i32.const 31 i32.mul local.get 2 i32.load8_u i32.add local.set 3 local.get 2 i32.const 1 i32.add local.set 2 br 0 end end local.get 3", params: 2 },
-    // Destination ABOVE the source and overlapping: this is the case a plain
+    // Destination above the source and overlapping: this is the case a plain
     // forward copy gets wrong, and the only one the direction flag is for.
     Case { name: "mem_cp_bwd", decl: "(memory 1) (data (i32.const 0) \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\")", body:
         "(local i32) (local i32) local.get 0 i32.const 15 i32.and i32.const 0 i32.const 24 memory.copy i32.const 0 local.set 2 i32.const 0 local.set 3 block loop local.get 2 i32.const 192 i32.ge_u br_if 1 local.get 3 i32.const 31 i32.mul local.get 2 i32.load8_u i32.add local.set 3 local.get 2 i32.const 1 i32.add local.set 2 br 0 end end local.get 3", params: 2 },
@@ -1128,14 +1124,14 @@ const CASES: &[Case] = &[
     // --- division ---
     // The divisor is forced non-zero, and for the signed quotients also away
     // from -1, so the ordinary cases can share the argument table with
-    // everything else. The trapping combinations are checked in a child.
+    // everything else. The trapping combinations are checked separately.
     Case { name: "i32_div_s", decl: "", body:
         "local.get 0 local.get 1 i32.const 0x7fffffff i32.and i32.const 1 i32.or i32.div_s",
         params: 2 },
     Case { name: "i32_div_u", decl: "", body:
         "local.get 0 local.get 1 i32.const 0x7fffffff i32.and i32.const 1 i32.or i32.div_u",
         params: 2 },
-    // Here the divisor MAY be -1: the argument table has 0xFFFFFFFF paired
+    // Here the divisor may be -1: the argument table has 0xFFFFFFFF paired
     // with INT_MIN, which is exactly the shortcut's reason to exist.
     Case { name: "i32_rem_s", decl: "", body:
         "local.get 0 local.get 1 i32.const 1 i32.or i32.rem_s", params: 2 },
@@ -1178,9 +1174,9 @@ const CASES: &[Case] = &[
 
     // --- floating point ---
     //
-    // A float result is NOT compared bit for bit: wasm leaves NaN payloads to
+    // A float result is not compared bit for bit: wasm leaves NaN payloads to
     // the implementation, so forge and wasmi may legitimately differ there.
-    // The fold below asks whether the result IS a NaN — the part the spec does
+    // The fold below asks whether the result is a NaN — the part the spec does
     // fix — and folds a non-NaN result down through its exact bits, so signed
     // zero and the last mantissa bit still count.
     Case { name: "f64_add", decl: "", body:
@@ -1227,7 +1223,7 @@ const CASES: &[Case] = &[
         "(local f64) (local i64) f64.const 1.0 f64.const nan f64.max  local.set 2 local.get 2 local.get 2 f64.ne if (result i32) i32.const 31337 else local.get 2 i64.reinterpret_f64 local.tee 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor end", params: 2 },
     Case { name: "f32_min_zero", decl: "", body:
         "(local f32) f32.const 0.0 f32.const -0.0 f32.min  local.set 2 local.get 2 local.get 2 f32.ne if (result i32) i32.const 31337 else local.get 2 i32.reinterpret_f32 end", params: 2 },
-    // Rounding. `nearest` rounds halves to EVEN, which is the one a
+    // Rounding. `nearest` rounds halves to even, which is the one a
     // hand-written lowering usually gets wrong in both directions.
     Case { name: "f64_floor", decl: "", body:
         "(local f64) (local i64) local.get 0 f64.convert_i32_s f64.const 4.0 f64.div f64.floor  local.set 2 local.get 2 local.get 2 f64.ne if (result i32) i32.const 31337 else local.get 2 i64.reinterpret_f64 local.tee 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor end", params: 2 },
@@ -1336,7 +1332,7 @@ const CASES: &[Case] = &[
     Case { name: "i64_reinterp", decl: "", body:
         "local.get 0 i64.extend_i32_u f64.reinterpret_i64 i64.reinterpret_f64 i32.wrap_i64 ", params: 2 },
     // Saturating truncation: the hardware answers "indefinite" for a NaN, for
-    // either overflow AND for a legitimate minimum, so every one of those
+    // either overflow and for a legitimate minimum, so every one of those
     // gets its own case.
     Case { name: "ts_i32f64s", decl: "", body:
         "local.get 0 f64.convert_i32_s f64.const 3.0 f64.div i32.trunc_sat_f64_s ", params: 2 },

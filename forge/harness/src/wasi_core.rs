@@ -1,10 +1,10 @@
-//! WASI preview1, lifted out of `../tools/pywasi` so BOTH engines can use the
-//! SAME implementation. Comparing two compilers through two different host
+//! WASI preview1, lifted out of `../tools/pywasi` so both engines can use the
+//! same implementation. Comparing two compilers through two different host
 //! layers would measure the host layers.
 //!
-//! Every function here works on `(guest memory, context)` and nothing else —
-//! that was already true in pywasi, which is why the bodies transfer
-//! unchanged. What differs per engine is only how those two are obtained.
+//! Every function here works on `(guest memory, context)` and nothing else,
+//! so the bodies are engine-independent. What differs per engine is only how
+//! those two are obtained.
 #![allow(dead_code)]
 
 // `wasi_snapshot_preview1` on wasmi — host-side prototype of the shim
@@ -234,10 +234,9 @@ fn filestat_bytes(md: &std::fs::Metadata) -> [u8; 64] {
 pub fn proc_exit(mem: &mut [u8], ctx: &mut WasiCtx, code: i32) -> i32 {
     ctx.tick("proc_exit");
     // A wasi program finishes by trapping out of here, clean run included.
-    // The interpreter can turn that into an `Err` and unwind; generated code
-    // has no trap path yet, so the run reports its own time on the way out and
-    // leaves. Both engines take this same exit, which is what keeps the two
-    // measurements comparable.
+    // The run reports its own time on the way out and ends the process; both
+    // engines take this same exit, which keeps the two measurements
+    // comparable.
     report(ctx, code);
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
