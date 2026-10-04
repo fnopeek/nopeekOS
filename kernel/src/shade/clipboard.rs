@@ -11,16 +11,16 @@
 //!   - `Text`:   small inline UTF-8 bytes. ~all of copy/paste.
 //!   - `Object`: a content-address handle (npkFS BLAKE3 hash + name + size)
 //!               for files/large blobs — copies the 32-byte reference, never
-//!               the bytes, so it is unbounded by construction. Reserved;
-//!               loft's file-copy wires it later (no ABI break — it is just
-//!               another variant).
+//!               the bytes, so it is unbounded by construction. Reserved,
+//!               not yet used (adding it later is no ABI break — it is
+//!               just another variant).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-/// Hard cap on inline `Text` payloads. NOT a UX limit — you never select
+/// Hard cap on inline `Text` payloads. Not a UX limit — you never select
 /// 4 MiB of text by hand — only an anti-heap-exhaustion guard so a
 /// malicious app can't balloon kernel memory. Large data uses `Object`
 /// (a reference), never inline bytes.

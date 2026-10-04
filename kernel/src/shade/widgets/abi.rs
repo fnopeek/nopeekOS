@@ -12,8 +12,7 @@
 //!   - Reserved variants use #[allow(dead_code)] to hold the slot
 //!   - #[repr(u8)] or #[repr(u16)] where the variant index is the ABI
 //!
-//! P10.0 scope: signatures + constants, no logic. Serialization lands in
-//! P10.1, deserialization in P10.2.
+//! Signatures and constants only, no logic.
 
 #![allow(dead_code)]
 
@@ -85,8 +84,8 @@ pub struct NodeId(pub u32);
 /// Theme tokens. Apps never specify hex colors — the compositor resolves
 /// tokens against the active palette at raster time.
 ///
-/// Integer values frozen on v1 release. New tokens **appended only** —
-/// existing values never reassigned.
+/// Integer values frozen on v1 release. New tokens are appended only;
+/// existing values are never reassigned.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -125,12 +124,11 @@ pub enum Token {
 
     // ── Code tokens (syntax highlighting) ─────────────────────────────
     //
-    // A second, independent ramp. The tokens above describe *chrome*;
-    // these describe *source text*. An editor needs both at once, and
-    // reusing `Accent`/`Warning` for keywords and strings tied the
-    // syntax colours to the wallpaper — a whole language got three
-    // colours. Resolved from the active code scheme (`set code.scheme`),
-    // never from the accent.
+    // A second, independent ramp. The tokens above describe chrome; these
+    // describe source text. An editor needs both at once, and reusing
+    // `Accent`/`Warning` for keywords and strings would tie the syntax
+    // colours to the wallpaper. Resolved from the active code scheme
+    // (`set code.scheme`), never from the accent.
     /// Declaration / storage keywords: `fn` `let` `def` `class` `int`.
     CodeKeyword     = 17,
     /// Control flow and imports: `if` `for` `return` `import` `match`.
@@ -154,19 +152,19 @@ pub enum Token {
 
 // ── Icons ─────────────────────────────────────────────────────────────
 
-/// Icon identifier — an index into the Phosphor atlas (P10.9).
+/// Icon identifier — an index into the Phosphor atlas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct IconId(pub u16);
 
-/// The named icons. `IconId` is a NUMBER, not a closed enum: a module that
+/// The named icons. `IconId` is a number, not a closed enum: a module that
 /// only passes an icon on (the dock showing an app's icon) must not have to
-/// know every icon there is — with an enum, one new icon meant rebuilding
-/// dock, drun and bar, or they showed a blank file instead. The atlas is
-/// looked up by number, and a number it lacks draws nothing.
+/// know every icon there is, or each new icon would mean rebuilding dock,
+/// drun and bar. The atlas is looked up by number, and a number it lacks
+/// draws nothing.
 ///
-/// Wire-identical to the enum this replaced: postcard writes a variant
-/// index and a `u16` as the same varint, and the numbers are the old
+/// Wire format: postcard writes an enum variant index and a `u16` as the
+/// same varint, so the numbers are wire-compatible with enum
 /// discriminants. Values frozen; append only — and the atlas
 /// (`tools/regen-icons`) must carry every number named here.
 macro_rules! icon_ids {
@@ -272,7 +270,7 @@ pub enum TextStyle {
     Caption = 2,
     Muted   = 3,
     Mono    = 4,
-    /// 18 px regular weight (vocab-v3 append).
+    /// 18 px regular weight (appended).
     Heading = 5,
     // Appended only.
 }
@@ -290,7 +288,7 @@ pub enum Fill {
 
 // ── Effect IDs (reserved) ─────────────────────────────────────────────
 
-/// Named GPU effect reference. Populated in Phase 12 (Xe render engine).
+/// Named GPU effect reference, for a future GPU render backend.
 /// CPU rasterizer treats `.effect(_)` as no-op.
 #[repr(u16)]
 #[non_exhaustive]
@@ -400,7 +398,7 @@ pub enum Modifier {
 
     // ── Reserved slots (v2+) ──────────────────────────────────────────
     // CPU rasterizer treats these as no-ops in v1. Slots declared now so
-    // wire indices do not shift when the GPU rasterizer (Phase 12)
+    // wire indices do not shift when a GPU rasterizer
     // implements them. Do not insert before these.
     #[allow(dead_code)]
     Blur(u8),
@@ -441,7 +439,7 @@ pub enum Modifier {
     /// tagged widget's rect into a side table; `Widget::Popover`'s
     /// `anchor` field looks rects up there at render time.
     NodeId(NodeId),
-    /// Focus ring — a stroke of `width` px drawn just OUTSIDE the node's
+    /// Focus ring — a stroke of `width` px drawn just outside the node's
     /// rect, under any Border. Mirrors CSS `box-shadow: 0 0 0 Npx`, which
     /// is how the design expresses focus. Costs no layout space; the
     /// caller must leave room (a row's gap is enough at width ≤ 3).
@@ -463,16 +461,14 @@ pub enum Modifier {
     /// forcing one value makes the horizontal air hostage to the row
     /// height. Sums with any `Padding` on the same node.
     ///
-    /// APPENDED after LineNumbers, not before it: LineNumbers had already
-    /// shipped, and inserting ahead of a live variant renumbers it on the
-    /// wire — the running app keeps sending the old index and the
-    /// compositor decodes garbage (spell rendered an empty window).
+    /// Appended after LineNumbers, not before it: inserting ahead of a
+    /// shipped variant renumbers it on the wire, and an app built against
+    /// the old order would send indices the compositor decodes as garbage.
     PaddingXY { x: u16, y: u16 },
     /// This text widget takes focus when its window first appears.
-    /// Opt-in: the compositor used to auto-focus the first `Input` it
-    /// found, which is right for a launcher and wrong for anything with
-    /// a search box — a file browser's list lost every arrow key to a
-    /// field the user never clicked.
+    /// Opt-in: auto-focusing the first `Input` is right for a launcher and
+    /// wrong for anything with a search box, where a list would lose every
+    /// arrow key to a field the user never clicked.
     Autofocus,
     /// Font size override in px for a `Widget::Text` — replaces the size
     /// its `TextStyle` resolves to; the face (proportional vs mono) still
@@ -486,22 +482,21 @@ pub enum Modifier {
     /// the rect shows. Clamped to the overhang, so it can never push the
     /// content out of view. Ignored on every other widget.
     CanvasOffset { x: i32, y: i32 },
-    /// Farbige LAEUFE ueber den Text eines `Widget::Input`, in Byte-
-    /// Offsets — dasselbe, was `Widget::TextArea.spans` fuer den Editor tut.
+    /// Coloured runs over the text of a `Widget::Input`, in byte offsets —
+    /// what `Widget::TextArea.spans` does for the editor.
     ///
-    /// **Wofuer es gebaut wurde: die Adresszeile.** Ein Browser hebt die
-    /// registrierbare Domain hervor und blendet den Rest ab, und das ist
-    /// keine Zierde, sondern die Anti-Phishing-Anzeige: in
-    /// `https://paypal.com.betrug.ru/login` heisst die Domain `betrug.ru`,
-    /// und ohne die Hervorhebung liest das Auge das erste, was wie ein Name
-    /// aussieht. Die App rechnet die Spanne selbst aus (beak nimmt die echte
-    /// Public Suffix List) — der Baukasten faerbt nur, was ihm gesagt wird,
-    /// und weiss nichts von URLs.
+    /// Built for the address bar: a browser highlights the registrable
+    /// domain and dims the rest, and that is the anti-phishing display, not
+    /// decoration. In `https://paypal.com.example.ru/login` the domain is
+    /// `example.ru`, and without the highlight the eye reads the first thing
+    /// that looks like a name. The app computes the span itself (e.g. from
+    /// the Public Suffix List); the toolkit only colours what it is told and
+    /// knows nothing about URLs.
     ///
-    /// Nicht abgedeckte Bytes behalten die Vorgabefarbe. Ueberlappende oder
-    /// unsortierte Spannen sind erlaubt; die spaetere gewinnt.
+    /// Uncovered bytes keep the default colour. Overlapping or unsorted
+    /// spans are allowed; the later one wins.
     Spans(alloc::vec::Vec<Span>),
-    /// Fire `Event::Action(id)` while the pointer MOVES over this widget,
+    /// Fire `Event::Action(id)` while the pointer moves over this widget,
     /// at most every [`MOTION_INTERVAL_MS`] — and at once when the pointer
     /// moves onto it from another `OnMotion` target (deepest wins, like
     /// `OnClick`). For "show the controls while the mouse is being used":
@@ -519,11 +514,11 @@ pub const FONT_SIZE_MAX: u16 = 64;
 
 // ── Widget ────────────────────────────────────────────────────────────
 
-/// Upper end of `Widget::Slider::value` — per mille, fine enough for a
-/// seek bar across a full-width window.
 /// Throttle of `Modifier::OnMotion`.
 pub const MOTION_INTERVAL_MS: u32 = 200;
 
+/// Upper end of `Widget::Slider::value` — per mille, fine enough for a
+/// seek bar across a full-width window.
 pub const SLIDER_MAX: u16 = 1000;
 
 /// Widget tree node. A single `Widget` = root of a render commit.
@@ -669,7 +664,7 @@ pub enum Widget {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
-    /// Keyboard input. Uses the existing Phase 8 KeyCode (already stable).
+    /// Keyboard input. Uses the existing KeyCode (already stable).
     Key(crate::input::KeyCode),
     /// User-defined action (synthesized from `OnClick` / `OnHover`).
     Action(ActionId),
@@ -688,7 +683,7 @@ pub enum Event {
     /// compositor's editor (printable key, Backspace, Delete). Carries
     /// the new buffer contents — the app typically mirrors `value` into
     /// its own state and re-commits the tree with the matching `value`.
-    /// Cursor-only navigation (Left / Right / Home / End) does **not**
+    /// Cursor-only navigation (Left / Right / Home / End) does not
     /// fire this event; the caret is purely compositor-side state.
     InputChange { value: alloc::string::String },
     /// Right-click hit-test result. Same hit-test as `Action`, but fired
@@ -707,12 +702,12 @@ pub enum Event {
     /// widget consumed, delivered to the focused app so it can act on its
     /// own selection (e.g. loft copies/moves the selected file). Apps
     /// built against an older SDK fail to decode this appended variant and
-    /// skip it — harmless. MUST stay in lockstep with the SDK copy in
+    /// skip it — harmless. Must stay in lockstep with the SDK copy in
     /// `tools/wasm/sdk/widgets/src/abi.rs` (postcard variant order).
     Clipboard(ClipKind),
     /// A file-picker request this app started via `npk_pick` finished.
-    /// `path` is the npkFS path the user chose, or **empty if they
-    /// cancelled**. `tag` is the caller's own value from `npk_pick`,
+    /// `path` is the npkFS path the user chose, or empty if they
+    /// cancelled. `tag` is the caller's own value from `npk_pick`,
     /// returned unchanged — the picker roundtrip is asynchronous, so an
     /// app running several dialogs (open / save-as / …) uses it to tell
     /// which one came back. The kernel never interprets it.
@@ -728,35 +723,34 @@ pub enum Event {
     CloseRequest,
     /// A Ctrl chord the text editor doesn't own — Ctrl+S, Ctrl+O, … The
     /// editor keeps Ctrl+A/C/X/V for text; everything else reaches the app
-    /// here. **Ctrl is implied**; `shift`/`alt` say what else was held, so
+    /// here. Ctrl is implied; `shift`/`alt` say what else was held, so
     /// Ctrl+Shift+S is distinguishable from Ctrl+S.
     ///
     /// `letter` is the lowercase ASCII letter, already normalized from the
     /// control byte some keyboard paths produce (0x13 → 's').
     ///
     /// Exists because `Event::Key` carries no modifiers: an app could not
-    /// otherwise tell Ctrl+S from a typed "s" — and while a text widget is
-    /// focused it never saw the keystroke at all.
+    /// otherwise tell Ctrl+S from a typed "s", and while a text widget is
+    /// focused it would never see the keystroke at all.
     Chord { letter: u8, shift: bool, alt: bool },
     /// Ctrl+wheel over the focused app — a zoom request. `delta` is
     /// positive for "bigger" (wheel up), negative for smaller; its
     /// magnitude is notches, not pixels, so the app picks the step.
     ///
     /// Separate from `Wheel` because that one carries no modifiers, and
-    /// because Ctrl+wheel must NOT scroll: the compositor skips its own
+    /// because Ctrl+wheel must not scroll: the compositor skips its own
     /// scroll handling and sends this instead. An app that ignores it
     /// simply doesn't zoom.
     Zoom { delta: i32 },
-    /// Waagrechtes Rollen ueber der fokussierten App, das kein
-    /// `Widget::Scroll` mit waagrechter Achse verbraucht hat. `dx` ist
-    /// pixelskaliert, positiv = nach RECHTS.
+    /// Horizontal scrolling over the focused app that no `Widget::Scroll`
+    /// with a horizontal axis consumed. `dx` is pixel-scaled, positive =
+    /// to the right.
     ///
-    /// Eigene Variante und kein Feld an `Wheel`: ein angehaengter Wert
-    /// waere eine ABI-Aenderung an einer bestehenden Variante, und die
-    /// bricht jede App, die gegen das alte SDK gebaut ist. Angehaengt
-    /// scheitert bei ihnen nur das Dekodieren DIESES Ereignisses, und es
-    /// wird uebersprungen. MUSS im Gleichschritt mit der SDK-Kopie in
-    /// `tools/wasm/sdk/widgets/src/abi.rs` bleiben.
+    /// A variant of its own rather than a field on `Wheel`: an added field
+    /// would change an existing variant's ABI and break every app built
+    /// against the old SDK. An appended variant only fails to decode for
+    /// them and is skipped. Must stay in lockstep with the SDK copy in
+    /// `tools/wasm/sdk/widgets/src/abi.rs`.
     WheelX { dx: i32 },
     /// A `Widget::Slider` moved. `action` is its `on_change`, `value` in
     /// 0..=[`SLIDER_MAX`]. `done: false` while the pointer drags (only
@@ -820,14 +814,6 @@ pub struct Palette {
 /// the rasterizer indexes with `token as usize` and does not bounds-check.
 pub const PALETTE_SLOTS: usize = 32;
 
-/// A raster destination. Either a tile in the GGTT slab, or a composition
-/// layer — from the rasterizer's perspective they are identical: a BGRA32
-/// pixel buffer with an origin offset in window coordinates.
-///
-/// The rasterizer receives `Rect`s and `Point`s in **window** coordinates
-/// and subtracts `origin` internally to get the target-local position.
-/// Draws are clipped to `size`. This is what makes tile-boundary drawing
-/// Just Work — the left tile clips the right half away, and vice versa.
 /// A planar 4:2:0 frame, borrowed from the canvas store. Every field was
 /// validated by `canvas::commit_i420`, which is what lets the blit index
 /// the planes without re-deriving a single bound.
@@ -841,6 +827,14 @@ pub struct I420Ref<'a> {
     pub coeffs: super::canvas::YuvCoeffs,
 }
 
+/// A raster destination. Either a tile in the GGTT slab, or a composition
+/// layer — from the rasterizer's perspective they are identical: a BGRA32
+/// pixel buffer with an origin offset in window coordinates.
+///
+/// The rasterizer receives `Rect`s and `Point`s in window coordinates
+/// and subtracts `origin` internally to get the target-local position.
+/// Draws are clipped to `size`, so drawing across tile boundaries works:
+/// the left tile clips the right half away, and vice versa.
 pub struct RasterTarget<'a> {
     /// Backing pixel buffer (BGRA32, packed u32 per pixel).
     pub pixels:  &'a mut [u32],
@@ -865,16 +859,16 @@ pub struct RasterTarget<'a> {
     /// Owning widget window id — lets the render walker look up a
     /// `Widget::Canvas`'s committed bitmap in the canvas store.
     pub window_id: u32,
-    /// Optional clip rectangle in **target-local** coords `(x0,y0,x1,y1)`.
+    /// Optional clip rectangle in target-local coords `(x0,y0,x1,y1)`.
     /// `None` = clip only to the target size (default). A `Widget::Scroll`
     /// sets this to its viewport rect for the duration of its subtree so
     /// overflowing content is masked instead of bleeding past the panel.
     pub clip: Option<(i32, i32, i32, i32)>,
 }
 
-/// Rasterizer backend. CPU in v1 (fontdue + gui/render.rs). GPU in v2+
-/// (Intel Xe Render engine, SDF text atlas, fragment shaders for blur /
-/// shadow / effect).
+/// Rasterizer backend. CPU in v1 (fontdue + gui/render.rs); a GPU backend
+/// (SDF text atlas, fragment shaders for blur / shadow / effect) would
+/// implement the same trait.
 ///
 /// Non-negotiable: no call site in the widget pipeline references CPU or
 /// GPU specifics. Switching backends = replacing `Box<dyn Rasterizer>`.
@@ -918,14 +912,13 @@ pub trait Rasterizer: Send + Sync {
     /// Copy app-supplied Canvas pixels (BGRA32) into the target.
     fn canvas_copy(&mut self, t: &mut RasterTarget, src: &[u8], w: u16, h: u16);
 
-    /// Blit a BGRA32 bitmap (`sw`×`sh`) contain-fit into `rect` (window
-    /// coordinates): scaled to fit while preserving aspect, centred,
-    /// no background fill outside the fitted image. Default no-op.
-    /// Blit app-supplied BGRA pixels into `rect`, contain-fit and centred.
-    /// `zoom_q88` scales that fitted size (256 = 1.0× = plain fit, larger
-    /// crops to the rect); it comes from `Modifier::Scale` on the Canvas.
-    /// `pan` shifts the content from centred (`Modifier::CanvasOffset`)
-    /// and is clamped to the overhang, so the rect never shows a gap.
+    /// Blit app-supplied BGRA32 pixels (`sw`×`sh`) contain-fit and centred
+    /// into `rect` (window coordinates), with no background fill outside
+    /// the fitted image. `zoom_q88` scales that fitted size (256 = 1.0× =
+    /// plain fit, larger crops to the rect); it comes from `Modifier::Scale`
+    /// on the Canvas. `pan` shifts the content from centred
+    /// (`Modifier::CanvasOffset`) and is clamped to the overhang, so the
+    /// rect never shows a gap. Default no-op.
     fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32,
                    _rect: Rect, _zoom_q88: u32, _pan: (i32, i32)) {}
 

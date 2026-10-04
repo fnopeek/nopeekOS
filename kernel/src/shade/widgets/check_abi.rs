@@ -1,6 +1,6 @@
 //! Compile-time ABI ordering lock.
 //!
-//! Postcard serializes enum variants by **declaration order**, not by
+//! Postcard serializes enum variants by declaration order, not by
 //! name. Inserting a variant in the middle of an ABI enum breaks every
 //! serialized tree written before the change. Removing one does the
 //! same.
@@ -76,7 +76,7 @@ const _: () = {
     assert!(TextStyle::Mono    as u8 == 4);
     assert!(TextStyle::Heading as u8 == 5);
 
-    // IconId — u16, P10.9 Phosphor set frozen.
+    // IconId — u16, Phosphor set frozen.
     assert!(IconId::None.0              == 0);
     assert!(IconId::Folder.0            == 1);
     assert!(IconId::File.0              == 2);

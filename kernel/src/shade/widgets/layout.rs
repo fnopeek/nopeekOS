@@ -1,9 +1,9 @@
 //! Widget layout — flexbox-lite.
 //!
 //! Takes a deserialized `Widget` tree + a container rect, returns a
-//! parallel `LayoutNode` tree where every node carries an **absolute**
-//! `Rect` in window coordinates. The rasterizer (P10.5) walks both
-//! trees in lockstep.
+//! parallel `LayoutNode` tree where every node carries an absolute
+//! `Rect` in window coordinates. The rasterizer walks both trees in
+//! lockstep.
 //!
 //! Strict subset of flexbox (no floats, no percent units, no absolute
 //! positioning, no z-index beyond `Stack`):
@@ -17,7 +17,7 @@
 //!   - Reserved widget slots (Popover/Tooltip/Menu) lay out as a zero-
 //!     sized placeholder — the compositor logs + rejects them.
 //!
-//! All sizes are **logical px at 1× HiDPI**. The rasterizer multiplies
+//! All sizes are logical px at 1× HiDPI. The rasterizer multiplies
 //! by the scale factor at raster time (per docs/archive/PHASE10_WIDGETS.md).
 //!
 //! Two-pass algorithm — cheap, fits on the stack:
@@ -67,7 +67,7 @@ impl LayoutNode {
 /// Floating overlay laid out at the end of the main pass.
 /// `anchor_rect` is captured at lookup time so the hit-tester knows
 /// which screen region to treat as "still inside the popover" for
-/// dismissal purposes (clicks on the anchor should NOT dismiss —
+/// dismissal purposes (clicks on the anchor should not dismiss —
 /// the anchor's own OnClick handles toggle). `child` holds a clone
 /// of the popover's content widget so the rasterizer + click router
 /// can walk it without re-finding the source `Widget::Popover` in
@@ -130,12 +130,9 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
 }
 
 pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutOutput {
-    // Pass 1: main tree. `place` unpacks the root's own padding itself —
-    // stripping it here first applied it TWICE, which shrank the root's
-    // rect by 2× its padding. On a full-window app that just cost a few
-    // px of content; on a panel it cut visibly into the card, because the
-    // root's Background paints on that rect (a 36 px bar rendered 28 px
-    // tall and sat 5 px too low).
+    // Pass 1: main tree. `place` unpacks the root's own padding itself;
+    // stripping it here as well would apply it twice and shrink the root's
+    // rect (and the Background painted on it) by 2× its padding.
     let mut ctx = ScrollCtx {
         offset: scroll_y, max: 0, max_rect: NO_RECT, max_x: 0, max_x_rect: NO_RECT,
     };
@@ -181,7 +178,7 @@ fn record_anchors(
 
 /// Walk the widget tree, find every Widget::Popover, look up its
 /// anchor rect, and lay out its child as a floating overlay below
-/// the anchor. Apps' contract: declare a Popover only AFTER its
+/// the anchor. Apps' contract: declare a Popover only after its
 /// anchor in tree order so the lookup succeeds.
 fn collect_popovers(
     w: &Widget,
@@ -377,7 +374,7 @@ fn measure_intrinsic(w: &Widget) -> Size {
         }
 
         Widget::Scroll { child, axis, .. } => {
-            // A scroll container does NOT demand its child's full extent on
+            // A scroll container does not demand its child's full extent on
             // the scroll axis — that's the whole point: it lets a flex
             // parent size it to the viewport and clips/scrolls the overflow.
             // Report the child's cross size, but only a small floor on the
@@ -400,12 +397,11 @@ fn measure_intrinsic(w: &Widget) -> Size {
             let w = if w == 0 {
                 content.chars().count() as u32 * 6
             } else { w };
-            // Honour a Padding modifier on the leaf so the OUTER rect
+            // Honour a Padding modifier on the leaf so the outer rect
             // grows to include the padding band — siblings then space
-            // out correctly. Render-side paints glyphs at the inner
-            // rect (post-padding) via paint_node_eff. Without this,
-            // `prefab::menu_bar` and `prefab::badge` (Text + Padding)
-            // were rendered with siblings touching their glyph edges.
+            // out correctly instead of touching the glyph edges.
+            // Render-side paints glyphs at the inner rect (post-padding)
+            // via paint_node_eff.
             let pad = padding(modifiers);
             Size { w: w + pad.0 * 2, h: h + pad.1 * 2 }
         }
@@ -550,7 +546,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
         }
 
         // TextArea + Canvas are placed as leaves, but unlike the others
-        // they FILL the rect the parent allotted (Flex / Align::Stretch
+        // they fill the rect the parent allotted (Flex / Align::Stretch
         // already expanded `inner`) instead of shrinking to their
         // intrinsic floor. A non-flex/non-stretch parent allots an
         // intrinsic-sized rect, so the small-widget case is unchanged;
@@ -569,7 +565,7 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             if max_off > ctx.max { ctx.max = max_off; ctx.max_rect = inner; }
             // Sideways: how far the widest line overruns the text column.
             // Lines are never wrapped, so a long one simply runs past the
-            // right edge — that overrun IS the scrollable range.
+            // right edge — that overrun is the scrollable range.
             let (col_x, col_w) = super::render::textarea_text_column(inner, modifiers, total);
             let max_x = super::render::textarea_content_w(value, modifiers)
                 .saturating_sub(col_w);
@@ -782,8 +778,7 @@ fn ceil_u32(x: f32) -> u32 {
     if (i as f32) < x { i.saturating_add(1) } else { i }
 }
 
-// ── Silence unused warnings on helper types while the rest of the
-//    pipeline (Point, Box) lands ────────────────────────────────────
+// ── Silence unused warnings on helper types (Point, Box) ─────────────
 #[allow(dead_code)]
 fn _keep_imports_alive() {
     let _ = Point::default();

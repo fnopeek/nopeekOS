@@ -1,4 +1,4 @@
-//! Canvas bitmap store (P10.10 escape hatch).
+//! Canvas bitmap store (escape hatch for app-drawn pixels).
 //!
 //! Apps with the CANVAS capability upload pixels via `npk_canvas_commit`
 //! (BGRA32) or `npk_canvas_commit_yuv` (planar 4:2:0); it is stored here
@@ -7,19 +7,18 @@
 //! Decoupled from the widget tree so a re-render (resize / theme) keeps
 //! showing the last committed pixels without the app re-uploading.
 //!
-//! **Why 4:2:0 is stored as 4:2:0 and not converted here:** a video
-//! decoder holds planar YUV, and turning it into BGRA is the single most
-//! expensive thing in the whole path. Measured at 1080p30 it costs 145 %
-//! of a core INSIDE a module — more than decoding the frame. Kept planar,
-//! the conversion happens in the blit instead: natively, and only for the
-//! pixels that actually land in the canvas rect. It also carries 1.5 bytes
-//! per pixel across the module boundary instead of 4.
+//! Why 4:2:0 is stored as 4:2:0 and not converted here: a video decoder
+//! holds planar YUV, and turning it into BGRA is the most expensive step in
+//! the whole path, more than decoding the frame when done inside a module.
+//! Kept planar, the conversion happens in the blit instead: natively, and
+//! only for the pixels that actually land in the canvas rect. It also
+//! carries 1.5 bytes per pixel across the module boundary instead of 4.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Per-app pixel caps (mirror the P10.10 spec): 4096×4096, 64 MB total.
+/// Per-app pixel caps: 4096×4096, 64 MB total.
 pub const MAX_DIM: u32 = 4096;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -102,7 +101,7 @@ pub fn commit(window_id: u32, canvas_id: u32, w: u32, h: u32, px: Vec<u8>) -> bo
 }
 
 /// Store (or replace) a planar 4:2:0 frame. Every bound the blit relies on
-/// is checked HERE and nowhere else — the blit walks these planes without
+/// is checked here and nowhere else — the blit walks these planes without
 /// re-deriving a single length, so this is the one place that decides
 /// whether an index can go out of range.
 pub fn commit_i420(
@@ -111,7 +110,7 @@ pub fn commit_i420(
     coding: YuvCoding,
 ) -> bool {
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM { return false; }
-    // Chroma is half size, rounded UP: an odd width still has a column.
+    // Chroma is half size, rounded up: an odd width still has a column.
     let cw = ((w + 1) / 2) as usize;
     let ch = ((h + 1) / 2) as usize;
     if ys < w as usize || cs < cw { return false; }

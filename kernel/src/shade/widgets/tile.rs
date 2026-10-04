@@ -1,15 +1,14 @@
 //! Tile grid — the workhorse of widget rasterization.
 //!
-//! A window's content is rasterized into a **fixed grid of tiles** in the
+//! A window's content is rasterized into a fixed grid of tiles in the
 //! GGTT slab. Tiles are geometry-driven, not widget-driven — they remain
 //! stable across tree rebuilds. Off-screen tiles LRU-evict individually.
 //!
-//! P10.0 scope: constants + TileId struct. Coordinate math, dirty-set
-//! scheduling, and per-tile raster tasks land in P10.5.
+//! Constants and the TileId struct only.
 
 #![allow(dead_code)]
 
-/// Tile edge length in **actual** pixels (not logical). BGRA32 → 1 MB per
+/// Tile edge length in actual pixels (not logical). BGRA32 → 1 MB per
 /// tile, matching the slab's primary bucket. At 2× HiDPI this renders
 /// content at 256×256 logical.
 ///

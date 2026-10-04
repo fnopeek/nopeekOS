@@ -26,7 +26,7 @@ pub enum WindowState {
 /// - `Terminal`: classic `loop` window with a per-window terminal
 ///   buffer (existing behaviour — keyboard input, text output,
 ///   intent prompt). Uses `terminal_idx`.
-/// - `Widget`: Phase 10 declarative GUI app window. Content is a
+/// - `Widget`: declarative GUI app window. Content is a
 ///   BGRA pixel buffer rendered by the widget pipeline from the
 ///   last committed tree. Doesn't own a terminal buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub enum WindowKind {
     Terminal,
     Widget,
     /// Raw-bitmap window fed by an external pixel source (a microvm's
-    /// virtio-gpu framebuffer; later any Canvas-escape-hatch app).
+    /// virtio-gpu framebuffer).
     /// No terminal buffer, no widget tree — its content is a
     /// `GuestSurface` double-buffer keyed by WindowId. Composited as a
     /// tile like any other window (tiling invariant; never fullscreen).
@@ -67,20 +67,20 @@ pub struct Window {
     /// Resize delta for tiling split adjustment (pixels, can be negative).
     pub resize_w: i32,
     pub resize_h: i32,
-    /// Dwindle: the window this one SPLIT when it opened, and which way.
+    /// Dwindle: the window this one split when it opened, and which way.
     ///
     /// Together these two fields are the whole layout tree — a dwindle tree is
     /// fully determined by "who did each window split, and in which direction",
     /// so no separate structure has to be kept in sync with the window list.
     /// `None` = this window owns the workspace's whole area (the root).
     pub split_from: Option<WindowId>,
-    /// `true` = the split put the new window BESIDE its parent, `false` = below.
+    /// `true` = the split put the new window beside its parent, `false` = below.
     /// Decided once, from the parent's shape at the moment of the split, so the
     /// layout stays stable when windows are later resized or closed.
     pub split_beside: bool,
     /// Process ID in process table (0 = not registered).
     pub pid: u32,
-    /// Content kind — Terminal (classic loop) or Widget (Phase 10 GUI).
+    /// Content kind — Terminal (classic loop), Widget (GUI) or Surface.
     pub kind: WindowKind,
     /// Overlay window: skipped by retile, keeps its own geometry,
     /// rendered on top. Set by the app via `npk_window_set_overlay`.

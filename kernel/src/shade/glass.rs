@@ -3,8 +3,8 @@
 //! Glass (loop, dock, bar) is a fill blended over the blurred wallpaper.
 //! How much blur, how much fill, and where the fill must hold the text
 //! legible depend on the picture: a calm dark image wants a light touch, a
-//! bright busy one wants more of everything. One fixed set per theme was
-//! right for one wallpaper at a time. So the wallpaper is measured once
+//! bright busy one wants more of everything, so no fixed set per theme
+//! fits every picture. The wallpaper is measured once
 //! when it is set (`background::compute_blur`), and every value below is
 //! derived from that measurement. A key set with `set` wins over the
 //! derived value; `unset` returns it to automatic.
@@ -17,11 +17,11 @@ use crate::shade::widgets::palette;
 /// What the wallpaper looks like, measured on its 1/4-size copy.
 #[derive(Clone, Copy)]
 pub struct Stats {
-    /// Luma percentiles of the BLURRED image (what glass sits on).
+    /// Luma percentiles of the blurred image (what glass sits on).
     pub p10: u32,
     pub p50: u32,
     pub p90: u32,
-    /// Mean luma standard deviation inside 4x4 blocks of the SHARP image —
+    /// Mean luma standard deviation inside 4x4 blocks of the sharp image —
     /// how much fine detail would compete with text.
     pub detail: u32,
     /// Mean colour of the blurred image (0xRRGGBB).
@@ -66,8 +66,8 @@ const NO_WALLPAPER: Stats = Stats { p10: 24, p50: 24, p90: 24, detail: 0, mean_r
 /// Blur radius for a measured detail level: the busier the picture, the
 /// more it has to be calmed before text can sit on it.
 pub fn auto_blur(detail: u32) -> usize {
-    // Florian's set measures 5-8 here and still carries fine grain that
-    // fights text, so the scale starts at 2 (~10 px), not 1.
+    // Typical photo wallpapers measure 5-8 here and still carry fine grain
+    // that fights text, so the scale starts at 2 (~10 px), not 1.
     (2 + detail / 4).clamp(2, 5) as usize
 }
 
@@ -91,7 +91,7 @@ pub fn params() -> Params {
     let ceil_auto = isqrt(max.min(65025)) as u32;
     let ceil = key("shade.dark_ceil").map(|v| v.min(255)).unwrap_or(ceil_auto);
 
-    // Fill weight: enough to take the MEDIAN of the picture a margin under
+    // Fill weight: enough to take the median of the picture a margin under
     // the ceiling (m + a·(fill − m) = target); the ceiling then holds the
     // remaining bright patches per pixel.
     let m = st.p50;

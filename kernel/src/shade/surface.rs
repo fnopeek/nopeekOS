@@ -1,22 +1,21 @@
-//! Per-window raw-bitmap surfaces (Phase 12.4 — display bridge).
+//! Per-window raw-bitmap surfaces (display bridge).
 //!
 //! A `Surface`-kind window's content is an opaque pixel buffer fed by
 //! an external source — today a microvm's virtio-gpu framebuffer
-//! (`RESOURCE_FLUSH`), later any Canvas-escape-hatch app. Shade
+//! (`RESOURCE_FLUSH`). Shade
 //! composites it as a tile like any other window (tiling invariant —
 //! never fullscreen).
 //!
-//! Keyed by `WindowId` so the design is N-surface-shaped from day one
-//! even though one VM exists now (forward-compat contract #2 —
-//! consumer side never assumes count).
+//! Keyed by `WindowId` so the design handles N surfaces even though one
+//! VM exists now; the consumer side never assumes a count.
 //!
 //! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
 //! consumer (Shade render on Core 0) run on different cores. Three
 //! buffers per surface (back → ready → front): each side copies or blits
-//! with the map lock RELEASED and takes it only to swap buffers. Holding it
-//! across a multi-MB copy or blit stalled the other side for milliseconds —
-//! the vCPU on its next exit, and with it every interrupt it would have
-//! delivered.
+//! with the map lock released and takes it only to swap buffers. Holding it
+//! across a multi-MB copy or blit would stall the other side for
+//! milliseconds — the vCPU on its next exit, and with it every interrupt it
+//! would deliver.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -51,7 +50,7 @@ pub struct GuestSurface {
     /// Desired output size = the window's content rect, written by
     /// Shade on create + every retile (`set_tile_size`). virtio-gpu
     /// `GET_DISPLAY_INFO` reports this so the guest (wlroots/cage)
-    /// reflows to the tile natively — D4, no host-side scaling.
+    /// reflows to the tile natively, with no host-side scaling.
     /// 0 until Shade has placed the window.
     tile_w: u32,
     tile_h: u32,
@@ -112,7 +111,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     }
     back.width = width;
     back.height = height;
-    // The guest sends little-endian BGRX bytes, which on x86 (LE) ARE the
+    // The guest sends little-endian BGRX bytes, which on x86 (LE) are the
     // exact in-memory layout of the packed u32 the compositor reads.
     // SAFETY: back.pixels holds px_count u32s = px_count*4 contiguous bytes;
     // src has at least px_count*4 bytes (checked above).
@@ -157,13 +156,12 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
         });
     }
     drop(map);
-    // A new guest frame must trigger a recomposite — otherwise the
-    // tile only updates when some *other* event (a click, a key)
-    // happens to call render_frame (observed: cyan appeared only
-    // after clicking the window). Use the clipped surface path (blit
-    // only the tile rect, not the whole screen) — a 60 Hz guest doing a
-    // full-screen MMIO blit every frame starved the cursor on bare metal.
-    // Both just set an atomic; poll_render picks it up.
+    // A new guest frame must trigger a recomposite, otherwise the tile only
+    // updates when some other event (a click, a key) happens to call
+    // render_frame. Use the clipped surface path (blit only the tile rect,
+    // not the whole screen): a 60 Hz guest doing a full-screen MMIO blit
+    // every frame starves the cursor. Both just set an atomic; poll_render
+    // picks it up.
     if crate::shade::SURFACE_CLIP_BLIT {
         crate::shade::request_surface_render();
     } else {
@@ -236,8 +234,8 @@ pub fn tile_size(window_id: u32) -> Option<(u32, u32)> {
 }
 
 /// Non-consuming peek of the display-dirty flag. The VM core checks
-/// this first so it can rate-limit the config-change IRQ (R2 debounce)
-/// WITHOUT clearing the flag when it decides to skip — the dirty state
+/// this first so it can rate-limit the config-change IRQ (debounce)
+/// without clearing the flag when it decides to skip — the dirty state
 /// (and the latest tile size) then survives to the next allowed
 /// window, so the final resize size is always delivered.
 pub fn display_dirty_peek(window_id: u32) -> bool {

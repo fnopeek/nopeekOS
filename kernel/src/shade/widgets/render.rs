@@ -10,7 +10,7 @@
 //!   3. Recurse into children.
 //!
 //! Clipping, coordinate transforms, and glyph compositing are all the
-//! rasterizer's problem. This file only *schedules* calls.
+//! rasterizer's problem. This file only schedules calls.
 
 #![allow(dead_code)]
 
@@ -38,7 +38,7 @@ pub fn render(
 ///
 /// Each `*_path: Option<&[u32]>` follows the same protocol:
 ///   - `None`        → this subtree contains no node in this state
-///   - `Some([])`    → THIS node IS the state target — merge inner mods
+///   - `Some([])`    → this node is the state target — merge inner mods
 ///   - `Some([i,…])` → child `i` is on the path; descend with tail
 ///
 /// CSS `:hover` / `:focus` / `:active` ancestor semantics: any
@@ -67,8 +67,8 @@ pub fn render_with_state(
     // Colour inherited from the nearest ancestor carrying `Modifier::Tint`,
     // like CSS `color`. A `Tint` on a Row is what apps reach for to say
     // "this whole row is accent now"; without inheritance the Row's own
-    // paint would take it and every Text/Icon inside would silently fall
-    // back to the default. `None` = no ancestor set one.
+    // paint would take it and every Text/Icon inside would fall back to the
+    // default. `None` = no ancestor set one.
     inherited_tint: Option<Token>,
 ) {
     let is_hovered = hover_path.is_some();
@@ -198,7 +198,7 @@ fn span_token_at(spans: &[super::abi::Span], off: usize, default: Token) -> Toke
     default
 }
 
-/// Die Farb-Laeufe aus `Modifier::Spans`, oder leer.
+/// The colour runs from `Modifier::Spans`, or empty.
 fn spans_of(mods: &[super::abi::Modifier]) -> &[super::abi::Span] {
     for m in mods {
         if let super::abi::Modifier::Spans(v) = m { return v }
@@ -382,8 +382,8 @@ const GUTTER_PAD_L: i32 = 10;
 /// Width a `TextArea`'s line-number gutter occupies, or 0 when the app
 /// didn't ask for one. Sized to the highest line number the buffer can
 /// show, so the text doesn't shift sideways as you scroll past 99.
-/// **Shared by the renderer and the click-to-caret hit test** — if these
-/// two disagree, clicks land on the wrong column.
+/// Shared by the renderer and the click-to-caret hit test; if these two
+/// disagree, clicks land on the wrong column.
 pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
     let px = super::layout::font_size_of(super::abi::TextStyle::Mono, mods);
     let on = mods.iter().any(|m| matches!(m, Modifier::LineNumbers(true)));
@@ -407,8 +407,8 @@ pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
 const TEXTAREA_BAR_W: i32 = 6;
 
 /// A `TextArea`'s text column: left edge and visible width, both in screen
-/// px. **Shared by the renderer, the click-to-caret hit test and the
-/// caret-follow scroll** — `scroll_x` is derived from these, so if they
+/// px. Shared by the renderer, the click-to-caret hit test and the
+/// caret-follow scroll — `scroll_x` is derived from these, so if they
 /// disagree the caret scrolls to a different place than it is drawn.
 pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: usize)
     -> (i32, u32)
@@ -421,12 +421,12 @@ pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: u
     (x, (right - x).max(0) as u32)
 }
 
-/// Width of the widest line in a `TextArea`, in px. **Shared by the layout
+/// Width of the widest line in a `TextArea`, in px. Shared by the layout
 /// (which turns it into the scrollable range) and the renderer (which sizes
-/// the scrollbar thumb from it).**
+/// the scrollbar thumb from it).
 ///
 /// A `TextArea` is always Mono, and mono means a uniform advance — so the
-/// longest line by character count IS the widest one. Find it by counting
+/// longest line by character count is the widest one. Find it by counting
 /// and measure only that line, instead of measuring every line of the
 /// document on every keystroke.
 pub(super) fn textarea_content_w(value: &str, mods: &[Modifier]) -> u32 {
@@ -462,7 +462,7 @@ fn paint_modifiers_eff(
     // radius via Border) keep their look without code changes.
     let radius = rounded.unwrap_or_else(|| border.map(|(_, _, r)| r).unwrap_or(0));
 
-    // Focus ring first: it sits OUTSIDE the node rect, so the background
+    // Focus ring first: it sits outside the node rect, so the background
     // and border paint over its inner edge and leave a clean band.
     if let Some((tok, width)) = ring {
         if width > 0 {
@@ -499,7 +499,7 @@ fn paint_modifiers_eff(
 /// take effect.
 ///
 /// `edit_state` is `Some` iff this node is the focused `Widget::Input`
-/// AND the compositor has a live editor for it — in which case the
+/// and the compositor has a live editor for it — in which case the
 /// rendered text comes from the editor buffer (not the widget's
 /// `value`, which lags by one round-trip) and a caret is painted at
 /// the editor cursor's x-position.
@@ -515,13 +515,11 @@ fn paint_node_eff(
     inherited_tint: Option<Token>,
 ) {
     let rect = layout.rect;
-    // Inner-rect origin for leaf glyph placement. The OUTER rect is
+    // Inner-rect origin for leaf glyph placement. The outer rect is
     // sized to include any `Modifier::Padding` (see layout.rs leaf
     // measure paths); the actual text/icon must shift in by the
     // padding amount so the glyphs sit centred inside the padded
-    // band — without this `prefab::menu_bar` and `prefab::badge`
-    // would render with their text glued to the left edge of their
-    // own padded background instead of inside it.
+    // band rather than glued to its left edge.
     let leaf_pad = leaf_padding(eff);
     let inner_x = rect.x + leaf_pad.0 as i32;
     let inner_y = rect.y + leaf_pad.1 as i32;
@@ -579,11 +577,10 @@ fn paint_node_eff(
             if !has_bg {
                 rast.rect(target, rect, Fill::Solid(Token::Accent));
             }
-            // Label + icon follow `Modifier::Tint` like Text and Icon do.
-            // They used to be hardcoded — OnSurface for the label, OnAccent
-            // for the icon — so a filled button painted dark-on-dark text on
-            // its own Accent fill and the two halves disagreed with each
-            // other. The default stays OnSurface for the unfilled styles.
+            // Label + icon follow `Modifier::Tint` like Text and Icon do, so
+            // a filled button's label and icon agree with each other on its
+            // Accent fill. The default stays OnSurface for the unfilled
+            // styles.
             let mut color = inherited_tint.unwrap_or(Token::OnSurface);
             for m in eff {
                 if let Modifier::Tint(tok) = m { color = *tok; }
@@ -621,21 +618,17 @@ fn paint_node_eff(
                 Some(e) => e.value.as_str(),
                 None    => value.as_str(),
             };
-            // A focused empty field shows the caret ALONE. Drawing the
-            // placeholder too puts both at the same x — the caret ends up
-            // welded to the first letter ("|search"), which reads as a
-            // glitch rather than as a hint. The design never shows the two
-            // together either: rest = placeholder, focus = text + caret.
+            // A focused empty field shows the caret alone. Drawing the
+            // placeholder too puts both at the same x, with the caret
+            // welded to the first letter ("|search"). Rest = placeholder,
+            // focus = text + caret.
             let focused = edit_state.is_some();
             let text_x = inner_x + 4;   // built-in chrome + the node's padding
             let text_y = inner_y + 4;
-            // **Die Auswahl UNTER dem Text, vor den Glyphen.** Ziehen,
-            // Shift+Pfeil und Strg+C arbeiteten hier laengst — nur sah man
-            // nichts davon, weil die `Input` als einziges Textfeld ihre
-            // Auswahl nie gemalt hat. Eine Auswahl, die es gibt und die man
-            // nicht sieht, ist schlimmer als keine: man markiert, kopiert und
-            // weiss nicht, was in der Ablage liegt. Dieselbe Rechnung und
-            // dasselbe Token wie in `TextArea` weiter unten.
+            // The selection goes under the text, before the glyphs. A
+            // selection that exists but cannot be seen is worse than none:
+            // the user marks, copies and does not know what is on the
+            // clipboard. Same computation and token as `TextArea` below.
             let sel = edit_state.and_then(|e| e.selection());
             if let (Some((a, b)), false) = (sel, live_value.is_empty()) {
                 let (a, b) = (a.min(live_value.len()), b.min(live_value.len()));
@@ -651,19 +644,17 @@ fn paint_node_eff(
                 }
             }
             if !live_value.is_empty() {
-                // `Modifier::Spans` faerbt LAEUFE des Textes — die
-                // Adresszeile hebt damit die registrierbare Domain hervor
-                // und blendet den Rest ab. Ohne Spannen bleibt es der eine
-                // billige Aufruf von vorher.
+                // `Modifier::Spans` colours runs of the text; the address
+                // bar uses it to highlight the registrable domain and dim
+                // the rest. Without spans it stays one cheap call.
                 let spans = spans_of(eff);
                 if spans.is_empty() {
                     rast.text(target, live_value, INPUT_STYLE, Token::OnSurface,
                               Point { x: text_x, y: text_y });
                 } else {
-                    // In Laeufe gleicher Farbe zerlegen und einzeln setzen —
-                    // dieselbe Rechnung wie in `TextArea`. Gemessen wird je
-                    // Lauf, damit der naechste dort anfaengt, wo der vorige
-                    // wirklich endete.
+                    // Split into runs of one colour and draw each — the same
+                    // computation as in `TextArea`. Measured per run so the
+                    // next starts where the previous really ended.
                     let mut x = text_x;
                     let mut run_start = 0usize;
                     let mut run_tok = span_token_at(spans, 0, Token::OnSurface);
@@ -728,7 +719,7 @@ fn paint_node_eff(
                 None    => value.as_str(),
             };
             let style = super::abi::TextStyle::Mono;
-            // Zoom: every metric below has to come from the SAME px, or the
+            // Zoom: every metric below has to come from the same px, or the
             // caret, the selection blocks and the gutter drift apart from
             // the glyphs they belong to.
             let px = super::layout::font_size_of(style, eff);
@@ -761,8 +752,8 @@ fn paint_node_eff(
 
             // Line window from the stored scroll offset (wheel / drag /
             // caret-follow). The view is authoritative here: caret-follow
-            // happens on caret MOVES (handle_input_key adjusts scroll_y), so
-            // the render must NOT re-pull to the caret every frame — that
+            // happens on caret moves (handle_input_key adjusts scroll_y), so
+            // the render must not re-pull to the caret every frame — that
             // would defeat manual wheel/drag scrolling.
             let total_lines = total_lines_all;
             let max_scroll = total_lines.saturating_sub(visible);
@@ -965,7 +956,7 @@ fn paint_node_eff(
         }
 
         Widget::Canvas { id, .. } => {
-            // P10.10: the app uploads BGRA pixels via npk_canvas_commit,
+            // The app uploads BGRA pixels via npk_canvas_commit,
             // stored keyed by (window_id, canvas_id). Blit it contain-fit
             // into this rect; muted placeholder until something commits.
             let cid = id.0;

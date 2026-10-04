@@ -45,7 +45,7 @@ const BORDER_ACTIVE_OPACITY: u32 = 235;
 const BORDER_INACTIVE_OPACITY: u32 = 130;
 
 /// What to paint around a window: `band` is the strip reserved for the halo
-/// (restored from the wallpaper on every repaint, so a tile that LOST focus
+/// (restored from the wallpaper on every repaint, so a tile that lost focus
 /// erases its old halo), `alpha` is how strongly it is drawn right now.
 #[derive(Clone, Copy)]
 pub struct Glow {
@@ -69,19 +69,17 @@ const CLOSE_BTN_BOX: u32 = 26;
 /// very top edge. Windows without a menu bar (browser, terminal) just
 /// get the X centred in their top ~band; close enough.
 const CLOSE_BTN_BAND: u32 = 36;
-/// Close-X glyph size at 1×. MUST be an atlas-native size (16/24/32/…):
+/// Close-X glyph size at 1×. Must be an atlas-native size (16/24/32/…):
 /// `icons::alpha_for` returns the nearest-not-smaller bitmap and the
-/// blit below uses THAT size verbatim, so asking for 20 silently drew a
-/// 24 px X — a quarter larger than intended.
+/// blit below uses that size verbatim, so any other value would draw a
+/// larger X than intended.
 const CLOSE_BTN_GLYPH: u32 = 16;
 
-/// The platform close-X is a FIXED pixel size — it never tracks the screen
-/// HiDPI scale. Widget apps render their UI at fixed px (the widget rasterizer
-/// runs at `RasterTarget.scale = 1`; apps size via density, not a HiDPI
-/// factor), so a screen-scaled X balloons against the content on 4K. We tried
-/// keeping the scale for terminals (whose text does grow 2×), but a 2× X on a
-/// loop tile looked absurdly large next to the small widget X — Florian wants
-/// every close-X the same small size. So: always 1×, on every window kind.
+/// The platform close-X is a fixed pixel size and never tracks the screen
+/// HiDPI scale. Widget apps render their UI at fixed px (the widget
+/// rasterizer runs at `RasterTarget.scale = 1`; apps size via density, not a
+/// HiDPI factor), so a screen-scaled X would balloon against the content on
+/// 4K. Every window kind gets the same small X.
 fn close_btn_scale(_win: &Window, _scale: u32) -> u32 {
     1
 }
@@ -104,7 +102,7 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     // The box is centred vertically in the app's menu-bar band so the X
     // aligns with `Datei / Bearbeiten / …` rather than the top edge. Reuse
     // that same vertical inset as the right-edge margin → equal gap on the
-    // top, bottom and right sides (Florian: "rundum gleicher Abstand").
+    // top, bottom and right sides.
     let band = CLOSE_BTN_BAND * scale;
     let inset = band.saturating_sub(box_px) / 2;
     if win.width <= border * 2 + inset + box_px { return None; }
@@ -113,16 +111,14 @@ fn close_button_rect(win: &Window, border: u32, scale: u32)
     Some((bx, by, box_px, box_px))
 }
 
-/// Paint the platform close button — a bare X — into the shadow buffer,
-/// vertically centred in the window's top menu-bar band. Drawn last in
 // ── Terminal chrome cache ──────────────────────────────────────────────
 // The translucent "glass" terminal background (bg_color blended over the
-// wallpaper, per pixel) is the dominant compositor cost (~71ms for a
-// maximised 4K terminal) and it's STATIC — only geometry / theme / focus /
-// wallpaper change it, not the text drawn on top. Cache the rendered chrome
-// region (wallpaper+border+glass) and memcpy it back each frame instead of
-// re-blending. One entry (the common case is one focused terminal); a second
-// terminal just thrashes it (still correct, recomputes on miss).
+// wallpaper, per pixel) is the dominant compositor cost, and it is static:
+// only geometry / theme / focus / wallpaper change it, not the text drawn on
+// top. Cache the rendered chrome region (wallpaper+border+glass) and memcpy
+// it back each frame instead of re-blending. One entry (the common case is
+// one focused terminal); a second terminal just thrashes it (still correct,
+// recomputes on miss).
 struct ChromeCache { key: u64, w: u32, h: u32, px: Vec<u32> }
 static CHROME_CACHE: spin::Mutex<Option<ChromeCache>> = spin::Mutex::new(None);
 
@@ -195,11 +191,12 @@ pub fn clear_chrome_cache() {
     *CHROME_CACHE.lock() = None;
 }
 
-/// `render_window` so it sits over the window content. No disc / colour
-/// highlight (Florian's call): just the glyph, sized and coloured like
-/// the design's `close` — 16 px in a 26 px box, `OnSurfaceMuted`, so it
-/// carries the same weight as the menu labels beside it and flips with
-/// the theme (dark X on light, light X on dark).
+/// Paint the platform close button — a bare X — into the shadow buffer,
+/// vertically centred in the window's top menu-bar band. Drawn last in
+/// `render_window` so it sits over the window content. Just the glyph, no
+/// disc or highlight, sized and coloured like the design's `close`: 16 px
+/// in a 26 px box, `OnSurfaceMuted`, so it carries the same weight as the
+/// menu labels beside it and flips with the theme.
 fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
                      border: u32, scale: u32) {
     let Some((bx, by, bw, bh)) = close_button_rect(win, border, scale) else { return };
@@ -308,8 +305,7 @@ pub struct DockState {
 /// Top strut panel registered by a bar app (`bar.wasm`) via
 /// `npk_window_set_panel(Top, Strut)`. The app reports its height; the kernel
 /// reserves a `margin + pill_h` band at the top and lays tiles below it. The
-/// app owns ALL rendering — there is no native fallback, so an unregistered or
-/// closed bar simply frees the band (tiles reclaim the full height).
+/// app owns all rendering; there is no native fallback, so an unregistered or
 #[derive(Clone, Copy)]
 pub struct TopStrut {
     pub id: WindowId,
@@ -337,7 +333,7 @@ pub struct Compositor {
     pub focused: Option<WindowId>,
     /// Active workspace (0-based).
     pub active_workspace: u8,
-    /// Number of workspaces (was tracked by the old native bar).
+    /// Number of workspaces.
     pub workspace_count: u8,
     /// Gap between tiled windows (in pixels, scaled).
     pub gaps: u32,
@@ -463,7 +459,7 @@ impl Compositor {
     }
 
     /// Width of the focus halo. `shade.glow` in px (0 disables), capped at
-    /// the full gap: only ONE tile is ever focused, so two halos can never
+    /// the full gap: only one tile is ever focused, so two halos can never
     /// meet, and the band stops one pixel short of the neighbour's rect
     /// (tiles stand `gaps` apart, band columns are `[edge, edge + gaps)`).
     /// The workspace area is inset by `gaps` on all four sides, so the band
@@ -515,7 +511,7 @@ impl Compositor {
         true
     }
 
-    /// Repaint ONLY the halo band of the focused tile. The flash animates
+    /// Repaint only the halo band of the focused tile. The flash animates
     /// nothing inside the window, so redrawing the whole tile 20 times over
     /// (millions of pixels at 4K, per frame) would be wasted — this touches
     /// the four gap strips and hands them back as the damage to blit.
@@ -546,16 +542,13 @@ impl Compositor {
             background::draw_background_region(shadow, info, bx, by, bw, bh);
             out.push((bx, by, bw, bh));
         }
-        // Und die vier ECKZWICKEL — innerhalb des umschliessenden Rechtecks,
-        // ausserhalb des Umrisses. Der Hof malt dort, die vier Streifen oben
-        // decken sie NICHT ab (sie enden an den Kanten des Kastens), und weil
-        // dieser Weg inkrementell ist, blieb der helle Blitzanstrich dort
-        // stehen, bis das Fenster irgendwann ganz neu gezeichnet wurde: ein
-        // kleiner Keil an jeder Ecke. Der volle Weg (`render_window`) stellt
-        // den ganzen Kasten her und hatte das Problem nie.
+        // And the four corner notches: inside the bounding rect, outside the
+        // outline. The halo paints there but the four strips above end at the
+        // box edges and do not cover them, so this incremental path must
+        // restore them too or the bright flash stays behind at each corner.
         //
-        // Maskiert, weil in demselben Quadrat auch der Bogen des Fensters
-        // liegt — ein glattes Rechteck wuerde ihn wegwischen.
+        // Masked, because the window's own arc lies in the same square and a
+        // plain rectangle would wipe it.
         let r = self.rounding.min(w / 2).min(h / 2);
         if r > 0 {
             for (cx, cy) in [(x, y), (x + w - r, y),
@@ -610,41 +603,27 @@ impl Compositor {
         (full as u64 * risen as u64 / slide as u64) as u32
     }
 
-    /// Create a new window and add it to the current workspace.
-    /// Returns None if no terminal slots available.
-
-    /// Where a newly opened window hangs in the dwindle tree: it SPLITS the
-    /// focused window, which is what makes the leftmost tile splittable at all
-    /// — the old layout always subdivided the most recent window, so the first
-    /// tile could never be halved however long the session ran.
+    /// Where a newly opened window hangs in the dwindle tree: it splits the
+    /// focused window, so every tile, including the first, can be split
+    /// again.
     ///
     /// Direction comes from the focused tile's shape: a wide one splits
     /// side-by-side, a tall one stacks. That is why the first split on a
     /// landscape screen goes to the right.
     fn dwindle_parent(&self) -> (Option<WindowId>, bool) {
-        // 1. Das fokussierte Fenster — aber nur, wenn es wirklich eine
-        //    Kachel ist.
+        // 1. The focused window, but only if it really is a tile.
         if let Some(fid) = self.focused {
             if let Some(f) = self.windows.iter().find(|w| w.id == fid && self.is_tile(w)) {
                 return (Some(fid), f.width >= f.height);
             }
         }
 
-        // 2. Der Fokus liegt auf einem OVERLAY — dem Launcher, einem Menue.
-        //
-        //    Hier stand frueher `return (None, true)`, und das machte das
-        //    neue Fenster zu einer WURZEL. Zwei Wurzeln liegen beide ueber
-        //    dem ganzen Schirm, ihre Mittelpunkte fallen also zusammen;
-        //    `swap_direction` sucht den naechsten Nachbarn geometrisch und
-        //    findet in KEINER Richtung einen. Mod+Shift+Pfeil tat damit
-        //    nichts — bei jeder App, die aus `drun` gestartet wurde. Aus
-        //    dem Dock ging es, weil ein Panel den Fokus gar nicht nimmt und
-        //    die Shell fokussiert bleibt.
-        //
-        //    Ein Overlay ist kein Ort, an den man kachelt. Es ist aber auch
-        //    kein Grund, den Baum zu vergessen: genommen wird die oberste
-        //    echte Kachel, also das Fenster, in dem der Nutzer gerade
-        //    gearbeitet hat, bevor er den Launcher aufzog.
+        // 2. Focus is on an overlay (launcher, menu). An overlay is not a
+        //    place to tile into, but returning no parent would make the new
+        //    window a second root: both roots cover the whole screen, their
+        //    centres coincide, and `swap_direction` finds no neighbour in
+        //    any direction. Take the topmost real tile instead, i.e. the
+        //    window the user worked in before opening the launcher.
         for &id in &self.z_order {
             if let Some(f) = self.windows.iter().find(|w| w.id == id && self.is_tile(w)) {
                 return (Some(id), f.width >= f.height);
@@ -653,7 +632,7 @@ impl Compositor {
         (None, true)
     }
 
-    /// Kommt dieses Fenster als Elternteil einer neuen Kachel in Frage?
+    /// Can this window be the parent of a new tile?
     fn is_tile(&self, w: &Window) -> bool {
         w.workspace == self.active_workspace
             && w.state == WindowState::Tiled
@@ -676,16 +655,14 @@ impl Compositor {
     /// (`beside` = the vertical line between side-by-side tiles, else the
     /// horizontal one). `None` = no such line bounds it.
     ///
-    /// The delta lives on the window that DREW the line, so a window owns the
+    /// The delta lives on the window that drew the line, so a window owns the
     /// line at only one of its edges; the opposite edge belongs to the last
-    /// child that split it. Adding the delta to the focused window
-    /// unconditionally was silently a no-op on every root window — the one
-    /// tile that has no line of its own.
+    /// child that split it. A root window has no line of its own.
     ///
-    /// No sign comes back any more. A delta always sits on the child that
-    /// drew the line and always pushes it towards the parent's origin
-    /// (left / up), so "move the line the way the arrow points" is a fixed
-    /// `- delta` for both callers — see `resize_focused`.
+    /// A delta always sits on the child that drew the line and always pushes
+    /// it towards the parent's origin (left / up), so "move the line the way
+    /// the arrow points" is a fixed `- delta` for both callers — see
+    /// `resize_focused`.
     fn resize_target(&self, id: WindowId, beside: bool) -> Option<WindowId> {
         let mut cur = id;
         // Bounded walk: a corrupt parent chain must not spin the compositor.
@@ -719,6 +696,8 @@ impl Compositor {
             .map(|c| c.id)
     }
 
+    /// Create a new window and add it to the current workspace.
+    /// Returns None if no terminal slots available.
     pub fn create_window(&mut self, title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<WindowId> {
         let terminal_idx = terminal::allocate()?;
 
@@ -745,7 +724,7 @@ impl Compositor {
         Some(id)
     }
 
-    /// Create a widget-kind window for a Phase 10 GUI app. Doesn't
+    /// Create a widget-kind window for a GUI app. Doesn't
     /// allocate a terminal buffer (widget apps aren't text-driven).
     /// Focus stays on the current window so the spawning shell keeps
     /// receiving the user's input.
@@ -762,7 +741,7 @@ impl Compositor {
 
         self.windows.push(win);
         self.z_order.insert(0, id);
-        // Deliberately NOT focus_window(id) — keep focus on the shell
+        // Deliberately not focus_window(id) — keep focus on the shell
         // that spawned us, so the user's next keystroke lands there.
         // But this insert(0) put us above the dock, so re-pin it on top.
         self.retile();
@@ -824,26 +803,21 @@ impl Compositor {
         };
         // Drop the "loop" process-table entry that create_window
         // allocated — for a widget the app runs as its own KIND_WASM
-        // process (registered by the spawn path), so the loop PID is a
-        // misleading orphan that otherwise leaks on every drun/dock
-        // launch (close_window only frees a pid in its Terminal arm,
-        // which a promoted Widget window never reaches). Exiting a pid
-        // only touches the PROCS map. We deliberately do NOT free the
-        // session or terminal buffer here: the terminal's intent loop is
-        // still live and holds a long-lived `&mut IntentSession`, so
-        // freeing them mid-flight is a use-after-free (panicked in
-        // sync_session_to_terminal). Their lifecycle stays tied to the
-        // window via close_window. (Session/terminal-slot leak for
-        // promoted widgets is pre-existing — a separate follow-up.)
+        // process (registered by the spawn path), so the loop PID would be
+        // a misleading orphan (close_window only frees a pid in its
+        // Terminal arm, which a promoted Widget window never reaches).
+        // Exiting a pid only touches the PROCS map. We deliberately do not
+        // free the session or terminal buffer here: the terminal's intent
+        // loop is still live and holds a long-lived `&mut IntentSession`,
+        // so freeing them mid-flight is a use-after-free. Their lifecycle
+        // stays tied to the window via close_window. Not implemented:
+        // freeing the session/terminal slot of a promoted widget.
         if pid != 0 { crate::process::exit(pid); }
         // Re-tile: the promoted window kept whatever geometry it had as a
-        // terminal (often fullscreen, if it was the only window when its
-        // terminal was created). Without this, launching a second app from
-        // the dock left the first app fullscreen and the second stacked
-        // behind it instead of splitting — promote is the only window-
-        // producing path that wasn't re-tiling. Overlay/panel apps (drun,
-        // dock, bar) call set_overlay/set_panel right after, which un-tiles
-        // them again, so this is a no-op for them.
+        // terminal (often fullscreen). Without this a second app launched
+        // from the dock would stack behind the first instead of splitting.
+        // Overlay/panel apps (drun, dock, bar) call set_overlay/set_panel
+        // right after, which un-tiles them again, so this is a no-op for them.
         self.retile();
         self.needs_full_redraw = true;
         Some(id)
@@ -939,7 +913,7 @@ impl Compositor {
         }
     }
 
-    /// A visible light-dismiss window NOT containing `(x, y)`, if any — the
+    /// A visible light-dismiss window not containing `(x, y)`, if any — the
     /// click-handler closes it so transient overlays vanish on an outside
     /// click. (Clicks inside keep it open to interact with.)
     fn light_dismiss_outside(&self, x: i32, y: i32) -> Option<WindowId> {
@@ -959,8 +933,7 @@ impl Compositor {
     /// `npk_window_set_panel` host fn — configure `id` as an edge panel.
     /// `edge`: 0=Bottom, 1=Top. `behavior`: 0=AutoHide overlay (dock),
     /// 1=Strut (bar). Bottom+AutoHide is the dock (slide + handle);
-    /// Top+Strut (the bar) is wired in the bar-render step. Returns false
-    /// for not-yet-implemented combos.
+    /// Top+Strut is the bar. Returns false for other combinations.
     pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
         match (edge, behavior) {
             (0, 0) => self.set_dock_panel(id, w, h),
@@ -1171,13 +1144,12 @@ impl Compositor {
         out
     }
 
-    /// Jedes Fenster mit seinem ECHTEN Zustand — die Ansicht, die es
-    /// braucht, wenn eine App „optisch geschlossen" ist und trotzdem in
-    /// `top` und im Dock weiterlebt.
+    /// Every window with its real state: the view needed when an app is
+    /// visually closed but still lives on in `top` and the dock.
     ///
-    /// `window_lines` (was das Dock sieht) zeigt nur Titel und laesst
-    /// Overlays und Panels weg; genau dort verschwindet dann auch die
-    /// Frage, WELCHES Fenster ueberlebt hat und in welcher Art.
+    /// `window_lines` (what the dock sees) shows only titles and omits
+    /// overlays and panels, which hides exactly which window survived and
+    /// of which kind.
     pub fn dump_windows(&self) -> alloc::string::String {
         use core::fmt::Write;
         let mut out = alloc::string::String::new();
@@ -1209,12 +1181,8 @@ impl Compositor {
         out
     }
 
-    /// Drive the dock reveal/hide intent from the current cursor Y.
-    /// Called every frame (poll_render) so dwell/debounce advance even
-    /// while the cursor is parked. Suppressed during a drag/resize so the
-    /// dock never fights a tile being dragged toward the bottom.
     /// Something moves on its own and needs the next frame (see
-    /// `shade::needs_tick`). The dock's dwell and debounce count CALLS, so
+    /// `shade::needs_tick`). The dock's dwell and debounce count calls, so
     /// while either runs, or the slide has not reached its target, the loop
     /// must keep calling at the frame rate.
     pub fn needs_tick(&self) -> bool {
@@ -1226,6 +1194,10 @@ impl Compositor {
         self.animation.is_some() || self.flash.is_some() || self.focus_glow.is_some() || dock_busy
     }
 
+    /// Drive the dock reveal/hide intent from the current cursor Y.
+    /// Called every frame (poll_render) so dwell/debounce advance even
+    /// while the cursor is parked. Suppressed during a drag/resize so the
+    /// dock never fights a tile being dragged toward the bottom.
     pub fn dock_update_reveal(&mut self, cursor_y: i32) {
         let dragging = self.drag.is_some();
         let baseline = self.dock_baseline() as i32;
@@ -1325,7 +1297,6 @@ impl Compositor {
             && w.visible)
     }
 
-    /// Close a window by ID.
     /// Is `id` a panel (dock or bar)? Panels are managed chrome — they
     /// never hold focus and must not be closed by Mod+Q.
     pub fn is_panel(&self, id: WindowId) -> bool {
@@ -1338,7 +1309,7 @@ impl Compositor {
     /// `Event::CloseRequest` and stays open so it can prompt about unsaved
     /// work. Asking a second time closes it for real — the guard buys one
     /// round of politeness, not a veto. Everything else closes at once,
-    /// exactly as before.
+    /// round of politeness, not a veto. Everything else closes at once.
     pub fn request_close_window(&mut self, id: WindowId) {
         if crate::shade::widgets::is_close_guarded(id.0) {
             let now = crate::interrupts::ticks();
@@ -1365,6 +1336,7 @@ impl Compositor {
         true
     }
 
+    /// Close a window by ID.
     pub fn close_window(&mut self, id: WindowId) {
         // Any file dialog this window opened goes with it. Collected (and
         // deregistered) first so closing them doesn't try to report a
@@ -1442,8 +1414,8 @@ impl Compositor {
         for w in &mut self.windows {
             if w.split_from == Some(id) {
                 w.split_from = inherited;
-                // The eldest child takes over the departing window's SLOT, so
-                // it inherits the direction AND the line's offset — the delta
+                // The eldest child takes over the departing window's slot, so
+                // it inherits the direction and the line's offset — the delta
                 // belongs to the line, not to the window that happens to hold
                 // it. Later children keep their own and chain after it,
                 // exactly as they did underneath.
@@ -1679,7 +1651,7 @@ impl Compositor {
 
     /// Lay a window out in `rect` together with everything that split it.
     ///
-    /// Children are walked in CREATION order, each taking half of what is left:
+    /// Children are walked in creation order, each taking half of what is left:
     /// splitting A, then splitting A again, halves A twice — which is exactly
     /// what happens interactively when the focus stays put.
     fn dwindle(&mut self, id: WindowId, tiled: &[WindowId],
@@ -1692,7 +1664,7 @@ impl Compositor {
         // Children only ever eat into the right/bottom, so the origin stays put.
         let (cx, cy, mut cw, mut ch) = (x, y, w, h);
         for kid in kids {
-            // The split's position is the CHILD's resize delta: it is the one
+            // The split's position is the child's resize delta: it is the one
             // that arrived and drew the line, so Mod+arrow on it moves the
             // line it created.
             let (beside, dw, dh) = self.windows.iter().find(|c| c.id == kid)
@@ -1726,7 +1698,7 @@ impl Compositor {
         }
     }
 
-    /// Write back the offset a split line ACTUALLY took after clamping, so a
+    /// Write back the offset a split line actually took after clamping, so a
     /// key held against the minimum tile size doesn't pile up an invisible
     /// debt that has to be pressed off again before the line moves back.
     fn store_delta(&mut self, id: WindowId, beside: bool, effective: i32, current: i32) {
@@ -1757,7 +1729,7 @@ impl Compositor {
 
     /// Push every Surface window's content rect into the surface
     /// registry so virtio-gpu can advertise it via GET_DISPLAY_INFO
-    /// (D4 — guest renders to the tile size, no host scaling). Called
+    /// (the guest renders to the tile size, no host scaling). Called
     /// at the end of every retile; `set_tile_size` is idempotent and
     /// only flags a config-change on a real size change. The `border`
     /// must match render_window's content-rect inset exactly or the
@@ -1895,10 +1867,10 @@ impl Compositor {
         // corners keep showing whatever app is underneath instead of
         // punching a wallpaper-shaped hole into it. The bar is the
         // exception: it's a translucent overlay that repaints every clock
-        // tick, so it MUST restore its band from the wallpaper first or
+        // tick, so it must restore its band from the wallpaper first or
         // successive blends would stack into an opaque smear.
         if !win.is_overlay || win.is_bar {
-            // Restore the halo band too, ALWAYS — also for an unfocused tile,
+            // Restore the halo band too, always — also for an unfocused tile,
             // which is exactly the one that has to paint over the halo it had
             // while it was focused. The band lives inside the gap, so this
             // never reaches a neighbour (see `glow_width`).
@@ -2163,7 +2135,7 @@ impl Compositor {
                 });
             }
             crate::shade::window::WindowKind::Surface => {
-                // Raw guest framebuffer → tile, 1:1 (no scaling). D4:
+                // Raw guest framebuffer → tile, 1:1 (no scaling).
                 // virtio-gpu GET_DISPLAY_INFO advertises this content
                 // rect, so the guest (wlroots/cage) reflows to the
                 // tile size natively — guest `sw×sh` == `cw×ch` in
@@ -2258,8 +2230,8 @@ impl Compositor {
         let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
         if win.is_dock || win.is_bar {
             // Panels return early from the widget arm but still flow here.
-            // Time them SEPARATELY — averaging them with the terminal made
-            // the phase numbers ambiguous (panels carry their own cost).
+            // Time them separately: panels carry their own cost, and
+            // averaging them with the terminal makes the numbers ambiguous.
             static T_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
             static N_PANEL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
             T_PANEL.fetch_add(t_rw_content.saturating_sub(t_rw0), Relaxed);
@@ -2716,12 +2688,11 @@ impl Compositor {
 
         // Middle click: raw button only, no hit-test.
         //
-        // **Es gibt keine `Action` dafuer, und das ist Absicht.** Ein
-        // Mittelklick ist keine zweite Art, einen Knopf zu druecken — er ist
-        // eine Geste auf dem INHALT (im Browser: den Link unter dem Zeiger in
-        // einem neuen Tab oeffnen). Wer ihn auf den Treffertest legte, liesse
-        // jeden Knopf im System auf die mittlere Taste reagieren, ohne dass
-        // eine einzige App darum gebeten haette.
+        // There is deliberately no `Action` for it. A middle click is not
+        // a second way to press a button but a gesture on the content (in
+        // the browser: open the link under the pointer in a new tab).
+        // Routing it through the hit-test would make every button in the
+        // system react to the middle button without any app asking for it.
         if !mod_held && self.mouse.middle_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
                 let is_widget = self.windows.iter()
@@ -2765,8 +2736,8 @@ impl Compositor {
             }
         }
 
-        // Und die mittlere Taste ebenso — eine App, die Druck und Loslassen
-        // paart, darf nicht auf ein Loslassen warten, das nie kommt.
+        // Same for the middle button: an app that pairs press and release
+        // must not wait for a release that never comes.
         if !mod_held && self.mouse.middle_released() {
             use crate::shade::widgets::abi::{Event, MouseButton};
             let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
@@ -2814,12 +2785,10 @@ impl Compositor {
             let Some(tid) = self.resize_target(fid, beside) else { continue };
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == tid) {
                 // `- delta`, exactly like the mouse drag: the arrow moves the
-                // split line the way it points. It used to mean "make the
-                // focused window wider" (Hyprland's resizeactive), which is
-                // predictable in the abstract but looks wrong on screen —
-                // on a right-hand tile the LEFT edge moved, so pressing
-                // Right made the window grow leftwards. Keyboard and mouse
-                // now push the same line the same way.
+                // split line the way it points. "Make the focused window
+                // wider" would move the left edge of a right-hand tile, so
+                // pressing Right would grow it leftwards. Keyboard and mouse
+                // push the same line the same way.
                 if beside { win.resize_w -= delta } else { win.resize_h -= delta }
                 moved = true;
             }
@@ -2848,7 +2817,7 @@ impl Compositor {
 
     /// Resolve the split lines a Mod+RMB drag will move and remember where
     /// they stood, so the drag stays absolute against its start position.
-    /// Only WHICH line comes from `resize_target` — the sign doesn't, see
+    /// Only which line comes from `resize_target` — the sign doesn't, see
     /// `apply_resize_drag`.
     fn begin_resize_drag(&mut self, wid: WindowId, mx: i32, my: i32) {
         let w_target = self.resize_target(wid, true);
@@ -2934,7 +2903,7 @@ impl Compositor {
         let b_from = self.windows.iter().find(|w| w.id == b)
             .map(|w| (w.x, w.y, w.width, w.height)).unwrap_or((0,0,0,0));
 
-        // Swap their PLACES IN THE TREE, not their places in the list — the
+        // Swap their places in the tree, not their places in the list — the
         // list order no longer decides geometry. Each takes the other's
         // parent, and each other's children come along, so the two tiles
         // exchange regions with everything nested inside them.
@@ -3031,7 +3000,7 @@ impl Compositor {
 
     // ── Screen flash ──────────────────────────────────────────────────
     //
-    // A shutter closing, not a floodlight: the screen dips DARK for a
+    // A shutter closing, not a floodlight: the screen dips dark for a
     // moment instead of being washed white. Same mechanism either way —
     // a full-screen blend — but dimming reads as a soft blink while white
     // is genuinely harsh on a dark desktop. Kept to a few frames because
@@ -3059,7 +3028,7 @@ impl Compositor {
     }
 
     /// Advance the flash. True while it still needs frames — including the
-    /// final one that clears it, otherwise the last white wash would stay
+    /// final one that clears it, otherwise the last dimmed frame would stay
     /// on screen until something else happened to repaint.
     pub fn flash_tick(&mut self) -> bool {
         let start = match self.flash { Some(s) => s, None => return false };
@@ -3111,7 +3080,6 @@ impl Compositor {
         }
     }
 
-    /// Find the topmost window at screen coordinates (x, y).
     /// The modal window on this workspace, if any — a dialog that owns the
     /// pointer until it's answered.
     fn modal_window(&self) -> Option<WindowId> {
@@ -3122,10 +3090,9 @@ impl Compositor {
 
     /// True if (x, y) lies outside an open modal dialog.
     ///
-    /// Clicking there used to focus and raise the window behind, burying
-    /// the dialog with no way back — a file picker vanished behind its own
-    /// app and the user was stuck. A modal dialog blocks the pointer
-    /// instead: nothing behind it reacts. Deliberately NOT light-dismiss,
+    /// Clicking there would focus and raise the window behind, burying the
+    /// dialog with no way back, so a modal dialog blocks the pointer
+    /// instead: nothing behind it reacts. Deliberately not light-dismiss,
     /// which is right for a casual overlay (the volume slider) but would
     /// throw away a half-typed filename on a stray click.
     fn modal_blocks(&self, x: i32, y: i32) -> bool {
@@ -3142,6 +3109,7 @@ impl Compositor {
         }
     }
 
+    /// Find the topmost window at screen coordinates (x, y).
     pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Z-order: front to back (first match = topmost)
         for &wid in &self.z_order {

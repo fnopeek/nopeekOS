@@ -44,7 +44,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 #[allow(dead_code)]
 static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
 
-/// Check if layer system is usable (initialized AND matches current framebuffer).
+/// Check if layer system is usable (initialized and matches current framebuffer).
 fn layers_usable() -> bool {
     if !crate::layers::is_initialized() { return false; }
     let info = framebuffer::get_info();
@@ -95,8 +95,8 @@ where
 {
     let r = COMPOSITOR.lock().as_mut().map(f);
     // A change from another core (a widget app focusing, flashing, closing a
-    // window) is something Core 0 has to act on — and Core 0 no longer looks
-    // every 10 ms (stage 3e). Tell it. After the lock, not under it.
+    // window) is something Core 0 has to act on, and Core 0 does not poll
+    // for it. Tell it. After the lock, not under it.
     if r.is_some() && crate::smp::per_core::current_core_id() != 0 {
         crate::intent::wake_shell();
     }
@@ -302,7 +302,7 @@ pub fn focused_surface_id() -> Option<u32> {
 }
 
 /// Forward a host pointer event into the focused Surface window's
-/// guest virtio-input eventq as an **absolute** pointer (qemu
+/// guest virtio-input eventq as an absolute pointer (qemu
 /// usb-tablet model): cursor position relative to the tile content
 /// rect, scaled to `0..ABS_MAX`, plus button transitions and wheel.
 /// Resolution-independent — the guest scales `ABS_MAX` onto its own
@@ -391,11 +391,10 @@ static FORCE_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Force a full redraw (e.g. after wallpaper change).
 ///
-/// Only Core 0 composes. The wallpaper module runs on a worker core, and
-/// composing from there raced Core 0 into the same back buffer: the
-/// terminal-glass cache could capture a half-mixed frame under the NEW key
-/// and keep showing it until the key changed again — which only a
-/// light/dark switch did. From any other core this just leaves a note.
+/// Only Core 0 composes. Composing from a worker core (e.g. the wallpaper
+/// module) would race Core 0 into the same back buffer, and the
+/// terminal-glass cache could capture a half-mixed frame under the new key.
+/// From any other core this just leaves a note.
 pub fn force_redraw() {
     if crate::smp::per_core::current_core_id() != 0 {
         FORCE_REDRAW_PENDING.store(true, Ordering::Release);
@@ -431,12 +430,12 @@ pub fn render_frame() {
     render_frame_mode(false);
 }
 
-/// Move the cursor WITHOUT recompositing the scene. The front buffer
+/// Move the cursor without recompositing the scene. The front buffer
 /// already holds the composed scene with the cursor baked in at its old
 /// spot + the clean pixels under it saved. Restore those (erase old
 /// cursor), save-under + bake at the new spot, and blit only the affected
-/// bounding box. NO comp.render, NO bg memcpy — that per-move recomposite
-/// was the bare-metal cost (+watts/stutter) whenever a window was open.
+/// bounding box. No comp.render and no bg memcpy, which would be costly
+/// per move whenever a window is open.
 fn render_frame_cursor_only() {
     note_render(2);
     framebuffer::with_fb(|fb| {
@@ -495,7 +494,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
     if w > 0 && h > 0 { framebuffer::blit_rect(fb, x0, y0, w, h); }
 }
 
-/// Full recomposite → blit. Scene is composed CLEAN into the back buffer
+/// Full recomposite → blit. Scene is composed clean into the back buffer
 /// (no cursor), swapped to front, then the cursor is saved-under + baked
 /// into the front and the whole frame blitted (cursor included → atomic,
 /// no flicker; incl. the dock reveal animation + the microvm tile).
@@ -509,7 +508,7 @@ fn render_frame_layered() {
         let info = *fb.info();
         let back = fb.shadow_back();
 
-        // Render scene to BACK buffer (front stays stable for cursor)
+        // Render scene to back buffer (front stays stable for cursor)
         if let Some((bg_buf, _, _, _)) = crate::layers::buffer(crate::layers::LAYER_BG) {
             let size = pitch as usize * screen_h as usize;
             // SAFETY: bg_buf and back are valid for size bytes
@@ -551,13 +550,12 @@ fn render_frame_layered() {
 }
 
 /// Like `render_frame_layered` but for a Surface-only update (a guest/browser
-/// FLUSH): recomposite the scene (cheap RAM work) yet blit ONLY the surface
-/// tile rect(s) + the cursor to MMIO — not the whole screen. The full-screen
-/// MMIO blit is the dominant bare-metal (GOP framebuffer) cost; a 60 Hz guest
-/// doing it every frame saturated the framebuffer and starved cursor blits
-/// → laggy mouse whenever an app was up. Only the surface pixels changed, so
-/// the rest of the front buffer already matches what's on screen. See
-/// project-baremetal-gfx-perf ("clip the MMIO blit = the main win").
+/// FLUSH): recomposite the scene (cheap RAM work) yet blit only the surface
+/// tile rect(s) + the cursor to MMIO, not the whole screen. The full-screen
+/// MMIO blit is the dominant cost on a GOP framebuffer; a 60 Hz guest doing
+/// it every frame saturates the framebuffer and starves cursor blits. Only
+/// the surface pixels changed, so the rest of the front buffer already
+/// matches what's on screen.
 fn render_frame_surface() {
     note_render(1);
     let t0 = crate::interrupts::rdtsc();
@@ -617,7 +615,7 @@ fn render_frame_surface() {
         fb.commit_front();
 
         // Capture the old cursor rect (to erase a ghost if it moved this
-        // frame) BEFORE save_under_and_bake overwrites the saved position.
+        // frame) before save_under_and_bake overwrites the saved position.
         let old = cursor::saved_pos();
         let had_old = cursor::save_valid();
         cursor::save_under_and_bake(fb.front_ptr(), &info);
@@ -785,17 +783,15 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
 
     let src_ggtt = fb.front_ggtt();
     let dst_ggtt = crate::gpu::fb_ggtt_offset();
-    // dst_ggtt == 0 is VALID: when the firmware scanout sits at GGTT offset 0
-    // (Tiger Lake blit-only, fw PLANE_SURF=0), that IS the live scanout. Only
-    // a missing shadow mapping (src == 0) means "not set up". Treating dst 0 as
-    // invalid was silently routing the whole frame back to the 100ms CPU/UC
-    // blit even though BCS is up + readback-verified.
+    // dst_ggtt == 0 is valid: when the firmware scanout sits at GGTT offset 0
+    // (Tiger Lake blit-only, fw PLANE_SURF=0), that is the live scanout. Only
+    // a missing shadow mapping (src == 0) means "not set up"; treating dst 0
+    // as invalid would route every frame to the slow CPU blit.
     if src_ggtt == 0 { return false; }
 
     // [gpu-blit] instrument: does the real (full 4K) blit succeed, and how
-    // long does submit+poll take? A small readback blit verified fine but a
-    // 33MB blit may time out submit_blit's completion poll → false → CPU
-    // fallback (the 100ms we still measure).
+    // long does submit+poll take? A large blit may time out submit_blit's
+    // completion poll → false → CPU fallback.
     let t = crate::interrupts::rdtsc();
     let ok = crate::gpu::gpu_blit_rect(src_ggtt, pitch, dst_ggtt, pitch, 0, 0, pitch / 4, h);
     record_gpu_blit(t, ok);
@@ -819,12 +815,10 @@ fn render_damaged_layered() {
 
         if let Some(ref mut comp) = *COMPOSITOR.lock() {
             // Erase → repaint → re-bake, never a bare `draw_cursor_on_shadow`:
-            // this is a PARTIAL repaint, so nothing here overwrites a cursor
-            // baked at the previous position. It went unnoticed while every
-            // mouse move was followed by `render_frame_cursor_only`, which
-            // cleaned up after it — but a scrollbar drag consumes the pointer
-            // event and leaves this pass as the only one running, so the
-            // cursor smeared a copy across the whole drag.
+            // this is a partial repaint, so nothing here overwrites a cursor
+            // baked at the previous position. When this pass is the only one
+            // running (e.g. a scrollbar drag consumes the pointer event), a
+            // bare bake would smear copies of the cursor across the drag.
             let old = cursor::saved_pos();
             let had_old = cursor::save_valid();
             cursor::restore_under(shadow, &info);
@@ -857,13 +851,12 @@ fn render_focus_glow() {
         let (shadow, _) = fb.shadow_ptr();
 
         if let Some(ref comp) = *COMPOSITOR.lock() {
-            // The cursor is BAKED into the front buffer. Baking another one
-            // per tick — which is what a plain `draw_cursor_on_shadow` does —
-            // left a copy at every position the mouse passed through: this
-            // pass repaints only the halo band, so nothing overwrites them
-            // (they vanished later, when a full render came along). Erase,
-            // repaint, bake at the new spot: the same save/restore dance
-            // `render_frame_cursor_only` does for every partial repaint.
+            // The cursor is baked into the front buffer. Baking another one
+            // per tick (a plain `draw_cursor_on_shadow`) would leave a copy at
+            // every position the mouse passed through, since this pass
+            // repaints only the halo band. Erase, repaint, bake at the new
+            // spot: the same save/restore dance `render_frame_cursor_only`
+            // does for every partial repaint.
             let old = cursor::saved_pos();
             let had_old = cursor::save_valid();
             cursor::restore_under(shadow, &info);
@@ -911,7 +904,7 @@ pub fn take_deferred_render() -> bool {
 /// call from any core (worker cores executing WASM etc.) — actual
 /// MMIO work still runs on Core 0.
 pub fn request_render() {
-    // The shell loop on Core 0 renders; wake it on the edge (stage 3e).
+    // The shell loop on Core 0 renders; wake it on the edge.
     if !DEFERRED_RENDER.swap(true, Ordering::AcqRel) {
         crate::intent::wake_shell();
     }
@@ -922,7 +915,7 @@ pub fn request_render() {
 /// screenshot flash, the focus glow, the dock (its dwell and debounce count
 /// calls, and it slides) — or a guest frame waits out its rate cap, a close
 /// request waits for its answer, or a render is still pending. Otherwise the
-/// shell sleeps until something wakes it (stage 3e).
+/// shell sleeps until something wakes it.
 pub fn needs_tick() -> bool {
     DEFERRED_RENDER.load(Ordering::Relaxed)
         || CURSOR_MOVED.load(Ordering::Relaxed)
@@ -945,7 +938,7 @@ where
 pub fn handle_action(action: input::ShadeAction) {
     use input::ShadeAction;
 
-    // Modal gate: while ANY window is marked modal (set via
+    // Modal gate: while any window is marked modal (set via
     // `npk_window_set_modal` from the app), suppress every action that
     // would steal focus or reshape the grid underneath. CloseWindow,
     // SpawnLauncher, and Lock stay allowed so the user can still
@@ -1209,11 +1202,6 @@ fn spawn_launcher() {
     }
 }
 
-/// Launch an installed widget module by name (e.g. "loft") from kernel
-/// code — the spawn half of `spawn_launcher`, exposed for cross-boundary
-/// actions (the 9p "open in loft" trigger from the microvm browser).
-/// MUST run on Core 0 (touches the compositor). Re-focuses an existing
-/// window of that name instead of spawning a duplicate.
 /// Launch every app named in the `autostart` config (comma/space-
 /// separated) via the widget-spawn path — a fresh window, no terminal,
 /// no `APP_RUNNING` capture (so background overlays like the dock don't
@@ -1234,9 +1222,8 @@ pub fn start_autostart() {
         // Stagger the launches. Every entry is fetched from npkFS, spawned as a
         // fiber and starts working immediately; firing them together makes the
         // first seconds after boot the busiest the machine ever is. A hardware
-        // driver brought up in that window is running handshakes against
-        // firmware timeouts it cannot extend — measured: the WiFi driver comes
-        // up reliably when started by hand and not at all from autostart.
+        // driver brought up in that window runs handshakes against firmware
+        // timeouts it cannot extend, and may fail where a later start works.
         if !first {
             let until = crate::interrupts::ticks() + AUTOSTART_STAGGER_TICKS;
             while crate::interrupts::ticks() < until {
@@ -1251,6 +1238,11 @@ pub fn start_autostart() {
 /// Gap between autostart launches, in 100 Hz ticks.
 const AUTOSTART_STAGGER_TICKS: u64 = 40; // 400 ms
 
+/// Launch an installed widget module by name (e.g. "loft") from kernel
+/// code — the spawn half of `spawn_launcher`, exposed for cross-boundary
+/// actions (the 9p "open in loft" trigger from the microvm browser).
+/// Must run on Core 0 (touches the compositor). Re-focuses an existing
+/// window of that name instead of spawning a duplicate.
 pub fn launch_app(name: &str) {
     launch_app_with_ttl(name, Some(600_000));
 }
@@ -1271,11 +1263,10 @@ pub fn launch_app_with_ttl(name: &str, ttl_ticks: Option<u64>) {
         render_frame();
         return;
     }
-    // **Loading the module happens on a worker** (`docs/plan/CORES_AND_EVENTS.md`,
-    // stage 3). Reading it from npkFS, decrypting it and checking its hash
-    // took milliseconds to tens of milliseconds for a large module — on
-    // Core 0, between the click and the next frame. The check above stays
-    // here: it needs the compositor.
+    // Loading the module happens on a worker (`docs/plan/CORES_AND_EVENTS.md`):
+    // reading it from npkFS, decrypting it and checking its hash can take
+    // tens of milliseconds for a large module, which on Core 0 would delay
+    // the next frame. The check above stays here: it needs the compositor.
     let job = alloc::boxed::Box::new(LaunchJob { name: alloc::string::String::from(name), ttl_ticks });
     let arg = alloc::boxed::Box::into_raw(job) as u64;
     if crate::smp::scheduler::worker_count() == 0 {
@@ -1407,17 +1398,16 @@ pub fn poll_render() {
         render_frame();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
-        // Guest produced a new frame. On HW the guest reports 100% damage
-        // every frame, so this is always a full-tile blit — ~16 MB of MMIO
-        // at 4K. Run unthrottled at the guest's 60 Hz it saturates Core 0,
-        // which ALSO drains the NIC RX ring, so saturation spiked network
-        // rxlat into the 100 ms range and the host cursor stuttered across
-        // ALL windows. So FPS-cap the heavy blit: at most once per
+        // Guest produced a new frame. The guest may report 100% damage every
+        // frame, so this can be a full-tile blit (~16 MB of MMIO at 4K). Run
+        // unthrottled at the guest's 60 Hz it saturates Core 0, which also
+        // drains the NIC RX ring, so network latency and the host cursor
+        // suffer. So FPS-cap the heavy blit: at most once per
         // SURFACE_MIN_TICKS normally, and stretch the cap to
-        // SURFACE_MAX_STALE_TICKS while the mouse is actively moving (the
-        // browser briefly drops fps) so the cursor stays smooth — the gaps
-        // are filled with the cheap cursor-only render. Coalescing is free:
-        // SURFACE_DIRTY stays set and we render the latest frame when due.
+        // SURFACE_MAX_STALE_TICKS while the mouse is actively moving so the
+        // cursor stays smooth — the gaps are filled with the cheap
+        // cursor-only render. Coalescing is free: SURFACE_DIRTY stays set and
+        // we render the latest frame when due.
         let now = crate::interrupts::ticks();
         let since = now.wrapping_sub(LAST_SURFACE_TICK.load(Ordering::Relaxed));
         let cap = if CURSOR_MOVED.load(Ordering::Relaxed) {
@@ -1464,8 +1454,7 @@ pub fn poll_render() {
             }
 
             // Any overlay that sits on top of a dirty non-overlay must
-            // repaint too — otherwise the window below paints over it
-            // (classic top-refresh-punches-through-drun bug).
+            // repaint too — otherwise the window below paints over it.
             let dirty_rects: alloc::vec::Vec<(u32, u32, u32, u32)> = comp.windows.iter()
                 .filter(|w| w.dirty && !w.is_overlay
                     && w.workspace == comp.active_workspace && w.visible)
@@ -1484,8 +1473,8 @@ pub fn poll_render() {
             }
 
             let focused_id = comp.focused;
-            // Wurde ausser dem fokussierten Fenster noch eines gemalt?
-            // Siehe die Begruendung hinter der Schleife.
+            // Was any window besides the focused one painted? See the reason
+            // after the loop.
             let mut others_repainted = false;
             // Render back-to-front so overlays paint last (otherwise a
             // terminal behind drun would overwrite drun's pixels).
@@ -1542,20 +1531,14 @@ pub fn poll_render() {
                 framebuffer::blit_rect(fb, win.x, win.y, win.width, win.height);
             }
 
-            // Der Hof zum SCHLUSS, sobald ausser dem fokussierten Fenster
-            // noch eines gemalt wurde.
-            //
-            // `render_window` stellt `Kasten + Band` aus der Wand wieder
-            // her, und das Band IST die Luecke (`glow_width` klemmt auf
-            // `gaps`) — also genau das Stueck Schirm, auf dem der Hof des
-            // NACHBARN liegt. Kommt der Nachbar in dieser Schleife nach dem
-            // fokussierten Fenster, wischt er dessen Hof in der Luecke weg.
-            // Was im eigenen Kasten steht, die vier Eckzwickel, wird mit dem
-            // fokussierten Fenster geblittet und bleibt stehen: ein Keil an
-            // der Ecke mit nichts darunter. Sichtbar nur bei MEHREREN
-            // Fenstern, weil es sonst keinen Nachbarn gibt, der die Luecke
-            // anfasst, und nur auf diesem Teilweg — ein voller Neuaufbau
-            // malt ohnehin alles in einem Zug.
+            // The halo goes last once any window besides the focused one was
+            // painted. `render_window` restores box + band from the
+            // wallpaper, and the band is the gap (`glow_width` clamps to
+            // `gaps`), i.e. exactly where the neighbour's halo lies. A
+            // neighbour painted after the focused window in this loop would
+            // wipe that halo in the gap, while the corner notches inside the
+            // focused box stay, leaving a wedge at each corner. A full
+            // rebuild paints everything in one go and is not affected.
             if others_repainted {
                 for (bx, by, bw, bh) in comp.render_focus_glow(shadow, info) {
                     framebuffer::blit_rect(fb, bx, by, bw, bh);
@@ -1640,11 +1623,11 @@ fn poll_render_legacy() {
 }
 
 /// True while a Mod+LMB/RMB drag is active (swap or resize).
-/// When set, handle_mouse enters slow path on EVERY event (not just button changes).
+/// When set, handle_mouse enters the slow path on every event (not just button changes).
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Set by handle_mouse when a full scene redraw is needed but deferred.
-/// poll_render picks this up AFTER processing all mouse events.
+/// poll_render picks this up after processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
 /// A pure mouse move occurred (no scene change). poll_render moves the
 /// cursor via save-under (no recomposite) for it — cheap, flicker-free.
@@ -1653,8 +1636,6 @@ static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
 /// A guest Surface produced a new frame (browser/microvm FLUSH). Distinct
 /// from DEFERRED_RENDER: only the surface tile pixels changed, so the final
 /// MMIO blit can be clipped to the tile rect instead of the whole screen.
-/// The full-screen blit per 60 Hz guest frame is the dominant bare-metal
-/// (GOP framebuffer) cost and starved the cursor → lag when an app is up.
 static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Last tick (100 Hz) at which a Surface (guest) frame was actually
@@ -1664,18 +1645,15 @@ static SURFACE_DIRTY: AtomicBool = AtomicBool::new(false);
 static LAST_SURFACE_TICK: AtomicU64 = AtomicU64::new(0);
 
 /// Min ticks (100 Hz) between full-tile surface blits when the mouse is
-/// idle — FPS-caps the ~16 MB 4K MMIO blit at ~50 fps so a 60 Hz guest
-/// can't peg Core 0 (which also drains the NIC RX ring).
+/// idle — FPS-caps the 4K MMIO blit so a 60 Hz guest can't peg Core 0
+/// (which also drains the NIC RX ring).
 const SURFACE_MIN_TICKS: u64 = 2;
-/// Min ticks between surface blits while the mouse is actively moving —
-/// the browser drops to ~20 fps so the cheap cursor-only path can keep the
-/// cursor smooth in the gaps.
+/// Min ticks between surface blits while the mouse is actively moving, so
+/// the cheap cursor-only path can keep the cursor smooth in the gaps.
 const SURFACE_MAX_STALE_TICKS: u64 = 5;
 
-/// Clip the blit on a Surface flush to the tile rect (vs full-screen). Flag-
-/// gated because the cursor/blit path has a flicker history (see
-/// project-baremetal-gfx-perf) — flip to `false` to fall back to a full
-/// `request_render` per guest frame (the old behavior).
+/// Clip the blit on a Surface flush to the tile rect (vs full-screen). Flip
+/// to `false` to fall back to a full `request_render` per guest frame.
 pub const SURFACE_CLIP_BLIT: bool = true;
 
 /// A guest Surface produced a new frame → clipped recomposite+blit. Set from
@@ -1690,11 +1668,9 @@ pub fn request_surface_render() {
 /// Signal a bare pointer move from the input IRQ. Picks the cheap cursor-
 /// only render as the default; `handle_mouse` (run by the Core-0 loop /
 /// poll_render before this flag is consumed) upgrades to a full
-/// DEFERRED_RENDER if the event turns out to be a drag/click/scroll. The
-/// IRQ previously called the full `request_render`, which forced a whole-
-/// scene recomposite on *every* pointer delta and defeated `handle_mouse`'s
-/// own CURSOR_MOVED logic (DEFERRED_RENDER is never cleared by it) — the
-/// dominant framebuffer cost while a window/tile was open.
+/// DEFERRED_RENDER if the event turns out to be a drag/click/scroll. A full
+/// `request_render` here would force a whole-scene recomposite on every
+/// pointer delta.
 pub fn request_cursor_move() {
     if !CURSOR_MOVED.swap(true, Ordering::AcqRel) {
         crate::intent::wake_shell();
@@ -1704,23 +1680,22 @@ pub fn request_cursor_move() {
 /// Process a mouse event: handle buttons/drag, redraw cursor.
 /// Position is already updated by timer IRQ (process_mouse_report).
 pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
-    // Forward to a focused microvm guest HERE, not at the call sites:
-    // poll_mouse is a single consuming ring with several Core-0
-    // consumers (this via poll_render:612, and the run_loop Surface
-    // branch). Whichever drains first must still forward, else the
-    // guest only gets events when the timing happens to favour the
-    // forwarding path (was: "only with Mod held" — Mod+drag shifted
-    // the race). handle_mouse is on every consumer's path, so this is
-    // race-free. forward_pointer_to_guest no-ops unless a Surface
-    // window is focused, so this is free in normal desktop use.
+    // Forward to a focused microvm guest here, not at the call sites:
+    // poll_mouse is a single consuming ring with several Core-0 consumers
+    // (poll_render and the run_loop Surface branch). Whichever drains first
+    // must still forward, else the guest only gets events when the timing
+    // happens to favour the forwarding path. handle_mouse is on every
+    // consumer's path, so this is race-free. forward_pointer_to_guest no-ops
+    // unless a Surface window is focused, so this is free in normal desktop
+    // use.
     forward_pointer_to_guest(evt);
 
-    // Waagrechtes Rollen — beim Touchpad zwei Finger nach links/rechts,
-    // bei einer Maus das Kippen des Rades. EIGENER Zweig vor dem
-    // senkrechten, und ohne `return`: ein schraeger Wisch kann beide
-    // Achsen tragen, und wer hier aussteigt, verschluckt die andere.
+    // Horizontal scrolling — two fingers left/right on a touchpad, wheel
+    // tilt on a mouse. Its own branch before the vertical one and without
+    // `return`: a diagonal swipe can carry both axes, and returning here
+    // would drop the other one.
     //
-    // Kein Zweig fuer das Terminal: sein Rueckblick hat nur eine Achse.
+    // No branch for the terminal: its scrollback has only one axis.
     if evt.hscroll != 0 {
         if let Some(wid) = focused_widget_id() {
             let delta = (evt.hscroll as i32) * WIDGET_SCROLL_STEP;
@@ -1815,7 +1790,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // compositor-side, precisely so apps never see a firehose of moves.
     // A drag is the part only the app can interpret (panning a zoomed
     // canvas, rubber-banding), and it is bounded by the button being down.
-    // Addressed to the FOCUSED window, not the one under the cursor, so a
+    // Addressed to the focused window, not the one under the cursor, so a
     // drag that leaves the window keeps arriving.
     //
     // This has to live here, on the real motion path: `handle_mouse` on
@@ -1854,8 +1829,8 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         if needs_redraw {
             if needs_full {
                 if dragging {
-                    // DEFER: don't render inside the event loop — blocks cursor.
-                    // poll_render renders AFTER all events are drained.
+                    // Defer: don't render inside the event loop (blocks the
+                    // cursor). poll_render renders after all events are drained.
                     DEFERRED_RENDER.store(true, Ordering::Relaxed);
                 } else {
                     render_frame();
@@ -1891,11 +1866,6 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     }
 }
 
-/// Terminal drag-selection state machine. A press inside a terminal's text
-/// area begins a selection; holding + moving extends it; release ends it.
-/// Geometry is captured at press so a drag can run past the window edge.
-/// Doesn't consume the event — a plain LMB drag in a terminal never moves
-/// the window, so the normal focus/click flow runs alongside.
 /// Re-render the focused terminal so a selection change (mouse or keyboard)
 /// shows. Marks the terminal + its window dirty, then repaints damage.
 pub fn refresh_focused_terminal() {
@@ -1908,6 +1878,11 @@ pub fn refresh_focused_terminal() {
     render_damaged();
 }
 
+/// Terminal drag-selection state machine. A press inside a terminal's text
+/// area begins a selection; holding + moving extends it; release ends it.
+/// Geometry is captured at press so a drag can run past the window edge.
+/// Doesn't consume the event — a plain LMB drag in a terminal never moves
+/// the window, so the normal focus/click flow runs alongside.
 fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
     if terminal::selection_dragging() {
         let changed = if lmb {
@@ -1951,7 +1926,7 @@ fn update_widget_slider(mx: i32, my: i32, lmb: bool, was: bool) -> bool {
 
 /// Widget text drag-selection for the focused Input/TextArea. Mirrors
 /// `update_terminal_selection`; the widget helpers re-render themselves.
-/// Runs AFTER the compositor's button block so `press_at` has already moved
+/// Runs after the compositor's button block so `press_at` has already moved
 /// focus onto the clicked text widget.
 fn update_widget_text_selection(mx: i32, my: i32, lmb: bool, was: bool) {
     let wid = match focused_widget_id() {
@@ -1964,10 +1939,9 @@ fn update_widget_text_selection(mx: i32, my: i32, lmb: bool, was: bool) {
         return;
     }
     if lmb && !was {
-        // Der wievielte Klick dieser Reihe? Zwei waehlen das Wort, drei die
-        // ganze Zeile — und `click_run` zaehlt IMMER mit, auch wenn der
-        // Druck danach kein Textfeld trifft, sonst laeuft eine Reihe weiter,
-        // die woanders stattfindet.
+        // Which click of this series is this? Two select the word, three the
+        // whole line. `click_run` always counts, even if the press then hits
+        // no text field; otherwise a series elsewhere would carry on.
         match widgets::click_run_at(wid, mx, my) {
             n if n >= 2 && widgets::text_select_run(wid, mx, my, n) => {}
             _ => { widgets::text_select_begin(wid, mx, my); }

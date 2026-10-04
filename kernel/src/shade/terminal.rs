@@ -152,8 +152,8 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Mark the terminal for repaint and, on the clean→dirty edge, wake the
-/// shell on Core 0 — it no longer re-checks every 10 ms (stage 3e). Only
-/// the edge, or every `kprint` from a worker would send an IPI.
+/// shell on Core 0, which does not poll for it. Only the edge, or every
+/// `kprint` from a worker would send an IPI.
 fn set_dirty() {
     if !DIRTY.swap(true, Ordering::AcqRel) {
         crate::intent::wake_shell();
@@ -384,7 +384,7 @@ pub fn write(s: &str) {
         }
     }
 
-    // Default (Core 0, no per-core redirect): the PRIMARY terminal — the
+    // Default (Core 0, no per-core redirect): the primary terminal — the
     // first loop — so background/system debug stays put instead of following
     // window focus. The interactive run loop brackets its prompt + command
     // output with a Core-0 redirect to the focused terminal, so those still
@@ -481,7 +481,7 @@ fn theme_token(t: crate::shade::widgets::abi::Token) -> u32 {
 // ── Status lines ──────────────────────────────────────────────────────
 //
 // The terminal has no escape codes and the font is ASCII-only, so colour
-// cannot travel inside the text. It comes from the SHAPE of a line, the way
+// cannot travel inside the text. It comes from the shape of a line, the way
 // the `[npk]` prefix and the `path> ` prompt already work: a line whose first
 // non-blank character is one of these markers (followed by a space) is a
 // status line, and its tokens are coloured by what they look like.
@@ -815,7 +815,7 @@ pub fn render_to_window(
     let start_line = (term.total + 1)
         .saturating_sub(term.scroll_offset)
         .saturating_sub(lines.len());
-    // Selection bounds for THIS terminal, if a selection covers it.
+    // Selection bounds for this terminal, if a selection covers it.
     let sel_bounds_opt = match SELECTION.lock().as_ref() {
         Some(s) if s.term_idx == terminal_idx as usize => Some(sel_bounds(s)),
         _ => None,
@@ -831,7 +831,7 @@ pub fn render_to_window(
         if e == s { continue; }
         let line_data = &lines[li].0;
         // Special colouring (system [npk] / `path> ` prompt) only on the
-        // FIRST wrapped row of a logical line; continuation rows are plain.
+        // first wrapped row of a logical line; continuation rows are plain.
         let first = s == 0;
         if let Ok(text) = core::str::from_utf8(&line_data[s..e]) {
             if first && text.starts_with("[npk]") {
@@ -1210,14 +1210,13 @@ static STREAM_SINKS: [AtomicPtr<StreamBuf>; MAX_SLOTS] = {
     [NULL; MAX_SLOTS]
 };
 
-/// A sink that gets EVERY write, whichever terminal it was addressed to.
+/// A sink that gets every write, whichever terminal it was addressed to.
 ///
 /// Per-slot mirroring is not what a remote console wants: output is routed by
 /// the per-core redirect, so a background message goes to the primary loop, a
 /// command's output to the loop it was typed in, and a failing path may print
-/// from a core with no redirect at all. A mirror bound to one index then goes
-/// quiet while the machine is still talking — observed as "it takes my commands
-/// but sends nothing back".
+/// from a core with no redirect at all. A mirror bound to one index would go
+/// quiet while the machine is still talking.
 static GLOBAL_SINK: AtomicPtr<StreamBuf> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Open a stream sink for a terminal. Idempotent — calling twice is a no-op.
@@ -1258,18 +1257,13 @@ pub fn stream_close(idx: usize) {
     }
 }
 
-/// Push to the everything-sink ONLY, touching no terminal slot.
+/// Push to the everything-sink only, touching no terminal slot.
 ///
-/// `npk_log_serial` exists precisely to bypass the terminal write path -- a
-/// widget-only app may run when no terminal has a backing buffer, and
-/// `kprintln` can stall there. That bypass also made every such app invisible
-/// to the remote mirror, which calls itself the everything-sink and was not
-/// one: beak, loft, spell, iris, drun, dock, bar, snap and volume all log this
-/// way, so on hardware their output existed only on the physical UART.
-///
-/// This closes the gap without giving the bypass back what it was avoiding:
-/// one atomic load and a push into the sink's own buffer, no terminal slot,
-/// no terminal lock.
+/// `npk_log_serial` bypasses the terminal write path (a widget-only app may
+/// run when no terminal has a backing buffer, and `kprintln` can stall
+/// there). Without this its output would reach only the physical UART and
+/// never the remote mirror. This costs one atomic load and a push into the
+/// sink's own buffer: no terminal slot, no terminal lock.
 pub fn stream_push_global(s: &str) {
     let g = GLOBAL_SINK.load(Ordering::Acquire);
     if !g.is_null() {

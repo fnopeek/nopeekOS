@@ -74,7 +74,7 @@ const DEFAULT_ACCENT: u32 = 0xFFE39BAB;
 //
 // Values taken verbatim from VSCodium's built-in theme JSONs, resolved
 // the way TextMate resolves scopes (most specific scope wins). A scheme
-// supplies ONLY these nine colours — the canvas stays `Page` and plain
+// supplies only these nine colours — the canvas stays `Page` and plain
 // text stays `OnSurface`. Importing a scheme's own background too would
 // fight the glass surfaces, and a dark scheme picked under a light theme
 // would then paint dark-on-white. Preference and canvas are two separate
@@ -247,7 +247,7 @@ pub fn resolve(token: Token) -> u32 {
 }
 
 /// A token as drawn on glass — loop, dock and bar are dark glass in both
-/// themes (light glass over a busy wallpaper was never as legible).
+/// themes, since light glass over a busy wallpaper is less legible.
 pub fn resolve_glass(token: Token) -> u32 {
     resolve_in(token, false)
 }
@@ -330,16 +330,16 @@ pub fn accent_raw() -> u32 {
 
 /// Accent adjusted for minimum contrast against the active surface.
 /// Extracted wallpaper accents can be close in luminance to the chosen
-/// theme surface (e.g. mid-grey wallpaper accent + LIGHT surface both
+/// theme surface (e.g. mid-grey wallpaper accent + light surface both
 /// bright) — we darken/lighten to keep Accent readable.
 fn accent_adjusted(surface: u32) -> u32 {
     let raw = accent_raw();
     let raw_lum = luminance(raw) as i32;
     let surf_lum = luminance(surface) as i32;
-    // Light: the accent is also INK (the loop prompt, links), and it stands
-    // on glass over the wallpaper, not on the near-white `surface` — one
-    // fixed step left a pastel accent barely visible. Darken until it reads
-    // as text.
+    // Light: the accent is also ink (the loop prompt, links), and it stands
+    // on glass over the wallpaper, not on the near-white `surface`, so one
+    // fixed step can leave a pastel accent barely visible. Darken until it
+    // reads as text.
     if surf_lum > 128 {
         let mut c = raw;
         for _ in 0..16 {

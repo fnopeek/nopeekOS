@@ -5,10 +5,9 @@
 //! deterministic fixed-point (floats drift across cores + variable
 //! wakeup latency).
 //!
-//! **Status (v0.61.0):** infra + math primitives only. No active
-//! consumers yet — proper wiring needs the tree-diff path (queued
-//! for the post-P10.9 cleanup). Once we know the delta between
-//! successive commits, each animatable modifier (Background,
+//! Infrastructure and math primitives only; there are no active
+//! consumers yet. Wiring needs a tree-diff path: once the delta between
+//! successive commits is known, each animatable modifier (Background,
 //! Opacity, Padding, x/y position) becomes a tween entry here.
 //!
 //! Self-scheduling tick: `tick()` is called by shade's poll_render

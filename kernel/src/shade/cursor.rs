@@ -1,14 +1,11 @@
-//! Software mouse cursor — OVERLAY approach.
+//! Software mouse cursor.
 //!
-//! The cursor is NEVER drawn on the shadow buffer. Instead:
-//! - Shadow buffer stays clean (scene only)
-//! - Cursor is drawn directly on the MMIO framebuffer
-//! - On move: restore old area from shadow→MMIO, draw cursor at new pos on MMIO
-//! - No save/restore array needed, no ghost cursors possible
+//! The render path bakes the cursor into the shadow buffer with save-under,
+//! so a blit carries scene and cursor together and a pure move needs no
+//! recomposite. A lock-free path can also draw it directly on the MMIO
+//! framebuffer from IRQ context.
 //!
-//! Lock-free fast path: mouse position is stored as atomics.
-//! Core 0 (input) writes position in ~2ns without any lock.
-//! Cursor overlay reads atomics and draws directly to MMIO.
+//! Mouse position is stored as atomics, so input updates it without a lock.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -22,7 +19,7 @@ pub fn cursor_size() -> (u32, u32) { eff_dims() }
 // ── Save-under cursor (no recomposite on a pure move) ───────────────────
 //
 // The render path keeps the scene in the shadow buffer with the cursor
-// BAKED in (atomic blit → no flicker). To move the cursor without
+// baked in (atomic blit → no flicker). To move the cursor without
 // recompositing the whole scene we remember the clean pixels under it
 // (`SAVE_UNDER`): on a move we restore them (erase the old cursor), then
 // save + bake at the new spot and blit only the small affected region.
@@ -41,7 +38,7 @@ static SU_VALID: AtomicBool = AtomicBool::new(false);
 pub fn saved_pos() -> (i32, i32) { (SU_X.load(Ordering::Relaxed), SU_Y.load(Ordering::Relaxed)) }
 pub fn save_valid() -> bool { SU_VALID.load(Ordering::Relaxed) }
 
-/// Save the clean pixels under the cursor's CURRENT position from `buf`,
+/// Save the clean pixels under the cursor's current position from `buf`,
 /// then bake the cursor there. `buf` is a shadow buffer (plain RAM).
 pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     if buf.is_null() || !crate::xhci::mouse_available() { return; }
@@ -193,8 +190,8 @@ fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
     ((lum << 16) | (lum << 8) | lum, ((a * 255.0) as u32).min(255))
 }
 
-/// Update mouse position atomically. NO LOCK needed.
-/// Called from Core 0 input polling — takes ~2 nanoseconds.
+/// Update mouse position atomically, without a lock. Called from Core 0
+/// input polling.
 pub fn update_atomic(dx: i8, dy: i8, buttons: u8) {
     let sw = SCREEN_W.load(Ordering::Relaxed);
     let sh = SCREEN_H.load(Ordering::Relaxed);
@@ -267,9 +264,9 @@ pub fn init_atomic(screen_w: u32, screen_h: u32) {
 /// light outline (OUTER silhouette) around a dark fill (INNER = OUTER inset
 /// by the outline width, computed offline). Both are rasterized with
 /// supersampled point-in-polygon coverage in a REF_W×REF_H reference space,
-/// so the cursor is resolution-independent — smooth at any size, unlike the
-/// old 16×22 bitmap that pixelated at 1:1. REF is exactly 2× the base dims
-/// (15×22) so the default maps 1 ref = 0.5 px with no aspect distortion.
+/// so the cursor is resolution-independent and smooth at any size. REF is
+/// exactly 2× the base dims (15×22) so the default maps 1 ref = 0.5 px with
+/// no aspect distortion.
 const REF_W: f32 = 30.0;
 const REF_H: f32 = 44.0;
 
@@ -339,11 +336,9 @@ impl MouseState {
     pub fn right_clicked(&self) -> bool {
         (self.buttons & 2) != 0 && (self.prev_buttons & 2) == 0
     }
-    /// Die mittlere Taste. Beide Zeigerwege liefern sie schon: die PS/2-Maske
-    /// ist `b0 & 0x07`, das HID-Boot-Protokoll hat sie auf demselben Bit —
-    /// niemand hat bisher nur danach gefragt. Der Browser tut es: ein
-    /// Mittelklick auf einen Link ist „in neuem Tab oeffnen", und ohne diese
-    /// Taste gibt es die Geste gar nicht.
+    /// The middle button. Both pointer paths deliver it (the PS/2 mask is
+    /// `b0 & 0x07`, and HID boot protocol uses the same bit). The browser
+    /// needs it: a middle click on a link opens it in a new tab.
     pub fn middle_clicked(&self) -> bool {
         (self.buttons & 4) != 0 && (self.prev_buttons & 4) == 0
     }
@@ -394,7 +389,7 @@ pub fn draw_cursor_irq() {
     draw_cursor_on_mmio(addr as *mut u8, shadow, pitch, sw, sh, cx, cy);
 }
 
-/// Draw cursor after scene blit. Erases old position ONLY if cursor moved
+/// Draw cursor after scene blit. Erases old position only if cursor moved
 /// (no blink when stationary, no ghost when moved).
 #[allow(dead_code)]
 pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
@@ -464,16 +459,12 @@ fn draw_cursor_on_mmio(mmio: *mut u8, bg_buf: *const u8, pitch: usize, sw: i32, 
 /// becomes part of the same shadow that gets blitted to MMIO — no
 /// separate post-blit cursor write, no race between blit and cursor.
 ///
-/// Critical for high-frequency surface tiles (microvm browser at 60Hz
-/// FLUSH): the previous design re-blitted the entire shadow on every
-/// frame, then re-drew the cursor over MMIO. Display refresh could
-/// catch the brief window where the blit had landed but the cursor
-/// re-write hadn't yet — visible as cursor flicker right after
-/// stopping mouse movement (the moving case masked the flicker with
-/// the moving cursor's blur).
-///
-/// Shadow is the single source of truth now: blit copies cursor along
-/// with the rest of the scene atomically (from the display's view).
+/// This matters for high-frequency surface tiles (a microvm browser
+/// flushing at 60 Hz): blitting the shadow and then drawing the cursor over
+/// MMIO separately lets the display catch the moment the blit has landed
+/// but the cursor has not, which shows as cursor flicker. With the cursor
+/// in the shadow, the blit carries it along atomically from the display's
+/// view.
 pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo) {
     if shadow.is_null() { return; }
     if !crate::xhci::mouse_available() { return; }

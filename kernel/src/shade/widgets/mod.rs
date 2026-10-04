@@ -1,24 +1,9 @@
 //! Widget pipeline — declarative GUI for WASM apps.
 //!
-//! Apps describe **what** to render (widget tree); Shade owns **how**
+//! Apps describe what to render (widget tree); Shade owns how
 //! (layout, rasterization, GPU compositing, animation, theming).
 //!
 //! See docs/archive/PHASE10_WIDGETS.md for the full spec.
-//!
-//! Phase map:
-//!   P10.0 — abi, tile, check_abi, ggtt_layout constants
-//!   P10.1 — SDK crate + font metrics (gui/text.rs)
-//!   P10.2 — npk_scene_commit host fn + deserialize + serial dump
-//!   P10.3 — layout (flexbox-lite) with real font metrics
-//!   P10.4 — GGTT slab allocator
-//!   P10.5 — CPU rasterization + first visible pixels
-//!   P10.5b (this file) — widget-kind windows first-class in shade
-//!   P10.6 — diff + per-app cache
-//!   P10.7 — event routing
-//!   P10.8 — animation (fixed-point Q16.16)
-//!   P10.9 — icon atlas
-//!   P10.10 — Canvas escape hatch
-//!   P10.11 — first real app (file browser)
 
 pub mod abi;
 pub mod canvas;
@@ -41,7 +26,7 @@ use spin::Mutex;
 //
 // When a `Widget::Input` is the focus target, the compositor — not the
 // app — owns the buffer + caret. Printable keys, Backspace, Delete,
-// Left/Right/Home/End all mutate this struct without going through the
+// Left, Right, Home and End all mutate this struct without going through the
 // WASM event queue, so cursor moves stay 60 Hz responsive even if the
 // app is busy. The app sees a single `Event::InputChange { value }`
 // per buffer mutation; pure cursor moves emit nothing.
@@ -55,16 +40,15 @@ pub struct InputEditState {
     /// always sees what they just typed.
     pub value:  String,
     /// Caret position as a byte index into `value`. Always at a UTF-8
-    /// boundary; v1 only inserts ASCII so `byte_index == char_index`.
+    /// char boundary.
     pub cursor: usize,
-    /// Angefangene UTF-8-Folge. **Die Tastaturleitung traegt ein Byte je
-    /// Ereignis, und `ü` sind zwei** — das erste Byte allein ist noch kein
-    /// Zeichen und darf nicht in `value`, sonst stuende dort kein gueltiges
-    /// UTF-8. Hier liegt es, bis die Folge vollstaendig ist. Fuer ASCII
-    /// bleibt es immer leer.
+    /// Incomplete UTF-8 sequence. The keyboard path carries one byte per
+    /// event and U+00FC is two; a lead byte alone is not a character and must
+    /// not enter `value`, or it would no longer be valid UTF-8. It waits
+    /// here until the sequence is complete; always empty for ASCII.
     ///
-    /// Kernel-seitig und NICHT auf dem Draht: die App sieht nur fertige
-    /// Zeichen, ueber `Event::InputChange`.
+    /// Kernel-side only, not on the wire: the app sees only complete
+    /// characters, via `Event::InputChange`.
     pub pending: [u8; 4],
     pub pending_len: u8,
     /// Selection anchor (byte index) — the fixed end of a text selection;
@@ -116,7 +100,7 @@ pub struct WidgetScene {
     /// NodeId → screen rect, populated for any widget tagged with
     /// `Modifier::NodeId`. Used by `Widget::Popover`'s anchor lookup
     /// at layout time and by the click-outside-dismiss test in
-    /// hit_test (clicks on an anchor must NOT fire on_dismiss —
+    /// hit_test (clicks on an anchor must not fire on_dismiss —
     /// the anchor's own OnClick handles toggle).
     pub anchors:     alloc::collections::BTreeMap<u32, abi::Rect>,
     /// Floating popover overlays in declaration order. Painted
@@ -125,7 +109,7 @@ pub struct WidgetScene {
     /// underneath it.
     pub popovers:    Vec<layout::PopoverLayout>,
     /// blake3 hash of the postcard payload that produced this
-    /// scene. P10.6: lets scene_commit short-circuit when an app
+    /// scene. Lets scene_commit short-circuit when an app
     /// resubmits the same tree (common with interactive apps that
     /// re-commit on every event loop iteration).
     pub payload_hash: [u8; 32],
@@ -279,7 +263,7 @@ pub fn remove_scene(window_id: u32) {
     canvas::remove_window(window_id);
 }
 
-// ── Per-window event queues (P10.7) ───────────────────────────────────
+// ── Per-window event queues ───────────────────────────────────────────
 //
 // Widget apps poll events via `npk_event_poll`. Shade pushes Events
 // here: mouse clicks after hit-testing against the scene's layout
@@ -309,7 +293,7 @@ pub fn push_event(window_id: u32, event: abi::Event) {
 
 /// The fiber of the app that owns each widget window, registered when the
 /// app waits (`npk_wait`). An event wakes it at once instead of on its next
-/// poll — the app used to look every 16 ms whether or not anything happened.
+/// poll.
 static EVENT_WAKERS: Mutex<BTreeMap<u32, crate::smp::fiber::Waker>> =
     Mutex::new(BTreeMap::new());
 
@@ -391,7 +375,7 @@ pub fn is_clipboard_sink(window_id: u32) -> bool {
 
 
 /// Capability of the app that owns a widget window. Recorded on scene
-/// commit, so a path grant can be routed to an app that is ALREADY
+/// commit, so a path grant can be routed to an app that is already
 /// running — `npk_open` on a live singleton delivers `Event::Open`
 /// rather than spawning, and the grant has to follow the same way.
 static WINDOW_CAPS: Mutex<BTreeMap<u32, crate::security::capability::CapId>> =
@@ -414,7 +398,7 @@ pub fn window_cap(window_id: u32) -> Option<crate::security::capability::CapId> 
 //
 // Opt-in, so every existing app keeps closing instantly. A guarded
 // window gets `Event::CloseRequest` and is expected to call
-// `npk_close_widget` when it's done. It is NOT a veto: a second close
+// `npk_close_widget` when it's done. It is not a veto: a second close
 // gesture, or `CLOSE_GRACE_TICKS` of silence, closes it regardless — an
 // app must never be able to pin a window open.
 
@@ -430,7 +414,7 @@ pub fn close_pending() -> bool {
     !PENDING_CLOSE.lock().is_empty()
 }
 
-/// How long a guarded window has to REACT to `CloseRequest` before the
+/// How long a guarded window has to react to `CloseRequest` before the
 /// compositor closes it anyway. Ticks run at 100 Hz, so ~2 s.
 ///
 /// This is a liveness check, not a patience limit: the moment the app
@@ -555,7 +539,7 @@ pub fn take_pick(picker: u32) -> Option<PickSession> {
 
 /// Deliver the picker's answer to the requester. Empty `path` = cancelled.
 pub fn finish_pick(session: PickSession, path: alloc::string::String) {
-    // The click IS the authorisation: hand the requester a right to this
+    // The click is the authorisation: hand the requester a right to this
     // one path, so it can open or save it without holding a blanket one.
     // Nothing is granted on a cancel (empty path).
     if !path.is_empty() {
@@ -577,12 +561,12 @@ pub fn finish_pick(session: PickSession, path: alloc::string::String) {
 ///
 /// Disabled-propagation: if any ancestor (inclusive) has
 /// `Modifier::Disabled(_)`, the click is swallowed — disabled widgets
-/// eat events for themselves AND their descendants.
+/// eat events for themselves and their descendants.
 pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     let scenes = SCENES.lock();
     let scene = scenes.get(&window_id)?;
 
-    // Popovers (declared overlays) hit-test FIRST so a click inside
+    // Popovers (declared overlays) hit-test first so a click inside
     // an open menu dropdown lands on the menu item, not on whatever
     // was rendered underneath. Iterate in reverse-declaration order
     // so a popover declared later (= painted on top) wins. We don't
@@ -597,7 +581,7 @@ pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
         }
     }
 
-    // Click outside every popover BUT one or more popovers are open
+    // Click outside every popover but one or more popovers are open
     // → fire the topmost popover's `on_dismiss`, unless the click
     // landed on its anchor (the anchor's own OnClick handles toggle
     // and we don't want the dismiss action to also fire and race).
@@ -747,13 +731,12 @@ fn descend_focusable(
 ///
 /// An `Input` is only as wide as its text (over a 120 px floor), while the
 /// chrome a user reads as "the field" — the border, the padding, the label
-/// beside it — belongs to the container. Hit-testing the Input alone means
-/// you have to strike the glyphs themselves; a click on the empty right
-/// half of an address bar landed on the container, counted as "clicked
-/// nothing", and cleared focus instead of granting it.
+/// beside it — belongs to the container. Hit-testing the Input alone would
+/// mean striking the glyphs themselves; a click on the empty right half of
+/// an address bar would count as "clicked nothing" and clear focus.
 ///
 /// So: descend to the deepest node under the cursor, and treat it as a
-/// field row if its subtree holds **exactly one** text widget and **no
+/// field row if its subtree holds exactly one text widget and no
 /// other click target**. That covers a bordered Row wrapping one Input
 /// (and makes its label clickable, like an HTML `<label for>`), while a
 /// panel or toolbar — which always carries buttons or clickable rows —
@@ -844,12 +827,12 @@ fn widget_at_path_mut<'a>(tree: &'a mut abi::Widget, path: &[u32])
 ///
 /// The editor leads the app's tree by one round-trip by design: what you
 /// typed lives in `input_edit`, and the app's `value` only catches up when
-/// it re-commits. An app that doesn't re-commit on every keystroke (beak's
-/// address bar, for one — a full chrome commit per character is not free)
-/// therefore still holds the OLD value. While the field is focused nobody
-/// notices, because the editor buffer is what gets painted. The moment
-/// focus leaves, the paint falls back to the tree and the text appears to
-/// vanish — though it was never lost, only unparked on the way back.
+/// it re-commits. An app that doesn't re-commit on every keystroke (a
+/// browser address bar, for one — a full chrome commit per character is
+/// not free) therefore still holds the old value. While the field is
+/// focused nobody notices, because the editor buffer is what gets painted.
+/// The moment focus leaves, the paint falls back to the tree and the text
+/// would appear to vanish.
 ///
 /// So on the way out we push the buffer into the tree. The next real
 /// `scene_commit` overwrites it, which is correct: an app that states a
@@ -885,7 +868,7 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
     let new_path = new_path.unwrap_or_default();
 
     // Step 2 — diff against the cached hover_path. If unchanged, skip.
-    // If changed AND the tree has any pseudo-state-aware modifier,
+    // If changed and the tree has any pseudo-state-aware modifier,
     // re-rasterize using the new path; otherwise just update the path
     // (hover events still fire below).
     let path_changed = {
@@ -979,7 +962,7 @@ fn motion_pulse(window_id: u32, x: i32, y: i32) {
 }
 
 /// Re-rasterize a scene's pixel buffer with the given hover path (focus /
-/// active come from the cached scene). Does NOT request a repaint — the
+/// active come from the cached scene). Does not request a repaint — the
 /// caller decides full vs. damage-rect. Locks SCENES internally.
 fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
     let (tree, rect, density, focus_path, active_path, input_edit, scroll_y, scroll_x) = {
@@ -1029,7 +1012,7 @@ fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
     }
 }
 
-/// Re-rasterize with the given hover path AND request a full repaint.
+/// Re-rasterize with the given hover path and request a full repaint.
 /// Used by focus/active state changes (rare, not the per-move hot path).
 fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
     rerender_scene_pixels(window_id, hover_path);
@@ -1051,8 +1034,8 @@ fn mark_dirty(window_id: u32) {
 /// deepest focusable widget at the cursor and start the active state.
 /// Re-rasterizes the scene if it has any pseudo-state visuals.
 ///
-/// Returns `true` if the scene was re-rasterized — caller MUST then
-/// mark the window dirty. We do NOT call `with_compositor` here
+/// Returns `true` if the scene was re-rasterized — caller must then
+/// mark the window dirty. We do not call `with_compositor` here
 /// because this function runs while the caller already holds the
 /// compositor lock (deadlock-prone).
 ///
@@ -1085,10 +1068,8 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
         };
         let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
         // One rule, everywhere: a press inside a text widget focuses it,
-        // a press anywhere else releases focus. Previously only a press
-        // into a Canvas released it — which is why the browser (whose
-        // page IS a canvas) felt right while the file browser trapped the
-        // keyboard in its search box with no way out but Tab.
+        // a press anywhere else releases focus. Otherwise a search box
+        // would trap the keyboard with no way out but Tab.
         let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
             Some(p) if matches!(
                 widget_at_path(&scene.tree, p),
@@ -1129,19 +1110,18 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     let mut tree_updated = false;
     let edit_present = if let Some(s) = SCENES.lock().get_mut(&window_id) {
         if let Some(new_focus) = new_focus_opt {
-            // Capture the OUTGOING path before it is overwritten — the
+            // Capture the outgoing path before it is overwritten — the
             // parked buffer is keyed by the field it came from.
             let leaving = s.focus_path.clone();
             match new_focus {
                 Some(p) => s.focus_path = p,
                 None    => s.focus_path.clear(),
             }
-            // The editor buffer leads the app's tree by one round-trip BY
-            // DESIGN, so discarding it on focus loss threw away whatever
-            // had been typed since the app last committed: the text
-            // vanished on click-away and only came back once Enter made
-            // the app re-commit. Park it under the field it belongs to,
-            // and hand it back when that same field is focused again.
+            // The editor buffer leads the app's tree by one round-trip by
+            // design, so discarding it on focus loss would throw away
+            // whatever was typed since the app last committed. Park it under
+            // the field it belongs to, and hand it back when that same field
+            // is focused again.
             if s.focus_path.is_empty() {
                 if let Some(edit) = s.input_edit.take() {
                     // Keep what was typed on screen — see
@@ -1157,7 +1137,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
                     _ => None,
                 };
                 s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
-                // Click ON the text positions the caret exactly there
+                // Click on the text positions the caret exactly there
                 // (`text_select_begin`, which needs the press inside the
                 // Input's own rect). A click on the field's chrome has no
                 // glyph to aim at, so the caret goes to the end — where
@@ -1293,7 +1273,7 @@ pub fn release_at(window_id: u32) -> bool {
 }
 
 /// Re-rasterize using the cached focus/active/hover paths and update
-/// the scene's pixel buffer. Does NOT touch the compositor (caller is
+/// the scene's pixel buffer. Does not touch the compositor (caller is
 /// responsible for marking the window dirty). Pure scene-state work,
 /// safe to call while the compositor lock is held.
 fn rerender_state_only(window_id: u32) {
@@ -1481,8 +1461,8 @@ fn find_first_input_path(tree: &abi::Widget) -> Option<Vec<u32>> {
     fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<Vec<u32>>) {
         if out.is_some() || is_disabled(w) { return; }
         // Opt-in via `Modifier::Autofocus`. Grabbing the first Input we
-        // find is right for a launcher and wrong everywhere else: a file
-        // browser's search box swallowed every arrow key on open.
+        // find is right for a launcher and wrong elsewhere: a file
+        // browser's search box would swallow every arrow key on open.
         if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. })
             && modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::Autofocus))
         {
@@ -1504,11 +1484,11 @@ fn find_first_input_path(tree: &abi::Widget) -> Option<Vec<u32>> {
 /// Decide the InputEditState that should sit on the scene after a
 /// focus change or commit:
 ///
-/// - `path` targets an Input AND `prev` already mirrors the same
+/// - `path` targets an Input and `prev` already mirrors the same
 ///   buffer → keep `prev` (app round-tripped a prior InputChange,
 ///   cursor must not jump).
 /// - `path` targets an Input with a different value (app overrode the
-///   buffer programmatically) OR `prev` is None → fresh state with
+///   buffer programmatically) or `prev` is None → fresh state with
 ///   the caret at the end of the new value.
 /// - `path` doesn't target an Input → None.
 fn compute_input_edit(
@@ -1746,25 +1726,25 @@ use core::sync::atomic::{AtomicU32, Ordering};
 /// Window id (+1) whose focused text widget is being drag-selected; 0 = none.
 static TEXT_DRAG: AtomicU32 = AtomicU32::new(0);
 
-/// Der letzte Klick in ein Textfeld: `(Tick, x, y, Fenster, Zaehler)`.
+/// The last click into a text field: `(tick, x, y, window, count)`.
 ///
-/// Daraus wird der Doppel- und Dreifachklick abgeleitet. Die Uhr ist
-/// `interrupts::ticks()` mit 100 Hz — 10 ms je Schritt, und ein Doppelklick
-/// wird in Zehntelsekunden gemessen, nicht in Millisekunden.
+/// Double and triple click derive from it. The clock is
+/// `interrupts::ticks()` at 100 Hz — 10 ms per step, and a double click is
+/// measured in tenths of a second, not milliseconds.
 static LAST_CLICK: Mutex<Option<(u64, i32, i32, u32, u8)>> = Mutex::new(None);
 
-/// Zeitfenster fuer den naechsten Klick derselben Reihe: 40 Ticks = 400 ms.
-/// Dasselbe, was jede Oberflaeche seit dreissig Jahren nimmt.
+/// Time window for the next click of the same series: 40 ticks = 400 ms,
+/// the conventional double-click interval.
 const MULTI_CLICK_TICKS: u64 = 40;
-/// Wie weit der Zeiger dabei wandern darf. Ohne diese Grenze wird aus zwei
-/// Klicks an verschiedenen Stellen ein Doppelklick, und die Auswahl springt.
+/// How far the pointer may travel meanwhile. Without this bound two clicks
+/// at different spots would count as a double click and the selection jumps.
 const MULTI_CLICK_SLOP: i32 = 4;
 
-/// Der wievielte Klick dieser Reihe ist das? 1 = einzeln, 2 = doppelt,
-/// 3 = dreifach (danach faengt es wieder bei 1 an).
+/// Which click of the current series is this? 1 = single, 2 = double,
+/// 3 = triple (then it starts again at 1).
 ///
-/// **Wird bei JEDEM Druck gerufen, auch ausserhalb eines Textfelds** — sonst
-/// zaehlt eine Reihe weiter, die laengst woanders stattfindet.
+/// Called on every press, also outside a text field; otherwise a series
+/// would keep counting while it continues somewhere else.
 pub fn click_run_at(window_id: u32, x: i32, y: i32) -> u8 { click_run(window_id, x, y) }
 
 fn click_run(window_id: u32, x: i32, y: i32) -> u8 {
@@ -1782,20 +1762,19 @@ fn click_run(window_id: u32, x: i32, y: i32) -> u8 {
     n
 }
 
-/// Die Wortgrenzen um `at` herum.
+/// Word boundaries around `at`.
 ///
-/// Ein „Wort" ist ein Lauf gleichartiger Zeichen: entweder alles
-/// Buchstaben/Ziffern/`_`, oder alles andere. Genau so trennt jeder Browser
-/// und jeder Editor, und fuer eine ADRESSE ist es die richtige Regel: ein
-/// Doppelklick auf `arcade` in `https://www.arcade.ch/media/x.jpg` gibt
-/// `arcade` und nicht die halbe Zeile, weil Punkt und Schraegstrich zur
-/// anderen Klasse gehoeren.
+/// A "word" is a run of characters of one class: either all letters,
+/// digits and `_`, or everything else. That is how browsers and editors
+/// split, and it is the right rule for an address: a double click on
+/// `arcade` in `https://www.arcade.ch/media/x.jpg` yields `arcade`, not
+/// half the line, because dot and slash belong to the other class.
 fn word_bounds(s: &str, at: usize) -> (usize, usize) {
     let b = s.as_bytes();
     if b.is_empty() { return (0, 0) }
     let wordish = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
-    // Steht der Zeiger hinter dem letzten Zeichen, gehoert er zum Zeichen
-    // DAVOR — sonst waehlt ein Doppelklick am Zeilenende nichts aus.
+    // A pointer past the last character belongs to the character before
+    // it, otherwise a double click at the end of a line selects nothing.
     let at = at.min(b.len());
     let probe = if at >= b.len() { b.len() - 1 } else { at };
     let want = wordish(b[probe]);
@@ -1809,10 +1788,9 @@ fn word_bounds(s: &str, at: usize) -> (usize, usize) {
 #[inline]
 fn ceil_u32(v: f32) -> u32 { let i = v as u32; if v > i as f32 { i + 1 } else { i } }
 
-/// Sum every `Modifier::Padding` — mirrors render's `leaf_padding` so the
-/// inverse hit-mapping uses the same text origin the glyphs were drawn at.
-/// Horizontal padding of a node — the caret hit-test needs the same
-/// x-inset the renderer used, so it must count `PaddingXY.x` too.
+/// Sum of horizontal padding (`Padding` and `PaddingXY.x`) — mirrors
+/// render's `leaf_padding` so the caret hit-test uses the same text origin
+/// the glyphs were drawn at.
 fn padding_sum(mods: &[abi::Modifier]) -> u32 {
     let mut p = 0u32;
     for m in mods {
@@ -1893,7 +1871,7 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let total_lines = value.split('\n').count();
             // Same text column the renderer used, shifted by the same
             // sideways offset — otherwise a click on a scrolled line lands
-            // on the character that WOULD be there at offset zero.
+            // on the character that would be there at offset zero.
             let (col_x, _) = render::textarea_text_column(
                 rect, modifiers_of_ref(widget), total_lines);
             let text_x = col_x - scene.scroll_x as i32;
@@ -1939,14 +1917,14 @@ pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
     began
 }
 
-/// Ein Doppel- oder Dreifachklick: das WORT unter dem Zeiger auswaehlen,
-/// beim dritten Klick die ganze Zeile.
+/// A double or triple click: select the word under the pointer, or the
+/// whole line on the third click.
 ///
-/// Kein eigener Zieh-Zustand — die Auswahl steht danach fest, und das
-/// Loslassen laesst sie in Ruhe (`text_select_end` raeumt nur eine
-/// zusammengefallene Auswahl weg, und eine Wortauswahl ist keine).
+/// No drag state of its own — the selection is fixed afterwards, and the
+/// release leaves it alone (`text_select_end` only clears a collapsed
+/// selection, and a word selection is not one).
 ///
-/// `run` ist das Ergebnis von [`click_run`]: 2 = Wort, 3 = alles.
+/// `run` is the result of [`click_run`]: 2 = word, 3 = all.
 pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
     let ok = {
         let mut scenes = SCENES.lock();
@@ -1968,7 +1946,7 @@ pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
         }
     };
     if ok {
-        // Der Zieh-Zustand bleibt AUS: ein Doppelklick waehlt, er zieht nicht.
+        // The drag state stays off: a double click selects, it does not drag.
         TEXT_DRAG.store(0, Ordering::Release);
         caret_follow_scroll(window_id);
         rerender_state_only(window_id);
@@ -2073,7 +2051,7 @@ fn set_slider_value(tree: &mut abi::Widget, action: abi::ActionId, value: u16) -
 /// Window (+1) whose slider moved since the last frame; 0 = none.
 static SLIDE_DIRTY: AtomicU32 = AtomicU32::new(0);
 
-/// The value lives in the tree AND in the popover copies the pixel-only
+/// The value lives in the tree and in the popover copies the pixel-only
 /// repaint draws from, so both are set.
 fn set_scene_slider(scene: &mut WidgetScene, action: abi::ActionId, value: u16) -> bool {
     let mut changed = set_slider_value(&mut scene.tree, action, value);
@@ -2200,10 +2178,10 @@ fn widget_clipboard(window_id: u32, letter: u8) -> bool {
 /// Input vs TextArea divergence:
 ///   - Input: Enter fires `Event::Action(on_submit)` (NO_ACTION = let it
 ///     fall through to the app as `Event::Key`); Home/End jump to buffer
-///     start/end; Up/Down are NOT consumed (fall through to the app — e.g.
+///     start/end; Up/Down are not consumed (fall through to the app — e.g.
 ///     loft's grid navigation).
 ///   - TextArea: Enter inserts `\n`; Home/End are line-relative;
-///     Up/Down/PageUp/PageDown move the caret across lines and ARE
+///     Up/Down/PageUp/PageDown move the caret across lines and are
 ///     consumed (an editor owns its arrows; super+arrow stays WM nav).
 pub fn handle_input_key(
     window_id: u32,
@@ -2243,7 +2221,7 @@ pub fn handle_input_key(
     // `mods.ctrl`, so normalize a control byte back to its letter.
     // Clipboard / select-all shortcuts. Two ways the combo arrives:
     //  - Ctrl+C is translated by the PS/2 layer to control byte 0x03 (the
-    //    SIGINT convention), produced ONLY when Ctrl was held — so detect it
+    //    SIGINT convention), produced only when Ctrl was held — so detect it
     //    directly, immune to `mods.ctrl` being sampled a tick late (the
     //    buffered key is often processed after Ctrl is already released).
     //  - Ctrl+V/X/A arrive as the plain letter; they need mods.ctrl.
@@ -2254,7 +2232,7 @@ pub fn handle_input_key(
     };
     if let Some(letter) = clip_letter {
         // For a clipboard-sink window (loft), decide whether this chord is a
-        // TEXT op (consume it here) or should fall through to the app as a
+        // text op (consume it here) or should fall through to the app as a
         // file/object clipboard op. A focused text field only owns the chord
         // when it can act on text:
         //   - Select-all: always text.
@@ -2304,11 +2282,9 @@ pub fn handle_input_key(
     }
 
     let op = match key {
-        // **Nicht mehr nur ASCII.** 0x20..0x7F war woertlich „keine
-        // Umlaute" — auf einer Deutschschweizer Tastatur liess sich damit
-        // kein einziges `ä` in ein Feld tippen. Alles ab 0x80 ist ein Stueck
-        // einer UTF-8-Folge und wird unten zusammengesetzt; 0x7F (DEL) ist
-        // kein Text und bleibt draussen.
+        // Not only ASCII: every byte from 0x80 is part of a UTF-8 sequence
+        // and is assembled below (so umlauts can be typed); 0x7F (DEL) is
+        // not text and stays out.
         K::Char(b) if b >= 0x20 && b != 0x7F => Op::Insert(b),
         K::Backspace                             => Op::Backspace,
         K::Delete                                => Op::Delete,
@@ -2389,16 +2365,16 @@ pub fn handle_input_key(
                     edit.cursor += 1;
                     changed = true;
                 } else {
-                    // **`b as char` waere hier LATIN-1, nicht UTF-8** — aus
-                    // dem Fuehrungsbyte 0xC3 wuerde `Ã`. Gesammelt wird, bis
-                    // die Folge steht, und dann als ZEICHEN eingefuegt.
-                    if b >= 0xC0 { edit.pending_len = 0; }   // neue Folge
+                    // `b as char` would be Latin-1, not UTF-8 (lead byte 0xC3
+                    // would become `Ã`). Collect until the sequence is
+                    // complete, then insert it as one character.
+                    if b >= 0xC0 { edit.pending_len = 0; }   // new sequence
                     let n = edit.pending_len as usize;
                     if n < 4 {
                         edit.pending[n] = b;
                         edit.pending_len = n as u8 + 1;
                     } else {
-                        edit.pending_len = 0;   // laenger als jede Folge — verwerfen
+                        edit.pending_len = 0;   // longer than any sequence: discard
                     }
                     let len = edit.pending_len as usize;
                     if let Ok(txt) = core::str::from_utf8(&edit.pending[..len]) {
@@ -2453,9 +2429,9 @@ pub fn handle_input_key(
         (changed, edit.value.clone())
     };
 
-    // Phase 3b: caret-follow scroll. The render no longer pulls the view to
-    // the caret every frame (that defeated wheel/drag scrolling), so do it
-    // HERE — only on a caret move — for the focused TextArea: nudge
+    // Phase 3b: caret-follow scroll. The render does not pull the view to
+    // the caret every frame (that would defeat wheel/drag scrolling), so do
+    // it here, only on a caret move, for the focused TextArea: nudge
     // scroll_y just enough to keep the caret line on screen.
     if is_textarea {
         caret_follow_scroll(window_id);
@@ -2608,7 +2584,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     let scroll_x = prev_scroll_x.min(max_scroll_x);
 
     // First commit auto-focuses the first focusable Widget::Input so
-    // search bars / launchers Just Work without the user having to
+    // search bars / launchers work without the user having to
     // click into the input first — keeps the "type as soon as it
     // opens" UX every keyboard-driven dialog needs. Re-commits keep
     // whatever focus the user navigated to via Tab / click; we never
@@ -2622,7 +2598,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // Reconcile the input editor against the new tree:
     //   - focus targets an Input with the same value the editor already
     //     holds → keep the prev state (the app just echoed our buffer
-    //     back, the cursor must NOT reset).
+    //     back, the cursor must not reset).
     //   - focus targets an Input with a different value → app overrode
     //     it programmatically; rebuild from the tree value.
     //   - focus elsewhere → drop the editor.
@@ -2694,8 +2670,9 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
 ///
 /// Each `*_path: Option<&[u32]>` follows the protocol from
 /// `render::render_with_state`: `None` = state not in this subtree,
-/// `Some([])` = root IS the state target, `Some([i,…])` = descend
+/// `Some([])` = root is the state target, `Some([i,…])` = descend
 /// into child `i`.
+///
 /// Rasterize the main tree, then paint each popover overlay on top
 /// in declaration order. Popovers are rendered without state-paths
 /// (no hover/focus carry-through to their content) — overlay state
@@ -2718,12 +2695,12 @@ fn rasterize_buffer_with_overlays(
     let mut pixels: Vec<u32> = alloc::vec![0u32; pixel_count];
 
     // Translucent-panel detection: the bar (and only the bar) roots its tree
-    // in a `Stack`. Such a scene clears TRANSPARENT and fills backgrounds at
+    // in a `Stack`. Such a scene clears transparent and fills backgrounds at
     // the chrome opacity, so glyphs stay full-coverage and the compositor
     // composites the whole scene over the wallpaper by per-pixel alpha (no
-    // halo). Every other app roots in Row/Column → opaque, byte-identical to
-    // before. Derived from the tree so it needs no extra plumbing or locks
-    // (relayout_scene rasterises while holding the SCENES lock).
+    // halo). Every other app roots in Row/Column → opaque. Derived from the
+    // tree so it needs no extra plumbing or locks (relayout_scene rasterises
+    // while holding the SCENES lock).
     let bg_alpha: u8 = if matches!(tree, abi::Widget::Stack { .. }) {
         palette::panel_opacity(window_id) as u8
     } else {
@@ -2731,7 +2708,7 @@ fn rasterize_buffer_with_overlays(
     };
 
     // Opaque scene → clear to the Surface token (covers unpainted areas).
-    // Translucent panel scene → clear TRANSPARENT (alpha 0) so gaps and
+    // Translucent panel scene → clear transparent (alpha 0) so gaps and
     // glyph edges composite correctly over the wallpaper.
     if bg_alpha >= 255 {
         let bg = palette::resolve(abi::Token::Surface);
@@ -2772,10 +2749,6 @@ fn rasterize_buffer_with_overlays(
     pixels
 }
 
-/// Re-render a scene at new dimensions — called by shade when a
-/// widget-kind window's content rect changes (resize / retile).
-/// Uses the cached tree + re-runs layout so we don't need the app
-/// to commit again. Returns false if no scene exists for that id.
 /// Re-rasterize every live widget scene without changing its geometry.
 /// Called after theme-affecting events (wallpaper change → new accent /
 /// surface palette) so cached pixels pick up the fresh token colours.
@@ -2831,16 +2804,16 @@ pub fn rerender_window(wid: u32) {
     });
 }
 
-/// Repaint a window from its EXISTING layout.
+/// Repaint a window from its existing layout.
 ///
 /// For a canvas commit the widget tree is untouched — only the pixels a
 /// `Widget::Canvas` holds changed — so `layout_scrolled` would produce the
-/// same tree it produced last time. At 30 frames a second that is the most
-/// expensive thing in the path, done for nothing.
+/// same tree it produced last time; at video frame rates that would be the
+/// most expensive thing in the path, done for nothing.
 ///
 /// The rasterisation itself still runs over the whole buffer, and that is
 /// deliberate: painting only the canvas rect would have to know what sits
-/// ON TOP of it (an open menu, a popover, a scroll clip), and a repaint
+/// on top of it (an open menu, a popover, a scroll clip), and a repaint
 /// that gets z-order wrong erases the menu instead of the frame. Skipping
 /// the layout is safe without asking that question at all.
 pub fn rerender_window_pixels(wid: u32) {
@@ -2877,6 +2850,10 @@ pub fn rerender_window_pixels(wid: u32) {
     });
 }
 
+/// Re-render a scene at new dimensions — called by shade when a
+/// widget-kind window's content rect changes (resize / retile).
+/// Uses the cached tree + re-runs layout so we don't need the app
+/// to commit again. Returns false if no scene exists for that id.
 pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h: u32) -> bool {
     let mut guard = SCENES.lock();
     let scene = match guard.get_mut(&window_id) {
@@ -2892,7 +2869,7 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     let scroll_y = scene.scroll_y;
     let scroll_x = scene.scroll_x;
     let new_density = classify_density(new_w);
-    // Resize invalidates the cached hover_path AND active_path —
+    // Resize invalidates the cached hover_path and active_path —
     // coordinates of the old layout no longer match. Focus survives
     // (a focused input stays focused after resize). Active is
     // mouse-tied so it gets cleared.

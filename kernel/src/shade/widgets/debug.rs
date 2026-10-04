@@ -1,9 +1,7 @@
 //! Serial pretty-printer for deserialized widget trees.
 //!
-//! P10.2 deliverable: when an app commits a tree, the compositor
-//! prints it to serial so we can eyeball the round-trip. Later phases
-//! (layout, rasterization) reduce the need for this, but the formatter
-//! stays around as a debug probe.
+//! When an app commits a tree, the compositor can print it to serial to
+//! check the round-trip. Kept as a debug probe.
 //!
 //! Output style — indented tree, one line per node, showing the
 //! variant + the fields that carry user-visible data. Modifiers are

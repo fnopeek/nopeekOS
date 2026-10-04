@@ -1,15 +1,14 @@
 //! CPU rasterizer — software-draws rects, text (fontdue), icon stubs.
 //!
 //! Target-agnostic: the same code paints a tile or a composition layer.
-//! All coordinates the compositor passes in are **window-space**; we
+//! All coordinates the compositor passes in are window-space; we
 //! subtract `target.origin` to get target-local positions, then clip to
-//! `target.size`. This is what makes tile-boundary drawing "just work"
-//! — a draw that straddles two tiles clips in-place on each.
+//! `target.size`, so a draw that straddles two tiles clips in place on
+//! each.
 //!
-//! P10.5 implements the essentials: clear, rect (solid fill),
-//! text (glyph composite via `gui::text`), icon (stub until P10.9),
-//! canvas_copy (raw BGRA memcpy). blur / shadow / effect are default
-//! no-ops from the trait — GPU backend implements them (Phase 12).
+//! Implemented: clear, rect (solid fill), text (glyph composite via
+//! `gui::text`), icons from the atlas, canvas blits. blur / shadow /
+//! effect are default no-ops from the trait, left to a GPU backend.
 
 #![allow(dead_code)]
 
@@ -17,8 +16,8 @@ use crate::shade::widgets::abi::{
     Fill, I420Ref, IconId, Point, RasterTarget, Rasterizer, Rect, Shadow, TextStyle, Token,
 };
 
-/// CPU-backed rasterizer. Holds no state between calls — safe to share
-/// across raster workers once Phase 9 threading kicks in.
+/// CPU-backed rasterizer. Holds no state between calls, so it is safe to
+/// share across raster workers.
 pub struct CpuRasterizer;
 
 impl CpuRasterizer {
@@ -91,8 +90,7 @@ impl Rasterizer for CpuRasterizer {
             }
 
             // Rasterize glyph via cached-path, composite alpha onto
-            // target pixels. The cache handles its own GGTT slot too
-            // (P10.4 glyph-atlas migration).
+            // target pixels. The cache handles its own GGTT slot too.
             let drew = crate::gui::text::rasterize_cached_px(ch, style, size_px, |glyph| {
                 if glyph.width == 0 || glyph.height == 0 {
                     return glyph.advance;
@@ -177,10 +175,10 @@ impl Rasterizer for CpuRasterizer {
         let xs0 = Step::new(f.x0 - f.ox, sw, f.dst_w);
 
         // One destination pixel per source pixel: BGRA little-endian already
-        // IS the target word, so a row is a straight copy. Measured 21x
-        // cheaper than the scaling walk, and it is the case a canvas painted
-        // at its own size (`npk_canvas_rect`) hits on every commit. The
-        // third term is what makes the unchecked slice below sound.
+        // is the target word, so a row is a straight copy, much cheaper than
+        // the scaling walk. It is the case a canvas painted at its own size
+        // (`npk_canvas_rect`) hits on every commit. The third term is what
+        // makes the unchecked slice below sound.
         let one_to_one =
             sw == f.dst_w && sh == f.dst_h && xs0.idx as usize + n <= sw as usize;
 
@@ -209,11 +207,10 @@ impl Rasterizer for CpuRasterizer {
                         rect: Rect, zoom_q88: u32, pan: (i32, i32)) {
         let Some(f) = canvas_fit(t, sw, sh, rect, zoom_q88, pan) else { return };
 
-        // Y'CbCr -> BGR happens HERE, not in the module, and per DESTINATION
-        // pixel, not per source pixel. A 1080p frame in a 720p window costs
-        // 0.92 Mpx instead of 2.07, and it runs native (SSE/AVX2 are in the
-        // target spec) instead of inside an interpreter-free but SIMD-free
-        // forge module, where the same loop measured 145 % of a core.
+        // Y'CbCr -> BGR happens here, not in the module, and per destination
+        // pixel, not per source pixel: a large frame in a smaller window
+        // converts only the pixels shown, and the loop runs natively with
+        // SSE/AVX2 rather than inside a SIMD-free WASM module.
         let c = p.coeffs;
         let stride = t.stride as usize;
         let n = (f.x1 - f.x0) as usize;
@@ -318,14 +315,12 @@ fn canvas_fit(t: &RasterTarget, sw: u32, sh: u32, rect: Rect,
     Some(CanvasFit { ox, oy, dst_w, dst_h, x0, y0, x1, y1 })
 }
 
-/// Nearest-neighbour source index that WALKS instead of being divided for.
+/// Nearest-neighbour source index that walks instead of being divided for.
 ///
 /// `idx` grows by the whole part of the step and `acc` carries the
 /// remainder, tipping one further exactly when it reaches `den`. That is
-/// the same number as `d * num / den` — verified bit-for-bit against the
-/// division over 35 combinations of destination size and offset
-/// (`<tools>/mediabench/src/blit_equiv.rs`) — without a 64-bit division
-/// per pixel. At 1080p that division ran two million times per frame.
+/// the same number as `d * num / den`, without a 64-bit division per
+/// pixel.
 #[derive(Clone, Copy)]
 struct Step {
     idx: u32,
@@ -459,10 +454,9 @@ fn composite_alpha_scaled(
 
     let stride = t.stride as usize;
     // Downscale: average the source box a destination pixel covers.
-    // Nearest-neighbour drops whole rows of a 1.5 px phosphor stroke, so
-    // an 18 px icon taken from the 24 px atlas came out visibly ragged.
-    // Upscale keeps nearest — the atlas has a size above every request we
-    // make, so this is the path that runs.
+    // Nearest-neighbour drops whole rows of a 1.5 px phosphor stroke and
+    // leaves downscaled icons ragged. Upscale keeps nearest — the atlas has
+    // a size above every request we make, so this is the path that runs.
     let downscale = atlas_size > size;
     for py in y0..y1 {
         let ly = (py - y) as u32;
@@ -610,19 +604,12 @@ fn rect_coverage(px: i32, py: i32, rx: i32, ry: i32, rw: i32, rh: i32, r: i32) -
     let in_y_core = py >= ry + r && py < ry + rh - r;
     if in_x_core || in_y_core { return 255; }
 
-    // Dieselben Mittelpunkte wie `fill_rounded_rect_target`, und das ist
-    // keine Kosmetik. Dort ist der Versatz `r - 1 - col`, der Mittelpunkt
-    // liegt also auf Pixel `rx + r - 1` und `rx + rw - r`. Hier stand
-    // `rx + r` und `rx + rw - 1 - r` — um EINEN Pixel daneben, auf allen
-    // vier Ecken, seit es die Funktion gibt.
-    //
-    // Bei den Radien, mit denen bisher gemalt wurde (4 bis 8), ist das
-    // ein Versatz unter der Aufmerksamkeitsschwelle. Bei einer PILLE
-    // (r = h/2) kippt es: mit `ry + r` und `ry + rh - 1 - r` liegt der
-    // UNTERE Mittelpunkt einen Pixel UEBER dem oberen, die beiden
-    // Halbkreise ueberlappen verkehrt, und die Form wird in der Mitte
-    // eingeschnuert. Der Strich lief dann sichtbar neben seiner eigenen
-    // Flaeche — gemeldet an der Bar, h = 32, r = 16.
+    // The same arc centres as `fill_rounded_rect_target`, and that matters:
+    // there the offset is `r - 1 - col`, so the centre lies on pixel
+    // `rx + r - 1` and `rx + rw - r`. A centre one pixel off is invisible
+    // at small radii, but for a pill (r = h/2) the two half circles would
+    // overlap the wrong way round and pinch the shape in the middle, so the
+    // stroke would run beside its own fill.
     let cx = if px < rx + r { rx + r - 1 } else { rx + rw - r };
     let cy = if py < ry + r { ry + r - 1 } else { ry + rh - r };
     corner_coverage(px - cx, py - cy, r)
@@ -637,9 +624,9 @@ fn blend_over(dst: u32, src: u32, src_alpha: u8) -> u32 {
     let sa = src_alpha as u32;
     let da = (dst >> 24) & 0xFF;        // destination alpha (0 for a transparent scene)
     // Straight-alpha "over": preserves the alpha channel instead of forcing
-    // opaque. For an OPAQUE dst (da == 255) this reduces to the old formula
-    // (out_a = 255, same colour) — so opaque scenes are byte-identical and
-    // every existing app renders unchanged. A transparent scene accumulates
+    // opaque. For an opaque dst (da == 255) this reduces to the plain
+    // formula (out_a = 255, same colour), so opaque scenes are unaffected.
+    // A transparent scene accumulates
     // real coverage alpha, which the compositor then composites over the
     // wallpaper (translucent bar pills, crisp glyphs, no halo).
     let dst_contrib = da * (255 - sa) / 255;
@@ -664,13 +651,12 @@ fn blend_over(dst: u32, src: u32, src_alpha: u8) -> u32 {
 mod round_tests {
     use super::{corner_coverage, rect_coverage};
 
-    /// Strich und Fuellung muessen DIESELBE Form meinen.
+    /// Stroke and fill must describe the same shape.
     ///
-    /// `fill_rounded_rect_target` baut seine Ecken zeilenweise mit
-    /// `corner_coverage(r-1-col, r-1-row, r)`. `rect_coverage` — von dem
-    /// der STRICH lebt — rechnet dieselbe Ecke analytisch. Standen die
-    /// Mittelpunkte einen Pixel auseinander, lief der Rahmen neben seiner
-    /// eigenen Flaeche.
+    /// `fill_rounded_rect_target` builds its corners row by row with
+    /// `corner_coverage(r-1-col, r-1-row, r)`. `rect_coverage`, which the
+    /// stroke uses, computes the same corner analytically. If the centres
+    /// were a pixel apart, the border would run beside its own fill.
     #[test]
     fn stroke_and_fill_agree_on_every_corner() {
         for &(w, h) in &[(64, 32), (40, 24), (200, 36), (33, 33), (48, 48)] {
@@ -678,7 +664,7 @@ mod round_tests {
                 for row in 0..r {
                     for col in 0..r {
                         let want = corner_coverage(r - 1 - col, r - 1 - row, r);
-                        // alle vier Ecken gegen die Fuellung halten
+                        // check all four corners against the fill
                         for &(px, py) in &[
                             (col, row),                 // oben links
                             (w - 1 - col, row),         // oben rechts
@@ -698,10 +684,9 @@ mod round_tests {
         }
     }
 
-    /// Eine Pille (r = h/2) ist der Fall, in dem der alte Fehler kippte:
-    /// die zwei Bogenmittelpunkte tauschten die Reihenfolge und schnuerten
-    /// die Form in der Mitte ein. Die Silhouette muss senkrecht
-    /// spiegelsymmetrisch sein und in der Mitte am breitesten.
+    /// A pill (r = h/2) is the case where misplaced arc centres show: they
+    /// swap order and pinch the shape in the middle. The silhouette must be
+    /// vertically mirror-symmetric and widest in the middle.
     #[test]
     fn pill_is_symmetric_and_widest_in_the_middle() {
         let (w, h) = (200, 32);
