@@ -46,12 +46,11 @@ pub fn decode(bytes: &[u8]) -> Result<AppMeta, AppMetaError> {
     }
     match postcard::from_bytes(body) {
         Ok(m) => Ok(m),
-        // An app built against a NEWER SDK may name an icon this build has
+        // An app built against a newer SDK may name an icon this build has
         // never heard of, and serde rejects the whole record for it. Losing
-        // the icon is a blemish; losing the app is a bug — tune shipped with
-        // IconId 44 and vanished from the launcher and the dock of every
-        // system whose drun predated that icon. The name and the description
-        // sit in front of the icon on the wire, so they are still readable.
+        // the icon is a blemish; losing the app (from launcher and dock) is a
+        // bug. The name and the description sit in front of the icon on the
+        // wire, so they are still readable.
         Err(_) => decode_lenient(body),
     }
 }
@@ -100,8 +99,7 @@ mod tests {
         assert_eq!(decode(&bytes).unwrap(), m);
     }
 
-    /// The exact failure that hid `tune`: an icon the reader has never
-    /// heard of must cost the icon, not the app.
+    /// An icon the reader has never heard of must cost the icon, not the app.
     #[test]
     fn unknown_icon_keeps_name_and_description() {
         let blob = b"\x01\x04tune\x0cAudio player\x00\xfa\x01";

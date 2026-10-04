@@ -1,7 +1,7 @@
-//! `IconId` is a number since it stopped being an enum. These tests stand
-//! in for the compile-time check the enum gave: every named icon exists in
-//! the atlas the kernel draws from, the atlas holds nothing unnamed, and
-//! the bytes on the wire did not change.
+//! `IconId` is a number, not an enum, so these tests stand in for the
+//! compile-time check an enum would give: every named icon exists in the
+//! atlas the kernel draws from, the atlas holds nothing unnamed, and the
+//! bytes on the wire are those of the original enum.
 
 use nopeek_widgets::{IconId, Widget};
 

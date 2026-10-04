@@ -44,7 +44,7 @@ pub fn encode(tree: &Widget) -> Result<Vec<u8>, WireError> {
 
 /// Decode a wire buffer back into a widget tree. Verifies the version
 /// byte first. Exposed mainly for unit-test round-tripping; the kernel
-/// has its own deserializer (P10.2).
+/// has its own deserializer.
 pub fn decode(bytes: &[u8]) -> Result<Widget, WireError> {
     let (&ver, body) = bytes.split_first().ok_or(WireError::Empty)?;
     if ver != WIRE_VERSION {

@@ -22,10 +22,9 @@ use crate::app_meta::{self, AppMeta, IconRef};
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_list_modules(ptr: i32, max: i32) -> i32;
-    // Kernel extracts just the `.npk.app_meta` custom section of sys/wasm/<name>
-    // and copies it here — no whole-module fetch, so module size is irrelevant
-    // (beak is >2 MB of embedded fonts; the old whole-module reader truncated it
-    // and dropped the app from the catalog).
+    // The kernel extracts just the `.npk.app_meta` custom section of
+    // sys/wasm/<name> and copies it here — no whole-module fetch, so module
+    // size (beak carries megabytes of embedded fonts) is irrelevant.
     fn npk_app_meta(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 }
 
@@ -62,7 +61,7 @@ static mut META_BUF: [u8; META_BUF_SIZE] = [0; META_BUF_SIZE];
 /// System / background / dev modules that are never user-launchable apps, so
 /// they don't clutter the launcher or dock. (Panels dock/bar/drun are excluded
 /// per-caller via `exclude`.) Background drivers that ship no `.npk.app_meta`
-/// section are hidden automatically — this list is only for modules that DO
+/// section are hidden automatically — this list is only for modules that do
 /// carry app_meta but still aren't apps.
 const SYSTEM_HIDDEN: &[&str] = &["debug", "testdisk", "wifi", "wallpaper", "snap"];
 

@@ -11,16 +11,10 @@ use crate::abi::{
 };
 use crate::style::{Elevation, Padding, Radius, Spacing};
 
-// Small uniform inset (4 px) so children — including dividers — get
-// breathing room from the window chrome instead of butting against
-// the rounded border. The vertical inset combines with the leading /
-// trailing zero-size widgets that `prefab::input` and `prefab::footer`
-// install at their wrap-Column ends to keep the search row + footer
-// row vertically symmetric between chrome and divider.
 /// Centre a single child inside a fixed-size box.
 ///
 /// `MinWidth` widens the box but leaves the child at the leading edge —
-/// `Align` on a Row is the CROSS axis (vertical), not the main one. The
+/// `Align` on a Row is the cross axis (vertical), not the main one. The
 /// flex spacers are what actually centre it. Every fixed-size cell in the
 /// design (workspace pill, tray icon, dock tile, toolbar button) needs
 /// this; without it the glyph sits left and the fill runs off to the right.
@@ -63,6 +57,12 @@ pub fn mark(w: u16, h: u16, token: Option<Token>) -> Widget {
     }
 }
 
+// Small uniform inset (4 px) so children — including dividers — get
+// breathing room from the window chrome instead of butting against
+// the rounded border. The vertical inset combines with the leading /
+// trailing zero-size widgets that `prefab::input` and `prefab::footer`
+// install at their wrap-Column ends to keep the search row + footer
+// row vertically symmetric between chrome and divider.
 pub fn panel(children: Vec<Widget>) -> Widget {
     Widget::Column {
         children,
@@ -74,11 +74,9 @@ pub fn panel(children: Vec<Widget>) -> Widget {
 
 // Selected rows are styled as a subtle elevated card with an accent
 // border — the colour cue lives in the border + the icon tint, not in
-// a strong fill that would clash with body text on top. Matches the
-// "card-style highlight" that AI-generated UIs and modern launchers
-// (Raycast, macOS Spotlight) reach for. Padding is Lg so the icon /
-// title / subtitle / arrow have visible breathing room inside the
-// border on a selected row instead of hugging the stroke.
+// a strong fill that would clash with body text on top. Padding is Lg
+// so the icon / title / subtitle / arrow have visible breathing room
+// inside the border on a selected row instead of hugging the stroke.
 pub fn list_row(
     icon: IconId,
     title: &str,
@@ -192,7 +190,7 @@ pub fn footer(left: &str, right: &str) -> Widget {
         modifiers: vec![Modifier::Padding(Padding::Md.as_u16())],
     };
     // Wrap with a trailing zero-size widget so the wrap-Column's
-    // internal `Sm` spacing acts as BOTTOM-margin on the last row.
+    // internal `Sm` spacing acts as bottom margin on the last row.
     // `row.Padding(Md=12) + this.spacing(Sm=8) + panel.Padding(Xs=4)
     // = 24 px` matches the symmetric 24 px above the footer text
     // (panel.spacing Md 12 + row top padding Md 12), keeping the
@@ -262,7 +260,7 @@ pub fn body(text: &str) -> Widget {
     }
 }
 
-// ── File-browser / multi-pane prefabs (P10.11 loft) ───────────────────
+// ── File-browser / multi-pane prefabs ─────────────────────────────────
 
 /// Square tap-target with a single centred icon. Used for toolbar chrome
 /// (back/forward/up, refresh) and in-row actions.
@@ -517,9 +515,8 @@ pub fn grid(items: Vec<Widget>, per_row: usize) -> Widget {
 // These are the primary building blocks for new apps and AI-generated
 // UI. They use the v2 modifier set (Hover, Rounded, WhenDensity) so
 // callers get hover-feedback, responsive padding, and consistent
-// elevation by default. The earlier prefabs above (panel, list_row,
-// nav_row, ...) remain for backward compat with drun + loft and have
-// been polished with hover-state in place.
+// elevation by default. The prefabs above (panel, list_row, nav_row,
+// ...) are still used by drun and loft.
 
 /// Visual weight tier for `card`. Maps semantically to design tokens
 /// rather than concrete pixel values so a future theme can retune all
@@ -712,7 +709,7 @@ fn input_maybe_focused(
         modifiers: wrap_mods,
     };
     // Wrap with a leading zero-size widget so the wrap-Column's
-    // internal `Sm` spacing acts as TOP-margin on the search row.
+    // internal `Sm` spacing acts as top margin on the search row.
     // `panel.Padding(Xs=4) + this.spacing(Sm=8) + row.Padding(Md=12)
     // = 24 px` matches the symmetric 24 px below the search text
     // (row bottom padding 12 + panel.spacing Md 12), so the search

@@ -1,10 +1,10 @@
 //! Widget ABI — wire contract mirror of `kernel/src/shade/widgets/abi.rs`.
 //!
-//! **Every change here must be mirrored to the kernel side, and vice
-//! versa.** Variant order, struct-variant field order, and `#[repr]`
-//! discriminants are all part of the wire format. Postcard serializes by
-//! declaration position, so drift between the two copies would produce
-//! silent deserialization corruption.
+//! Every change here must be mirrored to the kernel side, and vice versa.
+//! Variant order, struct-variant field order, and `#[repr]` discriminants
+//! are all part of the wire format. Postcard serializes by declaration
+//! position, so drift between the two copies would produce silent
+//! deserialization corruption.
 //!
 //! The `check_abi` module at the crate root enforces ordering invariants
 //! at compile time (same mechanism as the kernel's check_abi.rs).
@@ -90,12 +90,11 @@ pub enum Token {
 
     // ── Code tokens (syntax highlighting) ─────────────────────────────
     //
-    // A second, independent ramp. The tokens above describe *chrome*;
-    // these describe *source text*. An editor needs both at once, and
-    // reusing `Accent`/`Warning` for keywords and strings tied the
-    // syntax colours to the wallpaper — a whole language got three
-    // colours. Resolved from the active code scheme (`set code.scheme`),
-    // never from the accent.
+    // A second, independent ramp. The tokens above describe chrome; these
+    // describe source text. An editor needs both at once, and reusing
+    // `Accent`/`Warning` for keywords and strings would tie the syntax
+    // colours to the wallpaper. Resolved from the active code scheme
+    // (`set code.scheme`), never from the accent.
     /// Declaration / storage keywords: `fn` `let` `def` `class` `int`.
     CodeKeyword     = 17,
     /// Control flow and imports: `if` `for` `return` `import` `match`.
@@ -124,15 +123,14 @@ pub enum Token {
 #[serde(transparent)]
 pub struct IconId(pub u16);
 
-/// The named icons. `IconId` is a NUMBER, not a closed enum: a module that
+/// The named icons. `IconId` is a number, not a closed enum: a module that
 /// only passes an icon on (the dock showing an app's icon) must not have to
-/// know every icon there is — with an enum, one new icon meant rebuilding
-/// dock, drun and bar, or they showed a blank file instead. The atlas is
-/// looked up by number, and a number it lacks draws nothing.
+/// know every icon there is, or every new icon would force a rebuild of
+/// dock, drun and bar. The atlas is looked up by number, and a number it
+/// lacks draws nothing.
 ///
-/// Wire-identical to the enum this replaced: postcard writes a variant
-/// index and a `u16` as the same varint, and the numbers are the old
-/// discriminants. Values frozen; append only — and the atlas
+/// On the wire a `u16` encodes like an enum variant index (same varint), so
+/// the values are the frozen discriminants. Append only — and the atlas
 /// (`tools/regen-icons`) must carry every number named here.
 macro_rules! icon_ids {
     ($($name:ident = $n:expr,)*) => {
@@ -235,7 +233,7 @@ pub enum TextStyle {
     /// 18 px regular weight — between `Body` (14) and `Title` (24, bold).
     /// Used for non-bold display text such as input placeholders /
     /// values where Body reads too small but Title's 600-weight bold
-    /// is too heavy. (Appended for vocab-v3.)
+    /// is too heavy.
     Heading = 5,
     // Appended only.
 }
@@ -377,7 +375,7 @@ pub enum Modifier {
     /// internally for anchor lookups, never to other apps. Multiple
     /// widgets with the same id is undefined behavior (last wins).
     NodeId(NodeId),
-    /// Focus ring — a stroke of `width` px drawn just OUTSIDE the node's
+    /// Focus ring — a stroke of `width` px drawn just outside the node's
     /// rect, under any Border. Mirrors CSS `box-shadow: 0 0 0 Npx`. Costs
     /// no layout space; leave room yourself (a row gap suffices at ≤ 3).
     Ring { token: Token, width: u8 },
@@ -388,8 +386,8 @@ pub enum Modifier {
     /// Draw a line-number gutter down the left edge of a `TextArea`.
     LineNumbers(bool),
     /// Per-axis inner padding (px at 1× scale). Sums with `Padding`.
-    /// Appended AFTER LineNumbers — inserting ahead of a shipped variant
-    /// renumbers it on the wire and breaks the running app.
+    /// Appended after LineNumbers — inserting ahead of a shipped variant
+    /// renumbers it on the wire and breaks running apps.
     PaddingXY { x: u16, y: u16 },
     /// This text widget takes focus when its window first appears.
     /// Without it a window opens with nothing focused.
@@ -406,22 +404,19 @@ pub enum Modifier {
     /// the rect shows. The compositor clamps it to the overhang, so it can
     /// never push the content out of view. Ignored on every other widget.
     CanvasOffset { x: i32, y: i32 },
-    /// Farbige LAEUFE ueber den Text eines `Widget::Input`, in Byte-
-    /// Offsets — dasselbe, was `Widget::TextArea.spans` fuer den Editor tut.
+    /// Coloured runs over the text of a `Widget::Input`, in byte offsets —
+    /// what `Widget::TextArea.spans` does for the editor.
     ///
-    /// **Wofuer es gebaut wurde: die Adresszeile.** Ein Browser hebt die
-    /// registrierbare Domain hervor und blendet den Rest ab, und das ist
-    /// keine Zierde, sondern die Anti-Phishing-Anzeige: in
-    /// `https://paypal.com.betrug.ru/login` heisst die Domain `betrug.ru`,
-    /// und ohne die Hervorhebung liest das Auge das erste, was wie ein Name
-    /// aussieht. Die App rechnet die Spanne selbst aus (beak nimmt die echte
-    /// Public Suffix List) — der Baukasten faerbt nur, was ihm gesagt wird,
-    /// und weiss nichts von URLs.
+    /// Built for the address bar: a browser highlights the registrable domain
+    /// and dims the rest, which is an anti-phishing cue — in
+    /// `https://paypal.com.example.ru/login` the domain is `example.ru`. The
+    /// app computes the spans itself; the toolkit only colours what it is told
+    /// and knows nothing about URLs.
     ///
-    /// Nicht abgedeckte Bytes behalten die Vorgabefarbe. Ueberlappende oder
-    /// unsortierte Spannen sind erlaubt; die spaetere gewinnt.
+    /// Uncovered bytes keep the default colour. Overlapping or unsorted spans
+    /// are allowed; the later one wins.
     Spans(alloc::vec::Vec<Span>),
-    /// Fire `Event::Action(id)` while the pointer MOVES over this widget,
+    /// Fire `Event::Action(id)` while the pointer moves over this widget,
     /// at most every [`MOTION_INTERVAL_MS`] — and at once when the pointer
     /// moves onto it from another `OnMotion` target (deepest wins, like
     /// `OnClick`). For "show the controls while the mouse is being used":
@@ -442,11 +437,11 @@ pub const MONO_SIZE_PX: u16 = 13;
 
 // ── Widget ────────────────────────────────────────────────────────────
 
-/// Upper end of `Widget::Slider::value` — per mille, fine enough for a
-/// seek bar across a full-width window.
-/// Throttle of `Modifier::OnMotion`.
+/// Throttle of `Modifier::OnMotion`, in ms.
 pub const MOTION_INTERVAL_MS: u32 = 200;
 
+/// Upper end of `Widget::Slider::value` — per mille, fine enough for a
+/// seek bar across a full-width window.
 pub const SLIDER_MAX: u16 = 1000;
 
 #[non_exhaustive]
@@ -520,7 +515,7 @@ pub enum Widget {
     /// the anchor when there is no room below. Apps emit a Popover
     /// only while the overlay should be visible; toggle by adding /
     /// removing it from the tree. `on_dismiss` fires whenever the
-    /// user clicks outside both the popover content AND the anchor
+    /// user clicks outside both the popover content and the anchor
     /// rect — apps route this to their "close" state transition.
     Popover {
         anchor:     NodeId,
@@ -575,7 +570,7 @@ pub enum Widget {
 // ── Events / Actions ──────────────────────────────────────────────────
 
 /// Mirror of `kernel::input::KeyCode`. Field shape frozen as part of the
-/// Phase 8 ABI — kernel-side and SDK-side must stay in sync.
+/// ABI — kernel-side and SDK-side must stay in sync.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyCode {
@@ -618,7 +613,7 @@ pub enum Event {
     /// compositor (printable key, Backspace, Delete). `value` is the
     /// new buffer contents — apps typically mirror it into their state
     /// and re-commit the tree with `Widget::Input { value, ... }`
-    /// matching. Cursor-only navigation (Left/Right/Home/End) does
+    /// matching. Cursor-only navigation (Left, Right, Home, End) does
     /// not fire this event.
     InputChange { value: String },
     /// Right-click hit-test result. Same hit-test as `Action`, but
@@ -626,7 +621,7 @@ pub enum Event {
     /// menus (Popover) without consuming the primary click.
     ContextAction(ActionId),
     /// "Open this resource" — delivered when `npk_open` targets an app
-    /// that is ALREADY running (instead of spawning a duplicate). The
+    /// that is already running (instead of spawning a duplicate). The
     /// payload is the launch argument (e.g. a file path). Lets an app
     /// be a singleton with tabs: a second open routes here as a new tab.
     Open(String),
@@ -644,8 +639,8 @@ pub enum Event {
     /// `postcard::from_bytes` returns `Err`, treated as "no event").
     Clipboard(ClipKind),
     /// A file-picker request this app started via `npk_pick` finished.
-    /// `path` is the npkFS path the user chose, or **empty if they
-    /// cancelled**. `tag` is the caller's own value from `npk_pick`,
+    /// `path` is the npkFS path the user chose, or empty if they
+    /// cancelled. `tag` is the caller's own value from `npk_pick`,
     /// returned unchanged — the picker roundtrip is asynchronous, so an
     /// app running several dialogs (open / save-as / …) uses it to tell
     /// which one came back. The kernel never interprets it.
@@ -661,7 +656,7 @@ pub enum Event {
     CloseRequest,
     /// A Ctrl chord the text editor doesn't own — Ctrl+S, Ctrl+O, … The
     /// editor keeps Ctrl+A/C/X/V for text; everything else reaches the app
-    /// here. **Ctrl is implied**; `shift`/`alt` say what else was held, so
+    /// here. Ctrl is implied; `shift`/`alt` say what else was held, so
     /// Ctrl+Shift+S is distinguishable from Ctrl+S.
     ///
     /// `letter` is the lowercase ASCII letter, already normalized from the
@@ -676,20 +671,17 @@ pub enum Event {
     /// magnitude is notches, not pixels, so the app picks the step.
     ///
     /// Separate from `Wheel` because that one carries no modifiers, and
-    /// because Ctrl+wheel must NOT scroll: the compositor skips its own
+    /// because Ctrl+wheel must not scroll: the compositor skips its own
     /// scroll handling and sends this instead. An app that ignores it
     /// simply doesn't zoom.
     Zoom { delta: i32 },
-    /// Waagrechtes Rollen ueber der fokussierten App, das kein
-    /// `Widget::Scroll` mit waagrechter Achse verbraucht hat. `dx` ist
-    /// pixelskaliert, positiv = nach RECHTS.
+    /// Horizontal scroll over the focused app that no `Widget::Scroll` with a
+    /// horizontal axis consumed. `dx` is in pixels, positive = to the right.
     ///
-    /// Eigene Variante und kein Feld an `Wheel`: ein angehaengter Wert
-    /// waere eine ABI-Aenderung an einer bestehenden Variante, und die
-    /// bricht jede App, die gegen das alte SDK gebaut ist. Angehaengt
-    /// scheitert bei ihnen nur das Dekodieren DIESES Ereignisses, und es
-    /// wird uebersprungen. MUSS im Gleichschritt mit der SDK-Kopie in
-    /// `tools/wasm/sdk/widgets/src/abi.rs` bleiben.
+    /// A separate variant rather than a field on `Wheel`: adding a field
+    /// changes an existing variant and breaks every app built against the old
+    /// SDK, while an appended variant only fails to decode in those apps and
+    /// is skipped. Must stay in lockstep with the kernel copy.
     WheelX { dx: i32 },
     /// A `Widget::Slider` moved. `action` is its `on_change`, `value` in
     /// 0..=[`SLIDER_MAX`]. `done: false` while the pointer drags (only

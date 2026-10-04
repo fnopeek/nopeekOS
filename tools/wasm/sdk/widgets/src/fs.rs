@@ -7,13 +7,11 @@
 //! ```
 //!
 //! The name is NUL-terminated, so the 19 bytes after it are a fixed-width
-//! tail — the record is unambiguous when read **sequentially**. It is not
+//! tail — the record is unambiguous when read sequentially. It is not
 //! when the buffer is split on `\n` first: `size` and `mtime` are raw
 //! little-endian integers and any of their bytes can be `0x0A`. A file of
 //! 2600 bytes (`0x0A28`) or a mtime whose low byte happens to be 10 tears
-//! its own record in half — the front half is dropped for a short tail,
-//! and the back half decodes as a nameless directory carrying garbage.
-//! Roughly one entry in sixty. Read records, never lines.
+//! its own record in half. Read records, never lines.
 
 /// One decoded directory entry. Borrows the name out of the buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,7 +112,7 @@ mod tests {
         assert_eq!(names(&[]).len(), 0);
     }
 
-    /// The bug this module exists for: a `0x0A` byte inside `size`.
+    /// A `0x0A` byte inside `size` must not split the record.
     #[test]
     fn newline_byte_in_size() {
         for size in [10u64, 2560, 2600, 2815, 68096] {

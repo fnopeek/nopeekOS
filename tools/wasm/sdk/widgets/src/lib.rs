@@ -8,14 +8,14 @@
 //!
 //! # Layering rules
 //!
-//! - Types in this crate are **ABI** — variant order, struct field order,
+//! - Types in this crate are ABI — variant order, struct field order,
 //!   and `#[repr(u8/u16)]` discriminants are frozen. Changes break every
 //!   serialized tree.
 //! - Postcard serializes enum variants by declaration position, so
 //!   inserting a variant shifts every subsequent wire index. New variants
-//!   must be **appended only**.
+//!   must be appended only.
 //! - Reserved slots (`Popover`/`Tooltip`/`Menu`, `.blur`/`.shadow`/
-//!   `.effect`/`.role`) are declared now so v2 can implement them
+//!   `.effect`/`.role`) are declared up front so they can be implemented
 //!   without a wire-version bump.
 //!
 //! # Example
@@ -37,7 +37,7 @@
 //! };
 //!
 //! let bytes = wire::encode(&tree).expect("serialize");
-//! // then: host::scene_commit(&bytes);
+// then: host::scene_commit(&bytes);
 //! ```
 
 #![cfg_attr(not(test), no_std)]
@@ -47,11 +47,10 @@ extern crate alloc;
 pub mod abi;
 pub mod app_meta;
 pub mod fs;
-/// Die wachsende Halde — nur mit dem Merkmal `heap`, weil sie `talc`
-/// mitbringt. Siehe das Modul selbst, wann sie richtig ist.
-// Nur fuer wasm32: das Modul IST der `memory.grow`-Weg. Auf dem Host
-// (build.rs, Tests) gaebe es nichts zu tun und jede Zeile darin waere
-// toter Code, den der Compiler zu Recht anmahnt.
+/// The growing heap — only with the `heap` feature, because it pulls in
+/// `talc`. See the module itself for when it is the right choice.
+// wasm32 only: the module is the `memory.grow` path. On the host
+// (build.rs, tests) there is nothing to do and it would be dead code.
 #[cfg(all(feature = "heap", target_arch = "wasm32"))]
 pub mod heap;
 pub mod i18n;
@@ -100,7 +99,7 @@ pub mod caps {
     pub const NETCTL: u8 = 0x80;
 
     /// Second `.npk.caps` byte — the first byte's 8 bits above are full.
-    /// An app needing one of these ships a **2-byte** section:
+    /// An app needing one of these ships a 2-byte section:
     /// ```ignore
     /// #[unsafe(link_section = ".npk.caps")]
     /// #[used]
