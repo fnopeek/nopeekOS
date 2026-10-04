@@ -1,17 +1,15 @@
-//! spell 0.1 — text editor with markdown preview, in loft's visual
-//! language.
+//! spell — text editor with markdown preview, in loft's visual language.
 //!
 //! Layout (top → bottom):
-//!   menu_bar   — Datei / Ansicht / Hilfe
-//!   toolbar    — file name (+ dirty marker) · mode toggle · save
-//!   body       — TextArea (edit) OR rendered preview (read-only)
-//!   footer     — line + byte counts · file kind · saved/modified
+//!   menu_bar   — File / View / Help
+//!   tab bar    — one tab per open document
+//!   body       — TextArea (edit) or rendered markdown preview (read-only)
 //!
 //! Editing uses `Widget::TextArea`: the compositor owns the 2-D caret
 //! (arrows / Enter / Home-End / PageUp-Down), the app only mirrors the
-//! document via `Event::InputChange`. Syntax highlight + markdown live
-//! in the preview pane (read-only `Text` + `Tint` spans) because an
-//! editable field renders flat text by design.
+//! document via `Event::InputChange`. Syntax highlighting is sent as
+//! colour spans the compositor paints live; markdown has a separate
+//! rendered preview.
 
 #![no_std]
 
@@ -32,13 +30,13 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
-// Declared capabilities: read + render. **No WRITE** — an editor that can
+// Declared capabilities: read + render. No WRITE — an editor that can
 // overwrite any file in the store is exactly what the file-dialog portal
 // exists to avoid.
 //
 // Saving still works, through two narrower routes the kernel grants:
 //   - the path the user picked in the dialog (`npk_pick` records it
-//     against this instance — the click IS the authorisation), and
+//     against this instance — the click is the authorisation), and
 //   - `sys/config/spell`, our own settings file, whose name the kernel
 //     derives from the module name so we can't claim someone else's.
 //
@@ -187,7 +185,7 @@ fn step_label(n: usize, total: usize) -> String {
     fill(&once, &b)
 }
 
-/// "Originalgröße (13 px)" — naming the target makes the entry a status
+/// "Actual size (13 px)" — naming the target makes the entry a status
 /// line too: you can see how far you have zoomed without counting.
 fn zoom_reset_label() -> String {
     let mut target = String::with_capacity(4);
@@ -208,7 +206,7 @@ fn close_self() { unsafe { let _ = npk_close_widget(); } }
 // ── Buffers ───────────────────────────────────────────────────────────
 //
 // The event buffer must hold a full `InputChange` — its payload is the
-// WHOLE document. `npk_event_poll` drops (does not truncate) an event
+// whole document. `npk_event_poll` drops (does not truncate) an event
 // that overflows, which would silently desync our mirror from the
 // compositor's edit buffer, so size it well above any realistic file.
 const EVENT_BUF_SIZE: usize = 512 * 1024;
@@ -223,9 +221,9 @@ static mut FETCH_BUF: [u8; FETCH_BUF_SIZE] = [0; FETCH_BUF_SIZE];
 const TEXT_CAP: usize = 256 * 1024;
 
 // An event's owned String (Open path / InputChange value) is allocated on
-// the bump heap during poll, ABOVE persistent_mark — so `alloc_reset`
+// the bump heap during poll, above persistent_mark — so `alloc_reset`
 // before `handle` frees it and the first allocation in `handle` clobbers
-// it (a use-after-free). We copy such payloads into this STATIC buffer
+// it (a use-after-free). We copy such payloads into this static buffer
 // (outside the bump heap) before the reset, and hand `handle` a &str into
 // it. Sized to hold a whole-document InputChange.
 const PAYLOAD_CAP: usize = 512 * 1024;
@@ -402,7 +400,7 @@ impl Doc {
         self.text.push_str(s);
     }
 
-    /// `true` for a fresh, never-edited Unbenannt tab — opening a file
+    /// `true` for a fresh, never-edited untitled tab — opening a file
     /// reuses it instead of stacking a blank tab (VS Code behaviour).
     fn is_pristine(&self) -> bool {
         self.path.is_none() && !self.dirty
@@ -478,7 +476,7 @@ impl Spell {
     fn cur_mut(&mut self) -> &mut Doc { &mut self.docs[self.active] }
 
     /// Open a file: focus its tab if already open (VS Code behaviour),
-    /// else load it into a new tab (reusing a pristine Unbenannt tab).
+    /// else load it into a new tab (reusing a pristine untitled tab).
     fn open_path(&mut self, path: &str) {
         if let Some(i) = self.docs.iter().position(|d| d.path.as_deref() == Some(path)) {
             self.active = i;
@@ -766,7 +764,7 @@ fn render(sp: &Spell) -> Widget {
         Widget::Divider,
         render_tabbar(sp),
         Widget::Divider,
-        render_body(sp),       // Flex(1) — fills (no footer; removed as noise)
+        render_body(sp),       // Flex(1) — fills
     ];
 
     if let Some(kind) = sp.open_menu {
@@ -838,8 +836,7 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
 
 /// Tab bar — one tab per open document, active tab highlighted, each
 /// with a dirty dot and a close (×). Trailing "+" opens a new tab.
-/// Replaces the old filename+icons toolbar (save lives in the Datei
-/// menu, the markdown view toggle in the Ansicht menu).
+/// Save lives in the File menu, the markdown view toggle in View.
 /// Fixed tab width — names ellipsize rather than letting the strip
 /// reflow as you open files (docs/spec/UI_REFRESH.md §3 `tab`).
 const TAB_W: u16 = 200;
@@ -1117,8 +1114,8 @@ fn bullet(text: &str) -> Widget {
 }
 
 /// Paragraph with inline `code` spans rendered as Mono + muted tint.
-/// Other inline markup (**bold**, *italic*) is left as literal text in
-/// v1 — there is no bold weight in the text vocab yet.
+/// Other inline markup (bold, italic) is left as literal text — there is
+/// no bold weight in the text vocab.
 fn paragraph(text: &str) -> Widget {
     // Odd split segments sit between backticks → inline code.
     let mut spans: Vec<Widget> = Vec::new();
@@ -1165,7 +1162,7 @@ fn code_block(lines: &[String]) -> Widget {
 // is standing inside — it guesses wrong on exactly the files people
 // write.
 //
-// Spans cover only what is NOT default-coloured; uncovered bytes render
+// Spans cover only what is not default-coloured; uncovered bytes render
 // in `OnSurface`, which is most of a file. They come out sorted by
 // `start` (the scan only ever moves forward), which the compositor's
 // renderer relies on.
@@ -1178,9 +1175,8 @@ fn push_span(out: &mut Vec<Span>, start: usize, len: usize, token: Token) {
 /// Per-language lexer knobs.
 ///
 /// `decl` and `ctrl` are split the way the themes split them —
-/// storage/declaration against control flow and imports. VSCodium paints
-/// those two different colours, and collapsing them into one bucket was
-/// half of why source here read as flat.
+/// storage/declaration against control flow and imports, which common
+/// editor themes paint in two different colours.
 struct Syntax {
     decl:      &'static [&'static str],
     ctrl:      &'static [&'static str],
@@ -1381,7 +1377,7 @@ fn scan_string(text: &str, start: usize, quote: u8, triple: bool, subst: bool) -
             if i < b.len() { i += char_len(text, i); }
             continue;
         }
-        // `"$(cd "$dir" && pwd)"` is ONE string — the quotes inside the
+        // `"$(cd "$dir" && pwd)"` is one string — the quotes inside the
         // substitution belong to it, not to us. Skip to the balanced `)`.
         if subst && b[i] == b'$' && i + 1 < b.len() && b[i + 1] == b'(' {
             let mut depth = 1usize;
@@ -1425,7 +1421,7 @@ fn scan_raw_string(text: &str, at: usize) -> Option<usize> {
     Some(b.len())
 }
 
-/// `'x'` / `'\n'` / `'\u{1F600}'` — but NOT `'a`, which is a lifetime.
+/// `'x'` / `'\n'` / `'\u{1F600}'` — but not `'a`, which is a lifetime.
 /// `None` unless a closing quote really follows.
 fn scan_char_lit(text: &str, start: usize) -> Option<usize> {
     let b = text.as_bytes();
@@ -1486,9 +1482,8 @@ fn classify(w: &str, b: &[u8], after: usize, sx: &Syntax) -> Option<Token> {
     if sx.consts.contains(&w)   { return Some(Token::CodeConstant); }
     if sx.types.contains(&w)    { return Some(Token::CodeType); }
     if sx.builtins.contains(&w) { return Some(Token::CodeFunction); }
-    // Shape is checked BEFORE the call site: `new Error(…)` and
-    // `Downloader(url)` are a type being used, and colouring them as
-    // calls made every constructor in the file look like a free function.
+    // Shape is checked before the call site: `new Error(…)` and
+    // `Downloader(url)` are a type being used, not a free function.
     let first = w.as_bytes()[0];
     if first.is_ascii_uppercase() {
         if w.bytes().any(|c| c.is_ascii_lowercase()) { return Some(Token::CodeType); }
@@ -1739,7 +1734,7 @@ enum Outcome { Idle, Rerender, Exit }
 
 fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
     match ev {
-        // Esc backs out of whatever is open. It does NOT quit: in an
+        // Esc backs out of whatever is open. It does not quit: in an
         // editor Esc is the cancel key, and a stray press should never
         // end the session. Closing is Mod+Q, the window's ×, or
         // File → Close.
@@ -1756,7 +1751,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             // `payload` is the stabilized buffer value (the event's own
             // String was freed by alloc_reset). The TextArea is the only
             // editable widget we render — the file dialogs live in their
-            // own window now.
+            // own window.
             let d = sp.cur_mut();
             d.set_text(payload);
             d.dirty = true;
@@ -1946,7 +1941,7 @@ pub extern "C" fn _start() {
         match poll_event() {
             PollResult::Event(ev) => {
                 // Stabilize heap-backed payloads (Open path, InputChange
-                // value) into the static buffer BEFORE alloc_reset frees
+                // value) into the static buffer before alloc_reset frees
                 // the event — otherwise handle's first allocation clobbers
                 // them (use-after-free).
                 let plen = match &ev {
