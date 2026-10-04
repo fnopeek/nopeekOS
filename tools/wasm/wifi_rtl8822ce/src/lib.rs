@@ -57,6 +57,12 @@ use regs::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()] =
     *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+// The default rights plus HARDWARE, which binding the PCI device requires.
+// A section replaces the default, so READ, EXECUTE and RENDER are listed.
+#[unsafe(link_section = ".npk.caps")]
+#[used]
+static NPK_CAPS: [u8; 1] = [0x01 | 0x04 | 0x08 | 0x40]; // READ|EXEC|RENDER|HARDWARE
+
 /// Never die silently: a bare `loop {}` looks like an unresponsive chip from
 /// the outside. `Location` survives `strip = true` because it is static data.
 #[panic_handler]

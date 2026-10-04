@@ -1147,6 +1147,10 @@ pub(crate) fn npk_debug_target_port(_ctx: &mut HostState) -> i32 {
     get_debug_target().1 as i32
 }
 
+/// Binds the module to a PCI device. Allowed with a capability for that
+/// exact device (the `driver` intent) or with global `Rights::HARDWARE`:
+/// a bound device gives MMIO, bus mastering and DMA, i.e. reach into all
+/// physical memory, so `EXECUTE` alone is not enough.
 pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32 {
     let vid = vendor as u16;
     let did = device as u16;
@@ -1157,7 +1161,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
     let cap_id = ctx.cap_id;
     let a = dev.addr;
     if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
-        && capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+        && capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
         return -2;
     }
@@ -1199,7 +1203,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     let cap_id = ctx.cap_id;
     let a = dev.addr;
     if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
-        && capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+        && capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
         return -2;
     }
