@@ -615,7 +615,7 @@ impl Drop for Instance {
             m.size = now.clamp(start, MAX_MEMORY_BYTES);
             // Log the rare grown case once, with sizes.
             if m.size > start {
-                crate::kprintln!("[npk] forge: Instanz gibt {} MB zurueck ({} MB davon gewachsen)",
+                crate::kdebug!("[npk] forge: instance returns {} MB ({} MB grown)",
                                  m.size / (1024 * 1024), (m.size - start) / (1024 * 1024));
             }
         }

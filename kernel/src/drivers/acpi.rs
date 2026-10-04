@@ -256,7 +256,7 @@ fn find_pm1a_cnt() -> Option<u16> {
             ensure_mapped(dsdt_addr, dsdt_len);
             if let Some(slp_typ) = find_s5_slp_typ(dsdt_addr, dsdt_len) {
                 SLP_TYP_S5.store(slp_typ, Ordering::Release);
-                crate::kprintln!("[npk] ACPI: SLP_TYPa for S5 = {}", slp_typ);
+                crate::kdebug!("[npk] ACPI: SLP_TYPa for S5 = {}", slp_typ);
             }
         }
     }

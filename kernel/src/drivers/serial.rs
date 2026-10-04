@@ -60,12 +60,27 @@ pub fn verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
-/// Capture-only output for `kdebug!`.
+/// Capture-only output.
 pub fn capture_fmt(args: fmt::Arguments) {
     use fmt::Write;
     if let Some(ref mut buf) = *CAPTURE.lock() {
         let _ = buf.write_fmt(args);
     }
+}
+
+/// The quiet half of `kdebug!`: into the capture buffer and to the remote
+/// mirror (`debug`), not to screen or serial. Before the heap exists there
+/// is no capture buffer and the line is dropped.
+pub fn quiet_line(args: fmt::Arguments) {
+    use fmt::Write;
+    let line = {
+        let mut cap = CAPTURE.lock();
+        let Some(ref mut buf) = *cap else { return };
+        let start = buf.len();
+        let _ = buf.write_fmt(args);
+        String::from(&buf[start..])
+    };
+    crate::shade::terminal::stream_push_global(&line);
 }
 
 /// Append to capture buffer if active (called from write_str).
@@ -254,14 +269,14 @@ macro_rules! kprintln {
 }
 
 /// A detail line: printed only with `bootlog verbose`, always kept in the
-/// capture buffer (`dmesg`, `sys/log/boot`).
+/// capture buffer (`dmesg`, `sys/log/boot`) and sent to the remote mirror.
 #[macro_export]
 macro_rules! kdebug {
     ($($arg:tt)*) => ({
         if $crate::serial::verbose() {
             $crate::kprintln!($($arg)*);
         } else {
-            $crate::serial::capture_fmt(format_args!("{}\n", format_args!($($arg)*)));
+            $crate::serial::quiet_line(format_args!("{}\n", format_args!($($arg)*)));
         }
     });
 }

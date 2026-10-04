@@ -6,7 +6,7 @@
 // imports rather than ordinary undefined C symbols, which rust-lld rejects.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_print(ptr: i32, len: i32);
+    fn npk_log_serial(ptr: i32, len: i32);
     fn npk_sys_info(key: i32) -> i64;
 
     // PCI
@@ -44,8 +44,11 @@ pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
     if n > 0 { n as usize } else { 0 }
 }
 
+/// Diagnostic log line (`dmesg`; on screen only with `bootlog verbose`).
+/// The host adds the newline.
 pub fn log(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
+    let s = s.strip_suffix('\n').unwrap_or(s);
+    unsafe { npk_log_serial(s.as_ptr() as i32, s.len() as i32) };
 }
 
 // ── Diagnostic lines: built in, silent in normal operation ───────────

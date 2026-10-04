@@ -1184,7 +1184,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         irq_vector: 0,
         irq_seen: 0,
     });
-    kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
+    crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, vid, did);
     0
 }
@@ -1213,7 +1213,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
         return -2;
     }
-    kprintln!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
+    crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     ctx.hw = Some(HwDriverState {
@@ -2949,15 +2949,19 @@ pub(crate) fn npk_print(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32)
     }
 }
 
+/// Module diagnostics (`npk_log`, `npk_log_serial`) follow `kdebug!`: always
+/// in the capture buffer (`dmesg`), on screen and serial only with
+/// `bootlog verbose`. Program output goes through `npk_print`.
 pub(crate) fn npk_log(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len: i32) {
     if let Some(s) = read_str(mem, ptr, len) {
-        kprintln!("{}", s);
+        crate::kdebug!("{}", s);
     }
 }
 
 pub(crate) fn npk_log_serial(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len: i32) {
     if let Some(s) = read_str(mem, ptr, len) {
-        {
+        crate::drivers::serial::capture_fmt(format_args!("{}\n", s));
+        if crate::drivers::serial::verbose() {
             let serial = crate::drivers::serial::SERIAL.lock();
             for byte in s.bytes() {
                 if byte == b'\n' { serial.write_byte(b'\r'); }
