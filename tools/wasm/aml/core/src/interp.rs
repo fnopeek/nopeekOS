@@ -9,27 +9,23 @@ const MAX_DEPTH: usize = 64;
 
 pub struct Interp<'a> {
     ns: &'a Namespace,
-    /// Knoten, die eine METHODE zur Laufzeit deklariert (`OpRegion`, `Field`
-    /// im Rumpf). Die stehen nicht in der geladenen Tabelle: unser Lader
-    /// stellt Methodenruempfe zurueck und sieht sie erst beim Ausfuehren.
+    /// Nodes a method declares at run time (`OpRegion`, `Field` in a body).
+    /// They are not in the loaded table: the loader defers method bodies and
+    /// sees them only on execution.
     ///
-    /// ACPICA teilt das anders auf — der Knoten entsteht beim PARSEN, und
-    /// `acpi_ds_eval_region_operands` wertet Adresse und Laenge erst beim
-    /// AUSFUEHREN aus (dsopcode.c). Bei uns faellt beides zusammen, weil wir
-    /// den Rumpf ohnehin erst zur Laufzeit ansehen; das Ergebnis ist
-    /// dasselbe. Unterschied, bewusst: ACPICA loescht die Knoten beim
-    /// Verlassen der Methode (owner id), wir behalten sie bis zum Ende des
-    /// Laufs — `decode` baut je Runde einen frischen Namespace, also leben
-    /// sie nicht laenger als eine Messung.
+    /// ACPICA creates the node at parse time and evaluates address and length
+    /// at execution (`acpi_ds_eval_region_operands`, dsopcode.c); here both
+    /// happen at execution, with the same result. Deliberate difference:
+    /// ACPICA deletes the nodes when the method exits (owner id); we keep
+    /// them until the end of the run. `decode` builds a fresh namespace each
+    /// round, so they live no longer than one reading.
     dyn_nodes: BTreeMap<Path, Node>,
     ec: &'a mut dyn Ec,
     depth: usize,
-    /// Jeden gelesenen NAMEN melden.
+    /// Report every name read.
     ///
-    /// Gebaut fuer die Frage „warum sagt `_STA` null?" — die Antwort steht
-    /// in den drei, vier Werten, die die Methode dafuer liest, und die
-    /// sieht man sonst nirgends. Ein Interpreter, der eine 0 errechnet,
-    /// muss sagen koennen, WORAUS.
+    /// For questions like "why does `_STA` return zero?": the answer lies in
+    /// the few values the method reads, which are visible nowhere else.
     trace: bool,
     /// In-memory backing for non-EmbeddedControl regions (SystemIO,
     /// SystemMemory, PCI config, ...). Keyed by (region_space, absolute_byte).
@@ -124,9 +120,8 @@ pub fn ec_gpe(ns: &Namespace) -> Option<u32> {
 
 pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::BatteryInfo> {
     let mut it = Interp { ns, dyn_nodes: BTreeMap::new(), ec, depth: 0, trace: false, mem: BTreeMap::new() };
-    // Reihenfolge wie ACPICA in `acpi_initialize_objects`: erst die
-    // Operationsregionen freigeben (`_REG`), dann die Geraete anlaufen
-    // lassen (`_STA`/`_INI`).
+    // Order as in ACPICA `acpi_initialize_objects`: enable operation regions
+    // first (`_REG`), then start the devices (`_STA`/`_INI`).
     it.run_deferred();
     it.ec.note("[aml]  phase _REG");
     it.register_ec_regions()?;
@@ -134,17 +129,12 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     let ini_ran = it.run_ini_methods();
     it.ec.note_num("[aml]  _INI methods run: ", ini_ran as u64);
 
-    // Wieviele `_Qxx` fuehrt diese DSDT?
+    // How many `_Qxx` does this DSDT have?
     //
-    // Das sind die Abfragebehandler des EC: der Baustein meldet ein
-    // Ereignis (Akku rein/raus, Kabel), das Betriebssystem holt die
-    // Ereignisnummer mit QR_EC ab und ruft `_Q<nr>`. **Wir tun das nicht**,
-    // und wenn die Firmware ihr "Akku steckt"-Flag dort setzt, bleibt es
-    // auf seinem Anfangswert — genau das Bild, das `_STA` hier zeigt
-    // (0x0F: Geraet da, Bit4 frei = kein Akku), ohne dass ein einziger
-    // EC-Zugriff stattfindet.
-    //
-    // Die Zahl sagt, ob dieser Weg ueberhaupt in Frage kommt.
+    // These are the EC's query handlers: the EC signals an event (battery
+    // in/out, AC), the OS fetches the event number with QR_EC and calls
+    // `_Q<nr>`. Firmware often updates state such as "battery present" only
+    // there.
     let mut qcount = 0u64;
     for p in ns.nodes.keys() {
         if let Some(last) = p.last() {
@@ -153,36 +143,28 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     }
     it.ec.note_num("[aml]  _Qxx handlers in DSDT: ", qcount);
 
-    // Liegengebliebene EC-EREIGNISSE abholen und ihre `_Qxx` ausfuehren.
+    // Fetch pending EC events and run their `_Qxx`.
     //
-    // Das ist `acpi_ec_clear` aus Linux `drivers/acpi/ec.c`, und es ist der
-    // Schritt, der hier gefehlt hat: der EC sammelt Ereignisse (Akku
-    // eingelegt, Netzteil dran, Deckel), setzt Bit5 seines Statusregisters
-    // und wartet, dass jemand sie mit `QR_EC` abholt. Erst im `_Q<nr>`
-    // traegt die Firmware ihren Zustand nach. Holt sie keiner ab, bleibt
-    // `_STA` auf seinem Anfangswert — auf Florians IdeaPad 0x0F, also
-    // "kein Akku", bei vollem Akku am Netz.
+    // This is `acpi_ec_clear` from Linux `drivers/acpi/ec.c`: the EC
+    // collects events (battery inserted, AC, lid), sets bit 5 of its status
+    // register and waits for someone to fetch them with `QR_EC`. Only in
+    // `_Q<nr>` does the firmware update its state; if nobody fetches them,
+    // `_STA` stays at its initial value (e.g. "no battery").
     //
-    // Deckel 100 wie `ACPI_EC_CLEAR_MAX`; Linux warnt, wenn er greift, und
-    // wertet das als haengenden EC.
+    // Limit of 100 as `ACPI_EC_CLEAR_MAX`; Linux warns when it is hit and
+    // treats it as a stuck EC.
     let drained = it.drain_ec_queries();
     it.ec.note_num("[aml]  stale EC events drained: ", drained as u64);
 
-    // `_STA` des Akkugeraets — das fragt ein Betriebssystem VOR `_BST`, und
-    // es beantwortet die Frage direkt: Bit0 vorhanden, Bit3 funktionsfaehig,
-    // **Bit4 = Akku eingelegt** (ACPI 6.5 §10.2.1). Bisher sind wir ohne
-    // diese Auskunft gleich auf `_BST` gegangen und hatten hinterher nur
-    // 0xFFFFFFFF, das beides heissen kann.
+    // The battery device's `_STA`, which an OS queries before `_BST`: bit 0
+    // present, bit 3 functional, bit 4 = battery inserted (ACPI 6.5
+    // §10.2.1). Without it, `_BST` returning 0xFFFFFFFF is ambiguous.
     let mut sta = bat.clone();
     sta.push(crate::value::seg("_STA"));
-    // Praesenz kommt aus `_STA` Bit4 (ACPI 6.5 §10.2.1 "Battery is
-    // present"), nicht aus einem geratenen `remaining`.
-    //
-    // Bisher stand unten `remaining == 0xFFFFFFFF -> present = false`. Das
-    // war eine Kruecke aus der Zeit, als `_STA` gar nicht gefragt wurde —
-    // und sie ist falsch: 0xFFFFFFFF heisst nach Spezifikation
-    // "UNBEKANNT", nicht "nicht vorhanden". Ein voller Akku am Netz, dessen
-    // Restkapazitaet die Firmware nicht beziffert, verschwand damit ganz.
+    // Presence comes from `_STA` bit 4 (ACPI 6.5 §10.2.1 "Battery is
+    // present"), not from `remaining`: 0xFFFFFFFF means "unknown" per the
+    // specification, not "absent". A full battery on AC whose remaining
+    // capacity the firmware does not state is still present.
     let mut sta_present: Option<bool> = None;
     if it.has(&sta) {
         match it.call_path(&sta, Vec::new()) {
@@ -196,15 +178,12 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     } else {
         it.ec.note("[aml]  battery has no _STA");
     }
-    // REIHENFOLGE wie Linux: erst die Beschreibung, dann der Zustand.
+    // Order as in Linux: description first, then state.
     //
-    // `drivers/acpi/battery.c` ruft `acpi_battery_get_info` (_BIX/_BIF) VOR
-    // `acpi_battery_get_state` (_BST). Wir hatten es umgekehrt, und das ist
-    // nicht gleichgueltig: manche Firmware setzt in `_BIF` ihre Akkuauswahl
-    // oder latcht die Messwerte, und ein `_BST` davor meldet dann
-    // pflichtgemaess "unbekannt". Genau das Bild auf Florians IdeaPad, wo
-    // `_BST` sieben RICHTIGE Bytes liest (Rest 4745, Spannung 11971 mV) und
-    // trotzdem dreimal Ones zurueckgibt.
+    // `drivers/acpi/battery.c` calls `acpi_battery_get_info` (_BIX/_BIF)
+    // before `acpi_battery_get_state` (_BST). Some firmware selects the
+    // battery or latches readings in `_BIF`, and a `_BST` before it reports
+    // "unknown".
     it.ec.note("[aml]  phase _BIF");
     let (full, power_unit) = it.read_full_charge(bat)?;
     it.ec.note_num("[aml]  full charge: ", full as u64);
@@ -217,9 +196,9 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
     let bst = it.call_path(&p, Vec::new())?;
     let (state, remaining, rate, voltage_mv) = match &bst {
         Value::Package(e) if e.len() >= 4 => {
-            // Das ganze Paket zeigen: 0xFFFFFFFF in JEDEM Feld heisst "kein
-            // Akku", 0xFFFFFFFF nur in einem heisst "unbekannt" — und aus
-            // `remaining` allein war das nicht zu sehen.
+            // Log the whole package: 0xFFFFFFFF in every field means "no
+            // battery", in only one field it means "unknown"; `remaining`
+            // alone cannot tell.
             for (i, el) in e.iter().enumerate().take(4) {
                 it.ec.note_num(
                     match i { 0 => "[aml]   _BST[0] state=", 1 => "[aml]   _BST[1] rate=",
@@ -234,12 +213,10 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
 
     // Absent batteries report 0xFFFFFFFF in every field.
     //
-    // Was `_BST` WIRKLICH gesagt hat, faehrt mit: mit `..Default::default()`
-    // kam aus diesem Zweig `state=0 remaining=0` heraus, und das sah aus wie
-    // eine Messung. Der Rufer konnte "Firmware meldet keinen Akku" nicht von
-    // "wir haben nichts gelesen" unterscheiden.
-    // Sagt `_STA` ausdruecklich "kein Akku", ist es keiner — sonst gilt
-    // ein unbekanntes `remaining` als unbekannt und nicht als abwesend.
+    // What `_BST` actually returned is passed along, so the caller can
+    // tell "firmware reports no battery" from "nothing was read". If `_STA`
+    // explicitly says "no battery" there is none; otherwise an unknown
+    // `remaining` counts as unknown, not absent.
     if sta_present == Some(false) {
         return Ok(crate::BatteryInfo {
             present: false,
@@ -257,14 +234,9 @@ pub fn read_battery(ns: &Namespace, ec: &mut dyn Ec, bat: &Path) -> R<crate::Bat
         });
     }
 
-    // `remaining == 0xFFFFFFFF` heisst UNBEKANNT (ACPI 6.5 §10.2.2), und
-    // eine unbekannte Restkapazitaet darf keinen Prozentwert ergeben.
-    //
-    // Vorher lief sie durch dieselbe Rechnung wie ein Messwert: 4294967295
-    // mal 100 durch 53530 ist riesig, `.min(100)` macht daraus **100 %** —
-    // eine Zahl, die aussieht wie eine Messung, sich nie aendert und keinen
-    // Ursprung hat. Zum fuenften Mal an einem Abend dasselbe Muster: ein
-    // fehlender Wert, der als plausibler getarnt wird.
+    // `remaining == 0xFFFFFFFF` means unknown (ACPI 6.5 §10.2.2), and an
+    // unknown remaining capacity must not yield a percentage; computed as a
+    // measurement it would clamp to a constant 100 %.
     let percent = if full > 0 && remaining != 0xFFFF_FFFF {
         (((remaining as u64) * 100 + (full as u64) / 2) / full as u64).min(100) as u8
     } else {
@@ -315,19 +287,15 @@ impl<'a> Interp<'a> {
     /// Run every EmbeddedControl region's parent `_REG(3, 1)` so the firmware
     /// sets its "EC ready" gate (e.g. ECRG = 1). Generic — no name hardcoded.
     fn register_ec_regions(&mut self) -> R<()> {
-        // `_REG(space, 1)` fuer JEDE Regionsart, die wir bedienen — nicht nur
-        // fuer den EC.
+        // `_REG(space, 1)` for every region space we serve, not only the EC.
         //
-        // ACPICA ruft `_REG` fuer jeden Raum, fuer den ein Handler steht
-        // (`acpi_ev_initialize_op_regions`), und damit sagt das
-        // Betriebssystem der Firmware: "dieser Raum ist jetzt benutzbar."
-        // Wir haben das nur fuer Raum 3 getan, obwohl `region_byte` die
-        // uebrigen mit Speicher hinterlegt — eine DSDT, die ihren Zustand in
-        // einem `_REG` fuer SystemIO oder SystemMemory einrichtet, blieb
-        // dadurch halb angelaufen.
+        // ACPICA calls `_REG` for every space with an installed handler
+        // (`acpi_ev_initialize_op_regions`), telling the firmware "this
+        // space is now usable". A DSDT that sets up state in a `_REG` for
+        // SystemIO or SystemMemory would otherwise stay half-initialised.
         //
-        // Paare (Elternscope, Raum), damit ein Scope mit zwei Regionen auch
-        // zwei Aufrufe bekommt.
+        // Pairs of (parent scope, space), so a scope with two regions gets
+        // two calls.
         let mut pairs: Vec<(Path, u8)> = Vec::new();
         for (path, node) in self.ns.nodes.iter() {
             if let Node::Region { space, .. } = node {
@@ -339,34 +307,34 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        // EC zuletzt: die uebrigen Raeume richten oft erst das Tor ein, durch
-        // das der EC danach ueberhaupt antwortet.
+        // EC last: the other spaces often set up the gate through which the
+        // EC answers at all.
         pairs.sort_by_key(|(_, sp)| if *sp == 3 { 1 } else { 0 });
         for (par, space) in pairs {
             let mut reg = par.clone();
             reg.push(crate::value::seg("_REG"));
             if self.has(&reg) {
                 let args = vec![obj(Value::Int(space as u64)), obj(Value::Int(1))];
-                // Eine meckernde `_REG` darf die uebrigen nicht abbrechen —
-                // dasselbe Verhalten wie bei `_INI`.
+                // A failing `_REG` must not abort the others — same as for
+                // `_INI`.
                 let _ = self.call_path(&reg, args);
             }
         }
         Ok(())
     }
 
-    /// Gibt es diesen Pfad — in der Tabelle ODER zur Laufzeit deklariert?
+    /// Does this path exist, in the table or declared at run time?
     fn has(&self, p: &Path) -> bool {
         self.dyn_nodes.contains_key(p) || self.ns.nodes.contains_key(p)
     }
 
-    /// Knoten nachschlagen; Laufzeitdeklarationen verdecken die Tabelle.
+    /// Look up a node; run-time declarations shadow the table.
     fn node(&self, p: &Path) -> Option<&Node> {
         self.dyn_nodes.get(p).or_else(|| self.ns.get(p))
     }
 
-    /// Wie `Namespace::resolve`, aber ueber BEIDE Karten. Ein Feld, das eine
-    /// Methode gerade selbst angelegt hat, muss sie auch finden koennen.
+    /// Like `Namespace::resolve`, but over both maps. A field a method has
+    /// just created must be found by it.
     fn resolve(&self, scope: &Path, rooted: bool, carets: usize, segs: &[Seg]) -> Option<Path> {
         let mut base: Path = if rooted {
             Vec::new()
@@ -388,7 +356,7 @@ impl<'a> Interp<'a> {
         if self.has(&base) { Some(base) } else { None }
     }
 
-    /// Absoluter Pfad einer DEKLARATION (kein Aufwaertssuchen) — wie
+    /// Absolute path of a declaration (no upward search), like
     /// `Loader::def_path`.
     fn def_path(&self, scope: &Path, n: &NRef) -> Path {
         let mut base: Path = if n.rooted {
@@ -402,53 +370,44 @@ impl<'a> Interp<'a> {
         base
     }
 
-    /// `_INI` ueber den ganzen Namespace — der Anlauf, den das
-    /// BETRIEBSSYSTEM macht.
+    /// `_INI` over the whole namespace — the startup the OS performs.
     ///
-    /// Nachgebaut aus ACPICA `acpi_ns_initialize_devices` /
-    /// `acpi_ns_init_one_device` (nsinit.c): von oben nach unten, die Wurzel
-    /// zuerst, und `_STA` entscheidet.
+    /// Modelled on ACPICA `acpi_ns_initialize_devices` /
+    /// `acpi_ns_init_one_device` (nsinit.c): top-down, root first, and
+    /// `_STA` decides.
     ///
-    ///   * kein `_STA`  -> vorhanden UND funktionsfaehig
-    ///   * Bit0 gesetzt -> vorhanden, `_INI` laeuft
-    ///   * weder Bit0 noch Bit3 -> Geraet ist weder vorhanden noch
-    ///     funktionsfaehig: der ganze TEILBAUM wird uebersprungen
-    ///     ("don't look at the children of such a device")
-    ///   * abwesend, aber funktionsfaehig -> `_INI` nicht, Kinder schon
+    ///   * no `_STA`  -> present and functional
+    ///   * bit 0 set -> present, `_INI` runs
+    ///   * neither bit 0 nor bit 3 -> neither present nor functional: the
+    ///     whole subtree is skipped ("don't look at the children of such a
+    ///     device")
+    ///   * absent but functional -> no `_INI`, but children are visited
     ///
-    /// Wir haben das nie getan, und die Referenz-DSDT allein hat 44 solche
-    /// Methoden. Darin richtet die Firmware ihren Zustand ein — unter
-    /// anderem den, an dem der EC seinen Akku meldet.
+    /// Firmware sets up its state in these methods, including the state the
+    /// EC battery reporting depends on.
     ///
-    /// Fehler werden verschluckt, und das ist hier ACPICAs Verhalten: eine
-    /// `_INI`, die meckert, darf den Anlauf der uebrigen Geraete nicht
-    /// abbrechen.
+    /// Errors are swallowed, as in ACPICA: a failing `_INI` must not abort
+    /// the startup of the other devices.
     ///
-    /// Abweichung, bewusst: ACPICA laeuft das EINMAL beim Hochfahren, wir
-    /// je Messrunde — `decode` baut den Namespace jede Runde neu, und
-    /// `_REG` laeuft aus demselben Grund ebenfalls jedes Mal.
+    /// Deliberate deviation: ACPICA runs this once at boot, we run it every
+    /// round, since `decode` rebuilds the namespace each round; `_REG` runs
+    /// every time for the same reason.
     fn run_ini_methods(&mut self) -> u32 {
         let ini = crate::value::seg("_INI");
         let sta_seg = crate::value::seg("_STA");
 
-        // Die Wurzel zuerst (ACPICA: \_INI, dann \_SB._INI, dann der Rest).
+        // Root first (ACPICA: \_INI, then \_SB._INI, then the rest).
         let root_ini: Path = vec![ini];
         if self.has(&root_ini) {
             let _ = self.call_path(&root_ini, Vec::new());
         }
 
-        // Ueber die `_INI`-METHODEN gehen, nicht ueber Knoten, die wie ein
-        // Geraet AUSSEHEN.
+        // Walk the `_INI` methods, not nodes that look like devices.
         //
-        // Vorher filterte das auf `Node::Scope` — und der Lader vergibt den
-        // fuer Device, Scope, Processor, PowerRes und ThermalZone
-        // gleichermassen. Was er NICHT so einsortiert, fiel heraus, und
-        // damit auch dessen `_INI`. Auf Florians Geraet lief genau EINE von
-        // 56 Abfragebehandlern begleiteten Firmware — eine verdaechtig
-        // kleine Zahl.
-        //
-        // Der Elter einer `_INI` IST das Geraet. Damit haengt der Gang an
-        // dem, was wir suchen, statt an einer Einsortierung.
+        // The loader files Device, Scope, Processor, PowerRes and
+        // ThermalZone alike as `Node::Scope`, and anything filed otherwise
+        // would be missed. The parent of an `_INI` is the device, so the
+        // walk depends on what we look for rather than on a classification.
         let ini_seg = ini;
         let mut devs: Vec<Path> = self
             .ns
@@ -474,9 +433,9 @@ impl<'a> Interp<'a> {
             let flags: u64 = if self.has(&sta) {
                 match self.call_path(&sta, Vec::new()) {
                     Ok(v) => v.as_int(),
-                    // Meckert `_STA`, behandeln wir das Geraet wie ACPICA:
-                    // vorhanden und funktionsfaehig, damit ein Fehler nicht
-                    // einen ganzen Teilbaum stilllegt.
+                    // If `_STA` fails, treat the device as ACPICA does:
+                    // present and functional, so one error does not disable
+                    // a whole subtree.
                     Err(_) => 0x0F,
                 }
             } else {
@@ -492,11 +451,10 @@ impl<'a> Interp<'a> {
                 let mut ip = dev.clone();
                 ip.push(ini);
                 if self.has(&ip) {
-                    // Ein `_INI`, das WIRFT, muss es sagen. Es richtet das
-                    // Geraet ein — auf der HP-Tabelle setzt das `_INI` des
-                    // Touchpads die Adresse seines HID-Deskriptors —, und
-                    // ein verschlucktes `let _ =` laesst danach jeden
-                    // Folgefehler wie eine Eigenheit der Firmware aussehen.
+                    // An `_INI` that throws must be logged. It sets up the
+                    // device (e.g. a touchpad's `_INI` may set its HID
+                    // descriptor address), and swallowing the error makes
+                    // every follow-up failure look like a firmware quirk.
                     match self.call_path(&ip, Vec::new()) {
                         Ok(_) => {}
                         Err(e) => {
@@ -511,14 +469,14 @@ impl<'a> Interp<'a> {
         ran
     }
 
-    /// Anstehende EC-Abfragen abholen und ihre `_Q<nr>` ausfuehren.
+    /// Fetch pending EC queries and run their `_Q<nr>`.
     ///
-    /// Der Name ist `_Q` plus die Nummer in HEX — Linux liest ihn mit
-    /// `sscanf(node_name, "_Q%x", &value)`, also zwei Grossbuchstaben-
-    /// Ziffern. Gesucht wird er im Scope des EC-Geraets, und das ist der
-    /// Elter einer EmbeddedControl-Region.
+    /// The name is `_Q` plus the number in hex — Linux reads it with
+    /// `sscanf(node_name, "_Q%x", &value)`, i.e. two uppercase digits. It is
+    /// looked up in the EC device's scope, the parent of an EmbeddedControl
+    /// region.
     fn drain_ec_queries(&mut self) -> u32 {
-        // Scopes, in denen eine EC-Region haengt.
+        // Scopes containing an EC region.
         let mut scopes: Vec<Path> = Vec::new();
         for (path, node) in self.ns.nodes.iter() {
             if let Node::Region { space: 3, .. } = node {
@@ -550,8 +508,8 @@ impl<'a> Interp<'a> {
                 }
             }
             if !found {
-                // Linux protokolliert das ebenfalls und macht weiter: ein
-                // Ereignis ohne Behandler ist kein Fehler, es ist abgeholt.
+                // Linux logs this too and continues: an event without a
+                // handler is not an error; it has been fetched.
                 self.ec.note("[aml]   (no handler for that query)");
             }
             self.ec.ec_event(q, found);
@@ -569,10 +527,10 @@ impl<'a> Interp<'a> {
             Some(Node::Name(v)) => return Ok(v.borrow().clone()),
             Some(Node::Field { .. }) => return self.read_field(path),
             _ => {
-                // Zur Laufzeit deklarierte Feldeinheit: die steht nur in
-                // `dyn_nodes`. Methoden koennen dort nie stehen, deshalb
-                // bleibt der Zugriff oben absichtlich auf der Tabelle — er
-                // leiht `body` aus, und das muss die Methode ueberleben.
+                // A field unit declared at run time lives only in
+                // `dyn_nodes`. Methods can never be there, so the access
+                // above deliberately stays on the table: it borrows `body`,
+                // which must outlive the method.
                 if let Some(Node::BufferField { buf, bit_offset, bit_width }) =
                     self.dyn_nodes.get(path)
                 {
@@ -677,9 +635,8 @@ impl<'a> Interp<'a> {
             }
             0xA5 => Ok((Flow::Break, p + 1)),
             0x9F => Ok((Flow::Continue, p + 1)),
-            // Name(x, wert) im Methodenrumpf — die haeufigste Deklaration
-            // ueberhaupt: eine Methode legt ihr Ergebnispaket an, fuellt es
-            // und gibt es zurueck. Genau daran starb `GBIF`.
+            // Name(x, value) in a method body — the most common declaration:
+            // a method creates its result package, fills it and returns it.
             0x08 => {
                 let (nref, p1) = name_at(b, p + 1);
                 let (v, p2) = self.eval(f, p1)?;
@@ -687,9 +644,9 @@ impl<'a> Interp<'a> {
                 self.dyn_nodes.insert(target, Node::Name(obj(v)));
                 Ok((Flow::Normal, p2))
             }
-            // Mutex(name, flags) / Event(name) — im Rumpf zulaessig. Wir
-            // fuehren sie als "vorhanden"; `Acquire`/`Release` sind bei
-            // einem einzigen Rechenweg ohnehin folgenlos.
+            // Mutex(name, flags) / Event(name) — allowed in a body. Recorded
+            // as present; `Acquire`/`Release` have no effect on a single
+            // execution path anyway.
             0x5B if b[p + 1] == 0x01 => {
                 let (nref, p1) = name_at(b, p + 2);
                 let target = self.def_path(&f.scope, &nref);
@@ -702,15 +659,14 @@ impl<'a> Interp<'a> {
                 self.dyn_nodes.insert(target, Node::Other);
                 Ok((Flow::Normal, p1))
             }
-            // DEKLARATIONEN im Methodenrumpf. Legales, verbreitetes AML: eine
-            // Methode legt ihre Operationsregion und deren Felder selbst an,
-            // typisch fuer gemultiplexte EC-Register. Der Lader sieht sie nie,
-            // weil er Methodenruempfe zurueckstellt.
+            // Declarations in a method body. Legal and common AML: a method
+            // creates its own operation region and fields, typical for
+            // multiplexed EC registers. The loader never sees them because
+            // it defers method bodies.
             0x5B if b[p + 1] == 0x80 => {
                 // OpRegionOp NameString RegionSpace RegionOffset RegionLen.
-                // Offset und Laenge sind TermArgs und werden HIER ausgewertet
-                // — genau der Schritt, den ACPICA in
-                // `acpi_ds_eval_region_operands` macht.
+                // Offset and length are TermArgs and are evaluated here, the
+                // step ACPICA performs in `acpi_ds_eval_region_operands`.
                 let (nref, p1) = name_at(b, p + 2);
                 let space = b[p1];
                 let (off, p2) = self.eval(f, p1 + 1)?;
@@ -993,15 +949,13 @@ impl<'a> Interp<'a> {
             0x84 => {
                 // ConcatenateResTemplate(a, b, target) — ACPI 2.0.
                 //
-                // 1:1 aus ACPICA `acpi_ex_concat_template` (exconcat.c):
-                // in BEIDEN Vorlagen das End-Tag suchen, die Teile davor
-                // hintereinanderlegen und EIN neues End-Tag anhaengen,
-                // dessen Pruefsumme 0 ist („ignorieren"). Ein leerer Puffer
-                // ist erlaubt und zaehlt wie ein reines End-Tag.
+                // 1:1 from ACPICA `acpi_ex_concat_template` (exconcat.c):
+                // find the end tag in both templates, join the parts before
+                // it and append one new end tag with checksum 0 ("ignore").
+                // An empty buffer is allowed and counts as a bare end tag.
                 //
-                // Ohne diesen Operator gibt das `_CRS` jedes
-                // I2C-HID-Geraets nichts zurueck — die Firmware setzt ihre
-                // Vorlage aus Bus- und GPIO-Teil zusammen.
+                // Firmware commonly builds an I2C HID device's `_CRS` from a
+                // bus part and a GPIO part this way.
                 let (a, p1) = self.eval(f, p + 1)?;
                 let (bb, p2) = self.eval(f, p1)?;
                 let (tgt, p3) = self.super_name(f, p2)?;
@@ -1096,20 +1050,18 @@ impl<'a> Interp<'a> {
             0x21 | 0x22 => {
                 // Stall(usec) = 0x21, Sleep(msec) = 0x22.
                 //
-                // Beides war ein No-op, und das ist keine Kleinigkeit: die
-                // Firmware wartet damit auf ihre EIGENE Hardware, typisch
-                // zwischen einem Schreib- und einem Lesezugriff auf den EC.
-                // Wer nicht wartet, liest zu frueh und bekommt den alten
-                // Wert — ohne dass irgendwo ein Fehler entsteht.
+                // Firmware uses these to wait for its own hardware, typically
+                // between an EC write and a read. Not waiting reads too early
+                // and returns the old value without any error.
                 let (a, p1) = self.eval(f, p + 2)?;
                 let ms = if b[p + 1] == 0x21 {
-                    // Stall rechnet in Mikrosekunden; aufrunden, damit ein
-                    // Stall(1) nicht zu null wird.
+                    // Stall is in microseconds; round up so Stall(1) does
+                    // not become zero.
                     ((a.as_int() + 999) / 1000) as u32
                 } else {
                     a.as_int() as u32
                 };
-                // Deckel: eine DSDT darf uns nicht minutenlang anhalten.
+                // Cap: a DSDT must not stall us for minutes.
                 if ms > 0 { self.ec.sleep_ms(ms.min(50)); }
                 Ok((Value::Uninit, p1))
             }
@@ -1117,10 +1069,9 @@ impl<'a> Interp<'a> {
                 // DebugObj as a value (rare) — treat as 0.
                 Ok((Value::Int(0), p + 2))
             }
-            // Die Luecke, die nach diesem Abend noch steht, und zwar mit
-            // Namen statt als Zahl: Pufferfelder brauchen eine eigene
-            // Knotenart (Quelle + Bitversatz + Breite), IndexField ein
-            // Index/Daten-Paar. Beides ist ECHTE Semantik, kein Ueberspringen.
+            // Not implemented: IndexField needs an index/data register pair
+            // and BankField a bank select; both are real semantics, so they
+            // fail rather than being skipped.
             0x86 => Err(String::from(
                 "IndexField im Methodenrumpf — braucht Index/Daten-Semantik (nicht gebaut)")),
             0x87 => Err(String::from(
@@ -1133,38 +1084,32 @@ impl<'a> Interp<'a> {
     fn eval_name(&mut self, f: &Frame, p: usize) -> R<(Value, usize)> {
         let (nref, p1) = name_at(f.body, p);
 
-        // ── Namen, die das BETRIEBSSYSTEM liefert ────────────────────────
+        // ── Names provided by the operating system ───────────────────────
         //
-        // `_OSI`, `_OS` und `_REV` stehen NICHT in der DSDT (ACPI 6.5 §5.7).
-        // Die Firmware fragt damit, mit wem sie es zu tun hat, und
-        // verzweigt danach — jeder Interpreter (ACPICA, Linux, Windows)
-        // bringt sie mit. Uns fehlten sie ganz, und deshalb starb auf einem
-        // Lenovo IdeaPad schon `\_SB_.PCI0.LPC0.EC0_._REG` an
-        // "unresolved name _OSI" — also der Aufruf, der dem EC seine
-        // Operationsregion freigibt. Ohne den gibt es keinen Akku.
-        //
-        // Auf dem Intel-Notebook faellt es nicht auf: dessen DSDT ruft auf
-        // diesem Pfad kein `_OSI`. Die Luecke war immer da.
+        // `_OSI`, `_OS` and `_REV` are not in the DSDT (ACPI 6.5 §5.7).
+        // Firmware uses them to find out which OS it runs under and branches
+        // accordingly; every interpreter (ACPICA, Linux, Windows) provides
+        // them. Some firmware calls `_OSI` already in the EC's `_REG`, so
+        // without them the EC region is never enabled.
         if nref.carets == 0 && nref.segs.len() == 1 {
             match &nref.segs[0] {
                 b"_OSI" => {
-                    // Genau ein Argument (die abgefragte Zeichenkette).
+                    // Exactly one argument (the queried string).
                     let (arg, q) = self.eval(f, p1)?;
                     let yes = match &arg {
                         Value::Str(s) => osi_supported(s),
                         _ => false,
                     };
-                    // ACPI: "Ones" ist wahr, 0 ist falsch.
+                    // ACPI: "Ones" is true, 0 is false.
                     return Ok((Value::Int(if yes { 0xFFFF_FFFF } else { 0 }), q));
                 }
                 b"_OS_" => {
-                    // Was Linux meldet, und zwar mit Absicht: eine DSDT, die
-                    // hier etwas Unbekanntes liest, nimmt ihren aeltesten
-                    // Pfad.
+                    // What Linux reports, deliberately: a DSDT reading
+                    // something unknown here takes its oldest path.
                     return Ok((Value::Str(String::from("Microsoft Windows NT")), p1));
                 }
                 b"_REV" => {
-                    // ACPI-Revision, die wir auswerten koennen.
+                    // ACPI revision we can evaluate.
                     return Ok((Value::Int(2), p1));
                 }
                 _ => {}
@@ -1174,8 +1119,8 @@ impl<'a> Interp<'a> {
         let path = self
             .resolve(&f.scope, nref.rooted, nref.carets, &nref.segs)
             .ok_or_else(|| format!("unresolved name {} (scope {})", segs_str(&nref.segs), path_str(&f.scope)))?;
-        // Erst auslesen, dann handeln: `node()` leiht `self`, und die Arme
-        // darunter rufen `&mut self`-Methoden.
+        // Read first, then act: `node()` borrows `self`, and the arms below
+        // call `&mut self` methods.
         enum Kind { Method(u8), Name(Value), Field, BufField(Obj, u64, u64), Other }
         let kind = match self.node(&path) {
             Some(Node::Method { flags, .. }) => Kind::Method(*flags),
@@ -1311,14 +1256,13 @@ impl<'a> Interp<'a> {
     /// `CreateBitField` / `CreateByteField` / `CreateWordField` /
     /// `CreateDWordField` / `CreateQWordField` / `CreateField`.
     ///
-    /// ACPI 6.5 §19.6.20-25: ein benanntes BUFFER-FELD, also ein
-    /// Bitausschnitt eines bestehenden Puffers — kein eigener Speicher.
-    /// Schreibt jemand hinein, aendert sich der Puffer.
+    /// ACPI 6.5 §19.6.20-25: a named buffer field, i.e. a bit range of an
+    /// existing buffer with no storage of its own. Writing to it changes the
+    /// buffer.
     ///
-    /// Die Quelle wird als SuperName geholt, nicht mit `eval`: `eval` gaebe
-    /// eine KOPIE des Puffers, und `INT1 = GNUM (GPDI)` schriebe dann ins
-    /// Leere — die Ressourcenvorlage, aus der `_CRS` seine Pinnummer nimmt,
-    /// bliebe auf null.
+    /// The source is taken as a SuperName, not with `eval`: `eval` would
+    /// return a copy of the buffer, and `INT1 = GNUM (GPDI)` would write
+    /// into nothing, leaving e.g. the pin number in a `_CRS` template at 0.
     fn create_buffer_field(&mut self, f: &Frame, p: usize) -> R<usize> {
         let b = f.body;
         let (op, arg0) = if b[p] == 0x5B { (0x13u8, p + 2) } else { (b[p], p + 1) };
@@ -1326,10 +1270,9 @@ impl<'a> Interp<'a> {
         let (src_place, p1) = self.super_name_opt(f, arg0)?;
         let buf = match src_place {
             Some(Place::Obj(o)) => o,
-            // Eine Quelle, die kein schlichter Name ist (Index(...), ein
-            // Methodenergebnis): dann gibt es keinen Puffer zum Anbinden.
-            // Ein Wegwerfpuffer haelt den Lauf am Leben und ist als solcher
-            // benannt.
+            // A source that is not a plain name (Index(...), a method
+            // result) has no buffer to bind to. A throwaway buffer keeps the
+            // run going.
             other => {
                 let v = match other {
                     Some(pl) => self.read_place(&pl)?,
@@ -1360,18 +1303,17 @@ impl<'a> Interp<'a> {
         Ok(p4)
     }
 
-    /// Aufgehobene Anweisungen der Tabelle nachholen.
+    /// Run the table's deferred statements.
     ///
-    /// ACPICA fuehrt die Termliste beim Laden aus; wir holen genau die
-    /// Anweisungen nach, die dafuer einen Interpreter brauchen. Vor `_REG`
-    /// und `_INI`, weil die sie benutzen.
+    /// ACPICA executes the term list while loading; we run exactly the
+    /// statements that need an interpreter for it. Before `_REG` and `_INI`,
+    /// since those use them.
     fn run_deferred(&mut self) -> Vec<(Path, Vec<u8>)> {
         let items: Vec<(Path, Vec<u8>)> = self.ns.deferred.clone();
         self.run_deferred_items(items, true)
     }
 
-    /// Eine Liste aufgehobener Anweisungen ausfuehren; zurueck kommt, was
-    /// NICHT ging.
+    /// Execute a list of deferred statements; returns those that failed.
     fn run_deferred_items(&mut self, items: Vec<(Path, Vec<u8>)>, loud: bool)
         -> Vec<(Path, Vec<u8>)>
     {
@@ -1382,18 +1324,17 @@ impl<'a> Interp<'a> {
                 locals: (0..8).map(|_| obj(Value::Uninit)).collect(),
                 body: &bytes,
             };
-            // Ueber DENSELBEN Verteiler wie ein Methodenrumpf: dort sind
-            // `Create*Field` und `OpRegion` schon richtig behandelt, und
-            // eine zweite Fassung waere eine zweite Semantik.
+            // Through the same dispatcher as a method body: `Create*Field`
+            // and `OpRegion` are already handled there, and a second version
+            // would be a second semantics.
             if let Err(e) = self.stmt(&f, 0, bytes.len()) {
                 if loud {
                     let name = path_str(&scope);
                     self.ec.note(&format!("[aml]  deferred op in {name} failed: {e}"));
-                    // „Unaufloesbar" ist eine halbe Auskunft. Die andere
-                    // Haelfte ist, ob es den Namen ueberhaupt gibt — das
-                    // trennt „steht woanders im Baum" von „steht in keiner
-                    // Tabelle, die wir sehen", und nur das eine davon ist
-                    // ein Ladefehler.
+                    // "Unresolvable" is half the answer. The other half is
+                    // whether the name exists at all, which separates
+                    // "defined elsewhere in the tree" from "in no table we
+                    // see"; only the latter is a load error.
                     if let Some(want) = e.strip_prefix("unresolved name ") {
                         let want = want.split(' ').next().unwrap_or("");
                         let seg = crate::value::seg(want);
@@ -1469,42 +1410,34 @@ impl<'a> Interp<'a> {
         if space == 3 {
             return self.ec.read(addr as u8);
         }
-        // Jede ANDERE Regionsart — SystemMemory(0), SystemIO(1),
-        // PCI-Config(2), SMBus(4) — liegt bei uns auf einem Notizblock und
-        // liefert dort, wo noch nichts geschrieben wurde, eine 0.
+        // Every other region space — SystemMemory(0), SystemIO(1),
+        // PCI config(2), SMBus(4) — is backed by a scratch store and reads
+        // 0 where nothing has been written. This keeps firmware handshakes
+        // away from real ports, but a made-up 0 is indistinguishable from a
+        // real one to the DSDT, so it is logged below.
         //
-        // Das ist als Bremse gedacht (die Handshakes der Firmware laufen
-        // damit ins Leere statt auf echte Ports), war aber STILL: eine
-        // gelesene 0 aus einem echten Register ist von einer erfundenen
-        // nicht zu unterscheiden, und die DSDT rechnet mit beiden weiter.
-        // Genau daran haben wir heute schon dreimal geglaubt.
-        // Was WIR geschrieben haben, gilt zuerst: die Handshakes der
-        // Firmware sollen ihren eigenen Wert zurueckbekommen.
+        // What we wrote takes precedence: firmware handshakes should read
+        // back their own value.
         if let Some(v) = self.mem.get(&(space, addr)).copied() {
             return v;
         }
-        // SystemMemory(0): das echte Fenster fragen, bevor etwas erfunden
-        // wird. Auf einem Lenovo IdeaPad lesen `_STA` und `_BST` des Akkus
-        // 0xFE800008 — der EC haengt dort im Speicher statt an den Ports.
+        // SystemMemory(0): ask the real window before making anything up.
+        // Some firmware maps its EC into memory (e.g. at 0xFE800008)
+        // instead of using the ports.
         if space == 0 {
             if let Some(v) = self.ec.mem_read(addr) {
-                // MIT Adresse: sieben Werte ohne Herkunft sagen nicht, ob
-                // ein zusammenhaengender Block gelesen wird oder siebenmal
-                // dieselbe Stelle.
+                // Log with the address: values without their origin do not
+                // show whether a contiguous block or one location is read.
                 self.ec.note_num("[aml]   sysmem [", addr);
                 self.ec.note_num("[aml]        ] -> ", v as u64);
                 return v;
             }
         }
-        // EINE Zeile mit allem darin, und nur die ersten paar.
+        // One line with everything, and only for the first few.
         //
-        // Vorher waren es drei Zeilen ueber `note_num` — und ein Rufer, der
-        // nur `note` liefert (der i2c-hid-Treiber tut das), bekam davon
-        // ausgerechnet die beiden mit den ZAHLEN nicht. Uebrig blieb ein
-        // Dutzend nackter „erfunden", das nicht sagte, wo.
-        //
-        // Ein erfundener Wert ist EINMAL eine Auskunft und danach Laerm:
-        // die Firmware liest solche Register in Schleifen.
+        // A single `note` line, so a host that implements only `note` (not
+        // `note_num`) still sees the address. A made-up value is information
+        // once and noise afterwards: firmware reads such registers in loops.
         use core::sync::atomic::{AtomicU32, Ordering};
         static INVENTED: AtomicU32 = AtomicU32::new(0);
         let n = INVENTED.fetch_add(1, Ordering::Relaxed);
@@ -1522,12 +1455,11 @@ impl<'a> Interp<'a> {
             self.ec.write(addr as u8, val);
             return;
         }
-        // Ein Schreibzugriff auf eine Nicht-EC-Region landet auf dem
-        // Notizblock und erreicht die Hardware NICHT. Das ist Absicht
-        // (Schreiben auf beliebiges MMIO koennte Geraete umprogrammieren),
-        // war aber still — und wenn die Firmware hier ein Auswahlregister
-        // bedient und danach liest, bekommt sie die Daten der falschen
-        // Auswahl, ohne dass irgendwo etwas auffaellt.
+        // A write to a non-EC region goes to the scratch store and does not
+        // reach the hardware. This is deliberate (writing arbitrary MMIO
+        // could reprogram devices), but if the firmware drives a select
+        // register here and then reads, it gets data for the wrong
+        // selection, so it is logged.
         self.ec.note_num("[aml]   scratch write space=", space as u64);
         self.ec.note_num("[aml]        addr=", addr);
         self.ec.note_num("[aml]        val=", val as u64);
@@ -1571,16 +1503,16 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    /// FieldList einer Laufzeit-Deklaration, Bit fuer Bit — dieselbe Regel
-    /// wie `Loader::field_list`: Feldeinheiten sind GESCHWISTER der Region,
-    /// nicht ihre Kinder.
+    /// FieldList of a run-time declaration, bit by bit — the same rule as
+    /// `Loader::field_list`: field units are siblings of the region, not its
+    /// children.
     fn dyn_field_list(&mut self, b: &[u8], region: &Path, start: usize, end: usize) {
         let mut p = start;
         let mut bit: u64 = 0;
         while p < end && p < b.len() {
             match b[p] {
                 0x00 => {
-                    // ReservedField / Offset(): PkgLength-WERT ist eine Bitluecke.
+                    // ReservedField / Offset(): the PkgLength value is a bit gap.
                     let (pe, p1) = pkg_length(b, p + 1);
                     bit += (pe - (p + 1)) as u64;
                     p = p1;
@@ -1791,17 +1723,15 @@ fn seg_at(b: &[u8], p: usize) -> Seg {
     s
 }
 
-/// Antwort auf `_OSI("…")`.
+/// Answer to `_OSI("…")`.
 ///
-/// Wahr fuer die Windows-Zeichenketten, und das ist kein Zufall: fast jede
-/// Firmware fragt danach, und wer mit Nein antwortet, bekommt den aeltesten
-/// Pfad der DSDT — oder gar keinen. Alles andere ist falsch, insbesondere
-/// "Linux": das hat Linux selbst abgeschafft, weil Firmware daraufhin
-/// kaputte Sonderwege nimmt.
+/// True for the Windows strings: almost all firmware asks for them, and
+/// answering no selects the DSDT's oldest path or none at all. Everything
+/// else is false, in particular "Linux": Linux itself dropped it because
+/// firmware then takes broken special paths.
 ///
-/// Bewusst OHNE obere Grenze bei der Jahreszahl. Eine Liste hier waere eine
-/// Zahl aus dem Bauch, die auf dem naechsten Geraet unter dem Normalfall
-/// liegt — dieselbe Bauart Fehler wie ein Deckel, der nie gerissen ist.
+/// Deliberately without an upper bound on the year; a fixed list would be
+/// outdated by the next firmware.
 fn osi_supported(s: &str) -> bool {
     s.starts_with("Windows ")
 }
@@ -1843,18 +1773,18 @@ fn skip_else(b: &[u8], p: usize) -> usize {
     }
 }
 
-/// Laenge einer Ressourcen-Vorlage BIS zu ihrem End-Tag.
+/// Length of a resource template up to its end tag.
 ///
-/// ACPICA `acpi_ut_get_resource_end_tag`: die Deskriptoren durchgehen und
-/// beim kleinen Typ 0x0F stehenbleiben. Ein leerer Puffer gilt als Vorlage
-/// mit nichts als einem End-Tag, also Laenge 0.
+/// ACPICA `acpi_ut_get_resource_end_tag`: walk the descriptors and stop at
+/// small type 0x0F. An empty buffer counts as a template with only an end
+/// tag, i.e. length 0.
 fn resource_body_len(b: &[u8]) -> usize {
     let mut i = 0usize;
     while i < b.len() {
         let tag = b[i];
         if tag & 0x80 == 0 {
             if (tag >> 3) & 0x0F == 0x0F {
-                return i; // End-Tag: Laenge ist alles davor
+                return i; // End tag: the length is everything before it
             }
             i += 1 + (tag & 0x07) as usize;
         } else {
@@ -1865,13 +1795,13 @@ fn resource_body_len(b: &[u8]) -> usize {
             i += 3 + len;
         }
     }
-    // Kein End-Tag gefunden: alles gilt als Rumpf.
+    // No end tag found: everything counts as the body.
     b.len().min(i)
 }
 
-/// Bits `[off, off+width)` aus einem Puffer lesen — LSB zuerst innerhalb
-/// jedes Bytes (ACPI 6.5 §19.6.20 ff.). Bis 64 Bit ist das Ergebnis eine
-/// Zahl, darueber ein Puffer.
+/// Read bits `[off, off+width)` from a buffer, LSB first within each byte
+/// (ACPI 6.5 §19.6.20 ff.). Up to 64 bits the result is an integer, above
+/// that a buffer.
 fn buf_field_read(b: &[u8], off: u64, width: u64) -> Value {
     if width == 0 {
         return Value::Int(0);
@@ -1901,8 +1831,8 @@ fn buf_field_read(b: &[u8], off: u64, width: u64) -> Value {
     Value::Buffer(out)
 }
 
-/// Dieselben Bits schreiben. Der Puffer WAECHST nicht — was ausserhalb
-/// liegt, faellt weg, wie bei ACPICA.
+/// Write the same bits. The buffer does not grow; whatever lies outside is
+/// dropped, as in ACPICA.
 fn buf_field_write(b: &mut [u8], off: u64, width: u64, val: &Value) {
     let src: Vec<u8> = match val {
         Value::Buffer(v) => v.clone(),
@@ -1926,7 +1856,7 @@ fn buf_field_write(b: &mut [u8], off: u64, width: u64, val: &Value) {
     }
 }
 
-/// Einen Wert kurz benennen — fuer die Spur, nicht fuer Menschen mit Zeit.
+/// A short name for a value, for the trace.
 fn describe(v: &Value) -> String {
     match v {
         Value::Int(n) => format!("{n:#x}"),
@@ -1948,23 +1878,20 @@ fn concat_res_template(a: &Value, b: &Value) -> Vec<u8> {
     out.extend_from_slice(&ab[..l0]);
     out.extend_from_slice(&bb[..l1]);
     out.push(0x79); // ACPI_RESOURCE_NAME_END_TAG | 1
-    out.push(0x00); // Pruefsumme 0 = "ignorieren"
+    out.push(0x00); // checksum 0 = "ignore"
     out
 }
 
-// ── Allgemeiner Zugang: Geraete finden und Methoden auswerten ─────────
+// ── General access: find devices and evaluate methods ─────────────────
 //
-// Bis hierher war der Interpreter auf den Akku zugeschnitten. Die Wege, die
-// ein Bustreiber braucht, sind dieselben — nur ohne die Akku-Frage
-// davor: Geraete nach `_HID`/`_CID` suchen, `_STA` fragen, `_CRS`/`_DSM`
-// auswerten.
+// What a bus driver needs: search devices by `_HID`/`_CID`, query `_STA`,
+// evaluate `_CRS`/`_DSM`.
 
-/// Ein initialisierter Interpreter, den ein Aufrufer mehrfach befragen kann.
+/// An initialised interpreter a caller can query repeatedly.
 ///
-/// `read_battery` baut sich seinen eigenen und faehrt eine feste Folge; wer
-/// Geraete SUCHT, braucht stattdessen einen, der stehen bleibt — jede
-/// Auswertung auf einem frischen Interpreter hiesse, `_REG`/`_INI` je Frage
-/// erneut zu fahren.
+/// `read_battery` builds its own and runs a fixed sequence; a device search
+/// needs one that persists, since a fresh interpreter per evaluation would
+/// rerun `_REG`/`_INI` for every query.
 pub struct Machine<'a> {
     it: Interp<'a>,
 }
@@ -1976,14 +1903,13 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// Das PRAEDIKAT eines aufgehobenen `If`-Blocks auswerten und sagen,
-    /// welcher Zweig gilt — als Byte-Bereich innerhalb von `bytes`.
+    /// Evaluate the predicate of a deferred `If` block and return which
+    /// branch applies, as a byte range within `bytes`.
     ///
-    /// Mehr tut der Interpreter hier nicht. Was im Zweig steht, sind
-    /// DEKLARATIONEN (`Method`, `Name`, `Device`, `OperationRegion`), und
-    /// die gehoeren dem Lader. Sie hier noch einmal zu behandeln waere eine
-    /// zweite Fassung derselben Semantik — der erste Versuch scheiterte
-    /// prompt an „unhandled eval opcode 0x14", also an `Method`.
+    /// The interpreter does nothing more here. The branch contains
+    /// declarations (`Method`, `Name`, `Device`, `OperationRegion`), which
+    /// belong to the loader; handling them here too would be a second
+    /// version of the same semantics.
     pub fn taken_branch(&mut self, scope: &Path, bytes: &[u8]) -> Option<(usize, usize)> {
         if bytes.first() != Some(&0xA0) { return None; }
         let f = Frame {
@@ -2003,7 +1929,7 @@ impl<'a> Machine<'a> {
         if cond.as_int() != 0 {
             return Some((p2, pkg_end));
         }
-        // Sonst der Else-Zweig, wenn es einen gibt.
+        // Otherwise the Else branch, if there is one.
         if pkg_end < bytes.len() && bytes[pkg_end] == 0xA1 {
             let (else_end, e1) = pkg_length(bytes, pkg_end + 1);
             return Some((e1, else_end.min(bytes.len())));
@@ -2011,9 +1937,9 @@ impl<'a> Machine<'a> {
         None
     }
 
-    /// `_REG` und dann `_INI` — die Reihenfolge aus ACPICAs
-    /// `acpi_initialize_objects`. Ohne das antwortet eine Firmware, deren
-    /// Regionen noch nicht freigegeben sind, mit ihren Anfangswerten.
+    /// `_REG`, then `_INI` — the order of ACPICA's
+    /// `acpi_initialize_objects`. Without it, firmware whose regions are not
+    /// yet enabled answers with its initial values.
     pub fn init(&mut self) {
         self.it.ec.note("[aml]  phase deferred table ops");
         let failed = self.it.run_deferred();
@@ -2023,14 +1949,13 @@ impl<'a> Machine<'a> {
         let n = self.it.run_ini_methods();
         self.it.ec.note_num("[aml]  _INI methods run: ", n as u64);
 
-        // Was beim ersten Mal nicht ging, NOCH EINMAL.
+        // Retry what failed the first time.
         //
-        // ACPICA wertet die Operanden einer Operationsregion erst beim
-        // ERSTEN ZUGRIFF aus (`acpi_ds_eval_region_operands`), also
-        // fruehestens nach `_REG` und `_INI`. Wir holen sie beim Anlauf
-        // nach — und sind damit zu frueh, wenn die Basis ein Name ist, den
-        // erst `_INI` setzt. Ein zweiter Versuch danach kostet nichts und
-        // deckt genau diesen Fall.
+        // ACPICA evaluates an operation region's operands on first access
+        // (`acpi_ds_eval_region_operands`), i.e. after `_REG` and `_INI` at
+        // the earliest. We run them at startup, which is too early when the
+        // base is a name only `_INI` sets. A second attempt afterwards costs
+        // nothing and covers that case.
         if !failed.is_empty() {
             let n = failed.len();
             let still = self.it.run_deferred_items(failed, true);
@@ -2044,7 +1969,7 @@ impl<'a> Machine<'a> {
         self.it.has(p)
     }
 
-    /// Diagnosekanal — geht denselben Weg wie die Notizen des Interpreters.
+    /// Diagnostic channel — same path as the interpreter's notes.
     pub fn note(&mut self, s: &str) {
         self.it.ec.note(s);
     }
@@ -2053,13 +1978,11 @@ impl<'a> Machine<'a> {
         self.it.call_path(p, args)
     }
 
-    /// Den Wert eines Knotens holen: ein `Name` liefert seinen Inhalt, eine
-    /// `Method` wird AUSGEFUEHRT.
+    /// Get a node's value: a `Name` yields its content, a `Method` is
+    /// executed.
     ///
-    /// Genau hier lag die Falle: `find_batteries` sah nur `Node::Name`, und
-    /// `_HID` darf eine Methode sein (die HP-Tabelle schreibt woertlich
-    /// `Method (_HID) { Return ("SYNA30A1") }`). Eine Art ohne Zweig faellt
-    /// in den, der nichts sagt.
+    /// `_HID` may be a method (e.g. `Method (_HID) { Return ("SYNA30A1") }`),
+    /// so every node kind must be handled.
     pub fn value_of(&mut self, p: &Path) -> R<Value> {
         match self.it.ns.get(p) {
             Some(Node::Name(o)) => Ok(o.borrow().clone()),
@@ -2069,7 +1992,7 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// Ein Kind des Geraets auswerten, z. B. `_CRS`.
+    /// Evaluate a child of the device, e.g. `_CRS`.
     pub fn eval_child(&mut self, dev: &Path, name: &str) -> R<Value> {
         let mut p = dev.clone();
         p.push(crate::value::seg(name));
@@ -2079,23 +2002,22 @@ impl<'a> Machine<'a> {
         self.value_of(&p)
     }
 
-    /// `_STA` nach ACPI 6.5 §6.3.7: fehlt die Methode, gilt das Geraet als
-    /// vorhanden. Sonst Bit0 = vorhanden, Bit3 = funktionsfaehig.
+    /// `_STA` per ACPI 6.5 §6.3.7: without the method the device counts as
+    /// present. Otherwise bit 0 = present, bit 3 = functional.
     ///
-    /// **ODER, nicht UND.** Linux `acpi_device_is_present` (scan.c):
-    /// `adev->status.present || adev->status.functional`. Ein Und ist
-    /// strenger als die Vorlage und sperrt Geraete aus, die die Firmware
-    /// als brauchbar meldet.
+    /// Or, not and: Linux `acpi_device_is_present` (scan.c) uses
+    /// `adev->status.present || adev->status.functional`. An and would be
+    /// stricter than the reference and exclude devices the firmware
+    /// reports as usable.
     pub fn device_present(&mut self, dev: &Path) -> bool {
         self.device_status(dev).map(|f| f & 0x01 != 0 || f & 0x08 != 0).unwrap_or(true)
     }
 
-    /// Dieselbe Methode noch einmal, aber mit SPUR: jeder gelesene Name
-    /// und sein Wert gehen ins Log.
+    /// The same method again, but traced: every name read and its value go
+    /// to the log.
     ///
-    /// Gedacht fuer den Fall, dass eine Antwort nicht stimmen kann. Eine
-    /// gerechnete Null sagt nichts; die drei Werte, aus denen sie entstand,
-    /// sagen alles.
+    /// For answers that cannot be right: a computed zero says nothing, the
+    /// values it came from say everything.
     pub fn call_traced(&mut self, p: &Path, args: Vec<Obj>) -> R<Value> {
         self.it.trace = true;
         let r = self.it.call_path(p, args);
@@ -2103,11 +2025,10 @@ impl<'a> Machine<'a> {
         r
     }
 
-    /// Der rohe `_STA`-Wert, oder `None`, wenn es keinen gibt.
+    /// The raw `_STA` value, or `None` if there is none.
     ///
-    /// Eine Entscheidung ohne die Zahl dahinter ist am Geraet nicht
-    /// nachvollziehbar — „absent" sagt nicht, ob die Firmware 0 meinte
-    /// oder ob wir ihr eine 0 untergeschoben haben.
+    /// "Absent" alone does not say whether the firmware meant 0 or the
+    /// interpreter supplied one.
     pub fn device_status(&mut self, dev: &Path) -> Option<u64> {
         let mut p = dev.clone();
         p.push(crate::value::seg("_STA"));
@@ -2120,8 +2041,8 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// Alle Kennungen eines Geraets: `_HID` zuerst, dann jede aus `_CID`
-    /// (das ein Package mehrerer sein darf).
+    /// All IDs of a device: `_HID` first, then each from `_CID` (which may
+    /// be a package of several).
     pub fn device_ids(&mut self, dev: &Path) -> Vec<String> {
         let mut out = Vec::new();
         for name in ["_HID", "_CID"] {
@@ -2129,9 +2050,9 @@ impl<'a> Machine<'a> {
                 push_ids(&v, &mut out);
             }
         }
-        // Doppelte werfen: ein Geraet darf denselben Namen in `_HID` UND
-        // `_CID` fuehren (der AMD-GPIO-Block tut das), und zweimal
-        // dasselbe zu melden sieht nach zwei Geraeten aus.
+        // Drop duplicates: a device may carry the same ID in `_HID` and
+        // `_CID` (the AMD GPIO block does), and reporting it twice looks
+        // like two devices.
         out.dedup();
         let mut uniq: Vec<String> = Vec::new();
         for id in out {
@@ -2141,8 +2062,8 @@ impl<'a> Machine<'a> {
     }
 }
 
-/// Eine Kennung kann eine Zeichenkette, eine EisaId-Zahl oder ein Package
-/// aus beidem sein (ACPI 6.5 §6.1.2 `_CID`).
+/// An ID can be a string, an EisaId integer, or a package of both
+/// (ACPI 6.5 §6.1.2 `_CID`).
 fn push_ids(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Str(s) => out.push(s.clone()),
@@ -2161,13 +2082,14 @@ fn push_ids(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// EisaId auspacken — die Umkehrung von [`eisa_id`].
+/// Unpack an EisaId — the inverse of [`eisa_id`].
 ///
-/// Gegenrichtung statt Kandidatenvergleich: so faellt jede Kennung als NAME
-/// an und kann berichtet werden, auch eine, nach der niemand gesucht hat.
+/// Decoding instead of comparing against candidates means every ID is
+/// available as a name and can be reported, including ones nobody looked
+/// for.
 pub fn eisa_str(n: u64) -> String {
     let n = n & 0xFFFF_FFFF;
-    // Rueck-Byteswap (eisa_id speichert little-endian).
+    // Reverse byte swap (eisa_id stores little-endian).
     let s = ((n >> 24) & 0xFF) | (((n >> 16) & 0xFF) << 8) | (((n >> 8) & 0xFF) << 16) | ((n & 0xFF) << 24);
     let m = |sh: u32| -> u8 { (((s >> sh) & 0x1F) as u8) + b'@' };
     let (m0, m1, m2) = (m(26), m(21), m(16));
@@ -2189,11 +2111,11 @@ pub fn eisa_str(n: u64) -> String {
     out
 }
 
-/// Jedes Geraet im Namespace, das ueberhaupt eine Kennung traegt.
+/// Every device in the namespace that carries an ID at all.
 ///
-/// Ein „Geraet" ist hier der ELTER eines `_HID`- oder `_CID`-Knotens. Die
-/// Kennungen selbst werden erst beim Fragen ausgewertet — ein `_HID` als
-/// Methode auszufuehren kostet, und die meisten Tabellen fuehren Dutzende.
+/// A "device" here is the parent of an `_HID` or `_CID` node. The IDs are
+/// evaluated only when queried: running `_HID` as a method costs, and most
+/// tables have dozens.
 pub fn devices_with_ids(ns: &Namespace) -> Vec<Path> {
     let mut out: Vec<Path> = Vec::new();
     for path in ns.nodes.keys() {

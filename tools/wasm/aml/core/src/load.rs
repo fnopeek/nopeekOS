@@ -1,6 +1,6 @@
 //! AML table loader: bytes -> namespace. Registers all named objects, defers
-//! method bodies, and skips control-flow blocks at scope level (the battery
-//! objects are all unconditional definitions).
+//! method bodies, and defers scope-level statements that need evaluation
+//! (conditionals, computed region bases, buffer fields) to the interpreter.
 
 use crate::value::{obj, seg, Obj, Path, Seg, Value};
 use crate::{Namespace, Node};
@@ -13,11 +13,10 @@ pub fn load_table(table: &[u8]) -> Result<Namespace, String> {
     Ok(ns)
 }
 
-/// Einen Ausschnitt roher AML-Bytes als Termliste in einen Scope laden.
+/// Load a slice of raw AML bytes as a term list into a scope.
 ///
-/// Gebraucht fuer den genommenen Zweig eines `If` auf Scope-Ebene: die
-/// BEDINGUNG entscheidet der Interpreter, die DEKLARATIONEN darin gehoeren
-/// hierher.
+/// Used for the taken branch of a scope-level `If`: the interpreter decides
+/// the condition, the declarations inside belong here.
 pub fn load_range(ns: &mut Namespace, bytes: &[u8], start: usize, end: usize, scope: Path)
     -> Result<(), String>
 {
@@ -25,14 +24,12 @@ pub fn load_range(ns: &mut Namespace, bytes: &[u8], start: usize, end: usize, sc
     ld.term_list(scope, start, end)
 }
 
-/// Eine WEITERE Tabelle in denselben Namespace legen.
+/// Load another table into the same namespace.
 ///
-/// Eine Firmware verteilt ihre Deklarationen ueber die DSDT und beliebig
-/// viele SSDTs, und sie bilden EINEN Namespace — Linux laedt sie
-/// entsprechend alle (`acpi_tb_load_namespace`). Wer nur die DSDT liest,
-/// dem fehlen Namen, die woanders stehen: auf einem Lenovo IdeaPad die
-/// Basis der Region mit den Freigabebits der I2C-Controller (`FRTB`), und
-/// ohne sie meldet `_STA` beider Controller „abgeschaltet".
+/// Firmware spreads its declarations over the DSDT and any number of SSDTs,
+/// and together they form one namespace; Linux loads them all
+/// (`acpi_tb_load_namespace`). Reading only the DSDT misses names defined
+/// elsewhere, e.g. the base of a region a `_STA` depends on.
 pub fn load_into(ns: &mut Namespace, table: &[u8]) -> Result<(), String> {
     if table.len() < 36 || &table[0..4] != b"DSDT" && &table[0..4] != b"SSDT" {
         return Err(format!("not a DSDT/SSDT: {:?}", &table[0..4.min(table.len())]));
@@ -43,27 +40,25 @@ pub fn load_into(ns: &mut Namespace, table: &[u8]) -> Result<(), String> {
     ld.term_list(Vec::new(), 36, end)
 }
 
-/// Die Namen, die das BETRIEBSSYSTEM mitbringt — nicht die Tabelle.
+/// The names the operating system provides, not the table.
 ///
-/// ACPICA legt sie in `acpi_ns_root_initialize` (nsaccess.c) an, und das ist
-/// kein Schoenheitsdetail: eine Firmware fragt
-/// `If (CondRefOf (\_OSI, Local0))`, BEVOR sie `_OSI` benutzt. Wer die
-/// Namen nur beim AUFRUF abfaengt, sagt dort Nein — und die Tabelle nimmt
-/// dann ihren Pfad fuer ein Betriebssystem von vor 2001. Auf der
-/// HP-Tabelle blieb `OSYS` damit auf 0x07D0, und das `_CRS` des Touchpads
-/// gab statt Bus + Interrupt nur den Interrupt zurueck.
+/// ACPICA creates them in `acpi_ns_root_initialize` (nsaccess.c). Firmware
+/// checks `If (CondRefOf (\_OSI, Local0))` before using `_OSI`; catching
+/// the name only at call time answers no there, and the table then takes
+/// its path for a pre-2001 OS (e.g. `OSYS` stays 0x07D0 and `_CRS` returns
+/// less).
 ///
-/// Die Scope-Namen (`_SB_`, `_TZ_`, …) legt ACPICA ebenfalls an; die
-/// deklariert jede Tabelle selbst, also bleiben sie hier weg.
+/// ACPICA also creates the scope names (`_SB_`, `_TZ_`, …); every table
+/// declares those itself, so they are omitted here.
 fn predefine_root(ns: &mut Namespace) {
-    // `_OSI` ist bei ACPICA eine Methode; wir fangen den Aufruf in
-    // `eval_name` ab, brauchen hier also nur die PRAESENZ.
+    // `_OSI` is a method in ACPICA; we intercept the call in `eval_name`, so
+    // only its presence is needed here.
     ns.nodes.insert(alloc::vec![seg("_OSI")], Node::Other);
-    // `_GL_` ist der globale Mutex (ACPI 6.5 §5.7.1). Unser `Acquire` ist
-    // ein No-op, aber `super_name` muss den Namen finden.
+    // `_GL_` is the global lock (ACPI 6.5 §5.7.1). Our `Acquire` is a no-op,
+    // but `super_name` must find the name.
     ns.nodes.insert(alloc::vec![seg("_GL_")], Node::Other);
-    // `_OS_` und `_REV` sind Namen mit Werten. `eval_name` antwortet
-    // ohnehin; der Knoten macht sie fuer `CondRefOf` sichtbar.
+    // `_OS_` and `_REV` are names with values. `eval_name` answers anyway;
+    // the node makes them visible to `CondRefOf`.
     ns.nodes.insert(
         alloc::vec![seg("_OS_")],
         Node::Name(obj(Value::Str(alloc::string::String::from("Microsoft Windows NT")))),
@@ -151,31 +146,24 @@ impl<'a> Loader<'a> {
                 let (name, p3) = self.name_ref(p2);
                 p = p3;
                 let t = self.def_path(scope, &name);
-                // Platzhalter, damit der Name aufloesbar ist, BEVOR die
-                // aufgehobene Anweisung laeuft; sie ersetzt ihn dann.
+                // Placeholder so the name resolves before the deferred
+                // statement runs; that statement then replaces it.
                 self.ns.nodes.insert(t, Node::Other);
                 let bytes = self.b[op_start..p].to_vec();
                 self.ns.deferred.push((scope.clone(), bytes));
             }
             0xA0 | 0xA1 | 0xA2 => {
-                // If / Else / While auf SCOPE-Ebene: aufheben und beim
-                // Anlauf AUSFUEHREN.
+                // If / Else / While at scope level: defer and execute on
+                // first use.
                 //
-                // Hier stand „skip the whole block (the battery objects are
-                // never conditionally defined)". Fuer den Akku stimmte das.
-                // Fuer alles andere ist es ein Loch im Namespace: ACPICA
-                // FUEHRT die Termliste einer Tabelle beim Laden aus
-                // (`acpi_ns_execute_table`), ein `If` ist dort eine
-                // Verzweigung und kein Text. Was darin deklariert wird,
-                // existiert fuer einen Ueberspringer nicht.
+                // ACPICA executes a table's term list while loading
+                // (`acpi_ns_execute_table`); an `If` there is a branch, not
+                // text. Skipping it would hide every declaration inside,
+                // e.g. region bases or the `_HID` of I2C controllers on some
+                // Intel tables.
                 //
-                // Auf Florians IdeaPad haengt daran `FRTB` — die Basis der
-                // Region mit den Freigabebits der I2C-Controller —, und auf
-                // Intel-Tabellen die `_HID` der I2C-Controller selbst.
-                //
-                // Ein `Else` gehoert zu seinem `If`: beide zusammen
-                // aufheben, sonst entscheidet der Interpreter ohne
-                // Gegenstueck.
+                // An `Else` belongs to its `If`: defer both together, or the
+                // interpreter decides without its counterpart.
                 let op_start = p - 1;
                 let (pkg_end, _p1) = self.pkg_length(p);
                 p = pkg_end;
@@ -239,17 +227,12 @@ impl<'a> Loader<'a> {
                 let t = self.def_path(scope, &name);
                 self.ns.nodes.insert(t, Node::Region { space, offset, len });
                 if !off_lit || !len_lit {
-                    // GERECHNETE Basis. Hier stand frueher schlicht 0, und
-                    // damit lasen alle Felder der Region ab Adresse null.
-                    // Auf Florians IdeaPad sind das `IC0E`/`IC3E` — die
-                    // Freigabebits der I2C-Controller —, und ihre erfundene
-                    // 0 liess das `_STA` beider Controller „abgeschaltet"
-                    // melden, obwohl beide laufen.
-                    //
-                    // ACPICA wertet Adresse und Laenge erst beim AUSFUEHREN
-                    // aus (`acpi_ds_eval_region_operands`). Unser
-                    // Interpreter tut das im Methodenrumpf laengst; hier
-                    // wird die Anweisung dafuer aufgehoben.
+                    // Computed base. ACPICA evaluates address and length
+                    // only at execution (`acpi_ds_eval_region_operands`).
+                    // The interpreter already does this in method bodies;
+                    // here the statement is deferred so it can. A made-up
+                    // base of 0 would make every field of the region read
+                    // from address zero.
                     let bytes = self.b[op_start..p].to_vec();
                     self.ns.deferred.push((scope.clone(), bytes));
                 }
@@ -481,11 +464,10 @@ impl<'a> Loader<'a> {
         base
     }
 
-    /// A RegionOffset/RegionLen TermArg: a constant value if it is one,
-    /// otherwise 0 after skipping the (computed) expression.
-    /// Basis oder Laenge einer Operationsregion. Der dritte Rueckgabewert
-    /// sagt, ob es eine ECHTE Zahl war — sonst muss die Anweisung
-    /// nachgeholt werden.
+    /// Base or length of an operation region (a RegionOffset/RegionLen
+    /// TermArg): a constant value if it is one, otherwise 0 after skipping
+    /// the computed expression. The third return value says whether it was a
+    /// real number; if not, the statement must be deferred.
     fn region_arg(&mut self, scope: &Path, p: usize) -> Result<(u64, usize, bool), String> {
         match self.b[p] {
             0x00 | 0x01 | 0xFF | 0x0A | 0x0B | 0x0C | 0x0E => {

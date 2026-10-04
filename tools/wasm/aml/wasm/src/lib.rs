@@ -24,11 +24,8 @@ static NPK_CAPS: [u8; 1] = [0x40];
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     logln("[aml] panic");
-    // TRAPPEN, nicht drehen. `loop {}` verwandelte jeden Absturz in einen
-    // stillen Haenger: die Meldung ging in einen seriellen Port, den ein
-    // Notebook nicht hat, und danach drehte die Faser fuer immer. Ein Trap
-    // faengt der Kernel ab und druckt "forge: aml endete mit unreachable"
-    // ueber kprintln — also auf den Bildschirm.
+    // Trap, do not spin. `loop {}` would turn every panic into a silent
+    // hang; a trap is caught by the kernel and reported on screen.
     core::arch::wasm32::unreachable()
 }
 
@@ -53,28 +50,18 @@ unsafe extern "C" {
     fn npk_sys_info(key: i32) -> i64;
 }
 
-/// In BEIDE Kanaele.
+/// Log to one channel only.
 ///
-/// `npk_log_serial` geht nur in den UART und den Fernspiegel — auf einem
-/// Notebook ohne seriellen Port ist das unsichtbar, und haengt die Maschine,
-/// kommt auch der Spiegel nicht mehr heraus. `npk_print` laeuft ueber
-/// `kprint!`, also auf den BILDSCHIRM und in den Bootlog-Mitschnitt (und
-/// damit in `dmesg`). Deshalb beides: welcher Kanal lebt, weiss man erst
-/// hinterher.
-/// Ein Kanal, nicht zwei.
-///
-/// `npk_print` laeuft ueber `kprint!`, also auf den Bildschirm UND in den
-/// Bootlog-Mitschnitt (`dmesg`). `npk_log_serial` schreibt daneben in den
-/// UART und haengt an JEDEN Aufruf ein `\r\n` — in beide zu schreiben gab
-/// jede Zeile doppelt und zerriss sie an jeder Zahl. Ein sichtbarer Kanal
-/// genuegt.
+/// `npk_print` goes through `kprint!`, i.e. to the screen and the boot log
+/// (`dmesg`). `npk_log_serial` writes to the UART and appends `\r\n` to
+/// every call, so writing to both would duplicate lines and split them at
+/// every number.
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
 }
 fn logln(s: &str) { log(s); log("\n"); }
 
-/// `log` mit einer Zahl dahinter — ohne Formatierer, der Allokation braucht.
-/// Zwei Zahlen in einer Zeile — fuer `[addr] -> wert`.
+/// Two numbers on one line, for `[addr] -> value`; no allocating formatter.
 fn lognum2(a: &str, x: u32, b: &str, y: u32) {
     log(a);
     lognum_raw(x);
@@ -139,26 +126,24 @@ fn heap_reset() {
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
 
-/// Der EC-Zugang des Treibers.
+/// The driver's EC access.
 ///
-/// `read` MUSS ein Byte liefern — die Schnittstelle des Interpreters laesst
-/// kein "keine Antwort" zu, und eine 0 ist an dieser Stelle eine plausible
-/// Luege: die DSDT rechnet damit weiter und schliesst auf "kein Akku".
-/// Deshalb wird wenigstens GEZAEHLT, wie oft das passiert, und der Zaehler
-/// steht danach im Log. Ohne ihn sieht ein stummer EC genauso aus wie eine
-/// Firmware, die wirklich keinen Akku meldet.
+/// `read` must return a byte: the interpreter's interface has no "no
+/// answer", and a 0 is a plausible lie — the DSDT keeps computing with it
+/// and concludes "no battery". So failures are counted and the count is
+/// logged; otherwise a silent EC looks like firmware that really reports no
+/// battery.
 struct HostEc { reads: u32, fails: u32, verbose: bool }
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
         let r = unsafe { npk_ec_read(addr as i32) };
         self.reads += 1;
         let v = if r < 0 { self.fails += 1; 0 } else { r as u8 };
-        // Jedes gelesene BYTE zeigen, nicht nur zaehlen.
+        // Log every byte read, not just the count.
         //
-        // "failed=0" heisst nur "kein Fehlercode" — nicht "sinnvoller Wert".
-        // Liefert der EC lauter Nullen, sieht das fuer die DSDT aus wie eine
-        // echte Messung, und sie schliesst auf "kein Akku". Genau diese zwei
-        // Faelle liessen sich bisher nicht trennen.
+        // "failed=0" only means "no error code", not "meaningful value". An
+        // EC returning all zeros looks to the DSDT like a real reading and it
+        // concludes "no battery".
         if self.verbose {
             lognum2("[aml]   ec.read  [", addr as u32, "] -> ", v as u32);
         }
@@ -209,10 +194,9 @@ impl Ec for HostEc {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     logln("[aml] battery driver start");
-    // Der ausfuehrliche Mitschrieb der ERSTEN Runde — jede Region, jeder
-    // EC-Zugriff, jedes Feld von `_BIF` — ist das Werkzeug, mit dem dieser
-    // Treiber gebaut wurde, und rund 150 Zeilen. Im Normalbetrieb bleibt
-    // er aus; `set log.drivers 1` holt ihn zurueck.
+    // Verbose trace of the first round (every region, every EC access,
+    // every `_BIF` field). Off in normal operation; `set log.drivers 1`
+    // enables it.
     let loud = unsafe { npk_sys_info(50) } == 1;
 
     let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
@@ -225,16 +209,15 @@ pub extern "C" fn _start() {
     }
     let table_len = len as usize;
 
-    // Die Runde zaehlen. Haengt der Interpreter, sagt die letzte gedruckte
-    // Zahl, ob es beim ERSTEN Durchgang passiert oder erst spaeter — und
-    // das sind zwei ganz verschiedene Fehler.
-    // Die erste Runde erzaehlt, danach nur noch, wenn sich das ERGEBNIS
-    // aendert. Eine Wegmarke je Runde ist beim Suchen richtig und im
-    // Betrieb eine Flut — der Treiber laeuft fuer immer.
-    // Das SCI nehmen: der EC meldet ueber sein GPE, und ein Hotkey-Ereignis
-    // muss binnen Millisekunden abgeholt werden — nach 10 s antwortete der
-    // EC des IdeaPad auf QR_EC nur noch mit 0 (die Helligkeitstasten
-    // kamen nie an). Ohne SCI bleibt es beim 10-s-Takt.
+    // Count rounds: if the interpreter hangs, the last printed number shows
+    // whether it happened in the first pass or later. The first round is
+    // verbose; afterwards only changes of the result are logged, since the
+    // driver runs forever.
+    //
+    // Take the SCI: the EC signals via its GPE, and a hotkey event must be
+    // fetched within milliseconds; some ECs stop answering QR_EC (return 0)
+    // if events are left pending for seconds. Without SCI the EC is polled
+    // every 10 s.
     let sci_vec = {
         heap_reset();
         let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
@@ -254,11 +237,10 @@ pub extern "C" fn _start() {
 
     let mut round = 0u32;
     let mut last = i32::MIN;
-    // Wann der Akku das naechste Mal dran ist (TSC). Ein SCI allein ist
-    // KEIN Grund zu arbeiten: der EC meldet sein GPE auch nach jedem eigenen
-    // Lese-/Schreibvorgang, und wer darauf den Akku liest, weckt sich selbst
-    // — auf dem IdeaPad 60x je Sekunde, ein Kern auf 100 %. Gearbeitet wird
-    // nur bei SCI_EVT (ein echtes Ereignis) oder wenn der Akku faellig ist.
+    // When the battery is next due (TSC). An SCI alone is no reason to work:
+    // the EC raises its GPE after each of its own reads/writes too, so
+    // reading the battery on every SCI would keep waking ourselves. Work
+    // happens only on SCI_EVT (a real event) or when the battery is due.
     let tsc_per_ms = (unsafe { npk_sys_info(10) } as u64).max(1) * 1000;
     let now = || unsafe { npk_sys_info(19) } as u64;
     let mut battery_due = 0u64;
@@ -281,20 +263,18 @@ pub extern "C" fn _start() {
         let (packed, info) = decode(table, loud && round == 1);
         if packed != last {
             if packed < 0 {
-                // Ein Akku, der sich nicht mehr meldet, ist ein Befund.
+                // A battery that stops reporting is worth logging.
                 logln("[aml] no usable battery (packed=-1)");
             } else if loud {
-                // Der Prozentwert nicht: er aendert sich ueber eine
-                // Entladung rund hundertmal, und die Bar zeigt ihn
-                // ohnehin. Eine Zeile, die dem Nutzer waehrend des
-                // Tippens in den Prompt faellt, ist keine Auskunft.
+                // The percentage is not: it changes about a hundred times
+                // per discharge, and the bar shows it anyway.
                 lognum("[aml] battery percent=", (packed & 0xFF) as u32);
             }
             last = packed;
         }
         unsafe { npk_battery_report(packed) };
-        // Die Rohwerte fuer `battery` (Entnahme des ganzen Geraets) — die
-        // Bar braucht nur den Prozentwert, eine Strommessung braucht mehr.
+        // Raw values for `battery` (whole-system draw); the bar needs only
+        // the percentage, a power reading needs more.
         if let Some(i) = info {
             unsafe {
                 npk_battery_detail(i.rate as i32, i.remaining_mah as i32,
@@ -320,10 +300,9 @@ fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
     let mut n = 0u32;
     for bat in find_batteries(&ns) {
         n += 1;
-        // Warum -1? Bisher fielen "Methode/EC hat gemeckert" und "Akku
-        // meldet sich als nicht vorhanden" in dieselbe stille -1, und das
-        // sind zwei ganz verschiedene Fehler. `read_battery` traegt einen
-        // Fehlertext — der wurde weggeworfen.
+        // Why -1? "method/EC failed" and "battery reports not present" are
+        // different failures; `read_battery` carries an error text, so log
+        // it.
         match read_battery(&ns, &mut ec, &bat) {
             Err(e) => if verbose {
                 log("[aml]  _BST/_BIF failed: ");
@@ -339,9 +318,9 @@ fn decode(table: &[u8], verbose: bool) -> (i32, Option<aml_core::BatteryInfo>) {
                 lognum("[aml]  EC reads=", ec.reads);
                 lognum("[aml]  EC failed=", ec.fails);
             }
-            // Ein Akku, dessen Restkapazitaet die Firmware nicht beziffert,
-            // hat keinen Prozentwert — und eine erfundene Zahl in der Bar
-            // ist schlechter als gar keine Zelle.
+            // A battery whose remaining capacity the firmware does not state
+            // has no percentage; an invented number in the bar is worse than
+            // no cell at all.
             if info.present && info.remaining_mah == 0xFFFF_FFFF {
                 if verbose {
                     logln("[aml]  battery present, but _BST reports UNKNOWN remaining");

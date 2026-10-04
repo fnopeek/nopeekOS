@@ -34,10 +34,10 @@ pub enum Place {
     Field(Path),
     /// A byte inside a Buffer object.
     BufIndex(Obj, usize),
-    /// Ein BUFFER-FELD: `CreateWordField` & Co. binden einen Namen an einen
-    /// Bitausschnitt EINES bestimmten Puffers. Der Puffer faehrt als `Obj`
-    /// mit, nicht als Kopie — sonst schriebe `INT1 = …` in einen Abzug und
-    /// die Ressourcenvorlage bliebe, wie sie war.
+    /// A buffer field: `CreateWordField` & co. bind a name to a bit range of
+    /// one specific buffer. The buffer is held as `Obj`, not copied;
+    /// otherwise `INT1 = …` would write into a copy and the resource
+    /// template would stay unchanged.
     BufField(Obj, u64, u64),
 }
 
