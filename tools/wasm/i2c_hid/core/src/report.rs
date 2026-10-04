@@ -1,17 +1,16 @@
-//! Der HID-Report-Deskriptor — was ein Byte im Bericht bedeutet.
+//! The HID report descriptor — what each byte of a report means.
 //!
-//! Portiert aus Linux 6.18.26 `drivers/hid/hid-core.c`
-//! (`hid_parser_main`/`_global`/`_local`, `hid_add_field`), auf das
-//! eingedampft, was ein Zeigergeraet braucht: je Bericht eine Liste von
-//! Feldern mit Bitversatz, Breite und Usage.
+//! Ported from Linux `drivers/hid/hid-core.c` (`hid_parser_main`/`_global`/
+//! `_local`, `hid_add_field`), reduced to what a pointing device needs: per
+//! report a list of fields with bit offset, size and usage.
 //!
-//! **Warum ueberhaupt parsen?** Weil sonst jeder Treiber fuer genau ein
-//! Modell gilt. Die Elan im IdeaPad, die Wacom daneben und das naechste
-//! Geraet legen ihre Bytes verschieden — im Deskriptor steht, wie.
+//! Parsing the descriptor is what keeps the driver model-independent:
+//! different touchpads and digitizers lay out their bytes differently, and
+//! the descriptor says how.
 
 use alloc::{format, string::String, vec::Vec};
 
-// Usage Pages, die uns angehen.
+// Usage pages we care about.
 pub const PAGE_GENERIC_DESKTOP: u16 = 0x01;
 pub const PAGE_BUTTON: u16 = 0x09;
 pub const PAGE_DIGITIZER: u16 = 0x0D;
@@ -24,57 +23,54 @@ pub const USAGE_WHEEL: u16 = 0x38;
 // Usages (Digitizer)
 pub const USAGE_TIP_SWITCH: u16 = 0x42;
 pub const USAGE_CONTACT_ID: u16 = 0x51;
-/// „Device Mode" im Feature-Bericht: 0 = Maus-Kompatibilitaet,
-/// 3 = Praezisions-Touchpad. Ohne diesen Schalter liefert ein Touchpad
-/// gar keine Mehrfingerdaten — es TUT so, als waere es eine Maus.
+/// "Device Mode" in the feature report: 0 = mouse compatibility,
+/// 3 = precision touchpad. Without this switch a touchpad delivers no
+/// multi-finger data and behaves like a mouse.
 pub const USAGE_INPUT_MODE: u16 = 0x52;
 pub const USAGE_CONTACT_COUNT: u16 = 0x54;
 
-/// Zu welchem Berichtstyp ein Feld gehoert.
+/// Which report type a field belongs to.
 ///
-/// Report-IDs sind je Typ eigenstaendig: derselbe Bericht 3 kann als
-/// Eingabe und als Feature ganz verschieden aussehen, und beide haben
-/// ihre eigenen Bitversaetze.
+/// Report IDs are independent per type: report 3 as input and report 3 as
+/// feature can look entirely different, each with its own bit offsets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { Input, Output, Feature }
 
-/// Ein Feld in einem Eingabebericht.
+/// A field in an input report.
 #[derive(Clone, Copy, Debug)]
 pub struct Field {
     pub kind: Kind,
     pub report_id: u8,
     pub usage_page: u16,
     pub usage: u16,
-    /// Bitversatz IM BERICHT, ohne das Report-ID-Byte.
+    /// Bit offset within the report, excluding the report ID byte.
     pub bit_offset: u32,
     pub bit_size: u32,
     pub logical_min: i32,
     pub logical_max: i32,
-    /// Bit 2 des Input-Items: 0 = absolut, 1 = relativ.
+    /// Bit 2 of the Input item: 0 = absolute, 1 = relative.
     pub relative: bool,
-    /// Bit 0: 1 = Konstante (Fuellbits), fuer uns uninteressant.
+    /// Bit 0: 1 = constant (padding), of no interest to us.
     pub constant: bool,
 }
 
-/// Das Ergebnis: alle Eingabefelder, in Deskriptor-Reihenfolge.
+/// The result: all input fields, in descriptor order.
 #[derive(Default)]
 pub struct ReportMap {
     pub fields: Vec<Field>,
-    /// Hat der Deskriptor ueberhaupt Report-IDs benutzt? Wenn nicht,
-    /// traegt der Bericht kein ID-Byte.
+    /// Did the descriptor use report IDs at all? If not, reports carry no
+    /// ID byte.
     pub uses_ids: bool,
-    /// Die GANZE Laenge je Bericht, in Bit.
+    /// The full length of each report, in bits.
     ///
-    /// Aus den Feldern allein ist sie NICHT herleitbar: Fuellbits sind
-    /// keine Felder, stehen aber im Bericht. Und wer einen Feature-Bericht
-    /// zu kurz schickt, bekommt auf dem Bus ein ACK und trotzdem keine
-    /// Wirkung — genau daran ist der Umschalter in den Praezisionsmodus
-    /// gescheitert (Elan: `Report Size 16`, wir schickten ein Byte).
+    /// It cannot be derived from the fields alone: padding bits are not
+    /// fields but are part of the report. A feature report sent too short
+    /// is ACKed on the bus and then silently ignored.
     lens: Vec<(Kind, u8, u32)>,
 }
 
 impl ReportMap {
-    /// Wie lang ist dieser Bericht, in BYTES, ohne das Report-ID-Byte?
+    /// Length of this report in bytes, excluding the report ID byte.
     pub fn report_bytes(&self, kind: Kind, id: u8) -> usize {
         self.lens.iter()
             .find(|(k, i, _)| *k == kind && *i == id)
@@ -93,21 +89,19 @@ struct Global {
     report_id: u8,
 }
 
-/// Einen Report-Deskriptor zerlegen.
+/// Parse a report descriptor.
 ///
-/// Kurze Items: `bSize` in Bit 1..0, `bType` in 3..2, `bTag` in 7..4.
-/// `bSize == 3` heisst VIER Bytes, nicht drei — die Stelle, an der sich
-/// ein selbstgeschriebener Parser als erstes vertut.
+/// Short items: `bSize` in bits 1..0, `bType` in 3..2, `bTag` in 7..4.
+/// `bSize == 3` means four bytes, not three.
 pub fn parse(desc: &[u8]) -> ReportMap {
     let mut out = ReportMap::default();
     let mut g = Global::default();
-    // Ein Stapel fuer Push/Pop (Tag 0xA4/0xB4) — selten, aber wenn er
-    // fehlt, verrutscht alles danach.
+    // Stack for Push/Pop (tags 0xA4/0xB4) — rare, but without it everything
+    // after it is misaligned.
     let mut stack: Vec<Global> = Vec::new();
     let mut usages: Vec<u16> = Vec::new();
     let mut usage_min: Option<u16> = None;
-    // Bitversatz je Report-ID.
-    // Je Typ eigene Versaetze — siehe [`Kind`].
+    // Bit offset per report ID, separate per type — see [`Kind`].
     let mut off_in: [u32; 256] = [0; 256];
     let mut off_out: [u32; 256] = [0; 256];
     let mut off_feat: [u32; 256] = [0; 256];
@@ -116,7 +110,7 @@ pub fn parse(desc: &[u8]) -> ReportMap {
     while i < desc.len() {
         let b0 = desc[i];
         if b0 == 0xFE {
-            // Long item: Laenge in Byte 1.
+            // Long item: length in byte 1.
             let len = *desc.get(i + 1).unwrap_or(&0) as usize;
             i += 3 + len;
             continue;
@@ -129,7 +123,7 @@ pub fn parse(desc: &[u8]) -> ReportMap {
         for k in 0..size {
             val |= (desc[i + 1 + k] as u32) << (8 * k);
         }
-        // Vorzeichenbehaftet fuer logical min/max.
+        // Signed, for logical min/max.
         let sval: i32 = match size {
             1 => (val as u8) as i8 as i32,
             2 => (val as u16) as i16 as i32,
@@ -142,8 +136,8 @@ pub fn parse(desc: &[u8]) -> ReportMap {
             // ── Main ───────────────────────────────────────────────
             0 => match tag {
                 0x8 | 0x9 | 0xB => {
-                    // Input / Output / Feature — dieselbe Buchfuehrung,
-                    // nur ein anderer Topf.
+                    // Input / Output / Feature — same bookkeeping, different
+                    // bucket.
                     let kind = match tag {
                         0x8 => Kind::Input,
                         0x9 => Kind::Output,
@@ -156,18 +150,16 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         Kind::Output => &mut off_out[g.report_id as usize],
                         Kind::Feature => &mut off_feat[g.report_id as usize],
                     };
-                    // Ein Block, dessen Elemente ALLE DIESELBE Usage
-                    // tragen, braucht keinen Eintrag je Element.
+                    // A block whose elements all carry the same usage needs
+                    // no entry per element.
                     //
-                    // Linux speichert Anzahl und Groesse einmal je Feld;
-                    // ich lege je Element einen an, und ein
-                    // Hersteller-Feature mit `Report Count (0x488)` macht
-                    // daraus 1160 Eintraege — auf Florians Touchpad kamen
-                    // so 1583 Felder aus 381 Bytes zusammen. Wo die Usages
-                    // sich unterscheiden (Kontaktpunkte, Tastenreihen ueber
-                    // `Usage Minimum`), bleibt es bei einem Eintrag je
-                    // Element; sonst genuegt einer, und der Versatz
-                    // springt ueber den ganzen Block.
+                    // Linux stores count and size once per field; here each
+                    // element gets an entry, and a vendor feature with
+                    // `Report Count (0x488)` would produce over a thousand.
+                    // Where usages differ (contact points, button rows via
+                    // `Usage Minimum`) there is one entry per element;
+                    // otherwise one suffices and the offset skips the whole
+                    // block.
                     let distinct = usages.len() > 1 || usage_min.is_some();
                     if !distinct && g.report_count > 1 {
                         out.fields.push(Field {
@@ -195,15 +187,12 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         } else {
                             usages.last().copied().unwrap_or(0)
                         };
-                        // Fuellbits erzeugen KEIN Feld.
+                        // Padding bits create no field.
                         //
-                        // Sie werden nie gelesen (`find` filtert sie
-                        // ohnehin), aber sie kosten: ein Herstellerblock
-                        // mit `Report Count (0x488)` legte 1160 Eintraege
-                        // an. Auf Florians Touchpad kamen so 1634 Felder
-                        // aus 381 Bytes zusammen. Der Versatz muss
-                        // trotzdem weiterlaufen — sonst verrutscht alles
-                        // danach.
+                        // They are never read (`find` filters them anyway),
+                        // but large vendor padding blocks would cost
+                        // thousands of entries. The offset must still
+                        // advance, or everything after it is misaligned.
                         if constant {
                             *off += g.report_size;
                             continue;
@@ -248,7 +237,7 @@ pub fn parse(desc: &[u8]) -> ReportMap {
             2 => match tag {
                 0x0 => usages.push(val as u16),
                 0x1 => usage_min = Some(val as u16),
-                0x2 => {} // Usage Maximum: die Spanne ergibt sich aus min + n
+                0x2 => {} // Usage Maximum: the range follows from min + n
                 _ => {}
             },
             _ => {}
@@ -267,13 +256,13 @@ pub fn parse(desc: &[u8]) -> ReportMap {
 }
 
 impl ReportMap {
-    /// Das erste EINGABEfeld mit dieser Usage in diesem Bericht.
+    /// The first input field with this usage in this report.
     pub fn find(&self, report_id: u8, page: u16, usage: u16) -> Option<&Field> {
         self.find_all(Kind::Input, report_id, page, usage).into_iter().next()
     }
 
-    /// ALLE Felder dieser Usage — ein Mehrfinger-Touchpad fuehrt X und Y
-    /// je Kontaktpunkt, also mehrfach im selben Bericht.
+    /// All fields with this usage — a multi-finger touchpad carries X and Y
+    /// per contact point, so several times in the same report.
     pub fn find_all(&self, kind: Kind, report_id: u8, page: u16, usage: u16) -> Vec<&Field> {
         self.fields.iter().filter(|f| {
             f.kind == kind && f.report_id == report_id
@@ -281,15 +270,14 @@ impl ReportMap {
         }).collect()
     }
 
-    /// Ein FEATURE-Feld mit dieser Usage, irgendwo — samt seiner
-    /// Berichtsnummer.
+    /// A feature field with this usage anywhere, with its report ID.
     pub fn find_feature(&self, page: u16, usage: u16) -> Option<&Field> {
         self.fields.iter().find(|f| {
             f.kind == Kind::Feature && f.usage_page == page && f.usage == usage
         })
     }
 
-    /// Alle Report-IDs, die Eingabefelder tragen.
+    /// All report IDs that carry input fields.
     pub fn report_ids(&self) -> Vec<u8> {
         let mut ids: Vec<u8> = Vec::new();
         for f in &self.fields {
@@ -298,7 +286,7 @@ impl ReportMap {
         ids
     }
 
-    /// Ein Bericht, der sich als ZEIGER auswerten laesst: X und Y darin.
+    /// A report that can be read as a pointer: it contains X and Y.
     pub fn pointer_report(&self) -> Option<u8> {
         self.report_ids().into_iter().find(|&id| {
             self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
@@ -306,8 +294,8 @@ impl ReportMap {
         })
     }
 
-    /// Ein Bericht, der KONTAKTPUNKTE traegt — also ein echter
-    /// Touchpad-Bericht und keine Maus-Nachahmung.
+    /// A report that carries contact points — a real touchpad report, not
+    /// mouse emulation.
     pub fn touchpad_report(&self) -> Option<u8> {
         self.report_ids().into_iter().find(|&id| {
             self.find(id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).is_some()
@@ -315,12 +303,11 @@ impl ReportMap {
         })
     }
 
-    /// Wieviele Kontaktpunkte dieser Bericht fuehrt.
+    /// How many contact points this report carries.
     ///
-    /// **Das ist nicht die Zahl der Finger, die das Geraet erkennt.** Ein
-    /// Praezisions-Touchpad, dessen Bericht nur einen Platz hat, schickt
-    /// MEHRERE Berichte je Bild — `Contact Count` im ersten sagt, wieviele
-    /// insgesamt kommen. Florians Elan macht genau das.
+    /// This is not the number of fingers the device detects. A precision
+    /// touchpad whose report has only one slot sends several reports per
+    /// frame; `Contact Count` in the first says how many follow in total.
     pub fn contact_slots(&self, report_id: u8) -> usize {
         self.find_all(Kind::Input, report_id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).len()
     }
@@ -339,9 +326,9 @@ impl ReportMap {
     }
 }
 
-/// Ein Feld aus einem Bericht herausziehen — vorzeichenrichtig.
+/// Extract a field from a report, sign-extended where needed.
 ///
-/// `data` ist der Bericht OHNE Report-ID-Byte.
+/// `data` is the report without the report ID byte.
 pub fn extract(data: &[u8], f: &Field) -> i32 {
     if f.bit_size == 0 || f.bit_size > 32 { return 0; }
     let mut v: u32 = 0;
@@ -353,7 +340,7 @@ pub fn extract(data: &[u8], f: &Field) -> i32 {
             v |= 1 << k;
         }
     }
-    // Ein Feld mit negativem Minimum ist vorzeichenbehaftet.
+    // A field with a negative minimum is signed.
     if f.logical_min < 0 && f.bit_size < 32 {
         let sign = 1u32 << (f.bit_size - 1);
         if v & sign != 0 {
@@ -363,8 +350,8 @@ pub fn extract(data: &[u8], f: &Field) -> i32 {
     v as i32
 }
 
-/// Einen Wert IN einen Bericht schreiben — das Gegenstueck zu
-/// [`extract`]. Bits ausserhalb des Puffers fallen weg.
+/// Write a value into a report — the counterpart of [`extract`]. Bits
+/// outside the buffer are dropped.
 pub fn insert(data: &mut [u8], f: &Field, value: i32) {
     if f.bit_size == 0 || f.bit_size > 32 { return; }
     let v = value as u32;
@@ -381,8 +368,8 @@ pub fn insert(data: &mut [u8], f: &Field, value: i32) {
 mod tests {
     use super::*;
 
-    /// Der Boot-Maus-Deskriptor aus der HID-Spezifikation (Appendix E.10).
-    /// Drei Knoepfe, fuenf Fuellbits, X und Y als relative Bytes.
+    /// The boot mouse descriptor from the HID specification (Appendix E.10).
+    /// Three buttons, five padding bits, X and Y as relative bytes.
     const BOOT_MOUSE: &[u8] = &[
         0x05, 0x01, // Usage Page (Generic Desktop)
         0x09, 0x02, // Usage (Mouse)
@@ -421,21 +408,21 @@ mod tests {
 
         let x = m.find(0, PAGE_GENERIC_DESKTOP, USAGE_X).unwrap();
         let y = m.find(0, PAGE_GENERIC_DESKTOP, USAGE_Y).unwrap();
-        // 3 Knopfbits + 5 Fuellbits = Byte 1, dann X, dann Y.
+        // 3 button bits + 5 padding bits = byte 1, then X, then Y.
         assert_eq!(x.bit_offset, 8);
         assert_eq!(y.bit_offset, 16);
         assert_eq!(x.bit_size, 8);
         assert!(x.relative);
         assert_eq!(x.logical_min, -127);
 
-        // Knoepfe: Usage Minimum 1 laeuft ueber die drei Felder hoch.
+        // Buttons: Usage Minimum 1 counts up over the three fields.
         let b1 = m.find(0, PAGE_BUTTON, 1).expect("Knopf 1");
         let b3 = m.find(0, PAGE_BUTTON, 3).expect("Knopf 3");
         assert_eq!(b1.bit_offset, 0);
         assert_eq!(b3.bit_offset, 2);
     }
 
-    /// Ein Bericht: linke Taste, 5 nach rechts, 3 nach oben.
+    /// A report: left button, 5 to the right, 3 up.
     #[test]
     fn boot_mouse_values() {
         let m = parse(BOOT_MOUSE);
@@ -448,13 +435,11 @@ mod tests {
         assert_eq!(extract(&data, b1), 1);
     }
 
-    /// Der ECHTE Deskriptor von Florians Touchpad (Elan ELAN06FA,
-    /// `vid=0x04f3 pid=0x31ad`, 381 Bytes, vom Geraet gelesen).
+    /// A real Elan touchpad descriptor (ELAN06FA, `vid=0x04f3 pid=0x31ad`,
+    /// 381 bytes).
     ///
-    /// Er haelt genau das fest, was uns eine Fehlersuche gekostet hat:
-    /// Bericht 4 fuehrt **einen** Kontaktplatz und ein `Contact Count`.
-    /// Wer daraus schliesst, das Pad erkenne nur einen Finger, sucht den
-    /// Fehler danach an der falschen Stelle.
+    /// Report 4 carries one contact slot plus a `Contact Count`; this does
+    /// not mean the pad detects only one finger.
     #[test]
     fn elan_touchpad_report_layout() {
         let d = include_bytes!("../testdata/elan06fa.bin");
@@ -479,27 +464,24 @@ mod tests {
         let b1 = m.find(4, PAGE_BUTTON, 1).expect("Klickflaeche");
         assert_eq!(b1.bit_offset, 64);
 
-        // 88 Bit = 11 Byte, plus Berichtsnummer und zwei Laengenbytes = 14
-        // — genau das `wMaxInputLength`, das das Geraet ansagt.
+        // 88 bits = 11 bytes, plus report ID and two length bytes = 14,
+        // exactly the `wMaxInputLength` the device announces.
         //
-        // Und der Umschalter in den Praezisionsmodus muss auffindbar sein,
-        // sonst sendet es ueberhaupt keinen Bericht 4.
+        // The precision-mode switch must be found, or the device never
+        // sends report 4.
         let im = m.find_feature(PAGE_DIGITIZER, USAGE_INPUT_MODE).expect("Device Mode");
         assert_eq!(im.report_id, 3);
 
-        // Und der Block, der frueher 1634 Felder erzeugt hat, erzeugt jetzt
-        // keine: Fuellbits sind keine Felder.
+        // The large vendor padding block creates no fields.
         assert!(m.fields.len() < 100, "{} Felder aus 381 Bytes", m.fields.len());
     }
 
-    /// Der Umschalter in den Praezisionsmodus ist ZWEI Bytes lang.
+    /// The precision-mode switch is two bytes long.
     ///
-    /// Am Geraet quittierte das Elan einen Ein-Byte-Feature-Bericht auf
-    /// dem Bus und schaltete NICHT um — es kam weiter nur die
-    /// Maus-Nachahmung. Im Deskriptor steht `Report Size 16` an
-    /// `Input Mode`, und ein zu kurzer Feature-Bericht wird verworfen.
-    /// Die Laenge gehoert deshalb aus dem Deskriptor gerechnet und nicht
-    /// geraten — samt Fuellbits, die keine Felder sind.
+    /// The descriptor has `Report Size 16` on `Input Mode`, and the device
+    /// ACKs a one-byte feature report but ignores it. The length must
+    /// therefore be computed from the descriptor, including padding bits
+    /// that are not fields.
     #[test]
     fn a_feature_report_is_as_long_as_the_descriptor_says() {
         let d = include_bytes!("../testdata/elan06fa.bin");
@@ -510,18 +492,18 @@ mod tests {
         assert_eq!(im.bit_size, 16, "Report Size 16 — nicht 8");
         assert_eq!(m.report_bytes(Kind::Feature, 3), 2);
 
-        // Und so sieht die Nutzlast aus, die das Geraet erwartet.
+        // The payload the device expects.
         let mut payload = alloc::vec![0u8; m.report_bytes(Kind::Feature, 3)];
         insert(&mut payload, im, 3);
         assert_eq!(&payload[..], &[0x03, 0x00]);
 
-        // Bericht 5 endet auf 14 Fuellbits: aus den FELDERN allein kaeme
-        // ein Byte heraus, richtig sind zwei.
+        // Report 5 ends in 14 padding bits: the fields alone would give one
+        // byte; the correct answer is two.
         assert_eq!(m.report_bytes(Kind::Feature, 5), 2);
     }
 
-    /// Schreiben und Lesen muessen sich treffen, auch quer ueber eine
-    /// Bytegrenze und mit Vorzeichen.
+    /// Writing and reading must agree, also across a byte boundary and with
+    /// a sign.
     #[test]
     fn insert_and_extract_are_inverse() {
         let f = Field {
@@ -536,11 +518,11 @@ mod tests {
         }
     }
 
-    /// `bSize == 3` heisst VIER Bytes. Wer drei liest, verschiebt alles
-    /// danach — und merkt es erst an unsinnigen Koordinaten.
+    /// `bSize == 3` means four bytes. Reading three shifts everything after
+    /// it.
     #[test]
     fn four_byte_items_are_four_bytes() {
-        // Logical Maximum (0x00FFFFFF) als 4-Byte-Item, dann X als 16 Bit.
+        // Logical Maximum (0x00FFFFFF) as a 4-byte item, then X as 16 bits.
         let d = &[
             0x05, 0x01,
             0x27, 0xFF, 0xFF, 0xFF, 0x00, // Logical Maximum, bSize=3 -> 4 Bytes

@@ -1,13 +1,13 @@
-//! HID over I2C — das Protokoll auf dem Bus.
+//! HID over I2C — the protocol on the bus.
 //!
-//! Portiert aus Linux 6.18.26 `drivers/hid/i2c-hid/i2c-hid-core.c`. Die
-//! Reihenfolge ist die des Originals, und die Wartezeiten sind seine:
-//! sie stehen dort nicht in der Spezifikation, sondern sind gemessen.
+//! Ported from Linux `drivers/hid/i2c-hid/i2c-hid-core.c`. The order of
+//! operations and the delays are the original's; the delays are empirical,
+//! not from the specification.
 
 use crate::dw_i2c::{self, Bus, Error, Msg};
 use alloc::{format, string::String, vec, vec::Vec};
 
-/// `struct i2c_hid_desc` (i2c-hid-core.c) — 30 Bytes, little-endian.
+/// `struct i2c_hid_desc` (i2c-hid-core.c) — 30 bytes, little-endian.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HidDesc {
     pub desc_length: u16,
@@ -49,11 +49,10 @@ impl HidDesc {
         }
     }
 
-    /// `i2c_hid_fetch_hid_descriptor` prueft genau diese zwei Dinge.
+    /// `i2c_hid_fetch_hid_descriptor` checks exactly these two things.
     ///
-    /// **Beides ist eine echte Probe, keine Formalitaet:** ein Geraet, das
-    /// gar nicht antwortet, liefert lauter Nullen oder lauter Einsen — und
-    /// beides faellt hier durch.
+    /// Both are a real probe: a device that does not answer reads as all
+    /// zeros or all ones, and both fail here.
     pub fn valid(&self) -> Result<(), String> {
         if self.bcd_version != 0x0100 {
             return Err(format!("bcdVersion {:#06x}, expected 0x0100", self.bcd_version));
@@ -76,12 +75,12 @@ impl HidDesc {
     }
 }
 
-/// `i2c_hid_probe_address` — ein Byte lesen, und bei Fehlschlag nach
-/// 400 µs noch einmal.
+/// `i2c_hid_probe_address` — read one byte, and on failure retry once
+/// after 400 µs.
 ///
-/// Manche STM- und Weida-Geraete brauchen nach einer steigenden Taktflanke
-/// diese Zeit, um aus dem Tiefschlaf zu kommen; der erste Versuch schlaegt
-/// dann fehl. Steht im Original mit genau dieser Begruendung.
+/// Some STM and Weida devices need this time to wake from deep sleep after
+/// a rising clock edge; the first attempt then fails (reason as given in
+/// the original).
 pub fn probe_address(bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16) -> Result<(), Error> {
     let mut one = [0u8; 1];
     {
@@ -95,8 +94,8 @@ pub fn probe_address(bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16) -> Result<()
     dw_i2c::xfer(bus, dw, addr, &mut msgs)
 }
 
-/// `i2c_hid_read_register` — zwei Bytes Registeradresse schreiben, dann
-/// `len` Bytes lesen. Ein einziger Transfer mit Restart dazwischen.
+/// `i2c_hid_read_register` — write the two-byte register address, then
+/// read `len` bytes. One transfer with a restart in between.
 pub fn read_register(
     bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, reg: u16, out: &mut [u8],
 ) -> Result<(), Error> {
@@ -117,7 +116,7 @@ pub fn fetch_descriptor(
     Ok(d)
 }
 
-/// Opcodes aus dem HID-over-I2C-Protokoll (i2c-hid-core.c).
+/// Opcodes of the HID-over-I2C protocol (i2c-hid-core.c).
 pub const OPCODE_RESET: u8 = 0x01;
 pub const OPCODE_SET_REPORT: u8 = 0x03;
 pub const OPCODE_SET_POWER: u8 = 0x08;
@@ -139,11 +138,10 @@ fn encode_command(buf: &mut Vec<u8>, opcode: u8, report_type: u8, report_id: u8)
 
 /// `i2c_hid_set_power`.
 ///
-/// **Die 60 ms danach stehen nicht in der Spezifikation.** Der Kommentar
-/// im Original sagt es woertlich: nach PWR_ON soll das GERAET den Takt
-/// dehnen, aber Windows wartet 1 ms, Goodix-Geraete brauchen 60 — und
-/// mehrere Geraete arbeiten ohne diese Pause nicht richtig. Gemessen, nicht
-/// hergeleitet, und deshalb uebernommen.
+/// The 60 ms afterwards are not in the specification. Per the original's
+/// comment: after PWR_ON the device should stretch the clock, but Windows
+/// waits 1 ms, Goodix devices need 60, and several devices misbehave
+/// without the pause.
 pub fn set_power(
     bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc, state: u8,
 ) -> Result<(), Error> {
@@ -158,7 +156,7 @@ pub fn set_power(
         dw_i2c::xfer(bus, dw, addr, &mut msgs)
     };
     if r.is_err() && state == PWR_ON {
-        // Dieselbe 400-µs-Geschichte wie bei `probe_address`.
+        // Same 400 µs wake-up retry as in `probe_address`.
         bus.udelay(500);
         let mut msgs = [Msg::Write(&cmd)];
         r = dw_i2c::xfer(bus, dw, addr, &mut msgs);
@@ -169,17 +167,15 @@ pub fn set_power(
     r
 }
 
-/// `i2c_hid_set_or_send_report` mit `do_set = true` — ein FEATURE-Bericht
-/// an das Geraet.
+/// `i2c_hid_set_or_send_report` with `do_set = true` — a feature report to
+/// the device.
 ///
-/// Gebraucht fuer genau eine Sache, aber eine wichtige: den „Device Mode"
-/// eines Praezisions-Touchpads auf 3 zu stellen. Ohne diesen Schalter
-/// meldet es sich wie eine Maus und liefert gar keine Mehrfingerdaten —
-/// Zweifinger-Scrollen ist dann nicht schwer, sondern unmoeglich.
+/// Used to set the "Device Mode" of a precision touchpad to 3. Without it
+/// the touchpad reports as a mouse and delivers no multi-finger data.
 ///
-/// Die Form ist die des Originals: Befehlsregister, SET_REPORT mit Typ
-/// und Berichtsnummer, dann die Adresse des DATENregisters, dann der
-/// Bericht mit seiner Laenge davor (`i2c_hid_format_report`).
+/// Layout as in the original: command register, SET_REPORT with type and
+/// report ID, then the data register address, then the report prefixed
+/// with its length (`i2c_hid_format_report`).
 pub fn set_report(
     bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc,
     report_type: u8, report_id: u8, data: &[u8],
@@ -192,9 +188,8 @@ pub fn set_report(
     cmd.push((d.data_register & 0xFF) as u8);
     cmd.push((d.data_register >> 8) as u8);
 
-    // `i2c_hid_format_report`: Laenge zuerst, dann — wenn es eine gibt —
-    // die Berichtsnummer, dann die Daten. Die Laenge zaehlt sich SELBST
-    // mit.
+    // `i2c_hid_format_report`: length first, then the report ID if there is
+    // one, then the data. The length includes itself.
     let mut body: Vec<u8> = vec![0, 0];
     if report_id != 0 { body.push(report_id); }
     body.extend_from_slice(data);
@@ -209,9 +204,9 @@ pub fn set_report(
 
 /// `i2c_hid_start_hwreset` + `i2c_hid_finish_hwreset`.
 ///
-/// Der Reset meldet sich zurueck, indem das Geraet ein Eingaberegister mit
-/// LAENGE NULL bereitstellt. Linux wartet darauf ueber den Interrupt; wir
-/// lesen das Register, bis die Null kommt oder die Zeit ablaeuft.
+/// The device signals reset completion by presenting an input register of
+/// length zero. Linux waits for it via the interrupt; we poll the register
+/// until the zero arrives or the timeout expires.
 pub fn reset(
     bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc,
 ) -> Result<(), String> {
@@ -228,7 +223,7 @@ pub fn reset(
             .map_err(|e| format!("reset command failed: {e:?}"))?;
     }
 
-    // Auf die Null-Laenge warten (Linux: 1 s).
+    // Wait for the zero length (Linux: 1 s).
     let deadline = bus.now_us() + 1_000_000;
     loop {
         let mut len = [0u8; 2];
@@ -238,23 +233,23 @@ pub fn reset(
             if n == 0 { break; }
         }
         if bus.now_us() >= deadline {
-            // Linux warnt hier nur und macht weiter.
+            // Linux only warns here and continues.
             bus.note("i2c-hid: device did not ack reset within 1000 ms");
             break;
         }
         bus.udelay(1000);
     }
 
-    // „At least some SIS devices need this after reset."
+    // "At least some SIS devices need this after reset."
     set_power(bus, dw, addr, d, PWR_ON).map_err(|e| format!("power on after reset: {e:?}"))?;
     Ok(())
 }
 
-/// `i2c_hid_get_input` — ein Eingabebericht, wenn einer anliegt.
+/// `i2c_hid_get_input` — an input report, if one is pending.
 ///
-/// Gelesen wird die in `wMaxInputLength` angesagte Groesse; die ersten
-/// zwei Bytes sind die tatsaechliche Laenge. **Null heisst „nichts da"**
-/// (oder: ein Reset ist fertig), und das ist der Normalfall beim Pollen.
+/// Reads the size announced in `wMaxInputLength`; the first two bytes are
+/// the actual length. Zero means nothing pending (or a reset completed),
+/// which is the normal case when polling.
 pub fn get_input<'a>(
     bus: &mut dyn Bus, dw: &dw_i2c::Dw, addr: u16, d: &HidDesc, buf: &'a mut [u8],
 ) -> Result<Option<&'a [u8]>, Error> {
@@ -266,7 +261,7 @@ pub fn get_input<'a>(
     }
     let n = ((buf[0] as usize) | ((buf[1] as usize) << 8)) as usize;
     if n == 0 { return Ok(None); }
-    // 0xFFFF ist ein bekannter Muellwert (I2C_HID_QUIRK_BOGUS_IRQ).
+    // 0xFFFF is a known garbage value (I2C_HID_QUIRK_BOGUS_IRQ).
     if n == 0xFFFF || n > want || n < 2 { return Ok(None); }
     Ok(Some(&buf[2..n]))
 }
@@ -275,8 +270,8 @@ pub fn get_input<'a>(
 mod tests {
     use super::*;
 
-    /// Ein Deskriptor, wie ein Elan-Touchpad ihn liefert — und die beiden
-    /// Proben, die Linux daran macht.
+    /// A descriptor as an Elan touchpad returns it, and the two checks
+    /// Linux applies to it.
     #[test]
     fn descriptor_validation() {
         let mut raw = [0u8; 30];
@@ -287,13 +282,13 @@ mod tests {
         assert!(d.valid().is_ok());
         assert_eq!(d.input_register, 3);
 
-        // Ein Geraet, das nicht antwortet, liefert lauter Nullen …
+        // A device that does not answer reads as all zeros ...
         assert!(HidDesc::parse(&[0u8; 30]).valid().is_err());
-        // … oder lauter Einsen.
+        // ... or all ones.
         assert!(HidDesc::parse(&[0xFFu8; 30]).valid().is_err());
     }
 
-    /// `i2c_hid_encode_command`: ab Report-ID 15 wird sie ein drittes Byte.
+    /// `i2c_hid_encode_command`: from report ID 15 on it takes a third byte.
     #[test]
     fn command_encoding() {
         let mut b = Vec::new();

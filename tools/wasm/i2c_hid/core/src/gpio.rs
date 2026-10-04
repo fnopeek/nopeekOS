@@ -1,62 +1,56 @@
-//! Der GPIO-Block des AMD-FCH — nur so viel, wie die eine Frage braucht:
-//! **liegt gerade ein Bericht an?**
+//! The AMD FCH GPIO block — only as much as one question needs: is a
+//! report pending right now?
 //!
-//! Portiert aus Linux 6.18 `drivers/pinctrl/pinctrl-amd.{c,h}`. Dort steht
-//! beides, was hier gerechnet wird: ein Register je Pin bei `base + pin * 4`
-//! (`amd_gpio_get_value`) und der LEBENDE Pegel in Bit 16 (`PIN_STS_OFF`).
-//! `base` ist der erste `Memory32Fixed` des ACPI-Geraets — dieselbe Quelle,
-//! aus der Linux' `devm_platform_get_and_ioremap_resource(pdev, 0, …)`
-//! schoepft, also keine festverdrahtete 0xFED81500.
+//! Ported from Linux `drivers/pinctrl/pinctrl-amd.{c,h}`: one register per
+//! pin at `base + pin * 4` (`amd_gpio_get_value`) with the live level in
+//! bit 16 (`PIN_STS_OFF`). `base` is the first `Memory32Fixed` of the ACPI
+//! device, the same source as Linux'
+//! `devm_platform_get_and_ioremap_resource(pdev, 0, …)`; no hardwired
+//! 0xFED81500.
 //!
-//! **Warum das ueberhaupt gebraucht wird.** HID over I2C ist
-//! PEGELgesteuert: das Geraet zieht seine Leitung, sobald ein Bericht
-//! bereitliegt, und laesst sie erst los, wenn der Bericht geholt ist.
-//! Linux ruft `i2c_hid_get_input` deshalb ausschliesslich aus
-//! `i2c_hid_irq`. Ohne Interrupt lasen wir blind — und ein blinder Versuch
-//! ist nicht billig: `wMaxInputLength` sind 64 Bytes, bei 400 kHz also
-//! 1,4 ms, in denen der Kern auf dem Bus wartet. Ein Blick auf den Pin
-//! kostet EIN Register.
+//! HID over I2C is level-triggered: the device asserts its line while a
+//! report is pending and releases it once the report is read, which is why
+//! Linux calls `i2c_hid_get_input` only from `i2c_hid_irq`. Without the
+//! pin, every poll is a blind bus read of `wMaxInputLength` bytes; a look
+//! at the pin costs one register read.
 //!
-//! Der Registeraufbau ist AMD-eigen. Ein Intel-Block (`INT34BB` auf
-//! Florians HP) fuehrt an derselben Stelle etwas anderes — deshalb wird
-//! [`is_amd_block`] gefragt, bevor irgendetwas gelesen wird, und nicht
-//! geraten.
+//! The register layout is AMD-specific. An Intel block (e.g. `INT34BB`)
+//! has something else at the same place, so [`is_amd_block`] is checked
+//! before anything is read.
 
 use alloc::string::String;
 
-/// `PIN_STS_OFF` (pinctrl-amd.h) — der Pegel, den der Pin GERADE fuehrt.
+/// `PIN_STS_OFF` (pinctrl-amd.h) — the level the pin is driving right now.
 pub const PIN_STS: u32 = 1 << 16;
 
-/// Die ACPI-Kennungen, unter denen Linux `pinctrl-amd` bindet
-/// (`amd_gpio_acpi_match`).
+/// The ACPI IDs Linux binds `pinctrl-amd` to (`amd_gpio_acpi_match`).
 pub const AMD_GPIO_IDS: [&str; 3] = ["AMD0030", "AMDI0030", "AMDI0031"];
 
-/// Ist der GPIO-Block einer, dessen Register wir kennen?
+/// Is this a GPIO block whose registers we know?
 pub fn is_amd_block(ids: &[String]) -> bool {
     ids.iter().any(|i| AMD_GPIO_IDS.iter().any(|a| i == a))
 }
 
-/// Wohin der Pin abgebildet werden muss, und wo sein Register dann liegt.
+/// Where the pin must be mapped, and where its register then lies.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PinWindow {
-    /// Seitenausgerichtete Basis — `npk_mmio_map_phys` weist alles andere ab.
+    /// Page-aligned base; `npk_mmio_map_phys` rejects anything else.
     pub map_base: u32,
-    /// Wieviele Seiten, um DIESEN Pin zu erreichen.
+    /// Number of pages needed to reach this pin.
     pub pages: u32,
-    /// Versatz seines Registers, relativ zu `map_base`.
+    /// Offset of its register relative to `map_base`.
     pub reg_off: u32,
 }
 
-/// Das Fenster fuer einen Pin ausrechnen.
+/// Compute the mapping window for one pin.
 ///
-/// Der AMD-Block steht in der Firmware typisch als
-/// `Memory32Fixed(ReadWrite, 0xFED81500, 0x300)` — also NICHT
-/// seitenausgerichtet. Abgebildet wird deshalb ab der Seite darunter, und
-/// der Rest der Adresse faehrt in `reg_off` mit.
+/// Firmware typically declares the AMD block as
+/// `Memory32Fixed(ReadWrite, 0xFED81500, 0x300)`, which is not page-aligned.
+/// The mapping starts at the page below, and the remainder goes into
+/// `reg_off`.
 ///
-/// `None`, wenn der Pin ausserhalb des angesagten Fensters liegt: dann
-/// haben wir den falschen Block oder den falschen Pin, und ein Register
-/// daneben zu lesen waere geraten.
+/// `None` if the pin lies outside the declared window: then the block or
+/// the pin is wrong, and reading a neighbouring register would be a guess.
 pub fn pin_window(mmio_base: u32, mmio_len: u32, pin: u16) -> Option<PinWindow> {
     if mmio_base == 0 || mmio_len == 0 {
         return None;
@@ -68,8 +62,8 @@ pub fn pin_window(mmio_base: u32, mmio_len: u32, pin: u16) -> Option<PinWindow> 
     let within = mmio_base & 0xFFF;
     let map_base = mmio_base & !0xFFF;
     let reg_off = within.checked_add(reg)?;
-    // Nur so viele Seiten, wie dieser Pin braucht — der ganze Block waere
-    // bei einem 64-KB-Fenster mehr als die sechzehn, die der Kernel gibt.
+    // Only as many pages as this pin needs; a whole 64 KB window would
+    // exceed the sixteen pages the kernel grants.
     let pages = (reg_off + 4 + 4095) / 4096;
     if pages == 0 || pages > 16 {
         return None;
@@ -79,10 +73,10 @@ pub fn pin_window(mmio_base: u32, mmio_len: u32, pin: u16) -> Option<PinWindow> 
 
 // ── Interrupts: `pinctrl-amd.{c,h}` ──────────────────────────────────
 //
-// Ein Register je Pin; die Bits aus pinctrl-amd.h. Der Block hat EINE
-// Leitung fuer alle Pins (`_CRS`), und `do_amd_gpio_irq_handler` quittiert
-// zuerst den Pin (das gelesene Register zurueckschreiben loescht die
-// Statusbits) und dann die Einheit (`EOI_MASK` im WAKE_INT_MASTER_REG).
+// One register per pin; bits from pinctrl-amd.h. The block has one line
+// for all pins (`_CRS`), and `do_amd_gpio_irq_handler` acknowledges the pin
+// first (writing back the read value clears the status bits) and then the
+// unit (`EOI_MASK` in WAKE_INT_MASTER_REG).
 
 pub const LEVEL_TRIG: u32 = 1 << 8; // LEVEL_TRIG_OFF
 pub const ACTIVE_LEVEL_SHIFT: u32 = 9; // ACTIVE_LEVEL_OFF, 2 bits
@@ -102,7 +96,7 @@ pub const EOI_MASK: u32 = 1 << 29;
 
 /// `amd_gpio_irq_set_type` for a LEVEL line (the only kind HID over I2C
 /// uses): level trigger, the polarity, and `CLR_INTR_STAT` so a status left
-/// from before is cleared. Returns the value WITHOUT the enable bit; the
+/// from before is cleared. Returns the value without the enable bit; the
 /// caller does the debounce-settle dance and then `amd_gpio_irq_enable`.
 pub fn irq_level_config(pin_reg: u32, active_low: bool) -> u32 {
     let mut v = pin_reg | LEVEL_TRIG;
@@ -111,14 +105,14 @@ pub fn irq_level_config(pin_reg: u32, active_low: bool) -> u32 {
     v | INTERRUPT_STS
 }
 
-/// Sagt der Pin „ich habe etwas"?
+/// Does the pin say "I have something"?
 ///
-/// `active_low` kommt aus dem `GpioInt` der Firmware (ACPI: `int_flags`
-/// Bits 2:1), nicht aus einer Annahme.
+/// `active_low` comes from the firmware's `GpioInt` (ACPI `int_flags`
+/// bits 2:1), not from an assumption.
 ///
-/// **Lauter Einsen heissen: da hat niemand geantwortet.** Dann meldet
-/// diese Funktion JA und der Rufer liest. Eine Fehlmeldung kostet eine
-/// Busuebertragung; ein verschlucktes Ja kostet den Zeiger.
+/// All ones means nobody answered; this then returns true and the caller
+/// reads. A false positive costs one bus transfer; a missed one costs the
+/// pointer.
 pub fn asserted(pin_reg: u32, active_low: bool) -> bool {
     if pin_reg == u32::MAX {
         return true;
@@ -132,8 +126,8 @@ mod tests {
     use super::*;
     use alloc::{string::ToString, vec};
 
-    /// `amd_gpio_irq_set_type(IRQ_TYPE_LEVEL_LOW)`: Pegel, aktiv-niedrig,
-    /// Status loeschen — und die Pull-/Ausgangsbits unangetastet.
+    /// `amd_gpio_irq_set_type(IRQ_TYPE_LEVEL_LOW)`: level, active low,
+    /// clear status, and leave the pull/output bits untouched.
     #[test]
     fn level_low_config_matches_set_type() {
         let before = (1 << 20) | (0x2 << ACTIVE_LEVEL_SHIFT); // pull-up, both-edges
@@ -147,7 +141,7 @@ mod tests {
         assert_eq!(hi & ACTIVE_LEVEL_MASK, 0);
     }
 
-    /// Die zwei Pins aus Florians IdeaPad, gegen den ueblichen AMD-Block.
+    /// Two typical pins against the usual AMD block.
     #[test]
     fn ideapad_pins_land_in_the_first_page() {
         let w = pin_window(0xFED8_1500, 0x300, 9).expect("pin 9");
@@ -161,17 +155,17 @@ mod tests {
         assert_eq!(w.reg_off, 0x500 + 89 * 4);
     }
 
-    /// Ein Pin ausserhalb des angesagten Fensters ist kein Pin.
+    /// A pin outside the declared window is not a pin.
     #[test]
     fn a_pin_past_the_window_is_refused() {
-        // 0x300 Bytes sind 192 Register: 0..=191.
+        // 0x300 bytes are 192 registers: 0..=191.
         assert!(pin_window(0xFED8_1500, 0x300, 191).is_some());
         assert!(pin_window(0xFED8_1500, 0x300, 192).is_none());
         assert!(pin_window(0, 0x300, 9).is_none());
     }
 
-    /// Ein grosses Fenster darf nicht die ganze Abbildung sprengen: es
-    /// werden nur die Seiten bis zum Pin verlangt.
+    /// A large window must not blow up the mapping: only the pages up to
+    /// the pin are requested.
     #[test]
     fn only_the_pages_up_to_the_pin_are_mapped() {
         let w = pin_window(0xFD00_0000, 0x1_0000, 9).expect("pin 9");
@@ -179,35 +173,34 @@ mod tests {
         let w = pin_window(0xFD00_0000, 0x1_0000, 2000).expect("pin 2000");
         assert_eq!(w.reg_off, 8000);
         assert_eq!(w.pages, 2);
-        // 16 Seiten sind der Deckel des Kernels.
+        // 16 pages is the kernel's limit.
         assert!(pin_window(0xFD00_0000, 0x10_0000, 20_000).is_none());
     }
 
-    /// Der Pegel, und die Polaritaet aus der Firmware.
+    /// The level, and the polarity from the firmware.
     #[test]
     fn polarity_decides_what_asserted_means() {
-        // Aktiv LOW: Bit 16 gesetzt heisst „nichts da".
+        // Active low: bit 16 set means nothing pending.
         assert!(!asserted(PIN_STS, true));
         assert!(asserted(0, true));
-        // Aktiv HIGH: genau andersherum.
+        // Active high: the other way round.
         assert!(asserted(PIN_STS, false));
         assert!(!asserted(0, false));
-        // Andere Bits duerfen nicht mitreden: Treiberstaerke, Pull-ups,
-        // Wake — alles gesetzt, nur Bit 16 nicht.
+        // Other bits must not matter: drive strength, pull-ups, wake — all
+        // set, only bit 16 clear.
         let noise = 0xFFFF_FFFFu32 & !PIN_STS;
         assert!(asserted(noise, true));
         assert!(!asserted(noise, false));
     }
 
-    /// Ein Block, der gar nicht antwortet, darf den Zeiger nicht toeten.
+    /// A block that does not answer must not kill the pointer.
     #[test]
     fn all_ones_means_read_anyway() {
         assert!(asserted(u32::MAX, true));
         assert!(asserted(u32::MAX, false));
     }
 
-    /// Der Registeraufbau ist AMD-eigen — ein Intel-Block wird nicht
-    /// angefasst.
+    /// The register layout is AMD-specific; an Intel block is not touched.
     #[test]
     fn only_an_amd_block_is_touched() {
         assert!(is_amd_block(&vec!["AMDI0030".to_string()]));

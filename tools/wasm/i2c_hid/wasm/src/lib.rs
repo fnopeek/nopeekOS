@@ -1,17 +1,14 @@
-//! i2c_hid.wasm — das Touchpad, das nicht auf PCI liegt.
+//! i2c_hid.wasm — touchpads and digitizers that are not on PCI.
 //!
-//! Stufe 1: **berichten, was die Firmware sagt.** Das Modul holt die DSDT,
-//! sucht darin jedes HID-over-I2C-Geraet und schreibt Controller, Adresse,
-//! Busfrequenz, Deskriptor-Register und GPIO-Pin ins Log. Ein Zeiger
-//! bewegt sich damit noch nicht — aber erst diese Zeilen sagen, WELCHE
-//! Register der Bustreiber danach anfassen muss.
+//! Loads the DSDT, finds every HID-over-I2C device, logs controller,
+//! address, bus speed, descriptor register and GPIO pin, then brings up the
+//! bus and the device and feeds pointer motion and gestures to the kernel.
 //!
-//! Der ganze ACPI-Teil liegt in [`i2c_hid_core`] und ist host-seitig gegen
-//! eine echte Firmware-Tabelle geprueft (`hp_dsdt_finds_the_touchpad`).
+//! The ACPI part lives in [`i2c_hid_core`] and is tested on the host
+//! against a real firmware table (`hp_dsdt_finds_the_touchpad`).
 //!
-//! Gelesen wird nur, wenn der Interrupt-Pin sagt, dass etwas anliegt
-//! ([`Gate`]) — blind zu lesen kostete 1,4 ms Busarbeit je Versuch und
-//! damit einen halben Kern im Leerlauf.
+//! Reports are read only when the interrupt pin says one is pending
+//! ([`Gate`]); a blind read costs a full bus transfer per attempt.
 
 #![no_std]
 
@@ -20,9 +17,9 @@ extern crate alloc;
 use aml_core::{Ec, Machine, Namespace};
 use i2c_hid_core::report;
 
-// Rohzugriff auf Firmware und Hardware: HARDWARE (Bit 0x40). Wer eine
-// `.npk.caps`-Sektion schreibt, ERSETZT die Vorgabe und muss READ selbst
-// mitnennen, wenn er es behalten will — hier wird keines gebraucht.
+// Raw access to firmware and hardware: HARDWARE (bit 0x40). A `.npk.caps`
+// section replaces the default and must list READ itself to keep it; none
+// is needed here.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
 static NPK_CAPS: [u8; 1] = [0x40];
@@ -30,8 +27,8 @@ static NPK_CAPS: [u8; 1] = [0x40];
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     logln("[i2c-hid] panic");
-    // Trappen, nicht drehen: der Kernel faengt es ab und sagt es auf dem
-    // Bildschirm. `loop {}` waere ein stiller Haenger.
+    // Trap, do not spin: the kernel catches it and reports it on screen.
+    // `loop {}` would be a silent hang.
     core::arch::wasm32::unreachable()
 }
 
@@ -52,34 +49,31 @@ unsafe extern "C" {
     fn npk_sys_info(key: i32) -> i64;
 }
 
-// ── Diagnosezeilen: gebaut, aber im Normalbetrieb still ──────────────
+// ── Diagnostic lines: built in, silent in normal operation ───────────
 //
-// Jeder Fund an diesem Treiber haengt an einer dieser Zeilen — der rohe
-// Deskriptor, die ersten Berichte, die Zehn-Sekunden-Buchfuehrung. Sie
-// gehoeren deshalb nicht geloescht, sondern geschaltet. EINMAL beim Start
-// gefragt (`npk_sys_info(50)` = Konfigwert `log.drivers`), danach kostet
-// es einen Vergleich.
+// Raw descriptor, first reports, periodic statistics. Queried once at start
+// (`npk_sys_info(50)` = config value `log.drivers`); afterwards each check
+// costs one comparison.
 //
-// Was NICHT hier haengt: was der Treiber ENTSCHEIDET. Welches Geraet
-// gefunden wurde, ob der Praezisionsmodus griff, woran das Tor haengt und
-// jeder Fehler — das steht immer im Log, sonst ist ein Geraetelauf ohne
-// Aussage.
+// Not gated here: what the driver decides. Which device was found, whether
+// precision mode took effect, the state of the gate and every error are
+// always logged.
 static mut VERBOSE: bool = false;
 
 fn verbose() -> bool {
-    // SAFETY: ein Faden, ein Lauf.
+    // SAFETY: single thread, single run.
     unsafe { core::ptr::addr_of!(VERBOSE).read() }
 }
 
-/// Wie `logln`, aber nur wenn `set log.drivers 1` gesetzt ist.
+/// Like `logln`, but only when `set log.drivers 1` is set.
 fn dbgln(s: &str) {
     if verbose() { logln(s); }
 }
 
-/// Der Hardwarezugang des Bustreibers.
+/// Hardware access for the bus driver.
 ///
-/// Der Treiber rechnet, diese Huelle greift zu — deshalb laeuft derselbe
-/// Code im Pruefstand gegen einen Mock.
+/// The driver computes, this wrapper accesses — so the same code runs in
+/// the harness against a mock.
 struct HostBus { handle: i32 }
 
 impl i2c_hid_core::dw_i2c::Bus for HostBus {
@@ -94,16 +88,14 @@ impl i2c_hid_core::dw_i2c::Bus for HostBus {
         if t < 0 { 0 } else { t as u64 }
     }
     fn udelay(&mut self, us: u32) {
-        // Ab einer Millisekunde ABGEBEN, nicht drehen.
+        // From one millisecond on, yield instead of spinning.
         //
-        // wasmi zaehlt je WASM-Befehl, und `run` gibt einem Modul zehn
-        // Milliarden davon. Eine Warteschleife gegen die Uhr verbraucht
-        // sie in Sekunden — der erste Lauf mit lebendem Zeiger endete
-        // nach zehn Sekunden mit „fuel exhausted". `npk_sleep` gibt an den
-        // Scheduler ab und kostet EINEN Befehl.
+        // wasmi meters fuel per WASM instruction, and a busy-wait against
+        // the clock burns through the module's budget in seconds.
+        // `npk_sleep` yields to the scheduler and costs one instruction.
         //
-        // Darunter bleibt das Drehen: `npk_sleep` rechnet in Millisekunden,
-        // und ein I2C-Zyklus dauert 2,5 us.
+        // Below that we keep spinning: `npk_sleep` works in milliseconds,
+        // and an I2C cycle takes 2.5 us.
         if us >= 1000 {
             unsafe { npk_sleep((us / 1000) as i32) };
             return;
@@ -119,7 +111,7 @@ fn log(s: &str) {
 }
 fn logln(s: &str) { log(s); log("\n"); }
 
-// ── Bump-Allokator: der Lauf ist einmalig und ganz voruebergehend ──
+// ── Bump allocator: the run is one-shot ──────────────────────────────
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static mut HEAP_POS: usize = 0;
@@ -141,33 +133,29 @@ unsafe impl core::alloc::GlobalAlloc for Bump {
 #[global_allocator]
 static ALLOC: Bump = Bump;
 
-/// "SSDT", wie die vier Zeichen im Speicher stehen (little-endian).
+/// "SSDT" as the four characters appear in memory (little-endian).
 const SIG_SSDT: i32 = i32::from_le_bytes(*b"SSDT");
-/// ACPICA laedt ausser SSDT auch PSDT und OSDT in den Namespace
-/// (`acpi_tb_load_namespace`). Selten, aber es kostet nichts.
+/// Besides SSDT, ACPICA also loads PSDT and OSDT into the namespace
+/// (`acpi_tb_load_namespace`). Rare, but it costs nothing.
 const SIG_PSDT: i32 = i32::from_le_bytes(*b"PSDT");
 const SIG_OSDT: i32 = i32::from_le_bytes(*b"OSDT");
 
 const DSDT_MAX: usize = 512 * 1024;
 static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
-/// Platz fuer EINE SSDT auf einmal — der Namespace kopiert heraus, was er
-/// braucht, also darf der Puffer danach wieder benutzt werden.
+/// Room for one SSDT at a time. The namespace copies out what it needs, so
+/// the buffer may be reused afterwards.
 const SSDT_MAX: usize = 256 * 1024;
 static mut SSDT: [u8; SSDT_MAX] = [0; SSDT_MAX];
 
-/// Der Firmware-Zugang des Interpreters.
+/// Firmware access for the interpreter.
 ///
-/// Einen Embedded Controller fragt ein I2C-HID-Geraet nicht — aber
-/// SystemMemory schon, und das ist hier der Unterschied zwischen „laeuft"
-/// und „laeuft nicht": das `_STA` der I2C-Controller liest ein
-/// Konfigurationsbyte aus dem NVS-Fenster der Firmware. Ohne diesen Zugang
-/// erfindet der Interpreter dort eine 0, und die Firmware schliesst
-/// pflichtgemaess auf „abgeschaltet" — gemessen an Florians IdeaPad, wo
-/// beide Controller als absent gemeldet wurden, obwohl beide laufen.
+/// An I2C HID device needs no embedded controller, but it does need
+/// SystemMemory: the I2C controllers' `_STA` may read a configuration byte
+/// from the firmware's NVS window. Without this access the interpreter
+/// would return 0 there, and the firmware would conclude the controllers
+/// are disabled.
 ///
-/// Dasselbe Loch hatte der Akku-Treiber, und es steht dort seit
-/// Kernel 0.365.0 offen. `npk_acpi_mem_read` ist nur LESEND und lehnt
-/// jede Adresse in der RAM-Karte ab.
+/// `npk_acpi_mem_read` is read-only and rejects any address in the RAM map.
 struct FirmwareAccess;
 impl Ec for FirmwareAccess {
     fn read(&mut self, _a: u8) -> u8 { 0 }
@@ -181,7 +169,7 @@ impl Ec for FirmwareAccess {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // SAFETY: ein Faden, ein Lauf — einmal gesetzt, danach nur gelesen.
+    // SAFETY: single thread, single run — set once, only read afterwards.
     unsafe {
         core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
     }
@@ -193,7 +181,7 @@ pub extern "C" fn _start() {
         logln("[i2c-hid] no DSDT, or bigger than our buffer — nothing to do");
         return;
     }
-    // SAFETY: der Kernel hat genau `len` Bytes hineingeschrieben.
+    // SAFETY: the kernel wrote exactly `len` bytes into it.
     let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, len as usize) };
 
     let mut ns = match Namespace::load(table) {
@@ -201,13 +189,12 @@ pub extern "C" fn _start() {
         Err(_) => { logln("[i2c-hid] DSDT did not parse"); return; }
     };
 
-    // Und JEDE SSDT dazu.
+    // Plus every SSDT.
     //
-    // Eine Firmware verteilt ihre Deklarationen ueber die DSDT und
-    // beliebig viele SSDTs; sie bilden EINEN Namespace, und Linux laedt
-    // sie alle. Wer nur die DSDT liest, dem fehlen Namen, die woanders
-    // stehen — hier die Basis der Region mit den Freigabebits der
-    // I2C-Controller.
+    // Firmware spreads its declarations over the DSDT and any number of
+    // SSDTs; together they form one namespace, and Linux loads them all.
+    // Reading only the DSDT misses names defined elsewhere, e.g. the base
+    // of the region holding the I2C controllers' enable bits.
     let ssdt_ptr = core::ptr::addr_of_mut!(SSDT) as *mut u8;
     let mut loaded = 0u32;
     for (sig, name) in [(SIG_SSDT, "SSDT"), (SIG_PSDT, "PSDT"), (SIG_OSDT, "OSDT")] {
@@ -219,7 +206,7 @@ pub extern "C" fn _start() {
             logln(&alloc::format!("[i2c-hid] SSDT {i} is {n} bytes — bigger than our buffer"));
             continue;
         }
-        // SAFETY: der Kernel hat genau `n` Bytes hineingeschrieben.
+        // SAFETY: the kernel wrote exactly `n` bytes into it.
         let t = unsafe { core::slice::from_raw_parts(ssdt_ptr as *const u8, n as usize) };
         match ns.load_more(t) {
             Ok(()) => loaded += 1,
@@ -230,10 +217,9 @@ pub extern "C" fn _start() {
     logln(&alloc::format!("[i2c-hid] namespace: DSDT + {loaded} more table(s)"));
 
     let mut ec = FirmwareAccess;
-    // Bedingte Deklarationen auf Scope-Ebene aufloesen — ACPICA FUEHRT die
-    // Termliste beim Laden aus, ein `If` dort ist eine Verzweigung. Daran
-    // haengt auf diesem Geraet `FRTB`, die Basis der Region mit den
-    // Freigabebits der I2C-Controller.
+    // Resolve conditional declarations at scope level: ACPICA executes the
+    // term list while loading, so an `If` there is a real branch. Some
+    // firmware defines the base of the I2C enable-bit region this way.
     let (seen, taken) = ns.resolve_conditionals(&mut ec);
     logln(&alloc::format!(
         "[i2c-hid] scope-level conditionals: {seen} seen, {taken} taken"));
@@ -242,9 +228,9 @@ pub extern "C" fn _start() {
     m.init();
 
     let found = i2c_hid_core::discover::find(&ns, &mut m);
-    // Sagt ein `_STA` null, noch einmal MIT SPUR: woraus ist die Null
-    // entstanden? Nur fuer die Controller, und nur im Zweifelsfall — die
-    // Spur ist laut.
+    // If a `_STA` returns zero, evaluate it again with tracing to show where
+    // the zero came from. Controllers only, and only then — the trace is
+    // noisy.
     for d in &found {
         if let Some(c) = &d.controller {
             if !c.present {
@@ -261,8 +247,8 @@ pub extern "C" fn _start() {
         }
     }
     if found.is_empty() {
-        // Das ist eine ANTWORT, keine Panne: eine Maschine ohne Touchpad
-        // (QEMU, die NUC) sagt genau das.
+        // This is an answer, not a failure: a machine without a touchpad
+        // says exactly this.
         logln("[i2c-hid] no HID-over-I2C device declared — idle");
         return;
     }
@@ -280,29 +266,24 @@ pub extern "C" fn _start() {
     logln(&alloc::format!("[i2c-hid] {} pointer device(s) live", live.len()));
     let mut irq = arm_irq(&found, &live);
 
-    // Dauerbetrieb. Ein Treiber kehrt nicht zurueck — er horcht.
+    // Steady state. A driver does not return; it listens.
     //
-    // 5 ms Abstand: ein Touchpad meldet mit etwa 100-200 Hz, und
-    // `npk_sleep` gibt dazwischen an den Scheduler ab, kostet also weder
-    // Kern noch Treibstoff.
+    // 5 ms interval: a touchpad reports at about 100-200 Hz, and
+    // `npk_sleep` yields to the scheduler in between, costing neither CPU
+    // nor fuel.
     let mut buf = [0u8; 64];
-    // Drei Minuten Buchfuehrung, dann Ruhe.
+    // Three minutes of statistics, then quiet.
     let mut stat_lines_left = 18u32;
     let mut next_stat_us = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } }
         + 10_000_000;
     loop {
-        // Hat der Umschalter in den Praezisionsmodus gegriffen?
+        // Did the switch to precision mode take effect?
         //
-        // NICHT ueber die Zeit. 0.15.0 fragte nach zwei Sekunden „hat das
-        // Geraet etwas gesagt?" und schaltete sonst zurueck — und ein
-        // Touchpad, das niemand beruehrt, sagt NICHTS. Der Wachhund lief
-        // also jedesmal, bevor der erste Finger aufsetzte, und nahm den
-        // Modus wieder weg. Genau deshalb kam am Geraet nur Bericht 1.
-        //
-        // Die Frage, die sich beantworten laesst, ist eine andere: kommen
-        // Berichte, aber NIE der des Touchpads? Dann hat der Schalter
-        // nicht gegriffen. Schweigen beweist gar nichts und darf deshalb
-        // auch nichts ausloesen.
+        // Not decided by time: an untouched touchpad says nothing, so a
+        // timeout would revert the mode before the first finger lands.
+        // The answerable question is: do reports arrive, but never the
+        // touchpad report? Then the switch did not take. Silence proves
+        // nothing and must not trigger anything.
         for l in live.iter_mut() {
             if l.touch_rid.is_some() && !l.saw_touch && l.other_seen >= 64 {
                 if let Some(rid) = l.switched.take() {
@@ -320,28 +301,26 @@ pub extern "C" fn _start() {
         }
         let mut alive = false;
         for l in live.iter_mut() {
-            // Erst den PIN fragen, dann den Bus anfassen.
+            // Ask the pin first, then touch the bus.
             //
-            // Ein Leseversuch holt `wMaxInputLength` Bytes — bis zu 64,
-            // bei 400 kHz also 1,4 ms auf dem Bus. Der Pin kostet ein
-            // Register.
+            // A read fetches `wMaxInputLength` bytes, up to 64, i.e. about
+            // 1.4 ms on the bus at 400 kHz. The pin costs one register read.
             let (poll_now, gate_said_no) = gate_check(l);
             if !poll_now {
-                // Wer nicht gefragt wurde, kann nicht schweigen — es gilt
-                // der letzte echte Befund.
+                // A device that was not asked cannot be silent; the last
+                // real result stands.
                 l.skips += 1;
                 if !l.dead { alive = true; }
                 continue;
             }
             let mut got = false;
             let mut answered = false;
-            // Die Leitung LEER holen, nicht einen Bericht je Runde.
+            // Drain the line, not one report per round.
             //
-            // Ein Bild aus zwei Berichten braucht sonst zwei Runden, und
-            // bei 5 ms Abstand liegt das genau auf der Melderate des
-            // Geraets — ein Bericht geht verloren, sobald es einmal
-            // schneller ist als wir. Acht ist der Deckel, damit ein
-            // schwatzendes Geraet die Runde nicht besetzt.
+            // A frame of two reports would otherwise take two rounds, which
+            // at a 5 ms interval matches the device's report rate, so a
+            // report is lost whenever the device is faster. Eight is the cap
+            // so a chatty device cannot monopolise the round.
             for i in 0..8 {
                 l.polls += 1;
                 match poll_live(l, &mut buf) {
@@ -350,9 +329,9 @@ pub extern "C" fn _start() {
                         got = true;
                         l.datas += 1;
                         if i == 7 { l.capped += 1; }
-                        // Der Pegel steht, bis der Bericht geholt ist —
-                        // ist er weg, liegt nichts mehr an. Die leere
-                        // Nachlese waere sonst eine ganze Uebertragung.
+                        // The level stays asserted until the report is
+                        // read; once it drops nothing is pending. An empty
+                        // extra read would cost a whole transfer.
                         if !gate_asserted_now(l) { break; }
                     }
                     Step::Empty => { answered = true; l.empties += 1; break; }
@@ -369,16 +348,14 @@ pub extern "C" fn _start() {
             return;
         }
 
-        // Alle zehn Sekunden sagen, was die Runde wirklich gekostet hat —
-        // und dann von selbst aufhoeren. Sonst bleibt ein Treiber, der
-        // einen Kern frisst, eine Ratesache.
+        // Every ten seconds, log what the round actually cost, then stop
+        // on its own.
         let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
 
-        // Das Antippen drueckt sofort und laesst SPAETER los — sonst
-        // koennte daraus nie ein Ziehen werden. Der Tritt dafuer steht
-        // HIER und nicht im Berichtspfad: ein Touchpad, das niemand mehr
-        // beruehrt, schickt keinen Bericht, und die Taste bliebe unten.
-        // Genau dieser Fehler ist 0.13.0 ausgeliefert worden.
+        // A tap presses immediately and releases later, or it could never
+        // become a drag. The tick lives here and not in the report path: an
+        // untouched touchpad sends no report, and the button would stay
+        // down.
         for l in live.iter_mut() {
             l.track.tick(now / 1000);
             push_buttons(l);
@@ -405,13 +382,13 @@ pub extern "C" fn _start() {
                 // the EOI to the GPIO unit. The level line the kernel masked
                 // is released when we wait again.
                 use i2c_hid_core::gpio;
-                // ALL pending pins of the block, as `do_amd_gpio_irq_handler`
-                // does — the line is shared by every pin. 0.28.0 acked only
-                // ours; a pin the firmware enabled (lid, hotkeys, EC) with
-                // its status standing kept the level line up for good, and
-                // the driver span. Ours are acknowledged; any other pending
-                // pin is not an interrupt anybody here handles, so it is
-                // masked — Linux: "Disabling spurious GPIO IRQ".
+                // All pending pins of the block, as `do_amd_gpio_irq_handler`
+                // does — the line is shared by every pin. A pin the firmware
+                // enabled (lid, hotkeys, EC) with its status set would keep
+                // the level line asserted forever. Ours are acknowledged;
+                // any other pending pin is not an interrupt anybody here
+                // handles, so it is masked — Linux: "Disabling spurious GPIO
+                // IRQ".
                 let rd = |o: u32| unsafe { npk_mmio_read32(q.handle, o as i32) } as u32;
                 let wr = |o: u32, v: u32| unsafe { npk_mmio_write32(q.handle, o as i32, v as i32) };
                 let status = ((rd(q.block_off + gpio::WAKE_INT_STATUS_REG1) as u64) << 32
@@ -442,12 +419,10 @@ pub extern "C" fn _start() {
                 let m = unsafe { npk_mmio_read32(q.handle, mr as i32) } as u32;
                 unsafe { npk_mmio_write32(q.handle, mr as i32, (m | gpio::EOI_MASK) as i32) };
 
-                // **Sleep until the pad reports** (docs/plan/CORES_AND_EVENTS.md).
-                // It was every 5 ms — 200 wakes a second on an untouched pad.
-                // Awake early only for our own timers: an open tap releases
-                // its button after TAP_MS, and the first minutes of stats.
-                // At most a second: a lost interrupt shows as lag, not as a
-                // dead pointer.
+                // Sleep until the pad reports. Wake early only for our own
+                // timers: an open tap releases its button after TAP_MS, and
+                // the initial statistics period. At most one second, so a
+                // lost interrupt shows as lag rather than a dead pointer.
                 let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
                 let now_ms = now / 1000;
                 let mut wait_ms: u64 = 1000;
@@ -478,8 +453,8 @@ struct IrqMode {
     spurious_logged: u32,
 }
 
-/// Wait on the GPIO controller's interrupt instead of polling — or say why
-/// not. Needs every live pad gated on a pin of the SAME AMD block, and that
+/// Wait on the GPIO controller's interrupt instead of polling, or say why
+/// not. Needs every live pad gated on a pin of the same AMD block, and that
 /// block's own line in its `_CRS`. Pin setup as `amd_gpio_irq_set_type`
 /// (level, polarity, clear status, the enable-and-wait-for-debounce dance)
 /// followed by `amd_gpio_irq_enable` (enable + unmask).
@@ -538,12 +513,12 @@ fn arm_irq(found: &[i2c_hid_core::discover::HidDevice], live: &[Live]) -> Option
     Some(IrqMode { handle, block_off, pins, spurious_logged: 0 })
 }
 
-/// Den Controller ANFASSEN: abbilden, Kennung lesen, Zaehler rechnen.
+/// Touch the controller: map it, read its ID, compute the counts.
 ///
-/// Das ist der erste Schritt, der die Hardware beruehrt — und die Kennung
-/// ist die billigste Probe, dass Abbildung und Adresse stimmen. Steht dort
-/// `0x44570140` ("DW" + 0x0140), ist der ganze Weg bis hierher richtig:
-/// DSDT gelesen, `_CRS` ausgewertet, MMIO abgebildet.
+/// This is the first step that touches hardware, and the component type is
+/// the cheapest proof that mapping and address are right. If it reads
+/// `0x44570140` ("DW" + 0x0140), the whole path so far is correct: DSDT
+/// read, `_CRS` evaluated, MMIO mapped.
 fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
     use i2c_hid_core::dw_i2c;
 
@@ -552,19 +527,15 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
         _ => { logln("[i2c-hid]   controller has no fixed MMIO — nothing to map"); return None; }
     };
 
-    // `_STA` sperrt hier NICHT mehr, es warnt nur.
+    // `_STA` only warns here; it does not block.
     //
-    // Unser `_STA` wird auf einem Interpreter gerechnet, der zugegebene
-    // Loecher hat: Operationsregionen ohne hinterlegten Speicher liefern
-    // eine erfundene 0, und im Log stehen Lesungen an Adressen wie 0x6 —
-    // das ist ein Fenster, dessen Basis nie berechnet wurde. Eine so
-    // zustande gekommene 0 ueber einen direkten Hardware-Lesezugriff zu
-    // stellen, ist die falsche Reihenfolge der Beweise.
+    // `_STA` is evaluated by an interpreter with known gaps: operation
+    // regions without backing memory yield 0, so a zero may be an artefact
+    // and should not outrank a direct hardware read.
     //
-    // Die Grenze liegt deshalb zwischen LESEN und SCHREIBEN: die Kennung
-    // holen darf man immer (ein Registerlesen im FCH-Bereich antwortet
-    // schlimmstenfalls mit lauter Einsen), einrichten erst, wenn sie
-    // stimmt.
+    // The line is drawn between reading and writing: reading the ID is
+    // always allowed (a read in the FCH range at worst returns all ones);
+    // configuration only happens once it matches.
     if !c.present {
         logln("[i2c-hid]   _STA says absent — reading the signature anyway, \
                writes only if it checks out");
@@ -596,30 +567,28 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
     None
 }
 
-/// Ein eingerichtetes Geraet, aus dem sich Zeigerbewegung lesen laesst.
-/// Wie dieses Geraet seine Zeigerdaten meldet.
+/// How a device reports its pointer data.
 enum Mode {
-    /// Maus-Nachahmung: ein X, ein Y, Tasten, vielleicht ein Rad.
+    /// Mouse emulation: one X, one Y, buttons, maybe a wheel.
     Mouse {
         fx: report::Field,
         fy: report::Field,
         wheel: Option<report::Field>,
     },
-    /// Praezisions-Touchpad: KONTAKTPUNKTE. Je Finger ein Tip-Switch, ein
-    /// X und ein Y — daraus entstehen Gesten, die kein Geraet meldet.
+    /// Precision touchpad: contact points. Per finger a tip switch, an X and
+    /// a Y; gestures, which no device reports, are derived from them.
     ///
-    /// Die KENNUNG (`Contact Identifier`) faehrt mit, und sie ist kein
-    /// Beiwerk: liegen zwei Finger auf, muss der Weg aus DEMSELBEN Finger
-    /// gerechnet werden. Ohne sie ist der Bezugspunkt der „erste Kontakt
-    /// im Bild", und wenn das Geraet die Reihenfolge einmal tauscht,
-    /// springt die Strecke um den Fingerabstand.
+    /// The `Contact Identifier` is carried along: with two fingers down, the
+    /// motion must be computed from the same finger. Without it the
+    /// reference is "first contact in the frame", and when the device
+    /// reorders contacts the distance jumps by the finger spacing.
     Touchpad {
         contacts: alloc::vec::Vec<Contact>,
         count: Option<report::Field>,
     },
 }
 
-/// Ein Kontaktplatz im Bericht: liegt er auf, wer ist er, wo ist er.
+/// A contact slot in the report: is it touching, which finger, where.
 struct Contact {
     tip: report::Field,
     id: Option<report::Field>,
@@ -627,89 +596,81 @@ struct Contact {
     y: report::Field,
 }
 
-/// Ein Bericht und wie er zu lesen ist.
+/// A report and how to read it.
 struct Decoder {
     rid: u8,
     mode: Mode,
     btn: alloc::vec::Vec<report::Field>,
 }
 
-/// Ein eingerichtetes Geraet, aus dem sich Zeigerbewegung lesen laesst.
+/// A configured device from which pointer motion can be read.
 struct Live {
     bus: HostBus,
     dw: i2c_hid_core::dw_i2c::Dw,
     addr: u16,
     desc: i2c_hid_core::hid::HidDesc,
     uses_ids: bool,
-    /// **Alle** Berichte, die wir lesen koennen — nicht einer.
+    /// All reports we can read, not just one.
     ///
-    /// 0.14.0 legte sich auf den Touchpad-Bericht fest und warf jeden
-    /// anderen weg. Greift der Umschalter auf den Praezisionsmodus nicht,
-    /// sendet das Geraet weiter seinen MAUS-Bericht — und der Zeiger stand
-    /// still. Linux verteilt eingehende Berichte nach ihrer NUMMER an den
-    /// passenden Decoder, statt eine Nummer zu erwarten; das ist der
-    /// Unterschied zwischen „laeuft" und „laeuft, wenn ich richtig
-    /// geraten habe".
+    /// If the switch to precision mode does not take, the device keeps
+    /// sending its mouse report. Like Linux, incoming reports are
+    /// dispatched to a decoder by their report ID instead of expecting a
+    /// single ID.
     decoders: alloc::vec::Vec<Decoder>,
-    /// Die ersten paar unbekannten Berichtsnummern melden.
+    /// Log the first few unknown report IDs.
     unknown_logged: u32,
-    /// Haben wir auf den Praezisionsmodus umgeschaltet, und in welchem
-    /// Feature-Bericht steht der Schalter?
+    /// Did we switch to precision mode, and which feature report holds the
+    /// switch?
     switched: Option<u8>,
-    /// Wie lang dieser Feature-Bericht ist — die Ruecknahme muss dieselbe
-    /// Laenge haben wie das Setzen, sonst wird auch sie verworfen.
+    /// Length of that feature report. Reverting must use the same length as
+    /// setting, or it is discarded too.
     mode_len: usize,
-    /// Wieviele Berichte sind bisher gekommen?
+    /// How many reports have arrived so far?
     seen: u32,
-    /// Die Nummer des Touchpad-Berichts, falls es einen gibt.
+    /// ID of the touchpad report, if there is one.
     touch_rid: Option<u8>,
-    /// Ist er je gekommen? Das ist der BEWEIS, dass der Umschalter griff.
+    /// Has it ever arrived? That is the proof the switch took effect.
     saw_touch: bool,
-    /// Wieviele Berichte kamen, die NICHT der des Touchpads sind?
+    /// How many reports arrived that are not the touchpad report?
     other_seen: u32,
-    /// Wieviele Kontaktlagen wurden schon gemeldet? Die ersten paar
-    /// gehoeren ins Log: ob ZWEI Finger ankommen, sagt sonst niemand.
+    /// How many contact states have been logged? The first few go to the
+    /// log; otherwise nothing shows whether two fingers arrive.
     touch_logged: u32,
-    /// Die ersten Berichte ROH. Was das Geraet wirklich schickt, sagt
-    /// keine abgeleitete Zahl.
+    /// The first reports raw. What the device really sends is not visible
+    /// in any derived number.
     raw_logged: u32,
-    /// Die ersten Rollentscheidungen.
+    /// The first scroll decisions.
     scroll_logged: u32,
-    /// Die ersten Antipper.
+    /// The first taps.
     tap_logged: u32,
 
-    // ── Aus Orten werden Wege und Gesten ─────────────────────────
+    // ── Positions become motion and gestures ─────────────────────
     //
-    // Das steht in `i2c_hid_core::gesture` und nicht hier, weil genau
-    // diese Logik zweimal falsch ausgeliefert wurde und beide Male erst
-    // am Geraet auffiel. Dort haengen Tests daran.
+    // That logic lives in `i2c_hid_core::gesture`, where it has tests.
     track: i2c_hid_core::gesture::Tracker,
-    /// Bezugspunkt fuer eine Maus, die ORTE statt Wege meldet.
+    /// Reference point for a mouse that reports positions instead of motion.
     have_ref: bool,
     rx: i32,
     ry: i32,
-    /// Die zuletzt gemeldete Tastenlage.
+    /// The last reported button state.
     ///
-    /// Ein LOSLASSEN ist ein Ereignis wie ein Druck: wer nur bei
-    /// `buttons != 0` einspeist, meldet den Druck und nie das Ende — und
-    /// der Compositor haelt die Taste fuer immer fuer gedrueckt.
+    /// A release is an event just like a press: feeding only when
+    /// `buttons != 0` reports the press and never the end, and the
+    /// compositor considers the button held forever.
     last_buttons: i32,
-    /// Die PHYSISCHEN Tasten aus dem letzten Bericht, ohne das, was ein
-    /// Antippen gerade haelt.
+    /// The physical buttons from the last report, excluding what a tap is
+    /// currently holding.
     ///
-    /// Beides getrennt zu fuehren ist noetig, weil sie zu verschiedenen
-    /// Zeiten kommen: die physische Lage steht im Bericht, die gehaltene
-    /// laeuft an einem Zeitgeber ab — und der tickt auch dann, wenn das
-    /// Geraet schweigt.
+    /// They are kept apart because they arrive at different times: the
+    /// physical state comes with a report, the held one expires on a timer
+    /// that ticks even when the device is silent.
     hw_buttons: i32,
 
-    /// Fragen wir den Pin, bevor wir den Bus anfassen?
+    /// Do we ask the pin before touching the bus?
     gate: Gate,
-    // ── Was diese zehn Sekunden gekostet haben ───────────────────
+    // ── What the last ten seconds cost ───────────────────────────
     //
-    // Ein Treiber, der 90 % eines Kerns frisst und nichts sagt, laesst
-    // nur raten. Diese Zeilen sind die Zahlen dazu, und sie hoeren von
-    // selbst wieder auf.
+    // Periodic cost statistics; they stop on their own.
     polls: u32,
     datas: u32,
     empties: u32,
@@ -717,66 +678,61 @@ struct Live {
     errs: u32,
     skips: u32,
     capped: u32,
-    /// Die ersten paar Fehlschlaege MIT Grund. Ein stiller Fehlschlag ist
-    /// der teuerste Zustand ueberhaupt: xfer wartet bis zu einer Sekunde.
+    /// The first few failures with their reason. A silent failure is the
+    /// most expensive state: xfer waits up to one second.
     err_logged: u32,
-    /// Hat dieses Geraet beim letzten ECHTEN Leseversuch geschwiegen?
+    /// Was this device silent on the last real read attempt?
     ///
-    /// Eine uebersprungene Runde ist kein Schweigen — es wurde gar nicht
-    /// gefragt. Ohne diesen Merker haette das Tor die Notbremse
-    /// ausgehebelt: ein toter Bus saehe aus wie ein ruhiges Touchpad.
+    /// A skipped round is not silence; nothing was asked. Without this flag
+    /// the gate would defeat the emergency brake: a dead bus would look like
+    /// a resting touchpad.
     dead: bool,
 }
 
-/// Der Pin, der sagt, ob ueberhaupt ein Bericht anliegt.
+/// The pin that says whether a report is pending at all.
 ///
-/// **Warum es das gibt.** Ein Leseversuch ist nicht billig: geholt wird
-/// `wMaxInputLength`, bei uns bis zu 64 Bytes (der Puffer deckelt dort),
-/// und bei 400 kHz sind das 1,4 ms, in denen der Kern auf dem Bus wartet.
-/// Zweihundertmal je Sekunde, fuer zwei Geraete. Das ist der Grund, warum
-/// dieses Modul im Leerlauf einen halben Kern verbraucht hat.
+/// A read is not cheap: it fetches `wMaxInputLength` bytes (up to 64 here,
+/// capped by the buffer), about 1.4 ms on the bus at 400 kHz, two hundred
+/// times a second per device.
 ///
-/// Linux liest deshalb NIE blind: `i2c_hid_get_input` haengt dort
-/// ausschliesslich an `i2c_hid_irq`. Wir haben keinen Interrupt, aber der
-/// Pegel steht an, bis der Bericht geholt ist — also laesst er sich
-/// abfragen, und das kostet ein Register statt einer Uebertragung.
+/// Linux never reads blind: `i2c_hid_get_input` is called only from
+/// `i2c_hid_irq`. Without the interrupt, the level stays asserted until the
+/// report is read, so it can be polled for the cost of one register read.
 enum Gate {
-    /// Kein Pin, kein bekannter Block, oder er hat sich als falsch
-    /// erwiesen: lesen wie bisher.
+    /// No pin, no known block, or it proved wrong: read as before.
     Blind,
-    /// Der Pin steht und wird gefragt.
+    /// The pin is set up and queried.
     Pin {
         handle: i32,
         reg_off: u32,
         active_low: bool,
-        /// Wieviele Runden hintereinander sagte er „nichts da"?
+        /// How many consecutive rounds did it say "nothing pending"?
         skipped: u32,
-        /// Wie oft kam trotzdem ein Bericht, als er „nichts da" sagte?
+        /// How often did a report arrive anyway while it said "nothing"?
         contradictions: u32,
-        /// Hat er je RICHTIG einen Bericht angesagt? Steht einmal im Log.
+        /// Has it ever correctly announced a report? Logged once.
         proved: bool,
     },
 }
 
-/// Gegenprobe: so viele uebersprungene Runden, dann wird trotzdem gelesen.
+/// Cross-check: after this many skipped rounds, read anyway.
 ///
-/// **Schweigen beweist nichts** — ein ruhendes Touchpad sagt nichts, und
-/// ein Pin, der immer „nichts da" meldet, sieht genauso aus. Was etwas
-/// beweist, ist der umgekehrte Fall: ein Bericht, der ankommt, OBWOHL der
-/// Pin nein sagte. Alle 100 ms wird deshalb blind gelesen, und drei solche
-/// Widersprueche hintereinander schalten das Tor dauerhaft ab.
+/// Silence proves nothing — a resting touchpad says nothing, and a pin that
+/// always reports "nothing" looks the same. What proves something is the
+/// reverse: a report arriving although the pin said no. So every 100 ms a
+/// blind read is made, and three such contradictions in a row disable the
+/// gate permanently.
 const GATE_CROSS_CHECK_ROUNDS: u32 = 20;
-/// Hat der Pin einen Bericht einmal richtig ANGESAGT, taugt er — dann
-/// reicht ein Herzschlag je Sekunde, und die Gegenprobe kostet nichts mehr.
+/// Once the pin has correctly announced a report it is trusted; one
+/// heartbeat per second suffices and the cross-check costs nothing more.
 const GATE_CROSS_CHECK_PROVED: u32 = 200;
 const GATE_MAX_CONTRADICTIONS: u32 = 3;
 
-/// Mit dem GERAET reden: Bus einrichten, Adresse antippen, HID-Deskriptor
-/// holen, aufwecken und zuruecksetzen.
+/// Talk to the device: set up the bus, probe the address, fetch the HID
+/// descriptor, power on and reset.
 ///
-/// Ab hier wird GESCHRIEBEN. Die Rechtfertigung ist der Registerwert, den
-/// der Controller gerade selbst geliefert hat — nicht eine Firmware-Flagge,
-/// die wir aus einem Namen errechnen, den wir nirgends finden.
+/// From here on we write. The justification is the register value the
+/// controller just returned itself, not a firmware flag.
 fn talk_to_device(
     bus: &mut HostBus,
     dw: &i2c_hid_core::dw_i2c::Dw,
@@ -813,9 +769,9 @@ fn talk_to_device(
     }
 
 
-    // Den REPORT-DESKRIPTOR holen und AUSWERTEN. Was ein Byte im Bericht
-    // bedeutet, steht dort und nirgends sonst — ohne ihn gilt ein Treiber
-    // fuer genau ein Modell.
+    // Fetch and parse the report descriptor. What a report byte means is
+    // stated there and nowhere else; without it a driver fits exactly one
+    // model.
     let n = desc.report_desc_length as usize;
     if n == 0 || n > 4096 {
         logln("[i2c-hid]   no usable report descriptor length");
@@ -829,13 +785,11 @@ fn talk_to_device(
     let map = report::parse(&rd);
     dbgln(&alloc::format!("[i2c-hid]   {}", map.describe()));
 
-    // Den Deskriptor ROH ins Log, wenn er klein genug ist.
+    // Log the raw descriptor if it is small enough.
     //
-    // Mein Parser findet auf diesem Geraet EINEN Kontaktplatz, wo ein
-    // Praezisions-Touchpad fuenf deklariert. Das laesst sich nicht
-    // erraten — es steht in diesen Bytes, und sie sind die Grundwahrheit,
-    // nicht meine Auslegung davon. 381 Bytes sind 16 Zeilen; die 893 der
-    // Wacom bleiben draussen.
+    // The bytes are the ground truth, not our interpretation of them (e.g.
+    // how many contact slots the device declares). Large descriptors are
+    // left out.
     if n <= 512 {
         dbgln(&alloc::format!("[i2c-hid]   raw report descriptor, {n} bytes:"));
         for (i, chunk) in rd.chunks(24).enumerate() {
@@ -843,25 +797,21 @@ fn talk_to_device(
         }
     }
 
-    // Wenn das Geraet einen „Device Mode" fuehrt, auf 3 stellen.
+    // If the device has a "Device Mode", set it to 3.
     //
-    // Ein Praezisions-Touchpad startet in der MAUS-Nachahmung: ein X, ein
-    // Y, Tasten — und keine Kontaktpunkte. Zweifinger-Scrollen ist in
-    // diesem Zustand nicht schwer, sondern unmoeglich, weil der zweite
-    // Finger gar nicht gemeldet wird. Der Schalter steht in einem
-    // Feature-Bericht (Digitizer 0x52).
+    // A precision touchpad starts in mouse emulation: one X, one Y, buttons
+    // and no contact points, so the second finger is never reported. The
+    // switch is in a feature report (Digitizer 0x52).
     let mut switched: Option<u8> = None;
     let mut mode_len: usize = 1;
     if let Some(im) = map.find_feature(report::PAGE_DIGITIZER, report::USAGE_INPUT_MODE) {
         let im = *im;
-        // Die Laenge kommt aus dem DESKRIPTOR, nicht aus dem Bauch.
+        // The length comes from the descriptor.
         //
-        // Florians Elan fuehrt `Input Mode` mit `Report Size 16` — der
-        // Feature-Bericht ist ZWEI Bytes lang. Wir schickten eines. Auf
-        // dem Bus quittiert das Geraet, der Bericht ist aber zu kurz und
-        // wird verworfen: kein Fehler, keine Wirkung, und danach kommt
-        // ewig nur die Maus-Nachahmung. Fuellbits zaehlen mit, deshalb
-        // rechnet `report_bytes` und nicht die Summe der Felder.
+        // Some touchpads declare `Input Mode` with `Report Size 16`, a
+        // two-byte feature report. A shorter one is ACKed on the bus but
+        // discarded: no error, no effect. Padding bits count, which is why
+        // `report_bytes` is used and not the sum of the fields.
         let n = map.report_bytes(report::Kind::Feature, im.report_id).max(1);
         mode_len = n;
         let mut payload = alloc::vec![0u8; n];
@@ -879,8 +829,8 @@ fn talk_to_device(
         }
     }
 
-    // JEDEN Bericht einrichten, den wir lesen koennen — Touchpad und
-    // Maus. Welcher kommt, entscheidet das Geraet, nicht wir.
+    // Set up every report we can read, touchpad and mouse. The device
+    // decides which one comes.
     let mut decoders: alloc::vec::Vec<Decoder> = alloc::vec::Vec::new();
     let mut scroll_step = 1i32;
     let mut hscroll_step = 1i32;
@@ -902,26 +852,23 @@ fn talk_to_device(
                     y: *ys[i],
                 })
                 .collect();
-            // Ein Scrollschritt aus dem logischen Bereich: etwa ein
-            // Vierzigstel der Padhoehe je Raste. Geraeteunabhaengig, weil
-            // die Zahl aus dem Geraet selbst kommt.
+            // Scroll step from the logical range: about a fortieth of the
+            // pad height per detent. Device-independent, since the number
+            // comes from the device itself.
             let span = (ys[0].logical_max - ys[0].logical_min).max(1);
             let step = (span / 40).max(1);
-            // Soweit darf ein Finger wandern und es bleibt ein Tippen:
-            // rund ein Achtzigstel der Padbreite, also etwa 1,3 mm —
-            // derselbe Wert, den libinput nimmt. Aus dem Geraet
-            // hergeleitet, nicht in Pixeln geraten.
+            // How far a finger may move and still count as a tap: about an
+            // eightieth of the pad width, roughly 1.3 mm, the same value
+            // libinput uses. Derived from the device, not guessed in pixels.
             tap_move = ((xs[0].logical_max - xs[0].logical_min).max(1) / 80).max(1);
-            // Und soweit darf er unter einer GEDRUECKTEN Taste wandern,
-            // bevor der Zeiger ihm wieder folgt: doppelt so weit, also
-            // rund 2,6 mm. Wer durchdrueckt, verformt die Fingerkuppe,
-            // und ihr wandernder Schwerpunkt ist keine Zeigerbewegung.
-            // Aus unserem eigenen Tippmass hergeleitet und nicht aus
-            // einer Millimeterzahl geraten.
+            // How far it may move under a pressed button before the pointer
+            // follows again: twice that, roughly 2.6 mm. Pressing deforms
+            // the fingertip, and its wandering centroid is not pointer
+            // motion.
             pin_move = (tap_move * 2).max(1);
-            // Die quere Raste kommt aus der BREITE, nicht aus der Hoehe:
-            // das Pad ist breiter als hoch, und ein Schritt aus der Hoehe
-            // liefe quer zu fein.
+            // The horizontal detent comes from the width, not the height:
+            // the pad is wider than tall, and a step from the height would
+            // be too fine horizontally.
             hscroll_step = (((xs[0].logical_max - xs[0].logical_min).max(1)) / 40).max(1);
             logln(&alloc::format!(
                 "[i2c-hid]   report {id}: touchpad, {n} contact slot(s), \
@@ -992,52 +939,35 @@ fn talk_to_device(
     })
 }
 
-/// Einen Eingabebericht abholen und als Zeiger oder Geste einspeisen.
-///
-/// Der Unterschied, um den sich alles dreht: eine Maus meldet WEGE, ein
-/// Touchpad ORTE. Aus Orten wird ein Weg, indem man den vorigen abzieht —
-/// und die ERSTE Beruehrung liefert keinen, sonst spraenge der Zeiger
-/// dorthin, wo der Finger aufsetzt.
-///
-/// Und eine GESTE meldet niemand. „Zwei Finger wandern parallel" steht in
-/// keinem Bericht; es entsteht erst hier, aus der Zahl der aufliegenden
-/// Kontaktpunkte und ihrer Bewegung. Unter Linux macht das libinput.
-/// Was ein einzelner Leseversuch ergeben hat.
+/// Outcome of a single read attempt.
 enum Step {
-    /// Ein Bericht kam, und wir konnten ihn lesen — es kann sofort noch
-    /// einer dahinter liegen.
+    /// A report arrived and could be read; another may follow immediately.
     Data,
-    /// Nichts da. Das Geraet lebt, hat aber gerade nichts zu sagen.
+    /// Nothing pending. The device is alive but has nothing to say.
     Empty,
-    /// **Etwas kam, aber es ist kein Bericht.**
+    /// Something arrived, but it is not a report.
     ///
-    /// Eine Nummer, die der Deskriptor des Geraets SELBST nicht fuehrt.
-    /// Florians Wacom antwortet auf eine Lesung ohne anliegende Daten mit
-    /// ID 255 — seine eigenen sind 28, 19, 20, 11, 16, 31, 1 —, der Elan
-    /// mit ID 0, statt mit Laenge 0, wie HID over I2C es vorsieht. Genau
-    /// diese Frage stellt `docs/plan/INPUT_I2C_HID.md` seit je: was sagt
-    /// ein Geraet, wenn man es ohne Grund anspricht.
+    /// A report ID the device's own descriptor does not declare. Some
+    /// devices answer a read with no pending data with such an ID (e.g.
+    /// 255 or 0) instead of with length 0 as HID over I2C specifies.
     ///
-    /// Das ist KEINE Information. Es darf deshalb weder die Drainschleife
-    /// weiterlaufen lassen (acht Uebertragungen je Runde, fuer nichts)
-    /// noch als Beweis GEGEN den Interrupt-Pin zaehlen — und genau das
-    /// hat es in 0.23/0.24 getan: drei solche Antworten haben ein
-    /// funktionierendes Tor abgeschaltet.
+    /// This carries no information. It must neither keep the drain loop
+    /// going nor count as evidence against the interrupt pin.
     Junk,
-    /// Der Bus antwortet nicht mehr.
+    /// The bus no longer answers.
     Dead,
 }
 
-// ── Das Tor am Interrupt-Pin ─────────────────────────────────────────
+// ── The gate on the interrupt pin ────────────────────────────────────
 //
-// Eine Abbildung je GPIO-Block, nicht je Geraet: beide Geraete dieses
-// Notebooks haengen am selben, und `MAX_MMIO_MAPS` ist vier.
+// One mapping per GPIO block, not per device: several devices often share
+// one block, and `MAX_MMIO_MAPS` is four.
 const MAX_GPIO_MAPS: usize = 2;
 static mut GPIO_MAPS: [(u32, u32, i32); MAX_GPIO_MAPS] = [(0, 0, -1); MAX_GPIO_MAPS];
 static mut GPIO_MAP_N: usize = 0;
 
 fn map_gpio_page(base: u32, pages: u32) -> i32 {
-    // SAFETY: ein Faden, ein Lauf — das Modul hat keine Nebenlaeufigkeit.
+    // SAFETY: single thread, single run — the module has no concurrency.
     let maps = unsafe { &mut *core::ptr::addr_of_mut!(GPIO_MAPS) };
     let n = unsafe { core::ptr::addr_of!(GPIO_MAP_N).read() };
     for (b, p, h) in maps.iter().take(n) {
@@ -1051,10 +981,10 @@ fn map_gpio_page(base: u32, pages: u32) -> i32 {
     h
 }
 
-/// Das Tor scharf machen — oder begruenden, warum nicht.
+/// Arm the gate, or log why not.
 ///
-/// Jede Absage steht im Log. Ein Treiber, der still blind pollt, sieht
-/// genauso aus wie einer, der es nicht tut.
+/// Every refusal is logged; a driver silently polling blind looks the same
+/// as one that does not.
 fn arm_gate(d: &i2c_hid_core::discover::HidDevice) -> Gate {
     use i2c_hid_core::gpio;
 
@@ -1070,17 +1000,17 @@ fn arm_gate(d: &i2c_hid_core::discover::HidDevice) -> Gate {
              reading blind", d.gpio_source));
         return Gate::Blind;
     };
-    // Der Registeraufbau ist AMD-eigen. Ein fremder Block an derselben
-    // Stelle fuehrt etwas anderes, und ein geratenes Bit 16 waere
-    // schlimmer als gar keine Abfrage.
+    // The register layout is AMD-specific. A different block at the same
+    // place has something else there, and a guessed bit 16 would be worse
+    // than no check at all.
     if !gpio::is_amd_block(&g.ids) {
         logln(&alloc::format!(
             "[i2c-hid] {addr:#04x}: GPIO block [{}] is not one whose registers we know — \
              reading blind", g.ids.join(",")));
         return Gate::Blind;
     }
-    // Eine FLANKE laesst sich nicht abfragen: im Augenblick des Hinsehens
-    // ist sie vorbei. Nur ein Pegel steht an, bis der Bericht geholt ist.
+    // An edge cannot be polled: it is over by the time anyone looks. Only a
+    // level stays asserted until the report is read.
     if !d.gpio_level_triggered() {
         logln(&alloc::format!(
             "[i2c-hid] {addr:#04x}: GpioInt is edge-triggered — a level is what can be \
@@ -1117,7 +1047,7 @@ fn arm_gate(d: &i2c_hid_core::discover::HidDevice) -> Gate {
     Gate::Pin { handle, reg_off: w.reg_off, active_low, skipped: 0, contradictions: 0, proved: false }
 }
 
-/// Liegt gerade etwas an? Ohne Tor lautet die Antwort immer ja.
+/// Is something pending right now? Without a gate the answer is always yes.
 fn gate_asserted_now(l: &mut Live) -> bool {
     match &l.gate {
         Gate::Blind => true,
@@ -1128,7 +1058,7 @@ fn gate_asserted_now(l: &mut Live) -> bool {
     }
 }
 
-/// Soll diese Runde gelesen werden — und sagte der Pin dabei nein?
+/// Should this round read, and did the pin say no?
 fn gate_check(l: &mut Live) -> (bool, bool) {
     let Gate::Pin { handle, reg_off, active_low, skipped, proved, .. } = &mut l.gate else {
         return (true, false);
@@ -1148,11 +1078,11 @@ fn gate_check(l: &mut Live) -> (bool, bool) {
     }
 }
 
-/// Was die Gegenprobe ergeben hat.
+/// Evaluate the cross-check.
 ///
-/// Abgeschaltet wird das Tor nur durch einen WIDERSPRUCH — ein Bericht,
-/// der ankam, obwohl der Pin nichts meldete. Dass nichts kommt, beweist
-/// gar nichts: ein unberuehrtes Touchpad schweigt.
+/// The gate is disabled only by a contradiction: a report that arrived
+/// although the pin reported nothing. Nothing arriving proves nothing; an
+/// untouched touchpad is silent.
 fn gate_verdict(l: &mut Live, gate_said_no: bool, got_data: bool) {
     if !got_data { return; }
     let addr = l.addr;
@@ -1160,13 +1090,12 @@ fn gate_verdict(l: &mut Live, gate_said_no: bool, got_data: bool) {
         Gate::Blind => return,
         Gate::Pin { contradictions, proved, .. } => {
             if !gate_said_no {
-                // Eine RICHTIGE Ansage loescht die Widersprueche.
+                // A correct announcement clears the contradictions.
                 //
-                // Ein Widerspruch kann auch ein Wettlauf sein: der Finger
-                // setzt genau in der Gegenprobe auf, Mikrosekunden nachdem
-                // der Pin gelesen wurde. Das passiert einzeln. Ein FALSCHES
-                // Tor dagegen widerspricht bei jeder Gegenprobe und sagt
-                // nie etwas richtig an — nur DAS soll es abschalten.
+                // A single contradiction can be a race: the finger lands
+                // microseconds after the pin was read. A wrong gate
+                // contradicts on every cross-check and never announces
+                // correctly; only that should disable it.
                 *contradictions = 0;
                 if !*proved {
                     *proved = true;
@@ -1191,16 +1120,20 @@ fn gate_verdict(l: &mut Live, gate_said_no: bool, got_data: bool) {
     }
 }
 
+/// Fetch one input report and feed it as pointer motion or gesture.
+///
+/// A mouse reports motion, a touchpad reports positions; motion is the
+/// difference to the previous position, and the first touch yields none.
+/// Gestures are derived from the number of contacts and their motion.
 fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     use i2c_hid_core::{hid, report};
     let r = match hid::get_input(&mut l.bus, &l.dw, l.addr, &l.desc, buf) {
         Ok(Some(r)) => r,
         Ok(None) => return Step::Empty,
         Err(e) => {
-            // Der Grund wurde bisher WEGGEWORFEN. Ein Timeout und ein
-            // AddrNack sehen von aussen gleich aus und kosten das
-            // Tausendfache voneinander: der eine kehrt sofort zurueck,
-            // der andere haelt xfer bis zu einer Sekunde fest.
+            // Keep the reason: a Timeout and an AddrNack look alike from
+            // outside but differ in cost by three orders of magnitude; one
+            // returns immediately, the other holds xfer up to one second.
             if l.err_logged < 8 {
                 l.err_logged += 1;
                 logln(&alloc::format!(
@@ -1211,9 +1144,8 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     };
     let (id, data) = if l.uses_ids && !r.is_empty() { (r[0], &r[1..]) } else { (0u8, r) };
 
-    // Den Decoder zu DIESER Nummer nehmen. Kennt ihn keiner, einmal
-    // sagen, welche Nummer kam — das ist die Auskunft, die fehlt, wenn
-    // sich nichts bewegt.
+    // Pick the decoder for this report ID. If none matches, log the ID once;
+    // that is the missing information when nothing moves.
     let Some(d) = l.decoders.iter().find(|d| d.rid == id) else {
         if l.unknown_logged < 3 {
             l.unknown_logged += 1;
@@ -1241,11 +1173,10 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         dbgln(&alloc::format!("[i2c-hid] {:#04x} in {id}: {:02x?}", l.addr, data));
     }
 
-    // Die physische Tastenlage merken — aber nur aus einem Bericht, der
-    // ueberhaupt Tasten FUEHRT. Ein Geraet, das seine Taste in einem
-    // eigenen Bericht meldet, setzte sie sonst mit dem naechsten
-    // Kontaktbericht still wieder zurueck, und das Festhalten unter dem
-    // Druck waere wirkungslos, ohne dass es irgendwo auffiele.
+    // Remember the physical button state, but only from a report that
+    // carries buttons. A device reporting its button in a separate report
+    // would otherwise have it silently cleared by the next contact report,
+    // and pinning under the press would have no effect.
     if !btn.is_empty() {
         let mut buttons = 0i32;
         for (i, f) in btn.iter().enumerate() {
@@ -1259,7 +1190,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         Mode::Mouse { fx, fy, wheel } => {
             let x = report::extract(data, fx);
             let y = report::extract(data, fy);
-            // Das Rad meldet immer RELATIV — Rasten, keine Position.
+            // The wheel is always relative: detents, not a position.
             let s = wheel.as_ref().map(|w| report::extract(data, w)).unwrap_or(0);
             if fx.relative {
                 (x, y, s, 0, 0)
@@ -1277,7 +1208,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
             let mut np = 0usize;
             for (i, c) in contacts.iter().enumerate() {
                 if report::extract(data, &c.tip) != 0 && np < present.len() {
-                    // Ohne Kennungsfeld ist der PLATZ die Kennung.
+                    // Without an identifier field the slot is the ID.
                     let cid = c.id.as_ref()
                         .map(|f| report::extract(data, f))
                         .unwrap_or(i as i32);
@@ -1287,10 +1218,9 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                 }
             }
             let now_ms = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 / 1000 } };
-            // Die Taste faehrt MIT: ein durchgedruecktes Pad haelt die
-            // Finger fest, und eine Beruehrung unter der Taste ist kein
-            // Antippen. Beides gehoert in den Tracker, weil es dort
-            // Tests hat.
+            // The button is passed along: a pressed pad pins the fingers,
+            // and a touch under the button is not a tap. Both belong in the
+            // tracker, where they are tested.
             match l.track.feed(cc, &present[..np], contacts.len(), now_ms, buttons != 0) {
                 gesture::Out::Pending => (0, 0, 0, 0, 0),
                 gesture::Out::Frame { n, gesture, dx, dy, scroll, hscroll, tap } => {
@@ -1316,12 +1246,12 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         }
     };
 
-    // Erst die LAGE, dann der Impuls, dann der Weg.
+    // State first, then the click, then the motion.
     //
-    // Die Reihenfolge ist nicht beliebig: beim zweiten Antippen einer
-    // Reihe gibt der Tracker im selben Bild „Haltetaste auf" UND „ein
-    // ganzer Klick". Kaeme der Klick zuerst, stuende er IN der noch
-    // gedrueckten Taste und der Compositor saehe nur einen.
+    // The order matters: on the second tap of a series the tracker reports
+    // "release held button" and "one full click" in the same frame. If the
+    // click came first it would fall inside the still-pressed button and
+    // the compositor would see only one.
     push_buttons(l);
     if tap > 0 {
         let b = 1i32 << (tap - 1);
@@ -1334,12 +1264,11 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     Step::Data
 }
 
-/// Die Tastenlage melden, wenn sie sich geaendert hat.
+/// Report the button state if it changed.
 ///
-/// **Die einzige Stelle, die sie bildet.** Sie kommt aus zwei Quellen —
-/// den physischen Tasten des letzten Berichts und der Taste, die ein
-/// Antippen gerade haelt —, und zwei Stellen, die das je fuer sich
-/// zusammenrechnen, waeren zwei Semantiken.
+/// The only place that composes it. It has two sources — the physical
+/// buttons of the last report and the button a tap is currently holding —
+/// and two places combining them separately would be two semantics.
 fn push_buttons(l: &mut Live) {
     let want = l.hw_buttons | l.track.hold() as i32;
     if want != l.last_buttons {

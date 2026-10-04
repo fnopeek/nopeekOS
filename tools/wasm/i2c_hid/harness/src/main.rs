@@ -1,6 +1,5 @@
-//! Pruefstand: eine echte DSDT laden und berichten, was an HID-over-I2C
-//! darin steht. Kein Geraet noetig — genau der Gang, den das Modul am
-//! Notebook fahren wird.
+//! Harness: load a real DSDT and report what HID-over-I2C it describes.
+//! No hardware needed; this is the same walk the module performs at boot.
 //!
 //!     cargo run -p i2c_hid_harness -- <DSDT.aml>
 
@@ -17,8 +16,8 @@ fn show(v: &Value) -> String {
     }
 }
 
-/// Der Pruefstand hat keinen EC; jede Lesung meldet 0 und jede Notiz geht
-/// auf die Ausgabe, damit der Gang sichtbar ist.
+/// The harness has no EC: every read returns 0 and every notify is printed,
+/// so the walk is visible.
 struct NoEc {
     verbose: bool,
 }
@@ -53,9 +52,9 @@ fn main() {
     m.init();
 
     if std::env::args().any(|a| a == "-a") {
-        // Jedes Geraet mit einer Kennung — die Gegenprobe, wenn die Suche
-        // nichts findet: steht das Geraet ueberhaupt im Namespace, und wie
-        // heisst es dort?
+        // Every device with an ID: the cross-check when the search finds
+        // nothing — is the device in the namespace at all, and under what
+        // name?
         let devs = aml_core::devices_with_ids(&ns);
         println!("{} devices carrying _HID/_CID", devs.len());
         for d in &devs {
@@ -65,9 +64,8 @@ fn main() {
         println!();
     }
 
-    // `-e <pfad>`: ein beliebiges Objekt auswerten. Ein Name gibt seinen
-    // Inhalt, eine Methode wird ausgefuehrt — damit laesst sich eine Frage
-    // an die Firmware stellen, statt ihre Antwort zu erraten.
+    // `-e <path>`: evaluate any object. A name yields its value, a method
+    // is executed — this asks the firmware instead of guessing its answer.
     let argv: Vec<String> = std::env::args().collect();
     if let Some(i) = argv.iter().position(|a| a == "-e") {
         if let Some(want) = argv.get(i + 1) {

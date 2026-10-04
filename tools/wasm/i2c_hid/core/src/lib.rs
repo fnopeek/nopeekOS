@@ -1,19 +1,18 @@
-//! i2c_hid_core — HID over I2C auf einem Synopsys-Designware-Bus.
+//! i2c_hid_core — HID over I2C on a Synopsys DesignWare bus.
 //!
-//! no_std + alloc; dieselbe Bibliothek baut fuer den std-Pruefstand und fuer
-//! das wasm32-Modul. Quelle fuer jede Zeile ist der Linux-Treiber
-//! (6.18.26, im Cache unter `~/.cache/nopeekos/linux-src/`); jede Abweichung
-//! steht als Kommentar an ihrer Stelle.
+//! no_std + alloc; the same library builds for the std harness and for the
+//! wasm32 module. Every part follows the Linux driver; deviations are
+//! commented where they occur.
 //!
-//! Aufbau in der Reihenfolge, in der es laeuft:
+//! Modules in the order they run:
 //!
-//! 1. [`discover`] — was die Firmware sagt (DSDT): Controller, Slave-Adresse,
-//!    Deskriptor-Register, GPIO-Pin.
-//! 2. [`dw_i2c`] — der Synopsys-Designware-Bus, auf dem das Geraet haengt.
-//! 3. [`hid`] — HID over I2C: Deskriptor, Power, Reset, Eingabeberichte.
-//! 4. [`report`] — der Report-Deskriptor: was ein Byte im Bericht bedeutet.
-//! 5. [`gesture`] — aus Kontaktpunkten werden Zeigerwege und Gesten.
-//! 6. [`gpio`] — der Pin, der sagt, ob ueberhaupt etwas anliegt.
+//! 1. [`discover`] — what the firmware (DSDT) says: controller, slave
+//!    address, descriptor register, GPIO pin.
+//! 2. [`dw_i2c`] — the Synopsys DesignWare bus the device sits on.
+//! 3. [`hid`] — HID over I2C: descriptor, power, reset, input reports.
+//! 4. [`report`] — the report descriptor: what each byte of a report means.
+//! 5. [`gesture`] — contact points become pointer motion and gestures.
+//! 6. [`gpio`] — the pin that says whether anything is pending.
 
 #![cfg_attr(not(test), no_std)]
 
