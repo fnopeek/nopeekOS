@@ -827,10 +827,6 @@ fn to_bmp(px: &[u8], w: u32, h: u32) -> Vec<u8> {
     o
 }
 
-/// Lays the page out as the host does (scripted tree, all sheets from the
-/// tree, the font round) and hands the boxes to the machine, or
-/// `getBoundingClientRect` answers with zeros. One source for both callers:
-/// the geometry for `getBoundingClientRect` and the click point for `CLICK`.
 thread_local! {
     /// The HTML and mirror directory for the relayout hook. A `fn` pointer
     /// captures nothing, so the two things `feed_geometry` needs live here;
@@ -938,6 +934,10 @@ fn page_layout(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str)
     })
 }
 
+/// Lays the page out as the host does (scripted tree, all sheets from the
+/// tree, the font round) and hands the boxes to the machine, or
+/// `getBoundingClientRect` answers with zeros. One source for both callers:
+/// the geometry for `getBoundingClientRect` and the click point for `CLICK`.
 fn feed_geometry(ip: &mut beak_engine::js::interp::Interp, html: &str, dir: &str) {
     let width: u32 = std::env::var("W").ok().and_then(|w| w.parse().ok()).unwrap_or(1902);
     let Some(lay) = page_layout(ip, html, dir) else { return };

@@ -15608,7 +15608,7 @@ pub static CHANNEL_IDX_5G: [u8; 49] = [
 /// Indexed by channel number; 0xff means no entry (Linux warns and falls
 /// back to group 0).
 ///
-/// Channel 2 is computed (CCK gives 0, everything else 1) and is stored
+/// Channel 14 is computed (CCK gives 5, everything else 4) and is stored
 /// here with the non-CCK value; `txpower.rs` handles the special case.
 pub static CHANNEL_GROUP: [u8; 178] = [
     255, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 255,

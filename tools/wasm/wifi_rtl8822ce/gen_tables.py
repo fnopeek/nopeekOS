@@ -648,7 +648,7 @@ def channel_groups():
 /// Indexed by channel number; 0xff means no entry (Linux warns and falls
 /// back to group 0).
 ///
-/// Channel 2 is computed (CCK gives 0, everything else 1) and is stored
+/// Channel 14 is computed (CCK gives 5, everything else 4) and is stored
 /// here with the non-CCK value; `txpower.rs` handles the special case."""]
     out.append(f"pub static CHANNEL_GROUP: [u8; {hi + 1}] = [")
     row = []
