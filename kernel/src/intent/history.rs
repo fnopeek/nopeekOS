@@ -100,12 +100,9 @@ pub fn push(line: &str) {
     };
     // Written outside the lock: the store write is milliseconds of crypto
     // plus disk, and a peer fiber pushing meanwhile would spin on it.
-    //
-    // **And not on Core 0.** `push` runs on every Enter in the shell, and the
-    // shell runs on Core 0: the encryption and the disk write stood between
-    // the key press and the next frame. One writer task on a worker takes
-    // the NEWEST blob — two Enters in quick succession must not race two
-    // writes and land the older one last. (`docs/plan/CORES_AND_EVENTS.md`)
+    // Also not on Core 0, where the shell runs: the write would delay the
+    // next frame. One writer task on a worker takes the newest blob, so two
+    // quick Enters cannot land the older write last.
     *PENDING.lock() = Some(blob);
     if crate::smp::scheduler::worker_count() == 0 {
         write_pending(0);

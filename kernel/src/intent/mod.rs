@@ -10,8 +10,7 @@ mod forge;
 mod fs;
 pub(crate) mod gzip;
 pub mod history;
-/// Die Reichweitenregel — haengt an nichts und wird deshalb host-seitig
-/// gefahren (siehe die Datei selbst).
+/// Reachability rule; it depends on nothing, so it is also tested on the host.
 pub(crate) mod reach;
 pub(crate) mod http;
 pub(crate) mod http2;
@@ -55,16 +54,15 @@ pub fn clear_cancel() {
 /// wedge the shell — whatever an intent asks, the machine comes back.
 const CONFIRM_TIMEOUT_TICKS: u64 = 60 * 100; // 60 s at 100 Hz
 
-/// Ask a yes/no question and block until it is answered. Default is NO —
+/// Ask a yes/no question and block until it is answered. Default is no:
 /// Enter, Esc, Ctrl+C and the timeout all decline; only an explicit `y` agrees.
 ///
-/// An intent runs *inside* the loop's read cycle, so there is no session to
-/// hand the question back to: it drives the keyboard itself. That means it
-/// cannot lean on the machinery the loop normally provides — see the two
-/// comments below, both of which cost a hang before they were understood.
+/// An intent runs inside the loop's read cycle, so there is no session to
+/// hand the question back to: it drives the keyboard itself and cannot lean
+/// on the loop's machinery (see the two comments below).
 pub fn confirm(question: &str) -> bool {
     kprint!("[npk] {} [y/N] ", question);
-    // Paint the question, then wait. Deliberately NOT `poll_render` in the
+    // Paint the question, then wait. Deliberately not `poll_render` in the
     // wait loop: that pumps mouse events too, and a click on a window's X
     // would free the session this intent is running inside. Nothing else
     // changes on screen while we wait, so one frame is enough.
@@ -113,10 +111,10 @@ pub fn confirm(question: &str) -> bool {
             }
         }
 
-        // Hand the core to peer fibers if we are one; otherwise spin. NOT
-        // `hlt`: under IF=0 it would halt the core for good, and the timer
-        // that should wake it is the very thing that is off. A prompt waits
-        // on a human, so the spin is bounded by the timeout above.
+        // Hand the core to peer fibers if we are one; otherwise spin. Not
+        // `hlt`: under IF=0 it would halt the core for good, because the timer
+        // that should wake it is off. A prompt waits on a human, so the spin is
+        // bounded by the timeout above.
         if !crate::smp::fiber::yield_sleep(2) {
             core::hint::spin_loop();
         }
@@ -241,10 +239,7 @@ pub fn create_session(terminal_idx: u8) {
         if (*sessions_ptr()).contains_key(&terminal_idx) { return; }
         (*sessions_ptr()).insert(terminal_idx, Box::new(IntentSession::new(terminal_idx)));
     }
-    // New sessions always land in the user's home directory. Inheriting
-    // from the focused terminal's cwd was confusing — opening a fresh
-    // window from deep inside a project shouldn't drop you back into
-    // the same hole.
+    // New sessions start in the user's home directory, not the focused terminal's cwd.
     CWDS.lock().entry(terminal_idx).or_insert_with(home_dir);
 }
 
@@ -447,9 +442,8 @@ fn is_core0_intent(verb: &str) -> bool {
     matches!(verb, "lock" | "passwd" | "password" | "passphrase" |
                    "clear" | "cls" | "shade" | "shell" | "npk-shell" |
                    "cd" | "pwd" | "top" | "htop" | "cores" | "cpu" | "history" | "gpu" |
-                   // `power` liest kernLOKALE MSRs (RAPL) und haelt Core 0
-                   // selbst an — auf einem Worker gemessen waere beides
-                   // die falsche Zahl.
+                   // `power` reads core-local MSRs (RAPL) and halts Core 0
+                   // itself; on a worker both would give the wrong figure.
                    "power" | "watt" | "watts" |
                    // microvm + browser: VMX state (CR4.VMXE,
                    // IA32_FEATURE_CONTROL lock-bit, TSS, GDT-with-TR-
@@ -499,9 +493,8 @@ pub(crate) fn resolve_path(name: &str) -> String {
     parts.join("/")
 }
 
-/// Dieselbe Funktion, fuer die TLS-Schicht sichtbar: `lanpin` muss
-/// unterscheiden koennen, ob ein Host eine LITERALE Adresse ist oder ein
-/// Name — bei einem Namen gilt die Freigabe nicht.
+/// Exposed for the TLS layer: `lanpin` must tell a literal address
+/// from a name, because a pin never applies to a name.
 pub(crate) fn parse_ip_pub(s: &str) -> Option<[u8; 4]> { parse_ip(s) }
 
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
@@ -514,8 +507,7 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(ip)
 }
 
-/// Ensure every directory along `path` exists. v2 has real Tree
-/// objects so this is just an `mkdir -p`; no `.dir` marker files.
+/// Ensure every directory along `path` exists (`mkdir -p`).
 pub(crate) fn ensure_parents(path: &str) {
     let _ = crate::npkfs::fs::ensure_dirs(path);
 }
@@ -547,11 +539,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
     loop {
         // Detect focus change (mouse click, shade action, WASM switch)
         if crate::shade::is_active() {
-            // Phase 10: focus moved to a widget-kind window — return so
-            // run_loop enters the widget-focused input branch. Without
-            // this bailout we'd keep consuming keys as shell-line
-            // history/edit events and never forward them to the
-            // focused widget app (e.g. drun).
+            // Focus moved to a widget-kind window: return so run_loop
+            // enters the widget-focused input branch. Otherwise keys would
+            // be consumed as shell-line edits and never reach the focused
+            // widget app.
             if crate::shade::focused_widget_id().is_some() {
                 sync_session_to_terminal(session);
                 return None;
@@ -588,29 +579,22 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // re-taken at the next iteration's top.
         let console_gen = crate::serial::write_gen();
         crate::net::poll();
-        // Also while waiting for a line. run_loop calls this at the top of its
-        // iteration, but this reader blocks until Enter — so a link that comes
-        // up while the cursor sits at the prompt (WiFi finishing its handshake
-        // seconds after boot) was noticed only once the user typed something.
-        // Self-throttled to ~1 Hz, so this costs nothing per keystroke.
+        // Also while waiting for a line: this reader blocks until Enter, and
+        // a link that comes up meanwhile (e.g. WiFi finishing its handshake)
+        // must be noticed without a keystroke. Self-throttled to ~1 Hz.
         crate::net::tick_link_and_reconfigure();
-        // A running microvm is the foreground task — give it a real
-        // time budget per outer iteration. One 3 ms slice amortised
-        // against net::poll + the Shade composite + a 10 ms hlt was
-        // ~3 ms guest per tens-of-ms host → the ~5 s frame cadence
-        // (with multi-tens-of-second freezes) that destabilised the
-        // browser. 8 slices ≈ 24 ms guest, then input/render/spin.
+        // A running microvm is the foreground task: give it a real time
+        // budget per outer iteration (8 slices, ~24 ms guest), then
+        // input/render/spin. One slice per iteration starves the guest.
         if crate::microvm::vm_active() {
             for _ in 0..8 { crate::microvm::vm_poll_slice(); }
         } else {
             crate::microvm::vm_poll_slice();
         }
         crate::shell::check_and_serve(vault, session_id);
-        // Only redraw when the user has actually typed something:
-        // async output then split their in-progress command (the
-        // reported bug). With an empty input there is nothing to
-        // protect — redrawing an empty `path> ` between every
-        // streamed line is pure noise (observed during guest boot).
+        // Only redraw when the user has typed something: async output would
+        // otherwise split the in-progress command. With empty input, redrawing
+        // `path> ` between streamed lines is just noise.
         // Serial console only: in shade the live input line is redrawn via
         // rewrite_input, and this kprint would (a) duplicate the prompt and
         // (b) go to the primary debug sink, not the focused loop.
@@ -635,9 +619,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             crate::shade::handle_mouse(&evt);
         }
         // A click on the window's X button closes it inside handle_mouse
-        // (close_window → destroy_session), freeing THIS `session`. The
-        // ShadeAction (Mod+Q) close path below is guarded by sync+return, but
-        // the mouse path is not — bail before any further deref. run_loop
+        // (close_window → destroy_session), freeing this `session`. The
+        // ShadeAction (Mod+Q) close path below is guarded by sync+return, the
+        // mouse path is not, so bail before any further deref. run_loop
         // re-acquires a valid session on the next pass (None arm).
         if !session_exists(term_idx) { return None; }
 
@@ -670,12 +654,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 }
                 ShadeAction::CloseWindow | ShadeAction::SpawnLauncher => {
                     // Both can destroy / invalidate the current session's
-                    // terminal OR move focus to a widget window while we
+                    // terminal or move focus to a widget window while we
                     // hold `&mut session` into the SESSIONS map. Sync
                     // session state to the terminal buffer first, run
                     // the action, then bail so run_loop re-acquires the
                     // (possibly new / absent / widget-focused) session
-                    // cleanly — no dangling refs, no stale focus.
+                    // cleanly: no dangling refs, no stale focus.
                     sync_session_to_terminal(session);
                     crate::shade::handle_action(action);
                     return None;
@@ -693,11 +677,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         let event = if let Some(evt) = crate::keyboard::read_event() {
             evt
         } else if crate::shade::is_active() {
-            // Shade mode — normally idle until the next IRQ. But a
-            // running microvm is the foreground task: do NOT sleep,
-            // spin straight back to feed it more slices. hlt here was
-            // ~one 3 ms slice per timer tick → the ~5 s cadence that
-            // starved + crashed the browser. Idle (no VM) still hlts.
+            // Shade mode: normally idle until the next IRQ. A running
+            // microvm is the foreground task, so do not sleep: spin
+            // straight back to feed it more slices (a hlt here allows
+            // only one slice per timer tick). Without a VM we still halt.
             if !crate::microvm::vm_active() {
                 core0_wait();
             }
@@ -817,8 +800,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
             KeyCode::Enter => {
                 session.cursor = session.pos;
-                // Route the commit newline to THIS loop (like the prompt +
-                // command output), not the primary debug sink — otherwise
+                // Route the commit newline to this loop (like the prompt +
+                // command output), not the primary debug sink; otherwise
                 // with active != primary the '\n' lands in the primary loop
                 // and prompts stack on one line in the focused loop.
                 crate::shade::terminal::set_output_redirect(session.terminal_idx);
@@ -896,7 +879,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
         }
 
-        // Update cursor position for navigation keys (Up/Down/Left/Right/Home/End)
+        // Update cursor position for navigation keys (arrows, Home, End)
         if crate::shade::is_active() {
             crate::shade::terminal::set_cursor_pos(
                 crate::shade::terminal::current_line_len()
@@ -908,8 +891,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
 
 /// Tab-completion: find matching paths for the last word in the input.
 ///
-/// v2: list immediate children of the implied parent directory and
-/// filter by the partial leaf name. No more recursive flat-walk.
+/// Lists the immediate children of the implied parent directory and
+/// filters them by the partial leaf name.
 fn tab_complete(input: &str) -> Option<String> {
     let last_space = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
     let partial = &input[last_space..];
@@ -1014,41 +997,34 @@ fn common_prefix(strings: &[String]) -> String {
 /// Idle Core 0 until the next interrupt instead of busy-spinning between
 /// poll cycles. While a focused app (widget / intent / wasm) runs on a
 /// worker, Core 0 only needs to wake to forward input, drive the cursor /
-/// dock, and detect completion. The per-core 100 Hz LAPIC timer (v0.186)
-/// guarantees a ≤10 ms wake (plain HLT = C1, so the timer keeps ticking —
-/// the old "timer stalls in deep C-states" worry was a cpu-pm/MWAIT issue,
-/// gone since v0.186), and keyboard / mouse / net IRQs wake it immediately.
-/// The old `for 0..5000 { spin_loop() }` cadence pegged Core 0 at 100%
-/// whenever any window was focused.
+/// dock, and detect completion. The per-core 100 Hz LAPIC timer guarantees
+/// a wake within 10 ms (plain HLT = C1 keeps the timer ticking), and
+/// keyboard / mouse / net IRQs wake it immediately.
 #[inline]
 fn core0_idle_tick() {
-    // PS/2 mouse is POLLED (IRQ12 masked on UEFI machines), so HLT-ing until
-    // the 100 Hz timer caps the pointer sample + cursor-redraw rate at ~100 Hz
-    // with pipeline latency → laggy mouse whenever a window is focused (the
-    // run loop reaches here every iteration). While the pointer is actively
-    // moving, DON'T HLT — return so the loop spins, draining the mouse at its
-    // full rate + redrawing the cursor promptly. The instant motion stops
-    // (no PS/2 byte for ~40 ms) we fall through to HLT again → idle power is
-    // unchanged. No-op on USB/IRQ-mouse hosts (mouse_active_within stays
-    // false → always HLT, as before).
+    // The PS/2 mouse is polled (IRQ12 masked on UEFI machines), so halting
+    // until the 100 Hz timer caps the pointer sample and cursor-redraw rate at
+    // ~100 Hz, which feels laggy. While the pointer is moving, don't halt:
+    // return so the loop spins and drains the mouse at its full rate. Once
+    // motion stops (no PS/2 byte for ~40 ms) we halt again, so idle power is
+    // unchanged. No-op on USB/IRQ-mouse hosts (mouse_active_within stays false).
     if crate::keyboard::mouse_active_within(40) {
-        // Deliberate spin — and it MUST NOT be recorded as a halt. The
-        // core really is busy here, and the usage figure should say so.
+        // Deliberate spin; it must not be recorded as a halt, because the
+        // core really is busy and the usage figure should say so.
         return;
     }
-    // Park the shell fiber until input or the next tick (3c-1); the halt
-    // itself — and its accounting — happens in `per_core::core0_loop`.
+    // Park the shell fiber until input or the next tick; the halt
+    // itself, and its accounting, happens in `per_core::core0_loop`.
     core0_wait();
 }
 
 /// Idle auto-GC trigger, called from the shell run-loop's ~1 Hz top.
 /// Reclaims orphans once `GC_PRESSURE_THRESHOLD` mutations have piled up,
-/// but ONLY when the system is quiet: FS mounted, no in-flight streaming
-/// write (GC would eat its chunks), and no focused microvm surface (the
-/// loop is busy slicing the guest — a GC stall there would hitch it).
-/// Self-throttled so the gate checks don't run on every spin. GC itself
-/// is cheap now (skips Blob bodies) and resets the pressure counter, so
-/// after a sweep this won't fire again until real churn rebuilds it.
+/// but only when the system is quiet: FS mounted, no in-flight streaming
+/// write (GC would eat its chunks), and no focused microvm surface (a GC
+/// stall would hitch the guest). Self-throttled so the gate checks don't
+/// run on every spin. GC skips Blob bodies and resets the pressure
+/// counter, so after a sweep this won't fire until real churn rebuilds it.
 fn maybe_idle_gc() {
     use core::sync::atomic::{AtomicU64, Ordering};
     static LAST_CHECK: AtomicU64 = AtomicU64::new(0);
@@ -1069,9 +1045,9 @@ fn maybe_idle_gc() {
         return;
     }
 
-    // The sweep runs on a worker (`docs/plan/CORES_AND_EVENTS.md`, stage 3):
-    // it walks the whole tree under ROOT_MUTEX with disk I/O, and on Core 0
-    // it held the shell, the cursor and every frame for as long as it took.
+    // The sweep runs on a worker: it walks the whole tree under ROOT_MUTEX
+    // with disk I/O, and on Core 0 it would stall the shell, the cursor and
+    // every frame for as long as it takes.
     if crate::smp::scheduler::worker_count() == 0 {
         idle_gc_task(0);
     } else if !GC_RUNNING.swap(true, core::sync::atomic::Ordering::AcqRel) {
@@ -1091,8 +1067,8 @@ fn idle_gc_task(_: u64) {
     GC_RUNNING.store(false, core::sync::atomic::Ordering::Release);
 }
 
-/// The shell's fiber on Core 0 (stage 3c), signalled by the input
-/// interrupts so a key wakes the shell at once instead of on its next tick.
+/// The shell's fiber on Core 0, signalled by the input interrupts so a
+/// key wakes the shell at once instead of on its next tick.
 static SHELL_WAKER: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(crate::smp::fiber::NO_WAKER);
 
@@ -1105,13 +1081,13 @@ pub fn wake_shell() {
 }
 
 /// Core 0's idle step in the shell loop: park the shell fiber until
-/// something wakes it, so other Core-0 fibers run (3c-1).
+/// something wakes it, so other Core-0 fibers run.
 ///
-/// **How long (stage 3e):** one frame (10 ms) while anything needs the loop
-/// on its own — an animation or the dock (`shade::needs_tick`), a network
-/// timer or a polled card (`net::needs_tick`), a held USB key, input that
-/// no interrupt reports, serial mode, a cooperative guest. Otherwise one
-/// second: the link check and the idle GC run on that. Everything else
+/// How long: one frame (10 ms) while anything needs the loop on its own:
+/// an animation or the dock (`shade::needs_tick`), a network timer or a
+/// polled card (`net::needs_tick`), a held USB key, input that no
+/// interrupt reports, serial mode, a cooperative guest. Otherwise one
+/// second, which drives the link check and the idle GC. Everything else
 /// wakes the shell (`wake_shell`): input, render requests, terminal output,
 /// a finished intent, a microVM request. A dependency missed here shows as
 /// up to a second of lag, not as a hang.
@@ -1119,7 +1095,7 @@ fn core0_wait() {
     let freq = crate::interrupts::tsc_freq();
     // Media keys and unmapped-key reports the PS/2 ISR deferred to here.
     crate::keyboard::apply_deferred();
-    // Input that no interrupt reports is drained here (the tick used to).
+    // Input that no interrupt reports is drained here.
     if crate::xhci::needs_poll() || crate::xhci::take_missed_drain() {
         crate::interrupts::without_interrupts(crate::xhci::poll_events_irq);
     }
@@ -1173,25 +1149,20 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if crate::shade::is_active() {
             let focused_term = crate::shade::terminal::active_idx();
 
-            // 12.4: Surface-kind (microvm) window focused. It has no
-            // terminal session (idx 255) — without this branch the
-            // terminal path below wedges and shade keybinds never run,
-            // so the window can't be closed (observed: focus the VM
-            // window → everything frozen). Here: keep Core 0 polling
-            // (so the guest keeps slicing + the surface keeps
-            // compositing), let shade keybinds through (Mod+Q closes
-            // it → VM torn down), swallow other keys for now (Phase B
-            // forwards them to the guest's virtio-input eventq).
+            // Surface-kind (microvm) window focused. It has no
+            // terminal session (idx 255), so the terminal path below
+            // would wedge and shade keybinds would never run. Here:
+            // keep Core 0 polling (the guest keeps slicing and the
+            // surface keeps compositing), let shade keybinds through
+            // (Mod+Q closes it and tears the VM down), and forward
+            // other keys to the guest.
             if crate::shade::focused_surface_id().is_some() {
-                // Drain the mouse ring HERE, before poll_render() —
-                // poll_render has its own poll_mouse() loop for the
-                // host cursor and poll_mouse is a consuming SPSC ring,
-                // so if poll_render runs first it eats every event and
-                // the guest never sees a click (host cursor still
-                // works, which is why the mouse "felt fine"). We call
-                // handle_mouse ourselves so the host cursor/drag/focus
-                // logic still runs; poll_render's own loop then finds
-                // an empty ring (harmless).
+                // Drain the mouse ring here, before poll_render():
+                // poll_mouse is a consuming SPSC ring and poll_render
+                // has its own loop, so running it first would eat every
+                // event and the guest would never see a click.
+                // handle_mouse still drives the host cursor/drag/focus;
+                // poll_render's own loop then finds an empty ring.
                 while let Some(evt) = crate::xhci::poll_mouse() {
                     // handle_mouse forwards to the guest internally
                     // (race-free across all poll_mouse consumers) and
@@ -1200,15 +1171,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 }
                 crate::shade::poll_render();
                 crate::net::poll();
-                // Cooperative path (≤2 cores): Core 0 IS the guest's CPU,
-                // so it must keep slicing — 8 slices (~24 ms guest) per
+                // Cooperative path (≤2 cores): Core 0 is the guest's CPU,
+                // so it must keep slicing, 8 slices (~24 ms guest) per
                 // composite cycle (net::poll runs inside each slice's pump,
                 // so L3 stays responsive). Fiber/dedicated path: the guest
-                // runs on a WORKER core; here vm_poll_slice is just a cheap
-                // reaper, so Core 0 must NOT spin — that pegged a host core
-                // at 100% whenever the VM window was focused, even with the
-                // guest idle (same class as the v0.187.11 focused-window
-                // spin; the Surface branch was missed then). We idle below.
+                // runs on a worker core and vm_poll_slice is only a cheap
+                // reaper, so Core 0 must not spin; it idles below.
                 let cooperative = crate::microvm::vm_active();
                 if cooperative {
                     for _ in 0..8 { crate::microvm::vm_poll_slice(); }
@@ -1245,7 +1213,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 continue;
             }
 
-            // Phase 10: widget-kind window focused — keys go into the
+            // Widget-kind window focused: keys go into the
             // per-window widget event queue, never the terminal / WASM
             // app key buf. The widget app polls them via npk_event_poll.
             if let Some(widget_wid) = crate::shade::focused_widget_id() {
@@ -1277,19 +1245,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     // Mouse-move re-establishes hover on the next motion.
                     crate::shade::widgets::suppress_hover(widget_wid);
                     // If a Widget::Input / TextArea is focused, the
-                    // compositor owns text editing — printable /
+                    // compositor owns text editing: printable /
                     // Backspace / Delete / arrows / Home / End / Enter
                     // (and, in a TextArea, Tab → indent) are intercepted,
                     // mutate the editor buffer, and emit Event::InputChange
-                    // or Event::Action(on_submit). This runs BEFORE the
+                    // or Event::Action(on_submit). This runs before the
                     // Tab focus-nav below so a TextArea can claim Tab.
                     // Ctrl chords the text editor doesn't own belong to the
-                    // app: Ctrl+S, Ctrl+O, … Routed BEFORE handle_input_key
-                    // because a focused Input/TextArea otherwise swallows
-                    // them whole — its clipboard arm consumes every
-                    // Ctrl+<letter> and drops the ones it has no case for,
-                    // so Ctrl+S used to do nothing at all. A/C/X/V stay with
-                    // the editor (select-all, copy, cut, paste).
+                    // app: Ctrl+S, Ctrl+O, … They are routed before
+                    // handle_input_key because a focused Input/TextArea
+                    // would swallow them: its clipboard arm consumes every
+                    // Ctrl+<letter>. A/C/X/V stay with the editor
+                    // (select-all, copy, cut, paste).
                     if event.modifiers.ctrl {
                         let letter = match event.key {
                             crate::input::KeyCode::Char(b) =>
@@ -1361,8 +1328,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     );
                 }
 
-                // Idle until the next IRQ instead of busy-spinning — a
-                // focused widget app otherwise pegged Core 0 at 100%.
+                // Idle until the next IRQ instead of busy-spinning, which
+                // would peg Core 0 while a widget app is focused.
                 core0_idle_tick();
                 continue;
             }
@@ -1493,10 +1460,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         // No loop window is focused (desktop, or a non-terminal like the
         // dock/a widget has focus): there is no terminal session to drive.
-        // Without this, keys typed on the bare desktop were read into a
-        // stale terminal session and EXECUTED (the output only showed on
-        // serial). Idle here instead — shade keybinds (Mod+Enter to open a
-        // loop, Mod+D launcher) + mouse still work; plain keys are dropped.
+        // Without this, keys typed on the bare desktop would be read into a
+        // stale terminal session and executed. Idle here instead: shade
+        // keybinds (Mod+Enter to open a loop, Mod+D launcher) and the mouse
+        // still work; plain keys are dropped.
         // Guard only applies in shade mode; serial-only mode has no windows.
         if crate::shade::is_active() && !crate::shade::focused_is_terminal() {
             crate::shade::poll_render();
@@ -1550,8 +1517,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
             let p = alloc::format!("{}> ", path);
-            // Route the prompt (and, below, command output) to THIS terminal
-            // even though the default sink is the primary loop — so prompts +
+            // Route the prompt (and, below, command output) to this terminal
+            // even though the default sink is the primary loop, so prompts and
             // results land in the loop the user is typing in, while background
             // debug still goes to the primary. See terminal::write.
             crate::shade::terminal::set_output_redirect(session.terminal_idx);
@@ -1590,12 +1557,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
         let len = match line {
             // Focus / window change: run_loop re-acquires the session;
-            // keep prompt state, do NOT reprint.
+            // keep prompt state, do not reprint.
             None => continue,
-            // Empty Enter: a (blank) line WAS entered. Treat like any
-            // completed command → fresh prompt next iteration. Without
-            // this, spamming Enter scrolled the prompt away (the
-            // focus-change `len==0` path swallowed it).
+            // Empty Enter: a blank line was entered. Treat it like any
+            // completed command (fresh prompt next iteration); otherwise
+            // the focus-change `len==0` path would swallow it.
             Some(0) => { need_prompt = true; continue; }
             Some(n) => n,
         };
@@ -1619,8 +1585,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // Close this loop's window. Reuse the Mod+Q (CloseWindow) path:
             // sync the session to the terminal buffer, close the focused
             // window, then `continue` so run_loop re-acquires the now-focused
-            // terminal's session cleanly — never touching the &mut into
-            // SESSIONS that CloseWindow just freed ([[project-loop-pid-leak]]).
+            // terminal's session cleanly, never touching the &mut into
+            // SESSIONS that CloseWindow just freed.
             if crate::shade::is_active() {
                 sync_session_to_terminal(session);
                 crate::shade::handle_action(crate::shade::input::ShadeAction::CloseWindow);
@@ -1671,8 +1637,8 @@ fn isin_fixed(x: u16, amp: i64) -> i16 {
     (((prod as i64) * amp >> 28) * sign) as i16
 }
 
-/// `beep [hz]` — play a short test tone through the audio mailbox → HDA driver
-/// → speaker. Proves the app → mailbox → driver → hardware path (M2). Needs
+/// `beep [hz]`: play a short test tone through the audio mailbox → HDA driver
+/// → speaker, exercising the app → mailbox → driver → hardware path. Needs
 /// `audio_hda` running (autostart) to be audible.
 fn intent_beep(args: &str) {
     const SR: u32 = 48000;
@@ -1759,10 +1725,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "debug" => {
             // Parse "<ip> <port>" and set the target before spawning debug.wasm.
-            // No-arg dev shortcut: dial Florian's laptop on the LAN
-            // (192.168.178.97:22222) so reboots don't need re-typing
-            // every time. Saves ~10 s per cycle. Remove or move to
-            // sys/config/debug-target once a config-file path lands.
+            // Without arguments, dial the fixed development host below.
             let mut it = args.split_whitespace();
             let ip_s = it.next().unwrap_or("");
             let port_s = it.next().unwrap_or("");
@@ -1856,12 +1819,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     microvm_linux(b"", Some(mb));
                 }
             } else if let Some(rest) = sub.strip_prefix("shell") {
-                // `microvm shell [<line>]` — pre-injects <line> + '\n'
+                // `microvm shell [<line>]`: pre-injects <line> + '\n'
                 // into the UART RX FIFO before VMLAUNCH. PID-1 in the
                 // guest detects the pending byte via LSR.DR, drains
                 // RBR through iopl(3), echoes the line back through
-                // the same UART, then powers off. End-to-end inject-
-                // console round-trip (Phase 12.1.4).
+                // the same UART, then powers off. End-to-end
+                // inject-console round trip.
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm shell") {
                     let line = rest.trim();
                     let line = if line.is_empty() { "hi" } else { line };
@@ -2058,21 +2021,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 http::intent_netbench(args);
             }
         }
-        // `nic` — die eigenen Zaehler des USB-Netzchips, JEDERZEIT.
-        //
-        // **Sie standen nur am Ende eines gelungenen Downloads**, also
-        // genau dort nicht, wo man sie braucht. `rx_missed` ist der
-        // FIFO-Ueberlauf des Chips: steht er hoch, kamen die Rahmen an und
-        // wir haben sie nicht abgeholt; steht er null und `rx_pkts` ist
-        // klein, kam ueber die Leitung nichts. Das ist die Gabelung, an
-        // der jede Vermutung ueber einen langsamen Dongle anfaengt.
-        // `net window <KB>` / `net window auto` — der Fenster-Sweep.
-        //
-        // Bei gesaettigter Strecke ist `RTT = Fenster / Rate`. Eine einzelne
-        // Messung kann deshalb NICHT sagen, ob die Luft oder wir der Deckel
-        // sind -- beide Zahlen bewegen sich gemeinsam. Die FORM ueber
-        // mehrere Fenster sagt es: waechst der Durchsatz mit, waren wir es;
-        // bleibt er stehen und nur die RTT steigt, ist die Luft am Ende.
+        // `net window <KB>` / `net window auto`: force or release the receive
+        // window. On a saturated path RTT = window / rate, so a single measurement
+        // cannot tell whether the link or we are the limit. Sweep several windows:
+        // if throughput grows with the window, we were the limit; if only the RTT
+        // rises, the link is.
         "window" => {
             let a = args.trim();
             if a.is_empty() {
@@ -2096,6 +2049,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("usage: window <KB> | window auto");
             }
         }
+        // `nic`: the USB NIC's own counters, on demand. A high `rx_missed`
+        // (chip FIFO overflow) means frames arrived and we did not collect them;
+        // zero with a small `rx_pkts` means nothing came over the wire.
         "nic" => {
             if require_cap(vault, &session, Rights::AUDIT, "nic") {
                 if crate::xhci::nic_attached() {
@@ -2103,10 +2059,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                               crate::xhci::nic_link_speed_str());
                     crate::drivers::rtl8153::log_link_diag();
                     crate::drivers::rtl8153::dump_tally("jetzt");
-                    // Die Vollzuege des xHCI-Bulk-IN. Sie beantworten die
-                    // Frage, die der Chip-Tally offenlaesst: der Ring ist
-                    // voll, der Chip laeuft nicht ueber — warum meldet der
-                    // Controller trotzdem so wenig fertig?
+                    // xHCI bulk-IN completion codes. They answer what the
+                    // chip tally leaves open: why the controller reports few
+                    // completions although the ring is full and the chip does
+                    // not overflow.
                     let (ok, short, other, last, resid) =
                         crate::xhci::nic_take_cc();
                     let n = (ok + short + other).max(1);
@@ -2366,12 +2322,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
     }
 }
 
-/// Check capability before executing an intent. Returns true if allowed.
-/// `microvm linux-info` handler — fetch the bundled bzImage from
-/// npkFS, parse the Linux Boot Protocol setup-header, print stats.
-/// Read-only; no VM activity. The asset lands in npkFS at
-/// `sys/microvm/linux-virt.bzImage` on fresh install (see
-/// install_data/assets).
+/// `microvm linux-info` handler: fetch the bundled bzImage from npkFS,
+/// parse the Linux Boot Protocol setup header, print stats. Read-only, no
+/// VM activity. The asset lands at `sys/microvm/linux-virt.bzImage` on a
+/// fresh install (see install_data/assets).
 fn microvm_linux_info() {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
 
@@ -2429,116 +2383,62 @@ fn microvm_linux_info() {
     }
 }
 
-/// `microvm linux` / `microvm shell` handler — fetch the bundled
-/// bzImage from npkFS, hand it + a cmdline + `inject` bytes to
-/// vmx::run_linux. The kernel writes its earlyprintk to serial 0x3F8,
-/// which we trap via I/O bitmap and reflect as `[guest] <line>`
-/// kprintln output. `inject` is empty for the plain `linux`
-/// subcommand (idle-pause behavior); for `shell <line>` it's the
-/// line + '\n' pre-loaded into the UART RX FIFO so PID-1 can echo
-/// it back (Phase 12.1.4).
-/// Public entry the WASM host-fn `npk_run_intent("browser")` calls so
-/// drun (or any future launcher) can spawn the LibreWolf microvm
-/// without going through the Core-0 shell prompt. Safe from a worker
-/// core when the dedicated-VM-core path is active — `vm_open` just
-/// stashes a PENDING_VM request (pure atomic + mutex); the actual
-/// VMXON / VMRUN happens later on the dedicated core via
-/// `vm_core_serve`. On the cooperative path (≤ 2 cores), `vm_open`
-/// requires BSP state and will fail from a worker → host-fn returns
-/// -1; caller must type `browser` at a Core-0 prompt instead.
+/// Entry for the host function `npk_run_intent("browser")`, so a launcher
+/// can spawn the browser microvm without the Core-0 shell prompt. Safe from
+/// a worker when the dedicated VM core is active: `vm_open` only queues a
+/// PENDING_VM request (atomic + mutex), and VMXON / VMRUN happen later on
+/// that core via `vm_core_serve`. On the cooperative path (≤ 2 cores)
+/// `vm_open` needs BSP state and fails from a worker; the host function
+/// then returns -1 and the user must type `browser` at a Core-0 prompt.
 pub fn launch_browser() {
     microvm_linux(b"", None);
 }
 
+/// `microvm linux` / `microvm shell` handler: fetch the bundled bzImage
+/// from npkFS and boot it with a cmdline and `inject` bytes. The guest's
+/// serial output on 0x3F8 is trapped via the I/O bitmap and reflected as
+/// `[guest] <line>`. `inject` is empty for plain `linux`; for `shell <line>`
+/// it is the line + '\n' preloaded into the UART RX FIFO so PID-1 can echo
+/// it back.
 fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
-    /// Optional userspace bundle — Alpine minirootfs + busybox + (future)
-    /// Wayland/Mesa/LibreWolf. Built by `microvm-userspace/build.sh`,
-    /// distributed via OTA (`release/assets/microvm-userspace.cpio.gz`
-    /// for small bundles on raw.githubusercontent, or a GitHub Releases
-    /// asset with `url=` override in the asset manifest for the
-    /// Mesa-class >100 MB bundles). If present, we use it INSTEAD of
-    /// the minimal PID-1-only initramfs — the bundle contains our PID-1
-    /// at /init too, so all the existing substrate tests still run,
-    /// and PID-1 then exec's /bin/sh from the bundle's busybox.
+    /// Optional userspace bundle (Alpine minirootfs + busybox + browser
+    /// stack), built by `microvm-userspace/build.sh` and distributed via OTA.
+    /// If present it replaces the minimal PID-1-only initramfs; it carries our
+    /// PID-1 at /init too, which then execs /bin/sh from the bundle's busybox.
     const USERSPACE_PATH: &str = "sys/microvm/userspace.cpio.gz";
-    // Linux 32-bit boot protocol cmdline.
+    // Linux boot protocol cmdline.
     //
-    // `earlycon=uart8250,io,0x3f8,115200n8`: activate a simple
-    // early-boot console that writes directly to legacy COM1 at
-    // port 0x3F8 — no UART detection, no driver init. We checked
-    // Alpine's vmlinuz-virt config: CONFIG_EARLY_PRINTK is NOT
-    // set (so `earlyprintk=` is silently ignored), but
-    // CONFIG_SERIAL_EARLYCON=y IS set. earlycon is what we
-    // want — it bypasses the 8250 detection probe (which fails
-    // against our minimal UART emulation) and just dumps bytes.
+    // `earlycon=uart8250,io,0x3f8,115200n8`: early console straight to COM1,
+    // without the 8250 detection probe (which fails against our minimal UART
+    // emulation). Alpine's virt kernel has CONFIG_SERIAL_EARLYCON but not
+    // CONFIG_EARLY_PRINTK, so `earlyprintk=` would be ignored.
+    // `console=ttyS0,115200`: the regular 8250 console once full init runs.
+    // `panic=1`: halt on panic, no reboot loop. `nokaslr`: predictable load
+    // addresses for the hypervisor side. `acpi=off tsc=reliable`: skip probes
+    // that misbehave without real silicon (there are no ACPI tables).
     //
-    // `console=ttyS0,115200`: registers the regular 8250 driver as
-    // primary console once full kernel init runs. May or may not
-    // succeed depending on whether the 8250 detection passes.
+    // `tsc_early_khz=<host TSC kHz>` skips Linux's PIT-based TSC calibration,
+    // which hangs on AMD-V (no CPUID 0x15, and our PIT emulation returns 0).
+    // It must be the real host TSC frequency: the guest TSC is the host TSC,
+    // and a too-low hint makes the guest clock run faster than jiffies, which
+    // breaks pthread/futex timed waits in the browser. Intel advertises the
+    // frequency in CPUID 0x15 and Linux ignores the hint there.
     //
-    // `panic=1`: halt immediately on any panic (no reboot loop).
-    // `nokaslr`: predictable load addresses for our hypervisor side.
-    // `noapic acpi=off tsc=reliable`: tell Linux to skip hardware
-    // probing it would otherwise crash on — no ACPI tables, no IO-APIC
-    // (device IRQs go through the 8259 PIC). Without these Linux times
-    // out / panics on probes that don't behave like real silicon.
-    // `nolapic` was DROPPED (guest-SMP Stage 1): the local APIC is now
-    // trap-and-emulated (svm::lapic, NPT-faulting page @ 0xFEE00000), so
-    // Linux brings it up + uses the LAPIC timer as its clockevent. This
-    // is the prerequisite for guest SMP (AP bringup is LAPIC INIT-SIPI).
-    //
-    // PCI is now ON (12.2 step 1) — the legacy 0xCF8/0xCFC config-
-    // space path is emulated in `microvm::devices::pci_bus`. Linux
-    // enumerates bus 0 and finds an i440FX-style host bridge plus a
-    // virtio-blk-pci device at slot 1. BAR MMIO + IRQ delivery come
-    // in 12.2.2 — for now Linux probes, finds the device, can't talk
-    // to its BAR yet, and shelves it.
-    // `tsc_early_khz=<host TSC kHz>` skips Linux's PIT-based TSC
-    // calibration, which deadlocks on the AMD-V backend (host CPUID
-    // 0x15 absent on AMD → Linux falls back to PIT calibration → our
-    // PIT IO emulation returns 0 → Linux loops forever waiting for
-    // ticks). Harmless on Intel: there CPUID 0x15 advertises the freq
-    // and Linux uses it directly, ignoring the cmdline hint.
-    // It MUST be the REAL host TSC frequency, not a hardcoded 2 GHz:
-    // the guest's TSC is the pass-through host TSC (~4.7 GHz on the
-    // 9600X). With a wrong (too-low) hint Linux computes elapsed
-    // time = cycles / freq with too-small freq → the guest clock
-    // (clocksource=tsc, sched_clock, hrtimers, clock_gettime) runs
-    // ~2.3× too fast while jiffies (IRQ0) stays real-time. Benign
-    // for a slow/short cooperative guest; FATAL on the dedicated
-    // core where the guest runs continuously near-native — the
-    // TSC↔jiffies skew accumulates fast and breaks librewolf's
-    // pthread/futex/cond-timedwait startup → deterministic crash in
-    // musl __restore_sigs at ~6 s. `tsc_freq()` is the real
-    // calibrated value (its 2 GHz default is itself a safe fallback).
-    // The guest has no RTC — its clock boots at the year 2000. Every
-    // HTTPS site's cert is then "not yet valid" → Firefox shows "your
-    // computer clock is wrong" and the load fails/crashes. Pass the
-    // host's real wall-clock epoch on the cmdline; PID-1's
-    // launch_wayland reads `nopeektime=` from /proc/cmdline and
-    // `date -s @<epoch>` before cage so TLS cert validation passes.
+    // The guest has no RTC, so its clock would start in 2000 and every TLS
+    // certificate would be "not yet valid". `nopeektime=<epoch>` passes the
+    // host wall clock; PID-1 sets it with `date -s` before starting cage.
     use core::fmt::Write;
     let tsc_khz = crate::interrupts::tsc_freq() / 1000;
     let mut s = String::new();
-    // DIAG: `quiet loglevel=3` temporarily removed — bare-metal NUC
-    // reports the browser hanging and we can't tell whether it's the
-    // guest kernel failing to boot or something later. Putting boot
-    // verbose back so any `[guest]` panic / wedge during early Linux
-    // init surfaces on the host console. Re-add the gating once
-    // bare-metal is validated. Performance regression on launch is
-    // ~150 8250-IO VM-exits, one-shot, acceptable for diag.
-    // Guest-SMP maxcpus. Stage 2 (GUEST_SMP, GUEST_SMP_AP off): keep
-    // `maxcpus=1` — the MP-table makes Linux ENUMERATE GUEST_VCPUS CPUs
-    // (CPU1 present-but-offline) but `maxcpus=1` stops it from ONLINING the
-    // AP, because an enumerated-but-never-responding AP HANGS the cpuhp
-    // bring-up. Stage 3b-2 (GUEST_SMP_AP on): raise to GUEST_VCPUS so Linux
-    // actually brings the AP up — by then INIT-SIPI spawns a responding AP
-    // vCPU (`request_ap_spawn`), so the wait completes instead of hanging.
-    // Online the AP only where the host can actually bring it up (AMD/SVM).
-    // Both backends now have an AP-vCPU path; `smp_ap_active()` gates it.
-    // The count scales with the host's worker cores (`guest_vcpus()`).
+    // Boot output stays verbose (no `quiet loglevel=3`) so a guest panic or
+    // wedge during early init surfaces on the host console.
+    //
+    // maxcpus: an AP that Linux enumerates but that never responds hangs the
+    // cpuhp bring-up, so APs are onlined only where the host spawns a
+    // responding AP vCPU on INIT-SIPI (`smp_ap_active()`). The count scales
+    // with the host's worker cores (`guest_vcpus()`).
     let maxcpus: u8 = if crate::microvm::cpu::smp_ap_active() {
         crate::microvm::cpu::guest_vcpus()
     } else {
@@ -2570,21 +2470,14 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         let _ = write!(s, " nopeektime={}", epoch);
     }
     // Guest-side diagnostic probe: PID-1 forks a 1 s busybox loop that dumps the
-    // GUEST's own view (per-vCPU busy/softirq %, socket cwnd/rtt/retrans, softnet
+    // guest's own view (per-vCPU busy/softirq %, socket cwnd/rtt/retrans, softnet
     // drops/squeeze) to /dev/kmsg → our console as `[gdiag]`.
     //
-    // OFF by default since 0.294.0. It was on for everyone, and it is not free:
-    // the guest writes it through the emulated 8250, which is ONE VM-EXIT PER
-    // BYTE, and each finished line leaves as a blocking UART write from inside
-    // that exit handler — on the BSP vCPU fiber, the same one that services the
-    // virtio-net doorbell. The softnet line alone is ~700 bytes a second, so the
-    // probe cost about 700 extra exits and ~60 ms of UART spin per second,
-    // forever, on the network's own critical path. A measuring tool that slows
-    // the thing it measures is the third time we have paid for this.
-    //
-    //     set microvm_gdiag on
-    //
-    // turns it back on for a session that actually wants the inside view.
+    // Off by default: the guest writes through the emulated 8250, one VM exit
+    // per byte, and each line is a blocking UART write in the exit handler on
+    // the BSP vCPU fiber that also services the virtio-net doorbell, so the
+    // probe slows the network path it measures. Enable with
+    // `set microvm_gdiag on`.
     if crate::config::get("microvm_gdiag")
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("on"))
     {
@@ -2593,26 +2486,10 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     // Diagnostic pure-bridge throughput run: PID-1 sees `nopeekbench=` and runs
     // a busybox wget loop through the nat bridge instead of cage/browser.
     if let Some(mb) = bench_mb {
-        // `nohz=off` EXONERATED (v0.226.66 HW): forced 1000→2008 Hz effective tick
-        // but throughput stayed a lottery and gap_max grew to 40 ms (the extra
-        // timer-injects added host contention). So delayed-ACK-on-tick is NOT the
-        // root — reverted. `nopeekbenchhost=<gw>` lets PID-1 target whatever server
-        // sits at our host-NIC gateway, so the SAME bench works on slirp (10.0.2.2)
-        // and tap/vhost (e.g. 172.30.0.1) without a rebuild — that is the tap test
-        // that bypasses the single-threaded slirp ceiling (build.sh QEMU_NET=tap).
-        // The gateway default is a QEMU habit: on slirp the bench server sits at
-        // 10.0.2.2, which IS the gateway, and on tap it is 172.30.0.1. On real
-        // hardware the gateway is the ROUTER, and the bench would wget a box that
-        // has never heard of it — a failure that looks exactly like the bridge
-        // being broken and is not. Name the server instead:
-        //
-        //     store sys/config/benchhost 192.168.178.97
-        //
-        // Falls back to the gateway, so every QEMU invocation keeps working.
-        // Hardcoded fallback, on request, until the bridge is fixed: the gateway
-        // default is a QEMU habit (slirp's server IS the gateway) and on real
-        // hardware it points the bench at the ROUTER, which fails for a reason
-        // that has nothing to do with what we are measuring. TEMPORARY.
+        // `nopeekbenchhost=` names the bench server. The gateway is only right
+        // under QEMU (slirp's server is the gateway); on real hardware it is the
+        // router. So the server comes from `sys/config/benchhost` and falls back
+        // to a hardcoded address (temporary).
         const BENCH_FALLBACK: [u8; 4] = [192, 168, 178, 97];
         let host = crate::config::get("benchhost")
             .and_then(|v| parse_ip(v.trim()))
@@ -2639,17 +2516,15 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
 
     // Userspace-bundle delivery, newest path first:
     //
-    //  1. squashfs bundle present → boot the TINY PID-1-only
-    //     initramfs. That PID-1 mounts the .sqfs from /dev/vdb (the
-    //     slot-5 read-only virtio-blk device loads it straight from
-    //     `sys/microvm/userspace.sqfs` — never unpacked into RAM) and
-    //     chroots into it. RAM-efficient: the bundle stays compressed
-    //     on the virtual disk, decompressed on read.
+    //  1. squashfs bundle present → boot the tiny PID-1-only initramfs.
+    //     PID-1 mounts the .sqfs from /dev/vdb (the slot-5 read-only
+    //     virtio-blk device reads `sys/microvm/userspace.sqfs` directly,
+    //     never unpacked into RAM) and chroots into it. The bundle stays
+    //     compressed on the virtual disk.
     //
-    //  2. legacy cpio bundle present (no sqfs) → use it AS the
-    //     initramfs (embeds our PID-1 at /init). RAM-heavy: the whole
-    //     tree is unpacked into tmpfs. Kept for back-compat until the
-    //     sqfs bundle is the only shipped form.
+    //  2. legacy cpio bundle present (no sqfs) → use it as the initramfs
+    //     (embeds our PID-1 at /init). The whole tree is unpacked into
+    //     tmpfs. Kept until the sqfs bundle is the only shipped form.
     //
     //  3. neither → minimal PID-1-only substrate.
     const USERSPACE_SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
@@ -2694,34 +2569,28 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
               bytes.len(),
               core::str::from_utf8(cmdline).unwrap_or("?"));
 
-    // 12.4 step 1b: non-blocking. Open the VM (synchronous one-time
-    // substrate + guest-image setup, copies the bzImage into guest
-    // RAM so `bytes` can drop here), register it, return. The Core-0
-    // event loop then drives bounded slices via `vm_poll_slice`,
-    // rendering Shade between them — instead of this call blocking
-    // Core 0 until guest exit. Guest-exit logging happens in
+    // Non-blocking: open the VM (one-time substrate + guest-image setup,
+    // copies the bzImage into guest RAM so `bytes` can drop here), register
+    // it, return. The Core-0 event loop then drives bounded slices via
+    // `vm_poll_slice`, rendering Shade between them, instead of this call
+    // blocking Core 0 until guest exit. Guest-exit logging happens in
     // vm_poll_slice when the slice that observes the exit completes.
     match crate::microvm::vm_open(&bytes, cmdline, initramfs.as_deref(), inject) {
         Ok(()) => {
-            // 12.4 step A3: give the guest its own tiled Surface
-            // window (tiling invariant — never fullscreen). virtio-gpu
-            // FLUSH renders into it; shade composites it like any
-            // window; the teardown path closes it on guest exit /
-            // window close. If the compositor isn't up (serial-only
-            // boot) we stay unbound and virtio-gpu falls back to the
-            // legacy fullscreen blit.
+            // Give the guest its own tiled Surface window (tiling
+            // invariant: never fullscreen). virtio-gpu FLUSH renders
+            // into it; shade composites it like any window; the
+            // teardown path closes it on guest exit / window close.
+            // Without a compositor (serial-only boot) we stay unbound
+            // and virtio-gpu falls back to the fullscreen blit.
             match crate::shade::create_surface_window("microvm") {
                 Some(wid) => {
                     crate::microvm::vm_bind_window(wid.0);
-                    // Focus the guest window on launch. forward_pointer
-                    // _to_guest and the keyboard path only run in the
-                    // Surface-focused branch, so without this the guest
-                    // gets no input until the user manually focuses the
-                    // tile (the "only works after I touch the keyboard"
-                    // symptom). This is the productised D1' behaviour:
-                    // launching the guest gives it focus, like any app
-                    // window. The spawning shell is reachable again via
-                    // Mod-focus / Mod+number.
+                    // Focus the guest window on launch: pointer and
+                    // keyboard forwarding only run in the Surface-focused
+                    // branch, so otherwise the guest gets no input until the
+                    // user focuses the tile. The spawning shell stays
+                    // reachable via Mod-focus / Mod+number.
                     crate::shade::focus_window(wid);
                     kprintln!("[microvm] guest running — window {} (focused)", wid.0);
                 }
@@ -2815,19 +2684,15 @@ pub use fs::crypto_bench;
 
 /// Create initial directory structure and set cwd to home.
 ///
-/// Lays down the canonical user-tree on first boot so loft's sidebar
-/// (`Home / Documents / Downloads / Pictures / Projects / Trash`) and
-/// the wallpaper subsystem land on real `.dir`-marker-backed
-/// directories instead of phantom paths. Each `ensure_parents` call
-/// is idempotent — re-running setup_home on an already-populated home
-/// is a no-op (no duplicate writes, no journal churn).
+/// Lays down the standard user tree used by loft's sidebar
+/// (`Home / Documents / Downloads / Pictures / Projects / Trash`) and the
+/// wallpaper subsystem. Idempotent: re-running it on a populated home
+/// writes nothing.
 pub fn setup_home() {
     let home = home_dir();
     ensure_parents(&home);
     // Sidebar-aligned standard subdirs. The wallpapers dir lives
-    // under `pictures/` to match `wallpaper_dir()` in
-    // `intent::wallpaper`; the previous flat `wallpapers/` was a
-    // dead path nothing read or wrote.
+    // under `pictures/` to match `wallpaper_dir()` in `intent::wallpaper`.
     for sub in &["documents", "downloads", "pictures", "pictures/wallpapers", "projects", ".trash"] {
         ensure_parents(&alloc::format!("{}/{}", home, sub));
     }

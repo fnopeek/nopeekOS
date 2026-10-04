@@ -1,64 +1,56 @@
-//! Reichweite — darf eine Seite dorthin, wo sie hin will?
+//! Network reach: may a page go where it wants to?
 //!
-//! Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2. Kurz: eine
-//! oeffentliche Seite darf das private Netz des Nutzers nicht erreichen.
-//! CORS deckt das NICHT ab — es schuetzt den Zielserver, nicht das Netz, in
-//! dem der Browser steht. Browser haben die Regel als *Private Network
-//! Access* nachgerueckt und bis heute nicht vollstaendig; wir bauen sie von
-//! Anfang an.
+//! A public page must not reach the user's private network
+//! (`docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2). CORS does not cover this:
+//! it protects the target server, not the network the browser sits in.
+//! Browsers retrofitted the rule as Private Network Access.
 //!
-//! **Diese Datei haengt an NICHTS.** Kein `alloc`, kein `crate::`, nur
-//! `core`. Das ist Absicht: der Kernel hat keine Testinfrastruktur, und eine
-//! Sicherheitsregel, die man nicht fahren kann, ist eine Behauptung. So
-//! mountet `beak-engine` sie in seinen Testbaum und faehrt die Tabelle unten
-//! bei jedem `cargo test` mit — bei EINER Implementierung, nicht einer
-//! Kopie ([[feedback-a-copy-is-a-second-semantics-waiting]]).
+//! This file depends on `core` only (no `alloc`, no `crate::`), so
+//! `beak-engine` can mount it into its test tree and run the tests below
+//! against this one implementation; the kernel has no test harness.
 
-/// Wie offen ein Netzbereich ist. Die Ordnung ist der ganze Punkt:
-/// `Local < Private < Public`, und eine Anfrage darf nie von offen nach
-/// geschlossen laufen.
+/// How open a network range is. The ordering is the rule:
+/// `Local < Private < Public`, and a request may never go from more open
+/// to more closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reach {
-    /// Diese Maschine selbst — 127/8 und die Link-Local-Adressen, hinter
-    /// denen im Zweifel ein Geraetedienst sitzt.
+    /// This machine: 127/8 and the link-local addresses, where local
+    /// services may listen.
     Local,
-    /// Das Netz des Nutzers: 10/8, 172.16/12, 192.168/16, 100.64/10.
+    /// The user's network: 10/8, 172.16/12, 192.168/16, 100.64/10.
     Private,
-    /// Das offene Internet.
+    /// The open internet.
     Public,
 }
 
-/// Der Bereich, in dem eine Adresse liegt.
+/// The range an address belongs to.
 ///
-/// **Entschieden wird an der ADRESSE, nie am Namen.** Ein Name kann beim
-/// zweiten Aufloesen woandershin zeigen (DNS-Rebinding); eine Adresse kann
-/// sich nicht verwandeln.
+/// Decided on the address, never the name: a name can resolve elsewhere
+/// the second time (DNS rebinding), an address cannot change.
 pub fn classify_ip(ip: [u8; 4]) -> Reach {
     match ip {
-        // 0.0.0.0/8 heisst „diese Maschine, dieses Netz" und wird von
-        // manchen Stapeln wie Loopback behandelt. Also die strengste Klasse.
+        // 0.0.0.0/8 means "this host, this network" and some stacks treat it
+        // like loopback, so it gets the strictest class.
         [0, ..] => Reach::Local,
         [127, ..] => Reach::Local,
-        // Link-local: 169.254/16. Dort sitzt unter anderem der
-        // Metadatendienst jeder Cloud, und genau der ist das klassische Ziel.
+        // Link-local 169.254/16: home of cloud metadata services, the
+        // classic target.
         [169, 254, ..] => Reach::Local,
         [10, ..] => Reach::Private,
         [172, b, ..] if (16..=31).contains(&b) => Reach::Private,
         [192, 168, ..] => Reach::Private,
-        // Carrier-Grade NAT (100.64/10). Steht im offenen Netz nicht zur
-        // Verfuegung und ist fuer eine fremde Seite genauso interessant
-        // wie 10/8.
+        // Carrier-grade NAT (100.64/10): not routable on the open internet,
+        // so treated like 10/8.
         [100, b, ..] if (64..=127).contains(&b) => Reach::Private,
         _ => Reach::Public,
     }
 }
 
-/// Darf ein Dokument der Klasse `from` eine Adresse der Klasse `to`
-/// erreichen?
+/// May a document of class `from` reach an address of class `to`?
 ///
-/// Die ganze Regel in einer Zeile: **nie von offen nach geschlossen.** Eine
-/// oeffentliche Seite bleibt draussen; eine Seite aus dem Heimnetz darf ihr
-/// eigenes Netz und das offene Internet; eine lokale darf alles.
+/// Never from more open to more closed: a public page stays outside, a
+/// private one may reach its own network and the internet, a local one
+/// may reach everything.
 pub fn allows(from: Reach, to: Reach) -> bool {
     to >= from
 }
@@ -83,9 +75,8 @@ mod tests {
         }
     }
 
-    /// Die NACHBARN der privaten Bereiche sind oeffentlich. Ein Off-by-one
-    /// hier ist eine Luecke, die niemand sieht: `172.15.x` und `172.32.x`
-    /// gehoeren dem offenen Netz, `100.63` und `100.128` auch.
+    /// The neighbours of the private ranges are public; an off-by-one here
+    /// would be a silent hole.
     #[test]
     fn the_neighbours_of_the_private_ranges_are_public() {
         for ip in [[9, 255, 255, 255], [11, 0, 0, 1],
@@ -113,16 +104,14 @@ mod tests {
         assert!(allows(Reach::Local, Reach::Private));
     }
 
-    /// Der Router-Fall, um den es praktisch geht: die Seite AUF dem Router
-    /// darf ihre eigenen Bilder laden.
+    /// A router's admin page may load its own assets.
     #[test]
     fn the_router_page_may_load_its_own_assets() {
         assert!(allows(Reach::Private, Reach::Private));
         assert!(allows(Reach::Local, Reach::Local));
     }
 
-    /// Die Ordnung selbst — sie traegt die ganze Regel, also wird sie
-    /// geprueft und nicht angenommen.
+    /// The ordering carries the whole rule, so it is tested, not assumed.
     #[test]
     fn the_ordering_is_the_rule() {
         assert!(Reach::Local < Reach::Private);

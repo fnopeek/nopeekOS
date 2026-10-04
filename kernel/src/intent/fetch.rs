@@ -1,20 +1,17 @@
 //! Fetching that does not stand still.
 //!
-//! `npk_http_send` is synchronous: the calling module sits INSIDE the host
-//! call for the whole exchange — DNS, TCP, TLS, the wait for the first byte —
-//! and a fiber in a host call cannot paint, cannot read a key and cannot let
-//! its peers run (`feedback_wasm_host_call_freezes_peer_fibers`). For a
-//! browser that is the whole complaint: a server that goes quiet freezes the
-//! window, and no timeout is short enough to make freezing acceptable.
+//! `npk_http_send` is synchronous: the calling module sits inside the host
+//! call for the whole exchange (DNS, TCP, TLS, first byte), and a fiber in a
+//! host call cannot paint, read a key or let its peers run. A quiet server
+//! would freeze a browser window.
 //!
 //! So the wait moves off the caller's stack. A module hands in a request and
-//! gets a HANDLE; a worker fiber on ANOTHER core runs exactly the same
-//! synchronous client (`https_request_streaming` / `https_get_many` —
-//! unchanged, and there is deliberately no second HTTP implementation here);
-//! the module asks `poll` between two frames and collects the answer with
-//! `take`.
+//! gets a handle; a worker fiber on another core runs the same synchronous
+//! client (`https_request_streaming` / `https_get_many`; there is
+//! deliberately no second HTTP implementation); the module asks `poll`
+//! between frames and collects the answer with `take`.
 //!
-//! Two things this does NOT do, on purpose:
+//! Deliberately not done:
 //!
 //! - It does not make the HTTP client asynchronous. The blocking recv loops
 //!   are still blocking; they now block a fiber nobody is waiting on.
@@ -46,32 +43,24 @@ const MAX_URLS: usize = 64;
 
 /// Bytes all pending answers may reserve at once. Reserved at `begin` from
 /// what the caller asked for (not what arrives — that is unknown until it
-/// does), released at `take` or `cancel`. A browser reserves ~17 MiB for one
-/// page load (3 MiB document + 8 MiB stylesheets + 6 MiB sub-resources), so
-/// this is three of those at the same time and then a refusal instead of a
-/// kernel heap the size of the caller's ambition.
+/// does), released at `take` or `cancel`. Room for about three concurrent
+/// browser page loads; beyond that the request is refused rather than
+/// letting callers grow the kernel heap.
 const MAX_RESERVED_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many fetch workers may run at once.
 ///
-/// ONE, deliberately. Two would let a click start its document while the
-/// picture batch it replaces is still on the wire — but it would also make
-/// PARALLEL use of `intent::http` the normal case, and that client has never
-/// run that way: the connection pools are spin-locked, and `pool_take` closes
-/// a stale session while holding the lock. Whether that is safe under two
-/// callers is a question to answer by reading it, not by assuming it.
-///
-/// What one worker costs is bounded and visible: a navigation started while a
-/// sub-resource batch is running waits out that batch (one round trip, order
-/// 100-300 ms) before its own request goes out. The window stays alive the
-/// whole time — which was the entire complaint. Raising this is one constant,
-/// once the parallel-safety question above has actually been looked at.
+/// One, deliberately: more would make parallel use of `intent::http` the
+/// normal case, and its parallel safety is unverified (the connection pools
+/// are spin-locked, and `pool_take` closes a stale session while holding the
+/// lock). The cost is that a navigation waits out a running sub-resource
+/// batch; the window stays responsive meanwhile.
 const WORKER_COUNT: usize = 1;
 
 /// TLS handshake + gzip inflate + the h2 frame loop is a deep chain, and a
 /// fiber stack has no guard page — an overflow is a silent memory smash, not
-/// a fault. The 9p persist worker took 1 MiB for the same reason; this chain
-/// is shallower (no B-tree COW), so half of that.
+/// a fault. Half of the 9p persist worker's 1 MiB, since this chain has no
+/// B-tree COW.
 const WORKER_STACK_BYTES: usize = 512 * 1024;
 
 /// Idle ticks (100 Hz) a worker stays alive after its last job before it
@@ -91,11 +80,11 @@ enum Work {
         headers: Vec<String>,
         body: Vec<u8>,
         cap: usize,
-        /// Ueber TLS? `false` heisst Klartext — `parse_url` laesst das nur
-        /// unter der Politik in `plain_http_allowed` zu.
+        /// Over TLS? `false` means plain text, which `parse_url` allows only
+        /// under the policy in `plain_http_allowed`.
         tls: bool,
-        /// Die Reichweite des Dokuments, das die Anfrage ausloest.
-        /// Siehe `http::Reach` und `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1.
+        /// Reach of the document that triggers the request.
+        /// See `http::Reach` and `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1.
         from_reach: Option<http::Reach>,
     },
     /// A batch, multiplexed per host exactly as `npk_http_request_many` does.
@@ -246,8 +235,8 @@ fn submit(
 /// point of the whole exercise — never the caller's, because the recv loops
 /// spin rather than yield and would freeze the very app they are fetching for.
 ///
-/// If nothing is left, share the caller's core: that is exactly today's
-/// behaviour (the app stood still inside the host call) and no worse.
+/// If nothing is left, share the caller's core: no worse than a synchronous
+/// host call.
 fn worker_core(caller_core: usize, k: usize) -> usize {
     let n = crate::smp::per_core::core_count();
     if n <= 1 {
@@ -415,7 +404,7 @@ fn worker_entry(_k: u64) {
             crate::smp::fiber::yield_sleep(4);
             continue;
         };
-        // The exchange itself, with NO lock held: it waits for a network.
+        // The exchange itself, with no lock held: it waits for a network.
         let reply = run(slot, work);
         idle_since = crate::interrupts::ticks();
 
@@ -497,7 +486,7 @@ fn run(slot: usize, work: Work) -> Reply {
             let bodies = http::https_get_many(&urls, &cookies, cap, from_reach);
             // Packed here rather than at `take`, so the guest side is a plain
             // copy: bodies back to back, one length each, and one that would
-            // overrun the budget is DROPPED rather than truncated — half an
+            // overrun the budget is dropped rather than truncated — half an
             // image decodes to garbage, a missing one draws a placeholder.
             let mut blob: Vec<u8> = Vec::new();
             let mut lens: Vec<i32> = Vec::new();

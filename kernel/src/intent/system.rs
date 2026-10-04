@@ -59,18 +59,15 @@ pub fn intent_status(vault: &Vault) {
 
 /// `cores` / `cpu` — trustworthy per-core CPU instrumentation.
 ///
-/// Diagnosis step 0 for the scheduler rework: the WASM `top` is broken
-/// (self-reported busy-TSC can't see spinners; APERF/MPERF absent on
-/// AMD/qemu). This measures the opposite, directly: it double-samples
-/// the per-core HALTED-cycle counters (recorded at every HLT/MWAIT site)
-/// over a fixed window and reports the ground truth.
+/// Self-reported busy time cannot see spinning cores, and APERF/MPERF are
+/// absent on AMD/qemu. This instead double-samples the per-core halted-cycle
+/// counters (recorded at every HLT/MWAIT site) over a fixed window.
 ///
 ///   BUSY% = 100 − halted%  → a spinning core never halts → shows ~100%
 ///   HALTS/s + avg residency → many short halts = spurious-wake spin;
 ///                             few long halts = healthy deep idle.
 ///
-/// Output goes to serial via kprintln (primary I/O), bypassing the
-/// broken WASM top entirely.
+/// Output goes to serial via kprintln (primary I/O).
 pub fn intent_cores() {
     let cores = crate::smp::per_core::core_count().min(256);
     let tsc_hz = crate::interrupts::tsc_freq().max(1);
@@ -106,7 +103,7 @@ pub fn intent_cores() {
     let window_ms: u64 = 500;
     let deadline = wall0 + window_ms * (tsc_hz / 1000);
     while crate::interrupts::rdtsc() < deadline {
-        // Core 0 has no periodic tick (stage 3e): halt to the deadline.
+        // Core 0 has no periodic tick: halt to the deadline.
         crate::interrupts::halt_until(Some(deadline), crate::smp::per_core::WAKE_HLT_FALLBACK);
     }
 
@@ -189,8 +186,8 @@ pub fn intent_cores() {
         }
 
         // Wake-source breakdown: which cause returned each halt this
-        // window. The decisive number is UNATTR = HALTS − Σcauses: large
-        // here means the HLT returned with NO guest ISR — KVM resuming
+        // window. UNATTR = HALTS − Σcauses: large here means the HLT
+        // returned with no guest ISR, i.e. KVM resuming
         // the vCPU on a host event (host HZ tick) past the emulated HLT.
         // That is a QEMU/KVM artifact, not a bare-metal idle bug.
         let labels = crate::smp::per_core::WAKE_LABELS;
@@ -216,8 +213,8 @@ pub fn intent_cores() {
             t1[c].1 / tsc_per_us.max(1));
     }
 
-    // VM-exit mix — only when a guest ran during the window. Tells us
-    // WHY the dedicated core is busy: mmio-heavy = the guest is rendering
+    // VM-exit mix — only when a guest ran during the window. Tells why
+    // the dedicated core is busy: mmio-heavy = the guest is rendering
     // (legit); hlt/intr-heavy = idle spin (the run loop should yield/sleep).
     let vlabels = crate::microvm::cpu::VMEXIT_LABELS;
     let vtotal: u64 = (0..vlabels.len())
@@ -232,8 +229,8 @@ pub fn intent_cores() {
         kprintln!();
         // Break the `io` exit bucket down by port. During heavy RX this is
         // expected to be dominated by `pic` (the 8259 EOI, one outb 0x20 per
-        // device IRQ since the guest runs noapic) — proving the io storm is
-        // the interrupt-ack path, not the data path.
+        // device IRQ since the guest runs noapic), i.e. the interrupt-ack
+        // path rather than the data path.
         let iolabels = crate::microvm::cpu::IO_PORT_LABELS;
         let iototal: u64 = (0..iolabels.len())
             .map(|i| io1[i].saturating_sub(io0[i]))
@@ -283,8 +280,8 @@ pub fn intent_cores() {
             if any { kprintln!(); }
         }
         // Net RX worker wakeup attribution: irq = event-driven (host RX MSI-X
-        // woke it, ~µs); timeout = fell to the 2ms fallback (host IRQ did NOT
-        // fire → silent polling = the cold-start floor); polled = no MSI-X.
+        // woke it, ~µs); timeout = fell to the 2ms fallback (host IRQ did not
+        // fire, so it is polling); polled = no MSI-X.
         let (wi, wt, wp, ws) = (
             wk1.0.saturating_sub(wk0.0),
             wk1.1.saturating_sub(wk0.1),
@@ -297,16 +294,15 @@ pub fn intent_cores() {
                       wp * 1000 / window_ms, ws * 1000 / window_ms);
         }
         // BSP consumer park: kicked = the worker's kick woke it (event-driven);
-        // timeout = it fell to the 2ms fallback = the typical ~3ms cold floor.
+        // timeout = it fell to the 2ms fallback.
         let (kk, kt) = (kw1.0.saturating_sub(kw0.0), kw1.1.saturating_sub(kw0.1));
         if kk + kt > 0 {
             kprintln!("    bsp kick_wait/s: kicked={} timeout={}",
                       kk * 1000 / window_ms, kt * 1000 / window_ms);
         }
-        // kick→resume LATENCY (the irqfd-gap probe): how long from the worker's RX
-        // kick to the parked BSP vCPU actually resuming. µs = IPI-prompt (3ms RTT
-        // is elsewhere); ms = kicked-but-host-descheduled wake (nested oversub) =
-        // the structural irqfd gap → the real per-packet-round-trip cost.
+        // kick→resume latency: how long from the worker's RX kick to the
+        // parked BSP vCPU actually resuming. µs = prompt IPI; ms = the vCPU
+        // was kicked but descheduled by the host (nested oversubscription).
         let kln = kl1.1.saturating_sub(kl0.1);
         if kln > 0 {
             let avg_us = (kl1.0.saturating_sub(kl0.0)) / kln * 1_000_000 / tsc_hz.max(1);
@@ -316,7 +312,7 @@ pub fn intent_cores() {
         }
         // Tap backpressure: tapfull/s = the ring was full, so the producer
         // dropped (healthy in moderation — the far end slows down). injfalse/s =
-        // the GUEST had no RX buffer, so the frame stayed in the tap.
+        // the guest had no RX buffer, so the frame stayed in the tap.
         let tapfull = rh1.0.saturating_sub(rh0.0);
         let injf = rh1.1.saturating_sub(rh0.1);
         let core_of = |c: Option<usize>| c.map_or(-1i64, |c| c as i64);
@@ -329,10 +325,9 @@ pub fn intent_cores() {
         }
         kprintln!("    net tap backpressure: tapfull={}/s injfalse={}/s",
                   tapfull * 1000 / window_ms, injf * 1000 / window_ms);
-        // Outbound TX rate (the b1-vs-b2 upload discriminator). Read TOGETHER with
-        // the worker core's BUSY% above: high segs/s + worker pegged ~100% = the
-        // SW-TSO emit pipeline is the cap (b1); the same Mbit with the worker idle
-        // = cwnd × inflated bridge RTT (b2, an ACK-clock the emit can't lift).
+        // Outbound TX rate. Read together with the worker core's BUSY% above:
+        // high segs/s with the worker near 100% = the SW-TSO emit pipeline is
+        // the cap; the same rate with the worker idle = cwnd × bridge RTT.
         let txp = tx1.0.saturating_sub(tx0.0);
         let txb = tx1.1.saturating_sub(tx0.1);
         if txp > 0 {
@@ -341,10 +336,10 @@ pub fn intent_cores() {
                       txb / txp,
                       txb * 8 / 1000 / window_ms);
         }
-        // Full-path RX cadence (the rxlat/drops line above is BLIND in full mode).
+        // Full-path RX cadence (the rxlat/drops line above is blind in full mode).
         // batch = avg frames drained per non-empty pass; gap_max = peak µs between
-        // passes. Decisive read: small batch + ~1.5ms gap = park-cadence (lever a,
-        // RTT-bound); large batch (+ guest ring full) = receiver-drain (lever b).
+        // passes. Small batch + ~1.5ms gap = bound by park cadence; large batch
+        // (+ guest ring full) = bound by the receiver draining.
         let rpf = rp1.0.saturating_sub(rp0.0);
         let rpc = rp1.1.saturating_sub(rp0.1);
         let gap_us = rp1.2.saturating_mul(1_000_000) / tsc_hz.max(1);
@@ -353,14 +348,14 @@ pub fn intent_cores() {
                       rpc * 1000 / window_ms, rpf / rpc, gap_us);
         }
         // Effective guest HZ: the guest programs 1 kHz (CONFIG_HZ=1000); injected
-        // only while VMRUN runs, so a parky (slow) connection sees <1000 = the
-        // timer freezing under the 2ms parks = the "1000 vs 100" lottery.
+        // only while VMRUN runs, so a value below 1000 means the guest timer
+        // freezes while the vCPU is parked.
         let gt = gt1.saturating_sub(gt0);
         kprintln!("    guest timer/s (effective HZ): {}", gt * 1000 / window_ms);
     }
-    // Host-time breakdown: where the dedicated guest cores actually SPENT
-    // their cycles this window. guest% = in VMRESUME (the guest really ran);
-    // a high mmio/io% with low guest% PROVES the host burns the core on
+    // Host-time breakdown: where the dedicated guest cores spent their
+    // cycles this window. guest% = in VMRESUME (the guest really ran);
+    // a high mmio/io% with low guest% means the host burns the core on
     // exit-handling (mmio decode / PIC EOI) and the guest is starved — its
     // "0% CPU" is because it never gets scheduled, not because nothing runs.
     let gdelta = gcy1.saturating_sub(gcy0);
@@ -424,22 +419,11 @@ pub fn intent_history(args: &str) {
     }
 }
 
-/// `akku` / `battery` — Smart-Battery diagnostic. Shows whether the i801
-/// SMBus controller was found, dumps the raw SBS registers read from the
-/// pack at address 0x0B, and prints the decoded charge + status. Lets us
-/// tell "no controller" from "controller but no battery on the bus" from
-/// "battery present but odd values" without a serial cable.
-/// Wieviel Strom zieht das CPU-Package — gemessen, nicht geschaetzt.
+/// `power` — CPU package power, measured via RAPL. Separates the package
+/// from the rest of the system draw (display, PCIe links, NVMe, peripherals)
+/// that `battery` reports in total.
 ///
-/// Der Anlass: das IdeaPad zieht im Leerlauf 21,4 W (aus `_BST`,
-/// deckungsgleich mit 2,5 h auf 53,5 Wh), dasselbe Blech unter Linux
-/// 5-8 W. Es gibt acht plausible Verdaechtige und EINE Zahl; diese hier
-/// trennt den groessten Block ab. Ist das Package 3 W, sind C-States und
-/// Tickless die falsche Baustelle und der Strom geht an Bildschirm,
-/// PCIe-Links, NVMe und die Peripherie.
-///
-/// Das Fenster wird mit `hlt` verbracht — gemessen werden soll der
-/// LEERLAUF und nicht die Messung.
+/// The window is spent in `hlt` so it measures idle, not the measurement.
 pub fn intent_power(args: &str) {
     if !crate::smp::per_core::has_rapl() {
         kprintln!();
@@ -456,9 +440,8 @@ pub fn intent_power(args: &str) {
         return;
     }
 
-    // Laenger als bei `cores`: Energie ist ein Integral, und ein langes
-    // Fenster mittelt die Zacken weg, die das Dock und die Bar je Sekunde
-    // machen. `power 5` misst fuenf Sekunden.
+    // Longer than `cores`: energy is an integral, and a long window averages
+    // out periodic spikes. `power 5` measures five seconds.
     let secs: u64 = args.parse().unwrap_or(2).clamp(1, 300);
     let cores = crate::smp::per_core::core_count().min(256);
     let deep0: u64 = (0..cores).map(|c| crate::interrupts::DEEP_IDLE_COUNT[c]
@@ -475,12 +458,12 @@ pub fn intent_power(args: &str) {
     // count the updates, and measure between the first and the last.
     let mut jumps = 0u32;
     let mut last = pkg0;
-    // Erste und letzte Fortschreibung: dazwischen ist die Energie ganz
-    // verbucht, an den Raendern eines festen Fensters nicht.
+    // First and last update: between them the energy is fully accounted,
+    // at the edges of a fixed window it is not.
     let mut first: Option<(u64, u32)> = None;
     let mut latest: Option<(u64, u32)> = None;
     while crate::interrupts::rdtsc() < deadline {
-        // Kern 0 hat keinen Takt mehr (Stufe 3e): alle 20 ms nachsehen.
+        // Core 0 has no periodic tick: check every 20 ms.
         let d = (crate::interrupts::rdtsc() + tsc_hz / 50).min(deadline);
         crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
         let e = crate::smp::per_core::rapl_pkg_raw();
@@ -505,8 +488,8 @@ pub fn intent_power(args: &str) {
     let pkg_mw = crate::smp::per_core::rapl_mw(pkg1.wrapping_sub(pkg0), window_us);
     let core_mw = crate::smp::per_core::rapl_mw(core0_e1.wrapping_sub(core0_e0), window_us);
 
-    // Wieviel des Fensters war Core 0 wirklich angehalten? Eine Wattzahl
-    // ohne diese Angabe laesst offen, ob gerade Leerlauf gemessen wurde.
+    // How much of the window Core 0 was halted; without it a wattage does
+    // not say whether idle was measured.
     let halt_pct = ((halt1.saturating_sub(halt0) as u128) * 100
         / (window_tsc as u128)).min(100) as u64;
 
@@ -598,11 +581,16 @@ fn power_cstate(arg: &str) {
     kprintln!();
 }
 
+/// `akku` / `battery` — Smart-Battery diagnostic. Shows whether the i801
+/// SMBus controller was found, dumps the raw SBS registers read from the
+/// pack at address 0x0B, and prints the decoded charge + status. Lets us
+/// tell "no controller" from "controller but no battery on the bus" from
+/// "battery present but odd values" without a serial cable.
 pub fn intent_battery() {
     const SBS_ADDR: u8 = 0x0B;
     // A notebook whose pack sits behind the EC reports through the firmware
     // (`aml`: `_BST`/`_BIF`). That is the common case, and it carries what
-    // the SMBus path never had: the draw of the WHOLE machine.
+    // the SMBus path never had: the draw of the whole machine.
     if let Some(d) = crate::battery::detail() {
         battery_from_acpi(d);
         return;
@@ -702,8 +690,8 @@ fn battery_from_acpi(d: crate::battery::Detail) {
     kprintln!();
 }
 
-/// Dump the EC's 256-byte RAM so we can reverse-engineer the battery
-/// fields on this machine (HP Elite/Dragonfly stores charge as plain EC-RAM
+/// Dump the EC's 256-byte RAM to reverse-engineer the battery fields
+/// (HP Elite/Dragonfly stores charge as plain EC-RAM
 /// fields: remaining cap, full cap, status — read by the DSDT's _BST). Find
 /// the offset whose byte ≈ the known charge %, and the 16-bit capacity pair.
 fn intent_ec_battery_dump() {
@@ -809,8 +797,8 @@ pub fn intent_dsdt() {
     let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
     kprintln!("  DSDT @ 0x{:x}, len {} bytes", addr, len);
 
-    // We now know EC0.BTST reads fields BSEL/BST_/BPR_/BRC_/BPV_ and BTIF
-    // reads BDC_/BFC_/BDV_. We need their EC byte offsets → dump the
+    // EC0.BTST reads fields BSEL/BST_/BPR_/BRC_/BPV_ and BTIF reads
+    // BDC_/BFC_/BDV_. To get their EC byte offsets, dump the
     // enclosing Field() definition(s). Find each field NameSeg, scan back to
     // the FieldOp (0x5B 0x81) that declares it, dump from there so the
     // bit-offset accumulation (incl. Offset() skips) is visible from the top.
@@ -882,15 +870,12 @@ pub fn intent_dsdt_full() {
     kprintln!("---DSDT-END---");
 }
 
-/// `dsdt send <ip> <port>` — stream the raw DSDT bytes over TCP to a
-/// `nc -l <port>` listener (exact bytes, no base64, no terminal-mirror ring
-/// overflow). Paced in small chunks so the NIC TX ring drains. The DSDT
-/// carries its own length at header bytes 4..8, so the receiver can self-verify
-/// the transfer is complete. Generic ACPI diagnostic.
-/// `dsdt send <ip> <port>`: DSDT and every SSDT, back to back, over one TCP
-/// connection. Each table carries its own length at bytes 4..8, so the
-/// receiver splits them (`nc -l <port> > tables.bin`). The SSDTs belong in
-/// it: CPU `_CST`, the display's `_BCL`/`_BCM` and more often live there.
+/// `dsdt send <ip> <port>`: DSDT and every SSDT, raw and back to back, over
+/// one TCP connection to a `nc -l <port>` listener. Each table carries its
+/// own length at bytes 4..8, so the receiver splits and verifies them
+/// (`nc -l <port> > tables.bin`). SSDTs are included because CPU `_CST`, the
+/// display's `_BCL`/`_BCM` and more often live there. Paced in small chunks
+/// so the NIC TX ring drains.
 pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
     let Some(dsdt) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
@@ -926,8 +911,8 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
                 return;
             }
             off = end;
-            // Pace ~10 ms per KB as before: without it only 61 of ~200 KB
-            // arrived — the close overtook what was still queued.
+            // Pace ~10 ms per KB; otherwise the close overtakes data still
+            // queued.
             let t = crate::interrupts::rdtsc();
             let d = t + crate::interrupts::tsc_freq() / 100;
             while crate::interrupts::rdtsc() < d {
@@ -1075,7 +1060,7 @@ pub fn intent_gpu(args: &str) {
             crate::gpu::dump_native();
         }
         "test-pll" | "test" => {
-            // Test PLL re-lock with firmware values (will kill display!)
+            // Test PLL re-lock with firmware values (kills the display)
             kprintln!("[npk] WARNING: This will disable the display!");
             kprintln!("[npk] Log will be saved after test.");
 
@@ -1234,7 +1219,7 @@ pub fn intent_gpu(args: &str) {
             // BCS blitter status
             let bcs_ok = crate::gpu::supports_blit();
             kprintln!("  BCS:      {}", if bcs_ok { "active" } else { "off (probe failed)" });
-            // Readback self-test: did the blit actually PAINT? Distinguishes
+            // Readback self-test: did the blit actually paint? Distinguishes
             // "copy broken" (verified=no) from "copy ok but scanout wrong"
             // (verified=yes but screen black) on Tiger Lake bring-up.
             kprintln!("  Verified: {} (readback={:#010x})",
@@ -1292,18 +1277,16 @@ pub fn intent_gpu(args: &str) {
 
 pub fn intent_shade(args: &str) {
     match args.trim() {
-        // Die Fensterliste mit ihrem ECHTEN Zustand — Art, Terminal, PID,
-        // Wurzel-Flag. `window_lines` (was das Dock liest) zeigt nur Titel,
-        // und genau daran laesst sich nicht sehen, warum eine „geschlossene"
-        // App weiterlebt.
+        // The window list with its full state (kind, terminal, PID, root
+        // flag). `window_lines`, which the dock reads, shows only titles and
+        // cannot explain why a closed app is still alive.
         "windows" | "wins" => {
             let dump = crate::shade::with_compositor(|c| c.dump_windows())
                 .unwrap_or_default();
             kprintln!();
             kprintln!("{}", dump.trim_end());
-            // Und wer haelt noch ein Terminal besetzt? Ein Fenster kann weg
-            // sein, waehrend die App darin weiterlaeuft — dann steht hier
-            // ein Terminal auf `app`, zu dem es kein Fenster mehr gibt.
+            // Terminals still held: a window can be gone while its app keeps
+            // running, which shows as a terminal on `app` with no window.
             let mut busy = alloc::string::String::new();
             for i in 0..16u8 {
                 if crate::wasm::has_wasm_app(i) {
@@ -1615,10 +1598,8 @@ fn help_head(title: &str, subtitle: &str) {
 }
 
 /// Help. ASCII only, on purpose: the terminal font draws 0x20..0x7E and
-/// silently SKIPS anything above it, while the column arithmetic still counts
-/// the bytes. The old help was full of `─`, `·` and `✓` — 297 of them — so
-/// every rule appeared as a blank line and every separator as a gap. It only
-/// ever looked right on the serial console.
+/// silently skips anything above it, while the column arithmetic still counts
+/// the bytes.
 pub fn intent_help_topic(topic: &str) {
     match topic {
         "files" | "storage" | "store" | "fs" | "content" | "cat" | "grep" => {
@@ -1875,7 +1856,7 @@ pub fn intent_set(args: &str) {
         crate::config::set(key, value);
         kprintln!("[npk] {} = {}", key, value);
         // The shared panel knob is the master: it drops any per-panel
-        // override so it always moves bar AND dock.
+        // override so it always moves bar and dock.
         if key == "shade.chrome_opacity"
             && crate::shade::widgets::palette::clear_panel_opacity_overrides()
         {

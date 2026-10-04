@@ -26,7 +26,7 @@ struct ModuleEntry {
 /// Format:
 /// ```
 /// [wallpaper]
-/// version=0.1.0
+/// version=1.2.3
 /// size=12345
 /// sha384=abcdef...
 /// ```
@@ -135,11 +135,10 @@ pub fn intent_install(args: &str) {
 
     // Download module
     let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, name);
-    // Bound the fetch by the manifest's own size rather than a fixed cap, so a
-    // growing module can never be silently truncated at a constant nobody
-    // remembered to raise (that is exactly how OTA broke when the kernel
-    // crossed 4 MiB). The manifest is unauthenticated here — SHA-384 and the
-    // signature below are the real gate — so it may only lower the bound.
+    // Bound the fetch by the manifest's own size rather than a fixed cap, so
+    // a growing module is never silently truncated. The manifest is
+    // unauthenticated here (SHA-384 and the signature below are the real
+    // gate), so it may only lower the bound.
     if entry.size == 0 || entry.size > MAX_MODULE_SIZE {
         kprintln!("[npk] Refusing implausible module size: {} bytes (max {})",
             entry.size, MAX_MODULE_SIZE);
@@ -269,10 +268,9 @@ pub fn apply_module(p: &ModulePlan) -> bool {
     let store_name = alloc::format!("sys/wasm/{}", p.name);
     let version_key = alloc::format!("sys/wasm/{}.version", p.name);
 
-    // A COMPLETE line before the work, never one left open waiting for its
-    // `OK`: the download itself prints (redirects, ESP writes, progress), and
-    // the tail then landed on some later line. Success adds nothing — the
-    // summary counts it; only a failure speaks again, on its own `!` line.
+    // A complete line before the work, never one left open for its `OK`: the
+    // download prints its own lines. Success adds nothing (the summary counts
+    // it); only a failure prints again, on its own `!` line.
     kprintln!("[npk]   + module   {:<10} {}", p.name, p.remote);
     let fail = |msg: core::fmt::Arguments| {
         kprintln!("[npk]   ! module   {:<10} {}", p.name, msg);
@@ -323,12 +321,12 @@ pub fn apply_module(p: &ModulePlan) -> bool {
 /// `uninstall <name> [--force]` — remove a WASM module, with safety
 /// guards that prevent the user from bricking their system:
 ///
-///  1. **Hard block:** the module configured as the active launcher
+///  1. Hard block: the module configured as the active launcher
 ///     (`sys/config/launcher`, default `drun`) cannot be uninstalled —
 ///     without it, Mod+D / spawn flow has nothing to open. The user
 ///     must point `sys/config/launcher` somewhere else first.
 ///
-///  2. **--force gate for bundled modules:** every kernel-bundled
+///  2. `--force` gate for bundled modules: every kernel-bundled
 ///     module (drun, loft, wifi, wallpaper, top, debug, …) is on the
 ///     OTA recovery path, so removing one is reversible — but easy
 ///     to do by accident. Without `--force` we refuse and print the
@@ -475,9 +473,7 @@ pub fn intent_modules() {
         if !matches!(e.kind, crate::npkfs::object::EntryKind::File) { continue; }
         if e.name.ends_with(".version") { continue; }
         let version_key = alloc::format!("sys/wasm/{}.version", e.name);
-        // `.trim()` is not cosmetic: the sidecar carries a trailing newline,
-        // and printing it un-trimmed put a blank line after every module that
-        // had one.
+        // The sidecar carries a trailing newline.
         let version = crate::npkfs::fetch(&version_key).ok()
             .and_then(|(data, _)| core::str::from_utf8(&data).ok().map(|s| String::from(s.trim())))
             .unwrap_or_else(|| String::from("builtin"));
@@ -503,8 +499,7 @@ pub fn intent_modules() {
 
 /// `assets` — what the system carries besides modules: fonts, icons, the
 /// microvm payloads, wallpapers. They arrive over the same signed OTA path
-/// as modules but were invisible until now, so a 261 MB userspace bundle
-/// sat on the disk with nothing to show it.
+/// as modules.
 pub fn intent_assets() {
     // Directories rather than the update table: this lists what npkFS
     // actually holds, including anything dropped in by hand.

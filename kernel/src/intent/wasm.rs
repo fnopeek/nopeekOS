@@ -27,24 +27,18 @@ pub fn intent_run(args: &str) {
 
     // BLAKE3 integrity verified by npkfs::fetch
 
-    // Delegate full standard caps (READ + WRITE + EXECUTE + RENDER) for
-    // 60 s. Trust comes from: (a) the module is ECDSA-P-384-signed and
-    // verified at install time, (b) the user explicitly typed `run`,
-    // (c) the wasmi sandbox bounds memory + fuel + host-fn surface.
-    // AUDIT stays off — apps should not introspect kernel state.
-    // 600_000 ticks ≈ 100 minutes at 100 Hz. wasmi's instantiate +
-    // first-touch of large bump heaps eats tens of seconds on the N100
-    // before the module's first host-fn call; the old 60 s TTL was
-    // expired by the time WASM actually started running. 100 min is
-    // generous + bounded so a hung worker still gets reaped.
-    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
-    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
-    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
-    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
-    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
-    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
-    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
-    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    // Delegate the standard caps (READ + WRITE + EXECUTE + RENDER). Trust
+    // comes from: (a) the module is ECDSA-P-384-signed and verified at
+    // install time, (b) the user explicitly typed `run`, (c) the sandbox
+    // bounds memory, fuel and host-fn surface. AUDIT stays off: apps should
+    // not introspect kernel state.
+    // TTL 600_000 ticks ≈ 100 minutes at 100 Hz: instantiation and
+    // first-touch of large heaps can take tens of seconds before the first
+    // host call, and the bound still reaps a hung worker.
+    // The fixed standard set plus what the module declares in `.npk.caps`,
+    // the same as the click path (`npk_spawn_module`). A union, not a
+    // replacement, so no module loses a right it relied on here. Open: the
+    // fixed set grants WRITE to modules that never declared it.
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
@@ -71,36 +65,24 @@ pub fn intent_run(args: &str) {
     // Determine function name: if no args, try _start; otherwise use module name
     let func_name = if args_vec.is_empty() { "_start" } else { module_name };
 
-    // Alles, was KEINE Zahl ist, geht als STARTARGUMENT mit — dieselbe
-    // Zeichenkette, die `npk_open` einer App gibt und die sie mit
-    // `npk_launch_arg` abholt. Bisher kam sie nur von einer anderen App;
-    // von der Shell aus fiel sie auf den Boden, und `beak https://…`
-    // startete beak ohne die Adresse, obwohl beak sie beim Start liest.
-    //
-    // Die Zahlenform bleibt, wie sie war: wer `<modul> 3 4` tippt, ruft
-    // weiterhin den gleichnamigen Export mit zwei i32.
+    // Non-numeric arguments become the launch argument, the same string
+    // `npk_open` hands an app and it reads with `npk_launch_arg`
+    // (`beak https://…`). Numeric arguments keep calling the export of the
+    // same name with i32 values (`<module> 3 4`).
     let launch_arg = if args_vec.is_empty() && !arg_str.trim().is_empty() {
         Some(alloc::string::String::from(arg_str.trim()))
     } else {
         None
     };
 
-    // 10 B fuel — bumped from 1 B after testdisk's 100 MB phase
-    // exhausted it. wasmi charges ~1 fuel per WASM instruction; bulk
-    // memory ops (memory.fill / memory.copy) for 100+ MB buffers
-    // burn through hundreds of millions of fuel units in a single
-    // call. 10 B keeps the bulk-bench paths comfortable without
-    // making infinite loops free.
-    // Eine Fensteranwendung gehoert auf einen Arbeitskern, nicht in die
-    // Shell-Schleife. Woran man sie erkennt: sie hat RENDER SELBST deklariert
-    // (die feste Liste oben vergibt es an jeden, taugt also nicht als
-    // Unterscheidung).
-    //
-    // Das war bisher der Unterschied zwischen „beak vom Dock" und „beak vom
-    // Prompt": der Klickweg spawnt, der Terminalweg fuehrte blockierend aus —
-    // mit `pid: 0`, und ohne Prozessnummer lehnt `fetch::begin_one` jeden
-    // asynchronen Abruf ab. beak ging auf und blieb leer, mit
-    // „async fetch needs a process" im Log.
+    // Fuel for the blocking path below: 10 B. wasmi charges ~1 fuel per
+    // instruction, and bulk memory ops on 100+ MB buffers burn hundreds of
+    // millions in one call; 10 B covers that without making infinite loops
+    // free.
+    // A window app belongs on a worker core, not in the shell loop. It is
+    // recognised by declaring RENDER itself (the fixed set grants RENDER to
+    // everyone). A blocking run would also have `pid: 0`, and
+    // `fetch::begin_one` refuses async fetches without a process.
     if declared.contains(capability::Rights::RENDER) {
         let term_idx = crate::shade::terminal::active_idx();
         if !wasm::spawn_on_worker_with_arg(
@@ -139,14 +121,10 @@ pub fn intent_run_background(module_name: &str) {
         }
     };
 
-    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
-    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
-    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
-    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
-    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
-    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
-    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
-    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    // The fixed standard set plus what the module declares in `.npk.caps`,
+    // the same as the click path (`npk_spawn_module`). A union, not a
+    // replacement, so no module loses a right it relied on here. Open: the
+    // fixed set grants WRITE to modules that never declared it.
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
@@ -177,8 +155,8 @@ pub fn intent_run_interactive(module_name: &str) {
     run_interactive_on(module_name, false)
 }
 
-/// Dasselbe, aber unter forge. Eigener Eingang statt einer globalen Fahne:
-/// so laeuft genau EIN Modul auf dem neuen Motor und alles andere wie bisher.
+/// The same under forge. A separate entry point rather than a global flag,
+/// so only this one module runs on the forge engine.
 pub fn intent_run_interactive_forge(module_name: &str) {
     run_interactive_on(module_name, true)
 }
@@ -196,14 +174,10 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
         }
     };
 
-    // Was die feste Liste seit v0.83.x vergibt, PLUS was das Modul in
-    // `.npk.caps` deklariert. Der Klickweg (`npk_spawn_module`) liest die
-    // Deklaration laengst; der Terminalweg tat es nicht — deshalb hatte beak
-    // vom Prompt aus kein NET und kein CANVAS, iris kein CANVAS, snap kein
-    // CAPTURE. Vereinigung statt Ersetzung: so verliert kein Modul ein Recht,
-    // auf das es sich hier bisher verlassen konnte. Dass die feste Liste ein
-    // WRITE an neun Module verschenkt, die es nie deklariert haben, bleibt
-    // offen — das ist eine eigene Entscheidung und ein eigener Commit.
+    // The fixed standard set plus what the module declares in `.npk.caps`,
+    // the same as the click path (`npk_spawn_module`). A union, not a
+    // replacement, so no module loses a right it relied on here. Open: the
+    // fixed set grants WRITE to modules that never declared it.
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
     let module_cap = match capability::create_module_cap(
         capability::Rights::READ
@@ -250,13 +224,10 @@ pub fn intent_run_driver(args: &str) {
     };
     let bdf_arg = parts.next().unwrap_or("").trim();
 
-    // One card, one driver. Nothing used to stop a second `driver wifi_ax200`
-    // next to the autostarted one: both map the MMIO, both run nic_init — so
-    // the newcomer resets the card and reloads its firmware UNDER the running
-    // instance — both post their own RB rings, and together they need twice the
-    // per-module DMA budget. The frames that come out of that read as corrupt
-    // (`RX payload offset mismatch ... found nowhere`), which sends the next
-    // hour of debugging after the radio instead of after the second process.
+    // One card, one driver. A second instance would map the same MMIO, reset
+    // the card and reload its firmware under the running one, post its own
+    // RX rings and double the DMA budget; the result looks like corrupt RX
+    // frames rather than a duplicate driver.
     if crate::drivers::netdev::wasm_nic_available() {
         kprintln!("[npk] a WASM network driver is already registered — refusing \
                    a second instance (it would reset the card under the running \

@@ -219,14 +219,11 @@ fn decode_with_wasm(name: &str) -> bool {
         Err(_) => return false,
     };
 
-    // PNG decode is one of the few WASM call sites where fuel-metering
-    // bites: a 4K image (3840×2400 → ~37 MB BGRA) can take many
-    // billions of wasmi instructions to DEFLATE-decompress + filter +
-    // swizzle. Earlier scaling heuristics (`data.len() * 200`) under-
-    // estimated the cost. Wallpaper is a bundled / signature-trusted
-    // module that runs once per intent and exits, so there's no DoS
-    // surface to defend against here — bypass fuel-metering with the
-    // interactive cap (= u64::MAX / 2, effectively unlimited).
+    // A 4K PNG (~37 MB BGRA) takes billions of instructions to inflate,
+    // filter and swizzle, and size-based fuel estimates fall short. The
+    // module is signed, runs once per intent and exits, so there is no DoS
+    // surface here: use the interactive cap (u64::MAX / 2, effectively
+    // unlimited).
     let fuel: u64 = u64::MAX / 2;
 
     // Run the WASM module (_start reads .npk-wallpaper-target, decodes, calls npk_set_wallpaper)
@@ -245,15 +242,11 @@ fn decode_with_wasm(name: &str) -> bool {
     }
 }
 
-/// Set a random wallpaper from the user's collection.
 /// The wallpaper to bring up at boot.
 ///
-/// A wallpaper someone chose outlives the boot that follows it — so the
-/// stored one wins, and the random pick is only for a system that has never
-/// been asked. Boot used to call `random_wallpaper` unconditionally, which
-/// not only ignored the choice but **overwrote** it: applying a wallpaper
-/// persists its name, so every boot silently replaced `wallpaper` in the
-/// config with whatever it had just rolled.
+/// A stored choice wins; the random pick is only for a system where none was
+/// made. Applying a wallpaper persists its name, so rolling unconditionally
+/// would overwrite the user's choice on every boot.
 pub fn apply_startup_wallpaper() {
     match crate::config::get("wallpaper") {
         // Explicitly cleared (`wallpaper clear` stores an empty value) —
@@ -273,6 +266,7 @@ pub fn apply_startup_wallpaper() {
     }
 }
 
+/// Set a random wallpaper from the user's collection.
 pub fn random_wallpaper() {
     let names = get_wallpaper_names();
     if names.is_empty() {

@@ -1,18 +1,9 @@
 //! HTTP/2 client (RFC 9113).
 //!
-//! Why this exists at all: measured 2026-07-22, Wikimedia's front end
-//! throttles HTTP/1.1 clients — four images, then `429 Too Many Requests`
-//! for everything after, at a sustainable rate of about half a request per
-//! second. Over HTTP/2 the identical burst, from the same address with the
-//! same headers, is served in full. Backing off on `Retry-After` does not
-//! help (waiting past the advertised second still returns 429) and opening
-//! more HTTP/1.1 connections makes it worse, because the limit counts per
-//! address rather than per connection. So h2 is not a nicety here; it is how
-//! a page full of sub-resources loads at all.
-//!
-//! It also happens to be the concurrency story: one connection carrying many
-//! interleaved streams is what browsers do, and it replaces the ~8 serial
-//! round-trips a page currently spends before its first paint.
+//! Some front ends (Wikimedia) throttle HTTP/1.1 clients per address with
+//! `429`, while serving the same burst over HTTP/2 in full; h2 is how a page
+//! full of sub-resources loads at all. One connection carrying many
+//! interleaved streams also replaces serial round-trips.
 //!
 //! Scope: client only, GET only, no server push (we disable it), no
 //! prioritisation (advisory anyway, and RFC 9113 deprecated the scheme).
@@ -69,17 +60,16 @@ const WINDOW: u32 = 4 * 1024 * 1024;
 const WINDOW_REFILL_AT: u32 = WINDOW / 2;
 
 /// A TLS record can carry 16 KiB; `tls_recv` copies at most `buf.len()` and
-/// **drops the rest of the record**, so the read buffer must exceed the
+/// drops the rest of the record, so the read buffer must exceed the
 /// largest record or we silently lose bytes.
 const READ_BUF: usize = 17 * 1024;
 
-/// Wie lange EIN `fill_to` insgesamt auf seine Bytes wartet, in Ticks (100 Hz).
+/// Total time one `fill_to` waits for its bytes, in ticks (100 Hz).
 ///
-/// Die aeusserste Schranke des h2-Lesewegs — und damit die einzige Zahl in
-/// dieser Kette, die wirklich bindet. Darunter liegen `QUIET_TRANSFER` x
-/// `ATTEMPT_TICKS` (bis 60 s) und `ATTEMPT_TICKS_REUSED` (1 s); `fill_to`
-/// stutzt beide auf das, was hiervon uebrig ist. Wer eine der inneren Zahlen
-/// anhebt, hebt damit NICHT diese hier an — das ist der Sinn der Rangfolge.
+/// The outermost bound of the h2 read path and the only one that binds:
+/// `fill_to` clips the inner `QUIET_TRANSFER` x `ATTEMPT_TICKS` and
+/// `ATTEMPT_TICKS_REUSED` to what is left of it. Raising an inner value does
+/// not raise this one.
 const FILL_BUDGET: u64 = 1500; // 15 s
 
 /// Cap on one response body. Larger than any page asset we fetch; a peer
@@ -201,12 +191,11 @@ pub struct Http2 {
     dec: hpack::Decoder,
     /// Undecoded bytes left over from the last read.
     rx: Vec<u8>,
-    /// Ob seit dem letzten Senden auf dieser Verbindung ueberhaupt ein Byte
-    /// kam. Entscheidet, wie lange auf Daten gewartet wird — siehe `fill_to`.
+    /// Whether any byte arrived on this connection since the last send.
+    /// Decides how long to wait for data; see `fill_to`.
     answered: bool,
-    /// Ob diese Verbindung aus dem Pool kam. Auf einer wiederverwendeten ist
-    /// das Schweigen der Gegenstelle wahrscheinlicher und der Neuaufbau
-    /// billig, also wird frueher aufgegeben.
+    /// Whether this connection came from the pool. A reused one is more
+    /// likely dead and cheap to replace, so we give up sooner.
     pub reused: bool,
     next_id: u32,
     peer_max_frame: usize,
@@ -284,13 +273,11 @@ impl Http2 {
     /// This is the whole point of the module: the requests all go out before
     /// any response is read, so the round-trips overlap instead of stacking.
     /// Results come back positionally, one per requested path.
-    /// `accept_gzip` asks for the transfer compressed. The caller unpacks —
-    /// see `intent::gzip`. Measured 4,1x-9,9x fewer bytes per page on the
-    /// browser's target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
-    /// `cookies` ist POSITIONELL zu `paths`: Eintrag `i` ist die
-    /// `Cookie`-Kopfzeile fuer `paths[i]`, oder leer. Positionell und nicht
-    /// „einer je Host", weil ein Keks einen `Path` haben darf — zwei
-    /// Ressourcen desselben Hosts bekommen dann verschiedene.
+    /// `accept_gzip` asks for the transfer compressed; the caller unpacks
+    /// (see `intent::gzip`).
+    /// `cookies` is positional to `paths`: entry `i` is the `Cookie` header
+    /// for `paths[i]`, or empty. Per path rather than per host because a
+    /// cookie may carry a `Path`.
     pub fn get_all(
         &mut self,
         authority: &str,
@@ -318,10 +305,8 @@ impl Http2 {
             if accept_gzip {
                 fields.push(("accept-encoding", "gzip"));
             }
-            // **Der Keks gehoert auch an die Unterressource.** Ohne ihn kam
-            // das Dokument angemeldet und jedes Bild darin anonym zurueck —
-            // auf einer Seite hinter einer Anmeldung sah das aus wie ein
-            // Bildfehler und war keiner.
+            // Sub-resources carry the cookie too, or a page behind a login
+            // gets its images anonymously.
             if let Some(c) = cookies.get(pi) {
                 if !c.is_empty() { fields.push(("cookie", c)); }
             }
@@ -350,10 +335,9 @@ impl Http2 {
                 head_seen: false,
             });
         }
-        // Neuer Austausch: bis zur ersten Antwort gilt die kurze Geduld. Eine
-        // Verbindung aus dem Pool HAT frueher geantwortet — ohne dieses
-        // Zuruecksetzen greift die Unterscheidung genau im Fall nicht, fuer
-        // den sie da ist.
+        // New exchange: the short first-byte patience applies again. A pooled
+        // connection has answered before, so without this reset the
+        // distinction would never apply to it.
         self.answered = false;
         self.write(&out)?;
         self.pump(&mut streams, &mut Dest::Buffer)?;
@@ -380,9 +364,8 @@ impl Http2 {
     ///
     /// The document path's shape, as opposed to `get_all`'s batch: one
     /// stream, any method, a body if there is one, and DATA handed to `sink`
-    /// as it arrives. It exists because the document fetch was the last
-    /// caller still on HTTP/1.1 — and therefore the only one Wikimedia still
-    /// throttles (§8.1). Redirects are NOT followed here: the host may
+    /// as it arrives, so the document fetch is not left on throttled
+    /// HTTP/1.1. Redirects are not followed here: the host may
     /// change, so that decision stays one layer up, with the caller that
     /// already owns the method switch and the per-hop headers.
     ///
@@ -469,7 +452,7 @@ impl Http2 {
             frame(&mut out, FRAME_DATA, last, id, chunk);
         }
         self.conn_send_window -= body.len() as u32;
-        self.answered = false; // wie in `get_all`
+        self.answered = false; // as in `get_all`
         self.write(&out)?;
 
         let mut streams = alloc::vec![Stream {
@@ -557,7 +540,7 @@ impl Http2 {
                 }
             }
             FRAME_WINDOW_UPDATE => {
-                // Credit for OUR send direction. Only the connection-level
+                // Credit for our send direction. Only the connection-level
                 // grant is banked: `request` refuses a body that does not fit
                 // the window it already holds, so a per-stream grant always
                 // arrives too late to change a decision.
@@ -638,7 +621,7 @@ impl Http2 {
             .map_err(|_| Http2Error::Protocol("HPACK decode failed"))?;
 
         if let Some(id) = target {
-            // This block's OWN status, not the first one on the stream: a 1xx
+            // This block's own status, not the first one on the stream: a 1xx
             // is informational and the response we are here for is still
             // coming, so the sink must not be told it has arrived.
             let status = decoded
@@ -648,7 +631,7 @@ impl Http2 {
                 .unwrap_or(0);
             if let Some(s) = find(streams, id) {
                 // A 1xx is informational and the answer is still coming. Drop
-                // it: keeping its fields would leave TWO `:status` on the
+                // it: keeping its fields would leave two `:status` on the
                 // stream, and a reader that takes the first one reads 103
                 // Early Hints as the response — which is what a CDN sends
                 // before the document, over h2 far more often than over
@@ -753,7 +736,7 @@ impl Http2 {
             let value = be32(&chunk[2..6]);
             if id == SETTINGS_INITIAL_WINDOW_SIZE {
                 // §6.5.2: above 2^31-1 is a connection error. It bounds what
-                // we may send on a stream, which used to be nothing at all.
+                // we may send on a stream.
                 if value > 0x7FFF_FFFF {
                     return Err(Http2Error::Protocol("illegal INITIAL_WINDOW_SIZE"));
                 }
@@ -800,36 +783,27 @@ impl Http2 {
     /// Read until `self.rx` holds at least `n` bytes. False means the peer
     /// closed first.
     ///
-    /// `poll_rx_only`, NOT `poll`: the full poll also runs a shade render
-    /// pass, and calling that once per idle turn of a receive loop costs far
-    /// more than the receive itself — the HTTP/1.1 path learned this the hard
-    /// way (see the note on `tls_recv_poll`). Timeout is measured in ticks
-    /// rather than iterations so it means 15 seconds on any machine.
+    /// `poll_rx_only`, not `poll`: the full poll also runs a shade render
+    /// pass, which per idle turn of a receive loop costs far more than the
+    /// receive itself (see `tls_recv_poll`). The timeout is in ticks rather
+    /// than iterations so it means the same on any machine.
     fn fill_to(&mut self, n: usize) -> Result<bool, Http2Error> {
         let mut buf = vec![0u8; READ_BUF];
         let start = crate::interrupts::ticks();
         while self.rx.len() < n {
             crate::net::poll_rx_only();
-            // **Die aeussere Schranke ist die Autoritaet, und sie wird HIER
-            // geprueft, nicht nur im `Ok(0)`-Zweig.**
-            //
-            // Vorher stand sie dort unten und war Dekoration: ein einziger
-            // `tls_recv_patient(QUIET_TRANSFER=6, ATTEMPT_TICKS=1000)` wartet
-            // bis zu 60 s IN SICH, und die 15 s daueber konnten erst danach
-            // zuschlagen. Eine Schranke, die groesser ist als die Geduld, die
-            // sie begrenzen soll, begrenzt nichts
-            // ([[feedback-threshold-without-a-comparison]]).
+            // The outer budget is checked on every turn, not only after an
+            // empty read: one `tls_recv_patient` call can itself wait far
+            // longer than the whole budget.
             let spent = crate::interrupts::ticks().wrapping_sub(start);
             let left = FILL_BUDGET.saturating_sub(spent);
             if left == 0 {
                 return Err(Http2Error::Tls("timed out waiting for data"));
             }
-            // Solange auf DIESER Verbindung seit dem Senden noch nichts kam,
-            // ist die kurze Geduld richtig: eine aus dem Pool genommene
-            // Verbindung, die der Server inzwischen geschlossen hat, sieht
-            // lokal lebendig aus (siehe `PooledConn` in `intent/http.rs`) und
-            // hat einen Bildabruf 60 s gekostet. Sobald das erste Byte da ist,
-            // gilt wieder die volle Nachsicht fuer stockende Uebertragungen.
+            // Until this connection has answered since the send, use the short
+            // patience: a pooled connection the server has since closed still
+            // looks alive locally (see `PooledConn` in `intent/http.rs`). Once
+            // the first byte is in, stalling transfers get the full patience.
             let (patience, attempt) = if self.answered {
                 (crate::tls::QUIET_TRANSFER, crate::tls::ATTEMPT_TICKS)
             } else if self.reused {
@@ -837,9 +811,9 @@ impl Http2 {
             } else {
                 (crate::tls::QUIET_FIRST_BYTE, crate::tls::ATTEMPT_TICKS)
             };
-            // `tls_recv_patient` wartet bis zu `patience * attempt` Ticks. Beides
-            // wird auf das gestutzt, was vom Budget uebrig ist — sonst kaeme der
-            // Rueckweg erst, wenn die INNERE Geduld erschoepft ist.
+            // `tls_recv_patient` waits up to `patience * attempt` ticks; clip
+            // both to the remaining budget so the inner patience cannot
+            // outlast it.
             let attempt = attempt.min(left);
             let patience = patience.min((left / attempt.max(1)).max(1) as u32);
             match crate::tls::tls_recv_patient(&mut self.tls, &mut buf, patience, attempt) {
@@ -866,15 +840,15 @@ impl Http2 {
         !self.goaway && self.tls.is_healthy()
     }
 
-    /// Adresse und Port der Gegenstelle — die erste Haelfte der
-    /// Coalescing-Bedingung (RFC 7540 §9.1.1).
+    /// Peer address and port: the first half of the coalescing condition
+    /// (RFC 7540 §9.1.1).
     pub fn peer(&self) -> ([u8; 4], u16) {
         self.tls.peer()
     }
 
-    /// Deckt das Zertifikat dieser Verbindung auch `host`? Die zweite Haelfte.
-    /// Ein GOAWAY schliesst sie aus: eine Verbindung, die keine neuen Streams
-    /// mehr annimmt, ist fuer einen zweiten Namen erst recht nichts.
+    /// Whether this connection's certificate also covers `host`: the second
+    /// half. A connection that received GOAWAY accepts no new streams and is
+    /// never reused for another name.
     pub fn covers(&self, host: &str) -> bool {
         !self.goaway && self.tls.covers(host)
     }
@@ -934,11 +908,8 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
             return Err(Http2Error::Tls("TLS handshake failed"));
         }
     };
-    // Which leg is slow? The connect swings between ~200 ms and ~2100 ms
-    // across runs; 2 s is about a retransmission timeout, so name the leg.
-    // tcp+tls came to 90 ms while the caller measured 2100 for the same
-    // connect, so the preface — the first application write after the
-    // handshake — is timed too rather than left as the unnamed remainder.
+    // Log each leg (tcp, tls, preface) so a slow connect names its cause; the
+    // preface is the first application write after the handshake.
     let t_start = crate::interrupts::ticks();
     let legs = |t_start: u64| {
         kprintln!("[npk]   h2 tcp {} ms + tls {} ms + preface {} ms",

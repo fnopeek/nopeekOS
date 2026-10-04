@@ -8,12 +8,10 @@ const HTTP_MAX_RESPONSE: usize = 128 * 1024; // 128 KB
 
 /// Per-request chatter — the connect breakdown and the HTTP status lines.
 ///
-/// On by default: for `https <host>` the transfer IS what you asked about,
-/// and the `dns + arp + tcp + tls` split is the tool that names a slow leg
-/// (see the netbench work). But an intent that makes several requests just to
-/// answer a question of its own — `update` fetches three manifests before it
-/// can even say what changed — drowns its own output in them. Such a caller
-/// takes a `quiet()` guard for its duration; errors still speak.
+/// On by default: for `https <host>` the transfer is what was asked about,
+/// and the `dns + arp + tcp + tls` split names a slow leg. An intent that
+/// makes several requests to answer its own question (e.g. `update` fetching
+/// manifests) takes a `quiet()` guard for its duration; errors still print.
 static HTTP_QUIET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn chatty() -> bool {
@@ -34,30 +32,12 @@ impl Drop for QuietGuard {
     }
 }
 
-/// How we identify ourselves. Deliberately NOT a borrowed browser string.
+/// How we identify ourselves. Deliberately not a borrowed browser string.
 ///
-/// This used to read `Mozilla/5.0 (X11; Linux x86_64) beak/0.1`, added in the
-/// belief that the `Mozilla` prefix bought a friendlier rate-limit bucket at
-/// Wikimedia. Measured on 2026-07-22, that was wrong twice over: the 429s came
-/// from speaking HTTP/1.1, not from the name, and the same burst over h2 is
-/// served in full with this honest string. Sending *no* User-Agent is not an
-/// option either — that earns a 403, and Wikimedia's policy rightly asks for
-/// an identifiable client.
-///
-/// One string covers OTA as well as page fetches, since both go through this
-/// client. Splitting them would mean threading a parameter through every
-/// layer for little gain -- which is also why the name here is the OS and not
-/// `beak`: an OTA request does not come from the browser.
-///
-/// Two things the honest string still got wrong, both found on 2026-08-25 when
-/// Wikimedia answered a test burst with 429 and a pointer to its robot policy:
-///
-/// * **It said `0.1` while beak stood at 0.35.3.** A version that is typed by
-///   hand goes stale the moment nobody remembers it exists. `env!` cannot.
-/// * **It named no contact.** Wikimedia's User-Agent policy asks for a way to
-///   reach whoever is running the client, and an unidentifiable client is the
-///   one that gets throttled. Adding that is the OPPOSITE of the masquerade
-///   this comment argues against: it says MORE about who we are, not less.
+/// Sending no User-Agent earns a 403, and Wikimedia's User-Agent policy asks
+/// for an identifiable client with a contact, so the string names the OS, its
+/// version (from `env!`, so it cannot go stale) and a URL. One string covers
+/// OTA and page fetches alike, since both go through this client.
 pub(crate) const USER_AGENT: &str = concat!(
     "nopeekOS/", env!("CARGO_PKG_VERSION"),
     " (+https://github.com/fnopeek/nopeekOS)"
@@ -68,7 +48,7 @@ struct HttpFlags {
     headers_only: bool,  // -h: show only headers
     body_only: bool,     // -b: show only body
     silent: bool,        // -s: no status output
-    discard: bool,       // -d: stream + count + report MB/s, DON'T store (RAM only)
+    discard: bool,       // -d: stream + count + report MB/s, do not store (RAM only)
 }
 
 /// Parse flags from anywhere in the args, return flags + cleaned args.
@@ -118,7 +98,7 @@ fn do_http_request(args: &str, use_tls: bool) {
     }
 
     // Step 1: peel off `> store-redirect` first. Has to happen
-    // BEFORE the host/path split because for inputs like
+    // before the host/path split because for inputs like
     // `host/long/url/path > tmp/file` the first whitespace lives
     // before the `>`, so a naive whitespace split would assign
     // `host/long/url/path` to the host and break DNS.
@@ -146,25 +126,16 @@ fn do_http_request(args: &str, use_tls: bool) {
     // Streaming fast-path: `-d` or `> name` writes the body straight into
     // npkFS via the ChunkedWriter so a multi-GB ISO / movie download doesn't
     // fill the heap. Peak RAM = one 16 MiB chunk regardless of total size.
+    // Applies to both schemes; `HTTP_MAX_RESPONSE` only bounds the buffered
+    // path below, which prints the response.
     //
-    // **Fuer BEIDE Schemata.** Hier stand, Klartext-HTTP bleibe beim
-    // Speichern auf dem gepufferten Weg mit seinen 128 KB — das tut es
-    // nicht, und die Bedingung unten sagt es auch nicht: sie fragt nur nach
-    // `-d` oder `> name`. `HTTP_MAX_RESPONSE` gilt allein fuer den Weg
-    // DARUNTER, der die Antwort auf den Schirm schreibt. Der Satz hat mich
-    // einmal eine falsche Auskunft gekostet.
-    //
-    // ⚠ Und was hier NICHT geprueft wird: `net.allow_plain_http`. Der
-    // Schalter sitzt in `parse_url`, und die ruft nur der MODULweg
-    // (`npk_http_*`, also beak). Wer `http …` in die Shell tippt, bekommt
-    // Klartext ohne Schalter und ohne die KLARTEXT-Zeile, die `parse_url`
-    // sonst druckt. Das ist vertretbar — am eigenen Prompt ist der Mensch
-    // die Instanz, nicht die Seite —, aber es ist eine Asymmetrie und
-    // gehoert benannt statt entdeckt.
+    // `net.allow_plain_http` is not checked here: that switch lives in
+    // `parse_url`, which only the module path (`npk_http_*`) calls. Plain
+    // http typed at the shell prompt is the user's own decision.
     if flags.discard || store_as.is_some() {
-        // Sink for the streamed body. With -d we DON'T open npkFS — bytes are
-        // counted + thrown away, so this measures the pure net throughput
-        // and rules the disk OUT as a bottleneck. Otherwise stream to npkFS.
+        // Sink for the streamed body. With -d we do not open npkFS: bytes are
+        // counted and thrown away, so this measures pure net throughput
+        // and rules the disk out as a bottleneck. Otherwise stream to npkFS.
         // Works for both https (TLS) and http (plain) — plain http sidesteps
         // our minimal TLS for arbitrary hosts and is a cleaner speed test.
         let mut writer: Option<(String, crate::npkfs::fs::StreamingWriter)> = if flags.discard {
@@ -241,19 +212,14 @@ fn do_http_request(args: &str, use_tls: bool) {
                     kprintln!("[npk]      NIC-usb: {} Mbit  avg_batch={}B  empty_polls={}%  ring_depth={}  | tx_acks={} tx_wait={}ns",
                         nic_mbit, rxb / deliv1, empty * 100 / polls.max(1),
                         armed / deliv1, txc, if txc > 0 { txcyc / txc / ghz } else { 0 });
-                    // **Was haben WIR angeboten, und woher kam der Deckel?**
-                    // Auf einer Leitung mit Latenz ist das die Frage: `srtt`
-                    // wird in 100-Hz-Takten gemessen, also mit 10 ms Koernung.
-                    // Ein RTT unter 10 ms ergibt die Probe 0 — und die wird
-                    // VERWORFEN (`(1..6000).contains`), also bleibt `srtt` auf
-                    // null und der Deckel faellt auf die 50-ms-Annahme zurueck.
-                    // Ein RTT von 20 ms ergibt 1-2 Takte, und daraus wird ein
-                    // KLEINERER Deckel als auf der schnellen Leitung. Genau
-                    // verkehrt herum, und hier steht es als Zahl.
+                    // Offered receive window and its cap. `srtt` is sampled
+                    // at 100 Hz (10 ms granularity); a sub-10 ms RTT yields a
+                    // 0 sample that is discarded, so the cap falls back to the
+                    // 50 ms assumption, while a 20 ms RTT yields a smaller cap.
                     let (wnd, srtt, cap) = crate::net::tcp::window_diag();
                     kprintln!("[npk]      tcp-wnd: angeboten={}K  deckel={}K  srtt={} ms",
                         wnd / 1024, cap / 1024, srtt);
-                    // Do WE discard received bytes in the rx_desc walker?
+                    // Bytes discarded by our own rx_desc walker.
                     let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
                     kprintln!("[npk]      rx-parse: frames={}  truncated_batches={}  DISCARDED={} B",
                         frames, trunc, discard);
@@ -261,9 +227,9 @@ fn do_http_request(args: &str, use_tls: bool) {
                 }
                 Ok(())
             };
-            // Cross-scheme redirect-following download: lets `https cdimage…`
-            // chase its 302 to a fast plain-http mirror (the user's gigabit
-            // source) where strict https would dead-end.
+            // Cross-scheme redirect-following download: an https URL may
+            // redirect to a plain-http mirror, where strict https would
+            // dead-end.
             user_download_streaming(host, path, use_tls, max_size, &mut sink)
         };
         if let Err(e) = stream_result {
@@ -272,9 +238,7 @@ fn do_http_request(args: &str, use_tls: bool) {
             } else {
                 kprintln!("[npk] download failed: {}", e);
             }
-            // Die Zaehler des Chips gehoeren auf JEDEN Ausgang — sie
-            // standen nur hinter dem Erfolgsfall, also genau dort nicht,
-            // wo man sie braucht.
+            // Chip counters are dumped on every exit, failures included.
             if crate::xhci::nic_attached() {
                 crate::drivers::rtl8153::dump_tally("nach Abbruch");
                 crate::drivers::rtl8153::log_link_diag();
@@ -567,40 +531,31 @@ pub struct HttpRequest<'a> {
     pub body: &'a [u8],
     /// Ask for `gzip` and inflate the answer here, before the sink sees it.
     ///
-    /// Off by default, and that is deliberate: OTA downloads are already
-    /// compressed and signed, so for them this would be work without an
-    /// answer. It is the BROWSER that pays for its absence — the same
-    /// document arrives 4,1x to 9,9x larger without it, measured across the
-    /// target corpus (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8).
+    /// Off by default: OTA downloads are already compressed and signed. The
+    /// browser sets it, since documents are several times larger without it.
     pub accept_gzip: bool,
-    /// Diese Anfrage geht im KLARTEXT, ohne TLS.
+    /// Send this request in plaintext, without TLS.
     ///
-    /// Aus by default, und das ist keine Vorsichtsmassnahme, sondern die
-    /// Politik: `parse_url` setzt sie nur, wenn `net.allow_plain_http` an ist
-    /// UND der Host eine literale private Adresse ist. Wer sie von Hand setzt,
-    /// umgeht diese Pruefung — also nicht tun.
+    /// Off by default as policy: `parse_url` sets it only when
+    /// `net.allow_plain_http` is on and the host is a literal private
+    /// address. Setting it by hand bypasses that check.
     pub plain: bool,
     /// Offer HTTP/2 for this request, falling back to HTTP/1.1 when the host
     /// does not speak it.
     ///
-    /// Off by default, and that is a decision about blast radius, not about
-    /// h2: OTA and module installs come down this same path, and an update
-    /// that cannot download is the one failure this project cannot fix over
-    /// the air. The browser — which is the caller Wikimedia throttles (§8.1)
-    /// — asks for it. Flip the default once a release has h2 documents on
-    /// hardware behind it.
+    /// Off by default to limit blast radius: OTA and module installs use this
+    /// path, and an update that cannot download cannot be fixed over the air.
+    /// The browser asks for it.
     pub try_h2: bool,
-    /// Die Reichweite des DOKUMENTS, das diese Anfrage ausloest.
+    /// Reach of the document that triggers this request.
     ///
-    /// `None` heisst „nicht von einer Seite": OTA, Modulinstallation,
-    /// netbench. Die sind das Betriebssystem selbst und duerfen ueberallhin.
-    /// `Some(Reach::Public)` heisst „eine oeffentliche Seite fragt" — und
-    /// dann ist das private Netz des Nutzers zu.
+    /// `None` means "not from a page" (OTA, module install, netbench): the OS
+    /// itself, allowed anywhere. `Some(Reach::Public)` means a public page is
+    /// asking, and the user's private network is closed to it.
     ///
-    /// Vorgabe ist `None`, und das ist hier ausnahmsweise die LOCKERE Wahl.
-    /// Sie ist trotzdem richtig: der Vorgabewert bedient die Aufrufer im
-    /// Kernel, und der einzige Weg, auf dem Seitencode je hierher kommt,
-    /// ist `npk_http_begin` — der setzt das Feld ausdruecklich.
+    /// The default `None` is the permissive choice; it serves kernel callers,
+    /// and the only path page code takes here, `npk_http_begin`, sets the
+    /// field explicitly.
     pub from_reach: Option<Reach>,
 }
 
@@ -614,7 +569,7 @@ impl Default for HttpRequest<'_> {
 /// The response header block, minus the status line, capped and cleaned.
 ///
 /// Drops any line starting with a colon. No HTTP field name may begin with
-/// one, so nothing legitimate is lost — and it is what keeps a server from
+/// one, so nothing legitimate is lost, and it keeps a server from
 /// writing its own `:hop https://yourbank.example` into its headers and
 /// having the browser file the cookies that follow against a host it does
 /// not own.
@@ -637,15 +592,15 @@ fn capture_headers(hdr_str: &str) -> String {
 /// Append one hop's response headers under a `:hop <url>` marker.
 ///
 /// A redirect chain can cross origins, and a cookie belongs to the response
-/// that SENT it — filing a login cookie against the URL the chain happened to
+/// that sent it; filing a login cookie against the URL the chain happened to
 /// end at scopes it to the wrong host. So each block says where it came from.
 ///
 /// `:hop` cannot be forged by a server: a field name may not start with a
 /// colon, and `capture_headers` drops any line that does.
 fn push_hop(out: &mut String, host: &str, path: &str, headers: &str, tls: bool) {
-    // Auch hier das ECHTE Schema. Der Behaelter liest aus dieser Marke, ob
-    // die Antwort ueber einen sicheren Kanal kam — ein `Secure`-Keks, der im
-    // Klartext ankam, darf nicht abgelegt werden, als waere er es nicht.
+    // The real scheme: the cookie jar reads from this marker whether the
+    // response came over a secure channel, so a `Secure` cookie received in
+    // plaintext is not stored as if it were.
     out.push_str(if tls { ":hop https://" } else { ":hop http://" });
     out.push_str(host);
     out.push_str(path);
@@ -661,7 +616,7 @@ fn push_hop(out: &mut String, host: &str, path: &str, headers: &str, tls: bool) 
 /// the kernel hold an unbounded string per request.
 const MAX_REPLY_HEADERS: usize = 8 * 1024;
 
-/// Headers a guest may NOT set, because we own them.
+/// Headers a guest may not set, because we own them.
 ///
 /// `Host` decides which virtual host answers, and letting a caller state one
 /// that differs from the TLS SNI name is a request for the wrong origin's
@@ -678,7 +633,7 @@ const RESERVED_HEADERS: &[&str] =
 
 /// Is this a header line a guest is allowed to send?
 ///
-/// Rejects CR, LF and NUL anywhere — a newline in a header VALUE ends the
+/// Rejects CR, LF and NUL anywhere: a newline in a header value ends the
 /// header block early and everything after it is read as another request, so
 /// this single check is what stops a sandboxed app from smuggling one. Also
 /// rejects a missing colon, an empty name, and the reserved names above.
@@ -694,7 +649,7 @@ pub fn header_line_is_safe(line: &str) -> bool {
         return false;
     }
     let Some((name, _)) = line.split_once(':') else { return false };
-    // NOT trimmed, deliberately. A leading space makes the line an obsolete
+    // Not trimmed, deliberately. A leading space makes the line an obsolete
     // folded continuation of the header before it, and a space before the
     // colon is a name a server may read differently than we do. Both are
     // ways to mean something other than what this line looks like, so both
@@ -705,31 +660,23 @@ pub fn header_line_is_safe(line: &str) -> bool {
     !RESERVED_HEADERS.iter().any(|r| name.eq_ignore_ascii_case(r))
 }
 
-/// Is this a method a guest is allowed to send? A token of ASCII letters,
-// ── Reichweite ───────────────────────────────────────────────────────────
+// ── Reach ────────────────────────────────────────────────────────────────
 //
-// Siehe `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2. Kurz: eine oeffentliche
-// Seite darf das private Netz des Nutzers nicht erreichen. CORS deckt das
-// NICHT ab — es schuetzt den Zielserver, nicht das Netz, in dem der Browser
-// steht. Browser haben die Regel als *Private Network Access* nachgerueckt
-// und bis heute nicht vollstaendig; wir bauen sie von Anfang an.
-//
-// Warum im Kernel und nicht in beak: eine Grenze, die das Modul im
-// Sandkasten selbst zieht, ist keine. beak sagt nur, WOHER eine Anfrage
-// kommt; ob sie darf, entscheidet diese Datei.
+// A public page may not reach the user's private network
+// (`docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2). CORS does not cover this:
+// it protects the target server, not the network the browser sits in
+// (cf. Private Network Access). Enforced in the kernel because a boundary
+// the sandboxed module draws itself is none; beak only says where a request
+// comes from.
 
 pub use super::reach::{classify_ip, Reach};
 
-/// Einen Host aufloesen UND die Reichweite pruefen — in EINEM Schritt.
+/// Resolve a host and check its reach in one step, so the check cannot be
+/// forgotten; bypassing it has to be visible.
 ///
-/// Getrennt waeren es zwei, und die zweite wuerde irgendwo vergessen: im
-/// Baum standen fuenf Stellen mit demselben
-/// `parse_ip(h).or_else(|| dns::resolve(h))`. Wer hier durchgeht, ist
-/// geprueft; wer die Pruefung umgehen will, muss es sichtbar tun.
-///
-/// `from` ist die Reichweite des Dokuments, das die Anfrage ausloest.
-/// `None` heisst „nicht von einer Seite" — OTA, Modulinstallation, netbench.
-/// Die duerfen ueberallhin, sie sind das Betriebssystem selbst.
+/// `from` is the reach of the document that triggers the request. `None`
+/// means "not from a page" (OTA, module install, netbench): the OS itself,
+/// allowed anywhere.
 pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'static str> {
     let bare = split_host_port(host).0;
     let ip = parse_ip(bare)
@@ -746,11 +693,10 @@ pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'sta
     Ok(ip)
 }
 
-/// Die Reichweite eines DOKUMENTS, aus seiner Adresse.
+/// Reach of a document, from its URL, resolved here in the kernel.
 ///
-/// Aufgeloest wird hier, im Kernel. Alles, was keine brauchbare Adresse hat
-/// oder sich nicht aufloesen laesst, ist `Public` — die strengste Klasse.
-/// Ein Fehlschlag darf nie mehr erlauben als ein Erfolg.
+/// Anything without a usable address or that does not resolve is `Public`,
+/// the strictest class: a failure must never allow more than a success.
 pub fn reach_of_url(url: &str) -> Reach {
     let rest = match url.split_once("://") {
         Some((_, r)) => r,
@@ -767,7 +713,8 @@ pub fn reach_of_url(url: &str) -> Reach {
     }
 }
 
-/// nothing else — the method sits at the very front of the request line, so
+/// Is this a method a guest is allowed to send? A token of ASCII letters,
+/// nothing else: the method sits at the very front of the request line, so
 /// a space or a newline there rewrites the whole request.
 pub fn method_is_safe(m: &str) -> bool {
     !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_uppercase())
@@ -825,21 +772,17 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
     for _ in 0..4 {
-        // **Jeder Sprung neu.** Eine Weiterleitung auf `192.168.1.1` ist
-        // genau der Weg, den man sonst nimmt, wenn nur der erste Aufruf
-        // geprueft wird — und sie kostet den Angreifer nichts.
+        // Checked on every hop: otherwise a redirect to a private address
+        // would bypass a check made only on the first request.
         if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
             return Err(e);
         }
         // Vec-mode: accumulate into out, sink just extends it.
         let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        // Progress heartbeat. The streaming asset path reports every 8 MiB —
-        // but a kernel is ~4 MB and a module ~1.4 MB, so NEITHER ever crossed
-        // that threshold and both downloaded in complete silence. Over a slow
-        // WiFi link that is indistinguishable from a hang, and it is the path
-        // every update takes. Step from the expected size so any real download
-        // reports about eight times; manifests and signatures never reach
-        // 256 KiB and stay quiet.
+        // Progress heartbeat, so a slow download is distinguishable from a
+        // hang. Step from the expected size so any real download reports
+        // about eight times; manifests and signatures never reach 256 KiB and
+        // stay quiet.
         let step = core::cmp::max(max_size / 8, 256 * 1024);
         let mut next_report = step;
         let resp = https_get_once(
@@ -889,8 +832,8 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
 /// Returns the total number of body bytes pushed to the sink. Follows
 /// up to 3 redirects, same rules as [`https_get`].
 ///
-/// On non-2xx (other than a 3xx that's followed), the sink is NOT
-/// called and an error is returned — so a half-failed download
+/// On non-2xx (other than a 3xx that's followed), the sink is not
+/// called and an error is returned, so a half-failed download
 /// never feeds garbage into the consumer.
 pub fn https_get_streaming(
     host: &str,
@@ -898,8 +841,7 @@ pub fn https_get_streaming(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<usize, &'static str> {
-    // OTA: the payload is already compressed and signed — asking for gzip
-    // would be a round of work with nothing at the end of it.
+    // OTA: the payload is already compressed and signed, so no gzip.
     https_get_streaming_ex(host, path, max_size, on_chunk, None, &HttpRequest::default())
 }
 
@@ -909,9 +851,9 @@ pub fn https_get_streaming(
 /// A browser resolves a document's relative URLs against the *final*
 /// address (the document base URL, RFC 3986 §5.1.3). Without it every
 /// relative sub-resource is requested against the pre-redirect address and
-/// pays a second round-trip through the same redirect — which is what drove
-/// beak into Wikimedia's rate limit. It equally cannot decode the bytes
-/// without the Content-Type.
+/// pays a second round-trip through the same redirect, which also invites
+/// rate limiting. It equally cannot decode the bytes without the
+/// Content-Type.
 pub fn https_get_streaming_ex(
     host: &str,
     path: &str,
@@ -935,7 +877,7 @@ pub fn https_get_streaming_ex(
 /// which have no use for it and would pay a copy each.
 ///
 /// `keep_status` decides what a non-2xx means. An OTA download wants an
-/// error; a BROWSER wants the bytes, because a 404 page and a 403 explaining
+/// error; a browser wants the bytes, because a 404 page and a 403 explaining
 /// why are documents a person needs to read. With it set, the status is
 /// reported in `FetchInfo` and the body is delivered whatever it says.
 pub fn https_request_streaming(
@@ -949,9 +891,8 @@ pub fn https_request_streaming(
 ) -> Result<usize, &'static str> {
     let mut cur_host = String::from(host);
     let mut cur_path = String::from(path);
-    // Welches Schema der AKTUELLE Sprung faehrt. Eine Umleitung darf
-    // hinaufgehen (Klartext -> TLS), aber niemals hinunter — das ist die
-    // Regel, die `parse_https_url` seit jeher durchsetzt, und sie bleibt.
+    // Scheme of the current hop. A redirect may upgrade (plaintext -> TLS)
+    // but never downgrade; `parse_https_url` enforces the latter.
     let mut cur_tls = !req.plain;
     // A redirect can change the method, so the request travels by value from
     // here on (RFC 9110 §15.4).
@@ -959,23 +900,18 @@ pub fn https_request_streaming(
     let mut body: &[u8] = req.body;
     // Caller headers stop at the first hop that leaves the origin they were
     // written for. The caller computed its `Cookie:` (and anything else
-    // sensitive) for THIS host; replaying it to whatever a redirect names
+    // sensitive) for this host; replaying it to whatever a redirect names
     // hands one site's session to another. We follow redirects on the
-    // caller's behalf, so this rule is ours to keep — the same reason the
-    // redirect path already refuses an http downgrade.
+    // caller's behalf, so this rule is ours to keep.
     let mut carry_headers = true;
     // Every hop's response headers, each under a `:hop <url>` marker, so the
     // caller can scope what it finds to the response that actually sent it.
-    // A cookie set by the 303 of a login POST lives HERE and nowhere else:
-    // reporting only the final response's headers drops it, and the login
-    // silently does not take.
+    // A cookie set by the 303 of a login POST lives only here.
     let mut hops = String::new();
     for _ in 0..4 {
         let mut total: usize = 0;
         let no_headers: [String; 0] = [];
-        // Auch hier JEDER Sprung. Das ist die Schleife, die der Browser
-        // faehrt — die andere (`https_get_req`) gehoert OTA. Sie zu
-        // uebersehen waere die ganze Regel gewesen.
+        // Reach is checked on every hop here too; this is the browser's loop.
         if let Err(e) = resolve_checked(&cur_host, req.from_reach) {
             return Err(e);
         }
@@ -1003,20 +939,17 @@ pub fn https_request_streaming(
             200..=299 => true,
             301 | 302 | 303 | 307 | 308 => false,
             // Any other status is a document too, once the caller asked for
-            // it. Without `keep_status` this stays the old hard error.
+            // it. Without `keep_status` it is an error.
             _ if keep_status => true,
             _ => return Err("HTTP non-2xx response"),
         };
         if done {
             if let Some(out) = info.as_deref_mut() {
                 out.final_url.clear();
-                // Das Schema, das WIRKLICH gefahren wurde — nicht immer
-                // `https`. beak macht aus dieser Zeichenkette seine
-                // Basisadresse, und `origin_of` einer Adresse ohne Schema
-                // setzt `https://` davor: die Seite kam im Klartext an, und
-                // jedes Stilblatt danach lief in einen TLS-Handschlag gegen
-                // einen Klartext-Server. Im Serverlog steht dann ein
-                // ClientHello als „Bad request version".
+                // The scheme actually used, not always `https`: the browser
+                // derives its base URL from this, and a wrong scheme would
+                // send every sub-resource of a plaintext page into a TLS
+                // handshake.
                 out.final_url.push_str(if cur_tls { "https://" } else { "http://" });
                 out.final_url.push_str(&cur_host);
                 out.final_url.push_str(&cur_path);
@@ -1026,9 +959,8 @@ pub fn https_request_streaming(
                 }
                 out.status = resp.status;
                 // The header blocks are copied only for the caller that asked
-                // to see statuses — the browser. A page load fans out to ~20
-                // sub-resource GETs, and none of them has any use for a
-                // second copy of their headers.
+                // to see statuses (the browser); sub-resource GETs have no use
+                // for a copy.
                 out.headers.clear();
                 if keep_status {
                     out.headers.push_str(&hops);
@@ -1041,16 +973,14 @@ pub fn https_request_streaming(
         // the consumer never sees any bytes from the redirect response. Safe
         // to retry against the Location target with a fresh TLS session.
         let loc = resp.location.ok_or("redirect without Location")?;
-        // A redirect's OWN headers matter: a login POST is answered with a
+        // A redirect's own headers matter: a login POST is answered with a
         // 303 that carries `Set-Cookie: session=…`, and the page it points at
-        // is only reachable because of it. Keeping just the last response's
-        // headers threw the session away and the login quietly did not take.
+        // is only reachable because of it.
         if keep_status {
             push_hop(&mut hops, &cur_host, &cur_path, &resp.headers, cur_tls);
         }
-        // Auf TLS gilt weiter die strenge Fassung: sie verweigert jedes
-        // `http://` im `Location`. Faehrt der Lauf schon im Klartext, darf das
-        // Ziel auch `https://` sein — hinauf ist erlaubt.
+        // On TLS the strict parser refuses any `http://` Location. On a
+        // plaintext hop the target may also be `https://` (upgrade allowed).
         let (next_host, next_path, next_tls) = if cur_tls {
             let (h, p) = parse_https_url(&loc, &cur_host)?;
             (h, p, true)
@@ -1065,7 +995,7 @@ pub fn https_request_streaming(
         cur_tls = next_tls;
         // 303 says so outright, and 301/302 after a POST is the behaviour
         // every browser settled on (RFC 9110 §15.4.3 note): the redirect
-        // points at a RESULT page, and re-POSTing the form to it would
+        // points at a result page, and re-POSTing the form to it would
         // submit twice. 307/308 exist precisely to keep method and body.
         if matches!(resp.status, 301 | 302 | 303) && method != "GET" && method != "HEAD" {
             method = String::from("GET");
@@ -1078,11 +1008,10 @@ pub fn https_request_streaming(
 // ── HTTPS keep-alive connection pool ───────────────────────────────
 // A page load in beak fans out to ~20 sub-resources (CSS, images), most
 // from one or two hosts. Without reuse each pays a full fresh DNS + TCP
-// + TLS handshake, serially — the "Zeitlupe" page load Florian saw on
-// the serial log. Holding the TLS session open and sending
-// `Connection: keep-alive` collapses those ~20 handshakes to ~1 per host.
+// + TLS handshake, serially. Holding the TLS session open and sending
+// `Connection: keep-alive` collapses those to ~1 handshake per host.
 //
-// A session is returned to the pool ONLY when its response was fully
+// A session is returned to the pool only when its response was fully
 // framed (Content-Length or chunked, and we read the whole body off the
 // wire) and the peer did not signal `Connection: close`. Otherwise the
 // message boundary on the wire is unknown and reuse would desync the
@@ -1091,16 +1020,15 @@ struct PooledConn {
     host: String,
     tls: crate::tls::TlsSession,
     /// When it went idle. A server keeps a connection open for 5-75 s and
-    /// then closes it; `is_healthy` sees only the LOCAL TCP state, so a peer
-    /// that hung up quietly still looks alive here. The age is what catches
-    /// that — one wasted round-trip per stale socket, and the delayed-ACK-
-    /// shaped 230 ms header times all sat on pooled connections.
+    /// then closes it; `is_healthy` sees only the local TCP state, so a peer
+    /// that hung up quietly still looks alive here. The age catches that and
+    /// saves a wasted round-trip per stale socket.
     idle_since: u64,
 }
 
 /// How long a pooled connection may sit unused. Under every common server
 /// keep-alive (nginx 75 s, most CDNs 5-10 s), above any page load's own
-/// fan-out — the reuse we actually want is measured in the same second.
+/// fan-out; the reuse we want happens within the same second.
 const POOL_MAX_IDLE_TICKS: u64 = 500; // 5 s at 100 Hz
 const CONN_POOL_SIZE: usize = 8;
 static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
@@ -1109,17 +1037,12 @@ static CONN_POOL: spin::Mutex<[Option<PooledConn>; CONN_POOL_SIZE]> =
 /// Take a *live* pooled session for `host`, if any. A session the server
 /// has since closed (idle-timeout FIN → state left `Established`) is
 /// closed and skipped here, so the caller never sends on a dead socket.
-/// Vor jedem Griff in einen Pool: den NIC-Ring leeren.
+/// Drain the NIC ring before taking from a pool.
 ///
-/// `conn_healthy` liest den VERBINDUNGSZUSTAND, und der aendert sich nur,
-/// wenn ein Paket verarbeitet wurde. Zwischen Einlegen und Herausnehmen
-/// pollt niemand — das FIN des Servers liegt also unbearbeitet im Ring, der
-/// Zustand sagt weiter `Established`, und die Pruefung nickt eine tote
-/// Verbindung durch. Gemessen: `0/4 over one connection` auf
-/// thumb.wikimedia.org, reproduzierbar, weil der Server nach jeder bedienten
-/// Runde zumacht.
-///
-/// Ein Aufruf, und die Pruefung sieht, was schon angekommen ist.
+/// The health check reads the connection state, which only changes when a
+/// packet is processed. Nobody polls while a connection sits in the pool, so
+/// a server's FIN may still lie unprocessed in the ring and the state still
+/// reads `Established`.
 fn drain_before_reuse() {
     crate::net::poll_rx_only();
 }
@@ -1136,8 +1059,7 @@ fn pool_take(host: &str) -> Option<crate::tls::TlsSession> {
             if fresh && tls.is_healthy() {
                 return Some(tls);
             }
-            // Sagen, dass es gegriffen hat — sonst ist "kein Haenger mehr"
-            // nicht von "der Fall trat nicht ein" zu unterscheiden.
+            // Logged so a discarded stale connection is visible.
             kprintln!("[npk]   pool {}: Verbindung verworfen ({})", host,
                 if fresh { "Gegenstelle hat zugemacht" } else { "zu lange ungenutzt" });
             let _ = crate::tls::tls_close(&mut tls);
@@ -1173,7 +1095,7 @@ fn header_has_token(value: &str, token: &str) -> bool {
     value.split(',').any(|t| t.trim().eq_ignore_ascii_case(token))
 }
 
-/// Either pool `tls` for reuse or close it — exactly one, never both.
+/// Either pool `tls` for reuse or close it, exactly one of the two.
 fn finish_conn(host: &str, tls: crate::tls::TlsSession, reusable: bool) {
     if reusable {
         pool_put(host, tls);
@@ -1203,10 +1125,10 @@ pub fn error_kind(msg: &str) -> &'static str {
         "HTTP non-2xx response" => "http.status",
         "cancelled" => "cancelled",
         m if m.starts_with("certificate:") => "cert.invalid",
-        // Matched against the constants, not copies of the text — see
-        // `tls::reasons`. The peer aborting the handshake is the common
-        // shape here (a server that dislikes our ClientHello), and it is
-        // NOT a certificate problem, so it must not read like one.
+        // Matched against the constants, not copies of the text; see
+        // `tls::reasons`. The peer aborting the handshake (a server that
+        // dislikes our ClientHello) is not a certificate problem and must
+        // not read like one.
         crate::tls::reasons::HANDSHAKE_REJECTED
         | crate::tls::reasons::VERSION_UNSUPPORTED
         | crate::tls::reasons::INSUFFICIENT_SECURITY
@@ -1221,8 +1143,7 @@ pub fn error_kind(msg: &str) -> &'static str {
 
 /// Fresh DNS + ARP + TCP + TLS to `host:443`. Only paid on a pool miss.
 fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
-    // Der nackte Name fuer DNS und fuer die TLS-Kennung (SNI); der Port, wenn
-    // einer dasteht, sonst 443.
+    // The bare name for DNS and SNI; the explicit port if given, else 443.
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
     let t_dns = crate::interrupts::ticks();
@@ -1232,16 +1153,10 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
         crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?
     };
     let t_arp = crate::interrupts::ticks();
-    // Make sure the gateway's MAC is known before we SYN.
-    //
-    // This used to fire an ARP request and then spin 50_000 times over the
-    // FULL `net::poll()` — unconditionally, even when the MAC was already
-    // cached, and `net::poll()` also runs a shade render pass. So every fresh
-    // connect paid 50_000 render passes, and the price grew with whatever the
-    // browser had on screen: handshakes measured 350 ms against an empty page
-    // and 2250 ms once a real article was painted. `arp::resolve` returns
-    // immediately on a cache hit and otherwise polls only until the reply
-    // lands.
+    // Make sure the gateway's MAC is known before we SYN. `arp::resolve`
+    // returns immediately on a cache hit and otherwise polls only until the
+    // reply lands; a blind spin over `net::poll()` would also run render
+    // passes.
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
     let t_tcp = crate::interrupts::ticks();
@@ -1251,18 +1166,14 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
     let out = match crate::tls::tls_connect(handle, bare) {
         Ok(s) => Ok(s),
         Err(e) => {
-            // Keep the reason. Collapsing every handshake failure into one
-            // message is what left a browser with nothing to say but a blank
-            // page — "untrusted root CA" and "expired" are the two things the
-            // person in front of the screen actually needs to be told apart.
+            // Keep the reason: the user needs e.g. "untrusted root CA" and
+            // "expired" told apart.
             kprintln!("[npk] TLS error: {}", e);
             let _ = crate::net::tcp::close(handle);
             Err(e.reason())
         }
     };
-    // Split so a slow connect names its own culprit. The whole thing swings
-    // between ~200 ms and ~2100 ms across runs, and 2 s is suspiciously
-    // exactly a retransmission timeout — this says which leg waits.
+    // Split so a slow connect names the leg that waits.
     let done = crate::interrupts::ticks();
     if chatty() {
         kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443 (dns {} + arp {} + tcp {} + tls {} ms)",
@@ -1277,7 +1188,7 @@ fn open_tls(host: &str) -> Result<crate::tls::TlsSession, &'static str> {
 //
 // Two callers: the browser's batch fetch for sub-resources (`get_all`, whole
 // bodies buffered) and the document fetch (`request`, streamed into the
-// caller's sink). NOT OTA — see `HttpRequest::try_h2` for why that is a
+// caller's sink). Not OTA; see `HttpRequest::try_h2` for why that is a
 // decision about blast radius rather than about the protocol.
 
 use super::http2::{self, Http2};
@@ -1313,8 +1224,8 @@ fn h2_take(host: &str) -> Option<Http2> {
     h2_take_exact(host).or_else(|| h2_take_coalesced(host))
 }
 
-/// Eine Verbindung, die schon fuer GENAU diesen Namen offen ist. Kostet kein
-/// DNS — deshalb zuerst.
+/// A connection already open for exactly this name. Needs no DNS, so it is
+/// tried first.
 fn h2_take_exact(host: &str) -> Option<Http2> {
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
@@ -1326,10 +1237,9 @@ fn h2_take_exact(host: &str) -> Option<Http2> {
             // is indistinguishable from a quiet connection.
             let fresh = now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS;
             if fresh && conn.is_healthy() {
-                // Der Nehmer soll wissen, dass er wettet: eine Gegenstelle,
-                // die zwischen zwei Benutzungen still weggeht, sendet weder
-                // FIN noch RST — vorhersagen laesst sich das nicht, nur
-                // schneller merken.
+                // Tell the taker it is gambling: a peer that silently goes
+                // away between uses sends neither FIN nor RST, so this can
+                // only be detected quickly, not predicted.
                 conn.reused = true;
                 return Some(conn);
             }
@@ -1342,38 +1252,26 @@ fn h2_take_exact(host: &str) -> Option<Http2> {
     None
 }
 
-/// **Connection Coalescing, RFC 7540 §9.1.1.** Eine offene Verbindung darf
-/// einen ZWEITEN Namen bedienen, wenn beides gilt: sie geht zur selben Adresse
-/// UND ihr Zertifikat deckt den Namen.
+/// Connection coalescing, RFC 7540 §9.1.1: an open connection may serve a
+/// second name if it goes to the same address and its certificate covers
+/// the name. Both conditions are required; the certificate alone is not
+/// enough.
 ///
-/// Gemessen auf de.wikipedia.org/wiki/Stansstad: `de.wikipedia.org`,
-/// `thumb.wikimedia.org` und `auth.wikimedia.org` loesen alle auf
-/// 185.15.58.224 auf und bekamen je einen eigenen Handshake — 3 x 90 ms je
-/// Seitenaufbau, zweimal in Folge so gemessen. `upload.wikimedia.org` liegt
-/// auf .240 und bleibt zurecht getrennt; genau dafuer steht die Adresse in
-/// der Bedingung und nicht nur das Zertifikat.
-///
-/// Die Namenspruefung ist DIESELBE Funktion wie im Handshake
-/// (`certstore::covers`). Zwei Pruefungen nebeneinander laufen auseinander,
-/// und die schwaechere gewinnt dann immer — hier waere das ein fremder Name
-/// auf einer fremden Verbindung.
+/// The name check is the same function the handshake uses
+/// (`certstore::covers`), so the two cannot drift apart.
 fn h2_take_coalesced(host: &str) -> Option<Http2> {
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
-    // Aufloesen, nicht nur den Zwischenspeicher fragen: die Runde faellt
-    // ohnehin an, `h2_connect` macht sie gleich danach. Sie hier zu machen
-    // kostet nichts und ist der Unterschied zwischen „beim ERSTEN Bild
-    // gespart" und „erst beim zweiten". VOR dem Lock — ein blockierendes DNS
-    // unter einem Spinlock haelt jeden anderen Nehmer an.
+    // Resolve rather than only consult the cache: `h2_connect` would do the
+    // lookup right after anyway. Before the lock, because a blocking DNS
+    // query under a spinlock stalls every other taker.
     let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare))?;
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
     let now = crate::interrupts::ticks();
     for slot in pool.iter_mut() {
-        // `ip` ist nie 0.0.0.0 (ein Name loest nicht dorthin auf), aber eine
-        // Verbindung, deren TCP-Slot schon weg ist, MELDET 0.0.0.0:0. Die
-        // Gleichheit allein wuerde beide verwechseln — also erst gar keine
-        // unbekannte Gegenstelle zulassen.
+        // A connection whose TCP slot is gone reports 0.0.0.0:0; never match
+        // an unknown peer.
         let hit = matches!(slot, Some((_, c, _))
             if c.peer() != ([0, 0, 0, 0], 0) && c.peer() == (ip, port) && c.covers(host));
         if !hit {
@@ -1412,15 +1310,12 @@ fn h2_open(host: &str) -> Option<Http2> {
     h2_take(host).or_else(|| h2_connect(host))
 }
 
-/// A NEW connection — no pool. Split out because the document path needs to
-/// be able to say "not that one": a pooled connection can carry a GOAWAY we
+/// A new connection, bypassing the pool. Split out because the document path
+/// needs to say "not that one": a pooled connection can carry a GOAWAY we
 /// have not read yet, and giving up on h2 for that would put the document
-/// back under the HTTP/1.1 rate limit this whole path exists to leave.
+/// back on HTTP/1.1.
 fn h2_connect(host: &str) -> Option<Http2> {
-    // Everything before `t_dns` used to be the one unmeasured stretch of the
-    // connect, and a 2026-08-14 device log showed 2100 ms connect with every
-    // named leg at 90 ms. Do not "explain" that gap from a single clean run
-    // again — measure it.
+    // Timed from entry so no stretch of the connect goes unmeasured.
     let t_enter = crate::interrupts::ticks();
     if h2_refused(host) {
         return None;
@@ -1441,7 +1336,7 @@ fn h2_connect(host: &str) -> Option<Http2> {
             t_arp.wrapping_sub(t_dns) * 10, t_conn.wrapping_sub(t_arp) * 10);
     }
     // The serial write above is itself unmeasured otherwise, and it sits
-    // INSIDE the span the caller reports as "connect".
+    // inside the span the caller reports as "connect".
     let t_pre = crate::interrupts::ticks();
     let r = http2::connect(bare, ip, port);
     if chatty() {
@@ -1455,9 +1350,8 @@ fn h2_connect(host: &str) -> Option<Http2> {
             mark_h2_refused(host);
             None
         }
-        // Every other h2 failure falls back to HTTP/1.1 silently, which is the
-        // right behaviour but a terrible way to debug: the variants carry the
-        // reason, so say it when asked.
+        // Every other h2 failure falls back to HTTP/1.1; log the reason when
+        // chatty.
         Err(e) => {
             if chatty() {
                 kprintln!("[npk]   h2 {} failed ({:?}) — falling back to HTTP/1.1", host, e);
@@ -1473,21 +1367,20 @@ fn h2_connect(host: &str) -> Option<Http2> {
 ///
 /// Results are positional: entry `i` corresponds to `urls[i]`, and is `None`
 /// if that resource could not be fetched. A response with a 4xx/5xx status
-/// counts as a failure rather than returning the error page's body — the
-/// caller is loading images and stylesheets, and decoding an HTML error page
-/// as a PNG helps nobody.
-/// `cookies` ist POSITIONELL zu `urls`: Eintrag `i` ist die fertige
-/// `Cookie`-Zeile fuer `urls[i]` (ohne den Namen, nur der Wert), oder leer.
-/// Wer sie fuellt, ist der Browser — der Kernel hat kein Keksglas.
+/// counts as a failure rather than returning the error page's body: the
+/// caller is loading images and stylesheets.
+///
+/// `cookies` is positional to `urls`: entry `i` is the `Cookie` value for
+/// `urls[i]` (without the name), or empty. The browser fills it; the kernel
+/// has no cookie jar.
 pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
                       from_reach: Option<Reach>)
     -> alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> {
     let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> = urls.iter().map(|_| None).collect();
 
     // Split into per-host groups, keeping the original positions.
-    // Das Schema bleibt DABEI: ein Klartext-Host kann kein h2 (h2c sprechen
-    // wir nicht) und muss den einfachen Weg nehmen. Es wegzuwerfen hiesse,
-    // jede Unterressource einer lokalen Vorlage gegen :443 zu versuchen.
+    // The scheme is kept: a plaintext host gets no h2 (we do not speak h2c)
+    // and must take the plain path instead of being tried on :443.
     let mut parsed: alloc::vec::Vec<Option<(String, String, bool)>> = alloc::vec::Vec::new();
     for u in urls {
         parsed.push(parse_url(u).ok());
@@ -1499,9 +1392,8 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
         }
     }
 
-    // **Die Reichweite EINMAL je Host, vor allem anderen.** Ein verwehrter
-    // Host laesst seine Plaetze leer, genau wie ein kaputter Strom weiter
-    // unten — der Aufrufer sieht ein fehlendes Bild, keinen halben.
+    // Reach is checked once per host, before anything else. A refused host
+    // leaves its slots empty, like a broken stream below.
     let hosts: alloc::vec::Vec<String> = hosts.into_iter()
         .filter(|h| resolve_checked(h, from_reach).is_ok())
         .collect();
@@ -1521,7 +1413,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
-            // Dieselbe Reihenfolge wie `paths` — beide laufen ueber `idxs`.
+            // Same order as `paths`; both iterate `idxs`.
             let cks: alloc::vec::Vec<&str> = idxs.iter()
                 .map(|&i| cookies.get(i).map(|s| s.as_str()).unwrap_or("")).collect();
             match conn.get_all(host, &paths, &cks, USER_AGENT, true) {
@@ -1532,7 +1424,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
                         match res {
                             Ok(r) if (200..300).contains(&r.status) => {
                                 // h2 buffers a stream's DATA frames into one
-                                // Vec, so there is nothing to stream here —
+                                // Vec, so there is nothing to stream here,
                                 // but the same cap applies.
                                 let gz = r.header("content-encoding")
                                     .map(|v| v.trim().eq_ignore_ascii_case("gzip"))
@@ -1553,8 +1445,8 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
                                     Some(r.body)
                                 };
                                 // A damaged stream leaves the slot unset, so
-                                // the h1 fallback below picks the URL up again
-                                // — the same door a redirect goes through.
+                                // the h1 fallback below picks the URL up again,
+                                // the same path a redirect takes.
                                 if let Some(b) = body {
                                     ok += 1;
                                     out[*slot] = Some(b);
@@ -1571,7 +1463,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
                             Err(e) => kprintln!("[npk]   h2 stream failed: {:?}", e),
                         }
                     }
-                    // Split the time so a slow batch says WHERE it was slow:
+                    // Split the time so a slow batch says where it was slow:
                     // a fresh TLS handshake, or the transfer itself.
                     let now = crate::interrupts::ticks();
                     kprintln!("[npk]   h2 {}: {}/{} over one connection ({} ms connect + {} ms transfer)",
@@ -1596,21 +1488,16 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
             }
         }
 
-        // Anything h2 did not deliver — no h2, a protocol error, or a
-        // redirect — falls back to the ordinary sequential fetch.
+        // Anything h2 did not deliver (no h2, a protocol error, or a
+        // redirect) falls back to the ordinary sequential fetch.
         for &i in &idxs {
             if out[i].is_some() {
                 continue;
             }
             let (h, p, tls) = parsed[i].as_ref().unwrap();
-            // Still h2 where the host offers it — this door is the one a
-            // redirect goes through, and a redirected sub-resource is no
-            // less throttled than a direct one.
-            // Der h1-Rueckfall folgt Weiterleitungen, also traegt er die
-            // Reichweite mit — sonst waere er das Loch neben der Tuer.
-            // Der h1-Rueckfall traegt denselben Keks. Er ist der Weg, den
-            // eine Weiterleitung nimmt, und eine weitergeleitete
-            // Unterressource ist nicht weniger angemeldet als eine direkte.
+            // This fallback follows redirects, so it still offers h2 where the
+            // host does, carries the reach (otherwise it would bypass the
+            // check), and sends the same cookie as the direct request.
             let ck = cookies.get(i).map(|s| s.as_str()).unwrap_or("");
             let hdr: alloc::vec::Vec<String> = if ck.is_empty() {
                 alloc::vec::Vec::new()
@@ -1649,7 +1536,7 @@ struct H2Sink<'a> {
     /// A 3xx body is courtesy text. `https_request_streaming` follows the
     /// redirect instead and counts on the sink having stayed untouched.
     ///
-    /// Starts TRUE and is decided in `head`: DATA before HEADERS is a broken
+    /// Starts true and is decided in `head`: DATA before HEADERS is a broken
     /// (or hostile) peer, and the safe reading of "we do not know what this
     /// response is yet" is that the caller may not have it.
     discard: bool,
@@ -1668,7 +1555,7 @@ impl http2::BodySink for H2Sink<'_> {
         self.t_head = crate::interrupts::ticks();
         self.discard = (300..400).contains(&status);
         // Same link in the chain as HTTP/1.1 puts it: between the transport
-        // and the sink, streaming, with the caller's own cap as the budget —
+        // and the sink, streaming, with the caller's own cap as the budget;
         // a zip bomb is then no more dangerous than a body of the size the
         // caller already said it could take.
         if headers.iter().any(|h| {
@@ -1704,8 +1591,8 @@ impl http2::BodySink for H2Sink<'_> {
 /// one `Name: value` line per field, capped.
 ///
 /// Pseudo-headers are dropped for the same reason `capture_headers` drops
-/// colon-prefixed lines — no HTTP field name may start with a colon, so
-/// nothing legitimate is lost, and it is what stops a server from writing
+/// colon-prefixed lines: no HTTP field name may start with a colon, so
+/// nothing legitimate is lost, and it stops a server from writing
 /// its own `:hop` marker into the block.
 fn h2_header_block(headers: &[http2::Header]) -> String {
     let mut out = String::new();
@@ -1731,15 +1618,14 @@ fn h2_value<'a>(headers: &'a [http2::Header], name: &str) -> Option<&'a str> {
 
 /// One HTTPS round-trip over HTTP/2, when the host speaks it.
 ///
-/// `Retry` means nothing was delivered — no h2 here, no connection, or a
-/// failure before the first body byte — so the caller may run the same
+/// `Retry` means nothing was delivered (no h2 here, no connection, or a
+/// failure before the first body byte), so the caller may run the same
 /// request over HTTP/1.1. `Fatal` means the sink has already seen bytes.
 ///
 /// Redirects come back exactly as the HTTP/1.1 path hands them back: status
 /// plus Location, body dropped. Following them stays one layer up, in
 /// `https_request_streaming`, which is where the method switch, the
-/// origin-crossing header rule and the per-hop `Set-Cookie` already live —
-/// and every login runs through all three.
+/// origin-crossing header rule and the per-hop `Set-Cookie` already live.
 fn h2_once(
     host: &str,
     path: &str,
@@ -1748,7 +1634,7 @@ fn h2_once(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
     // Attempt 1: the pooled connection. Same ladder as HTTP/1.1 below, for
-    // the same reason — the peer may have hung up while it sat idle.
+    // the same reason: the peer may have hung up while it sat idle.
     if let Some(conn) = h2_take(host) {
         match h2_exchange(host, path, req, max_size, on_chunk, conn) {
             Ok(r) => return Ok(r),
@@ -1806,21 +1692,16 @@ fn h2_exchange(
                 let now = crate::interrupts::ticks();
                 let hdr_ms = t_head.wrapping_sub(t_send) * 10;
                 match (&location, redirect) {
-                    // WOHER die Umleitung kam, gehoert dazu. Ein Ziel allein
-                    // laesst sich nicht beurteilen: die 301 auf dieser Seite
-                    // zeigte auf eine Adresse, die genauso aussah wie die
-                    // angefragte, und ohne die Quelle war nicht zu sehen,
-                    // worin sie sich unterschieden
-                    // ([[feedback-print-the-identifier-not-just-the-event]]).
+                    // Log the source of a redirect too; a target alone
+                    // cannot be judged.
                     (Some(l), true) =>
                         kprintln!("[npk]   h2 HTTP {} (headers {} ms) {} -> {}",
                             status, hdr_ms, path, l),
                     _ => kprintln!("[npk]   h2 HTTP {} {} — headers {} ms + body {} ms",
                         status, req.method, hdr_ms, now.wrapping_sub(t_head) * 10),
                 }
-                // Say that gzip ran. Silence is ambiguous three ways — never
-                // asked, server answered identity, or the path lost it — and
-                // the whole point of asking is a number.
+                // Say whether gzip ran; silence would be ambiguous (never
+                // asked, server answered identity, or the path lost it).
                 match (gz, req.accept_gzip, redirect) {
                     (Some((raw, out)), _, _) => {
                         let r10 = out * 10 / core::cmp::max(raw, 1);
@@ -1875,10 +1756,10 @@ fn drain_body(
     }
 }
 
-/// One HTTPS round-trip over an OWNED TLS session (`Connection:
+/// One HTTPS round-trip over an owned TLS session (`Connection:
 /// keep-alive`). Reads + parses the response, streams the body through
 /// `on_chunk`, and hands the session back to the pool (if cleanly
-/// reusable) or closes it. No redirect following — the returned
+/// reusable) or closes it. No redirect following; the returned
 /// `HttpResponse` carries status + Location for the caller to follow.
 fn https_exchange(
     host: &str,
@@ -1899,7 +1780,7 @@ fn https_exchange(
         head.push_str(line);
         head.push_str("\r\n");
     }
-    // We state the length ourselves — always, when there is a body, and never
+    // We state the length ourselves: always when there is a body, and never
     // from a caller-supplied header (`RESERVED_HEADERS`). Announcing a length
     // that disagrees with the bytes we then send is how a request gets split
     // in two on the far side.
@@ -1909,12 +1790,10 @@ fn https_exchange(
     head.push_str("\r\n");
     let mut request = head.into_bytes();
     request.extend_from_slice(req.body);
-    // h2 reports connect/transfer separately; h1 reported NOTHING between the
-    // handshake and "receiving body", which is where a 6.5 s document fetch
-    // hid on 2026-08-14 with every measured leg at 90 ms.
+    // Timestamps for the wait between handshake and response headers.
     let t_send = crate::interrupts::ticks();
     if crate::tls::tls_send(&mut tls, &request).is_err() {
-        // Stale pooled socket (or a send error) — nothing delivered, retry fresh.
+        // Stale pooled socket (or a send error): nothing delivered, retry fresh.
         let _ = crate::tls::tls_close(&mut tls);
         return Err(ExchangeErr::Retry);
     }
@@ -1922,7 +1801,7 @@ fn https_exchange(
     // ── Phase 1: read the header block (up to \r\n\r\n) ──
     let mut raw = alloc::vec::Vec::new();
     let mut buf = [0u8; 17000]; // >= max TLS record (16KB)
-    // The loop leaves only two ways: it breaks WITH the header offset, or it
+    // The loop leaves only two ways: it breaks with the header offset, or it
     // returns. Yielding the offset out of `break` says that in the types, so
     // there is no "we got here without a header" case left to handle.
     let t_hdr0 = crate::interrupts::ticks();
@@ -1936,8 +1815,8 @@ fn https_exchange(
                 }
             }
             Err(_) => {
-                // A live server always answers — no header means the socket
-                // was dead/stale. No body delivered yet → safe to retry fresh.
+                // A live server always answers; no header means the socket
+                // was dead or stale. No body delivered yet, so retry fresh.
                 let _ = crate::tls::tls_close(&mut tls);
                 return Err(ExchangeErr::Retry);
             }
@@ -2021,8 +1900,8 @@ fn https_exchange(
     };
 
     // 2xx / other: stream the body. The headers already proved the socket
-    // live, so a failure HERE is a genuine mid-body drop (partial bytes are
-    // already in the sink) → Fatal, never a retry.
+    // live, so a failure here is a genuine mid-body drop (partial bytes are
+    // already in the sink): Fatal, never a retry.
     let fully_drained;
     if let Some(cl) = content_length {
         let cap = core::cmp::min(cl, max_size);
@@ -2049,13 +1928,13 @@ fn https_exchange(
                 Err(_) => break,
             }
         }
-        // Reusable only if we consumed the ENTIRE body — a max_size-clipped
+        // Reusable only if we consumed the entire body; a max_size-clipped
         // (truncated) read leaves unread bytes on the wire.
         fully_drained = delivered == cl;
     } else if chunked {
-        // True streaming chunked decoder (RFC 7230 §4.1) — GitHub codeload
-        // serves dynamically-generated tarballs chunked + binary, so the
-        // body can't be buffer-then-scanned.
+        // True streaming chunked decoder (RFC 7230 §4.1): e.g. GitHub
+        // codeload serves generated tarballs chunked and binary, so the
+        // body can't be buffered and then scanned.
         match stream_chunked_body(leading, &mut tls, &mut buf, max_size, &mut sink) {
             Ok(_) => fully_drained = true,
             Err(e) => {
@@ -2064,7 +1943,7 @@ fn https_exchange(
             }
         }
     } else {
-        // Neither Content-Length nor chunked → close-delimited body: read
+        // Neither Content-Length nor chunked: close-delimited body, read
         // until the peer closes. Never reusable (no boundary to stop at).
         let mut delivered = 0usize;
         if !leading.is_empty() {
@@ -2094,10 +1973,8 @@ fn https_exchange(
 
     if chatty() {
         kprintln!("[npk]   HTTP body {} ms", crate::interrupts::ticks().wrapping_sub(t_body0) * 10);
-        // Say that it ran. A gzip that quietly did not happen looks exactly
-        // like one that did, and the whole point of this path is a number.
-        // Silence used to be ambiguous three ways — old kernel, we never
-        // asked, or the server answered identity. Each now says which.
+        // Say whether gzip ran; silence would be ambiguous (never asked, or
+        // the server answered identity).
         match (gunzip.as_ref(), req.accept_gzip) {
             (Some(g), _) => {
                 let (raw, out) = g.ratio();
@@ -2112,17 +1989,14 @@ fn https_exchange(
     Ok(HttpResponse { status, location, content_type, headers: reply_headers })
 }
 
-/// One HTTPS round-trip — no redirect following. Tries HTTP/2 when the
+/// One HTTPS round-trip, no redirect following. Tries HTTP/2 when the
 /// caller asked for it, then a pooled HTTP/1.1 keep-alive session for `host`,
 /// then a fresh one. Body bytes are pushed through `on_chunk` as they arrive.
 ///
-/// This is the layer h2 belongs in, and the reason is the redirect: a
-/// redirect may change the host, and everything that follows from that —
-/// the method switch, dropping the caller's headers at an origin boundary,
-/// keeping each hop's `Set-Cookie` — lives ABOVE here, in
-/// `https_request_streaming`. Lifting the document onto h2 anywhere higher
-/// would have traded a throttling problem for a redirect problem, and every
-/// login is a redirect chain.
+/// h2 belongs at this layer because of redirects: everything that follows
+/// from a host change (the method switch, dropping the caller's headers at
+/// an origin boundary, keeping each hop's `Set-Cookie`) lives above here, in
+/// `https_request_streaming`, and must apply to both protocols.
 fn https_get_once(
     host: &str,
     path: &str,
@@ -2130,13 +2004,9 @@ fn https_get_once(
     max_size: usize,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, &'static str> {
-    // Timer-NAPI, for the handshake AND the body. `http_get_once` has done this
-    // since it was written; the TLS path never did — so every OTA download
-    // polled its socket at 100 Hz and slept up to 10 ms between looks, while
-    // `netbench` over plain HTTP got 10 kHz and a 100 µs floor. A factor of a
-    // hundred on the receive path, and exactly the asymmetry we kept blaming on
-    // TLS itself: "update crawls, netbench flies". The guard restores 100 Hz on
-    // every exit path, including the `?` returns below.
+    // Timer-NAPI at 10 kHz for the handshake and the body; at the default
+    // 100 Hz the socket would be polled only every 10 ms. The guard restores
+    // 100 Hz on every exit path, including the `?` returns below.
     crate::interrupts::set_worker_poll_hz(10_000);
     struct PollHzGuard;
     impl Drop for PollHzGuard {
@@ -2144,14 +2014,10 @@ fn https_get_once(
     }
     let _hz = PollHzGuard;
 
-    // Klartext geht seinen eigenen Weg: kein h2 (h2c sprechen wir nicht),
-    // kein Sitzungsspeicher, kein TLS. `http_get_once` gibt es seit langem,
-    // es fehlte nur der Weg dorthin.
-    //
-    // Nur GET. Ein POST oder eigene Koepfe muessten durch `https_exchange`,
-    // und das setzt eine TLS-Sitzung voraus — den zweiten Rumpf dafuer zu
-    // bauen, bevor ihn jemand braucht, waere Arbeit auf Verdacht. Wer es
-    // versucht, bekommt eine Absage und keinen stillen Fehlschlag.
+    // Plaintext takes its own path: no h2 (we do not speak h2c), no session
+    // pool, no TLS. GET only: other methods and custom headers would need
+    // `https_exchange`, which requires a TLS session. Not implemented, and
+    // refused explicitly rather than failing silently.
     if req.plain {
         if req.method != "GET" && !req.method.is_empty() {
             return Err("plain http: only GET");
@@ -2159,10 +2025,9 @@ fn https_get_once(
         return http_get_once(host, path, max_size, on_chunk);
     }
 
-    // Attempt 0: HTTP/2. Wikimedia throttles HTTP/1.1 to ~0.5 requests/s and
-    // exempts h2 (§8.1, measured) — and one page load is FOUR document
-    // requests inside two seconds, so this path was the only one still
-    // paying. `Retry` means nothing was delivered; HTTP/1.1 runs below.
+    // Attempt 0: HTTP/2. Some servers (e.g. Wikimedia) rate-limit HTTP/1.1
+    // far more strictly than h2. `Retry` means nothing was delivered;
+    // HTTP/1.1 runs below.
     if req.try_h2 {
         match h2_once(host, path, req, max_size, on_chunk) {
             Ok(r) => return Ok(r),
@@ -2175,7 +2040,7 @@ fn https_get_once(
     if let Some(tls) = pool_take(host) {
         match https_exchange(host, path, req, max_size, tls, on_chunk) {
             Ok(r) => return Ok(r),
-            Err(ExchangeErr::Retry) => {} // stale — reconnect below
+            Err(ExchangeErr::Retry) => {} // stale: reconnect below
             Err(ExchangeErr::Fatal(e)) => return Err(e),
         }
     }
@@ -2217,7 +2082,8 @@ fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'
 /// Parse a user-facing URL (from a WASM app, e.g. beak) into (host, path).
 /// Accepts `https://host/path`, `host/path`, or a bare `host` (path
 /// defaults to `/`). Scheme-less input is treated as https; plain `http://`
-/// is refused (no downgrade). Reuses `parse_https_url`'s rules.
+/// is refused unless `plain_http_allowed`. The bool is true for TLS.
+/// Reuses `parse_https_url`'s rules.
 pub(crate) fn parse_url(url: &str) -> Result<(String, String, bool), &'static str> {
     let url = url.trim();
     if url.is_empty() {
@@ -2236,9 +2102,8 @@ pub(crate) fn parse_url(url: &str) -> Result<(String, String, bool), &'static st
         if !plain_http_allowed(host) {
             return Err("refusing http downgrade");
         }
-        // JEDER Klartext-Abruf sagt es. Ein stiller Downgrade ist genau das,
-        // was die Regel verhindern soll — und wer den Schalter vergessen hat
-        // umzulegen, sieht es hier statt in einem Paketmitschnitt.
+        // Every plaintext fetch is logged; a silent downgrade is what the
+        // rule exists to prevent.
         kprintln!("[npk]   http (KLARTEXT, kein TLS) -> {}", host);
         Ok((String::from(host), String::from(path), false))
     } else {
@@ -2248,26 +2113,16 @@ pub(crate) fn parse_url(url: &str) -> Result<(String, String, bool), &'static st
     }
 }
 
-/// Darf `http://<host>` ohne TLS geholt werden?
+/// May `http://<host>` be fetched without TLS? Both conditions must hold:
 ///
-/// **Zwei Bedingungen, und beide muessen halten.**
+/// 1. `net.allow_plain_http` is `1` (default off).
+/// 2. The host is a literal private address: 10/8, 172.16/12, 192.168/16,
+///    127/8, 169.254/16. A name would not do, since its DNS record can point
+///    at a public address at any time; an address in the URL cannot change.
 ///
-/// 1. `net.allow_plain_http` steht auf `1`. Vorgabe ist AUS: ein Geraet, das
-///    den Schluessel nie setzt, verhaelt sich wie vorher, und die Angriffs-
-///    flaeche entsteht erst, wenn jemand sie einschaltet.
-/// 2. Der Host ist eine LITERALE private Adresse — 10/8, 172.16/12,
-///    192.168/16, 127/8, 169.254/16.
-///
-/// Der zweite Punkt ist nicht Bequemlichkeit, sondern der Kern: ein NAME
-/// waere hier eine Luecke, weil sein DNS-Eintrag jederzeit auf eine oeffent-
-/// liche Adresse zeigen kann (und beim zweiten Auflosen auf eine andere als
-/// beim ersten). Eine Adresse, die im URL selbst steht, kann sich nicht
-/// verwandeln.
-///
-/// ⚠ Was auch mit dem Schalter AN bestehen bleibt: eine fremde Seite kann
-/// beak dazu bringen, Unterressourcen von `http://192.168.x.y` zu holen und
-/// so das eigene Netz abzuklopfen. Deshalb ist der Schalter fuer die Dauer
-/// einer Messung gedacht und nicht fuer den Dauerbetrieb.
+/// Even with the switch on, a foreign page can make the browser fetch
+/// sub-resources from `http://192.168.x.y` and probe the local network, so
+/// the switch is meant for temporary use.
 fn plain_http_allowed(host: &str) -> bool {
     if crate::config::get("net.allow_plain_http").as_deref() != Some("1") {
         return false;
@@ -2283,20 +2138,15 @@ fn plain_http_allowed(host: &str) -> bool {
     }
 }
 
-/// `host` oder `host:port` in beides zerlegen. Der Port ist `None`, wenn
-/// keiner dasteht — dann entscheidet das Schema.
+/// Split `host` or `host:port`. The port is `None` when absent; the scheme
+/// then decides.
 ///
-/// Bis hierher hat NICHTS im Kernel einen Port aus einer Adresse gelesen:
-/// `connect(ip, 443)` stand fest, und `http://10.0.2.2:8080/x` waere auf :443
-/// gelandet. Der Aufruf mit dem vollen `host:port` bleibt fuer den
-/// `Host:`-Kopf richtig (RFC 9110 nennt den Port, wenn er nicht der
-/// Vorgabeport ist); DNS, `parse_ip` und die TLS-Kennung brauchen den nackten
-/// Namen.
+/// The full `host:port` stays correct for the `Host:` header (RFC 9110
+/// includes a non-default port); DNS, `parse_ip` and SNI need the bare name.
 pub(crate) fn split_host_port(host: &str) -> (&str, Option<u16>) {
     match host.rsplit_once(':') {
-        // Ein Doppelpunkt im Namen ist auch eine IPv6-Adresse — die kann
-        // dieser Stapel nicht, aber sie darf hier nicht als Port gelesen
-        // werden.
+        // More than one colon means an IPv6 address. This stack does not
+        // support IPv6, but it must not be read as a port either.
         Some((h, p)) if !h.contains(':') => match p.parse::<u16>() {
             Ok(n) => (h, Some(n)),
             Err(_) => (host, None),
@@ -2310,16 +2160,9 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
     let start = crate::interrupts::ticks();
     loop {
         if super::cancel_requested() { return Err("cancelled"); }
-        // ONE poll per attempt. `net::poll()` already drains the
-        // entire NIC ring (`while let Some = netdev::recv`), ticks
-        // TCP, and runs a shade render pass — so a single call
-        // pulls everything currently available. The old code did
-        // this 2000× before every `tls_recv`, which on emulated
-        // NICs (each MMIO read traps to the hypervisor) cost ~0.5 s
-        // of pure overhead per 16 KiB TLS record → ~31 KiB/s
-        // ceiling regardless of link speed. Polling once and
-        // returning the instant a record is ready makes throughput
-        // bound by the actual network, not a fixed busy-wait tax.
+        // One poll per attempt: a single call drains the entire NIC ring,
+        // so polling repeatedly before each `tls_recv` only adds overhead
+        // (each MMIO read traps to the hypervisor on emulated NICs).
         crate::net::poll_rx_only();
         match crate::tls::tls_recv(tls, buf) {
             Ok(0) => {
@@ -2337,13 +2180,13 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
     }
 }
 
-/// Plain-TCP recv with polling (no TLS). Analog of `tls_recv_poll`.
-// TEMP profiler: where does the recv loop's time go? TSC cycles + iteration
-// count, read+reset in the http heartbeat. Pinpoints the ~13 µs/packet.
+// Recv loop profiler: TSC cycles and iteration count, read and reset in the
+// http heartbeat.
 static PROF_POLL_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static PROF_RECV_CYC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static PROF_ITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// Plain-TCP recv with polling (no TLS). Analog of `tls_recv_poll`.
 fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     use core::sync::atomic::Ordering::Relaxed;
     let start = crate::interrupts::ticks();
@@ -2362,15 +2205,12 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // BUSY-SPIN, do NOT HLT. The USB NIC has no IRQ — its RX ring is
-                // re-armed ONLY by poll_rx_only() above. worker_idle_hlt() parks
-                // this core until the next 100 Hz worker tick (up to 10 ms);
-                // nothing re-arms the ring in that gap, so the chip exhausts all
-                // buffers in a few ms and then drops every frame → the ~24 Mbit
-                // cap + massive TCP reorder on rtl8153. (virtio/QEMU is immune:
-                // it delivers RX from a fiber, not this polled loop.) tcp_recv_poll
-                // only runs during an active download, so spinning is correct —
-                // and matches tls_recv_poll, which never had the HLT.
+                // Busy-spin, do not HLT. The USB NIC has no IRQ; its RX ring is
+                // re-armed only by poll_rx_only() above. worker_idle_hlt() would
+                // park this core until the next 100 Hz worker tick (up to
+                // 10 ms), and in that gap the rtl8153 exhausts its buffers and
+                // drops frames. This only runs during an active download, so
+                // spinning is acceptable.
                 core::hint::spin_loop();
             }
             Ok(n) => return Ok(n),
@@ -2379,7 +2219,7 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     }
 }
 
-/// Parse a Location into (host, path) for the PLAIN-HTTP path: accepts
+/// Parse a Location into (host, path) for the plain-HTTP path: accepts
 /// `http://…` and absolute-path; rejects https upgrade (our TLS is minimal).
 fn parse_http_url(loc: &str, current_host: &str) -> Result<(String, String), &'static str> {
     let loc = loc.trim();
@@ -2396,9 +2236,8 @@ fn parse_http_url(loc: &str, current_host: &str) -> Result<(String, String), &'s
     }
 }
 
-/// Plain-HTTP streaming GET (no TLS) — for throughput tests + plain-http
-/// mirrors (our TLS only handshakes with a couple of CAs, so arbitrary HTTPS
-/// fails; plain HTTP sidesteps it AND is a cleaner pure-net speed test).
+/// Plain-HTTP streaming GET (no TLS), for throughput tests and plain-http
+/// mirrors; it also isolates the network from TLS cost.
 /// Follows up to 4 http→http (or absolute-path) redirects. Requires
 /// Content-Length (true for static file mirrors); rejects chunked.
 pub fn http_get_streaming(
@@ -2434,11 +2273,11 @@ pub fn http_get_streaming(
     Err("too many redirects")
 }
 
-/// Network throughput benchmark against a plain-HTTP server — isolates our net
-/// stack from the WAN so we can see where the real bottleneck is. Reaches a
-/// local server (e.g. `10.0.2.2:80` = QEMU slirp host alias).
+/// Network throughput benchmark against a plain-HTTP server; isolates our net
+/// stack from the WAN. Reaches a local server (e.g. `10.0.2.2:80` = QEMU
+/// slirp host alias).
 ///   netbench get <host> <path>        download into a counting sink (we time)
-///   netbench put <host> <path> [MB]    upload a RAM buffer (the SERVER times it
+///   netbench put <host> <path> [MB]    upload a RAM buffer (the server times it
 ///                                      and returns the rate — our send side has
 ///                                      no congestion control, so it can't)
 pub fn intent_netbench(args: &str) {
@@ -2484,11 +2323,9 @@ fn bench_get(host: &str, path: &str) {
     bench_cores();
 }
 
-/// **Auf welchem Kern lief die Messung, und auf welchem der WLAN-Treiber.**
-/// Teilen sie sich einen, laufen Treiber und Leser abwechselnd statt
-/// nebeneinander — und genau das sah 2026-09-22 aus wie ein Deckel der
-/// Luft. Die Zeile sagt es in jedem Lauf, statt es aus Stillstaenden
-/// zurueckzurechnen.
+/// Report the core the benchmark ran on and the core of the WiFi driver.
+/// If they share one, driver and reader alternate instead of running in
+/// parallel, which caps throughput.
 fn bench_cores() {
     let me = crate::smp::per_core::current_core_id();
     match crate::netdev::wasm_nic_core() {
@@ -2520,22 +2357,16 @@ fn bench_put(host: &str, path: &str, mb: usize) {
 /// POST `total` zero-bytes to <host><path>; returns the server's response body
 /// (which is expected to report the server-measured throughput).
 fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'static str> {
-    // **Der Port stand hier hartcodiert auf 80**, und `parse_ip` bekam
-    // die ganze Zeichenkette samt `:8080` — also scheiterte schon die
-    // Aufloesung. Jeder andere HTTP-Weg dieser Datei geht seit je ueber
-    // `split_host_port`; der PUT-Weg als einziger nicht, und deshalb
-    // war `netbench put <host>:<port>` nie benutzbar. Der `Host:`-Kopf
-    // traegt weiterhin `host:port`, wie RFC 9110 es verlangt.
+    // Bare name for resolution; the `Host:` header keeps `host:port`
+    // (RFC 9110).
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(80);
     let ip = parse_ip(bare).or_else(|| crate::net::dns::resolve(bare)).ok_or("DNS/IP failed")?;
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
-    // Name the failure. ConnectionRefused means the peer answered with a RST —
-    // nothing is listening there, go look at the server. Timeout means nobody
-    // answered at all — go look at ARP, routing, the air. Collapsing both into
-    // "TCP connect failed" sent us hunting the radio while a Python process on
-    // the other end had simply exited.
+    // Name the failure. ConnectionRefused means the peer answered with a RST
+    // (nothing listening); Timeout means nobody answered at all (ARP,
+    // routing, link). They call for different investigations.
     let handle = crate::net::tcp::connect(ip, port).map_err(|e| {
         kprintln!("[netbench] connect to {}.{}.{}.{}:{} failed: {}",
                   ip[0], ip[1], ip[2], ip[3], port, e);
@@ -2558,33 +2389,25 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     }
 
     // 64 KiB, not 256. `tcp::send` refuses when `send_buf.len() + data.len()`
-    // exceeds MAX_UNACKED, which is itself 256 KiB — so a 256 KiB chunk could
-    // only ever be accepted with the send buffer at EXACTLY zero. That is
-    // stop-and-wait dressed up as a stream: every chunk had to be fully
-    // acknowledged before the next one could be queued, and one delayed ACK
-    // inside the 10 s window failed the whole transfer. A quarter of the cap
-    // leaves three chunks in flight.
+    // exceeds MAX_UNACKED, which is itself 256 KiB, so a 256 KiB chunk could
+    // only be accepted with an empty send buffer (stop-and-wait). A quarter
+    // of the cap leaves three chunks in flight.
     let chunk = alloc::vec![0u8; 64 * 1024];
     let mut sent = 0;
-    // **Erzeugerbegrenzt oder fensterbegrenzt.** Gemessen am 2026-09-22:
-    // 42 Mbit Upload bei 0,85 % belegter Luft und einem Treiber, der
-    // 63 000-mal je Sekunde vergeblich nach Sendearbeit sieht. Aus dem
-    // Durchsatz laesst sich beides zurueckrechnen, je nachdem welche RTT
-    // man einsetzt - also wird es jetzt gezaehlt statt gerechnet.
+    // Count send stats to tell a producer-limited upload from a
+    // window-limited one.
     crate::net::tcp::send_stats_reset();
     let mut poll_tsc = 0u64;
     let t_body = crate::interrupts::rdtsc();
     while sent < total {
         let n = core::cmp::min(chunk.len(), total - sent);
-        // Say WHICH failure it was. "send body failed" covers a peer that
+        // Say which failure it was. "send body failed" covers a peer that
         // closed the connection and a send window that never opened, and those
         // want opposite investigations.
         if let Err(e) = crate::net::tcp::send_blocking(handle, &chunk[..n], 1000) {
             kprintln!("[netbench] PUT stalled after {} of {} bytes: {}", sent, total, e);
-            // **Ein Stillstand muss seinen Zustand nennen.** Zweimal hat
-            // uns dieselbe Zeile ohne Zahlen einen ganzen Lauf gekostet:
-            // ein volles Fenster, ein geschlossenes Fenster und eine
-            // verpasste Weckung sehen von aussen gleich aus.
+            // A stall reports its state: a full window, a closed window and
+            // a missed wakeup look the same from outside.
             use core::sync::atomic::Ordering::Relaxed;
             let (_, _, segs, wb, maxbuf) = crate::net::tcp::send_stats();
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
@@ -2595,10 +2418,8 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
                 crate::net::tcp::snd_wnd_of(handle) / 1024,
                 segs, wb,
                 crate::net::tcp::SEND_REFUSED.load(Relaxed));
-            // **Die Zahlen, ohne die ich vier Releases lang geraten
-            // habe.** Ein Staufenster, das bei eins klebt, und ein
-            // Sendepuffer, der voll ist, sehen von aussen gleich aus —
-            // und verlangen das Gegenteil voneinander.
+            // Congestion state: a cwnd stuck at one and a full send buffer
+            // look the same from outside but need opposite fixes.
             kprintln!("[netbench]   stau: cwnd {} · ssthresh {} · {} Doppelquittungen{} \
 · {}x schnell wiederholt · {}x Zeitueberschreitung",
                 cw, ss, crate::net::tcp::DUPACKS_SEEN.load(Relaxed),
@@ -2645,9 +2466,7 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
             let _ = dup;
         }
         if segs > 0 {
-            // Die eine Zahl, die sagt, ob der Erzeuger der Deckel ist.
-            // 1448 Byte je Segment bei 42 Mbit sind 275 us - und alles,
-            // was ein Segment WIRKLICH kostet, steht hier.
+            // Per-segment cost: says whether the producer is the limit.
             kprintln!("[netbench] je Segment: {} ns in send, {} ns Wanduhr",
                 crate::interrupts::tsc_to_ns(send_tsc / segs),
                 crate::interrupts::tsc_to_ns(wall / segs));
@@ -2674,12 +2493,10 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
     Ok(body)
 }
 
-/// Streaming download for the USER `http`/`https` intents — follows redirects
-/// across BOTH schemes, including https→http downgrade (which OTA's strict
-/// `https_get` refuses on purpose). This lets `https cdimage.debian.org/…iso`
-/// chase its 302 to a fast plain-http mirror — the user's confirmed gigabit
-/// source — instead of dead-ending. `start_tls` = first hop's scheme.
-/// NOT for OTA (that path stays strict, signatures aside).
+/// Streaming download for the user `http`/`https` intents. Follows redirects
+/// across both schemes, including an https→http downgrade (which OTA's strict
+/// `https_get` refuses on purpose), so a download can chase its 302 to a
+/// plain-http mirror. `start_tls` = first hop's scheme. Not for OTA.
 fn user_download_streaming(
     host: &str,
     path: &str,
@@ -2739,16 +2556,12 @@ fn parse_any_url(loc: &str, current_host: &str, current_tls: bool) -> Result<(St
     }
 }
 
-/// Eine offene Klartext-Verbindung, die auf ihre naechste Anfrage wartet.
-///
-/// Der TLS-Pool daneben haelt `TlsSession`s; hier ist es der nackte
-/// TCP-Griff. Getrennt zu halten ist kein Duplikat, sondern der Unterschied
-/// zwischen den beiden Protokollen: eine TLS-Sitzung hat einen Zustand, der
-/// mitgeschleppt werden muss, ein TCP-Griff ist eine Zahl.
+/// An open plaintext connection waiting for its next request. Kept apart
+/// from the TLS pool because a TLS session carries state, while a TCP
+/// handle is just a number.
 struct PlainConn {
-    /// `host:port` — der Port GEHOERT dazu. Zwei Dienste auf derselben
-    /// Maschine sind zwei Gegenstellen, und ein Griff, der beim falschen
-    /// landet, schickt die Anfrage an den falschen Server.
+    /// `host:port`. The port is part of the key: two services on the same
+    /// machine are two peers.
     key: String,
     handle: usize,
     idle_since: u64,
@@ -2757,10 +2570,9 @@ struct PlainConn {
 static PLAIN_POOL: spin::Mutex<[Option<PlainConn>; CONN_POOL_SIZE]> =
     spin::Mutex::new([const { None }; CONN_POOL_SIZE]);
 
-/// Einen lebenden Klartext-Griff fuer `key` holen. Dieselbe Vorsicht wie im
-/// TLS-Pool: erst den NIC-Ring leeren, dann den Zustand lesen — sonst liegt
-/// das FIN der Gegenstelle unverarbeitet im Ring und `conn_healthy` nickt
-/// eine tote Verbindung durch.
+/// Take a live plaintext handle for `key`. As in the TLS pool, drain the NIC
+/// ring before reading the state, or a peer's unprocessed FIN would let
+/// `conn_healthy` pass a dead connection.
 fn plain_take(key: &str) -> Option<usize> {
     drain_before_reuse();
     let mut pool = PLAIN_POOL.lock();
@@ -2798,12 +2610,8 @@ fn plain_put(key: &str, handle: usize) {
 /// One plain-HTTP round-trip (no TLS, no redirect follow). Mirrors
 /// `https_get_once` but over raw TCP. Content-Length bodies only.
 ///
-/// **Die Verbindung wird wiederverwendet.** Bis 0.322.0 stand hier
-/// `Connection: close`, und JEDE Anfrage baute neu auf — am Geraet gegen den
-/// eigenen Vorlagenserver waren das zwei volle Handshakes je Seitenaufbau,
-/// einer fuers Dokument und einer fuers Stilblatt, fuer nichts. Der Weg ist
-/// derselbe wie im TLS-Pool: erst einen gepoolten Griff versuchen, und was
-/// dort schiefgeht, BEVOR ein Byte ausgeliefert wurde, wird frisch wiederholt.
+/// Connections are reused, as in the TLS pool: try a pooled handle first, and
+/// retry fresh whatever fails there before a byte was delivered.
 fn http_get_once(
     host: &str,
     path: &str,
@@ -2814,16 +2622,16 @@ fn http_get_once(
     let port = port.unwrap_or(80);
     let key = alloc::format!("{}:{}", bare, port);
 
-    // Versuch 1: eine offene Verbindung. Kein DNS, kein ARP, kein Handshake.
+    // Attempt 1: an open connection. No DNS, no ARP, no handshake.
     if let Some(handle) = plain_take(&key) {
         match http_exchange(handle, host, path, &key, max_size, on_chunk) {
             Ok(r) => return Ok(r),
-            Err(ExchangeErr::Retry) => {} // abgestanden — unten frisch
+            Err(ExchangeErr::Retry) => {} // stale: reconnect below
             Err(ExchangeErr::Fatal(e)) => return Err(e),
         }
     }
 
-    // Versuch 2: frisch aufbauen.
+    // Attempt 2: fresh connection.
     let ip = match parse_ip(bare) {
         Some(ip) => ip,
         None => crate::net::dns::resolve(bare).ok_or("DNS resolution failed")?,
@@ -2841,10 +2649,9 @@ fn http_get_once(
     }
 }
 
-/// Eine Anfrage ueber einen schon offenen Griff. `Retry` heisst: es ist nichts
-/// ausgeliefert worden, der Rufer darf frisch aufbauen und es nochmal
-/// versuchen. Alles, was nach dem ersten `on_chunk` schiefgeht, ist `Fatal` —
-/// ein zweiter Versuch wuerde dieselben Bytes ein zweites Mal liefern.
+/// One request over an already open handle. `Retry` means nothing was
+/// delivered and the caller may reconnect and retry. Anything failing after
+/// the first `on_chunk` is `Fatal`: a retry would deliver the same bytes twice.
 fn http_exchange(
     handle: usize,
     host: &str,
@@ -2854,7 +2661,7 @@ fn http_exchange(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
     // Timer-NAPI: speed this worker core's idle timer to ~10 kHz for the whole
-    // transfer so the recv loop's HLT wakes every ~100 µs (vs 10 ms at 100 Hz) —
+    // transfer so the recv loop's HLT wakes every ~100 µs (vs 10 ms at 100 Hz):
     // low-latency polling without burning the core. The guard restores 100 Hz on
     // every exit path (success, error, redirect).
     crate::interrupts::set_worker_poll_hz(10_000);
@@ -2874,12 +2681,11 @@ fn http_exchange(
     }
 
     let mut raw = alloc::vec::Vec::new();
-    // Large HEAP read buffer (a 512 KiB stack array would overflow the kernel
-    // stack). recv() returns at most buf.len() per call; the old 17 KB cap made
-    // the consumer drain far slower than poll_rx_only bulk-fills recv_buf (it
-    // empties the whole NIC ring per call) → recv_buf climbed to the 8 MiB
-    // window cap → window 0 → the sender stalled (measured rxbuf_max≈8191 KiB).
-    // A big drain per call keeps recv_buf near-empty → window stays open.
+    // Large heap read buffer (a 512 KiB stack array would overflow the kernel
+    // stack). recv() returns at most buf.len() per call, and poll_rx_only
+    // empties the whole NIC ring into recv_buf per call; a small buffer would
+    // let recv_buf fill up to the window cap and stall the sender with a zero
+    // window. A big drain per call keeps the window open.
     let mut buf = alloc::vec![0u8; 512 * 1024];
     let mut header_end = None;
     loop {
@@ -2901,8 +2707,8 @@ fn http_exchange(
     }
     let hdr_end = match header_end {
         Some(p) => p,
-        // Nichts oder nur Bruchstuecke: auf einer wiederverwendeten Verbindung
-        // ist das der Normalfall einer still geschlossenen Gegenstelle.
+        // Nothing or only fragments: on a reused connection, the normal sign
+        // of a peer that closed quietly.
         None => { let _ = crate::net::tcp::close(handle); return Err(ExchangeErr::Retry); }
     };
     let body_start = hdr_end + 4;
@@ -2923,9 +2729,8 @@ fn http_exchange(
             None if chatty() => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
             _ => {}
         }
-        // Der Koerper einer Weiterleitung wird nicht gelesen, also steht die
-        // Verbindung nicht mehr auf einer Nachrichtengrenze. Sie zurueckzulegen
-        // hiesse, die naechste Anfrage mit fremden Bytes zu beantworten.
+        // The redirect body is not read, so the connection is no longer at a
+        // message boundary and must not be pooled.
         let _ = crate::net::tcp::close(handle);
         return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
@@ -2957,11 +2762,9 @@ fn http_exchange(
             Err(_) => break,
         }
     }
-    // Zurueckgelegt wird NUR, was nachweislich auf einer Nachrichtengrenze
-    // steht: der ganze Koerper geliefert, nichts abgeschnitten, nichts
-    // uebriggelassen — und die Gegenstelle hat nicht `close` gesagt. Jede
-    // andere Verbindung traegt Reste, und die naechste Anfrage bekaeme sie als
-    // Antwort.
+    // Pool only a connection provably at a message boundary: whole body
+    // delivered, nothing clipped or left over, and the peer did not say
+    // `close`. Anything else carries leftovers the next request would read.
     let clean = delivered == cl && cl <= max_size && leading.len() <= cl;
     if clean && !peer_closes {
         plain_put(key, handle);
@@ -3002,14 +2805,14 @@ enum ChunkSt {
     AfterCr,
     /// Expecting the `\n` of that CRLF.
     AfterLf,
-    /// Saw the 0-size chunk — body complete.
+    /// Saw the 0-size chunk; body complete.
     Done,
 }
 
 /// Consume one input slice (header `leading` bytes, then each TLS
 /// record), advancing the decoder and pushing payload slices to
 /// `on_chunk`. Zero-copy: payload is handed out as sub-slices of
-/// `input` — no intermediate buffer, no `Vec::drain`. Returns
+/// `input`, no intermediate buffer, no `Vec::drain`. Returns
 /// `Ok(true)` once the terminal 0-chunk is seen.
 fn chunked_feed(
     input: &[u8],
@@ -3033,7 +2836,7 @@ fn chunked_feed(
                 }
                 size_line.extend_from_slice(&input[i..j]);
                 if j < input.len() {
-                    // input[j] == '\n' — the size line is complete.
+                    // input[j] == '\n': the size line is complete.
                     i = j + 1;
                     if size_line.last() == Some(&b'\r') {
                         size_line.pop();
@@ -3077,7 +2880,7 @@ fn chunked_feed(
             }
             ChunkSt::AfterCr => {
                 // The byte should be '\r'; consume it if so. Either
-                // way move on — a non-CR here on valid chunked never
+                // way move on: a non-CR here on valid chunked never
                 // happens, and tolerating it can't desync because
                 // the size-line parser re-validates.
                 if input[i] == b'\r' {
@@ -3102,16 +2905,12 @@ fn chunked_feed(
 /// Parses the chunk-size framing exactly and pushes only decoded
 /// payload bytes through `on_chunk` as they arrive. Linear and
 /// zero-copy: each TLS record is walked in place and payload is
-/// handed out as sub-slices — there is NO growing carry buffer and
-/// NO `Vec::drain`. (The previous implementation drained from the
-/// front of a `Vec` that it also extended at the back, which is
-/// O(n²) over a transfer: fine for a 13 KB repo, ~31 KiB/s by
-/// 500 KB, effectively dead at 250 MB. The Content-Length path was
-/// always ~100× faster purely because it never did this.)
+/// handed out as sub-slices. No growing carry buffer and no
+/// `Vec::drain` from the front, which would make a transfer O(n²).
 ///
 /// The only state kept across records is the decoder enum plus a
 /// small `size_line` accumulator (a chunk-size line that straddles
-/// a record boundary — capped at 64 bytes).
+/// a record boundary, capped at 64 bytes).
 ///
 /// Returns the number of payload bytes delivered.
 fn stream_chunked_body(

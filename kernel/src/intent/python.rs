@@ -1,4 +1,4 @@
-//! `python` — run Python on the machine.
+//! `python` — run Python as a wasi guest.
 //!
 //! The interpreter is an ordinary signed WASM module in `sys/wasm/`; the
 //! standard library is an ordinary npkFS object in `sys/python/`. Nothing
@@ -22,20 +22,18 @@ const BUNDLE: &str = "sys/python";
 
 /// Fuel for one Python run.
 ///
-/// Measured against this exact interpreter under this exact wasmi: a
-/// bare `-c pass` costs 2.6 G, `import json,re,os` 4.0 G, and a
-/// million-iteration Python loop 102 G. The 10 G that `run` grants would
-/// therefore stop almost any real script mid-sentence. 600 G leaves room
-/// for a script that actually computes something while still being a
-/// ceiling — roughly a minute of device time, not an afternoon.
+/// Interpreter startup and stdlib imports alone cost several G, so the 10 G
+/// that `run` grants would stop almost any real script. 600 G leaves room
+/// for real computation while still being a ceiling (on the order of a
+/// minute).
 const PYTHON_FUEL: u64 = 600_000_000_000;
 
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
     intent_python_on(args, vault, session, crate::wasm::forge_is_default())
 }
 
-/// Dasselbe unter forge. Eigener Eingang statt einer Fahne im python-Aufruf:
-/// so laeuft genau EIN Lauf auf dem Compiler und alles andere wie bisher.
+/// The same under forge. A separate entry point rather than a flag, so only
+/// this one run uses the compiler.
 pub fn intent_python_forge(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
     intent_python_on(args, vault, session, true)
 }
@@ -135,14 +133,13 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     } else {
         crate::wasm::execute_wasi(&wasm, cap, PYTHON_FUEL, ctx, term)
     };
-    // Die Zeit gehoert zum Vergleich, nicht zum Lauf — deshalb steht sie hier
-    // und nicht im Motor, und beide Motoren werden gleich gemessen.
+    // Timed here rather than inside the engine, so both engines are measured
+    // the same way.
     let ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
     let c = crate::heap::counters();
     kprintln!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
-    // Die Karte des Allokators fuer genau diesen Lauf. `steps` sind besuchte
-    // Knoten der Freiliste — die Zahl, die sagt, ob die lineare Suche das
-    // Problem ist oder nicht.
+    // Allocator counters for this run. `steps` are free-list nodes visited,
+    // which shows whether the linear search is the bottleneck.
     kprintln!("[heap] {} allocs / {} frees, Schritte: {} beim Belegen + {} beim Freigeben",
         c.allocs, c.frees, c.alloc_steps, c.free_steps);
     kprintln!("[heap] Freiliste jetzt {} Knoten, Spitze {}, {} mal gewachsen",

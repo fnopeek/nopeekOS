@@ -6,9 +6,8 @@ use super::parse_ip;
 pub fn intent_ping(args: &str) {
     let mut it = args.split_whitespace();
     let host = it.next().unwrap_or("");
-    // One probe is a coin flip on a radio link — the same lesson ARP taught us
-    // today. A single lost echo said "the host is down" when the host was fine,
-    // so the default is four and the summary says how many came back.
+    // One probe is a coin flip on a radio link: a single lost echo would say
+    // "host down". Default to four and report how many came back.
     let count: u16 = it.next().and_then(|s| s.parse().ok()).unwrap_or(4).clamp(1, 32);
     if host.is_empty() {
         kprintln!("[npk] Usage: ping <host or ip> [count]");
@@ -30,9 +29,7 @@ pub fn intent_ping(args: &str) {
         }
     };
 
-    // Resolve the next hop properly instead of firing a blind request at a
-    // hardcoded QEMU address and spinning 100 000 times: that helped only under
-    // QEMU and cost 100 ms everywhere else.
+    // Resolve the next hop before the first echo so it is not lost to ARP.
     let hop = crate::net::ipv4::arp_target_for(ip);
     if crate::net::arp::resolve(hop, 50).is_none() {
         kprintln!("[npk] ping: {}.{}.{}.{} did not answer ARP - sending anyway",
@@ -149,21 +146,17 @@ pub fn intent_netstat() {
     kprintln!();
 }
 
-/// The microVM's side of the wire. Prints itself only when the bridge has
-/// something to say — not gated on `vm_active()`, which despite the name means
-/// "a VM is running on the COOPERATIVE Core-0 path" and is therefore always
-/// false for the fiber-mode guest this report exists for. The counters are their
-/// own gate: they are zeroed at VM teardown, so a host without a guest stays
-/// silent, and a guest whose network just died still answers.
+/// The microVM's side of the wire. Not gated on `vm_active()`, which only
+/// covers the cooperative Core-0 path and is always false for a fiber-mode
+/// guest. The counters are their own gate: they are zeroed at VM teardown, so
+/// a host without a guest stays silent and a guest whose network died still
+/// reports.
 ///
-/// Read it as a decision tree, top to bottom. `guest -> host` still climbing
-/// says the guest is alive and the masquerade is taking its packets; if
-/// `host -> guest` has stopped with it, the replies are not coming back or the
-/// mapping no longer matches. If BOTH climb and the guest still sees nothing,
-/// the loss is in delivery, and the three `lost` numbers say which wall: a full
-/// staging queue is backpressure, a full table means no new connection can open
-/// at all, and an egress refusal means the frame never reached the wire. Call it
-/// twice a few seconds apart — the per-second figures come from the gap.
+/// Read top to bottom. `guest -> host` climbing means the guest is alive and
+/// the masquerade takes its packets; if `host -> guest` stalls, replies are
+/// not coming back or the mapping no longer matches. If both climb and the
+/// guest sees nothing, the loss is in delivery, and the `lost` counters name
+/// the cause. Per-second figures need two calls a few seconds apart.
 fn bridge_report() {
     let b = crate::microvm::devices::nat::bridge_stats();
     let up = crate::microvm::guest_running();
@@ -172,9 +165,8 @@ fn bridge_report() {
     }
     kprintln!();
     if up && b.frames_in == 0 {
-        // Say what is true and no more. `tx_pkts` counts only MASQUERADED
-        // egress, so gating on it called a guest that had sent nothing but ARP
-        // "silent". `frames_in` is counted at the door, before classification.
+        // Gate on `frames_in`, counted before classification: `tx_pkts` counts
+        // only masqueraded egress and would call an ARP-only guest silent.
         kprintln!("  microVM bridge — guest up {} s, {} frames from it",
             b.up_s, b.frames_in);
         kprintln!("  ─────────────────────────────");
@@ -191,9 +183,8 @@ fn bridge_report() {
     kprintln!("  microVM bridge (L3 masquerade){}",
         if b.active { "" } else { "  — idle, no flow yet" });
     kprintln!("  ─────────────────────────────");
-    // The identity line. QEMU, the NUC and the notebook must print the SAME
-    // path id: for months they did not, and no number gathered on one of them
-    // said anything about the others.
+    // Identity line: figures from different hosts are only comparable when
+    // they print the same path id.
     match b.worker_core {
         Some(c) => kprintln!("  path          {}  ·  kernel {}  ·  {}  ·  nic {}  ·  worker core {}",
             b.path, b.version, b.vendor, b.nic, c),
@@ -227,30 +218,26 @@ fn bridge_report() {
         b.rx_unmatched);
     kprintln!("  flows         {} tcp  {} udp opened   {} live of {}",
         b.flows_tcp, b.flows_udp, b.live, b.cap);
-    // Three walls, never one number. A full tap is BACKPRESSURE and healthy in
-    // moderation; a full table means no new connection can open at all; an
-    // egress refusal means the frame never reached the wire. From outside all
-    // three look like "throughput sagged".
+    // Three causes, kept apart because from outside all look like "throughput
+    // sagged": a full tap is backpressure (healthy in moderation), a full
+    // table means no new connection can open, an egress refusal means the
+    // frame never reached the wire.
     kprintln!("  lost          {} tap-full(backpressure)   {} TABLE-FULL   {} egress-refused",
         b.tap_full, b.drop_table, b.drop_egress);
     kprintln!("  delivery      {} guest-ring-full (guest is the limiter)   {} irq raised",
         b.inject_false, b.net_irq);
-    // The guest's own heartbeat. A guest whose jiffies crawl loses its TCP
-    // timers, its NAPI and its workqueues — and looks perfectly alive while
-    // doing it. Compare against the ~1000/s it programmed. A rate needs two
-    // readings: on the first call these are "not measured yet", not "zero",
-    // and printing 0 reads as a stopped guest clock. Say which it is.
+    // The guest's heartbeat. A guest whose jiffies crawl loses its TCP timers,
+    // NAPI and workqueues while looking alive; compare against the ~1000/s it
+    // programmed. Without a window the rate is unmeasured, not zero.
     if b.window_ms > 0 {
         kprintln!("  guest clock   {} timer irq/s", b.gtimer_ps);
     } else {
         kprintln!("  guest clock   -- timer irq/s   (no window yet)");
     }
-    // The vCPU that pumps this bridge is the SAME fiber that copies the guest's
-    // framebuffer, ~8 MB a frame, inline on its MMIO exit — on Intel, where the
-    // net has no off-vCPU worker to fall back on. Printed next to `rx wait` on
-    // purpose: a browser that starts painting and a delivery latency that goes
-    // to milliseconds in the same breath is the whole story, and neither number
-    // says it alone.
+    // The vCPU that pumps this bridge is the same fiber that copies the
+    // guest's framebuffer (~8 MB a frame) inline on its MMIO exit; on Intel
+    // the net has no off-vCPU worker. Printed next to the delivery figures so
+    // painting load and delivery latency can be read together.
     if b.window_ms > 0 {
         kprintln!("  gpu on vcpu   {} KB in {} transfers   {} KB/s   {} us each   {}% OF THE vCPU",
             b.gpu_kb, b.gpu_xfers, b.gpu_kbps, b.gpu_us_each, b.gpu_pct);
@@ -258,9 +245,9 @@ fn bridge_report() {
         kprintln!("  gpu on vcpu   {} KB copied in {} transfers   -- KB/s",
             b.gpu_kb, b.gpu_xfers);
     }
-    // The half of the evidence that was missing: did anything arrive on the
-    // WIRE at all? An empty staging queue with a live consumer means either
-    // nothing came in, or nobody looked. These two separate that.
+    // Did anything arrive on the wire at all? An empty staging queue with a
+    // live consumer means either nothing came in or nobody looked; these two
+    // counters separate the cases.
     let (nic_frames, nic_skipped) = crate::net::nic_drain_stats();
     kprintln!("  host nic      {} frames pulled   {} passes lost the drain guard",
         nic_frames, nic_skipped);
@@ -271,29 +258,17 @@ fn bridge_report() {
     }
 }
 
-/// `wlan` — one screen with everything needed to diagnose the WiFi link.
-///
-/// Two halves that must be read together: what the KERNEL sees of the WASM NIC
-/// (queues, drops, active interface) and what the DRIVER reports about the air
-/// (rates, retries, airtime). A link that is slow because the negotiated rate is
-/// legacy looks nothing like one that is slow because the TX queue keeps
-/// overflowing, and only both halves side by side tell them apart.
-///
-/// `wlan reset` zeroes the kernel counters so a single speed test can be
-/// measured on its own; the driver's counters are cumulative and it reports
-/// throughput over its own 1-second window regardless.
 // ── `wlan set` — one file, one key at a time ─────────────────────────────
 //
-// The wifi settings live in a single `key: value` object, but `store` REPLACES
-// what it writes: typing a second key from the loop dropped the first, and no
-// app may write this file (a module only gets `sys/config/<its own name>`).
-// That left the file creatable and not editable. So the read-modify-write lives
-// here, where the capability already exists.
+// The wifi settings live in a single `key: value` object, but `store`
+// replaces what it writes, and no app may write this file (a module only gets
+// `sys/config/<its own name>`). So the read-modify-write lives here, where
+// the capability already exists.
 
 const WIFI_CFG: &str = "sys/config/wifi";
 
-/// The keys the wifi stack actually reads. A typo that wrote silently is how an
-/// afternoon gets spent measuring a setting that never arrived.
+/// The keys the wifi stack actually reads; anything else is rejected so a
+/// typo does not write a setting nobody reads.
 const WIFI_KEYS: &[&str] = &["ssid", "band", "bw", "ampdu", "txagg", "roam", "ht40", "vht", "bawin", "ps", "btcoex", "settle_ms"];
 
 fn wlan_set_usage() {
@@ -385,6 +360,16 @@ pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
     }
 }
 
+/// `wlan` — one screen with everything needed to diagnose the WiFi link.
+///
+/// Two halves read together: what the kernel sees of the WASM NIC (queues,
+/// drops, active interface) and what the driver reports about the air
+/// (rates, retries, airtime). A legacy negotiated rate and an overflowing TX
+/// queue both look like "slow"; only both halves tell them apart.
+///
+/// `wlan reset` zeroes the kernel counters so a single speed test can be
+/// measured on its own; the driver's counters are cumulative and it reports
+/// throughput over its own 1-second window regardless.
 pub fn intent_wlan(args: &str) {
     if args.trim() == "reset" {
         crate::netdev::wasm_nic_stats_reset();
@@ -412,11 +397,9 @@ pub fn intent_wlan(args: &str) {
         if link { "UP" } else { "DOWN" });
     kprintln!("  routing    active={}  net_prefer={}", active, prefer.trim());
     kprintln!("  tx queue   enq {}  deq {}  backlog {} B", s.tx_enqueued, s.tx_dequeued, s.tx_backlog);
-    // Frames the TX path REFUSED, as opposed to sent and unanswered. The
-    // counters existed since the DNS hunt that motivated them and were never
-    // printed, so a SYN that never reached the air still looked exactly like a
-    // SYN the peer ignored — which is the question `connect timeout: state
-    // SynSent` leaves open.
+    // Frames the TX path refused, as opposed to sent and unanswered: tells a
+    // SYN that never reached the air from one the peer ignored, which
+    // `connect timeout: state SynSent` leaves open.
     let (no_link, tx_err) = crate::netdev::tx_reject_stats();
     if no_link > 0 || tx_err > 0 {
         kprintln!("  tx refused  no-link {}  by-driver {} (never reached the air)",
@@ -450,10 +433,9 @@ pub fn intent_wlan(args: &str) {
     kprintln!("             wifid→driver {} sent, {} queued, {} DROPPED",
         c.cmds_sent, c.cmds_queued, c.cmds_dropped);
     if c.events_sent > 0 && c.cmds_sent == 0 {
-        // Only meaningful once the driver has actually handed over something
-        // that needs an answer. A lone READY with no reply means the AP never
-        // started the handshake — the supplicant has nothing to answer yet, and
-        // blaming it here sent the last diagnosis down the wrong path.
+        // A lone READY with no reply means the AP has not started the
+        // handshake; the supplicant has nothing to answer yet, so this is not
+        // its fault.
         kprintln!("             (no reply yet — expected while the AP has not sent EAPOL msg1)");
     }
 
@@ -560,10 +542,9 @@ pub fn intent_net_info() {
     kprintln!("  DNS      {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
     kprintln!();
 
-    // The next-hop table. A wrong MAC here is invisible from the outside — it
-    // looks exactly like the far end being down, and it takes out everything
-    // that leaves the segment while LAN-direct traffic keeps working. The
-    // gateway's row is the one to check first, so it is marked.
+    // The next-hop table. A wrong gateway MAC looks like the far end being
+    // down and breaks everything off-segment while LAN traffic keeps working,
+    // so the gateway's row is marked.
     let table = crate::net::arp::table();
     kprintln!("  Neighbours");
     kprintln!("  ──────────");

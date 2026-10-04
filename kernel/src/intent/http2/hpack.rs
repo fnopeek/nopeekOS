@@ -1,12 +1,8 @@
 //! HPACK — header compression for HTTP/2 (RFC 7541).
 //!
-//! Full client-side decoder including the dynamic table. An earlier plan was
-//! to advertise `SETTINGS_HEADER_TABLE_SIZE = 0` and skip the dynamic table
-//! entirely; that was dropped for two reasons. It would have cost us the
-//! RFC's own worked examples (Appendix C) as a test oracle — most of them
-//! reference dynamic indices — and it left a real failure mode, since a peer
-//! that indexes dynamically anyway would break every page rather than one
-//! header.
+//! Full client-side decoder including the dynamic table: a peer may index
+//! dynamically regardless of what we advertise, and the RFC's worked
+//! examples (Appendix C) reference dynamic indices.
 //!
 //! Our *encoder* stays deliberately dumb: literals without indexing, never
 //! Huffman-coded, so our own dynamic table stays empty. Request headers are a

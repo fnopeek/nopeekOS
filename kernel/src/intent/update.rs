@@ -9,21 +9,15 @@ use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
 const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
-/// Hard ceiling on a kernel image we are willing to buffer. NOT the download
-/// bound — that comes from the signed manifest (see below), so this only has
-/// to be "implausible", not "current size plus guesswork".
-///
-/// It used to be 4 MiB and used directly as the download cap. When the kernel
-/// crossed 4 MiB the fetch was silently truncated there, and OTA failed with a
-/// confusing `Size mismatch` — the updater on the device could no longer
-/// install any kernel, including the one that fixes this. Deriving the bound
-/// from the manifest means the cap can never again drift away from reality.
+/// Hard ceiling on a kernel image we are willing to buffer. Not the download
+/// bound: that comes from the signed manifest, so this only has to be
+/// implausibly large. A fixed cap close to the real size would eventually
+/// truncate a grown kernel and leave the updater unable to install any fix.
 const MAX_KERNEL_SIZE: usize = 64 * 1024 * 1024;
 const MAX_MANIFEST_SIZE: usize = 4096;
 const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
-/// 512 MB ceiling for OTA assets. The userspace bundle with Mesa/Wayland
-/// runs ~270 MB; raw-githubusercontent caps at ~50–100 MB per file, so
-/// anything above ~32 MB ships via GitHub Releases (asset manifest carries
+/// 512 MB ceiling for OTA assets. raw-githubusercontent caps at ~50–100 MB
+/// per file, so large assets ship via GitHub Releases (asset manifest carries
 /// an explicit `url=` line for those; redirect-following lives in
 /// `https_get`).
 const MAX_ASSET_SIZE: usize = 512 * 1024 * 1024;
@@ -56,22 +50,21 @@ const ASSETS: &[AssetSpec] = &[
     // entry is absent in the asset manifest and we keep whatever's
     // already installed (or nothing).
     //
-    // Small bundles (<~30 MB) live in `release/assets/` on the `main`
-    // branch and ship via raw.githubusercontent.com. Larger bundles
-    // (Mesa+Wayland is ~270 MB) live on GitHub Releases — the asset
+    // Small bundles live in `release/assets/` on the `main` branch and
+    // ship via raw.githubusercontent.com. Larger bundles live on GitHub
+    // Releases; the asset
     // manifest carries a `url=` override per entry and `https_get`
     // follows the 302 redirect chain to objects.githubusercontent.com.
     AssetSpec { section: "microvm:userspace",   remote_filename: "microvm-userspace.cpio.gz", npkfs_path: "sys/microvm/userspace.cpio.gz" },
     // Squashfs form of the userspace bundle — read-only, mounted by
     // PID-1 from /dev/vdb (slot-5 virtio-blk) instead of unpacked into
-    // a tmpfs initramfs. The RAM-efficient daily-driver path; supersedes
-    // the cpio entry above once it's the only shipped form.
+    // a tmpfs initramfs. The RAM-efficient path; supersedes the cpio entry
+    // above once it is the only shipped form.
     AssetSpec { section: "microvm:userspace-sqfs", remote_filename: "microvm-userspace.sqfs",  npkfs_path: "sys/microvm/userspace.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
-    // ZipImportError at the first import. Costs ~5 MB over the wire and
-    // saves decompressing on every import — a fair trade on a machine
-    // where the interpreter is already the slow part.
+    // ZipImportError at the first import. It also saves decompressing on
+    // every import.
     //
     // Not bundled into the installer: like microvm:userspace, Python is
     // something you fetch, not something every USB stick carries.
@@ -163,7 +156,8 @@ impl Plan {
         self.kernel.iter().count() + self.modules.len() + self.assets.len()
     }
 
-    /// "kernel v0.240.0, 18 modules, 14 assets" — everything that needs nothing.
+    /// One summary line for everything that needs nothing (kernel, module
+    /// and asset counts).
     fn current_summary(&self) -> String {
         let mut bits = Vec::new();
         if self.kernel.is_none() {
@@ -187,16 +181,14 @@ pub fn intent_update(args: &str) {
         }
     }
 
-    // Answering "what changed" takes three manifest fetches plus one request
-    // per item — their connect timings and status lines say nothing about the
-    // question and buried the answer. `-v` puts them back.
+    // The per-request connect timings and status lines say nothing about
+    // what changed, so they are hidden unless `-v` is given.
     let _quiet = (!verbose).then(super::http::quiet);
 
     let Some(plan) = build_plan() else { return };
 
     if plan.is_empty() {
-        // The whole point of the rewrite: nothing to do is ONE line, not one
-        // line per module and per asset with the four that matter buried in it.
+        // Nothing to do is one line, not one line per module and asset.
         kprintln!("[npk]   * everything current — {}", plan.current_summary());
         return;
     }
@@ -267,8 +259,8 @@ fn print_plan(plan: &Plan) {
         kprintln!("[npk]   + asset    {:<28} {}{}", a.npkfs_path, fmt_size(a.entry.size), what);
     }
 
-    // One line for everything that needs nothing — this used to be one line
-    // per module and per asset, which buried the few that mattered.
+    // One line for everything that needs nothing, so the few items that
+    // matter are not buried.
     let rest = plan.current_summary();
     if !rest.is_empty() {
         kprintln!("[npk]   . {} current", rest);
@@ -296,8 +288,7 @@ fn apply_plan(plan: Plan) {
     }
     // New anchors are inert until reloaded — the store is held in memory so
     // handshakes never touch npkFS. Without this, a freshly delivered CA
-    // would only take effect after the next reboot, which looks exactly
-    // like the update not having worked.
+    // would only take effect after the next reboot.
     if certs_changed {
         let n = crate::tls::certstore::load_store();
         kprintln!("[npk]   * trust store reloaded — {} stored anchor(s)", n);
@@ -438,7 +429,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
     for entry in entries {
         let (npkfs_path, remote_filename) = match ASSETS.iter().find(|s| s.section == entry.section) {
             Some(s) => (String::from(s.npkfs_path), String::from(s.remote_filename)),
-            // Root CA anchors are data, not code: the section name IS the
+            // Root CA anchors are data, not code: the section name is the
             // filename, so shipping or replacing an anchor is dropping a file
             // into `release/assets/certs/` — no kernel change, no reinstall.
             // The trust chain is unchanged: size and sha384 come from the
@@ -479,14 +470,11 @@ fn apply_asset(job: &AssetJob) -> bool {
     let local_present = job.present;
     {
         // ── Make room before a streaming write ──────────────────────
-        // The streaming writer keeps the OLD copy live until finish(),
-        // so a refresh transiently needs the new asset's size ON TOP of
-        // everything already stored — 2× for a same-path replace. A
-        // previously-aborted download also leaks orphaned chunks that
-        // only gc reclaims. On a tight partition a 261 MB bundle can't
-        // afford either, which is why a fresh fetch failed ~40 MB in
-        // with a bare "npkfs write failed" (= DiskFull). Reclaim and
-        // free up front; bail with a clear message if it still won't fit.
+        // The streaming writer keeps the old copy live until finish(),
+        // so a refresh transiently needs the new asset's size on top of
+        // everything already stored (2x for a same-path replace), and an
+        // aborted download leaves orphaned chunks only gc reclaims. Reclaim
+        // and free up front; fail with a clear message if it still won't fit.
         const BLOCK: u64 = 4096;
         let free_bytes = || crate::npkfs::stats().map(|(_, f, _, _)| f * BLOCK).unwrap_or(0);
         let need = entry.size as u64;
@@ -509,7 +497,7 @@ fn apply_asset(job: &AssetJob) -> bool {
                 kprintln!("[npk]   . freed old {} to make room", spec.npkfs_path);
             }
         }
-        // 3. Truly out of space — fail clearly instead of 40 MB in.
+        // 3. Truly out of space: fail clearly up front, not mid-download.
         if free_bytes() < need {
             kprintln!("[npk]   ! {} disk full (need {} MB, {} MB free)",
                 spec.npkfs_path, need / (1024 * 1024), free_bytes() / (1024 * 1024));
@@ -524,7 +512,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         //       `github.com/.../releases/download/...` → the signed
         //       `objects.githubusercontent.com` CDN URL works transparently.
         //   (b) entry.url == None       → fall back to raw.githubusercontent
-        //       on main (the existing flow for <30 MB assets).
+        //       on main (small assets).
         let (asset_host, asset_path_owned);
         let (asset_host_str, asset_path_str): (&str, &str) = if let Some(url) = &entry.url {
             match split_url(url) {
@@ -539,8 +527,7 @@ fn apply_asset(job: &AssetJob) -> bool {
 
         // Streaming download: drive bytes straight into npkFS via the
         // ChunkedWriter, hashing SHA-384 incrementally as they pass.
-        // Peak RAM = one 16 MiB chunk regardless of asset size — a
-        // 1 GB userspace bundle no longer needs a 1 GB heap spike.
+        // Peak RAM is one 16 MiB chunk regardless of asset size.
         let mut writer = match crate::npkfs::open_streaming_write(spec.npkfs_path) {
             Ok(w) => w,
             Err(e) => { kprintln!("[npk]   ! asset     npkfs open failed: {:?}", e); return false; }

@@ -597,7 +597,7 @@ fn print_cpu_features() {
     // CPUID(7,0) — extended features. EBX bit 5 = AVX2.
     // ECX bit 10 = VPCLMULQDQ (VEX/EVEX-encoded carry-less multiply,
     // 256/512-bit parallel — Ice Lake / Zen 3+. polyval 0.7+ requires
-    // this for its HW path; N100 (Atom-class) likely does NOT have it
+    // this for its HW path; Atom-class cores such as the N100 may lack it
     // even though plain PCLMULQDQ works.)
     let cpuid7 = __cpuid(7);
     let hw_avx2 = (cpuid7.ebx & (1 << 5)) != 0;

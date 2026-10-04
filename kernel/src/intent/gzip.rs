@@ -1,27 +1,16 @@
 //! gzip on the receive path (RFC 1952), streaming and capped.
 //!
-//! Measured across beak's target corpus: the same document arrives **4,1x to
-//! 9,9x** smaller with `Accept-Encoding: gzip`
-//! (`docs/plan/JS_SCOPE_CONTENT_WEB.md` §8). Until now the HTTP path neither
-//! sent the header nor could inflate, so every page came uncompressed.
+//! * Streaming, not buffer-then-unpack: the receive path hands fragments to
+//!   a sink; a staging buffer would hold the whole response a second time.
+//! * The cap is the same as without gzip: at most `max_size` inflated bytes
+//!   pass. A zip bomb is then no worse than an uncompressed body of that
+//!   size, and the remote side never decides how much we unpack.
 //!
-//! Two things here are deliberate:
+//! miniz_oxide knows zlib and raw DEFLATE, not the gzip framing, so the
+//! header is parsed here and the rest is fed as `Raw`.
 //!
-//! * **Streaming, not buffer-then-unpack.** The receive path hands fragments
-//!   to a sink; a staging buffer would hold the whole response a second time.
-//! * **The cap is the same cap as without gzip.** At most as many bytes are
-//!   inflated as the caller already named in `max_size`. A zip bomb is then no
-//!   more dangerous than an uncompressed body of the size the caller said it
-//!   could take, and it is clipped in the same place. That is the answer to
-//!   the security checkpoint: we unpack foreign bytes, but into a pot whose
-//!   size the far side does not decide.
-//!
-//! miniz_oxide knows zlib and raw DEFLATE, not the gzip framing — so the
-//! header is read here and the rest is fed as `Raw`.
-//!
-//! The trailer's CRC32 is NOT verified, and that is a decision: the bytes came
-//! through TLS, which already vouches for their integrity. A stream damaged
-//! here means "the server is broken", not "someone turned it on the way".
+//! The trailer's CRC32 is not verified: the bytes came through TLS, which
+//! already vouches for their integrity.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -43,9 +32,8 @@ pub struct GzipInflate {
     hdr: Vec<u8>,
     out: Vec<u8>,
     budget: usize,
-    /// Fed in raw and handed out inflated — for the trace only. Without these
-    /// two numbers a successful gzip run on the device looks exactly like no
-    /// run at all (`feedback_the_fast_path_must_say_it_ran`).
+    /// Raw bytes fed and inflated bytes produced, for the trace only; they
+    /// show that the gzip path actually ran.
     fed: usize,
     produced: usize,
     done: bool,
@@ -54,7 +42,7 @@ pub struct GzipInflate {
 }
 
 impl GzipInflate {
-    /// `budget` = how many INFLATED bytes may pass through the sink at most.
+    /// `budget` = how many inflated bytes may pass through the sink at most.
     pub fn new(budget: usize) -> Self {
         GzipInflate {
             state: None,
@@ -84,10 +72,9 @@ impl GzipInflate {
         self.fed += input.len();
         if self.state.is_none() {
             self.hdr.extend_from_slice(input);
-            // The bound is for a header that does NOT END — not for the first
-            // delivery. Checking it before the parse rejected every response
-            // that arrived in one piece, which is nearly all of them: the
-            // bytes AFTER the header were counted too.
+            // The bound applies only to a header that does not end. Checking
+            // it before the parse would also count the body bytes that
+            // arrived in the same fragment.
             let n = match header_len(&self.hdr)? {
                 None => {
                     if self.hdr.len() > MAX_HEADER {
@@ -114,11 +101,8 @@ impl GzipInflate {
             Some(s) => s,
             None => return Ok(()),
         };
-        // Only while there is input. A call with EMPTY input reports
-        // `MZError::Buf` — "no progress possible", not "damaged". The first
-        // version read that as damage and dropped every response that arrived
-        // in more than one piece; in one piece it worked, which is the only
-        // reason it looked correct.
+        // Only while there is input: a call with empty input reports
+        // `MZError::Buf` ("no progress possible"), which is not damage.
         while !input.is_empty() {
             let r = inflate(state, input, &mut self.out, MZFlush::None);
             if r.bytes_written > 0 {

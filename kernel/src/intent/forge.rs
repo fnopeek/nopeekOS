@@ -1,10 +1,9 @@
 //! `forge` — translate a module to machine code, and say what it cost.
 //!
-//! The compiler runs on the device long before anything it produces is
-//! executed there. That order is deliberate: translating exercises the
-//! allocator, the parser and the whole generator under the kernel's own
-//! `no_std` conditions, and a failure there says something quite different
-//! from a failure while running. One thing at a time.
+//! Translating alone exercises the allocator, the parser and the whole
+//! generator under the kernel's `no_std` conditions, separately from
+//! running the result: a compile failure and a run failure mean different
+//! things.
 
 use crate::{kprint, kprintln};
 use alloc::format;
@@ -14,20 +13,11 @@ fn ms() -> u64 {
     crate::interrupts::ticks() * 10
 }
 
-/// Compile the embedded modules, run them, and compare against what the same
-/// compiler produced on the development machine.
+/// A 70-byte module that calls one import and then returns 99. The 99 must
+/// never come out: the import leaves the run via `forge_rt::host_trap`, so
+/// a broken unwind shows up here rather than later in python.
 ///
-/// The expectations in `forge_tests.rs` were not written by hand: each one was
-/// measured there, by a generator whose output is checked against the
-/// interpreter case by case. So this asks a sharper question than "did it
-/// work" — it asks whether the device agrees with the host, down to the trap
-/// codes.
-/// Ein Modul von 70 Bytes, das genau eine Sache tut: einen Import rufen und
-/// danach 99 zurueckgeben. Die 99 darf NIE herauskommen — der Import verlaesst
-/// den Lauf ueber `forge_rt::host_trap`, und wenn das Abrollen nicht stimmt,
-/// sagt es genau hier Bescheid statt spaeter in python.
-///
-/// Von Hand erzeugt (Typen, ein Import, ein Export "f", drei Instruktionen).
+/// Hand-assembled (types, one import, export "f", three instructions).
 const TRAP_PROBE: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x09, 0x02, 0x60,
     0x00, 0x00, 0x60, 0x01, 0x7f, 0x01, 0x7f, 0x02, 0x1c, 0x01, 0x03, 0x65,
@@ -38,15 +28,15 @@ const TRAP_PROBE: &[u8] = &[
 ];
 
 extern "C" fn probe_exit(vm: *const u64) -> i32 {
-    // SAFETY: `vm` ist der vmctx der laufenden Instanz, den der Generator als
-    // erstes Argument uebergibt. Kehrt nicht zurueck.
+    // SAFETY: `vm` is the running instance's vmctx, passed by the generator
+    // as the first argument. Does not return.
     unsafe { crate::forge_rt::host_trap(vm, forge_core::trap::EXIT) }
 }
 
 struct ProbeHost;
 impl crate::forge_rt::HostImports for ProbeHost {
     fn ctx_ptr(&self) -> u64 {
-        // Der Stumpf fasst den Zustand nicht an; ein Zeiger waere gelogen.
+        // The stub never touches host state, so there is no pointer to give.
         0
     }
     fn resolve(&self, module: &str, name: &str) -> Option<u64> {
@@ -55,12 +45,11 @@ impl crate::forge_rt::HostImports for ProbeHost {
     }
 }
 
-/// Kann eine Host-Funktion den Lauf beenden, statt zurueckzukehren?
+/// Can a host function end the run instead of returning?
 ///
-/// Das ist der eine Mechanismus, fuer den der Host-Zwilling keine Antwort hat:
-/// dort ist jeder Lauf ein eigener Prozess und `proc_exit` beendet ihn einfach.
-/// Im Kernel muss abgerollt werden, und ein Assembler-Stub, der `rsp` und `rbp`
-/// wiederherstellt, gehoert geprueft, bevor python davon abhaengt.
+/// The host harness cannot test this: there each run is its own process and
+/// `proc_exit` just ends it. In the kernel the run must be unwound by an
+/// assembly stub that restores `rsp` and `rbp`.
 fn trap_probe() -> bool {
     use crate::forge_rt::Instance;
     let Ok(m) = forge_core::compile(TRAP_PROBE) else {
@@ -88,7 +77,7 @@ fn trap_probe() -> bool {
             forge_core::trap::name(trap), got);
         return false;
     }
-    // Kaeme 99 heraus, waere die Host-Funktion zurueckgekehrt statt zu traps.
+    // 99 means the host function returned instead of trapping.
     if got == 99 {
         kprintln!("[npk] forge: Trap-Probe ist ZURUECKGEKEHRT — das Abrollen hat nicht gegriffen");
         return false;
@@ -96,6 +85,10 @@ fn trap_probe() -> bool {
     true
 }
 
+/// Compile the embedded modules, run them, and compare against what the same
+/// compiler produced on the host. The expectations in `forge_tests.rs` are
+/// generated there and checked against the interpreter, so this asks whether
+/// kernel and host agree down to the trap codes.
 fn selftest() {
     use crate::forge_rt::Instance;
     use crate::forge_tests::CASES;
@@ -158,7 +151,7 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         return;
     }
     if let Some(rest) = args.trim_start().strip_prefix("python") {
-        // `forge python -c "..."` — derselbe Lauf, anderer Motor.
+        // `forge python -c "..."`: the same run on the forge engine.
         super::python::intent_python_forge(rest.trim_start(), vault, session);
         return;
     }
@@ -171,9 +164,9 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         super::wasm::intent_run_interactive_forge(m);
         return;
     }
-    // Der Schalter, der einen Neustart uebersteht. `dock`, `bar`, `audio_hda`
-    // und `wifid` startet niemand von Hand — die kommen ueber Autostart und
-    // den Treiberweg, und nur so lassen sie sich unter forge pruefen.
+    // Persistent engine default. Modules started by autostart or the driver
+    // path (`dock`, `bar`, `audio_hda`, `wifid`) can only run under forge
+    // this way.
     if let Some(rest) = name.strip_prefix("default") {
         let arg = rest.trim();
         match arg {
@@ -237,8 +230,7 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
     }
     let instrs: u64 = m.plan.total_instrs();
 
-    // Tenths, printed with the point where it belongs — the value is around
-    // eight, and "84" reads like a different number entirely.
+    // Tenths, printed with a decimal point: "8.4" rather than "84".
     let tenths = if instrs > 0 { m.code.len() as u64 * 10 / instrs } else { 0 };
     kprintln!(
         "[npk] forge: {}/{} Funktionen, {} Instruktionen -> {} B x86 ({}.{} B je Instr)",
@@ -259,10 +251,8 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         kprintln!("[npk] forge: {} Funktionen abgelehnt, erste: {}", total - done, why);
     }
 
-    // Uebersetzen ist das eine, hinauskommen das andere. Ein Import, den die
-    // Bruecke nicht kennt, behaelt den Trap-Stumpf — das Modul wuerde beim
-    // ersten Aufruf stehenbleiben, nicht falsch rechnen. Also hier zaehlen,
-    // wo es noch niemandem weh tut.
+    // An import the glue cannot resolve keeps the trap stub: the module would
+    // stop at its first call. Count them here, before anything runs.
     let imports = m.plan.imported_funcs.len();
     let mut resolved = 0usize;
     let mut first_missing: Option<(&str, &str)> = None;
