@@ -4,11 +4,11 @@
 //! Structure:
 //!   1. BB table (MMIO writes via config_bb_reg)
 //!   2. bb_reset
-//!   3. BB gain table — NOT MMIO. Linux parses each entry's "addr" as a
+//!   3. BB gain table — not MMIO. Linux parses each entry's "addr" as a
 //!      struct (type/path/gain_band/cfg_type) and stores values in RAM
-//!      for later per-channel RSSI calibration. Writing them as MMIO
-//!      clobbers SYS_ISO_CTRL / SYS_PW_CTRL (addrs 0x000..0x002 overlap
-//!      PCIe power regs) and kills the chip. We skip the table for now.
+//!      for later per-channel gain setup (BB_GAIN here). Writing them as
+//!      MMIO clobbers SYS_ISO_CTRL / SYS_PW_CTRL (addrs 0x000..0x002
+//!      overlap PCIe power regs) and kills the chip.
 //!   4. RF table per path (path A: base 0xE000; path B: base 0xF000)
 //!      Each entry routed via rtw89_phy_write_rf_v1:
 //!         - bit 16 of addr set (ad_sel=1) → direct MMIO at base+((addr&0xff)<<2)
@@ -17,9 +17,9 @@
 //!   6. NCTL table (MMIO writes, addrs 0x8000+)
 //!
 //! Conditional state machine (PHY_COND_BRANCH_IF/ELIF/ELSE/END/CHECK) is
-//! implemented per Linux rtw89_phy_init_reg. Our flat .bin tables trigger
-//! the parser with headline_size=0 (no headers), so only the unconditional
-//! pre-IF entries exist — functional for basic init.
+//! implemented per Linux rtw89_phy_init_reg. Flat .bin tables without
+//! headers (headline_size=0) contain only the unconditional pre-IF
+//! entries, which suffice for basic init.
 
 use crate::host;
 use crate::fw;
@@ -38,12 +38,12 @@ const PHY_COND_BRANCH_END:  u32 = 0xb;
 const PHY_HEADLINE_VALID:   u32 = 0xf;
 const PHY_COND_DONT_CARE:   u8  = 0xff;
 
-// Linux rtw89_phy_gen_ax.cr_base — ALL PHY/BB/RF/NCTL register addresses
+// Linux rtw89_phy_gen_ax.cr_base — all PHY/BB/RF/NCTL register addresses
 // in the Linux phy table constants and in rtw89_phy_write32() helpers are
 // relative to this base. MAC registers (R_AX_* with cr_base=0) stay at
 // their raw offset, but everything going through rtw89_phy_write32/_mask
-// lands at addr + CR_BASE. Missing this offset was writing the BB table
-// into SYS/PCIe/MAC registers, killing the chip.
+// lands at addr + CR_BASE. Without the offset the BB table lands in
+// SYS/PCIe/MAC registers and kills the chip.
 pub const PHY_CR_BASE: u32 = 0x10000;
 
 // SWSI RF indirect write (Linux reg.h) — PHY-space addresses, add CR_BASE
@@ -67,10 +67,9 @@ const R_P1_PATH_RST:   u32 = 0x78AC;
 const R_NCTL_CFG:      u32 = 0x8000;
 const R_NCTL_POLL:     u32 = 0x8080;
 
-// 8852BE: rfe/cv values. cv=2 confirmed from SYS_CFG1 register dump.
-// v0.63.1 with full Linux tables showed rfe=0 fails all 4 sel_headline
-// cases (RF_A headlines have rfe ∈ {1..8, 0x29, 0x2B}). 1 is most common
-// for 8852BE consumer cards. If still aborts, try 2.
+// 8852BE rfe/cv values; cv=2 as reported by SYS_CFG1. rfe=0 matches none
+// of the sel_headline cases (RF_A headlines have rfe ∈ {1..8, 0x29,
+// 0x2B}); 1 is the most common value on 8852BE consumer cards.
 const RFE: u8 = 1;
 const CV:  u8 = 2;
 
@@ -91,10 +90,10 @@ pub fn init(mmio: i32) {
 
     host::print("  PHY: BB regs...\n");
     let bb = run_table(mmio, BB_TABLE, WriteKind::Bb);
-    // bb_reset IMMEDIATELY after last BB write, before any serial prints.
-    // Linux phy_init_bb_reg runs BB table → init_txpwr_unit → bb_gain →
-    // bb_reset, all in tight sequence. Our serial prints take 10-15ms
-    // and the BB subsystem destabilises during that gap.
+    // bb_reset immediately after the last BB write, before any serial
+    // prints. Linux phy_init_bb_reg runs BB table → init_txpwr_unit →
+    // bb_gain → bb_reset in tight sequence; a serial print takes several
+    // milliseconds and the BB subsystem destabilises during that gap.
     bb_reset(mmio);
     report("BB", &bb);
     host::print("  PHY: bb_reset done\n");
@@ -150,10 +149,8 @@ pub fn init(mmio: i32) {
     host::print(" regs written)\n");
 }
 
-/// Gated by `VERBOSE` — dumps CFG1 at every PHY-init milestone. Was
-/// critical while tracking down "BB table kills PCIe" regressions in
-/// v0.80-era; now that init passes cleanly these 15+ lines are pure
-/// noise. Keep code to re-enable when a future chip change breaks CFG1.
+/// Gated by `VERBOSE` — dumps CFG1 at every PHY-init milestone, for
+/// finding a table write that kills the PCIe interface.
 const VERBOSE: bool = false;
 
 fn dbg(mmio: i32, tag: &str) {
@@ -508,8 +505,7 @@ pub fn rf_write_full(mmio: i32, path: u8, addr: u32, data: u32) {
 // ═══════════════════════════════════════════════════════════════════
 //  RFK: baseline — 1:1 Linux rtw8852b_rfk_init
 //  rtw8852b.c:649 → dpk_init + rck + dack + rx_dck
-//  We implement dpk_init + rck for now (minimal baseline);
-//  dack/rx_dck are much larger and can be added if still needed.
+//  dpk_init + rck live here; dack + rx_dck are in rfk.rs.
 // ═══════════════════════════════════════════════════════════════════
 
 // RF register addresses (Linux reg.h)
@@ -650,7 +646,7 @@ fn bb_reset(mmio: i32) {
 //  BB gain parser + HW apply  — 1:1 Linux rtw89_phy_config_bb_gain_ax
 //  + rtw8852bx_set_gain_error (rtw8852b_common.c:577).
 //
-//  BB gain entries in the bb_gain table do NOT write to MMIO. Instead
+//  BB gain entries in the bb_gain table do not write to MMIO. Instead
 //  the table addr field is a packed `rtw89_phy_bb_gain_arg` union:
 //      [ 7: 0] type   (or rxsc_start[3:0] | bw[7:4] for rpl_ofst)
 //      [15: 8] path

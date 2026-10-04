@@ -4,16 +4,14 @@
 //!
 //! The chip has a shared WiFi+BT antenna on 8852BE (ant.num=2, type=
 //! SHARED, bt_pos=BTG). Out of reset, the PTA (Packet Traffic Arbiter)
-//! arbitrates the shared resources and — critically — has
-//! B_AX_PTA_WL_TX_EN at default 0 so WiFi mgmt/data TX is silenced
-//! until coex init explicitly enables it. That matches our post-v1.44
-//! sniffer finding: 0 frames on-air from the NUC while IQK/DPK/TSSI
-//! all run fine internally.
+//! arbitrates the shared resources and has B_AX_PTA_WL_TX_EN at default
+//! 0, so WiFi mgmt/data TX is silenced until coex init enables it. The
+//! symptom is no frames on air while IQK/DPK/TSSI all succeed.
 //!
 //! Linux chain we replicate:
 //!   rtw89_mac_coex_init(RTK mode, INNER direction):
 //!     R_AX_GPIO_MUXCFG |= ENBT                  (enable BT GPIO)
-//!     R_AX_BTC_FUNC_EN |= PTA_WL_TX_EN          ← THE BIT
+//!     R_AX_BTC_FUNC_EN |= PTA_WL_TX_EN          (gates WiFi TX)
 //!     R_AX_BT_COEX_CFG_2 high-byte |= GNT_BT_POLARITY
 //!     R_AX_CSR_MODE |= STATIS_BT_EN | WL_ACT_MSK
 //!     R_AX_CSR_MODE+2 |= BT_CNT_RST>>16
@@ -117,7 +115,7 @@ fn mac_coex_init(mmio: i32) {
     // 1) GPIO_MUXCFG: set B_AX_ENBT
     host::mmio_set32(mmio, R_AX_GPIO_MUXCFG, B_AX_ENBT);
 
-    // 2) BTC_FUNC_EN: set PTA_WL_TX_EN  ← THE CRITICAL BIT
+    // 2) BTC_FUNC_EN: set PTA_WL_TX_EN (without it WiFi TX stays muted)
     //    8852B is not 8851B or 8852BT, so this path applies.
     host::mmio_set32(mmio, R_AX_BTC_FUNC_EN, B_AX_PTA_WL_TX_EN);
 

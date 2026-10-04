@@ -6,11 +6,10 @@
 //! block-specific "catch these errors" mask, using the chip-specific
 //! values from `rtw89_imr_info rtw8852b_imr_info` (rtw8852b.c:157).
 //!
-//! Without the per-block IMRs, Linux observes that some error sources
-//! never get propagated to the ISR path — which for 8852B appears to
-//! include the CH12 H2C DONE/REC_ACK path. Our v1.0/v1.1 wedging after
-//! the first VIF H2C was silent (no C2H of any kind for multiple
-//! seconds) which is exactly that symptom.
+//! Without the per-block IMRs some error sources never reach the ISR
+//! path; on 8852B this appears to include the CH12 H2C DONE/REC_ACK
+//! path, and the symptom is a FW that goes silent (no C2H at all) after
+//! the first VIF H2C.
 //!
 //! Register addresses + mask values inlined from Linux reg.h with line
 //! refs. All values pre-computed from the combined `#define B_AX_*_IMR_*`
@@ -18,7 +17,7 @@
 
 use crate::host;
 
-// ── DMAC-seitige IMR-Register ────────────────────────────────────
+// ── DMAC-side IMR registers ──────────────────────────────────────
 const R_AX_HOST_DISPATCHER_ERR_IMR: u32   = 0x8850;
 const R_AX_CPU_DISPATCHER_ERR_IMR:  u32   = 0x8854;
 const R_AX_OTHER_DISPATCHER_ERR_IMR: u32  = 0x8858;
@@ -38,7 +37,7 @@ const R_AX_STA_SCHEDULER_ERR_IMR:   u32   = 0x9EF0;
 const R_AX_TXPKTCTL_ERR_IMR_ISR:    u32   = 0x9F1C;
 const R_AX_TXPKTCTL_ERR_IMR_ISR_B1: u32   = 0x9F2C;
 
-// ── CMAC-seitige IMR-Register (mac_idx=0 → reg + 0*0x2000) ────────
+// ── CMAC-side IMR registers (mac_idx=0 → reg + 0*0x2000) ─────────
 const R_AX_SCHEDULE_ERR_IMR:        u32   = 0xC3E8;
 const R_AX_PTCL_IMR0:               u32   = 0xC6C0;
 const R_AX_DLE_CTRL:                u32   = 0xC800;
@@ -143,7 +142,7 @@ const TMAC_IMR_CLR:         u32 = 0x0000_0780;
 const TMAC_IMR_SET:         u32 = 0x0000_0780;
 
 /// Apply mac_idx offset. 8852B: mac_idx=0 → +0, mac_idx=1 → +0x2000.
-/// We always use mac_idx=0 for now.
+/// Only mac_idx=0 is used.
 fn idx(reg: u32, mac_idx: u8) -> u32 {
     reg + (mac_idx as u32) * 0x2000
 }

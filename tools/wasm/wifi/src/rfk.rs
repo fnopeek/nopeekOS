@@ -1,10 +1,10 @@
-//! RF Kalibrierung — 1:1 Port aus Linux rtw8852b_rfk.c.
+//! RF calibration — 1:1 port of Linux rtw8852b_rfk.c.
 //!
-//! Implementiert die Basis-RFK die Linux in rtw8852b_rfk_init() ruft:
+//! Implements the baseline RFK that Linux runs in rtw8852b_rfk_init():
 //!   dpk_init → rck → dack → rx_dck
 //!
-//! Alle PHY-Register brauchen `PHY_CR_BASE` offset wie in phy.rs beschrieben.
-//! RF-Register (RR_*) gehen über SWSI (rf_read/rf_write_mask aus phy.rs).
+//! Every PHY register needs the `PHY_CR_BASE` offset described in phy.rs.
+//! RF registers (RR_*) go through SWSI (rf_read/rf_write_mask in phy.rs).
 
 use crate::host;
 use crate::phy::{self, rf_read, rf_write_mask, rf_write_full, PHY_CR_BASE};
@@ -251,8 +251,8 @@ fn addck_reload(mmio: i32) {
     let cur = host::mmio_r32(mmio, r);
     // B_ADDCK0_VAL = top two bits = (a01 >> 6) written into B_ADDCK0_VAL field
     // Linux: rtw89_phy_write32_mask(R_ADDCK0, B_ADDCK0_VAL, a01 >> 6);
-    // B_ADDCK0_VAL is 0xFC (bits 7..2) per reg.h context — we don't have the exact mask,
-    // using same mask as S1. For now skip this refinement.
+    // Not implemented: the exact B_ADDCK0_VAL mask is unknown (likely 0xFC,
+    // bits 7..2), so this write is skipped.
     let _ = cur;
 
     // B_ADDCK0_MAN = 0x3

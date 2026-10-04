@@ -1,7 +1,8 @@
 //! wifi — RTL8852BE WiFi 6 driver (WASM module)
 //!
-//! Phase 1: Chip probe — bind PCI device, map BAR0, read chip registers.
-//! Uses the nopeekOS WASM Driver ABI (npk_pci_*, npk_mmio_*, npk_dma_*).
+//! Probes the chip, downloads firmware, initializes MAC/PHY/RF, scans and
+//! sends a test AUTH. Uses the nopeekOS WASM Driver ABI (npk_pci_*,
+//! npk_mmio_*, npk_dma_*).
 
 #![no_std]
 
@@ -82,9 +83,9 @@ pub extern "C" fn _start() {
     host::print(" ("); fw::print_dec(bar2_pages as usize); host::print(" pages)\n");
 
     // ── Step 3: Enable bus master + memory space ──────────────────
-    // NO FLR! FLR resets the Digital Die but NOT the Analog Die,
-    // desynchronizing the XTAL SI interface between them.
-    // Instead we use soft MAC reset (pwr_off → pwr_on) in fw::download().
+    // No FLR: it resets the digital die but not the analog die and
+    // desynchronizes the XTAL SI interface between them. fw::download()
+    // uses a soft MAC reset (pwr_off → pwr_on) instead.
     host::pci_enable_bus_master();
 
     // ── Step 4: Map BAR2 (MMIO registers) ─────────────────────────
@@ -162,7 +163,7 @@ pub extern "C" fn _start() {
     host::print("\n");
 
     // ── Interpret firmware status ────────────────────────────────
-    // Real FW ready is in SYS_STATUS1 bit 0, NOT WCPU_FW_CTRL bit 0!
+    // FW ready is SYS_STATUS1 bit 0, not WCPU_FW_CTRL bit 0.
     let sys_status = host::mmio_r32(mmio, regs::R_AX_SYS_STATUS1);
     host::log_reg("SYS_STATUS1       ", sys_status);
     if sys_status & 1 != 0 {
@@ -195,7 +196,7 @@ pub extern "C" fn _start() {
         loop { if host::input_wait(1000) == 0x71 { return; } }
     }
 
-    // ── Gap 3.7.17: set_txpwr_ctrl — PA reference init.
+    // ── set_txpwr_ctrl — PA reference init.
     // Linux phy_dm_init calls chip->ops->set_txpwr_ctrl once to set the
     // OFDM/CCK power reference for both RF paths. Without this the
     // per-rate power table has no anchor and TX power is undefined.
@@ -218,34 +219,27 @@ pub extern "C" fn _start() {
         unsafe { vif::STA_MAC = efuse_data.mac_addr; }
     }
 
-    // ── Gap 3.7.18: power_trim — applies per-chip thermal + PA bias.
+    // ── power_trim — applies per-chip thermal + PA bias.
     // In rtw89_phy_dm_init Linux calls set_txpwr_ctrl then power_trim
-    // then cfg_txrx_path. Without PA-bias trim, RR_BIASA.TXG/TXA stay
-    // at HW defaults — on this NUC efuse has thermal=0xf1 programmed,
-    // which makes it very likely pa_bias_trim is also programmed and
-    // the chip ships expecting those values to be applied before TX.
+    // then cfg_txrx_path. Without PA-bias trim, RR_BIASA.TXG/TXA stay at
+    // HW defaults although the chip expects the efuse values before TX.
     pwr_trim::run(mmio, &efuse_data);
 
     // ── bb_cfg_txrx_path — 1:1 __rtw8852bx_bb_cfg_txrx_path.
-    //   Linux calls this as the LAST step of rtw89_phy_dm_init. It sets
+    //   Linux calls this as the last step of rtw89_phy_dm_init. It sets
     //   the TX-routing pattern in R_P0_RFMODE / R_P1_RFMODE bits[31:4]
-    //   to 0x1233312 — without this the chip doesn't know which RF path
-    //   to send TX through, so every TX silently dies at the BB→PA step.
-    //   That matches our v1.44 sniffer result (0 frames on-air).
-    //   Our earlier inline setup only wrote 0x333 to the wrong mask
-    //   ([23:12] instead of [11:0]) and never touched bits [31:4].
+    //   to 0x1233312; without it every TX silently dies at the BB→PA step.
     chan::bb_cfg_txrx_path(mmio);
 
-    // ── Phase 4a: BT-Coex init — CRITICAL for shared-antenna 8852BE.
+    // ── Phase 4a: BT-Coex init, required for the shared-antenna 8852BE.
     //   Linux core.c:5961 calls rtw89_btc_ntfy_init(BTC_MODE_NORMAL)
     //   right after phy_init_rf_reg. This runs rtw89_mac_coex_init +
     //   __rtw8852bx_btc_init_cfg which sets:
-    //     R_AX_BTC_FUNC_EN.B_AX_PTA_WL_TX_EN = 1   ← THE bit that
-    //   lets the PTA (Packet Traffic Arbiter) route WiFi mgmt/data TX
-    //   to the shared WL+BT antenna. Out of reset it is 0, so TX dies
-    //   silently in the PTA before reaching the PA — which is exactly
-    //   what the v1.44 sniffer test showed (0 frames on-air despite
-    //   BUSY/IDX/TX_COUNTER all toggling).
+    //     R_AX_BTC_FUNC_EN.B_AX_PTA_WL_TX_EN = 1
+    //   That bit lets the PTA (Packet Traffic Arbiter) route WiFi
+    //   mgmt/data TX to the shared WL+BT antenna. Out of reset it is 0,
+    //   so TX dies silently in the PTA before reaching the PA even
+    //   though BUSY/IDX/TX_COUNTER all toggle.
     //
     //   Also programs WL priorities (TX_RESP+BEACON high-pri), RF GNT
     //   debug off, SHARED-antenna TRX masks per path, PTA break table,
@@ -272,16 +266,15 @@ pub extern "C" fn _start() {
     // Linux __rtw89_set_channel (core.c:529):
     //   set_channel_prepare (help_enter) → set_channel → set_txpwr →
     //   set_channel_done (help_exit) → rfk_channel (rx_dck + iqk + tssi + dpk)
-    // Critical: rfk_channel runs OUTSIDE the set_channel_help bracket
-    // because set_channel_help turns OFF the ADC (B_ADC_FIFO_RST=0xF) and
-    // BB reset, which IQK needs enabled to measure TX-LO-leakage via the
-    // RX path. Running IQK with ADC off = all 4 cal stages fail (cor/fin/
-    // tx/rx all fail) — exactly our v1.x "LOK fail" pattern from day 1.
+    // rfk_channel runs outside the set_channel_help bracket because
+    // set_channel_help turns off the ADC (B_ADC_FIFO_RST=0xF) and BB
+    // reset, which IQK needs to measure TX-LO leakage via the RX path.
+    // With the ADC off all four cal stages (cor/fin/tx/rx) fail.
     let tx_en = chan::set_channel_help_enter(mmio);
     chan::set_channel_2g(mmio, 1);
     chan::set_channel_help_exit(mmio, tx_en);
 
-    // RFK outside the help bracket — ADC and BB are ON here.
+    // RFK outside the help bracket — ADC and BB are on here.
     rfk::rx_dck(mmio);
     iqk::run(mmio);
     let efuse_copy = unsafe { EFUSE };
@@ -290,19 +283,13 @@ pub extern "C" fn _start() {
     dpk::run(mmio, 0 /* band 2G */, 1, 0 /* bw 20M */);
     host::print("[wifi] RFK per-channel flow complete (rx_dck + IQK + TSSI + DPK)\n");
 
-    // ── Phase 5b: VIF registration — re-enabled in v1.5.0.
-    //   v1.0/v1.1 wedged the CH12 H2C pipe because our mac::init was
-    //   missing the 17 per-block DMAC/CMAC IMR enables (Phase 1.1)
-    //   and the post-FWDL sys_init_ax re-assert (Phase 1.3). Without
-    //   the per-block IMRs some FW error paths never propagate back
-    //   through the H2C ACK channel — the FW hangs waiting for an
-    //   ACK that never comes, and subsequent H2Cs stack up silently.
-    //
-    //   Phase 1 closed those gaps in v1.3.0 and v1.4.0. This commit
-    //   tests the hypothesis: does the full 8-step rtw89_mac_vif_init
+    // ── Phase 5b: VIF registration — the 8-step rtw89_mac_vif_init
     //   (port_update + dmac_tbl + cmac_tbl + macid_pause +
-    //   role_maintain + join_info + addr_cam + default_cmac_tbl)
-    //   now complete without wedging the pipe?
+    //   role_maintain + join_info + addr_cam + default_cmac_tbl).
+    //   Depends on the per-block DMAC/CMAC IMR enables and the
+    //   post-FWDL sys_init_ax re-assert in mac::init: without the IMRs
+    //   some FW error paths never reach the H2C ACK channel, the FW
+    //   waits for an ACK that never comes and later H2Cs stack up.
     vif::init(mmio, 0);
 
     // ── Phase 6: 3× FW scan_offload (2G ch 1..13) ─────────────────
@@ -322,11 +309,9 @@ pub extern "C" fn _start() {
     }
     mac::scan_summary();
 
-    // ── Phase 7: AUTH via CH8 to HomeAP_New ────────────────────────
-    // v1.34: v1.33 proved the chip TX via FW-pool (5 APs incl. Probe
-    // Responses from QL-132 / TP-Link). Now test the real Linux
-    // direct-TX use-case: a unicast Open-System AUTH request to a
-    // known AP. This exercises the CH8 BD path with:
+    // ── Phase 7: AUTH via CH8 to a fixed AP ────────────────────────
+    // Tests the Linux direct-TX path: a unicast Open-System AUTH
+    // request to a known AP. This exercises the CH8 BD path with:
     //   - INFRA net_type + TSF_UDT_EN + BSSID_FIT_EN (port_cfg)
     //   - addr_cam with target BSSID filled + NET_TYPE=INFRA
     //   - h2c_join_info dis_conn=false
@@ -335,7 +320,7 @@ pub extern "C" fn _start() {
     // path works for its intended Linux-supported use case.
     host::print("\n[wifi] Phase 7: AUTH via CH8 → HomeAP_New\n");
 
-    // HomeAP_New FritzBox main on ch 7. BSSID from scan logs.
+    // Hardcoded test AP on ch 7.
     const TARGET_BSSID: [u8; 6] = [0xb4, 0xfc, 0x7d, 0x56, 0xa2, 0xe8];
     const TARGET_CH: u8 = 7;
 
@@ -357,7 +342,7 @@ pub extern "C" fn _start() {
     chan::set_channel_2g(mmio, TARGET_CH);
     chan::apply_default_txpwr(mmio);
     chan::set_channel_help_exit(mmio, tx_en_c);
-    // RFK outside help bracket (ADC must be ON for IQK to measure)
+    // RFK outside help bracket (ADC must be on for IQK to measure)
     rfk::rx_dck(mmio);
     iqk::run(mmio);
     let efuse_copy7 = unsafe { EFUSE };
@@ -366,23 +351,21 @@ pub extern "C" fn _start() {
     host::print("  tuned to ch "); fw::print_dec(TARGET_CH as usize);
     host::print(" + RFK complete\n");
 
-    // Diagnostic: sample TX_COUNTER after scan-finished. v1.33 proved
-    // the FW pool TX path works (5 APs incl. probe-responders). If
-    // TX_COUNTER increased across the 3 scan passes, our counter read
-    // is trustworthy and the "silent drop" diagnosis is real. If it
-    // stays 0 despite working FW TX, the counter isn't the right one.
+    // Diagnostic: sample TX_COUNTER after the scan. The scan's probe
+    // requests go out through the FW pool, so a counter that stayed 0
+    // across the three passes is not counting real TX.
     let tx_counter_post_scan = host::mmio_r32(mmio, 0x0001_1A40) & 0xFFFF;
     host::print("  TX_COUNTER after 3 scan passes: ");
     fw::print_dec(tx_counter_post_scan as usize);
     host::print("\n");
 
-    // Just refresh addr_cam with target BSSID — NO NET_TYPE flip, no
+    // Just refresh addr_cam with target BSSID — no NET_TYPE flip, no
     // join_info. Linux stays NO_LINK until BSS_CHANGED_ASSOC fires
     // after AUTH+ASSOC complete. Flipping to INFRA pre-AUTH makes FW
     // see the macid as "already associated" and can gate pre-AUTH TX.
     vif::set_target_bssid(mmio, 0, TARGET_BSSID);
 
-    // State dump BEFORE AUTH
+    // State dump before AUTH
     let ctn_txen = host::mmio_r32(mmio, 0xC348);
     let rx_fltr  = host::mmio_r32(mmio, 0xCE20);
     let edcca    = host::mmio_r32(mmio, 0x0001_4884);
@@ -568,7 +551,7 @@ pub extern "C" fn _start() {
     run_tx_test("B (ch 7)", 7, &mut ring, mmio);
     */
 
-    // Final BSS table — delta tells the story
+    // Final BSS table
     host::print("\n[wifi] BSS table after Phase 7:\n");
     mac::scan_summary();
 

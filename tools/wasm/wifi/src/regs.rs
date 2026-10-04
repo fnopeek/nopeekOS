@@ -120,7 +120,7 @@ pub const R_AX_CH8_TXBD_DESA_L: u32   = 0x1150;
 pub const R_AX_CH9_BDRAM_CTRL: u32    = 0x1224;
 pub const R_AX_CH9_TXBD_DESA_L: u32   = 0x1158;
 
-// CH12 = FWCMD queue — correct addresses from Linux!
+// CH12 = FWCMD queue (Linux addresses)
 pub const R_AX_CH12_TXBD_NUM: u32     = 0x1038;
 pub const R_AX_CH12_TXBD_IDX: u32     = 0x1080;
 pub const R_AX_CH12_BDRAM_CTRL: u32   = 0x1228;
@@ -260,7 +260,7 @@ pub const B_AX_BBRPT_EN: u32        = 1 << 17;
 pub const B_AX_MAC_SEC_EN: u32      = 1 << 16;
 pub const B_AX_DMACREG_GCKEN: u32   = 1 << 15;
 
-// R_AX_DMAC_FUNC_EN extra (Linux has this, we missed it)
+// R_AX_DMAC_FUNC_EN extra
 pub const B_AX_DMAC_CRPRT: u32      = 1 << 31;
 
 // R_AX_DMAC_CLK_EN (0x8404) bits — Linux dmac_func_en_ax writes these

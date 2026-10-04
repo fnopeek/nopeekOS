@@ -110,17 +110,17 @@ const BD_SIZE: usize = 8;
 const BD_OPT_LS: u16 = 1 << 14; // Last Segment
 
 // ── WiFi Descriptor (WD) body ────────────────────────────────────
-// 24 bytes (6 dwords), prepended to ALL CH12 DMA transfers.
+// 24 bytes (6 dwords), prepended to every CH12 DMA transfer.
 // The PCIe DMA engine reads the WD to know how to process the packet.
 // Linux: struct rtw89_txwd_body, pushed by rtw89_pci_fwcmd_submit.
 const WD_BODY_SIZE: usize = 24;
 
 // WD dword0: CHANNEL_DMA = 12 (CH12 = H2C/FWCMD), FW_DL = 0
-// Used for FW HEADER download (H2C descriptor follows WD).
+// Used for the FW header download (H2C descriptor follows WD).
 const WD_DWORD0_FWCMD_HDR: u32 = 12 << 16;
 
 // WD dword0: CHANNEL_DMA = 12, FW_DL = 1
-// Used for FW SECTION download (raw data follows WD, no H2C descriptor).
+// Used for FW section download (raw data follows WD, no H2C descriptor).
 const WD_DWORD0_FWCMD_BODY: u32 = (1 << 20) | (12 << 16);
 
 // WD dword2: PKT_SIZE in bits [13:0] — data length after WD (set per-packet)
@@ -156,7 +156,7 @@ pub fn download(mmio: i32) -> bool {
 
     dump_state(mmio, "initial");
 
-    // ── Step 1: Power OFF (soft MAC reset, no FLR!) ─────────────
+    // ── Step 1: Power OFF (soft MAC reset, no FLR) ──────────────
     // FLR is forbidden: it desynchronizes DDIE↔ADIE (kills XTAL SI).
     // Soft pwr_off properly shuts down the MAC while keeping analog die intact.
     host::print("[wifi] Power off...\n");
@@ -173,7 +173,7 @@ pub fn download(mmio: i32) -> bool {
     dump_state(mmio, "pwr-on");
 
     // ── Step 3: Enable HCI DMA (rtw89_mac_ctrl_hci_dma_trx) ─────
-    // MUST come before dmac_pre_init — enables HCI TX/RX DMA engines.
+    // Must come before dmac_pre_init — enables HCI TX/RX DMA engines.
     // Without this, H2C path can never become ready.
     host::mmio_set32(mmio, regs::R_AX_HCI_FUNC_EN, 0x03); // TXDMA_EN | RXDMA_EN
 
@@ -182,7 +182,7 @@ pub fn download(mmio: i32) -> bool {
         host::print("[wifi] WARNING: DLE init incomplete\n");
     }
 
-    // ── Step 5: PCIe DMA pre-init (includes ALL ring setup) ─────
+    // ── Step 5: PCIe DMA pre-init (includes all ring setup) ─────
     let (ring_dma, data_dma) = match pcie_dma_pre_init(mmio) {
         Some(r) => r,
         None => {
@@ -540,7 +540,7 @@ fn pwr_on(mmio: i32) -> bool {
         | regs::B_AX_WD_RLS_CLK_EN | regs::B_AX_BBRPT_CLK_EN);
 
     // ── CMAC Clock Enable — Linux cmac_func_en_ax:1624 ────────────
-    // Must come BEFORE CMAC_FUNC_EN. Enables clocks for RMAC, TMAC,
+    // Must come before CMAC_FUNC_EN. Enables clocks for RMAC, TMAC,
     // PHYINTF, CMAC_DMA, Scheduler, PTCLTOP, CMAC. Without RMAC_CKEN
     // and CMAC_DMA_CKEN the RX path from PHY → MAC → DMA is dead:
     // frames may enter the radio but never reach the host ring.
@@ -619,7 +619,7 @@ fn enable_cpu_fwdl(mmio: i32) {
     val |= 0x2 << 16;
     host::mmio_w32(mmio, regs::R_AX_SEC_CTRL, val);
 
-    // Write boot reason = 0 (initial FW download, NOT 3=DLFW_RESUME)
+    // Write boot reason = 0 (initial FW download, not 3=DLFW_RESUME)
     // Linux: mac->fwdl_enable_wcpu(rtwdev, 0, true, false)
     let aligned = regs::R_AX_BOOT_REASON & !0x3; // 0x01E4
     let shift = (regs::R_AX_BOOT_REASON & 0x2) * 8; // 16
@@ -640,7 +640,7 @@ fn enable_cpu_fwdl(mmio: i32) {
 fn dmac_pre_init_dlfw(mmio: i32) -> bool {
     host::print("[wifi] DMAC/DLE/HFC init (DLFW)...\n");
 
-    // ── hci_func_en_ax: write (NOT set) basic DMAC enables ──────
+    // ── hci_func_en_ax: write (not set) basic DMAC enables ──────
     let val = regs::B_AX_MAC_FUNC_EN | regs::B_AX_DMAC_FUNC_EN
             | regs::B_AX_DISPATCHER_EN | regs::B_AX_PKT_BUF_EN;
     host::mmio_w32(mmio, regs::R_AX_DMAC_FUNC_EN, val);
@@ -747,7 +747,7 @@ fn dmac_pre_init_dlfw(mmio: i32) -> bool {
 }
 
 /// Complete PCIe DMA pre-init matching Linux rtw89_pci_ops_mac_pre_init_ax.
-/// Includes: PCIe helpers, DMA stop, mode_op, ALL ring setup + BDRAM, DMA enable.
+/// Includes: PCIe helpers, DMA stop, mode_op, all ring setup + BDRAM, DMA enable.
 /// Returns (ch12_ring_dma, ch12_data_dma) handles for firmware transfer.
 fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::print("[wifi] PCIe DMA init...\n");
@@ -807,7 +807,7 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
         host::mmio_clr32(mmio, regs::R_AX_PKTIN_SETTING, 1 << 1);
     }
 
-    // ── 5g. ops_reset: program ALL rings + BDRAM ────────────────
+    // ── 5g. ops_reset: program all rings + BDRAM ────────────────
     // Allocate DMA buffers: 1 shared page for dummy rings, 1 for CH12 ring, 2 for data
     let dummy_dma = host::dma_alloc(1);
     if dummy_dma < 0 { return None; }
@@ -860,14 +860,14 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     host::mmio_w32(mmio, regs::R_AX_CH9_TXBD_DESA_L, dummy_phys);
     host::mmio_w32(mmio, regs::R_AX_CH9_TXBD_DESA_L + 4, 0);
 
-    // CH12 — FWCMD queue (the one we actually use)
+    // CH12 — FWCMD queue (the only one used here)
     host::mmio_w32(mmio, regs::R_AX_CH12_BDRAM_CTRL, 0x0001041C);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_L, ring_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_DESA_H, (ring_phys >> 32) as u32);
     host::mmio_w32(mmio, regs::R_AX_CH12_TXBD_NUM, CH12_BD_COUNT as u32);
 
-    // ── RXQ: allocate REAL ring (not dummy!) ───────────────────────
-    // Linux allocates rings during probe, BEFORE BDRAM reset.
+    // ── RXQ: allocate a real ring, not a dummy ─────────────────────
+    // Linux allocates rings during probe, before BDRAM reset.
     // 33 pages: page 0 = BD ring, pages 1-32 = data buffers
     let rxq_dma = host::dma_alloc(33);
     if rxq_dma < 0 { return None; }
@@ -882,7 +882,7 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
     }
     host::fence();
 
-    // Program RXQ + RPQ NUM as SEPARATE write16 (Linux rtw89_pci_reset_trx_rings).
+    // Program RXQ + RPQ NUM as separate write16 (Linux rtw89_pci_reset_trx_rings).
     // 0x1020 = RXQ_RXBD_NUM, 0x1022 = RPQ_RXBD_NUM. A combined write32 on 0x1020
     // would stomp on HW-owned fields in the adjacent register.
     host::mmio_w16(mmio, regs::R_AX_RXQ_RXBD_NUM, 32);
@@ -927,7 +927,7 @@ fn pcie_dma_pre_init(mmio: i32) -> Option<(i32, i32)> {
         host::print(" CFG1=0x"); host::print_hex32(c2); host::print("\n");
     }
 
-    // NO RXQ IDX write here. 8852BE has rx_ring_eq_is_full=false in Linux,
+    // No RXQ IDX write here. 8852BE has rx_ring_eq_is_full=false in Linux,
     // meaning wp=0 and the IDX register is left alone after BDRAM reset.
 
     // ── 5i. Stop all TX channels ────────────────────────────────
@@ -952,7 +952,7 @@ const H2C_CL_MAC_FWDL: u32 = 3;
 /// H2C sequence counter
 static mut H2C_SEQ: u8 = 0;
 
-/// Send firmware HEADER via CH12 with WD + H2C descriptor.
+/// Send the firmware header via CH12 with WD + H2C descriptor.
 /// Linux: rtw89_pci_fwcmd_submit prepends 24-byte WD body,
 ///        rtw89_h2c_pkt_set_hdr_fwdl prepends 8-byte H2C header.
 /// Buffer layout: [WD 24B][H2C 8B][FW header data]
@@ -1000,7 +1000,7 @@ fn send_fw_header(ring_dma: i32, data_dma: i32, mmio: i32, hdr_len: usize) {
     submit_bd(ring_dma, data_dma, data_phys, mmio, dma_total);
 }
 
-/// Send a firmware SECTION chunk via CH12 — WD + raw data, NO H2C descriptor.
+/// Send a firmware section chunk via CH12 — WD + raw data, no H2C descriptor.
 /// Linux: rtw89_pci_fwcmd_submit prepends 24-byte WD body.
 ///        Section data uses fw_dl=1 (no H2C header).
 /// Buffer layout: [WD 24B][section data]
@@ -1037,11 +1037,10 @@ fn submit_bd(ring_dma: i32, _data_dma: i32, data_phys: u64, mmio: i32, total_len
 
     let new_idx = (bd_idx + 1) % CH12_BD_COUNT;
 
-    // CRITICAL: use 16-bit RMW write to preserve HW_IDX in upper 16 bits!
-    // Linux: rtw89_write16(rtwdev, addr.idx, wp) — only writes HOST_IDX.
-    // mmio_w32 would zero HW_IDX, causing DMA to reprocess old BDs = data corruption.
-    // Use mmio_w16 (RMW) — RTL8852B does NOT ignore upper 16 bits on w32!
-    // Linux uses writew (true 16-bit write). RMW race is negligible during FWDL.
+    // 16-bit write so HW_IDX in the upper half is preserved; Linux
+    // rtw89_write16(rtwdev, addr.idx, wp) writes only HOST_IDX. The
+    // RTL8852B does not ignore the upper 16 bits of a 32-bit write, so
+    // mmio_w32 would zero HW_IDX and make DMA reprocess old BDs.
     host::mmio_w16(mmio, regs::R_AX_CH12_TXBD_IDX, new_idx);
 
     // Wait for DMA engine to process this BD (HW_IDX == new HOST_IDX)
@@ -1136,8 +1135,8 @@ fn wait_fwdl_path_ready(mmio: i32) -> bool {
 ///      = 32 + section_num * 16
 /// section_num is in FW_HDR word 6, bits [15:8].
 /// Parse firmware header and return (send_len, body_offset).
-/// send_len = base header to send to chip (WITHOUT dynamic header).
-/// body_offset = where firmware sections start (AFTER full header).
+/// send_len = base header to send to chip (without dynamic header).
+/// body_offset = where firmware sections start (after full header).
 fn fw_header_info() -> (usize, usize) {
     let fw = fw_data();
     if fw.len() < 0x20 { return (fw.len(), fw.len()); }
@@ -1202,9 +1201,8 @@ fn wait_fw_ready(mmio: i32) -> bool {
             host::print("\n");
             return false;
         }
-        // Track BOOT_DBG progress — verbose-only. In steady-state the
-        // same 6 "STS=6 DBG=0x..." lines appear every boot and are
-        // uninteresting; keep for debugging boot regressions.
+        // Track BOOT_DBG progress, verbose only: useful when
+        // debugging boot regressions, noise otherwise.
         if VERBOSE {
             let dbg = host::mmio_r32(mmio, regs::R_AX_BOOT_DBG);
             if dbg != last_dbg || i % 500 == 0 {
@@ -1226,9 +1224,8 @@ fn wait_fw_ready(mmio: i32) -> bool {
 //  Debug helpers
 // ═══════════════════════════════════════════════════════════════════
 
-/// Dump key register state for debugging. Gated by `VERBOSE` — these
-/// PW/FW/PLAT checkpoints were useful during the v0.85-era pwr_off/
-/// pwr_on bring-up; once the sequence is stable they are noise.
+/// Dump key register state (PW/FW/PLAT checkpoints) for debugging the
+/// pwr_off/pwr_on sequence. Gated by `VERBOSE`.
 const VERBOSE: bool = false;
 
 fn dump_state(mmio: i32, label: &str) {

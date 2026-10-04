@@ -95,7 +95,7 @@ const R_AX_LTR_CTRL_1: u32        = 0x8414;
 const R_AX_LTR_IDLE_LATENCY: u32  = 0x8418;
 const R_AX_LTR_ACTIVE_LATENCY: u32 = 0x841C;
 
-// RXQ index register — now defined in regs.rs
+// RXQ index register — defined in regs.rs
 use crate::regs::R_AX_RXQ_RXBD_IDX;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -107,7 +107,7 @@ pub fn init(mmio: i32) -> bool {
 
     dbg_checkpoint(mmio, "start");
 
-    // ── 0. Enable BB/RF — MUST come before MAC init! ──────────────
+    // ── 0. Enable BB/RF — must come before MAC init ──────────────
     // Linux: rtw8852bx_mac_enable_bb_rf() — full 5-step sequence.
     // Without this, the radio hardware is off and firmware can't scan.
     enable_bb_rf(mmio);
@@ -115,13 +115,12 @@ pub fn init(mmio: i32) -> bool {
     dbg_checkpoint(mmio, "after BB/RF");
 
     // ── 0b. sys_init_ax — 1:1 Linux (mac.c:1696) re-assert after FWDL.
-    // Linux runs this in rtw89_mac_init AFTER partial_init (= FWDL).
+    // Linux runs this in rtw89_mac_init after partial_init (= FWDL).
     // pwr_on_func already sets DMAC/CMAC func_en bits once, but FWDL
     // can disturb them; sys_init_ax overwrites DMAC_FUNC_EN / CLK_EN
-    // with exact values (write32, not set32) and re-ORs CMAC. Without
-    // this the DMAC state after FWDL may contain extra bits our
-    // pwr_on OR'd in (DLE_WDE_EN, DLE_PLE_EN, BBRPT_EN, DMACREG_GCKEN)
-    // that Linux's canonical state does NOT set.
+    // with exact values (write32, not set32) and re-ORs CMAC. This also
+    // drops bits pwr_on ORs in (DLE_WDE_EN, DLE_PLE_EN, BBRPT_EN,
+    // DMACREG_GCKEN) that are not part of Linux's canonical state.
     sys_init_ax(mmio);
     dbg_checkpoint(mmio, "after sys_init");
 
@@ -141,19 +140,16 @@ pub fn init(mmio: i32) -> bool {
     cmac_init(mmio);
     dbg_checkpoint(mmio, "after CMAC");
 
-    // ── 4.5. chip_func_en_ax — moved into sys_init_ax (Phase 1.3).
-    // Kept the checkpoint comment for log continuity.
+    // ── 4.5. chip_func_en_ax — runs inside sys_init_ax; only the checkpoint
+    // stays here.
     dbg_checkpoint(mmio, "after chip_func_en");
 
     // ── 5. Enable IMRs — 1:1 Linux trx_init_ax (mac.c:3929):
     //   a) 11 DMAC per-block IMR enables (imr::enable_dmac)
     //   b) 6 CMAC per-block IMR enables (imr::enable_cmac)
     //   c) err_imr_ctrl_ax(true) — master ERR_IMR unmask
-    // Previously we only wrote (c) with 0xFFFFFFFF (which happens to
-    // equal DMAC_ERR_IMR_EN / CMAC0_ERR_IMR_EN). The (a)+(b) block
-    // IMRs were missing entirely — strongest hypothesis for the H2C
-    // pipe wedge after VIF H2Cs. Linux considers (a)+(b)+(c) a single
-    // "enable interrupt sources" package and all three are required.
+    // Linux treats (a)+(b)+(c) as one package; (c) alone is not enough,
+    // without the per-block IMRs the H2C pipe can wedge after VIF H2Cs.
     imr::enable_dmac(mmio);
     imr::enable_cmac(mmio, 0);
     host::mmio_w32(mmio, 0x8520, 0xFFFFFFFF); // DMAC_ERR_IMR (EN = GENMASK(31,0))
@@ -168,15 +164,15 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_w32_mask(mmio, 0x9414, 0xFF << 16, 255); // TO=255
     host::print("  RPR: POH mode\n");
 
-    // ── 6.5. mac_post_init BEFORE phy::init — Linux order ─────────
+    // ── 6.5. mac_post_init before phy::init — Linux order ─────────
     // Linux runs mac_post_init_ax (LTR + enable all DMA + TX_ADDR_INFO +
-    // clear STOP_WPDMA|STOP_PCIEIO) at the END of mac_init, BEFORE
-    // core_start proceeds to reset_bb_rf + phy tables. We had this call
-    // AFTER phy::init, leaving PCIe in a stopped state during BB writes.
+    // clear STOP_WPDMA|STOP_PCIEIO) at the end of mac_init, before
+    // core_start proceeds to reset_bb_rf + phy tables, so PCIe is not
+    // stopped during BB writes.
     pcie_post_init(mmio);
     dbg_checkpoint(mmio, "after mac_post_init");
 
-    // ── 6.6. reset_bb_rf (disable + enable) — MATCHES Linux core_start ───
+    // ── 6.6. reset_bb_rf (disable + enable) — matches Linux core_start ───
     // Linux calls rtw89_chip_reset_bb_rf between mac_init and phy_init_bb_reg.
     host::print("  PHY: reset_bb_rf (disable+enable)\n");
     reset_bb_rf(mmio);
@@ -193,9 +189,9 @@ pub fn init(mmio: i32) -> bool {
     // (toggle S0/S1_HW_SI_DIS + RSTB_ASYNC). Without this the BB DSP
     // stays in an indeterminate post-table state.
     //
-    // Even more critical: rtw8852b_bb_reset_en(2G, true) clears RXCCA_DIS
-    // and PD_HIT_DIS — enabling Packet Detection. Without PD the receiver
-    // literally does not see any frame arrive → our 0 beacons.
+    // rtw8852b_bb_reset_en(2G, true) then clears RXCCA_DIS and
+    // PD_HIT_DIS, enabling packet detection. Without PD the receiver sees
+    // no frames at all.
     // All PHY space, so + PHY_CR_BASE (0x10000).
     let cr_base: u32 = 0x10000;
     // rtw8852b_bb_reset — path 0 + path 1 TXPW manual on, TSSI trk en
@@ -218,12 +214,12 @@ pub fn init(mmio: i32) -> bool {
     host::mmio_clr32(mmio, cr_base + 0x78DC, 1 << 30);
     host::mmio_clr32(mmio, cr_base + 0x7818, 1 << 30);
 
-    // rtw8852b_bb_reset_en(RTW89_BAND_2G, phy_idx=0, en=true) — THIS enables PD/RXCCA
+    // rtw8852b_bb_reset_en(RTW89_BAND_2G, phy_idx=0, en=true) — this enables PD/RXCCA
     host::mmio_w32_mask(mmio, cr_base + 0x1200, 0x7 << 28, 0);  // S0_HW_SI_DIS clr
     host::mmio_w32_mask(mmio, cr_base + 0x3200, 0x7 << 28, 0);  // S1_HW_SI_DIS clr
     host::mmio_set32(mmio, cr_base + 0x0704, 1 << 1);           // RSTB_ASYNC.ALL = 1
     host::mmio_clr32(mmio, cr_base + 0x2344, 1 << 31);          // RXCCA.DIS = 0 (2G: enable CCA)
-    host::mmio_clr32(mmio, cr_base + 0x0C3C, 1 << 9);           // PD_CTRL.PD_HIT_DIS = 0 (ENABLE packet detect)
+    host::mmio_clr32(mmio, cr_base + 0x0C3C, 1 << 9);           // PD_CTRL.PD_HIT_DIS = 0 (enable packet detect)
     host::print("  BB: reset + bb_reset_en(2G, true) → PD + CCA enabled\n");
 
     // ── 7.25. bb_sethw — Linux __rtw8852bx_bb_sethw (rtw8852b_common.c:1099)
@@ -296,7 +292,7 @@ pub fn init(mmio: i32) -> bool {
     //     PHY R_DCFO_OPT (0x4494), B_DCFO_OPT_EN (BIT(29)) = 1
     //     PHY R_DCFO_WEIGHT (0x4490), B_DCFO_WEIGHT_MSK (GENMASK(27,24)) = 8
     //     MAC R_AX_PWR_UL_CTRL2 (0xD248), B_AX_PWR_UL_CFO_MASK ([2:0]) = 6
-    //   Skipping crystal_cap setting (needs efuse xtal_cap we don't parse).
+    //   Not implemented: crystal_cap (needs the efuse xtal_cap).
     host::mmio_w32_mask(mmio, cr_base + 0x4494, 1 << 29, 1);
     host::mmio_w32_mask(mmio, cr_base + 0x4490, 0xF << 24, 8);
     host::mmio_w32_mask(mmio, 0xD248, 0x7, 6);
@@ -401,7 +397,7 @@ pub fn init(mmio: i32) -> bool {
 
     // ── 8. H2C set_ofld_cfg — Linux rtw89_fw_h2c_set_ofld_cfg (fw.c:5228)
     // Sent after mac_init + phy tables, tells FW the offload config.
-    // Linux: rack=0, dack=1 (fw.c:5243) → FW MUST send DONE_ACK back.
+    // Linux: rack=0, dack=1 (fw.c:5243) → FW must send DONE_ACK back.
     //   CAT=1 (MAC), CLASS=9 (MAC_FW_OFLD), FUNC=0x14 (OFLD_CFG)
     let ofld_cfg: [u8; 8] = [0x09, 0x00, 0x00, 0x00, 0x5E, 0x00, 0x00, 0x00];
     host::print("  H2C: set_ofld_cfg (dack=1)...\n");
@@ -410,9 +406,9 @@ pub fn init(mmio: i32) -> bool {
 
     // ── 9. H2C fw_log_cfg — Linux rtw89_fw_h2c_fw_log (fw.c:2787).
     // Activates FW trace log routed over C2H with LEVEL=LOUD on components
-    // INIT/TASK/PS/ERROR/MLO/SCAN. Without this the FW is silent and our
-    // C2H_LOG decoder (handle_c2h cls=0 fn=2) sees nothing — meaning any
-    // init/scan/error condition on the FW side is invisible to us.
+    // INIT/TASK/PS/ERROR/MLO/SCAN. Without it the C2H_LOG decoder
+    // (handle_c2h cls=0 fn=2) receives nothing and FW-side errors are
+    // invisible.
     // Linux calls this at the end of rtw89_core_start (core.c:5985).
     host::print("  H2C: fw_log_cfg (LEVEL=LOUD, PATH=C2H)...\n");
     fw::h2c_fw_log(mmio, true);
@@ -480,11 +476,10 @@ pub fn hci_start(mmio: i32) {
 
 /// Diagnose: poll RXQ IDX for up to `max_ms` ms, report any HW_IDX advance.
 /// Used to verify H2C → C2H pipe bidirectionality. The "NO C2H" branch
-/// fires for fire-and-forget H2Cs (macid_pause, fw_log_cfg, some VIF
-/// helpers whose DONE_ACK gets batched behind a later dack=1 H2C) — we
-/// keep it silent in non-verbose builds to avoid misleading "H2C pipe
-/// 1-way" spam that made earlier logs look like problems when the H2Cs
-/// were in fact accepted fine.
+/// also fires for fire-and-forget H2Cs (macid_pause, fw_log_cfg, some
+/// VIF helpers whose DONE_ACK is batched behind a later dack=1 H2C),
+/// so it stays silent in non-verbose builds; it does not indicate a
+/// failure.
 fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
     let idx0 = host::mmio_r32(mmio, R_AX_RXQ_RXBD_IDX);
     let hw0 = (idx0 >> 16) & 0xFFFF;
@@ -518,8 +513,7 @@ fn diag_wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
 /// Debug helper: dump a few registers to find where the 0x1000 range dies.
 /// CFG1 (0x1000) vs HCI_OPT_CTRL (0x0074) vs SYS_CFG1 (0x00F0):
 /// if CFG1=0xFFFFFFFF but the others are sane, only PCIe DMA block is gated.
-/// Gated by `VERBOSE` — we leave it silent in production because once init
-/// passes cleanly this dump is pure noise; keep the code for re-enabling.
+/// Gated by `VERBOSE`.
 fn dbg_checkpoint(mmio: i32, tag: &str) {
     if !VERBOSE { return; }
     let cfg1 = host::mmio_r32(mmio, regs::R_AX_PCIE_INIT_CFG1);
@@ -533,14 +527,14 @@ fn dbg_checkpoint(mmio: i32, tag: &str) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  sys_init_ax — 1:1 Linux mac.c:1696. Runs AFTER FWDL inside
+//  sys_init_ax — 1:1 Linux mac.c:1696. Runs after FWDL inside
 //  rtw89_mac_init. Re-asserts DMAC/CMAC func_en + clk_en + chip
 //  OCP_L1. pwr_on_func did this before FWDL, but FWDL can disturb
 //  bits and Linux re-canonicalises via write32 (DMAC) + set32 (CMAC).
 // ═══════════════════════════════════════════════════════════════════
 
 fn sys_init_ax(mmio: i32) {
-    // ── dmac_func_en_ax (mac.c:1651) — DIRECT write32, overwrites any
+    // ── dmac_func_en_ax (mac.c:1651) — direct write32, overwrites any
     // extra bits from pwr_on. For non-8852C (= 8852B):
     //   MAC_FUNC_EN | DMAC_FUNC_EN | MAC_SEC_EN | DISPATCHER_EN
     // | DLE_CPUIO_EN | PKT_IN_EN | DMAC_TBL_EN | PKT_BUF_EN
@@ -624,9 +618,8 @@ fn enable_bb_rf(mmio: i32) {
     host::mmio_w32_mask(mmio, regs::R_AX_SPS_DIG_ON_CTRL0,
         regs::B_AX_REG_ZCDC_H_MASK, 0x1);
 
-    // Step 3: AFE toggle — Linux does SET-CLR-SET. We keep CLR-CLR-SET for now
-    // because empirically SET-CLR-SET kills BB writes. Re-evaluate once
-    // earlier init steps (disable_bb_rf, reset_bb_rf) are correct.
+    // Step 3: AFE toggle. Deviates from Linux (SET-CLR-SET): with this
+    // init order SET-CLR-SET breaks subsequent BB writes, so CLR-CLR-SET.
     host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_clr32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
     host::mmio_set32(mmio, regs::R_AX_WLRF_CTRL, regs::B_AX_AFC_AFEDIG);
@@ -663,7 +656,7 @@ pub fn disable_bb_rf(mmio: i32) {
 }
 
 /// 1:1 Linux rtw89_chip_reset_bb_rf (mac.h:1321): disable then enable.
-/// Linux calls this in core_start BETWEEN mac_init and phy_init_bb_reg,
+/// Linux calls this in core_start between mac_init and phy_init_bb_reg,
 /// so BB/RF is brought into a clean state before PHY tables are loaded.
 pub fn reset_bb_rf(mmio: i32) {
     disable_bb_rf(mmio);
@@ -865,8 +858,8 @@ fn cmac_init(mmio: i32) {
     //   9b. B_AX_RX_MPDU_MAX_LEN_MASK — bits [21:16] of R_AX_RX_FLTR_OPT.
     //   Linux rmac_init_ax:2862 computes this from c0_rx_qta * ple_pg_size
     //   / 512. A zero value makes the RMAC reject every incoming WiFi frame
-    //   as "too long" — this is why our scan saw only C2H messages (type 10)
-    //   and zero WiFi frames (type 0). Safe upper bound: 0x3F = 63 → 32 KB.
+    //   as "too long", so only C2H messages (type 10) and no WiFi frames
+    //   (type 0) arrive. Safe upper bound: 0x3F = 63 → 32 KB.
     host::mmio_w32_mask(mmio, R_AX_RX_FLTR_OPT, 0x3F << 16, 0x3F);
 
     // 10. CMAC com
@@ -879,7 +872,7 @@ fn cmac_init(mmio: i32) {
     // (~2 ms), the arbiter default is 0 → PTCL aborts every TX attempt the
     // instant it enters arbitration and the frame is silently dropped
     // between DMA and PHY (CH8_BUSY toggles, TXBD_IDX advances, but
-    // TX_COUNTER stays at 0). This was the v1.30 diagnostic finding.
+    // TX_COUNTER stays at 0).
     //
     // R_AX_SIFS_SETTING (0xC624):
     //   [31:24] HW_CTS2SELF_PKT_LEN_TH     = S_AX_CTS2S_TH_1K      = 4
@@ -933,9 +926,8 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_w32(mmio, R_AX_LTR_ACTIVE_LATENCY, 0x880B_880B);
 
     // 8852B addr-info format = 8-byte (non-V1). Without these two writes
-    // the HW parses our 8-byte addr_info as something else (probably the
-    // 16-byte V1 layout), can't make sense of it, and silently drops
-    // every CH8 TX between DMA consumption and PHY transmit.
+    // the HW misparses the 8-byte addr_info (probably as the 16-byte V1
+    // layout) and silently drops every CH8 TX between DMA and PHY.
     //   R_AX_TX_ADDRESS_INFO_MODE_SETTING = 0x8810
     //     BIT(0) B_AX_HOST_ADDR_INFO_8B_SEL — set: 8-byte addr_info
     //   R_AX_PKTIN_SETTING = 0x9A00
@@ -948,10 +940,10 @@ fn pcie_post_init(mmio: i32) {
     host::mmio_clr32(mmio, R_AX_PKTIN_SETTING, B_AX_WD_ADDR_INFO_LENGTH);
 
     // Ring addresses + wp were set in fw.rs pre_init and persist across FWDL.
-    // Linux mac_post_init_ax does NOT touch RXBD_IDX — don't fight the firmware.
+    // Linux mac_post_init_ax does not touch RXBD_IDX either.
     unsafe { RXQ_SW_IDX = 0; }
 
-    // Enable ALL TX DMA channels (clear stop bits)
+    // Enable all TX DMA channels (clear stop bits)
     host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, 0x000F_FF00);
     // Clear WPDMA + PCIEIO stops
     host::mmio_clr32(mmio, regs::R_AX_PCIE_DMA_STOP1, (1 << 19) | (1 << 20));
@@ -1225,11 +1217,8 @@ fn handle_c2h(dma: i32, off: u32) {
         // Payload starts right after the 8-byte C2H hdr. Content is either
         // struct rtw89_fw_c2h_log_fmt (binary, signature 0xA5A5) or raw ASCII.
         // Without the runtime-loaded fmt table we cannot substitute %-args.
-        // Per scan cycle we receive ~50 LOG-FMTs with fmt_id=0x371..0x374
-        // that just trace internal state transitions and give no useful
-        // hint in production. Keep the full parser under VERBOSE and skip
-        // silently otherwise so the normal scan log stays focused on
-        // [scan] ch N / [scan] complete / [c2h] DONE_ACK.
+        // A scan produces dozens of LOG-FMTs that only trace internal
+        // state transitions, so the parser runs under VERBOSE only.
         if !VERBOSE { return; }
         let payload_off = off + 8;
         let total_len = _len as u32;            // includes 8-byte hdr
@@ -1392,19 +1381,19 @@ fn handle_wifi_frame(dma: i32, off: u32, len: u32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Listen-only Mode (v0.94 diagnostic)
+//  Listen-only mode (diagnostic)
 // ═══════════════════════════════════════════════════════════════════
 
 /// Passive listen on the currently-tuned channel, no FW scan_offload.
 ///
-/// Purpose: isolate whether the RX pipe (RF → CMAC → RMAC → RXQ DMA) is
-/// live at all. If we see type-0 (WiFi) frames here, the radio + MAC path
-/// works and the scan_offload ret=4 problem is truly about FW state. If
-/// we still see only type-10 (C2H), something upstream of RMAC is dead.
+/// Isolates whether the RX pipe (RF → CMAC → RMAC → RXQ DMA) is live at
+/// all. Type-0 (WiFi) frames here mean the radio + MAC path works and a
+/// scan failure is FW state; only type-10 (C2H) means something upstream
+/// of RMAC is dead.
 pub fn listen_only(mmio: i32, seconds: u32) {
     host::print("\n[wifi] Phase 5: passive listen on current channel\n");
 
-    // Promiscuous RX filter — accept EVERYTHING:
+    // Promiscuous RX filter — accept everything:
     //   clear A1_MATCH (don't require dest = our MAC)
     //   clear BCN_CHK_EN (don't drop beacons from other BSSIDs)
     //   clear A_BC (bit 2) — don't apply broadcast addr filter
@@ -1471,7 +1460,7 @@ pub fn listen_only(mmio: i32, seconds: u32) {
 //  WiFi Scan
 // ═══════════════════════════════════════════════════════════════════
 
-/// Start an **active** scan on 2.4GHz channels 1-13.
+/// Start an active scan on 2.4GHz channels 1-13.
 /// Called 3x from lib.rs to accumulate beacons across passes. The
 /// RX_FLTR / EDCCA / BSS-table / probe-pool state is kept in statics
 /// so only the first call prints the setup lines — subsequent calls

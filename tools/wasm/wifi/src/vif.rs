@@ -11,7 +11,7 @@
 //!   8. rtw89_fw_h2c_cam                (fw.c:2221)
 //!   9. rtw89_chip_h2c_default_cmac_tbl (fw.c:3521)
 //!
-//! All tailored for: STATION, port 0, band 0, MACID 0, NOT CONNECTED (dis_conn=true).
+//! All tailored for: STATION, port 0, band 0, MACID 0, not connected (dis_conn=true).
 
 use crate::host;
 use crate::fw;
@@ -91,12 +91,10 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     fw::print_dec(macid as usize);
     host::print("\n");
 
-    // Strict 1:1 port of Linux rtw89_mac_vif_init (mac.c:4942). The earlier
-    // "minimal" two-H2C path was a v0.93 shortcut that left macid 0 with
-    // empty DMAC/CMAC tables, so role_maintain / addr_cam had no state to
-    // register against — the FW silently dropped both and wedged the H2C
-    // pipe (v1.0.0 log showed both H2Cs timed out with NO C2H, and every
-    // subsequent scan H2C also timed out).
+    // Strict 1:1 port of Linux rtw89_mac_vif_init (mac.c:4942). All steps
+    // are needed: with empty DMAC/CMAC tables for the macid, role_maintain
+    // and addr_cam have no state to register against, the FW silently
+    // drops them and the H2C pipe wedges (every later H2C times out).
     //
     // Linux order (all 8 steps for AX non-secure-boot; .h2c_default_dmac_tbl
     // is NULL for 8852B so step 9 drops out):
@@ -148,11 +146,10 @@ pub fn init(mmio: i32, macid: u8) -> bool {
     true
 }
 
-/// Silence VIF-init wait lines in production builds. These H2Cs are
-/// fire-and-forget per Linux (rack=1 only, dack=1 ack comes batched
-/// behind the next scan H2C), so our simple HW_IDX-advance poll nearly
-/// always logs "NO C2H after Xms" — misleading since the H2Cs did
-/// succeed. Flip to `true` to re-enable the per-step timing.
+/// Per-step wait lines for VIF init. Off by default: these H2Cs are
+/// fire-and-forget per Linux (rack=1 only, the dack=1 ack comes batched
+/// behind the next scan H2C), so the HW_IDX-advance poll nearly always
+/// reports "NO C2H after Xms" even though the H2Cs succeeded.
 const VERBOSE: bool = false;
 
 fn wait_c2h(mmio: i32, max_ms: u32, tag: &str) {
@@ -240,8 +237,8 @@ fn port_update_p0_nolink(mmio: i32) {
     host::mmio_w32_mask(mmio, R_AX_BCNERLYINT_CFG_P0, 0xFFF << 16, TBTT_ERLY_DEF);
 
     // rtw89_mac_port_cfg_tbtt_agg — 16-bit at 0xC412, TBTT_AGG_NUM_MASK = GENMASK(15,8) = 1
-    // 32-bit at 0xC410 would have it at [31:24]. Let me just use 0xC410 aligned.
-    // Actually TBTT_AGG @ 0xC412 is in upper 16 of 0xC410. Upper-byte of that 16-bit = bits [31:24]
+    // Accessed as aligned 32-bit at 0xC410: TBTT_AGG @ 0xC412 is its upper
+    // 16 bits, and the upper byte of that is bits [31:24].
     host::mmio_w32_mask(mmio, 0xC410, 0xFF << 24, TBTT_AGG_DEF);
 
     // rtw89_mac_port_cfg_bss_color — port 0: BSS_COLOB_AX_PORT_0_MASK = GENMASK(5,0) = 0
@@ -465,10 +462,10 @@ fn h2c_cam(mmio: i32, macid: u8, port: u8) {
 //
 //  Linux only writes BSSID + re-sends addr_cam on BSS_CHANGED_BSSID
 //  (mac80211.c:756). NET_TYPE stays NO_LINK until BSS_CHANGED_ASSOC fires
-//  after association completes. Setting NET_TYPE=INFRA prematurely (as
-//  an earlier version did) makes the FW consider the MACID "connected"
-//  before AUTH even starts — some FW paths guard TX behind the
-//  association state machine and silently drop pre-AUTH frames.
+//  after association completes. Setting NET_TYPE=INFRA prematurely makes
+//  the FW consider the MACID "connected" before AUTH even starts — some
+//  FW paths guard TX behind the association state machine and silently
+//  drop pre-AUTH frames.
 //
 //  Here we only refresh the addr_cam entry with the target BSSID so that
 //  an incoming AUTH Response (addr1 = our MAC, addr3 = target BSSID)
@@ -497,7 +494,7 @@ fn print_hex2(b: u8) {
 fn h2c_cam_infra(mmio: i32, macid: u8, port: u8, bssid: [u8; 6]) {
     // 60-byte v0 layout — Linux `rtw89_cam_fill_addr_cam_info` +
     // `rtw89_cam_fill_bssid_cam_info`. For a STA about to AUTH but
-    // NOT yet associated, Linux keeps net_type = NO_LINK (see
+    // not yet associated, Linux keeps net_type = NO_LINK (see
     // core.c:4992 rtw89_vif_type_mapping — only flips to INFRA when
     // assoc=true). TMA becomes the target AP's BSSID so any response
     // frame matches the CAM.
@@ -612,8 +609,7 @@ fn h2c_default_cmac_tbl(mmio: i32, macid: u8) {
     //
     // Without NTX_PATH_EN in the mask the FW leaves MACID 0 without a TX
     // RF path assigned, and HW silently drops every CH8 direct TX
-    // attempt (TX_COUNTER stays 0 even though DMA consumes the BD) —
-    // that was the v1.30..v1.34 diagnostic pattern.
+    // attempt (TX_COUNTER stays 0 even though DMA consumes the BD).
 
     let mut buf = [0u8; 68];
 

@@ -25,7 +25,7 @@ pub const B_RSTB_ASYNC_ALL:   u32 = 1 << 1;
 
 pub const R_PMAC_GNT:         u32 = 0x0980;
 pub const B_PMAC_GNT_TXEN:    u32 = 1 << 0;
-pub const B_PMAC_GNT_RXEN:    u32 = 1 << 16; // reg.h: BIT(16) — was wrongly 1<<4
+pub const B_PMAC_GNT_RXEN:    u32 = 1 << 16; // reg.h: BIT(16)
 pub const B_PMAC_GNT_P1:      u32 = 0xF00;
 
 pub const R_PMAC_RXMOD:       u32 = 0x0984;
@@ -75,8 +75,8 @@ pub const R_TXNSS_MAP:        u32 = 0x45B4;
 pub const B_TXNSS_MAP_MSK:    u32 = 0x0000_0780;
 
 pub const R_MAC_SEL:          u32 = 0x09A4;
-pub const B_MAC_SEL_PWR_EN:   u32 = 1 << 16; // reg.h:8840 BIT(16) — was wrongly 1<<7
-pub const B_MAC_SEL_MOD:      u32 = 0x0000_001C; // reg.h:8842 GENMASK(4,2) — was wrongly 0xE0
+pub const B_MAC_SEL_PWR_EN:   u32 = 1 << 16; // reg.h:8840 BIT(16)
+pub const B_MAC_SEL_MOD:      u32 = 0x0000_001C; // reg.h:8842 GENMASK(4,2)
 
 pub const R_PD_CTRL:          u32 = 0x0C3C;
 pub const B_PD_HIT_DIS:       u32 = 1 << 9;

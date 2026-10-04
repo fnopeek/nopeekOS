@@ -7,12 +7,12 @@
 //!   - TSSI CCK/MCS per-channel offsets (needed by TSSI set_efuse_to_de)
 //!   - RX gain offsets per path/band (needed by set_gain_offset)
 //!   - RFE type (external PA presence → DPK bypass decision)
-//!   - chip MAC address (replaces our pseudo 00:11:22:33:44:55)
+//!   - chip MAC address (replaces the pseudo 00:11:22:33:44:55)
 //!   - country code, crystal cap, coex type, etc.
 //!
-//! Without efuse, TSSI runs with thermal=0xff fallback (zero thermal
-//! offset table), set_txpwr uses uniform hardcoded dBm, and we send
-//! Probe Requests with a pseudo MAC. All three of those are broken.
+//! Without efuse, TSSI falls back to thermal=0xff (zero thermal offset
+//! table), set_txpwr uses uniform hardcoded dBm, and Probe Requests
+//! carry a pseudo MAC.
 //!
 //! Read path (8852BE is AX, non-DAV): direct MMIO via R_AX_EFUSE_CTRL.
 //!   1. enable_efuse_pwr_cut_ddv (SYS_ISO_CTRL bit sequence, +1ms)
@@ -55,11 +55,9 @@ pub const PHYCAP_ADDR: u32     = 0x580;
 pub const PHYCAP_SIZE: u32     = 128;
 
 // Sec-ctrl size: first + last N bytes are secure-control, not scanned.
-// chip->sec_ctrl_efuse_size for RTL8852BE = 4 (rtw8852b.c:993).
-// My first version used 2 — the logical decode started 2 bytes too
-// early, read sec-ctrl bytes as headers, got 0xFFFF on the first one,
-// and aborted before decoding any actual block. Result: log_map stays
-// all-0xFF, every parsed field reads 0xFF.
+// chip->sec_ctrl_efuse_size for RTL8852BE = 4 (rtw8852b.c:993). A wrong
+// size makes the decode read sec-ctrl bytes as a 0xFFFF header and stop
+// before the first block, leaving every field at 0xFF.
 const SEC_CTRL_SIZE: u32 = 4;
 
 // Struct rtw8852bx_efuse field offsets (logical space).
@@ -254,7 +252,7 @@ fn decode_logical(phy: &[u8], log: &mut [u8]) {
         phy_idx += 2;
 
         for i in 0u8..4 {
-            if word_en & (1 << i) != 0 { continue; } // bit set = word NOT present
+            if word_en & (1 << i) != 0 { continue; } // bit set = word not present
             let log_idx = blk_to_log(blk, i);
             if phy_idx + 1 > phys_size - SEC_CTRL_SIZE as usize
                 || log_idx + 1 >= log_size { return; }

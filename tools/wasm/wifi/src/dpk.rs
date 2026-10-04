@@ -376,7 +376,7 @@ fn tssi_pause(mmio: i32, path: u8, is_pause: bool) {
 // ═══════════════════════════════════════════════════════════════════
 fn kip_restore(mmio: i32, path: u8) {
     apply(mmio, RTW8852B_DPK_KIP_DEFS);
-    // cv > CHIP_CAV: our hal reports cv=2 so always apply.
+    // cv > CHIP_CAV: the HAL reports cv=2, so always apply.
     pwm(mmio, R_DPD_COM + ((path as u32) << 8), B_DPD_COM_OF, 0x1);
 }
 
@@ -662,7 +662,7 @@ fn agc(mmio: i32, path: u8, kidx: u8, init_txagc: u8, loss_only: bool) -> u8 {
                 else if new_rxbb < 0 { new_rxbb = 0; limited_rxbb = true; }
                 rw(mmio, path, RR_MOD, RFREG_MASKRXBB, new_rxbb as u32);
                 if off != 0 || agc_cnt == 0 {
-                    // bw < 80 → bypass; else lbk_rxiqk. Our chan is 20M so bypass.
+                    // bw < 80 → bypass; else lbk_rxiqk. Only 20 MHz is used, so bypass.
                     bypass_rxcfir(mmio, path, true);
                 }
                 step = if dgain > 1922 || dgain < 342 { AGC_SYNC_DGAIN } else { AGC_GAIN_LOSS_IDX };

@@ -1,20 +1,16 @@
 //! TSSI — Transmit Signal Strength Indicator calibration.
 //!
-//! 1:1 Port of Linux rtw8852b_rfk.c TSSI functions. Without TSSI the
+//! 1:1 port of Linux rtw8852b_rfk.c TSSI functions. Without TSSI the
 //! PA runs open-loop and real output power is unknown — frames leave
 //! the chip at undefined amplitude, APs see noise.
 //!
-//! Linux entry: rtw8852b_tssi(phy_idx, hwtx_en=true, chan).
-//! We skip _tssi_alimentk (the TX-loop cal with sch_tx pause) for
-//! Phase 1 — it requires hwtx_en and is a heavy multi-ms auto-cal.
-//! Setup-only run lets the TSSI tracking hardware become live without
-//! the per-level alignment sweep.
+//! Linux entry: rtw8852b_tssi(phy_idx, hwtx_en=true, chan), including
+//! _tssi_alimentk (the TX-loop cal, run with sch_tx paused).
 //!
 //! Efuse dependencies: _tssi_set_tmeter_tbl reads per-path thermal from
-//! efuse; with thermal=0xff (our default) it falls back to writing
-//! zero offsets — HW uses the default delta table.
-//! _tssi_set_efuse_to_de reads per-channel DE values from efuse;
-//! without efuse we skip it (HW keeps defaults from the tables above).
+//! efuse; with thermal=0xff (no efuse) it falls back to writing zero
+//! offsets and HW uses the default delta table. _tssi_set_efuse_to_de
+//! reads per-channel DE values from efuse.
 
 use crate::host;
 use crate::phy::{rf_write_mask, PHY_CR_BASE};
@@ -504,11 +500,9 @@ fn disable(mmio: i32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  Public entry — rtw8852b_tssi (phase 1: setup only, no alimentk)
+//  Public entry — rtw8852b_tssi
 //
 //  Channel parameters: band (2G=0, 5G=1), channel number.
-//  hwtx_en is accepted for future alimentk integration; currently
-//  ignored (we never run the TX alignment loop).
 // ═══════════════════════════════════════════════════════════════════
 
 // ── alimentk (rfk.c:3559): the actual TX-loop auto-calibration ───
@@ -520,8 +514,8 @@ fn disable(mmio: i32) {
 // drive the PA for a target output power.
 //
 // Without alimentk the TSSI loop tracks against defaults, so actual
-// output power for a given target dBm is unknown. Linux always runs
-// this per channel; it's why every AP replies to their Probe Reqs.
+// output power for a given target dBm is unknown. Linux runs this per
+// channel.
 
 const ALIM_REG_P0: [u32; 4] = [0x5630, 0x5634, 0x563C, 0x5640]; // ALIM1/3/2/4 (Linux order)
 const ALIM_REG_P1: [u32; 4] = [0x7630, 0x7634, 0x763C, 0x7640];
@@ -720,11 +714,8 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
         slope_cal_org(mmio, path, band);
         alignment_default(mmio, path, band, ch);
         set_tssi_slope(mmio, path);
-        // alimentk re-enabled in v1.42 — v1.28/v1.29 timed out on CW_RPT
-        // because IQK was running with ADC disabled (v1.38 fixed that),
-        // so PMAC test-TX had no feedback path. With IQK now clean
-        // (cor=0 fin=0 tx=0 rx=0) the TSSI alignment loop should see
-        // real CW reports and calibrate PA output per channel.
+        // alimentk needs a clean IQK (run with the ADC enabled): PMAC
+        // test-TX has no feedback path otherwise and CW_RPT times out.
         let tx_en = crate::fw::stop_sch_tx(mmio, 0);
         crate::iqk::wait_rx_mode_pub(mmio);
         alimentk(mmio, path, ch);
@@ -733,9 +724,8 @@ pub fn run(mmio: i32, band: u8, ch: u8, e: &crate::efuse::EfuseData) {
 
     enable(mmio);
 
-    // Efuse→DE: per-channel CCK + MCS power correction. The reason TSSI
-    // runs at all: without this the thermal loop has nothing to correct
-    // *against*. 16 BB register writes.
+    // Efuse→DE: per-channel CCK + MCS power correction, the reference the
+    // thermal loop corrects against. 16 BB register writes.
     set_efuse_to_de(mmio, e, ch);
 
     host::print("  TSSI: enabled (both paths) + DE programmed\n");

@@ -51,14 +51,14 @@ const B_IQKCH_CH: u32      = 0xFF << 8;
 const R_NCTL_CFG: u32      = 0x8000;
 const R_NCTL_RPT: u32      = 0x8008;
 const B_NCTL_RPT_FLG: u32  = 1 << 26;
-const R_NCTL_N1: u32       = 0x8010; // was WRONG (0x8004) in previous version
+const R_NCTL_N1: u32       = 0x8010;
 const B_NCTL_N1_CIP: u32   = 0xFF << 0;
 
 const R_IQK_DIF4: u32      = 0x802C;
 const B_IQK_DIF4_TXT: u32  = 0xFFF << 0;
 const B_IQK_DIF4_RXT: u32  = 0xFFF << 16;
 
-const R_KIP_SYSCFG: u32    = 0x8088; // was WRONG (0x8240) in previous version
+const R_KIP_SYSCFG: u32    = 0x8088;
 const R_COEF_SEL: u32      = 0x8104;       // + path<<8
 const B_COEF_SEL_IQC: u32  = 1 << 0;
 
@@ -68,13 +68,13 @@ const R_IQK_RES: u32       = 0x8124;       // + path<<8
 const B_IQK_RES_TXCFIR: u32 = 0xF << 8;
 const B_IQK_RES_RXCFIR: u32 = 0xF << 0;
 
-const R_TXIQC: u32         = 0x8138;       // + path<<8 — was WRONG (0x81D8)
-const R_RXIQC: u32         = 0x813C;       // + path<<8 — was WRONG (0x8220)
+const R_TXIQC: u32         = 0x8138;       // + path<<8
+const R_RXIQC: u32         = 0x813C;       // + path<<8
 
 const R_CFIR_LUT: u32      = 0x8154;       // + path<<8
 const B_CFIR_LUT_SEL: u32  = 1 << 8;
 const B_CFIR_LUT_SET: u32  = 1 << 4;
-const B_CFIR_LUT_G3: u32   = 1 << 3;       // was WRONG (1<<20)
+const B_CFIR_LUT_G3: u32   = 1 << 3;
 const B_CFIR_LUT_G2: u32   = 1 << 2;
 const B_CFIR_LUT_GP_V1: u32 = 0x7 << 0;    // 3-bit (RXK uses this)
 const B_CFIR_LUT_GP: u32   = 0x3 << 0;     // 2-bit (TXK uses this)
@@ -221,10 +221,8 @@ const BACKUP_RF_REGS: [u32; 11] = [
 //  Helpers
 // ═══════════════════════════════════════════════════════════════════
 
-// Each iteration includes an MMIO read (~300-500ns on PCIe) plus spin_loops.
-// Linux uses udelay(1) = real 1 microsecond. Our old 100×spin_loop was
-// ~100-300ns — 5-10× too short. Bumped to 1000 spin_loops for ~1-3µs floor;
-// combined with the MMIO read this stays >= 1µs per iteration.
+// Stand-in for Linux udelay(1). 1000 spin_loops (~1-3 µs) plus the MMIO
+// read each poll iteration does keeps every iteration at >= 1 µs.
 fn udelay_1() { for _ in 0..1000 { core::hint::spin_loop(); } }
 fn udelay_200() { for _ in 0..200000 { core::hint::spin_loop(); } }
 
@@ -773,7 +771,7 @@ pub fn run(mmio: i32) {
     host::print(")\n");
 
     // State — defaults match rtw89_iqk_info after _iqk_init.
-    // Channel is 2G ch 7 @ 20 MHz (set by chan::set_channel_2g(mmio, 7)).
+    // Assumes 2G ch 7 @ 20 MHz (set by chan::set_channel_2g(mmio, 7)).
     let mut state = IqkState {
         band: [BAND_2G, BAND_2G],
         bw:   [BW_20M,  BW_20M],

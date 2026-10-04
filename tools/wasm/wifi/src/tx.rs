@@ -9,13 +9,13 @@
 //!   48..56  TXWP Info  (seq0..3)
 //!   56..64  Addr Info  (length | option | dma_low, 1 entry)
 //!
-//! The 802.11 frame lives in a SEPARATE DMA buffer (frame pool). The
+//! The 802.11 frame lives in a separate DMA buffer (frame pool). The
 //! addr_info points at it via DMA address.
 
 use crate::host;
 use crate::regs;
 
-// ── Ring dimensions (smaller than Linux for Phase 1; easy to grow) ──
+// ── Ring dimensions (smaller than Linux) ─────────────────────────────
 
 const BD_NUM:        u32 = 32;   // 32 BDs × 8 B = 256 B (fits in 1 page)
 const WD_PAGES:      u32 = 16;   // 16 WD pages
@@ -93,7 +93,7 @@ pub fn alloc() -> Option<TxRing> {
 /// send. Mirrors rtw89_pci_reset_trx_rings for CH8 (pci.c:1776) plus the
 /// Linux disable→configure→enable sequence (pci.c:3105/3130).
 ///
-/// Why the disable wrap: mac_init already enabled ALL TX DMA channels via
+/// Why the disable wrap: mac_init already enabled all TX DMA channels via
 /// mac::pcie_post_init (clearing STOP bits in R_AX_PCIE_DMA_STOP1) long
 /// before we configure the CH8 ring. A DMA channel that is enabled while
 /// its DESA/NUM/BDRAM registers are garbage sits in a partial-error
@@ -102,7 +102,7 @@ pub fn alloc() -> Option<TxRing> {
 /// `ctrl_dma_all(false) → reset_trx_rings() → ctrl_dma_all(true)`
 /// atomically. We mimic that for CH8 specifically.
 pub fn init_ch8(mmio: i32, ring: &TxRing) {
-    // 1. STOP CH8 DMA while we rewrite the descriptors.
+    // 1. Stop CH8 DMA while we rewrite the descriptors.
     host::mmio_set32(mmio, regs::R_AX_PCIE_DMA_STOP1, regs::B_AX_STOP_CH8);
 
     // 2. Ring size (16-bit write, like Linux order: NUM before DESA).
@@ -118,7 +118,7 @@ pub fn init_ch8(mmio: i32, ring: &TxRing) {
     host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_L, ring.bd_phys as u32);
     host::mmio_w32(mmio, regs::R_AX_CH8_TXBD_DESA_H, (ring.bd_phys >> 32) as u32);
 
-    // 5. Reset wp/rp pointers AFTER DESA/NUM/BDRAM are in place.
+    // 5. Reset wp/rp pointers after DESA/NUM/BDRAM are in place.
     host::mmio_w32(mmio, regs::R_AX_TXBD_RWPTR_CLR1, regs::B_AX_CLR_CH8_IDX);
 
     host::fence();
@@ -130,7 +130,7 @@ pub fn init_ch8(mmio: i32, ring: &TxRing) {
 
 /// Send a management frame (Probe Request, AUTH, ASSOC) via CH8.
 /// `frame` is the raw 802.11 frame (MAC header + body), unencrypted.
-/// Returns true on enqueue success (does NOT wait for TX completion).
+/// Returns true on enqueue success (does not wait for TX completion).
 /// The multicast/broadcast decision is taken from bit 0 of addr1 (DA) —
 /// Linux core.c:1569 `rts_en = !is_bmc`: unicast frames do RTS, group
 /// frames skip RTS.
@@ -207,11 +207,10 @@ pub fn send_mgmt(mmio: i32, ring: &mut TxRing, frame: &[u8]) -> bool {
     // ── 6. TXBD (points at WD page) ───────────────────────────────
     // Linux pci.c:1539: `txwd->len = txwd_len + txwp_len + txaddr_info_len`
     // — 24 (body) + 24 (info) + 8 (wp) + 8 (one addr entry) = 64 bytes.
-    // The 802.11 frame lives in a SEPARATE DMA buffer referenced by the
-    // addr_info entry, so its length is NOT added here. Adding it caused
-    // HW to read 45 bytes of zero-padded slop past the real metadata and
-    // silently drop the frame — visible as TX_COUNTER=0 despite CH8_BUSY
-    // toggling and TXBD_IDX advancing (v1.30/v1.31 diagnostic).
+    // The 802.11 frame lives in a separate DMA buffer referenced by the
+    // addr_info entry, so its length is not added here. Otherwise HW reads
+    // padding past the real metadata and silently drops the frame
+    // (TX_COUNTER stays 0 while CH8_BUSY toggles and TXBD_IDX advances).
     let bd_off        = ring.wp as u32 * 8;
     let wd_total_len  = WD_HDR_TOTAL;
     let wd_dma_hi     = (wd_phys >> 32) as u32 & 0xFF;

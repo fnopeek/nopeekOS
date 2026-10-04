@@ -175,8 +175,8 @@ pub fn set_channel_2g(mmio: i32, ch: u8) {
     //   Reads LNA/TIA gain values stored in phy::BB_GAIN during BB-gain
     //   table parse and writes them into the per-path LNA/TIA gain
     //   registers. Without this step the RX analog front-end has no gain
-    //   → zero frames reach the MAC. set_gain_offset/set_rxsc_rpl_comp
-    //   need efuse data (not parsed yet), so they stay out for now.
+    //   and no frames reach the MAC. Not implemented: set_gain_offset and
+    //   set_rxsc_rpl_comp (they need parsed efuse data).
     crate::phy::apply_gain_error_2g(mmio, 0);
     crate::phy::apply_gain_error_2g(mmio, 1);
 
@@ -374,14 +374,13 @@ pub fn set_channel_help_exit(mmio: i32, tx_en: u16) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  apply_default_txpwr — smoke-test stand-in for rtw8852bx_set_txpwr
+//  apply_default_txpwr — minimal stand-in for rtw8852bx_set_txpwr
 //
 //  Linux's set_txpwr pipeline reads per-rate dBm values from efuse
-//  (set_txpwr_byrate + offset + limit + limit_ru + diff). We don't
-//  parse efuse, so for the Phase 7 smoke test we uniformly fill the
-//  per-rate table with a safe 20 dBm (= 0x50 in 0.25-dBm units) so
-//  HW has *something* to transmit at. Without this the table reads
-//  0 and the PA stays at minimum output — AP never sees our frame.
+//  (set_txpwr_byrate + offset + limit + limit_ru + diff). This fills
+//  the per-rate table uniformly with a safe 20 dBm (0x50 in 0.25-dBm
+//  units). With the table at 0 the PA stays at minimum output and the
+//  AP never hears the frame.
 //
 //  R_AX_PWR_BY_RATE_TABLE0..10 = 0xD2C0..0xD2E8, 11 dwords.
 //  Each byte = one rate's power setting in 0.25-dBm units.
@@ -425,14 +424,14 @@ const DPD_VAL_REF0: u32 = 0x02B27000;
 
 // ═══════════════════════════════════════════════════════════════════
 //  bb_cfg_txrx_path — 1:1 port of __rtw8852bx_bb_cfg_txrx_path
-//  (rtw8852b_common.c:1743). THE missing TX-routing setup.
+//  (rtw8852b_common.c:1743).
 //
 //  Linux calls this once from rtw89_phy_dm_init. Without it,
 //  R_P0_RFMODE / R_P1_RFMODE (0x12AC / 0x32AC) bits [31:4] stay at
-//  reset default — TX routing pattern undefined, chip doesn't know
-//  which RF path to send TX through, frame dies silently.
+//  reset default: the TX routing pattern is undefined and frames die
+//  silently.
 //
-//  For our 2G RF_AB case (both paths TX + both paths RX):
+//  For the 2G RF_AB case (both paths TX + both paths RX):
 //    R_P0_RFMODE[31:4]       = 0x1233312  (TX routing pattern)
 //    R_P0_RFMODE_FTM_RX[11:0]= 0x333
 //    R_P1_RFMODE[31:4]       = 0x1233312
@@ -490,8 +489,8 @@ pub fn bb_cfg_txrx_path(mmio: i32) {
     host::mmio_w32_mask(mmio, CR + R_P1_TXPW_RSTB, B_TXPW_RSTB, 1);
     host::mmio_w32_mask(mmio, CR + R_P1_TXPW_RSTB, B_TXPW_RSTB, 3);
 
-    // Linux __rtw8852bx_bb_ctrl_rf_mode_rx_path(RF_AB) — THE critical
-    // TX routing pattern. 0x1233312 encodes per-band-nibble routing.
+    // Linux __rtw8852bx_bb_ctrl_rf_mode_rx_path(RF_AB): the TX routing
+    // pattern. 0x1233312 encodes per-band-nibble routing.
     host::mmio_w32_mask(mmio, CR + R_P0_RFMODE,        B_TXRX_FTM_TX, 0x1233312);
     host::mmio_w32_mask(mmio, CR + R_P0_RFMODE_FTM_RX, B_FTM_RX,      0x333);
     host::mmio_w32_mask(mmio, CR + R_P1_RFMODE,        B_TXRX_FTM_TX, 0x1233312);
@@ -524,8 +523,7 @@ const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 //   bit  9      = B_AX_FORCE_PWR_BY_RATE_EN
 //   bits 8..0   = B_AX_FORCE_PWR_BY_RATE_VALUE_MASK
 // When FORCE_PWR_BY_RATE_EN=1, HW ignores the per-rate table and
-// transmits every frame at VALUE. Useful smoke-test override until
-// we port the full rtw8852bx_set_txpwr_ref/offset/limit pipeline.
+// transmits every frame at VALUE. A test override; Linux never sets it.
 
 // ═══════════════════════════════════════════════════════════════════
 //  set_txpwr — full Linux pipeline, 2 G only, FCC approximation.
@@ -538,18 +536,16 @@ const R_AX_PWR_BY_RATE_TABLE10: u32 = 0xD2E8;
 //    5. rtw89_phy_set_txpwr_limit_ru_ax(phy.c:3175)
 //    6. rtw8852bx_set_txpwr_diff       (common.c:1358) → set_txpwr_ref
 //
-//  This is the 1:1 port. The only simplification is the regulatory
-//  domain: we use permissive FCC-2G values (0x50 = 20 dBm) rather than
-//  parsing Linux's per-country-per-channel regulatory arrays
-//  (>10000 lines of table data). For our AUTH on ch 7 that's fine —
-//  FCC allows 30 dBm on 2.4 G and our PA won't do more than 20.
+//  The only simplification is the regulatory domain: permissive
+//  FCC-2G values (0x50 = 20 dBm) instead of Linux's per-country,
+//  per-channel regulatory arrays. FCC allows 30 dBm on 2.4 G, and the
+//  PA does not exceed 20.
 //
-//  The important difference from the old apply_default_txpwr:
-//    - NO FORCE_PWR_BY_RATE — FORCE is a debug override, never set by
-//      Linux in production. Leaving it on might lock the PA into a
-//      rate-blind mode that mis-configures the RF path.
-//    - Real per-rate byrate values (Linux rtw89_8852b_txpwr_byrate
-//      table row for 2 G: high MCS get lower dBm).
+//  Unlike apply_default_txpwr:
+//    - FORCE_PWR_BY_RATE stays off. It is a debug override Linux never
+//      sets; left on it can lock the PA into a rate-blind mode.
+//    - Real per-rate byrate values (Linux rtw89_8852b_txpwr_byrate,
+//      2 G row: high MCS get lower dBm).
 //    - tx_shape CCK + OFDM triangular = 0 (FCC default).
 // ═══════════════════════════════════════════════════════════════════
 
@@ -597,10 +593,9 @@ fn set_txpwr_byrate(mmio: i32) {
         addr += 4;
     }
 
-    // IMPORTANT: clear FORCE_PWR_BY_RATE_EN. Linux never sets this.
-    // A 1 here locks the PA into a single-rate test mode and may mis-
-    // route RF paths for normal TX. Also clear the whole REF field —
-    // we write it separately via apply_txpwr_ctrl.
+    // Clear FORCE_PWR_BY_RATE_EN; Linux never sets it. A 1 here locks
+    // the PA into a single-rate test mode and may misroute RF paths for
+    // normal TX. Also clear the REF field, which apply_txpwr_ctrl writes.
     host::mmio_w32(mmio, R_AX_PWR_RATE_CTRL, 0);
 }
 
@@ -629,8 +624,8 @@ fn set_tx_shape(mmio: i32) {
 
 /// Step 4: txpwr limit — 20 dwords for 2 paths.
 /// Per-band/regd/ch/bw in Linux, but for FCC 2 G 20 MHz the limit is
-/// 30 dBm ≈ 0x78. We use 0x50 (20 dBm) which is always below the FCC
-/// ceiling and above our PA's actual output, so it doesn't clamp.
+/// 30 dBm ≈ 0x78. 0x50 (20 dBm) is below the FCC ceiling and above the
+/// PA's actual output, so it never clamps.
 fn set_txpwr_limit(mmio: i32) {
     const R_AX_PWR_LMT: u32 = 0xD2EC;
     for i in 0u32..20 {
