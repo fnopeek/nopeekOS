@@ -237,9 +237,13 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
     } else {
         match crate::memory::allocate_contiguous(pages) {
             Some(addr) => addr as *mut u8,
-            None => return,
+            None => {
+                crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass stays sharp", pages);
+                return;
+            }
         }
     };
+    let t0 = crate::interrupts::ticks();
 
     // 1. Average BLUR_DOWN² blocks into a small image, one channel per plane.
     let sw = ((w + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
@@ -304,6 +308,7 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
         BLURRED_H = h;
     }
     BLURRED_SET.store(true, Ordering::Release);
+    crate::kprintln!("[npk] glass: wallpaper blurred in {} ms", (crate::interrupts::ticks() - t0) * 10);
 }
 
 /// One box-blur pass along a line direction. `lines` × `len` samples,
@@ -321,6 +326,12 @@ fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usiz
             sum = sum + at(i + r + 1) - at(i - r);
         }
     }
+}
+
+/// What translucent glass is precomputed from: the blurred wallpaper when
+/// it is ready, else the sharp one, else null (no wallpaper).
+pub fn glass_source_ptr() -> *const u8 {
+    if blurred_ready() { unsafe { BLURRED } } else { wallpaper_ptr() }
 }
 
 fn blurred_ready() -> bool {

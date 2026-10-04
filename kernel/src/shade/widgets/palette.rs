@@ -183,7 +183,7 @@ pub fn current() -> Palette {
 /// <0..255>` (255 = flat, ~180 = clearly see-through). Light mode stays
 /// lower because a near-white panel washes out faster.
 pub fn chrome_opacity() -> u32 {
-    let dflt = if is_light_theme() { 205 } else { 235 };
+    let dflt = if is_light_theme() { 215 } else { 235 };
     opacity_key("shade.chrome_opacity").unwrap_or(dflt)
 }
 
@@ -290,7 +290,7 @@ fn glass(color: u32, is_light: bool) -> u32 {
 fn light_glass_shift() -> u32 {
     let strength = crate::config::get("shade.light_tint")
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(70)
+        .unwrap_or(25)
         .min(100);
     if strength == 0 { return 0; }
     let l = crate::theme::avg_luminance() as u32; // 0..255

@@ -391,12 +391,18 @@ static GLASS_TINT: spin::Mutex<Option<(u64, u32, alloc::vec::Vec<u32>)>> =
     spin::Mutex::new(None);
 
 fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*const u32, usize)> {
-    let wp = crate::gui::background::wallpaper_ptr();
+    // The blurred wallpaper when there is one — glass is readable because
+    // of the blur. The generation is in the key, not just the pointer:
+    // `set_wallpaper` overwrites the SAME buffer in place, so a pointer key
+    // kept the old wallpaper inside every terminal until bg_color changed
+    // (a light/dark switch).
+    let wp = crate::gui::background::glass_source_ptr();
     if wp.is_null() { return None; }
+    let generation = crate::gui::background::wallpaper_generation();
     let pitch_px = info.pitch as usize / 4;
     let (width, height) = (info.width as usize, info.height as usize);
     let mut k = 0xcbf29ce484222325u64;
-    for v in [bg_color as u64, opacity as u64, wp as usize as u64,
+    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64,
               info.width as u64, info.height as u64] {
         k ^= v;
         k = k.wrapping_mul(0x0000_0100_0000_01b3);
