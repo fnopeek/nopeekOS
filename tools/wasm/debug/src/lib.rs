@@ -17,7 +17,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 mod host;
 
 /// One source for the version, printed in the banner.
-const VERSION: &str = "0.7.0";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
