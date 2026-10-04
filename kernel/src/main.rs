@@ -1,7 +1,6 @@
 //! nopeekOS Kernel
 //!
 //! Not Unix. Not POSIX. No legacy.
-//! A system built for AI as the operator, with humans as the conductor.
 
 #![no_std]
 #![no_main]

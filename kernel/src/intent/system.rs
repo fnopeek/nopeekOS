@@ -1787,7 +1787,6 @@ pub fn intent_about() {
     kprintln!("  ────────");
     kprintln!();
     kprintln!("  Not a Unix clone. Not POSIX. No legacy.");
-    kprintln!("  Built for AI as the operator, humans as the conductor.");
     kprintln!();
     kprintln!("  Capabilities, not permissions. Intents, not commands.");
     kprintln!("  Content-addressed, not paths. Runtime-generated, not installed.");
