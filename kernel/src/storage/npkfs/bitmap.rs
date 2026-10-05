@@ -33,7 +33,16 @@ impl Bitmap {
         bitmap_count: u64,
         data_start: u64,
     ) -> Result<Self, FsError> {
-        let byte_count = (total_blocks as usize + 7) / 8;
+        // The geometry comes from the superblock, whose checksum is not
+        // keyed: it must describe a bitmap that fits, before anything is
+        // allocated from it.
+        let byte_count = usize::try_from(total_blocks.div_ceil(8)).map_err(|_| FsError::Corrupt)?;
+        if bitmap_count != (byte_count as u64).div_ceil(BLOCK_SIZE as u64)
+            || data_start < bitmap_start.saturating_add(bitmap_count)
+            || data_start > total_blocks
+        {
+            return Err(FsError::Corrupt);
+        }
         let mut data = alloc::vec![0u8; byte_count];
 
         for i in 0..bitmap_count {
@@ -143,7 +152,18 @@ impl Bitmap {
     }
 
     /// Free a range of blocks. Queues TRIM for later.
+    ///
+    /// The range comes from on-disk extents and journal entries. One that
+    /// reaches below the data area or past the end is corrupt and frees
+    /// nothing: handing out the superblock ring or the journal as data
+    /// blocks would overwrite the file system's own metadata.
     pub fn free(&mut self, start: u64, count: u64) {
+        let in_data = start.checked_add(count)
+            .is_some_and(|end| start >= self.data_start && end <= self.total_blocks);
+        if !in_data {
+            crate::kprintln!("[npkfs] refusing to free blocks {}+{}: outside the data area", start, count);
+            return;
+        }
         for i in 0..count {
             let b = start + i;
             if b < self.total_blocks && !is_free(&self.data, b) {

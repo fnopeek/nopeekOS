@@ -130,7 +130,8 @@ pub fn lookup(
     if root == 0 { return Ok(None); }
     let mut block = root;
 
-    loop {
+    // Child pointers come from disk; a cycle would never reach a leaf.
+    for _ in 0..MAX_TREE_DEPTH {
         let mut buf = [0u8; BLOCK_SIZE];
         read_node(cache, block, &mut buf)?;
         let hdr = read_header(&buf);
@@ -150,6 +151,7 @@ pub fn lookup(
             _ => return Err(FsError::Corrupt),
         }
     }
+    Err(FsError::TreeTooDeep)
 }
 
 /// Insert an entry. Returns `(new_root, old_blocks_to_free, was_new)`.

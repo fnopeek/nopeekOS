@@ -93,6 +93,7 @@ const TRB_SETUP_STAGE:    u32 = 2 << 10;
 const TRB_DATA_STAGE:     u32 = 3 << 10;
 const TRB_STATUS_STAGE:   u32 = 4 << 10;
 const TRB_LINK:           u32 = 6 << 10;
+const TRB_TR_NOOP:        u32 = 8 << 10;
 const TRB_ENABLE_SLOT:    u32 = 9 << 10;
 #[allow(dead_code)]
 const TRB_DISABLE_SLOT:   u32 = 10 << 10;
@@ -1628,6 +1629,21 @@ fn cmd_address_device(state: &mut XhciState, port: u32, max_packet: u16) -> bool
 fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     w_value: u16, w_index: u16, w_length: u16, dir_in: bool) -> bool
 {
+    // The whole TD must fit before the Link TRB in the last slot. If it
+    // does not, the rest of the ring becomes No-Op TDs and the TD starts
+    // at the top after the link; otherwise its Data or Status stage would
+    // land on the Link TRB and past the ring.
+    let needed = if w_length > 0 { 3 } else { 2 };
+    if state.ep0_enqueue + needed > NUM_TR_TRBS - 1 {
+        let c = state.ep0_cycle;
+        for i in state.ep0_enqueue..NUM_TR_TRBS - 1 {
+            write_trb(state.ep0_ring, i, 0, 0, TRB_TR_NOOP | c);
+        }
+        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0, TRB_LINK | c | (1 << 1));
+        state.ep0_cycle ^= 1;
+        state.ep0_enqueue = 0;
+    }
+
     let ep0 = &mut state.ep0_enqueue;
     let cycle = state.ep0_cycle;
 

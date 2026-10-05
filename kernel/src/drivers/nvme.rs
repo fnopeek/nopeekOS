@@ -126,6 +126,14 @@ struct NvmeState {
     serial: [u8; 20],
     oncs: u16,                  // Optional NVM Command Support (from Identify Controller)
     command_id: u16,
+    /// I/O commands submitted and not yet completed. Every I/O path leaves
+    /// it at zero: a later command must never take an earlier one's
+    /// completion as its own.
+    io_inflight: u16,
+    /// A completion did not arrive in time. Its command may still run and
+    /// DMA at any moment, so the queue is closed for good: refusing I/O is
+    /// safe, guessing which completion belongs to whom is not.
+    io_dead: bool,
     msix_vector: u8,            // LAPIC vector for I/O CQ completion MSI-X (0 = none/poll)
     pci_addr: pci::PciAddr,     // for live MSI-X read-back (disk diagnostic)
 }
@@ -249,38 +257,93 @@ fn admin_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, Blk
     Err(BlkError::Timeout)
 }
 
-/// Submit a command to I/O queue 1 and wait for completion.
-fn io_command(state: &mut NvmeState, mut cmd: SqEntry) -> Result<CqEntry, BlkError> {
-    cmd.command_id = state.command_id;
-    state.command_id = state.command_id.wrapping_add(1);
+/// How long one I/O completion may take before the queue is given up,
+/// as Linux's default `nvme_io_timeout`.
+const IO_TIMEOUT_SECS: u64 = 30;
 
-    let sq_ptr = state.io_sq as *mut SqEntry;
-    unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
-    state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
-    ring_sq_doorbell(state, 1, state.io_sq_tail);
-
-    let cq_ptr = state.io_cq as *const CqEntry;
-    for _ in 0..5_000_000u32 {
-        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
-        let phase = (entry.status & 1) != 0;
-        if phase == state.io_phase {
-            state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
-            if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
-            ring_cq_doorbell(state, 1, state.io_cq_head);
-
-            let status_code = (entry.status >> 1) & 0x7FF;
-            if status_code != 0 {
-                return Err(BlkError::IoError);
-            }
-            // One-shot check: the poll completed this command; if the MSI-X
-            // ISR also fired (count advanced), the device-IRQ path works end
-            // to end. Logged once, in non-ISR context.
-            nvme_msix_confirm(state.msix_vector);
-            return Ok(entry);
-        }
-        core::hint::spin_loop();
+impl NvmeState {
+    /// Queue one I/O command without ringing the doorbell. Returns its id.
+    fn io_push(&mut self, mut cmd: SqEntry) -> u16 {
+        let cid = self.command_id;
+        cmd.command_id = cid;
+        self.command_id = self.command_id.wrapping_add(1);
+        let sq_ptr = self.io_sq as *mut SqEntry;
+        // SAFETY: `io_sq` is this queue's IO_QUEUE_SIZE-entry ring, and
+        // `io_sq_tail` is always reduced modulo that size.
+        unsafe { core::ptr::write_volatile(sq_ptr.add(self.io_sq_tail as usize), cmd); }
+        self.io_sq_tail = (self.io_sq_tail + 1) % IO_QUEUE_SIZE;
+        self.io_inflight += 1;
+        cid
     }
-    Err(BlkError::Timeout)
+
+    /// Hand everything queued so far to the controller.
+    fn io_ring(&self) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        ring_sq_doorbell(self, 1, self.io_sq_tail);
+    }
+
+    /// Take the next completion: `(command id, status code)`. A timeout
+    /// closes the queue (see `io_dead`).
+    fn io_reap(&mut self) -> Result<(u16, u16), BlkError> {
+        let t0 = crate::interrupts::rdtsc();
+        let deadline = t0.saturating_add(crate::interrupts::tsc_freq().saturating_mul(IO_TIMEOUT_SECS));
+        let cq_ptr = self.io_cq as *const CqEntry;
+        loop {
+            // SAFETY: `io_cq` is this queue's IO_QUEUE_SIZE-entry ring, and
+            // `io_cq_head` is always reduced modulo that size.
+            let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(self.io_cq_head as usize)) };
+            if ((entry.status & 1) != 0) == self.io_phase {
+                self.io_cq_head = (self.io_cq_head + 1) % IO_QUEUE_SIZE;
+                if self.io_cq_head == 0 { self.io_phase = !self.io_phase; }
+                ring_cq_doorbell(self, 1, self.io_cq_head);
+                self.io_inflight = self.io_inflight.saturating_sub(1);
+                record_drain(t0, self.msix_vector);
+                return Ok((entry.command_id, (entry.status >> 1) & 0x7FF));
+            }
+            if crate::interrupts::rdtsc() > deadline {
+                self.io_dead = true;
+                kprintln!("[npk] nvme: no completion within {} s, I/O queue closed until reboot",
+                    IO_TIMEOUT_SECS);
+                return Err(BlkError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Wait for every command in flight. Reports the first error status,
+    /// but only after all of them are done.
+    fn io_wait_all(&mut self) -> Result<(), BlkError> {
+        let mut err = None;
+        while self.io_inflight > 0 {
+            let (_, status) = self.io_reap()?;
+            if status != 0 && err.is_none() { err = Some(BlkError::IoError); }
+        }
+        err.map_or(Ok(()), Err)
+    }
+
+    /// Entry check of every I/O path: the queue is usable and empty.
+    fn io_ready(&mut self) -> Result<(), BlkError> {
+        if self.io_dead { return Err(BlkError::IoError); }
+        let _ = self.io_wait_all();
+        if self.io_dead { Err(BlkError::IoError) } else { Ok(()) }
+    }
+}
+
+/// Submit a command to I/O queue 1 and wait for its completion.
+fn io_command(state: &mut NvmeState, cmd: SqEntry) -> Result<CqEntry, BlkError> {
+    state.io_ready()?;
+    let cid = state.io_push(cmd);
+    state.io_ring();
+    let (got, status) = state.io_reap()?;
+    if got != cid {
+        // The queue was empty, so this completion answers nothing we sent.
+        state.io_dead = true;
+        kprintln!("[npk] nvme: completion for id {} while waiting for {}, I/O queue closed", got, cid);
+        return Err(BlkError::IoError);
+    }
+    if status != 0 { return Err(BlkError::IoError); }
+    nvme_msix_confirm(state.msix_vector);
+    Ok(CqEntry { dw0: 0, _rsvd: 0, sq_head: 0, sq_id: 1, command_id: cid, status: 0 })
 }
 
 /// One-shot confirmation that NVMe completions raise our MSI-X ISR, without
@@ -424,6 +487,8 @@ pub fn init() -> bool {
         serial: [0; 20],
         oncs: 0,
         command_id: 1,
+        io_inflight: 0,
+        io_dead: false,
         msix_vector: 0,
         pci_addr: dev.addr,
     };
@@ -509,6 +574,27 @@ pub fn init() -> bool {
     // NSZE (Namespace Size) at offset 0 (8 bytes, little-endian)
     let nsze = unsafe { core::ptr::read_volatile(identify_buf as *const u64) };
     state.total_lbas = nsze;
+
+    // The LBA format in use: FLBAS (byte 26) indexes LBAF[] at byte 128,
+    // four bytes each, metadata size in bits 15:0 and LBADS (log2 of the
+    // data size) in bits 23:16. Linux `nvme_update_ns_info`. Every command
+    // here counts 512-byte LBAs; with any other format a 4 KB block would
+    // be eight LBAs of 4 KB, DMA'd into a 4 KB buffer.
+    // SAFETY: `identify_buf` is the 4 KB identify page the controller just
+    // filled; both reads lie inside it.
+    let (flbas, lbaf) = unsafe {
+        let b = identify_buf as *const u8;
+        let flbas = core::ptr::read_volatile(b.add(26));
+        let idx = ((flbas & 0x0F) | ((flbas >> 1) & 0x30)) as usize;
+        (flbas, core::ptr::read_unaligned(b.add(128 + idx * 4) as *const u32))
+    };
+    let lbads = (lbaf >> 16) & 0xFF;
+    let metadata = lbaf & 0xFFFF;
+    if lbads != 9 || metadata != 0 {
+        kprintln!("[npk] nvme: namespace format {} has {}-byte LBAs with {} bytes of metadata; only 512 without metadata is supported",
+            flbas & 0x0F, 1u64 << lbads.min(63), metadata);
+        return false;
+    }
 
     let size_mb = (nsze * 512) / (1024 * 1024);
     let size_gb = size_mb / 1024;
@@ -693,8 +779,8 @@ pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlkError
 pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
     let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-    if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
 
     let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
 
@@ -745,66 +831,35 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.io_ready()?;
+
+    // Every range first: nothing may be queued if any of them is bad.
+    for &(block, _) in items {
+        if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
+    }
 
     // Stage every payload into its own DMA pool slot + push every SQ
     // entry, then ring the doorbell exactly once. `items.len() <= MAX_BATCH`,
     // so the tail cannot wrap onto our own un-acked head.
     for (i, &(block, buf)) in items.iter().enumerate() {
         let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
-
         let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
+        // SAFETY: slot `i` of the identity-mapped DMA pool (i < MAX_BATCH
+        // <= DMA_POOL_SLOTS); the controller does not own it until the
+        // doorbell below.
         unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dma as *mut u8, BLOCK_SIZE); }
 
         let mut cmd = SqEntry::zeroed();
         cmd.opcode = NVM_WRITE;
-        cmd.command_id = state.command_id;
         cmd.nsid = 1;
         cmd.prp1 = dma;
         cmd.cdw10 = sector as u32;
         cmd.cdw11 = (sector >> 32) as u32;
         cmd.cdw12 = 7;
-        state.command_id = state.command_id.wrapping_add(1);
-
-        let sq_ptr = state.io_sq as *mut SqEntry;
-        unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
-        state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
+        state.io_push(cmd);
     }
-
-    // Memory fence between SQ entry stores and the doorbell write. x86
-    // stores are normally ordered, but an explicit SeqCst fence pins the
-    // ordering deterministically, as real NVMe drivers do.
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    ring_sq_doorbell(state, 1, state.io_sq_tail);
-
-    let mut completed = 0usize;
-    let mut overall_err: Option<BlkError> = None;
-    let mut spin_budget = 5_000_000u32 * items.len() as u32;
-    while completed < items.len() {
-        if spin_budget == 0 {
-            return Err(BlkError::Timeout);
-        }
-        spin_budget -= 1;
-
-        let cq_ptr = state.io_cq as *const CqEntry;
-        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
-        let phase = (entry.status & 1) != 0;
-        if phase != state.io_phase {
-            core::hint::spin_loop();
-            continue;
-        }
-
-        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
-        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
-
-        let status_code = (entry.status >> 1) & 0x7FF;
-        if status_code != 0 && overall_err.is_none() {
-            overall_err = Some(BlkError::IoError);
-        }
-        completed += 1;
-    }
-    ring_cq_doorbell(state, 1, state.io_cq_head);
-    overall_err.map_or(Ok(()), Err)
+    state.io_ring();
+    state.io_wait_all()
 }
 
 /// Submit up to `MAX_BATCH` read-block commands in parallel and
@@ -856,70 +911,48 @@ fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool_base: u64) ->
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.io_ready()?;
 
+    for &block in blocks {
+        if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
+    }
     for (i, &block) in blocks.iter().enumerate() {
         let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
-
         let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
 
         let mut cmd = SqEntry::zeroed();
         cmd.opcode = NVM_READ;
-        cmd.command_id = state.command_id;
         cmd.nsid = 1;
         cmd.prp1 = dma;
         cmd.cdw10 = sector as u32;
         cmd.cdw11 = (sector >> 32) as u32;
         cmd.cdw12 = 7;
-        state.command_id = state.command_id.wrapping_add(1);
-
-        let sq_ptr = state.io_sq as *mut SqEntry;
-        unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
-        state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
+        state.io_push(cmd);
     }
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    ring_sq_doorbell(state, 1, state.io_sq_tail);
-
-    let mut completed = 0usize;
-    let mut overall_err: Option<BlkError> = None;
-    let mut spin_budget = 5_000_000u32 * blocks.len() as u32;
-    while completed < blocks.len() {
-        if spin_budget == 0 { return Err(BlkError::Timeout); }
-        spin_budget -= 1;
-
-        let cq_ptr = state.io_cq as *const CqEntry;
-        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
-        let phase = (entry.status & 1) != 0;
-        if phase != state.io_phase {
-            core::hint::spin_loop();
-            continue;
-        }
-
-        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
-        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
-
-        let status_code = (entry.status >> 1) & 0x7FF;
-        if status_code != 0 && overall_err.is_none() {
-            overall_err = Some(BlkError::IoError);
-        }
-        completed += 1;
-    }
-    ring_cq_doorbell(state, 1, state.io_cq_head);
+    state.io_ring();
+    state.io_wait_all()?;
 
     // Ensure DMA writes are visible before we read from the pool.
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-    if overall_err.is_none() {
-        for i in 0..blocks.len() {
-            let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
-            let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
-            unsafe {
-                core::ptr::copy_nonoverlapping(dma as *const u8, dst.as_mut_ptr(), BLOCK_SIZE);
-            }
+    for i in 0..blocks.len() {
+        let dma = pool_base + (i as u64) * BLOCK_SIZE as u64;
+        let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+        // SAFETY: slot `i` of the identity-mapped DMA pool, completed above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(dma as *const u8, dst.as_mut_ptr(), BLOCK_SIZE);
         }
     }
+    Ok(())
+}
 
-    overall_err.map_or(Ok(()), Err)
+/// Whether `count` 4 KB blocks from `block` lie inside the namespace.
+fn block_in_range(state: &NvmeState, block: u64, count: u64) -> bool {
+    let per = (BLOCK_SIZE / SECTOR_SIZE) as u64;
+    match block.checked_mul(per).zip(count.checked_mul(per)) {
+        Some((start, n)) => start.checked_add(n).is_some_and(|end| end <= state.total_lbas),
+        None => false,
+    }
 }
 
 // ── Single-command extent transfers (PRP list path) ───────────────────
@@ -946,36 +979,6 @@ fn build_prp_list(list_addr: u64, dma_base: u64, count: u64) {
             let page_addr = dma_base + (j + 1) * BLOCK_SIZE as u64;
             core::ptr::write_volatile(entries.add(j as usize), page_addr);
         }
-    }
-}
-
-/// Drain one I/O completion from the IO queue. Caller must have
-/// submitted a single cmd and rung the doorbell.
-fn drain_one_completion(state: &mut NvmeState) -> Result<(), BlkError> {
-    let t0 = crate::interrupts::rdtsc();
-    let mut budget = 50_000_000u32;
-    loop {
-        if budget == 0 { return Err(BlkError::Timeout); }
-        budget -= 1;
-
-        let cq_ptr = state.io_cq as *const CqEntry;
-        let entry = unsafe { core::ptr::read_volatile(cq_ptr.add(state.io_cq_head as usize)) };
-        let phase = (entry.status & 1) != 0;
-        if phase != state.io_phase {
-            core::hint::spin_loop();
-            continue;
-        }
-        state.io_cq_head = (state.io_cq_head + 1) % IO_QUEUE_SIZE;
-        if state.io_cq_head == 0 { state.io_phase = !state.io_phase; }
-        ring_cq_doorbell(state, 1, state.io_cq_head);
-
-        // [nvme-spin] Record how long this completion busy-spun, to tell
-        // whether the poll wastes real CPU. Measurement only.
-        record_drain(t0, state.msix_vector);
-
-        let status_code = (entry.status >> 1) & 0x7FF;
-        if status_code != 0 { return Err(BlkError::IoError); }
-        return Ok(());
     }
 }
 
@@ -1034,21 +1037,14 @@ fn submit_extent_cmd(
 
     let mut cmd = SqEntry::zeroed();
     cmd.opcode = opcode;
-    cmd.command_id = state.command_id;
     cmd.nsid = 1;
     cmd.prp1 = prp1;
     cmd.prp2 = prp2;
     cmd.cdw10 = start_sector as u32;
     cmd.cdw11 = (start_sector >> 32) as u32;
     cmd.cdw12 = (chunk_blocks as u32 * 8 - 1) & 0xFFFF;
-    state.command_id = state.command_id.wrapping_add(1);
-
-    let sq_ptr = state.io_sq as *mut SqEntry;
-    unsafe { core::ptr::write_volatile(sq_ptr.add(state.io_sq_tail as usize), cmd); }
-    state.io_sq_tail = (state.io_sq_tail + 1) % IO_QUEUE_SIZE;
-
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    ring_sq_doorbell(state, 1, state.io_sq_tail);
+    state.io_push(cmd);
+    state.io_ring();
 }
 
 /// Read `count` 4 KB blocks starting at `start_block` into `output`.
@@ -1079,6 +1075,8 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.io_ready()?;
+    if !block_in_range(state, start_block, count) { return Err(BlkError::OutOfRange); }
 
     // Submit + drain in batches of MAX_INFLIGHT. Each in-flight cmd
     // owns its own slice of the DMA pool + its own PRP-list slot, so
@@ -1094,9 +1092,6 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
             if offset >= count { break; }
             let chunk = (count - offset).min(max_per_cmd);
             let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-            if start_sector + chunk * 8 > state.total_lbas {
-                return Err(BlkError::OutOfRange);
-            }
 
             let dma_base = pool_base + (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
             let prp_list_addr = prp_pool_base + (slot as u64) * BLOCK_SIZE as u64;
@@ -1107,9 +1102,7 @@ pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<()
         }
 
         // Drain phase: wait for every cmd in this batch to finish.
-        for _ in 0..batch_len {
-            drain_one_completion(state)?;
-        }
+        state.io_wait_all()?;
         // Make all DMA writes visible before we copy out.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -1158,19 +1151,17 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.io_ready()?;
+    if !block_in_range(state, start_block, count) { return Err(BlkError::OutOfRange); }
 
     let mut offset = 0u64;
     while offset < count {
-        let mut batch_len = 0usize;
 
         // Stage + submit phase.
         for slot in 0..MAX_INFLIGHT {
             if offset >= count { break; }
             let chunk = (count - offset).min(max_per_cmd);
             let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-            if start_sector + chunk * 8 > state.total_lbas {
-                return Err(BlkError::OutOfRange);
-            }
 
             let dma_base = pool_base + (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
             unsafe {
@@ -1187,14 +1178,11 @@ pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), Bl
 
             let prp_list_addr = prp_pool_base + (slot as u64) * BLOCK_SIZE as u64;
             submit_extent_cmd(state, NVM_WRITE, start_sector, chunk, dma_base, prp_list_addr);
-            batch_len += 1;
             offset += chunk;
         }
 
         // Drain phase.
-        for _ in 0..batch_len {
-            drain_one_completion(state)?;
-        }
+        state.io_wait_all()?;
     }
 
     Ok(())
@@ -1254,6 +1242,10 @@ pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<()
 
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.io_ready()?;
+    if !extents.iter().all(|&(start, count)| block_in_range(state, start, count)) {
+        return Err(BlkError::OutOfRange);
+    }
 
     // Phase 2 — process work in batches of `MAX_INFLIGHT_MULTI` cmds.
     // Each batch: greedy-fill until we hit the inflight cap or pool
@@ -1275,9 +1267,6 @@ pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<()
             if pool_used + count > DMA_POOL_SLOTS as u64 { break; }
 
             let start_sector = start * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-            if start_sector + count * 8 > state.total_lbas {
-                return Err(BlkError::OutOfRange);
-            }
 
             let dma_base = pool_base + pool_used * BLOCK_SIZE as u64;
             let prp_list_addr = prp_pool_base + (batch_len as u64) * BLOCK_SIZE as u64;
@@ -1289,10 +1278,8 @@ pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<()
             wi += 1;
         }
 
-        // Drain all in submission order.
-        for _ in 0..batch_len {
-            drain_one_completion(state)?;
-        }
+        // Drain all of them, errors included, before anything returns.
+        state.io_wait_all()?;
         // Make all DMA writes visible before the memcpy-out.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
@@ -1329,8 +1316,8 @@ pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkErro
 fn write_block_inner(block: u64, buf: &[u8; BLOCK_SIZE], fua: bool) -> Result<(), BlkError> {
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
     let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-    if sector + 7 >= state.total_lbas { return Err(BlkError::OutOfRange); }
 
     let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
     unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), dma as *mut u8, BLOCK_SIZE); }

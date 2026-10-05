@@ -728,6 +728,18 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
 
 /// Fetch the payload for `hash`. Returns Ok(None) if not present.
 /// Verifies BLAKE3(plaintext) == hash before returning; mismatch = Corrupt.
+/// Sum of extent lengths, or `None` if any extent is empty, starts below the
+/// data area, ends past the disk, or the sum overflows or exceeds the disk.
+fn checked_extent_blocks(extents: &[(u64, u64)], data_start: u64, disk_blocks: u64) -> Option<u64> {
+    let mut sum: u64 = 0;
+    for &(start, count) in extents {
+        let end = start.checked_add(count)?;
+        if count == 0 || start < data_start || end > disk_blocks { return None; }
+        sum = sum.checked_add(count)?;
+    }
+    (sum <= disk_blocks).then_some(sum)
+}
+
 pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
@@ -762,17 +774,30 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     let extent_list: Vec<(u64, u64)> = all_extents.iter()
         .map(|e| (e.start_block, e.block_count))
         .collect();
+    // The entry comes from disk and its node checksum is not keyed: every
+    // extent must lie in the data area, the sum must fit the disk, and the
+    // stored size must fit the blocks, before anything is sized from them.
+    let total_blocks = checked_extent_blocks(&extent_list, fs.sb.data_start, fs.sb.total_blocks)
+        .ok_or(FsError::Corrupt)?;
     drop(lock);
 
-    let total_blocks: u64 = all_extents.iter().map(|e| e.block_count).sum();
-    let total_bytes = (total_blocks as usize) * BLOCK_SIZE;
+    let total_bytes = usize::try_from(total_blocks).ok()
+        .and_then(|b| b.checked_mul(BLOCK_SIZE))
+        .ok_or(FsError::Corrupt)?;
+    if disk_size as u64 > total_bytes as u64 || plaintext_size > disk_size {
+        return Err(FsError::Corrupt);
+    }
 
     // Avoid the zero-init that `vec![0u8; N]` does — the DMA path is
     // about to overwrite every byte. `Vec::with_capacity + set_len` is
     // safe because the immediately-following `read_extent` writes into
     // [0..total_bytes]; if it errors we never expose the uninit Vec to
-    // the caller.
-    let mut staging: Vec<u8> = Vec::with_capacity(total_bytes);
+    // the caller. Reserved fallibly: the size is the disk's word.
+    let mut staging: Vec<u8> = Vec::new();
+    staging.try_reserve_exact(total_bytes).map_err(|_| FsError::Corrupt)?;
+    // SAFETY: capacity is `total_bytes` (reserved above); every byte is
+    // written by `read_multi_extent` before any is read, and on its error
+    // the Vec is dropped unread.
     unsafe { staging.set_len(total_bytes); }
     let t_alloc = rdtsc();
 
@@ -801,6 +826,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
                 hash[0], hash[1]);
             return Err(FsError::Corrupt);
         }
+    }
+    // Content addressing promises the bytes are the hash's. AES-GCM's tag
+    // already proves that for encrypted objects; plaintext ones (Trees, and
+    // everything written before a master key exists) are checked here, or a
+    // changed or corrupted block would be returned as the object.
+    if !was_encrypted && *blake3::hash(&staging).as_bytes() != *hash {
+        kprintln!("[npk] npkfs: content of {:02x}{:02x}… does not match its hash",
+            hash[0], hash[1]);
+        return Err(FsError::Corrupt);
     }
     let t_dec = rdtsc();
     let plaintext = staging;
@@ -1024,6 +1058,8 @@ fn read_indirect_chain(
     let mut block = first_block;
 
     while block != 0 {
+        // `next` comes from disk: a block seen twice is a cycle.
+        if chain_blocks.contains(&block) { return Err(FsError::Corrupt); }
         chain_blocks.push(block);
         let mut buf = [0u8; BLOCK_SIZE];
         cache.read(block, &mut buf)?;
@@ -1045,7 +1081,10 @@ fn free_indirect_chain(
     cache: &mut BlockCache, bitmap: &mut Bitmap, first_block: u64,
 ) {
     let mut block = first_block;
+    let mut seen: Vec<u64> = Vec::new();
     while block != 0 {
+        if seen.contains(&block) { break; } // a cycle on disk
+        seen.push(block);
         let mut buf = [0u8; BLOCK_SIZE];
         if cache.read(block, &mut buf).is_err() { break; }
         let next = u64::from_le_bytes(buf[4..12].try_into().unwrap());

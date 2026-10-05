@@ -237,11 +237,12 @@ pub fn write_gpt() -> Result<u64, &'static str> {
     }
 
     // === Write backup GPT ===
-    // Backup entries at last_sector - 33 .. last_sector - 2
+    // Backup entries at last_sector - 32 .. last_sector - 1, right below the
+    // backup header, where the header's entries LBA says they are.
     for i in 0..32u64 {
         let start = (i as usize) * 512;
         sec.copy_from_slice(&entries[start..start + 512]);
-        nvme::write_sector(last_sector - 33 + i, &sec).map_err(|_| "write backup entries")?;
+        nvme::write_sector(last_sector - 32 + i, &sec).map_err(|_| "write backup entries")?;
     }
 
     // Backup header at last_sector (swap my/alternate LBA)
