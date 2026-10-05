@@ -211,6 +211,14 @@ fn read_apic_id(apic_base: u64) -> u32 {
     raw >> 24
 }
 
+/// The GDT an AP starts long mode with: null, code (0x08), data (0x10),
+/// byte for byte as `boot.s`. In the image, so below 4 GiB.
+static AP_BOOT_GDT: [u64; 3] = [
+    0,
+    0x00AF_9B00_0000_FFFF, // accessed bit preset: the CPU never writes here
+    0x00CF_9300_0000_FFFF,
+];
+
 /// Copy trampoline to 0x8000 and fill in shared data (CR3, GDT, IDT, entry)
 fn setup_trampoline(_apic_base: u64) {
     unsafe {
@@ -230,15 +238,12 @@ fn setup_trampoline(_apic_base: u64) {
         assert!(cr3 < 0x1_0000_0000, "PML4 above 4GB — AP trampoline cannot load it");
         *((TRAMPOLINE_BASE + OFF_CR3) as *mut u32) = cr3 as u32;
 
-        // GDT64 pointer — copy BSP's GDTR (SGDT stores 10 bytes in 64-bit mode)
-        // Trampoline uses lgdt in 32-bit mode (reads 2+4 bytes). GDT base is in kernel
-        // .rodata (~1MB), fits in 32 bits. Same assert for safety.
-        let mut gdtr = [0u8; 10];
-        core::arch::asm!("sgdt [{}]", in(reg) gdtr.as_mut_ptr());
-        let gdt_limit = u16::from_le_bytes([gdtr[0], gdtr[1]]);
-        let gdt_base = u64::from_le_bytes([
-            gdtr[2], gdtr[3], gdtr[4], gdtr[5], gdtr[6], gdtr[7], gdtr[8], gdtr[9],
-        ]);
+        // GDT64 pointer. The trampoline loads it with a 32-bit lgdt, so it
+        // must lie below 4 GiB: the image does, the heap (where each core's
+        // own GDT + TSS live) need not. It only has to carry the code and
+        // data segments until `smp_ap_entry` installs the core's own.
+        let gdt_base = core::ptr::addr_of!(AP_BOOT_GDT) as u64;
+        let gdt_limit = (core::mem::size_of::<[u64; 3]>() - 1) as u16;
         assert!(gdt_base < 0x1_0000_0000, "GDT above 4GB — AP trampoline cannot load it");
         *((TRAMPOLINE_BASE + OFF_GDT64) as *mut u16) = gdt_limit;
         *((TRAMPOLINE_BASE + OFF_GDT64 + 2) as *mut u32) = gdt_base as u32;
