@@ -141,7 +141,8 @@ fn four_way_roundtrip() -> bool {
         }
         _ => ok = false,
     }
-    ok &= sup.ptk().map(|p| p.tk == ptk[32..48]).unwrap_or(false);
+    // The derived key is not in use until msg3 verifies under it.
+    ok &= sup.ptk().is_none();
 
     // AP msg3: Pairwise|Ack|MIC|Install|Secure|Encrypted, ANonce, enc{GTK KDE}.
     let mut kde = vec![0xdd, (6 + gtk.len()) as u8, 0x00, 0x0f, 0xac, 0x01, 0x01, 0x00];
@@ -164,6 +165,7 @@ fn four_way_roundtrip() -> bool {
     match sup.on_eapol(&msg3, &mut out) {
         Step::Done(_) => {
             ok &= sup.gtk().map(|(g, _)| g == &gtk[..]).unwrap_or(false);
+            ok &= sup.ptk().map(|p| p.tk == ptk[32..48]).unwrap_or(false);
         }
         _ => ok = false,
     }
@@ -213,7 +215,51 @@ fn four_way_roundtrip() -> bool {
     }
     println!("[{}] group_rekey (new GTK installed + acknowledged)", if gok { "PASS" } else { "FAIL" });
 
-    ok && gok
+    // A group message under the live keys, with its own GTK, counter and RSC.
+    let group_msg = |gtk: &[u8], replay: u8, rsc: u8| -> Vec<u8> {
+        let mut kde = vec![0xdd, (6 + gtk.len()) as u8, 0x00, 0x0f, 0xac, 0x01, 0x01, 0x00];
+        kde.extend_from_slice(gtk);
+        while kde.len() % 8 != 0 { kde.push(0xdd); }
+        let mut wrapped = vec![0u8; kde.len() + 8];
+        aes_wrap(&kek, &kde, &mut wrapped);
+        let mut g = vec![0u8; 99 + wrapped.len()];
+        g[1] = 0x03;
+        put_be16(&mut g, 2, (95 + wrapped.len()) as u16);
+        g[4] = 0x02;
+        put_be16(&mut g, 5, 0x0002 | (1 << 7) | (1 << 8) | (1 << 9) | (1 << 12));
+        g[8] = 16;
+        g[9 + 7] = replay;
+        g[65] = rsc; // Key RSC, first byte
+        put_be16(&mut g, 97, wrapped.len() as u16);
+        g[99..].copy_from_slice(&wrapped);
+        let mic = hmac_sha1(&kck, &g)[..16].to_vec();
+        g[81..97].copy_from_slice(&mic);
+        g
+    };
+
+    // The same group message again: answered, the GTK is not reinstalled.
+    let rep = group_msg(&gtk2, 4, 0);
+    let rok = matches!(sup.on_eapol(&rep, &mut out), Step::ReplyOnly(_));
+    println!("[{}] group repeat (same GTK): answered, not reinstalled", if rok { "PASS" } else { "FAIL" });
+
+    // A forged msg1 (fresh ANonce, no MIC) must not replace the key in use:
+    // the AP's next rekey, under the real keys, still verifies.
+    let mut forged = vec![0u8; 99];
+    forged[1] = 0x03;
+    put_be16(&mut forged, 2, 95);
+    forged[4] = 0x02;
+    put_be16(&mut forged, 5, 0x0002 | (1 << 3) | (1 << 7));
+    forged[8] = 16;
+    forged[9 + 7] = 5;
+    forged[17..49].copy_from_slice(&[0xeeu8; 32]);
+    let _ = sup.on_eapol(&forged, &mut out);
+    let gtk3 = hexn("202122232425262728292a2b2c2d2e2f");
+    let next = group_msg(&gtk3, 6, 0x42);
+    let fok = matches!(sup.on_eapol(&next, &mut out), Step::Rekey(_))
+        && sup.gtk_rsc()[0] == 0x42;
+    println!("[{}] forged msg1 keeps the live PTK; next rekey verifies, RSC taken", if fok { "PASS" } else { "FAIL" });
+
+    ok && gok && rok && fok
 }
 
 /// The hardening rules, each against its own frame.
@@ -284,13 +330,14 @@ fn hardening() -> bool {
     println!("[{}] hardening: msg3 (Zaehler 2) wird angenommen",
              if ok { "PASS" } else { "FAIL" });
 
-    // (2) The same msg3 again — a retransmission, and it must pass,
-    //     otherwise the handshake cannot be retried.
+    // (2) The same msg3 again — a retransmission. It is answered (msg4 goes
+    //     out again, so the handshake can be retried) but the key in use is
+    //     not installed a second time (CVE-2017-13077).
     let rep_before = sup.replays_repeated;
-    let a = matches!(sup.on_eapol(&m3, &mut out), Step::Done(_));
+    let a = matches!(sup.on_eapol(&m3, &mut out), Step::ReplyOnly(_));
     let b = sup.replays_repeated == rep_before + 1;
     ok &= a && b;
-    println!("[{}] hardening: Wiederholung mit GLEICHEM Zaehler geht durch (und wird gezaehlt)",
+    println!("[{}] hardening: repeat with the SAME counter is answered, keys not reinstalled",
              if a && b { "PASS" } else { "FAIL" });
 
     // (3) An old msg3 (counter 1) is dropped.

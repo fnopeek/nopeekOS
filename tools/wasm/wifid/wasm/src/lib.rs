@@ -73,7 +73,7 @@ fn log_num(mut v: u32) {
 // Log to the terminal and buffer for npkFS `sys/log/wifid` — wifid runs in an
 // invisible autostart window, so its log is read back with `fetch /sys/log/wifid`.
 // Persisting happens in `log_flush`, once per poll round: one store per line
-// (and `log_hex` logs per byte pair) would be one full npkFS commit each,
+// would be one full npkFS commit each,
 // breaking npkFS's "N puts then one commit_root" assumption mid-download.
 fn log(s: &str) {
     unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
@@ -105,19 +105,6 @@ fn log_flush() {
         let name = b"sys/log/wifid";
         npk_store(name.as_ptr() as i32, name.len() as i32, buf as i32, l as i32);
     }
-}
-
-fn log_hex(prefix: &str, bytes: &[u8]) {
-    log(prefix);
-    let mut buf = [0u8; 2];
-    for &b in bytes {
-        let hi = b >> 4;
-        let lo = b & 0xf;
-        buf[0] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
-        buf[1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
-        log(unsafe { core::str::from_utf8_unchecked(&buf) });
-    }
-    log("\n");
 }
 
 // ── control-channel wire format (docs/spec/WIFI_CLASS_ABI.md) ──────────────────────
@@ -175,13 +162,12 @@ pub extern "C" fn _start() {
         }
         unsafe { npk_sleep(2000) };
     };
-    log("[wifid] credential loaded for SSID '");
-    log(unsafe { core::str::from_utf8_unchecked(ssid) });
-    log("'\n");
+    // Neither the network name nor anything derived from the passphrase is
+    // logged: the log is a file any module with READ can fetch.
+    log("[wifid] credential loaded\n");
 
     // ── Derive the PMK (PBKDF2-HMAC-SHA1, 4096 iters) — the std-tested core.
     let pmk = wpa2_pmk(pass, ssid);
-    log_hex("[wifid] PMK = ", &pmk);
     log("[wifid] supplicant resident — waiting for the driver to associate\n");
 
     // ── Resident supplicant loop. Runs on a worker core via autostart; drains
@@ -262,7 +248,7 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
                         send_set_key(false, 0, &ptk.tk, &[0u8; 6]);
                     }
                     if let Some((gtk, id)) = s.gtk() {
-                        send_set_key(true, id, gtk, &[0u8; 6]);
+                        send_set_key(true, id, gtk, &s.gtk_rsc());
                     }
                     send_cmd(&[CMD_AUTHORIZED]);
                     log("[wifid] *** 4-way complete — AUTHORIZED ***\n");
@@ -273,8 +259,14 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
                     log("[wifid] group rekey — new GTK, acknowledging\n");
                     send_tx_eapol(&out[..m]);
                     if let Some((gtk, id)) = s.gtk() {
-                        send_set_key(true, id, gtk, &[0u8; 6]);
+                        send_set_key(true, id, gtk, &s.gtk_rsc());
                     }
+                }
+                Step::ReplyOnly(m) => {
+                    // A repeat of a message whose key is installed: answer it,
+                    // reinstall nothing.
+                    log("[wifid] repeated handshake message — answered, keys kept\n");
+                    send_tx_eapol(&out[..m]);
                 }
                 Step::Fail => log("[wifid] 4-way FAILED (bad MIC / unwrap)\n"),
                 // `Ignore` is not always harmless: three hardening rules

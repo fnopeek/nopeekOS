@@ -3912,6 +3912,17 @@ struct LinkStats {
     /// `IEEE80211_NUM_TIDS + 1` as in `sta_info.h`: the TID field is four
     /// bits, so any value 0..15 can arrive.
     last_seq_ctrl: [u32; 17],
+    /// Last CCMP packet number accepted per TID (16 = non-QoS), for the
+    /// pairwise key [0] and the group key [1]: `key->u.ccmp.rx_pn` in
+    /// mac80211, checked in `ieee80211_crypto_ccmp_decrypt`. The hardware
+    /// decrypts but does not check for replays.
+    rx_pn: [[u64; 17]; 2],
+    /// Protected frames the hardware did not decrypt or whose ICV failed.
+    rx_undecrypted: u32,
+    /// Unprotected data frames dropped once the link is keyed.
+    rx_plain_dropped: u32,
+    /// Frames whose packet number was not above the last one (replays).
+    rx_pn_replay: u32,
     /// Dropped 802.11 retransmissions (`dot11FrameDuplicateCount`).
     dup_rx: u32,
     /// Frames with the retry bit set (802.11 §9.2.4.1.8).
@@ -4087,7 +4098,7 @@ impl Default for LinkStats {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
-            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], dup_rx: 0,
+            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], rx_pn: [[0; 17]; 2], rx_undecrypted: 0, rx_plain_dropped: 0, rx_pn_replay: 0, dup_rx: 0,
             retry_rx: 0,
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
@@ -5300,13 +5311,55 @@ fn ro_due_ms(ls: &LinkStats) -> Option<u64> {
 fn deliver_mpdu(ls: &mut LinkStats, f: &[u8]) {
     let mut out = [0u8; 2048];
     let qos = f.len() >= 26 && f[0] & (DOT11_STYPE_QOS << 4) != 0;
+    let protected = f.len() >= 2 && f[1] & DOT11_FC_PROTECTED != 0;
+    // After reordering, as in mac80211, so packet numbers arrive in order.
+    if protected && !ccmp_pn_ok(ls, f) {
+        ls.rx_pn_replay += 1;
+        return;
+    }
     if qos && f[24] & 0x80 != 0 {
+        // `ieee80211_drop_unencrypted`: once keyed, data must be protected.
+        if !protected && ls.authorized {
+            ls.rx_plain_dropped += 1;
+            return;
+        }
         amsdu_to_8023s(ls, f, &mut out);
         return;
     }
     if let Some((n, is_eapol)) = rx_to_8023(f, &mut out, &mut ls.llc_miss) {
+        // The one unprotected frame a keyed link takes is EAPOL: the AP
+        // may send a rekey before the station has the new key in use
+        // (rx.c `ieee80211_802_1x_port_control`).
+        if !protected && ls.authorized && !is_eapol {
+            ls.rx_plain_dropped += 1;
+            return;
+        }
         deliver(ls, &out[..n], is_eapol);
     }
+}
+
+/// The CCMP packet number check of `ieee80211_crypto_ccmp_decrypt`
+/// (wpa.c): the 48-bit PN from the CCMP header must be above the last one
+/// accepted for this key and TID. A frame repeated by a third party
+/// decrypts fine and is caught only here. Updates the counter on success.
+fn ccmp_pn_ok(ls: &mut LinkStats, f: &[u8]) -> bool {
+    let h = data_hdrlen(f);
+    if f.len() < h + 8 || f.len() < 24 {
+        return false;
+    }
+    // PN0 PN1 rsvd keyid PN2 PN3 PN4 PN5 (802.11-2020 §12.5.3.2).
+    let c = &f[h..h + 8];
+    let pn = c[0] as u64 | (c[1] as u64) << 8 | (c[4] as u64) << 16
+        | (c[5] as u64) << 24 | (c[6] as u64) << 32 | (c[7] as u64) << 40;
+    let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
+    let tid = if qos && f.len() >= 26 { (f[24] & 0x0f) as usize } else { 16 };
+    let group = f[4] & 0x01 != 0; // addr1 is a group address
+    let last = &mut ls.rx_pn[group as usize][tid];
+    if pn <= *last {
+        return false;
+    }
+    *last = pn;
+    true
 }
 
 /// cfg80211 `ieee80211_amsdu_to_8023s` (util.c:842-937) for a station in a
@@ -5594,6 +5647,15 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 return;
             }
             let f = &pkt[off..];
+            // rx.c `ieee80211_rx_h_decrypt`: a protected data frame the
+            // hardware did not decrypt, or decrypted with a bad ICV, is not
+            // the AP's. rtw88 reports both in the RX descriptor.
+            if f.len() >= 2 && f[0] & 0x0c == DOT11_FC_TYPE_DATA
+                && f[1] & DOT11_FC_PROTECTED != 0 && (!st.decrypted || st.icv_err)
+            {
+                ls.rx_undecrypted += 1;
+                return;
+            }
             // mlme.c:131-145: every frame from the AP resets the watchdog,
             // not only a beacon. `addr2` is the sender, the BSSID for
             // anything from it.
@@ -6244,6 +6306,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                        RTW_CAM_AES as u8, key_idx, group,
                                        &addr, key);
                         ls.keys_set += 1;
+                        // A new key starts its own packet numbers: the
+                        // pairwise key from zero, the group key from the
+                        // RSC the AP gave with it (`ieee80211_key_alloc`).
+                        let rsc = &cmd[5 + key_len..5 + key_len + 6];
+                        let start = rsc.iter().rev().fold(0u64, |a, &b| a << 8 | b as u64);
+                        ls.rx_pn[group as usize] = [if group { start } else { 0 }; 17];
                         if group {
                             ls.gtk_set += 1;
                         } else {

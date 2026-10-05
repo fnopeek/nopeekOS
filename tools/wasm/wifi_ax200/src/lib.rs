@@ -4761,7 +4761,7 @@ impl Ax200 {
 
     /// `ampdu_tog` carries the aggregate we are inside of across calls:
     /// `0xFF` = not in one, otherwise the firmware's TOGGLE bit as 0 or 1.
-    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], out: &mut [u8], miss_log: &mut u32,
+    fn rx_classify(rb: &Dma, our_mac: &[u8; 6], keyed: bool, out: &mut [u8], miss_log: &mut u32,
                    to_us: &mut u32, crypt: &mut [u32; 4], air_us: &mut u64,
                    ampdu_tog: &mut u8, sig: &mut SignalAvg) -> RxKind {
         let mut buf = [0u8; 1600];
@@ -4854,10 +4854,11 @@ impl Ax200 {
         }
 
         let status = le32(&buf, d + MPDU_OFF_STATUS);
-        // Did the firmware actually decrypt this? We do not drop on the answer —
-        // the point is to learn whether a link that looks alive is receiving
-        // frames it cannot read. See iwl_mvm_rx_crypto (rxmq.c:414).
-        if buf[f + 1] & DOT11_FC_PROTECTED != 0 {
+        // Did the firmware actually decrypt this? Counted, and a protected
+        // frame it did not decrypt as CCMP with a good MIC is dropped, as
+        // `iwl_mvm_rx_crypto` (rxmq.c:414) leaves it to mac80211 to do.
+        let protected = buf[f + 1] & DOT11_FC_PROTECTED != 0;
+        if protected {
             crypt[0] += 1;
             match status & RX_STATUS_SEC_MASK {
                 RX_STATUS_SEC_CCM => {
@@ -4870,6 +4871,12 @@ impl Ax200 {
             }
             if status & RX_STATUS_DECRYPTED == 0 {
                 crypt[3] += 1;
+            }
+            let good = status & RX_STATUS_SEC_MASK == RX_STATUS_SEC_CCM
+                && status & RX_STATUS_MIC_OK != 0
+                && status & RX_STATUS_DECRYPTED != 0;
+            if !good {
+                return RxKind::None;
             }
         }
         let crypt_len = if status & RX_STATUS_SEC_MASK == RX_STATUS_SEC_CCM {
@@ -4902,6 +4909,11 @@ impl Ax200 {
             return RxKind::None;
         }
         let ethertype = ((buf[llc + 6] as u16) << 8) | buf[llc + 7] as u16;
+        // `ieee80211_drop_unencrypted`: once keyed, the only unprotected data
+        // frame taken is EAPOL (`ieee80211_802_1x_port_control`).
+        if keyed && !protected && ethertype != ETHERTYPE_EAPOL {
+            return RxKind::None;
+        }
         let pl = llc + 8; // payload after LLC/SNAP
         if ethertype == ETHERTYPE_EAPOL {
             if pl + 4 > buf.len() {
@@ -5310,6 +5322,7 @@ impl Ax200 {
             let mut mb: Option<(u32, u32, u32, u32)> = None;
             // The data queue id, captured before the closure borrows self.
             let a_dataq = self.data_queue_id as u32;
+            let a_keyed = self.authorized;
             let mut a_read_ptr: Option<u32> = None;
             let t_rx0 = host::now_us();
             let rx_frames = self.service_rx(|c, g, rb| {
@@ -5490,7 +5503,7 @@ impl Ax200 {
                         return true; // mgmt frame — not for the IP path
                     }
                     let uni_before = a_to_us;
-                    match Self::rx_classify(rb, &our_mac, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air, &mut ampdu_tog, &mut a_sig) {
+                    match Self::rx_classify(rb, &our_mac, a_keyed, &mut rxbuf, &mut llc_miss, &mut a_to_us, &mut a_crypt, &mut a_air, &mut ampdu_tog, &mut a_sig) {
                         RxKind::Eapol(n) => {
                             a_eapol += 1;
                             a_rx_bytes += n as u64;

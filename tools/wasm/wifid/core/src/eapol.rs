@@ -22,6 +22,7 @@ const O_BODY_LEN: usize = 2; // __be16
 const O_KEY_INFO: usize = 5; // __be16
 const O_REPLAY: usize = 9; // 8 bytes
 const O_NONCE: usize = 17; // 32 bytes
+const O_KEY_RSC: usize = 65; // 8 bytes; the first 6 are the CCMP PN
 const O_MIC: usize = 81; // 16 bytes
 const O_KEY_DATA_LEN: usize = 97; // __be16
 const O_KEY_DATA: usize = 99;
@@ -79,6 +80,11 @@ pub enum Step {
     /// Group-key handshake done: the AP handed us a new GTK. Reply `out[..len]`
     /// and install the group key from `gtk()`; the pairwise key is untouched.
     Rekey(usize),
+    /// A verified repeat of a message whose key is already installed (a
+    /// retransmitted or replayed msg3 or group message). Reply `out[..len]`
+    /// and install nothing: reinstalling an in-use key resets its packet
+    /// numbers (CVE-2017-13077/13080, wpa_supplicant keeps `tk_set`).
+    ReplyOnly(usize),
 }
 
 pub struct Supplicant {
@@ -88,11 +94,21 @@ pub struct Supplicant {
     snonce: [u8; 32],
     rsn_ie: [u8; 64],
     rsn_len: usize,
+    /// The pairwise key in use: set when msg3 verifies.
     ptk: Ptk,
     have_ptk: bool,
+    /// The key msg1 derived, used only to answer it and to verify msg3. A
+    /// forged msg1 must not replace the key in use (wpa_supplicant's TPTK).
+    tptk: Ptk,
+    have_tptk: bool,
+    /// What was last handed out for installation, to refuse reinstalling it.
+    installed_tk: Option<[u8; 16]>,
+    installed_gtk: Option<([u8; 32], usize)>,
     gtk: [u8; 32],
     gtk_len: usize,
     gtk_id: u8,
+    /// Receive sequence counter for the GTK, from the message that carried it.
+    gtk_rsc: [u8; 6],
     /// 802.11-2020 §12.7.2: the Key Replay Counter of the last frame we
     /// accepted from the Authenticator.
     rx_replay: [u8; 8],
@@ -120,9 +136,14 @@ impl Supplicant {
             rsn_len: rsn_ie.len().min(64),
             ptk: Ptk::default(),
             have_ptk: false,
+            tptk: Ptk::default(),
+            have_tptk: false,
+            installed_tk: None,
+            installed_gtk: None,
             gtk: [0; 32],
             gtk_len: 0,
             gtk_id: 0,
+            gtk_rsc: [0; 6],
             rx_replay: [0; 8],
             rx_replay_set: false,
             replays_dropped: 0,
@@ -139,6 +160,26 @@ impl Supplicant {
     }
     pub fn gtk(&self) -> Option<(&[u8], u8)> {
         if self.gtk_len > 0 { Some((&self.gtk[..self.gtk_len], self.gtk_id)) } else { None }
+    }
+    /// The GTK's receive sequence counter (Key RSC of the frame that carried
+    /// it), to start the group replay window where the AP is.
+    pub fn gtk_rsc(&self) -> [u8; 6] {
+        self.gtk_rsc
+    }
+
+    fn take_gtk_rsc(&mut self, frame: &[u8]) {
+        self.gtk_rsc.copy_from_slice(&frame[O_KEY_RSC..O_KEY_RSC + 6]);
+    }
+
+    /// Whether the GTK just extracted is the one already installed.
+    fn gtk_is_installed(&self) -> bool {
+        self.installed_gtk.is_some_and(|(g, n)| n == self.gtk_len && g[..n] == self.gtk[..n])
+    }
+
+    fn mark_gtk_installed(&mut self) {
+        let mut g = [0u8; 32];
+        g[..self.gtk_len].copy_from_slice(&self.gtk[..self.gtk_len]);
+        self.installed_gtk = Some((g, self.gtk_len));
     }
 
     /// 802.11-2020 §12.7.2 — the Key Replay Counter.
@@ -221,7 +262,13 @@ impl Supplicant {
             if !self.extract_gtk(frame) {
                 return Step::Fail;
             }
-            return Step::Rekey(self.build_group_msg2(frame, out));
+            let len = self.build_group_msg2(frame, out);
+            if self.gtk_is_installed() {
+                return Step::ReplyOnly(len);
+            }
+            self.take_gtk_rsc(frame);
+            self.mark_gtk_installed();
+            return Step::Rekey(len);
         }
 
         if ki & KI_MIC == 0 {
@@ -229,28 +276,47 @@ impl Supplicant {
             let mut anonce = [0u8; 32];
             anonce.copy_from_slice(&frame[O_NONCE..O_NONCE + 32]);
             let ptk48 = wpa2_ptk(&self.pmk, &self.aa, &self.sa, &anonce, &self.snonce);
-            self.ptk.kck.copy_from_slice(&ptk48[0..16]);
-            self.ptk.kek.copy_from_slice(&ptk48[16..32]);
-            self.ptk.tk.copy_from_slice(&ptk48[32..48]);
-            self.have_ptk = true;
+            self.tptk.kck.copy_from_slice(&ptk48[0..16]);
+            self.tptk.kek.copy_from_slice(&ptk48[16..32]);
+            self.tptk.tk.copy_from_slice(&ptk48[32..48]);
+            self.have_tptk = true;
+            // msg2's MIC is under the new key; the key in use stays put.
+            core::mem::swap(&mut self.ptk, &mut self.tptk);
             let len = self.build_msg2(frame, out);
+            core::mem::swap(&mut self.ptk, &mut self.tptk);
             Step::Reply(len)
         } else {
             // ── msg3: MIC + Install + Encrypted → verify, unwrap GTK, send msg4. ──
-            if !self.have_ptk {
+            // Verified under the key msg1 derived; only then does it become
+            // the key in use.
+            if !self.have_tptk {
                 return Step::Fail;
             }
             if !self.key_version_ok(ki) || !self.replay_ok(frame) {
                 return Step::Ignore;
             }
+            core::mem::swap(&mut self.ptk, &mut self.tptk);
             if !self.verify_mic(frame) {
+                core::mem::swap(&mut self.ptk, &mut self.tptk);
                 return Step::Fail;
             }
+            self.have_ptk = true;
+            // The derived key is now the key in use; a retransmitted msg3
+            // verifies against it too.
+            self.tptk = self.ptk;
             self.remember_replay(frame);
             if ki & KI_ENCRYPTED != 0 && !self.extract_gtk(frame) {
                 return Step::Fail;
             }
             let len = self.build_msg4(frame, out);
+            if self.installed_tk == Some(self.ptk.tk) {
+                return Step::ReplyOnly(len);
+            }
+            self.installed_tk = Some(self.ptk.tk);
+            if self.gtk_len > 0 {
+                self.take_gtk_rsc(frame);
+                self.mark_gtk_installed();
+            }
             Step::Done(len)
         }
     }
