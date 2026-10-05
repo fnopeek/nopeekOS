@@ -84,7 +84,8 @@ fn give_slot(s: u64) {
 
 /// Code goes at the top of the region, far from any instance's memory.
 const CODE_BASE: u64 = REGION_BASE + 1024 * INSTANCE_STRIDE;
-static NEXT_CODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(CODE_BASE);
+#[unsafe(no_mangle)]
+static FORGE_NEXT_CODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(CODE_BASE);
 
 pub struct Memory {
     /// Slot in the region; returned when the instance goes away.
@@ -181,7 +182,7 @@ impl Code {
     pub fn map(bytes: &[u8]) -> Option<Code> {
         let len = bytes.len();
         let span = ((len as u64) + PAGE - 1) & !(PAGE - 1);
-        let base = NEXT_CODE.fetch_add(span.max(PAGE), core::sync::atomic::Ordering::Relaxed);
+        let base = FORGE_NEXT_CODE.fetch_add(span.max(PAGE), core::sync::atomic::Ordering::Relaxed);
 
         // Writable first, so it can be filled.
         let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
@@ -218,7 +219,7 @@ impl Code {
 }
 
 impl Drop for Code {
-    /// Frees the frames. The address range is not reused (`NEXT_CODE` only
+    /// Frees the frames. The address range is not reused (`FORGE_NEXT_CODE` only
     /// moves forward); address space is plentiful, frames are not.
     fn drop(&mut self) {
         unmap_range(self.base, self.span());
@@ -230,57 +231,30 @@ impl Drop for Code {
 // A page fault from a guard page and a divide fault are how two of the traps
 // arrive: they are the processor telling us what a check on every single
 // access would otherwise have had to look for. Catching them means pointing
-// the interrupted instruction pointer at the module's entry for that reason —
-// and because the entry names the reason itself, no general register has to be
-// touched. That is the whole reason the entries exist per reason.
+// the interrupted instruction pointer at a routine that records the reason
+// and unwinds to the entry trampoline.
 //
-// The stubs below are the smallest thing that can do it: one register saved,
-// two comparisons, and either a redirect or a jump to the handler that was
-// there before. A fault outside a module's code is still a kernel fault.
+// That routine needs nothing but the faulting module's vmctx, and generated
+// code keeps it pinned in r14 the whole time it runs. So one routine per
+// reason serves every module, and the only question a stub asks is whether
+// the fault came from generated code at all: is the instruction pointer
+// inside the code range? Several modules run at once on several cores, and
+// none of them has to announce itself.
+//
+// A fault outside the code range is still a kernel fault.
 
-#[unsafe(no_mangle)]
-pub static FORGE_CODE_LO: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(u64::MAX);
-#[unsafe(no_mangle)]
-pub static FORGE_CODE_HI: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-#[unsafe(no_mangle)]
-pub static FORGE_PF_ENTRY: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-#[unsafe(no_mangle)]
-pub static FORGE_DE_ENTRY: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-
-/// Which code may fault, and where its faults go. Cleared with `disarm`.
-pub fn arm_faults(code: &Code, pf_entry: usize, de_entry: usize) {
-    use core::sync::atomic::Ordering;
-    FORGE_PF_ENTRY.store(code.base + pf_entry as u64, Ordering::SeqCst);
-    FORGE_DE_ENTRY.store(code.base + de_entry as u64, Ordering::SeqCst);
-    FORGE_CODE_LO.store(code.base, Ordering::SeqCst);
-    FORGE_CODE_HI.store(code.base + code.len as u64, Ordering::SeqCst);
-}
-
-pub fn disarm_faults() {
-    use core::sync::atomic::Ordering;
-    FORGE_CODE_LO.store(u64::MAX, Ordering::SeqCst);
-    FORGE_CODE_HI.store(0, Ordering::SeqCst);
-}
-
-// The saved instruction pointer sits one word above our own push, plus another
-// word for #PF's error code. Nothing but `rax` is touched, and `iretq` puts
-// the flags back from the frame.
 core::arch::global_asm!(
     r#"
 .globl forge_pf_stub
 forge_pf_stub:
     push rax
-    mov  rax, [rip + FORGE_CODE_LO]
+    mov  rax, {lo}
     cmp  qword ptr [rsp + 16], rax
     jb   1f
-    mov  rax, [rip + FORGE_CODE_HI]
+    mov  rax, [rip + FORGE_NEXT_CODE]
     cmp  qword ptr [rsp + 16], rax
     jae  1f
-    mov  rax, [rip + FORGE_PF_ENTRY]
+    lea  rax, [rip + forge_trap_oob]
     mov  [rsp + 16], rax
     pop  rax
     add  rsp, 8
@@ -291,19 +265,36 @@ forge_pf_stub:
 .globl forge_de_stub
 forge_de_stub:
     push rax
-    mov  rax, [rip + FORGE_CODE_LO]
+    mov  rax, {lo}
     cmp  qword ptr [rsp + 8], rax
     jb   2f
-    mov  rax, [rip + FORGE_CODE_HI]
+    mov  rax, [rip + FORGE_NEXT_CODE]
     cmp  qword ptr [rsp + 8], rax
     jae  2f
-    mov  rax, [rip + FORGE_DE_ENTRY]
+    lea  rax, [rip + forge_trap_div]
     mov  [rsp + 8], rax
     pop  rax
     iretq
 2:  pop  rax
     jmp  divide_error_handler
-"#
+
+forge_trap_oob:
+    mov  eax, {oob}
+    jmp  3f
+forge_trap_div:
+    mov  eax, {div}
+3:  mov  [r14 + {tc}], rax
+    mov  rbp, [r14 + {rbp}]
+    mov  rsp, [r14 + {rsp}]
+    jmp  [r14 + {res}]
+"#,
+    lo = const CODE_BASE,
+    oob = const forge_core::trap::MEMORY_OUT_OF_BOUNDS,
+    div = const forge_core::trap::DIVIDE_ERROR,
+    tc = const vmctx::TRAP_CODE,
+    rbp = const vmctx::TRAP_RBP,
+    rsp = const vmctx::TRAP_RSP,
+    res = const vmctx::TRAP_RESUME,
 );
 
 unsafe extern "C" {
@@ -317,11 +308,16 @@ unsafe extern "C" {
 // Generated code unwinds the same way its own traps do: restore `rsp`/`rbp`
 // from the vmctx and jump back to the entry, dropping any depth of wasm
 // frames. Only the vmctx pointer is needed, and every host function has it in
-// `rdi`, so r14 is not touched.
+// `rdi`. The resume path writes the fuel register back through r14, and a
+// host function may have both registers in use for itself, so both are put
+// back first: r14 to the vmctx, r15 to the budget stored there (the live
+// count is lost with the unwound frames, and the run is over anyway).
 core::arch::global_asm!(
     r#"
 .globl forge_host_trap
 forge_host_trap:
+    mov  r14, rdi
+    mov  r15, [rdi + {fuel}]
     mov  [rdi + {tc}], rsi
     mov  rbp, [rdi + {rbp}]
     mov  rsp, [rdi + {rsp}]
@@ -331,6 +327,7 @@ forge_host_trap:
     rbp = const vmctx::TRAP_RBP,
     rsp = const vmctx::TRAP_RSP,
     res = const vmctx::TRAP_RESUME,
+    fuel = const vmctx::FUEL,
 );
 
 unsafe extern "C" {
@@ -442,8 +439,6 @@ pub struct Instance {
     memory: Option<Memory>,
     code: Code,
     entry: usize,
-    pf_entry: usize,
-    de_entry: usize,
 }
 
 impl Instance {
@@ -558,8 +553,6 @@ impl Instance {
             memory,
             code,
             entry: m.entry_offset,
-            pf_entry: m.pf_entry,
-            de_entry: m.de_entry,
         })
     }
 
@@ -582,11 +575,9 @@ impl Instance {
     }
 
     /// Enter the module at `off` and come back with what it produced and what
-    /// stopped it. Faults from this code are claimed for the duration and
-    /// released again — outside that window a page fault is the kernel's own.
+    /// stopped it.
     pub fn call(&mut self, off: usize, a: u32, b: u32, c: u32) -> (u32, u32) {
         self.ctx[vmctx::STACK_LIMIT as usize / 8] = stack_limit();
-        arm_faults(&self.code, self.pf_entry, self.de_entry);
         let entry = self.code.base + self.entry as u64;
         let target = self.code.base + off as u64;
         // SAFETY: both addresses come from the module's own tables, the code
@@ -597,7 +588,6 @@ impl Instance {
                 core::mem::transmute(entry as *const ());
             f(self.ctx.as_ptr(), target as *const u8, a, b, c)
         };
-        disarm_faults();
         (r, self.trap_code())
     }
 }
