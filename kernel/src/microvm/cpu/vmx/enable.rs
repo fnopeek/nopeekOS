@@ -264,6 +264,16 @@ fn write_host_state_with_current_rsp() -> Result<(), &'static str> {
 fn alloc_guest_ram_and_ept(guest_bytes: u64) -> Result<(u64, u64, u64, u64), &'static str> {
     let raw_base = memory::allocate_contiguous(ept::boot_frames_for(guest_bytes))
         .ok_or("OOM allocating guest boot window (+ slack)")?;
+    // Freed frames are not scrubbed, and the guest can read every byte of
+    // its window: whatever the host kept there before (decrypted store
+    // blocks, page data, keys) must not be in it. Demand-paged frames are
+    // zeroed when faulted in; this is the window that is not.
+    // SAFETY: the frames were just allocated to this VM and are
+    // identity-mapped; nothing else holds them.
+    unsafe {
+        core::ptr::write_bytes(raw_base as *mut u8, 0,
+            ept::boot_frames_for(guest_bytes) * 4096);
+    }
     let boot_base = ept::round_up_to_2mb(raw_base);
     let (eptp, pml4_phys) = ept::install_window(boot_base, guest_bytes)?;
     Ok((boot_base, eptp, pml4_phys, raw_base))

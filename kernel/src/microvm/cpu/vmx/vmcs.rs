@@ -571,6 +571,32 @@ fn vpid_supported() -> bool {
     (sec >> 32) & (SEC_ENABLE_VPID as u64) != 0 && cap & (1 << 32) != 0 && cap & (1 << 42) != 0
 }
 
+/// Drop EPT-derived translations on this core before the guest runs. They are
+/// tagged by the EPT root, survive VMXOFF/VMXON, and a closed VM's root frame
+/// can come back as this one's, so stale entries would map guest addresses to
+/// frames the host has reused. KVM does the same (`ept_sync_global` after
+/// VMXON). Global when the CPU offers it, else the single context; Linux
+/// `VMX_EPT_INVEPT_BIT` 20, `VMX_EPT_EXTENT_CONTEXT_BIT` 25,
+/// `VMX_EPT_EXTENT_GLOBAL_BIT` 26.
+fn invept(eptp: u64) {
+    // SAFETY: the capability MSR exists whenever VMX does (checked by probe).
+    let cap = unsafe { super::rdmsr(IA32_VMX_EPT_VPID_CAP) };
+    if cap & (1 << 20) == 0 { return; }
+    let (ty, desc): (u64, [u64; 2]) = if cap & (1 << 26) != 0 {
+        (2, [0, 0])
+    } else if cap & (1 << 25) != 0 {
+        (1, [eptp, 0])
+    } else {
+        return;
+    };
+    // SAFETY: VMX root operation (after VMXON); the 16-byte descriptor is
+    // aligned by the array; the type was checked against the capability MSR.
+    unsafe {
+        core::arch::asm!("invept {t}, [{d}]", t = in(reg) ty, d = in(reg) desc.as_ptr(),
+                         options(nostack));
+    }
+}
+
 /// INVVPID all-context (type 2): drop every VPID-tagged translation on this core.
 fn invvpid_all() {
     let desc: [u64; 2] = [0, 0];
@@ -718,6 +744,7 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
     vmwrite(IO_BITMAP_B_FULL, io_bitmap_b)?;
     vmwrite(MSR_BITMAPS_FULL, msr_bitmap)?;
     vmwrite(EPT_POINTER, eptp)?;
+    invept(eptp);
     vmwrite(VM_ENTRY_CONTROLS, entry as u64)?;
     vmwrite(VM_EXIT_CONTROLS, exit as u64)?;
 

@@ -678,12 +678,21 @@ impl VirtioNet {
             // the guest kicks on the next frame; we re-read avail.idx to catch a
             // frame that landed in the arming window (else TX stalls after one).
             loop {
-                while q.last_avail_idx != avail_top {
+                // A driver index more than a ring ahead is garbage (virtio
+                // §2.7), and one pass takes at most one ring's worth: the
+                // payloads are owned copies, so an unbounded pass is an
+                // unbounded allocation the guest controls.
+                if avail_top.wrapping_sub(q.last_avail_idx) > q.size {
+                    super::nat::note_tx_ring_bad();
+                    break;
+                }
+                while q.last_avail_idx != avail_top && nused < q.size {
                     let head = match avail_ring(mem, q.avail_gpa(), q.size, q.last_avail_idx) {
                         Some(v) => v, None => break,
                     };
                     let mut off = 0usize;
                     let mut idx = head;
+                    let mut hops = 0u16;
                     loop {
                         // A broken chain pushes what we have so far as if it were
                         // a whole frame. Nothing downstream can tell a truncated
@@ -695,6 +704,9 @@ impl VirtioNet {
                         let take = (d.len as usize).min(frame.len().saturating_sub(off));
                         if take > 0 { mem.read_bytes(d.addr, &mut frame[off..off + take]); off += take; }
                         if d.flags & VRING_DESC_F_NEXT == 0 { break; }
+                        // At most `size` descriptors: a longer chain loops.
+                        hops += 1;
+                        if hops >= q.size { super::nat::note_tx_truncated(); break; }
                         idx = d.next;
                     }
                     payloads.push(frame[..off].to_vec());   // own it; emit lock-free later
@@ -704,7 +716,7 @@ impl VirtioNet {
                     nused = nused.wrapping_add(1);
                     q.last_avail_idx = q.last_avail_idx.wrapping_add(1);
                 }
-                if !evidx { break; }
+                if !evidx || nused >= q.size { break; }
                 // Arm: kick me when avail.idx passes what I've consumed — or,
                 // while the worker polls, not before a full ring.
                 let target = if notify_off {

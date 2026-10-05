@@ -37,7 +37,7 @@ macro_rules! p9diag {
         }
     }};
 }
-use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use super::virtqueue::{read_desc, avail_idx, avail_ring, used_push, VRING_DESC_F_WRITE, chain_next};
 
 // ── 9p I/O stats ───────────────────────────────────────────────────────
 // Shows the guest's write pattern: writes/s, throughput, avg write size,
@@ -529,7 +529,7 @@ impl Virtio9p {
             let mut req: Vec<u8> = Vec::new();
             let mut wtargets: Vec<(u64, u32)> = Vec::new();
             let mut idx = head;
-            let mut guard = 0u32;
+            let mut hops = 0u16;
             loop {
                 let d = match read_desc(mem, desc, idx, size) { Some(d) => d, None => break };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
@@ -539,10 +539,7 @@ impl Virtio9p {
                     let mut buf = alloc::vec![0u8; take];
                     if mem.read_bytes(d.addr, &mut buf) { req.extend_from_slice(&buf); }
                 }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
-                guard += 1;
-                if guard > size as u32 { break; } // malformed loop guard
+                idx = match chain_next(&d, &mut hops, size) { Some(n) => n, None => break };
             }
 
             let svc_t0 = crate::interrupts::rdtsc();
@@ -934,7 +931,7 @@ impl Virtio9p {
     fn t_write(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 16 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
-        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap()) as usize;
+        let offset = u64::from_le_bytes(body[4..12].try_into().unwrap());
         let count = rd_u32(body, 12) as usize;
         let data = &body[16..body.len().min(16 + count)];
         STAT_TWRITES.fetch_add(1, AtO::Relaxed);
@@ -947,7 +944,7 @@ impl Virtio9p {
         // flow, TCP ramps). The worker persists durably; drain_async_done posts
         // the Rwrite once it's done.
         if f.async_stream {
-            if offset as u64 != f.stream_next {
+            if offset != f.stream_next {
                 // Diagnostic: does cache=loose writeback arrive out-of-order? If
                 // this fires, the streamed-write path needs a reorder buffer.
                 let n = P9_DIAG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -983,10 +980,12 @@ impl Virtio9p {
 
         // Buffered mode (small files / random writes) — synchronous, persisted
         // on Tfsync/Tclunk (small, so blocking is fine).
+        let Some((offset, end)) = usize::try_from(offset).ok()
+            .and_then(|o| Some((o, o.checked_add(data.len())?)))
+        else { return rlerror(tag, EFBIG) };
         {
             let buf = f.data.get_or_insert_with(Vec::new);
-            let end = offset + data.len();
-            if buf.len() < end { buf.resize(end, 0); }
+            if let Err(e) = grow_buffer(buf, end) { return rlerror(tag, e); }
             buf[offset..end].copy_from_slice(data);
         }
         f.dirty = true;
@@ -1044,14 +1043,16 @@ impl Virtio9p {
         let valid = rd_u32(body, 4);
         const P9_SETATTR_SIZE: u32 = 0x0000_0008;
         if valid & P9_SETATTR_SIZE != 0 && body.len() >= 32 {
-            let size = u64::from_le_bytes(body[24..32].try_into().unwrap()) as usize;
+            let size = usize::try_from(u64::from_le_bytes(body[24..32].try_into().unwrap()))
+                .unwrap_or(usize::MAX);
             if let Some(f) = self.fids.get_mut(&fid) {
                 // Ignore resize on a streaming file (would corrupt state by
                 // creating a second buffer); downloads only truncate at open,
                 // before promotion.
                 if !f.is_dir && !f.async_stream {
                     let buf = f.data.get_or_insert_with(Vec::new);
-                    buf.resize(size, 0);
+                    if let Err(e) = grow_buffer(buf, size) { return rlerror(tag, e); }
+                    buf.truncate(size);
                     f.dirty = true;
                 }
             }
@@ -1163,6 +1164,23 @@ const ENOTDIR: u32 = 20;
 const EINVAL:  u32 = 22;
 const ENOSYS:  u32 = 38;
 const ENODATA: u32 = 61;
+const EFBIG:   u32 = 27;
+const ENOSPC:  u32 = 28;
+
+/// Largest file the buffered path holds in host memory. Sizes and offsets
+/// come from the guest; past this, or when the host cannot reserve the
+/// memory, the guest gets an error instead of the host an allocation panic.
+const MAX_BUFFERED_BYTES: usize = 1 << 30;
+
+/// Grow `buf` to `len` zero-filled bytes, or say why not (an errno).
+fn grow_buffer(buf: &mut Vec<u8>, len: usize) -> Result<(), u32> {
+    if len > MAX_BUFFERED_BYTES { return Err(EFBIG); }
+    if len > buf.len() {
+        buf.try_reserve(len - buf.len()).map_err(|_| ENOSPC)?;
+        buf.resize(len, 0);
+    }
+    Ok(())
+}
 
 #[inline] fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])

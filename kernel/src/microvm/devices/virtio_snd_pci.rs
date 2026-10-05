@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use super::guest_mem::GuestMem;
-use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_WRITE, chain_next};
 
 const VIRTIO_VENDOR: u32 = 0x1AF4;
 const VIRTIO_SND_DEVICE: u32 = 0x1059;
@@ -292,6 +292,7 @@ impl VirtioSnd {
             let mut resp_segs: [(u64, u32); 4] = [(0, 0); 4];
             let mut resp_seg_n = 0usize;
             let mut idx = head;
+            let mut hops = 0u16;
             loop {
                 let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
@@ -303,8 +304,7 @@ impl VirtioSnd {
                     let n = (d.len as usize).min(req.len() - req_len);
                     if n > 0 { mem.read_bytes(d.addr, &mut req[req_len..req_len + n]); req_len += n; }
                 }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
+                idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
             }
 
             // Build the response, write it across the writable segments.
@@ -436,12 +436,12 @@ impl VirtioSnd {
             let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
             // Find the writable status desc in the chain and ack it S_OK.
             let mut idx = head;
+            let mut hops = 0u16;
             let mut status_addr = 0u64;
             loop {
                 let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
                 if d.flags & VRING_DESC_F_WRITE != 0 && status_addr == 0 { status_addr = d.addr; }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
+                idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
             }
             if status_addr != 0 {
                 let mut st = [0u8; 8];
@@ -535,6 +535,7 @@ impl VirtioSnd {
             let mut status_addr: u64 = 0;
             let mut readable_seen = 0usize; // bytes of readable seen (first 4 = stream_id)
             let mut idx = head;
+            let mut hops = 0u16;
             loop {
                 let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
@@ -553,8 +554,7 @@ impl VirtioSnd {
                         pcm_len += l;
                     }
                 }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
+                idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
             }
 
             // Wall-clock floor: hold this buffer until the 48 kHz clock has

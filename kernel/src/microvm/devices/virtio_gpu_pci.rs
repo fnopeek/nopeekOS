@@ -147,6 +147,13 @@ struct VirtQueue {
     used_idx: u16,
 }
 
+
+/// Largest width or height of a 2D resource: 8K displays fit.
+const MAX_RESOURCE_DIM: u32 = 8192;
+
+/// Most bytes of one control request the device reads from the guest.
+const MAX_CTRL_REQUEST: usize = 1024 * 1024;
+
 impl VirtQueue {
     fn desc_gpa(&self)   -> u64 { ((self.desc_hi   as u64) << 32) | self.desc_lo   as u64 }
     fn driver_gpa(&self) -> u64 { ((self.driver_hi as u64) << 32) | self.driver_lo as u64 }
@@ -375,7 +382,7 @@ impl VirtioGpu {
     /// command type, and write the response into the driver-writable
     /// descriptor(s).
     fn service_controlq(&mut self, mem: &GuestMem) -> bool {
-        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_WRITE, chain_next};
 
         let q_idx = 0usize;
         let q = match self.queues.get_mut(q_idx) {
@@ -411,6 +418,7 @@ impl VirtioGpu {
             let mut request = Vec::with_capacity(256);
             let mut resp_descs: Vec<(u64, u32)> = Vec::new(); // (addr, len)
             let mut idx = head;
+            let mut hops = 0u16;
             loop {
                 let d = match read_desc(mem, desc_gpa, idx, qsize) {
                     Some(d) => d, None => break,
@@ -418,12 +426,14 @@ impl VirtioGpu {
                 if d.flags & VRING_DESC_F_WRITE != 0 {
                     resp_descs.push((d.addr, d.len));
                 } else {
-                    let mut chunk = alloc::vec![0u8; d.len as usize];
-                    mem.read_bytes(d.addr, &mut chunk);
-                    request.extend_from_slice(&chunk);
+                    // The largest real command is ATTACH_BACKING with one
+                    // entry per page, ~0.5 MiB for an 8K framebuffer.
+                    let take = (d.len as usize).min(MAX_CTRL_REQUEST.saturating_sub(request.len()));
+                    let at = request.len();
+                    request.resize(at + take, 0);
+                    mem.read_bytes(d.addr, &mut request[at..]);
                 }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
+                idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
 
             // Dispatch the command + build the response payload (incl.
@@ -469,7 +479,7 @@ impl VirtioGpu {
     /// cursorq drain: acknowledge UPDATE_CURSOR / MOVE_CURSOR without
     /// rendering anything. Same chain shape as controlq.
     fn service_cursorq(&mut self, mem: &GuestMem) -> bool {
-        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+        use super::virtqueue::{avail_idx, avail_ring, read_desc, used_push, VRING_DESC_F_WRITE, chain_next};
 
         let q_idx = 1usize;
         let q = match self.queues.get_mut(q_idx) {
@@ -499,6 +509,7 @@ impl VirtioGpu {
             // Walk chain, find first writable for the response.
             let mut resp_descs: Vec<(u64, u32)> = Vec::new();
             let mut idx = head;
+            let mut hops = 0u16;
             loop {
                 let d = match read_desc(mem, desc_gpa, idx, qsize) {
                     Some(d) => d, None => break,
@@ -506,8 +517,7 @@ impl VirtioGpu {
                 if d.flags & VRING_DESC_F_WRITE != 0 {
                     resp_descs.push((d.addr, d.len));
                 }
-                if d.flags & VRING_DESC_F_NEXT == 0 { break; }
-                idx = d.next;
+                idx = match chain_next(&d, &mut hops, qsize) { Some(n) => n, None => break };
             }
             let resp = build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, 0, 0);
             let mut written: u32 = 0;
@@ -634,6 +644,11 @@ impl VirtioGpu {
         let format = u32::from_le_bytes([body[4],  body[5],  body[6],  body[7]]);
         let width  = u32::from_le_bytes([body[8],  body[9],  body[10], body[11]]);
         let height = u32::from_le_bytes([body[12], body[13], body[14], body[15]]);
+        // The host keeps a pixel copy of every resource; its size comes from
+        // the guest.
+        if width == 0 || height == 0 || width > MAX_RESOURCE_DIM || height > MAX_RESOURCE_DIM {
+            return;
+        }
         // Replace if id exists, else push.
         if let Some(r) = self.resources.iter_mut().find(|r| r.id == id) {
             r.format = format; r.width = width; r.height = height;
@@ -726,9 +741,21 @@ impl VirtioGpu {
         let stride = r.width as usize * bpp;
         let total_pixels_bytes = r.height as usize * stride;
 
-        // Ensure host_pixels exists with the right size.
-        let host_buf = r.host_pixels.get_or_insert_with(|| alloc::vec![0u8; total_pixels_bytes]);
+        // Only the part of the rectangle that lies on the resource; the rest
+        // has nowhere to go. Width and height are bounded at creation.
+        if x >= r.width || y >= r.height { return; }
+        let w = w.min(r.width - x);
+        let h = h.min(r.height - y);
+
+        // Ensure host_pixels exists with the right size, without panicking
+        // when the host cannot spare it.
+        let host_buf = r.host_pixels.get_or_insert_with(Vec::new);
         if host_buf.len() != total_pixels_bytes {
+            if total_pixels_bytes > host_buf.len()
+                && host_buf.try_reserve(total_pixels_bytes - host_buf.len()).is_err()
+            {
+                return;
+            }
             host_buf.resize(total_pixels_bytes, 0);
         }
 
@@ -739,7 +766,7 @@ impl VirtioGpu {
         let row_bytes = w as usize * bpp;
         let t0 = crate::interrupts::rdtsc();
         for row in 0..h as usize {
-            let src_lin = offset as usize + (y as usize + row) * stride + x as usize * bpp;
+            let src_lin = (offset as usize).saturating_add((y as usize + row) * stride + x as usize * bpp);
             let dst_lin = (y as usize + row) * stride + x as usize * bpp;
             if dst_lin + row_bytes > host_buf.len() { break; }
             copy_from_backing(mem, &r.backing, src_lin, &mut host_buf[dst_lin..dst_lin + row_bytes]);

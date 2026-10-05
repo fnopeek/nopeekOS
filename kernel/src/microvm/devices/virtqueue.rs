@@ -54,6 +54,25 @@ pub fn read_desc(mem: &GuestMem, table: u64, idx: u16, queue_size: u16) -> Optio
     })
 }
 
+/// The next descriptor of a chain, or `None` where it ends. A chain holds
+/// at most `queue_size` descriptors; a longer one loops back on itself,
+/// which only a broken or hostile guest builds, and it ends here too.
+pub fn chain_next(d: &Desc, hops: &mut u16, queue_size: u16) -> Option<u16> {
+    if d.flags & VRING_DESC_F_NEXT == 0 { return None; }
+    *hops = hops.saturating_add(1);
+    if *hops >= queue_size { return None; }
+    Some(d.next)
+}
+
+/// How many avail entries are waiting, or 0 if the driver claims more than
+/// the ring holds. A device must not consume more than `queue_size` entries
+/// past what it has used (virtio 1.x §2.7); an index further ahead is
+/// garbage, and walking it would service phantom requests.
+pub fn avail_pending(last: u16, top: u16, queue_size: u16) -> u16 {
+    let n = top.wrapping_sub(last);
+    if n > queue_size { 0 } else { n }
+}
+
 /// Read the current driver-side avail-ring head index.
 pub fn avail_idx(mem: &GuestMem, avail_gpa: u64) -> Option<u16> {
     mem.read_u16(avail_gpa + 2)
@@ -108,13 +127,14 @@ pub fn service_blk_queue(
         Some(v) => v,
         None => return false,
     };
-    if avail_idx == *last_avail_idx {
+    let pending = avail_pending(*last_avail_idx, avail_idx, queue_size);
+    if pending == 0 {
         return false;
     }
 
     let mut serviced_any = false;
 
-    while *last_avail_idx != avail_idx {
+    for _ in 0..pending {
         // ring[i] @ avail + 4 + (i % size) * 2
         let ring_slot = (*last_avail_idx % queue_size) as u64;
         let head_idx = match mem.read_u16(avail + 4 + ring_slot * 2) {
@@ -147,6 +167,14 @@ pub fn service_blk_queue(
     }
 
     serviced_any
+}
+
+/// `[off, off + n)` inside a backing of `len` bytes, or `None` when it
+/// overflows or does not fit. Offsets come from the guest.
+fn backing_range(off: Option<u64>, n: usize, len: usize) -> Option<(usize, usize)> {
+    let start = usize::try_from(off?).ok()?;
+    let end = start.checked_add(n)?;
+    (end <= len).then_some((start, end))
 }
 
 /// Walk one descriptor chain, perform the I/O, write the status byte.
@@ -184,10 +212,13 @@ fn service_one_request(
     // Walk descriptors after the header. The chain ends with a 1-byte
     // writable descriptor for status.
     let mut idx = head.next;
+    let mut hops: u16 = 1;
     let mut bytes_written: u32 = 0;
     let mut status_addr: u64 = 0;
     let mut status: u8 = VIRTIO_BLK_S_OK;
-    let mut sector_off: u64 = sector * SECTOR_SIZE;
+    // `None` once the guest names a sector past what u64 bytes can hold;
+    // every data descriptor after that fails.
+    let mut sector_off: Option<u64> = sector.checked_mul(SECTOR_SIZE);
 
     loop {
         let d = match read_desc(mem, desc_table, idx, queue_size) {
@@ -214,13 +245,13 @@ fn service_one_request(
                 if !writable { status = VIRTIO_BLK_S_IOERR; }
                 else {
                     let n = d.len as usize;
-                    let end = sector_off as usize + n;
-                    if end > backing.len() {
-                        status = VIRTIO_BLK_S_IOERR;
-                    } else {
-                        mem.write_bytes(d.addr, &backing[sector_off as usize..end]);
-                        bytes_written = bytes_written.saturating_add(n as u32);
-                        sector_off += n as u64;
+                    match backing_range(sector_off, n, backing.len()) {
+                        Some((start, end)) => {
+                            mem.write_bytes(d.addr, &backing[start..end]);
+                            bytes_written = bytes_written.saturating_add(n as u32);
+                            sector_off = Some(end as u64);
+                        }
+                        None => status = VIRTIO_BLK_S_IOERR,
                     }
                 }
             }
@@ -228,12 +259,12 @@ fn service_one_request(
                 if writable { status = VIRTIO_BLK_S_IOERR; }
                 else {
                     let n = d.len as usize;
-                    let end = sector_off as usize + n;
-                    if end > backing.len() {
-                        status = VIRTIO_BLK_S_IOERR;
-                    } else {
-                        mem.read_bytes(d.addr, &mut backing[sector_off as usize..end]);
-                        sector_off += n as u64;
+                    match backing_range(sector_off, n, backing.len()) {
+                        Some((start, end)) => {
+                            mem.read_bytes(d.addr, &mut backing[start..end]);
+                            sector_off = Some(end as u64);
+                        }
+                        None => status = VIRTIO_BLK_S_IOERR,
                     }
                 }
             }
@@ -252,6 +283,9 @@ fn service_one_request(
             _ => { status = VIRTIO_BLK_S_UNSUPP; }
         }
 
+        // At most `queue_size` descriptors; a longer chain loops.
+        hops += 1;
+        if hops > queue_size { return bytes_written; }
         idx = d.next;
     }
 
