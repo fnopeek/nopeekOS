@@ -61,6 +61,9 @@ pub struct X509Cert<'a> {
     /// True if a critical extension was found that we don't know how to process.
     /// Per RFC 5280 §4.2: such certs MUST be rejected.
     pub unknown_critical_ext: bool,
+    /// subjectAltName extension value (the GeneralNames SEQUENCE), taken from
+    /// the parsed extension list. None = extension absent.
+    pub san: Option<&'a [u8]>,
 }
 
 // OID: 2.5.4.3 (commonName)
@@ -148,6 +151,7 @@ pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
     let mut eku_server_auth = false;
     let mut eku_any = false;
     let mut unknown_critical_ext = false;
+    let mut san = None;
 
     for tlv in tbs_items {
         if tlv.tag == asn1::TAG_CONTEXT_3 {
@@ -160,6 +164,7 @@ pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
                 &mut eku_server_auth,
                 &mut eku_any,
                 &mut unknown_critical_ext,
+                &mut san,
             );
         }
     }
@@ -170,7 +175,7 @@ pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
         sig_algo_oid, signature, not_before, not_after,
         is_ca, path_len_constraint,
         key_usage, eku_present, eku_server_auth, eku_any,
-        unknown_critical_ext,
+        unknown_critical_ext, san,
     })
 }
 
@@ -267,8 +272,8 @@ fn strip_leading_zero(data: &[u8]) -> &[u8] {
 /// Walk the [3] EXPLICIT extensions wrapper. For each extension, dispatch on
 /// OID; record an unknown-critical hit when the extnID is unrecognised AND
 /// the critical flag is TRUE.
-fn parse_extensions(
-    ext_data: &[u8],
+fn parse_extensions<'a>(
+    ext_data: &'a [u8],
     is_ca: &mut bool,
     path_len: &mut Option<u32>,
     key_usage: &mut Option<u16>,
@@ -276,6 +281,7 @@ fn parse_extensions(
     eku_server_auth: &mut bool,
     eku_any: &mut bool,
     unknown_critical: &mut bool,
+    san: &mut Option<&'a [u8]>,
 ) {
     let outer = match asn1::parse_tlv(ext_data) {
         Some((tlv, _)) if tlv.tag == TAG_SEQUENCE => tlv,
@@ -311,7 +317,7 @@ fn parse_extensions(
             *eku_present = true;
             parse_eku(value, eku_server_auth, eku_any);
         } else if oid == OID_EXT_SAN {
-            // Recognised: handled separately by certstore via raw-TBS scan.
+            *san = Some(value);
         } else if critical {
             *unknown_critical = true;
         }

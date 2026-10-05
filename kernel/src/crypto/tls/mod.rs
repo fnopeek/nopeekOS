@@ -512,8 +512,9 @@ pub fn tls_connect_alpn(
     // Then: EncryptedExtensions, Certificate, CertificateVerify, Finished
 
     let mut cert_chain: Vec<Vec<u8>> = Vec::new();
-    let mut _cert_verify_sig: Vec<u8> = Vec::new();
-    let mut _cert_verify_algo: u16 = 0;
+    // The server's proof that it holds the leaf's key: scheme, signature, and
+    // the transcript hash it signs (everything up to Certificate).
+    let mut cert_verify: Option<(u16, Vec<u8>, Vec<u8>)> = None;
     let mut server_finished: Vec<u8> = Vec::new();
     let mut negotiated_alpn: Option<String> = None;
 
@@ -569,16 +570,26 @@ pub fn tls_connect_alpn(
                     cert_chain = parse_certificate_message(&inner[pos + 4..hs_end]);
                 }
                 HT_CERTIFICATE_VERIFY => {
-                    transcript.update(hs_msg);
-                    if hs_len >= 4 {
-                        _cert_verify_algo = ((inner[pos + 4] as u16) << 8) | inner[pos + 5] as u16;
-                        let sig_len = ((inner[pos + 6] as usize) << 8) | inner[pos + 7] as usize;
-                        if pos + 8 + sig_len <= hs_end {
-                            _cert_verify_sig = inner[pos + 8..pos + 8 + sig_len].to_vec();
-                        }
+                    if cert_chain.is_empty() || cert_verify.is_some() {
+                        return Err(TlsError::HandshakeFailed("unexpected CertificateVerify"));
                     }
+                    let signed_hash = transcript.clone().finalize();
+                    transcript.update(hs_msg);
+                    let body = &inner[pos + 4..hs_end];
+                    if body.len() < 4 {
+                        return Err(TlsError::HandshakeFailed("short CertificateVerify"));
+                    }
+                    let scheme = u16::from_be_bytes([body[0], body[1]]);
+                    let sig_len = u16::from_be_bytes([body[2], body[3]]) as usize;
+                    if body.len() != 4 + sig_len {
+                        return Err(TlsError::HandshakeFailed("malformed CertificateVerify"));
+                    }
+                    cert_verify = Some((scheme, body[4..].to_vec(), signed_hash));
                 }
                 HT_FINISHED => {
+                    if cert_verify.is_none() {
+                        return Err(TlsError::HandshakeFailed("Finished before CertificateVerify"));
+                    }
                     // Do NOT add to transcript before verifying!
                     server_finished = inner[pos + 4..hs_end].to_vec();
                 }
@@ -608,6 +619,22 @@ pub fn tls_connect_alpn(
     }
     // Keep the verified leaf, not whatever is around later.
     let leaf_der = cert_chain[0].clone();
+
+    // === Verify CertificateVerify ===
+    // A valid chain says whose certificate this is; only the signature says
+    // the peer holds its key. Without it, anyone who copied the public chain
+    // could finish the handshake.
+    let Some((scheme, signature, signed_hash)) = cert_verify else {
+        return Err(TlsError::HandshakeFailed("no CertificateVerify"));
+    };
+    let mut content = Vec::with_capacity(64 + 34 + signed_hash.len());
+    content.extend_from_slice(&[0x20; 64]);
+    content.extend_from_slice(b"TLS 1.3, server CertificateVerify");
+    content.push(0);
+    content.extend_from_slice(&signed_hash);
+    if !certstore::verify_certificate_verify(&leaf_der, scheme, &content, &signature) {
+        return Err(TlsError::HandshakeFailed("CertificateVerify signature invalid"));
+    }
 
     // === Verify Finished ===
     let transcript_before_sf = transcript.clone();

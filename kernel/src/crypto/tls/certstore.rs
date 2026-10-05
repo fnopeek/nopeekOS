@@ -575,6 +575,23 @@ fn verify_signature(cert: &X509Cert<'_>, issuer: &X509Cert<'_>) -> bool {
     }
 }
 
+/// Check a TLS 1.3 server CertificateVerify signature (RFC 8446 §4.4.3):
+/// `scheme` must be one we offered, fit the leaf's key type, and the
+/// signature must cover `content` under that key. RSA PKCS#1 v1.5 is not
+/// allowed here, only for signatures inside certificates.
+pub fn verify_certificate_verify(leaf_der: &[u8], scheme: u16, content: &[u8], signature: &[u8]) -> bool {
+    let Some(leaf) = super::x509::parse_x509(leaf_der) else { return false };
+    match (scheme, &leaf.key_type) {
+        (0x0403, KeyType::EcdsaP256) => ecdsa_p256_verify_sha256(leaf.public_key, content, signature),
+        (0x0503, KeyType::EcdsaP384) => ecdsa_p384_verify_sha384(leaf.public_key, content, signature),
+        (0x0804, KeyType::Rsa) => super::rsa::rsa_verify_pss_sha256(
+            leaf.public_key, leaf.rsa_exponent, content, signature),
+        (0x0805, KeyType::Rsa) => super::rsa::rsa_verify_pss_sha384(
+            leaf.public_key, leaf.rsa_exponent, content, signature),
+        _ => false,
+    }
+}
+
 /// ECDSA P-256 verify with SHA-256 digest.
 fn ecdsa_p256_verify_sha256(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool {
     use p256::ecdsa::{VerifyingKey, Signature as P256Sig};
@@ -669,24 +686,15 @@ pub fn covers(leaf_der: &[u8], hostname: &str) -> bool {
 }
 
 fn cn_matches(cert: &X509Cert<'_>, hostname: &str) -> bool {
-    // Check CN first
+    // With a subjectAltName present, its DNS names are the certificate's
+    // names and the CN is not consulted (RFC 6125 §6.4.4).
+    if let Some(sans) = cert.san {
+        return SanIter::new(sans)
+            .filter_map(|san| core::str::from_utf8(san).ok())
+            .any(|name| name_matches(name, hostname));
+    }
     let cn = core::str::from_utf8(cert.subject_cn).unwrap_or("");
-    if !cn.is_empty() && name_matches(cn, hostname) {
-        return true;
-    }
-
-    // Check SANs in TBS raw bytes (OID 2.5.29.17 = subjectAltName)
-    if let Some(sans) = extract_sans(cert.tbs_raw) {
-        for san in SanIter::new(sans) {
-            if let Ok(name) = core::str::from_utf8(san) {
-                if name_matches(name, hostname) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+    !cn.is_empty() && name_matches(cn, hostname)
 }
 
 /// Check if a certificate name (CN or SAN) matches the hostname.
@@ -703,40 +711,6 @@ fn name_matches(name: &str, hostname: &str) -> bool {
         }
     }
     false
-}
-
-// OID 2.5.29.17 = subjectAltName
-const OID_SAN: &[u8] = &[0x55, 0x1D, 0x11];
-
-/// Search TBS bytes for the SAN extension and return the inner SEQUENCE bytes.
-fn extract_sans(tbs: &[u8]) -> Option<&[u8]> {
-    // Scan for OID_SAN pattern in DER bytes
-    for i in 0..tbs.len().saturating_sub(OID_SAN.len() + 4) {
-        if &tbs[i..i + OID_SAN.len()] == OID_SAN {
-            // After OID, skip to the OCTET STRING containing the SAN SEQUENCE
-            let mut pos = i + OID_SAN.len();
-            // There may be a BOOLEAN (critical) before the OCTET STRING
-            while pos < tbs.len() {
-                let tag = tbs[pos];
-                if tag == 0x04 { // OCTET STRING
-                    pos += 1;
-                    let (len, hdr) = der_len(&tbs[pos..])?;
-                    pos += hdr;
-                    if pos + len <= tbs.len() {
-                        return Some(&tbs[pos..pos + len]);
-                    }
-                    return None;
-                } else if tag == 0x01 { // BOOLEAN (critical flag)
-                    pos += 1;
-                    let (len, hdr) = der_len(&tbs[pos..])?;
-                    pos += hdr + len;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-    None
 }
 
 fn der_len(data: &[u8]) -> Option<(usize, usize)> {
