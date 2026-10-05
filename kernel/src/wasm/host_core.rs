@@ -498,7 +498,7 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
         return -1;
     }
     let addr = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
-    if crate::memory::is_usable_ram(addr) {
+    if !crate::memory::is_device_window(addr) {
         // Log only the first few: the driver polls forever.
         use core::sync::atomic::{AtomicU32, Ordering};
         static REFUSED: AtomicU32 = AtomicU32::new(0);
@@ -1280,8 +1280,40 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
         _ => return -1,
     };
     if offset < 0 || offset > 255 { return -1; }
+    if config_write_refused(hw.pci_addr, offset as u8 & !3) {
+        kprintln!("[npk] WASM: PCI config write at {:#x} refused (address or interrupt routing)", offset);
+        return -1;
+    }
     pci::write32(hw.pci_addr, offset as u8, value as u32);
     0
+}
+
+/// Config dwords a driver must not write: they decide where the device sits
+/// in physical memory (BARs, expansion ROM, a bridge's windows) or where its
+/// interrupts go (MSI address and data, MSI-X control). The kernel sizes and
+/// assigns BARs and programs interrupts itself; a driver that moved a BAR
+/// onto RAM could map that RAM through `npk_mmio_map_bar`.
+fn config_write_refused(dev: pci::PciAddr, dword: u8) -> bool {
+    let header = pci::read8(dev, 0x0E) & 0x7F;
+    let fixed = match header {
+        0 => (0x10..0x28).contains(&dword) || dword == 0x30,
+        1 => (0x10..0x18).contains(&dword) || (0x1C..0x30).contains(&dword) || dword == 0x38,
+        _ => (0x10..0x40).contains(&dword),
+    };
+    if fixed { return true; }
+    // Capability list, when the status register says there is one.
+    if pci::read16(dev, 0x06) & 0x10 == 0 { return false; }
+    let mut ptr = pci::read8(dev, 0x34) & 0xFC;
+    for _ in 0..48 {
+        if ptr < 0x40 { break; }
+        let id = pci::read8(dev, ptr);
+        let span: u8 = match id { 0x05 => 24, 0x11 => 12, _ => 0 };
+        if span != 0 && dword >= ptr && (dword as u16) < ptr as u16 + span as u16 {
+            return true;
+        }
+        ptr = pci::read8(dev, ptr + 1) & 0xFC;
+    }
+    false
 }
 
 pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
@@ -1447,6 +1479,13 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
 
     for i in 0..page_count {
         let addr = bar_base + (i * 4096) as u64;
+        if let Some(why) = mmio_refusal(addr) {
+            kprintln!("[npk] WASM: BAR{} at {:#x} refused: {}", bar_idx, addr, why);
+            return -1;
+        }
+    }
+    for i in 0..page_count {
+        let addr = bar_base + (i * 4096) as u64;
         // SAFETY: identity-mapped MMIO region for bound PCI device BAR.
         // map_page splits huge pages to set NO_CACHE for MMIO access.
         if let Err(e) = crate::paging::map_page(
@@ -1484,6 +1523,29 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
 ///    routes other devices' interrupts.
 ///  * Caps on the span (16 pages = 64 KiB) and on the number of mappings
 ///    (`MAX_MMIO_MAPS`), as for a BAR.
+/// Platform ranges no driver may map (ECAM, HPET, IOMMU), read once from
+/// the ACPI tables.
+static PLATFORM_MMIO: spin::Mutex<Option<Vec<(u64, u64)>>> = spin::Mutex::new(None);
+
+/// Why page `a` must not be mapped for a module, or `None` if it may.
+/// One rule for every mapping path: a BAR the module can rewrite is no
+/// more trustworthy than an address it names.
+fn mmio_refusal(a: u64) -> Option<&'static str> {
+    if !crate::memory::is_device_window(a) {
+        return Some("RAM or the kernel image");
+    }
+    // LAPIC [0xFEE00000, 0xFEF00000) and IOAPIC [0xFEC00000, 0xFED00000).
+    if (0xFEE0_0000..0xFEF0_0000).contains(&a) || (0xFEC0_0000..0xFED0_0000).contains(&a) {
+        return Some("interrupt controller");
+    }
+    let mut g = PLATFORM_MMIO.lock();
+    let ranges = g.get_or_insert_with(crate::acpi::platform_mmio_ranges);
+    if ranges.iter().any(|&(b, l)| a >= b && a < b.saturating_add(l)) {
+        return Some("platform registers (ECAM, HPET, IOMMU)");
+    }
+    None
+}
+
 pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
@@ -1497,13 +1559,8 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
 
     for i in 0..n {
         let a = match base.checked_add((i * 4096) as u64) { Some(a) => a, None => return -1 };
-        if crate::memory::is_usable_ram(a) {
-            kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — that is RAM", a);
-            return -1;
-        }
-        // LAPIC [0xFEE00000, 0xFEF00000) and IOAPIC [0xFEC00000, 0xFED00000).
-        if (0xFEE0_0000..0xFEF0_0000).contains(&a) || (0xFEC0_0000..0xFED0_0000).contains(&a) {
-            kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x} — interrupt controller", a);
+        if let Some(why) = mmio_refusal(a) {
+            kprintln!("[npk] WASM: npk_mmio_map_phys refused {:#x}: {}", a, why);
             return -1;
         }
     }

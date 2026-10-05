@@ -2,6 +2,7 @@
 //!
 //! Finds RSDP → RSDT/XSDT → FADT → PM1a_CNT_BLK port for S5 power-off.
 
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 
 /// Cached PM1a control block I/O port (0 = not found yet)
@@ -120,6 +121,63 @@ pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
         ensure_mapped(rsdt_addr, 4096);
         find_table_in_rsdt(rsdt_addr, sig)
     }
+}
+
+/// Physical ranges the platform owns that no driver may map: PCI ECAM
+/// (MCFG), the HPET, and IOMMU register blocks (DMAR, IVRS). Each as
+/// `(base, length)`. Absent tables contribute nothing.
+pub fn platform_mmio_ranges() -> Vec<(u64, u64)> {
+    fn table(sig: &[u8; 4]) -> Option<&'static [u8]> {
+        let (addr, len) = find_table_nth(sig, 0)?;
+        // SAFETY: `find_table_nth` checked the length and mapped the table;
+        // firmware tables stay in place for the life of the system.
+        Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+    }
+    fn u64_at(t: &[u8], off: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(t.get(off..off + 8)?.try_into().ok()?))
+    }
+    fn u16_at(t: &[u8], off: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(t.get(off..off + 2)?.try_into().ok()?))
+    }
+
+    let mut out = Vec::new();
+    if let Some(t) = table(b"MCFG") {
+        // Allocation entries of 16 bytes after the 44-byte header.
+        for e in t.get(44..).unwrap_or(&[]).chunks_exact(16) {
+            let base = u64::from_le_bytes(e[0..8].try_into().unwrap_or([0; 8]));
+            let (start, end) = (e[10] as u64, e[11] as u64);
+            if base != 0 && end >= start {
+                out.push((base + (start << 20), (end - start + 1) << 20));
+            }
+        }
+    }
+    if let Some(base) = table(b"HPET").and_then(|t| u64_at(t, 44)) {
+        if base != 0 { out.push((base & !0xFFF, 0x1000)); }
+    }
+    // Remapping structures start at 48 in both; each says its own length.
+    for (sig, is_dmar) in [(b"DMAR", true), (b"IVRS", false)] {
+        let Some(t) = table(sig) else { continue };
+        let mut off = 48;
+        while let Some(len) = u16_at(t, off + 2) {
+            let len = len as usize;
+            if len < 16 { break; }
+            let kind = if is_dmar { u16_at(t, off).unwrap_or(u16::MAX) } else { t[off] as u16 };
+            // DMAR type 0 = DRHD, 2^size pages; IVRS 0x10/0x11/0x40 = IVHD,
+            // whose register block is at most 512 KiB.
+            let span = if is_dmar && kind == 0 {
+                Some(0x1000u64 << (t.get(off + 5).copied().unwrap_or(0) & 0xF))
+            } else if !is_dmar && matches!(kind, 0x10 | 0x11 | 0x40) {
+                Some(0x8_0000)
+            } else {
+                None
+            };
+            if let (Some(span), Some(base)) = (span, u64_at(t, off + 8)) {
+                if base != 0 { out.push((base, span)); }
+            }
+            off += len;
+        }
+    }
+    out
 }
 
 /// The `index`-th table with this signature, with its length.

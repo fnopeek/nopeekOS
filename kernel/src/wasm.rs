@@ -2789,6 +2789,14 @@ fn cleanup_instance_state(state: &mut HostState) {
         let _ = crate::net::tcp::close(h);
     }
     if let Some(hw) = state.hw.take() {
+        // Stop the device before its buffers go back: with bus mastering on
+        // it keeps writing received data into whatever the frames become
+        // next. Clearing the bit also stops its MSI writes. Linux does the
+        // same, `pci_clear_master` before freeing coherent memory.
+        if hw.is_pci {
+            let cmd = crate::drivers::pci::read32(hw.pci_addr, 0x04);
+            crate::drivers::pci::write32(hw.pci_addr, 0x04, cmd & !0x4);
+        }
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
             crate::memory::deallocate_contiguous(phys, pages);

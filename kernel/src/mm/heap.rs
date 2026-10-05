@@ -394,13 +394,13 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 static HEAP: LockedHeap = LockedHeap::new();
 
-unsafe extern "C" {
-    static __heap_start: u8;
-}
-
+/// The initial heap comes from the frame allocator like every later grow:
+/// only frames the firmware map called usable RAM. The bytes after the
+/// image are not known to be RAM.
 pub fn init() {
-    let heap_start = unsafe { &__heap_start as *const u8 as usize };
-    crate::memory::reserve_region(heap_start as u64, INITIAL_HEAP as u64);
+    let frames = INITIAL_HEAP / crate::memory::PAGE_SIZE;
+    let heap_start = crate::memory::allocate_contiguous(frames)
+        .expect("no contiguous RAM for the initial heap") as usize;
     HEAP.inner.lock().init(heap_start, INITIAL_HEAP);
     crate::kdebug!("[npk] Heap: {} MB (max {} MB)",
         INITIAL_HEAP / (1024 * 1024), MAX_HEAP / (1024 * 1024));

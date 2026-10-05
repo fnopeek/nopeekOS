@@ -94,24 +94,56 @@ impl FrameAllocator {
 }
 
 unsafe extern "C" {
+    static __image_base: u8;
     static __heap_start: u8;
 }
 
-/// Ranges the firmware reported as usable RAM (kernel, heap and module
-/// linear memories live there). Answers one question: may a module read
-/// this physical address? Anything inside is RAM and off limits; anything
-/// outside is a firmware or device window.
-static RAM_RANGES: Mutex<([(u64, u64); 64], usize)> = Mutex::new(([(0, 0); 64], 0));
+/// The whole firmware memory map as `(base, length, uefi type)`, and
+/// whether it was cut short. Answers one question: may a module map or
+/// read this physical address?
+struct FirmwareMap {
+    regions: [(u64, u64, u32); crate::boot_info::MAX_MEMORY_REGIONS],
+    count: usize,
+    truncated: bool,
+}
 
-/// Whether `addr` lies in a range reported as usable RAM.
-///
-/// Conservative: without a map (count 0), everything counts as RAM and is
-/// therefore off limits.
-pub fn is_usable_ram(addr: u64) -> bool {
-    let g = RAM_RANGES.lock();
-    let (ranges, n) = &*g;
-    if *n == 0 { return true; }
-    ranges[..*n].iter().any(|(b, l)| addr >= *b && addr < b.saturating_add(*l))
+static FIRMWARE_MAP: Mutex<FirmwareMap> = Mutex::new(FirmwareMap {
+    regions: [(0, 0, 0); crate::boot_info::MAX_MEMORY_REGIONS],
+    count: 0,
+    truncated: true,
+});
+
+/// Memory types that hold RAM someone owns: the kernel image (loader code
+/// and data), the frames the kernel hands out (boot services, conventional),
+/// firmware runtime services, and persistent or unusable RAM.
+fn is_ram_type(t: u32) -> bool {
+    use crate::boot_info::*;
+    matches!(t,
+        UEFI_LOADER_CODE | UEFI_LOADER_DATA
+        | UEFI_BOOT_SERVICES_CODE | UEFI_BOOT_SERVICES_DATA
+        | UEFI_RUNTIME_SERVICES_CODE | UEFI_RUNTIME_SERVICES_DATA
+        | UEFI_CONVENTIONAL_MEMORY | UEFI_UNUSABLE_MEMORY
+        | UEFI_PAL_CODE | UEFI_PERSISTENT_MEMORY)
+}
+
+/// Whether `addr` is a device or firmware window a module may map or read:
+/// MMIO, reserved, ACPI tables and NVS (where ACPI OpRegions live), or no
+/// region at all. Never RAM and never the kernel image, whatever the map
+/// says. Fails closed: without a complete map only regions the firmware
+/// typed as MMIO pass.
+pub fn is_device_window(addr: u64) -> bool {
+    // SAFETY: linker-provided symbols; only their addresses are taken.
+    let (image_lo, image_hi) = unsafe {
+        (&__image_base as *const u8 as u64, &__heap_start as *const u8 as u64)
+    };
+    if addr >= image_lo && addr < image_hi { return false; }
+    let map = FIRMWARE_MAP.lock();
+    let found = map.regions[..map.count].iter()
+        .find(|(b, l, _)| addr >= *b && addr < b.saturating_add(*l));
+    match found {
+        Some(&(_, _, t)) => !is_ram_type(t),
+        None => !map.truncated,
+    }
 }
 
 pub fn init(boot_info: &crate::boot_info::BootInfo) {
@@ -140,17 +172,16 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // above. The boot_info struct lives in BSS (= part of the kernel
     // image), so no separate reservation needed.
 
-    // Keep the RAM map while we still have it.
+    // Keep the whole map while we still have it.
     {
-        let mut g = RAM_RANGES.lock();
-        let (ranges, n) = &mut *g;
-        for region in boot_info.usable_regions() {
-            if *n >= ranges.len() { break; }
-            let length = region.page_count * PAGE_SIZE as u64;
-            if length == 0 { continue; }
-            ranges[*n] = (region.physical_start, length);
-            *n += 1;
+        let mut m = FIRMWARE_MAP.lock();
+        let n = (boot_info.region_count as usize).min(m.regions.len());
+        for (dst, r) in m.regions.iter_mut().zip(&boot_info.regions[..n]) {
+            *dst = (r.physical_start, r.page_count * PAGE_SIZE as u64, r.uefi_type);
         }
+        m.count = n;
+        // A full table may have lost descriptors at the stub.
+        m.truncated = n >= crate::boot_info::MAX_MEMORY_REGIONS;
     }
 
     let free = alloc.free_count;
