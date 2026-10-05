@@ -100,10 +100,10 @@ pub extern "C" fn fiber_on_exit() {
     // own hlt loop.)
 }
 
-/// Default per-fiber stack size. The WASM linear memory is separate (on the
-/// heap), so this only holds the interpreter and host-fn call frames. No
-/// guard page (heap-backed): overflow corrupts memory.
-pub const DEFAULT_STACK_BYTES: usize = 128 * 1024;
+/// Default per-fiber stack size. WASM linear memory lives elsewhere; this
+/// holds the compiled module's frames and the host functions it calls.
+/// The page below it is a guard (`mm::stack`).
+pub const DEFAULT_STACK_BYTES: usize = 1024 * 1024;
 
 // ── Per-core fiber scheduler ───────────────────────────────────────────
 //
@@ -273,17 +273,18 @@ pub fn admit(cid: usize, func: fn(u64), arg: u64) {
     admit_with_stack(cid, func, arg, DEFAULT_STACK_BYTES);
 }
 
-/// Like `admit` but with an explicit stack size. Use for long-running kernel
-/// workers that run deep call chains (e.g. the 9p persist worker doing npkFS
-/// writes/commits — AES + B-tree COW + journal — which the main kernel stack
-/// handles fine but overflow the default 128 KiB fiber stack, silently smashing
-/// memory since fibers have no guard page).
+/// Like `admit` but with an explicit stack size, for workers with deep call
+/// chains (e.g. the 9p persist worker: AES + B-tree COW + journal).
 pub fn admit_with_stack(cid: usize, func: fn(u64), arg: u64, stack_bytes: usize) {
     if cid >= MAX_CORES {
         func(arg); // degenerate (no per-core queue) → run inline
         return;
     }
-    let mut fiber = Box::new(Fiber::new(stack_bytes, fiber_app_entry, 0));
+    let Some(fiber) = Fiber::new(stack_bytes, fiber_app_entry, 0) else {
+        crate::kprintln!("[fiber] no memory for a {} KiB stack, task dropped", stack_bytes / 1024);
+        return;
+    };
+    let mut fiber = Box::new(fiber);
     fiber.app_func = Some(func);
     fiber.app_arg = arg;
     fiber.state = FiberState::Ready;
@@ -609,29 +610,25 @@ extern "C" fn fiber_app_entry(_unused: u64) {
     }
 }
 
-/// A fiber: a saved context, the heap-backed stack it runs on, its
-/// scheduling state, and the app entry to run. Dropping it frees the stack
-/// — only when finished (Done) or never started, never while parked.
+/// A fiber: a saved context, the guarded stack it runs on, its scheduling
+/// state, and the app entry to run. Dropping it frees the stack — only when
+/// finished (Done) or never started, never while parked.
 pub struct Fiber {
     pub ctx: Context,
     state: FiberState,
     waker: Waker,
     app_func: Option<fn(u64)>,
     app_arg: u64,
-    // 16-byte-aligned backing store (Box<[u128]> guarantees align 16, which
-    // the ABI needs at the trampoline's `call`). Kept solely to free on drop.
-    _stack: Box<[u128]>,
+    stack: crate::mm::stack::KernelStack,
 }
 
 impl Fiber {
     /// Build a fiber that will start at `entry(arg)` on a fresh stack.
     /// The first `switch` into `self.ctx` runs `entry`.
-    pub fn new(stack_bytes: usize, entry: extern "C" fn(u64), arg: u64) -> Fiber {
-        let n = stack_bytes.div_ceil(16).max(64);
-        let mut stack = alloc::vec![0u128; n].into_boxed_slice();
-
-        let base = stack.as_mut_ptr() as usize;
-        let top = base + n * 16; // 16-aligned (Box<[u128]>)
+    /// `None` when no stack of that size can be had.
+    pub fn new(stack_bytes: usize, entry: extern "C" fn(u64), arg: u64) -> Option<Fiber> {
+        let stack = crate::mm::stack::KernelStack::new(stack_bytes)?;
+        let top = stack.top() as usize; // page-aligned, so 16-aligned
 
         // Seven u64 slots below `top`, mirroring what `switch` pops then
         // `ret`s through:  r15 r14 r13 r12 rbx rbp [return addr]
@@ -650,14 +647,28 @@ impl Fiber {
             *p.add(6) = fiber_trampoline as *const () as u64; // ret → trampoline
         }
 
-        Fiber {
+        Some(Fiber {
             ctx: Context { rsp: sp0 as u64 },
             state: FiberState::Ready,
             waker: NO_WAKER,
             app_func: None,
             app_arg: 0,
-            _stack: stack,
-        }
+            stack,
+        })
+    }
+}
+
+/// Lowest usable address of the stack the current fiber runs on, or `None`
+/// outside a fiber (boot and AP main stacks).
+pub fn current_stack_lo() -> Option<u64> {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES { return None; }
+    // SAFETY: CURRENT_FIBER[cid] is written only by this core's scheduler;
+    // non-null means the fiber is checked out and running here, and its
+    // stack lives as long as it does.
+    unsafe {
+        let f = CURRENT_FIBER[cid];
+        if f.is_null() { None } else { Some((*f).stack.lo()) }
     }
 }
 
@@ -695,7 +706,10 @@ extern "C" fn st_fiber_entry(arg: u64) {
 
 /// Boot validation. Safe to call once on Core 0 after serial is up.
 pub fn self_test() {
-    let mut fiber = Fiber::new(DEFAULT_STACK_BYTES, st_fiber_entry, 0xF1B0);
+    let Some(mut fiber) = Fiber::new(DEFAULT_STACK_BYTES, st_fiber_entry, 0xF1B0) else {
+        crate::kprintln!("[fiber] self-test FAIL: no stack");
+        return;
+    };
     let fiber_ctx: *mut Context = &mut fiber.ctx;
 
     // SAFETY: single-threaded boot path on Core 0; the statics are touched

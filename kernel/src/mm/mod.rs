@@ -5,3 +5,4 @@
 pub mod memory;
 pub mod heap;
 pub mod paging;
+pub mod stack;

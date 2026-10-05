@@ -380,8 +380,8 @@ pub const VCPU_AS_FIBER: bool = true;
 
 /// Run the VMX guest as a pool fiber too, so it leaves the cooperative
 /// Core-0 path (which shares Core 0 with Shade, input and the cursor and
-/// starves both under load). Requires a per-core TSS on the worker
-/// (`tss::ensure_core`, done in `vmx::vm_open`). `false` reverts Intel to
+/// starves both under load). Relies on every core having its own TSS
+/// (`tss::init_core`). `false` reverts Intel to
 /// cooperative Core 0; AMD's fiber mode keys off the vendor, not this flag.
 pub const VMX_VCPU_AS_FIBER: bool = true;
 

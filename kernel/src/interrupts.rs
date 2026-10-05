@@ -382,9 +382,26 @@ extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
     halt_loop();
 }
 
+/// Run the double-fault handler on the IST stack from `tss::init_core`.
+/// Call once the boot core's TSS is in; every core that runs afterwards
+/// must have installed its own (the IDT is shared).
+pub fn use_double_fault_stack() {
+    // SAFETY: a single byte of the static IDT, written on the boot core
+    // before the APs start; the CPU reads it only when delivering #DF.
+    unsafe {
+        core::ptr::addr_of_mut!(IDT[8].ist).write(crate::tss::DOUBLE_FAULT_IST);
+    }
+}
+
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
     kprintln!();
     kprintln!("[npk] !!! DOUBLE FAULT (INT 8) !!!");
+    let cr2: u64;
+    // SAFETY: reads CR2, which holds the address of the last page fault.
+    unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+    if crate::mm::stack::is_guard(cr2) {
+        kprintln!("[npk] kernel stack overflow: guard page {:#018x} hit", cr2);
+    }
     kprintln!("[npk] Error code: {:#x}", error_code);
     kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
     kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);

@@ -585,6 +585,7 @@ impl Instance {
     /// stopped it. Faults from this code are claimed for the duration and
     /// released again — outside that window a page fault is the kernel's own.
     pub fn call(&mut self, off: usize, a: u32, b: u32, c: u32) -> (u32, u32) {
+        self.ctx[vmctx::STACK_LIMIT as usize / 8] = stack_limit();
         arm_faults(&self.code, self.pf_entry, self.de_entry);
         let entry = self.code.base + self.entry as u64;
         let target = self.code.base + off as u64;
@@ -598,6 +599,27 @@ impl Instance {
         };
         disarm_faults();
         (r, self.trap_code())
+    }
+}
+
+/// Stack room kept free below the module's deepest frame for the host
+/// functions it calls (scene decoding, layout, the network stack).
+const HOST_STACK_RESERVE: u64 = 512 * 1024;
+
+/// Room a module gets when it is not called from a fiber. Boot and AP
+/// main stacks are 2 MiB, and the callers there are shallow.
+const OFF_FIBER_BUDGET: u64 = 1024 * 1024;
+
+/// Lowest address the module's frames may reach on the current stack.
+fn stack_limit() -> u64 {
+    match crate::smp::fiber::current_stack_lo() {
+        Some(lo) => lo + HOST_STACK_RESERVE,
+        None => {
+            let rsp: u64;
+            // SAFETY: reads the stack pointer, nothing else.
+            unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+            rsp.saturating_sub(OFF_FIBER_BUDGET)
+        }
     }
 }
 

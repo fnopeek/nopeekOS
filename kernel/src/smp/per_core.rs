@@ -916,6 +916,10 @@ fn least_loaded(cid: usize) -> bool {
 /// Interrupts are disabled (cli from trampoline). IDT is loaded.
 #[unsafe(no_mangle)]
 pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
+    // Own GDT + TSS before anything can fault: the shared IDT sends a
+    // double fault to IST1, which only exists once this core has a TSS.
+    crate::tss::init_core();
+
     // Enable Local APIC (needed for IPI wakeup fallback)
     let apic_base = super::read_apic_base();
     // SAFETY: APIC MMIO is identity-mapped, each core sees its own LAPIC

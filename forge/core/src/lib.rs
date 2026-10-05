@@ -70,8 +70,15 @@ pub mod vmctx {
     /// host function would need a static, and a static cannot serve two
     /// modules on two cores.
     pub const HOST_CTX: i32 = 112;
+    /// Lowest stack address a module frame may reach. Every function
+    /// compares its stack pointer against it after reserving its frame and
+    /// traps below it, so deep recursion or a huge frame ends the module
+    /// instead of running off the native stack. What lies between the limit
+    /// and the end of the stack is the room left for host functions. Zero
+    /// disables the check.
+    pub const STACK_LIMIT: i32 = 120;
 
-    pub const SIZE: usize = 120;
+    pub const SIZE: usize = 128;
     /// Every global occupies eight bytes regardless of type, so the index is
     /// a plain shift.
     pub const GLOBAL_STRIDE: i32 = 8;
@@ -96,6 +103,8 @@ pub mod trap {
     /// itself does not travel here; it belongs to the embedder's state, which
     /// the host function already holds.
     pub const EXIT: u32 = 8;
+    /// A frame would have reached below `vmctx::STACK_LIMIT`.
+    pub const STACK_EXHAUSTED: u32 = 9;
 
     pub fn name(code: u32) -> &'static str {
         match code {
@@ -108,6 +117,7 @@ pub mod trap {
             OUT_OF_FUEL => "Fuel aufgebraucht",
             UNCOMPILED => "Funktion nicht uebersetzt",
             EXIT => "vom Programm selbst beendet",
+            STACK_EXHAUSTED => "stack exhausted",
             _ => "unbekannt",
         }
     }

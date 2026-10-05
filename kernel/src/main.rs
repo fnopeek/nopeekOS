@@ -144,6 +144,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // through it until a driver asks.
     ioapic::init();
 
+    // This core's GDT + TSS (double-fault stack, valid TR for VMX), then
+    // switch the double fault onto it. Before the APs start: they share
+    // the IDT and install their own TSS first thing.
+    tss::init_core();
+    interrupts::use_double_fault_stack();
     // SMP: discover cores via ACPI MADT, boot Application Processors
     smp::init();
 
@@ -151,15 +156,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // (docs/plan/SCHEDULER_FIBERS.md). Prints `[fiber] self-test OK`.
     smp::fiber::self_test();
 
-    // TSS install (BSP). Replaces the boot GDT with a clone that has
-    // a real long-mode TSS descriptor in slot 3, then `ltr`s it.
-    // VMX host-state validation rejects HOST_TR_SELECTOR=0, so this
-    // must run before microvm::init.
-    tss::init();
-
     // MicroVM: vendor-detect (Intel VMX / AMD SVM), probe
     // capabilities. Host-state setup reads TR via `str` and walks the
-    // GDT for the TSS base — both covered by tss::init() above.
+    // GDT for the TSS base — every core has both (`tss::init_core`).
     microvm::init();
 
     if virtio_blk::init() {

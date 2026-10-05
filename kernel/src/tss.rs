@@ -1,28 +1,19 @@
-//! Task State Segment install — prerequisite for VMLAUNCH.
+//! Per-core GDT + Task State Segment.
 //!
-//! The boot GDT (`boot.s :: gdt64`) is three entries — null, 64-bit
-//! code, 64-bit data — and the kernel never executed `ltr`, so TR=0.
-//! VMX host-state validation rejects HOST_TR_SELECTOR=0 at VMLAUNCH
-//! (SDM Vol. 3C §26.2.3). This module clones the boot GDT into BSS,
-//! appends a 16-byte long-mode TSS descriptor, `lgdt`s the new GDT,
-//! and `ltr`s the new TSS selector. BSP only; worker cores that run a
-//! VMX guest get their own via `ensure_core`.
+//! Every core gets its own GDT (the boot GDT's code and data descriptors
+//! plus a TSS descriptor; the busy bit `ltr` sets means cores cannot share
+//! one) and its own TSS. The TSS carries IST1, the stack the double-fault
+//! handler runs on: a fault while pushing an exception frame — a kernel
+//! stack running into its guard page — can only be reported from a stack
+//! that is known to be good. VMX needs a valid TR as well
+//! (HOST_TR_SELECTOR must not be 0, SDM Vol. 3C §26.2.3); it reads TR and
+//! GDTR back with `str`/`sgdt`, so nothing here is VMX-specific.
 //!
-//! Reference: Intel SDM Vol. 3A §3.4.5.1 (Code- and Data-Segment
-//! Descriptor Types), §7.7 (Task Management in 64-bit Mode);
-//! Vol. 3C §26.2.3 (Checks on Host Segment and Descriptor-Table
-//! Registers).
+//! Reference: Intel SDM Vol. 3A §3.4.5.1, §7.7, §6.14.5 (IST).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::boxed::Box;
 
-/// Maximum cores we install a per-core TSS for (`ensure_core`). A core id
-/// ≥ this is a no-op (it just can't run a VMX guest — only the fiber-mode
-/// worker cores need their own TR).
-pub const MAX_CORES: usize = 16;
-
-/// Long-mode TSS layout (104 bytes minimum, no I/O bitmap). RSP0/1/2
-/// and IST1..IST7 stay zero — we don't use ring transitions or IST
-/// stacks today. I/O map base = 104 means "no I/O bitmap follows".
+/// Long-mode TSS layout (104 bytes, no I/O bitmap).
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct Tss {
@@ -31,13 +22,7 @@ struct Tss {
     rsp1: u64,
     rsp2: u64,
     _reserved1: u64,
-    ist1: u64,
-    ist2: u64,
-    ist3: u64,
-    ist4: u64,
-    ist5: u64,
-    ist6: u64,
-    ist7: u64,
+    ist: [u64; 7],
     _reserved2: u64,
     _reserved3: u16,
     iomap_base: u16,
@@ -45,16 +30,31 @@ struct Tss {
 
 const TSS_LIMIT: u16 = (core::mem::size_of::<Tss>() - 1) as u16;
 
-const TSS_INIT: Tss = Tss {
-    _reserved0: 0,
-    rsp0: 0, rsp1: 0, rsp2: 0,
-    _reserved1: 0,
-    ist1: 0, ist2: 0, ist3: 0, ist4: 0, ist5: 0, ist6: 0, ist7: 0,
-    _reserved2: 0, _reserved3: 0,
-    iomap_base: 104,
-};
+/// IST slot of the double-fault stack (1-based, as the IDT entry names it).
+pub const DOUBLE_FAULT_IST: u8 = 1;
 
-static mut TSS: Tss = TSS_INIT;
+/// Size of each core's double-fault stack. The handler only prints and
+/// halts, but printing walks the console path.
+const DF_STACK_BYTES: usize = 32 * 1024;
+
+/// 10-byte pseudo-descriptor consumed by `lgdt`.
+#[repr(C, packed)]
+struct GdtPointer {
+    limit: u16,
+    base: u64,
+}
+
+/// Everything one core's `lgdt`/`ltr` points at. Leaked on purpose: the CPU
+/// keeps using it for the life of the core.
+#[repr(C, align(16))]
+struct CoreTables {
+    gdt: [u64; 5],
+    gdtr: GdtPointer,
+    tss: Tss,
+}
+
+/// TSS selector for `ltr`: index 3, TI=0, RPL=0.
+const TSS_SELECTOR: u16 = 3 << 3;
 
 /// Build the 16-byte long-mode TSS descriptor (two GDT slots) for a TSS
 /// at `tss_base`. Returns `(lo, hi)`. SDM Vol. 3A §7.2.3.
@@ -64,141 +64,62 @@ fn tss_descriptor(tss_base: u64) -> (u64, u64) {
     let base_lo23 = (tss_base >> 16) & 0xFF;
     let base_lo31 = (tss_base >> 24) & 0xFF;
     let access: u64 = 0x89; // P=1, DPL=0, S=0, type=9 (available 64-bit TSS)
-    let granularity: u64 = 0; // G=0, AVL=0, limit[19:16]=0
     let desc_lo = limit_lo
         | (base_lo15 << 16)
         | (base_lo23 << 32)
         | (access << 40)
-        | (granularity << 48)
         | (base_lo31 << 56);
     let desc_hi = (tss_base >> 32) & 0xFFFF_FFFF;
     (desc_lo, desc_hi)
 }
 
-const GDT_INIT: [u64; 5] = [
-    0,                       // null
-    0x00AF_9A00_0000_FFFF,   // code (0x08, ring0, L=1, P=1, type=0xA)
-    0x00CF_9200_0000_FFFF,   // data (0x10, ring0, P=1, type=0x2)
-    0,                       // TSS desc lo  — filled at install
-    0,                       // TSS desc hi  — filled at install
-];
+/// Install this core's GDT and TSS and `ltr` it. Call once per core, as
+/// early as the heap allows: the BSP before the APs start, each AP first
+/// thing in its entry. Until then a double fault on that core has no
+/// usable IST stack.
+pub fn init_core() {
+    let df_stack: &'static mut [u128] =
+        Box::leak(alloc::vec![0u128; DF_STACK_BYTES / 16].into_boxed_slice());
+    let df_top = df_stack.as_ptr() as u64 + DF_STACK_BYTES as u64; // 16-aligned
 
-const GDTR_INIT: GdtPointer = GdtPointer { limit: 0, base: 0 };
+    let mut ist = [0u64; 7];
+    ist[DOUBLE_FAULT_IST as usize - 1] = df_top;
+    let tables: &'static mut CoreTables = Box::leak(Box::new(CoreTables {
+        gdt: [
+            0,                     // null
+            0x00AF_9A00_0000_FFFF, // code (0x08, ring0, L=1, P=1, type=0xA) — as boot.s
+            0x00CF_9200_0000_FFFF, // data (0x10, ring0, P=1, type=0x2) — as boot.s
+            0,                     // TSS descriptor, low half
+            0,                     // TSS descriptor, high half
+        ],
+        gdtr: GdtPointer { limit: 0, base: 0 },
+        tss: Tss {
+            _reserved0: 0,
+            rsp0: 0, rsp1: 0, rsp2: 0,
+            _reserved1: 0,
+            ist,
+            _reserved2: 0, _reserved3: 0,
+            iomap_base: TSS_LIMIT + 1, // no I/O bitmap
+        },
+    }));
 
-// ── Per-core (AP) TSS+GDT for fiber-mode VMX ────────────────────────
-//
-// VMX rejects HOST_TR_SELECTOR=0 at VM-entry (SDM §26.2.3). The BSP gets
-// its TR from `init()` at boot; AP/worker cores keep the boot GDT with
-// TR=0. Fiber mode runs the guest's VMRESUME loop on a worker core, so that
-// worker needs its own valid TSS + TR before `write_host_state`. Each core
-// gets a private TSS + 5-slot GDT (the busy bit `ltr` sets means cores
-// cannot share one TSS descriptor). SVM has no such host-state check and
-// never calls `ensure_core`.
-#[unsafe(link_section = ".data")]
-static mut AP_GDT: [[u64; 5]; MAX_CORES] = [GDT_INIT; MAX_CORES];
-#[unsafe(link_section = ".data")]
-static mut AP_GDTR: [GdtPointer; MAX_CORES] = [GDTR_INIT; MAX_CORES];
-static mut AP_TSS: [Tss; MAX_CORES] = [TSS_INIT; MAX_CORES];
-static AP_TSS_INSTALLED: [AtomicBool; MAX_CORES] = {
-    const F: AtomicBool = AtomicBool::new(false);
-    [F; MAX_CORES]
-};
+    let (lo, hi) = tss_descriptor(core::ptr::addr_of!(tables.tss) as u64);
+    tables.gdt[3] = lo;
+    tables.gdt[4] = hi;
+    tables.gdtr = GdtPointer {
+        limit: (core::mem::size_of::<[u64; 5]>() - 1) as u16,
+        base: tables.gdt.as_ptr() as u64,
+    };
 
-/// Install a private TSS + GDT on the current core and `ltr` it, so VMX
-/// host-state has a valid HOST_TR when the guest runs as a fiber on this
-/// worker core. Idempotent per core. No-op for core 0 (the BSP already
-/// `ltr`'d via `init()` at boot — must not clobber its GDT) and for ids
-/// past `MAX_CORES`. Mirrors `init()` but per-core. Call on the worker
-/// core that is about to `vm_open` a VMX guest.
-pub fn ensure_core(core_id: usize) {
-    if core_id == 0 || core_id >= MAX_CORES {
-        return;
-    }
-    if AP_TSS_INSTALLED[core_id].swap(true, Ordering::SeqCst) {
-        return;
-    }
-    // SAFETY: each core writes only its own slot (disjoint), this core is
-    // the only one that ever `ltr`s AP_GDT[core_id]. lgdt keeps CS/SS/DS
-    // valid because slots 1+2 match the boot GDT byte-for-byte; we never
-    // reload the segment registers.
+    // SAFETY: `tables` is leaked, so the GDT and TSS outlive the core. Slots
+    // 1 and 2 match the boot GDT byte for byte, so CS/SS/DS stay valid
+    // without reloading the segment registers. The TSS descriptor is fresh
+    // (not busy), which `ltr` requires.
     unsafe {
-        let tss_base = core::ptr::addr_of!(AP_TSS[core_id]) as u64;
-        let (desc_lo, desc_hi) = tss_descriptor(tss_base);
-        core::ptr::addr_of_mut!(AP_GDT[core_id][3]).write(desc_lo);
-        core::ptr::addr_of_mut!(AP_GDT[core_id][4]).write(desc_hi);
-
-        let gdt_base = core::ptr::addr_of!(AP_GDT[core_id]) as u64;
-        let gdt_bytes = core::mem::size_of::<[u64; 5]>();
-        core::ptr::addr_of_mut!(AP_GDTR[core_id].limit).write((gdt_bytes - 1) as u16);
-        core::ptr::addr_of_mut!(AP_GDTR[core_id].base).write(gdt_base);
-
         core::arch::asm!(
             "lgdt [{ptr}]",
             "ltr {sel:x}",
-            ptr = in(reg) core::ptr::addr_of!(AP_GDTR[core_id]),
-            sel = in(reg) TSS_SELECTOR,
-            options(nostack, preserves_flags),
-        );
-    }
-}
-
-/// 5-slot GDT: null (0), code (1, 0x08), data (2, 0x10), TSS-lo (3,
-/// 0x18), TSS-hi (4). Initial values for slots 1+2 mirror `boot.s ::
-/// gdt64_code/_data`; slots 3+4 are filled at runtime once we know
-/// the TSS virtual address.
-#[unsafe(link_section = ".data")]
-static mut GDT: [u64; 5] = [
-    0,                       // null
-    0x00AF_9A00_0000_FFFF,   // code (0x08, ring0, L=1, P=1, type=0xA)
-    0x00CF_9200_0000_FFFF,   // data (0x10, ring0, P=1, type=0x2)
-    0,                       // TSS desc lo  — filled in init()
-    0,                       // TSS desc hi  — filled in init()
-];
-
-/// 10-byte pseudo-descriptor consumed by `lgdt`. Filled at init time.
-#[repr(C, packed)]
-struct GdtPointer {
-    limit: u16,
-    base: u64,
-}
-
-#[unsafe(link_section = ".data")]
-static mut GDTR: GdtPointer = GdtPointer { limit: 0, base: 0 };
-
-/// TSS selector for `ltr`: index 3, TI=0, RPL=0.
-const TSS_SELECTOR: u16 = 3 << 3;
-
-static INSTALLED: AtomicBool = AtomicBool::new(false);
-
-/// Install the TSS and switch to the cloned GDT. Idempotent; calling
-/// twice is a no-op so accidental double-invocation is harmless.
-pub fn init() {
-    if INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    let tss_base: u64 = core::ptr::addr_of!(TSS) as u64;
-    let (desc_lo, desc_hi) = tss_descriptor(tss_base);
-
-    // SAFETY: BSP boot path, single-threaded relative to GDT/TSS
-    // statics (APs are already running but never touch these symbols).
-    // Writes are confined to BSS-resident memory we own exclusively.
-    unsafe {
-        core::ptr::addr_of_mut!(GDT[3]).write(desc_lo);
-        core::ptr::addr_of_mut!(GDT[4]).write(desc_hi);
-
-        let gdt_base = core::ptr::addr_of!(GDT) as u64;
-        let gdt_bytes = core::mem::size_of::<[u64; 5]>();
-        core::ptr::addr_of_mut!(GDTR.limit).write((gdt_bytes - 1) as u16);
-        core::ptr::addr_of_mut!(GDTR.base).write(gdt_base);
-
-        // lgdt loads from a memory operand. Then ltr loads the TSS.
-        // The CS/SS/DS/ES/FS/GS selectors stay valid because slots 1
-        // and 2 of the new GDT match the boot GDT byte-for-byte.
-        core::arch::asm!(
-            "lgdt [{ptr}]",
-            "ltr {sel:x}",
-            ptr = in(reg) core::ptr::addr_of!(GDTR),
+            ptr = in(reg) core::ptr::addr_of!(tables.gdtr),
             sel = in(reg) TSS_SELECTOR,
             options(nostack, preserves_flags),
         );

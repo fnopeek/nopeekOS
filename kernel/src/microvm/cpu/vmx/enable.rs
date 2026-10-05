@@ -778,8 +778,7 @@ impl VmContext {
     /// Build an AP vCPU that shares an already-open BSP's `VmShared`
     /// (guest SMP). Enters VMX root on this (the AP's) worker core — VMX root
     /// + VMCS are per-physical-core, so the AP allocates its own VMXON/VMCS
-    /// here — installs this core's TSS (valid HOST_TR, like `vm_open`),
-    /// configures a real-mode SIPI-entry guest state, and reuses the BSP's
+    /// here, configures a real-mode SIPI-entry guest state, and reuses the BSP's
     /// shared EPTP / device model. No guest RAM / EPT / device allocation
     /// (those belong to the BSP, freed last-one-out). `apic_id` is 1.. Mirror
     /// of svm `open_ap`.
@@ -788,9 +787,6 @@ impl VmContext {
         sipi_vector: u8,
         apic_id: u8,
     ) -> Result<VmContext, &'static str> {
-        // Worker-core TSS so HOST_TR is valid at VM-entry (see vmx::vm_open).
-        crate::tss::ensure_core(crate::smp::per_core::current_core_id());
-
         let (vmxon_phys, vmcs_phys) = vmx_enter_root()?;
 
         // In VMX root now: VMXOFF on any error so the core never strands.

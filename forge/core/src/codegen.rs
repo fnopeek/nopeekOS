@@ -1011,6 +1011,12 @@ pub fn compile_func(
     f.asm.mov_rr64(Reg::Rbp, Reg::Rsp);
     f.asm.sub_r64_imm32(Reg::Rsp, 0);
     f.frame_patch = f.asm.pos() - 4;
+    // Stack check, before the frame is written to. `rax` is free here: it
+    // carries no argument. An unsigned compare: below the limit traps, and
+    // a limit of zero never does.
+    f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
+    f.asm.cmp_rr64(Reg::Rsp, A);
+    f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
     let (places, _) = arg_places(params);
     for (i, t) in params.iter().enumerate() {
         let off = f.local(i as u32);

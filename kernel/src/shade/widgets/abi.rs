@@ -416,12 +416,12 @@ pub enum Modifier {
     // Pseudo-state modifier lists — compositor merges the inner list onto
     // the widget when the state matches; the tree itself stays static
     // across hovers (no app round-trip).
-    Hover(Vec<Modifier>),
-    Focus(Vec<Modifier>),
-    Active(Vec<Modifier>),
-    Disabled(Vec<Modifier>),
+    Hover(#[serde(deserialize_with = "nested")] Vec<Modifier>),
+    Focus(#[serde(deserialize_with = "nested")] Vec<Modifier>),
+    Active(#[serde(deserialize_with = "nested")] Vec<Modifier>),
+    Disabled(#[serde(deserialize_with = "nested")] Vec<Modifier>),
     /// Container query — apply inner modifiers only at the given density.
-    WhenDensity(Density, Vec<Modifier>),
+    WhenDensity(Density, #[serde(deserialize_with = "nested")] Vec<Modifier>),
     /// Uniform scale, Q8.8 fixed-point. 256 = 1.0× (identity).
     Scale(u16),
     /// Layout minimum width (px at 1× scale).
@@ -527,6 +527,39 @@ pub const SLIDER_MAX: u16 = 1000;
 /// are declared so their wire indices do not shift when v2 implements
 /// them — compositor rejects them with a log until then.
 ///
+/// Deepest nesting a decoded tree may have, counting widgets inside widgets
+/// and modifier lists inside modifiers alike. Every pass over the tree —
+/// decode, layout, render, clone, drop — recurses once per level on the
+/// caller's stack, and the tree comes from an app. Real interfaces stay
+/// below 30.
+pub const MAX_NESTING: u32 = 128;
+
+/// Current nesting of the decode running on each core. A decode never
+/// yields, so one counter per core is exclusive to it.
+static NESTING: [core::sync::atomic::AtomicU32; 256] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 256];
+
+/// `deserialize_with` for every recursive field: one level deeper, refused
+/// past `MAX_NESTING` before the level is decoded.
+fn nested<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    use core::sync::atomic::Ordering::Relaxed;
+    struct Level(&'static core::sync::atomic::AtomicU32);
+    impl Drop for Level {
+        fn drop(&mut self) { self.0.fetch_sub(1, Relaxed); }
+    }
+    let cid = crate::smp::per_core::current_core_id() % NESTING.len();
+    let counter = &NESTING[cid];
+    let _level = Level(counter);
+    if counter.fetch_add(1, Relaxed) >= MAX_NESTING {
+        return Err(serde::de::Error::custom("widget tree nested too deeply"));
+    }
+    T::deserialize(d)
+}
+
 /// Struct-variant field order is also part of the ABI (postcard serializes
 /// fields in declaration order).
 #[non_exhaustive]
@@ -534,22 +567,26 @@ pub const SLIDER_MAX: u16 = 1000;
 pub enum Widget {
     // ── Containers ────────────────────────────────────────────────────
     Column {
+        #[serde(deserialize_with = "nested")] 
         children:  Vec<Widget>,
         spacing:   u16,
         align:     Align,
         modifiers: Vec<Modifier>,
     },
     Row {
+        #[serde(deserialize_with = "nested")] 
         children:  Vec<Widget>,
         spacing:   u16,
         align:     Align,
         modifiers: Vec<Modifier>,
     },
     Stack {
+        #[serde(deserialize_with = "nested")] 
         children:  Vec<Widget>,
         modifiers: Vec<Modifier>,
     },
     Scroll {
+        #[serde(deserialize_with = "nested")] 
         child:     alloc::boxed::Box<Widget>,
         axis:      Axis,
         modifiers: Vec<Modifier>,
@@ -609,6 +646,7 @@ pub enum Widget {
     /// rect.
     Popover {
         anchor:     NodeId,
+        #[serde(deserialize_with = "nested")] 
         child:      alloc::boxed::Box<Widget>,
         on_dismiss: ActionId,
         modifiers:  Vec<Modifier>,
@@ -621,6 +659,7 @@ pub enum Widget {
     },
     #[allow(dead_code)]
     Menu {
+        #[serde(deserialize_with = "nested")] 
         items:     Vec<Widget>,
         modifiers: Vec<Modifier>,
     },

@@ -271,6 +271,15 @@ impl Inst {
     pub(crate) fn set_fuel(&mut self, v: i64) {
         self.ctx[forge_core::vmctx::FUEL as usize / 8] = v as u64;
     }
+
+    /// Let the module's frames use at most `bytes` below the current stack
+    /// pointer, as the kernel does with its fiber stacks.
+    pub(crate) fn set_stack_budget(&mut self, bytes: u64) {
+        let rsp: u64;
+        // SAFETY: reads the stack pointer, nothing else.
+        unsafe { std::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+        self.ctx[forge_core::vmctx::STACK_LIMIT as usize / 8] = rsp - bytes;
+    }
 }
 
 // The host side, defined once and handed to both engines so a disagreement
@@ -370,6 +379,10 @@ pub fn oneshot(wasm: &[u8], arg: u32, fuel: Option<i64>) -> Option<(u32, u32)> {
 }
 
 fn run_it(src: &str, arg: u32, fuel: Option<i64>) -> Option<(u32, u32)> {
+    run_with_stack(src, arg, fuel, None)
+}
+
+fn run_with_stack(src: &str, arg: u32, fuel: Option<i64>, stack: Option<u64>) -> Option<(u32, u32)> {
     let wasm = wat::parse_str(src).ok()?;
     let m = forge_core::compile(&wasm).ok()?;
     let fidx = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i)?;
@@ -379,6 +392,9 @@ fn run_it(src: &str, arg: u32, fuel: Option<i64>) -> Option<(u32, u32)> {
     let mut inst = Inst::new(&m, exec.base())?;
     if let Some(v) = fuel {
         inst.set_fuel(v);
+    }
+    if let Some(b) = stack {
+        inst.set_stack_budget(b);
     }
     let r = exec.call_entry(m.entry_offset, off, inst.ptr(), arg, 0, 0);
     Some((r, inst.trap_code()))
@@ -465,6 +481,32 @@ fn traps_report_themselves() -> bool {
     // …and the one that must not trap, because wasm wants an answer there.
     want(&minmax("i32.rem_s"), 0xFFFF_FFFF, None, NONE, "INT_MIN%-1 darf NICHT trappen");
 
+    // The stack limit: recursion and a single oversized frame both stop at
+    // it instead of running off the native stack. Without the limit both
+    // would take the harness down.
+    let rec = "(module (func $f (export \"f\") (param i32) (result i32) \
+        local.get 0 i32.eqz if (result i32) i32.const 0 else \
+        local.get 0 i32.const 1 i32.sub call $f i32.const 1 i32.add end))";
+    let mut stack_ok = true;
+    let mut want_stack = |src: &str, arg: u32, code: u32, what: &str| {
+        match run_with_stack(src, arg, None, Some(256 * 1024)) {
+            Some((_, got)) if got == code => {}
+            Some((_, got)) => {
+                println!("  Trap: {what} reported {} instead of {}", name(got), name(code));
+                stack_ok = false;
+            }
+            None => {
+                println!("  Trap: {what} could not be run");
+                stack_ok = false;
+            }
+        }
+    };
+    want_stack(rec, 100, NONE, "shallow recursion");
+    want_stack(rec, 10_000_000, STACK_EXHAUSTED, "unbounded recursion");
+    let big = format!("(module (func (export \"f\") (param i32) (result i32) \
+        (local {}) i32.const 1))", "i64 ".repeat(40_000));
+    want_stack(&big, 0, STACK_EXHAUSTED, "frame larger than the stack");
+
     // `unreachable` is a trap the generator raises itself.
     let unr = "(module (func (export \"f\") (param i32) (result i32) \
         local.get 0 if unreachable end i32.const 3))";
@@ -481,7 +523,7 @@ fn traps_report_themselves() -> bool {
     want(loopy, 1, Some(100_000), OUT_OF_FUEL, "Endlosschleife");
     want(loopy, 0, Some(100_000), NONE, "endlicher Lauf");
     want(loopy, 0, Some(0), OUT_OF_FUEL, "leeres Budget");
-    ok
+    ok && stack_ok
 }
 
 struct Case {
