@@ -210,7 +210,7 @@ pub(crate) fn npk_screen_flash(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     if w <= 0 || h <= 0 { return -1; }
@@ -277,7 +277,7 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
 
 pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -290,7 +290,7 @@ pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
 
 pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     if w <= 0 || h <= 0 || x < 0 || y < 0 { return -1; }
@@ -364,7 +364,7 @@ pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_window_set_dock(ctx: &mut HostState, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     if w <= 0 || h <= 0 { return -1; }
@@ -418,10 +418,15 @@ pub(crate) fn npk_window_set_dock(ctx: &mut HostState, w: i32, h: i32) -> i32 {
 
 pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
+    // A panel is a strip along an edge, and its size becomes a pixel buffer
+    // on the next commit: clamp it to a strip of the screen.
+    let fb = crate::framebuffer::get_info();
+    let w = (w as u32).min(fb.width) as i32;
+    let h = (h as u32).min(fb.height / 4) as i32;
 
     let mut wid = ctx.widget_window_id;
     if wid == 0 {
@@ -578,7 +583,10 @@ pub(crate) fn npk_audio_close(ctx: &mut HostState, slot: i32) -> i32 {
     if crate::audio::close_for(slot as usize, ctx.pid) { 0 } else { -1 }
 }
 
-pub(crate) fn npk_audio_set_volume(_ctx: &mut HostState, pct: i32) -> i32 {
+/// The system volume: the shell's control, or the app the user is using.
+pub(crate) fn npk_audio_set_volume(ctx: &mut HostState, pct: i32) -> i32 {
+    let shell = capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_ok();
+    if !shell && !app_is_focused(ctx) { return -1; }
     if pct < 0 { return -1; }
     crate::audio::set_volume(pct.min(100) as u8);
     0
@@ -601,7 +609,7 @@ pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
 
 pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
     crate::acpi::power_off();
@@ -627,7 +635,7 @@ pub(crate) fn npk_get_fb_size(_ctx: &mut HostState) -> i64 {
     ((w as i64) << 32) | (h as i64)
 }
 
-pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
+pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
     match key & 0xFF {
         0 => crate::smp::per_core::core_count() as i64,
         1 => crate::interrupts::uptime_secs() as i64,
@@ -676,6 +684,9 @@ pub(crate) fn npk_sys_info(_ctx: &mut HostState, key: i32) -> i64 {
         // 33: raw blkdev write MB/s, 34: raw blkdev read MB/s.
         // The first call runs the measurement; results live in
         // BENCH_CACHE until reboot.
+        // Benchmarks write raw blocks and the check holds the file system
+        // lock for a full scan: disk tooling with WRITE only.
+        30..=34 | 40 if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() => -1,
         30..=34 => bench_sys_info(key),
 
         // ── fsck self-check (key 40) → read-only integrity scan ──
@@ -943,7 +954,14 @@ pub(crate) fn npk_self_terminal(ctx: &mut HostState) -> i32 {
     ctx.terminal_idx as i32
 }
 
-pub(crate) fn npk_stream_open(_ctx: &mut HostState, idx: i32) -> i32 {
+/// Terminal output sinks read what any terminal prints, which is a remote
+/// console's job and nobody else's.
+fn stream_allowed(ctx: &HostState) -> bool {
+    capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_ok()
+}
+
+pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
+    if !stream_allowed(ctx) { return -1; }
     // -1 = the everything-sink: every write, whichever terminal it was
     // routed to. A remote console bound to one index goes silent as soon
     // as output is redirected elsewhere.
@@ -953,7 +971,8 @@ pub(crate) fn npk_stream_open(_ctx: &mut HostState, idx: i32) -> i32 {
     if crate::shade::terminal::stream_open(idx as usize) { 0 } else { -1 }
 }
 
-pub(crate) fn npk_stream_close(_ctx: &mut HostState, idx: i32) -> i32 {
+pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
+    if !stream_allowed(ctx) { return -1; }
     if idx >= 0 { crate::shade::terminal::stream_close(idx as usize); }
     else { crate::shade::terminal::stream_close_global(); }
     0
@@ -1806,14 +1825,21 @@ pub(crate) fn npk_memory_fence(_ctx: &mut HostState) -> i32 {
     0
 }
 
+/// The NIC's own driver: a hardware module that registered as the network
+/// device. Only it may move frames and wifi commands for that device; any
+/// other module with driver state (an ACPI or input driver) may not.
+fn is_netdev(ctx: &HostState) -> bool {
+    ctx.hw.as_ref().is_some_and(|h| h.registered_as_netdev)
+}
+
 pub(crate) fn npk_netdev_set_link(ctx: &mut HostState, up: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     crate::netdev::set_wasm_nic_link(up != 0);
     0
 }
 
 pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dormant: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     crate::netdev::set_wasm_nic_link_state(carrier != 0, dormant != 0);
     0
 }
@@ -2667,7 +2693,8 @@ pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i3
     0
 }
 
-pub(crate) fn npk_stream_read(mem: &mut [u8], _ctx: &mut HostState, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
+    if !stream_allowed(ctx) { return -1; }
     if buf_len <= 0 { return 0; }
     let Some(out) = guest_mut(mem, buf_ptr, buf_len as usize) else { return -1 };
     if idx < 0 {
@@ -3306,6 +3333,22 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     urls.len() as i32
 }
 
+/// What a caller may pass on for `path`: READ and WRITE as far as it holds
+/// them itself, globally or through a grant on that path. Opening a file in
+/// another app hands over the user's choice, never more than the caller had.
+fn passable_rights(cap: &capability::CapId, path: &str) -> capability::Rights {
+    use capability::Rights;
+    let mut r = Rights::empty();
+    for want in [Rights::READ, Rights::WRITE] {
+        if capability::check_global(cap, want).is_ok()
+            || capability::check_path_grant(cap, path, want)
+        {
+            r |= want;
+        }
+    }
+    r
+}
+
 pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
@@ -3334,9 +3377,9 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
             // Same deal as a pick: the user pointed at this file
             // (a double-click in the file manager), so the app may
             // read and save it — and nothing else.
+            let pass = passable_rights(&cap_id, &arg_str);
             if let Some(cap) = crate::shade::widgets::window_cap(id.0) {
-                capability::grant_path(cap, &arg_str,
-                    capability::Rights::READ | capability::Rights::WRITE);
+                if !pass.is_empty() { capability::grant_path(cap, &arg_str, pass); }
             }
             crate::shade::widgets::push_event(
                 id.0, crate::shade::widgets::abi::Event::Open(arg_str));
@@ -3360,8 +3403,8 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
     // that one path so the app can save it back without holding
     // WRITE over the whole store.
     if let Some(a) = arg.as_deref() {
-        capability::grant_path(module_cap, a,
-            capability::Rights::READ | capability::Rights::WRITE);
+        let pass = passable_rights(&cap_id, a);
+        if !pass.is_empty() { capability::grant_path(module_cap, a, pass); }
     }
     // Create the widget window now (synchronously, titled with the
     // module name) instead of lazily on first scene_commit. The
@@ -3635,12 +3678,12 @@ pub(crate) fn npk_wifi_poll_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
 }
 
 pub(crate) fn npk_wifi_poll_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     wifi_poll_into(mem, buf_ptr, max, crate::wifi::poll_cmd)
 }
 
 pub(crate) fn npk_wifi_send_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
         Some(msg) if crate::wifi::send_event(&msg) => 0,
         _ => -1,
@@ -3661,7 +3704,7 @@ pub(crate) fn npk_driver_report(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
 }
 
 pub(crate) fn npk_netdev_submit_rx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
         Some(frame) => { crate::netdev::wasm_nic_submit_rx(&frame); 0 }
         None => -1,
@@ -3669,7 +3712,7 @@ pub(crate) fn npk_netdev_submit_rx(mem: &mut [u8], ctx: &mut HostState, buf_ptr:
 }
 
 pub(crate) fn npk_netdev_rx_deliver(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
         Some(frame) => { crate::net::wasm_deliver_rx(&frame); 0 }
         None => -1,
@@ -3677,7 +3720,7 @@ pub(crate) fn npk_netdev_rx_deliver(mem: &mut [u8], ctx: &mut HostState, buf_ptr
 }
 
 pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
-    if ctx.hw.is_none() { return -1; }
+    if !is_netdev(ctx) { return -1; }
     let mut frame = [0u8; crate::netdev::MTU];
     let len = match crate::netdev::wasm_nic_poll_tx(&mut frame) {
         Some(n) => n,

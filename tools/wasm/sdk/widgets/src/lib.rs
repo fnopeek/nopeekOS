@@ -108,6 +108,10 @@ pub mod caps {
     pub mod ext {
         /// `npk_http_request` — outbound HTTPS fetch (the native browser, beak).
         pub const NET: u8 = 0x01;
+        /// System UI roles: `npk_window_set_panel` / `_dock` / `_overlay` /
+        /// `_overlay_at` / `_modal`, `npk_power`, system volume without
+        /// focus. The shell's own modules only.
+        pub const SHELL: u8 = 0x02;
     }
 }
 

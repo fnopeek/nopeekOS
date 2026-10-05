@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "drun"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "nopeek_widgets",
  "postcard",

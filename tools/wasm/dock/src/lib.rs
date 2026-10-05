@@ -32,10 +32,11 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
 // Declared capabilities: read (catalog) + write (persist dock config) +
-// exec (launch apps/intents) + render. The kernel grants exactly this.
+// exec (launch apps/intents) + render, and the shell roles (the dock panel,
+// modal while a menu is open). The kernel grants exactly this.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER];
+static NPK_CAPS: [u8; 2] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER, caps::ext::SHELL];
 
 // Host functions are WASM imports from the `env` module, resolved by the
 // kernel at instantiation. Naming the module explicitly is what makes them

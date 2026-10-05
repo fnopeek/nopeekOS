@@ -4,7 +4,6 @@
 //! active (focused) terminal. Windows are completely independent.
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use spin::Mutex;
 
@@ -1181,34 +1180,55 @@ pub fn write_prompt() {
 
 const STREAM_CAPACITY: usize = 65536;
 
-struct StreamBuf {
-    data: Mutex<VecDeque<u8>>,
+/// One mirror buffer. The flag keeps the print path at a single load while
+/// nothing is mirrored; the buffer lives behind the lock, so closing can
+/// never free it under a reader or a writer.
+struct Sink {
+    open: AtomicBool,
+    buf: Mutex<Option<VecDeque<u8>>>,
 }
 
-impl StreamBuf {
-    fn new() -> Self {
-        Self { data: Mutex::new(VecDeque::with_capacity(STREAM_CAPACITY)) }
+impl Sink {
+    const fn new() -> Self {
+        Self { open: AtomicBool::new(false), buf: Mutex::new(None) }
+    }
+
+    fn open(&self) {
+        let mut g = self.buf.lock();
+        if g.is_none() {
+            *g = Some(VecDeque::with_capacity(STREAM_CAPACITY));
+        }
+        self.open.store(true, Ordering::Release);
+    }
+
+    fn close(&self) {
+        self.open.store(false, Ordering::Release);
+        *self.buf.lock() = None;
     }
 
     fn push(&self, bytes: &[u8]) {
-        let mut q = self.data.lock();
-        let overflow = (q.len() + bytes.len()).saturating_sub(STREAM_CAPACITY);
-        for _ in 0..overflow { q.pop_front(); }
-        q.extend(bytes.iter().copied());
+        if !self.open.load(Ordering::Acquire) { return; }
+        if let Some(q) = self.buf.lock().as_mut() {
+            let overflow = (q.len() + bytes.len()).saturating_sub(STREAM_CAPACITY);
+            q.drain(..overflow.min(q.len()));
+            let skip = bytes.len().saturating_sub(STREAM_CAPACITY);
+            q.extend(bytes[skip..].iter().copied());
+        }
     }
 
     fn pop_into(&self, dst: &mut [u8]) -> usize {
-        let mut q = self.data.lock();
-        let n = q.len().min(dst.len());
-        for i in 0..n { dst[i] = q.pop_front().unwrap(); }
-        n
+        match self.buf.lock().as_mut() {
+            Some(q) => {
+                let n = q.len().min(dst.len());
+                for (d, b) in dst.iter_mut().zip(q.drain(..n)) { *d = b; }
+                n
+            }
+            None => 0,
+        }
     }
 }
 
-static STREAM_SINKS: [AtomicPtr<StreamBuf>; MAX_SLOTS] = {
-    const NULL: AtomicPtr<StreamBuf> = AtomicPtr::new(core::ptr::null_mut());
-    [NULL; MAX_SLOTS]
-};
+static STREAM_SINKS: [Sink; MAX_SLOTS] = [const { Sink::new() }; MAX_SLOTS];
 
 /// A sink that gets every write, whichever terminal it was addressed to.
 ///
@@ -1217,44 +1237,24 @@ static STREAM_SINKS: [AtomicPtr<StreamBuf>; MAX_SLOTS] = {
 /// command's output to the loop it was typed in, and a failing path may print
 /// from a core with no redirect at all. A mirror bound to one index would go
 /// quiet while the machine is still talking.
-static GLOBAL_SINK: AtomicPtr<StreamBuf> = AtomicPtr::new(core::ptr::null_mut());
+static GLOBAL_SINK: Sink = Sink::new();
 
 /// Open a stream sink for a terminal. Idempotent — calling twice is a no-op.
 pub fn stream_open(idx: usize) -> bool {
-    if idx >= MAX_SLOTS { return false; }
-    if !STREAM_SINKS[idx].load(Ordering::Acquire).is_null() { return true; }
-    let ptr = Box::into_raw(Box::new(StreamBuf::new()));
-    match STREAM_SINKS[idx].compare_exchange(
-        core::ptr::null_mut(), ptr, Ordering::AcqRel, Ordering::Acquire
-    ) {
-        Ok(_) => true,
-        Err(_) => {
-            // SAFETY: lost race, reclaim our unused allocation
-            unsafe { drop(Box::from_raw(ptr)); }
-            true
-        }
+    match STREAM_SINKS.get(idx) {
+        Some(s) => { s.open(); true }
+        None => false,
     }
 }
 
 /// Read buffered bytes into dst. Returns bytes read (0 if empty or not open).
 pub fn stream_read(idx: usize, dst: &mut [u8]) -> usize {
-    if idx >= MAX_SLOTS { return 0; }
-    let ptr = STREAM_SINKS[idx].load(Ordering::Acquire);
-    if ptr.is_null() { return 0; }
-    // SAFETY: ptr remains valid until stream_close swaps it out.
-    // stream_close must not be called concurrently with stream_read on the
-    // same idx (enforced by single-reader convention: one debug.wasm module).
-    unsafe { (*ptr).pop_into(dst) }
+    STREAM_SINKS.get(idx).map_or(0, |s| s.pop_into(dst))
 }
 
 /// Close a stream sink, freeing its buffer.
 pub fn stream_close(idx: usize) {
-    if idx >= MAX_SLOTS { return; }
-    let ptr = STREAM_SINKS[idx].swap(core::ptr::null_mut(), Ordering::AcqRel);
-    if !ptr.is_null() {
-        // SAFETY: swap gave us exclusive ownership of ptr.
-        unsafe { drop(Box::from_raw(ptr)); }
-    }
+    if let Some(s) = STREAM_SINKS.get(idx) { s.close(); }
 }
 
 /// Push to the everything-sink only, touching no terminal slot.
@@ -1262,54 +1262,27 @@ pub fn stream_close(idx: usize) {
 /// `npk_log_serial` bypasses the terminal write path (a widget-only app may
 /// run when no terminal has a backing buffer, and `kprintln` can stall
 /// there). Without this its output would reach only the physical UART and
-/// never the remote mirror. This costs one atomic load and a push into the
-/// sink's own buffer: no terminal slot, no terminal lock.
+/// never the remote mirror.
 pub fn stream_push_global(s: &str) {
-    let g = GLOBAL_SINK.load(Ordering::Acquire);
-    if !g.is_null() {
-        // SAFETY: ptr valid until stream_close_global. push uses internal Mutex.
-        unsafe { (*g).push(s.as_bytes()); }
-    }
+    GLOBAL_SINK.push(s.as_bytes());
 }
 
 /// Internal: push bytes to sink if active. Called from write() and write_idx().
 fn stream_push(idx: usize, s: &str) {
-    let g = GLOBAL_SINK.load(Ordering::Acquire);
-    if !g.is_null() {
-        // SAFETY: ptr valid until stream_close_global. push uses internal Mutex.
-        unsafe { (*g).push(s.as_bytes()); }
-    }
-    if idx >= MAX_SLOTS { return; }
-    let ptr = STREAM_SINKS[idx].load(Ordering::Acquire);
-    if !ptr.is_null() {
-        // SAFETY: ptr valid until stream_close. push uses internal Mutex.
-        unsafe { (*ptr).push(s.as_bytes()); }
-    }
+    GLOBAL_SINK.push(s.as_bytes());
+    if let Some(sink) = STREAM_SINKS.get(idx) { sink.push(s.as_bytes()); }
 }
 
 /// Open/read/close the everything-sink. Index -1 on the ABI.
 pub fn stream_open_global() -> bool {
-    if !GLOBAL_SINK.load(Ordering::Acquire).is_null() { return true; }
-    let ptr = Box::into_raw(Box::new(StreamBuf::new()));
-    match GLOBAL_SINK.compare_exchange(
-        core::ptr::null_mut(), ptr, Ordering::AcqRel, Ordering::Acquire
-    ) {
-        Ok(_) => true,
-        Err(_) => { unsafe { drop(Box::from_raw(ptr)); } true }
-    }
+    GLOBAL_SINK.open();
+    true
 }
 
 pub fn stream_read_global(dst: &mut [u8]) -> usize {
-    let ptr = GLOBAL_SINK.load(Ordering::Acquire);
-    if ptr.is_null() { return 0; }
-    // SAFETY: valid until stream_close_global; pop_into takes the inner Mutex.
-    unsafe { (*ptr).pop_into(dst) }
+    GLOBAL_SINK.pop_into(dst)
 }
 
 pub fn stream_close_global() {
-    let ptr = GLOBAL_SINK.swap(core::ptr::null_mut(), Ordering::AcqRel);
-    if !ptr.is_null() {
-        // SAFETY: swapped out, no new reader can obtain it.
-        unsafe { drop(Box::from_raw(ptr)); }
-    }
+    GLOBAL_SINK.close();
 }

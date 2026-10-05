@@ -23,6 +23,12 @@ use alloc::vec::Vec;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
+// Read + exec + render, and WRITE: the throughput benchmark writes raw
+// blocks and the file system check holds the store's lock.
+#[unsafe(link_section = ".npk.caps")]
+#[used]
+static NPK_CAPS: [u8; 1] = [0x01 | 0x02 | 0x04 | 0x08]; // READ|WRITE|EXEC|RENDER
+
 mod host;
 
 #[panic_handler]

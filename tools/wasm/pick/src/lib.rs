@@ -32,11 +32,12 @@ use nopeek_widgets::*;
 static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin")).len()]
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
-// Read to list directories, render to draw. Deliberately no WRITE (we
-// return paths, we don't create files) and no EXEC.
+// Read to list directories, render to draw, the shell role to stay modal
+// over the asking app. Deliberately no WRITE (we return paths, we don't
+// create files) and no EXEC.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::RENDER];
+static NPK_CAPS: [u8; 2] = [caps::READ | caps::RENDER, caps::ext::SHELL];
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
