@@ -718,18 +718,25 @@ pub fn tls_connect_alpn(
     })
 }
 
-/// Send application data over TLS.
+/// Largest plaintext one record may carry (RFC 8446 §5.1).
+const MAX_RECORD_PLAINTEXT: usize = 1 << 14;
+
+/// Send application data over TLS, split into records of at most
+/// `MAX_RECORD_PLAINTEXT` bytes.
 pub fn tls_send(session: &mut TlsSession, data: &[u8]) -> Result<(), TlsError> {
-    let mut inner = data.to_vec();
-    inner.push(CT_APPLICATION_DATA); // Inner content type
+    for chunk in data.chunks(MAX_RECORD_PLAINTEXT) {
+        let mut inner = Vec::with_capacity(chunk.len() + 1);
+        inner.extend_from_slice(chunk);
+        inner.push(CT_APPLICATION_DATA); // Inner content type
 
-    let nonce = build_nonce(&session.client_app_iv, session.client_seq);
-    session.client_seq += 1;
+        let nonce = build_nonce(&session.client_app_iv, session.client_seq);
+        session.client_seq += 1;
 
-    let key = &session.client_app_key[..session.cipher.key_len()];
-    let aad = build_record_aad(CT_APPLICATION_DATA, inner.len() + 16);
-    let encrypted = tls_aead_encrypt(session.cipher, key, &nonce, &aad, &inner);
-    send_record(session.tcp_handle, CT_APPLICATION_DATA, &encrypted)?;
+        let key = &session.client_app_key[..session.cipher.key_len()];
+        let aad = build_record_aad(CT_APPLICATION_DATA, inner.len() + 16);
+        let encrypted = tls_aead_encrypt(session.cipher, key, &nonce, &aad, &inner);
+        send_record(session.tcp_handle, CT_APPLICATION_DATA, &encrypted)?;
+    }
     Ok(())
 }
 

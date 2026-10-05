@@ -21,37 +21,47 @@ use crate::drivers::pci;
 use alloc::vec::Vec;
 use alloc::string::String;
 
-/// A UTF-8 string from guest memory; `read_wasm_str` without the engine.
+/// The guest bytes `ptr .. ptr + len`, or `None` when the pointer is
+/// negative, the end overflows, or the range leaves guest memory. Every
+/// guest range goes through here or `guest_mut`; nothing indexes guest
+/// memory with its own arithmetic.
+pub(crate) fn guest(mem: &[u8], ptr: i32, len: usize) -> Option<&[u8]> {
+    let start = usize::try_from(ptr).ok()?;
+    mem.get(start..start.checked_add(len)?)
+}
+
+/// Writable form of `guest`.
+pub(crate) fn guest_mut(mem: &mut [u8], ptr: i32, len: usize) -> Option<&mut [u8]> {
+    let start = usize::try_from(ptr).ok()?;
+    mem.get_mut(start..start.checked_add(len)?)
+}
+
+/// A guest-supplied length; `None` when negative.
+pub(crate) fn glen(len: i32) -> Option<usize> {
+    usize::try_from(len).ok()
+}
+
+/// A UTF-8 string from guest memory; `None` if the range does not fit or
+/// is not UTF-8.
 pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
-    let start = ptr as usize;
-    let end = (start + len as usize).min(data.len());
-    if start >= end { return None; }
-    let mut buf = alloc::vec![0u8; end - start];
-    buf.copy_from_slice(&data[start..end]);
-    core::str::from_utf8(&buf).ok().map(String::from)
+    let bytes = guest(data, ptr, glen(len)?)?;
+    if bytes.is_empty() { return None; }
+    core::str::from_utf8(bytes).ok().map(String::from)
 }
 
 /// Bytes from guest memory, or `None` if the range does not fit.
 pub(crate) fn read_bytes(data: &[u8], ptr: i32, len: i32) -> Option<alloc::vec::Vec<u8>> {
-    if ptr < 0 || len <= 0 { return None; }
-    let start = ptr as usize;
-    let end = start.checked_add(len as usize)?;
-    if end > data.len() { return None; }
-    Some(data[start..end].to_vec())
+    if len <= 0 { return None; }
+    guest(data, ptr, glen(len)?).map(|b| b.to_vec())
 }
 
 /// Writes `bytes` to guest memory at `ptr`; returns the length, or -1 if
 /// the range does not fit.
 pub(crate) fn write_bytes(data: &mut [u8], ptr: i32, bytes: &[u8]) -> i32 {
-    if ptr < 0 { return -1; }
-    let start = ptr as usize;
-    let end = match start.checked_add(bytes.len()) {
-        Some(e) => e,
-        None => return -1,
-    };
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(bytes);
-    bytes.len() as i32
+    match guest_mut(data, ptr, bytes.len()) {
+        Some(dst) => { dst.copy_from_slice(bytes); bytes.len() as i32 }
+        None => -1,
+    }
 }
 
 /// Shared body of both poll functions: copies one message from `dequeue`
@@ -154,14 +164,9 @@ pub(crate) fn npk_random_bytes(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i3
     // Same 64 KiB cap as WebCrypto 10.1.1; without it a module could hold
     // the RNG mutex arbitrarily long.
     if len > 65_536 { return -1; }
-    let start = buf_ptr as usize;
-    let n = len as usize;
-    // `checked_add`: a wrapping `start + n` would give start > end and the
-    // slice would panic the kernel on guest input.
-    let Some(end) = start.checked_add(n) else { return -1 };
-    if end > mem.len() { return -1; }
-    crate::security::csprng::fill(&mut mem[start..end]);
-    n as i32
+    let Some(dst) = guest_mut(mem, buf_ptr, len as usize) else { return -1 };
+    crate::security::csprng::fill(dst);
+    len
 }
 
 pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
@@ -1071,11 +1076,8 @@ pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
 pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
                            handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
-    if buf_ptr < 0 || buf_len <= 0 { return -1 }
-    let start = buf_ptr as usize;
-    let Some(end) = start.checked_add(buf_len as usize) else { return -1 };
-    if end > mem.len() { return -1 }
-    let data = mem[start..end].to_vec();
+    if buf_len <= 0 { return -1 }
+    let Some(data) = guest(mem, buf_ptr, buf_len as usize).map(|b| b.to_vec()) else { return -1 };
     let mut g = TLS_SLOTS.lock();
     let Some(sl) = g[i].as_mut() else { return -1 };
     match crate::crypto::tls::tls_send(&mut sl.session, &data) {
@@ -1091,13 +1093,11 @@ pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
 pub(crate) fn npk_tls_recv(mem: &mut [u8], ctx: &mut HostState,
                            handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
-    if buf_ptr < 0 || buf_max <= 0 { return -1 }
-    let start = buf_ptr as usize;
-    let Some(end) = start.checked_add(buf_max as usize) else { return -1 };
-    if end > mem.len() { return -1 }
+    if buf_max <= 0 { return -1 }
+    let Some(dst) = guest_mut(mem, buf_ptr, buf_max as usize) else { return -1 };
     let mut g = TLS_SLOTS.lock();
     let Some(sl) = g[i].as_mut() else { return -1 };
-    match crate::crypto::tls::tls_poll(&mut sl.session, &mut mem[start..end]) {
+    match crate::crypto::tls::tls_poll(&mut sl.session, dst) {
         Ok(n) => n as i32,
         Err(_) => -1,
     }
@@ -1128,20 +1128,29 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
     // The TLS path above is used by beak on behalf of a page and does apply
     // it.
     match crate::net::tcp::connect_start(ip, port as u16) {
-        Ok(h) => h as i32,
+        Ok(h) => { ctx.tcp_handles.push(h); h as i32 }
         Err(_) => -1,
     }
 }
 
+/// A raw TCP handle this module opened itself, or `None`.
+fn own_tcp(ctx: &HostState, handle: i32) -> Option<usize> {
+    let h = usize::try_from(handle).ok()?;
+    ctx.tcp_handles.contains(&h).then_some(h)
+}
+
 pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
-    if handle < 0 { return -1; }
-    crate::net::tcp::connect_status(handle as usize)
+    let Some(h) = own_tcp(ctx, handle) else { return -1 };
+    crate::net::tcp::connect_status(h)
 }
 
 pub(crate) fn npk_tcp_close(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
-    if handle >= 0 { let _ = crate::net::tcp::close(handle as usize); }
+    if let Some(h) = own_tcp(ctx, handle) {
+        ctx.tcp_handles.retain(|&x| x != h);
+        let _ = crate::net::tcp::close(h);
+    }
     0
 }
 
@@ -1832,17 +1841,8 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         Err(_) => return -1,
     };
 
-    let write_len = content.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let result = if start + write_len <= data.len() {
-        data[start..start + write_len].copy_from_slice(&content[..write_len]);
-        write_len as i32
-    } else {
-        -1
-    };
-
-    result
+    let Some(max) = glen(buf_max) else { return -1 };
+    write_bytes(mem, buf_ptr, &content[..content.len().min(max)])
 }
 
 pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -1855,18 +1855,9 @@ pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf
         Some(h) => h.clone(),
         None => return -1,
     };
-    let n = hdrs.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    // checked_add: a wrapping `start + n` would panic the kernel on
-    // the slice index — a guest-triggerable halt.
-    match start.checked_add(n) {
-        Some(end) if end <= data.len() => {
-            data[start..end].copy_from_slice(&hdrs.as_bytes()[..n]);
-            n as i32
-        }
-        _ => -1,
-    }
+    let Some(max) = glen(buf_max) else { return -1 };
+    let n = hdrs.len().min(max);
+    write_bytes(mem, buf_ptr, &hdrs.as_bytes()[..n])
 }
 
 pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -1879,18 +1870,9 @@ pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
         Some(u) => u.clone(),
         None => return -1,
     };
-    let n = url.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the kernel on the slice index — a guest-triggerable halt.
-    match start.checked_add(n) {
-        Some(end) if end <= data.len() => {
-            data[start..end].copy_from_slice(&url.as_bytes()[..n]);
-            n as i32
-        }
-        _ => -1,
-    }
+    let Some(max) = glen(buf_max) else { return -1 };
+    let n = url.len().min(max);
+    write_bytes(mem, buf_ptr, &url.as_bytes()[..n])
 }
 
 pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -1903,18 +1885,9 @@ pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr
         Some(c) => c.clone(),
         None => return -1,
     };
-    let n = ct.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the kernel on the slice index — a guest-triggerable halt.
-    match start.checked_add(n) {
-        Some(end) if end <= data.len() => {
-            data[start..end].copy_from_slice(&ct.as_bytes()[..n]);
-            n as i32
-        }
-        _ => -1,
-    }
+    let Some(max) = glen(buf_max) else { return -1 };
+    let n = ct.len().min(max);
+    write_bytes(mem, buf_ptr, &ct.as_bytes()[..n])
 }
 
 pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -1927,18 +1900,9 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
         Some(e) => e.clone(),
         None => return -1,
     };
-    let n = err.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    // checked_add: a wrapping `start + n` would produce start > end and
-    // panic the kernel on the slice index — a guest-triggerable halt.
-    match start.checked_add(n) {
-        Some(end) if end <= data.len() => {
-            data[start..end].copy_from_slice(&err.as_bytes()[..n]);
-            n as i32
-        }
-        _ => -1,
-    }
+    let Some(max) = glen(buf_max) else { return -1 };
+    let n = err.len().min(max);
+    write_bytes(mem, buf_ptr, &err.as_bytes()[..n])
 }
 
 pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
@@ -1994,16 +1958,14 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
         return -1;
     }
 
-    let data = &*mem;
-    let start = data_ptr as usize;
-    let end = (start + data_len as usize).min(data.len());
-    if start >= end { return -1; }
+    let Some(payload) = glen(data_len).and_then(|n| guest(mem, data_ptr, n)) else { return -1 };
+    if payload.is_empty() { return -1; }
 
     // Insert-or-replace: apps with state to persist (panel
     // configs, etc.) re-write the same key on every change. The
     // strict-create `store` would fail on the second write and
     // leave the app's state diverging from disk.
-    match crate::npkfs::upsert(&name, &data[start..end], cap_id) {
+    match crate::npkfs::upsert(&name, payload, cap_id) {
         Ok(_) => 0,
         Err(_) => -1,
     }
@@ -2016,13 +1978,8 @@ pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, bu
     }
     let home = crate::intent::home_dir();
     let bytes = home.as_bytes();
-    if bytes.len() > buf_max as usize { return -1; }
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + bytes.len();
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(bytes);
-    bytes.len() as i32
+    if glen(buf_max).is_none_or(|m| bytes.len() > m) { return -1; }
+    write_bytes(mem, buf_ptr, bytes)
 }
 
 pub(crate) fn npk_locale(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2044,13 +2001,8 @@ pub(crate) fn npk_launch_arg(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
         None => return 0,
     };
     let bytes = arg.as_bytes();
-    if bytes.len() > buf_max as usize { return -1; }
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + bytes.len();
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(bytes);
-    bytes.len() as i32
+    if glen(buf_max).is_none_or(|m| bytes.len() > m) { return -1; }
+    write_bytes(mem, buf_ptr, bytes)
 }
 
 pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -2059,11 +2011,7 @@ pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
         return -1;
     }
     if !app_is_focused(ctx) { return -1; }
-    let data = &*mem;
-    let start = ptr as usize;
-    let end = (start + len.max(0) as usize).min(data.len());
-    if start > end { return -1; }
-    let slice = &data[start..end];
+    let Some(slice) = glen(len).and_then(|n| guest(mem, ptr, n)) else { return -1 };
     crate::shade::clipboard::set_text(slice);
     slice.len() as i32
 }
@@ -2079,11 +2027,7 @@ pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, m
         None => return 0,
     };
     let n = text.len().min(max.max(0) as usize);
-    let data = &mut *mem;
-    let start = ptr as usize;
-    let end = start + n;
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&text[..n]);
+    if write_bytes(mem, ptr, &text[..n]) < 0 { return -1; }
     text.len() as i32
 }
 
@@ -2098,16 +2042,11 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
     let owner_wid = ctx.widget_window_id;
     if owner_wid != 0 { crate::shade::widgets::set_window_cap(owner_wid, cap_id); }
 
-    let (bytes_start, bytes_end) = {
-        let data = &*mem;
-        let start = ptr as usize;
-        let end = start.saturating_add(len as usize).min(data.len());
-        if start >= end { return -1; }
-        (start, end)
-    };
-
     // Heap copy; a typical tree is a few hundred bytes.
-    let payload: alloc::vec::Vec<u8> = mem[bytes_start..bytes_end].to_vec();
+    let payload: alloc::vec::Vec<u8> = match glen(len).and_then(|n| guest(mem, ptr, n)) {
+        Some(b) if !b.is_empty() => b.to_vec(),
+        _ => return -1,
+    };
 
     let mut prev_window = ctx.widget_window_id;
 
@@ -2148,13 +2087,10 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
     }
     let wid = ctx.widget_window_id;
     if wid == 0 || width <= 0 || height <= 0 { return -1; }
-    let pixel_bytes = (width as usize) * (height as usize) * 4;
-    if len as usize != pixel_bytes { return -1; }
-    let data = &*mem;
-    let start = ptr as usize;
-    let end = start + pixel_bytes;
-    if end > data.len() { return -1; }
-    let px = data[start..end].to_vec();
+    let Some(pixel_bytes) = (width as usize).checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4)) else { return -1 };
+    if glen(len) != Some(pixel_bytes) { return -1; }
+    let Some(px) = guest(mem, ptr, pixel_bytes).map(|b| b.to_vec()) else { return -1 };
     if !crate::shade::widgets::canvas::commit(
         wid, canvas_id as u32, width as u32, height as u32, px) {
         return -1;
@@ -2198,13 +2134,7 @@ pub(crate) fn npk_canvas_commit_yuv(
     let Some(need_c) = cs.checked_mul(ch) else { return -1 };
 
     let data = &*mem;
-    let take = |ptr: i32, n: usize| -> Option<alloc::vec::Vec<u8>> {
-        if ptr < 0 { return None; }
-        let start = ptr as usize;
-        let end = start.checked_add(n)?;
-        if end > data.len() { return None; }
-        Some(data[start..end].to_vec())
-    };
+    let take = |ptr: i32, n: usize| guest(data, ptr, n).map(|b| b.to_vec());
     let (Some(y), Some(u), Some(v)) =
         (take(y_ptr, need_y), take(u_ptr, need_c), take(v_ptr, need_c))
         else { return -1 };
@@ -2235,15 +2165,11 @@ pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i3
         Some(r) => r,
         None => return -1,
     };
-    let data = &mut *mem;
-    let start = out_ptr as usize;
-    if start + 16 > data.len() {
-        return -1;
-    }
-    data[start..start + 4].copy_from_slice(&x.to_le_bytes());
-    data[start + 4..start + 8].copy_from_slice(&y.to_le_bytes());
-    data[start + 8..start + 12].copy_from_slice(&(w as i32).to_le_bytes());
-    data[start + 12..start + 16].copy_from_slice(&(h as i32).to_le_bytes());
+    let Some(out) = guest_mut(mem, out_ptr, 16) else { return -1 };
+    out[0..4].copy_from_slice(&x.to_le_bytes());
+    out[4..8].copy_from_slice(&y.to_le_bytes());
+    out[8..12].copy_from_slice(&(w as i32).to_le_bytes());
+    out[12..16].copy_from_slice(&(h as i32).to_le_bytes());
     0
 }
 
@@ -2279,12 +2205,7 @@ pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
             );
         }
     }
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + need;
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&tmp);
-    need as i32
+    write_bytes(mem, buf_ptr, &tmp[..])
 }
 
 pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2308,12 +2229,7 @@ pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
     };
     if encoded.len() > buf_max as usize { return -1; }
 
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + encoded.len();
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&encoded);
-    encoded.len() as i32
+    write_bytes(mem, buf_ptr, &encoded[..])
 }
 
 pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2339,12 +2255,7 @@ pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
 
     if out.len() > buf_max as usize { return -1; }
 
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + out.len();
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&out);
-    out.len() as i32
+    write_bytes(mem, buf_ptr, &out[..])
 }
 
 pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2373,12 +2284,8 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
         None => return -1,
     };
 
-    let write_len = meta.len().min(buf_max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    if start + write_len > data.len() { return -1; }
-    data[start..start + write_len].copy_from_slice(&meta[..write_len]);
-    write_len as i32
+    let Some(max) = glen(buf_max) else { return -1 };
+    write_bytes(mem, buf_ptr, &meta[..meta.len().min(max)])
 }
 
 pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
@@ -2388,16 +2295,8 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
     }
     if name_len <= 0 || name_len > 64 { return -1; }
 
-    let name = {
-        let data = &*mem;
-        let start = name_ptr as usize;
-        let end = start + name_len as usize;
-        if end > data.len() { return -1; }
-        match core::str::from_utf8(&data[start..end]) {
-            Ok(s) => alloc::string::String::from(s),
-            Err(_) => return -1,
-        }
-    };
+    let Some(name) = glen(name_len).and_then(|n| guest(mem, name_ptr, n))
+        .and_then(|b| core::str::from_utf8(b).ok()).map(String::from) else { return -1 };
 
     // Path validation — refuse absolute paths, traversal, prefix reuse.
     if name.contains('/') || name.contains("..") || name.is_empty() {
@@ -2456,16 +2355,8 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
         return -1;
     }
     if verb_len <= 0 || verb_len > 64 { return -1; }
-    let verb = {
-        let data = &*mem;
-        let start = verb_ptr as usize;
-        let end = start + verb_len as usize;
-        if end > data.len() { return -1; }
-        match core::str::from_utf8(&data[start..end]) {
-            Ok(s) => alloc::string::String::from(s),
-            Err(_) => return -1,
-        }
-    };
+    let Some(verb) = glen(verb_len).and_then(|n| guest(mem, verb_ptr, n))
+        .and_then(|b| core::str::from_utf8(b).ok()).map(String::from) else { return -1 };
     // Reject only on the pure cooperative Core-0 path (BSP-only),
     // so the caller falls back to typing the intent at the prompt.
     // Fiber mode (vCPU as a pool fiber) AND the dedicated-core path
@@ -2502,15 +2393,8 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
         secs / 3600, (secs % 3600) / 60, ws_count, ws_active, title);
 
     let bytes = s.as_bytes();
-    let write_len = bytes.len().min(max as usize);
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    if start + write_len <= data.len() {
-        data[start..start + write_len].copy_from_slice(&bytes[..write_len]);
-        write_len as i32
-    } else {
-        -1
-    }
+    let Some(max) = glen(max) else { return -1 };
+    write_bytes(mem, buf_ptr, &bytes[..bytes.len().min(max)])
 }
 
 pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
@@ -2559,12 +2443,7 @@ pub(crate) fn npk_acpi_table(
     }
     // SAFETY: find_table_nth mapped [addr, addr+len).
     let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + len;
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(src);
-    len as i32
+    write_bytes(mem, buf_ptr, &src[..])
 }
 
 pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -2578,20 +2457,13 @@ pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, b
     }
     // SAFETY: acpi::dsdt() mapped [addr, addr+len) for us.
     let src = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start + len;
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(src);
-    len as i32
+    write_bytes(mem, buf_ptr, &src[..])
 }
 
 pub(crate) fn npk_audio_submit(mem: &mut [u8], ctx: &mut HostState, slot: i32, ptr: i32, len: i32) -> i32 {
     if slot < 0 || ptr < 0 || len < 0 { return -1; }
-    let data = &*mem;
-    let (start, end) = (ptr as usize, ptr as usize + len as usize);
-    if end > data.len() { return -1; }
-    match crate::audio::submit_for(slot as usize, ctx.pid, &data[start..end]) {
+    let Some(pcm) = guest(mem, ptr, len as usize) else { return -1 };
+    match crate::audio::submit_for(slot as usize, ctx.pid, pcm) {
         Some(n) => n as i32,
         None => -1,
     }
@@ -2622,10 +2494,8 @@ pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, 
         return -1;
     }
     if ptr < 0 || max < 0 { return -1; }
-    let data = &mut *mem;
-    let (start, end) = (ptr as usize, ptr as usize + max as usize);
-    if end > data.len() { return -1; }
-    crate::audio::poll_mix(&mut data[start..end]) as i32
+    let Some(out) = guest_mut(mem, ptr, max as usize) else { return -1 };
+    crate::audio::poll_mix(out) as i32
 }
 
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
@@ -2725,12 +2595,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
 
     if out.len() > out_cap as usize { return -1; }
 
-    let data = &mut *mem;
-    let start = out_ptr as usize;
-    let end = start + out.len();
-    if end > data.len() { return -1; }
-    data[start..end].copy_from_slice(&out);
-    out.len() as i32
+    write_bytes(mem, out_ptr, &out[..])
 }
 
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
@@ -2759,11 +2624,7 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
     buf[0..8].copy_from_slice(&size.to_le_bytes());
     buf[8] = is_dir;
     buf[9..17].copy_from_slice(&mtime.to_le_bytes());
-    let data = &mut *mem;
-    let start = out_ptr as usize;
-    if start + 17 > data.len() { return -1; }
-    data[start..start + 17].copy_from_slice(&buf);
-    17
+    write_bytes(mem, out_ptr, &buf)
 }
 
 pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
@@ -2773,15 +2634,14 @@ pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
         return -1;
     }
 
-    let data = &*mem;
-    let start = ptr as usize;
-    let pixel_bytes = (width as usize) * (height as usize) * 4;
-    let end = start + pixel_bytes;
-    if end > data.len() || end > len as usize + start { return -1; }
+    if width <= 0 || height <= 0 { return -1; }
+    let Some(pixel_bytes) = (width as usize).checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4)) else { return -1 };
+    if glen(len).is_none_or(|n| n < pixel_bytes) { return -1; }
+    let Some(pixels) = guest(mem, ptr, pixel_bytes) else { return -1 };
 
     let info = crate::framebuffer::get_info();
-    crate::gui::background::set_wallpaper(
-        &data[start..end], width as u32, height as u32, &info);
+    crate::gui::background::set_wallpaper(pixels, width as u32, height as u32, &info);
 
     // Force compositor full redraw
     crate::shade::force_redraw();
@@ -2795,16 +2655,10 @@ pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i3
         return -1;
     }
 
-    let data = &*mem;
-    let start = ptr as usize;
-    if start + 64 > data.len() { return -1; }
-
+    let Some(raw) = guest(mem, ptr, 64) else { return -1 };
     let mut colors = [0u32; 16];
-    for i in 0..16 {
-        let off = start + i * 4;
-        colors[i] = u32::from_le_bytes([
-            data[off], data[off + 1], data[off + 2], data[off + 3],
-        ]);
+    for (c, b) in colors.iter_mut().zip(raw.chunks_exact(4)) {
+        *c = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     }
     crate::theme::set_palette(&colors);
     crate::shade::force_redraw();
@@ -2813,25 +2667,20 @@ pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i3
 
 pub(crate) fn npk_stream_read(mem: &mut [u8], _ctx: &mut HostState, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if buf_len <= 0 { return 0; }
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start.saturating_add(buf_len as usize);
-    if end > data.len() { return -1; }
+    let Some(out) = guest_mut(mem, buf_ptr, buf_len as usize) else { return -1 };
     if idx < 0 {
-        crate::shade::terminal::stream_read_global(&mut data[start..end]) as i32
+        crate::shade::terminal::stream_read_global(out) as i32
     } else {
-        crate::shade::terminal::stream_read(idx as usize, &mut data[start..end]) as i32
+        crate::shade::terminal::stream_read(idx as usize, out) as i32
     }
 }
 
 pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
-    if handle < 0 || buf_len <= 0 { return -1; }
-    let data = &*mem;
-    let start = buf_ptr as usize;
-    let end = start.saturating_add(buf_len as usize);
-    if end > data.len() { return -1; }
-    match crate::net::tcp::send(handle as usize, &data[start..end]) {
+    if buf_len <= 0 { return -1; }
+    let Some(h) = own_tcp(ctx, handle) else { return -1 };
+    let Some(bytes) = guest(mem, buf_ptr, buf_len as usize) else { return -1 };
+    match crate::net::tcp::send(h, bytes) {
         Ok(_) => 0,
         // Backpressure, not a failure: too much is still unacked.
         // A module that treats this as fatal drops a live connection.
@@ -2842,70 +2691,46 @@ pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
 
 pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
-    if handle < 0 || buf_max <= 0 { return -1; }
-    let data = &mut *mem;
-    let start = buf_ptr as usize;
-    let end = start.saturating_add(buf_max as usize);
-    if end > data.len() { return -1; }
-    match crate::net::tcp::recv(handle as usize, &mut data[start..end]) {
+    if buf_max <= 0 { return -1; }
+    let Some(h) = own_tcp(ctx, handle) else { return -1 };
+    let Some(out) = guest_mut(mem, buf_ptr, buf_max as usize) else { return -1 };
+    match crate::net::tcp::recv(h, out) {
         Ok(n) => n as i32,
         Err(_) => -1,
     }
 }
 
-pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
-    let (phys, pages) = {
-        let hw = match ctx.hw.as_ref() {
-            Some(h) => h,
-            None => return -1,
-        };
-        let h = handle as usize;
-        if h >= hw.dma_allocs.len() { return -1; }
-        hw.dma_allocs[h]
-    };
-    let off = dma_off as usize;
-    let length = len as usize;
-    if off + length > pages * 4096 { return -1; }
+/// The bytes `off .. off + len` of a module's DMA buffer, as a physical
+/// address, or `None` when the handle is not the module's or the range
+/// leaves the buffer. Negative values are refused before any arithmetic.
+fn dma_range(ctx: &HostState, handle: i32, off: i32, len: i32) -> Option<(u64, usize)> {
+    let hw = ctx.hw.as_ref()?;
+    let &(phys, pages) = hw.dma_allocs.get(usize::try_from(handle).ok()?)?;
+    let off = usize::try_from(off).ok()?;
+    let len = usize::try_from(len).ok()?;
+    if off.checked_add(len)? > pages.checked_mul(4096)? { return None; }
+    Some((phys + off as u64, len))
+}
 
-    let data = &mut *mem;
-    let dst = wasm_ptr as usize;
-    if dst + length > data.len() { return -1; }
-    // SAFETY: copying from validated DMA buffer to WASM linear memory
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            (phys + off as u64) as *const u8,
-            data[dst..].as_mut_ptr(),
-            length,
-        );
-    }
+pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
+    let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
+    let Some(dst) = guest_mut(mem, wasm_ptr, len) else { return -1 };
+    // SAFETY: `phys .. phys + len` lies inside one of this module's own DMA
+    // allocations (`dma_range`), which stay allocated while the module runs
+    // and are identity-mapped. The device may write it concurrently; the
+    // bytes are copied as they are.
+    let src = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
+    dst.copy_from_slice(src);
     0
 }
 
 pub(crate) fn npk_dma_write(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
-    let (phys, pages) = {
-        let hw = match ctx.hw.as_ref() {
-            Some(h) => h,
-            None => return -1,
-        };
-        let h = handle as usize;
-        if h >= hw.dma_allocs.len() { return -1; }
-        hw.dma_allocs[h]
-    };
-    let off = dma_off as usize;
-    let length = len as usize;
-    if off + length > pages * 4096 { return -1; }
-
-    let data = &*mem;
-    let src = wasm_ptr as usize;
-    if src + length > data.len() { return -1; }
-    // SAFETY: copying from WASM linear memory to validated DMA buffer
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            data[src..].as_ptr(),
-            (phys + off as u64) as *mut u8,
-            length,
-        );
-    }
+    let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
+    let Some(src) = guest(mem, wasm_ptr, len) else { return -1 };
+    // SAFETY: as in `npk_dma_read`; the range is the module's own buffer and
+    // nothing in the kernel holds a reference into it.
+    let dst = unsafe { core::slice::from_raw_parts_mut(phys as *mut u8, len) };
+    dst.copy_from_slice(src);
     0
 }
 
@@ -2916,11 +2741,9 @@ pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: 
     };
     if hw.registered_as_netdev { return -1; } // already registered
 
-    let data = &*mem;
-    let start = mac_ptr as usize;
-    if start + 6 > data.len() { return -1; }
+    let Some(raw) = guest(mem, mac_ptr, 6) else { return -1 };
     let mut mac = [0u8; 6];
-    mac.copy_from_slice(&data[start..start + 6]);
+    mac.copy_from_slice(raw);
 
     crate::netdev::register_wasm_nic(mac);
     // Re-borrow after register call

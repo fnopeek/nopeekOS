@@ -155,7 +155,7 @@ for i in 0..n {
     let chunk: Vec<u8> = match w.fds.get(&fd) {
         Some(Handle::File { data, .. }) => {
             let start = pos.min(data.len());
-            let end = (pos + len).min(data.len());
+            let end = pos.saturating_add(len).min(data.len());
             data[start..end].to_vec()
         }
         Some(_) => return ESPIPE,

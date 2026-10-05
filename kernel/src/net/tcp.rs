@@ -1011,7 +1011,7 @@ pub fn send_stats() -> (u64, u64, u64, u64, u64) {
 
 fn send_inner(handle: usize, data: &[u8]) -> Result<(), TcpError> {
     let mut conns = CONNECTIONS.lock();
-    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+    let conn = conns.get_mut(handle).and_then(|c| c.as_mut()).ok_or(TcpError::NotConnected)?;
     if conn.state != State::Established { return Err(TcpError::NotConnected); }
     // An empty buffer always accepts. Otherwise a call larger than the limit
     // could never get through, and a refusal that waiting cannot change is a
@@ -1185,7 +1185,7 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
 /// Sends a window update ACK if significant buffer space was freed.
 pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
     let mut conns = CONNECTIONS.lock();
-    let conn = conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+    let conn = conns.get_mut(handle).and_then(|c| c.as_mut()).ok_or(TcpError::NotConnected)?;
 
     let pre_len = conn.recv_buf.len();
     let available = pre_len.min(buf.len());

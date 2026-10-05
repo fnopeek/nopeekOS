@@ -138,6 +138,10 @@ pub(crate) struct HostState {
     /// program see a filesystem" is decided once, here, by whoever
     /// spawned it — not by what the program chooses to import.
     pub(crate) wasi: Option<alloc::boxed::Box<crate::wasi::WasiCtx>>,
+    /// Raw TCP connections this module opened. The connection table is
+    /// shared with the kernel's own clients, so a handle is honoured only
+    /// if it is listed here; all of them close when the module ends.
+    pub(crate) tcp_handles: Vec<usize>,
 }
 
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
@@ -519,6 +523,7 @@ fn wasm_worker_task(arg: u64) {
         http_reply_headers: None,
         http_status: 0,
         wasi: None,
+        tcp_handles: Vec::new(),
     });
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
@@ -635,6 +640,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
         http_reply_headers: None,
         http_status: 0,
         wasi: None,
+        tcp_handles: Vec::new(),
     };
 
     let host = forge_glue::NpkHost(&raw mut hs);
@@ -738,6 +744,7 @@ fn execute_inner(
         http_reply_headers: None,
         http_status: 0,
         wasi: None,
+        tcp_handles: Vec::new(),
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -819,6 +826,7 @@ pub fn execute_wasi(
         http_reply_headers: None,
         http_status: 0,
         wasi: Some(ctx),
+        tcp_handles: Vec::new(),
     });
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
@@ -886,6 +894,7 @@ fn execute_inner_forge(
         http_reply_headers: None,
         http_status: 0,
         wasi: None,
+        tcp_handles: Vec::new(),
     };
     let host = forge_glue::NpkHost(&raw mut hs);
     let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
@@ -954,6 +963,7 @@ pub fn execute_wasi_forge(
         http_reply_headers: None,
         http_status: 0,
         wasi: Some(ctx),
+        tcp_handles: Vec::new(),
     };
     let host = forge_glue::NpkHost(&raw mut hs);
     let mut inst = crate::forge_rt::Instance::new_with_host(&m, &host)
@@ -2775,6 +2785,9 @@ fn cleanup_instance_state(state: &mut HostState) {
     // Otherwise an app closed mid-load holds its fetch slots and reserved
     // buffers until the next boot.
     crate::intent::fetch::release_owner(state.pid);
+    for h in state.tcp_handles.drain(..) {
+        let _ = crate::net::tcp::close(h);
+    }
     if let Some(hw) = state.hw.take() {
         let mut total_pages = 0usize;
         for &(phys, pages) in &hw.dma_allocs {
