@@ -38,6 +38,18 @@ const MAX_STRING: usize = 16 * 1024;
 /// default; bounding it bounds our memory.
 pub const MAX_TABLE_SIZE: usize = 4096;
 
+/// Cap on a header list once decoded, counted as RFC 7541 §4.1 sizes an
+/// entry (name + value + 32). A one-byte index can name a 4 KiB table entry,
+/// so the compressed size says nothing about the decoded one; this is what
+/// bounds it. Applies to one block and to a stream's headers and trailers
+/// together. Browsers accept about this much.
+pub const MAX_HEADER_LIST: usize = 256 * 1024;
+
+/// A header list's size as `MAX_HEADER_LIST` counts it.
+pub fn list_size(headers: &[Header]) -> usize {
+    headers.iter().map(|h| h.name.len() + h.value.len() + 32).sum()
+}
+
 // ── Integers (RFC 7541 §5.1) ────────────────────────────────────────────────
 
 /// Decode an integer with an `n`-bit prefix. `pos` points at the prefix byte
@@ -310,9 +322,19 @@ impl Decoder {
     /// rejected: a header value is defined over octets, and a broken
     /// `server:` line should not fail a page load.
     pub fn decode(&mut self, block: &[u8]) -> Result<Vec<Header>, HpackError> {
-        let mut out = Vec::new();
+        let mut out: Vec<Header> = Vec::new();
+        let mut size = 0usize;
+        let mut counted = 0usize;
         let mut pos = 0usize;
         while pos < block.len() {
+            // Count each field once, as soon as it is out, so a block that
+            // keeps expanding stops at the cap instead of after it.
+            size += out[counted..].iter()
+                .map(|h| h.name.len() + h.value.len() + 32).sum::<usize>();
+            counted = out.len();
+            if size > MAX_HEADER_LIST {
+                return Err(HpackError::TooLarge);
+            }
             let b = block[pos];
             if b & 0x80 != 0 {
                 // §6.1 Indexed Header Field — name and value from the table.
@@ -331,6 +353,9 @@ impl Decoder {
                 // §6.2.2 / §6.2.3 Literal without / never indexed.
                 out.push(self.literal(block, &mut pos, 4)?);
             }
+        }
+        if list_size(&out) > MAX_HEADER_LIST {
+            return Err(HpackError::TooLarge);
         }
         Ok(out)
     }

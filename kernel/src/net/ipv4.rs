@@ -44,7 +44,7 @@ pub fn handle_ipv4(data: &[u8]) {
     if version != 4 || ihl < 20 || data.len() < ihl { return; }
 
     let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
-    if total_len > data.len() { return; }
+    if total_len < ihl || total_len > data.len() { return; }
 
     let protocol = data[9];
     let _src_ip = &data[12..16];
@@ -55,7 +55,7 @@ pub fn handle_ipv4(data: &[u8]) {
     // address first would drop its replies whenever that address moved (DHCP
     // renewal, carrier blink). The tap matches against its own mappings.
     // Cheap no-op when no VM is up.
-    if crate::microvm::devices::nat::tap_inbound(&data[..total_len.min(data.len())]) {
+    if crate::microvm::devices::nat::tap_inbound(&data[..total_len]) {
         return;
     }
 
@@ -63,7 +63,7 @@ pub fn handle_ipv4(data: &[u8]) {
     let our_ip = arp::our_ip();
     if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
 
-    let payload = &data[ihl..total_len.min(data.len())];
+    let payload = &data[ihl..total_len];
 
     match protocol {
         PROTO_ICMP => super::icmp::handle_icmp(data, payload),

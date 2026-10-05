@@ -1077,10 +1077,12 @@ pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
                            handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
     if buf_len <= 0 { return -1 }
-    let Some(data) = guest(mem, buf_ptr, buf_len as usize).map(|b| b.to_vec()) else { return -1 };
+    // Straight from guest memory: `tls_send` copies one record at a time,
+    // so the kernel never holds more than a record of it.
+    let Some(data) = guest(mem, buf_ptr, buf_len as usize) else { return -1 };
     let mut g = TLS_SLOTS.lock();
     let Some(sl) = g[i].as_mut() else { return -1 };
-    match crate::crypto::tls::tls_send(&mut sl.session, &data) {
+    match crate::crypto::tls::tls_send(&mut sl.session, data) {
         Ok(()) => 0,
         Err(_) => -1,
     }
@@ -2675,9 +2677,14 @@ pub(crate) fn npk_stream_read(mem: &mut [u8], _ctx: &mut HostState, idx: i32, bu
     }
 }
 
+/// Most one `npk_tcp_send` may hand the kernel. The send buffer takes a
+/// whole call when it is empty, and module memory is far larger than the
+/// kernel's reserve; a bigger send is the caller's loop to make.
+const MAX_TCP_SEND: usize = 1024 * 1024;
+
 pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
-    if buf_len <= 0 { return -1; }
+    if buf_len <= 0 || buf_len as usize > MAX_TCP_SEND { return -1; }
     let Some(h) = own_tcp(ctx, handle) else { return -1 };
     let Some(bytes) = guest(mem, buf_ptr, buf_len as usize) else { return -1 };
     match crate::net::tcp::send(h, bytes) {

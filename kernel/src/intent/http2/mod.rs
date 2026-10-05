@@ -641,7 +641,12 @@ impl Http2 {
                     return Ok(());
                 }
                 // A second HEADERS after that is trailers; later fields
-                // append.
+                // append, within one cap for the whole stream.
+                if hpack::list_size(&s.headers) + hpack::list_size(&decoded)
+                    > hpack::MAX_HEADER_LIST
+                {
+                    return Err(Http2Error::Protocol("header list too large"));
+                }
                 s.headers.extend(decoded);
                 if end_stream {
                     s.done = true;

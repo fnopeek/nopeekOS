@@ -3907,9 +3907,11 @@ struct LinkStats {
     extra_reported: u32,
     llc_miss: u32,
     rx_wd: u32,
-    /// The last sequence control field per TID (slot 8 = non-QoS),
-    /// `u32::MAX` = none yet. `rx.c:1480` `last_seq_ctrl[seqno_idx]`.
-    last_seq_ctrl: [u32; 9],
+    /// The last sequence control field per TID (slot 16 = non-QoS),
+    /// `u32::MAX` = none yet. `rx.c:1480` `last_seq_ctrl[seqno_idx]`, sized
+    /// `IEEE80211_NUM_TIDS + 1` as in `sta_info.h`: the TID field is four
+    /// bits, so any value 0..15 can arrive.
+    last_seq_ctrl: [u32; 17],
     /// Dropped 802.11 retransmissions (`dot11FrameDuplicateCount`).
     dup_rx: u32,
     /// Frames with the retry bit set (802.11 §9.2.4.1.8).
@@ -4085,7 +4087,7 @@ impl Default for LinkStats {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
-            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 9], dup_rx: 0,
+            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], dup_rx: 0,
             retry_rx: 0,
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
@@ -5726,7 +5728,7 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     let idx = if is_qos && f.len() >= 26 {
                         (f[24] & 0x0f) as usize
                     } else {
-                        8
+                        16
                     };
                     let sc = u16::from_le_bytes([f[22], f[23]]) as u32;
                     if fc & 0x0800 != 0 {

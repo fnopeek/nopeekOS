@@ -239,8 +239,8 @@ fn recv_window(conn: &TcpConn) -> u16 {
     }
 }
 
-/// Merge [s,e) into the coalesced out-of-order run set (offsets from rcv_irs).
-fn ooo_runs_add(runs: &mut BTreeMap<u32, u32>, s: u32, e: u32) {
+/// Merge [s,e) into the coalesced out-of-order run set (stream offsets).
+fn ooo_runs_add(runs: &mut BTreeMap<u64, u64>, s: u64, e: u64) {
     let mut s = s;
     let mut e = e;
     // Absorb a contiguous/overlapping left neighbour (greatest start < s).
@@ -248,7 +248,7 @@ fn ooo_runs_add(runs: &mut BTreeMap<u32, u32>, s: u32, e: u32) {
         if le >= s { s = ls; }
     }
     // Absorb every run starting within [s, e] (overlap or adjacency).
-    let keys: alloc::vec::Vec<u32> = runs.range(s..=e).map(|(&k, _)| k).collect();
+    let keys: alloc::vec::Vec<u64> = runs.range(s..=e).map(|(&k, _)| k).collect();
     for k in keys {
         if runs[&k] > e { e = runs[&k]; }
         runs.remove(&k);
@@ -257,8 +257,8 @@ fn ooo_runs_add(runs: &mut BTreeMap<u32, u32>, s: u32, e: u32) {
 }
 
 /// Drop/trim runs now delivered (everything below offset `want`).
-fn ooo_runs_trim(runs: &mut BTreeMap<u32, u32>, want: u32) {
-    let keys: alloc::vec::Vec<u32> =
+fn ooo_runs_trim(runs: &mut BTreeMap<u64, u64>, want: u64) {
+    let keys: alloc::vec::Vec<u64> =
         runs.range(..want).filter(|&(_, &e)| e <= want).map(|(&k, _)| k).collect();
     for k in keys { runs.remove(&k); }
     if let Some((&ks, &ke)) = runs.range(..want).next_back() {
@@ -420,23 +420,25 @@ struct TcpConn {
     snd_una: u32, // oldest unacknowledged
     snd_iss: u32, // initial send seq
     rcv_nxt: u32, // next expected from remote
-    rcv_irs: u32, // initial recv seq
+    /// Stream offset of `rcv_nxt`: data bytes delivered so far. 64 bits, so
+    /// reassembly offsets never wrap however long the connection lives.
+    rcv_off: u64,
 
     // Buffers
     recv_buf: VecDeque<u8>,
     send_buf: Vec<u8>,
     // Out-of-order reassembly: segments received ahead of a gap, keyed by
-    // stream offset (seq - rcv_irs). Without it a single lost packet forces
+    // stream offset (see `rcv_off`). Without it a single lost packet forces
     // the sender into go-back-N (retransmit the whole window), and the re-burst
     // can overflow small NIC FIFOs again. Bounded by OOO_MAX_BYTES (else
-    // dropped → the sender retransmits). Offsets assume < 4 GiB per connection.
-    ooo: BTreeMap<u32, Vec<u8>>,
+    // dropped → the sender retransmits).
+    ooo: BTreeMap<u64, Vec<u8>>,
     ooo_bytes: usize,
     // Coalesced [start,end) runs of `ooo`, kept in sync — so building SACK
     // blocks is O(runs), not a scan over thousands of `ooo` entries per ACK
     // with a large window. Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
-    ooo_runs: BTreeMap<u32, u32>,
+    ooo_runs: BTreeMap<u64, u64>,
     // Smoothed RTT in milliseconds, from the peer's echoed TSecr. Kept as a
     // diagnostic only; the advertised window comes from DRS below.
     srtt_ms: u32,
@@ -604,7 +606,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         snd_una: iss,
         snd_iss: iss,
         rcv_nxt: 0,
-        rcv_irs: 0,
+        rcv_off: 0,
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
@@ -760,7 +762,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         snd_una: 0,
         snd_iss: 0,
         rcv_nxt: 0,
-        rcv_irs: 0,
+        rcv_off: 0,
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
@@ -865,7 +867,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         snd_una: 0,
         snd_iss: 0,
         rcv_nxt: 0,
-        rcv_irs: 0,
+        rcv_off: 0,
         recv_buf: VecDeque::new(),
         ooo: BTreeMap::new(),
         ooo_bytes: 0,
@@ -1325,6 +1327,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
     let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let data_offset = ((data[12] >> 4) as usize) * 4;
+    if data_offset < HEADER_LEN { return; }
     let flags = data[13];
     let adv_window = u16::from_be_bytes([data[14], data[15]]);
 
@@ -1358,7 +1361,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     conn.state = State::SynReceived;
                     conn.remote_ip = src_ip;
                     conn.remote_port = src_port;
-                    conn.rcv_irs = seq;
+                    conn.rcv_off = 0;
                     conn.rcv_nxt = seq.wrapping_add(1);
                     conn.snd_iss = iss;
                     conn.snd_nxt = iss.wrapping_add(1);
@@ -1411,7 +1414,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
         State::SynSent => {
             if flags & SYN != 0 && flags & ACK != 0 {
                 // SYN-ACK received
-                conn.rcv_irs = seq;
+                conn.rcv_off = 0;
                 conn.rcv_nxt = seq.wrapping_add(1);
                 conn.snd_una = ack;
                 conn.state = State::Established;
@@ -1569,12 +1572,13 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // once and copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(copy as u32);
+                    conn.rcv_off += copy as u64;
                     // Gap just filled — pull any now-contiguous segments out of
                     // the reassembly queue. Only the lowest stored offset can be
                     // next; if it doesn't meet rcv_nxt there's still a hole.
                     let mut filled = false;
                     loop {
-                        let want = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
+                        let want = conn.rcv_off;
                         // Peek the lowest stored offset (copy out k+len so the
                         // immutable borrow ends before we remove).
                         let (k, seglen) = match conn.ooo.iter().next() {
@@ -1582,7 +1586,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                             None => break,
                         };
                         // Drop fully-stale segments (already delivered).
-                        if (k as usize) + seglen <= want as usize {
+                        if k + seglen as u64 <= want {
                             conn.ooo.remove(&k); conn.ooo_bytes -= seglen; continue;
                         }
                         if k != want { break; }                 // still a gap before it
@@ -1590,6 +1594,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         let seg = conn.ooo.remove(&k).unwrap();
                         conn.ooo_bytes -= seg.len();
                         conn.rcv_nxt = conn.rcv_nxt.wrapping_add(seg.len() as u32);
+                        conn.rcv_off += seg.len() as u64;
                         conn.recv_buf.extend(seg.into_iter());
                         filled = true;
                     }
@@ -1600,7 +1605,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                     // refresh the RTT estimate from the peer's echoed TSecr (our
                     // TSval is `ts_now_ms()`, so now - TSecr = RTT); it feeds DRS
                     // via `rcv_rtt_update`.
-                    let delivered = conn.rcv_nxt.wrapping_sub(conn.rcv_irs);
+                    let delivered = conn.rcv_off;
                     ooo_runs_trim(&mut conn.ooo_runs, delivered);
                     if conn.ts_ok {
                         if let Some(tsecr) = parse_tsecr(data, data_offset) {
@@ -1647,7 +1652,9 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         // sender fast-retransmits only the hole (RFC 5681) — not the
                         // whole window. Bounded; over budget or already-have → skip.
                         TCP_OOO_AHEAD.fetch_add(1, Relaxed);
-                        let off = seq.wrapping_sub(conn.rcv_irs);
+                        // Ahead by less than 2^31 (checked above), so this
+                        // lands past `rcv_off` and never wraps.
+                        let off = conn.rcv_off + seq.wrapping_sub(conn.rcv_nxt) as u64;
                         if !payload.is_empty()
                             && !conn.ooo.contains_key(&off)
                             && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
@@ -1655,7 +1662,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                             conn.ooo_bytes += payload.len();
                             conn.ooo.insert(off, payload.to_vec());
                             ooo_runs_add(&mut conn.ooo_runs,
-                                off, off.wrapping_add(payload.len() as u32));
+                                off, off + payload.len() as u64);
                         }
                         let w = recv_window(conn);
                         send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
@@ -2048,8 +2055,8 @@ fn build_sack_blocks(conn: &TcpConn, out: &mut [u8]) -> usize {
         take += 1;
     }
     for (&s, &e) in conn.ooo_runs.iter().rev().take(3 - take) {
-        let l = conn.rcv_irs.wrapping_add(s);
-        let r = conn.rcv_irs.wrapping_add(e);
+        let l = conn.rcv_nxt.wrapping_add(s.wrapping_sub(conn.rcv_off) as u32);
+        let r = conn.rcv_nxt.wrapping_add(e.wrapping_sub(conn.rcv_off) as u32);
         out[p..p + 4].copy_from_slice(&l.to_be_bytes()); p += 4;
         out[p..p + 4].copy_from_slice(&r.to_be_bytes()); p += 4;
         take += 1;
