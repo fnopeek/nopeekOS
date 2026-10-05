@@ -71,6 +71,31 @@ pub fn render_with_state(
     // default. `None` = no ancestor set one.
     inherited_tint: Option<Token>,
 ) {
+    render_node(
+        rast, target, widget, layout, hover_path, focus_path, active_path,
+        density, input_edit, scroll_y, scroll_x, inherited_tint, None,
+    );
+}
+
+/// `render_with_state` plus the inherited icon scale: a `Modifier::Scale`
+/// on a container (typically inside `Hover`) scales every Icon below it,
+/// so a whole tile can react to the cursor without the Icon itself
+/// being the hover target. An Icon's own `Scale` wins.
+fn render_node(
+    rast: &mut dyn Rasterizer,
+    target: &mut RasterTarget,
+    widget: &Widget,
+    layout: &LayoutNode,
+    hover_path: Option<&[u32]>,
+    focus_path: Option<&[u32]>,
+    active_path: Option<&[u32]>,
+    density: Density,
+    input_edit: Option<&InputEditState>,
+    scroll_y: u32,
+    scroll_x: u32,
+    inherited_tint: Option<Token>,
+    inherited_scale: Option<u32>,
+) {
     let is_hovered = hover_path.is_some();
     let is_focused = focus_path.is_some();
     let is_active  = active_path.is_some();
@@ -80,6 +105,9 @@ pub fn render_with_state(
     let subtree_tint = eff.iter().rev()
         .find_map(|m| if let Modifier::Tint(t) = m { Some(*t) } else { None })
         .or(inherited_tint);
+    let subtree_scale = eff.iter().rev()
+        .find_map(|m| if let Modifier::Scale(v) = m { Some(*v as u32) } else { None })
+        .or(inherited_scale);
 
     paint_modifiers_eff(rast, target, &eff, layout.rect);
     // `is_focused && Some([])` (focus exactly here) is the only case
@@ -88,7 +116,8 @@ pub fn render_with_state(
     // check.
     let edit_for_node: Option<&InputEditState> =
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
-    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, scroll_x, inherited_tint);
+    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, scroll_x,
+                   inherited_tint, inherited_scale);
 
     // A Scroll clips its subtree to its viewport rect so overflowing
     // content is masked (and, for a vertical scroll, an overlay scrollbar
@@ -112,10 +141,10 @@ pub fn render_with_state(
         let child_hover  = descend(hover_path,  i as u32);
         let child_focus  = descend(focus_path,  i as u32);
         let child_active = descend(active_path, i as u32);
-        render_with_state(
+        render_node(
             rast, target, cw, cl,
             child_hover, child_focus, child_active, density, input_edit, scroll_y, scroll_x,
-            subtree_tint,
+            subtree_tint, subtree_scale,
         );
     }
 
@@ -513,6 +542,7 @@ fn paint_node_eff(
     scroll_y: u32,
     scroll_x: u32,
     inherited_tint: Option<Token>,
+    inherited_scale: Option<u32>,
 ) {
     let rect = layout.rect;
     // Inner-rect origin for leaf glyph placement. The outer rect is
@@ -545,14 +575,12 @@ fn paint_node_eff(
 
         Widget::Icon { id, size, .. } => {
             let mut color = inherited_tint.unwrap_or(Token::OnSurface);
-            // Q8.8 fixed-point scale: 256 = 1.0×. Resolved from the
-            // effective modifier list so Hover/Focus/Active states can
-            // inflate the icon (dock cells use this for a Mac-style
-            // hover bump). The scaled glyph stays centred inside the
-            // original cell rect — layout doesn't change, so neighbours
-            // don't shift; a small overflow can paint over the cell
-            // background (the dock's Tray catches it cleanly).
-            let mut q88: u32 = 256;
+            // Q8.8 fixed-point scale: 256 = 1.0×. Taken from the nearest
+            // ancestor carrying `Scale` (see `render_node`), overridden by
+            // the icon's own, so Hover/Focus/Active on a tile can inflate
+            // the glyph. The scaled glyph stays centred on its layout
+            // rect — layout doesn't change, so neighbours don't shift.
+            let mut q88: u32 = inherited_scale.unwrap_or(256);
             for m in eff {
                 match m {
                     Modifier::Tint(tok)  => color = *tok,

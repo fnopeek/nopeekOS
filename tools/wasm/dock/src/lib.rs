@@ -198,6 +198,10 @@ const ADD_BASE:     u32 = 300_000;      // ADD_BASE+catalog_idx : add to dock
 // Visual sizing (px at 1× scale) — docs/spec/UI_REFRESH.md §3 "dock".
 /// Glyph inside a cell tile.
 const ICON_SIZE: u16 = 24;
+/// Hover zoom, Q8.8. 24 × 342 / 256 = 32 px: an atlas size, so the
+/// enlarged glyph is blitted 1:1 instead of resampled, and it still fits
+/// the 34 px tile.
+const HOVER_SCALE: u16 = 342;
 /// Square tile the glyph sits in.
 const CELL_BOX: u16 = 34;
 /// Corner radius of that tile.
@@ -668,9 +672,9 @@ enum RunState {
 }
 
 /// Single dock cell — a tile holding the glyph, with the running
-/// indicator dash below it. Hover keeps the Mac-style glyph bump; the
-/// tile background is reserved for the app that owns the focus, so the
-/// two cues never mean the same thing. The `hover` ActionId also drives
+/// indicator dash below it. Hover enlarges the glyph and paints it in
+/// the accent; the tile background is reserved for the app that owns the
+/// focus, so the two cues never mean the same thing. The `hover` ActionId also drives
 /// the drag-reorder live shuffle, and the NodeId anchors the
 /// right-click popover.
 fn icon_cell(
@@ -688,9 +692,8 @@ fn icon_cell(
         Modifier::OnHover(hover),
         Modifier::NodeId(anchor),
         Modifier::Hover(alloc::vec![
-            // Q8.8: 320 = 1.25× — visible bump without overflowing the
-            // tray enough to trample the neighbours.
-            Modifier::Scale(320),
+            Modifier::Scale(HOVER_SCALE),
+            Modifier::Tint(Token::Accent),
         ]),
     ];
     let mut glyph_mods: Vec<Modifier> = Vec::new();
