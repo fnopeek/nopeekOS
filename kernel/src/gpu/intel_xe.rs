@@ -9,7 +9,8 @@
 
 use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
 use alloc::vec::Vec;
-use crate::{kprintln, pci, paging, memory};
+use crate::{kprintln, pci, paging};
+use crate::hw::{DmaRegion, Mmio};
 
 // ── PCI Device IDs ──────────────────────────────────────────────────
 
@@ -240,6 +241,12 @@ const BCS_TEST_GGTT: u32        = 0x0400_3000;  // test surface (16KB)
 const SHADOW_A_GGTT_BASE: u32   = 0x0800_0000;  // 128MB: shadow buffer A
 const SHADOW_B_GGTT_BASE: u32   = 0x0A00_0000;  // 160MB: shadow buffer B
 
+// Byte offsets in the LRC allocation: page 1 is the context image.
+const LRC_CTX: u64              = 4096;
+const LRC_HEAD: u64             = LRC_CTX + 5 * 4;  // ctx[5] = RING_HEAD value
+const LRC_TAIL: u64             = LRC_CTX + 7 * 4;  // ctx[7] = RING_TAIL value
+const LRC_START: u64            = LRC_CTX + 9 * 4;  // ctx[9] = RING_START value
+
 // ── Display Timings ─────────────────────────────────────────────────
 
 /// CEA-861 standard timings
@@ -391,28 +398,10 @@ fn encode_cfgcr(params: &PllParams) -> (u32, u32) {
 
 // ── MMIO Helpers ────────────────────────────────────────────────────
 
-fn mmio_read32(base: u64, offset: u32) -> u32 {
-    let addr = (base + offset as u64) as *const u32;
-    // SAFETY: BAR0 is identity-mapped, volatile prevents reordering
-    unsafe { core::ptr::read_volatile(addr) }
-}
-
-fn mmio_write32(base: u64, offset: u32, val: u32) {
-    let addr = (base + offset as u64) as *mut u32;
-    // SAFETY: BAR0 is identity-mapped, volatile prevents reordering
-    unsafe { core::ptr::write_volatile(addr, val); }
-}
-
-fn mmio_write64(base: u64, offset: u32, val: u64) {
-    let addr = (base + offset as u64) as *mut u64;
-    // SAFETY: BAR0 is identity-mapped, volatile ensures write reaches device
-    unsafe { core::ptr::write_volatile(addr, val); }
-}
-
 /// Spin-wait with timeout (in iterations). Returns true if condition met.
-fn poll_timeout(base: u64, reg: u32, mask: u32, expected: u32, max_iters: u32) -> bool {
+fn poll_timeout(regs: Mmio, reg: u32, mask: u32, expected: u32, max_iters: u32) -> bool {
     for _ in 0..max_iters {
-        if mmio_read32(base, reg) & mask == expected {
+        if regs.r32(reg) & mask == expected {
             return true;
         }
         core::hint::spin_loop();
@@ -426,7 +415,7 @@ pub struct IntelXeDriver {
     pci_addr: pci::PciAddr,
     device_id: u16,
     device_name: &'static str,
-    bar0: u64,          // GTTMMADR: 16MB MMIO registers + GGTT
+    regs: Mmio,         // BAR0 (GTTMMADR): 16MB MMIO registers + GGTT; empty if unmapped
     bar2: u64,          // GMADR: 256MB aperture
     fb: Option<FramebufferInfo>,
     fb_ggtt_offset: u32,  // GGTT offset of scanout framebuffer
@@ -439,8 +428,8 @@ pub struct IntelXeDriver {
     ddi_port: u8,         // Which DDI port (0=A, 1=B, etc.)
     firmware_dpll: u8,    // Which DPLL firmware used (detected at boot)
     // BCS engine state (ExecList / ELSQ)
-    bcs_ring_phys: u64,   // Physical address of ring buffer (4KB)
-    bcs_lrc_phys: u64,    // Physical address of LRC (8KB: HWSP + context)
+    bcs_ring: DmaRegion,  // Ring buffer (1 page)
+    bcs_lrc: DmaRegion,   // LRC (5 pages: HWSP + context state)
     bcs_initialized: bool,
     // True only after a readback self-test proved the BCS blit actually
     // paints (ring advancing is not enough: on Tiger Lake the ring catches
@@ -492,24 +481,24 @@ impl GpuHal for IntelXeDriver {
     fn supports_modeset(&self) -> bool { is_adln(self.device_id) }
 
     fn flip(&mut self, surface_addr: u64) {
-        if self.bar0 == 0 { return; }
+        if self.regs.is_empty() { return; }
         // Write PLANE_SURF — GPU reads new address at next vblank
-        mmio_write32(self.bar0, PLANE_SURF_1_A, surface_addr as u32);
+        self.regs.w32(PLANE_SURF_1_A, surface_addr as u32);
     }
 
     fn wait_vblank(&self) {
-        if self.bar0 == 0 { return; }
+        if self.regs.is_empty() { return; }
         // Poll frame counter until it increments (= vblank occurred)
-        let cnt = mmio_read32(self.bar0, PIPE_FRMCNT_A);
+        let cnt = self.regs.r32(PIPE_FRMCNT_A);
         let mut spins = 0u32;
-        while mmio_read32(self.bar0, PIPE_FRMCNT_A) == cnt && spins < 2_000_000 {
+        while self.regs.r32(PIPE_FRMCNT_A) == cnt && spins < 2_000_000 {
             core::hint::spin_loop();
             spins += 1;
         }
     }
 
     fn supports_flip(&self) -> bool {
-        self.bar0 != 0 && self.fb.is_some()
+        !self.regs.is_empty() && self.fb.is_some()
     }
 
     fn init_blit_engine(&mut self) -> bool {
@@ -556,22 +545,22 @@ impl GpuHal for IntelXeDriver {
     }
 
     fn dump_bcs_regs(&self) {
-        if self.bar0 == 0 {
+        if self.regs.is_empty() {
             kprintln!("  BCS regs: no BAR0");
             return;
         }
-        let fw_ack = mmio_read32(self.bar0, FORCEWAKE_ACK_GT);
-        let fw_rn = mmio_read32(self.bar0, FORCEWAKE_ACK_RENDER);
-        let fw_md = mmio_read32(self.bar0, FORCEWAKE_ACK_MEDIA);
-        let head = mmio_read32(self.bar0, BCS_RING_HEAD);
-        let tail = mmio_read32(self.bar0, BCS_RING_TAIL);
-        let start = mmio_read32(self.bar0, BCS_RING_START);
-        let ctl = mmio_read32(self.bar0, BCS_RING_CTL);
-        let hws = mmio_read32(self.bar0, BCS_HWS_PGA);
-        let mode = mmio_read32(self.bar0, BCS_RING_MODE);
-        let mi = mmio_read32(self.bar0, BCS_MI_MODE);
-        let elsq_st = mmio_read32(self.bar0, BCS_ELSQ_STATUS_LO);
-        let rst = mmio_read32(self.bar0, BCS_RESET_CTL);
+        let fw_ack = self.regs.r32(FORCEWAKE_ACK_GT);
+        let fw_rn = self.regs.r32(FORCEWAKE_ACK_RENDER);
+        let fw_md = self.regs.r32(FORCEWAKE_ACK_MEDIA);
+        let head = self.regs.r32(BCS_RING_HEAD);
+        let tail = self.regs.r32(BCS_RING_TAIL);
+        let start = self.regs.r32(BCS_RING_START);
+        let ctl = self.regs.r32(BCS_RING_CTL);
+        let hws = self.regs.r32(BCS_HWS_PGA);
+        let mode = self.regs.r32(BCS_RING_MODE);
+        let mi = self.regs.r32(BCS_MI_MODE);
+        let elsq_st = self.regs.r32(BCS_ELSQ_STATUS_LO);
+        let rst = self.regs.r32(BCS_RESET_CTL);
         kprintln!("  FW_ACK:     GT={} RN={} MD={}", fw_ack & 1, fw_rn & 1, fw_md & 1);
         kprintln!("  RING_MODE:  {:#010x} (execlist={}, legacy_off={})",
             mode, mode & GFX_RUN_LIST_ENABLE != 0, mode & GEN11_GFX_DISABLE_LEGACY_MODE != 0);
@@ -582,28 +571,20 @@ impl GpuHal for IntelXeDriver {
         kprintln!("  ELSQ_ST:    {:#010x}", elsq_st);
         kprintln!("  RESET_CTL:  {:#010x}", rst);
         // LRC values from RAM (GPU writes here on context-save)
-        if self.bcs_lrc_phys != 0 {
-            let ctx = (self.bcs_lrc_phys + 4096) as *const u32;
-            // SAFETY: lrc_phys is identity-mapped, within our allocation
-            unsafe {
-                let lh = core::ptr::read_volatile(ctx.add(5));  // HEAD val
-                let lt = core::ptr::read_volatile(ctx.add(7));  // TAIL val
-                let ls = core::ptr::read_volatile(ctx.add(9));  // START val
-                let lc = core::ptr::read_volatile(ctx.add(11)); // CTL val
-                let lx = core::ptr::read_volatile(ctx.add(3));  // CTX_CTRL val
-                kprintln!("  LRC HEAD:   {} TAIL: {} START: {:#x} CTL: {:#x}",
-                    lh, lt, ls, lc);
-                kprintln!("  LRC CTXCTL: {:#010x}", lx);
-            }
+        if !self.bcs_lrc.is_empty() {
+            let ctx = self.bcs_lrc.sub(LRC_CTX, 4096);
+            let lh = ctx.r32(5 * 4u64);  // HEAD val
+            let lt = ctx.r32(7 * 4u64);  // TAIL val
+            let ls = ctx.r32(9 * 4u64);  // START val
+            let lc = ctx.r32(11 * 4u64); // CTL val
+            let lx = ctx.r32(3 * 4u64);  // CTX_CTRL val
+            kprintln!("  LRC HEAD:   {} TAIL: {} START: {:#x} CTL: {:#x}",
+                lh, lt, ls, lc);
+            kprintln!("  LRC CTXCTL: {:#010x}", lx);
             // HWSP first 4 DWORDs
-            let hwsp = self.bcs_lrc_phys as *const u32;
-            unsafe {
-                kprintln!("  HWSP[0-3]:  {:#010x} {:#010x} {:#010x} {:#010x}",
-                    core::ptr::read_volatile(hwsp),
-                    core::ptr::read_volatile(hwsp.add(1)),
-                    core::ptr::read_volatile(hwsp.add(2)),
-                    core::ptr::read_volatile(hwsp.add(3)));
-            }
+            let hwsp = self.bcs_lrc;
+            kprintln!("  HWSP[0-3]:  {:#010x} {:#010x} {:#010x} {:#010x}",
+                hwsp.r32(0u64), hwsp.r32(4u64), hwsp.r32(8u64), hwsp.r32(12u64));
         }
     }
 }
@@ -652,28 +633,24 @@ impl IntelXeDriver {
         kprintln!("[npk]   BAR2 (aperture): {:#x}", bar2);
 
         // Map BAR0 (16MB) so registers are accessible for dump and init
+        let mut regs = Mmio::empty();
         if bar0 != 0 {
-            let bar0_size = 16 * 1024 * 1024u64;
-            for offset in (0..bar0_size).step_by(4096) {
-                match paging::map_page(
-                    bar0 + offset, bar0 + offset,
-                    paging::PageFlags::PRESENT | paging::PageFlags::WRITABLE | paging::PageFlags::NO_CACHE,
-                ) {
-                    Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-                    Err(_) => {
-                        kprintln!("[npk]   GPU: BAR0 map failed at offset {:#x}", offset);
-                        break;
-                    }
+            // SAFETY: BAR0 of the Intel GPU this driver owns: 16MB of MMIO
+            // registers and GGTT, not RAM.
+            match unsafe { Mmio::map(bar0, 16 * 1024 * 1024) } {
+                Ok(m) => {
+                    regs = m;
+                    kprintln!("[npk]   GPU: BAR0 mapped (16MB)");
                 }
+                Err(e) => kprintln!("[npk]   GPU: BAR0 map failed: {:?}", e),
             }
-            kprintln!("[npk]   GPU: BAR0 mapped (16MB)");
         }
 
         Self {
             pci_addr: dev.addr,
             device_id,
             device_name: name,
-            bar0,
+            regs,
             bar2,
             fb: None,
             fb_ggtt_offset: 0,
@@ -683,8 +660,8 @@ impl IntelXeDriver {
             measured_hz: 0,
             ddi_port: 0,
             firmware_dpll: 1,
-            bcs_ring_phys: 0,
-            bcs_lrc_phys: 0,
+            bcs_ring: DmaRegion::empty(),
+            bcs_lrc: DmaRegion::empty(),
             bcs_initialized: false,
             bcs_verified: false,
             bcs_readback_got: 0,
@@ -704,9 +681,9 @@ impl IntelXeDriver {
         let (enable_reg, cfgcr0_reg, cfgcr1_reg) = self.dpll_regs();
 
         // Read current firmware PLL state
-        let orig_enable = mmio_read32(self.bar0, enable_reg);
-        let orig_cfgcr0 = mmio_read32(self.bar0, cfgcr0_reg);
-        let orig_cfgcr1 = mmio_read32(self.bar0, cfgcr1_reg);
+        let orig_enable = self.regs.r32(enable_reg);
+        let orig_cfgcr0 = self.regs.r32(cfgcr0_reg);
+        let orig_cfgcr1 = self.regs.r32(cfgcr1_reg);
 
         kprintln!("[npk]   DPLL{} test: ENABLE={:#010x} CFGCR0={:#010x} CFGCR1={:#010x}",
             self.firmware_dpll, orig_enable, orig_cfgcr0, orig_cfgcr1);
@@ -722,44 +699,44 @@ impl IntelXeDriver {
 
         // Step 1: Disable the display pipeline first (must stop using PLL before disabling it)
         kprintln!("[npk]   Step 1: Disabling pipe + transcoder...");
-        let pipe = mmio_read32(self.bar0, PIPE_CONF_A);
-        mmio_write32(self.bar0, PIPE_CONF_A, pipe & !(1 << 31));
-        let _ = poll_timeout(self.bar0, PIPE_CONF_A, 1 << 30, 0, 200_000);
+        let pipe = self.regs.r32(PIPE_CONF_A);
+        self.regs.w32(PIPE_CONF_A, pipe & !(1 << 31));
+        let _ = poll_timeout(self.regs, PIPE_CONF_A, 1 << 30, 0, 200_000);
 
         // Disable DDI buffer
         let ddi_ctl = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-        let ddi = mmio_read32(self.bar0, ddi_ctl);
-        mmio_write32(self.bar0, ddi_ctl, ddi & !(1 << 31));
-        let _ = poll_timeout(self.bar0, ddi_ctl, 1 << 7, 1 << 7, 200_000);
+        let ddi = self.regs.r32(ddi_ctl);
+        self.regs.w32(ddi_ctl, ddi & !(1 << 31));
+        let _ = poll_timeout(self.regs, ddi_ctl, 1 << 7, 1 << 7, 200_000);
 
         // Disable transcoder DDI function
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
+        self.regs.w32(TRANS_DDI_FUNC_CTL_A, 0);
 
         kprintln!("[npk]   Step 2: Disabling DPLL{}...", self.firmware_dpll);
-        mmio_write32(self.bar0, enable_reg, orig_enable & !(1 << 31));
+        self.regs.w32(enable_reg, orig_enable & !(1 << 31));
 
         // Wait for PLL to unlock
-        if !poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000) {
+        if !poll_timeout(self.regs, enable_reg, 1 << 30, 0, 200_000) {
             kprintln!("[npk]   WARNING: PLL unlock timeout");
         }
-        let after_disable = mmio_read32(self.bar0, enable_reg);
+        let after_disable = self.regs.r32(enable_reg);
         kprintln!("[npk]   After disable: ENABLE={:#010x}", after_disable);
 
         // Step 3: Write back the same CFGCR values
         kprintln!("[npk]   Step 3: Writing CFGCR0={:#010x} CFGCR1={:#010x}",
             orig_cfgcr0, orig_cfgcr1);
-        mmio_write32(self.bar0, cfgcr0_reg, orig_cfgcr0);
-        mmio_write32(self.bar0, cfgcr1_reg, orig_cfgcr1);
+        self.regs.w32(cfgcr0_reg, orig_cfgcr0);
+        self.regs.w32(cfgcr1_reg, orig_cfgcr1);
         // Posting read to ensure writes complete
-        let _ = mmio_read32(self.bar0, cfgcr1_reg);
+        let _ = self.regs.r32(cfgcr1_reg);
 
         // Step 4: Re-enable PLL
         kprintln!("[npk]   Step 4: Enabling DPLL{}...", self.firmware_dpll);
-        mmio_write32(self.bar0, enable_reg, 1 << 31);
+        self.regs.w32(enable_reg, 1 << 31);
 
         // Poll for lock
-        let locked = poll_timeout(self.bar0, enable_reg, 1 << 30, 1 << 30, 1_000_000);
-        let final_val = mmio_read32(self.bar0, enable_reg);
+        let locked = poll_timeout(self.regs, enable_reg, 1 << 30, 1 << 30, 1_000_000);
+        let final_val = self.regs.r32(enable_reg);
         kprintln!("[npk]   Result: ENABLE={:#010x} locked={}", final_val, locked);
 
         if locked {
@@ -783,9 +760,9 @@ impl IntelXeDriver {
     /// a fixed wall-clock window via the 100 Hz tick counter, no register
     /// writes. Returns 0 if the counter doesn't advance (pipe idle / no clock).
     pub fn measure_refresh_hz(&self) -> u8 {
-        if self.bar0 == 0 { return 0; }
+        if self.regs.is_empty() { return 0; }
         const WINDOW_TICKS: u64 = 50; // 500 ms @ 100 Hz → 60Hz→~30 / 30Hz→~15 frames
-        let f0 = mmio_read32(self.bar0, PIPE_FRMCNT_A);
+        let f0 = self.regs.r32(PIPE_FRMCNT_A);
         let t0 = crate::interrupts::ticks();
         // Bail if ticks aren't advancing at all (no time source) to avoid a hang.
         let mut elapsed = 0u64;
@@ -795,7 +772,7 @@ impl IntelXeDriver {
             if elapsed > WINDOW_TICKS + 200 { break; } // ~2.5s safety ceiling
         }
         if elapsed == 0 { return 0; }
-        let frames = mmio_read32(self.bar0, PIPE_FRMCNT_A).wrapping_sub(f0) as u64;
+        let frames = self.regs.r32(PIPE_FRMCNT_A).wrapping_sub(f0) as u64;
         // hz = frames / (elapsed/100 s) = frames*100/elapsed, rounded to nearest.
         ((frames * 100 + elapsed / 2) / elapsed) as u8
     }
@@ -826,7 +803,7 @@ impl IntelXeDriver {
         let cmd = pci::read32(self.pci_addr, 0x04);
         pci::write32(self.pci_addr, 0x04, cmd | 0x06);
 
-        if self.bar0 == 0 {
+        if self.regs.is_empty() {
             return Err(GpuError::MappingFailed);
         }
 
@@ -840,7 +817,7 @@ impl IntelXeDriver {
         self.init_cdclk()?;
 
         // Check if firmware has an active display pipeline
-        let transconf = mmio_read32(self.bar0, PIPE_CONF_A);
+        let transconf = self.regs.r32(PIPE_CONF_A);
         kprintln!("[npk]   PIPE_CONF_A: {:#010x} (enabled={}, active={})",
             transconf, transconf & (1 << 31) != 0, transconf & (1 << 30) != 0);
         if transconf & (1 << 30) == 0 {
@@ -849,24 +826,24 @@ impl IntelXeDriver {
         }
 
         // Read firmware's active resolution from transcoder A
-        let htotal_reg = mmio_read32(self.bar0, TRANS_HTOTAL_A);
-        let vtotal_reg = mmio_read32(self.bar0, TRANS_VTOTAL_A);
+        let htotal_reg = self.regs.r32(TRANS_HTOTAL_A);
+        let vtotal_reg = self.regs.r32(TRANS_VTOTAL_A);
         let fw_width = (htotal_reg & 0xFFFF) + 1;
         let fw_height = (vtotal_reg & 0xFFFF) + 1;
         kprintln!("[npk]   Firmware mode: {}x{}", fw_width, fw_height);
 
         // Log firmware plane state
-        let fw_plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
-        let fw_plane_stride = mmio_read32(self.bar0, PLANE_STRIDE_1_A);
-        let fw_plane_surf = mmio_read32(self.bar0, PLANE_SURF_1_A);
+        let fw_plane_ctl = self.regs.r32(PLANE_CTL_1_A);
+        let fw_plane_stride = self.regs.r32(PLANE_STRIDE_1_A);
+        let fw_plane_surf = self.regs.r32(PLANE_SURF_1_A);
         kprintln!("[npk]   FW plane: CTL={:#010x} STRIDE={} SURF={:#010x}",
             fw_plane_ctl, fw_plane_stride, fw_plane_surf);
 
         // Diagnostic: read GGTT entry to see physical address (log only, no writes)
         let ggtt_entry_idx = fw_plane_surf / 4096;
         let ggtt_entry_off = ggtt_entry_idx * 8;
-        let ggtt_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off);
-        let ggtt_hi = mmio_read32(self.bar0, GGTT_BASE as u32 + ggtt_entry_off + 4);
+        let ggtt_lo = self.regs.r32(GGTT_BASE as u32 + ggtt_entry_off);
+        let ggtt_hi = self.regs.r32(GGTT_BASE as u32 + ggtt_entry_off + 4);
         kprintln!("[npk]   FW GGTT[{}]: {:#010x}_{:08x}",
             ggtt_entry_idx, ggtt_hi, ggtt_lo);
 
@@ -962,7 +939,7 @@ impl IntelXeDriver {
 
         kprintln!("[npk]   set_mode: {}x{}@{}Hz (pclk={}kHz)", width, height, hz, timing.pixel_clock_khz);
         kprintln!("[npk]   BAR2 (aperture): {:#x}", self.bar2);
-        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
+        let cdclk = self.regs.r32(CDCLK_CTL);
         kprintln!("[npk]   CDCLK_CTL: {:#010x}", cdclk);
 
         let need_pll_change = self.active_timing
@@ -978,32 +955,32 @@ impl IntelXeDriver {
         }
 
         // Step 1: Disable plane
-        let plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
-        mmio_write32(self.bar0, PLANE_CTL_1_A, plane_ctl & !(1 << 31));
-        mmio_write32(self.bar0, PLANE_SURF_1_A, 0);
+        let plane_ctl = self.regs.r32(PLANE_CTL_1_A);
+        self.regs.w32(PLANE_CTL_1_A, plane_ctl & !(1 << 31));
+        self.regs.w32(PLANE_SURF_1_A, 0);
         kprintln!("[npk]   Plane disabled");
 
         // Step 2: Disable pipe — try both possible config registers
         // ADL-N: PIPE_CONF may be at 0x70008 or 0xF0008 depending on stepping
-        let pipe_val = mmio_read32(self.bar0, PIPE_CONF_A);
+        let pipe_val = self.regs.r32(PIPE_CONF_A);
         kprintln!("[npk]   PIPE_CONF(0x70008): {:#010x}", pipe_val);
         // Write disable to both offsets (harmless if one is invalid)
-        mmio_write32(self.bar0, 0x70008, 0);  // PIPE_CONF_A
-        mmio_write32(self.bar0, 0xF0008, 0);  // TRANSCONF_A
+        self.regs.w32(0x70008u32, 0);  // PIPE_CONF_A
+        self.regs.w32(0xF0008u32, 0);  // TRANSCONF_A
         // Blind wait ~20ms for pipe to drain (don't rely on polling)
         for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
-        let after = mmio_read32(self.bar0, PIPE_CONF_A);
+        let after = self.regs.r32(PIPE_CONF_A);
         kprintln!("[npk]   Pipe after disable: {:#010x}", after);
 
         // Step 2b: Disable pipe scaler (firmware may use it for 1080p→4K upscale)
-        let ps_ctrl = mmio_read32(self.bar0, PS_CTRL_1A);
-        let ps_winsz = mmio_read32(self.bar0, PS_WIN_SZ_1A);
+        let ps_ctrl = self.regs.r32(PS_CTRL_1A);
+        let ps_winsz = self.regs.r32(PS_WIN_SZ_1A);
         kprintln!("[npk]   Scaler: CTRL={:#010x} WIN_SZ={:#010x}", ps_ctrl, ps_winsz);
         if ps_ctrl & (1 << 31) != 0 {
             kprintln!("[npk]   Disabling pipe scaler (was limiting output)");
-            mmio_write32(self.bar0, PS_CTRL_1A, 0);
+            self.regs.w32(PS_CTRL_1A, 0);
             // Posting read
-            let _ = mmio_read32(self.bar0, PS_CTRL_1A);
+            let _ = self.regs.r32(PS_CTRL_1A);
         }
 
         // Step 3: Free old GGTT entries (no-op if fb_pages == 0)
@@ -1017,20 +994,18 @@ impl IntelXeDriver {
         // Step 5: Program transcoder timings + pipe source size
         self.program_transcoder(timing);
         let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
-        mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
+        self.regs.w32(PIPE_SRCSZ_A, srcsz);
         // Also try pipe-domain offset 0x7001C (in case 0x6001C is transcoder-only)
-        mmio_write32(self.bar0, 0x7001C, srcsz);
+        self.regs.w32(0x7001Cu32, srcsz);
         kprintln!("[npk]   PIPE_SRCSZ: {:#010x} (written to 0x6001C + 0x7001C)", srcsz);
 
         // Step 6: Allocate framebuffer (contiguous physical RAM)
         let pitch = timing.width * 4;
         let fb_size = pitch * timing.height;
         let pages = (fb_size + 4095) / 4096;
-        let phys = memory::allocate_contiguous(pages as usize)
-            .ok_or(GpuError::AllocFailed)?;
-
-        // SAFETY: phys is identity-mapped, contiguous, freshly allocated
-        unsafe { core::ptr::write_bytes(phys as *mut u8, 0, fb_size as usize); }
+        let phys = DmaRegion::alloc_zeroed(pages as usize)
+            .ok_or(GpuError::AllocFailed)?
+            .phys();
 
         self.fb_phys = phys;
         self.fb_pages = pages;
@@ -1043,8 +1018,8 @@ impl IntelXeDriver {
         self.program_ggtt_32()?;
 
         // Step 8: Invalidate GGTT TLB
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        self.regs.w32(GFX_FLSH_CNTL_GEN6, 1);
+        let _ = self.regs.r32(GFX_FLSH_CNTL_GEN6);
         kprintln!("[npk]   GGTT TLB invalidated");
 
         // Step 9: Map aperture pages for CPU access (BAR2 + GGTT offset)
@@ -1069,12 +1044,12 @@ impl IntelXeDriver {
             | (0x4 << 24)                    // XRGB 8:8:8:8
             | (1 << 3);                      // bit 3 (matches firmware)
         let stride_64b = pitch / 64;
-        mmio_write32(self.bar0, PLANE_CTL_1_A, new_plane_ctl);
-        mmio_write32(self.bar0, PLANE_STRIDE_1_A, stride_64b);
-        mmio_write32(self.bar0, PLANE_POS_1_A, 0);
-        mmio_write32(self.bar0, PLANE_SIZE_1_A,
+        self.regs.w32(PLANE_CTL_1_A, new_plane_ctl);
+        self.regs.w32(PLANE_STRIDE_1_A, stride_64b);
+        self.regs.w32(PLANE_POS_1_A, 0);
+        self.regs.w32(PLANE_SIZE_1_A,
             ((timing.height - 1) << 16) | (timing.width - 1));
-        mmio_write32(self.bar0, PLANE_SURF_1_A, self.fb_ggtt_offset); // triggers flip
+        self.regs.w32(PLANE_SURF_1_A, self.fb_ggtt_offset); // triggers flip
         kprintln!("[npk]   Plane: {}x{} stride={} surf={:#x}",
             timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
 
@@ -1098,16 +1073,16 @@ impl IntelXeDriver {
         }
 
         // Step 12: Re-enable pipe (write to both possible offsets)
-        mmio_write32(self.bar0, 0x70008, 1 << 31);  // PIPE_CONF_A
-        mmio_write32(self.bar0, 0xF0008, 1 << 31);  // TRANSCONF_A
+        self.regs.w32(0x70008u32, 1 << 31);  // PIPE_CONF_A
+        self.regs.w32(0xF0008u32, 1 << 31);  // TRANSCONF_A
         // Wait for pipe to start
         for _ in 0..2_000_000u32 { core::hint::spin_loop(); }
         kprintln!("[npk]   Pipe enabled (blind)");
 
         // Write PIPE_SRCSZ again after enable (some HW needs it live)
         let srcsz = ((timing.width - 1) << 16) | (timing.height - 1);
-        mmio_write32(self.bar0, PIPE_SRCSZ_A, srcsz);
-        mmio_write32(self.bar0, 0x7001C, srcsz);
+        self.regs.w32(PIPE_SRCSZ_A, srcsz);
+        self.regs.w32(0x7001Cu32, srcsz);
 
         Ok(fb)
     }
@@ -1118,31 +1093,31 @@ impl IntelXeDriver {
     /// Use this to understand what the firmware configured.
     pub fn dump_registers(&self) {
         kprintln!("[npk]   === Intel Xe Display Register Dump ===");
-        kprintln!("[npk]   BAR0: {:#x}", self.bar0);
+        kprintln!("[npk]   BAR0: {:#x}", self.regs.base());
 
         // Fuses
-        let fuse = mmio_read32(self.bar0, FUSE_STATUS);
-        let sfuse = mmio_read32(self.bar0, SFUSE_STRAP);
+        let fuse = self.regs.r32(FUSE_STATUS);
+        let sfuse = self.regs.r32(SFUSE_STRAP);
         kprintln!("[npk]   FUSE_STATUS:  {:#010x}", fuse);
         kprintln!("[npk]   SFUSE_STRAP:  {:#010x}", sfuse);
 
         // Power
-        let pwr = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        let pwr = self.regs.r32(PWR_WELL_CTL2);
         kprintln!("[npk]   PWR_WELL_CTL2: {:#010x}", pwr);
 
         // CDCLK
-        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
-        let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);
+        let cdclk = self.regs.r32(CDCLK_CTL);
+        let dbuf = self.regs.r32(DBUF_CTL_S1);
         kprintln!("[npk]   CDCLK_CTL:    {:#010x}", cdclk);
         kprintln!("[npk]   DBUF_CTL_S1:  {:#010x}", dbuf);
 
         // DPLL 0 and 1
-        let dpll0_en = mmio_read32(self.bar0, DPLL_ENABLE_0);
-        let dpll0_c0 = mmio_read32(self.bar0, DPLL_CFGCR0_0);
-        let dpll0_c1 = mmio_read32(self.bar0, DPLL_CFGCR1_0);
-        let dpll1_en = mmio_read32(self.bar0, DPLL_ENABLE_1);
-        let dpll1_c0 = mmio_read32(self.bar0, DPLL_CFGCR0_1);
-        let dpll1_c1 = mmio_read32(self.bar0, DPLL_CFGCR1_1);
+        let dpll0_en = self.regs.r32(DPLL_ENABLE_0);
+        let dpll0_c0 = self.regs.r32(DPLL_CFGCR0_0);
+        let dpll0_c1 = self.regs.r32(DPLL_CFGCR1_0);
+        let dpll1_en = self.regs.r32(DPLL_ENABLE_1);
+        let dpll1_c0 = self.regs.r32(DPLL_CFGCR0_1);
+        let dpll1_c1 = self.regs.r32(DPLL_CFGCR1_1);
         kprintln!("[npk]   DPLL0_ENABLE: {:#010x}", dpll0_en);
         kprintln!("[npk]   DPLL0_CFGCR0: {:#010x}", dpll0_c0);
         kprintln!("[npk]   DPLL0_CFGCR1: {:#010x}", dpll0_c1);
@@ -1151,20 +1126,20 @@ impl IntelXeDriver {
         kprintln!("[npk]   DPLL1_CFGCR1: {:#010x}", dpll1_c1);
 
         // DDI clock routing
-        let dpclka = mmio_read32(self.bar0, ICL_DPCLKA_CFGCR0);
+        let dpclka = self.regs.r32(ICL_DPCLKA_CFGCR0);
         kprintln!("[npk]   DPCLKA_CFGCR0: {:#010x}", dpclka);
 
         // Transcoder A clock selection
-        let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
+        let clk_sel = self.regs.r32(TRANS_CLK_SEL_A);
         kprintln!("[npk]   TRANS_CLK_SEL_A: {:#010x}", clk_sel);
 
         // Transcoder A timings
-        let htotal = mmio_read32(self.bar0, TRANS_HTOTAL_A);
-        let hblank = mmio_read32(self.bar0, TRANS_HBLANK_A);
-        let hsync  = mmio_read32(self.bar0, TRANS_HSYNC_A);
-        let vtotal = mmio_read32(self.bar0, TRANS_VTOTAL_A);
-        let vblank = mmio_read32(self.bar0, TRANS_VBLANK_A);
-        let vsync  = mmio_read32(self.bar0, TRANS_VSYNC_A);
+        let htotal = self.regs.r32(TRANS_HTOTAL_A);
+        let hblank = self.regs.r32(TRANS_HBLANK_A);
+        let hsync  = self.regs.r32(TRANS_HSYNC_A);
+        let vtotal = self.regs.r32(TRANS_VTOTAL_A);
+        let vblank = self.regs.r32(TRANS_VBLANK_A);
+        let vsync  = self.regs.r32(TRANS_VSYNC_A);
         kprintln!("[npk]   TRANS_HTOTAL_A: {:#010x}  (active={}, total={})",
             htotal, (htotal & 0xFFFF) + 1, (htotal >> 16) + 1);
         kprintln!("[npk]   TRANS_HBLANK_A: {:#010x}", hblank);
@@ -1175,7 +1150,7 @@ impl IntelXeDriver {
         kprintln!("[npk]   TRANS_VSYNC_A:  {:#010x}", vsync);
 
         // Transcoder DDI function control
-        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        let ddi_func = self.regs.r32(TRANS_DDI_FUNC_CTL_A);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL_A: {:#010x}", ddi_func);
         if ddi_func & (1 << 31) != 0 {
             // TGL+ port select is bits [30:27], encoding: 1=A, 2=B, 3=C
@@ -1192,9 +1167,9 @@ impl IntelXeDriver {
         }
 
         // Pipe A
-        let pipe_conf = mmio_read32(self.bar0, PIPE_CONF_A);
-        let transconf = mmio_read32(self.bar0, PIPE_CONF_A);
-        let pipe_src = mmio_read32(self.bar0, PIPE_SRCSZ_A);
+        let pipe_conf = self.regs.r32(PIPE_CONF_A);
+        let transconf = self.regs.r32(PIPE_CONF_A);
+        let pipe_src = self.regs.r32(PIPE_SRCSZ_A);
         kprintln!("[npk]   PIPE_CONF_A:  {:#010x}  (enabled={})",
             pipe_conf, pipe_conf & (1 << 31) != 0);
         kprintln!("[npk]   PIPE_CONF_A:  {:#010x}  (enabled={})",
@@ -1203,11 +1178,11 @@ impl IntelXeDriver {
             pipe_src, (pipe_src & 0xFFFF) + 1, (pipe_src >> 16) + 1);
 
         // Plane 1
-        let plane_ctl = mmio_read32(self.bar0, PLANE_CTL_1_A);
-        let plane_stride = mmio_read32(self.bar0, PLANE_STRIDE_1_A);
-        let plane_pos = mmio_read32(self.bar0, PLANE_POS_1_A);
-        let plane_size = mmio_read32(self.bar0, PLANE_SIZE_1_A);
-        let plane_surf = mmio_read32(self.bar0, PLANE_SURF_1_A);
+        let plane_ctl = self.regs.r32(PLANE_CTL_1_A);
+        let plane_stride = self.regs.r32(PLANE_STRIDE_1_A);
+        let plane_pos = self.regs.r32(PLANE_POS_1_A);
+        let plane_size = self.regs.r32(PLANE_SIZE_1_A);
+        let plane_surf = self.regs.r32(PLANE_SURF_1_A);
         kprintln!("[npk]   PLANE_CTL_1_A:    {:#010x}  (enabled={})",
             plane_ctl, plane_ctl & (1 << 31) != 0);
         kprintln!("[npk]   PLANE_STRIDE_1_A: {} ({}B per row)",
@@ -1218,8 +1193,8 @@ impl IntelXeDriver {
         kprintln!("[npk]   PLANE_SURF_1_A:   {:#010x}  (GGTT offset)", plane_surf);
 
         // DDI buffer control
-        let ddi_a = mmio_read32(self.bar0, DDI_BUF_CTL_A);
-        let ddi_b = mmio_read32(self.bar0, DDI_BUF_CTL_B);
+        let ddi_a = self.regs.r32(DDI_BUF_CTL_A);
+        let ddi_b = self.regs.r32(DDI_BUF_CTL_B);
         kprintln!("[npk]   DDI_BUF_CTL_A: {:#010x}  (enabled={})",
             ddi_a, ddi_a & (1 << 31) != 0);
         kprintln!("[npk]   DDI_BUF_CTL_B: {:#010x}  (enabled={})",
@@ -1231,14 +1206,14 @@ impl IntelXeDriver {
     // ── DDI Port Detection ──────────────────────────────────────────
 
     fn detect_ddi_ports(&mut self) {
-        let fuse = mmio_read32(self.bar0, FUSE_STATUS);
-        let sfuse = mmio_read32(self.bar0, SFUSE_STRAP);
+        let fuse = self.regs.r32(FUSE_STATUS);
+        let sfuse = self.regs.r32(SFUSE_STRAP);
 
         kprintln!("[npk]   FUSE_STATUS: {:#010x}", fuse);
         kprintln!("[npk]   SFUSE_STRAP: {:#010x}", sfuse);
 
         // Read TRANS_DDI_FUNC_CTL to see what the firmware configured
-        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        let ddi_func = self.regs.r32(TRANS_DDI_FUNC_CTL_A);
         if ddi_func & (1 << 31) != 0 {
             // Firmware has an active DDI — use the same port
             // TGL+ port select is bits [30:27]
@@ -1254,7 +1229,7 @@ impl IntelXeDriver {
         }
 
         // Detect which DPLL the firmware uses
-        let clk_sel = mmio_read32(self.bar0, TRANS_CLK_SEL_A);
+        let clk_sel = self.regs.r32(TRANS_CLK_SEL_A);
         let dpll_sel = (clk_sel >> 29) & 0x7;
         kprintln!("[npk]   Firmware clock source: DPLL{}", dpll_sel);
         self.firmware_dpll = dpll_sel as u8;
@@ -1266,7 +1241,7 @@ impl IntelXeDriver {
         kprintln!("[npk]   GPU: enabling power wells...");
 
         // Read current power well state
-        let pwr = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        let pwr = self.regs.r32(PWR_WELL_CTL2);
         kprintln!("[npk]   PWR_WELL_CTL2: {:#010x}", pwr);
 
         // Enable PW1 (Power Group 1): bit 1 = request, bit 0 = state
@@ -1288,17 +1263,17 @@ impl IntelXeDriver {
         let state_bit = 1u32 << (idx * 2);
 
         // Check if already on
-        let val = mmio_read32(self.bar0, PWR_WELL_CTL2);
+        let val = self.regs.r32(PWR_WELL_CTL2);
         if val & state_bit != 0 {
             kprintln!("[npk]     {} already on", name);
             return Ok(());
         }
 
         // Request enable
-        mmio_write32(self.bar0, PWR_WELL_CTL2, val | request_bit);
+        self.regs.w32(PWR_WELL_CTL2, val | request_bit);
 
         // Poll for state bit (up to 20ms equivalent in iterations)
-        if !poll_timeout(self.bar0, PWR_WELL_CTL2, state_bit, state_bit, 200_000) {
+        if !poll_timeout(self.regs, PWR_WELL_CTL2, state_bit, state_bit, 200_000) {
             kprintln!("[npk]     {} enable TIMEOUT", name);
             return Err(GpuError::PowerTimeout);
         }
@@ -1311,7 +1286,7 @@ impl IntelXeDriver {
 
     fn init_cdclk(&self) -> Result<(), GpuError> {
         // Read current CDCLK
-        let cdclk = mmio_read32(self.bar0, CDCLK_CTL);
+        let cdclk = self.regs.r32(CDCLK_CTL);
         kprintln!("[npk]   CDCLK_CTL: {:#010x}", cdclk);
 
         // ADL CDCLK_CTL format (Gen 12):
@@ -1327,10 +1302,10 @@ impl IntelXeDriver {
         // Only logged for diagnostics; CDCLK is not reprogrammed here.
 
         // Enable DBUF (Display Buffer)
-        let dbuf = mmio_read32(self.bar0, DBUF_CTL_S1);
+        let dbuf = self.regs.r32(DBUF_CTL_S1);
         if dbuf & (1 << 31) == 0 {
-            mmio_write32(self.bar0, DBUF_CTL_S1, dbuf | (1 << 31));
-            if !poll_timeout(self.bar0, DBUF_CTL_S1, 1 << 0, 1 << 0, 100_000) {
+            self.regs.w32(DBUF_CTL_S1, dbuf | (1 << 31));
+            if !poll_timeout(self.regs, DBUF_CTL_S1, 1 << 0, 1 << 0, 100_000) {
                 kprintln!("[npk]   DBUF enable timeout");
                 return Err(GpuError::PowerTimeout);
             }
@@ -1352,14 +1327,10 @@ impl IntelXeDriver {
         let pages = (size + 4095) / 4096;
 
         // Allocate contiguous physical memory for scanout
-        let phys = memory::allocate_contiguous(pages as usize)
-            .ok_or(GpuError::AllocFailed)?;
-
-        // Zero the framebuffer (black)
-        // SAFETY: phys is identity-mapped, contiguous, and we just allocated it
-        unsafe {
-            core::ptr::write_bytes(phys as *mut u8, 0, size as usize);
-        }
+        // Zeroed = black
+        let phys = DmaRegion::alloc_zeroed(pages as usize)
+            .ok_or(GpuError::AllocFailed)?
+            .phys();
 
         self.fb_phys = phys;
         self.fb_pages = pages;
@@ -1381,11 +1352,10 @@ impl IntelXeDriver {
     fn free_framebuffer(&mut self) {
         if self.fb_pages > 0 {
             // Clear GGTT entries
-            let ggtt_base = self.bar0 + GGTT_BASE as u64;
             let start_entry = self.fb_ggtt_offset / 4096;
             for i in 0..self.fb_pages {
                 let entry_offset = ((start_entry + i) * 8) as u32;
-                mmio_write64(ggtt_base, entry_offset, 0);
+                self.regs.w64(GGTT_BASE as u64 + entry_offset as u64, 0);
             }
             // Note: physical memory is not freed (no free API in memory.rs)
             self.fb_pages = 0;
@@ -1396,7 +1366,6 @@ impl IntelXeDriver {
     // ── GGTT Programming ────────────────────────────────────────────
 
     fn program_ggtt(&self) -> Result<(), GpuError> {
-        let ggtt_base = self.bar0 + GGTT_BASE as u64;
         let start_entry = self.fb_ggtt_offset / 4096;
 
         for i in 0..self.fb_pages {
@@ -1408,18 +1377,18 @@ impl IntelXeDriver {
             let ggtt_entry: u64 = (phys_addr & 0xFFFF_FFFF_FFFF_F000) | 0x01; // valid, system mem
 
             let entry_offset = ((start_entry + i) * 8) as u32;
-            mmio_write64(ggtt_base, entry_offset, ggtt_entry);
+            self.regs.w64(GGTT_BASE as u64 + entry_offset as u64, ggtt_entry);
         }
 
         // Flush GGTT writes with a read-back
-        let _ = mmio_read32(self.bar0, GGTT_BASE);
+        let _ = self.regs.r32(GGTT_BASE);
 
         // Log first and last entries for verification
         let first_off = (start_entry * 8) as u32;
         let last_off = ((start_entry + self.fb_pages - 1) * 8) as u32;
-        let first_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + first_off);
-        let first_hi = mmio_read32(self.bar0, GGTT_BASE as u32 + first_off + 4);
-        let last_lo = mmio_read32(self.bar0, GGTT_BASE as u32 + last_off);
+        let first_lo = self.regs.r32(GGTT_BASE as u32 + first_off);
+        let first_hi = self.regs.r32(GGTT_BASE as u32 + first_off + 4);
+        let last_lo = self.regs.r32(GGTT_BASE as u32 + last_off);
         kprintln!("[npk]   GGTT: {} entries @ offset {:#x} (entry[0]={:#010x}_{:08x}, last_lo={:#010x})",
             self.fb_pages, self.fb_ggtt_offset, first_hi, first_lo, last_lo);
         Ok(())
@@ -1435,17 +1404,17 @@ impl IntelXeDriver {
             let entry_hi = (phys_addr >> 32) as u32;
 
             let off = GGTT_BASE as u32 + (start_entry + i) * 8;
-            mmio_write32(self.bar0, off, entry_lo);
-            mmio_write32(self.bar0, off + 4, entry_hi);
+            self.regs.w32(off, entry_lo);
+            self.regs.w32(off + 4, entry_hi);
         }
 
         // Flush with read-back
-        let _ = mmio_read32(self.bar0, GGTT_BASE);
+        let _ = self.regs.r32(GGTT_BASE);
 
         // Log first entry for verification
         let first_off = GGTT_BASE as u32 + start_entry * 8;
-        let lo = mmio_read32(self.bar0, first_off);
-        let hi = mmio_read32(self.bar0, first_off + 4);
+        let lo = self.regs.r32(first_off);
+        let hi = self.regs.r32(first_off + 4);
         kprintln!("[npk]   GGTT: {} entries @ {:#x} (first={:#010x}_{:08x})",
             self.fb_pages, self.fb_ggtt_offset, hi, lo);
         Ok(())
@@ -1476,22 +1445,22 @@ impl IntelXeDriver {
         kprintln!("[npk]   DPLL{}: CFGCR0={:#010x} CFGCR1={:#010x}", self.firmware_dpll, cfgcr0, cfgcr1);
 
         // Disable DPLL first
-        let dpll = mmio_read32(self.bar0, enable_reg);
+        let dpll = self.regs.r32(enable_reg);
         if dpll & (1 << 31) != 0 {
-            mmio_write32(self.bar0, enable_reg, dpll & !(1 << 31));
-            let _ = poll_timeout(self.bar0, enable_reg, 1 << 30, 0, 200_000);
+            self.regs.w32(enable_reg, dpll & !(1 << 31));
+            let _ = poll_timeout(self.regs, enable_reg, 1 << 30, 0, 200_000);
         }
 
         // Write PLL configuration
-        mmio_write32(self.bar0, cfgcr0_reg, cfgcr0);
-        mmio_write32(self.bar0, cfgcr1_reg, cfgcr1);
+        self.regs.w32(cfgcr0_reg, cfgcr0);
+        self.regs.w32(cfgcr1_reg, cfgcr1);
 
         // Enable DPLL
-        mmio_write32(self.bar0, enable_reg, 1 << 31);
+        self.regs.w32(enable_reg, 1 << 31);
 
         // Poll for PLL lock (bit 30 on TGL+)
-        if !poll_timeout(self.bar0, enable_reg, 1 << 30, 1 << 30, 500_000) {
-            let val = mmio_read32(self.bar0, enable_reg);
+        if !poll_timeout(self.regs, enable_reg, 1 << 30, 1 << 30, 500_000) {
+            let val = self.regs.r32(enable_reg);
             kprintln!("[npk]   DPLL{} lock TIMEOUT (DPLL_ENABLE={:#010x})", self.firmware_dpll, val);
             return Err(GpuError::PllLockFailed);
         }
@@ -1511,15 +1480,15 @@ impl IntelXeDriver {
         let v_sync_end = v_sync_start + t.v_sync as u32;
 
         // HTOTAL = (total-1) << 16 | (active-1)
-        mmio_write32(self.bar0, TRANS_HTOTAL_A, ((h_total - 1) << 16) | (t.width - 1));
+        self.regs.w32(TRANS_HTOTAL_A, ((h_total - 1) << 16) | (t.width - 1));
         // HBLANK = (total-1) << 16 | (active-1) — blank covers non-active area
-        mmio_write32(self.bar0, TRANS_HBLANK_A, ((h_total - 1) << 16) | (t.width - 1));
+        self.regs.w32(TRANS_HBLANK_A, ((h_total - 1) << 16) | (t.width - 1));
         // HSYNC = (sync_end-1) << 16 | (sync_start-1)
-        mmio_write32(self.bar0, TRANS_HSYNC_A, ((h_sync_end - 1) << 16) | (h_sync_start - 1));
+        self.regs.w32(TRANS_HSYNC_A, ((h_sync_end - 1) << 16) | (h_sync_start - 1));
 
-        mmio_write32(self.bar0, TRANS_VTOTAL_A, ((v_total - 1) << 16) | (t.height - 1));
-        mmio_write32(self.bar0, TRANS_VBLANK_A, ((v_total - 1) << 16) | (t.height - 1));
-        mmio_write32(self.bar0, TRANS_VSYNC_A, ((v_sync_end - 1) << 16) | (v_sync_start - 1));
+        self.regs.w32(TRANS_VTOTAL_A, ((v_total - 1) << 16) | (t.height - 1));
+        self.regs.w32(TRANS_VBLANK_A, ((v_total - 1) << 16) | (t.height - 1));
+        self.regs.w32(TRANS_VSYNC_A, ((v_sync_end - 1) << 16) | (v_sync_start - 1));
 
         kprintln!("[npk]   Transcoder: {}x{} htotal={} vtotal={}",
             t.width, t.height, h_total, v_total);
@@ -1534,20 +1503,20 @@ impl IntelXeDriver {
         let plane_ctl = (1u32 << 31)       // enable
             | (0x4 << 24)                  // XRGB 8:8:8:8 pixel format
             | (0 << 10);                   // linear tiling (no tiling)
-        mmio_write32(self.bar0, PLANE_CTL_1_A, plane_ctl);
+        self.regs.w32(PLANE_CTL_1_A, plane_ctl);
 
         // Stride in 64-byte chunks
-        mmio_write32(self.bar0, PLANE_STRIDE_1_A, stride_64b);
+        self.regs.w32(PLANE_STRIDE_1_A, stride_64b);
 
         // Position (0,0)
-        mmio_write32(self.bar0, PLANE_POS_1_A, 0);
+        self.regs.w32(PLANE_POS_1_A, 0);
 
         // Size: (height-1) << 16 | (width-1)
-        mmio_write32(self.bar0, PLANE_SIZE_1_A,
+        self.regs.w32(PLANE_SIZE_1_A,
             ((timing.height - 1) << 16) | (timing.width - 1));
 
         // Surface address (GGTT offset, 4K-aligned) — writing this triggers the flip
-        mmio_write32(self.bar0, PLANE_SURF_1_A, self.fb_ggtt_offset);
+        self.regs.w32(PLANE_SURF_1_A, self.fb_ggtt_offset);
 
         kprintln!("[npk]   Plane: {}x{} XRGB8888 stride={} surf={:#x}",
             timing.width, timing.height, stride_64b * 64, self.fb_ggtt_offset);
@@ -1559,7 +1528,7 @@ impl IntelXeDriver {
     /// Wait for GMBUS to become idle/ready.
     fn gmbus_wait_idle(&self) -> bool {
         for _ in 0..50_000u32 {
-            let st = mmio_read32(self.bar0, GMBUS2);
+            let st = self.regs.r32(GMBUS2);
             if st & GMBUS_ACTIVE == 0 {
                 return true;
             }
@@ -1571,7 +1540,7 @@ impl IntelXeDriver {
     /// Wait for GMBUS HW_RDY (data transferred).
     fn gmbus_wait_hw_rdy(&self) -> bool {
         for _ in 0..100_000u32 {
-            let st = mmio_read32(self.bar0, GMBUS2);
+            let st = self.regs.r32(GMBUS2);
             if st & GMBUS_NAK != 0 {
                 kprintln!("[npk]   GMBUS: NAK received");
                 return false;
@@ -1587,11 +1556,11 @@ impl IntelXeDriver {
     /// Reset GMBUS after error or before use.
     fn gmbus_reset(&self) {
         // Set SW_CLR_INT to clear any pending state
-        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
-        mmio_write32(self.bar0, GMBUS1, 0);
+        self.regs.w32(GMBUS1, GMBUS_SW_CLR_INT);
+        self.regs.w32(GMBUS1, 0);
         // Select no port
-        mmio_write32(self.bar0, GMBUS0, 0);
-        let _ = mmio_read32(self.bar0, GMBUS2);
+        self.regs.w32(GMBUS0, 0);
+        let _ = self.regs.r32(GMBUS2);
     }
 
     /// Write a single byte to an I2C register via GMBUS.
@@ -1599,7 +1568,7 @@ impl IntelXeDriver {
         let pin = if self.ddi_port == 1 { GMBUS_PIN_DPB } else { 1 };
 
         // Select port
-        mmio_write32(self.bar0, GMBUS0, pin);
+        self.regs.w32(GMBUS0, pin);
 
         if !self.gmbus_wait_idle() {
             kprintln!("[npk]   GMBUS: not idle before write");
@@ -1608,7 +1577,7 @@ impl IntelXeDriver {
         }
 
         // Data: reg byte + value byte (little-endian in GMBUS3)
-        mmio_write32(self.bar0, GMBUS3, (val as u32) << 8 | reg as u32);
+        self.regs.w32(GMBUS3, (val as u32) << 8 | reg as u32);
 
         // Command: 2 bytes, write, slave address, WAIT+STOP cycle
         let cmd = GMBUS_SW_RDY
@@ -1617,15 +1586,15 @@ impl IntelXeDriver {
             | (2u32 << 16)                          // byte count = 2 (reg + val)
             | ((slave_addr as u32) << 1)            // slave addr (7-bit, shifted)
             | GMBUS_SLAVE_WRITE;
-        mmio_write32(self.bar0, GMBUS1, cmd);
+        self.regs.w32(GMBUS1, cmd);
 
         let ok = self.gmbus_wait_hw_rdy();
         // Wait for bus to go idle
         self.gmbus_wait_idle();
         // Clean up
-        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
-        mmio_write32(self.bar0, GMBUS1, 0);
-        mmio_write32(self.bar0, GMBUS0, 0);
+        self.regs.w32(GMBUS1, GMBUS_SW_CLR_INT);
+        self.regs.w32(GMBUS1, 0);
+        self.regs.w32(GMBUS0, 0);
 
         if ok {
             kprintln!("[npk]   GMBUS: wrote {:#04x}={:#04x} to slave {:#04x}", reg, val, slave_addr);
@@ -1640,7 +1609,7 @@ impl IntelXeDriver {
         let pin = if self.ddi_port == 1 { GMBUS_PIN_DPB } else { 1 };
 
         // Select port
-        mmio_write32(self.bar0, GMBUS0, pin);
+        self.regs.w32(GMBUS0, pin);
 
         if !self.gmbus_wait_idle() {
             kprintln!("[npk]   GMBUS: not idle before read");
@@ -1649,7 +1618,7 @@ impl IntelXeDriver {
         }
 
         // Set index register (GMBUS5) for indexed read
-        mmio_write32(self.bar0, GMBUS5, (reg as u32) | (1 << 31)); // index enable
+        self.regs.w32(GMBUS5, (reg as u32) | (1 << 31)); // index enable
 
         // Command: 1 byte, read, slave address, INDEX+WAIT+STOP
         let cmd = GMBUS_SW_RDY
@@ -1659,21 +1628,21 @@ impl IntelXeDriver {
             | (1u32 << 16)                          // byte count = 1
             | ((slave_addr as u32) << 1)
             | GMBUS_SLAVE_READ;
-        mmio_write32(self.bar0, GMBUS1, cmd);
+        self.regs.w32(GMBUS1, cmd);
 
         let ok = self.gmbus_wait_hw_rdy();
         let data = if ok {
-            let d = mmio_read32(self.bar0, GMBUS3);
+            let d = self.regs.r32(GMBUS3);
             Some((d & 0xFF) as u8)
         } else {
             None
         };
 
         self.gmbus_wait_idle();
-        mmio_write32(self.bar0, GMBUS5, 0); // disable index
-        mmio_write32(self.bar0, GMBUS1, GMBUS_SW_CLR_INT);
-        mmio_write32(self.bar0, GMBUS1, 0);
-        mmio_write32(self.bar0, GMBUS0, 0);
+        self.regs.w32(GMBUS5, 0); // disable index
+        self.regs.w32(GMBUS1, GMBUS_SW_CLR_INT);
+        self.regs.w32(GMBUS1, 0);
+        self.regs.w32(GMBUS0, 0);
 
         data
     }
@@ -1692,7 +1661,7 @@ impl IntelXeDriver {
     ///   7. Build context descriptor + submit via ELSQ
     ///   8. Probe: MI_NOOP in ring, check HWSP seqno
     pub fn init_bcs(&mut self) -> Result<(), GpuError> {
-        if self.bar0 == 0 { return Err(GpuError::MappingFailed); }
+        if self.regs.is_empty() { return Err(GpuError::MappingFailed); }
         if self.bcs_initialized {
             kprintln!("[npk]   BCS: already initialized");
             return Ok(());
@@ -1701,52 +1670,48 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS: initializing (Gen 12 ExecList/ELSQ)...");
 
         // ── Step 1: Allocate memory ─────────────────────────────────
-        let ring_phys = memory::allocate_contiguous(1)
+        let ring = DmaRegion::alloc_zeroed(1)
             .ok_or(GpuError::AllocFailed)?;
-        // SAFETY: identity-mapped, freshly allocated
-        unsafe { core::ptr::write_bytes(ring_phys as *mut u8, 0, 4096); }
 
         // LRC = 5 pages: page 0 = HWSP, pages 1-4 = context state + power context save area
         // GPU writes additional "power context" state beyond the LRI template on context-save.
         // Gen 12 BCS HW context is ~80 DWORDs but save area needs extra pages.
-        let lrc_phys = memory::allocate_contiguous(5)
+        let lrc = DmaRegion::alloc_zeroed(5)
             .ok_or(GpuError::AllocFailed)?;
-        // SAFETY: identity-mapped, freshly allocated
-        unsafe { core::ptr::write_bytes(lrc_phys as *mut u8, 0, 5 * 4096); }
 
-        self.bcs_ring_phys = ring_phys;
-        self.bcs_lrc_phys = lrc_phys;
+        self.bcs_ring = ring;
+        self.bcs_lrc = lrc;
 
-        kprintln!("[npk]   BCS: ring  phys={:#x} → GGTT {:#x}", ring_phys, BCS_RING_GGTT);
-        kprintln!("[npk]   BCS: LRC   phys={:#x} → GGTT {:#x} (5 pages)", lrc_phys, BCS_LRC_GGTT);
+        kprintln!("[npk]   BCS: ring  phys={:#x} → GGTT {:#x}", ring.phys(), BCS_RING_GGTT);
+        kprintln!("[npk]   BCS: LRC   phys={:#x} → GGTT {:#x} (5 pages)", lrc.phys(), BCS_LRC_GGTT);
 
         // ── Step 2: Map in GGTT ─────────────────────────────────────
-        self.map_pages_ggtt_at(ring_phys, 1, BCS_RING_GGTT);
-        self.map_pages_ggtt_at(lrc_phys, 5, BCS_LRC_GGTT);
+        self.map_pages_ggtt_at(ring.phys(), 1, BCS_RING_GGTT);
+        self.map_pages_ggtt_at(lrc.phys(), 5, BCS_LRC_GGTT);
         // Gen 12 GGTT TLB invalidation (i915 guc_ggtt_invalidate):
         // GFX_FLSH_CNTL_GEN6 alone is not sufficient on Gen 12;
         // Must also write GEN12_GUC_TLB_INV_CR + BLT engine TLB.
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
-        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
-        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
+        self.regs.w32(GFX_FLSH_CNTL_GEN6, 1);
+        let _ = self.regs.r32(GFX_FLSH_CNTL_GEN6);
+        self.regs.w32(GEN12_GUC_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_GUC_TLB_INV_CR);
+        self.regs.w32(GEN12_BLT_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_BLT_TLB_INV_CR);
 
         // ── Step 3: Acquire all forcewake domains ────────────────────
         // Request GT + Render + Media (masked bit write: bit 16 = mask, bit 0 = value)
         // Posted reads after each write flush the PCIe bus (writes are async/posted).
-        mmio_write32(self.bar0, FORCEWAKE_GT, (1 << 16) | 1);
-        let _ = mmio_read32(self.bar0, FORCEWAKE_GT); // posted read flush
-        mmio_write32(self.bar0, FORCEWAKE_RENDER, (1 << 16) | 1);
-        let _ = mmio_read32(self.bar0, FORCEWAKE_RENDER); // posted read flush
-        mmio_write32(self.bar0, FORCEWAKE_MEDIA, (1 << 16) | 1);
-        let _ = mmio_read32(self.bar0, FORCEWAKE_MEDIA); // posted read flush
+        self.regs.w32(FORCEWAKE_GT, (1 << 16) | 1);
+        let _ = self.regs.r32(FORCEWAKE_GT); // posted read flush
+        self.regs.w32(FORCEWAKE_RENDER, (1 << 16) | 1);
+        let _ = self.regs.r32(FORCEWAKE_RENDER); // posted read flush
+        self.regs.w32(FORCEWAKE_MEDIA, (1 << 16) | 1);
+        let _ = self.regs.r32(FORCEWAKE_MEDIA); // posted read flush
 
         // Poll all three acks
-        let gt_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_GT, 1, 1, 500_000);
-        let rn_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_RENDER, 1, 1, 500_000);
-        let md_ok = poll_timeout(self.bar0, FORCEWAKE_ACK_MEDIA, 1, 1, 500_000);
+        let gt_ok = poll_timeout(self.regs, FORCEWAKE_ACK_GT, 1, 1, 500_000);
+        let rn_ok = poll_timeout(self.regs, FORCEWAKE_ACK_RENDER, 1, 1, 500_000);
+        let md_ok = poll_timeout(self.regs, FORCEWAKE_ACK_MEDIA, 1, 1, 500_000);
         kprintln!("[npk]   BCS: forcewake GT={} RENDER={} MEDIA={}",
             gt_ok, rn_ok, md_ok);
         if !gt_ok {
@@ -1755,78 +1720,78 @@ impl IntelXeDriver {
         }
 
         // Verify BCS registers are accessible: read RING_MODE + RESET_CTL
-        let mode_readback = mmio_read32(self.bar0, BCS_RING_MODE);
-        let reset_readback = mmio_read32(self.bar0, BCS_RESET_CTL);
+        let mode_readback = self.regs.r32(BCS_RING_MODE);
+        let reset_readback = self.regs.r32(BCS_RESET_CTL);
         kprintln!("[npk]   BCS: probe RING_MODE={:#010x} RESET_CTL={:#010x}",
             mode_readback, reset_readback);
 
         // Re-invalidate GGTT TLB now that forcewake is held:
         // TLB regs at 0xCExx are in FORCEWAKE_GT range — writes without
         // forcewake are silently dropped by hardware.
-        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
-        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
+        self.regs.w32(GEN12_GUC_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_GUC_TLB_INV_CR);
+        self.regs.w32(GEN12_BLT_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_BLT_TLB_INV_CR);
 
         // ── Step 4: Engine reset ────────────────────────────────────
         // 4a: Request reset via RING_RESET_CTL (masked write)
-        mmio_write32(self.bar0, BCS_RESET_CTL, (1 << 16) | RESET_CTL_REQUEST);
-        let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
-        if !poll_timeout(self.bar0, BCS_RESET_CTL, RESET_CTL_READY, RESET_CTL_READY, 500_000) {
+        self.regs.w32(BCS_RESET_CTL, (1 << 16) | RESET_CTL_REQUEST);
+        let _ = self.regs.r32(BCS_RESET_CTL); // posted read flush
+        if !poll_timeout(self.regs, BCS_RESET_CTL, RESET_CTL_READY, RESET_CTL_READY, 500_000) {
             kprintln!("[npk]   BCS: reset request timeout (CTL={:#010x})",
-                mmio_read32(self.bar0, BCS_RESET_CTL));
+                self.regs.r32(BCS_RESET_CTL));
             // Non-fatal: continue anyway
         } else {
             kprintln!("[npk]   BCS: reset ready");
         }
         // 4b: Trigger BCS domain reset — GEN6_GDRST is a masked register on Gen 11+.
         // Must set mask bit (bit 18 = GEN11_GRDOM_BLT << 16) for write to take effect.
-        mmio_write32(self.bar0, GEN6_GDRST,
+        self.regs.w32(GEN6_GDRST,
             (GEN11_GRDOM_BLT << 16) | GEN11_GRDOM_BLT);
-        let _ = mmio_read32(self.bar0, GEN6_GDRST); // posted read flush
+        let _ = self.regs.r32(GEN6_GDRST); // posted read flush
         // Poll for reset complete (bit clears when reset done)
-        if !poll_timeout(self.bar0, GEN6_GDRST, GEN11_GRDOM_BLT, 0, 500_000) {
+        if !poll_timeout(self.regs, GEN6_GDRST, GEN11_GRDOM_BLT, 0, 500_000) {
             kprintln!("[npk]   BCS: GDRST timeout (reg={:#010x})",
-                mmio_read32(self.bar0, GEN6_GDRST));
+                self.regs.r32(GEN6_GDRST));
         }
         // 4c: Clear reset request and CAT_ERROR (bits 0 + 2, masked write).
         // CAT_ERROR left set could prevent the engine from accepting new contexts.
-        mmio_write32(self.bar0, BCS_RESET_CTL, (0x05 << 16) | 0); // mask bits 0+2, clear both
-        let _ = mmio_read32(self.bar0, BCS_RESET_CTL); // posted read flush
+        self.regs.w32(BCS_RESET_CTL, (0x05 << 16) | 0); // mask bits 0+2, clear both
+        let _ = self.regs.r32(BCS_RESET_CTL); // posted read flush
         for _ in 0..100_000u32 { core::hint::spin_loop(); }
-        let rst_after = mmio_read32(self.bar0, BCS_RESET_CTL);
+        let rst_after = self.regs.r32(BCS_RESET_CTL);
         kprintln!("[npk]   BCS: engine reset complete (RESET_CTL={:#010x})", rst_after);
 
         // ── Step 5: Enable ExecList mode (i915 enable_execlists) ─────
         // 5a: HWSTAM — mask all HW status interrupts (we poll, don't use IRQs)
-        mmio_write32(self.bar0, BCS_HWSTAM, 0xFFFF_FFFF);
+        self.regs.w32(BCS_HWSTAM, 0xFFFF_FFFF);
 
         // 5b: RING_MODE — set both GEN11_GFX_DISABLE_LEGACY_MODE (bit 3) and
         //     GFX_RUN_LIST_ENABLE (bit 15) for ADL-N compatibility.
         //     Also set PREFETCH_DISABLE (bit 10) — Gen 12 requirement.
         let mode_bits = GFX_RUN_LIST_ENABLE | GEN11_GFX_DISABLE_LEGACY_MODE | GFX_PREFETCH_DISABLE;
-        mmio_write32(self.bar0, BCS_RING_MODE, (mode_bits << 16) | mode_bits);
+        self.regs.w32(BCS_RING_MODE, (mode_bits << 16) | mode_bits);
 
         // 5c: MI_MODE — clear STOP_RING. After reset, command streamer is stopped.
         //     Without this, GPU accepts context via ELSQ but never executes ring.
         //     i915: ENGINE_WRITE(RING_MI_MODE, _MASKED_BIT_DISABLE(STOP_RING))
-        mmio_write32(self.bar0, BCS_MI_MODE, (STOP_RING << 16) | 0);
-        let _ = mmio_read32(self.bar0, BCS_MI_MODE); // posted read flush
+        self.regs.w32(BCS_MI_MODE, (STOP_RING << 16) | 0);
+        let _ = self.regs.r32(BCS_MI_MODE); // posted read flush
 
         // 5d: HWS_PGA — HWSP GGTT address
-        mmio_write32(self.bar0, BCS_HWS_PGA, BCS_LRC_GGTT);
-        let _ = mmio_read32(self.bar0, BCS_HWS_PGA); // posted read flush
+        self.regs.w32(BCS_HWS_PGA, BCS_LRC_GGTT);
+        let _ = self.regs.r32(BCS_HWS_PGA); // posted read flush
 
         // 5e: Initialize CSB pointers (i915 reset_csb_pointers)
         //     Gen 12 has 12 CSB entries. reset_value = 12 - 1 = 11 (0xB).
         //     Format: mask[31:16]=0xFFFF, write_ptr[15:8]=11, read_ptr[7:0]=11
-        mmio_write32(self.bar0, BCS_CTX_STATUS_PTR, 0xFFFF_0B0B);
-        let _ = mmio_read32(self.bar0, BCS_CTX_STATUS_PTR); // posted read flush
+        self.regs.w32(BCS_CTX_STATUS_PTR, 0xFFFF_0B0B);
+        let _ = self.regs.r32(BCS_CTX_STATUS_PTR); // posted read flush
 
         // 5f: Mask all interrupts
-        mmio_write32(self.bar0, BCS_IMR, 0xFFFF_FFFF);
+        self.regs.w32(BCS_IMR, 0xFFFF_FFFF);
 
-        let mode = mmio_read32(self.bar0, BCS_RING_MODE);
+        let mode = self.regs.r32(BCS_RING_MODE);
         kprintln!("[npk]   BCS: RING_MODE={:#010x} (execlist={})",
             mode, mode & GFX_RUN_LIST_ENABLE != 0);
 
@@ -1834,12 +1799,8 @@ impl IntelXeDriver {
         self.populate_bcs_lrc();
 
         // Write MI_NOOPs to ring buffer (probe commands)
-        let ring = ring_phys as *mut u32;
-        // SAFETY: ring is identity-mapped, freshly allocated
-        unsafe {
-            ring.add(0).write_volatile(MI_NOOP);
-            ring.add(1).write_volatile(MI_NOOP);
-        }
+        ring.w32(0u64, MI_NOOP);
+        ring.w32(4u64, MI_NOOP);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Set TAIL=8 in LRC before submit (single submit, no double-submit race)
@@ -1852,14 +1813,10 @@ impl IntelXeDriver {
         // Gen 12 ExecList does not update RING_HEAD MMIO live.
         // After context runs + saves, GPU writes HEAD back to LRC in RAM.
         // We check: (a) LRC HEAD value, (b) HWSP modifications, (c) MMIO as fallback.
-        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32; // ctx[5] = HEAD val
-        let hwsp_ptr = self.bcs_lrc_phys as *const u32; // HWSP page 0
-
         // Poll LRC HEAD in system RAM (GPU writes here on context-save)
         let mut probe_ok = false;
         for _ in 0..1_000_000u32 {
-            // SAFETY: lrc_phys is identity-mapped, within our allocation
-            let lrc_head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            let lrc_head = lrc.r32(LRC_HEAD);
             if lrc_head == 8 {
                 probe_ok = true;
                 break;
@@ -1868,15 +1825,13 @@ impl IntelXeDriver {
         }
 
         // Read diagnostics
-        let lrc_head_final = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
-        let lrc_tail_final = unsafe { core::ptr::read_volatile(
-            (self.bcs_lrc_phys + 4096 + 7 * 4) as *const u32) };
-        let lrc_start_final = unsafe { core::ptr::read_volatile(
-            (self.bcs_lrc_phys + 4096 + 9 * 4) as *const u32) };
-        let hwsp_0 = unsafe { core::ptr::read_volatile(hwsp_ptr) };
-        let hwsp_1 = unsafe { core::ptr::read_volatile(hwsp_ptr.add(1)) };
-        let mmio_head = mmio_read32(self.bar0, BCS_RING_HEAD);
-        let status = mmio_read32(self.bar0, BCS_ELSQ_STATUS_LO);
+        let lrc_head_final = lrc.r32(LRC_HEAD);
+        let lrc_tail_final = lrc.r32(LRC_TAIL);
+        let lrc_start_final = lrc.r32(LRC_START);
+        let hwsp_0 = lrc.r32(0u64); // HWSP page 0
+        let hwsp_1 = lrc.r32(4u64);
+        let mmio_head = self.regs.r32(BCS_RING_HEAD);
+        let status = self.regs.r32(BCS_ELSQ_STATUS_LO);
 
         kprintln!("[npk]   BCS: LRC HEAD={} TAIL={} START={:#x}",
             lrc_head_final, lrc_tail_final, lrc_start_final);
@@ -1912,108 +1867,98 @@ impl IntelXeDriver {
     ///   [10] = RING_CTL addr,             [11] = value
     ///   [12..27] = BB_HEAD, BB_STATE, etc. (zeroed)
     fn populate_bcs_lrc(&self) {
-        let ctx = (self.bcs_lrc_phys + 4096) as *mut u32; // page 1 = context state
+        let ctx = self.bcs_lrc.sub(LRC_CTX, 4096);
+        // Volatile DWORD writes: the GPU reads them from RAM.
+        let dw = |i: u64, v: u32| ctx.w32(i * 4, v);
+        // Zero entire context page first
+        ctx.zero();
 
-        // SAFETY: lrc_phys is identity-mapped, page 1 is within our 5-page allocation
-        // All writes must be write_volatile: the GPU reads from RAM but the
-        // compiler doesn't see the consumer, so plain writes get eliminated.
-        unsafe {
-            // Zero entire context page first
-            core::ptr::write_bytes(ctx as *mut u8, 0, 4096);
+        // Gen 12 hardcoded context layout (order is critical)
+        dw(0, MI_NOOP);
 
-            // Gen 12 hardcoded context layout (order is critical)
-            ctx.add(0).write_volatile(MI_NOOP);
+        // MI_LRI: 13 register/value pairs, posted
+        dw(1, MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
 
-            // MI_LRI: 13 register/value pairs, posted
-            ctx.add(1).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (13 * 2 - 1));
+        // Pair 1: CTX_CONTEXT_CONTROL (must be first)
+        // i915 init_common_regs(inhibit=true):
+        //   _MASKED_BIT_ENABLE(RESTORE_INHIBIT)       → bit 0: set (no saved state)
+        //   _MASKED_BIT_ENABLE(INHIBIT_SYN_CTX_SWITCH) → bit 3: set
+        //   _MASKED_BIT_DISABLE(SAVE_INHIBIT)          → bit 2: clear (allow save)
+        // mask=0x000D (bits 0,2,3), value=0x0009 (bits 0,3 set, bit 2 clear)
+        dw(2, 0x22244);
+        dw(3, 0x000D_0009);
 
-            // Pair 1: CTX_CONTEXT_CONTROL (must be first)
-            // i915 init_common_regs(inhibit=true):
-            //   _MASKED_BIT_ENABLE(RESTORE_INHIBIT)       → bit 0: set (no saved state)
-            //   _MASKED_BIT_ENABLE(INHIBIT_SYN_CTX_SWITCH) → bit 3: set
-            //   _MASKED_BIT_DISABLE(SAVE_INHIBIT)          → bit 2: clear (allow save)
-            // mask=0x000D (bits 0,2,3), value=0x0009 (bits 0,3 set, bit 2 clear)
-            ctx.add(2).write_volatile(0x22244);
-            ctx.add(3).write_volatile(0x000D_0009);
+        // Pair 2: RING_HEAD
+        dw(4, BCS_RING_HEAD);
+        dw(5, 0);
 
-            // Pair 2: RING_HEAD
-            ctx.add(4).write_volatile(BCS_RING_HEAD);
-            ctx.add(5).write_volatile(0);
+        // Pair 3: RING_TAIL (update_lrc_tail writes to ctx[7])
+        dw(6, BCS_RING_TAIL);
+        dw(7, 0);
 
-            // Pair 3: RING_TAIL (update_lrc_tail writes to ctx[7])
-            ctx.add(6).write_volatile(BCS_RING_TAIL);
-            ctx.add(7).write_volatile(0);
+        // Pair 4: RING_START
+        dw(8, BCS_RING_START);
+        dw(9, BCS_RING_GGTT);
 
-            // Pair 4: RING_START
-            ctx.add(8).write_volatile(BCS_RING_START);
-            ctx.add(9).write_volatile(BCS_RING_GGTT);
+        // Pair 5: RING_CTL (4KB ring, valid)
+        dw(10, BCS_RING_CTL);
+        dw(11, (4096 - 4096) | RING_CTL_VALID);
 
-            // Pair 5: RING_CTL (4KB ring, valid)
-            ctx.add(10).write_volatile(BCS_RING_CTL);
-            ctx.add(11).write_volatile((4096 - 4096) | RING_CTL_VALID);
+        // Pairs 6-13: BB regs, CCID, semaphore (matching gen12_xcs_offsets order)
+        dw(12, 0x22168); // BBADDR_UDW
+        dw(13, 0);
+        dw(14, 0x22140); // BBADDR
+        dw(15, 0);
+        dw(16, 0x22110); // BB_STATE
+        dw(17, 0);
+        dw(18, 0x221C0); // BB_PER_CTX_PTR
+        dw(19, 0);
+        dw(20, 0x221C4); // INDIRECT_CTX
+        dw(21, 0);
+        dw(22, 0x221C8); // INDIRECT_CTX_OFFSET
+        dw(23, 0);
+        dw(24, 0x22180); // CCID
+        dw(25, 0);
+        dw(26, 0x222B4); // semaphore
+        dw(27, 0);
 
-            // Pairs 6-13: BB regs, CCID, semaphore (matching gen12_xcs_offsets order)
-            ctx.add(12).write_volatile(0x22168); // BBADDR_UDW
-            ctx.add(13).write_volatile(0);
-            ctx.add(14).write_volatile(0x22140); // BBADDR
-            ctx.add(15).write_volatile(0);
-            ctx.add(16).write_volatile(0x22110); // BB_STATE
-            ctx.add(17).write_volatile(0);
-            ctx.add(18).write_volatile(0x221C0); // BB_PER_CTX_PTR
-            ctx.add(19).write_volatile(0);
-            ctx.add(20).write_volatile(0x221C4); // INDIRECT_CTX
-            ctx.add(21).write_volatile(0);
-            ctx.add(22).write_volatile(0x221C8); // INDIRECT_CTX_OFFSET
-            ctx.add(23).write_volatile(0);
-            ctx.add(24).write_volatile(0x22180); // CCID
-            ctx.add(25).write_volatile(0);
-            ctx.add(26).write_volatile(0x222B4); // semaphore
-            ctx.add(27).write_volatile(0);
+        // ── Second LRI section (gen12_xcs_offsets requires both) ─────
+        // NOP(5): DWords 28-32
+        dw(28, MI_NOOP);
+        dw(29, MI_NOOP);
+        dw(30, MI_NOOP);
+        dw(31, MI_NOOP);
+        dw(32, MI_NOOP);
 
-            // ── Second LRI section (gen12_xcs_offsets requires both) ─────
-            // NOP(5): DWords 28-32
-            ctx.add(28).write_volatile(MI_NOOP);
-            ctx.add(29).write_volatile(MI_NOOP);
-            ctx.add(30).write_volatile(MI_NOOP);
-            ctx.add(31).write_volatile(MI_NOOP);
-            ctx.add(32).write_volatile(MI_NOOP);
+        // MI_LRI: 9 register/value pairs (timestamp + status regs)
+        dw(33, MI_LRI_CMD | MI_LRI_FORCE_POSTED | (9 * 2 - 1));
 
-            // MI_LRI: 9 register/value pairs (timestamp + status regs)
-            ctx.add(33).write_volatile(MI_LRI_CMD | MI_LRI_FORCE_POSTED | (9 * 2 - 1));
-
-            ctx.add(34).write_volatile(0x223A8); // CTX_TIMESTAMP
-            ctx.add(35).write_volatile(0);
-            ctx.add(36).write_volatile(0x2228C); // CTX_STATUS[7]
-            ctx.add(37).write_volatile(0);
-            ctx.add(38).write_volatile(0x22288); // CTX_STATUS[6]
-            ctx.add(39).write_volatile(0);
-            ctx.add(40).write_volatile(0x22284); // CTX_STATUS[5]
-            ctx.add(41).write_volatile(0);
-            ctx.add(42).write_volatile(0x22280); // CTX_STATUS[4]
-            ctx.add(43).write_volatile(0);
-            ctx.add(44).write_volatile(0x2227C); // CTX_STATUS[3]
-            ctx.add(45).write_volatile(0);
-            ctx.add(46).write_volatile(0x22278); // CTX_STATUS[2]
-            ctx.add(47).write_volatile(0);
-            ctx.add(48).write_volatile(0x22274); // CTX_STATUS[1]
-            ctx.add(49).write_volatile(0);
-            ctx.add(50).write_volatile(0x22270); // CTX_STATUS[0]
-            ctx.add(51).write_volatile(0);
-        }
+        dw(34, 0x223A8); // CTX_TIMESTAMP
+        dw(35, 0);
+        dw(36, 0x2228C); // CTX_STATUS[7]
+        dw(37, 0);
+        dw(38, 0x22288); // CTX_STATUS[6]
+        dw(39, 0);
+        dw(40, 0x22284); // CTX_STATUS[5]
+        dw(41, 0);
+        dw(42, 0x22280); // CTX_STATUS[4]
+        dw(43, 0);
+        dw(44, 0x2227C); // CTX_STATUS[3]
+        dw(45, 0);
+        dw(46, 0x22278); // CTX_STATUS[2]
+        dw(47, 0);
+        dw(48, 0x22274); // CTX_STATUS[1]
+        dw(49, 0);
+        dw(50, 0x22270); // CTX_STATUS[0]
+        dw(51, 0);
     }
 
     /// Update RING_TAIL in LRC and reset HEAD to 0 (stateless ring hack).
     ///
-    /// Must use write_volatile: the GPU reads this from RAM, but the
-    /// compiler doesn't know that, so plain writes get eliminated as dead
-    /// stores in release builds.
+    /// The DmaRegion writes are volatile: the GPU reads them from RAM.
     fn update_lrc_tail(&self, tail_bytes: u32) {
-        let ctx = (self.bcs_lrc_phys + 4096) as *mut u32;
-        // SAFETY: within our allocated LRC page
-        unsafe {
-            ctx.add(5).write_volatile(0);             // Reset HEAD to 0
-            ctx.add(7).write_volatile(tail_bytes);    // Set new TAIL
-        }
+        self.bcs_lrc.w32(LRC_HEAD, 0);             // Reset HEAD to 0
+        self.bcs_lrc.w32(LRC_TAIL, tail_bytes);    // Set new TAIL
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 
@@ -2033,11 +1978,11 @@ impl IntelXeDriver {
 
         let desc_hi: u32 = 0;  // i915: upper 32 bits = context ID (0 for single context)
 
-        mmio_write32(self.bar0, BCS_ELSQ0_LO, desc_lo);
-        mmio_write32(self.bar0, BCS_ELSQ0_HI, desc_hi);
-        mmio_write32(self.bar0, BCS_ELSQ1_LO, 0);
-        mmio_write32(self.bar0, BCS_ELSQ1_HI, 0);
-        mmio_write32(self.bar0, BCS_ELSQ_CONTROL, 1);
+        self.regs.w32(BCS_ELSQ0_LO, desc_lo);
+        self.regs.w32(BCS_ELSQ0_HI, desc_hi);
+        self.regs.w32(BCS_ELSQ1_LO, 0);
+        self.regs.w32(BCS_ELSQ1_HI, 0);
+        self.regs.w32(BCS_ELSQ_CONTROL, 1);
     }
 
     /// Map contiguous physical pages into GGTT at a given offset.
@@ -2048,14 +1993,14 @@ impl IntelXeDriver {
             let entry_lo = (page_phys as u32 & 0xFFFF_F000) | 0x01; // valid, system mem
             let entry_hi = (page_phys >> 32) as u32;
             let off = GGTT_BASE as u32 + (start_entry + i) * 8;
-            mmio_write32(self.bar0, off, entry_lo);
-            mmio_write32(self.bar0, off + 4, entry_hi);
+            self.regs.w32(off, entry_lo);
+            self.regs.w32(off + 4, entry_hi);
         }
     }
 
     /// Map shadow buffers into GGTT for BCS access.
     pub fn map_shadows(&mut self, phys_a: u64, phys_b: u64, pages: u32) {
-        if self.bar0 == 0 { return; }
+        if self.regs.is_empty() { return; }
 
         kprintln!("[npk]   BCS: mapping shadow A ({} pages) → GGTT {:#x}", pages, SHADOW_A_GGTT_BASE);
         self.map_pages_ggtt_at(phys_a, pages, SHADOW_A_GGTT_BASE);
@@ -2064,12 +2009,12 @@ impl IntelXeDriver {
         self.map_pages_ggtt_at(phys_b, pages, SHADOW_B_GGTT_BASE);
 
         // Gen 12 GGTT TLB invalidation
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
-        mmio_write32(self.bar0, GEN12_GUC_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_GUC_TLB_INV_CR);
-        mmio_write32(self.bar0, GEN12_BLT_TLB_INV_CR, 1);
-        let _ = mmio_read32(self.bar0, GEN12_BLT_TLB_INV_CR);
+        self.regs.w32(GFX_FLSH_CNTL_GEN6, 1);
+        let _ = self.regs.r32(GFX_FLSH_CNTL_GEN6);
+        self.regs.w32(GEN12_GUC_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_GUC_TLB_INV_CR);
+        self.regs.w32(GEN12_BLT_TLB_INV_CR, 1);
+        let _ = self.regs.r32(GEN12_BLT_TLB_INV_CR);
 
         self.shadow_a_ggtt = SHADOW_A_GGTT_BASE;
         self.shadow_b_ggtt = SHADOW_B_GGTT_BASE;
@@ -2085,25 +2030,19 @@ impl IntelXeDriver {
     /// A failure here means the copy itself is broken (command / context /
     /// GGTT); a pass with a black screen means a scanout/flip problem.
     fn verify_blit_readback(&mut self) -> bool {
-        if !self.bcs_initialized || self.bar0 == 0 {
+        if !self.bcs_initialized || self.regs.is_empty() {
             return false;
         }
         const SRC_GGTT: u32 = 0x0400_3000; // reuse BCS_TEST_GGTT slot
         const DST_GGTT: u32 = 0x0400_7000;
         const PAT: u32 = 0xA5C3_F00D;
-        let src_phys = match memory::allocate_contiguous(1) { Some(p) => p, None => return false };
-        let dst_phys = match memory::allocate_contiguous(1) { Some(p) => p, None => return false };
-        // SAFETY: freshly allocated, identity-mapped, one page each.
-        unsafe {
-            let s = src_phys as *mut u32;
-            for i in 0..1024 { s.add(i).write_volatile(PAT); }
-            let d = dst_phys as *mut u32;
-            for i in 0..1024 { d.add(i).write_volatile(0); }
-        }
-        self.map_pages_ggtt_at(src_phys, 1, SRC_GGTT);
-        self.map_pages_ggtt_at(dst_phys, 1, DST_GGTT);
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        let src = match DmaRegion::alloc_zeroed(1) { Some(r) => r, None => return false };
+        let dst = match DmaRegion::alloc_zeroed(1) { Some(r) => r, None => return false };
+        for i in 0..1024u64 { src.w32(i * 4, PAT); }
+        self.map_pages_ggtt_at(src.phys(), 1, SRC_GGTT);
+        self.map_pages_ggtt_at(dst.phys(), 1, DST_GGTT);
+        self.regs.w32(GFX_FLSH_CNTL_GEN6, 1);
+        let _ = self.regs.r32(GFX_FLSH_CNTL_GEN6);
 
         // Copy a 16×16 px block src→dst (64 px/row → 256 B pitch).
         self.submit_blit(SRC_GGTT, 256, DST_GGTT, 256, 0, 0, 16, 16);
@@ -2111,16 +2050,17 @@ impl IntelXeDriver {
         // The dst page is WB identity-mapped and we just wrote zeros to it, so
         // they sit in cache. The GPU wrote the real bytes to memory via GGTT —
         // flush the cached zeros so the CPU re-reads from memory.
-        // SAFETY: dst_phys is identity-mapped; clflush on a mapped address.
+        // SAFETY: the four lines lie in `dst`, an identity-mapped page this
+        // driver owns; clflush only writes back and evicts them.
         unsafe {
-            let d = dst_phys as *const u8;
+            let d = dst.phys() as *const u8;
             for line in 0..4u64 {
                 core::arch::asm!("clflush [{}]", in(reg) d.add((line * 64) as usize),
                     options(nostack, preserves_flags));
             }
         }
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        let got = unsafe { core::ptr::read_volatile(dst_phys as *const u32) };
+        let got = dst.r32(0u64);
         self.bcs_readback_got = got;
         let ok = got == PAT;
         kprintln!("[npk]   BCS: blit-readback {} (dst[0]={:#010x} want {:#010x})",
@@ -2137,25 +2077,22 @@ impl IntelXeDriver {
         dst_ggtt: u32, dst_pitch: u32,
         x: u32, y: u32, w: u32, h: u32,
     ) -> bool {
-        if !self.bcs_initialized || self.bar0 == 0 { return false; }
+        if !self.bcs_initialized || self.regs.is_empty() { return false; }
 
         // Write XY_FAST_COPY_BLT to ring buffer at offset 0
-        let ring = self.bcs_ring_phys as *mut u32;
-        // SAFETY: ring is identity-mapped, within allocated page
-        unsafe {
-            ring.add(0).write_volatile(XY_FAST_COPY_BLT_CMD | 8);
-            ring.add(1).write_volatile(XY_FAST_COPY_BLT_DEPTH_32 | dst_pitch);
-            ring.add(2).write_volatile((y << 16) | x);
-            ring.add(3).write_volatile(((y + h) << 16) | (x + w));
-            ring.add(4).write_volatile(dst_ggtt);
-            ring.add(5).write_volatile(0);
-            ring.add(6).write_volatile((y << 16) | x);
-            ring.add(7).write_volatile(src_pitch);
-            ring.add(8).write_volatile(src_ggtt);
-            ring.add(9).write_volatile(0);
-            ring.add(10).write_volatile(MI_NOOP);
-            ring.add(11).write_volatile(MI_NOOP);
-        }
+        let ring = self.bcs_ring;
+        ring.w32(0u64, XY_FAST_COPY_BLT_CMD | 8);
+        ring.w32(4u64, XY_FAST_COPY_BLT_DEPTH_32 | dst_pitch);
+        ring.w32(8u64, (y << 16) | x);
+        ring.w32(12u64, ((y + h) << 16) | (x + w));
+        ring.w32(16u64, dst_ggtt);
+        ring.w32(20u64, 0);
+        ring.w32(24u64, (y << 16) | x);
+        ring.w32(28u64, src_pitch);
+        ring.w32(32u64, src_ggtt);
+        ring.w32(36u64, 0);
+        ring.w32(40u64, MI_NOOP);
+        ring.w32(44u64, MI_NOOP);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         let tail_bytes = 48u32; // 12 DWORDs (10 cmd + 2 noop padding)
@@ -2167,10 +2104,8 @@ impl IntelXeDriver {
         // Poll LRC HEAD in RAM (not MMIO — MMIO RING_HEAD is unreliable on Gen 12).
         // GPU writes HEAD back to LRC on context-save. This is the same approach
         // used in the init probe, and avoids race conditions with cursor overlay.
-        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32; // ctx[5] = HEAD val
         for _ in 0..500_000u32 {
-            // SAFETY: lrc_phys is identity-mapped, within our 5-page allocation
-            let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            let head = self.bcs_lrc.r32(LRC_HEAD);
             if head == tail_bytes {
                 return true;
             }
@@ -2193,50 +2128,42 @@ impl IntelXeDriver {
         kprintln!("[npk]   BCS test: 64x64 magenta at (100,100)...");
 
         // Allocate + fill test surface
-        let test_phys = match memory::allocate_contiguous(4) {
-            Some(p) => p,
+        let test = match DmaRegion::alloc_zeroed(4) {
+            Some(r) => r,
             None => return false,
         };
-        let ptr = test_phys as *mut u32;
-        // SAFETY: freshly allocated, identity-mapped
-        unsafe {
-            for i in 0..(4 * 1024) { ptr.add(i).write_volatile(0x00FF00FF); }
-        }
-        self.map_pages_ggtt_at(test_phys, 4, BCS_TEST_GGTT);
-        mmio_write32(self.bar0, GFX_FLSH_CNTL_GEN6, 1);
-        let _ = mmio_read32(self.bar0, GFX_FLSH_CNTL_GEN6);
+        for i in 0..(4 * 1024u64) { test.w32(i * 4, 0x00FF00FF); }
+        self.map_pages_ggtt_at(test.phys(), 4, BCS_TEST_GGTT);
+        self.regs.w32(GFX_FLSH_CNTL_GEN6, 1);
+        let _ = self.regs.r32(GFX_FLSH_CNTL_GEN6);
 
         // Write blit command
-        let ring = self.bcs_ring_phys as *mut u32;
-        // SAFETY: ring is our allocated page
-        unsafe {
-            ring.add(0).write_volatile(XY_FAST_COPY_BLT_CMD | 8);
-            ring.add(1).write_volatile(XY_FAST_COPY_BLT_DEPTH_32 | fb.pitch);
-            ring.add(2).write_volatile((100 << 16) | 100);
-            ring.add(3).write_volatile(((100 + 64) << 16) | (100 + 64));
-            ring.add(4).write_volatile(self.fb_ggtt_offset);
-            ring.add(5).write_volatile(0);
-            ring.add(6).write_volatile(0);
-            ring.add(7).write_volatile(256);
-            ring.add(8).write_volatile(BCS_TEST_GGTT);
-            ring.add(9).write_volatile(0);
-            ring.add(10).write_volatile(MI_NOOP);
-            ring.add(11).write_volatile(MI_NOOP);
-        }
+        let ring = self.bcs_ring;
+        ring.w32(0u64, XY_FAST_COPY_BLT_CMD | 8);
+        ring.w32(4u64, XY_FAST_COPY_BLT_DEPTH_32 | fb.pitch);
+        ring.w32(8u64, (100 << 16) | 100);
+        ring.w32(12u64, ((100 + 64) << 16) | (100 + 64));
+        ring.w32(16u64, self.fb_ggtt_offset);
+        ring.w32(20u64, 0);
+        ring.w32(24u64, 0);
+        ring.w32(28u64, 256);
+        ring.w32(32u64, BCS_TEST_GGTT);
+        ring.w32(36u64, 0);
+        ring.w32(40u64, MI_NOOP);
+        ring.w32(44u64, MI_NOOP);
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         self.update_lrc_tail(48);
         self.elsq_submit(false);
 
         // Poll LRC HEAD in RAM (reliable on Gen 12, unlike MMIO RING_HEAD)
-        let lrc_head_ptr = (self.bcs_lrc_phys + 4096 + 5 * 4) as *const u32;
         let mut ok = false;
         for _ in 0..2_000_000u32 {
-            let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+            let head = self.bcs_lrc.r32(LRC_HEAD);
             if head == 48 { ok = true; break; }
             core::hint::spin_loop();
         }
-        let head = unsafe { core::ptr::read_volatile(lrc_head_ptr) };
+        let head = self.bcs_lrc.r32(LRC_HEAD);
         kprintln!("[npk]   BCS test: LRC HEAD={} ok={}", head, ok);
 
         if ok {
@@ -2301,26 +2228,26 @@ impl IntelXeDriver {
         // Step 2: Cycle TRANS_DDI_FUNC_CTL: disable, switch DVI→HDMI, enable scrambling.
         // i915 does a full disable/reconfigure/enable cycle (intel_ddi_disable_transcoder_func
         // + intel_ddi_enable_transcoder_func). Just flipping bits in-place doesn't work.
-        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        let ddi_func = self.regs.r32(TRANS_DDI_FUNC_CTL_A);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL before: {:#010x}", ddi_func);
 
         // Disable transcoder DDI function
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, 0);
+        self.regs.w32(TRANS_DDI_FUNC_CTL_A, 0);
         for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
 
         // Also disable + re-enable DDI buffer for clean handshake
         let ddi_ctl = if self.ddi_port == 0 { DDI_BUF_CTL_A } else { DDI_BUF_CTL_B };
-        let ddi_buf = mmio_read32(self.bar0, ddi_ctl);
+        let ddi_buf = self.regs.r32(ddi_ctl);
         if ddi_buf & (1 << 31) != 0 {
-            mmio_write32(self.bar0, ddi_ctl, ddi_buf & !(1 << 31));
+            self.regs.w32(ddi_ctl, ddi_buf & !(1 << 31));
             // Wait for DDI idle (bit 7 = 1 when idle)
-            let _ = poll_timeout(self.bar0, ddi_ctl, 1 << 7, 1 << 7, 200_000);
+            let _ = poll_timeout(self.regs, ddi_ctl, 1 << 7, 1 << 7, 200_000);
             kprintln!("[npk]   DDI buffer disabled");
             for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
         }
 
         // Re-enable DDI buffer
-        mmio_write32(self.bar0, ddi_ctl, ddi_buf | (1 << 31));
+        self.regs.w32(ddi_ctl, ddi_buf | (1 << 31));
         for _ in 0..1_000_000u32 { core::hint::spin_loop(); }
         kprintln!("[npk]   DDI buffer re-enabled");
 
@@ -2329,7 +2256,7 @@ impl IntelXeDriver {
             | TRANS_DDI_MODE_HDMI
             | TRANS_DDI_SCRAMBLING_MASK
             | (1 << 31);  // enable
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
+        self.regs.w32(TRANS_DDI_FUNC_CTL_A, new_func);
         kprintln!("[npk]   TRANS_DDI_FUNC_CTL: {:#010x} -> {:#010x} (DVI->HDMI+scrambling)",
             ddi_func, new_func);
 
@@ -2356,10 +2283,10 @@ impl IntelXeDriver {
     /// Disable HDMI 2.0 scrambling (for modes <=340 MHz TMDS).
     fn disable_scrambling(&self) {
         // Clear scrambling bits and restore DVI mode
-        let ddi_func = mmio_read32(self.bar0, TRANS_DDI_FUNC_CTL_A);
+        let ddi_func = self.regs.r32(TRANS_DDI_FUNC_CTL_A);
         let new_func = (ddi_func & !TRANS_DDI_SCRAMBLING_MASK & !TRANS_DDI_MODE_MASK)
             | TRANS_DDI_MODE_DVI;
-        mmio_write32(self.bar0, TRANS_DDI_FUNC_CTL_A, new_func);
+        self.regs.w32(TRANS_DDI_FUNC_CTL_A, new_func);
 
         // Tell monitor to disable scrambling
         self.gmbus_reset();
