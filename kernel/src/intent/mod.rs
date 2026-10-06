@@ -2293,7 +2293,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
-        "nic" | "usbnet" => {
+        "usbnet" => {
             if require_cap(vault, &session, Rights::READ, "nic") {
                 if crate::xhci::nic_attached() {
                     crate::xhci::nic_dump_ports();

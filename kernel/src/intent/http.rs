@@ -1410,7 +1410,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
 
         let mut served = false;
         let t0 = crate::interrupts::ticks();
-        if let Some(mut conn) = (if plain { None } else { h2_open(host) }) {
+        if let Some(mut conn) = if plain { None } else { h2_open(host) } {
             let t_conn = crate::interrupts::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();

@@ -94,8 +94,6 @@ impl Utf8Tail {
     }
 }
 
-pub const EMPTY_EVENT: KeyEvent = KeyEvent { key: KeyCode::Char(0), modifiers: Modifiers::NONE };
-
 impl KeyEvent {
     /// Create a KeyEvent for a printable character.
     pub const fn char(c: u8, modifiers: Modifiers) -> Self {

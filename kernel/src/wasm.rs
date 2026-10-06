@@ -50,7 +50,7 @@ pub struct WasmResult {
 }
 
 /// Hardware driver state for WASM modules that access PCI devices.
-struct HwDriverState {
+pub(crate) struct HwDriverState {
     /// Whether this state belongs to a PCI device. A driver using
     /// `npk_mmio_map_phys` may drive non-PCI hardware (e.g. the DesignWare
     /// I2C in the AMD FCH); then `pci_addr` is meaningless and every

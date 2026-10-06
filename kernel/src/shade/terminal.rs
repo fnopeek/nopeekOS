@@ -3,7 +3,7 @@
 //! Each window gets its own TerminalBuffer. kprintln output goes to the
 //! active (focused) terminal. Windows are completely independent.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use spin::Mutex;
@@ -248,23 +248,28 @@ fn set_dirty() {
 }
 
 /// Input cursor position (for rendering blinking cursor on input line).
-static mut INPUT_CURSOR_POS: usize = 0;
+static INPUT_CURSOR_POS: AtomicUsize = AtomicUsize::new(0);
 
-/// Cached background pixels for the input line (saved after full render).
-/// Avoids re-blending on every keystroke — just restore + draw text.
-// Heap-allocated input line cache (allocated on first use, avoids 983KB BSS bloat)
-const INPUT_LINE_CACHE_MAX: usize = 3840 * 4 * 64; // max 4K width × 4 bytes × 64px font height
-static mut INPUT_LINE_CACHE: *mut u8 = core::ptr::null_mut();
-static mut INPUT_LINE_CACHE_X: u32 = 0;
-static mut INPUT_LINE_CACHE_Y: u32 = 0;
-static mut INPUT_LINE_CACHE_W: u32 = 0;
-static mut INPUT_LINE_CACHE_H: u32 = 0;
-static mut INPUT_LINE_CACHE_VALID: bool = false;
+/// Background pixels of the input line, saved after a full render so a
+/// keystroke restores them instead of re-blending the window.
+struct InputLineCache {
+    /// BGRA rows, `w * 4` bytes each; allocated on first use.
+    px: alloc::vec::Vec<u8>,
+    x: u32,
+    w: u32,
+    h: u32,
+    valid: bool,
+}
+
+/// 4K width × 4 bytes × 64 px font height.
+const INPUT_LINE_CACHE_MAX: usize = 3840 * 4 * 64;
+
+static INPUT_LINE_CACHE: Mutex<InputLineCache> =
+    Mutex::new(InputLineCache { px: alloc::vec::Vec::new(), x: 0, w: 0, h: 0, valid: false });
 
 /// Set the input cursor position (called from intent loop on every key/move).
 pub fn set_cursor_pos(pos: usize) {
-    // SAFETY: single-core
-    unsafe { INPUT_CURSOR_POS = pos; }
+    INPUT_CURSOR_POS.store(pos, Ordering::Relaxed);
 }
 
 /// Rewrite the input portion of the current terminal line.
@@ -279,7 +284,7 @@ pub fn rewrite_input(input: &[u8], input_len: usize) {
     // Find prompt length: everything already on the line before user input starts.
     // The prompt ends at the current col minus whatever the caller's pos is.
     // But we don't know the prompt length directly. Instead, we store it.
-    let prompt_len = unsafe { PROMPT_LEN };
+    let prompt_len = PROMPT_LEN.load(Ordering::Relaxed);
 
     // Rewrite from prompt_len onward
     let max = MAX_COLS.min(prompt_len + input_len);
@@ -297,12 +302,11 @@ pub fn rewrite_input(input: &[u8], input_len: usize) {
 }
 
 /// Stored prompt length for the active terminal.
-static mut PROMPT_LEN: usize = 0;
+static PROMPT_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// Set the prompt length (called after write_prompt).
 pub fn set_prompt_len(len: usize) {
-    // SAFETY: single-core
-    unsafe { PROMPT_LEN = len; }
+    PROMPT_LEN.store(len, Ordering::Relaxed);
 }
 
 /// Get the current line length in the active terminal (for cursor offset calculation).
@@ -332,8 +336,7 @@ pub fn line_count() -> usize {
 
 /// Get the input cursor position.
 pub fn cursor_pos() -> usize {
-    // SAFETY: single-core
-    unsafe { INPUT_CURSOR_POS }
+    INPUT_CURSOR_POS.load(Ordering::Relaxed)
 }
 
 /// Enable/disable terminal capture.
@@ -874,7 +877,7 @@ pub fn selection_key(idx: usize, dir: SelDir) -> bool {
     };
     let line_len = |ln: usize| -> usize { line(ln).len() };
     let oldest = total.saturating_sub(MAX_LINES - 1); // first ring-valid line
-    let caret_col = unsafe { INPUT_CURSOR_POS }.min(line_len(total));
+    let caret_col = cursor_pos().min(line_len(total));
     let caret = (total, caret_col);
 
     let mut g = SELECTION.lock();
@@ -1053,31 +1056,28 @@ pub fn render_input_line(
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
     // Restore cached background pixels (saved after full render_window).
-    let cache_valid = unsafe { INPUT_LINE_CACHE_VALID && !INPUT_LINE_CACHE.is_null() };
     let pitch = info.pitch as usize;
-    if cache_valid {
-        let cx = unsafe { INPUT_LINE_CACHE_X } as usize;
-        let cw = unsafe { INPUT_LINE_CACHE_W } as usize;
-        let ch_cached = unsafe { INPUT_LINE_CACHE_H } as usize;
-        let bytes_per_row = cw * 4;
-        let rows_to_copy = (char_h as usize).min(ch_cached);
+    let cache = INPUT_LINE_CACHE.lock();
+    if cache.valid {
+        let cx = cache.x as usize;
+        let bytes_per_row = cache.w as usize * 4;
+        let rows_to_copy = (char_h as usize).min(cache.h as usize);
         for row in 0..rows_to_copy {
             let cache_off = row * bytes_per_row;
             let shadow_off = (last_line_y as usize + row) * pitch + cx * 4;
-            if cache_off + bytes_per_row <= INPUT_LINE_CACHE_MAX
+            if let Some(src) = cache.px.get(cache_off..cache_off + bytes_per_row)
                && shadow_off + bytes_per_row <= (info.height as usize) * pitch
             {
-                // SAFETY: single-core, bounds checked above
+                // SAFETY: the shadow buffer is `info.height * pitch` bytes,
+                // and the range was checked against that above.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        INPUT_LINE_CACHE.add(cache_off),
-                        shadow.add(shadow_off),
-                        bytes_per_row,
-                    );
+                    core::ptr::copy_nonoverlapping(src.as_ptr(), shadow.add(shadow_off), bytes_per_row);
                 }
             }
         }
+        drop(cache);
     } else {
+        drop(cache);
         // No cache — fallback: clear with the theme surface color.
         crate::gui::render::fill_rect(shadow, info,
             win_cx, last_line_y, win_cw, char_h, theme_bg());
@@ -1199,38 +1199,34 @@ pub fn cache_input_line_bg(
     let bytes_per_row = (win_cw as usize) * 4;
     let total_bytes = bytes_per_row * char_h as usize;
     if total_bytes > INPUT_LINE_CACHE_MAX { return; }
-
-    // Allocate cache on first use (avoids 983KB BSS)
-    unsafe {
-        if INPUT_LINE_CACHE.is_null() {
-            let layout = alloc::alloc::Layout::from_size_align(INPUT_LINE_CACHE_MAX, 16).unwrap();
-            INPUT_LINE_CACHE = alloc::alloc::alloc_zeroed(layout);
-            if INPUT_LINE_CACHE.is_null() { return; }
-        }
+    let shadow_end = (last_line_y + char_h) as usize * pitch;
+    if (win_cx as usize * 4 + bytes_per_row) > pitch || shadow_end > info.height as usize * pitch {
+        return;
     }
 
-    // SAFETY: single-core, bounds checked, cache allocated above
-    unsafe {
-        for row in 0..char_h {
-            let shadow_off = (last_line_y + row) as usize * pitch + win_cx as usize * 4;
-            let cache_off = row as usize * bytes_per_row;
-            core::ptr::copy_nonoverlapping(
-                shadow.add(shadow_off),
-                INPUT_LINE_CACHE.add(cache_off),
-                bytes_per_row,
-            );
-        }
-        INPUT_LINE_CACHE_X = win_cx;
-        INPUT_LINE_CACHE_Y = last_line_y;
-        INPUT_LINE_CACHE_W = win_cw;
-        INPUT_LINE_CACHE_H = char_h;
-        INPUT_LINE_CACHE_VALID = true;
+    let mut cache = INPUT_LINE_CACHE.lock();
+    if cache.px.len() < total_bytes {
+        cache.px.resize(total_bytes, 0);
     }
+    for row in 0..char_h as usize {
+        let shadow_off = (last_line_y as usize + row) * pitch + win_cx as usize * 4;
+        let cache_off = row * bytes_per_row;
+        let dst = &mut cache.px[cache_off..cache_off + bytes_per_row];
+        // SAFETY: the row lies inside the shadow buffer (`info.height *
+        // pitch` bytes), checked above; `dst` is a distinct heap slice.
+        unsafe {
+            core::ptr::copy_nonoverlapping(shadow.add(shadow_off), dst.as_mut_ptr(), bytes_per_row);
+        }
+    }
+    cache.x = win_cx;
+    cache.w = win_cw;
+    cache.h = char_h;
+    cache.valid = true;
 }
 
 /// Invalidate the input line cache (call when window layout changes).
 pub fn invalidate_input_cache() {
-    unsafe { INPUT_LINE_CACHE_VALID = false; }
+    INPUT_LINE_CACHE.lock().valid = false;
 }
 
 /// Scroll the active terminal up (show older content).

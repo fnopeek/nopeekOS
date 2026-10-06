@@ -219,7 +219,7 @@ pub fn enable_bus_master(addr: PciAddr) {
 /// Find the bridge behind which `bus` sits: secondary <= bus <=
 /// subordinate. Bus 0 first (the common case), then a full scan.
 fn find_bridge_for_bus(bus: u8) -> Option<PciAddr> {
-    let mut search = |b: u8| -> Option<PciAddr> {
+    let search = |b: u8| -> Option<PciAddr> {
         for dev in 0..32u8 {
             for func in 0..8u8 {
                 let a = PciAddr { bus: b, device: dev, function: func };

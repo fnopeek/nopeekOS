@@ -200,7 +200,7 @@ static HID_TO_ASCII_DE_SHIFT: [char; 57] = [
 
 // Key buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
 const KEY_BUF_SIZE: usize = 32;
-static mut KEY_BUF: [u8; KEY_BUF_SIZE] = [0; KEY_BUF_SIZE];
+static KEY_BUF: [AtomicU8; KEY_BUF_SIZE] = [const { AtomicU8::new(0) }; KEY_BUF_SIZE];
 static KEY_HEAD: AtomicUsize = AtomicUsize::new(0);
 static KEY_TAIL: AtomicUsize = AtomicUsize::new(0);
 
@@ -208,8 +208,7 @@ fn push_key(k: u8) {
     let head = KEY_HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % KEY_BUF_SIZE;
     if next != KEY_TAIL.load(Ordering::Acquire) {
-        // SAFETY: single producer (IRQ or poll), head only written here
-        unsafe { KEY_BUF[head] = k; }
+        KEY_BUF[head].store(k, Ordering::Relaxed);
         KEY_HEAD.store(next, Ordering::Release);
     }
 }
@@ -230,7 +229,20 @@ pub struct MouseEvent {
 
 // Mouse event buffer — IRQ-safe SPSC ring (producer: IRQ/poll, consumer: main thread)
 const MOUSE_BUF_SIZE: usize = 128;
-static mut MOUSE_BUF: [MouseEvent; MOUSE_BUF_SIZE] = [MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0, hscroll: 0 }; MOUSE_BUF_SIZE];
+/// Slots hold `MouseEvent::pack`; the head/tail pair orders them.
+static MOUSE_BUF: [AtomicU64; MOUSE_BUF_SIZE] = [const { AtomicU64::new(0) }; MOUSE_BUF_SIZE];
+
+impl MouseEvent {
+    fn pack(self) -> u64 {
+        u64::from_le_bytes([self.buttons, self.dx as u8, self.dy as u8,
+            self.scroll as u8, self.hscroll as u8, 0, 0, 0])
+    }
+
+    fn unpack(v: u64) -> Self {
+        let b = v.to_le_bytes();
+        MouseEvent { buttons: b[0], dx: b[1] as i8, dy: b[2] as i8, scroll: b[3] as i8, hscroll: b[4] as i8 }
+    }
+}
 static MOUSE_HEAD: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_TAIL: AtomicUsize = AtomicUsize::new(0);
 
@@ -244,9 +256,7 @@ fn push_mouse_locked(evt: MouseEvent) {
     let head = MOUSE_HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % MOUSE_BUF_SIZE;
     if next != MOUSE_TAIL.load(Ordering::Acquire) {
-        // SAFETY: the lock makes this the only writer; `head` is only
-        // written here.
-        unsafe { MOUSE_BUF[head] = evt; }
+        MOUSE_BUF[head].store(evt.pack(), Ordering::Relaxed);
         MOUSE_HEAD.store(next, Ordering::Release);
     }
 }
@@ -298,8 +308,7 @@ pub fn poll_keyboard() -> Option<u8> {
     let head = KEY_HEAD.load(Ordering::Acquire);
     let tail = KEY_TAIL.load(Ordering::Relaxed);
     if head != tail {
-        // SAFETY: single consumer (main thread), tail only written here
-        let k = unsafe { KEY_BUF[tail] };
+        let k = KEY_BUF[tail].load(Ordering::Relaxed);
         KEY_TAIL.store((tail + 1) % KEY_BUF_SIZE, Ordering::Release);
         return Some(k);
     }
@@ -389,8 +398,7 @@ pub fn poll_mouse() -> Option<MouseEvent> {
     let head = MOUSE_HEAD.load(Ordering::Acquire);
     let tail = MOUSE_TAIL.load(Ordering::Relaxed);
     if head != tail {
-        // SAFETY: single consumer (main thread), tail only written here
-        let evt = unsafe { MOUSE_BUF[tail] };
+        let evt = MouseEvent::unpack(MOUSE_BUF[tail].load(Ordering::Relaxed));
         MOUSE_TAIL.store((tail + 1) % MOUSE_BUF_SIZE, Ordering::Release);
         return Some(evt);
     }

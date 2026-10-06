@@ -63,10 +63,6 @@ static LAST_HALT: [AtomicU64; 256] = {
     [ZERO; 256]
 };
 
-static LAST_BUSY: [AtomicU64; 256] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; 256]
-};
 static LAST_TSC_CORE: [AtomicU64; 256] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; 256]
@@ -596,12 +592,6 @@ pub fn update_core_freq(core_id: usize) {
                        / (delta_mperf as u128)) as u64;
         CORE_MHZ[core_id].store(eff_mhz.min(u32::MAX as u64) as u32, Ordering::Relaxed);
     }
-}
-
-/// Record task execution time on a core (called from AP work loop).
-pub fn add_busy_tsc(core_id: usize, cycles: u64) {
-    if core_id >= 256 { return; }
-    CORE_BUSY_TSC[core_id].fetch_add(cycles, Ordering::Relaxed);
 }
 
 /// Start tracking work time for a core (called when task begins or resumes).

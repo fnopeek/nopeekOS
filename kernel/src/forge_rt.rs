@@ -564,7 +564,7 @@ impl Instance {
         ctx[vmctx::TABLE_LEN as usize / 8] = slots as u64;
         ctx[vmctx::TABLE_SIGS as usize / 8] = table_sigs.as_ptr() as u64;
         ctx[vmctx::HOST_FNS as usize / 8] = host_fns.as_ptr() as u64;
-        ctx[vmctx::BUILTIN_GROW as usize / 8] = grow as usize as u64;
+        ctx[vmctx::BUILTIN_GROW as usize / 8] = grow as *const () as usize as u64;
         ctx[vmctx::HOST_CTX as usize / 8] = host.map(|h| h.ctx_ptr()).unwrap_or(0);
 
         Some(Instance {
