@@ -783,23 +783,26 @@ fn render_tabbar(sp: &Spell) -> Widget {
             ]));
         }
 
-        // Unsaved work shows as an accent dot; only a tab you can act on
-        // offers the ×. A saved, inactive tab shows neither.
-        let trailing = if d.dirty {
-            Widget::Row {
-                children:  alloc::vec![prefab::mark(8, 8, Some(Token::Accent))],
-                spacing:   0,
-                align:     Align::Center,
-                modifiers: alloc::vec![Modifier::Rounded(4)],
-            }
-        } else if active {
+        // The active tab offers the ×, in the accent colour when its work
+        // is unsaved. An inactive unsaved tab shows an accent dot that
+        // closes it too; either way the unsaved-changes dialog asks first.
+        // A saved, inactive tab shows neither.
+        let close = ActionId(ACT_TAB_CLOSE_BASE + i as u32);
+        let trailing = if active {
             Widget::Icon {
                 id:   IconId::X,
                 size: 16,
                 modifiers: alloc::vec![
-                    Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
-                    Modifier::Tint(Token::OnSurfaceMuted),
+                    Modifier::OnClick(close),
+                    Modifier::Tint(if d.dirty { Token::Accent } else { Token::OnSurfaceMuted }),
                 ],
+            }
+        } else if d.dirty {
+            Widget::Row {
+                children:  alloc::vec![prefab::mark(8, 8, Some(Token::Accent))],
+                spacing:   0,
+                align:     Align::Center,
+                modifiers: alloc::vec![Modifier::Rounded(4), Modifier::OnClick(close)],
             }
         } else {
             prefab::mark(8, 8, None)
