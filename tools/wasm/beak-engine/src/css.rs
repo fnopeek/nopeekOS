@@ -13,6 +13,7 @@
 //! shell and handed in as text.
 
 use alloc::borrow::Cow;
+use alloc::rc::Rc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::format;
@@ -274,6 +275,22 @@ struct SibCtx<'a> {
     /// The subject's parent, for siblings that come after it — `:has(+ x)`,
     /// `:has(~ x)`. `None` when the caller supplied no ancestors.
     parent: Option<&'a Element>,
+    /// The elements above the subject, root first, for `:dir()`.
+    chain: &'a [ElemInfo<'a>],
+}
+
+/// The direction `:dir()` sees: the nearest `dir` attribute on the element or
+/// an ancestor, `ltr` by default. Not implemented: `dir=auto` (treated as
+/// `ltr`) and the direction of `<bdi>`/text content.
+fn is_rtl(e: &ElemInfo, chain: &[ElemInfo]) -> bool {
+    for el in core::iter::once(e.el).chain(chain.iter().rev().map(|a| a.el)) {
+        match el.attr("dir") {
+            Some(v) if v.trim().eq_ignore_ascii_case("rtl") => return true,
+            Some(v) if v.trim().eq_ignore_ascii_case("ltr") => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// `:*-of-type`'s two counters, computed when the first selector asks and
@@ -356,7 +373,7 @@ impl Structural {
 /// lookup walks the grandparent's children, so it runs only when the
 /// compound carries a structural pseudo-class.
 fn matches_anc(comp: &Compound, ancestors: &[ElemInfo], i: usize) -> bool {
-    if comp.structural.is_empty() {
+    if comp.structural.is_empty() && comp.dir.is_none() {
         return comp.matches(&ancestors[i], None);
     }
     let Some((prev, count)) = anc_siblings(ancestors, i) else {
@@ -369,6 +386,7 @@ fn matches_anc(comp: &Compound, ancestors: &[ElemInfo], i: usize) -> bool {
         count,
         of_type: &of_type,
         parent,
+        chain: &ancestors[..i],
     }))
 }
 
@@ -569,6 +587,8 @@ struct Compound {
     /// `::before`/`::after` on this compound (only valid on the last compound
     /// of a selector — checked in `parse_selector`).
     pseudo: PseudoElem,
+    /// `:dir(rtl)` is `Some(true)`, `:dir(ltr)` `Some(false)`.
+    dir: Option<bool>,
 }
 
 impl Compound {
@@ -609,6 +629,12 @@ impl Compound {
         }
         if self.hover.is_some_and(|w| w != e.state.hover) {
             return false;
+        }
+        if let Some(want) = self.dir {
+            let chain = ctx.as_ref().map_or(&[][..], |c| c.chain);
+            if is_rtl(e, chain) != want {
+                return false;
+            }
         }
         if let Some(l) = self.link {
             let ok = match l {
@@ -734,6 +760,7 @@ impl Selector {
             count: sib_count,
             of_type,
             parent: ancestors.last().map(|p| p.el),
+            chain: ancestors,
         });
         let last = self.compounds.len() - 1;
         if !self.compounds[last].matches(subject, subj_ctx) {
@@ -805,44 +832,14 @@ impl Selector {
     }
 }
 
-/// A parsed `@media` condition. Evaluated: `min-width`/`max-width`,
-/// `prefers-color-scheme` and the `screen`/`all` media types. A query naming
-/// any other media type or feature (orientation, print, …) is marked
-/// `understood = false` and never matches, so its rules are never
-/// mis-applied.
-#[derive(Clone, Copy)]
-pub struct MediaCond {
-    min_width: Option<f32>,
-    max_width: Option<f32>,
-    /// `prefers-color-scheme` — `Some(true)` wants dark, `Some(false)` light.
-    scheme_dark: Option<bool>,
-    understood: bool,
-    /// A leading `not`, which negates the whole query (Media Queries 4 §3.1),
-    /// not one feature of it. `@media not screen and (max-width: 480px)` is
-    /// how a mobile-first page states its desktop rules.
-    negated: bool,
-}
-
-impl MediaCond {
-    fn matches(&self, m: Media) -> bool {
-        // A query we did not understand never matches — not even negated.
-        // `not <something we cannot evaluate>` is not "true", it is unknown,
-        // and unknown has to fail closed in both directions.
-        if !self.understood {
-            return false;
-        }
-        let hit = self.min_width.is_none_or(|v| m.width >= v)
-            && self.max_width.is_none_or(|v| m.width <= v)
-            && self.scheme_dark.is_none_or(|want| want == m.dark);
-        hit != self.negated
-    }
-}
-
 /// What the page is being rendered into — everything `@media` can ask about.
 /// `Copy`, so it threads through the cascade cheaply.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Media {
     pub width: f32,
+    /// The viewport height; `None` when the caller does not know it, which
+    /// makes every height feature unknown (and so not matching).
+    pub height: Option<f32>,
     /// The user's colour-scheme preference; the shell resolves it from the
     /// compositor palette, so it is the system theme.
     pub dark: bool,
@@ -850,7 +847,37 @@ pub struct Media {
 
 impl Media {
     pub fn new(width: f32, dark: bool) -> Media {
-        Media { width, dark }
+        Media { width, height: None, dark }
+    }
+
+    pub fn with_height(self, h: f32) -> Media {
+        Media { height: Some(h), ..self }
+    }
+}
+
+/// Everything selector matching evaluates conditional rules against: the
+/// media state and the query containers around the element, nearest last.
+#[derive(Clone, Copy, Debug)]
+pub struct MatchEnv<'a> {
+    pub media: Media,
+    pub containers: &'a [crate::media::CqBox],
+}
+
+/// The viewport a cascade runs in: a bare width (no height, no containers)
+/// or a full [`MatchEnv`]. The colour scheme always comes from the theme.
+pub trait Viewport {
+    fn env(&self, dark: bool) -> MatchEnv<'_>;
+}
+
+impl Viewport for f32 {
+    fn env(&self, dark: bool) -> MatchEnv<'_> {
+        MatchEnv { media: Media::new(*self, dark), containers: &[] }
+    }
+}
+
+impl Viewport for MatchEnv<'_> {
+    fn env(&self, dark: bool) -> MatchEnv<'_> {
+        MatchEnv { media: Media { dark, ..self.media }, containers: self.containers }
     }
 }
 
@@ -1114,6 +1141,9 @@ css_props! {
     PlaceItems = "place-items" @ Layout,
     PlaceSelf = "place-self" @ Layout,
     PlaceContent = "place-content" @ Layout,
+    ContainerType = "container-type" @ Layout,
+    ContainerName = "container-name" @ Layout,
+    Container = "container" @ Layout,
     Content = "content" @ Layout,
 }
 
@@ -1135,7 +1165,8 @@ pub struct Rule {
     /// pass 2 then has nothing to walk.
     decls_imp: Vec<(Prop, String)>,
     order: u32,
-    media: Option<Vec<MediaCond>>,
+    media: Option<Rc<crate::media::MediaChain>>,
+    container: Option<Rc<crate::media::ContainerChain>>,
     /// Cascade-layer rank (css-cascade-5 §6.4.4). `UNLAYERED` for a rule that
     /// sits outside every `@layer`; otherwise the layer's position in
     /// declaration order, so a later layer wins a normal declaration.
@@ -1265,6 +1296,11 @@ pub struct FontFace {
 /// tested against every rule, which dominates layout on a real page.
 pub struct Stylesheet {
     rules: Vec<Rule>,
+    /// Some `@media` rule tests a height-dependent feature, so a height-only
+    /// resize can change the cascade.
+    pub media_reads_height: bool,
+    /// Some rule sits in an `@container` block.
+    pub has_container_rules: bool,
     /// The page's fonts. Descriptors only — the host fetches the bytes (see
     /// `Engine::take_pending_fonts`).
     pub faces: Vec<FontFace>,
@@ -1441,6 +1477,8 @@ impl Stylesheet {
         Stylesheet {
             faces: Vec::new(),
             rules: Vec::new(),
+            media_reads_height: false,
+            has_container_rules: false,
             registered: Registered::new(),
             normal: Index::default(),
             pseudo: Index::default(),
@@ -1497,7 +1535,20 @@ impl Stylesheet {
         sib_count: u32,
         media: Media,
     ) -> Vec<Matched<'a>> {
-        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, PseudoElem::None)
+        let env = MatchEnv { media, containers: &[] };
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, env, PseudoElem::None)
+    }
+
+    /// Like [`Self::matched`], with query containers for `@container` rules.
+    pub fn matched_env<'a>(
+        &'a self,
+        subject: &ElemInfo,
+        ancestors: &[ElemInfo],
+        prev_siblings: &[ElemInfo],
+        sib_count: u32,
+        env: MatchEnv,
+    ) -> Vec<Matched<'a>> {
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, env, PseudoElem::None)
     }
 
     /// Same as `matched`, but for `subject`'s `::before`/`::after` generated
@@ -1508,10 +1559,10 @@ impl Stylesheet {
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
         sib_count: u32,
-        media: Media,
+        env: MatchEnv,
         pseudo: PseudoElem,
     ) -> Vec<Matched<'a>> {
-        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, media, pseudo)
+        self.matched_filtered(subject, ancestors, prev_siblings, sib_count, env, pseudo)
     }
 
     fn matched_filtered<'a>(
@@ -1520,7 +1571,7 @@ impl Stylesheet {
         ancestors: &[ElemInfo],
         prev_siblings: &[ElemInfo],
         sib_count: u32,
-        media: Media,
+        env: MatchEnv,
         want: PseudoElem,
     ) -> Vec<Matched<'a>> {
         // Only selectors whose rightmost compound could match this element are
@@ -1546,8 +1597,13 @@ impl Stylesheet {
                 continue;
             }
             // Skip rules inside an `@media` block whose condition doesn't hold.
-            if let Some(conds) = &rule.media {
-                if !conds.iter().any(|c| c.matches(media)) {
+            if let Some(chain) = &rule.media {
+                if !chain.matches(&env.media) {
+                    continue;
+                }
+            }
+            if let Some(chain) = &rule.container {
+                if !chain.matches(env.containers) {
                     continue;
                 }
             }
@@ -1752,7 +1808,7 @@ pub fn parse(css: &str) -> Stylesheet {
     let mut layers = Layers::default();
     let mut registered: Registered = Registered::new();
     let mut faces: Vec<FontFace> = Vec::new();
-    parse_into(&css, 0, css.len(), None, &mut rules, &mut order, "", &mut layers, &mut registered, &mut faces);
+    parse_into(&css, 0, css.len(), Conds::default(), &mut rules, &mut order, "", &mut layers, &mut registered, &mut faces);
     // Ids became positions only now that every layer is known.
     if !layers.names.is_empty() {
         let rank = layers.ranks();
@@ -1787,8 +1843,14 @@ pub fn parse(css: &str) -> Stylesheet {
             sel.collect_checked(&mut checked_set);
         }
     }
+    let media_reads_height = rules.iter().any(|r| {
+        r.media.as_ref().is_some_and(|m| m.any_feature(&crate::media::reads_height))
+    });
+    let has_container_rules = rules.iter().any(|r| r.container.is_some());
     let mut sheet = Stylesheet {
         faces,
+        media_reads_height,
+        has_container_rules,
         rules,
         registered,
         normal: Index::default(),
@@ -1806,11 +1868,18 @@ pub fn parse(css: &str) -> Stylesheet {
 /// Scan `css[start..end]` for rules, tagging each with the given `media`
 /// context, and recurse into nested `@media` blocks. `order` is threaded so
 /// document order is preserved across (and into) media blocks.
+/// The `@media` and `@container` blocks a rule sits inside.
+#[derive(Clone, Default)]
+struct Conds {
+    media: Option<Rc<crate::media::MediaChain>>,
+    container: Option<Rc<crate::media::ContainerChain>>,
+}
+
 fn parse_into(
     css: &str,
     start: usize,
     end: usize,
-    media: Option<&Vec<MediaCond>>,
+    media: Conds,
     rules: &mut Vec<Rule>,
     order: &mut u32,
     layer: &str,
@@ -1842,9 +1911,27 @@ fn parse_into(
                     i = (k + 1).min(end);
                     continue;
                 }
-                let conds = parse_media_query(&css[j..k]);
+                let chain = crate::media::MediaChain {
+                    list: crate::media::MediaList::parse(&css[j..k]),
+                    parent: media.media.clone(),
+                };
+                let inner = Conds { media: Some(Rc::new(chain)), container: media.container.clone() };
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, Some(&conds), rules, order, layer, layers, registered, faces);
+                parse_into(css, k + 1, close, inner, rules, order, layer, layers, registered, faces);
+                i = (close + 1).min(end);
+            } else if css[i + 1..j].eq_ignore_ascii_case("container") {
+                let mut k = j;
+                while k < end && bytes[k] != b'{' && bytes[k] != b';' {
+                    k += 1;
+                }
+                if k >= end || bytes[k] == b';' {
+                    i = (k + 1).min(end);
+                    continue;
+                }
+                let chain = crate::media::ContainerChain::parse(&css[j..k], media.container.clone());
+                let inner = Conds { media: media.media.clone(), container: Some(Rc::new(chain)) };
+                let close = matching_brace(bytes, k, end);
+                parse_into(css, k + 1, close, inner, rules, order, layer, layers, registered, faces);
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("supports") {
                 // Descend into `@supports` when the condition holds; else skip
@@ -1859,7 +1946,7 @@ fn parse_into(
                 }
                 let close = matching_brace(bytes, k, end);
                 if supports_cond(&css[j..k]) {
-                    parse_into(css, k + 1, close, media, rules, order, layer, layers, registered, faces);
+                    parse_into(css, k + 1, close, media.clone(), rules, order, layer, layers, registered, faces);
                 }
                 i = (close + 1).min(end);
             } else if css[i + 1..j].eq_ignore_ascii_case("font-face") {
@@ -1920,7 +2007,7 @@ fn parse_into(
                     (layers.id(&full), full)
                 };
                 let close = matching_brace(bytes, k, end);
-                parse_into(css, k + 1, close, media, rules, order, &full, layers, registered, faces);
+                parse_into(css, k + 1, close, media.clone(), rules, order, &full, layers, registered, faces);
                 let _ = id;
                 i = (close + 1).min(end);
             } else {
@@ -2011,7 +2098,8 @@ fn parse_into(
             // siblings, so a rank handed out here would go stale).
             let lid = if layer.is_empty() { UNLAYERED } else { layers.id(layer) };
             rules.push(Rule { selectors, decls, decls_imp, customs, customs_imp,
-                              order: *order, media: media.cloned(), layer: lid });
+                              order: *order, media: media.media.clone(),
+                              container: media.container.clone(), layer: lid });
             *order += 1;
         }
     }
@@ -2129,70 +2217,10 @@ fn split_top<'a>(s: &'a str, sep: &str) -> Option<Vec<&'a str>> {
     Some(parts)
 }
 
-/// Parse a `@media` prelude (comma = OR) into conditions. Only `min-width`/
-/// `max-width` (px) plus the `screen`/`all`/`only` media types are evaluated;
-/// any other media type or feature marks that branch not-understood so it never
-/// matches (we never mis-apply a rule we cannot evaluate).
-fn parse_media_query(prelude: &str) -> Vec<MediaCond> {
-    prelude
-        .split(',')
-        .map(|q| {
-            let mut cond = MediaCond { min_width: None, max_width: None, scheme_dark: None, understood: true, negated: false };
-            let mut ql = q.to_ascii_lowercase();
-            // `not` leads the query and covers all of it.
-            if let Some(rest) = ql.trim_start().strip_prefix("not ") {
-                cond.negated = true;
-                ql = rest.to_string();
-            }
-            for part in ql.split("and") {
-                let p = part.trim();
-                if p.is_empty() {
-                    continue;
-                }
-                if let Some(inner) = p.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-                    let mut kv = inner.splitn(2, ':');
-                    let feat = kv.next().unwrap_or("").trim();
-                    let val = kv.next().unwrap_or("").trim();
-                    // A width feature whose value we can't parse must not leave
-                    // the bound `None` (that matches every viewport) — mark the
-                    // whole query not-understood so it fails closed instead.
-                    match feat {
-                        "min-width" => match parse_media_px(val) {
-                            Some(px) => cond.min_width = Some(px),
-                            None => cond.understood = false,
-                        },
-                        "max-width" => match parse_media_px(val) {
-                            Some(px) => cond.max_width = Some(px),
-                            None => cond.understood = false,
-                        },
-                        // `no-preference` was dropped from the spec and never
-                        // matches; anything else is a value we don't know, so
-                        // the query fails closed like any other.
-                        "prefers-color-scheme" => match val {
-                            "dark" => cond.scheme_dark = Some(true),
-                            "light" => cond.scheme_dark = Some(false),
-                            _ => cond.understood = false,
-                        },
-                        _ => cond.understood = false,
-                    }
-                } else {
-                    for word in p.split_whitespace() {
-                        match word {
-                            "screen" | "all" | "only" => {}
-                            _ => cond.understood = false,
-                        }
-                    }
-                }
-            }
-            cond
-        })
-        .collect()
-}
-
-/// Does a media query text apply to `m`? Used by `@media` preludes and by
-/// `<source media=…>` in a `<picture>`.
+/// Does a media query text apply to `m`? Used by `@media` preludes, by
+/// `<source media=…>` in a `<picture>` and by `matchMedia`.
 pub fn media_matches(prelude: &str, m: Media) -> bool {
-    parse_media_query(prelude).iter().any(|c| c.matches(m))
+    crate::media::MediaList::parse(prelude).matches(&m)
 }
 
 /// A media-feature `<length>` in px; `em`/`rem` count as 16px.
@@ -2214,7 +2242,7 @@ fn parse_px(v: &str) -> Option<f32> {
 /// (e.g. `calc(640px - 1px)`). A value that fails to parse must not leave the
 /// bound unset, or the `@media (max-width: …)` block would match every
 /// viewport.
-fn parse_media_px(v: &str) -> Option<f32> {
+pub(crate) fn parse_media_px(v: &str) -> Option<f32> {
     let v = v.trim();
     if let Some(inner) = v.strip_prefix("calc(").and_then(|s| s.strip_suffix(')')) {
         // Sum of whitespace-separated `±<px>` terms (CSS requires spaces around
@@ -2466,6 +2494,7 @@ fn parse_compound(tok: &str) -> Option<Compound> {
         link: None,
         has: Vec::new(),
         pseudo: PseudoElem::None,
+        dir: None,
     };
     let mut i = 0;
     // Leading type selector or universal `*`.
@@ -2567,6 +2596,16 @@ fn parse_compound(tok: &str) -> Option<Compound> {
                     ("has", Some(a)) => c.has.push(parse_has_list(&a)?),
                     ("where", Some(a)) => c.where_groups.push(parse_compound_list(&a)),
                     ("root", None) => c.root = true,
+                    // Every element counts as defined. Not implemented: a
+                    // custom element before its definition is not `:defined`.
+                    ("defined", None) => {}
+                    ("dir", Some(a)) => match a.trim().to_ascii_lowercase().as_str() {
+                        "rtl" => c.dir = Some(true),
+                        "ltr" => c.dir = Some(false),
+                        _ => return None,
+                    },
+                    // No element is ever shown as a popover.
+                    ("popover-open", None) => c.not.push(parse_compound("*")?),
                     ("empty", None) => c.empty = true,
                     ("checked", None) => c.checked = Some(true),
                     ("disabled", None) => c.disabled = Some(true),
@@ -2614,7 +2653,7 @@ fn never_matches(sel: &str) -> bool {
         sel.trim().to_ascii_lowercase().as_str(),
         // `:hover` is not here: it is a real state, so `:not(:hover)` has to
         // be evaluated rather than assumed true.
-        ":focus" | ":focus-visible" | ":focus-within" | ":active" | ":target"
+        ":focus" | ":focus-visible" | ":focus-within" | ":active" | ":target" | ":popover-open"
     )
 }
 
@@ -2832,7 +2871,9 @@ fn parse_decls(body: &str) -> Vec<(String, String)> {
                     None => continue,
                 }
             };
+            // Custom property names are case-sensitive (css-variables-1 §2).
             let name = match unescape_value(p) {
+                Some(x) if x.starts_with("--") => x,
                 Some(x) => x.to_ascii_lowercase(),
                 None => continue,
             };
