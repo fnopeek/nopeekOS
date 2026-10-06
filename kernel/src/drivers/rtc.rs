@@ -3,10 +3,12 @@
 //! Reads the hardware clock as fallback time source.
 //! BCD-encoded registers, no IRQ — just polled reads.
 
-use crate::serial::{inb, outb};
+use crate::hw::Port;
 
-const CMOS_ADDR: u16 = 0x70;
-const CMOS_DATA: u16 = 0x71;
+// SAFETY: the CMOS index/data pair, always present on x86; `CMOS_LOCK`
+// keeps the pair together.
+const CMOS_ADDR: Port = unsafe { Port::new(0x70) };
+const CMOS_DATA: Port = unsafe { Port::new(0x71) };
 
 // CMOS register indices
 const REG_SECONDS: u8 = 0x00;
@@ -25,12 +27,8 @@ static CMOS_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 fn read_cmos(reg: u8) -> u8 {
     crate::interrupts::without_interrupts(|| {
         let _g = CMOS_LOCK.lock();
-        // SAFETY: CMOS ports are standard x86 I/O, always present; the lock
-        // keeps the index/data pair together.
-        unsafe {
-            outb(CMOS_ADDR, reg | 0x80); // bit 7 = disable NMI
-            inb(CMOS_DATA)
-        }
+        CMOS_ADDR.outb(reg | 0x80); // bit 7 = disable NMI
+        CMOS_DATA.inb()
     })
 }
 

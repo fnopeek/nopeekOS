@@ -10,7 +10,7 @@
 //! triggered): clear the status bit first, then handle, so an event that
 //! arrives during the handling sets the bit again and fires again.
 
-use crate::serial::{inb, inw, outb, outw};
+use crate::hw::{Port, PortRange};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static ARMED: AtomicBool = AtomicBool::new(false);
@@ -27,30 +27,38 @@ static EC_GPE: AtomicU32 = AtomicU32::new(0);
 #[derive(Clone, Copy)]
 struct Blocks {
     sci_int: u16,
-    pm1a_evt: u16,
+    /// PM1a_EVT status and enable registers.
+    pm1a_sts: Port,
+    pm1a_en: Port,
     pm1_half: u16,
-    gpe0: u16,
+    /// GPE0 block: status bytes, then as many enable bytes.
+    gpe0: PortRange,
     gpe0_half: u16,
 }
 
 fn blocks() -> Option<Blocks> {
-    let fadt = crate::acpi::find_table(b"FACP")?;
-    crate::acpi::ensure_mapped_pub(fadt, 256);
-    // SAFETY: FADT mapped; fields at their ACPI 6.5 §5.2.9 offsets.
-    let (sci, pm1a, pm1_len, gpe0, gpe0_len) = unsafe {
-        let r32 = |o: usize| core::ptr::read_unaligned((fadt + o) as *const u32);
-        let r16 = |o: usize| core::ptr::read_unaligned((fadt + o) as *const u16);
-        let r8 = |o: usize| core::ptr::read_volatile((fadt + o) as *const u8);
-        (r16(46), r32(56), r8(88), r32(80), r8(92))
-    };
-    if pm1a == 0 || pm1a > 0xFFFF || gpe0 == 0 || gpe0 > 0xFFFF || gpe0_len < 2 {
+    let fadt = crate::acpi::table(b"FACP")?;
+    // Fields at their ACPI 6.5 §5.2.9 offsets.
+    let sci = fadt.u16(46)?;
+    let pm1a = fadt.io_port(56)?;
+    let pm1_len = fadt.u8(88)?;
+    let gpe0 = fadt.io_port(80)?;
+    let gpe0_len = fadt.u8(92)?;
+    if gpe0_len < 2 {
         return None;
     }
+    let pm1_half = (pm1_len / 2) as u16;
+    // SAFETY: the FADT's PM1a event and GPE0 blocks, the ACPI hardware this
+    // module drives.
+    let (pm1a_sts, pm1a_en, gpe0) = unsafe {
+        (Port::new(pm1a), Port::new(pm1a.wrapping_add(pm1_half)), PortRange::new(gpe0, gpe0_len as u16))
+    };
     Some(Blocks {
         sci_int: sci,
-        pm1a_evt: pm1a as u16,
-        pm1_half: (pm1_len / 2) as u16,
-        gpe0: gpe0 as u16,
+        pm1a_sts,
+        pm1a_en,
+        pm1_half,
+        gpe0,
         gpe0_half: (gpe0_len / 2) as u16,
     })
 }
@@ -70,18 +78,14 @@ pub fn arm_ec(gpe: u32) -> Option<(u32, bool, bool)> {
     if gpe >= b.gpe0_half as u32 * 8 { return None; }
     if ARMED.swap(true, Ordering::AcqRel) { return None; }
     EC_GPE.store(gpe, Ordering::Relaxed);
-    // SAFETY: GPE0 and PM1a are the FADT's I/O blocks; status bits are
-    // write-1-to-clear, enable bits plain.
-    unsafe {
-        for i in 0..b.gpe0_half {
-            outb(b.gpe0 + b.gpe0_half + i, 0);
-            outb(b.gpe0 + i, 0xFF);
-        }
-        let sts = inw(b.pm1a_evt);
-        outw(b.pm1a_evt, sts);
-        let en_port = b.gpe0 + b.gpe0_half + (gpe / 8) as u16;
-        outb(en_port, 1 << (gpe % 8));
+    // Status bits are write-1-to-clear, enable bits plain.
+    for i in 0..b.gpe0_half {
+        b.gpe0.outb(b.gpe0_half + i, 0);
+        b.gpe0.outb(i, 0xFF);
     }
+    let sts = b.pm1a_sts.inw();
+    b.pm1a_sts.outw(sts);
+    b.gpe0.outb(b.gpe0_half + (gpe / 8) as u16, 1 << (gpe % 8));
     let (gsi, level, low) = crate::ioapic::isa_irq(b.sci_int as u8);
     crate::kprintln!("[npk] sci: IRQ {} -> GSI {} ({}, {}), EC on GPE {}",
         b.sci_int, gsi, if level { "level" } else { "edge" },
@@ -101,26 +105,22 @@ pub fn service() -> u32 {
     let gpe = EC_GPE.load(Ordering::Relaxed);
     let mut out = 0u32;
     CALLS.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: as in `arm_ec`.
-    unsafe {
-        let sts_port = b.gpe0 + (gpe / 8) as u16;
-        let bit = 1u8 << (gpe % 8);
-        if inb(sts_port) & bit != 0 {
-            outb(sts_port, bit);
-            out |= 1;
-        }
-        if b.pm1_half >= 2 {
-            let sts = inw(b.pm1a_evt);
-            let en = inw(b.pm1a_evt + b.pm1_half);
-            let fired = sts & en;
-            if fired != 0 {
-                outw(b.pm1a_evt, fired);
-                out |= (fired as u32) << 16;
-            }
+    let sts_off = (gpe / 8) as u16;
+    let bit = 1u8 << (gpe % 8);
+    if b.gpe0.inb(sts_off) & bit != 0 {
+        b.gpe0.outb(sts_off, bit);
+        out |= 1;
+    }
+    if b.pm1_half >= 2 {
+        let sts = b.pm1a_sts.inw();
+        let en = b.pm1a_en.inw();
+        let fired = sts & en;
+        if fired != 0 {
+            b.pm1a_sts.outw(fired);
+            out |= (fired as u32) << 16;
         }
     }
-    // SAFETY: EC status port, read only.
-    if unsafe { inb(0x66) } & 0x20 != 0 {
+    if crate::drivers::ec::status() & 0x20 != 0 {
         out |= 2;
     }
     if out & 1 != 0 { EC_HITS.fetch_add(1, Ordering::Relaxed); }
@@ -145,15 +145,12 @@ pub fn report() {
         EMPTY.load(Ordering::Relaxed));
     let mut sts = alloc::string::String::new();
     let mut en = alloc::string::String::new();
-    // SAFETY: GPE0 / PM1a are the FADT's I/O blocks; reads only.
-    unsafe {
-        for i in 0..b.gpe0_half {
-            sts.push_str(&alloc::format!("{:02x} ", inb(b.gpe0 + i)));
-            en.push_str(&alloc::format!("{:02x} ", inb(b.gpe0 + b.gpe0_half + i)));
-        }
-        crate::kprintln!("  GPE0 STS {}· EN {}· PM1 STS {:04x} EN {:04x} · EC Status {:02x}",
-            sts, en, inw(b.pm1a_evt), inw(b.pm1a_evt + b.pm1_half), inb(0x66));
+    for i in 0..b.gpe0_half {
+        sts.push_str(&alloc::format!("{:02x} ", b.gpe0.inb(i)));
+        en.push_str(&alloc::format!("{:02x} ", b.gpe0.inb(b.gpe0_half + i)));
     }
+    crate::kprintln!("  GPE0 STS {}· EN {}· PM1 STS {:04x} EN {:04x} · EC Status {:02x}",
+        sts, en, b.pm1a_sts.inw(), b.pm1a_en.inw(), crate::drivers::ec::status());
 }
 
 /// `ec gpe off|on` (diagnostic): take the EC's GPE out of the SCI or put it
@@ -162,13 +159,10 @@ pub fn set_ec_gpe(on: bool) -> bool {
     let Some(b) = blocks() else { return false };
     if !ARMED.load(Ordering::Acquire) { return false; }
     let gpe = EC_GPE.load(Ordering::Relaxed);
-    let port = b.gpe0 + b.gpe0_half + (gpe / 8) as u16;
-    // SAFETY: GPE0 enable byte of the FADT's block.
-    unsafe {
-        let v = inb(port);
-        let bit = 1u8 << (gpe % 8);
-        outb(port, if on { v | bit } else { v & !bit });
-    }
+    let off = b.gpe0_half + (gpe / 8) as u16;
+    let v = b.gpe0.inb(off);
+    let bit = 1u8 << (gpe % 8);
+    b.gpe0.outb(off, if on { v | bit } else { v & !bit });
     true
 }
 
@@ -176,23 +170,19 @@ pub fn set_ec_gpe(on: bool) -> bool {
 /// with FADT.ACPI_DISABLE, or take them again with ACPI_ENABLE. Returns
 /// SCI_EN afterwards.
 pub fn set_acpi_mode(acpi: bool) -> Option<bool> {
-    let fadt = crate::acpi::find_table(b"FACP")?;
-    crate::acpi::ensure_mapped_pub(fadt, 256);
-    // SAFETY: FADT mapped; SMI_CMD 48, ACPI_ENABLE 52, ACPI_DISABLE 53,
-    // PM1a_CNT 64.
-    let (smi, en, dis, cnt) = unsafe {
-        (core::ptr::read_unaligned((fadt + 48) as *const u32),
-         core::ptr::read_volatile((fadt + 52) as *const u8),
-         core::ptr::read_volatile((fadt + 53) as *const u8),
-         core::ptr::read_unaligned((fadt + 64) as *const u32))
-    };
-    if smi == 0 || smi > 0xFFFF || cnt == 0 || cnt > 0xFFFF { return None; }
+    let fadt = crate::acpi::table(b"FACP")?;
+    // SMI_CMD 48, ACPI_ENABLE 52, ACPI_DISABLE 53, PM1a_CNT 64.
+    let smi = fadt.io_port(48)?;
+    let en = fadt.u8(52)?;
+    let dis = fadt.u8(53)?;
+    let cnt = fadt.io_port(64)?;
     // SAFETY: the FADT's SMI command port and PM1a control port.
-    unsafe { outb(smi as u16, if acpi { en } else { dis }) };
+    let (smi, cnt) = unsafe { (Port::new(smi), Port::new(cnt)) };
+    smi.outb(if acpi { en } else { dis });
     let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
     let t0 = crate::interrupts::rdtsc();
     loop {
-        let on = unsafe { inw(cnt as u16) } & 1 != 0;
+        let on = cnt.inw() & 1 != 0;
         if on == acpi || crate::interrupts::rdtsc() - t0 > 3000 * tsc_ms {
             return Some(on);
         }

@@ -6,10 +6,12 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::kprintln;
-use crate::serial::{inb, outb};
+use crate::hw::Port;
 
-const DATA_PORT: u16 = 0x60;
-const STATUS_PORT: u16 = 0x64;
+// SAFETY: the i8042 data and status/command ports, driven only by this
+// module.
+const DATA_PORT: Port = unsafe { Port::new(0x60) };
+const STATUS_PORT: Port = unsafe { Port::new(0x64) };
 
 // Ring buffer for decoded key bytes. Written by the PS/2 ISR, by injection
 // from modules and the terminal, read by several loops, so every access holds
@@ -102,54 +104,52 @@ const KEY_INSERT: u8 = 0x89;
 /// Initialize PS/2 keyboard controller.
 /// Safe on systems without PS/2 (returns silently).
 pub fn init() {
-    unsafe {
-        // Check if PS/2 controller exists (0xFF = no controller)
-        let status = inb(STATUS_PORT);
-        if status == 0xFF {
-            // Report the absence: without a keyboard no diagnostic command
-            // can be typed to find out.
-            kprintln!("[npk] ps2: no i8042 — a built-in keyboard must come from USB or I2C-HID");
-            return; // No PS/2 controller (USB-only system)
-        }
+    // Check if PS/2 controller exists (0xFF = no controller)
+    let status = STATUS_PORT.inb();
+    if status == 0xFF {
+        // Report the absence: without a keyboard no diagnostic command
+        // can be typed to find out.
+        kprintln!("[npk] ps2: no i8042 — a built-in keyboard must come from USB or I2C-HID");
+        return; // No PS/2 controller (USB-only system)
+    }
 
-        // Flush any pending data from controller buffer (with timeout)
-        for _ in 0..1000 {
-            if (inb(STATUS_PORT) & 0x01) == 0 { break; }
-            let _ = inb(DATA_PORT);
-        }
+    // Flush any pending data from controller buffer (with timeout)
+    for _ in 0..1000 {
+        if (STATUS_PORT.inb() & 0x01) == 0 { break; }
+        let _ = DATA_PORT.inb();
+    }
 
-        // Enable keyboard (send 0xAE to command port)
-        outb(STATUS_PORT, 0xAE);
+    // Enable keyboard (send 0xAE to command port)
+    STATUS_PORT.outb(0xAE);
 
-        // Scancode translation (config bit 6). `decode_scancode` reads set 1,
-        // which the controller delivers only with translation on. UEFI-only
-        // firmware may hand over the bit cleared; the keyboard then sends set
-        // 2 and looks dead. Read-modify-write, a no-op where the bit is set.
-        wait_write();
-        outb(STATUS_PORT, 0x20);
-        match ps2_read() {
-            Some(cfg) => {
-                crate::kdebug!("[npk] ps2: i8042 status {:#04x} config {:#04x}{}",
-                    status, cfg,
-                    if cfg & 0x40 == 0 { " — translation OFF, turning it on" } else { "" });
-                if cfg & 0x40 == 0 {
-                    wait_write();
-                    outb(STATUS_PORT, 0x60);
-                    wait_write();
-                    outb(DATA_PORT, cfg | 0x40);
-                }
+    // Scancode translation (config bit 6). `decode_scancode` reads set 1,
+    // which the controller delivers only with translation on. UEFI-only
+    // firmware may hand over the bit cleared; the keyboard then sends set
+    // 2 and looks dead. Read-modify-write, a no-op where the bit is set.
+    wait_write();
+    STATUS_PORT.outb(0x20);
+    match ps2_read() {
+        Some(cfg) => {
+            crate::kdebug!("[npk] ps2: i8042 status {:#04x} config {:#04x}{}",
+                status, cfg,
+                if cfg & 0x40 == 0 { " — translation OFF, turning it on" } else { "" });
+            if cfg & 0x40 == 0 {
+                wait_write();
+                STATUS_PORT.outb(0x60);
+                wait_write();
+                DATA_PORT.outb(cfg | 0x40);
             }
-            None => kprintln!("[npk] ps2: i8042 status {:#04x}, config read timed out", status),
         }
+        None => kprintln!("[npk] ps2: i8042 status {:#04x}, config read timed out", status),
+    }
 
-        // Enable scanning (send 0xF4 to data port)
-        wait_write();
-        outb(DATA_PORT, 0xF4);
-        match ps2_read() {
-            Some(0xFA) => crate::kdebug!("[npk] ps2: keyboard scanning enabled"),
-            Some(b)    => kprintln!("[npk] ps2: enable scanning answered {:#04x}", b),
-            None       => kprintln!("[npk] ps2: enable scanning got no answer — no keyboard on the i8042"),
-        }
+    // Enable scanning (send 0xF4 to data port)
+    wait_write();
+    DATA_PORT.outb(0xF4);
+    match ps2_read() {
+        Some(0xFA) => crate::kdebug!("[npk] ps2: keyboard scanning enabled"),
+        Some(b)    => kprintln!("[npk] ps2: enable scanning answered {:#04x}", b),
+        None       => kprintln!("[npk] ps2: enable scanning got no answer — no keyboard on the i8042"),
     }
 }
 
@@ -177,8 +177,8 @@ static PM_B1: AtomicU8 = AtomicU8::new(0);
 /// Read one byte from the i8042 output buffer with a bounded spin (None on timeout).
 fn ps2_read() -> Option<u8> {
     for _ in 0..200_000 {
-        if unsafe { inb(STATUS_PORT) } & 0x01 != 0 {
-            return Some(unsafe { inb(DATA_PORT) });
+        if STATUS_PORT.inb() & 0x01 != 0 {
+            return Some(DATA_PORT.inb());
         }
     }
     None
@@ -187,9 +187,9 @@ fn ps2_read() -> Option<u8> {
 /// Send a command byte to the aux device (0xD4 prefix) and read its reply.
 fn mouse_write(b: u8) -> Option<u8> {
     wait_write();
-    unsafe { outb(STATUS_PORT, 0xD4); }   // next data-port byte goes to aux
+    STATUS_PORT.outb(0xD4);   // next data-port byte goes to aux
     wait_write();
-    unsafe { outb(DATA_PORT, b); }
+    DATA_PORT.outb(b);
     ps2_read()
 }
 
@@ -197,21 +197,19 @@ fn mouse_write(b: u8) -> Option<u8> {
 /// false) if a USB mouse is already up or no aux device responds.
 pub fn init_mouse() -> bool {
     if crate::xhci::mouse_available() { return false; }
-    unsafe {
-        if inb(STATUS_PORT) == 0xFF { return false; }   // no i8042 controller
-        // Enable the aux device.
-        wait_write();
-        outb(STATUS_PORT, 0xA8);
-        // Read controller config, enable the aux clock (clear bit5), keep the
-        // keyboard bits. We poll, so leave the aux-IRQ bit alone.
-        wait_write();
-        outb(STATUS_PORT, 0x20);
-        let cfg = match ps2_read() { Some(c) => c, None => return false };
-        wait_write();
-        outb(STATUS_PORT, 0x60);
-        wait_write();
-        outb(DATA_PORT, cfg & !0x20);
-    }
+    if STATUS_PORT.inb() == 0xFF { return false; }   // no i8042 controller
+    // Enable the aux device.
+    wait_write();
+    STATUS_PORT.outb(0xA8);
+    // Read controller config, enable the aux clock (clear bit5), keep the
+    // keyboard bits. We poll, so leave the aux-IRQ bit alone.
+    wait_write();
+    STATUS_PORT.outb(0x20);
+    let cfg = match ps2_read() { Some(c) => c, None => return false };
+    wait_write();
+    STATUS_PORT.outb(0x60);
+    wait_write();
+    DATA_PORT.outb(cfg & !0x20);
     // Reset (0xFF) answers ACK 0xFA, then self-test 0xAA, then the device
     // id: 0x00 standard PS/2 (3 bytes), 0x03 wheel (4 bytes), 0x04 five
     // buttons (4 bytes). `mouse_write` does not check the ACK, so the answer
@@ -219,10 +217,8 @@ pub fn init_mouse() -> bool {
     // First test the aux port itself: 0xA9 "test auxiliary interface"
     // answers 0x00 when ok, 0x01/0x02 clock line stuck, 0x03/0x04 data line
     // stuck. Unambiguous, unlike guessing from the reset answer.
-    unsafe {
-        wait_write();
-        outb(STATUS_PORT, 0xA9);
-    }
+    wait_write();
+    STATUS_PORT.outb(0xA9);
     let aux_test = ps2_read();
 
     // Reset (0xFF), retried on 0xFE ("resend") as the PS/2 protocol requires.
@@ -334,7 +330,7 @@ pub fn has_key() -> bool {
         return true;
     }
     // PS/2 byte waiting in the i8042 output buffer (keyboard, not aux)?
-    if unsafe { inb(STATUS_PORT) } & 0x21 == 0x01 {
+    if STATUS_PORT.inb() & 0x21 == 0x01 {
         return true;
     }
     crate::xhci::is_available()
@@ -365,60 +361,58 @@ pub fn read_key() -> Option<u8> {
 /// Poll the i8042 PS/2 controller for one keyboard scancode. Skips aux
 /// (PS/2 mouse/touchpad) bytes so they don't get misread as keystrokes.
 fn poll_ps2() -> Option<u8> {
-    unsafe {
-        // Drain the shared i8042 output buffer: aux (touchpad) bytes feed the
-        // mouse assembler, keyboard bytes decode to a char. Draining aux is
-        // mandatory — an unread aux byte sits in the single output buffer and
-        // would block keyboard reads.
-        //
-        // The PS/2 device delivers one byte per ~1 ms, paced by our reads. At a
-        // 100 Hz poll that splits each 3-byte mouse packet across ~30 ms → the
-        // cursor lags and overshoots ("rubber-band"). So while a packet is
-        // mid-assembly we briefly (TSC-bounded ~2 ms) wait for the next byte to
-        // finish the packet in one poll — full sample rate, ≤10 ms latency. The
-        // wait only happens during active movement (PM_IDX != 0) and a byte
-        // budget caps total work per call.
-        let tsc_2ms = crate::interrupts::tsc_freq() / 500;
-        let mut budget = 48u32;
-        loop {
-            let status = inb(STATUS_PORT);
-            if status == 0xFF { return None; }       // no controller
-            if status & 0x01 == 0 {
-                // Buffer empty. Finish an in-flight mouse packet rather than
-                // splitting it across polls.
-                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed)
-                    && PM_IDX.load(Ordering::Relaxed) != 0
-                    && tsc_2ms > 0
-                    && budget > 0
-                {
-                    let deadline = crate::interrupts::rdtsc() + tsc_2ms;
-                    while crate::interrupts::rdtsc() < deadline {
-                        if inb(STATUS_PORT) & 0x01 != 0 { break; }
-                        core::hint::spin_loop();
-                    }
-                    if inb(STATUS_PORT) & 0x01 != 0 { continue; }
+    // Drain the shared i8042 output buffer: aux (touchpad) bytes feed the
+    // mouse assembler, keyboard bytes decode to a char. Draining aux is
+    // mandatory — an unread aux byte sits in the single output buffer and
+    // would block keyboard reads.
+    //
+    // The PS/2 device delivers one byte per ~1 ms, paced by our reads. At a
+    // 100 Hz poll that splits each 3-byte mouse packet across ~30 ms → the
+    // cursor lags and overshoots ("rubber-band"). So while a packet is
+    // mid-assembly we briefly (TSC-bounded ~2 ms) wait for the next byte to
+    // finish the packet in one poll — full sample rate, ≤10 ms latency. The
+    // wait only happens during active movement (PM_IDX != 0) and a byte
+    // budget caps total work per call.
+    let tsc_2ms = crate::interrupts::tsc_freq() / 500;
+    let mut budget = 48u32;
+    loop {
+        let status = STATUS_PORT.inb();
+        if status == 0xFF { return None; }       // no controller
+        if status & 0x01 == 0 {
+            // Buffer empty. Finish an in-flight mouse packet rather than
+            // splitting it across polls.
+            if PS2_MOUSE_ENABLED.load(Ordering::Relaxed)
+                && PM_IDX.load(Ordering::Relaxed) != 0
+                && tsc_2ms > 0
+                && budget > 0
+            {
+                let deadline = crate::interrupts::rdtsc() + tsc_2ms;
+                while crate::interrupts::rdtsc() < deadline {
+                    if STATUS_PORT.inb() & 0x01 != 0 { break; }
+                    core::hint::spin_loop();
                 }
-                return None;
+                if STATUS_PORT.inb() & 0x01 != 0 { continue; }
             }
-            if budget == 0 { return None; }
-            budget -= 1;
-            if status & 0x20 != 0 {
-                // bit5 set → byte is from the aux device (touchpad/mouse).
-                let b = inb(DATA_PORT);
-                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
-                    feed_mouse(b);
-                }
-                continue;
-            }
-            // Pending rest of a multi-byte character goes first, before the
-            // next scancode, or it is lost.
-            if let Some(b) = take_tail() { return Some(b) }
-            let scancode = inb(DATA_PORT);
-            if let Some(c) = decode_scancode(scancode) {
-                return Some(c);
-            }
-            // Modifier / release / 0xE0 prefix produced no char — keep draining.
+            return None;
         }
+        if budget == 0 { return None; }
+        budget -= 1;
+        if status & 0x20 != 0 {
+            // bit5 set → byte is from the aux device (touchpad/mouse).
+            let b = DATA_PORT.inb();
+            if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
+                feed_mouse(b);
+            }
+            continue;
+        }
+        // Pending rest of a multi-byte character goes first, before the
+        // next scancode, or it is lost.
+        if let Some(b) = take_tail() { return Some(b) }
+        let scancode = DATA_PORT.inb();
+        if let Some(c) = decode_scancode(scancode) {
+            return Some(c);
+        }
+        // Modifier / release / 0xE0 prefix produced no char — keep draining.
     }
 }
 
@@ -444,8 +438,7 @@ pub fn needs_poll() -> bool {
 /// From here the interrupt owns the i8042 (`PS2_IRQ_ACTIVE`): `read_key`
 /// stops polling the port and takes keys from the buffer.
 pub fn enable_irq() {
-    // SAFETY: i8042 port I/O at boot, on Core 0, interrupts off below.
-    if unsafe { inb(STATUS_PORT) } == 0xFF {
+    if STATUS_PORT.inb() == 0xFF {
         return; // no controller
     }
     PS2_PRESENT.store(true, Ordering::Relaxed);
@@ -463,22 +456,20 @@ pub fn enable_irq() {
         None
     };
     crate::interrupts::without_interrupts(|| {
-        // SAFETY: i8042 command/data ports; nothing else touches them yet.
-        unsafe {
-            for _ in 0..16 {
-                if inb(STATUS_PORT) & 0x01 == 0 { break; }
-                let _ = inb(DATA_PORT);
-            }
-            wait_write();
-            outb(STATUS_PORT, 0x20);
-            if let Some(cfg) = ps2_read() {
-                let want = cfg | 0x01 | if aux { 0x02 } else { 0 };
-                if want != cfg {
-                    wait_write();
-                    outb(STATUS_PORT, 0x60);
-                    wait_write();
-                    outb(DATA_PORT, want);
-                }
+        // Nothing else touches the i8042 yet.
+        for _ in 0..16 {
+            if STATUS_PORT.inb() & 0x01 == 0 { break; }
+            let _ = DATA_PORT.inb();
+        }
+        wait_write();
+        STATUS_PORT.outb(0x20);
+        if let Some(cfg) = ps2_read() {
+            let want = cfg | 0x01 | if aux { 0x02 } else { 0 };
+            if want != cfg {
+                wait_write();
+                STATUS_PORT.outb(0x60);
+                wait_write();
+                DATA_PORT.outb(want);
             }
         }
         PS2_IRQ_ACTIVE.store(true, Ordering::Release);
@@ -504,29 +495,26 @@ pub fn poll_ps2_irq() {
         return;
     }
     let mut budget = 64u32;
-    // SAFETY: ring-0 i8042 port access; only Core-0 interrupt handlers call
-    // this (the i8042 IRQ, and the timer tick as fallback) — they do not
-    // nest — and once active nothing else touches the i8042 (read_key reads
-    // BUF).
-    unsafe {
-        while budget > 0 {
-            let status = inb(STATUS_PORT);
-            if status == 0xFF || status & 0x01 == 0 {
-                return; // no controller / output buffer empty
+    // Only Core-0 interrupt handlers call this (the i8042 IRQ, and the timer
+    // tick as fallback); they do not nest, and once active nothing else
+    // touches the i8042 (read_key reads BUF).
+    while budget > 0 {
+        let status = STATUS_PORT.inb();
+        if status == 0xFF || status & 0x01 == 0 {
+            return; // no controller / output buffer empty
+        }
+        budget -= 1;
+        if status & 0x20 != 0 {
+            // Aux (touchpad/mouse) byte.
+            let b = DATA_PORT.inb();
+            if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
+                feed_mouse(b);
             }
-            budget -= 1;
-            if status & 0x20 != 0 {
-                // Aux (touchpad/mouse) byte.
-                let b = inb(DATA_PORT);
-                if PS2_MOUSE_ENABLED.load(Ordering::Relaxed) {
-                    feed_mouse(b);
-                }
-                continue;
-            }
-            let scancode = inb(DATA_PORT);
-            if let Some(c) = decode_scancode(scancode) {
-                push_char(c);
-            }
+            continue;
+        }
+        let scancode = DATA_PORT.inb();
+        if let Some(c) = decode_scancode(scancode) {
+            push_char(c);
         }
     }
 }
@@ -613,10 +601,8 @@ fn push_arrow(code: u8) {
 }
 
 fn wait_write() {
-    unsafe {
-        for _ in 0..10000 {
-            if (inb(STATUS_PORT) & 0x02) == 0 { return; }
-        }
+    for _ in 0..10000 {
+        if (STATUS_PORT.inb() & 0x02) == 0 { return; }
     }
 }
 
@@ -833,7 +819,7 @@ pub fn is_de_layout() -> bool {
 
 /// IRQ1 handler — called from interrupts.rs.
 pub fn irq_handler() {
-    let scancode = unsafe { inb(DATA_PORT) };
+    let scancode = DATA_PORT.inb();
     if let Some(c) = decode_scancode(scancode) {
         push_char(c);
     }

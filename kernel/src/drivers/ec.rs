@@ -13,11 +13,13 @@
 //! the multiplexed capacity registers — exactly as ACPICA drives the EC. We
 //! never poke arbitrary offsets ourselves.
 
-use crate::serial::{inb, outb};
+use crate::hw::Port;
 
 // Default ISA EC ports (FADT EC_BLK; 0x62/0x66 is universal on x86 laptops).
-const EC_DATA: u16 = 0x62;
-const EC_SC: u16 = 0x66; // status (read) / command (write)
+// SAFETY: the EC's data and status/command ports; every multi-step
+// transaction runs under `EC_LOCK`.
+const EC_DATA: Port = unsafe { Port::new(0x62) };
+const EC_SC: Port = unsafe { Port::new(0x66) }; // status (read) / command (write)
 
 // Status register bits (ec.c).
 const EC_FLAG_OBF: u8 = 0x01; // output buffer full → data ready to read
@@ -36,6 +38,11 @@ const EC_FLAG_SCI: u8 = 0x20;
 /// takes it, so IF stays as it is.
 static EC_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// The status register, read without taking the lock.
+pub(crate) fn status() -> u8 {
+    EC_SC.inb()
+}
+
 fn udelay(us: u64) {
     let freq = crate::interrupts::tsc_freq();
     if freq == 0 {
@@ -50,7 +57,7 @@ fn udelay(us: u64) {
 /// byte). ~10 ms cap. Returns false on timeout.
 fn wait_ibf_clear() -> bool {
     for _ in 0..2000 {
-        if unsafe { inb(EC_SC) } & EC_FLAG_IBF == 0 { return true; }
+        if EC_SC.inb() & EC_FLAG_IBF == 0 { return true; }
         udelay(5);
     }
     false
@@ -59,7 +66,7 @@ fn wait_ibf_clear() -> bool {
 /// Wait until the output buffer is full (a read result is available).
 fn wait_obf_set() -> bool {
     for _ in 0..2000 {
-        if unsafe { inb(EC_SC) } & EC_FLAG_OBF != 0 { return true; }
+        if EC_SC.inb() & EC_FLAG_OBF != 0 { return true; }
         udelay(5);
     }
     false
@@ -74,11 +81,11 @@ pub fn read(addr: u8) -> Option<u8> {
 
 fn read_locked(addr: u8) -> Option<u8> {
     if !wait_ibf_clear() { return None; }
-    unsafe { outb(EC_SC, CMD_READ); }
+    EC_SC.outb(CMD_READ);
     if !wait_ibf_clear() { return None; }
-    unsafe { outb(EC_DATA, addr); }
+    EC_DATA.outb(addr);
     if !wait_obf_set() { return None; }
-    Some(unsafe { inb(EC_DATA) })
+    Some(EC_DATA.inb())
 }
 
 /// Fetch a pending EC query (`QR_EC`), or `None`.
@@ -92,13 +99,12 @@ fn read_locked(addr: u8) -> Option<u8> {
 /// read one byte. Zero means "nothing pending" (ec.c treats 0 as an empty
 /// query).
 pub fn query() -> Option<u8> {
-    // SAFETY: ring-0 ISA port access to the EC, as throughout this module.
-    if unsafe { inb(EC_SC) } & EC_FLAG_SCI == 0 { return None; }
+    if EC_SC.inb() & EC_FLAG_SCI == 0 { return None; }
     let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return None; }
-    unsafe { outb(EC_SC, CMD_QUERY); }
+    EC_SC.outb(CMD_QUERY);
     if !wait_obf_set() { return None; }
-    let q = unsafe { inb(EC_DATA) };
+    let q = EC_DATA.inb();
     if q == 0 { None } else { Some(q) }
 }
 
@@ -107,9 +113,9 @@ pub fn query() -> Option<u8> {
 pub fn query_raw() -> Result<u8, &'static str> {
     let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return Err("IBF stuck before QR_EC"); }
-    unsafe { outb(EC_SC, CMD_QUERY); }
+    EC_SC.outb(CMD_QUERY);
     if !wait_obf_set() { return Err("no OBF after QR_EC"); }
-    Ok(unsafe { inb(EC_DATA) })
+    Ok(EC_DATA.inb())
 }
 
 /// Read a little-endian 16-bit word from EC RAM (addr = low byte).
@@ -126,11 +132,11 @@ pub fn read_u16(addr: u8) -> Option<u16> {
 pub fn write(addr: u8, val: u8) -> bool {
     let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return false; }
-    unsafe { outb(EC_SC, CMD_WRITE); }
+    EC_SC.outb(CMD_WRITE);
     if !wait_ibf_clear() { return false; }
-    unsafe { outb(EC_DATA, addr); }
+    EC_DATA.outb(addr);
     if !wait_ibf_clear() { return false; }
-    unsafe { outb(EC_DATA, val); }
+    EC_DATA.outb(val);
     let _ = wait_ibf_clear();
     true
 }

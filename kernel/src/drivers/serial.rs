@@ -7,6 +7,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use alloc::string::String;
+use crate::hw::{Port, PortRange};
 
 /// Bumped once per console `write_str`. The line editor snapshots
 /// this before its async poll batch and reprints the prompt + input
@@ -21,7 +22,10 @@ pub fn write_gen() -> u64 {
     WRITE_GEN.load(Ordering::Relaxed)
 }
 
-const COM1: u16 = 0x3F8;
+// SAFETY: the 16550 register blocks of COM1 and COM2, which only this
+// driver touches.
+const COM1: PortRange = unsafe { PortRange::new(0x3F8, 8) };
+const COM2_THR: Port = unsafe { Port::new(0x2F8) };
 
 pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
 
@@ -91,53 +95,49 @@ fn capture_bytes(s: &str) {
 }
 
 pub struct SerialPort {
-    base: u16,
+    regs: PortRange,
     port_exists: bool,
 }
 
 impl SerialPort {
-    pub const fn new(base: u16) -> Self {
-        SerialPort { base, port_exists: false }
+    pub const fn new(regs: PortRange) -> Self {
+        SerialPort { regs, port_exists: false }
     }
 
     /// Initialize COM1: 115200 baud, 8N1
     pub fn init(&mut self) {
-        unsafe {
-            // Check if serial port exists (0xFF = no hardware)
-            if inb(self.base + 5) == 0xFF {
-                self.port_exists = false;
-                return;
-            }
-            outb(self.base + 1, 0x00);       // Disable interrupts
-            outb(self.base + 3, 0x80);       // Enable DLAB
-            outb(self.base + 0, 0x01);       // Divisor low: 115200 baud
-            outb(self.base + 1, 0x00);       // Divisor high
-            outb(self.base + 3, 0x03);       // 8 bits, no parity, one stop
-            outb(self.base + 2, 0xC7);       // Enable FIFO, 14-byte threshold
-            outb(self.base + 4, 0x0B);       // IRQs off, RTS/DSR set
-            outb(self.base + 4, 0x1E);       // Loopback test
-            outb(self.base + 0, 0xAE);
-            if inb(self.base + 0) != 0xAE {
-                self.port_exists = false;
-                return; // Port defective
-            }
-            outb(self.base + 4, 0x0F);       // Normal operation
-            self.port_exists = true;
+        let r = self.regs;
+        // Check if serial port exists (0xFF = no hardware)
+        if r.inb(5) == 0xFF {
+            self.port_exists = false;
+            return;
         }
+        r.outb(1, 0x00);       // Disable interrupts
+        r.outb(3, 0x80);       // Enable DLAB
+        r.outb(0, 0x01);       // Divisor low: 115200 baud
+        r.outb(1, 0x00);       // Divisor high
+        r.outb(3, 0x03);       // 8 bits, no parity, one stop
+        r.outb(2, 0xC7);       // Enable FIFO, 14-byte threshold
+        r.outb(4, 0x0B);       // IRQs off, RTS/DSR set
+        r.outb(4, 0x1E);       // Loopback test
+        r.outb(0, 0xAE);
+        if r.inb(0) != 0xAE {
+            self.port_exists = false;
+            return; // Port defective
+        }
+        r.outb(4, 0x0F);       // Normal operation
+        self.port_exists = true;
     }
 
     pub fn write_byte(&self, byte: u8) {
         if !self.port_exists { return; }
-        unsafe {
-            // Mirror to COM2 (0x2F8) — host pipes this to
-            // target/serial.log via -serial file: in build.sh. Write
-            // first/unconditionally so the log captures every byte
-            // even if COM1's THR-empty poll stalls. Real HW just
-            // discards writes to an absent COM2 port.
-            outb(0x2F8, byte);
-            while (inb(self.base + 5) & 0x20) == 0 {}
-            outb(self.base, byte);
-        }
+        // Mirror to COM2 — host pipes this to target/serial.log via
+        // -serial file: in build.sh. Written first so the log captures
+        // every byte even if COM1's THR-empty poll stalls. Real HW
+        // discards writes to an absent COM2 port.
+        COM2_THR.outb(byte);
+        while (self.regs.inb(5) & 0x20) == 0 {}
+        self.regs.outb(0, byte);
     }
 
     /// Write byte with framebuffer echo (for read_line echo on headless systems)
@@ -155,14 +155,14 @@ impl SerialPort {
             }
             // Check serial (only if port exists — 0xFF means no hardware)
             if self.port_exists && self.has_data() {
-                return unsafe { inb(self.base) };
+                return self.regs.inb(0);
             }
             core::hint::spin_loop();
         }
     }
 
     pub fn has_data(&self) -> bool {
-        self.port_exists && unsafe { (inb(self.base + 5) & 0x01) != 0 }
+        self.port_exists && (self.regs.inb(5) & 0x01) != 0
     }
 
     /// Read a single byte directly from the UART receive register.
@@ -171,7 +171,7 @@ impl SerialPort {
     /// poll the USB keyboard separately (e.g. the intent loop) so the
     /// two input sources don't steal each other's keystrokes.
     pub fn read_serial_raw(&self) -> u8 {
-        unsafe { inb(self.base) }
+        self.regs.inb(0)
     }
 
     /// Read a line with masked echo (shows '*'), returns length.
@@ -281,38 +281,74 @@ macro_rules! kdebug {
     });
 }
 
+/// Write `val` to I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn outb(port: u16, val: u8) {
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") val); }
 }
 
+/// Write `val` to I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn outw(port: u16, val: u16) {
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("out dx, ax", in("dx") port, in("ax") val); }
 }
 
+/// Write `val` to I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn outl(port: u16, val: u32) {
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("out dx, eax", in("dx") port, in("eax") val); }
 }
 
+/// Read I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn inb(port: u16) -> u8 {
     let val: u8;
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") val); }
     val
 }
 
+/// Read I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn inw(port: u16) -> u16 {
     let val: u16;
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("in ax, dx", in("dx") port, out("ax") val); }
     val
 }
 
+/// Read I/O port `port`.
+///
+/// # Safety
+/// The port must belong to a device the caller drives; an access to a
+/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
 #[inline(always)]
 pub(crate) unsafe fn inl(port: u16) -> u32 {
     let val: u32;
+    // SAFETY: the caller's contract; `in`/`out` touch no memory.
     unsafe { core::arch::asm!("in eax, dx", in("dx") port, out("eax") val); }
     val
 }

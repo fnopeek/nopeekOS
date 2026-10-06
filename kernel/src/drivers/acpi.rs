@@ -4,17 +4,68 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
+use crate::hw::{PhysView, Port};
 
-/// Cached PM1a control block I/O port (0 = not found yet)
-static PM1A_CNT_PORT: AtomicU16 = AtomicU16::new(0);
+/// PM1a control block, from the FADT.
+static PM1A_CNT: spin::Once<Port> = spin::Once::new();
 /// Cached SLP_TYPa value for S5 state (default 5, works on most Intel)
 static SLP_TYP_S5: AtomicU16 = AtomicU16::new(5);
-/// Cached ACPI reset register info (address_space, address, value)
-static RESET_PORT: AtomicU16 = AtomicU16::new(0);
-static RESET_VAL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// FADT reset register (System I/O only) and the value to write.
+static RESET: spin::Once<(Port, u8)> = spin::Once::new();
 
 /// Cached RSDP physical address (set by UEFI stub via `set_rsdp`).
 static RSDP_ADDR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Largest RSDT/XSDT accepted.
+const MAX_ROOT: usize = 0x10000;
+/// Largest table accepted.
+const MAX_TABLE: usize = 0x40_0000;
+
+/// A mapped ACPI table. Reads are bounded by the table's own length: a read
+/// past it returns `None`.
+#[derive(Clone, Copy)]
+pub struct AcpiTable(PhysView);
+
+impl AcpiTable {
+    /// The table at `addr`, mapped whole, if its length is in `36..=max`.
+    ///
+    /// # Safety
+    /// `addr` must be where the firmware placed an ACPI table: the RSDP's
+    /// root pointer, an RSDT/XSDT entry or a FADT DSDT pointer.
+    unsafe fn at(addr: usize, max: usize) -> Option<Self> {
+        // SAFETY: the caller's contract.
+        let len = unsafe { header(addr) }.u32(4u64)? as usize;
+        if !(36..=max).contains(&len) { return None; }
+        ensure_mapped(addr, len);
+        // SAFETY: mapped just above; firmware tables neither move nor change.
+        Some(AcpiTable(unsafe { PhysView::new(addr as u64, len as u64) }))
+    }
+
+    pub fn addr(&self) -> usize { self.0.addr() as usize }
+    pub fn len(&self) -> usize { self.0.len() as usize }
+    pub fn u8(&self, off: usize) -> Option<u8> { self.0.u8(off) }
+    pub fn u16(&self, off: usize) -> Option<u16> { self.0.u16(off) }
+    pub fn u32(&self, off: usize) -> Option<u32> { self.0.u32(off) }
+    pub fn u64(&self, off: usize) -> Option<u64> { self.0.u64(off) }
+    pub fn bytes(&self) -> &'static [u8] { self.0.bytes() }
+
+    /// The I/O port number in the 32-bit field at `off` (a FADT block
+    /// address), or `None` if it is outside the table, zero or above 0xFFFF.
+    pub fn io_port(&self, off: usize) -> Option<u16> {
+        let v = self.u32(off)?;
+        (v != 0 && v <= 0xFFFF).then_some(v as u16)
+    }
+}
+
+/// Signature and length of the table at `addr`, mapped.
+///
+/// # Safety
+/// As for `AcpiTable::at`.
+unsafe fn header(addr: usize) -> PhysView {
+    ensure_mapped(addr, 8);
+    // SAFETY: mapped just above; the caller's contract.
+    unsafe { PhysView::new(addr as u64, 8) }
+}
 
 /// Stash the ACPI RSDP address handed to us by the UEFI stub. Called
 /// from `kernel_main` before `init`.
@@ -31,7 +82,9 @@ pub fn init() {
     }
 
     if let Some(port) = find_pm1a_cnt() {
-        PM1A_CNT_PORT.store(port, Ordering::Release);
+        // SAFETY: PM1a_CNT_BLK, the FADT's control port of the ACPI hardware
+        // this module drives.
+        PM1A_CNT.call_once(|| unsafe { Port::new(port) });
         crate::kdebug!("[npk] ACPI: PM1a_CNT at {:#x}", port);
     } else {
         crate::kprintln!("[npk] ACPI: PM1a_CNT not found");
@@ -43,19 +96,12 @@ pub fn init() {
 /// is clear, write FADT.ACPI_ENABLE to FADT.SMI_CMD, then poll SCI_EN for up
 /// to 3 s (30000 × 100 us). Called by `sci::arm_ec`.
 pub fn enable_acpi_mode() {
-    let pm1a_cnt = PM1A_CNT_PORT.load(Ordering::Acquire);
-    if pm1a_cnt == 0 { return; }
-    let Some(fadt) = find_table(b"FACP") else { return };
-    ensure_mapped(fadt, 256);
-    // SAFETY: FADT mapped; SMI_CMD at 48 (u32), ACPI_ENABLE at 52 (u8).
-    let (smi_cmd, acpi_enable) = unsafe {
-        (core::ptr::read_unaligned((fadt + 48) as *const u32),
-         core::ptr::read_volatile((fadt + 52) as *const u8))
-    };
-    let sci_en = || -> bool {
-        // SAFETY: PM1a_CNT is the FADT's I/O port.
-        (unsafe { crate::serial::inw(pm1a_cnt) } & 1) != 0
-    };
+    let Some(&pm1a_cnt) = PM1A_CNT.get() else { return };
+    let Some(fadt) = table(b"FACP") else { return };
+    // SMI_CMD at 48 (u32), ACPI_ENABLE at 52 (u8).
+    let smi_cmd = fadt.u32(48).unwrap_or(0);
+    let acpi_enable = fadt.u8(52).unwrap_or(0);
+    let sci_en = || -> bool { (pm1a_cnt.inw() & 1) != 0 };
     if sci_en() {
         crate::kprintln!("[npk] ACPI: already in ACPI mode");
         return;
@@ -67,7 +113,7 @@ pub fn enable_acpi_mode() {
         return;
     }
     // SAFETY: SMI_CMD is the FADT's I/O port for exactly this command.
-    unsafe { crate::serial::outb(smi_cmd as u16, acpi_enable) };
+    unsafe { Port::new(smi_cmd as u16) }.outb(acpi_enable);
     let tsc_100us = (crate::interrupts::tsc_freq() / 10_000).max(1);
     for retry in 0..30_000u32 {
         if sci_en() {
@@ -85,42 +131,33 @@ pub fn enable_acpi_mode() {
 
 /// Perform ACPI reset via FADT reset register.
 pub fn reset() {
-    let port = RESET_PORT.load(Ordering::Acquire);
-    let val = RESET_VAL.load(Ordering::Acquire);
-    if port == 0 { return; }
-    unsafe {
-        core::arch::asm!("out dx, al", in("dx") port, in("al") val);
+    if let Some(&(port, val)) = RESET.get() {
+        port.outb(val);
     }
 }
 
 /// Perform ACPI S5 power-off.
 pub fn power_off() {
-    let port = PM1A_CNT_PORT.load(Ordering::Acquire);
-    if port == 0 { return; }
+    let Some(port) = PM1A_CNT.get() else { return };
 
     let slp_typ = SLP_TYP_S5.load(Ordering::Acquire);
     let val: u16 = (slp_typ << 10) | (1 << 13); // SLP_TYPa | SLP_EN
 
-    unsafe {
-        core::arch::asm!("out dx, ax", in("dx") port, in("ax") val);
-    }
+    port.outw(val);
 }
 
 /// Find an ACPI table by 4-byte signature (e.g., b"APIC" for MADT).
 /// Returns the physical address of the table header.
 pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
-    let rsdp = find_rsdp()?;
-    let revision = unsafe { *rsdp.add(15) };
+    let (root, stride) = root()?;
+    entries(root, stride).find(|&addr| sig_at(addr, sig))
+}
 
-    if revision >= 2 {
-        let xsdt_addr = unsafe { *(rsdp.add(24) as *const u64) } as usize;
-        ensure_mapped(xsdt_addr, 4096);
-        find_table_in_xsdt(xsdt_addr, sig)
-    } else {
-        let rsdt_addr = unsafe { *(rsdp.add(16) as *const u32) } as usize;
-        ensure_mapped(rsdt_addr, 4096);
-        find_table_in_rsdt(rsdt_addr, sig)
-    }
+/// The first table with this signature, mapped whole.
+pub fn table(sig: &[u8; 4]) -> Option<AcpiTable> {
+    let addr = find_table(sig)?;
+    // SAFETY: an RSDT/XSDT entry.
+    unsafe { AcpiTable::at(addr, MAX_TABLE) }
 }
 
 /// Physical ranges the platform owns that no driver may map: PCI ECAM
@@ -128,10 +165,7 @@ pub fn find_table(sig: &[u8; 4]) -> Option<usize> {
 /// `(base, length)`. Absent tables contribute nothing.
 pub fn platform_mmio_ranges() -> Vec<(u64, u64)> {
     fn table(sig: &[u8; 4]) -> Option<&'static [u8]> {
-        let (addr, len) = find_table_nth(sig, 0)?;
-        // SAFETY: `find_table_nth` checked the length and mapped the table;
-        // firmware tables stay in place for the life of the system.
-        Some(unsafe { core::slice::from_raw_parts(addr as *const u8, len) })
+        Some(table_nth(sig, 0)?.bytes())
     }
     fn u64_at(t: &[u8], off: usize) -> Option<u64> {
         Some(u64::from_le_bytes(t.get(off..off + 8)?.try_into().ok()?))
@@ -188,35 +222,18 @@ pub fn platform_mmio_ranges() -> Vec<(u64, u64)> {
 ///
 /// `find_table` always returns the first; this one can enumerate.
 pub fn find_table_nth(sig: &[u8; 4], index: usize) -> Option<(usize, usize)> {
-    let rsdp = find_rsdp()?;
-    let revision = unsafe { *rsdp.add(15) };
-    let (root, stride) = if revision >= 2 {
-        (unsafe { *(rsdp.add(24) as *const u64) } as usize, 8usize)
-    } else {
-        (unsafe { *(rsdp.add(16) as *const u32) } as usize, 4usize)
-    };
-    ensure_mapped(root, 4096);
-    let length = unsafe { *((root + 4) as *const u32) } as usize;
-    if length < 36 || length > 0x10000 { return None; }
-    let entries = (length - 36) / stride;
+    let t = table_nth(sig, index)?;
+    Some((t.addr(), t.len()))
+}
 
+fn table_nth(sig: &[u8; 4], index: usize) -> Option<AcpiTable> {
+    let (root, stride) = root()?;
     let mut seen = 0usize;
-    for i in 0..entries {
-        let entry = root + 36 + i * stride;
-        let addr = if stride == 8 {
-            (unsafe { *(entry as *const u64) }) as usize
-        } else {
-            (unsafe { *(entry as *const u32) }) as usize
-        };
-        if addr == 0 { continue; }
-        ensure_mapped(addr, 8);
-        let table_sig = unsafe { core::slice::from_raw_parts(addr as *const u8, 4) };
-        if table_sig != sig { continue; }
+    for addr in entries(root, stride) {
+        if !sig_at(addr, sig) { continue; }
         if seen != index { seen += 1; continue; }
-        let len = unsafe { *((addr + 4) as *const u32) } as usize;
-        if len < 36 || len > 0x40_0000 { return None; }
-        ensure_mapped(addr, len);
-        return Some((addr, len));
+        // SAFETY: an RSDT/XSDT entry.
+        return unsafe { AcpiTable::at(addr, MAX_TABLE) };
     }
     None
 }
@@ -229,31 +246,22 @@ pub fn ensure_mapped_pub(addr: usize, size: usize) {
 /// Locate the DSDT (AML) via the FADT: DSDT pointer at offset 40 (32-bit)
 /// or X_DSDT at 140 (64-bit). Returns (addr, len) with the region mapped.
 pub fn dsdt() -> Option<(usize, usize)> {
-    let fadt = find_table(b"FACP")?;
-    ensure_mapped(fadt, 256);
-    let fadt_len = unsafe { *((fadt + 4) as *const u32) } as usize;
-    let mut addr = unsafe { *((fadt + 40) as *const u32) } as usize;
-    if fadt_len >= 148 {
-        let x = unsafe { *((fadt + 140) as *const u64) } as usize;
-        if x != 0 { addr = x; }
+    let fadt = table(b"FACP")?;
+    let mut addr = fadt.u32(40)? as usize;
+    if let Some(x) = fadt.u64(140) {
+        if x != 0 { addr = x as usize; }
     }
     if addr == 0 { return None; }
-    ensure_mapped(addr, 64);
-    let len = unsafe { *((addr + 4) as *const u32) } as usize;
-    if !(36..=0x200000).contains(&len) { return None; }
-    ensure_mapped(addr, len);
-    Some((addr, len))
+    // SAFETY: the FADT's DSDT pointer.
+    let t = unsafe { AcpiTable::at(addr, 0x200000) }?;
+    Some((t.addr(), t.len()))
 }
 
 /// FADT "Preferred PM Profile" (offset 45): 2 = Mobile (laptop). Used to
 /// gate the EC battery driver so desktops (profile 1) never probe for
 /// a battery and show a phantom one.
 pub fn is_mobile() -> bool {
-    let Some(fadt) = find_table(b"FACP") else { return false };
-    ensure_mapped(fadt, 256);
-    let len = unsafe { *((fadt + 4) as *const u32) } as usize;
-    if len < 46 { return false; }
-    unsafe { *((fadt + 45) as *const u8) == 2 }
+    table(b"FACP").and_then(|f| f.u8(45)) == Some(2)
 }
 
 /// Ensure a memory region is identity-mapped so we can read ACPI tables.
@@ -269,63 +277,44 @@ fn ensure_mapped(addr: usize, size: usize) {
 }
 
 fn find_pm1a_cnt() -> Option<u16> {
-    let rsdp = find_rsdp()?;
+    let fadt = table(b"FACP")?;
 
-    // RSDP: signature at 0, revision at 15, RSDT at 16, XSDT at 24 (if revision >= 2)
-    let revision = unsafe { *rsdp.add(15) };
-
-    let fadt_addr = if revision >= 2 {
-        let xsdt_addr = unsafe { *(rsdp.add(24) as *const u64) } as usize;
-        ensure_mapped(xsdt_addr, 4096);
-        find_table_in_xsdt(xsdt_addr, b"FACP")?
-    } else {
-        let rsdt_addr = unsafe { *(rsdp.add(16) as *const u32) } as usize;
-        ensure_mapped(rsdt_addr, 4096);
-        find_table_in_rsdt(rsdt_addr, b"FACP")?
-    };
-
-    // Map FADT and read PM1a_CNT_BLK at offset 64
-    ensure_mapped(fadt_addr, 256);
-    let pm1a = unsafe { *((fadt_addr + 64) as *const u32) };
-    if pm1a == 0 || pm1a > 0xFFFF { return None; }
+    // PM1a_CNT_BLK at offset 64
+    let pm1a = fadt.io_port(64)?;
 
     // FADT offset 116: RESET_REG (Generic Address Structure)
     // GAS: address_space(1) + bit_width(1) + bit_offset(1) + access_size(1) + address(8)
     // FADT offset 128: RESET_VALUE (1 byte)
-    let fadt_len = unsafe { *((fadt_addr + 4) as *const u32) } as usize;
-    if fadt_len >= 129 {
-        let reset_space = unsafe { *((fadt_addr + 116) as *const u8) };
-        let reset_addr = unsafe { *((fadt_addr + 120) as *const u64) };
-        let reset_val = unsafe { *((fadt_addr + 128) as *const u8) };
+    if let (Some(reset_space), Some(reset_addr), Some(reset_val)) =
+        (fadt.u8(116), fadt.u64(120), fadt.u8(128))
+    {
         // address_space 1 = System I/O
         if reset_space == 1 && reset_addr > 0 && reset_addr <= 0xFFFF {
-            RESET_PORT.store(reset_addr as u16, Ordering::Release);
-            RESET_VAL.store(reset_val, Ordering::Release);
+            // SAFETY: the FADT's reset register, in System I/O space.
+            RESET.call_once(|| (unsafe { Port::new(reset_addr as u16) }, reset_val));
             crate::kprintln!("[npk] ACPI: reset register at {:#x} val={:#x}", reset_addr, reset_val);
         }
     }
 
     // Try to read SLP_TYPa from DSDT \_S5 object
-    let dsdt_addr = unsafe { *((fadt_addr + 40) as *const u32) } as usize;
+    let dsdt_addr = fadt.u32(40).unwrap_or(0) as usize;
     if dsdt_addr != 0 {
-        ensure_mapped(dsdt_addr, 64);
-        let dsdt_len = unsafe { *((dsdt_addr + 4) as *const u32) } as usize;
-        if dsdt_len > 36 && dsdt_len < 0x100000 {
-            ensure_mapped(dsdt_addr, dsdt_len);
-            if let Some(slp_typ) = find_s5_slp_typ(dsdt_addr, dsdt_len) {
-                SLP_TYP_S5.store(slp_typ, Ordering::Release);
-                crate::kdebug!("[npk] ACPI: SLP_TYPa for S5 = {}", slp_typ);
+        // SAFETY: the FADT's DSDT pointer.
+        if let Some(dsdt) = unsafe { AcpiTable::at(dsdt_addr, 0xFFFFF) } {
+            if dsdt.len() > 36 {
+                if let Some(slp_typ) = find_s5_slp_typ(dsdt.bytes()) {
+                    SLP_TYP_S5.store(slp_typ, Ordering::Release);
+                    crate::kdebug!("[npk] ACPI: SLP_TYPa for S5 = {}", slp_typ);
+                }
             }
         }
     }
 
-    Some(pm1a as u16)
+    Some(pm1a)
 }
 
 /// Parse DSDT AML to find \_S5 object and extract SLP_TYPa value.
-fn find_s5_slp_typ(dsdt_addr: usize, dsdt_len: usize) -> Option<u16> {
-    let data = unsafe { core::slice::from_raw_parts(dsdt_addr as *const u8, dsdt_len) };
-
+fn find_s5_slp_typ(data: &[u8]) -> Option<u16> {
     // Scan for "_S5_" (0x5F 0x53 0x35 0x5F)
     for i in 0..data.len().saturating_sub(20) {
         if &data[i..i + 4] == b"_S5_" {
@@ -368,20 +357,73 @@ fn find_s5_slp_typ(dsdt_addr: usize, dsdt_len: usize) -> Option<u16> {
     None
 }
 
+/// The root table (XSDT for revision 2+, else RSDT) and its entry width.
+fn root() -> Option<(AcpiTable, usize)> {
+    let rsdp = find_rsdp()?;
+    // RSDP: signature at 0, revision at 15, RSDT at 16, XSDT at 24 (if revision >= 2)
+    let (addr, stride) = if rsdp.u8(15u64)? >= 2 {
+        (rsdp.u64(24u64)? as usize, 8)
+    } else {
+        (rsdp.u32(16u64)? as usize, 4)
+    };
+    // SAFETY: the RSDP's root pointer.
+    Some((unsafe { AcpiTable::at(addr, MAX_ROOT) }?, stride))
+}
+
+/// The non-zero table addresses in the root table.
+fn entries(root: AcpiTable, stride: usize) -> impl Iterator<Item = usize> {
+    (0..(root.len() - 36) / stride)
+        .map(move |i| {
+            let off = 36 + i * stride;
+            if stride == 8 {
+                root.u64(off).unwrap_or(0) as usize
+            } else {
+                root.u32(off).unwrap_or(0) as usize
+            }
+        })
+        .filter(|&addr| addr != 0)
+}
+
+/// Whether the table at root entry `addr` has signature `sig`.
+fn sig_at(addr: usize, sig: &[u8; 4]) -> bool {
+    // SAFETY: an RSDT/XSDT entry.
+    unsafe { header(addr) }.bytes()[..4] == sig[..]
+}
+
+/// The RSDP at `addr`: 20 bytes, 36 from revision 2 on.
+///
+/// # Safety
+/// `addr` must hold an RSDP signature in firmware memory that the boot page
+/// tables map.
+unsafe fn rsdp_at(addr: usize) -> PhysView {
+    // SAFETY: the caller's contract; every revision has 20 bytes.
+    let v1 = unsafe { PhysView::new(addr as u64, 20) };
+    if v1.u8(15u64).unwrap_or(0) >= 2 {
+        // SAFETY: as above; revision 2 is 36 bytes long.
+        unsafe { PhysView::new(addr as u64, 36) }
+    } else {
+        v1
+    }
+}
+
 /// Find RSDP: first from Multiboot2 tag, then scan legacy BIOS regions.
-fn find_rsdp() -> Option<*const u8> {
+fn find_rsdp() -> Option<PhysView> {
     // Prefer Multiboot2-provided RSDP (works on UEFI systems)
     let mb_rsdp = RSDP_ADDR.load(core::sync::atomic::Ordering::Acquire);
     if mb_rsdp != 0 {
-        let p = mb_rsdp as *const u8;
-        let sig_match = unsafe { *(p as *const u64) == *(b"RSD PTR ".as_ptr() as *const u64) };
-        if sig_match {
-            return Some(p);
+        // SAFETY: the RSDP address the firmware handed over, in memory the
+        // boot page tables map.
+        let sig = unsafe { PhysView::new(mb_rsdp as u64, 8) };
+        if sig.bytes() == b"RSD PTR " {
+            // SAFETY: signature checked just above.
+            return Some(unsafe { rsdp_at(mb_rsdp) });
         }
     }
 
     // Fallback: scan legacy BIOS regions
-    let ebda_seg = unsafe { *(0x40E as *const u16) } as usize;
+    // SAFETY: the BIOS data area word holding the EBDA segment; low memory
+    // is mapped at boot.
+    let ebda_seg = unsafe { PhysView::new(0x40E, 2) }.u16(0u64).unwrap_or(0) as usize;
     let ebda_base = ebda_seg << 4;
     if ebda_base > 0 && ebda_base < 0x100000 {
         if let Some(p) = scan_rsdp(ebda_base, ebda_base + 1024) {
@@ -391,59 +433,20 @@ fn find_rsdp() -> Option<*const u8> {
     scan_rsdp(0xE0000, 0x100000)
 }
 
-fn scan_rsdp(start: usize, end: usize) -> Option<*const u8> {
-    let sig = b"RSD PTR ";
-    let mut addr = start;
-    while addr + 20 <= end {
-        let p = addr as *const u8;
-        let matches = unsafe {
-            *(p as *const u64) == *(sig.as_ptr() as *const u64)
-        };
-        if matches {
+fn scan_rsdp(start: usize, end: usize) -> Option<PhysView> {
+    // SAFETY: legacy BIOS memory (EBDA or 0xE0000..0x100000), mapped at boot.
+    let area = unsafe { PhysView::new(start as u64, (end - start) as u64) }.bytes();
+    let mut off = 0;
+    while off + 20 <= area.len() {
+        if &area[off..off + 8] == b"RSD PTR " {
             // Verify checksum (first 20 bytes sum to 0)
-            let mut sum: u8 = 0;
-            for i in 0..20 {
-                sum = sum.wrapping_add(unsafe { *p.add(i) });
-            }
+            let sum = area[off..off + 20].iter().fold(0u8, |s, &b| s.wrapping_add(b));
             if sum == 0 {
-                return Some(p);
+                // SAFETY: signature found inside the BIOS area above.
+                return Some(unsafe { rsdp_at(start + off) });
             }
         }
-        addr += 16; // RSDP is always 16-byte aligned
-    }
-    None
-}
-
-fn find_table_in_rsdt(rsdt_addr: usize, sig: &[u8; 4]) -> Option<usize> {
-    let length = unsafe { *((rsdt_addr + 4) as *const u32) } as usize;
-    if length < 36 || length > 0x10000 { return None; }
-    let entries = (length - 36) / 4;
-
-    for i in 0..entries {
-        let entry_addr = unsafe { *((rsdt_addr + 36 + i * 4) as *const u32) } as usize;
-        if entry_addr == 0 { continue; }
-        ensure_mapped(entry_addr, 8);
-        let table_sig = unsafe { core::slice::from_raw_parts(entry_addr as *const u8, 4) };
-        if table_sig == sig {
-            return Some(entry_addr);
-        }
-    }
-    None
-}
-
-fn find_table_in_xsdt(xsdt_addr: usize, sig: &[u8; 4]) -> Option<usize> {
-    let length = unsafe { *((xsdt_addr + 4) as *const u32) } as usize;
-    if length < 36 || length > 0x10000 { return None; }
-    let entries = (length - 36) / 8;
-
-    for i in 0..entries {
-        let entry_addr = unsafe { *((xsdt_addr + 36 + i * 8) as *const u64) } as usize;
-        if entry_addr == 0 { continue; }
-        ensure_mapped(entry_addr, 8);
-        let table_sig = unsafe { core::slice::from_raw_parts(entry_addr as *const u8, 4) };
-        if table_sig == sig {
-            return Some(entry_addr);
-        }
+        off += 16; // RSDP is always 16-byte aligned
     }
     None
 }

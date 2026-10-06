@@ -9,8 +9,8 @@
 
 use spin::Mutex;
 
+use crate::hw::PortRange;
 use crate::pci;
-use crate::serial::{inb, outb};
 
 // SMBus I/O register offsets from the SMBA base (i2c-i801.c).
 const SMBHSTSTS: u16 = 0;
@@ -19,6 +19,8 @@ const SMBHSTCMD: u16 = 3;
 const SMBHSTADD: u16 = 4;
 const SMBHSTDAT0: u16 = 5;
 const SMBHSTDAT1: u16 = 6;
+/// Size of the SMBA I/O block (i2c-i801.c requests 32 ports).
+const SMBA_LEN: u16 = 32;
 
 // PCI config: host configuration register + I/O BAR (BAR4).
 const SMBHSTCFG: u8 = 0x40;
@@ -43,7 +45,7 @@ const STATUS_FLAGS: u8 = STS_BYTE_DONE | STS_INTR | STATUS_ERROR_FLAGS;
 // SMBus transfer direction in the address byte.
 const SMBUS_READ: u8 = 1;
 
-static SMBA: Mutex<Option<u16>> = Mutex::new(None);
+static SMBA: Mutex<Option<PortRange>> = Mutex::new(None);
 
 /// Find the i801 SMBus controller, enable it, and cache its I/O base.
 /// Logs + returns silently if absent — SMBus is a nice-to-have (battery).
@@ -67,7 +69,8 @@ pub fn init() {
         pci::write32(addr, SMBHSTCFG, cfg | SMBHSTCFG_HST_EN);
     }
 
-    *SMBA.lock() = Some(base);
+    // SAFETY: the controller's own I/O BAR, assigned by firmware.
+    *SMBA.lock() = Some(unsafe { PortRange::new(base, SMBA_LEN) });
     crate::kprintln!("[npk] smbus: i801 @ I/O 0x{:04x} (enabled)", base);
 }
 
@@ -75,7 +78,7 @@ pub fn init() {
 /// Used by the `akku` diagnostic intent to tell "no controller" apart from
 /// "controller present but no battery on the bus".
 pub fn base() -> Option<u16> {
-    *SMBA.lock()
+    SMBA.lock().map(|r| r.base())
 }
 
 fn udelay(us: u64) {
@@ -95,10 +98,10 @@ fn udelay(us: u64) {
 /// bar's fiber, so a wedged bus must not stall the clock for a fifth of a
 /// second every poll. A best-effort battery read that times out just leaves
 /// the segment stale until the next tick.
-fn wait_intr(base: u16) -> Option<u8> {
+fn wait_intr(base: PortRange) -> Option<u8> {
     for _ in 0..120 {
         udelay(250);
-        let status = unsafe { inb(base + SMBHSTSTS) };
+        let status = base.inb(SMBHSTSTS);
         let busy = status & STS_HOST_BUSY;
         let done = status & (STATUS_ERROR_FLAGS | STS_INTR);
         if busy == 0 && done != 0 {
@@ -119,41 +122,39 @@ pub fn read_word(addr: u8, cmd: u8) -> Option<u16> {
 
     // Pre-transaction: bail if the bus is wedged busy, then clear any
     // lingering status flags (i801_check_pre).
-    let pre = unsafe { inb(base + SMBHSTSTS) };
+    let pre = base.inb(SMBHSTSTS);
     if pre & STS_HOST_BUSY != 0 {
-        unsafe { outb(base + SMBHSTCNT, SMBHSTCNT_KILL); }
+        base.outb(SMBHSTCNT, SMBHSTCNT_KILL);
         wait_intr(base);
-        unsafe { outb(base + SMBHSTCNT, 0); }
-        if unsafe { inb(base + SMBHSTSTS) } & STS_HOST_BUSY != 0 {
+        base.outb(SMBHSTCNT, 0);
+        if base.inb(SMBHSTSTS) & STS_HOST_BUSY != 0 {
             return None;
         }
     }
     let lingering = pre & STATUS_FLAGS;
     if lingering != 0 {
-        unsafe { outb(base + SMBHSTSTS, lingering); }
+        base.outb(SMBHSTSTS, lingering);
     }
 
     // Set up the word-data read and kick it off.
-    unsafe {
-        outb(base + SMBHSTADD, (addr << 1) | SMBUS_READ);
-        outb(base + SMBHSTCMD, cmd);
-        outb(base + SMBHSTCNT, I801_WORD_DATA | SMBHSTCNT_START);
-    }
+    base.outb(SMBHSTADD, (addr << 1) | SMBUS_READ);
+    base.outb(SMBHSTCMD, cmd);
+    base.outb(SMBHSTCNT, I801_WORD_DATA | SMBHSTCNT_START);
 
     let err = wait_intr(base)?;
     if err & STATUS_ERROR_FLAGS != 0 {
         // Clear the error so the next transaction starts clean.
-        unsafe { outb(base + SMBHSTSTS, err); }
+        base.outb(SMBHSTSTS, err);
         return None;
     }
 
-    let lo = unsafe { inb(base + SMBHSTDAT0) } as u16;
-    let hi = unsafe { inb(base + SMBHSTDAT1) } as u16;
+    let lo = base.inb(SMBHSTDAT0) as u16;
+    let hi = base.inb(SMBHSTDAT1) as u16;
 
     // Clear the completion flags.
-    let done = unsafe { inb(base + SMBHSTSTS) } & STATUS_FLAGS;
+    let done = base.inb(SMBHSTSTS) & STATUS_FLAGS;
     if done != 0 {
-        unsafe { outb(base + SMBHSTSTS, done); }
+        base.outb(SMBHSTSTS, done);
     }
 
     Some(lo | (hi << 8))
