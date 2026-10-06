@@ -125,7 +125,15 @@ impl Interp {
                 }
                 Ok(Value::Undefined)
             }
-            Expr::ImportCall(_) => self.type_err("dynamic import is not supported"),
+            Expr::ImportCall(a) => {
+                let mut spec = Value::Undefined;
+                for (k, x) in a.iter().enumerate() {
+                    let Arg::Expr(e) = x else { return self.type_err("import(): spread is not allowed") };
+                    let v = self.eval(e, env)?;
+                    if k == 0 { spec = v; }
+                }
+                self.dynamic_import(&spec, env)
+            }
             // `tag`a${x}b`` (ES 13.2.8.6): the tag receives the template
             // object first, then the substitutions. The receiver counts:
             // `o.tag`x`` calls with `o` as `this`, like an ordinary call.
@@ -255,6 +263,19 @@ impl Interp {
             // is being constructed; `HTMLElement` reads the registered name
             // from the prototype chain.
             let built = self.construct_on(&ctor, this_val.clone(), args)?;
+            // A builtin that honoured the new target already returns the finished
+            // object (`HTMLElement` hands out the element itself, which an upgrade
+            // must keep); it becomes `this` as is.
+            if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
+                let same = match (&src.borrow().proto, &dst.borrow().proto) {
+                    (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                    _ => false,
+                };
+                if same && !Rc::ptr_eq(src, dst) {
+                    set_env_this(env, built.clone());
+                    return self.finish_super(env, built);
+                }
+            }
             if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
                 let keys = src.borrow().raw_keys();
                 for k in keys {

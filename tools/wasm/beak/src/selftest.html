@@ -86,6 +86,9 @@
  <span id="bubble">nicht geklickt</span>
 </p>
 <ul id="sink"></ul>
+<!-- Parsed before any definition: the upgrade must find it, keep the object
+     and report its observed attribute. -->
+<x-selftest id="ce1" data-a="one two"><i class="ce-kid"></i></x-selftest>
 <template id="tpl"><li class="ausschablone">aus der Schablone</li></template>
 
 <h2>Zeitgeber</h2>
@@ -773,6 +776,48 @@ row(domRows, "CSS.supports kennt var()", function () {
   return CSS.supports("color", "var(--test, red)") === true
       && CSS.supports("(--a: 0)") === true
       && CSS.supports("color", "totalerquatsch") === false;
+});
+/* Custom elements (HTML §4.13): upgrade of a parsed element in place,
+   attributeChangedCallback for observed attributes, connected/disconnected,
+   synchronous construction by createElement. */
+row(domRows, "custom elements: upgrade and reactions", function () {
+  var held = document.getElementById("ce1"), log = [];
+  class XSelftest extends HTMLElement {
+    static get observedAttributes() { return ["data-a"]; }
+    connectedCallback() { log.push("c"); }
+    disconnectedCallback() { log.push("d"); }
+    attributeChangedCallback(n, o, v) { log.push("a:" + o + ">" + v); }
+  }
+  customElements.define("x-selftest", XSelftest);
+  var up = held instanceof XSelftest && document.getElementById("ce1") === held;
+  held.setAttribute("data-a", "x");
+  held.setAttribute("data-b", "ignored");
+  var fresh = document.createElement("x-selftest");
+  document.getElementById("sink").appendChild(fresh);
+  fresh.remove();
+  return up && fresh instanceof XSelftest
+      && log.join(",") === "a:null>one two,c,a:one two>x,c,d";
+});
+/* Selectors 4 in querySelector: Catalyst finds its targets with `~=`. */
+row(domRows, "querySelector: ~=, :not, :has, :scope", function () {
+  var ce = document.getElementById("ce1");
+  return document.querySelector('[data-a~="x"]') === ce
+      && document.querySelectorAll("x-selftest:has(> .ce-kid):not(.nope)").length === 1
+      && ce.querySelector(":scope > i") !== null
+      && (function () { try { document.querySelector("a:nope"); return false; }
+                        catch (e) { return e.name === "SyntaxError"; } })();
+});
+/* EventTarget options (DOM §2.7): once, capture order, signal removal. */
+row(domRows, "addEventListener: once, capture, signal", function () {
+  var ce = document.getElementById("ce1"), kid = ce.firstElementChild, log = [];
+  var ac = new AbortController();
+  ce.addEventListener("st", function () { log.push("bubble"); }, { signal: ac.signal });
+  ce.addEventListener("st", function () { log.push("capture"); }, true);
+  kid.addEventListener("st", { handleEvent: function () { log.push("once"); } }, { once: true });
+  kid.dispatchEvent(new Event("st", { bubbles: true }));
+  ac.abort();
+  kid.dispatchEvent(new Event("st", { bubbles: true }));
+  return log.join(",") === "capture,once,bubble,capture" && ac.signal instanceof EventTarget;
 });
 
 /* ---------- Behandler ---------- */

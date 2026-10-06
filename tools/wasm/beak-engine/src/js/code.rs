@@ -156,6 +156,10 @@ pub enum Op {
     /// finds the parent constructor, runs it on this `this` and then creates
     /// the own instance fields.
     SuperCall(u16),
+    /// `import(spec, options)`. Stack: spec options -> promise.
+    ImportCall,
+    /// `import.meta`. Stack: -> the module's meta object, or `undefined`.
+    ImportMeta,
     /// Jump if the top is `null`/`undefined`, leaving the value. Counterpart
     /// of `JumpNullishKeep` for optional chains.
     JumpNullishTo(u32),

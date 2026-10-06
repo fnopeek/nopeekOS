@@ -15,12 +15,9 @@
 //!
 //! Not implemented:
 //!
-//! * `Request` objects. Input is a string (or converts to one);
-//!   `fetch(new Request(u))` throws.
 //! * Bodies other than text: no `FormData`, `Blob`, `ArrayBuffer`.
 //! * `response.body` as a stream, `arrayBuffer()`, `blob()`. `text()` and
 //!   `json()` return the whole response at once.
-//! * `AbortSignal.timeout(ms)`.
 //!
 //! `Headers` holds the raw header block as text, not a list: that is what
 //! the host delivers and expects, and `Set-Cookie` may repeat.
@@ -63,7 +60,6 @@ const R_NET: &str = "\0!res.neterr";
 const H_RAW: &str = "\0!hdr.raw";
 const S_ABORTED: &str = "\0!sig.aborted";
 const S_REASON: &str = "\0!sig.reason";
-const S_LISTEN: &str = "\0!sig.listen";
 const S_FETCH: &str = "\0!sig.fetch";
 const C_SIGNAL: &str = "\0!ctl.signal";
 
@@ -145,26 +141,32 @@ fn raw_of(i: &mut Interp, t: &Value) -> String {
 
 // ── AbortSignal ─────────────────────────────────────────────────────────
 
-/// The reason an abort without its own reason rejects with.
-///
-/// There is no `DOMException` in this engine, so this builds an `Error`
-/// with the name page code checks, via `throw_kind`.
+/// The reason an abort without its own reason rejects with: a
+/// `DOMException` named `AbortError` (DOM §3.1).
 fn abort_error(i: &mut Interp) -> Value {
-    let Abrupt::Throw(v) = i.throw_kind("Error", "signal is aborted without reason")
-        else { return Value::Undefined };
-    if let Value::Obj(o) = &v {
-        o.borrow_mut().define("name", Prop::builtin(Value::str("AbortError")));
+    match super::dombind::dom_exc(i, "AbortError", "signal is aborted without reason") {
+        Abrupt::Throw(v) => v,
+        _ => Value::Undefined,
     }
-    v
 }
 
-pub(crate) fn new_signal(i: &Interp) -> Gc {
-    let s = new_obj(Some(i.realm.abort_signal_proto.clone()));
+/// A fresh `AbortSignal`. With a document it is backed by a detached node, so
+/// the `EventTarget` methods and `dispatchEvent` work on it as on any target;
+/// without one it has no listener registry.
+pub(crate) fn new_signal(i: &mut Interp) -> Gc {
+    let proto = i.realm.abort_signal_proto.clone();
+    let node = i.doc.as_mut().map(|d| d.create(super::dombind::ELEMENT_NODE, "#eventtarget"));
+    let s = match node {
+        Some(id) => match super::dombind::wrap(i, id) {
+            Value::Obj(o) => { o.borrow_mut().proto = Some(proto); o }
+            _ => new_obj(Some(proto)),
+        },
+        None => new_obj(Some(proto)),
+    };
     {
         let mut b = s.borrow_mut();
         b.define(S_ABORTED, hidden(Value::Bool(false)));
         b.define(S_REASON, hidden(Value::Undefined));
-        b.define(S_LISTEN, hidden(Value::Undefined));
         b.define(S_FETCH, hidden(Value::Undefined));
     }
     s
@@ -172,6 +174,21 @@ pub(crate) fn new_signal(i: &Interp) -> Gc {
 
 fn signal_aborted(i: &mut Interp, sig: &Value) -> bool {
     matches!(slot(i, sig, S_ABORTED), Value::Bool(true))
+}
+
+/// Is this an `AbortSignal`?
+pub(crate) fn is_signal(_i: &Interp, v: &Value) -> bool {
+    matches!(v, Value::Obj(o) if o.borrow().get_own(S_ABORTED).is_some())
+}
+
+pub(crate) fn signal_is_aborted(i: &mut Interp, sig: &Value) -> bool { signal_aborted(i, sig) }
+
+/// The `TimeoutError` of `AbortSignal.timeout`.
+fn timeout_error(i: &mut Interp) -> Value {
+    match super::dombind::dom_exc(i, "TimeoutError", "signal timed out") {
+        Abrupt::Throw(v) => v,
+        _ => Value::Undefined,
+    }
 }
 
 /// Set a signal to aborted and notify everything attached: listeners,
@@ -182,27 +199,202 @@ fn do_abort(i: &mut Interp, sig: &Value, reason: Value) -> C<()> {
     i.set(sig, S_ABORTED, Value::Bool(true), false)?;
     i.set(sig, S_REASON, r.clone(), false)?;
 
-    // Actually cancel the running request, not just set the flag.
-    if let Value::Num(id) = slot(i, sig, S_FETCH) {
+    // Actually cancel the running requests, not just set the flag.
+    for id in list_of(i, sig, S_FETCH) {
+        let Value::Num(id) = id else { continue };
         let id = id as u32;
         i.aborted_fetches.push(id);
         fetch_failed_with(i, id, r.clone());
     }
 
-    let ev = new_obj(Some(i.realm.object_proto.clone()));
-    ev.borrow_mut().define("type", Prop::builtin(Value::str("abort")));
-    ev.borrow_mut().define("target", Prop::builtin(sig.clone()));
-    let ev = Value::Obj(ev);
-
+    // `onabort` first, then the listeners, through the ordinary dispatch.
     let on = i.get(sig, "onabort")?;
-    if i.is_callable(&on) { i.call(&on, sig.clone(), &[ev.clone()])?; }
-    {
-        let items = list_of(i, sig, S_LISTEN);
-        for f in items {
-            if i.is_callable(&f) { i.call(&f, sig.clone(), &[ev.clone()])?; }
+    let backed = super::dombind::node_of(i, sig).is_ok();
+    if backed {
+        if i.is_callable(&on) {
+            let ev = super::dombind::plain_event(i, "abort", sig);
+            i.call(&on, sig.clone(), &[ev])?;
         }
+        super::dombind::fire_simple(i, sig, "abort", false)?;
+    } else if i.is_callable(&on) {
+        let ev = super::dombind::plain_event(i, "abort", sig);
+        i.call(&on, sig.clone(), &[ev])?;
     }
     Ok(())
+}
+
+// ── Request ─────────────────────────────────────────────────────────────
+
+const Q_URL: &str = "\0!req.url";
+const Q_METHOD: &str = "\0!req.method";
+const Q_HDRS: &str = "\0!req.headers";
+const Q_BODY: &str = "\0!req.body";
+const Q_SIGNAL: &str = "\0!req.signal";
+const Q_CRED: &str = "\0!req.cred";
+const Q_MODE: &str = "\0!req.mode";
+const Q_CACHE: &str = "\0!req.cache";
+const Q_REDIRECT: &str = "\0!req.redirect";
+const Q_USED: &str = "\0!req.used";
+
+/// What a request is made of, before it becomes an object.
+struct ReqParts {
+    url: String,
+    method: String,
+    headers: String,
+    body: Option<String>,
+    signal: Value,
+    strs: [String; 4],
+}
+
+fn is_request(v: &Value) -> bool {
+    matches!(v, Value::Obj(o) if o.borrow().get_own(Q_URL).is_some())
+}
+
+/// Fetch §5.4 `new Request(input, init)`: from a URL or another request,
+/// with `init` overriding field by field. The URL is resolved against the
+/// document; whether it may be fetched is `fetch`'s question.
+fn request_parts(i: &mut Interp, input: &Value, init: &Value) -> C<ReqParts> {
+    let mut p = if is_request(input) {
+        let h = slot(i, input, Q_HDRS);
+        let mut strs = [String::new(), String::new(), String::new(), String::new()];
+        for (k, s) in [Q_CRED, Q_MODE, Q_CACHE, Q_REDIRECT].iter().zip(strs.iter_mut()) {
+            let v = slot(i, input, k);
+            *s = i.to_string(&v)?.to_string();
+        }
+        let (u, m) = (slot(i, input, Q_URL), slot(i, input, Q_METHOD));
+        ReqParts {
+            url: i.to_string(&u)?.to_string(),
+            method: i.to_string(&m)?.to_string(),
+            headers: raw_of(i, &h),
+            body: match slot(i, input, Q_BODY) { Value::Str(s) => Some(s.to_string()), _ => None },
+            signal: slot(i, input, Q_SIGNAL),
+            strs,
+        }
+    } else {
+        let raw = i.to_string(input)?.to_string();
+        let g = Value::Obj(i.realm.global.clone());
+        let loc = i.get(&g, "location")?;
+        let href = i.get(&loc, "href")?;
+        let base = match &href { Value::Str(h) => super::url::parse_abs(h), _ => None }
+            .filter(|b| !b.host.is_empty());
+        let url = match (super::url::parse_abs(&raw), base) {
+            (Some(u), _) => u.href(),
+            (None, Some(b)) => super::url::resolve(&raw, &b).href(),
+            (None, None) => return i.type_err(&alloc::format!("Request: failed to parse URL from {raw}")),
+        };
+        ReqParts { url, method: String::from("GET"), headers: String::new(), body: None,
+                   signal: Value::Undefined,
+                   strs: [String::from("same-origin"), String::from("cors"),
+                          String::from("default"), String::from("follow")] }
+    };
+    if matches!(init, Value::Obj(_)) {
+        if let v @ (Value::Str(_) | Value::Num(_) | Value::Obj(_)) = i.get(init, "method")? {
+            let m = i.to_string(&v)?.to_string();
+            let up = m.to_ascii_uppercase();
+            p.method = if matches!(up.as_str(), "DELETE" | "GET" | "HEAD" | "OPTIONS" | "POST" | "PUT")
+                { up } else { m };
+        }
+        if !matches!(i.get(init, "headers")?, Value::Undefined) { p.headers = init_headers(i, init)?; }
+        match i.get(init, "body")? {
+            Value::Undefined => {}
+            Value::Null => p.body = None,
+            v => p.body = Some(i.to_string(&v)?.to_string()),
+        }
+        match i.get(init, "signal")? {
+            Value::Undefined => {}
+            Value::Null => p.signal = Value::Undefined,
+            s => p.signal = s,
+        }
+        for (k, s) in ["credentials", "mode", "cache", "redirect"].iter().zip(p.strs.iter_mut()) {
+            if let v @ Value::Str(_) = i.get(init, k)? { *s = i.to_string(&v)?.to_string(); }
+        }
+    }
+    if p.body.is_some() && matches!(p.method.as_str(), "GET" | "HEAD") {
+        return i.type_err("Request with GET/HEAD method cannot have body");
+    }
+    Ok(p)
+}
+
+fn build_request(i: &mut Interp, proto: Gc, p: ReqParts) -> Gc {
+    let r = new_obj(Some(proto));
+    let headers = Value::Obj(new_headers(i, p.headers));
+    // A request always has a signal (Fetch §5.4 step 30); one of its own
+    // follows the given one.
+    let signal = match p.signal {
+        s @ Value::Obj(_) => s,
+        _ => Value::Obj(new_signal(i)),
+    };
+    let mut b = r.borrow_mut();
+    b.define(Q_URL, hidden(Value::string(p.url)));
+    b.define(Q_METHOD, hidden(Value::string(p.method)));
+    b.define(Q_HDRS, hidden(headers));
+    b.define(Q_BODY, hidden(match p.body { Some(s) => Value::string(s), None => Value::Null }));
+    b.define(Q_SIGNAL, hidden(signal));
+    for (k, s) in [Q_CRED, Q_MODE, Q_CACHE, Q_REDIRECT].iter().zip(p.strs) {
+        b.define(k, hidden(Value::string(s)));
+    }
+    b.define(Q_USED, hidden(Value::Bool(false)));
+    drop(b);
+    r
+}
+
+/// `request.text()` / `request.json()`: the body as given, once.
+fn request_body(i: &mut Interp, t: &Value, json: bool) -> C<Value> {
+    let p = promise::new_promise(i);
+    if matches!(slot(i, t, Q_USED), Value::Bool(true)) {
+        if let Abrupt::Throw(e) = i.throw_kind("TypeError", "body stream already read") {
+            promise::settle(i, &p, e, true);
+        }
+        return Ok(Value::Obj(p));
+    }
+    i.set(t, Q_USED, Value::Bool(true), false)?;
+    let text = match slot(i, t, Q_BODY) { Value::Str(s) => s, _ => Rc::from("") };
+    if !json {
+        promise::resolve_promise(i, &p, Value::Str(text));
+        return Ok(Value::Obj(p));
+    }
+    let g = Value::Obj(i.realm.global.clone());
+    let j = i.get(&g, "JSON")?;
+    let parse = i.get(&j, "parse")?;
+    match i.call(&parse, j, &[Value::Str(text)]) {
+        Ok(v) => promise::resolve_promise(i, &p, v),
+        Err(Abrupt::Throw(e)) => promise::settle(i, &p, e, true),
+        Err(e) => return Err(e),
+    }
+    Ok(Value::Obj(p))
+}
+
+/// The header block as sorted, combined pairs (Fetch §5.2).
+fn header_pairs(raw: &str) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = raw.split("\r\n").flat_map(|l| l.split('\n'))
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (k, v) in pairs {
+        match out.last_mut() {
+            Some((lk, lv)) if *lk == k && k != "set-cookie" => { lv.push_str(", "); lv.push_str(&v); }
+            _ => out.push((k, v)),
+        }
+    }
+    out
+}
+
+/// An iterator over a `Headers`: 0 entries, 1 keys, 2 values.
+fn headers_iter(i: &mut Interp, t: &Value, part: u8) -> C<Value> {
+    let raw = raw_of(i, t);
+    let mut items = Vec::new();
+    for (k, v) in header_pairs(&raw) {
+        items.push(match part {
+            0 => i.new_array(alloc::vec![Value::string(k), Value::string(v)]),
+            1 => Value::string(k),
+            _ => Value::string(v),
+        });
+    }
+    let arr = i.new_array(items);
+    let it = i.get(&arr, super::value::SYM_ITERATOR)?;
+    i.call(&it, arr, &[])
 }
 
 // ── fetch ───────────────────────────────────────────────────────────────
@@ -242,15 +434,22 @@ fn do_fetch(i: &mut Interp, t: Value, a: &[Value]) -> C<Value> {
 
 fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     let input = a.first().cloned().unwrap_or(Value::Undefined);
-    if let Value::Obj(o) = &input {
-        // There is no `Request`. Saying so beats guessing its fields and silently
-        // sending the wrong request.
-        if o.borrow().get_own("url").is_some() && o.borrow().get_own("method").is_some() {
-            return i.type_err("fetch: Request objects are not supported, pass a URL string");
+    let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+    // `fetch(request, init)` is `fetch(new Request(request, init))`.
+    if is_request(&input) {
+        if matches!(slot(i, &input, Q_USED), Value::Bool(true)) {
+            return i.type_err("fetch: the request body has already been used");
         }
+        let parts = request_parts(i, &input, &init)?;
+        let o = new_obj(Some(i.realm.object_proto.clone()));
+        o.borrow_mut().define("method", Prop::data(Value::string(parts.method)));
+        let h = Value::Obj(new_headers(i, parts.headers));
+        o.borrow_mut().define("headers", Prop::data(h));
+        if let Some(b) = parts.body { o.borrow_mut().define("body", Prop::data(Value::string(b))); }
+        o.borrow_mut().define("signal", Prop::data(parts.signal));
+        return do_fetch_inner(i, Value::Undefined, &[Value::string(parts.url), Value::Obj(o)]);
     }
     let raw = i.to_string(&input)?.to_string();
-    let init = a.get(1).cloned().unwrap_or(Value::Undefined);
 
     let Some(url) = same_origin_url(i, &raw)? else {
         let base = document_origin(i).unwrap_or_default();
@@ -288,7 +487,10 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     i.pending_fetches.push(PendingFetch { id, url, method, headers, body });
     i.fetch_waiting.push((id, Waiter::Promise(p.clone())));
     if matches!(signal, Value::Obj(_)) {
-        i.set(&signal, S_FETCH, Value::Num(id as f64), false)?;
+        let mut ids = list_of(i, &signal, S_FETCH);
+        ids.push(Value::Num(id as f64));
+        let arr = i.new_array(ids);
+        i.set(&signal, S_FETCH, arr, false)?;
     }
     Ok(Value::Obj(p))
 }
@@ -440,6 +642,83 @@ pub fn install(realm: &mut Realm) {
         Ok(Value::Undefined)
     }, 1, &fp);
 
+    // Iteration (Fetch §5.2 "sort and combine"): names lowercased and
+    // sorted, repeated names joined with ", ", `set-cookie` kept apart.
+    for (name, part) in [("entries", 0u8), ("keys", 1), ("values", 2)] {
+        let f: NativeFn = match part {
+            0 => |i, t, _| headers_iter(i, &t, 0),
+            1 => |i, t, _| headers_iter(i, &t, 1),
+            _ => |i, t, _| headers_iter(i, &t, 2),
+        };
+        meth(&h_proto, name, f, 0, &fp);
+    }
+    meth(&h_proto, super::value::SYM_ITERATOR, |i, t, _| headers_iter(i, &t, 0), 0, &fp);
+    meth(&h_proto, "getSetCookie", |i, t, _| {
+        let raw = raw_of(i, &t);
+        let v: Vec<Value> = header_pairs(&raw).into_iter()
+            .filter(|(k, _)| k == "set-cookie").map(|(_, v)| Value::string(v)).collect();
+        Ok(i.new_array(v))
+    }, 0, &fp);
+
+    // ── Request ─────────────────────────────────────────────────────────
+    //
+    // The fields `fetch` reads, kept in slots. `headers` is one `Headers`
+    // object for the request's lifetime, so a page that appends to
+    // `req.headers` before `fetch(req)` sends what it appended.
+    let q_proto = new_obj(Some(op.clone()));
+    q_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("Request")));
+    let q_ctor = native(Some(fp.clone()), |i, this, a| {
+        if !i.native_new { return i.type_err("Constructor Request requires 'new'") }
+        let input = a.first().cloned().unwrap_or(Value::Undefined);
+        let init = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let parts = request_parts(i, &input, &init)?;
+        let proto = match &this { Value::Obj(t) => t.borrow().proto.clone(), _ => None };
+        let proto = match proto {
+            Some(p) => p,
+            None => match i.get(&Value::Obj(i.realm.global.clone()), "Request")? {
+                c @ Value::Obj(_) => match i.get(&c, "prototype")? {
+                    Value::Obj(p) => p, _ => i.realm.object_proto.clone() },
+                _ => i.realm.object_proto.clone(),
+            },
+        };
+        Ok(Value::Obj(build_request(i, proto, parts)))
+    }, "Request", 1, true);
+    q_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(q_proto.clone())));
+    q_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(q_ctor.clone())));
+    realm.global.borrow_mut().define("Request", Prop::builtin(Value::Obj(q_ctor)));
+    getter(&q_proto, "url", |i, t, _| Ok(slot(i, &t, Q_URL)), &fp);
+    getter(&q_proto, "method", |i, t, _| Ok(slot(i, &t, Q_METHOD)), &fp);
+    getter(&q_proto, "headers", |i, t, _| Ok(slot(i, &t, Q_HDRS)), &fp);
+    getter(&q_proto, "signal", |i, t, _| Ok(slot(i, &t, Q_SIGNAL)), &fp);
+    getter(&q_proto, "credentials", |i, t, _| Ok(slot(i, &t, Q_CRED)), &fp);
+    getter(&q_proto, "mode", |i, t, _| Ok(slot(i, &t, Q_MODE)), &fp);
+    getter(&q_proto, "cache", |i, t, _| Ok(slot(i, &t, Q_CACHE)), &fp);
+    getter(&q_proto, "redirect", |i, t, _| Ok(slot(i, &t, Q_REDIRECT)), &fp);
+    getter(&q_proto, "referrer", |_, _, _| Ok(Value::str("about:client")), &fp);
+    getter(&q_proto, "referrerPolicy", |_, _, _| Ok(Value::str("")), &fp);
+    getter(&q_proto, "destination", |_, _, _| Ok(Value::str("")), &fp);
+    getter(&q_proto, "integrity", |_, _, _| Ok(Value::str("")), &fp);
+    getter(&q_proto, "keepalive", |_, _, _| Ok(Value::Bool(false)), &fp);
+    getter(&q_proto, "bodyUsed", |i, t, _| Ok(Value::Bool(matches!(slot(i, &t, Q_USED), Value::Bool(true)))), &fp);
+    getter(&q_proto, "body", |_, _, _| Ok(Value::Null), &fp);
+    meth(&q_proto, "clone", |i, t, _| {
+        if matches!(slot(i, &t, Q_USED), Value::Bool(true)) {
+            return i.type_err("Request.clone: the body has already been used");
+        }
+        let parts = request_parts(i, &t, &Value::Undefined)?;
+        let proto = match &t { Value::Obj(o) => o.borrow().proto.clone(), _ => None }
+            .unwrap_or_else(|| i.realm.object_proto.clone());
+        Ok(Value::Obj(build_request(i, proto, parts)))
+    }, 0, &fp);
+    for (name, json) in [("text", false), ("json", true)] {
+        let f: NativeFn = if json {
+            |i, t, _| request_body(i, &t, true)
+        } else {
+            |i, t, _| request_body(i, &t, false)
+        };
+        meth(&q_proto, name, f, 0, &fp);
+    }
+
     // ── Response ────────────────────────────────────────────────────────
     let r_proto = new_obj(Some(op.clone()));
     realm.response_proto = r_proto.clone();
@@ -521,7 +800,8 @@ pub fn install(realm: &mut Realm) {
     }, 0, &fp);
 
     // ── AbortSignal ─────────────────────────────────────────────────────
-    let s_proto = new_obj(Some(op.clone()));
+    // An `EventTarget`, as the DOM defines it (DOM §3.1).
+    let s_proto = new_obj(Some(realm.event_target_proto.clone()));
     realm.abort_signal_proto = s_proto.clone();
     s_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("AbortSignal")));
     let s_ctor = native(Some(fp.clone()), |i, _, _| {
@@ -536,6 +816,48 @@ pub fn install(realm: &mut Realm) {
         do_abort(i, &sv, a.first().cloned().unwrap_or(Value::Undefined))?;
         Ok(sv)
     }, 0, &fp);
+    // `AbortSignal.timeout(ms)`: aborts with a `TimeoutError` through the
+    // page's own timer queue.
+    meth(&s_ctor, "timeout", |i, _, a| {
+        let ms = match a.first() { Some(v) => i.to_number(v)?, None => 0.0 };
+        if !ms.is_finite() || ms < 0.0 { return i.type_err("AbortSignal.timeout: invalid delay") }
+        let sv = Value::Obj(new_signal(i));
+        let f = promise::bind1(i, |i, _, a| {
+            let s = a.first().cloned().unwrap_or(Value::Undefined);
+            let e = timeout_error(i);
+            do_abort(i, &s, e)?;
+            Ok(Value::Undefined)
+        }, sv.clone());
+        let st = i.get(&Value::Obj(i.realm.global.clone()), "setTimeout")?;
+        i.call(&st, Value::Undefined, &[f, Value::Num(ms)])?;
+        Ok(sv)
+    }, 1, &fp);
+    // `AbortSignal.any(signals)`: aborted as soon as one of them is.
+    meth(&s_ctor, "any", |i, _, a| {
+        let list = i.iterate(a.first().unwrap_or(&Value::Undefined))?;
+        let sv = Value::Obj(new_signal(i));
+        for s in &list {
+            if !is_signal(i, s) { return i.type_err("AbortSignal.any: not an AbortSignal") }
+            if signal_aborted(i, s) {
+                let r = slot(i, s, S_REASON);
+                do_abort(i, &sv, r)?;
+                return Ok(sv);
+            }
+        }
+        for s in list {
+            let pair = i.new_array(alloc::vec![sv.clone(), s.clone()]);
+            let f = promise::bind1(i, |i, _, a| {
+                let pair = a.first().cloned().unwrap_or(Value::Undefined);
+                let dst = i.get(&pair, "0")?;
+                let src = i.get(&pair, "1")?;
+                let r = slot(i, &src, S_REASON);
+                do_abort(i, &dst, r)?;
+                Ok(Value::Undefined)
+            }, pair);
+            super::dombind::add_listener(i, &s, "abort", f, true);
+        }
+        Ok(sv)
+    }, 1, &fp);
     realm.global.borrow_mut().define("AbortSignal", Prop::builtin(Value::Obj(s_ctor)));
 
     getter(&s_proto, "aborted", |i, t, _| Ok(slot(i, &t, S_ABORTED)), &fp);
@@ -544,27 +866,6 @@ pub fn install(realm: &mut Realm) {
         if signal_aborted(i, &t) { return Err(Abrupt::Throw(slot(i, &t, S_REASON))) }
         Ok(Value::Undefined)
     }, 0, &fp);
-    // An `AbortSignal` is not a node, so it cannot use the document's
-    // listener registry (which needs a node id). It has a single event type,
-    // and its listener list hangs off the signal itself.
-    meth(&s_proto, "addEventListener", |i, t, a| {
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if ev != "abort" || !i.is_callable(&f) { return Ok(Value::Undefined) }
-        let mut items = list_of(i, &t, S_LISTEN);
-        items.push(f);
-        let arr = i.new_array(items);
-        i.set(&t, S_LISTEN, arr, false)?;
-        Ok(Value::Undefined)
-    }, 2, &fp);
-    meth(&s_proto, "removeEventListener", |i, t, a| {
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        let items = list_of(i, &t, S_LISTEN);
-        let keep: Vec<Value> = items.into_iter().filter(|x| !x.strict_eq(&f)).collect();
-        let arr = i.new_array(keep);
-        i.set(&t, S_LISTEN, arr, false)?;
-        Ok(Value::Undefined)
-    }, 2, &fp);
 
     // ── AbortController ─────────────────────────────────────────────────
     let c_proto = new_obj(Some(op.clone()));

@@ -43,6 +43,31 @@ fn serve_fetches(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
 /// as the host serves them from the network. Every code-splitting bundler
 /// loads this way; without it a promise that never settles looks like a
 /// hanging page.
+/// `import()`: deliver what the waiting graphs need from the mirror, then
+/// let the engine evaluate and settle them. The same order beak uses.
+fn serve_dyn_imports(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
+    let mut n = 0;
+    for _ in 0..32 {
+        let want = sess.interp.dynamic_import_wants();
+        if want.is_empty() { break }
+        for u in want {
+            n += 1;
+            let parsed = std::fs::read_to_string(local(dir, &u)).ok()
+                .and_then(|t| beak_engine::js::parse(&t, true).map_err(|e| {
+                    println!("  import() {u}: SyntaxError: {} @{}", e.msg, pos(&t, e.at));
+                }).ok());
+            match parsed {
+                Some(p) => sess.interp.add_module(&u, std::rc::Rc::new(p)),
+                None => {
+                    println!("  import() fehlt: {u}");
+                    sess.interp.module_unavailable(&u);
+                }
+            }
+        }
+    }
+    n + sess.interp.settle_dynamic_imports()
+}
+
 fn serve_dyn_scripts(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
     let want = sess.interp.take_pending_scripts();
     let mut n = 0;
@@ -195,6 +220,7 @@ fn main() {
         sess.interp.relayout = Some(host_relayout);
     }
     if let Ok(u) = std::env::var("URL") { sess.interp.set_location(&u); }
+    sess.interp.load_import_maps();
     // `BUDGET=<seconds>`: the same deadline the host sets. Without it a page
     // runs unbounded host-side.
     if let Ok(v) = std::env::var("BUDGET") {
@@ -305,7 +331,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         // guards is delivered.
         fetches += serve_fetches(&mut sess, &dir);
         let want = sess.interp.take_pending_sheets();
-        let js = serve_dyn_scripts(&mut sess, &dir);
+        let js = serve_dyn_scripts(&mut sess, &dir) + serve_dyn_imports(&mut sess, &dir);
         dynjs += js;
         let t = sess.interp.run_timers();
         timers += t;
@@ -318,7 +344,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
         for (id, href) in want {
             let u = resolve_path(&format!("{}/", origin()), &href);
             let ok = std::fs::read_to_string(local(&dir, &u)).is_ok();
-            if ok { sheets_ok += 1 } else { sheets_bad += 1 }
+            if ok { sheets_ok += 1 } else { sheets_bad += 1; println!("  dyn-Blatt fehlt: {u}"); }
             beak_engine::js::dombind::sheet_done(&mut sess.interp, id, ok);
         }
     }
@@ -340,7 +366,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
     for _ in 0..64 {
         let f = serve_fetches(&mut sess, &dir);
         fetches += f;
-        let js = serve_dyn_scripts(&mut sess, &dir);
+        let js = serve_dyn_scripts(&mut sess, &dir) + serve_dyn_imports(&mut sess, &dir);
         dynjs += js;
         let t = sess.interp.run_timers();
         timers += t;
@@ -413,7 +439,7 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
                 // its answer with `fetch`.
                 for _ in 0..32 {
                     let f = serve_fetches(&mut sess, &dir);
-                    let j = serve_dyn_scripts(&mut sess, &dir);
+                    let j = serve_dyn_scripts(&mut sess, &dir) + serve_dyn_imports(&mut sess, &dir);
                     let t = sess.interp.run_timers();
                     if f == 0 && j == 0 && t == 0 { break }
                 }
@@ -633,7 +659,7 @@ fn run_module_graph(sess: &mut beak_engine::js::Session, label: &str, src: &str,
     let mut queue = vec![entry.clone()];
     while let Some(u) = queue.pop() {
         for spec in sess.interp.module_requests(&u) {
-            let r = resolve_path(&u, &spec);
+            let r = sess.interp.resolve_module(&u, &spec).map_err(|e| format!("{u}: {e}"))?;
             sess.interp.map_module_dep(&u, &spec, &r);
             if sess.interp.has_module(&r) { continue }
             let text = std::fs::read_to_string(local(dir, &r))

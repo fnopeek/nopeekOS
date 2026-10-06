@@ -49,8 +49,8 @@ pub struct DomNode {
     pub children: Vec<u32>,
     /// Built once and kept, otherwise `el === el` would be false.
     pub js: Option<Gc>,
-    /// Registered listeners, per event type.
-    pub listeners: Vec<(Rc<str>, Value)>,
+    /// Registered listeners, in registration order.
+    pub listeners: Vec<Listener>,
     /// Handlers set as a property (`el.onclick = f`).
     ///
     /// Separate from `listeners` because a second assignment replaces the
@@ -81,14 +81,42 @@ pub struct DomNode {
     /// `0` means no source node: an element created by script. For those
     /// `getComputedStyle` can only answer from the inline style.
     pub src_seq: u32,
+    /// Custom element state (HTML §4.13.4), one of the `CE_*` constants.
+    /// `CE_NONE` means "undefined" for a valid custom element name and
+    /// "uncustomized" for any other.
+    pub ce: u8,
+    /// An element: its shadow root. A shadow root: its host. The root is not
+    /// among the host's children and has no parent.
+    pub shadow: Option<u32>,
+    /// Shown states without an attribute: `UI_POPOVER_OPEN`, `UI_MODAL`.
+    pub ui: u8,
+    /// Custom states (`ElementInternals.states`, `:state()`).
+    pub states: Vec<Rc<str>>,
 }
+
+/// An event listener (DOM §2.7).
+#[derive(Clone)]
+pub struct Listener {
+    pub kind: Rc<str>,
+    /// A function, or an object with `handleEvent`.
+    pub cb: Value,
+    pub capture: bool,
+    pub once: bool,
+    pub passive: bool,
+    /// Unique within the document: a listener removed during dispatch must
+    /// not run, and the snapshot finds out by this number.
+    pub id: u32,
+}
+
+pub const UI_POPOVER_OPEN: u8 = 1;
+pub const UI_MODAL: u8 = 2;
 
 impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
                   parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
                   handlers: Vec::new(), content: None, value: None, checked: None,
-                  seq: 0, src_seq: 0 }
+                  seq: 0, src_seq: 0, ce: CE_NONE, shadow: None, ui: 0, states: Vec::new() }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -166,6 +194,27 @@ pub struct Doc {
     /// The observed nodes as `(node, subtree)`, in the bit order of
     /// `Mutation::hits`. The tree need not know who observes, only where.
     pub observed: Vec<(u32, bool)>,
+    /// Is any custom element defined? Until one is, nothing is queued.
+    pub ce_on: bool,
+    /// Custom element reactions caused by tree changes, run by `ce_flush`
+    /// before control returns to script.
+    pub ce_queue: Vec<CeEvent>,
+    /// The next `Listener::id`.
+    pub next_listener: u32,
+}
+
+/// A tree change a custom element may have to react to.
+#[derive(Clone)]
+pub enum CeEvent {
+    /// The subtree entered the document: upgrade, then `connectedCallback`.
+    Inserted(u32),
+    /// The subtree left the document: `disconnectedCallback`.
+    Removed(u32),
+    /// The subtree was created outside the document (`innerHTML` on a
+    /// detached element, `cloneNode`): upgrade only.
+    Created(u32),
+    /// An attribute changed: element, name, old value, new value.
+    Attr(u32, Rc<str>, Option<Rc<str>>, Option<Rc<str>>),
 }
 
 impl Doc {
@@ -175,7 +224,38 @@ impl Doc {
         Doc { nodes, doc: 0, html: None, body: None, head: None,
               dirty: false, has_listeners: false, focused: None, version: 0,
               mutations: Vec::new(), observing: false, mut_overflow: false,
-              observed: Vec::new() }
+              observed: Vec::new(), ce_on: false, ce_queue: Vec::new(), next_listener: 1 }
+    }
+
+    /// Is this node in the document, through shadow roots to their hosts?
+    pub fn connected(&self, mut id: u32) -> bool {
+        loop {
+            if id == self.doc { return true }
+            let n = &self.nodes[id as usize];
+            match n.parent {
+                Some(p) => id = p,
+                None => match n.shadow {
+                    Some(h) if &*n.tag == SHADOW_TAG => id = h,
+                    _ => return false,
+                },
+            }
+        }
+    }
+
+    fn ce_note_insert(&mut self, child: u32) {
+        if self.ce_on && self.connected(child) { self.ce_queue.push(CeEvent::Inserted(child)); }
+    }
+
+    fn ce_note_remove(&mut self, id: u32) {
+        if self.ce_on && self.nodes[id as usize].parent.is_some() && self.connected(id) {
+            self.ce_queue.push(CeEvent::Removed(id));
+        }
+    }
+
+    fn ce_note_attr(&mut self, id: u32, k: &str, old: Option<Rc<str>>, new: Option<Rc<str>>) {
+        if self.ce_on && self.nodes[id as usize].ce == CE_CUSTOM {
+            self.ce_queue.push(CeEvent::Attr(id, Rc::from(k), old, new));
+        }
     }
 
     /// From beak's parsed tree. The original `seq` is not taken over; the
@@ -200,6 +280,17 @@ impl Doc {
                     n.text = Rc::from(t.as_str());
                     let id = self.push(n, parent);
                     let _ = id;
+                }
+                // Declarative shadow DOM (HTML §13.2.6.4.1): the template becomes
+                // the parent's shadow root and is not in the tree itself.
+                crate::dom::Node::Element(el) if &*el.tag == "template"
+                    && el.attr("shadowrootmode").is_some_and(|m| m == "open" || m == "closed")
+                    && self.nodes[parent as usize].kind == ELEMENT_NODE
+                    && self.nodes[parent as usize].shadow.is_none() => {
+                    let mode = el.attr("shadowrootmode").unwrap_or("open").to_string();
+                    let delegates = el.attr("shadowrootdelegatesfocus").is_some();
+                    let root = extra::attach_shadow_root(self, parent, &mode, delegates);
+                    self.add_children(el, root);
                 }
                 crate::dom::Node::Element(el) => {
                     let mut n = DomNode::new(ELEMENT_NODE, &el.tag);
@@ -279,6 +370,7 @@ impl Doc {
     /// node sits in two child lists.
     pub fn detach(&mut self, id: u32) {
         self.touch();
+        self.ce_note_remove(id);
         if let Some(p) = self.nodes[id as usize].parent {
             let at = self.nodes[p as usize].children.iter().position(|&c| c == id);
             if self.observing {
@@ -309,6 +401,7 @@ impl Doc {
                 added: alloc::vec![child], removed: Vec::new(),
                 prev, next: None, attr: None, old: None, hits: 0 });
         }
+        self.ce_note_insert(child);
     }
 
     /// Insert; a fragment hands over its children instead of being inserted
@@ -340,18 +433,20 @@ impl Doc {
                 added: alloc::vec![child], removed: Vec::new(),
                 prev, next, attr: None, old: None, hits: 0 });
         }
+        self.ce_note_insert(child);
     }
 
     /// Set an attribute. The single path, so the change is recorded once.
     pub fn set_attr_at(&mut self, id: u32, k: &str, v: &str) {
         self.touch();
+        let old = self.nodes[id as usize].attr(k).cloned();
         if self.observing {
-            let old = self.nodes[id as usize].attr(k).cloned();
             self.record(Mutation { kind: MutKind::Attributes, target: id,
                 added: Vec::new(), removed: Vec::new(), prev: None, next: None,
-                attr: Some(Rc::from(k)), old, hits: 0 });
+                attr: Some(Rc::from(k)), old: old.clone(), hits: 0 });
         }
         self.nodes[id as usize].set_attr(k, v);
+        self.ce_note_attr(id, k, old, Some(Rc::from(v)));
     }
 
     /// Remove an attribute. If it is absent, that is not a change and nothing
@@ -363,9 +458,10 @@ impl Doc {
         if self.observing {
             self.record(Mutation { kind: MutKind::Attributes, target: id,
                 added: Vec::new(), removed: Vec::new(), prev: None, next: None,
-                attr: Some(Rc::from(k)), old, hits: 0 });
+                attr: Some(Rc::from(k)), old: old.clone(), hits: 0 });
         }
         self.nodes[id as usize].attrs.retain(|(n, _)| &**n != k);
+        self.ce_note_attr(id, k, old, None);
     }
 
     /// Set the text of a text/comment node (`data`, `nodeValue`). Not for
@@ -424,6 +520,12 @@ impl Doc {
             self.nodes[*id as usize].parent = Some(parent);
             let pos = (idx + k).min(self.nodes[parent as usize].children.len());
             self.nodes[parent as usize].children.insert(pos, *id);
+            // Elements the fragment parser creates are upgraded even when
+            // detached (HTML §4.13.3, synchronous flag unset).
+            if self.ce_on {
+                let ev = if self.connected(*id) { CeEvent::Inserted(*id) } else { CeEvent::Created(*id) };
+                self.ce_queue.push(ev);
+            }
         }
         made
     }
@@ -519,6 +621,7 @@ impl Doc {
     pub fn clear_children(&mut self, id: u32) {
         self.touch();
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
+        for c in &old { self.ce_note_remove(*c); }
         for c in &old { self.nodes[*c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
         // `innerHTML = "…"` clears before rebuilding. Without this record an
@@ -542,10 +645,27 @@ impl Doc {
         self.nodes[new as usize].text = text;
         if deep {
             for c in kids {
-                let cc = self.clone_node(c, true);
+                let cc = self.clone_node_inner(c);
                 self.nodes[cc as usize].parent = Some(new);
                 self.nodes[new as usize].children.push(cc);
             }
+        }
+        if self.ce_on { self.ce_queue.push(CeEvent::Created(new)); }
+        new
+    }
+
+    fn clone_node_inner(&mut self, id: u32) -> u32 {
+        let (kind, tag, attrs, text, kids) = {
+            let n = &self.nodes[id as usize];
+            (n.kind, n.tag.clone(), n.attrs.clone(), n.text.clone(), n.children.clone())
+        };
+        let new = self.create(kind, &tag);
+        self.nodes[new as usize].attrs = attrs;
+        self.nodes[new as usize].text = text;
+        for c in kids {
+            let cc = self.clone_node_inner(c);
+            self.nodes[cc as usize].parent = Some(new);
+            self.nodes[new as usize].children.push(cc);
         }
         new
     }
@@ -578,6 +698,8 @@ impl Doc {
         if n.kind == TEXT_NODE { return Some(crate::dom::Node::Text(n.text.to_string())); }
         if n.kind != ELEMENT_NODE { return None; }
         let mut e = crate::dom::Element::bare(n.tag.to_string(), id);
+        e.defined = ce_defined(n);
+        e.ui = n.ui;
         for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes; see `to_node`.
         e.index_attrs();
@@ -620,6 +742,8 @@ impl Doc {
         // The bridge: the same number now stands here and in layout.
         self.nodes[id as usize].seq = *seq;
         let mut e = crate::dom::Element::bare(tag.to_string(), *seq);
+        e.defined = ce_defined(&self.nodes[id as usize]);
+        e.ui = self.nodes[id as usize].ui;
         for (k, v) in &attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes, otherwise classes, id and the bloom
         // filter are empty and no selector matches.
@@ -780,95 +904,51 @@ pub fn inline_scripts(d: &Doc) -> Vec<String> {
 
 // ── Selectors ───────────────────────────────────────────────────────────────
 //
-// A small matcher of its own, not the one in `css.rs`, which works on
-// beak's `Element` rather than the arena. Covers `tag`, `#id`, `.class`,
-// `[attr]`, `[attr=value]` in any combination, descendant (space), child
-// (`>`) and lists (`,`). Anything unsupported does not match, rather than
-// matching wrongly.
+// `js::qsel` parses and matches on the arena. An invalid selector throws
+// `SyntaxError` (DOM §4.2.6 "scope-match a selectors string").
 
-fn matches_simple(d: &Doc, id: u32, sel: &str) -> bool {
-    let n = &d.nodes[id as usize];
-    if n.kind != ELEMENT_NODE { return false; }
-    let mut rest = sel.trim();
-    if rest == "*" { return true; }
-    // Leading type selector.
-    let tag_end = rest.find(['.', '#', '[']).unwrap_or(rest.len());
-    if tag_end > 0 {
-        if !n.tag.eq_ignore_ascii_case(&rest[..tag_end]) { return false; }
-        rest = &rest[tag_end..];
-    }
-    while !rest.is_empty() {
-        let c = rest.as_bytes()[0];
-        let end = rest[1..].find(['.', '#', '[']).map(|i| i + 1).unwrap_or(rest.len());
-        let part = &rest[1..end];
-        match c {
-            b'#' => if n.attr("id").map(|v| &**v) != Some(part) { return false; },
-            b'.' => if !d.classes(id).iter().any(|k| &**k == part) { return false; },
-            b'[' => {
-                let inner = part.trim_end_matches(']');
-                let (k, v) = match inner.split_once('=') {
-                    Some((k, v)) => (k, Some(v.trim_matches(['"', '\'']))),
-                    None => (inner, None),
-                };
-                match (n.attr(k), v) {
-                    (None, _) => return false,
-                    (Some(av), Some(want)) if &**av != want => return false,
-                    _ => {}
-                }
-            }
-            _ => return false,
-        }
-        rest = &rest[end..];
-    }
-    true
+/// Parse a selector for the DOM API, or the exception to throw.
+fn parse_selector(i: &mut Interp, s: &str) -> C<super::qsel::SelList> {
+    super::qsel::parse(s).map_err(|e| dom_exc(i, "SyntaxError",
+        &alloc::format!("'{s}' is not a valid selector: {e}")))
 }
 
-/// A compound selector, checked right to left, because the rightmost part
-/// already fixes the candidate.
-fn matches_compound(d: &Doc, id: u32, sel: &str) -> bool {
-    let mut parts: Vec<(&str, char)> = Vec::new();
-    let mut comb = ' ';
-    for tok in sel.split_whitespace() {
-        if tok == ">" { comb = '>'; continue; }
-        if let Some(t) = tok.strip_prefix('>') {
-            parts.push((t, '>'));
-            comb = ' ';
-            continue;
-        }
-        parts.push((tok, comb));
-        comb = ' ';
-    }
-    if parts.is_empty() { return false; }
-    let (last, _) = parts.pop().unwrap();
-    if !matches_simple(d, id, last) { return false; }
-    let mut cur = d.nodes[id as usize].parent;
-    while let Some((p, c)) = parts.pop() {
-        let mut found = None;
-        while let Some(x) = cur {
-            if matches_simple(d, x, p) { found = Some(x); break; }
-            if c == '>' { return false; }
-            cur = d.nodes[x as usize].parent;
-        }
-        match found { Some(x) => cur = d.nodes[x as usize].parent, None => return false }
-    }
-    true
+/// The fragment of the document URL, for `:target`.
+fn url_fragment(i: &Interp) -> String {
+    i.loc_href.split_once('#').map(|(_, f)| f.to_string()).unwrap_or_default()
 }
 
+/// Does `id` match `sel`, with `scope` as `:scope`?
+fn sel_matches(i: &Interp, sel: &super::qsel::SelList, id: u32, scope: Option<u32>) -> bool {
+    let Some(d) = &i.doc else { return false };
+    let target = url_fragment(i);
+    let cx = super::qsel::Ctx { d, scope, target: &target };
+    sel.matches(&cx, id)
+}
+
+/// The elements below `from` that match, in tree order.
+fn sel_query(i: &Interp, sel: &super::qsel::SelList, from: u32, first_only: bool) -> Vec<u32> {
+    let Some(d) = &i.doc else { return Vec::new() };
+    let target = url_fragment(i);
+    // On the document `:scope` is the root element; on an element, itself.
+    let scope = if from == d.doc { d.html } else { Some(from) };
+    let cx = super::qsel::Ctx { d, scope, target: &target };
+    super::qsel::query_all(&cx, from, sel, first_only)
+}
+
+/// Selector matching for callers without an interpreter. An invalid
+/// selector matches nothing.
 pub fn selector_match(d: &Doc, id: u32, sel: &str) -> bool {
-    sel.split(',').any(|s| { let s = s.trim(); !s.is_empty() && matches_compound(d, id, s) })
+    let Ok(l) = super::qsel::parse(sel) else { return false };
+    let cx = super::qsel::Ctx { d, scope: Some(id), target: "" };
+    l.matches(&cx, id)
 }
 
 pub fn query(d: &Doc, from: u32, sel: &str, all: bool) -> Vec<u32> {
-    let mut cands = Vec::new();
-    d.descendants(from, &mut cands);
-    let mut out = Vec::new();
-    for c in cands {
-        if selector_match(d, c, sel) {
-            out.push(c);
-            if !all { break; }
-        }
-    }
-    out
+    let Ok(l) = super::qsel::parse(sel) else { return Vec::new() };
+    let scope = if from == d.doc { d.html } else { Some(from) };
+    let cx = super::qsel::Ctx { d, scope, target: "" };
+    super::qsel::query_all(&cx, from, &l, !all)
 }
 
 // ── The JS side ─────────────────────────────────────────────────────────────
@@ -1445,6 +1525,14 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
                        .unwrap_or_else(|| Rc::from(""));
             if &*tag == "#eventtarget" { i.realm.event_target_proto.clone() }
             else if &*tag == "#fragment" { i.realm.fragment_proto.clone() }
+            else if &*tag == SHADOW_TAG {
+                let c = i.realm.global.borrow().get_own("ShadowRoot").and_then(|p| p.value.clone());
+                match c.and_then(|c| match c { Value::Obj(c) => c.borrow().get_own("prototype")
+                        .and_then(|p| p.value.clone()), _ => None }) {
+                    Some(Value::Obj(p)) => p,
+                    _ => i.realm.fragment_proto.clone(),
+                }
+            }
             else if &*tag == "svg" || tag.starts_with("svg:") {
                 i.realm.tag_protos.get("svg").cloned()
                     .unwrap_or_else(|| i.realm.svg_element_proto.clone())
@@ -1539,6 +1627,8 @@ const EV_STAMP: &str = "__evstamp";
 const EV_STOP: &str = "__evstop";
 const EV_STOPIMM: &str = "__evstopimm";
 const EV_DETAIL: &str = "__evdetail";
+/// Set while a passive listener runs: `preventDefault` is ignored then.
+const EV_PASSIVE: &str = "__evpassive";
 
 /// A getter reading a fixed slot. A macro because a builtin getter is a
 /// function pointer that captures nothing, so the slot name must be in the
@@ -1701,10 +1791,20 @@ fn same_fn(a: &Value, b: &Value) -> bool {
 fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
     let Some(d) = &i.doc else { return alloc::vec![id] };
     let mut out = alloc::vec![id];
-    let mut cur = d.nodes[id as usize].parent;
-    while let Some(x) = cur {
+    let mut at = id;
+    loop {
+        let n = &d.nodes[at as usize];
+        // From a shadow root the path continues at its host (DOM §4.8 "get the
+        // parent"). Retargeting is not done: listeners outside see the inner
+        // target.
+        let next = match n.parent {
+            Some(p) => Some(p),
+            None if &*n.tag == SHADOW_TAG => n.shadow,
+            None => None,
+        };
+        let Some(x) = next else { break };
         out.push(x);
-        cur = d.nodes[x as usize].parent;
+        at = x;
     }
     out.reverse();
     out
@@ -1717,12 +1817,44 @@ fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
 /// declarations, and `el.style.foo` would then read something else.
 fn style_decls(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for decl in text.split(';') {
+    for decl in split_top(text) {
         let Some((k, v)) = decl.split_once(':') else { continue };
         let (k, v) = (k.trim(), v.trim());
         if k.is_empty() || v.is_empty() { continue }
-        out.push((k.to_ascii_lowercase(), v.to_string()));
+        out.push((prop_name(k), v.to_string()));
     }
+    out
+}
+
+/// A property name as CSS compares it: ASCII case-insensitive, except a
+/// custom property, whose name is case-sensitive (css-variables-1 §2).
+fn prop_name(k: &str) -> String {
+    if k.starts_with("--") { String::from(k) } else { k.to_ascii_lowercase() }
+}
+
+/// Split declarations at `;` outside strings and brackets: a `url(data:…;…)`
+/// or a quoted `;` is part of a value.
+fn split_top(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut quote, mut start) = (0i32, 0u8, 0usize);
+    let b = text.as_bytes();
+    let mut k = 0;
+    while k < b.len() {
+        let c = b[k];
+        if quote != 0 {
+            if c == b'\\' { k += 1; } else if c == quote { quote = 0; }
+        } else {
+            match c {
+                b'"' | b'\'' => quote = c,
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth = (depth - 1).max(0),
+                b';' if depth == 0 => { out.push(&text[start..k]); start = k + 1; }
+                _ => {}
+            }
+        }
+        k += 1;
+    }
+    out.push(&text[start..]);
     out
 }
 
@@ -2187,7 +2319,24 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         parent = out;
         anc.push(info);
     }
-    Some(crate::style::serialize_computed(&out))
+    let mut text = crate::style::serialize_computed(&out);
+    // The side colours, with `currentColor` resolved (CSSOM §6.7.2 resolved
+    // value), and the custom properties in effect, which `getPropertyValue`
+    // answers with their computed value.
+    let rgba = |c: crate::layout::Rgba| if c.a == 255 {
+        alloc::format!("rgb({}, {}, {})", c.c.0, c.c.1, c.c.2)
+    } else {
+        alloc::format!("rgba({}, {}, {}, {})", c.c.0, c.c.1, c.c.2,
+                       ((c.a as u32 * 1000 + 127) / 255) as f32 / 1000.0)
+    };
+    for (k, b) in [("border-top-color", &out.border_top), ("border-right-color", &out.border_right),
+                   ("border-bottom-color", &out.border_bottom), ("border-left-color", &out.border_left)] {
+        text.push_str(&alloc::format!(" {k}: {};", rgba(b.color.unwrap_or(out.color))));
+    }
+    for (k, v) in &vars {
+        text.push_str(&alloc::format!(" {k}: {v};"));
+    }
+    Some(text)
 }
 
 /// Collect the path from the root to `seq`.
@@ -2644,9 +2793,7 @@ pub fn install(realm: &mut Realm) {
             // All children out, one text node in. The old nodes stay in the arena,
             // just detached: freeing them would shift indices, and a handle must
             // never move.
-            let old: Vec<u32> = d.nodes[id as usize].children.clone();
-            for c in old { d.nodes[c as usize].parent = None; }
-            d.nodes[id as usize].children.clear();
+            d.clear_children(id);
             if !s.is_empty() {
                 let tid = d.create(TEXT_NODE, "#text");
                 d.nodes[tid as usize].text = s;
@@ -2780,27 +2927,53 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Bool(false))
     }, 1, &fp);
-    // Register; dispatch happens elsewhere. Throwing here would end the
-    // calling script.
+    // DOM §2.7: options are a boolean (`capture`) or a dictionary with
+    // `capture`, `once`, `passive` and `signal`; the same (type, callback,
+    // capture) is registered once.
     meth(&event_target_proto, "addEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if let Some(d) = &mut i.doc {
-            d.nodes[id as usize].listeners.push((ev, f));
-            // As soon as one handler exists, layout needs hit boxes.
-            d.has_listeners = true;
+        let kind: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let cb = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let (capture, once, passive, signal) = listener_options(i, a.get(2))?;
+        if !matches!(cb, Value::Obj(_)) { return Ok(Value::Undefined) }
+        if let Some(sig) = &signal {
+            if super::fetch::signal_is_aborted(i, sig) { return Ok(Value::Undefined) }
+        }
+        let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+        let n = &d.nodes[id as usize];
+        if n.listeners.iter().any(|l| l.kind == kind && l.capture == capture && same_fn(&l.cb, &cb)) {
+            return Ok(Value::Undefined);
+        }
+        let lid = d.next_listener;
+        d.next_listener += 1;
+        d.nodes[id as usize].listeners.push(Listener { kind, cb, capture, once, passive, id: lid });
+        // As soon as one handler exists, layout needs hit boxes.
+        d.has_listeners = true;
+        if let Some(sig) = signal {
+            // Removal on abort: a listener on the signal that knows the node and
+            // the listener's number.
+            let rec = i.new_array(alloc::vec![Value::Num(id as f64), Value::Num(lid as f64)]);
+            let f = super::promise::bind1(i, |i, _, a| {
+                let rec = a.first().cloned().unwrap_or(Value::Undefined);
+                let node = i.get(&rec, "0")?;
+                let lid = i.get(&rec, "1")?;
+                if let (Value::Num(n), Value::Num(l), Some(d)) = (node, lid, &mut i.doc) {
+                    if let Some(x) = d.nodes.get_mut(n as usize) { x.listeners.retain(|k| k.id != l as u32); }
+                }
+                Ok(Value::Undefined)
+            }, rec);
+            add_listener(i, &sig, "abort", f, true);
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    // `removeEventListener(type, f)` removes exactly f, not every listener of
-    // that type.
     meth(&event_target_proto, "removeEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let cb = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let (capture, _, _, _) = listener_options(i, a.get(2))?;
         if let Some(d) = &mut i.doc {
-            d.nodes[id as usize].listeners.retain(|(e, g)| *e != ev || !same_fn(g, &f));
+            d.nodes[id as usize].listeners
+                .retain(|l| l.kind != kind || l.capture != capture || !same_fn(&l.cb, &cb));
         }
         Ok(Value::Undefined)
     }, 2, &fp);
@@ -2814,16 +2987,20 @@ pub fn install(realm: &mut Realm) {
             Value::Undefined => return i.type_err("dispatchEvent needs an Event"),
             v => i.to_string(&v)?,
         };
-        let bubbles = matches!(i.get(&Value::Obj(ev.clone()), "bubbles")?, Value::Bool(true));
-        // If it does not bubble, the path is one node long and only the target's
-        // handler runs.
-        let chain = if bubbles { ancestors(i, id) } else { alloc::vec![id] };
+        if !matches!(i.get(&Value::Obj(ev.clone()), EV_PHASE)?, Value::Num(0.0) | Value::Undefined) {
+            return Err(dom_exc(i, "InvalidStateError", "the event is already being dispatched"));
+        }
+        // A dispatched event is untrusted (DOM §2.9 step 1 of dispatchEvent).
+        ev.borrow_mut().define(EV_TRUSTED, Prop { value: Some(Value::Bool(false)), get: None,
+            set: None, writable: true, enumerable: false, configurable: true });
+        let chain = ancestors(i, id);
         let prevented = deliver(i, &ev, &kind, &chain)?;
         Ok(Value::Bool(!prevented))
     }, 1, &fp);
 
     // ── Element ──────────────────────────────────────────────────────────
-    getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_uppercase()))), &fp);
+    getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_ascii_uppercase()))), &fp);
+    getter(&element_proto, "localName", |i, t, _| with_node!(i, t, |n| Ok(Value::Str(n.tag.clone()))), &fp);
     getter(&element_proto, "children", |i, t, _| {
         let id = node_of(i, &t)?;
         let cs: Vec<u32> = i.doc.as_ref().map(|d| d.nodes[id as usize].children.iter()
@@ -2870,7 +3047,8 @@ pub fn install(realm: &mut Realm) {
     meth(&element_proto, "matches", |i, t, a| {
         let id = node_of(i, &t)?;
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| selector_match(d, id, &s))))
+        let sel = parse_selector(i, &s)?;
+        Ok(Value::Bool(sel_matches(i, &sel, id, Some(id))))
     }, 1, &fp);
     meth(&element_proto, "remove", |i, t, _| {
         let id = node_of(i, &t)?;
@@ -3167,13 +3345,15 @@ pub fn install(realm: &mut Realm) {
         meth(target, "querySelector", |i, t, a| {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let found = i.doc.as_ref().map(|d| query(d, id, &s, false)).unwrap_or_default();
+            let sel = parse_selector(i, &s)?;
+            let found = sel_query(i, &sel, id, true);
             Ok(match found.first() { Some(&x) => wrap(i, x), None => Value::Null })
         }, 1, &fp);
         meth(target, "querySelectorAll", |i, t, a| {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let found = i.doc.as_ref().map(|d| query(d, id, &s, true)).unwrap_or_default();
+            let sel = parse_selector(i, &s)?;
+            let found = sel_query(i, &sel, id, false);
             Ok(nodes_array(i, found))
         }, 1, &fp);
         meth(target, "getElementsByTagName", |i, t, a| {
@@ -3256,6 +3436,23 @@ pub fn install(realm: &mut Realm) {
     // `referrer` is the empty string, the correct answer for a navigation
     // without a referrer; beak does not pass one on yet.
     getter(&document_proto, "referrer", |_, _, _| Ok(Value::str("")), &fp);
+    // `document.domain` (HTML §7.5.2): the host of the document's origin, the
+    // empty string for an opaque origin. Setting it is only accepted when
+    // nothing changes; relaxing to a parent domain is deprecated and not
+    // supported.
+    accessor(&document_proto, "domain",
+        |i, _, _| {
+            let host = super::url::parse_abs(&i.loc_href)
+                .filter(|p| matches!(p.scheme.as_str(), "http" | "https"))
+                .map(|p| p.host).unwrap_or_default();
+            Ok(Value::string(host))
+        },
+        |i, _, a| {
+            let want = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let host = super::url::parse_abs(&i.loc_href).map(|p| p.host).unwrap_or_default();
+            if want.eq_ignore_ascii_case(&host) { return Ok(Value::Undefined) }
+            Err(dom_exc(i, "SecurityError", "document.domain cannot be changed"))
+        }, &fp);
     // `document.cookie`. The engine holds no cookie jar: what this document
     // may see depends on domain, path, `Secure` and `HttpOnly`, which the host
     // knows; `Interp::set_cookies` provides the script view. Writes go back
@@ -3345,10 +3542,12 @@ pub fn install(realm: &mut Realm) {
             else { "http://www.w3.org/1999/xhtml" })))
     }, &fp);
     meth(&element_proto, "closest", |i, t, a| {
-        let sel = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let mut id = Some(node_of(i, &t)?);
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let sel = parse_selector(i, &s)?;
+        let me = node_of(i, &t)?;
+        let mut id = Some(me);
         while let Some(x) = id {
-            let hit = i.doc.as_ref().is_some_and(|d| selector_match(d, x, &sel));
+            let hit = sel_matches(i, &sel, x, Some(me));
             if hit { return Ok(wrap(i, x)) }
             let Some(d) = &i.doc else { break };
             id = d.nodes[x as usize].parent;
@@ -3462,7 +3661,8 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
     meth(&document_proto, "createElement", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let lower = s.to_lowercase();
+        let lower = s.to_ascii_lowercase();
+        if let Some(k) = i.custom.by_name(&lower) { return ce_create_sync(i, k); }
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(ELEMENT_NODE, &lower);
         Ok(wrap(i, id))
@@ -4112,6 +4312,7 @@ pub fn install(realm: &mut Realm) {
     // After `iface`: it puts an "Illegal constructor" on the same prototype,
     // and the last write wins.
     iface(realm, "HTMLElement", &html_element_proto);
+    install_dom_exception(realm);
     install_custom_elements(realm, &html_element_proto);
     iface(realm, "SVGElement", &svg_element_proto);
     // `CharacterData` sits between Node and Text; library code checks this
@@ -4417,7 +4618,7 @@ pub fn install(realm: &mut Realm) {
     let style_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "CSSStyleDeclaration", &style_proto);
     meth(&style_proto, "getPropertyValue", |i, t, a| {
-        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_ascii_lowercase();
+        let n = prop_name(&i.to_string(a.first().unwrap_or(&Value::Undefined))?);
         let text = style_text(i, &t);
         Ok(match style_decls(&text).into_iter().rev().find(|(k, _)| *k == n) {
             Some((_, v)) => Value::string(v),
@@ -4428,7 +4629,7 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
-        style_set(i, id, &n.to_ascii_lowercase(), &v);
+        style_set(i, id, &prop_name(&n), &v);
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&style_proto, "removeProperty", |i, t, a| {
@@ -4500,6 +4701,18 @@ pub fn install(realm: &mut Realm) {
     style_prop!(style_proto, fp, "borderWidth", "border-width");
     style_prop!(style_proto, fp, "borderStyle", "border-style");
     style_prop!(style_proto, fp, "borderRadius", "border-radius");
+    style_prop!(style_proto, fp, "borderTopColor", "border-top-color");
+    style_prop!(style_proto, fp, "borderTopWidth", "border-top-width");
+    style_prop!(style_proto, fp, "borderTopStyle", "border-top-style");
+    style_prop!(style_proto, fp, "borderRightColor", "border-right-color");
+    style_prop!(style_proto, fp, "borderRightWidth", "border-right-width");
+    style_prop!(style_proto, fp, "borderRightStyle", "border-right-style");
+    style_prop!(style_proto, fp, "borderBottomColor", "border-bottom-color");
+    style_prop!(style_proto, fp, "borderBottomWidth", "border-bottom-width");
+    style_prop!(style_proto, fp, "borderBottomStyle", "border-bottom-style");
+    style_prop!(style_proto, fp, "borderLeftColor", "border-left-color");
+    style_prop!(style_proto, fp, "borderLeftWidth", "border-left-width");
+    style_prop!(style_proto, fp, "borderLeftStyle", "border-left-style");
     style_prop!(style_proto, fp, "font", "font");
     style_prop!(style_proto, fp, "fontSize", "font-size");
     style_prop!(style_proto, fp, "fontFamily", "font-family");
@@ -4593,7 +4806,8 @@ pub fn install(realm: &mut Realm) {
     meth(&event_proto, "preventDefault", |i, t, _| {
         // Only a cancelable event can be canceled; otherwise `defaultPrevented`
         // would report a stop nobody honours.
-        if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true)) {
+        if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true))
+            && !matches!(i.get(&t, EV_PASSIVE)?, Value::Bool(true)) {
             if let Value::Obj(o) = &t { o.borrow_mut().define(EV_PREVENTED, Prop::data(Value::Bool(true))); }
         }
         Ok(Value::Undefined)
@@ -5372,6 +5586,9 @@ pub fn install(realm: &mut Realm) {
             }
             let Some(d) = &mut i.doc else { return i.type_err("no document") };
             let f = d.create(ELEMENT_NODE, "#fragment");
+            // Template contents belong to an inert document: nothing in them is
+            // upgraded.
+            d.nodes[f as usize].ce = CE_INERT;
             for k in d.nodes[id as usize].children.clone() { d.append(f, k); }
             d.nodes[id as usize].content = Some(f);
             Ok(wrap(i, f))
@@ -5396,6 +5613,7 @@ pub fn install(realm: &mut Realm) {
     realm.svg_element_proto = svg_element_proto;
     realm.fragment_proto = fragment_proto;
     realm.tag_protos = tag_protos;
+    extra::install(realm);
 }
 
 /// Which element carries which interface.
@@ -5635,64 +5853,154 @@ fn dispatch_plain(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
 /// one set of rules.
 fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
-    let target = wrap(i, chain[chain.len() - 1]);
-    let set = |o: &Gc, k: &str, v: Value| {
-        o.borrow_mut().define(k, Prop { value: Some(v), get: None, set: None,
-            writable: true, enumerable: false, configurable: true });
-    };
-    set(ev, EV_TARGET, target);
-    let evv = Value::Obj(ev.clone());
+    let last = chain.len() - 1;
+    let target = wrap(i, chain[last]);
+    set_ev(ev, EV_TARGET, target);
+    let bubbles = ev_flag(ev, EV_BUBBLES);
+    // DOM §2.9: capture from the root down, the target (capture listeners
+    // first), then bubbling back up if the event bubbles.
+    let mut stopped = false;
+    for &node in &chain[..last] {
+        invoke(i, ev, kind, node, true, 1.0)?;
+        if ev_flag(ev, EV_STOP) { stopped = true; break }
+    }
+    if !stopped {
+        invoke(i, ev, kind, chain[last], true, 2.0)?;
+        if !ev_flag(ev, EV_STOPIMM) { invoke(i, ev, kind, chain[last], false, 2.0)?; }
+        if bubbles && !ev_flag(ev, EV_STOP) {
+            for &node in chain[..last].iter().rev() {
+                invoke(i, ev, kind, node, false, 3.0)?;
+                if ev_flag(ev, EV_STOP) { break }
+            }
+        }
+    }
+    set_ev(ev, EV_CUR, Value::Null);
+    set_ev(ev, EV_PHASE, Value::Num(0.0));
+    for k in [EV_STOP, EV_STOPIMM] { set_ev(ev, k, Value::Bool(false)); }
+    Ok(ev_flag(ev, EV_PREVENTED))
+}
 
-    for (k, &node) in chain.iter().enumerate().rev() {
-        let mut listeners: Vec<Value> = Vec::new();
-        // The handler from the attribute or property runs first: it precedes any
-        // `addEventListener` a script registers later, and registration order is
-        // call order.
-        //
-        // Either-or: `el.onclick = f` replaces the attribute handler, as it is the
-        // same slot.
+fn set_ev(o: &Gc, k: &str, v: Value) {
+    o.borrow_mut().define(k, Prop { value: Some(v), get: None, set: None,
+        writable: true, enumerable: false, configurable: true });
+}
+
+fn ev_flag(o: &Gc, k: &str) -> bool {
+    matches!(o.borrow().get_own(k).and_then(|p| p.value.clone()), Some(Value::Bool(true)))
+}
+
+/// Run the listeners of one node for one pass (DOM §2.9 "inner invoke").
+///
+/// The list is a snapshot, but a listener removed meanwhile does not run;
+/// `once` removes before the call. The `on…` handler belongs to the
+/// non-capture pass and runs first there.
+fn invoke(i: &mut Interp, ev: &Gc, kind: &str, node: u32, capture: bool, phase: f64) -> C<()> {
+    let mut handler = None;
+    if !capture {
         let prop = i.doc.as_ref().and_then(|d| d.nodes[node as usize].handlers.iter()
             .find(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
-        match prop {
-            Some(f) => listeners.push(f),
-            None => if let Some(f) = inline_handler(i, node, kind)? { listeners.push(f); },
-        }
-        if let Some(d) = &i.doc {
-            listeners.extend(d.nodes[node as usize].listeners.iter()
-                .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
-        }
-        if listeners.is_empty() { continue; }
-        let this_node = wrap(i, node);
-        set(ev, EV_CUR, this_node.clone());
-        // 2 = AT_TARGET, 3 = BUBBLING_PHASE. There is no capture phase:
-        // `addEventListener` accepts the third argument and ignores it.
-        set(ev, EV_PHASE, Value::Num(if k + 1 == chain.len() { 2.0 } else { 3.0 }));
-        for f in listeners {
-            // A throwing handler must not take the following ones with it, as in
-            // browsers.
-            let r = i.call(&f, this_node.clone(), &[evv.clone()]);
-            // A throwing handler is reported to the console, not dropped.
-            if let Err(e) = r {
+        handler = match prop {
+            Some(f) => Some(f),
+            None => inline_handler(i, node, kind)?,
+        };
+    }
+    let snap: Vec<Listener> = i.doc.as_ref().map(|d| d.nodes[node as usize].listeners.iter()
+        .filter(|l| &*l.kind == kind && l.capture == capture).cloned().collect())
+        .unwrap_or_default();
+    if handler.is_none() && snap.is_empty() { return Ok(()) }
+    let this_node = wrap(i, node);
+    set_ev(ev, EV_CUR, this_node.clone());
+    set_ev(ev, EV_PHASE, Value::Num(phase));
+    let evv = Value::Obj(ev.clone());
+    if let Some(f) = handler {
+        match i.call(&f, this_node.clone(), &[evv.clone()]) {
+            // `onclick="return false"` is the old form of `preventDefault`.
+            Ok(Value::Bool(false)) => set_ev(ev, EV_PREVENTED, Value::Bool(true)),
+            Ok(_) => {}
+            Err(e) => {
                 let msg = super::modules::describe(i, e);
                 i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
-                continue;
             }
-            // `onclick="return false"` is the old form of `preventDefault`. It applies
-            // only to the attribute handler; `addEventListener` ignores the return
-            // value.
-            if matches!(r, Ok(Value::Bool(false))) { set(ev, EV_PREVENTED, Value::Bool(true)); }
-            let imm = matches!(ev.borrow().get_own(EV_STOPIMM).and_then(|p| p.value.clone()),
-                               Some(Value::Bool(true)));
-            if imm { break; }
         }
-        let stop = matches!(ev.borrow().get_own(EV_STOP).and_then(|p| p.value.clone()),
-                            Some(Value::Bool(true)));
-        if stop { break; }
+        if ev_flag(ev, EV_STOPIMM) { return Ok(()) }
     }
-    set(ev, EV_CUR, Value::Null);
-    set(ev, EV_PHASE, Value::Num(0.0));
-    Ok(matches!(ev.borrow().get_own(EV_PREVENTED).and_then(|p| p.value.clone()),
-                Some(Value::Bool(true))))
+    for l in snap {
+        let live = i.doc.as_mut().is_some_and(|d| {
+            let list = &mut d.nodes[node as usize].listeners;
+            let Some(at) = list.iter().position(|x| x.id == l.id) else { return false };
+            if l.once { list.remove(at); }
+            true
+        });
+        if !live { continue }
+        set_ev(ev, EV_PASSIVE, Value::Bool(l.passive));
+        let r = if i.is_callable(&l.cb) {
+            i.call(&l.cb, this_node.clone(), &[evv.clone()])
+        } else {
+            match i.get(&l.cb, "handleEvent") {
+                Ok(h) if i.is_callable(&h) => i.call(&h, l.cb.clone(), &[evv.clone()]),
+                Ok(_) => i.type_err("the listener has no handleEvent method"),
+                Err(e) => Err(e),
+            }
+        };
+        set_ev(ev, EV_PASSIVE, Value::Bool(false));
+        // A throwing listener is reported and does not stop the others.
+        if let Err(e) = r {
+            let msg = super::modules::describe(i, e);
+            i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
+        }
+        if ev_flag(ev, EV_STOPIMM) { break }
+    }
+    Ok(())
+}
+
+/// The third argument of `addEventListener`: `(capture, once, passive,
+/// signal)`.
+fn listener_options(i: &mut Interp, opt: Option<&Value>) -> C<(bool, bool, bool, Option<Value>)> {
+    match opt {
+        None | Some(Value::Undefined) | Some(Value::Null) => Ok((false, false, false, None)),
+        Some(v @ Value::Obj(_)) => {
+            let capture = i.get(v, "capture")?.truthy();
+            let once = i.get(v, "once")?.truthy();
+            let passive = i.get(v, "passive")?.truthy();
+            let signal = match i.get(v, "signal")? {
+                Value::Undefined => None,
+                s if super::fetch::is_signal(i, &s) => Some(s),
+                _ => return i.type_err("addEventListener: signal is not an AbortSignal"),
+            };
+            Ok((capture, once, passive, signal))
+        }
+        Some(v) => Ok((v.truthy(), false, false, None)),
+    }
+}
+
+/// Register a listener from Rust (an abort algorithm on a signal, say).
+pub fn add_listener(i: &mut Interp, target: &Value, kind: &str, cb: Value, once: bool) {
+    let Ok(id) = node_of(i, target) else { return };
+    let Some(d) = &mut i.doc else { return };
+    let lid = d.next_listener;
+    d.next_listener += 1;
+    d.nodes[id as usize].listeners.push(Listener { kind: Rc::from(kind), cb, capture: false,
+        once, passive: false, id: lid });
+}
+
+/// A trusted `Event` of this type with `target` set, not dispatched: the
+/// argument for an `on…` property called directly.
+pub fn plain_event(i: &mut Interp, kind: &str, target: &Value) -> Value {
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    set_ev(&ev, EV_TARGET, target.clone());
+    set_ev(&ev, EV_CUR, target.clone());
+    Value::Obj(ev)
+}
+
+/// Fire a plain, trusted, non-bubbling event at a target that has a node
+/// (an `AbortSignal`, a `<dialog>`). Returns true if it was canceled.
+pub fn fire_simple(i: &mut Interp, target: &Value, kind: &str, cancelable: bool) -> C<bool> {
+    let Ok(id) = node_of(i, target) else { return Ok(false) };
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    set_ev(&ev, EV_CANCELABLE, Value::Bool(cancelable));
+    deliver(i, &ev, kind, &[id])
 }
 
 /// `theme` -> `data-theme`, `myKey` -> `data-my-key`. The inverse of
@@ -5789,6 +6097,24 @@ mod tests {
              console.log(getComputedStyle(document.getElementById('b')).fontSize);",
         );
         assert_eq!(out, ["none", "rgb(13, 110, 253)", "20px"]);
+    }
+
+    /// Custom properties reach `getPropertyValue` through inheritance; the
+    /// side colours resolve `currentColor`; an inline custom property keeps
+    /// its case.
+    #[test]
+    fn computed_custom_properties_and_border_colors() {
+        let out = run(
+            "<html><head><style>:root{--brand:#123} .c{color:#00ff00;border:1px solid red;\
+             border-left-color:currentColor;--local:2px}</style></head>\
+             <body><p class='c' id='p' style='background:url(data:image/png;base64,AA)'>x</p></body></html>",
+            "var cs = getComputedStyle(document.getElementById('p'));\
+             console.log(cs.getPropertyValue('--brand'), cs.getPropertyValue('--local'), cs.getPropertyValue('--nope') === '');\
+             console.log(cs.borderTopColor, cs.borderLeftColor);\
+             var st = document.getElementById('p').style;\
+             st.setProperty('--X', '1'); console.log(st.getPropertyValue('--X'), st.background.indexOf('base64') > 0);",
+        );
+        assert_eq!(out, ["#123 2px true", "rgb(255, 0, 0) rgb(0, 255, 0)", "1 true"]);
     }
 
     /// `new Image()` is a real `img` element that arrives in the tree and
@@ -6454,26 +6780,177 @@ fn lossy_utf8(b: &[u8]) -> String {
     }
 }
 
-/// `customElements`: the custom element registry.
+// ── Custom elements (HTML §4.13) ────────────────────────────────────────────
+
+/// `DomNode::ce`: no definition applied yet.
+pub const CE_NONE: u8 = 0;
+/// An upgrade is running the constructor.
+pub const CE_RUNNING: u8 = 1;
+pub const CE_CUSTOM: u8 = 2;
+pub const CE_FAILED: u8 = 3;
+/// On a fragment: template contents, which are never upgraded.
+pub const CE_INERT: u8 = 4;
+
+/// `:defined`: "uncustomized" or "custom" (HTML §4.16.3).
+pub fn ce_defined(n: &DomNode) -> bool {
+    n.ce == CE_CUSTOM || (n.ce == CE_NONE && !crate::dom::valid_custom_element_name(&n.tag))
+}
+
+/// The tag of a shadow root node.
+pub const SHADOW_TAG: &str = "#shadow-root";
+
+/// One `customElements.define` (HTML §4.13.4 "custom element definition").
+/// The callbacks are read once, at definition, as the spec requires.
+pub struct CeDef {
+    pub name: Rc<str>,
+    pub ctor: Value,
+    pub proto: Gc,
+    pub observed: Vec<Rc<str>>,
+    pub connected: Value,
+    pub disconnected: Value,
+    pub adopted: Value,
+    pub attr_changed: Value,
+    pub form_associated: bool,
+}
+
+#[derive(Default)]
+pub struct CeRegistry {
+    pub defs: Vec<CeDef>,
+    /// `whenDefined` promises still waiting, by name.
+    pub waiting: Vec<(Rc<str>, Gc)>,
+    /// The construction stack: definition index and the element an upgrade
+    /// constructs; `None` once `super()` has handed the element out.
+    pub stack: Vec<(usize, Option<u32>)>,
+    /// `define` is reading the class; a nested `define` throws.
+    pub defining: bool,
+}
+
+impl CeRegistry {
+    pub fn by_name(&self, name: &str) -> Option<usize> {
+        self.defs.iter().position(|d| &*d.name == name)
+    }
+
+    /// Every value the registry keeps alive.
+    pub fn values(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for d in &self.defs {
+            out.push(d.ctor.clone());
+            out.push(Value::Obj(d.proto.clone()));
+            for v in [&d.connected, &d.disconnected, &d.adopted, &d.attr_changed] {
+                out.push(v.clone());
+            }
+        }
+        for (_, p) in &self.waiting { out.push(Value::Obj(p.clone())); }
+        out
+    }
+}
+
+/// A `DOMException` with the given name (WebIDL §3.14.1).
+pub fn dom_exc(i: &mut Interp, name: &str, msg: &str) -> Abrupt {
+    let proto = i.realm.global.borrow().get_own("DOMException")
+        .and_then(|p| p.value.clone())
+        .and_then(|c| match c { Value::Obj(c) => c.borrow().get_own("prototype").and_then(|p| p.value.clone()), _ => None });
+    let e = match proto {
+        Some(Value::Obj(p)) => new_kind(Some(p), ObjKind::Error),
+        _ => return i.throw_kind("Error", msg),
+    };
+    {
+        let mut b = e.borrow_mut();
+        b.define("message", Prop::builtin(Value::string(String::from(msg))));
+        b.define("name", Prop::builtin(Value::string(String::from(name))));
+        b.define("code", Prop::builtin(Value::Num(dom_exc_code(name))));
+    }
+    Abrupt::Throw(Value::Obj(e))
+}
+
+/// The legacy code of a `DOMException` name (WebIDL §3.14.2), 0 for new names.
+fn dom_exc_code(name: &str) -> f64 {
+    const CODES: &[(&str, f64)] = &[
+        ("IndexSizeError", 1.0), ("HierarchyRequestError", 3.0), ("WrongDocumentError", 4.0),
+        ("InvalidCharacterError", 5.0), ("NoModificationAllowedError", 7.0),
+        ("NotFoundError", 8.0), ("NotSupportedError", 9.0), ("InvalidStateError", 11.0),
+        ("SyntaxError", 12.0), ("InvalidModificationError", 13.0), ("NamespaceError", 14.0),
+        ("InvalidAccessError", 15.0), ("TypeMismatchError", 17.0), ("SecurityError", 18.0),
+        ("NetworkError", 19.0), ("AbortError", 20.0), ("URLMismatchError", 21.0),
+        ("QuotaExceededError", 22.0), ("TimeoutError", 23.0), ("InvalidNodeTypeError", 24.0),
+        ("DataCloneError", 25.0),
+    ];
+    CODES.iter().find(|(n, _)| *n == name).map(|(_, c)| *c).unwrap_or(0.0)
+}
+
+fn install_dom_exception(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let proto = new_obj(Some(realm.error_proto.clone()));
+    let ctor = native(Some(fp.clone()), |i, this, a| {
+        if !i.native_new { return i.type_err("Constructor DOMException requires 'new'") }
+        let msg = match a.first() { None | Some(Value::Undefined) => String::new(),
+                                    Some(v) => i.to_string(v)?.to_string() };
+        let name = match a.get(1) { None | Some(Value::Undefined) => String::from("Error"),
+                                    Some(v) => i.to_string(v)?.to_string() };
+        let Abrupt::Throw(e) = dom_exc(i, &name, &msg) else { return Ok(Value::Undefined) };
+        // A subclass gets its own prototype through the receiver.
+        if let (Value::Obj(e), Value::Obj(t)) = (&e, &this) {
+            let p = t.borrow().proto.clone();
+            if p.is_some() { e.borrow_mut().proto = p; }
+        }
+        Ok(e)
+    }, "DOMException", 0, true);
+    ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+    proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+    proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMException")));
+    for (n, c) in [("INDEX_SIZE_ERR", 1.0), ("NOT_FOUND_ERR", 8.0), ("NOT_SUPPORTED_ERR", 9.0),
+                   ("INVALID_STATE_ERR", 11.0), ("SYNTAX_ERR", 12.0), ("SECURITY_ERR", 18.0),
+                   ("NETWORK_ERR", 19.0), ("ABORT_ERR", 20.0), ("TIMEOUT_ERR", 23.0),
+                   ("DATA_CLONE_ERR", 25.0)] {
+        ctor.borrow_mut().define(n, Prop::frozen(Value::Num(c)));
+        proto.borrow_mut().define(n, Prop::frozen(Value::Num(c)));
+    }
+    realm.global.borrow_mut().define("DOMException", Prop::builtin(Value::Obj(ctor)));
+}
+
+/// `customElements` and the `HTMLElement` constructor.
 ///
-/// Not implemented: shadow roots (`attachShadow`).
-///
-/// Supports define, get, and making `class X extends HTMLElement`
-/// constructible: `new X()` creates a real node with the registered tag,
-/// determined by the prototype of the object being built.
+/// Not implemented: customized built-in elements (`extends`, `is`); the
+/// option is accepted and ignored.
 fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
     let fp = realm.function_proto.clone();
 
-    // `HTMLElement` is a real constructor from here on; without it `super()`
-    // in every component throws "Illegal constructor".
+    // HTML §3.2.3 "HTML element constructors". The class comes from the
+    // receiver's prototype, which `super()` and `Reflect.construct` set to
+    // the new target's.
     let he = native(Some(fp.clone()), |i, this, _| {
         if !i.native_new { return i.type_err("Illegal constructor"); }
-        let Some(tag) = custom_tag_of(i, &this) else {
-            return i.type_err("HTMLElement constructor: the class is not a registered custom element");
+        // `Reflect.construct(HTMLElement, [], X)` passes no receiver; the
+        // class is the new target.
+        let this = match (&this, i.native_new_target.clone()) {
+            (Value::Undefined, Some(nt)) => match i.get(&nt, "prototype")? {
+                Value::Obj(p) => Value::Obj(new_obj(Some(p))),
+                _ => this,
+            },
+            _ => this,
         };
+        let Some(k) = ce_def_of(i, &this) else {
+            return i.type_err("Illegal constructor: the class is not a registered custom element");
+        };
+        let proto = match &this { Value::Obj(o) => o.borrow().proto.clone(), _ => None }
+            .unwrap_or_else(|| i.custom.defs[k].proto.clone());
+        // An upgrade: the element is already there and waits on the stack.
+        if let Some(pos) = i.custom.stack.iter().rposition(|(d, _)| *d == k) {
+            let Some(id) = i.custom.stack[pos].1.take() else {
+                return Err(dom_exc(i, "InvalidStateError",
+                    "the custom element constructor called super() twice"));
+            };
+            let el = wrap(i, id);
+            if let Value::Obj(o) = &el { o.borrow_mut().proto = Some(proto); }
+            return Ok(el);
+        }
+        let name = i.custom.defs[k].name.clone();
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
-        let id = d.create(ELEMENT_NODE, &tag);
-        Ok(wrap(i, id))
+        let id = d.create(ELEMENT_NODE, &name);
+        d.nodes[id as usize].ce = CE_CUSTOM;
+        let el = wrap(i, id);
+        if let Value::Obj(o) = &el { o.borrow_mut().proto = Some(proto); }
+        Ok(el)
     }, "HTMLElement", 0, true);
     he.borrow_mut().define("prototype", Prop::frozen(Value::Obj(html_element_proto.clone())));
     html_element_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(he.clone())));
@@ -6481,78 +6958,329 @@ fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
 
     let ce = new_obj(Some(realm.object_proto.clone()));
     meth(&ce, "define", |i, _, a| {
-        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let name: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let ctor = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if !i.is_callable(&ctor) { return i.type_err("customElements.define: not a constructor"); }
-        // A name without a hyphen is not a valid custom element name; the spec
-        // throws.
-        if !name.contains('-') {
-            return i.type_err(&alloc::format!("'{name}' is not a valid custom element name"));
+        if !i.is_constructor(&ctor) {
+            return i.type_err("customElements.define: the second argument is not a constructor");
         }
-        if i.custom.iter().any(|(t, _)| **t == *name) {
-            return i.type_err(&alloc::format!("'{name}' has already been defined"));
+        if !crate::dom::valid_custom_element_name(&name) {
+            return Err(dom_exc(i, "SyntaxError",
+                &alloc::format!("'{name}' is not a valid custom element name")));
         }
-        // `observedAttributes` is read here, at definition, as the spec says.
-        // Libraries hook their setup into this getter (e.g. a `static get` that
-        // calls `finalize()`).
-        let obs = i.get(&ctor, "observedAttributes")?;
-        if !matches!(obs, Value::Undefined | Value::Null) {
-            // Read only; the list itself is needed once `attributeChangedCallback`
-            // exists.
-            let _ = i.iterate(&obs);
+        if i.custom.by_name(&name).is_some() {
+            return Err(dom_exc(i, "NotSupportedError",
+                &alloc::format!("the name '{name}' has already been defined")));
         }
-        i.custom.push((name, ctor));
+        if i.custom.defs.iter().any(|d| d.ctor.strict_eq(&ctor)) {
+            return Err(dom_exc(i, "NotSupportedError",
+                "this constructor has already been used with another name"));
+        }
+        if i.custom.defining {
+            return Err(dom_exc(i, "NotSupportedError", "customElements.define is already running"));
+        }
+        i.custom.defining = true;
+        let read = ce_read_class(i, &name, &ctor);
+        i.custom.defining = false;
+        let def = read?;
+        i.custom.defs.push(def);
+        let k = i.custom.defs.len() - 1;
+        if let Some(d) = &mut i.doc { d.ce_on = true; }
+        // Upgrade candidates: the elements of that name in the document, in
+        // shadow-including tree order.
+        let mut cands = Vec::new();
+        if let Some(d) = &i.doc { ce_walk(d, d.doc, &mut cands); }
+        cands.retain(|&n| i.doc.as_ref().is_some_and(|d|
+            d.nodes[n as usize].ce == CE_NONE && *d.nodes[n as usize].tag == *name));
+        for n in cands { ce_upgrade(i, n, k); }
+        let ctor = i.custom.defs[k].ctor.clone();
+        while let Some(pos) = i.custom.waiting.iter().position(|(t, _)| *t == name) {
+            let (_, p) = i.custom.waiting.remove(pos);
+            super::promise::resolve_promise(i, &p, ctor.clone());
+        }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&ce, "get", |i, _, a| {
         let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
+        Ok(i.custom.by_name(&name).map(|k| i.custom.defs[k].ctor.clone())
             .unwrap_or(Value::Undefined))
     }, 1, &fp);
     meth(&ce, "getName", |i, _, a| {
         let c = a.first().cloned().unwrap_or(Value::Undefined);
-        Ok(i.custom.iter().find(|(_, x)| x.strict_eq(&c))
-            .map(|(t, _)| Value::Str(t.clone())).unwrap_or(Value::Null))
+        Ok(i.custom.defs.iter().find(|d| d.ctor.strict_eq(&c))
+            .map(|d| Value::Str(d.name.clone())).unwrap_or(Value::Null))
     }, 1, &fp);
-    // `whenDefined` resolves immediately: all definitions happen at load, so
-    // the answer is always already there.
     meth(&ce, "whenDefined", |i, _, a| {
-        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let v = i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
-            .unwrap_or(Value::Undefined);
+        let name: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        if !crate::dom::valid_custom_element_name(&name) {
+            let p = super::promise::new_promise(i);
+            let Abrupt::Throw(e) = dom_exc(i, "SyntaxError",
+                &alloc::format!("'{name}' is not a valid custom element name"))
+                else { return Ok(Value::Obj(p)) };
+            super::promise::settle(i, &p, e, true);
+            return Ok(Value::Obj(p));
+        }
+        if let Some(k) = i.custom.by_name(&name) {
+            let p = super::promise::new_promise(i);
+            let c = i.custom.defs[k].ctor.clone();
+            super::promise::resolve_promise(i, &p, c);
+            return Ok(Value::Obj(p));
+        }
+        // The same promise for every call until the name is defined.
+        if let Some((_, p)) = i.custom.waiting.iter().find(|(t, _)| *t == name) {
+            return Ok(Value::Obj(p.clone()));
+        }
         let p = super::promise::new_promise(i);
-        super::promise::resolve_promise(i, &p, v);
+        i.custom.waiting.push((name, p.clone()));
         Ok(Value::Obj(p))
     }, 1, &fp);
-    // `upgrade` does nothing: beak builds the tree from HTML before any script
-    // runs and does not upgrade existing nodes later. It exists so the call
-    // does not throw.
-    meth(&ce, "upgrade", |_, _, _| Ok(Value::Undefined), 1, &fp);
+    // Upgrade every element below `root`, connected or not.
+    meth(&ce, "upgrade", |i, _, a| {
+        let root = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let mut list = Vec::new();
+        if let Some(d) = &i.doc { list.push(root); ce_walk(d, root, &mut list); }
+        for n in list { ce_try_upgrade(i, n); }
+        Ok(Value::Undefined)
+    }, 1, &fp);
     ce.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomElementRegistry")));
     realm.global.borrow_mut().define("customElements", Prop::builtin(Value::Obj(ce)));
 }
 
-/// Which registered tag belongs to this object?
-///
-/// Walks the prototype chain from the inside out, which yields the most
-/// derived class. `new.target` would give the same answer but beak does
-/// not pass it through; `construct` has set the prototype before `super()`
-/// runs.
-fn custom_tag_of(i: &Interp, this: &Value) -> Option<Rc<str>> {
+/// Read the class for `define` (HTML §4.13.4 steps 14-15): prototype,
+/// lifecycle callbacks, `observedAttributes`, `formAssociated`.
+fn ce_read_class(i: &mut Interp, name: &Rc<str>, ctor: &Value) -> C<CeDef> {
+    let Value::Obj(proto) = i.get(ctor, "prototype")? else {
+        return i.type_err("customElements.define: the prototype is not an object");
+    };
+    let pv = Value::Obj(proto.clone());
+    let mut cbs = [Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined];
+    for (k, key) in ["connectedCallback", "disconnectedCallback", "adoptedCallback",
+                     "attributeChangedCallback"].iter().enumerate() {
+        let v = i.get(&pv, key)?;
+        if !matches!(v, Value::Undefined) && !i.is_callable(&v) {
+            return i.type_err(&alloc::format!("customElements.define: {key} is not a function"));
+        }
+        cbs[k] = v;
+    }
+    let mut observed = Vec::new();
+    if !matches!(cbs[3], Value::Undefined) {
+        let obs = i.get(ctor, "observedAttributes")?;
+        if !matches!(obs, Value::Undefined) {
+            for v in i.iterate(&obs)? { observed.push(i.to_string(&v)?); }
+        }
+    }
+    let fa = i.get(ctor, "formAssociated")?;
+    let form_associated = fa.truthy();
+    let [connected, disconnected, adopted, attr_changed] = cbs;
+    Ok(CeDef { name: name.clone(), ctor: ctor.clone(), proto, observed, connected,
+               disconnected, adopted, attr_changed, form_associated })
+}
+
+/// Which definition does this receiver belong to? The innermost prototype
+/// on its chain that is a defined class's prototype, which is the new
+/// target's.
+fn ce_def_of(i: &Interp, this: &Value) -> Option<usize> {
     let Value::Obj(o) = this else { return None };
     let mut cur = o.borrow().proto.clone();
     while let Some(p) = cur {
-        for (tag, ctor) in &i.custom {
-            let Value::Obj(c) = ctor else { continue };
-            let cp = c.borrow().get_own("prototype").and_then(|x| x.value.clone());
-            if matches!(cp, Some(Value::Obj(cp)) if Rc::ptr_eq(&cp, &p)) {
-                return Some(tag.clone());
-            }
+        if let Some(k) = i.custom.defs.iter().position(|d| Rc::ptr_eq(&d.proto, &p)) {
+            return Some(k);
         }
         let n = p.borrow().proto.clone();
         cur = n;
     }
     None
+}
+
+/// The elements below `id` in shadow-including tree order, without `id`.
+/// Template contents are skipped: they are never upgraded.
+fn ce_walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
+    let n = &d.nodes[id as usize];
+    if n.kind == ELEMENT_NODE && &*n.tag == "template" { return }
+    if let Some(s) = n.shadow {
+        if &*n.tag != SHADOW_TAG { ce_walk(d, s, out); }
+    }
+    for &c in &n.children {
+        if d.nodes[c as usize].kind == ELEMENT_NODE && !d.nodes[c as usize].tag.starts_with('#') {
+            out.push(c);
+        }
+        ce_walk(d, c, out);
+    }
+}
+
+/// `id` and the elements below it.
+fn ce_subtree(i: &Interp, id: u32) -> Vec<u32> {
+    let Some(d) = &i.doc else { return Vec::new() };
+    let mut out = Vec::new();
+    if d.nodes[id as usize].kind == ELEMENT_NODE && !d.nodes[id as usize].tag.starts_with('#') {
+        out.push(id);
+    }
+    ce_walk(d, id, &mut out);
+    out
+}
+
+/// Is `id` inside template contents?
+fn ce_inert(d: &Doc, mut id: u32) -> bool {
+    loop {
+        let n = &d.nodes[id as usize];
+        if n.ce == CE_INERT { return true }
+        match n.parent {
+            Some(p) => {
+                if &*d.nodes[p as usize].tag == "template" { return true }
+                id = p;
+            }
+            None => return false,
+        }
+    }
+}
+
+/// Upgrade `id` if it is undefined and its name is defined.
+fn ce_try_upgrade(i: &mut Interp, id: u32) {
+    let k = {
+        let Some(d) = &i.doc else { return };
+        let n = &d.nodes[id as usize];
+        if n.kind != ELEMENT_NODE || n.ce != CE_NONE || !n.tag.contains('-') { return }
+        match i.custom.by_name(&n.tag) { Some(k) => k, None => return }
+    };
+    ce_upgrade(i, id, k);
+}
+
+/// HTML §4.13.5 "upgrade an element": run the constructor on the existing
+/// element, then report its attributes and, if connected, the connection.
+fn ce_upgrade(i: &mut Interp, id: u32, k: usize) {
+    {
+        let Some(d) = &mut i.doc else { return };
+        if d.nodes[id as usize].ce != CE_NONE { return }
+        d.nodes[id as usize].ce = CE_RUNNING;
+    }
+    let ctor = i.custom.defs[k].ctor.clone();
+    i.custom.stack.push((k, Some(id)));
+    let r = i.construct(&ctor, &[]);
+    i.custom.stack.pop();
+    let el = i.doc.as_ref().and_then(|d| d.nodes[id as usize].js.clone());
+    let failure = match r {
+        Ok(Value::Obj(o)) if el.as_ref().is_some_and(|e| Rc::ptr_eq(e, &o)) => None,
+        Ok(_) => Some(String::from(
+            "TypeError: the custom element constructor did not produce the element")),
+        Err(e) => Some(super::modules::describe(i, e)),
+    };
+    let name = i.custom.defs[k].name.clone();
+    if let Some(msg) = failure {
+        if let Some(d) = &mut i.doc { d.nodes[id as usize].ce = CE_FAILED; d.touch(); }
+        i.console_push(alloc::format!("custom element <{name}>: upgrade failed: {msg}"));
+        return;
+    }
+    let attrs = match &mut i.doc {
+        Some(d) => { d.nodes[id as usize].ce = CE_CUSTOM; d.touch(); d.nodes[id as usize].attrs.clone() }
+        None => return,
+    };
+    if !matches!(i.custom.defs[k].attr_changed, Value::Undefined) {
+        for (an, av) in attrs {
+            if i.custom.defs[k].observed.iter().any(|o| *o == an) {
+                let cb = i.custom.defs[k].attr_changed.clone();
+                ce_call(i, id, &cb, "attributeChangedCallback",
+                        &[Value::Str(an), Value::Null, Value::Str(av), Value::Null]);
+            }
+        }
+    }
+    if i.doc.as_ref().is_some_and(|d| d.connected(id)) {
+        let cb = i.custom.defs[k].connected.clone();
+        ce_call(i, id, &cb, "connectedCallback", &[]);
+    }
+}
+
+/// Call one lifecycle callback. An exception is reported, not propagated:
+/// the DOM operation that caused it has already happened (HTML §4.13.6).
+fn ce_call(i: &mut Interp, id: u32, cb: &Value, which: &str, args: &[Value]) {
+    if !i.is_callable(cb) { return }
+    let this = wrap(i, id);
+    if let Err(e) = i.call(cb, this, args) {
+        let msg = super::modules::describe(i, e);
+        let tag = i.doc.as_ref().map(|d| d.nodes[id as usize].tag.to_string()).unwrap_or_default();
+        i.console_push(alloc::format!("{which} <{tag}>: {msg}"));
+    }
+}
+
+/// The definition of a custom element in the "custom" state.
+fn ce_def_at(i: &Interp, id: u32) -> Option<usize> {
+    let d = i.doc.as_ref()?;
+    let n = &d.nodes[id as usize];
+    if n.ce != CE_CUSTOM { return None }
+    i.custom.by_name(&n.tag)
+}
+
+/// Run the custom element reactions queued by tree changes (CEReactions).
+///
+/// The queue is taken whole first: a callback that changes the tree queues
+/// new reactions, and the nested flush after that change runs them before
+/// the callback continues, as the spec's element queue stack does.
+pub fn ce_flush(i: &mut Interp) {
+    let evs = match &mut i.doc {
+        Some(d) if !d.ce_queue.is_empty() => core::mem::take(&mut d.ce_queue),
+        _ => return,
+    };
+    for ev in evs {
+        match ev {
+            CeEvent::Inserted(n) => {
+                for e in ce_subtree(i, n) {
+                    match ce_def_at(i, e) {
+                        Some(k) => {
+                            let cb = i.custom.defs[k].connected.clone();
+                            ce_call(i, e, &cb, "connectedCallback", &[]);
+                        }
+                        None => ce_try_upgrade(i, e),
+                    }
+                }
+            }
+            CeEvent::Created(n) => {
+                if i.doc.as_ref().is_some_and(|d| ce_inert(d, n)) { continue }
+                for e in ce_subtree(i, n) { ce_try_upgrade(i, e); }
+            }
+            CeEvent::Removed(n) => {
+                for e in ce_subtree(i, n) {
+                    if let Some(k) = ce_def_at(i, e) {
+                        let cb = i.custom.defs[k].disconnected.clone();
+                        ce_call(i, e, &cb, "disconnectedCallback", &[]);
+                    }
+                }
+            }
+            CeEvent::Attr(e, name, old, new) => {
+                let Some(k) = ce_def_at(i, e) else { continue };
+                if !i.custom.defs[k].observed.iter().any(|o| *o == name) { continue }
+                let cb = i.custom.defs[k].attr_changed.clone();
+                let v = |x: Option<Rc<str>>| x.map(Value::Str).unwrap_or(Value::Null);
+                ce_call(i, e, &cb, "attributeChangedCallback",
+                        &[Value::Str(name), v(old), v(new), Value::Null]);
+            }
+        }
+    }
+}
+
+/// `document.createElement` for a defined name (HTML §4.13.3 "create an
+/// element", synchronous custom elements flag set). A constructor that
+/// fails is reported and yields a failed element, as in browsers.
+fn ce_create_sync(i: &mut Interp, k: usize) -> C<Value> {
+    let ctor = i.custom.defs[k].ctor.clone();
+    let name = i.custom.defs[k].name.clone();
+    let msg = match i.construct(&ctor, &[]) {
+        Ok(v) => {
+            let ok = match node_of_ref(i, &v) {
+                Ok(id) => i.doc.as_ref().is_some_and(|d| {
+                    let n = &d.nodes[id as usize];
+                    n.kind == ELEMENT_NODE && *n.tag == *name && n.parent.is_none()
+                        && n.children.is_empty() && n.attrs.is_empty()
+                }),
+                Err(()) => false,
+            };
+            if ok { return Ok(v) }
+            String::from("NotSupportedError: the constructor did not return a fresh element")
+        }
+        Err(e) => super::modules::describe(i, e),
+    };
+    i.console_push(alloc::format!("custom element <{name}>: {msg}"));
+    let Some(d) = &mut i.doc else { return i.type_err("no document") };
+    let id = d.create(ELEMENT_NODE, &name);
+    d.nodes[id as usize].ce = CE_FAILED;
+    Ok(wrap(i, id))
 }
 
 /// Move the DOM node from one wrapper object to another.
@@ -6637,10 +7365,7 @@ fn select_index(i: &mut Interp, sel: u32, n: i64) {
 /// as a function because `option.text` needs it too.
 fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     let Some(d) = &mut i.doc else { return };
-    d.touch();
-    let old: Vec<u32> = d.nodes[id as usize].children.clone();
-    for c in old { d.nodes[c as usize].parent = None; }
-    d.nodes[id as usize].children.clear();
+    d.clear_children(id);
     if !s.is_empty() {
         let tid = d.create(TEXT_NODE, "#text");
         d.nodes[tid as usize].text = s.into();
@@ -6648,26 +7373,8 @@ fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     }
 }
 
-/// Marker on the wrapper: `connectedCallback` has run. NUL-prefixed, so
-/// invisible to scripts.
-const CE_CONNECTED: &str = "\0!ceconn";
-
-/// Is this node really attached to the document?
-fn is_connected(d: &Doc, mut id: u32) -> bool {
-    loop {
-        if id == d.doc { return true }
-        match d.nodes[id as usize].parent { Some(p) => id = p, None => return false }
-    }
-}
-
-/// The custom elements of a subtree, outside in.
-fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
-    let n = &d.nodes[id as usize];
-    // A tag without a hyphen cannot be a custom element; the spec requires
-    // one.
-    if n.kind == ELEMENT_NODE && n.tag.contains('-') { out.push(id); }
-    for c in n.children.clone() { collect_custom(d, c, out); }
-}
+/// Is this node attached to the document, through shadow roots?
+fn is_connected(d: &Doc, id: u32) -> bool { d.connected(id) }
 
 /// `document.write`/`writeln`: insert the fragment after the writing
 /// `<script>` and connect everything in it.
@@ -6707,32 +7414,12 @@ fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> 
     Ok(Value::Undefined)
 }
 
-/// Run `connectedCallback` for everything that just entered the document.
-///
-/// Once per element, marked on the wrapper: components build their content
-/// there, and a second run would duplicate it. An exception in the callback
-/// does not abort the insertion (as in browsers) but is logged to the
-/// console.
+/// Settle what just entered the tree: stylesheets and scripts start loading,
+/// custom element reactions run.
 fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     settle_stylesheet(i, id);
     settle_script(i, id);
-    if i.custom.is_empty() { return Ok(Value::Undefined) }
-    if !i.doc.as_ref().is_some_and(|d| is_connected(d, id)) { return Ok(Value::Undefined) }
-    let mut list = Vec::new();
-    if let Some(d) = &i.doc { collect_custom(d, id, &mut list); }
-    for n in list {
-        let v = wrap(i, n);
-        let Value::Obj(o) = &v else { continue };
-        if o.borrow().get_own(CE_CONNECTED).is_some() { continue }
-        o.borrow_mut().define(CE_CONNECTED, Prop::frozen(Value::Bool(true)));
-        let f = i.get(&v, "connectedCallback")?;
-        if !i.is_callable(&f) { continue }
-        if let Err(e) = i.call(&f, v.clone(), &[]) {
-            let msg = super::modules::describe(i, e);
-            let tag = i.doc.as_ref().map(|d| d.nodes[n as usize].tag.to_string()).unwrap_or_default();
-            i.console_push(alloc::format!("connectedCallback <{tag}>: {msg}"));
-        }
-    }
+    ce_flush(i);
     Ok(Value::Undefined)
 }
 
@@ -7133,3 +7820,266 @@ pub fn pull_control_values(doc: &Doc, forms: &crate::forms::Forms,
         if let Some(b) = ch { state.set_checked(seq, b); }
     }
 }
+
+#[cfg(test)]
+mod ce_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// Run on both engines; the console must agree.
+    pub(super) fn run(html: &str, js: &str) -> Vec<String> {
+        let mut outs = Vec::new();
+        for vm_off in [false, true] {
+            let dom = crate::dom::parse(html);
+            let mut i = super::super::interp::Interp::new();
+            i.vm_off = vm_off;
+            i.set_document(super::Doc::from_dom(&dom));
+            let prog = super::super::parse(js, false).expect("parses");
+            if let Err(e) = i.run_program(&prog) {
+                let m = super::super::modules::describe(&mut i, e);
+                i.console_push(alloc::format!("THREW {m}"));
+            }
+            super::super::promise::run_jobs(&mut i);
+            for _ in 0..4 { if i.run_timers() == 0 { break } }
+            outs.push(i.take_console());
+        }
+        assert_eq!(outs[0], outs[1], "tree walker and VM disagree");
+        outs.pop().unwrap()
+    }
+
+    #[test]
+    fn define_upgrades_existing_elements_in_document_order() {
+        let out = run(
+            "<body><x-a id=one k=v></x-a><div><x-a id=two></x-a></div><template><x-a id=t></x-a></template></body>",
+            "var held = document.getElementById('one');\
+             class A extends HTMLElement {\
+               static get observedAttributes() { return ['k']; }\
+               constructor() { super(); console.log('ctor ' + this.id); }\
+               connectedCallback() { console.log('conn ' + this.id); }\
+               attributeChangedCallback(n, o, v) { console.log('attr ' + n + ' ' + o + ' ' + v); }\
+               hi() { return 'hi ' + this.id; }\
+             }\
+             customElements.define('x-a', A);\
+             console.log(held instanceof A, held === document.getElementById('one'), held.hi());\
+             console.log(document.querySelector('template').innerHTML.length > 0);",
+        );
+        assert_eq!(out, ["ctor one", "attr k null v", "conn one", "ctor two", "conn two",
+                         "true true hi one", "true"]);
+    }
+
+    #[test]
+    fn create_element_constructs_synchronously_and_insertion_connects() {
+        let out = run(
+            "<body><main></main></body>",
+            "class B extends HTMLElement {\
+               static observedAttributes = ['x'];\
+               connectedCallback() { console.log('conn', this.isConnected); }\
+               disconnectedCallback() { console.log('disc'); }\
+               attributeChangedCallback(n, o, v) { console.log('attr', n, o, v); }\
+             }\
+             customElements.define('x-b', B);\
+             var e = document.createElement('x-b');\
+             console.log(e instanceof B, e.localName, customElements.get('x-b') === B, customElements.getName(B));\
+             e.setAttribute('x', '1'); e.setAttribute('y', '2'); e.removeAttribute('x');\
+             var m = document.querySelector('main');\
+             m.appendChild(e); console.log('after append');\
+             e.remove(); console.log('after remove');\
+             m.innerHTML = '<x-b x=7></x-b>';\
+             console.log(m.firstChild instanceof B);\
+             var n = new B(); console.log(n.tagName);",
+        );
+        assert_eq!(out, ["true x-b true x-b", "attr x null 1", "attr x 1 null",
+                         "conn true", "after append", "disc", "after remove",
+                         "attr x null 7", "conn true", "true", "X-B"]);
+    }
+
+    #[test]
+    fn reflect_construct_and_when_defined() {
+        let out = run(
+            "<body><x-c></x-c></body>",
+            "function C() { return Reflect.construct(HTMLElement, [], C); }\
+             C.prototype = Object.create(HTMLElement.prototype);\
+             C.prototype.constructor = C;\
+             Object.setPrototypeOf(C, HTMLElement);\
+             C.prototype.connectedCallback = function() { console.log('conn c'); };\
+             customElements.whenDefined('x-c').then(function(k) { console.log('defined', k === C); });\
+             customElements.define('x-c', C);\
+             console.log(document.querySelector('x-c') instanceof C);\
+             try { customElements.define('x-c', class extends HTMLElement {}); }\
+             catch (e) { console.log(e.name, e instanceof DOMException); }\
+             try { customElements.define('nohyphen', class extends HTMLElement {}); }\
+             catch (e) { console.log(e.name); }\
+             try { new HTMLElement(); } catch (e) { console.log(e.constructor.name); }",
+        );
+        assert_eq!(out, ["conn c", "true", "NotSupportedError true", "SyntaxError",
+                         "TypeError", "defined true"]);
+    }
+
+    #[test]
+    fn a_failing_constructor_leaves_a_failed_element() {
+        let out = run(
+            "<body><x-d></x-d></body>",
+            "customElements.define('x-d', class extends HTMLElement {\
+               constructor() { super(); throw new Error('boom'); } });\
+             document.body.appendChild(document.createElement('x-d'));\
+             console.log('still running');",
+        );
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert!(out[0].contains("upgrade failed") && out[0].contains("boom"), "{out:?}");
+        assert!(out[1].contains("boom"), "{out:?}");
+        assert_eq!(out[2], "still running");
+    }
+
+    #[test]
+    fn nested_insertions_in_callbacks_run_before_the_callback_continues() {
+        let out = run(
+            "<body></body>",
+            "customElements.define('x-in', class extends HTMLElement {\
+               connectedCallback() { console.log('inner'); } });\
+             customElements.define('x-out', class extends HTMLElement {\
+               connectedCallback() { this.appendChild(document.createElement('x-in'));\
+                                     console.log('outer done'); } });\
+             document.body.appendChild(document.createElement('x-out'));",
+        );
+        assert_eq!(out, ["inner", "outer done"]);
+    }
+}
+
+#[cfg(test)]
+mod event_target_tests {
+    use super::ce_tests::run;
+
+    #[test]
+    fn capture_target_bubble_order_once_and_dedupe() {
+        let out = run(
+            "<body><div id=o><p id=t>x</p></div></body>",
+            "var o = document.getElementById('o'), t = document.getElementById('t'), log = [];\
+             function f(e) { log.push('o-bubble:' + e.eventPhase); }\
+             o.addEventListener('ping', f); o.addEventListener('ping', f);\
+             o.addEventListener('ping', e => log.push('o-capture:' + e.eventPhase), true);\
+             t.addEventListener('ping', e => log.push('t:' + e.eventPhase));\
+             t.addEventListener('ping', e => log.push('t-cap:' + e.eventPhase), { capture: true });\
+             t.addEventListener('ping', { handleEvent(e) { log.push('obj:' + (this !== t)); } }, { once: true });\
+             t.dispatchEvent(new Event('ping', { bubbles: true }));\
+             t.dispatchEvent(new Event('ping'));\
+             console.log(log.join(' '));",
+        );
+        assert_eq!(out, ["o-capture:1 t-cap:2 t:2 obj:true o-bubble:3 o-capture:1 t-cap:2 t:2"]);
+    }
+
+    #[test]
+    fn passive_ignores_prevent_default_and_signal_removes() {
+        let out = run(
+            "<body><p id=t>x</p></body>",
+            "var t = document.getElementById('t'), c = new AbortController(), n = 0;\
+             t.addEventListener('go', e => e.preventDefault(), { passive: true });\
+             console.log(t.dispatchEvent(new Event('go', { cancelable: true })));\
+             t.addEventListener('go', () => n++, { signal: c.signal });\
+             t.dispatchEvent(new Event('go')); c.abort(); t.dispatchEvent(new Event('go'));\
+             console.log(n, c.signal.aborted, c.signal.reason.name, c.signal.reason instanceof DOMException);",
+        );
+        assert_eq!(out, ["true", "1 true AbortError true"]);
+    }
+
+    #[test]
+    fn abort_signal_is_an_event_target() {
+        let out = run(
+            "<body></body>",
+            "var c = new AbortController(), s = c.signal, seen = [];\
+             console.log(s instanceof EventTarget, s instanceof AbortSignal);\
+             s.onabort = e => seen.push('on:' + e.type);\
+             s.addEventListener('abort', e => seen.push('l:' + (e.target === s) + ':' + s.reason));\
+             EventTarget.prototype.addEventListener.call(s, 'abort', () => seen.push('call'));\
+             c.abort('why'); c.abort('again');\
+             console.log(seen.join(' '));\
+             try { s.throwIfAborted(); } catch (e) { console.log('thrown', e); }\
+             var a = AbortSignal.abort(); console.log(a.aborted, a.reason.name);\
+             var c2 = new AbortController(), any = AbortSignal.any([c2.signal, new AbortController().signal]);\
+             c2.abort('first'); console.log(any.aborted, any.reason);\
+             var et = new EventTarget(), hits = 0; et.addEventListener('x', () => hits++);\
+             et.dispatchEvent(new CustomEvent('x')); console.log(hits);\
+             console.log(typeof AbortSignal.timeout(10).aborted);",
+        );
+        assert_eq!(out, ["true true", "on:abort l:true:why call", "thrown why",
+                         "true AbortError", "true first", "1", "boolean"]);
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::ce_tests::run;
+
+    #[test]
+    fn lists_iterate_and_small_document_apis() {
+        let out = run(
+            "<body><p id=p class='a b c' data-x=1>x</p><input name=q><input name=q><input name=r></body>",
+            "var p = document.getElementById('p');\
+             console.log([...p.classList].join(','), [...p.classList.entries()].join('|'));\
+             console.log([...p.attributes].map(a => a.name).join(','));\
+             console.log(document.getElementsByName('q').length);\
+             var f = new DocumentFragment(); f.append('t'); console.log(f instanceof DocumentFragment, f.textContent);\
+             console.log(document.domain);\
+             var r = new Request('https://ex.test/api?x=1', { method: 'post', headers: { 'X-A': '1' }, body: 'b' });\
+             r.headers.append('x-b', '2');\
+             console.log(r instanceof Request, r.method, r.url, [...r.headers.keys()].join(','));\
+             console.log(typeof PerformanceObserver, PerformanceObserver.supportedEntryTypes.length);",
+        );
+        assert_eq!(out, ["a,b,c 0,a|1,b|2,c", "id,class,data-x", "2", "true t",
+                         "", "true POST https://ex.test/api?x=1 x-a,x-b", "function 0"]);
+    }
+
+    #[test]
+    fn constructed_sheets_and_shadow_roots() {
+        let out = run(
+            "<body><div id=h><template shadowrootmode=open><b>in</b></template><i>light</i></div><span id=s></span></body>",
+            "var s = new CSSStyleSheet(); s.replaceSync('a{color:red} @import url(x.css); b{}');\
+             console.log(s.cssRules.length, s.cssRules[0].cssText);\
+             s.insertRule('i{}', 1); console.log(s.cssRules.length);\
+             document.adoptedStyleSheets = [s]; console.log(document.adoptedStyleSheets[0] === s);\
+             var h = document.getElementById('h');\
+             console.log(h.shadowRoot.innerHTML, h.children.length, h.shadowRoot.host === h);\
+             var sr = document.getElementById('s').attachShadow({ mode: 'closed' });\
+             sr.innerHTML = '<em>x</em>';\
+             console.log(sr instanceof ShadowRoot, document.getElementById('s').shadowRoot, sr.mode);\
+             try { document.createElement('img').attachShadow({ mode: 'open' }); } catch (e) { console.log(e.name); }\
+             var hits = []; h.addEventListener('ping', () => hits.push('host'));\
+             h.shadowRoot.firstChild.dispatchEvent(new Event('ping', { bubbles: true }));\
+             console.log(hits.join());",
+        );
+        assert_eq!(out, ["2 a{color:red}", "3", "true", "<b>in</b> 1 true",
+                         "true null closed", "NotSupportedError", "host"]);
+    }
+
+    #[test]
+    fn popover_dialog_internals() {
+        let out = run(
+            "<body><div id=pop popover>p</div><dialog id=d>d</dialog><x-f id=xf></x-f></body>",
+            "var p = document.getElementById('pop'), log = [];\
+             p.addEventListener('beforetoggle', e => log.push('before ' + e.newState));\
+             p.addEventListener('toggle', e => log.push('toggle ' + e.newState));\
+             p.showPopover(); console.log(p.matches(':popover-open'), p.popover);\
+             console.log(p.togglePopover(), p.matches(':popover-open'));\
+             try { document.getElementById('d').showPopover(); } catch (e) { console.log(e.name); }\
+             var d = document.getElementById('d');\
+             d.addEventListener('close', () => log.push('close ' + d.returnValue));\
+             d.showModal(); console.log(d.open, d.matches(':modal'));\
+             d.close('ok'); console.log(d.open, d.matches(':modal'));\
+             class F extends HTMLElement { static formAssociated = true;\
+               constructor() { super(); this.i = this.attachInternals(); } }\
+             customElements.define('x-f', F);\
+             var x = document.getElementById('xf');\
+             x.i.states.add('busy'); console.log(x.matches(':state(busy)'), x.i.states.has('busy'));\
+             x.i.setValidity({ valueMissing: true }, 'need'); console.log(x.i.validity.valid, x.i.validationMessage);\
+             try { x.attachInternals(); } catch (e) { console.log(e.name); }\
+             console.log(p.checkVisibility(), document.createElement('div').checkVisibility());\
+             setTimeout(() => console.log(log.join(' | ')), 0);",
+        );
+        assert_eq!(&out[..8], ["true auto", "false false", "NotSupportedError", "true true",
+                               "false false", "true true", "false need", "NotSupportedError"]);
+        assert_eq!(out[8], "true false");
+        assert!(out[9].starts_with("before open | before closed | toggle") && out[9].ends_with("close ok"),
+                "{out:?}");
+    }
+}
+
+mod extra;

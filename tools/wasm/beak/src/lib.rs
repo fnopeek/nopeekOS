@@ -465,6 +465,9 @@ struct Doc {
     nav_sheet_rounds: usize,
     nav_dynjs_nodes: Option<Vec<u32>>,
     nav_dynjs_rounds: usize,
+    /// The module URLs an `import()` round is fetching, and how many rounds ran.
+    nav_imp_want: Option<Vec<String>>,
+    nav_imp_rounds: usize,
 
     // ── The view of this document ───────────────────────────────────────
     // Not the same as what the frame buffer holds (`LAST_W/H/SY` below):
@@ -576,7 +579,7 @@ impl Doc {
             content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None, pending_link: None,
             find: None, found: Vec::new(), find_at: 0,
             find_pending: [0; 4], find_pending_len: 0,
-            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0,
+            nav_css_count: 0, nav_scripts: None, js: None, nav_js_count: 0, nav_mod_entries: None, nav_mod_want: None, nav_mod_rounds: 0, nav_css_urls: None, nav_css_parts: None, nav_css_want: None, nav_css_rounds: 0, nav_sheet_nodes: None, nav_sheet_rounds: 0, nav_dynjs_nodes: None, nav_dynjs_rounds: 0, nav_imp_want: None, nav_imp_rounds: 0,
             dirty: true, need_full: true, images_dirty: false, geom: None, last_vp: (0, 0),
             told_scroll: 0, told_vp: (0, 0), caret_phase: None, caret_since: 0,
             img_job: -1, img_job_srcs: None, img_missed: Vec::new(),
@@ -1301,6 +1304,8 @@ enum NavStage {
     /// `<script src=…>` inserted by a script. Round-based like `Sheet`: an
     /// arriving chunk inserts the next, which is how a split bundle loads.
     DynJs,
+    /// The module graphs `import()` calls wait for. Round-based like `Mod`.
+    DynImport,
 }
 
 /// Handle of the navigation in flight, or -1.
@@ -1558,6 +1563,7 @@ fn nav_pump(engine: &Engine) -> bool {
         NavStage::Sheet => nav_sheets_arrived(engine),
         NavStage::CssImport => nav_css_imports_arrived(engine),
         NavStage::DynJs => nav_dynjs_arrived(engine),
+        NavStage::DynImport => nav_imports_arrived(engine),
     }
     true
 }
@@ -2147,6 +2153,9 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     // not the requested one: a redirect changes the origin and with it the
     // cookies.
     sess.interp.set_location(url_str());
+    // Import maps apply to every module specifier, so they go in before any
+    // module is resolved.
+    sess.interp.load_import_maps();
     // The cookies this document may see. `HttpOnly` stays out: that flag is
     // the defence against foreign code on the page.
     if !url_str().is_empty() {
@@ -2607,7 +2616,10 @@ fn module_pump(engine: &Engine) -> bool {
             continue;
         }
         for spec in sess.interp.module_requests(&u) {
-            let r = resolve(&u, &spec);
+            let r = match sess.interp.resolve_module(&u, &spec) {
+                Ok(r) => r,
+                Err(e) => { log(&alloc::format!("[beak]   module {u}: {e}")); continue }
+            };
             sess.interp.map_module_dep(&u, &spec, &r);
             queue.push(r);
         }
@@ -2732,7 +2744,7 @@ fn script_pump(engine: &Engine) -> bool {
     let Some(sess) = js_session() else { finish_scripts(engine); return false };
     for _ in 0..8 { if sess.interp.run_timers() == 0 { break } }
     let want = sess.interp.take_pending_scripts();
-    if want.is_empty() { finish_scripts(engine); return false }
+    if want.is_empty() { return import_pump(engine) }
     let rounds = doc().nav_dynjs_rounds;
     if rounds >= MAX_DYNJS_ROUNDS {
         log(&alloc::format!("[beak] dyn-script rounds capped at {MAX_DYNJS_ROUNDS}, {} offen",
@@ -2763,6 +2775,79 @@ fn script_pump(engine: &Engine) -> bool {
         doc_mut().nav_stage_ms = now_ms();
     }
     true
+}
+
+/// One round over the module graphs that `import()` calls wait for.
+///
+/// Returns true if a round trip is running. Settling an import runs module
+/// code, which may insert sheets or scripts, so a settled round goes back to
+/// `sheet_pump`.
+fn import_pump(engine: &Engine) -> bool {
+    let Some(sess) = js_session() else { finish_scripts(engine); return false };
+    let settled = sess.interp.settle_dynamic_imports();
+    let mut want = sess.interp.dynamic_import_wants();
+    if want.is_empty() {
+        if settled > 0 { return sheet_pump(engine) }
+        finish_scripts(engine);
+        return false;
+    }
+    let rounds = doc().nav_imp_rounds;
+    let give_up = |sess: &mut beak_engine::js::Session, want: &[String]| {
+        for u in want { sess.interp.module_unavailable(u); }
+        sess.interp.settle_dynamic_imports();
+    };
+    if rounds >= MAX_MODULE_ROUNDS {
+        log(&alloc::format!("[beak] import() rounds capped at {MAX_MODULE_ROUNDS}, {} offen",
+                            want.len()));
+        give_up(sess, &want);
+        finish_scripts(engine);
+        return false;
+    }
+    want.truncate(MAX_SCRIPT_URLS);
+    let h = begin_batch(&want, SCRIPT_CAP);
+    if h < 0 {
+        log("[beak] import() modules could not be fetched");
+        give_up(sess, &want);
+        finish_scripts(engine);
+        return false;
+    }
+    {
+        doc_mut().nav_imp_want = Some(want);
+        doc_mut().nav_imp_rounds = rounds + 1;
+        doc_mut().nav_stage = NavStage::DynImport;
+        doc_mut().nav_job = h;
+        doc_mut().nav_stage_ms = now_ms();
+    }
+    true
+}
+
+fn nav_imports_arrived(engine: &Engine) {
+    let h = nav_job();
+    let want = doc_mut().nav_imp_want.take().unwrap_or_default();
+    let dst = img_fetch_buf();
+    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want.len());
+    if let Some(sess) = js_session() {
+        for (k, url) in want.iter().enumerate() {
+            let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
+            let text = if n == 0 { None } else { core::str::from_utf8(&dst[off..off + n]).ok() };
+            let parsed = match text {
+                Some(t) => match beak_engine::js::parse(t, true) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        log(&alloc::format!("[beak]   import() FAIL {url}: SyntaxError: {} @{}",
+                                            e.msg, src_pos(t, e.at)));
+                        None
+                    }
+                },
+                None => { log(&alloc::format!("[beak]   import() FAIL {url}: leer")); None }
+            };
+            match parsed {
+                Some(p) => sess.interp.add_module(url, alloc::rc::Rc::new(p)),
+                None => sess.interp.module_unavailable(url),
+            }
+        }
+    }
+    if !sheet_pump(engine) { nav_done(); }
 }
 
 fn nav_dynjs_arrived(engine: &Engine) {

@@ -480,6 +480,8 @@ pub struct Interp {
     /// Which module threw first. An error from a large graph would otherwise
     /// only name the entry point.
     pub module_fail: Option<Rc<str>>,
+    /// The import map and the `import()` calls waiting for the host.
+    pub loader: super::modules::Loader,
     /// Stylesheets inserted by script that still need fetching:
     /// `(node, address as in the attribute)`.
     ///
@@ -535,11 +537,8 @@ pub struct Interp {
     pub submits: Vec<u32>,
     /// Rejected promises with nothing attached (yet).
     pub pending_rejections: Vec<Gc>,
-    /// `customElements`: tag -> constructor, in registration order.
-    ///
-    /// A list, not a table: it is scanned once per `new` to find the tag from
-    /// the prototype, and a handful of entries do not warrant a hash table.
-    pub custom: Vec<(Rc<str>, Value)>,
+    /// `customElements`: the definitions and their construction state.
+    pub custom: super::dombind::CeRegistry,
     /// Call depth. The tree walker uses the Rust stack, so a too-deep JS program
     /// would overflow the host stack, which in the kernel is a crash, not an
     /// error. The limit is mandatory.
@@ -862,7 +861,7 @@ impl Interp {
     }
 
     fn with_realm(realm: Realm) -> Interp {
-        Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
+        Interp { realm, modules: HashMap::new(), module_fail: None, loader: Default::default(), submits: Vec::new(),
                  deadline: None,
                  pending_sheets: Vec::new(),
                  pending_scripts: Vec::new(),
@@ -872,7 +871,7 @@ impl Interp {
                  ran_scripts: Vec::new(),
                  pending_fetches: Vec::new(), fetch_waiting: Vec::new(),
                  aborted_fetches: Vec::new(), next_fetch_id: 1,
-                 pending_rejections: Vec::new(), custom: Vec::new(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
+                 pending_rejections: Vec::new(), custom: Default::default(), depth: 0, max_depth: MAX_DEPTH, steps: 0, max_steps: u64::MAX,
                  fake_now: 0.0, clock: None, epoch_ms: 0.0, doc: None, next_sym: 0, sym_registry: HashMap::new(),
                  #[cfg(feature = "strict-probe")]
                  strict_probe: [0; STRICT_SITES],
@@ -1012,9 +1011,10 @@ impl Interp {
 
         add(&self.history_state, &mut objs);
         for v in self.sym_registry.values() { add(v, &mut objs); }
-        for (_, v) in &self.custom { add(v, &mut objs); }
+        for v in self.custom.values() { add(&v, &mut objs); }
         for (_, (_, v)) in &self.templates { add(v, &mut objs); }
         objs.extend(self.pending_rejections.iter().cloned());
+        objs.extend(self.loader.pending.iter().map(|(_, p)| p.clone()));
         objs.extend(self.socket_objs.values().cloned());
         for o in &self.observers { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
         for o in &self.resize_obs { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
@@ -1048,7 +1048,7 @@ impl Interp {
         if let Some(d) = &self.doc {
             for n in &d.nodes {
                 if let Some(g) = &n.js { objs.push(g.clone()); }
-                for (_, v) in &n.listeners { add(v, &mut objs); }
+                for l in &n.listeners { add(&l.cb, &mut objs); }
                 for (_, v) in &n.handlers { add(v, &mut objs); }
             }
         }
@@ -2128,7 +2128,15 @@ impl Interp {
             _ => return self.type_err("value is not a function"),
         };
         match which {
-            Which::Native(n) => (n.func)(self, this_val, args),
+            Which::Native(n) => {
+                let r = (n.func)(self, this_val, args);
+                // CEReactions: custom element callbacks queued by a DOM operation run
+                // before control returns to script.
+                if self.doc.as_ref().is_some_and(|d| !d.ce_queue.is_empty()) {
+                    super::dombind::ce_flush(self);
+                }
+                r
+            }
             Which::Bound(t, bt, mut ba) => {
                 ba.extend_from_slice(args);
                 self.call(&Value::Obj(t), bt, &ba)
