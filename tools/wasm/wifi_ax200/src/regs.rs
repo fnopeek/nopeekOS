@@ -618,6 +618,7 @@ pub const IWL_RX_MPDU_REORDER_BAID_SHIFT: u32 = 24;
 pub const IWL_RX_MPDU_REORDER_BA_OLD_SN: u32 = 0x8000_0000;
 pub const IWL_RX_MPDU_STATUS_DUPLICATE: u32 = 1 << 22;
 pub const IWL_RX_MPDU_MFLG2_AMSDU: u8 = 0x40;
+pub const IWL_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK: u8 = 0x7f;
 pub const IWL_RX_MPDU_AMSDU_LAST_SUBFRAME: u8 = 0x80;
 // ── Missed beacons (fw/api/mac.h, mvm/mac-ctxt.c) ─────────────────────────
 // Once associated the firmware stops passing beacons to the host — Linux sets

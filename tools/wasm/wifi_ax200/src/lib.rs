@@ -23,6 +23,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 static NPK_CAPS: [u8; 1] = [0x01 | 0x04 | 0x08 | 0x40]; // READ|EXEC|RENDER|HARDWARE
 
 mod ba;
+mod pn;
 mod host;
 mod regs;
 use regs::*;
@@ -107,6 +108,8 @@ struct Agg {
     /// Not an A-MSDU, or the last sub-frame of one. NSSN advances on the first
     /// sub-frame, so acting on it earlier releases frames still in flight.
     amsdu_last: bool,
+    /// CCMP packet number, checked when the frame goes up (`pn::deliver`).
+    pn: pn::Pn,
     /// Unicast QoS data — the only thing a block-ack session covers.
     /// `iwl_mvm_reorder` bypasses everything else, and the frames it lets past
     /// are exactly the ones a client without an address depends on: a DHCP offer
@@ -3808,6 +3811,8 @@ impl Ax200 {
         r.d(self.st.rx_sec_none as u64);
         r.s("  never-decrypted ");
         r.d(self.st.rx_undecrypted as u64);
+        r.s("  replays ");
+        r.d(pn::replays() as u64);
         r.c(b'\n');
         r.s("cpu      work ");
         r.d(work_pp);
@@ -4702,6 +4707,15 @@ impl Ax200 {
         cmd[KEY_OFF_RX_SEQ..KEY_OFF_RX_SEQ + rl].copy_from_slice(&rsc[..rl]);
         self.send_hcmd(0, ADD_STA_KEY_CMD, &cmd); // → LONG_GROUP(1)
         self.pump_rx(20);
+        // The replay counters belong to the key: they start over with it,
+        // the group key's at the RSC the AP sent along.
+        let mut start = 0u64;
+        if group {
+            for (i, b) in rsc.iter().take(6).enumerate() {
+                start |= (*b as u64) << (8 * i);
+            }
+        }
+        pn::reset(group, start);
         if group {
             self.st.gtk_installs = self.st.gtk_installs.wrapping_add(1);
         } else {
@@ -4954,11 +4968,36 @@ impl Ax200 {
             out[14..14 + plen].copy_from_slice(&buf[pl..end]);
             let amsdu = buf[d + MPDU_OFF_MAC_FLAGS2] & IWL_RX_MPDU_MFLG2_AMSDU != 0;
             let last = buf[d + MPDU_OFF_AMSDU_INFO] & IWL_RX_MPDU_AMSDU_LAST_SUBFRAME != 0;
+            let subframe = buf[d + MPDU_OFF_AMSDU_INFO] & IWL_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK;
+            // The CCMP header sits right before LLC/SNAP: the firmware leaves
+            // the IV in place, and its padding comes before the IV.
+            let pn = if protected {
+                if llc < f + hdrlen + IEEE80211_CCMP_HDR_LEN {
+                    return RxKind::None;
+                }
+                let c = &buf[llc - IEEE80211_CCMP_HDR_LEN..llc];
+                // ExtIV is set in every CCMP header; without it these are
+                // not the bytes we take them for.
+                if c[3] & 0x20 == 0 {
+                    return RxKind::None;
+                }
+                pn::Pn {
+                    pn: c[0] as u64 | (c[1] as u64) << 8 | (c[4] as u64) << 16
+                        | (c[5] as u64) << 24 | (c[6] as u64) << 32 | (c[7] as u64) << 40,
+                    idx: if subtype & DOT11_STYPE_QOS != 0 { buf[f + DOT11_HDR_LEN] & 0x0f } else { 16 },
+                    group: multicast,
+                    same_ok: amsdu && subframe != 0,
+                    valid: true,
+                }
+            } else {
+                pn::Pn::NONE
+            };
             RxKind::Ip(14 + plen, Agg {
                 reorder: le32(&buf, d + MPDU_OFF_REORDER_DATA),
                 status,
                 amsdu_last: !amsdu || last,
                 reorderable: subtype & DOT11_STYPE_QOS != 0 && !multicast,
+                pn,
             })
         }
     }
@@ -5566,12 +5605,12 @@ impl Ax200 {
                                     >> IWL_RX_MPDU_REORDER_BAID_SHIFT) as u8;
                                 match ba::by_baid(b) {
                                     Some(sess) => sess.on_frame(
-                                        agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n]),
+                                        agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n], agg.pn),
                                     None => false,
                                 }
                             };
                             if !taken {
-                                host::netdev_submit_rx(&rxbuf[..n]);
+                                pn::deliver(&rxbuf[..n], agg.pn);
                             }
                         }
                         RxKind::Undecoded => { a_undecoded += 1; }

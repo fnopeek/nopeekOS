@@ -68,6 +68,8 @@ static mut POOL: [[u8; BA_FRAME_MAX]; BA_POOL] = [[0; BA_FRAME_MAX]; BA_POOL];
 /// Payload length per pool slot. 0 = free, and it is the only free-list we need:
 /// a decoded Ethernet frame is never shorter than its header.
 static mut POOL_LEN: [u16; BA_POOL] = [0; BA_POOL];
+/// Packet number each held frame is checked with when it goes up.
+static mut POOL_PN: [crate::pn::Pn; BA_POOL] = [crate::pn::Pn::NONE; BA_POOL];
 /// Where the next search for a free slot starts. Turns the scan into O(1)
 /// amortised without a second array to keep in step.
 static mut POOL_CURSOR: usize = 0;
@@ -285,7 +287,7 @@ impl Reorder {
             POOL_LEN[slot] = 0;
             if len != 0 {
                 let pool = &*(&raw const POOL);
-                host::netdev_submit_rx(&pool[slot][..len]);
+                crate::pn::deliver(&pool[slot][..len], POOL_PN[slot]);
             }
         }
         if len != 0 {
@@ -293,7 +295,7 @@ impl Reorder {
         }
     }
 
-    fn store(&mut self, sn: u16, frame: &[u8]) -> bool {
+    fn store(&mut self, sn: u16, frame: &[u8], pn: crate::pn::Pn) -> bool {
         if frame.len() > BA_FRAME_MAX || frame.is_empty() {
             return false;
         }
@@ -327,6 +329,7 @@ impl Reorder {
             let pool = &mut *(&raw mut POOL);
             pool[slot][..frame.len()].copy_from_slice(frame);
             POOL_LEN[slot] = frame.len() as u16;
+            POOL_PN[slot] = pn;
             SLOT_IDX[t][index] = (slot + 1) as u16;
         }
         if self.stored == 0 {
@@ -402,7 +405,8 @@ impl Reorder {
     /// frames pass through, duplicates and outdated frames are dropped, an
     /// in-order frame with nothing held is delivered without touching the
     /// buffer, and only a frame that actually sits ahead of a hole is stored.
-    pub fn on_frame(&mut self, reorder: u32, status: u32, amsdu_last: bool, frame: &[u8]) -> bool {
+    pub fn on_frame(&mut self, reorder: u32, status: u32, amsdu_last: bool, frame: &[u8],
+                    pn: crate::pn::Pn) -> bool {
         let baid = ((reorder & IWL_RX_MPDU_REORDER_BAID_MASK) >> IWL_RX_MPDU_REORDER_BAID_SHIFT) as u8;
         if baid == IWL_RX_REORDER_DATA_INVALID_BAID || !self.active() || baid != self.baid {
             return false;
@@ -449,7 +453,7 @@ impl Reorder {
             return false;
         }
 
-        if !self.store(sn, frame) {
+        if !self.store(sn, frame, pn) {
             return false; // oversized — better out of order than dropped
         }
 
