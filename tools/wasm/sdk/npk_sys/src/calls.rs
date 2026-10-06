@@ -23,6 +23,9 @@ unsafe extern "C" {
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
+    fn npk_fs_mkdir(name_ptr: i32, name_len: i32) -> i32;
+    fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
+    fn npk_fs_copy(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
     fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
 
@@ -213,6 +216,7 @@ reads! {
     fn spawn_module = npk_spawn_module -> i32;
     fn run_intent = npk_run_intent -> i32;
     fn fs_delete = npk_fs_delete -> i32;
+    fn fs_mkdir = npk_fs_mkdir -> i32;
     fn driver_report = npk_driver_report -> i32;
     fn netdev_submit_rx = npk_netdev_submit_rx -> i32;
     fn netdev_rx_deliver = npk_netdev_rx_deliver -> i32;
@@ -251,6 +255,18 @@ pub fn fs_list(prefix: &[u8], out: &mut [u8], recursive: bool) -> i32 {
         npk_fs_list(prefix.as_ptr() as i32, prefix.len() as i32,
             out.as_mut_ptr() as i32, out.len() as i32, recursive as i32)
     }
+}
+
+/// Move `old` to `new` (files and whole directories; `new` must not exist).
+pub fn fs_rename(old: &[u8], new: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_fs_rename(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
+}
+
+/// Copy `old` to `new` (`new` must not exist).
+pub fn fs_copy(old: &[u8], new: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_fs_copy(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
 }
 
 /// Size (8 bytes LE), directory flag (1), mtime (8 bytes LE) into `out`.

@@ -3710,6 +3710,27 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
     }
 }
 
+/// Create directory `name`. The parent must exist; an existing entry of
+/// that name is refused. Same rights and areas as `npk_fs_delete`.
+pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() {
+        return -1;
+    }
+    let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if is_trust_critical_path(&name) {
+        kprintln!("[npk] WASM: npk_fs_mkdir DENIED ({} is read-only to apps)", name);
+        return -1;
+    }
+    if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
+        kprintln!("[npk] WASM: npk_fs_mkdir DENIED ({} belongs to another module)", name);
+        return -1;
+    }
+    match crate::storage::npkfs::fs::mkdir(&name) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
 pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {

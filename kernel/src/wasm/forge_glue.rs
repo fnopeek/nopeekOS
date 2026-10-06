@@ -785,6 +785,9 @@ host_imports! {
     // -1 on cap / not found / fs error.
     mem fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
 
+    // npk_fs_mkdir(name_ptr, name_len) -> 0 or -1
+    mem fn npk_fs_mkdir(name_ptr: i32, name_len: i32) -> i32;
+
     // npk_fs_rename(old_ptr, old_len, new_ptr, new_len) -> i32
     // Move/rename a single npkFS key (files and whole directories).
     // Content-addressed, so even a directory move is O(1). WRITE-gated;
