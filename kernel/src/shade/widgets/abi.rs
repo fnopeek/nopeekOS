@@ -79,6 +79,12 @@ pub struct CanvasId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NodeId(pub u32);
 
+impl NodeId {
+    /// Anchor a `Popover` at the point of the window's last right click
+    /// instead of at a widget: where a context menu belongs.
+    pub const POINTER: NodeId = NodeId(u32::MAX);
+}
+
 // ── Theme tokens ──────────────────────────────────────────────────────
 
 /// Theme tokens. Apps never specify hex colors — the compositor resolves

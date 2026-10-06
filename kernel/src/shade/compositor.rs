@@ -2673,6 +2673,7 @@ impl Compositor {
                     .unwrap_or(false);
                 if is_widget {
                     use crate::shade::widgets::abi::{Event, MouseButton};
+                    crate::shade::widgets::set_context_point(wid.0, mx, my);
                     if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
                         crate::shade::widgets::push_event(wid.0, Event::ContextAction(action));
                     }

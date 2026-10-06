@@ -264,6 +264,7 @@ pub fn scroll_viewport_x_of(window_id: u32) -> Option<(abi::Rect, u32)> {
 /// widget-kind window is destroyed.
 pub fn remove_scene(window_id: u32) {
     SCENES.lock().remove(&window_id);
+    CONTEXT_POINT.lock().remove(&window_id);
     LAST_HOVER.lock().remove(&window_id);
     LAST_MOTION.lock().remove(&window_id);
     canvas::remove_window(window_id);
@@ -855,6 +856,36 @@ fn set_input_value_at(tree: &mut abi::Widget, path: &[u32], value: &str) -> bool
     }
 }
 
+/// Last right click per window, relative to the content origin: the
+/// anchor `NodeId::POINTER` resolves to it. Kept apart from the scene,
+/// which every commit replaces.
+static CONTEXT_POINT: Mutex<BTreeMap<u32, (i32, i32)>> = Mutex::new(BTreeMap::new());
+
+/// Record a right click at screen `(x, y)` in `window_id`.
+pub fn set_context_point(window_id: u32, x: i32, y: i32) {
+    let origin = SCENES.lock().get(&window_id).map(|s| (s.origin_x, s.origin_y));
+    if let Some((ox, oy)) = origin {
+        CONTEXT_POINT.lock().insert(window_id, (x - ox, y - oy));
+    }
+}
+
+fn context_point(window_id: u32) -> Option<(i32, i32)> {
+    CONTEXT_POINT.lock().get(&window_id).copied()
+}
+
+/// First element of a hover path that points into popover `n` rather than
+/// the main tree: `[POPOVER_PATH + n, child indices…]`. Child indices never
+/// come near it.
+const POPOVER_PATH: u32 = 0x8000_0000;
+
+/// The part of `path` that belongs to the main tree, or to popover `n`.
+fn main_hover(path: Option<&[u32]>) -> Option<&[u32]> {
+    path.filter(|p| p.first().is_none_or(|&h| h < POPOVER_PATH))
+}
+fn popover_hover(path: Option<&[u32]>, n: usize) -> Option<&[u32]> {
+    path.and_then(|p| (p.first() == Some(&(POPOVER_PATH + n as u32))).then(|| &p[1..]))
+}
+
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
     // One pass under the lock: motion target, hover path and OnHover target
     // all come from the same cached layout. `motion` is `None` when the
@@ -863,24 +894,37 @@ pub fn update_hover(window_id: u32, x: i32, y: i32) {
         let mut scenes = SCENES.lock();
         match scenes.get_mut(&window_id) {
             Some(s) => {
-                let popover_hit = s.popovers.iter().rev()
-                    .any(|p| rect_contains(p.layout.rect, x, y));
-                let motion = if popover_hit {
+                // An open popover sits on top: the pointer hovers its
+                // content, never what is painted underneath.
+                let popover = s.popovers.iter().enumerate().rev()
+                    .find(|(_, p)| rect_contains(p.layout.rect, x, y))
+                    .map(|(i, _)| i);
+                let motion = if popover.is_some() {
                     None
                 } else {
                     find_motion_target(&s.tree, &s.layout_tree, x, y)
                 };
                 // Re-render only when the path crosses a node boundary and the
                 // tree has state-driven visuals; otherwise just track the path.
-                let new_path = find_hover_path(&s.tree, &s.layout_tree, x, y)
-                    .unwrap_or_default();
+                let new_path = match popover {
+                    Some(i) => {
+                        let p = &s.popovers[i];
+                        let mut path = alloc::vec![POPOVER_PATH + i as u32];
+                        path.extend(find_hover_path(&p.child, &p.layout, x, y).unwrap_or_default());
+                        path
+                    }
+                    None => find_hover_path(&s.tree, &s.layout_tree, x, y).unwrap_or_default(),
+                };
                 let mut job = None;
                 if s.hover_path != new_path {
                     s.hover_path = new_path;
                     if s.has_pseudo { job = Some(RenderJob::take(s, LayoutMode::Reuse)); }
                 }
                 let mut hover = None;
-                find_hover_target(&s.tree, &s.layout_tree, x, y, &mut hover);
+                match popover {
+                    Some(i) => find_hover_target(&s.popovers[i].child, &s.popovers[i].layout, x, y, &mut hover),
+                    None => find_hover_target(&s.tree, &s.layout_tree, x, y, &mut hover),
+                }
                 (Some(motion), hover, job)
             }
             None => (None, None, None),
@@ -1024,7 +1068,7 @@ impl RenderJob {
         let (layout_tree, popovers, relaid) = match &self.layout {
             Some((t, p)) => (t.clone(), p.clone(), None),
             None => {
-                let lo = layout::layout_scrolled(&self.tree, self.rect, self.scroll_y);
+                let lo = layout::layout_at(&self.tree, self.rect, self.scroll_y, context_point(window_id));
                 let t = Arc::new(lo.tree);
                 let p = Arc::new(lo.popovers);
                 (t.clone(), p.clone(), Some(Relaid {
@@ -2526,7 +2570,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // Preserve the wheel scroll position across re-commits so an app that
     // re-renders on every event doesn't snap back to the top.
     let prev_scroll_y = SCENES.lock().get(&target_id).map(|s| s.scroll_y).unwrap_or(0);
-    let lo = layout::layout_scrolled(&tree, layout_rect, prev_scroll_y);
+    let lo = layout::layout_at(&tree, layout_rect, prev_scroll_y, context_point(target_id));
     let layout_tree = lo.tree;
     let anchors = lo.anchors;
     let popovers = lo.popovers;
@@ -2714,17 +2758,17 @@ fn rasterize_buffer_with_overlays(
     let mut rast = raster::cpu::CpuRasterizer::new();
     render::render_with_state(
         &mut rast, &mut target, tree, layout_tree,
-        hover_path, focus_path, active_path, density,
+        main_hover(hover_path), focus_path, active_path, density,
         input_edit, scroll_y, scroll_x, None,
     );
 
     // Overlays — paint after the main tree so they sit on top of any
-    // pixels the main pass wrote into the same screen region. No
-    // pseudo-state paths — popovers are transient by definition (scroll 0).
-    for p in popovers {
+    // pixels the main pass wrote into the same screen region. Hover only:
+    // popovers hold no focus or press state (scroll 0).
+    for (n, p) in popovers.iter().enumerate() {
         render::render_with_state(
             &mut rast, &mut target, &p.child, &p.layout,
-            None, None, None, density, None, 0, 0, None,
+            popover_hover(hover_path, n), None, None, density, None, 0, 0, None,
         );
     }
 
@@ -2809,7 +2853,7 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     // coordinates of the old layout no longer match. Focus survives
     // (a focused input stays focused after resize). Active is
     // mouse-tied so it gets cleared.
-    let new_lo = layout::layout_scrolled(&tree, new_rect, scroll_y);
+    let new_lo = layout::layout_at(&tree, new_rect, scroll_y, context_point(window_id));
     let f: Option<&[u32]> = if scene.focus_path.is_empty() { None } else { Some(&scene.focus_path) };
     let new_pixels = rasterize_buffer_with_overlays(
         window_id, &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,

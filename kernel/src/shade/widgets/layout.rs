@@ -130,6 +130,12 @@ pub fn layout(root: &Widget, container: Rect) -> LayoutOutput {
 }
 
 pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutOutput {
+    layout_at(root, container, scroll_y, None)
+}
+
+/// As `layout_scrolled`, with the last right click (relative to the
+/// container's origin) available as the anchor `NodeId::POINTER`.
+pub fn layout_at(root: &Widget, container: Rect, scroll_y: u32, pointer: Option<(i32, i32)>) -> LayoutOutput {
     // Pass 1: main tree. `place` unpacks the root's own padding itself;
     // stripping it here as well would apply it twice and shrink the root's
     // rect (and the Background painted on it) by 2× its padding.
@@ -147,6 +153,10 @@ pub fn layout_scrolled(root: &Widget, container: Rect, scroll_y: u32) -> LayoutO
     // tree order — apps' contract) can look them up.
     let mut anchors: BTreeMap<u32, Rect> = BTreeMap::new();
     record_anchors(root, &tree, &mut anchors);
+    if let Some((dx, dy)) = pointer {
+        anchors.insert(super::abi::NodeId::POINTER.0,
+            Rect { x: container.x + dx, y: container.y + dy, w: 1, h: 1 });
+    }
 
     // Pass 3: place every popover in the tree as a floating overlay.
     // A popover whose anchor isn't in the table is silently dropped
