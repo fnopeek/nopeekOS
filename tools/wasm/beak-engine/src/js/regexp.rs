@@ -23,35 +23,41 @@ pub struct Flags {
     pub dot_all: bool,
     pub sticky: bool,
     pub unicode: bool,
+    /// `v`: class set notation (ES 22.2.1, `ClassSetExpression`). Implies `unicode`.
+    pub unicode_sets: bool,
 }
 
 impl Flags {
+    /// `None` for an unknown or repeated flag, or `u` together with `v`.
     pub fn parse(s: &str) -> Option<Flags> {
         let mut f = Flags::default();
+        let mut seen = String::new();
         for c in s.chars() {
+            if seen.contains(c) { return None }
+            seen.push(c);
             match c {
                 'g' => f.global = true,
                 'i' => f.ignore_case = true,
                 'm' => f.multiline = true,
                 's' => f.dot_all = true,
                 'y' => f.sticky = true,
-                'u' | 'v' => f.unicode = true,
+                'u' => f.unicode = true,
+                'v' => { f.unicode = true; f.unicode_sets = true; }
                 'd' => {}
                 _ => return None,
             }
         }
+        if seen.contains('u') && seen.contains('v') { return None }
         Some(f)
     }
+    /// In the spec's order (d g i m s u v y), without `d`, which is not kept.
     pub fn as_string(&self) -> String {
-        let mut s = String::new();
-        if self.dot_all { }
-        for (on, c) in [(self.dot_all, 's'), (self.global, 'g'), (self.ignore_case, 'i'),
-                        (self.multiline, 'm'), (self.unicode, 'u'), (self.sticky, 'y')] {
-            if on { s.push(c); }
-        }
-        // Fixed order: d g i m s u v y.
         let mut out = String::new();
-        for c in ['g', 'i', 'm', 's', 'u', 'y'] { if s.contains(c) { out.push(c); } }
+        for (on, c) in [(self.global, 'g'), (self.ignore_case, 'i'), (self.multiline, 'm'),
+                        (self.dot_all, 's'), (self.unicode && !self.unicode_sets, 'u'),
+                        (self.unicode_sets, 'v'), (self.sticky, 'y')] {
+            if on { out.push(c); }
+        }
         out
     }
 }
@@ -61,6 +67,9 @@ enum ClassItem {
     Ch(char),
     Range(char, char),
     Digit(bool), Word(bool), Space(bool),
+    /// A code point set (`\p{..}`, a `v`-mode class) as sorted, disjoint
+    /// inclusive ranges; the flag negates it (`\P{..}`).
+    Set(Rc<[(u32, u32)]>, bool),
 }
 
 #[derive(Clone)]
@@ -94,6 +103,52 @@ struct P<'a> {
     groups: usize,
     names: Vec<(String, usize)>,
     unicode: bool,
+    sets: bool,
+}
+
+/// A class under the `v` flag: single code points plus strings (`\q{ab}`).
+#[derive(Default)]
+struct VSet {
+    ranges: Vec<(u32, u32)>,
+    strings: Vec<Vec<char>>,
+}
+
+enum VOperand { Char(u32), Set(VSet) }
+
+const WORD_RANGES: &[(u32, u32)] = &[(0x30, 0x39), (0x41, 0x5A), (0x5F, 0x5F), (0x61, 0x7A)];
+/// WhiteSpace and LineTerminator (ES 12.2, 12.3).
+const SPACE_RANGES: &[(u32, u32)] = &[(0x9, 0xD), (0x20, 0x20), (0xA0, 0xA0), (0x1680, 0x1680),
+    (0x2000, 0x200A), (0x2028, 0x2029), (0x202F, 0x202F), (0x205F, 0x205F), (0x3000, 0x3000),
+    (0xFEFF, 0xFEFF)];
+
+fn intersect(a: &[(u32, u32)], b: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let (mut x, mut y) = (0, 0);
+    while x < a.len() && y < b.len() {
+        let lo = a[x].0.max(b[y].0);
+        let hi = a[x].1.min(b[y].1);
+        if lo <= hi { out.push((lo, hi)); }
+        if a[x].1 < b[y].1 { x += 1 } else { y += 1 }
+    }
+    out
+}
+
+impl VSet {
+    fn of(ranges: Vec<(u32, u32)>) -> VSet { VSet { ranges, strings: Vec::new() } }
+    fn union(mut self, o: VSet) -> VSet {
+        self.ranges.extend(o.ranges);
+        self.ranges = normalized(self.ranges);
+        for st in o.strings { if !self.strings.contains(&st) { self.strings.push(st) } }
+        self
+    }
+    fn intersect(self, o: VSet) -> VSet {
+        VSet { ranges: intersect(&self.ranges, &o.ranges),
+               strings: self.strings.into_iter().filter(|s| o.strings.contains(s)).collect() }
+    }
+    fn minus(self, o: VSet) -> VSet {
+        VSet { ranges: intersect(&self.ranges, &complement(&o.ranges)),
+               strings: self.strings.into_iter().filter(|s| !o.strings.contains(s)).collect() }
+    }
 }
 
 impl<'a> P<'a> {
@@ -213,14 +268,27 @@ impl<'a> P<'a> {
     }
 
     fn class(&mut self) -> Result<Node, &'static str> {
+        if self.sets { return Ok(vset_node(self.v_bracket()?)) }
         let neg = self.eat('^');
         let mut items = Vec::new();
         loop {
             let Some(c) = self.at() else { return Err("unterminated character class") };
             if c == ']' { self.i += 1; break; }
             self.i += 1;
-            let lo = if c == '\\' { 
-                match self.class_escape()? { Ok(ch) => ch, Err(item) => { items.push(item); continue } }
+            let lo = if c == '\\' {
+                match self.class_escape()? {
+                    Ok(ch) => ch,
+                    Err(item) => {
+                        // `[\d-x]` is a SyntaxError with `u` (ES 22.2.1.1); without it,
+                        // Annex B reads the `-` literally.
+                        if self.unicode && self.at() == Some('-')
+                            && self.c.get(self.i + 1).is_some_and(|&n| n != ']') {
+                            return Err("invalid class range");
+                        }
+                        items.push(item);
+                        continue
+                    }
+                }
             } else { c };
             // A `-` followed by anything other than `]` makes a range.
             if self.at() == Some('-') && self.c.get(self.i + 1).copied() != Some(']') && self.c.get(self.i + 1).is_some() {
@@ -239,6 +307,136 @@ impl<'a> P<'a> {
         Ok(Node::Class { neg, items })
     }
 
+    /// At `{` after `\p` under `v`: a property of strings, consumed, or `None`
+    /// with nothing consumed.
+    fn v_string_property(&mut self) -> Option<VSet> {
+        if self.at() != Some('{') { return None }
+        let end = (self.i..self.c.len()).find(|&k| self.c[k] == '}')?;
+        let name: String = self.c[self.i + 1..end].iter().collect();
+        let set = string_property(&name)?;
+        self.i = end + 1;
+        Some(set)
+    }
+
+    fn v_string_property_ahead(&mut self) -> bool {
+        let at = self.i;
+        let hit = self.v_string_property().is_some();
+        self.i = at;
+        hit
+    }
+
+    /// `[` already consumed: `^`? ClassContents `]` under the `v` flag.
+    fn v_bracket(&mut self) -> Result<VSet, &'static str> {
+        let neg = self.eat('^');
+        let mut set = self.v_contents()?;
+        if !self.eat(']') { return Err("unterminated character class"); }
+        if neg {
+            if !set.strings.is_empty() { return Err("negated class may contain strings"); }
+            set.ranges = complement(&set.ranges);
+        }
+        Ok(set)
+    }
+
+    fn peek2(&self, a: char) -> bool {
+        self.at() == Some(a) && self.c.get(self.i + 1) == Some(&a)
+    }
+
+    /// ClassUnion, ClassIntersection or ClassSubtraction; they do not mix
+    /// without brackets.
+    fn v_contents(&mut self) -> Result<VSet, &'static str> {
+        if self.at() == Some(']') { return Ok(VSet::default()) }
+        let first = self.v_union_item()?;
+        if self.peek2('-') || self.peek2('&') {
+            let op = self.at().unwrap();
+            let VOperand::Set(mut acc) = to_set(first.0) else { unreachable!() };
+            if first.1 { return Err("invalid set operation on a range"); }
+            while self.peek2(op) {
+                self.i += 2;
+                if op == '&' && self.at() == Some('&') { return Err("invalid set operation"); }
+                let rhs = match self.v_operand()? { VOperand::Char(c) => VSet::of(vec![(c, c)]), VOperand::Set(s) => s };
+                acc = if op == '-' { acc.minus(rhs) } else { acc.intersect(rhs) };
+            }
+            if self.at() != Some(']') { return Err("invalid set operation"); }
+            return Ok(acc);
+        }
+        let VOperand::Set(mut acc) = to_set(first.0) else { unreachable!() };
+        while self.at().is_some_and(|c| c != ']') {
+            if self.peek2('-') || self.peek2('&') { return Err("invalid set operation"); }
+            let (o, _) = self.v_union_item()?;
+            let VOperand::Set(s) = to_set(o) else { unreachable!() };
+            acc = acc.union(s);
+        }
+        Ok(acc)
+    }
+
+    /// An operand or a range `a-z`; the flag says it was a range.
+    fn v_union_item(&mut self) -> Result<(VOperand, bool), &'static str> {
+        let o = self.v_operand()?;
+        if let VOperand::Char(lo) = o {
+            if self.at() == Some('-') && !self.peek2('-') {
+                self.i += 1;
+                let VOperand::Char(hi) = self.v_operand()? else { return Err("invalid class range") };
+                if lo > hi { return Err("range out of order in character class"); }
+                return Ok((VOperand::Set(VSet::of(vec![(lo, hi)])), true));
+            }
+        }
+        Ok((o, false))
+    }
+
+    fn v_operand(&mut self) -> Result<VOperand, &'static str> {
+        let Some(c) = self.at() else { return Err("unterminated character class") };
+        self.i += 1;
+        match c {
+            '[' => Ok(VOperand::Set(self.v_bracket()?)),
+            '\\' => {
+                let Some(e) = self.at() else { return Err("trailing backslash") };
+                if e == 'q' && self.c.get(self.i + 1) == Some(&'{') {
+                    self.i += 2;
+                    return Ok(VOperand::Set(self.v_strings()?));
+                }
+                if e == 'p' {
+                    self.i += 1;
+                    if let Some(set) = self.v_string_property() { return Ok(VOperand::Set(set)) }
+                    self.i -= 1;
+                }
+                match self.class_escape()? {
+                    Ok(ch) => Ok(VOperand::Char(ch as u32)),
+                    Err(item) => Ok(VOperand::Set(VSet::of(item_ranges(&item)))),
+                }
+            }
+            '(' | ')' | '{' | '}' | '/' | '-' | '|' | ']' => Err("invalid character in class"),
+            _ if self.at() == Some(c) && "&!#$%*+,.:;<=>?@^`~".contains(c) =>
+                Err("reserved double punctuator in class"),
+            _ => Ok(VOperand::Char(c as u32)),
+        }
+    }
+
+    /// `\q{` already consumed: `a|bc|` up to `}`.
+    fn v_strings(&mut self) -> Result<VSet, &'static str> {
+        let mut set = VSet::default();
+        let mut cur: Vec<char> = Vec::new();
+        loop {
+            let Some(c) = self.at() else { return Err("unterminated \\q{") };
+            self.i += 1;
+            match c {
+                '}' | '|' => {
+                    let st = core::mem::take(&mut cur);
+                    if st.len() == 1 { set.ranges.push((st[0] as u32, st[0] as u32)); }
+                    else if !set.strings.contains(&st) { set.strings.push(st); }
+                    if c == '}' { break }
+                }
+                '\\' => {
+                    let Some(e) = self.at() else { return Err("trailing backslash") };
+                    self.i += 1;
+                    cur.push(if e == 'b' { '\u{8}' } else { self.simple_escape(e)? });
+                }
+                _ => cur.push(c),
+            }
+        }
+        set.ranges = normalized(set.ranges);
+        Ok(set)
+    }
+
     /// Inside a class: either a character (`Ok`) or a whole set such as `\d`
     /// (`Err`, which here is not an error but the other case).
     fn class_escape(&mut self) -> Result<Result<char, ClassItem>, &'static str> {
@@ -248,9 +446,37 @@ impl<'a> P<'a> {
             'd' => Err(ClassItem::Digit(false)), 'D' => Err(ClassItem::Digit(true)),
             'w' => Err(ClassItem::Word(false)), 'W' => Err(ClassItem::Word(true)),
             's' => Err(ClassItem::Space(false)), 'S' => Err(ClassItem::Space(true)),
+            'p' | 'P' if self.unicode => Err(self.property(c == 'P')?),
             'b' => Ok('\u{8}'),
             _ => Ok(self.simple_escape(c)?),
         })
+    }
+
+    /// The `{Name}` or `{Name=Value}` after `\p` / `\P` (ES 22.2.2.9). Names
+    /// match exactly: no loose matching, no `Is`/`In` prefixes.
+    fn property(&mut self, neg: bool) -> Result<ClassItem, &'static str> {
+        const BAD: &str = "invalid unicode property escape";
+        if !self.eat('{') { return Err(BAD); }
+        let mut body = String::new();
+        loop {
+            match self.at() {
+                Some('}') => { self.i += 1; break }
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '=' => {
+                    body.push(c);
+                    self.i += 1;
+                }
+                _ => return Err(BAD),
+            }
+        }
+        let (name, value) = match body.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (body.as_str(), None),
+        };
+        if name.is_empty() || value.is_some_and(|v| v.is_empty() || v.contains('=')) {
+            return Err(BAD);
+        }
+        let set = unicode_property(name, value).ok_or(BAD)?;
+        Ok(ClassItem::Set(Rc::from(set), neg))
     }
 
     fn simple_escape(&mut self, c: char) -> Result<char, &'static str> {
@@ -317,11 +543,13 @@ impl<'a> P<'a> {
                 let n = self.number().unwrap_or(0) as usize;
                 Node::BackRef(n)
             }
+            'p' if self.sets && self.v_string_property_ahead() => {
+                let set = self.v_string_property().ok_or("invalid unicode property escape")?;
+                vset_node(set)
+            }
             'p' | 'P' if self.unicode => {
-                // Unicode property escapes are not implemented. Report an error rather than
-                // read them as literals: a pattern that silently does something else is
-                // worse than one that fails.
-                return Err("unicode property escapes are not supported");
+                let item = self.property(c == 'P')?;
+                Node::Class { neg: false, items: vec![item] }
             }
             other => Node::Char(self.simple_escape(other)?),
         })
@@ -332,7 +560,8 @@ impl Regex {
     pub fn new(pattern: &str, flags_str: &str) -> Result<Regex, &'static str> {
         let flags = Flags::parse(flags_str).ok_or("invalid flags")?;
         let chars: Vec<char> = pattern.chars().collect();
-        let mut p = P { c: &chars, i: 0, groups: 0, names: Vec::new(), unicode: flags.unicode };
+        let mut p = P { c: &chars, i: 0, groups: 0, names: Vec::new(), unicode: flags.unicode,
+                        sets: flags.unicode_sets };
         let root = p.alternation()?;
         if p.i < chars.len() { return Err("unmatched ) in regular expression"); }
         Ok(Regex { root, group_count: p.groups, names: p.names, flags, source:
@@ -390,10 +619,148 @@ fn class_hit(items: &[ClassItem], neg: bool, c: char, f: Flags) -> bool {
             ClassItem::Digit(n) => c.is_ascii_digit() != *n,
             ClassItem::Word(n) => is_word(c) != *n,
             ClassItem::Space(n) => is_space(c) != *n,
+            ClassItem::Set(set, n) => {
+                let hit = in_set(set, c) || (f.ignore_case && (
+                    c.to_lowercase().any(|x| in_set(set, x))
+                    || c.to_uppercase().any(|x| in_set(set, x))));
+                hit != *n
+            }
         };
         if m { hit = true; break; }
     }
     hit != neg
+}
+
+/// A `v`-mode class as a pattern node: strings first and longest first, so
+/// `[\q{abc|a}]` takes the longer match, then the single code points.
+fn vset_node(set: VSet) -> Node {
+    let class = Node::Class { neg: false, items: vec![ClassItem::Set(Rc::from(set.ranges), false)] };
+    if set.strings.is_empty() { return class }
+    let mut strings = set.strings;
+    strings.sort_unstable_by_key(|st| core::cmp::Reverse(st.len()));
+    let mut alts: Vec<Node> = strings.into_iter()
+        .map(|st| if st.is_empty() { Node::Empty }
+                  else { Node::Seq(st.into_iter().map(Node::Char).collect()) })
+        .collect();
+    let empty_at = alts.iter().position(|n| matches!(n, Node::Empty));
+    let empty = empty_at.map(|k| alts.remove(k));
+    alts.push(class);
+    alts.extend(empty);
+    Node::Alt(alts)
+}
+
+/// A property of strings (ES 22.2.2.9, `v` only). Not implemented: the
+/// `Basic_Emoji` and `RGI_Emoji*` sequence sets, which need the emoji
+/// sequence data; they stay a SyntaxError.
+fn string_property(name: &str) -> Option<VSet> {
+    if name != "Emoji_Keycap_Sequence" { return None }
+    let strings = "#*0123456789".chars().map(|c| vec![c, '\u{FE0F}', '\u{20E3}']).collect();
+    Some(VSet { ranges: Vec::new(), strings })
+}
+
+fn to_set(o: VOperand) -> VOperand {
+    match o { VOperand::Char(c) => VOperand::Set(VSet::of(vec![(c, c)])), s => s }
+}
+
+/// The code points of a class escape (`\d`, `\w`, `\s`, `\p{..}` and negations).
+fn item_ranges(item: &ClassItem) -> Vec<(u32, u32)> {
+    let (base, neg): (Vec<(u32, u32)>, bool) = match item {
+        ClassItem::Digit(n) => (vec![(0x30, 0x39)], *n),
+        ClassItem::Word(n) => (WORD_RANGES.to_vec(), *n),
+        ClassItem::Space(n) => (SPACE_RANGES.to_vec(), *n),
+        ClassItem::Set(r, n) => (r.to_vec(), *n),
+        ClassItem::Ch(c) => (vec![(*c as u32, *c as u32)], false),
+        ClassItem::Range(a, b) => (vec![(*a as u32, *b as u32)], false),
+    };
+    if neg { complement(&base) } else { base }
+}
+
+fn in_set(set: &[(u32, u32)], c: char) -> bool {
+    let c = c as u32;
+    set.binary_search_by(|&(a, b)| {
+        if b < c { core::cmp::Ordering::Less }
+        else if a > c { core::cmp::Ordering::Greater }
+        else { core::cmp::Ordering::Equal }
+    }).is_ok()
+}
+
+/// Append the ranges of one generated table (see `unicode_props`).
+fn decode_table(t: &[u8], out: &mut Vec<(u32, u32)>) {
+    fn next(t: &[u8], at: &mut usize) -> u32 {
+        let mut v = 0u32;
+        let mut shift = 0;
+        while let Some(&b) = t.get(*at) {
+            *at += 1;
+            v |= ((b & 0x7F) as u32) << shift;
+            if b & 0x80 == 0 { break }
+            shift += 7;
+        }
+        v
+    }
+    let mut at = 0;
+    let mut prev = 0u32;
+    while at < t.len() {
+        let a = prev + next(t, &mut at);
+        let b = a + next(t, &mut at);
+        out.push((a, b));
+        prev = b + 1;
+    }
+}
+
+fn normalized(mut v: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    v.sort_unstable();
+    let mut out: Vec<(u32, u32)> = Vec::with_capacity(v.len());
+    for (a, b) in v {
+        match out.last_mut() {
+            Some(l) if a <= l.1.saturating_add(1) => l.1 = l.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+fn complement(v: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut from = 0u32;
+    for &(a, b) in v {
+        if a > from { out.push((from, a - 1)); }
+        from = b + 1;
+    }
+    if from <= 0x10FFFF { out.push((from, 0x10FFFF)); }
+    out
+}
+
+fn lookup<T: Copy>(table: &[(&str, T)], name: &str) -> Option<T> {
+    table.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|k| table[k].1)
+}
+
+/// The code points of `\p{name}` or `\p{name=value}`; `None` for an unknown
+/// property or value.
+pub(crate) fn unicode_property(name: &str, value: Option<&str>) -> Option<Vec<(u32, u32)>> {
+    use super::unicode_props as u;
+    let mut out = Vec::new();
+    let gc = |v: &str, out: &mut Vec<(u32, u32)>| -> bool {
+        match lookup(u::GENERAL_CATEGORY, v) {
+            Some(ts) => { for t in ts { decode_table(t, out) } true }
+            None => false,
+        }
+    };
+    match (name, value) {
+        ("General_Category" | "gc", Some(v)) => if !gc(v, &mut out) { return None },
+        ("Script" | "sc", Some(v)) => decode_table(lookup(u::SCRIPT, v)?, &mut out),
+        ("Script_Extensions" | "scx", Some(v)) =>
+            decode_table(lookup(u::SCRIPT_EXTENSIONS, v)?, &mut out),
+        (_, Some(_)) => return None,
+        ("Any", None) => out.push((0, 0x10FFFF)),
+        ("ASCII", None) => out.push((0, 0x7F)),
+        ("Assigned", None) => {
+            let mut cn = Vec::new();
+            gc("Cn", &mut cn);
+            return Some(complement(&normalized(cn)));
+        }
+        (n, None) => if !gc(n, &mut out) { decode_table(lookup(u::BINARY, n)?, &mut out) },
+    }
+    Some(normalized(out))
 }
 
 type K<'k> = &'k dyn Fn(&mut St, usize) -> Option<usize>;
@@ -488,6 +855,9 @@ fn m(n: &Node, st: &mut St, pos: usize, k: K) -> Option<usize> {
             k(st, pos + len)
         }
         Node::Repeat { node, min, max, greedy } => {
+            if one_char(node, ' ', st.f).is_some() {
+                return repeat_one(node, *min, *max, *greedy, st, pos, k);
+            }
             repeat(node, *min, *max, *greedy, st, pos, 0, k)
         }
     }
@@ -497,6 +867,50 @@ fn seq(items: &[Node], i: usize, st: &mut St, pos: usize, k: K) -> Option<usize>
     if i == items.len() { return k(st, pos); }
     let rest = move |st: &mut St, p: usize| seq(items, i + 1, st, p, k);
     m(&items[i], st, pos, &rest)
+}
+
+/// Does a node that always consumes exactly one character match `c`? `None`
+/// for any other node.
+fn one_char(n: &Node, c: char, f: Flags) -> Option<bool> {
+    Some(match n {
+        Node::Char(x) => fold(c, f) == fold(*x, f),
+        Node::Any => f.dot_all || !matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'),
+        Node::Class { neg, items } => class_hit(items, *neg, c, f),
+        _ => return None,
+    })
+}
+
+/// A quantifier over a single character (`a*`, `[^"]+`, `\p{L}{2,}`) as a loop.
+/// Same result as `repeat`, without one stack frame per iteration, so a long
+/// run cannot exhaust the stack.
+fn repeat_one(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
+              pos: usize, k: K) -> Option<usize> {
+    let hit = |st: &St, at: usize| st.s.get(at).is_some_and(|&c| one_char(node, c, st.f) == Some(true));
+    let max = max as usize;
+    let mut n = 0usize;
+    if greedy {
+        while n < max && hit(st, pos + n) { n += 1; }
+        st.steps = st.steps.saturating_add(n as u32);
+        if n < min as usize { return None; }
+        loop {
+            st.steps += 1;
+            if st.steps > st.budget { return None; }
+            if let Some(e) = k(st, pos + n) { return Some(e); }
+            if n == min as usize { return None; }
+            n -= 1;
+        }
+    }
+    while n < min as usize {
+        if !hit(st, pos + n) { return None; }
+        n += 1;
+    }
+    loop {
+        st.steps += 1;
+        if st.steps > st.budget { return None; }
+        if let Some(e) = k(st, pos + n) { return Some(e); }
+        if n >= max || !hit(st, pos + n) { return None; }
+        n += 1;
+    }
 }
 
 fn repeat(node: &Node, min: u32, max: u32, greedy: bool, st: &mut St,
@@ -787,11 +1201,10 @@ pub fn install(realm: &mut Realm) {
         "multiline" => |f| f.multiline,
         "dotAll" => |f| f.dot_all,
         "sticky" => |f| f.sticky,
-        "unicode" => |f| f.unicode,
-        // Neither `d` nor `v` is implemented; the accessors still exist and report
-        // `false`.
+        "unicode" => |f| f.unicode && !f.unicode_sets,
+        "unicodeSets" => |f| f.unicode_sets,
+        // `d` is accepted but not implemented: no `indices` on the result.
         "hasIndices" => |_| false,
-        "unicodeSets" => |_| false,
     }
     {
         let g = native(Some(fp.clone()), |i, t, _| {

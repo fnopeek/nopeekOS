@@ -1674,4 +1674,65 @@ mod tests {
                              new TypeError('t', {cause: 0}).cause, e.propertyIsEnumerable('cause')].join()"),
                    "5,false,false,0,false");
     }
+
+    /// `\p{..}` matches from the Unicode tables and rejects what the spec rejects.
+    #[test]
+    fn regexp_property_escapes() {
+        assert_eq!(on_both(r#"[/^\p{Lu}+$/u.test("AÄΩ"), /\p{Lu}/u.test("a"), /^\p{sc=Grek}+$/u.test("αβ"),
+                            /^\p{scx=Grek}$/u.test("͂"), /^[\p{N}\p{P}]+$/u.test("1,2."),
+                            /^\P{L}$/u.test("1"), /^\p{Any}$/u.test("\u{10FFFF}"),
+                            /\p{L}/.test("p{L}")].join()"#),
+                   "true,false,true,true,true,true,true,true");
+        assert_eq!(on_both(r#"["\\p{ascii}", "\\p{Script}", "\\p{Latin}", "\\p{ASCII=Y}", "[\\p{L}-z]"]
+                            .map(function (b) { try { new RegExp(b, "u"); return "ok" } catch (e) { return e.name } })
+                            .join()"#),
+                   "SyntaxError,SyntaxError,SyntaxError,SyntaxError,SyntaxError");
+    }
+
+    /// Class set notation under `v`: difference, intersection, nested classes, strings.
+    #[test]
+    fn regexp_v_flag_sets() {
+        assert_eq!(on_both(r#"[/^[\d--[3-5]]+$/v.test("0129"), /^[\d--[3-5]]$/v.test("4"),
+                            /^[\p{L}&&\p{ASCII}]+$/v.test("aZ"), /^[\p{L}&&\p{ASCII}]$/v.test("é"),
+                            /^[\q{abc|d}x]+$/v.test("abcxd"), /x/v.flags, /x/v.unicode].join()"#),
+                   "true,false,true,false,true,v,false");
+        assert_eq!(on_both(r#"["[a-z--[aeiou]]", "[^\\q{ab}]", "[a&&&b]"]
+                            .map(function (b) { try { new RegExp(b, "v"); return "ok" } catch (e) { return e.name } })
+                            .join()"#),
+                   "SyntaxError,SyntaxError,SyntaxError");
+    }
+
+    /// A quantifier over one character does not recurse per iteration.
+    #[test]
+    fn long_single_char_repeat() {
+        assert_eq!(on_both(r#"var s = "a".repeat(300000) + "b"; [/^a+b$/.test(s), /^[^x]*$/.test(s),
+                            /a*?b/.exec("aab")[0]].join()"#), "true,true,aab");
+    }
+
+    #[test]
+    fn structured_clone_keeps_shape() {
+        assert_eq!(on_both(r#"var o = {a: [1, {b: 2}], d: new Date(5), m: new Map([[1, 2]]), s: new Set(["x"]),
+                            t: new Uint8Array([1, 2]), e: new RangeError("r")}; o.me = o;
+                            var c = structuredClone(o);
+                            [c !== o, c.me === c, c.a[1].b, c.d.getTime(), c.m.get(1), c.s.has("x"),
+                             c.t.join("-"), c.e instanceof RangeError, c.e.message].join()"#),
+                   "true,true,2,5,2,true,1-2,true,r");
+        assert_eq!(on_both("try { structuredClone({f: function(){}}); 'no' } catch (e) { e.name }"),
+                   "DataCloneError");
+    }
+
+    #[test]
+    fn intl_plural_relative_segmenter() {
+        assert_eq!(on_both(r#"var o = new Intl.PluralRules("en", {type: "ordinal"});
+                            [new Intl.PluralRules("de").select(1), o.select(2), o.select(13), o.select(23),
+                             new Intl.RelativeTimeFormat("en").format(-3, "day"),
+                             new Intl.RelativeTimeFormat("de", {numeric: "auto"}).format(1, "day"),
+                             new Intl.RelativeTimeFormat("de").format(2, "years")].join()"#),
+                   "one,two,other,few,3 days ago,morgen,in 2 Jahren");
+        assert_eq!(on_both(r#"var g = new Intl.Segmenter("en"), w = new Intl.Segmenter("en", {granularity: "word"});
+                            [Array.from(g.segment("é🇩🇪!"), function (x) { return x.index }).join(" "),
+                             Array.from(w.segment("It's 3.14, ok")).filter(function (x) { return x.isWordLike })
+                                  .map(function (x) { return x.segment }).join("|")].join()"#),
+                   "0 2 4,It's|3.14|ok");
+    }
 }

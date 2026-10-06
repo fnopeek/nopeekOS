@@ -341,8 +341,9 @@ fn set_fields(i: &mut Interp, t: Value, a: &[Value], first: usize, count: usize)
 /// `npk_unix_time` provides nothing else; the Gregorian calendar; Latin
 /// digits). `format` delegates to the existing `Date` `toLocale*` methods.
 ///
-/// Not implemented: locale-aware number grouping, currencies, plural rules,
-/// collation, relative time.
+/// `PluralRules`, `RelativeTimeFormat` and `Segmenter` live in `intl.rs`.
+///
+/// Not implemented: locale-aware number grouping, currencies, collation.
 fn intl_def(o: &Gc, name: &str, f: NativeFn, len: usize, proto: &Gc) {
     let g = native(Some(proto.clone()), f, name, len, false);
     o.borrow_mut().define(name, Prop::builtin(Value::Obj(g)));
@@ -424,6 +425,7 @@ fn install_intl(realm: &mut Realm) {
         Ok(i.new_array(v))
     }, 1, &fp);
 
+    super::intl::install(realm, &intl);
     realm.global.borrow_mut().define("Intl", Prop::builtin(Value::Obj(intl)));
 }
 

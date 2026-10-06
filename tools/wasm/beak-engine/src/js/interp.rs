@@ -298,6 +298,8 @@ pub struct Realm {
     pub formdata_proto: Gc,
     pub intl_dtf_proto: Gc,
     pub intl_nf_proto: Gc,
+    /// Prototypes of the `Intl` constructors in `intl.rs`, by name.
+    pub intl_protos: HashMap<&'static str, Gc>,
     pub xpath_result_proto: Gc,
     pub xpath_expr_proto: Gc,
     pub xpath_eval_proto: Gc,
@@ -844,6 +846,7 @@ impl Interp {
         super::date::install(&mut realm);
         super::iterhelp::install(&mut realm);
         super::proxy::install(&mut realm);
+        super::clone::install(&mut realm);
         realm.eval_fn = match realm.global.borrow().get_own("eval").and_then(|p| p.value.clone()) {
             Some(Value::Obj(o)) => Some(o), _ => None,
         };
