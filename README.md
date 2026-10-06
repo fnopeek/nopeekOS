@@ -331,41 +331,6 @@ drift, this paragraph will.
 
 ---
 
-## Performance
-
-npkFS on an N100 NUC (AirDisk 512 GB SSD, all figures **with**
-AES-256-GCM at rest + BLAKE3 on every operation; measured on npkFS v3,
-before keyed addresses and encrypted trees):
-
-| Op | Throughput |
-|----|------------|
-| 1 MB write (dedup hit) | 479 MB/s |
-| 1 MB read | 411 MB/s |
-| 16 MB write (dedup hit) | 759 MB/s |
-| 100 MB read | 406 MB/s |
-| Mixed workload | W 491 MB/s · R 370 MB/s |
-
-Crypto on the same N100: BLAKE3 ~1670 MB/s, AES-256-GCM ~715 MB/s dec /
-~622 MB/s enc. Encrypted throughput lands near unencrypted ext4 on
-comparable hardware, at ~2 W over idle on a fanless 6 W TDP CPU.
-
-The two WASM engines, same binary on the same machine — the laptop, not
-the N100 (`python -c "print(sum(i*i for i in range(1000000)))"`):
-
-| Phase | wasmi | forge |
-|-------|------:|------:|
-| translate | 90 ms | 2410 ms |
-| **run** | 6550 ms | **650 ms** |
-| total | 6650 ms | 3070 ms |
-
-Compiling is paid up front, so on a *short* enough run the interpreter
-still wins the total — which is why both engines stay in the image and
-the comparison is a command, not a claim. QEMU flatters the compiler
-(21x there, 10.1x on metal): a factor measured under TCG is never
-carried forward.
-
----
-
 ## Build & Run
 
 ```bash
