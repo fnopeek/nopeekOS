@@ -92,6 +92,9 @@ struct Manifest {
     version: String,
     size: usize,
     sha384: [u8; 48],
+    /// npkFS version the kernel reads (`disk_format=`). Manifests from
+    /// before the field existed were v3.
+    disk_format: u32,
 }
 
 /// Which release manifest; part of the signed message, so one kind's
@@ -171,12 +174,14 @@ fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
     let mut version = None;
     let mut size = None;
     let mut sha384 = None;
+    let mut disk_format = 3;
 
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
         if let Some((key, val)) = line.split_once('=') {
             match key.trim() {
+                "disk_format" => disk_format = val.trim().parse().map_err(|_| "manifest: bad disk_format")?,
                 "version" => version = Some(String::from(val.trim())),
                 "size" => size = val.trim().parse::<usize>().ok(),
                 "sha384" => sha384 = Some(hex_to_bytes48(val.trim())?),
@@ -189,6 +194,7 @@ fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
         version: version.ok_or("manifest: missing version")?,
         size: size.ok_or("manifest: missing size")?,
         sha384: sha384.ok_or("manifest: missing sha384")?,
+        disk_format,
     })
 }
 
@@ -306,6 +312,12 @@ fn build_plan() -> Option<Plan> {
     let current = env!("CARGO_PKG_VERSION");
     // The manifest is signed, but a ceiling still guards the buffer.
     let kernel = if manifest.version == current {
+        None
+    } else if manifest.disk_format != crate::npkfs::DISK_VERSION {
+        // A kernel for another disk format would halt at the next boot on
+        // this disk, newer or older alike. That change is a reinstall.
+        kprintln!("[npk]   ! kernel v{} reads npkFS v{}, this disk is v{} — not installed (reinstall from USB)",
+            manifest.version, manifest.disk_format, crate::npkfs::DISK_VERSION);
         None
     } else if manifest.size == 0 || manifest.size > MAX_KERNEL_SIZE {
         kprintln!("[npk]   ! implausible kernel size {} (max {})", manifest.size, MAX_KERNEL_SIZE);

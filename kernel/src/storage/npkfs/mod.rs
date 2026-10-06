@@ -84,7 +84,7 @@ pub fn sync() {
 
 pub fn install_salt() -> Option<[u8; 16]> { storage::install_salt() }
 
-pub use format::KEYSLOTS;
+pub use format::{KEYSLOTS, DISK_VERSION};
 pub fn keyslot(i: usize) -> Option<crate::crypto::keyslot::Slot> { storage::keyslot(i) }
 pub fn has_keyslot() -> bool { storage::has_keyslot() }
 pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), FsError> {

@@ -1048,11 +1048,17 @@ sha384=${MOD_SHA}
         # One release time for all three manifests: the kernel refuses a
         # manifest older than the last one it accepted (replay, downgrade).
         ISSUED=$(date +%s)
+        # npkFS version this kernel reads; `update` installs a kernel only
+        # onto a disk of the same version.
+        DISK_FORMAT=$(sed -n 's/^pub const DISK_VERSION: u32 = \([0-9]*\);/\1/p' \
+            "$PROJECT_DIR/kernel/src/storage/npkfs/format.rs")
+        [ -n "$DISK_FORMAT" ] || { err "DISK_VERSION not found in format.rs"; exit 1; }
 
         # Write manifest
         cat > "$RELEASE_DIR/manifest" <<MANIFEST
 issued=$ISSUED
 version=$VERSION
+disk_format=$DISK_FORMAT
 size=$SIZE
 sha384=$SHA384
 MANIFEST
