@@ -2205,7 +2205,7 @@ fn handle_mmio_ioapic(
         let value = sh.pic.ioapic.mmio(off, None).unwrap_or(0) as u64;
         write_gpr_vmx(regs, dec.reg, dec.width, value & width_mask(dec.width));
     }
-    vmcs::advance_guest_rip().is_ok()
+    vmcs::advance_guest_rip_by(dec.length as u64).is_ok()
 }
 
 /// EPT violation on the LAPIC MMIO page. Decode the faulting MOV, service
@@ -2251,7 +2251,7 @@ fn handle_mmio_lapic(
         let value = apic.read(off) as u64;
         write_gpr_vmx(regs, dec.reg, dec.width, value);
     }
-    if vmcs::advance_guest_rip().is_err() {
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() {
         return false;
     }
     true
@@ -2261,7 +2261,7 @@ fn handle_mmio_lapic(
 /// Handle an EPT violation that targets virtio-blk's BAR0 MMIO range.
 /// Walks the guest's page tables to fetch the faulting instruction
 /// (VMX has no decode-assists), decodes the MOV form, emulates against
-/// the device, advances RIP via `VM_EXIT_INSTRUCTION_LEN`.
+/// the device, advances RIP by the decoded instruction length.
 ///
 /// Returns `true` if the fault was handled, `false` otherwise (page
 /// walk failed, opcode unsupported).
@@ -2327,14 +2327,16 @@ fn handle_mmio_ept_blk(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() {
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() {
         return false;
     }
     true
 }
 
-fn read_gpr_vmx(regs: &vmcs::GuestRegs, idx: u8) -> u64 {
-    match idx {
+/// Read the decoded MOV register `reg` (see `DecodedMov::reg`).
+fn read_gpr_vmx(regs: &vmcs::GuestRegs, reg: u8) -> u64 {
+    use crate::microvm::devices::insn_decoder::{gpr_index, read_reg};
+    let full = match gpr_index(reg) {
         0  => regs.rax,
         1  => regs.rcx,
         2  => regs.rdx,
@@ -2352,28 +2354,31 @@ fn read_gpr_vmx(regs: &vmcs::GuestRegs, idx: u8) -> u64 {
         14 => regs.r14,
         15 => regs.r15,
         _  => 0,
-    }
+    };
+    read_reg(reg, full)
 }
 
-fn write_gpr_vmx(regs: &mut vmcs::GuestRegs, idx: u8, width: u8, value: u64) {
-    use crate::microvm::devices::insn_decoder::merge_reg;
-    match idx {
-        0  => regs.rax = merge_reg(regs.rax, value, width),
-        1  => regs.rcx = merge_reg(regs.rcx, value, width),
-        2  => regs.rdx = merge_reg(regs.rdx, value, width),
-        3  => regs.rbx = merge_reg(regs.rbx, value, width),
+/// Write the decoded MOV register `reg`, honouring x86 width rules.
+fn write_gpr_vmx(regs: &mut vmcs::GuestRegs, reg: u8, width: u8, value: u64) {
+    use crate::microvm::devices::insn_decoder::{gpr_index, merge_operand};
+    let m = |old: u64| merge_operand(reg, old, value, width);
+    match gpr_index(reg) {
+        0  => regs.rax = m(regs.rax),
+        1  => regs.rcx = m(regs.rcx),
+        2  => regs.rdx = m(regs.rdx),
+        3  => regs.rbx = m(regs.rbx),
         4  => {} // RSP — silently drop
-        5  => regs.rbp = merge_reg(regs.rbp, value, width),
-        6  => regs.rsi = merge_reg(regs.rsi, value, width),
-        7  => regs.rdi = merge_reg(regs.rdi, value, width),
-        8  => regs.r8  = merge_reg(regs.r8,  value, width),
-        9  => regs.r9  = merge_reg(regs.r9,  value, width),
-        10 => regs.r10 = merge_reg(regs.r10, value, width),
-        11 => regs.r11 = merge_reg(regs.r11, value, width),
-        12 => regs.r12 = merge_reg(regs.r12, value, width),
-        13 => regs.r13 = merge_reg(regs.r13, value, width),
-        14 => regs.r14 = merge_reg(regs.r14, value, width),
-        15 => regs.r15 = merge_reg(regs.r15, value, width),
+        5  => regs.rbp = m(regs.rbp),
+        6  => regs.rsi = m(regs.rsi),
+        7  => regs.rdi = m(regs.rdi),
+        8  => regs.r8  = m(regs.r8),
+        9  => regs.r9  = m(regs.r9),
+        10 => regs.r10 = m(regs.r10),
+        11 => regs.r11 = m(regs.r11),
+        12 => regs.r12 = m(regs.r12),
+        13 => regs.r13 = m(regs.r13),
+        14 => regs.r14 = m(regs.r14),
+        15 => regs.r15 = m(regs.r15),
         _  => {}
     }
 }
@@ -2415,7 +2420,7 @@ fn handle_mmio_ept_net(
         if !dec.is_write {
             write_gpr_vmx(regs, dec.reg, dec.width, v & width_mask(dec.width));
         }
-        return vmcs::advance_guest_rip().is_ok();
+        return vmcs::advance_guest_rip_by(dec.length as u64).is_ok();
     }
 
     let mut net = crate::microvm::devices::net_backend::lock();
@@ -2446,7 +2451,7 @@ fn handle_mmio_ept_net(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() { return false; }
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }
 
@@ -2503,7 +2508,7 @@ fn handle_mmio_ept_gpu(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() { return false; }
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }
 
@@ -2554,7 +2559,7 @@ fn handle_mmio_ept_input(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() { return false; }
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }
 
@@ -2604,7 +2609,7 @@ fn handle_mmio_ept_p9(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() { return false; }
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }
 
@@ -2641,6 +2646,6 @@ fn handle_mmio_ept_snd(
         }
     }
 
-    if vmcs::advance_guest_rip().is_err() { return false; }
+    if vmcs::advance_guest_rip_by(dec.length as u64).is_err() { return false; }
     true
 }

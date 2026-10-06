@@ -2190,10 +2190,12 @@ fn handle_mmio_npf_blk(
     true
 }
 
-/// Read a guest GPR by ModR/M index 0..15. RAX comes from VMCB.SAVE.RAX
-/// (SVM auto-saves it); the rest from the GuestRegs struct we maintain.
-fn read_guest_gpr(regs: &vmcb::GuestRegs, rax: u64, idx: u8) -> u64 {
-    match idx {
+/// Read the decoded MOV register `reg` (see `DecodedMov::reg`). RAX comes
+/// from VMCB.SAVE.RAX (SVM auto-saves it); the rest from the GuestRegs struct
+/// we maintain.
+fn read_guest_gpr(regs: &vmcb::GuestRegs, rax: u64, reg: u8) -> u64 {
+    use crate::microvm::devices::insn_decoder::{gpr_index, read_reg};
+    let full = match gpr_index(reg) {
         0  => rax,
         1  => regs.rcx,
         2  => regs.rdx,
@@ -2211,37 +2213,39 @@ fn read_guest_gpr(regs: &vmcb::GuestRegs, rax: u64, idx: u8) -> u64 {
         14 => regs.r14,
         15 => regs.r15,
         _  => 0,
-    }
+    };
+    read_reg(reg, full)
 }
 
-/// Write a value into a guest GPR by ModR/M index, honouring x86 width
+/// Write a value into the decoded MOV register `reg`, honouring x86 width
 /// rules. RAX writes go to VMCB.SAVE.RAX directly.
 fn write_guest_gpr(
     regs: &mut vmcb::GuestRegs,
     vmcb: &mut vmcb::Vmcb,
     rax: u64,
-    idx: u8,
+    reg: u8,
     width: u8,
     value: u64,
 ) {
-    use crate::microvm::devices::insn_decoder::merge_reg;
-    match idx {
-        0  => vmcb.write_u64(vmcb::OFF_SAVE_RAX, merge_reg(rax, value, width)),
-        1  => regs.rcx = merge_reg(regs.rcx, value, width),
-        2  => regs.rdx = merge_reg(regs.rdx, value, width),
-        3  => regs.rbx = merge_reg(regs.rbx, value, width),
+    use crate::microvm::devices::insn_decoder::{gpr_index, merge_operand};
+    let m = |old: u64| merge_operand(reg, old, value, width);
+    match gpr_index(reg) {
+        0  => vmcb.write_u64(vmcb::OFF_SAVE_RAX, m(rax)),
+        1  => regs.rcx = m(regs.rcx),
+        2  => regs.rdx = m(regs.rdx),
+        3  => regs.rbx = m(regs.rbx),
         4  => {} // RSP — silently drop
-        5  => regs.rbp = merge_reg(regs.rbp, value, width),
-        6  => regs.rsi = merge_reg(regs.rsi, value, width),
-        7  => regs.rdi = merge_reg(regs.rdi, value, width),
-        8  => regs.r8  = merge_reg(regs.r8,  value, width),
-        9  => regs.r9  = merge_reg(regs.r9,  value, width),
-        10 => regs.r10 = merge_reg(regs.r10, value, width),
-        11 => regs.r11 = merge_reg(regs.r11, value, width),
-        12 => regs.r12 = merge_reg(regs.r12, value, width),
-        13 => regs.r13 = merge_reg(regs.r13, value, width),
-        14 => regs.r14 = merge_reg(regs.r14, value, width),
-        15 => regs.r15 = merge_reg(regs.r15, value, width),
+        5  => regs.rbp = m(regs.rbp),
+        6  => regs.rsi = m(regs.rsi),
+        7  => regs.rdi = m(regs.rdi),
+        8  => regs.r8  = m(regs.r8),
+        9  => regs.r9  = m(regs.r9),
+        10 => regs.r10 = m(regs.r10),
+        11 => regs.r11 = m(regs.r11),
+        12 => regs.r12 = m(regs.r12),
+        13 => regs.r13 = m(regs.r13),
+        14 => regs.r14 = m(regs.r14),
+        15 => regs.r15 = m(regs.r15),
         _  => {}
     }
 }

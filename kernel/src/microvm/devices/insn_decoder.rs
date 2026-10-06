@@ -22,7 +22,9 @@ pub struct DecodedMov {
     /// Register index 0..15. The "reg" field of ModR/M, extended by REX.R.
     /// Mapping: 0=RAX, 1=RCX, 2=RDX, 3=RBX, 4=RSP, 5=RBP, 6=RSI, 7=RDI,
     /// 8=R8, …, 15=R15. Always the GPR side of the access (mem is the
-    /// other operand).
+    /// other operand). A byte operand without REX names AH, CH, DH, BH for
+    /// fields 4-7; those decode to `HIGH_BYTE_REG + 0..=3` (bits 15:8 of
+    /// RAX, RCX, RDX, RBX).
     pub reg: u8,
     /// Total instruction length in bytes (prefixes + REX + opcode +
     /// ModR/M + SIB + displacement). The SVM MMIO handler adds this to
@@ -38,6 +40,7 @@ pub fn decode_mov(bytes: &[u8]) -> Option<DecodedMov> {
     let mut i = 0usize;
     let mut op16 = false; // 0x66 prefix → 16-bit operand
     let mut addr32 = false; // 0x67 prefix → 32-bit addressing
+    let mut rex = false;
     let mut rex_w = false;
     let mut rex_r = false;
 
@@ -58,6 +61,7 @@ pub fn decode_mov(bytes: &[u8]) -> Option<DecodedMov> {
     if i >= bytes.len() { return None; }
 
     if (bytes[i] & 0xF0) == 0x40 {
+        rex = true;
         rex_w = bytes[i] & 0x08 != 0;
         rex_r = bytes[i] & 0x04 != 0;
         i += 1;
@@ -115,7 +119,13 @@ pub fn decode_mov(bytes: &[u8]) -> Option<DecodedMov> {
     if i + disp_bytes > bytes.len() { return None; }
     i += disp_bytes;
 
-    let reg = if rex_r { reg_field + 8 } else { reg_field };
+    let reg = if rex_r {
+        reg_field + 8
+    } else if byte_op && !rex && reg_field >= 4 {
+        HIGH_BYTE_REG + reg_field - 4
+    } else {
+        reg_field
+    };
 
     let width = if byte_op {
         1
@@ -128,6 +138,30 @@ pub fn decode_mov(bytes: &[u8]) -> Option<DecodedMov> {
     };
 
     Some(DecodedMov { width, is_write, reg, length: i as u8 })
+}
+
+/// `DecodedMov::reg` base for AH/CH/DH/BH.
+pub const HIGH_BYTE_REG: u8 = 16;
+
+/// Read the operand register `reg` (as decoded) from its 64-bit GPR value
+/// `full`, which the caller looked up for `gpr_index(reg)`.
+pub fn read_reg(reg: u8, full: u64) -> u64 {
+    if reg >= HIGH_BYTE_REG { (full >> 8) & 0xFF } else { full }
+}
+
+/// The 64-bit GPR index (0..15) that holds decoded register `reg`.
+pub fn gpr_index(reg: u8) -> u8 {
+    if reg >= HIGH_BYTE_REG { reg - HIGH_BYTE_REG } else { reg }
+}
+
+/// Merge a `width`-byte value into decoded register `reg`, whose 64-bit GPR
+/// currently holds `old`.
+pub fn merge_operand(reg: u8, old: u64, value: u64, width: u8) -> u64 {
+    if reg >= HIGH_BYTE_REG {
+        (old & !0xFF00) | ((value & 0xFF) << 8)
+    } else {
+        merge_reg(old, value, width)
+    }
 }
 
 /// Mask the upper bits off a value to honour the operand width.

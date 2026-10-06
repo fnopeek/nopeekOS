@@ -1311,7 +1311,13 @@ pub(super) fn guest_cpl() -> Result<u8, &'static str> {
 /// add it to the current GUEST_RIP. Required after I/O exits
 /// (otherwise VMRESUME re-executes the trapping OUT/IN forever).
 pub(super) fn advance_guest_rip() -> Result<(), &'static str> {
-    let len = vmread(VM_EXIT_INSTRUCTION_LEN)?;
+    advance_guest_rip_by(vmread(VM_EXIT_INSTRUCTION_LEN)?)
+}
+
+/// Advance GUEST_RIP by `len` bytes, the length of an instruction we decoded
+/// ourselves. For EPT violations: the SDM defines VM_EXIT_INSTRUCTION_LEN
+/// only for exits caused by instruction execution.
+pub(super) fn advance_guest_rip_by(len: u64) -> Result<(), &'static str> {
     let rip = vmread(GUEST_RIP)?;
     vmwrite(GUEST_RIP, rip.wrapping_add(len))?;
     // KVM `skip_emulated_instruction` → `vmx_set_interrupt_shadow(0)`: the
