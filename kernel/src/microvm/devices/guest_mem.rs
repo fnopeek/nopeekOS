@@ -40,6 +40,22 @@ pub fn set_active(gm: GuestMem) -> &'static GuestMem {
     unsafe { &*p }
 }
 
+/// Frames guest RAM may still take before the host's reserve: the same
+/// `KERNEL_RESERVE_MB` a module's `memory.grow` keeps free. Demand paging
+/// stops there; the guest then dies on the unbacked page instead of the
+/// host running out of frames under its own allocations.
+pub fn frames_spare() -> usize {
+    let (free, _) = crate::memory::stats();
+    let reserve = crate::forge_rt::KERNEL_RESERVE_MB * (1024 * 1024 / crate::memory::PAGE_SIZE);
+    let spare = free.saturating_sub(reserve);
+    if spare == 0 && !RESERVE_HIT.swap(true, Ordering::Relaxed) {
+        crate::kprintln!("[microvm] guest RAM not backed: host memory is down to its reserve");
+    }
+    spare
+}
+
+static RESERVE_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// The active guest memory, if a microvm is running. Used by the off-vCPU
 /// backend fiber (which has no `VmShared` handle).
 pub fn active() -> Option<&'static GuestMem> {

@@ -232,16 +232,23 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
         if pte & EPT_R != 0 {
             return Some(pte & EPT_ADDR_MASK); // already faulted in
         }
+        let spare = crate::microvm::devices::guest_mem::frames_spare();
+        if spare == 0 {
+            return None;
+        }
         let frame = memory::allocate_frame()?;
         core::ptr::write_bytes(frame as *mut u8, 0, 4096);
         pt.add(pt_idx)
             .write_volatile(frame | EPT_RWX | EPT_MEM_TYPE_WB);
         // Fault-around: back the rest of this 2 MB block now, so a guest
         // walking fresh memory takes one exit per 2 MB, not one per 4 KB
-        // (KVM gets the same from a THP-backed memslot). Stops quietly when
-        // the allocator runs dry; the remaining pages fault in singly.
+        // (KVM gets the same from a THP-backed memslot). Stops at the host
+        // reserve; the remaining pages fault in singly.
+        let mut left = spare - 1;
         for j in 0..512usize {
+            if left == 0 { break; }
             if j == pt_idx || pt.add(j).read_volatile() & EPT_R != 0 { continue; }
+            left -= 1;
             let Some(f) = memory::allocate_frame() else { break };
             core::ptr::write_bytes(f as *mut u8, 0, 4096);
             pt.add(j).write_volatile(f | EPT_RWX | EPT_MEM_TYPE_WB);
