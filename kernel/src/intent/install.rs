@@ -1,7 +1,7 @@
 //! npk install — module package manager.
 //!
-//! Downloads WASM modules from GitHub release/modules/,
-//! verifies ECDSA P-384 signature + SHA-384 hash,
+//! Downloads WASM modules from GitHub release/modules/, checks each against
+//! its entry in the signed module manifest (`update::fetch_manifest`),
 //! stores in npkFS under sys/wasm/<name>.
 
 use crate::{kprintln, kprint};
@@ -12,7 +12,6 @@ const MODULE_HOST: &str = "raw.githubusercontent.com";
 const MODULE_BASE: &str = "/fnopeek/nopeekOS/main/release/modules";
 const MAX_MODULE_SIZE: usize = 16 * 1024 * 1024; // 16 MB (buffer is min(content_length, cap), so no waste)
 const MAX_MANIFEST_SIZE: usize = 8192;
-const MAX_SIG_SIZE: usize = 512;
 
 
 struct ModuleEntry {
@@ -32,7 +31,7 @@ struct ModuleEntry {
 /// ```
 fn parse_manifest(data: &[u8]) -> Result<Vec<ModuleEntry>, &'static str> {
     let text = core::str::from_utf8(data).map_err(|_| "manifest: invalid UTF-8")?;
-    let mut modules = Vec::new();
+    let mut modules: Vec<ModuleEntry> = Vec::new();
     let mut name: Option<String> = None;
     let mut version: Option<String> = None;
     let mut size: Option<usize> = None;
@@ -72,7 +71,15 @@ fn parse_manifest(data: &[u8]) -> Result<Vec<ModuleEntry>, &'static str> {
         modules.push(ModuleEntry { name: n, version: v, size: s, sha384: h });
     }
 
+    // The name becomes an npkFS path and a download URL.
+    modules.retain(|m| super::update::safe_asset_name(&m.name));
     Ok(modules)
+}
+
+fn fetch_module_manifest() -> Result<Vec<u8>, String> {
+    let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
+    super::update::fetch_manifest(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE,
+        super::update::ManifestKind::Modules)
 }
 
 fn hex_to_bytes48(hex: &str) -> Result<[u8; 48], &'static str> {
@@ -95,8 +102,7 @@ pub fn intent_install(args: &str) {
     }
 
     kprintln!("[npk] Fetching module manifest...");
-    let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
-    let manifest_data = match super::http::https_get(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
+    let manifest_data = match fetch_module_manifest() {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk] Failed to fetch manifest: {}", e); return; }
     };
@@ -136,9 +142,7 @@ pub fn intent_install(args: &str) {
     // Download module
     let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, name);
     // Bound the fetch by the manifest's own size rather than a fixed cap, so
-    // a growing module is never silently truncated. The manifest is
-    // unauthenticated here (SHA-384 and the signature below are the real
-    // gate), so it may only lower the bound.
+    // a growing module is never silently truncated.
     if entry.size == 0 || entry.size > MAX_MODULE_SIZE {
         kprintln!("[npk] Refusing implausible module size: {} bytes (max {})",
             entry.size, MAX_MODULE_SIZE);
@@ -154,7 +158,7 @@ pub fn intent_install(args: &str) {
         return;
     }
 
-    // Verify SHA-384
+    // The signed manifest names this hash.
     kprint!("[npk] Verifying SHA-384... ");
     let hash = crate::tls::sha256::sha384(&wasm_data);
     if hash != entry.sha384 {
@@ -164,34 +168,12 @@ pub fn intent_install(args: &str) {
     }
     kprintln!("OK");
 
-    // Verify ECDSA P-384 signature
-    kprint!("[npk] Verifying signature... ");
-    let sig_path = alloc::format!("{}/{}.sig", MODULE_BASE, name);
-    let sig_data = match super::http::https_get(MODULE_HOST, &sig_path, MAX_SIG_SIZE) {
-        Ok(d) => d,
-        Err(e) => { kprintln!("FAILED ({})", e); return; }
-    };
-
-    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-        kprintln!("FAILED");
-        kprintln!("[npk] Invalid signature! Install rejected.");
-        return;
-    }
-    kprintln!("OK");
-
-    // Delete old version before storing (npkFS doesn't overwrite)
-    let _ = crate::npkfs::delete(&store_name);
-    let _ = crate::npkfs::delete(&version_key);
-
-    // Store in npkFS
-    if let Err(e) = crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL) {
+    // Replaced in place: the old module stays until the new one is written.
+    if let Err(e) = crate::npkfs::upsert(&store_name, &wasm_data, crate::capability::CAP_NULL) {
         kprintln!("[npk] Failed to store module: {:?}", e);
         return;
     }
-
-    // Store version metadata
-    let _ = crate::npkfs::store(&version_key, entry.version.as_bytes(), crate::capability::CAP_NULL);
+    let _ = crate::npkfs::upsert(&version_key, entry.version.as_bytes(), crate::capability::CAP_NULL);
 
     kprintln!("[npk] ✓ {} v{} installed.", name, entry.version);
 }
@@ -210,8 +192,7 @@ pub struct ModulePlan {
 /// anything. Returns what needs updating plus how many were already current,
 /// so the caller can show a plan before asking to apply it.
 pub fn plan_modules() -> (Vec<ModulePlan>, usize) {
-    let manifest_path = alloc::format!("{}/manifest", MODULE_BASE);
-    let manifest_data = match super::http::https_get(MODULE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
+    let manifest_data = match fetch_module_manifest() {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! module manifest: {}", e); return (Vec::new(), 0); }
     };
@@ -290,28 +271,15 @@ pub fn apply_module(p: &ModulePlan) -> bool {
         return fail(format_args!("short download ({} of {})", wasm_data.len(), p.size));
     }
 
+    // The signed manifest names this hash.
     let hash = crate::tls::sha256::sha384(&wasm_data);
     if hash != p.sha384 {
         return fail(format_args!("checksum mismatch"));
     }
 
-    let sig_path = alloc::format!("{}/{}.sig", MODULE_BASE, p.name);
-    let sig_data = match super::http::https_get(MODULE_HOST, &sig_path, MAX_SIG_SIZE) {
-        Ok(d) => d,
-        Err(e) => return fail(format_args!("signature: {}", e)),
-    };
-
-    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-        return fail(format_args!("signature invalid"));
-    }
-
-    // Delete old module + version before storing new one (npkFS doesn't overwrite)
-    let _ = crate::npkfs::delete(&store_name);
-    let _ = crate::npkfs::delete(&version_key);
-
-    if crate::npkfs::store(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
-        let _ = crate::npkfs::store(&version_key, p.remote.as_bytes(), crate::capability::CAP_NULL);
+    // Replaced in place: the old module stays until the new one is written.
+    if crate::npkfs::upsert(&store_name, &wasm_data, crate::capability::CAP_NULL).is_ok() {
+        let _ = crate::npkfs::upsert(&version_key, p.remote.as_bytes(), crate::capability::CAP_NULL);
         true
     } else {
         fail(format_args!("store failed"))

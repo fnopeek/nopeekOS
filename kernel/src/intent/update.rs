@@ -2,6 +2,14 @@
 //!
 //! Downloads kernel from GitHub, verifies ECDSA P-384 signature,
 //! writes to ESP FAT32 partition.
+//!
+//! Trust comes from the three release manifests (kernel, modules, assets),
+//! each signed as a whole (`fetch_manifest`). A manifest names every
+//! artifact with its version, size, sha384 and URL, so a downloaded blob is
+//! accepted when its hash matches its signed entry. Each manifest carries
+//! `issued=` (release time); an older one than the last accepted is refused,
+//! so a replayed old release cannot downgrade. Withdrawing a release stays
+//! possible: a new manifest may name an older version.
 
 use crate::kprintln;
 use alloc::string::String;
@@ -76,8 +84,7 @@ struct AssetEntry {
     size: usize,
     sha384: [u8; 48],
     /// Optional explicit URL — when present, fetched verbatim instead of
-    /// `https://{UPDATE_HOST}{UPDATE_BASE}/assets/<remote_filename>`. The
-    /// `.sig` sidecar URL is derived by appending `.sig` to this URL.
+    /// `https://{UPDATE_HOST}{UPDATE_BASE}/assets/<remote_filename>`.
     url: Option<String>,
 }
 
@@ -85,6 +92,78 @@ struct Manifest {
     version: String,
     size: usize,
     sha384: [u8; 48],
+}
+
+/// Which release manifest; part of the signed message, so one kind's
+/// manifest cannot stand in for another's.
+#[derive(Clone, Copy)]
+pub(super) enum ManifestKind {
+    Kernel,
+    Modules,
+    Assets,
+}
+
+impl ManifestKind {
+    fn tag(self) -> &'static str {
+        match self {
+            ManifestKind::Kernel => "kernel",
+            ManifestKind::Modules => "modules",
+            ManifestKind::Assets => "assets",
+        }
+    }
+}
+
+/// Prefix of every signed manifest message (`build.sh` `sign_manifest`).
+const MANIFEST_SIG_TAG: &str = "nopeekOS-ota-manifest-v1";
+
+/// Fetch a release manifest and its detached signature, verify both and
+/// the `issued=` order. Returns the manifest bytes, now authenticated.
+pub(super) fn fetch_manifest(host: &str, path: &str, max: usize, kind: ManifestKind)
+    -> Result<Vec<u8>, String>
+{
+    let data = super::http::https_get(host, path, max).map_err(String::from)?;
+    let sig_path = alloc::format!("{}.sig", path);
+    let sig = super::http::https_get(host, &sig_path, MAX_SIG_SIZE)
+        .map_err(|e| alloc::format!("signature: {}", e))?;
+
+    let mut h = crate::tls::sha256::Sha384::new();
+    h.update(MANIFEST_SIG_TAG.as_bytes());
+    h.update(b"\n");
+    h.update(kind.tag().as_bytes());
+    h.update(b"\n");
+    h.update(&data);
+    let digest = h.finalize();
+    if !crate::tls::certstore::verify_p384_prehash_384(&crate::update_key::UPDATE_PUB_KEY, &digest, &sig) {
+        return Err(String::from("signature invalid — rejected"));
+    }
+
+    let issued = manifest_issued(&data).ok_or_else(|| String::from("no issued= line — rejected"))?;
+    let key = alloc::format!("sys/ota/issued-{}", kind.tag());
+    let seen = crate::npkfs::fetch(&key).ok()
+        .and_then(|(d, _)| core::str::from_utf8(&d).ok().and_then(|t| t.trim().parse::<u64>().ok()))
+        .unwrap_or(0);
+    if issued < seen {
+        return Err(alloc::format!(
+            "older than the release already installed (issued {} < {}) — rejected", issued, seen));
+    }
+    if issued > seen {
+        let _ = crate::npkfs::upsert(&key, alloc::format!("{}", issued).as_bytes(),
+            crate::capability::CAP_NULL);
+    }
+    Ok(data)
+}
+
+/// The `issued=` value, from the lines before the first `[section]`.
+fn manifest_issued(data: &[u8]) -> Option<u64> {
+    let text = core::str::from_utf8(data).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') { break; }
+        if let Some(v) = line.strip_prefix("issued=") {
+            return v.trim().parse().ok();
+        }
+    }
+    None
 }
 
 fn parse_manifest(data: &[u8]) -> Result<Manifest, &'static str> {
@@ -215,7 +294,7 @@ fn build_plan() -> Option<Plan> {
     kprintln!("[npk] update — {}{}", UPDATE_HOST, UPDATE_BASE);
 
     let manifest_path = alloc::format!("{}/manifest", UPDATE_BASE);
-    let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_MANIFEST_SIZE) {
+    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, MAX_MANIFEST_SIZE, ManifestKind::Kernel) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! manifest: {}", e); return None; }
     };
@@ -225,9 +304,7 @@ fn build_plan() -> Option<Plan> {
     };
 
     let current = env!("CARGO_PKG_VERSION");
-    // The manifest is not authenticated yet — the SHA-384 and signature
-    // checks in `apply_kernel` are what make it trustworthy. Here it may only
-    // *lower* our appetite, never raise it past MAX_KERNEL_SIZE.
+    // The manifest is signed, but a ceiling still guards the buffer.
     let kernel = if manifest.version == current {
         None
     } else if manifest.size == 0 || manifest.size > MAX_KERNEL_SIZE {
@@ -317,20 +394,10 @@ fn apply_kernel(manifest: &Manifest) -> bool {
         return false;
     }
 
+    // The signed manifest names this hash; nothing else is needed.
     let hash = crate::tls::sha256::sha384(&kernel_data);
     if hash != manifest.sha384 {
         kprintln!("[npk]   ! kernel     checksum mismatch — rejected");
-        return false;
-    }
-
-    let sig_path = alloc::format!("{}/kernel.sig", UPDATE_BASE);
-    let sig_data = match super::http::https_get(UPDATE_HOST, &sig_path, MAX_SIG_SIZE) {
-        Ok(d) => d,
-        Err(e) => { kprintln!("[npk]   ! kernel     signature: {}", e); return false; }
-    };
-    let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-    if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-        kprintln!("[npk]   ! kernel     signature invalid — rejected");
         return false;
     }
 
@@ -413,7 +480,7 @@ struct AssetJob {
 /// returns the jobs to run and how many were already current.
 fn plan_assets() -> (Vec<AssetJob>, usize) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
-    let manifest_data = match super::http::https_get(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE) {
+    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, MAX_ASSET_MANIFEST_SIZE, ManifestKind::Assets) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
     };
@@ -433,8 +500,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
             // filename, so shipping or replacing an anchor is dropping a file
             // into `release/assets/certs/` — no kernel change, no reinstall.
             // The trust chain is unchanged: size and sha384 come from the
-            // manifest and every asset is checked against its own detached
-            // signature on apply, exactly like the kernel.
+            // signed manifest, exactly like the kernel.
             None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
                 Some(name) => (
                     alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
@@ -585,44 +651,13 @@ fn apply_asset(job: &AssetJob) -> bool {
             return false;
         }
 
+        // The signed manifest names this hash.
         let hash = hasher.finalize();
         if hash != entry.sha384 {
             kprintln!("[npk]   ! asset     checksum failed");
             // Drop the writer without finishing — flushed chunks
             // remain in storage but are unreachable from the path
             // tree, so the next `gc()` cycle reclaims them.
-            return false;
-        }
-
-        // Sig URL: `<asset_url>.sig` if url= override, else default path.
-        let sig_host_owned;
-        let sig_path_owned;
-        let (sig_host_str, sig_path_str): (&str, &str) = if let Some(url) = &entry.url {
-            let sig_full = alloc::format!("{}.sig", url);
-            match split_url(&sig_full) {
-                Some((h, p)) => {
-                    sig_host_owned = String::from(h);
-                    sig_path_owned = String::from(p);
-                    (sig_host_owned.as_str(), sig_path_owned.as_str())
-                }
-                None => { kprintln!("[npk]   ! asset     bad sig url"); return false; }
-            }
-        } else {
-            sig_host_owned = String::from(UPDATE_HOST);
-            sig_path_owned = alloc::format!("{}/assets/{}.sig", UPDATE_BASE, spec.remote_filename);
-            (sig_host_owned.as_str(), sig_path_owned.as_str())
-        };
-
-        let sig_data = match super::http::https_get(sig_host_str, sig_path_str, MAX_SIG_SIZE) {
-            Ok(d) => d,
-            Err(e) => { kprintln!("[npk]   ! asset     signature: {}", e); return false; }
-        };
-
-        let pubkey = &crate::update_key::UPDATE_PUB_KEY;
-        if !crate::tls::certstore::verify_p384_prehash_384(pubkey, &hash, &sig_data) {
-            kprintln!("[npk]   ! asset     signature invalid");
-            // Writer is dropped without finish; chunks become
-            // unreachable, gc reclaims them on next pass.
             return false;
         }
 
@@ -637,11 +672,11 @@ fn apply_asset(job: &AssetJob) -> bool {
     }
 }
 
-/// A manifest-supplied asset name we are willing to turn into a path.
+/// A manifest-supplied name we are willing to turn into a path.
 /// Deliberately strict — the name becomes part of an npkFS path, so anything
-/// that could climb out of its directory is refused. The manifest is
-/// signature-checked per asset, but a name is not a place to be trusting.
-fn safe_asset_name(name: &str) -> bool {
+/// that could climb out of its directory is refused. The manifest is signed,
+/// but a name is not a place to be trusting.
+pub(super) fn safe_asset_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')

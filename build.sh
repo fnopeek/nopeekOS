@@ -64,6 +64,15 @@ ok()   { echo -e "${GREEN}[npk]${NC} $1"; }
 warn() { echo -e "${YELLOW}[npk]${NC} $1"; }
 err()  { echo -e "${RED}[npk]${NC} $1"; }
 
+# Sign a release manifest as a whole: <kind> <manifest> <key>. The message is
+# a fixed tag, the kind and the manifest bytes (kernel/src/intent/update.rs,
+# `fetch_manifest`), so one kind's manifest cannot stand in for another's.
+# The manifest must already carry its `issued=` line.
+sign_manifest() {
+    { printf 'nopeekOS-ota-manifest-v1\n%s\n' "$1"; cat "$2"; } \
+        | openssl dgst -sha384 -sign "$3" -out "$2.sig"
+}
+
 # ============================================================
 # Build
 # ============================================================
@@ -992,7 +1001,9 @@ case "${1:-}" in
         [ -d "$RELEASE_DIR/modules" ] || { err "no release/modules/"; exit 1; }
         [ -f "$KEY_FILE" ] || { err "no update.key - cannot sign"; exit 1; }
         OLD_MANIFEST="$RELEASE_DIR/modules/manifest"
-        MODULE_MANIFEST=""
+        MODULE_MANIFEST="issued=$(date +%s)
+
+"
         SIGNED=0
         for wasm_file in "$RELEASE_DIR/modules/"*.wasm; do
             [ -f "$wasm_file" ] || continue
@@ -1015,6 +1026,7 @@ sha384=${MOD_SHA}
             SIGNED=$((SIGNED + 1))
         done
         echo "$MODULE_MANIFEST" > "$OLD_MANIFEST"
+        sign_manifest modules "$OLD_MANIFEST" "$KEY_FILE"
         ok "Module manifest written - $SIGNED module(s) re-signed, kernel untouched"
         ;;
     release)
@@ -1033,8 +1045,13 @@ sha384=${MOD_SHA}
         SIZE=$(stat -c%s "$RELEASE_DIR/kernel.efi")
         SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel.efi" 2>/dev/null | awk '{print $NF}')
 
+        # One release time for all three manifests: the kernel refuses a
+        # manifest older than the last one it accepted (replay, downgrade).
+        ISSUED=$(date +%s)
+
         # Write manifest
         cat > "$RELEASE_DIR/manifest" <<MANIFEST
+issued=$ISSUED
 version=$VERSION
 size=$SIZE
 sha384=$SHA384
@@ -1047,6 +1064,7 @@ MANIFEST
         KEY_FILE="$PROJECT_DIR/update.key"
         if [ -f "$KEY_FILE" ]; then
             openssl dgst -sha384 -sign "$KEY_FILE" -out "$RELEASE_DIR/kernel.sig" "$RELEASE_DIR/kernel.efi"
+            sign_manifest kernel "$RELEASE_DIR/manifest" "$KEY_FILE"
             ok "Signed with $KEY_FILE"
         else
             warn "No signing key found at $KEY_FILE"
@@ -1263,7 +1281,8 @@ sha384=${USQ_SHA}
         fi
 
         if [ -n "$ASSET_MANIFEST" ]; then
-            echo "$ASSET_MANIFEST" > "$RELEASE_DIR/assets/manifest"
+            printf 'issued=%s\n\n%s\n' "$ISSUED" "$ASSET_MANIFEST" > "$RELEASE_DIR/assets/manifest"
+            [ -f "$KEY_FILE" ] && sign_manifest assets "$RELEASE_DIR/assets/manifest" "$KEY_FILE"
             ok "Asset manifest written"
         fi
 
@@ -1282,7 +1301,9 @@ sha384=${USQ_SHA}
         # Sign WASM modules in release/modules/ (if any)
         if [ -d "$RELEASE_DIR/modules" ]; then
             log "Signing WASM modules..."
-            MODULE_MANIFEST=""
+            MODULE_MANIFEST="issued=$ISSUED
+
+"
             for wasm_file in "$RELEASE_DIR/modules/"*.wasm; do
                 [ -f "$wasm_file" ] || continue
                 MOD_NAME=$(basename "$wasm_file" .wasm)
@@ -1304,6 +1325,7 @@ sha384=${MOD_SHA}
 
             if [ -n "$MODULE_MANIFEST" ]; then
                 echo "$MODULE_MANIFEST" > "$RELEASE_DIR/modules/manifest"
+                [ -f "$KEY_FILE" ] && sign_manifest modules "$RELEASE_DIR/modules/manifest" "$KEY_FILE"
                 ok "Module manifest written"
             fi
         fi
