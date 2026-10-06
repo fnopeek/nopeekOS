@@ -6627,7 +6627,9 @@ family: st.family,
             self.path.push(self.info(el));
             let iw = if el.tag == "svg" { self.svg_size(el, &cs).0 } else { self.img_box(el, &cs).0 };
             self.path.pop();
-            (iw as f32, iw as f32)
+            // The margin box, as for every other child.
+            let outer = iw as f32 + inline_frame(&cs, 0.0);
+            (outer, outer)
         } else {
             self.child_outer(el, &cs)
         };
@@ -6650,6 +6652,21 @@ family: st.family,
         // Floated siblings still sum up (`run.atomic`); at min-content every
         // float gets its own line, so there they compete (`atomic_min`).
         if cs.float != FloatKind::None || (atomic_inline && cs.float == FloatKind::None) {
+            // A space before an atomic inline is inside the line, not hanging
+            // at its end, so it counts — `flush_run` would trim it.
+            if cs.float == FloatKind::None && !st.pre {
+                let kept = run.text.trim_end_matches(is_css_space).len();
+                if kept < run.text.len() {
+                    let before = !run.text[..kept].trim_matches(is_css_space).is_empty()
+                        || run.frame > 0.0
+                        || run.atomic > 0.0;
+                    run.text.truncate(kept);
+                    if before {
+                        let font = self.fonts.pick(st.bold, st.italic, st.mono, st.family);
+                        run.atomic += space_width(font, st.font_px, (st.letter_spacing, st.word_spacing));
+                    }
+                }
+            }
             run.atomic += p;
             run.atomic_min = run.atomic_min.max(m);
             return;
