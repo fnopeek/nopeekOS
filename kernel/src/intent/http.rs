@@ -196,8 +196,9 @@ fn do_http_request(args: &str, use_tls: bool) {
                     let poll_cyc = PROF_POLL_CYC.swap(0, Relaxed);
                     let recv_cyc = PROF_RECV_CYC.swap(0, Relaxed);
                     let ghz = (crate::interrupts::tsc_freq() / 1_000_000_000).max(1);
-                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: a={} d={}  rxbuf={}K  tx_acks={}/s  | iters={} poll={}ns recv={}ns",
-                        total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024,
+                    let budget_drops = crate::net::tcp::take_rx_budget_drops();
+                    kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: a={} d={}  rxbuf={}K  budget-drops={}  tx_acks={}/s  | iters={} poll={}ns recv={}ns",
+                        total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024, budget_drops,
                         txsegs as u64 * 100 / dt2,
                         iters, poll_cyc / iters / ghz, recv_cyc / iters / ghz);
                     let (nd, st, tf, rn, pk) = crate::net::take_poll_prof();

@@ -351,6 +351,48 @@ const ACK_COALESCE: u16 = 8;
 // can't blow up the heap.
 const OOO_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// Received bytes held by all connections together (in order and in
+/// reassembly), and the ceiling on it. The per-connection caps above allow
+/// over a gigabyte across the table; a peer that ignores flow control, or a
+/// module that opens many connections and never reads, would otherwise fill
+/// the kernel heap. Raised on every admission, recomputed exactly on each
+/// tick, so it cannot drift.
+static RX_HELD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static RX_BUDGET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Segments dropped because the budget was full (diagnostic).
+static RX_BUDGET_DROPS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const RX_BUDGET_MAX: usize = 256 * 1024 * 1024;
+const RX_BUDGET_MIN: usize = 16 * 1024 * 1024;
+
+/// 256 MiB, or an eighth of the memory free when first asked if that is less.
+fn rx_budget() -> usize {
+    use core::sync::atomic::Ordering::Relaxed;
+    let b = RX_BUDGET.load(Relaxed);
+    if b != 0 { return b; }
+    let (_, free_mib) = crate::memory::stats();
+    let b = (free_mib * 1024 * 1024 / 8).clamp(RX_BUDGET_MIN, RX_BUDGET_MAX);
+    RX_BUDGET.store(b, Relaxed);
+    b
+}
+
+/// Take `n` received bytes in, if the budget allows. A refused segment is
+/// dropped like one that does not fit the buffer; the peer sends it again.
+fn rx_admit(n: usize) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    if n == 0 { return true; }
+    if RX_HELD.load(Relaxed) + n > rx_budget() {
+        RX_BUDGET_DROPS.fetch_add(1, Relaxed);
+        return false;
+    }
+    RX_HELD.fetch_add(n, Relaxed);
+    true
+}
+
+/// Segments refused for the global receive budget since the last call.
+pub fn take_rx_budget_drops() -> u32 {
+    RX_BUDGET_DROPS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 // Out-of-order receive counters (diagnostic). `AHEAD` = a segment past rcv_nxt
 // (a gap → the sender will have to retransmit); `BEHIND` = a duplicate at/below
 // rcv_nxt (a retransmit we already have). A burst of AHEAD during a download =
@@ -1633,7 +1675,8 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         }
                     }
                     let space = RECV_BUF_SIZE - conn.recv_buf.len();
-                    let copy = payload.len().min(space);
+                    let mut copy = payload.len().min(space);
+                    if !rx_admit(copy) { copy = 0; }
                     // Bulk append, not byte-by-byte push_back: extend reserves
                     // once and copies.
                     conn.recv_buf.extend(payload[..copy].iter().copied());
@@ -1729,6 +1772,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                             && in_window
                             && !conn.ooo.contains_key(&off)
                             && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
+                            && rx_admit(payload.len())
                         {
                             conn.ooo_bytes += payload.len();
                             conn.ooo.insert(off, payload.to_vec());
@@ -1836,6 +1880,10 @@ pub fn tick_connections() {
         alloc::vec::Vec::new();
     {
         let mut conns = CONNECTIONS.lock();
+        let held: usize = conns.iter().flatten()
+            .map(|c| c.recv_buf.len() + c.ooo_bytes)
+            .sum();
+        RX_HELD.store(held, core::sync::atomic::Ordering::Relaxed);
         for slot in conns.iter_mut().flatten() {
             // Send what the driver queue refused earlier. Otherwise it would
             // wait for the caller's next `send`, while the caller waits for
