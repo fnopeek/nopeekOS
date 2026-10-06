@@ -1304,6 +1304,7 @@ pub struct LinkRect {
 /// beak's "inspect" dev tool. Recorded only when inspection is enabled (see
 /// `Ctx::inspect`); the shell hit-tests these and shows the deepest box under
 /// the cursor so a mis-placed element can be named.
+#[derive(Clone)]
 pub struct InspectBox {
     pub x: i32,
     pub y: i32,
@@ -2155,6 +2156,10 @@ struct Ctx<'a> {
     /// every element needs its parent's entry; one that sets none shares the
     /// parent's map (`Rc`) instead of copying it.
     varmaps: core::cell::RefCell<BTreeMap<u32, alloc::rc::Rc<crate::vars::VarMap>>>,
+    /// The query containers whose boxes are being laid out right now, outermost
+    /// first. Everything cascaded while one is on the stack is its descendant
+    /// (or its own `::before`/`::after`), which is what `@container` asks about.
+    cq: core::cell::RefCell<Vec<crate::media::CqBox>>,
 }
 
 /// Hash the inputs `style::resolve` actually depends on. Elements are
@@ -2263,11 +2268,52 @@ impl<'a> Ctx<'a> {
         self.varmaps.borrow().get(&seq).cloned().unwrap_or_default()
     }
 
+    /// The media state and query containers a cascade evaluates against.
+    fn match_env<'c>(&self, cq: &'c [crate::media::CqBox]) -> crate::css::MatchEnv<'c> {
+        let media = crate::css::Media::new(self.viewport_w, self.theme.is_dark()).with_height(self.viewport_h);
+        crate::css::MatchEnv { media, containers: cq }
+    }
+
+    /// What the container stack adds to a memo key: nothing when the sheet has
+    /// no `@container` rules, else the size of every container in effect.
+    fn cq_key(&self) -> u64 {
+        if !self.sheet.has_container_rules {
+            return 0;
+        }
+        let mut h: u64 = 0;
+        for c in self.cq.borrow().iter() {
+            h = (h ^ (c.seq as u64) << 32 ^ c.w.to_bits() as u64 ^ c.h.map_or(0, |v| v.to_bits() as u64) << 16)
+                .wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h.rotate_left(7)
+    }
+
+    /// Run `f` with `el` on the container stack when it is a query container
+    /// and the sheet asks about containers. `w` is the strip the box is laid
+    /// out in; its content box is solved the way the box itself solves it.
+    fn with_container<R>(&mut self, el: &Element, st: &ComputedStyle, w: i32, f: impl FnOnce(&mut Self) -> R) -> R {
+        if st.container_type == crate::media::CQ_NONE || !self.sheet.has_container_rules {
+            return f(self);
+        }
+        let (cw, _) = resolve_block_h(st, w as f32);
+        let h = match st.height {
+            Len::Px(v) if st.box_border => Some((v - st.pad_top - st.pad_bottom - st.border_y()).max(0.0)),
+            Len::Px(v) => Some(v),
+            _ => None,
+        };
+        self.cq.borrow_mut().push(crate::media::CqBox {
+            seq: el.seq, kind: st.container_type, names: st.container_names, w: cw, h,
+        });
+        let r = f(self);
+        self.cq.borrow_mut().pop();
+        r
+    }
+
     /// `style::resolve` through the memo. Every cascade inside the layout goes
     /// through here so a re-measured subtree costs a map lookup, not a full
     /// selector match against the page's stylesheet.
     fn styled(&self, el: &Element, parent: &ComputedStyle, prev: &[ElemInfo], sib_count: u32) -> ComputedStyle {
-        let key = style_key(el, parent, &self.path, prev, sib_count);
+        let key = style_key(el, parent, &self.path, prev, sib_count) ^ self.cq_key();
         if let Some(s) = self.styles.borrow().get(&key) {
             self.note_vh(s);
             return *s;
@@ -2277,8 +2323,10 @@ impl<'a> Ctx<'a> {
             None => alloc::rc::Rc::new(crate::vars::VarMap::new()),
         };
         let mut own = None;
+        let cq = self.cq.borrow();
         let s = style::resolve_in(&self.info(el), parent, self.theme, self.sheet, &self.path,
-            prev, sib_count, self.viewport_w, &inherited, &mut own);
+            prev, sib_count, self.match_env(&cq), &inherited, &mut own);
+        drop(cq);
         // An element that sets nothing shares its parent's map (same `Rc`, no
         // copy). The entry must still exist, or a child would find nothing and
         // inheritance would break here.
@@ -2654,10 +2702,15 @@ pub fn layout(
     initial.vh = viewport_h as f32;
     let html_el = dom.root_element();
     let (mut root_own, no_vars) = (None, crate::vars::VarMap::new());
+    let top_env = crate::css::MatchEnv {
+        media: crate::css::Media::new(width as f32, theme.is_dark()).with_height(viewport_h as f32),
+        containers: &[],
+    };
     let mut root = style::resolve_in(&ElemInfo::of_hovered(html_el, hover), &initial, theme,
-        sheet, &[], &[], 0, width as f32, &no_vars, &mut root_own);
+        sheet, &[], &[], 0, top_env, &no_vars, &mut root_own);
     let root_vars = root_own.unwrap_or_default();
     root.rem_base = root.font_px;
+    root.rlh_base = root.line_height.px(root.font_px).unwrap_or(root.font_px * 1.2);
     let cx = 0;
     let cw = (width as i32).max(60);
     let mut ctx = Ctx {
@@ -2713,6 +2766,7 @@ pub fn layout(
         segs: core::cell::RefCell::new(BTreeMap::new()),
         styles: core::cell::RefCell::new(BTreeMap::new()),
         varmaps: core::cell::RefCell::new(BTreeMap::new()),
+        cq: core::cell::RefCell::new(Vec::new()),
     };
     // The root palette. `:root{--…}` is the map everything else reads from;
     // without this entry nothing inherits.
@@ -2728,7 +2782,7 @@ pub fn layout(
     let body_inherited = ctx.vars_of(html_el.seq);
     let mut body_own = None;
     let body_style = style::resolve_in(&ctx.info(body), &root, theme, sheet, anc, &[], 0,
-        width as f32, &body_inherited, &mut body_own);
+        top_env, &body_inherited, &mut body_own);
     ctx.varmaps.borrow_mut().insert(body.seq, match body_own {
         Some(m) => alloc::rc::Rc::new(m),
         None => body_inherited,
@@ -2818,7 +2872,8 @@ pub fn layout(
         css_image_keys: ctx.css_images.into_inner(),
         css_image_srcs: Vec::new(),
         inline_svgs: ctx.inline_svgs.into_inner(),
-        viewport_h_used: ctx.vh_used.get(),
+        // A height-dependent `@media` rule makes the whole cascade depend on it.
+        viewport_h_used: ctx.vh_used.get() || sheet.media_reads_height,
         phase: [0; 3],
         inspect: ctx.inspects,
         hover_boxes: ctx.hover_boxes,
@@ -3605,13 +3660,16 @@ impl<'a> Ctx<'a> {
         let anc = self.path.len().saturating_sub(1);
         // Same inputs the cascade reads, plus which pseudo-element is asked
         // about — `prev`/`sib_count` are constant here, so they add nothing.
-        let key = style_key(owner, own, &self.path[..anc], &[], 0) ^ ((kind as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let key = style_key(owner, own, &self.path[..anc], &[], 0) ^ ((kind as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            ^ self.cq_key();
         if let Some(hit) = self.pseudos.borrow().get(&key) {
             let (template, ps) = hit.as_ref()?;
             return Some((self.render_content(owner, template), *ps));
         }
-        let got =
-            style::resolve_pseudo(&self.info(owner), own, self.theme, self.sheet, &self.path[..anc], &[], 0, self.viewport_w, kind);
+        let cq = self.cq.borrow();
+        let got = style::resolve_pseudo(&self.info(owner), own, self.theme, self.sheet,
+            &self.path[..anc], &[], 0, self.match_env(&cq), kind);
+        drop(cq);
         self.pseudos.borrow_mut().insert(key, got.clone());
         let (template, ps) = got?;
         Some((self.render_content(owner, &template), ps))
@@ -3924,6 +3982,10 @@ family: ps.family,
     /// left open for the next sibling. When `isolated`, `base_y` is the
     /// border-box top and margins are committed, not propagated.
     fn flow_block_impl(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
+        self.with_container(el, st, w, |c| c.flow_block_body(el, st, x, w, base_y, incoming, isolated))
+    }
+
+    fn flow_block_body(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, base_y: i32, incoming: Collapse, isolated: bool) -> BoxOut {
         // The style as it came in — the collapse-through case below lays this
         // box out a second time, exactly as the caller asked for it.
         let st_in = st;
@@ -4199,7 +4261,7 @@ family: st.family,
                         }
                         None => base_y,
                     };
-                    return self.flow_block_impl(el, st_in, x, w, base2, merged, isolated);
+                    return self.flow_block_body(el, st_in, x, w, base2, merged, isolated);
                 }
             }
         }
@@ -4606,6 +4668,21 @@ family: st.family,
         if let Some(mn) = st.min_width.px(avail) {
             w = w.max(mn as i32);
         }
+        // `min-width: max-content` (every Primer button) is the box's own
+        // natural width, whatever `width` says.
+        if matches!(st.min_width, Len::Intrinsic(_)) || matches!(st.max_width, Len::Intrinsic(_)) {
+            let mut m = *st;
+            m.width = Len::Auto;
+            m.min_width = Len::Auto;
+            m.max_width = Len::Auto;
+            let natural = self.control_box(el, &m, kind, NO_LIMIT).w;
+            if matches!(st.max_width, Len::Intrinsic(_)) {
+                w = w.min(natural);
+            }
+            if matches!(st.min_width, Len::Intrinsic(_)) {
+                w = w.max(natural);
+            }
+        }
         // `min-height` on a control is how real pages give a search field its
         // height (e.g. `min-height: 32px`). Without it the control keeps its
         // intrinsic line height and sits short inside its own flex row.
@@ -4795,15 +4872,15 @@ family: st.family,
         // nothing that owns a hit rect of its own inside it.
         self.links.truncate(l0);
         self.controls.truncate(c0);
-        self.inspects.truncate(i0);
-        self.hover_boxes.truncate(h0);
+        let inspects: Vec<InspectBox> = self.inspects.drain(i0..).collect();
+        let boxes: Vec<HoverBox> = self.hover_boxes.drain(h0..).collect();
         // And the ranges that point into `ops` — see above. A button's inner
         // stacking order is lost with them.
         self.stack_ops.truncate(s0);
         self.stack_links.truncate(sl0);
         self.float_ops.truncate(f0);
         self.float_links.truncate(fl0);
-        Some(CtlContent { ops, w: content_w, h: bottom.max(0), centred: takes_children })
+        Some(CtlContent { ops, boxes, inspects, w: content_w, h: bottom.max(0), centred: takes_children })
     }
 
     /// The preferred width of `el`'s `::before`/`::after` generated box, when
@@ -6244,7 +6321,16 @@ family: st.family,
                 Node::Element(e) => Some(self.table_role(e, parent, &siblings, sib_count)),
                 Node::Text(_) => None,
             };
+            // A `display: none` cell generates no box: it takes no column and
+            // does not end a run of stray content around it.
+            let none_cell = match (role, n) {
+                (Some(TableRole::Cell), Node::Element(e)) => {
+                    self.styled(e, parent, &siblings, sib_count).display == Display::None
+                }
+                _ => false,
+            };
             match role {
+                _ if none_cell => {}
                 Some(TableRole::Cell) => {
                     if let Some(s) = run_start.take() {
                         if run_has_content {
@@ -6316,8 +6402,9 @@ family: st.family,
         // `contain-intrinsic-size` — or are zero when it says nothing. This
         // has to sit ahead of every content-measuring branch below, including
         // the replaced one: the point of the property is that the box sizes
-        // as if it held a single child of exactly that size.
-        let out = if st.contain_size {
+        // as if it held a single child of exactly that size. A query container
+        // has (at least) inline-size containment (css-contain-3 §6.1).
+        let out = if st.contain_size || st.container_type != crate::media::CQ_NONE {
             let w = st.contain_intrinsic.map_or(0.0, |(iw, _)| iw);
             (w, w)
         } else if el.tag == "svg" {
@@ -6353,6 +6440,8 @@ family: st.family,
                         *len = Len::Auto;
                     }
                 }
+                // Measured without a width limit, so a button's contents
+                // report their max-content width rather than their minimum.
                 // This function returns a content width — every caller adds
                 // padding and border back itself (`child_outer`,
                 // `flex_metrics`, `flex_column`). `control_box` returns the
@@ -6364,7 +6453,7 @@ family: st.family,
                 // `control_box`. The caller does not know the UA minimum
                 // padding of a button without its own padding, so it must not
                 // be subtracted here.
-                let bw = self.control_box(el, &mst, kind, 0.0).w as f32;
+                let bw = self.control_box(el, &mst, kind, NO_LIMIT).w as f32;
                 let css_frame = mst.pad_left + mst.pad_right + mst.border_x();
                 let w = (bw - css_frame).max(0.0);
                 (w, w)
@@ -6706,6 +6795,9 @@ family: st.family,
                 // A percentage has no basis here (css-sizing-3 §4.1) and so
                 // contributes nothing.
                 GridTrack::Pct(_) => {}
+                GridTrack::MinContent => { pref += col_m[c]; min += col_m[c]; }
+                GridTrack::MaxContent => { pref += col_p[c]; min += col_p[c]; }
+                GridTrack::AutoFrom(px) => { pref += col_p[c].max(px); min += px; }
                 GridTrack::Auto | GridTrack::Fr(_) => { pref += col_p[c]; min += col_m[c]; }
             }
         }
@@ -6908,6 +7000,7 @@ family: st.family,
             }
             let h_i = ctl.h;
             paint_control(self.fonts, self.theme, &ctl, x + dx, y, &mut self.ops, &mut self.controls);
+            place_content_boxes(&ctl, x + dx, y, &mut self.hover_boxes, &mut self.inspects);
             return y + h_i;
         }
         // A replaced element reached through a box-making path: a flex or grid
@@ -6988,6 +7081,10 @@ family: st.family,
     /// default `stretch`). Not yet: named lines, dense packing, subgrid, or
     /// `align-content`/`justify-content`.
     fn layout_grid(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        self.with_container(el, st, w, |c| c.layout_grid_body(el, st, x, w, y0))
+    }
+
+    fn layout_grid_body(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // No template at all → a grid degenerates to a block box.
         if st.grid_ncols == 0 && st.grid_nrows == 0 {
             return self.layout_block(el, st, x, w, y0);
@@ -7234,49 +7331,93 @@ family: st.family,
             place.push((fc, cspan, fr, rspan));
         }
 
-        // — column sizing — fixed/% direct, `auto` = max-content of single-span
-        // items, `fr` splits the leftover.
+        // — column sizing (css-grid-2 §12.3-12.8, single-span items only) —
+        // A track starts at its base size and grows towards its limit while
+        // there is room; `fr` tracks then share what is left, and with none
+        // of them `justify-content: normal` stretches the `auto` tracks.
+        // Contributions are margin boxes: the item is laid out inside the
+        // track with its margins.
         let avail = w as f32;
-        let mut auto_content = vec![0.0f32; ncols];
+        let (mut c_max, mut c_min) = (vec![0.0f32; ncols], vec![0.0f32; ncols]);
         for (i, (el_i, s_i)) in items.iter().enumerate() {
             let (c, cspan, _, _) = place[i];
             if cspan == 1 {
-                auto_content[c] = auto_content[c].max(self.intrinsic_width(el_i, s_i).0);
+                let (p, m) = self.child_outer(el_i, s_i);
+                // The minimum contribution (§6.6): a definite `min-width`
+                // when there is one; a scroll container has no automatic
+                // minimum (a form control is never treated as one); otherwise
+                // the min-content contribution.
+                let margins = s_i.margin_left.px(0.0).unwrap_or(0.0) + s_i.margin_right.px(0.0).unwrap_or(0.0);
+                let frame = s_i.pad_left + s_i.pad_right + s_i.border_x();
+                let m = match s_i.min_width {
+                    Len::Px(v) if s_i.box_border => v.max(frame) + margins,
+                    Len::Px(v) => v + frame + margins,
+                    _ if s_i.overflow_x.scrolls() && crate::forms::kind_of(el_i).is_none() => frame + margins,
+                    _ => m,
+                };
+                c_max[c] = c_max[c].max(p);
+                c_min[c] = c_min[c].max(m);
             }
         }
         let mut colw = vec![0.0f32; ncols];
-        let (mut fr_sum, mut used) = (0.0f32, 0.0f32);
+        let mut limit = vec![0.0f32; ncols];
+        let mut fr_sum = 0.0f32;
         for c in 0..ncols {
-            match tracks[c] {
-                GridTrack::Fixed(px) => {
-                    colw[c] = px;
-                    used += px;
+            let (base, lim) = match tracks[c] {
+                GridTrack::Fixed(px) => (px, px),
+                GridTrack::Pct(p) => (p / 100.0 * avail, p / 100.0 * avail),
+                GridTrack::Auto => (c_min[c], c_max[c].max(c_min[c])),
+                GridTrack::AutoFrom(px) => (px, c_max[c].max(px)),
+                GridTrack::MinContent => (c_min[c], c_min[c]),
+                GridTrack::MaxContent => (c_max[c], c_max[c]),
+                GridTrack::Fr(f) => {
+                    fr_sum += f;
+                    (0.0, 0.0)
                 }
-                GridTrack::Pct(p) => {
-                    colw[c] = p / 100.0 * avail;
-                    used += colw[c];
-                }
-                GridTrack::Auto => {
-                    colw[c] = auto_content[c];
-                    used += colw[c];
-                }
-                GridTrack::Fr(f) => fr_sum += f,
-            }
+            };
+            colw[c] = base;
+            limit[c] = lim;
         }
         let gaps_w = col_gap * (ncols as f32 - 1.0).max(0.0);
-        let leftover = (avail - gaps_w - used).max(0.0);
+        let free = |colw: &[f32]| avail - gaps_w - colw.iter().sum::<f32>();
+        // Maximize: grow every track below its limit by an equal share,
+        // freezing those that reach it.
+        for _ in 0..ncols {
+            let room = free(&colw);
+            let growing: Vec<usize> = (0..ncols).filter(|&c| colw[c] < limit[c]).collect();
+            if room <= 0.01 || growing.is_empty() {
+                break;
+            }
+            let share = room / growing.len() as f32;
+            for c in growing {
+                colw[c] = (colw[c] + share).min(limit[c]);
+            }
+        }
         if fr_sum > 0.0 {
+            let leftover = free(&colw).max(0.0);
             for c in 0..ncols {
                 if let GridTrack::Fr(f) = tracks[c] {
                     colw[c] = leftover * f / fr_sum;
                 }
             }
+        } else if st.justify == Justify::Normal {
+            let auto: Vec<usize> = (0..ncols)
+                .filter(|&c| matches!(tracks[c], GridTrack::Auto | GridTrack::AutoFrom(_)))
+                .collect();
+            let room = free(&colw);
+            if room > 0.0 && !auto.is_empty() {
+                for &c in &auto {
+                    colw[c] += room / auto.len() as f32;
+                }
+            }
         }
+        // `justify-content` places the tracks in what is still free.
+        let (start, between) = content_distribution(st.justify, free(&colw).max(0.0), ncols);
         let mut colx = vec![0.0f32; ncols];
-        let mut acc = x as f32;
+        let mut acc = x as f32 + start;
         for c in 0..ncols {
             colx[c] = acc;
-            acc += colw[c] + col_gap;
+            acc += colw[c] + col_gap + between;
         }
 
         // Per-item content-box horizontal placement (needed before measuring the
@@ -7298,15 +7439,19 @@ family: st.family,
             let (ix, iw) = if jself == CrossAlign::Stretch && width_auto {
                 (colx[c], cw)
             } else {
+                // An auto width shrinks to fit (css-grid-2 §6.2); the strip
+                // handed to layout includes the margins, like the track did.
                 let uw = match s.width {
-                    Len::Auto => self.intrinsic_width(el_i, s).0,
+                    Len::Auto => {
+                        let (pref, min) = self.child_outer(el_i, s);
+                        pref.min(min.max(cw))
+                    }
                     Len::Intrinsic(k) => {
                         let (pref, min) = self.intrinsic_width(el_i, s);
-                        intrinsic_size(k, pref, min, cw)
+                        intrinsic_size(k, pref, min, cw).min(cw)
                     }
-                    other => other.px(cw).unwrap_or(0.0),
+                    other => other.px(cw).unwrap_or(0.0).min(cw),
                 }
-                .min(cw)
                 .max(1.0);
                 let ix = match jself {
                     CrossAlign::End => colx[c] + cw - uw,
@@ -7316,7 +7461,9 @@ family: st.family,
                 (ix, uw)
             };
             let s_copy = *s;
-            let nh = self.measure_box_height(el_i, &s_copy, ix as i32, iw as i32, y0);
+            // A row holds the item's margin box.
+            let nh = self.measure_box_height(el_i, &s_copy, ix as i32, iw as i32, y0)
+                + px_of(s.margin_top) + px_of(s.margin_bottom);
             hpos.push((ix, iw));
             nat_h.push(nh);
         }
@@ -7379,13 +7526,37 @@ family: st.family,
                 }
             }
         }
+        // `align-content` in a definite height: `normal`/`stretch` grow the
+        // `auto` rows, the rest place the rows in the free space.
+        let (mut row_start, mut row_between) = (0.0f32, 0.0f32);
+        if let Some(dh) = def_h {
+            let room = dh - row_h.iter().sum::<f32>() - row_gap * (nrows as f32 - 1.0).max(0.0);
+            if room > 0.0 && nrows > 0 {
+                if st.align_content == ContentAlign::Stretch {
+                    let auto: Vec<usize> = (0..nrows).filter(|&r| row_track(r) == GridTrack::Auto).collect();
+                    for &r in &auto {
+                        row_h[r] += room / auto.len() as f32;
+                    }
+                } else {
+                    let j = match st.align_content {
+                        ContentAlign::End => Justify::End,
+                        ContentAlign::Center => Justify::Center,
+                        ContentAlign::Between => Justify::Between,
+                        ContentAlign::Around => Justify::Around,
+                        ContentAlign::Evenly => Justify::Evenly,
+                        _ => Justify::Start,
+                    };
+                    (row_start, row_between) = content_distribution(j, room, nrows);
+                }
+            }
+        }
         let mut row_y = vec![0i32; nrows];
-        let mut yy = y0;
+        let mut yy = y0 + px_of(row_start);
         for r in 0..nrows {
             row_y[r] = yy;
             yy += row_h[r] as i32;
             if r + 1 < nrows {
-                yy += row_gap as i32;
+                yy += row_gap as i32 + px_of(row_between);
             }
         }
 
@@ -7401,8 +7572,20 @@ family: st.family,
             let aself = s.align_self.unwrap_or(st.align_items);
             let height_auto = matches!(s.height, Len::Auto);
             let mut s2 = *s;
+            // The margin box is aligned in the area; a stretched item's
+            // border box fills it less its margins (css-align-3 §6.1).
+            let (mt, mb) = (px_of(s.margin_top), px_of(s.margin_bottom));
+            let cell_y = cell_y + mt;
+            let cell_h = (cell_h - (mt + mb) as f32).max(0.0);
             if aself == CrossAlign::Stretch && height_auto && cell_h > 0.0 {
-                s2.height = Len::Px(cell_h);
+                if crate::forms::kind_of(el_i).is_some() {
+                    // A control adds its own UA padding to a content height.
+                    s2.box_border = true;
+                    s2.height = Len::Px(cell_h);
+                } else {
+                    let frame = if s.box_border { 0.0 } else { s.pad_top + s.pad_bottom + s.border_y() };
+                    s2.height = Len::Px((cell_h - frame).max(0.0));
+                }
             }
             let m0 = self.spec_mark();
             self.path.push(self.info(el_i));
@@ -7618,6 +7801,10 @@ family: st.family,
     /// (start/center/end/stretch), `align-content`, and `flex-wrap`
     /// (multi-line). Not yet: reverse directions, baseline alignment.
     fn layout_flex(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
+        self.with_container(el, st, w, |c| c.layout_flex_body(el, st, x, w, y0))
+    }
+
+    fn layout_flex_body(&mut self, el: &'a Element, st: &ComputedStyle, x: i32, w: i32, y0: i32) -> i32 {
         // Flex items = in-flow child elements; abspos children are out of flow.
         // A bare text run between the children is an anonymous flex item
         // (css-flexbox-1 §4). Structural selectors count every element
@@ -7926,7 +8113,7 @@ family: st.family,
         } else {
             let lo = leftover.max(0.0);
             let (o, g) = match st.justify {
-                Justify::Start => (0.0, 0.0),
+                Justify::Start | Justify::Normal => (0.0, 0.0),
                 Justify::End => (lo, 0.0),
                 Justify::Center => (lo / 2.0, 0.0),
                 Justify::Between => (0.0, if ln > 1 { lo / (ln as f32 - 1.0) } else { 0.0 }),
@@ -8265,7 +8452,7 @@ family: st.family,
                 Justify::Between => (0.0, if n > 1 { free / (n as f32 - 1.0) } else { 0.0 }),
                 Justify::Around => (free / (2.0 * n as f32), free / n as f32),
                 Justify::Evenly => (free / (n as f32 + 1.0), free / (n as f32 + 1.0)),
-                Justify::Start => (0.0, 0.0),
+                Justify::Start | Justify::Normal => (0.0, 0.0),
             };
             (o, g, 0.0)
         };
@@ -8380,7 +8567,13 @@ family: st.family,
             if let Some(mn) = min_size.px(avail) {
                 floor = floor.max(to_content(mn));
             }
-            let ceil = max_size.px(avail).map(to_content).unwrap_or(f32::INFINITY);
+            if let (Len::Intrinsic(k), true) = (min_size, row) {
+                floor = floor.max(intrinsic_size(k, pref, minc, avail));
+            }
+            let mut ceil = max_size.px(avail).map(to_content).unwrap_or(f32::INFINITY);
+            if let (Len::Intrinsic(k), true) = (max_size, row) {
+                ceil = ceil.min(intrinsic_size(k, pref, minc, avail));
+            }
             let hypo = base.clamp(floor.min(ceil), ceil);
             // Cross-axis stretch is possible only when the cross size is auto.
             let cross_auto = if row {
@@ -8692,6 +8885,25 @@ fn flex_item_style(s: &ComputedStyle, main: Option<f32>, forced_cross: Option<f3
         }
     }
     s2
+}
+
+/// The offset of the first track and the extra space between tracks for a
+/// `justify-content`/`align-content` distribution of `free` over `n` tracks
+/// (css-align-3 §5.3).
+fn content_distribution(j: Justify, free: f32, n: usize) -> (f32, f32) {
+    if free <= 0.0 || n == 0 {
+        return (0.0, 0.0);
+    }
+    let n = n as f32;
+    match j {
+        Justify::Normal | Justify::Start => (0.0, 0.0),
+        Justify::End => (free, 0.0),
+        Justify::Center => (free / 2.0, 0.0),
+        Justify::Between if n > 1.0 => (0.0, free / (n - 1.0)),
+        Justify::Between => (0.0, 0.0),
+        Justify::Around => (free / (2.0 * n), free / n),
+        Justify::Evenly => (free / (n + 1.0), free / (n + 1.0)),
+    }
 }
 
 /// `white-space: pre` — honor newlines and runs of spaces; no word-wrap.
@@ -9294,6 +9506,9 @@ const CTL_ARROW: i32 = 20;
 /// nothing scrolls, and counts toward the intrinsic width.
 const CTL_SCROLLBAR: i32 = 16;
 
+/// The available width when measuring a control's max-content size.
+const NO_LIMIT: f32 = 1.0e6;
+
 /// A measured form control, ready to place on a line and paint.
 #[derive(Clone)]
 struct CtlBox {
@@ -9376,6 +9591,10 @@ struct CtlBox {
 #[derive(Clone)]
 struct CtlContent {
     ops: Vec<DrawOp>,
+    /// The boxes of the elements inside, at the content origin, so that
+    /// geometry queries and hit tests find them once the control is placed.
+    boxes: Vec<HoverBox>,
+    inspects: Vec<InspectBox>,
     w: i32,
     h: i32,
     /// Button layout centres its contents vertically in the content box. A
@@ -9467,10 +9686,8 @@ fn button_label(el: &Element, kind: ControlKind, value: &str) -> String {
     if el.tag == "button" {
         let mut s = String::new();
         gather_text(&el.children, &mut s);
-        let s = collapse_whitespace(&s).trim().to_string();
-        if !s.is_empty() {
-            return s;
-        }
+        // A `<button>`'s label is its content; an empty one has none.
+        return collapse_whitespace(&s).trim().to_string();
     }
     if !value.is_empty() {
         return value.to_string();
@@ -9541,6 +9758,42 @@ fn luma(c: Rgb) -> u32 {
 }
 
 /// Paint one control's chrome + text at (x, top) and record its hit rect.
+/// Where a control's laid-out contents sit: its content box, centred
+/// vertically for a button (HTML §button-layout).
+fn content_origin(ctl: &CtlBox, c: &CtlContent, x: i32, top: i32) -> (i32, i32) {
+    let inner_h = (ctl.h - ctl.border[0].w - ctl.border[2].w - ctl.pad_t - ctl.pad_b).max(0);
+    let cx = x + ctl.border[3].w + ctl.pad_l;
+    let cy = top + ctl.border[0].w + ctl.pad_t + if c.centred { (inner_h - c.h).max(0) / 2 } else { 0 };
+    (cx, cy)
+}
+
+/// Record the boxes inside a button where `paint_control` put its contents.
+fn place_content_boxes(ctl: &CtlBox, x: i32, top: i32, boxes: &mut Vec<HoverBox>, inspects: &mut Vec<InspectBox>) {
+    let Some(c) = &ctl.content else { return };
+    if ctl.style.hidden || ctl.style.transparent {
+        return;
+    }
+    let (dx, dy) = content_origin(ctl, c, x, top);
+    for b in &c.boxes {
+        let mut b = *b;
+        b.x += dx;
+        b.y += dy;
+        b.paint.0 += dx;
+        b.paint.1 += dy;
+        if let Some(a) = &mut b.anchor {
+            a.x += dx;
+            a.y += dy;
+        }
+        boxes.push(b);
+    }
+    for b in &c.inspects {
+        let mut b = b.clone();
+        b.x += dx;
+        b.y += dy;
+        inspects.push(b);
+    }
+}
+
 fn paint_control(
     fonts: &crate::fonts::Fonts,
     theme: &Theme,
@@ -9725,10 +9978,7 @@ fn paint_control(
             // what centres the text inside them, which is why a 100px block
             // child stays at the left edge with its own text in the middle.
             if let Some(c) = &ctl.content {
-                let inner_h = (h - ctl.border[0].w - ctl.border[2].w - ctl.pad_t - ctl.pad_b).max(0);
-                let cx = x + ctl.border[3].w + ctl.pad_l;
-                let cy = top + ctl.border[0].w + ctl.pad_t
-                    + if c.centred { (inner_h - c.h).max(0) / 2 } else { 0 };
+                let (cx, cy) = content_origin(ctl, c, x, top);
                 let mut inner = c.ops.clone();
                 translate_op_list(&mut inner, cx, cy);
                 ops.extend(inner);
@@ -10666,6 +10916,7 @@ pub fn resolve_out_of_band(
         &ElemInfo::of_hovered(html_el, hover), &initial, theme, sheet, &[], &[], 0, width as f32,
     );
     root.rem_base = root.font_px;
+    root.rlh_base = root.line_height.px(root.font_px).unwrap_or(root.font_px * 1.2);
     let mut anc = vec![ElemInfo::of_hovered(html_el, hover)];
     let own = if html_el.seq == seq {
         Some(StyleProbe { own: root, before: None, after: None })
@@ -11631,6 +11882,7 @@ family: seg.style.family,
             Placed::Control { x, ctl } => {
                 let top = baseline - (ctl.h - CTL_PAD_Y);
                 paint_control(fonts, theme, ctl, x + dx, top, ops, controls);
+                place_content_boxes(ctl, x + dx, top, hover_boxes, inspects);
             }
             Placed::Image { x, w, h, src, href, alt, hidden, transparent, fit, filter, deco } => {
                 let x = x + dx;
@@ -11910,6 +12162,56 @@ mod tests {
         // … and it matches what is actually painted.
         let red = rects(&l).into_iter().find(|(.., c)| *c == Rgb(0xff, 0, 0)).unwrap();
         assert_eq!((red.0, red.2), (b.x, b.w));
+    }
+
+    fn boxed(l: &Layout, id: &str) -> (i32, i32) {
+        let b = l.inspect.iter().find(|b| b.label.starts_with(id)).expect(id);
+        (b.x, b.w)
+    }
+
+    #[test]
+    fn a_hidden_cell_takes_no_column() {
+        let l = lay_inspect(
+            "<body style=margin:0><table style=border-spacing:0><tr>\
+             <td style=display:none>hidden</td><td id=v>shown</td></tr></table></body>",
+            800,
+        );
+        assert_eq!(boxed(&l, "td#v").0, 0);
+    }
+
+    #[test]
+    fn grid_tracks_hold_margin_boxes_and_auto_tracks_stretch() {
+        let l = lay_inspect(
+            "<body style=margin:0><div style=\"display:grid;width:300px;\
+             grid-template-columns:min-content minmax(0,auto) min-content\">\
+             <div id=a style=\"width:16px;margin-right:8px\"></div><div id=b>x</div>\
+             <div id=c style=width:16px></div></div>\
+             <div style=\"display:grid;width:300px;justify-content:center;\
+             grid-template-columns:40px 60px\"><div id=d></div><div id=e></div></div></body>",
+            800,
+        );
+        assert_eq!(boxed(&l, "div#a"), (0, 16));
+        assert_eq!(boxed(&l, "div#b"), (24, 260));
+        assert_eq!(boxed(&l, "div#c"), (284, 16));
+        assert_eq!(boxed(&l, "div#d"), (100, 40));
+        assert_eq!(boxed(&l, "div#e"), (140, 60));
+    }
+
+    #[test]
+    fn container_queries_read_the_nearest_container() {
+        let css = "<style>.c{container-type:inline-size} .x,.y{height:2px} \
+                   @container (width >= 500px){.x{width:11px}} \
+                   @container (width < 500px){.x{width:22px}} \
+                   @container outer (width > 550px){.y{width:33px}}</style>";
+        let html = alloc::format!(
+            "{css}<body style=margin:0><div class=c style=\"width:600px;container-name:outer\">\
+             <div class=x id=p></div><div class=c style=width:300px><div class=x id=q></div>\
+             <div class=y id=r></div></div></div></body>"
+        );
+        let l = lay_inspect(&html, 800);
+        assert_eq!(boxed(&l, "div#p").1, 11);
+        assert_eq!(boxed(&l, "div#q").1, 22);
+        assert_eq!(boxed(&l, "div#r").1, 33);
     }
 
     #[test]

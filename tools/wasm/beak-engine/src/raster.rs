@@ -979,7 +979,7 @@ impl Engine {
         // `prefers-color-scheme` decides which rules apply and `resolve_vars` bakes
         // the winning custom properties into its output.
         let t_parse = now();
-        let media = crate::css::Media::new(width as f32, self.theme.is_dark());
+        let media = crate::css::Media::new(width as f32, self.theme.is_dark()).with_height(self.viewport_h.get() as f32);
         // The viewport height too, since a baked custom property may hold a `vh`
         // length.
         //

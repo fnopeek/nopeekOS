@@ -32,6 +32,7 @@ pub mod webp;
 pub mod woff;
 pub mod woff2;
 pub mod layout;
+pub mod media;
 pub mod picture;
 pub mod raster;
 pub mod select;

@@ -145,6 +145,9 @@ fn parse_rgba(v: &str) -> Option<(Rgb, u8)> {
     }
     let lower = v.to_ascii_lowercase();
     let l = lower.as_str();
+    if let Some(inner) = fn_body(l, "color-mix") {
+        return parse_color_mix(inner);
+    }
     // Functional notation. `rgba(` never matches `rgb(` because the `(` is part
     // of the probe, so declaration order here is irrelevant.
     if let Some(inner) = fn_body(l, "rgba") {
@@ -555,6 +558,356 @@ fn lch_c(tok: &str, ok: bool) -> Option<f32> {
     Some(v.max(0.0))
 }
 
+// ── color-mix() (css-color-5 §2) ─────────────────────────────────────────
+
+/// Split at `sep` outside parentheses.
+fn split_top_by(s: &str, sep: fn(char) -> bool) -> Vec<&str> {
+    let (mut out, mut depth, mut st) = (Vec::new(), 0i32, 0usize);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if depth == 0 && sep(c) => {
+                out.push(s[st..i].trim());
+                st = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(s[st..].trim());
+    out.retain(|p| !p.is_empty());
+    out
+}
+
+/// A mix operand: a colour, or `None` for `currentcolor`.
+type MixColor = Option<(Rgb, u8)>;
+
+fn mix_color(s: &str) -> Option<MixColor> {
+    if s.eq_ignore_ascii_case("currentcolor") {
+        return Some(None);
+    }
+    parse_rgba(s).map(Some)
+}
+
+/// One `<color> <percentage>?` operand, the percentage on either side.
+fn mix_operand(s: &str) -> Option<(MixColor, Option<f32>)> {
+    let pct = |t: &str| t.strip_suffix('%').and_then(|n| n.trim().parse::<f32>().ok());
+    let words = split_top_by(s, |c| c.is_ascii_whitespace());
+    match words.as_slice() {
+        [c] => Some((mix_color(c)?, None)),
+        [a, b] => match (pct(a), pct(b)) {
+            (Some(p), None) => Some((mix_color(b)?, Some(p))),
+            (None, Some(p)) => Some((mix_color(a)?, Some(p))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+const HUE_METHODS: [&str; 4] = ["shorter", "longer", "increasing", "decreasing"];
+const MIX_SPACES: [MixSpace; 10] = [
+    MixSpace::Srgb, MixSpace::SrgbLinear, MixSpace::XyzD65, MixSpace::XyzD50, MixSpace::Lab,
+    MixSpace::Lch, MixSpace::Oklab, MixSpace::Oklch, MixSpace::Hsl, MixSpace::Hwb,
+];
+
+/// A parsed `color-mix()`, kept apart from its operands so that one of them
+/// can be `currentcolor` and resolve later.
+struct MixSpec {
+    space: MixSpace,
+    method: u8,
+    a: (MixColor, Option<f32>),
+    b: (MixColor, Option<f32>),
+}
+
+fn parse_mix_spec(inner: &str) -> Option<MixSpec> {
+    let parts = split_top_by(inner, |c| c == ',');
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut words = parts[0].split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("in") {
+        return None;
+    }
+    let space = MixSpace::of(&words.next()?.to_ascii_lowercase())?;
+    let method = match (words.next(), words.next(), words.next()) {
+        (None, _, _) => 0,
+        (Some(m), Some(h), None) if space.hue().is_some() && h.eq_ignore_ascii_case("hue") => {
+            HUE_METHODS.iter().position(|x| x.eq_ignore_ascii_case(m))? as u8
+        }
+        _ => return None,
+    };
+    Some(MixSpec { space, method, a: mix_operand(parts[1])?, b: mix_operand(parts[2])? })
+}
+
+/// A `color-mix()` with one `currentcolor` operand, resolved at used-value
+/// time like `currentcolor` itself (css-color-5 §2.3): an element that
+/// inherits it mixes its own `color`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CurrentMix {
+    other: Rgba,
+    /// The two percentages as written, 255 for an omitted one.
+    pct: [u8; 2],
+    /// Bit 0: `currentcolor` is the first operand; bits 1-4: the colour
+    /// space; bits 5-6: the hue method.
+    bits: u8,
+}
+
+impl CurrentMix {
+    pub fn resolve(&self, current: Rgba) -> Option<Rgba> {
+        let space = MIX_SPACES[((self.bits >> 1) & 0xF) as usize];
+        let method = (self.bits >> 5) & 3;
+        let p = |v: u8| (v != 255).then_some(v as f32);
+        let cur = (current.c, current.a);
+        let oth = (self.other.c, self.other.a);
+        let (a, b) = if self.bits & 1 != 0 { (cur, oth) } else { (oth, cur) };
+        let (c, alpha) = mix_colors(space, method, (a, p(self.pct[0])), (b, p(self.pct[1])))?;
+        Some(Rgba { c, a: alpha })
+    }
+}
+
+/// `color-mix()` with exactly one `currentcolor` operand; `None` for any
+/// other value.
+pub fn parse_current_mix(v: &str) -> Option<CurrentMix> {
+    let lower = v.trim().to_ascii_lowercase();
+    let spec = parse_mix_spec(fn_body(&lower, "color-mix")?)?;
+    let pct = |p: Option<f32>| p.map_or(Some(255u8), |p| (0.0..=100.0).contains(&p).then_some(p as u8));
+    let space = MIX_SPACES.iter().position(|s| *s == spec.space)? as u8;
+    let (first_cc, other) = match (spec.a.0, spec.b.0) {
+        (None, Some(o)) => (true, o),
+        (Some(o), None) => (false, o),
+        _ => return None,
+    };
+    Some(CurrentMix {
+        other: Rgba { c: other.0, a: other.1 },
+        pct: [pct(spec.a.1)?, pct(spec.b.1)?],
+        bits: first_cc as u8 | space << 1 | spec.method << 5,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MixSpace {
+    Srgb,
+    SrgbLinear,
+    XyzD65,
+    XyzD50,
+    Lab,
+    Lch,
+    Oklab,
+    Oklch,
+    Hsl,
+    Hwb,
+}
+
+impl MixSpace {
+    fn of(name: &str) -> Option<MixSpace> {
+        Some(match name {
+            "srgb" => MixSpace::Srgb,
+            "srgb-linear" => MixSpace::SrgbLinear,
+            "xyz" | "xyz-d65" => MixSpace::XyzD65,
+            "xyz-d50" => MixSpace::XyzD50,
+            "lab" => MixSpace::Lab,
+            "lch" => MixSpace::Lch,
+            "oklab" => MixSpace::Oklab,
+            "oklch" => MixSpace::Oklch,
+            "hsl" => MixSpace::Hsl,
+            "hwb" => MixSpace::Hwb,
+            _ => return None,
+        })
+    }
+
+    /// Index of the hue channel in a polar space.
+    fn hue(self) -> Option<usize> {
+        match self {
+            MixSpace::Hsl | MixSpace::Hwb => Some(0),
+            MixSpace::Lch | MixSpace::Oklch => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Channels of `c` in this space; a powerless hue is `NaN` ("missing").
+    fn from_rgb(self, c: Rgb) -> [f32; 3] {
+        let g = [c.0 as f32 / 255.0, c.1 as f32 / 255.0, c.2 as f32 / 255.0];
+        let lin = [srgb_lin(g[0]), srgb_lin(g[1]), srgb_lin(g[2])];
+        let polar = |l: f32, a: f32, b: f32, eps: f32| {
+            let ch = libm::sqrtf(a * a + b * b);
+            let h = if ch < eps { f32::NAN } else { wrap_hue(libm::atan2f(b, a) * 180.0 / core::f32::consts::PI) };
+            [l, ch, h]
+        };
+        match self {
+            MixSpace::Srgb => g,
+            MixSpace::SrgbLinear => lin,
+            MixSpace::XyzD65 => mat(&LIN_SRGB_TO_XYZ_D65, lin),
+            MixSpace::XyzD50 => mat(&BRADFORD_D65_TO_D50, mat(&LIN_SRGB_TO_XYZ_D65, lin)),
+            MixSpace::Lab => rgb_to_lab(lin),
+            MixSpace::Lch => {
+                let [l, a, b] = rgb_to_lab(lin);
+                polar(l, a, b, 0.02)
+            }
+            MixSpace::Oklab => rgb_to_oklab(lin),
+            MixSpace::Oklch => {
+                let [l, a, b] = rgb_to_oklab(lin);
+                polar(l, a, b, 0.0002)
+            }
+            MixSpace::Hsl | MixSpace::Hwb => {
+                let (mx, mn) = (g[0].max(g[1]).max(g[2]), g[0].min(g[1]).min(g[2]));
+                let d = mx - mn;
+                let h = if d < 1e-6 {
+                    f32::NAN
+                } else if mx == g[0] {
+                    wrap_hue(60.0 * ((g[1] - g[2]) / d))
+                } else if mx == g[1] {
+                    wrap_hue(60.0 * ((g[2] - g[0]) / d + 2.0))
+                } else {
+                    wrap_hue(60.0 * ((g[0] - g[1]) / d + 4.0))
+                };
+                if self == MixSpace::Hwb {
+                    [h, mn, 1.0 - mx]
+                } else {
+                    let l = (mx + mn) / 2.0;
+                    let s = if d < 1e-6 { 0.0 } else { d / (1.0 - fabs(2.0 * l - 1.0)) };
+                    [h, s, l]
+                }
+            }
+        }
+    }
+
+    fn to_rgb(self, c: [f32; 3]) -> Rgb {
+        let hue_rad = |h: f32| if h.is_nan() { 0.0 } else { h * core::f32::consts::PI / 180.0 };
+        let hue_deg = |h: f32| if h.is_nan() { 0.0 } else { h };
+        match self {
+            MixSpace::Srgb => gamma_to_rgb(c),
+            MixSpace::SrgbLinear => lin_srgb_to_rgb(c),
+            MixSpace::XyzD65 => lin_srgb_to_rgb(xyz_to_lin_srgb(c)),
+            MixSpace::XyzD50 => lin_srgb_to_rgb(xyz_to_lin_srgb(d50_to_d65(c))),
+            MixSpace::Lab => lab_to_rgb(c[0], c[1], c[2]),
+            MixSpace::Lch => {
+                let r = hue_rad(c[2]);
+                lab_to_rgb(c[0], c[1] * libm::cosf(r), c[1] * libm::sinf(r))
+            }
+            MixSpace::Oklab => oklab_to_rgb(c[0], c[1], c[2]),
+            MixSpace::Oklch => {
+                let r = hue_rad(c[2]);
+                oklab_to_rgb(c[0], c[1] * libm::cosf(r), c[1] * libm::sinf(r))
+            }
+            MixSpace::Hsl => hsl_to_rgb(hue_deg(c[0]), clamp(c[1], 0.0, 1.0), clamp(c[2], 0.0, 1.0)),
+            MixSpace::Hwb => {
+                let (w, b) = (c[1].max(0.0), c[2].max(0.0));
+                if w + b >= 1.0 {
+                    let gray = round_u8(w / (w + b) * 255.0);
+                    return Rgb(gray, gray, gray);
+                }
+                let base = hsl_to_rgb(hue_deg(c[0]), 1.0, 0.5);
+                let f = |v: u8| round_u8(((v as f32 / 255.0) * (1.0 - w - b) + w) * 255.0);
+                Rgb(f(base.0), f(base.1), f(base.2))
+            }
+        }
+    }
+}
+
+fn wrap_hue(h: f32) -> f32 {
+    let h = h % 360.0;
+    if h < 0.0 { h + 360.0 } else { h }
+}
+
+fn rgb_to_oklab(lin: [f32; 3]) -> [f32; 3] {
+    let l = 0.4122214708 * lin[0] + 0.5363325363 * lin[1] + 0.0514459929 * lin[2];
+    let m = 0.2119034982 * lin[0] + 0.6806995451 * lin[1] + 0.1073969566 * lin[2];
+    let s = 0.0883024619 * lin[0] + 0.2817188376 * lin[1] + 0.6299787005 * lin[2];
+    let (l, m, s) = (libm::cbrtf(l), libm::cbrtf(m), libm::cbrtf(s));
+    [
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ]
+}
+
+fn rgb_to_lab(lin: [f32; 3]) -> [f32; 3] {
+    const K: f32 = 24389.0 / 27.0;
+    const E: f32 = 216.0 / 24389.0;
+    let xyz = mat(&BRADFORD_D65_TO_D50, mat(&LIN_SRGB_TO_XYZ_D65, lin));
+    let w = [xyz[0] / 0.9642956, xyz[1], xyz[2] / 0.8251046];
+    let f = |v: f32| if v > E { libm::cbrtf(v) } else { (K * v + 16.0) / 116.0 };
+    let (fx, fy, fz) = (f(w[0]), f(w[1]), f(w[2]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// Move one of two hues by a turn so that plain linear interpolation follows
+/// the requested arc (css-color-4 §12.4). `method` indexes `HUE_METHODS`.
+fn fix_hues(x: &mut f32, y: &mut f32, method: u8) {
+    let d = *y - *x;
+    match method {
+        0 if d > 180.0 => *x += 360.0,
+        0 if d < -180.0 => *y += 360.0,
+        1 if d > 0.0 && d < 180.0 => *x += 360.0,
+        1 if d > -180.0 && d <= 0.0 => *y += 360.0,
+        2 if d < 0.0 => *y += 360.0,
+        3 if d > 0.0 => *x += 360.0,
+        _ => {}
+    }
+}
+
+/// `color-mix(in <space> [<hue-method> hue]?, <color> <p>?, <color> <p>?)`.
+///
+/// Interpolates premultiplied by alpha; a missing hue takes the other
+/// colour's. Not implemented: `currentcolor` operands (the declaration is
+/// dropped) and colour spaces beyond those of [`MixSpace`].
+fn parse_color_mix(inner: &str) -> Option<(Rgb, u8)> {
+    let spec = parse_mix_spec(inner)?;
+    let a = (spec.a.0?, spec.a.1);
+    let b = (spec.b.0?, spec.b.1);
+    mix_colors(spec.space, spec.method, a, b)
+}
+
+/// Mix two colours with their optional percentages (css-color-5 §2.1).
+fn mix_colors(space: MixSpace, method: u8, a: ((Rgb, u8), Option<f32>), b: ((Rgb, u8), Option<f32>)) -> Option<(Rgb, u8)> {
+    let ((c1, a1), p1) = a;
+    let ((c2, a2), p2) = b;
+    let (p1, p2) = match (p1, p2) {
+        (None, None) => (50.0, 50.0),
+        (Some(a), None) => (a, 100.0 - a),
+        (None, Some(b)) => (100.0 - b, b),
+        (Some(a), Some(b)) => (a, b),
+    };
+    if !(0.0..=100.0).contains(&p1) || !(0.0..=100.0).contains(&p2) {
+        return None;
+    }
+    let sum = p1 + p2;
+    if sum <= 0.0 {
+        return None;
+    }
+    let (w1, w2) = (p1 / sum, p2 / sum);
+    let mult = if sum < 100.0 { sum / 100.0 } else { 1.0 };
+    let (al1, al2) = (a1 as f32 / 255.0, a2 as f32 / 255.0);
+    let mut x = space.from_rgb(c1);
+    let mut y = space.from_rgb(c2);
+    // A fully transparent colour carries no hue either.
+    if let Some(h) = space.hue() {
+        if al1 == 0.0 {
+            x[h] = f32::NAN;
+        }
+        if al2 == 0.0 {
+            y[h] = f32::NAN;
+        }
+        match (x[h].is_nan(), y[h].is_nan()) {
+            (true, false) => x[h] = y[h],
+            (false, true) => y[h] = x[h],
+            (false, false) => fix_hues(&mut x[h], &mut y[h], method),
+            (true, true) => {}
+        }
+    }
+    let alpha = al1 * w1 + al2 * w2;
+    let mut out = [0.0f32; 3];
+    for k in 0..3 {
+        if Some(k) == space.hue() {
+            out[k] = if x[k].is_nan() { f32::NAN } else { wrap_hue(x[k] * w1 + y[k] * w2) };
+        } else if alpha > 0.0 {
+            out[k] = (x[k] * al1 * w1 + y[k] * al2 * w2) / alpha;
+        }
+    }
+    let a = round_u8(clamp(alpha * mult, 0.0, 1.0) * 255.0);
+    Some((space.to_rgb(out), a))
+}
+
 // — colour-space conversions —
 
 fn lab_to_rgb(l: f32, a: f32, b: f32) -> Rgb {
@@ -649,6 +1002,16 @@ static XYZ_D65_TO_LIN_SRGB: [f32; 9] = [
     3.2409699419045226, -1.537383177570094, -0.4986107602930034,
     -0.9692436362808796, 1.8759675015077202, 0.04155505740717559,
     0.05563007969699366, -0.20397695888897652, 1.0569715142428786,
+];
+static LIN_SRGB_TO_XYZ_D65: [f32; 9] = [
+    0.41239079926595934, 0.357584339383878, 0.1804807884018343,
+    0.21263900587151027, 0.715168678767756, 0.07219231536073371,
+    0.01933081871559182, 0.11919477979462598, 0.9505321522496607,
+];
+static BRADFORD_D65_TO_D50: [f32; 9] = [
+    1.0479298208405488, 0.022946793341019088, -0.05019222954313557,
+    0.029627815688159344, 0.990434484573249, -0.01707382502938514,
+    -0.009243058152591178, 0.015055144896577895, 0.7518742899580008,
 ];
 static BRADFORD_D50_TO_D65: [f32; 9] = [
     0.955473452704218, -0.0230985368742614, 0.0632593086610217,
@@ -913,6 +1276,26 @@ mod tests {
 
     /// `currentcolor` is a value, not a parse failure; that lets a background
     /// follow the element's own text colour.
+    #[test]
+    fn color_mix_interpolates_premultiplied() {
+        let mix = |v: &str| super::parse_rgba(v);
+        assert_eq!(mix("color-mix(in srgb, red 50%, blue)"), Some((Rgb(128, 0, 128), 255)));
+        assert_eq!(mix("color-mix(in srgb, red, blue 25%)"), Some((Rgb(191, 0, 64), 255)));
+        // Mixing with transparent fades the colour without darkening it.
+        assert_eq!(mix("color-mix(in srgb, rgb(0 0 255) 40%, transparent)"), Some((Rgb(0, 0, 255), 102)));
+        // Percentages under 100 % scale the alpha.
+        assert_eq!(mix("color-mix(in srgb, red 25%, blue 25%)").map(|c| c.1), Some(128));
+        assert_eq!(mix("color-mix(in oklab, white, black)"), Some((Rgb(99, 99, 99), 255)));
+        assert_eq!(mix("color-mix(in oklch, red, red)"), Some((Rgb(255, 0, 0), 255)));
+        assert_eq!(mix("color-mix(in hsl, red, lime)"), Some((Rgb(255, 255, 0), 255)));
+        assert_eq!(mix("color-mix(in hsl longer hue, red, lime)"), Some((Rgb(0, 0, 255), 255)));
+        assert_eq!(mix("color-mix(in srgb, red 120%, blue)"), None);
+        assert_eq!(mix("color-mix(in nowhere, red, blue)"), None);
+        assert_eq!(mix("color-mix(in srgb, currentcolor, blue)"), None);
+        let m = super::parse_current_mix("color-mix(in srgb, currentColor 25%, blue)").unwrap();
+        assert_eq!(m.resolve(Rgba { c: Rgb(255, 0, 0), a: 255 }), Some(Rgba { c: Rgb(64, 0, 191), a: 255 }));
+    }
+
     #[test]
     fn currentcolor_is_a_value_of_its_own() {
         assert_eq!(parse_color_val("currentcolor"), Some(ColorVal::CurrentColor));

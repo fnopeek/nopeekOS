@@ -176,7 +176,13 @@ pub enum TableLayout {
 /// A `grid-template-columns` track size.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GridTrack {
-    Auto,      // size to column content (max-content)
+    /// `auto`: at least the min-content contribution, grows to the
+    /// max-content one, and stretches under `justify-content: normal`.
+    Auto,
+    /// `minmax(<length>, auto)`: like `auto`, with that length as the floor.
+    AutoFrom(f32),
+    MinContent,
+    MaxContent,
     Fixed(f32), // px
     Pct(f32),
     Fr(f32), // fraction of leftover space
@@ -261,6 +267,8 @@ fn parse_counter_ops(v: &str, out: &mut [(u32, i32); COUNTER_OPS_MAX], n: &mut u
 /// `justify-content` — main-axis distribution of leftover space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Justify {
+    /// `normal`/`stretch`: `start` for flex; for grid, `auto` tracks stretch.
+    Normal,
     Start,
     End,
     Center,
@@ -915,6 +923,9 @@ pub struct ComputedStyle {
     pub em_base: f32,
     /// The root element's computed `font-size` — the basis for `rem`.
     pub rem_base: f32,
+    /// The root element's used line height — the basis for `rlh`, carried
+    /// like `rem_base`.
+    pub rlh_base: f32,
     /// The viewport, for `vw`/`vh`/`vmin`/`vmax`. Document-global like
     /// `rem_base`, and carried the same way: seeded on the initial style and
     /// copied down by `inherit_reset`, so every `s.units()` has it without
@@ -1091,6 +1102,11 @@ pub struct ComputedStyle {
     /// sliders and progress bars. Inherited; `None` means `auto`, i.e. the theme
     /// colour.
     pub accent: Option<Rgba>,
+    /// `container-type` (css-contain-3 §6.1), one of `media::CQ_*`.
+    pub container_type: u8,
+    /// `container-name`, hashed with `media::name_hash`; 0 is an empty slot.
+    /// Not implemented: more than two names.
+    pub container_names: [u32; 2],
     // — positioning —
     pub position: Position,
     pub top: Len,
@@ -1198,6 +1214,9 @@ pub struct ComputedStyle {
     /// against its own `color`. Other colour fields defer by having `None` mean
     /// `currentcolor`; `bg`'s `None` means transparent, so this one needs a flag.
     pub bg_cc: bool,
+    /// A `color-mix()` background with a `currentcolor` operand, resolved
+    /// against the final `color` like `bg_cc`.
+    pub bg_mix: Option<crate::color::CurrentMix>,
     /// `filter`, as the one colour transform the whole chain composes to. Not
     /// inherited, but it applies to the element's whole subtree, which layout
     /// does by walking the op range the box produced, not via the cascade (a
@@ -1284,6 +1303,7 @@ impl ComputedStyle {
             font_px: BASE_FONT_PX,
             em_base: BASE_FONT_PX,
             rem_base: BASE_FONT_PX,
+            rlh_base: BASE_FONT_PX * 1.2,
             // Overwritten by `layout()` with the real viewport. The default is
             // the reftest canvas, so a bare `ComputedStyle::root()` in a unit
             // test still resolves `vw`/`vh` to something meaningful.
@@ -1298,6 +1318,7 @@ impl ComputedStyle {
             ellipsis: false,
             object_fit: ObjectFit::Fill,
             bg_cc: false,
+            bg_mix: None,
             filter: None,
             radius: [Len::Px(0.0); 4],
             shadow: None,
@@ -1312,6 +1333,8 @@ impl ComputedStyle {
             pre: false,
             color: Rgba::opaque(theme.text),
             accent: None,
+            container_type: 0,
+            container_names: [0; 2],
             hidden: false,
             transparent: false,
             opacity: 1.0,
@@ -1380,7 +1403,7 @@ impl ComputedStyle {
             flex_row: true,
             flex_wrap: false,
             flex_balance: false,
-            justify: Justify::Start,
+            justify: Justify::Normal,
             align_items: CrossAlign::Stretch,
             align_content: ContentAlign::Stretch,
             flex_grow: 0.0,
@@ -1515,6 +1538,10 @@ pub struct Units {
     pub vw: f32,
     /// Viewport height in px — the basis for `vh`, and the other half.
     pub vh: f32,
+    /// The element's own used line height, for `lh`.
+    pub lh: f32,
+    /// The root's, for `rlh`.
+    pub rlh: f32,
 }
 
 /// The starting point for any freshly-resolved style: the inherited slice
@@ -1528,6 +1555,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         em_base: parent.font_px,
         // `rem` is root-relative: inherited untouched, never reset per element.
         rem_base: parent.rem_base,
+        rlh_base: parent.rlh_base,
         // Document-global, same as `rem_base`.
         vw: parent.vw,
         vh: parent.vh,
@@ -1544,6 +1572,8 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         opacity_zero: false,
         color: parent.color,
         accent: parent.accent,
+        container_type: 0,
+        container_names: [0; 2],
         text_align: parent.text_align,
         center_blocks: parent.center_blocks,
         list_style: parent.list_style,
@@ -1563,6 +1593,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         ellipsis: false,
         object_fit: ObjectFit::Fill,
         bg_cc: false,
+        bg_mix: None,
         filter: None,
         radius: [Len::Px(0.0); 4],
         shadow: None,
@@ -1623,7 +1654,7 @@ fn inherit_reset(parent: &ComputedStyle) -> ComputedStyle {
         flex_row: true,
         flex_wrap: false,
         flex_balance: false,
-        justify: Justify::Start,
+        justify: Justify::Normal,
         align_items: CrossAlign::Stretch,
         align_content: ContentAlign::Stretch,
         flex_grow: 0.0,
@@ -1692,11 +1723,11 @@ pub fn resolve(
     ancestors: &[ElemInfo],
     prev_siblings: &[ElemInfo],
     sib_count: u32,
-    viewport_w: f32,
+    viewport: impl crate::css::Viewport,
 ) -> ComputedStyle {
     let (mut own, empty) = (None, crate::vars::VarMap::new());
     resolve_in(subject, parent, theme, sheet, ancestors, prev_siblings, sib_count,
-               viewport_w, &empty, &mut own)
+               viewport, &empty, &mut own)
 }
 
 /// Like [`resolve`], but with the parent's custom properties, and returns
@@ -1715,7 +1746,7 @@ pub fn resolve_in(
     ancestors: &[ElemInfo],
     prev_siblings: &[ElemInfo],
     sib_count: u32,
-    viewport_w: f32,
+    viewport: impl crate::css::Viewport,
     inherited: &crate::vars::VarMap,
     own: &mut Option<crate::vars::VarMap>,
 ) -> ComputedStyle {
@@ -1866,7 +1897,7 @@ pub fn resolve_in(
     // wins its property regardless of specificity/order.
     let inline = el.attr("style");
     if !sheet.is_empty() {
-        let mut matched = sheet.matched(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()));
+        let mut matched = sheet.matched_env(subject, ancestors, prev_siblings, sib_count, viewport.env(theme.is_dark()));
         matched.sort_by_key(|(layer, spec, order, _, _, _, _)| (*layer, *spec, *order));
         // Pass 1: normal <style> declarations, low→high layer/specificity.
         // `revert-layer` needs to know which layer a declaration came from, so it
@@ -2068,6 +2099,9 @@ pub fn resolve_in(
     if s.bg_cc {
         s.bg = Some(s.color);
     }
+    if let Some(m) = s.bg_mix {
+        s.bg = m.resolve(s.color);
+    }
     // A float or an absolutely positioned box is blockified (css-display-3
     // §2.7); otherwise e.g. a floated `inline-flex` would stay an atomic inline
     // on the line instead of floating. `getComputedStyle` uses the same
@@ -2155,13 +2189,13 @@ pub fn resolve_pseudo(
     ancestors: &[ElemInfo],
     prev_siblings: &[ElemInfo],
     sib_count: u32,
-    viewport_w: f32,
+    viewport: impl crate::css::Viewport,
     pseudo: PseudoElem,
 ) -> Option<(Vec<ContentPiece>, ComputedStyle)> {
     if sheet.is_empty() {
         return None;
     }
-    let mut matched = sheet.matched_pseudo(subject, ancestors, prev_siblings, sib_count, crate::css::Media::new(viewport_w, theme.is_dark()), pseudo);
+    let mut matched = sheet.matched_pseudo(subject, ancestors, prev_siblings, sib_count, viewport.env(theme.is_dark()), pseudo);
     if matched.is_empty() {
         return None;
     }
@@ -2223,6 +2257,9 @@ pub fn resolve_pseudo(
     // value arrived through `inherit`.
     if s.bg_cc {
         s.bg = Some(s.color);
+    }
+    if let Some(m) = s.bg_mix {
+        s.bg = m.resolve(s.color);
     }
     finish_borders(&mut s);
     Some((template, s))
@@ -2823,7 +2860,9 @@ fn apply_declarations_pass(decls: &str, theme: &Theme, parent: Option<&ComputedS
 impl ComputedStyle {
     /// The `em`/`rem` bases for parsing this element's declarations.
     pub fn units(&self) -> Units {
-        Units { em: self.font_px, rem: self.rem_base, vw: self.vw, vh: self.vh }
+        // `normal` has no fixed value; 1.2 is the usual UA approximation.
+        let lh = self.line_height.px(self.font_px).unwrap_or(self.font_px * 1.2);
+        Units { em: self.font_px, rem: self.rem_base, vw: self.vw, vh: self.vh, lh, rlh: self.rlh_base }
     }
 }
 
@@ -2843,7 +2882,7 @@ fn has_viewport_h_unit(v: &str) -> bool {
         let starts = i > 0 && (b[i - 1].is_ascii_digit() || b[i - 1] == b'.');
         if starts {
             let rest = &v[i..];
-            for u in ["vmin", "vmax", "vh"] {
+            for u in ["vmin", "vmax", "vh", "dvh", "svh", "lvh", "dvmin", "svmin", "lvmin", "dvmax", "svmax", "lvmax"] {
                 if rest.starts_with(u) && !rest[u.len()..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
                     return true;
                 }
@@ -2977,12 +3016,13 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         // sheet set.
         Prop::All => {
             let rtl = s.rtl;
-            let (rem, vw, vh, seen) = (s.rem_base, s.vw, s.vh, s.vh_seen);
+            let (rem, rlh, vw, vh, seen) = (s.rem_base, s.rlh_base, s.vw, s.vh, s.vh_seen);
             let (acb, acp) = (s.attr_cell_border, s.attr_cell_padding);
             let (link, rule, brk, summ) = (s.is_link, s.is_rule, s.is_break, s.is_summary);
             *s = *src;
             s.rtl = rtl;
             s.rem_base = rem;
+            s.rlh_base = rlh;
             s.vw = vw;
             s.vh = vh;
             s.vh_seen = seen;
@@ -3000,12 +3040,14 @@ pub fn apply_wide(prop: Prop, kw: Wide, parent: &ComputedStyle, theme: &Theme, s
         Prop::BackgroundColor => {
             s.bg = src.bg;
             s.bg_cc = src.bg_cc;
+            s.bg_mix = src.bg_mix;
             s.bg_set = src.bg_set;
         }
         Prop::BackgroundImage => s.bg_layer = src.bg_layer,
         Prop::Background => {
             s.bg = src.bg;
             s.bg_cc = src.bg_cc;
+            s.bg_mix = src.bg_mix;
             s.bg_set = src.bg_set;
             s.bg_layer = src.bg_layer;
             s.bg_clip = src.bg_clip;
@@ -3334,6 +3376,9 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
         Prop::Color => {
             if let Some(c) = parse_color(&v, theme) {
                 s.color = c;
+            } else if let Some(c) = crate::color::parse_current_mix(&v).and_then(|m| m.resolve(s.color)) {
+                // `currentcolor` inside `color` is the inherited colour.
+                s.color = c;
             }
         }
         Prop::FontWeight => {
@@ -3657,6 +3702,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             let vt = v.trim();
             if vt == "none" {
                 s.bg = None;
+                s.bg_mix = None;
             } else if let Some(cv) = parse_color_val(vt, theme) {
                 // Handles space-separated function colours like
                 // `rgb(0% 50% 0%)` / `hsl(120 100% 25%)`.
@@ -3666,6 +3712,12 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     ColorVal::CurrentColor => Some(s.color),
                 };
                 s.bg_cc = cv == ColorVal::CurrentColor;
+                s.bg_mix = None;
+                s.bg_set = true;
+            } else if let Some(m) = crate::color::parse_current_mix(vt) {
+                s.bg = m.resolve(s.color);
+                s.bg_cc = false;
+                s.bg_mix = Some(m);
                 s.bg_set = true;
             }
         }
@@ -3681,6 +3733,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                     ColorVal::CurrentColor => Some(s.color),
                 };
                 s.bg_cc = cv == ColorVal::CurrentColor;
+                s.bg_mix = None;
                 s.bg_set = true;
                 s.bg_layer = BgLayer::NONE;
                 s.bg_origin = BoxEdge::Padding;
@@ -3690,6 +3743,7 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 if let Some((color, layer, origin, clip)) = parse_bg_shorthand(val, &v, u, theme, &mut cc) {
                     s.bg = if cc { Some(s.color) } else { color };
                     s.bg_cc = cc;
+                    s.bg_mix = None;
                     s.bg_layer = layer;
                     s.bg_origin = origin;
                     s.bg_clip = clip;
@@ -4088,6 +4142,21 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             {
                 s.grid_area = area_hash(name);
+            } else if name.contains('/') || name.parse::<i32>().is_ok() {
+                // `row-start / column-start / row-end / column-end`.
+                let p: alloc::vec::Vec<&str> = name.split('/').map(str::trim).collect();
+                let axis = |start: Option<&&str>, end: Option<&&str>| match (start, end) {
+                    (Some(a), Some(b)) => alloc::format!("{a} / {b}"),
+                    (Some(a), None) => String::from(*a),
+                    _ => String::from("auto"),
+                };
+                let (rs, rspan) = parse_line_placement(&axis(p.first(), p.get(2)));
+                let (cs, cspan) = parse_line_placement(&axis(p.get(1), p.get(3)));
+                s.grid_area = 0;
+                s.grid_row_start = rs;
+                s.grid_row_span = rspan;
+                s.grid_col_start = cs;
+                s.grid_col_span = cspan;
             }
         }
         Prop::JustifyItems => s.justify_items = parse_cross(&v).unwrap_or(CrossAlign::Stretch),
@@ -4107,6 +4176,14 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
             s.align_content = parse_content_align(a);
             s.justify = parse_justify(j);
         }
+        Prop::ContainerType => s.container_type = container_type(v),
+        Prop::ContainerName => s.container_names = container_names(t),
+        // `container: <name> [ / <type> ]`
+        Prop::Container => {
+            let (n, ty) = t.split_once('/').unwrap_or((t, "normal"));
+            s.container_names = container_names(n);
+            s.container_type = container_type(&ty.trim().to_ascii_lowercase());
+        }
         Prop::PlaceSelf => {
             let mut it = v.split_whitespace();
             let a = it.next().unwrap_or("");
@@ -4117,6 +4194,23 @@ pub fn apply_one(prop: Prop, val: &str, theme: &Theme, s: &mut ComputedStyle) {
 
         Prop::Unknown | Prop::Content => {}
     }
+}
+
+fn container_type(v: &str) -> u8 {
+    match v.trim() {
+        "inline-size" => crate::media::CQ_INLINE,
+        "size" => crate::media::CQ_SIZE,
+        _ => crate::media::CQ_NONE,
+    }
+}
+
+/// `container-name`: custom identifiers, case-sensitive; `none` is no name.
+fn container_names(v: &str) -> [u32; 2] {
+    let mut out = [0; 2];
+    for (slot, n) in out.iter_mut().zip(v.split_whitespace().filter(|n| !n.eq_ignore_ascii_case("none"))) {
+        *slot = crate::media::name_hash(n);
+    }
+    out
 }
 
 /// A CSS `<integer>`, saturating to the 32-bit signed range instead of
@@ -4709,11 +4803,11 @@ fn set_max(slot: &mut Len, v: &str, u: Units) {
 fn parse_calc_affine(v: &str, u: Units) -> Option<Len> {
     let at0 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh, lh: u.lh, rlh: u.rlh },
     )?;
     let at100 = crate::values::resolve_length(
         v,
-        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 100.0, vw: u.vw, vh: u.vh },
+        &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 100.0, vw: u.vw, vh: u.vh, lh: u.lh, rlh: u.rlh },
     )?;
     let pct = at100 - at0;
     if (-0.001..0.001).contains(&pct) {
@@ -4874,9 +4968,13 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
                    ("padding-bottom", s.pad_bottom), ("padding-left", s.pad_left)] {
         put(k, &px(v));
     }
-    for (k, b) in [("border-top-width", &s.border_top), ("border-right-width", &s.border_right),
-                   ("border-bottom-width", &s.border_bottom), ("border-left-width", &s.border_left)] {
-        put(k, &px(b.width));
+    for (side, b) in [("top", &s.border_top), ("right", &s.border_right),
+                      ("bottom", &s.border_bottom), ("left", &s.border_left)] {
+        put(&alloc::format!("border-{side}-width"), &px(b.width));
+        // Unset is `currentcolor`, which computes to the element's `color`.
+        let c = if b.see_through { String::from("rgba(0, 0, 0, 0)") } else { rgba(b.color.unwrap_or(s.color)) };
+        put(&alloc::format!("border-{side}-color"), &c);
+        put(&alloc::format!("border-{side}-style"), if b.hidden { "hidden" } else if b.styled { "solid" } else { "none" });
     }
     put("opacity", &if s.transparent || s.opacity_zero { "0".into() } else { trim_f32(s.opacity) });
     put("visibility", if s.transparent { "hidden" } else { "visible" });
@@ -4921,6 +5019,7 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("flex-direction", if s.flex_row { "row" } else { "column" });
     put("flex-wrap", if s.flex_wrap { "wrap" } else { "nowrap" });
     put("justify-content", match s.justify {
+        Justify::Normal => "normal",
         Justify::Start => "flex-start", Justify::End => "flex-end", Justify::Center => "center",
         Justify::Between => "space-between", Justify::Around => "space-around",
         Justify::Evenly => "space-evenly",
@@ -4961,6 +5060,26 @@ pub fn serialize_computed(s: &ComputedStyle) -> String {
     put("border-radius", &if r.iter().all(|x| *x == r[0]) { len(r[0]) } else {
         alloc::format!("{} {} {} {}", len(r[0]), len(r[1]), len(r[2]), len(r[3]))
     });
+    o
+}
+
+/// [`serialize_computed`] followed by the element's custom properties, so that
+/// `getPropertyValue('--x')` answers like a browser: the value as specified,
+/// case-sensitive name, inherited through the map.
+pub fn serialize_computed_with_vars(s: &ComputedStyle, vars: &crate::vars::VarMap) -> String {
+    let mut o = serialize_computed(s);
+    for (k, v) in vars.iter() {
+        if crate::vars::var_get(vars, k).is_none() {
+            continue;
+        }
+        if !o.is_empty() {
+            o.push(' ');
+        }
+        o.push_str(k);
+        o.push_str(": ");
+        o.push_str(v.trim());
+        o.push(';');
+    }
     o
 }
 
@@ -5114,7 +5233,7 @@ fn parse_box_shadow(v: &str, u: Units) -> Option<(bool, BoxShadow)> {
         let len = if is_math_fn(tok) {
             crate::values::resolve_length(
                 tok,
-                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh },
+                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: 0.0, vw: u.vw, vh: u.vh, lh: u.lh, rlh: u.rlh },
             )
         } else {
             parse_length(tok, u)
@@ -5182,7 +5301,7 @@ fn length_parts(v: &str, u: Units) -> Option<(f32, f32)> {
         let at = |basis: f32| {
             crate::values::resolve_length(
                 t,
-                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: basis, vw: u.vw, vh: u.vh },
+                &crate::values::LenCtx { em: u.em, rem: u.rem, pct_basis: basis, vw: u.vw, vh: u.vh, lh: u.lh, rlh: u.rlh },
             )
         };
         let (a, b) = (at(0.0)?, at(100.0)?);
@@ -5350,8 +5469,12 @@ fn parse_grid_tracks(v: &str, u: Units) -> TrackList {
 
 fn parse_track(t: &str, u: Units) -> GridTrack {
     let t = t.trim();
-    if t == "auto" || t == "min-content" || t == "max-content" {
+    if t == "auto" || t.starts_with("fit-content(") {
         GridTrack::Auto
+    } else if t == "min-content" {
+        GridTrack::MinContent
+    } else if t == "max-content" {
+        GridTrack::MaxContent
     } else if let Some(f) = t.strip_suffix("fr") {
         GridTrack::Fr(f.trim().parse().unwrap_or(1.0))
     } else if let Some(p) = t.strip_suffix('%') {
@@ -5361,8 +5484,12 @@ fn parse_track(t: &str, u: Units) -> GridTrack {
         // max length must become a Fixed cap, not unbounded `Auto` max-content,
         // which would blow a `minmax(0,59.25rem)` content column up to the whole
         // unwrapped content width.
+        let min_part = inner.split(',').next().unwrap_or("").trim();
         let max_part = inner.split(',').nth(1).unwrap_or(inner).trim();
-        parse_track(max_part, u)
+        match (parse_track(max_part, u), parse_track(min_part, u)) {
+            (GridTrack::Auto | GridTrack::MaxContent, GridTrack::Fixed(px)) => GridTrack::AutoFrom(px),
+            (max, _) => max,
+        }
     } else {
         // A fixed length: px/em/rem/pt/cm/vw/… against the element's own units.
         match parse_length(t, u) {
@@ -5522,6 +5649,7 @@ fn parse_justify(v: &str) -> Justify {
         "space-between" => Justify::Between,
         "space-around" => Justify::Around,
         "space-evenly" => Justify::Evenly,
+        "normal" | "stretch" => Justify::Normal,
         _ => Justify::Start,
     }
 }
@@ -5663,12 +5791,32 @@ fn parse_length(v: &str, u: Units) -> Option<f32> {
     }
     // Viewport-percentage units (CSS Values 3 §5.1.2). Before the absolute
     // table: `vmin` ends in `in`, so the inch arm would eat it otherwise.
+    // The small/large/dynamic variants (css-values-4 §6.1.2) equal the plain
+    // ones: there is no retractable browser UI. Longest suffix first.
     const VP: &[(&str, fn(&Units) -> f32)] = &[
+        ("dvmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
+        ("svmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
+        ("lvmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
+        ("dvmax", |u| if u.vw > u.vh { u.vw } else { u.vh }),
+        ("svmax", |u| if u.vw > u.vh { u.vw } else { u.vh }),
+        ("lvmax", |u| if u.vw > u.vh { u.vw } else { u.vh }),
         ("vmin", |u| if u.vw < u.vh { u.vw } else { u.vh }),
         ("vmax", |u| if u.vw > u.vh { u.vw } else { u.vh }),
+        ("dvw", |u| u.vw),
+        ("svw", |u| u.vw),
+        ("lvw", |u| u.vw),
+        ("dvh", |u| u.vh),
+        ("svh", |u| u.vh),
+        ("lvh", |u| u.vh),
         ("vw", |u| u.vw),
         ("vh", |u| u.vh),
     ];
+    if let Some(n) = v.strip_suffix("rlh") {
+        return n.trim().parse::<f32>().ok().map(|f| f * u.rlh);
+    }
+    if let Some(n) = v.strip_suffix("lh") {
+        return n.trim().parse::<f32>().ok().map(|f| f * u.lh);
+    }
     for (suf, basis) in VP {
         if let Some(n) = v.strip_suffix(suf) {
             return n.trim().parse::<f32>().ok().map(|f| f / 100.0 * basis(&u));
@@ -6367,6 +6515,6 @@ mod size_probe {
     fn the_style_stays_small() {
         assert_eq!(core::mem::size_of::<super::GradStop>(), 12);
         assert_eq!(core::mem::size_of::<super::Gradient>(), 84);
-        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1504);
+        assert_eq!(core::mem::size_of::<super::ComputedStyle>(), 1520);
     }
 }

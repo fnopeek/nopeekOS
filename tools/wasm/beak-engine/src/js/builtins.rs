@@ -2296,7 +2296,7 @@ pub fn make_realm() -> Realm {
         let Some((w, dark)) = i.media else {
             return i.type_err("matchMedia needs a viewport (host did not submit one)");
         };
-        let m = crate::css::Media::new(w as f32, dark);
+        let m = crate::css::Media::new(w as f32, dark).with_height(i.viewport.1 as f32);
         let hit = crate::css::media_matches(&q, m);
         let g = new_obj(Some(i.realm.object_proto.clone()));
         {

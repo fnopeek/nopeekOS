@@ -21,6 +21,9 @@ pub struct LenCtx {
     pub vw: f32,
     /// Viewport height in px (for `vh`/`vmin`/`vmax`).
     pub vh: f32,
+    /// Used line height of the element (for `lh`) and of the root (`rlh`).
+    pub lh: f32,
+    pub rlh: f32,
 }
 
 /// Resolve a CSS `<length>`/`<percentage>`/`calc(...)` value to pixels.
@@ -69,14 +72,20 @@ fn resolve_unit(n: f32, unit: &str, ctx: &LenCtx) -> Option<f32> {
         n * ctx.rem
     } else if eq("%") {
         n / 100.0 * ctx.pct_basis
-    } else if eq("vw") {
+    // The small/large/dynamic viewport units equal the plain ones: there is
+    // no retractable browser UI.
+    } else if eq("vw") || eq("svw") || eq("lvw") || eq("dvw") {
         n / 100.0 * ctx.vw
-    } else if eq("vh") {
+    } else if eq("vh") || eq("svh") || eq("lvh") || eq("dvh") {
         n / 100.0 * ctx.vh
-    } else if eq("vmin") {
+    } else if eq("vmin") || eq("svmin") || eq("lvmin") || eq("dvmin") {
         n / 100.0 * fmin(ctx.vw, ctx.vh)
-    } else if eq("vmax") {
+    } else if eq("vmax") || eq("svmax") || eq("lvmax") || eq("dvmax") {
         n / 100.0 * fmax(ctx.vw, ctx.vh)
+    } else if eq("lh") {
+        n * ctx.lh
+    } else if eq("rlh") {
+        n * ctx.rlh
     } else if eq("pt") {
         // 1pt = 1/72in, 1in = 96px.
         n * (96.0 / 72.0)
@@ -358,6 +367,8 @@ mod tests {
             pct_basis: 1000.0,
             vw: 1280.0,
             vh: 800.0,
+            lh: 20.0,
+            rlh: 24.0,
         }
     }
 
