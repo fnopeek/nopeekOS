@@ -429,10 +429,6 @@ const ACT_CTX_DISMISS:        u32 = 8_200;
 // The file area behind the items: right-click opens the background menu.
 const ACT_BACKGROUND:         u32 = 8_300;
 
-// NodeId the context-menu Popover anchors against — the item it was
-// opened on, or a zero-height marker at the top of the file area.
-const NODE_CTX_ANCHOR: u32 = 200;
-
 // NodeIds for menu-bar labels — used as Popover anchors.
 const NODE_MENU_FILE: u32 = 100;
 const NODE_MENU_EDIT: u32 = 101;
@@ -1454,12 +1450,11 @@ fn render(lf: &Loft) -> Widget {
             modifiers:  alloc::vec![],
         });
     } else if let Some(ctx) = &lf.ctx {
-        // Floated at the item it was opened on, or at the top of the file
-        // area; either carries NODE_CTX_ANCHOR while the menu is open.
+        // Opens where the right click landed.
         let mut m = MenuBuf::default();
         ctx_menu_items(lf, ctx, &mut m);
         children.push(Widget::Popover {
-            anchor:     NodeId(NODE_CTX_ANCHOR),
+            anchor:     NodeId::POINTER,
             child:      alloc::boxed::Box::new(m.widget()),
             on_dismiss: ActionId(ACT_CTX_DISMISS),
             modifiers:  alloc::vec![],
@@ -1958,15 +1953,9 @@ fn render_body(lf: &Loft) -> Widget {
         axis:      Axis::Vertical,
         modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnClick(ActionId(ACT_BACKGROUND))],
     };
-    // A zero-height marker above the scroll anchors the background menu at
-    // the top of the file area. Always present, so the tree keeps its shape.
-    let mut marker = Vec::new();
-    if lf.ctx == Some(CtxMenu::Background) {
-        marker.push(Modifier::NodeId(NodeId(NODE_CTX_ANCHOR)));
-    }
     let content = Widget::Column {
         children: alloc::vec![
-            Widget::Row { children: Vec::new(), spacing: 0, align: Align::Start, modifiers: marker },
+            Widget::Row { children: Vec::new(), spacing: 0, align: Align::Start, modifiers: Vec::new() },
             content,
         ],
         spacing:   0,
@@ -1993,7 +1982,7 @@ fn render_grid(lf: &Loft) -> Widget {
     let source = lf.source();
     let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
         let e = &source[entry_idx];
-        let look = item_look(lf, ui_idx, &e.name);
+        let look = item_look(lf, ui_idx);
         let mut item = prefab::grid_item(
             icon_for(e), &e.name,
             look.highlighted,
@@ -2008,27 +1997,24 @@ fn render_grid(lf: &Loft) -> Widget {
 
 /// How one item is drawn: highlighted when marked (or, with nothing
 /// marked, when it is the cursor), ringed when it is the cursor among
-/// marks, and the context-menu anchor while the menu is open on it.
+/// marks.
 struct ItemLook {
     highlighted: bool,
     ring:        bool,
-    anchor:      bool,
 }
 
-fn item_look(lf: &Loft, ui: usize, name: &str) -> ItemLook {
+fn item_look(lf: &Loft, ui: usize) -> ItemLook {
     let is_cursor = lf.cursor == Some(ui);
     let marking = !lf.marks.is_empty() || lf.select_mode;
     ItemLook {
         highlighted: lf.is_marked(ui) || (!marking && is_cursor),
         ring:        marking && is_cursor,
-        anchor:      matches!(&lf.ctx, Some(CtxMenu::Item(n)) if n == name),
     }
 }
 
 impl ItemLook {
     fn apply(&self, w: &mut Widget) {
         if self.ring { add_modifier(w, Modifier::Ring { token: Token::AccentRing, width: 2 }); }
-        if self.anchor { add_modifier(w, Modifier::NodeId(NodeId(NODE_CTX_ANCHOR))); }
     }
 }
 
@@ -2047,7 +2033,7 @@ fn render_list(lf: &Loft) -> Widget {
     rows.push(Widget::Divider);
     for (ui_idx, &entry_idx) in lf.filtered.iter().enumerate() {
         let e = &source[entry_idx];
-        let look = item_look(lf, ui_idx, &e.name);
+        let look = item_look(lf, ui_idx);
         let mut row = list_data_row(
             e, look.highlighted, browsing,
             ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32),
