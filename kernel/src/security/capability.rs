@@ -127,7 +127,14 @@ impl Vault {
             return Err(CapError::EscalationAttempt);
         }
 
+        // A free slot, or one whose capability is revoked or expired: those
+        // only ever answer "denied", and a slot that is never reused turns
+        // a few hundred launches into a full vault.
+        let root = *ROOT_CAP.lock();
         let slot = self.caps.iter().position(|c| c.is_none())
+            .or_else(|| self.caps.iter().position(|c| {
+                c.as_ref().is_some_and(|c| c.id != root && (!c.active || c.is_expired()))
+            }))
             .ok_or_else(|| {
                 audit::record(AuditOp::Denied { reason: DenyReason::VaultFull });
                 CapError::VaultFull
@@ -216,20 +223,34 @@ impl Vault {
         self.caps.iter().filter_map(|c| c.as_ref()).find(|c| c.id == *id)
     }
 
+    /// Deactivate `target_id` and everything delegated from it, however
+    /// many: repeat until a pass finds no active child of a revoked parent.
     fn revoke_recursive(&mut self, target_id: &CapId) {
         for cap in self.caps.iter_mut().flatten() {
             if cap.id == *target_id { cap.active = false; }
         }
-        let mut children = [[0u8; 32]; 64];
-        let mut child_count = 0;
-        for cap in self.caps.iter().filter_map(|c| c.as_ref()) {
-            if cap.parent.as_ref() == Some(target_id) && cap.active && child_count < 64 {
-                children[child_count] = cap.id;
-                child_count += 1;
+        loop {
+            let revoked: alloc::vec::Vec<CapId> = self.caps.iter().flatten()
+                .filter(|c| !c.active).map(|c| c.id).collect();
+            let mut changed = false;
+            for cap in self.caps.iter_mut().flatten() {
+                if cap.active && cap.parent.is_some_and(|p| revoked.contains(&p)) {
+                    cap.active = false;
+                    changed = true;
+                }
             }
+            if !changed { break; }
         }
-        for i in 0..child_count {
-            self.revoke_recursive(&children[i]);
+    }
+
+    /// Revoke `id` and its delegations and free their slots.
+    fn release(&mut self, id: &CapId) {
+        self.revoke_recursive(id);
+        for slot in self.caps.iter_mut() {
+            if slot.as_ref().is_some_and(|c| !c.active) {
+                *slot = None;
+                self.count = self.count.saturating_sub(1);
+            }
         }
     }
 }
@@ -238,6 +259,13 @@ impl Vault {
 pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId, CapError> {
     let root = *ROOT_CAP.lock();
     VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
+}
+
+/// A module instance has ended: its capability (one per launch) and what it
+/// delegated are revoked and their vault slots freed. Never the root.
+pub fn release_module_cap(cap: &CapId) {
+    if *cap == *ROOT_CAP.lock() { return; }
+    VAULT.lock().release(cap);
 }
 
 

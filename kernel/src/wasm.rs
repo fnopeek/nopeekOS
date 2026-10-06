@@ -584,6 +584,7 @@ fn wasm_worker_task(arg: u64) {
     // reusing the capability id would otherwise inherit a file it never
     // asked for.
     capability::revoke_path_grants(&store.data().cap_id);
+    capability::release_module_cap(&store.data().cap_id);
 
     // Update final memory usage
     if let Some(mem) = instance.get_memory(&store, "memory") {
@@ -690,6 +691,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
     // As in the interpreter path: release hardware, revoke path grants.
     cleanup_instance_state(&mut hs);
     capability::revoke_path_grants(&hs.cap_id);
+    capability::release_module_cap(&hs.cap_id);
     crate::process::set_memory(pid, inst.memory_size() as u32);
     done(pid, terminal_idx, slot);
 }
@@ -933,6 +935,7 @@ fn execute_inner_forge(
 
     cleanup_instance_state(&mut hs);
     capability::revoke_path_grants(&hs.cap_id);
+    capability::release_module_cap(&hs.cap_id);
     Some(match trap {
         forge_core::trap::NONE => Ok(WasmResult { output: hs.output }),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
