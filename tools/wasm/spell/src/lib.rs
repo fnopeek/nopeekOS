@@ -895,6 +895,9 @@ fn render_body(sp: &Spell) -> Widget {
             Modifier::Padding(Padding::Sm.as_u16()),
             Modifier::LineNumbers(true),
             Modifier::FontSize(sp.font_px),
+            // Typing works without a click: on open, and whenever focus
+            // has nowhere else to be (new tab, closed dialog).
+            Modifier::Autofocus,
         ],
     }
 }
@@ -1839,9 +1842,8 @@ fn commit_tree(sp: &Spell) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // Tiled app — the first commit creates the window; the compositor
-    // auto-focuses the first text widget (our TextArea) so the user can
-    // type immediately.
+    // Tiled app — the first commit creates the window, and the TextArea's
+    // `Autofocus` gives it the keyboard.
     let mut sp = Spell::new();
 
     commit_tree(&sp);
