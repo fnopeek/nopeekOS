@@ -2,6 +2,7 @@
 name = "volume"
 version = "0.2.1"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 description = "Volume mixer — a centred overlay slider (drun-style)."
 
 [lib]

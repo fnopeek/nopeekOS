@@ -2,6 +2,7 @@
 name = "i2c_hid"
 version = "0.28.2"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib"]

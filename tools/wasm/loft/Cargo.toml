@@ -2,6 +2,7 @@
 name = "loft"
 version = "0.9.1"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 description = "File browser — Thunar-clone for nopeekOS."
 
 [lib]

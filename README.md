@@ -455,7 +455,27 @@ third-party modules become possible this evolves into a key hierarchy
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE)
+nopeekOS is dual-licensed.
+
+- **Open source: [AGPL-3.0-or-later](LICENSE).** Use it, study it, change
+  it, share it — privately or commercially. If you distribute a modified
+  version, or offer it to others over a network, you publish your source
+  under the same license.
+- **Commercial license on request.** For building nopeekOS or its SDK
+  into a product or service without the AGPL's source obligations,
+  contact florian@nopeek.ch.
+
+Bundled third-party components keep their own licenses: Inter and IBM
+Plex fonts (SIL OFL 1.1, texts in `release/assets/`), the Phosphor icons
+(MIT), CPython (PSF), and the microVM guest (Linux: GPL-2.0, LibreWolf:
+MPL-2.0).
+
+**Contributions** are welcome, but can only be merged under a
+contributor license agreement that keeps dual licensing possible — ask
+before sending a larger change.
+
+"nopeekOS" is the project's name; the license covers the code, not the
+name. A fork is welcome under a name of its own.
 
 ## Author
 

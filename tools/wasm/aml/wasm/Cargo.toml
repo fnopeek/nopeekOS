@@ -2,6 +2,7 @@
 name = "aml"
 version = "0.5.1"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib"]

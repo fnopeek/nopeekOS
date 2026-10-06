@@ -2,6 +2,7 @@
 name = "forge_core"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 description = "WASM -> x86-64, single pass, at install time"
 
 # no_std + alloc rlib. Builds for x86_64-nopeek AND for the std harness.

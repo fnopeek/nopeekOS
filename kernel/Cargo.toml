@@ -2,6 +2,7 @@
 name = "nopeekos-kernel"
 version = "0.490.0"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 authors = ["nopeek"]
 description = "nopeekOS kernel"
 

@@ -2,6 +2,7 @@
 name = "beak-engine"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 description = "Portable browser engine core for beak (nopeekOS) — pure no_std+alloc, host-agnostic. See docs/spec/BROWSER.md §10."
 
 [lib]

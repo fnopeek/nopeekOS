@@ -2,6 +2,7 @@
 name = "i2c_hid_core"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 
 # no_std + alloc. Builds for the std test harness and for wasm32.
 [lib]

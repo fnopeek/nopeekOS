@@ -2,6 +2,7 @@
 name = "iris"
 version = "0.11.1"
 edition = "2024"
+license = "AGPL-3.0-or-later"
 description = "Image viewer — nopeekOS."
 
 [lib]
