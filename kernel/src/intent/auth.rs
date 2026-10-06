@@ -53,9 +53,11 @@ pub fn intent_lock() {
 /// `passwd` — rewrap the disk key under a new passphrase. The data stays as
 /// it is: it is encrypted under the data key, which does not change.
 pub fn intent_passwd() {
-    kprint!("[npk] Current passphrase: ");
     let mut old = [0u8; 128];
-    let old_len = { serial::SERIAL.lock().read_line_masked(&mut old) };
+    let Some(old_len) = super::read_secret("Current passphrase: ", &mut old) else {
+        kprintln!("[npk] Cancelled.");
+        return;
+    };
     if old_len == 0 {
         kprintln!("[npk] Cancelled.");
         return;
@@ -63,18 +65,26 @@ pub fn intent_passwd() {
 
     let mut new = [0u8; 128];
     let new_len = loop {
-        kprint!("[npk] New passphrase: ");
-        let len1 = { serial::SERIAL.lock().read_line_masked(&mut new) };
+        let Some(len1) = super::read_secret("New passphrase: ", &mut new) else {
+            old.fill(0);
+            kprintln!("[npk] Cancelled.");
+            return;
+        };
         if len1 < 8 {
             kprintln!("[npk] Too short. Minimum 8 characters.");
+            new.fill(0);
             continue;
         }
-
-        kprint!("[npk] Confirm passphrase: ");
         let mut confirm = [0u8; 128];
-        let len2 = { serial::SERIAL.lock().read_line_masked(&mut confirm) };
-        let same = len1 == len2 && new[..len1] == confirm[..len2];
+        let len2 = super::read_secret("Confirm passphrase: ", &mut confirm);
+        let same = len2 == Some(len1) && new[..len1] == confirm[..len1];
         confirm.fill(0);
+        if len2.is_none() {
+            old.fill(0);
+            new.fill(0);
+            kprintln!("[npk] Cancelled.");
+            return;
+        }
         if !same {
             kprintln!("[npk] Passphrases do not match. Try again.");
             new.fill(0);
@@ -83,6 +93,7 @@ pub fn intent_passwd() {
         break len1;
     };
 
+    kprintln!("[npk] Rewrapping the disk key...");
     let r = crate::disk_key::change(&old[..old_len], &new[..new_len]);
     old.fill(0);
     new.fill(0);

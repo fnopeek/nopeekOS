@@ -124,6 +124,66 @@ pub fn confirm(question: &str) -> bool {
     answer
 }
 
+/// Read a masked line (a passphrase) into `buf`, echoing `*`. Same input
+/// path as `confirm`: the keyboard in the loop, COM1 without a compositor.
+/// Printable ASCII only, like the login screen — a character the login
+/// cannot type must not end up in a passphrase. None on Ctrl+C or timeout.
+pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
+    kprint!("[npk] {}", prompt);
+    let on_screen = crate::shade::is_active()
+        && crate::smp::per_core::current_core_id() == 0;
+    if on_screen { crate::shade::render_frame(); }
+
+    let mut len = 0usize;
+    let started = crate::interrupts::ticks();
+    let result = loop {
+        if cancel_requested() { kprint!("^C"); break None; }
+        if crate::interrupts::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
+            kprint!("(timeout)");
+            break None;
+        }
+        crate::xhci::poll_events();
+        let key = crate::keyboard::read_key().or_else(|| {
+            let serial = serial::SERIAL.try_lock()?;
+            if serial.has_data() { Some(serial.read_serial_raw()) } else { None }
+        });
+        if let Some(key) = key {
+            match key {
+                b'\n' | b'\r' => break Some(len),
+                0x03 => { kprint!("^C"); break None; }
+                0x08 | 0x7F => {
+                    if len > 0 {
+                        len -= 1;
+                        buf[len] = 0;
+                        kprint!("\x08 \x08");
+                    }
+                }
+                0x1B => {
+                    // An arrow key arrives as ESC '[' x: swallow it.
+                    if crate::keyboard::read_key() == Some(b'[') {
+                        let _ = crate::keyboard::read_key();
+                    }
+                }
+                b if (0x20..0x7F).contains(&b) && len < buf.len() => {
+                    buf[len] = b;
+                    len += 1;
+                    kprint!("*");
+                }
+                _ => {}
+            }
+            if on_screen { crate::shade::render_frame(); }
+            continue;
+        }
+        if !crate::smp::fiber::yield_sleep(2) {
+            core::hint::spin_loop();
+        }
+    };
+    kprintln!();
+    if on_screen { crate::shade::render_frame(); }
+    if result.is_none() { buf.fill(0); }
+    result
+}
+
 // -- Command history --
 /// Lines a session keeps for Up/Down. The persistent log has its own,
 /// larger ring; this is only what one window walks.
