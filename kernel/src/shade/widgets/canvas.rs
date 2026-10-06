@@ -18,9 +18,13 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Per-app pixel caps: 4096×4096, 64 MB total.
+/// Per-canvas pixel caps: 4096×4096, 64 MB.
 pub const MAX_DIM: u32 = 4096;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Per-window caps. Canvas ids are the app's to choose, so without them one
+/// window could store a full-size bitmap under every id it likes.
+const WINDOW_BYTES: usize = 128 * 1024 * 1024;
+const WINDOW_CANVASES: usize = 64;
 
 /// Which matrix and range the Y′CbCr planes were coded with. A video
 /// stream says so in its VUI; guessing here would tint every frame, so the
@@ -84,6 +88,29 @@ struct Bitmap {
 
 static CANVASES: Mutex<BTreeMap<(u32, u32), Bitmap>> = Mutex::new(BTreeMap::new());
 
+impl Pixels {
+    fn bytes(&self) -> usize {
+        match self {
+            Pixels::Bgra(px) => px.len(),
+            Pixels::I420 { y, u, v, .. } => y.len() + u.len() + v.len(),
+        }
+    }
+}
+
+/// Store `bmp` under `(window_id, canvas_id)` if the window stays within its
+/// caps; the bitmap it replaces does not count.
+fn insert_within_caps(window_id: u32, canvas_id: u32, bmp: Bitmap) -> bool {
+    let mut map = CANVASES.lock();
+    let others = map.range((window_id, 0)..=(window_id, u32::MAX))
+        .filter(|(k, _)| k.1 != canvas_id);
+    let (count, bytes) = others.fold((0usize, 0usize), |(n, b), (_, v)| (n + 1, b + v.px.bytes()));
+    if count >= WINDOW_CANVASES || bytes + bmp.px.bytes() > WINDOW_BYTES {
+        return false;
+    }
+    map.insert((window_id, canvas_id), bmp);
+    true
+}
+
 /// Last laid-out rect (x, y, w, h) per (window_id, canvas_id), recorded by
 /// the render walker so an app (e.g. the browser) can query its real
 /// on-screen size and paint 1:1 instead of relying on the contain-fit blit.
@@ -96,8 +123,7 @@ pub fn commit(window_id: u32, canvas_id: u32, w: u32, h: u32, px: Vec<u8>) -> bo
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM { return false; }
     let need = (w as usize) * (h as usize) * 4;
     if need > MAX_BYTES || px.len() != need { return false; }
-    CANVASES.lock().insert((window_id, canvas_id), Bitmap { w, h, px: Pixels::Bgra(px) });
-    true
+    insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Bgra(px) })
 }
 
 /// Store (or replace) a planar 4:2:0 frame. Every bound the blit relies on
@@ -121,11 +147,10 @@ pub fn commit_i420(
     let need_c = cs.checked_mul(ch).unwrap_or(usize::MAX);
     if y.len() < need_y || u.len() < need_c || v.len() < need_c { return false; }
     if need_y.saturating_add(need_c.saturating_mul(2)) > MAX_BYTES { return false; }
-    CANVASES.lock().insert(
-        (window_id, canvas_id),
+    insert_within_caps(
+        window_id, canvas_id,
         Bitmap { w, h, px: Pixels::I420 { y, u, v, ys, cs, coding } },
-    );
-    true
+    )
 }
 
 /// Run `f` with the stored pixels (whatever form they are in, w, h) if

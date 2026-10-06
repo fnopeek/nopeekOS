@@ -2222,8 +2222,13 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
     let owner_wid = ctx.widget_window_id;
     if owner_wid != 0 { crate::shade::widgets::set_window_cap(owner_wid, cap_id); }
 
-    // Heap copy; a typical tree is a few hundred bytes.
-    let payload: alloc::vec::Vec<u8> = match glen(len).and_then(|n| guest(mem, ptr, n)) {
+    // Heap copy; a typical tree is a few hundred bytes. Capped before the
+    // copy: the tree is stored and cloned on every hover and keystroke.
+    const MAX_SCENE_BYTES: usize = 16 * 1024 * 1024;
+    let payload: alloc::vec::Vec<u8> = match glen(len)
+        .filter(|&n| n <= MAX_SCENE_BYTES)
+        .and_then(|n| guest(mem, ptr, n))
+    {
         Some(b) if !b.is_empty() => b.to_vec(),
         _ => return -1,
     };
@@ -2270,6 +2275,9 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
     let Some(pixel_bytes) = (width as usize).checked_mul(height as usize)
         .and_then(|n| n.checked_mul(4)) else { return -1 };
     if glen(len) != Some(pixel_bytes) { return -1; }
+    // The canvas caps, before anything is copied onto the kernel heap.
+    use crate::shade::widgets::canvas::{MAX_BYTES, MAX_DIM};
+    if width as u32 > MAX_DIM || height as u32 > MAX_DIM || pixel_bytes > MAX_BYTES { return -1; }
     let Some(px) = guest(mem, ptr, pixel_bytes).map(|b| b.to_vec()) else { return -1 };
     if !crate::shade::widgets::canvas::commit(
         wid, canvas_id as u32, width as u32, height as u32, px) {
@@ -2312,6 +2320,10 @@ pub(crate) fn npk_canvas_commit_yuv(
     // different question — whether the module's own memory holds it.
     let Some(need_y) = ys.checked_mul(h as usize) else { return -1 };
     let Some(need_c) = cs.checked_mul(ch) else { return -1 };
+    // The canvas caps, before anything is copied onto the kernel heap.
+    use crate::shade::widgets::canvas::{MAX_BYTES, MAX_DIM};
+    if w > MAX_DIM || h > MAX_DIM
+        || need_y.saturating_add(need_c.saturating_mul(2)) > MAX_BYTES { return -1; }
 
     let data = &*mem;
     let take = |ptr: i32, n: usize| guest(data, ptr, n).map(|b| b.to_vec());
