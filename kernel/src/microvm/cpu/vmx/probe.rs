@@ -74,21 +74,7 @@ const FEAT_CTRL_VMX_OUTSIDE_SMX: u64 = 1 << 2;
 
 /// CPUID.1:ECX[5] — VMX present.
 fn cpuid_vmx_bit() -> bool {
-    let ecx: u32;
-    // SAFETY: CPUID has no privileged side-effects. ebx is preserved
-    // explicitly because Rust reserves it for LLVM internals.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "pop rbx",
-            inout("eax") 1u32 => _,
-            out("ecx") ecx,
-            out("edx") _,
-            options(nostack, preserves_flags),
-        );
-    }
-    ecx & (1 << 5) != 0
+    core::arch::x86_64::__cpuid_count(1, 0).ecx & (1 << 5) != 0
 }
 
 /// Decode the secondary-controls-allowed bitmap to surface the three

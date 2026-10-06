@@ -511,32 +511,10 @@ fn allocate_msr_bitmap() -> Result<u64, &'static str> {
     Ok(bitmap)
 }
 
-/// Run CPUID on the host with the guest's input leaf+subleaf,
-/// return (eax, ebx, ecx, edx). LLVM reserves rbx, so we save it
-/// across the cpuid instruction.
+/// Run CPUID on the host, return (eax, ebx, ecx, edx).
 pub fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: CPUID has no privileged side effects beyond what the
-    // architectural docs spell out (returns CPU info in A/B/C/D).
-    // rbx is preserved via push/pop because LLVM forbids using it
-    // as a clobbered or output register directly.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov esi, ebx",
-            "pop rbx",
-            inout("eax") leaf => eax,
-            inout("ecx") subleaf => ecx,
-            lateout("esi") ebx,
-            lateout("edx") edx,
-            options(nostack, preserves_flags),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 // ── Execution controls ─────────────────────────────────────────────

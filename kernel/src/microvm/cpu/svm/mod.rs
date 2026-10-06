@@ -169,26 +169,7 @@ pub(super) unsafe fn wrmsr(msr: u32, val: u64) {
 }
 
 /// CPUID with explicit subleaf. Returns (eax, ebx, ecx, edx).
-/// Rust reserves rbx for LLVM internals so we save/restore it
-/// manually. CPUID has no privileged side-effects.
 pub(super) fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: CPUID is unprivileged.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {ebx_save:e}, ebx",
-            "pop rbx",
-            ebx_save = out(reg) ebx,
-            inout("eax") leaf => eax,
-            inout("ecx") subleaf => ecx,
-            out("edx") edx,
-            options(nostack, preserves_flags),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
