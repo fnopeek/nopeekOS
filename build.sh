@@ -139,32 +139,11 @@ assert_relative_only() {
     fi
 }
 
-# Both ABI paths must register the same host calls. A module runs under
-# wasmi or under forge; a name in only one table is missing under the
-# other engine, and nothing else catches it before runtime.
-check_host_abi() {
-    python3 - "$PROJECT_DIR" <<'PYEOF' || { err "host-ABI tables differ"; exit 1; }
-import re, sys
-root = sys.argv[1]
-linker = set(re.findall(r'func_wrap\("env",\s*"(npk_[a-z0-9_]+)"',
-    open(f"{root}/kernel/src/wasm.rs").read()))
-glue = set(re.findall(r'"(npk_[a-z0-9_]+)"\s*=>\s*f_npk',
-    open(f"{root}/kernel/src/wasm/forge_glue.rs").read()))
-only_l, only_g = sorted(linker - glue), sorted(glue - linker)
-if only_l or only_g:
-    print(f"  wasmi only: {only_l}")
-    print(f"  forge only: {only_g}")
-    sys.exit(1)
-print(f"  host ABI: {len(linker)} calls, both engines agree")
-PYEOF
-}
-
 build() {
     log "Building kernel..."
 
     cd "$PROJECT_DIR"
 
-    check_host_abi
 
     # Comment rules (docs/spec/COMMENTS.md) on uncommitted changes; warn only.
     python3 tools/comments.py lint --rev HEAD --warn || true

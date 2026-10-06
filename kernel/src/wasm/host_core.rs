@@ -1742,61 +1742,60 @@ pub(crate) fn npk_pointer_inject(
     0
 }
 
+/// An address inside one of the module's own MMIO or DMA regions, checked
+/// once on construction. Only `hw_addr` makes one.
+#[derive(Clone, Copy)]
+struct HwAddr(u64);
+
+impl HwAddr {
+    fn read<T: Copy>(self) -> T {
+        // SAFETY: `hw_addr` checked that the access lies inside a region the
+        // kernel mapped for this module (a validated BAR or physical window,
+        // or its own DMA allocation), which stays mapped while it runs.
+        unsafe { core::ptr::read_volatile(self.0 as *const T) }
+    }
+
+    fn write<T: Copy>(self, v: T) {
+        // SAFETY: as in `read`.
+        unsafe { core::ptr::write_volatile(self.0 as *mut T, v) }
+    }
+}
+
+/// `width` bytes at `offset` in region `handle` of `regions` (base, pages).
+fn hw_addr(regions: &[(u64, usize)], handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
+    let &(base, pages) = regions.get(usize::try_from(handle).ok()?)?;
+    let off = usize::try_from(offset).ok()?;
+    if off.checked_add(width)? > pages.checked_mul(4096)? { return None; }
+    Some(HwAddr(base + off as u64))
+}
+
+fn mmio_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
+    hw_addr(&ctx.hw.as_ref()?.mmio_maps, handle, offset, width)
+}
+
+fn dma_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
+    hw_addr(&ctx.hw.as_ref()?.dma_allocs, handle, offset, width)
+}
+
 pub(crate) fn npk_mmio_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 4 > pages * 4096 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR
-    unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) as i32 }
+    mmio_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
 pub(crate) fn npk_mmio_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 4 > pages * 4096 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR
-    unsafe { core::ptr::write_volatile((base + off as u64) as *mut u32, value as u32) }
+    let Some(a) = mmio_at(ctx, handle, offset, 4) else { return -1 };
+    a.write(value as u32);
     0
 }
 
 pub(crate) fn npk_mmio_read16(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
-    unsafe { core::ptr::read_volatile((base + off as u64) as *const u16) as i32 }
+    if offset & 1 != 0 { return -1; }
+    mmio_at(ctx, handle, offset, 2).map_or(-1, |a| a.read::<u16>() as i32)
 }
 
 pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 2 > pages * 4096 || off & 0x1 != 0 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR, 2-byte aligned
-    unsafe { core::ptr::write_volatile((base + off as u64) as *mut u16, value as u16) }
+    if offset & 1 != 0 { return -1; }
+    let Some(a) = mmio_at(ctx, handle, offset, 2) else { return -1 };
+    a.write(value as u16);
     0
 }
 
@@ -1806,66 +1805,28 @@ pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, va
 // three neighbouring bytes, which differs on registers with read side
 // effects. Linux chooses the width deliberately; we follow it.
 pub(crate) fn npk_mmio_read8(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 1 > pages * 4096 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR
-    unsafe { core::ptr::read_volatile((base + off as u64) as *const u8) as i32 }
+    mmio_at(ctx, handle, offset, 1).map_or(-1, |a| a.read::<u8>() as i32)
 }
 
 pub(crate) fn npk_mmio_write8(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 1 > pages * 4096 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR
-    unsafe { core::ptr::write_volatile((base + off as u64) as *mut u8, value as u8) }
+    let Some(a) = mmio_at(ctx, handle, offset, 1) else { return -1 };
+    a.write(value as u8);
     0
 }
 
+/// Two 32-bit accesses, low half first: not every device decodes a 64-bit
+/// transaction.
 pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> i64 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 8 > pages * 4096 { return -1; }
-    // SAFETY: validated MMIO region within mapped BAR
-    let lo = unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) } as u64;
-    let hi = unsafe { core::ptr::read_volatile((base + off as u64 + 4) as *const u32) } as u64;
-    (hi << 32 | lo) as i64
+    let (Some(lo), Some(hi)) = (mmio_at(ctx, handle, offset, 8), mmio_at(ctx, handle, offset.wrapping_add(4), 4))
+        else { return -1 };
+    ((hi.read::<u32>() as u64) << 32 | lo.read::<u32>() as u64) as i64
 }
 
 pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.mmio_maps.len() { return -1; }
-    let (base, pages) = hw.mmio_maps[h];
-    let off = offset as usize;
-    if offset < 0 || off + 8 > pages * 4096 { return -1; }
-    let v = value as u64;
-    // SAFETY: validated MMIO region within mapped BAR
-    unsafe {
-        core::ptr::write_volatile((base + off as u64) as *mut u32, v as u32);
-        core::ptr::write_volatile((base + off as u64 + 4) as *mut u32, (v >> 32) as u32);
-    }
+    let (Some(lo), Some(hi)) = (mmio_at(ctx, handle, offset, 8), mmio_at(ctx, handle, offset.wrapping_add(4), 4))
+        else { return -1 };
+    lo.write(value as u32);
+    hi.write((value as u64 >> 32) as u32);
     0
 }
 
@@ -1944,31 +1905,12 @@ pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
 }
 
 pub(crate) fn npk_dma_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.dma_allocs.len() { return -1; }
-    let (phys, pages) = hw.dma_allocs[h];
-    let off = offset as usize;
-    if offset < 0 || off + 4 > pages * 4096 { return -1; }
-    // SAFETY: reading from validated DMA buffer
-    unsafe { core::ptr::read_volatile((phys + off as u64) as *const u32) as i32 }
+    dma_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
 pub(crate) fn npk_dma_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
-    let hw = match ctx.hw.as_ref() {
-        Some(h) => h,
-        None => return -1,
-    };
-    let h = handle as usize;
-    if h >= hw.dma_allocs.len() { return -1; }
-    let (phys, pages) = hw.dma_allocs[h];
-    let off = offset as usize;
-    if offset < 0 || off + 4 > pages * 4096 { return -1; }
-    // SAFETY: writing to validated DMA buffer
-    unsafe { core::ptr::write_volatile((phys + off as u64) as *mut u32, value as u32) }
+    let Some(a) = dma_at(ctx, handle, offset, 4) else { return -1 };
+    a.write(value as u32);
     0
 }
 
@@ -2910,12 +2852,8 @@ pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
 /// address, or `None` when the handle is not the module's or the range
 /// leaves the buffer. Negative values are refused before any arithmetic.
 fn dma_range(ctx: &HostState, handle: i32, off: i32, len: i32) -> Option<(u64, usize)> {
-    let hw = ctx.hw.as_ref()?;
-    let &(phys, pages) = hw.dma_allocs.get(usize::try_from(handle).ok()?)?;
-    let off = usize::try_from(off).ok()?;
     let len = usize::try_from(len).ok()?;
-    if off.checked_add(len)? > pages.checked_mul(4096)? { return None; }
-    Some((phys + off as u64, len))
+    Some((dma_at(ctx, handle, off, len)?.0, len))
 }
 
 pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {

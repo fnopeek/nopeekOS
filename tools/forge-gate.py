@@ -9,10 +9,10 @@ Two checks, and the second is why "it compiled" is not enough:
 1. All functions. `forge_harness --roadmap` reports the share. Anything
    below 100 % means a trap stub somewhere, hit on the first call of that
    function rather than at load time.
-2. All imports. An import the glue does not know also lands on a stub.
-   The names come from the two generated tables
-   `kernel/src/wasm/forge_glue.rs` (env) and `kernel/src/wasi/forge_glue.rs`
-   (wasi_snapshot_preview1).
+2. All imports, by name and signature. An import the glue does not know,
+   or declares with other types, also lands on a stub. The list comes from
+   the `host_imports!` entries in `kernel/src/wasm/forge_glue.rs` (env) and
+   `kernel/src/wasi/forge_glue.rs` (wasi_snapshot_preview1).
 
 Runs over `release/modules/*.wasm`, not the build path, because `aml` and
 `wifid` are staged by hand and would otherwise bypass it. Individual files
@@ -39,19 +39,34 @@ def leb(b, i):
             return v, i
 
 
+VALTYPES = {0x7f: "i32", 0x7e: "i64", 0x7d: "f32", 0x7c: "f64"}
+
+
 def imports(path):
-    """(module, name) per imported function. Memories, tables and globals
-    are skipped without decoding; they never land on a trap stub."""
+    """(module, name, (params, results)) per imported function. Memories,
+    tables and globals are skipped without decoding; they never land on a
+    trap stub."""
     b = open(path, "rb").read()
     if b[:8] != b"\0asm\x01\0\0\0":
         raise SystemExit(f"{path}: kein wasm")
-    i, out = 8, []
+    i, out, types = 8, [], []
     while i < len(b):
         sid = b[i]
         i += 1
         size, i = leb(b, i)
         end = i + size
-        if sid == 2:
+        if sid == 1:
+            n, j = leb(b, i)
+            for _ in range(n):
+                j += 1  # 0x60
+                np_, j = leb(b, j)
+                ps = tuple(VALTYPES.get(x, "?") for x in b[j:j + np_])
+                j += np_
+                nr, j = leb(b, j)
+                rs = tuple(VALTYPES.get(x, "?") for x in b[j:j + nr])
+                j += nr
+                types.append((ps, rs))
+        elif sid == 2:
             n, j = leb(b, i)
             for _ in range(n):
                 ml, j = leb(b, j)
@@ -63,8 +78,8 @@ def imports(path):
                 kind = b[j]
                 j += 1
                 if kind == 0:
-                    _, j = leb(b, j)
-                    out.append((mod, nm))
+                    t, j = leb(b, j)
+                    out.append((mod, nm, types[t]))
                 elif kind == 1:  # table
                     j += 1
                     lim = b[j]
@@ -85,8 +100,14 @@ def imports(path):
 
 
 def glue_names(rel):
+    """name -> (params, results) from the `host_imports!` entries."""
     src = open(os.path.join(ROOT, rel), encoding="utf-8").read()
-    return set(re.findall(r'^\s*"([A-Za-z_0-9]+)" =>', src, re.M))
+    out = {}
+    for name, args, ret in re.findall(
+            r'^\s*(?:ctx|mem) fn (\w+)\(([^)]*)\)(?:\s*->\s*(\w+))?;', src, re.M):
+        params = tuple(a.split(":")[1].strip() for a in args.split(",") if a.strip())
+        out[name] = (params, (ret,) if ret else ())
+    return out
 
 
 def ensure_harness():
@@ -101,6 +122,8 @@ def main():
     ensure_harness()
     env = glue_names("kernel/src/wasm/forge_glue.rs")
     wasi = glue_names("kernel/src/wasi/forge_glue.rs")
+    # Hand-written next to the list: it must not return.
+    wasi["proc_exit"] = (("i32",), ())
     if not env or not wasi:
         raise SystemExit("[gate] Bruecken-Tabellen leer — erzeugt? abgebrochen")
 
@@ -127,11 +150,19 @@ def main():
                               f"Instruktionen — {why.group(1) if why else '?'}"))
             continue
 
-        miss = [f"{mo}::{nm}" for mo, nm in imports(p)
-                if not ((mo == "env" and nm in env)
-                        or (mo == "wasi_snapshot_preview1" and nm in wasi))]
+        tables = {"env": env, "wasi_snapshot_preview1": wasi}
+        miss, wrong = [], []
+        for mo, nm, sig in imports(p):
+            have = tables.get(mo, {}).get(nm)
+            if have is None:
+                miss.append(f"{mo}::{nm}")
+            elif have != sig:
+                wrong.append(f"{mo}::{nm} declared {sig}, host {have}")
         if miss:
-            bad.append((name, f"{len(miss)} Importe ohne Bruecke, erster: {miss[0]}"))
+            bad.append((name, f"{len(miss)} imports without a host routine, first: {miss[0]}"))
+            continue
+        if wrong:
+            bad.append((name, f"{len(wrong)} imports with the wrong signature, first: {wrong[0]}"))
             continue
 
         print(f"[gate] {name:16s} ok")

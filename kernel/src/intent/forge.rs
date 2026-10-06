@@ -39,9 +39,10 @@ impl crate::forge_rt::HostImports for ProbeHost {
         // The stub never touches host state, so there is no pointer to give.
         0
     }
-    fn resolve(&self, module: &str, name: &str) -> Option<u64> {
+    fn resolve(&self, module: &str, name: &str) -> Option<(u64, crate::forge_rt::HostSig)> {
+        let sig = crate::forge_rt::HostSig { params: &[], result: None };
         (module == "env" && name == "npk_forge_trap_probe")
-            .then(|| probe_exit as *const () as u64)
+            .then(|| (probe_exit as *const () as u64, sig))
     }
 }
 

@@ -428,17 +428,45 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
 }
 
 
+/// A host function's integer type; host calls take and return nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Wt { I32, I64 }
+
+/// The wasm signature a host routine was written for.
+#[derive(Clone, Copy, Debug)]
+pub struct HostSig {
+    pub params: &'static [Wt],
+    pub result: Option<Wt>,
+}
+
+impl HostSig {
+    /// Does the module's declaration of the import match? A mismatch would
+    /// make the routine read argument registers the module never set.
+    fn matches(&self, params: &[forge_core::ValType], results: &[forge_core::ValType]) -> bool {
+        fn same(w: Wt, v: &forge_core::ValType) -> bool {
+            matches!((w, v), (Wt::I32, forge_core::ValType::I32) | (Wt::I64, forge_core::ValType::I64))
+        }
+        params.len() == self.params.len()
+            && self.params.iter().zip(params).all(|(w, v)| same(*w, v))
+            && match (self.result, results) {
+                (None, []) => true,
+                (Some(w), [v]) => same(w, v),
+                _ => false,
+            }
+    }
+}
+
 /// What an embedder has to answer so a compiled module can call out.
 ///
-/// Deliberately two questions and no types: `forge_rt` stays free of anything
-/// npk-specific, and the table it fills is plain addresses. The npk side of
-/// this lives in `wasm::forge_glue`.
+/// `forge_rt` stays free of anything npk-specific, and the table it fills is
+/// plain addresses. The npk side of this lives in `wasm::forge_glue`.
 pub trait HostImports {
     /// The embedder state a host function will be handed, as a raw address.
     /// Parked in the vmctx, so two modules on two cores never share one.
     fn ctx_ptr(&self) -> u64;
-    /// Address of the routine for one import, or `None` to leave it trapping.
-    fn resolve(&self, module: &str, name: &str) -> Option<u64>;
+    /// Address and signature of the routine for one import, or `None` to
+    /// leave it trapping.
+    fn resolve(&self, module: &str, name: &str) -> Option<(u64, HostSig)>;
 }
 
 /// A module made ready to run: its code mapped, its memory reserved, and the
@@ -545,9 +573,16 @@ impl Instance {
         host_fns.resize(m.plan.imported_funcs.len().max(1), trap_stub);
         let mut unresolved = 0u32;
         for (i, (module, name)) in m.plan.imported_funcs.iter().enumerate() {
-            match host.and_then(|h| h.resolve(module, name)) {
-                Some(addr) => host_fns[i] = addr,
-                None => unresolved += 1,
+            let declared = m.plan.func_type_of.get(i).and_then(|&t| m.plan.types.get(t as usize));
+            match (host.and_then(|h| h.resolve(module, name)), declared) {
+                (Some((addr, sig)), Some((params, results))) if sig.matches(params, results) => {
+                    host_fns[i] = addr;
+                }
+                (Some(_), _) => {
+                    crate::kprintln!("[npk] forge: import {}::{} declared with the wrong signature", module, name);
+                    unresolved += 1;
+                }
+                (None, _) => unresolved += 1,
             }
         }
 

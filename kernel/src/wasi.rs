@@ -37,7 +37,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use wasmi::{Caller, Extern, Linker, Memory};
+use wasmi::{Caller, Linker};
 
 use crate::capability::{self, Rights};
 use crate::storage::npkfs::fs;
@@ -186,12 +186,6 @@ fn fs_errno(e: &fs::Error) -> i32 {
 
 // ── guest memory pokes ────────────────────────────────────────────────
 
-fn mem_of(caller: &mut Caller<'_, crate::wasm::HostState>) -> Result<Memory, i32> {
-    match caller.get_export("memory") {
-        Some(Extern::Memory(m)) => Ok(m),
-        _ => Err(EFAULT),
-    }
-}
 fn w32(m: &mut [u8], at: i32, v: u32) -> Result<(), i32> {
     let a = usize::try_from(at).map_err(|_| EFAULT)?;
     let s = m.get_mut(a..a.checked_add(4).ok_or(EFAULT)?).ok_or(EFAULT)?;
@@ -292,55 +286,8 @@ pub fn link(linker: &mut Linker<HS>) -> Result<(), wasmi::Error> {
             record_exit(c.data_mut(), code);
             Err(wasmi::Error::i32_exit(code))
         })?;
-    linker.func_wrap(NS, "sched_yield", |mut c: Caller<'_, HS>| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::sched_yield(mem, st)
-    })?;
 
-    // ── argv / environ ────────────────────────────────────────────────
-    linker.func_wrap(NS, "args_sizes_get", |mut c: Caller<'_, HS>, n: i32, sz: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::args_sizes_get(mem, st, n, sz)
-    })?;
-    linker.func_wrap(NS, "args_get", |mut c: Caller<'_, HS>, argv: i32, buf: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::args_get(mem, st, argv, buf)
-    })?;
-    linker.func_wrap(NS, "environ_sizes_get", |mut c: Caller<'_, HS>, n: i32, sz: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::environ_sizes_get(mem, st, n, sz)
-    })?;
-    linker.func_wrap(NS, "environ_get", |mut c: Caller<'_, HS>, ep: i32, buf: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::environ_get(mem, st, ep, buf)
-    })?;
-
-    // ── clocks + randomness ───────────────────────────────────────────
-    linker.func_wrap(NS, "clock_res_get", |mut c: Caller<'_, HS>, _id: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::clock_res_get(mem, st, _id, out)
-    })?;
-    linker.func_wrap(NS, "clock_time_get", |mut c: Caller<'_, HS>, id: i32, _p: i64, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::clock_time_get(mem, st, id, _p, out)
-    })?;
-    linker.func_wrap(NS, "random_get", |mut c: Caller<'_, HS>, buf: i32, len: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::random_get(mem, st, buf, len)
-    })?;
-
-    link_fd(linker)?;
-    link_path(linker)?;
-    link_stubs(linker)?;
-    Ok(())
+    forge_glue::register_wasmi(linker)
 }
 
 fn write_string_vec(mem: &mut [u8], ptr_arr: i32, buf: i32, items: &[String]) -> i32 {
@@ -360,8 +307,6 @@ fn write_string_vec(mem: &mut [u8], ptr_arr: i32, buf: i32, items: &[String]) ->
 
 // ── fd: the read/write path ───────────────────────────────────────────
 
-/// Gather the `iovec` array into one buffer. Copying first keeps the
-/// borrow of guest memory apart from the borrow of the fd table.
 /// Bytes one write call takes in. Every iovec may point at the same large
 /// region, so without a ceiling a short list of them asks the kernel for
 /// terabytes. A write may be partial: the caller is told how much went in
@@ -371,6 +316,8 @@ const MAX_WRITE_CALL: usize = 64 * 1024 * 1024;
 /// is held in kernel memory until it is synced.
 const MAX_WASI_FILE: usize = 256 * 1024 * 1024;
 
+/// Gather the `iovec` array into one buffer. Copying first keeps the
+/// borrow of guest memory apart from the borrow of the fd table.
 fn gather(mem: &[u8], iovs: i32, iovs_len: i32) -> Result<Vec<u8>, i32> {
     let mut out = Vec::new();
     for i in 0..iovs_len {
@@ -385,217 +332,6 @@ fn gather(mem: &[u8], iovs: i32, iovs_len: i32) -> Result<Vec<u8>, i32> {
     Ok(out)
 }
 
-fn link_fd(linker: &mut Linker<HS>) -> Result<(), wasmi::Error> {
-    const NS: &str = "wasi_snapshot_preview1";
-
-    linker.func_wrap(NS, "fd_write", |mut c: Caller<'_, HS>, fd: i32, iovs: i32, n: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_write(mem, st, fd, iovs, n, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_read", |mut c: Caller<'_, HS>, fd: i32, iovs: i32, n: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_read(mem, st, fd, iovs, n, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_pread", |mut c: Caller<'_, HS>, fd: i32, iovs: i32, n: i32, off: i64, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_pread(mem, st, fd, iovs, n, off, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_pwrite", |mut c: Caller<'_, HS>, fd: i32, iovs: i32, n: i32, off: i64, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_pwrite(mem, st, fd, iovs, n, off, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_seek", |mut c: Caller<'_, HS>, fd: i32, off: i64, whence: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_seek(mem, st, fd, off, whence, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_tell", |mut c: Caller<'_, HS>, fd: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_tell(mem, st, fd, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_close", |mut c: Caller<'_, HS>, fd: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_close(mem, st, fd)
-    })?;
-    linker.func_wrap(NS, "fd_sync", |mut c: Caller<'_, HS>, _fd: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_sync(mem, st, _fd)
-    })?;
-    linker.func_wrap(NS, "fd_datasync", |mut c: Caller<'_, HS>, _fd: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_datasync(mem, st, _fd)
-    })?;
-    linker.func_wrap(NS, "fd_advise", |mut c: Caller<'_, HS>, _f: i32, _o: i64, _l: i64, _a: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_advise(mem, st, _f, _o, _l, _a)
-    })?;
-    linker.func_wrap(NS, "fd_fdstat_set_flags", |mut c: Caller<'_, HS>, _f: i32, _fl: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_fdstat_set_flags(mem, st, _f, _fl)
-    })?;
-
-    linker.func_wrap(NS, "fd_fdstat_get", |mut c: Caller<'_, HS>, fd: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_fdstat_get(mem, st, fd, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_filestat_get", |mut c: Caller<'_, HS>, fd: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_filestat_get(mem, st, fd, out)
-    })?;
-
-    linker.func_wrap(NS, "fd_prestat_get", |mut c: Caller<'_, HS>, fd: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_prestat_get(mem, st, fd, out)
-    })?;
-    linker.func_wrap(NS, "fd_prestat_dir_name", |mut c: Caller<'_, HS>, fd: i32, ptr: i32, len: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_prestat_dir_name(mem, st, fd, ptr, len)
-    })?;
-
-    linker.func_wrap(NS, "fd_readdir", |mut c: Caller<'_, HS>, fd: i32, buf: i32, buf_len: i32, cookie: i64, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_readdir(mem, st, fd, buf, buf_len, cookie, out)
-    })?;
-
-    linker.func_wrap(NS, "poll_oneoff", |mut c: Caller<'_, HS>, _i: i32, _o: i32, _n: i32, nev: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::poll_oneoff(mem, st, _i, _o, _n, nev)
-    })?;
-    Ok(())
-}
-
-// ── path-based calls ──────────────────────────────────────────────────
-
-fn link_path(linker: &mut Linker<HS>) -> Result<(), wasmi::Error> {
-    const NS: &str = "wasi_snapshot_preview1";
-
-    linker.func_wrap(NS, "path_open", |mut c: Caller<'_, HS>, dirfd: i32, _dirflags: i32, path: i32, path_len: i32, oflags: i32, rights: i64, _rights_inh: i64, _fdflags: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_open(mem, st, dirfd, _dirflags, path, path_len, oflags, rights, _rights_inh, _fdflags, out)
-    })?;
-
-    linker.func_wrap(NS, "path_filestat_get", |mut c: Caller<'_, HS>, dirfd: i32, _flags: i32, path: i32, path_len: i32, out: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_filestat_get(mem, st, dirfd, _flags, path, path_len, out)
-    })?;
-
-    linker.func_wrap(NS, "path_create_directory", |mut c: Caller<'_, HS>, dirfd: i32, p: i32, pl: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_create_directory(mem, st, dirfd, p, pl)
-    })?;
-
-    linker.func_wrap(NS, "path_remove_directory", |mut c: Caller<'_, HS>, dirfd: i32, p: i32, pl: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_remove_directory(mem, st, dirfd, p, pl)
-    })?;
-
-    linker.func_wrap(NS, "path_unlink_file", |mut c: Caller<'_, HS>, dirfd: i32, p: i32, pl: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_unlink_file(mem, st, dirfd, p, pl)
-    })?;
-
-    linker.func_wrap(NS, "path_rename", |mut c: Caller<'_, HS>, ofd: i32, op: i32, ol: i32, nfd: i32, np: i32, nl: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_rename(mem, st, ofd, op, ol, nfd, np, nl)
-    })?;
-    Ok(())
-}
-
-// ── the ten that answer "no" ──────────────────────────────────────────
-//
-// Not laziness: npkFS has no links, no symlinks and no settable
-// timestamps, and there are no sockets behind this ABI. ENOSYS is the
-// true answer, and CPython handles it — `os.symlink` raises
-// OSError, which is what it should do on a filesystem without symlinks.
-
-fn link_stubs(linker: &mut Linker<HS>) -> Result<(), wasmi::Error> {
-    const NS: &str = "wasi_snapshot_preview1";
-    linker.func_wrap(NS, "fd_filestat_set_size", |mut c: Caller<'_, HS>, a0: i32, a1: i64| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_filestat_set_size(mem, st, a0, a1)
-    })?;
-    linker.func_wrap(NS, "fd_filestat_set_times", |mut c: Caller<'_, HS>, a0: i32, a1: i64, a2: i64, a3: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_filestat_set_times(mem, st, a0, a1, a2, a3)
-    })?;
-    linker.func_wrap(NS, "path_filestat_set_times", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i64, a5: i64, a6: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_filestat_set_times(mem, st, a0, a1, a2, a3, a4, a5, a6)
-    })?;
-    linker.func_wrap(NS, "path_link", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_link(mem, st, a0, a1, a2, a3, a4, a5, a6)
-    })?;
-    linker.func_wrap(NS, "path_symlink", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_symlink(mem, st, a0, a1, a2, a3, a4)
-    })?;
-    linker.func_wrap(NS, "path_readlink", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::path_readlink(mem, st, a0, a1, a2, a3, a4, a5)
-    })?;
-    linker.func_wrap(NS, "fd_renumber", |mut c: Caller<'_, HS>, a0: i32, a1: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::fd_renumber(mem, st, a0, a1)
-    })?;
-    linker.func_wrap(NS, "sock_accept", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::sock_accept(mem, st, a0, a1, a2)
-    })?;
-    linker.func_wrap(NS, "sock_recv", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::sock_recv(mem, st, a0, a1, a2, a3, a4, a5)
-    })?;
-    linker.func_wrap(NS, "sock_send", |mut c: Caller<'_, HS>, a0: i32, a1: i32, a2: i32, a3: i32, a4: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::sock_send(mem, st, a0, a1, a2, a3, a4)
-    })?;
-    linker.func_wrap(NS, "sock_shutdown", |mut c: Caller<'_, HS>, a0: i32, a1: i32| -> i32 {
-        let mem = match mem_of(&mut c) { Ok(m) => m, Err(e) => return e };
-        let (mem, st) = mem.data_and_store_mut(&mut c);
-        calls::sock_shutdown(mem, st, a0, a1)
-    })?;
-    Ok(())
-}
 
 /// Build a context. Callers add their preopens with `preopen` — there
 /// is no default grant, because "what can this program see" should be a

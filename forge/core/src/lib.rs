@@ -123,8 +123,11 @@ pub mod trap {
     }
 }
 
+/// The value types of the plan, for embedders that check signatures.
+pub use wasmparser::ValType;
+
 use wasmparser::{
-    FuncValidatorAllocations, FunctionBody, Operator, Parser, Payload, ValType, ValidPayload,
+    FuncValidatorAllocations, FunctionBody, Operator, Parser, Payload, ValidPayload,
     Validator, WasmFeatures,
 };
 
