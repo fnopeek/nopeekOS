@@ -2,8 +2,7 @@
 //!
 //! The render path bakes the cursor into the shadow buffer with save-under,
 //! so a blit carries scene and cursor together and a pure move needs no
-//! recomposite. A lock-free path can also draw it directly on the MMIO
-//! framebuffer from IRQ context.
+//! recomposite.
 //!
 //! Mouse position is stored as atomics, so input updates it without a lock.
 
@@ -358,66 +357,6 @@ impl MouseState {
 
 }
 
-// ── Shared cursor-drawn state (used by both lock-free and inner paths) ──
-
-static DRAWN_LF_X: AtomicI32 = AtomicI32::new(0);
-static DRAWN_LF_Y: AtomicI32 = AtomicI32::new(0);
-static DRAWN_LF_W: AtomicU32 = AtomicU32::new(0);   // dims of the last MMIO-drawn cursor
-static DRAWN_LF_H: AtomicU32 = AtomicU32::new(0);
-static DRAWN_LF: AtomicBool = AtomicBool::new(false);
-
-/// Rect (w,h) to erase for the last MMIO-drawn cursor (falls back to current
-/// effective size if nothing drawn yet).
-fn drawn_erase_dims() -> (u32, u32) {
-    let w = DRAWN_LF_W.load(Ordering::Relaxed);
-    let h = DRAWN_LF_H.load(Ordering::Relaxed);
-    if w == 0 || h == 0 { eff_dims() } else { (w, h) }
-}
-
-/// Draw cursor from IRQ context — no locks, no shadow restore.
-/// Writes directly to MMIO using cached framebuffer info.
-/// Any trail artifact is cleaned up by the next render_frame().
-#[allow(dead_code)]
-pub fn draw_cursor_irq() {
-    let addr = IRQ_FB_ADDR.load(Ordering::Relaxed);
-    if addr == 0 { return; }
-    let pitch = IRQ_FB_PITCH.load(Ordering::Relaxed) as usize;
-    let sw = SCREEN_W.load(Ordering::Relaxed);
-    let sh = SCREEN_H.load(Ordering::Relaxed);
-    let (cx, cy) = atomic_pos();
-    let shadow = crate::framebuffer::cached_shadow_front();
-    draw_cursor_on_mmio(addr as *mut u8, shadow, pitch, sw, sh, cx, cy);
-}
-
-/// Draw cursor after scene blit. Erases old position only if cursor moved
-/// (no blink when stationary, no ghost when moved).
-#[allow(dead_code)]
-pub fn draw_cursor_after_blit(fb: &mut crate::framebuffer::FbConsole) {
-    let info = fb.info();
-    let (shadow, _) = fb.shadow_ptr();
-    let mmio = info.addr as *mut u8;
-    let pitch = info.pitch as usize;
-    let sw = info.width as i32;
-    let sh = info.height as i32;
-
-    let (cx, cy) = atomic_pos();
-
-    // Erase old cursor only if it moved (avoid blink when stationary)
-    if DRAWN_LF.load(Ordering::Relaxed) {
-        let dx = DRAWN_LF_X.load(Ordering::Relaxed);
-        let dy = DRAWN_LF_Y.load(Ordering::Relaxed);
-        if dx != cx || dy != cy {
-            blit_shadow_to_mmio(shadow, mmio, pitch, sw, sh, dx, dy, drawn_erase_dims().0, drawn_erase_dims().1);
-        }
-    }
-
-    draw_cursor_on_mmio(mmio, shadow, pitch, sw, sh, cx, cy);
-
-    DRAWN_LF_X.store(cx, Ordering::Relaxed);
-    DRAWN_LF_Y.store(cy, Ordering::Relaxed);
-    DRAWN_LF.store(true, Ordering::Relaxed);
-}
-
 /// Cached framebuffer MMIO address for IRQ-safe cursor draw
 static IRQ_FB_ADDR: AtomicU64 = AtomicU64::new(0);
 static IRQ_FB_PITCH: AtomicU32 = AtomicU32::new(0);
@@ -426,32 +365,6 @@ static IRQ_FB_PITCH: AtomicU32 = AtomicU32::new(0);
 pub fn cache_fb_info(addr: u64, pitch: u32) {
     IRQ_FB_ADDR.store(addr, Ordering::Relaxed);
     IRQ_FB_PITCH.store(pitch, Ordering::Relaxed);
-}
-
-/// Draw cursor bitmap directly to MMIO framebuffer at given position.
-fn draw_cursor_on_mmio(mmio: *mut u8, bg_buf: *const u8, pitch: usize, sw: i32, sh: i32, x: i32, y: i32) {
-    let (ew, eh) = eff_dims();
-    for row in 0..eh {
-        let py = y + row as i32;
-        if py < 0 || py >= sh { continue; }
-        for col in 0..ew {
-            let px = x + col as i32;
-            if px < 0 || px >= sw { continue; }
-            let (color, a) = cursor_sample_aa(col, row, ew, eh);
-            if a == 0 { continue; }
-            let off = py as usize * pitch + px as usize * 4;
-            // Blend over the clean shadow pixel if provided, else read back the
-            // current MMIO pixel (slow path; only the IRQ fallback with no shadow).
-            let bg = unsafe {
-                if bg_buf.is_null() { *(mmio.add(off) as *const u32) }
-                else { *(bg_buf.add(off) as *const u32) }
-            };
-            // SAFETY: writing to MMIO framebuffer within bounds
-            unsafe { core::ptr::write_volatile(mmio.add(off) as *mut u32, blend(bg, color, a)); }
-        }
-    }
-    DRAWN_LF_W.store(ew, Ordering::Relaxed);
-    DRAWN_LF_H.store(eh, Ordering::Relaxed);
 }
 
 /// Paint cursor bitmap into the back-shadow buffer at the current
@@ -485,24 +398,6 @@ pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo)
             // SAFETY: alpha-blend over the existing back-shadow pixel. Shadow
             // is a kernel-owned allocation, not MMIO — plain load/store fine.
             unsafe { let p = shadow.add(off) as *mut u32; *p = blend(*p, color, a); }
-        }
-    }
-}
-
-/// Copy a small rectangle from shadow buffer to MMIO framebuffer (restore clean pixels).
-fn blit_shadow_to_mmio(shadow: *mut u8, mmio: *mut u8, pitch: usize,
-                       sw: i32, sh: i32, x: i32, y: i32, w: u32, h: u32) {
-    for row in 0..h as i32 {
-        let py = y + row;
-        if py < 0 || py >= sh { continue; }
-        let x0 = x.max(0) as usize;
-        let x1 = (x + w as i32).min(sw) as usize;
-        if x0 >= x1 { continue; }
-        let off = py as usize * pitch + x0 * 4;
-        let len = (x1 - x0) * 4;
-        // SAFETY: copying from shadow buffer to MMIO framebuffer
-        unsafe {
-            core::ptr::copy_nonoverlapping(shadow.add(off), mmio.add(off), len);
         }
     }
 }

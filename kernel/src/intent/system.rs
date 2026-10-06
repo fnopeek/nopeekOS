@@ -785,6 +785,13 @@ fn dsdt_dump_range(b: &[u8], label: &str, start: usize, count: usize) {
     }
 }
 
+/// The bytes of a table from `acpi::dsdt` or `acpi::find_table_nth`.
+fn acpi_bytes(addr: usize, len: usize) -> &'static [u8] {
+    // SAFETY: both return the address and length of a whole ACPI table they
+    // have mapped; firmware tables neither move nor change.
+    unsafe { crate::hw::PhysView::new(addr as u64, len as u64) }.bytes()
+}
+
 /// `dsdt` — dump only the battery-relevant AML: every EmbeddedControl
 /// OperationRegion+Field (field NameSegs → EC byte offsets, e.g. BRC/BFC)
 /// and the _BST/_BIF/_BIX methods. Small enough to copy from the console;
@@ -794,7 +801,7 @@ pub fn intent_dsdt() {
         kprintln!("[npk] DSDT not found");
         return;
     };
-    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    let b = acpi_bytes(addr, len);
     kprintln!("  DSDT @ 0x{:x}, len {} bytes", addr, len);
 
     // EC0.BTST reads fields BSEL/BST_/BPR_/BRC_/BPV_ and BTIF reads
@@ -844,7 +851,7 @@ pub fn intent_dsdt_full() {
         kprintln!("[npk] DSDT not found");
         return;
     };
-    let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    let b = acpi_bytes(addr, len);
     const A: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     kprintln!("---DSDT-BEGIN len={}---", len);
@@ -900,8 +907,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
     };
 
     for &(addr, len) in &tables[..n] {
-        // SAFETY: `acpi::dsdt` / `find_table_nth` return mapped tables.
-        let b = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+        let b = acpi_bytes(addr, len);
         let mut off = 0usize;
         while off < len {
             let end = (off + 1024).min(len);
@@ -929,7 +935,9 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16) {
 /// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
 /// Nothing is written and no event is taken — aml keeps draining the EC.
 pub fn intent_ec_watch(args: &str) {
-    use crate::serial::{inb, inw};
+    use crate::hw::{Port, PortRange};
+    // SAFETY: the EC status/command port, read only.
+    const EC_SC: Port = unsafe { Port::new(0x66) };
     // `ec watch take [s]`: also fetch each event (QR_EC) and print the raw
     // answer — this steals it from aml, whose `_Qxx` then does not run.
     let (take, rest) = match args.trim().strip_prefix("take") {
@@ -937,41 +945,40 @@ pub fn intent_ec_watch(args: &str) {
         None => (false, args),
     };
     let secs: u64 = rest.trim().parse().unwrap_or(15).clamp(1, 60);
-    let Some(fadt) = crate::acpi::find_table(b"FACP") else {
+    let Some(fadt) = crate::acpi::table(b"FACP") else {
         kprintln!("[npk] no FADT");
         return;
     };
-    crate::acpi::ensure_mapped_pub(fadt, 256);
-    // SAFETY: FADT mapped above; fields at their ACPI 6.5 §5.2.9 offsets.
-    let (smi_cmd, acpi_en, pm1a_evt, pm1a_cnt, gpe0, gpe0_len, flen) = unsafe {
-        let r32 = |o: usize| core::ptr::read_unaligned((fadt + o) as *const u32);
-        let r8 = |o: usize| core::ptr::read_volatile((fadt + o) as *const u8);
-        let mut g = r32(80) as u64;
-        if g == 0 && r32(4) >= 232 {
-            g = core::ptr::read_unaligned((fadt + 224) as *const u64);
-        }
-        (r32(48), r8(52), r32(56), r32(64), g, r8(92), r32(4))
-    };
+    // Fields at their ACPI 6.5 §5.2.9 offsets.
+    let r32 = |o: usize| fadt.u32(o).unwrap_or(0);
+    let r8 = |o: usize| fadt.u8(o).unwrap_or(0);
+    let mut gpe0 = r32(80) as u64;
+    if gpe0 == 0 && r32(4) >= 232 {
+        gpe0 = fadt.u64(224).unwrap_or(0);
+    }
+    let (smi_cmd, acpi_en, pm1a_evt, pm1a_cnt, gpe0_len, flen) =
+        (r32(48), r8(52), r32(56), r32(64), r8(92), r32(4));
     kprintln!();
     kprintln!("  FADT len {}: SMI_CMD 0x{:x} ACPI_ENABLE 0x{:x} PM1a_EVT 0x{:x} PM1a_CNT 0x{:x}",
         flen, smi_cmd, acpi_en, pm1a_evt, pm1a_cnt);
     kprintln!("  GPE0 0x{:x}, {} bytes ({} status + {} enable)", gpe0, gpe0_len,
         gpe0_len / 2, gpe0_len / 2);
     if pm1a_cnt != 0 && pm1a_cnt <= 0xFFFF {
-        // SAFETY: PM1a_CNT is an I/O port named by the FADT.
-        let cnt = unsafe { inw(pm1a_cnt as u16) };
+        // SAFETY: PM1a_CNT is an I/O port named by the FADT, read only.
+        let cnt = unsafe { Port::new(pm1a_cnt as u16) }.inw();
         kprintln!("  PM1_CNT 0x{:04x} — SCI_EN {} ({})", cnt, cnt & 1,
             if cnt & 1 != 0 { "ACPI-Modus: Ereignisse gehen ans OS" }
             else { "LEGACY: die Firmware (SMM) behaelt die Ereignisse" });
     }
     let half = (gpe0_len / 2) as usize;
     let gpe_ok = gpe0 != 0 && gpe0 <= 0xFFFF && half > 0 && half <= 16;
+    // SAFETY: the GPE0 block the FADT names, `gpe0_len` ports, read only.
+    let gpe_blk = gpe_ok.then(|| unsafe { PortRange::new(gpe0 as u16, gpe0_len as u16) });
     let read_gpe = |off: usize| -> [u8; 16] {
         let mut v = [0u8; 16];
-        if gpe_ok {
+        if let Some(blk) = &gpe_blk {
             for i in 0..half {
-                // SAFETY: inside the GPE0 block the FADT names.
-                v[i] = unsafe { inb(gpe0 as u16 + (off + i) as u16) };
+                v[i] = blk.inb((off + i) as u16);
             }
         }
         v
@@ -987,16 +994,18 @@ pub fn intent_ec_watch(args: &str) {
     let tsc_hz = crate::interrupts::tsc_freq().max(1);
     let t0 = crate::interrupts::rdtsc();
     let end = t0 + secs * tsc_hz;
-    // SAFETY: EC status port and PM1a status, both I/O ports of the FADT/EC.
-    let mut last_ec = unsafe { inb(0x66) };
+    // SAFETY: PM1a_EVT is an I/O port named by the FADT, read only.
+    let pm1_sts = (pm1a_evt != 0 && pm1a_evt <= 0xFFFF)
+        .then(|| unsafe { Port::new(pm1a_evt as u16) });
+    let mut last_ec = EC_SC.inb();
     let mut last_gpe = read_gpe(0);
-    let mut last_pm1 = if pm1a_evt != 0 && pm1a_evt <= 0xFFFF { unsafe { inw(pm1a_evt as u16) } } else { 0 };
+    let mut last_pm1 = pm1_sts.map_or(0, |p| p.inw());
     let mut changes = 0u32;
     while crate::interrupts::rdtsc() < end && changes < 60 {
         let now = crate::interrupts::rdtsc();
         crate::interrupts::halt_until(Some(now + tsc_hz / 200), crate::smp::per_core::WAKE_HLT_FALLBACK);
         let ms = (crate::interrupts::rdtsc() - t0) / (tsc_hz / 1000).max(1);
-        let ec = unsafe { inb(0x66) };
+        let ec = EC_SC.inb();
         if (ec ^ last_ec) & 0x20 != 0 {
             kprintln!("  {:>6} ms  EC SCI_EVT {} (Status 0x{:02x})", ms, (ec >> 5) & 1, ec);
             changes += 1;
@@ -1009,7 +1018,7 @@ pub fn intent_ec_watch(args: &str) {
                 Err(e) => kprintln!("  {:>6} ms  QR_EC: {}", ms, e),
             }
             changes += 1;
-            last_ec = unsafe { inb(0x66) };
+            last_ec = EC_SC.inb();
         }
         let g = read_gpe(0);
         for i in 0..half {
@@ -1025,8 +1034,8 @@ pub fn intent_ec_watch(args: &str) {
             }
         }
         last_gpe = g;
-        if pm1a_evt != 0 && pm1a_evt <= 0xFFFF {
-            let p = unsafe { inw(pm1a_evt as u16) };
+        if let Some(sts) = pm1_sts {
+            let p = sts.inw();
             let rose = p & !last_pm1;
             if rose != 0 {
                 kprintln!("  {:>6} ms  PM1_STS +0x{:04x}", ms, rose);

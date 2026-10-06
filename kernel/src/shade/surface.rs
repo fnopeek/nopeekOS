@@ -92,6 +92,14 @@ static SURFACES: Mutex<BTreeMap<u32, GuestSurface>> = Mutex::new(BTreeMap::new()
 /// without taking the map lock.
 static ANY_DISPLAY_DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// The pixels as their raw bytes, in memory order.
+fn as_bytes_mut(px: &mut [u32]) -> &mut [u8] {
+    // SAFETY: `px` is `px.len() * 4` contiguous initialised bytes, u8 has
+    // alignment 1 and every bit pattern is a valid u8 and u32; the returned
+    // slice borrows `px` mutably, so nothing else can alias it.
+    unsafe { core::slice::from_raw_parts_mut(px.as_mut_ptr() as *mut u8, px.len() * 4) }
+}
+
 /// Copy a freshly-flushed `w*h` BGRX frame (raw bytes, 4 per pixel)
 /// into the window's surface and mark it dirty. Creates/resizes the
 /// surface on first frame or geometry change. Cheap no-op if `src` is
@@ -113,12 +121,7 @@ pub fn write_frame(window_id: u32, src: &[u8], width: u32, height: u32, dmg: (u3
     back.height = height;
     // The guest sends little-endian BGRX bytes, which on x86 (LE) are the
     // exact in-memory layout of the packed u32 the compositor reads.
-    // SAFETY: back.pixels holds px_count u32s = px_count*4 contiguous bytes;
-    // src has at least px_count*4 bytes (checked above).
-    let dst = unsafe {
-        core::slice::from_raw_parts_mut(back.pixels.as_mut_ptr() as *mut u8, px_count * 4)
-    };
-    dst.copy_from_slice(&src[..px_count * 4]);
+    as_bytes_mut(&mut back.pixels).copy_from_slice(&src[..px_count * 4]);
 
     let mut map = SURFACES.lock();
     let Some(surf) = map.get_mut(&window_id) else { return };

@@ -445,8 +445,7 @@ static CORE_OUTPUT: [AtomicU8; 256] = {
 pub fn set_output_redirect(terminal_idx: u8) {
     let apic_base = crate::interrupts::apic_base();
     if apic_base == 0 { return; }
-    // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
-    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    let apic_id = crate::interrupts::current_apic_id();
     CORE_OUTPUT[apic_id as usize & 0xFF].store(terminal_idx, Ordering::Release);
 }
 
@@ -454,8 +453,7 @@ pub fn set_output_redirect(terminal_idx: u8) {
 pub fn output_redirect_terminal() -> Option<u8> {
     let apic_base = crate::interrupts::apic_base();
     if apic_base == 0 { return None; }
-    // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
-    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    let apic_id = crate::interrupts::current_apic_id();
     let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Acquire);
     if redirect != 255 && slot_in_use(redirect as usize) { Some(redirect) } else { None }
 }
@@ -464,7 +462,7 @@ pub fn output_redirect_terminal() -> Option<u8> {
 pub fn clear_output_redirect() {
     let apic_base = crate::interrupts::apic_base();
     if apic_base == 0 { return; }
-    let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+    let apic_id = crate::interrupts::current_apic_id();
     CORE_OUTPUT[apic_id as usize & 0xFF].store(255, Ordering::Release);
 }
 
@@ -482,8 +480,7 @@ pub fn write(s: &str) {
     // Check per-core output redirect (workers running intents)
     let apic_base = crate::interrupts::apic_base();
     if apic_base != 0 {
-        // SAFETY: APIC MMIO is identity-mapped
-        let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
+        let apic_id = crate::interrupts::current_apic_id();
         let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Relaxed);
         if redirect != 255 {
             write_idx(redirect as usize, s);
