@@ -397,7 +397,7 @@ fn apply_plan(plan: Plan) {
 fn apply_kernel(manifest: &Manifest) -> bool {
     kprintln!("[npk]   + kernel   v{} {}", manifest.version, fmt_size(manifest.size));
     let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
-    let kernel_data = match super::http::https_get(UPDATE_HOST, &kernel_path, manifest.size) {
+    let kernel_data = match super::http::https_get_resumable(UPDATE_HOST, &kernel_path, manifest.size) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! kernel     download: {}", e); return false; }
     };

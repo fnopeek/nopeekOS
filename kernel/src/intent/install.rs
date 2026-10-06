@@ -148,7 +148,7 @@ pub fn intent_install(args: &str) {
             entry.size, MAX_MODULE_SIZE);
         return;
     }
-    let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, entry.size) {
+    let wasm_data = match super::http::https_get_resumable(MODULE_HOST, &wasm_path, entry.size) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk] Download failed: {}", e); return; }
     };
@@ -262,7 +262,7 @@ pub fn apply_module(p: &ModulePlan) -> bool {
         return fail(format_args!("implausible size {} (max {})", p.size, MAX_MODULE_SIZE));
     }
     let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, p.name);
-    let wasm_data = match super::http::https_get(MODULE_HOST, &wasm_path, p.size) {
+    let wasm_data = match super::http::https_get_resumable(MODULE_HOST, &wasm_path, p.size) {
         Ok(d) => d,
         Err(e) => return fail(format_args!("download: {}", e)),
     };

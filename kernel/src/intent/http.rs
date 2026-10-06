@@ -757,6 +757,56 @@ pub fn https_get(host: &str, path: &str, max_size: usize) -> Result<alloc::vec::
     https_get_ex(host, path, max_size, false)
 }
 
+/// A download of known size that survives a dropped connection: it resumes
+/// with `Range: bytes=N-` up to three times. Used for signed payloads, whose
+/// hash the caller checks afterwards; a server that ignores the range and
+/// answers 200 restarts the body from zero.
+pub fn https_get_resumable(host: &str, path: &str, size: usize)
+    -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let step = core::cmp::max(size / 8, 256 * 1024);
+    let mut next_report = step;
+    let mut last_err = "empty body";
+    for attempt in 0..4 {
+        let have = out.len();
+        if have >= size { break; }
+        if attempt > 0 {
+            if super::cancel_requested() { return Err("cancelled"); }
+            crate::kprintln!("[npk]     {} at {} KiB, resuming", last_err, have / 1024);
+        }
+        let range = [alloc::format!("Range: bytes={}-", have)];
+        let req = HttpRequest {
+            headers: if have > 0 { &range } else { &[] },
+            ..HttpRequest::default()
+        };
+        let mut part: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut info = FetchInfo::default();
+        let r = https_request_streaming(host, path, &req, size, &mut |chunk: &[u8]| {
+            part.extend_from_slice(chunk);
+            if have + part.len() >= next_report {
+                crate::kprintln!("[npk]     {} / {} KiB ({}%)",
+                    (have + part.len()) / 1024, size / 1024, (have + part.len()) * 100 / size);
+                next_report = have + part.len() + step;
+            }
+            Ok(())
+        }, Some(&mut info), false);
+        // A finished 200 to a range request is the whole body again. A
+        // broken one leaves the status unknown; its bytes count as the asked
+        // range, and the caller's hash check catches a server that lied.
+        if r.is_ok() && info.status == 200 {
+            out = part;
+        } else {
+            out.extend_from_slice(&part);
+        }
+        match r {
+            Ok(_) => last_err = "short body",
+            Err("cancelled") => return Err("cancelled"),
+            Err(e) => last_err = e,
+        }
+    }
+    if out.len() == size { Ok(out) } else { Err(last_err) }
+}
+
 /// As [`https_get`], but the caller says whether it wants the transfer
 /// compressed. The browser does; nothing else in the tree does.
 pub fn https_get_ex(host: &str, path: &str, max_size: usize, accept_gzip: bool)
@@ -1929,7 +1979,16 @@ fn https_exchange(
                     }
                     delivered += take;
                 }
-                Err(_) => break,
+                // The body ends before its Content-Length: an error with its
+                // reason, not a short success.
+                Err(e) => {
+                    finish_conn(host, tls, false);
+                    return Err(ExchangeErr::Fatal(match e {
+                        "cancelled" => "cancelled",
+                        "recv timeout" => "body cut short: no data for 15 s",
+                        _ => "body cut short: connection error",
+                    }));
+                }
             }
         }
         // Reusable only if we consumed the entire body; a max_size-clipped
