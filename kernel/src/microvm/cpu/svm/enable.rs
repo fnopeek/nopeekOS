@@ -881,12 +881,21 @@ impl VmContext {
         // guest_mem::active(); clear_active() below frees it, so the worker must
         // have stopped touching it. Bounded-waits for the fiber to exit;
         // idempotent (the teardown path calls it again).
-        crate::microvm::devices::net_dataplane::stop_worker();
+        let workers_gone = crate::microvm::devices::net_dataplane::stop_worker();
         // Persist the home image to npkFS before freeing. close() is
         // reached on every teardown, including the window-close path
         // (VM_CLOSE_REQUESTED → break → close), where run_slice's own
         // loop-end save() never runs (it returned StillRunning).
         self.shared.pci.virtio_blk.save();
+        if !workers_gone {
+            // A worker may still read guest memory and fault pages in: keep
+            // all of it — guest RAM, page tables, the active GuestMem —
+            // rather than free it under a live reader.
+            crate::kprintln!("[microvm] a device worker did not stop — guest memory is kept, not freed");
+            memory::deallocate_contiguous(self.shared.iopm_phys, 3);
+            memory::deallocate_contiguous(self.shared.msrpm_phys, 2);
+            return;
+        }
         // Demand-faulted frames + demand PTs + NPT tables.
         npt::release(self.shared.npt_pml4, self.shared.guest_mem.len());
         // Contiguous boot window.

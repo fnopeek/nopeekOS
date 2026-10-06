@@ -1050,13 +1050,20 @@ impl VmContext {
     pub fn close(&mut self) {
         // Stop the off-vCPU net backend first (it holds &'static GuestMem via
         // guest_mem::active(), freed by clear_active() below). Idempotent.
-        crate::microvm::devices::net_dataplane::stop_worker();
+        let workers_gone = crate::microvm::devices::net_dataplane::stop_worker();
         // Persist the home image before teardown — see the svm mirror:
         // the window-close path reaches close() without run_slice's
         // loop-end save(), so without this the profile is lost on close.
         self.shared.pci.virtio_blk.save();
         // SAFETY: this vCPU entered VMX root on this core → VMXOFF is valid.
         unsafe { vmx_exit_root(); }
+        if !workers_gone {
+            // See the svm mirror: keep guest memory under a live reader.
+            crate::kprintln!("[microvm] a device worker did not stop — guest memory is kept, not freed");
+            memory::deallocate_frame(self.vcpu.vmcs_phys);
+            memory::deallocate_frame(self.vcpu.vmxon_phys);
+            return;
+        }
         // Demand-faulted frames + demand PTs + EPT tables.
         ept::release(self.shared.ept_pml4, self.shared.guest_mem.len());
         // Contiguous boot window.

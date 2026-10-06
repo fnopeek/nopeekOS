@@ -147,18 +147,25 @@ pub fn start_worker(core: usize) {
     crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
 }
 
-/// Stop the worker at VM teardown and wait (bounded) for it to exit.
-pub fn stop_worker() {
-    if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
+/// Stop the worker at VM teardown and wait (bounded) for it to exit. False
+/// if it is still running: then guest memory must not be freed under it.
+#[must_use]
+pub fn stop_worker() -> bool {
+    if !WORKER_RUNNING.load(Ordering::Acquire) { return true; }
     set_full_active(false);
     STOP.store(true, Ordering::Release);
+    // Out of its park now rather than at the next timeout.
+    let core = WORKER_CORE.load(Ordering::Acquire);
+    if core != usize::MAX { crate::smp::kick_host_core(core); }
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
         core::hint::spin_loop();
     }
+    let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
     GPU_KICK.store(0xFFFF, Ordering::Release);
     GPU_IRQ_PENDING.store(false, Ordering::Release);
     WORKER_CORE.store(usize::MAX, Ordering::Release);
+    stopped
 }
 
 fn worker_entry(_arg: u64) {

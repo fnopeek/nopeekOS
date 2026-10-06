@@ -1036,7 +1036,7 @@ pub fn vm_poll_slice() {
 
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
-            crate::microvm::devices::net_dataplane::stop_worker();
+            let _ = crate::microvm::devices::net_dataplane::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
             BSP_HOST_CORE.store(usize::MAX, Ordering::Release);
@@ -1064,7 +1064,7 @@ pub fn vm_poll_slice() {
         }
         *slot = None;
         drop(slot); // release before teardown — it locks the compositor
-        crate::microvm::devices::net_dataplane::stop_worker();
+        let _ = crate::microvm::devices::net_dataplane::stop_worker();
         crate::microvm::devices::p9_async::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
         crate::microvm::cpu::rip_sample::reset();
@@ -1096,7 +1096,7 @@ pub fn vm_poll_slice() {
     }
     *slot = None;
     drop(slot); // release before teardown — it locks the compositor
-    crate::microvm::devices::net_dataplane::stop_worker();
+    let _ = crate::microvm::devices::net_dataplane::stop_worker();
     crate::microvm::devices::p9_async::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
     crate::microvm::cpu::rip_sample::reset();
@@ -1507,7 +1507,7 @@ fn vcpu_fiber_task(_arg: u64) {
 
     // Stop the RX producer (also covers an open-failed path where vm_poll_slice
     // teardown might not run). Idempotent with the vm_poll_slice stop sites.
-    crate::microvm::devices::net_dataplane::stop_worker();
+    let _ = crate::microvm::devices::net_dataplane::stop_worker();
 
 
     drop(pending); // owned guest-image buffers freed

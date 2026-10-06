@@ -130,22 +130,36 @@ fn nic_needs_polling() -> bool { crate::netdev::rx_wake_vector().is_none() }
 
 /// Stop the fiber at VM teardown and wait (bounded) for it to exit so the host's
 /// own networking reclaims the NIC drain.
-pub fn stop_worker() {
+///
+/// Returns whether this worker and the GPU worker are both gone. Both read
+/// guest memory through `guest_mem::active()`; if either is still running
+/// after the wait, the caller must leave guest memory and its page tables
+/// allocated — freed under a live worker, its next fault-in would write
+/// page-table entries into frames that belong to someone else by then.
+#[must_use]
+pub fn stop_worker() -> bool {
     // The off-vCPU GPU worker shares this lifecycle (both spawned in
     // vcpu_fiber_task); stop it here so every net-worker teardown site covers it
     // too (else a leaked GPU fiber + a stale WORKER_RUNNING would block the next
     // VM's GPU worker from starting). Idempotent (its own RUNNING guard).
-    crate::microvm::devices::gpu_backend::stop_worker();
-    if !WORKER_RUNNING.load(Ordering::Acquire) { return; }
+    let gpu_stopped = crate::microvm::devices::gpu_backend::stop_worker();
+    if !WORKER_RUNNING.load(Ordering::Acquire) { return gpu_stopped; }
     ACTIVE.store(false, Ordering::Release);
     crate::microvm::devices::net_backend::set_full_active(false);
     STOP.store(true, Ordering::Release);
+    // A parked worker would only see STOP at its park timeout: ring its
+    // doorbell.
+    if let Some(core) = crate::microvm::devices::net_backend::worker_core() {
+        crate::smp::kick_host_core(core);
+    }
     for _ in 0..50_000_000u64 {
         if !WORKER_RUNNING.load(Ordering::Acquire) { break; }
         core::hint::spin_loop();
     }
+    let stopped = !WORKER_RUNNING.load(Ordering::Acquire);
     crate::microvm::devices::net_backend::set_worker_core(usize::MAX);
     crate::microvm::devices::nat::tap_reset();
+    stopped && gpu_stopped
 }
 
 /// `VHOST_NET_PKT_WEIGHT` (drivers/vhost/net.c): frames one pass may move before
@@ -300,7 +314,10 @@ fn worker_entry(_arg: u64) {
                 // Cooperative core: a peer fiber here (the NAPI fiber filling
                 // the tap) runs between two looks instead of after the window.
                 crate::smp::fiber::yield_ready();
+                // Teardown may have run meanwhile.
+                if STOP.load(Ordering::Acquire) { break; }
             }
+            if STOP.load(Ordering::Acquire) { continue; }
             if got {
                 WAKE_BUSY.fetch_add(1, Ordering::Relaxed);
                 continue; // stay warm — service the work on the next loop pass
@@ -310,7 +327,8 @@ fn worker_entry(_arg: u64) {
         }
         // Before parking the doorbell must ring again; a frame queued while it
         // was off is served now instead of waiting for the park's timeout.
-        if let Some(gm) = gm {
+        // Fetched again: the one above predates the busy-poll's yields.
+        if let Some(gm) = crate::microvm::devices::guest_mem::active() {
             if crate::microvm::devices::net_backend::lock().tx_set_notify(gm, true) {
                 continue;
             }
