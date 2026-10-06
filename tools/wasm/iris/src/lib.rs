@@ -205,7 +205,28 @@ struct Iris {
     /// toolbar's ◀ would page back on the Action and forward again on the
     /// release, and a menu would close in the same click that opened it.
     swallow_press: bool,
+    /// Last navigation direction; the neighbours ahead are decoded first.
+    forward: bool,
+    /// Decoded neighbours of the current picture.
+    ready: Vec<Decoded>,
+    /// A file that would not decode, so idle time does not retry it.
+    unreadable: Option<usize>,
 }
+
+/// A picture decoded ahead of time, ready for `canvas_commit`.
+struct Decoded {
+    idx: usize,
+    bgra: Vec<u8>,
+    w: u32,
+    h: u32,
+}
+
+/// Decoded pictures kept at once, and the bytes they may take together.
+const READY_MAX: usize = 4;
+const READY_BYTES: usize = 128 * 1024 * 1024;
+/// Idle polls (16 ms each) before a neighbour is decoded, so a key press
+/// never waits behind background work.
+const QUIET_POLLS: u32 = 6;
 
 const ZOOM_FIT: u16 = 256;
 const ZOOM_MIN: u16 = 64;      // 25 %
@@ -232,6 +253,7 @@ impl Iris {
             menu: None, picking: false, zoom: ZOOM_FIT,
             pan: (0, 0), press: None, dragged: false, loading: false,
             swallow_press: false,
+            forward: true, ready: Vec::new(), unreadable: None,
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
@@ -259,6 +281,8 @@ impl Iris {
 
     /// Re-list `dir` for image files.
     fn refresh(&mut self) {
+        self.ready.clear();
+        self.unreadable = None;
         self.files = list_images(&self.dir);
         if self.idx >= self.files.len() { self.idx = 0; }
     }
@@ -271,6 +295,15 @@ impl Iris {
     /// Show the current image: read it, decode it, hand it to the compositor.
     fn load(&mut self) {
         self.w = 0; self.h = 0; self.failed = false;
+        if let Some(d) = self.ready.iter().find(|d| d.idx == self.idx) {
+            let (w, h) = (d.w, d.h);
+            if host::canvas_commit(CANVAS_ID, &d.bgra, w, h) {
+                self.w = w; self.h = h;
+            } else {
+                self.failed = true;
+            }
+            return;
+        }
         let path = match self.full_path() { Some(p) => p, None => return };
         let t_start = now_ms();
         let bytes = match fetch_file(&path) {
@@ -292,9 +325,57 @@ impl Iris {
                 // The number that matters: click → pixels on screen.
                 log_ms("=== open -> displayed", now_ms() - t_start);
                 if !ok { self.failed = true; log("[iris] canvas_commit rejected"); }
-                else { self.w = w; self.h = h; }
+                else {
+                    self.w = w; self.h = h;
+                    self.keep(Decoded { idx: self.idx, bgra, w, h });
+                }
             }
             None => { self.failed = true; log("[iris] decode failed"); }
+        }
+    }
+
+    /// Distance between two positions in the folder, which wraps around.
+    fn distance(&self, a: usize, b: usize) -> usize {
+        let n = self.files.len().max(1);
+        let d = a.abs_diff(b) % n;
+        d.min(n - d)
+    }
+
+    /// Hold `d`, dropping the pictures furthest from the current one until
+    /// it fits. A picture larger than the whole budget is not held.
+    fn keep(&mut self, d: Decoded) {
+        if d.bgra.len() > READY_BYTES { return; }
+        self.ready.retain(|r| r.idx != d.idx);
+        while self.ready.len() >= READY_MAX
+            || self.ready.iter().map(|r| r.bgra.len()).sum::<usize>() + d.bgra.len() > READY_BYTES
+        {
+            let cur = self.idx;
+            let Some(far) = (0..self.ready.len())
+                .max_by_key(|&i| self.distance(self.ready[i].idx, cur)) else { break };
+            self.ready.swap_remove(far);
+        }
+        self.ready.push(d);
+    }
+
+    /// The next neighbour worth decoding: two ahead in the browsing
+    /// direction, then one behind.
+    fn ahead_target(&self) -> Option<usize> {
+        let n = self.files.len();
+        if n < 2 { return None; }
+        let step = |k: usize, fwd: bool| if fwd { (self.idx + k) % n } else { (self.idx + n - k % n) % n };
+        let order = [step(1, self.forward), step(2, self.forward), step(1, !self.forward)];
+        order.into_iter().find(|&i| {
+            i != self.idx && Some(i) != self.unreadable && !self.ready.iter().any(|d| d.idx == i)
+        })
+    }
+
+    /// Decode one neighbour into `ready`. Never touches the view.
+    fn decode_ahead(&mut self, idx: usize) {
+        let Some(name) = self.files.get(idx) else { return };
+        let path = alloc::format!("{}/{}", self.dir, name);
+        match fetch_file(&path).and_then(|b| decode_png(&b)) {
+            Some((bgra, w, h)) => self.keep(Decoded { idx, bgra, w, h }),
+            None => self.unreadable = Some(idx),
         }
     }
 
@@ -303,11 +384,13 @@ impl Iris {
     fn next(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + 1) % self.files.len();
+        self.forward = true;
         self.reset_view();
     }
     fn prev(&mut self) {
         if self.files.len() < 2 { return; }
         self.idx = (self.idx + self.files.len() - 1) % self.files.len();
+        self.forward = false;
         self.reset_view();
     }
 
@@ -653,9 +736,11 @@ pub extern "C" fn _start() {
     iris.loading = false;
     commit_scene(&iris); // refresh chrome with dims
 
+    let mut quiet: u32 = 0;
     loop {
         match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
+                quiet = 0;
                 let payload = match &ev {
                     Event::Open(s) => s.clone(),
                     _ => String::new(),
@@ -676,7 +761,18 @@ pub extern "C" fn _start() {
                     Outcome::Exit => { host::close_widget(); return; }
                 }
             }
-            PollResult::Empty => host::sleep_ms(16),
+            PollResult::Empty => {
+                // One neighbour per idle round, then straight back to
+                // polling, so a key press never waits behind more than one.
+                if quiet >= QUIET_POLLS {
+                    if let Some(idx) = iris.ahead_target() {
+                        iris.decode_ahead(idx);
+                        continue;
+                    }
+                }
+                quiet = quiet.saturating_add(1);
+                host::sleep_ms(16);
+            }
             PollResult::WindowGone => return,
         }
     }
