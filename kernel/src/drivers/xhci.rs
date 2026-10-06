@@ -3,29 +3,9 @@
 //! Minimal implementation for USB HID boot-protocol keyboards.
 //! Polling model, single device, no hubs.
 
-use crate::{kprintln, pci, paging, memory};
-use crate::paging::PageFlags;
+use crate::{kprintln, pci};
+use crate::hw::{DmaRegion, Mmio};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
-
-// === MMIO helpers ===
-
-fn r32(base: u64, off: u32) -> u32 {
-    // SAFETY: MMIO read from mapped, uncacheable region
-    unsafe { core::ptr::read_volatile((base + off as u64) as *const u32) }
-}
-fn w32(base: u64, off: u32, val: u32) {
-    // SAFETY: MMIO write to mapped, uncacheable region
-    unsafe { core::ptr::write_volatile((base + off as u64) as *mut u32, val); }
-}
-fn r8(base: u64, off: u32) -> u8 {
-    // SAFETY: MMIO read
-    unsafe { core::ptr::read_volatile((base + off as u64) as *const u8) }
-}
-fn w64(base: u64, off: u32, val: u64) {
-    // SAFETY: 64-bit MMIO write (low then high)
-    w32(base, off, val as u32);
-    w32(base, off + 4, (val >> 32) as u32);
-}
 
 // === Capability register offsets (from BAR0) ===
 const CAP_CAPLENGTH:  u32 = 0x00;
@@ -34,6 +14,14 @@ const CAP_HCSPARAMS2: u32 = 0x08;
 const CAP_HCCPARAMS1: u32 = 0x10;
 const CAP_DBOFF:      u32 = 0x14;
 const CAP_RTSOFF:     u32 = 0x18;
+
+/// Bytes of BAR0 mapped; covers capability, operational, runtime and
+/// doorbell registers.
+const BAR0_MAP: u64 = 64 * 1024;
+
+// Interrupter 0 register set (from the runtime base), 32 bytes.
+const IR0:    u32 = 0x20;
+const IR_LEN: u64 = 0x20;
 
 // === Operational register offsets (from oper_base) ===
 const OP_USBCMD:  u32 = 0x00;
@@ -417,30 +405,29 @@ struct XhciState {
     /// scan) can be attributed to exactly this controller and not discard
     /// working devices on another one.
     pci_addr: pci::PciAddr,
-    mmio: u64,
-    oper: u64,          // operational registers base
-    rt: u64,            // runtime registers base
-    db: u64,            // doorbell array base
+    mmio: Mmio,
+    oper: Mmio,         // operational registers
+    rt: Mmio,           // runtime registers
+    db: Mmio,           // doorbell array
     ctx_size: usize,    // 32 or 64
     max_ports: u32,
-    // DMA regions (physical = virtual, identity-mapped)
-    dcbaa: u64,
-    cmd_ring: u64,
+    dcbaa: DmaRegion,
+    cmd_ring: DmaRegion,
     cmd_cycle: u32,
     cmd_enqueue: usize,
-    evt_ring: u64,
+    evt_ring: DmaRegion,
     evt_cycle: u32,
     evt_dequeue: usize,
-    evt_seg_table: u64,
-    input_ctx: u64,
-    device_ctx: u64,
-    ep0_ring: u64,
+    evt_seg_table: DmaRegion,
+    input_ctx: DmaRegion,
+    device_ctx: DmaRegion,
+    ep0_ring: DmaRegion,
     ep0_cycle: u32,
     ep0_enqueue: usize,
-    intr_ring: u64,
+    intr_ring: DmaRegion,
     intr_cycle: u32,
     intr_enqueue: usize,
-    data_buf: u64,      // general-purpose DMA buffer (4KB)
+    data_buf: DmaRegion, // general-purpose DMA buffer (4KB)
     slot_id: u8,
     port_speed: u32,
     intr_ep_dci: u8,     // DCI of interrupt IN endpoint
@@ -459,18 +446,18 @@ struct XhciState {
     has_keyboard: bool,
     has_mouse: bool,
     /// DMA buffers for a network device on this controller.
-    nic_device_ctx: u64,
-    nic_ep0_ring: u64,
+    nic_device_ctx: DmaRegion,
+    nic_ep0_ring: DmaRegion,
     /// The network device, if one is attached here. It shares this state
     /// and its event ring dequeue pointer; a second state on the same ring
     /// would steal events.
     nic: Option<NicRings>,
     mouse_slot_id: u8,
-    mouse_device_ctx: u64,
-    mouse_ep0_ring: u64,
+    mouse_device_ctx: DmaRegion,
+    mouse_ep0_ring: DmaRegion,
     mouse_ep0_cycle: u32,
     mouse_ep0_enqueue: usize,
-    mouse_intr_ring: u64,
+    mouse_intr_ring: DmaRegion,
     mouse_intr_cycle: u32,
     mouse_intr_enqueue: usize,
     mouse_intr_ep_dci: u8,
@@ -602,32 +589,32 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     if bar0 == 0 { kprintln!("[npk] xhci: BAR0 is zero"); return None; }
 
     // Map BAR0 (64KB)
-    let map_size = 64 * 1024u64;
-    for off in (0..map_size).step_by(4096) {
-        match paging::map_page(bar0 + off, bar0 + off,
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
-            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-            Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return None; }
-        }
-    }
-
-    let mmio = bar0;
+    let map_size = BAR0_MAP;
+    // SAFETY: BAR0 of this xHCI controller, its register window.
+    let mmio = match unsafe { Mmio::map(bar0, map_size) } {
+        Ok(m) => m,
+        Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return None; }
+    };
 
     // Read capability registers
-    let caplength = r8(mmio, CAP_CAPLENGTH) as u32;
-    let hcsparams1 = r32(mmio, CAP_HCSPARAMS1);
-    let hcsparams2 = r32(mmio, CAP_HCSPARAMS2);
-    let hccparams1 = r32(mmio, CAP_HCCPARAMS1);
-    let dboff = r32(mmio, CAP_DBOFF) & 0xFFFF_FFFC;
-    let rtsoff = r32(mmio, CAP_RTSOFF) & 0xFFFF_FFE0;
+    let caplength = mmio.r8(CAP_CAPLENGTH) as u32;
+    let hcsparams1 = mmio.r32(CAP_HCSPARAMS1);
+    let hcsparams2 = mmio.r32(CAP_HCSPARAMS2);
+    let hccparams1 = mmio.r32(CAP_HCCPARAMS1);
+    let dboff = mmio.r32(CAP_DBOFF) & 0xFFFF_FFFC;
+    let rtsoff = mmio.r32(CAP_RTSOFF) & 0xFFFF_FFE0;
 
     let max_slots = hcsparams1 & 0xFF;
     let max_ports = (hcsparams1 >> 24) & 0xFF;
     let ctx_size: usize = if hccparams1 & 0x04 != 0 { 64 } else { 32 };
 
-    let oper = mmio + caplength as u64;
-    let rt = mmio + rtsoff as u64;
-    let db = mmio + dboff as u64;
+    if rtsoff as u64 >= map_size || dboff as u64 >= map_size {
+        kprintln!("[npk] xhci: register offsets outside BAR0 (rt={:#x} db={:#x})", rtsoff, dboff);
+        return None;
+    }
+    let oper = mmio.sub(caplength, map_size - caplength as u64);
+    let rt = mmio.sub(rtsoff, map_size - rtsoff as u64);
+    let db = mmio.sub(dboff, map_size - dboff as u64);
 
     crate::kdebug!("[npk] xhci: ports={} slots={} ctx={}B", max_ports, max_slots, ctx_size);
 
@@ -638,15 +625,15 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     }
 
     // Halt controller
-    let cmd_val = r32(oper, OP_USBCMD);
-    w32(oper, OP_USBCMD, cmd_val & !CMD_RUN);
+    let cmd_val = oper.r32(OP_USBCMD);
+    oper.w32(OP_USBCMD, cmd_val & !CMD_RUN);
     if !wait_for(oper, OP_USBSTS, STS_HCH, STS_HCH) {
         kprintln!("[npk] xhci: halt timeout");
         return None;
     }
 
     // Reset controller
-    w32(oper, OP_USBCMD, CMD_HCRST);
+    oper.w32(OP_USBCMD, CMD_HCRST);
     if !wait_for(oper, OP_USBCMD, CMD_HCRST, 0) {
         kprintln!("[npk] xhci: reset timeout (CMD)");
         return None;
@@ -657,82 +644,77 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     }
 
     // Allocate DMA structures (all page-aligned, zeroed)
-    let dcbaa = alloc_dma(1, "DCBAA");
-    let cmd_ring = alloc_dma(1, "cmd ring");
-    let evt_ring = alloc_dma(1, "evt ring");
-    let evt_seg_table = alloc_dma(1, "evt seg table");
-    let input_ctx = alloc_dma(1, "input ctx");
-    let device_ctx = alloc_dma(1, "device ctx");
-    let ep0_ring = alloc_dma(1, "EP0 ring");
-    let intr_ring = alloc_dma(1, "intr ring");
-    let data_buf = alloc_dma(1, "data buf");
-    let mouse_device_ctx = alloc_dma(1, "mouse dev ctx");
-    let mouse_ep0_ring = alloc_dma(1, "mouse EP0");
-    let mouse_intr_ring = alloc_dma(1, "mouse intr");
-    // A third set for a network device on the same controller, so it does
-    // not share one with the keyboard or mouse.
-    let nic_device_ctx = alloc_dma(1, "nic dev ctx");
-    let nic_ep0_ring = alloc_dma(1, "nic EP0");
-
-    if dcbaa == 0 || cmd_ring == 0 || evt_ring == 0 || evt_seg_table == 0
-        || input_ctx == 0 || device_ctx == 0 || ep0_ring == 0 || intr_ring == 0
-        || data_buf == 0 || mouse_device_ctx == 0 || mouse_ep0_ring == 0
-        || mouse_intr_ring == 0 {
+    // A third set (nic_*) for a network device on the same controller, so
+    // it does not share one with the keyboard or mouse.
+    let (Some(dcbaa), Some(cmd_ring), Some(evt_ring), Some(evt_seg_table),
+         Some(input_ctx), Some(device_ctx), Some(ep0_ring), Some(intr_ring),
+         Some(data_buf), Some(mouse_device_ctx), Some(mouse_ep0_ring),
+         Some(mouse_intr_ring), Some(nic_device_ctx), Some(nic_ep0_ring)) = (
+        alloc_dma(1, "DCBAA"),
+        alloc_dma(1, "cmd ring"),
+        alloc_dma(1, "evt ring"),
+        alloc_dma(1, "evt seg table"),
+        alloc_dma(1, "input ctx"),
+        alloc_dma(1, "device ctx"),
+        alloc_dma(1, "EP0 ring"),
+        alloc_dma(1, "intr ring"),
+        alloc_dma(1, "data buf"),
+        alloc_dma(1, "mouse dev ctx"),
+        alloc_dma(1, "mouse EP0"),
+        alloc_dma(1, "mouse intr"),
+        alloc_dma(1, "nic dev ctx"),
+        alloc_dma(1, "nic EP0"),
+    ) else {
         kprintln!("[npk] xhci: DMA alloc failed");
         return None;
-    }
+    };
 
     // Set up Link TRBs at end of rings (wrap back to start)
-    write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
-    write_trb(ep0_ring, NUM_TR_TRBS - 1, ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(intr_ring, NUM_TR_TRBS - 1, intr_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(mouse_ep0_ring, NUM_TR_TRBS - 1, mouse_ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(mouse_intr_ring, NUM_TR_TRBS - 1, mouse_intr_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(nic_ep0_ring, NUM_TR_TRBS - 1, nic_ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
+    write_trb(ep0_ring, NUM_TR_TRBS - 1, ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(intr_ring, NUM_TR_TRBS - 1, intr_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(mouse_ep0_ring, NUM_TR_TRBS - 1, mouse_ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(mouse_intr_ring, NUM_TR_TRBS - 1, mouse_intr_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(nic_ep0_ring, NUM_TR_TRBS - 1, nic_ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
     // Set up Event Ring Segment Table (1 entry)
-    // SAFETY: writing to DMA-allocated, zeroed memory
-    unsafe {
-        let seg = evt_seg_table as *mut u64;
-        core::ptr::write_volatile(seg, evt_ring);           // ring base address
-        core::ptr::write_volatile(seg.add(1),
-            NUM_EVT_TRBS as u64);                            // ring size
-    }
+    evt_seg_table.w64(0u32, evt_ring.phys());           // ring base address
+    evt_seg_table.w64(8u32, NUM_EVT_TRBS as u64);       // ring size
 
     // Scratchpad buffers
     let sp_hi = (hcsparams2 >> 21) & 0x1F;
     let sp_lo = (hcsparams2 >> 27) & 0x1F;
     let num_scratchpad = ((sp_hi << 5) | sp_lo) as usize;
     if num_scratchpad > 0 {
-        let sp_array = alloc_dma(1, "scratchpad array");
-        if sp_array == 0 { kprintln!("[npk] xhci: scratchpad alloc failed"); return None; }
+        let Some(sp_array) = alloc_dma(1, "scratchpad array") else {
+            kprintln!("[npk] xhci: scratchpad alloc failed"); return None;
+        };
         for i in 0..num_scratchpad {
-            let page = alloc_dma(1, "scratchpad page");
-            if page == 0 { kprintln!("[npk] xhci: scratchpad page alloc failed"); return None; }
-            // SAFETY: writing to DMA array
-            unsafe { core::ptr::write_volatile((sp_array as *mut u64).add(i), page); }
+            let Some(page) = alloc_dma(1, "scratchpad page") else {
+                kprintln!("[npk] xhci: scratchpad page alloc failed"); return None;
+            };
+            sp_array.w64(i * 8, page.phys());
         }
         // DCBAA[0] = scratchpad array pointer
-        // SAFETY: writing to DMA array
-        unsafe { core::ptr::write_volatile(dcbaa as *mut u64, sp_array); }
+        dcbaa.w64(0u32, sp_array.phys());
         crate::kdebug!("[npk] xhci: {} scratchpad buffers", num_scratchpad);
     }
 
     // Program controller
-    w32(oper, OP_CONFIG, max_slots_en); // MaxSlotsEn
-    w64(oper, OP_DCBAAP, dcbaa);
-    w64(oper, OP_CRCR, cmd_ring | 1); // cycle bit = 1
+    oper.w32(OP_CONFIG, max_slots_en); // MaxSlotsEn
+    oper.w64_lo_hi(OP_DCBAAP, dcbaa.phys());
+    oper.w64_lo_hi(OP_CRCR, cmd_ring.phys() | 1); // cycle bit = 1
 
     // Program Event Ring (interrupter 0)
-    let ir0 = rt + 0x20; // interrupter 0 offset
-    w32(ir0, 0x08, 1);              // ERSTSZ = 1 segment
-    w64(ir0, 0x18, evt_ring);       // ERDP
-    w64(ir0, 0x10, evt_seg_table);  // ERSTBA (write AFTER ERSTSZ)
+    let ir0 = rt.sub(IR0, IR_LEN);
+    ir0.w32(0x08u32, 1);                            // ERSTSZ = 1 segment
+    ir0.w64_lo_hi(0x18u32, evt_ring.phys());        // ERDP
+    ir0.w64_lo_hi(0x10u32, evt_seg_table.phys());   // ERSTBA (write AFTER ERSTSZ)
     // Enable interrupter (for event ring to work, even in polling mode)
-    w32(ir0, 0x00, r32(ir0, 0x00) | 0x02); // IMAN.IE = 1
+    ir0.w32(0x00u32, ir0.r32(0x00u32) | 0x02); // IMAN.IE = 1
 
     // Start controller
-    w32(oper, OP_USBCMD, CMD_RUN);
+    oper.w32(OP_USBCMD, CMD_RUN);
     if !wait_for(oper, OP_USBSTS, STS_HCH, 0) {
         kprintln!("[npk] xhci: start failed");
         return None;
@@ -743,8 +725,8 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     // the event ring.
     if pci::program_msix(dev.addr, 0, crate::interrupts::XHCI_VECTOR,
                          crate::interrupts::current_apic_id()) {
-        w32(oper, OP_USBSTS, STS_EINT);
-        w32(oper, OP_USBCMD, r32(oper, OP_USBCMD) | CMD_INTE);
+        oper.w32(OP_USBSTS, STS_EINT);
+        oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
         crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
     } else {
         NEEDS_POLL.store(true, Ordering::Relaxed);
@@ -774,9 +756,9 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
     // Power on all ports
     for p in 0..max_ports {
         let off = portsc_off(p);
-        let sc = r32(oper, off);
+        let sc = oper.r32(off);
         if sc & PORTSC_PP == 0 {
-            w32(oper, off, port_neutral(sc) | PORTSC_PP);
+            oper.w32(off, port_neutral(sc) | PORTSC_PP);
         }
     }
 
@@ -794,7 +776,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
         crate::interrupts::delay_ms(POLL_MS);
         elapsed += POLL_MS;
         let now = (0..max_ports)
-            .filter(|&p| r32(oper, portsc_off(p)) & PORTSC_CCS != 0)
+            .filter(|&p| oper.r32(portsc_off(p)) & PORTSC_CCS != 0)
             .count() as u32;
         if now != connected {
             connected = now;
@@ -812,7 +794,7 @@ fn bring_up_controller(dev: pci::PciDevice, max_slots_en: u32) -> Option<XhciSta
 
     // Debug: show all port states
     for p in 0..max_ports {
-        let sc = r32(oper, portsc_off(p));
+        let sc = oper.r32(portsc_off(p));
         if sc & PORTSC_CCS != 0 {
             let speed = (sc >> 10) & 0xF;
             crate::kdebug!("[npk] xhci: port {} connected (speed={}, portsc={:#010x})", p + 1, speed, sc);
@@ -833,16 +815,13 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     // its slot again. One DMA set then serves any number of ports, and a
     // leftover slot cannot make a later Address Device on that port fail.
     for p in 0..state.max_ports {
-        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+        if state.oper.r32(portsc_off(p)) & PORTSC_CCS == 0 { continue; }
         crate::kdebug!("[npk] xhci: trying port {}", p + 1);
 
         // Start clean: the set may hold leftovers from the previous port.
-        // SAFETY: our own DMA memory; no device points at it anymore.
-        unsafe {
-            core::ptr::write_bytes(state.ep0_ring as *mut u8, 0, 4096);
-            core::ptr::write_bytes(state.device_ctx as *mut u8, 0, 4096);
-        }
-        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0,
+        state.ep0_ring.fill(0u32, 0, 4096);
+        state.device_ctx.fill(0u32, 0, 4096);
+        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring.phys(), 0,
             TRB_LINK | TRB_CYCLE | (1 << 1));
         state.ep0_cycle = 1;
         state.ep0_enqueue = 0;
@@ -853,7 +832,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
             kprintln!("[npk] xhci: port reset failed");
             continue;   // no slot allocated yet
         }
-        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+        state.port_speed = (state.oper.r32(portsc_off(p)) >> 10) & 0xF;
         crate::kdebug!("[npk] xhci: port {} reset ok, speed={}", p + 1, state.port_speed);
 
         // Enable Slot
@@ -866,13 +845,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
         crate::kdebug!("[npk] xhci: slot {} assigned", slot_id);
 
         // Set DCBAA entry for this slot
-        // SAFETY: writing to DMA array
-        unsafe {
-            core::ptr::write_volatile(
-                (state.dcbaa as *mut u64).add(slot_id as usize),
-                state.device_ctx
-            );
-        }
+        state.dcbaa.w64(slot_id as usize * 8, state.device_ctx.phys());
 
         // Address Device
         let max_packet = match state.port_speed {
@@ -898,9 +871,9 @@ fn init_controller(dev: pci::PciDevice) -> bool {
             continue;
         }
         let total_len = u16::from_le_bytes([
-            r8(state.data_buf, 2), r8(state.data_buf, 3)
+            state.data_buf.r8(2u32), state.data_buf.r8(3u32)
         ]) as usize;
-        let config_val = r8(state.data_buf, 5);
+        let config_val = state.data_buf.r8(5u32);
 
         // Get full Configuration Descriptor
         let fetch_len = total_len.min(512) as u16;
@@ -961,7 +934,7 @@ fn init_controller(dev: pci::PciDevice) -> bool {
     }
 
     let connected = (0..state.max_ports)
-        .filter(|&p| r32(state.oper, portsc_off(p)) & PORTSC_CCS != 0)
+        .filter(|&p| state.oper.r32(portsc_off(p)) & PORTSC_CCS != 0)
         .count();
     crate::kdebug!("[npk] xhci: no keyboard — {} of {} ports connected", connected, state.max_ports);
 
@@ -1003,7 +976,7 @@ fn probe_mouse(state: &mut XhciState) -> bool {
         // Skip the keyboard's port, but only if this controller has one;
         // otherwise `port_num` is 0 and would hide port 1.
         if state.has_keyboard && p == kbd_port { continue; }
-        let portsc = r32(state.oper, portsc_off(p));
+        let portsc = state.oper.r32(portsc_off(p));
         if portsc & PORTSC_CCS == 0 { continue; }
 
         crate::kdebug!("[npk] xhci: device on port {} (mouse candidate)", p + 1);
@@ -1025,7 +998,7 @@ fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
         kprintln!("[npk] xhci: mouse port reset failed");
         return false;
     }
-    let port_speed = (r32(state.oper, portsc_off(port)) >> 10) & 0xF;
+    let port_speed = (state.oper.r32(portsc_off(port)) >> 10) & 0xF;
     crate::kdebug!("[npk] xhci: mouse: port {} reset ok, speed={}", port + 1, port_speed);
     state.mouse_port_speed = port_speed;
     state.mouse_port_num = port;
@@ -1039,12 +1012,9 @@ fn try_init_mouse_on_port(state: &mut XhciState, port: u32) -> bool {
     let saved_port_speed = state.port_speed;
 
     // Clear mouse EP0 ring + device context (may have stale data from keyboard probe)
-    // SAFETY: zeroing DMA memory
-    unsafe {
-        core::ptr::write_bytes(state.mouse_ep0_ring as *mut u8, 0, 4096);
-        core::ptr::write_bytes(state.mouse_device_ctx as *mut u8, 0, 4096);
-    }
-    write_trb(state.mouse_ep0_ring, NUM_TR_TRBS - 1, state.mouse_ep0_ring, 0,
+    state.mouse_ep0_ring.fill(0u32, 0, 4096);
+    state.mouse_device_ctx.fill(0u32, 0, 4096);
+    write_trb(state.mouse_ep0_ring, NUM_TR_TRBS - 1, state.mouse_ep0_ring.phys(), 0,
         TRB_LINK | TRB_CYCLE | (1 << 1));
 
     // Switch to mouse EP0 context (fresh state)
@@ -1083,13 +1053,7 @@ fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
     crate::kdebug!("[npk] xhci: mouse: slot {} assigned", slot_id);
 
     // Set DCBAA entry for mouse slot
-    // SAFETY: writing to DMA array
-    unsafe {
-        core::ptr::write_volatile(
-            (state.dcbaa as *mut u64).add(slot_id as usize),
-            state.mouse_device_ctx
-        );
-    }
+    state.dcbaa.w64(slot_id as usize * 8, state.mouse_device_ctx.phys());
 
     // Address Device
     let max_packet = match state.port_speed {
@@ -1113,9 +1077,9 @@ fn init_mouse_device(state: &mut XhciState, port: u32) -> bool {
         return false;
     }
     let total_len = u16::from_le_bytes([
-        r8(state.data_buf, 2), r8(state.data_buf, 3)
+        state.data_buf.r8(2u32), state.data_buf.r8(3u32)
     ]) as usize;
-    let config_val = r8(state.data_buf, 5);
+    let config_val = state.data_buf.r8(5u32);
 
     // Get full Configuration Descriptor
     let fetch_len = total_len.min(512) as u16;
@@ -1174,30 +1138,30 @@ fn find_mouse_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8, u
     let mut mouse_iface = 0u8;
 
     while pos + 1 < total_len {
-        let len = r8(buf, pos as u32) as usize;
-        let dtype = r8(buf, (pos + 1) as u32);
+        let len = buf.r8(pos as u32) as usize;
+        let dtype = buf.r8((pos + 1) as u32);
         if len < 2 { break; }
 
         // Interface descriptor (type 4)
         if dtype == 4 && len >= 9 {
-            let iface_class = r8(buf, (pos + 5) as u32);
-            let iface_subclass = r8(buf, (pos + 6) as u32);
-            let iface_protocol = r8(buf, (pos + 7) as u32);
+            let iface_class = buf.r8((pos + 5) as u32);
+            let iface_subclass = buf.r8((pos + 6) as u32);
+            let iface_protocol = buf.r8((pos + 7) as u32);
             // HID class=3, boot subclass=1, mouse protocol=2
             in_mouse_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 2;
             if in_mouse_iface {
-                mouse_iface = r8(buf, (pos + 2) as u32);
+                mouse_iface = buf.r8((pos + 2) as u32);
             }
         }
 
         // Endpoint descriptor (type 5)
         if dtype == 5 && len >= 7 && in_mouse_iface {
-            let ep_addr = r8(buf, (pos + 2) as u32);
-            let ep_attr = r8(buf, (pos + 3) as u32);
+            let ep_addr = buf.r8((pos + 2) as u32);
+            let ep_attr = buf.r8((pos + 3) as u32);
             let max_pkt = u16::from_le_bytes([
-                r8(buf, (pos + 4) as u32), r8(buf, (pos + 5) as u32)
+                buf.r8((pos + 4) as u32), buf.r8((pos + 5) as u32)
             ]);
-            let interval = r8(buf, (pos + 6) as u32);
+            let interval = buf.r8((pos + 6) as u32);
             // Interrupt IN endpoint
             if (ep_attr & 0x03) == 3 && (ep_addr & 0x80) != 0 {
                 return Some((mouse_iface, ep_addr, max_pkt, interval));
@@ -1213,12 +1177,12 @@ fn schedule_mouse_interrupt_transfer(state: &mut XhciState) {
     let idx = state.mouse_intr_enqueue;
     let cycle = state.mouse_intr_cycle;
     // Mouse uses data_buf+3072 (keyboard uses data_buf+2048)
-    let buf = state.data_buf + 3072;
+    let buf = state.data_buf.phys() + MOUSE_REPORT_OFF;
     write_trb(state.mouse_intr_ring, idx, buf, 8, TRB_NORMAL | TRB_IOC | cycle);
     state.mouse_intr_enqueue += 1;
     if state.mouse_intr_enqueue >= NUM_TR_TRBS - 1 {
         let link = TRB_LINK | cycle | (1 << 1);
-        write_trb(state.mouse_intr_ring, NUM_TR_TRBS - 1, state.mouse_intr_ring, 0, link);
+        write_trb(state.mouse_intr_ring, NUM_TR_TRBS - 1, state.mouse_intr_ring.phys(), 0, link);
         state.mouse_intr_cycle ^= 1;
         state.mouse_intr_enqueue = 0;
     }
@@ -1226,12 +1190,12 @@ fn schedule_mouse_interrupt_transfer(state: &mut XhciState) {
 }
 
 fn process_mouse_report(state: &mut XhciState) {
-    let buf = state.data_buf + 3072;
-    let buttons = r8(buf, 0);
-    let dx = r8(buf, 1) as i8;
-    let dy = r8(buf, 2) as i8;
+    let buf = state.data_buf.sub(MOUSE_REPORT_OFF, REPORT_LEN);
+    let buttons = buf.r8(0u32);
+    let dx = buf.r8(1u32) as i8;
+    let dy = buf.r8(2u32) as i8;
     // Byte 3 = scroll wheel (if present, boot protocol may not have it)
-    let scroll = r8(buf, 3) as i8;
+    let scroll = buf.r8(3u32) as i8;
 
     // Only push event if something changed (movement, button, or scroll)
     if dx != 0 || dy != 0 || buttons != state.mouse_prev_buttons || scroll != 0 {
@@ -1249,22 +1213,21 @@ fn process_mouse_report(state: &mut XhciState) {
 
 // === Helper functions ===
 
-fn alloc_dma(pages: usize, _name: &str) -> u64 {
-    match memory::allocate_contiguous(pages) {
-        Some(a) => {
-            // SAFETY: zeroing allocated DMA memory
-            unsafe { core::ptr::write_bytes(a as *mut u8, 0, pages * 4096); }
-            a
-        }
-        None => 0,
-    }
+fn alloc_dma(pages: usize, _name: &str) -> Option<DmaRegion> {
+    DmaRegion::alloc_zeroed(pages)
 }
 
-fn wait_for(base: u64, reg: u32, mask: u32, expected: u32) -> bool {
+/// Offsets in `data_buf` of the keyboard and mouse interrupt reports; the
+/// control transfer data stage uses the start.
+const KBD_REPORT_OFF: u64 = 2048;
+const MOUSE_REPORT_OFF: u64 = 3072;
+const REPORT_LEN: u64 = 1024;
+
+fn wait_for(base: Mmio, reg: u32, mask: u32, expected: u32) -> bool {
     // Tick-based timeout (500ms) — CPU-speed independent
     let deadline = crate::interrupts::ticks() + 50; // 50 ticks = 500ms at 100Hz
     loop {
-        if r32(base, reg) & mask == expected { return true; }
+        if base.r32(reg) & mask == expected { return true; }
         if crate::interrupts::ticks() >= deadline { return false; }
         core::hint::spin_loop();
     }
@@ -1274,53 +1237,48 @@ fn portsc_off(port: u32) -> u32 {
     0x400 + port * 0x10
 }
 
-fn write_trb(ring: u64, idx: usize, param: u64, status: u32, control: u32) {
-    let addr = ring + (idx * 16) as u64;
-    // SAFETY: writing to DMA-allocated memory
-    unsafe {
-        core::ptr::write_volatile(addr as *mut u32, param as u32);
-        core::ptr::write_volatile((addr + 4) as *mut u32, (param >> 32) as u32);
-        core::ptr::write_volatile((addr + 8) as *mut u32, status);
-        fence(Ordering::SeqCst);
-        core::ptr::write_volatile((addr + 12) as *mut u32, control);
-    }
+fn write_trb(ring: DmaRegion, idx: usize, param: u64, status: u32, control: u32) {
+    let off = idx * 16;
+    ring.w32(off, param as u32);
+    ring.w32(off + 4, (param >> 32) as u32);
+    ring.w32(off + 8, status);
+    fence(Ordering::SeqCst);
+    ring.w32(off + 12, control);
 }
 
-fn read_trb(ring: u64, idx: usize) -> (u64, u32, u32) {
-    let addr = ring + (idx * 16) as u64;
-    // SAFETY: reading from DMA memory
-    unsafe {
-        let lo = core::ptr::read_volatile(addr as *const u32) as u64;
-        let hi = core::ptr::read_volatile((addr + 4) as *const u32) as u64;
-        let status = core::ptr::read_volatile((addr + 8) as *const u32);
-        let control = core::ptr::read_volatile((addr + 12) as *const u32);
-        (lo | (hi << 32), status, control)
-    }
+fn read_trb(ring: DmaRegion, idx: usize) -> (u64, u32, u32) {
+    let off = idx * 16;
+    let lo = ring.r32(off) as u64;
+    let hi = ring.r32(off + 4) as u64;
+    let status = ring.r32(off + 8);
+    let control = ring.r32(off + 12);
+    (lo | (hi << 32), status, control)
 }
 
 fn ring_doorbell(state: &XhciState, slot: u32, target: u32) {
     fence(Ordering::SeqCst);
-    w32(state.db, slot * 4, target);
+    state.db.w32(slot * 4, target);
 }
 
-fn bios_handoff(mmio: u64, mut off: u32) {
+fn bios_handoff(mmio: Mmio, mut off: u32) {
     // Walk extended capability list to find USB Legacy Support (ID=1)
     for _ in 0..100 {
-        let cap = r32(mmio, off);
+        if off as u64 + 8 > mmio.len() { break; }
+        let cap = mmio.r32(off);
         let id = cap & 0xFF;
         if id == 1 {
             // Found USB Legacy Support capability
             // Set OS Owned Semaphore (bit 24)
-            w32(mmio, off, cap | (1 << 24));
+            mmio.w32(off, cap | (1 << 24));
             // Wait for BIOS Owned Semaphore (bit 16) to clear (1s timeout)
             let deadline = crate::interrupts::ticks() + 100;
-            while r32(mmio, off) & (1 << 16) != 0 {
+            while mmio.r32(off) & (1 << 16) != 0 {
                 if crate::interrupts::ticks() >= deadline { break; }
                 core::hint::spin_loop();
             }
             // Disable SMI (clear USBLEGCTLSTS enable bits)
             let ctl_off = off + 4;
-            w32(mmio, ctl_off, r32(mmio, ctl_off) & 0x0000_001F); // keep RO/RW1C, clear enables
+            mmio.w32(ctl_off, mmio.r32(ctl_off) & 0x0000_001F); // keep RO/RW1C, clear enables
             return;
         }
         let next = (cap >> 8) & 0xFF;
@@ -1332,7 +1290,7 @@ fn bios_handoff(mmio: u64, mut off: u32) {
 #[allow(dead_code)]
 fn find_connected_port(state: &XhciState) -> Option<u32> {
     for p in 0..state.max_ports {
-        let sc = r32(state.oper, portsc_off(p));
+        let sc = state.oper.r32(portsc_off(p));
         if sc & PORTSC_CCS != 0 {
             return Some(p);
         }
@@ -1349,13 +1307,13 @@ fn usb_get_string(state: &mut XhciState, idx: u8, out: &mut [u8]) -> usize {
         0x0300 | idx as u16, 0x0409, 255, true) {
         return 0;
     }
-    let blen = r8(state.data_buf, 0) as usize;
-    if blen < 2 || r8(state.data_buf, 1) != 0x03 { return 0; }
+    let blen = state.data_buf.r8(0u32) as usize;
+    if blen < 2 || state.data_buf.r8(1u32) != 0x03 { return 0; }
     let mut n = 0usize;
     let mut i = 2usize;
     while i + 1 < blen && n < out.len() {
-        let lo = r8(state.data_buf, i as u32);
-        let hi = r8(state.data_buf, i as u32 + 1);
+        let lo = state.data_buf.r8(i as u32);
+        let hi = state.data_buf.r8(i as u32 + 1);
         if hi == 0 && (0x20..0x7F).contains(&lo) { out[n] = lo; n += 1; }
         i += 2;
     }
@@ -1412,7 +1370,7 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
     let mut found = 0u32;
 
     for p in 0..state.max_ports {
-        let sc = r32(state.oper, portsc_off(p));
+        let sc = state.oper.r32(portsc_off(p));
         if sc & PORTSC_CCS == 0 { continue; }
         state.port_speed = (sc >> 10) & 0xF;
 
@@ -1425,7 +1383,7 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
                 kprintln!("  port {} reset failed", p + 1);
                 continue;
             }
-            state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+            state.port_speed = (state.oper.r32(portsc_off(p)) >> 10) & 0xF;
         }
 
         let slot_id = match cmd_enable_slot(&mut state) {
@@ -1433,11 +1391,7 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
             None => { kprintln!("  port {} enable-slot failed", p + 1); continue; }
         };
         state.slot_id = slot_id;
-        // SAFETY: writing this slot's device-context pointer into the DMA DCBAA
-        unsafe {
-            core::ptr::write_volatile(
-                (state.dcbaa as *mut u64).add(slot_id as usize), state.device_ctx);
-        }
+        state.dcbaa.w64(slot_id as usize * 8, state.device_ctx.phys());
 
         let max_packet = match state.port_speed {
             SPEED_LOW | SPEED_FULL => 8u16,
@@ -1458,28 +1412,28 @@ fn enumerate_controller(dev: pci::PciDevice) -> u32 {
             cmd_disable_slot(&mut state, slot_id);
             continue;
         }
-        let vid = u16::from_le_bytes([r8(state.data_buf, 8), r8(state.data_buf, 9)]);
-        let pid = u16::from_le_bytes([r8(state.data_buf, 10), r8(state.data_buf, 11)]);
-        let dclass = r8(state.data_buf, 4);
-        let dsub = r8(state.data_buf, 5);
-        let i_product = r8(state.data_buf, 15);
+        let vid = u16::from_le_bytes([state.data_buf.r8(8u32), state.data_buf.r8(9u32)]);
+        let pid = u16::from_le_bytes([state.data_buf.r8(10u32), state.data_buf.r8(11u32)]);
+        let dclass = state.data_buf.r8(4u32);
+        let dsub = state.data_buf.r8(5u32);
+        let i_product = state.data_buf.r8(15u32);
 
         // First interface descriptor → its class. Devices whose device-class is
         // 0 (per-interface) or 0xFF (vendor) defer the real class here — most
         // USB-NICs do exactly this.
         let (mut iclass, mut isub, mut iproto) = (0u8, 0u8, 0u8);
         if usb_get_descriptor(&mut state, DESC_CONFIG, 9) {
-            let total_len = u16::from_le_bytes([r8(state.data_buf, 2), r8(state.data_buf, 3)]) as usize;
+            let total_len = u16::from_le_bytes([state.data_buf.r8(2u32), state.data_buf.r8(3u32)]) as usize;
             let fetch = total_len.min(256) as u16;
             if usb_get_descriptor(&mut state, DESC_CONFIG, fetch) {
                 let mut pos = 0usize;
                 while pos + 2 <= fetch as usize {
-                    let blen = r8(state.data_buf, pos as u32) as usize;
+                    let blen = state.data_buf.r8(pos as u32) as usize;
                     if blen == 0 { break; }
-                    if r8(state.data_buf, pos as u32 + 1) == 0x04 {
-                        iclass = r8(state.data_buf, pos as u32 + 5);
-                        isub = r8(state.data_buf, pos as u32 + 6);
-                        iproto = r8(state.data_buf, pos as u32 + 7);
+                    if state.data_buf.r8(pos as u32 + 1) == 0x04 {
+                        iclass = state.data_buf.r8(pos as u32 + 5);
+                        isub = state.data_buf.r8(pos as u32 + 6);
+                        iproto = state.data_buf.r8(pos as u32 + 7);
                         break;
                     }
                     pos += blen;
@@ -1544,17 +1498,17 @@ fn usb_vendor_product(vid: u16, pid: u16) -> &'static str {
 fn reset_port(state: &XhciState, port: u32) -> bool {
     let off = portsc_off(port);
     // Linux SetPortFeature(PORT_RESET): neutral state + PR.
-    let sc = r32(state.oper, off);
-    w32(state.oper, off, port_neutral(sc) | PORTSC_PR);
+    let sc = state.oper.r32(off);
+    state.oper.w32(off, port_neutral(sc) | PORTSC_PR);
 
     // Done when PR has self-cleared and PRC is set (hub_port_wait_reset) —
     // not merely when PED reads 1, which an enabled port still does in the
     // instant before the controller starts the reset. 500 ms timeout.
     let deadline = crate::interrupts::ticks() + 50;
     loop {
-        let sc = r32(state.oper, off);
+        let sc = state.oper.r32(off);
         if sc & PORTSC_PR == 0 && sc & PORTSC_PRC != 0 {
-            w32(state.oper, off, port_neutral(sc) | PORTSC_PRC);
+            state.oper.w32(off, port_neutral(sc) | PORTSC_PRC);
             return sc & PORTSC_PED != 0;
         }
         if crate::interrupts::ticks() >= deadline { break; }
@@ -1572,7 +1526,7 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
     if state.cmd_enqueue >= NUM_CMD_TRBS - 1 {
         // Wrap: update Link TRB cycle bit and reset enqueue
         let link_ctrl = TRB_LINK | state.cmd_cycle | (1 << 1); // Toggle Cycle
-        write_trb(state.cmd_ring, NUM_CMD_TRBS - 1, state.cmd_ring, 0, link_ctrl);
+        write_trb(state.cmd_ring, NUM_CMD_TRBS - 1, state.cmd_ring.phys(), 0, link_ctrl);
         state.cmd_cycle ^= 1;
         state.cmd_enqueue = 0;
     }
@@ -1613,20 +1567,13 @@ fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
     post_command(state, 0, 0, TRB_DISABLE_SLOT | slot_field);
     let _ = wait_command_completion(state); // best effort
     // Clear DCBAA entry
-    // SAFETY: writing to DMA array
-    unsafe {
-        core::ptr::write_volatile(
-            (state.dcbaa as *mut u64).add(slot_id as usize),
-            0u64
-        );
-    }
+    state.dcbaa.w64(slot_id as usize * 8, 0);
 }
 
 #[allow(dead_code)]
 fn reset_ep0_ring(state: &mut XhciState) {
-    // SAFETY: zeroing DMA-allocated ring memory
-    unsafe { core::ptr::write_bytes(state.ep0_ring as *mut u8, 0, 4096); }
-    write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    state.ep0_ring.fill(0u32, 0, 4096);
+    write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     state.ep0_cycle = 1;
     state.ep0_enqueue = 0;
 }
@@ -1635,44 +1582,35 @@ fn cmd_address_device(state: &mut XhciState, port: u32, max_packet: u16) -> bool
     let ctx = state.ctx_size;
     let input = state.input_ctx;
 
-    // SAFETY: writing to DMA-allocated input context
-    unsafe { core::ptr::write_bytes(input as *mut u8, 0, 4096); }
+    input.fill(0u32, 0, 4096);
 
     // Input Control Context: Add Slot (bit 0) + EP0 (bit 1)
-    // SAFETY: writing to DMA memory
-    unsafe {
-        core::ptr::write_volatile((input + 4) as *mut u32, 0x03); // Add flags at offset 4
-    }
+    input.w32(4u32, 0x03); // Add flags at offset 4
 
     // Slot Context (at input + ctx_size * 1)
-    let slot_off = input + ctx as u64;
+    let slot_off = ctx;
     let route_speed_entries = (1 << 27) | // Context Entries = 1
         ((state.port_speed as u32) << 20); // Speed
-    // SAFETY: writing slot context
-    unsafe {
-        core::ptr::write_volatile(slot_off as *mut u32, route_speed_entries);
-        // Dword 1: Root Hub Port Number (1-based)
-        core::ptr::write_volatile((slot_off + 4) as *mut u32, ((port + 1) as u32) << 16);
-    }
+    input.w32(slot_off, route_speed_entries);
+    // Dword 1: Root Hub Port Number (1-based)
+    input.w32(slot_off + 4, ((port + 1) as u32) << 16);
 
     // EP0 Context (at input + ctx_size * 2)
-    let ep0_off = input + (ctx * 2) as u64;
+    let ep0_off = ctx * 2;
     let ep_type_mps = (EP_TYPE_CONTROL << 3) | (3 << 1); // CErr=3, EP Type=Control
     let mps_field = (max_packet as u32) << 16;
-    // SAFETY: writing EP0 context
-    unsafe {
-        // Dword 1: CErr + EP Type
-        core::ptr::write_volatile((ep0_off + 4) as *mut u32, ep_type_mps | mps_field);
-        // Dword 2-3: TR Dequeue Pointer (with DCS=1)
-        core::ptr::write_volatile((ep0_off + 8) as *mut u32, (state.ep0_ring as u32) | 1);
-        core::ptr::write_volatile((ep0_off + 12) as *mut u32, (state.ep0_ring >> 32) as u32);
-        // Dword 4: Average TRB Length
-        core::ptr::write_volatile((ep0_off + 16) as *mut u32, 8);
-    }
+    let ring = state.ep0_ring.phys();
+    // Dword 1: CErr + EP Type
+    input.w32(ep0_off + 4, ep_type_mps | mps_field);
+    // Dword 2-3: TR Dequeue Pointer (with DCS=1)
+    input.w32(ep0_off + 8, (ring as u32) | 1);
+    input.w32(ep0_off + 12, (ring >> 32) as u32);
+    // Dword 4: Average TRB Length
+    input.w32(ep0_off + 16, 8);
 
     // Post Address Device Command
     let slot_field = (state.slot_id as u32) << 24;
-    post_command(state, input, 0, TRB_ADDRESS_DEVICE | slot_field);
+    post_command(state, input.phys(), 0, TRB_ADDRESS_DEVICE | slot_field);
     match wait_command_completion(state) {
         Some((cc, _)) => cc == CC_SUCCESS,
         None => false,
@@ -1694,7 +1632,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         for i in state.ep0_enqueue..NUM_TR_TRBS - 1 {
             write_trb(state.ep0_ring, i, 0, 0, TRB_TR_NOOP | c);
         }
-        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0, TRB_LINK | c | (1 << 1));
+        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring.phys(), 0, TRB_LINK | c | (1 << 1));
         state.ep0_cycle ^= 1;
         state.ep0_enqueue = 0;
     }
@@ -1714,7 +1652,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     // Data Stage TRB (if needed)
     if w_length > 0 {
         let dir_bit = if dir_in { TRB_DIR_IN } else { 0 };
-        write_trb(state.ep0_ring, *ep0, state.data_buf, w_length as u32, TRB_DATA_STAGE | dir_bit | cycle);
+        write_trb(state.ep0_ring, *ep0, state.data_buf.phys(), w_length as u32, TRB_DATA_STAGE | dir_bit | cycle);
         *ep0 += 1;
     }
 
@@ -1726,7 +1664,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
     // Wrap check
     if *ep0 >= NUM_TR_TRBS - 1 {
         let link_ctrl = TRB_LINK | cycle | (1 << 1);
-        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring, 0, link_ctrl);
+        write_trb(state.ep0_ring, NUM_TR_TRBS - 1, state.ep0_ring.phys(), 0, link_ctrl);
         state.ep0_cycle ^= 1;
         *ep0 = 0;
     }
@@ -1746,7 +1684,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
         flush_erdp(state);
         if e.trb_type != EVT_TRANSFER { continue; }
         let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
-        if in_ring(e.param, state.ep0_ring) {
+        if in_ring(e.param, state.ep0_ring.phys()) {
             return ok;
         }
         if dispatch_transfer(state, &e) {
@@ -1759,8 +1697,7 @@ fn usb_control_transfer(state: &mut XhciState, bm_request: u8, b_request: u8,
 }
 
 fn usb_get_descriptor(state: &mut XhciState, desc_type: u16, length: u16) -> bool {
-    // SAFETY: zeroing DMA buffer
-    unsafe { core::ptr::write_bytes(state.data_buf as *mut u8, 0, length as usize); }
+    state.data_buf.fill(0u32, 0, length as u64);
     usb_control_transfer(state, 0x80, USB_GET_DESCRIPTOR, desc_type, 0, length, true)
 }
 
@@ -1789,15 +1726,15 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
     // Single pass: collect keyboard endpoint AND check for mouse interface.
     // If both exist, it's a composite mouse device — skip its keyboard interface.
     while pos + 1 < total_len {
-        let len = r8(buf, pos as u32) as usize;
-        let dtype = r8(buf, (pos + 1) as u32);
+        let len = buf.r8(pos as u32) as usize;
+        let dtype = buf.r8((pos + 1) as u32);
         if len < 2 { break; }
 
         // Interface descriptor (type 4)
         if dtype == 4 && len >= 9 {
-            let iface_class = r8(buf, (pos + 5) as u32);
-            let iface_subclass = r8(buf, (pos + 6) as u32);
-            let iface_protocol = r8(buf, (pos + 7) as u32);
+            let iface_class = buf.r8((pos + 5) as u32);
+            let iface_subclass = buf.r8((pos + 6) as u32);
+            let iface_protocol = buf.r8((pos + 7) as u32);
             // Track mouse interface (composite device detection)
             if iface_class == 3 && iface_subclass == 1 && iface_protocol == 2 {
                 has_mouse_iface = true;
@@ -1805,18 +1742,18 @@ fn find_keyboard_endpoint(state: &XhciState, total_len: usize) -> Option<(u8, u8
             // HID class=3, boot subclass=1, keyboard protocol=1
             in_kbd_iface = iface_class == 3 && iface_subclass == 1 && iface_protocol == 1;
             if in_kbd_iface {
-                kbd_iface = r8(buf, (pos + 2) as u32);
+                kbd_iface = buf.r8((pos + 2) as u32);
             }
         }
 
         // Endpoint descriptor (type 5)
         if dtype == 5 && len >= 7 && in_kbd_iface && kbd_result.is_none() {
-            let ep_addr = r8(buf, (pos + 2) as u32);
-            let ep_attr = r8(buf, (pos + 3) as u32);
+            let ep_addr = buf.r8((pos + 2) as u32);
+            let ep_attr = buf.r8((pos + 3) as u32);
             let max_pkt = u16::from_le_bytes([
-                r8(buf, (pos + 4) as u32), r8(buf, (pos + 5) as u32)
+                buf.r8((pos + 4) as u32), buf.r8((pos + 5) as u32)
             ]);
-            let interval = r8(buf, (pos + 6) as u32);
+            let interval = buf.r8((pos + 6) as u32);
             // Interrupt IN endpoint
             if (ep_attr & 0x03) == 3 && (ep_addr & 0x80) != 0 {
                 kbd_result = Some((kbd_iface, ep_addr, max_pkt, interval));
@@ -1841,25 +1778,18 @@ fn cmd_configure_endpoint(state: &mut XhciState, ep_dci: u8, max_pkt: u16, inter
     let ctx = state.ctx_size;
     let input = state.input_ctx;
 
-    // SAFETY: zeroing input context
-    unsafe { core::ptr::write_bytes(input as *mut u8, 0, 4096); }
+    input.fill(0u32, 0, 4096);
 
     // Input Control Context: Add Slot (bit 0) + the endpoint (bit ep_dci)
-    // SAFETY: writing to DMA memory
-    unsafe {
-        core::ptr::write_volatile((input + 4) as *mut u32, 1 | (1u32 << ep_dci));
-    }
+    input.w32(4u32, 1 | (1u32 << ep_dci));
 
     // Slot Context: Context Entries = last valid endpoint index = ep_dci
-    let slot_off = input + ctx as u64;
+    let slot_off = ctx;
     let slot_dw0 = ((ep_dci as u32) << 27) | ((state.port_speed as u32) << 20);
-    // SAFETY: writing slot context
-    unsafe {
-        core::ptr::write_volatile(slot_off as *mut u32, slot_dw0);
-    }
+    input.w32(slot_off, slot_dw0);
 
     // Endpoint Context (at input + ctx_size * (ep_dci + 1))
-    let ep_off = input + (ctx * (ep_dci as usize + 1)) as u64;
+    let ep_off = ctx * (ep_dci as usize + 1);
 
     // Compute interval for xHCI (different from USB bInterval)
     let xhci_interval = match state.port_speed {
@@ -1877,20 +1807,18 @@ fn cmd_configure_endpoint(state: &mut XhciState, ep_dci: u8, max_pkt: u16, inter
 
     // Dword 0: Interval + mult=0 + LSA=0
     // Dword 1: CErr=3, EP Type=Interrupt IN (7), MaxPacketSize
-    // SAFETY: writing endpoint context
-    unsafe {
-        core::ptr::write_volatile(ep_off as *mut u32, (xhci_interval as u32) << 16);
-        core::ptr::write_volatile((ep_off + 4) as *mut u32,
-            (3 << 1) | (EP_TYPE_INTERRUPT_IN << 3) | ((max_pkt as u32) << 16));
-        // TR Dequeue Pointer with DCS=1
-        core::ptr::write_volatile((ep_off + 8) as *mut u32, (state.intr_ring as u32) | 1);
-        core::ptr::write_volatile((ep_off + 12) as *mut u32, (state.intr_ring >> 32) as u32);
-        // Average TRB Length
-        core::ptr::write_volatile((ep_off + 16) as *mut u32, 8);
-    }
+    let ring = state.intr_ring.phys();
+    input.w32(ep_off, (xhci_interval as u32) << 16);
+    input.w32(ep_off + 4,
+        (3 << 1) | (EP_TYPE_INTERRUPT_IN << 3) | ((max_pkt as u32) << 16));
+    // TR Dequeue Pointer with DCS=1
+    input.w32(ep_off + 8, (ring as u32) | 1);
+    input.w32(ep_off + 12, (ring >> 32) as u32);
+    // Average TRB Length
+    input.w32(ep_off + 16, 8);
 
     let slot_field = (state.slot_id as u32) << 24;
-    post_command(state, input, 0, TRB_CONFIGURE_EP | slot_field);
+    post_command(state, input.phys(), 0, TRB_CONFIGURE_EP | slot_field);
     match wait_command_completion(state) {
         Some((cc, _)) => cc == CC_SUCCESS,
         None => false,
@@ -1936,9 +1864,9 @@ struct NicRings {
     /// Own EP0 state (runtime control transfers, e.g. link status).
     ep0_cycle: u32,
     ep0_enqueue: usize,
-    in_ring: u64,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
-    out_ring: u64, out_cycle: u32, out_enq: usize, out_dci: u8,
-    in_buf: u64,   out_buf: u64,       // out_buf = base of NIC_TX_BUFS TX buffers
+    in_ring: DmaRegion,  in_cycle: u32,  in_enq: usize,  in_dci: u8,
+    out_ring: DmaRegion, out_cycle: u32, out_enq: usize, out_dci: u8,
+    in_buf: DmaRegion,   out_buf: DmaRegion, // out_buf = NIC_TX_BUFS TX buffers
     tx_inflight: usize,                // posted-but-not-completed TX
     tx_next: usize,                    // round-robin TX buffer index
     rx_armed: usize,                   // bulk-IN TRBs currently device-owned
@@ -2093,24 +2021,22 @@ fn scan_one_controller(addr: pci::PciAddr, vid: u16, did: u16) {
                else { (bar0_raw & 0xFFFF_FFF0) as u64 };
     if bar0 == 0 { kprintln!("    BAR0 unassigned (controller off / D3 — SS path likely dark here)"); return; }
 
-    for off in (0..64 * 1024u64).step_by(4096) {
-        match paging::map_page(bar0 + off, bar0 + off,
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
-            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-            Err(_) => { kprintln!("    BAR0 map failed"); return; }
-        }
-    }
+    // SAFETY: BAR0 of this xHCI controller, its register window.
+    let mmio = match unsafe { Mmio::map(bar0, BAR0_MAP) } {
+        Ok(m) => m,
+        Err(_) => { kprintln!("    BAR0 map failed"); return; }
+    };
 
-    let caplength = r8(bar0, CAP_CAPLENGTH) as u64;
-    let hcsparams1 = r32(bar0, CAP_HCSPARAMS1);
+    let caplength = mmio.r8(CAP_CAPLENGTH) as u64;
+    let hcsparams1 = mmio.r32(CAP_HCSPARAMS1);
     let max_ports = (hcsparams1 >> 24) & 0xFF;
     if max_ports == 0 || max_ports > 64 { kprintln!("    ports={} (unreadable — not running)", max_ports); return; }
-    let oper = bar0 + caplength;
+    let oper = mmio.sub(caplength, BAR0_MAP - caplength);
     kprintln!("    ports={}", max_ports);
     for p in 0..max_ports {
-        let sc = r32(oper, portsc_off(p));
+        let sc = oper.r32(portsc_off(p));
         let ccs = sc & PORTSC_CCS != 0;
-        let ver = port_usb_version(bar0, p);
+        let ver = port_usb_version(mmio, p);
         if !ccs && ver != 3 { continue; } // show every USB3 port even if empty
         let speed = (sc >> 10) & 0xF;
         let pls = (sc >> 5) & 0xF;
@@ -2161,43 +2087,41 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
     let bar0 = if bar0_raw & 0x04 != 0 { pci::read_bar64(addr, 0x10) }
                else { (bar0_raw & 0xFFFF_FFF0) as u64 };
     if bar0 == 0 { kprintln!("[npk] tbtrain: {:04x} BAR0 unassigned", did); return; }
-    for off in (0..64 * 1024u64).step_by(4096) {
-        match paging::map_page(bar0 + off, bar0 + off,
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
-            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-            Err(_) => { kprintln!("[npk] tbtrain: BAR0 map failed"); return; }
-        }
-    }
-    let caplength = r8(bar0, CAP_CAPLENGTH) as u64;
-    let max_ports = (r32(bar0, CAP_HCSPARAMS1) >> 24) & 0xFF;
+    // SAFETY: BAR0 of this xHCI controller, its register window.
+    let mmio = match unsafe { Mmio::map(bar0, BAR0_MAP) } {
+        Ok(m) => m,
+        Err(_) => { kprintln!("[npk] tbtrain: BAR0 map failed"); return; }
+    };
+    let caplength = mmio.r8(CAP_CAPLENGTH) as u64;
+    let max_ports = (mmio.r32(CAP_HCSPARAMS1) >> 24) & 0xFF;
     if max_ports == 0 || max_ports > 64 { kprintln!("[npk] tbtrain: {:04x} not running", did); return; }
-    let oper = bar0 + caplength;
+    let oper = mmio.sub(caplength, BAR0_MAP - caplength);
 
     kprintln!("[npk] tbtrain: TB xHCI [{:04x}] warm-resetting USB3 ports", did);
     for p in 0..max_ports {
-        if port_usb_version(bar0, p) != 3 { continue; }
+        if port_usb_version(mmio, p) != 3 { continue; }
         let off = portsc_off(p);
-        let before = r32(oper, off);
+        let before = oper.r32(off);
         kprintln!("  port {}: before portsc={:#010x} (pls={})", p + 1, before, (before >> 5) & 0xF);
 
         // Issue warm reset: preserve PP, set WPR (RW1S, self-clearing).
-        w32(oper, off, port_neutral(before) | PORTSC_PP | PORTSC_WPR);
+        oper.w32(off, port_neutral(before) | PORTSC_PP | PORTSC_WPR);
         // Wait up to ~500ms for the reset to complete (WRC or PRC), polling ticks.
         let deadline = crate::interrupts::ticks() + 50;
         loop {
-            let sc = r32(oper, off);
+            let sc = oper.r32(off);
             if sc & (PORTSC_WRC | PORTSC_PRC) != 0 { break; }
             if crate::interrupts::ticks() >= deadline { break; }
             core::hint::spin_loop();
         }
         // Clear all change bits.
-        let sc = r32(oper, off);
-        w32(oper, off, port_neutral(sc) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
+        let sc = oper.r32(off);
+        oper.w32(off, port_neutral(sc) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
             | PORTSC_PRC | PORTSC_PLC);
         // Settle, then read the resulting state.
         let s2 = crate::interrupts::ticks() + 10;
         while crate::interrupts::ticks() < s2 { core::hint::spin_loop(); }
-        let after = r32(oper, off);
+        let after = oper.r32(off);
         let speed = (after >> 10) & 0xF;
         let sname = match speed {
             SPEED_SUPER => "SuperSpeed", SPEED_HIGH => "High", SPEED_FULL => "Full",
@@ -2244,16 +2168,16 @@ pub fn nic_speed_class() -> u8 {
 /// Protocol extended capability (ID=2): 3 = USB3/SuperSpeed-capable, 2 = USB2,
 /// 0 = unknown. The same physical USB-C jack appears as two logical ports — one
 /// USB2, one USB3 — so this is how we tell whether a SuperSpeed port even exists.
-fn port_usb_version(mmio: u64, port0: u32) -> u8 {
-    let hccparams1 = r32(mmio, CAP_HCCPARAMS1);
+fn port_usb_version(mmio: Mmio, port0: u32) -> u8 {
+    let hccparams1 = mmio.r32(CAP_HCCPARAMS1);
     let mut off = ((hccparams1 >> 16) & 0xFFFF) * 4;
     let port_num = port0 + 1; // Supported-Protocol port offset is 1-based
     for _ in 0..64 {
-        if off == 0 { break; }
-        let d0 = r32(mmio, off);
+        if off == 0 || off as u64 + 12 > mmio.len() { break; }
+        let d0 = mmio.r32(off);
         if d0 & 0xFF == 2 {
             let major = ((d0 >> 24) & 0xFF) as u8;
-            let d2 = r32(mmio, off + 8);
+            let d2 = mmio.r32(off + 8);
             let cpo = d2 & 0xFF;          // compatible port offset (1-based)
             let cpc = (d2 >> 8) & 0xFF;   // compatible port count
             if port_num >= cpo && port_num < cpo + cpc { return major; }
@@ -2272,7 +2196,7 @@ fn port_usb_version(mmio: u64, port0: u32) -> u8 {
 fn dump_nic_ports(x: &XhciState) {
     kprintln!("[npk] xhci: NIC ctrl root-port scan ({} ports):", x.max_ports);
     for p in 0..x.max_ports {
-        let sc = r32(x.oper, portsc_off(p));
+        let sc = x.oper.r32(portsc_off(p));
         let ver = port_usb_version(x.mmio, p);
         let ccs = sc & PORTSC_CCS != 0;
         if !ccs && ver != 3 { continue; } // show all USB3 ports even if empty
@@ -2305,18 +2229,15 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
     for p in 0..state.max_ports {
         if state.has_keyboard && p == state.port_num { continue; }
         if state.has_mouse && p == state.mouse_port_num { continue; }
-        if r32(state.oper, portsc_off(p)) & PORTSC_CCS == 0 { continue; }
+        if state.oper.r32(portsc_off(p)) & PORTSC_CCS == 0 { continue; }
 
         if !reset_port(state, p) { continue; }
-        state.port_speed = (r32(state.oper, portsc_off(p)) >> 10) & 0xF;
+        state.port_speed = (state.oper.r32(portsc_off(p)) >> 10) & 0xF;
 
         // Own fresh set for this device.
-        // SAFETY: this controller's DMA memory; no device points at it.
-        unsafe {
-            core::ptr::write_bytes(state.nic_ep0_ring as *mut u8, 0, 4096);
-            core::ptr::write_bytes(state.nic_device_ctx as *mut u8, 0, 4096);
-        }
-        write_trb(state.nic_ep0_ring, NUM_TR_TRBS - 1, state.nic_ep0_ring, 0,
+        state.nic_ep0_ring.fill(0u32, 0, 4096);
+        state.nic_device_ctx.fill(0u32, 0, 4096);
+        write_trb(state.nic_ep0_ring, NUM_TR_TRBS - 1, state.nic_ep0_ring.phys(), 0,
             TRB_LINK | TRB_CYCLE | (1 << 1));
         state.ep0_ring = state.nic_ep0_ring;
         state.device_ctx = state.nic_device_ctx;
@@ -2325,19 +2246,15 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
 
         let slot = match cmd_enable_slot(state) { Some(s) => s, None => continue };
         state.slot_id = slot;
-        // SAFETY: writing this slot's device-context pointer into the DMA DCBAA
-        unsafe {
-            core::ptr::write_volatile((state.dcbaa as *mut u64).add(slot as usize),
-                state.device_ctx);
-        }
+        state.dcbaa.w64(slot as usize * 8, state.device_ctx.phys());
 
         let mp0 = match state.port_speed {
             SPEED_LOW | SPEED_FULL => 8u16, SPEED_HIGH => 64, SPEED_SUPER => 512, _ => 64,
         };
         if !cmd_address_device(state, p, mp0) { cmd_disable_slot(state, slot); continue; }
         if !usb_get_descriptor(state, DESC_DEVICE, 18) { cmd_disable_slot(state, slot); continue; }
-        let dvid = u16::from_le_bytes([r8(state.data_buf, 8), r8(state.data_buf, 9)]);
-        let dpid = u16::from_le_bytes([r8(state.data_buf, 10), r8(state.data_buf, 11)]);
+        let dvid = u16::from_le_bytes([state.data_buf.r8(8u32), state.data_buf.r8(9u32)]);
+        let dpid = u16::from_le_bytes([state.data_buf.r8(10u32), state.data_buf.r8(11u32)]);
         if dvid != vid || dpid != pid {
             // Not ours: release the slot, or the next attempt on this port
             // fails.
@@ -2346,26 +2263,27 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
         }
 
         if !usb_get_descriptor(state, DESC_CONFIG, 9) { cmd_disable_slot(state, slot); break; }
-        let config_val = r8(state.data_buf, 5);
+        let config_val = state.data_buf.r8(5u32);
         if !usb_set_config(state, config_val) { cmd_disable_slot(state, slot); break; }
 
-        let in_ring = alloc_dma(1, "nic bulk-in ring");
-        let out_ring = alloc_dma(1, "nic bulk-out ring");
-        let in_buf = alloc_dma(NIC_RX_BUFS * NIC_BULK_BUF_PAGES, "nic in bufs");
-        let out_buf = alloc_dma((NIC_TX_BUFS * NIC_TX_BUF_BYTES).div_ceil(4096), "nic tx bufs");
-        if in_ring == 0 || out_ring == 0 || in_buf == 0 || out_buf == 0 {
+        let (Some(in_ring), Some(out_ring), Some(in_buf), Some(out_buf)) = (
+            alloc_dma(1, "nic bulk-in ring"),
+            alloc_dma(1, "nic bulk-out ring"),
+            alloc_dma(NIC_RX_BUFS * NIC_BULK_BUF_PAGES, "nic in bufs"),
+            alloc_dma((NIC_TX_BUFS * NIC_TX_BUF_BYTES).div_ceil(4096), "nic tx bufs"),
+        ) else {
             kprintln!("[npk] xhci: nic DMA alloc failed");
             cmd_disable_slot(state, slot);
             break;
-        }
+        };
         // Bulk-IN uses NIC_RX_BUFS slots; bulk-OUT uses the whole ring.
-        write_trb(in_ring, NIC_RX_BUFS, in_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-        write_trb(out_ring, NUM_TR_TRBS - 1, out_ring, 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+        write_trb(in_ring, NIC_RX_BUFS, in_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+        write_trb(out_ring, NUM_TR_TRBS - 1, out_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
         let in_dci = ep_in * 2 + 1;   // IN endpoint
         let out_dci = ep_out * 2;     // OUT endpoint
         let bulk_mp = if state.port_speed == SPEED_SUPER { 1024 } else { 512 };
-        if !cmd_configure_bulk(state, in_dci, in_ring, out_dci, out_ring, bulk_mp) {
+        if !cmd_configure_bulk(state, in_dci, in_ring.phys(), out_dci, out_ring.phys(), bulk_mp) {
             kprintln!("[npk] xhci: nic configure-bulk failed (speed {})", state.port_speed);
             cmd_disable_slot(state, slot);
             break;
@@ -2522,38 +2440,29 @@ fn cmd_configure_bulk(state: &mut XhciState, in_dci: u8, in_ring: u64,
 {
     let ctx = state.ctx_size;
     let input = state.input_ctx;
-    // SAFETY: zeroing the input context
-    unsafe { core::ptr::write_bytes(input as *mut u8, 0, 4096); }
+    input.fill(0u32, 0, 4096);
 
     let max_dci = in_dci.max(out_dci);
-    // SAFETY: Input Control Context — add Slot + both endpoints
-    unsafe {
-        core::ptr::write_volatile((input + 4) as *mut u32,
-            1 | (1u32 << in_dci) | (1u32 << out_dci));
-        // Slot context: Context Entries = highest DCI, plus speed
-        let slot_off = input + ctx as u64;
-        core::ptr::write_volatile(slot_off as *mut u32,
-            ((max_dci as u32) << 27) | ((state.port_speed as u32) << 20));
-    }
+    // Input Control Context: add Slot + both endpoints
+    input.w32(4u32, 1 | (1u32 << in_dci) | (1u32 << out_dci));
+    // Slot context: Context Entries = highest DCI, plus speed
+    let slot_off = ctx;
+    input.w32(slot_off, ((max_dci as u32) << 27) | ((state.port_speed as u32) << 20));
 
     for (dci, ring, ep_type) in [
         (in_dci, in_ring, EP_TYPE_BULK_IN),
         (out_dci, out_ring, EP_TYPE_BULK_OUT),
     ] {
-        let ep = input + (ctx * (dci as usize + 1)) as u64;
-        // SAFETY: endpoint context for a bulk EP
-        unsafe {
-            core::ptr::write_volatile(ep as *mut u32, 0);
-            core::ptr::write_volatile((ep + 4) as *mut u32,
-                (3 << 1) | (ep_type << 3) | ((max_pkt as u32) << 16));
-            core::ptr::write_volatile((ep + 8) as *mut u32, (ring as u32) | 1);
-            core::ptr::write_volatile((ep + 12) as *mut u32, (ring >> 32) as u32);
-            core::ptr::write_volatile((ep + 16) as *mut u32, max_pkt as u32);
-        }
+        let ep = ctx * (dci as usize + 1);
+        input.w32(ep, 0);
+        input.w32(ep + 4, (3 << 1) | (ep_type << 3) | ((max_pkt as u32) << 16));
+        input.w32(ep + 8, (ring as u32) | 1);
+        input.w32(ep + 12, (ring >> 32) as u32);
+        input.w32(ep + 16, max_pkt as u32);
     }
 
     let slot_field = (state.slot_id as u32) << 24;
-    post_command(state, input, 0, TRB_CONFIGURE_EP | slot_field);
+    post_command(state, input.phys(), 0, TRB_CONFIGURE_EP | slot_field);
     matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
 }
 
@@ -2566,13 +2475,13 @@ fn nic_arm_rx(state: &mut XhciState, buf_idx: usize) {
         let n = match state.nic.as_mut() { Some(n) => n, None => return };
         let ring_slot = n.in_enq;
         let cyc = n.in_cycle;
-        let addr = n.in_buf + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
+        let addr = n.in_buf.phys() + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
         write_trb(n.in_ring, ring_slot, addr, NIC_BULK_BUF_BYTES as u32,
             TRB_NORMAL | TRB_IOC | cyc);
         n.trb_buf[ring_slot] = buf_idx;
         n.in_enq += 1;
         if n.in_enq >= NIC_RX_BUFS {
-            write_trb(n.in_ring, NIC_RX_BUFS, n.in_ring, 0, TRB_LINK | cyc | (1 << 1));
+            write_trb(n.in_ring, NIC_RX_BUFS, n.in_ring.phys(), 0, TRB_LINK | cyc | (1 << 1));
             n.in_cycle ^= 1;
             n.in_enq = 0;
         }
@@ -2589,14 +2498,12 @@ pub fn nic_control(req_type: u8, request: u8, value: u16, index: u16, buf: &mut 
     with_nic(|state| {
         let len = buf.len().min(2048) as u16;
         if !dir_in && len > 0 {
-            // SAFETY: data_buf is a 4 KiB DMA page; len <= 2048
-            unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), state.data_buf as *mut u8, len as usize); }
+            state.data_buf.copy_in(0u32, &buf[..len as usize]);
         }
         let ok = with_nic_ep0(state, |s|
             usb_control_transfer(s, req_type, request, value, index, len, dir_in));
         if ok && dir_in && len > 0 {
-            // SAFETY: as above
-            unsafe { core::ptr::copy_nonoverlapping(state.data_buf as *const u8, buf.as_mut_ptr(), len as usize); }
+            state.data_buf.copy_out(0u32, &mut buf[..len as usize]);
         }
         ok
     }).unwrap_or(false)
@@ -2632,17 +2539,18 @@ fn nic_bulk_out_on(state: &mut XhciState, data: &[u8]) -> bool {
     let (sid, dci) = {
         let n = match state.nic.as_mut() { Some(n) => n, None => return false };
         let bidx = n.tx_next;
-        let addr = n.out_buf + (bidx * NIC_TX_BUF_BYTES) as u64;
-        // SAFETY: slot `bidx` is free: tx_inflight < NIC_TX_BUFS means the
-        // last user of this round-robin slot has completed.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, len); }
+        let off = bidx * NIC_TX_BUF_BYTES;
+        let addr = n.out_buf.phys() + off as u64;
+        // Slot `bidx` is free: tx_inflight < NIC_TX_BUFS means the last user
+        // of this round-robin slot has completed.
+        n.out_buf.copy_in(off, &data[..len]);
 
         let idx = n.out_enq;
         let cyc = n.out_cycle;
         write_trb(n.out_ring, idx, addr, len as u32, TRB_NORMAL | TRB_IOC | cyc);
         n.out_enq += 1;
         if n.out_enq >= NUM_TR_TRBS - 1 {
-            write_trb(n.out_ring, NUM_TR_TRBS - 1, n.out_ring, 0, TRB_LINK | cyc | (1 << 1));
+            write_trb(n.out_ring, NUM_TR_TRBS - 1, n.out_ring.phys(), 0, TRB_LINK | cyc | (1 << 1));
             n.out_cycle ^= 1;
             n.out_enq = 0;
         }
@@ -2681,9 +2589,8 @@ fn nic_bulk_in_on(state: &mut XhciState, buf: &mut [u8]) -> usize {
     };
 
     let n_copy = len.min(buf.len());
-    let src = in_buf + (b * NIC_BULK_BUF_BYTES) as u64;
-    // SAFETY: `src` is RX buffer `b` and holds `len` received bytes.
-    unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n_copy); }
+    // RX buffer `b` holds `len` received bytes.
+    in_buf.copy_out(b * NIC_BULK_BUF_BYTES, &mut buf[..n_copy]);
     NIC_RX_BYTES.fetch_add(n_copy as u64, Relaxed);
     NIC_RX_DELIV.fetch_add(1, Relaxed);
     NIC_RX_ARMED.fetch_add(armed as u64, Relaxed);
@@ -2697,12 +2604,12 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
     let idx = state.intr_enqueue;
     let cycle = state.intr_cycle;
     // Normal TRB: 8 bytes from data_buf+2048 (separate from control xfer buf)
-    let buf = state.data_buf + 2048;
+    let buf = state.data_buf.phys() + KBD_REPORT_OFF;
     write_trb(state.intr_ring, idx, buf, 8, TRB_NORMAL | TRB_IOC | cycle);
     state.intr_enqueue += 1;
     if state.intr_enqueue >= NUM_TR_TRBS - 1 {
         let link = TRB_LINK | cycle | (1 << 1);
-        write_trb(state.intr_ring, NUM_TR_TRBS - 1, state.intr_ring, 0, link);
+        write_trb(state.intr_ring, NUM_TR_TRBS - 1, state.intr_ring.phys(), 0, link);
         state.intr_cycle ^= 1;
         state.intr_enqueue = 0;
     }
@@ -2718,9 +2625,9 @@ fn schedule_interrupt_transfer(state: &mut XhciState) {
 pub fn msi_irq() {
     if let Some(mut g) = CTRLS.try_lock() {
         for slot in g.iter_mut().flatten() {
-            w32(slot.oper, OP_USBSTS, STS_EINT);
-            let ir0 = slot.rt + 0x20;
-            w32(ir0, 0x00, r32(ir0, 0x00) | 0x01);
+            slot.oper.w32(OP_USBSTS, STS_EINT);
+            let ir0 = slot.rt.sub(IR0, IR_LEN);
+            ir0.w32(0x00u32, ir0.r32(0x00u32) | 0x01);
             drain(slot);
         }
     } else {
@@ -2801,8 +2708,8 @@ fn next_event(state: &mut XhciState) -> Option<Evt> {
 /// run at least once per pass that took events, or the controller reports
 /// no further events.
 fn flush_erdp(state: &XhciState) {
-    let erdp = state.evt_ring + (state.evt_dequeue * 16) as u64;
-    w64(state.rt + 0x20, 0x18, erdp | (1 << 3));
+    let erdp = state.evt_ring.phys() + (state.evt_dequeue * 16) as u64;
+    state.rt.sub(IR0, IR_LEN).w64_lo_hi(0x18u32, erdp | (1 << 3));
 }
 
 /// Whether TRB address `a` lies in the transfer ring starting at `base`.
@@ -2820,7 +2727,7 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
     let cc = e.cc;
     let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
 
-    if state.has_mouse && in_ring(a, state.mouse_intr_ring) {
+    if state.has_mouse && in_ring(a, state.mouse_intr_ring.phys()) {
         if ok {
             process_mouse_report(state);
             state.mouse_error_count = 0;
@@ -2830,7 +2737,7 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
             state.mouse_error_count += 1;
             if state.mouse_error_count >= 10 {
                 state.mouse_error_count = 0;
-                let portsc = r32(state.oper, portsc_off(state.mouse_port_num));
+                let portsc = state.oper.r32(portsc_off(state.mouse_port_num));
                 if portsc & PORTSC_CCS == 0 {
                     // Device unplugged: do not re-queue.
                     state.has_mouse = false;
@@ -2844,7 +2751,7 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
     }
 
     // The network device: largest rings and most events at runtime.
-    if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring, n.out_ring)) {
+    if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring.phys(), n.out_ring.phys())) {
         let on_in = ir != 0 && a >= ir && a < ir + ((NIC_RX_BUFS + 1) * 16) as u64;
         let on_out = or != 0 && a >= or && a < or + (NUM_TR_TRBS * 16) as u64;
         if on_in {
@@ -2892,14 +2799,14 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
         }
     }
 
-    if state.has_keyboard && in_ring(a, state.intr_ring) {
+    if state.has_keyboard && in_ring(a, state.intr_ring.phys()) {
         if ok {
             state.error_count = 0;
-            let buf = state.data_buf + 2048;
-            let modifiers = r8(buf, 0);
+            let buf = state.data_buf.sub(KBD_REPORT_OFF, REPORT_LEN);
+            let modifiers = buf.r8(0u32);
             let mut keys = [0u8; 6];
             for i in 0..6 {
-                keys[i] = r8(buf, (2 + i) as u32);
+                keys[i] = buf.r8((2 + i) as u32);
             }
             process_hid_report(modifiers, &keys, state);
             state.prev_keys = keys;
@@ -2908,7 +2815,7 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
         } else {
             state.error_count += 1;
             if state.error_count >= 3 {
-                let portsc = r32(state.oper, portsc_off(state.port_num));
+                let portsc = state.oper.r32(portsc_off(state.port_num));
                 if portsc & PORTSC_CCS == 0 {
                     state.has_keyboard = false;
                     AVAILABLE.store(false, Ordering::Relaxed);
