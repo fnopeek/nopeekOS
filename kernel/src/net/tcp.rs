@@ -559,19 +559,28 @@ struct TcpConn {
     // recovery is then a full 1 s SYN retry.
     arp_pending: bool,
     arp_tries: u8,
+    /// The owner has let go (`close`). Until then a Closed slot still
+    /// belongs to whoever holds the handle and is not reused under it.
+    released: bool,
 }
 
 static CONNECTIONS: Mutex<[Option<TcpConn>; MAX_CONNECTIONS]> = Mutex::new(
     [const { None }; MAX_CONNECTIONS]
 );
 
-static NEXT_PORT: Mutex<u16> = Mutex::new(49152);
-
+/// A random ephemeral port no connection uses (RFC 6056, algorithm 1).
+/// Sequential ports let an off-path sender guess the 4-tuple of every
+/// connection to a known server.
 fn alloc_port() -> u16 {
-    let mut port = NEXT_PORT.lock();
-    let p = *port;
-    *port = if *port >= 65534 { 49152 } else { *port + 1 };
-    p
+    let conns = CONNECTIONS.lock();
+    let mut port = 0;
+    for _ in 0..64 {
+        port = 49152 + (crate::csprng::random_u64() % 16384) as u16;
+        if !conns.iter().flatten().any(|c| c.local_port == port) {
+            break;
+        }
+    }
+    port
 }
 
 /// Open a TCP connection without waiting for the handshake: the handle comes
@@ -652,6 +661,7 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         sack_ok: false,
         arp_pending,
         arp_tries: 1,
+        released: false,
     };
 
     // Find free slot
@@ -661,10 +671,19 @@ pub fn connect_start(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpE
         // a Closed conn pins its slot forever (tick_connections only
         // moves TimeWait→Closed, never frees it) — under browser churn
         // every slot ends up a Closed corpse and connect() starves.
+        //
+        // A Closed slot the owner still holds (reset, retransmits
+        // exhausted) is not reused at once: the owner's next `close` or
+        // `recv` would hit the new connection. Only after FIN_TIMEOUT_TICKS
+        // of silence, so an owner that never closes cannot starve the table.
+        let now = crate::interrupts::ticks();
         let slot = conns.iter()
             .position(|c| c.is_none())
             .or_else(|| conns.iter()
-                .position(|c| matches!(c, Some(x) if x.state == State::Closed)))
+                .position(|c| matches!(c, Some(x) if x.state == State::Closed && x.released)))
+            .or_else(|| conns.iter()
+                .position(|c| matches!(c, Some(x) if x.state == State::Closed
+                    && now.saturating_sub(x.last_send_tick) > FIN_TIMEOUT_TICKS)))
             .ok_or(TcpError::TooManyConnections)?;
         conns[slot] = Some(conn);
         slot
@@ -808,6 +827,7 @@ pub fn listen(port: u16) -> Result<usize, TcpError> {
         sack_ok: false,
         arp_pending: false,
         arp_tries: 0,
+        released: false,
     };
 
     let mut conns = CONNECTIONS.lock();
@@ -913,6 +933,7 @@ pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
         sack_ok: false,
         arp_pending: false,
         arp_tries: 0,
+        released: false,
     };
     Ok(())
 }
@@ -1309,6 +1330,7 @@ pub fn close(handle: usize) -> Result<(), TcpError> {
         let seq = conn.snd_nxt;
         conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
         conn.state = State::FinWait1;
+        conn.released = true;
         conn.last_send_tick = crate::interrupts::ticks();
         send_seg(conn, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
     } else {
@@ -1394,17 +1416,58 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 
     let conn = conns[idx].as_mut().unwrap();
 
-    // RST handling
+    // RST (RFC 9293 §3.10.7, RFC 5961 §3). In SYN-SENT it must acknowledge
+    // our SYN. Elsewhere it resets only at exactly rcv_nxt; anywhere else in
+    // the window it gets a challenge ACK (a true peer then resends the RST
+    // with the right number), outside it is dropped. Otherwise anyone who
+    // guesses the 4-tuple can tear down a connection.
     if flags & RST != 0 {
-        conn.error = true;
-        conn.state = State::Closed;
+        let accept = match conn.state {
+            State::SynSent => flags & ACK != 0 && ack == conn.snd_nxt,
+            State::Listen => false,
+            _ => seq == conn.rcv_nxt,
+        };
+        if accept {
+            conn.error = true;
+            conn.state = State::Closed;
+            conn.last_send_tick = crate::interrupts::ticks();
+        } else if !matches!(conn.state, State::SynSent | State::Listen)
+            && seq_in_window(conn, seq)
+        {
+            let w = recv_window(conn);
+            send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+        }
+        return;
+    }
+
+    // A synchronized connection takes a segment only if it starts inside
+    // the receive window (RFC 9293 §3.10.7.4). Old retransmissions (behind
+    // rcv_nxt) keep going to the D-SACK path below, which only ACKs; one
+    // beyond the window gets an ACK and nothing else — no window update, no
+    // ACK processing, no FIN.
+    if matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2 | State::CloseWait)
+        && (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0
+        && !seq_in_window(conn, seq)
+    {
+        let w = recv_window(conn);
+        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+        return;
+    }
+    // An ACK for data we never sent says nothing true: ACK it back and drop
+    // (RFC 9293 §3.10.7.4, "ACK of something not yet sent").
+    if flags & ACK != 0
+        && !matches!(conn.state, State::SynSent | State::Listen | State::SynReceived)
+        && (ack.wrapping_sub(conn.snd_nxt) as i32) > 0
+    {
+        let w = recv_window(conn);
+        send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
         return;
     }
 
     match conn.state {
         State::SynReceived => {
             // Waiting for ACK of our SYN-ACK
-            if flags & ACK != 0 {
+            if flags & ACK != 0 && ack == conn.snd_nxt {
                 conn.snd_una = ack;
                 conn.state = State::Established;
                 conn.established = true;
@@ -1412,7 +1475,10 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
         }
 
         State::SynSent => {
-            if flags & SYN != 0 && flags & ACK != 0 {
+            // Only the answer to our SYN: it must acknowledge exactly our
+            // ISN + 1. Anything else would hand the connection a sequence
+            // space chosen by whoever sent it.
+            if flags & SYN != 0 && flags & ACK != 0 && ack == conn.snd_nxt {
                 // SYN-ACK received
                 conn.rcv_off = 0;
                 conn.rcv_nxt = seq.wrapping_add(1);
@@ -1655,7 +1721,12 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                         // Ahead by less than 2^31 (checked above), so this
                         // lands past `rcv_off` and never wraps.
                         let off = conn.rcv_off + seq.wrapping_sub(conn.rcv_nxt) as u64;
+                        // Only what fits in the window we can offer: bytes
+                        // beyond it were never invited.
+                        let in_window = off + payload.len() as u64
+                            <= conn.rcv_off + rcv_space(conn) as u64;
                         if !payload.is_empty()
+                            && in_window
                             && !conn.ooo.contains_key(&off)
                             && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
                         {
@@ -1697,8 +1768,10 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
                 }
             }
 
-            // FIN from remote
-            if flags & FIN != 0 {
+            // FIN from remote: it counts only where it sits in the stream,
+            // right after this segment's data, once that data is in. A FIN
+            // ahead of a gap is dropped; the peer resends it.
+            if flags & FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                 conn.state = State::CloseWait;
                 conn.closed = true;
@@ -1708,14 +1781,19 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 
         }
 
+        // Data the peer still sends after our FIN is not delivered (the
+        // owner has closed), but its FIN is placed after it: the window
+        // check above has already admitted `seq`.
         State::FinWait1 => {
-            if flags & ACK != 0 {
+            if flags & ACK != 0 && ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
                 conn.snd_una = ack;
-                if flags & FIN != 0 {
-                    conn.rcv_nxt = seq.wrapping_add(1);
+                // Our FIN is acknowledged only when everything up to it is.
+                let fin_acked = ack == conn.snd_nxt;
+                if flags & FIN != 0 && fin_acked {
+                    conn.rcv_nxt = seq.wrapping_add(payload.len() as u32).wrapping_add(1);
                     conn.state = State::TimeWait;
                     send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
-                } else {
+                } else if fin_acked {
                     conn.state = State::FinWait2;
                 }
             }
@@ -1723,7 +1801,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 
         State::FinWait2 => {
             if flags & FIN != 0 {
-                conn.rcv_nxt = seq.wrapping_add(1);
+                conn.rcv_nxt = seq.wrapping_add(payload.len() as u32).wrapping_add(1);
                 conn.state = State::TimeWait;
                 send_seg(conn, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
             }
@@ -2227,6 +2305,19 @@ fn send_pending(p: &PendingSeg) {
         send_segment(p.dst_ip, p.src_port, p.dst_port,
             p.seq, p.ack, p.flags, p.window, &[]);
     }
+}
+
+/// Free receive buffer: the most this connection can ever advertise.
+fn rcv_space(conn: &TcpConn) -> usize {
+    RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(RCV_WND_MAX)
+}
+
+/// Is `seq` inside [rcv_nxt, rcv_nxt + window)? With a zero window only
+/// rcv_nxt itself is.
+fn seq_in_window(conn: &TcpConn, seq: u32) -> bool {
+    let off = seq.wrapping_sub(conn.rcv_nxt) as usize;
+    let wnd = rcv_space(conn);
+    if wnd == 0 { off == 0 } else { off < wnd }
 }
 
 fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
