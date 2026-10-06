@@ -104,57 +104,45 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
     // as the guest needs, chained off PDPT[0..num_pds).
     let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
 
-    let pml4_phys = memory::allocate_frame().ok_or("OOM: EPT PML4")?;
-    let pdpt_phys = memory::allocate_frame().ok_or("OOM: EPT PDPT")?;
-    let pd_high_phys = memory::allocate_frame().ok_or("OOM: EPT PD_HIGH")?;
-    let pt_dummy_phys = memory::allocate_frame().ok_or("OOM: EPT PT_DUMMY")?;
-    let pt_lapic_phys = memory::allocate_frame().ok_or("OOM: EPT PT_LAPIC")?;
-    let dummy_page_phys = memory::allocate_frame().ok_or("OOM: EPT dummy page")?;
     // Trap the guest LAPIC page (0xFEE00000) into the emulator (vmx::lapic)
     // by leaving it EPT-not-present. Only when LAPIC emulation is on;
-    // otherwise keep the aliased scratch for the `nolapic` boot. Mirrors
-    // svm/npt.rs.
+    // otherwise PD_HIGH[503] aliases the scratch PT for the `nolapic` boot
+    // and no PT_LAPIC exists. Mirrors svm/npt.rs.
     let lapic_trap = crate::microvm::cpu::GUEST_LAPIC && crate::microvm::cpu::VMX_GUEST_LAPIC;
-    let mut pd_physs = [0u64; 3];
-    for p in 0..num_pds {
-        pd_physs[p] = memory::allocate_frame().ok_or("OOM: EPT PD")?;
+
+    // Fixed tables: PML4, PDPT, PD_HIGH, PT_DUMMY, the scratch page, the
+    // guest-RAM PDs and (trapping) PT_LAPIC. All or none.
+    let nfixed = 5 + num_pds + lapic_trap as usize;
+    let mut fixed = [0u64; 9];
+    for i in 0..nfixed {
+        match memory::allocate_frame() {
+            Some(f) => fixed[i] = f,
+            None => {
+                for &f in &fixed[..i] { memory::deallocate_frame(f); }
+                return Err("OOM: EPT tables");
+            }
+        }
     }
+    let (pml4_phys, pdpt_phys, pd_high_phys, pt_dummy_phys, dummy_page_phys) =
+        (fixed[0], fixed[1], fixed[2], fixed[3], fixed[4]);
+    let pd_physs = &fixed[5..5 + num_pds];
+    let pt_lapic_phys = if lapic_trap { fixed[5 + num_pds] } else { pt_dummy_phys };
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
+        for &f in &fixed[..nfixed] {
+            core::ptr::write_bytes(f as *mut u8, 0, 4096);
+        }
         let pml4 = pml4_phys as *mut u64;
-        core::ptr::write_bytes(pml4 as *mut u8, 0, 4096);
         pml4.add(0).write_volatile(pdpt_phys | EPT_RWX);
 
         let pdpt = pdpt_phys as *mut u64;
-        core::ptr::write_bytes(pdpt as *mut u8, 0, 4096);
         // PDPT[0..num_pds] → guest-RAM PDs (each covers 1 GiB).
         for p in 0..num_pds {
             pdpt.add(p).write_volatile(pd_physs[p] | EPT_RWX);
         }
         // PDPT[3] → PD_HIGH (MMIO scratch lives in [3 GiB, 4 GiB)).
         pdpt.add(3).write_volatile(pd_high_phys | EPT_RWX);
-
-        // Populate each PD: entries [0..512) cover [p*1GiB, (p+1)*1GiB).
-        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
-        for p in 0..num_pds {
-            let pd = pd_physs[p] as *mut u64;
-            core::ptr::write_bytes(pd as *mut u8, 0, 4096);
-            let base_leaf = (p as u64) * LEAVES_PER_PD;
-            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
-            for leaf in base_leaf..end_leaf {
-                let local = (leaf - base_leaf) as usize;
-                if leaf < boot_leaves {
-                    let host_target = boot_base + leaf * TWO_MB;
-                    pd.add(local).write_volatile(
-                        host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
-                } else {
-                    let pt = memory::allocate_frame().ok_or("OOM: EPT demand PT")?;
-                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-                    pd.add(local).write_volatile(pt | EPT_RWX);
-                }
-            }
-        }
 
         // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
         // IOAPIC + HPET, scratch). PD_HIGH[503] covers [0xFEE00000,
@@ -163,14 +151,10 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
         // guest's LAPIC MMIO EPT-faults into vmx::lapic; the rest stays
         // scratch. When not emulating, alias it to PT_DUMMY.
         let pd_high = pd_high_phys as *mut u64;
-        core::ptr::write_bytes(pd_high as *mut u8, 0, 4096);
         pd_high.add(502).write_volatile(pt_dummy_phys | EPT_RWX);
-        pd_high.add(503).write_volatile(
-            if lapic_trap { pt_lapic_phys } else { pt_dummy_phys } | EPT_RWX);
+        pd_high.add(503).write_volatile(pt_lapic_phys | EPT_RWX);
 
         let pt_dummy = pt_dummy_phys as *mut u64;
-        core::ptr::write_bytes(pt_dummy as *mut u8, 0, 4096);
-        core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
         for i in 0..512usize {
             pt_dummy
                 .add(i)
@@ -183,15 +167,39 @@ pub fn install_window(boot_base: u64, guest_bytes: u64) -> Result<(u64, u64), &'
         // PT_LAPIC: entry [0] = the LAPIC MMIO page (0xFEE00000) left
         // not present → guest LAPIC accesses EPT-violate → trap-and-emulate
         // (vmx::lapic). The rest of the 2 MB → dummy scratch (harmless if
-        // ever touched). Only consulted when `lapic_trap` (PD_HIGH[503]
-        // points here); built unconditionally — a leaked frame otherwise.
-        let pt_lapic = pt_lapic_phys as *mut u64;
-        core::ptr::write_bytes(pt_lapic as *mut u8, 0, 4096);
-        pt_lapic.add(0).write_volatile(0); // LAPIC page: trap on access
-        for i in 1..512usize {
-            pt_lapic
-                .add(i)
-                .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
+        // ever touched).
+        if lapic_trap {
+            let pt_lapic = pt_lapic_phys as *mut u64;
+            for i in 1..512usize {
+                pt_lapic
+                    .add(i)
+                    .write_volatile(dummy_page_phys | EPT_RWX | EPT_MEM_TYPE_WB);
+            }
+        }
+
+        // Populate each PD: entries [0..512) cover [p*1GiB, (p+1)*1GiB). The
+        // tree is linked and walkable from here on, so a failed demand-PT
+        // allocation unwinds through `release`.
+        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
+        for p in 0..num_pds {
+            let pd = pd_physs[p] as *mut u64;
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                let local = (leaf - base_leaf) as usize;
+                if leaf < boot_leaves {
+                    let host_target = boot_base + leaf * TWO_MB;
+                    pd.add(local).write_volatile(
+                        host_target | EPT_RWX | EPT_MEM_TYPE_WB | EPT_LEAF);
+                } else {
+                    let Some(pt) = memory::allocate_frame() else {
+                        release(pml4_phys, guest_bytes);
+                        return Err("OOM: EPT demand PT");
+                    };
+                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+                    pd.add(local).write_volatile(pt | EPT_RWX);
+                }
+            }
         }
     }
 
@@ -258,8 +266,9 @@ pub fn demand_fault_in(pml4_phys: u64, gpa: u64) -> Option<u64> {
 }
 
 /// Free everything `install_window` allocated for `guest_bytes`: every
-/// demand-faulted 4 KB frame, the demand PT pages, and the four fixed
-/// tables (PML4/PDPT/PD/PD_HIGH/PT_DUMMY/dummy). The contiguous boot
+/// demand-faulted 4 KB frame, the demand PT pages, and the fixed tables
+/// (PML4/PDPT/PDs/PD_HIGH/PT_DUMMY/PT_LAPIC/scratch page). Also unwinds a
+/// partially built tree: absent entries are skipped. The contiguous boot
 /// block is freed separately by the caller (it owns `boot_raw_base`).
 pub fn release(pml4_phys: u64, guest_bytes: u64) {
     let boot_leaves = boot_window_bytes(guest_bytes) / TWO_MB;
@@ -302,6 +311,10 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
         if pd_high_phys != 0 {
             let pd_high = pd_high_phys as *const u64;
             let pt_dummy_phys = pd_high.add(502).read_volatile() & EPT_ADDR_MASK;
+            let pt_lapic_phys = pd_high.add(503).read_volatile() & EPT_ADDR_MASK;
+            if pt_lapic_phys != 0 && pt_lapic_phys != pt_dummy_phys {
+                memory::deallocate_frame(pt_lapic_phys);
+            }
             if pt_dummy_phys != 0 {
                 // [0] is the trapped I/O APIC page; [1] maps the scratch page.
                 let dummy = (pt_dummy_phys as *const u64).add(1).read_volatile() & EPT_ADDR_MASK;

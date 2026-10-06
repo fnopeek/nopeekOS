@@ -131,21 +131,29 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
     };
     let num_pds = ((guest_bytes + ONE_GB - 1) / ONE_GB) as usize;
 
-    let pml4_phys = memory::allocate_frame().ok_or("OOM allocating NPT PML4")?;
-    let pdpt_phys = memory::allocate_frame().ok_or("OOM allocating NPT PDPT")?;
-    let mut pd_physs = [0u64; 3];
-    for p in 0..num_pds {
-        pd_physs[p] = memory::allocate_frame().ok_or("OOM allocating NPT PD")?;
+    // Fixed tables: PML4, PDPT, the guest-RAM PDs, and with the MMIO
+    // scratch PD_HIGH, PT_DUMMY, PT_LAPIC and the scratch page. All or none.
+    let nfixed = 2 + num_pds + if with_mmio_scratch { 4 } else { 0 };
+    let mut fixed = [0u64; 9];
+    for i in 0..nfixed {
+        match memory::allocate_frame() {
+            Some(f) => fixed[i] = f,
+            None => {
+                for &f in &fixed[..i] { memory::deallocate_frame(f); }
+                return Err("OOM allocating NPT tables");
+            }
+        }
     }
+    let pml4_phys = fixed[0];
+    let pdpt_phys = fixed[1];
+    let pd_physs = &fixed[2..2 + num_pds];
 
     // SAFETY: freshly allocated, identity-mapped (host paging),
     // exclusive. All pages are 4 KB aligned (frame allocator
     // guarantee).
     unsafe {
-        core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
-        for p in 0..num_pds {
-            core::ptr::write_bytes(pd_physs[p] as *mut u8, 0, 4096);
+        for &f in &fixed[..nfixed] {
+            core::ptr::write_bytes(f as *mut u8, 0, 4096);
         }
 
         // PML4[0] → PDPT (non-leaf, no PS bit).
@@ -158,43 +166,12 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
             pdpt.add(p).write_volatile(pd_physs[p] | NPT_P | NPT_RW | NPT_US);
         }
 
-        // Populate each PD: [base_leaf, end_leaf) in this PD's window.
-        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
-        for p in 0..num_pds {
-            let pd = pd_physs[p] as *mut u64;
-            let base_leaf = (p as u64) * LEAVES_PER_PD;
-            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
-            for leaf in base_leaf..end_leaf {
-                let local = (leaf - base_leaf) as usize;
-                if leaf < boot_leaves {
-                    let host_target = host_base + leaf * TWO_MB;
-                    let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
-                    pd.add(local).write_volatile(entry);
-                } else {
-                    let pt = memory::allocate_frame()
-                        .ok_or("OOM allocating NPT demand PT")?;
-                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
-                    pd.add(local).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
-                }
-            }
-        }
-
         if with_mmio_scratch {
+            let m = 2 + num_pds;
+            let (pd_high_phys, pt_dummy_phys, pt_lapic_phys, dummy_page_phys) =
+                (fixed[m], fixed[m + 1], fixed[m + 2], fixed[m + 3]);
+
             // PDPT[3] → PD_HIGH (covers [3 GB, 4 GB), MMIO range).
-            let pd_high_phys = memory::allocate_frame()
-                .ok_or("OOM allocating NPT PD_HIGH")?;
-            let pt_dummy_phys = memory::allocate_frame()
-                .ok_or("OOM allocating NPT PT_DUMMY")?;
-            let pt_lapic_phys = memory::allocate_frame()
-                .ok_or("OOM allocating NPT PT_LAPIC")?;
-            let dummy_page_phys = memory::allocate_frame()
-                .ok_or("OOM allocating NPT dummy page")?;
-
-            core::ptr::write_bytes(pd_high_phys as *mut u8, 0, 4096);
-            core::ptr::write_bytes(pt_dummy_phys as *mut u8, 0, 4096);
-            core::ptr::write_bytes(pt_lapic_phys as *mut u8, 0, 4096);
-            core::ptr::write_bytes(dummy_page_phys as *mut u8, 0, 4096);
-
             pdpt.add(3).write_volatile(pd_high_phys | NPT_P | NPT_RW | NPT_US);
 
             // PD_HIGH[502] → PT_DUMMY (covers [0xFEC00000, 0xFEE00000):
@@ -221,6 +198,31 @@ fn build_npt(host_base: u64, guest_bytes: u64, with_mmio_scratch: bool) -> Resul
             pt_lapic.add(0).write_volatile(0); // LAPIC page: trap on access
             for i in 1..512usize {
                 pt_lapic.add(i).write_volatile(dummy_page_phys | NPT_P | NPT_RW | NPT_US);
+            }
+        }
+
+        // Populate each PD: [base_leaf, end_leaf) in this PD's window. The
+        // tree is linked and walkable from here on, so a failed demand-PT
+        // allocation unwinds through `release`.
+        const LEAVES_PER_PD: u64 = ONE_GB / TWO_MB; // 512
+        for p in 0..num_pds {
+            let pd = pd_physs[p] as *mut u64;
+            let base_leaf = (p as u64) * LEAVES_PER_PD;
+            let end_leaf = ((p as u64 + 1) * LEAVES_PER_PD).min(guest_leaves);
+            for leaf in base_leaf..end_leaf {
+                let local = (leaf - base_leaf) as usize;
+                if leaf < boot_leaves {
+                    let host_target = host_base + leaf * TWO_MB;
+                    let entry = host_target | NPT_P | NPT_RW | NPT_US | NPT_PS;
+                    pd.add(local).write_volatile(entry);
+                } else {
+                    let Some(pt) = memory::allocate_frame() else {
+                        release(pml4_phys, guest_bytes);
+                        return Err("OOM allocating NPT demand PT");
+                    };
+                    core::ptr::write_bytes(pt as *mut u8, 0, 4096);
+                    pd.add(local).write_volatile(pt | NPT_P | NPT_RW | NPT_US);
+                }
             }
         }
     }
@@ -326,6 +328,10 @@ pub fn release(pml4_phys: u64, guest_bytes: u64) {
         if pd_high_phys != 0 {
             let pd_high = pd_high_phys as *const u64;
             let pt_dummy_phys = pd_high.add(502).read_volatile() & NPT_ADDR_MASK;
+            let pt_lapic_phys = pd_high.add(503).read_volatile() & NPT_ADDR_MASK;
+            if pt_lapic_phys != 0 && pt_lapic_phys != pt_dummy_phys {
+                memory::deallocate_frame(pt_lapic_phys);
+            }
             if pt_dummy_phys != 0 {
                 // [0] is the trapped I/O APIC page; [1] maps the scratch page.
                 let dummy = (pt_dummy_phys as *const u64).add(1).read_volatile() & NPT_ADDR_MASK;

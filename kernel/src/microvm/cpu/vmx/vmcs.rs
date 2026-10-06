@@ -474,13 +474,15 @@ fn exit_trampoline_addr() -> u64 {
 /// state. We trap everything and ignore (return 0 for IN, no-op
 /// for OUT) anything our handler doesn't explicitly understand.
 ///
-/// Returns (io_bitmap_a_phys, io_bitmap_b_phys). Frames leaked
-/// (same lifecycle as VMXON / VMCS / EPT regions).
+/// Returns (io_bitmap_a_phys, io_bitmap_b_phys), owned by the caller.
 fn allocate_and_populate_io_bitmaps() -> Result<(u64, u64), &'static str> {
     use crate::mm::memory;
 
     let bitmap_a = memory::allocate_frame().ok_or("OOM: IO_BITMAP_A")?;
-    let bitmap_b = memory::allocate_frame().ok_or("OOM: IO_BITMAP_B")?;
+    let Some(bitmap_b) = memory::allocate_frame() else {
+        memory::deallocate_frame(bitmap_a);
+        return Err("OOM: IO_BITMAP_B");
+    };
 
     // SAFETY: identity-mapped, freshly allocated, exclusive.
     unsafe {
@@ -651,12 +653,48 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 /// unrestricted-guest. VM-exit: host-address-space-size. VM-entry:
 /// IA-32e-mode-guest stays 0.
 ///
-/// I/O bitmaps trap accesses to port 0x80 (substrate-test stub) and
-/// ports 0x3F8-0x3FF (UART COM1 — Linux's earlyprintk target). All
-/// other ports pass through natively.
-pub(super) fn setup_execution_controls(eptp: u64) -> Result<(), &'static str> {
-    let (io_bitmap_a, io_bitmap_b) = allocate_and_populate_io_bitmaps()?;
-    let msr_bitmap = allocate_msr_bitmap()?;
+/// The I/O bitmaps trap every port; the MSR bitmap intercepts all but the
+/// pass-through set. Returns the bitmap frames, which the VMCS references
+/// until VMXOFF; the caller frees them after that.
+pub(super) fn setup_execution_controls(eptp: u64) -> Result<ExecBitmaps, &'static str> {
+    let (io_a, io_b) = allocate_and_populate_io_bitmaps()?;
+    let msr = match allocate_msr_bitmap() {
+        Ok(m) => m,
+        Err(e) => {
+            crate::mm::memory::deallocate_frame(io_a);
+            crate::mm::memory::deallocate_frame(io_b);
+            return Err(e);
+        }
+    };
+    let bitmaps = ExecBitmaps { io_a, io_b, msr };
+    match write_execution_controls(eptp, &bitmaps) {
+        Ok(()) => Ok(bitmaps),
+        Err(e) => {
+            bitmaps.free();
+            Err(e)
+        }
+    }
+}
+
+/// The frames `setup_execution_controls` hands to one VMCS.
+pub(super) struct ExecBitmaps {
+    io_a: u64,
+    io_b: u64,
+    msr: u64,
+}
+
+impl ExecBitmaps {
+    /// Free the frames. Only once no VMCS that references them can be
+    /// entered again (after VMXOFF, or before the first entry).
+    pub(super) fn free(&self) {
+        crate::mm::memory::deallocate_frame(self.io_a);
+        crate::mm::memory::deallocate_frame(self.io_b);
+        crate::mm::memory::deallocate_frame(self.msr);
+    }
+}
+
+fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(), &'static str> {
+    let (io_bitmap_a, io_bitmap_b, msr_bitmap) = (bitmaps.io_a, bitmaps.io_b, bitmaps.msr);
 
     // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them. The TRUE
     // variants relax classic "default-1" bits, notably CR3-load/store-

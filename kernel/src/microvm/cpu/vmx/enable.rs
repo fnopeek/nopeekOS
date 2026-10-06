@@ -310,7 +310,8 @@ pub fn enable_and_test() -> Result<vmcs::LaunchOutcome, &'static str> {
 
         write_host_state_with_current_rsp()?;
         vmcs::setup_guest_state(0x10000)?;
-        vmcs::setup_execution_controls(eptp)?;
+        // Kept for the test's lifetime, like the rest of its frames.
+        let _bitmaps = vmcs::setup_execution_controls(eptp)?;
 
         run_substrate_loop()
     })
@@ -614,6 +615,8 @@ pub struct Vcpu {
     apic_id: u8,
     vmxon_phys: u64,
     vmcs_phys: u64,
+    /// I/O + MSR bitmap frames of this vCPU's VMCS, freed after VMXOFF.
+    bitmaps: vmcs::ExecBitmaps,
     regs: vmcs::GuestRegs,
     trace: ExitTrace,
     io_stats: IoStats,
@@ -722,7 +725,7 @@ impl VmContext {
             let gm = crate::microvm::devices::guest_mem::set_active(gm);
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
-            vmcs::setup_execution_controls(eptp)?;
+            let bitmaps = vmcs::setup_execution_controls(eptp)?;
 
             let mut regs = vmcs::GuestRegs::default();
             regs.rsi = load.boot_params_phys;
@@ -760,6 +763,7 @@ impl VmContext {
                     apic_id: 0, // BSP
                     vmxon_phys,
                     vmcs_phys,
+                    bitmaps,
                     regs,
                     trace: ExitTrace::new(),
                     io_stats: IoStats::new(),
@@ -815,7 +819,7 @@ impl VmContext {
             };
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state_ap(sipi_vector)?;
-            vmcs::setup_execution_controls(eptp)?;
+            let bitmaps = vmcs::setup_execution_controls(eptp)?;
 
             Ok(VmContext {
                 shared: SharedRef::Borrowed(shared),
@@ -823,6 +827,7 @@ impl VmContext {
                     apic_id,
                     vmxon_phys,
                     vmcs_phys,
+                    bitmaps,
                     regs: vmcs::GuestRegs::default(),
                     trace: ExitTrace::new(),
                     io_stats: IoStats::new(),
@@ -1087,6 +1092,7 @@ impl VmContext {
             crate::kprintln!("[microvm] a device worker did not stop — guest memory is kept, not freed");
             memory::deallocate_frame(self.vcpu.vmcs_phys);
             memory::deallocate_frame(self.vcpu.vmxon_phys);
+            self.vcpu.bitmaps.free();
             return;
         }
         // Demand-faulted frames + demand PTs + EPT tables.
@@ -1098,6 +1104,7 @@ impl VmContext {
         );
         memory::deallocate_frame(self.vcpu.vmcs_phys);
         memory::deallocate_frame(self.vcpu.vmxon_phys);
+        self.vcpu.bitmaps.free();
         // Free the active GuestMem (held outside VmShared); page tables are
         // released above and all vCPUs + the net backend have stopped.
         crate::microvm::devices::guest_mem::clear_active();
@@ -1113,6 +1120,7 @@ impl VmContext {
         unsafe { vmx_exit_root(); }
         memory::deallocate_frame(self.vcpu.vmcs_phys);
         memory::deallocate_frame(self.vcpu.vmxon_phys);
+        self.vcpu.bitmaps.free();
     }
 }
 
