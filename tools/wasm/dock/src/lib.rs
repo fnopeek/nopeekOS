@@ -38,23 +38,26 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER, caps::ext::SHELL];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The calls only the dock makes; the shared ones are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    fn npk_spawn_module(ptr: i32, len: i32) -> i32;
-    fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
     fn npk_window_set_dock(w: i32, h: i32) -> i32;
-    fn npk_window_set_modal(modal: i32) -> i32;
-    fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_get_fb_size() -> i64;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
+}
+
+fn window_set_dock(w: i32, h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_dock(w, h) };
+}
+
+/// Framebuffer height in pixels (the low half of `npk_get_fb_size`).
+fn fb_height() -> i32 {
+    // SAFETY: FFI without pointers.
+    let packed = unsafe { npk_get_fb_size() };
+    (packed & 0xFFFF_FFFF) as i32
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -100,40 +103,18 @@ fn fill(template: &str, value: &str) -> String {
     }
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
-}
+fn log(msg: &str) { host::log_serial(msg); }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
+fn spawn(name: &str) -> bool { host::spawn_module(name) }
 
-fn spawn(name: &str) -> bool {
-    unsafe { npk_spawn_module(name.as_ptr() as i32, name.len() as i32) == 0 }
-}
-
-fn run_intent(verb: &str) -> bool {
-    unsafe { npk_run_intent(verb.as_ptr() as i32, verb.len() as i32) == 0 }
-}
-
-fn store(path: &str, data: &[u8]) -> bool {
-    unsafe {
-        npk_store(
-            path.as_ptr() as i32, path.len() as i32,
-            data.as_ptr() as i32, data.len() as i32,
-        ) == 0
-    }
-}
+fn run_intent(verb: &str) -> bool { host::run_intent(verb) == 0 }
 
 const EVENT_BUF_SIZE: usize = 64;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -204,6 +185,9 @@ const SIDE_PADDING: i32 = 24 + 2 * TRAY_PAD_X as i32;
 /// the visible bottom gap is preserved when a menu is open.
 const DOCK_GAP_RESERVE: i32 = 24;
 
+/// Room for the compositor's window list.
+const TITLES_CAP: usize = 2048;
+
 const DOCK_CFG_PATH: &str = "sys/config/dock";
 /// Header line written by `persist`. Its presence (returned by
 /// `read_pins`) tells the next boot the user has touched the config —
@@ -244,6 +228,8 @@ struct Dock {
     /// window when a menu is open so the popover has room above the tray
     /// and click-outside lands inside the (now-large) dock window.
     screen_h:   i32,
+    /// The compositor's window list, as last read by `refresh_titles`.
+    titles:     Vec<u8>,
 }
 
 impl Dock {
@@ -260,12 +246,11 @@ impl Dock {
         };
         let mut entries: Vec<AppEntry> = Vec::with_capacity(catalog.len() + 1);
         entries.extend(initial);
-        let packed = unsafe { npk_get_fb_size() };
-        let screen_h = (packed & 0xFFFF_FFFF) as i32;
         Dock {
             entries, catalog,
             open: None, moving: None, suppress_next_press: false,
-            screen_h,
+            screen_h: fb_height(),
+            titles: Vec::new(),
         }
     }
 
@@ -286,7 +271,7 @@ impl Dock {
                 ActionId(CLICK_BASE + i as u32),
                 ActionId(HOVER_BASE + i as u32),
                 NodeId(NODE_CELL + i as u32),
-                run_state_of(&e.launch_name),
+                run_state_of(self.titles_text(), &e.launch_name),
             ));
         }
         cells.push(separator());
@@ -384,7 +369,7 @@ impl Dock {
         } else {
             DOCK_HEIGHT
         };
-        unsafe { let _ = npk_window_set_dock(self.width(), h); }
+        window_set_dock(self.width(), h);
     }
 
     fn render_popover(&self, menu: OpenMenu) -> Widget {
@@ -443,7 +428,7 @@ impl Dock {
 
     fn commit_tree(&self) {
         match wire::encode(&self.render()) {
-            Ok(bytes) => { if commit(&bytes) < 0 { log("[dock] commit failed"); } }
+            Ok(bytes) => { if !host::scene_commit(&bytes) { log("[dock] commit failed"); } }
             Err(_) => log("[dock] encode failed"),
         }
     }
@@ -612,6 +597,23 @@ impl Dock {
     /// per line. A leading marker line is written even when entries is
     /// empty so that "no apps pinned" is distinguishable from "file
     /// never existed" on the next boot. Errors are logged but non-fatal.
+    /// Re-read the window list. Returns true when it differs from the last
+    /// read — the dock re-renders only then, so polling stays cheap.
+    fn refresh_titles(&mut self) -> bool {
+        let mut scratch = [0u8; TITLES_CAP];
+        let len = host::window_titles(&mut scratch).unwrap_or(0).min(TITLES_CAP);
+        if self.titles[..] == scratch[..len] {
+            return false;
+        }
+        self.titles.clear();
+        self.titles.extend_from_slice(&scratch[..len]);
+        true
+    }
+
+    fn titles_text(&self) -> &str {
+        core::str::from_utf8(&self.titles).unwrap_or("")
+    }
+
     fn persist(&self) {
         let mut buf = String::with_capacity(self.entries.len() * 16 + 32);
         buf.push_str(DOCK_CFG_MARKER);
@@ -620,7 +622,7 @@ impl Dock {
             buf.push_str(&e.launch_name);
             buf.push('\n');
         }
-        if !store(DOCK_CFG_PATH, buf.as_bytes()) {
+        if !host::store(DOCK_CFG_PATH, buf.as_bytes()) {
             log("[dock] persist failed");
         }
     }
@@ -712,46 +714,11 @@ fn separator() -> Widget {
     }
 }
 
-// The compositor's window list, kept in a static buffer: it is refreshed
-// on every idle poll and needs no allocation.
-const TITLES_CAP: usize = 2048;
-static mut TITLES: [u8; TITLES_CAP] = [0; TITLES_CAP];
-static mut TITLES_LEN: usize = 0;
-
-/// Re-read the window list. Returns true when it differs from the last
-/// read — the dock re-renders only then, so polling stays cheap.
-fn refresh_titles() -> bool {
-    let mut scratch = [0u8; TITLES_CAP];
-    let n = unsafe { npk_window_titles(scratch.as_mut_ptr() as i32, TITLES_CAP as i32) };
-    let len = if n > 0 { n as usize } else { 0 };
-    // SAFETY: single-threaded WASM app; no concurrent access.
-    unsafe {
-        let cur_len = *(&raw const TITLES_LEN);
-        let cur = &*(&raw const TITLES);
-        if cur_len == len && cur[..len] == scratch[..len] {
-            return false;
-        }
-        let dst = &mut *(&raw mut TITLES);
-        dst[..len].copy_from_slice(&scratch[..len]);
-        *(&raw mut TITLES_LEN) = len;
-    }
-    true
-}
-
-fn titles_text() -> &'static str {
-    // SAFETY: single-threaded; the buffer is only written by refresh_titles.
-    unsafe {
-        let len = *(&raw const TITLES_LEN);
-        let buf = &*(&raw const TITLES);
-        core::str::from_utf8(&buf[..len]).unwrap_or("")
-    }
-}
-
 /// Window titles carry the module name, so a dock entry's `launch_name`
 /// matches a window line directly.
-fn run_state_of(launch_name: &str) -> RunState {
+fn run_state_of(titles: &str, launch_name: &str) -> RunState {
     let mut state = RunState::Idle;
-    for line in titles_text().lines() {
+    for line in titles.lines() {
         let mut cols = line.split('\t');
         let (Some(flags), Some(_ws), Some(title)) = (cols.next(), cols.next(), cols.next())
             else { continue };
@@ -767,15 +734,10 @@ fn run_state_of(launch_name: &str) -> RunState {
 /// Missing / empty → None (caller falls back to the full catalog).
 fn read_pins() -> Option<Vec<String>> {
     const CFG_BUF_SIZE: usize = 4096;
-    static mut CFG_BUF: [u8; CFG_BUF_SIZE] = [0; CFG_BUF_SIZE];
-    let buf_ptr = core::ptr::addr_of_mut!(CFG_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(DOCK_CFG_PATH.as_ptr() as i32, DOCK_CFG_PATH.len() as i32,
-                  buf_ptr as i32, CFG_BUF_SIZE as i32)
-    };
-    if n <= 0 { return None; }
-    let bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    let text = core::str::from_utf8(bytes).ok()?;
+    let mut buf = [0u8; CFG_BUF_SIZE];
+    let n = host::fetch(DOCK_CFG_PATH, &mut buf).unwrap_or(0);
+    if n == 0 { return None; }
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
     let mut pins: Vec<String> = Vec::new();
     for line in text.lines() {
         let name = line.trim();
@@ -801,14 +763,15 @@ fn order_by_pins(catalog: &[AppEntry], pins: &[String]) -> Vec<AppEntry> {
 pub extern "C" fn _start() {
     let mut dock = Dock::load();
 
-    unsafe { let _ = npk_window_set_modal(0); }
+    host::window_set_modal(false);
     dock.apply_window_size();
 
-    refresh_titles();
+    dock.refresh_titles();
     dock.commit_tree();
 
+    let mut event_buf = [0u8; EVENT_BUF_SIZE];
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
                 let dirty = dock.handle(ev);
                 if dirty {
@@ -816,10 +779,6 @@ pub extern "C" fn _start() {
                     // closes. set_dock is idempotent at the same size, so
                     // unconditionally calling it here costs nothing extra.
                     dock.apply_window_size();
-                    // Per-frame Vecs from render() live past the mark —
-                    // reset and rebuild so the heap doesn't grow on every
-                    // mutation. entries/catalog were allocated before mark
-                    // with capacity headroom, so they survive.
                     dock.commit_tree();
                 }
             }
@@ -827,7 +786,7 @@ pub extern "C" fn _start() {
                 // Focus and window opens/closes happen elsewhere; re-read
                 // the window list and re-render only when the running
                 // indicators changed.
-                if refresh_titles() {
+                if dock.refresh_titles() {
                     dock.commit_tree();
                 }
                 // Then wait to be told. The kernel wakes the dock on an event
@@ -836,9 +795,9 @@ pub extern "C" fn _start() {
                 // indicator that goes stale means a change nobody reported, and
                 // that must show, not be papered over by a timer.
                 // docs/plan/CORES_AND_EVENTS.md.
-                const WAIT_INPUT: i32 = 1;
-                const WAIT_STATE: i32 = 32;
-                unsafe { let _ = npk_wait(WAIT_INPUT | WAIT_STATE, -1); }
+                const WAIT_INPUT: u32 = 1;
+                const WAIT_STATE: u32 = 32;
+                host::wait(WAIT_INPUT | WAIT_STATE, -1);
             }
             PollResult::WindowGone => return,
         }

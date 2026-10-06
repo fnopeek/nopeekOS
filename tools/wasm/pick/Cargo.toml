@@ -1,6 +1,6 @@
 [package]
 name = "pick"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "File dialog portal — nopeekOS."
 
@@ -8,7 +8,7 @@ description = "File dialog portal — nopeekOS."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [dependencies.postcard]
 version = "1.0"

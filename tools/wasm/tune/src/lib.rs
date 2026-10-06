@@ -56,39 +56,13 @@ fn log(msg: &str) { host::log(msg); }
 
 // ── Buffers ───────────────────────────────────────────────────────────
 const EVENT_BUF_SIZE: usize = 4 * 1024;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
-
 const LIST_BUF_SIZE: usize = 64 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-
 const HOME_CAP: usize = 256;
-static mut HOME_BUF: [u8; HOME_CAP] = [0; HOME_CAP];
-
-const PAYLOAD_CAP: usize = 1024;
-static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
-
-/// One decoded block, interleaved f32 at the source rate.
-static mut BLOCK: [f32; MAX_BLOCK_SAMPLES] = [0.0; MAX_BLOCK_SAMPLES];
-
-fn copy_payload(s: &str) -> usize {
-    let n = s.len().min(PAYLOAD_CAP);
-    let dst = &raw mut PAYLOAD_BUF as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), dst, n); }
-    n
-}
-
-fn payload_str(len: usize) -> &'static str {
-    let ptr = &raw const PAYLOAD_BUF as *const u8;
-    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(slice).unwrap_or("")
-}
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *(&raw mut EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -99,7 +73,7 @@ fn poll_event() -> PollResult {
 //
 // Everything the player keeps on the heap is small: the playlist, decoder
 // state, and a scene tree rebuilt each frame. The file bytes do not live
-// here — they are claimed with `memory.grow` (see `file_arena`), so a long
+// here — they are claimed with `memory.grow` (see `Arena`), so a long
 // song never has to fit in a fixed heap. The heap must free: a video frame
 // is about 0.5 MB and many arrive per second.
 #[global_allocator]
@@ -116,14 +90,14 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[tune] panic!"); core::arch::wa
 // `memory.grow` at the size the folder listing says this file has, and
 // reused for every track after that.
 const WASM_PAGE: usize = 64 * 1024;
-static mut ARENA_PTR: *mut u8 = core::ptr::null_mut();
-static mut ARENA_CAP: usize = 0;
 
-fn arena_reserve(want: usize) -> Option<*mut u8> {
-    unsafe {
-        if want <= (&raw const ARENA_CAP).read() {
-            return Some((&raw const ARENA_PTR).read());
-        }
+struct Arena { ptr: *mut u8, cap: usize }
+
+impl Arena {
+    const fn new() -> Arena { Arena { ptr: core::ptr::null_mut(), cap: 0 } }
+
+    fn reserve(&mut self, want: usize) -> Option<*mut u8> {
+        if want <= self.cap { return Some(self.ptr); }
         let pages = want.div_ceil(WASM_PAGE);
         let prev = core::arch::wasm32::memory_grow(0, pages);
         if prev == usize::MAX { return None; }
@@ -131,21 +105,26 @@ fn arena_reserve(want: usize) -> Option<*mut u8> {
         // `memory.grow`. That is fine: it returns the previous page count, the
         // fresh pages behind it are ours alone, and the old arena is simply
         // abandoned.
-        let fresh = (prev * WASM_PAGE) as *mut u8;
-        (&raw mut ARENA_PTR).write(fresh);
-        (&raw mut ARENA_CAP).write(pages * WASM_PAGE);
-        Some(fresh)
+        self.ptr = (prev * WASM_PAGE) as *mut u8;
+        self.cap = pages * WASM_PAGE;
+        Some(self.ptr)
     }
-}
 
-/// Read a whole file into the arena. `size` comes from the folder listing;
-/// a wrong guess only costs a second claim.
-fn fetch_file(path: &str, size: usize) -> Option<&'static [u8]> {
-    let want = size.max(64 * 1024);
-    let ptr = arena_reserve(want)?;
-    let n = host::fetch(path, ptr, want);
-    if n <= 0 { return None; }
-    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) })
+    /// Read a whole file into the arena. `size` comes from the folder
+    /// listing; a wrong guess only costs a second claim. The caller drops
+    /// every slice of the previous file first.
+    fn fetch(&mut self, path: &str, size: usize) -> Option<&'static [u8]> {
+        let want = size.max(64 * 1024);
+        let ptr = self.reserve(want)?;
+        // SAFETY: `ptr..ptr + want` lies in pages `memory.grow` gave to the
+        // arena alone, which are never freed. The slices of the previous file
+        // are dropped before `load` calls this, so the buffer is unaliased.
+        let buf: &'static mut [u8] = unsafe { core::slice::from_raw_parts_mut(ptr, want) };
+        let n = host::fetch(path, buf)?;
+        if n == 0 { return None; }
+        let buf: &'static [u8] = buf;
+        Some(&buf[..n])
+    }
 }
 
 // ── State ─────────────────────────────────────────────────────────────
@@ -197,6 +176,9 @@ struct Tune {
     audio_priming_ms: i64,
     /// Still filling the queue before the clock starts.
     video_buffering: bool,
+    /// One decoded block, interleaved f32 at the source rate.
+    block:   Vec<f32>,
+    arena:   Arena,
 }
 
 const A_PLAY_PAUSE: u32 = 1;
@@ -255,12 +237,14 @@ impl Tune {
             video_ms: 0,
             audio_priming_ms: 0,
             video_buffering: false,
+            block: alloc::vec![0.0; MAX_BLOCK_SAMPLES],
+            arena: Arena::new(),
         };
 
         let mut argbuf = [0u8; 512];
-        let n = host::launch_arg(argbuf.as_mut_ptr(), argbuf.len());
+        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
         if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
+            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
                 t.point_at(path);
                 t.opened_with_file = true;
                 return t;
@@ -307,7 +291,7 @@ impl Tune {
         self.error = None;
         let path = match self.full_path() { Some(p) => p, None => return };
         let size = self.files[self.idx].size as usize;
-        let bytes = match fetch_file(&path, size) {
+        let bytes = match self.arena.fetch(&path, size) {
             Some(b) => b,
             None => { self.error = Some("cannot read file".to_string()); return; }
         };
@@ -473,7 +457,7 @@ impl Tune {
         if !self.playing || self.src.is_none() { return; }
         if !self.sink.flush() { return; }   // ring still full from last time
         let channels = self.src.as_ref().map(|s| s.info().channels as usize).unwrap_or(2);
-        let block = unsafe { &mut *(&raw mut BLOCK) };
+        let block = &mut self.block;
         while self.sink.lead_ms() < sink::TARGET_LEAD_MS {
             let n = match self.src.as_mut() {
                 Some(s) => s.next_block(block),
@@ -824,7 +808,7 @@ fn volume_icon(v: u8) -> IconId {
 fn commit_scene(t: &mut Tune) {
     t.controls_shown = t.controls_visible(host::ticks());
     match wire::encode(&render(t)) {
-        Ok(bytes) => { if host::scene_commit(&bytes) < 0 { log("[tune] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[tune] commit failed"); } }
         Err(_) => log("[tune] encode failed"),
     }
 }
@@ -943,11 +927,10 @@ fn handle(t: &mut Tune, ev: Event, payload: &str) -> Outcome {
 // ── npkFS helpers ─────────────────────────────────────────────────────
 
 fn read_home_dir() -> String {
-    let buf_ptr = &raw mut HOME_BUF as *mut u8;
-    let n = host::home_dir(buf_ptr, HOME_CAP);
-    if n <= 0 { return "home".to_string(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    core::str::from_utf8(slice).unwrap_or("home").to_string()
+    let mut buf = [0u8; HOME_CAP];
+    let n = host::home_dir(&mut buf).unwrap_or(0);
+    if n == 0 { return "home".to_string(); }
+    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
 }
 
 /// What the folder list accepts: audio and video in one place, so a new
@@ -966,12 +949,11 @@ fn is_media(name: &str) -> bool {
 }
 
 fn list_media(dir: &str) -> Vec<Track> {
-    let buf_ptr = &raw mut LIST_BUF as *mut u8;
-    let n = host::fs_list(dir, buf_ptr, LIST_BUF_SIZE);
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
     let mut out: Vec<Track> = Vec::new();
-    if n <= 0 { return out; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    for e in nopeek_widgets::fs::list_entries(slice) {
+    if n == 0 { return out; }
+    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
         if e.is_dir || !is_media(e.name) { continue; }
         out.push(Track { name: e.name.to_string(), size: e.size });
     }
@@ -1009,6 +991,7 @@ pub extern "C" fn _start() {
     let autoplay = t.opened_with_file;
     t.load(autoplay);
     commit_scene(&mut t);
+    let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];
 
     loop {
         // Clock and pump run on EVERY turn, not only when the poll came up
@@ -1024,10 +1007,10 @@ pub extern "C" fn _start() {
         t.pump();
         t.video_tick();
 
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
-                let plen = match &ev { Event::Open(s) => copy_payload(s), _ => 0 };
-                let outcome = handle(&mut t, ev, payload_str(plen));
+                let payload = match &ev { Event::Open(s) => s.clone(), _ => String::new() };
+                let outcome = handle(&mut t, ev, &payload);
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Render => { commit_scene(&mut t); t.shown_s = -1; }

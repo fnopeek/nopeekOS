@@ -39,36 +39,32 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::RENDER, caps::ext::SHELL];
 
+use nopeek_widgets::host;
+
+// The two calls only the file dialog makes; the shared ones are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_pick_result(path_ptr: i32, path_len: i32) -> i32;
     fn npk_pick_mkdir(path_ptr: i32, path_len: i32) -> i32;
-    fn npk_window_set_modal(modal: i32) -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+fn pick_result(path: &str) {
+    // SAFETY: FFI; the kernel validates the range.
+    unsafe { npk_pick_result(path.as_ptr() as i32, path.len() as i32) };
 }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
+fn pick_mkdir(path: &str) -> bool {
+    // SAFETY: FFI; the kernel validates the range.
+    unsafe { npk_pick_mkdir(path.as_ptr() as i32, path.len() as i32) == 0 }
 }
 
-fn close_self() { unsafe { let _ = npk_close_widget(); } }
+fn log(msg: &str) { host::log_serial(msg); }
 
 /// Answer the requester and go away. An empty path means cancelled.
 fn answer(path: &str) {
-    unsafe { let _ = npk_pick_result(path.as_ptr() as i32, path.len() as i32); }
-    close_self();
+    pick_result(path);
+    host::close_widget();
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -150,83 +146,31 @@ fn fill(template: &str, value: &str) -> String {
 // ── Buffers ───────────────────────────────────────────────────────────
 
 const EVENT_BUF_SIZE: usize = 8 * 1024;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 // Directory listings. npkFS names are long; a deep home dir with many
 // files needs room. Oversized rather than truncating a listing silently.
 const LIST_BUF_SIZE: usize = 256 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-
-// Separate scratch for the per-folder child count — the outer listing is
-// still being read out of LIST_BUF while these run.
+// The per-folder child count reads only how many entries there are.
 const COUNT_BUF_SIZE: usize = 64 * 1024;
-static mut COUNT_BUF: [u8; COUNT_BUF_SIZE] = [0; COUNT_BUF_SIZE];
-
 const ARG_CAP: usize = 1024;
-static mut ARG_BUF: [u8; ARG_CAP] = [0; ARG_CAP];
-
 const NAME_CAP: usize = 128;
-static mut NAME_BUF: [u8; NAME_CAP] = [0; NAME_CAP];
-
-// InputChange hands us a heap String that `alloc_reset` frees before
-// `handle` runs — copy it out first, or it is a use-after-free.
-const PAYLOAD_CAP: usize = 1024;
-static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
-
-fn copy_payload(s: &str) -> usize {
-    let n = s.len().min(PAYLOAD_CAP);
-    let dst = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), dst, n); }
-    n
-}
-
-fn payload_str(len: usize) -> &'static str {
-    let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
-    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(slice).unwrap_or("")
-}
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-// ── Bump allocator ────────────────────────────────────────────────────
-
-const HEAP_SIZE: usize = 2 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { log("[pick] panic!"); core::arch::wasm32::unreachable() }
 
-fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
-fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 
 // ── Action ids ────────────────────────────────────────────────────────
 
@@ -296,8 +240,6 @@ impl Pick {
             dir,
             entries:  Vec::new(),
             selected: None,
-            // Pre-allocate so typing doesn't reallocate past the
-            // persistent mark and get freed by the next alloc_reset.
             name:     String::with_capacity(NAME_CAP),
             history:  Vec::with_capacity(16),
             confirm_overwrite: false,
@@ -411,9 +353,7 @@ impl Pick {
         let name = self.folder_name.trim().to_string();
         if !can_commit_name(&name) { return false; }
         let path = self.join(&name);
-        let ok = unsafe {
-            npk_pick_mkdir(path.as_ptr() as i32, path.len() as i32) == 0
-        };
+        let ok = pick_mkdir(&path);
         self.new_folder = false;
         if ok {
             self.enter_dir(path);
@@ -455,19 +395,16 @@ impl Pick {
 // ── Filesystem ────────────────────────────────────────────────────────
 
 fn read_launch_arg() -> String {
-    let buf_ptr = core::ptr::addr_of_mut!(ARG_BUF) as *mut u8;
-    let n = unsafe { npk_launch_arg(buf_ptr as i32, ARG_CAP as i32) };
-    if n <= 0 { return String::new(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    core::str::from_utf8(slice).unwrap_or("").to_string()
+    let mut buf = [0u8; ARG_CAP];
+    let n = host::launch_arg(&mut buf).unwrap_or(0);
+    core::str::from_utf8(&buf[..n]).unwrap_or("").to_string()
 }
 
 fn read_home_dir() -> String {
-    let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
-    let n = unsafe { npk_home_dir(buf_ptr as i32, NAME_CAP as i32) };
-    if n <= 0 { return String::from("home"); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match core::str::from_utf8(slice) {
+    let mut buf = [0u8; NAME_CAP];
+    let n = host::home_dir(&mut buf).unwrap_or(0);
+    if n == 0 { return String::from("home"); }
+    match core::str::from_utf8(&buf[..n]) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => String::from("home"),
     }
@@ -476,13 +413,10 @@ fn read_home_dir() -> String {
 /// Immediate children of `dir`, folders first then files, each group
 /// sorted by name. Wire per line: `name\0size(8)\0is_dir(1)\0mtime(8)`.
 fn list_dir(dir: &str) -> Vec<Entry> {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(dir.as_ptr() as i32, dir.len() as i32,
-                    buf_ptr as i32, LIST_BUF_SIZE as i32, 0)
-    };
-    if n <= 0 { return Vec::new(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
+    if n == 0 { return Vec::new(); }
+    let slice = &buf[..n];
 
     let mut out: Vec<Entry> = Vec::new();
     for e in nopeek_widgets::fs::list_entries(slice) {
@@ -508,17 +442,11 @@ fn list_dir(dir: &str) -> Vec<Entry> {
     out
 }
 
-/// Number of entries directly inside `dir`. Uses its own buffer so it can
-/// run while the outer listing is still being parsed out of `LIST_BUF`.
+/// Number of entries directly inside `dir`.
 fn count_children(dir: &str) -> usize {
-    let buf_ptr = core::ptr::addr_of_mut!(COUNT_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(dir.as_ptr() as i32, dir.len() as i32,
-                    buf_ptr as i32, COUNT_BUF_SIZE as i32, 0)
-    };
-    if n <= 0 { return 0; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    nopeek_widgets::fs::list_entries(slice)
+    let mut buf = alloc::vec![0u8; COUNT_BUF_SIZE];
+    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
+    nopeek_widgets::fs::list_entries(&buf[..n])
         .filter(|e| e.name != ".dir")
         .count()
 }
@@ -534,11 +462,7 @@ fn clamp_str(s: &str, max: usize) -> &str {
 }
 
 fn path_exists(path: &str) -> bool {
-    let mut out = [0u8; 17];
-    let r = unsafe {
-        npk_fs_stat(path.as_ptr() as i32, path.len() as i32, out.as_mut_ptr() as i32)
-    };
-    r > 0
+    host::fs_stat(path).is_some()
 }
 
 // ── Render ────────────────────────────────────────────────────────────
@@ -1097,7 +1021,7 @@ fn commit_tree(p: &Pick) {
     // Always through `wire::encode` — a bare postcard payload is rejected
     // by the compositor and the window stays blank.
     match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[pick] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[pick] commit failed"); } }
         Err(_) => log("[pick] encode failed"),
     }
 }
@@ -1106,23 +1030,21 @@ fn commit_tree(p: &Pick) {
 pub extern "C" fn _start() {
     // The kernel already made this window a centred overlay; modal keeps
     // stray keystrokes out of the app behind us while a dialog is up.
-    unsafe { let _ = npk_window_set_modal(1); }
+    host::window_set_modal(true);
 
     let mut p = Pick::new();
-    let mut persistent_mark = alloc_mark();
+    let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];
 
     commit_tree(&p);
 
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
-                let plen = match &ev {
-                    Event::InputChange { value } => copy_payload(value),
-                    _ => 0,
+                let payload = match &ev {
+                    Event::InputChange { value } => value.clone(),
+                    _ => String::new(),
                 };
-                alloc_reset(persistent_mark);
-                let outcome = handle(&mut p, ev, payload_str(plen));
-                persistent_mark = alloc_mark();
+                let outcome = handle(&mut p, ev, &payload);
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Rerender => commit_tree(&p),
@@ -1130,7 +1052,7 @@ pub extern "C" fn _start() {
                     Outcome::Done => return,
                 }
             }
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => host::sleep_ms(16),
             PollResult::WindowGone => return,
         }
     }

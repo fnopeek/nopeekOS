@@ -29,31 +29,55 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::EXEC | caps::RENDER, caps::ext::SHELL];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The calls only the bar makes; the shared ones are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
     fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
-    fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_battery() -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
-    fn npk_audio_get_volume() -> i32;
-    fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-    fn npk_unix_time() -> i64;
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+fn window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_panel(edge, behavior, w, h) };
 }
+
+/// Live bar state into `buf`; the raw length, `<= 0` when there is none.
+fn bar_state(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_bar_state(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// `(status << 8) | percent`, or -1 without a battery.
+fn battery() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_battery() }
+}
+
+fn workspace_switch(n: u32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_workspace_switch(n as i32) };
+}
+
+fn power() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_power() };
+}
+
+fn launch(app: &str, arg: &str) {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe {
+        npk_launch(app.as_ptr() as i32, app.len() as i32, arg.as_ptr() as i32, arg.len() as i32)
+    };
+}
+
+fn log(msg: &str) { host::log_serial(msg); }
 
 // Panel edge/behavior (see docs/spec/PANEL.md / compositor set_panel).
 const EDGE_TOP: i32 = 1;
@@ -126,56 +150,15 @@ const SEP_H: u16 = 14;
 /// horizontal allowance, unlike the dock's shelf.
 const WS_RADIUS: u8 = Radius::Pill as u8;
 
-// ── Bump allocator with a reset mark ─────────────────────────────────
-// Config is parsed once (below MARK and kept); the per-frame widget tree
-// is rebuilt above MARK and reclaimed each commit by resetting to MARK,
-// so re-committing every clock tick never leaks.
-const HEAP_SIZE: usize = 256 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-static mut HEAP_MARK: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + layout.size()); }
-        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
-
-// u32 → decimal &str in a static buffer (no alloc — safe in the panic handler
-// even when the panic IS an allocation failure).
-static mut NUMBUF: [u8; 12] = [0; 12];
-fn u32_str(mut n: u32) -> &'static str {
-    let b = core::ptr::addr_of_mut!(NUMBUF) as *mut u8;
-    let buf = unsafe { core::slice::from_raw_parts_mut(b, 12) };
-    let mut i = 12;
-    if n == 0 {
-        i -= 1;
-        buf[i] = b'0';
-    }
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    unsafe { core::str::from_utf8_unchecked(&buf[i..]) }
-}
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log("[bar] panic!");
     if let Some(loc) = info.location() {
         log(loc.file());
-        log(u32_str(loc.line()));
+        log(nopeek_widgets::heap::u32_str(loc.line()));
     }
     // Trap — do not `loop {}`. A wasm `unreachable` makes `_start`'s host call
     // return Err, so the kernel tears this instance down and frees its worker
@@ -184,19 +167,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
-
 const EVENT_BUF_SIZE: usize = 64;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -208,6 +184,9 @@ fn poll_event() -> PollResult {
 // plus "font: <px>" / "icon: <px>" (see read_sizes).
 // Missing / empty → built-in default. Unknown widget names are skipped
 // at render time.
+const CFG_PATH: &str = "sys/config/bar";
+const CFG_MAX: usize = 2048;
+
 struct Segments { left: Vec<String>, center: Vec<String>, right: Vec<String> }
 
 fn default_segments() -> Segments {
@@ -219,14 +198,10 @@ fn default_segments() -> Segments {
 }
 
 fn read_segments() -> Segments {
-    const CFG: usize = 2048;
-    static mut BUF: [u8; CFG] = [0; CFG];
-    let path = "sys/config/bar";
-    let p = core::ptr::addr_of_mut!(BUF) as *mut u8;
-    let n = unsafe { npk_fetch(path.as_ptr() as i32, path.len() as i32, p as i32, CFG as i32) };
-    if n <= 0 { return default_segments(); }
-    let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
-    let Ok(text) = core::str::from_utf8(bytes) else { return default_segments() };
+    let mut buf = [0u8; CFG_MAX];
+    let n = host::fetch(CFG_PATH, &mut buf).unwrap_or(0);
+    if n == 0 { return default_segments(); }
+    let Ok(text) = core::str::from_utf8(&buf[..n]) else { return default_segments() };
     let mut seg = Segments { left: Vec::new(), center: Vec::new(), right: Vec::new() };
     let mut any = false;
     for line in text.lines() {
@@ -245,27 +220,17 @@ fn read_segments() -> Segments {
 }
 
 // ── Config: sizing ───────────────────────────────────────────────────
-// Same file, two more lines: "font: 15", "icon: 18". Kept in statics and
-// re-read on config change, so tuning them is edit-and-look — no heap
-// involved, which is what lets this run above the bump-allocator mark.
-static mut FONT_PX: u16 = FONT_DEFAULT;
-static mut ICON_PX: u16 = ICON_DEFAULT;
+// Same file, two more lines: "font: 15", "icon: 18". Re-read on config
+// change, so tuning them is edit-and-look.
 
-fn font_px() -> u16 { unsafe { *(&raw const FONT_PX) } }
-fn icon_px() -> u16 { unsafe { *(&raw const ICON_PX) } }
-
-/// Re-read the two size lines. True when either changed.
-fn read_sizes() -> bool {
-    const CFG: usize = 2048;
-    static mut SBUF: [u8; CFG] = [0; CFG];
-    let path = "sys/config/bar";
-    let p = core::ptr::addr_of_mut!(SBUF) as *mut u8;
-    let n = unsafe { npk_fetch(path.as_ptr() as i32, path.len() as i32, p as i32, CFG as i32) };
+/// The two size lines, clamped; the defaults where a line is missing.
+fn read_sizes() -> (u16, u16) {
+    let mut buf = [0u8; CFG_MAX];
+    let n = host::fetch(CFG_PATH, &mut buf).unwrap_or(0);
     let mut font = FONT_DEFAULT;
     let mut icon = ICON_DEFAULT;
     if n > 0 {
-        let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
-        if let Ok(text) = core::str::from_utf8(bytes) {
+        if let Ok(text) = core::str::from_utf8(&buf[..n]) {
             for line in text.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') { continue; }
@@ -279,96 +244,182 @@ fn read_sizes() -> bool {
             }
         }
     }
-    // SAFETY: single-threaded WASM app.
-    unsafe {
-        let changed = *(&raw const FONT_PX) != font || *(&raw const ICON_PX) != icon;
-        *(&raw mut FONT_PX) = font;
-        *(&raw mut ICON_PX) = icon;
-        changed
-    }
+    (font, icon)
 }
 
 // ── Live state ───────────────────────────────────────────────────────
 // `npk_bar_state` → "HH:MM\n<ws_count>\n<ws_active>\n<title>".
 const STATE_MAX: usize = 256;
-static mut STATE_BUF: [u8; STATE_MAX] = [0; STATE_MAX];
-static mut LAST_BUF: [u8; STATE_MAX] = [0; STATE_MAX];
-static mut LAST_LEN: usize = usize::MAX;
-// Battery, polled alongside bar_state. -1 = no battery (segment hidden);
-// else (status<<8)|percent. Sentinel i32::MIN = never read yet.
-static mut BAT: i32 = -1;
-static mut LAST_BAT: i32 = i32::MIN;
-// Master volume (0..=100), polled each tick (cheap atomic). i32::MIN = unread.
-static mut VOL: i32 = 80;
-static mut LAST_VOL: i32 = i32::MIN;
-static mut PRE_MUTE: i32 = 50; // level restored on un-mute
 
-struct BarState<'a> { clock: &'a str, ws_count: u8, ws_active: u8, title: &'a str, bat: i32, vol: u8 }
+// `npk_window_titles` → "<flags>\t<workspace>\t<title>" per open window.
+const WINS_CAP: usize = 2048;
 
-fn parse_state(s: &str) -> BarState<'_> {
-    let mut it = s.splitn(4, '\n');
-    let clock = it.next().unwrap_or("");
-    let ws_count = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let ws_active = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let title = it.next().unwrap_or("");
-    BarState { clock, ws_count, ws_active, title, bat: -1, vol: 0 }
+struct Bar {
+    seg: Segments,
+    font_px: u16,
+    icon_px: u16,
+    /// The bar state of the last commit; `None` before the first.
+    last: Option<([u8; STATE_MAX], usize)>,
+    /// Battery, polled alongside bar_state. -1 = no battery (segment
+    /// hidden); else (status<<8)|percent. `i32::MIN` = never read yet.
+    bat: i32,
+    /// Master volume (0..=100), polled each tick. `i32::MIN` = unread.
+    vol: i32,
+    /// Level restored on un-mute.
+    pre_mute: i32,
+    /// The window list as last read.
+    wins: Vec<u8>,
+    /// Window titles carry the module name; the catalog maps that to the
+    /// app's declared icon. Loaded once at startup.
+    catalog: Vec<app_catalog::AppEntry>,
 }
 
-// ── Window list ──────────────────────────────────────────────────────
-// `npk_window_titles` → "<flags>\t<workspace>\t<title>" per open window.
-// Kept in a static buffer: the render loop resets the bump allocator
-// before every commit, so heap-derived state would dangle a frame later.
-const WINS_CAP: usize = 2048;
-static mut WINS: [u8; WINS_CAP] = [0; WINS_CAP];
-static mut WINS_LEN: usize = 0;
+/// What one frame renders from.
+struct BarState<'a> {
+    clock: &'a str,
+    ws_count: u8,
+    ws_active: u8,
+    title: &'a str,
+    bat: i32,
+    vol: u8,
+    font_px: u16,
+    icon_px: u16,
+    wins: &'a str,
+    catalog: &'a [app_catalog::AppEntry],
+}
 
-/// Re-read the window list; true when it changed since the last read.
-fn refresh_windows() -> bool {
-    let mut scratch = [0u8; WINS_CAP];
-    let n = unsafe { npk_window_titles(scratch.as_mut_ptr() as i32, WINS_CAP as i32) };
-    let len = if n > 0 { n as usize } else { 0 };
-    // SAFETY: single-threaded WASM app.
-    unsafe {
-        if *(&raw const WINS_LEN) == len && (&*(&raw const WINS))[..len] == scratch[..len] {
+impl Bar {
+    fn new() -> Self {
+        let (font_px, icon_px) = read_sizes();
+        Bar {
+            seg: read_segments(),
+            font_px,
+            icon_px,
+            last: None,
+            bat: i32::MIN,
+            vol: i32::MIN,
+            pre_mute: 50,
+            wins: Vec::new(),
+            catalog: app_catalog::load(&[]),
+        }
+    }
+
+    /// Re-read the two size lines. True when either changed.
+    fn reload_sizes(&mut self) -> bool {
+        let (font, icon) = read_sizes();
+        let changed = self.font_px != font || self.icon_px != icon;
+        self.font_px = font;
+        self.icon_px = icon;
+        changed
+    }
+
+    /// Re-read the window list; true when it changed since the last read.
+    fn refresh_windows(&mut self) -> bool {
+        let mut scratch = [0u8; WINS_CAP];
+        let len = host::window_titles(&mut scratch).unwrap_or(0).min(WINS_CAP);
+        if self.wins[..] == scratch[..len] {
             return false;
         }
-        (&mut *(&raw mut WINS))[..len].copy_from_slice(&scratch[..len]);
-        *(&raw mut WINS_LEN) = len;
+        self.wins.clear();
+        self.wins.extend_from_slice(&scratch[..len]);
+        true
     }
-    true
-}
 
-fn windows_text() -> &'static str {
-    // SAFETY: single-threaded; only refresh_windows writes the buffer.
-    unsafe {
-        let len = *(&raw const WINS_LEN);
-        core::str::from_utf8(&(&*(&raw const WINS))[..len]).unwrap_or("")
+    /// Read live state; true if it changed since the last commit (and
+    /// remember it as the new last state).
+    fn state_changed(&mut self) -> bool {
+        let mut cur = [0u8; STATE_MAX];
+        let n = bar_state(&mut cur);
+        if n <= 0 { return false; }
+        let n = (n as usize).min(STATE_MAX);
+        // Battery and volume fold into the same change gate. The bar only
+        // wakes when something changed (or the minute turned), so no
+        // throttle: with the AML driver the battery is a cached value, and
+        // the kernel wakes us when it moves.
+        let bat = battery();
+        let vol = host::audio_volume().map_or(-1, |v| v as i32);
+        let same = matches!(&self.last, Some((buf, len)) if buf[..*len] == cur[..n]);
+        // The window list feeds the occupied-workspace hints, and a window
+        // opening on another workspace leaves bar_state untouched — so it
+        // needs its own vote in the change gate.
+        let wins_changed = self.refresh_windows();
+        if same && bat == self.bat && vol == self.vol && !wins_changed { return false; }
+        self.last = Some((cur, n));
+        self.bat = bat;
+        self.vol = vol;
+        true
+    }
+
+    /// Render and commit the last state, if there is one.
+    fn rebuild_and_commit(&self) {
+        let Some((buf, len)) = &self.last else { return };
+        let s = core::str::from_utf8(&buf[..*len]).unwrap_or("");
+        let mut it = s.splitn(4, '\n');
+        let st = BarState {
+            clock: it.next().unwrap_or(""),
+            ws_count: it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            ws_active: it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            title: it.next().unwrap_or(""),
+            bat: self.bat,
+            vol: self.vol as u8,
+            font_px: self.font_px,
+            icon_px: self.icon_px,
+            wins: core::str::from_utf8(&self.wins).unwrap_or(""),
+            catalog: &self.catalog,
+        };
+        let tree = build_tree(&self.seg, &st);
+        match wire::encode(&tree) {
+            Ok(bytes) => { if !host::scene_commit(&bytes) { log("[bar] commit failed"); } }
+            Err(_) => log("[bar] encode failed"),
+        }
+    }
+
+    fn handle(&mut self, ev: Event) {
+        match ev {
+            // Left-click. Screenshot icon → region select. Power → off.
+            // Otherwise a workspace pill.
+            Event::Action(ActionId(id)) => {
+                if id == SHOT {
+                    launch("snap", "region");
+                } else if id == POWER {
+                    power();
+                } else if id == VOL_OPEN {
+                    // Open the slider as its own centred overlay (drun-style).
+                    launch("volume", "");
+                } else if id >= WS_BASE && id < POWER {
+                    workspace_switch(id - WS_BASE);
+                }
+            }
+            // Right-click: screenshot icon → full-screen capture; speaker → mute.
+            Event::ContextAction(ActionId(id)) => {
+                if id == SHOT {
+                    launch("snap", "full");
+                } else if id == VOL_OPEN {
+                    let v = host::audio_volume().unwrap_or(0);
+                    if v > 0 {
+                        self.pre_mute = v as i32;
+                        host::audio_set_volume(0);
+                    } else {
+                        host::audio_set_volume(self.pre_mute.max(10) as u32);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
 /// Does workspace `ws` hold at least one window?
-fn workspace_occupied(ws: u8) -> bool {
-    windows_text().lines().any(|line| {
+fn workspace_occupied(wins: &str, ws: u8) -> bool {
+    wins.lines().any(|line| {
         let mut cols = line.split('\t');
         cols.next();
         cols.next().and_then(|w| w.trim().parse::<u8>().ok()) == Some(ws)
     })
 }
 
-// ── App icons ────────────────────────────────────────────────────────
-// Window titles carry the module name; the catalog maps that to the
-// app's declared icon. Loaded once at startup (below the heap mark).
-static mut CATALOG: Option<Vec<app_catalog::AppEntry>> = None;
-
-fn load_catalog() {
-    // SAFETY: single-threaded; called once before the render loop.
-    unsafe { *(&raw mut CATALOG) = Some(app_catalog::load(&[])); }
-}
-
-fn icon_for_app(title: &str) -> IconId {
-    // SAFETY: single-threaded; written once by load_catalog.
-    let cat = unsafe { (*(&raw const CATALOG)).as_ref() };
-    cat.and_then(|c| c.iter().find(|e| e.launch_name == title))
+fn icon_for_app(catalog: &[app_catalog::AppEntry], title: &str) -> IconId {
+    catalog.iter().find(|e| e.launch_name == title)
         .map(|e| e.icon)
         .unwrap_or(IconId::Monitor)
 }
@@ -384,13 +435,13 @@ fn cell(child: Widget, modifiers: Vec<Modifier>) -> Widget {
 
 /// Bar text: the style picks the face, `FontSize` the size. Every string
 /// in the bar goes through here so one config line moves all of them.
-fn bar_text(content: String, style: TextStyle, mut modifiers: Vec<Modifier>) -> Widget {
-    modifiers.push(Modifier::FontSize(font_px()));
+fn bar_text(st: &BarState, content: String, style: TextStyle, mut modifiers: Vec<Modifier>) -> Widget {
+    modifiers.push(Modifier::FontSize(st.font_px));
     Widget::Text { content, style, modifiers }
 }
 
 /// Icon plus a mono value (volume, battery) as one hoverable unit.
-fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
+fn readout(st: &BarState, icon: IconId, icon_mods: Vec<Modifier>, value: String,
            click: Option<ActionId>) -> Widget {
     let mut mods: Vec<Modifier> = alloc::vec![
         Modifier::MinHeight(BAND_H),
@@ -408,8 +459,8 @@ fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
     }
     Widget::Row {
         children: alloc::vec![
-            Widget::Icon { id: icon, size: icon_px(), modifiers: icon_mods },
-            bar_text(value, TextStyle::Mono, Vec::new()),
+            Widget::Icon { id: icon, size: st.icon_px, modifiers: icon_mods },
+            bar_text(st, value, TextStyle::Mono, Vec::new()),
         ],
         spacing: Spacing::Xs.as_u16(),
         align: Align::Center,
@@ -419,7 +470,7 @@ fn readout(icon: IconId, icon_mods: Vec<Modifier>, value: String,
 
 /// Tray icon cell: rest is `OnSurfaceMuted` on no background, hover
 /// fills `SurfaceHover` (docs/spec/UI_REFRESH.md §3 `toolbar_button`).
-fn tray_cell(icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
+fn tray_cell(st: &BarState, icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
     let mut mods: Vec<Modifier> = alloc::vec![
         Modifier::MinWidth(CELL_W),
         Modifier::MinHeight(BAND_H),
@@ -431,7 +482,7 @@ fn tray_cell(icon: IconId, click: Option<ActionId>, tint: Token) -> Widget {
         ]),
     ];
     if let Some(a) = click { mods.push(Modifier::OnClick(a)); }
-    cell(Widget::Icon { id: icon, size: icon_px(), modifiers: Vec::new() }, mods)
+    cell(Widget::Icon { id: icon, size: st.icon_px, modifiers: Vec::new() }, mods)
 }
 
 // No per-widget Padding (the bar is short — the enclosing card supplies
@@ -457,7 +508,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     mods.push(Modifier::Background(Token::Accent));
                     mods.push(Modifier::Tint(Token::OnAccent));
                 } else {
-                    if !workspace_occupied(i) {
+                    if !workspace_occupied(st.wins, i) {
                         mods.push(Modifier::Tint(Token::OnSurfaceFaint));
                     }
                     // Same shape as the cell: a hover rectangle with a different radius
@@ -468,7 +519,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                     ]));
                 }
                 row.push(cell(
-                    bar_text(alloc::format!("{}", i + 1), TextStyle::Mono, Vec::new()),
+                    bar_text(st, alloc::format!("{}", i + 1), TextStyle::Mono, Vec::new()),
                     mods));
             }
             alloc::vec![Widget::Row {
@@ -518,17 +569,17 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                             //
                             // The width is computed: half the remaining cell minus the gap
                             // the row already sets between mark and icon. It follows
-                            // `icon_px()`, which comes from the config.
+                            // `icon_px`, which comes from the config.
                             prefab::mark(
-                                (WS_W.saturating_sub(icon_px()) / 2)
+                                (WS_W.saturating_sub(st.icon_px) / 2)
                                     .saturating_sub(Spacing::Sm.as_u16()),
                                 1, None),
                             Widget::Icon {
-                                id: icon_for_app(st.title),
-                                size: icon_px(),
+                                id: icon_for_app(st.catalog, st.title),
+                                size: st.icon_px,
                                 modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
                             },
-                            bar_text(st.title.to_string(), TextStyle::Body,
+                            bar_text(st, st.title.to_string(), TextStyle::Body,
                                 alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)]),
                         ],
                         spacing: Spacing::Sm.as_u16(),
@@ -538,7 +589,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
                 ]
             }
         }
-        "clock" => alloc::vec![bar_text(st.clock.to_string(), TextStyle::Mono, Vec::new())],
+        "clock" => alloc::vec![bar_text(st, st.clock.to_string(), TextStyle::Mono, Vec::new())],
         // Battery: hidden entirely when no smart battery responds (bat < 0,
         // e.g. desktops/QEMU). Icon picked by charge level; charging shows
         // the bolt; a near-empty pack tints Danger.
@@ -562,11 +613,11 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             if status == 0 && percent <= 10 {
                 icon_mods.push(Modifier::Tint(Token::Danger));
             }
-            alloc::vec![readout(icon, icon_mods,
+            alloc::vec![readout(st, icon, icon_mods,
                 alloc::format!("{}%", percent), None)]
         }
         "screenshot" => alloc::vec![
-            tray_cell(IconId::Camera, Some(ActionId(SHOT)), Token::OnSurfaceMuted)
+            tray_cell(st, IconId::Camera, Some(ActionId(SHOT)), Token::OnSurfaceMuted)
         ],
         // Separator before the power button, in its own cell — built like
         // the one between workspaces and app. Centred in the cell, so the
@@ -596,7 +647,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             modifiers: alloc::vec![Modifier::MinWidth(16)],
         }],
         "power" => alloc::vec![
-            tray_cell(IconId::Power, Some(ActionId(POWER)), Token::Danger)
+            tray_cell(st, IconId::Power, Some(ActionId(POWER)), Token::Danger)
         ],
         // Volume: speaker icon + level. Left-click either → launch the
         // `volume` overlay slider; right-click → mute. Reflects the kernel
@@ -606,7 +657,7 @@ fn segment_widgets(name: &str, st: &BarState) -> Vec<Widget> {
             let icon = if v == 0 { IconId::SpeakerX }
                        else if v <= 50 { IconId::SpeakerLow }
                        else { IconId::SpeakerHigh };
-            alloc::vec![readout(icon, Vec::new(),
+            alloc::vec![readout(st, icon, Vec::new(),
                 alloc::format!("{}%", v), Some(ActionId(VOL_OPEN)))]
         }
         _ => Vec::new(),
@@ -685,156 +736,51 @@ fn build_tree(seg: &Segments, st: &BarState) -> Widget {
     }
 }
 
-/// Read live state into STATE_BUF; return Some(len) if it changed since
-/// the last commit (and update LAST_BUF), else None.
-fn state_changed() -> Option<usize> {
-    let p = core::ptr::addr_of_mut!(STATE_BUF) as *mut u8;
-    let n = unsafe { npk_bar_state(p as i32, STATE_MAX as i32) };
-    if n <= 0 { return None; }
-    let n = n as usize;
-    // Battery and volume fold into the same change gate. The bar only
-    // wakes when something changed (or the minute turned), so no
-    // throttle: with the AML driver the battery is a cached value, and
-    // the kernel wakes us when it moves.
-    let bat = unsafe { npk_battery() };
-    let vol = unsafe { npk_audio_get_volume() };
-    let cur = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
-    let last = unsafe {
-        let lp = core::ptr::addr_of!(LAST_BUF) as *const u8;
-        let ll = LAST_LEN;
-        if ll == usize::MAX { None } else { Some(core::slice::from_raw_parts(lp, ll)) }
-    };
-    let bat_same = bat == unsafe { LAST_BAT };
-    let vol_same = vol == unsafe { LAST_VOL };
-    // The window list feeds the occupied-workspace hints, and a window
-    // opening on another workspace leaves bar_state untouched — so it
-    // needs its own vote in the change gate.
-    let wins_changed = refresh_windows();
-    if last == Some(cur) && bat_same && vol_same && !wins_changed { return None; }
-    unsafe {
-        let lp = core::ptr::addr_of_mut!(LAST_BUF) as *mut u8;
-        core::ptr::copy_nonoverlapping(p, lp, n);
-        LAST_LEN = n;
-        LAST_BAT = bat;
-        BAT = bat;
-        LAST_VOL = vol;
-        VOL = vol;
-    }
-    Some(n)
-}
-
-fn rebuild_and_commit(seg: &Segments, len: usize) {
-    // Reclaim the previous frame's tree; config (below the mark) survives.
-    unsafe { HEAP_POS = HEAP_MARK; }
-    let s = unsafe {
-        core::str::from_utf8(core::slice::from_raw_parts(
-            core::ptr::addr_of!(STATE_BUF) as *const u8, len)).unwrap_or("")
-    };
-    let mut st = parse_state(s);
-    st.bat = unsafe { BAT };
-    st.vol = unsafe { VOL as u8 };
-    let tree = build_tree(seg, &st);
-    match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[bar] commit failed"); } }
-        Err(_) => log("[bar] encode failed"),
-    }
-}
-
-fn launch(app: &str, arg: &str) {
-    unsafe {
-        let _ = npk_launch(app.as_ptr() as i32, app.len() as i32,
-                           arg.as_ptr() as i32, arg.len() as i32);
-    }
-}
-
-fn handle(ev: Event) {
-    match ev {
-        // Left-click. Screenshot icon → region select. Power → off.
-        // Otherwise a workspace pill.
-        Event::Action(ActionId(id)) => {
-            if id == SHOT {
-                launch("snap", "region");
-            } else if id == POWER {
-                unsafe { let _ = npk_power(); }
-            } else if id == VOL_OPEN {
-                // Open the slider as its own centred overlay (drun-style).
-                launch("volume", "");
-            } else if id >= WS_BASE && id < POWER {
-                unsafe { let _ = npk_workspace_switch((id - WS_BASE) as i32); }
-            }
-        }
-        // Right-click: screenshot icon → full-screen capture; speaker → mute.
-        Event::ContextAction(ActionId(id)) => {
-            if id == SHOT {
-                launch("snap", "full");
-            } else if id == VOL_OPEN {
-                let v = unsafe { npk_audio_get_volume() };
-                if v > 0 {
-                    unsafe { PRE_MUTE = v; let _ = npk_audio_set_volume(0); }
-                } else {
-                    unsafe { let _ = npk_audio_set_volume(PRE_MUTE.max(10)); }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    let seg = read_segments();
-    let _ = read_sizes();
-    load_catalog();                    // title → app icon, resolved once
-    unsafe { HEAP_MARK = HEAP_POS; }   // freeze config; tree rebuilds above this
+    let mut bar = Bar::new();
 
     // Declare the top strut panel. `h` is the band height we need (room for
     // 24px tray icons + pill padding); the compositor reserves `margin + h`
     // and sizes our window to it. `w` is advisory.
-    unsafe { let _ = npk_window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 36); }
+    window_set_panel(EDGE_TOP, BEHAVIOR_STRUT, 1920, 36);
 
     // First commit.
-    if let Some(len) = state_changed() {
-        rebuild_and_commit(&seg, len);
+    if bar.state_changed() {
+        bar.rebuild_and_commit();
     }
 
     // Wait for a change, don't poll for one. The kernel wakes the bar:
     // WAIT_INPUT for a click, WAIT_STATE when a watched topic changes
     // (windows, battery, volume, a config file), and the deadline is the
     // next full minute for the clock. docs/plan/CORES_AND_EVENTS.md.
-    const WAIT_INPUT: i32 = 1;
-    const WAIT_STATE: i32 = 32;
-    let mut fired = 0;
+    const WAIT_INPUT: u32 = 1;
+    const WAIT_STATE: u32 = 32;
+    let mut fired = 0u32;
+    let mut event_buf = [0u8; EVENT_BUF_SIZE];
 
     loop {
         // Drain any pending click events first.
         loop {
-            match poll_event() {
-                PollResult::Event(ev) => handle(ev),
+            match poll_event(&mut event_buf) {
+                PollResult::Event(ev) => bar.handle(ev),
                 PollResult::Empty => break,
                 PollResult::WindowGone => return,
             }
         }
         // Sizes come from `sys/config/bar` and are tuned by eye, so an edit
         // must show without a restart — a config write is a watched topic.
-        let resized = fired & WAIT_STATE != 0 && read_sizes();
+        let resized = fired & WAIT_STATE != 0 && bar.reload_sizes();
         // Re-render only when the live state changed (clock minute / title
-        // / active workspace), so the tree isn't rebuilt every wake.
-        match state_changed() {
-            Some(len) => rebuild_and_commit(&seg, len),
-            // State is unchanged but the sizes moved — repaint at the last
-            // committed length (STATE_BUF still holds that same state).
-            None if resized => {
-                let len = unsafe { *(&raw const LAST_LEN) };
-                if len != usize::MAX && len <= STATE_MAX {
-                    rebuild_and_commit(&seg, len);
-                }
-            }
-            None => {}
+        // / active workspace) or the sizes moved, so the tree isn't rebuilt
+        // every wake.
+        if bar.state_changed() || resized {
+            bar.rebuild_and_commit();
         }
         // Until the next full minute, plus a little so the minute has
         // surely turned when we read the clock.
-        let now = unsafe { npk_unix_time() }.max(0);
+        let now = host::unix_time();
         let to_minute_ms = (60 - now % 60) * 1000 + 50;
-        fired = unsafe { npk_wait(WAIT_INPUT | WAIT_STATE, to_minute_ms as i32) };
+        fired = host::wait(WAIT_INPUT | WAIT_STATE, to_minute_ms as i32) as u32;
     }
 }

@@ -166,7 +166,7 @@ fn run_phase(
     for i in 0..count {
         let name = format!("{}/{}/{:04}", ROOT, label, i);
         let n = host::fetch(&name, &mut read_buf[..size + 32]);
-        if n != size as i32 {
+        if n != Some(size) {
             stats.failures += 1;
         }
     }
@@ -178,7 +178,7 @@ fn run_phase(
     write_buf[..8].copy_from_slice(&counter.to_le_bytes());
     let probe_name = format!("{}/{}/{:04}", ROOT, label, 0);
     let n = host::fetch(&probe_name, &mut read_buf[..size + 32]);
-    if n == size as i32 {
+    if n == Some(size) {
         if &read_buf[..size] != &write_buf[..size] {
             host::print("  WARN: byte mismatch on roundtrip probe — ");
             host::print(label);

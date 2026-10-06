@@ -175,8 +175,7 @@ impl Sink {
     pub fn flush(&mut self) -> bool {
         while self.out_sent < self.out_bytes {
             let left = self.out_bytes - self.out_sent;
-            let ptr = unsafe { (self.out.as_ptr() as *const u8).add(self.out_sent) };
-            let n = host::audio_submit(self.slot, ptr as i32, left as i32);
+            let n = host::audio_submit(self.slot, &pcm_bytes(&self.out)[self.out_sent..self.out_bytes]);
             if n <= 0 { return false; }
             let accepted = (n as usize).min(left);
             self.out_sent += accepted;
@@ -192,4 +191,12 @@ impl Sink {
         if self.slot >= 0 { host::audio_close(self.slot); }
         self.slot = -1;
     }
+}
+
+/// The samples as the little-endian bytes the mailbox takes.
+fn pcm_bytes(s: &[i16]) -> &[u8] {
+    // SAFETY: i16 has no padding and every byte pattern is a valid u8; the
+    // byte slice covers exactly the samples and borrows them. wasm32 is
+    // little-endian.
+    unsafe { core::slice::from_raw_parts(s.as_ptr() as *const u8, s.len() * 2) }
 }

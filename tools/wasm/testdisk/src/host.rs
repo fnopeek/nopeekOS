@@ -1,94 +1,37 @@
-//! Host function bindings for testdisk.wasm.
+//! Host calls for testdisk: the shared ones from `nopeek_widgets::host`,
+//! plus delete and the benchmark keys of `npk_sys_info`.
 
-#![allow(dead_code)]
+pub use nopeek_widgets::host::{fetch, log, print, store};
+use nopeek_widgets::host::sys_info;
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_print(ptr: i32, len: i32);
-    /// Direct-to-kernel-serial — bypasses the per-app output buffer
-    /// `npk_print` uses, so the message appears in real time.
-    fn npk_log(ptr: i32, len: i32);
-
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32,
-                   out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
-
-    /// Generic system-info accessor.
-    /// Key 10 → TSC frequency in MHz.
-    /// Key 19 → raw TSC ticks (monotonic).
-    fn npk_sys_info(key: i32) -> i64;
 }
 
-pub fn tsc_now() -> u64 { unsafe { npk_sys_info(19) as u64 } }
-pub fn tsc_mhz() -> u64 { unsafe { npk_sys_info(10) as u64 } }
+/// Raw TSC ticks (monotonic).
+pub fn tsc_now() -> u64 { sys_info(19) as u64 }
+/// TSC frequency in MHz.
+pub fn tsc_mhz() -> u64 { sys_info(10) as u64 }
 
 /// Bench probes — kernel-side, AVX2/AES-NI/raw-NVMe pathway.
 /// Keys 30..34. First call triggers ~100 ms of measurement, results
 /// are cached in the kernel until reboot.
-pub fn bench_blake3_mbs() -> u64    { unsafe { npk_sys_info(30) as u64 } }
-pub fn bench_aes_enc_mbs() -> u64   { unsafe { npk_sys_info(31) as u64 } }
-pub fn bench_aes_dec_mbs() -> u64   { unsafe { npk_sys_info(32) as u64 } }
-pub fn bench_raw_write_mbs() -> u64 { unsafe { npk_sys_info(33) as u64 } }
-pub fn bench_raw_read_mbs() -> u64  { unsafe { npk_sys_info(34) as u64 } }
+pub fn bench_blake3_mbs() -> u64    { sys_info(30) as u64 }
+pub fn bench_aes_enc_mbs() -> u64   { sys_info(31) as u64 }
+pub fn bench_aes_dec_mbs() -> u64   { sys_info(32) as u64 }
+pub fn bench_raw_write_mbs() -> u64 { sys_info(33) as u64 }
+pub fn bench_raw_read_mbs() -> u64  { sys_info(34) as u64 }
 
 /// Read-only FS integrity self-check (key 40). Runs the kernel's btree
 /// refcount scan now (not cached) and returns the total problem count
 /// (0 = clean, -1 = scan error). The detailed report is logged to serial
 /// by the kernel. Called at the end of a run so corruption surfaces before
 /// a reboot bricks the mount.
-pub fn fs_selfcheck() -> i64 { unsafe { npk_sys_info(40) } }
-
-pub fn print(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
-}
-
-/// Live-to-serial logging (used for "where did the time go" diagnostics).
-pub fn log(s: &str) {
-    unsafe { npk_log(s.as_ptr() as i32, s.len() as i32); }
-}
-
-/// Strict create — fails if `name` already exists. Caller is expected
-/// to delete first if overwrite is desired.
-pub fn store(name: &str, data: &[u8]) -> bool {
-    unsafe {
-        npk_store(name.as_ptr() as i32, name.len() as i32,
-                  data.as_ptr() as i32, data.len() as i32) == 0
-    }
-}
-
-/// Returns bytes written into `buf` on success, -1 on error / not found.
-pub fn fetch(name: &str, buf: &mut [u8]) -> i32 {
-    unsafe {
-        npk_fetch(name.as_ptr() as i32, name.len() as i32,
-                  buf.as_mut_ptr() as i32, buf.len() as i32)
-    }
-}
-
-/// Returns bytes written into `buf`. 0 if the prefix is empty / has no
-/// children, -1 on error.
-pub fn fs_list(prefix: &str, buf: &mut [u8], recursive: bool) -> i32 {
-    unsafe {
-        npk_fs_list(prefix.as_ptr() as i32, prefix.len() as i32,
-                    buf.as_mut_ptr() as i32, buf.len() as i32,
-                    if recursive { 1 } else { 0 })
-    }
-}
-
-/// 17 → wrote (size_u64 + is_dir_u8 + mtime_u64); 0 → not found;
-/// -1 → error.
-pub fn fs_stat(name: &str, out: &mut [u8; 17]) -> i32 {
-    unsafe {
-        npk_fs_stat(name.as_ptr() as i32, name.len() as i32, out.as_mut_ptr() as i32)
-    }
-}
+pub fn fs_selfcheck() -> i64 { sys_info(40) }
 
 pub fn delete(name: &str) -> bool {
+    // SAFETY: FFI; the kernel validates the range.
     unsafe { npk_fs_delete(name.as_ptr() as i32, name.len() as i32) == 0 }
 }
 
@@ -96,5 +39,5 @@ pub fn delete(name: &str) -> bool {
 pub fn print_dec(n: u64) {
     if n >= 10 { print_dec(n / 10); }
     let d = [(n % 10) as u8 + b'0'];
-    unsafe { npk_print(d.as_ptr() as i32, 1); }
+    print(core::str::from_utf8(&d).unwrap_or("?"));
 }

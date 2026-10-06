@@ -15,6 +15,9 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 
 mod neterror;
 mod selftest;
@@ -28,6 +31,7 @@ use nopeek_widgets::i18n;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
 use nopeek_widgets::{caps, prefab};
 use nopeek_widgets::*;
+use nopeek_widgets::host;
 
 // ── Strings ───────────────────────────────────────────────────────────
 // English is the source language; a new one is one more `const` below.
@@ -98,8 +102,6 @@ static NPK_CAPS: [u8; 2] = [caps::RENDER | caps::CANVAS, caps::ext::NET];
 // imports rather than ordinary undefined C symbols, which rust-lld rejects.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
     /// Start the general request — any method, extra headers
     /// (newline-separated `Name: value`), a body — and come straight back
     /// with a handle. Nothing here waits for a network: the kernel waits on a
@@ -134,9 +136,6 @@ unsafe extern "C" {
     /// navigation (a 404 page is a document), essential for `fetch`:
     /// `response.ok` depends on it.
     fn npk_http_status() -> i32;
-    /// Seconds since the epoch, UTC. `npk_ticks` cannot stand in: it restarts
-    /// at every boot and a cookie's `Expires` is an absolute date.
-    fn npk_unix_time() -> i64;
     /// Random bytes from the kernel CSPRNG (ChaCha20, seeded from RDRAND).
     /// Returns the number of bytes written, or -1. At most 64 KiB per call.
     fn npk_random_bytes(ptr: i32, len: i32) -> i32;
@@ -150,12 +149,7 @@ unsafe extern "C" {
     /// subresource may reach the private network.
     /// See `docs/plan/BROWSER_FETCH_ORIGIN.md` §3.1 V2.
     fn npk_net_context(url_ptr: i32, url_len: i32) -> i32;
-    /// Start a newline-separated list of URLs in one call, multiplexed over
-    /// HTTP/2 where the host offers it. Same handle discipline as
-    /// `npk_http_begin`.
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     /// A TLS stream, unlike `npk_http_*`: not a request with an end but a
     /// connection that stays open. Used for `wss://`. `connect` blocks for
     /// the handshake; `recv` returns immediately — 0 means nothing yet,
@@ -165,6 +159,9 @@ unsafe extern "C" {
     fn npk_tls_recv(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_tls_close(handle: i32) -> i32;
 
+    /// Start a newline-separated list of URLs in one call, multiplexed over
+    /// HTTP/2 where the host offers it. Same handle discipline as
+    /// `npk_http_begin`.
     fn npk_http_begin_many(urls_ptr: i32, urls_len: i32, out_max: i32) -> i32;
     /// Like above, but with one cookie line per URL (separated by `\n`,
     /// empty lines count).
@@ -180,19 +177,105 @@ unsafe extern "C" {
         lens_ptr: i32,
         lens_max: i32,
     ) -> i32;
-    fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
-    fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
-    /// Milliseconds since boot, 10 ms resolution (the 100 Hz timer).
-    fn npk_ticks() -> i64;
+}
+
+// Safe wrappers for the calls only beak makes; the shared ones are in
+// `nopeek_widgets::host`. The kernel validates every range it is handed.
+
+/// The raw handle, or a negative refusal.
+fn http_begin(method: &str, url: &str, hdrs: &str, body: &[u8], cap: usize) -> i32 {
+    // SAFETY: FFI; the four ranges are borrowed for the call.
+    unsafe {
+        npk_http_begin(
+            method.as_ptr() as i32, method.len() as i32,
+            url.as_ptr() as i32, url.len() as i32,
+            hdrs.as_ptr() as i32, hdrs.len() as i32,
+            body.as_ptr() as i32, body.len() as i32,
+            cap as i32,
+        )
+    }
+}
+
+fn http_poll(h: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_http_poll(h) }
+}
+
+/// Bytes written into `buf`, or the kernel's negative code.
+fn http_take(h: i32, buf: &mut [MaybeUninit<u8>]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call and the kernel writes
+    // only initialised bytes into it.
+    unsafe { npk_http_take(h, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+fn http_cancel(h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_http_cancel(h) };
+}
+
+fn http_status() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_http_status() }
+}
+
+/// One of the four getters of the last response: bytes into `buf`, or `None`
+/// when it wrote nothing.
+fn http_getter(f: unsafe extern "C" fn(i32, i32) -> i32, buf: &mut [u8]) -> Option<&str> {
+    // SAFETY: FFI; `f` is one of the getters declared above, and the range
+    // is borrowed for the call.
+    let n = unsafe { f(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    if n <= 0 {
+        return None;
+    }
+    core::str::from_utf8(&buf[..(n as usize).min(buf.len())]).ok()
+}
+
+fn net_context(url: &str) {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_net_context(url.as_ptr() as i32, url.len() as i32) };
+}
+
+fn clipboard_set(text: &str) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_clipboard_set(text.as_ptr() as i32, text.len() as i32) }
+}
+
+fn tls_connect(host: &str, port: u16) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_tls_connect(host.as_ptr() as i32, host.len() as i32, port as i32) }
+}
+
+fn tls_send(h: i32, data: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_tls_send(h, data.as_ptr() as i32, data.len() as i32) }
+}
+
+fn tls_recv(h: i32, buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_tls_recv(h, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+fn tls_close(h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_tls_close(h) };
+}
+
+/// A byte buffer as the out-range of a host call.
+fn as_uninit(b: &mut [u8]) -> &mut [MaybeUninit<u8>] {
+    // SAFETY: same layout; the only writer through the result is the kernel,
+    // which writes initialised bytes.
+    unsafe { &mut *(b as *mut [u8] as *mut [MaybeUninit<u8>]) }
+}
+
+/// Seconds since the epoch, UTC. `ticks` cannot stand in: it restarts at
+/// every boot and a cookie's `Expires` is an absolute date.
+fn unix_now() -> i64 {
+    host::unix_time() as i64
 }
 
 /// Milliseconds since boot. Used only for the phase timings below.
 fn now_ms() -> i64 {
-    unsafe { npk_ticks() }
+    host::ticks_ms() as i64
 }
 
 /// Log "<label>: <ms> ms". Phase timings are permanent, not scaffolding:
@@ -222,7 +305,7 @@ fn push_i64(out: &mut String, mut v: i64) {
 }
 
 fn log(m: &str) {
-    unsafe { npk_log_serial(m.as_ptr() as i32, m.len() as i32) };
+    host::log_serial(m);
 }
 
 /// The page palette: the canvas a document is painted on when it paints none
@@ -247,7 +330,7 @@ fn query_theme() -> beak_engine::Theme {
     }
 }
 
-const CANVAS_ID: i32 = 1;
+const CANVAS_ID: u32 = 1;
 
 // Toolbar
 const ACT_GO: u32 = 1;
@@ -285,12 +368,12 @@ const NODE_MENU_VIEW: u32 = 102;
 const NODE_MENU_HELP: u32 = 104;
 
 // Which menu dropdown is open (0 = none, else ACT_MENU_FILE..HELP encoded 1..4).
-static mut OPEN_MENU: u8 = 0;
+static OPEN_MENU: AtomicU8 = AtomicU8::new(0);
 fn open_menu() -> u8 {
-    unsafe { core::ptr::addr_of!(OPEN_MENU).read() }
+    OPEN_MENU.load(Relaxed)
 }
 fn set_open_menu(v: u8) {
-    unsafe { core::ptr::addr_of_mut!(OPEN_MENU).write(v) };
+    OPEN_MENU.store(v, Relaxed);
 }
 fn toggle_menu(which: u8) {
     let cur = open_menu();
@@ -306,8 +389,8 @@ const URL_CAP: usize = 4096;
 /// same buffer, which keeps e.g. the document URL and the address-bar text
 /// apart.
 ///
-/// Rule: nothing that belongs to a document may be added as a `static mut`.
-/// The statics that remain each belong to something there is only one of:
+/// Rule: nothing that belongs to a document may be added as a global.
+/// The globals that remain each belong to something there is only one of:
 ///
 /// | Fetch buffers (`HTML_BUF`, `CSS_BUF`, `IMG_FETCH_BUF` …) | belong to the running fetch |
 /// | `LAST_W`/`LAST_H`/`LAST_SY` | describe the frame buffer |
@@ -523,7 +606,7 @@ impl Doc {
 /// a tab opens would leave them pointing at freed memory.
 static mut TABS: Vec<alloc::boxed::Box<Doc>> = Vec::new();
 /// The tab that is painted and live. Always valid — `active` clamps.
-static mut ACTIVE: usize = 0;
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// The layout engine, as a global rather than a variable of the frame loop:
 /// `Interp::relayout` is a `fn` pointer and captures nothing, so the hook a
@@ -566,11 +649,11 @@ fn tabs() -> &'static mut Vec<alloc::boxed::Box<Doc>> {
 /// closed tab would otherwise panic where nobody expects it.
 fn active() -> usize {
     let n = tabs().len();
-    let a = unsafe { core::ptr::addr_of!(ACTIVE).read() };
+    let a = ACTIVE.load(Relaxed);
     if a >= n { n - 1 } else { a }
 }
 fn set_active(i: usize) {
-    unsafe { core::ptr::addr_of_mut!(ACTIVE).write(i) };
+    ACTIVE.store(i, Relaxed);
 }
 
 /// Rule for both: one borrow per statement.
@@ -603,7 +686,7 @@ fn clip(s: &str, cap: usize) -> &str {
 
 const HTML_CAP: usize = 3 * 1024 * 1024;
 static mut HTML_BUF: [u8; HTML_CAP] = [0; HTML_CAP];
-static mut HTML_LEN: usize = 0;
+static HTML_LEN: AtomicUsize = AtomicUsize::new(0);
 
 // Concatenated bytes of the page's external <link rel=stylesheet> files.
 // Large pages link dozens of sheets totalling several MiB; the link count is
@@ -613,7 +696,7 @@ static mut HTML_LEN: usize = 0;
 const CSS_CAP: usize = 8 * 1024 * 1024;
 const MAX_CSS_LINKS: usize = 64;
 static mut CSS_BUF: [u8; CSS_CAP] = [0; CSS_CAP];
-static mut CSS_LEN: usize = 0;
+static CSS_LEN: AtomicUsize = AtomicUsize::new(0);
 
 // Scratch buffer a whole batch of <img> bytes arrives in before decoding.
 //
@@ -629,14 +712,31 @@ const IMG_FETCH_CAP: usize = 24 * 1024 * 1024;
 const MAX_IMAGES: usize = 512;
 static mut IMG_FETCH_BUF: [u8; IMG_FETCH_CAP] = [0; IMG_FETCH_CAP];
 
+// The three fetch buffers stay in `.bss`: they are tens of MiB and are filled
+// by the kernel without being zeroed first. Every access goes through these
+// accessors; the borrow they hand out must end before the next call to the
+// same accessor (single thread, same rule as `doc_mut`).
+fn html_buf() -> &'static mut [u8; HTML_CAP] {
+    // SAFETY: single thread; see above.
+    unsafe { &mut *core::ptr::addr_of_mut!(HTML_BUF) }
+}
+fn css_buf() -> &'static mut [u8; CSS_CAP] {
+    // SAFETY: single thread; see above.
+    unsafe { &mut *core::ptr::addr_of_mut!(CSS_BUF) }
+}
+fn img_fetch_buf() -> &'static mut [u8; IMG_FETCH_CAP] {
+    // SAFETY: single thread; see above.
+    unsafe { &mut *core::ptr::addr_of_mut!(IMG_FETCH_BUF) }
+}
+
 /// How many images one batch asks for. Small on purpose: a large batch
 /// would make a turn of the loop long; four is enough to overlap the
 /// round-trips.
 const IMG_BATCH: usize = 4;
 
-/// Receives the per-URL length table from `npk_http_take_many`. Sized for
-/// the largest batch either caller asks for.
-static mut LENS_BUF: [u8; 4 * MAX_CSS_LINKS] = [0; 4 * MAX_CSS_LINKS];
+/// Room for the per-URL length table of `npk_http_take_many`. Sized for the
+/// largest batch either caller asks for.
+const LENS_CAP: usize = 4 * MAX_CSS_LINKS;
 
 /// The URL list a batch call wants: one per line.
 fn url_lines(urls: &[String]) -> String {
@@ -659,7 +759,7 @@ fn begin_batch(urls: &[String], cap: usize) -> i32 {
     // One line per URL, in the same order, empty lines included: the mapping
     // is by position, and dropping empty lines would send one URL's cookies
     // to another.
-    let now = unsafe { npk_unix_time() };
+    let now = unix_now();
     let mut ck = String::new();
     let mut any = false;
     for (i, u) in urls.iter().enumerate() {
@@ -670,8 +770,10 @@ fn begin_batch(urls: &[String], cap: usize) -> i32 {
     // No cookies involved: use the plain call; nothing for the kernel to
     // check.
     if !any {
+        // SAFETY: FFI; the range is borrowed for the call.
         return unsafe { npk_http_begin_many(blob.as_ptr() as i32, blob.len() as i32, cap as i32) };
     }
+    // SAFETY: FFI; both ranges are borrowed for the call.
     unsafe {
         npk_http_begin_many_hdr(blob.as_ptr() as i32, blob.len() as i32,
                                 ck.as_ptr() as i32, ck.len() as i32, cap as i32)
@@ -684,15 +786,17 @@ fn begin_batch(urls: &[String], cap: usize) -> i32 {
 /// Returns an empty vec if the batch failed, which the callers treat the
 /// same as "none of them loaded" — every one of them degrades to a
 /// placeholder or to unstyled content rather than to a blank page.
-fn take_batch(handle: i32, dst: *mut u8, cap: usize, want: usize) -> Vec<(usize, usize)> {
-    let lens = core::ptr::addr_of_mut!(LENS_BUF) as *mut u8;
+fn take_batch(handle: i32, dst: &mut [MaybeUninit<u8>], want: usize) -> Vec<(usize, usize)> {
+    let mut lens = [0u8; LENS_CAP];
+    // SAFETY: FFI; both ranges are borrowed for the call and the kernel
+    // writes only initialised bytes into them.
     let n = unsafe {
         npk_http_take_many(
             handle,
-            dst as i32,
-            cap as i32,
-            lens as i32,
-            (4 * MAX_CSS_LINKS) as i32,
+            dst.as_mut_ptr() as i32,
+            dst.len() as i32,
+            lens.as_mut_ptr() as i32,
+            LENS_CAP as i32,
         )
     };
     let mut spans = Vec::new();
@@ -700,10 +804,8 @@ fn take_batch(handle: i32, dst: *mut u8, cap: usize, want: usize) -> Vec<(usize,
         return spans;
     }
     let mut off = 0usize;
-    for i in 0..(n as usize).min(want) {
-        let mut raw = [0u8; 4];
-        unsafe { core::ptr::copy_nonoverlapping(lens.add(i * 4), raw.as_mut_ptr(), 4) };
-        let len = i32::from_le_bytes(raw);
+    for i in 0..(n as usize).min(want).min(LENS_CAP / 4) {
+        let len = i32::from_le_bytes([lens[i * 4], lens[i * 4 + 1], lens[i * 4 + 2], lens[i * 4 + 3]]);
         if len < 0 {
             spans.push((0, 0)); // this one failed; keep positions aligned
         } else {
@@ -713,16 +815,9 @@ fn take_batch(handle: i32, dst: *mut u8, cap: usize, want: usize) -> Vec<(usize,
     }
     spans
 }
-// Scratch for the kernel to write back the post-redirect URL of a fetch.
-static mut FINAL_URL_BUF: [u8; URL_CAP] = [0; URL_CAP];
-
 const PAYLOAD_CAP: usize = URL_CAP;
-static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
 
 const EVENT_BUF_SIZE: usize = 16 * 1024;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
-
-static mut RECT_BUF: [u8; 16] = [0; 16];
 
 /// What the frame buffer holds — not what the page says.
 ///
@@ -730,11 +825,11 @@ static mut RECT_BUF: [u8; 16] = [0; 16];
 /// a repaint is needed belongs to the document (`Doc::dirty`,
 /// `Doc::need_full`): an image arriving in the background makes its own page
 /// stale, not the picture on screen.
-static mut LAST_W: i32 = -1;
-static mut LAST_H: i32 = -1;
+static LAST_W: AtomicI32 = AtomicI32::new(-1);
+static LAST_H: AtomicI32 = AtomicI32::new(-1);
 /// The scroll offset the buffer currently holds, so the next frame knows how
 /// far the picture has to move.
-static mut LAST_SY: i32 = 0;
+static LAST_SY: AtomicI32 = AtomicI32::new(0);
 
 /// Tell the kernel which document the next requests come from.
 ///
@@ -743,7 +838,7 @@ static mut LAST_SY: i32 = 0;
 /// function. beak itself can still get it wrong; this function and
 /// `set_url` are the only callers.
 fn tell_net_context(url: &str) {
-    unsafe { npk_net_context(url.as_ptr() as i32, url.len() as i32) };
+    net_context(url);
 }
 
 fn set_url(s: &str) {
@@ -784,18 +879,12 @@ fn set_edit(s: &str) {
 
 fn edit_str() -> &'static str { &doc().edit }
 fn html_str() -> &'static str {
-    unsafe {
-        let len = core::ptr::addr_of!(HTML_LEN).read();
-        let ptr = core::ptr::addr_of!(HTML_BUF) as *const u8;
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    }
+    let len = HTML_LEN.load(Relaxed);
+    core::str::from_utf8(&html_buf()[..len]).unwrap_or("")
 }
 fn css_str() -> &'static str {
-    unsafe {
-        let len = core::ptr::addr_of!(CSS_LEN).read();
-        let ptr = core::ptr::addr_of!(CSS_BUF) as *const u8;
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    }
+    let len = CSS_LEN.load(Relaxed);
+    core::str::from_utf8(&css_buf()[..len]).unwrap_or("")
 }
 
 /// The current page's forms + the user's live edits to them. Rebuilt on every
@@ -937,27 +1026,24 @@ fn bump_nav_gen() {
 
 // Reader-mode toggle: apply the site's own (external + <style>) CSS, or render
 // with just our UA sheet (docs/spec/BROWSER.md §9.7 — never worse than clean content).
-static mut USE_SITE_CSS: bool = true;
+static USE_SITE_CSS: AtomicBool = AtomicBool::new(true);
 fn use_site_css() -> bool {
-    unsafe { core::ptr::addr_of!(USE_SITE_CSS).read() }
+    USE_SITE_CSS.load(Relaxed)
 }
 fn toggle_site_css() {
-    unsafe { core::ptr::addr_of_mut!(USE_SITE_CSS).write(!use_site_css()) };
+    USE_SITE_CSS.store(!use_site_css(), Relaxed);
 }
 
 // Inspect dev tool: when on, the engine records an element box per node and a
 // canvas click selects the deepest box under the cursor (outline + a label in
 // the status bar) instead of following a link, so a mis-rendered element can
 // be named.
-static mut INSPECT_MODE: bool = false;
+static INSPECT_MODE: AtomicBool = AtomicBool::new(false);
 fn inspect_mode() -> bool {
-    unsafe { core::ptr::addr_of!(INSPECT_MODE).read() }
+    INSPECT_MODE.load(Relaxed)
 }
 fn toggle_inspect() {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(INSPECT_MODE);
-        p.write(!p.read());
-    }
+    INSPECT_MODE.store(!inspect_mode(), Relaxed);
 }
 fn set_selected(b: Option<(i32, i32, i32, i32, String)>) {
     doc_mut().sel_box = b;
@@ -1001,12 +1087,6 @@ fn do_layout(engine: &Engine, w: u32, state: &FormState) -> Layout {
         log_ms("  box layout", p[2] as i64);
     }
     lay
-}
-fn payload_str(len: usize) -> &'static str {
-    unsafe {
-        let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
-        core::str::from_utf8(core::slice::from_raw_parts(ptr, len)).unwrap_or("")
-    }
 }
 fn scroll_y() -> i32 {
     doc().scroll_y
@@ -1106,15 +1186,8 @@ fn hover_affordable() -> bool {
 /// Why the last fetch failed, as `(kind, message)`. `None` if the kernel
 /// reported nothing, so the caller must have a fallback.
 fn last_error() -> Option<(String, String)> {
-    const ERR_CAP: usize = 512;
-    static mut ERR_BUF: [u8; ERR_CAP] = [0; ERR_CAP];
-    let dst = core::ptr::addr_of_mut!(ERR_BUF) as *mut u8;
-    let n = unsafe { npk_http_last_error(dst as i32, ERR_CAP as i32) };
-    if n <= 0 {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
-    let s = core::str::from_utf8(bytes).ok()?;
+    let mut buf = [0u8; 512];
+    let s = http_getter(npk_http_last_error, &mut buf)?;
     let (kind, msg) = s.split_once('\t')?;
     Some((kind.to_string(), msg.to_string()))
 }
@@ -1131,29 +1204,19 @@ fn show_error_page(url: &str) {
 
     let doc = neterror::document(url, &kind, &message);
     let len = doc.len().min(HTML_CAP);
-    unsafe {
-        let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
-        core::ptr::copy_nonoverlapping(doc.as_ptr(), dst, len);
-        core::ptr::addr_of_mut!(HTML_LEN).write(len);
-        // The page carries its own inline <style> and links nothing, so any
-        // leftover author CSS from the previous page must go — otherwise the
-        // last site's rules would style this one.
-        core::ptr::addr_of_mut!(CSS_LEN).write(0);
-    }
+    html_buf()[..len].copy_from_slice(&doc.as_bytes()[..len]);
+    HTML_LEN.store(len, Relaxed);
+    // The page carries its own inline <style> and links nothing, so any
+    // leftover author CSS from the previous page must go — otherwise the
+    // last site's rules would style this one.
+    CSS_LEN.store(0, Relaxed);
 }
 
 /// The last response's Content-Type. `None` if the server sent none, which
 /// is why every caller has to cope with not knowing rather than assume UTF-8.
 fn content_type() -> Option<String> {
-    const CT_CAP: usize = 256;
-    static mut CT_BUF: [u8; CT_CAP] = [0; CT_CAP];
-    let dst = core::ptr::addr_of_mut!(CT_BUF) as *mut u8;
-    let n = unsafe { npk_http_content_type(dst as i32, CT_CAP as i32) };
-    if n <= 0 {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
-    core::str::from_utf8(bytes).ok().map(|s| s.to_string())
+    let mut buf = [0u8; 256];
+    http_getter(npk_http_content_type, &mut buf).map(|s| s.to_string())
 }
 
 /// Bring the freshly fetched document to valid UTF-8, in place.
@@ -1161,16 +1224,13 @@ fn content_type() -> Option<String> {
 /// Must run before anything reads `html_str()` — the stylesheet scan does,
 /// and a document still holding raw Latin-1 reads back as the empty string.
 fn decode_document() {
-    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
+    let len = HTML_LEN.load(Relaxed);
     if len == 0 {
         return;
     }
     let ct = content_type();
-    let buf = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(HTML_BUF) as *mut u8, HTML_CAP)
-    };
-    let (n, how) = charset::to_utf8_in_place(buf, len, ct.as_deref());
-    unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(n) };
+    let (n, how) = charset::to_utf8_in_place(html_buf(), len, ct.as_deref());
+    HTML_LEN.store(n, Relaxed);
     if how != charset::KEPT {
         log(&alloc::format!("[beak] document charset: {} ({} -> {} B)", how, len, n));
     }
@@ -1180,15 +1240,12 @@ fn decode_document() {
 /// through the batch fetch, which reports one status per URL and no headers —
 /// so this is sniff-only; one bad byte must not cost the page all its CSS.
 fn decode_css() {
-    let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
+    let len = CSS_LEN.load(Relaxed);
     if len == 0 {
         return;
     }
-    let buf = unsafe {
-        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(CSS_BUF) as *mut u8, CSS_CAP)
-    };
-    let (n, how) = charset::to_utf8_in_place(buf, len, None);
-    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(n) };
+    let (n, how) = charset::to_utf8_in_place(css_buf(), len, None);
+    CSS_LEN.store(n, Relaxed);
     if how != charset::KEPT {
         log(&alloc::format!("[beak] css charset: {} ({} -> {} B)", how, len, n));
     }
@@ -1197,19 +1254,13 @@ fn decode_css() {
 /// The URL the last fetch's body actually came from, after redirects.
 /// `None` if the kernel reported none (e.g. the request failed).
 fn fetched_from() -> Option<String> {
-    let dst = core::ptr::addr_of_mut!(FINAL_URL_BUF) as *mut u8;
-    let n = unsafe { npk_http_final_url(dst as i32, URL_CAP as i32) };
-    if n <= 0 {
-        return None;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(dst as *const u8, n as usize) };
-    core::str::from_utf8(bytes).ok().map(|s| s.to_string())
+    let mut buf = [0u8; URL_CAP];
+    http_getter(npk_http_final_url, &mut buf).map(|s| s.to_string())
 }
 
 /// Room for one response's header block — the kernel caps what it hands back
 /// at 8 KiB, and a page that sets a dozen cookies still fits.
 const HDR_CAP: usize = 8 * 1024;
-static mut HDR_BUF: [u8; HDR_CAP] = [0; HDR_CAP];
 
 // ── A navigation that runs while the window stays alive ───────────────────
 //
@@ -1271,7 +1322,7 @@ fn nav_clear() {
 fn nav_cancel() {
     let h = nav_job();
     if h >= 0 {
-        unsafe { npk_http_cancel(h) };
+        http_cancel(h);
     }
     nav_clear();
 }
@@ -1318,7 +1369,7 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         return;
     }
 
-    let now = unsafe { npk_unix_time() };
+    let now = unix_now();
     let mut hdrs = String::new();
     let jar = cookies::header_for(url, now);
     if !jar.is_empty() {
@@ -1353,15 +1404,7 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
         d.nav_reported = false;
         d.nav_stage_ms = t_nav;
     }
-    let h = unsafe {
-        npk_http_begin(
-            method.as_ptr() as i32, method.len() as i32,
-            url.as_ptr() as i32, url.len() as i32,
-            hdrs.as_ptr() as i32, hdrs.len() as i32,
-            body.as_ptr() as i32, body.len() as i32,
-            HTML_CAP as i32,
-        )
-    };
+    let h = http_begin(method, url, &hdrs, body, HTML_CAP);
     {
         let d = doc_mut();
         d.nav_url = Some(url.to_string());
@@ -1402,20 +1445,15 @@ fn nav_fail(url: &str) {
 /// no right to system-wide storage for its own state.
 const COOKIE_FILE: &str = "priv/beak/cookies";
 const COOKIE_CAP: usize = 96 * 1024;   // 256 cookies fit well below
-static mut COOKIE_BUF: [u8; COOKIE_CAP] = [0; COOKIE_CAP];
 
 /// Load the stored cookies into the jar — once at startup.
 fn cookies_restore() {
-    let now = unsafe { npk_unix_time() };
-    let p = core::ptr::addr_of_mut!(COOKIE_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(COOKIE_FILE.as_ptr() as i32, COOKIE_FILE.len() as i32,
-                  p as i32, COOKIE_CAP as i32)
-    };
+    let now = unix_now();
+    let mut buf = vec![0u8; COOKIE_CAP];
+    let n = host::fetch(COOKIE_FILE, &mut buf).unwrap_or(0);
     // No file is the normal case on first start, not an error.
-    if n <= 0 { return }
-    let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
-    let Ok(text) = core::str::from_utf8(bytes) else {
+    if n == 0 { return }
+    let Ok(text) = core::str::from_utf8(&buf[..n.min(COOKIE_CAP)]) else {
         log("[beak] cookies: gespeicherte Datei ist kein UTF-8 — uebergangen");
         return;
     };
@@ -1428,13 +1466,9 @@ fn cookies_restore() {
 /// Write the persistent cookies to disk. Session cookies stay out —
 /// `Jar::serialize` decides that, not this function.
 fn cookies_persist() {
-    let now = unsafe { npk_unix_time() };
+    let now = unix_now();
     let text = cookies::serialize(now);
-    let r = unsafe {
-        npk_store(COOKIE_FILE.as_ptr() as i32, COOKIE_FILE.len() as i32,
-                  text.as_ptr() as i32, text.len() as i32)
-    };
-    if r < 0 {
+    if !host::store(COOKIE_FILE, text.as_bytes()) {
         log("[beak] cookies: konnten nicht gespeichert werden");
     }
 }
@@ -1445,14 +1479,9 @@ fn cookies_persist() {
 /// filing them against the URL we asked for would scope a login cookie to the
 /// wrong host.
 fn file_cookies(asked: &str) {
-    let now = unsafe { npk_unix_time() };
-    let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
-    let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
-    if hn <= 0 {
-        return;
-    }
-    let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
-    let Ok(h) = core::str::from_utf8(bytes) else { return };
+    let now = unix_now();
+    let mut buf = [0u8; HDR_CAP];
+    let Some(h) = http_getter(npk_http_response_headers, &mut buf) else { return };
     let from = fetched_from().unwrap_or_else(|| asked.to_string());
     let before = cookies::count();
     cookies::store(&from, h, now);
@@ -1483,16 +1512,13 @@ fn file_cookies(asked: &str) {
 /// instead of the real one.
 fn deliver_builtin(engine: &Engine, url: &str, html: &str, push_hist: bool) {
     let len = html.len().min(HTML_CAP);
-    unsafe {
-        let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
-        core::ptr::copy_nonoverlapping(html.as_ptr(), dst, len);
-        core::ptr::addr_of_mut!(HTML_LEN).write(len);
-        // The page brings its own `<style>` and links nothing; the previous
-        // page's CSS must go or it would style this one.
-        core::ptr::addr_of_mut!(CSS_LEN).write(0);
-        doc_mut().nav_start_ms = now_ms();
-        doc_mut().nav_reported = false;
-    }
+    html_buf()[..len].copy_from_slice(&html.as_bytes()[..len]);
+    HTML_LEN.store(len, Relaxed);
+    // The page brings its own `<style>` and links nothing; the previous
+    // page's CSS must go or it would style this one.
+    CSS_LEN.store(0, Relaxed);
+    doc_mut().nav_start_ms = now_ms();
+    doc_mut().nav_reported = false;
     scroll_after_load();
     bump_content_gen("navigation");
     bump_nav_gen();
@@ -1513,7 +1539,7 @@ fn nav_pump(engine: &Engine) -> bool {
     }
     // 0 = still running. Everything else (done, failed, or a handle the
     // kernel no longer knows) is answered by collecting it.
-    if unsafe { npk_http_poll(h) } == 0 {
+    if http_poll(h) == 0 {
         return false;
     }
     match doc().nav_stage {
@@ -1531,8 +1557,7 @@ fn nav_pump(engine: &Engine) -> bool {
 fn nav_document_arrived(engine: &Engine) {
     let h = nav_job();
     let asked = nav_asked();
-    let dst = core::ptr::addr_of_mut!(HTML_BUF) as *mut u8;
-    let n = unsafe { npk_http_take(h, dst as i32, HTML_CAP as i32) };
+    let n = http_take(h, as_uninit(html_buf()));
     log_ms("fetch document", now_ms() - doc().nav_stage_ms);
     if n < 0 {
         nav_fail(&asked);
@@ -1541,11 +1566,11 @@ fn nav_document_arrived(engine: &Engine) {
     // Before anything downstream: the cookies belong to this response, and
     // the getters that carry them are overwritten by the next `take`.
     file_cookies(&asked);
-    unsafe { core::ptr::addr_of_mut!(HTML_LEN).write(n as usize) };
+    HTML_LEN.store((n as usize).min(HTML_CAP), Relaxed);
     // The bytes are not UTF-8 just because we would like them to be, and the
     // stylesheet scan below reads `html_str()`.
     decode_document();
-    let len = unsafe { core::ptr::addr_of!(HTML_LEN).read() };
+    let len = HTML_LEN.load(Relaxed);
     if len == 0 {
         // Succeeded with nothing in it. The reader gets told, same as for a
         // refusal, and `nav_fail` does the bookkeeping below itself.
@@ -1596,7 +1621,7 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
         }
     }
     if urls.is_empty() {
-        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+        CSS_LEN.store(0, Relaxed);
         nav_finish(engine);
         return;
     }
@@ -1605,7 +1630,7 @@ fn nav_begin_stylesheets(engine: &Engine, base: &str) {
         // No stylesheets is not a failed page — it renders against our UA
         // sheet — so this ends the navigation rather than diagnosing it.
         log("[beak] stylesheet fetch could not start — rendering unstyled");
-        unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+        CSS_LEN.store(0, Relaxed);
         nav_finish(engine);
         return;
     }
@@ -1671,8 +1696,10 @@ fn nav_stylesheets_arrived(engine: &Engine) {
     // concatenated, and they need a separator between them: without one, a
     // sheet not ending in `}` would merge into the next sheet's first rule.
     let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, want);
+    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], want);
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    // SAFETY: the kernel initialised the bytes up to the end of the last
+    // span, and the capacity is `CSS_CAP`.
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
 
     // The bodies are kept as parts rather than written straight into
@@ -1756,8 +1783,9 @@ fn nav_css_imports_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc_mut().nav_css_want.take().unwrap_or_default();
     let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, want.len());
+    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], want.len());
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    // SAFETY: as in `nav_stylesheets_arrived`.
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(parts) = doc_mut().nav_css_parts.as_mut() {
@@ -1788,7 +1816,7 @@ fn nav_css_imports_arrived(engine: &Engine) {
 /// which is cascade order, imports ahead of their importer.
 fn css_assemble() {
     let parts = doc_mut().nav_css_parts.take().unwrap_or_default();
-    unsafe { core::ptr::addr_of_mut!(CSS_LEN).write(0) };
+    CSS_LEN.store(0, Relaxed);
     for (_, body, _) in &parts {
         if !css_append(body) {
             break;
@@ -1878,8 +1906,8 @@ fn nav_scripts_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc().nav_js_count;
     let mut list = doc_mut().nav_scripts.take().unwrap_or_default();
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want);
+    let dst = img_fetch_buf();
+    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want);
     for p in list.iter_mut() {
         let (k, label, is_mod, node) = match p {
             PendingScript::Fetching(k, l, m, n) => (*k, core::mem::take(l), *m, *n),
@@ -1887,7 +1915,7 @@ fn nav_scripts_arrived(engine: &Engine) {
         };
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
         let text = if n == 0 { String::new() } else {
-            let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+            let bytes = &dst[off..off + n];
             // Not decodable means not executed. Running half a script is
             // worse than skipping it.
             match core::str::from_utf8(bytes) {
@@ -1948,7 +1976,7 @@ fn sync_cookies(sess: &mut beak_engine::js::Session) {
     if url.is_empty() {
         return;
     }
-    let now = unsafe { npk_unix_time() };
+    let now = unix_now();
     let sets = sess.interp.take_cookie_sets();
     for decl in &sets {
         cookies::store_from_script(url, decl, now);
@@ -2114,7 +2142,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     // The cookies this document may see. `HttpOnly` stays out: that flag is
     // the defence against foreign code on the page.
     if !url_str().is_empty() {
-        let now = unsafe { npk_unix_time() };
+        let now = unix_now();
         sess.interp.set_cookies(cookies::script_header_for(url_str(), now));
     }
     // The cascade context for `getComputedStyle`. Without it the answer
@@ -2141,7 +2169,7 @@ fn run_scripts(engine: &Engine, list: Vec<PendingScript>) -> bool {
     sess.interp.seed_random(now_ms() as u64 ^ 0x9E37_79B9_7F4A_7C15);
     // And a real clock. The engine has none; without this `Date.now()` is in
     // 1970.
-    sess.interp.epoch_ms = unsafe { npk_unix_time() } as f64 * 1000.0;
+    sess.interp.epoch_ms = unix_now() as f64 * 1000.0;
     let (mut ran, mut failed, mut bytes) = (0usize, 0usize, 0usize);
     // Module entries, in document order. They run after all classic scripts:
     // `type="module"` is deferred by spec.
@@ -2230,26 +2258,23 @@ fn fetch_jobs() -> &'static mut Vec<(u32, i32)> {
 
 /// The header block of the last collected response.
 fn response_headers() -> String {
-    let hp = core::ptr::addr_of_mut!(HDR_BUF) as *mut u8;
-    let hn = unsafe { npk_http_response_headers(hp as i32, HDR_CAP as i32) };
-    if hn <= 0 { return String::new() }
-    let bytes = unsafe { core::slice::from_raw_parts(hp as *const u8, hn as usize) };
-    core::str::from_utf8(bytes).unwrap_or("").to_string()
+    let mut buf = [0u8; HDR_CAP];
+    http_getter(npk_http_response_headers, &mut buf).unwrap_or("").to_string()
 }
 
-/// The read buffer of the WebSockets — one for all, used in turn.
-fn ws_buf() -> &'static mut [u8; 16 * 1024] {
-    static mut BUF: [u8; 16 * 1024] = [0; 16 * 1024];
-    // SAFETY: beak is single-threaded; same rule as for `fetch_jobs`.
-    unsafe { &mut *core::ptr::addr_of_mut!(BUF) }
-}
+/// A global for state that has no context to be passed through.
+struct Single<T>(RefCell<T>);
+// SAFETY: wasm is single-threaded; there is no second thread to share with.
+unsafe impl<T> Sync for Single<T> {}
 
-/// The open WebSockets: `(engine id, TLS handle)`.
-fn ws_jobs() -> &'static mut Vec<(u32, i32)> {
-    static mut JOBS: Vec<(u32, i32)> = Vec::new();
-    // SAFETY: beak is single-threaded; same rule as for `fetch_jobs`.
-    unsafe { &mut *core::ptr::addr_of_mut!(JOBS) }
+/// The WebSockets: one read buffer for all, used in turn, and the open
+/// connections as `(engine id, TLS handle)`.
+struct Sockets {
+    buf: Vec<u8>,
+    jobs: Vec<(u32, i32)>,
 }
+static SOCKETS: Single<Sockets> = Single(RefCell::new(Sockets { buf: Vec::new(), jobs: Vec::new() }));
+const WS_BUF: usize = 16 * 1024;
 
 /// Drive the connections: open what is pending, collect what arrived, send
 /// what the engine queued.
@@ -2257,6 +2282,8 @@ fn ws_jobs() -> &'static mut Vec<(u32, i32)> {
 /// `true` if something happened — then a round of microtasks is worthwhile.
 fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
     let mut moved = false;
+    let mut sockets = SOCKETS.0.borrow_mut();
+    let Sockets { buf, jobs } = &mut *sockets;
     // 1. New connections. The handshake blocks; it is the same price the
     //    HTTP path pays in `open_tls`, once per connection.
     let want: Vec<_> = core::mem::take(&mut sess.interp.pending_sockets);
@@ -2269,9 +2296,7 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
             beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
             continue;
         }
-        let h = unsafe {
-            npk_tls_connect(w.host.as_ptr() as i32, w.host.len() as i32, w.port as i32)
-        };
+        let h = tls_connect(&w.host, w.port);
         if h < 0 {
             let mut m = String::from("[beak] WebSocket: Verbindung zu ");
             m.push_str(&w.host);
@@ -2281,8 +2306,8 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
             moved = true;
             continue;
         }
-        if unsafe { npk_tls_send(h, w.hello.as_ptr() as i32, w.hello.len() as i32) } < 0 {
-            unsafe { npk_tls_close(h) };
+        if tls_send(h, &w.hello) < 0 {
+            tls_close(h);
             beak_engine::js::websocket::host_bytes(&mut sess.interp, w.id, None);
             moved = true;
             continue;
@@ -2291,46 +2316,48 @@ fn pump_websockets(sess: &mut beak_engine::js::Session) -> bool {
         // as one where nothing was attempted.
         log(&alloc::format!("[beak] WebSocket: {}:{} verbunden, Handschlag raus ({} B)",
                             w.host, w.port, w.hello.len()));
-        ws_jobs().push((w.id, h));
+        jobs.push((w.id, h));
         moved = true;
     }
     // 2. Read and write. One buffer per round suffices: what does not fit
     //    stays in the kernel and arrives next frame.
     // Not on the stack: 16 KB zeroed per call, every frame, right under the
     // recursive layout.
-    let buf = ws_buf();
+    if buf.is_empty() {
+        buf.resize(WS_BUF, 0);
+    }
     let mut tot: Vec<(u32, i32)> = Vec::new();
-    for (id, h) in ws_jobs().clone() {
+    for (id, h) in jobs.clone() {
         // Drain, not peek. `npk_tls_recv` returns 0 exactly when nothing
         // complete is left; stopping after the first record would leave the
         // rest in the kernel until its buffer fills. The cap guards the other
         // direction: a peer that never stops must not eat the whole frame.
         for _ in 0..64 {
-            let n = unsafe { npk_tls_recv(h, buf.as_mut_ptr() as i32, buf.len() as i32) };
+            let n = tls_recv(h, buf);
             if n < 0 {
                 // Closed or broken — the engine turns this into 1006.
                 log("[beak] WebSocket: Leitung zu");
                 beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
-                unsafe { npk_tls_close(h) };
+                tls_close(h);
                 tot.push((id, h));
                 moved = true;
                 break;
             }
             if n == 0 { break }
-            beak_engine::js::websocket::host_bytes(&mut sess.interp, id, Some(&buf[..n as usize]));
+            beak_engine::js::websocket::host_bytes(&mut sess.interp, id, Some(&buf[..(n as usize).min(WS_BUF)]));
             moved = true;
         }
         if tot.iter().any(|(x, _)| *x == id) { continue }
         if let Some(out) = beak_engine::js::websocket::take_out_for(&mut sess.interp, id) {
-            if unsafe { npk_tls_send(h, out.as_ptr() as i32, out.len() as i32) } < 0 {
+            if tls_send(h, &out) < 0 {
                 beak_engine::js::websocket::host_bytes(&mut sess.interp, id, None);
-                unsafe { npk_tls_close(h) };
+                tls_close(h);
                 tot.push((id, h));
             }
             moved = true;
         }
     }
-    ws_jobs().retain(|(id, _)| !tot.iter().any(|(x, _)| x == id));
+    jobs.retain(|(id, _)| !tot.iter().any(|(x, _)| x == id));
     moved
 }
 
@@ -2352,7 +2379,7 @@ fn pump_fetches() -> bool {
     for id in sess.interp.take_aborted_fetches() {
         let jobs = fetch_jobs();
         if let Some(k) = jobs.iter().position(|(n, _)| *n == id) {
-            unsafe { npk_http_cancel(jobs[k].1) };
+            http_cancel(jobs[k].1);
             jobs.remove(k);
         }
     }
@@ -2360,22 +2387,24 @@ fn pump_fetches() -> bool {
     let mut k = 0;
     while k < fetch_jobs().len() {
         let (id, h) = fetch_jobs()[k];
-        if unsafe { npk_http_poll(h) } == 0 { k += 1; continue }
+        if http_poll(h) == 0 { k += 1; continue }
         fetch_jobs().remove(k);
         let mut buf: Vec<u8> = Vec::with_capacity(FETCH_CAP);
-        let n = unsafe { npk_http_take(h, buf.as_mut_ptr() as i32, FETCH_CAP as i32) };
+        let n = http_take(h, &mut buf.spare_capacity_mut()[..FETCH_CAP]);
         landed = true;
         if n < 0 {
             let why = last_error().map(|(a, _)| a).unwrap_or_else(|| String::from("request failed"));
             beak_engine::js::fetch::fetch_failed(&mut sess.interp, id, &why);
             continue;
         }
+        // SAFETY: the kernel initialised the first `n` bytes, and the
+        // capacity is `FETCH_CAP`.
         unsafe { buf.set_len((n as usize).min(FETCH_CAP)) };
         // The cookies belong to this response, and the getters carrying them
         // are overwritten by the next `take`.
         let from = fetched_from().unwrap_or_default();
         file_cookies(&from);
-        let status = unsafe { npk_http_status() }.max(0) as u16;
+        let status = http_status().max(0) as u16;
         let hdrs = response_headers();
         let body = alloc::string::String::from_utf8_lossy(&buf).into_owned();
         beak_engine::js::fetch::fetch_done(&mut sess.interp, id, status, &from, &hdrs, body);
@@ -2394,21 +2423,14 @@ fn pump_fetches() -> bool {
         // engine lets only same-origin requests through. Across an origin
         // boundary they would be the ambient authority
         // `BROWSER_FETCH_ORIGIN.md` §3.1 warns about.
-        let jar = cookies::header_for(&url, unsafe { npk_unix_time() });
+        let jar = cookies::header_for(&url, unix_now());
         if !jar.is_empty() {
             if !hdrs.is_empty() { hdrs.push('\n'); }
             hdrs.push_str("Cookie: ");
             hdrs.push_str(&jar);
         }
         let body = f.body.clone().unwrap_or_default();
-        let h = unsafe {
-            npk_http_begin(
-                f.method.as_ptr() as i32, f.method.len() as i32,
-                url.as_ptr() as i32, url.len() as i32,
-                hdrs.as_ptr() as i32, hdrs.len() as i32,
-                body.as_ptr() as i32, body.len() as i32,
-                FETCH_CAP as i32)
-        };
+        let h = http_begin(&f.method, &url, &hdrs, body.as_bytes(), FETCH_CAP);
         if h < 0 {
             beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, "no handle");
             landed = true;
@@ -2427,12 +2449,14 @@ fn pump_fonts(engine: &Engine) -> bool {
     let h = doc().font_job;
     let mut loaded = false;
     if h >= 0 {
-        if unsafe { npk_http_poll(h) } == 0 { return false }
+        if http_poll(h) == 0 { return false }
         doc_mut().font_job = -1;
         let want = doc_mut().font_want.take().unwrap_or_default();
         let mut buf: Vec<u8> = Vec::with_capacity(FONT_CAP);
-        let spans = take_batch(h, buf.as_mut_ptr(), FONT_CAP, want.len());
+        let spans = take_batch(h, &mut buf.spare_capacity_mut()[..FONT_CAP], want.len());
         let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+        // SAFETY: the kernel initialised the bytes up to the end of the last
+        // span, and the capacity is `FONT_CAP`.
         unsafe { buf.set_len(total.min(FONT_CAP)) };
         let (mut ok, mut bad) = (0usize, 0usize);
         for (k, (url, family, weight, italic)) in want.iter().enumerate() {
@@ -2664,8 +2688,9 @@ fn nav_sheets_arrived(engine: &Engine) {
     let h = nav_job();
     let nodes = doc_mut().nav_sheet_nodes.take().unwrap_or_default();
     let mut scratch: Vec<u8> = Vec::with_capacity(CSS_CAP);
-    let spans = take_batch(h, scratch.as_mut_ptr(), CSS_CAP, nodes.len());
+    let spans = take_batch(h, &mut scratch.spare_capacity_mut()[..CSS_CAP], nodes.len());
     let total = spans.iter().map(|(o, l)| o + l).max().unwrap_or(0);
+    // SAFETY: as in `nav_stylesheets_arrived`.
     unsafe { scratch.set_len(total.min(CSS_CAP)) };
     let (mut ok, mut bad) = (0usize, 0usize);
     if let Some(sess) = js_session() {
@@ -2735,17 +2760,15 @@ fn script_pump(engine: &Engine) -> bool {
 fn nav_dynjs_arrived(engine: &Engine) {
     let h = nav_job();
     let nodes = doc_mut().nav_dynjs_nodes.take().unwrap_or_default();
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), nodes.len());
+    let dst = img_fetch_buf();
+    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), nodes.len());
     // Copy everything out first, then run: a running script may insert the
     // next one, which reuses the same buffer.
     let mut texts: Vec<Option<String>> = Vec::with_capacity(nodes.len());
     for k in 0..nodes.len() {
         let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
         if n == 0 { texts.push(None); continue }
-        // SAFETY: `take_batch` filled exactly this span of `IMG_FETCH_BUF`,
-        // and `off + n` lies within the cap we gave it.
-        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        let bytes = &dst[off..off + n];
         texts.push(core::str::from_utf8(bytes).ok().map(String::from));
     }
     let (mut ok, mut bad) = (0usize, 0usize);
@@ -2790,30 +2813,28 @@ fn log_font_faces(css: &str) {
 /// Append a stylesheet. Fetched later means later in the cascade, which is
 /// the order a browser applies it in.
 fn css_append(bytes: &[u8]) -> bool {
-    let len = unsafe { core::ptr::addr_of!(CSS_LEN).read() };
+    let len = CSS_LEN.load(Relaxed);
     if len + bytes.len() + 1 >= CSS_CAP {
         log(&alloc::format!("[beak] CSS buffer full at {len} B — dropped a {} B sheet", bytes.len()));
         return false;
     }
-    let dst = core::ptr::addr_of_mut!(CSS_BUF) as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(len), bytes.len());
-        *dst.add(len + bytes.len()) = b'\n';
-        core::ptr::addr_of_mut!(CSS_LEN).write(len + bytes.len() + 1);
-    }
+    let dst = css_buf();
+    dst[len..len + bytes.len()].copy_from_slice(bytes);
+    dst[len + bytes.len()] = b'\n';
+    CSS_LEN.store(len + bytes.len() + 1, Relaxed);
     true
 }
 
 fn nav_modules_arrived(engine: &Engine) {
     let h = nav_job();
     let want = doc_mut().nav_mod_want.take().unwrap_or_default();
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = take_batch(h, dst, SCRIPT_CAP.min(IMG_FETCH_CAP), want.len());
+    let dst = img_fetch_buf();
+    let spans = take_batch(h, as_uninit(&mut dst[..SCRIPT_CAP.min(IMG_FETCH_CAP)]), want.len());
     if let Some(sess) = js_session() {
         for (k, url) in want.iter().enumerate() {
             let (off, n) = spans.get(k).copied().unwrap_or((0, 0));
             if n == 0 { log(&alloc::format!("[beak]   module FAIL {url}: leer")); continue }
-            let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+            let bytes = &dst[off..off + n];
             let Ok(text) = core::str::from_utf8(bytes) else {
                 log(&alloc::format!("[beak]   module FAIL {url}: kein UTF-8"));
                 continue;
@@ -3051,11 +3072,11 @@ const SCRIPT_HEARTBEAT_MS: i64 = 5_000;
 /// interpreter, which already holds a `&mut` borrow from the document via
 /// `js_session()`. A `doc()` there would be the aliasing `doc`/`doc_mut`
 /// warns about.
-static mut SCRIPT_DEADLINE: i64 = 0;
+static SCRIPT_DEADLINE: AtomicI64 = AtomicI64::new(0);
 /// When the running handler started, for the heartbeat. Distinct from
 /// `Doc::script_t0`, which is the start of the page's script round.
-static mut BUDGET_T0: i64 = 0;
-static mut BUDGET_SAID: i64 = 0;
+static BUDGET_T0: AtomicI64 = AtomicI64::new(0);
+static BUDGET_SAID: AtomicI64 = AtomicI64::new(0);
 
 /// The clock the engine asks every 65 536 steps — and the heartbeat.
 ///
@@ -3064,11 +3085,11 @@ static mut BUDGET_SAID: i64 = 0;
 /// afterwards. The engine asks here anyway, often enough for once a second.
 fn script_time_left() -> bool {
     let now = now_ms();
-    let t0 = unsafe { core::ptr::addr_of!(BUDGET_T0).read() };
-    let said = unsafe { core::ptr::addr_of!(BUDGET_SAID).read() };
+    let t0 = BUDGET_T0.load(Relaxed);
+    let said = BUDGET_SAID.load(Relaxed);
     let el = now - t0;
     if el >= SCRIPT_SLOW_MS && el - said >= SCRIPT_HEARTBEAT_MS {
-        unsafe { core::ptr::addr_of_mut!(BUDGET_SAID).write(el) };
+        BUDGET_SAID.store(el, Relaxed);
         let mut m = String::from("[beak] Skript rechnet noch: ");
         push_i64(&mut m, el / 1000);
         m.push_str(" s von hoechstens ");
@@ -3076,17 +3097,15 @@ fn script_time_left() -> bool {
         m.push_str(" s");
         log(&m);
     }
-    now < unsafe { core::ptr::addr_of!(SCRIPT_DEADLINE).read() }
+    now < SCRIPT_DEADLINE.load(Relaxed)
 }
 
 /// Reset the clock — before every run of page code.
 fn arm_script_budget() {
     let now = now_ms();
-    unsafe {
-        core::ptr::addr_of_mut!(SCRIPT_DEADLINE).write(now + SCRIPT_BUDGET_MS);
-        core::ptr::addr_of_mut!(BUDGET_T0).write(now);
-        core::ptr::addr_of_mut!(BUDGET_SAID).write(0);
-    }
+    SCRIPT_DEADLINE.store(now + SCRIPT_BUDGET_MS, Relaxed);
+    BUDGET_T0.store(now, Relaxed);
+    BUDGET_SAID.store(0, Relaxed);
 }
 
 /// Start a page's image load: drop the old pixels and return the list of
@@ -3174,7 +3193,7 @@ fn pump_images(
 ) {
     let h = img_job();
     if h >= 0 {
-        if unsafe { npk_http_poll(h) } == 0 {
+        if http_poll(h) == 0 {
             return; // still on the wire — come back next turn
         }
         images_arrived(engine, h, layout, band);
@@ -3218,8 +3237,8 @@ fn images_arrived(
 ) {
     let want: Vec<(String, String)> = doc_mut().img_job_srcs.take().unwrap_or_default();
     doc_mut().img_job = -1;
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
+    let dst = img_fetch_buf();
+    let spans = take_batch(handle, as_uninit(dst), want.len());
     let mut arrived: Vec<&str> = Vec::new();
     let mut moved = false;
     for ((src, url), (off, n)) in want.iter().zip(spans) {
@@ -3230,7 +3249,7 @@ fn images_arrived(
                 IMG_FETCH_CAP / 1024, src));
             continue;
         }
-        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        let bytes = &dst[off..off + n];
         // Decode now, drop the compressed bytes — and keep the pixels under
         // their url so the next navigation to this page needs neither.
         if let Err(why) = engine.add_image_cached(src, url, bytes) {
@@ -3308,7 +3327,7 @@ fn pump_css_images(
 ) {
     let h = cssimg_job();
     if h >= 0 {
-        if unsafe { npk_http_poll(h) } == 0 {
+        if http_poll(h) == 0 {
             return;
         }
         css_images_arrived(engine, h, layout, band);
@@ -3342,8 +3361,8 @@ fn css_images_arrived(
 ) {
     let want: Vec<(u64, String)> = doc_mut().cssimg_job_keys.take().unwrap_or_default();
     doc_mut().cssimg_job = -1;
-    let dst = core::ptr::addr_of_mut!(IMG_FETCH_BUF) as *mut u8;
-    let spans = take_batch(handle, dst, IMG_FETCH_CAP, want.len());
+    let dst = img_fetch_buf();
+    let spans = take_batch(handle, as_uninit(dst), want.len());
     let mut arrived: Vec<u64> = Vec::new();
     for ((key, url), (off, n)) in want.iter().zip(spans) {
         if n == 0 {
@@ -3351,7 +3370,7 @@ fn css_images_arrived(
                 IMG_FETCH_CAP / 1024, url));
             continue; // the box stays undecorated
         }
-        let bytes = unsafe { core::slice::from_raw_parts(dst.add(off) as *const u8, n) };
+        let bytes = &dst[off..off + n];
         match engine.add_css_image_cached(*key, url, bytes) {
             Ok(()) => arrived.push(*key),
             Err(why) => log(&alloc::format!("[beak] background dropped ({n} B): {why} — {url}")),
@@ -3387,12 +3406,12 @@ fn font_job() -> i32 {
 /// makes the new document wait its turn.
 fn subresources_cancel() {
     if doc().img_job >= 0 {
-        unsafe { npk_http_cancel(doc().img_job) };
+        http_cancel(doc().img_job);
         doc_mut().img_job = -1;
     }
     doc_mut().img_job_srcs = None;
     if doc().cssimg_job >= 0 {
-        unsafe { npk_http_cancel(doc().cssimg_job) };
+        http_cancel(doc().cssimg_job);
         doc_mut().cssimg_job = -1;
     }
     doc_mut().cssimg_job_keys = None;
@@ -3507,10 +3526,10 @@ fn tab_freeze() {
     {
         let d = doc_mut();
         if d.font_job >= 0 {
-            unsafe { npk_http_cancel(d.font_job) };
+            http_cancel(d.font_job);
         }
         for (_, h) in core::mem::take(&mut d.fetch_jobs) {
-            unsafe { npk_http_cancel(h) };
+            http_cancel(h);
         }
     }
     let (url, hist, hist_pos, y, title) = {
@@ -3535,10 +3554,8 @@ fn tab_freeze() {
 /// program, not the page, and a new tab showing the old one's text would be
 /// exactly the mix-up `Doc` exists to prevent.
 fn blank_document(engine: &Engine) {
-    unsafe {
-        core::ptr::addr_of_mut!(HTML_LEN).write(0);
-        core::ptr::addr_of_mut!(CSS_LEN).write(0);
-    }
+    HTML_LEN.store(0, Relaxed);
+    CSS_LEN.store(0, Relaxed);
     engine.set_scripted_dom(None);
     engine.set_hit_all(false);
     bump_content_gen("tab-blank");
@@ -3614,9 +3631,7 @@ fn tab_close(engine: &Engine, i: usize, cache: &mut Option<(Layout, i32, i32, u3
     // The last tab is the window, as in other browsers; otherwise Ctrl+W
     // would do nothing and the window could not be closed by keyboard.
     if n == 1 {
-        unsafe {
-            let _ = npk_close_widget();
-        }
+        host::close_widget();
         return;
     }
     let a = active();
@@ -3857,13 +3872,7 @@ fn resolve(base: &str, href: &str) -> String {
 /// Query the canvas widget's actual laid-out rect (x, y, w, h) in the app's
 /// window space. `None` until the compositor has laid it out at least once.
 fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
-    let out = core::ptr::addr_of_mut!(RECT_BUF) as *mut u8;
-    if unsafe { npk_canvas_rect(CANVAS_ID, out as i32) } != 0 {
-        return None;
-    }
-    let b = unsafe { core::slice::from_raw_parts(out as *const u8, 16) };
-    let rd = |i: usize| i32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-    Some((rd(0), rd(4), rd(8), rd(12)))
+    host::canvas_rect(CANVAS_ID)
 }
 
 /// Set one BGRA pixel (bounds-checked).
@@ -3944,8 +3953,8 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         return;
     }
     let dirty = doc().dirty;
-    let lw = unsafe { core::ptr::addr_of!(LAST_W).read() };
-    let lh = unsafe { core::ptr::addr_of!(LAST_H).read() };
+    let lw = LAST_W.load(Relaxed);
+    let lh = LAST_H.load(Relaxed);
     if !dirty && w == lw && h == lh {
         return;
     }
@@ -4042,7 +4051,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     //
     // The inspect overlay is drawn over the frame rather than being part of the
     // display list, so a blit would smear it; that mode takes the full path.
-    let dy = sy - unsafe { core::ptr::addr_of!(LAST_SY).read() };
+    let dy = sy - LAST_SY.load(Relaxed);
     let full = doc().need_full
         || need_layout
         || resized
@@ -4081,7 +4090,7 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         }
     }
     let t_commit = now_ms();
-    unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
+    host::canvas_commit(CANVAS_ID, buf, w as u32, h as u32);
     // Say which path ran. A fast path that never says so looks exactly like one
     // that never happened, and the whole point of this one is a number.
     if full {
@@ -4109,11 +4118,9 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
         }
     }
 
-    unsafe {
-        core::ptr::addr_of_mut!(LAST_W).write(w);
-        core::ptr::addr_of_mut!(LAST_H).write(h);
-        core::ptr::addr_of_mut!(LAST_SY).write(sy);
-    }
+    LAST_W.store(w, Relaxed);
+    LAST_H.store(h, Relaxed);
+    LAST_SY.store(sy, Relaxed);
     doc_mut().need_full = false;
     doc_mut().dirty = false;
 }
@@ -4263,7 +4270,7 @@ fn render_chrome() {
         toolbar,
         Widget::Divider,
         Widget::Canvas {
-            id: CanvasId(CANVAS_ID as u32),
+            id: CanvasId(CANVAS_ID),
             width: 800,
             height: 600,
             modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Page)],
@@ -4337,7 +4344,7 @@ fn render_chrome() {
 
     match wire::encode(&tree) {
         Ok(b) => {
-            if unsafe { npk_scene_commit(b.as_ptr() as i32, b.len() as i32) } < 0 {
+            if !host::scene_commit(&b) {
                 log("[beak] commit failed");
             }
         }
@@ -4900,7 +4907,7 @@ fn blink_caret(engine: &Engine, cache: &Option<(Layout, i32, i32, u32)>,
     engine.set_caret_on(on);
     engine.paint_band(lay, w as u32, h as u32, sy, buf, y0 as u32, y1 as u32);
     engine.set_caret_on(true);
-    unsafe { npk_canvas_commit(CANVAS_ID, buf.as_ptr() as i32, buf.len() as i32, w, h) };
+    host::canvas_commit(CANVAS_ID, buf, w as u32, h as u32);
 }
 
 /// Report `scroll` and `resize` to the page — after the frame, not during.
@@ -5185,9 +5192,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
                 true
             }
             ACT_FILE_CLOSE => {
-                unsafe {
-                    let _ = npk_close_widget();
-                }
+                host::close_widget();
                 true
             }
             ACT_TAB_NEW => {
@@ -5356,7 +5361,7 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             let Some((lay, _, _, _)) = cache.as_ref() else { return false };
             let text = engine.selected_text(lay, a, b);
             if text.is_empty() { return false }
-            let n = unsafe { npk_clipboard_set(text.as_ptr() as i32, text.len() as i32) };
+            let n = clipboard_set(&text);
             log(&alloc::format!("[beak] kopiert: {} Zeichen", if n < 0 { 0 } else { n }));
             true
         }
@@ -5483,10 +5488,8 @@ enum PollResult {
     WindowGone,
 }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -5526,13 +5529,10 @@ pub extern "C" fn _start() {
 
     // Launch argument: `npk_open("beak", "https://…")` → prime the address bar
     // now; the actual fetch waits until the engine is set up (below).
-    let arg_len = {
-        let p = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
-        let n = unsafe { npk_launch_arg(p as i32, PAYLOAD_CAP as i32) };
-        if n > 0 { n as usize } else { 0 }
-    };
+    let mut arg = [0u8; PAYLOAD_CAP];
+    let arg_len = host::launch_arg(&mut arg).unwrap_or(0).min(PAYLOAD_CAP);
     if arg_len > 0 {
-        set_url(payload_str(arg_len));
+        set_url(core::str::from_utf8(&arg[..arg_len]).unwrap_or(""));
     }
 
     // Commit the chrome immediately so the window is an opaque browser from
@@ -5554,7 +5554,7 @@ pub extern "C" fn _start() {
     // paint says how many a page needed.
     engine_mut().set_theme(query_theme());
     // Lend the engine our tick source so it can report the per-phase split.
-    engine().set_clock(|| unsafe { npk_ticks() } as u64);
+    engine().set_clock(host::ticks_ms);
     // Restore stored cookies before the first request goes out, or the start
     // page would load logged out.
     cookies_restore();
@@ -5572,6 +5572,7 @@ pub extern "C" fn _start() {
     let mut page = Page::new();
     // Persistent paint buffer, reused across frames (see maybe_repaint).
     let mut paint_buf: Vec<u8> = Vec::new();
+    let mut event_buf = vec![0u8; EVENT_BUF_SIZE];
 
     loop {
         // Drain the entire event queue this tick, then repaint once.
@@ -5580,7 +5581,7 @@ pub extern "C" fn _start() {
         let mut chrome = false;
         let mut had_event = false;
         loop {
-            match poll_event() {
+            match poll_event(&mut event_buf) {
                 PollResult::Event(ev) => {
                     had_event = true;
                     if handle(engine(), ev, &mut cache, &mut page) {
@@ -5589,9 +5590,7 @@ pub extern "C" fn _start() {
                 }
                 PollResult::Empty => break,
                 PollResult::WindowGone => {
-                    unsafe {
-                        let _ = npk_close_widget();
-                    }
+                    host::close_widget();
                     return;
                 }
             }
@@ -5777,19 +5776,17 @@ pub extern "C" fn _start() {
         // Always yield so this worker core can halt — a cooperative fiber that
         // never sleeps pins its core at 100%. A short nap while interacting
         // stays responsive; a longer one when idle keeps the core asleep.
-        unsafe {
-            // Anything on the wire keeps the short nap: that is how often we
-            // ask the kernel whether the answer is here. A running font round
-            // counts too, or the page would stay unstyled longer.
-            let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
-                || font_job() >= 0;
-            let busy = had_event
-                || waiting
-                || !doc().pending_imgs.is_empty()
-                || !doc().pending_css_imgs.is_empty();
-            let nap = if busy { 4 } else { 16 };
-            let _ = npk_sleep(nap);
-        }
+        // Anything on the wire keeps the short nap: that is how often we
+        // ask the kernel whether the answer is here. A running font round
+        // counts too, or the page would stay unstyled longer.
+        let waiting = nav_busy() || img_job() >= 0 || cssimg_job() >= 0
+            || font_job() >= 0;
+        let busy = had_event
+            || waiting
+            || !doc().pending_imgs.is_empty()
+            || !doc().pending_css_imgs.is_empty();
+        let nap = if busy { 4 } else { 16 };
+        host::sleep_ms(nap);
     }
 }
 

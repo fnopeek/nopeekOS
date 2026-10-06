@@ -1,24 +1,13 @@
-//! Host functions — WASM imports from the `env` module, resolved by the
-//! kernel at instantiation. Naming the module explicitly is what makes them
-//! imports rather than ordinary undefined C symbols, which rust-lld rejects.
+//! Host functions. The shared ones come from `nopeek_widgets::host`; the
+//! audio mailbox, the file dialog and the YUV canvas are tune's own.
+
+use nopeek_widgets::host as sdk;
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_ticks() -> i64;
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
     fn npk_audio_open() -> i32;
     fn npk_audio_close(slot: i32) -> i32;
     fn npk_audio_submit(slot: i32, ptr: i32, len: i32) -> i32;
-    fn npk_audio_set_volume(pct: i32) -> i32;
-    fn npk_audio_get_volume() -> i32;
     fn npk_audio_buffered(slot: i32) -> i32;
     fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
                 suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
@@ -26,38 +15,41 @@ unsafe extern "C" {
                              ys: i32, cs: i32, w: i32, h: i32, flags: i32) -> i32;
 }
 
-pub fn scene_commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
+pub fn scene_commit(bytes: &[u8]) -> bool { sdk::scene_commit(bytes) }
+pub fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> { sdk::fetch(name, buf) }
+pub fn fs_list(dir: &str, buf: &mut [u8], recursive: bool) -> Option<usize> { sdk::fs_list(dir, buf, recursive) }
+pub fn home_dir(buf: &mut [u8]) -> Option<usize> { sdk::home_dir(buf) }
+pub fn launch_arg(buf: &mut [u8]) -> Option<usize> { sdk::launch_arg(buf) }
+pub fn close_widget() { sdk::close_widget(); }
+pub fn ticks() -> i64 { sdk::ticks_ms() as i64 }
+pub fn sleep(ms: i32) { sdk::sleep_ms(ms.max(0) as u32); }
+pub fn log(msg: &str) { sdk::log_serial(msg); }
+pub fn set_volume(pct: i32) { let _ = sdk::audio_set_volume(pct.max(0) as u32); }
+/// Master volume in percent, -1 if unknown.
+pub fn get_volume() -> i32 {
+    sdk::audio_volume().map_or(-1, |v| v.min(i32::MAX as u32) as i32)
 }
-pub fn event_poll(ptr: *mut u8, max: usize) -> i32 {
-    unsafe { npk_event_poll(ptr as i32, max as i32) }
-}
-pub fn fetch(name: &str, buf: *mut u8, max: usize) -> i32 {
-    unsafe { npk_fetch(name.as_ptr() as i32, name.len() as i32, buf as i32, max as i32) }
-}
-pub fn fs_list(dir: &str, buf: *mut u8, max: usize) -> i32 {
-    unsafe { npk_fs_list(dir.as_ptr() as i32, dir.len() as i32, buf as i32, max as i32, 0) }
-}
-pub fn home_dir(buf: *mut u8, max: usize) -> i32 {
-    unsafe { npk_home_dir(buf as i32, max as i32) }
-}
-pub fn launch_arg(buf: *mut u8, max: usize) -> i32 {
-    unsafe { npk_launch_arg(buf as i32, max as i32) }
-}
-pub fn close_widget() { unsafe { let _ = npk_close_widget(); } }
+
 /// Open the system file dialog. The answer arrives as `Event::Picked`.
 pub fn pick_open(start: &str) -> i32 {
+    // SAFETY: FFI; the kernel validates the range.
     unsafe { npk_pick(0, start.as_ptr() as i32, start.len() as i32, 0, 0, 0) }
 }
-pub fn ticks() -> i64 { unsafe { npk_ticks() } }
-pub fn sleep(ms: i32) { unsafe { let _ = npk_sleep(ms); } }
-pub fn log(msg: &str) { unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32) } }
 
-pub fn audio_open() -> i32 { unsafe { npk_audio_open() } }
-pub fn audio_close(slot: i32) { unsafe { let _ = npk_audio_close(slot); } }
-pub fn audio_submit(slot: i32, ptr: i32, len: i32) -> i32 { unsafe { npk_audio_submit(slot, ptr, len) } }
-pub fn set_volume(pct: i32) { unsafe { let _ = npk_audio_set_volume(pct); } }
-pub fn get_volume() -> i32 { unsafe { npk_audio_get_volume() } }
+pub fn audio_open() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_open() }
+}
+pub fn audio_close(slot: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_close(slot) };
+}
+/// Hand `pcm` to the slot's ring; the bytes it accepted.
+pub fn audio_submit(slot: i32, pcm: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call and validated by the
+    // kernel.
+    unsafe { npk_audio_submit(slot, pcm.as_ptr() as i32, pcm.len() as i32) }
+}
 
 /// Bytes still sitting in the slot's ring.
 ///
@@ -65,6 +57,7 @@ pub fn get_volume() -> i32 { unsafe { npk_audio_get_volume() } }
 /// and over a film that shows.
 #[allow(dead_code)]
 pub fn audio_buffered(slot: i32) -> i32 {
+    // SAFETY: FFI without pointers.
     unsafe { npk_audio_buffered(slot) }
 }
 
@@ -75,6 +68,8 @@ pub fn audio_buffered(slot: i32) -> i32 {
 /// `flags`: bit 0 = Rec. 709, bit 1 = full range.
 pub fn canvas_commit_yuv(canvas_id: i32, y: &[u8], u: &[u8], v: &[u8],
                          ys: usize, cs: usize, w: u32, h: u32, flags: i32) -> i32 {
+    // SAFETY: FFI; the three planes are borrowed for the call and the kernel
+    // validates each against the strides and size.
     unsafe {
         npk_canvas_commit_yuv(canvas_id, y.as_ptr() as i32, u.as_ptr() as i32,
                               v.as_ptr() as i32, ys as i32, cs as i32,

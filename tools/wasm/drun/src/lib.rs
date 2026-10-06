@@ -23,32 +23,21 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::EXEC | caps::RENDER, caps::ext::SHELL];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_spawn_module(ptr: i32, len: i32) -> i32;
-    fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
-    fn npk_close_widget() -> i32;
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
-    fn npk_window_set_modal(modal: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+fn window_set_overlay(w: i32, h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_overlay(w, h) };
 }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
+fn log(msg: &str) { host::log_serial(msg); }
 
 const EVENT_BUF_SIZE: usize = 64;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 enum PollResult {
     Event(Event),
@@ -56,67 +45,25 @@ enum PollResult {
     WindowGone,
 }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-fn spawn(name: &str) -> bool {
-    unsafe { npk_spawn_module(name.as_ptr() as i32, name.len() as i32) == 0 }
-}
+fn spawn(name: &str) -> bool { host::spawn_module(name) }
 
-fn run_intent(verb: &str) -> bool {
-    unsafe { npk_run_intent(verb.as_ptr() as i32, verb.len() as i32) == 0 }
-}
-
-fn close_self() {
-    unsafe { let _ = npk_close_widget(); }
-}
-
-// Bump allocator reset every rerender; state kept across frames must be
-// allocated before `persistent_mark` with enough capacity that push()
-// never reallocates past the mark.
-const HEAP_SIZE: usize = 256 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
+fn run_intent(verb: &str) -> bool { host::run_intent(verb) == 0 }
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     log("[drun] panic!");
     core::arch::wasm32::unreachable()
-}
-
-fn alloc_reset(pos: usize) {
-    unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); }
-}
-
-fn alloc_mark() -> usize {
-    unsafe { core::ptr::addr_of!(HEAP_POS).read() }
 }
 
 // ActionId encoding:
@@ -227,7 +174,7 @@ impl Drun {
     fn commit_tree(&self) {
         let tree = self.render();
         match wire::encode(&tree) {
-            Ok(bytes) => { if commit(&bytes) < 0 { log("[drun] commit failed"); } }
+            Ok(bytes) => { if !host::scene_commit(&bytes) { log("[drun] commit failed"); } }
             Err(_) => log("[drun] encode failed"),
         }
     }
@@ -258,11 +205,8 @@ impl Drun {
             }
             Event::Key(KeyCode::Enter) => { self.spawn_selected(); Outcome::Exit }
             Event::Key(KeyCode::Escape) => Outcome::Exit,
-            // Search-buffer mutation lives in the compositor now —
-            // we just mirror the new value back into our pre-mark
-            // heap slot so it survives `alloc_reset(persistent_mark)`
-            // before the next commit. Past QUERY_CAP we hard-cap;
-            // the compositor will reconcile on the next round-trip.
+            // The compositor owns the search buffer; mirror its value,
+            // capped at QUERY_CAP.
             Event::InputChange { value } => {
                 self.query.clear();
                 // At a character boundary: typed text is UTF-8.
@@ -343,32 +287,25 @@ fn push_usize(s: &mut String, mut n: usize) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    unsafe {
-        let _ = npk_window_set_overlay(600, 540);
-        let _ = npk_window_set_modal(1);
-    }
+    window_set_overlay(600, 540);
+    host::window_set_modal(true);
 
     let mut drun = Drun::load();
-    let persistent_mark = alloc_mark();
+    let mut event_buf = [0u8; EVENT_BUF_SIZE];
 
     drun.commit_tree();
 
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => match drun.handle(ev) {
                 Outcome::Idle => {}
-                Outcome::Rerender => {
-                    alloc_reset(persistent_mark);
-                    drun.commit_tree();
-                }
+                Outcome::Rerender => drun.commit_tree(),
                 Outcome::Exit => {
-                    close_self();
+                    host::close_widget();
                     return;
                 }
             },
-            PollResult::Empty => {
-                unsafe { let _ = npk_sleep(16); }
-            }
+            PollResult::Empty => host::sleep_ms(16),
             PollResult::WindowGone => return,
         }
     }

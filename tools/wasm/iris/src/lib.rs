@@ -39,31 +39,17 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 1] = [caps::READ | caps::CANVAS | caps::RENDER];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The one call only iris makes; the shared ones are in `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
-    fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_cursor_pos() -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_ticks() -> i64;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
-}
+fn log(msg: &str) { host::log_serial(msg); }
 
-fn now_ms() -> i64 { unsafe { npk_ticks() } }
+fn now_ms() -> i64 { host::ticks_ms() as i64 }
 
 /// Log "<label>: <ms> ms". Permanent, not scaffolding: the decode runs
 /// under a WASM interpreter, so knowing whether the seconds go into
@@ -92,53 +78,26 @@ fn push_i64(out: &mut String, mut v: i64) {
     while n > 0 { n -= 1; out.push(digits[n] as char); }
 }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
-
-fn close_self() { unsafe { let _ = npk_close_widget(); } }
-
-const CANVAS_ID: i32 = 1;
+const CANVAS_ID: u32 = 1;
 
 // ── Buffers ───────────────────────────────────────────────────────────
 const EVENT_BUF_SIZE: usize = 8 * 1024;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 // Compressed PNG file scratch (a screen-sized PNG is a few MB).
 const FETCH_BUF_SIZE: usize = 32 * 1024 * 1024;
-static mut FETCH_BUF: [u8; FETCH_BUF_SIZE] = [0; FETCH_BUF_SIZE];
 
 const LIST_BUF_SIZE: usize = 64 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
 
 const HOME_CAP: usize = 256;
-static mut HOME_BUF: [u8; HOME_CAP] = [0; HOME_CAP];
 
-// Event payloads (Open path) live on the bump heap above the persistent
-// mark; alloc_reset before handling frees them, so copy into this static
-// first (same as spell).
+// The Open path is copied out of the event before `reset` hands its heap
+// memory to the next allocation.
 const PAYLOAD_CAP: usize = 4 * 1024;
-static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
-
-fn copy_payload(s: &str) -> usize {
-    let n = s.len().min(PAYLOAD_CAP);
-    let dst = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), dst, n); }
-    n
-}
-
-fn payload_str(len: usize) -> &'static str {
-    let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
-    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(slice).unwrap_or("")
-}
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -148,41 +107,23 @@ fn poll_event() -> PollResult {
 // ── Bump allocator ────────────────────────────────────────────────────
 //
 // A 4K PNG decode needs ~3× its raw size live at once (decompressed +
-// unfiltered + BGRA). 256 MB matches wallpaper's headroom; everything
-// above `persistent_mark` (the per-frame scene + the decode buffers) is
-// freed each loop iteration so navigation doesn't leak.
-const HEAP_SIZE: usize = 160 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos = core::ptr::addr_of!(HEAP_POS).read();
-        let align = layout.align();
-        let aligned = (pos + align - 1) & !(align - 1);
-        let new_pos = aligned + layout.size();
-        if new_pos > HEAP_SIZE { return core::ptr::null_mut(); }
-        core::ptr::addr_of_mut!(HEAP_POS).write(new_pos);
-        core::ptr::addr_of_mut!(HEAP).cast::<u8>().add(aligned)
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
+// unfiltered + BGRA). Everything above the persistent mark (the per-frame
+// scene + the decode buffers) is freed each loop iteration so navigation
+// doesn't leak. The fetch buffer sits below the mark, on top of the
+// 160 MB for decoding.
+const HEAP_SIZE: usize = 160 * 1024 * 1024 + FETCH_BUF_SIZE;
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::bump::Bump<HEAP_SIZE> = nopeek_widgets::bump::Bump::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { log("[iris] panic!"); core::arch::wasm32::unreachable() }
-
-fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
-fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
 
 // ── Decoded-bitmap cache ──────────────────────────────────────────────
 //
 // Decoding is the whole cost of showing an image (seconds for a large PNG
 // under the interpreter), so a picture already decoded must never be
-// decoded twice. The cache lives outside the bump heap — `alloc_reset`
+// decoded twice. The cache lives outside the bump heap — a `reset`
 // would otherwise pull it out from under us every event.
 //
 // Budgeted in bytes, not in pictures: a count that fits 1080p (8 MB
@@ -206,119 +147,121 @@ fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(po
 const CACHE_MAX: usize = 320 * 1024 * 1024;
 const WASM_PAGE: usize = 64 * 1024;
 
-static mut CACHE_PTR: *mut u8 = core::ptr::null_mut();
-static mut CACHE_CAP: usize = 0;
-static mut CACHE_POS: usize = 0;
-
-/// Claim linear memory until the arena holds at least `want` bytes (never
-/// past `CACHE_MAX`). Returns the capacity actually available.
-fn arena_reserve(want: usize) -> usize {
-    unsafe {
-        let cap = *(&raw const CACHE_CAP);
-        let want = want.min(CACHE_MAX);
-        if want <= cap { return cap; }
-        let pages = (want - cap).div_ceil(WASM_PAGE);
-        let prev = core::arch::wasm32::memory_grow(0, pages);
-        if prev == usize::MAX { return cap; }   // runtime refused; keep what we have
-        let fresh = (prev * WASM_PAGE) as *mut u8;
-        if cap == 0 {
-            *(&raw mut CACHE_PTR) = fresh;
-        } else if fresh != (*(&raw const CACHE_PTR)).add(cap) {
-            // Someone else claimed memory in between, so the arena is no
-            // longer one run. Nothing else in this module does that today;
-            // if it ever starts to, drop what we hold and re-base rather
-            // than address across the gap.
-            cache_clear();
-            *(&raw mut CACHE_PTR) = fresh;
-            *(&raw mut CACHE_CAP) = pages * WASM_PAGE;
-            return pages * WASM_PAGE;
-        }
-        let grown = cap + pages * WASM_PAGE;
-        *(&raw mut CACHE_CAP) = grown;
-        grown
-    }
-}
-
 #[derive(Clone, Copy)]
 struct CacheEntry { idx: usize, off: usize, len: usize, w: u32, h: u32 }
 
 const CACHE_SLOTS: usize = 48;
-static mut ENTRIES: [Option<CacheEntry>; CACHE_SLOTS] = [None; CACHE_SLOTS];
 
 /// Pictures that did not make it into the cache — too big for the budget,
 /// or undecodable. Without this list prefetching would pick the same
 /// target every round and re-decode it forever: a hundred percent of a
 /// core, spent on an image that can never land.
 const SKIP_SLOTS: usize = 8;
-static mut SKIP: [Option<usize>; SKIP_SLOTS] = [None; SKIP_SLOTS];
-static mut SKIP_POS: usize = 0;
 
-fn skip_mark(idx: usize) {
-    unsafe {
-        let pos = *(&raw const SKIP_POS);
-        (&mut *(&raw mut SKIP))[pos] = Some(idx);
-        *(&raw mut SKIP_POS) = (pos + 1) % SKIP_SLOTS;
+struct Cache {
+    arena:    &'static mut [u8],
+    pos:      usize,
+    entries:  [Option<CacheEntry>; CACHE_SLOTS],
+    skip:     [Option<usize>; SKIP_SLOTS],
+    skip_pos: usize,
+}
+
+impl Cache {
+    fn new() -> Cache {
+        Cache {
+            arena: &mut [],
+            pos: 0,
+            entries: [None; CACHE_SLOTS],
+            skip: [None; SKIP_SLOTS],
+            skip_pos: 0,
+        }
     }
-}
 
-fn skip_holds(idx: usize) -> bool {
-    unsafe { (&*(&raw const SKIP)).iter().flatten().any(|&i| i == idx) }
-}
-
-/// Everything cached is dropped when the folder changes — the entries are
-/// keyed by position in `files`, and that meaning changes with the list.
-fn cache_clear() {
-    unsafe {
-        *(&raw mut CACHE_POS) = 0;
-        for e in (&mut *(&raw mut ENTRIES)).iter_mut() { *e = None; }
-        for s in (&mut *(&raw mut SKIP)).iter_mut() { *s = None; }
-        *(&raw mut SKIP_POS) = 0;
+    /// Claim linear memory until the arena holds at least `want` bytes
+    /// (never past `CACHE_MAX`). Returns the capacity actually available.
+    fn reserve(&mut self, want: usize) -> usize {
+        let cap = self.arena.len();
+        let want = want.min(CACHE_MAX);
+        if want <= cap { return cap; }
+        let pages = (want - cap).div_ceil(WASM_PAGE);
+        let prev = core::arch::wasm32::memory_grow(0, pages);
+        if prev == usize::MAX { return cap; }   // runtime refused; keep what we have
+        let fresh = (prev * WASM_PAGE) as *mut u8;
+        let old = core::mem::take(&mut self.arena);
+        let (base, len) = if cap == 0 {
+            (fresh, pages * WASM_PAGE)
+        } else if fresh != old.as_mut_ptr().wrapping_add(cap) {
+            // Someone else claimed memory in between, so the arena is no
+            // longer one run. Nothing else in this module does that today;
+            // if it ever starts to, drop what we hold and re-base rather
+            // than address across the gap.
+            self.clear();
+            (fresh, pages * WASM_PAGE)
+        } else {
+            (old.as_mut_ptr(), cap + pages * WASM_PAGE)
+        };
+        // SAFETY: `base..base + len` is linear memory `memory.grow` handed
+        // to the arena — the old run plus the fresh pages right behind it,
+        // or the fresh pages alone. Nothing else addresses it, it is never
+        // given back, and the previous slice over it was taken out above.
+        self.arena = unsafe { core::slice::from_raw_parts_mut(base, len) };
+        len
     }
-}
 
-fn cache_get(idx: usize) -> Option<(&'static [u8], u32, u32)> {
-    unsafe {
-        let base = *(&raw const CACHE_PTR);
-        if base.is_null() { return None; }
-        let entries = &*(&raw const ENTRIES);
-        let e = entries.iter().flatten().find(|e| e.idx == idx)?;
-        Some((core::slice::from_raw_parts(base.add(e.off), e.len), e.w, e.h))
+    fn skip_mark(&mut self, idx: usize) {
+        self.skip[self.skip_pos] = Some(idx);
+        self.skip_pos = (self.skip_pos + 1) % SKIP_SLOTS;
     }
-}
 
-/// Store a decoded bitmap, growing the arena if this folder can use the
-/// room. `wanted` is how many pictures are worth holding — the prefetch
-/// window, capped by how many the folder actually has, so a two-picture
-/// folder never claims space for nine.
-///
-/// Skips pictures too big to share the arena: one of those would evict
-/// everything else on every navigation.
-fn cache_put(idx: usize, bgra: &[u8], w: u32, h: u32, wanted: usize) {
-    let len = bgra.len();
-    if len == 0 || len > CACHE_MAX / 2 { return; }
-    let cap = arena_reserve(len.saturating_mul(wanted.max(1)));
-    if cap < len { return; }
-    unsafe {
-        let mut start = *(&raw const CACHE_POS);
+    fn skip_holds(&self, idx: usize) -> bool {
+        self.skip.iter().flatten().any(|&i| i == idx)
+    }
+
+    /// Everything cached is dropped when the folder changes — the entries
+    /// are keyed by position in `files`, and that meaning changes with the
+    /// list.
+    fn clear(&mut self) {
+        self.pos = 0;
+        self.entries = [None; CACHE_SLOTS];
+        self.skip = [None; SKIP_SLOTS];
+        self.skip_pos = 0;
+    }
+
+    fn get(&self, idx: usize) -> Option<(&[u8], u32, u32)> {
+        let e = self.entries.iter().flatten().find(|e| e.idx == idx)?;
+        Some((&self.arena[e.off..e.off + e.len], e.w, e.h))
+    }
+
+    /// Store a decoded bitmap, growing the arena if this folder can use
+    /// the room. `wanted` is how many pictures are worth holding — the
+    /// prefetch window, capped by how many the folder actually has, so a
+    /// two-picture folder never claims space for nine.
+    ///
+    /// Skips pictures too big to share the arena: one of those would evict
+    /// everything else on every navigation.
+    fn put(&mut self, idx: usize, bgra: &[u8], w: u32, h: u32, wanted: usize) {
+        let len = bgra.len();
+        if len == 0 || len > CACHE_MAX / 2 { return; }
+        let cap = self.reserve(len.saturating_mul(wanted.max(1)));
+        if cap < len { return; }
+        let mut start = self.pos;
         if start + len > cap { start = 0; }   // wrap; tail is wasted
         let end = start + len;
-        let entries = &mut *(&raw mut ENTRIES);
         // Anything the new bytes land on is gone.
-        for slot in entries.iter_mut() {
+        for slot in self.entries.iter_mut() {
             if let Some(e) = slot {
                 if e.off < end && start < e.off + e.len { *slot = None; }
             }
         }
-        let dst = *(&raw const CACHE_PTR);
-        core::ptr::copy_nonoverlapping(bgra.as_ptr(), dst.add(start), len);
+        self.arena[start..end].copy_from_slice(bgra);
         let entry = CacheEntry { idx, off: start, len, w, h };
         // Prefer a free slot; if the table is full the oldest region is
         // the one nearest the write head, so drop the first entry.
-        match entries.iter_mut().find(|s| s.is_none()) {
+        match self.entries.iter_mut().find(|s| s.is_none()) {
             Some(slot) => *slot = Some(entry),
-            None => entries[0] = Some(entry),
+            None => self.entries[0] = Some(entry),
         }
-        *(&raw mut CACHE_POS) = end;
+        self.pos = end;
     }
 }
 
@@ -426,6 +369,9 @@ struct Iris {
     /// toolbar's ◀ would page back on the Action and forward again on the
     /// release, and a menu would close in the same click that opened it.
     swallow_press: bool,
+    cache:  Cache,
+    /// Compressed file scratch, allocated below the persistent mark.
+    fetch_buf: Vec<u8>,
 }
 
 const ZOOM_FIT: u16 = 256;
@@ -461,12 +407,14 @@ impl Iris {
             menu: None, picking: false, zoom: ZOOM_FIT,
             pan: (0, 0), press: None, dragged: false, forward: true, loading: false,
             swallow_press: false,
+            cache: Cache::new(),
+            fetch_buf: alloc::vec![0u8; FETCH_BUF_SIZE],
         };
         // Launched to open a specific file?
         let mut argbuf = [0u8; 512];
-        let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
+        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
         if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
+            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
                 iris.point_at(path);
                 return iris;
             }
@@ -490,7 +438,7 @@ impl Iris {
     fn refresh(&mut self) {
         // Entries are keyed by position in `files`; a new listing gives
         // those positions a different meaning.
-        cache_clear();
+        self.cache.clear();
         self.files = list_images(&self.dir);
         if self.idx >= self.files.len() { self.idx = 0; }
     }
@@ -506,14 +454,11 @@ impl Iris {
     /// after the per-frame alloc mark (decode buffers are freed next reset).
     fn load(&mut self) {
         self.w = 0; self.h = 0; self.failed = false;
-        if let Some((px, w, h)) = cache_get(self.idx) {
+        if let Some((px, w, h)) = self.cache.get(self.idx) {
             let t = now_ms();
-            let rc = unsafe {
-                npk_canvas_commit(CANVAS_ID, px.as_ptr() as i32, px.len() as i32,
-                    w as i32, h as i32)
-            };
+            let ok = host::canvas_commit(CANVAS_ID, px, w, h);
             log_ms("=== cached -> displayed", now_ms() - t);
-            if rc < 0 { self.failed = true; } else { self.w = w; self.h = h; }
+            if !ok { self.failed = true; } else { self.w = w; self.h = h; }
             return;
         }
         self.decode_into_view();
@@ -523,7 +468,7 @@ impl Iris {
     fn decode_into_view(&mut self) {
         let path = match self.full_path() { Some(p) => p, None => return };
         let t_start = now_ms();
-        let bytes = match fetch_file(&path) {
+        let bytes = match fetch_file(&mut self.fetch_buf, &path) {
             Some(b) => b,
             None => { self.failed = true; log("[iris] fetch failed"); return; }
         };
@@ -537,17 +482,15 @@ impl Iris {
         match decode_png(bytes) {
             Some((bgra, w, h)) => {
                 let t_decoded = now_ms();
-                let rc = unsafe {
-                    npk_canvas_commit(CANVAS_ID, bgra.as_ptr() as i32,
-                        bgra.len() as i32, w as i32, h as i32)
-                };
+                let ok = host::canvas_commit(CANVAS_ID, &bgra, w, h);
                 log_ms("canvas commit", now_ms() - t_decoded);
                 // The number that matters: click → pixels on screen.
                 log_ms("=== open -> displayed", now_ms() - t_start);
-                if rc < 0 { self.failed = true; log("[iris] canvas_commit rejected"); }
+                if !ok { self.failed = true; log("[iris] canvas_commit rejected"); }
                 else {
                     self.w = w; self.h = h;
-                    cache_put(self.idx, &bgra, w, h, self.cache_slots());
+                    let slots = self.cache_slots();
+                    self.cache.put(self.idx, &bgra, w, h, slots);
                 }
             }
             None => { self.failed = true; log("[iris] decode failed"); }
@@ -575,8 +518,8 @@ impl Iris {
                 } else {
                     (self.idx + n - (d % n)) % n
                 };
-                if idx == self.idx || skip_holds(idx) { continue; }
-                if cache_get(idx).is_none() { return Some(idx); }
+                if idx == self.idx || self.cache.skip_holds(idx) { continue; }
+                if self.cache.get(idx).is_none() { return Some(idx); }
             }
         }
         None
@@ -585,17 +528,18 @@ impl Iris {
     /// Decode one neighbour into the cache. Never touches the view, so a
     /// half-finished round of prefetching leaves nothing behind.
     fn prefetch_one(&mut self, idx: usize) {
-        let Some(name) = self.files.get(idx) else { skip_mark(idx); return };
+        let Some(name) = self.files.get(idx) else { self.cache.skip_mark(idx); return };
         let path = alloc::format!("{}/{}", self.dir, name);
-        let Some(bytes) = fetch_file(&path) else { skip_mark(idx); return };
+        let Some(bytes) = fetch_file(&mut self.fetch_buf, &path) else { self.cache.skip_mark(idx); return };
         let t = now_ms();
         if let Some((bgra, w, h)) = decode_png(bytes) {
-            cache_put(idx, &bgra, w, h, self.cache_slots());
+            let slots = self.cache_slots();
+            self.cache.put(idx, &bgra, w, h, slots);
             log_ms("prefetch", now_ms() - t);
         }
         // Did not land (undecodable, or larger than the budget allows) —
         // remember that, or we would try it again every round forever.
-        if cache_get(idx).is_none() { skip_mark(idx); }
+        if self.cache.get(idx).is_none() { self.cache.skip_mark(idx); }
     }
 
     // A new image always starts fit to the window — carrying a 4× zoom
@@ -839,7 +783,7 @@ fn render_footer(iris: &Iris) -> Widget {
     prefab::footer(&path, &right)
 }
 
-fn render_dropdown(iris: &Iris, kind: OpenMenu) -> (u32, Widget) {
+fn render_dropdown(kind: OpenMenu) -> (u32, Widget) {
     match kind {
         OpenMenu::File => (
             NODE_MENU_FILE,
@@ -918,7 +862,7 @@ fn render(iris: &Iris) -> Widget {
     if iris.picking {
         children.push(render_open_list(iris));
     } else if let Some(kind) = iris.menu {
-        let (anchor, content) = render_dropdown(iris, kind);
+        let (anchor, content) = render_dropdown(kind);
         children.push(Widget::Popover {
             anchor:     NodeId(anchor),
             child:      Box::new(content),
@@ -938,7 +882,7 @@ fn render(iris: &Iris) -> Widget {
 fn commit_scene(iris: &Iris) {
     let tree = render(iris);
     match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[iris] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[iris] commit failed"); } }
         Err(_) => log("[iris] encode failed"),
     }
 }
@@ -947,7 +891,8 @@ fn commit_scene(iris: &Iris) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     let mut iris = Iris::new();
-    let mut mark = alloc_mark();
+    let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];
+    let mut mark = ALLOCATOR.mark();
     // The window appears immediately and says what it is busy with; the
     // first picture has nothing cached behind it and takes the full
     // decode, which is the longest wait iris ever shows anyone.
@@ -961,16 +906,22 @@ pub extern "C" fn _start() {
     let mut quiet: u32 = 0;
 
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
                 quiet = 0;
+                let mut payload = [0u8; PAYLOAD_CAP];
                 let plen = match &ev {
-                    Event::Open(s) => copy_payload(s),
+                    Event::Open(s) => {
+                        let n = s.len().min(PAYLOAD_CAP);
+                        payload[..n].copy_from_slice(&s.as_bytes()[..n]);
+                        n
+                    }
                     _ => 0,
                 };
-                alloc_reset(mark);
-                let outcome = handle(&mut iris, ev, payload_str(plen));
-                mark = alloc_mark(); // small state mutations persist
+                ALLOCATOR.reset(mark);
+                let payload = core::str::from_utf8(&payload[..plen]).unwrap_or("");
+                let outcome = handle(&mut iris, ev, payload);
+                mark = ALLOCATOR.mark(); // small state mutations persist
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Render => commit_scene(&iris),
@@ -984,7 +935,7 @@ pub extern "C" fn _start() {
                         iris.loading = false;
                         commit_scene(&iris);
                     }
-                    Outcome::Exit => { close_self(); return; }
+                    Outcome::Exit => { host::close_widget(); return; }
                 }
             }
             PollResult::Empty => {
@@ -993,14 +944,14 @@ pub extern "C" fn _start() {
                 // so a click never waits behind more than a single image.
                 if quiet >= QUIET_POLLS {
                     if let Some(idx) = iris.prefetch_target() {
-                        alloc_reset(mark);
+                        ALLOCATOR.reset(mark);
                         iris.prefetch_one(idx);
-                        alloc_reset(mark);   // decode buffers are transient
+                        ALLOCATOR.reset(mark);   // decode buffers are transient
                         continue;
                     }
                 }
                 quiet = quiet.saturating_add(1);
-                unsafe { let _ = npk_sleep(16); }
+                host::sleep_ms(16);
             }
             PollResult::WindowGone => return,
         }
@@ -1009,16 +960,16 @@ pub extern "C" fn _start() {
 
 // ── npkFS helpers ─────────────────────────────────────────────────────
 fn read_home_dir() -> String {
-    let buf_ptr = core::ptr::addr_of_mut!(HOME_BUF) as *mut u8;
-    let n = unsafe { npk_home_dir(buf_ptr as i32, HOME_CAP as i32) };
-    if n <= 0 { return "home".to_string(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    core::str::from_utf8(slice).unwrap_or("home").to_string()
+    let mut buf = [0u8; HOME_CAP];
+    let n = host::home_dir(&mut buf).unwrap_or(0);
+    if n == 0 { return "home".to_string(); }
+    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
 }
 
 /// Pointer position in screen coordinates — the same space the mouse
 /// events report. `None` while we don't have focus (the kernel refuses).
 fn cursor_pos() -> Option<(i32, i32)> {
+    // SAFETY: FFI without pointers.
     let packed = unsafe { npk_cursor_pos() };
     if packed < 0 { return None; }
     Some((packed >> 16, packed & 0xFFFF))
@@ -1027,31 +978,22 @@ fn cursor_pos() -> Option<(i32, i32)> {
 /// The canvas widget's laid-out rect (screen coords). `None` until the
 /// first scene with a Canvas has been laid out.
 fn canvas_rect() -> Option<(i32, i32, i32, i32)> {
-    let mut buf = [0u8; 16];
-    if unsafe { npk_canvas_rect(CANVAS_ID, buf.as_mut_ptr() as i32) } < 0 { return None; }
-    let g = |i: usize| i32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
-    Some((g(0), g(4), g(8), g(12)))
+    host::canvas_rect(CANVAS_ID)
 }
 
-fn fetch_file(path: &str) -> Option<&'static [u8]> {
-    let buf_ptr = core::ptr::addr_of_mut!(FETCH_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(path.as_ptr() as i32, path.len() as i32, buf_ptr as i32, FETCH_BUF_SIZE as i32)
-    };
-    if n <= 0 { return None; }
-    Some(unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) })
+fn fetch_file<'a>(buf: &'a mut [u8], path: &str) -> Option<&'a [u8]> {
+    let n = host::fetch(path, buf)?;
+    if n == 0 { return None; }
+    Some(&buf[..n])
 }
 
 /// List `.png` files (non-recursive) in `dir`, sorted by name.
 fn list_images(dir: &str) -> Vec<String> {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(dir.as_ptr() as i32, dir.len() as i32, buf_ptr as i32, LIST_BUF_SIZE as i32, 0)
-    };
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
     let mut out: Vec<String> = Vec::new();
-    if n <= 0 { return out; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    for e in nopeek_widgets::fs::list_entries(slice) {
+    if n == 0 { return out; }
+    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
         if e.is_dir { continue; }
         if is_image(e.name) { out.push(e.name.to_string()); }
     }
@@ -1107,7 +1049,7 @@ where
     let mut pos = 8;
     let mut width: u32 = 0;
     let mut height: u32 = 0;
-    let mut bit_depth: u8 = 0;
+    let mut bit_depth: u8;
     let mut color_type: u8 = 0;
     let mut idat_data: Vec<u8> = Vec::with_capacity(data.len());
 

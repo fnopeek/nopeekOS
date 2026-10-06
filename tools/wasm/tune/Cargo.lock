@@ -58,7 +58,7 @@ checksum = "f69bdf7e634dc76798adc292ebd4f6e8e125cde6843a264fe398c52c3f7e8541"
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "postcard",
  "serde",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "tune"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "nanomp3",
  "nopeek_widgets",

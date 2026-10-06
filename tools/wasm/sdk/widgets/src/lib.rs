@@ -46,6 +46,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod app_meta;
+pub mod bump;
 pub mod fs;
 /// The growing heap — only with the `heap` feature, because it pulls in
 /// `talc`. See the module itself for when it is the right choice.
@@ -65,6 +66,8 @@ pub mod app_catalog;
 // Event polling and the panic handler import host fns: wasm32 only too.
 #[cfg(target_arch = "wasm32")]
 pub mod events;
+#[cfg(target_arch = "wasm32")]
+pub mod host;
 #[cfg(target_arch = "wasm32")]
 pub mod rt;
 

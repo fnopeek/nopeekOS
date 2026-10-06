@@ -21,45 +21,22 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-// --- Host function bindings (provided by nopeekOS kernel) ---
+// --- Host function bindings ---
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host::{self, fetch, store};
+
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_set_wallpaper(ptr: i32, len: i32, width: i32, height: i32) -> i32;
-    fn npk_log(ptr: i32, len: i32);
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log(msg.as_ptr() as i32, msg.len() as i32); }
-}
-
-fn fetch(name: &str, buf: &mut [u8]) -> Option<usize> {
-    let result = unsafe {
-        npk_fetch(name.as_ptr() as i32, name.len() as i32,
-                  buf.as_mut_ptr() as i32, buf.len() as i32)
-    };
-    if result < 0 { None } else { Some(result as usize) }
-}
+fn log(msg: &str) { host::log(msg); }
 
 fn set_wallpaper(pixels: &[u8], w: u32, h: u32) -> bool {
-    let result = unsafe {
-        npk_set_wallpaper(pixels.as_ptr() as i32, pixels.len() as i32,
-                          w as i32, h as i32)
-    };
-    result == 0
-}
-
-fn store(name: &str, data: &[u8]) -> bool {
-    let result = unsafe {
-        npk_store(name.as_ptr() as i32, name.len() as i32,
-                  data.as_ptr() as i32, data.len() as i32)
-    };
-    result == 0
+    // SAFETY: FFI; the kernel validates the range.
+    unsafe {
+        npk_set_wallpaper(pixels.as_ptr() as i32, pixels.len() as i32, w as i32, h as i32) == 0
+    }
 }
 
 // The SDK's growing heap: it frees, and it takes memory from the runtime as
@@ -537,7 +514,7 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut pos = 8;
     let mut width: u32 = 0;
     let mut height: u32 = 0;
-    let mut bit_depth: u8 = 0;
+    let mut bit_depth: u8;
     let mut color_type: u8 = 0;
     // IDAT concatenation: pre-size to the *whole* PNG payload so the
     // chunk-by-chunk `extend_from_slice` doesn't re-allocate.

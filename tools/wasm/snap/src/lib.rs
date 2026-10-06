@@ -31,27 +31,32 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 1] = [nopeek_widgets::caps::READ | nopeek_widgets::caps::WRITE | nopeek_widgets::caps::CAPTURE];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The two calls only snap makes; the shared ones are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_screen_size() -> i32;
     fn npk_capture_screen(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_screen_flash() -> i32;
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_ticks() -> i64;
-    fn npk_log_serial(ptr: i32, len: i32);
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+/// Copy the composited screen as BGRA into `buf`; the byte count or a
+/// negative refusal.
+fn capture_screen(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call and validated by the
+    // kernel.
+    unsafe { npk_capture_screen(buf.as_mut_ptr() as i32, buf.len() as i32) }
 }
 
-fn now_ms() -> i64 { unsafe { npk_ticks() } }
+fn screen_flash() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_screen_flash() };
+}
+
+fn log(msg: &str) { host::log_serial(msg); }
+
+fn now_ms() -> i64 { host::ticks_ms() as i64 }
 
 /// Log "<label>: <ms> ms". Permanent, not scaffolding: this runs under a
 /// WASM interpreter, so which phase a save spends its seconds in is the
@@ -82,10 +87,7 @@ fn push_i64(out: &mut String, mut v: i64) {
 
 // ── Buffers ───────────────────────────────────────────────────────────
 const LIST_BUF_SIZE: usize = 64 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-
 const HOME_CAP: usize = 256;
-static mut HOME_BUF: [u8; HOME_CAP] = [0; HOME_CAP];
 
 // The SDK's growing heap: it frees, and it takes memory from the runtime as
 // it is needed instead of reserving it at launch.
@@ -100,14 +102,12 @@ fn panic(_: &core::panic::PanicInfo) -> ! { log("[snap] panic!"); core::arch::wa
 pub extern "C" fn _start() {
     // Mode (unused — region falls back to full).
     let mut argbuf = [0u8; 32];
-    let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
-    let _mode = if n > 0 { core::str::from_utf8(&argbuf[..n as usize]).unwrap_or("full") } else { "full" };
+    let n = host::launch_arg(&mut argbuf).unwrap_or(0);
+    let _mode = if n > 0 { core::str::from_utf8(&argbuf[..n]).unwrap_or("full") } else { "full" };
 
-    // Screen size: packed (w << 16) | h.
-    let packed = unsafe { npk_screen_size() };
-    if packed <= 0 { log("[snap] screen_size failed"); return; }
-    let w = ((packed as u32) >> 16) as usize;
-    let h = ((packed as u32) & 0xFFFF) as usize;
+    let (w, h) = host::screen_size();
+    if (w, h) == (0, 0) { log("[snap] screen_size failed"); return; }
+    let (w, h) = (w as usize, h as usize);
     if w == 0 || h == 0 { log("[snap] zero screen"); return; }
 
     let t_start = now_ms();
@@ -115,7 +115,7 @@ pub extern "C" fn _start() {
     // Capture the composited screen as BGRA.
     let need = w * h * 4;
     let mut bgra: Vec<u8> = alloc::vec![0u8; need];
-    let got = unsafe { npk_capture_screen(bgra.as_mut_ptr() as i32, need as i32) };
+    let got = capture_screen(&mut bgra);
     if got as usize != need { log("[snap] capture failed"); return; }
     let t_captured = now_ms();
     log_ms("capture", t_captured - t_start);
@@ -123,7 +123,7 @@ pub extern "C" fn _start() {
     // Shutter blink — after the capture, so the white is never in the
     // shot, and before the encode, so the acknowledgement is immediate
     // rather than a second later when the file lands.
-    unsafe { let _ = npk_screen_flash(); }
+    screen_flash();
 
     // Encode PNG (RGB, screenshots have no meaningful alpha).
     let png = encode_png_rgb(&bgra, w as u32, h as u32);
@@ -134,36 +134,30 @@ pub extern "C" fn _start() {
     let dir = alloc::format!("{}/pictures/printscreens", home);
     let name = next_name(&dir);
     let path = alloc::format!("{}/{}", dir, name);
-    let rc = unsafe {
-        npk_store(path.as_ptr() as i32, path.len() as i32, png.as_ptr() as i32, png.len() as i32)
-    };
+    let saved = host::store(&path, &png);
     let t_stored = now_ms();
     log_ms("store", t_stored - t_encoded);
     // The number that matters: button press → file on disk.
     log_ms("=== capture -> saved", t_stored - t_start);
-    if rc < 0 { log("[snap] save failed"); } else { log("[snap] saved screenshot"); }
+    if !saved { log("[snap] save failed"); } else { log("[snap] saved screenshot"); }
 }
 
 // ── npkFS helpers ─────────────────────────────────────────────────────
 fn read_home_dir() -> String {
-    let buf_ptr = core::ptr::addr_of_mut!(HOME_BUF) as *mut u8;
-    let n = unsafe { npk_home_dir(buf_ptr as i32, HOME_CAP as i32) };
-    if n <= 0 { return "home".to_string(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    core::str::from_utf8(slice).unwrap_or("home").to_string()
+    let mut buf = [0u8; HOME_CAP];
+    let n = host::home_dir(&mut buf).unwrap_or(0);
+    if n == 0 { return "home".to_string(); }
+    core::str::from_utf8(&buf[..n]).unwrap_or("home").to_string()
 }
 
 /// Next free `screenshot-NNN.png` in `dir` (clock-free naming — we have
 /// no time host fn, so number sequentially from the existing files).
 fn next_name(dir: &str) -> String {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(dir.as_ptr() as i32, dir.len() as i32, buf_ptr as i32, LIST_BUF_SIZE as i32, 0)
-    };
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(dir, &mut buf, false).unwrap_or(0);
     let mut max: u32 = 0;
     if n > 0 {
-        let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-        for e in nopeek_widgets::fs::list_entries(slice) {
+        for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
             if let Some(num) = e.name.strip_prefix("screenshot-").and_then(|s| s.strip_suffix(".png")) {
                 if let Ok(v) = num.parse::<u32>() { if v > max { max = v; } }
             }

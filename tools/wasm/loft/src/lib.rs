@@ -35,25 +35,46 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The calls without a shared wrapper; the rest are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
-    fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_fs_copy(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
     fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
     fn npk_open(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
-    fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_fs_usage() -> i64;
     fn npk_window_set_clipboard_sink() -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
+}
+
+/// Copy `old` to `new`; the kernel's result, 0 on success.
+fn fs_copy(old: &str, new: &str) -> i32 {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe { npk_fs_copy(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
+}
+
+/// Move `old` to `new`; the kernel's result, 0 on success.
+fn fs_rename(old: &str, new: &str) -> i32 {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe { npk_fs_rename(old.as_ptr() as i32, old.len() as i32, new.as_ptr() as i32, new.len() as i32) }
+}
+
+/// Open `arg` with module `app`.
+fn open(app: &str, arg: &str) {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe { npk_open(app.as_ptr() as i32, app.len() as i32, arg.as_ptr() as i32, arg.len() as i32) };
+}
+
+/// Packed `(used << 32) | total`, negative without a mounted filesystem.
+fn fs_usage() -> i64 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_fs_usage() }
+}
+
+fn window_set_clipboard_sink() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_clipboard_sink() };
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -136,62 +157,25 @@ fn s() -> &'static Strings {
     match i18n::lang() { Lang::De => &DE, _ => &EN }
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
-}
-
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
+fn log(msg: &str) { host::log_serial(msg); }
 
 const EVENT_BUF_SIZE: usize = 256;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-fn close_self() { unsafe { let _ = npk_close_widget(); } }
-
-// ── Bump allocator (1 MB — the grid can cover hundreds of entries in a
-//    deep directory). State allocated before `persistent_mark` survives
-//    `alloc_reset` between commits; everything after the mark is rebuilt
-//    from scratch each frame. ──
-const HEAP_SIZE: usize = 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { log("[loft] panic!"); core::arch::wasm32::unreachable() }
-
-fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
-fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 
 // ── Action-id encoding ────────────────────────────────────────────────
 //
@@ -269,10 +253,7 @@ const NODE_MENU_HELP: u32 = 104;
 const GRID_COLS: usize = 4;
 const QUERY_CAP: usize = 127;
 const LIST_BUF_SIZE: usize = 128 * 1024;
-static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
-
 const NAME_FETCH_CAP: usize = 64;
-static mut NAME_BUF: [u8; NAME_FETCH_CAP] = [0; NAME_FETCH_CAP];
 
 // ── State ─────────────────────────────────────────────────────────────
 
@@ -378,10 +359,7 @@ struct Loft {
     filtered:       Vec<usize>,
     grid_sel:       Option<usize>,
     sidebar_sel:    Option<usize>,
-    /// Pre-allocated (`String::with_capacity(QUERY_CAP + 1)`) so that
-    /// `clear` + `push_str` stays inside the same heap block — bump
-    /// allocator hands out the storage before `persistent_mark`, and
-    /// `alloc_reset` between frames must not invalidate it.
+    /// The search query, at most `QUERY_CAP` bytes.
     query:          String,
     /// Pre-allocated mirror used to compute `query.to_ascii_lowercase()`
     /// without an extra allocation per keystroke.
@@ -408,8 +386,8 @@ struct Loft {
     /// size/count scan. Drained a few at a time off the idle loop
     /// (`pump_stats`) so opening a directory never blocks on a deep tree.
     stats_queue:    Vec<usize>,
-    /// Reusable path buffer for `pump_stats` — pre-allocated before the
-    /// persistent mark so building "current/sub" each tick allocates
+    /// Reusable path buffer for `pump_stats`, so building "current/sub"
+    /// each tick allocates
     /// nothing on the hot path.
     scratch:        String,
     /// Pending copy/cut awaiting a paste. None = clipboard empty.
@@ -421,8 +399,7 @@ struct Loft {
     /// the dialog opened, so a later selection change can't misdirect it).
     rename_open:    bool,
     rename_old:     String,
-    /// Pre-allocated (like `query`) so `clear` + `push_str` on every
-    /// InputChange stays inside the same heap block across `alloc_reset`.
+    /// The edited name, at most its pre-allocated capacity.
     rename_buf:     String,
 }
 
@@ -545,9 +522,7 @@ impl Loft {
     /// folders, one host scan per folder. Runs off the idle loop so a
     /// directory with many or deep subfolders fills in progressively
     /// instead of freezing the app on open. Returns true if anything
-    /// changed (→ caller re-renders). Caller must wrap this between
-    /// `alloc_reset(persistent_mark)` / re-capture like the other state
-    /// mutations so `filtered`/`scratch` growth lands in the kept region.
+    /// changed (→ caller re-renders).
     fn pump_stats(&mut self, budget: usize) -> bool {
         if self.stats_queue.is_empty() { return false; }
         let mut changed = false;
@@ -600,7 +575,7 @@ impl Loft {
         if self.query.is_empty() {
             for i in 0..self.entries.len() { self.filtered.push(i); }
         } else {
-            // Reuse the pre-mark buffer for the lowercased query.
+            // Reuse the buffer for the lowercased query.
             self.query_lc.clear();
             for ch in self.query.chars() {
                 self.query_lc.push(ch.to_ascii_lowercase());
@@ -691,10 +666,7 @@ impl Loft {
             } else {
                 alloc::format!("{}/{}", self.current, name)
             };
-            unsafe {
-                npk_open(app.as_ptr() as i32, app.len() as i32,
-                         full.as_ptr() as i32, full.len() as i32);
-            }
+            open(&app, &full);
         } else {
             log(s().no_handler);
         }
@@ -773,14 +745,8 @@ impl Loft {
         };
         let dest = self.unique_dest(&name);
         let rc = match mode {
-            ClipMode::Copy => unsafe {
-                npk_fs_copy(src.as_ptr() as i32, src.len() as i32,
-                            dest.as_ptr() as i32, dest.len() as i32)
-            },
-            ClipMode::Cut => unsafe {
-                npk_fs_rename(src.as_ptr() as i32, src.len() as i32,
-                              dest.as_ptr() as i32, dest.len() as i32)
-            },
+            ClipMode::Copy => fs_copy(&src, &dest),
+            ClipMode::Cut => fs_rename(&src, &dest),
         };
         if rc == 0 {
             if mode == ClipMode::Cut { self.clipboard = None; }
@@ -796,8 +762,7 @@ impl Loft {
             let base = basename(&name).to_string();
             self.rename_old = join(&self.current, &name);
             self.rename_buf.clear();
-            // Stay within the pre-allocated capacity so the InputChange
-            // mirror never reallocates (bump-heap discipline).
+            // The name field holds at most its pre-allocated capacity.
             let cap = self.rename_buf.capacity();
             self.rename_buf.push_str(nopeek_widgets::rt::str_clamp(&base, cap));
             self.rename_open = true;
@@ -818,10 +783,7 @@ impl Loft {
         let dest = join(&self.current, new);
         self.rename_open = false;
         if old == dest { return; }
-        let rc = unsafe {
-            npk_fs_rename(old.as_ptr() as i32, old.len() as i32,
-                          dest.as_ptr() as i32, dest.len() as i32)
-        };
+        let rc = fs_rename(&old, &dest);
         if rc == 0 { self.refresh(); } else { log("[loft] rename failed"); }
     }
 
@@ -1090,7 +1052,7 @@ fn search_input(query: &str) -> Widget {
 /// track plus the percentage. Hidden when the kernel reports no
 /// mounted filesystem.
 fn storage_meter() -> Option<Widget> {
-    let packed = unsafe { npk_fs_usage() };
+    let packed = fs_usage();
     if packed < 0 { return None; }
     let used  = ((packed as u64) >> 32) as u64;
     let total = (packed as u64) & 0xFFFF_FFFF;
@@ -1519,10 +1481,8 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         Event::Clipboard(ClipKind::Cut)   => { lf.do_cut();   Outcome::Rerender }
         Event::Clipboard(ClipKind::Paste) => { lf.do_paste(); Outcome::Rerender }
         Event::InputChange { value } => {
-            // Mirror the new buffer into our pre-mark `query` slot
-            // (clear + push_str within capacity) so it survives the
-            // upcoming `alloc_reset`. Past QUERY_CAP we hard-cap;
-            // the compositor reconciles on the next round-trip.
+            // Mirror the new buffer into `query`. Past QUERY_CAP we
+            // hard-cap; the compositor reconciles on the next round-trip.
             lf.query.clear();
             // At a character boundary: typed text is UTF-8.
             lf.query.push_str(nopeek_widgets::rt::str_clamp(&value, QUERY_CAP));
@@ -1700,12 +1660,9 @@ fn load_associations() -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let key = "sys/config/associations";
     let mut buf = [0u8; 2048];
-    let n = unsafe {
-        npk_fetch(key.as_ptr() as i32, key.len() as i32,
-                  buf.as_mut_ptr() as i32, buf.len() as i32)
-    };
-    if n <= 0 { return out; }
-    if let Ok(s) = core::str::from_utf8(&buf[..n as usize]) {
+    let n = host::fetch(key, &mut buf).unwrap_or(0);
+    if n == 0 { return out; }
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
         for line in s.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') { continue; }
@@ -1723,18 +1680,17 @@ fn read_home_dir() -> String {
     // The username lives in the single encrypted `.system/config` blob,
     // not a fetchable `sys/config/name` object — ask the kernel for the
     // resolved home dir directly.
-    let buf_ptr = core::ptr::addr_of_mut!(NAME_BUF) as *mut u8;
-    let n = unsafe { npk_home_dir(buf_ptr as i32, NAME_FETCH_CAP as i32) };
-    if n <= 0 { return String::from("home"); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match core::str::from_utf8(slice) {
+    let mut buf = [0u8; NAME_FETCH_CAP];
+    let n = host::home_dir(&mut buf).unwrap_or(0);
+    if n == 0 { return String::from("home"); }
+    match core::str::from_utf8(&buf[..n]) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => String::from("home"),
     }
 }
 
 fn list_dir(prefix: &str) -> Vec<Entry> {
-    list_dir_internal(prefix, 0)
+    list_dir_internal(prefix, false)
 }
 
 /// Cheap order-sensitive signature of a directory listing — folds count,
@@ -1759,22 +1715,15 @@ fn dir_signature(entries: &[Entry]) -> u64 {
 /// so a search hit visually points at the match's location. Skips
 /// synthetic `.dir` markers.
 fn list_dir_recursive(prefix: &str) -> Vec<Entry> {
-    list_dir_internal(prefix, 1)
+    list_dir_internal(prefix, true)
 }
 
-fn list_dir_internal(prefix: &str, recursive: i32) -> Vec<Entry> {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(
-            prefix.as_ptr() as i32, prefix.len() as i32,
-            buf_ptr as i32, LIST_BUF_SIZE as i32,
-            recursive,
-        )
-    };
-    if n <= 0 { return Vec::new(); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+fn list_dir_internal(prefix: &str, recursive: bool) -> Vec<Entry> {
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(prefix, &mut buf, recursive).unwrap_or(0);
+    if n == 0 { return Vec::new(); }
     let mut out: Vec<Entry> = Vec::new();
-    for e in nopeek_widgets::fs::list_entries(slice) {
+    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
         out.push(Entry {
             name:          e.name.to_string(),
             name_lc:       e.name.to_ascii_lowercase(),
@@ -1821,18 +1770,11 @@ fn pending_folder_indices(entries: &[Entry]) -> Vec<usize> {
 /// `Entry` per descendant — cheap even for large subtrees, and called one
 /// folder at a time off the idle loop so no single scan stalls the app.
 fn scan_folder_stats(path: &str) -> (u64, u64) {
-    let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fs_list(
-            path.as_ptr() as i32, path.len() as i32,
-            buf_ptr as i32, LIST_BUF_SIZE as i32,
-            1,
-        )
-    };
-    if n <= 0 { return (0, 0); }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
+    let mut buf = alloc::vec![0u8; LIST_BUF_SIZE];
+    let n = host::fs_list(path, &mut buf, true).unwrap_or(0);
+    if n == 0 { return (0, 0); }
     let (mut bytes, mut files) = (0u64, 0u64);
-    for e in nopeek_widgets::fs::list_entries(slice) {
+    for e in nopeek_widgets::fs::list_entries(&buf[..n]) {
         if e.is_dir { continue; }                // directory → count files only
         bytes = bytes.saturating_add(e.size);
         files += 1;
@@ -1878,17 +1820,7 @@ fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
 }
 
 fn dir_exists(path: &str) -> bool {
-    // `npk_fs_stat` writes 17 bytes (size + is_dir + mtime); the is_dir
-    // byte sits at offset 8. `n > 0` distinguishes a valid stat from
-    // "not found" (0) or "error" (-1).
-    let mut out = [0u8; 17];
-    let n = unsafe {
-        npk_fs_stat(
-            path.as_ptr() as i32, path.len() as i32,
-            out.as_mut_ptr() as i32,
-        )
-    };
-    n > 0 && out[8] != 0
+    host::fs_stat(path).is_some_and(|(_, is_dir, _)| is_dir)
 }
 
 // ── Path helpers for file operations ──────────────────────────────────
@@ -1910,11 +1842,7 @@ fn basename(name: &str) -> &str {
 
 /// True if any object (file or directory) exists at `path`.
 fn path_exists(path: &str) -> bool {
-    let mut out = [0u8; 17];
-    let n = unsafe {
-        npk_fs_stat(path.as_ptr() as i32, path.len() as i32, out.as_mut_ptr() as i32)
-    };
-    n > 0
+    host::fs_stat(path).is_some()
 }
 
 /// Split a file name into (stem, extension-with-dot): "a.txt" → ("a",
@@ -2106,7 +2034,7 @@ fn push_decimal(s: &mut String, n: u64, unit: u64) {
 fn commit_tree(lf: &Loft) {
     let tree = render(lf);
     match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[loft] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[loft] commit failed"); } }
         Err(_) => log("[loft] encode failed"),
     }
 }
@@ -2115,56 +2043,34 @@ fn commit_tree(lf: &Loft) {
 pub extern "C" fn _start() {
     // No `npk_window_set_overlay` — loft is a regular tiled app, the
     // first commit creates its window via shade::create_widget_window.
-    //
-    // Bump-allocator lifecycle:
-    //   * `persistent_mark` is the heap top *after* the last state
-    //     mutation. Anything below it is live `Loft` state (entries,
-    //     history, sidebar Strings, …) that next frame still needs.
-    //     Anything above it is the previous frame's Widget tree —
-    //     transient, safe to wipe.
-    //   * Reset goes *before* `handle()`, not before render.
-    //     Otherwise `navigate()`'s freshly-loaded entries land above
-    //     the old mark and get clobbered by the very Widget allocs
-    //     that follow — the Vec metadata in `loft.entries` survives
-    //     but its String contents are overwritten mid-render →
-    //     UTF-8 / bounds panic on the next navigate.
-    //   * `persistent_mark` is re-captured after `handle()` so the
-    //     new state allocs (if any) become part of the persistent
-    //     region for next frame.
     let mut loft = Loft::new();
-    let mut persistent_mark = alloc_mark();
+    let mut event_buf = [0u8; EVENT_BUF_SIZE];
     let mut idle_ticks: u32 = 0;
 
     commit_tree(&loft);
     // The widget window exists after the first commit — opt into receiving
     // Ctrl+C/X/V as Event::Clipboard so the shortcuts drive file operations.
-    unsafe { let _ = npk_window_set_clipboard_sink(); }
+    window_set_clipboard_sink();
 
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
                 idle_ticks = 0;
-                alloc_reset(persistent_mark);
-                let outcome = handle(&mut loft, ev);
-                persistent_mark = alloc_mark();
-                match outcome {
+                match handle(&mut loft, ev) {
                     Outcome::Idle => {}
                     Outcome::Rerender => commit_tree(&loft),
-                    Outcome::Exit => { close_self(); return; }
+                    Outcome::Exit => { host::close_widget(); return; }
                 }
             }
             PollResult::Empty => {
-                unsafe { let _ = npk_sleep(16); }
+                host::sleep_ms(16);
 
                 // Progressively fill folder sizes/counts a few per tick.
-                // Wrapped in the alloc_reset/recapture discipline so the
-                // scratch/filtered growth lands in the persistent region.
                 // Skipped while searching (folder stats aren't shown then).
-                if loft.query.is_empty() && !loft.stats_queue.is_empty() {
-                    alloc_reset(persistent_mark);
-                    let changed = loft.pump_stats(STATS_PUMP_BUDGET);
-                    persistent_mark = alloc_mark();
-                    if changed { commit_tree(&loft); }
+                if loft.query.is_empty() && !loft.stats_queue.is_empty()
+                    && loft.pump_stats(STATS_PUMP_BUDGET)
+                {
+                    commit_tree(&loft);
                 }
 
                 idle_ticks += 1;
@@ -2174,15 +2080,11 @@ pub extern "C" fn _start() {
                     // on disk (new screenshot, download, …). Skip while a
                     // search or menu is active so we don't disturb the user.
                     if loft.open_menu.is_none() && loft.query.is_empty() {
-                        // Probe via a throwaway listing + reset so an unchanged
-                        // folder leaks nothing in the bump heap. Only a real
-                        // change does the persistent re-list + re-render.
-                        alloc_reset(persistent_mark);
+                        // Probe with a throwaway listing; only a real change
+                        // re-lists and re-renders.
                         let new_sig = dir_signature(&list_dir(&loft.current));
-                        alloc_reset(persistent_mark);
                         if new_sig != loft.dir_sig {
                             loft.refresh();
-                            persistent_mark = alloc_mark();
                             commit_tree(&loft);
                         }
                     }

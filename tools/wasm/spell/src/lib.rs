@@ -46,22 +46,20 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 1] = [caps::READ | caps::RENDER];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The calls without a shared wrapper; the rest are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
     fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
                 suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
-    fn npk_launch_arg(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_close_widget() -> i32;
     fn npk_window_set_close_guard(on: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
+}
+
+fn window_set_close_guard(on: bool) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_close_guard(on as i32) };
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
@@ -193,28 +191,16 @@ fn zoom_reset_label() -> String {
     fill(s().zoom_reset, &target)
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
-}
-
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
-}
-
-fn close_self() { unsafe { let _ = npk_close_widget(); } }
+fn log(msg: &str) { host::log_serial(msg); }
 
 // ── Buffers ───────────────────────────────────────────────────────────
 //
-// The event buffer must hold a full `InputChange` — its payload is the
-// whole document. `npk_event_poll` drops (does not truncate) an event
-// that overflows, which would silently desync our mirror from the
-// compositor's edit buffer, so size it well above any realistic file.
+// An `InputChange` carries the whole document, so the usual buffer is sized
+// for a large file; a larger event gets its own (`events::poll`).
 const EVENT_BUF_SIZE: usize = 512 * 1024;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 // Scratch for npk_fetch (open) — same ceiling as the edit buffer.
 const FETCH_BUF_SIZE: usize = 512 * 1024;
-static mut FETCH_BUF: [u8; FETCH_BUF_SIZE] = [0; FETCH_BUF_SIZE];
 
 // Pre-allocate the document so ordinary edits stay within capacity.
 const TEXT_CAP: usize = 256 * 1024;
@@ -222,10 +208,8 @@ const TEXT_CAP: usize = 256 * 1024;
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
@@ -405,9 +389,9 @@ impl Spell {
 
         // Launched to open a specific file (loft file association)?
         let mut argbuf = [0u8; 512];
-        let n = unsafe { npk_launch_arg(argbuf.as_mut_ptr() as i32, argbuf.len() as i32) };
+        let n = host::launch_arg(&mut argbuf).unwrap_or(0);
         if n > 0 {
-            if let Ok(path) = core::str::from_utf8(&argbuf[..n as usize]) {
+            if let Ok(path) = core::str::from_utf8(&argbuf[..n]) {
                 if let Some(text) = read_file(path) {
                     let mut d = Doc::empty();
                     d.set_text(&text);
@@ -570,11 +554,10 @@ impl Spell {
     }
 
     fn write_to(&mut self, path: &str) {
-        let r = unsafe {
-            npk_store(path.as_ptr() as i32, path.len() as i32,
-                      self.cur().text.as_ptr() as i32, self.cur().text.len() as i32)
-        };
-        if r < 0 { log("[spell] save: store failed"); return; }
+        if !host::store(path, self.cur().text.as_bytes()) {
+            log("[spell] save: store failed");
+            return;
+        }
         self.cur_mut().dirty = false;
         // Editing the settings file in spell itself is a stated use of
         // having one. Adopt what was just saved — otherwise our in-memory
@@ -622,26 +605,23 @@ impl Spell {
 
 /// Ask the kernel for a file dialog. `tag` comes back in `Event::Picked`.
 fn pick(mode: i32, start: &str, suggest: &str, tag: u32) {
+    // SAFETY: FFI; the kernel validates both ranges.
     unsafe {
-        let _ = npk_pick(
+        npk_pick(
             mode,
             start.as_ptr() as i32, start.len() as i32,
             suggest.as_ptr() as i32, suggest.len() as i32,
             tag as i32,
-        );
-    }
+        )
+    };
 }
 
 /// Fetch a file's contents as a String, or None on error / non-UTF-8.
 fn read_file(path: &str) -> Option<String> {
-    let buf_ptr = core::ptr::addr_of_mut!(FETCH_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(path.as_ptr() as i32, path.len() as i32,
-                  buf_ptr as i32, FETCH_BUF_SIZE as i32)
-    };
-    if n <= 0 { return None; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    core::str::from_utf8(slice).ok().map(|s| s.to_string())
+    let mut buf = alloc::vec![0u8; FETCH_BUF_SIZE];
+    let n = host::fetch(path, &mut buf)?;
+    if n == 0 { return None; }
+    core::str::from_utf8(&buf[..n]).ok().map(|s| s.to_string())
 }
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -654,19 +634,14 @@ fn read_file(path: &str) -> Option<String> {
 
 const CONFIG_PATH: &str = "sys/config/spell";
 const CONFIG_CAP: usize = 2048;
-static mut CONFIG_BUF: [u8; CONFIG_CAP] = [0; CONFIG_CAP];
 
 /// Read the saved font size. Anything missing or unparseable falls back
 /// to the default — a broken config should never keep the editor shut.
 fn read_config_font() -> u16 {
-    let p = core::ptr::addr_of_mut!(CONFIG_BUF) as *mut u8;
-    let n = unsafe {
-        npk_fetch(CONFIG_PATH.as_ptr() as i32, CONFIG_PATH.len() as i32,
-                  p as i32, CONFIG_CAP as i32)
-    };
-    if n <= 0 { return MONO_SIZE_PX; }
-    let bytes = unsafe { core::slice::from_raw_parts(p as *const u8, n as usize) };
-    let text = match core::str::from_utf8(bytes) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
+    let mut buf = [0u8; CONFIG_CAP];
+    let n = host::fetch(CONFIG_PATH, &mut buf).unwrap_or(0);
+    if n == 0 { return MONO_SIZE_PX; }
+    let text = match core::str::from_utf8(&buf[..n]) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
@@ -687,11 +662,7 @@ fn write_config(font_px: u16) {
     out.push_str("font: ");
     push_usize(&mut out, font_px as usize);
     out.push('\n');
-    let r = unsafe {
-        npk_store(CONFIG_PATH.as_ptr() as i32, CONFIG_PATH.len() as i32,
-                  out.as_ptr() as i32, out.len() as i32)
-    };
-    if r < 0 { log("[spell] config: store failed"); }
+    if !host::store(CONFIG_PATH, out.as_bytes()) { log("[spell] config: store failed"); }
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
@@ -1871,7 +1842,7 @@ fn commit_tree(sp: &Spell) {
     // `wire::encode` prepends the WIRE_VERSION byte that the compositor's
     // `scene_commit` checks — a raw postcard payload is rejected (-1).
     match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[spell] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[spell] commit failed"); } }
         Err(_) => log("[spell] encode failed"),
     }
 }
@@ -1886,10 +1857,11 @@ pub extern "C" fn _start() {
     commit_tree(&sp);
     // After the first commit — the window has to exist before it can be
     // guarded. From here Mod+Q and the × ask us first.
-    unsafe { let _ = npk_window_set_close_guard(1); }
+    window_set_close_guard(true);
 
+    let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];
     loop {
-        match poll_event() {
+        match poll_event(&mut event_buf) {
             PollResult::Event(ev) => {
                 // The event's text (Open path, InputChange value, picked
                 // path), whole: a document has no size limit here.
@@ -1903,10 +1875,10 @@ pub extern "C" fn _start() {
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Rerender => commit_tree(&sp),
-                    Outcome::Exit => { sp.save_config(); close_self(); return; }
+                    Outcome::Exit => { sp.save_config(); host::close_widget(); return; }
                 }
             }
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => host::sleep_ms(16),
             // Window pulled out from under us (hard close): the settings
             // write still goes through, npkFS doesn't need the window.
             PollResult::WindowGone => { sp.save_config(); return; }

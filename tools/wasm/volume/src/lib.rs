@@ -27,68 +27,44 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[used]
 static NPK_CAPS: [u8; 2] = [caps::READ | caps::EXEC | caps::RENDER, caps::ext::SHELL];
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
+use nopeek_widgets::host;
+
+// The two overlay calls only this app makes; the shared ones are in
+// `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_scene_commit(ptr: i32, len: i32) -> i32;
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-    fn npk_screen_size() -> i32;
     fn npk_window_set_overlay_at(x: i32, y: i32, w: i32, h: i32) -> i32;
     fn npk_window_set_light_dismiss(on: i32) -> i32;
-    fn npk_close_widget() -> i32;
-    fn npk_audio_get_volume() -> i32;
-    fn npk_audio_set_volume(pct: i32) -> i32;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sleep(ms: i32) -> i32;
 }
 
-fn log(msg: &str) {
-    unsafe { npk_log_serial(msg.as_ptr() as i32, msg.len() as i32); }
+fn set_overlay_at(x: i32, y: i32, w: i32, h: i32) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_overlay_at(x, y, w, h) };
 }
 
-fn commit(bytes: &[u8]) -> i32 {
-    unsafe { npk_scene_commit(bytes.as_ptr() as i32, bytes.len() as i32) }
+fn set_light_dismiss(on: bool) {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_set_light_dismiss(on as i32) };
 }
+
+fn log(msg: &str) { host::log_serial(msg); }
 
 const EVENT_BUF_SIZE: usize = 64;
-static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
-fn poll_event() -> PollResult {
-    // SAFETY: the event buffer is used only here, on the app's one fiber.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
-    match nopeek_widgets::events::poll(&mut buf[..]) {
+fn poll_event(buf: &mut [u8]) -> PollResult {
+    match nopeek_widgets::events::poll(buf) {
         nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
         nopeek_widgets::events::Poll::Empty => PollResult::Empty,
         nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-// ── Bump allocator ───────────────────────────────────────────────────
-// No heap state survives between frames (the slider reads its level from
-// the statics below), so every commit resets to zero and rebuilds.
-const HEAP_SIZE: usize = 128 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + layout.size()); }
-        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
+// No heap state survives between frames (the slider keeps its level in
+// `Volume`), so every commit resets to the start mark and rebuilds.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::bump::Bump<{ 128 * 1024 }> = nopeek_widgets::bump::Bump::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -105,11 +81,16 @@ const VOL_STEPS: u32 = 20;          // 5 %-steps
 const W: i32 = 340;
 const H: i32 = 92;
 
-static mut VOL: u8 = 50;
-static mut PRE_MUTE: u8 = 50;       // level restored on un-mute
+struct Volume {
+    vol: u8,
+    /// Level restored on un-mute.
+    pre_mute: u8,
+    /// Allocator fill level before the first frame.
+    heap_base: usize,
+}
 
-fn render() -> Widget {
-    let vol = unsafe { VOL } as u32;
+fn render(v: &Volume) -> Widget {
+    let vol = v.vol as u32;
     let step = 100 / VOL_STEPS;
 
     // The slider track: VOL_STEPS clickable cells, filled (Accent) up to the
@@ -161,38 +142,39 @@ fn render() -> Widget {
     }
 }
 
-fn commit_tree() {
-    unsafe { HEAP_POS = 0; }   // reclaim the previous frame's tree
-    let tree = render();
+fn commit_tree(v: &Volume) {
+    ALLOCATOR.reset(v.heap_base);   // reclaim the previous frame's tree
+    let tree = render(v);
     match wire::encode(&tree) {
-        Ok(bytes) => { if commit(&bytes) < 0 { log("[volume] commit failed"); } }
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[volume] commit failed"); } }
         Err(_) => log("[volume] encode failed"),
     }
 }
 
 enum Outcome { Idle, Rerender, Exit }
 
-fn set_volume(level: u8) {
+fn set_volume(st: &mut Volume, level: u8) {
     let v = level.min(100);
-    unsafe { let _ = npk_audio_set_volume(v as i32); VOL = v; }
+    host::audio_set_volume(v as u32);
+    st.vol = v;
 }
 
-fn handle(ev: Event) -> Outcome {
+fn handle(st: &mut Volume, ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => Outcome::Exit,
         Event::Action(ActionId(id)) => {
             if id == MUTE {
-                let v = unsafe { npk_audio_get_volume() };
+                let v = host::audio_volume().unwrap_or(0);
                 if v > 0 {
-                    unsafe { PRE_MUTE = v as u8; }
-                    set_volume(0);
+                    st.pre_mute = v as u8;
+                    set_volume(st, 0);
                 } else {
-                    set_volume(unsafe { PRE_MUTE }.max(10));
+                    set_volume(st, st.pre_mute.max(10));
                 }
                 Outcome::Rerender
             } else if id >= VOL_SET_BASE && id < VOL_SET_BASE + VOL_STEPS {
                 let n = id - VOL_SET_BASE;
-                set_volume(((n + 1) * (100 / VOL_STEPS)) as u8);
+                set_volume(st, ((n + 1) * (100 / VOL_STEPS)) as u8);
                 Outcome::Rerender
             } else {
                 Outcome::Idle
@@ -204,29 +186,31 @@ fn handle(ev: Event) -> Outcome {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    unsafe {
-        VOL = npk_audio_get_volume().clamp(0, 100) as u8;
-        PRE_MUTE = if VOL > 0 { VOL } else { 50 };
-        // Top-right, just below the bar (≈8 px under the ~40 px strut). The
-        // compositor clamps to the screen. Light-dismiss = close on a click
-        // outside; Esc closes too.
-        let packed = npk_screen_size();
-        let screen_w = ((packed >> 16) & 0xFFFF).max(W + 20);
-        let x = screen_w - W - 12;
-        let _ = npk_window_set_overlay_at(x, 48, W, H);
-        let _ = npk_window_set_light_dismiss(1);
-    }
+    let vol = host::audio_volume().unwrap_or(0).min(100) as u8;
+    let mut st = Volume {
+        vol,
+        pre_mute: if vol > 0 { vol } else { 50 },
+        heap_base: ALLOCATOR.mark(),
+    };
+    // Top-right, just below the bar (≈8 px under the ~40 px strut). The
+    // compositor clamps to the screen. Light-dismiss = close on a click
+    // outside; Esc closes too.
+    let screen_w = (host::screen_size().0 as i32).max(W + 20);
+    let x = screen_w - W - 12;
+    set_overlay_at(x, 48, W, H);
+    set_light_dismiss(true);
 
-    commit_tree();
+    commit_tree(&st);
 
+    let mut event_buf = [0u8; EVENT_BUF_SIZE];
     loop {
-        match poll_event() {
-            PollResult::Event(ev) => match handle(ev) {
+        match poll_event(&mut event_buf) {
+            PollResult::Event(ev) => match handle(&mut st, ev) {
                 Outcome::Idle => {}
-                Outcome::Rerender => commit_tree(),
-                Outcome::Exit => { unsafe { let _ = npk_close_widget(); } return; }
+                Outcome::Rerender => commit_tree(&st),
+                Outcome::Exit => { host::close_widget(); return; }
             },
-            PollResult::Empty => { unsafe { let _ = npk_sleep(16); } }
+            PollResult::Empty => host::sleep_ms(16),
             PollResult::WindowGone => return,
         }
     }

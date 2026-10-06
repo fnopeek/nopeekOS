@@ -17,9 +17,6 @@ fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 // ── App Display API ──────────────────────────────────────────────
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     /// Write text to the app's display area.
@@ -32,11 +29,26 @@ unsafe extern "C" {
     fn npk_sys_info(key: i32) -> i64;
 }
 
-fn print(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32); }
+/// Raw bytes to the display; a process name need not be UTF-8.
+fn print_bytes(b: &[u8]) {
+    // SAFETY: FFI; the kernel validates the range.
+    unsafe { npk_print(b.as_ptr() as i32, b.len() as i32) };
+}
+
+fn print(s: &str) { print_bytes(s.as_bytes()); }
+
+fn clear() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_clear() };
+}
+
+fn input_wait(timeout_ms: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_input_wait(timeout_ms) }
 }
 
 fn sys(key: i32) -> i64 {
+    // SAFETY: FFI without pointers.
     unsafe { npk_sys_info(key) }
 }
 
@@ -44,8 +56,7 @@ fn print_num(n: i64) {
     if n < 0 { print("-"); print_num(-n); return; }
     if n >= 10 { print_num(n / 10); }
     let d = (n % 10) as u8 + b'0';
-    let s = [d];
-    unsafe { npk_print(s.as_ptr() as i32, 1); }
+    print_bytes(&[d]);
 }
 
 fn pad(n: i64, w: usize) {
@@ -87,7 +98,7 @@ fn unpack_name(val: i64, buf: &mut [u8], offset: usize) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     loop {
-        unsafe { npk_clear(); }
+        clear();
 
         let cores = sys(0);
         let uptime = sys(1);
@@ -205,8 +216,7 @@ pub extern "C" fn _start() {
                     if name_len > 0 {
                         let mut j = 0;
                         while j < name_len {
-                            let ch = [name_buf[j]];
-                            unsafe { npk_print(ch.as_ptr() as i32, 1); }
+                            print_bytes(&[name_buf[j]]);
                             j += 1;
                         }
                         let mut p = name_len;
@@ -265,7 +275,7 @@ pub extern "C" fn _start() {
         print("\n  [q] quit\n");
 
         // Wait for key or 1-second timeout — instant response to 'q'
-        let key = unsafe { npk_input_wait(1000) };
+        let key = input_wait(1000);
         if key == 0x71 || key == 0x51 { return; } // 'q' or 'Q'
     }
 }
