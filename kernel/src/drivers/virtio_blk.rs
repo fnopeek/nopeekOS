@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{fence, Ordering};
 use spin::Mutex;
-use crate::serial::{outb, outw, outl, inb, inw, inl};
+use crate::hw::{DmaRegion, PortRange};
 use crate::{kprintln, memory, pci};
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
@@ -38,30 +38,17 @@ pub const SECTOR_SIZE: usize = 512;
 pub const BLOCK_SIZE: usize = 4096;
 pub const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
 
-#[repr(C)]
-struct BlkReqHeader {
-    req_type: u32,
-    _reserved: u32,
-    sector: u64,
-}
+/// Legacy I/O BAR: common header (0x14, 0x18 with MSI-X) plus the
+/// 64-bit capacity field of the device config.
+const IO_LEN: u16 = 0x20;
 
-#[repr(C)]
-struct BlkDiscardSegment {
-    sector: u64,
-    num_sectors: u32,
-    flags: u32,
-}
-
-#[repr(C)]
-struct VringDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
+// virtio_blk_outhdr: type u32 @0, reserved u32 @4, sector u64 @8.
+// virtio_blk_discard_write_zeroes: sector u64 @0, num_sectors u32 @8, flags u32 @12.
+// vring_desc (16 bytes): addr u64 @0, len u32 @8, flags u16 @12, next u16 @14.
+const DESC_SIZE: u64 = 16;
 
 struct VirtioBlk {
-    io_base: u16,
+    io: PortRange,
     queue_size: u16,
     num_free: u16,
     free_head: u16,
@@ -70,11 +57,14 @@ struct VirtioBlk {
     capacity_sectors: u64,
     has_discard: bool,
 
-    desc_base: u64,
-    avail_base: u64,
-    used_base: u64,
-    req_hdrs: u64,
-    status_buf: u64,
+    /// Descriptor table at 0, avail ring at `avail_off`, used ring at `used_off`.
+    queue: DmaRegion,
+    avail_off: u64,
+    used_off: u64,
+    /// One 16-byte request header per descriptor index.
+    req_hdrs: DmaRegion,
+    /// One status byte per descriptor index.
+    status_buf: DmaRegion,
 }
 
 static DEVICE: Mutex<Option<VirtioBlk>> = Mutex::new(None);
@@ -95,95 +85,92 @@ pub fn init() -> bool {
         kprintln!("[npk] virtio-blk: BAR0 is MMIO — legacy I/O required");
         return false;
     }
-    let io = (dev.bar0 & 0xFFFC) as u16;
+    // SAFETY: BAR0 is this virtio-blk device's legacy I/O BAR, which this
+    // driver owns; IO_LEN does not exceed the header plus capacity field.
+    let io = unsafe { PortRange::new((dev.bar0 & 0xFFFC) as u16, IO_LEN) };
 
     pci::enable_bus_master(dev.addr);
     let cfg_off: u16 = if pci::msix_enabled(dev.addr) { 24 } else { 20 };
 
-    // SAFETY: All port I/O targets the VirtIO device's I/O BAR
-    unsafe {
-        outb(io + REG_STATUS, 0);
-        outb(io + REG_STATUS, S_ACKNOWLEDGE);
-        outb(io + REG_STATUS, S_ACKNOWLEDGE | S_DRIVER);
+    io.outb(REG_STATUS, 0);
+    io.outb(REG_STATUS, S_ACKNOWLEDGE);
+    io.outb(REG_STATUS, S_ACKNOWLEDGE | S_DRIVER);
 
-        let features = inl(io + REG_DEV_FEATURES);
-        let has_discard = features & F_DISCARD != 0;
-        outl(io + REG_DRV_FEATURES, if has_discard { F_DISCARD } else { 0 });
+    let features = io.inl(REG_DEV_FEATURES);
+    let has_discard = features & F_DISCARD != 0;
+    io.outl(REG_DRV_FEATURES, if has_discard { F_DISCARD } else { 0 });
 
-        let cap_lo = inl(io + cfg_off) as u64;
-        let cap_hi = inl(io + cfg_off + 4) as u64;
-        let capacity_sectors = cap_lo | (cap_hi << 32);
-        let mb = (capacity_sectors * SECTOR_SIZE as u64) / (1024 * 1024);
-        kprintln!("[npk] virtio-blk: {} sectors ({} MB), TRIM={}",
-            capacity_sectors, mb, if has_discard { "yes" } else { "no" });
+    let cap_lo = io.inl(cfg_off) as u64;
+    let cap_hi = io.inl(cfg_off + 4) as u64;
+    let capacity_sectors = cap_lo | (cap_hi << 32);
+    let mb = (capacity_sectors * SECTOR_SIZE as u64) / (1024 * 1024);
+    kprintln!("[npk] virtio-blk: {} sectors ({} MB), TRIM={}",
+        capacity_sectors, mb, if has_discard { "yes" } else { "no" });
 
-        outw(io + REG_QUEUE_SEL, 0);
-        let qs = inw(io + REG_QUEUE_SIZE);
-        if qs == 0 || qs > 1024 {
-            kprintln!("[npk] virtio-blk: invalid queue size {}", qs);
-            outb(io + REG_STATUS, S_FAILED);
-            return false;
-        }
-
-        let q = qs as usize;
-        let part1 = align_up(16 * q + 6 + 2 * q, 4096);
-        let part2 = align_up(6 + 8 * q, 4096);
-        let pages = (part1 + part2 + 4095) / 4096;
-
-        let qmem = match memory::allocate_contiguous(pages) {
-            Some(a) => a,
-            None => {
-                kprintln!("[npk] virtio-blk: queue alloc failed");
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(qmem as *mut u8, 0, pages * 4096);
-
-        let desc_base = qmem;
-        let avail_base = qmem + (16 * q) as u64;
-        let used_base = qmem + part1 as u64;
-
-        for i in 0..q {
-            let d = (desc_base + (i * 16) as u64) as *mut VringDesc;
-            (*d).next = if i + 1 < q { (i + 1) as u16 } else { 0 };
-        }
-        *(avail_base as *mut u16) = 1;
-        outl(io + REG_QUEUE_PFN, (qmem >> 12) as u32);
-
-        let req_hdrs = match memory::allocate_contiguous((q * 16 + 4095) / 4096) {
-            Some(a) => a,
-            None => {
-                kprintln!("[npk] virtio-blk: header alloc failed");
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(req_hdrs as *mut u8, 0, (q * 16 + 4095) / 4096 * 4096);
-
-        let status_buf = match memory::allocate_frame() {
-            Some(a) => a,
-            None => {
-                kprintln!("[npk] virtio-blk: status alloc failed");
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(status_buf as *mut u8, 0, 4096);
-
-        outb(io + REG_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_DRIVER_OK);
-        if inb(io + REG_STATUS) & S_FAILED != 0 {
-            kprintln!("[npk] virtio-blk: device rejected initialization");
-            return false;
-        }
-
-        *DEVICE.lock() = Some(VirtioBlk {
-            io_base: io, queue_size: qs, num_free: qs,
-            free_head: 0, avail_idx: 0, last_used_idx: 0,
-            capacity_sectors, has_discard,
-            desc_base, avail_base, used_base, req_hdrs, status_buf,
-        });
+    io.outw(REG_QUEUE_SEL, 0);
+    let qs = io.inw(REG_QUEUE_SIZE);
+    if qs == 0 || qs > 1024 {
+        kprintln!("[npk] virtio-blk: invalid queue size {}", qs);
+        io.outb(REG_STATUS, S_FAILED);
+        return false;
     }
+
+    let q = qs as usize;
+    let part1 = align_up(16 * q + 6 + 2 * q, 4096);
+    let part2 = align_up(6 + 8 * q, 4096);
+    let pages = (part1 + part2 + 4095) / 4096;
+
+    let queue = match DmaRegion::alloc_zeroed(pages) {
+        Some(r) => r,
+        None => {
+            kprintln!("[npk] virtio-blk: queue alloc failed");
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    let avail_off = (16 * q) as u64;
+    let used_off = part1 as u64;
+
+    for i in 0..q {
+        queue.w16(i as u64 * DESC_SIZE + 14, if i + 1 < q { (i + 1) as u16 } else { 0 });
+    }
+    queue.w16(avail_off, 1);
+    io.outl(REG_QUEUE_PFN, (queue.phys() >> 12) as u32);
+
+    let req_hdrs = match DmaRegion::alloc_zeroed((q * 16 + 4095) / 4096) {
+        Some(r) => r,
+        None => {
+            kprintln!("[npk] virtio-blk: header alloc failed");
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    let status_buf = match memory::allocate_frame() {
+        // SAFETY: a fresh frame from the allocator, identity-mapped RAM that
+        // this driver keeps for the device's lifetime.
+        Some(a) => unsafe { DmaRegion::from_raw(a, 4096) },
+        None => {
+            kprintln!("[npk] virtio-blk: status alloc failed");
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+    status_buf.zero();
+
+    io.outb(REG_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_DRIVER_OK);
+    if io.inb(REG_STATUS) & S_FAILED != 0 {
+        kprintln!("[npk] virtio-blk: device rejected initialization");
+        return false;
+    }
+
+    *DEVICE.lock() = Some(VirtioBlk {
+        io, queue_size: qs, num_free: qs,
+        free_head: 0, avail_idx: 0, last_used_idx: 0,
+        capacity_sectors, has_discard,
+        queue, avail_off, used_off, req_hdrs, status_buf,
+    });
 
     kprintln!("[npk] virtio-blk: online");
     true
@@ -253,45 +240,26 @@ pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
     let d1 = dev.alloc_desc().ok_or(BlkError::QueueFull)?;
     let d2 = dev.alloc_desc().ok_or(BlkError::QueueFull)?;
 
-    let hdr_addr = dev.req_hdrs + d0 as u64 * 16;
-    let seg_addr = dev.req_hdrs + d1 as u64 * 16; // reuse header slot for discard segment
-    let stat_addr = dev.status_buf + d0 as u64;
+    let hdr_off = d0 as u64 * 16;
+    let seg_off = d1 as u64 * 16; // reuse header slot for discard segment
+    let stat_off = d0 as u64;
 
-    // SAFETY: DMA buffers in identity-mapped range
-    unsafe {
-        let hdr = hdr_addr as *mut BlkReqHeader;
-        (*hdr).req_type = BLK_T_DISCARD;
-        (*hdr)._reserved = 0;
-        (*hdr).sector = 0;
+    dev.req_hdrs.w32(hdr_off, BLK_T_DISCARD);
+    dev.req_hdrs.w32(hdr_off + 4, 0);
+    dev.req_hdrs.w64(hdr_off + 8, 0);
 
-        let seg = seg_addr as *mut BlkDiscardSegment;
-        (*seg).sector = start_sector;
-        (*seg).num_sectors = num_sectors as u32;
-        (*seg).flags = 0;
+    dev.req_hdrs.w64(seg_off, start_sector);
+    dev.req_hdrs.w32(seg_off + 8, num_sectors as u32);
+    dev.req_hdrs.w32(seg_off + 12, 0);
 
-        *(stat_addr as *mut u8) = 0xFF;
+    dev.status_buf.w8(stat_off, 0xFF);
 
-        let desc0 = (dev.desc_base + d0 as u64 * 16) as *mut VringDesc;
-        (*desc0).addr = hdr_addr;
-        (*desc0).len = 16;
-        (*desc0).flags = DESC_F_NEXT;
-        (*desc0).next = d1;
-
-        let desc1 = (dev.desc_base + d1 as u64 * 16) as *mut VringDesc;
-        (*desc1).addr = seg_addr;
-        (*desc1).len = 16;
-        (*desc1).flags = DESC_F_NEXT;
-        (*desc1).next = d2;
-
-        let desc2 = (dev.desc_base + d2 as u64 * 16) as *mut VringDesc;
-        (*desc2).addr = stat_addr;
-        (*desc2).len = 1;
-        (*desc2).flags = DESC_F_WRITE;
-        (*desc2).next = 0;
-    }
+    dev.set_desc(d0, dev.req_hdrs.phys() + hdr_off, 16, DESC_F_NEXT, d1);
+    dev.set_desc(d1, dev.req_hdrs.phys() + seg_off, 16, DESC_F_NEXT, d2);
+    dev.set_desc(d2, dev.status_buf.phys() + stat_off, 1, DESC_F_WRITE, 0);
 
     let result = dev.submit_and_poll(d0);
-    let status = unsafe { *(stat_addr as *const u8) };
+    let status = dev.status_buf.r8(stat_off);
 
     dev.free_desc(d2);
     dev.free_desc(d1);
@@ -327,23 +295,26 @@ pub fn is_available() -> bool {
 // === Internal ===
 
 impl VirtioBlk {
+    fn set_desc(&self, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
+        let o = idx as u64 * DESC_SIZE;
+        self.queue.w64(o, addr);
+        self.queue.w32(o + 8, len);
+        self.queue.w16(o + 12, flags);
+        self.queue.w16(o + 14, next);
+    }
+
     fn alloc_desc(&mut self) -> Option<u16> {
         if self.num_free == 0 { return None; }
         let idx = self.free_head;
-        unsafe {
-            let d = (self.desc_base + idx as u64 * 16) as *const VringDesc;
-            self.free_head = (*d).next;
-        }
+        self.free_head = self.queue.r16(idx as u64 * DESC_SIZE + 14);
         self.num_free -= 1;
         Some(idx)
     }
 
     fn free_desc(&mut self, idx: u16) {
-        unsafe {
-            let d = (self.desc_base + idx as u64 * 16) as *mut VringDesc;
-            (*d).flags = 0;
-            (*d).next = self.free_head;
-        }
+        let o = idx as u64 * DESC_SIZE;
+        self.queue.w16(o + 12, 0);
+        self.queue.w16(o + 14, self.free_head);
         self.free_head = idx;
         self.num_free += 1;
     }
@@ -353,38 +324,21 @@ impl VirtioBlk {
         let d1 = self.alloc_desc().ok_or(BlkError::QueueFull)?;
         let d2 = self.alloc_desc().ok_or(BlkError::QueueFull)?;
 
-        let hdr_addr = self.req_hdrs + d0 as u64 * 16;
-        let stat_addr = self.status_buf + d0 as u64;
+        let hdr_off = d0 as u64 * 16;
+        let stat_off = d0 as u64;
 
-        // SAFETY: DMA buffers in identity-mapped range
-        unsafe {
-            let hdr = hdr_addr as *mut BlkReqHeader;
-            (*hdr).req_type = req_type;
-            (*hdr)._reserved = 0;
-            (*hdr).sector = sector;
-            *(stat_addr as *mut u8) = 0xFF;
+        self.req_hdrs.w32(hdr_off, req_type);
+        self.req_hdrs.w32(hdr_off + 4, 0);
+        self.req_hdrs.w64(hdr_off + 8, sector);
+        self.status_buf.w8(stat_off, 0xFF);
 
-            let desc0 = (self.desc_base + d0 as u64 * 16) as *mut VringDesc;
-            (*desc0).addr = hdr_addr;
-            (*desc0).len = 16;
-            (*desc0).flags = DESC_F_NEXT;
-            (*desc0).next = d1;
-
-            let desc1 = (self.desc_base + d1 as u64 * 16) as *mut VringDesc;
-            (*desc1).addr = buf_addr;
-            (*desc1).len = buf_len;
-            (*desc1).flags = if buf_writable { DESC_F_WRITE | DESC_F_NEXT } else { DESC_F_NEXT };
-            (*desc1).next = d2;
-
-            let desc2 = (self.desc_base + d2 as u64 * 16) as *mut VringDesc;
-            (*desc2).addr = stat_addr;
-            (*desc2).len = 1;
-            (*desc2).flags = DESC_F_WRITE;
-            (*desc2).next = 0;
-        }
+        self.set_desc(d0, self.req_hdrs.phys() + hdr_off, 16, DESC_F_NEXT, d1);
+        self.set_desc(d1, buf_addr, buf_len,
+            if buf_writable { DESC_F_WRITE | DESC_F_NEXT } else { DESC_F_NEXT }, d2);
+        self.set_desc(d2, self.status_buf.phys() + stat_off, 1, DESC_F_WRITE, 0);
 
         let result = self.submit_and_poll(d0);
-        let status = unsafe { *(stat_addr as *const u8) };
+        let status = self.status_buf.r8(stat_off);
 
         self.free_desc(d2);
         self.free_desc(d1);
@@ -395,31 +349,26 @@ impl VirtioBlk {
     }
 
     fn submit_and_poll(&mut self, head: u16) -> Result<(), BlkError> {
-        let avail_ring = self.avail_base + 4;
-        let used_idx_ptr = (self.used_base + 2) as *const u16;
+        let avail_ring = self.avail_off + 4;
+        let used_idx = self.used_off + 2;
 
-        // SAFETY: Volatile writes to available ring, volatile reads from used ring
-        unsafe {
-            let slot = (avail_ring + (self.avail_idx % self.queue_size) as u64 * 2) as *mut u16;
-            core::ptr::write_volatile(slot, head);
-            fence(Ordering::SeqCst);
+        self.queue.w16(avail_ring + (self.avail_idx % self.queue_size) as u64 * 2, head);
+        fence(Ordering::SeqCst);
 
-            let avail_idx_ptr = (self.avail_base + 2) as *mut u16;
-            self.avail_idx = self.avail_idx.wrapping_add(1);
-            core::ptr::write_volatile(avail_idx_ptr, self.avail_idx);
-            fence(Ordering::SeqCst);
+        self.avail_idx = self.avail_idx.wrapping_add(1);
+        self.queue.w16(self.avail_off + 2, self.avail_idx);
+        fence(Ordering::SeqCst);
 
-            outw(self.io_base + REG_QUEUE_NOTIFY, 0);
+        self.io.outw(REG_QUEUE_NOTIFY, 0);
 
-            for _ in 0..2_000_000u32 {
-                let idx = core::ptr::read_volatile(used_idx_ptr);
-                if idx != self.last_used_idx {
-                    self.last_used_idx = idx;
-                    inb(self.io_base + REG_ISR);
-                    return Ok(());
-                }
-                core::hint::spin_loop();
+        for _ in 0..2_000_000u32 {
+            let idx = self.queue.r16(used_idx);
+            if idx != self.last_used_idx {
+                self.last_used_idx = idx;
+                self.io.inb(REG_ISR);
+                return Ok(());
             }
+            core::hint::spin_loop();
         }
         Err(BlkError::Timeout)
     }

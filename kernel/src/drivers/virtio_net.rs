@@ -3,12 +3,12 @@
 //! Legacy (0.9.5) VirtIO PCI transport with RX/TX virtqueues.
 //! Provides Ethernet frame send/receive for the TCP/IP stack.
 
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 
-/// Lock-free pointer to the host NIC RX used.idx (`rx_used_base + 2`), published
-/// at init. Lets the off-vCPU data plane busy-poll for RX arrival without
-/// taking the DEVICE lock every spin iteration. 0 = not yet up.
-static RX_USED_IDX_PTR: AtomicU64 = AtomicU64::new(0);
+/// The host NIC RX used.idx field, published at init. Lets the off-vCPU data
+/// plane busy-poll for RX arrival without taking the DEVICE lock every spin
+/// iteration.
+static RX_USED_IDX: spin::Once<DmaRegion> = spin::Once::new();
 /// The device segments and checksums TCPv4 GSO frames (`send_tso`).
 static TSO: AtomicBool = AtomicBool::new(false);
 
@@ -18,15 +18,10 @@ pub fn tso_capable() -> bool { TSO.load(Ordering::Acquire) }
 /// caches the value it last drained to; a change means a frame arrived.
 #[inline]
 pub fn rx_used_idx() -> u16 {
-    let p = RX_USED_IDX_PTR.load(Ordering::Relaxed);
-    if p == 0 { return 0; }
-    // SAFETY: p is the device's used-ring idx field, identity-mapped, set once
-    // at init and stable for the device's life; a torn 16-bit read at worst
-    // costs one extra poll iteration.
-    unsafe { core::ptr::read_volatile(p as *const u16) }
+    RX_USED_IDX.get().map_or(0, |r| r.r16(0u64))
 }
 use spin::Mutex;
-use crate::serial::{outb, outw, outl, inb, inw, inl};
+use crate::hw::{DmaRegion, PortRange};
 use crate::{kprintln, memory, pci};
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
@@ -89,63 +84,61 @@ const TSO_SLOT_SIZE: usize = 66 * 1024;
 const TSO_SLOTS: usize = 32;
 const NO_TSO_SLOT: u8 = u8::MAX;
 
-/// VirtIO net header prepended to every packet (10 bytes, no mergeable buffers)
-#[repr(C)]
-struct VirtioNetHdr {
-    flags: u8,
-    gso_type: u8,
-    hdr_len: u16,
-    gso_size: u16,
-    csum_start: u16,
-    csum_offset: u16,
-}
-
-const NET_HDR_SIZE: usize = core::mem::size_of::<VirtioNetHdr>(); // 10
+/// virtio_net_hdr prepended to every packet (no mergeable buffers): flags u8,
+/// gso_type u8, hdr_len u16, gso_size u16, csum_start u16, csum_offset u16.
+const NET_HDR_SIZE: usize = 10;
 const RX_BUF_SIZE: usize = NET_HDR_SIZE + MTU;
 
-#[repr(C)]
-struct VringDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
+/// Legacy I/O BAR: common header (0x14, 0x18 with MSI-X) plus the MAC field
+/// of the device config.
+const IO_LEN: u16 = 0x20;
+
+// vring_desc (16 bytes): addr u64 @0, len u32 @8, flags u16 @12, next u16 @14.
+const DESC_SIZE: u64 = 16;
+
+fn set_desc(q: &DmaRegion, idx: u16, addr: u64, len: u32, flags: u16, next: u16) {
+    let o = idx as u64 * DESC_SIZE;
+    q.w64(o, addr);
+    q.w32(o + 8, len);
+    q.w16(o + 12, flags);
+    q.w16(o + 14, next);
 }
 
 #[allow(dead_code)]
 struct VirtioNet {
-    io_base: u16,
+    io: PortRange,
     mac: [u8; 6],
 
-    // RX queue
-    rx_desc_base: u64,
-    rx_avail_base: u64,
-    rx_used_base: u64,
+    // RX queue: descriptor table at 0, avail ring at `rx_avail`, used ring at `rx_used`
+    rx_q: DmaRegion,
+    rx_avail: u64,
+    rx_used: u64,
     rx_queue_size: u16,
     rx_last_used: u16,
-    rx_buffers: u64, // contiguous RX buffer region
+    rx_buffers: DmaRegion, // contiguous RX buffer region
     rx_repost_pending: u16, // RX buffers reposted but not yet notified (batch the doorbell)
     pci_addr: pci::PciAddr, // for MSI-X dest re-routing (net-RX IRQ)
     rx_msix_vector: u8,     // LAPIC vector for RX-queue MSI-X (0 = none, polling)
 
-    // TX queue
-    tx_desc_base: u64,
-    tx_avail_base: u64,
-    tx_used_base: u64,
+    // TX queue, laid out as the RX queue
+    tx_q: DmaRegion,
+    tx_avail: u64,
+    tx_used: u64,
     tx_queue_size: u16,
     tx_avail_idx: u16,
     tx_last_used: u16,
     tx_num_free: u16,
     tx_notify_pending: bool, // TX frames queued but doorbell not yet rung (batch it)
     tx_free_head: u16,
-    tx_hdrs: u64,   // pre-allocated net headers for TX
+    tx_hdrs: DmaRegion, // pre-allocated net headers for TX
     /// Pre-allocated DMA-stable TX data pool — one MTU-sized slot per
     /// descriptor. `send` copies the caller's frame here so the device
     /// reads from memory that outlives the caller's stack-local `Vec`
     /// (which may be freed and reused before QEMU's slirp loop does the DMA).
     /// Modelled on `intel_nic::send`'s `tx_bufs`.
-    tx_data: u64,
+    tx_data: DmaRegion,
     /// `TSO_SLOTS` super-frame buffers, `TSO_SLOT_SIZE` each.
-    tso_data: u64,
+    tso_data: DmaRegion,
     /// Bit per free TSO slot.
     tso_free: u32,
     /// Chain head descriptor → the TSO slot it holds, freed on completion.
@@ -167,7 +160,9 @@ pub fn init() -> bool {
         kprintln!("[npk] virtio-net: BAR0 is MMIO — legacy I/O required");
         return false;
     }
-    let io = (dev.bar0 & 0xFFFC) as u16;
+    // SAFETY: BAR0 is this virtio-net device's legacy I/O BAR, which this
+    // driver owns; IO_LEN does not exceed the header plus the MAC field.
+    let io = unsafe { PortRange::new((dev.bar0 & 0xFFFC) as u16, IO_LEN) };
     pci::enable_bus_master(dev.addr);
     // Try to enable MSI-X for the RX queue → the device raises an interrupt on
     // RX so delivery is event-driven (a drain/wake) instead of pump-cadence
@@ -186,220 +181,208 @@ pub fn init() -> bool {
     };
     let cfg_off: u16 = if rx_vec != 0 || pci::msix_enabled(dev.addr) { 24 } else { 20 };
 
-    // SAFETY: All port I/O targets the VirtIO device's I/O BAR
-    unsafe {
-        outb(io + REG_STATUS, 0);
-        outb(io + REG_STATUS, S_ACKNOWLEDGE);
-        outb(io + REG_STATUS, S_ACKNOWLEDGE | S_DRIVER);
+    io.outb(REG_STATUS, 0);
+    io.outb(REG_STATUS, S_ACKNOWLEDGE);
+    io.outb(REG_STATUS, S_ACKNOWLEDGE | S_DRIVER);
 
-        let features = inl(io + REG_DEV_FEATURES);
+    let features = io.inl(REG_DEV_FEATURES);
 
-        // Accept MAC, plus CSUM+TSO4 if BOTH are offered. These are DEVICE
-        // capabilities (it can segment and checksum for us); we do not currently
-        // hand it a GSO frame, and accepting them costs nothing. Only when both
-        // are present, so we never promise a frame the device can't segment.
-        let mut accepted = features & F_MAC;
-        // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
-        // (what QEMU's transitional device offers a legacy driver). Either lets us
-        // forward the guest's GSO super-frame AS-IS (device segments + checksums).
-        // Linux `virtnet_probe`: every TSO feature sits inside the F_CSUM
-        // branch. A device that cannot checksum cannot segment; QEMU with a
-        // slirp backend still lists the legacy F_GSO bit without backing it.
-        let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
-        let legacy_gso = features & (F_CSUM | F_GSO) == (F_CSUM | F_GSO);
-        let offload = modern || legacy_gso;
-        crate::kdebug!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
-                  features, features & F_CSUM != 0, legacy_gso, features & F_HOST_TSO4 != 0, offload);
-        if modern {
-            accepted |= F_CSUM | F_HOST_TSO4;
-        } else if legacy_gso {
-            accepted |= F_CSUM | F_GSO;
-        }
-        if offload {
-            TSO.store(true, Ordering::Release);
-            kprintln!("[npk] virtio-net: TX offload negotiated ({})",
-                      if modern { "CSUM+HOST_TSO4" } else { "legacy GSO" });
-        }
-        outl(io + REG_DRV_FEATURES, accepted);
-
-        // Read MAC address
-        let mut mac = [0u8; 6];
-        if features & F_MAC != 0 {
-            for i in 0..6 {
-                mac[i] = inb(io + cfg_off + i as u16);
-            }
-        }
-
-        // Setup RX queue (queue 0)
-        outw(io + REG_QUEUE_SEL, RX_QUEUE);
-        let rx_qs = inw(io + REG_QUEUE_SIZE);
-        if rx_qs == 0 {
-            kprintln!("[npk] virtio-net: RX queue size 0");
-            outb(io + REG_STATUS, S_FAILED);
-            return false;
-        }
-
-        let (rx_desc, rx_avail, rx_used, _rx_mem) = match setup_queue(io, rx_qs) {
-            Some(v) => v,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-
-        // Setup TX queue (queue 1)
-        outw(io + REG_QUEUE_SEL, TX_QUEUE);
-        let tx_qs = inw(io + REG_QUEUE_SIZE);
-        if tx_qs == 0 {
-            kprintln!("[npk] virtio-net: TX queue size 0");
-            outb(io + REG_STATUS, S_FAILED);
-            return false;
-        }
-
-        let (tx_desc, tx_avail, tx_used, _tx_mem) = match setup_queue(io, tx_qs) {
-            Some(v) => v,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-
-        // Build TX descriptor free chain
-        for i in 0..tx_qs as usize {
-            let d = (tx_desc + (i * 16) as u64) as *mut VringDesc;
-            (*d).next = if i + 1 < tx_qs as usize { (i + 1) as u16 } else { 0 };
-        }
-
-        // Allocate TX net headers (one per descriptor)
-        let tx_hdrs = match memory::allocate_contiguous(
-            (tx_qs as usize * NET_HDR_SIZE + 4095) / 4096
-        ) {
-            Some(a) => a,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(tx_hdrs as *mut u8, 0,
-            (tx_qs as usize * NET_HDR_SIZE + 4095) / 4096 * 4096);
-
-        // Allocate TX data pool — one MTU slot per descriptor. The
-        // sender copies the frame here so the descriptor points at
-        // memory that outlives the caller's stack frame; otherwise QEMU/slirp
-        // can DMA-read recycled heap memory.
-        let tx_data_pages = (tx_qs as usize * MTU + 4095) / 4096;
-        let tx_data = match memory::allocate_contiguous(tx_data_pages) {
-            Some(a) => a,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(tx_data as *mut u8, 0, tx_data_pages * 4096);
-
-        let tso_pages = (TSO_SLOTS * TSO_SLOT_SIZE).div_ceil(4096);
-        let tso_data = match memory::allocate_contiguous(tso_pages) {
-            Some(a) => a,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-
-        // Allocate RX buffers (contiguous, one per RX descriptor)
-        let rx_buf_count = RX_BUFFERS.min(rx_qs as usize);
-        let rx_buf_pages = (rx_buf_count * RX_BUF_SIZE + 4095) / 4096;
-        let rx_buffers = match memory::allocate_contiguous(rx_buf_pages) {
-            Some(a) => a,
-            None => {
-                outb(io + REG_STATUS, S_FAILED);
-                return false;
-            }
-        };
-        core::ptr::write_bytes(rx_buffers as *mut u8, 0, rx_buf_pages * 4096);
-
-        // Post RX buffers to the RX queue
-        for i in 0..rx_buf_count {
-            let buf_addr = rx_buffers + (i * RX_BUF_SIZE) as u64;
-            let d = (rx_desc + (i * 16) as u64) as *mut VringDesc;
-            (*d).addr = buf_addr;
-            (*d).len = RX_BUF_SIZE as u32;
-            (*d).flags = DESC_F_WRITE;
-            (*d).next = 0;
-
-            // Add to available ring
-            let avail_ring = rx_avail + 4;
-            let slot = (avail_ring + (i as u64) * 2) as *mut u16;
-            *slot = i as u16;
-        }
-
-        // Set available ring idx
-        fence(Ordering::SeqCst);
-        let rx_avail_idx_ptr = (rx_avail + 2) as *mut u16;
-        core::ptr::write_volatile(rx_avail_idx_ptr, rx_buf_count as u16);
-
-        // Suppress TX interrupts
-        *(tx_avail as *mut u16) = 1;
-
-        // Bind the RX queue to MSI-X table entry 0 so the device fires our
-        // vector on RX. config_msix_vector = NO_VECTOR (we don't want a
-        // config-change IRQ). Read-back guards a device that rejects it →
-        // rx_msix_vector stays 0 and we keep polling (the recv path is
-        // unchanged either way).
-        let mut rx_msix_vector = 0u8;
-        if rx_vec != 0 {
-            outw(io + REG_CONFIG_MSIX_VEC, MSIX_NO_VECTOR);
-            outw(io + REG_QUEUE_SEL, RX_QUEUE);
-            outw(io + REG_QUEUE_MSIX_VEC, 0);
-            if inw(io + REG_QUEUE_MSIX_VEC) == 0 {
-                rx_msix_vector = rx_vec;
-                crate::kdebug!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
-            } else {
-                kprintln!("[npk] virtio-net: RX MSI-X vector rejected — polling");
-            }
-        }
-
-        // Go live
-        outb(io + REG_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_DRIVER_OK);
-        if inb(io + REG_STATUS) & S_FAILED != 0 {
-            kprintln!("[npk] virtio-net: device rejected initialization");
-            return false;
-        }
-
-        // Notify RX queue that buffers are available
-        outw(io + REG_QUEUE_NOTIFY, RX_QUEUE);
-
-        kprintln!("[npk] virtio-net: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
-        *DEVICE.lock() = Some(VirtioNet {
-            io_base: io,
-            mac,
-            rx_desc_base: rx_desc,
-            rx_avail_base: rx_avail,
-            rx_used_base: { RX_USED_IDX_PTR.store(rx_used + 2, Ordering::Relaxed); rx_used },
-            rx_queue_size: rx_qs,
-            rx_last_used: 0,
-            rx_repost_pending: 0,
-            rx_buffers,
-            pci_addr: dev.addr,
-            rx_msix_vector,
-            tx_desc_base: tx_desc,
-            tx_avail_base: tx_avail,
-            tx_used_base: tx_used,
-            tx_queue_size: tx_qs,
-            tx_avail_idx: 0,
-            tx_last_used: 0,
-            tx_num_free: tx_qs,
-            tx_notify_pending: false,
-            tx_free_head: 0,
-            tx_hdrs,
-            tx_data,
-            tso_data,
-            tso_free: if TSO_SLOTS == 32 { u32::MAX } else { (1u32 << TSO_SLOTS) - 1 },
-            tso_slot_of: alloc::vec![NO_TSO_SLOT; tx_qs as usize],
-        });
+    // Accept MAC, plus CSUM+TSO4 if BOTH are offered. These are DEVICE
+    // capabilities (it can segment and checksum for us); we do not currently
+    // hand it a GSO frame, and accepting them costs nothing. Only when both
+    // are present, so we never promise a frame the device can't segment.
+    let mut accepted = features & F_MAC;
+    // Prefer the modern per-type bits; fall back to the legacy combined F_GSO
+    // (what QEMU's transitional device offers a legacy driver). Either lets us
+    // forward the guest's GSO super-frame AS-IS (device segments + checksums).
+    // Linux `virtnet_probe`: every TSO feature sits inside the F_CSUM
+    // branch. A device that cannot checksum cannot segment; QEMU with a
+    // slirp backend still lists the legacy F_GSO bit without backing it.
+    let modern = (features & (F_CSUM | F_HOST_TSO4)) == (F_CSUM | F_HOST_TSO4);
+    let legacy_gso = features & (F_CSUM | F_GSO) == (F_CSUM | F_GSO);
+    let offload = modern || legacy_gso;
+    crate::kdebug!("[npk] virtio-net: dev features {:#010x} (csum={} gso={} host_tso4={} → offload={})",
+              features, features & F_CSUM != 0, legacy_gso, features & F_HOST_TSO4 != 0, offload);
+    if modern {
+        accepted |= F_CSUM | F_HOST_TSO4;
+    } else if legacy_gso {
+        accepted |= F_CSUM | F_GSO;
     }
+    if offload {
+        TSO.store(true, Ordering::Release);
+        kprintln!("[npk] virtio-net: TX offload negotiated ({})",
+                  if modern { "CSUM+HOST_TSO4" } else { "legacy GSO" });
+    }
+    io.outl(REG_DRV_FEATURES, accepted);
+
+    // Read MAC address
+    let mut mac = [0u8; 6];
+    if features & F_MAC != 0 {
+        for i in 0..6 {
+            mac[i] = io.inb(cfg_off + i as u16);
+        }
+    }
+
+    // Setup RX queue (queue 0)
+    io.outw(REG_QUEUE_SEL, RX_QUEUE);
+    let rx_qs = io.inw(REG_QUEUE_SIZE);
+    if rx_qs == 0 {
+        kprintln!("[npk] virtio-net: RX queue size 0");
+        io.outb(REG_STATUS, S_FAILED);
+        return false;
+    }
+
+    let (rx_q, rx_avail, rx_used) = match setup_queue(&io, rx_qs) {
+        Some(v) => v,
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    // Setup TX queue (queue 1)
+    io.outw(REG_QUEUE_SEL, TX_QUEUE);
+    let tx_qs = io.inw(REG_QUEUE_SIZE);
+    if tx_qs == 0 {
+        kprintln!("[npk] virtio-net: TX queue size 0");
+        io.outb(REG_STATUS, S_FAILED);
+        return false;
+    }
+
+    let (tx_q, tx_avail, tx_used) = match setup_queue(&io, tx_qs) {
+        Some(v) => v,
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    // Build TX descriptor free chain
+    for i in 0..tx_qs as usize {
+        tx_q.w16(i as u64 * DESC_SIZE + 14, if i + 1 < tx_qs as usize { (i + 1) as u16 } else { 0 });
+    }
+
+    // Allocate TX net headers (one per descriptor)
+    let tx_hdrs = match DmaRegion::alloc_zeroed(
+        (tx_qs as usize * NET_HDR_SIZE + 4095) / 4096
+    ) {
+        Some(r) => r,
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    // Allocate TX data pool — one MTU slot per descriptor. The
+    // sender copies the frame here so the descriptor points at
+    // memory that outlives the caller's stack frame; otherwise QEMU/slirp
+    // can DMA-read recycled heap memory.
+    let tx_data_pages = (tx_qs as usize * MTU + 4095) / 4096;
+    let tx_data = match DmaRegion::alloc_zeroed(tx_data_pages) {
+        Some(r) => r,
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    let tso_pages = (TSO_SLOTS * TSO_SLOT_SIZE).div_ceil(4096);
+    let tso_data = match memory::allocate_contiguous(tso_pages) {
+        // SAFETY: fresh contiguous frames from the allocator, identity-mapped
+        // RAM this driver keeps for the device's lifetime. Not zeroed: every
+        // slot is written before a descriptor points at it.
+        Some(a) => unsafe { DmaRegion::from_raw(a, tso_pages as u64 * 4096) },
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    // Allocate RX buffers (contiguous, one per RX descriptor)
+    let rx_buf_count = RX_BUFFERS.min(rx_qs as usize);
+    let rx_buf_pages = (rx_buf_count * RX_BUF_SIZE + 4095) / 4096;
+    let rx_buffers = match DmaRegion::alloc_zeroed(rx_buf_pages) {
+        Some(r) => r,
+        None => {
+            io.outb(REG_STATUS, S_FAILED);
+            return false;
+        }
+    };
+
+    // Post RX buffers to the RX queue
+    for i in 0..rx_buf_count {
+        let buf_addr = rx_buffers.phys() + (i * RX_BUF_SIZE) as u64;
+        set_desc(&rx_q, i as u16, buf_addr, RX_BUF_SIZE as u32, DESC_F_WRITE, 0);
+
+        // Add to available ring
+        rx_q.w16(rx_avail + 4 + (i as u64) * 2, i as u16);
+    }
+
+    // Set available ring idx
+    fence(Ordering::SeqCst);
+    rx_q.w16(rx_avail + 2, rx_buf_count as u16);
+
+    // Suppress TX interrupts
+    tx_q.w16(tx_avail, 1);
+
+    // Bind the RX queue to MSI-X table entry 0 so the device fires our
+    // vector on RX. config_msix_vector = NO_VECTOR (we don't want a
+    // config-change IRQ). Read-back guards a device that rejects it →
+    // rx_msix_vector stays 0 and we keep polling (the recv path is
+    // unchanged either way).
+    let mut rx_msix_vector = 0u8;
+    if rx_vec != 0 {
+        io.outw(REG_CONFIG_MSIX_VEC, MSIX_NO_VECTOR);
+        io.outw(REG_QUEUE_SEL, RX_QUEUE);
+        io.outw(REG_QUEUE_MSIX_VEC, 0);
+        if io.inw(REG_QUEUE_MSIX_VEC) == 0 {
+            rx_msix_vector = rx_vec;
+            crate::kdebug!("[npk] virtio-net: RX MSI-X on vector {:#04x}", rx_vec);
+        } else {
+            kprintln!("[npk] virtio-net: RX MSI-X vector rejected — polling");
+        }
+    }
+
+    // Go live
+    io.outb(REG_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_DRIVER_OK);
+    if io.inb(REG_STATUS) & S_FAILED != 0 {
+        kprintln!("[npk] virtio-net: device rejected initialization");
+        return false;
+    }
+
+    // Notify RX queue that buffers are available
+    io.outw(REG_QUEUE_NOTIFY, RX_QUEUE);
+
+    kprintln!("[npk] virtio-net: MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    *DEVICE.lock() = Some(VirtioNet {
+        io,
+        mac,
+        rx_q,
+        rx_avail,
+        rx_used: { RX_USED_IDX.call_once(|| rx_q.sub(rx_used + 2, 2)); rx_used },
+        rx_queue_size: rx_qs,
+        rx_last_used: 0,
+        rx_repost_pending: 0,
+        rx_buffers,
+        pci_addr: dev.addr,
+        rx_msix_vector,
+        tx_q,
+        tx_avail,
+        tx_used,
+        tx_queue_size: tx_qs,
+        tx_avail_idx: 0,
+        tx_last_used: 0,
+        tx_num_free: tx_qs,
+        tx_notify_pending: false,
+        tx_free_head: 0,
+        tx_hdrs,
+        tx_data,
+        tso_data,
+        tso_free: if TSO_SLOTS == 32 { u32::MAX } else { (1u32 << TSO_SLOTS) - 1 },
+        tso_slot_of: alloc::vec![NO_TSO_SLOT; tx_qs as usize],
+    });
 
     kprintln!("[npk] virtio-net: online");
     true
@@ -436,45 +419,32 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
     let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
 
-    let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
+    let hdr_off = d0 as u64 * NET_HDR_SIZE as u64;
 
-    // SAFETY: Writing to pre-allocated DMA buffers
-    unsafe {
-        // Zero net header (no offload)
-        core::ptr::write_bytes(hdr_addr as *mut u8, 0, NET_HDR_SIZE);
+    // Zero net header (no offload)
+    dev.tx_hdrs.fill(hdr_off, 0, NET_HDR_SIZE as u64);
 
-        // Descriptor 0: net header
-        let desc0 = (dev.tx_desc_base + d0 as u64 * 16) as *mut VringDesc;
-        (*desc0).addr = hdr_addr;
-        (*desc0).len = NET_HDR_SIZE as u32;
-        (*desc0).flags = DESC_F_NEXT;
-        (*desc0).next = d1;
+    // Descriptor 0: net header
+    set_desc(&dev.tx_q, d0, dev.tx_hdrs.phys() + hdr_off, NET_HDR_SIZE as u32, DESC_F_NEXT, d1);
 
-        // Descriptor 1: frame data. Copy into the DMA-stable pool
-        // before publishing the descriptor — the caller's `frame: &[u8]`
-        // is a stack-local Vec that gets dropped before QEMU/slirp's
-        // event loop wakes up to walk our virtqueue.
-        let data_addr = dev.tx_data + d1 as u64 * MTU as u64;
-        core::ptr::copy_nonoverlapping(frame.as_ptr(), data_addr as *mut u8, frame.len());
+    // Descriptor 1: frame data. Copy into the DMA-stable pool
+    // before publishing the descriptor — the caller's `frame: &[u8]`
+    // is a stack-local Vec that gets dropped before QEMU/slirp's
+    // event loop wakes up to walk our virtqueue.
+    let data_off = d1 as u64 * MTU as u64;
+    dev.tx_data.copy_in(data_off, frame);
 
-        let desc1 = (dev.tx_desc_base + d1 as u64 * 16) as *mut VringDesc;
-        (*desc1).addr = data_addr;
-        (*desc1).len = frame.len() as u32;
-        (*desc1).flags = 0;
-        (*desc1).next = 0;
+    set_desc(&dev.tx_q, d1, dev.tx_data.phys() + data_off, frame.len() as u32, 0, 0);
 
-        // Add to available ring
-        let avail_ring = dev.tx_avail_base + 4;
-        let slot = (avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2) as *mut u16;
-        core::ptr::write_volatile(slot, d0);
+    // Add to available ring
+    let avail_ring = dev.tx_avail + 4;
+    dev.tx_q.w16(avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2, d0);
 
-        fence(Ordering::SeqCst);
-        let avail_idx_ptr = (dev.tx_avail_base + 2) as *mut u16;
-        dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
-        core::ptr::write_volatile(avail_idx_ptr, dev.tx_avail_idx);
+    fence(Ordering::SeqCst);
+    dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
+    dev.tx_q.w16(dev.tx_avail + 2, dev.tx_avail_idx);
 
-        fence(Ordering::SeqCst);
-    }
+    fence(Ordering::SeqCst);
 
     // Batch the TX doorbell: an outw() notify is a VM-exit, and notifying per
     // frame would be a per-packet exit on the upload path.
@@ -521,8 +491,8 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     let d0 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
     let d1 = dev.alloc_tx_desc().ok_or(NetError::QueueFull)?;
     dev.tso_slot_of[d0 as usize] = slot as u8;
-    let hdr_addr = dev.tx_hdrs + d0 as u64 * NET_HDR_SIZE as u64;
-    let data_addr = dev.tso_data + (slot * TSO_SLOT_SIZE) as u64;
+    let hdr_off = d0 as u64 * NET_HDR_SIZE as u64;
+    let data_off = (slot * TSO_SLOT_SIZE) as u64;
     let mut h = [0u8; NET_HDR_SIZE];
     h[0] = VNET_HDR_F_NEEDS_CSUM;
     h[1] = VNET_HDR_GSO_TCPV4;
@@ -530,35 +500,19 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     h[4..6].copy_from_slice(&mss.to_le_bytes());
     h[6..8].copy_from_slice(&(l4_off as u16).to_le_bytes()); // csum_start
     h[8..10].copy_from_slice(&16u16.to_le_bytes());          // csum_offset: tcphdr.check
-    // SAFETY: pre-allocated DMA buffers + this device's descriptor table;
-    // the slot is ours until its chain completes, `frame` fits it (checked).
-    unsafe {
-        core::ptr::copy_nonoverlapping(h.as_ptr(), hdr_addr as *mut u8, NET_HDR_SIZE);
-        core::ptr::copy_nonoverlapping(frame.as_ptr(), data_addr as *mut u8, frame.len());
-        let dd0 = (dev.tx_desc_base + d0 as u64 * 16) as *mut VringDesc;
-        (*dd0).addr = hdr_addr;
-        (*dd0).len = NET_HDR_SIZE as u32;
-        (*dd0).flags = DESC_F_NEXT;
-        (*dd0).next = d1;
-        let dd1 = (dev.tx_desc_base + d1 as u64 * 16) as *mut VringDesc;
-        (*dd1).addr = data_addr;
-        (*dd1).len = frame.len() as u32;
-        (*dd1).flags = 0;
-        (*dd1).next = 0;
-    }
+    // The slot is ours until its chain completes.
+    dev.tx_hdrs.copy_in(hdr_off, &h);
+    dev.tso_data.copy_in(data_off, frame);
+    set_desc(&dev.tx_q, d0, dev.tx_hdrs.phys() + hdr_off, NET_HDR_SIZE as u32, DESC_F_NEXT, d1);
+    set_desc(&dev.tx_q, d1, dev.tso_data.phys() + data_off, frame.len() as u32, 0, 0);
 
     // Publish the chain head (d0) on the avail ring.
-    // SAFETY: this device's own virtqueue memory; fenced.
-    unsafe {
-        let avail_ring = dev.tx_avail_base + 4;
-        let slot = (avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2) as *mut u16;
-        core::ptr::write_volatile(slot, d0);
-        fence(Ordering::SeqCst);
-        let avail_idx_ptr = (dev.tx_avail_base + 2) as *mut u16;
-        dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
-        core::ptr::write_volatile(avail_idx_ptr, dev.tx_avail_idx);
-        fence(Ordering::SeqCst);
-    }
+    let avail_ring = dev.tx_avail + 4;
+    dev.tx_q.w16(avail_ring + (dev.tx_avail_idx % dev.tx_queue_size) as u64 * 2, d0);
+    fence(Ordering::SeqCst);
+    dev.tx_avail_idx = dev.tx_avail_idx.wrapping_add(1);
+    dev.tx_q.w16(dev.tx_avail + 2, dev.tx_avail_idx);
+    fence(Ordering::SeqCst);
     dev.tx_notify_pending = true;
     if dev.tx_num_free < 16 || dev.tso_free.count_ones() < 4 { dev.tx_kick(); }
     Ok(())
@@ -570,8 +524,8 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let mut lock = DEVICE.lock();
     let dev = lock.as_mut()?;
 
-    let used_idx_ptr = (dev.rx_used_base + 2) as *const u16;
-    let used_idx = unsafe { core::ptr::read_volatile(used_idx_ptr) };
+    let used_idx_off = dev.rx_used + 2;
+    let used_idx = dev.rx_q.r16(used_idx_off);
 
     if used_idx == dev.rx_last_used {
         // Ring appears drained. NAPI: if RX IRQs are enabled (MSI-X on) and we
@@ -580,17 +534,17 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
         // window) before parking, so no wakeup is lost. If already enabled
         // (flags==0), the next RX will interrupt — nothing to do.
         if dev.rx_msix_vector != 0 {
-            let flags = unsafe { core::ptr::read_volatile(dev.rx_avail_base as *const u16) };
+            let flags = dev.rx_q.r16(dev.rx_avail);
             if flags != 0 {
-                unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 0); }
+                dev.rx_q.w16(dev.rx_avail, 0);
                 fence(Ordering::SeqCst);
-                let used2 = unsafe { core::ptr::read_volatile(used_idx_ptr) };
+                let used2 = dev.rx_q.r16(used_idx_off);
                 if used2 == dev.rx_last_used {
                     dev.rx_kick();
                     return None; // truly empty, IRQ re-armed for the next frame
                 }
                 // A frame arrived in the window — re-suppress + fall through.
-                unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 1); }
+                dev.rx_q.w16(dev.rx_avail, 1);
             } else {
                 dev.rx_kick();
                 return None;
@@ -604,17 +558,13 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     } else if dev.rx_msix_vector != 0 {
         // Frames present → we're draining; suppress further RX IRQs until the
         // ring empties (NAPI), so the device doesn't interrupt per packet.
-        unsafe { core::ptr::write_volatile(dev.rx_avail_base as *mut u16, 1); }
+        dev.rx_q.w16(dev.rx_avail, 1);
     }
 
     // Read the used ring entry
-    let used_entry_off = 4 + (dev.rx_last_used % dev.rx_queue_size) as u64 * 8;
-    let used_id = unsafe {
-        *((dev.rx_used_base + used_entry_off) as *const u32)
-    };
-    let used_len = unsafe {
-        *((dev.rx_used_base + used_entry_off + 4) as *const u32)
-    } as usize;
+    let used_entry_off = dev.rx_used + 4 + (dev.rx_last_used % dev.rx_queue_size) as u64 * 8;
+    let used_id = dev.rx_q.r32(used_entry_off);
+    let used_len = dev.rx_q.r32(used_entry_off + 4) as usize;
 
     dev.rx_last_used = dev.rx_last_used.wrapping_add(1);
 
@@ -628,15 +578,8 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let frame_len = used_len - NET_HDR_SIZE;
     let frame_len = frame_len.min(MTU);
 
-    let buf_addr = dev.rx_buffers + (used_id as usize * RX_BUF_SIZE) as u64;
-    // SAFETY: Reading from DMA buffer in identity-mapped range
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            (buf_addr + NET_HDR_SIZE as u64) as *const u8,
-            buf.as_mut_ptr(),
-            frame_len,
-        );
-    }
+    let buf_off = (used_id as usize * RX_BUF_SIZE) as u64;
+    dev.rx_buffers.copy_out(buf_off + NET_HDR_SIZE as u64, &mut buf[..frame_len]);
 
     // Repost buffer for next receive
     dev.repost_rx(used_id as usize);
@@ -667,32 +610,27 @@ impl VirtioNet {
     fn alloc_tx_desc(&mut self) -> Option<u16> {
         if self.tx_num_free == 0 { return None; }
         let idx = self.tx_free_head;
-        unsafe {
-            let d = (self.tx_desc_base + idx as u64 * 16) as *const VringDesc;
-            self.tx_free_head = (*d).next;
-        }
+        self.tx_free_head = self.tx_q.r16(idx as u64 * DESC_SIZE + 14);
         self.tx_num_free -= 1;
         Some(idx)
     }
 
     fn free_tx_desc(&mut self, idx: u16) {
-        unsafe {
-            let d = (self.tx_desc_base + idx as u64 * 16) as *mut VringDesc;
-            (*d).flags = 0;
-            (*d).next = self.tx_free_head;
-        }
+        let o = idx as u64 * DESC_SIZE;
+        self.tx_q.w16(o + 12, 0);
+        self.tx_q.w16(o + 14, self.tx_free_head);
         self.tx_free_head = idx;
         self.tx_num_free += 1;
     }
 
     fn reclaim_tx(&mut self) {
-        let used_idx_ptr = (self.tx_used_base + 2) as *const u16;
+        let used_idx_off = self.tx_used + 2;
         loop {
-            let used_idx = unsafe { core::ptr::read_volatile(used_idx_ptr) };
+            let used_idx = self.tx_q.r16(used_idx_off);
             if used_idx == self.tx_last_used { break; }
 
-            let entry_off = 4 + (self.tx_last_used % self.tx_queue_size) as u64 * 8;
-            let id = unsafe { *((self.tx_used_base + entry_off) as *const u32) } as u16;
+            let entry_off = self.tx_used + 4 + (self.tx_last_used % self.tx_queue_size) as u64 * 8;
+            let id = self.tx_q.r32(entry_off) as u16;
             if let Some(slot) = self.tso_slot_of.get_mut(id as usize) {
                 if *slot != NO_TSO_SLOT {
                     self.tso_free |= 1u32 << *slot;
@@ -706,10 +644,8 @@ impl VirtioNet {
             // overwrites next with the free-list head).
             let mut cur = id;
             loop {
-                let (flags, next) = unsafe {
-                    let d = (self.tx_desc_base + cur as u64 * 16) as *const VringDesc;
-                    ((*d).flags, (*d).next)
-                };
+                let o = cur as u64 * DESC_SIZE;
+                let (flags, next) = (self.tx_q.r16(o + 12), self.tx_q.r16(o + 14));
                 self.free_tx_desc(cur);
                 if flags & DESC_F_NEXT == 0 { break; }
                 cur = next;
@@ -721,8 +657,7 @@ impl VirtioNet {
         // no line to deassert, and on QEMU the port read is an exit — once
         // per frame sent, since every send reclaims first.
         if self.rx_msix_vector == 0 {
-            // SAFETY: this device's legacy I/O BAR.
-            unsafe { inb(self.io_base + REG_ISR); }
+            self.io.inb(REG_ISR);
         }
     }
 
@@ -733,16 +668,13 @@ impl VirtioNet {
         // the avail ring now and batch the notify (see recv): one doorbell per
         // drain instead of per packet. A mid-burst safety notify keeps the device
         // from running dry if a caller doesn't drain to empty.
-        let avail_ring = self.rx_avail_base + 4;
-        let avail_idx_ptr = (self.rx_avail_base + 2) as *mut u16;
+        let avail_ring = self.rx_avail + 4;
+        let avail_idx_off = self.rx_avail + 2;
 
-        unsafe {
-            let idx = core::ptr::read_volatile(avail_idx_ptr);
-            let slot = (avail_ring + (idx % self.rx_queue_size) as u64 * 2) as *mut u16;
-            core::ptr::write_volatile(slot, desc_idx as u16);
-            fence(Ordering::SeqCst);
-            core::ptr::write_volatile(avail_idx_ptr, idx.wrapping_add(1));
-        }
+        let idx = self.rx_q.r16(avail_idx_off);
+        self.rx_q.w16(avail_ring + (idx % self.rx_queue_size) as u64 * 2, desc_idx as u16);
+        fence(Ordering::SeqCst);
+        self.rx_q.w16(avail_idx_off, idx.wrapping_add(1));
         self.rx_repost_pending += 1;
         if self.rx_repost_pending >= 64 {
             self.rx_kick();
@@ -755,7 +687,7 @@ impl VirtioNet {
             return;
         }
         fence(Ordering::SeqCst);
-        unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, TX_QUEUE); }
+        self.io.outw(REG_QUEUE_NOTIFY, TX_QUEUE);
         self.tx_notify_pending = false;
     }
 
@@ -765,27 +697,26 @@ impl VirtioNet {
             return;
         }
         fence(Ordering::SeqCst);
-        unsafe { outw(self.io_base + REG_QUEUE_NOTIFY, RX_QUEUE); }
+        self.io.outw(REG_QUEUE_NOTIFY, RX_QUEUE);
         self.rx_repost_pending = 0;
     }
 }
 
-unsafe fn setup_queue(io: u16, qs: u16) -> Option<(u64, u64, u64, u64)> {
+/// Allocate and register the selected queue: (memory, avail offset, used offset).
+fn setup_queue(io: &PortRange, qs: u16) -> Option<(DmaRegion, u64, u64)> {
     let q = qs as usize;
     let part1 = align_up(16 * q + 6 + 2 * q, 4096);
     let part2 = align_up(6 + 8 * q, 4096);
     let pages = (part1 + part2 + 4095) / 4096;
 
-    let qmem = memory::allocate_contiguous(pages)?;
-    unsafe { core::ptr::write_bytes(qmem as *mut u8, 0, pages * 4096); }
+    let qmem = DmaRegion::alloc_zeroed(pages)?;
 
-    let desc_base = qmem;
-    let avail_base = qmem + (16 * q) as u64;
-    let used_base = qmem + part1 as u64;
+    let avail = (16 * q) as u64;
+    let used = part1 as u64;
 
-    unsafe { outl(io + REG_QUEUE_PFN, (qmem >> 12) as u32); }
+    io.outl(REG_QUEUE_PFN, (qmem.phys() >> 12) as u32);
 
-    Some((desc_base, avail_base, used_base, qmem))
+    Some((qmem, avail, used))
 }
 
 fn align_up(val: usize, align: usize) -> usize {
