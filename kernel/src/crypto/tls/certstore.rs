@@ -419,7 +419,7 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
 // completely, a far worse failure than honouring a stale one. The floor
 // only has to be late enough that a plausible clock is a useful clock:
 // 1 January 2025.
-const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
+pub(crate) const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
 
 /// Current UTC seconds, or `None` when no source is trustworthy.
 /// NTP first — it is the accurate one; CMOS is the offline fallback.

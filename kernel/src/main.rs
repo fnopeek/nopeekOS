@@ -180,6 +180,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         kprintln!("[npk] RTC: read failed");
     }
 
+    // Before the network: DNS, NTP and TCP draw ports and ids from it.
+    csprng::init();
+
     // Both PCI NICs unconditionally (`|`, not `||`): a short circuit left the
     // second one uninitialised on a machine with two, and the survivor then held
     // the whole data path — including traffic that belonged elsewhere.
@@ -235,8 +238,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     } else {
         kprintln!("[npk] No network device found.");
     }
-
-    csprng::init();
 
     // Select random color scheme for login screen aurora background
 
