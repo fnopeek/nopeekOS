@@ -2419,7 +2419,15 @@ pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
         Ok(v) => v,
         Err(_) => return -1,
     };
-    if encoded.len() > buf_max as usize { return -1; }
+    // Too small a buffer is not a closed window: the event stays queued and
+    // the answer says how much it needs, as -(needed + 2). -1 keeps meaning
+    // "window gone", so an app that knows only that one still stops cleanly
+    // instead of reading a size as an event.
+    if buf_max < 0 || encoded.len() > buf_max as usize {
+        let needed = encoded.len();
+        crate::shade::widgets::unpoll_event(window_id, event);
+        return -(i32::try_from(needed).unwrap_or(i32::MAX - 2) + 2);
+    }
 
     write_bytes(mem, buf_ptr, &encoded[..])
 }

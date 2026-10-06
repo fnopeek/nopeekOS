@@ -320,6 +320,14 @@ pub fn poll_event(window_id: u32) -> Option<abi::Event> {
         .and_then(|q| q.pop_front())
 }
 
+/// Put an event back at the head of the queue: the app could not take it
+/// (its buffer was too small) and asks again with a larger one.
+pub fn unpoll_event(window_id: u32, event: abi::Event) {
+    if let Some(q) = EVENT_QUEUES.lock().get_mut(&window_id) {
+        q.push_front(event);
+    }
+}
+
 /// True if a widget-kind window with this id still exists in the
 /// compositor. Host fn `npk_event_poll` uses this to distinguish
 /// "queue empty" from "window closed" — the app turns the latter
