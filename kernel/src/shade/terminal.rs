@@ -78,7 +78,9 @@ impl TerminalBuffer {
                     }
                 }
             }
-            byte if byte >= 0x20 && byte < 0x7F => {
+            // Printable ASCII and every byte of a UTF-8 sequence. Columns
+            // are bytes here; the renderer counts characters.
+            byte if byte >= 0x20 && byte != 0x7F => {
                 let idx = self.total % MAX_LINES;
                 if self.col < MAX_COLS {
                     self.lines[idx][self.col] = byte;
@@ -118,6 +120,52 @@ impl TerminalBuffer {
     pub fn current_line(&self) -> (&[u8], usize) {
         let idx = self.total % MAX_LINES;
         (&self.lines[idx][..], self.lens[idx])
+    }
+}
+
+/// Lines hold UTF-8, and a screen column is one character. A line cut at
+/// `MAX_COLS` may end inside a character; the incomplete tail is not drawn.
+fn is_char_start(b: u8) -> bool {
+    b & 0xC0 != 0x80
+}
+
+/// Screen columns `b` takes.
+fn cols_of(b: &[u8]) -> usize {
+    b.iter().filter(|&&x| is_char_start(x)).count()
+}
+
+/// Byte offset where column `col` of `b` starts (`b.len()` past the end).
+fn byte_at_col(b: &[u8], col: usize) -> usize {
+    let mut n = 0;
+    for (i, &x) in b.iter().enumerate() {
+        if is_char_start(x) {
+            if n == col { return i; }
+            n += 1;
+        }
+    }
+    b.len()
+}
+
+/// Start of the character after the one at `i`.
+fn next_char(b: &[u8], i: usize) -> usize {
+    let mut j = (i + 1).min(b.len());
+    while j < b.len() && !is_char_start(b[j]) { j += 1; }
+    j
+}
+
+/// Start of the character before `i`.
+fn prev_char(b: &[u8], i: usize) -> usize {
+    let mut j = i.min(b.len()).saturating_sub(1);
+    while j > 0 && !is_char_start(b[j]) { j -= 1; }
+    j
+}
+
+/// The valid UTF-8 prefix of `b`.
+fn valid_str(b: &[u8]) -> &str {
+    match core::str::from_utf8(b) {
+        Ok(s) => s,
+        // SAFETY: `valid_up_to` is the length of the longest valid prefix.
+        Err(e) => unsafe { core::str::from_utf8_unchecked(&b[..e.valid_up_to()]) },
     }
 }
 
@@ -595,10 +643,10 @@ fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
     let accent = theme_token(crate::shade::widgets::abi::Token::Accent);
     let faint = theme_token(crate::shade::widgets::abi::Token::OnSurfaceFaint);
     crate::gui::font::draw_str(shadow, info, &text[first..first + 1],
-        x + first as u32 * char_w, py, marker_color, None, 1);
+        x + cols_of(&bytes[..first]) as u32 * char_w, py, marker_color, None, 1);
 
-    // Tokens keep their byte offset, so every glyph stays in the column it
-    // would have had — selection and wrapping still count plain bytes.
+    // Each token is drawn at the column of its first character, so every
+    // glyph stays where plain text would have put it.
     let mut i = first + 2;
     while i < bytes.len() {
         if bytes[i] == b' ' { i += 1; continue }
@@ -609,7 +657,7 @@ fn draw_status_row(shadow: *mut u8, info: &crate::framebuffer::FbInfo,
         } else {
             base
         };
-        crate::gui::font::draw_str(shadow, info, tok, x + i as u32 * char_w, py, color, None, 1);
+        crate::gui::font::draw_str(shadow, info, tok, x + cols_of(&bytes[..i]) as u32 * char_w, py, color, None, 1);
         i = end;
     }
     true
@@ -653,23 +701,18 @@ pub fn cell_at(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32)
     let visible_rows = (rh / char_h) as usize;
     if cols == 0 || visible_rows == 0 { return None; }
 
-    let (lens, start_line) = {
+    let (lines, start_line) = {
         let term = term(idx)?;
-        let lens: alloc::vec::Vec<usize> =
-            term.visible_lines(visible_rows).map(|(_, len)| len).collect();
+        let lines: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+            term.visible_lines(visible_rows).map(|(data, len)| data[..len].to_vec()).collect();
         let start_line = (term.total + 1)
             .saturating_sub(term.scroll_offset)
-            .saturating_sub(lens.len());
-        (lens, start_line)
+            .saturating_sub(lines.len());
+        (lines, start_line)
     };
 
     // Soft-wrap each logical line into cols-wide segments (same as render).
-    let mut segs: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
-    for (li, &len) in lens.iter().enumerate() {
-        if len == 0 { segs.push((li, 0, 0)); continue; }
-        let mut s = 0usize;
-        while s < len { let e = (s + cols).min(len); segs.push((li, s, e)); s = e; }
-    }
+    let segs = wrap_segments(lines.iter().map(|l| l.as_slice()), cols);
     let first_seg = segs.len().saturating_sub(visible_rows);
     let disp = segs.len() - first_seg;
     if disp == 0 { return None; }
@@ -678,8 +721,29 @@ pub fn cell_at(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32)
     let row = row.min(disp - 1);
     let (li, s, e) = segs[first_seg + row];
     let col_in_seg = ((((mx - rx).max(0)) as u32) / char_w) as usize;
-    let col = (s + col_in_seg).min(e); // clamp within this seg's byte range
+    // Byte offset of that column, clamped within this segment.
+    let col = s + byte_at_col(&lines[li][s..e], col_in_seg);
     Some((start_line + li, col))
+}
+
+/// Soft-wrap logical lines into `cols`-character screen rows:
+/// (logical index, byte start, byte end).
+fn wrap_segments<'a>(lines: impl Iterator<Item = &'a [u8]>, cols: usize)
+    -> alloc::vec::Vec<(usize, usize, usize)>
+{
+    let mut segs = alloc::vec::Vec::new();
+    for (li, data) in lines.enumerate() {
+        let len = data.len();
+        if len == 0 { segs.push((li, 0, 0)); continue; }
+        let mut s = 0usize;
+        while s < len {
+            let e = s + byte_at_col(&data[s..], cols);
+            let e = if e == s { len } else { e };
+            segs.push((li, s, e));
+            s = e;
+        }
+    }
+    segs
 }
 
 /// Begin a selection at the click cell (collapsed). No-op if the point
@@ -799,13 +863,16 @@ pub enum SelDir { Left, Right, Up, Down }
 /// mouse selection already present is continued from its moving end. Moves
 /// are clamped to the ring-valid range. Returns true if it changed.
 pub fn selection_key(idx: usize, dir: SelDir) -> bool {
-    // A copy of the line lengths: the terminal lock is not held across the
-    // SELECTION lock below.
-    let (lens, total) = match term(idx) {
-        Some(t) => (t.lens, t.total),
-        None => return false,
+    // Held across the SELECTION lock: nothing takes the two the other way
+    // round (selection_extend, copy_selection and the renderer drop
+    // SELECTION before they lock a terminal).
+    let term = match term(idx) { Some(t) => t, None => return false };
+    let total = term.total;
+    let line = |ln: usize| -> &[u8] {
+        let i = ln % MAX_LINES;
+        &term.lines[i][..term.lens[i]]
     };
-    let line_len = |ln: usize| -> usize { lens[ln % MAX_LINES] };
+    let line_len = |ln: usize| -> usize { line(ln).len() };
     let oldest = total.saturating_sub(MAX_LINES - 1); // first ring-valid line
     let caret_col = unsafe { INPUT_CURSOR_POS }.min(line_len(total));
     let caret = (total, caret_col);
@@ -821,18 +888,26 @@ pub fn selection_key(idx: usize, dir: SelDir) -> bool {
     let (mut hl, mut hc) = sel.head;
     match dir {
         SelDir::Left => {
-            if hc > 0 { hc -= 1; }
+            if hc > 0 { hc = prev_char(line(hl), hc); }
             else if hl > oldest { hl -= 1; hc = line_len(hl); }
         }
         SelDir::Right => {
-            if hc < line_len(hl) { hc += 1; }
+            if hc < line_len(hl) { hc = next_char(line(hl), hc); }
             else if hl < total { hl += 1; hc = 0; }
         }
         SelDir::Up => {
-            if hl > oldest { hl -= 1; hc = hc.min(line_len(hl)); }
+            if hl > oldest {
+                let col = cols_of(&line(hl)[..hc.min(line_len(hl))]);
+                hl -= 1;
+                hc = byte_at_col(line(hl), col);
+            }
         }
         SelDir::Down => {
-            if hl < total { hl += 1; hc = hc.min(line_len(hl)); }
+            if hl < total {
+                let col = cols_of(&line(hl)[..hc.min(line_len(hl))]);
+                hl += 1;
+                hc = byte_at_col(line(hl), col);
+            }
         }
     }
     let new_head = (hl, hc);
@@ -876,16 +951,7 @@ pub fn render_to_window(
     // Soft-wrap each logical line into `cols`-wide screen-row segments
     // (logical index, byte start, byte end) so long lines wrap instead of
     // running off the right edge. Then show the bottom-most `rows` segments.
-    let mut segs: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
-    for (li, (_, len)) in lines.iter().enumerate() {
-        if *len == 0 { segs.push((li, 0, 0)); continue; }
-        let mut s = 0usize;
-        while s < *len {
-            let e = (s + cols).min(*len);
-            segs.push((li, s, e));
-            s = e;
-        }
-    }
+    let segs = wrap_segments(lines.iter().map(|(v, _)| v.as_slice()), cols);
     let first_seg = segs.len().saturating_sub(visible_rows);
 
     // Absolute line number of the first snapshot line — lets each wrapped
@@ -911,15 +977,15 @@ pub fn render_to_window(
         // Special colouring (system [npk] / `path> ` prompt) only on the
         // first wrapped row of a logical line; continuation rows are plain.
         let first = s == 0;
-        if let Ok(text) = core::str::from_utf8(&line_data[s..e]) {
+        {
+            let text = valid_str(&line_data[s..e]);
             if first && text.starts_with("[npk]") {
                 crate::gui::font::draw_str(shadow, info, "[npk]", x, py, prompt_color, None, 1);
-                if e > 5 {
-                    if let Ok(rest) = core::str::from_utf8(&line_data[5..e]) {
-                        let rx = x + 5 * char_w;
-                        if !draw_status_row(shadow, info, rest, rx, py, char_w) {
-                            crate::gui::font::draw_str(shadow, info, rest, rx, py, fg, None, 1);
-                        }
+                if text.len() > 5 {
+                    let rest = &text[5..];
+                    let rx = x + 5 * char_w;
+                    if !draw_status_row(shadow, info, rest, rx, py, char_w) {
+                        crate::gui::font::draw_str(shadow, info, rest, rx, py, fg, None, 1);
                     }
                 }
             } else if first {
@@ -927,7 +993,8 @@ pub fn render_to_window(
                     let prompt_end = pos + 2; // include "> "
                     crate::gui::font::draw_str(shadow, info, &text[..prompt_end], x, py, prompt_color, None, 1);
                     if text.len() > prompt_end {
-                        crate::gui::font::draw_str(shadow, info, &text[prompt_end..], x + prompt_end as u32 * char_w, py, fg, None, 1);
+                        let px = x + cols_of(&text.as_bytes()[..prompt_end]) as u32 * char_w;
+                        crate::gui::font::draw_str(shadow, info, &text[prompt_end..], px, py, fg, None, 1);
                     }
                 } else {
                     crate::gui::font::draw_str(shadow, info, text, x, py, fg, None, 1);
@@ -949,10 +1016,9 @@ pub fn render_to_window(
                 let a = csel0.max(s);
                 let b = csel1.min(e);
                 if b > a {
-                    if let Ok(seltext) = core::str::from_utf8(&line_data[a..b]) {
-                        crate::gui::font::draw_str(shadow, info, seltext,
-                            x + (a - s) as u32 * char_w, py, fg, Some(sel_color), 1);
-                    }
+                    let seltext = valid_str(&line_data[a..b]);
+                    crate::gui::font::draw_str(shadow, info, seltext,
+                        x + cols_of(&line_data[s..a]) as u32 * char_w, py, fg, Some(sel_color), 1);
                 }
             }
         }
@@ -1017,25 +1083,26 @@ pub fn render_input_line(
             win_cx, last_line_y, win_cw, char_h, theme_bg());
     }
 
-    let visible_len = len.min(cols as usize);
+    let visible_len = byte_at_col(&line_data[..len], cols as usize);
     if visible_len > 0 {
         let prompt_color = theme_prompt();
         let fg = theme_fg();
-        if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            if let Some(pos) = text.find("> ") {
-                let prompt_end = pos + 2;
-                crate::gui::font::draw_str(shadow, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
-                if visible_len > prompt_end {
-                    crate::gui::font::draw_str(shadow, info, &text[prompt_end..], win_cx + prompt_end as u32 * char_w, last_line_y, fg, None, 1);
-                }
-            } else {
-                crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
+        let text = valid_str(&line_data[..visible_len]);
+        if let Some(pos) = text.find("> ") {
+            let prompt_end = pos + 2;
+            crate::gui::font::draw_str(shadow, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
+            if text.len() > prompt_end {
+                let px = win_cx + cols_of(&text.as_bytes()[..prompt_end]) as u32 * char_w;
+                crate::gui::font::draw_str(shadow, info, &text[prompt_end..], px, last_line_y, fg, None, 1);
             }
+        } else {
+            crate::gui::font::draw_str(shadow, info, text, win_cx, last_line_y, fg, None, 1);
         }
     }
 
-    // Draw text cursor (solid bar at cursor position)
-    let cur = cursor_pos();
+    // Draw text cursor (solid bar at cursor position). `cursor_pos` is a
+    // byte offset into the line.
+    let cur = cols_of(&line_data[..cursor_pos().min(len)]);
     let cursor_x = win_cx + cur as u32 * char_w;
     if cursor_x + 2 <= win_cx + win_cw {
         let cursor_color = theme_fg();
@@ -1085,25 +1152,25 @@ pub fn render_input_line_to_layer(
     }
 
     // Draw text
-    let visible_len = len.min(cols as usize);
+    let visible_len = byte_at_col(&line_data[..len], cols as usize);
     if visible_len > 0 {
         let prompt_color = theme_prompt();
         let fg = theme_fg();
-        if let Ok(text) = core::str::from_utf8(&line_data[..visible_len]) {
-            if let Some(pos) = text.find("> ") {
-                let prompt_end = pos + 2;
-                crate::gui::font::draw_str(text_buf, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
-                if visible_len > prompt_end {
-                    crate::gui::font::draw_str(text_buf, info, &text[prompt_end..], win_cx + prompt_end as u32 * char_w, last_line_y, fg, None, 1);
-                }
-            } else {
-                crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, fg, None, 1);
+        let text = valid_str(&line_data[..visible_len]);
+        if let Some(pos) = text.find("> ") {
+            let prompt_end = pos + 2;
+            crate::gui::font::draw_str(text_buf, info, &text[..prompt_end], win_cx, last_line_y, prompt_color, None, 1);
+            if text.len() > prompt_end {
+                let px = win_cx + cols_of(&text.as_bytes()[..prompt_end]) as u32 * char_w;
+                crate::gui::font::draw_str(text_buf, info, &text[prompt_end..], px, last_line_y, fg, None, 1);
             }
+        } else {
+            crate::gui::font::draw_str(text_buf, info, text, win_cx, last_line_y, fg, None, 1);
         }
     }
 
-    // Draw text cursor
-    let cur = cursor_pos();
+    // Draw text cursor (`cursor_pos` is a byte offset into the line)
+    let cur = cols_of(&line_data[..cursor_pos().min(len)]);
     let cursor_x = win_cx + cur as u32 * char_w;
     if cursor_x + 2 <= win_cx + win_cw {
         let cursor_color = theme_fg();

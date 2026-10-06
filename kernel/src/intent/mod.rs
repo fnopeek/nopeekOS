@@ -561,6 +561,31 @@ pub(crate) fn ensure_parents(path: &str) {
 
 /// Sync session state to terminal.rs saved input (for cursor restore on focus change).
 /// Temporarily switches to the session's terminal to save to the correct slot.
+/// Bytes of the UTF-8 sequence that starts with `b` (1 for ASCII and for a
+/// byte that cannot start one).
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    }
+}
+
+/// Start of the character after the one at `i` in UTF-8 `buf`.
+fn next_char_at(buf: &[u8], i: usize) -> usize {
+    let mut j = (i + 1).min(buf.len());
+    while j < buf.len() && buf[j] & 0xC0 == 0x80 { j += 1; }
+    j
+}
+
+/// Start of the character before `i` in UTF-8 `buf`.
+fn prev_char_at(buf: &[u8], i: usize) -> usize {
+    let mut j = i.min(buf.len()).saturating_sub(1);
+    while j > 0 && buf[j] & 0xC0 == 0x80 { j -= 1; }
+    j
+}
+
 fn sync_session_to_terminal(session: &IntentSession) {
     let current = crate::shade::terminal::active_idx();
     if current != session.terminal_idx {
@@ -832,20 +857,23 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 }
             }
             KeyCode::Right => {
-                if session.cursor < session.pos { session.cursor += 1; }
+                if session.cursor < session.pos {
+                    session.cursor = next_char_at(&session.input_buf[..session.pos], session.cursor);
+                }
             }
             KeyCode::Left => {
-                if session.cursor > 0 { session.cursor -= 1; }
+                if session.cursor > 0 {
+                    session.cursor = prev_char_at(&session.input_buf[..session.pos], session.cursor);
+                }
             }
             KeyCode::Home => { session.cursor = 0; }
             KeyCode::End => { session.cursor = session.pos; }
             KeyCode::PageUp | KeyCode::PageDown | KeyCode::Insert => {}
             KeyCode::Delete => {
                 if session.cursor < session.pos {
-                    for i in session.cursor..session.pos - 1 {
-                        session.input_buf[i] = session.input_buf[i + 1];
-                    }
-                    session.pos -= 1;
+                    let end = next_char_at(&session.input_buf[..session.pos], session.cursor);
+                    session.input_buf.copy_within(end..session.pos, session.cursor);
+                    session.pos -= end - session.cursor;
                     if crate::shade::is_active() {
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                     }
@@ -865,11 +893,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             }
             KeyCode::Backspace => {
                 if session.cursor > 0 {
-                    for i in session.cursor..session.pos {
-                        session.input_buf[i - 1] = session.input_buf[i];
-                    }
-                    session.pos -= 1;
-                    session.cursor -= 1;
+                    let start = prev_char_at(&session.input_buf[..session.pos], session.cursor);
+                    session.input_buf.copy_within(session.cursor..session.pos, start);
+                    session.pos -= session.cursor - start;
+                    session.cursor = start;
                     if crate::shade::is_active() {
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                         crate::shade::terminal::set_cursor_pos(
@@ -908,15 +935,28 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             KeyCode::Escape => { continue; }
             KeyCode::F(_) => { continue; }
             KeyCode::Char(b) => {
-                if b >= 0x20 && b < 0x7F && session.pos < session.input_buf.len() - 1 {
-                    if session.cursor < session.pos {
-                        for i in (session.cursor..session.pos).rev() {
-                            session.input_buf[i + 1] = session.input_buf[i];
-                        }
+                // A non-ASCII character arrives as its UTF-8 bytes, back to
+                // back in the key ring (`keyboard::push_char`); take the rest
+                // of the sequence and insert it as one character.
+                let mut seq = [b, 0, 0, 0];
+                let n = utf8_len(b);
+                let mut got = 1;
+                while got < n {
+                    match crate::keyboard::read_key() {
+                        Some(c) if c & 0xC0 == 0x80 => { seq[got] = c; got += 1; }
+                        _ => break,
                     }
-                    session.input_buf[session.cursor] = b;
-                    session.pos += 1;
-                    session.cursor += 1;
+                }
+                let ch = &seq[..got];
+                let printable = match core::str::from_utf8(ch) {
+                    Ok(t) => t.chars().all(|c| !c.is_control()),
+                    Err(_) => false,
+                };
+                if printable && session.pos + got < session.input_buf.len() {
+                    session.input_buf.copy_within(session.cursor..session.pos, session.cursor + got);
+                    session.input_buf[session.cursor..session.cursor + got].copy_from_slice(ch);
+                    session.pos += got;
+                    session.cursor += got;
                     crate::shade::terminal::scroll_reset();
                     if crate::shade::is_active() {
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
@@ -924,8 +964,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                             crate::shade::terminal::current_line_len()
                                 .saturating_sub(session.pos - session.cursor));
                         crate::shade::render_input_line();
-                    } else {
-                        kprint!("{}", b as char);
+                    } else if let Ok(t) = core::str::from_utf8(ch) {
+                        kprint!("{}", t);
                     }
                 }
                 continue; // skip cursor update below

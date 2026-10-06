@@ -97,17 +97,26 @@ pub fn draw_char(shadow: *mut u8, info: &FbInfo,
     draw_char_with(shadow, info, font_for_scale(scale), ch, px_x, px_y, fg, bg);
 }
 
+/// Glyph index for `c`. The Spleen tables are laid out as Latin-1, so
+/// printable ASCII and U+00A0..U+00FF have their own glyph; anything else
+/// shows as `?`. Control characters take no cell.
+pub fn glyph_index(c: char) -> Option<u8> {
+    match c {
+        ' '..='~' | '\u{A0}'..='\u{FF}' => Some(c as u32 as u8),
+        c if (c as u32) < 0x20 || c == '\u{7F}' || ('\u{80}'..'\u{A0}').contains(&c) => None,
+        _ => Some(b'?'),
+    }
+}
+
 /// Draw a string. Returns the X position after the last character.
 pub fn draw_str(shadow: *mut u8, info: &FbInfo,
                 s: &str, px_x: u32, px_y: u32,
                 fg: u32, bg: Option<u32>, scale: u32) -> u32 {
     let f = font_for_scale(scale);
     let mut x = px_x;
-    for &byte in s.as_bytes() {
-        if byte >= 0x20 && byte < 0x7F {
-            draw_char_with(shadow, info, f, byte, x, px_y, fg, bg);
-            x += f.glyph_w;
-        }
+    for g in s.chars().filter_map(glyph_index) {
+        draw_char_with(shadow, info, f, g, x, px_y, fg, bg);
+        x += f.glyph_w;
     }
     x
 }
@@ -115,7 +124,7 @@ pub fn draw_str(shadow: *mut u8, info: &FbInfo,
 /// Measure string width in pixels.
 pub fn measure_str(s: &str, scale: u32) -> u32 {
     let f = font_for_scale(scale);
-    let n = s.as_bytes().iter().filter(|&&b| b >= 0x20 && b < 0x7F).count() as u32;
+    let n = s.chars().filter_map(glyph_index).count() as u32;
     n * f.glyph_w
 }
 
@@ -137,7 +146,7 @@ pub fn draw_clock_str_centered(shadow: *mut u8, info: &FbInfo,
                                s: &str, region_x: u32, region_w: u32, py: u32,
                                fg: u32, bg: Option<u32>, scale: u32) {
     let f = clock_font(scale);
-    let n = s.as_bytes().iter().filter(|&&b| b >= 0x20 && b < 0x7F).count() as u32;
+    let n = s.chars().filter_map(glyph_index).count() as u32;
     let text_w = n * f.glyph_w;
     let x = if text_w < region_w {
         region_x + (region_w - text_w) / 2
@@ -145,10 +154,8 @@ pub fn draw_clock_str_centered(shadow: *mut u8, info: &FbInfo,
         region_x
     };
     let mut cx = x;
-    for &byte in s.as_bytes() {
-        if byte >= 0x20 && byte < 0x7F {
-            draw_char_with(shadow, info, f, byte, cx, py, fg, bg);
-            cx += f.glyph_w;
-        }
+    for g in s.chars().filter_map(glyph_index) {
+        draw_char_with(shadow, info, f, g, cx, py, fg, bg);
+        cx += f.glyph_w;
     }
 }
