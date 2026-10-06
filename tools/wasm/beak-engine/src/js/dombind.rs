@@ -1817,12 +1817,44 @@ fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
 /// declarations, and `el.style.foo` would then read something else.
 fn style_decls(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for decl in text.split(';') {
+    for decl in split_top(text) {
         let Some((k, v)) = decl.split_once(':') else { continue };
         let (k, v) = (k.trim(), v.trim());
         if k.is_empty() || v.is_empty() { continue }
-        out.push((k.to_ascii_lowercase(), v.to_string()));
+        out.push((prop_name(k), v.to_string()));
     }
+    out
+}
+
+/// A property name as CSS compares it: ASCII case-insensitive, except a
+/// custom property, whose name is case-sensitive (css-variables-1 §2).
+fn prop_name(k: &str) -> String {
+    if k.starts_with("--") { String::from(k) } else { k.to_ascii_lowercase() }
+}
+
+/// Split declarations at `;` outside strings and brackets: a `url(data:…;…)`
+/// or a quoted `;` is part of a value.
+fn split_top(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut quote, mut start) = (0i32, 0u8, 0usize);
+    let b = text.as_bytes();
+    let mut k = 0;
+    while k < b.len() {
+        let c = b[k];
+        if quote != 0 {
+            if c == b'\\' { k += 1; } else if c == quote { quote = 0; }
+        } else {
+            match c {
+                b'"' | b'\'' => quote = c,
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth = (depth - 1).max(0),
+                b';' if depth == 0 => { out.push(&text[start..k]); start = k + 1; }
+                _ => {}
+            }
+        }
+        k += 1;
+    }
+    out.push(&text[start..]);
     out
 }
 
@@ -2287,7 +2319,24 @@ fn computed_decls(i: &Interp, node: u32) -> Option<String> {
         parent = out;
         anc.push(info);
     }
-    Some(crate::style::serialize_computed(&out))
+    let mut text = crate::style::serialize_computed(&out);
+    // The side colours, with `currentColor` resolved (CSSOM §6.7.2 resolved
+    // value), and the custom properties in effect, which `getPropertyValue`
+    // answers with their computed value.
+    let rgba = |c: crate::layout::Rgba| if c.a == 255 {
+        alloc::format!("rgb({}, {}, {})", c.c.0, c.c.1, c.c.2)
+    } else {
+        alloc::format!("rgba({}, {}, {}, {})", c.c.0, c.c.1, c.c.2,
+                       ((c.a as u32 * 1000 + 127) / 255) as f32 / 1000.0)
+    };
+    for (k, b) in [("border-top-color", &out.border_top), ("border-right-color", &out.border_right),
+                   ("border-bottom-color", &out.border_bottom), ("border-left-color", &out.border_left)] {
+        text.push_str(&alloc::format!(" {k}: {};", rgba(b.color.unwrap_or(out.color))));
+    }
+    for (k, v) in &vars {
+        text.push_str(&alloc::format!(" {k}: {v};"));
+    }
+    Some(text)
 }
 
 /// Collect the path from the root to `seq`.
@@ -4569,7 +4618,7 @@ pub fn install(realm: &mut Realm) {
     let style_proto = new_obj(Some(realm.object_proto.clone()));
     iface(realm, "CSSStyleDeclaration", &style_proto);
     meth(&style_proto, "getPropertyValue", |i, t, a| {
-        let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_ascii_lowercase();
+        let n = prop_name(&i.to_string(a.first().unwrap_or(&Value::Undefined))?);
         let text = style_text(i, &t);
         Ok(match style_decls(&text).into_iter().rev().find(|(k, _)| *k == n) {
             Some((_, v)) => Value::string(v),
@@ -4580,7 +4629,7 @@ pub fn install(realm: &mut Realm) {
         let id = node_of(i, &t)?;
         let n = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let v = i.to_string(a.get(1).unwrap_or(&Value::Undefined))?;
-        style_set(i, id, &n.to_ascii_lowercase(), &v);
+        style_set(i, id, &prop_name(&n), &v);
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&style_proto, "removeProperty", |i, t, a| {
@@ -4652,6 +4701,18 @@ pub fn install(realm: &mut Realm) {
     style_prop!(style_proto, fp, "borderWidth", "border-width");
     style_prop!(style_proto, fp, "borderStyle", "border-style");
     style_prop!(style_proto, fp, "borderRadius", "border-radius");
+    style_prop!(style_proto, fp, "borderTopColor", "border-top-color");
+    style_prop!(style_proto, fp, "borderTopWidth", "border-top-width");
+    style_prop!(style_proto, fp, "borderTopStyle", "border-top-style");
+    style_prop!(style_proto, fp, "borderRightColor", "border-right-color");
+    style_prop!(style_proto, fp, "borderRightWidth", "border-right-width");
+    style_prop!(style_proto, fp, "borderRightStyle", "border-right-style");
+    style_prop!(style_proto, fp, "borderBottomColor", "border-bottom-color");
+    style_prop!(style_proto, fp, "borderBottomWidth", "border-bottom-width");
+    style_prop!(style_proto, fp, "borderBottomStyle", "border-bottom-style");
+    style_prop!(style_proto, fp, "borderLeftColor", "border-left-color");
+    style_prop!(style_proto, fp, "borderLeftWidth", "border-left-width");
+    style_prop!(style_proto, fp, "borderLeftStyle", "border-left-style");
     style_prop!(style_proto, fp, "font", "font");
     style_prop!(style_proto, fp, "fontSize", "font-size");
     style_prop!(style_proto, fp, "fontFamily", "font-family");
@@ -6036,6 +6097,24 @@ mod tests {
              console.log(getComputedStyle(document.getElementById('b')).fontSize);",
         );
         assert_eq!(out, ["none", "rgb(13, 110, 253)", "20px"]);
+    }
+
+    /// Custom properties reach `getPropertyValue` through inheritance; the
+    /// side colours resolve `currentColor`; an inline custom property keeps
+    /// its case.
+    #[test]
+    fn computed_custom_properties_and_border_colors() {
+        let out = run(
+            "<html><head><style>:root{--brand:#123} .c{color:#00ff00;border:1px solid red;\
+             border-left-color:currentColor;--local:2px}</style></head>\
+             <body><p class='c' id='p' style='background:url(data:image/png;base64,AA)'>x</p></body></html>",
+            "var cs = getComputedStyle(document.getElementById('p'));\
+             console.log(cs.getPropertyValue('--brand'), cs.getPropertyValue('--local'), cs.getPropertyValue('--nope') === '');\
+             console.log(cs.borderTopColor, cs.borderLeftColor);\
+             var st = document.getElementById('p').style;\
+             st.setProperty('--X', '1'); console.log(st.getPropertyValue('--X'), st.background.indexOf('base64') > 0);",
+        );
+        assert_eq!(out, ["#123 2px true", "rgb(255, 0, 0) rgb(0, 255, 0)", "1 true"]);
     }
 
     /// `new Image()` is a real `img` element that arrives in the tree and
