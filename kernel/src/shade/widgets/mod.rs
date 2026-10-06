@@ -2609,13 +2609,12 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // it, or the editor stays parked past the end of its own text.
     let scroll_x = prev_scroll_x.min(max_scroll_x);
 
-    // First commit auto-focuses the first focusable Widget::Input so
-    // search bars / launchers work without the user having to
-    // click into the input first — keeps the "type as soon as it
-    // opens" UX every keyboard-driven dialog needs. Re-commits keep
-    // whatever focus the user navigated to via Tab / click; we never
-    // auto-jump focus during a session.
-    let focus_path: Vec<u32> = if is_first_commit {
+    // A text widget marked `Autofocus` takes focus on the first commit and
+    // whenever nothing holds it (the focused widget is gone, e.g. a closed
+    // dialog), so a keyboard user can type without clicking first. Focus
+    // the user moved by Tab or click is never taken away.
+    let focus_lost = prev_focus.is_empty() || widget_at_path(&tree, &prev_focus).is_none();
+    let focus_path: Vec<u32> = if is_first_commit || focus_lost {
         find_first_input_path(&tree).unwrap_or_default()
     } else {
         prev_focus
