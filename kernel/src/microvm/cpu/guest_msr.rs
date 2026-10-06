@@ -88,22 +88,20 @@ pub fn pat_valid(v: u64) -> bool {
     (0..8).all(|i| matches!((v >> (i * 8)) as u8, 0 | 1 | 4 | 5 | 6 | 7))
 }
 
-pub fn host_rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    // SAFETY: callers pass only MSRs architectural on the running vendor.
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-                         options(nomem, nostack, preserves_flags));
-    }
-    ((hi as u64) << 32) | lo as u64
+/// RDMSR on the host.
+///
+/// # Safety
+/// `msr` exists on this CPU (else #GP) and reading it has no side effect.
+pub unsafe fn host_rdmsr(msr: u32) -> u64 {
+    // SAFETY: the caller's contract.
+    unsafe { crate::hw::msr::read(msr) }
 }
 
+/// # Safety
+/// `msr` exists on this CPU and `v` is a value it accepts.
 unsafe fn host_wrmsr(msr: u32, v: u64) {
-    // SAFETY: caller guarantees msr/v are valid on this CPU.
-    unsafe {
-        core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
-                         options(nomem, nostack, preserves_flags));
-    }
+    // SAFETY: the caller's contract.
+    unsafe { crate::hw::msr::write(msr, v) }
 }
 
 /// Common RDMSR. `spec_valid` = the vendor's SPEC_CTRL bits (0 = no MSR).
@@ -192,7 +190,9 @@ fn unknown(msr: u32, write: Option<u64>) -> u64 {
 /// restore. KVM without V_SPEC_CTRL does the same swap (`x86_spec_ctrl_set_guest`).
 pub fn spec_ctrl_enter(guest: u64) -> Option<u64> {
     if guest == 0 { return None; }
-    let host = host_rdmsr(MSR_SPEC_CTRL);
+    // SAFETY: `write` accepts a non-zero guest value only when the host
+    // has SPEC_CTRL bits, so the MSR exists.
+    let host = unsafe { host_rdmsr(MSR_SPEC_CTRL) };
     if host == guest { return None; }
     // SAFETY: guest was validated against the host's SPEC_CTRL bits in `write`.
     unsafe { host_wrmsr(MSR_SPEC_CTRL, guest); }

@@ -150,8 +150,14 @@ pub fn enable_and_test() -> Result<vmcb::LaunchOutcome, &'static str> {
     // FPU, but run_guest_once unconditionally brackets vmrun).
     let mut hf = crate::microvm::cpu::FpuArea::boxed();
     let mut gf = crate::microvm::cpu::FpuArea::boxed();
-    let outcome = run_guest_once(
-        &mut regs, vmcb_ptr, vmcb_phys, &mut *hf, &mut *gf, crate::microvm::cpu::guest_cpuid::host_xcr0());
+    // SAFETY: EFER.SVME was enabled above, `vmcb_phys` is `vmcb_ptr`'s
+    // address, and `setup_vmcb` filled it with the test's own NPT and maps.
+    let outcome = unsafe {
+        run_guest_once(
+            &mut regs, vmcb_ptr, vmcb_phys, &mut hf, &mut gf,
+            crate::microvm::cpu::guest_cpuid::host_xcr0(),
+        )
+    };
 
     Ok(outcome)
 }
@@ -318,15 +324,23 @@ fn setup_vmcb(
 /// VMEXIT, returning RSP to its post-push value. The pushed
 /// struct pointer is then recovered after we spill all 14 guest
 /// GPRs.
-fn run_guest_once(
+///
+/// # Safety
+/// EFER.SVME is set on this core, `vmcb_phys` is the physical address of
+/// `vmcb`, and the VMCB passes the APM §15.5.1 consistency checks with
+/// its IOPM, MSRPM and NCR3 pointing at this VM's trapping bitmaps and
+/// nested page tables.
+unsafe fn run_guest_once(
     regs: &mut vmcb::GuestRegs,
     vmcb: &mut vmcb::Vmcb,
     vmcb_phys: u64,
-    host_fpu: *mut crate::microvm::cpu::FpuArea,
-    guest_fpu: *mut crate::microvm::cpu::FpuArea,
+    host_fpu: &mut crate::microvm::cpu::FpuArea,
+    guest_fpu: &mut crate::microvm::cpu::FpuArea,
     guest_xcr0: u64,
 ) -> vmcb::LaunchOutcome {
     let regs_ptr: *mut vmcb::GuestRegs = regs;
+    let host_fpu: *mut crate::microvm::cpu::FpuArea = host_fpu;
+    let guest_fpu: *mut crate::microvm::cpu::FpuArea = guest_fpu;
     // [guest, host] XCR0, switched inside the asm next to the FPU swap
     // (KVM `kvm_load_guest_xsave_state`): the guest's XSETBV value must
     // never stay live on the host, and the host's must not leak in.
@@ -1529,13 +1543,17 @@ impl VmContext {
         }
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
-        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
-        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
-        let outcome = run_guest_once(
-            &mut self.vcpu.regs, &mut *self.vcpu.vmcb, self.vcpu.vmcb_phys, hf, gf, self.vcpu.xcr0,
-        );
+        // SAFETY: `open`/`open_ap` enabled EFER.SVME on this core and built
+        // this vCPU's VMCB (`vmcb_phys` is its address) with the VM's IOPM,
+        // MSRPM and NPT.
+        let outcome = unsafe {
+            run_guest_once(
+                &mut self.vcpu.regs, &mut self.vcpu.vmcb, self.vcpu.vmcb_phys,
+                &mut self.vcpu.host_fpu, &mut self.vcpu.guest_fpu, self.vcpu.xcr0,
+            )
+        };
         super::msr::spec_ctrl_exit(host_spec);
         crate::microvm::cpu::entry_irqs_on();
         let exit = outcome.exit_reason;

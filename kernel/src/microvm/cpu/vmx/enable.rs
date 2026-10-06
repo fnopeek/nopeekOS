@@ -256,7 +256,9 @@ fn write_host_state_with_current_rsp() -> Result<(), &'static str> {
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) host_rsp, options(nostack, preserves_flags));
     }
-    vmcs::setup_host_state(host_rsp)
+    // SAFETY: only called in VMX root after VMPTRLD (open, open_ap, the
+    // substrate test); `host_rsp` is this frame's live stack.
+    unsafe { vmcs::setup_host_state(host_rsp) }
 }
 
 /// Allocate only the contiguous boot window (256 MiB or the whole guest
@@ -311,7 +313,9 @@ pub fn enable_and_test() -> Result<vmcs::LaunchOutcome, &'static str> {
         write_host_state_with_current_rsp()?;
         vmcs::setup_guest_state(0x10000)?;
         // Kept for the test's lifetime, like the rest of its frames.
-        let _bitmaps = vmcs::setup_execution_controls(eptp)?;
+        // SAFETY: in VMX root with the VMCS current; `eptp` is this test's
+        // own EPT from `alloc_guest_ram_and_ept`.
+        let _bitmaps = unsafe { vmcs::setup_execution_controls(eptp)? };
 
         run_substrate_loop()
     })
@@ -339,8 +343,11 @@ fn run_substrate_loop() -> Result<vmcs::LaunchOutcome, &'static str> {
     let mut guest_fpu = crate::microvm::cpu::FpuArea::boxed();
 
     for _ in 0..MAX_ITERATIONS {
-        let outcome = vmcs::run_guest_once(
-            &mut regs, launched, &mut *host_fpu, &mut *guest_fpu)?;
+        // SAFETY: `enable_and_test` entered VMX root, loaded the VMCS and
+        // wrote host, guest and control state before this loop.
+        let outcome = unsafe {
+            vmcs::run_guest_once(&mut regs, launched, &mut host_fpu, &mut guest_fpu)?
+        };
         launched = true;
         let basic = vmcs::basic_exit_reason(outcome.exit_reason);
 
@@ -725,7 +732,9 @@ impl VmContext {
             let gm = crate::microvm::devices::guest_mem::set_active(gm);
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state(load.entry_rip)?;
-            let bitmaps = vmcs::setup_execution_controls(eptp)?;
+            // SAFETY: in VMX root with the VMCS current; `eptp` is this VM's
+            // own EPT from `alloc_guest_ram_and_ept`.
+            let bitmaps = unsafe { vmcs::setup_execution_controls(eptp)? };
 
             let mut regs = vmcs::GuestRegs::default();
             regs.rsi = load.boot_params_phys;
@@ -819,7 +828,9 @@ impl VmContext {
             };
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state_ap(sipi_vector)?;
-            let bitmaps = vmcs::setup_execution_controls(eptp)?;
+            // SAFETY: in VMX root with this AP's VMCS current; `eptp` is the
+            // BSP's EPT for the same VM, live until the last vCPU exits.
+            let bitmaps = unsafe { vmcs::setup_execution_controls(eptp)? };
 
             Ok(VmContext {
                 shared: SharedRef::Borrowed(shared),
@@ -1486,8 +1497,6 @@ impl VmContext {
         // anywhere between a Rust helper and the asm). The asm
         // save/restore mask is -1 (current-XCR0 components; guest XCR0 ⊇
         // host's via XSETBV pass-through).
-        let hf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.host_fpu;
-        let gf: *mut crate::microvm::cpu::FpuArea = &mut *self.vcpu.guest_fpu;
         // Profiler: charge the time since the last exit to that exit's
         // handler bucket, then time the VMRESUME itself as guest cycles.
         let prof_pre = crate::interrupts::rdtsc();
@@ -1496,7 +1505,14 @@ impl VmContext {
         }
         let host_spec = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
         lapic::phase(self.vcpu.apic_id, lapic::PH_GUEST);
-        let result = vmcs::run_guest_once(&mut self.vcpu.regs, self.vcpu.launched, hf, gf);
+        // SAFETY: `open`/`open_ap` entered VMX root on this core, loaded this
+        // vCPU's VMCS and wrote its host, guest and control state.
+        let result = unsafe {
+            vmcs::run_guest_once(
+                &mut self.vcpu.regs, self.vcpu.launched,
+                &mut self.vcpu.host_fpu, &mut self.vcpu.guest_fpu,
+            )
+        };
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         super::msr::spec_ctrl_exit(host_spec);
         prof_post = crate::interrupts::rdtsc();

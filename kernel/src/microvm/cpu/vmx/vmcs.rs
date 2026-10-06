@@ -205,16 +205,34 @@ const RFLAGS_ZF: u64 = 1 << 6;
 
 // ── VMWRITE / VMREAD primitives ────────────────────────────────────
 
-/// VMWRITE the given field with `value`. Caller must be in VMX root
-/// mode with a current VMCS loaded (VMPTRLD'd).
+/// VMWRITE a field that cannot affect the host: guest state (encoding
+/// type 2, SDM Vol. 3D App. B) or the VM-entry event fields. Anything
+/// else returns `Err`; control and host-state fields go through
+/// `vmwrite_unchecked`. Outside VMX root VMWRITE raises #UD.
+pub(super) fn vmwrite(field: u64, value: u64) -> Result<(), &'static str> {
+    let guest_state = (field >> 10) & 3 == 2;
+    if !guest_state && field != VM_ENTRY_INTR_INFO_FIELD && field != VM_ENTRY_EXCEPTION_ERROR_CODE {
+        return Err("VMWRITE: control or host-state field");
+    }
+    // SAFETY: a guest-state or event-injection field only changes what the
+    // guest sees; the CPU checks it on the next VM entry.
+    unsafe { vmwrite_unchecked(field, value) }
+}
+
+/// VMWRITE any field of the current VMCS.
 ///
 /// On VMfailInvalid (CF=1) — no current VMCS — or VMfailValid (ZF=1)
 /// — invalid field encoding for the loaded VMCS — returns `Err`.
-pub(super) fn vmwrite(field: u64, value: u64) -> Result<(), &'static str> {
+///
+/// # Safety
+/// In VMX root with a current VMCS. Control and host-state values decide
+/// what the guest can reach and where the CPU resumes the host on a VM
+/// exit: the caller vouches for them (an EPTP of this VM's own tables,
+/// bitmaps that trap, the real host state).
+unsafe fn vmwrite_unchecked(field: u64, value: u64) -> Result<(), &'static str> {
     let rflags: u64;
-    // SAFETY: VMWRITE has no architectural side effects beyond the
-    // VMCS state and RFLAGS. Caller-guaranteed VMX root mode +
-    // current VMCS. pushfq/pop touches the stack.
+    // SAFETY: VMWRITE changes only the VMCS and RFLAGS; the field's
+    // meaning is the caller's contract. pushfq/pop touches the stack.
     unsafe {
         core::arch::asm!(
             "vmwrite {field}, {val}",
@@ -234,8 +252,8 @@ pub(super) fn vmwrite(field: u64, value: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// VMREAD the given field. Same VMX-root-mode + current-VMCS
-/// preconditions as `vmwrite`.
+/// VMREAD the given field. Writes only a register and RFLAGS, so it is
+/// safe; outside VMX root it raises #UD, which halts the kernel.
 pub(super) fn vmread(field: u64) -> Result<u64, &'static str> {
     let value: u64;
     let rflags: u64;
@@ -264,8 +282,12 @@ pub(super) fn vmread(field: u64) -> Result<u64, &'static str> {
 /// the VMWRITE/VMREAD path *and* the silent truncation cases (a few
 /// host-state fields are 32-bit on the wire even though we pass
 /// `u64`).
-fn vmwrite_check(field: u64, value: u64, name: &'static str) -> Result<(), &'static str> {
-    vmwrite(field, value)?;
+///
+/// # Safety
+/// As `vmwrite_unchecked`.
+unsafe fn vmwrite_check(field: u64, value: u64, name: &'static str) -> Result<(), &'static str> {
+    // SAFETY: the caller's contract.
+    unsafe { vmwrite_unchecked(field, value)? };
     let back = vmread(field)?;
     if back != value {
         // Stash the field name so the caller can report which one
@@ -381,7 +403,11 @@ fn resolve_tr_base(tr_selector: u16, gdtr_base: u64) -> u64 {
 ///
 /// `host_rsp` is captured at the call site (one frame above) so it
 /// describes a slot that is still live when the function returns.
-pub(super) fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
+///
+/// # Safety
+/// In VMX root with a current VMCS; `host_rsp` is a live stack of this
+/// core. `run_guest_once` rewrites HOST_RSP/HOST_RIP before every entry.
+pub(super) unsafe fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
     let snap = snapshot_host();
     let tr_base = resolve_tr_base(snap.tr, snap.gdtr_base);
 
@@ -406,6 +432,12 @@ pub(super) fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
     let sysenter_eip = unsafe { rdmsr(IA32_SYSENTER_EIP) };
 
     let host_rip = exit_trampoline_addr();
+    // SAFETY: IA32_PAT is architectural on every VMX-capable CPU.
+    let pat = unsafe { rdmsr(0x277) };
+    // SAFETY: every value is this core's live host state (CRs, selectors,
+    // bases, MSRs just read), `host_rsp` is the caller's contract, and
+    // `host_rip` is kernel text.
+    let vmwrite_check = |f, v, n| unsafe { vmwrite_check(f, v, n) };
 
     // Control registers.
     vmwrite_check(HOST_CR0, snap.cr0, "HOST_CR0")?;
@@ -437,8 +469,6 @@ pub(super) fn setup_host_state(host_rsp: u64) -> Result<(), &'static str> {
     // VM-exit control is set, harmless otherwise).
     vmwrite_check(HOST_IA32_EFER, efer, "HOST_IA32_EFER")?;
     // Host PAT (carries the framebuffer's WC entry), reloaded on every exit.
-    // SAFETY: IA32_PAT is architectural on every VMX-capable CPU.
-    let pat = unsafe { rdmsr(0x277) };
     vmwrite_check(HOST_IA32_PAT, pat, "HOST_IA32_PAT")?;
 
     // RIP / RSP last so a failure earlier doesn't leave a stale RSP
@@ -656,7 +686,11 @@ fn fixed_ctrl(desired: u32, msr: u32) -> u32 {
 /// The I/O bitmaps trap every port; the MSR bitmap intercepts all but the
 /// pass-through set. Returns the bitmap frames, which the VMCS references
 /// until VMXOFF; the caller frees them after that.
-pub(super) fn setup_execution_controls(eptp: u64) -> Result<ExecBitmaps, &'static str> {
+///
+/// # Safety
+/// In VMX root with a current VMCS; `eptp` points to this VM's own EPT
+/// (`ept::install_window`), which maps nothing but its guest memory.
+pub(super) unsafe fn setup_execution_controls(eptp: u64) -> Result<ExecBitmaps, &'static str> {
     let (io_a, io_b) = allocate_and_populate_io_bitmaps()?;
     let msr = match allocate_msr_bitmap() {
         Ok(m) => m,
@@ -667,7 +701,8 @@ pub(super) fn setup_execution_controls(eptp: u64) -> Result<ExecBitmaps, &'stati
         }
     };
     let bitmaps = ExecBitmaps { io_a, io_b, msr };
-    match write_execution_controls(eptp, &bitmaps) {
+    // SAFETY: the caller's contract; the bitmaps were just built to trap.
+    match unsafe { write_execution_controls(eptp, &bitmaps) } {
         Ok(()) => Ok(bitmaps),
         Err(e) => {
             bitmaps.free();
@@ -693,8 +728,15 @@ impl ExecBitmaps {
     }
 }
 
-fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(), &'static str> {
+/// # Safety
+/// As `setup_execution_controls`; `bitmaps` trap every port and all but
+/// the pass-through MSRs.
+unsafe fn write_execution_controls(eptp: u64, bitmaps: &ExecBitmaps) -> Result<(), &'static str> {
     let (io_bitmap_a, io_bitmap_b, msr_bitmap) = (bitmaps.io_a, bitmaps.io_b, bitmaps.msr);
+    // SAFETY: the controls below come from the capability MSRs and keep
+    // HLT, I/O, MSR, MONITOR/MWAIT and RDPMC exiting on; `eptp` and the
+    // bitmaps are the caller's contract.
+    let vmwrite = |f, v| unsafe { vmwrite_unchecked(f, v) };
 
     // Use IA32_VMX_TRUE_*_CTLS when the CPU supports them. The TRUE
     // variants relax classic "default-1" bits, notably CR3-load/store-
@@ -1104,24 +1146,29 @@ pub struct LaunchOutcome {
 ///      transition, execution falls through. Set vmfail=1 and
 ///      converge.
 ///
-/// SAFETY: caller guarantees VMX root mode + current VMCS +
-/// validated host/guest/control state. The asm pushes a variable
-/// amount onto the stack across the boundary; HOST_RSP is set to
-/// the post-prologue rsp so the post-exit landing finds the right
-/// stack shape.
-pub(super) fn run_guest_once(
+/// The asm pushes a variable amount onto the stack across the boundary;
+/// HOST_RSP is set to the post-prologue rsp so the post-exit landing
+/// finds the right stack shape.
+///
+/// # Safety
+/// VMX root mode with this vCPU's VMCS current, and host, guest and
+/// control state written by `setup_host_state`, `setup_guest_state*` and
+/// `setup_execution_controls`.
+pub(super) unsafe fn run_guest_once(
     regs: &mut GuestRegs,
     launched: bool,
-    host_fpu: *mut crate::microvm::cpu::FpuArea,
-    guest_fpu: *mut crate::microvm::cpu::FpuArea,
+    host_fpu: &mut crate::microvm::cpu::FpuArea,
+    guest_fpu: &mut crate::microvm::cpu::FpuArea,
 ) -> Result<LaunchOutcome, &'static str> {
+    let host_fpu: *mut crate::microvm::cpu::FpuArea = host_fpu;
+    let guest_fpu: *mut crate::microvm::cpu::FpuArea = guest_fpu;
     let exit_reason: u64;
     let exit_qualification: u64;
     let vmfail: u64;
     let regs_ptr: *mut GuestRegs = regs;
 
-    // SAFETY: see fn-level docs. The asm respects every register
-    // dependency by ordering: launched-flag check sets ZF before
+    // SAFETY: the fn-level contract; the FPU areas are exclusive borrows.
+    // The asm respects every register dependency by ordering: launched-flag check sets ZF before
     // r10 is overwritten with the guest's r10; rdi (struct ptr) is
     // overwritten last; post-exit save spills all guest GPRs to
     // stack first (so rdi stays guest's value), then reloads struct
@@ -1417,7 +1464,8 @@ pub fn inject_exception(vector: u8, error_code: Option<u32>) -> Result<(), &'sta
 pub fn set_interrupt_window_exiting(on: bool) -> Result<(), &'static str> {
     let v = vmread(CPU_BASED_VM_EXEC_CONTROL)? as u32;
     let n = if on { v | CPU_INTR_WINDOW_EXITING } else { v & !CPU_INTR_WINDOW_EXITING };
-    if n != v { vmwrite(CPU_BASED_VM_EXEC_CONTROL, n as u64)?; }
+    // SAFETY: only interrupt-window exiting changes in the current controls.
+    if n != v { unsafe { vmwrite_unchecked(CPU_BASED_VM_EXEC_CONTROL, n as u64)? }; }
     Ok(())
 }
 
@@ -1802,7 +1850,9 @@ pub fn sync_entry_ia32e_with_efer() -> Result<(), &'static str> {
         } else {
             entry & !(ENTRY_IA32E_MODE_GUEST as u64)
         };
-        vmwrite(VM_ENTRY_CONTROLS, new)?;
+        // SAFETY: only the IA-32e-mode-guest bit changes; it describes the
+        // guest and is checked against guest state on entry.
+        unsafe { vmwrite_unchecked(VM_ENTRY_CONTROLS, new)? };
     }
     Ok(())
 }

@@ -120,12 +120,14 @@ pub fn read(st: &GuestMsrs, apic_id: u8, lapic_on: bool, msr: u32) -> MsrResult<
         MSR_PAT => super::vmcs::read_guest_pat().map_err(|_| ())?,
         // Locked, VMX off — the guest has no VMX (KVM without nested).
         MSR_FEATURE_CONTROL => 1,
-        MSR_BIOS_SIGN_ID => host_rdmsr(MSR_BIOS_SIGN_ID),
+        // SAFETY: IA32_BIOS_SIGN_ID is architectural on Intel.
+        MSR_BIOS_SIGN_ID => unsafe { host_rdmsr(MSR_BIOS_SIGN_ID) },
         MSR_PLATFORM_INFO => 0,
         MSR_MISC_ENABLE => st.misc_enable,
         MSR_ARCH_CAPABILITIES => {
             if !l7_edx(29) { return Err(()); }
-            host_rdmsr(MSR_ARCH_CAPABILITIES) & ARCH_CAP_MASK
+            // SAFETY: CPUID.7.EDX[29] above says the MSR exists.
+            unsafe { host_rdmsr(MSR_ARCH_CAPABILITIES) & ARCH_CAP_MASK }
         }
         MSR_TSX_CTRL | MSR_MCU_OPT_CTRL | MSR_DEBUGCTL | MSR_PERF_CAPABILITIES
         | MSR_UMWAIT_CONTROL | MSR_TSC_DEADLINE => 0,

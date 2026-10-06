@@ -115,7 +115,8 @@ pub fn read(st: &GuestMsrs, vmcb: &vmcb::Vmcb, apic_id: u8, msr: u32) -> MsrResu
         MSR_TSC => {
             crate::interrupts::rdtsc().wrapping_add(vmcb.read_u64(vmcb::OFF_TSC_OFFSET))
         }
-        MSR_PATCH_LEVEL => host_rdmsr(MSR_PATCH_LEVEL),
+        // SAFETY: PATCH_LEVEL is architectural on AMD (the SVM path).
+        MSR_PATCH_LEVEL => unsafe { host_rdmsr(MSR_PATCH_LEVEL) },
         MSR_PAT => vmcb.read_u64(vmcb::OFF_SAVE_G_PAT),
         // Guest view: SVME is ours, not the guest's (KVM `svm_set_efer`).
         MSR_EFER => vmcb.read_u64(vmcb::OFF_SAVE_EFER) & !EFER_SVME,
@@ -124,7 +125,8 @@ pub fn read(st: &GuestMsrs, vmcb: &vmcb::Vmcb, apic_id: u8, msr: u32) -> MsrResu
         MSR_SYSCFG | MSR_NB_CFG | MSR_CPUID_7_FEATURES | MSR_ZEN2_SPECTRAL_CHICKEN => 0,
         MSR_K7_PERF_FIRST..=MSR_K7_PERF_LAST | MSR_F15H_PERF_FIRST..=MSR_F15H_PERF_LAST => 0,
         // Feature MSR: only the LFENCE-serialising bit (KVM `kvm_get_feature_msr`).
-        MSR_DE_CFG => host_rdmsr(MSR_DE_CFG) & (1 << 1),
+        // SAFETY: DE_CFG exists on every AMD family with SVM.
+        MSR_DE_CFG => unsafe { host_rdmsr(MSR_DE_CFG) & (1 << 1) },
         _ => return common::read(
             st, msr, apic_id, crate::microvm::cpu::GUEST_LAPIC, spec_ctrl_valid_bits(),
         ),
