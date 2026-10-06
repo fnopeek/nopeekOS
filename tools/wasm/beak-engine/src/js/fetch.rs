@@ -20,7 +20,6 @@
 //! * Bodies other than text: no `FormData`, `Blob`, `ArrayBuffer`.
 //! * `response.body` as a stream, `arrayBuffer()`, `blob()`. `text()` and
 //!   `json()` return the whole response at once.
-//! * `AbortSignal.timeout(ms)`.
 //!
 //! `Headers` holds the raw header block as text, not a list: that is what
 //! the host delivers and expects, and `Set-Cookie` may repeat.
@@ -63,7 +62,6 @@ const R_NET: &str = "\0!res.neterr";
 const H_RAW: &str = "\0!hdr.raw";
 const S_ABORTED: &str = "\0!sig.aborted";
 const S_REASON: &str = "\0!sig.reason";
-const S_LISTEN: &str = "\0!sig.listen";
 const S_FETCH: &str = "\0!sig.fetch";
 const C_SIGNAL: &str = "\0!ctl.signal";
 
@@ -145,26 +143,32 @@ fn raw_of(i: &mut Interp, t: &Value) -> String {
 
 // ── AbortSignal ─────────────────────────────────────────────────────────
 
-/// The reason an abort without its own reason rejects with.
-///
-/// There is no `DOMException` in this engine, so this builds an `Error`
-/// with the name page code checks, via `throw_kind`.
+/// The reason an abort without its own reason rejects with: a
+/// `DOMException` named `AbortError` (DOM §3.1).
 fn abort_error(i: &mut Interp) -> Value {
-    let Abrupt::Throw(v) = i.throw_kind("Error", "signal is aborted without reason")
-        else { return Value::Undefined };
-    if let Value::Obj(o) = &v {
-        o.borrow_mut().define("name", Prop::builtin(Value::str("AbortError")));
+    match super::dombind::dom_exc(i, "AbortError", "signal is aborted without reason") {
+        Abrupt::Throw(v) => v,
+        _ => Value::Undefined,
     }
-    v
 }
 
-pub(crate) fn new_signal(i: &Interp) -> Gc {
-    let s = new_obj(Some(i.realm.abort_signal_proto.clone()));
+/// A fresh `AbortSignal`. With a document it is backed by a detached node, so
+/// the `EventTarget` methods and `dispatchEvent` work on it as on any target;
+/// without one it has no listener registry.
+pub(crate) fn new_signal(i: &mut Interp) -> Gc {
+    let proto = i.realm.abort_signal_proto.clone();
+    let node = i.doc.as_mut().map(|d| d.create(super::dombind::ELEMENT_NODE, "#eventtarget"));
+    let s = match node {
+        Some(id) => match super::dombind::wrap(i, id) {
+            Value::Obj(o) => { o.borrow_mut().proto = Some(proto); o }
+            _ => new_obj(Some(proto)),
+        },
+        None => new_obj(Some(proto)),
+    };
     {
         let mut b = s.borrow_mut();
         b.define(S_ABORTED, hidden(Value::Bool(false)));
         b.define(S_REASON, hidden(Value::Undefined));
-        b.define(S_LISTEN, hidden(Value::Undefined));
         b.define(S_FETCH, hidden(Value::Undefined));
     }
     s
@@ -172,6 +176,21 @@ pub(crate) fn new_signal(i: &Interp) -> Gc {
 
 fn signal_aborted(i: &mut Interp, sig: &Value) -> bool {
     matches!(slot(i, sig, S_ABORTED), Value::Bool(true))
+}
+
+/// Is this an `AbortSignal`?
+pub(crate) fn is_signal(_i: &Interp, v: &Value) -> bool {
+    matches!(v, Value::Obj(o) if o.borrow().get_own(S_ABORTED).is_some())
+}
+
+pub(crate) fn signal_is_aborted(i: &mut Interp, sig: &Value) -> bool { signal_aborted(i, sig) }
+
+/// The `TimeoutError` of `AbortSignal.timeout`.
+fn timeout_error(i: &mut Interp) -> Value {
+    match super::dombind::dom_exc(i, "TimeoutError", "signal timed out") {
+        Abrupt::Throw(v) => v,
+        _ => Value::Undefined,
+    }
 }
 
 /// Set a signal to aborted and notify everything attached: listeners,
@@ -182,25 +201,26 @@ fn do_abort(i: &mut Interp, sig: &Value, reason: Value) -> C<()> {
     i.set(sig, S_ABORTED, Value::Bool(true), false)?;
     i.set(sig, S_REASON, r.clone(), false)?;
 
-    // Actually cancel the running request, not just set the flag.
-    if let Value::Num(id) = slot(i, sig, S_FETCH) {
+    // Actually cancel the running requests, not just set the flag.
+    for id in list_of(i, sig, S_FETCH) {
+        let Value::Num(id) = id else { continue };
         let id = id as u32;
         i.aborted_fetches.push(id);
         fetch_failed_with(i, id, r.clone());
     }
 
-    let ev = new_obj(Some(i.realm.object_proto.clone()));
-    ev.borrow_mut().define("type", Prop::builtin(Value::str("abort")));
-    ev.borrow_mut().define("target", Prop::builtin(sig.clone()));
-    let ev = Value::Obj(ev);
-
+    // `onabort` first, then the listeners, through the ordinary dispatch.
     let on = i.get(sig, "onabort")?;
-    if i.is_callable(&on) { i.call(&on, sig.clone(), &[ev.clone()])?; }
-    {
-        let items = list_of(i, sig, S_LISTEN);
-        for f in items {
-            if i.is_callable(&f) { i.call(&f, sig.clone(), &[ev.clone()])?; }
+    let backed = super::dombind::node_of(i, sig).is_ok();
+    if backed {
+        if i.is_callable(&on) {
+            let ev = super::dombind::plain_event(i, "abort", sig);
+            i.call(&on, sig.clone(), &[ev])?;
         }
+        super::dombind::fire_simple(i, sig, "abort", false)?;
+    } else if i.is_callable(&on) {
+        let ev = super::dombind::plain_event(i, "abort", sig);
+        i.call(&on, sig.clone(), &[ev])?;
     }
     Ok(())
 }
@@ -288,7 +308,10 @@ fn do_fetch_inner(i: &mut Interp, _t: Value, a: &[Value]) -> C<Value> {
     i.pending_fetches.push(PendingFetch { id, url, method, headers, body });
     i.fetch_waiting.push((id, Waiter::Promise(p.clone())));
     if matches!(signal, Value::Obj(_)) {
-        i.set(&signal, S_FETCH, Value::Num(id as f64), false)?;
+        let mut ids = list_of(i, &signal, S_FETCH);
+        ids.push(Value::Num(id as f64));
+        let arr = i.new_array(ids);
+        i.set(&signal, S_FETCH, arr, false)?;
     }
     Ok(Value::Obj(p))
 }
@@ -521,7 +544,8 @@ pub fn install(realm: &mut Realm) {
     }, 0, &fp);
 
     // ── AbortSignal ─────────────────────────────────────────────────────
-    let s_proto = new_obj(Some(op.clone()));
+    // An `EventTarget`, as the DOM defines it (DOM §3.1).
+    let s_proto = new_obj(Some(realm.event_target_proto.clone()));
     realm.abort_signal_proto = s_proto.clone();
     s_proto.borrow_mut().define(super::value::SYM_TO_STRING_TAG, Prop::tag(Value::str("AbortSignal")));
     let s_ctor = native(Some(fp.clone()), |i, _, _| {
@@ -536,6 +560,48 @@ pub fn install(realm: &mut Realm) {
         do_abort(i, &sv, a.first().cloned().unwrap_or(Value::Undefined))?;
         Ok(sv)
     }, 0, &fp);
+    // `AbortSignal.timeout(ms)`: aborts with a `TimeoutError` through the
+    // page's own timer queue.
+    meth(&s_ctor, "timeout", |i, _, a| {
+        let ms = match a.first() { Some(v) => i.to_number(v)?, None => 0.0 };
+        if !ms.is_finite() || ms < 0.0 { return i.type_err("AbortSignal.timeout: invalid delay") }
+        let sv = Value::Obj(new_signal(i));
+        let f = promise::bind1(i, |i, _, a| {
+            let s = a.first().cloned().unwrap_or(Value::Undefined);
+            let e = timeout_error(i);
+            do_abort(i, &s, e)?;
+            Ok(Value::Undefined)
+        }, sv.clone());
+        let st = i.get(&Value::Obj(i.realm.global.clone()), "setTimeout")?;
+        i.call(&st, Value::Undefined, &[f, Value::Num(ms)])?;
+        Ok(sv)
+    }, 1, &fp);
+    // `AbortSignal.any(signals)`: aborted as soon as one of them is.
+    meth(&s_ctor, "any", |i, _, a| {
+        let list = i.iterate(a.first().unwrap_or(&Value::Undefined))?;
+        let sv = Value::Obj(new_signal(i));
+        for s in &list {
+            if !is_signal(i, s) { return i.type_err("AbortSignal.any: not an AbortSignal") }
+            if signal_aborted(i, s) {
+                let r = slot(i, s, S_REASON);
+                do_abort(i, &sv, r)?;
+                return Ok(sv);
+            }
+        }
+        for s in list {
+            let pair = i.new_array(alloc::vec![sv.clone(), s.clone()]);
+            let f = promise::bind1(i, |i, _, a| {
+                let pair = a.first().cloned().unwrap_or(Value::Undefined);
+                let dst = i.get(&pair, "0")?;
+                let src = i.get(&pair, "1")?;
+                let r = slot(i, &src, S_REASON);
+                do_abort(i, &dst, r)?;
+                Ok(Value::Undefined)
+            }, pair);
+            super::dombind::add_listener(i, &s, "abort", f, true);
+        }
+        Ok(sv)
+    }, 1, &fp);
     realm.global.borrow_mut().define("AbortSignal", Prop::builtin(Value::Obj(s_ctor)));
 
     getter(&s_proto, "aborted", |i, t, _| Ok(slot(i, &t, S_ABORTED)), &fp);
@@ -544,27 +610,6 @@ pub fn install(realm: &mut Realm) {
         if signal_aborted(i, &t) { return Err(Abrupt::Throw(slot(i, &t, S_REASON))) }
         Ok(Value::Undefined)
     }, 0, &fp);
-    // An `AbortSignal` is not a node, so it cannot use the document's
-    // listener registry (which needs a node id). It has a single event type,
-    // and its listener list hangs off the signal itself.
-    meth(&s_proto, "addEventListener", |i, t, a| {
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?.to_string();
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if ev != "abort" || !i.is_callable(&f) { return Ok(Value::Undefined) }
-        let mut items = list_of(i, &t, S_LISTEN);
-        items.push(f);
-        let arr = i.new_array(items);
-        i.set(&t, S_LISTEN, arr, false)?;
-        Ok(Value::Undefined)
-    }, 2, &fp);
-    meth(&s_proto, "removeEventListener", |i, t, a| {
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        let items = list_of(i, &t, S_LISTEN);
-        let keep: Vec<Value> = items.into_iter().filter(|x| !x.strict_eq(&f)).collect();
-        let arr = i.new_array(keep);
-        i.set(&t, S_LISTEN, arr, false)?;
-        Ok(Value::Undefined)
-    }, 2, &fp);
 
     // ── AbortController ─────────────────────────────────────────────────
     let c_proto = new_obj(Some(op.clone()));

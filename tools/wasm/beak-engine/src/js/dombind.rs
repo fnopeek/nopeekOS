@@ -49,8 +49,8 @@ pub struct DomNode {
     pub children: Vec<u32>,
     /// Built once and kept, otherwise `el === el` would be false.
     pub js: Option<Gc>,
-    /// Registered listeners, per event type.
-    pub listeners: Vec<(Rc<str>, Value)>,
+    /// Registered listeners, in registration order.
+    pub listeners: Vec<Listener>,
     /// Handlers set as a property (`el.onclick = f`).
     ///
     /// Separate from `listeners` because a second assignment replaces the
@@ -92,6 +92,20 @@ pub struct DomNode {
     pub ui: u8,
     /// Custom states (`ElementInternals.states`, `:state()`).
     pub states: Vec<Rc<str>>,
+}
+
+/// An event listener (DOM §2.7).
+#[derive(Clone)]
+pub struct Listener {
+    pub kind: Rc<str>,
+    /// A function, or an object with `handleEvent`.
+    pub cb: Value,
+    pub capture: bool,
+    pub once: bool,
+    pub passive: bool,
+    /// Unique within the document: a listener removed during dispatch must
+    /// not run, and the snapshot finds out by this number.
+    pub id: u32,
 }
 
 pub const UI_POPOVER_OPEN: u8 = 1;
@@ -185,6 +199,8 @@ pub struct Doc {
     /// Custom element reactions caused by tree changes, run by `ce_flush`
     /// before control returns to script.
     pub ce_queue: Vec<CeEvent>,
+    /// The next `Listener::id`.
+    pub next_listener: u32,
 }
 
 /// A tree change a custom element may have to react to.
@@ -208,7 +224,7 @@ impl Doc {
         Doc { nodes, doc: 0, html: None, body: None, head: None,
               dirty: false, has_listeners: false, focused: None, version: 0,
               mutations: Vec::new(), observing: false, mut_overflow: false,
-              observed: Vec::new(), ce_on: false, ce_queue: Vec::new() }
+              observed: Vec::new(), ce_on: false, ce_queue: Vec::new(), next_listener: 1 }
     }
 
     /// Is this node in the document, through shadow roots to their hosts?
@@ -1590,6 +1606,8 @@ const EV_STAMP: &str = "__evstamp";
 const EV_STOP: &str = "__evstop";
 const EV_STOPIMM: &str = "__evstopimm";
 const EV_DETAIL: &str = "__evdetail";
+/// Set while a passive listener runs: `preventDefault` is ignored then.
+const EV_PASSIVE: &str = "__evpassive";
 
 /// A getter reading a fixed slot. A macro because a builtin getter is a
 /// function pointer that captures nothing, so the slot name must be in the
@@ -2829,27 +2847,53 @@ pub fn install(realm: &mut Realm) {
         }
         Ok(Value::Bool(false))
     }, 1, &fp);
-    // Register; dispatch happens elsewhere. Throwing here would end the
-    // calling script.
+    // DOM §2.7: options are a boolean (`capture`) or a dictionary with
+    // `capture`, `once`, `passive` and `signal`; the same (type, callback,
+    // capture) is registered once.
     meth(&event_target_proto, "addEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if let Some(d) = &mut i.doc {
-            d.nodes[id as usize].listeners.push((ev, f));
-            // As soon as one handler exists, layout needs hit boxes.
-            d.has_listeners = true;
+        let kind: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let cb = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let (capture, once, passive, signal) = listener_options(i, a.get(2))?;
+        if !matches!(cb, Value::Obj(_)) { return Ok(Value::Undefined) }
+        if let Some(sig) = &signal {
+            if super::fetch::signal_is_aborted(i, sig) { return Ok(Value::Undefined) }
+        }
+        let Some(d) = &mut i.doc else { return Ok(Value::Undefined) };
+        let n = &d.nodes[id as usize];
+        if n.listeners.iter().any(|l| l.kind == kind && l.capture == capture && same_fn(&l.cb, &cb)) {
+            return Ok(Value::Undefined);
+        }
+        let lid = d.next_listener;
+        d.next_listener += 1;
+        d.nodes[id as usize].listeners.push(Listener { kind, cb, capture, once, passive, id: lid });
+        // As soon as one handler exists, layout needs hit boxes.
+        d.has_listeners = true;
+        if let Some(sig) = signal {
+            // Removal on abort: a listener on the signal that knows the node and
+            // the listener's number.
+            let rec = i.new_array(alloc::vec![Value::Num(id as f64), Value::Num(lid as f64)]);
+            let f = super::promise::bind1(i, |i, _, a| {
+                let rec = a.first().cloned().unwrap_or(Value::Undefined);
+                let node = i.get(&rec, "0")?;
+                let lid = i.get(&rec, "1")?;
+                if let (Value::Num(n), Value::Num(l), Some(d)) = (node, lid, &mut i.doc) {
+                    if let Some(x) = d.nodes.get_mut(n as usize) { x.listeners.retain(|k| k.id != l as u32); }
+                }
+                Ok(Value::Undefined)
+            }, rec);
+            add_listener(i, &sig, "abort", f, true);
         }
         Ok(Value::Undefined)
     }, 2, &fp);
-    // `removeEventListener(type, f)` removes exactly f, not every listener of
-    // that type.
     meth(&event_target_proto, "removeEventListener", |i, t, a| {
         let id = target_node(i, &t)?;
-        let ev = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let f = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let kind = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let cb = a.get(1).cloned().unwrap_or(Value::Undefined);
+        let (capture, _, _, _) = listener_options(i, a.get(2))?;
         if let Some(d) = &mut i.doc {
-            d.nodes[id as usize].listeners.retain(|(e, g)| *e != ev || !same_fn(g, &f));
+            d.nodes[id as usize].listeners
+                .retain(|l| l.kind != kind || l.capture != capture || !same_fn(&l.cb, &cb));
         }
         Ok(Value::Undefined)
     }, 2, &fp);
@@ -2863,10 +2907,13 @@ pub fn install(realm: &mut Realm) {
             Value::Undefined => return i.type_err("dispatchEvent needs an Event"),
             v => i.to_string(&v)?,
         };
-        let bubbles = matches!(i.get(&Value::Obj(ev.clone()), "bubbles")?, Value::Bool(true));
-        // If it does not bubble, the path is one node long and only the target's
-        // handler runs.
-        let chain = if bubbles { ancestors(i, id) } else { alloc::vec![id] };
+        if !matches!(i.get(&Value::Obj(ev.clone()), EV_PHASE)?, Value::Num(0.0) | Value::Undefined) {
+            return Err(dom_exc(i, "InvalidStateError", "the event is already being dispatched"));
+        }
+        // A dispatched event is untrusted (DOM §2.9 step 1 of dispatchEvent).
+        ev.borrow_mut().define(EV_TRUSTED, Prop { value: Some(Value::Bool(false)), get: None,
+            set: None, writable: true, enumerable: false, configurable: true });
+        let chain = ancestors(i, id);
         let prevented = deliver(i, &ev, &kind, &chain)?;
         Ok(Value::Bool(!prevented))
     }, 1, &fp);
@@ -4667,7 +4714,8 @@ pub fn install(realm: &mut Realm) {
     meth(&event_proto, "preventDefault", |i, t, _| {
         // Only a cancelable event can be canceled; otherwise `defaultPrevented`
         // would report a stop nobody honours.
-        if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true)) {
+        if matches!(i.get(&t, EV_CANCELABLE)?, Value::Bool(true))
+            && !matches!(i.get(&t, EV_PASSIVE)?, Value::Bool(true)) {
             if let Value::Obj(o) = &t { o.borrow_mut().define(EV_PREVENTED, Prop::data(Value::Bool(true))); }
         }
         Ok(Value::Undefined)
@@ -5712,64 +5760,154 @@ fn dispatch_plain(i: &mut Interp, kind: &str, chain: &[u32]) -> C<bool> {
 /// one set of rules.
 fn deliver(i: &mut Interp, ev: &Gc, kind: &str, chain: &[u32]) -> C<bool> {
     if chain.is_empty() { return Ok(false); }
-    let target = wrap(i, chain[chain.len() - 1]);
-    let set = |o: &Gc, k: &str, v: Value| {
-        o.borrow_mut().define(k, Prop { value: Some(v), get: None, set: None,
-            writable: true, enumerable: false, configurable: true });
-    };
-    set(ev, EV_TARGET, target);
-    let evv = Value::Obj(ev.clone());
+    let last = chain.len() - 1;
+    let target = wrap(i, chain[last]);
+    set_ev(ev, EV_TARGET, target);
+    let bubbles = ev_flag(ev, EV_BUBBLES);
+    // DOM §2.9: capture from the root down, the target (capture listeners
+    // first), then bubbling back up if the event bubbles.
+    let mut stopped = false;
+    for &node in &chain[..last] {
+        invoke(i, ev, kind, node, true, 1.0)?;
+        if ev_flag(ev, EV_STOP) { stopped = true; break }
+    }
+    if !stopped {
+        invoke(i, ev, kind, chain[last], true, 2.0)?;
+        if !ev_flag(ev, EV_STOPIMM) { invoke(i, ev, kind, chain[last], false, 2.0)?; }
+        if bubbles && !ev_flag(ev, EV_STOP) {
+            for &node in chain[..last].iter().rev() {
+                invoke(i, ev, kind, node, false, 3.0)?;
+                if ev_flag(ev, EV_STOP) { break }
+            }
+        }
+    }
+    set_ev(ev, EV_CUR, Value::Null);
+    set_ev(ev, EV_PHASE, Value::Num(0.0));
+    for k in [EV_STOP, EV_STOPIMM] { set_ev(ev, k, Value::Bool(false)); }
+    Ok(ev_flag(ev, EV_PREVENTED))
+}
 
-    for (k, &node) in chain.iter().enumerate().rev() {
-        let mut listeners: Vec<Value> = Vec::new();
-        // The handler from the attribute or property runs first: it precedes any
-        // `addEventListener` a script registers later, and registration order is
-        // call order.
-        //
-        // Either-or: `el.onclick = f` replaces the attribute handler, as it is the
-        // same slot.
+fn set_ev(o: &Gc, k: &str, v: Value) {
+    o.borrow_mut().define(k, Prop { value: Some(v), get: None, set: None,
+        writable: true, enumerable: false, configurable: true });
+}
+
+fn ev_flag(o: &Gc, k: &str) -> bool {
+    matches!(o.borrow().get_own(k).and_then(|p| p.value.clone()), Some(Value::Bool(true)))
+}
+
+/// Run the listeners of one node for one pass (DOM §2.9 "inner invoke").
+///
+/// The list is a snapshot, but a listener removed meanwhile does not run;
+/// `once` removes before the call. The `on…` handler belongs to the
+/// non-capture pass and runs first there.
+fn invoke(i: &mut Interp, ev: &Gc, kind: &str, node: u32, capture: bool, phase: f64) -> C<()> {
+    let mut handler = None;
+    if !capture {
         let prop = i.doc.as_ref().and_then(|d| d.nodes[node as usize].handlers.iter()
             .find(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
-        match prop {
-            Some(f) => listeners.push(f),
-            None => if let Some(f) = inline_handler(i, node, kind)? { listeners.push(f); },
-        }
-        if let Some(d) = &i.doc {
-            listeners.extend(d.nodes[node as usize].listeners.iter()
-                .filter(|(k, _)| &**k == kind).map(|(_, f)| f.clone()));
-        }
-        if listeners.is_empty() { continue; }
-        let this_node = wrap(i, node);
-        set(ev, EV_CUR, this_node.clone());
-        // 2 = AT_TARGET, 3 = BUBBLING_PHASE. There is no capture phase:
-        // `addEventListener` accepts the third argument and ignores it.
-        set(ev, EV_PHASE, Value::Num(if k + 1 == chain.len() { 2.0 } else { 3.0 }));
-        for f in listeners {
-            // A throwing handler must not take the following ones with it, as in
-            // browsers.
-            let r = i.call(&f, this_node.clone(), &[evv.clone()]);
-            // A throwing handler is reported to the console, not dropped.
-            if let Err(e) = r {
+        handler = match prop {
+            Some(f) => Some(f),
+            None => inline_handler(i, node, kind)?,
+        };
+    }
+    let snap: Vec<Listener> = i.doc.as_ref().map(|d| d.nodes[node as usize].listeners.iter()
+        .filter(|l| &*l.kind == kind && l.capture == capture).cloned().collect())
+        .unwrap_or_default();
+    if handler.is_none() && snap.is_empty() { return Ok(()) }
+    let this_node = wrap(i, node);
+    set_ev(ev, EV_CUR, this_node.clone());
+    set_ev(ev, EV_PHASE, Value::Num(phase));
+    let evv = Value::Obj(ev.clone());
+    if let Some(f) = handler {
+        match i.call(&f, this_node.clone(), &[evv.clone()]) {
+            // `onclick="return false"` is the old form of `preventDefault`.
+            Ok(Value::Bool(false)) => set_ev(ev, EV_PREVENTED, Value::Bool(true)),
+            Ok(_) => {}
+            Err(e) => {
                 let msg = super::modules::describe(i, e);
                 i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
-                continue;
             }
-            // `onclick="return false"` is the old form of `preventDefault`. It applies
-            // only to the attribute handler; `addEventListener` ignores the return
-            // value.
-            if matches!(r, Ok(Value::Bool(false))) { set(ev, EV_PREVENTED, Value::Bool(true)); }
-            let imm = matches!(ev.borrow().get_own(EV_STOPIMM).and_then(|p| p.value.clone()),
-                               Some(Value::Bool(true)));
-            if imm { break; }
         }
-        let stop = matches!(ev.borrow().get_own(EV_STOP).and_then(|p| p.value.clone()),
-                            Some(Value::Bool(true)));
-        if stop { break; }
+        if ev_flag(ev, EV_STOPIMM) { return Ok(()) }
     }
-    set(ev, EV_CUR, Value::Null);
-    set(ev, EV_PHASE, Value::Num(0.0));
-    Ok(matches!(ev.borrow().get_own(EV_PREVENTED).and_then(|p| p.value.clone()),
-                Some(Value::Bool(true))))
+    for l in snap {
+        let live = i.doc.as_mut().is_some_and(|d| {
+            let list = &mut d.nodes[node as usize].listeners;
+            let Some(at) = list.iter().position(|x| x.id == l.id) else { return false };
+            if l.once { list.remove(at); }
+            true
+        });
+        if !live { continue }
+        set_ev(ev, EV_PASSIVE, Value::Bool(l.passive));
+        let r = if i.is_callable(&l.cb) {
+            i.call(&l.cb, this_node.clone(), &[evv.clone()])
+        } else {
+            match i.get(&l.cb, "handleEvent") {
+                Ok(h) if i.is_callable(&h) => i.call(&h, l.cb.clone(), &[evv.clone()]),
+                Ok(_) => i.type_err("the listener has no handleEvent method"),
+                Err(e) => Err(e),
+            }
+        };
+        set_ev(ev, EV_PASSIVE, Value::Bool(false));
+        // A throwing listener is reported and does not stop the others.
+        if let Err(e) = r {
+            let msg = super::modules::describe(i, e);
+            i.console_push(alloc::format!("Fehler im {kind}-Behandler: {msg}"));
+        }
+        if ev_flag(ev, EV_STOPIMM) { break }
+    }
+    Ok(())
+}
+
+/// The third argument of `addEventListener`: `(capture, once, passive,
+/// signal)`.
+fn listener_options(i: &mut Interp, opt: Option<&Value>) -> C<(bool, bool, bool, Option<Value>)> {
+    match opt {
+        None | Some(Value::Undefined) | Some(Value::Null) => Ok((false, false, false, None)),
+        Some(v @ Value::Obj(_)) => {
+            let capture = i.get(v, "capture")?.truthy();
+            let once = i.get(v, "once")?.truthy();
+            let passive = i.get(v, "passive")?.truthy();
+            let signal = match i.get(v, "signal")? {
+                Value::Undefined => None,
+                s if super::fetch::is_signal(i, &s) => Some(s),
+                _ => return i.type_err("addEventListener: signal is not an AbortSignal"),
+            };
+            Ok((capture, once, passive, signal))
+        }
+        Some(v) => Ok((v.truthy(), false, false, None)),
+    }
+}
+
+/// Register a listener from Rust (an abort algorithm on a signal, say).
+pub fn add_listener(i: &mut Interp, target: &Value, kind: &str, cb: Value, once: bool) {
+    let Ok(id) = node_of(i, target) else { return };
+    let Some(d) = &mut i.doc else { return };
+    let lid = d.next_listener;
+    d.next_listener += 1;
+    d.nodes[id as usize].listeners.push(Listener { kind: Rc::from(kind), cb, capture: false,
+        once, passive: false, id: lid });
+}
+
+/// A trusted `Event` of this type with `target` set, not dispatched: the
+/// argument for an `on…` property called directly.
+pub fn plain_event(i: &mut Interp, kind: &str, target: &Value) -> Value {
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    set_ev(&ev, EV_TARGET, target.clone());
+    set_ev(&ev, EV_CUR, target.clone());
+    Value::Obj(ev)
+}
+
+/// Fire a plain, trusted, non-bubbling event at a target that has a node
+/// (an `AbortSignal`, a `<dialog>`). Returns true if it was canceled.
+pub fn fire_simple(i: &mut Interp, target: &Value, kind: &str, cancelable: bool) -> C<bool> {
+    let Ok(id) = node_of(i, target) else { return Ok(false) };
+    let proto = i.realm.event_proto.clone();
+    let ev = build_event(i, proto, kind, true);
+    set_ev(&ev, EV_CANCELABLE, Value::Bool(cancelable));
+    deliver(i, &ev, kind, &[id])
 }
 
 /// `theme` -> `data-theme`, `myKey` -> `data-my-key`. The inverse of
@@ -7683,5 +7821,65 @@ mod ce_tests {
              document.body.appendChild(document.createElement('x-out'));",
         );
         assert_eq!(out, ["inner", "outer done"]);
+    }
+}
+
+#[cfg(test)]
+mod event_target_tests {
+    use super::ce_tests::run;
+
+    #[test]
+    fn capture_target_bubble_order_once_and_dedupe() {
+        let out = run(
+            "<body><div id=o><p id=t>x</p></div></body>",
+            "var o = document.getElementById('o'), t = document.getElementById('t'), log = [];\
+             function f(e) { log.push('o-bubble:' + e.eventPhase); }\
+             o.addEventListener('ping', f); o.addEventListener('ping', f);\
+             o.addEventListener('ping', e => log.push('o-capture:' + e.eventPhase), true);\
+             t.addEventListener('ping', e => log.push('t:' + e.eventPhase));\
+             t.addEventListener('ping', e => log.push('t-cap:' + e.eventPhase), { capture: true });\
+             t.addEventListener('ping', { handleEvent(e) { log.push('obj:' + (this !== t)); } }, { once: true });\
+             t.dispatchEvent(new Event('ping', { bubbles: true }));\
+             t.dispatchEvent(new Event('ping'));\
+             console.log(log.join(' '));",
+        );
+        assert_eq!(out, ["o-capture:1 t-cap:2 t:2 obj:true o-bubble:3 o-capture:1 t-cap:2 t:2"]);
+    }
+
+    #[test]
+    fn passive_ignores_prevent_default_and_signal_removes() {
+        let out = run(
+            "<body><p id=t>x</p></body>",
+            "var t = document.getElementById('t'), c = new AbortController(), n = 0;\
+             t.addEventListener('go', e => e.preventDefault(), { passive: true });\
+             console.log(t.dispatchEvent(new Event('go', { cancelable: true })));\
+             t.addEventListener('go', () => n++, { signal: c.signal });\
+             t.dispatchEvent(new Event('go')); c.abort(); t.dispatchEvent(new Event('go'));\
+             console.log(n, c.signal.aborted, c.signal.reason.name, c.signal.reason instanceof DOMException);",
+        );
+        assert_eq!(out, ["true", "1 true AbortError true"]);
+    }
+
+    #[test]
+    fn abort_signal_is_an_event_target() {
+        let out = run(
+            "<body></body>",
+            "var c = new AbortController(), s = c.signal, seen = [];\
+             console.log(s instanceof EventTarget, s instanceof AbortSignal);\
+             s.onabort = e => seen.push('on:' + e.type);\
+             s.addEventListener('abort', e => seen.push('l:' + (e.target === s) + ':' + s.reason));\
+             EventTarget.prototype.addEventListener.call(s, 'abort', () => seen.push('call'));\
+             c.abort('why'); c.abort('again');\
+             console.log(seen.join(' '));\
+             try { s.throwIfAborted(); } catch (e) { console.log('thrown', e); }\
+             var a = AbortSignal.abort(); console.log(a.aborted, a.reason.name);\
+             var c2 = new AbortController(), any = AbortSignal.any([c2.signal, new AbortController().signal]);\
+             c2.abort('first'); console.log(any.aborted, any.reason);\
+             var et = new EventTarget(), hits = 0; et.addEventListener('x', () => hits++);\
+             et.dispatchEvent(new CustomEvent('x')); console.log(hits);\
+             console.log(typeof AbortSignal.timeout(10).aborted);",
+        );
+        assert_eq!(out, ["true true", "on:abort l:true:why call", "thrown why",
+                         "true AbortError", "true first", "1", "boolean"]);
     }
 }

@@ -1041,7 +1041,7 @@ impl Interp {
         if let Some(d) = &self.doc {
             for n in &d.nodes {
                 if let Some(g) = &n.js { objs.push(g.clone()); }
-                for (_, v) in &n.listeners { add(v, &mut objs); }
+                for l in &n.listeners { add(&l.cb, &mut objs); }
                 for (_, v) in &n.handlers { add(v, &mut objs); }
             }
         }
