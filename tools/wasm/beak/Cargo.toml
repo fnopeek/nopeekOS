@@ -1,6 +1,6 @@
 [package]
 name = "beak"
-version = "0.190.0"
+version = "0.191.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "beak — the native, sandboxed web browser for nopeekOS. See docs/spec/BROWSER.md."

@@ -441,6 +441,13 @@ pub enum Modifier {
     /// `CanvasOffset` are ignored while it is set. Ignored on every other
     /// widget.
     CanvasNative,
+    /// Focus this `Widget::Input` or `Widget::TextArea` once, with its whole
+    /// text selected, whenever the number differs from the one last honoured
+    /// in this window. The app raises it when it wants the keyboard there —
+    /// a browser's new tab or Ctrl+L — and re-committing the same number
+    /// changes nothing, so the request survives the app re-rendering on
+    /// every event without stealing focus back each time. 0 never requests.
+    FocusRequest(u32),
     // Appended only.
 }
 

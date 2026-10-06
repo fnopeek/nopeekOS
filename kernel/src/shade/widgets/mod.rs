@@ -145,6 +145,8 @@ pub struct WidgetScene {
     /// the path it belonged to. Refocusing that same widget resumes it
     /// instead of rebuilding from the app's (one-round-trip-stale) tree.
     pub parked_edit: Option<(Vec<u32>, InputEditState)>,
+    /// The last `Modifier::FocusRequest` number honoured in this window.
+    pub focus_request: u32,
     /// Compositor-owned text-editor state, populated when `focus_path`
     /// targets a `Widget::Input`. None means no Input is focused (or
     /// the focused widget isn't an Input). Drives caret render +
@@ -1477,6 +1479,33 @@ fn widget_at_path<'a>(tree: &'a abi::Widget, path: &[u32]) -> Option<&'a abi::Wi
 /// document order. Used by `scene_commit` to auto-focus on first commit
 /// so apps with a search bar (drun) or an editing surface (spell) never
 /// need their own focus-priming host fn.
+/// The first text widget carrying a non-zero `Modifier::FocusRequest`, with
+/// its path and number.
+fn find_focus_request(tree: &abi::Widget) -> Option<(Vec<u32>, u32)> {
+    fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<(Vec<u32>, u32)>) {
+        if out.is_some() || is_disabled(w) { return; }
+        if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. }) {
+            let n = modifiers_of_ref(w).iter().find_map(|m| match m {
+                abi::Modifier::FocusRequest(n) if *n != 0 => Some(*n),
+                _ => None,
+            });
+            if let Some(n) = n {
+                *out = Some((cursor.clone(), n));
+                return;
+            }
+        }
+        for (i, c) in widget_children_ref(w).iter().enumerate() {
+            cursor.push(i as u32);
+            walk(c, cursor, out);
+            cursor.pop();
+        }
+    }
+    let mut cursor: Vec<u32> = Vec::new();
+    let mut out = None;
+    walk(tree, &mut cursor, &mut out);
+    out
+}
+
 fn find_first_input_path(tree: &abi::Widget) -> Option<Vec<u32>> {
     fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<Vec<u32>>) {
         if out.is_some() || is_disabled(w) { return; }
@@ -2590,7 +2619,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // `npk_window_set_overlay` (drun's path), which is exactly when we
     // want to auto-focus.
     let (prev_hover, prev_focus, prev_active, prev_input_edit, prev_parked,
-         prev_scroll_x, is_first_commit) = {
+         prev_scroll_x, prev_focus_request, is_first_commit) = {
         let scenes = SCENES.lock();
         match scenes.get(&target_id) {
             Some(s) => (
@@ -2600,9 +2629,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
                 s.input_edit.clone(),
                 s.parked_edit.clone(),
                 s.scroll_x,
+                s.focus_request,
                 false,
             ),
-            None    => (Vec::new(), Vec::new(), None, None, None, 0, true),
+            None    => (Vec::new(), Vec::new(), None, None, None, 0, 0, true),
         }
     };
     // A commit that shortens the longest line must pull the view back with
@@ -2614,7 +2644,13 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // dialog), so a keyboard user can type without clicking first. Focus
     // the user moved by Tab or click is never taken away.
     let focus_lost = prev_focus.is_empty() || widget_at_path(&tree, &prev_focus).is_none();
-    let focus_path: Vec<u32> = if is_first_commit || focus_lost {
+    // An explicit request from the app outranks both: it is how a keyboard
+    // user gets into a field without the mouse.
+    let requested = find_focus_request(&tree).filter(|(_, n)| *n != prev_focus_request);
+    let focus_request = requested.as_ref().map_or(prev_focus_request, |(_, n)| *n);
+    let focus_path: Vec<u32> = if let Some((p, _)) = &requested {
+        p.clone()
+    } else if is_first_commit || focus_lost {
         find_first_input_path(&tree).unwrap_or_default()
     } else {
         prev_focus
@@ -2629,6 +2665,13 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     //   - focus elsewhere → drop the editor.
     let input_edit: Option<InputEditState> = if focus_path.is_empty() {
         None
+    } else if requested.is_some() {
+        // Selected whole, so typing replaces it — what Ctrl+L does in
+        // every browser.
+        compute_input_edit(&tree, &focus_path, None).map(|mut e| {
+            if !e.value.is_empty() { e.sel_anchor = Some(0); }
+            e
+        })
     } else {
         compute_input_edit(&tree, &focus_path, prev_input_edit.as_ref())
     };
@@ -2664,6 +2707,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         density,
         has_pseudo,
         parked_edit: prev_parked,
+        focus_request,
         input_edit,
         scroll_x,
         scroll_y,

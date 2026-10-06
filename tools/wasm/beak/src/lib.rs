@@ -826,6 +826,14 @@ const EVENT_BUF_SIZE: usize = 16 * 1024;
 /// `Doc::need_full`): an image arriving in the background makes its own page
 /// stale, not the picture on screen.
 static LAST_W: AtomicI32 = AtomicI32::new(-1);
+/// `Modifier::FocusRequest` of the address field; raising it puts the
+/// keyboard there on the next chrome commit, with the text selected.
+static ADDR_FOCUS: AtomicI32 = AtomicI32::new(0);
+
+/// Put the keyboard into the address field, without the mouse.
+fn focus_address() {
+    ADDR_FOCUS.fetch_add(1, Relaxed);
+}
 static LAST_H: AtomicI32 = AtomicI32::new(-1);
 /// The scroll offset the buffer currently holds, so the next frame knows how
 /// far the picture has to move.
@@ -3619,6 +3627,10 @@ fn tab_open(engine: &Engine, url: &str, background: bool,
     set_active(i);
     tab_load(engine, cache, page);
     mark_dirty();
+    // An empty tab is opened to type an address into.
+    if url.is_empty() {
+        focus_address();
+    }
 }
 
 /// Close a tab.
@@ -4243,6 +4255,8 @@ fn render_chrome() {
                 modifiers: {
                     let mut m = vec![Modifier::Flex(1)];
                     if !spans.is_empty() { m.push(Modifier::Spans(spans)); }
+                    let f = ADDR_FOCUS.load(Relaxed);
+                    if f != 0 { m.push(Modifier::FocusRequest(f as u32)); }
                     m
                 },
             },
@@ -5079,6 +5093,11 @@ fn handle_event(engine: &Engine, ev: Event, cache: &mut Option<(Layout, i32, i32
             tab_open(engine, "", false, cache, page);
             true
         }
+        // Ctrl+L: into the address field, as in every browser.
+        Event::Chord { letter: b'l', .. } => {
+            focus_address();
+            true
+        }
         Event::Chord { letter: b'w', .. } => {
             tab_close(engine, active(), cache, page);
             true
@@ -5560,6 +5579,8 @@ pub extern "C" fn _start() {
     let arg_len = host::launch_arg(&mut arg).unwrap_or(0).min(PAYLOAD_CAP);
     if arg_len > 0 {
         set_url(core::str::from_utf8(&arg[..arg_len]).unwrap_or(""));
+    } else {
+        focus_address();
     }
 
     // Commit the chrome immediately so the window is an opaque browser from

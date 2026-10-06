@@ -214,6 +214,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Spans(_)            => 32,
         Modifier::OnMotion(_)         => 33,
         Modifier::CanvasNative        => 34,
+        Modifier::FocusRequest(_)     => 35,
     }
 }
 
