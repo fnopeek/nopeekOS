@@ -336,6 +336,10 @@ static VM_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// loft (a compositor op that must run on Core 0). Mirrors the
 /// VM_CLOSE_REQUESTED cross-core handoff.
 static OPEN_LOFT_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// `ticks()` of the last loft launch (0 = none yet).
+static LOFT_LAUNCH_TICK: AtomicU64 = AtomicU64::new(0);
+/// Minimum gap between two guest-requested loft launches (3 s at 100 Hz).
+const LOFT_LAUNCH_INTERVAL_TICKS: u64 = 300;
 
 /// Request that the host open loft. Safe to call from the VM core; the
 /// spawn itself happens on Core 0 (`vm_poll_slice`).
@@ -714,10 +718,13 @@ fn reserve_ap_core() -> Option<usize> {
 
 /// Record a guest SIPI (from a backend ICR router) → ask Core 0 to spawn the
 /// AP with `apic_id` at `sipi_vector`. No-op unless guest-SMP AP bring-up is
-/// enabled or apic_id is out of range. Idempotent: the reaper's `AP_SPAWNED`
-/// guard ignores a re-SIPI of an already-spawned AP.
+/// enabled and `apic_id` is an AP the MP table enumerated (`guest_vcpus`).
+/// Idempotent: the reaper's `AP_SPAWNED` guard ignores a re-SIPI of an
+/// already-spawned AP.
 pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
-    if !GUEST_SMP_AP || apic_id == 0 || apic_id as usize >= ORCH_MAX_VCPUS {
+    if !GUEST_SMP_AP || apic_id == 0 || apic_id as usize >= ORCH_MAX_VCPUS
+        || apic_id >= guest_vcpus()
+    {
         return;
     }
     AP_SIPI_VECTORS[apic_id as usize].store(sipi_vector, Ordering::Release);
@@ -968,7 +975,16 @@ pub fn vm_poll_slice() {
     // loft. Spawn it here on Core 0 (compositor op). Runs on both the
     // cooperative and dedicated paths since it's before the early return.
     if OPEN_LOFT_REQUESTED.swap(false, Ordering::AcqRel) {
-        crate::shade::launch_app("loft");
+        // `launch_app` dedups by open window, but loading runs on a worker:
+        // a burst of guest requests before the window exists would start
+        // several instances. One launch per interval; requests in between
+        // are dropped.
+        let now = crate::interrupts::ticks();
+        let last = LOFT_LAUNCH_TICK.load(Ordering::Acquire);
+        if last == 0 || now.wrapping_sub(last) >= LOFT_LAUNCH_INTERVAL_TICKS {
+            LOFT_LAUNCH_TICK.store(now.max(1), Ordering::Release);
+            crate::shade::launch_app("loft");
+        }
     }
 
     // Dedicated path and fiber path: Core 0 is only the reaper. The VM
