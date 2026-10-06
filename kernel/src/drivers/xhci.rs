@@ -289,6 +289,11 @@ pub fn inject_mouse(evt: MouseEvent) {
 pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
 
+    // The rest of a repeated escape sequence goes before anything newer.
+    if let Some(b) = crate::interrupts::without_interrupts(|| REPEAT_SEQ.lock().pop()) {
+        return Some(b);
+    }
+
     // Read from software key buffer (filled by timer IRQ)
     let head = KEY_HEAD.load(Ordering::Acquire);
     let tail = KEY_TAIL.load(Ordering::Relaxed);
@@ -314,6 +319,14 @@ pub fn poll_keyboard() -> Option<u8> {
             let is_de = crate::keyboard::is_de_layout();
             let shift = REPEAT_SHIFT.load(Ordering::Relaxed);
             let altgr = REPEAT_ALTGR.load(Ordering::Relaxed);
+            // Navigation keys are escape sequences, not characters: ESC
+            // now, the rest from REPEAT_SEQ on the next calls.
+            if let Some(last) = nav_seq_final(rk) {
+                crate::interrupts::without_interrupts(|| {
+                    *REPEAT_SEQ.lock() = RepeatSeq { bytes: [b'[', last], next: 0 };
+                });
+                return Some(0x1B);
+            }
             let ch = hid_to_char(rk, shift, altgr, is_de);
             if ch != 0 {
                 return Some(ch);
@@ -323,6 +336,40 @@ pub fn poll_keyboard() -> Option<u8> {
 
     None
 }
+
+/// Final byte of the `ESC [ x` sequence for a HID navigation key.
+fn nav_seq_final(key: u8) -> Option<u8> {
+    Some(match key {
+        0x4F => b'C', // Right
+        0x50 => b'D', // Left
+        0x51 => b'B', // Down
+        0x52 => b'A', // Up
+        0x4A => b'H', // Home
+        0x4D => b'F', // End
+        0x4B => b'5', // PgUp
+        0x4E => b'6', // PgDn
+        _ => return None,
+    })
+}
+
+/// The bytes after ESC of a repeated navigation key. USB keyboards do not
+/// repeat in hardware (PS/2 ones do), so `poll_keyboard` repeats held keys
+/// itself and must deliver a sequence, not just a character.
+struct RepeatSeq {
+    bytes: [u8; 2],
+    next: usize,
+}
+
+impl RepeatSeq {
+    fn pop(&mut self) -> Option<u8> {
+        let b = *self.bytes.get(self.next)?;
+        self.next += 1;
+        Some(b)
+    }
+}
+
+static REPEAT_SEQ: spin::Mutex<RepeatSeq> =
+    spin::Mutex::new(RepeatSeq { bytes: [0; 2], next: 2 });
 
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 static MOUSE_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -3002,14 +3049,11 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
 
         // Arrow keys and special multi-byte sequences (when mod NOT held)
         match key {
-            0x4F => { push_key(0x1B); push_key(b'['); push_key(b'C'); continue; } // Right
-            0x50 => { push_key(0x1B); push_key(b'['); push_key(b'D'); continue; } // Left
-            0x51 => { push_key(0x1B); push_key(b'['); push_key(b'B'); continue; } // Down
-            0x52 => { push_key(0x1B); push_key(b'['); push_key(b'A'); continue; } // Up
-            0x4A => { push_key(0x1B); push_key(b'['); push_key(b'H'); continue; } // Home
-            0x4D => { push_key(0x1B); push_key(b'['); push_key(b'F'); continue; } // End
-            0x4B => { push_key(0x1B); push_key(b'['); push_key(b'5'); continue; } // PgUp
-            0x4E => { push_key(0x1B); push_key(b'['); push_key(b'6'); continue; } // PgDn
+            k if nav_seq_final(k).is_some() => {
+                let last = nav_seq_final(k).unwrap_or(b'C');
+                push_key(0x1B); push_key(b'['); push_key(last);
+                continue;
+            }
             _ => {}
         }
 
