@@ -69,7 +69,7 @@ pub fn to_sfnt(d: &[u8]) -> Option<Vec<u8>> {
         let raw = if comp >= orig {
             src[..orig.min(src.len())].to_vec()
         } else {
-            let out = miniz_oxide::inflate::decompress_to_vec_zlib(src).ok()?;
+            let out = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(src, orig).ok()?;
             if out.len() != orig {
                 return None;
             }

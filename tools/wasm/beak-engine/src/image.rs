@@ -288,10 +288,13 @@ fn decode_png(data: &[u8]) -> Option<Image> {
     let stride = (width as usize * bits_per_pixel + 7) / 8; // bytes per row (may be sub-byte packed)
     let bpp = ((bits_per_pixel + 7) / 8).max(1); // filter byte-distance (spec: rounded up, ≥1)
 
-    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib(&idat)
+    // Bounded by what the header says the image needs: a small IDAT that
+    // inflates to gigabytes stops here instead of exhausting the heap.
+    let need = (height as usize).checked_mul(stride.checked_add(1)?)?;
+    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&idat, need)
         .ok()
-        .or_else(|| miniz_oxide::inflate::decompress_to_vec(&idat[2..]).ok())?;
-    if decomp.len() < height as usize * (1 + stride) {
+        .or_else(|| miniz_oxide::inflate::decompress_to_vec_with_limit(&idat[2..], need).ok())?;
+    if decomp.len() < need {
         return None;
     }
 
@@ -525,6 +528,22 @@ mod tests {
         assert_eq!((img.w, img.h), (2, 1));
         assert_eq!(&img.bgra[0..4], &[0, 0, 255, 255]); // red → BGRA
         assert_eq!(&img.bgra[4..8], &[0, 255, 0, 255]); // green → BGRA
+    }
+
+    #[test]
+    fn an_idat_larger_than_the_header_allows_is_not_inflated() {
+        // A 1x1 RGB image needs 4 bytes; this IDAT holds 64 MiB of zeros.
+        let bomb = alloc::vec![0u8; 64 * 1024 * 1024];
+        let idat = miniz_oxide::deflate::compress_to_vec_zlib(&bomb, 9);
+        let mut png: Vec<u8> = alloc::vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut png, b"IHDR", &ihdr);
+        chunk(&mut png, b"IDAT", &idat);
+        chunk(&mut png, b"IEND", &[]);
+        assert!(decode(&png).is_none());
     }
 
     #[test]
