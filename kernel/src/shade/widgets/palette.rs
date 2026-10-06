@@ -166,17 +166,69 @@ fn code_scheme() -> &'static CodeScheme {
 }
 
 pub fn current() -> Palette {
-    current_in(is_light_theme())
+    cached(None)
 }
 
 /// The palette of one theme, whichever is active. Glass (loop, dock, bar)
 /// is always dark; only ordinary apps follow the theme.
 pub fn current_in(light: bool) -> Palette {
+    cached(Some(light))
+}
+
+fn compute_in(light: bool) -> Palette {
     let mut colors = [0u32; super::abi::PALETTE_SLOTS];
     for (i, slot) in colors.iter_mut().enumerate() {
         *slot = resolve_in(token_at(i), light);
     }
     Palette { colors }
+}
+
+// Everything the palette reads lives in the config store and the wallpaper
+// theme; both bump a generation after each write. A cache entry is valid
+// while both generations are unchanged.
+struct PaletteCache {
+    key:   (u32, u32),
+    light: Option<bool>,
+    pals:  [Option<Palette>; 2],
+}
+
+static CACHE: spin::Mutex<PaletteCache> = spin::Mutex::new(PaletteCache {
+    key: (0, 0), light: None, pals: [None, None],
+});
+
+fn deps_key() -> (u32, u32) {
+    (crate::config::generation(), crate::theme::generation())
+}
+
+/// Palette for `light`, or for the active theme when `None`. Computed
+/// outside the cache lock; the key is read first, so a write racing the
+/// computation leaves an entry that the next call already sees as stale.
+fn cached(light: Option<bool>) -> Palette {
+    let key = deps_key();
+    let (hit_light, hit) = {
+        let c = CACHE.lock();
+        if c.key == key {
+            let l = light.or(c.light);
+            (c.light, l.and_then(|l| c.pals[l as usize]))
+        } else {
+            (None, None)
+        }
+    };
+    if let Some(p) = hit { return p; }
+    let l = match light.or(hit_light) {
+        Some(l) => l,
+        None => is_light_theme(),
+    };
+    let pal = compute_in(l);
+    let mut c = CACHE.lock();
+    if c.key != key {
+        c.key = key;
+        c.light = None;
+        c.pals = [None, None];
+    }
+    if light.is_none() { c.light = Some(l); }
+    c.pals[l as usize] = Some(pal);
+    pal
 }
 
 /// Palette for a widget window: dock and bar are glass and stay dark.
@@ -243,13 +295,13 @@ pub fn panel_opacity(window_id: u32) -> u32 {
 }
 
 pub fn resolve(token: Token) -> u32 {
-    resolve_in(token, is_light_theme())
+    current().colors[token as u8 as usize]
 }
 
 /// A token as drawn on glass — loop, dock and bar are dark glass in both
 /// themes, since light glass over a busy wallpaper is less legible.
 pub fn resolve_glass(token: Token) -> u32 {
-    resolve_in(token, false)
+    current_in(false).colors[token as u8 as usize]
 }
 
 pub fn resolve_in(token: Token, is_light: bool) -> u32 {

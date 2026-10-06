@@ -170,7 +170,7 @@ fn record_anchors(
             out.insert(id.0, n.rect);
         }
     }
-    let kids = widget_children(w);
+    let kids = children(w);
     for (cw, cl) in kids.iter().zip(n.children.iter()) {
         record_anchors(cw, cl, out);
     }
@@ -219,13 +219,14 @@ fn collect_popovers(
         // tree to avoid double-placing.
         return;
     }
-    for c in widget_children(w) {
+    for c in children(w) {
         collect_popovers(c, window, anchors, out);
     }
 }
 
-/// Children of a widget — used by anchor + popover walkers.
-fn widget_children(w: &Widget) -> &[Widget] {
+/// Children of a widget in tree order; the one container set every walker
+/// (layout, render, hit tests, focus) descends through.
+pub(super) fn children(w: &Widget) -> &[Widget] {
     match w {
         Widget::Column { children, .. }
         | Widget::Row    { children, .. }
@@ -234,6 +235,19 @@ fn widget_children(w: &Widget) -> &[Widget] {
         Widget::Scroll  { child, .. } => core::slice::from_ref(&**child),
         Widget::Popover { child, .. } => core::slice::from_ref(&**child),
         _ => &[],
+    }
+}
+
+/// Mutable twin of `children`.
+pub(super) fn children_mut(w: &mut Widget) -> &mut [Widget] {
+    match w {
+        Widget::Column { children, .. }
+        | Widget::Row    { children, .. }
+        | Widget::Stack  { children, .. }
+        | Widget::Menu   { items: children, .. } => children,
+        Widget::Scroll  { child, .. } => core::slice::from_mut(&mut **child),
+        Widget::Popover { child, .. } => core::slice::from_mut(&mut **child),
+        _ => &mut [],
     }
 }
 
@@ -291,7 +305,7 @@ fn flex_modifier(mods: &[Modifier]) -> Option<u8> {
 /// (clamped — a module must not be able to ask for a 60 000 px glyph),
 /// else whatever the style resolves to. Layout and render must agree on
 /// this, so both go through here.
-pub(super) fn font_size_of(style: TextStyle, mods: &[Modifier]) -> u16 {
+pub(super) fn font_size_of<'a>(style: TextStyle, mods: impl IntoIterator<Item = &'a Modifier>) -> u16 {
     for m in mods {
         if let Modifier::FontSize(px) = m {
             return (*px).clamp(super::abi::FONT_SIZE_MIN, super::abi::FONT_SIZE_MAX);

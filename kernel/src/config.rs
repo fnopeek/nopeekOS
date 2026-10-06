@@ -7,6 +7,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
 const MAX_ENTRIES: usize = 32;
@@ -88,11 +89,26 @@ impl ConfigStore {
 
 static CONFIG: Mutex<ConfigStore> = Mutex::new(ConfigStore::new());
 
+/// Bumped after every write to `CONFIG`; lets derived caches (the widget
+/// palette) skip the string lookups while nothing changed.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Current config generation. A value read before a lookup stays valid
+/// for that lookup's result: writers bump only after the store.
+pub fn generation() -> u32 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+fn bump() {
+    GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Load config from npkFS. Call after unlock.
 pub fn load() {
     match crate::npkfs::fetch(CONFIG_OBJECT) {
         Ok((data, _)) => {
             CONFIG.lock().deserialize(&data);
+            bump();
         }
         Err(_) => {
             // No config yet — fresh system
@@ -114,6 +130,7 @@ pub fn get(key: &str) -> Option<String> {
 /// Set a config value and persist.
 pub fn set(key: &str, value: &str) {
     CONFIG.lock().set(key, value);
+    bump();
     save();
     if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
     if key == "keyboard" { crate::keyboard::cache_layout(); }
@@ -122,7 +139,7 @@ pub fn set(key: &str, value: &str) {
 /// Remove a config value and persist.
 pub fn unset(key: &str) -> bool {
     let removed = CONFIG.lock().remove(key);
-    if removed { save(); }
+    if removed { bump(); save(); }
     if key == "bootlog" { crate::serial::set_verbose(false); }
     if key == "keyboard" { crate::keyboard::cache_layout(); }
     removed

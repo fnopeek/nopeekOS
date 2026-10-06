@@ -14,8 +14,6 @@
 
 #![allow(dead_code)]
 
-use alloc::vec::Vec;
-
 use super::abi::{
     Axis, Density, Fill, Modifier, Point, RasterTarget, Rasterizer, Rect, Token, Widget,
 };
@@ -100,23 +98,25 @@ fn render_node(
     let is_focused = focus_path.is_some();
     let is_active  = active_path.is_some();
     let base = modifiers_of(widget);
-    let eff = effective_modifiers(base, is_hovered, is_focused, is_active, density);
-    // This node's own Tint wins for its whole subtree.
-    let subtree_tint = eff.iter().rev()
-        .find_map(|m| if let Modifier::Tint(t) = m { Some(*t) } else { None })
+    let eff = Eff::new(base, is_hovered, is_focused, is_active, density);
+    // This node's own Tint wins for its whole subtree (the last one listed).
+    let subtree_tint = eff.iter()
+        .filter_map(|m| if let Modifier::Tint(t) = m { Some(*t) } else { None })
+        .last()
         .or(inherited_tint);
-    let subtree_scale = eff.iter().rev()
-        .find_map(|m| if let Modifier::Scale(v) = m { Some(*v as u32) } else { None })
+    let subtree_scale = eff.iter()
+        .filter_map(|m| if let Modifier::Scale(v) = m { Some(*v as u32) } else { None })
+        .last()
         .or(inherited_scale);
 
-    paint_modifiers_eff(rast, target, &eff, layout.rect);
+    paint_modifiers_eff(rast, target, eff, layout.rect);
     // `is_focused && Some([])` (focus exactly here) is the only case
     // where the editor caret is painted — descended-focus paths are
     // ancestors, not the input itself. paint_node_eff applies that
     // check.
     let edit_for_node: Option<&InputEditState> =
         if matches!(focus_path, Some(p) if p.is_empty()) { input_edit } else { None };
-    paint_node_eff(rast, target, widget, layout, &eff, edit_for_node, scroll_y, scroll_x,
+    paint_node_eff(rast, target, widget, layout, eff, edit_for_node, scroll_y, scroll_x,
                    inherited_tint, inherited_scale);
 
     // A Scroll clips its subtree to its viewport rect so overflowing
@@ -136,7 +136,7 @@ fn render_node(
     }
 
     // Recurse — at most one child sits on each path.
-    let kids = widget_children(widget);
+    let kids = super::layout::children(widget);
     for (i, (cw, cl)) in kids.iter().zip(layout.children.iter()).enumerate() {
         let child_hover  = descend(hover_path,  i as u32);
         let child_focus  = descend(focus_path,  i as u32);
@@ -158,7 +158,7 @@ fn render_node(
     // Surface token, weighted by (255 - opacity). Lets the SDK
     // express "show this at 70 % visibility" without the rasterizer
     // trait needing a new parameter.
-    let op = find_opacity_in(&eff);
+    let op = find_opacity_in(eff);
     if op < 255 {
         apply_rect_opacity(target, layout.rect, op);
     }
@@ -228,7 +228,7 @@ fn span_token_at(spans: &[super::abi::Span], off: usize, default: Token) -> Toke
 }
 
 /// The colour runs from `Modifier::Spans`, or empty.
-fn spans_of(mods: &[super::abi::Modifier]) -> &[super::abi::Span] {
+fn spans_of<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> &'a [super::abi::Span] {
     for m in mods {
         if let super::abi::Modifier::Spans(v) = m { return v }
     }
@@ -239,7 +239,7 @@ fn spans_of(mods: &[super::abi::Modifier]) -> &[super::abi::Span] {
 /// `layout::padding` so leaf glyph placement matches the layout-side
 /// outer-size growth — a single canonical source for "how much
 /// padding does this leaf carry".
-fn leaf_padding(mods: &[Modifier]) -> (u32, u32) {
+fn leaf_padding<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> (u32, u32) {
     let (mut px, mut py) = (0u32, 0u32);
     for m in mods {
         match m {
@@ -257,82 +257,108 @@ fn leaf_padding(mods: &[Modifier]) -> (u32, u32) {
     (px, py)
 }
 
-/// Build the modifier list that applies to `widget` after merging the
-/// active pseudo-states and density-conditional mods. Wrapper variants
-/// are stripped so downstream paint code never sees nested modifier
-/// lists.
+/// The modifier list that applies to a widget after merging the active
+/// pseudo-states and density-conditional mods, borrowed from the tree.
+/// Wrapper variants are skipped so downstream paint code never sees nested
+/// modifier lists.
 ///
-/// Application order (later wins for last-write-wins fields like
+/// Iteration order (later wins for last-write-wins fields like
 /// Background): base → density → hover → focus → active → disabled.
-/// Disabled is presence-based (the *modifier itself* on the widget,
-/// not a compositor-tracked external state) and overrides interactive
-/// states because it represents an explicit app decision.
-fn effective_modifiers(
-    base: &[Modifier],
-    is_hovered: bool,
-    is_focused: bool,
-    is_active: bool,
-    density: Density,
-) -> Vec<Modifier> {
-    let is_disabled = base.iter().any(|m| matches!(m, Modifier::Disabled(_)));
+/// Disabled is presence-based (the modifier itself on the widget, not a
+/// compositor-tracked external state) and overrides interactive states
+/// because it represents an explicit app decision.
+#[derive(Clone, Copy)]
+pub(super) struct Eff<'a> {
+    base:     &'a [Modifier],
+    density:  Density,
+    /// Base holds no wrapper variant: the effective list is `base` itself.
+    plain:    bool,
+    disabled: bool,
+    hovered:  bool,
+    focused:  bool,
+    active:   bool,
+}
 
-    let mut out: Vec<Modifier> = Vec::with_capacity(base.len());
-    // Base: keep all non-pseudo-state modifiers verbatim.
-    for m in base {
-        match m {
-            Modifier::Hover(_)
-            | Modifier::Focus(_)
-            | Modifier::Active(_)
-            | Modifier::Disabled(_)
-            | Modifier::WhenDensity(_, _) => {}
-            _ => out.push(m.clone()),
+fn is_wrapper(m: &Modifier) -> bool {
+    matches!(m,
+        Modifier::Hover(_) | Modifier::Focus(_) | Modifier::Active(_)
+        | Modifier::Disabled(_) | Modifier::WhenDensity(_, _))
+}
+
+/// Number of passes over `base` that make up an effective list.
+const EFF_STAGES: u8 = 6;
+
+impl<'a> Eff<'a> {
+    fn new(base: &'a [Modifier], hovered: bool, focused: bool, active: bool,
+           density: Density) -> Self {
+        Eff {
+            base, density,
+            plain:    !base.iter().any(is_wrapper),
+            disabled: base.iter().any(|m| matches!(m, Modifier::Disabled(_))),
+            hovered, focused, active,
         }
     }
-    // Density (always applies — orthogonal to interactive states).
-    for m in base {
-        if let Modifier::WhenDensity(d, inner) = m {
-            if *d == density {
-                for inner_m in inner { out.push(inner_m.clone()); }
-            }
+
+    pub(super) fn iter(self) -> EffIter<'a> {
+        if self.plain {
+            EffIter { eff: self, stage: EFF_STAGES, pos: 0, inner: self.base.iter() }
+        } else {
+            EffIter { eff: self, stage: 0, pos: 0, inner: [].iter() }
         }
     }
-    // Disabled wins over interactive states — when an app marks a
-    // widget disabled, the user-state visuals shouldn't show through.
-    if is_disabled {
-        for m in base {
-            if let Modifier::Disabled(inner) = m {
-                for inner_m in inner { out.push(inner_m.clone()); }
-            }
+
+    /// What base modifier `m` contributes in pass `stage`.
+    fn select(&self, stage: u8, m: &'a Modifier) -> &'a [Modifier] {
+        match (stage, m) {
+            (0, m) if !is_wrapper(m) => core::slice::from_ref(m),
+            (1, Modifier::WhenDensity(d, inner)) if *d == self.density => inner,
+            (2, Modifier::Disabled(inner)) if self.disabled => inner,
+            (3, Modifier::Hover(inner))  if !self.disabled && self.hovered => inner,
+            (4, Modifier::Focus(inner))  if !self.disabled && self.focused => inner,
+            (5, Modifier::Active(inner)) if !self.disabled && self.active  => inner,
+            _ => &[],
         }
-    } else {
-        if is_hovered {
-            for m in base {
-                if let Modifier::Hover(inner) = m {
-                    for inner_m in inner { out.push(inner_m.clone()); }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct EffIter<'a> {
+    eff:   Eff<'a>,
+    stage: u8,
+    pos:   usize,
+    inner: core::slice::Iter<'a, Modifier>,
+}
+
+impl<'a> Iterator for EffIter<'a> {
+    type Item = &'a Modifier;
+
+    fn next(&mut self) -> Option<&'a Modifier> {
+        loop {
+            if let Some(m) = self.inner.next() { return Some(m); }
+            if self.stage >= EFF_STAGES { return None; }
+            match self.eff.base.get(self.pos) {
+                Some(m) => {
+                    self.pos += 1;
+                    self.inner = self.eff.select(self.stage, m).iter();
+                }
+                None => {
+                    self.stage += 1;
+                    self.pos = 0;
                 }
             }
         }
-        if is_focused {
-            for m in base {
-                if let Modifier::Focus(inner) = m {
-                    for inner_m in inner { out.push(inner_m.clone()); }
-                }
-            }
-        }
-        if is_active {
-            for m in base {
-                if let Modifier::Active(inner) = m {
-                    for inner_m in inner { out.push(inner_m.clone()); }
-                }
-            }
-        }
     }
-    out
+}
+
+impl<'a> IntoIterator for Eff<'a> {
+    type Item = &'a Modifier;
+    type IntoIter = EffIter<'a>;
+    fn into_iter(self) -> EffIter<'a> { self.iter() }
 }
 
 /// First Opacity in an explicit modifier list. Used by the post-paint
 /// opacity dampening pass.
-fn find_opacity_in(mods: &[Modifier]) -> u8 {
+fn find_opacity_in<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> u8 {
     for m in mods {
         if let Modifier::Opacity(v) = m { return *v; }
     }
@@ -355,7 +381,7 @@ pub fn tree_has_pseudo_state(tree: &Widget) -> bool {
             return true;
         }
     }
-    for c in widget_children(tree) {
+    for c in super::layout::children(tree) {
         if tree_has_pseudo_state(c) { return true; }
     }
     false
@@ -413,9 +439,11 @@ const GUTTER_PAD_L: i32 = 10;
 /// show, so the text doesn't shift sideways as you scroll past 99.
 /// Shared by the renderer and the click-to-caret hit test; if these two
 /// disagree, clicks land on the wrong column.
-pub(super) fn textarea_gutter_w(mods: &[Modifier], total_lines: usize) -> u32 {
+pub(super) fn textarea_gutter_w<'a, M>(mods: M, total_lines: usize) -> u32
+where M: IntoIterator<Item = &'a Modifier> + Copy
+{
     let px = super::layout::font_size_of(super::abi::TextStyle::Mono, mods);
-    let on = mods.iter().any(|m| matches!(m, Modifier::LineNumbers(true)));
+    let on = mods.into_iter().any(|m| matches!(m, Modifier::LineNumbers(true)));
     if !on { return 0; }
     let digits = {
         let mut n = total_lines.max(1);
@@ -439,8 +467,9 @@ const TEXTAREA_BAR_W: i32 = 6;
 /// px. Shared by the renderer, the click-to-caret hit test and the
 /// caret-follow scroll — `scroll_x` is derived from these, so if they
 /// disagree the caret scrolls to a different place than it is drawn.
-pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: usize)
+pub(super) fn textarea_text_column<'a, M>(rect: Rect, mods: M, total_lines: usize)
     -> (i32, u32)
+where M: IntoIterator<Item = &'a Modifier> + Copy
 {
     let pad = leaf_padding(mods).0 as i32;
     let x = rect.x + pad + 4 + textarea_gutter_w(mods, total_lines) as i32;
@@ -458,7 +487,7 @@ pub(super) fn textarea_text_column(rect: Rect, mods: &[Modifier], total_lines: u
 /// longest line by character count is the widest one. Find it by counting
 /// and measure only that line, instead of measuring every line of the
 /// document on every keystroke.
-pub(super) fn textarea_content_w(value: &str, mods: &[Modifier]) -> u32 {
+pub(super) fn textarea_content_w<'a>(value: &str, mods: impl IntoIterator<Item = &'a Modifier>) -> u32 {
     let px = super::layout::font_size_of(super::abi::TextStyle::Mono, mods);
     let longest = value.split('\n').max_by_key(|l| l.chars().count()).unwrap_or("");
     ceil_u32_local(crate::gui::text::measure_px(longest, super::abi::TextStyle::Mono, px))
@@ -467,7 +496,7 @@ pub(super) fn textarea_content_w(value: &str, mods: &[Modifier]) -> u32 {
 fn paint_modifiers_eff(
     rast: &mut dyn Rasterizer,
     target: &mut RasterTarget,
-    mods: &[Modifier],
+    mods: Eff<'_>,
     rect: Rect,
 ) {
     // Last write wins so state mods (hover, etc.) appended after the
@@ -537,7 +566,7 @@ fn paint_node_eff(
     target: &mut RasterTarget,
     widget: &Widget,
     layout: &LayoutNode,
-    eff: &[Modifier],
+    eff: Eff<'_>,
     edit_state: Option<&InputEditState>,
     scroll_y: u32,
     scroll_x: u32,
@@ -1060,21 +1089,4 @@ fn modifiers_of(w: &Widget) -> &[Modifier] {
         Widget::Menu    { modifiers, .. } => modifiers,
         _ => &[],
     }
-}
-
-fn widget_children(w: &Widget) -> alloc::vec::Vec<&Widget> {
-    let mut out = alloc::vec::Vec::new();
-    match w {
-        Widget::Column { children, .. } |
-        Widget::Row    { children, .. } |
-        Widget::Stack  { children, .. } |
-        Widget::Menu   { items: children, .. } => {
-            for c in children { out.push(c); }
-        }
-        Widget::Scroll { child, .. } | Widget::Popover { child, .. } => {
-            out.push(child.as_ref());
-        }
-        _ => {}
-    }
-    out
 }

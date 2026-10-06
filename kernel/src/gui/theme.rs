@@ -17,6 +17,15 @@ static BORDER_GRADIENT: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
 /// Whether a custom theme is active (vs. aurora default).
 static THEME_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Bumped after every change to the palette or the active flag, so caches
+/// derived from the theme know when to recompute.
+static GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Current theme generation; changes whenever `set_palette` or `clear` ran.
+pub fn generation() -> u32 {
+    GENERATION.load(Ordering::Acquire)
+}
+
 
 /// Set the full 16-color palette and derive border gradient.
 pub fn set_palette(colors: &[u32; 16]) {
@@ -28,6 +37,7 @@ pub fn set_palette(colors: &[u32; 16]) {
     BORDER_GRADIENT[0].store(ensure_bright(colors[1]), Ordering::Relaxed);
     BORDER_GRADIENT[1].store(ensure_bright(colors[2]), Ordering::Relaxed);
     THEME_ACTIVE.store(true, Ordering::Release);
+    GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Ensure a color has minimum luminance for readability.
@@ -80,6 +90,7 @@ pub fn inactive_border() -> u32 {
 /// Clear the custom theme, revert to aurora defaults.
 pub fn clear() {
     THEME_ACTIVE.store(false, Ordering::Release);
+    GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Interpolate between two colors. t = 0..1000 (0 = a, 1000 = b).

@@ -19,6 +19,7 @@ mod check_abi;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -94,9 +95,14 @@ pub struct WidgetScene {
     pub origin_y:    i32,
     /// Cached tree + layout so the compositor can re-layout on
     /// resize without the app committing again. Widget-apps are
-    /// allowed to exit after a single commit.
-    pub tree:        abi::Widget,
-    pub layout_tree: layout::LayoutNode,
+    /// allowed to exit after a single commit. Shared so a re-render can
+    /// work outside the `SCENES` lock without copying them.
+    pub tree:        Arc<abi::Widget>,
+    pub layout_tree: Arc<layout::LayoutNode>,
+    /// `scroll_y` the cached layout was computed with.
+    pub layout_scroll_y: u32,
+    /// The tree was edited in place since the last layout.
+    pub layout_stale: bool,
     /// NodeId → screen rect, populated for any widget tagged with
     /// `Modifier::NodeId`. Used by `Widget::Popover`'s anchor lookup
     /// at layout time and by the click-outside-dismiss test in
@@ -107,7 +113,7 @@ pub struct WidgetScene {
     /// last (top z-order); hit-tested before the main tree so a
     /// click on a popover never falls through to whatever's
     /// underneath it.
-    pub popovers:    Vec<layout::PopoverLayout>,
+    pub popovers:    Arc<Vec<layout::PopoverLayout>>,
     /// blake3 hash of the postcard payload that produced this
     /// scene. Lets scene_commit short-circuit when an app
     /// resubmits the same tree (common with interactive apps that
@@ -631,14 +637,6 @@ fn is_focusable(w: &abi::Widget) -> bool {
 // on every MouseMove; we push Event::Action only when the hit changes.
 static LAST_HOVER: Mutex<BTreeMap<u32, abi::ActionId>> = Mutex::new(BTreeMap::new());
 
-pub fn hover_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
-    let scenes = SCENES.lock();
-    let scene = scenes.get(&window_id)?;
-    let mut out = None;
-    find_hover_target(&scene.tree, &scene.layout_tree, x, y, &mut out);
-    out
-}
-
 /// Compositor-side density classifier. Thresholds live here once;
 /// apps reference them only via `Modifier::WhenDensity(Density, …)`.
 fn classify_density(window_w: u32) -> abi::Density {
@@ -825,8 +823,7 @@ fn widget_at_path_mut<'a>(tree: &'a mut abi::Widget, path: &[u32])
 {
     let mut cur = tree;
     for &i in path {
-        let kids = widget_children_mut(cur);
-        cur = kids.into_iter().nth(i as usize)?;
+        cur = widget_children_mut(cur).get_mut(i as usize)?;
     }
     Some(cur)
 }
@@ -859,52 +856,48 @@ fn set_input_value_at(tree: &mut abi::Widget, path: &[u32], value: &str) -> bool
 }
 
 pub fn update_hover(window_id: u32, x: i32, y: i32) {
-    // First: every step below may return early when the hover target did
-    // not change — and an unchanged target is exactly when motion matters.
-    motion_pulse(window_id, x, y);
-
-    // Step 1 — recompute the hover path against the cached layout tree.
-    // Cheap (one descent), avoids re-rendering on hover moves that
-    // don't actually cross node boundaries.
-    let new_path: Option<Vec<u32>> = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => find_hover_path(&s.tree, &s.layout_tree, x, y),
-            None    => None,
-        }
-    };
-    let new_path = new_path.unwrap_or_default();
-
-    // Step 2 — diff against the cached hover_path. If unchanged, skip.
-    // If changed and the tree has any pseudo-state-aware modifier,
-    // re-rasterize using the new path; otherwise just update the path
-    // (hover events still fire below).
-    let path_changed = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => s.hover_path != new_path,
-            None    => false,
-        }
-    };
-
-    if path_changed {
-        let needs_rerender = {
-            let scenes = SCENES.lock();
-            scenes.get(&window_id).map(|s| s.has_pseudo).unwrap_or(false)
-        };
-        if needs_rerender {
-            rerender_with_state(window_id, &new_path);
-        } else {
-            // Just bump the cached path so the next move diffs cleanly.
-            if let Some(s) = SCENES.lock().get_mut(&window_id) {
-                s.hover_path = new_path.clone();
+    // One pass under the lock: motion target, hover path and OnHover target
+    // all come from the same cached layout. `motion` is `None` when the
+    // window has no scene.
+    let (motion, new_id, job) = {
+        let mut scenes = SCENES.lock();
+        match scenes.get_mut(&window_id) {
+            Some(s) => {
+                let popover_hit = s.popovers.iter().rev()
+                    .any(|p| rect_contains(p.layout.rect, x, y));
+                let motion = if popover_hit {
+                    None
+                } else {
+                    find_motion_target(&s.tree, &s.layout_tree, x, y)
+                };
+                // Re-render only when the path crosses a node boundary and the
+                // tree has state-driven visuals; otherwise just track the path.
+                let new_path = find_hover_path(&s.tree, &s.layout_tree, x, y)
+                    .unwrap_or_default();
+                let mut job = None;
+                if s.hover_path != new_path {
+                    s.hover_path = new_path;
+                    if s.has_pseudo { job = Some(RenderJob::take(s, LayoutMode::Reuse)); }
+                }
+                let mut hover = None;
+                find_hover_target(&s.tree, &s.layout_tree, x, y, &mut hover);
+                (Some(motion), hover, job)
             }
+            None => (None, None, None),
         }
+    };
+
+    // Motion first: the steps below may return early when the hover target
+    // did not change, and an unchanged target is exactly when motion matters.
+    if let Some(motion) = motion { motion_pulse(window_id, x, y, motion); }
+
+    if let Some(job) = job {
+        finish_job(window_id, job, LayoutMode::Reuse);
+        mark_dirty(window_id);
     }
 
-    // Step 3 — fire the OnHover action event (existing semantics:
-    // dedup on ActionId, push only when target action changes).
-    let new_id = hover_test(window_id, x, y);
+    // OnHover action event: dedup on ActionId, push only when the target
+    // action changes.
     let mut last = LAST_HOVER.lock();
     let prev = last.get(&window_id).copied();
     let changed = match (prev, new_id) {
@@ -945,15 +938,10 @@ fn find_motion_target(
 /// `Modifier::OnMotion`: one Action per `MOTION_INTERVAL_MS` while the
 /// pointer actually moves, immediately on a change of target. Called on
 /// every hover update, which also runs when nothing moved — so the
-/// position is compared, not just the clock.
-fn motion_pulse(window_id: u32, x: i32, y: i32) {
-    let id = {
-        let scenes = SCENES.lock();
-        let s = match scenes.get(&window_id) { Some(s) => s, None => return };
-        let popover_hit = s.popovers.iter().rev().any(|p| rect_contains(p.layout.rect, x, y));
-        if popover_hit { None } else { find_motion_target(&s.tree, &s.layout_tree, x, y) }
-    };
-    let id = match id {
+/// position is compared, not just the clock. `target` is the OnMotion
+/// widget under the pointer, if any.
+fn motion_pulse(window_id: u32, x: i32, y: i32, target: Option<abi::ActionId>) {
+    let id = match target {
         Some(id) => id,
         None => { LAST_MOTION.lock().remove(&window_id); return; }
     };
@@ -969,62 +957,142 @@ fn motion_pulse(window_id: u32, x: i32, y: i32) {
     push_event(window_id, abi::Event::Action(id));
 }
 
-/// Re-rasterize a scene's pixel buffer with the given hover path (focus /
-/// active come from the cached scene). Does not request a repaint — the
-/// caller decides full vs. damage-rect. Locks SCENES internally.
-fn rerender_scene_pixels(window_id: u32, hover_path: &[u32]) {
-    let (tree, rect, density, focus_path, active_path, input_edit, scroll_y, scroll_x) = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => (
-                s.tree.clone(),
-                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
-                s.density,
-                s.focus_path.clone(),
-                s.active_path.clone(),
-                s.input_edit.clone(),
-                s.scroll_y,
-                s.scroll_x,
-            ),
-            None => return,
-        }
-    };
-    let lo = layout::layout_scrolled(&tree, rect, scroll_y);
-    let layout_tree = lo.tree;
-    let anchors = lo.anchors;
-    let popovers = lo.popovers;
-    let max_scroll_y = lo.max_scroll_y;
-    let max_scroll_x = lo.max_scroll_x;
-    let max_scroll_x_rect = lo.max_scroll_x_rect;
-    let max_scroll_rect = lo.max_scroll_rect;
-    let h = if hover_path.is_empty() { None } else { Some(hover_path) };
-    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-    let a: Option<&[u32]> = active_path.as_deref();
-    let pixels = rasterize_buffer_with_overlays(
-        window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
-        input_edit.as_ref(), scroll_y, scroll_x,
-    );
+/// When a re-rasterization may skip `layout_scrolled`.
+#[derive(Clone, Copy)]
+enum LayoutMode {
+    /// Reuse the cached layout unless the tree or `scroll_y` changed since
+    /// it was computed. Layout reads neither hover, focus, active, the
+    /// editor buffer nor `scroll_x`, so pseudo-state changes never need it.
+    Reuse,
+    /// Always lay out again.
+    Force,
+    /// Never lay out; paint into the cached geometry as it stands.
+    Never,
+}
 
-    if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        s.pixels      = pixels;
-        s.layout_tree = layout_tree;
-        s.anchors     = anchors;
-        s.popovers    = popovers;
-        s.hover_path  = hover_path.to_vec();
-        s.max_scroll_y = max_scroll_y;
-        s.scroll_viewport = max_scroll_rect;
-        s.max_scroll_x = max_scroll_x;
-        s.scroll_viewport_x = max_scroll_x_rect;
-        s.scroll_x    = s.scroll_x.min(max_scroll_x);
-        s.scroll_y    = s.scroll_y.min(max_scroll_y);
+/// Everything one rasterization reads, taken from a scene under one lock.
+/// The tree and layout are shared, so taking a job copies no widget data;
+/// only the editor buffer, when one is focused, is cloned.
+struct RenderJob {
+    tree:        Arc<abi::Widget>,
+    /// Cached layout to paint into; `None` = lay out first.
+    layout:      Option<(Arc<layout::LayoutNode>, Arc<Vec<layout::PopoverLayout>>)>,
+    rect:        abi::Rect,
+    density:     abi::Density,
+    hover_path:  Vec<u32>,
+    focus_path:  Vec<u32>,
+    active_path: Option<Vec<u32>>,
+    input_edit:  Option<InputEditState>,
+    scroll_y:    u32,
+    scroll_x:    u32,
+}
+
+/// Geometry from a fresh `layout_scrolled`, to be stored with the pixels.
+struct Relaid {
+    layout_tree:       Arc<layout::LayoutNode>,
+    anchors:           BTreeMap<u32, abi::Rect>,
+    popovers:          Arc<Vec<layout::PopoverLayout>>,
+    max_scroll_y:      u32,
+    max_scroll_rect:   abi::Rect,
+    max_scroll_x:      u32,
+    max_scroll_x_rect: abi::Rect,
+}
+
+impl RenderJob {
+    fn take(s: &WidgetScene, mode: LayoutMode) -> Self {
+        let reuse = match mode {
+            LayoutMode::Reuse => !s.layout_stale && s.layout_scroll_y == s.scroll_y,
+            LayoutMode::Force => false,
+            LayoutMode::Never => true,
+        };
+        RenderJob {
+            tree:        s.tree.clone(),
+            layout:      if reuse { Some((s.layout_tree.clone(), s.popovers.clone())) } else { None },
+            rect:        abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
+            density:     s.density,
+            hover_path:  s.hover_path.clone(),
+            focus_path:  s.focus_path.clone(),
+            active_path: s.active_path.clone(),
+            input_edit:  s.input_edit.clone(),
+            scroll_y:    s.scroll_y,
+            scroll_x:    s.scroll_x,
+        }
+    }
+
+    /// Lay out if needed and rasterize. Takes no scene lock.
+    fn run(&self, window_id: u32) -> (Vec<u32>, Option<Relaid>) {
+        let (layout_tree, popovers, relaid) = match &self.layout {
+            Some((t, p)) => (t.clone(), p.clone(), None),
+            None => {
+                let lo = layout::layout_scrolled(&self.tree, self.rect, self.scroll_y);
+                let t = Arc::new(lo.tree);
+                let p = Arc::new(lo.popovers);
+                (t.clone(), p.clone(), Some(Relaid {
+                    layout_tree:       t,
+                    anchors:           lo.anchors,
+                    popovers:          p,
+                    max_scroll_y:      lo.max_scroll_y,
+                    max_scroll_rect:   lo.max_scroll_rect,
+                    max_scroll_x:      lo.max_scroll_x,
+                    max_scroll_x_rect: lo.max_scroll_x_rect,
+                }))
+            }
+        };
+        let h: Option<&[u32]> = if self.hover_path.is_empty() { None } else { Some(&self.hover_path) };
+        let f: Option<&[u32]> = if self.focus_path.is_empty() { None } else { Some(&self.focus_path) };
+        let a: Option<&[u32]> = self.active_path.as_deref();
+        let pixels = rasterize_buffer_with_overlays(
+            window_id, &self.tree, &layout_tree, &popovers, self.rect, h, f, a,
+            self.density, self.input_edit.as_ref(), self.scroll_y, self.scroll_x,
+        );
+        (pixels, relaid)
+    }
+
+    /// Whether `s` is still the scene this job was taken from: same tree
+    /// and same geometry. A commit or resize in between makes the result
+    /// stale (and the pixel buffer possibly the wrong size).
+    fn matches(&self, s: &WidgetScene) -> bool {
+        Arc::ptr_eq(&self.tree, &s.tree)
+            && self.rect == (abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height })
     }
 }
 
-/// Re-rasterize with the given hover path and request a full repaint.
-/// Used by focus/active state changes (rare, not the per-move hot path).
-fn rerender_with_state(window_id: u32, hover_path: &[u32]) {
-    rerender_scene_pixels(window_id, hover_path);
-    mark_dirty(window_id);
+/// Store a finished job's pixels (and fresh geometry, if it laid out).
+fn store_job(s: &mut WidgetScene, job: &RenderJob, pixels: Vec<u32>, relaid: Option<Relaid>,
+             mode: LayoutMode) {
+    s.pixels = pixels;
+    if let Some(r) = relaid {
+        s.layout_tree       = r.layout_tree;
+        s.anchors           = r.anchors;
+        s.popovers          = r.popovers;
+        s.max_scroll_y      = r.max_scroll_y;
+        s.scroll_viewport   = r.max_scroll_rect;
+        s.max_scroll_x      = r.max_scroll_x;
+        s.scroll_viewport_x = r.max_scroll_x_rect;
+        s.layout_scroll_y   = job.scroll_y;
+        s.layout_stale      = false;
+    }
+    // A pixel-only repaint leaves the scroll state alone.
+    if !matches!(mode, LayoutMode::Never) {
+        s.scroll_x = s.scroll_x.min(s.max_scroll_x);
+        s.scroll_y = s.scroll_y.min(s.max_scroll_y);
+    }
+}
+
+/// Rasterize `job` outside the lock and store the result. If the scene
+/// was replaced meanwhile (a commit on another core, a resize), the job is
+/// redone from the new scene so the stored pixels show the current state.
+fn finish_job(window_id: u32, mut job: RenderJob, mode: LayoutMode) {
+    for _ in 0..3 {
+        let (pixels, relaid) = job.run(window_id);
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) { Some(s) => s, None => return };
+        if job.matches(s) {
+            store_job(s, &job, pixels, relaid, mode);
+            return;
+        }
+        job = RenderJob::take(s, mode);
+    }
 }
 
 /// Helper: mark the window dirty + request a render. Used by every
@@ -1052,123 +1120,106 @@ fn mark_dirty(window_id: u32) {
 /// click-routing aren't affected by state mechanics).
 #[must_use]
 pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
-    // Decide focus + active for the press.
-    //
-    // Focus is *only* moved when the click lands on a `Widget::Input`.
-    // For every other focusable (Button, OnClick'd container, sidebar
-    // nav_row, menu-bar label, …) we fire the click action but leave
-    // focus where it was — keeps the keyboard caret on the search
-    // input across mouse navigation, which is exactly what loft /
-    // settings-style apps want. Tab/Shift+Tab still walk every
-    // focusable; click is just no longer a way to *land* keyboard
-    // focus on a non-Input.
-    //
-    // Active still tracks the press target so `:active` state on
-    // buttons works visually during mouse-down.
-    // Set when focus came from the chrome around a field rather than from
-    // the glyphs — decides where the caret lands (see below).
-    let mut via_field_row = false;
-    let (new_focus_opt, new_active, has_pseudo) = {
-        let scenes = SCENES.lock();
-        let scene = match scenes.get(&window_id) {
+    // Focus moves only onto a text widget (or the field row around one);
+    // a press anywhere else releases it, so a search box never traps the
+    // keyboard with no way out but Tab. Active tracks the press target so
+    // `:active` styling works during mouse-down.
+    let job = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) {
             Some(s) => s,
             None    => return false,
         };
-        let press_path = find_focusable_path(&scene.tree, &scene.layout_tree, x, y);
-        // One rule, everywhere: a press inside a text widget focuses it,
-        // a press anywhere else releases focus. Otherwise a search box
-        // would trap the keyboard with no way out but Tab.
-        let new_focus_opt: Option<Option<Vec<u32>>> = match press_path.as_ref() {
+        // Set when focus came from the chrome around a field rather than
+        // from the glyphs — decides where the caret lands (see below).
+        let mut via_field_row = false;
+        let press_path = find_focusable_path(&s.tree, &s.layout_tree, x, y);
+        let new_focus: Option<Vec<u32>> = match press_path.as_ref() {
             Some(p) if matches!(
-                widget_at_path(&scene.tree, p),
+                widget_at_path(&s.tree, p),
                 Some(abi::Widget::Input { .. }) | Some(abi::Widget::TextArea { .. })
-            ) => Some(Some(p.clone())),
+            ) => Some(p.clone()),
             // Not on the text itself — but possibly on the field around
             // it. A field is the whole row a user sees, not just the run
             // of glyphs inside it.
-            _ => match find_field_input_path(&scene.tree, &scene.layout_tree, x, y) {
-                Some(p) => { via_field_row = true; Some(Some(p)) }
-                None    => Some(None),
+            _ => match find_field_input_path(&s.tree, &s.layout_tree, x, y) {
+                Some(p) => { via_field_row = true; Some(p) }
+                None    => None,
             },
         };
-        (new_focus_opt, press_path, scene.has_pseudo)
-    };
 
-    let (focus_changed, active_changed) = {
-        let scenes = SCENES.lock();
-        let scene = match scenes.get(&window_id) {
-            Some(s) => s,
-            None    => return false,
+        let focus_changed = match &new_focus {
+            Some(p) => *p != s.focus_path,
+            None    => !s.focus_path.is_empty(),
         };
-        let f_changed = match &new_focus_opt {
-            Some(Some(p))  => *p != scene.focus_path,
-            Some(None)     => !scene.focus_path.is_empty(),
-            None           => false,
-        };
-        let a_changed = match (&new_active, &scene.active_path) {
+        let active_changed = match (&press_path, &s.active_path) {
             (Some(p), Some(cur)) => p != cur,
             (None, None)         => false,
             _                    => true,
         };
-        (f_changed, a_changed)
-    };
+        if !(focus_changed || active_changed) { return false; }
 
-    if !(focus_changed || active_changed) { return false; }
-
-    let mut tree_updated = false;
-    let edit_present = if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        if let Some(new_focus) = new_focus_opt {
-            // Capture the outgoing path before it is overwritten — the
-            // parked buffer is keyed by the field it came from.
-            let leaving = s.focus_path.clone();
-            match new_focus {
-                Some(p) => s.focus_path = p,
-                None    => s.focus_path.clear(),
+        // Capture the outgoing path before it is overwritten — the parked
+        // buffer is keyed by the field it came from.
+        let leaving = core::mem::take(&mut s.focus_path);
+        let mut tree_updated = false;
+        if let Some(p) = new_focus { s.focus_path = p; }
+        // The editor buffer leads the app's tree by one round-trip by
+        // design, so discarding it on focus loss would throw away whatever
+        // was typed since the app last committed. Park it under the field
+        // it belongs to, and hand it back when that same field is focused
+        // again.
+        if s.focus_path.is_empty() {
+            if let Some(edit) = s.input_edit.take() {
+                // Keep what was typed on screen — see `set_input_value_at`.
+                tree_updated = set_scene_input_value(s, &leaving, &edit.value);
+                s.parked_edit = Some((leaving, edit));
             }
-            // The editor buffer leads the app's tree by one round-trip by
-            // design, so discarding it on focus loss would throw away
-            // whatever was typed since the app last committed. Park it under
-            // the field it belongs to, and hand it back when that same field
-            // is focused again.
-            if s.focus_path.is_empty() {
-                if let Some(edit) = s.input_edit.take() {
-                    // Keep what was typed on screen — see
-                    // `set_input_value_at`.
-                    if set_input_value_at(&mut s.tree, &leaving, &edit.value) {
-                        tree_updated = true;
-                    }
-                    s.parked_edit = Some((leaving, edit));
-                }
-            } else {
-                let resume = match &s.parked_edit {
-                    Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
-                    _ => None,
-                };
-                s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
-                // Click on the text positions the caret exactly there
-                // (`text_select_begin`, which needs the press inside the
-                // Input's own rect). A click on the field's chrome has no
-                // glyph to aim at, so the caret goes to the end — where
-                // you'd continue typing. Overrides a resumed caret too:
-                // the click is the more recent intent.
-                if via_field_row {
-                    if let Some(edit) = s.input_edit.as_mut() {
-                        edit.cursor = edit.value.len();
-                        edit.sel_anchor = None;
-                    }
+        } else {
+            let resume = match &s.parked_edit {
+                Some((path, edit)) if *path == s.focus_path => Some(edit.clone()),
+                _ => None,
+            };
+            s.input_edit = compute_input_edit(&s.tree, &s.focus_path, resume.as_ref());
+            // Click on the text positions the caret exactly there
+            // (`text_select_begin`, which needs the press inside the
+            // Input's own rect). A click on the field's chrome has no
+            // glyph to aim at, so the caret goes to the end — where you'd
+            // continue typing. Overrides a resumed caret too: the click is
+            // the more recent intent.
+            if via_field_row {
+                if let Some(edit) = s.input_edit.as_mut() {
+                    edit.cursor = edit.value.len();
+                    edit.sel_anchor = None;
                 }
             }
         }
-        s.active_path = new_active;
-        s.input_edit.is_some()
-    } else { false };
+        s.active_path = press_path;
 
-    if has_pseudo || edit_present || tree_updated {
-        rerender_state_only(window_id);
-        crate::shade::request_render();
-        return true;
-    }
-    false
+        if s.has_pseudo || s.input_edit.is_some() || tree_updated {
+            RenderJob::take(s, LayoutMode::Reuse)
+        } else {
+            return false;
+        }
+    };
+    finish_job(window_id, job, LayoutMode::Reuse);
+    crate::shade::request_render();
+    true
+}
+
+/// `set_input_value_at` on a scene's shared tree. Unshares the tree only
+/// when the value actually differs, and marks the layout stale (an Input
+/// is as wide as its text).
+fn set_scene_input_value(s: &mut WidgetScene, path: &[u32], value: &str) -> bool {
+    let differs = match widget_at_path(&s.tree, path) {
+        Some(abi::Widget::Input { value: v, .. })
+        | Some(abi::Widget::TextArea { value: v, .. }) => v.as_str() != value,
+        _ => false,
+    };
+    if !differs { return false; }
+    let changed = set_input_value_at(Arc::make_mut(&mut s.tree), path, value);
+    if changed { s.layout_stale = true; }
+    changed
 }
 
 /// Move focus to the next focusable widget in document order
@@ -1189,50 +1240,39 @@ pub fn prev_focus(window_id: u32) -> bool {
 }
 
 fn advance_focus(window_id: u32, delta: isize) -> bool {
-    let (paths, current, has_pseudo) = {
-        let scenes = SCENES.lock();
-        let scene = match scenes.get(&window_id) {
+    let job = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) {
             Some(s) => s,
             None    => return false,
         };
         let mut paths: Vec<Vec<u32>> = Vec::new();
         let mut cursor: Vec<u32> = Vec::new();
-        collect_focusable_paths(&scene.tree, &scene.layout_tree, &mut cursor, &mut paths);
-        (paths, scene.focus_path.clone(), scene.has_pseudo)
-    };
-    if paths.is_empty() { return false; }
+        collect_focusable_paths(&s.tree, &s.layout_tree, &mut cursor, &mut paths);
+        if paths.is_empty() { return false; }
 
-    let cur_idx = paths.iter().position(|p| *p == current);
-    let next_idx = match cur_idx {
-        Some(i) => {
-            let n = paths.len() as isize;
-            ((i as isize + delta).rem_euclid(n)) as usize
-        }
-        None => if delta >= 0 { 0 } else { paths.len() - 1 },
-    };
-    let new_path = paths[next_idx].clone();
-    if new_path == current { return false; }
+        let cur_idx = paths.iter().position(|p| *p == s.focus_path);
+        let next_idx = match cur_idx {
+            Some(i) => {
+                let n = paths.len() as isize;
+                ((i as isize + delta).rem_euclid(n)) as usize
+            }
+            None => if delta >= 0 { 0 } else { paths.len() - 1 },
+        };
+        let new_path = paths.swap_remove(next_idx);
+        if new_path == s.focus_path { return false; }
 
-    if let Some(s) = SCENES.lock().get_mut(&window_id) {
         s.focus_path = new_path;
         // Tab onto an Input → init the editor; Tab off Input → drop it.
         s.input_edit = compute_input_edit(&s.tree, &s.focus_path, None);
-    }
-    if has_pseudo {
-        rerender_state_only(window_id);
-        mark_dirty(window_id);
-        return true;
-    }
-    // Even without pseudo-state mods, we need to re-render to show
-    // the cursor caret on the newly-focused Input.
-    let needs_caret_render = SCENES.lock().get(&window_id)
-        .map(|s| s.input_edit.is_some()).unwrap_or(false);
-    if needs_caret_render {
-        rerender_state_only(window_id);
-        mark_dirty(window_id);
-        return true;
-    }
-    false
+        // Without pseudo-state mods a newly focused Input still needs its
+        // caret painted.
+        if !(s.has_pseudo || s.input_edit.is_some()) { return false; }
+        RenderJob::take(s, LayoutMode::Reuse)
+    };
+    finish_job(window_id, job, LayoutMode::Reuse);
+    mark_dirty(window_id);
+    true
 }
 
 /// DFS-collect all focusable widget paths in document order. Used
@@ -1243,7 +1283,6 @@ fn collect_focusable_paths(
     cursor: &mut Vec<u32>,
     out: &mut Vec<Vec<u32>>,
 ) {
-    let _ = layout; // Same shape as the widget tree; kept for symmetry.
     if is_disabled(widget) { return; }
     if is_focusable(widget) {
         out.push(cursor.clone());
@@ -1261,23 +1300,18 @@ fn collect_focusable_paths(
 /// `true` if a re-render happened — caller marks the window dirty.
 #[must_use]
 pub fn release_at(window_id: u32) -> bool {
-    let (had_active, has_pseudo) = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => (s.active_path.is_some(), s.has_pseudo),
+    let job = {
+        let mut scenes = SCENES.lock();
+        let s = match scenes.get_mut(&window_id) {
+            Some(s) => s,
             None    => return false,
-        }
+        };
+        if s.active_path.take().is_none() || !s.has_pseudo { return false; }
+        RenderJob::take(s, LayoutMode::Reuse)
     };
-    if !had_active { return false; }
-    if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        s.active_path = None;
-    }
-    if has_pseudo {
-        rerender_state_only(window_id);
-        crate::shade::request_render();
-        return true;
-    }
-    false
+    finish_job(window_id, job, LayoutMode::Reuse);
+    crate::shade::request_render();
+    true
 }
 
 /// Re-rasterize using the cached focus/active/hover paths and update
@@ -1285,51 +1319,11 @@ pub fn release_at(window_id: u32) -> bool {
 /// responsible for marking the window dirty). Pure scene-state work,
 /// safe to call while the compositor lock is held.
 fn rerender_state_only(window_id: u32) {
-    let (tree, rect, density, hover_path, focus_path, active_path, input_edit,
-         scroll_y, scroll_x) = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => (
-                s.tree.clone(),
-                abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
-                s.density,
-                s.hover_path.clone(),
-                s.focus_path.clone(),
-                s.active_path.clone(),
-                s.input_edit.clone(),
-                s.scroll_y,
-                s.scroll_x,
-            ),
-            None => return,
-        }
+    let job = match SCENES.lock().get(&window_id) {
+        Some(s) => RenderJob::take(s, LayoutMode::Reuse),
+        None    => return,
     };
-    let lo = layout::layout_scrolled(&tree, rect, scroll_y);
-    let layout_tree = lo.tree;
-    let anchors = lo.anchors;
-    let popovers = lo.popovers;
-    let max_scroll_y = lo.max_scroll_y;
-    let max_scroll_x = lo.max_scroll_x;
-    let max_scroll_x_rect = lo.max_scroll_x_rect;
-    let max_scroll_rect = lo.max_scroll_rect;
-    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
-    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-    let a: Option<&[u32]> = active_path.as_deref();
-    let pixels = rasterize_buffer_with_overlays(
-        window_id, &tree, &layout_tree, &popovers, rect, h, f, a, density,
-        input_edit.as_ref(), scroll_y, scroll_x,
-    );
-    if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        s.pixels      = pixels;
-        s.layout_tree = layout_tree;
-        s.anchors     = anchors;
-        s.popovers    = popovers;
-        s.max_scroll_y = max_scroll_y;
-        s.scroll_viewport = max_scroll_rect;
-        s.max_scroll_x = max_scroll_x;
-        s.scroll_viewport_x = max_scroll_x_rect;
-        s.scroll_x    = s.scroll_x.min(max_scroll_x);
-        s.scroll_y    = s.scroll_y.min(max_scroll_y);
-    }
+    finish_job(window_id, job, LayoutMode::Reuse);
 }
 
 /// Drop the cached hover_path and the OnHover-action dedup so the next
@@ -1341,17 +1335,20 @@ fn rerender_state_only(window_id: u32) {
 /// to row N leaves the original mouse-hovered row M still highlighted
 /// and both states render at once.
 pub fn suppress_hover(window_id: u32) {
-    let needs_rerender = {
-        let scenes = SCENES.lock();
-        match scenes.get(&window_id) {
-            Some(s) => s.has_pseudo && !s.hover_path.is_empty(),
-            None    => false,
+    let job = {
+        let mut scenes = SCENES.lock();
+        match scenes.get_mut(&window_id) {
+            Some(s) => {
+                let needs_rerender = s.has_pseudo && !s.hover_path.is_empty();
+                s.hover_path.clear();
+                if needs_rerender { Some(RenderJob::take(s, LayoutMode::Reuse)) } else { None }
+            }
+            None => None,
         }
     };
-    if needs_rerender {
-        rerender_with_state(window_id, &[]);
-    } else if let Some(s) = SCENES.lock().get_mut(&window_id) {
-        s.hover_path.clear();
+    if let Some(job) = job {
+        finish_job(window_id, job, LayoutMode::Reuse);
+        mark_dirty(window_id);
     }
     LAST_HOVER.lock().remove(&window_id);
 }
@@ -1411,40 +1408,12 @@ fn modifiers_of_ref(w: &abi::Widget) -> &[abi::Modifier] {
     }
 }
 
-fn widget_children_ref(w: &abi::Widget) -> alloc::vec::Vec<&abi::Widget> {
-    let mut out = alloc::vec::Vec::new();
-    match w {
-        abi::Widget::Column { children, .. } |
-        abi::Widget::Row    { children, .. } |
-        abi::Widget::Stack  { children, .. } |
-        abi::Widget::Menu   { items: children, .. } => {
-            for c in children { out.push(c); }
-        }
-        abi::Widget::Scroll { child, .. } | abi::Widget::Popover { child, .. } => {
-            out.push(child.as_ref());
-        }
-        _ => {}
-    }
-    out
+fn widget_children_ref(w: &abi::Widget) -> &[abi::Widget] {
+    layout::children(w)
 }
 
-/// Mutable twin of `widget_children_ref`. Same container set — anything
-/// missing here would silently break path descent for the mutable walk.
-fn widget_children_mut(w: &mut abi::Widget) -> alloc::vec::Vec<&mut abi::Widget> {
-    let mut out = alloc::vec::Vec::new();
-    match w {
-        abi::Widget::Column { children, .. } |
-        abi::Widget::Row    { children, .. } |
-        abi::Widget::Stack  { children, .. } |
-        abi::Widget::Menu   { items: children, .. } => {
-            for c in children { out.push(c); }
-        }
-        abi::Widget::Scroll { child, .. } | abi::Widget::Popover { child, .. } => {
-            out.push(child.as_mut());
-        }
-        _ => {}
-    }
-    out
+fn widget_children_mut(w: &mut abi::Widget) -> &mut [abi::Widget] {
+    layout::children_mut(w)
 }
 
 // ── Input self-editing helpers ────────────────────────────────────────
@@ -1455,8 +1424,7 @@ fn widget_children_mut(w: &mut abi::Widget) -> alloc::vec::Vec<&mut abi::Widget>
 fn widget_at_path<'a>(tree: &'a abi::Widget, path: &[u32]) -> Option<&'a abi::Widget> {
     let mut cur = tree;
     for &i in path {
-        let kids = widget_children_ref(cur);
-        cur = *kids.get(i as usize)?;
+        cur = widget_children_ref(cur).get(i as usize)?;
     }
     Some(cur)
 }
@@ -1581,7 +1549,11 @@ const CARET_MARGIN_PX: u32 = 24;
 fn caret_follow_scroll(window_id: u32) {
     let mut scenes = SCENES.lock();
     let Some(s) = scenes.get_mut(&window_id) else { return };
+    caret_follow_scroll_in(s);
+}
 
+/// `caret_follow_scroll` on a scene the caller has already locked.
+fn caret_follow_scroll_in(s: &mut WidgetScene) {
     // Resolve the focused editor's metrics in one immutable pass — a zoomed
     // editor scrolls in its own line height, not the default one.
     let (px, column) = match widget_at_path(&s.tree, &s.focus_path) {
@@ -2062,8 +2034,8 @@ static SLIDE_DIRTY: AtomicU32 = AtomicU32::new(0);
 /// The value lives in the tree and in the popover copies the pixel-only
 /// repaint draws from, so both are set.
 fn set_scene_slider(scene: &mut WidgetScene, action: abi::ActionId, value: u16) -> bool {
-    let mut changed = set_slider_value(&mut scene.tree, action, value);
-    for p in scene.popovers.iter_mut() {
+    let mut changed = set_slider_value(Arc::make_mut(&mut scene.tree), action, value);
+    for p in Arc::make_mut(&mut scene.popovers).iter_mut() {
         changed |= set_slider_value(&mut p.child, action, value);
     }
     changed
@@ -2317,8 +2289,9 @@ pub fn handle_input_key(
     };
 
     // Phase 2: apply the edit, snapshot the new buffer for the
-    // InputChange event.
-    let (value_changed, new_value) = {
+    // InputChange event, keep the caret in view and take the render job,
+    // all under one lock.
+    let (new_value, job) = {
         let mut scenes = SCENES.lock();
         let scene = match scenes.get_mut(&window_id) {
             Some(s) => s,
@@ -2434,16 +2407,17 @@ pub fn handle_input_key(
             Op::PageDown => for _ in 0..page { edit.cursor = cursor_down(&edit.value, edit.cursor); },
             Op::Submit => {}
         }
-        (changed, edit.value.clone())
-    };
+        let new_value = if changed { Some(edit.value.clone()) } else { None };
 
-    // Phase 3b: caret-follow scroll. The render does not pull the view to
-    // the caret every frame (that would defeat wheel/drag scrolling), so do
-    // it here, only on a caret move, for the focused TextArea: nudge
-    // scroll_y just enough to keep the caret line on screen.
-    if is_textarea {
-        caret_follow_scroll(window_id);
-    }
+        // Caret-follow scroll. The render does not pull the view to the
+        // caret every frame (that would defeat wheel/drag scrolling), so do
+        // it here, only on a caret move, for the focused TextArea: nudge
+        // scroll_y just enough to keep the caret line on screen.
+        if is_textarea {
+            caret_follow_scroll_in(scene);
+        }
+        (new_value, RenderJob::take(scene, LayoutMode::Reuse))
+    };
 
     // Phase 3: push the right event(s).
     match op {
@@ -2453,8 +2427,8 @@ pub fn handle_input_key(
             }
         }
         _ => {
-            if value_changed {
-                push_event(window_id, abi::Event::InputChange { value: new_value });
+            if let Some(value) = new_value {
+                push_event(window_id, abi::Event::InputChange { value });
             }
         }
     }
@@ -2462,7 +2436,7 @@ pub fn handle_input_key(
     // Phase 4: re-rasterize so the new buffer + caret position appear.
     // Same machinery as a hover-state change: pure local re-render
     // using the cached state slices, no recommit needed.
-    rerender_state_only(window_id);
+    finish_job(window_id, job, LayoutMode::Reuse);
     mark_dirty(window_id);
     crate::shade::request_render();
     true
@@ -2626,18 +2600,20 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         density, input_edit.as_ref(), scroll_y, scroll_x,
     );
 
-    // Store into the per-window scene map. Keep a clone of the tree
-    // + layout for future resize re-renders (typical tree < 1 KB).
+    // Store into the per-window scene map. Keep the tree + layout for
+    // future resize and state re-renders.
     SCENES.lock().insert(target_id, WidgetScene {
         pixels,
         width:       win_w,
         height:      win_h,
         origin_x:    win_x,
         origin_y:    win_y,
-        tree:        tree.clone(),
-        layout_tree,
+        tree:        Arc::new(tree),
+        layout_tree: Arc::new(layout_tree),
+        layout_scroll_y: prev_scroll_y,
+        layout_stale: false,
         anchors,
-        popovers,
+        popovers:    Arc::new(popovers),
         payload_hash: incoming_hash,
         hover_path:  prev_hover,
         focus_path,
@@ -2773,38 +2749,11 @@ pub fn refresh_all_scenes() {
 /// changed without an app commit — a theme swap, or a committed
 /// `Widget::Canvas` bitmap (`npk_canvas_commit`). No-op if no scene.
 pub fn rerender_window(wid: u32) {
-    let (tree, rect, hover_path, focus_path, active_path, density, input_edit,
-         scroll_y, scroll_x) = match SCENES.lock().get(&wid) {
-        Some(s) => (
-            s.tree.clone(),
-            abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
-            s.hover_path.clone(),
-            s.focus_path.clone(),
-            s.active_path.clone(),
-            s.density,
-            s.input_edit.clone(),
-            s.scroll_y,
-            s.scroll_x,
-        ),
+    let job = match SCENES.lock().get(&wid) {
+        Some(s) => RenderJob::take(s, LayoutMode::Force),
         None => return,
     };
-    let new_lo = layout::layout_scrolled(&tree, rect, scroll_y);
-    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
-    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-    let a: Option<&[u32]> = active_path.as_deref();
-    let new_pixels = rasterize_buffer_with_overlays(wid, &tree, &new_lo.tree, &new_lo.popovers, rect, h, f, a, density, input_edit.as_ref(), scroll_y, scroll_x);
-    if let Some(scene) = SCENES.lock().get_mut(&wid) {
-        scene.pixels      = new_pixels;
-        scene.layout_tree = new_lo.tree;
-        scene.anchors     = new_lo.anchors;
-        scene.popovers    = new_lo.popovers;
-        scene.max_scroll_y = new_lo.max_scroll_y;
-        scene.scroll_viewport = new_lo.max_scroll_rect;
-        scene.max_scroll_x = new_lo.max_scroll_x;
-        scene.scroll_viewport_x = new_lo.max_scroll_x_rect;
-        scene.scroll_x    = scene.scroll_x.min(new_lo.max_scroll_x);
-        scene.scroll_y    = scene.scroll_y.min(new_lo.max_scroll_y);
-    }
+    finish_job(wid, job, LayoutMode::Force);
     crate::shade::with_compositor(|c| {
         if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
             win.dirty = true;
@@ -2825,32 +2774,11 @@ pub fn rerender_window(wid: u32) {
 /// that gets z-order wrong erases the menu instead of the frame. Skipping
 /// the layout is safe without asking that question at all.
 pub fn rerender_window_pixels(wid: u32) {
-    let (tree, layout_tree, popovers, rect, hover_path, focus_path, active_path,
-         density, input_edit, scroll_y, scroll_x) = match SCENES.lock().get(&wid) {
-        Some(s) => (
-            s.tree.clone(),
-            s.layout_tree.clone(),
-            s.popovers.clone(),
-            abi::Rect { x: s.origin_x, y: s.origin_y, w: s.width, h: s.height },
-            s.hover_path.clone(),
-            s.focus_path.clone(),
-            s.active_path.clone(),
-            s.density,
-            s.input_edit.clone(),
-            s.scroll_y,
-            s.scroll_x,
-        ),
+    let job = match SCENES.lock().get(&wid) {
+        Some(s) => RenderJob::take(s, LayoutMode::Never),
         None => return,
     };
-    let h: Option<&[u32]> = if hover_path.is_empty() { None } else { Some(&hover_path) };
-    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
-    let a: Option<&[u32]> = active_path.as_deref();
-    let new_pixels = rasterize_buffer_with_overlays(
-        wid, &tree, &layout_tree, &popovers, rect, h, f, a, density,
-        input_edit.as_ref(), scroll_y, scroll_x);
-    if let Some(scene) = SCENES.lock().get_mut(&wid) {
-        scene.pixels = new_pixels;
-    }
+    finish_job(wid, job, LayoutMode::Never);
     crate::shade::with_compositor(|c| {
         if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == wid) {
             win.dirty = true;
@@ -2882,21 +2810,21 @@ pub fn relayout_scene(window_id: u32, new_x: i32, new_y: i32, new_w: u32, new_h:
     // (a focused input stays focused after resize). Active is
     // mouse-tied so it gets cleared.
     let new_lo = layout::layout_scrolled(&tree, new_rect, scroll_y);
-    let focus_path = scene.focus_path.clone();
-    let input_edit = scene.input_edit.clone();
-    let f: Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
+    let f: Option<&[u32]> = if scene.focus_path.is_empty() { None } else { Some(&scene.focus_path) };
     let new_pixels = rasterize_buffer_with_overlays(
         window_id, &tree, &new_lo.tree, &new_lo.popovers, new_rect, None, f, None, new_density,
-        input_edit.as_ref(), scroll_y, scroll_x,
+        scene.input_edit.as_ref(), scroll_y, scroll_x,
     );
     scene.pixels      = new_pixels;
     scene.width       = new_w;
     scene.height      = new_h;
     scene.origin_x    = new_x;
     scene.origin_y    = new_y;
-    scene.layout_tree = new_lo.tree;
+    scene.layout_tree = Arc::new(new_lo.tree);
+    scene.layout_scroll_y = scroll_y;
+    scene.layout_stale = false;
     scene.anchors     = new_lo.anchors;
-    scene.popovers    = new_lo.popovers;
+    scene.popovers    = Arc::new(new_lo.popovers);
     scene.density     = new_density;
     scene.max_scroll_y = new_lo.max_scroll_y;
     scene.scroll_viewport = new_lo.max_scroll_rect;
