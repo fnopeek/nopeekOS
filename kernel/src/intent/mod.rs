@@ -129,6 +129,9 @@ pub fn confirm(question: &str) -> bool {
 /// Printable ASCII only, like the login screen — a character the login
 /// cannot type must not end up in a passphrase. None on Ctrl+C or timeout.
 pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
+    // A new question: a Ctrl+C from an earlier prompt must not answer it.
+    // Nothing else clears the flag for an intent on Core 0.
+    clear_cancel();
     kprint!("[npk] {}", prompt);
     let on_screen = crate::shade::is_active()
         && crate::smp::per_core::current_core_id() == 0;
