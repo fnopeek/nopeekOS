@@ -156,6 +156,8 @@ pub enum Op {
     /// finds the parent constructor, runs it on this `this` and then creates
     /// the own instance fields.
     SuperCall(u16),
+    /// `super(...xs)`. Stack: args array -> result.
+    SuperCallSpread,
     /// `import(spec, options)`. Stack: spec options -> promise.
     ImportCall,
     /// `import.meta`. Stack: -> the module's meta object, or `undefined`.
@@ -195,7 +197,18 @@ pub enum Op {
     /// The handler also records stack and environment depth: a throw in the
     /// middle of an expression leaves partial values behind, which must be
     /// cut off before the `catch` block runs.
+    ///
+    /// `finally` is the single copy of the finalizer. It is entered with a
+    /// completion record on the stack, `[value, kind]`, and ends in
+    /// `EndFinally`; see `FIN_NORMAL` and friends. A `catch` takes precedence
+    /// for a throw; a `return` (also `gen.return()`) always goes to
+    /// `finally`.
     TryStart { catch: u32, finally: u32 },
+    /// Resume the completion record a finalizer was entered with. Stack:
+    /// value, kind -> (nothing). Kinds from `FIN_JUMP` on jump to
+    /// `finally_tables[i][kind - FIN_JUMP]`, the continuation of a `break` or
+    /// `continue` that left the `try`.
+    EndFinally(u32),
     /// Close the innermost handler.
     TryEnd,
     /// Bind the thrown value to `names[i]`: the head of a `catch`.
@@ -257,6 +270,10 @@ pub enum Op {
     /// exist before its line.
     PushEnv(u32),
     PopEnv,
+    /// Replace the innermost environment with a copy of its bindings
+    /// (CreatePerIterationEnvironment, ES 14.7.4.4), so a closure from one
+    /// iteration of `for (let i …)` keeps that iteration's `i`.
+    CopyEnv,
     /// Record the program's completion value (its last expression value;
     /// `eval` and the console use it).
     SetCompletion,
@@ -288,6 +305,13 @@ pub enum BlockDecl {
     Func { name: u32, func: u32 },
 }
 
+/// Completion kinds of a finalizer's record (`Op::TryStart`).
+pub const FIN_NORMAL: u32 = 0;
+pub const FIN_THROW: u32 = 1;
+pub const FIN_RETURN: u32 = 2;
+/// First jump kind; `break`/`continue` exits are numbered from here.
+pub const FIN_JUMP: u32 = 3;
+
 /// "No hint yet." Not an `Option`, which would cost a byte per op site on a
 /// hot path.
 pub const HINT_NONE: u16 = u16::MAX;
@@ -313,13 +337,16 @@ pub struct Chunk {
     pub blocks: Vec<Vec<BlockDecl>>,
     /// One mask per `MakeArraySpread`: which entries were `...x`.
     pub blocks_spread: Vec<Vec<bool>>,
+    /// Per `try … finally`, the continuations of its jump exits.
+    pub finally_tables: Vec<Vec<u32>>,
 }
 
 impl Chunk {
     pub fn new() -> Chunk {
         Chunk { ops: Vec::new(), hints: Vec::new(), constants: Vec::new(), names: Vec::new(),
                 funcs: Vec::new(), templates: Vec::new(), classes: Vec::new(), pats: Vec::new(),
-                heads: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new() }
+                heads: Vec::new(), blocks: Vec::new(), blocks_spread: Vec::new(),
+                finally_tables: Vec::new() }
     }
 
     pub fn emit(&mut self, op: Op) -> usize {

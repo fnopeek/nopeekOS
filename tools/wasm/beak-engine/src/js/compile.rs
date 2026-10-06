@@ -40,6 +40,27 @@ struct Loop {
     /// `break` belongs to it, `continue` to the loop below. Otherwise a
     /// `continue` inside a `switch` would loop back to the `switch` forever.
     brk_only: bool,
+    /// Number of `try` statements open on entry. A jump to this loop leaves
+    /// every one above it, running their finalizers.
+    trys: usize,
+    /// Values the enclosing finalizers keep on the stack on entry
+    /// (`Compiler::extra`).
+    extra: usize,
+}
+
+/// An open `try`, as far as a `break`/`continue` leaving it is concerned.
+struct TryCtx {
+    /// Environment, iterator and stack depth outside the `try`.
+    depth: usize,
+    iters: usize,
+    extra: usize,
+    /// Handlers this `try` has open at the current position: one in the
+    /// block, one in a `catch` guarded by a finalizer, else none.
+    handlers: usize,
+    finally: bool,
+    /// Jump exits through the finalizer: the site and where it goes
+    /// (loop index, `true` = break).
+    exits: Vec<(usize, usize, bool)>,
 }
 
 pub struct Compiler {
@@ -71,12 +92,12 @@ pub struct Compiler {
     /// loop knows where `continue outer` goes. The label stores its names
     /// here and the loop takes them when it is created.
     pending_labels: Vec<String>,
-    /// Number of currently pending `finally` blocks.
-    ///
-    /// A `yield` inside is declined, for the same reason as `return`:
-    /// `gen.return()` there must still run the finalizer, but finalizers are
-    /// copied inline, so there is no place for a saved completion to resume.
-    fin: usize,
+    /// Open `try` statements, innermost last.
+    trys: Vec<TryCtx>,
+    /// Values on the stack below the current statement: the completion
+    /// record (two values) of every finalizer being compiled around it. A
+    /// jump out of a finalizer must pop them.
+    extra: usize,
 }
 
 /// Compile a function body.
@@ -89,7 +110,8 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
     // An async generator suspends on both `yield` and `await`, so both flags
     // may be set. The protocol around it lives in `generator.rs`.
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
-                           in_gen: f.is_generator, in_async: f.is_async, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
+                           in_gen: f.is_generator, in_async: f.is_async, trys: Vec::new(), extra: 0, chains: Vec::new(),
+                           pending_labels: Vec::new() };
     for st in &f.body {
         c.stmt_no_completion(st)?;
     }
@@ -102,7 +124,8 @@ pub fn function(f: &Func) -> CompileResult<Chunk> {
 /// Compile a whole program. `Err` means the tree walker runs it.
 pub fn program(prog: &Program) -> CompileResult<Chunk> {
     let mut c = Compiler { chunk: Chunk::new(), loops: Vec::new(), depth: 0, iters: 0,
-                           in_gen: false, in_async: false, fin: 0, chains: Vec::new(), pending_labels: Vec::new() };
+                           in_gen: false, in_async: false, trys: Vec::new(), extra: 0, chains: Vec::new(),
+                           pending_labels: Vec::new() };
     // Hoisting stays in `Interp::hoist`: it works on the environment, so it
     // is shared by both machines. Only the body is compiled here.
     for st in &prog.body {
@@ -187,7 +210,7 @@ impl Compiler {
                 self.expr(test)?;
                 let out = self.chunk.emit_jump(Op::JumpFalse);
                 let lbl = self.take_label();
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                        depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
@@ -204,7 +227,7 @@ impl Compiler {
             Stmt::DoWhile { body, test } => {
                 let top = self.chunk.here();
                 let lbl = self.take_label();
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                        depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
@@ -223,8 +246,10 @@ impl Compiler {
             }
             Stmt::For { init, test, update, body } => {
                 // Own environment so `for (let i …)` does not bind into the
-                // enclosing block. A fresh binding per iteration is not
-                // implemented, so a body that captures it is declined below.
+                // enclosing block. A fresh copy per iteration (ES 14.7.4.4) is
+                // only observable through a closure, so only then is it made.
+                let per_iter = matches!(init.as_deref(), Some(ForInit::VarDecl(d)) if d.kind == VarKind::Let)
+                    && may_capture(st);
                 let empty = self.chunk.block(Vec::new());
                 self.chunk.emit(Op::PushEnv(empty));
                 self.depth += 1;
@@ -235,14 +260,10 @@ impl Compiler {
                             self.expr(e)?;
                             self.chunk.emit(Op::Pop);
                         }
-                        ForInit::VarDecl(d) => {
-                            if d.kind != VarKind::Var && self.captures(body) {
-                                return Err(Unsupported("for-let-capture"));
-                            }
-                            self.var_decl(d)?;
-                        }
+                        ForInit::VarDecl(d) => self.var_decl(d)?,
                     },
                 }
+                if per_iter { self.chunk.emit(Op::CopyEnv); }
                 let top = self.chunk.here();
                 let out = match test {
                     None => None,
@@ -252,7 +273,7 @@ impl Compiler {
                     }
                 };
                 let lbl = self.take_label();
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                        depth: self.depth, brk_only: false, labels: lbl, iters: self.iters });
                 self.stmt(body)?;
                 let l = self.loops.pop().unwrap();
@@ -260,6 +281,7 @@ impl Compiler {
                 for at in l.continues {
                     self.patch_to(at, cont);
                 }
+                if per_iter { self.chunk.emit(Op::CopyEnv); }
                 if let Some(u) = update {
                     self.expr(u)?;
                     self.chunk.emit(Op::Pop);
@@ -276,14 +298,8 @@ impl Compiler {
                 Ok(())
             }
             Stmt::Break(None) => {
-                let Some(d) = self.loops.last().map(|l| l.depth) else {
-                    return Err(Unsupported("break-outside-loop"));
-                };
-                let it = self.loops.last().unwrap().iters;
-                self.unwind_iters(it);
-                self.unwind_to(d);
-                let at = self.chunk.emit_jump(Op::Jump);
-                self.loops.last_mut().unwrap().breaks.push(at);
+                if self.loops.is_empty() { return Err(Unsupported("break-outside-loop")) }
+                self.jump_out(self.loops.len() - 1, true);
                 Ok(())
             }
             Stmt::Continue(None) => {
@@ -292,10 +308,7 @@ impl Compiler {
                 let Some(k) = self.loops.iter().rposition(|l| !l.brk_only) else {
                     return Err(Unsupported("continue-outside-loop"));
                 };
-                self.unwind_iters(self.loops[k].iters);
-                self.unwind_to(self.loops[k].depth);
-                let at = self.chunk.emit_jump(Op::Jump);
-                self.loops[k].continues.push(at);
+                self.jump_out(k, false);
                 Ok(())
             }
             Stmt::Return(e) => {
@@ -337,7 +350,7 @@ impl Compiler {
                 }
                 // Otherwise the label itself is the exit, reachable only by
                 // `break lbl`.
-                self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+                self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                        depth: self.depth, brk_only: true, labels, iters: self.iters });
                 let r = self.stmt(inner);
                 let l = self.loops.pop().unwrap();
@@ -348,10 +361,7 @@ impl Compiler {
             Stmt::Break(Some(l)) => {
                 let Some(k) = self.loops.iter().rposition(|x| x.labels.iter().any(|n| n == l))
                 else { return Err(Unsupported("break-unknown-label")) };
-                self.unwind_iters(self.loops[k].iters);
-                self.unwind_to(self.loops[k].depth);
-                let at = self.chunk.emit_jump(Op::Jump);
-                self.loops[k].breaks.push(at);
+                self.jump_out(k, true);
                 Ok(())
             }
             Stmt::Continue(Some(l)) => {
@@ -359,10 +369,7 @@ impl Compiler {
                 let Some(k) = self.loops.iter().rposition(
                     |x| !x.brk_only && x.labels.iter().any(|n| n == l))
                 else { return Err(Unsupported("continue-unknown-label")) };
-                self.unwind_iters(self.loops[k].iters);
-                self.unwind_to(self.loops[k].depth);
-                let at = self.chunk.emit_jump(Op::Jump);
-                self.loops[k].continues.push(at);
+                self.jump_out(k, false);
                 Ok(())
             }
             Stmt::Switch { disc, cases } => self.switch(disc, cases),
@@ -444,31 +451,75 @@ impl Compiler {
 
     /// `try` / `catch` / `finally`.
     ///
-    /// The finalizer is copied, not called: once for the normal path, once
-    /// for the throw path. A subroutine would need a return address on the
-    /// stack (the JVM's `jsr`/`ret` problem); two copies of a usually short
-    /// block are simpler.
+    /// One copy of the finalizer, entered with a completion record
+    /// `[value, kind]` on the stack and left through `Op::EndFinally`
+    /// (ES 14.15.3). Every way in pushes its record: the normal end of the
+    /// block or `catch` here, a throw and a `return` in the VM, and a
+    /// `break`/`continue` in `jump_out`. A jump's continuation is compiled
+    /// after the finalizer, outside the `try`, so it passes through the
+    /// enclosing finalizers the same way.
     ///
-    /// Not implemented, so declined: `return`/`break`/`continue` out of a
-    /// `try` with `finally`. That needs a saved completion that resumes after
-    /// the finalizer, and an abrupt finalizer must override it.
+    /// ```text
+    ///   TryStart(catch, pad)
+    ///   <block> TryEnd
+    ///   Jump normal
+    /// catch:
+    ///   [TryStart(-, pad)] <catch> [TryEnd]
+    /// normal:
+    ///   Const undefined, Const FIN_NORMAL
+    /// pad:
+    ///   <finalizer> EndFinally(t)
+    ///   Jump end
+    ///   <one continuation per jump exit>
+    /// end:
+    /// ```
     fn try_stmt(&mut self, block: &[Stmt], handler: &Option<CatchClause>,
                 finalizer: &Option<Vec<Stmt>>) -> CompileResult<()> {
-        if finalizer.is_some() && (Self::jumps_out(block)
-            || handler.as_ref().is_some_and(|h| Self::jumps_out(&h.body))) {
-            return Err(Unsupported("finally-with-jump"));
+        let start = self.chunk.emit(Op::TryStart { catch: u32::MAX, finally: u32::MAX });
+        let depth0 = self.depth;
+        self.trys.push(TryCtx { depth: depth0, iters: self.iters, extra: self.extra, handlers: 1,
+                                finally: finalizer.is_some(), exits: Vec::new() });
+        let r = self.try_body(block, handler, finalizer.is_some(), start);
+        let ctx = self.trys.pop().unwrap();
+        self.depth = depth0;
+        let (to_normal, catch_guard) = r?;
+
+        let Some(f) = finalizer else {
+            for at in to_normal { self.chunk.patch(at); }
+            return Ok(());
+        };
+        for at in to_normal { self.chunk.patch(at); }
+        let u = self.chunk.konst(Value::Undefined);
+        self.chunk.emit(Op::Const(u));
+        let k = self.chunk.konst(Value::Num(FIN_NORMAL as f64));
+        self.chunk.emit(Op::Const(k));
+        let pad = self.chunk.here();
+        self.extra += 2;
+        let fr = self.finalizer(f);
+        self.extra -= 2;
+        fr?;
+        let table = self.chunk.finally_tables.len() as u32;
+        self.chunk.finally_tables.push(Vec::new());
+        self.chunk.emit(Op::EndFinally(table));
+        let to_end = self.chunk.emit_jump(Op::Jump);
+        for &(site, lp, brk) in &ctx.exits {
+            self.patch_to(site, pad);
+            let here = self.chunk.here();
+            self.chunk.finally_tables[table as usize].push(here);
+            self.jump_out(lp, brk);
         }
-        // A `yield` under a pending finalizer is declined like a `return`;
-        // see `Compiler::fin`.
-        if finalizer.is_some() { self.fin += 1; }
-        let r = self.try_inner(block, handler, finalizer);
-        if finalizer.is_some() { self.fin -= 1; }
-        r
+        self.chunk.patch(to_end);
+        if let Op::TryStart { finally, .. } = &mut self.chunk.ops[start] { *finally = pad; }
+        if let Some(at) = catch_guard {
+            if let Op::TryStart { finally, .. } = &mut self.chunk.ops[at] { *finally = pad; }
+        }
+        Ok(())
     }
 
-    fn try_inner(&mut self, block: &[Stmt], handler: &Option<CatchClause>,
-                 finalizer: &Option<Vec<Stmt>>) -> CompileResult<()> {
-        let start = self.chunk.emit(Op::TryStart { catch: u32::MAX, finally: u32::MAX });
+    /// The block and `catch` of a `try`. Returns the jumps to the normal end
+    /// and the `catch` guard handler, if any.
+    fn try_body(&mut self, block: &[Stmt], handler: &Option<CatchClause>, has_fin: bool,
+                start: usize) -> CompileResult<(Vec<usize>, Option<usize>)> {
         let depth0 = self.depth;
         let b = self.block_decls(block)?;
         self.chunk.emit(Op::PushEnv(b));
@@ -477,77 +528,41 @@ impl Compiler {
         self.chunk.emit(Op::PopEnv);
         self.depth -= 1;
         self.chunk.emit(Op::TryEnd);
-        let to_end = self.chunk.emit_jump(Op::Jump);
+        let mut to_normal = Vec::new();
+        let Some(h) = handler else { return Ok((to_normal, None)) };
+        to_normal.push(self.chunk.emit_jump(Op::Jump));
 
         // The catch path. The thrown value is on top on arrival.
         let catch_at = self.chunk.here();
-        let mut catch_guard = None;
-        if let Some(h) = handler {
-            self.depth = depth0;
-            // With a finalizer the `catch` block needs its own handler: if it
-            // throws, the finalizer must still run.
-            if finalizer.is_some() {
-                catch_guard = Some(self.chunk.emit(
-                    Op::TryStart { catch: u32::MAX, finally: u32::MAX }));
-            }
-            let hb = self.block_decls(&h.body)?;
-            self.chunk.emit(Op::PushEnv(hb));
-            self.depth += 1;
-            match &h.param {
-                None => { self.chunk.emit(Op::Pop); }
-                Some(Pat::Ident(n)) => {
-                    let i = self.chunk.name(n);
-                    self.chunk.emit(Op::BindCatch(i));
-                }
-                Some(p) => {
-                    let k = self.chunk.pat(p.clone());
-                    self.chunk.emit(Op::BindPat { pat: k, mode: BindMode::Declare });
-                }
-            }
-            for st in &h.body { self.stmt(st)?; }
-            self.chunk.emit(Op::PopEnv);
-            self.depth -= 1;
-            if catch_guard.is_some() { self.chunk.emit(Op::TryEnd); }
-        }
-        let after_catch = self.chunk.emit_jump(Op::Jump);
-
-        // The throw path without `catch`: finalizer, then rethrow.
-        let rethrow_at = self.chunk.here();
+        if let Op::TryStart { catch, .. } = &mut self.chunk.ops[start] { *catch = catch_at; }
         self.depth = depth0;
-        if let Some(f) = finalizer {
-            self.finalizer(f)?;
-        }
-        self.chunk.emit(Op::Rethrow);
-
-        // The normal path (also taken after a caught throw).
-        self.chunk.patch(to_end);
-        self.chunk.patch(after_catch);
-        self.depth = depth0;
-        if let Some(f) = finalizer {
-            self.finalizer(f)?;
-        }
-        // Only now are the handler's targets known.
-        match &mut self.chunk.ops[start] {
-            Op::TryStart { catch, finally } => {
-                if handler.is_some() {
-                    *catch = catch_at;
-                    // A caught throw goes through the catch path, which ends
-                    // in the normal finalizer.
-                    *finally = u32::MAX;
-                } else {
-                    *catch = u32::MAX;
-                    *finally = rethrow_at;
-                }
+        // With a finalizer the `catch` block needs its own handler: if it
+        // throws, the finalizer must still run.
+        let guard = if has_fin {
+            Some(self.chunk.emit(Op::TryStart { catch: u32::MAX, finally: u32::MAX }))
+        } else {
+            None
+        };
+        self.trys.last_mut().unwrap().handlers = guard.is_some() as usize;
+        let hb = self.block_decls(&h.body)?;
+        self.chunk.emit(Op::PushEnv(hb));
+        self.depth += 1;
+        match &h.param {
+            None => { self.chunk.emit(Op::Pop); }
+            Some(Pat::Ident(n)) => {
+                let i = self.chunk.name(n);
+                self.chunk.emit(Op::BindCatch(i));
             }
-            _ => unreachable!(),
-        }
-        if let Some(at) = catch_guard {
-            match &mut self.chunk.ops[at] {
-                Op::TryStart { finally, .. } => *finally = rethrow_at,
-                _ => unreachable!(),
+            Some(p) => {
+                let k = self.chunk.pat(p.clone());
+                self.chunk.emit(Op::BindPat { pat: k, mode: BindMode::Declare });
             }
         }
-        Ok(())
+        for st in &h.body { self.stmt(st)?; }
+        self.chunk.emit(Op::PopEnv);
+        self.depth -= 1;
+        if guard.is_some() { self.chunk.emit(Op::TryEnd); }
+        Ok((to_normal, guard))
     }
 
     fn finalizer(&mut self, body: &[Stmt]) -> CompileResult<()> {
@@ -560,35 +575,48 @@ impl Compiler {
         Ok(())
     }
 
-    /// Does anything jump out of this body (`return`, `break`, `continue`)?
-    /// A `break` inside a nested loop does not leave the `try`.
-    fn jumps_out(body: &[Stmt]) -> bool {
-        fn walk(st: &Stmt, in_loop: bool, hit: &mut bool) {
-            match st {
-                Stmt::Return(_) => *hit = true,
-                Stmt::Break(_) | Stmt::Continue(_) if !in_loop => *hit = true,
-                Stmt::Block(b) => b.iter().for_each(|s| walk(s, in_loop, hit)),
-                Stmt::If { cons, alt, .. } => {
-                    walk(cons, in_loop, hit);
-                    if let Some(a) = alt { walk(a, in_loop, hit) }
-                }
-                Stmt::While { body, .. } | Stmt::DoWhile { body, .. }
-                | Stmt::For { body, .. } | Stmt::ForIn { body, .. }
-                | Stmt::ForOf { body, .. } => walk(body, true, hit),
-                Stmt::Labeled { body, .. } => walk(body, in_loop, hit),
-                Stmt::Try { block, handler, finalizer } => {
-                    block.iter().for_each(|s| walk(s, in_loop, hit));
-                    if let Some(h) = handler { h.body.iter().for_each(|s| walk(s, in_loop, hit)) }
-                    if let Some(f) = finalizer { f.iter().for_each(|s| walk(s, in_loop, hit)) }
-                }
-                Stmt::Switch { cases, .. } =>
-                    cases.iter().flat_map(|c| c.body.iter()).for_each(|s| walk(s, true, hit)),
-                _ => {}
+    /// `break`/`continue` to `self.loops[k]`.
+    ///
+    /// Leaves everything opened since the loop, innermost first: iterators
+    /// (closed), environments, finalizer records on the stack, and handlers.
+    /// The first `try` with a finalizer on the way takes over: the jump
+    /// enters it with a jump completion, and its continuation (compiled in
+    /// `try_stmt`) calls this again from outside that `try`.
+    fn jump_out(&mut self, k: usize, brk: bool) {
+        let (ltrys, ldepth, liters, lextra) = {
+            let l = &self.loops[k];
+            (l.trys, l.depth, l.iters, l.extra)
+        };
+        let (mut d, mut it, mut ex) = (self.depth, self.iters, self.extra);
+        let mut n = self.trys.len();
+        while n > ltrys {
+            n -= 1;
+            let (td, ti, te, th, tf) = {
+                let t = &self.trys[n];
+                (t.depth, t.iters, t.extra, t.handlers, t.finally)
+            };
+            for _ in ti..it { self.chunk.emit(Op::IterClose); }
+            for _ in td..d { self.chunk.emit(Op::PopEnv); }
+            for _ in te..ex { self.chunk.emit(Op::Pop); }
+            for _ in 0..th { self.chunk.emit(Op::TryEnd); }
+            (d, it, ex) = (td, ti, te);
+            if tf {
+                let j = self.trys[n].exits.len() as u32;
+                let u = self.chunk.konst(Value::Undefined);
+                self.chunk.emit(Op::Const(u));
+                let kind = self.chunk.konst(Value::Num((FIN_JUMP + j) as f64));
+                self.chunk.emit(Op::Const(kind));
+                // The pad is not known yet; `try_stmt` patches the site.
+                let site = self.chunk.emit(Op::Jump(u32::MAX));
+                self.trys[n].exits.push((site, k, brk));
+                return;
             }
         }
-        let mut hit = false;
-        body.iter().for_each(|s| walk(s, false, &mut hit));
-        hit
+        for _ in liters..it { self.chunk.emit(Op::IterClose); }
+        for _ in ldepth..d { self.chunk.emit(Op::PopEnv); }
+        for _ in lextra..ex { self.chunk.emit(Op::Pop); }
+        let at = self.chunk.emit_jump(Op::Jump);
+        if brk { self.loops[k].breaks.push(at); } else { self.loops[k].continues.push(at); }
     }
 
     /// `for (x of e) body`.
@@ -603,7 +631,7 @@ impl Compiler {
         let top = self.chunk.here();
         let done = self.chunk.emit_jump(Op::IterNext);
         let lbl = self.take_label();
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+        self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
         // One environment per iteration, so a closure in the body captures
         // this iteration's value, not the last one.
@@ -646,7 +674,7 @@ impl Compiler {
         self.chunk.emit(Op::Await);
         let done = self.chunk.emit_jump(Op::IterStepAsync);
         let lbl = self.take_label();
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+        self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
         let empty = self.chunk.block(Vec::new());
         self.chunk.emit(Op::PushEnv(empty));
@@ -725,7 +753,7 @@ impl Compiler {
         let top = self.chunk.here();
         let done = self.chunk.emit_jump(Op::ForInNext);
         let lbl = self.take_label();
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+        self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                depth: depth0, brk_only: false, labels: lbl, iters: self.iters });
         // One environment per iteration, as in `for…of`.
         let empty = self.chunk.block(Vec::new());
@@ -764,7 +792,7 @@ impl Compiler {
         self.chunk.emit(Op::PushEnv(b));
         self.depth += 1;
         let lbl = self.take_label();
-        self.loops.push(Loop { breaks: Vec::new(), continues: Vec::new(),
+        self.loops.push(Loop { trys: self.trys.len(), extra: self.extra, breaks: Vec::new(), continues: Vec::new(),
                                depth: self.depth, brk_only: true, labels: lbl, iters: self.iters });
 
         // The test chain. Each match jumps to its gate.
@@ -1069,7 +1097,11 @@ impl Compiler {
                 Ok(())
             }
             Expr::Call { callee, args, optional: false } if matches!(**callee, Expr::Super) => {
-                if Self::args_have_spread(args) { return Err(Unsupported("super-spread")) }
+                if Self::args_have_spread(args) {
+                    self.args_as_array(args)?;
+                    self.chunk.emit(Op::SuperCallSpread);
+                    return Ok(());
+                }
                 let n = self.plain_args(args)?;
                 self.chunk.emit(Op::SuperCall(n));
                 Ok(())
@@ -1405,7 +1437,6 @@ impl Compiler {
             // value of this expression.
             Expr::Yield { arg, delegate } => {
                 if !self.in_gen { return Err(Unsupported("yield-outside-generator")) }
-                if self.fin > 0 { return Err(Unsupported("yield-in-finally")) }
                 if *delegate {
                     let Some(e) = arg else {
                         return Err(Unsupported("yield-delegate-without-operand"));
@@ -1674,23 +1705,6 @@ impl Compiler {
         }
     }
 
-    /// Close all loop iterators opened since `n`. The target loop's own
-    /// iterator stays: `continue` keeps using it, and on `break` the loop's
-    /// epilogue closes it.
-    fn unwind_iters(&mut self, n: usize) {
-        for _ in n..self.iters {
-            self.chunk.emit(Op::IterClose);
-        }
-    }
-
-    /// Close all environments opened since `depth`; a jump out of a block
-    /// would otherwise leave them open.
-    fn unwind_to(&mut self, depth: usize) {
-        for _ in depth..self.depth {
-            self.chunk.emit(Op::PopEnv);
-        }
-    }
-
     /// The key of a member access, where it is known at compile time.
     ///
     /// A private field is just a different key text (`value::private_key`,
@@ -1737,88 +1751,89 @@ impl Compiler {
         }
     }
 
-    /// Does a function in this body capture anything?
-    ///
-    /// Used to decline `for (let i …)` only when it matters: the spec gives
-    /// each iteration a fresh binding, which is only observable through a
-    /// closure in the body.
-    fn captures(&self, body: &Stmt) -> bool {
-        let mut found = false;
-        walk_stmt(body, &mut |e| {
-            if matches!(e, Expr::Func(_) | Expr::Class(_)) {
-                found = true;
-            }
-        });
-        found
-    }
 }
 
-/// Visit every expression of a statement. Deliberately coarse: the only
-/// caller asks whether a function occurs anywhere.
-fn walk_stmt(st: &Stmt, f: &mut dyn FnMut(&Expr)) {
+/// Can anything in this statement capture the current environment: a
+/// function, a class or a direct `eval`? Conservative: a construct it does
+/// not look into counts as yes.
+fn may_capture(st: &Stmt) -> bool {
+    fn ex(x: &Expr) -> bool {
+        match x {
+            Expr::Func(_) | Expr::Class(_) => true,
+            Expr::Ident(_) | Expr::Num(_) | Expr::BigInt(_) | Expr::Str(_) | Expr::Bool(_)
+            | Expr::Null | Expr::This | Expr::Super | Expr::Regex { .. }
+            | Expr::MetaProp { .. } => false,
+            Expr::Template { exprs, .. } => exprs.iter().any(ex),
+            Expr::TaggedTemplate { tag, exprs, .. } => ex(tag) || exprs.iter().any(ex),
+            Expr::Array(items) => items.iter().flatten().any(ex),
+            Expr::Object(props) => props.iter().any(|p| {
+                matches!(&p.key, PropKey::Computed(k) if ex(k)) || match &p.value {
+                    ObjPropValue::Init(e) | ObjPropValue::Spread(e) => ex(e),
+                    _ => true,
+                }
+            }),
+            Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Spread(arg)
+            | Expr::Chain(arg) | Expr::Await(arg) => ex(arg),
+            Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } =>
+                ex(left) || ex(right),
+            Expr::Assign { left, right, .. } => pat(left) || ex(right),
+            Expr::Cond { test, cons, alt } => ex(test) || ex(cons) || ex(alt),
+            Expr::Call { callee, args, .. } =>
+                matches!(&**callee, Expr::Ident(n) if n == "eval") || ex(callee) || args.iter().any(arg),
+            Expr::New { callee, args } => ex(callee) || args.iter().any(arg),
+            Expr::ImportCall(args) => args.iter().any(arg),
+            Expr::Member { obj, prop, .. } =>
+                ex(obj) || matches!(&**prop, MemberProp::Computed(k) if ex(k)),
+            Expr::Seq(list) => list.iter().any(ex),
+            Expr::Yield { arg, .. } => arg.as_deref().is_some_and(ex),
+        }
+    }
+    fn arg(a: &Arg) -> bool {
+        match a { Arg::Expr(e) | Arg::Spread(e) => ex(e) }
+    }
+    fn pat(p: &Pat) -> bool {
+        match p {
+            Pat::Ident(_) => false,
+            Pat::Array(items) => items.iter().flatten().any(pat),
+            Pat::Object { props, rest } =>
+                props.iter().any(|q| matches!(&q.key, PropKey::Computed(k) if ex(k)) || pat(&q.value))
+                || rest.as_deref().is_some_and(pat),
+            Pat::Assign { left, right } => pat(left) || ex(right),
+            Pat::Rest(p) => pat(p),
+            Pat::Expr(e) => ex(e),
+        }
+    }
+    fn decl(d: &VarDecl) -> bool {
+        d.decls.iter().any(|x| pat(&x.id) || x.init.as_ref().is_some_and(ex))
+    }
+    fn head(h: &ForHead) -> bool {
+        match h { ForHead::VarDecl(d) => decl(d), ForHead::Pattern(p) => pat(p) }
+    }
+    fn body(b: &[Stmt]) -> bool { b.iter().any(may_capture) }
     match st {
-        Stmt::Expr(x) | Stmt::Throw(x) => walk_expr(x, f),
-        Stmt::Return(Some(x)) => walk_expr(x, f),
-        Stmt::Block(b) => b.iter().for_each(|s| walk_stmt(s, f)),
-        Stmt::If { test, cons, alt } => {
-            walk_expr(test, f);
-            walk_stmt(cons, f);
-            if let Some(a) = alt { walk_stmt(a, f) }
+        Stmt::Empty | Stmt::Debugger | Stmt::Break(_) | Stmt::Continue(_) => false,
+        Stmt::Expr(x) | Stmt::Throw(x) => ex(x),
+        Stmt::Return(x) => x.as_ref().is_some_and(ex),
+        Stmt::Block(b) => body(b),
+        Stmt::If { test, cons, alt } =>
+            ex(test) || may_capture(cons) || alt.as_deref().is_some_and(may_capture),
+        Stmt::For { init, test, update, body: b } => {
+            init.as_deref().is_some_and(|i| match i {
+                ForInit::Expr(x) => ex(x),
+                ForInit::VarDecl(d) => decl(d),
+            }) || test.as_ref().is_some_and(ex) || update.as_ref().is_some_and(ex) || may_capture(b)
         }
-        Stmt::While { test, body } => { walk_expr(test, f); walk_stmt(body, f) }
-        Stmt::DoWhile { body, test } => { walk_stmt(body, f); walk_expr(test, f) }
-        Stmt::For { init, test, update, body } => {
-            if let Some(i) = init {
-                match &**i {
-                    ForInit::Expr(x) => walk_expr(x, f),
-                    ForInit::VarDecl(d) => {
-                        for x in d.decls.iter().filter_map(|x| x.init.as_ref()) { walk_expr(x, f) }
-                    }
-                }
-            }
-            if let Some(t) = test { walk_expr(t, f) }
-            if let Some(u) = update { walk_expr(u, f) }
-            walk_stmt(body, f);
-        }
-        Stmt::VarDecl(d) => {
-            for x in d.decls.iter().filter_map(|x| x.init.as_ref()) { walk_expr(x, f) }
-        }
-        Stmt::Labeled { body, .. } => walk_stmt(body, f),
-        // Other statements are not relevant to the caller.
-        _ => {}
-    }
-}
-
-fn walk_expr(x: &Expr, f: &mut dyn FnMut(&Expr)) {
-    f(x);
-    match x {
-        Expr::Unary { arg, .. } | Expr::Update { arg, .. } | Expr::Spread(arg)
-        | Expr::Chain(arg) | Expr::Await(arg) => walk_expr(arg, f),
-        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
-            walk_expr(left, f);
-            walk_expr(right, f);
-        }
-        Expr::Assign { right, .. } => walk_expr(right, f),
-        Expr::Cond { test, cons, alt } => {
-            walk_expr(test, f);
-            walk_expr(cons, f);
-            walk_expr(alt, f);
-        }
-        Expr::Call { callee, args, .. } | Expr::New { callee, args } => {
-            walk_expr(callee, f);
-            for a in args {
-                match a {
-                    Arg::Expr(e) | Arg::Spread(e) => walk_expr(e, f),
-                }
-            }
-        }
-        Expr::Member { obj, prop, .. } => {
-            walk_expr(obj, f);
-            if let MemberProp::Computed(k) = &**prop { walk_expr(k, f) }
-        }
-        Expr::Seq(list) => list.iter().for_each(|e| walk_expr(e, f)),
-        Expr::Array(items) => items.iter().flatten().for_each(|e| walk_expr(e, f)),
-        _ => {}
+        Stmt::ForIn { left, right, body: b } | Stmt::ForOf { left, right, body: b, .. } =>
+            head(left) || ex(right) || may_capture(b),
+        Stmt::While { test, body: b } | Stmt::DoWhile { body: b, test } => ex(test) || may_capture(b),
+        Stmt::Labeled { body: b, .. } => may_capture(b),
+        Stmt::Switch { disc, cases } =>
+            ex(disc) || cases.iter().any(|c| c.test.as_ref().is_some_and(ex) || body(&c.body)),
+        Stmt::Try { block, handler, finalizer } =>
+            body(block) || handler.as_ref().is_some_and(|h| h.param.as_ref().is_some_and(pat) || body(&h.body))
+            || finalizer.as_deref().is_some_and(body),
+        Stmt::VarDecl(d) => decl(d),
+        _ => true,
     }
 }
 

@@ -164,6 +164,9 @@ enum Seed {
     /// A `return(v)` at a `yield*`: passed as a value to the inner iterator
     /// instead of abandoning the outer generator.
     Delegate(Value),
+    /// A `return(v)` at a plain `yield` of an async generator: `v` is awaited
+    /// first, then returned through the pending finalizers (ES 27.6.3.8).
+    Return(Value),
 }
 
 /// Run an async function's machine until it waits or finishes, then settle
@@ -183,6 +186,7 @@ fn pump(i: &mut Interp, st: &Rc<GenState>, seed: Seed, holder: Value) {
             else { Err(super::interp::Abrupt::Throw(e)) }
         }
         Seed::Delegate(v) => { vm.send_return(v); vm.drive(i) }
+        Seed::Return(v) => { vm.send(v); vm.drive(i) }
     };
     match r {
         Ok(Step::Await(v)) => {
@@ -342,10 +346,9 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
                     // abandoning the outer one.
                     ReqKind::Return if st.vm.borrow().as_ref()
                         .is_some_and(|vm| vm.at_delegate()) => Seed::Delegate(value),
-                    // `return` does not run the body to completion. A `finally` containing
-                    // `yield` is rejected by the compiler, so none can be pending; open
-                    // `for…of` iterations are closed by `Vm::close`. Not implemented: the spec
-                    // awaits the value first (AsyncGeneratorAwaitReturn).
+                    ReqKind::Return if st.status.get() == Status::Suspended => Seed::Return(value),
+                    // Not started: nothing to run. Not implemented: the spec awaits the
+                    // value first (AsyncGeneratorAwaitReturn).
                     ReqKind::Return => {
                         if let Some(mut vm) = st.vm.borrow_mut().take() { vm.close(i); }
                         st.status.set(Status::Done);
@@ -361,8 +364,14 @@ fn serve(i: &mut Interp, st: &Rc<GenState>, holder: Value, mut seed: Option<Seed
         st.status.set(Status::Running);
         let r = match cur {
             Seed::Start => vm.drive(i),
+            Seed::Value(v) if core::mem::take(&mut vm.ret_await) => {
+                if vm.inject_return(i, v.clone()) { vm.drive(i) }
+                else { vm.close(i); Ok(Step::Done(v)) }
+            }
             Seed::Value(v) => { vm.send(v); vm.drive(i) }
+            Seed::Return(v) => { vm.ret_await = true; Ok(Step::Await(v)) }
             Seed::Throw(e) => {
+                vm.ret_await = false;
                 if vm.at_delegate() { vm.send_throw(e); vm.drive(i) }
                 else if vm.inject_throw(i, e.clone()) { vm.drive(i) }
                 else { Err(super::interp::Abrupt::Throw(e)) }
@@ -559,11 +568,12 @@ pub fn throw(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     finish(i, &st, vm, r)
 }
 
-/// `gen.return(v)`: abandon. Open `for…of` iterations are closed
-/// (`Vm::close`); no `finally` can be pending, because a `yield` inside one
-/// is rejected by the compiler.
+/// `gen.return(v)`: a return completion at the suspension point. Pending
+/// finalizers run (and may yield again); without any the machine is closed
+/// (`Vm::close`), which also closes open `for…of` iterations.
 pub fn ret(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     let st = state(i, t)?;
+    let started = st.status.get() == Status::Suspended;
     let Some(mut vm) = take(i, &st)? else { return Ok(i.iter_result(v, true)) };
     // At a `yield*` the inner iterator gets its `return` first. It may run its
     // own cleanup and even refuse (its `return()` gives `done: false`); then the
@@ -571,6 +581,11 @@ pub fn ret(i: &mut Interp, t: &Value, v: Value) -> C<Value> {
     if vm.at_delegate() {
         st.status.set(Status::Running);
         vm.send_return(v);
+        let r = vm.drive(i);
+        return finish(i, &st, vm, r);
+    }
+    if started && vm.inject_return(i, v.clone()) {
+        st.status.set(Status::Running);
         let r = vm.drive(i);
         return finish(i, &st, vm, r);
     }

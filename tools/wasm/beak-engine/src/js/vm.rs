@@ -30,7 +30,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use super::code::{Chunk, Op};
+use super::code::{Chunk, Op, FIN_JUMP, FIN_NORMAL, FIN_RETURN, FIN_THROW};
 use super::interp::{Abrupt, Env, Interp, C};
 use super::value::Value;
 
@@ -126,12 +126,15 @@ pub struct Vm {
     /// a suspension between calling the inner iterator and evaluating its
     /// result, and resuming from it via `send` resets `resume` to `Normal`.
     deleg: Resume,
+    /// An async generator's `return(v)` is awaiting `v`; the settlement is a
+    /// return completion, not the value of the `yield`.
+    pub ret_await: bool,
 }
 
 impl Vm {
     pub fn new() -> Vm {
         Vm { stack: Vec::new(), frames: Vec::new(), completion: Value::Undefined,
-             resume: Resume::Normal, deleg: Resume::Normal }
+             resume: Resume::Normal, deleg: Resume::Normal, ret_await: false }
     }
 
     /// Run a compiled program. The caller has already hoisted into `env`;
@@ -261,11 +264,9 @@ impl Vm {
         self.unwind(i, v)
     }
 
-    /// `gen.return(v)`: abandon the VM. Open `for…of` iterations are closed
-    /// (innermost first) so inner generators run their `finally`.
-    ///
-    /// There can be no pending `finally` here: a `yield` under one is
-    /// rejected at compile time (`Compiler::fin`).
+    /// Abandon the VM. Open `for…of` iterations are closed (innermost first)
+    /// so inner generators run their `finally`. Pending finalizers of this
+    /// VM are the caller's business (`inject_return`).
     pub fn close(&mut self, i: &mut Interp) {
         while let Some(f) = self.frames.pop() {
             for it in f.iters.iter().rev() {
@@ -328,7 +329,7 @@ impl Vm {
                 Op::Jump(t) => (*t as usize) <= ip,
                 Op::Call { .. } | Op::New { .. } | Op::CallSpread(_) | Op::NewSpread
                 | Op::SetCompletion | Op::DeclVar { .. } | Op::Ret
-                | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_)
+                | Op::Yield | Op::Await | Op::ForInNext(_) | Op::SuperCall(_) | Op::SuperCallSpread
                 // `yield*` calls the inner iterator once per round.
                 | Op::YieldDelegate(_) | Op::DelegateCall(_) => true,
                 _ => false,
@@ -570,6 +571,12 @@ impl Vm {
             Op::SuperCall(argc) => {
                 let args = self.take(*argc as usize);
                 let v = i.super_call(&args, &env)?;
+                self.push(v);
+            }
+            Op::SuperCallSpread => {
+                let args = self.pop();
+                let a = i.iterate(&args)?;
+                let v = i.super_call(&a, &env)?;
                 self.push(v);
             }
             Op::JumpNullishTo(t) => {
@@ -894,10 +901,43 @@ impl Vm {
             Op::PopEnv => {
                 self.frames.last_mut().unwrap().envs.pop();
             }
+            Op::CopyEnv => {
+                let copy = {
+                    let old = env.borrow();
+                    let e = Env::new(old.parent.clone(), false);
+                    {
+                        let mut n = e.borrow_mut();
+                        n.strict = old.strict;
+                        for (k, b) in old.vars.iter() {
+                            n.vars.insert(k.clone(), super::interp::Binding {
+                                value: b.value.clone(), mutable: b.mutable,
+                                initialized: b.initialized });
+                        }
+                    }
+                    e
+                };
+                if let Some(top) = self.frames.last_mut().unwrap().envs.last_mut() { *top = copy; }
+            }
             Op::SetCompletion => {
                 self.completion = self.pop();
             }
-            Op::Ret => return self.do_return(i),
+            Op::Ret => return self.ret(i),
+            Op::EndFinally(t) => {
+                let kind = match self.pop() { Value::Num(n) => n as u32, _ => FIN_NORMAL };
+                match kind {
+                    FIN_NORMAL => { self.pop(); }
+                    FIN_THROW => {
+                        let v = self.pop();
+                        return Err(Abrupt::Throw(v));
+                    }
+                    FIN_RETURN => return self.ret(i),
+                    k => {
+                        self.pop();
+                        let to = chunk.finally_tables[*t as usize][(k - FIN_JUMP) as usize];
+                        self.jump(to);
+                    }
+                }
+            }
             // ── yield* ───────────────────────────────────────────────────
             //
             // Split into several ops because in an async generator an `await`
@@ -984,7 +1024,7 @@ impl Vm {
                     if fertig {
                         self.frames.last_mut().unwrap().iters.pop();
                         self.push(r);
-                        if self.deleg == Resume::Return { return self.do_return(i); }
+                        if self.deleg == Resume::Return { return self.ret(i); }
                         self.jump(*end);
                     } else {
                         self.push(r);
@@ -1004,7 +1044,7 @@ impl Vm {
                     // exhausted inner iterator returns from the outer body;
                     // after `next()` the value is the result of `yield*`.
                     if self.deleg == Resume::Return {
-                        return self.do_return(i);
+                        return self.ret(i);
                     }
                     self.jump(*end);
                 } else if *is_async {
@@ -1076,11 +1116,62 @@ impl Vm {
             };
             match &it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
         }
-        let Some(t) = h.catch_ip.or(h.finally_ip) else { return false };
+        let (t, fin) = match (h.catch_ip, h.finally_ip) {
+            (Some(c), _) => (c, false),
+            (None, Some(f)) => (f, true),
+            (None, None) => return false,
+        };
         self.frames.last_mut().unwrap().ip = t as usize;
         self.stack.truncate(h.stack);
         self.stack.push(v);
+        if fin { self.stack.push(Value::Num(FIN_THROW as f64)); }
         true
+    }
+
+    /// `return` from the top frame: through every pending finalizer first,
+    /// innermost first. The value is on top.
+    fn ret(&mut self, i: &mut Interp) -> C<Flow> {
+        let has_fin = self.frames.last().unwrap().handlers.iter().any(|h| h.finally_ip.is_some());
+        if !has_fin { return self.do_return(i); }
+        let base = self.frames.last().unwrap().base;
+        let v = if self.stack.len() > base { self.pop() } else { Value::Undefined };
+        self.enter_return(i, v);
+        Ok(Flow::Go)
+    }
+
+    /// Enter the innermost finalizer of the top frame with a return
+    /// completion. Handlers without one are dropped on the way; `false`
+    /// means there was none.
+    fn enter_return(&mut self, i: &mut Interp, v: Value) -> bool {
+        let h = loop {
+            let f = self.frames.last_mut().unwrap();
+            match f.handlers.pop() {
+                None => return false,
+                Some(h) if h.finally_ip.is_some() => break h,
+                Some(_) => {}
+            }
+        };
+        self.frames.last_mut().unwrap().envs.truncate(h.envs);
+        loop {
+            let it = {
+                let f = self.frames.last_mut().unwrap();
+                if f.iters.len() <= h.iters { break }
+                f.iters.pop().unwrap()
+            };
+            match &it { Iter::Obj(v) | Iter::Async { it: v, .. } => i.iter_close(v), _ => {} }
+        }
+        self.stack.truncate(h.stack);
+        self.stack.push(v);
+        self.stack.push(Value::Num(FIN_RETURN as f64));
+        self.frames.last_mut().unwrap().ip = h.finally_ip.unwrap() as usize;
+        true
+    }
+
+    /// `gen.return(v)` at a plain `yield`: run the pending finalizers.
+    /// `false` means there are none; the caller then closes the machine.
+    pub fn inject_return(&mut self, i: &mut Interp, v: Value) -> bool {
+        if self.frames.is_empty() { return false }
+        self.enter_return(i, v)
     }
 
     /// Perform a call.
@@ -1747,5 +1838,152 @@ mod tests {
                              Array.from(w.segment("It's 3.14, ok")).filter(function (x) { return x.isWordLike })
                                   .map(function (x) { return x.segment }).join("|")].join()"#),
                    "0 2 4,It's|3.14|ok");
+    }
+
+    /// Runs on both engines, requires agreement and that the VM declined no
+    /// function body.
+    fn compiled_on_both(src: &str) -> alloc::string::String {
+        let mut out = alloc::vec::Vec::new();
+        for novm in [false, true] {
+            let mut i = super::Interp::new();
+            i.vm_off = novm;
+            let prog = crate::js::parse(src, false).expect("parses");
+            let got = match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(super::Abrupt::Throw(v)) => {
+                    let m = i.to_string(&v).map(|s| s.to_string()).unwrap_or_default();
+                    alloc::format!("THROW {m}")
+                }
+                Err(_) => alloc::string::String::from("ABRUPT"),
+            };
+            if !novm {
+                assert!(i.func_declines.is_empty() && i.vm_declined == 0,
+                        "declined {:?} in {src}", i.func_declines);
+            }
+            out.push(got);
+        }
+        assert_eq!(out[0], out[1], "engines disagree on {src}");
+        out.pop().unwrap()
+    }
+
+    #[test]
+    fn finally_runs_on_return_break_continue() {
+        let cases: &[(&str, &str)] = &[
+            ("function f(){ var l=[]; function g(){ try { l.push(1); return 'r' } finally { l.push(2) } } \
+              return g()+l.join() } f()", "r1,2"),
+            // Nested: innermost finalizer first, the value survives both.
+            ("function f(){ var l=[]; function g(){ try { try { return 'v' } finally { l.push('a') } } \
+              finally { l.push('b') } } return g()+l.join() } f()", "va,b"),
+            // An abrupt finalizer overrides the pending completion.
+            ("function f(){ try { return 1 } finally { return 2 } } f()", "2"),
+            ("function f(){ try { throw 1 } finally { return 3 } } f()", "3"),
+            ("function f(){ try { return 1 } finally { throw 'x' } } try { f() } catch(e) { 'c'+e }", "cx"),
+            ("function f(){ for(;;){ try { return 1 } finally { break } } return 'b' } f()", "b"),
+            ("function f(){ var n=0; for(var i=0;i<3;i++){ try { continue } finally { n+=10 } } return n } f()", "30"),
+            // Labeled jumps across two finalizers, inner `for…of` closed first.
+            ("function f(){ var l=[]; var it={[Symbol.iterator](){ return { next(){ return {value:1,done:false} }, \
+              return(){ l.push('close'); return {} } } }}; \
+              outer: for(var k=0;k<2;k++){ try { for (var x of it) { try { continue outer } finally { l.push('in') } } } \
+              finally { l.push('out') } } return l.join() } f()", "in,close,out,in,close,out"),
+            ("function f(){ var l=[]; a: { try { break a } finally { l.push('f') } l.push('no') } return l.join() } f()", "f"),
+            // `catch` with a jump and a finalizer.
+            ("function f(){ var l=[]; for(;;){ try { throw 1 } catch(e) { l.push('c'); break } finally { l.push('f') } } \
+              return l.join() } f()", "c,f"),
+            ("function f(){ try { throw 1 } catch(e) { return 'c' } finally { } } f()", "c"),
+            // The return value is evaluated before the finalizer runs.
+            ("function f(){ var x=1; try { return x } finally { x=2 } } f()", "1"),
+            // A throw from the finalizer of a return goes to the outer catch.
+            ("function f(){ try { try { return 1 } finally { throw 'e' } } catch(e) { return 'caught '+e } } f()", "caught e"),
+            // A break out of a try without finally leaves no handler behind.
+            ("function t(){ for(;;){ try { break } catch(e){ return 'stale' } } throw 'x' } \
+              try { t() } catch(e) { 'ok '+e }", "ok x"),
+            // Program level.
+            ("var l=[]; for(var i=0;i<2;i++){ try { if(i) break; continue } finally { l.push(i) } } l.join()", "0,1"),
+        ];
+        for (src, want) in cases {
+            assert_eq!(&compiled_on_both(src), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn generator_finally_with_yield_and_return() {
+        let cases: &[(&str, &str)] = &[
+            // `gen.return()` runs the finalizer, which may yield again.
+            ("function* g(){ try { yield 1 } finally { yield 2 } } var it=g(); \
+              var a=it.next(), b=it.return(5), c=it.next(), d=it.next(); \
+              [a.value,a.done,b.value,b.done,c.value,c.done,d.done].join()",
+             "1,false,2,false,5,true,true"),
+            ("var l=[]; function* g(){ try { try { yield 1 } finally { l.push('a') } } finally { l.push('b') } } \
+              var it=g(); it.next(); var r=it.return(7); l.join()+'|'+r.value+r.done", "a,b|7true"),
+            // A return in the finalizer overrides `gen.return(v)`.
+            ("function* g(){ try { yield 1 } finally { return 9 } } var it=g(); it.next(); \
+              var r=it.return(5); r.value+''+r.done", "9true"),
+            // `return` in the body with a yield in the finalizer.
+            ("function* g(){ try { return 'r' } finally { yield 'f' } } var it=g(); \
+              var a=it.next(), b=it.next(); a.value+a.done+b.value+b.done", "ffalsertrue"),
+            // `gen.return()` inside `catch`.
+            ("var l=[]; function* g(){ try { throw 1 } catch(e) { yield 'c' } finally { l.push('f') } } \
+              var it=g(); it.next(); it.return(0); l.join()", "f"),
+            // `gen.throw()` at a yield inside the finalizer.
+            ("function* g(){ try { yield 1 } finally { yield 2 } } var it=g(); it.next(); it.return(0); \
+              try { it.throw('t') } catch(e) { 'got '+e }", "got t"),
+        ];
+        for (src, want) in cases {
+            let mut i = super::Interp::new();
+            let prog = crate::js::parse(src, false).expect("parses");
+            let v = i.run_program(&prog).ok().expect("runs");
+            assert!(i.func_declines.is_empty(), "declined {:?} in {src}", i.func_declines);
+            assert_eq!(&*i.to_string(&v).ok().unwrap(), *want, "{src}");
+        }
+    }
+
+    #[test]
+    fn async_finally_with_await_and_jumps() {
+        let cases: &[(&str, &str)] = &[
+            ("async function f(){ try { await null; return 'r' } finally { await null; out.push('f') } } \
+              f().then(v=>out.push(v))", "f|r"),
+            ("async function f(){ for(let i=0;i<3;i++){ try { await null; if(i==1) continue; out.push(i) } \
+              finally { out.push('f'+i) } } } f()", "0|f0|f1|2|f2"),
+            ("async function f(){ try { await Promise.reject('e') } catch(e) { return 'c'+e } finally { out.push('f') } } \
+              f().then(v=>out.push(v))", "f|ce"),
+            // An async generator's `return()` awaits its value, then runs the finalizer.
+            ("async function* g(){ try { yield 1 } finally { out.push('fin') } } \
+              (async()=>{ const h=g(); await h.next(); const r=await h.return(Promise.resolve(4)); \
+              out.push(r.value+''+r.done) })()", "fin|4true"),
+            ("async function* g(){ try { yield 1 } finally { yield 2 } } \
+              (async()=>{ const h=g(); await h.next(); const a=await h.return(5); const b=await h.next(); \
+              out.push(a.value+''+a.done, b.value+''+b.done) })()", "2false|5true"),
+        ];
+        for (src, want) in cases {
+            assert_eq!(&async_out(src), want, "{src}");
+        }
+    }
+
+    #[test]
+    fn super_call_with_spread() {
+        assert_eq!(compiled_on_both("class A { constructor(...a){ this.s=a.join() } } \
+                                     class B extends A { constructor(...a){ super(0, ...a, 9) } } new B(1,2).s"),
+                   "0,1,2,9");
+        assert_eq!(compiled_on_both("class B extends Array { constructor(){ super(...[1,2,3]) } } \
+                                     var b=new B(); b.length+''+(b instanceof B)"), "3true");
+    }
+
+    #[test]
+    fn for_let_gives_each_iteration_its_binding() {
+        let cases: &[(&str, &str)] = &[
+            ("var fs=[]; for (let i=0;i<3;i++) fs.push(()=>i); fs.map(f=>f()).join()", "0,1,2"),
+            ("var fs=[]; for (let i=0;i<3;i++) { fs.push({get: ()=>i}); } fs.map(o=>o.get()).join()", "0,1,2"),
+            ("var fs=[]; for (let i=0;i<4;i++) { if (i%2) continue; try { fs.push(()=>i) } catch(e){} } \
+              fs.map(f=>f()).join()", "0,2"),
+            // A closure may change its own iteration's copy; the next one starts from it.
+            ("var fs=[]; for (let i=0;i<6;i++) { fs.push(()=>i); fs[fs.length-1]; if (i==1) { i=3 } } \
+              fs.length+':'+fs.map(f=>f()).join()", "4:0,3,4,5"),
+            ("function f(){ var fs=[]; for (let i=0, j=10; i<2; i++, j--) fs.push(()=>i+'/'+j); \
+              return fs.map(f=>f()).join() } f()", "0/10,1/9"),
+        ];
+        for (src, want) in cases {
+            assert_eq!(&compiled_on_both(src), want, "{src}");
+        }
     }
 }
