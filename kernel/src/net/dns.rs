@@ -2,6 +2,11 @@
 //!
 //! Stub resolver over UDP port 53.
 //! Queries A records, caches results.
+//!
+//! An off-path forger has to guess the random source port and the random
+//! transaction id of a query, and its reply must come from the configured
+//! server, repeat the question, and carry the address under the asked name
+//! (or a CNAME chain from it within the same answer).
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -10,16 +15,16 @@ use spin::Mutex;
 use super::udp;
 
 const DNS_PORT: u16 = 53;
-const LOCAL_PORT: u16 = 10053;
+/// Positive answers are kept for their TTL, but no longer than this.
+const MAX_TTL_TICKS: u64 = 360_000; // 1 h at 100 Hz
+/// CNAME hops followed within one answer.
+const MAX_CNAME_HOPS: usize = 8;
 /// A browser opening a single site touches twenty to forty names; the cache
 /// must hold more than one page load or nothing is ever used twice.
 const CACHE_SIZE: usize = 64;
 
 static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]); // QEMU user-mode DNS
 
-/// The local port is fixed, so the transaction ID is the only thing that tells
-/// this query's reply from a late one for an earlier name.
-static NEXT_ID: Mutex<u16> = Mutex::new(0xABCD);
 
 struct DnsEntry {
     name: String,
@@ -35,6 +40,14 @@ struct DnsEntry {
     /// Tick this entry was written. Evicts the oldest instead of always slot 0,
     /// and expires a negative entry.
     stamp: u64,
+    /// Ticks a positive entry stays valid (the record's TTL, capped).
+    ttl: u64,
+}
+
+impl DnsEntry {
+    fn fresh_ip(&self, now: u64) -> Option<[u8; 4]> {
+        (self.valid && now.wrapping_sub(self.stamp) < self.ttl).then_some(self.ip)
+    }
 }
 
 static CACHE: Mutex<[Option<DnsEntry>; CACHE_SIZE]> = Mutex::new(
@@ -73,8 +86,8 @@ pub fn cached(name: &str) -> Cached {
     let now = crate::interrupts::ticks();
     let cache = CACHE.lock();
     match cache.iter().flatten().find(|e| e.name == name) {
-        Some(e) if e.valid => Cached::Ip(e.ip),
-        Some(e) if now.wrapping_sub(e.stamp) < NEG_TTL_TICKS => Cached::Failed,
+        Some(e) if e.fresh_ip(now).is_some() => Cached::Ip(e.ip),
+        Some(e) if !e.valid && now.wrapping_sub(e.stamp) < NEG_TTL_TICKS => Cached::Failed,
         _ => Cached::Unknown,
     }
 }
@@ -135,20 +148,21 @@ pub fn pump_wanted() {
 
 /// Write an entry, replacing the oldest when the table is full.
 fn remember(name: &str, ip: [u8; 4], valid: bool) {
-    remember_kind(name, ip, valid, false)
+    remember_kind(name, ip, valid, false, 0)
 }
 
-fn remember_kind(name: &str, ip: [u8; 4], valid: bool, denied: bool) {
+fn remember_kind(name: &str, ip: [u8; 4], valid: bool, denied: bool, ttl: u64) {
     let stamp = crate::interrupts::ticks();
+    let entry = DnsEntry { name: String::from(name), ip, valid, denied, stamp, ttl };
     let mut cache = CACHE.lock();
     if let Some(slot) = cache.iter_mut().find(|s| {
         s.as_ref().is_some_and(|e| e.name == name)
     }) {
-        *slot = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
+        *slot = Some(entry);
         return;
     }
     if let Some(slot) = cache.iter_mut().find(|s| s.is_none()) {
-        *slot = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
+        *slot = Some(entry);
         return;
     }
     let oldest = cache
@@ -156,7 +170,7 @@ fn remember_kind(name: &str, ip: [u8; 4], valid: bool, denied: bool) {
         .enumerate()
         .min_by_key(|(_, s)| s.as_ref().map_or(0, |e| e.stamp))
         .map_or(0, |(i, _)| i);
-    cache[oldest] = Some(DnsEntry { name: String::from(name), ip, valid, denied, stamp });
+    cache[oldest] = Some(entry);
 }
 
 /// Resolve a hostname to IPv4 address. Blocking (polls for reply).
@@ -170,8 +184,8 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     {
         let cache = CACHE.lock();
         if let Some(e) = cache.iter().flatten().find(|e| e.name == name) {
-            if e.valid {
-                return Some(e.ip);
+            if let Some(ip) = e.fresh_ip(crate::interrupts::ticks()) {
+                return Some(ip);
             }
             // Only an explicit no skips the query; a timeout is retried.
             if e.denied && crate::interrupts::ticks().wrapping_sub(e.stamp) < NEG_TTL_TICKS {
@@ -180,11 +194,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         }
     }
 
-    let id = {
-        let mut n = NEXT_ID.lock();
-        *n = n.wrapping_add(1);
-        *n
-    };
+    let id = crate::csprng::random_u64() as u16;
     let query = build_query(name, id);
 
     // Warm the next hop's MAC. `arp::resolve` returns at once on a cache hit,
@@ -204,12 +214,12 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
                           - query goes out to L2 broadcast", hop[0], hop[1], hop[2], hop[3]);
     }
 
-    // The return value matters: eight listener slots exist, and a full table
-    // means we send four queries and listen on nothing at all.
-    if !udp::listen(LOCAL_PORT) {
+    // Eight listener slots exist, and a full table means we would send
+    // four queries and listen on nothing at all.
+    let Some(local_port) = udp::listen_ephemeral() else {
         crate::kprintln!("[npk] dns: no UDP listener slot free - the query would go out deaf");
         return None;
-    }
+    };
 
     // Split into legs: UDP has no retransmit of its own, so a dropped datagram
     // costs one leg instead of the whole budget.
@@ -234,24 +244,24 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     let udp_before = udp::rx_total();
     let (nl_before, _) = udp::no_listener_stats();
     'legs: for (n, leg) in LEGS.iter().enumerate() {
-        udp::send(dns_server, LOCAL_PORT, DNS_PORT, &query);
+        udp::send(dns_server, local_port, DNS_PORT, &query);
         sent += 1;
         let t0 = crate::interrupts::ticks();
         while crate::interrupts::ticks().wrapping_sub(t0) < *leg {
             super::poll();
-            if let Some((_src_ip, _src_port, data)) = udp::recv(LOCAL_PORT) {
+            if let Some((src_ip, src_port, data)) = udp::recv(local_port) {
                 seen += 1;
                 // Only our reply ends the wait — a negative answer is an
-                // answer, a stale one is not.
-                if is_reply_to(&data, id) {
-                    result = parse_response(&data);
+                // answer, a stale or forged one is not.
+                if src_ip == dns_server && src_port == DNS_PORT && is_reply_to(&data, id, name) {
+                    result = parse_response(&data, name);
                     answered_on = n + 1;
                     answered = true;
                     if result.is_none() {
                         // Not a failure but a no: report the measured time.
                         crate::kprintln!(
-                            "[npk] dns: {} gibt es nicht — der Aufloeser hat nach {} ms \
-                             geantwortet ({} Bytes, an={}, rcode={})",
+                            "[npk] dns: {} does not exist — the resolver answered after {} ms \
+                             ({} bytes, an={}, rcode={})",
                             name,
                             crate::interrupts::ticks().wrapping_sub(t_start) * 10,
                             data.len(),
@@ -274,7 +284,7 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             name, answered_on);
     }
 
-    udp::unlisten(LOCAL_PORT);
+    udp::unlisten(local_port);
 
     // A failed lookup names what it had to work with. Whether the next hop's MAC
     // was known decides where to look next, and reconstructing that afterwards
@@ -291,8 +301,8 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
             seen, id);
         // A foreign id is a separate finding; name it only if one arrived.
         if let Some(f) = foreign_id {
-            crate::kprintln!("[npk] dns: ein Datagramm auf unserem Port trug die fremde \
-                              Kennung 0x{:04x} — nicht unsere Antwort", f);
+            crate::kprintln!("[npk] dns: a datagram on our port carried the foreign \
+                              id 0x{:04x} — not our reply", f);
         }
         let (nl, nlp) = udp::no_listener_stats();
         crate::kprintln!("[npk] dns: during this lookup {} UDP datagram(s) reached the stack, \
@@ -312,12 +322,12 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // it may be a single lost frame, and pinning it for the whole TTL would
     // turn a glitch into an outage.
     match result {
-        Some(ip) => remember(name, ip, true),
-        None if answered => remember_kind(name, [0; 4], false, true),
+        Some((ip, ttl)) => remember_kind(name, ip, true, false, ttl),
+        None if answered => remember_kind(name, [0; 4], false, true, 0),
         None => {}
     }
 
-    result
+    result.map(|(ip, _)| ip)
 }
 
 fn build_query(name: &str, id: u16) -> Vec<u8> {
@@ -345,64 +355,93 @@ fn build_query(name: &str, id: u16) -> Vec<u8> {
     pkt
 }
 
-/// Is this datagram a response carrying our transaction ID?
-fn is_reply_to(data: &[u8], id: u16) -> bool {
-    data.len() >= 12
-        && u16::from_be_bytes([data[0], data[1]]) == id
-        && u16::from_be_bytes([data[2], data[3]]) & 0x8000 != 0
+/// Is this datagram a response to our query: our transaction id, and the
+/// question repeated exactly (one question, `name`, A, IN)?
+fn is_reply_to(data: &[u8], id: u16, name: &str) -> bool {
+    if data.len() < 12
+        || u16::from_be_bytes([data[0], data[1]]) != id
+        || u16::from_be_bytes([data[2], data[3]]) & 0x8000 == 0
+        || u16::from_be_bytes([data[4], data[5]]) != 1
+    {
+        return false;
+    }
+    let Some((qname, pos)) = read_name(data, 12) else { return false };
+    pos + 4 <= data.len()
+        && qname.eq_ignore_ascii_case(name.trim_end_matches('.'))
+        && u16::from_be_bytes([data[pos], data[pos + 1]]) == 1
+        && u16::from_be_bytes([data[pos + 2], data[pos + 3]]) == 1
 }
 
-fn parse_response(data: &[u8]) -> Option<[u8; 4]> {
+/// The address of `name` in a reply that `is_reply_to` accepted, and how
+/// long it may be cached. An A record counts only under the asked name or
+/// at the end of a CNAME chain from it within this answer.
+fn parse_response(data: &[u8], name: &str) -> Option<([u8; 4], u64)> {
     if data.len() < 12 { return None; }
-
     let flags = u16::from_be_bytes([data[2], data[3]]);
-    if flags & 0x8000 == 0 { return None; } // not a response
-    let rcode = flags & 0x0F;
-    if rcode != 0 { return None; } // error
+    if flags & 0x0F != 0 { return None; } // rcode: error
 
-    let qdcount = u16::from_be_bytes([data[4], data[5]]) as usize;
     let ancount = u16::from_be_bytes([data[6], data[7]]) as usize;
-    if ancount == 0 { return None; }
+    let (_, mut pos) = read_name(data, 12)?;
+    pos += 4; // QTYPE + QCLASS
 
-    // Skip questions
-    let mut pos = 12;
-    for _ in 0..qdcount {
-        pos = skip_name(data, pos)?;
-        pos += 4; // QTYPE + QCLASS
-        if pos > data.len() { return None; }
-    }
-
-    // Parse answers, look for A record
+    struct Rr { owner: String, rtype: u16, ttl: u32, rdata: usize, rdlen: usize }
+    let mut rrs = Vec::new();
     for _ in 0..ancount {
-        if pos >= data.len() { return None; }
-        pos = skip_name(data, pos)?;
-        if pos + 10 > data.len() { return None; }
-
-        let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
-        let _rclass = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
-        let _ttl = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
-        let rdlength = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
-        pos += 10;
-
-        if rtype == 1 && rdlength == 4 && pos + 4 <= data.len() {
-            return Some([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let (owner, p) = read_name(data, pos)?;
+        if p + 10 > data.len() { return None; }
+        let rtype = u16::from_be_bytes([data[p], data[p + 1]]);
+        let rclass = u16::from_be_bytes([data[p + 2], data[p + 3]]);
+        let ttl = u32::from_be_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]);
+        let rdlen = u16::from_be_bytes([data[p + 8], data[p + 9]]) as usize;
+        let rdata = p + 10;
+        if rdata + rdlen > data.len() { return None; }
+        if rclass == 1 {
+            rrs.push(Rr { owner, rtype, ttl, rdata, rdlen });
         }
-
-        pos += rdlength;
+        pos = rdata + rdlen;
     }
 
+    let mut target = String::from(name.trim_end_matches('.'));
+    let mut ttl = u32::MAX;
+    for _ in 0..=MAX_CNAME_HOPS {
+        let here = |r: &&Rr| r.owner.eq_ignore_ascii_case(&target);
+        if let Some(a) = rrs.iter().filter(here).find(|r| r.rtype == 1 && r.rdlen == 4) {
+            let d = &data[a.rdata..a.rdata + 4];
+            let ttl = ttl.min(a.ttl) as u64 * 100;
+            return Some(([d[0], d[1], d[2], d[3]], ttl.min(MAX_TTL_TICKS)));
+        }
+        let cname = rrs.iter().filter(here).find(|r| r.rtype == 5)?;
+        ttl = ttl.min(cname.ttl);
+        target = read_name(data, cname.rdata)?.0;
+    }
     None
 }
 
-fn skip_name(data: &[u8], mut pos: usize) -> Option<usize> {
+/// Decode a (possibly compressed) domain name at `pos`: the dotted name and
+/// the position after it in the record. Pointers may only go backwards, so a
+/// loop cannot form.
+fn read_name(data: &[u8], mut pos: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    let mut end = None;
+    let mut limit = pos;
     loop {
-        if pos >= data.len() { return None; }
-        let len = data[pos] as usize;
-        if len == 0 { return Some(pos + 1); }
-        if len & 0xC0 == 0xC0 {
-            // Compression pointer
-            return Some(pos + 2);
+        let len = *data.get(pos)? as usize;
+        if len == 0 {
+            return Some((name, end.unwrap_or(pos + 1)));
         }
+        if len & 0xC0 == 0xC0 {
+            let ptr = ((len & 0x3F) << 8) | *data.get(pos + 1)? as usize;
+            if ptr >= limit { return None; }
+            end.get_or_insert(pos + 2);
+            limit = ptr;
+            pos = ptr;
+            continue;
+        }
+        if len & 0xC0 != 0 { return None; }
+        let label = data.get(pos + 1..pos + 1 + len)?;
+        if !name.is_empty() { name.push('.'); }
+        name.push_str(core::str::from_utf8(label).ok()?);
+        if name.len() > 255 { return None; }
         pos += 1 + len;
     }
 }

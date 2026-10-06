@@ -124,6 +124,28 @@ pub fn recv(port: u16) -> Option<([u8; 4], u16, Vec<u8>)> {
     None
 }
 
+/// Listen on a random free port in the ephemeral range (RFC 6056), for a
+/// client that waits for one reply. The port is the reply's first secret:
+/// a fixed one lets anyone aim forged answers at it. None if every try is
+/// taken or the table is full.
+pub fn listen_ephemeral() -> Option<u16> {
+    let mut listeners = LISTENERS.lock();
+    for _ in 0..16 {
+        let port = 49152 + (crate::csprng::random_u64() % 16384) as u16;
+        if listeners.iter().flatten().any(|l| l.port == port) { continue; }
+        let slot = listeners.iter_mut().find(|s| s.is_none())?;
+        *slot = Some(UdpListener {
+            port,
+            buf: Vec::with_capacity(MAX_RECV_BUF),
+            src_ip: [0; 4],
+            src_port: 0,
+            has_data: false,
+        });
+        return Some(port);
+    }
+    None
+}
+
 /// Stop listening on a port.
 pub fn unlisten(port: u16) {
     let mut listeners = LISTENERS.lock();
