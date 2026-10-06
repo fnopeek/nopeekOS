@@ -43,8 +43,20 @@ pub(crate) fn glen(len: i32) -> Option<usize> {
 
 /// A UTF-8 string from guest memory; `None` if the range does not fit or
 /// is not UTF-8.
+/// Longest string a host call copies out of a guest: paths, URLs, log lines
+/// and metadata are far shorter, and the copy lands on the kernel heap.
+const MAX_GUEST_STR: usize = 1024 * 1024;
+/// Largest byte buffer a host call copies out of a guest (request bodies,
+/// frames, driver messages).
+const MAX_GUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Most response body a module's HTTP request makes the kernel hold; the
+/// module names the buffer, the server decides how much arrives.
+const MAX_HTTP_BODY: usize = 256 * 1024 * 1024;
+
 pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
-    let bytes = guest(data, ptr, glen(len)?)?;
+    let n = glen(len)?;
+    if n > MAX_GUEST_STR { return None; }
+    let bytes = guest(data, ptr, n)?;
     if bytes.is_empty() { return None; }
     core::str::from_utf8(bytes).ok().map(String::from)
 }
@@ -52,7 +64,9 @@ pub(crate) fn read_str(data: &[u8], ptr: i32, len: i32) -> Option<String> {
 /// Bytes from guest memory, or `None` if the range does not fit.
 pub(crate) fn read_bytes(data: &[u8], ptr: i32, len: i32) -> Option<alloc::vec::Vec<u8>> {
     if len <= 0 { return None; }
-    guest(data, ptr, glen(len)?).map(|b| b.to_vec())
+    let n = glen(len)?;
+    if n > MAX_GUEST_BYTES { return None; }
+    guest(data, ptr, n).map(|b| b.to_vec())
 }
 
 /// Writes `bytes` to guest memory at `ptr`; returns the length, or -1 if
@@ -2956,7 +2970,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = buf_max as usize;
+    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
 
     let url = match read_str(mem, url_ptr, url_len) {
         Some(s) => s,
@@ -3024,7 +3038,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = buf_max as usize;
+    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
 
     let method = match read_str(mem, method_ptr, method_len) {
         Some(s) => s,
@@ -3177,7 +3191,7 @@ pub(crate) fn npk_http_begin(
         return -1;
     }
     if buf_max <= 0 { return -1; }
-    let cap = buf_max as usize;
+    let cap = (buf_max as usize).min(MAX_HTTP_BODY);
 
     let method = match read_str(mem, method_ptr, method_len) {
         Some(s) => s,
@@ -3305,7 +3319,7 @@ pub(crate) fn npk_http_begin_many_hdr(
     } else {
         alloc::vec::Vec::new()
     };
-    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, cookies, out_max as usize,
+    match crate::intent::fetch::begin_many(ctx.pid, ctx.core_id, urls, cookies, (out_max as usize).min(MAX_HTTP_BODY),
                                           Some(ctx.net_reach)) {
         Ok(h) => h,
         Err(e) => {
@@ -3423,7 +3437,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if urls.is_empty() || urls.len() > MAX_URLS { return -1; }
     if (lens_max as usize) < urls.len() * 4 { return -1; }
 
-    let total_cap = out_max as usize;
+    let total_cap = (out_max as usize).min(MAX_HTTP_BODY);
     let bodies = crate::intent::http::https_get_many(&urls, &[], total_cap, Some(ctx.net_reach));
 
     let mut blobs: alloc::vec::Vec<u8> = alloc::vec::Vec::new();

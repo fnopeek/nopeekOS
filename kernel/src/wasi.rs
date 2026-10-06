@@ -48,6 +48,7 @@ pub const SUCCESS: i32 = 0;
 const EBADF: i32 = 8;
 const EEXIST: i32 = 20;
 const EFAULT: i32 = 21;
+const EFBIG: i32 = 22;
 const EINVAL: i32 = 28;
 const EIO: i32 = 29;
 const EISDIR: i32 = 31;
@@ -361,13 +362,25 @@ fn write_string_vec(mem: &mut [u8], ptr_arr: i32, buf: i32, items: &[String]) ->
 
 /// Gather the `iovec` array into one buffer. Copying first keeps the
 /// borrow of guest memory apart from the borrow of the fd table.
+/// Bytes one write call takes in. Every iovec may point at the same large
+/// region, so without a ceiling a short list of them asks the kernel for
+/// terabytes. A write may be partial: the caller is told how much went in
+/// and writes the rest.
+const MAX_WRITE_CALL: usize = 64 * 1024 * 1024;
+/// Largest file a wasi program may grow by positioned writes; the whole file
+/// is held in kernel memory until it is synced.
+const MAX_WASI_FILE: usize = 256 * 1024 * 1024;
+
 fn gather(mem: &[u8], iovs: i32, iovs_len: i32) -> Result<Vec<u8>, i32> {
     let mut out = Vec::new();
     for i in 0..iovs_len {
         let base = iovs.checked_add(i.checked_mul(8).ok_or(EFAULT)?).ok_or(EFAULT)?;
         let ptr = i32::try_from(r32(mem, base)?).map_err(|_| EFAULT)?;
         let len = i32::try_from(r32(mem, base + 4)?).map_err(|_| EFAULT)?;
-        out.extend_from_slice(bytes_at(mem, ptr, len)?);
+        let b = bytes_at(mem, ptr, len)?;
+        let room = MAX_WRITE_CALL - out.len();
+        out.extend_from_slice(&b[..b.len().min(room)]);
+        if out.len() == MAX_WRITE_CALL { break; }
     }
     Ok(out)
 }

@@ -68,15 +68,14 @@ pub(crate) fn random_get(mem: &mut [u8], st: &mut HS, buf: i32, len: i32) -> i32
 // Straight from the kernel CSPRNG. CPython seeds its hash
 // randomisation here, so a predictable stream is a real
 // weakness, not a placeholder detail.
-let l = match usize::try_from(len) { Ok(v) => v, Err(_) => return EFAULT };
-let mut tmp = Vec::with_capacity(l);
-while tmp.len() < l {
-    let block = crate::security::csprng::random_256();
-    let take = (l - tmp.len()).min(block.len());
-    tmp.extend_from_slice(&block[..take]);
-}
+// Into the checked guest range directly: no kernel buffer sized by the
+// guest's number.
 let _ = wasi_of!(st);
-match put_bytes(mem, buf, &tmp) { Ok(()) => SUCCESS, Err(e) => e }
+let l = match usize::try_from(len) { Ok(v) => v, Err(_) => return EFAULT };
+match crate::wasm::host_core::guest_mut(mem, buf, l) {
+    Some(dst) => { crate::security::csprng::fill(dst); SUCCESS }
+    None => EFAULT,
+}
 }
 
 pub(crate) fn fd_write(mem: &mut [u8], st: &mut HS, fd: i32, iovs: i32, n: i32, out: i32) -> i32 {
@@ -178,6 +177,7 @@ match w.fds.get_mut(&fd) {
     Some(Handle::File { data: buf, dirty, writable, .. }) => {
         if !*writable { return EPERM; }
         let end = at.saturating_add(data.len());
+        if end > MAX_WASI_FILE { return EFBIG; }
         if end > buf.len() { buf.resize(end, 0); }
         buf[at..end].copy_from_slice(&data);
         *dirty = true;
