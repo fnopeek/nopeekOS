@@ -175,7 +175,7 @@ pub fn intent_install(args: &str) {
     }
     let _ = crate::npkfs::upsert(&version_key, entry.version.as_bytes(), crate::capability::CAP_NULL);
 
-    kprintln!("[npk] ✓ {} v{} installed.", name, entry.version);
+    kprintln!("[npk]   * {} v{} installed", name, entry.version);
 }
 
 /// One installed module that the release has a newer build of.

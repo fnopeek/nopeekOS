@@ -115,6 +115,8 @@ pub fn glyph_index(c: char) -> Option<u8> {
         '\u{2264}' => Some(b'<'),
         '\u{2265}' => Some(b'>'),
         '\u{2248}' => Some(b'~'),
+        '\u{2713}' | '\u{2714}' => Some(b'+'), // check marks
+        '\u{2717}' | '\u{2718}' => Some(b'x'), // ballot x
         c if (c as u32) < 0x20 || c == '\u{7F}' || ('\u{80}'..'\u{A0}').contains(&c) => None,
         _ => Some(b'?'),
     }
