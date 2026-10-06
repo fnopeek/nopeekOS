@@ -2941,6 +2941,13 @@ pub(crate) fn npk_log_serial(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len
     }
 }
 
+/// Fetch a document: the navigation itself, which goes wherever it is
+/// pointed, a home-network address included, as in any browser. Reach is
+/// therefore not applied here. It is applied to everything a page fetches
+/// in turn (`npk_http_begin`, `npk_http_send`, `npk_http_request_many`,
+/// `npk_tls_connect`), so a public page cannot reach into the home network.
+/// It separates pages inside a module from each other; against the module
+/// itself, which declares NET, it cannot be enforced and is not meant to be.
 pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32, url_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
@@ -3148,7 +3155,7 @@ pub(crate) fn npk_net_context(
     };
     let reach = crate::intent::http::reach_of_url(&url);
     if reach != ctx.net_reach {
-        kprintln!("[npk] Netzkontext: {:?} ({})", reach, url);
+        kprintln!("[npk] net context: {:?} ({})", reach, url);
     }
     ctx.net_reach = reach;
     0
