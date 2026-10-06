@@ -99,6 +99,15 @@ pub fn buffered_for(slot: usize, pid: u32) -> Option<usize> {
     Some(slots[slot].len)
 }
 
+/// Close every slot module `pid` still holds (it has ended).
+pub fn release_owner(pid: u32) {
+    let mut slots = SLOTS.lock();
+    for s in slots.iter_mut().filter(|s| s.active && s.owner == Some(pid)) {
+        s.active = false;
+        s.len = 0;
+    }
+}
+
 /// Release a streaming slot (discards anything still buffered).
 pub fn close(slot: usize) {
     if slot >= NUM_SLOTS { return; }

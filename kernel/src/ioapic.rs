@@ -266,6 +266,14 @@ pub fn route(gsi: u32, vector: u8, dest_apic: u32, level: bool, active_low: bool
     })
 }
 
+/// Mask `gsi` and give the line up, so the next driver can route it.
+pub fn release(gsi: u32) {
+    mask(gsi);
+    crate::interrupts::without_interrupts(|| {
+        LOCK.lock().routed.retain(|&g| g != gsi);
+    });
+}
+
 /// Is `gsi` served by an I/O APIC and still without an owner?
 pub fn is_free(gsi: u32) -> bool {
     crate::interrupts::without_interrupts(|| {

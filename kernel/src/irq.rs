@@ -155,20 +155,46 @@ pub fn fired_count(vector: u8) -> u64 {
     IRQ_FIRED[vector as usize].load(Ordering::Acquire)
 }
 
-/// Next free device-IRQ vector slot. Vectors are never freed (a driver lives
-/// for the boot); the pool (`DEVICE_IRQ_VEC_COUNT`) is sized for all expected
-/// HW drivers.
-static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+/// Device-IRQ vector slots in use, one bit each (`DEVICE_IRQ_VEC_COUNT`).
+/// A driver that ends gives its vector back (`release`), so restarting
+/// drivers cannot run the pool dry.
+static SLOTS_USED: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocate a fresh LAPIC vector from the device-IRQ pool, or None if
 /// exhausted. The matching IDT entry is already installed (`interrupts::init`).
 pub fn alloc_vector() -> Option<u8> {
-    let s = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
-    if s < DEVICE_IRQ_VEC_COUNT {
-        Some(DEVICE_IRQ_VEC_BASE + s as u8)
-    } else {
-        None
+    loop {
+        let used = SLOTS_USED.load(Ordering::Acquire);
+        let s = (!used).trailing_zeros() as usize;
+        if s >= DEVICE_IRQ_VEC_COUNT {
+            return None;
+        }
+        if SLOTS_USED
+            .compare_exchange(used, used | (1 << s), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some(DEVICE_IRQ_VEC_BASE + s as u8);
+        }
     }
+}
+
+/// Give `vector` back: no waiter, no registration, its I/O APIC line masked
+/// and released. The device must already be quiet (bus mastering off, which
+/// also stops its MSI writes).
+pub fn release(vector: u8) {
+    let s = vector.wrapping_sub(DEVICE_IRQ_VEC_BASE) as usize;
+    if s >= DEVICE_IRQ_VEC_COUNT {
+        return;
+    }
+    IRQ_WAITER[vector as usize].store(crate::smp::fiber::NO_WAKER, Ordering::Release);
+    let reg = IRQ_REG.lock()[vector as usize].take();
+    if let Some(r) = reg {
+        if r.entry == GSI {
+            crate::ioapic::release(GSI_OF[vector as usize].load(Ordering::Relaxed));
+        }
+    }
+    LEVEL[vector as usize].store(false, Ordering::Release);
+    SLOTS_USED.fetch_and(!(1 << s), Ordering::AcqRel);
 }
 
 /// Snapshot the fired count for `vector` before submitting the device

@@ -1061,6 +1061,25 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     }
 }
 
+/// Close every TLS handle of module `pid` (it has ended). A session checked
+/// out by a running call cannot be: there is none once the module is gone.
+pub(crate) fn tls_release_owner(pid: u32) {
+    let mut sessions = alloc::vec::Vec::new();
+    {
+        let mut g = TLS_SLOTS.lock();
+        for slot in g.iter_mut() {
+            if slot.as_ref().is_some_and(|s| s.pid == pid) {
+                if let Some(sl) = slot.take() {
+                    if let Some(sess) = sl.session { sessions.push(sess); }
+                }
+            }
+        }
+    }
+    for mut s in sessions {
+        let _ = crate::crypto::tls::tls_close(&mut s);
+    }
+}
+
 /// Check the session of slot `i` out of the table; `None` if it is busy.
 fn tls_checkout(i: usize, pid: u32) -> Option<crate::crypto::tls::TlsSession> {
     let mut g = TLS_SLOTS.lock();
@@ -1266,6 +1285,9 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         return -2;
     }
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
+    // A new binding replaces the old one: release it, or its buffers and
+    // vector stay taken for the rest of the boot.
+    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,
@@ -1310,6 +1332,9 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
+    // A new binding replaces the old one: release it, or its buffers and
+    // vector stay taken for the rest of the boot.
+    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,
@@ -1446,6 +1471,9 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
     if !(0..256).contains(&gpe) { return -1; }
     if ctx.hw.is_none() {
         crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
+        // A new binding replaces the old one: release it, or its buffers and
+        // vector stay taken for the rest of the boot.
+        if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
         ctx.hw = Some(HwDriverState {
             is_pci: false,
             pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
@@ -1632,6 +1660,9 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
     // A driver state without a PCI device if the module never bound one.
     if ctx.hw.is_none() {
         crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
+        // A new binding replaces the old one: release it, or its buffers and
+        // vector stay taken for the rest of the boot.
+        if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
         ctx.hw = Some(HwDriverState {
             is_pci: false,
             pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },

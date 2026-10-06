@@ -2812,7 +2812,18 @@ fn cleanup_instance_state(state: &mut HostState) {
     for h in state.tcp_handles.drain(..) {
         let _ = crate::net::tcp::close(h);
     }
+    crate::wasm::host_core::tls_release_owner(state.pid);
+    crate::audio::release_owner(state.pid);
     if let Some(hw) = state.hw.take() {
+        release_hw(hw);
+    }
+}
+
+/// Let go of a driver's device: quiet it, give back its interrupt vector,
+/// its DMA buffers and its network registration. On module exit, and when a
+/// driver binds another device in place of this one.
+pub(crate) fn release_hw(hw: HwDriverState) {
+    {
         // Stop the device before its buffers go back: with bus mastering on
         // it keeps writing received data into whatever the frames become
         // next. Clearing the bit also stops its MSI writes. Linux does the
@@ -2831,6 +2842,9 @@ fn cleanup_instance_state(state: &mut HostState) {
             // The WiFi driver owns the control channel's device side — clear it
             // so a re-launch doesn't inherit stale commands/events.
             crate::wifi::reset();
+        }
+        if hw.irq_vector != 0 {
+            crate::irq::release(hw.irq_vector);
         }
         if !hw.dma_allocs.is_empty() || hw.registered_as_netdev {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
