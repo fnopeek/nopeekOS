@@ -140,7 +140,7 @@ pub fn intent_install(args: &str) {
     }
 
     // Download module
-    let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, name);
+    let wasm_path = super::update::blob_path(&entry.sha384);
     // Bound the fetch by the manifest's own size rather than a fixed cap, so
     // a growing module is never silently truncated.
     if entry.size == 0 || entry.size > MAX_MODULE_SIZE {
@@ -261,7 +261,7 @@ pub fn apply_module(p: &ModulePlan) -> bool {
     if p.size == 0 || p.size > MAX_MODULE_SIZE {
         return fail(format_args!("implausible size {} (max {})", p.size, MAX_MODULE_SIZE));
     }
-    let wasm_path = alloc::format!("{}/{}.wasm", MODULE_BASE, p.name);
+    let wasm_path = super::update::blob_path(&p.sha384);
     let wasm_data = match super::http::https_get_resumable(MODULE_HOST, &wasm_path, p.size) {
         Ok(d) => d,
         Err(e) => return fail(format_args!("download: {}", e)),

@@ -17,6 +17,16 @@ use alloc::vec::Vec;
 
 const UPDATE_HOST: &str = "raw.githubusercontent.com";
 const UPDATE_BASE: &str = "/fnopeek/nopeekOS/main/release";
+
+/// Where a signed artifact lives under its own hash. A new version is a new
+/// name, so a CDN cache can never pair a fresh manifest with a stale file.
+pub(super) fn blob_path(sha384: &[u8; 48]) -> String {
+    let mut p = alloc::format!("{}/blobs/", UPDATE_BASE);
+    for b in sha384 {
+        let _ = core::fmt::Write::write_fmt(&mut p, format_args!("{:02x}", b));
+    }
+    p
+}
 /// Hard ceiling on a kernel image we are willing to buffer. Not the download
 /// bound: that comes from the signed manifest, so this only has to be
 /// implausibly large. A fixed cap close to the real size would eventually
@@ -31,26 +41,24 @@ const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
 const MAX_ASSET_SIZE: usize = 512 * 1024 * 1024;
 const MAX_SIG_SIZE: usize = 512;
 
-/// Mapping from asset-manifest section header to (remote filename,
-/// npkFS path). Keep in sync with `build.sh` ASSET_MANIFEST writer
+/// Mapping from asset-manifest section header to npkFS path. Keep in sync with `build.sh` ASSET_MANIFEST writer
 /// and `kernel/src/install_data/assets/mod.rs` BUNDLED entries.
 struct AssetSpec {
     section: &'static str,
-    remote_filename: &'static str,
     npkfs_path: &'static str,
 }
 
 const ASSETS: &[AssetSpec] = &[
-    AssetSpec { section: "font:inter-variable", remote_filename: "inter-variable.ttf",        npkfs_path: "sys/fonts/inter-variable" },
-    AssetSpec { section: "font:ibm-plex-mono",  remote_filename: "ibm-plex-mono.ttf",         npkfs_path: "sys/fonts/ibm-plex-mono" },
+    AssetSpec { section: "font:inter-variable", npkfs_path: "sys/fonts/inter-variable" },
+    AssetSpec { section: "font:ibm-plex-mono",  npkfs_path: "sys/fonts/ibm-plex-mono" },
     // Both faces are SIL OFL 1.1: the licence must accompany every copy,
     // so an OTA-updated system pulls it alongside the font rather than
     // only fresh installs getting it from the bundled assets.
-    AssetSpec { section: "font:LICENSE-Inter",   remote_filename: "LICENSE-Inter.txt",        npkfs_path: "sys/fonts/LICENSE-Inter" },
-    AssetSpec { section: "font:LICENSE-IBM-Plex", remote_filename: "LICENSE-IBM-Plex.txt",   npkfs_path: "sys/fonts/LICENSE-IBM-Plex" },
-    AssetSpec { section: "icons:phosphor",      remote_filename: "phosphor.atlas",            npkfs_path: "sys/icons/phosphor" },
-    AssetSpec { section: "microvm:initramfs",   remote_filename: "microvm-initramfs.cpio.gz", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
-    AssetSpec { section: "microvm:linux-virt",  remote_filename: "linux-virt.bzImage",        npkfs_path: "sys/microvm/linux-virt.bzImage" },
+    AssetSpec { section: "font:LICENSE-Inter",   npkfs_path: "sys/fonts/LICENSE-Inter" },
+    AssetSpec { section: "font:LICENSE-IBM-Plex", npkfs_path: "sys/fonts/LICENSE-IBM-Plex" },
+    AssetSpec { section: "icons:phosphor",      npkfs_path: "sys/icons/phosphor" },
+    AssetSpec { section: "microvm:initramfs",   npkfs_path: "sys/microvm/initramfs.cpio.gz" },
+    AssetSpec { section: "microvm:linux-virt",  npkfs_path: "sys/microvm/linux-virt.bzImage" },
     // Optional userspace bundle — Alpine minirootfs + busybox + (future)
     // Wayland/Mesa/LibreWolf. Built by `microvm-userspace/build.sh`.
     // Distinct from `microvm:initramfs` (which is just our PID-1, always
@@ -63,12 +71,12 @@ const ASSETS: &[AssetSpec] = &[
     // Releases; the asset
     // manifest carries a `url=` override per entry and `https_get`
     // follows the 302 redirect chain to objects.githubusercontent.com.
-    AssetSpec { section: "microvm:userspace",   remote_filename: "microvm-userspace.cpio.gz", npkfs_path: "sys/microvm/userspace.cpio.gz" },
+    AssetSpec { section: "microvm:userspace",   npkfs_path: "sys/microvm/userspace.cpio.gz" },
     // Squashfs form of the userspace bundle — read-only, mounted by
     // PID-1 from /dev/vdb (slot-5 virtio-blk) instead of unpacked into
     // a tmpfs initramfs. The RAM-efficient path; supersedes the cpio entry
     // above once it is the only shipped form.
-    AssetSpec { section: "microvm:userspace-sqfs", remote_filename: "microvm-userspace.sqfs",  npkfs_path: "sys/microvm/userspace.sqfs" },
+    AssetSpec { section: "microvm:userspace-sqfs", npkfs_path: "sys/microvm/userspace.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
     // ZipImportError at the first import. It also saves decompressing on
@@ -76,7 +84,7 @@ const ASSETS: &[AssetSpec] = &[
     //
     // Not bundled into the installer: like microvm:userspace, Python is
     // something you fetch, not something every USB stick carries.
-    AssetSpec { section: "python:stdlib",       remote_filename: "python313.zip",             npkfs_path: "sys/python/lib/python313.zip" },
+    AssetSpec { section: "python:stdlib",       npkfs_path: "sys/python/lib/python313.zip" },
 ];
 
 struct AssetEntry {
@@ -84,7 +92,7 @@ struct AssetEntry {
     size: usize,
     sha384: [u8; 48],
     /// Optional explicit URL — when present, fetched verbatim instead of
-    /// `https://{UPDATE_HOST}{UPDATE_BASE}/assets/<remote_filename>`.
+    /// the blob named by `sha384`.
     url: Option<String>,
 }
 
@@ -396,7 +404,7 @@ fn apply_plan(plan: Plan) {
 /// Download, verify and write the kernel to the ESP.
 fn apply_kernel(manifest: &Manifest) -> bool {
     kprintln!("[npk]   + kernel   v{} {}", manifest.version, fmt_size(manifest.size));
-    let kernel_path = alloc::format!("{}/kernel.efi", UPDATE_BASE);
+    let kernel_path = blob_path(&manifest.sha384);
     let kernel_data = match super::http::https_get_resumable(UPDATE_HOST, &kernel_path, manifest.size) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! kernel     download: {}", e); return false; }
@@ -483,7 +491,6 @@ fn split_url(url: &str) -> Option<(&str, &str)> {
 struct AssetJob {
     entry: AssetEntry,
     npkfs_path: String,
-    remote_filename: String,
     /// Whether a copy already exists locally (only differs in wording).
     present: bool,
 }
@@ -506,18 +513,15 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
     let mut current = 0usize;
 
     for entry in entries {
-        let (npkfs_path, remote_filename) = match ASSETS.iter().find(|s| s.section == entry.section) {
-            Some(s) => (String::from(s.npkfs_path), String::from(s.remote_filename)),
+        let npkfs_path = match ASSETS.iter().find(|s| s.section == entry.section) {
+            Some(s) => String::from(s.npkfs_path),
             // Root CA anchors are data, not code: the section name is the
             // filename, so shipping or replacing an anchor is dropping a file
             // into `release/assets/certs/` — no kernel change, no reinstall.
             // The trust chain is unchanged: size and sha384 come from the
             // signed manifest, exactly like the kernel.
             None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
-                Some(name) => (
-                    alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
-                    alloc::format!("certs/{}", name),
-                ),
+                Some(name) => alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
                 None => {
                     kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
                     continue;
@@ -534,7 +538,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
         }
 
         let present = local_hash.is_some();
-        jobs.push(AssetJob { entry, npkfs_path, remote_filename, present });
+        jobs.push(AssetJob { entry, npkfs_path, present });
     }
 
     (jobs, current)
@@ -544,7 +548,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
 /// returns whether the asset was written.
 fn apply_asset(job: &AssetJob) -> bool {
     let entry = &job.entry;
-    let spec = AssetRef { npkfs_path: &job.npkfs_path, remote_filename: &job.remote_filename };
+    let spec = AssetRef { npkfs_path: &job.npkfs_path };
     let local_present = job.present;
     {
         // ── Make room before a streaming write ──────────────────────
@@ -599,7 +603,7 @@ fn apply_asset(job: &AssetJob) -> bool {
             }
         } else {
             asset_host = String::from(UPDATE_HOST);
-            asset_path_owned = alloc::format!("{}/assets/{}", UPDATE_BASE, spec.remote_filename);
+            asset_path_owned = blob_path(&entry.sha384);
             (asset_host.as_str(), asset_path_owned.as_str())
         };
 
@@ -619,7 +623,7 @@ fn apply_asset(job: &AssetJob) -> bool {
         const STEP: usize = 8 * 1024 * 1024;
         let expected = entry.size;
         let mut next_report: usize = STEP;
-        let stream_result = super::http::https_get_streaming(
+        let stream_result = super::http::https_get_streaming_resumable(
             asset_host_str,
             asset_path_str,
             MAX_ASSET_SIZE,
@@ -699,5 +703,4 @@ pub(super) fn safe_asset_name(name: &str) -> bool {
 /// cert case produce the same shape.
 struct AssetRef<'a> {
     npkfs_path: &'a str,
-    remote_filename: &'a str,
 }

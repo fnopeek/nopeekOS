@@ -558,12 +558,16 @@ pub struct HttpRequest<'a> {
     /// and the only path page code takes here, `npk_http_begin`, sets the
     /// field explicitly.
     pub from_reach: Option<Reach>,
+    /// The request carries a `Range`, and only `206 Partial Content` may
+    /// deliver a body: a 200 would restart the file into a sink that
+    /// already holds its beginning.
+    pub require_partial: bool,
 }
 
 impl Default for HttpRequest<'_> {
     fn default() -> Self {
         HttpRequest { method: "GET", headers: &[], body: &[], accept_gzip: false, try_h2: false,
-                      plain: false, from_reach: None }
+                      plain: false, from_reach: None, require_partial: false }
     }
 }
 
@@ -807,6 +811,58 @@ pub fn https_get_resumable(host: &str, path: &str, size: usize)
     if out.len() == size { Ok(out) } else { Err(last_err) }
 }
 
+/// Streaming download of known size that survives a dropped connection:
+/// after a break it asks the hop that was serving the body for the rest
+/// (`Range: bytes=N-`, 206 required), up to three times. `on_chunk` sees
+/// every byte exactly once, in order.
+pub fn https_get_streaming_resumable(
+    host: &str,
+    path: &str,
+    max_size: usize,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
+) -> Result<usize, &'static str> {
+    let mut cur_host = String::from(host);
+    let mut cur_path = String::from(path);
+    let mut delivered = 0usize;
+    let mut last_err = "empty body";
+    for attempt in 0..4 {
+        if attempt > 0 {
+            if super::cancel_requested() { return Err("cancelled"); }
+            crate::kprintln!("[npk]     {} at {} KiB, resuming", last_err, delivered / 1024);
+        }
+        let range = [alloc::format!("Range: bytes={}-", delivered)];
+        let req = HttpRequest {
+            headers: if delivered > 0 { &range } else { &[] },
+            require_partial: delivered > 0,
+            ..HttpRequest::default()
+        };
+        let mut info = FetchInfo::default();
+        let mut sink_failed = false;
+        let r = https_request_streaming(&cur_host, &cur_path, &req, max_size.saturating_sub(delivered),
+            &mut |chunk: &[u8]| {
+                if let Err(e) = on_chunk(chunk) {
+                    sink_failed = true;
+                    return Err(e);
+                }
+                delivered += chunk.len();
+                Ok(())
+            }, Some(&mut info), false);
+        match r {
+            Ok(_) => return Ok(delivered),
+            Err(e) if sink_failed => return Err(e),
+            Err(e @ ("cancelled" | "server ignored the range" | "HTTP non-2xx response")) => return Err(e),
+            Err(e) => last_err = e,
+        }
+        if let Some(rest) = info.final_url.strip_prefix("https://") {
+            let (h, p) = rest.split_once('/').map(|(h, p)| (h, alloc::format!("/{}", p)))
+                .unwrap_or((rest, String::from("/")));
+            cur_host = String::from(h);
+            cur_path = p;
+        }
+    }
+    Err(last_err)
+}
+
 /// As [`https_get`], but the caller says whether it wants the transfer
 /// compressed. The browser does; nothing else in the tree does.
 pub fn https_get_ex(host: &str, path: &str, max_size: usize, accept_gzip: bool)
@@ -974,7 +1030,16 @@ pub fn https_request_streaming(
             try_h2: req.try_h2 && cur_tls,
             plain: !cur_tls,
             from_reach: req.from_reach,
+            require_partial: req.require_partial,
         };
+        // Known before the body starts, so a caller whose download breaks
+        // can resume at the hop that was serving it.
+        if let Some(out) = info.as_deref_mut() {
+            out.final_url.clear();
+            out.final_url.push_str(if cur_tls { "https://" } else { "http://" });
+            out.final_url.push_str(&cur_host);
+            out.final_url.push_str(&cur_path);
+        }
         let resp = https_get_once(
             &cur_host,
             &cur_path,
@@ -1891,6 +1956,10 @@ fn https_exchange(
         }
     };
     let status = parse_status_code(hdr_str).unwrap_or(0);
+    if req.require_partial && (200..300).contains(&status) && status != 206 {
+        let _ = crate::tls::tls_close(&mut tls);
+        return Err(ExchangeErr::Fatal("server ignored the range"));
+    }
     // Everything after the status line, capped. `Set-Cookie` repeats, so
     // handing back parsed single values could never carry it.
     let reply_headers = capture_headers(hdr_str);

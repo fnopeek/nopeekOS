@@ -73,6 +73,70 @@ sign_manifest() {
         | openssl dgst -sha384 -sign "$3" -out "$2.sig"
 }
 
+# Copy every artifact a manifest names to release/blobs/<sha384>, the path
+# the kernel downloads from. A new version is a new name, so the CDN in
+# front of raw.githubusercontent.com cannot pair a fresh manifest with a
+# stale file. Blobs the previous release's manifests name stay, for a
+# client that still holds a cached old manifest; older ones are removed.
+# Git stores identical content once, so the copies cost no repo space.
+publish_blobs() {
+    python3 - "$RELEASE_DIR" "$PROJECT_DIR" <<'PYEOF' || { err "publish_blobs failed"; exit 1; }
+import hashlib, os, re, shutil, subprocess, sys
+rel, root = sys.argv[1], sys.argv[2]
+blobs = os.path.join(rel, "blobs")
+os.makedirs(blobs, exist_ok=True)
+manifests = ["manifest", "modules/manifest", "assets/manifest"]
+
+def entries(text):
+    """(sha, has_url) per manifest section."""
+    out, sha, url = [], None, False
+    for line in text.splitlines() + ["["]:
+        if line.startswith("["):
+            if sha: out.append((sha, url))
+            sha, url = None, False
+        elif line.startswith("sha384="):
+            sha = line[7:].strip()
+        elif line.startswith("url="):
+            url = True
+    return out
+
+want, keep = set(), set()
+for m in manifests:
+    path = os.path.join(rel, m)
+    if os.path.exists(path):
+        for sha, url in entries(open(path).read()):
+            keep.add(sha)
+            if not url: want.add(sha)
+    prev = subprocess.run(["git", "show", "HEAD:release/" + m], cwd=root,
+                          capture_output=True, text=True).stdout
+    keep |= {sha for sha, _ in entries(prev)}
+
+files = [os.path.join(rel, "kernel.efi")]
+for d in ("modules", "assets"):
+    for dirpath, dirs, names in os.walk(os.path.join(rel, d)):
+        dirs[:] = [x for x in dirs if x != "large"]
+        files += [os.path.join(dirpath, n) for n in names
+                  if not n.endswith(".sig") and not n.startswith("manifest") and not n.endswith(".version")]
+found = set()
+for f in files:
+    if not os.path.isfile(f): continue
+    h = hashlib.sha384(open(f, "rb").read()).hexdigest()
+    if h in want:
+        found.add(h)
+        dst = os.path.join(blobs, h)
+        if not os.path.exists(dst): shutil.copyfile(f, dst)
+missing = want - found
+if missing:
+    print("[npk] blobs: no file for " + ", ".join(sorted(x[:12] for x in missing)), file=sys.stderr)
+    sys.exit(1)
+removed = 0
+for n in os.listdir(blobs):
+    if n not in keep:
+        os.remove(os.path.join(blobs, n)); removed += 1
+print(f"[npk] blobs: {len(want)} published, {removed} removed")
+PYEOF
+}
+
 # ============================================================
 # Build
 # ============================================================
@@ -1007,6 +1071,7 @@ sha384=${MOD_SHA}
         echo "$MODULE_MANIFEST" > "$OLD_MANIFEST"
         sign_manifest modules "$OLD_MANIFEST" "$KEY_FILE"
         ok "Module manifest written - $SIGNED module(s) re-signed, kernel untouched"
+        publish_blobs
         ;;
     release)
         check_deps
@@ -1315,6 +1380,7 @@ sha384=${MOD_SHA}
             fi
         fi
 
+        publish_blobs
         ok "Release artifacts in $RELEASE_DIR/"
         ls -la "$RELEASE_DIR/"
         ;;
