@@ -1706,7 +1706,8 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
                 pick(PICK_OPEN, &start, "", TAG_OPEN);
                 Outcome::Rerender
             }
-            b'n' => { sp.new_doc(); Outcome::Rerender }
+            // New tab: Ctrl+N as in editors, Ctrl+T as in browsers.
+            b'n' | b't' => { sp.new_doc(); Outcome::Rerender }
             b'w' => { sp.request_close(sp.active); Outcome::Rerender }
             // Zoom. '=' comes along because on a US layout the '+' key is
             // Shift+'=', and people press Ctrl+'=' without the Shift.
