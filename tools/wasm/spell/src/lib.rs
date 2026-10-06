@@ -52,8 +52,6 @@ use nopeek_widgets::host;
 // `nopeek_widgets::host`.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
-                suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
     fn npk_window_set_close_guard(on: i32) -> i32;
 }
 
@@ -250,8 +248,8 @@ const ACT_ZOOM_RESET: u32 = 6_104;
 const ACT_HELP_ABOUT: u32 = 6_300;
 
 // `npk_pick` modes.
-const PICK_OPEN: i32 = 0;
-const PICK_SAVE: i32 = 1;
+const PICK_OPEN: host::PickMode = host::PickMode::Open;
+const PICK_SAVE: host::PickMode = host::PickMode::Save;
 
 // Tags handed to `npk_pick` and returned in `Event::Picked`. The save tags
 // carry the tab index, so a reply lands on the document it was asked for
@@ -604,16 +602,8 @@ impl Spell {
 }
 
 /// Ask the kernel for a file dialog. `tag` comes back in `Event::Picked`.
-fn pick(mode: i32, start: &str, suggest: &str, tag: u32) {
-    // SAFETY: FFI; the kernel validates both ranges.
-    unsafe {
-        npk_pick(
-            mode,
-            start.as_ptr() as i32, start.len() as i32,
-            suggest.as_ptr() as i32, suggest.len() as i32,
-            tag as i32,
-        )
-    };
+fn pick(mode: host::PickMode, start: &str, suggest: &str, tag: u32) {
+    host::pick(mode, start, suggest, tag);
 }
 
 /// Fetch a file's contents as a String, or None on error / non-UTF-8.

@@ -36,6 +36,8 @@ unsafe extern "C" {
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
+    fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
+                suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
 }
 
 /// A non-negative return as a length.
@@ -210,4 +212,19 @@ pub fn canvas_rect(id: u32) -> Option<(i32, i32, i32, i32)> {
     if unsafe { npk_canvas_rect(id as i32, out.as_mut_ptr() as i32) } != 0 { return None; }
     let rd = |i: usize| i32::from_le_bytes([out[i], out[i + 1], out[i + 2], out[i + 3]]);
     Some((rd(0), rd(4), rd(8), rd(12)))
+}
+
+/// What the system file dialog is for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickMode { Open = 0, Save = 1 }
+
+/// Open the system file dialog in `start` (a hint), with `suggest` as the
+/// proposed name when saving. The answer arrives as `Event::Picked` with
+/// `tag`. False if refused or a dialog for this window is already open.
+pub fn pick(mode: PickMode, start: &str, suggest: &str, tag: u32) -> bool {
+    // SAFETY: FFI; the kernel validates both ranges.
+    unsafe {
+        npk_pick(mode as i32, start.as_ptr() as i32, start.len() as i32,
+            suggest.as_ptr() as i32, suggest.len() as i32, tag as i32) >= 0
+    }
 }

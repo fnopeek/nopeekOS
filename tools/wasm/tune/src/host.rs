@@ -9,8 +9,6 @@ unsafe extern "C" {
     fn npk_audio_close(slot: i32) -> i32;
     fn npk_audio_submit(slot: i32, ptr: i32, len: i32) -> i32;
     fn npk_audio_buffered(slot: i32) -> i32;
-    fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
-                suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
     fn npk_canvas_commit_yuv(canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32,
                              ys: i32, cs: i32, w: i32, h: i32, flags: i32) -> i32;
 }
@@ -31,9 +29,8 @@ pub fn get_volume() -> i32 {
 }
 
 /// Open the system file dialog. The answer arrives as `Event::Picked`.
-pub fn pick_open(start: &str) -> i32 {
-    // SAFETY: FFI; the kernel validates the range.
-    unsafe { npk_pick(0, start.as_ptr() as i32, start.len() as i32, 0, 0, 0) }
+pub fn pick_open(start: &str) -> bool {
+    sdk::pick(sdk::PickMode::Open, start, "", 0)
 }
 
 pub fn audio_open() -> i32 {

@@ -816,7 +816,7 @@ fn commit_scene(t: &mut Tune) {
 /// The system file dialog, starting in the folder tune is looking at.
 fn open_dialog(t: &Tune) {
     let start = if t.dir.is_empty() { read_home_dir() } else { t.dir.clone() };
-    if host::pick_open(&start) < 0 { log("[tune] file dialog unavailable"); }
+    if !host::pick_open(&start) { log("[tune] file dialog unavailable"); }
 }
 
 /// A mid-drag redraw, throttled: every scene is a full layout and raster
