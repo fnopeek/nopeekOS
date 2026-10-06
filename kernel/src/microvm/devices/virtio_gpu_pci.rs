@@ -150,6 +150,11 @@ struct VirtQueue {
 
 /// Largest width or height of a 2D resource: 8K displays fit.
 const MAX_RESOURCE_DIM: u32 = 8192;
+/// Resources per device, and host pixel copies of all of them together.
+/// A Linux guest uses a handful (framebuffers, cursor); both numbers are
+/// the guest's to choose, and every byte of them is host memory.
+const MAX_RESOURCES: usize = 256;
+const MAX_HOST_PIXEL_BYTES: usize = 512 * 1024 * 1024;
 
 /// Most bytes of one control request the device reads from the guest.
 const MAX_CTRL_REQUEST: usize = 1024 * 1024;
@@ -576,8 +581,12 @@ impl VirtioGpu {
                 build_display_info_resp(flags, fence_id, dw, dh, enabled)
             }
             VIRTIO_GPU_CMD_RESOURCE_CREATE_2D => {
-                self.handle_resource_create_2d(&request[24..]);
-                build_ctrl_hdr(VIRTIO_GPU_RESP_OK_NODATA, flags, fence_id)
+                let resp = if self.handle_resource_create_2d(&request[24..]) {
+                    VIRTIO_GPU_RESP_OK_NODATA
+                } else {
+                    VIRTIO_GPU_RESP_ERR_UNSPEC
+                };
+                build_ctrl_hdr(resp, flags, fence_id)
             }
             VIRTIO_GPU_CMD_RESOURCE_UNREF => {
                 if request.len() >= 24 + 8 {
@@ -638,8 +647,8 @@ impl VirtioGpu {
         }
     }
 
-    fn handle_resource_create_2d(&mut self, body: &[u8]) {
-        if body.len() < 16 { return; }
+    fn handle_resource_create_2d(&mut self, body: &[u8]) -> bool {
+        if body.len() < 16 { return false; }
         let id     = u32::from_le_bytes([body[0],  body[1],  body[2],  body[3]]);
         let format = u32::from_le_bytes([body[4],  body[5],  body[6],  body[7]]);
         let width  = u32::from_le_bytes([body[8],  body[9],  body[10], body[11]]);
@@ -647,18 +656,20 @@ impl VirtioGpu {
         // The host keeps a pixel copy of every resource; its size comes from
         // the guest.
         if width == 0 || height == 0 || width > MAX_RESOURCE_DIM || height > MAX_RESOURCE_DIM {
-            return;
+            return false;
         }
         // Replace if id exists, else push.
         if let Some(r) = self.resources.iter_mut().find(|r| r.id == id) {
             r.format = format; r.width = width; r.height = height;
             r.backing.clear(); r.host_pixels = None; r.frame = 0; r.flushed_frame = 0;
         } else {
+            if self.resources.len() >= MAX_RESOURCES { return false; }
             self.resources.push(Resource {
                 id, format, width, height,
                 backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
             });
         }
+        true
     }
 
     fn handle_attach_backing(&mut self, body: &[u8]) {
@@ -729,6 +740,10 @@ impl VirtioGpu {
         ]);
         let resource_id = u32::from_le_bytes([body[24], body[25], body[26], body[27]]);
 
+        let others: usize = self.resources.iter()
+            .filter(|r| r.id != resource_id)
+            .map(|r| r.host_pixels.as_ref().map_or(0, |p| p.len()))
+            .sum();
         let r = match self.resources.iter_mut().find(|r| r.id == resource_id) {
             Some(r) => r, None => return,
         };
@@ -749,6 +764,7 @@ impl VirtioGpu {
 
         // Ensure host_pixels exists with the right size, without panicking
         // when the host cannot spare it.
+        if others + total_pixels_bytes > MAX_HOST_PIXEL_BYTES { return; }
         let host_buf = r.host_pixels.get_or_insert_with(Vec::new);
         if host_buf.len() != total_pixels_bytes {
             if total_pixels_bytes > host_buf.len()

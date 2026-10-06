@@ -691,9 +691,23 @@ impl Virtio9p {
 
     /// Tattach: fid[4] afid[4] uname[s] aname[s] n_uname[4]. The fid
     /// becomes the filesystem root — confined to `self.root`.
+    /// Bytes buffered by every fid but `except`.
+    fn buffered_except(&self, except: u32) -> usize {
+        self.fids.iter()
+            .filter(|(k, _)| **k != except)
+            .map(|(_, f)| f.data.as_ref().map_or(0, |d| d.len()))
+            .sum()
+    }
+
+    /// May `fid` be bound? An existing one is rebound; a new one needs room.
+    fn fid_room(&self, fid: u32) -> bool {
+        self.fids.contains_key(&fid) || self.fids.len() < MAX_FIDS
+    }
+
     fn t_attach(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
         if body.len() < 4 { return rlerror(tag, EINVAL); }
         let fid = rd_u32(body, 0);
+        if !self.fid_room(fid) { return rlerror(tag, EMFILE); }
         let root = self.root.clone();
         self.fids.insert(fid, Fid { path: root.clone(), is_dir: true, data: None, dirty: false, async_stream: false, stream_next: 0 });
         if self.log_count < 32 {
@@ -733,6 +747,7 @@ impl Virtio9p {
         }
         let walked = (qids.len() / 13) as u16;
         if walked as usize == nw {
+            if !self.fid_room(newfid) { return rlerror(tag, EMFILE); }
             let is_dir = npkfs_stat(&cur).map(|s| s.0).unwrap_or(true);
             self.fids.insert(newfid, Fid { path: cur, is_dir, data: None, dirty: false, async_stream: false, stream_next: 0 });
         }
@@ -833,6 +848,9 @@ impl Virtio9p {
             } else {
                 npkfs_read(&path).unwrap_or_default()
             };
+            if self.buffered_except(fid) + data.len() > MAX_DEVICE_BUFFERED {
+                return rlerror(tag, ENOSPC);
+            }
             if let Some(f) = self.fids.get_mut(&fid) { f.data = Some(data); }
         }
         let mut b = Vec::with_capacity(17);
@@ -934,6 +952,7 @@ impl Virtio9p {
         let offset = u64::from_le_bytes(body[4..12].try_into().unwrap());
         let count = rd_u32(body, 12) as usize;
         let data = &body[16..body.len().min(16 + count)];
+        let others = self.buffered_except(fid);
         STAT_TWRITES.fetch_add(1, AtO::Relaxed);
         STAT_TWRITE_BYTES.fetch_add(data.len() as u64, AtO::Relaxed);
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
@@ -985,6 +1004,7 @@ impl Virtio9p {
         else { return rlerror(tag, EFBIG) };
         {
             let buf = f.data.get_or_insert_with(Vec::new);
+            if end > buf.len() && others + end > MAX_DEVICE_BUFFERED { return rlerror(tag, ENOSPC); }
             if let Err(e) = grow_buffer(buf, end) { return rlerror(tag, e); }
             buf[offset..end].copy_from_slice(data);
         }
@@ -1171,6 +1191,12 @@ const ENOSPC:  u32 = 28;
 /// come from the guest; past this, or when the host cannot reserve the
 /// memory, the guest gets an error instead of the host an allocation panic.
 const MAX_BUFFERED_BYTES: usize = 1 << 30;
+/// File bytes all fids together may hold in host memory, opened files and
+/// write buffers alike: the guest chooses how many fids it opens.
+const MAX_DEVICE_BUFFERED: usize = 1 << 30;
+/// Open fids per device. A Linux client uses a few hundred.
+const MAX_FIDS: usize = 4096;
+const EMFILE: u32 = 24;
 
 /// Grow `buf` to `len` zero-filled bytes, or say why not (an errno).
 fn grow_buffer(buf: &mut Vec<u8>, len: usize) -> Result<(), u32> {
