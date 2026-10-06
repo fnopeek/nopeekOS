@@ -33,7 +33,10 @@ fn serve_fetches(sess: &mut beak_engine::js::Session, dir: &str) -> usize {
                     &mut sess.interp, f.id, 200, &u, ct,
                     String::from_utf8_lossy(&bytes).into_owned());
             }
-            Err(e) => beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, &e.to_string()),
+            Err(e) => {
+                println!("fetch fehlt: {} {}", f.method, u);
+                beak_engine::js::fetch::fetch_failed(&mut sess.interp, f.id, &e.to_string())
+            }
         }
     }
     n
@@ -583,6 +586,15 @@ erreichbar ({} Umgebungen, {} Eigenschaften){}",
     // the cap.
     if sess.interp.console_dropped > 0 {
         println!("Konsole: {} Zeilen verworfen (Deckel)", sess.interp.console_dropped);
+    }
+    // Function bodies the compiler declined run on the tree walker, which
+    // cannot suspend: an async one among them fails at its first `await`.
+    let mut d: Vec<(&&'static str, &u64)> = sess.interp.func_declines.iter().collect();
+    if !d.is_empty() {
+        d.sort_by_key(|(_, n)| core::cmp::Reverse(**n));
+        let tot: u64 = d.iter().map(|(_, n)| **n).sum();
+        println!("Rumpfe abgelehnt: {tot} in {} Sorten", d.len());
+        for (why, n) in d.iter().take(8) { println!("  {why} x{n}"); }
     }
     println!("\n{ran} gelaufen, {failed} gescheitert, {timers} Zeitgeber, {}",
              if listeners { "Ereignisse SCHARF" } else { "keine Behandler" });
