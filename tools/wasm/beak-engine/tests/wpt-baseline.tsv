@@ -2033,8 +2033,8 @@ PASS	CSS2/inline-block-replaced-height-004.xht
 PASS	CSS2/inline-block-replaced-height-005.xht
 PASS	CSS2/inline-block-replaced-height-007.xht
 FAIL	CSS2/inline-block-replaced-height-009.xht
-PASS	CSS2/inline-block-replaced-width-007.xht
-PASS	CSS2/inline-block-replaced-width-008.xht
+FAIL	CSS2/inline-block-replaced-width-007.xht
+FAIL	CSS2/inline-block-replaced-width-008.xht
 INCONCLUSIVE	CSS2/inline-block-valign-001.xht
 INCONCLUSIVE	CSS2/inline-block-valign-002.xht
 PASS	CSS2/inline-block-width-001a.xht
@@ -2063,8 +2063,8 @@ PASS	CSS2/inline-replaced-height-004.xht
 PASS	CSS2/inline-replaced-height-005.xht
 PASS	CSS2/inline-replaced-height-007.xht
 FAIL	CSS2/inline-replaced-height-009.xht
-PASS	CSS2/inline-replaced-width-008.xht
-PASS	CSS2/inline-replaced-width-009.xht
+FAIL	CSS2/inline-replaced-width-008.xht
+FAIL	CSS2/inline-replaced-width-009.xht
 PASS	CSS2/inline-svg-intrinsic-size-100-percent-1.html
 FAIL	CSS2/inline-svg-intrinsic-size-100-percent-2.html
 FAIL	CSS2/inline-svg-margin-padding-border.html
@@ -2128,7 +2128,7 @@ PASS	CSS2/left-applies-to-015.xht
 PASS	CSS2/left-offset-percentage-002.xht
 PASS	CSS2/left-offset-position-fixed-001.xht
 FAIL	CSS2/letter-spacing-102.xht
-FAIL	CSS2/line-breaking-font-size-zero-001.html
+PASS	CSS2/line-breaking-font-size-zero-001.html
 PASS	CSS2/line-height-125.xht
 FAIL	CSS2/line-height-bleed-001.xht
 PASS	CSS2/line-height-oof-descendants-001.html
@@ -4852,11 +4852,11 @@ FAIL	css-grid/grid-lanes-subgrid-001b.html
 FAIL	css-grid/grid-lanes-subgrid-001c.html
 FAIL	css-grid/grid-lanes-subgrid-001d.html
 FAIL	css-grid/grid-lanes-subgrid-002a.html
-FAIL	css-grid/grid-lanes-subgrid-002b.html
+PASS	css-grid/grid-lanes-subgrid-002b.html
 FAIL	css-grid/grid-lanes-subgrid-002c.html
-FAIL	css-grid/grid-lanes-subgrid-002d.html
+PASS	css-grid/grid-lanes-subgrid-002d.html
 FAIL	css-grid/grid-lanes-subgrid-002e.html
-FAIL	css-grid/grid-lanes-subgrid-002f.html
+PASS	css-grid/grid-lanes-subgrid-002f.html
 FAIL	css-grid/grid-lanes-subgrid-flex.html
 FAIL	css-grid/grid-lanes-subgrid-intrinsic-sizing.html
 FAIL	css-grid/grid-lanes-subgrid.html
