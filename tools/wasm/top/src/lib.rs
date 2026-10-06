@@ -13,7 +13,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 // ── App Display API ──────────────────────────────────────────────
 

@@ -131,56 +131,24 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event() -> PollResult {
-    let buf_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-    let n = unsafe { npk_event_poll(buf_ptr as i32, EVENT_BUF_SIZE as i32) };
-    if n < 0 { return PollResult::WindowGone; }
-    if n == 0 { return PollResult::Empty; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+    // SAFETY: the event buffer is used only here, on the app's one fiber.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
+    match nopeek_widgets::events::poll(&mut buf[..]) {
+        nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
+        nopeek_widgets::events::Poll::Empty => PollResult::Empty,
+        nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-// Bump allocator — same pattern as drun. 512 KB because it holds the full
-// catalog (every installed app) for the Add-to-dock submenu, and may
-// re-render multiple times per session.
-const HEAP_SIZE: usize = 512 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
-fn alloc_mark() -> usize {
-    unsafe { core::ptr::addr_of!(HEAP_POS).read() }
-}
-
-fn alloc_reset(pos: usize) {
-    unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); }
-}
-
+// The SDK's growing heap: it frees, and it takes memory from the runtime as
+// it is needed instead of reserving it at launch.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     log("[dock] panic!");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 // ── ActionIds + NodeIds ───────────────────────────────────────────────
@@ -290,9 +258,6 @@ impl Dock {
             // File never written → first boot, seed from the catalog.
             None => catalog.clone(),
         };
-        // Pre-allocate `entries` to the full catalog size so subsequent
-        // Add/Remove mutations never re-allocate behind the persistent
-        // bump mark (which would leak the Vec buffer on every alloc_reset).
         let mut entries: Vec<AppEntry> = Vec::with_capacity(catalog.len() + 1);
         entries.extend(initial);
         let packed = unsafe { npk_get_fb_size() };
@@ -747,10 +712,8 @@ fn separator() -> Widget {
     }
 }
 
-// The compositor's window list, kept in a static buffer rather than on
-// the heap: the render loop resets the bump allocator before every
-// commit, so anything derived here that lived on the heap would be a
-// use-after-free one frame later.
+// The compositor's window list, kept in a static buffer: it is refreshed
+// on every idle poll and needs no allocation.
 const TITLES_CAP: usize = 2048;
 static mut TITLES: [u8; TITLES_CAP] = [0; TITLES_CAP];
 static mut TITLES_LEN: usize = 0;
@@ -841,7 +804,6 @@ pub extern "C" fn _start() {
     unsafe { let _ = npk_window_set_modal(0); }
     dock.apply_window_size();
 
-    let persistent_mark = alloc_mark();
     refresh_titles();
     dock.commit_tree();
 
@@ -858,7 +820,6 @@ pub extern "C" fn _start() {
                     // reset and rebuild so the heap doesn't grow on every
                     // mutation. entries/catalog were allocated before mark
                     // with capacity headroom, so they survive.
-                    alloc_reset(persistent_mark);
                     dock.commit_tree();
                 }
             }
@@ -867,7 +828,6 @@ pub extern "C" fn _start() {
                 // the window list and re-render only when the running
                 // indicators changed.
                 if refresh_titles() {
-                    alloc_reset(persistent_mark);
                     dock.commit_tree();
                 }
                 // Then wait to be told. The kernel wakes the dock on an event

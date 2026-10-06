@@ -32,40 +32,12 @@ static NPK_CAPS: [u8; 1] = [0x01 | 0x02 | 0x04 | 0x08]; // READ|WRITE|EXEC|RENDE
 mod host;
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
-// ── 256 MB bump heap ──────────────────────────────────────────────────
-//
-// Sized for the 100 MB bucket: 100 MB write_buf + 100 MB read_buf + ~50
-// MB slack for transient kernel-side allocations (storage::put alloc'd
-// AES-GCM ciphertext + tree-rebuild + commit-journal scratch).
-//
-// 256 MB as bss adds nothing to the binary on disk (zero-init), but
-// the wasmi runtime has to back it with real pages on instantiate, so
-// startup gets slower. Acceptable for a one-shot bench.
-const HEAP_SIZE: usize = 256 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAlloc;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
+// The SDK's growing heap: it frees, and it takes memory from the runtime as
+// it is needed instead of reserving it at launch.
 #[global_allocator]
-static ALLOC: BumpAlloc = BumpAlloc;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 // ── Output formatting (no f64 in WASM no_std — keep integer-only) ─────
 

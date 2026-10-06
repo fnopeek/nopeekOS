@@ -48,7 +48,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     host::print("\n");
     host::log("[ax200] PANIC — driver stopped (see the line above for file:line)");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 /// AX200 runtime firmware (unified ucode), embedded like the RTL driver embeds

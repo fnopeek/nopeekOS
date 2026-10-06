@@ -20,7 +20,7 @@ mod host;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 /// `debug` needs the network (its log goes over a raw TCP socket to an
 /// `nc -lk`, gated by NET) and HARDWARE (it injects remote key bytes via

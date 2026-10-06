@@ -5484,18 +5484,12 @@ enum PollResult {
 }
 
 fn poll_event() -> PollResult {
-    let buf_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-    let n = unsafe { npk_event_poll(buf_ptr as i32, EVENT_BUF_SIZE as i32) };
-    if n < 0 {
-        return PollResult::WindowGone;
-    }
-    if n == 0 {
-        return PollResult::Empty;
-    }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+    // SAFETY: the event buffer is used only here, on the app's one fiber.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
+    match nopeek_widgets::events::poll(&mut buf[..]) {
+        nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
+        nopeek_widgets::events::Poll::Empty => PollResult::Empty,
+        nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 

@@ -87,30 +87,13 @@ static mut LIST_BUF: [u8; LIST_BUF_SIZE] = [0; LIST_BUF_SIZE];
 const HOME_CAP: usize = 256;
 static mut HOME_BUF: [u8; HOME_CAP] = [0; HOME_CAP];
 
-// ── Bump allocator (192 MB — a 4K capture is 33 MB BGRA + ~25 MB RGB
-//    scanlines + the deflate output, all live at encode time). ──
-const HEAP_SIZE: usize = 192 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos = core::ptr::addr_of!(HEAP_POS).read();
-        let align = layout.align();
-        let aligned = (pos + align - 1) & !(align - 1);
-        let new_pos = aligned + layout.size();
-        if new_pos > HEAP_SIZE { return core::ptr::null_mut(); }
-        core::ptr::addr_of_mut!(HEAP_POS).write(new_pos);
-        core::ptr::addr_of_mut!(HEAP).cast::<u8>().add(aligned)
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
+// The SDK's growing heap: it frees, and it takes memory from the runtime as
+// it is needed instead of reserving it at launch.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { log("[snap] panic!"); loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { log("[snap] panic!"); core::arch::wasm32::unreachable() }
 
 // ── Entry ─────────────────────────────────────────────────────────────
 #[unsafe(no_mangle)]

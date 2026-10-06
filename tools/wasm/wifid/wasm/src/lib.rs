@@ -24,7 +24,7 @@ static NPK_CAPS: [u8; 1] = [0x83];
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     log("[wifid] panic");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 // Host functions are WASM imports from the `env` module, resolved by the

@@ -216,76 +216,30 @@ static mut EVENT_BUF: [u8; EVENT_BUF_SIZE] = [0; EVENT_BUF_SIZE];
 const FETCH_BUF_SIZE: usize = 512 * 1024;
 static mut FETCH_BUF: [u8; FETCH_BUF_SIZE] = [0; FETCH_BUF_SIZE];
 
-// Pre-allocate the document so ordinary edits stay within capacity and
-// don't churn the bump allocator (mirrors loft's `query` discipline).
+// Pre-allocate the document so ordinary edits stay within capacity.
 const TEXT_CAP: usize = 256 * 1024;
 
-// An event's owned String (Open path / InputChange value) is allocated on
-// the bump heap during poll, above persistent_mark — so `alloc_reset`
-// before `handle` frees it and the first allocation in `handle` clobbers
-// it (a use-after-free). We copy such payloads into this static buffer
-// (outside the bump heap) before the reset, and hand `handle` a &str into
-// it. Sized to hold a whole-document InputChange.
-const PAYLOAD_CAP: usize = 512 * 1024;
-static mut PAYLOAD_BUF: [u8; PAYLOAD_CAP] = [0; PAYLOAD_CAP];
-
-fn copy_payload(s: &str) -> usize {
-    let n = s.len().min(PAYLOAD_CAP);
-    let dst = core::ptr::addr_of_mut!(PAYLOAD_BUF) as *mut u8;
-    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), dst, n); }
-    n
-}
-
-fn payload_str(len: usize) -> &'static str {
-    let ptr = core::ptr::addr_of!(PAYLOAD_BUF) as *const u8;
-    let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-    core::str::from_utf8(slice).unwrap_or("")
-}
 
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event() -> PollResult {
-    let buf_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-    let n = unsafe { npk_event_poll(buf_ptr as i32, EVENT_BUF_SIZE as i32) };
-    if n < 0 { return PollResult::WindowGone; }
-    if n == 0 { return PollResult::Empty; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+    // SAFETY: the event buffer is used only here, on the app's one fiber.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
+    match nopeek_widgets::events::poll(&mut buf[..]) {
+        nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
+        nopeek_widgets::events::Poll::Empty => PollResult::Empty,
+        nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
-// ── Bump allocator (4 MB — a document plus its transient widget tree
-//    and preview spans). State alloc'd before `persistent_mark`
-//    survives `alloc_reset`; everything above the mark is per-frame. ──
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE { return core::ptr::null_mut(); }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
+// The SDK's growing heap: it frees, and it takes memory from the runtime as
+// it is needed instead of reserving it at launch.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { log("[spell] panic!"); loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { log("[spell] panic!"); core::arch::wasm32::unreachable() }
 
-fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
-fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 
 // ── Action / node ids ─────────────────────────────────────────────────
 
@@ -1748,8 +1702,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             if sp.begin_quit() { Outcome::Exit } else { Outcome::Rerender }
         }
         Event::InputChange { .. } => {
-            // `payload` is the stabilized buffer value (the event's own
-            // String was freed by alloc_reset). The TextArea is the only
+            // `payload` is the buffer value. The TextArea is the only
             // editable widget we render — the file dialogs live in their
             // own window.
             let d = sp.cur_mut();
@@ -1927,10 +1880,8 @@ fn commit_tree(sp: &Spell) {
 pub extern "C" fn _start() {
     // Tiled app — the first commit creates the window; the compositor
     // auto-focuses the first text widget (our TextArea) so the user can
-    // type immediately. See the loft bump-allocator notes for the
-    // persistent_mark / alloc_reset lifecycle.
+    // type immediately.
     let mut sp = Spell::new();
-    let mut persistent_mark = alloc_mark();
 
     commit_tree(&sp);
     // After the first commit — the window has to exist before it can be
@@ -1940,19 +1891,15 @@ pub extern "C" fn _start() {
     loop {
         match poll_event() {
             PollResult::Event(ev) => {
-                // Stabilize heap-backed payloads (Open path, InputChange
-                // value) into the static buffer before alloc_reset frees
-                // the event — otherwise handle's first allocation clobbers
-                // them (use-after-free).
-                let plen = match &ev {
-                    Event::Open(s) => copy_payload(s),
-                    Event::InputChange { value } => copy_payload(value),
-                    Event::Picked { path, .. } => copy_payload(path),
-                    _ => 0,
+                // The event's text (Open path, InputChange value, picked
+                // path), whole: a document has no size limit here.
+                let payload = match &ev {
+                    Event::Open(s) => s.clone(),
+                    Event::InputChange { value } => value.clone(),
+                    Event::Picked { path, .. } => path.clone(),
+                    _ => alloc::string::String::new(),
                 };
-                alloc_reset(persistent_mark);
-                let outcome = handle(&mut sp, ev, payload_str(plen));
-                persistent_mark = alloc_mark();
+                let outcome = handle(&mut sp, ev, &payload);
                 match outcome {
                     Outcome::Idle => {}
                     Outcome::Rerender => commit_tree(&sp),

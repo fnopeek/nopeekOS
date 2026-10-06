@@ -62,6 +62,11 @@ pub mod wire;
 // compiled out of host-side test builds of the SDK.
 #[cfg(target_arch = "wasm32")]
 pub mod app_catalog;
+// Event polling and the panic handler import host fns: wasm32 only too.
+#[cfg(target_arch = "wasm32")]
+pub mod events;
+#[cfg(target_arch = "wasm32")]
+pub mod rt;
 
 // Compile-time ABI ordering guard. Mirrors kernel/src/shade/widgets/check_abi.rs.
 mod check_abi;

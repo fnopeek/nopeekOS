@@ -136,14 +136,12 @@ fn payload_str(len: usize) -> &'static str {
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event() -> PollResult {
-    let buf_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
-    let n = unsafe { npk_event_poll(buf_ptr as i32, EVENT_BUF_SIZE as i32) };
-    if n < 0 { return PollResult::WindowGone; }
-    if n == 0 { return PollResult::Empty; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+    // SAFETY: the event buffer is used only here, on the app's one fiber.
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(EVENT_BUF) };
+    match nopeek_widgets::events::poll(&mut buf[..]) {
+        nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
+        nopeek_widgets::events::Poll::Empty => PollResult::Empty,
+        nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
@@ -175,7 +173,7 @@ unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { log("[iris] panic!"); loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { log("[iris] panic!"); core::arch::wasm32::unreachable() }
 
 fn alloc_mark() -> usize { unsafe { core::ptr::addr_of!(HEAP_POS).read() } }
 fn alloc_reset(pos: usize) { unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(pos); } }
@@ -1089,6 +1087,16 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 /// above it. What the format does give us is that the stream arrives in
 /// order, so the top of the picture is ready while the bottom is still
 /// compressed.
+/// Largest image decoded: per side, and in pixels (an 8K frame). Width and
+/// height come from the file, and on wasm32 their products wrap.
+const PNG_MAX_SIDE: u32 = 16384;
+const PNG_MAX_PIXELS: u64 = 32 * 1024 * 1024;
+
+fn png_size_ok(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && width <= PNG_MAX_SIDE && height <= PNG_MAX_SIDE
+        && (width as u64) * (height as u64) <= PNG_MAX_PIXELS
+}
+
 fn decode_png_cb<F>(data: &[u8], mut on_rows: F) -> Option<(Vec<u8>, u32, u32)>
 where
     F: FnMut(&[u8], u32, u32),
@@ -1107,7 +1115,8 @@ where
         let chunk_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
         let chunk_type = &data[pos+4..pos+8];
         let start = pos + 8;
-        let end = start + chunk_len;
+        // checked: a wrapped end would send `pos` backwards, forever.
+        let Some(end) = start.checked_add(chunk_len) else { break };
         if end > data.len() { break; }
         match chunk_type {
             b"IHDR" => {
@@ -1128,7 +1137,7 @@ where
         pos = end + 4; // +4 CRC
     }
 
-    if width == 0 || height == 0 || idat_data.is_empty() { return None; }
+    if !png_size_ok(width, height) || idat_data.is_empty() { return None; }
 
     let channels: usize = match color_type { 2 => 3, 6 => 4, _ => return None };
     let stride = width as usize * channels;
@@ -1139,7 +1148,7 @@ where
 
     let row_bytes = 1 + stride;
     let rows = height as usize;
-    let pixel_count = (width * height) as usize;
+    let pixel_count = width as usize * height as usize;
 
     let mut decompressed = alloc::vec![0u8; rows * row_bytes];
     let mut unfiltered = alloc::vec![0u8; rows * stride];

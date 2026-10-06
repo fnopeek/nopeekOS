@@ -1,6 +1,6 @@
 [package]
 name = "dock"
-version = "0.7.4"
+version = "0.8.0"
 edition = "2024"
 description = "Bottom auto-hide app dock (overlay launcher)."
 
@@ -8,7 +8,7 @@ description = "Bottom auto-hide app dock (overlay launcher)."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [dependencies.postcard]
 version = "1.0"

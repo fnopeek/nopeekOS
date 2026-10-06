@@ -62,55 +62,15 @@ fn store(name: &str, data: &[u8]) -> bool {
     result == 0
 }
 
-// --- Simple bump allocator for WASM ---
-//
-// 256 MB heap covers worst-case 4K-PNG decode. The bump allocator
-// never frees, so every intermediate buffer the decoder holds onto
-// stacks up:
-//   - input PNG buffer (decode mode):    up to 32 MB
-//   - IDAT concatenation Vec:            ~9 MB (pre-sized)
-//   - miniz_oxide decompressed output:   ~38 MB (4K, 1 byte filter
-//                                                + 4 channels per
-//                                                pixel @ 3840×2400)
-//   - per-row unfilter buffer:           ~37 MB
-//   - final BGRA buffer:                 ~37 MB
-//   - miniz_oxide internal state:        ~5 MB
-// Total: ~158 MB worst-case at 4K, so 128 MB is not enough.
-// 256 MB linear memory is fine — wasmi grows on demand and the
-// module's lifetime is one intent invocation.
-const HEAP_SIZE: usize = 256 * 1024 * 1024; // 256 MB
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct BumpAllocator;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + align - 1) & !(align - 1);
-        if aligned + size > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        unsafe { pos_ptr.write(aligned + size); }
-        let heap_ptr = core::ptr::addr_of_mut!(HEAP) as *mut u8;
-        unsafe { heap_ptr.add(aligned) }
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        // Bump allocator: no deallocation (module runs once and exits)
-    }
-}
-
+// The SDK's growing heap: it frees, and it takes memory from the runtime as
+// it is needed instead of reserving it at launch.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     log("[wallpaper] panic!");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 // --- Entry point ---
@@ -558,6 +518,16 @@ fn sine_lut(x: u32) -> i32 {
 
 // --- PNG Decoder ---
 
+/// Largest image decoded: per side, and in pixels (an 8K frame). Width and
+/// height come from the file, and on wasm32 their products wrap.
+const PNG_MAX_SIDE: u32 = 16384;
+const PNG_MAX_PIXELS: u64 = 32 * 1024 * 1024;
+
+fn png_size_ok(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && width <= PNG_MAX_SIDE && height <= PNG_MAX_SIDE
+        && (width as u64) * (height as u64) <= PNG_MAX_PIXELS
+}
+
 fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     // Verify PNG signature
     if data.len() < 8 || &data[0..8] != b"\x89PNG\r\n\x1a\n" {
@@ -570,10 +540,7 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut bit_depth: u8 = 0;
     let mut color_type: u8 = 0;
     // IDAT concatenation: pre-size to the *whole* PNG payload so the
-    // chunk-by-chunk `extend_from_slice` doesn't re-allocate (and,
-    // because the bump allocator never frees, leak each previous
-    // buffer in the geometric doubling cascade — that's a multi-
-    // MB leak on a 4K wallpaper).
+    // chunk-by-chunk `extend_from_slice` doesn't re-allocate.
     let mut idat_data: Vec<u8> = Vec::with_capacity(data.len());
 
     // Parse chunks
@@ -581,7 +548,8 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         let chunk_len = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
         let chunk_type = &data[pos+4..pos+8];
         let chunk_data_start = pos + 8;
-        let chunk_data_end = chunk_data_start + chunk_len;
+        // checked: a wrapped end would send `pos` backwards, forever.
+        let Some(chunk_data_end) = chunk_data_start.checked_add(chunk_len) else { break };
 
         if chunk_data_end > data.len() { break; }
 
@@ -621,7 +589,7 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         pos = chunk_data_end + 4; // +4 for CRC
     }
 
-    if width == 0 || height == 0 || idat_data.is_empty() {
+    if !png_size_ok(width, height) || idat_data.is_empty() {
         return None;
     }
 
@@ -682,7 +650,7 @@ fn decode_png(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     }
 
     // Convert to BGRA (framebuffer format)
-    let pixel_count = (width * height) as usize;
+    let pixel_count = width as usize * height as usize;
     let mut bgra = vec![0u8; pixel_count * 4];
     for i in 0..pixel_count {
         let src = i * channels;

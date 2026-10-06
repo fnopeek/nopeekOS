@@ -19,7 +19,7 @@ use regs::*;
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     log("[audio_hda] panic");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 // EXECUTE to bind the PCI device, HARDWARE to drain the kernel mixer

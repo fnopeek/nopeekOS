@@ -79,7 +79,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     host::print("\n");
     host::log("[rtl8822ce] PANIC — Treiber gestoppt (Datei:Zeile steht oben)");
-    loop {}
+    core::arch::wasm32::unreachable()
 }
 
 /// Single source for the version, so banner and report cannot diverge.

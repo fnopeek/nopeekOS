@@ -1,6 +1,6 @@
 [package]
 name = "spell"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 description = "Text editor with markdown preview — nopeekOS."
 
@@ -8,7 +8,7 @@ description = "Text editor with markdown preview — nopeekOS."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets" }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [dependencies.postcard]
 version = "1.0"

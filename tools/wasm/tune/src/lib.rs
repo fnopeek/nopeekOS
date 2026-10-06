@@ -86,14 +86,12 @@ fn payload_str(len: usize) -> &'static str {
 enum PollResult { Event(Event), Empty, WindowGone }
 
 fn poll_event() -> PollResult {
-    let buf_ptr = &raw mut EVENT_BUF as *mut u8;
-    let n = host::event_poll(buf_ptr, EVENT_BUF_SIZE);
-    if n < 0 { return PollResult::WindowGone; }
-    if n == 0 { return PollResult::Empty; }
-    let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
-    match postcard::from_bytes::<Event>(slice) {
-        Ok(ev) => PollResult::Event(ev),
-        Err(_) => PollResult::Empty,
+    // SAFETY: the event buffer is used only here, on the app's one fiber.
+    let buf = unsafe { &mut *(&raw mut EVENT_BUF) };
+    match nopeek_widgets::events::poll(&mut buf[..]) {
+        nopeek_widgets::events::Poll::Event(ev) => PollResult::Event(ev),
+        nopeek_widgets::events::Poll::Empty => PollResult::Empty,
+        nopeek_widgets::events::Poll::Gone => PollResult::WindowGone,
     }
 }
 
@@ -108,7 +106,7 @@ fn poll_event() -> PollResult {
 static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { log("[tune] panic!"); loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { log("[tune] panic!"); core::arch::wasm32::unreachable() }
 
 // ── File arena ────────────────────────────────────────────────────────
 //

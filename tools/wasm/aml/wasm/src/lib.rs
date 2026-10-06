@@ -45,6 +45,7 @@ unsafe extern "C" {
     fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
     fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn npk_sleep(ms: i32) -> i32;
+    fn npk_ticks() -> i64;
     fn npk_log_serial(ptr: i32, len: i32);
     fn npk_print(ptr: i32, len: i32);
     fn npk_sys_info(key: i32) -> i64;
@@ -157,6 +158,9 @@ impl Ec for HostEc {
     }
     fn sleep_ms(&mut self, ms: u32) {
         unsafe { npk_sleep(ms as i32) };
+    }
+    fn now_ms(&mut self) -> Option<u64> {
+        Some(unsafe { npk_ticks() }.max(0) as u64)
     }
     fn mem_read(&mut self, addr: u64) -> Option<u8> {
         let hi = (addr >> 32) as u32 as i32;

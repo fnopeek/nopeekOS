@@ -610,6 +610,11 @@ impl<'a> Interp<'a> {
                 // While
                 let (pkg_end, p1) = pkg_length(b, p + 1);
                 let mut guard = 0u32;
+                // ACPICA ends a loop after ACPI_MAX_LOOP_TIMEOUT (30 s,
+                // AE_AML_LOOP_TIMEOUT). Counting iterations alone lets a
+                // loop with a Sleep in it run for hours, with no SCI served
+                // meanwhile.
+                let started = self.ec.now_ms();
                 loop {
                     let (cond, p2) = self.eval(f, p1)?;
                     if cond.as_int() == 0 {
@@ -623,6 +628,11 @@ impl<'a> Interp<'a> {
                     guard += 1;
                     if guard > 1_000_000 {
                         return Err(String::from("While loop runaway"));
+                    }
+                    if let (Some(t0), Some(now)) = (started, self.ec.now_ms()) {
+                        if now.saturating_sub(t0) > 30_000 {
+                            return Err(String::from("While loop timeout (30 s)"));
+                        }
                     }
                 }
                 Ok((Flow::Normal, pkg_end))

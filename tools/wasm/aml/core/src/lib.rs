@@ -32,6 +32,9 @@ pub trait Ec {
     /// them reads too early. Default: do nothing, so the harness needs no
     /// clock.
     fn sleep_ms(&mut self, _ms: u32) {}
+    /// Monotonic milliseconds, for the `While` timeout. Default: no clock,
+    /// so only the iteration limit applies (the harness).
+    fn now_ms(&mut self) -> Option<u64> { None }
     /// Fetch a pending EC query (`QR_EC`), or `None`.
     /// Default: none — the harness has no real EC.
     fn query(&mut self) -> Option<u8> { None }
