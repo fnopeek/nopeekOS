@@ -13,7 +13,8 @@
 
 use core::sync::atomic::{AtomicU8, Ordering};
 use spin::Mutex;
-use crate::{kprintln, memory, pci};
+use crate::{kprintln, pci};
+use crate::hw::{DmaRegion, Mmio};
 use crate::virtio_net::NetError;
 
 pub const MTU: usize = 1514;
@@ -114,11 +115,11 @@ const BUF_SIZE: usize = IGC_RXBUFFER_2048 as usize;
 const QUEUE_MSIX_ENTRY: u16 = 1;
 
 struct Igc {
-    mmio: u64,
-    rx_descs: u64,
-    rx_bufs: u64,
-    tx_descs: u64,
-    tx_bufs: u64,
+    mmio: Mmio,
+    rx_descs: DmaRegion,
+    rx_bufs: DmaRegion,
+    tx_descs: DmaRegion,
+    tx_bufs: DmaRegion,
     rx_next_to_clean: u16,
     /// Consumed and re-armed, not yet handed back through RDT.
     rx_cleaned: u16,
@@ -138,28 +139,18 @@ struct Igc {
 static DEVICE: Mutex<Option<Igc>> = Mutex::new(None);
 static RX_VECTOR: AtomicU8 = AtomicU8::new(0);
 
-fn rd32(base: u64, reg: u32) -> u32 {
-    // SAFETY: BAR0 mapped by `intel_nic::init`, identity-mapped, uncached.
-    unsafe { core::ptr::read_volatile((base + reg as u64) as *const u32) }
-}
+fn wrfl(mmio: &Mmio) { let _ = mmio.r32(IGC_STATUS); }
 
-fn wr32(base: u64, reg: u32, val: u32) {
-    // SAFETY: as `rd32`.
-    unsafe { core::ptr::write_volatile((base + reg as u64) as *mut u32, val); }
-}
+/// Offset of descriptor `i` in its ring.
+fn desc_off(i: u16) -> u64 { i as u64 * 16 }
 
-fn wrfl(base: u64) { let _ = rd32(base, IGC_STATUS); }
-
-fn rx_desc(d: &Igc, i: u16) -> u64 { d.rx_descs + i as u64 * 16 }
-fn tx_desc(d: &Igc, i: u16) -> u64 { d.tx_descs + i as u64 * 16 }
-
-/// Bring the queues up on a BAR0 `intel_nic` has mapped. Returns false if a
-/// ring cannot be allocated.
-pub fn init(dev: pci::PciAddr, mmio: u64) -> bool {
+/// Bring the queues up on the BAR0 window `intel_nic` has mapped. Returns
+/// false if a ring cannot be allocated.
+pub fn init(dev: pci::PciAddr, mmio: Mmio) -> bool {
     // Interrupts off and acknowledged while the queues are rebuilt.
-    wr32(mmio, IGC_IMC, 0xFFFF_FFFF);
-    wr32(mmio, IGC_EIMC, 0xFFFF_FFFF);
-    let _ = rd32(mmio, IGC_ICR);
+    mmio.w32(IGC_IMC, 0xFFFF_FFFF);
+    mmio.w32(IGC_EIMC, 0xFFFF_FFFF);
+    let _ = mmio.r32(IGC_ICR);
 
     let Some(rx_descs) = alloc_zeroed(IGC_DEFAULT_RXD * 16) else { return false };
     let Some(rx_bufs) = alloc_zeroed(IGC_DEFAULT_RXD * BUF_SIZE) else { return false };
@@ -167,51 +158,51 @@ pub fn init(dev: pci::PciAddr, mmio: u64) -> bool {
     let Some(tx_bufs) = alloc_zeroed(IGC_DEFAULT_TXD * BUF_SIZE) else { return false };
 
     // igc_get_hw_control
-    wr32(mmio, IGC_CTRL_EXT, rd32(mmio, IGC_CTRL_EXT) | IGC_CTRL_EXT_DRV_LOAD);
+    mmio.w32(IGC_CTRL_EXT, mmio.r32(IGC_CTRL_EXT) | IGC_CTRL_EXT_DRV_LOAD);
 
     // igc_setup_tctl
-    wr32(mmio, IGC_TXDCTL0, 0);
-    let mut tctl = rd32(mmio, IGC_TCTL);
+    mmio.w32(IGC_TXDCTL0, 0);
+    let mut tctl = mmio.r32(IGC_TCTL);
     tctl &= !IGC_TCTL_CT;
     tctl |= IGC_TCTL_PSP | IGC_TCTL_RTLC | (IGC_COLLISION_THRESHOLD << IGC_CT_SHIFT);
     tctl |= IGC_TCTL_EN;
-    wr32(mmio, IGC_TCTL, tctl);
+    mmio.w32(IGC_TCTL, tctl);
 
     // igc_setup_rctl (mc_filter_type 0; RSS off — one queue)
-    let mut rctl = rd32(mmio, IGC_RCTL);
+    let mut rctl = mmio.r32(IGC_RCTL);
     rctl &= !(3 << IGC_RCTL_MO_SHIFT);
     rctl &= !(IGC_RCTL_LBM_TCVR | IGC_RCTL_LBM_MAC);
     rctl |= IGC_RCTL_EN | IGC_RCTL_BAM | IGC_RCTL_RDMTS_HALF;
     rctl |= IGC_RCTL_SECRC;
     rctl &= !(IGC_RCTL_SBP | IGC_RCTL_SZ_256);
     rctl |= IGC_RCTL_LPE;
-    wr32(mmio, IGC_RXDCTL0, 0);
-    wr32(mmio, IGC_RCTL, rctl);
+    mmio.w32(IGC_RXDCTL0, 0);
+    mmio.w32(IGC_RCTL, rctl);
 
     // igc_configure_tx_ring
-    wr32(mmio, IGC_TXDCTL0, 0);
-    wrfl(mmio);
-    wr32(mmio, IGC_TDLEN0, (IGC_DEFAULT_TXD * 16) as u32);
-    wr32(mmio, IGC_TDBAL0, tx_descs as u32);
-    wr32(mmio, IGC_TDBAH0, (tx_descs >> 32) as u32);
-    wr32(mmio, IGC_TDH0, 0);
-    wr32(mmio, IGC_TDT0, 0);
-    wr32(mmio, IGC_TXDCTL0, 8 | (1 << 8) | (16 << 16) | IGC_TXDCTL_QUEUE_ENABLE);
+    mmio.w32(IGC_TXDCTL0, 0);
+    wrfl(&mmio);
+    mmio.w32(IGC_TDLEN0, (IGC_DEFAULT_TXD * 16) as u32);
+    mmio.w32(IGC_TDBAL0, tx_descs.phys() as u32);
+    mmio.w32(IGC_TDBAH0, (tx_descs.phys() >> 32) as u32);
+    mmio.w32(IGC_TDH0, 0);
+    mmio.w32(IGC_TDT0, 0);
+    mmio.w32(IGC_TXDCTL0, 8 | (1 << 8) | (16 << 16) | IGC_TXDCTL_QUEUE_ENABLE);
 
     // igc_configure_rx_ring
-    wr32(mmio, IGC_RXDCTL0, 0);
-    wr32(mmio, IGC_RDBAL0, rx_descs as u32);
-    wr32(mmio, IGC_RDBAH0, (rx_descs >> 32) as u32);
-    wr32(mmio, IGC_RDLEN0, (IGC_DEFAULT_RXD * 16) as u32);
-    wr32(mmio, IGC_RDH0, 0);
-    wr32(mmio, IGC_RDT0, 0);
-    let mut srrctl = rd32(mmio, IGC_SRRCTL0);
+    mmio.w32(IGC_RXDCTL0, 0);
+    mmio.w32(IGC_RDBAL0, rx_descs.phys() as u32);
+    mmio.w32(IGC_RDBAH0, (rx_descs.phys() >> 32) as u32);
+    mmio.w32(IGC_RDLEN0, (IGC_DEFAULT_RXD * 16) as u32);
+    mmio.w32(IGC_RDH0, 0);
+    mmio.w32(IGC_RDT0, 0);
+    let mut srrctl = mmio.r32(IGC_SRRCTL0);
     srrctl &= !(IGC_SRRCTL_BSIZEPKT_MASK | IGC_SRRCTL_BSIZEHDR_MASK | IGC_SRRCTL_DESCTYPE_MASK);
     srrctl |= (IGC_RX_HDR_LEN / 64) << 8;
     srrctl |= IGC_RXBUFFER_2048 / 1024;
     srrctl |= IGC_SRRCTL_DESCTYPE_ADV_ONEBUF;
-    wr32(mmio, IGC_SRRCTL0, srrctl);
-    wr32(mmio, IGC_RXDCTL0, IGC_RXDCTL_PTHRESH | (IGC_RXDCTL_HTHRESH << 8)
+    mmio.w32(IGC_SRRCTL0, srrctl);
+    mmio.w32(IGC_RXDCTL0, IGC_RXDCTL_PTHRESH | (IGC_RXDCTL_HTHRESH << 8)
         | (IGC_RXDCTL_WTHRESH << 16) | IGC_RXDCTL_QUEUE_ENABLE);
 
     let mut d = Igc {
@@ -225,25 +216,25 @@ pub fn init(dev: pci::PciAddr, mmio: u64) -> bool {
     for i in 0..IGC_DEFAULT_RXD as u16 {
         arm_rx_desc(&d, i);
     }
-    wr32(mmio, IGC_RDT0, (IGC_DEFAULT_RXD - 1) as u32);
+    mmio.w32(IGC_RDT0, (IGC_DEFAULT_RXD - 1) as u32);
 
     // igc_configure_msix + igc_irq_enable, queue vector only.
     if let Some(vector) = crate::irq::register(dev, QUEUE_MSIX_ENTRY) {
-        wr32(mmio, IGC_GPIE, IGC_GPIE_MSIX_MODE | IGC_GPIE_PBA | IGC_GPIE_EIAME | IGC_GPIE_NSICR);
+        mmio.w32(IGC_GPIE, IGC_GPIE_MSIX_MODE | IGC_GPIE_PBA | IGC_GPIE_EIAME | IGC_GPIE_NSICR);
         // igc_assign_vector: rx queue 0 at offset 0, tx queue 0 at offset 8.
         let msix = QUEUE_MSIX_ENTRY as u32;
-        let mut ivar = rd32(mmio, IGC_IVAR0);
+        let mut ivar = mmio.r32(IGC_IVAR0);
         ivar &= !0xFFFF;
         ivar |= (msix | IGC_IVAR_VALID) | ((msix | IGC_IVAR_VALID) << 8);
-        wr32(mmio, IGC_IVAR0, ivar);
+        mmio.w32(IGC_IVAR0, ivar);
         // igc_write_itr
-        wr32(mmio, igc_eitr(msix), (IGC_START_ITR & IGC_QVECTOR_MASK) | IGC_EITR_CNT_IGNR);
+        mmio.w32(igc_eitr(msix), (IGC_START_ITR & IGC_QVECTOR_MASK) | IGC_EITR_CNT_IGNR);
         d.eims_value = 1 << msix;
-        wrfl(mmio);
-        let _ = rd32(mmio, IGC_ICR);
-        wr32(mmio, IGC_EIAC, rd32(mmio, IGC_EIAC) | d.eims_value);
-        wr32(mmio, IGC_EIAM, rd32(mmio, IGC_EIAM) | d.eims_value);
-        wr32(mmio, IGC_EIMS, d.eims_value);
+        wrfl(&mmio);
+        let _ = mmio.r32(IGC_ICR);
+        mmio.w32(IGC_EIAC, mmio.r32(IGC_EIAC) | d.eims_value);
+        mmio.w32(IGC_EIAM, mmio.r32(IGC_EIAM) | d.eims_value);
+        mmio.w32(IGC_EIMS, d.eims_value);
         RX_VECTOR.store(vector, Ordering::Release);
         kprintln!("[npk] igc: {} RX/{} TX descriptors, MSI-X entry {} on vector {:#x}",
             IGC_DEFAULT_RXD, IGC_DEFAULT_TXD, QUEUE_MSIX_ENTRY, vector);
@@ -256,12 +247,8 @@ pub fn init(dev: pci::PciAddr, mmio: u64) -> bool {
     true
 }
 
-fn alloc_zeroed(bytes: usize) -> Option<u64> {
-    let pages = bytes.div_ceil(4096);
-    let a = memory::allocate_contiguous(pages)?;
-    // SAFETY: freshly allocated, identity-mapped, exclusively ours.
-    unsafe { core::ptr::write_bytes(a as *mut u8, 0, pages * 4096); }
-    Some(a)
+fn alloc_zeroed(bytes: usize) -> Option<DmaRegion> {
+    DmaRegion::alloc_zeroed(bytes.div_ceil(4096))
 }
 
 /// Read format for descriptor `i`: buffer address, no header buffer. The
@@ -269,13 +256,10 @@ fn alloc_zeroed(bytes: usize) -> Option<u64> {
 /// it also clears the length the clean loop tests (Linux clears
 /// `wb.upper.length` of the next descriptor for the same reason).
 fn arm_rx_desc(d: &Igc, i: u16) {
-    let desc = rx_desc(d, i);
-    let buf = d.rx_bufs + i as u64 * BUF_SIZE as u64;
-    // SAFETY: `desc` is inside the ring we allocated.
-    unsafe {
-        core::ptr::write_volatile(desc as *mut u64, buf);
-        core::ptr::write_volatile((desc + 8) as *mut u64, 0);
-    }
+    let desc = desc_off(i);
+    let buf = d.rx_bufs.phys() + i as u64 * BUF_SIZE as u64;
+    d.rx_descs.w64(desc, buf);
+    d.rx_descs.w64(desc + 8, 0);
 }
 
 /// Hand the re-armed descriptors back: RDT one behind next_to_clean, so one
@@ -285,7 +269,7 @@ fn rx_refill(d: &mut Igc) {
     let n = IGC_DEFAULT_RXD as u16;
     let tail = (d.rx_next_to_clean + n - 1) % n;
     core::sync::atomic::fence(Ordering::Release); // wmb()
-    wr32(d.mmio, IGC_RDT0, tail as u32);
+    d.mmio.w32(IGC_RDT0, tail as u32);
     d.rx_cleaned = 0;
 }
 
@@ -299,16 +283,12 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     loop {
         if d.rx_cleaned >= IGC_RX_BUFFER_WRITE { rx_refill(d); }
         let i = d.rx_next_to_clean;
-        let desc = rx_desc(d, i);
-        // SAFETY: descriptor inside our ring; the NIC writes it back by DMA.
-        let (status, len) = unsafe {
-            let upper = core::ptr::read_volatile((desc + 8) as *const u64);
-            (upper as u32, ((upper >> 32) & 0xFFFF) as usize)
-        };
+        let upper = d.rx_descs.r64(desc_off(i) + 8);
+        let (status, len) = (upper as u32, ((upper >> 32) & 0xFFFF) as usize);
         if len == 0 {
             rx_refill(d);
             if d.eims_value != 0 {
-                wr32(d.mmio, IGC_EIMS, d.eims_value);
+                d.mmio.w32(IGC_EIMS, d.eims_value);
             }
             return None;
         }
@@ -319,9 +299,8 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
         d.rx_discarding = !eop;
         let n = len.min(MTU);
         if good {
-            let src = d.rx_bufs + i as u64 * BUF_SIZE as u64;
-            // SAFETY: the NIC finished writing this buffer (length != 0 + rmb).
-            unsafe { core::ptr::copy_nonoverlapping(src as *const u8, buf.as_mut_ptr(), n); }
+            // The NIC finished writing this buffer (length != 0 + rmb).
+            d.rx_bufs.copy_out(i as u64 * BUF_SIZE as u64, &mut buf[..n]);
         }
         arm_rx_desc(d, i);
         d.rx_next_to_clean = (i + 1) % IGC_DEFAULT_RXD as u16;
@@ -336,9 +315,8 @@ fn tx_clean(d: &mut Igc) {
     let n = IGC_DEFAULT_TXD as u16;
     while d.tx_next_to_clean != d.tx_next_to_use {
         let eop = d.tx_eop[d.tx_next_to_clean as usize];
-        let desc = tx_desc(d, eop);
-        // SAFETY: descriptor inside our ring; `wb.status` is the olinfo word.
-        let status = unsafe { core::ptr::read_volatile((desc + 12) as *const u32) };
+        // `wb.status` is the olinfo word.
+        let status = d.tx_descs.r32(desc_off(eop) + 12);
         if status & IGC_TXD_STAT_DD == 0 { break; }
         d.tx_next_to_clean = (eop + 1) % n;
     }
@@ -365,21 +343,19 @@ fn tx_reserve(d: &mut Igc, need: u16) -> Result<(), NetError> {
 }
 
 fn write_data_desc(d: &Igc, i: u16, chunk: &[u8], cmd: u32, olinfo: u32) {
-    let buf = d.tx_bufs + i as u64 * BUF_SIZE as u64;
-    let desc = tx_desc(d, i);
-    // SAFETY: slot `i` was retired by `tx_clean`; buffer and descriptor are ours.
-    unsafe {
-        core::ptr::copy_nonoverlapping(chunk.as_ptr(), buf as *mut u8, chunk.len());
-        core::ptr::write_volatile(desc as *mut u64, buf);
-        core::ptr::write_volatile((desc + 8) as *mut u32, cmd | chunk.len() as u32);
-        core::ptr::write_volatile((desc + 12) as *mut u32, olinfo);
-    }
+    // Slot `i` was retired by `tx_clean`.
+    let buf_off = i as u64 * BUF_SIZE as u64;
+    let desc = desc_off(i);
+    d.tx_bufs.copy_in(buf_off, chunk);
+    d.tx_descs.w64(desc, d.tx_bufs.phys() + buf_off);
+    d.tx_descs.w32(desc + 8, cmd | chunk.len() as u32);
+    d.tx_descs.w32(desc + 12, olinfo);
 }
 
 fn tx_bump_tail(d: &mut Igc, next: u16) {
     d.tx_next_to_use = next;
     core::sync::atomic::fence(Ordering::SeqCst); // wmb() before the tail
-    wr32(d.mmio, IGC_TDT0, next as u32);
+    d.mmio.w32(IGC_TDT0, next as u32);
 }
 
 /// `igc_xmit_frame_ring` for a single-buffer frame.
@@ -423,19 +399,17 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     let n = IGC_DEFAULT_TXD as u16;
     let first = d.tx_next_to_use;
     // Context descriptor.
-    let ctx = tx_desc(d, first);
+    let ctx = desc_off(first);
     let ip_len = (l4_off - 14) as u32;
-    // SAFETY: slot `first` is free (reserved above).
-    unsafe {
-        core::ptr::write_volatile(ctx as *mut u32, ip_len | (14 << IGC_ADVTXD_MACLEN_SHIFT));
-        core::ptr::write_volatile((ctx + 4) as *mut u32, 0);
-        core::ptr::write_volatile((ctx + 8) as *mut u32,
-            IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DTYP_CTXT
-            | IGC_ADVTXD_TUCMD_IPV4 | IGC_ADVTXD_TUCMD_L4T_TCP);
-        core::ptr::write_volatile((ctx + 12) as *mut u32,
-            (((hdr_len - l4_off) as u32) << IGC_ADVTXD_L4LEN_SHIFT)
-            | ((mss as u32) << IGC_ADVTXD_MSS_SHIFT));
-    }
+    let txd = &d.tx_descs;
+    txd.w32(ctx, ip_len | (14 << IGC_ADVTXD_MACLEN_SHIFT));
+    txd.w32(ctx + 4, 0);
+    txd.w32(ctx + 8,
+        IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DTYP_CTXT
+        | IGC_ADVTXD_TUCMD_IPV4 | IGC_ADVTXD_TUCMD_L4T_TCP);
+    txd.w32(ctx + 12,
+        (((hdr_len - l4_off) as u32) << IGC_ADVTXD_L4LEN_SHIFT)
+        | ((mss as u32) << IGC_ADVTXD_MSS_SHIFT));
     // Data descriptors; PAYLEN + checksum insertion on the first only.
     let cmd = IGC_ADVTXD_DTYP_DATA | IGC_ADVTXD_DCMD_DEXT | IGC_ADVTXD_DCMD_IFCS
         | IGC_ADVTXD_DCMD_TSE;
@@ -462,7 +436,7 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
 
 pub fn link_up() -> bool {
     match DEVICE.lock().as_ref() {
-        Some(d) => rd32(d.mmio, IGC_STATUS) & IGC_STATUS_LU != 0,
+        Some(d) => d.mmio.r32(IGC_STATUS) & IGC_STATUS_LU != 0,
         None => false,
     }
 }

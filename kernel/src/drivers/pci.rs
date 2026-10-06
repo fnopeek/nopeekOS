@@ -3,11 +3,14 @@
 //! Standard x86 PCI bus via I/O ports 0xCF8 (address) / 0xCFC (data).
 //! Scans for VirtIO and other PCI devices.
 
-use crate::serial::{outl, inl};
 use crate::kprintln;
+use crate::hw::{Mmio, Port};
 
-const CONFIG_ADDR: u16 = 0xCF8;
-const CONFIG_DATA: u16 = 0xCFC;
+// SAFETY: the PCI configuration mechanism #1 ports, owned by this module;
+// every access goes through `CONFIG_LOCK`.
+const CONFIG_ADDR: Port = unsafe { Port::new(0xCF8) };
+// SAFETY: as `CONFIG_ADDR`.
+const CONFIG_DATA: Port = unsafe { Port::new(0xCFC) };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciAddr {
@@ -35,24 +38,16 @@ static CONFIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 pub fn read32(addr: PciAddr, offset: u8) -> u32 {
     crate::interrupts::without_interrupts(|| {
         let _g = CONFIG_LOCK.lock();
-        // SAFETY: PCI config space port I/O, standard x86 mechanism; the
-        // lock keeps the address/data pair together.
-        unsafe {
-            outl(CONFIG_ADDR, addr.address(offset));
-            inl(CONFIG_DATA)
-        }
+        CONFIG_ADDR.outl(addr.address(offset));
+        CONFIG_DATA.inl()
     })
 }
 
 pub fn write32(addr: PciAddr, offset: u8, value: u32) {
     crate::interrupts::without_interrupts(|| {
         let _g = CONFIG_LOCK.lock();
-        // SAFETY: PCI config space port I/O; the lock keeps the
-        // address/data pair together.
-        unsafe {
-            outl(CONFIG_ADDR, addr.address(offset));
-            outl(CONFIG_DATA, value);
-        }
+        CONFIG_ADDR.outl(addr.address(offset));
+        CONFIG_DATA.outl(value);
     })
 }
 
@@ -462,27 +457,22 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
 
     // Defensively identity-map the MSI-X table page NO_CACHE — the device's
     // BAR may not be mapped if its driver only mapped a register window.
-    // Avoids a #PF on the writes below (AlreadyMapped is fine).
+    // A mapping error is ignored: the page may already lie in a huge mapping.
     let page = entry_addr & !0xFFF;
-    let _ = crate::paging::map_page(
-        page,
-        page,
-        crate::paging::PageFlags::PRESENT
-            | crate::paging::PageFlags::WRITABLE
-            | crate::paging::PageFlags::NO_CACHE,
-    );
+    // SAFETY: `entry_addr` is entry `entry` (bounds-checked against the table
+    // size above) of the MSI-X table the capability places in an assigned
+    // BAR: device registers. The page is mapped here.
+    let e = unsafe {
+        let _ = Mmio::map(page, 4096);
+        Mmio::from_mapped(entry_addr, 16)
+    };
 
     // MSI-X table entry: addr_lo, addr_hi, data, vector-control (bit0 = mask).
     let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
-    // SAFETY: MSI-X table MMIO inside the device BAR (identity-mapped). The
-    // entry was bounds-checked against the table size above.
-    unsafe {
-        let p = entry_addr as *mut u32;
-        core::ptr::write_volatile(p.add(0), msg_addr_lo); // Message Address (low)
-        core::ptr::write_volatile(p.add(1), 0); // Message Address (high)
-        core::ptr::write_volatile(p.add(2), vector as u32); // Message Data = vector
-        core::ptr::write_volatile(p.add(3), 0); // Vector Control: unmasked
-    }
+    e.w32(0u64, msg_addr_lo); // Message Address (low)
+    e.w32(4u64, 0); // Message Address (high)
+    e.w32(8u64, vector as u32); // Message Data = vector
+    e.w32(12u64, 0); // Vector Control: unmasked
 
     // Enable MSI-X (bit 15) + clear global function mask (bit 14), preserving
     // cap ID + next ptr in the low 16 bits of the dword.
@@ -527,9 +517,11 @@ pub fn msix_set_dest(dev: PciAddr, entry: u16, dest_apic: u32) {
     }
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
     let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
-    // SAFETY: MSI-X table MMIO (mapped when `program_msix` first ran). Writing
-    // the message-address low word re-points delivery; no enable/mask change.
-    unsafe { core::ptr::write_volatile(entry_addr as *mut u32, msg_addr_lo); }
+    // SAFETY: MSI-X table entry in an assigned BAR; `irq` only re-points
+    // entries `program_msix` has programmed, which mapped the page.
+    let e = unsafe { Mmio::from_mapped(entry_addr, 16) };
+    // Re-points delivery; no enable/mask change.
+    e.w32(0u64, msg_addr_lo);
 }
 
 /// Offset of capability `id` in `dev`'s list, or 0 if it has none.
@@ -658,15 +650,10 @@ pub fn msix_debug(dev: PciAddr, entry: u16) -> Option<MsixDebug> {
         (bar_lo as u64) & !0xF
     };
     let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
-    // SAFETY: MSI-X table MMIO (mapped at program_msix time), read-only here.
-    let (e_addr, e_data, e_vctrl) = unsafe {
-        let p = entry_addr as *const u32;
-        (
-            core::ptr::read_volatile(p.add(0)),
-            core::ptr::read_volatile(p.add(2)),
-            core::ptr::read_volatile(p.add(3)),
-        )
-    };
+    // SAFETY: MSI-X table entry in the device's BAR, mapped when
+    // `program_msix` ran for it; only read here.
+    let e = unsafe { Mmio::from_mapped(entry_addr, 16) };
+    let (e_addr, e_data, e_vctrl) = (e.r32(0u64), e.r32(8u64), e.r32(12u64));
     Some(MsixDebug {
         cap,
         ctrl,

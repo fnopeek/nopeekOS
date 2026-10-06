@@ -7,8 +7,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use super::igc;
 use spin::Mutex;
-use crate::{kprintln, pci, paging, memory};
-use crate::paging::PageFlags;
+use crate::{kprintln, pci};
+use crate::hw::{DmaRegion, Mmio};
 use crate::virtio_net::NetError;
 
 pub const MTU: usize = 1514;
@@ -113,30 +113,22 @@ const NUM_RX_DESC: usize = 32;
 const NUM_TX_DESC: usize = 32;
 const RX_BUF_SIZE: usize = 2048;
 
-/// Legacy RX Descriptor (16 bytes, for e1000)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct LegacyRxDesc {
-    addr: u64,
-    length: u16,
-    checksum: u16,
-    status: u8,
-    errors: u8,
-    special: u16,
-}
+// Legacy RX descriptor (16 bytes): addr u64, length u16, checksum u16,
+// status u8, errors u8, special u16.
+const RXD_ADDR: u64 = 0;
+const RXD_LENGTH: u64 = 8;
+const RXD_STATUS: u64 = 12;
+const RXD_ERRORS: u64 = 13;
 
-/// Legacy TX Descriptor (16 bytes, for e1000)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct LegacyTxDesc {
-    addr: u64,
-    length: u16,
-    cso: u8,
-    cmd: u8,
-    status: u8,
-    css: u8,
-    special: u16,
-}
+// Legacy TX descriptor (16 bytes): addr u64, length u16, cso u8, cmd u8,
+// status u8, css u8, special u16.
+const TXD_ADDR: u64 = 0;
+const TXD_LENGTH: u64 = 8;
+const TXD_CSO: u64 = 10;
+const TXD_CMD: u64 = 11;
+const TXD_STATUS: u64 = 12;
+const TXD_CSS: u64 = 13;
+const TXD_SPECIAL: u64 = 14;
 
 struct QueueRegs {
     rdbal: u32, rdbah: u32, rdlen: u32, rdh: u32, rdt: u32,
@@ -149,13 +141,13 @@ const E1000_REGS: QueueRegs = QueueRegs {
 };
 
 struct IntelNic {
-    mmio: u64,
+    mmio: Mmio,
     mac_addr: [u8; 6],
     regs: &'static QueueRegs,
-    rx_descs: u64,
-    tx_descs: u64,
-    rx_bufs: u64,
-    tx_bufs: u64,
+    rx_descs: DmaRegion,
+    tx_descs: DmaRegion,
+    rx_bufs: DmaRegion,
+    tx_bufs: DmaRegion,
     rx_cur: usize,
     tx_cur: usize,
 }
@@ -164,14 +156,6 @@ static DEVICE: Mutex<Option<IntelNic>> = Mutex::new(None);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// The card is an I225/I226 and `igc` owns its rings.
 static IS_IGC: AtomicBool = AtomicBool::new(false);
-
-fn r32(base: u64, reg: u32) -> u32 {
-    unsafe { core::ptr::read_volatile((base + reg as u64) as *const u32) }
-}
-
-fn w32(base: u64, reg: u32, val: u32) {
-    unsafe { core::ptr::write_volatile((base + reg as u64) as *mut u32, val); }
-}
 
 /// Detect and initialize Intel NIC.
 pub fn init() -> bool {
@@ -244,31 +228,27 @@ pub fn init() -> bool {
 
     // Map BAR0 (128KB for modern Intel NICs)
     let map_size = 128 * 1024u64;
-    for offset in (0..map_size).step_by(4096) {
-        match paging::map_page(bar0 + offset, bar0 + offset,
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE) {
-            Ok(()) | Err(paging::PagingError::AlreadyMapped) => {}
-            Err(e) => {
-                kprintln!("[npk] intel-nic: map failed at {:#x}: {:?}", bar0 + offset, e);
-                return false;
-            }
+    // SAFETY: BAR0 of the Intel NIC this driver binds: its register window.
+    let mmio = match unsafe { Mmio::map(bar0, map_size) } {
+        Ok(m) => m,
+        Err(e) => {
+            kprintln!("[npk] intel-nic: map failed at {:#x}: {:?}", bar0, e);
+            return false;
         }
-    }
-
-    let mmio = bar0;
+    };
 
     // Don't full-reset — UEFI firmware already configured the PHY.
     // Just disable interrupts (we poll).
-    w32(mmio, IMC, 0xFFFF_FFFF);
-    let _ = r32(mmio, ICR); // Clear pending
+    mmio.w32(IMC, 0xFFFF_FFFF);
+    let _ = mmio.r32(ICR); // Clear pending
 
     // Preserve UEFI link config, ensure link-up + auto-speed
-    let ctrl = r32(mmio, CTRL);
-    w32(mmio, CTRL, (ctrl | CTRL_SLU | CTRL_ASDE) & !(CTRL_RST));
+    let ctrl = mmio.r32(CTRL);
+    mmio.w32(CTRL, (ctrl | CTRL_SLU | CTRL_ASDE) & !(CTRL_RST));
 
     // Read MAC from RAL/RAH
-    let ral = r32(mmio, RAL);
-    let rah = r32(mmio, RAH);
+    let ral = mmio.r32(RAL);
+    let rah = mmio.r32(RAH);
     let mac = [
         (ral & 0xFF) as u8,
         ((ral >> 8) & 0xFF) as u8,
@@ -280,7 +260,7 @@ pub fn init() -> bool {
 
     // If MAC is all zeros, try EEPROM
     let mac = if mac == [0; 6] {
-        read_mac_eeprom(mmio)
+        read_mac_eeprom(&mmio)
     } else {
         mac
     };
@@ -290,7 +270,7 @@ pub fn init() -> bool {
 
     // Clear multicast table
     for i in 0..128 {
-        w32(mmio, MTA + i * 4, 0);
+        mmio.w32(MTA + i * 4, 0);
     }
 
     if is_igc {
@@ -299,12 +279,14 @@ pub fn init() -> bool {
             return false;
         }
         IS_IGC.store(true, Ordering::Release);
-        wait_for_link(mmio);
+        wait_for_link(&mmio);
         kprintln!("[npk] intel-nic: online (igc)");
         AVAILABLE.store(true, Ordering::Relaxed);
         *DEVICE.lock() = Some(IntelNic {
             mmio, mac_addr: mac, regs: qregs,
-            rx_descs: 0, tx_descs: 0, rx_bufs: 0, tx_bufs: 0, rx_cur: 0, tx_cur: 0,
+            rx_descs: DmaRegion::empty(), tx_descs: DmaRegion::empty(),
+            rx_bufs: DmaRegion::empty(), tx_bufs: DmaRegion::empty(),
+            rx_cur: 0, tx_cur: 0,
         });
         return true;
     }
@@ -312,71 +294,66 @@ pub fn init() -> bool {
     // === Setup RX ===
     let rx_ring_size = NUM_RX_DESC * 16; // 16 bytes per desc
     let rx_ring_pages = (rx_ring_size + 4095) / 4096;
-    let rx_descs = match memory::allocate_contiguous(rx_ring_pages) {
+    let rx_descs = match DmaRegion::alloc_zeroed(rx_ring_pages) {
         Some(a) => a,
         None => { kprintln!("[npk] intel-nic: RX ring alloc failed"); return false; }
     };
-    unsafe { core::ptr::write_bytes(rx_descs as *mut u8, 0, rx_ring_pages * 4096); }
 
     // Allocate RX buffers (NUM_RX_DESC * RX_BUF_SIZE)
     let rx_buf_pages = (NUM_RX_DESC * RX_BUF_SIZE + 4095) / 4096;
-    let rx_bufs = match memory::allocate_contiguous(rx_buf_pages) {
+    let rx_bufs = match DmaRegion::alloc_zeroed(rx_buf_pages) {
         Some(a) => a,
         None => { kprintln!("[npk] intel-nic: RX buf alloc failed"); return false; }
     };
-    unsafe { core::ptr::write_bytes(rx_bufs as *mut u8, 0, rx_buf_pages * 4096); }
 
-    let rctl = r32(mmio, RCTL);
-    w32(mmio, RCTL, (rctl & !(3 << 12)) | RCTL_EN | RCTL_BAM | RCTL_SECRC);
+    let rctl = mmio.r32(RCTL);
+    mmio.w32(RCTL, (rctl & !(3 << 12)) | RCTL_EN | RCTL_BAM | RCTL_SECRC);
 
     {
         // Legacy e1000 RX init
         for i in 0..NUM_RX_DESC {
-            let desc = (rx_descs + (i * 16) as u64) as *mut LegacyRxDesc;
-            unsafe {
-                (*desc).addr = rx_bufs + (i * RX_BUF_SIZE) as u64;
-                (*desc).status = 0;
-            }
+            let desc = (i * 16) as u64;
+            rx_descs.w64(desc + RXD_ADDR, rx_bufs.phys() + (i * RX_BUF_SIZE) as u64);
+            rx_descs.w8(desc + RXD_STATUS, 0);
         }
 
-        w32(mmio, qregs.rdbal, rx_descs as u32);
-        w32(mmio, qregs.rdbah, (rx_descs >> 32) as u32);
-        w32(mmio, qregs.rdlen, rx_ring_size as u32);
-        w32(mmio, qregs.rdh, 0);
-        w32(mmio, qregs.rdt, (NUM_RX_DESC - 1) as u32);
+        mmio.w32(qregs.rdbal, rx_descs.phys() as u32);
+        mmio.w32(qregs.rdbah, (rx_descs.phys() >> 32) as u32);
+        mmio.w32(qregs.rdlen, rx_ring_size as u32);
+        mmio.w32(qregs.rdh, 0);
+        mmio.w32(qregs.rdt, (NUM_RX_DESC - 1) as u32);
     }
 
     // === Setup TX ===
     let tx_ring_size = NUM_TX_DESC * 16;
     let tx_ring_pages = (tx_ring_size + 4095) / 4096;
-    let tx_descs = match memory::allocate_contiguous(tx_ring_pages) {
+    let tx_descs = match DmaRegion::alloc_zeroed(tx_ring_pages) {
         Some(a) => a,
         None => { kprintln!("[npk] intel-nic: TX ring alloc failed"); return false; }
     };
-    unsafe { core::ptr::write_bytes(tx_descs as *mut u8, 0, tx_ring_pages * 4096); }
 
     // Allocate TX buffers (2KB aligned per buffer, not MTU)
     let tx_buf_pages = (NUM_TX_DESC * RX_BUF_SIZE + 4095) / 4096;
-    let tx_bufs = match memory::allocate_contiguous(tx_buf_pages) {
+    let tx_bufs = match DmaRegion::alloc_zeroed(tx_buf_pages) {
         Some(a) => a,
         None => { kprintln!("[npk] intel-nic: TX buf alloc failed"); return false; }
     };
 
     {
-        w32(mmio, qregs.tdbal, tx_descs as u32);
-        w32(mmio, qregs.tdbah, (tx_descs >> 32) as u32);
-        w32(mmio, qregs.tdlen, tx_ring_size as u32);
-        w32(mmio, qregs.tdh, 0);
-        w32(mmio, qregs.tdt, 0);
-        w32(mmio, TIPG, 10 | (10 << 10) | (10 << 20));
-        w32(mmio, TCTL, TCTL_EN | TCTL_PSP | (15 << TCTL_CT_SHIFT) | (64 << TCTL_COLD_SHIFT));
+        mmio.w32(qregs.tdbal, tx_descs.phys() as u32);
+        mmio.w32(qregs.tdbah, (tx_descs.phys() >> 32) as u32);
+        mmio.w32(qregs.tdlen, tx_ring_size as u32);
+        mmio.w32(qregs.tdh, 0);
+        mmio.w32(qregs.tdt, 0);
+        mmio.w32(TIPG, 10 | (10 << 10) | (10 << 20));
+        mmio.w32(TCTL, TCTL_EN | TCTL_PSP | (15 << TCTL_CT_SHIFT) | (64 << TCTL_COLD_SHIFT));
     }
 
-    wait_for_link(mmio);
+    wait_for_link(&mmio);
 
     // Debug: show buffer addresses
-    kprintln!("[npk] intel-nic: RX descs={:#x} bufs={:#x}", rx_descs, rx_bufs);
-    kprintln!("[npk] intel-nic: TX descs={:#x} bufs={:#x}", tx_descs, tx_bufs);
+    kprintln!("[npk] intel-nic: RX descs={:#x} bufs={:#x}", rx_descs.phys(), rx_bufs.phys());
+    kprintln!("[npk] intel-nic: TX descs={:#x} bufs={:#x}", tx_descs.phys(), tx_bufs.phys());
     kprintln!("[npk] intel-nic: online");
     AVAILABLE.store(true, Ordering::Relaxed);
     *DEVICE.lock() = Some(IntelNic {
@@ -389,13 +366,13 @@ pub fn init() -> bool {
 }
 
 /// Wait for link up (max 3 seconds).
-fn wait_for_link(mmio: u64) {
+fn wait_for_link(mmio: &Mmio) {
     kprintln!("[npk] intel-nic: waiting for link...");
     for _ in 0..3_000_000u32 {
-        if r32(mmio, STATUS) & STATUS_LU != 0 { break; }
+        if mmio.r32(STATUS) & STATUS_LU != 0 { break; }
         core::hint::spin_loop();
     }
-    if r32(mmio, STATUS) & STATUS_LU != 0 {
+    if mmio.r32(STATUS) & STATUS_LU != 0 {
         kprintln!("[npk] intel-nic: link up");
     } else {
         kprintln!("[npk] intel-nic: WARNING: no link");
@@ -426,7 +403,7 @@ pub fn link_up() -> bool {
     if !AVAILABLE.load(Ordering::Relaxed) { return false; }
     if IS_IGC.load(Ordering::Acquire) { return igc::link_up(); }
     match DEVICE.lock().as_ref() {
-        Some(d) => r32(d.mmio, STATUS) & STATUS_LU != 0,
+        Some(d) => d.mmio.r32(STATUS) & STATUS_LU != 0,
         None => false,
     }
 }
@@ -447,31 +424,30 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     let dev = lock.as_mut().ok_or(NetError::NotInitialized)?;
 
     let i = dev.tx_cur;
-    let buf_addr = dev.tx_bufs + (i * RX_BUF_SIZE) as u64; // 2KB aligned
-    unsafe { core::ptr::copy_nonoverlapping(frame.as_ptr(), buf_addr as *mut u8, frame.len()); }
+    let buf_off = (i * RX_BUF_SIZE) as u64; // 2KB aligned
+    dev.tx_bufs.copy_in(buf_off, frame);
 
-    let desc = (dev.tx_descs + (i * 16) as u64) as *mut LegacyTxDesc;
+    let txd = &dev.tx_descs;
+    let desc = (i * 16) as u64;
     for _ in 0..1_000_000u32 {
-        let status = unsafe { core::ptr::read_volatile(&(*desc).status) };
-        let cmd = unsafe { core::ptr::read_volatile(&(*desc).cmd) };
+        let status = txd.r8(desc + TXD_STATUS);
+        let cmd = txd.r8(desc + TXD_CMD);
         if status & TXD_STAT_DD != 0 || cmd == 0 { break; }
         core::hint::spin_loop();
     }
-    unsafe {
-        core::ptr::write_volatile(&mut (*desc).addr, buf_addr);
-        core::ptr::write_volatile(&mut (*desc).length, frame.len() as u16);
-        core::ptr::write_volatile(&mut (*desc).cso, 0);
-        core::ptr::write_volatile(&mut (*desc).css, 0);
-        core::ptr::write_volatile(&mut (*desc).special, 0);
-        core::ptr::write_volatile(&mut (*desc).status, 0);
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-        core::ptr::write_volatile(&mut (*desc).cmd, TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS);
-    }
+    txd.w64(desc + TXD_ADDR, dev.tx_bufs.phys() + buf_off);
+    txd.w16(desc + TXD_LENGTH, frame.len() as u16);
+    txd.w8(desc + TXD_CSO, 0);
+    txd.w8(desc + TXD_CSS, 0);
+    txd.w16(desc + TXD_SPECIAL, 0);
+    txd.w8(desc + TXD_STATUS, 0);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    txd.w8(desc + TXD_CMD, TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS);
 
     dev.tx_cur = (i + 1) % NUM_TX_DESC;
     // Write barrier: ensure descriptor is visible to NIC before tail bump
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    w32(dev.mmio, dev.regs.tdt, dev.tx_cur as u32);
+    dev.mmio.w32(dev.regs.tdt, dev.tx_cur as u32);
 
     TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(())
@@ -493,38 +469,37 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<usize> {
     let dev = lock.as_mut()?;
 
     let i = dev.rx_cur;
-    let buf_addr = dev.rx_bufs + (i * RX_BUF_SIZE) as u64;
+    let buf_off = (i * RX_BUF_SIZE) as u64;
 
-    let desc = (dev.rx_descs + (i * 16) as u64) as *mut LegacyRxDesc;
-    let status = unsafe { core::ptr::read_volatile(&(*desc).status) };
+    let rxd = &dev.rx_descs;
+    let desc = (i * 16) as u64;
+    let status = rxd.r8(desc + RXD_STATUS);
     if status & RXD_STAT_DD == 0 { return None; }
 
-    let len = unsafe { core::ptr::read_volatile(&(*desc).length) } as usize;
+    let len = rxd.r16(desc + RXD_LENGTH) as usize;
     let len = len.min(MTU);
 
-    unsafe { core::ptr::copy_nonoverlapping(buf_addr as *const u8, buf.as_mut_ptr(), len); }
+    dev.rx_bufs.copy_out(buf_off, &mut buf[..len]);
 
-    unsafe {
-        (*desc).status = 0;
-        (*desc).length = 0;
-        (*desc).errors = 0;
-    }
+    rxd.w8(desc + RXD_STATUS, 0);
+    rxd.w16(desc + RXD_LENGTH, 0);
+    rxd.w8(desc + RXD_ERRORS, 0);
 
     let old_cur = dev.rx_cur;
     dev.rx_cur = (i + 1) % NUM_RX_DESC;
-    w32(dev.mmio, dev.regs.rdt, old_cur as u32);
+    dev.mmio.w32(dev.regs.rdt, old_cur as u32);
 
     Some(len)
 }
 
 /// Read MAC address from EEPROM (for NICs that don't expose it via RAL/RAH).
-fn read_mac_eeprom(mmio: u64) -> [u8; 6] {
+fn read_mac_eeprom(mmio: &Mmio) -> [u8; 6] {
     let mut mac = [0u8; 6];
     for i in 0..3u32 {
-        w32(mmio, EERD, (i << 8) | 1); // Start read at address i
+        mmio.w32(EERD, (i << 8) | 1); // Start read at address i
         // Wait for done
         for _ in 0..10_000u32 {
-            let val = r32(mmio, EERD);
+            let val = mmio.r32(EERD);
             if val & (1 << 4) != 0 { // Done bit
                 let data = (val >> 16) as u16;
                 mac[(i * 2) as usize] = data as u8;
