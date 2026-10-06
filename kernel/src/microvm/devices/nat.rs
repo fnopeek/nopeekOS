@@ -360,17 +360,12 @@ const FRAME_POOL_MAX: usize = TAP_RING + 16;
 const FRAME_BUF_CAP: usize = 2048; // ≥ vnet+eth+MTU, so resize never reallocs
 
 /// Borrow a frame buffer sized to `len` from the pool (or allocate once if the
-/// pool is cold). The contents are uninitialised beyond what the caller writes —
-/// tap_inbound overwrites every byte (vnet hdr + eth hdr + full IP copy).
+/// pool is cold). The contents are stale bytes of an earlier frame (zeroes only
+/// where the buffer grows); tap_inbound overwrites every byte.
 fn frame_pool_get(len: usize) -> Vec<u8> {
     let mut buf = FRAME_POOL.lock().pop()
         .unwrap_or_else(|| Vec::with_capacity(FRAME_BUF_CAP.max(len)));
-    buf.clear();
-    if buf.capacity() < len { buf.reserve(len - buf.capacity()); }
-    // SAFETY: capacity ≥ len after the reserve above. The caller writes all
-    // `len` bytes before the buffer is read (vnet[0..12]=0, eth[12..26],
-    // ip-copy[26..len]), so no uninitialised byte is ever observed.
-    unsafe { buf.set_len(len); }
+    if buf.len() < len { buf.resize(len, 0); } else { buf.truncate(len); }
     buf
 }
 

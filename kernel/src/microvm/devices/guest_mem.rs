@@ -212,6 +212,15 @@ impl GuestMem {
         }
     }
 
+    /// `contig`, and only when `gpa` is aligned to `n`: a guest may place a
+    /// ring field at an odd address, and the typed volatile access needs
+    /// alignment. Unaligned accesses take the byte copy instead.
+    #[inline]
+    fn contig_aligned(&self, gpa: u64, n: u64) -> Option<u64> {
+        if gpa & (n - 1) != 0 { return None; }
+        self.contig(gpa, n)
+    }
+
     pub fn read_u8(&self, gpa: u64) -> Option<u8> {
         let mut b = [0u8; 1];
         if !self.read_bytes(gpa, &mut b) { return None; }
@@ -219,7 +228,9 @@ impl GuestMem {
     }
 
     pub fn read_u16(&self, gpa: u64) -> Option<u16> {
-        if let Some(h) = self.contig(gpa, 2) {
+        if let Some(h) = self.contig_aligned(gpa, 2) {
+            // SAFETY: `contig_aligned` returned an in-window host address
+            // aligned for `u16`; the boot window stays mapped for the VM's life.
             return Some(unsafe { core::ptr::read_volatile(h as *const u16) });
         }
         let mut b = [0u8; 2];
@@ -228,7 +239,9 @@ impl GuestMem {
     }
 
     pub fn read_u32(&self, gpa: u64) -> Option<u32> {
-        if let Some(h) = self.contig(gpa, 4) {
+        if let Some(h) = self.contig_aligned(gpa, 4) {
+            // SAFETY: `contig_aligned` returned an in-window host address
+            // aligned for `u32`; the boot window stays mapped for the VM's life.
             return Some(unsafe { core::ptr::read_volatile(h as *const u32) });
         }
         let mut b = [0u8; 4];
@@ -237,7 +250,9 @@ impl GuestMem {
     }
 
     pub fn read_u64(&self, gpa: u64) -> Option<u64> {
-        if let Some(h) = self.contig(gpa, 8) {
+        if let Some(h) = self.contig_aligned(gpa, 8) {
+            // SAFETY: `contig_aligned` returned an in-window host address
+            // aligned for `u64`; the boot window stays mapped for the VM's life.
             return Some(unsafe { core::ptr::read_volatile(h as *const u64) });
         }
         let mut b = [0u8; 8];
@@ -250,7 +265,8 @@ impl GuestMem {
     }
 
     pub fn write_u16(&self, gpa: u64, val: u16) -> bool {
-        if let Some(h) = self.contig(gpa, 2) {
+        if let Some(h) = self.contig_aligned(gpa, 2) {
+            // SAFETY: as in `read_u16`.
             unsafe { core::ptr::write_volatile(h as *mut u16, val) };
             return true;
         }
@@ -258,7 +274,8 @@ impl GuestMem {
     }
 
     pub fn write_u32(&self, gpa: u64, val: u32) -> bool {
-        if let Some(h) = self.contig(gpa, 4) {
+        if let Some(h) = self.contig_aligned(gpa, 4) {
+            // SAFETY: as in `read_u32`.
             unsafe { core::ptr::write_volatile(h as *mut u32, val) };
             return true;
         }
@@ -272,6 +289,8 @@ impl GuestMem {
     pub fn read_bytes(&self, gpa: u64, dst: &mut [u8]) -> bool {
         let total = dst.len() as u64;
         if let Some(h) = self.contig(gpa, total) {
+            // SAFETY: `contig` checked `[gpa, gpa+len)` lies in the mapped boot
+            // window; `dst` is a distinct host buffer.
             unsafe { core::ptr::copy_nonoverlapping(h as *const u8, dst.as_mut_ptr(), dst.len()) };
             return true;
         }
@@ -288,6 +307,8 @@ impl GuestMem {
                 None => return false,
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
+            // SAFETY: `host` is the mapped frame of this guest page and
+            // `off + take <= 4096`; `done + take <= dst.len()`.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     (host + off as u64) as *const u8,
@@ -303,6 +324,7 @@ impl GuestMem {
     pub fn write_bytes(&self, gpa: u64, src: &[u8]) -> bool {
         let total = src.len() as u64;
         if let Some(h) = self.contig(gpa, total) {
+            // SAFETY: as in `read_bytes`.
             unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), h as *mut u8, src.len()) };
             return true;
         }
@@ -319,6 +341,7 @@ impl GuestMem {
                 None => return false,
             };
             let take = core::cmp::min(total as usize - done, 4096 - off);
+            // SAFETY: as in `read_bytes`.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     src.as_ptr().add(done),
