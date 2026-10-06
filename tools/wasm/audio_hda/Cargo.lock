@@ -4,4 +4,11 @@ version = 4
 
 [[package]]
 name = "audio_hda"
-version = "0.5.3"
+version = "0.5.4"
+dependencies = [
+ "npk_sys",
+]
+
+[[package]]
+name = "npk_sys"
+version = "0.1.0"

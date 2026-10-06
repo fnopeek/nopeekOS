@@ -51,6 +51,12 @@ mod vif;
 mod txpower;
 mod regs;
 use regs::*;
+use npk_sys::cell::Single;
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+
+const RX_BUF_LEN: usize = pci::RTK_PCI_RX_BUF_SIZE as usize;
+/// One full receive buffer.
+type RxBuf = [u8; RX_BUF_LEN];
 
 #[unsafe(link_section = ".npk.app_meta")]
 #[used]
@@ -245,7 +251,7 @@ pub extern "C" fn _start() {
 
     // ── `rtwdev`: state for the whole driver run ─────────────────
     // Too large for the stack (DACK backups and rate counters dominate).
-    static mut DEV: Dev = Dev {
+    static DEV: Single<Dev> = Single::new(Dev {
         dm: dm::DmInfo::new(),
         path_div: dm::PathDiv::new(),
         dpk: dpk::DpkInfo::new(),
@@ -255,11 +261,12 @@ pub extern "C" fn _start() {
         busy_traffic: false,
         beacon_loss: false,
         cur_bw: 0,
-    };
-    // SAFETY: single-threaded, exactly one caller, and `_start` returns only
-    // when the driver ends.
-    let rtwdev = unsafe { &mut *core::ptr::addr_of_mut!(DEV) };
+    });
+    DEV.with(driver_main);
+}
 
+/// The driver run after the verbosity is set, on the one `rtwdev`.
+fn driver_main(rtwdev: &mut Dev) {
     // ── Bind PCI ─────────────────────────────────────────────────
     // rtw8822ce.c lists two device IDs for the same chip.
     let mut dev = RTL8822CE_DEVICE;
@@ -1262,8 +1269,7 @@ fn stage4a_power_on_tail(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     // loop when idle; during bring-up the driver works through its steps in
     // order and waits on nothing.
     let vec = host::irq_register();
-    // SAFETY: only this fiber reads and writes IRQ_VEC.
-    unsafe { IRQ_VEC = vec; }
+    IRQ_VEC.store(vec, Ordering::Relaxed);
     if vec >= 0 {
         host::print("  MSI auf Vektor ");
         host::print_dec(vec as u32);
@@ -1568,6 +1574,13 @@ fn pwr_cmds_for_us(cut: u8) -> usize {
 /// long to poll and what to report. Linux runs it from the interrupt in
 /// NAPI; here the write pointer is polled.
 fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
+    // A full receive buffer. Static because this driver has no allocator
+    // and 11 KB do not belong on the stack.
+    static RXBUF: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    RXBUF.with(|buf| stage5a_rx_in(h, hal, trx, d, buf))
+}
+
+fn stage5a_rx_in(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev, buf: &mut RxBuf) -> bool {
     /// Same channel as stage 4c (`hal.current_channel`).
     const CH_5A: u8 = 1;
 
@@ -1585,13 +1598,6 @@ fn stage5a_rx(h: i32, hal: &Hal, trx: &mut pci::Trx, d: &mut Dev) -> bool {
     host::print_dec(dm.cck_gi_l_bnd as u32);
     host::print("\n");
 
-    // A full receive buffer. Static because this driver has no allocator
-    // and 11 KB do not belong on the stack.
-    static mut RXBUF: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: single-threaded, one caller, and the buffer does not leave
-    // this function. No other path in this driver touches it.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF) };
 
     let mut total = 0u32;
     let mut c2h = 0u32;
@@ -1714,6 +1720,12 @@ fn print_dbm(v: i8) {
 /// long. A probe request goes out uncalibrated in Linux too.
 fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
               mac: [u8; 6], d: &mut Dev) -> bool {
+    static RXBUF2: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    RXBUF2.with(|buf| stage5b_tx_in(h, hal, trx, mgmt_buf, mac, d, buf))
+}
+
+fn stage5b_tx_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+              mac: [u8; 6], d: &mut Dev, buf: &mut RxBuf) -> bool {
     host::print("[rtl8822ce] Stufe 5b: der Sendeweg\n");
     if mgmt_buf < 0 {
         host::print("  kein DMA-Puffer fuer die MGMT-Queue\n");
@@ -1806,11 +1818,6 @@ fn stage5b_tx(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
-    static mut RXBUF2: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: as in stage 5a: one thread, one caller, the buffer does not
-    // leave this function.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF2) };
 
     let mut resp = 0u32;
     let mut shown = 0u32;
@@ -1942,7 +1949,7 @@ fn print_probe_resp(f: &[u8], st: &rx::RxPktStat) {
         if id == 0 {
             for &c in &f[i + 2..i + 2 + len] {
                 let s = [if (0x20..0x7f).contains(&c) { c } else { b'.' }];
-                host::print(unsafe { core::str::from_utf8_unchecked(&s) });
+                host::print(core::str::from_utf8(&s).unwrap_or("?"));
             }
             break;
         }
@@ -2352,6 +2359,17 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 h2c: &mut fw::H2cState,
                 e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
                 fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev) -> bool {
+    static RXBUF3: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    RXBUF3.with(|buf| stage5c_scan_in(h, hal, trx, mgmt_buf, h2c, e, t, mac,
+                                      fw_feature, target, d, buf))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage5c_scan_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                h2c: &mut fw::H2cState,
+                e: &efuse::Efuse, t: &txpower::TxPower, mac: [u8; 6],
+                fw_feature: u32, target: &mut Option<Bss>, d: &mut Dev,
+                buf: &mut RxBuf) -> bool {
     // 2.4 GHz: the thirteen channels allowed in Europe. Channel 14 is
     // allowed only in Japan and only with DSSS, so it is left out.
     const ACTIVE_2G: [u8; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
@@ -2396,10 +2414,6 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
-    static mut RXBUF3: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: one thread, one caller, the buffer does not leave the function.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF3) };
 
     let mut found: [Bss; MAX_BSS] = [Bss {
         bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
@@ -2712,21 +2726,21 @@ fn stage5c_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             {
                 continue;
             }
-            // SAFETY: single-threaded, one writer, and the scan does not run
-            // concurrently with the pump.
-            unsafe {
-                let chs = &mut *core::ptr::addr_of_mut!(ROAM_CHANNELS);
+            ROAM_CHANNELS.with(|(chs, _)| {
                 if !chs[..n_ch].contains(&b.channel) && n_ch < chs.len() {
                     chs[n_ch] = b.channel;
                     n_ch += 1;
                 }
-            }
+            });
         }
-        unsafe { N_ROAM_CHANNELS = n_ch };
+        let chs = ROAM_CHANNELS.with(|(chs, n)| {
+            *n = n_ch;
+            *chs
+        });
         host::print("  Roaming-Kanaele:");
         for i in 0..n_ch {
             host::print(" K");
-            host::print_dec(unsafe { ROAM_CHANNELS[i] } as u32);
+            host::print_dec(chs[i] as u32);
         }
         host::print("\n");
     }
@@ -2889,7 +2903,7 @@ fn print_ssid(s: &[u8]) {
     }
     for &c in s {
         let b = [if (0x20..0x7f).contains(&c) { c } else { b'.' }];
-        host::print(unsafe { core::str::from_utf8_unchecked(&b) });
+        host::print(core::str::from_utf8(&b).unwrap_or("?"));
     }
 }
 
@@ -2932,42 +2946,41 @@ fn stage5d_calibration(h: i32, hal: &Hal, trx: &mut pci::Trx, h2c_buf: i32,
     {
         let mut dmx = dm::DmInfo::new();
         let mut pdx = dm::PathDiv::default();
-        static mut RXBUF4: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-            [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-        // SAFETY: one thread, one caller, the buffer does not leave the block.
-        let b = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF4) };
-        let mut c2h = 0u32;
-        let mut frames = 0u32;
-        let t0 = host::now_us();
-        while host::now_us() - t0 < 50_000 {
-            let n = pci::rx_poll(h, trx, 64, b, &mut dmx, &mut pdx,
-                                 hal.rf_path_num, 0, 1, |st, pkt| {
-                if st.is_c2h {
-                    c2h += 1;
-                    let off = RX_PKT_DESC_SZ as usize
-                        + st.drv_info_sz as usize + st.shift as usize;
-                    if c2h <= 4 && off + 2 <= pkt.len() {
-                        host::print("    c2h id 0x");
-                        host::print_hex8(pkt[off]);
-                        host::print(" len ");
-                        host::print_dec(st.pkt_len as u32);
-                        host::print("\n");
+        static RXBUF4: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+        RXBUF4.with(|b| {
+            let mut c2h = 0u32;
+            let mut frames = 0u32;
+            let t0 = host::now_us();
+            while host::now_us() - t0 < 50_000 {
+                let n = pci::rx_poll(h, trx, 64, b, &mut dmx, &mut pdx,
+                                     hal.rf_path_num, 0, 1, |st, pkt| {
+                    if st.is_c2h {
+                        c2h += 1;
+                        let off = RX_PKT_DESC_SZ as usize
+                            + st.drv_info_sz as usize + st.shift as usize;
+                        if c2h <= 4 && off + 2 <= pkt.len() {
+                            host::print("    c2h id 0x");
+                            host::print_hex8(pkt[off]);
+                            host::print(" len ");
+                            host::print_dec(st.pkt_len as u32);
+                            host::print("\n");
+                        }
+                    } else {
+                        frames += 1;
                     }
-                } else {
-                    frames += 1;
+                });
+                if n == 0 {
+                    host::sleep_ms(1);
                 }
-            });
-            if n == 0 {
-                host::sleep_ms(1);
             }
-        }
-        host::print("  Ring geleert: ");
-        host::print_dec(c2h);
-        host::print(" C2H, ");
-        host::print_dec(frames);
-        host::print(" Funkrahmen · HMETFR danach 0x");
-        host::print_hex8(fw::hmetfr(h));
-        host::print("\n");
+            host::print("  Ring geleert: ");
+            host::print_dec(c2h);
+            host::print(" C2H, ");
+            host::print_dec(frames);
+            host::print(" Funkrahmen · HMETFR danach 0x");
+            host::print_hex8(fw::hmetfr(h));
+            host::print("\n");
+        });
     }
 
     let mut gapk = txgapk::GapkInfo::new();
@@ -3143,6 +3156,16 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                    h2c: &mut fw::H2cState, e: &efuse::Efuse,
                    t: &txpower::TxPower, mac: [u8; 6], bss: &Bss,
                    out_vif: &mut Option<vif::Vif>, d: &mut Dev) -> bool {
+    static RXBUF5: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    RXBUF5.with(|rxbuf| stage5e_connect_in(h, hal, trx, mgmt_buf, h2c, e, t, mac,
+                                           bss, out_vif, d, rxbuf))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage5e_connect_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                   h2c: &mut fw::H2cState, e: &efuse::Efuse,
+                   t: &txpower::TxPower, mac: [u8; 6], bss: &Bss,
+                   out_vif: &mut Option<vif::Vif>, d: &mut Dev, rxbuf: &mut RxBuf) -> bool {
     host::print("[rtl8822ce] Stufe 5e: Auth und Assoc mit \"");
     print_ssid(&bss.ssid[..bss.ssid_len as usize]);
     host::print("\" auf K");
@@ -3267,10 +3290,6 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
-    static mut RXBUF5: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: one thread, one caller, the buffer does not leave the function.
-    let rxbuf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF5) };
 
     let mut frame = [0u8; 256];
     let mut ok = true;
@@ -3353,8 +3372,7 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // The AID is in the same frame as the status, two bytes after it.
         // `exchange` returns only one number, so the reader stores it
         // alongside.
-        // SAFETY: single-threaded, one writer, one reader.
-        aid = unsafe { LAST_ASSOC_AID };
+        aid = LAST_ASSOC.with(|a| a.aid);
     }
     host::print("  Assoc: ");
     report_exchange(assoc_ok, assoc_status, assoc_tries);
@@ -3386,14 +3404,19 @@ fn stage5e_connect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     ok
 }
 
-/// The AID of the last association response. It is in the same frame as the
-/// status, and `exchange` returns only one number.
-static mut LAST_ASSOC_AID: u16 = 0;
+/// The last association response, kept by `exchange`.
+struct LastAssoc {
+    /// The AID. It is in the same frame as the status, and `exchange`
+    /// returns only one number.
+    aid: u16,
+    /// The whole frame as well: stage 5f reads the AP's capabilities (HT,
+    /// VHT, rates) from it. In Linux mac80211 builds `ieee80211_sta` from it.
+    resp: [u8; 256],
+    resp_len: usize,
+}
 
-/// The whole frame as well: stage 5f reads the AP's capabilities (HT, VHT,
-/// rates) from it. In Linux mac80211 builds `ieee80211_sta` from it.
-static mut LAST_ASSOC_RESP: [u8; 256] = [0; 256];
-static mut LAST_ASSOC_RESP_LEN: usize = 0;
+static LAST_ASSOC: Single<LastAssoc> =
+    Single::new(LastAssoc { aid: 0, resp: [0; 256], resp_len: 0 });
 
 /// Sends a management frame and waits for the response.
 ///
@@ -3442,14 +3465,12 @@ fn exchange(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     // For the association response the same frame carries
                     // the AID.
                     if want_fc == 0x10 && f.len() >= 32 {
-                        // SAFETY: single-threaded, one writer.
-                        unsafe {
-                            LAST_ASSOC_AID =
-                                u16::from_le_bytes([f[28], f[29]]);
+                        LAST_ASSOC.with(|a| {
+                            a.aid = u16::from_le_bytes([f[28], f[29]]);
                             let n = f.len().min(256);
-                            LAST_ASSOC_RESP[..n].copy_from_slice(&f[..n]);
-                            LAST_ASSOC_RESP_LEN = n;
-                        }
+                            a.resp[..n].copy_from_slice(&f[..n]);
+                            a.resp_len = n;
+                        });
                     }
                     status = Some(v);
                 }
@@ -3587,20 +3608,15 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
                                       });
         // Record what actually went out, not the condition for it, so the
         // report reflects the wire even if `build_vht_cap_ie` declined.
-        // SAFETY: single-threaded, one writer, and the report reads it only
-        // after association completed.
-        unsafe {
-            SENT_VHT = if v >= 14 {
-                Some(u32::from_le_bytes([out[n + 2], out[n + 3],
-                                         out[n + 4], out[n + 5]]))
-            } else {
-                None
-            };
-        }
+        SENT_VHT.set(if v >= 14 {
+            Some(u32::from_le_bytes([out[n + 2], out[n + 3],
+                                     out[n + 4], out[n + 5]]))
+        } else {
+            None
+        });
         n += v;
     } else {
-        // SAFETY: as above.
-        unsafe { SENT_VHT = None };
+        SENT_VHT.set(None);
     }
 
     // ── WMM information, as the last element ─────────────────────
@@ -3626,17 +3642,16 @@ fn build_assoc_req(out: &mut [u8; 256], mac: &[u8; 6], bss: &Bss,
         ]);
         n += 9;
     }
-    // SAFETY: as above; single-threaded, read only after association.
-    unsafe { SENT_WMM = bss.wmm };
+    SENT_WMM.store(bss.wmm, Ordering::Relaxed);
     n
 }
 
 /// Whether the last association request carried the WMM element.
-static mut SENT_WMM: bool = false;
+static SENT_WMM: AtomicBool = AtomicBool::new(false);
 
 /// The "VHT Capabilities Info" field the last association request actually
 /// carried. `None` = no VHT element went out.
-static mut SENT_VHT: Option<u32> = None;
+static SENT_VHT: Single<Option<u32>> = Single::new(None);
 
 /// 802.11 §9.4.2.24: our RSN element.
 ///
@@ -3698,12 +3713,18 @@ fn mgmt_header(out: &mut [u8; 256], subtype_fc: u8, mac: &[u8; 6],
 fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
                  hal: &Hal, vifc: &vif::Vif, bss: &Bss,
                  out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev) -> bool {
+    static RXBUF6: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    RXBUF6.with(|buf| stage5f_rates_in(h, trx, h2c, hal, vifc, bss, out, d, buf))
+}
+
+fn stage5f_rates_in(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
+                 hal: &Hal, vifc: &vif::Vif, bss: &Bss,
+                 out: &mut Option<(sta::PeerCaps, sta::StaInfo)>, d: &mut Dev,
+                 buf: &mut RxBuf) -> bool {
     host::print("[rtl8822ce] Stufe 5f: die Ratenanpassung\n");
 
-    // SAFETY: single-threaded, and 5e wrote it before.
-    let (resp, len) = unsafe {
-        (&*core::ptr::addr_of!(LAST_ASSOC_RESP), LAST_ASSOC_RESP_LEN)
-    };
+    // 5e wrote it before.
+    let (resp, len) = LAST_ASSOC.with(|a| (a.resp, a.resp_len));
     if len < 30 {
         host::print("  keine Anmeldeantwort aufgehoben\n");
         return false;
@@ -3800,10 +3821,6 @@ fn stage5f_rates(h: i32, trx: &mut pci::Trx, h2c: &mut fw::H2cState,
     let dm = &mut d.dm;
     let path_div = &mut d.path_div;
     chip::read_cck_gi_bnd(h, dm);
-    static mut RXBUF6: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    // SAFETY: one thread, one caller, the buffer does not leave the function.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RXBUF6) };
 
     let mut ra_rpt = 0u32;
     let mut last_rate = 0u8;
@@ -4340,8 +4357,8 @@ const ROAM_BSS_MAX: usize = 8;
 /// levels are not used; they are from the initial scan and possibly another
 /// place, and a stale level is worse than none. Only where to look is
 /// stored.
-static mut ROAM_CHANNELS: [u8; ROAM_CHANNELS_MAX] = [0; ROAM_CHANNELS_MAX];
-static mut N_ROAM_CHANNELS: usize = 0;
+static ROAM_CHANNELS: Single<([u8; ROAM_CHANNELS_MAX], usize)> =
+    Single::new(([0; ROAM_CHANNELS_MAX], 0));
 
 /// Roaming state of a running link.
 #[derive(Clone, Copy)]
@@ -4899,24 +4916,22 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
 /// the pump loop, and nobody drains the ring while it computes, so a long
 /// part can overflow the ring. `do_lck` alone may poll up to 100 ms per
 /// Linux. These numbers show which part it was.
-static mut WD_MAX: [u32; 8] = [0; 8];
+static WD_MAX: Single<[u32; 8]> = Single::new([0; 8]);
 const WD_NAMES: [&str; 8] = ["coex", "statistik", "dig/cck", "ra/rrsr",
                              "pfad/cfo", "dpk", "pwr_track", "adaptivity"];
 
 fn wd_mark(i: usize, tp: &mut u64) {
     let now = host::now_us();
     let d = now.saturating_sub(*tp).min(u32::MAX as u64) as u32;
-    // SAFETY: single-threaded, only the pump thread writes, the report reads.
-    unsafe {
-        let m = &mut *core::ptr::addr_of_mut!(WD_MAX);
+    WD_MAX.with(|m| {
         if d > m[i] { m[i] = d; }
-    }
+    });
     *tp = now;
 }
 
 /// The chip's MSI vector, `-1` = polling. Set at start (`rtw_hci_start`),
 /// read when the pump loop is idle.
-static mut IRQ_VEC: i32 = -1;
+static IRQ_VEC: AtomicI32 = AtomicI32::new(-1);
 
 /// During a channel switch (CSA) the pump parks at most this long: beacon
 /// deadline and switch time are rare and short, so the fine grid stays.
@@ -4924,8 +4939,8 @@ const CSA_WAIT_MS: u64 = 10;
 
 /// The longest pump loop iteration without its sleep, in us, and whether
 /// the watchdog ran in it.
-static mut ITER_MAX: u32 = 0;
-static mut ITER_MAX_WD: bool = false;
+static ITER_MAX: AtomicU32 = AtomicU32::new(0);
+static ITER_MAX_WD: AtomicBool = AtomicBool::new(false);
 
 /// main.c:224-310 `rtw_watch_dog_work`, every two seconds for the life of a
 /// link: crystal tracking, TX power over temperature, DPK tracking, RSSI to
@@ -5076,26 +5091,30 @@ const RO_POOL: usize = 64;
 /// mac80211: `HT_RX_REORDER_BUF_TIMEOUT` = HZ/10.
 const RO_TIMEOUT_MS: u32 = 100;
 
-static mut RO_BUF: [[u8; RO_FRAME]; RO_POOL] = [[0; RO_FRAME]; RO_POOL];
-static mut RO_LEN: [u16; RO_POOL] = [0; RO_POOL];
-static mut RO_USED: [bool; RO_POOL] = [false; RO_POOL];
+struct RoPool {
+    buf: [[u8; RO_FRAME]; RO_POOL],
+    len: [u16; RO_POOL],
+    used: [bool; RO_POOL],
+}
+
+static RO: Single<RoPool> = Single::new(RoPool {
+    buf: [[0; RO_FRAME]; RO_POOL],
+    len: [0; RO_POOL],
+    used: [false; RO_POOL],
+});
 
 /// Takes a free pool slot and stores the MPDU in it.
 fn ro_take(mpdu: &[u8]) -> Option<usize> {
     if mpdu.len() > RO_FRAME {
         return None;
     }
-    // SAFETY: one thread, one caller, the same contract as RXBUF6.
-    unsafe {
-        let used = &mut *core::ptr::addr_of_mut!(RO_USED);
-        let i = used.iter().position(|u| !*u)?;
-        used[i] = true;
-        let buf = &mut *core::ptr::addr_of_mut!(RO_BUF);
-        buf[i][..mpdu.len()].copy_from_slice(mpdu);
-        let lens = &mut *core::ptr::addr_of_mut!(RO_LEN);
-        lens[i] = mpdu.len() as u16;
+    RO.with(|ro| {
+        let i = ro.used.iter().position(|u| !*u)?;
+        ro.used[i] = true;
+        ro.buf[i][..mpdu.len()].copy_from_slice(mpdu);
+        ro.len[i] = mpdu.len() as u16;
         Some(i)
-    }
+    })
 }
 
 /// Delivers the frame in slot `i` and frees the slot.
@@ -5104,18 +5123,12 @@ fn ro_release_slot(ls: &mut LinkStats, i: usize) {
     // and a borrow of the pool across it would be a second mutable access
     // to the same memory.
     let mut tmp = [0u8; RO_FRAME];
-    // SAFETY: as `ro_take`: one thread, one caller. The pointers are bound
-    // to references first; `&(*ptr)[i]` inside an expression would be an
-    // implicit borrow through a raw pointer.
-    let len = unsafe {
-        let lens = &*core::ptr::addr_of!(RO_LEN);
-        let len = lens[i] as usize;
-        let buf = &*core::ptr::addr_of!(RO_BUF);
-        tmp[..len].copy_from_slice(&buf[i][..len]);
-        let used = &mut *core::ptr::addr_of_mut!(RO_USED);
-        used[i] = false;
+    let len = RO.with(|ro| {
+        let len = ro.len[i] as usize;
+        tmp[..len].copy_from_slice(&ro.buf[i][..len]);
+        ro.used[i] = false;
         len
-    };
+    });
     ls.ro_sorted += 1;
     deliver_mpdu(ls, &tmp[..len]);
 }
@@ -5528,17 +5541,23 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
              e: &efuse::Efuse, t_pwr: &txpower::TxPower,
              caps: &sta::PeerCaps, fw_feature: u32)
     -> PumpEnd {
+    static RXBUF7: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
+    static ETHBUF: Single<[u8; 2048]> = Single::new([0; 2048]);
+    static CMDBUF: Single<[u8; 2048]> = Single::new([0; 2048]);
+    RXBUF7.with(|rxbuf| ETHBUF.with(|ethbuf| CMDBUF.with(|cmdbuf| {
+        link_pump_in(h, hal, trx, mgmt_buf, link, ls, mac, frist_us, d, h2c, e,
+                     t_pwr, caps, fw_feature, rxbuf, ethbuf, cmdbuf)
+    })))
+}
+
+fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             link: &mut Link, ls: &mut LinkStats, mac: [u8; 6],
+             frist_us: u64, d: &mut Dev, h2c: &mut fw::H2cState,
+             e: &efuse::Efuse, t_pwr: &txpower::TxPower,
+             caps: &sta::PeerCaps, fw_feature: u32, rxbuf: &mut RxBuf,
+             ethbuf: &mut [u8; 2048], cmdbuf: &mut [u8; 2048])
+    -> PumpEnd {
     chip::read_cck_gi_bnd(h, &mut d.dm);
-    static mut RXBUF7: [u8; pci::RTK_PCI_RX_BUF_SIZE as usize] =
-        [0; pci::RTK_PCI_RX_BUF_SIZE as usize];
-    static mut ETHBUF: [u8; 2048] = [0; 2048];
-    static mut CMDBUF: [u8; 2048] = [0; 2048];
-    // SAFETY: single-threaded, one caller each, none leaves this function.
-    let (rxbuf, ethbuf, cmdbuf) = unsafe {
-        (&mut *core::ptr::addr_of_mut!(RXBUF7),
-         &mut *core::ptr::addr_of_mut!(ETHBUF),
-         &mut *core::ptr::addr_of_mut!(CMDBUF))
-    };
 
 
     // Stage 6a passes eight seconds: the handshake takes four frames and
@@ -6692,16 +6711,12 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // within half a millisecond.
         {
             let dt = (host::now_us() - t_iter).min(u32::MAX as u64) as u32;
-            // SAFETY: as `WD_MAX`.
-            unsafe {
-                if dt > ITER_MAX {
-                    ITER_MAX = dt;
-                    ITER_MAX_WD = wd_ran;
-                }
+            if dt > ITER_MAX.load(Ordering::Relaxed) {
+                ITER_MAX.store(dt, Ordering::Relaxed);
+                ITER_MAX_WD.store(wd_ran, Ordering::Relaxed);
             }
         }
-        // SAFETY: only this fiber reads IRQ_VEC.
-        let irq = unsafe { IRQ_VEC } >= 0;
+        let irq = IRQ_VEC.load(Ordering::Relaxed) >= 0;
         if got == 0 && irq {
             // With MSI: park until the chip signals. The shape of
             // `rtw_pci_napi_poll` when less than the budget arrived: ack HISR
@@ -6974,11 +6989,7 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::sleep_ms(2);
 
     let t0 = host::now_us();
-    // SAFETY: single-threaded, and the scan does not write while the pump
-    // runs.
-    let (chs, n_ch) = unsafe {
-        (&*core::ptr::addr_of!(ROAM_CHANNELS), N_ROAM_CHANNELS)
-    };
+    let (chs, n_ch) = ROAM_CHANNELS.get();
     for &ch in chs[..n_ch].iter() {
         // (2) switch, probe, listen
         let _ = switch_channel(h, hal, e, t_pwr, ch, CellWidth::default(), 0);
@@ -7573,9 +7584,7 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     put("\n  wir schickten  HT ", &mut b, &mut n);
     num(e.hw_cap_nss as u32, &mut b, &mut n);
     put("SS", &mut b, &mut n);
-    // SAFETY: single-threaded; written when building the request, only read
-    // here.
-    match unsafe { SENT_VHT } {
+    match SENT_VHT.get() {
         Some(cap) => {
             put(" + VHT ", &mut b, &mut n);
             num(e.hw_cap_nss as u32, &mut b, &mut n);
@@ -7592,8 +7601,8 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
         }
         None => put(" + kein VHT (2,4 GHz)", &mut b, &mut n),
     }
-    // SAFETY: as above.
-    put(if unsafe { SENT_WMM } { " + WMM" } else { " + KEIN WMM (AP sagt keins an)" },
+    let wmm = SENT_WMM.load(Ordering::Relaxed);
+    put(if wmm { " + WMM" } else { " + KEIN WMM (AP sagt keins an)" },
         &mut b, &mut n);
     // How wide the AP operates its cell, from the association response, not
     // the beacon. Linux reads exactly these elements:
@@ -7984,10 +7993,9 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     // is Linux' own rule.
     put("\nwatchdog ", &mut b, &mut n);
     num(d.watch_dog_cnt, &mut b, &mut n);
-    // SAFETY: single-threaded; the pump thread writes, only read here.
-    let (wd, it, it_wd) = unsafe {
-        (*core::ptr::addr_of!(WD_MAX), ITER_MAX, ITER_MAX_WD)
-    };
+    let (wd, it, it_wd) = (
+        WD_MAX.get(), ITER_MAX.load(Ordering::Relaxed), ITER_MAX_WD.load(Ordering::Relaxed),
+    );
     put(" (laengste runde ", &mut b, &mut n);
     num(it, &mut b, &mut n);
     put(if it_wd { " us MIT watchdog; teile max" } else { " us ohne watchdog; teile max" },

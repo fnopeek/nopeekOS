@@ -1,6 +1,6 @@
 [package]
 name = "i2c_hid"
-version = "0.28.1"
+version = "0.28.2"
 edition = "2024"
 
 [lib]
@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 i2c_hid_core = { path = "../core" }
 aml_core = { path = "../../aml/core" }
+npk_sys = { path = "../../sdk/npk_sys" }
 
 [profile.release]
 opt-level = "s"

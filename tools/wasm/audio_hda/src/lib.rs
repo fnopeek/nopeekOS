@@ -38,9 +38,6 @@ const RING_BYTES: usize = HALF_BYTES * 2;
 
 const STREAM_TAG: u32 = 1;
 
-// Scratch buffer for one mailbox poll -> one ring half.
-static mut MIXBUF: [u8; HALF_BYTES] = [0; HALF_BYTES];
-
 // ── small hex/dec logging helpers (no alloc) ──────────────────────────────
 fn loghex(prefix: &str, v: u32) {
     let mut buf = [0u8; 8];
@@ -49,7 +46,7 @@ fn loghex(prefix: &str, v: u32) {
         buf[i] = if nib < 10 { b'0' + nib as u8 } else { b'a' + (nib - 10) as u8 };
     }
     log(prefix);
-    log(unsafe { core::str::from_utf8_unchecked(&buf) });
+    log(core::str::from_utf8(&buf).unwrap_or("?"));
 }
 
 /// One whole diagnostic line (prefix, hex value, newline), only with
@@ -493,6 +490,8 @@ pub extern "C" fn _start() {
     let mut peak: i32 = 0;
     let mut wrote: u32 = 0;
     let mut readback: u32 = 0;
+    // Scratch buffer for one mailbox poll -> one ring half.
+    let mut mix = [0u8; HALF_BYTES];
     loop {
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % RING_BYTES;
         ticks += 1;
@@ -519,9 +518,8 @@ pub extern "C" fn _start() {
             // Bytes the DMA has played since we last filled (frame-aligned to 4).
             let avail = ((lpib + RING_BYTES - write_pos) % RING_BYTES) & !3;
             if avail == 0 { break; }
-            // Don't cross the ring end or overflow MIXBUF in one copy.
+            // Don't cross the ring end or overflow `mix` in one copy.
             let n = avail.min(RING_BYTES - write_pos).min(HALF_BYTES);
-            let mix = unsafe { &mut *core::ptr::addr_of_mut!(MIXBUF) };
             audio_poll_mix(&mut mix[..n]);
             // Peak of the mixed block: shows whether the mailbox delivers
             // anything. Every eighth sample is enough for a peak.

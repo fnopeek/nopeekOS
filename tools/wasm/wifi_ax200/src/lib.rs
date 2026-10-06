@@ -1724,7 +1724,7 @@ impl Ax200 {
                 let mcc = u16::from_le_bytes([p[b + MCC_RESP_OFF_MCC], p[b + MCC_RESP_OFF_MCC + 1]]);
                 let cc = [(mcc >> 8) as u8, mcc as u8];
                 host::dprint("[ax200]   MCC set to '");
-                host::dprint(unsafe { core::str::from_utf8_unchecked(&cc) });
+                host::dprint_bytes(&cc);
                 host::dprint("' status=0x");
                 host::dprint_hex32(rd32(MCC_RESP_OFF_STATUS));
                 host::dprint(" n_channels=0x");
@@ -2194,7 +2194,7 @@ impl Ax200 {
             } else {
                 for &b in &ap.ssid[..ap.ssid_len as usize] {
                     let c = if (0x20..0x7f).contains(&b) { b } else { b'.' };
-                    host::print(unsafe { core::str::from_utf8_unchecked(core::slice::from_ref(&c)) });
+                    host::print_bytes(core::slice::from_ref(&c));
                 }
             }
             host::print("  [");
@@ -2430,7 +2430,7 @@ impl Ax200 {
             host::print("\"");
             for &b in &self.want_ssid[..self.want_ssid_len as usize] {
                 let s = [if (0x20..0x7f).contains(&b) { b } else { b'?' }];
-                host::print(unsafe { core::str::from_utf8_unchecked(&s) });
+                host::print_bytes(&s);
             }
             host::print("\"");
         } else {
@@ -4236,12 +4236,13 @@ impl Ax200 {
     /// `initiator == WLAN_BACK_RECIPIENT && tx`. A session the AP itself ended
     /// (DELBA received) or replaced (new ADDBA on the same TID) gets none.
     fn ba_stop(&mut self, tid: u8, tell_ap: bool, reason: u16) {
-        let baid = match ba::by_tid(tid) {
-            Some(s) if s.active() => {
-                let b = s.baid;
-                s.stop();
-                b
-            }
+        let baid = match ba::with_tid(tid, |s| {
+            if !s.active() { return None; }
+            let b = s.baid;
+            s.stop();
+            Some(b)
+        }) {
+            Some(Some(b)) => b,
             _ => return,
         };
         self.ba_remove(tid, baid);
@@ -4257,7 +4258,7 @@ impl Ax200 {
     fn ba_stop_all(&mut self) {
         for tid in 0..ba::NUM_TIDS as u8 {
             if ba::by_tid(tid).map(|s| s.active()).unwrap_or(false) {
-                if let Some(s) = ba::by_tid(tid) { s.stop(); }
+                ba::with_tid(tid, |s| s.stop());
             }
         }
         self.ba_pending = None;
@@ -4298,9 +4299,9 @@ impl Ax200 {
             host::print(")\n");
             return;
         }
-        if let Some(sess) = ba::by_tid(p.tid) {
+        ba::with_tid(p.tid, |sess| {
             sess.start(baid as u8, p.tid, p.ssn, p.dialog, p.timeout, p.win);
-        }
+        });
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
         if self.st.addba_accepted <= 2 {
@@ -4375,9 +4376,9 @@ impl Ax200 {
             return;
         }
         let baid = ((status & IWL_ADD_STA_BAID_MASK) >> IWL_ADD_STA_BAID_SHIFT) as u8;
-        if let Some(sess) = ba::by_tid(p.tid) {
+        ba::with_tid(p.tid, |sess| {
             sess.start(baid, p.tid, p.ssn, p.dialog, p.timeout, p.win);
-        }
+        });
         self.ba_reply(&p, WLAN_STATUS_SUCCESS);
         self.st.addba_accepted = self.st.addba_accepted.wrapping_add(1);
         if self.st.addba_accepted <= 2 {
@@ -5494,9 +5495,7 @@ impl Ax200 {
                         p[RX_PKT_DATA_OFF + FR_OFF_NSSN],
                         p[RX_PKT_DATA_OFF + FR_OFF_NSSN + 1],
                     ]);
-                    if let Some(sess) = ba::by_baid(baid) {
-                        sess.on_frame_release(nssn & 0x0fff);
-                    }
+                    ba::with_baid(baid, |sess| sess.on_frame_release(nssn & 0x0fff));
                 } else if c == TLC_MNG_UPDATE_NOTIF && g == DATA_PATH_GROUP {
                     // The firmware's rate-scaling verdict: what it is actually
                     // transmitting at. Without this the host is blind to the
@@ -5603,11 +5602,9 @@ impl Ax200 {
                             let taken = agg.reorderable && {
                                 let b = ((agg.reorder & IWL_RX_MPDU_REORDER_BAID_MASK)
                                     >> IWL_RX_MPDU_REORDER_BAID_SHIFT) as u8;
-                                match ba::by_baid(b) {
-                                    Some(sess) => sess.on_frame(
-                                        agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n], agg.pn),
-                                    None => false,
-                                }
+                                ba::with_baid(b, |sess| sess.on_frame(
+                                    agg.reorder, agg.status, agg.amsdu_last, &rxbuf[..n], agg.pn))
+                                    .unwrap_or(false)
                             };
                             if !taken {
                                 pn::deliver(&rxbuf[..n], agg.pn);

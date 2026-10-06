@@ -13,9 +13,10 @@ dependencies = [
 
 [[package]]
 name = "debug"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "nopeek_widgets",
+ "npk_sys",
 ]
 
 [[package]]

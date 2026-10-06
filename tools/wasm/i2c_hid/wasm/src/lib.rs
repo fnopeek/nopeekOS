@@ -32,22 +32,9 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_print(ptr: i32, len: i32);
-    fn npk_mmio_map_phys(hi: i32, lo: i32, pages: i32) -> i32;
-    fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
-    fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
-    fn npk_now_us() -> i64;
-    fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
-    fn npk_acpi_table(sig: i32, index: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-    fn npk_sys_info(key: i32) -> i64;
-}
+use core::sync::atomic::{AtomicBool, Ordering};
+use npk_sys::bump::Bump;
+use npk_sys::cell::Single;
 
 // ── Diagnostic lines: built in, silent in normal operation ───────────
 //
@@ -58,11 +45,10 @@ unsafe extern "C" {
 // Not gated here: what the driver decides. Which device was found, whether
 // precision mode took effect, the state of the gate and every error are
 // always logged.
-static mut VERBOSE: bool = false;
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 fn verbose() -> bool {
-    // SAFETY: single thread, single run.
-    unsafe { core::ptr::addr_of!(VERBOSE).read() }
+    VERBOSE.load(Ordering::Relaxed)
 }
 
 /// Like `logln`, but only when `set log.drivers 1` is set.
@@ -78,13 +64,13 @@ struct HostBus { handle: i32 }
 
 impl i2c_hid_core::dw_i2c::Bus for HostBus {
     fn read32(&mut self, off: u32) -> u32 {
-        unsafe { npk_mmio_read32(self.handle, off as i32) as u32 }
+        npk_sys::mmio_read32(self.handle, off as i32) as u32
     }
     fn write32(&mut self, off: u32, val: u32) {
-        unsafe { npk_mmio_write32(self.handle, off as i32, val as i32) };
+        npk_sys::mmio_write32(self.handle, off as i32, val as i32);
     }
     fn now_us(&mut self) -> u64 {
-        let t = unsafe { npk_now_us() };
+        let t = npk_sys::now_us();
         if t < 0 { 0 } else { t as u64 }
     }
     fn udelay(&mut self, us: u32) {
@@ -97,7 +83,7 @@ impl i2c_hid_core::dw_i2c::Bus for HostBus {
         // Below that we keep spinning: `npk_sleep` works in milliseconds,
         // and an I2C cycle takes 2.5 us.
         if us >= 1000 {
-            unsafe { npk_sleep((us / 1000) as i32) };
+            npk_sys::sleep((us / 1000) as i32);
             return;
         }
         let end = self.now_us() + us as u64;
@@ -107,45 +93,28 @@ impl i2c_hid_core::dw_i2c::Bus for HostBus {
 }
 
 fn log(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
+    npk_sys::print(s.as_bytes());
 }
 fn logln(s: &str) { log(s); log("\n"); }
 
 // ── Bump allocator: the run is one-shot ──────────────────────────────
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct Bump;
-unsafe impl core::alloc::GlobalAlloc for Bump {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        unsafe { pos_ptr.write(aligned + layout.size()) };
-        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _p: *mut u8, _l: core::alloc::Layout) {}
-}
 #[global_allocator]
-static ALLOC: Bump = Bump;
+static ALLOC: Bump<HEAP_SIZE> = Bump::new();
 
 /// "SSDT" as the four characters appear in memory (little-endian).
-const SIG_SSDT: i32 = i32::from_le_bytes(*b"SSDT");
+const SIG_SSDT: [u8; 4] = *b"SSDT";
 /// Besides SSDT, ACPICA also loads PSDT and OSDT into the namespace
 /// (`acpi_tb_load_namespace`). Rare, but it costs nothing.
-const SIG_PSDT: i32 = i32::from_le_bytes(*b"PSDT");
-const SIG_OSDT: i32 = i32::from_le_bytes(*b"OSDT");
+const SIG_PSDT: [u8; 4] = *b"PSDT";
+const SIG_OSDT: [u8; 4] = *b"OSDT";
 
 const DSDT_MAX: usize = 512 * 1024;
-static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
+static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 /// Room for one SSDT at a time. The namespace copies out what it needs, so
 /// the buffer may be reused afterwards.
 const SSDT_MAX: usize = 256 * 1024;
-static mut SSDT: [u8; SSDT_MAX] = [0; SSDT_MAX];
+static SSDT: Single<[u8; SSDT_MAX]> = Single::new([0; SSDT_MAX]);
 
 /// Firmware access for the interpreter.
 ///
@@ -161,7 +130,7 @@ impl Ec for FirmwareAccess {
     fn read(&mut self, _a: u8) -> u8 { 0 }
     fn write(&mut self, _a: u8, _v: u8) {}
     fn mem_read(&mut self, addr: u64) -> Option<u8> {
-        let v = unsafe { npk_acpi_mem_read((addr >> 32) as i32, addr as u32 as i32) };
+        let v = npk_sys::acpi_mem_read((addr >> 32) as i32, addr as u32 as i32);
         if v < 0 { None } else { Some(v as u8) }
     }
     fn note(&mut self, s: &str) { dbgln(s); }
@@ -169,22 +138,21 @@ impl Ec for FirmwareAccess {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
-    // SAFETY: single thread, single run — set once, only read afterwards.
-    unsafe {
-        core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
-    }
+    VERBOSE.store(npk_sys::sys_info(50) == 1, Ordering::Relaxed);
     logln("[i2c-hid] looking for a HID-over-I2C device in the firmware tables");
 
-    let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
-    let len = unsafe { npk_acpi_dsdt(dsdt_ptr as i32, DSDT_MAX as i32) };
-    if len <= 0 || len as usize > DSDT_MAX {
+    let dsdt = DSDT.with(|d| {
+        let len = npk_sys::acpi_dsdt(d);
+        if len <= 0 || len as usize > DSDT_MAX { return None; }
+        // The kernel wrote exactly `len` bytes.
+        Some(Namespace::load(&d[..len as usize]))
+    });
+    let Some(dsdt) = dsdt else {
         logln("[i2c-hid] no DSDT, or bigger than our buffer — nothing to do");
         return;
-    }
-    // SAFETY: the kernel wrote exactly `len` bytes into it.
-    let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, len as usize) };
+    };
 
-    let mut ns = match Namespace::load(table) {
+    let mut ns = match dsdt {
         Ok(ns) => ns,
         Err(_) => { logln("[i2c-hid] DSDT did not parse"); return; }
     };
@@ -195,20 +163,22 @@ pub extern "C" fn _start() {
     // SSDTs; together they form one namespace, and Linux loads them all.
     // Reading only the DSDT misses names defined elsewhere, e.g. the base
     // of the region holding the I2C controllers' enable bits.
-    let ssdt_ptr = core::ptr::addr_of_mut!(SSDT) as *mut u8;
     let mut loaded = 0u32;
     for (sig, name) in [(SIG_SSDT, "SSDT"), (SIG_PSDT, "PSDT"), (SIG_OSDT, "OSDT")] {
     for i in 0..32 {
-        let n = unsafe { npk_acpi_table(sig, i, ssdt_ptr as i32, SSDT_MAX as i32) };
+        let (n, r) = SSDT.with(|t| {
+            let n = npk_sys::acpi_table(sig, i, t);
+            // The kernel wrote exactly `n` bytes.
+            let r = (n > 0 && n as usize <= SSDT_MAX).then(|| ns.load_more(&t[..n as usize]));
+            (n, r)
+        });
         if n <= 0 { break; }
         let _ = name;
-        if n as usize > SSDT_MAX {
+        let Some(r) = r else {
             logln(&alloc::format!("[i2c-hid] SSDT {i} is {n} bytes — bigger than our buffer"));
             continue;
-        }
-        // SAFETY: the kernel wrote exactly `n` bytes into it.
-        let t = unsafe { core::slice::from_raw_parts(ssdt_ptr as *const u8, n as usize) };
-        match ns.load_more(t) {
+        };
+        match r {
             Ok(()) => loaded += 1,
             Err(e) => logln(&alloc::format!("[i2c-hid] {name} {i} did not parse: {e}")),
         }
@@ -274,7 +244,7 @@ pub extern "C" fn _start() {
     let mut buf = [0u8; 64];
     // Three minutes of statistics, then quiet.
     let mut stat_lines_left = 18u32;
-    let mut next_stat_us = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } }
+    let mut next_stat_us = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 } }
         + 10_000_000;
     loop {
         // Did the switch to precision mode take effect?
@@ -350,7 +320,7 @@ pub extern "C" fn _start() {
 
         // Every ten seconds, log what the round actually cost, then stop
         // on its own.
-        let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
+        let now = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 } };
 
         // A tap presses immediately and releases later, or it could never
         // become a drag. The tick lives here and not in the report path: an
@@ -389,8 +359,8 @@ pub extern "C" fn _start() {
                 // any other pending pin is not an interrupt anybody here
                 // handles, so it is masked — Linux: "Disabling spurious GPIO
                 // IRQ".
-                let rd = |o: u32| unsafe { npk_mmio_read32(q.handle, o as i32) } as u32;
-                let wr = |o: u32, v: u32| unsafe { npk_mmio_write32(q.handle, o as i32, v as i32) };
+                let rd = |o: u32| npk_sys::mmio_read32(q.handle, o as i32) as u32;
+                let wr = |o: u32, v: u32| npk_sys::mmio_write32(q.handle, o as i32, v as i32);
                 let status = ((rd(q.block_off + gpio::WAKE_INT_STATUS_REG1) as u64) << 32
                     | rd(q.block_off + gpio::WAKE_INT_STATUS_REG0) as u64)
                     & ((1u64 << 46) - 1);
@@ -416,14 +386,14 @@ pub extern "C" fn _start() {
                     }
                 }
                 let mr = q.block_off + gpio::WAKE_INT_MASTER_REG;
-                let m = unsafe { npk_mmio_read32(q.handle, mr as i32) } as u32;
-                unsafe { npk_mmio_write32(q.handle, mr as i32, (m | gpio::EOI_MASK) as i32) };
+                let m = npk_sys::mmio_read32(q.handle, mr as i32) as u32;
+                npk_sys::mmio_write32(q.handle, mr as i32, (m | gpio::EOI_MASK) as i32);
 
                 // Sleep until the pad reports. Wake early only for our own
                 // timers: an open tap releases its button after TAP_MS, and
                 // the initial statistics period. At most one second, so a
                 // lost interrupt shows as lag rather than a dead pointer.
-                let now = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 } };
+                let now = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 } };
                 let now_ms = now / 1000;
                 let mut wait_ms: u64 = 1000;
                 for l in live.iter() {
@@ -435,9 +405,9 @@ pub extern "C" fn _start() {
                     wait_ms = wait_ms.min((next_stat_us.saturating_sub(now) / 1000).max(1));
                 }
                 const WAIT_IRQ: i32 = 2;
-                unsafe { npk_wait(WAIT_IRQ, wait_ms as i32) };
+                npk_sys::wait(WAIT_IRQ, wait_ms as i32);
             }
-            None => unsafe { let _ = npk_sleep(5); },
+            None => { let _ = npk_sys::sleep(5); }
         }
     }
 }
@@ -483,7 +453,7 @@ fn arm_irq(found: &[i2c_hid_core::discover::HidDevice], live: &[Live]) -> Option
     };
     let level = flags & 0x02 == 0;
     let low = flags & 0x04 != 0;
-    let v = unsafe { npk_irq_register_gsi(gsi as i32, (level as i32) | ((low as i32) << 1)) };
+    let v = npk_sys::irq_register_gsi(gsi as i32, (level as i32) | ((low as i32) << 1));
     if v < 0 {
         logln(&alloc::format!(
             "[i2c-hid] interrupt: GSI {gsi} refused (taken, or no I/O APIC) — staying on the 5 ms poll"));
@@ -491,22 +461,22 @@ fn arm_irq(found: &[i2c_hid_core::discover::HidDevice], live: &[Live]) -> Option
     }
     for (&off, &active_low) in pins.iter().zip(lows.iter()) {
         let o = off as i32;
-        let cfg = gpio::irq_level_config(unsafe { npk_mmio_read32(handle, o) } as u32, active_low);
+        let cfg = gpio::irq_level_config(npk_sys::mmio_read32(handle, o) as u32, active_low);
         // Enable while still masked, wait for the enable bit to read back
         // (the debounce settles), then write the plain configuration.
-        unsafe { npk_mmio_write32(handle, o, ((cfg | gpio::INTERRUPT_ENABLE) & !gpio::INTERRUPT_MASK) as i32) };
+        npk_sys::mmio_write32(handle, o, ((cfg | gpio::INTERRUPT_ENABLE) & !gpio::INTERRUPT_MASK) as i32);
         for _ in 0..100_000 {
-            if unsafe { npk_mmio_read32(handle, o) } as u32 & gpio::INTERRUPT_ENABLE != 0 { break; }
+            if npk_sys::mmio_read32(handle, o) as u32 & gpio::INTERRUPT_ENABLE != 0 { break; }
         }
-        unsafe { npk_mmio_write32(handle, o, cfg as i32) };
+        npk_sys::mmio_write32(handle, o, cfg as i32);
         // `amd_gpio_irq_enable`.
-        let r = unsafe { npk_mmio_read32(handle, o) } as u32;
-        unsafe { npk_mmio_write32(handle, o, (r | gpio::INTERRUPT_ENABLE | gpio::INTERRUPT_MASK) as i32) };
+        let r = npk_sys::mmio_read32(handle, o) as u32;
+        npk_sys::mmio_write32(handle, o, (r | gpio::INTERRUPT_ENABLE | gpio::INTERRUPT_MASK) as i32);
     }
     let block_off = g.mmio_base & 0xFFF;
     let mr = (block_off + gpio::WAKE_INT_MASTER_REG) as i32;
-    let m = unsafe { npk_mmio_read32(handle, mr) } as u32;
-    unsafe { npk_mmio_write32(handle, mr, (m | gpio::EOI_MASK) as i32) };
+    let m = npk_sys::mmio_read32(handle, mr) as u32;
+    npk_sys::mmio_write32(handle, mr, (m | gpio::EOI_MASK) as i32);
     logln(&alloc::format!(
         "[i2c-hid] interrupt: GSI {gsi} ({}, active-{}) on vector {v} — the pads wake the driver",
         if level { "level" } else { "edge" }, if low { "low" } else { "high" }));
@@ -542,7 +512,7 @@ fn probe_bus(d: &i2c_hid_core::discover::HidDevice) -> Option<Live> {
     }
 
     let pages = ((c.mmio_len as usize).max(4096) + 4095) / 4096;
-    let handle = unsafe { npk_mmio_map_phys(0, c.mmio_base as i32, pages.min(16) as i32) };
+    let handle = npk_sys::mmio_map_phys(0, c.mmio_base as i32, pages.min(16) as i32);
     if handle < 0 {
         logln("[i2c-hid]   MMIO mapping REFUSED — no HARDWARE right, or the range is RAM");
         return None;
@@ -963,22 +933,22 @@ enum Step {
 // One mapping per GPIO block, not per device: several devices often share
 // one block, and `MAX_MMIO_MAPS` is four.
 const MAX_GPIO_MAPS: usize = 2;
-static mut GPIO_MAPS: [(u32, u32, i32); MAX_GPIO_MAPS] = [(0, 0, -1); MAX_GPIO_MAPS];
-static mut GPIO_MAP_N: usize = 0;
+/// `(base, pages, handle)` per mapped block, and how many are in use.
+static GPIO_MAPS: Single<([(u32, u32, i32); MAX_GPIO_MAPS], usize)> =
+    Single::new(([(0, 0, -1); MAX_GPIO_MAPS], 0));
 
 fn map_gpio_page(base: u32, pages: u32) -> i32 {
-    // SAFETY: single thread, single run — the module has no concurrency.
-    let maps = unsafe { &mut *core::ptr::addr_of_mut!(GPIO_MAPS) };
-    let n = unsafe { core::ptr::addr_of!(GPIO_MAP_N).read() };
-    for (b, p, h) in maps.iter().take(n) {
-        if *b == base && *p >= pages { return *h; }
-    }
-    let h = unsafe { npk_mmio_map_phys(0, base as i32, pages as i32) };
-    if h >= 0 && n < MAX_GPIO_MAPS {
-        maps[n] = (base, pages, h);
-        unsafe { core::ptr::addr_of_mut!(GPIO_MAP_N).write(n + 1) };
-    }
-    h
+    GPIO_MAPS.with(|(maps, n)| {
+        for (b, p, h) in maps.iter().take(*n) {
+            if *b == base && *p >= pages { return *h; }
+        }
+        let h = npk_sys::mmio_map_phys(0, base as i32, pages as i32);
+        if h >= 0 && *n < MAX_GPIO_MAPS {
+            maps[*n] = (base, pages, h);
+            *n += 1;
+        }
+        h
+    })
 }
 
 /// Arm the gate, or log why not.
@@ -1031,7 +1001,7 @@ fn arm_gate(d: &i2c_hid_core::discover::HidDevice) -> Gate {
         return Gate::Blind;
     }
     let active_low = d.gpio_active_low();
-    let v = unsafe { npk_mmio_read32(handle, w.reg_off as i32) } as u32;
+    let v = npk_sys::mmio_read32(handle, w.reg_off as i32) as u32;
     if v == u32::MAX {
         logln(&alloc::format!(
             "[i2c-hid] {addr:#04x}: pin register reads all ones — nobody answered there, \
@@ -1052,7 +1022,7 @@ fn gate_asserted_now(l: &mut Live) -> bool {
     match &l.gate {
         Gate::Blind => true,
         Gate::Pin { handle, reg_off, active_low, .. } => {
-            let v = unsafe { npk_mmio_read32(*handle, *reg_off as i32) } as u32;
+            let v = npk_sys::mmio_read32(*handle, *reg_off as i32) as u32;
             i2c_hid_core::gpio::asserted(v, *active_low)
         }
     }
@@ -1063,7 +1033,7 @@ fn gate_check(l: &mut Live) -> (bool, bool) {
     let Gate::Pin { handle, reg_off, active_low, skipped, proved, .. } = &mut l.gate else {
         return (true, false);
     };
-    let v = unsafe { npk_mmio_read32(*handle, *reg_off as i32) } as u32;
+    let v = npk_sys::mmio_read32(*handle, *reg_off as i32) as u32;
     if i2c_hid_core::gpio::asserted(v, *active_low) {
         *skipped = 0;
         return (true, false);
@@ -1217,7 +1187,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
                     np += 1;
                 }
             }
-            let now_ms = { let t = unsafe { npk_now_us() }; if t < 0 { 0 } else { t as u64 / 1000 } };
+            let now_ms = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 / 1000 } };
             // The button is passed along: a pressed pad pins the fingers,
             // and a touch under the button is not a tap. Both belong in the
             // tracker, where they are tested.
@@ -1255,11 +1225,11 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     push_buttons(l);
     if tap > 0 {
         let b = 1i32 << (tap - 1);
-        unsafe { npk_pointer_inject(0, 0, l.last_buttons | b, 0, 0) };
-        unsafe { npk_pointer_inject(0, 0, l.last_buttons, 0, 0) };
+        npk_sys::pointer_inject(0, 0, l.last_buttons | b, 0, 0);
+        npk_sys::pointer_inject(0, 0, l.last_buttons, 0, 0);
     }
     if dx != 0 || dy != 0 || scroll != 0 || hscroll != 0 {
-        unsafe { npk_pointer_inject(dx, dy, l.last_buttons, scroll, hscroll) };
+        npk_sys::pointer_inject(dx, dy, l.last_buttons, scroll, hscroll);
     }
     Step::Data
 }
@@ -1272,7 +1242,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
 fn push_buttons(l: &mut Live) {
     let want = l.hw_buttons | l.track.hold() as i32;
     if want != l.last_buttons {
-        unsafe { npk_pointer_inject(0, 0, want, 0, 0) };
+        npk_sys::pointer_inject(0, 0, want, 0, 0);
         l.last_buttons = want;
     }
 }

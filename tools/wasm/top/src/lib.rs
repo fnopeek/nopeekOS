@@ -15,42 +15,12 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
-// ── App Display API ──────────────────────────────────────────────
-
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    /// Write text to the app's display area.
-    fn npk_print(ptr: i32, len: i32);
-    /// Clear the app's display.
-    fn npk_clear();
-    /// Wait for a key press or timeout. Returns key (0-255) or -1 (timeout).
-    fn npk_input_wait(timeout_ms: i32) -> i32;
-    /// Query system information.
-    fn npk_sys_info(key: i32) -> i64;
-}
+use npk_sys::{clear, input_wait, sys_info as sys};
 
 /// Raw bytes to the display; a process name need not be UTF-8.
-fn print_bytes(b: &[u8]) {
-    // SAFETY: FFI; the kernel validates the range.
-    unsafe { npk_print(b.as_ptr() as i32, b.len() as i32) };
-}
+fn print_bytes(b: &[u8]) { npk_sys::print(b); }
 
 fn print(s: &str) { print_bytes(s.as_bytes()); }
-
-fn clear() {
-    // SAFETY: FFI without pointers.
-    unsafe { npk_clear() };
-}
-
-fn input_wait(timeout_ms: i32) -> i32 {
-    // SAFETY: FFI without pointers.
-    unsafe { npk_input_wait(timeout_ms) }
-}
-
-fn sys(key: i32) -> i64 {
-    // SAFETY: FFI without pointers.
-    unsafe { npk_sys_info(key) }
-}
 
 fn print_num(n: i64) {
     if n < 0 { print("-"); print_num(-n); return; }

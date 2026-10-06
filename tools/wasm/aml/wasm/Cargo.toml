@@ -1,6 +1,6 @@
 [package]
 name = "aml"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [lib]
@@ -8,6 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aml_core = { path = "../core" }
+npk_sys = { path = "../../sdk/npk_sys" }
 
 [profile.release]
 opt-level = "s"

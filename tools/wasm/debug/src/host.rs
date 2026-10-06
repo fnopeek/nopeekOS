@@ -5,10 +5,6 @@
 // imports rather than ordinary undefined C symbols, which rust-lld rejects.
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
-    fn npk_print(ptr: i32, len: i32);
-
-    fn npk_sleep(ms: i32) -> i32;
-
     fn npk_self_terminal() -> i32;
     fn npk_stream_open(idx: i32) -> i32;
     fn npk_stream_read(idx: i32, buf_ptr: i32, buf_len: i32) -> i32;
@@ -24,15 +20,9 @@ unsafe extern "C" {
     fn npk_debug_target_port() -> i32;
 }
 
-pub fn print(s: &str) {
-    // SAFETY: FFI; the kernel validates the range.
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
-}
+pub fn print(s: &str) { npk_sys::print(s.as_bytes()); }
 
-pub fn sleep(ms: i32) {
-    // SAFETY: FFI without pointers.
-    unsafe { npk_sleep(ms) };
-}
+pub fn sleep(ms: i32) { npk_sys::sleep(ms); }
 
 pub fn self_terminal() -> i32 {
     // SAFETY: FFI without pointers.

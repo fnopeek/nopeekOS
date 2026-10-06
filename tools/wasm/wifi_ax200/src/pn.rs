@@ -7,6 +7,10 @@
 //! block-ack reorder buffer (`iwl_mvm_pass_packet_to_mac80211`), so the
 //! numbers it sees on a session are in order.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use npk_sys::cell::Single;
+
 use crate::host;
 
 /// TIDs 0..15 plus one counter for non-QoS frames (`IEEE80211_NUM_TIDS + 1`).
@@ -33,16 +37,13 @@ impl Pn {
 }
 
 /// Last accepted number per counter, pairwise [0] and group [1].
-// SAFETY (all statics here): the module is single-threaded and nothing in
-// this file calls back into code that could re-enter it.
-static mut RX_PN: [[u64; COUNTERS]; 2] = [[0; COUNTERS]; 2];
-static mut REPLAYS: u32 = 0;
+static RX_PN: Single<[[u64; COUNTERS]; 2]> = Single::new([[0; COUNTERS]; 2]);
+static REPLAYS: AtomicU32 = AtomicU32::new(0);
 
 /// Hand a decoded frame up unless its packet number is a replay.
 pub fn deliver(frame: &[u8], p: Pn) {
     if p.valid && !accept(p) {
-        // SAFETY: see above.
-        unsafe { REPLAYS = REPLAYS.wrapping_add(1) };
+        REPLAYS.fetch_add(1, Ordering::Relaxed);
         return;
     }
     host::netdev_submit_rx(frame);
@@ -50,24 +51,23 @@ pub fn deliver(frame: &[u8], p: Pn) {
 
 fn accept(p: Pn) -> bool {
     let idx = (p.idx as usize).min(COUNTERS - 1);
-    // SAFETY: see above.
-    let last = unsafe { &mut (*(&raw mut RX_PN))[p.group as usize][idx] };
-    if p.pn < *last || (p.pn == *last && !p.same_ok) {
-        return false;
-    }
-    *last = p.pn;
-    true
+    RX_PN.with(|t| {
+        let last = &mut t[p.group as usize][idx];
+        if p.pn < *last || (p.pn == *last && !p.same_ok) {
+            return false;
+        }
+        *last = p.pn;
+        true
+    })
 }
 
 /// A key was installed: its counters start over, the group key's at the
 /// RSC the AP gave with it.
 pub fn reset(group: bool, start: u64) {
-    // SAFETY: see above.
-    unsafe { (*(&raw mut RX_PN))[group as usize] = [start; COUNTERS] };
+    RX_PN.with(|t| t[group as usize] = [start; COUNTERS]);
 }
 
 /// Frames dropped as replays since boot.
 pub fn replays() -> u32 {
-    // SAFETY: see above.
-    unsafe { REPLAYS }
+    REPLAYS.load(Ordering::Relaxed)
 }

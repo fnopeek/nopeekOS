@@ -27,32 +27,20 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_wifi_send_cmd(buf_ptr: i32, len: i32) -> i32;
-    fn npk_wifi_poll_event(buf_ptr: i32, max: i32) -> i32;
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-    // Terminal/framebuffer output (like the driver) — visible on machines
-    // without a serial port, where npk_log_serial shows nothing.
-    fn npk_print(ptr: i32, len: i32);
-    fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
-    /// `security::csprng`. Needs no capability, like `npk_unix_time`. Returns
-    /// the number of bytes written or -1.
-    fn npk_random_bytes(buf_ptr: i32, len: i32) -> i32;
-}
+use npk_sys::cell::Single;
 
 const LOG_CAP: usize = 8192;
-static mut LOG_BUF: [u8; LOG_CAP] = [0; LOG_CAP];
-static mut LOG_LEN: usize = 0;
 
-/// Bytes already persisted. `log` only appends to the buffer; `log_flush`
-/// writes it out, and the main loop calls that once per poll round.
-static mut LOG_FLUSHED: usize = 0;
+struct Log {
+    buf: [u8; LOG_CAP],
+    len: usize,
+    /// Bytes already persisted. `log` only appends to the buffer;
+    /// `log_flush` writes it out, and the main loop calls that once per
+    /// poll round.
+    flushed: usize,
+}
+
+static LOG: Single<Log> = Single::new(Log { buf: [0; LOG_CAP], len: 0, flushed: 0 });
 
 // A decimal number into the log, without allocating.
 fn log_num(mut v: u32) {
@@ -67,7 +55,7 @@ fn log_num(mut v: u32) {
         b[i] = b'0' + (v % 10) as u8;
         v /= 10;
     }
-    log(unsafe { core::str::from_utf8_unchecked(&b[i..]) });
+    log(core::str::from_utf8(&b[i..]).unwrap_or("?"));
 }
 
 // Log to the terminal and buffer for npkFS `sys/log/wifid` — wifid runs in an
@@ -76,35 +64,29 @@ fn log_num(mut v: u32) {
 // would be one full npkFS commit each,
 // breaking npkFS's "N puts then one commit_root" assumption mid-download.
 fn log(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
-    unsafe {
-        let buf = core::ptr::addr_of_mut!(LOG_BUF) as *mut u8;
-        let len_ptr = core::ptr::addr_of_mut!(LOG_LEN);
-        let mut l = len_ptr.read();
+    // Terminal/framebuffer output — visible on machines without a serial
+    // port, where npk_log_serial shows nothing.
+    npk_sys::print(s.as_bytes());
+    LOG.with(|g| {
         for &c in s.as_bytes() {
-            if l < LOG_CAP {
-                buf.add(l).write(c);
-                l += 1;
+            if g.len < LOG_CAP {
+                g.buf[g.len] = c;
+                g.len += 1;
             }
         }
-        len_ptr.write(l);
-    }
+    });
 }
 
 /// Persist the log if it grew. One store per poll round instead of one per
 /// line — and none at all while nothing is happening.
 fn log_flush() {
-    unsafe {
-        let l = core::ptr::addr_of_mut!(LOG_LEN).read();
-        let flushed_ptr = core::ptr::addr_of_mut!(LOG_FLUSHED);
-        if l == flushed_ptr.read() {
+    LOG.with(|g| {
+        if g.len == g.flushed {
             return;
         }
-        flushed_ptr.write(l);
-        let buf = core::ptr::addr_of_mut!(LOG_BUF) as *mut u8;
-        let name = b"sys/log/wifid";
-        npk_store(name.as_ptr() as i32, name.len() as i32, buf as i32, l as i32);
-    }
+        g.flushed = g.len;
+        npk_sys::store(b"sys/log/wifid", &g.buf[..g.len]);
+    });
 }
 
 // ── control-channel wire format (docs/spec/WIFI_CLASS_ABI.md) ──────────────────────
@@ -130,10 +112,6 @@ const RSN_IE: [u8; 22] = [
     0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
 ];
 
-static mut SSID_BUF: [u8; 512] = [0; 512];
-static mut PSK_BUF: [u8; 128] = [0; 128];
-static mut EVENT_BUF: [u8; 2048] = [0; 2048];
-
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     log("[wifid] WiFi manager start (WPA2 supplicant)\n");
@@ -149,18 +127,20 @@ pub extern "C" fn _start() {
     // this races the rest of boot. Without a supplicant the driver associates,
     // sends READY into the void, and the AP deauthenticates us after an
     // unanswered msg1 — which looks like "connected but no DHCP lease".
+    let mut ssid_buf = [0u8; 512];
+    let mut psk_buf = [0u8; 128];
     let (ssid, pass) = loop {
-        let ssid = read_cfg(b"sys/config/wifi", core::ptr::addr_of_mut!(SSID_BUF) as *mut u8, 512)
+        let ssid = read_cfg(b"sys/config/wifi", &mut ssid_buf)
             .and_then(|c| cfg_get(c, b"ssid"))
             .filter(|s| !s.is_empty());
-        let pass = read_cfg(b"sys/config/wifi_psk", core::ptr::addr_of_mut!(PSK_BUF) as *mut u8, 128)
+        let pass = read_cfg(b"sys/config/wifi_psk", &mut psk_buf)
             .filter(|p| p.len() >= 8);
         match (ssid, pass) {
             (Some(s), Some(p)) => break (s, p),
             (None, _) => log("[wifid] waiting for an `ssid:` line in sys/config/wifi\n"),
             (_, None) => log("[wifid] waiting for sys/config/wifi_psk (store /sys/config/wifi_psk <pass>)\n"),
         }
-        unsafe { npk_sleep(2000) };
+        npk_sys::sleep(2000);
     };
     // Neither the network name nor anything derived from the passphrase is
     // logged: the log is a file any module with READ can fetch.
@@ -172,16 +152,16 @@ pub extern "C" fn _start() {
 
     // ── Resident supplicant loop. Runs on a worker core via autostart; drains
     // control-channel events and drives the 4-way handshake to completion. ──
-    let ev_ptr = core::ptr::addr_of_mut!(EVENT_BUF) as *mut u8;
+    let mut ev_buf = [0u8; 2048];
     let mut sup: Option<Supplicant> = None;
     let mut out = [0u8; 256];
     loop {
         loop {
-            let len = unsafe { npk_wifi_poll_event(ev_ptr as i32, 2048) };
+            let len = npk_sys::wifi_poll_event(&mut ev_buf);
             if len <= 0 {
                 break;
             }
-            let ev = unsafe { core::slice::from_raw_parts(ev_ptr as *const u8, len as usize) };
+            let ev = &ev_buf[..len as usize];
             handle_event(ev, &pmk, &mut sup, &mut out);
         }
         // One store per round, not one per line.
@@ -192,7 +172,7 @@ pub extern "C" fn _start() {
         // supplicant has no timers of its own: no deadline.
         // docs/plan/CORES_AND_EVENTS.md.
         const WAIT_WIFI_EVENT: i32 = 16;
-        unsafe { npk_wait(WAIT_WIFI_EVENT, -1) };
+        npk_sys::wait(WAIT_WIFI_EVENT, -1);
     }
 }
 
@@ -211,7 +191,7 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
             // same PTK while our packet number restarts at 1, and then drops
             // our frames as replays.
             let mut snonce = [0u8; 32];
-            let got = unsafe { npk_random_bytes(snonce.as_mut_ptr() as i32, 32) };
+            let got = npk_sys::random_bytes(&mut snonce);
             if got != 32 {
                 // No fallback to a made-up value. A predictable nonce is worse
                 // than no handshake: it looks like one.
@@ -313,7 +293,7 @@ fn handle_event(ev: &[u8], pmk: &[u8; 32], sup: &mut Option<Supplicant>, out: &m
 }
 
 fn send_cmd(msg: &[u8]) {
-    unsafe { npk_wifi_send_cmd(msg.as_ptr() as i32, msg.len() as i32) };
+    npk_sys::wifi_send_cmd(msg);
 }
 
 // TX_EAPOL: [op][len u16][frame].
@@ -362,12 +342,12 @@ fn cfg_get<'a>(text: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
-fn read_cfg(name: &[u8], buf: *mut u8, max: i32) -> Option<&'static [u8]> {
-    let n = unsafe { npk_fetch(name.as_ptr() as i32, name.len() as i32, buf as i32, max) };
+fn read_cfg<'a>(name: &[u8], buf: &'a mut [u8]) -> Option<&'a [u8]> {
+    let n = npk_sys::fetch(name, buf);
     if n <= 0 {
         return None;
     }
-    let mut v = unsafe { core::slice::from_raw_parts(buf as *const u8, n as usize) };
+    let mut v = &buf[..n as usize];
     while let Some(&last) = v.last() {
         if matches!(last, b'\n' | b'\r' | b' ' | b'\t') {
             v = &v[..v.len() - 1];

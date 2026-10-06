@@ -3,9 +3,14 @@
 version = 4
 
 [[package]]
+name = "npk_sys"
+version = "0.1.0"
+
+[[package]]
 name = "wifid"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
+ "npk_sys",
  "wifid_core",
 ]
 

@@ -1,46 +1,10 @@
 //! Host-function bindings for the nopeekOS WASM Driver ABI.
 //! Subset needed by the HDA driver: serial log, PCI, MMIO, DMA, sleep, fence.
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_sys_info(key: i32) -> i64;
-
-    // PCI
-    fn npk_pci_bind_class(class: i32, subclass: i32) -> i32;
-    fn npk_pci_bind_class_n(class: i32, subclass: i32, index: i32) -> i32;
-    fn npk_pci_enable_bus_master() -> i32;
-    fn npk_pci_read_config(offset: i32) -> i32;
-    fn npk_pci_write_config(offset: i32, value: i32) -> i32;
-
-    // MMIO (handle-based; no pointer deref)
-    fn npk_mmio_map_bar(bar_idx: i32, pages: i32) -> i32;
-    fn npk_mmio_read16(handle: i32, offset: i32) -> i32;
-    fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
-    fn npk_mmio_write8(handle: i32, offset: i32, value: i32) -> i32;
-    fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
-    fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
-
-    // DMA
-    fn npk_dma_alloc(pages: i32) -> i32;
-    fn npk_dma_phys_addr(handle: i32) -> i64;
-    fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
-    fn npk_dma_read32(handle: i32, offset: i32) -> i32;
-
-    fn npk_memory_fence() -> i32;
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_irq_register(entry: i32) -> i32;
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-
-    // Audio mailbox (driver side): pull a mixed S16/48k/stereo buffer.
-    fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
-}
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
-    let n = unsafe { npk_audio_poll_mix(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    let n = npk_sys::audio_poll_mix(buf);
     if n > 0 { n as usize } else { 0 }
 }
 
@@ -48,7 +12,7 @@ pub fn audio_poll_mix(buf: &mut [u8]) -> usize {
 /// The host adds the newline.
 pub fn log(s: &str) {
     let s = s.strip_suffix('\n').unwrap_or(s);
-    unsafe { npk_log_serial(s.as_ptr() as i32, s.len() as i32) };
+    npk_sys::log_serial(s.as_bytes());
 }
 
 // ── Diagnostic lines: built in, silent in normal operation ───────────
@@ -56,74 +20,70 @@ pub fn log(s: &str) {
 // The codec topology and the per-second reports (LPIB/wpos/SDCTL) say
 // whether the DMA runs at all. Queried once at start;
 // `set log.drivers 1` turns them on.
-static mut VERBOSE: bool = false;
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 /// Once at start: does the user want the diagnostic log?
 pub fn log_init() {
-    // SAFETY: single thread; written once at start, only read afterwards.
-    unsafe {
-        core::ptr::addr_of_mut!(VERBOSE).write(npk_sys_info(50) == 1);
-    }
+    VERBOSE.store(npk_sys::sys_info(50) == 1, Ordering::Relaxed);
 }
 
 pub fn verbose() -> bool {
-    // SAFETY: see `log_init`.
-    unsafe { core::ptr::addr_of!(VERBOSE).read() }
+    VERBOSE.load(Ordering::Relaxed)
 }
 
 
 pub fn pci_bind_class(class: u8, subclass: u8) -> i32 {
-    unsafe { npk_pci_bind_class(class as i32, subclass as i32) }
+    npk_sys::pci_bind_class(class as i32, subclass as i32)
 }
 /// Bind the `index`-th controller of this class. A machine usually has two
 /// HD Audio controllers (GPU HDMI and chipset), in arbitrary PCI order.
 pub fn pci_bind_class_n(class: u8, subclass: u8, index: u32) -> i32 {
-    unsafe { npk_pci_bind_class_n(class as i32, subclass as i32, index as i32) }
+    npk_sys::pci_bind_class_n(class as i32, subclass as i32, index as i32)
 }
 pub fn pci_enable_bus_master() -> i32 {
-    unsafe { npk_pci_enable_bus_master() }
+    npk_sys::pci_enable_bus_master()
 }
 pub fn pci_read_config(offset: u8) -> u32 {
-    unsafe { npk_pci_read_config(offset as i32) as u32 }
+    npk_sys::pci_read_config(offset as i32) as u32
 }
 pub fn pci_write_config(offset: u8, value: u32) {
-    unsafe { npk_pci_write_config(offset as i32, value as i32) };
+    npk_sys::pci_write_config(offset as i32, value as i32);
 }
 
 pub fn mmio_map_bar(bar: u8, pages: u16) -> i32 {
-    unsafe { npk_mmio_map_bar(bar as i32, pages as i32) }
+    npk_sys::mmio_map_bar(bar as i32, pages as i32)
 }
 pub fn mmio_r16(h: i32, off: u32) -> u16 {
-    unsafe { npk_mmio_read16(h, off as i32) as u16 }
+    npk_sys::mmio_read16(h, off as i32) as u16
 }
 pub fn mmio_w8(h: i32, off: u32, val: u8) {
-    unsafe { npk_mmio_write8(h, off as i32, val as i32) };
+    npk_sys::mmio_write8(h, off as i32, val as i32);
 }
 pub fn mmio_w16(h: i32, off: u32, val: u16) {
-    unsafe { npk_mmio_write16(h, off as i32, val as i32) };
+    npk_sys::mmio_write16(h, off as i32, val as i32);
 }
 pub fn mmio_r32(h: i32, off: u32) -> u32 {
-    unsafe { npk_mmio_read32(h, off as i32) as u32 }
+    npk_sys::mmio_read32(h, off as i32) as u32
 }
 pub fn mmio_w32(h: i32, off: u32, val: u32) {
-    unsafe { npk_mmio_write32(h, off as i32, val as i32) };
+    npk_sys::mmio_write32(h, off as i32, val as i32);
 }
 
 pub fn dma_alloc(pages: u16) -> i32 {
-    unsafe { npk_dma_alloc(pages as i32) }
+    npk_sys::dma_alloc(pages as i32)
 }
 pub fn dma_phys(h: i32) -> u64 {
-    unsafe { npk_dma_phys_addr(h) as u64 }
+    npk_sys::dma_phys_addr(h) as u64
 }
 pub fn dma_write(h: i32, off: u32, data: &[u8]) -> i32 {
-    unsafe { npk_dma_write(h, off as i32, data.as_ptr() as i32, data.len() as i32) }
+    npk_sys::dma_write(h, off as i32, data)
 }
 
 pub fn fence() {
-    unsafe { npk_memory_fence() };
+    npk_sys::memory_fence();
 }
 pub fn sleep_ms(ms: u32) {
-    unsafe { npk_sleep(ms as i32) };
+    npk_sys::sleep(ms as i32);
 }
 
 /// `npk_wait` bit: the bound device's IRQ fired.
@@ -131,12 +91,12 @@ pub const WAIT_IRQ: i32 = 2;
 
 /// Register the bound controller's MSI; returns the vector or -1.
 pub fn irq_register() -> i32 {
-    unsafe { npk_irq_register(0) }
+    npk_sys::irq_register(0)
 }
 
 /// Park until the IRQ fires or `timeout_ms` passes.
 pub fn wait_irq(timeout_ms: u32) -> i32 {
-    unsafe { npk_wait(WAIT_IRQ, timeout_ms as i32) }
+    npk_sys::wait(WAIT_IRQ, timeout_ms as i32)
 }
 
 /// Read a dword back from the DMA buffer.
@@ -144,5 +104,5 @@ pub fn wait_irq(timeout_ms: u32) -> i32 {
 /// Diagnostic: checks that `dma_write` lands in the memory the device
 /// reads.
 pub fn dma_read32(h: i32, off: u32) -> u32 {
-    unsafe { npk_dma_read32(h, off as i32) as u32 }
+    npk_sys::dma_read32(h, off as i32) as u32
 }

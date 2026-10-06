@@ -18,6 +18,10 @@
 //! second ADDBA must not overwrite the first (leaking its firmware BAID), and a
 //! DELBA for one TID must not tear down another's session.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use npk_sys::cell::Single;
+
 use crate::host;
 use crate::regs::*;
 
@@ -64,78 +68,92 @@ pub fn sn_add(sn: u16, n: u16) -> u16 {
 /// driver struct: the driver lives on the stack in `_start`, and 400 KB of
 /// buffer does not belong there. Zero-initialised .bss, so it costs nothing in
 /// the module binary.
-static mut POOL: [[u8; BA_FRAME_MAX]; BA_POOL] = [[0; BA_FRAME_MAX]; BA_POOL];
-/// Payload length per pool slot. 0 = free, and it is the only free-list we need:
-/// a decoded Ethernet frame is never shorter than its header.
-static mut POOL_LEN: [u16; BA_POOL] = [0; BA_POOL];
-/// Packet number each held frame is checked with when it goes up.
-static mut POOL_PN: [crate::pn::Pn; BA_POOL] = [crate::pn::Pn::NONE; BA_POOL];
-/// Where the next search for a free slot starts. Turns the scan into O(1)
-/// amortised without a second array to keep in step.
-static mut POOL_CURSOR: usize = 0;
+struct Store {
+    pool: [[u8; BA_FRAME_MAX]; BA_POOL],
+    /// Payload length per pool slot. 0 = free, and it is the only free-list we
+    /// need: a decoded Ethernet frame is never shorter than its header.
+    len: [u16; BA_POOL],
+    /// Packet number each held frame is checked with when it goes up.
+    pn: [crate::pn::Pn; BA_POOL],
+    /// Where the next search for a free slot starts. Turns the scan into O(1)
+    /// amortised without a second array to keep in step.
+    cursor: usize,
+    /// Window position -> pool slot, per TID. Holds `slot + 1` so that 0 means
+    /// empty: an array whose empty value is 0xffff would be 4 KB of non-zero
+    /// bytes dragged out of .bss and into the module image.
+    slot_idx: [[u16; BA_WIN_MAX]; NUM_TIDS],
+}
 
-/// Window position -> pool slot, per TID. Holds `slot + 1` so that 0 means
-/// empty: an array whose empty value is 0xffff would be 4 KB of non-zero bytes
-/// dragged out of .bss and into the module image.
-static mut SLOT_IDX: [[u16; BA_WIN_MAX]; NUM_TIDS] = [[0; BA_WIN_MAX]; NUM_TIDS];
+// `with` on it reaches `pn::deliver` and the host, never back into this file.
+static STORE: Single<Store> = Single::new(Store {
+    pool: [[0; BA_FRAME_MAX]; BA_POOL],
+    len: [0; BA_POOL],
+    pn: [crate::pn::Pn::NONE; BA_POOL],
+    cursor: 0,
+    slot_idx: [[0; BA_WIN_MAX]; NUM_TIDS],
+});
 
 /// Times the pool ran dry and a frame went up out of order instead of being
 /// held. Zero in a healthy run; anything else means the sessions are holding
 /// more than `BA_POOL` frames at once and the window outgrew its storage.
-static mut POOL_FULL: u32 = 0;
+static POOL_FULL: AtomicU32 = AtomicU32::new(0);
 
 pub fn pool_full() -> u32 {
-    // SAFETY: single-threaded module.
-    unsafe { POOL_FULL }
+    POOL_FULL.load(Ordering::Relaxed)
 }
 
 /// How many pool slots are held right now — the high-water mark is what says
 /// whether `BA_POOL` is sized right.
 pub fn pool_used() -> u32 {
-    // SAFETY: single-threaded module.
-    unsafe {
-        let lens = &*(&raw const POOL_LEN);
-        lens.iter().filter(|&&l| l != 0).count() as u32
-    }
+    STORE.with(|st| st.len.iter().filter(|&&l| l != 0).count() as u32)
 }
 
 /// Take a free pool slot, or None when every one is held.
 fn pool_alloc() -> Option<usize> {
-    // SAFETY: single-threaded module; the pool is touched only from the RX path.
-    unsafe {
-        let lens = &mut *(&raw mut POOL_LEN);
+    STORE.with(|st| {
         for k in 0..BA_POOL {
-            let i = (POOL_CURSOR + k) % BA_POOL;
-            if lens[i] == 0 {
-                POOL_CURSOR = (i + 1) % BA_POOL;
+            let i = (st.cursor + k) % BA_POOL;
+            if st.len[i] == 0 {
+                st.cursor = (i + 1) % BA_POOL;
                 return Some(i);
             }
         }
         None
-    }
+    })
 }
 
-static mut REORDER: [Reorder; NUM_TIDS] = [Reorder::NEW; NUM_TIDS];
+fn slot_used(t: usize, index: usize) -> bool {
+    STORE.with(|st| st.slot_idx[t][index] != 0)
+}
 
-/// All sessions. Free function rather than a driver field because the RX path
+/// All sessions. A free static rather than a driver field because the RX path
 /// classifies frames inside a closure that cannot also borrow the driver.
-pub fn sessions() -> &'static mut [Reorder; NUM_TIDS] {
-    // SAFETY: single-threaded WASM module; no host call re-enters the RX path.
-    unsafe { &mut *(&raw mut REORDER) }
+/// Methods of `Reorder` reach `STORE`, never this cell.
+static REORDER: Single<[Reorder; NUM_TIDS]> = Single::new([Reorder::NEW; NUM_TIDS]);
+
+/// A copy of every session, for reading.
+pub fn sessions() -> [Reorder; NUM_TIDS] {
+    REORDER.get()
 }
 
-/// The session for a TID, or None for a TID block-ack does not cover.
-pub fn by_tid(tid: u8) -> Option<&'static mut Reorder> {
+/// Run `f` on the session for a TID; None for a TID block-ack does not cover.
+pub fn with_tid<R>(tid: u8, f: impl FnOnce(&mut Reorder) -> R) -> Option<R> {
     let t = tid as usize;
     if t >= NUM_TIDS { return None; }
-    Some(&mut sessions()[t])
+    REORDER.with(|ss| Some(f(&mut ss[t])))
 }
 
-/// The session the firmware stamped this BAID with. Frames and FRAME_RELEASE
-/// notifications name the BAID, not the TID, so this is the RX-path lookup.
-pub fn by_baid(baid: u8) -> Option<&'static mut Reorder> {
+/// A copy of the session for a TID.
+pub fn by_tid(tid: u8) -> Option<Reorder> {
+    with_tid(tid, |s| *s)
+}
+
+/// Run `f` on the session the firmware stamped this BAID with. Frames and
+/// FRAME_RELEASE notifications name the BAID, not the TID, so this is the
+/// RX-path lookup.
+pub fn with_baid<R>(baid: u8, f: impl FnOnce(&mut Reorder) -> R) -> Option<R> {
     if baid == IWL_RX_REORDER_DATA_INVALID_BAID { return None; }
-    sessions().iter_mut().find(|s| s.active() && s.baid == baid)
+    REORDER.with(|ss| ss.iter_mut().find(|s| s.active() && s.baid == baid).map(f))
 }
 
 /// Sum a counter across sessions — the report shows one aggregate line.
@@ -154,9 +172,11 @@ pub fn totals() -> (u32, u32, u32, u32, u32, u16) {
 
 /// Release held frames on every session whose hole has stood too long.
 pub fn tick_all() {
-    for s in sessions().iter_mut() {
-        if s.active() { s.tick(); }
-    }
+    REORDER.with(|ss| {
+        for s in ss.iter_mut() {
+            if s.active() { s.tick(); }
+        }
+    });
 }
 
 /// One RX aggregation session, one per TID.
@@ -274,22 +294,22 @@ impl Reorder {
     fn emit_slot(&mut self, index: usize) {
         let t = self.tid as usize;
         if t >= NUM_TIDS || index >= BA_WIN_MAX { return; }
-        // SAFETY: single-threaded module; the pool and the index array are
-        // touched only here and in `store`, never across a host call that could
-        // re-enter.
-        let slot = match unsafe { SLOT_IDX[t][index] } {
-            0 => return,
-            v => (v - 1) as usize,
-        };
-        let len = unsafe { POOL_LEN[slot] } as usize;
-        unsafe {
-            SLOT_IDX[t][index] = 0;
-            POOL_LEN[slot] = 0;
+        let len = match STORE.with(|st| {
+            let slot = match st.slot_idx[t][index] {
+                0 => return None,
+                v => (v - 1) as usize,
+            };
+            let len = st.len[slot] as usize;
+            st.slot_idx[t][index] = 0;
+            st.len[slot] = 0;
             if len != 0 {
-                let pool = &*(&raw const POOL);
-                crate::pn::deliver(&pool[slot][..len], POOL_PN[slot]);
+                crate::pn::deliver(&st.pool[slot][..len], st.pn[slot]);
             }
-        }
+            Some(len)
+        }) {
+            Some(len) => len,
+            None => return,
+        };
         if len != 0 {
             self.delivered = self.delivered.wrapping_add(1);
         }
@@ -304,14 +324,11 @@ impl Reorder {
             return false;
         }
         let index = (sn as usize) % self.buf_size as usize;
-        // SAFETY: as in emit_slot.
-        unsafe {
-            if SLOT_IDX[t][index] != 0 {
-                // Slot occupied by a frame a full window away — the window has
-                // outrun itself. Release the old one rather than lose it.
-                self.emit_slot(index);
-                self.stored = self.stored.saturating_sub(1);
-            }
+        if slot_used(t, index) {
+            // Slot occupied by a frame a full window away — the window has
+            // outrun itself. Release the old one rather than lose it.
+            self.emit_slot(index);
+            self.stored = self.stored.saturating_sub(1);
         }
         // Storage is shared, so it can run out. Declining is the right answer:
         // the caller then delivers this frame straight away, out of order — the
@@ -319,19 +336,16 @@ impl Reorder {
         let slot = match pool_alloc() {
             Some(i) => i,
             None => {
-                // SAFETY: single-threaded module.
-                unsafe { POOL_FULL = POOL_FULL.wrapping_add(1) };
+                POOL_FULL.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
         };
-        // SAFETY: as in emit_slot.
-        unsafe {
-            let pool = &mut *(&raw mut POOL);
-            pool[slot][..frame.len()].copy_from_slice(frame);
-            POOL_LEN[slot] = frame.len() as u16;
-            POOL_PN[slot] = pn;
-            SLOT_IDX[t][index] = (slot + 1) as u16;
-        }
+        STORE.with(|st| {
+            st.pool[slot][..frame.len()].copy_from_slice(frame);
+            st.len[slot] = frame.len() as u16;
+            st.pn[slot] = pn;
+            st.slot_idx[t][index] = (slot + 1) as u16;
+        });
         if self.stored == 0 {
             // The clock the stall release runs on starts when a hole appears —
             // not on the last delivery. Refreshing it on every release would
@@ -366,8 +380,7 @@ impl Reorder {
         let mut ssn = self.head_sn;
         while sn_less(ssn, nssn) {
             let index = (ssn as usize) % self.buf_size as usize;
-            // SAFETY: as in emit_slot.
-            if unsafe { SLOT_IDX[t][index] } != 0 {
+            if slot_used(t, index) {
                 self.emit_slot(index);
                 self.stored = self.stored.saturating_sub(1);
             }

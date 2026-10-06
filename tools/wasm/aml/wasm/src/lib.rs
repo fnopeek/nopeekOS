@@ -29,27 +29,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-// Host functions are WASM imports from the `env` module, resolved by the
-// kernel at instantiation. Naming the module explicitly is what makes them
-// imports rather than ordinary undefined C symbols, which rust-lld rejects.
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_acpi_dsdt(buf_ptr: i32, buf_max: i32) -> i32;
-    fn npk_ec_read(addr: i32) -> i32;
-    fn npk_ec_write(addr: i32, val: i32) -> i32;
-    fn npk_ec_query() -> i32;
-    fn npk_acpi_mem_read(hi: i32, lo: i32) -> i32;
-    fn npk_battery_report(packed: i32);
-    fn npk_sci_arm(gpe: i32) -> i32;
-    fn npk_sci_service() -> i32;
-    fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
-    fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
-    fn npk_sleep(ms: i32) -> i32;
-    fn npk_ticks() -> i64;
-    fn npk_log_serial(ptr: i32, len: i32);
-    fn npk_print(ptr: i32, len: i32);
-    fn npk_sys_info(key: i32) -> i64;
-}
+use npk_sys::bump::Bump;
+use npk_sys::cell::Single;
 
 /// Log to one channel only.
 ///
@@ -58,7 +39,7 @@ unsafe extern "C" {
 /// every call, so writing to both would duplicate lines and split them at
 /// every number.
 fn log(s: &str) {
-    unsafe { npk_print(s.as_ptr() as i32, s.len() as i32) };
+    npk_sys::print(s.as_bytes());
 }
 fn logln(s: &str) { log(s); log("\n"); }
 
@@ -99,33 +80,16 @@ const WAIT_IRQ: i32 = 2;
 
 // ── bump allocator: reset to zero each tick (re-parse is fully transient) ──
 const HEAP_SIZE: usize = 16 * 1024 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static mut HEAP_POS: usize = 0;
-
-struct Bump;
-unsafe impl core::alloc::GlobalAlloc for Bump {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let pos_ptr = core::ptr::addr_of_mut!(HEAP_POS);
-        let current = unsafe { pos_ptr.read() };
-        let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-        if aligned + layout.size() > HEAP_SIZE {
-            return core::ptr::null_mut();
-        }
-        unsafe { pos_ptr.write(aligned + layout.size()) };
-        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
 #[global_allocator]
-static ALLOC: Bump = Bump;
+static ALLOC: Bump<HEAP_SIZE> = Bump::new();
 
 fn heap_reset() {
-    unsafe { core::ptr::addr_of_mut!(HEAP_POS).write(0) };
+    ALLOC.reset(0);
 }
 
 // DSDT buffer: filled once, persists across heap resets (it's not on the heap).
 const DSDT_MAX: usize = 512 * 1024;
-static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
+static DSDT: Single<[u8; DSDT_MAX]> = Single::new([0; DSDT_MAX]);
 
 /// The driver's EC access.
 ///
@@ -137,7 +101,7 @@ static mut DSDT: [u8; DSDT_MAX] = [0; DSDT_MAX];
 struct HostEc { reads: u32, fails: u32, verbose: bool }
 impl Ec for HostEc {
     fn read(&mut self, addr: u8) -> u8 {
-        let r = unsafe { npk_ec_read(addr as i32) };
+        let r = npk_sys::ec_read(addr as i32);
         self.reads += 1;
         let v = if r < 0 { self.fails += 1; 0 } else { r as u8 };
         // Log every byte read, not just the count.
@@ -151,25 +115,25 @@ impl Ec for HostEc {
         v
     }
     fn write(&mut self, addr: u8, val: u8) {
-        unsafe { npk_ec_write(addr as i32, val as i32) };
+        npk_sys::ec_write(addr as i32, val as i32);
         if self.verbose {
             lognum2("[aml]   ec.write [", addr as u32, "] <- ", val as u32);
         }
     }
     fn sleep_ms(&mut self, ms: u32) {
-        unsafe { npk_sleep(ms as i32) };
+        npk_sys::sleep(ms as i32);
     }
     fn now_ms(&mut self) -> Option<u64> {
-        Some(unsafe { npk_ticks() }.max(0) as u64)
+        Some(npk_sys::ticks().max(0) as u64)
     }
     fn mem_read(&mut self, addr: u64) -> Option<u8> {
         let hi = (addr >> 32) as u32 as i32;
         let lo = (addr & 0xFFFF_FFFF) as u32 as i32;
-        let r = unsafe { npk_acpi_mem_read(hi, lo) };
+        let r = npk_sys::acpi_mem_read(hi, lo);
         if r < 0 { None } else { Some(r as u8) }
     }
     fn query(&mut self) -> Option<u8> {
-        let q = unsafe { npk_ec_query() };
+        let q = npk_sys::ec_query();
         if q < 0 { None } else { Some(q as u8) }
     }
     fn note(&mut self, s: &str) {
@@ -201,10 +165,9 @@ pub extern "C" fn _start() {
     // Verbose trace of the first round (every region, every EC access,
     // every `_BIF` field). Off in normal operation; `set log.drivers 1`
     // enables it.
-    let loud = unsafe { npk_sys_info(50) } == 1;
+    let loud = npk_sys::sys_info(50) == 1;
 
-    let dsdt_ptr = core::ptr::addr_of_mut!(DSDT) as *mut u8;
-    let len = unsafe { npk_acpi_dsdt(dsdt_ptr as i32, DSDT_MAX as i32) };
+    let len = DSDT.with(|d| npk_sys::acpi_dsdt(d));
     lognum("[aml] DSDT bytes reported: ", len as u32);
     if len <= 0 || len as usize > DSDT_MAX {
         lognum("[aml] no DSDT, or larger than the buffer of ", DSDT_MAX as u32);
@@ -224,10 +187,10 @@ pub extern "C" fn _start() {
     // every 10 s.
     let sci_vec = {
         heap_reset();
-        let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
-        match Namespace::load(table).ok().and_then(|ns| ec_gpe(&ns)) {
+        let gpe = DSDT.with(|d| Namespace::load(&d[..table_len]).ok().and_then(|ns| ec_gpe(&ns)));
+        match gpe {
             Some(gpe) => {
-                let v = unsafe { npk_sci_arm(gpe as i32) };
+                let v = npk_sys::sci_arm(gpe as i32);
                 if v > 0 {
                     lognum("[aml] EC events by SCI, GPE ", gpe);
                 } else {
@@ -245,14 +208,14 @@ pub extern "C" fn _start() {
     // the EC raises its GPE after each of its own reads/writes too, so
     // reading the battery on every SCI would keep waking ourselves. Work
     // happens only on SCI_EVT (a real event) or when the battery is due.
-    let tsc_per_ms = (unsafe { npk_sys_info(10) } as u64).max(1) * 1000;
-    let now = || unsafe { npk_sys_info(19) } as u64;
+    let tsc_per_ms = (npk_sys::sys_info(10) as u64).max(1) * 1000;
+    let now = || npk_sys::sys_info(19) as u64;
     let mut battery_due = 0u64;
     let mut work = true;
     loop {
         if !work {
-            unsafe { npk_wait(WAIT_IRQ, 10_000) };
-            let fired = unsafe { npk_sci_service() };
+            npk_sys::wait(WAIT_IRQ, 10_000);
+            let fired = npk_sys::sci_service();
             if fired > 0 && (fired >> 16) & 0x100 != 0 {
                 logln("[aml] power button (PM1 PWRBTN_STS)");
             }
@@ -263,8 +226,7 @@ pub extern "C" fn _start() {
         battery_due = now() + 10_000 * tsc_per_ms;
         round += 1;
         heap_reset();
-        let table = unsafe { core::slice::from_raw_parts(dsdt_ptr as *const u8, table_len) };
-        let (packed, info) = decode(table, loud && round == 1);
+        let (packed, info) = DSDT.with(|d| decode(&d[..table_len], loud && round == 1));
         if packed != last {
             if packed < 0 {
                 // A battery that stops reporting is worth logging.
@@ -276,17 +238,15 @@ pub extern "C" fn _start() {
             }
             last = packed;
         }
-        unsafe { npk_battery_report(packed) };
+        npk_sys::battery_report(packed);
         // Raw values for `battery` (whole-system draw); the bar needs only
         // the percentage, a power reading needs more.
         if let Some(i) = info {
-            unsafe {
-                npk_battery_detail(i.rate as i32, i.remaining_mah as i32,
-                    i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32)
-            };
+            npk_sys::battery_detail(i.rate as i32, i.remaining_mah as i32,
+                i.full_charge_mah as i32, i.voltage_mv as i32, i.power_unit as i32);
         }
         if sci_vec <= 0 {
-            unsafe { npk_sleep(10_000) };
+            npk_sys::sleep(10_000);
         }
     }
 }

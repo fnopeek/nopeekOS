@@ -1,10 +1,13 @@
 [package]
 name = "wifi_ax200"
-version = "0.111.1"
+version = "0.111.2"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+npk_sys = { path = "../sdk/npk_sys" }
 
 [build-dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }

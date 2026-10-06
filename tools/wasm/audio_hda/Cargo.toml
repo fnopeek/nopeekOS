@@ -1,10 +1,13 @@
 [package]
 name = "audio_hda"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+npk_sys = { path = "../sdk/npk_sys" }
 
 [profile.release]
 opt-level = "s"
