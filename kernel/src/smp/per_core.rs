@@ -6,6 +6,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+use crate::hw::{msr, Mmio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreState {
@@ -160,15 +161,10 @@ static RUN_APERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 static RUN_MPERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 fn read_aperf_mperf() -> (u64, u64) {
-    // SAFETY: only called when CPUID.06H:ECX[0] says MSRs 0xE7/0xE8 exist.
-    unsafe {
-        let (a_lo, a_hi, m_lo, m_hi): (u32, u32, u32, u32);
-        core::arch::asm!("rdmsr", in("ecx") 0xE8u32, out("eax") a_lo, out("edx") a_hi,
-            options(nomem, nostack, preserves_flags));
-        core::arch::asm!("rdmsr", in("ecx") 0xE7u32, out("eax") m_lo, out("edx") m_hi,
-            options(nomem, nostack, preserves_flags));
-        (((a_hi as u64) << 32) | a_lo as u64, ((m_hi as u64) << 32) | m_lo as u64)
-    }
+    if !HAS_APERFMPERF.load(Ordering::Relaxed) { return (0, 0); }
+    // SAFETY: CPUID.06H:ECX[0] says MSRs 0xE7/0xE8 exist (checked above);
+    // reading them has no side effect.
+    unsafe { (msr::read(0xE8), msr::read(0xE7)) }
 }
 
 /// Cumulative halted TSC for `core_id`, including a halt still in progress.
@@ -334,16 +330,25 @@ static HAS_RAPL: AtomicBool = AtomicBool::new(false);
 /// an integer (ESU 16 -> 15258 nJ), so no floating point is needed.
 static RAPL_NJ_PER_UNIT: AtomicU32 = AtomicU32::new(0);
 
-/// Must run on the core being measured (rdmsr is core-local) and only when
-/// `has_rapl()` holds, else #GP.
-fn rdmsr32(msr: u32) -> u32 {
-    let lo: u32;
-    // SAFETY: the caller checked `has_rapl()`; the MSR then exists on every
-    // core of this socket.
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") _);
-    }
-    lo
+#[derive(Clone, Copy)]
+enum RaplMsr {
+    PowerUnit,
+    PkgEnergy,
+    CoreEnergy,
+}
+
+/// Low dword of a RAPL MSR, 0 without RAPL. Core-local: measures the core
+/// it runs on.
+fn rapl_read(r: RaplMsr) -> u32 {
+    if !has_rapl() { return 0; }
+    let m = match r {
+        RaplMsr::PowerUnit => MSR_AMD_RAPL_POWER_UNIT,
+        RaplMsr::PkgEnergy => MSR_AMD_PKG_ENERGY_STATUS,
+        RaplMsr::CoreEnergy => MSR_AMD_CORE_ENERGY_STATUS,
+    };
+    // SAFETY: `has_rapl()` (CPUID 0x80000007:EDX[14]) says these MSRs exist
+    // on every core of this socket; reading them has no side effect.
+    unsafe { msr::read(m) as u32 }
 }
 
 fn rapl_probe() {
@@ -364,7 +369,7 @@ fn rapl_probe() {
     if edx & (1 << 14) == 0 { return; }
     HAS_RAPL.store(true, Ordering::Release);
     // Only read after the feature check; before it this would #GP.
-    let esu = (rdmsr32(MSR_AMD_RAPL_POWER_UNIT) >> 8) & 0x1F;
+    let esu = (rapl_read(RaplMsr::PowerUnit) >> 8) & 0x1F;
     // 2^-ESU joules in nanojoules: 1e9 >> ESU. An absurd ESU (0 or > 30)
     // would give nonsense, so report no RAPL instead.
     if esu == 0 || esu > 30 {
@@ -383,13 +388,13 @@ pub fn rapl_nj_per_unit() -> u32 { RAPL_NJ_PER_UNIT.load(Ordering::Relaxed) }
 /// difference of two samples (`wrapping_sub`).
 pub fn rapl_pkg_raw() -> u32 {
     if !has_rapl() { return 0; }
-    rdmsr32(MSR_AMD_PKG_ENERGY_STATUS)
+    rapl_read(RaplMsr::PkgEnergy)
 }
 
 /// The same for the core this call runs on.
 pub fn rapl_core_raw() -> u32 {
     if !has_rapl() { return 0; }
-    rdmsr32(MSR_AMD_CORE_ENERGY_STATUS)
+    rapl_read(RaplMsr::CoreEnergy)
 }
 
 /// Milliwatts from a counter delta and a window: mW = nJ / us, so no
@@ -645,17 +650,18 @@ static APIC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64:
 /// Read current core's sequential ID via LAPIC.
 pub fn current_core_id() -> usize {
     use core::sync::atomic::Ordering::Relaxed;
-    let mut base = APIC_BASE.load(Relaxed);
-    if base == 0 {
-        let (lo, hi): (u32, u32);
-        // SAFETY: MSR 0x1B (APIC base) always readable on x86_64 ring 0.
-        unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-        base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
-        APIC_BASE.store(base, Relaxed);
-    }
-    // SAFETY: APIC MMIO is identity-mapped; offset 0x20 is the per-core
-    // APIC ID register.
-    let apic_id = unsafe { core::ptr::read_volatile((base + 0x20) as *const u32) } >> 24;
+    let base = APIC_BASE.load(Relaxed);
+    let lapic = if base == 0 {
+        let l = crate::interrupts::lapic_from_msr();
+        APIC_BASE.store(l.base(), Relaxed);
+        l
+    } else {
+        // SAFETY: `APIC_BASE` holds only bases from
+        // `interrupts::lapic_from_msr`, the xAPIC register page.
+        unsafe { Mmio::from_mapped(base, 0x1000) }
+    };
+    // The per-core APIC ID register.
+    let apic_id = lapic.r32(crate::interrupts::LAPIC_ID) >> 24;
     // An unregistered id reads as core 0.
     APIC_TO_CORE[(apic_id & 0xFF) as usize].load(Relaxed) as usize
 }
@@ -701,14 +707,14 @@ pub fn enable_hwp() -> bool {
     if eax & (1 << 7) == 0 { return false; }
 
     // Enable HWP: MSR 0x770 (IA32_PM_ENABLE) = 1
-    // SAFETY: HWP supported (checked above), ring 0
-    unsafe { core::arch::asm!("wrmsr", in("ecx") 0x770u32, in("eax") 1u32, in("edx") 0u32); }
+    // SAFETY: HWP supported (checked above); enabling it only hands
+    // P-state selection to the CPU.
+    unsafe { msr::write(0x770, 1) };
 
     // Read HWP capabilities: MSR 0x771 (IA32_HWP_CAPABILITIES)
     // [7:0]=Highest, [15:8]=Guaranteed, [23:16]=Efficient, [31:24]=Lowest
-    let cap_lo: u32;
-    // SAFETY: MSR 0x771 exists when HWP is supported
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x771u32, out("eax") cap_lo, out("edx") _); }
+    // SAFETY: MSR 0x771 exists when HWP is supported; read-only.
+    let cap_lo = unsafe { msr::read(0x771) } as u32;
     let highest = cap_lo & 0xFF;
     let lowest = (cap_lo >> 24) & 0xFF;
 
@@ -729,8 +735,9 @@ pub fn enable_hwp() -> bool {
     let hwp_req = (lowest as u32)
         | ((highest as u32) << 8)
         | (0u32 << 24);
-    // SAFETY: MSR 0x774 exists when HWP is enabled
-    unsafe { core::arch::asm!("wrmsr", in("ecx") 0x774u32, in("eax") hwp_req, in("edx") 0u32); }
+    // SAFETY: MSR 0x774 exists when HWP is enabled; min/max come from the
+    // CPU's own capabilities.
+    unsafe { msr::write(0x774, hwp_req as u64) };
 
     true
 }
@@ -754,13 +761,10 @@ pub fn amd_cstate_base() -> Option<u16> {
     let base_fam = (eax >> 8) & 0xF;
     let family = if base_fam == 0xF { base_fam + ((eax >> 20) & 0xFF) } else { base_fam };
     if family < 0x17 { return None; }
-    let (lo, _hi): (u32, u32);
     // SAFETY: MSRC001_0073 is architectural on AMD family 17h+ (PPR
-    // Core::X86::Msr::CStateBaseAddr), gated on vendor, family and bare metal.
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") 0xC001_0073u32, out("eax") lo, out("edx") _hi,
-            options(nomem, nostack, preserves_flags));
-    }
+    // Core::X86::Msr::CStateBaseAddr), gated on vendor, family and bare
+    // metal; reading it has no side effect.
+    let lo = unsafe { msr::read(0xC001_0073) } as u32;
     let base = (lo & 0xFFFF) as u16;
     if base == 0 || base > 0xFFF8 { None } else { Some(base) }
 }
@@ -916,12 +920,10 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     crate::tss::init_core();
 
     // Enable Local APIC (needed for IPI wakeup fallback)
-    let apic_base = super::read_apic_base();
-    // SAFETY: APIC MMIO is identity-mapped, each core sees its own LAPIC
-    unsafe {
-        let svr = core::ptr::read_volatile((apic_base + 0xF0) as *const u32);
-        core::ptr::write_volatile((apic_base + 0xF0) as *mut u32, svr | (1 << 8) | crate::interrupts::SPURIOUS_VECTOR as u32);
-    }
+    // Each core sees its own LAPIC.
+    let lapic = crate::interrupts::lapic_from_msr();
+    let svr = lapic.r32(crate::interrupts::LAPIC_SVR);
+    lapic.w32(crate::interrupts::LAPIC_SVR, svr | (1 << 8) | crate::interrupts::SPURIOUS_VECTOR as u32);
 
     crate::cpu_errata::apply();
 

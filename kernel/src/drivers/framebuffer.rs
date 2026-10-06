@@ -475,25 +475,37 @@ pub fn dump_memory_type() {
 /// MTRRs vs our PAT WC). A UC MTRR over this region overrides PAT WC (UC
 /// always wins) and makes the blit slow.
 fn diagnose_fb_memory_type(fb_addr: u64) {
-    // SAFETY: rdmsr on architectural MTRR/PAT MSRs, all read-only.
-    unsafe fn rdmsr(msr: u32) -> u64 {
-        let lo: u32;
-        let hi: u32;
-        // SAFETY: architectural MTRR/PAT MSRs, read-only; the caller
-        // guarantees `msr` is one of them.
-        unsafe {
-            core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-                options(nomem, nostack, preserves_flags));
+    use crate::hw::msr;
+    /// IA32_MTRRCAP; its VCNT bounds the variable-range MTRRs that exist.
+    struct MtrrCap(u64);
+    impl MtrrCap {
+        fn read() -> Self {
+            // SAFETY: MTRRs are present on every x86_64 CPU; IA32_MTRRCAP
+            // is read-only.
+            MtrrCap(unsafe { msr::read(0xFE) })
         }
-        ((hi as u64) << 32) | lo as u64
+        fn vcnt(&self) -> u32 { (self.0 & 0xFF) as u32 }
+        fn def_type(&self) -> u64 {
+            // SAFETY: IA32_MTRR_DEF_TYPE exists with MTRRs; reading it has
+            // no side effect.
+            unsafe { msr::read(0x2FF) }
+        }
+        /// (IA32_MTRR_PHYSBASEn, IA32_MTRR_PHYSMASKn).
+        fn var(&self, n: u32) -> (u64, u64) {
+            assert!(n < self.vcnt());
+            // SAFETY: the pair exists for every n below VCNT; reading it
+            // has no side effect.
+            unsafe { (msr::read(0x200 + 2 * n), msr::read(0x201 + 2 * n)) }
+        }
     }
     fn type_name(t: u8) -> &'static str {
         match t { 0 => "UC", 1 => "WC", 4 => "WT", 5 => "WP", 6 => "WB", _ => "??" }
     }
 
-    let cap = unsafe { rdmsr(0xFE) };
-    let vcnt = (cap & 0xFF) as u32;
-    let def = unsafe { rdmsr(0x2FF) };
+    let mtrr = MtrrCap::read();
+    let cap = mtrr.0;
+    let vcnt = mtrr.vcnt();
+    let def = mtrr.def_type();
     let def_type = (def & 0xFF) as u8;
     crate::kprintln!(
         "[mtrr] cap vcnt={} wc_supported={} | def_type={} mtrr_enabled={} | fb @ {:#x}",
@@ -504,8 +516,7 @@ fn diagnose_fb_memory_type(fb_addr: u64) {
     // else WT over WB, else the matching type, else the default type).
     let mut eff: Option<u8> = None;
     for n in 0..vcnt.min(16) {
-        let base = unsafe { rdmsr(0x200 + 2 * n) };
-        let mask = unsafe { rdmsr(0x201 + 2 * n) };
+        let (base, mask) = mtrr.var(n);
         if mask & (1 << 11) == 0 { continue; } // V bit clear → not valid
         let mtype = (base & 0xFF) as u8;
         let phys_base = base & 0x000F_FFFF_FFFF_F000;

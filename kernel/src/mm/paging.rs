@@ -6,8 +6,11 @@
 
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicU64, Ordering};
+use crate::hw::msr;
 use crate::memory;
 
+const IA32_EFER: u32 = 0xC000_0080;
+const IA32_PAT: u32 = 0x277;
 const ENTRY_COUNT: usize = 512;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -210,27 +213,17 @@ unsafe fn get_or_create(table_phys: u64, index: usize) -> Result<u64, PagingErro
 
 pub fn init() {
     // Enable NXE (bit 11) in EFER MSR so NO_EXECUTE flag works in page tables.
+    // SAFETY: IA32_EFER exists on every x86_64 CPU; setting NXE only makes
+    // the NX bit in page tables meaningful, and no entry uses it yet.
     unsafe {
-        let lo: u32;
-        let hi: u32;
-        core::arch::asm!("rdmsr", in("ecx") 0xC000_0080u32, out("eax") lo, out("edx") hi);
-        let efer = ((hi as u64) << 32) | (lo as u64);
-        let efer = efer | (1 << 11);
-        core::arch::asm!("wrmsr",
-            in("ecx") 0xC000_0080u32,
-            in("eax") efer as u32,
-            in("edx") (efer >> 32) as u32);
+        let efer = msr::read(IA32_EFER);
+        msr::write(IA32_EFER, efer | (1 << 11));
     }
 
     // Program PAT MSR (0x277) to add Write-Combining on index 5.
-    unsafe {
-        let pat_lo: u32 = 0x00070406;
-        let pat_hi: u32 = 0x00070106;
-        core::arch::asm!("wrmsr",
-            in("ecx") 0x277u32,
-            in("eax") pat_lo,
-            in("edx") pat_hi);
-    }
+    // SAFETY: IA32_PAT exists on every x86_64 CPU. Against the reset value
+    // only index 5 changes (WT to WC), and no mapping selects it yet.
+    unsafe { msr::write(IA32_PAT, 0x0007_0106_0007_0406) };
 
     // Build our own page tables. UEFI handed us long mode running on
     // its own PML4 — those tables are in firmware-owned memory marked

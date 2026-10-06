@@ -12,6 +12,7 @@ pub mod fiber;
 pub mod per_core;
 pub mod scheduler;
 
+use crate::hw::{Mmio, PhysView};
 use crate::kprintln;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -43,7 +44,8 @@ unsafe extern "C" {
 
 /// Initialize SMP: discover cores via MADT, boot all APs.
 pub fn init() {
-    let apic_base = read_apic_base();
+    let lapic = crate::interrupts::lapic_from_msr();
+    let apic_base = lapic.base();
     if apic_base == 0 {
         kprintln!("[npk] smp: no Local APIC");
         return;
@@ -57,7 +59,7 @@ pub fn init() {
             | crate::paging::PageFlags::NO_CACHE,
     );
 
-    let bsp_id = read_apic_id(apic_base);
+    let bsp_id = read_apic_id(lapic);
     per_core::register_bsp(bsp_id);
 
     crate::cpu_errata::apply();
@@ -80,13 +82,13 @@ pub fn init() {
         ap_ids.len() + 1, ap_ids.len());
 
     // Prepare trampoline at 0x8000
-    setup_trampoline(apic_base);
+    setup_trampoline();
 
     // Boot each AP sequentially
     let mut online = 0u32;
     for (i, &ap_apic_id) in ap_ids.iter().enumerate() {
         let core_id = (i + 1) as u32;
-        if boot_ap(apic_base, ap_apic_id, core_id) {
+        if boot_ap(lapic, ap_apic_id, core_id) {
             per_core::register_ap(ap_apic_id, core_id);
             online += 1;
         } else {
@@ -163,11 +165,7 @@ fn log_tsc_sync(online: usize) {
         // SAFETY: IA32_TSC (MSR 0x10) is architectural on x86_64 and
         // writable at CPL 0; it moves only this core's (core 0's) counter.
         // Interrupts are off, so nothing on this core sees the jump halfway.
-        unsafe {
-            core::arch::asm!("wrmsr", in("ecx") 0x10u32,
-                in("eax") now as u32, in("edx") (now >> 32) as u32,
-                options(nostack, preserves_flags));
-        }
+        unsafe { crate::hw::msr::write(0x10, now) };
     });
     let (lo2, hi2, _, _) = measure_offsets(online);
     kprintln!("[npk] tsc: core 0 moved {:+} us to join the APs — now min {:+} us, max {:+} us",
@@ -196,19 +194,9 @@ fn measure_offsets(online: usize) -> (i64, i64, usize, (i64, u64)) {
     (lo, hi, n, best)
 }
 
-/// Read Local APIC base from MSR 0x1B
-fn read_apic_base() -> u64 {
-    let (lo, hi): (u32, u32);
-    // SAFETY: MSR 0x1B is the APIC base, always readable on x86_64
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-    ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000
-}
-
 /// Read this core's APIC ID from the Local APIC register
-fn read_apic_id(apic_base: u64) -> u32 {
-    // SAFETY: APIC page is mapped, register at offset 0x20 is read-only
-    let raw = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) };
-    raw >> 24
+fn read_apic_id(lapic: Mmio) -> u32 {
+    lapic.r32(crate::interrupts::LAPIC_ID) >> 24
 }
 
 /// The GDT an AP starts long mode with: null, code (0x08), data (0x10),
@@ -220,7 +208,7 @@ static AP_BOOT_GDT: [u64; 3] = [
 ];
 
 /// Copy trampoline to 0x8000 and fill in shared data (CR3, GDT, IDT, entry)
-fn setup_trampoline(_apic_base: u64) {
+fn setup_trampoline() {
     unsafe {
         let start = &smp_trampoline_start as *const u8;
         let end = &smp_trampoline_end as *const u8;
@@ -264,7 +252,7 @@ fn setup_trampoline(_apic_base: u64) {
 }
 
 /// Boot a single AP: allocate stack, write per-AP data, send INIT-SIPI-SIPI
-fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
+fn boot_ap(lapic: Mmio, target_apic_id: u32, core_id: u32) -> bool {
     let stack_top = allocate_ap_stack();
     if stack_top == 0 {
         return false;
@@ -286,11 +274,11 @@ fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
     let vector = (TRAMPOLINE_BASE / 0x1000) as u32; // SIPI vector = page number
 
     // INIT IPI
-    send_ipi(apic_base, target_apic_id, 0x0000_4500);
+    send_ipi(lapic, target_apic_id, 0x0000_4500);
     crate::interrupts::delay_ms(10);
 
     // SIPI #1
-    send_ipi(apic_base, target_apic_id, 0x0000_4600 | vector);
+    send_ipi(lapic, target_apic_id, 0x0000_4600 | vector);
     crate::interrupts::delay_ms(1);
 
     // Check if AP started
@@ -299,7 +287,7 @@ fn boot_ap(apic_base: u64, target_apic_id: u32, core_id: u32) -> bool {
     }
 
     // SIPI #2 (spec says retry once)
-    send_ipi(apic_base, target_apic_id, 0x0000_4600 | vector);
+    send_ipi(lapic, target_apic_id, 0x0000_4600 | vector);
 
     // Wait up to 100ms
     let timeout = crate::interrupts::tsc_freq() / 10;
@@ -332,25 +320,16 @@ pub fn kick_host_core(core_id: usize) {
             None => return,
         }
     };
-    // xAPIC base (core-invariant physical address). SAFETY: MSR 0x1B always
-    // readable in ring 0; we mask to the 4 KiB-aligned base.
-    let base = {
-        let (lo, hi): (u32, u32);
-        unsafe {
-            core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi,
-                             options(nomem, nostack, preserves_flags));
-        }
-        ((hi as u64) << 32 | lo as u64) & 0xFFFF_F000
-    };
     // FIXED delivery (mode 000), level assert (bit 14), physical dest.
-    send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
+    send_ipi(crate::interrupts::lapic_from_msr(), apic_id,
+        0x0000_4000 | crate::interrupts::VCPU_KICK_VECTOR as u32);
 }
 
 /// Send the worker wake IPI to the core with xAPIC id `apic_id`.
 pub fn send_wake_ipi(apic_id: u32) {
-    let base = crate::interrupts::apic_base_any();
     // FIXED delivery, level assert, physical destination.
-    send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32);
+    send_ipi(crate::interrupts::lapic(), apic_id,
+        0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32);
 }
 
 /// Send IPI via Local APIC ICR (wait for idle first).
@@ -358,22 +337,20 @@ pub fn send_wake_ipi(apic_id: u32) {
 /// IF is masked across the two ICR writes: an ISR on this core that sends
 /// its own IPI in between would overwrite ICR-high, and the second write
 /// here would then deliver to the ISR's target.
-fn send_ipi(apic_base: u64, target_apic_id: u32, icr_low: u32) {
-    crate::interrupts::without_interrupts(|| send_ipi_masked(apic_base, target_apic_id, icr_low))
+fn send_ipi(lapic: Mmio, target_apic_id: u32, icr_low: u32) {
+    crate::interrupts::without_interrupts(|| send_ipi_masked(lapic, target_apic_id, icr_low))
 }
 
-fn send_ipi_masked(apic_base: u64, target_apic_id: u32, icr_low: u32) {
-    // SAFETY: APIC MMIO is mapped. ICR write triggers IPI.
-    unsafe {
-        // Wait for delivery status = idle
-        while core::ptr::read_volatile((apic_base + 0x300) as *const u32) & (1 << 12) != 0 {
-            core::hint::spin_loop();
-        }
-        // Destination APIC ID (bits 24-31 of ICR high)
-        core::ptr::write_volatile((apic_base + 0x310) as *mut u32, target_apic_id << 24);
-        // Command (writing ICR low triggers the IPI)
-        core::ptr::write_volatile((apic_base + 0x300) as *mut u32, icr_low);
+fn send_ipi_masked(lapic: Mmio, target_apic_id: u32, icr_low: u32) {
+    use crate::interrupts::{LAPIC_ICR_HI, LAPIC_ICR_LO};
+    // Wait for delivery status = idle
+    while lapic.r32(LAPIC_ICR_LO) & (1 << 12) != 0 {
+        core::hint::spin_loop();
     }
+    // Destination APIC ID (bits 24-31 of ICR high)
+    lapic.w32(LAPIC_ICR_HI, target_apic_id << 24);
+    // Command (writing ICR low triggers the IPI)
+    lapic.w32(LAPIC_ICR_LO, icr_low);
 }
 
 /// Allocate the per-AP stack (`AP_STACK_SIZE`). Returns stack top (grows down).
@@ -399,25 +376,30 @@ fn parse_madt(bsp_apic_id: u32) -> Vec<u32> {
         }
     };
 
-    // SAFETY: MADT is in identity-mapped memory. We validate bounds before reads.
-    let madt_len = unsafe { *((madt_addr + 4) as *const u32) } as usize;
+    // SAFETY: `find_table` returns a mapped ACPI table; its header holds
+    // the length.
+    let header = unsafe { PhysView::new(madt_addr as u64, 8) };
+    let madt_len = header.u32(4u32).unwrap_or(0) as usize;
     if madt_len < 44 || madt_len > 0x10000 {
         return ap_ids;
     }
     crate::acpi::ensure_mapped_pub(madt_addr, madt_len);
+    // SAFETY: the whole table is mapped just above; firmware tables do not
+    // change.
+    let madt = unsafe { PhysView::new(madt_addr as u64, madt_len as u64) };
 
     // Walk Interrupt Controller Structures (start at offset 44)
     let mut offset = 44;
     while offset + 2 <= madt_len {
-        let entry_type = unsafe { *((madt_addr + offset) as *const u8) };
-        let entry_len = unsafe { *((madt_addr + offset + 1) as *const u8) } as usize;
+        let entry_type = madt.u8(offset).unwrap_or(0);
+        let entry_len = madt.u8(offset + 1).unwrap_or(0) as usize;
         if entry_len < 2 || offset + entry_len > madt_len { break; }
 
         match entry_type {
             // Type 0: Processor Local APIC (8-bit APIC ID)
             0 if entry_len >= 8 => {
-                let apic_id = unsafe { *((madt_addr + offset + 3) as *const u8) } as u32;
-                let flags = unsafe { *((madt_addr + offset + 4) as *const u32) };
+                let apic_id = madt.u8(offset + 3).unwrap_or(0) as u32;
+                let flags = madt.u32(offset + 4).unwrap_or(0);
                 // bit 0 = Enabled, bit 1 = Online Capable
                 if (flags & 0x03) != 0 && apic_id != bsp_apic_id {
                     ap_ids.push(apic_id);
@@ -425,8 +407,8 @@ fn parse_madt(bsp_apic_id: u32) -> Vec<u32> {
             }
             // Type 9: Processor Local x2APIC (32-bit APIC ID, for >255 cores)
             9 if entry_len >= 16 => {
-                let x2apic_id = unsafe { *((madt_addr + offset + 4) as *const u32) };
-                let flags = unsafe { *((madt_addr + offset + 8) as *const u32) };
+                let x2apic_id = madt.u32(offset + 4).unwrap_or(0);
+                let flags = madt.u32(offset + 8).unwrap_or(0);
                 if (flags & 0x03) != 0 && x2apic_id != bsp_apic_id {
                     ap_ids.push(x2apic_id);
                 }

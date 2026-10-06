@@ -275,20 +275,22 @@ fn ensure_msi_deliverable() {
     // DMAR: ACPI header (length @4 u32), Flags @37 (1 byte). Remapping
     // structures start at +48; walk for a DRHD (type 0). Its register base is
     // at DRHD+8 (after type:2 len:2 flags:1 rsvd:1 segment:2).
-    // SAFETY: DMAR table mapped above; reads bounded by `len` (< one page).
-    let len = unsafe { core::ptr::read_volatile((dmar + 4) as *const u32) } as usize;
-    let flags = unsafe { core::ptr::read_volatile((dmar + 37) as *const u8) };
+    // SAFETY: one page of the DMAR table, mapped above; firmware tables do
+    // not change. Reads are bounded by `len` as well.
+    let t = unsafe { crate::hw::PhysView::new(dmar as u64, 4096) };
+    let len = t.u32(4u32).unwrap_or(0) as usize;
+    let flags = t.u8(37u32).unwrap_or(0);
     let scan_end = len.min(4096);
     let mut off = 48usize;
     let mut regbase = 0u64;
     while off + 4 <= scan_end {
-        let ty = unsafe { core::ptr::read_volatile((dmar + off) as *const u16) };
-        let slen = unsafe { core::ptr::read_volatile((dmar + off + 2) as *const u16) } as usize;
+        let ty = t.u16(off).unwrap_or(0);
+        let slen = t.u16(off + 2).unwrap_or(0) as usize;
         if slen == 0 {
             break;
         }
         if ty == 0 && off + 16 <= scan_end {
-            regbase = unsafe { core::ptr::read_volatile((dmar + off + 8) as *const u64) };
+            regbase = t.u64(off + 8).unwrap_or(0);
             break;
         }
         off += slen;
@@ -308,8 +310,10 @@ fn ensure_msi_deliverable() {
     );
     const GCMD: u64 = 0x18; // Global Command Register
     const GSTS: u64 = 0x1C; // Global Status Register
-    // SAFETY: VT-d remapping-hardware MMIO at the DRHD register base.
-    let gsts = unsafe { core::ptr::read_volatile((regbase + GSTS) as *const u32) };
+    // SAFETY: the DRHD register base is VT-d remapping-hardware MMIO; its
+    // page was mapped uncached above and lies in the identity map anyway.
+    let regs = unsafe { crate::hw::Mmio::from_mapped(regbase, GSTS + 4) };
+    let gsts = regs.r32(GSTS);
     let ires = (gsts >> 25) & 1; // Interrupt Remapping Enable Status
     crate::kprintln!(
         "[npk] irq: VT-d @ {:#x} GSTS={:#010x} IR={} TE={} QI={} dmar_flags={:#x}",
@@ -321,11 +325,10 @@ fn ensure_msi_deliverable() {
         // then wait for IRES to drop. Preserving TE keeps any active DMA
         // translation intact; we only turn off interrupt remapping.
         let keep = gsts & ((1 << 31) | (1 << 26) | (1 << 23));
-        // SAFETY: GCMD write per VT-d spec; only reached when IR is enabled.
-        unsafe { core::ptr::write_volatile((regbase + GCMD) as *mut u32, keep); }
+        regs.w32(GCMD, keep);
         let mut ok = false;
         for _ in 0..1_000_000u32 {
-            let s = unsafe { core::ptr::read_volatile((regbase + GSTS) as *const u32) };
+            let s = regs.r32(GSTS);
             if (s >> 25) & 1 == 0 {
                 ok = true;
                 break;

@@ -3,6 +3,8 @@
 //! A microvm guest's MSR writes stay in the guest, so the host sets these
 //! itself on every core before any guest can run there.
 
+use crate::hw::msr;
+
 const MSR_DE_CFG: u32 = 0xC001_1029;
 const DE_CFG_ZEN2_FP_BACKUP_FIX: u64 = 1 << 9;
 const MSR_ZEN2_SPECTRAL_CHICKEN: u32 = 0xC001_10E3;
@@ -14,21 +16,36 @@ fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     (r.eax, r.ebx, r.ecx, r.edx)
 }
 
-fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    // SAFETY: only called for MSRs Linux documents on Zen2 (see `apply`).
-    unsafe {
-        core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-                         options(nomem, nostack, preserves_flags));
-    }
-    ((hi as u64) << 32) | lo as u64
+/// The chicken-bit MSRs Linux `init_amd_zen2` sets.
+#[derive(Clone, Copy)]
+enum Chicken {
+    DeCfg,
+    Spectral,
 }
 
-fn wrmsr(msr: u32, v: u64) {
-    // SAFETY: read-modify-write of a Zen2 chicken bit Linux sets the same way.
-    unsafe {
-        core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
-                         options(nomem, nostack, preserves_flags));
+/// A bare-metal AMD family 17h Zen2 core; only `apply` makes one, after the
+/// check.
+struct Zen2(());
+
+impl Zen2 {
+    fn patch_level(&self) -> u32 {
+        // SAFETY: MSR_PATCH_LEVEL exists on every Zen2; reading it has no
+        // side effect.
+        unsafe { msr::read(MSR_PATCH_LEVEL) as u32 }
+    }
+
+    /// Read-modify-write one bit of a chicken MSR.
+    fn set_bit(&self, c: Chicken, bit: u64, on: bool) {
+        let m = match c {
+            Chicken::DeCfg => MSR_DE_CFG,
+            Chicken::Spectral => MSR_ZEN2_SPECTRAL_CHICKEN,
+        };
+        // SAFETY: both MSRs exist on every Zen2 (Linux `init_amd_zen2`), and
+        // flipping the bits Linux flips only changes speculation behaviour.
+        unsafe {
+            let v = msr::read(m);
+            msr::write(m, if on { v | bit } else { v & !bit });
+        }
     }
 }
 
@@ -67,15 +84,11 @@ fn zenbleed_fixed(model: u32, rev: u32) -> bool {
 pub fn apply() {
     let Some((fam, model)) = amd_family_model() else { return };
     if fam != 0x17 || !is_zen2(model) { return; }
+    let cpu = Zen2(());
     // Retbleed: suppress non-branch predictions.
-    wrmsr(MSR_ZEN2_SPECTRAL_CHICKEN, rdmsr(MSR_ZEN2_SPECTRAL_CHICKEN) | SPECTRAL_CHICKEN_BIT);
+    cpu.set_bit(Chicken::Spectral, SPECTRAL_CHICKEN_BIT, true);
     // Zenbleed: without fixed microcode the chicken bit is the mitigation —
     // otherwise vector registers leak across contexts, guest ↔ host included.
-    let rev = rdmsr(MSR_PATCH_LEVEL) as u32;
-    let de = rdmsr(MSR_DE_CFG);
-    if zenbleed_fixed(model, rev) {
-        wrmsr(MSR_DE_CFG, de & !DE_CFG_ZEN2_FP_BACKUP_FIX);
-    } else {
-        wrmsr(MSR_DE_CFG, de | DE_CFG_ZEN2_FP_BACKUP_FIX);
-    }
+    let rev = cpu.patch_level();
+    cpu.set_bit(Chicken::DeCfg, DE_CFG_ZEN2_FP_BACKUP_FIX, !zenbleed_fixed(model, rev));
 }

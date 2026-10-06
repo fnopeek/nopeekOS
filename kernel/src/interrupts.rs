@@ -1,6 +1,6 @@
 //! Interrupt Descriptor Table, exception handlers, timer and device IRQs.
 
-use crate::serial::outb;
+use crate::hw::{msr, Mmio, Port};
 use crate::kprintln;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -130,26 +130,6 @@ pub fn calibrate_tsc() {
     kprintln!("[npk] TSC: 2000 MHz (default — CPUID 0x15 + PIT both unavailable)");
 }
 
-#[inline]
-unsafe fn cal_inb(port: u16) -> u8 {
-    let v: u8;
-    // SAFETY: port I/O read; the caller picks the port (PIT calibration only).
-    unsafe {
-        core::arch::asm!("in al, dx", out("al") v, in("dx") port,
-                         options(nomem, nostack, preserves_flags));
-    }
-    v
-}
-
-#[inline]
-unsafe fn cal_outb(port: u16, val: u8) {
-    // SAFETY: port I/O write; the caller picks the port (PIT calibration only).
-    unsafe {
-        core::arch::asm!("out dx, al", in("al") val, in("dx") port,
-                         options(nomem, nostack, preserves_flags));
-    }
-}
-
 /// Measure TSC over a fixed PIT channel-2 window (no IRQs needed —
 /// polled via the timer-2 output bit in port 0x61). Channel 2 is the
 /// "speaker" timer; gating it via 0x61 starts a one-shot countdown we
@@ -157,40 +137,38 @@ unsafe fn cal_outb(port: u16, val: u8) {
 /// bare-metal AMD and QEMU/KVM. Returns the TSC frequency in Hz, or
 /// None if the PIT isn't counting / the result is implausible.
 fn pit_calibrate_tsc() -> Option<u64> {
-    // SAFETY: legacy PIT/0x61 ports, single-threaded boot context.
-    unsafe {
-        // Gate2 on, speaker off (preserve the other bits to restore).
-        let p61 = cal_inb(0x61);
-        cal_outb(0x61, (p61 & 0xFC) | 0x01);
-        // Channel 2, access lobyte+hibyte, mode 0 (terminal count),
-        // binary. Mode 0: OUT (0x61 bit 5) is low while counting,
-        // goes high at terminal count.
-        cal_outb(0x43, 0xB0);
-        // Initial count 0xFFFF → 0x10000 input clocks @ 1.193182 MHz
-        // ≈ 54.9 ms calibration window.
-        cal_outb(0x42, 0xFF);
-        cal_outb(0x42, 0xFF);
+    // Single-threaded boot context.
+    // Gate2 on, speaker off (preserve the other bits to restore).
+    let p61 = SYSTEM_CONTROL_B.inb();
+    SYSTEM_CONTROL_B.outb((p61 & 0xFC) | 0x01);
+    // Channel 2, access lobyte+hibyte, mode 0 (terminal count),
+    // binary. Mode 0: OUT (0x61 bit 5) is low while counting,
+    // goes high at terminal count.
+    PIT_COMMAND.outb(0xB0);
+    // Initial count 0xFFFF → 0x10000 input clocks @ 1.193182 MHz
+    // ≈ 54.9 ms calibration window.
+    PIT_CHANNEL2.outb(0xFF);
+    PIT_CHANNEL2.outb(0xFF);
 
-        let t0 = rdtsc();
-        let mut spins: u64 = 0;
-        while cal_inb(0x61) & 0x20 == 0 {
-            spins += 1;
-            if spins > 2_000_000_000 {
-                cal_outb(0x61, p61 & 0xFC); // gate off, restore
-                return None; // PIT not advancing
-            }
+    let t0 = rdtsc();
+    let mut spins: u64 = 0;
+    while SYSTEM_CONTROL_B.inb() & 0x20 == 0 {
+        spins += 1;
+        if spins > 2_000_000_000 {
+            SYSTEM_CONTROL_B.outb(p61 & 0xFC); // gate off, restore
+            return None; // PIT not advancing
         }
-        let t1 = rdtsc();
-        cal_outb(0x61, p61 & 0xFC); // gate off, restore original bits
+    }
+    let t1 = rdtsc();
+    SYSTEM_CONTROL_B.outb(p61 & 0xFC); // gate off, restore original bits
 
-        let cycles = t1.wrapping_sub(t0);
-        // 0x10000 PIT clocks at PIT_BASE_FREQ Hz.
-        let freq = cycles.saturating_mul(PIT_BASE_FREQ as u64) / 0x10000;
-        if (500_000_000..=10_000_000_000).contains(&freq) {
-            Some(freq)
-        } else {
-            None
-        }
+    let cycles = t1.wrapping_sub(t0);
+    // 0x10000 PIT clocks at PIT_BASE_FREQ Hz.
+    let freq = cycles.saturating_mul(PIT_BASE_FREQ as u64) / 0x10000;
+    if (500_000_000..=10_000_000_000).contains(&freq) {
+        Some(freq)
+    } else {
+        None
     }
 }
 
@@ -210,10 +188,14 @@ pub fn delay_ms(ms: u64) {
 
 // Kept next to the ports we do drive: a register map with holes in it is
 // worse than one unused constant.
+// SAFETY (all port constants in this file): the legacy PIT, system control
+// port B (speaker gate, PIT channel 2 output) and the 8259 PIC pair; this
+// module is their only driver.
 #[allow(dead_code)]
-const PIT_CHANNEL0: u16 = 0x40;
-#[allow(dead_code)]
-const PIT_COMMAND: u16 = 0x43;
+const PIT_CHANNEL0: Port = unsafe { Port::new(0x40) };
+const PIT_CHANNEL2: Port = unsafe { Port::new(0x42) };
+const PIT_COMMAND: Port = unsafe { Port::new(0x43) };
+const SYSTEM_CONTROL_B: Port = unsafe { Port::new(0x61) };
 const PIT_BASE_FREQ: u32 = 1_193_182;
 const TARGET_FREQ: u32 = 100; // 100 Hz = 10ms per tick
 
@@ -271,10 +253,11 @@ const IDT_SIZE: usize = 256;
 // SAFETY: Written exactly once in init() before sti, then only read by CPU
 static mut IDT: [IdtEntry; IDT_SIZE] = [IdtEntry::missing(); IDT_SIZE];
 
-const PIC1_CMD: u16 = 0x20;
-const PIC1_DATA: u16 = 0x21;
-const PIC2_CMD: u16 = 0xA0;
-const PIC2_DATA: u16 = 0xA1;
+// SAFETY: see the PIT port constants.
+const PIC1_CMD: Port = unsafe { Port::new(0x20) };
+const PIC1_DATA: Port = unsafe { Port::new(0x21) };
+const PIC2_CMD: Port = unsafe { Port::new(0xA0) };
+const PIC2_DATA: Port = unsafe { Port::new(0xA1) };
 const PIC_EOI: u8 = 0x20;
 const PIC_OFFSET_MASTER: u8 = 32; // IRQ0-7 → vectors 32-39
 #[allow(dead_code)] // the master's twin; the map stays complete
@@ -342,19 +325,17 @@ pub fn init() {
         // from the Local APIC timer (`init_apic_timer`). A masked, un-remapped
         // PIC delivers no IRQs, so the default 0x08-0x0F vectors never
         // collide with CPU exceptions.
-        outb(PIC1_DATA, 0xFF);
-        outb(PIC2_DATA, 0xFF);
+        PIC1_DATA.outb(0xFF);
+        PIC2_DATA.outb(0xFF);
 
         // SAFETY: IDT loaded, PIC fully masked, handlers set.
         core::arch::asm!("sti");
     }
 }
 
-unsafe fn pic_eoi(irq: u8) {
-    unsafe {
-        if irq >= 8 { outb(PIC2_CMD, PIC_EOI); }
-        outb(PIC1_CMD, PIC_EOI);
-    }
+fn pic_eoi(irq: u8) {
+    if irq >= 8 { PIC2_CMD.outb(PIC_EOI); }
+    PIC1_CMD.outb(PIC_EOI);
 }
 
 // === Exception Handlers ===
@@ -528,14 +509,14 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
     }
-    unsafe { pic_eoi(0); }
+    pic_eoi(0);
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     // Wake attribution: IRQ1 fires on the BSP (Core 0).
     crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_KEYBOARD);
     crate::keyboard::irq_handler();
-    unsafe { pic_eoi(1); }
+    pic_eoi(1);
 }
 
 /// APIC timer handler, for hardware without a PIT (UEFI-only machines).
@@ -552,10 +533,8 @@ extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
     if tick % 100 == 0 {
         crate::smp::per_core::update_core_freq(0);
     }
-    // APIC EOI: write 0 to End-of-Interrupt register
-    let apic_base = APIC_BASE.load(Ordering::Relaxed);
-    if apic_base != 0 {
-        unsafe { core::ptr::write_volatile((apic_base + 0xB0) as *mut u32, 0); }
+    if let Some(lapic) = lapic_cached() {
+        lapic.w32(LAPIC_EOI, 0);
     }
 }
 
@@ -566,15 +545,48 @@ const APIC_TIMER_VECTOR: u8 = 48;
 /// Get cached APIC base (for per-core identification via LAPIC ID register).
 pub fn apic_base() -> u64 { APIC_BASE.load(Ordering::Relaxed) }
 
-/// The xAPIC base, read from MSR 0x1B if no timer path cached it yet.
-/// Physical address is the same on every core.
-pub fn apic_base_any() -> u64 {
+const IA32_APIC_BASE: u32 = 0x1B;
+const LAPIC_LEN: u64 = 0x1000;
+// xAPIC register offsets.
+pub const LAPIC_ID: u32 = 0x20;
+const LAPIC_EOI: u32 = 0xB0;
+pub const LAPIC_SVR: u32 = 0xF0;
+pub const LAPIC_ICR_LO: u32 = 0x300;
+pub const LAPIC_ICR_HI: u32 = 0x310;
+const LAPIC_LVT_TIMER: u32 = 0x320;
+const LAPIC_TIMER_INIT: u32 = 0x380;
+const LAPIC_TIMER_CUR: u32 = 0x390;
+const LAPIC_TIMER_DIV: u32 = 0x3E0;
+
+/// The xAPIC registers named by IA32_APIC_BASE. Every core reaches its own
+/// LAPIC through the same physical page.
+pub fn lapic_from_msr() -> Mmio {
+    // SAFETY: IA32_APIC_BASE is architectural on x86_64; reading it has no
+    // side effect.
+    let base = unsafe { msr::read(IA32_APIC_BASE) } & 0xFFFF_FFFF_F000;
+    // SAFETY: the page IA32_APIC_BASE names is the xAPIC register window. It
+    // lies inside the 64 GB identity map, which `smp::init` and
+    // `init_apic_timer` remap uncached, and it never moves.
+    unsafe { Mmio::from_mapped(base, LAPIC_LEN) }
+}
+
+/// The xAPIC registers at the base cached in `APIC_BASE`, once set.
+fn lapic_cached() -> Option<Mmio> {
     let b = APIC_BASE.load(Ordering::Relaxed);
-    if b != 0 { return b; }
-    let (lo, hi): (u32, u32);
-    // SAFETY: MSR 0x1B (APIC base) is always readable in ring 0.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi) };
-    ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000
+    // SAFETY: `APIC_BASE` holds only bases from `lapic_from_msr`.
+    (b != 0).then(|| unsafe { Mmio::from_mapped(b, LAPIC_LEN) })
+}
+
+/// The xAPIC registers, from the cached base or else from the MSR.
+pub fn lapic() -> Mmio {
+    lapic_cached().unwrap_or_else(lapic_from_msr)
+}
+
+/// The xAPIC registers at the base cached in `WORKER_APIC_BASE`, once set.
+fn worker_lapic() -> Option<Mmio> {
+    let b = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    // SAFETY: `WORKER_APIC_BASE` holds only bases from `lapic_from_msr`.
+    (b != 0).then(|| unsafe { Mmio::from_mapped(b, LAPIC_LEN) })
 }
 
 // ── Per-core worker timer: one-shot to the next deadline ────────────
@@ -690,10 +702,8 @@ extern "x86-interrupt" fn worker_wake_handler(_frame: InterruptStackFrame) {
     if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
         crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     }
-    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
-        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    if let Some(lapic) = worker_lapic() {
+        lapic.w32(LAPIC_EOI, 0); // each core EOIs its own LAPIC
     }
 }
 
@@ -708,10 +718,8 @@ extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
     if CORE0_TICKLESS.load(Ordering::Relaxed) && crate::smp::per_core::current_core_id() == 0 {
         crate::smp::per_core::record_wake(0, crate::smp::per_core::WAKE_TIMER);
     }
-    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
-        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    if let Some(lapic) = worker_lapic() {
+        lapic.w32(LAPIC_EOI, 0); // each core EOIs its own LAPIC
     }
 }
 
@@ -724,10 +732,8 @@ extern "x86-interrupt" fn worker_timer_handler(_frame: InterruptStackFrame) {
 pub const VCPU_KICK_VECTOR: u8 = 51;
 
 extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
-    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: LAPIC MMIO, identity-mapped; each core EOIs its own LAPIC.
-        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    if let Some(lapic) = worker_lapic() {
+        lapic.w32(LAPIC_EOI, 0); // each core EOIs its own LAPIC
     }
 }
 
@@ -735,10 +741,8 @@ extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
 /// mode on `WORKER_TIMER_VECTOR`, nothing armed. Each AP calls it once at
 /// boot.
 pub fn init_worker_timer() {
-    let (lo, hi): (u32, u32);
-    // SAFETY: MSR 0x1B (APIC base) is always readable on x86_64 ring 0.
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-    let base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+    let lapic = lapic_from_msr();
+    let base = lapic.base();
     WORKER_APIC_BASE.store(base, Ordering::Relaxed);
     // Also publish the (core-invariant) xAPIC base for the device-IRQ ISR EOI
     // path, in case Core 0 runs on the PIT and never set APIC_BASE itself.
@@ -747,37 +751,32 @@ pub fn init_worker_timer() {
     let deadline = has_tsc_deadline();
     HAS_TSC_DEADLINE.store(deadline, Ordering::Relaxed);
 
-    // SAFETY: LAPIC MMIO regs, identity-mapped; this core's own LAPIC.
-    unsafe {
-        let b = base as *mut u8;
-        let svr = core::ptr::read_volatile(b.add(0xF0) as *const u32);
-        core::ptr::write_volatile(b.add(0xF0) as *mut u32, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
-        // Divide = 16.
-        core::ptr::write_volatile(b.add(0x3E0) as *mut u32, 0x03);
-        if WORKER_TIMER_INITIAL.load(Ordering::Relaxed) == 0 {
-            // Calibrate counts/10ms against the TSC, once — the LAPIC timer
-            // clock is the same on every core. Periodic mode for the
-            // measurement only; the counter just has to run down.
-            core::ptr::write_volatile(b.add(0x320) as *mut u32, (1 << 16) | WORKER_TIMER_VECTOR as u32);
-            let freq = TSC_FREQ.load(Ordering::Relaxed);
-            core::ptr::write_volatile(b.add(0x380) as *mut u32, 0xFFFF_FFFF);
-            let start = rdtsc();
-            let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
-            while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
-            let n = 0xFFFF_FFFFu32
-                .wrapping_sub(core::ptr::read_volatile(b.add(0x390) as *const u32))
-                .max(1);
-            WORKER_TIMER_INITIAL.store(n, Ordering::Relaxed);
-        }
-        // Stop whatever ran before, then set the mode:
-        // TSC-deadline = LVT bits 18:17 = 10b, one-shot = 00b.
-        core::ptr::write_volatile(b.add(0x380) as *mut u32, 0);
-        let mode = if deadline { 0b10 << 17 } else { 0 };
-        core::ptr::write_volatile(b.add(0x320) as *mut u32, mode | WORKER_TIMER_VECTOR as u32);
+    let svr = lapic.r32(LAPIC_SVR);
+    lapic.w32(LAPIC_SVR, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
+    // Divide = 16.
+    lapic.w32(LAPIC_TIMER_DIV, 0x03);
+    if WORKER_TIMER_INITIAL.load(Ordering::Relaxed) == 0 {
+        // Calibrate counts/10ms against the TSC, once — the LAPIC timer
+        // clock is the same on every core. Periodic mode for the
+        // measurement only; the counter just has to run down.
+        lapic.w32(LAPIC_LVT_TIMER, (1 << 16) | WORKER_TIMER_VECTOR as u32);
+        let freq = TSC_FREQ.load(Ordering::Relaxed);
+        lapic.w32(LAPIC_TIMER_INIT, 0xFFFF_FFFF);
+        let start = rdtsc();
+        let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
+        while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
+        let n = 0xFFFF_FFFFu32
+            .wrapping_sub(lapic.r32(LAPIC_TIMER_CUR))
+            .max(1);
+        WORKER_TIMER_INITIAL.store(n, Ordering::Relaxed);
     }
+    // Stop whatever ran before, then set the mode:
+    // TSC-deadline = LVT bits 18:17 = 10b, one-shot = 00b.
+    lapic.w32(LAPIC_TIMER_INIT, 0);
+    let mode = if deadline { 0b10 << 17 } else { 0 };
+    lapic.w32(LAPIC_LVT_TIMER, mode | WORKER_TIMER_VECTOR as u32);
     if deadline {
-        // SAFETY: TSC-deadline mode is supported (checked above); 0 disarms.
-        unsafe { wrmsr_deadline(0) };
+        set_tsc_deadline(0);
     }
     let cid = crate::smp::per_core::current_core_id();
     if cid < 256 {
@@ -785,15 +784,18 @@ pub fn init_worker_timer() {
     }
 }
 
-/// SAFETY: only with TSC-deadline mode supported and selected in the LVT.
-unsafe fn wrmsr_deadline(tsc: u64) {
-    // SAFETY: the SDM asks for the LVT write to be ordered before the MSR
-    // write; Linux fences the same way (`weak_wrmsr_fence`).
+/// Write IA32_TSC_DEADLINE; 0 disarms. A no-op on a CPU without
+/// TSC-deadline mode.
+fn set_tsc_deadline(tsc: u64) {
+    if !HAS_TSC_DEADLINE.load(Ordering::Relaxed) { return; }
+    // SAFETY: the fences only order: the SDM asks for the LVT write to be
+    // ordered before the MSR write, and Linux fences the same way
+    // (`weak_wrmsr_fence`). IA32_TSC_DEADLINE exists when CPUID.1:ECX[24]
+    // is set (checked above); a write only arms or disarms this core's
+    // LAPIC timer.
     unsafe {
         core::arch::asm!("mfence; lfence", options(nostack, preserves_flags));
-        core::arch::asm!("wrmsr", in("ecx") MSR_TSC_DEADLINE,
-            in("eax") tsc as u32, in("edx") (tsc >> 32) as u32,
-            options(nostack, preserves_flags));
+        msr::write(MSR_TSC_DEADLINE, tsc);
     }
 }
 
@@ -805,20 +807,20 @@ fn arm_at(deadline: u64) {
         ARMED[cid].store(deadline.max(1), Ordering::Relaxed);
     }
     if HAS_TSC_DEADLINE.load(Ordering::Relaxed) {
-        // SAFETY: mode selected by `init_worker_timer`; never 0 (= disarm).
-        unsafe { wrmsr_deadline(deadline.max(1)) };
+        // Never 0, which disarms.
+        set_tsc_deadline(deadline.max(1));
         return;
     }
-    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
+    let lapic = worker_lapic();
     let per_10ms = WORKER_TIMER_INITIAL.load(Ordering::Relaxed) as u64;
     let tsc_10ms = (TSC_FREQ.load(Ordering::Relaxed) / 100).max(1);
-    if base == 0 || per_10ms == 0 { return; }
+    let Some(lapic) = lapic else { return };
+    if per_10ms == 0 { return; }
     let delta = deadline.saturating_sub(rdtsc());
     let count = ((delta as u128 * per_10ms as u128) / tsc_10ms as u128)
         .clamp(1, u32::MAX as u128) as u32;
-    // SAFETY: this core's own LAPIC initial-count register; a write starts
-    // the one-shot countdown.
-    unsafe { core::ptr::write_volatile((base + 0x380) as *mut u32, count) };
+    // Writing the initial count starts the one-shot countdown.
+    lapic.w32(LAPIC_TIMER_INIT, count);
 }
 
 fn disarm() {
@@ -827,14 +829,11 @@ fn disarm() {
         ARMED[cid].store(0, Ordering::Relaxed);
     }
     if HAS_TSC_DEADLINE.load(Ordering::Relaxed) {
-        // SAFETY: mode selected by `init_worker_timer`; 0 disarms.
-        unsafe { wrmsr_deadline(0) };
+        set_tsc_deadline(0);
         return;
     }
-    let base = WORKER_APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: this core's own LAPIC initial-count register; 0 stops it.
-        unsafe { core::ptr::write_volatile((base + 0x380) as *mut u32, 0) };
+    if let Some(lapic) = worker_lapic() {
+        lapic.w32(LAPIC_TIMER_INIT, 0); // 0 stops it
     }
 }
 
@@ -963,8 +962,7 @@ pub const PS2_VECTOR: u8 = 53;
 pub const XHCI_VECTOR: u8 = 54;
 
 fn lapic_eoi() {
-    // SAFETY: LAPIC EOI register (xAPIC base + 0xB0), identity-mapped.
-    unsafe { core::ptr::write_volatile((apic_base_any() + 0xB0) as *mut u32, 0) };
+    lapic().w32(LAPIC_EOI, 0);
 }
 
 extern "x86-interrupt" fn ps2_irq_handler(_frame: InterruptStackFrame) {
@@ -1036,10 +1034,8 @@ fn device_irq_common(vector: u8) {
     // LAPIC EOI: write 0 to offset 0xB0. The xAPIC base is the same physical
     // address on every core; this write hits the LAPIC of the core that took
     // the interrupt (the MSI-X destination = the driver fiber's core).
-    let base = APIC_BASE.load(Ordering::Relaxed);
-    if base != 0 {
-        // SAFETY: LAPIC MMIO EOI register, identity-mapped.
-        unsafe { core::ptr::write_volatile((base + 0xB0) as *mut u32, 0); }
+    if let Some(lapic) = lapic_cached() {
+        lapic.w32(LAPIC_EOI, 0);
     }
 }
 
@@ -1076,19 +1072,7 @@ device_isrs!(
 /// Used to set an MSI-X message's destination so the IRQ wakes this core.
 /// Reads MSR 0x1B directly if `APIC_BASE` isn't cached yet.
 pub fn current_apic_id() -> u32 {
-    let base = {
-        let b = APIC_BASE.load(Ordering::Relaxed);
-        if b != 0 {
-            b
-        } else {
-            let (lo, hi): (u32, u32);
-            // SAFETY: MSR 0x1B (APIC base) is always readable in ring 0.
-            unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-            ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000
-        }
-    };
-    // SAFETY: LAPIC ID register at MMIO offset 0x20, identity-mapped.
-    unsafe { core::ptr::read_volatile((base + 0x20) as *const u32) >> 24 }
+    lapic().r32(LAPIC_ID) >> 24
 }
 
 /// Initialize Local APIC timer (for hardware without PIT).
@@ -1107,48 +1091,43 @@ pub fn init_apic_timer() {
         return; // PIT works — no APIC timer needed
     }
 
-    // Read APIC base from MSR 0x1B
-    let (lo, hi): (u32, u32);
-    unsafe { core::arch::asm!("rdmsr", in("ecx") 0x1Bu32, out("eax") lo, out("edx") hi); }
-    let apic_base = ((hi as u64) << 32 | lo as u64) & 0xFFFF_FFFF_F000;
+    let lapic = lapic_from_msr();
+    let apic_base = lapic.base();
     APIC_BASE.store(apic_base, Ordering::Relaxed);
 
     // Map APIC page (identity-mapped, uncacheable)
     let _ = crate::paging::map_page(apic_base, apic_base,
         crate::paging::PageFlags::PRESENT | crate::paging::PageFlags::WRITABLE | crate::paging::PageFlags::NO_CACHE);
 
+    // SAFETY: one IDT entry written on the BSP; the vector is not live
+    // until the LVT below names it.
     unsafe {
-        let base = apic_base as *mut u8;
-
-        // Install APIC timer handler in IDT
         IDT[APIC_TIMER_VECTOR as usize].set_handler(apic_timer_handler as *const () as u64);
-
-        // Enable APIC: set Spurious Interrupt Vector Register (offset 0xF0)
-        // Bit 8 = APIC enable, bits 0-7 = spurious vector (use 0xFF)
-        let svr = core::ptr::read_volatile(base.add(0xF0) as *const u32);
-        core::ptr::write_volatile(base.add(0xF0) as *mut u32, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
-
-        // Set timer divide = 16 (offset 0x3E0, value 0x03)
-        core::ptr::write_volatile(base.add(0x3E0) as *mut u32, 0x03);
-
-        // Calibrate: measure APIC ticks per 10ms using TSC
-        core::ptr::write_volatile(base.add(0x380) as *mut u32, 0xFFFF_FFFF); // max initial count
-        let tsc_start = rdtsc();
-        let tsc_10ms = freq / 100;
-        while rdtsc() - tsc_start < tsc_10ms { core::hint::spin_loop(); }
-        let elapsed = 0xFFFF_FFFFu32 - core::ptr::read_volatile(base.add(0x390) as *const u32);
-
-        // Set timer: periodic mode, vector APIC_TIMER_VECTOR
-        // LVT Timer Register (offset 0x320): bit 17 = periodic, bits 0-7 = vector
-        core::ptr::write_volatile(base.add(0x320) as *mut u32,
-            (1 << 17) | APIC_TIMER_VECTOR as u32);
-
-        // Set initial count (ticks per 10ms = 100Hz)
-        core::ptr::write_volatile(base.add(0x380) as *mut u32, elapsed);
-
-        crate::kdebug!("[npk] APIC timer: {}Hz (base={:#x}, ticks/10ms={})",
-            TARGET_FREQ, apic_base, elapsed);
     }
+
+    // Enable APIC: Spurious Interrupt Vector Register, bit 8 = APIC enable,
+    // bits 0-7 = spurious vector.
+    let svr = lapic.r32(LAPIC_SVR);
+    lapic.w32(LAPIC_SVR, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
+
+    // Timer divide = 16.
+    lapic.w32(LAPIC_TIMER_DIV, 0x03);
+
+    // Calibrate: measure APIC ticks per 10ms using TSC
+    lapic.w32(LAPIC_TIMER_INIT, 0xFFFF_FFFF); // max initial count
+    let tsc_start = rdtsc();
+    let tsc_10ms = freq / 100;
+    while rdtsc() - tsc_start < tsc_10ms { core::hint::spin_loop(); }
+    let elapsed = 0xFFFF_FFFFu32 - lapic.r32(LAPIC_TIMER_CUR);
+
+    // LVT timer: bit 17 = periodic, bits 0-7 = vector.
+    lapic.w32(LAPIC_LVT_TIMER, (1 << 17) | APIC_TIMER_VECTOR as u32);
+
+    // Initial count: ticks per 10ms = 100Hz.
+    lapic.w32(LAPIC_TIMER_INIT, elapsed);
+
+    crate::kdebug!("[npk] APIC timer: {}Hz (base={:#x}, ticks/10ms={})",
+        TARGET_FREQ, apic_base, elapsed);
 }
 
 fn halt_loop() -> ! {

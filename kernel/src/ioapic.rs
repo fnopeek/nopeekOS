@@ -25,6 +25,7 @@
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::hw::{Mmio, PhysView};
 use crate::kprintln;
 
 /// One I/O APIC from the MADT.
@@ -32,6 +33,8 @@ use crate::kprintln;
 struct IoApic {
     id: u8,
     base: u64,
+    /// IOREGSEL at +0, IOWIN at +0x10, EOI at +0x40 (`struct io_apic`).
+    regs: Mmio,
     gsi_base: u32,
     pins: u32,
     version: u8,
@@ -64,21 +67,19 @@ const RTE_IRR: u32 = 1 << 14;
 const RTE_LEVEL: u32 = 1 << 15;
 const RTE_MASKED: u32 = 1 << 16;
 
+const IOREGSEL: u32 = 0x00;
+const IOWIN: u32 = 0x10;
+const IOEOI: u32 = 0x40;
+const IOAPIC_LEN: u64 = IOEOI as u64 + 4;
+
 fn read(a: &IoApic, reg: u32) -> u32 {
-    // SAFETY: the I/O APIC's register window was mapped NO_CACHE in `init`;
-    // IOREGSEL at +0, IOWIN at +0x10 (`struct io_apic`).
-    unsafe {
-        core::ptr::write_volatile(a.base as *mut u32, reg);
-        core::ptr::read_volatile((a.base + 0x10) as *const u32)
-    }
+    a.regs.w32(IOREGSEL, reg);
+    a.regs.r32(IOWIN)
 }
 
 fn write(a: &IoApic, reg: u32, val: u32) {
-    // SAFETY: as in `read`.
-    unsafe {
-        core::ptr::write_volatile(a.base as *mut u32, reg);
-        core::ptr::write_volatile((a.base + 0x10) as *mut u32, val);
-    }
+    a.regs.w32(IOREGSEL, reg);
+    a.regs.w32(IOWIN, val);
 }
 
 fn read_entry(a: &IoApic, pin: u32) -> (u32, u32) {
@@ -95,8 +96,8 @@ fn write_entry(a: &IoApic, pin: u32, lo: u32, hi: u32) {
 /// `__eoi_ioapic_pin`: clear a level line's Remote-IRR.
 fn eoi_pin(a: &IoApic, pin: u32, vector: u8) {
     if a.version >= 0x20 {
-        // SAFETY: the EOI register at +0x40 exists from version 0x20 on.
-        unsafe { core::ptr::write_volatile((a.base + 0x40) as *mut u32, vector as u32) };
+        // The EOI register exists from version 0x20 on.
+        a.regs.w32(IOEOI, vector as u32);
     } else {
         // Masked and edge for a moment, then the level entry again.
         let (lo, hi) = read_entry(a, pin);
@@ -140,42 +141,42 @@ pub fn init() {
         kprintln!("[npk] ioapic: no MADT");
         return;
     };
-    // SAFETY: the MADT header is identity-mapped; length checked below.
-    let len = unsafe { *((madt + 4) as *const u32) } as usize;
+    // SAFETY: `find_table` returns a mapped ACPI table; its header holds
+    // the length.
+    let header = unsafe { PhysView::new(madt as u64, 8) };
+    let len = header.u32(4u32).unwrap_or(0) as usize;
     if !(44..=0x10000).contains(&len) {
         return;
     }
     crate::acpi::ensure_mapped_pub(madt, len);
+    // SAFETY: the whole table is mapped just above; firmware tables do not
+    // change.
+    let t = unsafe { PhysView::new(madt as u64, len as u64) };
 
     let mut apics = Vec::new();
     let mut overrides = Vec::new();
     let mut off = 44;
     while off + 2 <= len {
-        // SAFETY: inside the MADT, bounds checked by the loop and entry length.
-        let ty = unsafe { *((madt + off) as *const u8) };
-        let elen = unsafe { *((madt + off + 1) as *const u8) } as usize;
+        let ty = t.u8(off).unwrap_or(0);
+        let elen = t.u8(off + 1).unwrap_or(0) as usize;
         if elen < 2 || off + elen > len {
             break;
         }
         match ty {
             // Type 1: I/O APIC — id, reserved, address (u32), GSI base (u32).
             1 if elen >= 12 => {
-                // SAFETY: elen >= 12 covers the fields read.
-                let (id, addr, gsi_base) = unsafe {
-                    (*((madt + off + 2) as *const u8),
-                     core::ptr::read_unaligned((madt + off + 4) as *const u32),
-                     core::ptr::read_unaligned((madt + off + 8) as *const u32))
-                };
-                apics.push(IoApic { id, base: addr as u64, gsi_base, pins: 0, version: 0 });
+                let id = t.u8(off + 2).unwrap_or(0);
+                let addr = t.u32(off + 4).unwrap_or(0);
+                let gsi_base = t.u32(off + 8).unwrap_or(0);
+                apics.push(IoApic {
+                    id, base: addr as u64, regs: Mmio::empty(), gsi_base, pins: 0, version: 0,
+                });
             }
             // Type 2: Interrupt Source Override — bus, source, GSI, flags.
             2 if elen >= 10 => {
-                // SAFETY: elen >= 10 covers the fields read.
-                let (bus_irq, gsi, flags) = unsafe {
-                    (*((madt + off + 3) as *const u8),
-                     core::ptr::read_unaligned((madt + off + 4) as *const u32),
-                     core::ptr::read_unaligned((madt + off + 8) as *const u16))
-                };
+                let bus_irq = t.u8(off + 3).unwrap_or(0);
+                let gsi = t.u32(off + 4).unwrap_or(0);
+                let flags = t.u16(off + 8).unwrap_or(0);
                 if bus_irq < 16 {
                     overrides.push(Override { bus_irq, gsi, flags });
                 }
@@ -190,6 +191,10 @@ pub fn init() {
             crate::paging::PageFlags::PRESENT
                 | crate::paging::PageFlags::WRITABLE
                 | crate::paging::PageFlags::NO_CACHE);
+        // SAFETY: the MADT names this window as an I/O APIC's registers;
+        // the page was mapped NO_CACHE just above and lies inside the
+        // identity map either way.
+        a.regs = unsafe { Mmio::from_mapped(a.base, IOAPIC_LEN) };
         let r1 = read(a, 1); // IOAPIC version register
         a.version = (r1 & 0xFF) as u8;
         a.pins = ((r1 >> 16) & 0xFF) + 1;
