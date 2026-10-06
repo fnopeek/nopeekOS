@@ -98,11 +98,23 @@ pub fn draw_char(shadow: *mut u8, info: &FbInfo,
 }
 
 /// Glyph index for `c`. The Spleen tables are laid out as Latin-1, so
-/// printable ASCII and U+00A0..U+00FF have their own glyph; anything else
-/// shows as `?`. Control characters take no cell.
+/// printable ASCII and U+00A0..U+00FF have their own glyph. Common
+/// typography outside it (dashes, quotes, arrows, bullets) borrows the
+/// nearest of those; anything else shows as `?`. Control characters take
+/// no cell.
 pub fn glyph_index(c: char) -> Option<u8> {
     match c {
         ' '..='~' | '\u{A0}'..='\u{FF}' => Some(c as u32 as u8),
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => Some(b'-'),
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2032}' => Some(b'\''),
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => Some(b'"'),
+        '\u{2022}' | '\u{2027}' | '\u{2219}' | '\u{22C5}' => Some(0xB7), // ·
+        '\u{2026}' => Some(b'.'),
+        '\u{2192}' | '\u{21D2}' => Some(b'>'),
+        '\u{2190}' | '\u{21D0}' => Some(b'<'),
+        '\u{2264}' => Some(b'<'),
+        '\u{2265}' => Some(b'>'),
+        '\u{2248}' => Some(b'~'),
         c if (c as u32) < 0x20 || c == '\u{7F}' || ('\u{80}'..'\u{A0}').contains(&c) => None,
         _ => Some(b'?'),
     }
