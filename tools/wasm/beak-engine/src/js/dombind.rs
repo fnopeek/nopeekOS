@@ -88,14 +88,21 @@ pub struct DomNode {
     /// An element: its shadow root. A shadow root: its host. The root is not
     /// among the host's children and has no parent.
     pub shadow: Option<u32>,
+    /// Shown states without an attribute: `UI_POPOVER_OPEN`, `UI_MODAL`.
+    pub ui: u8,
+    /// Custom states (`ElementInternals.states`, `:state()`).
+    pub states: Vec<Rc<str>>,
 }
+
+pub const UI_POPOVER_OPEN: u8 = 1;
+pub const UI_MODAL: u8 = 2;
 
 impl DomNode {
     fn new(kind: f64, tag: &str) -> DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
                   parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
                   handlers: Vec::new(), content: None, value: None, checked: None,
-                  seq: 0, src_seq: 0, ce: CE_NONE, shadow: None }
+                  seq: 0, src_seq: 0, ce: CE_NONE, shadow: None, ui: 0, states: Vec::new() }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -868,95 +875,51 @@ pub fn inline_scripts(d: &Doc) -> Vec<String> {
 
 // ── Selectors ───────────────────────────────────────────────────────────────
 //
-// A small matcher of its own, not the one in `css.rs`, which works on
-// beak's `Element` rather than the arena. Covers `tag`, `#id`, `.class`,
-// `[attr]`, `[attr=value]` in any combination, descendant (space), child
-// (`>`) and lists (`,`). Anything unsupported does not match, rather than
-// matching wrongly.
+// `js::qsel` parses and matches on the arena. An invalid selector throws
+// `SyntaxError` (DOM §4.2.6 "scope-match a selectors string").
 
-fn matches_simple(d: &Doc, id: u32, sel: &str) -> bool {
-    let n = &d.nodes[id as usize];
-    if n.kind != ELEMENT_NODE { return false; }
-    let mut rest = sel.trim();
-    if rest == "*" { return true; }
-    // Leading type selector.
-    let tag_end = rest.find(['.', '#', '[']).unwrap_or(rest.len());
-    if tag_end > 0 {
-        if !n.tag.eq_ignore_ascii_case(&rest[..tag_end]) { return false; }
-        rest = &rest[tag_end..];
-    }
-    while !rest.is_empty() {
-        let c = rest.as_bytes()[0];
-        let end = rest[1..].find(['.', '#', '[']).map(|i| i + 1).unwrap_or(rest.len());
-        let part = &rest[1..end];
-        match c {
-            b'#' => if n.attr("id").map(|v| &**v) != Some(part) { return false; },
-            b'.' => if !d.classes(id).iter().any(|k| &**k == part) { return false; },
-            b'[' => {
-                let inner = part.trim_end_matches(']');
-                let (k, v) = match inner.split_once('=') {
-                    Some((k, v)) => (k, Some(v.trim_matches(['"', '\'']))),
-                    None => (inner, None),
-                };
-                match (n.attr(k), v) {
-                    (None, _) => return false,
-                    (Some(av), Some(want)) if &**av != want => return false,
-                    _ => {}
-                }
-            }
-            _ => return false,
-        }
-        rest = &rest[end..];
-    }
-    true
+/// Parse a selector for the DOM API, or the exception to throw.
+fn parse_selector(i: &mut Interp, s: &str) -> C<super::qsel::SelList> {
+    super::qsel::parse(s).map_err(|e| dom_exc(i, "SyntaxError",
+        &alloc::format!("'{s}' is not a valid selector: {e}")))
 }
 
-/// A compound selector, checked right to left, because the rightmost part
-/// already fixes the candidate.
-fn matches_compound(d: &Doc, id: u32, sel: &str) -> bool {
-    let mut parts: Vec<(&str, char)> = Vec::new();
-    let mut comb = ' ';
-    for tok in sel.split_whitespace() {
-        if tok == ">" { comb = '>'; continue; }
-        if let Some(t) = tok.strip_prefix('>') {
-            parts.push((t, '>'));
-            comb = ' ';
-            continue;
-        }
-        parts.push((tok, comb));
-        comb = ' ';
-    }
-    if parts.is_empty() { return false; }
-    let (last, _) = parts.pop().unwrap();
-    if !matches_simple(d, id, last) { return false; }
-    let mut cur = d.nodes[id as usize].parent;
-    while let Some((p, c)) = parts.pop() {
-        let mut found = None;
-        while let Some(x) = cur {
-            if matches_simple(d, x, p) { found = Some(x); break; }
-            if c == '>' { return false; }
-            cur = d.nodes[x as usize].parent;
-        }
-        match found { Some(x) => cur = d.nodes[x as usize].parent, None => return false }
-    }
-    true
+/// The fragment of the document URL, for `:target`.
+fn url_fragment(i: &Interp) -> String {
+    i.loc_href.split_once('#').map(|(_, f)| f.to_string()).unwrap_or_default()
 }
 
+/// Does `id` match `sel`, with `scope` as `:scope`?
+fn sel_matches(i: &Interp, sel: &super::qsel::SelList, id: u32, scope: Option<u32>) -> bool {
+    let Some(d) = &i.doc else { return false };
+    let target = url_fragment(i);
+    let cx = super::qsel::Ctx { d, scope, target: &target };
+    sel.matches(&cx, id)
+}
+
+/// The elements below `from` that match, in tree order.
+fn sel_query(i: &Interp, sel: &super::qsel::SelList, from: u32, first_only: bool) -> Vec<u32> {
+    let Some(d) = &i.doc else { return Vec::new() };
+    let target = url_fragment(i);
+    // On the document `:scope` is the root element; on an element, itself.
+    let scope = if from == d.doc { d.html } else { Some(from) };
+    let cx = super::qsel::Ctx { d, scope, target: &target };
+    super::qsel::query_all(&cx, from, sel, first_only)
+}
+
+/// Selector matching for callers without an interpreter. An invalid
+/// selector matches nothing.
 pub fn selector_match(d: &Doc, id: u32, sel: &str) -> bool {
-    sel.split(',').any(|s| { let s = s.trim(); !s.is_empty() && matches_compound(d, id, s) })
+    let Ok(l) = super::qsel::parse(sel) else { return false };
+    let cx = super::qsel::Ctx { d, scope: Some(id), target: "" };
+    l.matches(&cx, id)
 }
 
 pub fn query(d: &Doc, from: u32, sel: &str, all: bool) -> Vec<u32> {
-    let mut cands = Vec::new();
-    d.descendants(from, &mut cands);
-    let mut out = Vec::new();
-    for c in cands {
-        if selector_match(d, c, sel) {
-            out.push(c);
-            if !all { break; }
-        }
-    }
-    out
+    let Ok(l) = super::qsel::parse(sel) else { return Vec::new() };
+    let scope = if from == d.doc { d.html } else { Some(from) };
+    let cx = super::qsel::Ctx { d, scope, target: "" };
+    super::qsel::query_all(&cx, from, &l, !all)
 }
 
 // ── The JS side ─────────────────────────────────────────────────────────────
@@ -2957,7 +2920,8 @@ pub fn install(realm: &mut Realm) {
     meth(&element_proto, "matches", |i, t, a| {
         let id = node_of(i, &t)?;
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(Value::Bool(i.doc.as_ref().is_some_and(|d| selector_match(d, id, &s))))
+        let sel = parse_selector(i, &s)?;
+        Ok(Value::Bool(sel_matches(i, &sel, id, Some(id))))
     }, 1, &fp);
     meth(&element_proto, "remove", |i, t, _| {
         let id = node_of(i, &t)?;
@@ -3254,13 +3218,15 @@ pub fn install(realm: &mut Realm) {
         meth(target, "querySelector", |i, t, a| {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let found = i.doc.as_ref().map(|d| query(d, id, &s, false)).unwrap_or_default();
+            let sel = parse_selector(i, &s)?;
+            let found = sel_query(i, &sel, id, true);
             Ok(match found.first() { Some(&x) => wrap(i, x), None => Value::Null })
         }, 1, &fp);
         meth(target, "querySelectorAll", |i, t, a| {
             let id = node_of(i, &t)?;
             let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-            let found = i.doc.as_ref().map(|d| query(d, id, &s, true)).unwrap_or_default();
+            let sel = parse_selector(i, &s)?;
+            let found = sel_query(i, &sel, id, false);
             Ok(nodes_array(i, found))
         }, 1, &fp);
         meth(target, "getElementsByTagName", |i, t, a| {
@@ -3449,10 +3415,12 @@ pub fn install(realm: &mut Realm) {
             else { "http://www.w3.org/1999/xhtml" })))
     }, &fp);
     meth(&element_proto, "closest", |i, t, a| {
-        let sel = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let mut id = Some(node_of(i, &t)?);
+        let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let sel = parse_selector(i, &s)?;
+        let me = node_of(i, &t)?;
+        let mut id = Some(me);
         while let Some(x) = id {
-            let hit = i.doc.as_ref().is_some_and(|d| selector_match(d, x, &sel));
+            let hit = sel_matches(i, &sel, x, Some(me));
             if hit { return Ok(wrap(i, x)) }
             let Some(d) = &i.doc else { break };
             id = d.nodes[x as usize].parent;
