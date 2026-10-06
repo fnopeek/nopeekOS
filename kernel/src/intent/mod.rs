@@ -2384,6 +2384,21 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        // Deliberate kernel panic, to check that every core stops and the
+        // message reaches the screen and COM1: `panic` here, `panic <n>` on
+        // core n.
+        "panic" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "panic") {
+                match args.trim().parse::<usize>() {
+                    Ok(core) if core > 0 => {
+                        kprintln!("[npk] panic: on core {}", core);
+                        crate::smp::fiber::admit(core, |c| panic!("requested on core {}", c), core as u64);
+                    }
+                    _ => panic!("requested from the shell"),
+                }
+            }
+        }
+
         "update" | "upgrade" => {
             if require_cap(vault, &session, Rights::EXECUTE, "update") {
                 update::intent_update(args);

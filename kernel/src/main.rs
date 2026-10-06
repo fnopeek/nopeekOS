@@ -49,6 +49,7 @@ mod intent;
 mod config;
 mod vga;
 mod hw;
+mod fatal;
 mod forge_rt;
 mod forge_tests;
 mod wasm;
@@ -610,13 +611,9 @@ fn text_mode_auth() {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    kprintln!();
-    kprintln!("[npk] !!! KERNEL PANIC !!!");
-    if let Some(location) = info.location() {
-        kprintln!("[npk] at {}:{}", location.file(), location.line());
-    }
-    kprintln!("[npk] {}", info.message());
-    loop {
-        unsafe { core::arch::asm!("cli; hlt"); }
+    match info.location() {
+        Some(l) => crate::fatal::die(format_args!("KERNEL PANIC !!!\n[npk] at {}:{}\n[npk] {}",
+            l.file(), l.line(), info.message())),
+        None => crate::fatal::die(format_args!("KERNEL PANIC !!!\n[npk] {}", info.message())),
     }
 }

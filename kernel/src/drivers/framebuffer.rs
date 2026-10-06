@@ -262,6 +262,7 @@ pub fn init_from_gpu() {
 
     // Initialize cached pointer for lock-free cursor
     SHADOW_FRONT_CACHED.store(shadow, Ordering::Release);
+    crate::fatal::set_framebuffer(info.addr, info.pitch, info.width, info.height, info.bpp);
 
     *CONSOLE.lock() = Some(FbConsole {
         info, shadow, shadow_b, shadow_size, front: 0,

@@ -1,5 +1,6 @@
 //! Interrupt Descriptor Table, exception handlers, timer and device IRQs.
 
+use core::fmt::Write as _;
 use crate::hw::{msr, Mmio, Port};
 use crate::kprintln;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -344,19 +345,20 @@ fn pic_eoi(irq: u8) {
 // wasm. Named for the assembler, which cannot see through Rust's mangling.
 #[unsafe(no_mangle)]
 extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
-    kprintln!();
-    kprintln!("[npk] !!! DIVIDE ERROR (INT 0) !!!");
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-    halt_loop();
+    crate::fatal::die(format_args!("DIVIDE ERROR (INT 0) !!!\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}",
+        frame.instruction_pointer, frame.stack_pointer));
 }
 
-/// NMIs the kernel does not raise itself. They reach the host when a guest is
+/// NMIs other than the panic stop. They reach the host when a guest is
 /// interrupted (SVM intercepts NMI) or from firmware. Counted, not printed —
 /// an NMI may land while the console lock is held.
 pub static NMI_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+/// A panicking core stops the others with an NMI (`fatal::begin`).
 extern "x86-interrupt" fn nmi_handler(_frame: InterruptStackFrame) {
+    if crate::fatal::is_panicking() {
+        crate::fatal::halt();
+    }
     NMI_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
@@ -366,11 +368,8 @@ extern "x86-interrupt" fn breakpoint_handler(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
-    kprintln!();
-    kprintln!("[npk] !!! INVALID OPCODE (INT 6) !!!");
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-    halt_loop();
+    crate::fatal::die(format_args!("INVALID OPCODE (INT 6) !!!\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}",
+        frame.instruction_pointer, frame.stack_pointer));
 }
 
 /// Run the double-fault handler on the IST stack from `tss::init_core`.
@@ -395,21 +394,14 @@ extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}
 macro_rules! fatal_exception {
     ($name:ident, $vec:literal, $what:literal) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
-            kprintln!();
-            kprintln!(concat!("[npk] !!! ", $what, " (INT ", $vec, ") !!!"));
-            kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-            kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-            halt_loop();
+            crate::fatal::die(format_args!(concat!($what, " (INT ", $vec, ") !!!\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}"),
+                frame.instruction_pointer, frame.stack_pointer));
         }
     };
     ($name:ident, $vec:literal, $what:literal, error_code) => {
         extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
-            kprintln!();
-            kprintln!(concat!("[npk] !!! ", $what, " (INT ", $vec, ") !!!"));
-            kprintln!("[npk] Error code: {:#x}", error_code);
-            kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-            kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-            halt_loop();
+            crate::fatal::die(format_args!(concat!($what, " (INT ", $vec, ") !!!\n[npk] Error code: {:#x}\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}"),
+                error_code, frame.instruction_pointer, frame.stack_pointer));
         }
     };
 }
@@ -422,34 +414,26 @@ fatal_exception!(alignment_check_handler, 17, "ALIGNMENT CHECK", error_code);
 fatal_exception!(simd_fp_handler, 19, "SIMD FLOATING-POINT EXCEPTION");
 
 extern "x86-interrupt" fn machine_check_handler(frame: InterruptStackFrame) -> ! {
-    kprintln!();
-    kprintln!("[npk] !!! MACHINE CHECK (INT 18) !!!");
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    halt_loop();
+    crate::fatal::die(format_args!("MACHINE CHECK (INT 18) !!!\n[npk] RIP: {:#018x}", frame.instruction_pointer));
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
-    kprintln!();
-    kprintln!("[npk] !!! DOUBLE FAULT (INT 8) !!!");
+    let Some(mut w) = crate::fatal::begin() else { crate::fatal::halt() };
     let cr2: u64;
     // SAFETY: reads CR2, which holds the address of the last page fault.
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags)) };
+    let _ = writeln!(w, "DOUBLE FAULT (INT 8) !!!");
     if crate::mm::stack::is_guard(cr2) {
-        kprintln!("[npk] kernel stack overflow: guard page {:#018x} hit", cr2);
+        let _ = writeln!(w, "[npk] kernel stack overflow: guard page {:#018x} hit", cr2);
     }
-    kprintln!("[npk] Error code: {:#x}", error_code);
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-    halt_loop();
+    let _ = writeln!(w, "[npk] Error code: {:#x}\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}",
+        error_code, frame.instruction_pointer, frame.stack_pointer);
+    crate::fatal::halt()
 }
 
 extern "x86-interrupt" fn gp_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    kprintln!();
-    kprintln!("[npk] !!! GENERAL PROTECTION FAULT (INT 13) !!!");
-    kprintln!("[npk] Error code: {:#x}", error_code);
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
-    halt_loop();
+    crate::fatal::die(format_args!("GENERAL PROTECTION FAULT (INT 13) !!!\n[npk] Error code: {:#x}\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}",
+        error_code, frame.instruction_pointer, frame.stack_pointer));
 }
 
 #[unsafe(no_mangle)]
@@ -458,12 +442,9 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
     // SAFETY: Reading CR2 is side-effect-free
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2); }
 
-    kprintln!();
-    kprintln!("[npk] !!! PAGE FAULT (INT 14) !!!");
-    kprintln!("[npk] Faulting address: {:#018x}", cr2);
-    kprintln!("[npk] Error code: {:#x}", error_code);
-    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
-    kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
+    let Some(mut w) = crate::fatal::begin() else { crate::fatal::halt() };
+    let _ = writeln!(w, "PAGE FAULT (INT 14) !!!\n[npk] Faulting address: {:#018x}\n[npk] Error code: {:#x}\n[npk] RIP: {:#018x}\n[npk] RSP: {:#018x}",
+        cr2, error_code, frame.instruction_pointer, frame.stack_pointer);
 
     // Best-effort backtrace: scan the stack for words that look like return
     // addresses into kernel code (link base 0x1000_0000 .. ~+8 MB). The PIE
@@ -472,7 +453,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
     // is inside the identity-mapped range so the scan itself can't fault.
     let rsp = frame.stack_pointer;
     if rsp >= 0x10_0000 && rsp < 0x10_0000_0000 {
-        kprintln!("[npk] stack trace (return addrs in kernel code):");
+        let _ = writeln!(w, "[npk] stack trace (return addrs in kernel code):");
         let mut p = rsp;
         let mut printed = 0;
         let mut scanned = 0;
@@ -481,14 +462,14 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
             // so this read cannot page-fault (re-entry would triple-fault).
             let v = unsafe { core::ptr::read_volatile(p as *const u64) };
             if v >= 0x1000_0000 && v < 0x1080_0000 {
-                kprintln!("[npk]   {:#018x}", v);
+                let _ = writeln!(w, "[npk]   {:#018x}", v);
                 printed += 1;
             }
             p += 8;
             scanned += 1;
         }
     }
-    halt_loop();
+    crate::fatal::halt()
 }
 
 // === IRQ Handlers ===
@@ -1130,8 +1111,3 @@ pub fn init_apic_timer() {
         TARGET_FREQ, apic_base, elapsed);
 }
 
-fn halt_loop() -> ! {
-    loop {
-        unsafe { core::arch::asm!("cli; hlt"); }
-    }
-}

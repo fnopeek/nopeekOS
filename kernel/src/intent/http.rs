@@ -505,7 +505,7 @@ fn url_basename(url_path: &str) -> Option<String> {
 /// Status + Location of a single HTTPS round-trip. Body bytes are
 /// not carried in this struct — `https_get_once` always pushes them
 /// through the caller's sink closure as they arrive (`https_get`
-/// installs a Vec-collecting sink, `https_get_streaming` passes the
+/// installs a Vec-collecting sink, `https_get_streaming_resumable` passes the
 /// caller's sink through directly).
 struct HttpResponse {
     status: u16,
@@ -747,7 +747,7 @@ pub struct FetchInfo {
 /// Reusable HTTPS GET — returns the response body as Vec<u8>.
 ///
 /// Suitable for small responses (manifests, signatures, JSON, < ~32 MB
-/// configs). For large downloads use [`https_get_streaming`] instead —
+/// configs). For large downloads use [`https_get_streaming_resumable`] instead —
 /// this function buffers the entire body in heap and will OOM the
 /// kernel on multi-GB inputs.
 ///
@@ -931,28 +931,7 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
     Err("too many redirects")
 }
 
-/// Streaming HTTPS GET — drives body bytes through `on_chunk` as they
-/// arrive, never buffering the full payload in memory. The caller
-/// chooses where the bytes go (typical: `npkfs::open_streaming_write`
-/// then `writer.write(chunk)`).
-///
-/// Returns the total number of body bytes pushed to the sink. Follows
-/// up to 3 redirects, same rules as [`https_get`].
-///
-/// On non-2xx (other than a 3xx that's followed), the sink is not
-/// called and an error is returned, so a half-failed download
-/// never feeds garbage into the consumer.
-pub fn https_get_streaming(
-    host: &str,
-    path: &str,
-    max_size: usize,
-    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
-) -> Result<usize, &'static str> {
-    // OTA: the payload is already compressed and signed, so no gzip.
-    https_get_streaming_ex(host, path, max_size, on_chunk, None, &HttpRequest::default())
-}
-
-/// As [`https_get_streaming`], but also reports what the caller needs to
+/// A streaming GET that also reports what the caller needs to
 /// interpret the bytes — see [`FetchInfo`].
 ///
 /// A browser resolves a document's relative URLs against the *final*

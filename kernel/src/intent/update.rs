@@ -590,7 +590,7 @@ fn apply_asset(job: &AssetJob) -> bool {
 
         // Two URL paths:
         //   (a) entry.url == Some(url)  → fetch verbatim (GitHub Releases).
-        //       `https_get_streaming` follows 302 redirects so
+        //       `https_get_streaming_resumable` follows 302 redirects so
         //       `github.com/.../releases/download/...` → the signed
         //       `objects.githubusercontent.com` CDN URL works transparently.
         //   (b) entry.url == None       → fall back to raw.githubusercontent
