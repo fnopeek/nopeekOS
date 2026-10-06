@@ -40,6 +40,10 @@ pub struct Element {
     /// separately in `ElemState`.
     pub checked_attr: bool,
     pub disabled_attr: bool,
+    /// Matches `:defined` (HTML §4.16.3): false for a custom element name
+    /// that has not been upgraded. Set by the parser and by
+    /// `js::dombind::Doc::to_dom`.
+    pub defined: bool,
 }
 
 impl Element {
@@ -59,6 +63,7 @@ impl Element {
             bloom: [0; 4],
             checked_attr: false,
             disabled_attr: false,
+            defined: true,
         }
     }
 
@@ -191,6 +196,7 @@ pub fn parse(html: &str) -> Dom {
 
             seq += 1;
             let mut el = Element::new(name.clone(), seq);
+            el.defined = !valid_custom_element_name(&name);
             parse_attrs(&raw, &mut el.attrs);
             // Foreign content keeps its case (see `svg::adjust_tag_name`). The
             // stack walk only runs on a document that has an <svg> in it at
@@ -422,16 +428,33 @@ fn skip_bogus(bytes: &[u8], start: usize) -> usize {
     bytes.len()
 }
 
-/// Lowercased tag name after an optional leading `/`.
+/// A valid custom element name (HTML §4.13.2): a lowercase ASCII letter
+/// first, a hyphen somewhere, no ASCII uppercase, and not one of the names
+/// SVG and MathML reserve.
+pub fn valid_custom_element_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else { return false };
+    if !first.is_ascii_lowercase() || !name.contains('-') { return false }
+    let pcen = |c: char| matches!(c, '-' | '.' | '_' | '0'..='9' | 'a'..='z' | '\u{B7}'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}' | '\u{200C}' | '\u{200D}' | '\u{203F}' | '\u{2040}'
+        | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' | '\u{10000}'..='\u{EFFFF}');
+    if !name.chars().all(pcen) { return false }
+    !matches!(name, "annotation-xml" | "color-profile" | "font-face" | "font-face-src"
+        | "font-face-uri" | "font-face-format" | "font-face-name" | "missing-glyph")
+}
+
+/// Tag name after an optional leading `/`: everything up to whitespace, `/`
+/// or the end of the tag, ASCII-lowercased (HTML §13.2.5.8). Custom element
+/// names (`x-foo`) depend on the hyphen staying part of the name.
 fn tag_name(raw: &str) -> String {
-    let raw = raw.trim_start_matches('/').trim_start();
+    let raw = raw.strip_prefix('/').unwrap_or(raw);
     let mut name = String::new();
     for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || (name.is_empty() && ch.is_ascii_alphabetic()) {
-            name.push(ch.to_ascii_lowercase());
-        } else {
+        if ch.is_ascii_whitespace() || ch == '/' || ch == '>' {
             break;
         }
+        name.push(ch.to_ascii_lowercase());
     }
     name
 }
@@ -760,6 +783,16 @@ mod tests {
     fn comments_skip_even_with_inner_markup() {
         let dom = parse("<body><p>before</p><!-- <li><a>x</a> --><p>after</p></body>");
         assert_eq!(child_tags(dom.body()), ["p", "p"]);
+    }
+
+    #[test]
+    fn tag_names_keep_hyphens_and_other_characters() {
+        let dom = parse("<body><x-foo-bar a-b=1><my_el.v2>t</my_el.v2></x-foo-bar>\
+            <relative-time/></body>");
+        assert_eq!(child_tags(dom.body()), ["x-foo-bar", "relative-time"]);
+        let x = as_el(&dom.body().children[0]);
+        assert_eq!(x.attr("a-b"), Some("1"));
+        assert_eq!(child_tags(x), ["my_el.v2"]);
     }
 
     fn as_el(n: &Node) -> &Element {

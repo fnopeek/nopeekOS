@@ -256,6 +256,19 @@ impl Interp {
             // is being constructed; `HTMLElement` reads the registered name
             // from the prototype chain.
             let built = self.construct_on(&ctor, this_val.clone(), args)?;
+            // A builtin that honoured the new target already returns the finished
+            // object (`HTMLElement` hands out the element itself, which an upgrade
+            // must keep); it becomes `this` as is.
+            if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
+                let same = match (&src.borrow().proto, &dst.borrow().proto) {
+                    (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                    _ => false,
+                };
+                if same && !Rc::ptr_eq(src, dst) {
+                    set_env_this(env, built.clone());
+                    return self.finish_super(env, built);
+                }
+            }
             if let (Value::Obj(src), Value::Obj(dst)) = (&built, &this_val) {
                 let keys = src.borrow().raw_keys();
                 for k in keys {
@@ -464,10 +477,24 @@ impl Interp {
         if let ObjKind::Native(n) = &fo.borrow().kind {
             if !n.ctor { return Err(self.not_a_constructor(f)); }
             let nf = n.clone();
+            // With a separate new target the builtin learns the class through the
+            // receiver, as with `super()`, and the result gets its prototype
+            // (GetPrototypeFromConstructor).
+            let nt_proto = match nt {
+                Some(ntv) => match self.get(ntv, "prototype")? { Value::Obj(p) => Some(p), _ => None },
+                None => None,
+            };
+            let recv = match (&recv, &nt_proto) {
+                (Value::Undefined, Some(p)) => Value::Obj(new_obj(Some(p.clone()))),
+                _ => recv,
+            };
             let was = self.native_new;
             self.native_new = true;
             let r = (nf.func)(self, recv, args);
             self.native_new = was;
+            if let (Ok(Value::Obj(o)), Some(p)) = (&r, &nt_proto) {
+                o.borrow_mut().proto = Some(p.clone());
+            }
             return r;
         }
         if !self.is_constructor(f) { return Err(self.not_a_constructor(f)); }

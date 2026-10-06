@@ -81,6 +81,13 @@ pub struct DomNode {
     /// `0` means no source node: an element created by script. For those
     /// `getComputedStyle` can only answer from the inline style.
     pub src_seq: u32,
+    /// Custom element state (HTML §4.13.4), one of the `CE_*` constants.
+    /// `CE_NONE` means "undefined" for a valid custom element name and
+    /// "uncustomized" for any other.
+    pub ce: u8,
+    /// An element: its shadow root. A shadow root: its host. The root is not
+    /// among the host's children and has no parent.
+    pub shadow: Option<u32>,
 }
 
 impl DomNode {
@@ -88,7 +95,7 @@ impl DomNode {
         DomNode { kind, tag: Rc::from(tag), attrs: Vec::new(), text: Rc::from(""),
                   parent: None, children: Vec::new(), js: None, listeners: Vec::new(),
                   handlers: Vec::new(), content: None, value: None, checked: None,
-                  seq: 0, src_seq: 0 }
+                  seq: 0, src_seq: 0, ce: CE_NONE, shadow: None }
     }
     pub fn attr(&self, k: &str) -> Option<&Rc<str>> {
         self.attrs.iter().find(|(n, _)| &**n == k).map(|(_, v)| v)
@@ -166,6 +173,25 @@ pub struct Doc {
     /// The observed nodes as `(node, subtree)`, in the bit order of
     /// `Mutation::hits`. The tree need not know who observes, only where.
     pub observed: Vec<(u32, bool)>,
+    /// Is any custom element defined? Until one is, nothing is queued.
+    pub ce_on: bool,
+    /// Custom element reactions caused by tree changes, run by `ce_flush`
+    /// before control returns to script.
+    pub ce_queue: Vec<CeEvent>,
+}
+
+/// A tree change a custom element may have to react to.
+#[derive(Clone)]
+pub enum CeEvent {
+    /// The subtree entered the document: upgrade, then `connectedCallback`.
+    Inserted(u32),
+    /// The subtree left the document: `disconnectedCallback`.
+    Removed(u32),
+    /// The subtree was created outside the document (`innerHTML` on a
+    /// detached element, `cloneNode`): upgrade only.
+    Created(u32),
+    /// An attribute changed: element, name, old value, new value.
+    Attr(u32, Rc<str>, Option<Rc<str>>, Option<Rc<str>>),
 }
 
 impl Doc {
@@ -175,7 +201,38 @@ impl Doc {
         Doc { nodes, doc: 0, html: None, body: None, head: None,
               dirty: false, has_listeners: false, focused: None, version: 0,
               mutations: Vec::new(), observing: false, mut_overflow: false,
-              observed: Vec::new() }
+              observed: Vec::new(), ce_on: false, ce_queue: Vec::new() }
+    }
+
+    /// Is this node in the document, through shadow roots to their hosts?
+    pub fn connected(&self, mut id: u32) -> bool {
+        loop {
+            if id == self.doc { return true }
+            let n = &self.nodes[id as usize];
+            match n.parent {
+                Some(p) => id = p,
+                None => match n.shadow {
+                    Some(h) if &*n.tag == SHADOW_TAG => id = h,
+                    _ => return false,
+                },
+            }
+        }
+    }
+
+    fn ce_note_insert(&mut self, child: u32) {
+        if self.ce_on && self.connected(child) { self.ce_queue.push(CeEvent::Inserted(child)); }
+    }
+
+    fn ce_note_remove(&mut self, id: u32) {
+        if self.ce_on && self.nodes[id as usize].parent.is_some() && self.connected(id) {
+            self.ce_queue.push(CeEvent::Removed(id));
+        }
+    }
+
+    fn ce_note_attr(&mut self, id: u32, k: &str, old: Option<Rc<str>>, new: Option<Rc<str>>) {
+        if self.ce_on && self.nodes[id as usize].ce == CE_CUSTOM {
+            self.ce_queue.push(CeEvent::Attr(id, Rc::from(k), old, new));
+        }
     }
 
     /// From beak's parsed tree. The original `seq` is not taken over; the
@@ -279,6 +336,7 @@ impl Doc {
     /// node sits in two child lists.
     pub fn detach(&mut self, id: u32) {
         self.touch();
+        self.ce_note_remove(id);
         if let Some(p) = self.nodes[id as usize].parent {
             let at = self.nodes[p as usize].children.iter().position(|&c| c == id);
             if self.observing {
@@ -309,6 +367,7 @@ impl Doc {
                 added: alloc::vec![child], removed: Vec::new(),
                 prev, next: None, attr: None, old: None, hits: 0 });
         }
+        self.ce_note_insert(child);
     }
 
     /// Insert; a fragment hands over its children instead of being inserted
@@ -340,18 +399,20 @@ impl Doc {
                 added: alloc::vec![child], removed: Vec::new(),
                 prev, next, attr: None, old: None, hits: 0 });
         }
+        self.ce_note_insert(child);
     }
 
     /// Set an attribute. The single path, so the change is recorded once.
     pub fn set_attr_at(&mut self, id: u32, k: &str, v: &str) {
         self.touch();
+        let old = self.nodes[id as usize].attr(k).cloned();
         if self.observing {
-            let old = self.nodes[id as usize].attr(k).cloned();
             self.record(Mutation { kind: MutKind::Attributes, target: id,
                 added: Vec::new(), removed: Vec::new(), prev: None, next: None,
-                attr: Some(Rc::from(k)), old, hits: 0 });
+                attr: Some(Rc::from(k)), old: old.clone(), hits: 0 });
         }
         self.nodes[id as usize].set_attr(k, v);
+        self.ce_note_attr(id, k, old, Some(Rc::from(v)));
     }
 
     /// Remove an attribute. If it is absent, that is not a change and nothing
@@ -363,9 +424,10 @@ impl Doc {
         if self.observing {
             self.record(Mutation { kind: MutKind::Attributes, target: id,
                 added: Vec::new(), removed: Vec::new(), prev: None, next: None,
-                attr: Some(Rc::from(k)), old, hits: 0 });
+                attr: Some(Rc::from(k)), old: old.clone(), hits: 0 });
         }
         self.nodes[id as usize].attrs.retain(|(n, _)| &**n != k);
+        self.ce_note_attr(id, k, old, None);
     }
 
     /// Set the text of a text/comment node (`data`, `nodeValue`). Not for
@@ -424,6 +486,12 @@ impl Doc {
             self.nodes[*id as usize].parent = Some(parent);
             let pos = (idx + k).min(self.nodes[parent as usize].children.len());
             self.nodes[parent as usize].children.insert(pos, *id);
+            // Elements the fragment parser creates are upgraded even when
+            // detached (HTML §4.13.3, synchronous flag unset).
+            if self.ce_on {
+                let ev = if self.connected(*id) { CeEvent::Inserted(*id) } else { CeEvent::Created(*id) };
+                self.ce_queue.push(ev);
+            }
         }
         made
     }
@@ -519,6 +587,7 @@ impl Doc {
     pub fn clear_children(&mut self, id: u32) {
         self.touch();
         let old: Vec<u32> = self.nodes[id as usize].children.clone();
+        for c in &old { self.ce_note_remove(*c); }
         for c in &old { self.nodes[*c as usize].parent = None; }
         self.nodes[id as usize].children.clear();
         // `innerHTML = "…"` clears before rebuilding. Without this record an
@@ -542,10 +611,27 @@ impl Doc {
         self.nodes[new as usize].text = text;
         if deep {
             for c in kids {
-                let cc = self.clone_node(c, true);
+                let cc = self.clone_node_inner(c);
                 self.nodes[cc as usize].parent = Some(new);
                 self.nodes[new as usize].children.push(cc);
             }
+        }
+        if self.ce_on { self.ce_queue.push(CeEvent::Created(new)); }
+        new
+    }
+
+    fn clone_node_inner(&mut self, id: u32) -> u32 {
+        let (kind, tag, attrs, text, kids) = {
+            let n = &self.nodes[id as usize];
+            (n.kind, n.tag.clone(), n.attrs.clone(), n.text.clone(), n.children.clone())
+        };
+        let new = self.create(kind, &tag);
+        self.nodes[new as usize].attrs = attrs;
+        self.nodes[new as usize].text = text;
+        for c in kids {
+            let cc = self.clone_node_inner(c);
+            self.nodes[cc as usize].parent = Some(new);
+            self.nodes[new as usize].children.push(cc);
         }
         new
     }
@@ -578,6 +664,7 @@ impl Doc {
         if n.kind == TEXT_NODE { return Some(crate::dom::Node::Text(n.text.to_string())); }
         if n.kind != ELEMENT_NODE { return None; }
         let mut e = crate::dom::Element::bare(n.tag.to_string(), id);
+        e.defined = ce_defined(n);
         for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes; see `to_node`.
         e.index_attrs();
@@ -620,6 +707,7 @@ impl Doc {
         // The bridge: the same number now stands here and in layout.
         self.nodes[id as usize].seq = *seq;
         let mut e = crate::dom::Element::bare(tag.to_string(), *seq);
+        e.defined = ce_defined(&self.nodes[id as usize]);
         for (k, v) in &attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes, otherwise classes, id and the bloom
         // filter are empty and no selector matches.
@@ -2644,9 +2732,7 @@ pub fn install(realm: &mut Realm) {
             // All children out, one text node in. The old nodes stay in the arena,
             // just detached: freeing them would shift indices, and a handle must
             // never move.
-            let old: Vec<u32> = d.nodes[id as usize].children.clone();
-            for c in old { d.nodes[c as usize].parent = None; }
-            d.nodes[id as usize].children.clear();
+            d.clear_children(id);
             if !s.is_empty() {
                 let tid = d.create(TEXT_NODE, "#text");
                 d.nodes[tid as usize].text = s;
@@ -2823,7 +2909,8 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
 
     // ── Element ──────────────────────────────────────────────────────────
-    getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_uppercase()))), &fp);
+    getter(&element_proto, "tagName", |i, t, _| with_node!(i, t, |n| Ok(Value::string(n.tag.to_ascii_uppercase()))), &fp);
+    getter(&element_proto, "localName", |i, t, _| with_node!(i, t, |n| Ok(Value::Str(n.tag.clone()))), &fp);
     getter(&element_proto, "children", |i, t, _| {
         let id = node_of(i, &t)?;
         let cs: Vec<u32> = i.doc.as_ref().map(|d| d.nodes[id as usize].children.iter()
@@ -3462,7 +3549,8 @@ pub fn install(realm: &mut Realm) {
     }, 1, &fp);
     meth(&document_proto, "createElement", |i, _, a| {
         let s = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let lower = s.to_lowercase();
+        let lower = s.to_ascii_lowercase();
+        if let Some(k) = i.custom.by_name(&lower) { return ce_create_sync(i, k); }
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
         let id = d.create(ELEMENT_NODE, &lower);
         Ok(wrap(i, id))
@@ -4112,6 +4200,7 @@ pub fn install(realm: &mut Realm) {
     // After `iface`: it puts an "Illegal constructor" on the same prototype,
     // and the last write wins.
     iface(realm, "HTMLElement", &html_element_proto);
+    install_dom_exception(realm);
     install_custom_elements(realm, &html_element_proto);
     iface(realm, "SVGElement", &svg_element_proto);
     // `CharacterData` sits between Node and Text; library code checks this
@@ -5372,6 +5461,9 @@ pub fn install(realm: &mut Realm) {
             }
             let Some(d) = &mut i.doc else { return i.type_err("no document") };
             let f = d.create(ELEMENT_NODE, "#fragment");
+            // Template contents belong to an inert document: nothing in them is
+            // upgraded.
+            d.nodes[f as usize].ce = CE_INERT;
             for k in d.nodes[id as usize].children.clone() { d.append(f, k); }
             d.nodes[id as usize].content = Some(f);
             Ok(wrap(i, f))
@@ -6454,26 +6546,168 @@ fn lossy_utf8(b: &[u8]) -> String {
     }
 }
 
-/// `customElements`: the custom element registry.
+// ── Custom elements (HTML §4.13) ────────────────────────────────────────────
+
+/// `DomNode::ce`: no definition applied yet.
+pub const CE_NONE: u8 = 0;
+/// An upgrade is running the constructor.
+pub const CE_RUNNING: u8 = 1;
+pub const CE_CUSTOM: u8 = 2;
+pub const CE_FAILED: u8 = 3;
+/// On a fragment: template contents, which are never upgraded.
+pub const CE_INERT: u8 = 4;
+
+/// `:defined`: "uncustomized" or "custom" (HTML §4.16.3).
+pub fn ce_defined(n: &DomNode) -> bool {
+    n.ce == CE_CUSTOM || (n.ce == CE_NONE && !crate::dom::valid_custom_element_name(&n.tag))
+}
+
+/// The tag of a shadow root node.
+pub const SHADOW_TAG: &str = "#shadow-root";
+
+/// One `customElements.define` (HTML §4.13.4 "custom element definition").
+/// The callbacks are read once, at definition, as the spec requires.
+pub struct CeDef {
+    pub name: Rc<str>,
+    pub ctor: Value,
+    pub proto: Gc,
+    pub observed: Vec<Rc<str>>,
+    pub connected: Value,
+    pub disconnected: Value,
+    pub adopted: Value,
+    pub attr_changed: Value,
+    pub form_associated: bool,
+}
+
+#[derive(Default)]
+pub struct CeRegistry {
+    pub defs: Vec<CeDef>,
+    /// `whenDefined` promises still waiting, by name.
+    pub waiting: Vec<(Rc<str>, Gc)>,
+    /// The construction stack: definition index and the element an upgrade
+    /// constructs; `None` once `super()` has handed the element out.
+    pub stack: Vec<(usize, Option<u32>)>,
+    /// `define` is reading the class; a nested `define` throws.
+    pub defining: bool,
+}
+
+impl CeRegistry {
+    pub fn by_name(&self, name: &str) -> Option<usize> {
+        self.defs.iter().position(|d| &*d.name == name)
+    }
+
+    /// Every value the registry keeps alive.
+    pub fn values(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for d in &self.defs {
+            out.push(d.ctor.clone());
+            out.push(Value::Obj(d.proto.clone()));
+            for v in [&d.connected, &d.disconnected, &d.adopted, &d.attr_changed] {
+                out.push(v.clone());
+            }
+        }
+        for (_, p) in &self.waiting { out.push(Value::Obj(p.clone())); }
+        out
+    }
+}
+
+/// A `DOMException` with the given name (WebIDL §3.14.1).
+pub fn dom_exc(i: &mut Interp, name: &str, msg: &str) -> Abrupt {
+    let proto = i.realm.global.borrow().get_own("DOMException")
+        .and_then(|p| p.value.clone())
+        .and_then(|c| match c { Value::Obj(c) => c.borrow().get_own("prototype").and_then(|p| p.value.clone()), _ => None });
+    let e = match proto {
+        Some(Value::Obj(p)) => new_kind(Some(p), ObjKind::Error),
+        _ => return i.throw_kind("Error", msg),
+    };
+    {
+        let mut b = e.borrow_mut();
+        b.define("message", Prop::builtin(Value::string(String::from(msg))));
+        b.define("name", Prop::builtin(Value::string(String::from(name))));
+        b.define("code", Prop::builtin(Value::Num(dom_exc_code(name))));
+    }
+    Abrupt::Throw(Value::Obj(e))
+}
+
+/// The legacy code of a `DOMException` name (WebIDL §3.14.2), 0 for new names.
+fn dom_exc_code(name: &str) -> f64 {
+    const CODES: &[(&str, f64)] = &[
+        ("IndexSizeError", 1.0), ("HierarchyRequestError", 3.0), ("WrongDocumentError", 4.0),
+        ("InvalidCharacterError", 5.0), ("NoModificationAllowedError", 7.0),
+        ("NotFoundError", 8.0), ("NotSupportedError", 9.0), ("InvalidStateError", 11.0),
+        ("SyntaxError", 12.0), ("InvalidModificationError", 13.0), ("NamespaceError", 14.0),
+        ("InvalidAccessError", 15.0), ("TypeMismatchError", 17.0), ("SecurityError", 18.0),
+        ("NetworkError", 19.0), ("AbortError", 20.0), ("URLMismatchError", 21.0),
+        ("QuotaExceededError", 22.0), ("TimeoutError", 23.0), ("InvalidNodeTypeError", 24.0),
+        ("DataCloneError", 25.0),
+    ];
+    CODES.iter().find(|(n, _)| *n == name).map(|(_, c)| *c).unwrap_or(0.0)
+}
+
+fn install_dom_exception(realm: &mut Realm) {
+    let fp = realm.function_proto.clone();
+    let proto = new_obj(Some(realm.error_proto.clone()));
+    let ctor = native(Some(fp.clone()), |i, this, a| {
+        if !i.native_new { return i.type_err("Constructor DOMException requires 'new'") }
+        let msg = match a.first() { None | Some(Value::Undefined) => String::new(),
+                                    Some(v) => i.to_string(v)?.to_string() };
+        let name = match a.get(1) { None | Some(Value::Undefined) => String::from("Error"),
+                                    Some(v) => i.to_string(v)?.to_string() };
+        let Abrupt::Throw(e) = dom_exc(i, &name, &msg) else { return Ok(Value::Undefined) };
+        // A subclass gets its own prototype through the receiver.
+        if let (Value::Obj(e), Value::Obj(t)) = (&e, &this) {
+            let p = t.borrow().proto.clone();
+            if p.is_some() { e.borrow_mut().proto = p; }
+        }
+        Ok(e)
+    }, "DOMException", 0, true);
+    ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(proto.clone())));
+    proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ctor.clone())));
+    proto.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("DOMException")));
+    for (n, c) in [("INDEX_SIZE_ERR", 1.0), ("NOT_FOUND_ERR", 8.0), ("NOT_SUPPORTED_ERR", 9.0),
+                   ("INVALID_STATE_ERR", 11.0), ("SYNTAX_ERR", 12.0), ("SECURITY_ERR", 18.0),
+                   ("NETWORK_ERR", 19.0), ("ABORT_ERR", 20.0), ("TIMEOUT_ERR", 23.0),
+                   ("DATA_CLONE_ERR", 25.0)] {
+        ctor.borrow_mut().define(n, Prop::frozen(Value::Num(c)));
+        proto.borrow_mut().define(n, Prop::frozen(Value::Num(c)));
+    }
+    realm.global.borrow_mut().define("DOMException", Prop::builtin(Value::Obj(ctor)));
+}
+
+/// `customElements` and the `HTMLElement` constructor.
 ///
-/// Not implemented: shadow roots (`attachShadow`).
-///
-/// Supports define, get, and making `class X extends HTMLElement`
-/// constructible: `new X()` creates a real node with the registered tag,
-/// determined by the prototype of the object being built.
+/// Not implemented: customized built-in elements (`extends`, `is`); the
+/// option is accepted and ignored.
 fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
     let fp = realm.function_proto.clone();
 
-    // `HTMLElement` is a real constructor from here on; without it `super()`
-    // in every component throws "Illegal constructor".
+    // HTML §3.2.3 "HTML element constructors". The class comes from the
+    // receiver's prototype, which `super()` and `Reflect.construct` set to
+    // the new target's.
     let he = native(Some(fp.clone()), |i, this, _| {
         if !i.native_new { return i.type_err("Illegal constructor"); }
-        let Some(tag) = custom_tag_of(i, &this) else {
-            return i.type_err("HTMLElement constructor: the class is not a registered custom element");
+        let Some(k) = ce_def_of(i, &this) else {
+            return i.type_err("Illegal constructor: the class is not a registered custom element");
         };
+        let proto = match &this { Value::Obj(o) => o.borrow().proto.clone(), _ => None }
+            .unwrap_or_else(|| i.custom.defs[k].proto.clone());
+        // An upgrade: the element is already there and waits on the stack.
+        if let Some(pos) = i.custom.stack.iter().rposition(|(d, _)| *d == k) {
+            let Some(id) = i.custom.stack[pos].1.take() else {
+                return Err(dom_exc(i, "InvalidStateError",
+                    "the custom element constructor called super() twice"));
+            };
+            let el = wrap(i, id);
+            if let Value::Obj(o) = &el { o.borrow_mut().proto = Some(proto); }
+            return Ok(el);
+        }
+        let name = i.custom.defs[k].name.clone();
         let Some(d) = &mut i.doc else { return i.type_err("no document") };
-        let id = d.create(ELEMENT_NODE, &tag);
-        Ok(wrap(i, id))
+        let id = d.create(ELEMENT_NODE, &name);
+        d.nodes[id as usize].ce = CE_CUSTOM;
+        let el = wrap(i, id);
+        if let Value::Obj(o) = &el { o.borrow_mut().proto = Some(proto); }
+        Ok(el)
     }, "HTMLElement", 0, true);
     he.borrow_mut().define("prototype", Prop::frozen(Value::Obj(html_element_proto.clone())));
     html_element_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(he.clone())));
@@ -6481,78 +6715,329 @@ fn install_custom_elements(realm: &mut Realm, html_element_proto: &Gc) {
 
     let ce = new_obj(Some(realm.object_proto.clone()));
     meth(&ce, "define", |i, _, a| {
-        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        let name: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
         let ctor = a.get(1).cloned().unwrap_or(Value::Undefined);
-        if !i.is_callable(&ctor) { return i.type_err("customElements.define: not a constructor"); }
-        // A name without a hyphen is not a valid custom element name; the spec
-        // throws.
-        if !name.contains('-') {
-            return i.type_err(&alloc::format!("'{name}' is not a valid custom element name"));
+        if !i.is_constructor(&ctor) {
+            return i.type_err("customElements.define: the second argument is not a constructor");
         }
-        if i.custom.iter().any(|(t, _)| **t == *name) {
-            return i.type_err(&alloc::format!("'{name}' has already been defined"));
+        if !crate::dom::valid_custom_element_name(&name) {
+            return Err(dom_exc(i, "SyntaxError",
+                &alloc::format!("'{name}' is not a valid custom element name")));
         }
-        // `observedAttributes` is read here, at definition, as the spec says.
-        // Libraries hook their setup into this getter (e.g. a `static get` that
-        // calls `finalize()`).
-        let obs = i.get(&ctor, "observedAttributes")?;
-        if !matches!(obs, Value::Undefined | Value::Null) {
-            // Read only; the list itself is needed once `attributeChangedCallback`
-            // exists.
-            let _ = i.iterate(&obs);
+        if i.custom.by_name(&name).is_some() {
+            return Err(dom_exc(i, "NotSupportedError",
+                &alloc::format!("the name '{name}' has already been defined")));
         }
-        i.custom.push((name, ctor));
+        if i.custom.defs.iter().any(|d| d.ctor.strict_eq(&ctor)) {
+            return Err(dom_exc(i, "NotSupportedError",
+                "this constructor has already been used with another name"));
+        }
+        if i.custom.defining {
+            return Err(dom_exc(i, "NotSupportedError", "customElements.define is already running"));
+        }
+        i.custom.defining = true;
+        let read = ce_read_class(i, &name, &ctor);
+        i.custom.defining = false;
+        let def = read?;
+        i.custom.defs.push(def);
+        let k = i.custom.defs.len() - 1;
+        if let Some(d) = &mut i.doc { d.ce_on = true; }
+        // Upgrade candidates: the elements of that name in the document, in
+        // shadow-including tree order.
+        let mut cands = Vec::new();
+        if let Some(d) = &i.doc { ce_walk(d, d.doc, &mut cands); }
+        cands.retain(|&n| i.doc.as_ref().is_some_and(|d|
+            d.nodes[n as usize].ce == CE_NONE && *d.nodes[n as usize].tag == *name));
+        for n in cands { ce_upgrade(i, n, k); }
+        let ctor = i.custom.defs[k].ctor.clone();
+        while let Some(pos) = i.custom.waiting.iter().position(|(t, _)| *t == name) {
+            let (_, p) = i.custom.waiting.remove(pos);
+            super::promise::resolve_promise(i, &p, ctor.clone());
+        }
         Ok(Value::Undefined)
     }, 2, &fp);
     meth(&ce, "get", |i, _, a| {
         let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        Ok(i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
+        Ok(i.custom.by_name(&name).map(|k| i.custom.defs[k].ctor.clone())
             .unwrap_or(Value::Undefined))
     }, 1, &fp);
     meth(&ce, "getName", |i, _, a| {
         let c = a.first().cloned().unwrap_or(Value::Undefined);
-        Ok(i.custom.iter().find(|(_, x)| x.strict_eq(&c))
-            .map(|(t, _)| Value::Str(t.clone())).unwrap_or(Value::Null))
+        Ok(i.custom.defs.iter().find(|d| d.ctor.strict_eq(&c))
+            .map(|d| Value::Str(d.name.clone())).unwrap_or(Value::Null))
     }, 1, &fp);
-    // `whenDefined` resolves immediately: all definitions happen at load, so
-    // the answer is always already there.
     meth(&ce, "whenDefined", |i, _, a| {
-        let name = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
-        let v = i.custom.iter().find(|(t, _)| **t == *name).map(|(_, c)| c.clone())
-            .unwrap_or(Value::Undefined);
+        let name: Rc<str> = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+        if !crate::dom::valid_custom_element_name(&name) {
+            let p = super::promise::new_promise(i);
+            let Abrupt::Throw(e) = dom_exc(i, "SyntaxError",
+                &alloc::format!("'{name}' is not a valid custom element name"))
+                else { return Ok(Value::Obj(p)) };
+            super::promise::settle(i, &p, e, true);
+            return Ok(Value::Obj(p));
+        }
+        if let Some(k) = i.custom.by_name(&name) {
+            let p = super::promise::new_promise(i);
+            let c = i.custom.defs[k].ctor.clone();
+            super::promise::resolve_promise(i, &p, c);
+            return Ok(Value::Obj(p));
+        }
+        // The same promise for every call until the name is defined.
+        if let Some((_, p)) = i.custom.waiting.iter().find(|(t, _)| *t == name) {
+            return Ok(Value::Obj(p.clone()));
+        }
         let p = super::promise::new_promise(i);
-        super::promise::resolve_promise(i, &p, v);
+        i.custom.waiting.push((name, p.clone()));
         Ok(Value::Obj(p))
     }, 1, &fp);
-    // `upgrade` does nothing: beak builds the tree from HTML before any script
-    // runs and does not upgrade existing nodes later. It exists so the call
-    // does not throw.
-    meth(&ce, "upgrade", |_, _, _| Ok(Value::Undefined), 1, &fp);
+    // Upgrade every element below `root`, connected or not.
+    meth(&ce, "upgrade", |i, _, a| {
+        let root = node_of(i, a.first().unwrap_or(&Value::Undefined))?;
+        let mut list = Vec::new();
+        if let Some(d) = &i.doc { list.push(root); ce_walk(d, root, &mut list); }
+        for n in list { ce_try_upgrade(i, n); }
+        Ok(Value::Undefined)
+    }, 1, &fp);
     ce.borrow_mut().define(SYM_TO_STRING_TAG, Prop::tag(Value::str("CustomElementRegistry")));
     realm.global.borrow_mut().define("customElements", Prop::builtin(Value::Obj(ce)));
 }
 
-/// Which registered tag belongs to this object?
-///
-/// Walks the prototype chain from the inside out, which yields the most
-/// derived class. `new.target` would give the same answer but beak does
-/// not pass it through; `construct` has set the prototype before `super()`
-/// runs.
-fn custom_tag_of(i: &Interp, this: &Value) -> Option<Rc<str>> {
+/// Read the class for `define` (HTML §4.13.4 steps 14-15): prototype,
+/// lifecycle callbacks, `observedAttributes`, `formAssociated`.
+fn ce_read_class(i: &mut Interp, name: &Rc<str>, ctor: &Value) -> C<CeDef> {
+    let Value::Obj(proto) = i.get(ctor, "prototype")? else {
+        return i.type_err("customElements.define: the prototype is not an object");
+    };
+    let pv = Value::Obj(proto.clone());
+    let mut cbs = [Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined];
+    for (k, key) in ["connectedCallback", "disconnectedCallback", "adoptedCallback",
+                     "attributeChangedCallback"].iter().enumerate() {
+        let v = i.get(&pv, key)?;
+        if !matches!(v, Value::Undefined) && !i.is_callable(&v) {
+            return i.type_err(&alloc::format!("customElements.define: {key} is not a function"));
+        }
+        cbs[k] = v;
+    }
+    let mut observed = Vec::new();
+    if !matches!(cbs[3], Value::Undefined) {
+        let obs = i.get(ctor, "observedAttributes")?;
+        if !matches!(obs, Value::Undefined) {
+            for v in i.iterate(&obs)? { observed.push(i.to_string(&v)?); }
+        }
+    }
+    let fa = i.get(ctor, "formAssociated")?;
+    let form_associated = fa.truthy();
+    let [connected, disconnected, adopted, attr_changed] = cbs;
+    Ok(CeDef { name: name.clone(), ctor: ctor.clone(), proto, observed, connected,
+               disconnected, adopted, attr_changed, form_associated })
+}
+
+/// Which definition does this receiver belong to? The innermost prototype
+/// on its chain that is a defined class's prototype, which is the new
+/// target's.
+fn ce_def_of(i: &Interp, this: &Value) -> Option<usize> {
     let Value::Obj(o) = this else { return None };
     let mut cur = o.borrow().proto.clone();
     while let Some(p) = cur {
-        for (tag, ctor) in &i.custom {
-            let Value::Obj(c) = ctor else { continue };
-            let cp = c.borrow().get_own("prototype").and_then(|x| x.value.clone());
-            if matches!(cp, Some(Value::Obj(cp)) if Rc::ptr_eq(&cp, &p)) {
-                return Some(tag.clone());
-            }
+        if let Some(k) = i.custom.defs.iter().position(|d| Rc::ptr_eq(&d.proto, &p)) {
+            return Some(k);
         }
         let n = p.borrow().proto.clone();
         cur = n;
     }
     None
+}
+
+/// The elements below `id` in shadow-including tree order, without `id`.
+/// Template contents are skipped: they are never upgraded.
+fn ce_walk(d: &Doc, id: u32, out: &mut Vec<u32>) {
+    let n = &d.nodes[id as usize];
+    if n.kind == ELEMENT_NODE && &*n.tag == "template" { return }
+    if let Some(s) = n.shadow {
+        if &*n.tag != SHADOW_TAG { ce_walk(d, s, out); }
+    }
+    for &c in &n.children {
+        if d.nodes[c as usize].kind == ELEMENT_NODE && !d.nodes[c as usize].tag.starts_with('#') {
+            out.push(c);
+        }
+        ce_walk(d, c, out);
+    }
+}
+
+/// `id` and the elements below it.
+fn ce_subtree(i: &Interp, id: u32) -> Vec<u32> {
+    let Some(d) = &i.doc else { return Vec::new() };
+    let mut out = Vec::new();
+    if d.nodes[id as usize].kind == ELEMENT_NODE && !d.nodes[id as usize].tag.starts_with('#') {
+        out.push(id);
+    }
+    ce_walk(d, id, &mut out);
+    out
+}
+
+/// Is `id` inside template contents?
+fn ce_inert(d: &Doc, mut id: u32) -> bool {
+    loop {
+        let n = &d.nodes[id as usize];
+        if n.ce == CE_INERT { return true }
+        match n.parent {
+            Some(p) => {
+                if &*d.nodes[p as usize].tag == "template" { return true }
+                id = p;
+            }
+            None => return false,
+        }
+    }
+}
+
+/// Upgrade `id` if it is undefined and its name is defined.
+fn ce_try_upgrade(i: &mut Interp, id: u32) {
+    let k = {
+        let Some(d) = &i.doc else { return };
+        let n = &d.nodes[id as usize];
+        if n.kind != ELEMENT_NODE || n.ce != CE_NONE || !n.tag.contains('-') { return }
+        match i.custom.by_name(&n.tag) { Some(k) => k, None => return }
+    };
+    ce_upgrade(i, id, k);
+}
+
+/// HTML §4.13.5 "upgrade an element": run the constructor on the existing
+/// element, then report its attributes and, if connected, the connection.
+fn ce_upgrade(i: &mut Interp, id: u32, k: usize) {
+    {
+        let Some(d) = &mut i.doc else { return };
+        if d.nodes[id as usize].ce != CE_NONE { return }
+        d.nodes[id as usize].ce = CE_RUNNING;
+    }
+    let ctor = i.custom.defs[k].ctor.clone();
+    i.custom.stack.push((k, Some(id)));
+    let r = i.construct(&ctor, &[]);
+    i.custom.stack.pop();
+    let el = i.doc.as_ref().and_then(|d| d.nodes[id as usize].js.clone());
+    let failure = match r {
+        Ok(Value::Obj(o)) if el.as_ref().is_some_and(|e| Rc::ptr_eq(e, &o)) => None,
+        Ok(_) => Some(String::from(
+            "TypeError: the custom element constructor did not produce the element")),
+        Err(e) => Some(super::modules::describe(i, e)),
+    };
+    let name = i.custom.defs[k].name.clone();
+    if let Some(msg) = failure {
+        if let Some(d) = &mut i.doc { d.nodes[id as usize].ce = CE_FAILED; d.touch(); }
+        i.console_push(alloc::format!("custom element <{name}>: upgrade failed: {msg}"));
+        return;
+    }
+    let attrs = match &mut i.doc {
+        Some(d) => { d.nodes[id as usize].ce = CE_CUSTOM; d.touch(); d.nodes[id as usize].attrs.clone() }
+        None => return,
+    };
+    if !matches!(i.custom.defs[k].attr_changed, Value::Undefined) {
+        for (an, av) in attrs {
+            if i.custom.defs[k].observed.iter().any(|o| *o == an) {
+                let cb = i.custom.defs[k].attr_changed.clone();
+                ce_call(i, id, &cb, "attributeChangedCallback",
+                        &[Value::Str(an), Value::Null, Value::Str(av), Value::Null]);
+            }
+        }
+    }
+    if i.doc.as_ref().is_some_and(|d| d.connected(id)) {
+        let cb = i.custom.defs[k].connected.clone();
+        ce_call(i, id, &cb, "connectedCallback", &[]);
+    }
+}
+
+/// Call one lifecycle callback. An exception is reported, not propagated:
+/// the DOM operation that caused it has already happened (HTML §4.13.6).
+fn ce_call(i: &mut Interp, id: u32, cb: &Value, which: &str, args: &[Value]) {
+    if !i.is_callable(cb) { return }
+    let this = wrap(i, id);
+    if let Err(e) = i.call(cb, this, args) {
+        let msg = super::modules::describe(i, e);
+        let tag = i.doc.as_ref().map(|d| d.nodes[id as usize].tag.to_string()).unwrap_or_default();
+        i.console_push(alloc::format!("{which} <{tag}>: {msg}"));
+    }
+}
+
+/// The definition of a custom element in the "custom" state.
+fn ce_def_at(i: &Interp, id: u32) -> Option<usize> {
+    let d = i.doc.as_ref()?;
+    let n = &d.nodes[id as usize];
+    if n.ce != CE_CUSTOM { return None }
+    i.custom.by_name(&n.tag)
+}
+
+/// Run the custom element reactions queued by tree changes (CEReactions).
+///
+/// The queue is taken whole first: a callback that changes the tree queues
+/// new reactions, and the nested flush after that change runs them before
+/// the callback continues, as the spec's element queue stack does.
+pub fn ce_flush(i: &mut Interp) {
+    let evs = match &mut i.doc {
+        Some(d) if !d.ce_queue.is_empty() => core::mem::take(&mut d.ce_queue),
+        _ => return,
+    };
+    for ev in evs {
+        match ev {
+            CeEvent::Inserted(n) => {
+                for e in ce_subtree(i, n) {
+                    match ce_def_at(i, e) {
+                        Some(k) => {
+                            let cb = i.custom.defs[k].connected.clone();
+                            ce_call(i, e, &cb, "connectedCallback", &[]);
+                        }
+                        None => ce_try_upgrade(i, e),
+                    }
+                }
+            }
+            CeEvent::Created(n) => {
+                if i.doc.as_ref().is_some_and(|d| ce_inert(d, n)) { continue }
+                for e in ce_subtree(i, n) { ce_try_upgrade(i, e); }
+            }
+            CeEvent::Removed(n) => {
+                for e in ce_subtree(i, n) {
+                    if let Some(k) = ce_def_at(i, e) {
+                        let cb = i.custom.defs[k].disconnected.clone();
+                        ce_call(i, e, &cb, "disconnectedCallback", &[]);
+                    }
+                }
+            }
+            CeEvent::Attr(e, name, old, new) => {
+                let Some(k) = ce_def_at(i, e) else { continue };
+                if !i.custom.defs[k].observed.iter().any(|o| *o == name) { continue }
+                let cb = i.custom.defs[k].attr_changed.clone();
+                let v = |x: Option<Rc<str>>| x.map(Value::Str).unwrap_or(Value::Null);
+                ce_call(i, e, &cb, "attributeChangedCallback",
+                        &[Value::Str(name), v(old), v(new), Value::Null]);
+            }
+        }
+    }
+}
+
+/// `document.createElement` for a defined name (HTML §4.13.3 "create an
+/// element", synchronous custom elements flag set). A constructor that
+/// fails is reported and yields a failed element, as in browsers.
+fn ce_create_sync(i: &mut Interp, k: usize) -> C<Value> {
+    let ctor = i.custom.defs[k].ctor.clone();
+    let name = i.custom.defs[k].name.clone();
+    let msg = match i.construct(&ctor, &[]) {
+        Ok(v) => {
+            let ok = match node_of_ref(i, &v) {
+                Ok(id) => i.doc.as_ref().is_some_and(|d| {
+                    let n = &d.nodes[id as usize];
+                    n.kind == ELEMENT_NODE && *n.tag == *name && n.parent.is_none()
+                        && n.children.is_empty() && n.attrs.is_empty()
+                }),
+                Err(()) => false,
+            };
+            if ok { return Ok(v) }
+            String::from("NotSupportedError: the constructor did not return a fresh element")
+        }
+        Err(e) => super::modules::describe(i, e),
+    };
+    i.console_push(alloc::format!("custom element <{name}>: {msg}"));
+    let Some(d) = &mut i.doc else { return i.type_err("no document") };
+    let id = d.create(ELEMENT_NODE, &name);
+    d.nodes[id as usize].ce = CE_FAILED;
+    Ok(wrap(i, id))
 }
 
 /// Move the DOM node from one wrapper object to another.
@@ -6637,10 +7122,7 @@ fn select_index(i: &mut Interp, sel: u32, n: i64) {
 /// as a function because `option.text` needs it too.
 fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     let Some(d) = &mut i.doc else { return };
-    d.touch();
-    let old: Vec<u32> = d.nodes[id as usize].children.clone();
-    for c in old { d.nodes[c as usize].parent = None; }
-    d.nodes[id as usize].children.clear();
+    d.clear_children(id);
     if !s.is_empty() {
         let tid = d.create(TEXT_NODE, "#text");
         d.nodes[tid as usize].text = s.into();
@@ -6648,26 +7130,8 @@ fn set_text_of(i: &mut Interp, id: u32, s: &str) {
     }
 }
 
-/// Marker on the wrapper: `connectedCallback` has run. NUL-prefixed, so
-/// invisible to scripts.
-const CE_CONNECTED: &str = "\0!ceconn";
-
-/// Is this node really attached to the document?
-fn is_connected(d: &Doc, mut id: u32) -> bool {
-    loop {
-        if id == d.doc { return true }
-        match d.nodes[id as usize].parent { Some(p) => id = p, None => return false }
-    }
-}
-
-/// The custom elements of a subtree, outside in.
-fn collect_custom(d: &Doc, id: u32, out: &mut Vec<u32>) {
-    let n = &d.nodes[id as usize];
-    // A tag without a hyphen cannot be a custom element; the spec requires
-    // one.
-    if n.kind == ELEMENT_NODE && n.tag.contains('-') { out.push(id); }
-    for c in n.children.clone() { collect_custom(d, c, out); }
-}
+/// Is this node attached to the document, through shadow roots?
+fn is_connected(d: &Doc, id: u32) -> bool { d.connected(id) }
 
 /// `document.write`/`writeln`: insert the fragment after the writing
 /// `<script>` and connect everything in it.
@@ -6707,32 +7171,12 @@ fn doc_write(i: &mut Interp, this: &Value, a: &[Value], line: bool) -> C<Value> 
     Ok(Value::Undefined)
 }
 
-/// Run `connectedCallback` for everything that just entered the document.
-///
-/// Once per element, marked on the wrapper: components build their content
-/// there, and a second run would duplicate it. An exception in the callback
-/// does not abort the insertion (as in browsers) but is logged to the
-/// console.
+/// Settle what just entered the tree: stylesheets and scripts start loading,
+/// custom element reactions run.
 fn fire_connected(i: &mut Interp, id: u32) -> C<Value> {
     settle_stylesheet(i, id);
     settle_script(i, id);
-    if i.custom.is_empty() { return Ok(Value::Undefined) }
-    if !i.doc.as_ref().is_some_and(|d| is_connected(d, id)) { return Ok(Value::Undefined) }
-    let mut list = Vec::new();
-    if let Some(d) = &i.doc { collect_custom(d, id, &mut list); }
-    for n in list {
-        let v = wrap(i, n);
-        let Value::Obj(o) = &v else { continue };
-        if o.borrow().get_own(CE_CONNECTED).is_some() { continue }
-        o.borrow_mut().define(CE_CONNECTED, Prop::frozen(Value::Bool(true)));
-        let f = i.get(&v, "connectedCallback")?;
-        if !i.is_callable(&f) { continue }
-        if let Err(e) = i.call(&f, v.clone(), &[]) {
-            let msg = super::modules::describe(i, e);
-            let tag = i.doc.as_ref().map(|d| d.nodes[n as usize].tag.to_string()).unwrap_or_default();
-            i.console_push(alloc::format!("connectedCallback <{tag}>: {msg}"));
-        }
-    }
+    ce_flush(i);
     Ok(Value::Undefined)
 }
 
@@ -7131,5 +7575,128 @@ pub fn pull_control_values(doc: &Doc, forms: &crate::forms::Forms,
     for (seq, v, ch) in set {
         if let Some(v) = v { state.set_value(seq, v.to_string()); }
         if let Some(b) = ch { state.set_checked(seq, b); }
+    }
+}
+
+#[cfg(test)]
+mod ce_tests {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// Run on both engines; the console must agree.
+    pub(super) fn run(html: &str, js: &str) -> Vec<String> {
+        let mut outs = Vec::new();
+        for vm_off in [false, true] {
+            let dom = crate::dom::parse(html);
+            let mut i = super::super::interp::Interp::new();
+            i.vm_off = vm_off;
+            i.set_document(super::Doc::from_dom(&dom));
+            let prog = super::super::parse(js, false).expect("parses");
+            if let Err(e) = i.run_program(&prog) {
+                let m = super::super::modules::describe(&mut i, e);
+                i.console_push(alloc::format!("THREW {m}"));
+            }
+            super::super::promise::run_jobs(&mut i);
+            outs.push(i.take_console());
+        }
+        assert_eq!(outs[0], outs[1], "tree walker and VM disagree");
+        outs.pop().unwrap()
+    }
+
+    #[test]
+    fn define_upgrades_existing_elements_in_document_order() {
+        let out = run(
+            "<body><x-a id=one k=v></x-a><div><x-a id=two></x-a></div><template><x-a id=t></x-a></template></body>",
+            "var held = document.getElementById('one');\
+             class A extends HTMLElement {\
+               static get observedAttributes() { return ['k']; }\
+               constructor() { super(); console.log('ctor ' + this.id); }\
+               connectedCallback() { console.log('conn ' + this.id); }\
+               attributeChangedCallback(n, o, v) { console.log('attr ' + n + ' ' + o + ' ' + v); }\
+               hi() { return 'hi ' + this.id; }\
+             }\
+             customElements.define('x-a', A);\
+             console.log(held instanceof A, held === document.getElementById('one'), held.hi());\
+             console.log(document.querySelector('template').innerHTML.length > 0);",
+        );
+        assert_eq!(out, ["ctor one", "attr k null v", "conn one", "ctor two", "conn two",
+                         "true true hi one", "true"]);
+    }
+
+    #[test]
+    fn create_element_constructs_synchronously_and_insertion_connects() {
+        let out = run(
+            "<body><main></main></body>",
+            "class B extends HTMLElement {\
+               static observedAttributes = ['x'];\
+               connectedCallback() { console.log('conn', this.isConnected); }\
+               disconnectedCallback() { console.log('disc'); }\
+               attributeChangedCallback(n, o, v) { console.log('attr', n, o, v); }\
+             }\
+             customElements.define('x-b', B);\
+             var e = document.createElement('x-b');\
+             console.log(e instanceof B, e.localName, customElements.get('x-b') === B, customElements.getName(B));\
+             e.setAttribute('x', '1'); e.setAttribute('y', '2'); e.removeAttribute('x');\
+             var m = document.querySelector('main');\
+             m.appendChild(e); console.log('after append');\
+             e.remove(); console.log('after remove');\
+             m.innerHTML = '<x-b x=7></x-b>';\
+             console.log(m.firstChild instanceof B);\
+             var n = new B(); console.log(n.tagName);",
+        );
+        assert_eq!(out, ["true x-b true x-b", "attr x null 1", "attr x 1 null",
+                         "conn true", "after append", "disc", "after remove",
+                         "attr x null 7", "conn true", "true", "X-B"]);
+    }
+
+    #[test]
+    fn reflect_construct_and_when_defined() {
+        let out = run(
+            "<body><x-c></x-c></body>",
+            "function C() { return Reflect.construct(HTMLElement, [], C); }\
+             C.prototype = Object.create(HTMLElement.prototype);\
+             C.prototype.constructor = C;\
+             Object.setPrototypeOf(C, HTMLElement);\
+             C.prototype.connectedCallback = function() { console.log('conn c'); };\
+             customElements.whenDefined('x-c').then(function(k) { console.log('defined', k === C); });\
+             customElements.define('x-c', C);\
+             console.log(document.querySelector('x-c') instanceof C);\
+             try { customElements.define('x-c', class extends HTMLElement {}); }\
+             catch (e) { console.log(e.name, e instanceof DOMException); }\
+             try { customElements.define('nohyphen', class extends HTMLElement {}); }\
+             catch (e) { console.log(e.name); }\
+             try { new HTMLElement(); } catch (e) { console.log(e.constructor.name); }",
+        );
+        assert_eq!(out, ["conn c", "true", "NotSupportedError true", "SyntaxError",
+                         "TypeError", "defined true"]);
+    }
+
+    #[test]
+    fn a_failing_constructor_leaves_a_failed_element() {
+        let out = run(
+            "<body><x-d></x-d></body>",
+            "customElements.define('x-d', class extends HTMLElement {\
+               constructor() { super(); throw new Error('boom'); } });\
+             document.body.appendChild(document.createElement('x-d'));\
+             console.log('still running');",
+        );
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert!(out[0].contains("upgrade failed") && out[0].contains("boom"), "{out:?}");
+        assert!(out[1].contains("boom"), "{out:?}");
+        assert_eq!(out[2], "still running");
+    }
+
+    #[test]
+    fn nested_insertions_in_callbacks_run_before_the_callback_continues() {
+        let out = run(
+            "<body></body>",
+            "customElements.define('x-in', class extends HTMLElement {\
+               connectedCallback() { console.log('inner'); } });\
+             customElements.define('x-out', class extends HTMLElement {\
+               connectedCallback() { this.appendChild(document.createElement('x-in'));\
+                                     console.log('outer done'); } });\
+             document.body.appendChild(document.createElement('x-out'));",
+        );
+        assert_eq!(out, ["inner", "outer done"]);
     }
 }
