@@ -12,8 +12,7 @@
 //! rustybuzz). All metrics returned here reflect the default weight but
 //! use the real font's `hhea` / `OS/2` tables — no hardcoded values.
 //!
-//! The glyph cache is heap-backed; each glyph also reserves a slot in the
-//! GGTT glyph region (see `gpu/ggtt_layout.rs`).
+//! The glyph cache is heap-backed and bounded (`GLYPH_CACHE_MAX`).
 
 #![allow(dead_code)]
 
@@ -109,14 +108,8 @@ pub struct GlyphKey {
     pub mono:    bool,
 }
 
-/// Rasterized glyph — alpha bitmap + metrics.
-///
-/// Each cached glyph reserves a slot in the GGTT CompSmall4K bucket via
-/// the slab allocator. `ggtt_offset` is the slot's address; the alpha
-/// bitmap stays heap-resident (the CPU rasterizer reads from the heap
-/// copy). The GGTT slot is an address reservation so bytes can be
-/// uploaded there later without re-keying the cache. LRU eviction
-/// happens on the slab side.
+/// Rasterized glyph — alpha bitmap + metrics, heap-resident (the CPU
+/// rasterizer reads it from here).
 pub struct CachedGlyph {
     pub alpha:       Vec<u8>,
     pub width:       u16,
@@ -124,10 +117,14 @@ pub struct CachedGlyph {
     pub xmin:        i16,
     pub ymin:        i16,
     pub advance:     f32,
-    pub ggtt_offset: u32,
 }
 
 static GLYPH_CACHE: Mutex<Option<HashMap<GlyphKey, CachedGlyph>>> = Mutex::new(None);
+/// Alpha bytes held by the cache. An app chooses sizes (6..64 px) and
+/// text freely, so the key space is large; at the cap the cache starts
+/// over instead of growing for the rest of the boot.
+static GLYPH_CACHE_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+const GLYPH_CACHE_MAX: usize = 16 * 1024 * 1024;
 
 // ── Init ──────────────────────────────────────────────────────────────
 
@@ -377,16 +374,12 @@ where
 
     if !cache.contains_key(&key) {
         let (m, alpha) = font.rasterize_indexed(glyph, d.size_px as f32);
-
-        // Reserve a GGTT slot for the alpha bitmap. CompSmall4K fits
-        // every glyph we care about (UI text at 11–24 px, max ~32×32
-        // = 1 KB). Slab handles LRU eviction if the bucket fills up.
-        let ggtt_offset = crate::gpu::ggtt_slab::alloc(
-            crate::gpu::ggtt_layout::BucketKind::CompSmall4K,
-        )
-        .map(|s| s.ggtt_offset())
-        .unwrap_or(0);
-
+        use core::sync::atomic::Ordering::Relaxed;
+        if GLYPH_CACHE_BYTES.load(Relaxed) + alpha.len() > GLYPH_CACHE_MAX {
+            cache.clear();
+            GLYPH_CACHE_BYTES.store(0, Relaxed);
+        }
+        GLYPH_CACHE_BYTES.fetch_add(alpha.len(), Relaxed);
         cache.insert(key, CachedGlyph {
             alpha,
             width:       m.width  as u16,
@@ -394,25 +387,7 @@ where
             xmin:        m.xmin   as i16,
             ymin:        m.ymin   as i16,
             advance:     m.advance_width,
-            ggtt_offset,
         });
-    } else {
-        // Keep warm glyphs alive in LRU. Cheap — linear on the
-        // bucket's VecDeque but hit rate is high on typical text.
-        if let Some(cg) = cache.get(&key) {
-            if cg.ggtt_offset != 0 {
-                // Rebuild a SlotId from the offset for the LRU touch.
-                let kind = crate::gpu::ggtt_layout::BucketKind::CompSmall4K;
-                let base = crate::gpu::ggtt_layout::BUCKET_BASES[kind as usize];
-                let size = crate::gpu::ggtt_layout::BUCKET_SIZES[kind as usize] as u32;
-                if cg.ggtt_offset >= base && size > 0 {
-                    let idx = (cg.ggtt_offset - base) / size;
-                    crate::gpu::ggtt_slab::touch(
-                        crate::gpu::ggtt_slab::SlotId { kind, idx },
-                    );
-                }
-            }
-        }
     }
     cache.get(&key).map(f)
 }
