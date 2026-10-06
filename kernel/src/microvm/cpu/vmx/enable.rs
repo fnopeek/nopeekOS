@@ -60,6 +60,8 @@ fn vmx_lapic_on() -> bool {
 /// their VMRESUMEs run truly in parallel on separate host cores. Never taken
 /// until an AP is admitted (`AP_ACTIVE`).
 static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+/// The BSP's last device deadline read under `VM_BIG_LOCK` (0 = none).
+static LAST_DEV_DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// True once a second vCPU (AP) shares this VM. While false the BSP runs
 /// the single-vCPU path and the lock is not taken. Set by the
@@ -860,9 +862,21 @@ impl VmContext {
     /// timer is armed → the park falls back to its safety cap.
     pub fn next_timer_deadline_tsc(&self) -> Option<u64> {
         let lapic = self.vcpu.lapic.next_timer_deadline_tsc();
-        let mut dev = None;
-        if self.vcpu.apic_id == 0 {
-            dev = self.shared.pit.next_deadline_tsc();
+        let dev = if self.vcpu.apic_id == 0 { self.device_deadline() } else { None };
+        match (lapic, dev) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The BSP's device timers: PIT, GPU resume, a playing sound stream. An
+    /// AP's exit handling changes PIT and sound under `VM_BIG_LOCK`, so they
+    /// are read under it too. This runs on every entry, so it does not wait:
+    /// while an AP holds the lock, the last reading stands in, and the next
+    /// entry reads afresh.
+    fn device_deadline(&self) -> Option<u64> {
+        let read = || {
+            let mut dev = self.shared.pit.next_deadline_tsc();
             if let Some(t) = crate::microvm::devices::gpu_backend::resume_tsc() {
                 dev = Some(dev.map_or(t, |d| d.min(t)));
             }
@@ -871,10 +885,21 @@ impl VmContext {
                 let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
                 dev = Some(dev.map_or(t, |d| d.min(t)));
             }
+            dev
+        };
+        if !ap_active() {
+            return read();
         }
-        match (lapic, dev) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        match VM_BIG_LOCK.try_lock() {
+            Some(_big) => {
+                let d = read();
+                LAST_DEV_DEADLINE.store(d.unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
+                d
+            }
+            None => {
+                let v = LAST_DEV_DEADLINE.load(core::sync::atomic::Ordering::Relaxed);
+                (v != 0).then_some(v)
+            }
         }
     }
 
@@ -1983,8 +2008,12 @@ impl VmContext {
 
     // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
     // Reached only when the loop ended (guest exit / cap), not on a
-    // StillRunning yield or a `?` early-return.
-    self.shared.pci.virtio_blk.save();
+    // StillRunning yield or a `?` early-return. APs may still be in an exit
+    // and writing the same device: under the lock, or the snapshot tears.
+    {
+        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        self.shared.pci.virtio_blk.save();
+    }
 
     match last_outcome {
         Some(o) => Ok(SliceOutcome::Exited(o)),
