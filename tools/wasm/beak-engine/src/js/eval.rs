@@ -154,8 +154,7 @@ impl Interp {
                 Some(e) => {
                     let val = self.eval(e, env)?;
                     if let Pat::Ident(n) = &dec.id {
-                        let n = n.clone();
-                        self.name_function(&val, &n);
+                        if e.is_anon_fn_def() { self.name_function(&val, n); }
                     }
                     val
                 }
@@ -387,8 +386,12 @@ impl Interp {
 
     /// Gives a freshly created anonymous function the name it is being bound
     /// to. Visible in stack traces and `f.name`.
+    ///
+    /// Callers decide from the syntax (`Expr::is_anon_fn_def`) whether the
+    /// value qualifies; an object that merely has an empty `name` must keep it.
     pub fn name_function(&mut self, v: &Value, name: &str) {
         let Value::Obj(o) = v else { return };
+        if !matches!(o.borrow().kind, ObjKind::Function(_)) { return }
         let empty = matches!(o.borrow().get_own("name").and_then(|p| p.value.clone()),
             Some(Value::Str(s)) if s.is_empty());
         if !empty { return }
@@ -445,10 +448,7 @@ impl Interp {
         match p {
             Pat::Ident(n) => {
                 if declare { self.init_binding(n, v, env); }
-                else {
-                    self.name_function(&v, n);
-                    self.assign_ident(n, v, env)?;
-                }
+                else { self.assign_ident(n, v, env)?; }
                 Ok(())
             }
             Pat::Assign { left, right } => {
@@ -457,8 +457,7 @@ impl Interp {
                     // `var [a = () => {}] = []` names the arrow `a`, the same
                     // rule as `var f = function(){}` one level deeper.
                     if let Pat::Ident(n) = &**left {
-                        let n = n.clone();
-                        self.name_function(&d, &n);
+                        if right.is_anon_fn_def() { self.name_function(&d, n); }
                     }
                     d
                 } else { v };

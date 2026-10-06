@@ -197,6 +197,20 @@ pub struct ObjProp {
     pub shorthand: bool,
 }
 
+impl Expr {
+    /// `IsAnonymousFunctionDefinition` (ES 8.4.3): only these take the name of
+    /// the binding they are assigned to (NamedEvaluation). Parentheses are not
+    /// in the tree, which matches the spec: `(function(){})` still qualifies,
+    /// `(0, function(){})` does not.
+    pub fn is_anon_fn_def(&self) -> bool {
+        match self {
+            Expr::Func(f) => f.name.is_none(),
+            Expr::Class(c) => c.name.is_none(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjPropValue { Init(Expr), Get(Rc<Func>), Set(Rc<Func>), Method(Rc<Func>), Spread(Expr) }
 

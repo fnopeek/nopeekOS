@@ -840,7 +840,7 @@ impl Compiler {
             }
             let n = self.chunk.name(name);
             // `var f = function(){}` names the function after the variable.
-            if dec.init.is_some() {
+            if dec.init.as_ref().is_some_and(|e| e.is_anon_fn_def()) {
                 self.chunk.emit(Op::NameFunc(n));
             }
             self.chunk.emit(Op::DeclVar {
@@ -978,7 +978,7 @@ impl Compiler {
                     self.expr(right)?;
                     let i = self.chunk.name(n);
                     // `q = function(){}` names the function, as `var q = …`.
-                    self.chunk.emit(Op::NameFunc(i));
+                    if right.is_anon_fn_def() { self.chunk.emit(Op::NameFunc(i)); }
                     self.chunk.emit(Op::StoreVar(i));
                     Ok(())
                 }
@@ -1280,9 +1280,13 @@ impl Compiler {
                                 self.chunk.emit(Op::SetLiteralProto);
                                 continue;
                             }
+                            let named = e.is_anon_fn_def();
                             match k {
-                                Some(n) => { self.chunk.emit(Op::DefineProp(n)); }
-                                None => { self.chunk.emit(Op::DefinePropComputed); }
+                                Some(n) => {
+                                    if named { self.chunk.emit(Op::NameFunc(n)); }
+                                    self.chunk.emit(Op::DefineProp(n));
+                                }
+                                None => { self.chunk.emit(Op::DefinePropComputed { named }); }
                             }
                         }
                         ObjPropValue::Method(f) => {
@@ -1290,8 +1294,11 @@ impl Compiler {
                             let fi = self.chunk.func(f.clone());
                             self.chunk.emit(Op::Closure(fi));
                             match k {
-                                Some(n) => { self.chunk.emit(Op::DefineProp(n)); }
-                                None => { self.chunk.emit(Op::DefinePropComputed); }
+                                Some(n) => {
+                                    self.chunk.emit(Op::NameFunc(n));
+                                    self.chunk.emit(Op::DefineProp(n));
+                                }
+                                None => { self.chunk.emit(Op::DefinePropComputed { named: true }); }
                             }
                         }
                         ObjPropValue::Get(f) | ObjPropValue::Set(f) => {

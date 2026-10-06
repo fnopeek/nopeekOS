@@ -773,6 +773,10 @@ pub struct Interp {
     /// (`undefined`) for call and construct, so this flag is needed: `Symbol`
     /// has a `[[Construct]]`, it just throws inside it.
     pub native_new: bool,
+    /// The new target of the running built-in construct when it differs from
+    /// the constructor itself (`Reflect.construct(F, args, NT)`); otherwise
+    /// `None`. A builtin that needs the class being built reads it here.
+    pub native_new_target: Option<Value>,
     /// The last successful match, only for the Annex B statics `RegExp.$1`,
     /// `RegExp.lastMatch` and friends. They live on the constructor, not on the
     /// expression object, so the state lives here.
@@ -887,7 +891,7 @@ impl Interp {
                  live_dom: core::cell::RefCell::new(None),
                  jobs: alloc::collections::VecDeque::new(),
                  rng: 0x2545_F491_4F6C_DD1D, media: None,
-                 timers: Vec::new(), vnow: 0.0, next_timer: 1, native_new: false, last_match: None, console: Vec::new(), console_dropped: 0 }
+                 timers: Vec::new(), vnow: 0.0, next_timer: 1, native_new: false, native_new_target: None, last_match: None, console: Vec::new(), console_dropped: 0 }
     }
 
     /// Is an observation waiting for its callback?
@@ -2228,7 +2232,7 @@ impl Interp {
                     let val = self.eval(e, &fenv)?;
                     // `x = function(){}` gives the function the field name; same rule as
                     // `var f = function(){}`.
-                    self.name_function(&val, &k);
+                    if e.is_anon_fn_def() { self.name_function(&val, &k); }
                     val
                 }
                 None => Value::Undefined,
@@ -2255,10 +2259,10 @@ impl Interp {
         if !d.node.is_generator && !d.node.is_async {
             if let Some(chunk) = self.func_chunk(&d.node) {
                 self.hoist_body(&d.node.body, &env)?;
-                let implicit = if d.class.is_some() { env_this(&env) } else { Value::Undefined };
                 return match super::vm::Vm::run_function(self, chunk, &env) {
-                    // A constructor without `return` yields its `this`.
-                    Ok(Value::Undefined) => Ok(implicit),
+                    // A constructor without `return` yields its `this`, read after the
+                    // run: `super()` may have replaced it.
+                    Ok(Value::Undefined) if d.class.is_some() => Ok(env_this(&env)),
                     Ok(v) => Ok(v),
                     Err(e) => Err(e),
                 };

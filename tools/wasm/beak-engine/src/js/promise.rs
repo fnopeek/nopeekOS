@@ -203,9 +203,12 @@ fn report_rejections(i: &mut Interp) {
     let list = core::mem::take(&mut i.pending_rejections);
     for p in list {
         let Some(d) = pdata(&p) else { continue };
-        if d.borrow().handled { continue }
-        let PState::Rejected(v) = &d.borrow().state else { continue };
-        let reason = v.clone();
+        // The borrow must end here: the handler below may touch the promise.
+        let reason = {
+            let b = d.borrow();
+            if b.handled { continue }
+            match &b.state { PState::Rejected(v) => v.clone(), _ => continue }
+        };
         // The handler may still answer: `preventDefault` suppresses the report, as in
         // browsers.
         let prevented = super::dombind::dispatch_rejection(i, reason.clone(), Value::Obj(p.clone()))
@@ -564,3 +567,23 @@ fn new_capability(i: &mut Interp, c: &Value) -> C<(Value, Value, Value)> {
 
 const CAP_RES: &str = "\0!cap.res";
 const CAP_REJ: &str = "\0!cap.rej";
+
+#[cfg(test)]
+mod tests {
+    /// An `unhandledrejection` handler may use the promise it is told about.
+    #[test]
+    fn rejection_handler_may_touch_the_promise() {
+        let dom = crate::dom::parse("<html><body></body></html>");
+        let mut i = super::super::interp::Interp::new();
+        i.set_document(super::super::dombind::Doc::from_dom(&dom));
+        let src = "addEventListener('unhandledrejection', function (e) { \
+                   e.preventDefault(); e.promise.catch(function () {}); \
+                   e.promise.then(null, function (r) { console.log('late ' + r) }); \
+                   console.log('seen ' + e.reason) }); \
+                   Promise.reject('x');";
+        let prog = super::super::parse(src, false).expect("parses");
+        assert!(i.run_program(&prog).is_ok());
+        super::run_jobs(&mut i);
+        assert_eq!(i.take_console(), ["seen x", "late x"]);
+    }
+}

@@ -239,10 +239,9 @@ impl Interp {
     /// initialized here.
     pub fn super_call(&mut self, args: &[Value], env: &Rc<RefCell<Env>>) -> C<Value> {
         let this_val = env_this(env);
-        let parent = self.super_parent(env)?;
-        let ctor = self.get(&Value::Obj(parent), "constructor")?;
-        if !self.is_callable(&ctor) {
-            return self.type_err("super: the parent class has no constructor");
+        let ctor = self.super_ctor(env)?;
+        if !self.is_constructor(&ctor) {
+            return self.type_err("super: the parent class is not a constructor");
         }
         // A builtin parent constructor builds its own object and cannot fill
         // `this` (e.g. `class E extends Error {}`). So the built object is
@@ -305,6 +304,23 @@ impl Interp {
     /// one. Public because both engines call it.
     pub fn super_get(&mut self, key: &str, env: &Rc<RefCell<Env>>) -> C<(Value, Value)> {
         self.super_lookup(key, env)
+    }
+
+    /// The constructor `super(...)` calls: `[[GetPrototypeOf]]` of the active
+    /// function (ES 13.3.7.1), found as the home object's own `constructor`.
+    fn super_ctor(&mut self, env: &Rc<RefCell<Env>>) -> C<Value> {
+        let Some(home) = env_home(env) else {
+            return self.type_err("'super' outside of a method");
+        };
+        let own = home.borrow().get_own("constructor").and_then(|p| p.value.clone());
+        if let Some(Value::Obj(f)) = own {
+            if matches!(f.borrow().kind, ObjKind::Function(ref d) if d.class.is_some()) {
+                let p = f.borrow().proto.clone();
+                return Ok(p.map(Value::Obj).unwrap_or(Value::Null));
+            }
+        }
+        let parent = self.super_parent(env)?;
+        self.get(&Value::Obj(parent), "constructor")
     }
 
     /// The prototype `super` looks up on: that of the home object.
@@ -464,10 +480,22 @@ impl Interp {
         if let ObjKind::Native(n) = &fo.borrow().kind {
             if !n.ctor { return Err(self.not_a_constructor(f)); }
             let nf = n.clone();
-            let was = self.native_new;
+            let nt = nt.filter(|v| !matches!(v, Value::Obj(o) if Rc::ptr_eq(o, fo))).cloned();
+            let was = (self.native_new, self.native_new_target.take());
             self.native_new = true;
+            self.native_new_target = nt.clone();
             let r = (nf.func)(self, recv, args);
-            self.native_new = was;
+            self.native_new = was.0;
+            self.native_new_target = was.1;
+            // GetPrototypeFromConstructor (ES 10.1.14): with a distinct new target
+            // the result takes `newTarget.prototype`. Read after the builtin ran, so
+            // its argument checks come first as in the spec; a non-object keeps the
+            // builtin's own prototype.
+            if let (Ok(Value::Obj(o)), Some(ntv)) = (&r, nt) {
+                if let Value::Obj(p) = self.get(&ntv, "prototype")? {
+                    if super::proxy::parts(o).is_none() { o.borrow_mut().proto = Some(p); }
+                }
+            }
             return r;
         }
         if !self.is_constructor(f) { return Err(self.not_a_constructor(f)); }
@@ -527,7 +555,7 @@ impl Interp {
                         self.set_literal_proto(&g, &v);
                         continue;
                     }
-                    self.name_function(&v, &key);
+                    if e.is_anon_fn_def() { self.name_function(&v, &key); }
                     g.borrow_mut().set_prop(key, Prop::data(v));
                 }
                 ObjPropValue::Method(f) => {
@@ -969,6 +997,9 @@ impl Interp {
                    env: &Rc<RefCell<Env>>) -> C<Value> {
         if op == AssignOp::Assign {
             let v = self.eval(right, env)?;
+            if let Pat::Ident(n) = left {
+                if right.is_anon_fn_def() { self.name_function(&v, n); }
+            }
             self.bind_pattern(left, v.clone(), env, false)?;
             return Ok(v);
         }

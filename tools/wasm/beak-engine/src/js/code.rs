@@ -95,8 +95,9 @@ pub enum Op {
     /// `{ __proto__: v }`: sets the prototype of the object on the stack
     /// instead of creating a property.
     SetLiteralProto,
-    /// Stack: obj, key, value -> obj.
-    DefinePropComputed,
+    /// Stack: obj, key, value -> obj. `named` gives an anonymous function
+    /// value the key as its name.
+    DefinePropComputed { named: bool },
     /// Stack: obj, function -> obj. `get` selects getter or setter; both must
     /// be able to land on the same property.
     DefineAccessor { name: u32, get: bool },

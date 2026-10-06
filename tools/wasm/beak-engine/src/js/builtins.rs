@@ -3036,14 +3036,9 @@ pub fn make_realm() -> Realm {
     let mut ta_protos: HashMap<&'static str, Gc> = HashMap::new();
     let ab_proto = new_obj(Some(object_proto.clone()));
     let ab_ctor = native(Some(function_proto.clone()), |i, _, a| {
-        let n = match a.first() {
-            None | Some(Value::Undefined) => 0.0,
-            Some(v) => i.to_number(v)?,
-        };
-        if n < 0.0 || n != to_integer(n) || n > MAX_BUFFER_BYTES as f64 {
-            return i.range_err("invalid ArrayBuffer length");
-        }
-        Ok(i.new_buffer(n as usize))
+        let n = to_index(i, a.first())?;
+        if n > MAX_BUFFER_BYTES { return i.range_err("invalid ArrayBuffer length"); }
+        Ok(i.new_buffer(n))
     }, "ArrayBuffer", 1, true);
     ab_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(ab_proto.clone())));
     ab_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(ab_ctor.clone())));
@@ -3231,21 +3226,19 @@ pub fn make_realm() -> Realm {
             return i.type_err("DataView needs a buffer");
         };
         let have = bd.bytes.borrow().len();
-        let off = match a.get(1) { None => 0.0, Some(v) => i.to_number(v)? };
-        if off < 0.0 || off as usize > have { return i.range_err("offset out of range") }
+        let off = to_index(i, a.get(1))?;
+        if off > have { return i.range_err("offset out of range") }
         let len = match a.get(2) {
-            None | Some(Value::Undefined) => have - off as usize,
-            Some(v) => {
-                let n = i.to_number(v)?;
-                if n < 0.0 || n > MAX_BUFFER_BYTES as f64 {
-                    return i.range_err("invalid DataView length");
-                }
-                n as usize
+            None | Some(Value::Undefined) => have - off,
+            v => {
+                let n = to_index(i, v)?;
+                if n > MAX_BUFFER_BYTES { return i.range_err("invalid DataView length"); }
+                n
             }
         };
-        if off as usize + len > have { return i.range_err("length out of range") }
+        if off + len > have { return i.range_err("length out of range") }
         Ok(Value::Obj(new_kind(Some(i.realm.dataview_proto.clone()),
-            ObjKind::DataView(Rc::new(DvData { buf: b.clone(), offset: off as usize, len })))))
+            ObjKind::DataView(Rc::new(DvData { buf: b.clone(), offset: off, len })))))
     }, "DataView", 1, true);
     dv_ctor.borrow_mut().define("prototype", Prop::frozen(Value::Obj(dv_proto.clone())));
     dv_proto.borrow_mut().define("constructor", Prop::builtin(Value::Obj(dv_ctor.clone())));
@@ -3550,12 +3543,10 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
                 ObjKind::Buffer(bd) => bd.bytes.borrow().len(),
                 _ => 0,
             };
-            let off = match a.get(1) { None | Some(Value::Undefined) => 0.0,
-                                       Some(v) => i.to_number(v)? };
-            if off < 0.0 || off as usize > have || (off as usize) % kind.size() != 0 {
+            let off = to_index(i, a.get(1))?;
+            if off % kind.size() != 0 || off > have {
                 return i.range_err("start offset is outside the buffer");
             }
-            let off = off as usize;
             let len = match a.get(2) {
                 None | Some(Value::Undefined) => {
                     if (have - off) % kind.size() != 0 {
@@ -3563,12 +3554,10 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
                     }
                     (have - off) / kind.size()
                 }
-                Some(v) => {
-                    let n = i.to_number(v)?;
-                    if n < 0.0 || n > MAX_BUFFER_BYTES as f64 {
-                        return i.range_err("invalid typed array length");
-                    }
-                    n as usize
+                v => {
+                    let n = to_index(i, v)?;
+                    if n > MAX_BUFFER_BYTES { return i.range_err("invalid typed array length"); }
+                    n
                 }
             };
             if off + len * kind.size() > have {
@@ -3616,24 +3605,33 @@ fn ta_new(i: &mut Interp, kind: ElemKind, a: &[Value]) -> C<Value> {
             }
             Ok(out)
         }
-        Some(v) => {
-            let n = i.to_number(v)?;
-            if n < 0.0 || n != to_integer(n) || n * kind.size() as f64 > MAX_BUFFER_BYTES as f64 {
+        v => {
+            let n = to_index(i, v)?;
+            if n.saturating_mul(kind.size()) > MAX_BUFFER_BYTES {
                 return i.range_err("invalid typed array length");
             }
-            Ok(i.new_typed(kind, n as usize))
+            Ok(i.new_typed(kind, n))
         }
     }
+}
+
+/// `ToIndex` (ES 7.1.22): `undefined` is 0, otherwise truncate; negative or
+/// above 2^53 - 1 is a RangeError. Callers apply their own allocation cap.
+fn to_index(i: &mut Interp, v: Option<&Value>) -> C<usize> {
+    let n = match v {
+        None | Some(Value::Undefined) => return Ok(0),
+        Some(v) => to_integer(i.to_number(v)?),
+    };
+    if !(0.0..=9007199254740991.0).contains(&n) { return i.range_err("index out of range") }
+    Ok(n as usize)
 }
 
 fn dv_get(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
     // For `getFloat*` and the integer getters the byte order is argument 1;
     // only `set*` shifts it one place back.
     let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
-    let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
-    if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
-    let off = off as usize;
-    if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
+    let off = to_index(i, a.first())?;
+    if off.saturating_add(kind.size()) > d.len { return i.range_err("offset is out of bounds") }
     let little = matches!(kind, ElemKind::I8 | ElemKind::U8)
         || a.get(1).map(|v| v.truthy()).unwrap_or(false);
     let ObjKind::Buffer(b) = &d.buf.borrow().kind else { return i.type_err("detached") };
@@ -3645,13 +3643,11 @@ fn dv_get(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
 
 fn dv_set(i: &mut Interp, t: Value, a: &[Value], kind: ElemKind) -> C<Value> {
     let Some(d) = dv_of(&t) else { return i.type_err("not a DataView") };
-    let off = i.to_number(a.first().unwrap_or(&Value::Undefined))?;
-    if off < 0.0 || !off.is_finite() { return i.range_err("offset is out of bounds") }
-    let off = off as usize;
+    let off = to_index(i, a.first())?;
     // The conversion happens before the range check; it is observable.
     let big = if kind.is_big() { Some(i.to_bigint(a.get(1).unwrap_or(&Value::Undefined))?) } else { None };
     let v = match &big { Some(_) => 0.0, None => i.to_number(a.get(1).unwrap_or(&Value::Undefined))? };
-    if off + kind.size() > d.len { return i.range_err("offset is out of bounds") }
+    if off.saturating_add(kind.size()) > d.len { return i.range_err("offset is out of bounds") }
     let little = matches!(kind, ElemKind::I8 | ElemKind::U8)
         || a.get(2).map(|x| x.truthy()).unwrap_or(false);
     let n = kind.size();
@@ -3675,6 +3671,13 @@ fn make_error(i: &mut Interp, kind: &'static str, a: &[Value]) -> C<Value> {
         if !matches!(m, Value::Undefined) {
             let s = i.to_string(m)?;
             e.borrow_mut().define("message", Prop::builtin(Value::Str(s)));
+        }
+    }
+    // InstallErrorCause (ES 20.5.8.1).
+    if let Some(opts @ Value::Obj(o)) = a.get(1) {
+        if i.has_property(o, "cause") {
+            let c = i.get(opts, "cause")?;
+            e.borrow_mut().define("cause", Prop::builtin(c));
         }
     }
     Ok(Value::Obj(e))

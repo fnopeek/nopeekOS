@@ -598,18 +598,15 @@ impl Vm {
             Op::DefineProp(n) => {
                 let val = self.pop();
                 let key: Rc<str> = chunk.names[*n as usize].clone();
-                // `{ m(){} }` and `{ a: function(){} }` take the key as name,
-                // like `var f = ...`.
-                i.name_function(&val, &key);
                 if let Value::Obj(g) = self.top() {
                     g.borrow_mut().set_prop(key, super::value::Prop::data(val));
                 }
             }
-            Op::DefinePropComputed => {
+            Op::DefinePropComputed { named } => {
                 let val = self.pop();
                 let key = self.pop();
                 let k = i.to_prop_key(&key)?;
-                i.name_function(&val, &k);
+                if *named { i.name_function(&val, &k); }
                 if let Value::Obj(g) = self.top() {
                     g.borrow_mut().set_prop(k, super::value::Prop::data(val));
                 }
@@ -1607,5 +1604,74 @@ mod tests {
             };
             assert_eq!(&got, want, "fuer {src}");
         }
+    }
+
+    /// The completion value of `src` as a string, on both engines; they must agree.
+    fn on_both(src: &str) -> alloc::string::String {
+        let mut out = alloc::vec::Vec::new();
+        for novm in [false, true] {
+            let mut i = super::Interp::new();
+            i.vm_off = novm;
+            let prog = crate::js::parse(src, false).expect("parses");
+            let got = match i.run_program(&prog) {
+                Ok(v) => i.to_string(&v).map(|s| s.to_string())
+                          .unwrap_or_else(|_| alloc::string::String::from("?")),
+                Err(_) => alloc::string::String::from("THROW"),
+            };
+            out.push(got);
+        }
+        assert_eq!(out[0], out[1], "engines disagree on {src}");
+        out.pop().unwrap()
+    }
+
+    /// An object returned by the parent constructor becomes `this` of the
+    /// derived constructor, also when its body has no `return`.
+    #[test]
+    fn super_result_replaces_this() {
+        assert_eq!(on_both("function B(){ return {x:1} } \
+                            class D extends B { constructor(){ super(); this.y = 2 } } \
+                            JSON.stringify(new D())"), r#"{"x":1,"y":2}"#);
+        // `super()` calls the constructor's prototype, not `parent.prototype.constructor`.
+        assert_eq!(on_both("class A { constructor(){ this.a = 1 } } class D extends A {} \
+                            Object.setPrototypeOf(D, function O(){ this.o = 1 }); \
+                            JSON.stringify(new D())"), r#"{"o":1}"#);
+    }
+
+    /// `Reflect.construct` with a builtin takes the prototype from the new target.
+    #[test]
+    fn reflect_construct_native_uses_new_target() {
+        assert_eq!(on_both("function S(){} \
+                            var e = Reflect.construct(Error, ['m'], S), a = Reflect.construct(Array, [2], S); \
+                            [e instanceof S, e.message, a instanceof S, a.length].join()"),
+                   "true,m,true,2");
+    }
+
+    /// Only an anonymous function definition takes the binding's name.
+    #[test]
+    fn names_come_from_syntax_not_values() {
+        assert_eq!(on_both("var p = {name: ''}; p.name = 'ok'; var q; q = {name: ''}; q.name = 'k'; \
+                            var o = {z: p}; var f = (0, function(){}); var g = (function(){}); \
+                            var h; h = () => 0; var y; [y] = [function(){}]; \
+                            var m = {a: function(){}, ['c' + 1]: function(){}, n(){}}; \
+                            [p.name, q.name, JSON.stringify(f.name), g.name, h.name, \
+                             JSON.stringify(y.name), m.a.name, m.c1.name, m.n.name].join()"),
+                   r#"ok,k,"",g,h,"",a,c1,n"#);
+    }
+
+    /// `ToIndex` truncates; only a negative or too large value is a RangeError.
+    #[test]
+    fn typed_array_lengths_use_to_index() {
+        assert_eq!(on_both("[new Uint8Array(2.5).length, new Float64Array(1.9).length, \
+                            new ArrayBuffer(3.7).byteLength, new DataView(new ArrayBuffer(4), 1.5).byteLength, \
+                            new DataView(new ArrayBuffer(4)).getUint8(0.9)].join()"), "2,1,3,3,0");
+        assert_eq!(on_both("try { new Uint8Array(-1); 'no' } catch (e) { e.name }"), "RangeError");
+    }
+
+    #[test]
+    fn error_cause() {
+        assert_eq!(on_both("var e = new Error('m', {cause: 5}); \
+                            [e.cause, 'cause' in new Error('m'), 'cause' in new Error('m', {}), \
+                             new TypeError('t', {cause: 0}).cause, e.propertyIsEnumerable('cause')].join()"),
+                   "5,false,false,0,false");
     }
 }
