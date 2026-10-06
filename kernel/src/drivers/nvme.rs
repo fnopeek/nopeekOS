@@ -194,17 +194,12 @@ static MAX_BLOCKS_PER_CMD: AtomicU32 = AtomicU32::new(64);
 
 /// Write submission entry `idx` of `sq` as one volatile store.
 fn sq_write(sq: &DmaRegion, idx: u16, cmd: SqEntry) {
-    let slot = sq.sub(idx as u64 * 64, 64);
-    // SAFETY: `slot` is a 64-byte, 64-aligned part of the ring (bounds
-    // checked by `sub`), identity-mapped RAM owned by this driver.
-    unsafe { core::ptr::write_volatile(slot.phys() as *mut SqEntry, cmd); }
+    sq.write_obj(idx as u64 * 64, cmd);
 }
 
 /// Read completion entry `idx` of `cq` as one volatile load.
 fn cq_read(cq: &DmaRegion, idx: u16) -> CqEntry {
-    let slot = cq.sub(idx as u64 * 16, 16);
-    // SAFETY: as in `sq_write`, a 16-byte, 16-aligned entry.
-    unsafe { core::ptr::read_volatile(slot.phys() as *const CqEntry) }
+    cq.read_obj(idx as u64 * 16)
 }
 
 /// Ring doorbell for a submission queue.

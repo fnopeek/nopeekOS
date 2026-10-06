@@ -16,6 +16,10 @@ pub trait Off: Copy {
 impl Off for u32 { fn get(self) -> u64 { self as u64 } }
 impl Off for u64 { fn get(self) -> u64 { self } }
 impl Off for usize { fn get(self) -> u64 { self as u64 } }
+/// Lets an unsuffixed literal be an offset; a negative one panics.
+impl Off for i32 {
+    fn get(self) -> u64 { u64::try_from(self).expect("negative register offset") }
+}
 
 /// A window of memory-mapped device registers.
 #[derive(Clone, Copy, Debug)]
@@ -132,6 +136,8 @@ impl Mmio {
 pub struct Port(u16);
 
 impl Port {
+    pub fn number(&self) -> u16 { self.0 }
+
     /// # Safety
     /// The port must belong to a device this code drives; an access to a
     /// foreign port can reset or reprogram hardware.
@@ -298,6 +304,25 @@ impl DmaRegion {
     pub fn w64(&self, off: impl Off, v: u64) {
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 8) as *mut u64, v) }
+    }
+
+    /// Write `v` at `off` as one volatile access of its size (a queue entry
+    /// the device must never see half-written).
+    pub fn write_obj<T: Copy>(&self, off: impl Off, v: T) {
+        let p = self.at(off, core::mem::size_of::<T>() as u64);
+        assert!(p % core::mem::align_of::<T>() as u64 == 0, "dma object misaligned");
+        // SAFETY: as in `r8`, and aligned for `T`.
+        unsafe { core::ptr::write_volatile(p as *mut T, v) }
+    }
+
+    /// Read a `T` at `off` as one volatile access. `T` must be valid for
+    /// any bit pattern (plain integers and arrays of them).
+    pub fn read_obj<T: Copy>(&self, off: impl Off) -> T {
+        let p = self.at(off, core::mem::size_of::<T>() as u64);
+        assert!(p % core::mem::align_of::<T>() as u64 == 0, "dma object misaligned");
+        // SAFETY: as in `write_obj`; the caller's `T` accepts every bit
+        // pattern the device may leave.
+        unsafe { core::ptr::read_volatile(p as *const T) }
     }
 
     /// Copy `src` into the region at `off`.
