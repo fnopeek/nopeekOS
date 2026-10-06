@@ -3,13 +3,13 @@
 //! For apps that rebuild everything per frame: allocate freely, then
 //! `reset(mark)` back to the state taken after the long-lived data was set
 //! up. Nothing is freed individually. An app whose state outlives a frame
-//! in ways that are hard to keep below the mark is better served by the
-//! growing heap (`heap`, feature `heap`).
+//! in ways that are hard to keep below the mark is better served by a
+//! growing heap (the widget SDK's `heap`).
 //!
 //! ```ignore
 //! #[global_allocator]
-//! static ALLOCATOR: nopeek_widgets::bump::Bump<{ 2 * 1024 * 1024 }> =
-//!     nopeek_widgets::bump::Bump::new();
+//! static ALLOCATOR: npk_sys::bump::Bump<{ 2 * 1024 * 1024 }> =
+//!     npk_sys::bump::Bump::new();
 //! ```
 
 use core::alloc::{GlobalAlloc, Layout};

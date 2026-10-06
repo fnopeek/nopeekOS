@@ -1,0 +1,13 @@
+[package]
+name = "npk_sys"
+version = "0.1.0"
+edition = "2024"
+description = "nopeekOS host ABI for WASM modules: safe wrappers, no allocator needed."
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true

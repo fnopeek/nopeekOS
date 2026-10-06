@@ -102,6 +102,7 @@ fn reserved_slots_round_trip() {
     let t0 = Widget::Popover {
         anchor: NodeId(7),
         child: alloc::boxed::Box::new(Widget::Divider),
+        on_dismiss: ActionId(3),
         modifiers: vec![Modifier::RoleOverride(Role::Group)],
     };
     let bytes = encode(&t0).expect("encode");
@@ -111,7 +112,6 @@ fn reserved_slots_round_trip() {
 
 #[test]
 fn events_round_trip() {
-    use nopeek_widgets::wire::WIRE_VERSION as _;
     let events = [
         Event::Key(KeyCode::Enter),
         Event::Key(KeyCode::Char(b'a')),

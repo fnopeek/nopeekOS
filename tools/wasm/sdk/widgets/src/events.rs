@@ -10,11 +10,6 @@
 use crate::abi::Event;
 use alloc::vec;
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_event_poll(ptr: i32, max: i32) -> i32;
-}
-
 /// What one poll found.
 pub enum Poll {
     Event(Event),
@@ -26,8 +21,7 @@ pub enum Poll {
 /// Take the next event, decoding it from `buf` or, if it is larger, from a
 /// buffer of its size.
 pub fn poll(buf: &mut [u8]) -> Poll {
-    // SAFETY: the host writes at most `buf.len()` bytes into `buf`.
-    let n = unsafe { npk_event_poll(buf.as_mut_ptr() as i32, buf.len() as i32) };
+    let n = npk_sys::event_poll(buf);
     match n {
         0 => Poll::Empty,
         -1 => Poll::Gone,
@@ -35,8 +29,7 @@ pub fn poll(buf: &mut [u8]) -> Poll {
         n => {
             let needed = (-(n as i64) - 2) as usize;
             let mut big = vec![0u8; needed];
-            // SAFETY: as above, for `big`.
-            let m = unsafe { npk_event_poll(big.as_mut_ptr() as i32, big.len() as i32) };
+            let m = npk_sys::event_poll(&mut big);
             match m {
                 m if m > 0 => decode(&big[..m as usize]),
                 -1 => Poll::Gone,

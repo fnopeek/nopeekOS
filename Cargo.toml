@@ -9,6 +9,7 @@ exclude = [
     "tools/wasm/audio_hda",
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
+    "tools/wasm/sdk/npk_sys",
     "tools/wasm/drun",
     "tools/wasm/dock",
     "tools/wasm/bar",

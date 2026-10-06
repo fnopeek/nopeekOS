@@ -1,13 +1,7 @@
 //! Small runtime pieces every app needs the same way.
 
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn npk_log(ptr: i32, len: i32);
-}
-
 fn log(s: &str) {
-    // SAFETY: a valid slice of this module's memory.
-    unsafe { npk_log(s.as_ptr() as i32, s.len() as i32) };
+    npk_sys::log(s.as_bytes());
 }
 
 /// Log a panic's tag and location without allocating; the heap may be the

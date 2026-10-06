@@ -49,11 +49,16 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.30.0"
+version = "0.32.0"
 dependencies = [
+ "npk_sys",
  "postcard",
  "serde",
 ]
+
+[[package]]
+name = "npk_sys"
+version = "0.1.0"
 
 [[package]]
 name = "postcard"

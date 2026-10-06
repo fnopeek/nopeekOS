@@ -1,6 +1,6 @@
 [package]
 name = "nopeek_widgets"
-version = "0.31.0"
+version = "0.32.0"
 edition = "2024"
 description = "nopeekOS widget SDK — declarative GUI types for WASM apps."
 license = "AGPL-3.0-or-later"
@@ -17,6 +17,7 @@ crate-type = ["rlib"]
 heap = ["dep:talc", "dep:spin"]
 
 [dependencies]
+npk_sys = { path = "../npk_sys" }
 talc = { version = "5", default-features = false, optional = true }
 spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "lock_api"], optional = true }
 

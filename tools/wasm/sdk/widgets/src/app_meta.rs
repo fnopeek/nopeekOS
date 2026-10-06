@@ -99,14 +99,15 @@ mod tests {
         assert_eq!(decode(&bytes).unwrap(), m);
     }
 
-    /// An icon the reader has never heard of must cost the icon, not the app.
+    /// An icon number the reader has never heard of still decodes; the
+    /// renderer draws its fallback for it.
     #[test]
     fn unknown_icon_keeps_name_and_description() {
         let blob = b"\x01\x04tune\x0cAudio player\x00\xfa\x01";
         let m = decode(blob).expect("unknown icon must not drop the app");
         assert_eq!(m.display_name, "tune");
         assert_eq!(m.description, "Audio player");
-        assert_eq!(m.icon, IconRef::Builtin(IconId::File));
+        assert_eq!(m.icon, IconRef::Builtin(IconId(250)));
     }
 
     #[test]
