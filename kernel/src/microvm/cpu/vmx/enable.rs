@@ -1028,9 +1028,8 @@ impl VmContext {
         // Stop the off-vCPU net backend first (it holds &'static GuestMem via
         // guest_mem::active(), freed by clear_active() below). Idempotent.
         let workers_gone = crate::microvm::devices::net_dataplane::stop_worker();
-        // Persist the home image before teardown — see the svm mirror:
-        // the window-close path reaches close() without run_slice's
-        // loop-end save(), so without this the profile is lost on close.
+        // Persist the home image before teardown: the one save, see the svm
+        // mirror.
         self.shared.dev.lock().pci.virtio_blk.save();
         // SAFETY: this vCPU entered VMX root on this core → VMXOFF is valid.
         unsafe { vmx_exit_root(); }
@@ -1958,11 +1957,6 @@ impl VmContext {
         None => kprintln!("[microvm] run_slice returning Err (no outcome captured)"),
     }
 
-    // Persist the virtio-blk profile-image to npkFS (encrypted at rest).
-    // Reached only when the loop ended (guest exit / cap), not on a
-    // StillRunning yield or a `?` early-return. APs may still be in an exit
-    // and writing the same device: under the lock, or the snapshot tears.
-    self.shared.dev.lock().pci.virtio_blk.save();
 
     match last_outcome {
         Some(o) => Ok(SliceOutcome::Exited(o)),

@@ -850,10 +850,10 @@ impl VmContext {
         // have stopped touching it. Bounded-waits for the fiber to exit;
         // idempotent (the teardown path calls it again).
         let workers_gone = crate::microvm::devices::net_dataplane::stop_worker();
-        // Persist the home image to npkFS before freeing. close() is
-        // reached on every teardown, including the window-close path
-        // (VM_CLOSE_REQUESTED → break → close), where run_slice's own
-        // loop-end save() never runs (it returned StillRunning).
+        // Persist the home image to npkFS before freeing. close() is the one
+        // save: every teardown reaches it (guest exit, run error, window
+        // close), after the APs have stopped, so the image does not change
+        // under the stream and no vCPU waits for the device lock meanwhile.
         self.shared.dev.lock().pci.virtio_blk.save();
         if !workers_gone {
             // A worker may still read guest memory and fault pages in: keep
@@ -1841,11 +1841,6 @@ impl VmContext {
         );
     }
 
-    // Persist the virtio-blk profile-image to npkFS (encrypted at
-    // rest). Reached only when the loop ended (guest exit / cap), not
-    // on a StillRunning yield. APs may still be in an exit and writing
-    // the same device: under the lock, or the snapshot tears.
-    self.shared.dev.lock().pci.virtio_blk.save();
 
     match last_outcome {
         Some(o) => Ok(SliceOutcome::Exited(o)),
