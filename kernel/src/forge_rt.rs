@@ -129,6 +129,28 @@ fn unmap_range(at: u64, bytes: u64) {
     }
 }
 
+/// May an instance hold `total` bytes of linear memory, `add` of them about
+/// to be mapped? The per-module cap, then the machine-wide reserve. Shared by
+/// instantiation and `memory.grow`: a module that declares a large initial
+/// memory must not get what growing would refuse.
+fn may_map(total: u64, add: u64) -> Result<(), alloc::string::String> {
+    if total > MAX_INSTANCE_BYTES {
+        return Err(alloc::format!("module cap reached ({} MB of at most {} MB)",
+            total / (1024 * 1024), MAX_INSTANCE_BYTES / (1024 * 1024)));
+    }
+    let (_, free_mb) = crate::memory::stats();
+    let want_mb = (add as usize).div_ceil(1024 * 1024);
+    if free_mb < KERNEL_RESERVE_MB + want_mb {
+        return Err(alloc::format!("machine nearly full ({} MB free, {} MB reserve, {} MB asked)",
+            free_mb, KERNEL_RESERVE_MB, want_mb));
+    }
+    Ok(())
+}
+
+/// Most table entries an instance gets (8 + 4 bytes each on the kernel
+/// heap). wasmparser allows ten million.
+const MAX_TABLE_ENTRIES: usize = 1 << 20;
+
 impl Memory {
     /// Reserve an instance's address space and map its initial pages.
     ///
@@ -137,8 +159,13 @@ impl Memory {
     pub fn new(initial_pages: u64) -> Option<Memory> {
         let slot = take_slot()?;
         let base = REGION_BASE + slot * INSTANCE_STRIDE;
-        let size = initial_pages * 65536;
+        let size = initial_pages.saturating_mul(65536);
         if size > MAX_MEMORY_BYTES {
+            give_slot(slot);
+            return None;
+        }
+        if let Err(why) = may_map(size, size) {
+            crate::kprintln!("[npk] forge: initial memory refused — {}", why);
             give_slot(slot);
             return None;
         }
@@ -373,24 +400,13 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
         };
         if new_pages > max_pages || new_pages * 65536 > MAX_MEMORY_BYTES {
             crate::kprintln!(
-                "[npk] forge: memory.grow abgelehnt — Deckel erreicht ({} von hoechstens {} Seiten)",
+                "[npk] forge: memory.grow refused — limit reached ({} of at most {} pages)",
                 new_pages, max_pages);
             return u32::MAX;
         }
-        // The per-module cap, then the machine-wide reserve. Both refuse the
-        // module rather than panic the kernel.
-        if new_pages * 65536 > MAX_INSTANCE_BYTES {
-            crate::kprintln!(
-                "[npk] forge: memory.grow abgelehnt — Modul-Deckel erreicht ({} MB von hoechstens {} MB)",
-                new_pages * 65536 / (1024 * 1024), MAX_INSTANCE_BYTES / (1024 * 1024));
-            return u32::MAX;
-        }
-        let (_, free_mb) = crate::memory::stats();
-        let want_mb = (delta as usize * 65536).div_ceil(1024 * 1024);
-        if free_mb < KERNEL_RESERVE_MB + want_mb {
-            crate::kprintln!(
-                "[npk] forge: memory.grow abgelehnt — Maschine fast leer ({} MB frei, {} MB Reserve, {} MB gefragt)",
-                free_mb, KERNEL_RESERVE_MB, want_mb);
+        // Both refuse the module rather than panic the kernel.
+        if let Err(why) = may_map(new_pages * 65536, delta as u64 * 65536) {
+            crate::kprintln!("[npk] forge: memory.grow refused — {}", why);
             return u32::MAX;
         }
         if delta > 0 {
@@ -401,7 +417,7 @@ extern "C" fn grow(ctx: *mut u64, delta: u32) -> u32 {
                 // visible here, so log it.
                 let (frames, mb) = crate::memory::stats();
                 crate::kprintln!(
-                    "[npk] forge: memory.grow abgelehnt — {} Seiten gefragt, {} MB frei ({} Rahmen)",
+                    "[npk] forge: memory.grow refused — {} pages asked, {} MB free ({} frames)",
                     delta, mb, frames);
                 return u32::MAX;
             }
@@ -489,6 +505,7 @@ impl Instance {
             .len()
             .saturating_sub(m.plan.global_init.len());
         let mut globals: Vec<u64> = Vec::new();
+        globals.try_reserve_exact(m.plan.global_types.len() + 1).ok()?;
         globals.resize(imported_globals, 0);
         for g in &m.plan.global_init {
             globals.push(g.unwrap_or(0) as u64);
@@ -496,8 +513,15 @@ impl Instance {
         globals.push(0); // never hand out a null base
 
         let slots = m.plan.table.map(|(min, _)| min as usize).unwrap_or(0);
+        if slots > MAX_TABLE_ENTRIES {
+            crate::kprintln!("[npk] forge: table of {} entries refused (at most {})",
+                slots, MAX_TABLE_ENTRIES);
+            return None;
+        }
         let mut table: Vec<u64> = Vec::new();
         let mut table_sigs: Vec<u32> = Vec::new();
+        table.try_reserve_exact(slots.max(1)).ok()?;
+        table_sigs.try_reserve_exact(slots.max(1)).ok()?;
         table.resize(slots.max(1), trap_stub);
         table_sigs.resize(slots.max(1), u32::MAX);
         for (off, funcs) in &m.plan.elem_init {

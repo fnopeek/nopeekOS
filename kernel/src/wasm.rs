@@ -81,7 +81,22 @@ const MAX_DMA_ALLOCS: usize = 1024;
 const MAX_DMA_PAGES: usize = 2048; // 8MB total (iwlwifi FW sections ~1.3MB)
 const MAX_DMA_PAGES_PER_CALL: usize = 1024; // 4MB; a single FW section can exceed 256KB
 
+/// The caps forge applies in `forge_rt`, for wasmi: linear memory up to
+/// `MAX_INSTANCE_BYTES` (initial size included), tables up to a million
+/// entries, one memory. A refused growth fails the instruction instead of
+/// exhausting the kernel heap, which backs wasmi's memories.
+fn guest_limits() -> wasmi::StoreLimits {
+    wasmi::StoreLimitsBuilder::new()
+        .memory_size(crate::forge_rt::MAX_INSTANCE_BYTES as usize)
+        .table_elements(1 << 20)
+        .memories(1)
+        .build()
+}
+
 pub(crate) struct HostState {
+    /// wasmi's resource limits for this instance (`guest_limits`). forge
+    /// enforces the same caps in `forge_rt` and ignores this field.
+    limits: wasmi::StoreLimits,
     output: String,
     pub(crate) cap_id: CapId,
     /// When true, npk_print writes directly to terminal instead of buffering
@@ -506,6 +521,7 @@ fn wasm_worker_task(arg: u64) {
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
 
     let mut store = Store::new(&engine, HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id: job.cap_id,
         net_reach: crate::intent::http::Reach::Public,
@@ -525,6 +541,7 @@ fn wasm_worker_task(arg: u64) {
         wasi: None,
         tcp_handles: Vec::new(),
     });
+    store.limiter(|s| &mut s.limits);
     let _ = store.set_fuel(INTERACTIVE_FUEL);
 
     let mut linker = <Linker<HostState>>::new(&engine);
@@ -623,6 +640,7 @@ fn forge_worker_task(slot: usize, job: WasmJob) {
     // Here we own the state (under wasmi the Store holds it). It must not
     // move while the instance holds its pointer in the vmctx.
     let mut hs = HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id: job.cap_id,
         net_reach: crate::intent::http::Reach::Public,
@@ -727,6 +745,7 @@ fn execute_inner(
         .map_err(|_| WasmError::InvalidModule)?;
 
     let mut store = Store::new(&engine, HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id,
         direct_output: false,
@@ -746,6 +765,7 @@ fn execute_inner(
         wasi: None,
         tcp_handles: Vec::new(),
     });
+    store.limiter(|s| &mut s.limits);
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(&engine);
@@ -809,6 +829,7 @@ pub fn execute_wasi(
         crate::interrupts::ticks().saturating_sub(t_c) * 10);
 
     let mut store = Store::new(&engine, HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id,
         direct_output: true,
@@ -828,6 +849,7 @@ pub fn execute_wasi(
         wasi: Some(ctx),
         tcp_handles: Vec::new(),
     });
+    store.limiter(|s| &mut s.limits);
     store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(&engine);
@@ -877,6 +899,7 @@ fn execute_inner_forge(
     };
 
     let mut hs = HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id,
         direct_output: false,
@@ -946,6 +969,7 @@ pub fn execute_wasi_forge(
     // Here we own the state (under wasmi the Store holds it). It must not
     // move while the instance holds its pointer in the vmctx.
     let mut hs = HostState {
+        limits: guest_limits(),
         output: String::new(),
         cap_id,
         direct_output: true,
