@@ -66,7 +66,6 @@ pub fn init() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
             let info = framebuffer::get_info();
             crate::gui::background::draw_background(bg_buf, &info);
-            crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
         }
     }
 
@@ -75,10 +74,6 @@ pub fn init() {
 
     // Initialize lock-free cursor position (centered, screen bounds for clamping)
     cursor::init_atomic(screen_w, screen_h);
-
-    // Cache framebuffer MMIO address for IRQ-safe cursor draw
-    let fb_info = framebuffer::get_info();
-    cursor::cache_fb_info(fb_info.addr, fb_info.pitch);
 
     *COMPOSITOR.lock() = Some(comp);
     ACTIVE.store(true, Ordering::Release);
@@ -414,7 +409,6 @@ pub fn force_redraw() {
         if let Some((bg_buf, _w, _h, _p)) = crate::layers::buffer(crate::layers::LAYER_BG) {
             let info = framebuffer::get_info();
             crate::gui::background::draw_background(bg_buf, &info);
-            crate::layers::mark_full_dirty(crate::layers::LAYER_BG);
         }
     }
 

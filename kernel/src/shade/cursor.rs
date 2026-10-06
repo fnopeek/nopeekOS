@@ -6,7 +6,7 @@
 //!
 //! Mouse position is stored as atomics, so input updates it without a lock.
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 /// Cursor dimensions.
 const CURSOR_W: u32 = 15;
@@ -355,16 +355,6 @@ impl MouseState {
         (self.buttons & 2) == 0 && (self.prev_buttons & 2) != 0
     }
 
-}
-
-/// Cached framebuffer MMIO address for IRQ-safe cursor draw
-static IRQ_FB_ADDR: AtomicU64 = AtomicU64::new(0);
-static IRQ_FB_PITCH: AtomicU32 = AtomicU32::new(0);
-
-/// Cache framebuffer info for IRQ cursor draw. Call after GPU init.
-pub fn cache_fb_info(addr: u64, pitch: u32) {
-    IRQ_FB_ADDR.store(addr, Ordering::Relaxed);
-    IRQ_FB_PITCH.store(pitch, Ordering::Relaxed);
 }
 
 /// Paint cursor bitmap into the back-shadow buffer at the current

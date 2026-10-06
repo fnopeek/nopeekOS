@@ -3288,9 +3288,6 @@ impl Compositor {
         render::fill_rounded_rect_alpha(chrome_buf, info,
             cx, cy, cw, ch,
             win.bg_color, inner_r, opacity);
-
-        crate::layers::mark_dirty(crate::layers::LAYER_CHROME,
-            win.x, win.y, win.width, win.height);
     }
 
     /// Render terminal text for a window to Layer 2.
@@ -3321,8 +3318,6 @@ impl Compositor {
 
         // Render text characters into text layer
         terminal::render_to_window(text_buf, info, cx, cy, cw, ch, scale, win.terminal_idx);
-
-        crate::layers::mark_dirty(crate::layers::LAYER_TEXT, cx, cy, cw, ch);
     }
 
     /// Render only the input line to Layer 2 (fast path for typing).

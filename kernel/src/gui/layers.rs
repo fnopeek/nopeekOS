@@ -15,8 +15,6 @@ pub const LAYER_CHROME: usize = 1;
 pub const LAYER_TEXT: usize = 2;
 /// Number of layers.
 const LAYER_COUNT: usize = 3;
-/// Dirty marks per layer before it counts as fully dirty.
-const MAX_DIRTY: usize = 16;
 
 /// Per-layer state.
 struct Layer {
@@ -24,10 +22,6 @@ struct Layer {
     buf: *mut u8,
     /// Buffer size in bytes.
     size: usize,
-    /// Dirty marks since the last clear.
-    dirty_count: usize,
-    /// If true, entire layer needs compositing (e.g. after init or clear).
-    full_dirty: bool,
 }
 
 // SAFETY: Layer buffers are heap-allocated and accessed under LAYERS mutex.
@@ -38,8 +32,6 @@ impl Layer {
         Layer {
             buf: core::ptr::null_mut(),
             size: 0,
-            dirty_count: 0,
-            full_dirty: false,
         }
     }
 }
@@ -110,8 +102,6 @@ pub fn init(width: u32, height: u32, pitch: u32) {
         }
         layer.buf = buf;
         layer.size = buf_size;
-        layer.full_dirty = true;
-        layer.dirty_count = 0;
     }
 
     stack.width = width;
@@ -135,12 +125,9 @@ pub fn clear(layer_idx: usize) {
     let layer = &mut stack.layers[layer_idx];
     // SAFETY: buffer is valid and sized correctly
     unsafe { core::ptr::write_bytes(layer.buf, 0, layer.size); }
-    layer.full_dirty = true;
-    layer.dirty_count = 0;
 }
 
 /// Get raw pointer to a layer buffer for direct writes.
-/// Caller must call `mark_dirty` after writing.
 ///
 /// SAFETY: Caller must ensure writes stay within (pitch * height) bytes.
 /// Caller must hold no other lock on LAYERS.
@@ -155,27 +142,4 @@ pub fn buffer(layer_idx: usize) -> Option<(*mut u8, u32, u32, u32)> {
 pub fn matches_resolution(width: u32, height: u32, pitch: u32) -> bool {
     let stack = LAYERS.lock();
     stack.initialized && stack.width == width && stack.height == height && stack.pitch == pitch
-}
-
-/// Mark a region of a layer as dirty (needs re-compositing).
-pub fn mark_dirty(layer_idx: usize, _x: u32, _y: u32, _w: u32, _h: u32) {
-    let mut stack = LAYERS.lock();
-    if layer_idx >= LAYER_COUNT || !stack.initialized { return; }
-    mark_dirty_inner(&mut stack.layers[layer_idx]);
-}
-
-/// Mark entire layer as dirty.
-pub fn mark_full_dirty(layer_idx: usize) {
-    let mut stack = LAYERS.lock();
-    if layer_idx >= LAYER_COUNT { return; }
-    stack.layers[layer_idx].full_dirty = true;
-}
-
-fn mark_dirty_inner(layer: &mut Layer) {
-    if layer.full_dirty { return; } // already fully dirty
-    if layer.dirty_count >= MAX_DIRTY {
-        layer.full_dirty = true;
-        return;
-    }
-    layer.dirty_count += 1;
 }
