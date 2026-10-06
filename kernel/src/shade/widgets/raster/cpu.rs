@@ -203,6 +203,43 @@ impl Rasterizer for CpuRasterizer {
         }
     }
 
+    fn canvas_blit_native(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32,
+                          rect: Rect) {
+        if sw == 0 || sh == 0 || rect.w == 0 || rect.h == 0 { return; }
+        if src.len() < (sw as usize) * (sh as usize) * 4 { return; }
+        let (rx, ry) = window_to_target(t, rect.x, rect.y);
+        let (clx0, cly0, clx1, cly1) = local_clip(t);
+        let x0 = clx0.max(rx);
+        let y0 = cly0.max(ry);
+        let x1 = clx1.min(rx + rect.w as i32);
+        let y1 = cly1.min(ry + rect.h as i32);
+        if x0 >= x1 || y0 >= y1 { return; }
+
+        let stride = t.stride as usize;
+        let n = (x1 - x0) as usize;
+        // Source column of the first destination pixel, and how many of the
+        // row's pixels the bitmap covers; the rest repeat its last column.
+        let sx0 = (x0 - rx) as u32;
+        let covered = (sw.saturating_sub(sx0) as usize).min(n);
+        for py in y0..y1 {
+            let sy = ((py - ry) as u32).min(sh - 1) as usize;
+            let src_row = sy * sw as usize * 4;
+            let dst_row = py as usize * stride + x0 as usize;
+            let out = &mut t.pixels[dst_row..dst_row + n];
+            if covered > 0 {
+                let s = src_row + sx0 as usize * 4;
+                for (d, c) in out[..covered].iter_mut().zip(src[s..s + covered * 4].chunks_exact(4)) {
+                    *d = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                }
+            }
+            if covered < n {
+                let o = src_row + (sw as usize - 1) * 4;
+                let edge = u32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]]);
+                out[covered..].fill(edge);
+            }
+        }
+    }
+
     fn canvas_blit_i420(&mut self, t: &mut RasterTarget, p: &I420Ref, sw: u32, sh: u32,
                         rect: Rect, zoom_q88: u32, pan: (i32, i32)) {
         let Some(f) = canvas_fit(t, sw, sh, rect, zoom_q88, pan) else { return };

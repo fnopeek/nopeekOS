@@ -213,6 +213,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::CanvasOffset { .. } => 31,
         Modifier::Spans(_)            => 32,
         Modifier::OnMotion(_)         => 33,
+        Modifier::CanvasNative        => 34,
     }
 }
 

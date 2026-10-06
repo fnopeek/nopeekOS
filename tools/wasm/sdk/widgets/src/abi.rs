@@ -430,6 +430,17 @@ pub enum Modifier {
     /// entering, so a pointer that rests and then moves again inside the
     /// same widget would go unnoticed.
     OnMotion(ActionId),
+    /// The app paints a `Widget::Canvas` at the rect's own size
+    /// (`canvas_rect`), so its pixels are 1:1 with the screen. When the
+    /// stored bitmap no longer matches the rect — the window was resized and
+    /// the app has not committed the new size yet — it is drawn unscaled at
+    /// the rect's top-left and its last column and row are extended over the
+    /// uncovered part, instead of being contain-fit scaled. A scaled stale
+    /// frame shrinks the whole picture for one frame and leaves the margins
+    /// unpainted, which reads as flicker on every resize step. `Scale` and
+    /// `CanvasOffset` are ignored while it is set. Ignored on every other
+    /// widget.
+    CanvasNative,
     // Appended only.
 }
 

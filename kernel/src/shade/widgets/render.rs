@@ -1027,15 +1027,20 @@ fn paint_node_eff(
             // an Icon: 256 = 1.0×, here relative to the contain-fit size.
             let mut zoom: u32 = 256;
             let mut pan = (0i32, 0i32);
+            let mut native = false;
             for m in eff {
                 match m {
                     Modifier::Scale(v) => zoom = *v as u32,
                     Modifier::CanvasOffset { x, y } => pan = (*x, *y),
+                    Modifier::CanvasNative => native = true,
                     _ => {}
                 }
             }
             let drawn = super::canvas::with_bitmap(wid, cid, |px, w, h| {
                 match px {
+                    super::canvas::Pixels::Bgra(b) if native => {
+                        rast.canvas_blit_native(target, b, w, h, rect);
+                    }
                     super::canvas::Pixels::Bgra(b) => {
                         rast.canvas_blit(target, b, w, h, rect, zoom, pan);
                     }

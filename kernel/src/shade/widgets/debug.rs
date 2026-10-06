@@ -222,6 +222,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::CanvasOffset { x, y } => { let _ = write!(s, "CanvasOffset({},{})", x, y); }
             Modifier::Spans(v)      => { let _ = write!(s, "Spans({})", v.len()); }
             Modifier::OnMotion(a)   => { let _ = write!(s, "OnMotion({})", a.0); }
+            Modifier::CanvasNative  => { s.push_str("CanvasNative"); }
         }
     }
     s.push(']');

@@ -510,6 +510,17 @@ pub enum Modifier {
     /// entering, so a pointer that rests and then moves again inside the
     /// same widget would go unnoticed.
     OnMotion(ActionId),
+    /// The app paints a `Widget::Canvas` at the rect's own size
+    /// (`npk_canvas_rect`), so its pixels are 1:1 with the screen. When the
+    /// stored bitmap no longer matches the rect — the window was resized and
+    /// the app has not committed the new size yet — it is drawn unscaled at
+    /// the rect's top-left and its last column and row are extended over the
+    /// uncovered part, instead of being contain-fit scaled. A scaled stale
+    /// frame shrinks the whole picture for one frame and leaves the margins
+    /// unpainted, which reads as flicker on every resize step. `Scale` and
+    /// `CanvasOffset` are ignored while it is set. Ignored on every other
+    /// widget.
+    CanvasNative,
     // Appended only.
 }
 
@@ -966,6 +977,16 @@ pub trait Rasterizer: Send + Sync {
     /// rect never shows a gap. Default no-op.
     fn canvas_blit(&mut self, _t: &mut RasterTarget, _src: &[u8], _sw: u32, _sh: u32,
                    _rect: Rect, _zoom_q88: u32, _pan: (i32, i32)) {}
+
+    /// Blit app-supplied BGRA32 pixels 1:1 at the top-left of `rect`
+    /// (`Modifier::CanvasNative`). Where the bitmap is smaller than the
+    /// rect, its last column and row are extended to the rect's edge, so a
+    /// frame the app has not yet re-committed after a resize still fills
+    /// the rect. Defaults to the contain-fit blit.
+    fn canvas_blit_native(&mut self, t: &mut RasterTarget, src: &[u8], sw: u32, sh: u32,
+                          rect: Rect) {
+        self.canvas_blit(t, src, sw, sh, rect, 256, (0, 0));
+    }
 
     /// The same blit for a planar 4:2:0 frame, converting Y′CbCr to BGRA
     /// on the way. Separate from `canvas_blit` rather than a format flag

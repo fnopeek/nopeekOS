@@ -4039,6 +4039,31 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     // pixel (background first), so no re-zeroing is needed, and a scroll repaint
     // does not allocate and zero a full frame.
     let need = (w as usize) * (h as usize) * 4;
+    let dy = sy - LAST_SY.load(Relaxed);
+
+    // Only the height changed — the tiles glide with the dock, once per
+    // animation step. The rows that stay are the same picture: a shorter
+    // viewport is the old buffer cut off, a taller one needs only the rows
+    // that came into view. A full paint per step is what made the browser
+    // flicker while every other window just followed the dock.
+    let height_only = !need_layout && w == lw && h != lh && lh > 0 && dy == 0
+        && !doc().need_full && !inspect_mode()
+        && buf.len() == (w as usize) * (lh as usize) * 4;
+    if height_only {
+        let t_paint = now_ms();
+        if h < lh {
+            buf.truncate(need);
+        } else {
+            buf.resize(need, 0);
+            engine.paint_band(layout, w as u32, h as u32, sy, buf, lh as u32, h as u32);
+        }
+        host::canvas_commit(CANVAS_ID, buf, w as u32, h as u32);
+        log(&alloc::format!("[beak] paint height {} -> {}: {} ms", lh, h, now_ms() - t_paint));
+        LAST_H.store(h, Relaxed);
+        doc_mut().dirty = false;
+        return;
+    }
+
     let resized = buf.len() != need;
     if resized {
         buf.resize(need, 0);
@@ -4051,7 +4076,6 @@ fn maybe_repaint(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, b
     //
     // The inspect overlay is drawn over the frame rather than being part of the
     // display list, so a blit would smear it; that mode takes the full path.
-    let dy = sy - LAST_SY.load(Relaxed);
     let full = doc().need_full
         || need_layout
         || resized
@@ -4273,7 +4297,10 @@ fn render_chrome() {
             id: CanvasId(CANVAS_ID),
             width: 800,
             height: 600,
-            modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Page)],
+            // Painted at the rect's own size, so a stale frame during a
+            // resize is drawn unscaled instead of shrinking the whole page.
+            modifiers: vec![Modifier::Flex(1), Modifier::Background(Token::Page),
+                            Modifier::CanvasNative],
         },
     ];
 
