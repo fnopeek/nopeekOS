@@ -60,7 +60,29 @@ const CONFIRM_TIMEOUT_TICKS: u64 = 60 * 100; // 60 s at 100 Hz
 /// An intent runs inside the loop's read cycle, so there is no session to
 /// hand the question back to: it drives the keyboard itself and cannot lean
 /// on the loop's machinery (see the two comments below).
+/// Prompts (`confirm`, `read_secret`) waiting for a key right now. While an
+/// intent runs on a worker, the shell loop on Core 0 throws typed keys away;
+/// it must not do that to the answer the intent is waiting for.
+static PROMPTS_WAITING: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Held while a prompt waits; counts it in `PROMPTS_WAITING`.
+struct PromptGuard;
+
+impl PromptGuard {
+    fn new() -> Self {
+        PROMPTS_WAITING.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        PromptGuard
+    }
+}
+
+impl Drop for PromptGuard {
+    fn drop(&mut self) {
+        PROMPTS_WAITING.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 pub fn confirm(question: &str) -> bool {
+    let _waiting = PromptGuard::new();
     kprint!("[npk] {} [y/N] ", question);
     // Paint the question, then wait. Deliberately not `poll_render` in the
     // wait loop: that pumps mouse events too, and a click on a window's X
@@ -132,6 +154,7 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
     // A new question: a Ctrl+C from an earlier prompt must not answer it.
     // Nothing else clears the flag for an intent on Core 0.
     clear_cancel();
+    let _waiting = PromptGuard::new();
     kprint!("[npk] {}", prompt);
     let on_screen = crate::shade::is_active()
         && crate::smp::per_core::current_core_id() == 0;
@@ -1509,7 +1532,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_action(action);
                 }
 
-                while let Some(_key) = crate::keyboard::read_key() {}
+                // Typed keys are dropped — except while the intent asks for
+                // one (`confirm`, `read_secret`): it reads the same buffer.
+                if PROMPTS_WAITING.load(core::sync::atomic::Ordering::Acquire) == 0 {
+                    while let Some(_key) = crate::keyboard::read_key() {}
+                }
 
                 // Idle until the next IRQ (≤10 ms via the per-core 100 Hz
                 // timer) instead of busy-spinning — we re-poll the worker's
