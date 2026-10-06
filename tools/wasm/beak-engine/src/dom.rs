@@ -44,6 +44,9 @@ pub struct Element {
     /// that has not been upgraded. Set by the parser and by
     /// `js::dombind::Doc::to_dom`.
     pub defined: bool,
+    /// Shown states without an attribute, for `:popover-open` and `:modal`:
+    /// `js::dombind::UI_POPOVER_OPEN`, `UI_MODAL`. Set by `Doc::to_dom`.
+    pub ui: u8,
 }
 
 impl Element {
@@ -64,6 +67,7 @@ impl Element {
             checked_attr: false,
             disabled_attr: false,
             defined: true,
+            ui: 0,
         }
     }
 

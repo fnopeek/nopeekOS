@@ -281,6 +281,17 @@ impl Doc {
                     let id = self.push(n, parent);
                     let _ = id;
                 }
+                // Declarative shadow DOM (HTML §13.2.6.4.1): the template becomes
+                // the parent's shadow root and is not in the tree itself.
+                crate::dom::Node::Element(el) if &*el.tag == "template"
+                    && el.attr("shadowrootmode").is_some_and(|m| m == "open" || m == "closed")
+                    && self.nodes[parent as usize].kind == ELEMENT_NODE
+                    && self.nodes[parent as usize].shadow.is_none() => {
+                    let mode = el.attr("shadowrootmode").unwrap_or("open").to_string();
+                    let delegates = el.attr("shadowrootdelegatesfocus").is_some();
+                    let root = extra::attach_shadow_root(self, parent, &mode, delegates);
+                    self.add_children(el, root);
+                }
                 crate::dom::Node::Element(el) => {
                     let mut n = DomNode::new(ELEMENT_NODE, &el.tag);
                     n.src_seq = el.seq;
@@ -688,6 +699,7 @@ impl Doc {
         if n.kind != ELEMENT_NODE { return None; }
         let mut e = crate::dom::Element::bare(n.tag.to_string(), id);
         e.defined = ce_defined(n);
+        e.ui = n.ui;
         for (k, v) in &n.attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes; see `to_node`.
         e.index_attrs();
@@ -731,6 +743,7 @@ impl Doc {
         self.nodes[id as usize].seq = *seq;
         let mut e = crate::dom::Element::bare(tag.to_string(), *seq);
         e.defined = ce_defined(&self.nodes[id as usize]);
+        e.ui = self.nodes[id as usize].ui;
         for (k, v) in &attrs { e.attrs.push((k.to_string(), v.to_string())); }
         // Must run after the attributes, otherwise classes, id and the bloom
         // filter are empty and no selector matches.
@@ -1512,6 +1525,14 @@ pub fn wrap(i: &mut Interp, id: u32) -> Value {
                        .unwrap_or_else(|| Rc::from(""));
             if &*tag == "#eventtarget" { i.realm.event_target_proto.clone() }
             else if &*tag == "#fragment" { i.realm.fragment_proto.clone() }
+            else if &*tag == SHADOW_TAG {
+                let c = i.realm.global.borrow().get_own("ShadowRoot").and_then(|p| p.value.clone());
+                match c.and_then(|c| match c { Value::Obj(c) => c.borrow().get_own("prototype")
+                        .and_then(|p| p.value.clone()), _ => None }) {
+                    Some(Value::Obj(p)) => p,
+                    _ => i.realm.fragment_proto.clone(),
+                }
+            }
             else if &*tag == "svg" || tag.starts_with("svg:") {
                 i.realm.tag_protos.get("svg").cloned()
                     .unwrap_or_else(|| i.realm.svg_element_proto.clone())
@@ -1770,10 +1791,20 @@ fn same_fn(a: &Value, b: &Value) -> bool {
 fn ancestors(i: &Interp, id: u32) -> Vec<u32> {
     let Some(d) = &i.doc else { return alloc::vec![id] };
     let mut out = alloc::vec![id];
-    let mut cur = d.nodes[id as usize].parent;
-    while let Some(x) = cur {
+    let mut at = id;
+    loop {
+        let n = &d.nodes[at as usize];
+        // From a shadow root the path continues at its host (DOM §4.8 "get the
+        // parent"). Retargeting is not done: listeners outside see the inner
+        // target.
+        let next = match n.parent {
+            Some(p) => Some(p),
+            None if &*n.tag == SHADOW_TAG => n.shadow,
+            None => None,
+        };
+        let Some(x) = next else { break };
         out.push(x);
-        cur = d.nodes[x as usize].parent;
+        at = x;
     }
     out.reverse();
     out
@@ -5521,6 +5552,7 @@ pub fn install(realm: &mut Realm) {
     realm.svg_element_proto = svg_element_proto;
     realm.fragment_proto = fragment_proto;
     realm.tag_protos = tag_protos;
+    extra::install(realm);
 }
 
 /// Which element carries which interface.
@@ -7720,6 +7752,7 @@ mod ce_tests {
                 i.console_push(alloc::format!("THREW {m}"));
             }
             super::super::promise::run_jobs(&mut i);
+            for _ in 0..4 { if i.run_timers() == 0 { break } }
             outs.push(i.take_console());
         }
         assert_eq!(outs[0], outs[1], "tree walker and VM disagree");
@@ -7883,3 +7916,82 @@ mod event_target_tests {
                          "true AbortError", "true first", "1", "boolean"]);
     }
 }
+
+#[cfg(test)]
+mod extra_tests {
+    use super::ce_tests::run;
+
+    #[test]
+    fn lists_iterate_and_small_document_apis() {
+        let out = run(
+            "<body><p id=p class='a b c' data-x=1>x</p><input name=q><input name=q><input name=r></body>",
+            "var p = document.getElementById('p');\
+             console.log([...p.classList].join(','), [...p.classList.entries()].join('|'));\
+             console.log([...p.attributes].map(a => a.name).join(','));\
+             console.log(document.getElementsByName('q').length);\
+             var f = new DocumentFragment(); f.append('t'); console.log(f instanceof DocumentFragment, f.textContent);\
+             console.log(document.domain);\
+             var r = new Request('https://ex.test/api?x=1', { method: 'post', headers: { 'X-A': '1' }, body: 'b' });\
+             r.headers.append('x-b', '2');\
+             console.log(r instanceof Request, r.method, r.url, [...r.headers.keys()].join(','));\
+             console.log(typeof PerformanceObserver, PerformanceObserver.supportedEntryTypes.length);",
+        );
+        assert_eq!(out, ["a,b,c 0,a|1,b|2,c", "id,class,data-x", "2", "true t",
+                         "", "true POST https://ex.test/api?x=1 x-a,x-b", "function 0"]);
+    }
+
+    #[test]
+    fn constructed_sheets_and_shadow_roots() {
+        let out = run(
+            "<body><div id=h><template shadowrootmode=open><b>in</b></template><i>light</i></div><span id=s></span></body>",
+            "var s = new CSSStyleSheet(); s.replaceSync('a{color:red} @import url(x.css); b{}');\
+             console.log(s.cssRules.length, s.cssRules[0].cssText);\
+             s.insertRule('i{}', 1); console.log(s.cssRules.length);\
+             document.adoptedStyleSheets = [s]; console.log(document.adoptedStyleSheets[0] === s);\
+             var h = document.getElementById('h');\
+             console.log(h.shadowRoot.innerHTML, h.children.length, h.shadowRoot.host === h);\
+             var sr = document.getElementById('s').attachShadow({ mode: 'closed' });\
+             sr.innerHTML = '<em>x</em>';\
+             console.log(sr instanceof ShadowRoot, document.getElementById('s').shadowRoot, sr.mode);\
+             try { document.createElement('img').attachShadow({ mode: 'open' }); } catch (e) { console.log(e.name); }\
+             var hits = []; h.addEventListener('ping', () => hits.push('host'));\
+             h.shadowRoot.firstChild.dispatchEvent(new Event('ping', { bubbles: true }));\
+             console.log(hits.join());",
+        );
+        assert_eq!(out, ["2 a{color:red}", "3", "true", "<b>in</b> 1 true",
+                         "true null closed", "NotSupportedError", "host"]);
+    }
+
+    #[test]
+    fn popover_dialog_internals() {
+        let out = run(
+            "<body><div id=pop popover>p</div><dialog id=d>d</dialog><x-f id=xf></x-f></body>",
+            "var p = document.getElementById('pop'), log = [];\
+             p.addEventListener('beforetoggle', e => log.push('before ' + e.newState));\
+             p.addEventListener('toggle', e => log.push('toggle ' + e.newState));\
+             p.showPopover(); console.log(p.matches(':popover-open'), p.popover);\
+             console.log(p.togglePopover(), p.matches(':popover-open'));\
+             try { document.getElementById('d').showPopover(); } catch (e) { console.log(e.name); }\
+             var d = document.getElementById('d');\
+             d.addEventListener('close', () => log.push('close ' + d.returnValue));\
+             d.showModal(); console.log(d.open, d.matches(':modal'));\
+             d.close('ok'); console.log(d.open, d.matches(':modal'));\
+             class F extends HTMLElement { static formAssociated = true;\
+               constructor() { super(); this.i = this.attachInternals(); } }\
+             customElements.define('x-f', F);\
+             var x = document.getElementById('xf');\
+             x.i.states.add('busy'); console.log(x.matches(':state(busy)'), x.i.states.has('busy'));\
+             x.i.setValidity({ valueMissing: true }, 'need'); console.log(x.i.validity.valid, x.i.validationMessage);\
+             try { x.attachInternals(); } catch (e) { console.log(e.name); }\
+             console.log(p.checkVisibility(), document.createElement('div').checkVisibility());\
+             setTimeout(() => console.log(log.join(' | ')), 0);",
+        );
+        assert_eq!(&out[..8], ["true auto", "false false", "NotSupportedError", "true true",
+                               "false false", "true true", "false need", "NotSupportedError"]);
+        assert_eq!(out[8], "true false");
+        assert!(out[9].starts_with("before open | before closed | toggle") && out[9].ends_with("close ok"),
+                "{out:?}");
+    }
+}
+
+mod extra;
