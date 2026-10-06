@@ -111,22 +111,14 @@ pub fn vm_open(
     }
 }
 
-/// Open an AP vCPU context (guest SMP) sharing the BSP's `VmShared` at
-/// `shared_ptr` (a `*mut VmShared` as a u64), entering real mode at
-/// `sipi_vector`. The caller drives `run_slice` (not `close` — the BSP owns
-/// the shared state).
-pub fn vm_open_ap(
-    shared_ptr: u64,
-    sipi_vector: u8,
-    apic_id: u8,
-) -> Result<VmContext, &'static str> {
-    VmContext::open_ap(shared_ptr as *mut enable::VmShared, sipi_vector, apic_id)
+/// Open an AP vCPU context (guest SMP) joining the VM the BSP published
+/// (`VmContext::publish_for_aps`), entering real mode at `sipi_vector`. The
+/// caller drives `run_slice` (not `close` — the BSP owns the shared state).
+pub fn vm_open_ap(sipi_vector: u8, apic_id: u8) -> Result<VmContext, &'static str> {
+    VmContext::open_ap(sipi_vector, apic_id)
 }
 
-/// Set/clear the guest-SMP big-VM-lock engagement (see `enable::AP_ACTIVE`).
-pub fn set_ap_active(on: bool) {
-    enable::AP_ACTIVE.store(on, core::sync::atomic::Ordering::Release);
-}
+pub use enable::clear_ap_shared;
 
 // ── shared CPU primitives for SVM submodules ───────────────────────
 

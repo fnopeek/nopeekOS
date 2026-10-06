@@ -22,7 +22,8 @@ use super::{ept, rdmsr, vmcs, wrmsr};
 use crate::microvm::devices::guest_mem::GuestMem;
 use crate::microvm::linux::bzimage;
 use crate::mm::memory;
-use core::sync::atomic::{AtomicBool, Ordering};
+use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 // LAPIC emulation is pure register state (only uses rdtsc), so the SVM
 // module's `LocalApic` is reused rather than duplicated. `IcrWrite` +
 // `ICR_DM_*` are also reused by the cross-vCPU IPI router (guest SMP).
@@ -43,35 +44,25 @@ fn vmx_lapic_on() -> bool {
 // ── Guest SMP — mirror of svm/enable.rs ─────────────────────────────
 //
 // Same architecture as the AMD backend: `VmContext` is split into a shared
-// `VmShared` (one guest address space + device model, behind a `SharedRef`
-// so an AP vCPU aliases the BSP's heap box) and a per-vCPU `Vcpu` (its own
-// VMXON/VMCS/regs/FPU/LAPIC/apic_id). The BSP and AP run their VMRESUME
-// loops as pinned pool fibers on separate worker cores, in parallel,
-// serialising only their post-exit device handling under `VM_BIG_LOCK`.
-// VMXON/VMCS are per core (each vCPU enters VMX root on its own core), the
-// AP never locks VENDOR (it learns its vendor lock-free via
-// `detect_vendor`), IPIs inject only when interruptible (reason-33 guard),
-// idle-park is gated on AP_ESTABLISHED, and devices/timer/nat/input are
-// BSP-only.
+// `VmShared` (one guest address space + device model; every vCPU holds an
+// `Arc` of it) and a per-vCPU `Vcpu` (its own VMXON/VMCS/regs/FPU/LAPIC/
+// apic_id). The BSP and AP run their VMRESUME loops as pinned pool fibers on
+// separate worker cores, in parallel, serialising only their device handling
+// under `VmShared::dev`. VMXON/VMCS are per core (each vCPU enters VMX root
+// on its own core), the AP never locks VENDOR (it learns its vendor
+// lock-free via `detect_vendor`), IPIs inject only when interruptible
+// (reason-33 guard), and devices/timer/nat/input are BSP-only.
 
-/// Big-VM lock (guest SMP). Held by a vCPU only around its post-exit
-/// device/MMIO/IO handling — never across `run_guest_once` or a fiber yield —
-/// so the BSP and an AP serialise all access to the shared `VmShared` while
-/// their VMRESUMEs run truly in parallel on separate host cores. Never taken
-/// until an AP is admitted (`AP_ACTIVE`).
-static VM_BIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
-/// The BSP's last device deadline read under `VM_BIG_LOCK` (0 = none).
+/// The open VM's shared state, for AP vCPUs to join (`open_ap`). Set by the
+/// BSP once it has opened the VM, cleared at teardown.
+static AP_SHARED: spin::Mutex<Option<Arc<VmShared>>> = spin::Mutex::new(None);
+/// The BSP's last device deadline read under `VmShared::dev` (0 = none).
 static LAST_DEV_DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// True once a second vCPU (AP) shares this VM. While false the BSP runs
-/// the single-vCPU path and the lock is not taken. Set by the
-/// orchestration layer when it spawns an AP fiber, cleared after the last
-/// vCPU exits.
-pub static AP_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-#[inline]
-fn ap_active() -> bool {
-    AP_ACTIVE.load(Ordering::Acquire)
+/// Withdraw the shared state offered to AP vCPUs (VM teardown).
+pub fn clear_ap_shared() {
+    let old = AP_SHARED.lock().take();
+    drop(old);
 }
 
 
@@ -558,7 +549,7 @@ unsafe fn vmx_exit_root() {
 }
 
 /// Which target a nested page fault at `gpa` hits (`cores` NPF breakdown).
-fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
+fn npf_kind(sh: &VmDevices, guest_len: u64, gpa: u64) -> usize {
     use crate::microvm::cpu as c;
     if sh.pci.virtio_blk.bar0_in_range(gpa) { c::NPF_BLK }
     else if crate::microvm::devices::net_backend::bar0_in_range(gpa) { c::NPF_NET }
@@ -571,20 +562,18 @@ fn npf_kind(sh: &VmShared, gpa: u64) -> usize {
     else if (crate::microvm::devices::ioapic::IOAPIC_BASE
         ..crate::microvm::devices::ioapic::IOAPIC_BASE + crate::microvm::devices::ioapic::IOAPIC_SIZE)
         .contains(&gpa) { c::NPF_IOAPIC }
-    else if gpa < sh.guest_mem.len() { c::NPF_RAM }
+    else if gpa < guest_len { c::NPF_RAM }
     else { c::NPF_OTHER }
 }
 
-/// State shared by all vCPUs of one microvm: the single guest address space
-/// (RAM + EPT), the device model, and the host-tick/display bookkeeping. The
-/// BSP owns it heap-boxed (behind `SharedRef`); an AP aliases it. Mirror of
-/// svm `VmShared`.
+/// State shared by all vCPUs of one microvm. The guest address space (RAM,
+/// EPT) is fixed at open and read without a lock; the device model is
+/// behind `dev`. The BSP and every AP hold an `Arc` of it. Mirror of svm
+/// `VmShared`.
 pub struct VmShared {
     /// Shared handle to the active guest memory (owned by `guest_mem`'s
-    /// `ACTIVE_GM`, freed at close). A reference, not the owned `GuestMem`, so
-    /// the off-vCPU net backend can hold the same `&'static GuestMem` without
-    /// aliasing this `&mut VmShared` (borrow governs the pointer, not the `Sync`
-    /// pointee). Mirror of svm.
+    /// `ACTIVE_GM`, freed at close); the off-vCPU net backend holds the same
+    /// `&'static GuestMem`.
     guest_mem: &'static GuestMem,
     /// EPT PML4 phys — `close()` passes it to `ept::release` to free
     /// every demand-faulted 4 KB frame + the demand PT pages + the
@@ -598,6 +587,14 @@ pub struct VmShared {
     /// align). `close()` frees `ept::boot_frames_for(guest_mem.len())`
     /// from here; the demand region is freed via `ept::release`.
     guest_raw_base: u64,
+    /// The device model. A vCPU holds it around device work after an exit
+    /// and around interrupt collection before an entry, never across
+    /// VMRESUME or a yield. Lock order: `dev`, then the GPU or NET device lock.
+    dev: spin::Mutex<VmDevices>,
+}
+
+/// The device model and host-tick bookkeeping of one microvm.
+struct VmDevices {
     serial: SerialState,
     pci: crate::microvm::devices::PciBus,
     pic: crate::microvm::devices::pic8259::Pic8259,
@@ -648,54 +645,11 @@ pub struct Vcpu {
     guest_fpu: alloc::boxed::Box<crate::microvm::cpu::FpuArea>,
 }
 
-/// Handle to a microvm's `VmShared`. The BSP vCPU owns it (heap-boxed so
-/// its address is stable while the BSP's `VmContext` moves on the fiber
-/// stack); an AP holds `Borrowed` — a raw pointer to the same box, valid for
-/// the VM lifetime via the last-one-out refcount. `Deref`/`DerefMut` make
-/// every `self.shared.X` access work for both; access is serialised by
-/// `VM_BIG_LOCK`, not this handle. Mirror of svm `SharedRef`.
-pub enum SharedRef {
-    Owned(alloc::boxed::Box<VmShared>),
-    Borrowed(*mut VmShared),
-}
-
-// SAFETY: Borrowed is a raw pointer moved only into AP fiber tasks; all
-// pointee access is VM_BIG_LOCK-serialised. The Send marker lets it cross
-// into the spawned fiber.
-unsafe impl Send for SharedRef {}
-
-impl SharedRef {
-    fn owned(s: VmShared) -> Self {
-        SharedRef::Owned(alloc::boxed::Box::new(s))
-    }
-}
-
-impl core::ops::Deref for SharedRef {
-    type Target = VmShared;
-    fn deref(&self) -> &VmShared {
-        match self {
-            SharedRef::Owned(b) => b,
-            // SAFETY: valid for the VM lifetime (see SharedRef doc).
-            SharedRef::Borrowed(p) => unsafe { &**p },
-        }
-    }
-}
-
-impl core::ops::DerefMut for SharedRef {
-    fn deref_mut(&mut self) -> &mut VmShared {
-        match self {
-            SharedRef::Owned(b) => b,
-            // SAFETY: as above; access is VM_BIG_LOCK-serialised.
-            SharedRef::Borrowed(p) => unsafe { &mut **p },
-        }
-    }
-}
-
 /// Persistent state of one Linux microvm across cooperative slices.
 /// Core-agnostic: nothing here assumes which core it runs on. Composed of
-/// `VmShared` (all-vCPU, behind `SharedRef`) + one `Vcpu`.
+/// the all-vCPU `VmShared` and this vCPU's `Vcpu`.
 pub struct VmContext {
-    shared: SharedRef,
+    shared: Arc<VmShared>,
     vcpu: Vcpu,
 }
 
@@ -751,22 +705,24 @@ impl VmContext {
             crate::microvm::devices::gpu_backend::reset();
 
             Ok(VmContext {
-                shared: SharedRef::owned(VmShared {
+                shared: Arc::new(VmShared {
                     guest_mem: gm,
                     ept_pml4,
                     eptp,
                     guest_raw_base,
-                    serial,
-                    pci: crate::microvm::devices::PciBus::new(),
-                    pic: {
-                        // The I/O APIC's ID follows the vCPUs' in the MP table.
-                        let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
-                        pic.ioapic.set_id(crate::microvm::cpu::guest_vcpus());
-                        pic
-                    },
-                    last_cfg_tick: 0,
-                    last_reap_tick: 0,
-                    pit: crate::microvm::devices::pit8253::Pit::new(),
+                    dev: spin::Mutex::new(VmDevices {
+                        serial,
+                        pci: crate::microvm::devices::PciBus::new(),
+                        pic: {
+                            // The I/O APIC's ID follows the vCPUs' in the MP table.
+                            let mut pic = crate::microvm::devices::pic8259::Pic8259::new();
+                            pic.ioapic.set_id(crate::microvm::cpu::guest_vcpus());
+                            pic
+                        },
+                        last_cfg_tick: 0,
+                        last_reap_tick: 0,
+                        pit: crate::microvm::devices::pit8253::Pit::new(),
+                    }),
                 }),
                 vcpu: Vcpu {
                     apic_id: 0, // BSP
@@ -807,25 +763,14 @@ impl VmContext {
     /// shared EPTP / device model. No guest RAM / EPT / device allocation
     /// (those belong to the BSP, freed last-one-out). `apic_id` is 1.. Mirror
     /// of svm `open_ap`.
-    pub fn open_ap(
-        shared: *mut VmShared,
-        sipi_vector: u8,
-        apic_id: u8,
-    ) -> Result<VmContext, &'static str> {
+    pub fn open_ap(sipi_vector: u8, apic_id: u8) -> Result<VmContext, &'static str> {
+        let shared = AP_SHARED.lock().clone().ok_or("no open VM for an AP to join")?;
         let (vmxon_phys, vmcs_phys) = vmx_enter_root()?;
 
         // In VMX root now: VMXOFF on any error so the core never strands.
         let build = || -> Result<VmContext, &'static str> {
-            // Read the shared EPTP (set once at BSP open, never mutated). Take
-            // VM_BIG_LOCK: AP_ACTIVE is set by now, so the BSP may be touching
-            // `*shared` under the lock — holding it keeps this `&*shared`
-            // borrow from aliasing the BSP's `&mut`.
-            let eptp = {
-                let _big = VM_BIG_LOCK.lock();
-                // SAFETY: `shared` is valid for the VM lifetime (SharedRef),
-                // and the lock excludes any concurrent `&mut` to `*shared`.
-                unsafe { (*shared).eptp }
-            };
+            // Fixed at BSP open: no lock needed.
+            let eptp = shared.eptp;
             write_host_state_with_current_rsp()?;
             vmcs::setup_guest_state_ap(sipi_vector)?;
             // SAFETY: in VMX root with this AP's VMCS current; `eptp` is the
@@ -833,7 +778,7 @@ impl VmContext {
             let bitmaps = unsafe { vmcs::setup_execution_controls(eptp)? };
 
             Ok(VmContext {
-                shared: SharedRef::Borrowed(shared),
+                shared,
                 vcpu: Vcpu {
                     apic_id,
                     vmxon_phys,
@@ -866,10 +811,9 @@ impl VmContext {
         }
     }
 
-    /// Raw pointer to this VM's shared state, for an AP vCPU to alias
-    /// (`open_ap`). Only valid on the BSP's `Owned` context.
-    pub fn shared_ptr(&mut self) -> *mut VmShared {
-        &mut *self.shared as *mut VmShared
+    /// Offer this VM's shared state to AP vCPUs (`open_ap`). BSP only.
+    pub fn publish_for_aps(&self) {
+        *AP_SHARED.lock() = Some(self.shared.clone());
     }
 
     /// Absolute host TSC of the BSP vCPU's next guest LAPIC-timer tick — the
@@ -885,168 +829,160 @@ impl VmContext {
         }
     }
 
-    /// The BSP's device timers: PIT, GPU resume, a playing sound stream. An
-    /// AP's exit handling changes PIT and sound under `VM_BIG_LOCK`, so they
-    /// are read under it too. This runs on every entry, so it does not wait:
-    /// while an AP holds the lock, the last reading stands in, and the next
-    /// entry reads afresh.
+    /// The BSP's device timers: PIT, GPU resume, a playing sound stream, read
+    /// under `dev`. This runs on every entry, so it does not wait: while an
+    /// AP holds the lock, the last reading stands in, and the next entry
+    /// reads afresh.
     fn device_deadline(&self) -> Option<u64> {
-        let read = || {
-            let mut dev = self.shared.pit.next_deadline_tsc();
-            if let Some(t) = crate::microvm::devices::gpu_backend::resume_tsc() {
-                dev = Some(dev.map_or(t, |d| d.min(t)));
-            }
-            // A playing sound stream is serviced every millisecond.
-            if self.shared.pci.virtio_snd.playing() {
-                let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
-                dev = Some(dev.map_or(t, |d| d.min(t)));
-            }
-            dev
+        let Some(sh) = self.shared.dev.try_lock() else {
+            let v = LAST_DEV_DEADLINE.load(Ordering::Relaxed);
+            return (v != 0).then_some(v);
         };
-        if !ap_active() {
-            return read();
+        let mut dev = sh.pit.next_deadline_tsc();
+        if let Some(t) = crate::microvm::devices::gpu_backend::resume_tsc() {
+            dev = Some(dev.map_or(t, |d| d.min(t)));
         }
-        match VM_BIG_LOCK.try_lock() {
-            Some(_big) => {
-                let d = read();
-                LAST_DEV_DEADLINE.store(d.unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
-                d
-            }
-            None => {
-                let v = LAST_DEV_DEADLINE.load(core::sync::atomic::Ordering::Relaxed);
-                (v != 0).then_some(v)
-            }
+        // A playing sound stream is serviced every millisecond.
+        if sh.pci.virtio_snd.playing() {
+            let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+            dev = Some(dev.map_or(t, |d| d.min(t)));
         }
+        LAST_DEV_DEADLINE.store(dev.unwrap_or(0), Ordering::Relaxed);
+        dev
     }
+}
 
-    /// Feed every device line and the PIT into the PIC (BSP: in PIC mode the
-    /// device lines are wired there). Lock held by the caller when APs run.
-    /// Mirror of the SVM backend.
-    fn collect_device_irqs(&mut self) {
-        let sh = &mut *self.shared;
-        if crate::microvm::devices::net_backend::take_irq() {
-            sh.pic.pulse(10);
-            crate::microvm::devices::nat::note_net_irq();
-        }
-        if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(9); }
-        // vblank: a paused controlq runs its next frame (virtio-gpu IRQ 9).
-        if crate::microvm::devices::gpu_backend::take_resume(crate::interrupts::rdtsc())
-            && crate::microvm::devices::gpu_backend::lock()
-                .service_queues(0, sh.guest_mem)
+
+/// Feed every device line and the PIT into the PIC (BSP: in PIC mode the
+/// device lines are wired there). The caller holds `VmShared::dev`. Mirror
+/// of the SVM backend.
+fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
+    if crate::microvm::devices::net_backend::take_irq() {
+        sh.pic.pulse(10);
+        crate::microvm::devices::nat::note_net_irq();
+    }
+    if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(9); }
+    // vblank: a paused controlq runs its next frame (virtio-gpu IRQ 9).
+    if crate::microvm::devices::gpu_backend::take_resume(crate::interrupts::rdtsc())
+        && crate::microvm::devices::gpu_backend::lock()
+            .service_queues(0, gm)
+    {
+        sh.pic.pulse(9);
+    }
+    if sh.pci.virtio_snd.pump(gm) {
+        let l = sh.pci.virtio_snd.irq_line();
+        sh.pic.pulse(l);
+    }
+    if sh.pci.virtio_9p.drain_async_done(gm) {
+        let l = sh.pci.virtio_9p.irq_line();
+        sh.pic.pulse(l);
+    }
+    if sh.pci.virtio_input.drain_injected(gm) { sh.pic.pulse(12); }
+    sh.pit.poll(&mut sh.pic);
+
+    let now = crate::interrupts::ticks();
+    // Live resize: disconnect, then reconnect after 100 ms; a new
+    // cycle at most every 250 ms while the window is dragged.
+    if crate::microvm::devices::gpu_backend::d4_pending()
+        && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
+    {
+        sh.pic.pulse(9);
+    } else {
+        let wid = crate::microvm::vm_window();
+        if wid != 0
+            && !crate::microvm::devices::gpu_backend::d4_pending()
+            && crate::shade::surface::display_dirty_peek(wid)
+            && now.wrapping_sub(sh.last_cfg_tick) >= 25
         {
+            let _ = crate::shade::surface::take_display_dirty(wid);
+            sh.last_cfg_tick = now;
+            crate::microvm::devices::gpu_backend::lock().signal_display_change(now);
             sh.pic.pulse(9);
         }
-        if sh.pci.virtio_snd.pump(sh.guest_mem) {
-            let l = sh.pci.virtio_snd.irq_line();
-            sh.pic.pulse(l);
-        }
-        if sh.pci.virtio_9p.drain_async_done(sh.guest_mem) {
-            let l = sh.pci.virtio_9p.irq_line();
-            sh.pic.pulse(l);
-        }
-        if sh.pci.virtio_input.drain_injected(sh.guest_mem) { sh.pic.pulse(12); }
-        sh.pit.poll(&mut sh.pic);
-
-        let now = crate::interrupts::ticks();
-        // Live resize: disconnect, then reconnect after 100 ms; a new
-        // cycle at most every 250 ms while the window is dragged.
-        if crate::microvm::devices::gpu_backend::d4_pending()
-            && crate::microvm::devices::gpu_backend::lock().tick_d4(now)
-        {
-            sh.pic.pulse(9);
-        } else {
-            let wid = crate::microvm::vm_window();
-            if wid != 0
-                && !crate::microvm::devices::gpu_backend::d4_pending()
-                && crate::shade::surface::display_dirty_peek(wid)
-                && now.wrapping_sub(sh.last_cfg_tick) >= 25
-            {
-                let _ = crate::shade::surface::take_display_dirty(wid);
-                sh.last_cfg_tick = now;
-                crate::microvm::devices::gpu_backend::lock().signal_display_change(now);
-                sh.pic.pulse(9);
-            }
-        }
-        // NAT mapping reaper: an idle scan, once per 10 ms at most.
-        if now != sh.last_reap_tick {
-            sh.last_reap_tick = now;
-            crate::microvm::devices::nat::housekeep();
-        }
     }
-
-    /// `kvm_cpu_has_interrupt`: the PIC's INTR if this vCPU takes it (LINT0 in
-    /// ExtINT, or no LAPIC), else a LAPIC vector above PPR.
-    fn pending_interrupt(&mut self) -> Option<bool> {
-        let lapic_on = vmx_lapic_on();
-        if self.vcpu.apic_id == 0
-            && self.shared.pic.output()
-            && (!lapic_on || self.vcpu.lapic.accept_pic_intr())
-        {
-            return Some(true);
-        }
-        if lapic_on && self.vcpu.lapic.has_interrupt().is_some() {
-            return Some(false);
-        }
-        None
+    // NAT mapping reaper: an idle scan, once per 10 ms at most.
+    if now != sh.last_reap_tick {
+        sh.last_reap_tick = now;
+        crate::microvm::devices::nat::housekeep();
     }
+}
 
+/// `kvm_cpu_has_interrupt`: the PIC's INTR if this vCPU takes it (LINT0 in
+/// ExtINT, or no LAPIC), else a LAPIC vector above PPR. `dev` is the locked
+/// device model on the BSP (the PIC is wired there), `None` on an AP.
+fn pending_interrupt(vcpu: &mut Vcpu, dev: Option<&VmDevices>) -> Option<bool> {
+    let lapic_on = vmx_lapic_on();
+    if dev.is_some_and(|sh| sh.pic.output())
+        && (!lapic_on || vcpu.lapic.accept_pic_intr())
+    {
+        return Some(true);
+    }
+    if lapic_on && vcpu.lapic.has_interrupt().is_some() {
+        return Some(false);
+    }
+    None
+}
+
+impl Vcpu {
     /// Interrupt-window exiting (CPU-based control bit 2) — only VMWRITEs on a
     /// change.
     fn set_irq_window(&mut self, on: bool) -> Result<(), &'static str> {
-        if self.vcpu.irq_window != on {
+        if self.irq_window != on {
             vmcs::set_interrupt_window_exiting(on)?;
-            self.vcpu.irq_window = on;
+            self.irq_window = on;
         }
         Ok(())
     }
+}
 
+impl VmContext {
     /// `inject_pending_event` (`vmx_inject_irq` / `vmx_enable_irq_window`),
     /// before every VM entry. An external interrupt may only be injected when
     /// the guest is interruptible — on Intel an IF=0 inject fails the entry
     /// (reason 33, SDM §26.3.1.5) — so otherwise the window is opened.
     fn inject_pending_event(&mut self) -> Result<(), &'static str> {
-        let is_bsp = self.vcpu.apic_id == 0;
-        let _big = if is_bsp && ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
-        if is_bsp { self.collect_device_irqs(); }
+        // The BSP owns the device lines: collect them under `dev`.
+        let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
+        if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
+        let vcpu = &mut self.vcpu;
 
-        if self.vcpu.reinject != 0 {
-            let rtype = (self.vcpu.reinject >> 8) & 0x7;
+        if vcpu.reinject != 0 {
+            let rtype = (vcpu.reinject >> 8) & 0x7;
             if rtype != 0 || vmcs::guest_interruptible() {
-                vmcs::write_entry_intr_info(self.vcpu.reinject)?;
-                self.vcpu.reinject = 0;
-                let more = self.pending_interrupt().is_some();
-                self.set_irq_window(more)?;
+                vmcs::write_entry_intr_info(vcpu.reinject)?;
+                vcpu.reinject = 0;
+                let more = pending_interrupt(vcpu, dev.as_deref()).is_some();
+                vcpu.set_irq_window(more)?;
             } else {
-                self.set_irq_window(true)?;
+                vcpu.set_irq_window(true)?;
             }
             return Ok(());
         }
-        let Some(from_pic) = self.pending_interrupt() else {
-            return self.set_irq_window(false);
+        let Some(from_pic) = pending_interrupt(vcpu, dev.as_deref()) else {
+            return vcpu.set_irq_window(false);
         };
         let queued = vmcs::read_entry_intr_info()? & (1u64 << 31) != 0;
         if queued || !vmcs::guest_interruptible() {
-            return self.set_irq_window(true);
+            return vcpu.set_irq_window(true);
         }
         // `kvm_cpu_get_interrupt`: ExtINT first, then the LAPIC.
-        let vector = if from_pic {
-            self.shared.pic.read_irq()
-        } else {
-            match self.vcpu.lapic.has_interrupt() {
-                Some(v) => { self.vcpu.lapic.ack_interrupt(v); v }
-                None => return self.set_irq_window(false),
-            }
+        let vector = match (from_pic, dev.as_deref_mut()) {
+            (true, Some(sh)) => sh.pic.read_irq(),
+            (true, None) => return vcpu.set_irq_window(false),
+            (false, _) => match vcpu.lapic.has_interrupt() {
+                Some(v) => { vcpu.lapic.ack_interrupt(v); v }
+                None => return vcpu.set_irq_window(false),
+            },
         };
         vmcs::inject_external_irq(vector)?;
-        self.set_irq_window(false)
+        vcpu.set_irq_window(false)
     }
 
-    /// Anything deliverable right now (takes the lock + collects on the BSP).
+    /// Anything deliverable right now (takes `dev` + collects on the BSP).
     fn event_pending(&mut self) -> bool {
-        let is_bsp = self.vcpu.apic_id == 0;
-        let _big = if is_bsp && ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
-        if is_bsp { self.collect_device_irqs(); }
-        self.vcpu.reinject != 0 || self.pending_interrupt().is_some()
+        let mut dev = (self.vcpu.apic_id == 0).then(|| self.shared.dev.lock());
+        if let Some(sh) = dev.as_deref_mut() { collect_device_irqs(sh, self.shared.guest_mem); }
+        self.vcpu.reinject != 0 || pending_interrupt(&mut self.vcpu, dev.as_deref()).is_some()
     }
 
     /// `kvm_vcpu_halt` with adaptive halt-polling. Mirror of the SVM backend.
@@ -1095,7 +1031,7 @@ impl VmContext {
         // Persist the home image before teardown — see the svm mirror:
         // the window-close path reaches close() without run_slice's
         // loop-end save(), so without this the profile is lost on close.
-        self.shared.pci.virtio_blk.save();
+        self.shared.dev.lock().pci.virtio_blk.save();
         // SAFETY: this vCPU entered VMX root on this core → VMXOFF is valid.
         unsafe { vmx_exit_root(); }
         if !workers_gone {
@@ -1582,14 +1518,7 @@ impl VmContext {
             );
         }
 
-        // Take the big-VM lock around this exit's device/memory handling when
-        // an AP shares the VM (guest SMP) so the two vCPUs serialise access to
-        // `VmShared`. Both `_big` and `sh` drop at the loop-body end — `sh`'s
-        // `&mut VmShared` borrow ends before the lock releases (reverse decl
-        // order), so only the lock holder ever has a live `&mut` to the shared
-        // state (sound aliasing across the BSP's Owned box + the AP's Borrowed
-        // pointer). No AP active → lock not taken.
-        // Exits that touch only this vCPU take no VM_BIG_LOCK (see the SVM
+        // Exits that touch only this vCPU take no device lock (see the SVM
         // run loop): the interrupt window, an MSR (x2APIC, PV-EOI), a hypercall.
         match basic {
             // A host interrupt (timer, device, kick IPI) pre-empted the guest;
@@ -1601,7 +1530,7 @@ impl VmContext {
             // Interrupt window open (`vmx_enable_irq_window`): the guest can
             // take the event now — the next entry injects it.
             7 => {
-                self.set_irq_window(false)?;
+                self.vcpu.set_irq_window(false)?;
                 last_outcome = Some(outcome);
                 continue;
             }
@@ -1662,15 +1591,14 @@ impl VmContext {
             _ => {}
         }
 
+        // The device model is shared between vCPUs (guest SMP). Released at
+        // the end of this iteration, or before the HLT path parks; never held
+        // across run_guest_once or a yield.
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
-        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
+        let mut dev = self.shared.dev.lock();
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
-        // Resolve the shared device/memory state once for this exit (a single
-        // `SharedRef::DerefMut` borrow of `self.shared`, so the handlers below
-        // keep their disjoint sub-field borrows; `self.vcpu` stays separately
-        // borrowable). Re-bound per iteration; never held across run_guest_once
-        // / a yield. Device/timer/nat/input handling is BSP-only.
-        let sh = &mut *self.shared;
+        let sh = &mut *dev;
+        let gm = self.shared.guest_mem;
 
         match basic {
             0 if (vmcs::read_exit_intr_info().unwrap_or(0) >> 8) & 0x7 == 2 => {
@@ -1729,7 +1657,7 @@ impl VmContext {
                 );
                 if vector == 14 {
                     let cr3 = vmcs::read_guest_cr3().unwrap_or(0);
-                    dump_page_walk(sh.guest_mem, cr3, outcome.exit_qualification);
+                    dump_page_walk(gm, cr3, outcome.exit_qualification);
                 }
                 self.vcpu.trace.dump();
                 last_outcome = Some(outcome);
@@ -1746,7 +1674,7 @@ impl VmContext {
                 }
                 vmcs::advance_guest_rip()?;
                 last_outcome = Some(outcome);
-                drop(_big);
+                drop(dev);
                 // `kvm_vcpu_halt`: resume at once if something is deliverable,
                 // else halt-poll, then block (the fiber parks until the next
                 // timer deadline or a kick).
@@ -1866,14 +1794,14 @@ impl VmContext {
                 // permissions). Device BAR ranges are emulated; demand
                 // RAM is faulted in; everything else dumps + bails.
                 let gpa = vmcs::read_guest_phys_addr().unwrap_or(0);
-                crate::microvm::cpu::record_npf(npf_kind(sh, gpa));
+                crate::microvm::cpu::record_npf(npf_kind(sh, gm.len(), gpa));
                 // LAPIC MMIO page (0xFEE00000) → trap-and-emulate. Left
                 // EPT-not-present in ept.rs when the LAPIC is emulated.
                 // I/O APIC page (0xFEC00000), EPT-not-present like the LAPIC's.
                 {
                     use crate::microvm::devices::ioapic::{IOAPIC_BASE, IOAPIC_SIZE};
                     if (IOAPIC_BASE..IOAPIC_BASE + IOAPIC_SIZE).contains(&gpa)
-                        && handle_mmio_ioapic(&mut self.vcpu.regs, sh, gpa)
+                        && handle_mmio_ioapic(&mut self.vcpu.regs, &mut sh.pic, gpa, gm)
                     {
                         last_outcome = Some(outcome);
                         continue;
@@ -1882,18 +1810,18 @@ impl VmContext {
                 if vmx_lapic_on()
                     && (lapic::LAPIC_BASE..lapic::LAPIC_BASE + lapic::LAPIC_SIZE).contains(&gpa)
                 {
-                    if handle_mmio_lapic(&mut self.vcpu.regs, &mut self.vcpu.lapic, self.vcpu.apic_id, sh, gpa) {
+                    if handle_mmio_lapic(&mut self.vcpu.regs, &mut self.vcpu.lapic, self.vcpu.apic_id, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 }
                 if sh.pci.virtio_blk.bar0_in_range(gpa) {
-                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if crate::microvm::devices::net_backend::bar0_in_range(gpa) {
-                    if handle_mmio_ept_net(&mut self.vcpu.regs, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_net(&mut self.vcpu.regs, &mut sh.pic, gpa, gm) {
                         // Deliver a deferred device IRQ (esp. an async 9p
                         // write completion) now rather than at the next
                         // reason-1/12 exit.
@@ -1902,17 +1830,17 @@ impl VmContext {
                     }
                 } else if crate::microvm::devices::gpu_backend::bar0_in_range(gpa) {
                     let mut gpu = crate::microvm::devices::gpu_backend::lock();
-                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut *gpu, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_gpu(&mut self.vcpu.regs, &mut *gpu, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_input.bar0_in_range(gpa) {
-                    if handle_mmio_ept_input(&mut self.vcpu.regs, &mut sh.pci.virtio_input, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_input(&mut self.vcpu.regs, &mut sh.pci.virtio_input, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_9p.bar0_in_range(gpa) {
-                    if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_p9(&mut self.vcpu.regs, &mut sh.pci.virtio_9p, &mut sh.pic, gpa, gm) {
                         // Deliver the freshly-completed 9p write-reply IRQ now
                         // (latched by drain_async_done at the loop top) instead
                         // of waiting for the next reason-1/12 exit.
@@ -1921,12 +1849,12 @@ impl VmContext {
                     }
                 } else if sh.pci.virtio_blk_sqfs.bar0_in_range(gpa) {
                     // Same handler — VirtioBlk carries its own IRQ line.
-                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_blk(&mut self.vcpu.regs, &mut sh.pci.virtio_blk_sqfs, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
                 } else if sh.pci.virtio_snd.bar0_in_range(gpa) {
-                    if handle_mmio_ept_snd(&mut self.vcpu.regs, &mut sh.pci.virtio_snd, &mut sh.pic, gpa, sh.guest_mem) {
+                    if handle_mmio_ept_snd(&mut self.vcpu.regs, &mut sh.pci.virtio_snd, &mut sh.pic, gpa, gm) {
                         last_outcome = Some(outcome);
                         continue;
                     }
@@ -1937,7 +1865,7 @@ impl VmContext {
                 // demand page → fault it in + re-enter. Ordering is
                 // load-bearing: MMIO BAR ranges first (above),
                 // RAM-demand here, fatal dump last.
-                if sh.guest_mem.ensure(gpa) {
+                if gm.ensure(gpa) {
                     last_outcome = Some(outcome);
                     continue;
                 }
@@ -2013,7 +1941,7 @@ impl VmContext {
     }
 
     if self.vcpu.iter >= MAX_ITERATIONS && crate::microvm::vm_window() == 0 {
-        self.shared.serial.flush();
+        self.shared.dev.lock().serial.flush();
         kprintln!(
             "[microvm] iteration cap ({}) reached — guest still running, ({} I/O drops)",
             MAX_ITERATIONS, self.vcpu.io_dropped,
@@ -2034,10 +1962,7 @@ impl VmContext {
     // Reached only when the loop ended (guest exit / cap), not on a
     // StillRunning yield or a `?` early-return. APs may still be in an exit
     // and writing the same device: under the lock, or the snapshot tears.
-    {
-        let _big = if ap_active() { Some(VM_BIG_LOCK.lock()) } else { None };
-        self.shared.pci.virtio_blk.save();
-    }
+    self.shared.dev.lock().pci.virtio_blk.save();
 
     match last_outcome {
         Some(o) => Ok(SliceOutcome::Exited(o)),
@@ -2204,8 +2129,9 @@ fn handle_linux_io(
 /// EPT violation on the I/O APIC page → `devices::ioapic` (register window).
 fn handle_mmio_ioapic(
     regs: &mut vmcs::GuestRegs,
-    sh: &mut VmShared,
+    pic: &mut crate::microvm::devices::pic8259::Pic8259,
     gpa: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -2213,7 +2139,7 @@ fn handle_mmio_ioapic(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let Some(buf) = fetch_inst(rip, cr3, sh.guest_mem) else {
+    let Some(buf) = fetch_inst(rip, cr3, mem) else {
         kprintln!("[vmx] ioapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);
         return false;
     };
@@ -2224,9 +2150,9 @@ fn handle_mmio_ioapic(
     let off = (gpa - crate::microvm::devices::ioapic::IOAPIC_BASE) as u32;
     if dec.is_write {
         let value = read_gpr_vmx(regs, dec.reg) & width_mask(dec.width);
-        sh.pic.ioapic.mmio(off, Some(value as u32));
+        pic.ioapic.mmio(off, Some(value as u32));
     } else {
-        let value = sh.pic.ioapic.mmio(off, None).unwrap_or(0) as u64;
+        let value = pic.ioapic.mmio(off, None).unwrap_or(0) as u64;
         write_gpr_vmx(regs, dec.reg, dec.width, value & width_mask(dec.width));
     }
     vmcs::advance_guest_rip_by(dec.length as u64).is_ok()
@@ -2241,8 +2167,8 @@ fn handle_mmio_lapic(
     regs: &mut vmcs::GuestRegs,
     apic: &mut LocalApic,
     apic_id: u8,
-    sh: &mut VmShared,
     gpa: u64,
+    mem: &GuestMem,
 ) -> bool {
     use crate::kprintln;
     use crate::microvm::devices::guest_fetch::fetch_inst;
@@ -2250,7 +2176,7 @@ fn handle_mmio_lapic(
 
     let rip = match vmcs::read_guest_rip() { Ok(v) => v, Err(_) => return false };
     let cr3 = match vmcs::read_guest_cr3() { Ok(v) => v, Err(_) => return false };
-    let buf = match fetch_inst(rip, cr3, sh.guest_mem) {
+    let buf = match fetch_inst(rip, cr3, mem) {
         Some(b) => b,
         None => {
             kprintln!("[vmx] lapic mmio: insn fetch failed (rip={:#x} gpa={:#x})", rip, gpa);

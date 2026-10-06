@@ -22,11 +22,10 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use core::ptr;
 
 /// The active microvm's `GuestMem`, held outside `VmShared` so the off-vCPU
-/// network backend can share `&GuestMem` across cores without aliasing the
-/// vCPU's `&mut VmShared`. Sound because `GuestMem` is `&self`-only + `Sync`
-/// (its only interior mutability is the atomic software TLB) — a vCPU's
-/// `&mut VmShared` governs only the stored reference, never the pointee. One
-/// instance (one microvm at a time); a future multi-VM world keys this per VM.
+/// workers can share `&GuestMem` across cores without a `VmShared` handle.
+/// Sound because `GuestMem` is `&self`-only + `Sync` (its only interior
+/// mutability is the atomic software TLB). One instance (one microvm at a
+/// time); a future multi-VM world keys this per VM.
 static ACTIVE_GM: AtomicPtr<GuestMem> = AtomicPtr::new(ptr::null_mut());
 
 /// Install `gm` as the active guest memory and return a `'static` handle to it.

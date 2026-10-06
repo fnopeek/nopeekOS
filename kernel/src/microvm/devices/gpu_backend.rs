@@ -9,8 +9,8 @@
 //! Why out of VmShared: the GPU copy reads guest pages (`guest_mem::active()`,
 //! already `&self`) and writes the compositor surface (global `shade::surface`).
 //! Only the device state needed to move out so the worker can hold it across
-//! cores without aliasing the vCPU's `&mut VmShared`. Lock order: a vCPU takes
-//! `VM_BIG_LOCK` then this lock; the worker takes only this lock — no cycle.
+//! cores without waiting for the vCPUs' device lock. Lock order: a vCPU takes
+//! `VmShared::dev` then this lock; the worker takes only this lock — no cycle.
 
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
@@ -18,8 +18,8 @@ use super::virtio_gpu_pci::{VirtioGpu, BAR0_BASE};
 
 static GPU: Mutex<VirtioGpu> = Mutex::new(VirtioGpu::new());
 
-/// Acquire the GPU device. The vCPU takes this only after `VM_BIG_LOCK`; the
-/// worker takes only this — lock order is acyclic.
+/// Acquire the GPU device. The vCPU takes this only after `VmShared::dev`;
+/// the worker takes only this — lock order is acyclic.
 pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).

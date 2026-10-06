@@ -541,7 +541,7 @@ pub const MAX_VCPUS_CAP: usize = 8;
 /// Bring up the AP vCPUs. When true the boot cmdline raises `maxcpus` to
 /// `GUEST_VCPUS`, the guest's INIT-SIPI spawns further vCPU fibers sharing
 /// the BSP's `VmShared`, and the cross-vCPU IPI path is used. When false
-/// there is no spawn, `maxcpus=1`, and the big VM lock is never taken.
+/// there is no spawn and `maxcpus=1`.
 /// Requires `GUEST_SMP`.
 pub const GUEST_SMP_AP: bool = true;
 
@@ -551,18 +551,6 @@ pub const GUEST_SMP_AP: bool = true;
 /// on AMD and Intel alike. Unknown vendor stays single-vCPU.
 pub fn smp_ap_active() -> bool {
     GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd | Vendor::Intel)
-}
-
-/// Set/clear the active backend's guest-SMP big-VM-lock engagement. Dispatches
-/// via `detect_vendor` (lock-free CPUID), not `current_vendor()` (which locks
-/// VENDOR) — the BSP vCPU fiber holds the VENDOR lock for its whole run loop,
-/// so the last-one-out call from inside that arm must not re-lock it.
-fn vm_set_ap_active(on: bool) {
-    match detect_vendor() {
-        Vendor::Intel => vmx::set_ap_active(on),
-        Vendor::Amd => svm::set_ap_active(on),
-        Vendor::Unknown(_) => {}
-    }
 }
 
 /// An I/O APIC in the MP table, and the guest booted without `noapic`: device
@@ -620,9 +608,6 @@ static AP_SPAWNED: AtomicU32 = AtomicU32::new(0);
 /// per-id to stay correct if that ever changes).
 static AP_SIPI_VECTORS: [AtomicU8; ORCH_MAX_VCPUS] =
     { const Z: AtomicU8 = AtomicU8::new(0); [Z; ORCH_MAX_VCPUS] };
-/// The BSP's `*mut VmShared` (as u64), published once the BSP opens, for an
-/// AP fiber to alias. 0 = not yet published.
-static AP_SHARED_PTR: AtomicU64 = AtomicU64::new(0);
 /// Live vCPU count for this VM. The BSP sets it to 1 at open; the reaper bumps
 /// it per AP it spawns; each fiber decrements on exit. The BSP (owner) waits
 /// for it to return to 1 before `close()` so no AP touches freed shared state
@@ -733,18 +718,13 @@ pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
     crate::intent::wake_shell();
 }
 
-/// The BSP publishes the address of its (heap-boxed) `VmShared` so a
-/// spawned AP fiber can alias it.
-pub fn publish_ap_shared(ptr: u64) {
-    AP_SHARED_PTR.store(ptr, Ordering::Release);
-}
-
 /// Reset the AP-spawn orchestration statics after the last vCPU has exited
 /// (BSP teardown), so a relaunch starts clean.
 fn ap_orch_reset() {
     AP_SPAWNED.store(0, Ordering::Release);
     AP_SPAWN_REQUESTED.store(0, Ordering::Release);
-    AP_SHARED_PTR.store(0, Ordering::Release);
+    svm::clear_ap_shared();
+    vmx::clear_ap_shared();
     VM_CORE_MASK.store(1, Ordering::Release); // only Core 0 reserved
     VCPU_CORES.store(0, Ordering::Release);
     WORKER_CORES.store(0, Ordering::Release);
@@ -996,9 +976,7 @@ pub fn vm_poll_slice() {
     // Guest SMP: a guest SIPI asked us to bring up an AP. Core 0 owns the
     // run-queue deque, so it does the spawn here; the BSP vCPU fiber that
     // decoded the SIPI runs on a worker and cannot push. Once per AP
-    // (AP_SPAWNED guard absorbs the retried 2nd SIPI). AP_ACTIVE is set
-    // before the spawn so the BSP starts taking the big VM lock before the
-    // AP can run.
+    // (AP_SPAWNED guard absorbs the retried 2nd SIPI).
     if GUEST_SMP_AP {
         let fresh = AP_SPAWN_REQUESTED.load(Ordering::Acquire)
             & !AP_SPAWNED.load(Ordering::Acquire);
@@ -1014,10 +992,7 @@ pub fn vm_poll_slice() {
                 {
                     continue;
                 }
-                // AP_ACTIVE before the spawn so the BSP starts taking the
-                // big-VM lock before the AP can run.
                 VCPU_COUNT.fetch_add(1, Ordering::AcqRel);
-                vm_set_ap_active(true);
                 let vec = AP_SIPI_VECTORS[apic_id as usize].load(Ordering::Acquire);
                 // Place the AP on a distinct idle worker core (one vCPU per
                 // core, since VMX root is per core). `fiber::admit` pushes
@@ -1390,12 +1365,11 @@ fn vcpu_fiber_task(_arg: u64) {
             ) {
                 Ok(mut ctx) => {
                     // Guest-SMP: this is the BSP (owner). Seed the live-vCPU
-                    // count and publish our shared state's address so a
-                    // later AP fiber can alias it (the SIPI → Core-0 spawn
-                    // path reads AP_SHARED_PTR).
+                    // count and offer the shared state to later AP fibers
+                    // (the SIPI → Core-0 spawn path).
                     VCPU_COUNT.store(1, Ordering::Release);
                     if GUEST_SMP_AP {
-                        publish_ap_shared(ctx.shared_ptr() as u64);
+                        ctx.publish_for_aps();
                     }
                     loop {
                     if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
@@ -1437,7 +1411,7 @@ fn vcpu_fiber_task(_arg: u64) {
                         }
                     }
                     }
-                    // Last-one-out: the BSP owns the shared box. If an AP is
+                    // Last-one-out: the BSP frees the guest memory. If an AP is
                     // still running, signal it down and wait for it to stop
                     // touching the shared state before we free it (close()).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
@@ -1445,7 +1419,6 @@ fn vcpu_fiber_task(_arg: u64) {
                     while VCPU_COUNT.load(Ordering::Acquire) > 1 {
                         crate::smp::fiber::yield_sleep(2);
                     }
-                    svm::set_ap_active(false);
                     ap_orch_reset();
                     ctx.close();
                     VCPU_COUNT.store(0, Ordering::Release);
@@ -1457,9 +1430,8 @@ fn vcpu_fiber_task(_arg: u64) {
             // VMX guest as a fiber + guest-SMP BSP. `vmx::vm_open` installs
             // this worker's per-core TSS so VMX host state is valid off Core 0.
             // Same IF/yield discipline as the AMD arm. Owns the shared
-            // `VmShared`: seeds the live-vCPU count + publishes its address so
-            // AP fibers can alias it, and last-one-out teardown waits for APs
-            // before `close()`.
+            // `VmShared`: seeds the live-vCPU count + offers it to AP fibers,
+            // and last-one-out teardown waits for APs before `close()`.
             match vmx::vm_open(
                 &pending.bzimage,
                 &pending.cmdline,
@@ -1469,7 +1441,7 @@ fn vcpu_fiber_task(_arg: u64) {
                 Ok(mut ctx) => {
                     VCPU_COUNT.store(1, Ordering::Release);
                     if GUEST_SMP_AP {
-                        publish_ap_shared(ctx.shared_ptr() as u64);
+                        ctx.publish_for_aps();
                     }
                     loop {
                         if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
@@ -1503,14 +1475,13 @@ fn vcpu_fiber_task(_arg: u64) {
                             }
                         }
                     }
-                    // Last-one-out: the BSP owns the shared box. If an AP is
+                    // Last-one-out: the BSP frees the guest memory. If an AP is
                     // still running, signal down + wait before freeing (close).
                     VM_CLOSE_REQUESTED.store(true, Ordering::Release);
                     crate::intent::wake_shell();
                     while VCPU_COUNT.load(Ordering::Acquire) > 1 {
                         crate::smp::fiber::yield_sleep(2);
                     }
-                    vmx::set_ap_active(false);
                     ap_orch_reset();
                     ctx.close();
                     VCPU_COUNT.store(0, Ordering::Release);
@@ -1534,7 +1505,7 @@ fn vcpu_fiber_task(_arg: u64) {
 }
 
 /// AP (secondary) vCPU fiber (guest SMP). Spawned by the Core-0 reaper after
-/// the guest's SIPI; `arg` is the AP's apic_id (1..). Aliases the BSP's
+/// the guest's SIPI; `arg` is the AP's apic_id (1..). Joins the BSP's
 /// `VmShared` (it does not open guest RAM / EPT|NPT / devices). Runs its own
 /// VMRUN/VMRESUME loop on whatever worker core picks it up, in parallel with
 /// the BSP. Decrements `VCPU_COUNT` on exit so the BSP's last-one-out teardown
@@ -1545,15 +1516,10 @@ fn vcpu_fiber_task(_arg: u64) {
 /// VMRUNning (the BSP owns teardown).
 fn ap_vcpu_fiber_task(arg: u64) {
     let apic_id = arg as u8;
-    let ptr = AP_SHARED_PTR.load(Ordering::Acquire);
     let vector = AP_SIPI_VECTORS
         .get(apic_id as usize)
         .map(|v| v.load(Ordering::Acquire))
         .unwrap_or(0);
-    if ptr == 0 {
-        VCPU_COUNT.fetch_sub(1, Ordering::AcqRel);
-        return;
-    }
     let cid = crate::smp::per_core::current_core_id();
     crate::kprintln!(
         "[microvm] AP vCPU fiber (apic_id {}) opening on core {} (sipi vec {:#x})",
@@ -1561,7 +1527,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
     );
 
     match detect_vendor() {
-        Vendor::Intel => match vmx::vm_open_ap(ptr, vector, apic_id) {
+        Vendor::Intel => match vmx::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => {
                 loop {
                     if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
@@ -1597,7 +1563,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
             }
             Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
         },
-        Vendor::Amd => match svm::vm_open_ap(ptr, vector, apic_id) {
+        Vendor::Amd => match svm::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => loop {
                 if VM_CLOSE_REQUESTED.load(Ordering::Acquire) {
                     break;
@@ -1629,7 +1595,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
                         break;
                     }
                 }
-                // AMD: the AP does not close() — the BSP owns + frees the box.
+                // AMD: the AP does not close() — the BSP owns the shared state.
             },
             Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
         },

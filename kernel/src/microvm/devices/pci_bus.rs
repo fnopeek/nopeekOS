@@ -36,7 +36,7 @@ const NO_DEVICE: u32 = 0xFFFF_FFFF;
 pub struct PciBus {
     config_addr: u32,
     pub virtio_blk: VirtioBlk,
-    // virtio-net and virtio-gpu live out of VmShared/VM_BIG_LOCK (in
+    // virtio-net and virtio-gpu live out of the VM's device lock (in
     // `net_backend` / `gpu_backend`), so their off-vCPU workers can own the
     // data-plane. Config-space dispatch reaches the GPU via `gpu_backend::lock()`.
     pub virtio_input: VirtioInput,

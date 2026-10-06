@@ -1,16 +1,12 @@
 //! Off-vCPU network backend for the microvm (vhost-style).
 //!
-//! Owns the virtio-net device outside `VmShared`/`VM_BIG_LOCK` so the
-//! data-plane worker fiber can run it — `inject_rx` (RX) + `service_tx`
-//! (TX) — on its own core while the vCPUs only ring the notify doorbell.
-//!
-//! Why out of `VmShared`: the run loop hands the lock holder an exclusive
-//! `&mut VmShared`. A second core touching `virtio_net` while a vCPU holds
-//! that borrow would alias. `GuestMem` is already `&self` (interior
-//! mutability), so the backend can share `&GuestMem` soundly; only the
-//! device state needed to move out. Lock order: a vCPU may take
-//! `VM_BIG_LOCK` then this lock; the backend takes only this lock (never
-//! `VM_BIG_LOCK`), so no cycle.
+//! Owns the virtio-net device outside the VM's device lock (`VmShared::dev`)
+//! so the data-plane worker fiber can run it — `inject_rx` (RX) +
+//! `service_tx` (TX) — on its own core while the vCPUs only ring the notify
+//! doorbell, without waiting for their device work. `GuestMem` is `&self`
+//! (interior mutability), so the backend shares `&GuestMem`. Lock order: a
+//! vCPU may take `VmShared::dev` then this lock; the backend takes only this
+//! lock, so no cycle.
 //!
 //! Single instance: exactly one microvm runs at a time.
 
@@ -60,7 +56,7 @@ pub fn take_tx_kick() -> bool { TX_KICK.swap(false, Ordering::AcqRel) }
 pub fn tx_kick_pending() -> bool { TX_KICK.load(Ordering::Acquire) }
 
 /// Guest RX/TX IRQ (IRQ10) raised by the net pump, which runs outside
-/// `VM_BIG_LOCK` (it does not touch `VmShared`). The BSP folds this into its
+/// `VmShared::dev` (it does not touch `VmShared`). The BSP folds this into its
 /// `pending_irqs` at a safe injection point. A lock-free atomic, so the
 /// pump needs no `VmShared` borrow and APs never block behind it on a
 /// TLB-shootdown exit. Set by the pump (any caller), consumed by the BSP.
