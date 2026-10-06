@@ -1769,6 +1769,9 @@ fn https_exchange(
     mut tls: crate::tls::TlsSession,
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
 ) -> Result<HttpResponse, ExchangeErr> {
+    if !request_line_ok(host, path) {
+        return Err(ExchangeErr::Fatal("url: unsafe host or path"));
+    }
     let mut head = alloc::format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n",
         req.method, path, host, USER_AGENT
@@ -2061,7 +2064,56 @@ fn https_get_once(
 ///   * absolute-path `/path?query` → (current_host, "/path?query")
 ///
 /// Rejects `http://...` (we never downgrade) and any other scheme.
+/// Host and path go verbatim into `GET {path} HTTP/1.1` and `Host: {host}`.
+/// A space, CR or LF there would end the request line early and let a
+/// caller (a module, or a redirect from the network) append headers or a
+/// second request on a pooled connection. A host with anything but a
+/// hostname's characters is refused; the path is percent-encoded the way a
+/// browser does it (controls, space, DEL and non-ASCII bytes), so it can
+/// only ever be one token.
+fn url_parts_ok(host: &str, path: &str) -> Result<String, &'static str> {
+    // `request_line_ok` checks the same at the point of sending; this is
+    // where the path still gets a chance to be encoded.
+    let (name, port) = match host.rsplit_once(':') {
+        Some((n, _)) if !n.ends_with(']') && n.contains(':') => (host, None), // bare IPv6
+        Some((n, p)) => (n, Some(p)),
+        None => (host, None),
+    };
+    let name_ok = !name.is_empty() && name.bytes().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'[' | b']' | b':')
+    });
+    let port_ok = port.is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|c| c.is_ascii_digit()));
+    if !name_ok || !port_ok {
+        return Err("url: invalid host");
+    }
+    let mut out = String::with_capacity(path.len());
+    for &c in path.as_bytes() {
+        if c <= 0x20 || c >= 0x7F {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push('%');
+            out.push(HEX[(c >> 4) as usize] as char);
+            out.push(HEX[(c & 0xF) as usize] as char);
+        } else {
+            out.push(c as char);
+        }
+    }
+    Ok(out)
+}
+
+/// Last check before host and path enter a request line, for any caller
+/// that did not come through the URL parsers.
+fn request_line_ok(host: &str, path: &str) -> bool {
+    let token = |s: &str| !s.is_empty() && s.bytes().all(|c| c > 0x20 && c != 0x7F);
+    token(host) && token(path)
+}
+
 fn parse_https_url(loc: &str, current_host: &str) -> Result<(String, String), &'static str> {
+    let (h, p) = parse_https_url_raw(loc, current_host)?;
+    let p = url_parts_ok(&h, &p)?;
+    Ok((h, p))
+}
+
+fn parse_https_url_raw(loc: &str, current_host: &str) -> Result<(String, String), &'static str> {
     let loc = loc.trim();
     if let Some(rest) = loc.strip_prefix("https://") {
         let (h, p) = match rest.find('/') {
@@ -2099,13 +2151,14 @@ pub(crate) fn parse_url(url: &str) -> Result<(String, String, bool), &'static st
         if host.is_empty() {
             return Err("empty host");
         }
+        let path = url_parts_ok(host, path)?;
         if !plain_http_allowed(host) {
             return Err("refusing http downgrade");
         }
         // Every plaintext fetch is logged; a silent downgrade is what the
         // rule exists to prevent.
-        kprintln!("[npk]   http (KLARTEXT, kein TLS) -> {}", host);
-        Ok((String::from(host), String::from(path), false))
+        kprintln!("[npk]   http (PLAINTEXT, no TLS) -> {}", host);
+        Ok((String::from(host), path, false))
     } else {
         let mut full = String::from("https://");
         full.push_str(url);
@@ -2534,6 +2587,12 @@ fn user_download_streaming(
 /// Permissive redirect-URL parser: accepts http://, https://, and absolute
 /// paths. Returns (host, path, is_tls).
 fn parse_any_url(loc: &str, current_host: &str, current_tls: bool) -> Result<(String, String, bool), &'static str> {
+    let (h, p, tls) = parse_any_url_raw(loc, current_host, current_tls)?;
+    let p = url_parts_ok(&h, &p)?;
+    Ok((h, p, tls))
+}
+
+fn parse_any_url_raw(loc: &str, current_host: &str, current_tls: bool) -> Result<(String, String, bool), &'static str> {
     let loc = loc.trim();
     let split = |rest: &str| -> (String, String) {
         match rest.find('/') {
@@ -2671,6 +2730,10 @@ fn http_exchange(
     }
     let _poll_hz_guard = PollHzGuard;
 
+    if !request_line_ok(host, path) {
+        let _ = crate::net::tcp::close(handle);
+        return Err(ExchangeErr::Fatal("url: unsafe host or path"));
+    }
     let request = alloc::format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
         path, host, USER_AGENT
