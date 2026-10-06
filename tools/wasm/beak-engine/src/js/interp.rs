@@ -478,6 +478,8 @@ pub struct Interp {
     /// Which module threw first. An error from a large graph would otherwise
     /// only name the entry point.
     pub module_fail: Option<Rc<str>>,
+    /// The import map and the `import()` calls waiting for the host.
+    pub loader: super::modules::Loader,
     /// Stylesheets inserted by script that still need fetching:
     /// `(node, address as in the attribute)`.
     ///
@@ -852,7 +854,7 @@ impl Interp {
     }
 
     fn with_realm(realm: Realm) -> Interp {
-        Interp { realm, modules: HashMap::new(), module_fail: None, submits: Vec::new(),
+        Interp { realm, modules: HashMap::new(), module_fail: None, loader: Default::default(), submits: Vec::new(),
                  deadline: None,
                  pending_sheets: Vec::new(),
                  pending_scripts: Vec::new(),
@@ -1005,6 +1007,7 @@ impl Interp {
         for v in self.custom.values() { add(&v, &mut objs); }
         for (_, (_, v)) in &self.templates { add(v, &mut objs); }
         objs.extend(self.pending_rejections.iter().cloned());
+        objs.extend(self.loader.pending.iter().map(|(_, p)| p.clone()));
         objs.extend(self.socket_objs.values().cloned());
         for o in &self.observers { objs.push(o.js.clone()); add(&o.cb, &mut objs); }
         for o in &self.resize_obs { objs.push(o.js.clone()); add(&o.cb, &mut objs); }

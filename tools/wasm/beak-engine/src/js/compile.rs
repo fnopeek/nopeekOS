@@ -1429,8 +1429,21 @@ impl Compiler {
                 self.chunk.emit(Op::Await);
                 Ok(())
             }
+            Expr::MetaProp { meta, prop } if meta == "import" && prop == "meta" => {
+                self.chunk.emit(Op::ImportMeta);
+                Ok(())
+            }
             Expr::MetaProp { .. } => Err(Unsupported("meta-prop")),
-            Expr::ImportCall(_) => Err(Unsupported("import-call")),
+            Expr::ImportCall(args) => {
+                let n = self.plain_args(args)?;
+                for _ in n..2 {
+                    let k = self.chunk.konst(Value::Undefined);
+                    self.chunk.emit(Op::Const(k));
+                }
+                if n > 2 { return Err(Unsupported("import-call-args")) }
+                self.chunk.emit(Op::ImportCall);
+                Ok(())
+            }
         }
     }
 

@@ -3343,6 +3343,23 @@ pub fn install(realm: &mut Realm) {
     // `referrer` is the empty string, the correct answer for a navigation
     // without a referrer; beak does not pass one on yet.
     getter(&document_proto, "referrer", |_, _, _| Ok(Value::str("")), &fp);
+    // `document.domain` (HTML §7.5.2): the host of the document's origin, the
+    // empty string for an opaque origin. Setting it is only accepted when
+    // nothing changes; relaxing to a parent domain is deprecated and not
+    // supported.
+    accessor(&document_proto, "domain",
+        |i, _, _| {
+            let host = super::url::parse_abs(&i.loc_href)
+                .filter(|p| matches!(p.scheme.as_str(), "http" | "https"))
+                .map(|p| p.host).unwrap_or_default();
+            Ok(Value::string(host))
+        },
+        |i, _, a| {
+            let want = i.to_string(a.first().unwrap_or(&Value::Undefined))?;
+            let host = super::url::parse_abs(&i.loc_href).map(|p| p.host).unwrap_or_default();
+            if want.eq_ignore_ascii_case(&host) { return Ok(Value::Undefined) }
+            Err(dom_exc(i, "SecurityError", "document.domain cannot be changed"))
+        }, &fp);
     // `document.cookie`. The engine holds no cookie jar: what this document
     // may see depends on domain, path, `Secure` and `HttpOnly`, which the host
     // knows; `Interp::set_cookies` provides the script view. Writes go back

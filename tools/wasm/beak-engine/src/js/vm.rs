@@ -554,6 +554,19 @@ impl Vm {
                 self.push(v);
                 self.push(t);
             }
+            Op::ImportCall => {
+                let _options = self.pop();
+                let spec = self.pop();
+                let v = i.dynamic_import(&spec, &env)?;
+                self.push(v);
+            }
+            Op::ImportMeta => {
+                let n = super::modules::META_LOCAL;
+                let v = super::interp::env_lookup(&env, n)
+                    .and_then(|e| e.borrow().vars.get(n).map(|b| b.value.clone()))
+                    .unwrap_or(Value::Undefined);
+                self.push(v);
+            }
             Op::SuperCall(argc) => {
                 let args = self.take(*argc as usize);
                 let v = i.super_call(&args, &env)?;

@@ -125,7 +125,15 @@ impl Interp {
                 }
                 Ok(Value::Undefined)
             }
-            Expr::ImportCall(_) => self.type_err("dynamic import is not supported"),
+            Expr::ImportCall(a) => {
+                let mut spec = Value::Undefined;
+                for (k, x) in a.iter().enumerate() {
+                    let Arg::Expr(e) = x else { return self.type_err("import(): spread is not allowed") };
+                    let v = self.eval(e, env)?;
+                    if k == 0 { spec = v; }
+                }
+                self.dynamic_import(&spec, env)
+            }
             // `tag`a${x}b`` (ES 13.2.8.6): the tag receives the template
             // object first, then the substitutions. The receiver counts:
             // `o.tag`x`` calls with `o` as `this`, like an ordinary call.
