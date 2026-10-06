@@ -246,7 +246,7 @@ impl VirtioBlk {
 
     /// Persist the current backing buffer to npkFS. Called when the
     /// VM exits the run loop. npkFS encrypts every blob with AES-256-GCM
-    /// at rest using the user's master key, so storing the plaintext
+    /// at rest under the disk key, so storing the plaintext
     /// here yields an encrypted-at-rest profile image automatically.
     /// Per-sector AEAD with sector-in-AAD would allow partial
     /// random-access without re-encrypting the whole image; the

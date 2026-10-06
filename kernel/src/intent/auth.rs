@@ -1,16 +1,14 @@
 //! Authentication intents: lock, passwd
 
-use crate::{kprint, kprintln, crypto, serial};
+use crate::{kprint, kprintln, serial};
 
 pub fn intent_lock() {
     kprintln!("[npk] System locked.");
-    crypto::clear_master_key();
-
-    let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
+    crate::disk_key::lock();
 
     // Use GUI login screen if framebuffer available
     if crate::framebuffer::is_available() {
-        let _key = crate::gui::login::run(&salt);
+        crate::gui::login::run();
     } else {
         // Fallback: text-mode unlock
         let mut attempts: u32 = 0;
@@ -30,101 +28,66 @@ pub fn intent_lock() {
             let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
             if len == 0 { continue; }
 
-            let key = crypto::derive_master_key(&buf[..len], &salt);
+            let ok = crate::disk_key::unlock(&buf[..len]);
             for b in buf.iter_mut() { *b = 0; }
 
-            crypto::set_master_key(key);
-
-            match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
-                Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {
-                    crate::config::load();
-                    if let Some(name) = crate::config::get("name") {
-                        kprintln!("[npk] Welcome back, {}.", name);
-                    } else {
-                        kprintln!("[npk] Unlocked.");
-                    }
-                    return;
+            if ok {
+                crate::config::load();
+                if let Some(name) = crate::config::get("name") {
+                    kprintln!("[npk] Welcome back, {}.", name);
+                } else {
+                    kprintln!("[npk] Unlocked.");
                 }
-                _ => {
-                    crypto::clear_master_key();
-                    kprintln!("[npk] Wrong passphrase.");
-                    attempts += 1;
-                    if attempts >= 10 {
-                        kprintln!("[npk] Too many failed attempts.");
-                        crate::intent::system::intent_halt();
-                    }
-                }
+                return;
+            }
+            kprintln!("[npk] Wrong passphrase.");
+            attempts += 1;
+            if attempts >= 10 {
+                kprintln!("[npk] Too many failed attempts.");
+                crate::intent::system::intent_halt();
             }
         }
     }
 }
 
+/// `passwd` — rewrap the disk key under a new passphrase. The data stays as
+/// it is: it is encrypted under the data key, which does not change.
 pub fn intent_passwd() {
-    let salt = crate::npkfs::install_salt().unwrap_or([0u8; 16]);
-
-    // Verify current passphrase
     kprint!("[npk] Current passphrase: ");
-    let mut buf = [0u8; 128];
-    let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
-    if len == 0 {
+    let mut old = [0u8; 128];
+    let old_len = { serial::SERIAL.lock().read_line_masked(&mut old) };
+    if old_len == 0 {
         kprintln!("[npk] Cancelled.");
         return;
     }
 
-    let old_key = crypto::derive_master_key(&buf[..len], &salt);
-    for b in buf.iter_mut() { *b = 0; }
-
-    // Temporarily set old key to verify
-    let saved_key = crypto::get_master_key();
-    crypto::set_master_key(old_key);
-
-    match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
-        Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {}
-        _ => {
-            // Restore original key
-            if let Some(k) = saved_key { crypto::set_master_key(k); }
-            kprintln!("[npk] Wrong passphrase. Aborted.");
-            return;
-        }
-    }
-
-    // Delete old keycheck (still encrypted with old key)
-    let _ = crate::npkfs::delete(crate::config::KEYCHECK_PATH);
-
-    // Get new passphrase
-    let new_key = loop {
+    let mut new = [0u8; 128];
+    let new_len = loop {
         kprint!("[npk] New passphrase: ");
-        let mut buf1 = [0u8; 128];
-        let len1 = { serial::SERIAL.lock().read_line_masked(&mut buf1) };
+        let len1 = { serial::SERIAL.lock().read_line_masked(&mut new) };
         if len1 < 8 {
             kprintln!("[npk] Too short. Minimum 8 characters.");
             continue;
         }
 
         kprint!("[npk] Confirm passphrase: ");
-        let mut buf2 = [0u8; 128];
-        let len2 = { serial::SERIAL.lock().read_line_masked(&mut buf2) };
-
-        if len1 != len2 || buf1[..len1] != buf2[..len2] {
+        let mut confirm = [0u8; 128];
+        let len2 = { serial::SERIAL.lock().read_line_masked(&mut confirm) };
+        let same = len1 == len2 && new[..len1] == confirm[..len2];
+        confirm.fill(0);
+        if !same {
             kprintln!("[npk] Passphrases do not match. Try again.");
-            for b in buf1.iter_mut() { *b = 0; }
-            for b in buf2.iter_mut() { *b = 0; }
+            new.fill(0);
             continue;
         }
-
-        let key = crypto::derive_master_key(&buf1[..len1], &salt);
-        for b in buf1.iter_mut() { *b = 0; }
-        for b in buf2.iter_mut() { *b = 0; }
-        break key;
+        break len1;
     };
 
-    // Set new key and re-encrypt keycheck
-    crypto::set_master_key(new_key);
-    match crate::npkfs::store(crate::config::KEYCHECK_PATH, crate::config::KEYCHECK_VALUE, crate::capability::CAP_NULL) {
-        Ok(_) => kprintln!("[npk] Passphrase changed successfully."),
-        Err(e) => kprintln!("[npk] ERROR: Could not store new keycheck: {}", e),
+    let r = crate::disk_key::change(&old[..old_len], &new[..new_len]);
+    old.fill(0);
+    new.fill(0);
+    match r {
+        Ok(()) => kprintln!("[npk] Passphrase changed."),
+        Err(e) => kprintln!("[npk] Passphrase not changed: {}.", e),
     }
-
-    kprintln!("[npk] NOTE: Existing objects remain encrypted with the old key.");
-    kprintln!("[npk]       They will be re-encrypted on next fetch+store cycle.");
 }

@@ -1,8 +1,11 @@
 //! Cryptographically Secure PRNG (ChaCha20-based)
 //!
-//! Source for capability tokens and all security-sensitive randomness.
-//! Seeded from RDRAND (hardware RNG) if available, TSC fallback.
-//! Re-keys every 64 blocks for forward secrecy.
+//! Source for capability tokens, the disk data key and all other
+//! security-sensitive randomness. The seed is BLAKE3 over hardware RNG words
+//! (RDSEED, else RDRAND) that pass a health check, TSC jitter and the RTC, so
+//! a broken hardware source cannot make the seed a constant on its own.
+//! Re-keys every 64 blocks for forward secrecy; `reseed` mixes in fresh
+//! material before a long-lived key is drawn.
 
 use spin::Mutex;
 
@@ -168,46 +171,156 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
-fn build_seed() -> [u8; 32] {
-    let mut seed = [0u8; 32];
+fn has_rdseed() -> bool {
+    let ebx: u32;
+    // SAFETY: CPUID leaf 7 subleaf 0 exists on every x86_64 we boot on; rbx
+    // is saved by hand because LLVM reserves it.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {0:e}, ebx",
+            "pop rbx",
+            out(reg) ebx,
+            inout("eax") 7u32 => _,
+            inout("ecx") 0u32 => _,
+            out("edx") _,
+        );
+    }
+    ebx & (1 << 18) != 0
+}
 
-    if has_rdrand() {
-        // Hardware RNG: best entropy source
-        for i in 0..4 {
-            // Retry up to 10 times per word
-            for _ in 0..10 {
-                if let Some(val) = rdrand64() {
-                    seed[i * 8..(i + 1) * 8].copy_from_slice(&val.to_le_bytes());
-                    break;
-                }
+fn rdseed64() -> Option<u64> {
+    let val: u64;
+    let ok: u8;
+    // SAFETY: RDSEED is available (checked by has_rdseed).
+    unsafe {
+        core::arch::asm!(
+            "rdseed {val}",
+            "setc {ok}",
+            val = out(reg) val,
+            ok = out(reg_byte) ok,
+        );
+    }
+    if ok == 1 { Some(val) } else { None }
+}
+
+/// Words drawn from the hardware RNG for one seed.
+const HW_WORDS: usize = 8;
+
+/// Hardware RNG words, or None when the source is missing or fails the
+/// health check. RDSEED (an entropy source) is preferred; RDRAND (a DRBG
+/// seeded from it) is the fallback. Rejected, as Linux does at boot: a word
+/// that is all zeros or all ones (the AMD erratum returns all ones with CF
+/// set), and a sample in which any word repeats.
+fn hardware_words() -> Option<[u64; HW_WORDS]> {
+    let source: fn() -> Option<u64> = if has_rdseed() {
+        rdseed64
+    } else if has_rdrand() {
+        rdrand64
+    } else {
+        return None;
+    };
+    let mut words = [0u64; HW_WORDS];
+    for w in words.iter_mut() {
+        // RDSEED may run dry for a moment; give it time before giving up.
+        let mut got = None;
+        for _ in 0..100 {
+            if let Some(v) = source() {
+                got = Some(v);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let v = got?;
+        if v == 0 || v == u64::MAX {
+            return None;
+        }
+        *w = v;
+    }
+    for i in 0..HW_WORDS {
+        for j in i + 1..HW_WORDS {
+            if words[i] == words[j] {
+                return None;
             }
         }
-    } else {
-        // Fallback: TSC + constants (weak, but better than nothing)
-        let t1 = rdtsc();
-        let t2 = rdtsc();
-        let t3 = rdtsc();
-        let t4 = rdtsc();
-        seed[0..8].copy_from_slice(&(t1 ^ 0x6A09E667F3BCC908).to_le_bytes());
-        seed[8..16].copy_from_slice(&(t2 ^ 0xBB67AE8584CAA73B).to_le_bytes());
-        seed[16..24].copy_from_slice(&(t3 ^ 0x3C6EF372FE94F82B).to_le_bytes());
-        seed[24..32].copy_from_slice(&(t4 ^ 0xA54FF53A5F1D36F1).to_le_bytes());
     }
+    Some(words)
+}
 
-    seed
+/// Timing jitter: TSC deltas around memory traffic. A few bits each, but
+/// independent of the hardware RNG.
+fn jitter(h: &mut blake3::Hasher) {
+    let mut scratch = [0u64; 64];
+    let mut prev = rdtsc();
+    for i in 0..1024usize {
+        let slot = (prev as usize ^ i.wrapping_mul(0x9E37_79B9)) % scratch.len();
+        scratch[slot] = scratch[slot].wrapping_add(prev).rotate_left(7);
+        let now = rdtsc();
+        h.update(&now.wrapping_sub(prev).to_le_bytes());
+        prev = now;
+    }
+    h.update(&scratch[0].to_le_bytes());
+}
+
+/// Fresh seed material, and whether a hardware source passed.
+fn build_seed() -> ([u8; 32], bool) {
+    let mut h = blake3::Hasher::new_derive_key("nopeekOS csprng seed v1");
+    let hw = hardware_words();
+    if let Some(words) = hw {
+        for w in words {
+            h.update(&w.to_le_bytes());
+        }
+    }
+    jitter(&mut h);
+    if let Some(t) = crate::rtc::read_unix_time() {
+        h.update(&t.to_le_bytes());
+    }
+    (*h.finalize().as_bytes(), hw.is_some())
+}
+
+static HW_SEEDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the last seed or reseed had a hardware source that passed.
+pub fn hardware_seeded() -> bool {
+    HW_SEEDED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn report(hw: bool) {
+    HW_SEEDED.store(hw, core::sync::atomic::Ordering::Relaxed);
+    if !hw {
+        crate::kprintln!("[npk] CSPRNG: WARNING — no hardware RNG passed its check; \
+            seeded from timing jitter only");
+    }
 }
 
 // === Public API ===
 
 pub fn init() {
-    let seed = build_seed();
+    let (seed, hw) = build_seed();
     *RNG.lock() = Some(ChaChaRng::new(&seed));
-
-    if has_rdrand() {
-        crate::kdebug!("[npk] CSPRNG: ready (RDRAND-seeded)");
-    } else {
-        crate::kdebug!("[npk] CSPRNG: ready (TSC-seeded, no RDRAND)");
+    report(hw);
+    if hw {
+        let src = if has_rdseed() { "RDSEED" } else { "RDRAND" };
+        crate::kdebug!("[npk] CSPRNG: ready ({}-seeded)", src);
     }
+}
+
+/// Mix fresh hardware words, jitter and the RTC into the generator. Called
+/// before a long-lived key is drawn, so it does not rest on the boot seed
+/// alone.
+pub fn reseed() {
+    let (fresh, hw) = build_seed();
+    {
+        let mut guard = RNG.lock();
+        let Some(rng) = guard.as_mut() else { return };
+        let mut h = blake3::Hasher::new_derive_key("nopeekOS csprng reseed v1");
+        h.update(&rng.key);
+        h.update(&fresh);
+        rng.key = *h.finalize().as_bytes();
+        rng.refill();
+    }
+    report(hw);
 }
 
 #[allow(dead_code)]

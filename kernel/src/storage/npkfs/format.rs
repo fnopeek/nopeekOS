@@ -1,15 +1,16 @@
-//! npkFS on-disk format (v3).
+//! npkFS on-disk format (v4).
 //!
 //! Disk layout: block 0 reserved (MBR/GPT/UEFI), blocks 1–8 = SB slots,
 //! blocks 9–264 = journal area, block 265+ = bitmap & data.
 //!
-//! v3 extends the v2 `TreeEntry` shape with an `mtime` field (UTC
-//! seconds since the Unix epoch). v2 disks cannot be read: the magic is
-//! `npkFS\x03\0\0` and the postcard wire shape of `Tree` payloads differs.
-//! The mount-time guard halts with a reinstall message on v2 magic.
+//! v4 keeps v3's object shapes and changes the keys: the superblock holds
+//! keyslots that wrap a random data key (`crypto::keyslot`), every object is
+//! encrypted (trees included), and an object's address is a keyed BLAKE3 of
+//! its bytes instead of a plain hash. v2 and v3 disks cannot be read; the
+//! mount-time guard halts with a reinstall message.
 //!
-//! The block-level B-tree node layout is the same in v2 and v3, so
-//! `BTREE_NODE_MAGIC` stays `"NPK2"` at superblock version 3.
+//! The block-level B-tree node layout is unchanged since v2, so
+//! `BTREE_NODE_MAGIC` stays `"NPK2"`.
 
 #![allow(dead_code)]
 
@@ -26,17 +27,20 @@ pub use super::types::{
 
 // ── Format identity ───────────────────────────────────────────────────
 
-/// v3 superblock magic. Byte 5 carries the schema version (`0x01` v1,
-/// `0x02` v2, `0x03` v3) so `dd | xxd` shows the generation directly
-/// next to the ASCII tag.
-pub const DISK_MAGIC: [u8; 8] = *b"npkFS\x03\0\0";
+/// v4 superblock magic. Byte 5 carries the schema version so `dd | xxd`
+/// shows the generation directly next to the ASCII tag.
+pub const DISK_MAGIC: [u8; 8] = *b"npkFS\x04\0\0";
 
-/// v2 superblock magic. Kept here so the mount-time guard can detect
-/// pre-mtime disks and surface a clear reinstall message.
+/// Older superblock magics, kept so the mount-time guard can name the
+/// version and ask for a reinstall.
 pub const DISK_MAGIC_V2: [u8; 8] = *b"npkFS\x02\0\0";
+pub const DISK_MAGIC_V3: [u8; 8] = *b"npkFS\x03\0\0";
 
 /// On-disk format version field of the superblock.
-pub const DISK_VERSION: u32 = 3;
+pub const DISK_VERSION: u32 = 4;
+
+/// Keyslots in the superblock (see `crypto::keyslot`).
+pub const KEYSLOTS: usize = 2;
 
 /// B-tree node magic. ASCII "NPK2" little-endian. The same in v2 and v3:
 /// the block-level node layout (header + leaf entries keyed by 32-byte
@@ -69,9 +73,8 @@ pub struct BTreeEntryRaw {
     pub hash: [u8; 32],
     /// Caller's payload size (decrypted).
     pub plaintext_size: u64,
-    /// Bytes actually stored across `extents` + indirect chain. Equals
-    /// `plaintext_size` if the FS was formatted without a master key,
-    /// `plaintext_size + 16` if the AEAD tag is appended.
+    /// Bytes actually stored across `extents` + indirect chain:
+    /// `plaintext_size + 16`, the AEAD tag appended.
     pub disk_size: u64,
     /// Total extents (direct + indirect).
     pub extent_count: u32,
@@ -143,7 +146,9 @@ pub struct SuperblockRaw {
     pub journal_head: u64,
     pub journal_seq: u64,
     pub install_salt: [u8; 16],
-    pub _reserved: [u8; 3920],
+    /// Slot 0: passphrase. Slot 1: free for a second way in (recovery key).
+    pub keyslots: [[u8; crate::crypto::keyslot::SLOT_BYTES]; KEYSLOTS],
+    pub _reserved: [u8; 3664],
     pub checksum: [u8; 32],
 }
 

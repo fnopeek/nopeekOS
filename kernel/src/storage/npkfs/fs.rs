@@ -393,6 +393,11 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let _g = ROOT_MUTEX.lock();
 
+    // Locked: every read would fail, and the walk proves nothing.
+    if !crate::crypto::disk_unlocked() {
+        return Err(Error::Storage(FsError::Locked));
+    }
+
     // Race guard: never sweep while a streaming write is in flight — its
     // flushed-but-uncommitted chunks are visible to the orphan
     // enumeration but unreachable from any committed root, so we'd delete
@@ -642,7 +647,7 @@ impl StreamingWriter {
         let blob = super::object::Object::Blob(bytes);
         let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
         if !storage::has(&hash) {
-            storage::put(&hash, &encoded, /* encrypt */ true)?;
+            storage::put(&hash, &encoded)?;
         }
         self.chunk_hashes.push(hash);
         self.written += chunk_len as u64;
@@ -677,7 +682,7 @@ impl StreamingWriter {
         // dedup still works because the manifest itself is
         // content-addressed.
         if !storage::has(&manifest_hash) {
-            storage::put(&manifest_hash, &encoded, /* encrypt */ true)?;
+            storage::put(&manifest_hash, &encoded)?;
         }
 
         let _g = ROOT_MUTEX.lock();

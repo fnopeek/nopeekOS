@@ -7,7 +7,7 @@
 
 use super::cache::BlockCache;
 use super::types::{AlignedBlock, BLOCK_SIZE, FsError};
-use super::format::{SuperblockRaw, SUPERBLOCK_SLOTS, SUPERBLOCK_START, DISK_MAGIC, DISK_VERSION, DISK_MAGIC_V2};
+use super::format::{SuperblockRaw, SUPERBLOCK_SLOTS, SUPERBLOCK_START, DISK_MAGIC, DISK_VERSION, DISK_MAGIC_V2, DISK_MAGIC_V3};
 
 /// Read the highest-generation valid superblock from the 8-slot ring.
 /// Returns `Ok(None)` if no slot validates — caller decides whether
@@ -77,7 +77,7 @@ pub fn probe(cache: &mut BlockCache) -> SbProbe {
             p.blank += 1;
             continue;
         }
-        if buf.0[..8] == DISK_MAGIC_V2 {
+        if buf.0[..8] == DISK_MAGIC_V2 || buf.0[..8] == DISK_MAGIC_V3 {
             p.legacy += 1;
             continue;
         }
@@ -102,13 +102,14 @@ pub fn probe(cache: &mut BlockCache) -> SbProbe {
 /// Detect a previous-version superblock magic anywhere in the SB ring.
 /// Returns the first version byte found among the legacy magics that
 /// matches; `None` if no slot has anything resembling an older npkFS.
-/// Used by the mount-time guard to halt with a "reinstall to v3"
-/// message instead of trying to parse the old format.
+/// Used by the mount-time guard to halt with a reinstall message instead
+/// of trying to parse the old format.
 pub fn read_legacy_magic(cache: &mut BlockCache) -> Option<u8> {
     for slot in 0..SUPERBLOCK_SLOTS {
         let mut buf = AlignedBlock::zeroed();
         if cache.read(SUPERBLOCK_START + slot, &mut buf.0).is_err() { continue; }
         if buf.0[..8] == DISK_MAGIC_V2 { return Some(2); }
+        if buf.0[..8] == DISK_MAGIC_V3 { return Some(3); }
     }
     None
 }

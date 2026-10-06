@@ -90,8 +90,7 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     kprintln!(" done.");
 
     // Bundled assets are seeded later, after setup::run_fresh_install has
-    // installed the master key (see main.rs). Written here they would be
-    // stored as plaintext and fail AEAD decryption on every later boot.
+    // created the disk key (see main.rs): nothing can be written before it.
     // See seed_bundled_assets() below.
 
     kprintln!("[npk] Installation complete.");
@@ -100,9 +99,9 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Write the bundled font + WASM modules into npkFS, encrypting each
-/// with the active master key (AEAD). Must be called
-/// after setup::run_fresh_install has called crypto::set_master_key.
+/// Write the bundled font + WASM modules into npkFS, encrypted like every
+/// object. Must be called after setup::run_fresh_install has created the
+/// disk key.
 #[cfg(feature = "installer")]
 pub fn seed_bundled_assets() {
     bundled_assets::bootstrap_into_npkfs();

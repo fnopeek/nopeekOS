@@ -53,7 +53,7 @@ const NVM_DSM: u8 = 0x09;   // Dataset Management (TRIM/Deallocate)
 const ADMIN_QUEUE_SIZE: u16 = 16;
 // 256 entries is universally supported (CAP.MQES on any modern SSD is well
 // above this). A larger queue fails init on SSDs with a smaller MQES, and
-// then at-rest decryption cannot read its keycheck.
+// then at-rest decryption cannot read a thing.
 const IO_QUEUE_SIZE: u16 = 256;
 
 // Submission Queue Entry (64 bytes)

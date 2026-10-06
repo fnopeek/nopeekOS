@@ -14,13 +14,6 @@ const MAX_ENTRIES: usize = 32;
 /// Path of the encrypted config blob.
 pub const CONFIG_OBJECT: &str = ".system/config";
 
-/// Path of the passphrase verifier blob.
-pub const KEYCHECK_PATH: &str = ".system/keycheck";
-
-/// Magic bytes written into KEYCHECK_PATH at install time. Decryption
-/// of the blob produces these bytes iff the master key is correct.
-pub const KEYCHECK_VALUE: &[u8] = b"nopeekOS.keycheck.v1.valid";
-
 struct ConfigEntry {
     key: String,
     value: String,

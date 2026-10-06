@@ -13,8 +13,7 @@
 //! Empty-root convention: a hash of all zeros is the sentinel for
 //! "no root Tree exists yet". Reading it returns an empty directory;
 //! the first mutation creates the actual on-disk Tree object. This
-//! keeps `mkfs` from having to choose an encryption mode before the
-//! master key is known.
+//! keeps `mkfs` from writing an object before the disk key exists.
 
 #![allow(dead_code)]
 
@@ -118,7 +117,7 @@ fn store_tree(entries: Vec<TreeEntry>) -> Result<([u8; 32], u64), PathError> {
     // before the user has logged in, so AEAD on Trees would brick the
     // first-vs-subsequent-boot decision. File contents (Blobs) are
     // encrypted separately in `paths::store` below.
-    storage::put(&hash, &bytes, /* encrypt */ false)?;
+    storage::put(&hash, &bytes)?;
     Ok((hash, recursive_size))
 }
 
@@ -290,7 +289,7 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
     // Stream-hash the would-be Blob's content address (no alloc, no
     // encode) so we can skip `data.to_vec() + encode_and_hash() +
     // storage::put` entirely when the blob already exists.
-    let blob_hash = super::object::blob_content_hash(data);
+    let blob_hash = super::object::blob_content_hash(data).ok_or(PathError::Corrupt)?;
 
     if !storage::has(&blob_hash) {
         // Cache-miss path: full encode + AEAD + put.
@@ -299,7 +298,7 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
             blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
         debug_assert_eq!(blob_hash, full_hash,
             "stream-hashed blob_content_hash diverged from encode_and_hash");
-        storage::put(&full_hash, &blob_bytes, /* encrypt */ true)?;
+        storage::put(&full_hash, &blob_bytes)?;
     }
 
     let entry = TreeEntry {
@@ -349,7 +348,7 @@ pub fn mkdir(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
     let empty = Object::Tree(Vec::new());
     let (bytes, hash) = empty.encode_and_hash().map_err(|_| PathError::Corrupt)?;
     // Tree → unencrypted (same reasoning as `store_tree`).
-    storage::put(&hash, &bytes, /* encrypt */ false)?;
+    storage::put(&hash, &bytes)?;
 
     let entry = TreeEntry {
         name: String::from(*segs.last().unwrap()),

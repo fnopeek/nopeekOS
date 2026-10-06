@@ -1,9 +1,9 @@
 //! npkFS storage entry points: mkfs / mount / unmount / put / get / has / remove.
 //!
 //! A content-addressed object store. The caller hands in
-//! `(hash, payload)` where `hash == BLAKE3(payload)`; we encrypt on
-//! disk (if a master key is set), index by hash in the B-tree, and
-//! verify on read. The path layer lives above this in `fs`/`paths`.
+//! `(hash, payload)` where `hash` is the payload's keyed content address
+//! (`crypto::object_address`); we encrypt on disk, index by hash in the
+//! B-tree, and verify on read. Nothing is stored or read while locked. The path layer lives above this in `fs`/`paths`.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -48,11 +48,11 @@ fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("[npk] ┌──────────────────────────────────────────────────────────┐");
     kprintln!("[npk] │ This disk is formatted as npkFS v{}.                      │", version);
     kprintln!("[npk] │                                                          │");
-    kprintln!("[npk] │ npkFS v3 is incompatible by design (clean break —        │");
-    kprintln!("[npk] │ TreeEntry now carries an mtime field, the on-disk wire   │");
-    kprintln!("[npk] │ shape changed). Boot the installer USB and reinstall to  │");
-    kprintln!("[npk] │ continue. Previous data is unrecoverable from this       │");
-    kprintln!("[npk] │ kernel — restore from backup if you have one.            │");
+    kprintln!("[npk] │ npkFS v4 is incompatible by design (clean break — a      │");
+    kprintln!("[npk] │ keyslot now wraps a random data key, and objects are     │");
+    kprintln!("[npk] │ addressed by keyed hash). Boot the installer USB and     │");
+    kprintln!("[npk] │ reinstall to continue. Nothing on this disk was changed; │");
+    kprintln!("[npk] │ older kernels can still read it.                         │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
@@ -86,7 +86,7 @@ pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
     loop { unsafe { core::arch::asm!("cli; hlt"); } }
 }
 
-/// Format the entire disk to npkFS v3. Destructive: any pre-v3
+/// Format the entire disk to npkFS v4. Destructive: any pre-v4
 /// data is gone after this call. The boot-time mount guard refuses
 /// older formats with a reinstall message, so this only runs
 /// deliberately (installer / explicit intent).
@@ -135,7 +135,8 @@ pub fn mkfs() -> Result<(), FsError> {
         journal_head: 0,
         journal_seq: 0,
         install_salt: salt_16,
-        _reserved: [0u8; 3920],
+        keyslots: [[0u8; crate::crypto::keyslot::SLOT_BYTES]; super::format::KEYSLOTS],
+        _reserved: [0u8; 3664],
         checksum: [0u8; 32],
     };
 
@@ -159,9 +160,9 @@ pub fn probe_disk() -> Result<sb_io::SbProbe, FsError> {
     Ok(sb_io::probe(&mut cache))
 }
 
-/// Mount an existing v3 disk. Errors with `NotFormatted` if no v3
+/// Mount an existing v4 disk. Errors with `NotFormatted` if no v4
 /// superblock validates and no recognized legacy version is present.
-/// If a legacy (v2) magic is detected the kernel halts with an
+/// If a legacy (v2, v3) magic is detected the kernel halts with an
 /// explicit reinstall message — there is no in-place migration.
 pub fn mount() -> Result<(), FsError> {
     let mut cache = BlockCache::new()?;
@@ -217,6 +218,35 @@ pub fn stats() -> Option<(u64, u64, u64, u64)> {
     let lock = FS.lock();
     let s = lock.as_ref()?;
     Some((s.sb.total_blocks, s.sb.free_blocks, s.sb.object_count, s.generation))
+}
+
+/// Keyslot `i`, None when not mounted or out of range.
+pub fn keyslot(i: usize) -> Option<crate::crypto::keyslot::Slot> {
+    let lock = FS.lock();
+    lock.as_ref()?.sb.keyslots.get(i).copied()
+}
+
+/// Whether any keyslot is in use, i.e. setup has run on this disk.
+pub fn has_keyslot() -> bool {
+    let lock = FS.lock();
+    lock.as_ref().is_some_and(|s| {
+        s.sb.keyslots.iter().any(|k| !crate::crypto::keyslot::is_empty(k))
+    })
+}
+
+/// Write keyslot `i` and commit the superblock durably. Only the
+/// superblock changes, so no journal entry is needed.
+pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), FsError> {
+    let mut lock = FS.lock();
+    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+    if i >= fs.sb.keyslots.len() { return Err(FsError::InvalidName); }
+    fs.sb.keyslots[i] = *slot;
+    fs.generation += 1;
+    fs.sb.generation = fs.generation;
+    fs.cache.flush()?;
+    crate::blkdev::flush()?;
+    sb_io::write_next_durable(&mut fs.cache, &mut fs.sb)?;
+    Ok(())
 }
 
 /// Per-installation 128-bit salt baked at mkfs time. Used by callers
@@ -509,22 +539,20 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
 
 // ── Object operations ─────────────────────────────────────────────────
 
-/// Store `payload` indexed by `hash`. `hash` must equal BLAKE3(payload);
-/// the call verifies this and returns `InvalidName` on mismatch (the
-/// closest existing error variant — the contract is "the address you
-/// claim is the address we'd compute").
+/// Store `payload` indexed by `hash`. `hash` must equal its content
+/// address (`crypto::object_address`, a keyed BLAKE3); the call verifies
+/// this and returns `InvalidName` on mismatch (the closest existing error
+/// variant — the contract is "the address you claim is the address we'd
+/// compute").
 ///
-/// `encrypt`: caller decides whether to AEAD-wrap the payload. Tree
-/// objects must be readable pre-master-key (boot-time `exists` walks
-/// them before the user has logged in), so the path layer passes
-/// `encrypt=false` for trees and `encrypt=true` for file content
-/// blobs. Encryption only actually happens if a master key is set;
-/// otherwise the payload is stored plaintext regardless of the flag.
+/// Every object is AEAD-wrapped, trees included: their names are as
+/// telling as file contents. Without the disk key the call fails with
+/// `Locked`, so nothing is ever written in the clear.
 ///
 /// Idempotent: putting the same hash twice is a no-op (content-addressed
 /// dedup). The first put owns the on-disk extents; subsequent ones see
 /// the entry already present and return Ok.
-pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError> {
+pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
@@ -540,28 +568,19 @@ pub fn put(hash: &[u8; 32], payload: &[u8], encrypt: bool) -> Result<(), FsError
     }
     let t_dedup = rdtsc();
 
-    let computed = *blake3::hash(payload).as_bytes();
+    let computed = crypto::object_address(payload).ok_or(FsError::Locked)?;
     if computed != *hash {
         return Err(FsError::InvalidName);
     }
     let t_hash = rdtsc();
 
-    // Encrypt only if the caller asked and we have a master key. The
-    // result's length (= payload.len() + 16 AEAD tag) is what the read
-    // path uses to infer "this object was AEAD-wrapped".
-    //
     // AES-256-GCM via the aes-gcm crate, which detects AES-NI at runtime
-    // and uses the hardware path (AESENC + PCLMULQDQ for GHASH).
-    let encrypted = if encrypt {
-        crypto::get_master_key().map(|master_key| {
-            let obj_key = crypto::derive_object_key(&master_key, hash);
-            let nonce = crypto::derive_nonce(hash);
-            crypto::aead_encrypt_aes(&obj_key, &nonce, payload)
-        })
-    } else {
-        None
-    };
-    let write_data: &[u8] = encrypted.as_deref().unwrap_or(payload);
+    // and uses the hardware path (AESENC + PCLMULQDQ for GHASH). The
+    // result's length (= payload.len() + 16 AEAD tag) is what the read
+    // path checks.
+    let (obj_key, nonce) = crypto::object_key(hash).ok_or(FsError::Locked)?;
+    let encrypted = crypto::aead_encrypt_aes(&obj_key, &nonce, payload);
+    let write_data: &[u8] = &encrypted;
     let t_enc = rdtsc();
 
     let mut lock = FS.lock();
@@ -810,29 +829,15 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
 
     let was_encrypted = disk_size > plaintext_size;
 
-    if was_encrypted {
-        let master_key = match crypto::get_master_key() {
-            Some(k) => k,
-            None => {
-                kprintln!("[npk] npkfs: encrypted blob {:02x}{:02x}… requested but no master key",
-                    hash[0], hash[1]);
-                return Err(FsError::Corrupt);
-            }
-        };
-        let obj_key = crypto::derive_object_key(&master_key, hash);
-        let nonce = crypto::derive_nonce(hash);
-        if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
-            kprintln!("[npk] npkfs: decrypt failed for hash {:02x}{:02x}…",
-                hash[0], hash[1]);
-            return Err(FsError::Corrupt);
-        }
+    // v4 writes no plaintext object; one on disk was not written by us.
+    if !was_encrypted {
+        kprintln!("[npk] npkfs: object {:02x}{:02x}… is not encrypted — refused",
+            hash[0], hash[1]);
+        return Err(FsError::Corrupt);
     }
-    // Content addressing promises the bytes are the hash's. AES-GCM's tag
-    // already proves that for encrypted objects; plaintext ones (Trees, and
-    // everything written before a master key exists) are checked here, or a
-    // changed or corrupted block would be returned as the object.
-    if !was_encrypted && *blake3::hash(&staging).as_bytes() != *hash {
-        kprintln!("[npk] npkfs: content of {:02x}{:02x}… does not match its hash",
+    let (obj_key, nonce) = crypto::object_key(hash).ok_or(FsError::Locked)?;
+    if crypto::aead_decrypt_aes_in_place(&obj_key, &nonce, &mut staging).is_none() {
+        kprintln!("[npk] npkfs: decrypt failed for hash {:02x}{:02x}…",
             hash[0], hash[1]);
         return Err(FsError::Corrupt);
     }
@@ -841,8 +846,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
 
     // BLAKE3 verify intentionally elided. AES-GCM's tag already
     // authenticates the ciphertext under (key, nonce), and both
-    // are derived from `hash` via `derive_object_key` /
-    // `derive_nonce`. Tampering anywhere — hash field in the btree
+    // are derived from `hash` via `crypto::object_key`. Tampering anywhere — hash field in the btree
     // entry, ciphertext on disk, AEAD tag — invalidates the tag
     // check above and we return Corrupt then. A fresh BLAKE3 over
     // the plaintext only catches scenarios already covered by the

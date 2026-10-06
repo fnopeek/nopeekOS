@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.475.0"
+version = "0.476.0"
 edition = "2024"
 authors = ["nopeek"]
 description = "nopeekOS kernel"
@@ -95,6 +95,14 @@ features = ["verifying"]
 # for a release past 0.9.
 [dependencies.rsa]
 version = "0.9"
+default-features = false
+
+# Argon2id for the disk keyslot: turns the passphrase into the key that
+# unwraps the data key (RFC 9106). Only the raw KDF is used; the
+# password-hash string format is left out. blake2 0.10 sits on digest 0.10,
+# the same generation as the sha2 block above.
+[dependencies.argon2]
+version = "0.5"
 default-features = false
 
 # AES-256-GCM, the primary symmetric cipher.

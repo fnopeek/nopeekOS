@@ -205,7 +205,7 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
 
 /// Stub invoked by install.rs to avoid conditional compilation at the
 /// call site. Writes every bundled asset into npkFS. Must only run
-/// after `npkfs::mount` has succeeded and the master key is set;
+/// after `npkfs::mount` has succeeded and the disk key is set;
 /// otherwise data lands as plaintext.
 pub fn bootstrap_into_npkfs() {
     use crate::kprintln;

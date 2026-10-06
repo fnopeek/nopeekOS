@@ -1,9 +1,9 @@
 //! First-Boot Setup Wizard
 //!
-//! Runs on first boot (no .npk-keycheck found).
+//! Runs on first boot (no keyslot in the superblock).
 //! Collects: storage, name, passphrase, timezone, keyboard, language.
 
-use crate::{kprint, kprintln, serial, crypto, config, npkfs, blkdev, capability};
+use crate::{kprint, kprintln, serial, config, npkfs};
 
 /// Read a line from serial (with echo). Returns trimmed string.
 fn read_line() -> alloc::string::String {
@@ -35,83 +35,14 @@ fn read_passphrase() -> (alloc::vec::Vec<u8>, usize) {
 
 /// Run fresh install setup (npkFS already formatted and mounted).
 /// Collects identity + settings only, no storage questions.
-pub fn run_fresh_install(salt: &[u8; 16]) -> bool {
+pub fn run_fresh_install() -> bool {
     kprintln!();
     kprintln!("[npk] ══════════════════════════════════");
     kprintln!("[npk]  Welcome to nopeekOS.");
     kprintln!("[npk]  Choose your identity.");
     kprintln!("[npk] ══════════════════════════════════");
     kprintln!();
-    setup_identity_and_settings(salt)
-}
-
-#[allow(dead_code)]
-/// Run the first-boot setup wizard (legacy, with storage questions).
-pub fn run_first_boot(salt: &[u8; 16]) -> bool {
-    kprintln!();
-    kprintln!("[npk] ══════════════════════════════════");
-    kprintln!("[npk]  Welcome to nopeekOS.");
-    kprintln!("[npk]  First-time setup.");
-    kprintln!("[npk] ══════════════════════════════════");
-    kprintln!();
-
-    // === Storage ===
-    if blkdev::is_available() {
-        if let Some(blocks) = blkdev::block_count() {
-            let mb = (blocks * 4096) / (1024 * 1024);
-            let gb = mb / 1024;
-            let dev = if crate::nvme::is_available() {
-                let model = crate::nvme::model_name().unwrap_or_default();
-                alloc::format!("NVMe: {}", model)
-            } else {
-                alloc::string::String::from("virtio-blk")
-            };
-
-            kprintln!("[npk] Storage:");
-            if gb > 0 {
-                kprintln!("[npk]   {} ({} GB, {} blocks)", dev, gb, blocks);
-            } else {
-                kprintln!("[npk]   {} ({} MB, {} blocks)", dev, mb, blocks);
-            }
-        }
-
-        // Check if already formatted
-        match npkfs::mount() {
-            Ok(()) => {
-                kprintln!("[npk]   npkFS: already formatted, mounted.");
-            }
-            Err(_) => {
-                kprint!("[npk]   Format as npkFS? [Y/n] ");
-                let answer = read_line();
-                if answer.is_empty() || answer == "y" || answer == "Y" || answer == "yes" {
-                    kprint!("[npk]   Formatting...");
-                    match npkfs::mkfs().and_then(|_| npkfs::mount()) {
-                        Ok(()) => kprintln!(" done."),
-                        Err(e) => {
-                            kprintln!(" failed: {}", e);
-                            return false;
-                        }
-                    }
-                } else {
-                    kprintln!("[npk]   Skipped. No storage available.");
-                    return false;
-                }
-            }
-        }
-    } else {
-        // Setup ends here and the machine halts with no prompt and no npkFS
-        // for `dmesg`, so the screen is the only diagnostic: show what PCI
-        // storage was found.
-        kprintln!();
-        kprintln!("[npk] No block device found. Cannot continue setup.");
-        kprintln!("[npk] PCI mass-storage controllers seen:");
-        crate::pci::report_mass_storage();
-        kprintln!("[npk] nopeekOS drives NVMe (class 01:08) and virtio-blk, nothing else.");
-        return false;
-    }
-
-    kprintln!();
-    setup_identity_and_settings(salt)
+    setup_identity_and_settings()
 }
 
 /// Create the npkFS v3 locked default tree. Idempotent.
@@ -152,20 +83,17 @@ fn setup_default_tree(name: &str) -> Result<(), npkfs::fs::Error> {
 }
 
 /// Common identity + settings setup (used by both fresh install and legacy first boot)
-fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
+fn setup_identity_and_settings() -> bool {
     // === Identity ===
     kprintln!("[npk] Identity:");
 
-    // Name — captured into a local but NOT persisted yet. Writing
-    // before the master key is set would land a plaintext config blob
-    // on disk; later config::set calls overwrite to encrypted but the
-    // plaintext blob lingers as an orphan in the v2 B-tree, and `gc`
-    // would crash trying to decrypt it during the mark phase.
+    // Name — captured into a local but NOT persisted yet: nothing can be
+    // written before the disk key exists.
     kprint!("[npk]   Your name: ");
     let name = read_line();
 
     // Passphrase
-    let master_key = loop {
+    loop {
         kprint!("[npk]   Passphrase: ");
         let (pass1, len1) = read_passphrase();
         if len1 < 8 {
@@ -181,25 +109,23 @@ fn setup_identity_and_settings(salt: &[u8; 16]) -> bool {
             continue;
         }
 
-        let key = crypto::derive_master_key(&pass1, salt);
-        drop(pass1);
-        drop(pass2);
-        break key;
-    };
-
-    crypto::set_master_key(master_key);
+        let r = crate::disk_key::create(&pass1[..len1]);
+        let (mut pass1, mut pass2) = (pass1, pass2);
+        pass1.fill(0);
+        pass2.fill(0);
+        match r {
+            Ok(()) => break,
+            Err(e) => {
+                kprintln!("[npk]   Could not create the disk key: {}", e);
+                return false;
+            }
+        }
+    }
 
     // From here on every FS write goes through the AEAD path, so it's
     // safe to persist the name.
     if !name.is_empty() {
         config::set("name", &name);
-    }
-
-    // Store keycheck (encrypted with the new master key, lives at
-    // .system/keycheck per the v2 locked tree).
-    match npkfs::store(config::KEYCHECK_PATH, config::KEYCHECK_VALUE, capability::CAP_NULL) {
-        Ok(_) => {}
-        Err(e) => kprintln!("[npk]   WARNING: Could not store keycheck: {}", e),
     }
 
     // Lay down the locked default tree once. Idempotent — re-runs are

@@ -227,9 +227,9 @@ fn idle_halt() {
     crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
-/// Run the graphical login screen.
-/// Returns the 256-bit master key on success, or halts on lockout.
-pub fn run(salt: &[u8; 16]) -> [u8; 32] {
+/// Run the graphical login screen. Returns once the disk is unlocked;
+/// halts on lockout.
+pub fn run() {
     // Enable GUI mode (kprintln skips framebuffer, only serial)
     // Color scheme already selected in main.rs after csprng::init()
     framebuffer::set_gui_mode(true);
@@ -329,15 +329,13 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             layout.screen_w, 24 * layout.scale);
                     });
 
-                    // Derive key (outside fb lock)
-                    let key = crate::crypto::derive_master_key(&passphrase[..pos], salt);
+                    // Unlock (outside fb lock)
+                    let ok = crate::disk_key::unlock(&passphrase[..pos]);
                     for b in passphrase.iter_mut() { *b = 0; }
                     pos = 0;
 
-                    crate::crypto::set_master_key(key);
-
-                    match crate::npkfs::fetch(crate::config::KEYCHECK_PATH) {
-                        Ok((data, _)) if &data[..] == crate::config::KEYCHECK_VALUE => {
+                    match ok {
+                        true => {
                             // Success!
                             crate::config::load();
                             let name = crate::config::get("name");
@@ -366,11 +364,10 @@ pub fn run(salt: &[u8; 16]) -> [u8; 32] {
                             // Exit GUI mode, clear screen for loop
                             framebuffer::set_gui_mode(false);
                             framebuffer::clear();
-                            return key;
+                            return;
                         }
-                        _ => {
+                        false => {
                             // Wrong passphrase
-                            crate::crypto::clear_master_key();
                             attempts += 1;
 
                             if attempts >= 10 {

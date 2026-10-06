@@ -1463,7 +1463,7 @@ pub fn intent_dmesg(args: &str) {
 /// File this boot's log in npkFS, keeping the previous one alongside it.
 ///
 /// Called once the system is up: everything before this point is in the
-/// snapshot, and the master key exists so the object is encrypted at rest
+/// snapshot, and the disk key exists so the object is encrypted at rest
 /// like every other. A boot that never gets here leaves the previous log
 /// untouched — which is the one worth reading in that case.
 pub fn persist_boot_log() {

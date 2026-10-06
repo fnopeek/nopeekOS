@@ -70,6 +70,8 @@ pub enum FsError {
     TreeTooDeep,
     #[allow(dead_code)]
     TooManyExtents,
+    /// No disk key: nothing can be written or read before unlock.
+    Locked,
 }
 
 impl From<crate::virtio_blk::BlkError> for FsError {
@@ -91,6 +93,7 @@ impl core::fmt::Display for FsError {
             FsError::DiskFull => write!(f, "disk full"),
             FsError::TreeTooDeep => write!(f, "B-tree too deep"),
             FsError::TooManyExtents => write!(f, "too many extents"),
+            FsError::Locked => write!(f, "disk is locked"),
         }
     }
 }

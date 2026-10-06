@@ -84,6 +84,13 @@ pub fn sync() {
 
 pub fn install_salt() -> Option<[u8; 16]> { storage::install_salt() }
 
+pub use format::KEYSLOTS;
+pub fn keyslot(i: usize) -> Option<crate::crypto::keyslot::Slot> { storage::keyslot(i) }
+pub fn has_keyslot() -> bool { storage::has_keyslot() }
+pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), FsError> {
+    storage::set_keyslot(i, slot)
+}
+
 pub fn stats() -> Option<(u64, u64, u64, u64)> { storage::stats() }
 
 /// Strict create: errors with `ObjectExists` if `name` is already present.
@@ -94,7 +101,7 @@ pub fn store(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], FsE
     validate(path)?;
     if exists_inner(path) { return Err(FsError::ObjectExists); }
     write_with_parents(path, data)?;
-    Ok(*blake3::hash(data).as_bytes())
+    crate::crypto::object_address(data).ok_or(FsError::Locked)
 }
 
 /// Insert-or-replace.
@@ -102,7 +109,7 @@ pub fn upsert(name: &str, data: &[u8], _cap_id: [u8; 32]) -> Result<[u8; 32], Fs
     let path = clean_path(name);
     validate(path)?;
     write_with_parents(path, data)?;
-    Ok(*blake3::hash(data).as_bytes())
+    crate::crypto::object_address(data).ok_or(FsError::Locked)
 }
 
 /// Read an object. Returns `(plaintext, content_hash)`. The hash is
@@ -192,7 +199,7 @@ pub fn exists(name: &str) -> bool {
 }
 
 /// Reject reserved names that would clash with kernel-managed paths.
-/// `.system/` is reserved for boot config + keycheck.
+/// `.system/` is reserved for boot config.
 pub fn validate_user_name(name: &str) -> Result<(), FsError> {
     let path = clean_path(name);
     validate(path)?;

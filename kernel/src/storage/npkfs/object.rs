@@ -104,6 +104,8 @@ pub enum ObjectError {
     Decode,
     /// A `TreeEntry::name` violated the naming rules.
     InvalidName,
+    /// No disk key, so no content address can be computed.
+    Locked,
 }
 
 impl TreeEntry {
@@ -154,24 +156,25 @@ impl Object {
         postcard::from_bytes(bytes).map_err(|_| ObjectError::Decode)
     }
 
-    /// BLAKE3-hash the encoded form. This is the object's content address.
+    /// Keyed BLAKE3 of the encoded form (`crypto::object_address`). This
+    /// is the object's content address.
     pub fn hash(&self) -> Result<[u8; 32], ObjectError> {
         let bytes = self.encode()?;
-        Ok(*blake3::hash(&bytes).as_bytes())
+        crate::crypto::object_address(&bytes).ok_or(ObjectError::Locked)
     }
 
     /// Encode + hash in one shot. Returns (encoded_bytes, hash). Avoids
     /// re-encoding when the caller wants both (typical write path).
     pub fn encode_and_hash(&self) -> Result<(Vec<u8>, [u8; 32]), ObjectError> {
         let bytes = self.encode()?;
-        let h = *blake3::hash(&bytes).as_bytes();
+        let h = crate::crypto::object_address(&bytes).ok_or(ObjectError::Locked)?;
         Ok((bytes, h))
     }
 }
 
-/// Compute the content-address (BLAKE3 hash) that `Object::Blob(data)`
-/// would produce, without allocating the encoded form. Streams
-/// the postcard wire bytes into a `blake3::Hasher`:
+/// Compute the content address that `Object::Blob(data)` would produce,
+/// without allocating the encoded form. None while the disk is locked.
+/// Streams the postcard wire bytes into the keyed address hasher:
 ///
 ///   `update([variant_tag = 0])`
 ///   `update(varint(data.len()))`
@@ -181,14 +184,14 @@ impl Object {
 /// when the blob already exists in storage. If the hash misses, callers
 /// fall back to the full encode path; if it hits, we go straight to
 /// tree-rebuild.
-pub fn blob_content_hash(data: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+pub fn blob_content_hash(data: &[u8]) -> Option<[u8; 32]> {
+    let mut hasher = crate::crypto::address_hasher()?;
     hasher.update(&[0u8]); // postcard variant tag for `Object::Blob`
     let mut varint = [0u8; 10];
     let n = encode_varint_u64(data.len() as u64, &mut varint);
     hasher.update(&varint[..n]);
     hasher.update(data);
-    *hasher.finalize().as_bytes()
+    Some(*hasher.finalize().as_bytes())
 }
 
 fn encode_varint_u64(mut x: u64, buf: &mut [u8; 10]) -> usize {

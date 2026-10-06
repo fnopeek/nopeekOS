@@ -26,7 +26,7 @@ mod mm;
 pub use mm::{memory, heap, paging};
 
 mod security;
-pub use security::{capability, audit, csprng};
+pub use security::{capability, audit, csprng, disk_key};
 
 mod crypto;
 pub use crypto::{tls, update_key};
@@ -246,10 +246,10 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     wasm::init();
     vga::show_status(b"WASM runtime online (wasmi)");
 
-    // === Identity: Passphrase → Master Key ===
+    // === Identity: Passphrase → Disk Key ===
     //
     // First boot:       Setup wizard (storage, name, passphrase, settings)
-    // Subsequent boots: Enter passphrase → verify against keycheck
+    // Subsequent boots: Enter passphrase → open the keyslot
     //
     // No users. No accounts. Your passphrase IS your identity.
 
@@ -342,29 +342,23 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         }
     }
 
-    // Per-installation random salt (generated at mkfs, stored in superblock)
-    let salt = npkfs::install_salt().unwrap_or_else(|| {
-        let mut s = [0u8; 16];
-        let hash = blake3::hash(b"nopeekOS.fallback.salt");
-        s.copy_from_slice(&hash.as_bytes()[..16]);
-        s
-    });
-
-    let is_first_boot = !mounted || !npkfs::exists(crate::config::KEYCHECK_PATH);
+    // Setup has run on this disk iff a keyslot is in use. Nothing else can
+    // be asked before unlock: every object is encrypted, trees included.
+    let is_first_boot = !mounted || !npkfs::has_keyslot();
 
     if is_first_boot {
         // === First boot: Setup Wizard (identity, settings) ===
-        if !setup::run_fresh_install(&salt) {
+        if !setup::run_fresh_install() {
             kprintln!("[npk] Setup failed. System halted.");
             loop { unsafe { core::arch::asm!("cli; hlt"); } }
         }
         vga::show_status(b"Setup complete");
 
-        // Seed bundled assets into npkFS now that the master key is set,
+        // Seed bundled assets into npkFS now that the disk key is set,
         // so font + WASM modules end up AEAD-encrypted like everything
         // else. No-op on non-installer builds. If the user re-runs the
         // installer on a dirty partition, we get a fresh seed with the
-        // new master key.
+        // new disk key.
         install::seed_bundled_assets();
     } else {
         // === Subsequent boot: Verify passphrase ===
@@ -384,7 +378,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
                 }
             }
             // Graphical login screen
-            let _master_key = gui::login::run(&salt);
+            gui::login::run();
 
             // Auto-upgrade to highest refresh rate if monitor is now connected.
             // Only on GPUs with a validated modeset path — a blit-only takeover
@@ -402,7 +396,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             }
         } else {
             // Fallback: text-mode login (serial only, no framebuffer)
-            text_mode_auth(&salt);
+            text_mode_auth();
         }
         vga::show_status(b"Identity verified");
     }
@@ -523,7 +517,7 @@ fn shell_fiber(_: u64) {
 }
 
 /// Text-mode passphrase authentication (fallback when no framebuffer).
-fn text_mode_auth(salt: &[u8; 16]) {
+fn text_mode_auth() {
     kprintln!();
     kprintln!("[npk] ─────────────────────────────────");
     kprintln!("[npk]  Identity required.");
@@ -577,14 +571,8 @@ fn text_mode_auth(salt: &[u8; 16]) {
                     let _ = npkfs::mkfs();
                     let _ = npkfs::mount();
                 }
-                let salt = npkfs::install_salt().unwrap_or_else(|| {
-                    let mut s = [0u8; 16];
-                    let hash = blake3::hash(b"nopeekOS.fallback.salt");
-                    s.copy_from_slice(&hash.as_bytes()[..16]);
-                    s
-                });
                 kprintln!();
-                if !setup::run_fresh_install(&salt) {
+                if !setup::run_fresh_install() {
                     kprintln!("[npk] Setup failed. System halted.");
                     loop { unsafe { core::arch::asm!("cli; hlt"); } }
                 }
@@ -595,28 +583,20 @@ fn text_mode_auth(salt: &[u8; 16]) {
             }
         }
 
-        let key = crypto::derive_master_key(&buf[..len], salt);
+        let ok = disk_key::unlock(&buf[..len]);
         for b in buf.iter_mut() { *b = 0; }
 
-        crypto::set_master_key(key);
-
-        match npkfs::fetch(crate::config::KEYCHECK_PATH) {
-            Ok((data, _)) if &data[..] == b"nopeekOS.keycheck.v1.valid" => {
-                config::load();
-                serial::set_verbose(config::bootlog_verbose());
-                if let Some(name) = config::get("name") {
-                    kprintln!("[npk] Welcome back, {}.", name);
-                } else {
-                    kprintln!("[npk] Identity verified.");
-                }
-                return;
+        if ok {
+            config::load();
+            serial::set_verbose(config::bootlog_verbose());
+            if let Some(name) = config::get("name") {
+                kprintln!("[npk] Welcome back, {}.", name);
+            } else {
+                kprintln!("[npk] Identity verified.");
             }
-            _ => {
-                kprintln!("[npk] Wrong passphrase.");
-            }
+            return;
         }
-
-        crypto::clear_master_key();
+        kprintln!("[npk] Wrong passphrase.");
         attempts += 1;
 
         if attempts >= 10 {

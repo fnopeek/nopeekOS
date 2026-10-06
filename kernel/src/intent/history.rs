@@ -40,7 +40,7 @@ fn is_secret(line: &str) -> bool {
 /// Readable/writable only once identity is established — before that
 /// npkFS has no key to decrypt with.
 fn unlocked() -> bool {
-    crate::npkfs::is_mounted() && crate::crypto::get_master_key().is_some()
+    crate::npkfs::is_mounted() && crate::crypto::disk_unlocked()
 }
 
 fn trim(s: &mut Store) {

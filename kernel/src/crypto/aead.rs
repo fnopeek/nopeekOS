@@ -3,7 +3,7 @@
 //! - ChaCha20 stream cipher (RFC 7539)
 //! - Poly1305 MAC (RFC 7539)
 //! - ChaCha20-Poly1305 AEAD (RFC 8439)
-//! - BLAKE3-based KDF for key derivation
+//! - The disk key hierarchy (BLAKE3 key derivation from the data key)
 //!
 //! All implementations target no_std bare metal.
 
@@ -11,21 +11,73 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 // ============================================================
-// Global Master Key (set after passphrase auth)
+// Disk keys (held while unlocked)
 // ============================================================
+//
+// The data encryption key (DEK) comes out of a keyslot (`keyslot`). Nothing
+// uses it directly: each purpose gets its own key, derived with BLAKE3's KDF
+// mode under a fixed context string, so a key for one purpose says nothing
+// about another.
+//
+//   data    — per-object AES-256-GCM keys
+//   address — keyed BLAKE3 over an object's bytes: its content address. A
+//             plain hash would let anyone holding the disk test whether a
+//             known or guessed content is stored, a short secret included.
+//   vault   — reserved for secrets kept apart from files
 
-static MASTER_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
-
-pub fn set_master_key(key: [u8; 32]) {
-    *MASTER_KEY.lock() = Some(key);
+struct DiskKeys {
+    data: [u8; 32],
+    address: [u8; 32],
 }
 
-pub fn get_master_key() -> Option<[u8; 32]> {
-    *MASTER_KEY.lock()
+static DISK_KEYS: Mutex<Option<DiskKeys>> = Mutex::new(None);
+
+const CTX_DATA: &str = "nopeekOS npkfs data key v1";
+const CTX_ADDRESS: &str = "nopeekOS npkfs address key v1";
+#[allow(dead_code)]
+const CTX_VAULT: &str = "nopeekOS vault key v1";
+
+/// Unlock: derive the working keys from the DEK.
+pub fn set_disk_key(dek: &[u8; 32]) {
+    *DISK_KEYS.lock() = Some(DiskKeys {
+        data: blake3::derive_key(CTX_DATA, dek),
+        address: blake3::derive_key(CTX_ADDRESS, dek),
+    });
 }
 
-pub fn clear_master_key() {
-    *MASTER_KEY.lock() = None;
+/// Lock: forget every key derived from the DEK.
+pub fn clear_disk_key() {
+    *DISK_KEYS.lock() = None;
+}
+
+pub fn disk_unlocked() -> bool {
+    DISK_KEYS.lock().is_some()
+}
+
+/// A hasher that yields content addresses, or None while locked.
+pub fn address_hasher() -> Option<blake3::Hasher> {
+    DISK_KEYS.lock().as_ref().map(|k| blake3::Hasher::new_keyed(&k.address))
+}
+
+/// The content address of `bytes`, or None while locked.
+pub fn object_address(bytes: &[u8]) -> Option<[u8; 32]> {
+    let mut h = address_hasher()?;
+    h.update(bytes);
+    Some(*h.finalize().as_bytes())
+}
+
+/// The AES-256-GCM key and nonce for the object at `address`, or None while
+/// locked. Every distinct content has its own key, so the nonce taken from
+/// the address is never reused under a key.
+pub fn object_key(address: &[u8; 32]) -> Option<([u8; 32], [u8; 12])> {
+    let keys = DISK_KEYS.lock();
+    let k = keys.as_ref()?;
+    let mut h = blake3::Hasher::new_keyed(&k.data);
+    h.update(address);
+    let key = *h.finalize().as_bytes();
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&address[..12]);
+    Some((key, nonce))
 }
 
 // ============================================================
@@ -361,30 +413,4 @@ fn build_mac_input(aad: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     input
 }
 
-// ============================================================
-// Key Derivation (BLAKE3-based)
-// ============================================================
 
-/// Derive a 256-bit master key from a passphrase and salt.
-pub fn derive_master_key(passphrase: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut input = Vec::new();
-    input.extend_from_slice(b"nopeekOS.master-key.v1");
-    input.extend_from_slice(salt);
-    input.extend_from_slice(passphrase);
-    *blake3::hash(&input).as_bytes()
-}
-
-/// Derive a per-object encryption key from master key and object content hash.
-pub fn derive_object_key(master_key: &[u8; 32], content_hash: &[u8; 32]) -> [u8; 32] {
-    let mut input = [0u8; 64];
-    input[..32].copy_from_slice(master_key);
-    input[32..].copy_from_slice(content_hash);
-    *blake3::hash(&input).as_bytes()
-}
-
-/// Derive a nonce from the content hash (first 12 bytes).
-pub fn derive_nonce(content_hash: &[u8; 32]) -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&content_hash[..12]);
-    nonce
-}
