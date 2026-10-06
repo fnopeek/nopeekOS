@@ -40,9 +40,10 @@ dependencies = [
 
 [[package]]
 name = "loft"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "nopeek_widgets",
+ "npk_sys",
  "postcard",
 ]
 
@@ -59,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "npk_sys"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "postcard"
