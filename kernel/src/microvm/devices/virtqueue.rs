@@ -110,7 +110,8 @@ pub fn used_push(mem: &GuestMem, used_gpa: u64, queue_size: u16, used_idx: &mut 
 
 /// Walk the available ring from `last_avail_idx` to the current head
 /// and service each request. Returns true if any request completed
-/// (caller should set ISR + inject IRQ).
+/// (caller should set ISR + inject IRQ). A `read_only` device fails every
+/// write with IOERR (virtio 1.2 §5.2.6, VIRTIO_BLK_F_RO).
 pub fn service_blk_queue(
     mem: &GuestMem,
     desc_table: u64,
@@ -120,6 +121,7 @@ pub fn service_blk_queue(
     last_avail_idx: &mut u16,
     used_idx: &mut u16,
     backing: &mut [u8],
+    read_only: bool,
 ) -> bool {
     // avail.flags @ +0 (ignored — VIRTIO_F_RING_EVENT_IDX off)
     // avail.idx   @ +2
@@ -143,7 +145,7 @@ pub fn service_blk_queue(
         };
 
         let total_written = service_one_request(
-            mem, desc_table, head_idx, queue_size, backing,
+            mem, desc_table, head_idx, queue_size, backing, read_only,
         );
 
         // used.elem[used_idx % size] = (head_idx, total_written)
@@ -187,6 +189,7 @@ fn service_one_request(
     head_idx: u16,
     queue_size: u16,
     backing: &mut [u8],
+    read_only: bool,
 ) -> u32 {
     // [0] header
     let head = match read_desc(mem, desc_table, head_idx, queue_size) {
@@ -256,7 +259,7 @@ fn service_one_request(
                 }
             }
             VIRTIO_BLK_T_OUT => {
-                if writable { status = VIRTIO_BLK_S_IOERR; }
+                if writable || read_only { status = VIRTIO_BLK_S_IOERR; }
                 else {
                     let n = d.len as usize;
                     match backing_range(sector_off, n, backing.len()) {

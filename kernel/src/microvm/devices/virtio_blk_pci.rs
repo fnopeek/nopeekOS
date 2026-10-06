@@ -309,6 +309,7 @@ impl VirtioBlk {
                 &mut q.last_avail_idx,
                 &mut q.used_idx,
                 &mut self.backing,
+                self.read_only,
             );
             new_used_idx = q.used_idx;
         }
