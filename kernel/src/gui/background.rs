@@ -6,7 +6,7 @@
 //! 2. A user-supplied wallpaper copied in from `wallpaper.wasm`,
 //!    which also extracts a 16-colour theme palette via theme::.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use crate::framebuffer::FbInfo;
 
 /// Default dark-grey background pixel (0xAARRGGBB).
@@ -16,10 +16,49 @@ const BG_GREY: u32 = 0xFF181820;
 /// `shade::widgets::palette::fallback(Token::Accent)`.
 const DEFAULT_ACCENT: u32 = 0x007B50A0;
 
-static mut WALLPAPER: *mut u8 = core::ptr::null_mut();
-static mut WALLPAPER_W: u32 = 0;
-static mut WALLPAPER_H: u32 = 0;
+/// A screen-sized buffer in contiguous frames, framebuffer pitch.
+#[derive(Clone, Copy)]
+struct Plane {
+    ptr: *mut u8,
+    w: u32,
+    h: u32,
+}
+
+impl Plane {
+    const NONE: Plane = Plane { ptr: core::ptr::null_mut(), w: 0, h: 0 };
+}
+
+/// Two buffers each for the sharp and the blurred wallpaper. A new one is
+/// drawn into the buffer nobody reads and then published by pointer, so
+/// Core 0 never copies a half-written image. Writers hold this lock; readers
+/// take only the published pointer.
+struct Buffers {
+    wall: [Plane; 2],
+    blur: [Plane; 2],
+}
+
+// SAFETY: the planes are plain frame addresses, owned by this module.
+unsafe impl Send for Buffers {}
+
+static BUFFERS: spin::Mutex<Buffers> =
+    spin::Mutex::new(Buffers { wall: [Plane::NONE; 2], blur: [Plane::NONE; 2] });
+
+/// Published sharp wallpaper, null before the first one.
+static WALLPAPER: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
+
+/// The buffer of `pair` that is not `front`, sized for the screen.
+/// A buffer of the wrong size is replaced; the old one is not freed, since
+/// a reader may still be copying from it.
+fn back_plane(pair: &mut [Plane; 2], front: *mut u8, w: u32, h: u32, pages: usize) -> Option<*mut u8> {
+    let i = if pair[0].ptr == front && !front.is_null() { 1 } else { 0 };
+    let p = &mut pair[i];
+    if p.ptr.is_null() || p.w != w || p.h != h {
+        let addr = crate::memory::allocate_contiguous(pages)?;
+        *p = Plane { ptr: addr as *mut u8, w, h };
+    }
+    Some(p.ptr)
+}
 
 /// The wallpaper, heavily blurred, same size and pitch. Glass surfaces
 /// (loop, dock, bar) blend over this instead of the sharp image: a
@@ -27,9 +66,7 @@ static WALLPAPER_SET: AtomicBool = AtomicBool::new(false);
 /// competing with the text on it, and blur is what makes glass readable.
 /// Computed once per wallpaper — the wallpaper is static, so reading it
 /// costs a frame exactly what reading the sharp one did.
-static mut BLURRED: *mut u8 = core::ptr::null_mut();
-static mut BLURRED_W: u32 = 0;
-static mut BLURRED_H: u32 = 0;
+static BLURRED: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 
 /// Downscale factor for the blur. Blur keeps no detail, so it is computed
@@ -39,11 +76,9 @@ const BLUR_PASSES: usize = 3;
 
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
 /// translucent-glass cache key so a same-theme wallpaper swap invalidates it
-/// (the key otherwise tracks colour/geometry only, not the backdrop pixels —
-/// and set_wallpaper overwrites the buffer in place, so clearing the cache
-/// alone races a cross-core re-store under the unchanged key). Bump after the
-/// pixel write with Release: a core that Acquire-observes the new generation
-/// also observes the finished new pixels.
+/// (the key otherwise tracks colour/geometry only, not the backdrop pixels).
+/// Bump after publishing with Release: a core that Acquire-observes the new
+/// generation also observes the finished new pixels.
 static WALLPAPER_GEN: AtomicU32 = AtomicU32::new(0);
 
 /// Generation counter of the active wallpaper (see WALLPAPER_GEN).
@@ -79,24 +114,15 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
     let size = target_h as usize * info.pitch as usize;
     let pages = (size + 4095) / 4096;
 
-    let buf = if !unsafe { WALLPAPER.is_null() } && unsafe { WALLPAPER_W == target_w && WALLPAPER_H == target_h } {
-        unsafe { WALLPAPER }
-    } else {
-        match crate::memory::allocate_contiguous(pages) {
-            Some(addr) => addr as *mut u8,
-            None => return,
-        }
-    };
-
-    scale_cover(pixels, w, h, buf, info);
-
-    unsafe {
-        WALLPAPER = buf;
-        WALLPAPER_W = target_w;
-        WALLPAPER_H = target_h;
+    {
+        let mut bufs = BUFFERS.lock();
+        let front = WALLPAPER.load(Ordering::Acquire);
+        let Some(buf) = back_plane(&mut bufs.wall, front, target_w, target_h, pages) else { return };
+        scale_cover(pixels, w, h, buf, info);
+        WALLPAPER.store(buf, Ordering::Release);
+        WALLPAPER_SET.store(true, Ordering::Release);
+        compute_blur(&mut bufs, buf, info, pages);
     }
-    compute_blur(buf, info, pages);
-    WALLPAPER_SET.store(true, Ordering::Release);
     // After the pixels are fully written: invalidate the glass cache by moving
     // the generation forward (Release pairs with the Acquire in the cache key).
     WALLPAPER_GEN.fetch_add(1, Ordering::Release);
@@ -115,7 +141,7 @@ pub fn has_wallpaper() -> bool {
 
 /// Raw wallpaper buffer (framebuffer-pitch layout, BGRX u32), or null.
 fn wallpaper_ptr() -> *const u8 {
-    if WALLPAPER_SET.load(Ordering::Acquire) { unsafe { WALLPAPER } } else { core::ptr::null() }
+    if WALLPAPER_SET.load(Ordering::Acquire) { WALLPAPER.load(Ordering::Acquire) } else { core::ptr::null() }
 }
 
 pub fn clear_wallpaper() {
@@ -155,7 +181,7 @@ fn fill_grey(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32)
 }
 
 fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
-    let wp = unsafe { WALLPAPER };
+    let wp = WALLPAPER.load(Ordering::Acquire);
     if wp.is_null() { return; }
     let size = info.height as usize * info.pitch as usize;
     unsafe { core::ptr::copy_nonoverlapping(wp, shadow, size); }
@@ -170,7 +196,7 @@ fn draw_wallpaper(shadow: *mut u8, info: &FbInfo) {
 pub fn draw_background_region_where(shadow: *mut u8, info: &FbInfo,
                                     rx: u32, ry: u32, rw: u32, rh: u32,
                                     want: impl Fn(u32, u32) -> bool) {
-    let wp = unsafe { WALLPAPER };
+    let wp = WALLPAPER.load(Ordering::Acquire);
     let pitch = info.pitch as usize;
     let x1 = (rx + rw).min(info.width);
     let y1 = (ry + rh).min(info.height);
@@ -191,7 +217,7 @@ pub fn draw_background_region_where(shadow: *mut u8, info: &FbInfo,
 }
 
 fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u32, rh: u32) {
-    let wp = unsafe { WALLPAPER };
+    let wp = WALLPAPER.load(Ordering::Acquire);
     if wp.is_null() {
         fill_grey(shadow, info, rx, ry, rw, rh);
         return;
@@ -213,24 +239,22 @@ pub fn reblur() {
     if !has_wallpaper() { return; }
     let info = crate::framebuffer::get_info();
     let pages = (info.height as usize * info.pitch as usize + 4095) / 4096;
-    compute_blur(unsafe { WALLPAPER }, &info, pages);
+    let mut bufs = BUFFERS.lock();
+    compute_blur(&mut bufs, WALLPAPER.load(Ordering::Acquire), &info, pages);
+    drop(bufs);
     // Every glass cache keys on the generation.
     WALLPAPER_GEN.fetch_add(1, Ordering::Release);
 }
 
-fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
-    BLURRED_SET.store(false, Ordering::Release);
+/// Blur `wp` into the blurred back buffer and publish it. The caller holds
+/// `BUFFERS`.
+fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) {
     let (w, h, pitch) = (info.width, info.height, info.pitch as usize);
-    let dst = if unsafe { !BLURRED.is_null() && BLURRED_W == w && BLURRED_H == h } {
-        unsafe { BLURRED }
-    } else {
-        match crate::memory::allocate_contiguous(pages) {
-            Some(addr) => addr as *mut u8,
-            None => {
-                crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass stays sharp", pages);
-                return;
-            }
-        }
+    let front = BLURRED.load(Ordering::Acquire);
+    let Some(dst) = back_plane(&mut bufs.blur, front, w, h, pages) else {
+        BLURRED_SET.store(false, Ordering::Release);
+        crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass stays sharp", pages);
+        return;
     };
     let t0 = crate::interrupts::ticks();
 
@@ -331,11 +355,7 @@ fn compute_blur(wp: *const u8, info: &FbInfo, pages: usize) {
         }
     }
 
-    unsafe {
-        BLURRED = dst;
-        BLURRED_W = w;
-        BLURRED_H = h;
-    }
+    BLURRED.store(dst, Ordering::Release);
     BLURRED_SET.store(true, Ordering::Release);
     crate::kdebug!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
         (crate::interrupts::ticks() - t0) * 10, detail, radius);
@@ -362,7 +382,7 @@ fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usiz
 /// What translucent glass is precomputed from: the blurred wallpaper when
 /// it is ready, else the sharp one, else null (no wallpaper).
 pub fn glass_source_ptr() -> *const u8 {
-    if blurred_ready() { unsafe { BLURRED } } else { wallpaper_ptr() }
+    if blurred_ready() { BLURRED.load(Ordering::Acquire) } else { wallpaper_ptr() }
 }
 
 fn blurred_ready() -> bool {
@@ -375,7 +395,7 @@ fn blurred_ready() -> bool {
 pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
                            rx: u32, ry: u32, rw: u32, rh: u32, radius: u32) {
     if !blurred_ready() { return; }
-    let bl = unsafe { BLURRED };
+    let bl = BLURRED.load(Ordering::Acquire);
     let pitch = info.pitch as usize;
     let r = radius.min(rw / 2).min(rh / 2);
     let y1 = (ry + rh).min(info.height);
@@ -403,8 +423,12 @@ pub fn glass_base_at(info: &FbInfo, x: u32, y: u32, current: u32) -> u32 {
     // SAFETY: caller passes on-screen coordinates; both buffers are
     // screen-sized with the framebuffer pitch.
     unsafe {
-        let sharp = *(WALLPAPER.add(off) as *const u32);
-        if (sharp ^ current) & 0x00FF_FFFF == 0 { *(BLURRED.add(off) as *const u32) } else { current }
+        let sharp = *(WALLPAPER.load(Ordering::Acquire).add(off) as *const u32);
+        if (sharp ^ current) & 0x00FF_FFFF == 0 {
+            *(BLURRED.load(Ordering::Acquire).add(off) as *const u32)
+        } else {
+            current
+        }
     }
 }
 

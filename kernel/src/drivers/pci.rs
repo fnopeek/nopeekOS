@@ -26,20 +26,34 @@ impl PciAddr {
     }
 }
 
+/// Serialises the CF8/CFC pair (Linux `pci_config_lock`): CF8 selects the
+/// register CFC then reaches, so two cores interleaving their pairs would
+/// read or write another device's register. Held with IF=0 so an ISR on the
+/// same core cannot take it while it is held.
+static CONFIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 pub fn read32(addr: PciAddr, offset: u8) -> u32 {
-    // SAFETY: PCI config space port I/O, standard x86 mechanism
-    unsafe {
-        outl(CONFIG_ADDR, addr.address(offset));
-        inl(CONFIG_DATA)
-    }
+    crate::interrupts::without_interrupts(|| {
+        let _g = CONFIG_LOCK.lock();
+        // SAFETY: PCI config space port I/O, standard x86 mechanism; the
+        // lock keeps the address/data pair together.
+        unsafe {
+            outl(CONFIG_ADDR, addr.address(offset));
+            inl(CONFIG_DATA)
+        }
+    })
 }
 
 pub fn write32(addr: PciAddr, offset: u8, value: u32) {
-    // SAFETY: PCI config space port I/O
-    unsafe {
-        outl(CONFIG_ADDR, addr.address(offset));
-        outl(CONFIG_DATA, value);
-    }
+    crate::interrupts::without_interrupts(|| {
+        let _g = CONFIG_LOCK.lock();
+        // SAFETY: PCI config space port I/O; the lock keeps the
+        // address/data pair together.
+        unsafe {
+            outl(CONFIG_ADDR, addr.address(offset));
+            outl(CONFIG_DATA, value);
+        }
+    })
 }
 
 pub fn read16(addr: PciAddr, offset: u8) -> u16 {

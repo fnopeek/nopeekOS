@@ -223,57 +223,104 @@ impl IntentSession {
     }
 }
 
-/// Per-window sessions, indexed by terminal_idx.
-// SAFETY: only accessed from Core 0 (event dispatcher owns all session state)
-static mut SESSIONS: BTreeMap<u8, Box<IntentSession>> = BTreeMap::new();
+/// Per-window sessions, indexed by terminal_idx. Changed only on Core 0:
+/// the shell loop holds a `&mut` into one session across its read loop, so a
+/// session must not be written or freed under it from another core. Other
+/// cores queue the change (`SESSION_OPS`) and Core 0 applies it at a point
+/// where it holds no session.
+static SESSIONS: Mutex<BTreeMap<u8, Box<IntentSession>>> = Mutex::new(BTreeMap::new());
 
-/// Raw pointer access to SESSIONS (avoids static_mut_refs lint).
-fn sessions_ptr() -> *mut BTreeMap<u8, Box<IntentSession>> {
-    core::ptr::addr_of_mut!(SESSIONS)
+#[derive(Clone, Copy)]
+enum SessionOp {
+    Create,
+    ResetPrompt,
+    Destroy,
+    /// Every session's history; the index is ignored.
+    ClearHistory,
+}
+
+/// Session changes requested off Core 0, applied by `apply_session_ops`.
+static SESSION_OPS: Mutex<alloc::vec::Vec<(u8, SessionOp)>> = Mutex::new(alloc::vec::Vec::new());
+
+fn on_core0() -> bool {
+    crate::smp::per_core::current_core_id() == 0
+}
+
+fn session_op(terminal_idx: u8, op: SessionOp) {
+    if on_core0() {
+        apply_session_op(terminal_idx, op);
+    } else {
+        SESSION_OPS.lock().push((terminal_idx, op));
+        wake_shell();
+    }
+}
+
+fn apply_session_op(terminal_idx: u8, op: SessionOp) {
+    match op {
+        SessionOp::Create => {
+            SESSIONS.lock().entry(terminal_idx)
+                .or_insert_with(|| Box::new(IntentSession::new(terminal_idx)));
+            // New sessions start in the user's home directory, not the focused terminal's cwd.
+            CWDS.lock().entry(terminal_idx).or_insert_with(home_dir);
+        }
+        SessionOp::ResetPrompt => {
+            if let Some(s) = SESSIONS.lock().get_mut(&terminal_idx) {
+                s.prompt_len = 0;
+                s.reset_input();
+            }
+        }
+        SessionOp::Destroy => {
+            SESSIONS.lock().remove(&terminal_idx);
+            CWDS.lock().remove(&terminal_idx);
+        }
+        SessionOp::ClearHistory => {
+            for s in SESSIONS.lock().values_mut() {
+                s.history.clear();
+            }
+        }
+    }
+}
+
+/// Apply the session changes other cores queued. Core 0, holding no session.
+fn apply_session_ops() {
+    let ops = core::mem::take(&mut *SESSION_OPS.lock());
+    for (idx, op) in ops {
+        apply_session_op(idx, op);
+    }
 }
 
 /// Create a new session for the given terminal (idempotent).
 pub fn create_session(terminal_idx: u8) {
-    // SAFETY: Core 0 only
-    unsafe {
-        if (*sessions_ptr()).contains_key(&terminal_idx) { return; }
-        (*sessions_ptr()).insert(terminal_idx, Box::new(IntentSession::new(terminal_idx)));
-    }
-    // New sessions start in the user's home directory, not the focused terminal's cwd.
-    CWDS.lock().entry(terminal_idx).or_insert_with(home_dir);
+    session_op(terminal_idx, SessionOp::Create);
 }
 
 /// Reset session prompt after terminal was freshly allocated (cleared).
 /// Forces run_loop to print a fresh prompt with full render.
 pub fn reset_session_prompt(terminal_idx: u8) {
-    // SAFETY: Core 0 only
-    unsafe {
-        if let Some(s) = (*sessions_ptr()).get_mut(&terminal_idx) {
-            s.prompt_len = 0;
-            s.reset_input();
-        }
-    }
+    session_op(terminal_idx, SessionOp::ResetPrompt);
 }
 
 /// Destroy the session for the given terminal.
 pub fn destroy_session(terminal_idx: u8) {
-    // SAFETY: Core 0 only
-    unsafe { (*sessions_ptr()).remove(&terminal_idx); }
-    CWDS.lock().remove(&terminal_idx);
+    session_op(terminal_idx, SessionOp::Destroy);
 }
 
-/// Get a mutable reference to a session. Core 0 only.
+/// The session for `terminal_idx`. Core 0 only: sessions are freed only
+/// there, so the box outlives the reference until Core 0 itself destroys it
+/// (which `session_exists` then reports).
 fn session_mut(terminal_idx: u8) -> Option<&'static mut IntentSession> {
-    // SAFETY: Core 0 only, no aliasing (one terminal active at a time)
-    unsafe { (*sessions_ptr()).get_mut(&terminal_idx).map(|b| &mut **b) }
+    let p: *mut IntentSession = SESSIONS.lock().get_mut(&terminal_idx)?.as_mut();
+    // SAFETY: the box is heap memory that stays put while the map changes;
+    // only Core 0 removes entries, and the shell loop holds one session at a
+    // time and re-checks `session_exists` after anything that may close it.
+    Some(unsafe { &mut *p })
 }
 
 /// Does a session for `terminal_idx` still exist? Lets the read loop detect
 /// that a mouse-driven window close (close_window → destroy_session) freed the
 /// session it holds, WITHOUT dereferencing the dangling reference. Core 0 only.
 fn session_exists(terminal_idx: u8) -> bool {
-    // SAFETY: Core 0 only
-    unsafe { (*sessions_ptr()).contains_key(&terminal_idx) }
+    SESSIONS.lock().contains_key(&terminal_idx)
 }
 
 /// Per-terminal CWD (accessible from all cores via Mutex).
@@ -624,6 +671,12 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // mouse path is not, so bail before any further deref. run_loop
         // re-acquires a valid session on the next pass (None arm).
         if !session_exists(term_idx) { return None; }
+        // Session changes queued by other cores apply at the top of
+        // run_loop, where no session is held.
+        if !SESSION_OPS.lock().is_empty() {
+            sync_session_to_terminal(session);
+            return None;
+        }
 
         if crate::shade::take_deferred_render() {
             crate::shade::render_frame();
@@ -1492,14 +1545,18 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         }
 
         // Get session for active terminal (create if needed)
+        apply_session_ops();
         let term = crate::shade::terminal::active_idx();
-        if session_mut(term).is_none() {
-            create_session(term);
-            need_prompt = true; // new session always needs a prompt
-        }
-        // SAFETY: Core 0 only, session exists after create above, no aliasing
-        let session = unsafe {
-            &mut **((*sessions_ptr()).get_mut(&term).unwrap() as *mut Box<IntentSession>)
+        let session = match session_mut(term) {
+            Some(s) => s,
+            None => {
+                apply_session_op(term, SessionOp::Create);
+                need_prompt = true; // new session always needs a prompt
+                match session_mut(term) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            }
         };
 
         // Fresh session (created by compositor) that never had a prompt
@@ -2707,17 +2764,12 @@ pub fn get_cwd_for_shell() -> String {
 /// Print the active terminal's command history.
 pub fn print_active_history() {
     let term = crate::shade::terminal::active_idx();
-    // SAFETY: Core 0 only (history is a Core 0-only intent)
-    let session = unsafe { (*sessions_ptr()).get(&term) };
-    let Some(s) = session else {
+    let lines = SESSIONS.lock().get(&term).map(|s| s.history.lines.clone());
+    let Some(lines) = lines.filter(|l| !l.is_empty()) else {
         kprintln!("(no history)");
         return;
     };
-    if s.history.lines.is_empty() {
-        kprintln!("(no history)");
-        return;
-    }
-    for (i, line) in s.history.lines.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         kprintln!("  {:3}  {}", i + 1, line);
     }
 }
@@ -2725,12 +2777,7 @@ pub fn print_active_history() {
 /// `history clear` — drop the stored log and every window's ring.
 pub fn clear_all_history() {
     let stored = history::clear();
-    // SAFETY: Core 0 only (intents run on Core 0)
-    unsafe {
-        for s in (*sessions_ptr()).values_mut() {
-            s.history.clear();
-        }
-    }
+    session_op(0, SessionOp::ClearHistory);
     kprintln!("[npk] history cleared ({} stored)", stored);
 }
 

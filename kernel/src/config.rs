@@ -123,6 +123,7 @@ pub fn set(key: &str, value: &str) {
     CONFIG.lock().set(key, value);
     save();
     if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
+    if key == "keyboard" { crate::keyboard::cache_layout(); }
 }
 
 /// Remove a config value and persist.
@@ -130,6 +131,7 @@ pub fn unset(key: &str) -> bool {
     let removed = CONFIG.lock().remove(key);
     if removed { save(); }
     if key == "bootlog" { crate::serial::set_verbose(false); }
+    if key == "keyboard" { crate::keyboard::cache_layout(); }
     removed
 }
 

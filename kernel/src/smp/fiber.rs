@@ -3,9 +3,9 @@
 //! See `docs/plan/SCHEDULER_FIBERS.md`. A fiber is a stack plus a saved
 //! context that runs until it yields. wasmi cannot be paused mid-`_start`,
 //! so each app gets its own stack and the whole CPU context is switched at
-//! the yield point (`npk_sleep`). Only `rsp` and the callee-saved registers
-//! are swapped, so the primitive is agnostic to what runs on the stack (apps,
-//! guest vCPU run-loops, kernel workers).
+//! the yield point (`npk_sleep`). Only `rsp`, RFLAGS and the callee-saved
+//! registers are swapped, so the primitive is agnostic to what runs on the
+//! stack (apps, guest vCPU run-loops, kernel workers).
 //!
 //! `npk_sleep` parks the fiber and switches back to a per-core scheduler
 //! that round-robins the core's other fibers, so many apps share few cores.
@@ -18,8 +18,12 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Saved execution context. Only `rsp` lives here — the callee-saved
-/// registers (rbx, rbp, r12–r15) are pushed onto the fiber's own stack by
-/// `switch` and popped back on resume, System V style.
+/// registers (rbx, rbp, r12–r15) and RFLAGS are pushed onto the fiber's own
+/// stack by `switch` and popped back on resume, System V style.
+///
+/// RFLAGS travels with the context because IF is per-context state: a vCPU
+/// fiber runs with interrupts enabled, while an AP's scheduler loop relies on
+/// IF=0 for its idle check and for locks it shares with ISRs.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
@@ -35,8 +39,8 @@ impl Context {
 // The switch + the fresh-fiber entry trampoline. AT&T syntax to match
 // boot.s / trampoline.s. System V args: rdi = `from`, rsi = `to`.
 //
-//   switch: save callee-saved + rsp into *from, load *to's rsp + regs,
-//           `ret` into to's resume point.
+//   switch: save callee-saved + RFLAGS + rsp into *from, load *to's rsp,
+//           RFLAGS and regs, `ret` into to's resume point.
 //   trampoline: where a *fresh* fiber's first `ret` lands. The initial
 //           frame put the entry fn in r12 and its arg in r13 (they were
 //           just popped by `switch`), so move the arg into rdi and call
@@ -52,8 +56,10 @@ fiber_context_switch:
     pushq %r13
     pushq %r14
     pushq %r15
+    pushfq
     movq %rsp, (%rdi)
     movq (%rsi), %rsp
+    popfq
     popq %r15
     popq %r14
     popq %r13
@@ -104,6 +110,9 @@ pub extern "C" fn fiber_on_exit() {
 /// holds the compiled module's frames and the host functions it calls.
 /// The page below it is a guard (`mm::stack`).
 pub const DEFAULT_STACK_BYTES: usize = 1024 * 1024;
+
+/// RFLAGS bit 1 reads as one and must be written as one.
+const RFLAGS_RESERVED: u64 = 1 << 1;
 
 // ── Per-core fiber scheduler ───────────────────────────────────────────
 //
@@ -350,6 +359,7 @@ pub fn run_core_fibers(cid: usize) {
         return;
     }
     loop {
+        crate::mm::paging::sync_tlb();
         let now = crate::interrupts::rdtsc();
         // Check out the next runnable fiber (FIFO). Lock dropped before the
         // switch — the fiber's Box is owned by this stack frame meanwhile.
@@ -367,6 +377,19 @@ pub fn run_core_fibers(cid: usize) {
                 None => return, // nothing runnable → idle
             }
         };
+
+        if !fiber.started {
+            fiber.started = true;
+            // A fresh fiber starts with this loop's RFLAGS, as if called
+            // from here. The slot is the lowest word of its initial frame.
+            let flags: u64;
+            // SAFETY: reading RFLAGS has no side effect; ctx.rsp points at
+            // the 8-word frame `Fiber::new` wrote and nothing has run on it.
+            unsafe {
+                core::arch::asm!("pushfq; pop {}", out(reg) flags, options(preserves_flags));
+                *(fiber.ctx.rsp as *mut u64) = flags;
+            }
+        }
 
         let fptr: *mut Fiber = &mut *fiber;
         // SAFETY: fptr is stable across the switch (the Box is this frame's
@@ -619,6 +642,9 @@ pub struct Fiber {
     waker: Waker,
     app_func: Option<fn(u64)>,
     app_arg: u64,
+    /// Switched into at least once. Until then its RFLAGS slot is a
+    /// placeholder that the scheduler replaces with its own (`run_core_fibers`).
+    started: bool,
     stack: crate::mm::stack::KernelStack,
 }
 
@@ -630,21 +656,22 @@ impl Fiber {
         let stack = crate::mm::stack::KernelStack::new(stack_bytes)?;
         let top = stack.top() as usize; // page-aligned, so 16-aligned
 
-        // Seven u64 slots below `top`, mirroring what `switch` pops then
-        // `ret`s through:  r15 r14 r13 r12 rbx rbp [return addr]
+        // Eight u64 slots below `top`, mirroring what `switch` pops then
+        // `ret`s through:  rflags r15 r14 r13 r12 rbx rbp [return addr]
         // At trampoline entry rsp == top (16-aligned) → ABI-correct `call`.
-        let sp0 = top - 56;
+        let sp0 = top - 64;
         // SAFETY: sp0..top lies inside the freshly allocated stack; we
-        // write exactly the 7 machine words the switch/ret sequence reads.
+        // write exactly the 8 machine words the switch/ret sequence reads.
         unsafe {
             let p = sp0 as *mut u64;
-            *p.add(0) = 0; // r15
-            *p.add(1) = 0; // r14
-            *p.add(2) = arg; // r13 → rdi in trampoline
-            *p.add(3) = entry as usize as u64; // r12 → call target
-            *p.add(4) = 0; // rbx
-            *p.add(5) = 0; // rbp
-            *p.add(6) = fiber_trampoline as *const () as u64; // ret → trampoline
+            *p.add(0) = RFLAGS_RESERVED; // rflags: IF=0 unless the scheduler says otherwise
+            *p.add(1) = 0; // r15
+            *p.add(2) = 0; // r14
+            *p.add(3) = arg; // r13 → rdi in trampoline
+            *p.add(4) = entry as usize as u64; // r12 → call target
+            *p.add(5) = 0; // rbx
+            *p.add(6) = 0; // rbp
+            *p.add(7) = fiber_trampoline as *const () as u64; // ret → trampoline
         }
 
         Some(Fiber {
@@ -653,6 +680,7 @@ impl Fiber {
             waker: NO_WAKER,
             app_func: None,
             app_arg: 0,
+            started: false,
             stack,
         })
     }

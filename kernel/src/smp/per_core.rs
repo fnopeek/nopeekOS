@@ -849,6 +849,10 @@ pub fn core0_loop() -> ! {
         super::fiber::run_core_fibers(0);
         // Self-throttled to 100 ms windows.
         update_core_freq(0);
+        // IF=0 from the last look to the halt: an ISR here that signals a
+        // fiber on this core sends no IPI (`wake_core`), so it must stay
+        // pending and end the halt rather than run before it.
+        let flags = crate::interrupts::irq_save();
         IDLE[0].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
         match super::fiber::earliest_deadline(0) {
@@ -856,6 +860,7 @@ pub fn core0_loop() -> ! {
             wake => crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK),
         }
         IDLE[0].store(false, Ordering::Relaxed);
+        crate::interrupts::irq_restore(flags);
     }
 }
 
@@ -925,7 +930,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     // SAFETY: APIC MMIO is identity-mapped, each core sees its own LAPIC
     unsafe {
         let svr = core::ptr::read_volatile((apic_base + 0xF0) as *const u32);
-        core::ptr::write_volatile((apic_base + 0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
+        core::ptr::write_volatile((apic_base + 0xF0) as *mut u32, svr | (1 << 8) | crate::interrupts::SPURIOUS_VECTOR as u32);
     }
 
     crate::cpu_errata::apply();
@@ -954,6 +959,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
     let cid = core_id as usize;
 
     loop {
+        crate::mm::paging::sync_tlb();
         // Carved out of the pool for the microvm. `vm_core_serve` opens the
         // guest on this core when a launch is pending and runs it to exit,
         // blocking the core for the guest's lifetime. Cheap no-op when
@@ -1025,17 +1031,21 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // IDLE is published before the inbox is looked at again: a spawn
         // that pushed without seeing IDLE sent no IPI, so its work must be
         // seen by this re-check; one that saw IDLE sends the IPI, which
-        // stays pending (IF=0) and ends the halt below at once.
+        // stays pending (IF=0) and ends the halt below at once. The same
+        // holds for an ISR on this core that signals one of its fibers.
+        let flags = crate::interrupts::irq_save();
         IDLE[cid].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
         let mut wake = super::fiber::earliest_deadline(cid);
         if matches!(wake, Some(d) if d <= now) {
             IDLE[cid].store(false, Ordering::Relaxed);
+            crate::interrupts::irq_restore(flags);
             continue; // became runnable — round again
         }
         if super::scheduler::has_work() {
             if !nic_core && least_loaded(cid) {
                 IDLE[cid].store(false, Ordering::Relaxed);
+                crate::interrupts::irq_restore(flags);
                 continue;
             }
             // Work waits that this core declines — for another core. If
@@ -1047,5 +1057,6 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         }
         crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK);
         IDLE[cid].store(false, Ordering::Relaxed);
+        crate::interrupts::irq_restore(flags);
     }
 }

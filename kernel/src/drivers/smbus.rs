@@ -112,7 +112,10 @@ fn wait_intr(base: u16) -> Option<u8> {
 /// `addr` is the 7-bit address, `cmd` the register/command byte. Returns
 /// None if the controller is absent, busy-stuck, or the device NAKs.
 pub fn read_word(addr: u8, cmd: u8) -> Option<u16> {
-    let base = (*SMBA.lock())?;
+    // Held for the whole transaction: the host registers are one set, and a
+    // second caller (bar battery, `akku`) would overwrite address and command.
+    let smba = SMBA.lock();
+    let base = (*smba)?;
 
     // Pre-transaction: bail if the bus is wedged busy, then clear any
     // lingering status flags (i801_check_pre).

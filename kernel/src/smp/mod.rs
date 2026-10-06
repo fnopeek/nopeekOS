@@ -349,15 +349,20 @@ pub fn kick_host_core(core_id: usize) {
 /// Send the worker wake IPI to the core with xAPIC id `apic_id`.
 pub fn send_wake_ipi(apic_id: u32) {
     let base = crate::interrupts::apic_base_any();
-    // FIXED delivery, level assert, physical destination. IF masked so an
-    // interrupt cannot land between the ICR-high and ICR-low writes.
-    crate::interrupts::without_interrupts(|| {
-        send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32)
-    });
+    // FIXED delivery, level assert, physical destination.
+    send_ipi(base, apic_id, 0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32);
 }
 
-/// Send IPI via Local APIC ICR (wait for idle first)
+/// Send IPI via Local APIC ICR (wait for idle first).
+///
+/// IF is masked across the two ICR writes: an ISR on this core that sends
+/// its own IPI in between would overwrite ICR-high, and the second write
+/// here would then deliver to the ISR's target.
 fn send_ipi(apic_base: u64, target_apic_id: u32, icr_low: u32) {
+    crate::interrupts::without_interrupts(|| send_ipi_masked(apic_base, target_apic_id, icr_low))
+}
+
+fn send_ipi_masked(apic_base: u64, target_apic_id: u32, icr_low: u32) {
     // SAFETY: APIC MMIO is mapped. ICR write triggers IPI.
     unsafe {
         // Wait for delivery status = idle

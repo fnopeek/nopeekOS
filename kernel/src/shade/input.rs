@@ -6,9 +6,45 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Action buffer (single action, polled by intent loop).
-static mut PENDING_ACTION: Option<ShadeAction> = None;
+/// Pending actions, polled by the intent loop. Pushed from the main loop and
+/// from the keyboard ISR on Core 0, so every access holds the lock with IF=0.
+static PENDING: spin::Mutex<ActionQueue> = spin::Mutex::new(ActionQueue::new());
+/// Cheap check before taking the lock; written only under it.
 static HAS_ACTION: AtomicBool = AtomicBool::new(false);
+
+const ACTION_SLOTS: usize = 16;
+
+/// Fixed ring: the ISR must not allocate.
+struct ActionQueue {
+    slots: [Option<ShadeAction>; ACTION_SLOTS],
+    head: usize,
+    len: usize,
+}
+
+impl ActionQueue {
+    const fn new() -> Self {
+        ActionQueue { slots: [None; ACTION_SLOTS], head: 0, len: 0 }
+    }
+
+    /// A full queue drops the new action: a burst of sixteen keybinds
+    /// between two polls is a stuck key, not intent.
+    fn push(&mut self, a: ShadeAction) {
+        if self.len < ACTION_SLOTS {
+            self.slots[(self.head + self.len) % ACTION_SLOTS] = Some(a);
+            self.len += 1;
+        }
+    }
+
+    fn pop(&mut self) -> Option<ShadeAction> {
+        if self.len == 0 {
+            return None;
+        }
+        let a = self.slots[self.head].take();
+        self.head = (self.head + 1) % ACTION_SLOTS;
+        self.len -= 1;
+        a
+    }
+}
 
 /// Actions the compositor can perform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,19 +133,22 @@ pub fn push_workspace_key(n: u8, shift: bool) {
 
 /// Push a pending action.
 fn push_action(action: ShadeAction) {
-    // SAFETY: single-core, no preemption
-    let p = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_ACTION) };
-    *p = Some(action);
-    HAS_ACTION.store(true, Ordering::Release);
+    crate::interrupts::without_interrupts(|| {
+        let mut q = PENDING.lock();
+        q.push(action);
+        HAS_ACTION.store(true, Ordering::Release);
+    });
 }
 
 /// Poll for a pending action (called from intent loop).
 pub fn poll_action() -> Option<ShadeAction> {
     if !HAS_ACTION.load(Ordering::Acquire) { return None; }
-    HAS_ACTION.store(false, Ordering::Release);
-    // SAFETY: single-core
-    let p = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_ACTION) };
-    p.take()
+    crate::interrupts::without_interrupts(|| {
+        let mut q = PENDING.lock();
+        let a = q.pop();
+        HAS_ACTION.store(q.len != 0, Ordering::Release);
+        a
+    })
 }
 
 /// Try to handle a key press as a shade keybinding (legacy u8 path).

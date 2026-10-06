@@ -293,6 +293,16 @@ pub fn init() {
         IDT[8].set_handler(double_fault_handler as *const () as u64);
         IDT[13].set_handler(gp_fault_handler as *const () as u64);
         IDT[14].set_handler(crate::forge_rt::forge_pf_stub as *const () as u64);
+        IDT[10].set_handler(invalid_tss_handler as *const () as u64);
+        IDT[11].set_handler(segment_not_present_handler as *const () as u64);
+        IDT[12].set_handler(stack_segment_handler as *const () as u64);
+        IDT[16].set_handler(x87_fp_handler as *const () as u64);
+        IDT[17].set_handler(alignment_check_handler as *const () as u64);
+        IDT[18].set_handler(machine_check_handler as *const () as u64);
+        IDT[19].set_handler(simd_fp_handler as *const () as u64);
+        // Every SVR write names this vector. Without a gate a spurious
+        // interrupt would raise #NP and end as a double fault.
+        IDT[SPURIOUS_VECTOR as usize].set_handler(spurious_handler as *const () as u64);
 
         // Hardware interrupt handlers
         IDT[PIC_OFFSET_MASTER as usize].set_handler(timer_handler as *const () as u64);
@@ -391,6 +401,50 @@ pub fn use_double_fault_stack() {
     unsafe {
         core::ptr::addr_of_mut!(IDT[8].ist).write(crate::tss::DOUBLE_FAULT_IST);
     }
+}
+
+/// LAPIC spurious-interrupt vector, as written to every core's SVR.
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
+
+/// A spurious interrupt is not in service: no EOI (SDM 11.9).
+extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}
+
+/// Fatal exceptions the kernel never raises on purpose: report and halt,
+/// rather than fault on a missing gate and surface as a double fault.
+macro_rules! fatal_exception {
+    ($name:ident, $vec:literal, $what:literal) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame) {
+            kprintln!();
+            kprintln!(concat!("[npk] !!! ", $what, " (INT ", $vec, ") !!!"));
+            kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
+            kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
+            halt_loop();
+        }
+    };
+    ($name:ident, $vec:literal, $what:literal, error_code) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) {
+            kprintln!();
+            kprintln!(concat!("[npk] !!! ", $what, " (INT ", $vec, ") !!!"));
+            kprintln!("[npk] Error code: {:#x}", error_code);
+            kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
+            kprintln!("[npk] RSP: {:#018x}", frame.stack_pointer);
+            halt_loop();
+        }
+    };
+}
+
+fatal_exception!(invalid_tss_handler, 10, "INVALID TSS", error_code);
+fatal_exception!(segment_not_present_handler, 11, "SEGMENT NOT PRESENT", error_code);
+fatal_exception!(stack_segment_handler, 12, "STACK-SEGMENT FAULT", error_code);
+fatal_exception!(x87_fp_handler, 16, "x87 FLOATING-POINT ERROR");
+fatal_exception!(alignment_check_handler, 17, "ALIGNMENT CHECK", error_code);
+fatal_exception!(simd_fp_handler, 19, "SIMD FLOATING-POINT EXCEPTION");
+
+extern "x86-interrupt" fn machine_check_handler(frame: InterruptStackFrame) -> ! {
+    kprintln!();
+    kprintln!("[npk] !!! MACHINE CHECK (INT 18) !!!");
+    kprintln!("[npk] RIP: {:#018x}", frame.instruction_pointer);
+    halt_loop();
 }
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
@@ -697,7 +751,7 @@ pub fn init_worker_timer() {
     unsafe {
         let b = base as *mut u8;
         let svr = core::ptr::read_volatile(b.add(0xF0) as *const u32);
-        core::ptr::write_volatile(b.add(0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
+        core::ptr::write_volatile(b.add(0xF0) as *mut u32, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
         // Divide = 16.
         core::ptr::write_volatile(b.add(0x3E0) as *mut u32, 0x03);
         if WORKER_TIMER_INITIAL.load(Ordering::Relaxed) == 0 {
@@ -927,6 +981,23 @@ extern "x86-interrupt" fn xhci_irq_handler(_frame: InterruptStackFrame) {
     lapic_eoi();
 }
 
+/// Clear IF and return RFLAGS as it was, for `irq_restore`. For a critical
+/// section that does not fit a closure (`without_interrupts`).
+pub fn irq_save() -> u64 {
+    let rflags: u64;
+    // SAFETY: save RFLAGS and clear IF; the caller restores via `irq_restore`.
+    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
+    rflags
+}
+
+/// Set IF again if it was set in `rflags` (from `irq_save`).
+pub fn irq_restore(rflags: u64) {
+    if rflags & (1 << 9) != 0 {
+        // SAFETY: IF was set when `irq_save` ran.
+        unsafe { core::arch::asm!("sti") };
+    }
+}
+
 /// Run `f` with this core's interrupts masked, restoring the previous IF.
 ///
 /// For a spin lock that an ISR on the same core may also take: held with
@@ -1055,7 +1126,7 @@ pub fn init_apic_timer() {
         // Enable APIC: set Spurious Interrupt Vector Register (offset 0xF0)
         // Bit 8 = APIC enable, bits 0-7 = spurious vector (use 0xFF)
         let svr = core::ptr::read_volatile(base.add(0xF0) as *const u32);
-        core::ptr::write_volatile(base.add(0xF0) as *mut u32, svr | (1 << 8) | 0xFF);
+        core::ptr::write_volatile(base.add(0xF0) as *mut u32, svr | (1 << 8) | SPURIOUS_VECTOR as u32);
 
         // Set timer divide = 16 (offset 0x3E0, value 0x03)
         core::ptr::write_volatile(base.add(0x3E0) as *mut u32, 0x03);

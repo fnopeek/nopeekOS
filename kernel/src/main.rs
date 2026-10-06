@@ -418,7 +418,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     // The module engine is a config setting so it persists across reboots
     // and also applies to autostart and driver modules.
     wasm::load_engine_default();
-    xhci::cache_keyboard_layout();
+    keyboard::cache_layout();
     if let Some(v) = config::get("mouse_speed") {
         if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_speed(n); }
     }

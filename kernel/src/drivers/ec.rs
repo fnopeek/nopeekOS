@@ -30,6 +30,12 @@ const CMD_QUERY: u8 = 0x84; // QR_EC
 /// Status bit: the EC has an event pending (ec.c: `ACPI_EC_FLAG_SCI`).
 const EC_FLAG_SCI: u8 = 0x20;
 
+/// One EC transaction at a time (Linux `ec->mutex`): the protocol is several
+/// port writes long, and a second caller in between would feed its bytes to
+/// the first one's command — a read address taken as a write value. No ISR
+/// takes it, so IF stays as it is.
+static EC_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
 fn udelay(us: u64) {
     let freq = crate::interrupts::tsc_freq();
     if freq == 0 {
@@ -62,6 +68,11 @@ fn wait_obf_set() -> bool {
 /// Read one byte from EC RAM at `addr`. None on timeout. Polling RD_EC:
 /// IBF-clear → cmd 0x80 → IBF-clear → addr → OBF-set → data.
 pub fn read(addr: u8) -> Option<u8> {
+    let _g = EC_LOCK.lock();
+    read_locked(addr)
+}
+
+fn read_locked(addr: u8) -> Option<u8> {
     if !wait_ibf_clear() { return None; }
     unsafe { outb(EC_SC, CMD_READ); }
     if !wait_ibf_clear() { return None; }
@@ -83,6 +94,7 @@ pub fn read(addr: u8) -> Option<u8> {
 pub fn query() -> Option<u8> {
     // SAFETY: ring-0 ISA port access to the EC, as throughout this module.
     if unsafe { inb(EC_SC) } & EC_FLAG_SCI == 0 { return None; }
+    let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return None; }
     unsafe { outb(EC_SC, CMD_QUERY); }
     if !wait_obf_set() { return None; }
@@ -93,6 +105,7 @@ pub fn query() -> Option<u8> {
 /// `query` without folding the outcomes together, for `ec watch take`:
 /// Ok(0) = the EC answered "nothing pending", Err = which step timed out.
 pub fn query_raw() -> Result<u8, &'static str> {
+    let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return Err("IBF stuck before QR_EC"); }
     unsafe { outb(EC_SC, CMD_QUERY); }
     if !wait_obf_set() { return Err("no OBF after QR_EC"); }
@@ -101,8 +114,9 @@ pub fn query_raw() -> Result<u8, &'static str> {
 
 /// Read a little-endian 16-bit word from EC RAM (addr = low byte).
 pub fn read_u16(addr: u8) -> Option<u16> {
-    let lo = read(addr)? as u16;
-    let hi = read(addr.wrapping_add(1))? as u16;
+    let _g = EC_LOCK.lock();
+    let lo = read_locked(addr)? as u16;
+    let hi = read_locked(addr.wrapping_add(1))? as u16;
     Some(lo | (hi << 8))
 }
 
@@ -110,6 +124,7 @@ pub fn read_u16(addr: u8) -> Option<u16> {
 /// IBF-clear → cmd 0x81 → IBF-clear → addr → IBF-clear → data. Returns false
 /// on timeout. See the module note on firmware-directed-only writes.
 pub fn write(addr: u8, val: u8) -> bool {
+    let _g = EC_LOCK.lock();
     if !wait_ibf_clear() { return false; }
     unsafe { outb(EC_SC, CMD_WRITE); }
     if !wait_ibf_clear() { return false; }

@@ -3,14 +3,16 @@
 //! Colors are extracted via Median-Cut quantization from raw pixel data.
 //! The palette drives border gradients, shadebar, accent colors, etc.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// 16-color theme palette (pywal-compatible ordering).
 /// color0 = darkest (background), color1..7 = dominant, color8..15 = bright variants.
-static mut PALETTE: [u32; 16] = [0; 16];
+/// Set by the wallpaper path on a worker core, read by every raster; a reader
+/// may see the old and new palette mixed for one frame, never a torn colour.
+static PALETTE: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
 
 /// Gradient border colors: start and end color for 45° linear gradient.
-static mut BORDER_GRADIENT: (u32, u32) = (0, 0);
+static BORDER_GRADIENT: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
 
 /// Whether a custom theme is active (vs. aurora default).
 static THEME_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -18,13 +20,13 @@ static THEME_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Set the full 16-color palette and derive border gradient.
 pub fn set_palette(colors: &[u32; 16]) {
-    // SAFETY: single-core
-    unsafe {
-        PALETTE = *colors;
-        // Border gradient: color1 → color2 (like Hyprland pywal setup)
-        // Ensure minimum brightness for visibility on dark backgrounds
-        BORDER_GRADIENT = (ensure_bright(colors[1]), ensure_bright(colors[2]));
+    for (slot, &c) in PALETTE.iter().zip(colors.iter()) {
+        slot.store(c, Ordering::Relaxed);
     }
+    // Border gradient: color1 → color2 (like Hyprland pywal setup)
+    // Ensure minimum brightness for visibility on dark backgrounds
+    BORDER_GRADIENT[0].store(ensure_bright(colors[1]), Ordering::Relaxed);
+    BORDER_GRADIENT[1].store(ensure_bright(colors[2]), Ordering::Relaxed);
     THEME_ACTIVE.store(true, Ordering::Release);
 }
 
@@ -47,8 +49,7 @@ fn ensure_bright(color: u32) -> u32 {
 
 /// Get the full palette.
 pub fn palette() -> [u32; 16] {
-    // SAFETY: single-core
-    unsafe { PALETTE }
+    core::array::from_fn(|i| PALETTE[i].load(Ordering::Relaxed))
 }
 
 /// Whether a custom theme is active.
@@ -58,23 +59,22 @@ pub fn is_active() -> bool {
 
 /// Get border gradient (start_color, end_color).
 pub fn border_gradient() -> (u32, u32) {
-    // SAFETY: single-core
-    unsafe { BORDER_GRADIENT }
+    (BORDER_GRADIENT[0].load(Ordering::Relaxed), BORDER_GRADIENT[1].load(Ordering::Relaxed))
 }
 
 /// Get background color (color0 — darkest).
 pub fn bg_color() -> u32 {
-    unsafe { PALETTE[0] }
+    PALETTE[0].load(Ordering::Relaxed)
 }
 
 /// Get accent color (color1 — primary dominant).
 pub fn accent() -> u32 {
-    unsafe { PALETTE[1] }
+    PALETTE[1].load(Ordering::Relaxed)
 }
 
 /// Get inactive border color (color0 with some brightness).
 pub fn inactive_border() -> u32 {
-    unsafe { PALETTE[8] } // bright variant of bg
+    PALETTE[8].load(Ordering::Relaxed) // bright variant of bg
 }
 
 /// Clear the custom theme, revert to aurora defaults.

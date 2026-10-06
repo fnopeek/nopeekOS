@@ -90,6 +90,35 @@ fn flush_tlb_all() {
     }
 }
 
+/// Bumped after every change to an entry that may already sit in another
+/// core's TLB (huge-page split, flag change, unmap). All cores share one
+/// PML4 and `invlpg` / a CR3 reload act only locally.
+///
+/// Not a synchronous shootdown: workers run with IF=0 outside their idle
+/// halt, so an IPI would be answered only there. Instead every core flushes
+/// at its next scheduling point (`sync_tlb`), before it starts the next fiber
+/// or task. The core that made the change flushes at once; a fiber only ever
+/// touches memory mapped for it, on the core it is pinned to.
+static TLB_GEN: AtomicU64 = AtomicU64::new(0);
+static TLB_SEEN: [AtomicU64; 256] =
+    [const { AtomicU64::new(0) }; 256];
+
+fn note_shared_change() {
+    TLB_GEN.fetch_add(1, Ordering::Release);
+}
+
+/// Flush this core's TLB if another core changed a live entry since it last
+/// looked. One atomic load when nothing changed.
+pub fn sync_tlb() {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= TLB_SEEN.len() { return; }
+    let g = TLB_GEN.load(Ordering::Acquire);
+    if TLB_SEEN[cid].load(Ordering::Relaxed) != g {
+        flush_tlb_all();
+        TLB_SEEN[cid].store(g, Ordering::Relaxed);
+    }
+}
+
 /// Split a 1GB huge page (PDPT entry) into 512 × 2MB huge pages (PDT).
 /// Preserves the original identity mapping with the same base flags.
 /// Returns the physical address of the new PDT.
@@ -290,6 +319,7 @@ pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingEr
         if pdpt_entry & PageFlags::PRESENT.bits() != 0 && pdpt_entry & PageFlags::HUGE.bits() != 0 {
             split_1gb_to_2mb(pdpt, pdpt_index(vaddr))?;
             flush_tlb_all(); // full TLB flush after huge page split
+            note_shared_change();
         }
 
         let pdt = get_or_create(pdpt, pdpt_index(vaddr))?;
@@ -299,6 +329,7 @@ pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingEr
         if pdt_entry & PageFlags::PRESENT.bits() != 0 && pdt_entry & PageFlags::HUGE.bits() != 0 {
             split_2mb_to_4kb(pdt, pdt_index(vaddr))?;
             flush_tlb_all(); // full TLB flush after huge page split
+            note_shared_change();
         }
 
         let pt = get_or_create(pdt, pdt_index(vaddr))?;
@@ -311,6 +342,7 @@ pub fn map_page(vaddr: u64, paddr: u64, flags: PageFlags) -> Result<(), PagingEr
                 // Same physical address — just update flags (e.g. add NO_CACHE)
                 write_entry(pt, pt_index(vaddr), paddr | flags.bits());
                 flush_tlb(vaddr);
+                note_shared_change();
                 return Ok(());
             }
             return Err(PagingError::AlreadyMapped);
@@ -354,6 +386,7 @@ pub fn unmap_page(vaddr: u64) -> Result<u64, PagingError> {
         let paddr = entry_addr(pt_entry);
         write_entry(pt, pt_index(vaddr), 0);
         flush_tlb(vaddr);
+        note_shared_change();
         Ok(paddr)
     }
 }

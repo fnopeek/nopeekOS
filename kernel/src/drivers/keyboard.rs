@@ -4,20 +4,63 @@
 //! Scancode Set 1 with US and DE_CH layouts.
 //! USB keyboards work via BIOS legacy PS/2 emulation.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, AtomicU32};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::kprintln;
 use crate::serial::{inb, outb};
 
 const DATA_PORT: u16 = 0x60;
 const STATUS_PORT: u16 = 0x64;
 
-// Lock-free ring buffer for decoded key events (interrupt-safe).
+// Ring buffer for decoded key bytes. Written by the PS/2 ISR, by injection
+// from modules and the terminal, read by several loops, so every access holds
+// the lock with IF=0 (the ISR takes it too). A multi-byte sequence goes in
+// under one hold, so another producer cannot split it.
 // A pasted line arrives as a fast key burst while the shell drains one key
 // per loop iteration; 512 (= INPUT_BUF_SIZE) absorbs any pasteable line.
 const BUF_SIZE: usize = 512;
-static mut KEY_BUF: [u8; BUF_SIZE] = [0; BUF_SIZE];
-static BUF_HEAD: AtomicUsize = AtomicUsize::new(0);
-static BUF_TAIL: AtomicUsize = AtomicUsize::new(0);
+
+struct KeyRing {
+    buf: [u8; BUF_SIZE],
+    head: usize,
+    tail: usize,
+}
+
+impl KeyRing {
+    fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+
+    fn free(&self) -> usize {
+        (self.tail + BUF_SIZE - self.head - 1) % BUF_SIZE
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.is_empty() {
+            return None;
+        }
+        let b = self.buf[self.tail];
+        self.tail = (self.tail + 1) % BUF_SIZE;
+        Some(b)
+    }
+
+    /// All of `seq` or nothing: half an escape sequence is worse than none.
+    fn push_seq(&mut self, seq: &[u8]) {
+        if seq.len() > self.free() {
+            return;
+        }
+        for &b in seq {
+            self.buf[self.head] = b;
+            self.head = (self.head + 1) % BUF_SIZE;
+        }
+    }
+}
+
+static KEY_RING: spin::Mutex<KeyRing> =
+    spin::Mutex::new(KeyRing { buf: [0; BUF_SIZE], head: 0, tail: 0 });
+
+fn push_seq(seq: &[u8]) {
+    crate::interrupts::without_interrupts(|| KEY_RING.lock().push_seq(seq));
+}
 
 // Modifier state (shared across all keyboard drivers)
 static SHIFT: AtomicBool = AtomicBool::new(false);
@@ -287,7 +330,7 @@ fn feed_mouse(byte: u8) {
 #[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
-    if BUF_HEAD.load(Ordering::Relaxed) != BUF_TAIL.load(Ordering::Relaxed) {
+    if !crate::interrupts::without_interrupts(|| KEY_RING.lock().is_empty()) {
         return true;
     }
     // PS/2 byte waiting in the i8042 output buffer (keyboard, not aux)?
@@ -300,12 +343,7 @@ pub fn has_key() -> bool {
 /// Read next raw key byte from buffer. Falls back to PS/2 polling, then
 /// xHCI USB keyboard. Prefer `read_event()` for typed KeyEvent w/ modifiers.
 pub fn read_key() -> Option<u8> {
-    let head = BUF_HEAD.load(Ordering::Acquire);
-    let tail = BUF_TAIL.load(Ordering::Acquire);
-    if head != tail {
-        // SAFETY: single consumer (main loop), IRQ only writes via push_key
-        let key = unsafe { KEY_BUF[tail] };
-        BUF_TAIL.store((tail + 1) % BUF_SIZE, Ordering::Release);
+    if let Some(key) = crate::interrupts::without_interrupts(|| KEY_RING.lock().pop()) {
         return Some(key);
     }
     // PS/2 polling: with the legacy PIC masked (UEFI/APIC machines) IRQ1
@@ -314,7 +352,7 @@ pub fn read_key() -> Option<u8> {
     // SKIP when the Core-0 timer IRQ owns the i8042 (PS2_IRQ_ACTIVE): polling
     // here would race the IRQ on the single output buffer (it can preempt us
     // between the STATUS and DATA reads → misread byte). Keyboard bytes then
-    // arrive via the IRQ → push_key → the BUF read above.
+    // arrive via the IRQ → push_char → the ring read above.
     if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
         if let Some(c) = poll_ps2() {
             return Some(c);
@@ -458,7 +496,7 @@ pub fn enable_irq() {
 /// Drain the i8042 from a Core-0 interrupt (i8042 IRQ, or the timer tick
 /// next to `xhci::poll_events_irq`). Non-blocking, no busy-wait; a mouse
 /// packet split across calls completes on the next one. Keyboard scancodes
-/// go to `push_key` (the BUF `read_key` reads), aux bytes to `feed_mouse`.
+/// go to `push_char` (the ring `read_key` reads), aux bytes to `feed_mouse`.
 /// The sole i8042 drainer once active; a no-op until `PS2_IRQ_ACTIVE` is set
 /// after init, so init cannot race it. Core 0 only.
 pub fn poll_ps2_irq() {
@@ -487,8 +525,7 @@ pub fn poll_ps2_irq() {
             }
             let scancode = inb(DATA_PORT);
             if let Some(c) = decode_scancode(scancode) {
-                push_key(c);
-                while let Some(b) = take_tail() { push_key(b) }
+                push_char(c);
             }
         }
     }
@@ -537,22 +574,24 @@ pub fn read_event() -> Option<crate::input::KeyEvent> {
     }
 }
 
-fn push_key(key: u8) {
-    let head = BUF_HEAD.load(Ordering::Relaxed);
-    let next = (head + 1) % BUF_SIZE;
-    if next != BUF_TAIL.load(Ordering::Relaxed) {
-        // SAFETY: single producer (IRQ handler), consumer only reads via read_key
-        unsafe { KEY_BUF[head] = key; }
-        BUF_HEAD.store(next, Ordering::Release);
+/// Push a decoded character: its first byte and the UTF-8 tail behind it.
+fn push_char(first: u8) {
+    let mut seq = [first, 0, 0, 0];
+    let mut n = 1;
+    while let Some(b) = take_tail() {
+        if n < seq.len() {
+            seq[n] = b;
+            n += 1;
+        }
     }
-    // Drop key if buffer full
+    push_seq(&seq[..n]);
 }
 
 /// Inject a raw key byte into the keyboard buffer as if it came from hardware.
 /// Used by the remote debug shell to drive the focused window from outside.
 /// Clients should send ANSI escape sequences for arrow/nav keys (ESC [ A etc).
 pub fn inject_byte(byte: u8) {
-    push_key(byte);
+    push_seq(&[byte]);
 }
 
 /// Push an arrow key as ANSI escape sequence: ESC [ A/B/C/D
@@ -570,9 +609,7 @@ fn push_arrow(code: u8) {
         KEY_INSERT => b'2',
         _ => return,
     };
-    push_key(0x1B); // ESC
-    push_key(b'[');
-    push_key(ch);
+    push_seq(&[0x1B, b'[', ch]);
 }
 
 fn wait_write() {
@@ -764,8 +801,7 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
         return Some('\u{3}');
     }
 
-    let layout = crate::config::get("keyboard");
-    let is_de = !matches!(layout.as_deref(), Some("us"));
+    let is_de = is_de_layout();
 
     // AltGr: special characters (de_CH layout)
     if alt_gr && is_de {
@@ -779,14 +815,27 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
     }
 }
 
+/// The configured layout, cached: this is read in interrupt context, where
+/// `config::get` (a lock and an allocation) must not run.
+static IS_DE_LAYOUT: AtomicBool = AtomicBool::new(true);
+
+/// Re-read the `keyboard` setting. Called after the configuration loads and
+/// whenever the setting changes.
+pub fn cache_layout() {
+    let is_de = !matches!(crate::config::get("keyboard").as_deref(), Some("us"));
+    IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
+}
+
+/// Whether keys map through the German (de_CH) layout. IRQ-safe.
+pub fn is_de_layout() -> bool {
+    IS_DE_LAYOUT.load(Ordering::Relaxed)
+}
+
 /// IRQ1 handler — called from interrupts.rs.
 pub fn irq_handler() {
     let scancode = unsafe { inb(DATA_PORT) };
     if let Some(c) = decode_scancode(scancode) {
-        push_key(c);
-        // A non-ASCII character is several bytes; they must enter the ring
-        // back to back, or another key could land between them.
-        while let Some(b) = take_tail() { push_key(b) }
+        push_char(c);
     }
 }
 

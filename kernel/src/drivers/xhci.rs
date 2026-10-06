@@ -311,7 +311,7 @@ pub fn poll_keyboard() -> Option<u8> {
         let since_last = (now.wrapping_sub(last)) * 10;
         if held_ms >= 500 && since_last >= 50 {
             REPEAT_LAST.store(now, Ordering::Relaxed);
-            let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
+            let is_de = crate::keyboard::is_de_layout();
             let shift = REPEAT_SHIFT.load(Ordering::Relaxed);
             let altgr = REPEAT_ALTGR.load(Ordering::Relaxed);
             let ch = hid_to_char(rk, shift, altgr, is_de);
@@ -2892,19 +2892,6 @@ fn drain(state: &mut XhciState) {
     }
 }
 
-/// Cached keyboard layout: `config::get` allocates, which is not allowed in
-/// IRQ context.
-static IS_DE_LAYOUT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// Call after the configuration is loaded.
-pub fn cache_keyboard_layout() {
-    let is_de = match crate::config::get("keyboard") {
-        Some(ref s) if s == "us" => false,
-        _ => true,
-    };
-    IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
-}
-
 /// Drain events from the main loop. Needed only early in boot, before the
 /// interrupt path drains.
 pub fn poll_events() {
@@ -2927,7 +2914,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8; 6], state: &mut XhciState) {
     crate::keyboard::set_ctrl(ctrl);
 
     // Use cached layout (IRQ-safe, no allocation)
-    let is_de = IS_DE_LAYOUT.load(Ordering::Relaxed);
+    let is_de = crate::keyboard::is_de_layout();
 
     // Find the first non-zero key in the current report for repeat tracking
     let first_key = keys.iter().find(|&&k| k != 0 && k != 1).copied().unwrap_or(0);

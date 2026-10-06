@@ -3,7 +3,8 @@
 //! Each window gets its own TerminalBuffer. kprintln output goes to the
 //! active (focused) terminal. Windows are completely independent.
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use spin::Mutex;
 
@@ -120,23 +121,62 @@ impl TerminalBuffer {
     }
 }
 
-/// Heap-allocated terminal buffers. Pointer is non-null when slot is in use.
-static TERM_PTRS: [AtomicPtr<TerminalBuffer>; MAX_SLOTS] = {
-    const NULL: AtomicPtr<TerminalBuffer> = AtomicPtr::new(core::ptr::null_mut());
-    [NULL; MAX_SLOTS]
-};
+/// Heap-allocated terminal buffers, `Some` while the slot is in use.
+///
+/// Written by `kprint` on any core, edited and rendered on Core 0, freed when
+/// the window closes: every access goes through the slot's lock (`term`), so
+/// no reference outlives the buffer. Held with IF=0, since an ISR may print.
+/// Nothing that prints or takes another slot may run while it is held.
+static TERMS: [Mutex<Option<Box<TerminalBuffer>>>; MAX_SLOTS] =
+    [const { Mutex::new(None) }; MAX_SLOTS];
 
-/// Get a shared reference to a terminal buffer (None if slot empty).
-fn term_ref(idx: usize) -> Option<&'static TerminalBuffer> {
-    let ptr = TERM_PTRS[idx].load(Ordering::Acquire);
-    if ptr.is_null() { None } else { unsafe { Some(&*ptr) } }
+/// A locked, occupied terminal slot. Restores IF after unlocking.
+struct TermGuard {
+    guard: Option<spin::MutexGuard<'static, Option<Box<TerminalBuffer>>>>,
+    flags: u64,
 }
 
-/// Get a mutable reference to a terminal buffer (None if slot empty).
-/// SAFETY: Only called from Core 0 or with exclusive access (output redirect).
-fn term_mut(idx: usize) -> Option<&'static mut TerminalBuffer> {
-    let ptr = TERM_PTRS[idx].load(Ordering::Acquire);
-    if ptr.is_null() { None } else { unsafe { Some(&mut *ptr) } }
+impl core::ops::Deref for TermGuard {
+    type Target = TerminalBuffer;
+    fn deref(&self) -> &TerminalBuffer {
+        match self.guard.as_deref() {
+            Some(Some(t)) => t,
+            _ => unreachable!("TermGuard is only built for an occupied slot"),
+        }
+    }
+}
+
+impl core::ops::DerefMut for TermGuard {
+    fn deref_mut(&mut self) -> &mut TerminalBuffer {
+        match self.guard.as_deref_mut() {
+            Some(Some(t)) => t,
+            _ => unreachable!("TermGuard is only built for an occupied slot"),
+        }
+    }
+}
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        crate::interrupts::irq_restore(self.flags);
+    }
+}
+
+/// Lock terminal `idx` (None if the slot is empty or out of range).
+fn term(idx: usize) -> Option<TermGuard> {
+    if idx >= MAX_SLOTS { return None; }
+    let flags = crate::interrupts::irq_save();
+    let guard = TERMS[idx].lock();
+    if guard.is_none() {
+        drop(guard);
+        crate::interrupts::irq_restore(flags);
+        return None;
+    }
+    Some(TermGuard { guard: Some(guard), flags })
+}
+
+fn slot_in_use(idx: usize) -> bool {
+    crate::interrupts::without_interrupts(|| TERMS[idx].lock().is_some())
 }
 
 /// Currently active (focused) terminal index — drives rendering + is the
@@ -185,7 +225,7 @@ pub fn set_cursor_pos(pos: usize) {
 pub fn rewrite_input(input: &[u8], input_len: usize) {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    let term = match term_mut(idx) { Some(t) => t, None => return };
+    let mut term = match term(idx) { Some(t) => t, None => return };
     let line_idx = term.total % MAX_LINES;
 
     // Find prompt length: everything already on the line before user input starts.
@@ -204,6 +244,7 @@ pub fn rewrite_input(input: &[u8], input_len: usize) {
     }
     term.lens[line_idx] = max;
     term.col = max;
+    drop(term);
     set_dirty();
 }
 
@@ -219,14 +260,14 @@ pub fn set_prompt_len(len: usize) {
 /// Get the current line length in the active terminal (for cursor offset calculation).
 pub fn current_line_len() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    match term_ref(idx) { Some(t) => t.current_line().1, None => 0 }
+    match term(idx) { Some(t) => t.current_line().1, None => 0 }
 }
 
 /// Get the current (input) line data and length from the active terminal.
 #[allow(dead_code)]
 pub fn current_line_data() -> ([u8; 256], usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    let term = match term_ref(idx) { Some(t) => t, None => return ([0; 256], 0) };
+    let term = match term(idx) { Some(t) => t, None => return ([0; 256], 0) };
     let (data, len) = term.current_line();
     let mut buf = [0u8; 256];
     let copy_len = len.min(256);
@@ -238,7 +279,7 @@ pub fn current_line_data() -> ([u8; 256], usize) {
 #[allow(dead_code)]
 pub fn line_count() -> usize {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    match term_ref(idx) { Some(t) => t.total, None => 0 }
+    match term(idx) { Some(t) => t.total, None => 0 }
 }
 
 /// Get the input cursor position.
@@ -260,14 +301,28 @@ pub fn is_active() -> bool {
 /// Uses alloc_zeroed to avoid 264KB stack frame (kernel stack is only 256KB).
 pub fn allocate() -> Option<u8> {
     for i in 0..MAX_SLOTS {
-        if TERM_PTRS[i].load(Ordering::Acquire).is_null() {
-            // SAFETY: TerminalBuffer is ~264KB — too large for the 256KB kernel stack.
-            // Allocate zeroed memory directly on the heap and cast to TerminalBuffer.
-            // All fields are zero-initialized (arrays of 0, usize=0, bool=false).
-            let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
-            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut TerminalBuffer;
+        if slot_in_use(i) { continue; }
+        let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
+        // SAFETY: TerminalBuffer is ~264KB — too large for the 256KB kernel
+        // stack, so it is zero-allocated on the heap. All fields are valid
+        // when zero (arrays of 0, usize=0, bool=false); the layout is the
+        // type's own, so the Box frees it correctly.
+        let buf = unsafe {
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut TerminalBuffer;
             if ptr.is_null() { return None; }
-            TERM_PTRS[i].store(ptr, Ordering::Release);
+            Box::from_raw(ptr)
+        };
+        let placed = crate::interrupts::without_interrupts(|| {
+            let mut slot = TERMS[i].lock();
+            if slot.is_some() { return Some(buf); }
+            *slot = Some(buf);
+            None
+        });
+        if let Some(lost_race) = placed {
+            drop(lost_race);
+            continue;
+        }
+        {
             // First loop opened → it becomes the primary debug sink.
             let _ = PRIMARY_IDX.compare_exchange(
                 255, i as u8, Ordering::AcqRel, Ordering::Relaxed);
@@ -279,18 +334,19 @@ pub fn allocate() -> Option<u8> {
 
 /// Free a terminal buffer (returns heap memory).
 pub fn free(idx: u8) {
-    let ptr = TERM_PTRS[idx as usize].swap(core::ptr::null_mut(), Ordering::AcqRel);
-    if !ptr.is_null() {
-        // SAFETY: ptr was created by alloc_zeroed in allocate()
-        let layout = alloc::alloc::Layout::new::<TerminalBuffer>();
-        unsafe { alloc::alloc::dealloc(ptr as *mut u8, layout); }
+    // A core still printing into this terminal must not land in the next
+    // window that gets the same slot.
+    for c in CORE_OUTPUT.iter() {
+        let _ = c.compare_exchange(idx, 255, Ordering::AcqRel, Ordering::Relaxed);
     }
+    let buf = crate::interrupts::without_interrupts(|| TERMS[idx as usize].lock().take());
+    drop(buf);
     // If the primary just closed, hand primary to the lowest surviving loop
     // (the next-oldest by index), or 255 when none remain.
     if PRIMARY_IDX.load(Ordering::Acquire) == idx {
         let mut new_primary = 255u8;
         for i in 0..MAX_SLOTS {
-            if !TERM_PTRS[i].load(Ordering::Acquire).is_null() {
+            if slot_in_use(i) {
                 new_primary = i as u8;
                 break;
             }
@@ -313,14 +369,15 @@ pub fn set_active_terminal(idx: u8) {
 pub fn clear() {
     if !is_active() { return; }
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if let Some(t) = term_mut(idx) { t.clear(); }
+    if let Some(mut t) = term(idx) { t.clear(); }
     clear_selection(idx);
 }
 
 /// Clear a specific terminal by index (for WASM apps on worker cores).
 pub fn clear_idx(idx: usize) {
-    if let Some(t) = term_mut(idx) {
+    if let Some(mut t) = term(idx) {
         t.clear();
+        drop(t);
         set_dirty();
     }
     clear_selection(idx);
@@ -349,7 +406,7 @@ pub fn output_redirect_terminal() -> Option<u8> {
     // SAFETY: APIC MMIO is identity-mapped, reading LAPIC ID register
     let apic_id = unsafe { core::ptr::read_volatile((apic_base + 0x20) as *const u32) } >> 24;
     let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Acquire);
-    if redirect != 255 && term_ref(redirect as usize).is_some() { Some(redirect) } else { None }
+    if redirect != 255 && slot_in_use(redirect as usize) { Some(redirect) } else { None }
 }
 
 /// Clear output redirect for the current core.
@@ -395,8 +452,9 @@ pub fn write(s: &str) {
     } else {
         ACTIVE_IDX.load(Ordering::Acquire) as usize
     };
-    if let Some(t) = term_mut(idx) {
+    if let Some(mut t) = term(idx) {
         t.write_str(s);
+        drop(t);
         set_dirty();
     }
     stream_push(idx, s);
@@ -410,8 +468,9 @@ static TERM_DIRTY: [AtomicBool; MAX_SLOTS] = {
 
 /// Write to a specific terminal by index (for WASM apps on worker cores).
 pub fn write_idx(idx: usize, s: &str) {
-    if let Some(t) = term_mut(idx) {
+    if let Some(mut t) = term(idx) {
         t.write_str(s);
+        drop(t);
         TERM_DIRTY[idx].store(true, Ordering::Release);
         set_dirty();
     }
@@ -588,18 +647,21 @@ fn sel_bounds(s: &Selection) -> ((usize, usize), (usize, usize)) {
 pub fn cell_at(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, my: i32)
     -> Option<(usize, usize)>
 {
-    let term = term_ref(idx)?;
     let (char_w, char_h) = crate::gui::font::char_size(1);
     if char_w == 0 || char_h == 0 { return None; }
     let cols = (rw / char_w) as usize;
     let visible_rows = (rh / char_h) as usize;
     if cols == 0 || visible_rows == 0 { return None; }
 
-    let lens: alloc::vec::Vec<usize> =
-        term.visible_lines(visible_rows).map(|(_, len)| len).collect();
-    let start_line = (term.total + 1)
-        .saturating_sub(term.scroll_offset)
-        .saturating_sub(lens.len());
+    let (lens, start_line) = {
+        let term = term(idx)?;
+        let lens: alloc::vec::Vec<usize> =
+            term.visible_lines(visible_rows).map(|(_, len)| len).collect();
+        let start_line = (term.total + 1)
+            .saturating_sub(term.scroll_offset)
+            .saturating_sub(lens.len());
+        (lens, start_line)
+    };
 
     // Soft-wrap each logical line into cols-wide segments (same as render).
     let mut segs: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
@@ -638,10 +700,18 @@ pub fn selection_begin(idx: usize, rx: i32, ry: i32, rw: u32, rh: u32, mx: i32, 
 /// the selection changed (caller re-renders). Clamps to the press-time
 /// rect, so dragging past the window edge keeps extending.
 pub fn selection_extend(mx: i32, my: i32) -> bool {
+    let sel = match *SELECTION.lock() { Some(s) if s.active => s, _ => return false };
+    // Not under the SELECTION lock: `cell_at` locks the terminal, and the
+    // renderer takes the two the other way round.
+    let Some(cell) = cell_at(sel.term_idx, sel.rx, sel.ry, sel.rw, sel.rh, mx, my) else {
+        return false;
+    };
     let mut g = SELECTION.lock();
-    let sel = match g.as_mut() { Some(s) if s.active => s, _ => return false };
-    match cell_at(sel.term_idx, sel.rx, sel.ry, sel.rw, sel.rh, mx, my) {
-        Some(cell) if cell != sel.head => { sel.head = cell; true }
+    match g.as_mut() {
+        Some(cur) if cur.active && cur.term_idx == sel.term_idx && cell != cur.head => {
+            cur.head = cell;
+            true
+        }
         _ => false,
     }
 }
@@ -670,7 +740,7 @@ pub fn selection_dragging() -> bool {
 pub fn copy_selection() {
     let sel = match *SELECTION.lock() { Some(s) => s, None => return };
     let (lo, hi) = sel_bounds(&sel);
-    let term = match term_ref(sel.term_idx) { Some(t) => t, None => return };
+    let term = match term(sel.term_idx) { Some(t) => t, None => return };
 
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     for line in lo.0..=hi.0 {
@@ -686,6 +756,7 @@ pub fn copy_selection() {
         }
         if line != hi.0 { out.push(b'\n'); }
     }
+    drop(term);
     if !out.is_empty() {
         crate::shade::clipboard::set_text(&out);
     }
@@ -728,11 +799,16 @@ pub enum SelDir { Left, Right, Up, Down }
 /// mouse selection already present is continued from its moving end. Moves
 /// are clamped to the ring-valid range. Returns true if it changed.
 pub fn selection_key(idx: usize, dir: SelDir) -> bool {
-    let term = match term_ref(idx) { Some(t) => t, None => return false };
-    let line_len = |ln: usize| -> usize { term.lens[ln % MAX_LINES] };
-    let oldest = term.total.saturating_sub(MAX_LINES - 1); // first ring-valid line
-    let caret_col = unsafe { INPUT_CURSOR_POS }.min(line_len(term.total));
-    let caret = (term.total, caret_col);
+    // A copy of the line lengths: the terminal lock is not held across the
+    // SELECTION lock below.
+    let (lens, total) = match term(idx) {
+        Some(t) => (t.lens, t.total),
+        None => return false,
+    };
+    let line_len = |ln: usize| -> usize { lens[ln % MAX_LINES] };
+    let oldest = total.saturating_sub(MAX_LINES - 1); // first ring-valid line
+    let caret_col = unsafe { INPUT_CURSOR_POS }.min(line_len(total));
+    let caret = (total, caret_col);
 
     let mut g = SELECTION.lock();
     let mut sel = match g.take() {
@@ -750,13 +826,13 @@ pub fn selection_key(idx: usize, dir: SelDir) -> bool {
         }
         SelDir::Right => {
             if hc < line_len(hl) { hc += 1; }
-            else if hl < term.total { hl += 1; hc = 0; }
+            else if hl < total { hl += 1; hc = 0; }
         }
         SelDir::Up => {
             if hl > oldest { hl -= 1; hc = hc.min(line_len(hl)); }
         }
         SelDir::Down => {
-            if hl < term.total { hl += 1; hc = hc.min(line_len(hl)); }
+            if hl < total { hl += 1; hc = hc.min(line_len(hl)); }
         }
     }
     let new_head = (hl, hc);
@@ -774,8 +850,6 @@ pub fn render_to_window(
     _scale: u32,
     terminal_idx: u8,
 ) {
-    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return };
-
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = w / char_w;
     let rows = h / char_h;
@@ -785,14 +859,19 @@ pub fn render_to_window(
     let cols = cols as usize;
 
     // Snapshot the last `rows` logical lines. Each wraps to ≥1 screen row,
-    // so this is always enough to fill the viewport bottom-up.
-    let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
-        .map(|(data, len)| {
-            let mut v = alloc::vec![0u8; len];
-            v.copy_from_slice(&data[..len]);
-            (v, len)
-        })
-        .collect();
+    // so this is always enough to fill the viewport bottom-up. The lock is
+    // dropped before drawing.
+    let (lines, total, scroll_offset) = {
+        let term = match term(terminal_idx as usize) { Some(t) => t, None => return };
+        let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
+            .map(|(data, len)| {
+                let mut v = alloc::vec![0u8; len];
+                v.copy_from_slice(&data[..len]);
+                (v, len)
+            })
+            .collect();
+        (lines, term.total, term.scroll_offset)
+    };
 
     // Soft-wrap each logical line into `cols`-wide screen-row segments
     // (logical index, byte start, byte end) so long lines wrap instead of
@@ -811,8 +890,8 @@ pub fn render_to_window(
 
     // Absolute line number of the first snapshot line — lets each wrapped
     // segment map back to (abs_line) for the selection test below.
-    let start_line = (term.total + 1)
-        .saturating_sub(term.scroll_offset)
+    let start_line = (total + 1)
+        .saturating_sub(scroll_offset)
         .saturating_sub(lines.len());
     // Selection bounds for this terminal, if a selection covers it.
     let sel_bounds_opt = match SELECTION.lock().as_ref() {
@@ -888,7 +967,13 @@ pub fn render_input_line(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
-    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return None };
+    let (total, line_data, len) = {
+        let term = match term(terminal_idx as usize) { Some(t) => t, None => return None };
+        let (data, len) = term.current_line();
+        let mut copy = [0u8; MAX_COLS];
+        copy[..len].copy_from_slice(&data[..len]);
+        (term.total, copy, len)
+    };
 
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = win_cw / char_w;
@@ -897,7 +982,7 @@ pub fn render_input_line(
 
     // Calculate Y position of the last visible line
     let visible_rows = rows as usize;
-    let end = term.total + 1;
+    let end = total + 1;
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
@@ -932,7 +1017,6 @@ pub fn render_input_line(
             win_cx, last_line_y, win_cw, char_h, theme_bg());
     }
 
-    let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
         let prompt_color = theme_prompt();
@@ -969,7 +1053,13 @@ pub fn render_input_line_to_layer(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) -> Option<(u32, u32, u32, u32)> {
-    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return None };
+    let (total, line_data, len) = {
+        let term = match term(terminal_idx as usize) { Some(t) => t, None => return None };
+        let (data, len) = term.current_line();
+        let mut copy = [0u8; MAX_COLS];
+        copy[..len].copy_from_slice(&data[..len]);
+        (term.total, copy, len)
+    };
 
     let (char_w, char_h) = crate::gui::font::char_size(1);
     let cols = win_cw / char_w;
@@ -977,7 +1067,7 @@ pub fn render_input_line_to_layer(
     if cols == 0 || rows == 0 { return None; }
 
     let visible_rows = rows as usize;
-    let end = term.total + 1;
+    let end = total + 1;
     let visible_count = visible_rows.min(end);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
@@ -995,7 +1085,6 @@ pub fn render_input_line_to_layer(
     }
 
     // Draw text
-    let (line_data, len) = term.current_line();
     let visible_len = len.min(cols as usize);
     if visible_len > 0 {
         let prompt_color = theme_prompt();
@@ -1032,11 +1121,11 @@ pub fn cache_input_line_bg(
     win_cx: u32, win_cy: u32, win_cw: u32, win_ch: u32,
     terminal_idx: u8,
 ) {
-    let term = match term_ref(terminal_idx as usize) { Some(t) => t, None => return };
+    let total = match term(terminal_idx as usize) { Some(t) => t.total, None => return };
     let (_, char_h) = crate::gui::font::char_size(1);
     let rows = win_ch / char_h;
     if rows == 0 { return; }
-    let visible_count = (rows as usize).min(term.total + 1);
+    let visible_count = (rows as usize).min(total + 1);
     let last_line_y = win_cy + (visible_count as u32).saturating_sub(1) * char_h;
 
     let pitch = info.pitch as usize;
@@ -1080,9 +1169,10 @@ pub fn invalidate_input_cache() {
 /// Scroll the active terminal up (show older content).
 pub fn scroll_up(lines: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if let Some(term) = term_mut(idx) {
+    if let Some(mut term) = term(idx) {
         let max_scroll = term.total.saturating_sub(10);
         term.scroll_offset = (term.scroll_offset + lines).min(max_scroll);
+        drop(term);
         set_dirty();
     }
 }
@@ -1090,8 +1180,9 @@ pub fn scroll_up(lines: usize) {
 /// Scroll the active terminal down (show newer content).
 pub fn scroll_down(lines: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if let Some(term) = term_mut(idx) {
+    if let Some(mut term) = term(idx) {
         term.scroll_offset = term.scroll_offset.saturating_sub(lines);
+        drop(term);
         set_dirty();
     }
 }
@@ -1099,15 +1190,16 @@ pub fn scroll_down(lines: usize) {
 /// (total logical lines, current scroll_offset) for terminal `idx` —
 /// used by the compositor to draw + drag the scrollbar.
 pub fn scroll_metrics(idx: usize) -> Option<(usize, usize)> {
-    term_ref(idx).map(|t| (t.total, t.scroll_offset))
+    term(idx).map(|t| (t.total, t.scroll_offset))
 }
 
 /// Set the absolute scroll_offset (logical lines from the bottom) for
 /// terminal `idx`, clamped. Used by the scrollbar drag.
 pub fn set_scroll_offset(idx: usize, off: usize) {
-    if let Some(term) = term_mut(idx) {
+    if let Some(mut term) = term(idx) {
         let max_scroll = term.total.saturating_sub(1);
         term.scroll_offset = off.min(max_scroll);
+        drop(term);
         set_dirty();
     }
 }
@@ -1115,16 +1207,16 @@ pub fn set_scroll_offset(idx: usize, off: usize) {
 /// Reset scroll to bottom (show latest content).
 pub fn scroll_reset() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    if let Some(term) = term_mut(idx) { term.scroll_offset = 0; }
+    if let Some(mut term) = term(idx) { term.scroll_offset = 0; }
 }
 
 /// Restore cursor position from per-terminal saved state.
 pub fn restore_cursor() {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    let term = match term_ref(idx) { Some(t) => t, None => return };
-    let pos = term.saved_pos;
-    let cursor = term.saved_cursor.min(pos);
-    let line_len = current_line_len();
+    let (pos, cursor, line_len) = match term(idx) {
+        Some(t) => (t.saved_pos, t.saved_cursor.min(t.saved_pos), t.current_line().1),
+        None => return,
+    };
     set_cursor_pos(line_len.saturating_sub(pos.saturating_sub(cursor)));
 }
 
@@ -1137,7 +1229,7 @@ pub fn save_input(buf: &[u8], pos: usize) {
 /// Save input buffer, pos, and cursor position.
 pub fn save_input_with_cursor(buf: &[u8], pos: usize, cursor: usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    let term = match term_mut(idx) { Some(t) => t, None => return };
+    let mut term = match term(idx) { Some(t) => t, None => return };
     let len = pos.min(MAX_INPUT);
     term.saved_input[..len].copy_from_slice(&buf[..len]);
     term.saved_pos = len;
@@ -1148,7 +1240,7 @@ pub fn save_input_with_cursor(buf: &[u8], pos: usize, cursor: usize) {
 #[allow(dead_code)]
 pub fn restore_input_with_cursor(buf: &mut [u8]) -> (usize, usize) {
     let idx = ACTIVE_IDX.load(Ordering::Acquire) as usize;
-    let term = match term_ref(idx) { Some(t) => t, None => return (0, 0) };
+    let term = match term(idx) { Some(t) => t, None => return (0, 0) };
     let len = term.saved_pos.min(buf.len());
     buf[..len].copy_from_slice(&term.saved_input[..len]);
     (len, term.saved_cursor.min(len))

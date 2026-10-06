@@ -1025,7 +1025,11 @@ struct TlsSlot {
     /// Owner. A handle is served only to the process that opened it, as
     /// with the HTTP handles.
     pid: u32,
-    session: crate::crypto::tls::TlsSession,
+    /// `None` while the handshake runs or a send/poll has it checked out:
+    /// those may yield the fiber, so they run without the table lock.
+    session: Option<crate::crypto::tls::TlsSession>,
+    /// Closed while checked out; whoever returns the session closes it.
+    closed: bool,
 }
 
 static TLS_SLOTS: spin::Mutex<[Option<TlsSlot>; MAX_TLS]> =
@@ -1041,6 +1045,36 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
         Some(sl) if sl.pid == ctx.pid => Some(i),
         _ => None,
     }
+}
+
+/// Check the session of slot `i` out of the table; `None` if it is busy.
+fn tls_checkout(i: usize, pid: u32) -> Option<crate::crypto::tls::TlsSession> {
+    let mut g = TLS_SLOTS.lock();
+    match g[i].as_mut() {
+        Some(sl) if sl.pid == pid && !sl.closed => sl.session.take(),
+        _ => None,
+    }
+}
+
+/// Return a checked-out session, or close it if the handle was closed
+/// meanwhile.
+fn tls_checkin(i: usize, pid: u32, mut session: crate::crypto::tls::TlsSession) {
+    let leftover = {
+        let mut g = TLS_SLOTS.lock();
+        match g[i].as_mut() {
+            Some(sl) if sl.pid == pid && !sl.closed && sl.session.is_none() => {
+                sl.session = Some(session);
+                return;
+            }
+            Some(sl) if sl.pid == pid && sl.closed => {
+                g[i] = None;
+            }
+            _ => {}
+        }
+        session
+    };
+    session = leftover;
+    let _ = crate::crypto::tls::tls_close(&mut session);
 }
 
 /// `npk_tls_connect(ip, port, host_ptr, host_len) -> handle | -1`
@@ -1071,23 +1105,28 @@ pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
         }
     };
 
+    // Reserved before the handshake, so two connects cannot pick one slot.
     let free = {
-        let g = TLS_SLOTS.lock();
-        match g.iter().position(|s| s.is_none()) { Some(i) => i, None => return -1 }
+        let mut g = TLS_SLOTS.lock();
+        let Some(i) = g.iter().position(|s| s.is_none()) else { return -1 };
+        g[i] = Some(TlsSlot { pid: ctx.pid, session: None, closed: false });
+        i
     };
+    let release = || { TLS_SLOTS.lock()[free] = None; };
     let tcp = match crate::net::tcp::connect(ip, port as u16) {
         Ok(h) => h,
-        Err(_) => return -1,
+        Err(_) => { release(); return -1 }
     };
     let session = match crate::crypto::tls::tls_connect(tcp, &bare) {
         Ok(s) => s,
         Err(e) => {
-            kprintln!("[npk] tls: Handschlag mit {} gescheitert ({:?})", bare, e);
+            kprintln!("[npk] tls: handshake with {} failed ({:?})", bare, e);
             let _ = crate::net::tcp::close(tcp);
+            release();
             return -1;
         }
     };
-    TLS_SLOTS.lock()[free] = Some(TlsSlot { pid: ctx.pid, session });
+    tls_checkin(free, ctx.pid, session);
     free as i32
 }
 
@@ -1099,12 +1138,13 @@ pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
     // Straight from guest memory: `tls_send` copies one record at a time,
     // so the kernel never holds more than a record of it.
     let Some(data) = guest(mem, buf_ptr, buf_len as usize) else { return -1 };
-    let mut g = TLS_SLOTS.lock();
-    let Some(sl) = g[i].as_mut() else { return -1 };
-    match crate::crypto::tls::tls_send(&mut sl.session, data) {
+    let Some(mut session) = tls_checkout(i, ctx.pid) else { return -1 };
+    let r = match crate::crypto::tls::tls_send(&mut session, data) {
         Ok(()) => 0,
         Err(_) => -1,
-    }
+    };
+    tls_checkin(i, ctx.pid, session);
+    r
 }
 
 /// `npk_tls_recv(handle, ptr, cap) -> n | 0 (nothing yet) | -1 (closed/error)`
@@ -1116,19 +1156,29 @@ pub(crate) fn npk_tls_recv(mem: &mut [u8], ctx: &mut HostState,
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
     if buf_max <= 0 { return -1 }
     let Some(dst) = guest_mut(mem, buf_ptr, buf_max as usize) else { return -1 };
-    let mut g = TLS_SLOTS.lock();
-    let Some(sl) = g[i].as_mut() else { return -1 };
-    match crate::crypto::tls::tls_poll(&mut sl.session, dst) {
+    let Some(mut session) = tls_checkout(i, ctx.pid) else { return -1 };
+    let r = match crate::crypto::tls::tls_poll(&mut session, dst) {
         Ok(n) => n as i32,
         Err(_) => -1,
-    }
+    };
+    tls_checkin(i, ctx.pid, session);
+    r
 }
 
 /// `npk_tls_close(handle) -> 0`
 pub(crate) fn npk_tls_close(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
-    if let Some(mut sl) = TLS_SLOTS.lock()[i].take() {
-        let _ = crate::crypto::tls::tls_close(&mut sl.session);
+    let session = {
+        let mut g = TLS_SLOTS.lock();
+        match g[i].as_mut() {
+            Some(sl) if sl.session.is_some() => g[i].take().and_then(|sl| sl.session),
+            // Checked out or still connecting: the holder closes it.
+            Some(sl) => { sl.closed = true; None }
+            None => None,
+        }
+    };
+    if let Some(mut session) = session {
+        let _ = crate::crypto::tls::tls_close(&mut session);
     }
     0
 }
