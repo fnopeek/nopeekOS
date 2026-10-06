@@ -86,25 +86,9 @@ impl Mmio {
         // makes mapped device memory.
         unsafe { core::ptr::read_volatile(self.at(off, 1) as *const u8) }
     }
-    pub fn r16(&self, off: impl Off) -> u16 {
-        // SAFETY: as in `r8`.
-        unsafe { core::ptr::read_volatile(self.at(off, 2) as *const u16) }
-    }
     pub fn r32(&self, off: impl Off) -> u32 {
         // SAFETY: as in `r8`.
         unsafe { core::ptr::read_volatile(self.at(off, 4) as *const u32) }
-    }
-    pub fn r64(&self, off: impl Off) -> u64 {
-        // SAFETY: as in `r8`.
-        unsafe { core::ptr::read_volatile(self.at(off, 8) as *const u64) }
-    }
-    pub fn w8(&self, off: impl Off, v: u8) {
-        // SAFETY: as in `r8`.
-        unsafe { core::ptr::write_volatile(self.at(off, 1) as *mut u8, v) }
-    }
-    pub fn w16(&self, off: impl Off, v: u16) {
-        // SAFETY: as in `r8`.
-        unsafe { core::ptr::write_volatile(self.at(off, 2) as *mut u16, v) }
     }
     pub fn w32(&self, off: impl Off, v: u32) {
         // SAFETY: as in `r8`.
@@ -207,8 +191,7 @@ impl PortRange {
 
 /// A physically contiguous, identity-mapped buffer a device reads or writes.
 ///
-/// Not freed on drop: a device may still access it. `free` is explicit and
-/// the caller states that the device is quiet.
+/// Not freed on drop: a device may still access it.
 #[derive(Clone, Copy, Debug)]
 pub struct DmaRegion {
     phys: u64,
@@ -228,14 +211,6 @@ impl DmaRegion {
         Some(r)
     }
 
-    /// `pages` zeroed pages below `limit` (for 32-bit DMA addresses).
-    pub fn alloc_zeroed_below(pages: usize, limit: u64) -> Option<Self> {
-        let phys = crate::memory::allocate_contiguous_below(pages, limit)?;
-        let r = DmaRegion { phys, len: pages as u64 * PAGE };
-        r.zero();
-        Some(r)
-    }
-
     /// A region allocated elsewhere.
     ///
     /// # Safety
@@ -245,17 +220,7 @@ impl DmaRegion {
         DmaRegion { phys, len }
     }
 
-    /// Return the pages to the frame allocator.
-    ///
-    /// # Safety
-    /// No device may access the region any more, and no other copy of this
-    /// value may be used afterwards.
-    pub unsafe fn free(self) {
-        crate::memory::deallocate_contiguous(self.phys, (self.len / PAGE) as usize);
-    }
-
     pub fn phys(&self) -> u64 { self.phys }
-    pub fn len(&self) -> u64 { self.len }
     pub fn is_empty(&self) -> bool { self.len == 0 }
 
     /// The part `off .. off + len` of this region.
@@ -368,7 +333,6 @@ impl PhysView {
 
     pub fn addr(&self) -> u64 { self.addr }
     pub fn len(&self) -> u64 { self.len }
-    pub fn is_empty(&self) -> bool { self.len == 0 }
 
     fn get<T: Copy>(&self, off: impl Off) -> Option<T> {
         let off = off.get();
@@ -390,11 +354,6 @@ impl PhysView {
         unsafe { core::slice::from_raw_parts(self.addr as *const u8, self.len as usize) }
     }
 
-    /// The part `off .. off + len`, or `None` if it leaves the view.
-    pub fn sub(&self, off: impl Off, len: u64) -> Option<PhysView> {
-        let off = off.get();
-        (off.checked_add(len)? <= self.len).then_some(PhysView { addr: self.addr + off, len })
-    }
 }
 
 /// Model-specific registers.
@@ -406,8 +365,10 @@ pub mod msr {
         let (lo, hi): (u32, u32);
         // SAFETY: the caller's contract.
         unsafe {
+            // No `nomem`: callers order MSR reads against memory accesses
+            // (counter snapshots, errata sequences).
             core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-                options(nomem, nostack, preserves_flags));
+                options(nostack, preserves_flags));
         }
         (hi as u64) << 32 | lo as u64
     }
