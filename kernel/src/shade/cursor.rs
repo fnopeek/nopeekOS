@@ -47,23 +47,26 @@ pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     let (cx, cy) = atomic_pos();
     let (ew, eh) = eff_dims();
     let mut su = SAVE_UNDER.lock();
-    for row in 0..eh {
-        let py = cy + row as i32;
-        for col in 0..ew {
-            let px = cx + col as i32;
-            let idx = (row * ew + col) as usize;
-            if px < 0 || px >= sw || py < 0 || py >= sh { su[idx] = 0; continue; }
-            let off = py as usize * pitch + px as usize * 4;
-            // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
-            unsafe {
-                let p = buf.add(off) as *mut u32;
-                let bg = *p;
-                su[idx] = bg;
-                let (color, a) = cursor_sample_aa(col, row, ew, eh);
-                if a > 0 { *p = blend(bg, color, a); }
+    with_sprite(ew, eh, |sprite| {
+        for row in 0..eh {
+            let py = cy + row as i32;
+            for col in 0..ew {
+                let px = cx + col as i32;
+                let idx = (row * ew + col) as usize;
+                if px < 0 || px >= sw || py < 0 || py >= sh { su[idx] = 0; continue; }
+                let off = py as usize * pitch + px as usize * 4;
+                let s = sprite[idx];
+                // SAFETY: bounds-checked offset into a kernel-owned shadow buffer.
+                unsafe {
+                    let p = buf.add(off) as *mut u32;
+                    let bg = *p;
+                    su[idx] = bg;
+                    let a = s >> 24;
+                    if a > 0 { *p = blend(bg, s & 0x00FF_FFFF, a); }
+                }
             }
         }
-    }
+    });
     SU_X.store(cx, Ordering::Relaxed);
     SU_Y.store(cy, Ordering::Relaxed);
     SU_W.store(ew, Ordering::Relaxed);
@@ -187,6 +190,28 @@ fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
     // Outline ≈ white (235), interior ≈ near-black (30), mixed by fill cover.
     let lum = ((235.0 * (1.0 - i) + 30.0 * i) as u32) & 0xff;
     ((lum << 16) | (lum << 8) | lum, ((a * 255.0) as u32).min(255))
+}
+
+/// The cursor at one size, `color | alpha << 24` per pixel, row-major.
+/// Rasterized once per size; every bake reads it.
+static SPRITE: spin::Mutex<(u32, u32, alloc::vec::Vec<u32>)> =
+    spin::Mutex::new((0, 0, alloc::vec::Vec::new()));
+
+/// Run `f` on the sprite for `ew` x `eh`, rasterizing it on a size change.
+fn with_sprite<R>(ew: u32, eh: u32, f: impl FnOnce(&[u32]) -> R) -> R {
+    let mut sp = SPRITE.lock();
+    if sp.0 != ew || sp.1 != eh || sp.2.len() != (ew * eh) as usize {
+        sp.2.clear();
+        for row in 0..eh {
+            for col in 0..ew {
+                let (color, a) = cursor_sample_aa(col, row, ew, eh);
+                sp.2.push(color | a << 24);
+            }
+        }
+        sp.0 = ew;
+        sp.1 = eh;
+    }
+    f(&sp.2)
 }
 
 /// Update mouse position atomically, without a lock. Called from Core 0
@@ -376,18 +401,21 @@ pub fn draw_cursor_on_shadow(shadow: *mut u8, info: &crate::framebuffer::FbInfo)
     let sh = info.height as i32;
     let (cx, cy) = atomic_pos();
     let (ew, eh) = eff_dims();
-    for row in 0..eh {
-        let py = cy + row as i32;
-        if py < 0 || py >= sh { continue; }
-        for col in 0..ew {
-            let px = cx + col as i32;
-            if px < 0 || px >= sw { continue; }
-            let (color, a) = cursor_sample_aa(col, row, ew, eh);
-            if a == 0 { continue; }
-            let off = py as usize * pitch + px as usize * 4;
-            // SAFETY: alpha-blend over the existing back-shadow pixel. Shadow
-            // is a kernel-owned allocation, not MMIO — plain load/store fine.
-            unsafe { let p = shadow.add(off) as *mut u32; *p = blend(*p, color, a); }
+    with_sprite(ew, eh, |sprite| {
+        for row in 0..eh {
+            let py = cy + row as i32;
+            if py < 0 || py >= sh { continue; }
+            for col in 0..ew {
+                let px = cx + col as i32;
+                if px < 0 || px >= sw { continue; }
+                let s = sprite[(row * ew + col) as usize];
+                let a = s >> 24;
+                if a == 0 { continue; }
+                let off = py as usize * pitch + px as usize * 4;
+                // SAFETY: alpha-blend over the existing back-shadow pixel. Shadow
+                // is a kernel-owned allocation, not MMIO — plain load/store fine.
+                unsafe { let p = shadow.add(off) as *mut u32; *p = blend(*p, s & 0x00FF_FFFF, a); }
+            }
         }
-    }
+    });
 }

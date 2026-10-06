@@ -21,11 +21,14 @@ struct FrameAllocator {
     bitmap: [u8; BITMAP_SIZE],
     free_count: usize,
     memory_top: usize,
+    /// No free frame lies in a bitmap byte below this one; `allocate` starts
+    /// here instead of at frame 0.
+    next_byte: usize,
 }
 
 impl FrameAllocator {
     const fn new() -> Self {
-        FrameAllocator { bitmap: [0u8; BITMAP_SIZE], free_count: 0, memory_top: 0 }
+        FrameAllocator { bitmap: [0u8; BITMAP_SIZE], free_count: 0, memory_top: 0, next_byte: 0 }
     }
 
     fn mark_all_used(&mut self) {
@@ -39,6 +42,7 @@ impl FrameAllocator {
         if self.bitmap[byte] & (1 << bit) != 0 {
             self.bitmap[byte] &= !(1 << bit);
             self.free_count += 1;
+            self.next_byte = self.next_byte.min(byte);
         }
     }
 
@@ -71,19 +75,18 @@ impl FrameAllocator {
     }
 
     fn allocate(&mut self) -> Option<u64> {
-        let top_byte = (self.memory_top + 7) / 8;
-        for byte_idx in 0..top_byte.min(BITMAP_SIZE) {
-            if self.bitmap[byte_idx] == 0xFF { continue; }
-            for bit in 0..8u8 {
-                let frame = byte_idx * 8 + bit as usize;
-                if frame >= self.memory_top { return None; }
-                if self.bitmap[byte_idx] & (1 << bit) == 0 {
-                    self.bitmap[byte_idx] |= 1 << bit;
-                    self.free_count -= 1;
-                    return Some((frame * PAGE_SIZE) as u64);
-                }
-            }
+        let top_byte = ((self.memory_top + 7) / 8).min(BITMAP_SIZE);
+        for byte_idx in self.next_byte..top_byte {
+            let b = self.bitmap[byte_idx];
+            if b == 0xFF { continue; }
+            self.next_byte = byte_idx;
+            let frame = byte_idx * 8 + b.trailing_ones() as usize;
+            if frame >= self.memory_top { return None; }
+            self.bitmap[byte_idx] |= 1 << (frame % 8);
+            self.free_count -= 1;
+            return Some((frame * PAGE_SIZE) as u64);
         }
+        self.next_byte = top_byte;
         None
     }
 
@@ -247,43 +250,10 @@ pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> 
     }
 }
 
-/// Allocate `count` contiguous physical frames. Returns base physical address.
+/// Allocate `count` contiguous physical frames, searching from the top of
+/// memory, where RAM is almost always free. Returns the base address.
 pub fn allocate_contiguous(count: usize) -> Option<u64> {
-    if count == 0 { return None; }
-    let mut alloc = ALLOCATOR.lock();
-    let top = alloc.memory_top;
-    if count > top { return None; }
-
-    // Search from top of memory downward — high RAM is almost always free,
-    // avoids O(n*count) scan through busy low memory regions.
-    let mut start = top - count;
-    loop {
-        let mut ok = true;
-        let mut skip_to = start;
-        for i in 0..count {
-            let frame = start + i;
-            let (byte, bit) = (frame / 8, frame % 8);
-            if alloc.bitmap[byte] & (1 << bit) != 0 {
-                // Frame is used — skip past it
-                ok = false;
-                if start == 0 { return None; }
-                skip_to = if frame > count { frame - count } else { 0 };
-                break;
-            }
-        }
-        if ok {
-            for i in 0..count {
-                alloc.set_used(start + i);
-            }
-            return Some((start * PAGE_SIZE) as u64);
-        }
-        if skip_to >= start {
-            if start == 0 { return None; }
-            start -= 1;
-        } else {
-            start = skip_to;
-        }
-    }
+    allocate_contiguous_below(count, 0)
 }
 
 /// Deallocate `count` contiguous physical frames starting at `base`.

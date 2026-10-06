@@ -341,16 +341,16 @@ fn const_init(expr: &wasmparser::ConstExpr<'_>) -> Option<i64> {
 /// `call_indirect` check compares shapes and not the order the types happened
 /// to be written in.
 fn canonical_sig_ids(types: &[(Vec<ValType>, Vec<ValType>)]) -> Vec<u32> {
-    let mut seen: Vec<&(Vec<ValType>, Vec<ValType>)> = Vec::new();
+    // Keyed by an encoding of the shape, so a module with many types costs
+    // n log n instead of n squared.
+    fn key(t: &(Vec<ValType>, Vec<ValType>)) -> String {
+        alloc::format!("{:?}", t)
+    }
+    let mut seen: alloc::collections::BTreeMap<String, u32> = alloc::collections::BTreeMap::new();
     let mut out = Vec::with_capacity(types.len());
     for t in types {
-        match seen.iter().position(|s| *s == t) {
-            Some(i) => out.push(i as u32),
-            None => {
-                seen.push(t);
-                out.push(seen.len() as u32 - 1);
-            }
-        }
+        let next = seen.len() as u32;
+        out.push(*seen.entry(key(t)).or_insert(next));
     }
     out
 }
@@ -411,6 +411,10 @@ pub fn compile(wasm: &[u8]) -> Result<CompiledModule, Error> {
     let mut lk = Linker::new(wasm.len());
     let (plan, funcs) = walk(wasm, Some(&mut lk))?;
     let l = lk.finish(&plan, &funcs);
+    // Calls and fault entries are rel32; beyond 2 GiB they would wrap.
+    if l.code.len() > i32::MAX as usize {
+        return Err(reject("generated code exceeds 2 GiB"));
+    }
     Ok(CompiledModule {
         plan,
         funcs,

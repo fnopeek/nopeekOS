@@ -19,6 +19,7 @@ pub mod clipboard;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
+use alloc::string::String;
 
 /// Per-frame render/compositor performance logging ([render], [comp],
 /// [chrome-cache], [gpu-blit], [rw-phase], [nvme-spin] …). Off for normal
@@ -1207,30 +1208,40 @@ pub fn start_autostart() {
         Some(v) => v,
         None => return,
     };
-    let mut first = true;
-    for name in list
+    let mut names = list
         .split(|c| c == ',' || c == ' ')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-    {
-        // Stagger the launches. Every entry is fetched from npkFS, spawned as a
-        // fiber and starts working immediately; firing them together makes the
-        // first seconds after boot the busiest the machine ever is. A hardware
-        // driver brought up in that window runs handshakes against firmware
-        // timeouts it cannot extend, and may fail where a later start works.
-        if !first {
-            let until = crate::interrupts::ticks() + AUTOSTART_STAGGER_TICKS;
-            while crate::interrupts::ticks() < until {
-                core::hint::spin_loop();
-            }
-        }
-        first = false;
-        launch_app_with_ttl(name, None);
+        .map(String::from);
+    let Some(first) = names.next() else { return };
+    launch_app_with_ttl(&first, None);
+    let rest: alloc::collections::VecDeque<String> = names.collect();
+    if rest.is_empty() { return; }
+    *AUTOSTART_REST.lock() = rest;
+    // Core 0, because launching touches the compositor; a fiber, so the
+    // gaps below are sleeps and the first frames render meanwhile.
+    crate::smp::fiber::admit(0, autostart_fiber, 0);
+}
+
+/// Autostart entries not launched yet.
+static AUTOSTART_REST: Mutex<alloc::collections::VecDeque<String>> =
+    Mutex::new(alloc::collections::VecDeque::new());
+
+/// Stagger the launches. Every entry is fetched from npkFS, spawned as a
+/// fiber and starts working immediately; firing them together makes the
+/// first seconds after boot the busiest the machine ever is. A hardware
+/// driver brought up in that window runs handshakes against firmware
+/// timeouts it cannot extend, and may fail where a later start works.
+fn autostart_fiber(_: u64) {
+    loop {
+        crate::smp::fiber::yield_sleep(AUTOSTART_STAGGER_MS);
+        let Some(name) = AUTOSTART_REST.lock().pop_front() else { return };
+        launch_app_with_ttl(&name, None);
     }
 }
 
-/// Gap between autostart launches, in 100 Hz ticks.
-const AUTOSTART_STAGGER_TICKS: u64 = 40; // 400 ms
+/// Gap between autostart launches.
+const AUTOSTART_STAGGER_MS: u64 = 400;
 
 /// Launch an installed widget module by name (e.g. "loft") from kernel
 /// code — the spawn half of `spawn_launcher`, exposed for cross-boundary

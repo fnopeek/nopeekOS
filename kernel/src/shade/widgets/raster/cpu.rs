@@ -122,15 +122,15 @@ impl Rasterizer for CpuRasterizer {
 
         // Phosphor atlas path — picks nearest-but-not-smaller size.
         // Falls back to stub square if atlas isn't loaded yet.
-        match crate::gui::icons::alpha_for(id, size) {
-            Some((atlas_size, alpha)) => {
-                if atlas_size == size {
-                    composite_alpha_target(t, x, y, size as u32, size as u32, &alpha, bgra);
-                } else {
-                    // Nearest-neighbour scale atlas_size → size.
-                    composite_alpha_scaled(t, x, y, size as u32, atlas_size as u32, &alpha, bgra);
-                }
+        let drawn = crate::gui::icons::with_alpha(id, size, |atlas_size, alpha| {
+            if atlas_size == size {
+                composite_alpha_target(t, x, y, size as u32, size as u32, alpha, bgra);
+            } else {
+                composite_alpha_scaled(t, x, y, size as u32, atlas_size as u32, alpha, bgra);
             }
+        });
+        match drawn {
+            Some(()) => {}
             None => {
                 // Atlas not yet loaded or icon missing — stub square
                 // keeps layout debuggable.

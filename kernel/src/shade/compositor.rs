@@ -210,7 +210,7 @@ fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
         crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted)
     } & 0x00FF_FFFF;
     let req = CLOSE_BTN_GLYPH * close_btn_scale(win, scale);
-    if let Some((asz, glyph)) = crate::gui::icons::alpha_for(IconId::X, req as u16) {
+    crate::gui::icons::with_alpha(IconId::X, req as u16, |asz, glyph| {
         let asz = asz as u32;
         if asz > 0 && glyph.len() >= (asz * asz) as usize {
             let ox = bx + bw.saturating_sub(asz) / 2;
@@ -225,7 +225,7 @@ fn draw_close_button(shadow: *mut u8, info: &FbInfo, win: &Window,
                 }
             }
         }
-    }
+    });
 }
 
 /// Swap animation state — windows glide from old to new position.

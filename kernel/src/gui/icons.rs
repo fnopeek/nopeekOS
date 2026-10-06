@@ -35,8 +35,7 @@ const FS_PATH: &str = "sys/icons/phosphor";
 const MAGIC: &[u8; 8] = b"NPKIATLS";
 const SUPPORTED_VERSION: u16 = 1;
 
-/// Parsed atlas header + raw bytes. Stored once at load time; we keep
-/// the owned `Vec<u8>` to keep returned slices valid forever.
+/// Parsed atlas header + raw bytes, stored once at load time.
 pub struct Atlas {
     bytes:      Vec<u8>,
     sizes:      Vec<u16>,
@@ -89,19 +88,19 @@ pub fn init() {
     READY.store(true, Ordering::Release);
 }
 
-/// Look up the alpha bitmap for `icon` at the requested `size_px`.
-/// Returns the size that was actually used (nearest >= requested in
-/// the atlas) plus the packed alpha byte slice (`S*S` bytes).
+/// Run `f` on the alpha bitmap for `icon` at the requested `size_px`: the
+/// size actually used (nearest >= requested in the atlas) and `S*S` alpha
+/// bytes, borrowed from the atlas. The atlas lock is held for the call, so
+/// `f` must not draw icons itself.
 ///
-/// Returns None if atlas not loaded, icon not present, or requested
-/// size unreasonable.
-pub fn alpha_for(icon: IconId, size_px: u16) -> Option<(u16, Vec<u8>)> {
+/// None if the atlas is not loaded or the icon is not in it.
+pub fn with_alpha<R>(icon: IconId, size_px: u16, f: impl FnOnce(u16, &[u8]) -> R) -> Option<R> {
     if icon == IconId::None { return None; }
     let guard = ATLAS.lock();
     let atlas = guard.as_ref()?;
 
-    // Find entry by id.
-    let entry = atlas.entries.iter().find(|e| e.id == icon.0)?;
+    let i = atlas.entries.binary_search_by_key(&icon.0, |e| e.id).ok()?;
+    let entry = &atlas.entries[i];
 
     // Pick smallest atlas size >= requested, else largest available.
     let (idx, size) = best_size(&atlas.sizes, size_px)?;
@@ -109,7 +108,7 @@ pub fn alpha_for(icon: IconId, size_px: u16) -> Option<(u16, Vec<u8>)> {
     let len = (size as usize) * (size as usize);
     if offset.saturating_add(len) > atlas.bytes.len() { return None; }
 
-    Some((size, atlas.bytes[offset..offset + len].to_vec()))
+    Some(f(size, &atlas.bytes[offset..offset + len]))
 }
 
 fn best_size(sizes: &[u16], requested: u16) -> Option<(usize, u16)> {
@@ -164,5 +163,7 @@ fn parse(bytes: Vec<u8>) -> Result<Atlas, &'static str> {
         entries.push(IndexEntry { id, offsets });
     }
 
+    // Sorted by id for `with_alpha`'s binary search.
+    entries.sort_unstable_by_key(|e| e.id);
     Ok(Atlas { bytes, sizes, entries })
 }
