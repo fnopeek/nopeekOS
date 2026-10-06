@@ -36,8 +36,8 @@ a signed, capability-gated WASM module.
 ## What It Can Do Today
 
 A tiling desktop with real apps, networking, encrypted storage, and a
-native web browser — running on bare metal (Intel N100 NUC, HP laptop)
-and in QEMU.
+native web browser — running on bare metal (Intel N100 NUC, AMD Ryzen
+laptop) and in QEMU.
 
 ```
 # Desktop
@@ -57,18 +57,19 @@ npk> fetch notes         # Retrieve + decrypt + integrity-check
 npk> find report         # Search object names   ·   grep TODO notes
 npk> https nopeek.ch /   # HTTPS GET (TLS 1.3, hardware AES) — add `> page` to store
 npk> install <module>    # Fetch + verify (ECDSA P-384) a signed WASM module
-npk> update              # OTA kernel update (signed, SHA-384 verified)
+npk> update              # OTA update of kernel, modules and assets (signed)
 npk> cert list           # TLS root store — inspect, add, drop a CA
-npk> driver wifi         # Bring up the AX200 WiFi driver + scan
+npk> driver wifi_rtl8822ce  # Start a driver module by hand (normally autostart)
 npk> wlan                # Link report: rate, retries, airtime, handshake rung
+npk> wlan set ssid <name> # WiFi settings; passphrase: store /sys/config/wifi_psk
 npk> python fib.py       # CPython 3.13 as a WASM module (own WASI layer)
 npk> forge run <mod>     # Run a module on the compiler — A/B against wasmi
 npk> cores               # Trustworthy per-core CPU instrumentation
 ```
 
 Every operation is capability-gated. No ambient authority, no sudo.
-Identity is your passphrase — no users, no accounts. All data encrypted
-at rest.
+The passphrase unlocks the disk key — no users, no accounts. All data
+encrypted at rest.
 
 ---
 
@@ -81,7 +82,7 @@ at rest.
  │  bar / dock  — top + bottom panels                         │
  │  drun / loft / spell / iris / snap — launcher + apps       │
  │  beak   — from-scratch web browser (HTML/CSS engine)       │
- │  wifi / aml / audio_hda — hardware drivers as WASM         │
+ │  wifi_* / wifid / aml / i2c_hid / audio_hda — drivers      │
  ├──────────────────────────────────────────────────────────┤
  │  MicroVM (compatibility layer)                             │
  │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
@@ -94,7 +95,7 @@ at rest.
  ├──────────────────────────────────────────────────────────┤
  │  Kernel (Rust, no_std)                                     │
  │  SMP scheduler (work-stealing + stackful fibers)           │
- │  npkFS v3 (content-addressed, CoW, encrypted)              │
+ │  npkFS v4 (content-addressed, CoW, encrypted)              │
  │  Crypto (AES-256-GCM · BLAKE3 · TLS 1.3 · ECDSA P-384)     │
  │  Capability vault · network stack · GPU HAL · drivers      │
  ├──────────────────────────────────────────────────────────┤
@@ -116,20 +117,22 @@ a token, nothing happens.
 
 ### WASM as the universal execution model
 
-Every app and every driver is a WASM module — loaded from npkFS,
-BLAKE3-verified before execution, fuel-metered, and given exactly the
-capabilities it declares in a 1-byte `.npk.caps` section (default:
-READ + EXECUTE + RENDER, never WRITE). A hardware driver reaches its
-device through capability-gated `npk_pci_*` / `npk_mmio_*` / `npk_dma_*`
-host functions — the same sandbox contains a text editor and a WiFi
-stack. A guest trap kills exactly one instance, nothing else.
+Every app and every driver is a WASM module — installed only if its
+SHA-384 matches a signed manifest, stored encrypted and integrity-checked
+in npkFS, and given exactly the capabilities it declares in a 1-byte
+`.npk.caps` section (default: READ + EXECUTE + RENDER, never WRITE). A
+hardware driver reaches its device through capability-gated `npk_pci_*`
+/ `npk_mmio_*` / `npk_dma_*` host functions — the same sandbox contains
+a text editor and a WiFi stack. A guest trap kills exactly one instance,
+nothing else.
 
 ### Content-addressed storage (npkFS)
 
 No paths as identity, no hierarchy in the on-disk format. Objects are
-identified by their BLAKE3 hash; directories are Git-style tree objects.
-Copy-on-write B-tree, dedup on write, AES-256-GCM at rest, per-entry
-mtime, mark-and-sweep GC. Apps still see opaque path strings — the tree
+identified by a keyed BLAKE3 hash of their content (keyed, so the disk
+does not reveal which known files it holds); directories are Git-style
+tree objects. Copy-on-write B-tree, dedup on write, AES-256-GCM at rest,
+per-entry mtime, mark-and-sweep GC. Apps still see opaque path strings — the tree
 is content-addressed underneath.
 
 ### Intents, not commands
@@ -141,28 +144,35 @@ system owns DNS, TCP, TLS, HTTP — you express intent, not protocol.
 
 ## What's Built
 
-Grouped by subsystem. Kernel is at **v0.326.0**, beak at **v0.110.0**; the
-full change history lives in the git log.
+Grouped by subsystem. Versions and the full change history live in the
+git log and in `release/manifest`.
 
 **Kernel & SMP** — UEFI PE32+ boot straight to long mode; 4-level paging
 with NX + write-combining; a growable size-class heap (64 MB → 2 GB) that
 costs ~1 step per allocation instead of walking a free list. All cores boot
 (no limit) via a Chase-Lev work-stealing scheduler with MONITOR/MWAIT
 sleep, plus a stackful-fiber layer so blocking host calls yield instead
-of pinning a core. Per-core idle quiesces to real HLT.
+of pinning a core. Per-core idle quiesces to real HLT. Device registers,
+ports, DMA buffers and MSRs go through typed, bounds-checked accessors
+(`kernel/src/hw.rs`); a panic stops every core and writes to COM1 and the
+screen without taking a lock.
 
 **Security & crypto** — 256-bit capability vault (delegation, temporal
 scoping, transitive revocation, audit log). AES-256-GCM at rest via
 AES-NI + PCLMULQDQ; BLAKE3 via AVX2. Full TLS 1.3 (RFC 8446, X25519 +
-ECDH P-384, three cipher suites, X.509 chain validation and expiry
-checks against 8 embedded root CAs, extendable at runtime through a
-`sys/certs` store) on RustCrypto primitives. Passphrase-derived identity
-(BLAKE3-KDF), no accounts. OTA updates signed with ECDSA P-384 + SHA-384.
+ECDH P-384, three cipher suites, CertificateVerify and SAN checks, X.509
+chain validation and expiry against 30 embedded root CAs, extendable at
+runtime through a `sys/certs` store) on RustCrypto primitives. The
+passphrase unlocks a random disk key through an Argon2id keyslot; no
+accounts. OTA manifests are signed as a whole with ECDSA P-384, carry a
+monotonic `issued=` against rollback, and name each artifact by its
+SHA-384.
 
-**npkFS v3** — content-addressed CoW B-tree, per-block BLAKE3, rotating
-superblock, LRU cache, journalled crash recovery, batch TRIM, dedup
-fastpath, per-entry mtime, auto-GC. ~480 MB/s write, ~370 MB/s read on
-an N100 (encrypted, on top of NVMe).
+**npkFS v4** — content-addressed CoW B-tree with keyed addresses and
+encrypted trees, a random data key behind Argon2id keyslots (changing the
+passphrase rewraps the key, it does not re-encrypt the disk), per-block
+BLAKE3, rotating superblock, LRU cache, journalled crash recovery, batch
+TRIM, dedup fastpath, per-entry mtime, auto-GC.
 
 **Networking** — Ethernet / ARP / IPv4 / ICMP / UDP / TCP from scratch,
 plus DNS, DHCP, NTP, and an HTTP/HTTPS client with a keep-alive
@@ -170,35 +180,42 @@ connection pool and TCP window scaling (RFC 7323, ~gigabit). **HTTP/2**
 (HPACK, multiplexed streams) carries the document fetch and beak's
 subresource batches, with a per-host memory of who does not speak it;
 gzip on the receive path. OTA deliberately stays on HTTP/1.1 — an update
-that cannot be decoded is worse than a slow one.
+that cannot be decoded is worse than a slow one — fetches each artifact
+under its content hash, and resumes a broken download with a range
+request.
 
 **Drivers** — NVMe, xHCI USB (keyboard + mouse, HID boot protocol),
 Intel I226-V and RTL8153 USB Ethernet, Intel Xe GPU (native 4K@60Hz
-HDMI 2.0 + a Gen-12 BCS blitter for compositing), Intel HDA audio, an
-AML interpreter driving firmware `_BST`/`_BIF` for a vendor-independent
-battery %, and an Intel AX200 WiFi driver. WiFi, AML, and audio run as
-**WASM modules**; hardware drivers are ported 1:1 from Linux.
+HDMI 2.0 + a Gen-12 BCS blitter for compositing), GOP framebuffer
+elsewhere, Intel HDA audio, an I2C-HID touchpad, an AML interpreter
+driving firmware `_BST`/`_BIF` for a vendor-independent battery %, and
+WiFi for Intel AX200 and Realtek RTL8822CE. WiFi, the touchpad, AML and
+audio run as **WASM modules** on a shared host-ABI crate (`npk_sys`);
+hardware drivers are ported 1:1 from Linux.
 
-**WiFi (AX200)** — iwlwifi ported function by function: firmware load,
-scan, a WPA2 four-way handshake in a resident `wifid` supplicant, TX and
-RX A-MPDU aggregation (~17-19 MPDUs per aggregate), fq_codel with 10240
-slots and AQL, which budgets airtime rather than bytes. Measured on the
-device: **116 Mbit down** on HT40, 69 minutes of link with `deauth 0`,
-one dropped frame in 404k transmitted. The `wlan` intent prints the
-driver's own report — rate, retries, airtime, handshake rung, ring state
-— next to the kernel's view, so a bad link says *which* stage is bad.
+**WiFi** — iwlwifi (AX200) and rtw88 (RTL8822CE) ported function by
+function: firmware load, scan, roaming, a WPA2 four-way handshake in a
+resident `wifid` supplicant with CCMP replay checks, A-MPDU aggregation,
+fq_codel and AQL, which budgets airtime rather than bytes. The `wlan`
+intent prints the driver's own report — rate, retries, airtime,
+handshake rung, ring state — next to the kernel's view, so a bad link
+says *which* stage is bad.
 
-**forge — the engine** — since v0.317.0 the default way a WASM module
-runs is our own single-pass **WASM→x86-64 compiler inside the kernel**.
+**forge — the engine** — the default way a WASM module runs is our own
+single-pass **WASM→x86-64 compiler inside the kernel**.
 Code pages are W^X (writable while emitted, executable after, never
 both); linear memory gets an 8 GiB reservation, so a wasm address — a
 `u32` — cannot reach past it and the generator emits **no bounds check at
 all**; a host function can trap out of any depth of wasm frames in four
 instructions, which is what lets a WASI program `proc_exit` cleanly.
+Each import is bound only if the module declares it with the host
+routine's exact signature; one list in the kernel (`host_imports!`)
+generates the forge adapters, the resolver and the wasmi registrations,
+and a release gate refuses any module forge cannot translate completely.
 Measured on the device against wasmi on the same binary: **10.1x** on the
-run phase of a CPython workload. wasmi stays in the image (0.82 MB of
-4.69) — not as dead weight but so the A/B comparison stays possible on
-real hardware: `run` vs `forge run`, `python` vs `forge python`.
+run phase of a CPython workload. wasmi stays in the image so the A/B
+comparison stays possible on real hardware: `run` vs `forge run`,
+`python` vs `forge python`.
 
 **Python** — CPython 3.13 runs as an ordinary signed WASM module. The
 kernel implements `wasi_snapshot_preview1` against npkFS, so nothing
@@ -208,7 +225,8 @@ would, plus two directories. `python fib.py`, stdlib from a bundle in
 
 **Desktop (Shade)** — Hyprland-style dwindle tiling compositor: rounded
 corners via SDF, light/dark `theme=auto` following wallpaper luminance,
-GPU-composited cursor, smooth swap animations, per-window scrolling. The
+glass panels tinted from the wallpaper, smooth swap animations,
+per-window scrolling. The
 top bar and bottom dock are themselves WASM **panels**, alpha-composited
 translucent over the wallpaper.
 
@@ -230,15 +248,13 @@ syntax highlight, markdown preview), `iris` (image viewer), `tune`
 VT-x + EPT and AMD-V + NPT, vendor-symmetric), running a custom
 9.5 MB **Linux 6.18-nopeek** build. virtio-blk / -net / -gpu / -input
 backends, a 9p bridge that mounts npkFS into the guest, profile-image
-persistence, and guest-SMP (one vCPU per host worker core). Guest
-networking reaches ~480/290 Mbit on hardware after the interrupt and
-wake paths were rebuilt around what Intel machines actually do. It runs
-**LibreWolf** as a tiled window — the compatibility browser for the
-legacy web.
+persistence, guest-SMP (one vCPU per host worker core), sound and
+networking. It runs **LibreWolf** as a tiled window — the
+compatibility browser for the legacy web.
 
 ---
 
-## beak — the native browser (current focus)
+## beak — the native browser
 
 The microVM browser works, but a whole Linux + Firefox behind the WASM
 boundary is the one place nopeekOS leans on legacy. **beak** is the
@@ -259,13 +275,14 @@ scrolls smoothly.
 **JavaScript is in, and pages react.** A whole engine of our own: lexer,
 parser, RegExp, DOM bindings, an event loop with timers and microtasks —
 running on a **bytecode VM**, where the state is an array rather than the
-Rust stack, and 99.6 % of programs execute on it. The language side has
+Rust stack, and nearly every program executes on it. The language side has
 `Proxy`, `BigInt` on our own bignum, `eval` (direct and indirect), the
 iterator helpers, strict mode as a *difference* rather than a flag,
 private fields with a brand, and a `defineProperty` that really checks.
 The web side has ES modules with cycles and live bindings, custom
-elements, `history`, and a form bridge — the Fritzbox login mask now
-builds itself in beak, web component and all. An interpreter, never a
+elements, `history`, `fetch`, `WebSocket`, the intersection and resize
+observers, keyboard, mouse and focus events, and a form bridge — React
+pages such as DuckDuckGo's results render. An interpreter, never a
 JIT: a JIT would need a hole in W^X.
 
 Fidelity is measured, not guessed. The engine is a portable core with no
@@ -273,21 +290,21 @@ host dependencies, so every oracle runs on the dev box without booting
 the OS — which is how nearly every bug it has had was found. **The
 numbers live in files, not in this paragraph:**
 
-| Oracle | Where it stands | Runner |
+| Oracle | What it measures | Runner |
 |---|---|---|
-| WPT CSS reftests | **86.2 %** of the 5192 tests a real page can exercise (79.4 % of the raw 5786) | `docs/spec/CONFORMANCE.md` |
-| test262 | **81.3 %** passing — V8 on the same corpus: 99.4 % | `…/beak-engine/tests/test262.rs` |
-| DOM surface | **98.3 %** of a Chromium call census covered | `…/beak-engine/tests/apigap.rs` |
+| WPT CSS reftests | rendering against the reference, without test vehicles | `docs/spec/CONFORMANCE.md` |
+| test262 | the JavaScript language, with V8 on the same corpus as yardstick | `…/beak-engine/tests/test262.rs` |
+| DOM surface | a Chromium call census of real pages | `…/beak-engine/tests/apigap.rs` |
 
 The counterpart runs on the device: `beak:selftest`, a check page baked
 into the image that fetches nothing and reports on screen *and* in the
 log. One run found nine gaps that weeks of foreign pages had not.
 
-Honest gaps: `@font-face` is skipped, so an icon font paints its ligature
-text and every text width drifts; `getBoundingClientRect` answers for
-roughly half the boxes a real browser reports; `fetch`, Shadow DOM,
-`postMessage` and the observers are unbuilt. Spec and status live in
-`docs/spec/BROWSER.md` — that file will not drift, this paragraph will.
+Honest gaps: no JIT (by design), no `<canvas>` 2D context, no Shadow DOM
+beyond the interface, and no cycle collector — a page whose framework
+builds reference cycles grows until the module's memory cap ends it.
+Spec and status live in `docs/spec/BROWSER.md` — that file will not
+drift, this paragraph will.
 
 ---
 
@@ -304,9 +321,9 @@ roughly half the boxes a real browser reports; `fetch`, Shadow DOM,
 | At-rest AEAD | AES-256-GCM (AES-NI + PCLMULQDQ) | Hardware-accelerated |
 | Hashing | BLAKE3 (AVX2) | Fast, streaming, verify on read |
 | TLS | 1.3 (RFC 8446) | X25519 + P-384, RustCrypto |
-| OTA | ECDSA P-384 + SHA-384 | Signed kernel + modules |
-| Identity | Passphrase → BLAKE3-KDF | No users, no accounts |
-| GPU | Intel Xe Gen 12.2 | 4K@60Hz HDMI 2.0, BCS blitter |
+| OTA | Signed manifests (ECDSA P-384), SHA-384-named blobs | Rollback-protected, cache-proof |
+| Identity | Passphrase → Argon2id keyslot → disk key | No users, no accounts |
+| GPU | Intel Xe Gen 12.2, else UEFI GOP | 4K@60Hz HDMI 2.0, BCS blitter |
 | Compositor | Shade (native Rust) | Dwindle tiling, layer-based |
 | SMP | N cores (no limit) | Work-stealing + stackful fibers |
 | Linux apps | MicroVM (VT-x / AMD-V) | Vendor HAL, mini-Linux + virtio |
@@ -317,7 +334,8 @@ roughly half the boxes a real browser reports; `fetch`, Shadow DOM,
 ## Performance
 
 npkFS on an N100 NUC (AirDisk 512 GB SSD, all figures **with**
-AES-256-GCM at rest + BLAKE3 on every operation):
+AES-256-GCM at rest + BLAKE3 on every operation; measured on npkFS v3,
+before keyed addresses and encrypted trees):
 
 | Op | Throughput |
 |----|------------|
@@ -372,14 +390,17 @@ sudo pacman -S edk2-ovmf mtools gdisk qemu-system-x86
 Every kernel or module change ships to hardware through this loop:
 
 1. Bump the version (patch for a fix, minor for a feature).
-2. Rebuild changed WASM modules and copy them into `release/modules/`.
-3. `./build.sh release` — signs `kernel.efi` + all modules with
-   `update.key` (ECDSA P-384) and regenerates the manifests.
+2. Rebuild changed WASM modules and stage them: `tools/stage-module.sh <name>`.
+3. `./build.sh release` — refuses any module forge cannot translate
+   completely, then writes and signs the manifests with `update.key`
+   (ECDSA P-384) and copies every artifact to `release/blobs/<sha384>`.
+   A module-only change can use `./build.sh sign-modules` instead.
 4. Commit + push `release/` so `raw.githubusercontent.com/…/release/`
    serves the signed artifacts.
-5. On the device: `update` (kernel) / `install <module>` (module) —
-   each verifies SHA-384 + the ECDSA signature against the embedded
-   root key in `kernel/src/crypto/update_key.rs` before touching disk.
+5. On the device: `update` — checks each manifest's signature against
+   the root key in `kernel/src/crypto/update_key.rs` and its `issued=`
+   against the last one seen, then fetches each changed artifact by its
+   hash and checks the SHA-384 before touching disk.
 
 > Skipping `./build.sh release` means OTA users keep getting the *last*
 > signed release — a silent downgrade. It is mandatory after any
@@ -399,7 +420,9 @@ nopeekOS/
 ├── kernel/src/
 │   ├── main.rs               # Entry, boot sequence
 │   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT
-│   ├── drivers/              # PCI, NVMe, xHCI, NICs, GPU, HDA, RTC, ...
+│   ├── hw.rs                 # Typed MMIO, ports, DMA, firmware tables, MSRs
+│   ├── fatal.rs              # Panic path: stop all cores, lock-free output
+│   ├── drivers/              # PCI, NVMe, xHCI, NICs, ACPI, EC, RTC, ...
 │   ├── mm/                   # Frame allocator, growable heap, paging
 │   ├── security/             # Capability vault, audit log, CSPRNG
 │   ├── crypto/               # AES-GCM, BLAKE3, TLS 1.3, OTA key
@@ -412,7 +435,8 @@ nopeekOS/
 │   ├── microvm/              # VT-x / AMD-V hypervisor + virtio + Linux loader
 │   ├── forge_rt.rs           # forge address space, W^X mapping, host trap
 │   ├── wasi.rs               # wasi_snapshot_preview1 against npkFS
-│   └── wasm.rs               # Engine glue + host functions (npk_*)
+│   ├── wasm.rs               # Module lifecycle, engine glue
+│   └── wasm/                 # host_core.rs (npk_* calls), forge_glue.rs (import list)
 └── tools/wasm/               # WASM apps & drivers
     ├── beak/ + beak-engine/  #   Native browser + portable render engine
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
@@ -420,9 +444,10 @@ nopeekOS/
     ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
     ├── bar/ dock/ volume/    #   Panels + volume overlay
     ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder
-    ├── wifi/ wifid/ aml/     #   AX200 driver, WPA supplicant, ACPI AML
+    ├── wifi_ax200/ wifi_rtl8822ce/  # WiFi drivers
+    ├── wifid/ aml/ i2c_hid/  #   WPA supplicant, ACPI AML, touchpad
     ├── audio_hda/            #   Intel HDA driver as WASM
-    └── sdk/widgets/          #   nopeek_widgets — declarative UI SDK
+    └── sdk/                  #   npk_sys (host ABI) + widgets (declarative UI SDK)
 ```
 
 ---
@@ -432,14 +457,17 @@ nopeekOS/
 1. **Deny by default** — without a capability token, nothing happens
 2. **Encrypted at rest** — every npkFS blob is AES-256-GCM, verified on
    read via BLAKE3
-3. **Passphrase identity** — no users, no accounts; your passphrase is
-   your identity
+3. **Passphrase identity** — no users, no accounts; the passphrase
+   unlocks the disk key through an Argon2id keyslot
 4. **256-bit tokens** — CSPRNG, Grover-resistant, least-privilege
 5. **Temporal scoping** — module capabilities expire; rights only shrink
    on delegation
 6. **One trust boundary** — the WASM sandbox contains apps *and* drivers
-7. **Signed OTA** — ECDSA P-384 kernel + modules, SHA-384 integrity
-8. **TLS 1.3 everywhere** — all network traffic encrypted
+7. **Signed OTA** — signed manifests with rollback protection, every
+   artifact checked against its SHA-384
+8. **TLS 1.3 by default** — everything the system fetches goes over TLS;
+   plaintext HTTP only for literal private addresses when
+   `net.allow_plain_http` is on
 
 > Before every commit: *"Can a WASM module escape its sandbox through
 > this change?"* If the answer isn't clearly **no**, it doesn't ship.
