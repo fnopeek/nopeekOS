@@ -1461,6 +1461,21 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::widgets::handle_input_key(widget_wid, event.key, event.modifiers) {
                         continue;
                     }
+                    // Ctrl+A that no text widget claimed is the app's select-all.
+                    let ctrl_a = match event.key {
+                        crate::input::KeyCode::Char(0x01) => true,
+                        crate::input::KeyCode::Char(b) => event.modifiers.ctrl && b.to_ascii_lowercase() == b'a',
+                        _ => false,
+                    };
+                    if ctrl_a {
+                        crate::shade::widgets::push_event(
+                            widget_wid,
+                            crate::shade::widgets::abi::Event::Chord {
+                                letter: b'a', shift: event.modifiers.shift, alt: event.modifiers.alt,
+                            },
+                        );
+                        continue;
+                    }
                     // Ctrl+C / X / V that no focused text widget claimed →
                     // deliver a semantic clipboard event to a clipboard-sink
                     // app (loft copies/moves the selected file). Gated on the
