@@ -2752,11 +2752,10 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
     //     tmpfs. Kept until the sqfs bundle is the only shipped form.
     //
     //  3. neither → minimal PID-1-only substrate.
-    const USERSPACE_SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
-    let have_sqfs = crate::npkfs::exists(USERSPACE_SQFS_PATH);
+    let have_sqfs = crate::npkfs::exists(crate::microvm::devices::virtio_blk_pci::sqfs_path());
     let initramfs = if have_sqfs {
         kprintln!("[microvm] sqfs bundle at {} — booting tiny PID-1 (mounts /dev/vdb)",
-                  USERSPACE_SQFS_PATH);
+                  crate::microvm::devices::virtio_blk_pci::sqfs_path());
         match crate::npkfs::fetch(INITRAMFS_PATH) {
             Ok((b, _hash)) => {
                 kprintln!("[microvm] loaded initramfs ({} bytes)", b.len());

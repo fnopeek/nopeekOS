@@ -1483,6 +1483,8 @@ sha384=${MOD_SHA}
             case "$NAME" in
                 microvm-userspace.cpio.gz) SECTION="microvm:userspace" ;;
                 microvm-userspace.sqfs)    SECTION="microvm:userspace-sqfs" ;;
+                microvm-userspace-zstd.sqfs) SECTION="microvm:userspace-sqfs-zstd" ;;
+                microvm-userspace-raw.sqfs)  SECTION="microvm:userspace-sqfs-raw" ;;
                 *)
                     err "unknown large asset filename: $NAME"
                     err "add an AssetSpec entry in kernel/src/intent/update.rs and a case here"
