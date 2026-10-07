@@ -1,15 +1,5 @@
-[microvm:userspace-sqfs-raw]
-size=724525056
-sha384=8e58a19c40c02c33b32f4eb328c999d4f138f7ffb7a197f6cbc48fc131c09847889367ffe70e61c5be12f95c5ce9adb3
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.3.0/microvm-userspace-raw.sqfs
-
 [microvm:userspace-sqfs]
-size=264822784
-sha384=2f31ed8e1d5084ada3dfc7b42d576098b374e7e946a0a591a259725b64e65b9f2dc44b7ef6caf1d6cd90923aa94c6daf
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.3.0/microvm-userspace.sqfs
-
-[microvm:userspace-sqfs-zstd]
 size=239177728
 sha384=e1acafc745cd6d6bbc43c45fec050a61c6389b7800b32ecb7528f97cfe5c72cb1217bc65dc002d4a032c456c1f9f570a
-url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.3.0/microvm-userspace-zstd.sqfs
+url=https://github.com/fnopeek/nopeekOS/releases/download/assets/librewolf-0.4.0/microvm-userspace.sqfs
 

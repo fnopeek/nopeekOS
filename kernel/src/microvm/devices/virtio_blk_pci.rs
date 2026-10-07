@@ -96,19 +96,9 @@ pub const SQFS_BAR0_BASE: u64 = 0xFE01_0000;
 /// gpu/net/blk/input; 5 is a free master-PIC line.
 const SQFS_IRQ_LINE: u8 = 5;
 /// npkFS object holding the userspace `.sqfs`, delivered as an OTA asset.
-/// The same tree ships with three compressions; `set microvm_sqfs
-/// gzip|zstd|raw` picks one (gzip by default). A missing variant falls
-/// back to gzip. If none is present → empty backing → the guest's
-/// squashfs mount fails → PID-1 falls back.
-pub fn sqfs_path() -> &'static str {
-    const GZIP: &str = "sys/microvm/userspace.sqfs";
-    let want = match crate::config::get("microvm_sqfs").as_deref().map(str::trim) {
-        Some("zstd") => "sys/microvm/userspace-zstd.sqfs",
-        Some("raw") => "sys/microvm/userspace-raw.sqfs",
-        _ => GZIP,
-    };
-    if crate::npkfs::exists(want) { want } else { GZIP }
-}
+/// If absent → empty backing → guest squashfs mount fails → PID-1 falls
+/// back.
+pub const SQFS_PATH: &str = "sys/microvm/userspace.sqfs";
 
 /// Per-queue state.
 #[derive(Default, Clone, Copy)]
@@ -666,7 +656,7 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
 fn load_sqfs_backing() -> (BlkImage, u64) {
     // mksquashfs pads to 4 KiB, so the length is already 512-aligned;
     // round up defensively regardless.
-    let path = sqfs_path();
+    let path = SQFS_PATH;
     if let Some(img) = BlkImage::open_lazy(path, true) {
         let sectors = (img.len() as u64).div_ceil(512);
         kprintln!(

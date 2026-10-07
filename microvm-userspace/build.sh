@@ -264,12 +264,12 @@ fi
 # /dev/vdb (slot-5 RO virtio-blk) and chroots into it; decompress-on-read
 # is cheaper in RAM than unpacking the cpio into a tmpfs.
 #
-# gzip compression is mandatory. zstd's FSE decompressor faults on the
-# stack canary (`gs:[0x28]`) in our minimal guest env: the first
-# `-fstack-protector-strong` function on the squashfs read path #PFs.
-# gzip's inflate path has no such canary dependency.
+# zstd: the guest inflates every block on first touch, and that is most of
+# an app's start. Measured with LibreWolf, start to first full window:
+# gzip 4.5 s, zstd 3.2 s, uncompressed 2.8-3.1 s at almost three times the
+# bytes to read and hold.
 SQFS_OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs"
-cyan "building squashfs (gzip) — PID-1's load path"
+cyan "building squashfs (zstd) — PID-1's load path"
 # -all-root: everything root-owned inside the guest. -noappend:
 # fresh image. -no-xattrs: our minimal guest doesn't carry them.
 # -all-time/-mkfs-time 0: epoch (1970) timestamps. The guest has
@@ -279,7 +279,7 @@ cyan "building squashfs (gzip) — PID-1's load path"
 # guest clock, and it makes the image reproducible (the .sig is over
 # the bytes).
 mksquashfs "$STAGE" "$SQFS_OUT.tmp" \
-    -comp gzip -all-root -noappend -no-xattrs \
+    -comp zstd -all-root -noappend -no-xattrs \
     -all-time 0 -mkfs-time 0 -quiet \
     >/dev/null
 mv "$SQFS_OUT.tmp" "$SQFS_OUT"

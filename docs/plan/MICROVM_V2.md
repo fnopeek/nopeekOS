@@ -120,7 +120,64 @@ schneller Kaltstart**.
 - **Die App-Phase messen** (§0.7), bevor dort optimiert wird.
 - `sleep 1` vor cage ersetzen (PID 1 im Gast, braucht neues initramfs).
 
-### 0.7 App-Start: wo die Sekunden liegen — offen
+### 0.7 App-Start: Ergebnis — es war die Kompression
+
+Gemessen am 2026-10-07, LibreWolf, Fenster 946x1074.
+
+**Wo es nicht liegt:**
+- **Nicht am Rendering:** Firefox nativ auf dem Entwicklungsrechner (9600X),
+  frisches Profil, Zeitstempel aus `Services.startup.getStartupInfo()`:
+  erstes Bild 0,49 s, Fenster fertig 0,53 s **mit Software-Rendering**
+  (mit GPU 0,6 s).
+- **Nicht an musl oder am Build:** genau das LibreWolf aus der sqfs, per
+  `bwrap` nativ auf dem Wayland des Rechners, mit der `user.js` des Gasts:
+  0,51 s / 0,55 s.
+- **Nicht an unserem VMM:** derselbe Gast unter QEMU/KVM
+  (`tools/microvm_kvm.py`) war ebenso langsam wie bei uns.
+- **Nicht an cage:** ohne Kompression startet cage in 0,10 s.
+
+**Wo es liegt:** Der Gast entpackt jeden Block der sqfs beim ersten Zugriff,
+auf einem Kern; `libxul.so` hat 184 MB, `omni.ja` 42 MB.
+
+| sqfs | KVM 9600X: cage → App | KVM: Start → Fenster | Notebook: cage → App | Notebook: Start → Bild #50 |
+|---|---|---|---|---|
+| gzip | 0,76 s | 3,5 s | 1,00 s | 4,49 s |
+| **zstd** | 0,28 s | 2,3 s | **0,55 s** | **3,23 s** |
+| unkomprimiert | 0,10 s | 1,9 s | 0,27-0,62 s | 2,76-3,12 s |
+
+Unkomprimiert liest der Gast 609 statt 222 MB aus npkFS; am Notebook
+verschiebt sich der Engpass damit vom Entpacken zum Lesen und Entschlüsseln,
+und der Vorsprung schmilzt. **Entscheid: zstd** (Kernel 0.501.0) — fast so
+schnell, kleinste Datei, ein Drittel des RAM für vorausgelesene Stücke.
+Der alte Grund für gzip (ein Absturz am Stack-Canary `gs:[0x28]` unter zstd)
+tritt nicht mehr auf; er war ein Fehler unseres VMM.
+
+Weitere Funde dabei: `sleep 1` vor cage ersetzt durch Warten auf den
+seatd-Socket (5 ms); die `sync`-Schleife beginnt erst nach 15 s;
+`browser.startup.page=3` lädt die Tabs der letzten Sitzung übers Netz und
+verfälscht spätere Bildzähler (deshalb gilt Bild #50, nicht #200).
+
+**Notebook, Start bis LibreWolf (Bild #50):**
+
+| Stand | Zeit |
+|---|---|
+| v1 | 6,53 s |
+| Platten bei Bedarf, leiser Gast (0.497) | 5,62 s |
+| + Vorauslesen (0.498) | 5,23 s |
+| + ohne `sleep 1` (0.499) | 4,31 s |
+| + zstd (0.500) | **3,23 s** |
+
+**Offen:**
+- Der **erste Start** nach einem Update oder einem Wechsel der sqfs ist
+  regelmässig 2-2,5 s langsamer. Nicht nur die fehlende `.hot`-Liste — der
+  erste raw-Lauf war schnell. Ungeklärt.
+- **Mehrkerniges Entpacken** im Gastkernel
+  (`CONFIG_SQUASHFS_DECOMP_MULTI_PERCPU`); heute entpackt ein Kern, der Gast
+  hat sechs.
+- Die Restzeit gegen nativ (0,55 s): kalter Seitencache im Gast,
+  Anzeigekette (cage, pixman, virtio-gpu 2D).
+
+### 0.7a Methode, falls die Frage wiederkommt
 
 Vor jeder Massnahme die Zerlegung, mit derselben Methode wie M0:
 

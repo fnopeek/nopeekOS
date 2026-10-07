@@ -34,12 +34,11 @@ pub(super) fn blob_path(sha384: &[u8; 48]) -> String {
 const MAX_KERNEL_SIZE: usize = 64 * 1024 * 1024;
 const MAX_MANIFEST_SIZE: usize = 4096;
 const MAX_ASSET_MANIFEST_SIZE: usize = 16 * 1024;
-/// 1 GiB ceiling for OTA assets; an uncompressed microvm userspace is
-/// ~700 MB. The download streams into npkFS one chunk at a time, so the cap
-/// bounds disk use, not RAM. raw-githubusercontent caps at ~50–100 MB per
-/// file, so large assets ship via GitHub Releases (asset manifest carries
-/// an explicit `url=` line for those; redirect-following lives in
-/// `https_get`).
+/// 1 GiB ceiling for OTA assets. The download streams into npkFS one chunk
+/// at a time, so the cap bounds disk use, not RAM. raw-githubusercontent
+/// caps at ~50–100 MB per file, so large assets ship via GitHub Releases
+/// (asset manifest carries an explicit `url=` line for those;
+/// redirect-following lives in `https_get`).
 const MAX_ASSET_SIZE: usize = 1024 * 1024 * 1024;
 const MAX_SIG_SIZE: usize = 512;
 
@@ -79,11 +78,6 @@ const ASSETS: &[AssetSpec] = &[
     // a tmpfs initramfs. The RAM-efficient path; supersedes the cpio entry
     // above once it is the only shipped form.
     AssetSpec { section: "microvm:userspace-sqfs", npkfs_path: "sys/microvm/userspace.sqfs" },
-    // The same tree, zstd-compressed and uncompressed, for `set
-    // microvm_sqfs zstd|raw`: decompressing gzip on first touch is most of
-    // the app's start.
-    AssetSpec { section: "microvm:userspace-sqfs-zstd", npkfs_path: "sys/microvm/userspace-zstd.sqfs" },
-    AssetSpec { section: "microvm:userspace-sqfs-raw", npkfs_path: "sys/microvm/userspace-raw.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
     // ZipImportError at the first import. It also saves decompressing on
