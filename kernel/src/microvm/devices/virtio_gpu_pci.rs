@@ -826,6 +826,7 @@ impl VirtioGpu {
             return;
         }
         r.flushed_frame = r.frame;
+        crate::microvm::boottime::gpu_frame();
         let r = &*r;
         let pix = match &r.host_pixels { Some(p) => p, None => return };
 

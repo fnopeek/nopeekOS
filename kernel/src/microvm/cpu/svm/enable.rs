@@ -1349,13 +1349,13 @@ impl SerialState {
     }
 
     fn put_char(&mut self, byte: u8) {
-        use crate::kprintln;
+        crate::microvm::boottime::guest_byte();
         if byte == b'\n' || self.line_n == self.line.len() {
             let n = self.line_n;
             self.scan_for_panic(n);
             self.scan_for_shutdown(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
-            kprintln!("[guest] {}", s);
+            crate::microvm::boottime::guest_line(s);
             self.line_n = 0;
             return;
         }
@@ -1366,13 +1366,12 @@ impl SerialState {
     }
 
     fn flush(&mut self) {
-        use crate::kprintln;
         if self.line_n > 0 {
             let n = self.line_n;
             self.scan_for_panic(n);
             self.scan_for_shutdown(n);
             let s = core::str::from_utf8(&self.line[..n]).unwrap_or("?");
-            kprintln!("[guest] {}", s);
+            crate::microvm::boottime::guest_line(s);
             self.line_n = 0;
         }
     }

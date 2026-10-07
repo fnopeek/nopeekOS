@@ -22,6 +22,7 @@
 //!     └── bzimage.rs — Linux Boot Protocol loader
 //! ```
 
+pub mod boottime;
 pub mod cpu;
 pub mod devices;
 pub mod linux;

@@ -791,6 +791,7 @@ pub fn note_guest_shutdown() {
 /// window. Must be called without the ACTIVE_VM lock held (it locks
 /// the compositor, whose close path re-enters microvm). Idempotent.
 fn teardown_vm_window() {
+    crate::microvm::boottime::report();
     let wid = ACTIVE_VM_WINDOW.swap(0, Ordering::AcqRel);
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     if wid != 0 {

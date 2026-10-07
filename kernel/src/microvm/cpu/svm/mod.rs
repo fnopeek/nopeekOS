@@ -104,8 +104,13 @@ pub fn vm_open(
     initramfs: Option<&[u8]>,
     inject: &[u8],
 ) -> Result<VmContext, &'static str> {
+    crate::microvm::boottime::mark("host: guest setup begins");
     match *PROBE.lock() {
-        ProbeState::Available(_) => VmContext::open(bzimage, cmdline, initramfs, inject),
+        ProbeState::Available(_) => {
+            let ctx = VmContext::open(bzimage, cmdline, initramfs, inject);
+            crate::microvm::boottime::mark("host: guest image loaded, first entry next");
+            ctx
+        }
         ProbeState::Unavailable(reason) => Err(reason),
         ProbeState::NotProbed => Err("svm::init() not called yet"),
     }

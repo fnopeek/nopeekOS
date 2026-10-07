@@ -2647,6 +2647,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // certificate would be "not yet valid". `nopeektime=<epoch>` passes the
     // host wall clock; PID-1 sets it with `date -s` before starting cage.
     use core::fmt::Write;
+    crate::microvm::boottime::start();
     let tsc_khz = crate::interrupts::tsc_freq() / 1000;
     let mut s = String::new();
     // Boot output stays verbose (no `quiet loglevel=3`) so a guest panic or
@@ -2782,6 +2783,7 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
         }
     };
 
+    crate::microvm::boottime::mark("host: images read from npkFS");
     kprintln!("[microvm] launching Linux ({} bytes, cmdline: {:?})",
               bytes.len(),
               core::str::from_utf8(cmdline).unwrap_or("?"));
@@ -2810,6 +2812,7 @@ tsc_early_khz={} devtmpfs.mount=1 maxcpus={}",
                     // reachable via Mod-focus / Mod+number.
                     crate::shade::focus_window(wid);
                     kprintln!("[microvm] guest running — window {} (focused)", wid.0);
+                    crate::microvm::boottime::mark("host: window bound");
                 }
                 None => kprintln!("[microvm] guest running (no compositor; serial only)"),
             }
