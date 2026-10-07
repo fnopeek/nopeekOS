@@ -251,9 +251,10 @@ impl VirtioBlk {
     /// keep their blob. The old image is replaced atomically at `finish`;
     /// on an error it stays intact.
     pub fn save(&mut self) {
-        let (touched, total) = self.backing.residency();
-        kprintln!("[virtio-blk] {} chunks of {} read from npkFS this run{}",
-            touched, total, if self.persist { " (home)" } else { " (sqfs)" });
+        let (touched, prefetched, total) = self.backing.residency();
+        kprintln!("[virtio-blk] {}: guest touched {} of {} chunks, {} came from prefetch",
+            if self.persist { "home" } else { "sqfs" }, touched, total, prefetched);
+        self.backing.remember_hot();
         if !self.persist {
             return; // read-only sqfs bundle — nothing to write back.
         }
@@ -599,7 +600,7 @@ static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 /// `HOME_TEMPLATE` so PID-1's first `mount -t ext4 /dev/vda` succeeds.
 fn load_or_init_backing() -> BlkImage {
     let cap = (CAPACITY_SECTORS * 512) as usize;
-    if let Some(img) = BlkImage::open_lazy(PROFILE_PATH) {
+    if let Some(img) = BlkImage::open_lazy(PROFILE_PATH, false) {
         if img.len() == cap {
             kprintln!("[virtio-blk] home image opened ({} bytes, chunks on demand) /dev/vda", cap);
             return img;
@@ -655,7 +656,7 @@ fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
 fn load_sqfs_backing() -> (BlkImage, u64) {
     // mksquashfs pads to 4 KiB, so the length is already 512-aligned;
     // round up defensively regardless.
-    if let Some(img) = BlkImage::open_lazy(SQFS_PATH) {
+    if let Some(img) = BlkImage::open_lazy(SQFS_PATH, true) {
         let sectors = (img.len() as u64).div_ceil(512);
         kprintln!(
             "[virtio-blk] sqfs bundle opened ({} bytes, chunks on demand) /dev/vdb",

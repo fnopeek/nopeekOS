@@ -252,9 +252,12 @@ fn service_one_request(
                         Some((start, end)) => {
                             let mut pos = start;
                             while pos < end {
-                                let Some(s) = backing.read_at(pos, end - pos) else { break };
-                                mem.write_bytes(d.addr + (pos - start) as u64, s);
-                                pos += s.len();
+                                let dst = d.addr + (pos - start) as u64;
+                                let Some(k) = backing.read_with(pos, end - pos, |s| {
+                                    mem.write_bytes(dst, s);
+                                    s.len()
+                                }) else { break };
+                                pos += k;
                             }
                             if pos == end {
                                 bytes_written = bytes_written.saturating_add(n as u32);
@@ -275,9 +278,11 @@ fn service_one_request(
                         Some((start, end)) => {
                             let mut pos = start;
                             while pos < end {
-                                let Some(s) = backing.write_at(pos, end - pos) else { break };
-                                let k = s.len();
-                                mem.read_bytes(d.addr + (pos - start) as u64, s);
+                                let src = d.addr + (pos - start) as u64;
+                                let Some(k) = backing.write_with(pos, end - pos, |s| {
+                                    mem.read_bytes(src, s);
+                                    s.len()
+                                }) else { break };
                                 pos += k;
                             }
                             if pos == end {

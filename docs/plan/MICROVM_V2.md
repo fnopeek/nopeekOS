@@ -1,14 +1,16 @@
-# microVM v2 — Grundgerüst, App-Schichten aus apk, Snapshot statt Boot
+# microVM v2 — Grundgerüst, App-Schichten aus apk, schneller Kaltstart
 
-*Diskussionspapier, 2026-10-07. Richtung entschieden, Snapshot hängt am Prototyp (§0), Details offen (§9).*
+*Diskussionspapier, 2026-10-07. Richtung entschieden; der Snapshot ist gemessen und verworfen (§0.5); Details offen (§9).*
 
 ## Idee in drei Sätzen
 
 Wir liefern nur noch ein **Grundgerüst** (Kernel, Alpine-Basis, unser PID 1,
 cage). Was der Nutzer haben will, holt seine Maschine **einmalig aus den
 offiziellen Alpine-Quellen** in eine eigene App-Schicht — kuratiert über einen
-Store. Danach wird nicht mehr gebootet, sondern ein in npkFS abgelegter
-**Snapshot fortgesetzt**, und das in Millisekunden.
+Store. Gestartet wird **kalt, aber schnell**: Linux bis cage in rund einer
+halben Sekunde, die Platten bei Bedarf aus npkFS gelesen und im Hintergrund
+vorab geladen. Ein Snapshot war geplant und ist nach der Messung gestrichen
+(§0.5).
 
 ## 0. Erst beweisen, dann bauen
 
@@ -19,7 +21,7 @@ npkFS gegenüber einem guten Kaltstart überhaupt Zeit?**
 ### 0.1 Was neu ist und was bleibt
 
 - **Neu:** Gerätemodell, Lebenszyklus einer VM, Speicherverwaltung des Gasts,
-  Steuerkanal, Snapshot.
+  Steuerkanal.
 - **Bleibt:** die CPU-Ebene (`cpu/svm`, `cpu/vmx`: VMCB/VMCS, Intercepts,
   MSR/CPUID/XCR0-Härtung, Interrupt-Injektion, HLT-Behandlung). Sie ist auf
   beiden Herstellern am Blech erarbeitet und im Code-Review (D12-D24)
@@ -29,11 +31,9 @@ npkFS gegenüber einem guten Kaltstart überhaupt Zeit?**
 ### 0.2 Firecracker als Konzept, Jailer als Vorbereitung
 
 - **Firecracker übernehmen wir als Konzept, ab Tag 1:** so wenige Geräte wie
-  möglich, kein ACPI (haben wir schon: `acpi=off`), jeder Gerätezustand von
-  Anfang an speicherbar. Das ist keine zusätzliche Komplexität, sondern die
-  Voraussetzung für den Snapshot — jedes Gerät ist ein Zustand, der mit muss.
-  Firecracker selbst hat kein GPU, Ton und Eingabe; die kommen bei uns dazu,
-  aber erst nach dem Beweis.
+  möglich, kein ACPI (haben wir schon: `acpi=off`). Jedes Gerät, das eine VM
+  nicht braucht, ist Angriffsfläche weniger (§6.2, Ring 3). Firecracker selbst
+  hat kein GPU, Ton und Eingabe; die kommen bei uns dazu.
 - **Jailer bauen wir jetzt nicht** (Geräteemulation aus Ring 0 heraus ist ein
   eigenes Projekt). Aber das Gerätemodell wird **jailer-fähig** geschrieben:
   jedes Gerät ist reine Logik auf `(Zustand, Gastspeicher-Zugriff,
@@ -59,11 +59,89 @@ Befehl bis zur Meldung `ready`:
 - **M3 klar unter M1** (Faktor 3+): Snapshot lohnt sich → §5 wird gebaut.
 - **M1 schon klein** (unter ~200 ms) und M3 kaum besser: **kein Snapshot.**
   v2 ist dann Store + schneller Kaltstart, und die ganze Zufalls- und
-  Gerätezustandsfrage (§5.4) fällt weg.
+  Gerätezustandsfrage (§5) fällt weg.
 - Unabhängig davon zeigt M0, wo die heutigen Sekunden wirklich liegen. Liegt
   der Grossteil im **App-Start** (LibreWolf, Chromium), spart kein Snapshot an
   Punkt A ihn ein — dann ist das ehrliche Ergebnis, dass der Gewinn des Stores
   die Apps sind, nicht die Startzeit.
+
+### 0.5 Ergebnis: kein Snapshot
+
+Gemessen am 2026-10-07 mit `kernel/src/microvm/boottime.rs` (Kernel
+0.496.0/0.497.0), LibreWolf als App, Zeit ab dem Startbefehl.
+
+**M0, heutiger Start:**
+
+| Abschnitt | QEMU (Ryzen 9600X) | Notebook (Ryzen 5700U) |
+|---|---|---|
+| Abbilder aus npkFS | 15 ms | 23 ms |
+| VM aufsetzen: beide Platten ganz vorab geladen | 728 ms | 1356 ms |
+| Kernel entpacken | 91 ms | 115 ms |
+| Gastkernel bis PID 1 | 1540 ms (fast alles serielle Konsole) | 273 ms |
+| PID 1 bis „cage next“ | 170 ms | 100 ms |
+| **bis cage** | **2,56 s** | **1,87 s** |
+| cage bis Bild #50 / #200 | +4,9 s / +7,4 s | +4,7 s / +7,2 s |
+
+**M1, optimierter Kaltstart** (Platten bei Bedarf aus npkFS in 1-MiB-Stücken,
+Gast mit `loglevel=5`):
+
+| | QEMU | Notebook |
+|---|---|---|
+| VM aufsetzen | 316 ms (sqfs dort noch ein Blob, §0.6) | **40 ms** |
+| **bis cage** | **0,97 s** | **0,58 s** |
+| bis Bild #50 | 6,26 s (vorher 7,45) | 5,62 s (vorher 6,53) |
+
+**Entscheid:** Ein Snapshot an Punkt A könnte am Notebook höchstens noch
+~0,4-0,5 s sparen. Dafür bräuchte es Gerätezustand für jedes Gerät, faules
+Laden des RAM über NPT/EPT und das Neusäen des Zufalls — der schwierigste und
+riskanteste Teil von v2. **Gestrichen.** M2/M3 wurden nicht gebaut; die Zahl,
+gegen die sie hätten gewinnen müssen, ist schon zu klein. v2 ist **Store +
+schneller Kaltstart**.
+
+**Was die Messung sonst sagt:**
+- Die Wartezeit ist jetzt die **App** (5-7,5 s nach cage), nicht Linux. Ein
+  Snapshot vor dem App-Start hätte daran nichts geändert.
+- Die App-Phase wurde mit M1 auf beiden Geräten ~0,4 s langsamer: LibreWolf
+  liest über die Sitzung **243 von 253** sqfs-Stücken. Bedarfsweises Lesen
+  spart also keine Menge, es verschiebt nur den Zeitpunkt in die App-Phase
+  hinein. Daher §0.6.
+- Speichern von `home.img`: 168 von 512 Stücken geschrieben, 344 übernommen
+  (vorher immer alle 512).
+
+### 0.6 Nächste Schritte am Start
+
+- **Vorauslesen im Hintergrund** (Kernel 0.498.0): ab dem Öffnen der Platte
+  liest ein Worker auf einem anderen Kern die Stücke, die beim letzten Lauf
+  berührt wurden, zuerst, bei der sqfs danach den Rest. Die berührte Menge
+  steht neben dem Abbild (`<pfad>.hot`). Entschlüsselt wird ohne das
+  Slot-Lock; der Gast liest selbst nur, was der Worker noch nicht hat.
+- **Installer schreibt grosse Assets in Stücken**, wie der OTA-Weg; sonst
+  bleibt eine frisch installierte sqfs ein Blob, der nur ganz lesbar ist.
+- **Die App-Phase messen** (§0.7), bevor dort optimiert wird.
+- `sleep 1` vor cage ersetzen (PID 1 im Gast, braucht neues initramfs).
+
+### 0.7 App-Start: wo die Sekunden liegen — offen
+
+Vor jeder Massnahme die Zerlegung, mit derselben Methode wie M0:
+
+| Vergleich | trennt |
+|---|---|
+| LibreWolf **nativ** auf dem Entwicklungsrechner, kalt (Seitencache geleert) und warm | was die App selbst braucht |
+| **dasselbe Gastabbild unter QEMU/KVM** auf Linux | unseren VMM gegen Gast und App |
+| unser VMM mit **zwei Fenstergrössen** | ob die Zeit mit den Pixeln wächst (Software-Rendering) |
+| unser VMM mit **1, 2, 6 vCPUs** | ob sie mit den Kernen fällt |
+
+Kandidaten danach, je nach Befund:
+- **Schliessen = Schlafen:** das Fenster schliessen hält die VM an statt sie zu
+  beenden; ein erneutes Öffnen ist sofort da. Dieselbe Instanz läuft weiter,
+  also kein geklonter Zufall. Kostet RAM, solange sie schläft.
+- **Vorstart beim Systemstart** für die zuletzt benutzte App, unsichtbar, auf
+  Wunsch.
+- **Ruhezustand je App** (Hibernate): einmalig fortsetzbar, das Abbild wird beim
+  Fortsetzen gelöscht — dann gibt es kein zweites Fortsetzen desselben
+  Zustands. Braucht den Gerätezustand aus dem gestrichenen §5; nur, wenn die
+  beiden Punkte davor nicht reichen.
+- **GPU-Beschleunigung** im Gast, falls das Rendering die Zeit frisst.
 
 ## 1. Warum
 
@@ -72,10 +150,11 @@ Befehl bis zur Meldung `ready`:
 | `release/apps` 3,8 GB, davon LibreWolf 3,4 GB, jede Fassung als eigener Satz `cpio.gz` + `sqfs` | Release trägt nur das Grundgerüst (Grössenordnung `alpine-wayland` 16 MB + cage) |
 | eine App: der Browser | jede App, die im Store steht |
 | jede App-Aktualisierung = unser Release | Aktualisierung = `apk upgrade` gegen Alpine, Rezept bleibt gleich |
-| Start = Linux bootet | Start = Snapshot fortsetzen |
+| Start bis cage 1,9-2,6 s | Start bis cage ~0,6 s (gemessen, §0.5) |
 
-**Ehrlich benannt:** gewonnen wird **Startzeit** und **Speicher** (geteilte
-Seiten). Die Laufzeitleistung einer App ändert sich dadurch nicht.
+**Ehrlich benannt:** gewonnen werden **Apps, Releasegrösse und die Startzeit von
+Linux**. Die Startzeit der App selbst und ihre Laufzeitleistung ändern sich
+dadurch nicht (§0.7).
 
 ## 2. Begriffe
 
@@ -89,8 +168,6 @@ Seiten). Die Laufzeitleistung einer App ändert sich dadurch nicht.
 - **App-Schicht** — Ergebnis von `apk add` über der Basis, liegt in npkFS. Ein
   **Zwischenspeicher**, aus dem Rezept jederzeit neu baubar.
 - **App-Daten** — ext4-Abbild je App, getrennt von allem anderen (§4b).
-- **Snapshot** — RAM + vCPU + Gerätezustand einer laufenden Maschine an einem
-  definierten Punkt (§5.6).
 
 Schichten von unten nach oben: **Basis (ro) → App-Schicht (ro nach Bau) →
 App-Daten (rw)**, dazu Freigaben auf Nutzerordner. Jede Schicht ist einzeln
@@ -121,14 +198,13 @@ ersetzbar. **Je App eine eigene VM** (entschieden) — die Grenze ist die App.
    gegen die Alpine-Schlüssel, die fest in der Basis liegen.
 4. Die Schicht wird versiegelt (ro), in npkFS abgelegt, Rezept + Basisfassung
    daneben vermerkt.
-5. Optional sofort: erster Start + Snapshot (§5).
 
 **Vertrauensmodell:** Der Wirt vertraut dem Inhalt der Schicht **nichts** — sie
 läuft nur je in einer VM, und die VM ist die Grenze (Prinzip 5). Die Signatur
 schützt den Nutzer vor einem manipulierten Spiegel, nicht den Wirt vor der App.
 Daraus folgt: die Signaturprüfung im Gast genügt.
 
-**Basis ändert sich** → alle App-Schichten und Snapshots darauf sind ungültig →
+**Basis ändert sich** → alle App-Schichten darauf sind ungültig →
 neu bauen aus dem Rezept, im Hintergrund, App-Daten bleiben.
 
 **Format der Schicht: sqfs je App** (entschieden, Begründung §4a).
@@ -207,10 +283,8 @@ Drei Arten von Daten, drei Wege:
 3. **Flüchtiges** (Zwischenablage, Drag & Drop) — eigener Kanal über cage,
    nie über das Dateisystem. Offen (§9).
 
-**Zusammenhang mit dem Snapshot:** Punkt B (§5.6) liegt VOR dem Einhängen von
-App-Daten und Freigaben. Damit enthält kein Snapshot offene 9P-fids oder
-Seiten aus App-Daten, und Freigaben werden bei jedem Start neu erteilt — sie
-können sich zwischen zwei Starts geändert haben.
+Freigaben werden bei jedem Start neu erteilt — sie können sich zwischen zwei
+Starts geändert haben.
 
 ## 4c. Verwaltung: die App „Linux-Apps“
 
@@ -238,76 +312,16 @@ ein `apk upgrade` innerhalb des Zweigs kann eine Version bringen, die wir nicht
 gefahren haben. Das nehmen wir hin; beim Zweigwechsel wird die ganze Liste neu
 geprüft.
 
-## 5. Snapshot statt Boot
+## 5. Start und Steuerung
 
-### 5.1 Was gespeichert wird
+Gestartet wird kalt (§0.5). Ein Snapshot mit Fortsetzen war hier geplant —
+RAM, vCPU und Gerätezustand in npkFS, faul geladen über NPT/EPT, Zufall über
+PID 1 neu gesät, nur an Punkt „Basis bereit“, weil die App sonst ihren eigenen
+Zufall geklont hätte und der Gast `acpi=off` bootet (kein vmgenid). Gemessen
+hätte er am Notebook höchstens ~0,5 s gespart. **Verworfen**; die Begründung
+steht in §0.5, damit niemand die Frage ohne neue Zahlen wieder aufmacht.
 
-- Gast-RAM, seitenweise (4 KiB), **Nullseiten als Loch** — nicht als
-  verschlüsselte Nullen (AES-GCM macht aus Nullen Rauschen). Das
-  Seitenverzeichnis vermerkt „leer“ ausdrücklich.
-- vCPU-Zustand (VMCB/VMCS-Felder, GPR, FPU/XSAVE, MSRs, LAPIC).
-- Gerätezustand **jedes** Geräts: virtqueues (Indizes, Adressen), virtio-blk,
-  -net, -gpu (Ressourcen + Scanout), -snd, -input, -9p, IOAPIC, PIC, PIT.
-- Basisfassung + App-Schicht-Hash, gegen die der Snapshot gilt.
-
-### 5.2 Teilen über Inhaltsadressierung
-
-npkFS adressiert nach Inhalt — zwei Snapshots auf derselben Basis teilen
-gleiche Seiten ohne eigenen Mechanismus. Das ist der Grund, warum „die 0 Bytes
-gratis“ sind und die übrigen fast.
-
-### 5.3 Fortsetzen in Millisekunden — faul laden
-
-1 GB RAM vorab lesen + entschlüsseln kostet hunderte ms. Deshalb:
-
-- NPT/EPT zunächst leer; der erste Zugriff auf eine Seite → Fehler → Seite aus
-  npkFS holen, einsetzen, weiter (Prinzip wie Firecracker/UFFD).
-- Loch → frische Nullseite, kein Plattenzugriff.
-- Vorab nur die **Arbeitsmenge** des letzten Starts (beim Snapshot mitgemessen),
-  Rest faul.
-- Mehrere Klone derselben Basis: gemeinsame Seiten **copy-on-write**.
-
-### 5.4 Identität und Zufall — Pflicht
-
-Wer denselben Snapshot zweimal fortsetzt — zwei Klone, oder einfach zweimal
-dieselbe App an zwei Tagen —, startet zweimal mit **demselben Zustand des
-Zufallsgenerators** → gleiche TLS-Schlüssel und Nonces. Das ist der
-sicherheitskritische Teil des Snapshots.
-
-**vmgenid geht bei uns nicht direkt:** es ist ein ACPI-Gerät, und unser Gast
-bootet `acpi=off` mit MP-Tabelle (`linux/mptable.rs`). Stattdessen:
-
-- Snapshot **nur an Punkt A** (§5.6): der Kernel ist oben, PID 1 wartet, **noch
-  kein Prozess, der Zufall verbraucht hat**, keine Verbindung offen.
-- Beim Fortsetzen schickt der Wirt über den Steuerkanal (§5.7) frischen Zufall
-  aus `npk_random_bytes`. PID 1 speist ihn mit `RNDADDENTROPY` ein und erzwingt
-  `RNDRESEEDCRNG`, **bevor** es irgendetwas anderes startet.
-- Neue `/etc/machine-id` je Start.
-- Punkt B (App bereits gestartet) ist damit **ausgeschlossen**: die App hätte
-  eigenen Zufall im Userspace (BoringSSL, NSS), den kein Neusäen des Kernels
-  erreicht.
-
-### 5.5 Zeit
-
-Nach dem Fortsetzen ist die Gastuhr um die Ruhezeit falsch.
-
-- TSC-Versatz so setzen, dass der Gast-TSC monoton weiterläuft.
-- PID 1 stellt die Uhr (`clock_settime`) aus der Meldung `resumed` — derselbe
-  Wert, den heute `nopeektime=` auf der Kommandozeile mitbringt, nur dass die
-  Kommandozeile nach einem Snapshot schon gelesen ist.
-
-### 5.6 Wo der Snapshot gezogen wird
-
-| Punkt | Vorteil | Nachteil |
-|---|---|---|
-| **A: Basis bereit** (Kernel oben, PID 1 wartet) | einer für alle Apps, Zufall sauber neu säbar | App startet kalt |
-| B: App gestartet | App sofort da | Zufall der App geklont — **nicht** |
-| C: App warm mit Sitzung | am schnellsten | dazu Sitzungszustand — **nicht** |
-
-**Nur A.** Ein Snapshot für alle Apps; was die App danach braucht, ist ihr
-gewöhnlicher Kaltstart (Chromium ~1-2 s) statt Kernel + Basis + App.
-
-### 5.7 Steuerkanal Wirt ↔ PID 1
+### 5.1 Steuerkanal Wirt ↔ PID 1
 
 **Heute gibt es keinen.** Der Wirt spricht nur einmal, beim Boot, über die
 Kommandozeile (`nopeektime=`, `nopeekbench=`); der Gast spricht nur Log über
@@ -317,11 +331,10 @@ Gebraucht wird er für:
 
 | Richtung | Meldung | wozu |
 |---|---|---|
-| Wirt → Gast | `resumed { zeit, zufall, machine_id }` | §5.4, §5.5 |
 | Wirt → Gast | `start { app, freigaben, netz }` | App-Daten + Freigaben einhängen, App starten |
 | Wirt → Gast | `quit` | App **sauber** beenden (SIGTERM, warten), dann `sync` — heute wird die App beim Schliessen hart abgeschnitten, vermutlich der Grund für das verlorene LibreWolf-Profil |
 | Wirt → Gast | `disk_grown`, `grant_changed` | `resize2fs`, Freigabe aus-/einhängen |
-| Gast → Wirt | `ready` | Punkt A erreicht → Snapshot |
+| Gast → Wirt | `ready`, `first_frame` | Meilensteine für die Zeitachse (§0.7) |
 | Gast → Wirt | `exited { code }`, `build { fortschritt, ergebnis }` | Verwaltung, Bau-VM |
 
 **Entscheid: virtio-console** (ein Port, `/dev/hvc0`). `CONFIG_VIRTIO_CONSOLE=y`
@@ -393,9 +406,11 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
 
 ### 6.3 Was sonst fremde Daten sind
 
-- **Snapshot-Dateien:** nur lesen, was dieser Wirt geschrieben hat
-  (AES-GCM-Tag in npkFS), Gerätezustand beim Laden auf Wertebereiche prüfen.
-- **Steuerkanal:** §5.7.
+- **Plattenstücke** und die `.hot`-Liste: kommen aus npkFS und sind von diesem
+  Wirt geschrieben (AES-GCM); Offsets des Gasts werden gegen die Abbildlänge
+  geprüft, ein unlesbares Stück lässt die Platte mit IOERR scheitern statt
+  Nullen zu liefern.
+- **Steuerkanal:** §5.1.
 - **Store:** von uns signiert. **App-Schichten** signieren wir nicht (sie
   entstehen beim Nutzer) — apk prüft gegen die Alpine-Schlüssel. Ein
   manipuliertes Paket ist dann Ring 1/2, nicht Ring 3.
@@ -404,13 +419,14 @@ der Angreifer **root im Gast**. Die Frage ist nur, was er dann hat.
 
 - Release schrumpft um die App-Bundles. `release/apps` gehört danach nicht mehr
   in den OTA-Weg; nur Basis + Store-Liste.
-- Beim Nutzer: Basis einmal, App-Schichten je App, ein Snapshot (Punkt A).
-  Eine Aufräumfunktion löscht Schichten ohne Rezept oder mit veralteter Basis.
+- Beim Nutzer: Basis einmal, App-Schichten je App, App-Daten je App. Eine
+  Aufräumfunktion löscht Schichten ohne Rezept oder mit veralteter Basis.
+- Gelesene Plattenstücke liegen im Wirts-RAM, solange die VM läuft (die sqfs
+  fast ganz, gemessen 243 von 253 MiB).
 
 ## 8. Reihenfolge
 
-Vor allem anderen: **der Prototyp aus §0** und der Entscheid §0.4. Die Stufen
-4 und 5 hängen davon ab.
+Der Prototyp aus §0 ist gelaufen; der Start ist §0.6, die App §0.7.
 
 0. **Gast härten** (Ring 1) und **9P auf `home/` durch Ordnerfreigaben
    ersetzen** (Ring 2) — gilt schon für LibreWolf heute und ist das grösste
@@ -420,11 +436,8 @@ Vor allem anderen: **der Prototyp aus §0** und der Entscheid §0.4. Die Stufen
 2. **App-Schichten über apk:** Rezept, Bau-VM, sqfs, App-Daten je App. Chromium
    als erster Eintrag.
 3. **Verwaltung „Linux-Apps“** mit Vorgaben aus dem Store und Übersteuerung.
-4. **Snapshot/Restore an Punkt A, vorab geladen:** Gerätezustand, Neusäen,
-   TSC-Versatz.
-5. **Faules Laden** über NPT/EPT-Fehler, Löcher, Arbeitsmenge vorab; mehrere
-   VMs teilen die Seiten des Snapshots copy-on-write.
-6. **Store-Oberfläche**; danach fällt das LibreWolf-Bundle weg.
+4. **App-Start** nach dem Befund aus §0.7.
+5. **Store-Oberfläche**; danach fällt das LibreWolf-Bundle weg.
 
 Ring 3 (Fläche verkleinern, Geräte fuzzen) läuft neben jeder Stufe mit.
 Jede Stufe wird auf AMD **und** Intel gefahren (Lehre aus
@@ -440,15 +453,15 @@ Jede Stufe wird auf AMD **und** Intel gefahren (Lehre aus
 ## 10. Entschieden
 
 - **v2 ist ein Neustart** über der bestehenden CPU-Ebene (§0.1).
-- **Firecracker als Konzept** (wenige Geräte, Zustand speicherbar), **Jailer
-  nicht jetzt**, aber Gerätemodell jailer-fähig (§0.2).
-- **Erst der Prototyp** M0-M3, dann der Entscheid über den Snapshot (§0.4).
+- **Firecracker als Konzept** (wenige Geräte), **Jailer nicht jetzt**, aber
+  Gerätemodell jailer-fähig (§0.2).
+- **Kein Snapshot** — gemessen, zu wenig Gewinn für das Risiko (§0.5).
 - **Je App eine eigene VM.**
 - **App-Schicht = sqfs**, gebaut in der Bau-VM (§4a).
 - **Keine Ordnerfreigabe ohne Zustimmung**; `home/` als Ganzes bekommt keine
   App (§4b).
-- **Steuerkanal = virtio-console**, nur PID 1 hat Zugriff (§5.7).
-- **Snapshot nur an Punkt A**; Zufall wird über PID 1 neu gesät (§5.4).
+- **Steuerkanal = virtio-console**, nur PID 1 hat Zugriff (§5.1).
+- **Platten bei Bedarf aus npkFS**, im Hintergrund vorab geladen (§0.6).
 - **Verwaltung „Linux-Apps“:** Vorgaben aus dem signierten Store,
   Übersteuerung durch den Nutzer, auch beim RAM (§4c).
 - **Die Liste prüfen wir**, gepinnt auf den Alpine-Zweig (§4c).

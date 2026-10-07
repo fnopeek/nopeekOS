@@ -1030,6 +1030,7 @@ pub fn vm_poll_slice() {
         if VM_RUN_STATE.load(Ordering::Acquire) == VM_EXITED {
             let _ = crate::microvm::devices::net_dataplane::stop_worker();
             crate::microvm::devices::p9_async::stop_worker();
+            crate::microvm::devices::blk_image::stop_worker();
             crate::microvm::devices::nat::reset_sessions();
             BSP_HOST_CORE.store(usize::MAX, Ordering::Release);
             crate::microvm::cpu::rip_sample::reset();
@@ -1058,6 +1059,7 @@ pub fn vm_poll_slice() {
         drop(slot); // release before teardown — it locks the compositor
         let _ = crate::microvm::devices::net_dataplane::stop_worker();
         crate::microvm::devices::p9_async::stop_worker();
+        crate::microvm::devices::blk_image::stop_worker();
         crate::microvm::devices::nat::reset_sessions();
         crate::microvm::cpu::rip_sample::reset();
         teardown_vm_window();
@@ -1090,6 +1092,7 @@ pub fn vm_poll_slice() {
     drop(slot); // release before teardown — it locks the compositor
     let _ = crate::microvm::devices::net_dataplane::stop_worker();
     crate::microvm::devices::p9_async::stop_worker();
+    crate::microvm::devices::blk_image::stop_worker();
     crate::microvm::devices::nat::reset_sessions();
     crate::microvm::cpu::rip_sample::reset();
     teardown_vm_window();

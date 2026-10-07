@@ -214,8 +214,8 @@ pub fn bootstrap_into_npkfs() {
     crate::kprintln!("[npk] Seeding npkFS with {} bundled asset(s)...", BUNDLED_ASSETS.len());
     let mut total_bytes: usize = 0;
     for a in bundled() {
-        match crate::npkfs::store(a.fs_path, a.bytes, CAP_NULL) {
-            Ok(_) => {
+        match store_asset(a.fs_path, a.bytes) {
+            Ok(()) => {
                 total_bytes += a.bytes.len();
                 kprintln!("[npk]   {} ({} bytes)", a.fs_path, a.bytes.len());
             }
@@ -239,6 +239,19 @@ pub fn bootstrap_into_npkfs() {
     kprintln!("[npk] Seeded {} bytes total.", total_bytes);
 
     seed_wallpapers();
+}
+
+/// Store one bundled asset. Anything larger than a chunk goes through the
+/// streaming writer, as an OTA download does, so a disk image can later be
+/// read chunk by chunk instead of decrypted whole.
+fn store_asset(path: &str, bytes: &[u8]) -> Result<(), crate::npkfs::FsError> {
+    use crate::security::capability::CAP_NULL;
+    if bytes.len() <= crate::npkfs::STREAMING_CHUNK_SIZE {
+        return crate::npkfs::store(path, bytes, CAP_NULL).map(|_| ());
+    }
+    let mut w = crate::npkfs::open_streaming_write(path)?;
+    w.write(bytes).map_err(|_| crate::npkfs::FsError::Corrupt)?;
+    w.finish().map(|_| ()).map_err(|_| crate::npkfs::FsError::Corrupt)
 }
 
 /// Put the bundled wallpapers into `home/<user>/pictures/wallpapers/` —
